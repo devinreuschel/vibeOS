@@ -1,0 +1,154 @@
+# --- Rust / Cargo ---
+/target/
+**/target/
+/target-kernel-tests/
+**/*.rs.bk
+**/*.rlib
+**/*.prof*
+**/*.pdb
+.cargo/registry/
+.cargo/git/
+# Uncomment if this repo is a pure library and you prefer not to lock versions:
+# Cargo.lock
+
+# --- Build outputs (kernel / bare-metal / firmware) ---
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.elf
+*.bin
+!src/font_95x8.bin
+*.img
+*.iso
+*.rom
+*.hex
+*.map
+*.lst
+*.dis
+*.sym
+build/
+dist/
+out/
+obj/
+isodir/
+/iso_root/
+/iso_root_ktest/
+/limine
+sysroot/
+
+# --- Bootloader / assembly / link artifacts ---
+*.efi
+*.mbr
+*.img.gz
+*.qcow2
+*.vmdk
+*.vdi
+
+# --- Emulators & debug ---
+qemu_trace*
+.gdb_history
+gdb_history
+*.core
+core
+core.*
+vgcore.*
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# --- Profiling & tracing ---
+perf.data*
+*.folded
+*.trace
+flamegraph.svg
+
+# --- OS junk files ---
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*~
+*.swp
+*.swo
+*.tmp
+*.temp
+*.log
+
+# --- Editors & IDEs ---
+.idea/
+*.iml
+*.ipr
+*.iws
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+.vscode/*
+!.vscode/extensions.json
+*.code-workspace
+
+# --- AI / assistant tooling (local caches & scratch; keep team rules in repo if you want them) ---
+.cursor/debug.log
+.cursor/*.log
+.cursor/hooks/state/
+.aider*
+.aider.chat.history.md
+.continue/
+*.copilot.md
+.agent/
+
+# --- Testing & coverage ---
+tarpaulin-report.html
+cobertura.xml
+*.profraw
+*.profdata
+lcov.info
+coverage/
+
+# --- Environment & secrets ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# --- Misc ---
+*.orig
+*.rej
+*.bak
+.cache/
+node_modules/
+
+# --- AI ---
+.aider.chat.history.md
+.aider/
+.agent/
+.continue/
+.cursor/
+.cursor.chat.history.md
+.cursor.chat.history.md
