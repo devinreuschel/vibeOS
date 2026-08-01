@@ -14,6 +14,22 @@ If you learn something about hardware or Rust from reading this, good, but that'
 - Custom target spec: `x86_64-unknown-none-executable.json`
 - Limine to boot, `linker.ld` for layout, `Makefile` to build the ISO, QEMU to run and test
 
+## Status
+
+Nothing yet. The tree is fresh and phase 0 is not done. A previous iteration got to SMP with a
+preemptive scheduler before being scrapped; what survived is written down in `docs/`.
+
+## Docs
+
+Two files in [`docs/`](docs/). Root stays at a readme and a changelog.
+
+- [DESIGN.md](docs/DESIGN.md): invariants, boot order, address map, interrupts, time, SMP, testing, and
+  a list of bugs already paid for once. Decisions, not narration.
+- [ROADMAP.md](docs/ROADMAP.md): 21 phases from boot to self-hosting, each with a goal, an exit gate,
+  and per-part task lists.
+
+Read [section 9](docs/DESIGN.md#9-pitfalls) before touching boot, paging, interrupts, or AP bring-up.
+
 ## License
 
 all rights reserved for now.
