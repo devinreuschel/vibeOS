@@ -85,71 +85,71 @@ features. The entire value of this phase is that everything after it can be trus
 rest of the project, which is the single most consequential decision in this phase.
 
 **Exit gate**
-- [ ] `make` produces a hybrid BIOS + UEFI ISO
-- [ ] boots in QEMU under both `-bios` default and OVMF
-- [ ] serial shows `vibeOS: serial online` as its first line
-- [ ] a deliberate `panic!()` prints file, line, and message and halts without rebooting
-- [ ] `make test-e2e` asserts markers in order, fails fast on panic signatures, exits early on success
-- [ ] `make test-harness` passes: the harness has its own unit tests
-- [ ] CI runs the full ladder on push and pull request
+- [x] `make` produces a hybrid BIOS + UEFI ISO
+- [x] boots in QEMU under both `-bios` default and OVMF
+- [x] serial shows `vibeOS: serial online` as its first line
+- [x] a deliberate `panic!()` prints file, line, and message and halts without rebooting
+- [x] `make test-e2e` asserts markers in order, fails fast on panic signatures, exits early on success
+- [x] `make test-harness` passes: the harness has its own unit tests
+- [x] CI runs the full ladder on push and pull request
 
 ### 0.1 Toolchain and target
-- [ ] `rust-toolchain.toml`: nightly, `rust-src`, `llvm-tools`
-- [ ] `x86_64-unknown-none-executable.json`: `executable: true`, no PIE, static relocation model, `disable-redzone: true`, `-mmx,-sse,+soft-float`, `code-model: kernel`
-- [ ] no RELRO in pre-link args; it conflicts with a non-PIE static kernel
-- [ ] `.cargo/config.toml`: default target, `-Z build-std=core,compiler_builtins,alloc`, linker script flag
-- [ ] `Cargo.toml`: `panic = "abort"` in both profiles, `opt-level = 1` for dev
-- [ ] library and binary targets split from the first commit, not retrofitted
+- [x] `rust-toolchain.toml`: nightly, `rust-src`, `llvm-tools`
+- [x] `x86_64-unknown-none-executable.json`: `executable: true`, no PIE, static relocation model, `disable-redzone: true`, `-mmx,-sse,+soft-float`, `code-model: kernel`
+- [x] no RELRO in pre-link args; it conflicts with a non-PIE static kernel
+- [x] `.cargo/config.toml`: default target, `-Z build-std=core,compiler_builtins,alloc`, linker script flag
+- [x] `Cargo.toml`: `panic = "abort"` in both profiles, `opt-level = 1` for dev
+- [x] library and binary targets split from the first commit, not retrofitted
 - [ ] `kernel_tests` feature declared now, wired in phase 1
 
 ### 0.2 Linker and image layout
-- [ ] `linker.ld` places the image at `0xFFFF_FFFF_8000_0000`
-- [ ] page-align every section boundary so per-section permissions are possible
-- [ ] `.got` before `.bss` and inside the mapped range
-- [ ] export `__kernel_vma_start`, `__kernel_vma_end`, and per-section start/end symbols
-- [ ] `make layout` target: `llvm-objdump` section table plus `llvm-nm` for the exported symbols, so layout mistakes are visible without booting
+- [x] `linker.ld` places the image at `0xFFFF_FFFF_8000_0000`
+- [x] page-align every section boundary so per-section permissions are possible
+- [x] `.got` before `.bss` and inside the mapped range
+- [x] export `__kernel_vma_start`, `__kernel_vma_end`, and per-section start/end symbols
+- [x] `make layout` target: `llvm-objdump` section table plus `llvm-nm` for the exported symbols, so layout mistakes are visible without booting
 
 ### 0.3 Limine handshake
-- [ ] request statics in `.limine_requests` with the start and end markers, all `#[used]`
-- [ ] base revision verified before reading any other response, with its own marker
-- [ ] requests: framebuffer, memory map, HHDM, executable address, RSDP
-- [ ] a `BootInfo` struct captured once at entry; nothing else reads Limine statics
-- [ ] each null response produces a named halt, not an unwrap panic in a function with no context
-- [ ] `limine.conf` with a single entry, serial console enabled
+- [x] request statics in `.limine_requests` with the start and end markers, all `#[used]`
+- [x] base revision verified before reading any other response, with its own marker
+- [~] requests: framebuffer, memory map, HHDM, executable address, RSDP  (memmap, HHDM, RSDP wired; framebuffer + executable-address land with phase 5/1)
+- [ ] a `BootInfo` struct captured once at entry; nothing else reads Limine statics  (deferred: phase 0 only queries a handful of responses inline)
+- [~] each null response produces a named halt, not an unwrap panic in a function with no context  (base revision path only for now)
+- [x] `limine.conf` with a single entry, serial console enabled
 
 ### 0.4 Serial and panic
-- [ ] COM1 16550 init: 115200 8N1, FIFO enabled, DLAB dance
-- [ ] polled TX with a bounded THRE wait; drop the byte at the cap rather than spinning forever
-- [ ] polled RX on the data-ready bit
-- [ ] `fmt::Write` implementation with no allocation, usable before the heap exists
-- [ ] `print!` / `println!` macros routed to it
-- [ ] `#[panic_handler]`: re-init the port from scratch, print location and message, `cli; hlt` loop
-- [ ] a `panic-test` build feature or shell command so the panic path is exercised, not assumed
+- [x] COM1 16550 init: 115200 8N1, FIFO enabled, DLAB dance
+- [x] polled TX with a bounded THRE wait; drop the byte at the cap rather than spinning forever
+- [ ] polled RX on the data-ready bit  (input arrives in phase 5)
+- [x] `fmt::Write` implementation with no allocation, usable before the heap exists
+- [x] `print!` / `println!` macros routed to it
+- [x] `#[panic_handler]`: re-init the port from scratch, print location and message, `cli; hlt` loop
+- [x] a `panic-test` build feature or shell command so the panic path is exercised, not assumed
 
 ### 0.5 Build system
-- [ ] `Makefile`: `all`, `run`, `clean`, plus the test targets
-- [ ] `CARGO_TARGET_DIR` pinned to `./target`
-- [ ] kernel prerequisites from a `find` over `src/`, never a hand-written list
-- [ ] ISO staging: kernel ELF, `limine.conf`, BIOS and UEFI Limine artifacts, `xorriso` hybrid image, `limine bios-install`
-- [ ] `setup.sh`: fetch the Limine binary branch, verify `qemu-system-x86_64`, `xorriso`, `nasm`, `python3`; never rewrite project files
-- [ ] `make run` uses `-smp 2` so the default loop is multiprocessor from day one
+- [x] `Makefile`: `all`, `run`, `clean`, plus the test targets
+- [x] `CARGO_TARGET_DIR` pinned to `./target`
+- [x] kernel prerequisites from a `find` over `src/`, never a hand-written list
+- [x] ISO staging: kernel ELF, `limine.conf`, BIOS and UEFI Limine artifacts, `xorriso` hybrid image, `limine bios-install`
+- [x] `setup.sh`: fetch the Limine binary branch, verify `qemu-system-x86_64`, `xorriso`, `nasm`, `python3`; never rewrite project files
+- [x] `make run` uses `-smp 2` so the default loop is multiprocessor from day one
 
 ### 0.6 Test harness
-- [ ] Python, standard library only; `subprocess` with its own timeout, no GNU `timeout`
-- [ ] QEMU spawned with serial captured and a monitor socket
-- [ ] ordered marker assertion, each check individually named in output
-- [ ] panic and exception signature scan, fail immediately with the captured line
-- [ ] early `quit` through the monitor on success
-- [ ] `VIBEOS_SMP` and `VIBEOS_QEMU_CPU` overrides
-- [ ] harness helpers have unit tests under `make test-harness`
-- [ ] targets: `test-unit`, `test-harness`, `test-e2e`, `test`
+- [x] Python, standard library only; `subprocess` with its own timeout, no GNU `timeout`
+- [x] QEMU spawned with serial captured and a monitor socket
+- [x] ordered marker assertion, each check individually named in output
+- [x] panic and exception signature scan, fail immediately with the captured line
+- [x] early `quit` through the monitor on success
+- [x] `VIBEOS_SMP` and `VIBEOS_QEMU_CPU` overrides
+- [x] harness helpers have unit tests under `make test-harness`
+- [x] targets: `test-unit`, `test-harness`, `test-e2e`, `test`
 
 ### 0.7 CI
-- [ ] GitHub Actions on push and pull request, Linux runner
-- [ ] install `qemu-system-x86`, `nasm`, `xorriso`; bootstrap Limine
-- [ ] `RUSTFLAGS=-Dwarnings`, `cargo clippy -- -D warnings`, `cargo fmt --check`
-- [ ] run host units, harness units, ISO build, e2e
-- [ ] cache the cargo registry and the Limine checkout so the loop stays fast
+- [x] GitHub Actions on push and pull request, Linux runner
+- [x] install `qemu-system-x86`, `nasm`, `xorriso`; bootstrap Limine
+- [ ] `RUSTFLAGS=-Dwarnings`, `cargo clippy -- -D warnings`, `cargo fmt --check`  (deferred: clippy/fmt gates land with phase 1)
+- [x] run host units, harness units, ISO build, e2e
+- [x] cache the cargo registry and the Limine checkout so the loop stays fast
 
 ---
 
