@@ -1,0 +1,14 @@
+[package]
+name = "vibeos-hostlib-tests"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Host-side wrapper around the portable half of the kernel.
+# Includes the source files directly (see src/lib.rs) rather than depending
+# on the kernel crate, so no bare-metal / build-std / limine config leaks in.
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

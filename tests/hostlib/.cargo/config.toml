@@ -1,0 +1,8 @@
+[build]
+target = "x86_64-unknown-linux-gnu"
+rustflags = []
+
+# Disable build-std inherited from ../../.cargo/config.toml.
+[unstable]
+build-std = []
+build-std-features = []
