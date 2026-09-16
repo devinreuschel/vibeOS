@@ -1,0 +1,35 @@
+[package]
+name = "vibeos"
+version = "0.0.0"
+edition = "2024"
+license = "UNLICENSED"
+publish = false
+
+[lib]
+name = "vibeos"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vibeos"
+path = "src/main.rs"
+
+[features]
+default = []
+# Force a panic early in boot so the panic path can be exercised end to end.
+panic-test = []
+
+[dependencies]
+limine = "0.6"
+
+[profile.dev]
+# opt-level 0 makes page-table setup overflow the boot stack; DESIGN §3.5.
+opt-level = 1
+panic = "abort"
+overflow-checks = true
+debug = true
+
+[profile.release]
+opt-level = 3
+panic = "abort"
+lto = false
+debug = true
