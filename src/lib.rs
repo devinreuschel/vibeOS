@@ -1,0 +1,11 @@
+//! vibeOS: portable, host-testable half.
+//!
+//! Anything that has no hardware access lives here so `cargo test --lib`
+//! covers it. Serial byte formatting, marker strings, small utilities.
+//! Hardware pokes live in the binary crate. See DESIGN §1.1.
+
+#![cfg_attr(not(test), no_std)]
+
+pub mod fmt_util;
+pub mod marker;
+pub mod uart;
