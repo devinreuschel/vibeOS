@@ -120,6 +120,11 @@ fn normal_boot_tail() {
     let hhdm = HHDM
         .response()
         .unwrap_or_else(|| halt_with("vibeOS: limine: hhdm missing"));
+    // Slice B pins the physmap VA at `paging_init::HHDM_BASE`. If Limine
+    // drifts to a different offset, buddy free-list nodes (reached via
+    // `phys + hhdm_offset`) fault the moment we install our own PML4.
+    // Fail loud here instead of chasing that later.
+    paging_init::assert_limine_hhdm(hhdm.offset);
     let memmap = MEMMAP
         .response()
         .unwrap_or_else(|| halt_with("vibeOS: limine: memmap missing"));

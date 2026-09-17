@@ -26,10 +26,28 @@ use crate::x86;
 
 // ------------------ constants matching DESIGN §4.1 ------------------
 
-/// HHDM base for our physmap. Same VA Limine already gave us, so the
-/// switch does not invalidate any pointer already computed as
-/// `hhdm_offset + phys`.
-const HHDM_BASE: u64 = 0xFFFF_8000_0000_0000;
+/// HHDM base for our physmap. Same VA Limine already gave us (DESIGN
+/// §4.1), so the switch does not invalidate any pointer already computed
+/// as `hhdm_offset + phys` — including the buddy allocator's intrusive
+/// free-list nodes, which live inside the free pages and are reached via
+/// `phys + hhdm_offset`. If Limine ever drifts to a different offset,
+/// the first `Buddy::allocate` after `mov cr3` walks an unmapped VA and
+/// faults with no useful backtrace. `assert_limine_hhdm` fails loud
+/// against that drift at boot.
+pub const HHDM_BASE: u64 = 0xFFFF_8000_0000_0000;
+
+/// Panic if Limine handed us an HHDM offset different from
+/// [`HHDM_BASE`]. Kept out of `install` so `main` can call it right
+/// after reading the HHDM response, before any code has committed to
+/// the constant.
+pub fn assert_limine_hhdm(offset: u64) {
+    assert!(
+        offset == HHDM_BASE,
+        "paging: limine hhdm offset {:#x} != expected {:#x}; buddy nodes would fault after cr3",
+        offset,
+        HHDM_BASE,
+    );
+}
 
 /// Low identity window base and size (DESIGN §4.1). 512 MiB is enough
 /// to keep the AP trampoline reachable and to give phase 2's early
