@@ -112,7 +112,7 @@ rest of the project, which is the single most consequential decision in this pha
 ### 0.3 Limine handshake
 - [x] request statics in `.limine_requests` with the start and end markers, all `#[used]`
 - [x] base revision verified before reading any other response, with its own marker
-- [~] requests: framebuffer, memory map, HHDM, executable address, RSDP  (memmap, HHDM, RSDP wired; framebuffer + executable-address land with phase 5/1)
+- [x] requests: framebuffer, memory map, HHDM, executable address, RSDP  (all five wired as of phase 1 slice A; framebuffer response only used for pmm exclusion so far)
 - [ ] a `BootInfo` struct captured once at entry; nothing else reads Limine statics  (deferred: phase 0 only queries a handful of responses inline)
 - [~] each null response produces a named halt, not an unwrap panic in a function with no context  (base revision path only for now)
 - [x] `limine.conf` with a single entry, serial console enabled
@@ -168,13 +168,13 @@ paging cannot be verified from the host.
 - [ ] a shell-less `meminfo` dump on the boot log reports plausible totals
 
 ### 1.1 Buddy physical allocator
-- [ ] `Buddy` in the library half: `allocate(order)`, `deallocate(phys, order)`, intrusive free lists stored in the free pages
-- [ ] split on allocation, merge with the buddy on free, up to a max order covering at least 4 MiB
-- [ ] O(1) free frame counter, no list walking
-- [ ] `stats()`: total, free, largest available order
-- [ ] host tests: exhaustion returns `None`, random alloc/free returns the count to its initial value, per-order alignment, coalescing after freeing alternate blocks, double free detected
-- [ ] init from the Limine memory map, excluding frame 0, the kernel image, the framebuffer, `0x8000`, and everything not `USABLE`
-- [ ] design for a future per-frame metadata array; do not paint into a corner where refcounts cannot be added
+- [x] `Buddy` in the library half: `allocate(order)`, `deallocate(phys, order)`, intrusive free lists stored in the free pages
+- [x] split on allocation, merge with the buddy on free, up to a max order covering at least 4 MiB
+- [x] O(1) free frame counter, no list walking
+- [x] `stats()`: total, free, largest available order
+- [x] host tests: exhaustion returns `None`, random alloc/free returns the count to its initial value, per-order alignment, coalescing after freeing alternate blocks, double free detected
+- [x] init from the Limine memory map, excluding frame 0, the kernel image, the framebuffer, `0x8000`, and everything not `USABLE`
+- [x] design for a future per-frame metadata array; do not paint into a corner where refcounts cannot be added
 
 ### 1.2 Page tables
 - [ ] 4-level walk with typed abstractions for `PhysAddr`, `VirtAddr`, and PTE flags

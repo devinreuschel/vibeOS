@@ -25,11 +25,17 @@ mod smoke {
         for m in [
             marker::SERIAL_ONLINE,
             marker::LIMINE_OK,
+            marker::PMM_PREFIX,
             marker::BOOT_DONE,
         ] {
             assert!(m.starts_with("vibeOS: "), "marker missing prefix: {m}");
             assert!(!m.ends_with(['.', '!']), "marker has trailing punct: {m}");
         }
+        // The PMM line is assembled at runtime: prefix, decimal count,
+        // suffix. Confirm the fragments agree with the phase-1 exit-gate
+        // string in the roadmap.
+        assert_eq!(marker::PMM_PREFIX, "vibeOS: pmm: ");
+        assert_eq!(marker::PMM_FREE_SUFFIX, " free 4KiB frames");
     }
 
     #[test]

@@ -333,16 +333,21 @@ def run_qemu_and_check(
     return result
 
 
-# Marker preset for the phase 0 boot contract. New markers extend this in the
-# same commit that emits them.
+# Boot contract, in order. Extended per DESIGN §8.3 as each phase lands.
+# Phase 0 gave us serial + limine + boot done; phase 1 slice A adds the
+# PMM free-frames line. `pmm_free_frames` matches the exit-gate fragment
+# from ROADMAP §Phase 1 rather than the full formatted line, since the
+# frame count is runtime-derived.
 PHASE0_MARKERS: list[Marker] = [
     Marker("vibeOS: serial online", "serial_online"),
     Marker("vibeOS: limine: rev 3 ok", "limine_ok"),
+    Marker(" free 4KiB frames", "pmm_free_frames"),
     Marker("vibeOS: boot: phase0 done", "boot_done"),
 ]
 
 # Markers that must appear *before* the deliberate panic in the panic-test
-# build. Everything after the boot marker is the panic itself.
+# build. panic-test panics right after the limine handshake, so PMM never
+# runs on this path.
 PHASE0_PANIC_PREFIX: list[Marker] = [
     Marker("vibeOS: serial online", "serial_online"),
     Marker("vibeOS: limine: rev 3 ok", "limine_ok"),
