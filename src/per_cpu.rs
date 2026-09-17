@@ -4,12 +4,13 @@
 //! Hardware install (`GS_BASE`) lives in the binary crate.
 //!
 //! Heap array sized from the MADT CPU count (no `MAX_CPUS` static).
-//! `ready_head` is a stub until Slice C splits the UP ready queue.
+//! `runq` is this CPU's ready FIFO; remotes use `wake_inbox` + IPI.
 
 use core::mem::offset_of;
 use core::sync::atomic::{AtomicBool, AtomicU64};
 
 use crate::apic::TimerMode;
+use crate::sched::ReadyQueue;
 use crate::thread::{CpuContext, Tcb, ThreadId};
 
 /// One CPU's local state, reached through `GS_BASE`.
@@ -23,7 +24,7 @@ pub struct PerCpu {
     pub idle_id: ThreadId,
     pub current: *mut Tcb,
     pub idle: *mut Tcb,
-    /// Ready-list head. Null = empty. Slice C owns per-CPU queues.
+    /// First TCB on this CPU's ready queue, or null.
     pub ready_head: *mut Tcb,
     pub tsc_per_ms: u64,
     pub ticks: u64,
@@ -33,13 +34,15 @@ pub struct PerCpu {
     /// TSC at the start of the current slice.
     pub slice_tsc: u64,
     pub switch_scratch: CpuContext,
-    /// Cross-CPU wake stub. Slice C: inbox + reschedule IPI `0xFD`.
+    /// ThreadId bitset. Remote CPUs OR a bit and send `0xFD`.
     pub wake_inbox: AtomicU64,
     pub timer_mode: TimerMode,
     /// Set by the AP after GS/IDT/LAPIC/timer; BSP waits on this.
     pub ready: AtomicBool,
     /// Future `syscall` entry scratch. `KERNEL_GS_BASE` matches `GS_BASE`.
     pub syscall_scratch: [u64; 6],
+    /// Local ready FIFO. Owner CPU only, IRQs off. DESIGN §7.8.
+    pub runq: ReadyQueue,
 }
 
 impl PerCpu {
@@ -63,6 +66,7 @@ impl PerCpu {
             timer_mode: TimerMode::Pit,
             ready: AtomicBool::new(false),
             syscall_scratch: [0; 6],
+            runq: ReadyQueue::empty(),
         }
     }
 }
@@ -94,6 +98,7 @@ mod tests {
         assert!(p.current.is_null());
         assert!(p.idle.is_null());
         assert!(p.ready_head.is_null());
+        assert!(p.runq.is_empty());
         assert_eq!(p.timer_mode, TimerMode::Pit);
         assert!(!p.ready.load(Ordering::Relaxed));
         assert_eq!(p.wake_inbox.load(Ordering::Relaxed), 0);

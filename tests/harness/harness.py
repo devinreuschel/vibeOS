@@ -518,8 +518,8 @@ def run_qemu_until_exit(
 # `time: lapic_timer ok (<mode>)` after the LAPIC timer is proven (PIC
 # masked only then). Phase 3 slice B then emits
 # `sched: cpu0 ready` and `irq: enabled` (keyboard stays masked until
-# phase 5). Phase 4 slice B then emits `N-1` × `smp: ap online` and
-# `smp: done` before `boot: phase1 done`.
+# phase 5). Phase 4 slice C then emits `sched: cpu<i> ready` then
+# `smp: ap online` for each AP, then `smp: done` before `boot: phase1 done`.
 # `pic: remapped` means the PIC step finished (ICW ran, or FADT skip);
 # unlike `paging: mmio uc` it is not a claim that ports were programmed.
 # Trailing marker is `boot: phase1 done`. Runtime-derived payload uses
@@ -569,8 +569,11 @@ def boot_contract_markers(
         Marker("vibeOS: sched: cpu0 ready", "sched_cpu0"),
         Marker("vibeOS: irq: enabled", "irq_enabled"),
     ]
-    for i in range(max(smp, 1) - 1):
-        after.append(Marker("vibeOS: smp: ap online", f"smp_ap_online_{i}"))
+    for i in range(1, max(smp, 1)):
+        after.append(
+            Marker(f"vibeOS: sched: cpu{i} ready", f"sched_cpu{i}")
+        )
+        after.append(Marker("vibeOS: smp: ap online", f"smp_ap_online_{i - 1}"))
     after.append(Marker("vibeOS: smp: done", "smp_done"))
     after.append(Marker("vibeOS: boot: phase1 done", "boot_done"))
     if hpet:

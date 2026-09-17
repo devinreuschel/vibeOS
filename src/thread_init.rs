@@ -1,16 +1,21 @@
-//! Kernel threads: TCB table, spawn, schedule, sleep. ROADMAP §3.1–§3.4.
+//! Kernel threads: TCB table, spawn, schedule, sleep. ROADMAP §3.1–§3.4 / §4.8.
 //!
-//! One `SCHED` lock (IRQ-aware `SpinMutex`). Never held across
-//! `switch_context`, heap free, or KVA/stack reclaim.
+//! Global TCB table + timeouts under one SCHED lock. Per-CPU ready queues
+//! (owner CPU only, IRQs off). Cross-CPU wake is inbox + IPI 0xFD, never
+//! a remote runq lock. Never held across `switch_context`, heap free, or
+//! KVA/stack reclaim.
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
 use alloc::boxed::Box;
 use core::fmt::Write;
+use core::sync::atomic::{AtomicU32, Ordering};
 
+use vibeos::ipi::{home_cpu, pick_cpu};
 use vibeos::kva::DEFAULT_STACK_PAGES;
+use vibeos::lock::RANK_SCHED;
 use vibeos::paging::VirtAddr;
 use vibeos::sched::{
-    effective_deadline, enqueue_runnable, take_next, ReadyQueue, TimeoutQueue, SWEEP_TICKS,
+    effective_deadline, enqueue_runnable, take_next, TimeoutQueue, SWEEP_TICKS,
 };
 use vibeos::thread::{
     apply_if_on_resume, prepare_thread, switch_context, CpuAffinity, CpuContext, KernelStack, Tcb,
@@ -39,16 +44,18 @@ impl ThreadHandle {
 
 pub(crate) struct Sched {
     slots: [Option<Box<Tcb>>; MAX_THREADS],
-    ready: ReadyQueue,
     timeouts: TimeoutQueue,
+    places: [(u32, ThreadId); MAX_THREADS],
+    place_n: usize,
 }
 
 impl Sched {
     const fn empty() -> Self {
         Self {
             slots: [const { None }; MAX_THREADS],
-            ready: ReadyQueue::empty(),
             timeouts: TimeoutQueue::empty(),
+            places: [(0, ThreadId::NONE); MAX_THREADS],
+            place_n: 0,
         }
     }
 
@@ -67,25 +74,45 @@ impl Sched {
         }
     }
 
-    /// Enqueue → Blocked → still holding SCHED. Caller drops, then `schedule`.
+    fn place(&mut self, cpu: u32, id: ThreadId) {
+        if self.place_n >= MAX_THREADS {
+            return;
+        }
+        self.places[self.place_n] = (cpu, id);
+        self.place_n += 1;
+    }
+
+    fn place_home(&mut self, id: ThreadId) {
+        let (aff, last) = match self.get(id) {
+            Some(t) => (t.affinity, t.cpu),
+            None => return,
+        };
+        let cpu = home_cpu(aff, last, per_cpu_init::online_mask());
+        if let Some(t) = self.get_mut(id) {
+            t.cpu = cpu;
+        }
+        self.place(cpu, id);
+    }
+
+    /// Enqueue wait → Blocked. Still holding SCHED. Caller drops, then `schedule`.
     pub(crate) fn begin_wait(&mut self, wq: &mut WaitQueue, deadline: Instant) {
         let id = current_id();
-        wait::begin_wait(wq, &mut self.ready, &mut self.timeouts, id, deadline);
+        wq.enqueue(id);
+        self.timeouts.insert(id, deadline);
         let cookie = wq.cookie();
         if let Some(t) = self.get_mut(id) {
             t.state = ThreadState::Blocked { wq: cookie };
             t.wait_outcome = WaitOutcome::Woken;
         }
-        relink(self);
     }
 
     pub(crate) fn wake_one(&mut self, wq: &mut WaitQueue) -> Option<ThreadId> {
-        let id = wait::wake_one(wq, &mut self.ready, &mut self.timeouts)?;
+        let id = wait::take_one(wq, &mut self.timeouts)?;
         if let Some(t) = self.get_mut(id) {
             t.state = ThreadState::Ready;
             t.wait_outcome = WaitOutcome::Woken;
         }
-        relink(self);
+        self.place_home(id);
         Some(id)
     }
 
@@ -109,7 +136,8 @@ impl Sched {
     }
 }
 
-static SCHED: SpinMutex<Sched> = SpinMutex::new(Sched::empty());
+static SCHED: SpinMutex<Sched> = SpinMutex::with_rank(Sched::empty(), RANK_SCHED);
+static SPAWN_RR: AtomicU32 = AtomicU32::new(0);
 
 extern "C" fn trampoline() {
     reap_zombies();
@@ -145,7 +173,8 @@ pub fn schedule() {
     schedule_inner(false);
 }
 
-/// Timer path. EOI already done. May switch; reaping stays off the IRQ path.
+/// Timer / reschedule-IPI path. EOI already done. May switch; reaping
+/// stays off the IRQ path.
 pub fn schedule_preempt() {
     schedule_inner(true);
 }
@@ -154,17 +183,18 @@ pub fn schedule_preempt() {
 /// [`apply_if_on_resume`]. `InterruptGuard` stays on the outgoing stack.
 fn schedule_inner(from_irq: bool) {
     let _irq = InterruptGuard::enter();
+    crate::ipi_init::drain_inbox();
     let now = Instant {
         ns: time_init::now_ns(),
     };
     let idle = per_cpu_init::current().idle_id;
     let cur = current_id();
+    let me = per_cpu_init::current().cpu_id;
 
     let mut overdue = [ThreadId::NONE; 4];
     let mut n_overdue = 0usize;
 
-    let (old_ptr, new_ptr, old_id, new_id) = {
-        let mut s = SCHED.lock();
+    let cur_state = with_sched(|s| {
         let mut expired = [ThreadId::NONE; MAX_THREADS];
         let n = s.timeouts.pop_expired_into(now, &mut expired);
         let mut i = 0;
@@ -180,7 +210,7 @@ fn schedule_inner(from_irq: bool) {
                     ThreadState::Ready | ThreadState::Running | ThreadState::Dead => {}
                 }
             }
-            s.ready.push_back(id);
+            s.place_home(id);
             i += 1;
         }
 
@@ -196,8 +226,7 @@ fn schedule_inner(from_irq: bool) {
             }
         }
 
-        let cur_state = s.get(cur).map(|t| t.state).unwrap_or(ThreadState::Dead);
-        enqueue_runnable(&mut s.ready, cur, idle, cur_state);
+        let st = s.get(cur).map(|t| t.state).unwrap_or(ThreadState::Dead);
         if let Some(t) = s.get_mut(cur) {
             match t.state {
                 ThreadState::Running => t.state = ThreadState::Ready,
@@ -207,18 +236,8 @@ fn schedule_inner(from_irq: bool) {
                 | ThreadState::Dead => {}
             }
         }
-
-        s.ready.remove(idle);
-        let next = take_next(&mut s.ready, idle);
-        if let Some(t) = s.get_mut(next) {
-            t.state = ThreadState::Running;
-            t.cpu = 0;
-        }
-        relink(&mut s);
-        let old_ptr = s.ptr(cur);
-        let new_ptr = s.ptr(next);
-        (old_ptr, new_ptr, cur, next)
-    };
+        st
+    });
 
     if n_overdue != 0 {
         let mut i = 0;
@@ -228,10 +247,23 @@ fn schedule_inner(from_irq: bool) {
         }
     }
 
+    let next = {
+        let cpu = per_cpu_init::current_mut();
+        enqueue_runnable(&mut cpu.runq, cur, idle, cur_state);
+        cpu.runq.remove(idle);
+        take_next(&mut cpu.runq, idle)
+    };
+
+    let (old_ptr, new_ptr, old_id, new_id) = with_sched(|s| {
+        if let Some(t) = s.get_mut(next) {
+            t.state = ThreadState::Running;
+            t.cpu = me;
+        }
+        relink(s);
+        (s.ptr(cur), s.ptr(next), cur, next)
+    });
+
     if old_id == new_id || old_ptr.is_null() || new_ptr.is_null() {
-        // Idle/voluntary no-switch. Drain here: after-switch reap only
-        // runs when this call site resumes, which a from_irq idle
-        // resume never does.
         if !from_irq {
             reap_zombies();
         }
@@ -265,11 +297,12 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
 }
 
 fn relink(s: &mut Sched) {
-    let n = s.ready.len();
+    let cpu = per_cpu_init::current_mut();
+    let n = cpu.runq.len();
     let mut ids = [ThreadId::NONE; MAX_THREADS];
     let mut i = 0;
     while i < n {
-        ids[i] = s.ready.at(i);
+        ids[i] = cpu.runq.at(i);
         i += 1;
     }
     i = 0;
@@ -282,19 +315,38 @@ fn relink(s: &mut Sched) {
         }
         i += 1;
     }
-    let head = match s.ready.front() {
+    let front = cpu.runq.front();
+    let head = match front {
         Some(id) => s.ptr(id),
         None => core::ptr::null_mut(),
     };
-    if let Some(c) = per_cpu_init::try_current_mut() {
-        c.ready_head = head;
-    }
+    cpu.ready_head = head;
 }
 
 pub(crate) fn reap_zombies() {
     // Stacks only. Dead TCBs stay queryable (`state == Dead`) until spawn
     // reuses the slot. Never unmap a stack we are running on.
     kva_init::drain_deferred();
+}
+
+/// `sti; hlt` with a closed lost-wakeup window: cli, drain inbox, recheck
+/// runq, then `sti; hlt` as one pair. ROADMAP §4.8 / DESIGN §7.8.
+pub fn halt_if_idle() {
+    loop {
+        unsafe {
+            core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+        }
+        crate::ipi_init::drain_inbox();
+        if !per_cpu_init::current().runq.is_empty() {
+            unsafe {
+                core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+            }
+            return;
+        }
+        unsafe {
+            core::arch::asm!("sti; hlt", options(nomem, nostack));
+        }
+    }
 }
 
 /// Wrap the current boot context as thread 0. After [`per_cpu_init::init_bsp`].
@@ -339,6 +391,17 @@ pub fn spawn(name: &'static str, entry: fn()) -> ThreadHandle {
     spawn_inner(name, entry, CpuAffinity::Any, true)
 }
 
+/// Pin to this CPU. In-guest tests that `switch_to` / `yield_now` a
+/// worker must use this: `ktest::run` holds IF off on the BSP, so an
+/// `Any` spawn would RR onto an AP the BSP cannot switch to.
+pub fn spawn_here(name: &'static str, entry: fn()) -> ThreadHandle {
+    spawn_inner(name, entry, CpuAffinity::Pinned(current_cpu()), true)
+}
+
+pub fn spawn_on(name: &'static str, entry: fn(), cpu: u32) -> ThreadHandle {
+    spawn_inner(name, entry, CpuAffinity::Pinned(cpu), true)
+}
+
 pub(crate) fn spawn_idle(entry: fn()) -> ThreadHandle {
     spawn_inner("idle", entry, CpuAffinity::Pinned(0), false)
 }
@@ -365,33 +428,40 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Option<ThreadId> {
         run_tsc: 0,
         wait_outcome: WaitOutcome::Woken,
     });
-    let id = {
-        let mut s = SCHED.lock();
+    let id = with_sched(|s| {
         let slot = s.slots.iter().position(|x| x.is_none())?;
         let id = ThreadId(slot as u32);
         tcb.id = id;
         s.slots[slot] = Some(tcb);
-        id
-    };
+        Some(id)
+    })?;
     Some(id)
 }
 
 /// Timeout path: TCB never ran. Return the stack so the caller can free it.
 pub fn abandon_ap_idle(id: ThreadId) -> Option<GuardedStack> {
-    let mut s = SCHED.lock();
-    s.ready.remove(id);
-    s.timeouts.remove(id);
-    let t = s.get_mut(id)?;
-    t.state = ThreadState::Dead;
-    let ks = t.stack.take()?;
-    Some(GuardedStack {
-        guard: VirtAddr(ks.guard),
-        pages: ks.pages,
+    with_sched(|s| {
+        s.timeouts.remove(id);
+        let t = s.get_mut(id)?;
+        t.state = ThreadState::Dead;
+        let ks = t.stack.take()?;
+        Some(GuardedStack {
+            guard: VirtAddr(ks.guard),
+            pages: ks.pages,
+        })
     })
 }
 
 fn ap_idle_entry() {
     panic!("ap idle entry called");
+}
+
+fn choose_cpu(affinity: CpuAffinity) -> u32 {
+    let mask = per_cpu_init::online_mask();
+    let mut rr = SPAWN_RR.load(Ordering::Relaxed);
+    let cpu = pick_cpu(affinity, mask, &mut rr);
+    SPAWN_RR.store(rr, Ordering::Relaxed);
+    cpu
 }
 
 fn spawn_inner(
@@ -410,27 +480,26 @@ fn spawn_inner(
     let tramp = trampoline as *const () as u64;
     let cur = current_id();
     let idle = per_cpu_init::current().idle_id;
+    let cpu = choose_cpu(affinity);
 
     // Dead slot: rewrite the Box. 2000 spawn/exit must not churn the
     // heap (one extra mapped page shows up as a leaked frame).
-    {
-        let mut s = SCHED.lock();
-        if let Some(slot) = s.slots.iter().position(|x| match x.as_ref() {
+    if let Some(id) = with_sched(|s| {
+        let slot = s.slots.iter().position(|x| match x.as_ref() {
             Some(t) => t.state == ThreadState::Dead && t.id != cur && t.id != idle,
             None => false,
-        }) {
-            let id = ThreadId(slot as u32);
-            s.ready.remove(id);
-            s.timeouts.remove(id);
-            let tcb = s.slots[slot].as_mut().expect("dead slot");
-            assert!(tcb.stack.is_none(), "dead tcb still owns stack");
-            fill_tcb(tcb, name, entry, affinity, ks, top, tramp);
-            if enqueue {
-                s.ready.push_back(id);
-            }
-            relink(&mut s);
-            return ThreadHandle { id };
+        })?;
+        let id = ThreadId(slot as u32);
+        s.timeouts.remove(id);
+        let tcb = s.slots[slot].as_mut().expect("dead slot");
+        assert!(tcb.stack.is_none(), "dead tcb still owns stack");
+        fill_tcb(tcb, name, entry, affinity, cpu, ks, top, tramp);
+        if enqueue {
+            s.place(cpu, id);
         }
+        Some(id)
+    }) {
+        return ThreadHandle { id };
     }
 
     let mut tcb = Box::new(Tcb {
@@ -443,7 +512,7 @@ fn spawn_inner(
         next: None,
         prev: None,
         affinity,
-        cpu: 0,
+        cpu,
         irq_nest: 0,
         switches: 0,
         run_tsc: 0,
@@ -452,24 +521,21 @@ fn spawn_inner(
     prepare_thread(&mut tcb.context, top, tramp);
     unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
 
-    let id = {
-        let mut s = SCHED.lock();
+    let id = with_sched(|s| {
         let slot = s
             .slots
             .iter()
             .position(|x| x.is_none())
             .expect("thread table full");
         let id = ThreadId(slot as u32);
-        s.ready.remove(id);
         s.timeouts.remove(id);
         tcb.id = id;
         s.slots[slot] = Some(tcb);
         if enqueue {
-            s.ready.push_back(id);
+            s.place(cpu, id);
         }
-        relink(&mut s);
         id
-    };
+    });
     ThreadHandle { id }
 }
 
@@ -478,6 +544,7 @@ fn fill_tcb(
     name: &'static str,
     entry: fn(),
     affinity: CpuAffinity,
+    cpu: u32,
     ks: KernelStack,
     top: u64,
     tramp: u64,
@@ -489,7 +556,7 @@ fn fill_tcb(
     tcb.next = None;
     tcb.prev = None;
     tcb.affinity = affinity;
-    tcb.cpu = 0;
+    tcb.cpu = cpu;
     tcb.irq_nest = 0;
     tcb.switches = 0;
     tcb.run_tsc = 0;
@@ -507,15 +574,12 @@ pub fn sleep_ms(ms: u64) {
 pub fn park(deadline: Option<Instant>) {
     let d = effective_deadline(deadline);
     let id = current_id();
-    {
-        let mut s = SCHED.lock();
+    with_sched(|s| {
         if let Some(t) = s.get_mut(id) {
             t.state = ThreadState::Sleeping { deadline: d };
         }
-        s.ready.remove(id);
         s.timeouts.insert(id, d);
-        relink(&mut s);
-    }
+    });
     schedule();
 }
 
@@ -526,8 +590,20 @@ pub fn with_sched_lock<R>(f: impl FnOnce() -> R) -> R {
 }
 
 pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
-    let mut s = SCHED.lock();
-    f(&mut s)
+    let (r, places, n) = {
+        let mut s = SCHED.lock();
+        let r = f(&mut s);
+        let n = s.place_n;
+        let p = s.places;
+        s.place_n = 0;
+        (r, p, n)
+    };
+    let mut i = 0;
+    while i < n {
+        crate::ipi_init::place_ready(places[i].0, places[i].1);
+        i += 1;
+    }
+    r
 }
 
 pub fn last_wait_outcome() -> WaitOutcome {
@@ -536,23 +612,33 @@ pub fn last_wait_outcome() -> WaitOutcome {
     unsafe { (*p).wait_outcome }
 }
 
-/// Test helper. Same nest-swap as `schedule`.
+/// Test helper. Local CPU only — the target must already sit on this
+/// runq (spawn_here). Same nest-swap as `schedule`.
 pub fn switch_to(id: ThreadId) {
     let _irq = InterruptGuard::enter();
+    crate::ipi_init::drain_inbox();
     let old_id = current_id();
     assert!(old_id != id, "switch_to self");
     let idle = per_cpu_init::current().idle_id;
+    let me = per_cpu_init::current().cpu_id;
 
-    let (old_ptr, new_ptr) = {
-        let mut s = SCHED.lock();
-        let new = s.ptr(id);
-        assert!(!new.is_null(), "switch_to unknown id");
-        unsafe {
-            assert!((*new).state != ThreadState::Dead, "switch_to dead thread");
-        }
-        s.ready.remove(id);
-        let cur_state = s.get(old_id).map(|t| t.state).unwrap_or(ThreadState::Dead);
-        enqueue_runnable(&mut s.ready, old_id, idle, cur_state);
+    {
+        let s = SCHED.lock();
+        let t = s.get(id).expect("switch_to unknown id");
+        assert!(t.state != ThreadState::Dead, "switch_to dead thread");
+        assert!(t.cpu == me, "switch_to remote cpu");
+    }
+
+    let cur_state = {
+        let s = SCHED.lock();
+        s.get(old_id).map(|t| t.state).unwrap_or(ThreadState::Dead)
+    };
+    {
+        let cpu = per_cpu_init::current_mut();
+        cpu.runq.remove(id);
+        enqueue_runnable(&mut cpu.runq, old_id, idle, cur_state);
+    }
+    let (old_ptr, new_ptr) = with_sched(|s| {
         if let Some(t) = s.get_mut(old_id) {
             if t.state != ThreadState::Dead && old_id != idle {
                 t.state = ThreadState::Ready;
@@ -560,11 +646,11 @@ pub fn switch_to(id: ThreadId) {
         }
         if let Some(t) = s.get_mut(id) {
             t.state = ThreadState::Running;
-            t.cpu = 0;
+            t.cpu = me;
         }
-        relink(&mut s);
+        relink(s);
         (s.ptr(old_id), s.ptr(id))
-    };
+    });
     switch_now(old_ptr, new_ptr);
     reap_zombies();
 }
@@ -573,6 +659,10 @@ pub fn current_id() -> ThreadId {
     let p = per_cpu_init::current_thread();
     assert!(!p.is_null(), "no current thread");
     unsafe { (*p).id }
+}
+
+pub fn current_cpu() -> u32 {
+    per_cpu_init::current().cpu_id
 }
 
 #[allow(dead_code)]
@@ -592,6 +682,10 @@ pub fn try_state(id: ThreadId) -> Option<ThreadState> {
 
 pub fn name(id: ThreadId) -> &'static str {
     SCHED.lock().get(id).expect("unknown thread").name
+}
+
+pub fn cpu_of(id: ThreadId) -> u32 {
+    SCHED.lock().get(id).expect("unknown thread").cpu
 }
 
 #[allow(dead_code)]

@@ -1,15 +1,21 @@
 //! COM1 serial writer. Uses the register constants from `vibeos::uart`.
 //!
 //! Polled TX with a bounded THRE wait; a dead UART drops the byte rather
-//! than wedging the panic handler (DESIGN §9.6).
+//! than wedging the panic handler (DESIGN §9.6). Byte-granularity TX lock
+//! so SMP CPUs do not interleave bytes (DESIGN §7.7). Panic/halt skips
+//! the lock so a holder cannot stall the dump.
 
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::x86;
+use vibeos::lock::RANK_SERIAL;
 use vibeos::uart::*;
 
+use crate::sync_init::SpinMutex;
+use crate::x86;
+
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
+static TX: SpinMutex<()> = SpinMutex::with_rank((), RANK_SERIAL);
 
 pub struct Serial;
 
@@ -31,7 +37,7 @@ impl Serial {
         INITIALIZED.store(true, Ordering::Release);
     }
 
-    fn write_byte(b: u8) {
+    fn write_byte_raw(b: u8) {
         // Bounded THRE poll; drop on cap rather than spin forever.
         let mut spin = TX_POLL_CAP;
         while spin > 0 {
@@ -42,6 +48,15 @@ impl Serial {
             }
             spin -= 1;
         }
+    }
+
+    fn write_byte(b: u8) {
+        if crate::ipi_init::is_halting() {
+            Self::write_byte_raw(b);
+            return;
+        }
+        let _g = TX.lock();
+        Self::write_byte_raw(b);
     }
 
     pub fn write_bytes(bytes: &[u8]) {

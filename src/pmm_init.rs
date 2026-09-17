@@ -14,47 +14,26 @@
 //! sorted into an "excludes" list and subtracted from every USABLE range
 //! before it is inserted.
 
-use core::cell::UnsafeCell;
 use core::fmt::Write;
 
 use limine::memmap::{Entry, MEMMAP_USABLE};
 
+use vibeos::lock::RANK_BUDDY;
 use vibeos::pmm::{Buddy, PAGE_SIZE, PmmStats};
 
 use crate::serial::Serial;
+use crate::sync_init::SpinMutex;
 
 /// AP trampoline page. DESIGN §7.3 fixes the SIPI vector at 0x08, which
 /// means the entry point lives at physical 0x8000.
 const AP_TRAMPOLINE_PHYS: u64 = 0x8000;
 
-/// Small pre-boot cell: single-CPU, pre-interrupts, so an UnsafeCell with
-/// a Sync claim is fine. Phase 4 replaces this with a real IRQ-aware
-/// mutex once concurrency arrives.
-struct BootCell<T>(UnsafeCell<T>);
-unsafe impl<T> Sync for BootCell<T> {}
-impl<T> BootCell<T> {
-    const fn new(v: T) -> Self {
-        Self(UnsafeCell::new(v))
-    }
-    /// # Safety
-    /// Caller must ensure no other reference is live. Only sound during
-    /// single-threaded, IRQs-off boot.
-    #[allow(clippy::mut_from_ref)]
-    unsafe fn get_mut(&self) -> &mut T {
-        unsafe { &mut *self.0.get() }
-    }
-}
+static BUDDY: SpinMutex<Buddy> = SpinMutex::with_rank(Buddy::new(), RANK_BUDDY);
 
-static BUDDY: BootCell<Buddy> = BootCell::new(Buddy::new());
-
-/// Post-init access to the global buddy. Paging bring-up pulls table
-/// frames through this; later slices add heap-backing and KVA calls.
-///
-/// # Safety
-/// Same rule as [`init`]: single-threaded, interrupts off. Phase 4
-/// wraps the underlying storage in a real IRQ-aware mutex.
-pub unsafe fn with_buddy<R>(f: impl FnOnce(&mut Buddy) -> R) -> R {
-    f(unsafe { BUDDY.get_mut() })
+/// Post-init access to the global buddy. IRQ-aware, rank buddy.
+pub fn with_buddy<R>(f: impl FnOnce(&mut Buddy) -> R) -> R {
+    let mut g = BUDDY.lock();
+    f(&mut g)
 }
 
 // Bounds of the loaded kernel image. Declared in linker.ld (DESIGN §3.4).
@@ -141,7 +120,7 @@ pub unsafe fn init(
     hhdm_offset: u64,
     kernel_phys_base: u64,
 ) -> PmmStats {
-    let buddy = unsafe { BUDDY.get_mut() };
+    let mut buddy = BUDDY.lock();
     buddy.set_hhdm_offset(hhdm_offset);
 
     // Build the sorted excludes list. Frame 0 is implicit.
@@ -184,7 +163,7 @@ pub unsafe fn init(
         }
         let base = entry.base;
         let end = base + entry.length;
-        unsafe { insert_clipped(buddy, base, end, excl.as_slice()) };
+        unsafe { insert_clipped(&mut buddy, base, end, excl.as_slice()) };
     }
 
     buddy.stats()

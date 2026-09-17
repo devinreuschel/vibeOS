@@ -28,9 +28,8 @@
 //!
 //! - 1 GiB pages, per-process address-space objects, and the demand-paging
 //!   fault handler (all phase 9/10).
-//! - Real TLB shootdown IPIs: `tlb_shootdown_others` is a documented
-//!   no-op that phase 4 replaces without touching call sites (DESIGN §4.3
-//!   TLB section, §7.9).
+//! - Real TLB shootdown IPIs: `tlb_shootdown_others` is a hook the
+//!   kernel installs (DESIGN §4.3 / §7.9). Host tests leave it unset.
 
 #![allow(clippy::identity_op)]
 
@@ -716,16 +715,25 @@ pub const fn stack_flags() -> PageFlags {
     kernel_data_flags()
 }
 
-/// TLB shootdown hook. Single-CPU no-op today; phase 4 replaces this
-/// with the IPI 0xFC path (DESIGN §7.9). Every place that changes a
-/// kernel PTE calls this after the local `invlpg` so call sites are
-/// already correct when APs arrive.
-///
+/// TLB shootdown hook. Kernel installs the IPI 0xFC path (DESIGN §7.9).
+/// Host tests and pre-SMP boot leave this unset (local `invlpg` is enough).
+static SHOOTDOWN_HOOK: core::sync::atomic::AtomicPtr<()> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+pub fn set_tlb_shootdown_hook(f: fn(VirtAddr)) {
+    SHOOTDOWN_HOOK.store(f as *mut (), core::sync::atomic::Ordering::Release);
+}
+
 /// Intentionally free-standing (not a method on `Mapper`) so architecture
 /// code can call it after any leaf edit including MMIO patches.
 #[inline]
-pub fn tlb_shootdown_others(_va: VirtAddr) {
-    // no-op: single CPU
+pub fn tlb_shootdown_others(va: VirtAddr) {
+    let p = SHOOTDOWN_HOOK.load(core::sync::atomic::Ordering::Acquire);
+    if p.is_null() {
+        return;
+    }
+    let f: fn(VirtAddr) = unsafe { core::mem::transmute(p) };
+    f(va);
 }
 
 // ------------------ host tests ------------------

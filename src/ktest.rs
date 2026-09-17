@@ -23,6 +23,7 @@ use vibeos::vectors;
 use crate::acpi_init;
 use crate::apic_init;
 use crate::arch;
+use crate::ipi_init;
 use crate::kva_init;
 use crate::paging_init;
 use crate::per_cpu_init;
@@ -101,6 +102,11 @@ const TESTS: &[(&str, TestFn)] = &[
     ("sync_try_paths", test_sync_try_paths),
     ("sched_lock_timer_irq", test_sched_lock_timer_irq),
     ("spawn_exit_thousands", test_spawn_exit_thousands),
+    ("cross_cpu_spawn", test_cross_cpu_spawn),
+    ("reschedule_ipi_wake_ap", test_reschedule_ipi_wake_ap),
+    ("call_function_ipi", test_call_function_ipi),
+    ("tlb_shootdown_remote", test_tlb_shootdown_remote),
+    ("alloc_stress_smp", test_alloc_stress_smp),
 ];
 
 pub fn run() -> ! {
@@ -136,15 +142,15 @@ fn qemu_exit(code: u32) -> ! {
 }
 
 fn free_frames() -> usize {
-    unsafe { pmm_init::with_buddy(|b| b.stats().free_frames) }
+    pmm_init::with_buddy(|b| b.stats().free_frames)
 }
 
 fn alloc_frame() -> Option<PhysAddr> {
-    unsafe { pmm_init::with_buddy(|b| b.allocate_frame()) }.map(PhysAddr)
+    pmm_init::with_buddy(|b| b.allocate_frame()).map(PhysAddr)
 }
 
 fn free_frame(pa: PhysAddr) {
-    unsafe { pmm_init::with_buddy(|b| b.deallocate_frame(pa.as_u64())) };
+    pmm_init::with_buddy(|b| unsafe { b.deallocate_frame(pa.as_u64()) });
 }
 
 struct Fault {
@@ -975,7 +981,7 @@ fn sentinel_entry() {
 fn test_spawn_sentinel() -> Outcome {
     SENTINEL.store(0, Ordering::SeqCst);
     let nest0 = per_cpu_init::irq_nest();
-    let h = thread_init::spawn("sentinel", sentinel_entry);
+    let h = thread_init::spawn_here("sentinel", sentinel_entry);
     if h.id() == ThreadId::BOOTSTRAP {
         return Outcome::Fail("spawned bootstrap id");
     }
@@ -1016,8 +1022,8 @@ fn thread_b() {
 fn test_switch_two_threads() -> Outcome {
     STEPS.store(0, Ordering::SeqCst);
     let nest0 = per_cpu_init::irq_nest();
-    let a = thread_init::spawn("a", thread_a);
-    let b = thread_init::spawn("b", thread_b);
+    let a = thread_init::spawn_here("a", thread_a);
+    let b = thread_init::spawn_here("b", thread_b);
     A_ID.store(a.id().raw(), Ordering::SeqCst);
     B_ID.store(b.id().raw(), Ordering::SeqCst);
     thread_init::switch_to(a.id());
@@ -1107,7 +1113,7 @@ fn yielder_entry() {
 
 fn test_yield_now_switches() -> Outcome {
     YIELD_FLAG.store(0, Ordering::SeqCst);
-    let _h = thread_init::spawn("yielder", yielder_entry);
+    let _h = thread_init::spawn_here("yielder", yielder_entry);
     thread_init::yield_now();
     if YIELD_FLAG.load(Ordering::SeqCst) != 1 {
         return Outcome::Fail("yielder did not run");
@@ -1199,7 +1205,7 @@ fn dying_entry() {}
 
 fn test_reap_returns_frames() -> Outcome {
     let before = free_frames();
-    let h = thread_init::spawn("dying", dying_entry);
+    let h = thread_init::spawn_here("dying", dying_entry);
     thread_init::yield_now();
     if thread_init::current_id() != ThreadId::BOOTSTRAP {
         return Outcome::Fail("did not return to bootstrap");
@@ -1226,7 +1232,7 @@ fn test_reap_many_via_idle() -> Outcome {
         // from_irq resume skips reap; the idle loop must drain.
         let mut i = 0;
         while i < REAP_MANY {
-            ids[i] = thread_init::spawn("dying", dying_entry).id();
+            ids[i] = thread_init::spawn_here("dying", dying_entry).id();
             i += 1;
         }
         thread_init::sleep_ms(30);
@@ -1242,7 +1248,7 @@ fn test_reap_many_via_idle() -> Outcome {
         // yield_now no-switch must drain.
         i = 0;
         while i < REAP_MANY {
-            ids[i] = thread_init::spawn("dying", dying_entry).id();
+            ids[i] = thread_init::spawn_here("dying", dying_entry).id();
             i += 1;
         }
         let t0 = time_init::uptime_ms();
@@ -1668,7 +1674,7 @@ const SPAWN_EXIT_N: usize = 2000;
 const SPAWN_EXIT_WARMUP: usize = 256;
 
 fn spawn_until_dead(name: &'static str) -> Outcome {
-    let h = thread_init::spawn(name, dying_entry);
+    let h = thread_init::spawn_here(name, dying_entry);
     thread_init::yield_now();
     if thread_init::try_state(h.id()) != Some(ThreadState::Dead) {
         thread_init::yield_now();
@@ -1714,6 +1720,231 @@ fn test_spawn_exit_thousands() -> Outcome {
             h.used, h.capacity, k.used
         );
         return Outcome::Fail("spawn/exit leaked frames");
+    }
+    Outcome::Ok
+}
+
+fn second_cpu() -> Option<u32> {
+    let mask = per_cpu_init::online_mask();
+    let mut i = 1u32;
+    while i < 64 {
+        if mask & (1u64 << i) != 0 {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn spin_until_ns(pred: impl Fn() -> bool, ns: u64) -> bool {
+    let t0 = time_init::now_ns();
+    while !pred() {
+        if time_init::now_ns().saturating_sub(t0) > ns {
+            return false;
+        }
+        ipi_init::service_incoming();
+        core::hint::spin_loop();
+    }
+    true
+}
+
+static XCPU_FLAG: AtomicU64 = AtomicU64::new(0);
+static XCPU_CPU: AtomicU32 = AtomicU32::new(0xFFFF);
+
+fn xcpu_entry() {
+    XCPU_CPU.store(per_cpu_init::current().cpu_id, Ordering::SeqCst);
+    XCPU_FLAG.store(1, Ordering::SeqCst);
+}
+
+fn test_cross_cpu_spawn() -> Outcome {
+    let Some(ap) = second_cpu() else {
+        return Outcome::Skip("no AP");
+    };
+    XCPU_FLAG.store(0, Ordering::SeqCst);
+    XCPU_CPU.store(0xFFFF, Ordering::SeqCst);
+    let h = thread_init::spawn_on("xcpu", xcpu_entry, ap);
+    if !spin_until_ns(|| XCPU_FLAG.load(Ordering::SeqCst) != 0, 500_000_000) {
+        return Outcome::Fail("AP thread did not run");
+    }
+    if XCPU_CPU.load(Ordering::SeqCst) != ap {
+        return Outcome::Fail("thread ran on wrong cpu");
+    }
+    if !spin_until_ns(
+        || thread_init::try_state(h.id()) == Some(ThreadState::Dead),
+        500_000_000,
+    ) {
+        return Outcome::Fail("AP thread did not exit");
+    }
+    if thread_init::cpu_of(h.id()) != ap {
+        return Outcome::Fail("tcb.cpu != ap");
+    }
+    Outcome::Ok
+}
+
+static WAKE_FLAG: AtomicU64 = AtomicU64::new(0);
+
+fn wake_ap_entry() {
+    WAKE_FLAG.store(1, Ordering::SeqCst);
+}
+
+fn test_reschedule_ipi_wake_ap() -> Outcome {
+    let Some(ap) = second_cpu() else {
+        return Outcome::Skip("no AP");
+    };
+    WAKE_FLAG.store(0, Ordering::SeqCst);
+    let before = ipi_init::reschedule_count();
+    let _h = thread_init::spawn_on("wake-ap", wake_ap_entry, ap);
+    if !spin_until_ns(|| WAKE_FLAG.load(Ordering::SeqCst) != 0, 500_000_000) {
+        return Outcome::Fail("idle AP not woken");
+    }
+    let after = ipi_init::reschedule_count();
+    if after <= before {
+        return Outcome::Fail("no reschedule IPI");
+    }
+    Outcome::Ok
+}
+
+static CALL_CPU: AtomicU32 = AtomicU32::new(0xFFFF);
+
+fn call_mark(arg: *mut ()) {
+    let _ = arg;
+    CALL_CPU.store(per_cpu_init::current().cpu_id, Ordering::SeqCst);
+}
+
+fn test_call_function_ipi() -> Outcome {
+    let Some(ap) = second_cpu() else {
+        return Outcome::Skip("no AP");
+    };
+    CALL_CPU.store(0xFFFF, Ordering::SeqCst);
+    let before = ipi_init::call_count();
+    ipi_init::call_cpu(ap, call_mark, core::ptr::null_mut(), true);
+    if CALL_CPU.load(Ordering::SeqCst) != ap {
+        return Outcome::Fail("call-function did not run on AP");
+    }
+    if ipi_init::call_count() <= before {
+        return Outcome::Fail("call count stuck");
+    }
+    Outcome::Ok
+}
+
+struct ShootProbe {
+    va: u64,
+    /// 0 idle, 1 access ok, 2 fault.
+    result: AtomicU64,
+}
+
+fn shoot_touch(arg: *mut ()) {
+    let p = unsafe { &*(arg as *const ShootProbe) };
+    let fault = catch_fault(|| unsafe {
+        core::ptr::read_volatile(p.va as *const u64);
+    });
+    p.result.store(
+        if fault.is_some() { 2 } else { 1 },
+        Ordering::SeqCst,
+    );
+}
+
+fn test_tlb_shootdown_remote() -> Outcome {
+    let Some(ap) = second_cpu() else {
+        return Outcome::Skip("no AP");
+    };
+    let Some(va) = kva_init::alloc_va(PAGE_SIZE) else {
+        return Outcome::Fail("kva alloc");
+    };
+    let Some(pa) = alloc_frame() else {
+        kva_init::free_va(va, PAGE_SIZE);
+        return Outcome::Fail("frame alloc");
+    };
+    if unsafe { paging_init::map_4k(va, pa, heap_flags()) }.is_err() {
+        free_frame(pa);
+        kva_init::free_va(va, PAGE_SIZE);
+        return Outcome::Fail("map");
+    }
+    unsafe { (va.as_u64() as *mut u64).write_volatile(0xD15EA5E) };
+
+    let probe = ShootProbe {
+        va: va.as_u64(),
+        result: AtomicU64::new(0),
+    };
+    ipi_init::call_cpu(ap, shoot_touch, &probe as *const _ as *mut (), true);
+    if probe.result.load(Ordering::SeqCst) != 1 {
+        let _ = unsafe { paging_init::unmap_4k(va) };
+        free_frame(pa);
+        kva_init::free_va(va, PAGE_SIZE);
+        return Outcome::Fail("AP could not read mapped page");
+    }
+
+    let before = ipi_init::shootdown_count();
+    let _ = unsafe { paging_init::unmap_4k(va) };
+    probe.result.store(0, Ordering::SeqCst);
+    ipi_init::call_cpu(ap, shoot_touch, &probe as *const _ as *mut (), true);
+    if probe.result.load(Ordering::SeqCst) != 2 {
+        let _ = unsafe { paging_init::map_4k(va, pa, heap_flags()) };
+        free_frame(pa);
+        kva_init::free_va(va, PAGE_SIZE);
+        return Outcome::Fail("AP did not fault after unmap");
+    }
+    if per_cpu_init::online_mask().count_ones() > 1 && ipi_init::shootdown_count() <= before {
+        let _ = unsafe { paging_init::map_4k(va, pa, heap_flags()) };
+        free_frame(pa);
+        kva_init::free_va(va, PAGE_SIZE);
+        return Outcome::Fail("no shootdown IPI");
+    }
+
+    if unsafe { paging_init::map_4k(va, pa, heap_flags()) }.is_err() {
+        free_frame(pa);
+        kva_init::free_va(va, PAGE_SIZE);
+        return Outcome::Fail("remap");
+    }
+    unsafe { (va.as_u64() as *mut u64).write_volatile(0xD15EA5E) };
+    probe.result.store(0, Ordering::SeqCst);
+    ipi_init::call_cpu(ap, shoot_touch, &probe as *const _ as *mut (), true);
+    let ok = probe.result.load(Ordering::SeqCst) == 1;
+    let _ = unsafe { paging_init::unmap_4k(va) };
+    free_frame(pa);
+    kva_init::free_va(va, PAGE_SIZE);
+    if !ok {
+        return Outcome::Fail("AP could not read after remap");
+    }
+    Outcome::Ok
+}
+
+static HAMMER_DONE: AtomicU32 = AtomicU32::new(0);
+
+fn alloc_hammer() {
+    let mut i = 0u32;
+    while i < 128 {
+        let b = Box::new([i; 16]);
+        if b[0] != i {
+            return;
+        }
+        i += 1;
+    }
+    HAMMER_DONE.fetch_add(1, Ordering::SeqCst);
+}
+
+fn test_alloc_stress_smp() -> Outcome {
+    let mask = per_cpu_init::online_mask();
+    let n = mask.count_ones();
+    if n < 2 {
+        return Outcome::Skip("no AP");
+    }
+    HAMMER_DONE.store(0, Ordering::SeqCst);
+    let mut c = 1u32;
+    while c < 64 {
+        if mask & (1u64 << c) != 0 {
+            let _ = thread_init::spawn_on("hammer", alloc_hammer, c);
+        }
+        c += 1;
+    }
+    alloc_hammer();
+    if !spin_until_ns(|| HAMMER_DONE.load(Ordering::SeqCst) >= n, 2_000_000_000) {
+        let _ = writeln!(
+            Serial,
+            "vibeOS: ktest:   hammers {}",
+            HAMMER_DONE.load(Ordering::SeqCst)
+        );
+        return Outcome::Fail("allocator stress hung");
     }
     Outcome::Ok
 }

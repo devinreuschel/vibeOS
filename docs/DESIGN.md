@@ -326,7 +326,8 @@ when LAPIC owns the tick. PIT fallback keeps IRQ0 unmasked with LINT0 ExtINT.
 The handler updates the clock, EOIs, rearms (TSC-deadline), then
 `on_timer_tick`, a no-op until the idle thread exists. Step 14
 (`sched: cpu0 ready`) then step 16 (`irq: enabled`) follow meminfo: IF on,
-preemption live. Step 17 brings APs up one at a time and emits `smp: done`
+preemption live. Step 17 brings APs up one at a time; each AP prints
+`sched: cpu<i> ready` then the BSP prints `smp: ap online`, then `smp: done`
 before the boot-done stand-in for `shell ready`. IRQ1 stays masked until the keyboard driver (phase 5): the
 default PIC handler halts on an unexpected line. The timer path re-runs the
 8259 ICW sequence even when FADT bit 0 skipped the boot remap (QEMU clears
@@ -1007,8 +1008,9 @@ Contents:
 Phase 3 slice A installs one BSP `PerCpu` through `GS_BASE` and
 `KERNEL_GS_BASE` (not a `MAX_CPUS` array, no `swapgs`). Slice B allocates
 the array from the MADT CPU count, brings up APs, and fills timer mode,
-wake inbox (stub), and `ready`. `current` and `idle` are `*mut Tcb`.
-`ready_head` is still the UP queue head — Slice C splits it per CPU.
+wake inbox (stub), and `ready`. `current` and `idle` are `*mut Tcb`. Slice C owns per-CPU `runq` plus
+`wake_inbox`; `ready_head` is that CPU's FIFO head. Cross-CPU wake is
+inbox + IPI `0xFD`.
 
 Allocate the array on the heap once the CPU count is known from the MADT rather than sizing a static
 array by a `MAX_CPUS` guess.
@@ -1212,10 +1214,10 @@ vibeOS: smp: done
 vibeOS: shell ready
 ```
 
-Live e2e through Phase 4 slice B asserts through `idt ok`, then `per_cpu: bsp ready`,
+Live e2e through Phase 4 slice C asserts through `idt ok`, then `per_cpu: bsp ready`,
 then `acpi: xsdt`, then `time: tsc <n>/ms`, then `time: lapic_timer ok (<mode>)`, then
-`sched: cpu0 ready`, then `irq: enabled`, then `N-1` × `smp: ap online`, then
-`smp: done`, then `boot: phase1 done`.
+`sched: cpu0 ready`, then `irq: enabled`, then for each AP `sched: cpu<i> ready`
+followed by `smp: ap online`, then `smp: done`, then `boot: phase1 done`.
 The harness pins `<mode>` for the QEMU config: TCG (CI, `make test`) cannot
 advertise `CPUID.01H:ECX[24]`, so `-cpu max` expects `periodic`; `-machine pc,hpet=off`
 expects `pit`; KVM `-cpu max` expects `tsc-deadline`. Default QEMU also requires
@@ -1284,7 +1286,8 @@ make test-e2e           boot contract on the normal ISO
 make test-kernel        in-guest tests, -smp 2
 make test-kernel-smp4   in-guest tests, -smp 4
 make test-lapic-fallback  in-guest tests with TSC-deadline disabled
-make test               all of the above
+make test-smp-stress    -smp 4, longer timeout (scheduled CI)
+make test               all of the above except test-smp-stress
 ```
 
 `make test-e2e` alone is the right check when only boot output or QEMU wiring changed. `make test` is

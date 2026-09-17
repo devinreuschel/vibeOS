@@ -237,13 +237,16 @@ extern "C" fn ap_entry() -> ! {
     cpu.timer_mode = apic_init::timer_mode();
     apic_init::arm_ap();
     per_cpu_init::mark_online(cpu.cpu_id);
+    let _ = writeln!(
+        Serial,
+        "{}{}{}",
+        marker::SCHED_CPU_PREFIX,
+        cpu.cpu_id,
+        marker::SCHED_CPU_SUFFIX
+    );
     cpu.ready.store(true, Ordering::Release);
     x86::sti();
-    loop {
-        unsafe {
-            core::arch::asm!("sti; hlt", options(nomem, nostack));
-        }
-    }
+    crate::sched_init::idle_loop();
 }
 
 /// Bring up every enabled MADT CPU except the BSP. Emits `smp: done`.

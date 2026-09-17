@@ -1,9 +1,8 @@
-//! BSP scheduler bring-up, idle thread, timer preemption. ROADMAP §3.3, §3.6.
+//! BSP scheduler bring-up, idle thread, timer preemption. ROADMAP §3.3, §3.6, §4.8.
 //!
-//! Marker `sched: cpu0 ready` after idle exists. PIT calls [`on_timer_tick`]
+//! Marker `sched: cpu0 ready` after idle exists. PIT/LAPIC call [`on_timer_tick`]
 //! after EOI (DESIGN §5.8). Idle is always runnable, never on the FIFO.
 
-use core::arch::asm;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::per_cpu_init;
@@ -33,35 +32,32 @@ pub fn is_live() -> bool {
 }
 
 /// After EOI. Preempt every `QUANTUM_TICKS`, or every tick while idle
-/// so a sleeper can displace `sti; hlt`. AP timers tick locally; Slice C
-/// owns per-CPU ready queues, so do not steal the UP queue.
+/// so a sleeper can displace `sti; hlt`. Each CPU owns its runq.
 pub fn on_timer_tick() {
     if !is_live() {
         return;
     }
     let cpu = per_cpu_init::current_mut();
     cpu.ticks = cpu.ticks.wrapping_add(1);
-    if cpu.cpu_id != 0 {
-        return;
-    }
     let idle = cpu.current == cpu.idle && !cpu.idle.is_null();
     if vibeos::sched::should_preempt(cpu.ticks, idle) {
         thread_init::schedule_preempt();
     }
 }
 
-fn idle_main() {
+/// Shared idle body for BSP and APs. DESIGN §7.8.
+pub fn idle_loop() -> ! {
     loop {
         // Timer preempt resumes idle with from_irq, so schedule skips
         // reap. Drain here: not on a dying stack, not on the IRQ path.
         thread_init::reap_zombies();
         thread_init::yield_now();
-        // `sti; hlt` is one instruction pair so IF cannot open a window
-        // before halt. Always runnable, lowest priority (not on the FIFO).
-        unsafe {
-            asm!("sti; hlt", options(nomem, nostack));
-        }
+        thread_init::halt_if_idle();
     }
+}
+
+fn idle_main() {
+    idle_loop();
 }
 
 #[allow(dead_code)]

@@ -52,7 +52,7 @@ KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml $(TARGET_JSON) linker.ld Makefile rust-
 
 .PHONY: all kernel iso run run-panic clean distclean setup layout \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-gp test \
-        test-e2e-pit test-kernel test-kernel-smp4 test-lapic-fallback
+        test-e2e-pit test-kernel test-kernel-smp4 test-lapic-fallback test-smp-stress
 
 all: $(ISO)
 
@@ -212,7 +212,11 @@ test-kernel-smp4: $(ISO_KTEST)
 test-lapic-fallback: $(ISO_KTEST)
 	VIBEOS_ISO=$(ISO_KTEST) VIBEOS_QEMU_CPU=qemu64,-tsc-deadline python3 tests/kernel_boot.py
 
-test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-pit test-kernel test-lapic-fallback
+test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-pit test-kernel test-kernel-smp4 test-lapic-fallback
+
+# Longer high-CPU stress. Scheduled CI, not every push. ROADMAP §4.11.
+test-smp-stress: $(ISO_KTEST)
+	VIBEOS_ISO=$(ISO_KTEST) VIBEOS_SMP=4 VIBEOS_TIMEOUT=180 python3 tests/kernel_boot.py
 
 clean:
 	rm -rf $(ISO_ROOT) $(ISO_ROOT_PANIC) $(ISO_ROOT_GP) $(ISO_ROOT_KTEST) $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_KTEST) target-panic target-gp $(KERNEL_TESTS_DIR)

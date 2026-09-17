@@ -9,6 +9,7 @@ use core::cell::UnsafeCell;
 use core::mem::ManuallyDrop;
 use core::ops::{Deref, DerefMut};
 
+use vibeos::lock::{can_acquire, acquire_mask, release_mask};
 use vibeos::sync::SpinLock;
 use vibeos::thread::{ThreadId, WaitOutcome};
 use vibeos::time::Instant;
@@ -25,6 +26,7 @@ use crate::x86::InterruptGuard;
 pub struct SpinMutex<T> {
     lock: SpinLock,
     data: UnsafeCell<T>,
+    rank: u8,
 }
 
 unsafe impl<T: Send> Sync for SpinMutex<T> {}
@@ -33,24 +35,35 @@ unsafe impl<T: Send> Send for SpinMutex<T> {}
 pub struct SpinMutexGuard<'a, T> {
     mutex: &'a SpinMutex<T>,
     owner: usize,
+    rank: u8,
     _irq: InterruptGuard,
 }
 
 impl<T> SpinMutex<T> {
     pub const fn new(v: T) -> Self {
+        Self::with_rank(v, 0)
+    }
+
+    pub const fn with_rank(v: T, rank: u8) -> Self {
         Self {
             lock: SpinLock::new(),
             data: UnsafeCell::new(v),
+            rank,
         }
     }
 
     pub fn lock(&self) -> SpinMutexGuard<'_, T> {
         let irq = InterruptGuard::enter();
         let owner = owner_token();
-        self.lock.acquire(owner);
+        lock_enter(self.rank);
+        while !self.lock.try_acquire(owner) {
+            crate::ipi_init::service_incoming();
+            core::hint::spin_loop();
+        }
         SpinMutexGuard {
             mutex: self,
             owner,
+            rank: self.rank,
             _irq: irq,
         }
     }
@@ -59,6 +72,7 @@ impl<T> SpinMutex<T> {
 impl<T> Drop for SpinMutexGuard<'_, T> {
     fn drop(&mut self) {
         self.mutex.lock.release(self.owner);
+        lock_leave(self.rank);
     }
 }
 
@@ -80,6 +94,51 @@ fn owner_token() -> usize {
         Some(c) => c.cpu_id as usize + 1,
         None => 1,
     }
+}
+
+fn lock_cpu() -> usize {
+    match per_cpu_init::try_current() {
+        Some(c) => c.cpu_id as usize,
+        None => 0,
+    }
+}
+
+/// Debug lock-order tracker. Cheap: one byte per CPU, skipped until GS is live.
+static HELD: [core::sync::atomic::AtomicU8; 64] =
+    [const { core::sync::atomic::AtomicU8::new(0) }; 64];
+
+fn lock_enter(rank: u8) {
+    if rank == 0 || !per_cpu_init::is_live() {
+        return;
+    }
+    let i = lock_cpu();
+    if i >= 64 {
+        return;
+    }
+    let held = HELD[i].load(core::sync::atomic::Ordering::Relaxed);
+    assert!(
+        can_acquire(held, rank),
+        "lock order: rank {rank} while holding {held:#x}"
+    );
+    HELD[i].store(
+        acquire_mask(held, rank),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+fn lock_leave(rank: u8) {
+    if rank == 0 || !per_cpu_init::is_live() {
+        return;
+    }
+    let i = lock_cpu();
+    if i >= 64 {
+        return;
+    }
+    let held = HELD[i].load(core::sync::atomic::Ordering::Relaxed);
+    HELD[i].store(
+        release_mask(held, rank),
+        core::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 fn past(deadline: Instant) -> bool {
