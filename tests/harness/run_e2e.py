@@ -9,12 +9,10 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from harness import (  # noqa: E402
-    PHASE0_GP_MARKERS,
-    PHASE0_MARKERS,
     PHASE0_PANIC_PREFIX,
-    PHASE0_PIT_MARKERS,
     HarnessError,
     QemuConfig,
+    boot_contract_markers,
     run_qemu_and_check,
 )
 
@@ -40,14 +38,12 @@ def main() -> int:
         hpet=not expect_pit,
     )
     if gp_test:
-        markers = PHASE0_GP_MARKERS
+        markers = boot_contract_markers(cpu=cpu, gp=True)
         expect_panic = True
     elif expect_panic:
         markers = PHASE0_PANIC_PREFIX
-    elif expect_pit:
-        markers = PHASE0_PIT_MARKERS
     else:
-        markers = PHASE0_MARKERS
+        markers = boot_contract_markers(cpu=cpu, hpet=not expect_pit)
 
     try:
         result = run_qemu_and_check(

@@ -134,6 +134,21 @@ fn hpet_va(hpet: &HpetInfo) -> u64 {
     paging_init::HHDM_BASE.wrapping_add(hpet.base)
 }
 
+/// HPET main counter VA + period, after the page is UC. None if unusable.
+pub(crate) fn hpet_ready() -> Option<(u64, u32)> {
+    let hpet = acpi_init::info()?.hpet?;
+    if !hpet_period_ok(hpet.period_fs) {
+        return None;
+    }
+    let va = hpet_va(&hpet);
+    hpet_enable(va);
+    Some((va, hpet.period_fs))
+}
+
+pub(crate) fn hpet_read_main(va: u64) -> u64 {
+    hpet_read(va, HPET_MAIN)
+}
+
 fn calibrate_hpet(hpet: &HpetInfo, use_rdtscp: bool) -> Option<u64> {
     if !hpet_period_ok(hpet.period_fs) {
         return None;
@@ -295,12 +310,16 @@ fn read_rtc_unix() -> Option<u64> {
     unix_from_civil(civil.0, civil.1, civil.2, civil.3, civil.4, civil.5)
 }
 
-/// IRQ0 body: increment tick, snapshot TSC. Caller EOIs, then
+/// Tick body: increment, snapshot TSC. Caller EOIs, rearms, then
 /// `sched_init::on_timer_tick` (DESIGN §5.8). No allocation, no logging.
-pub fn on_pit_tick(tsc: u64) {
+pub fn on_hw_tick(tsc: u64) {
     let st = unsafe { STATE.get_mut() };
     st.ticks = st.ticks.wrapping_add(1);
     st.clock.write(st.ticks, tsc);
+}
+
+pub fn on_pit_tick(tsc: u64) {
+    on_hw_tick(tsc);
 }
 
 pub fn uptime_ms() -> u64 {

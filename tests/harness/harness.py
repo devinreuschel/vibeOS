@@ -211,6 +211,7 @@ def iter_lines_with_deadline(fd: int, deadline: float) -> Iterator[str]:
 # 8.x (where -no-hpet is only deprecated) and on 10.x.
 HPET_OFF_MACHINE = ("-machine", "pc,hpet=off")
 DEFAULT_ACCEL = "tcg"
+LAPIC_TIMER_MODES = ("tsc-deadline", "periodic", "pit")
 
 
 @dataclass
@@ -226,12 +227,45 @@ class QemuConfig:
     accel: str | None = None
 
 
+def _accel_name(accel: str | None) -> str:
+    if accel is not None:
+        return accel
+    return os.environ.get("VIBEOS_QEMU_ACCEL", DEFAULT_ACCEL)
+
+
+def expected_lapic_mode(
+    *,
+    cpu: str | None = None,
+    hpet: bool = True,
+    accel: str | None = None,
+) -> str:
+    """Mode the kernel must print. TCG on QEMU 8.x cannot set CPUID.01H:ECX[24]
+    (`TCG doesn't support requested feature: tsc-deadline`), so the periodic
+    path is what CI sees on `-cpu max`. HPET off refuses periodic calib.
+    """
+    if not hpet:
+        return "pit"
+    cpu = cpu if cpu is not None else os.environ.get("VIBEOS_QEMU_CPU", "max")
+    parts = [p.strip() for p in cpu.split(",")]
+    accel_s = _accel_name(accel)
+    if accel_s == "tcg" or "-tsc-deadline" in parts:
+        return "periodic"
+    return "tsc-deadline"
+
+
+def lapic_timer_marker(
+    *,
+    cpu: str | None = None,
+    hpet: bool = True,
+    accel: str | None = None,
+) -> Marker:
+    mode = expected_lapic_mode(cpu=cpu, hpet=hpet, accel=accel)
+    return Marker(f"vibeOS: time: lapic_timer ok ({mode})", "lapic_timer_ok")
+
+
 def _accel_args(cfg: QemuConfig) -> list[str]:
     """`-accel tcg` unless overridden. Empty env/config skips the flag."""
-    if cfg.accel is not None:
-        accel = cfg.accel
-    else:
-        accel = os.environ.get("VIBEOS_QEMU_ACCEL", DEFAULT_ACCEL)
+    accel = _accel_name(cfg.accel)
     if accel == "":
         return []
     return ["-accel", accel]
@@ -480,9 +514,11 @@ def run_qemu_until_exit(
 # `per_cpu: bsp ready` (GS_BASE; DESIGN step 11, after GDT because
 # `mov gs` zeros the hidden base), then `acpi: xsdt <n> tables`. Slice C
 # adds TSC calibration: a diagnostic `time: calibrated hpet|pit <n>/ms`
-# then the exit-gate `time: tsc <n>/ms`. Phase 3 slice B then emits
-# `sched: cpu0 ready` and `irq: enabled` (IRQ0 already live for
-# timekeeping; keyboard stays masked until phase 5).
+# then the exit-gate `time: tsc <n>/ms`. Phase 4 slice A then emits
+# `time: lapic_timer ok (<mode>)` after the LAPIC timer is proven (PIC
+# masked only then). Phase 3 slice B then emits
+# `sched: cpu0 ready` and `irq: enabled` (keyboard stays masked until
+# phase 5).
 # `pic: remapped` means the PIC step finished (ICW ran, or FADT skip);
 # unlike `paging: mmio uc` it is not a claim that ports were programmed.
 # Trailing marker is `boot: phase1 done`. Runtime-derived payload uses
@@ -510,33 +546,50 @@ _PHASE0_BEFORE_TIME: list[Marker] = [
     ),
 ]
 
-_PHASE0_AFTER_CALIB: list[Marker] = [
-    Marker(
-        "vibeOS: time: tsc ",
-        "time_tsc",
-        and_contains=("/ms",),
-    ),
-    Marker("vibeOS: sched: cpu0 ready", "sched_cpu0"),
-    Marker("vibeOS: irq: enabled", "irq_enabled"),
-    Marker("vibeOS: boot: phase1 done", "boot_done"),
-]
 
-PHASE0_MARKERS: list[Marker] = _PHASE0_BEFORE_TIME + [
-    Marker(
-        "vibeOS: time: calibrated hpet ",
-        "time_calib_hpet",
-        and_contains=("/ms",),
-    ),
-] + _PHASE0_AFTER_CALIB
+def boot_contract_markers(
+    *,
+    hpet: bool = True,
+    cpu: str | None = None,
+    accel: str | None = None,
+    gp: bool = False,
+) -> list[Marker]:
+    """Live e2e contract. Pins the LAPIC timer mode for this QEMU config."""
+    after = [
+        Marker(
+            "vibeOS: time: tsc ",
+            "time_tsc",
+            and_contains=("/ms",),
+        ),
+        lapic_timer_marker(cpu=cpu, hpet=hpet, accel=accel),
+        Marker("vibeOS: sched: cpu0 ready", "sched_cpu0"),
+        Marker("vibeOS: irq: enabled", "irq_enabled"),
+        Marker("vibeOS: boot: phase1 done", "boot_done"),
+    ]
+    if hpet:
+        calib = Marker(
+            "vibeOS: time: calibrated hpet ",
+            "time_calib_hpet",
+            and_contains=("/ms",),
+        )
+    else:
+        calib = Marker(
+            "vibeOS: time: calibrated pit ",
+            "time_calib_pit",
+            and_contains=("/ms",),
+        )
+    markers = _PHASE0_BEFORE_TIME + [calib] + after
+    if gp:
+        markers = markers + [
+            Marker("vibeOS: boot: gp-test armed", "gp_test_armed"),
+        ]
+    return markers
 
-# Production ISO with HPET emulation off: same contract, PIT channel 2.
-PHASE0_PIT_MARKERS: list[Marker] = _PHASE0_BEFORE_TIME + [
-    Marker(
-        "vibeOS: time: calibrated pit ",
-        "time_calib_pit",
-        and_contains=("/ms",),
-    ),
-] + _PHASE0_AFTER_CALIB
+
+PHASE0_MARKERS: list[Marker] = boot_contract_markers()
+
+# Production ISO with HPET emulation off: PIT calib + PIT tick.
+PHASE0_PIT_MARKERS: list[Marker] = boot_contract_markers(hpet=False)
 
 # Markers that must appear *before* the deliberate panic in the panic-test
 # build. panic-test panics right after the limine handshake, so PMM never
@@ -549,6 +602,4 @@ PHASE0_PANIC_PREFIX: list[Marker] = [
 
 # gp-test boots all the way through IDT, then a deliberate #GP dumps and
 # halts. Same expect_panic scanner; full marker contract plus the armed line.
-PHASE0_GP_MARKERS: list[Marker] = PHASE0_MARKERS + [
-    Marker("vibeOS: boot: gp-test armed", "gp_test_armed"),
-]
+PHASE0_GP_MARKERS: list[Marker] = boot_contract_markers(gp=True)

@@ -212,7 +212,7 @@ test-kernel-smp4: $(ISO_KTEST)
 test-lapic-fallback: $(ISO_KTEST)
 	VIBEOS_ISO=$(ISO_KTEST) VIBEOS_QEMU_CPU=qemu64,-tsc-deadline python3 tests/kernel_boot.py
 
-test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-pit test-kernel
+test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-pit test-kernel test-lapic-fallback
 
 clean:
 	rm -rf $(ISO_ROOT) $(ISO_ROOT_PANIC) $(ISO_ROOT_GP) $(ISO_ROOT_KTEST) $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_KTEST) target-panic target-gp $(KERNEL_TESTS_DIR)

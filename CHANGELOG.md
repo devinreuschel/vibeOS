@@ -9,6 +9,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Phase 4 slice A: BSP LAPIC, I/O APIC, and LAPIC timer. After `time: tsc`,
+  boot enables the local APIC (`IA32_APIC_BASE` bit 11, MADT type-5 base),
+  programs every I/O APIC with ISOs (high dword before low, still masked),
+  then proves a tick and prints `vibeOS: time: lapic_timer ok (<mode>)`.
+  Preference is TSC-deadline, then periodic (HPET, divider 16), then PIT.
+  PIC and the PIT GSI are masked only after that proof (no double delivery).
+  Spurious `0xFF` does not EOI. `send_ipi` polls delivery-pending with a
+  cap of 1000. Host tests cover the poll (clear + timeout), redir write
+  order, and ISO IRQ0→GSI. In-guest: mode matches CPUID (no silent
+  downgrade), rearm across many ticks, PIT GSI masked when LAPIC owns
+  the tick. `make test-lapic-fallback` (`-cpu qemu64,-tsc-deadline`) is
+  in `make test` and CI. TCG cannot advertise TSC-deadline, so default
+  e2e pins `periodic`; `make test-e2e-pit` pins `pit`. PIT fallback
+  programs LINT0 as ExtINT so the 8259 virtual-wire still delivers IRQ0
+  after LAPIC enable (a masked LINT0 swallowed the tick).
 - Phase 3 slice C: `WaitQueue` plus `BlockingMutex`, `RwLock`, `Semaphore`,
   `Condvar`, and bounded MPSC `Channel<T>`. Every wait takes an optional
   deadline (`None` → far-future sentinel). Enqueue → Blocked → drop SCHED →
@@ -22,6 +37,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- TSC-deadline arm: `MFENCE` after the LVT timer write so `IA32_TSC_DEADLINE`
+  cannot retire against the old masked one-shot (SDM Vol. 3A). Host test
+  asserts LVT → MFENCE → deadline. DESIGN §3.3 lists step 13b
+  (`time: lapic_timer ok`).
 - `switch_context` no longer `popfq`s with IF set before `jmp`. A timer
   in that window preempted a first-run thread, overwrote the trampoline
   frame, and `iret` jumped into `schedule_inner` on `stack_top-8` (`#PF`

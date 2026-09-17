@@ -130,6 +130,22 @@ extern "x86-interrupt" fn pit_irq(_frame: InterruptFrame) {
     crate::sched_init::on_timer_tick();
 }
 
+extern "x86-interrupt" fn lapic_timer_irq(_frame: InterruptFrame) {
+    crate::apic_init::on_timer_irq();
+}
+
+extern "x86-interrupt" fn lapic_error_irq(_frame: InterruptFrame) {
+    crate::apic_init::on_error_irq();
+}
+
+extern "x86-interrupt" fn lapic_thermal_irq(_frame: InterruptFrame) {
+    crate::apic_init::on_thermal_irq();
+}
+
+extern "x86-interrupt" fn lapic_spurious_irq(_frame: InterruptFrame) {
+    crate::apic_init::on_spurious_irq();
+}
+
 /// Fill all 256 entries, overlay named handlers, `lidt`.
 ///
 /// # Safety
@@ -195,6 +211,11 @@ unsafe fn overlay_named() {
     set_noerr(vectors::IRQ_SLAVE_BASE + 5, irq::<{ vectors::IRQ_SLAVE_BASE + 5 }>, 0);
     set_noerr(vectors::IRQ_SLAVE_BASE + 6, irq::<{ vectors::IRQ_SLAVE_BASE + 6 }>, 0);
     set_noerr(vectors::IRQ_SPURIOUS_SLAVE, irq::<{ vectors::IRQ_SPURIOUS_SLAVE }>, 0);
+
+    set_noerr(vectors::LAPIC_TIMER, lapic_timer_irq, 0);
+    set_noerr(vectors::LAPIC_ERROR, lapic_error_irq, 0);
+    set_noerr(vectors::LAPIC_THERMAL, lapic_thermal_irq, 0);
+    set_noerr(vectors::LAPIC_SPURIOUS, lapic_spurious_irq, 0);
 }
 
 fn ist_for(vec: u8) -> u8 {
