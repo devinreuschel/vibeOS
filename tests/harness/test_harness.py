@@ -73,6 +73,39 @@ class TestOrderedMarkerCheck(unittest.TestCase):
             check_markers_in_order(lines, markers)
         self.assertIn("panicked at", str(cm.exception))
 
+    def test_and_contains_requires_all_fragments(self) -> None:
+        # A line that carries only the suffix must NOT satisfy a marker
+        # whose shape includes both `vibeOS: pmm:` and the suffix. This
+        # is the phase-1 PMM marker's contract per DESIGN §2.6 / §8.3.
+        m = Marker(
+            "vibeOS: pmm: ",
+            "pmm_free_frames",
+            and_contains=(" free 4KiB frames",),
+        )
+        self.assertTrue(m.matches("vibeOS: pmm: 31329 free 4KiB frames"))
+        self.assertFalse(m.matches("someone reports 12 free 4KiB frames"))
+        self.assertFalse(m.matches("vibeOS: pmm: initializing"))
+
+    def test_and_contains_wrong_shape_fails_ordered_check(self) -> None:
+        # The pmm marker must not accept a line that lacks the prefix.
+        lines = [
+            "vibeOS: serial online",
+            "diagnostic: 12 free 4KiB frames on some other subsystem",
+            "vibeOS: boot: phase0 done",
+        ]
+        markers = [
+            Marker("vibeOS: serial online", "a"),
+            Marker(
+                "vibeOS: pmm: ",
+                "pmm",
+                and_contains=(" free 4KiB frames",),
+            ),
+            Marker("vibeOS: boot: phase0 done", "b"),
+        ]
+        with self.assertRaises(HarnessError) as cm:
+            check_markers_in_order(lines, markers)
+        self.assertIn("'pmm'", str(cm.exception))
+
     def test_extra_lines_between_markers_are_fine(self) -> None:
         lines = [
             "chatter",

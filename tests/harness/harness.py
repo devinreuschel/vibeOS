@@ -42,13 +42,23 @@ class HarnessError(Exception):
 
 @dataclass
 class Marker:
-    """One assertion in the boot contract."""
+    """One assertion in the boot contract.
+
+    `substring` is the primary needle. `and_contains` holds any additional
+    fragments that must ALSO appear on the same line, so a marker whose
+    payload is runtime-generated (a decimal count, a hex address) can be
+    pinned to its full `vibeOS: <subsystem>: <state>` shape without
+    hard-coding the varying part. See DESIGN §2.6 / §8.3.
+    """
 
     substring: str
     name: str
+    and_contains: tuple[str, ...] = ()
 
     def matches(self, line: str) -> bool:
-        return self.substring in line
+        if self.substring not in line:
+            return False
+        return all(needle in line for needle in self.and_contains)
 
 
 @dataclass
@@ -333,16 +343,26 @@ def run_qemu_and_check(
     return result
 
 
-# Marker preset for the phase 0 boot contract. New markers extend this in the
-# same commit that emits them.
+# Boot contract, in order. Extended per DESIGN §8.3 as each phase lands.
+# Phase 0 gave us serial + limine + boot done; phase 1 slice A adds the
+# PMM free-frames line. The frame count is runtime-derived, so the PMM
+# marker is pinned to both fragments of `vibeOS: pmm: <n> free 4KiB
+# frames` — matching only the suffix would let a stray `<n> free 4KiB
+# frames` line elsewhere satisfy the contract.
 PHASE0_MARKERS: list[Marker] = [
     Marker("vibeOS: serial online", "serial_online"),
     Marker("vibeOS: limine: rev 3 ok", "limine_ok"),
+    Marker(
+        "vibeOS: pmm: ",
+        "pmm_free_frames",
+        and_contains=(" free 4KiB frames",),
+    ),
     Marker("vibeOS: boot: phase0 done", "boot_done"),
 ]
 
 # Markers that must appear *before* the deliberate panic in the panic-test
-# build. Everything after the boot marker is the panic itself.
+# build. panic-test panics right after the limine handshake, so PMM never
+# runs on this path.
 PHASE0_PANIC_PREFIX: list[Marker] = [
     Marker("vibeOS: serial online", "serial_online"),
     Marker("vibeOS: limine: rev 3 ok", "limine_ok"),

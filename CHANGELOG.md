@@ -9,6 +9,22 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Phase 1 slice A: buddy physical allocator. `vibeos::pmm::Buddy` lives in
+  the library half with intrusive doubly-linked free lists inside the free
+  pages, splitting on allocate and merging on free up to 4 MiB blocks
+  (`MAX_ORDER = 10`). O(1) running free-frame counter; `stats()` reports
+  total, free, and the largest available order. Double-free is caught even
+  after coalescing by scanning every covering order. Host tests cover the
+  full phase-1 checklist: exhaustion, per-order alignment, coalescing after
+  freeing alternate blocks, a random alloc/free stream that restores the
+  initial free count, and double-free panics.
+- Kernel-side `pmm_init` walks Limine's memmap and hands `USABLE` regions
+  to the buddy after subtracting frame 0, the loaded kernel image (via
+  Limine's executable-address response), the AP trampoline page at
+  `0x8000`, and every framebuffer. Prints `vibeOS: pmm: <n> free 4KiB
+  frames` as the phase-1 exit-gate marker, followed by a diagnostic
+  totals/largest-order line. Paging, heap, and KVA are deliberately
+  deferred to slices B–D.
 - Phase 0 kernel: `_start` verifies the Limine base revision, brings up COM1,
   and prints the phase 0 marker contract before halting.
 - `x86_64-unknown-none-executable.json` custom target: no PIE, static reloc,
