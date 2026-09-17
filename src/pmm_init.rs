@@ -180,6 +180,16 @@ pub unsafe fn init(
     buddy.stats()
 }
 
+/// Grab a `&mut Buddy` on the global allocator. Single-CPU boot rule
+/// applies: caller must run before interrupts are enabled and before any
+/// other CPU is started (DESIGN §2.4 / §7.7).
+///
+/// # Safety
+/// See above; only sound during single-threaded, IRQs-off boot.
+pub unsafe fn buddy_mut() -> &'static mut Buddy {
+    unsafe { BUDDY.get_mut() }
+}
+
 /// Feed `[base, end)` into the buddy, skipping every byte covered by any
 /// exclude in `sorted`.
 ///
