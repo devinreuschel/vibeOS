@@ -175,6 +175,9 @@ pub enum MapError {
     /// A leaf entry already covers this VA and the caller did not ask
     /// for `Remap`.
     AlreadyMapped,
+    /// The VA has no present leaf. Returned by operations that expect
+    /// to walk an existing mapping (e.g. `patch_physmap_uc`).
+    NotMapped,
     /// Frame allocator returned `None` while walking down.
     OutOfFrames,
     /// A 2 MiB request landed under a 4 KiB leaf, or vice versa.
@@ -453,7 +456,7 @@ impl Mapper {
         let mut off: u64 = 0;
         while off < len {
             let va = VirtAddr(hhdm_start.0 + phys.0 + off);
-            let (_, size, _) = self.translate(va).ok_or(MapError::AlreadyMapped)?;
+            let (_, size, _) = self.translate(va).ok_or(MapError::NotMapped)?;
             // Walk to the leaf slot, add the bits, write back.
             let leaf_level: u8 = match size {
                 PageSize::Size4K => 1,
@@ -843,6 +846,19 @@ mod tests {
         let outside = VirtAddr(hhdm.0 + 0x0040_0000);
         let (_, _, oflags) = m.translate(outside).unwrap();
         assert!(!oflags.contains(PageFlags::PCD));
+    }
+
+    #[test]
+    fn patch_uc_on_unmapped_returns_not_mapped() {
+        // patch_physmap_uc walks the physmap PTEs, so a phys address the
+        // physmap doesn't cover must surface as `NotMapped` — not the
+        // easily-misread `AlreadyMapped`.
+        let mut pool = TestPool::new(1024);
+        let mut m = fresh_mapper(&mut pool);
+        let hhdm = VirtAddr(0xFFFF_8000_0000_0000);
+        // Deliberately do NOT map anything into hhdm before patching.
+        let err = unsafe { m.patch_physmap_uc(hhdm, PhysAddr(0), PAGE_SIZE_4K).unwrap_err() };
+        assert_eq!(err, MapError::NotMapped);
     }
 
     #[test]
