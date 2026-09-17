@@ -226,12 +226,13 @@ extern "C" fn ap_entry() -> ! {
     x86::cli();
     let st = STARTING.get();
     let tables = unsafe { &*st.cpu_tables };
-    // `mov gs` zeros the hidden base. IF is off, so the IDT is not live.
+    let cpu = unsafe { &mut *st.cpu };
+    // `mov gs` zeros the hidden base. GS_BASE before any lidt so NMI
+    // cannot gs:[0] a null PerCpu (DESIGN §7.4 / ROADMAP).
     unsafe { tables.load() };
+    unsafe { per_cpu_init::install_gs(cpu) };
     unsafe { arch::idt::load() };
     unsafe { apic_init::enable_ap() };
-    let cpu = unsafe { &mut *st.cpu };
-    unsafe { per_cpu_init::install_gs(cpu) };
     cpu.tsc_per_ms = time_init::tsc_per_ms();
     cpu.timer_mode = apic_init::timer_mode();
     apic_init::arm_ap();

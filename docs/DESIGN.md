@@ -978,13 +978,13 @@ For each enabled APIC ID that is not the BSP:
 6. On timeout: free the stack and the per-CPU area, log the failure, continue with the remaining CPUs.
    Leaking a 16 KiB stack per failed AP is exactly the kind of thing that goes unnoticed for months.
 
-On the AP side, in order: load per-CPU GDT and TSS, load the IDT, enable the LAPIC, set `GS_BASE` and
-`KERNEL_GS_BASE`, calibrate and arm the LAPIC timer, publish the ready flag, `sti`, enter the scheduler
-as the idle thread.
+On the AP side, in order: load per-CPU GDT and TSS, set `GS_BASE` and
+`KERNEL_GS_BASE`, load the IDT, enable the LAPIC, calibrate and arm the LAPIC timer, publish the ready
+flag, `sti`, enter the scheduler as the idle thread.
 
-`GS_BASE` must be set before any code that touches per-CPU state, which includes any ISR. Setting it
-late means the window between `sti` and the per-CPU setup is a null dereference waiting for a timer
-interrupt.
+`GS_BASE` must be set before any `lidt` and before `sti`. NMI and timer IRQs both
+read per-CPU state through `gs:[0]`. Setting it after `lidt` is a null dereference
+waiting for a non-maskable interrupt, even with IF off.
 
 ## 7.5 Per-CPU data
 

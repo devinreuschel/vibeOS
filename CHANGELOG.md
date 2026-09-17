@@ -14,8 +14,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `build.rs` / `CARGO_MANIFEST_DIR`) to identity-mapped `0x8000`, starts
   each enabled MADT CPU one at a time (INIT, 10 ms, SIPI, ~1 ms, SIPI),
   and waits on a ready flag (3 s timeout; timeout frees the stack, IST,
-  GDT/TSS, and idle TCB). APs load a per-CPU GDT/TSS, the shared IDT,
-  enable the LAPIC, set `GS_BASE`/`KERNEL_GS_BASE` before `sti`, arm the
+  GDT/TSS, and idle TCB). APs load a per-CPU GDT/TSS, set
+  `GS_BASE`/`KERNEL_GS_BASE` before `lidt` and `sti`, enable the LAPIC, arm the
   same timer mode as the BSP, then idle. Markers: `N-1` ×
   `vibeOS: smp: ap online`, then `vibeOS: smp: done`, still before
   `boot: phase1 done`. `PerCpu` is a heap array sized from the MADT CPU

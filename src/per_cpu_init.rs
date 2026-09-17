@@ -34,6 +34,7 @@ impl<T> BootCell<T> {
 
 static CPUS: BootCell<Option<Box<[PerCpu]>>> = BootCell::new(None);
 static LIVE: AtomicBool = AtomicBool::new(false);
+/// Bit `cpu_id`. MADTs with >64 CPUs need a wider mask later.
 static ONLINE: AtomicU64 = AtomicU64::new(0);
 
 fn apic_id() -> u32 {

@@ -423,7 +423,7 @@ comes before drivers rather than after.
 - [x] one AP at a time, INIT, 10 ms, SIPI, ~1 ms, SIPI
 - [x] per-CPU area and guarded stack allocated and published with a fence before the SIPI
 - [x] 3 second ready-flag timeout; on failure free the stack and per-CPU area, log, and continue
-- [x] AP path in order: per-CPU GDT and TSS, IDT, LAPIC enable, per-CPU MSRs, timer calibrate and arm, ready flag, `sti`, enter as idle
+- [x] AP path in order: per-CPU GDT and TSS, per-CPU MSRs (`GS_BASE` before any `lidt`), IDT, LAPIC enable, timer calibrate and arm, ready flag, `sti`, enter as idle
 - [x] `GS_BASE` set before the IDT is live and before `sti`
 - [x] an online mask, and a barrier the BSP waits on before declaring `smp: done`
 

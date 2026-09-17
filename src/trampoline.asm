@@ -6,6 +6,7 @@
 ;
 ; Param block (BSP write_volatile, not in this blob):
 ;   0xD0 CR3, 0xD8 stack top, 0xE0 entry, 0xE8 IDTR (10 bytes).
+; Do not lidt here: GS is still 0. ap_entry loads GDT, then GS, then IDT.
 ; `times` below is the static "blob fits below param block" check.
 
 bits 16
@@ -62,7 +63,6 @@ lm64:
     ; identity-mapped physical slots, so force abs.
     mov rsp, [abs RSP_OFF]
     xor rbp, rbp
-    lidt [abs IDT_OFF]
     mov rax, [abs RIP_OFF]
     call rax
 .hang:
