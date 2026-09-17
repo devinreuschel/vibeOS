@@ -179,3 +179,54 @@ pub fn read_cs() -> u16 {
     unsafe { asm!("mov {0:x}, cs", out(reg) val, options(nomem, nostack, preserves_flags)) };
     val
 }
+
+/// Task register. In-guest GDT test checks we `ltr`'d the TSS selector.
+#[inline]
+#[allow(dead_code)]
+pub fn read_tr() -> u16 {
+    let val: u16;
+    unsafe { asm!("str {0:x}", out(reg) val, options(nomem, nostack, preserves_flags)) };
+    val
+}
+
+/// 10-byte GDTR/IDTR payload.
+#[repr(C, packed)]
+pub struct DtPtr {
+    pub limit: u16,
+    pub base: u64,
+}
+
+/// # Safety
+/// `ptr` must describe a valid GDT that covers every selector we load
+/// immediately after, including the code selector used by `retfq`.
+#[inline]
+pub unsafe fn lgdt(ptr: &DtPtr) {
+    unsafe {
+        asm!(
+            "lgdt [{}]",
+            in(reg) ptr,
+            options(readonly, nostack, preserves_flags)
+        )
+    };
+}
+
+/// # Safety
+/// `ptr` must describe a 256-entry IDT. Hardware IRQs should already
+/// be masked at the controller.
+#[inline]
+pub unsafe fn lidt(ptr: &DtPtr) {
+    unsafe {
+        asm!(
+            "lidt [{}]",
+            in(reg) ptr,
+            options(readonly, nostack, preserves_flags)
+        )
+    };
+}
+
+/// # Safety
+/// `sel` must index an available 64-bit TSS descriptor in the current GDT.
+#[inline]
+pub unsafe fn ltr(sel: u16) {
+    unsafe { asm!("ltr {0:x}", in(reg) sel, options(nomem, nostack, preserves_flags)) };
+}

@@ -27,8 +27,16 @@ pub const PAGING_MMIO_UC: &str = "vibeOS: paging: mmio uc";
 pub const HEAP_OK: &str = "vibeOS: heap ok";
 pub const KVA_READY: &str = "vibeOS: kva: ready";
 
+/// Phase 2 slice A. Live order is after KVA (IST stacks come from it);
+/// relative order matches DESIGN §3.3 steps 3–5.
+pub const GDT_OK: &str = "vibeOS: gdt ok";
+/// PIC boot step finished: ICW remap+mask ran, or FADT skip. Not a claim
+/// that ports were programmed (unlike `paging: mmio uc`).
+pub const PIC_REMAPPED: &str = "vibeOS: pic: remapped";
+pub const IDT_OK: &str = "vibeOS: idt ok";
+
 /// Phase 2 §2.4. Runtime table count via `writeln!`; harness pins the
-/// shape with `and_contains`.
+/// shape with `and_contains`. Live order is after IDT (step 12 after 3–5).
 pub const ACPI_XSDT_PREFIX: &str = "vibeOS: acpi: xsdt ";
 pub const ACPI_XSDT_SUFFIX: &str = " tables";
 

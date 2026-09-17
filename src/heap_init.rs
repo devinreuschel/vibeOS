@@ -138,7 +138,7 @@ static GLOBAL: KernelAlloc = KernelAlloc;
 #[alloc_error_handler]
 fn on_alloc_error(layout: Layout) -> ! {
     #[cfg(feature = "kernel_tests")]
-    crate::ktest::on_alloc_error(layout);
+    crate::arch::catch::on_alloc_error(layout);
     panic!(
         "alloc error: size={} align={}",
         layout.size(),

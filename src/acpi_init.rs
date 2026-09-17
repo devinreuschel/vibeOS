@@ -2,7 +2,7 @@
 //!
 //! DESIGN §3.3: after CR3, walk tables through the physmap, UC-patch
 //! LAPIC / I/O APIC / HPET before first MMIO touch, then later print
-//! `acpi: xsdt N tables` after the phase-1 heap/KVA markers.
+//! `acpi: xsdt N tables` after GDT/PIC/IDT (live steps 3–5 after KVA).
 
 use core::cell::UnsafeCell;
 use core::fmt::Write;
@@ -146,7 +146,7 @@ pub unsafe fn init(rsdp_phys: u64) {
     }
 }
 
-/// Marker + summary. DESIGN §3.3 step 12, after heap/KVA.
+/// Marker + summary. DESIGN §3.3 step 12, after GDT/PIC/IDT.
 pub fn report() {
     let Some(info) = INFO.get() else {
         return;
@@ -169,7 +169,6 @@ pub fn report() {
     );
 }
 
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn info() -> Option<&'static AcpiInfo> {
     unsafe { (*INFO.0.get()).as_ref() }
 }

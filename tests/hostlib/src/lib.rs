@@ -28,6 +28,15 @@ pub mod pmm;
 #[path = "../../../src/uart.rs"]
 pub mod uart;
 
+#[path = "../../../src/vectors.rs"]
+pub mod vectors;
+
+#[path = "../../../src/desc.rs"]
+pub mod desc;
+
+#[path = "../../../src/pic.rs"]
+pub mod pic;
+
 #[cfg(test)]
 mod smoke {
     use super::marker;
@@ -42,6 +51,9 @@ mod smoke {
             marker::PAGING_MMIO_UC,
             marker::HEAP_OK,
             marker::KVA_READY,
+            marker::GDT_OK,
+            marker::PIC_REMAPPED,
+            marker::IDT_OK,
             marker::ACPI_XSDT_PREFIX,
             marker::BOOT_DONE,
         ] {
@@ -59,6 +71,9 @@ mod smoke {
         assert_eq!(marker::PAGING_MMIO_UC, "vibeOS: paging: mmio uc");
         assert_eq!(marker::HEAP_OK, "vibeOS: heap ok");
         assert_eq!(marker::KVA_READY, "vibeOS: kva: ready");
+        assert_eq!(marker::GDT_OK, "vibeOS: gdt ok");
+        assert_eq!(marker::PIC_REMAPPED, "vibeOS: pic: remapped");
+        assert_eq!(marker::IDT_OK, "vibeOS: idt ok");
         assert_eq!(marker::ACPI_XSDT_PREFIX, "vibeOS: acpi: xsdt ");
         assert_eq!(marker::ACPI_XSDT_SUFFIX, " tables");
         assert_eq!(marker::BOOT_DONE, "vibeOS: boot: phase1 done");

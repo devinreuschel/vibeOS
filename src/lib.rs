@@ -7,10 +7,13 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod acpi;
+pub mod desc;
 pub mod fmt_util;
 pub mod heap;
 pub mod kva;
 pub mod marker;
 pub mod paging;
+pub mod pic;
 pub mod pmm;
 pub mod uart;
+pub mod vectors;

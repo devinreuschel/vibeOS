@@ -1,0 +1,166 @@
+//! Per-CPU GDT + TSS + IST. DESIGN §5.1.
+//!
+//! One [`CpuTables`] instance per CPU later; today the BSP keeps its
+//! tables in a static so the GDT/TSS addresses never move. IST stacks
+//! come from the KVA allocator (guarded), which is why this runs after
+//! `kva: ready` rather than before PMM.
+
+use core::mem::size_of;
+
+use vibeos::desc::{Gdt, IstSlot, Tss, GDT_LIMIT, KERNEL_CS, KERNEL_DS, TSS_SEL};
+use vibeos::paging::VirtAddr;
+
+use crate::kva_init::{self, GuardedStack};
+use crate::x86::{self, DtPtr};
+
+/// Mapped pages on each IST stack. DESIGN mentions a single page; we
+/// take the KVA default so a dump/`x86-interrupt` prologue cannot eat
+/// the IST. Guard page is still unmapped below.
+const IST_PAGES: usize = 4;
+const RSP0_PAGES: usize = 4;
+
+struct BootCell<T>(core::cell::UnsafeCell<T>);
+unsafe impl<T> Sync for BootCell<T> {}
+impl<T> BootCell<T> {
+    const fn new(v: T) -> Self {
+        Self(core::cell::UnsafeCell::new(v))
+    }
+    unsafe fn get_mut(&self) -> &mut T {
+        unsafe { &mut *self.0.get() }
+    }
+    unsafe fn get(&self) -> &T {
+        unsafe { &*self.0.get() }
+    }
+}
+
+/// GDT+TSS for one CPU. Phase 4 allocates one of these per AP.
+#[repr(C, align(16))]
+pub struct CpuTables {
+    gdt: Gdt,
+    tss: Tss,
+}
+
+impl CpuTables {
+    pub const fn empty() -> Self {
+        Self {
+            gdt: Gdt::empty(),
+            tss: Tss::empty(),
+        }
+    }
+
+    pub fn init(&mut self, ist_tops: [u64; 4], rsp0: u64) {
+        self.tss = Tss::empty();
+        self.tss.set_rsp0(rsp0);
+        self.tss.set_ist(IstSlot::DoubleFault, ist_tops[0]);
+        self.tss.set_ist(IstSlot::Nmi, ist_tops[1]);
+        self.tss.set_ist(IstSlot::MachineCheck, ist_tops[2]);
+        self.tss.set_ist(IstSlot::Debug, ist_tops[3]);
+        let tss_base = core::ptr::addr_of!(self.tss) as u64;
+        self.gdt = Gdt::with_tss(tss_base, (size_of::<Tss>() - 1) as u16);
+    }
+
+    /// lgdt, reload CS/data segs, ltr. IRQs stay masked.
+    pub unsafe fn load(&self) {
+        let gdtr = DtPtr {
+            limit: GDT_LIMIT,
+            base: core::ptr::addr_of!(self.gdt) as u64,
+        };
+        unsafe { x86::lgdt(&gdtr) };
+        unsafe { reload_cs(KERNEL_CS) };
+        unsafe { load_data_segs(KERNEL_DS) };
+        unsafe { x86::ltr(TSS_SEL) };
+    }
+}
+
+struct Bsp {
+    tables: CpuTables,
+    ist: [GuardedStack; 4],
+    rsp0: GuardedStack,
+}
+
+impl Bsp {
+    const fn empty() -> Self {
+        Self {
+            tables: CpuTables::empty(),
+            ist: [GuardedStack {
+                guard: VirtAddr(0),
+                pages: 0,
+            }; 4],
+            rsp0: GuardedStack {
+                guard: VirtAddr(0),
+                pages: 0,
+            },
+        }
+    }
+}
+
+static BSP: BootCell<Bsp> = BootCell::new(Bsp::empty());
+
+/// Allocate IST + RSP0 stacks, fill GDT/TSS, load them.
+///
+/// # Safety
+/// Single-CPU, IRQs off, KVA already up.
+pub unsafe fn init_bsp() {
+    let ist = [
+        kva_init::alloc_guarded_stack(IST_PAGES).expect("ist df"),
+        kva_init::alloc_guarded_stack(IST_PAGES).expect("ist nmi"),
+        kva_init::alloc_guarded_stack(IST_PAGES).expect("ist mc"),
+        kva_init::alloc_guarded_stack(IST_PAGES).expect("ist db"),
+    ];
+    let rsp0 = kva_init::alloc_guarded_stack(RSP0_PAGES).expect("tss rsp0");
+    let bsp = unsafe { BSP.get_mut() };
+    bsp.ist = ist;
+    bsp.rsp0 = rsp0;
+    bsp.tables.init(
+        [
+            ist[0].top().as_u64(),
+            ist[1].top().as_u64(),
+            ist[2].top().as_u64(),
+            ist[3].top().as_u64(),
+        ],
+        rsp0.top().as_u64(),
+    );
+    unsafe { bsp.tables.load() };
+}
+
+/// `[mapped_base, top)` of an IST stack. Used by the in-guest DF test.
+#[allow(dead_code)]
+pub fn ist_span(slot: IstSlot) -> (u64, u64) {
+    let s = unsafe { BSP.get().ist[slot.index()] };
+    (s.mapped_base().as_u64(), s.top().as_u64())
+}
+
+unsafe fn reload_cs(sel: u16) {
+    unsafe {
+        asm_reload_cs(sel as u64);
+    }
+}
+
+unsafe fn asm_reload_cs(sel: u64) {
+    unsafe {
+        core::arch::asm!(
+            "push {sel}",
+            "lea {tmp}, [rip + 2f]",
+            "push {tmp}",
+            "retfq",
+            "2:",
+            sel = in(reg) sel,
+            tmp = lateout(reg) _,
+            options(preserves_flags),
+        );
+    }
+}
+
+unsafe fn load_data_segs(sel: u16) {
+    unsafe {
+        core::arch::asm!(
+            "mov ds, {0:x}",
+            "mov es, {0:x}",
+            "mov ss, {0:x}",
+            "mov fs, {0:x}",
+            "mov gs, {0:x}",
+            in(reg) sel,
+            options(nostack, preserves_flags),
+        );
+    }
+}

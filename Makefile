@@ -47,8 +47,8 @@ KERNEL_SRCS := $(shell find src -type f \( -name '*.rs' -o -name '*.asm' -o -nam
 KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml $(TARGET_JSON) linker.ld Makefile rust-toolchain.toml
 
 .PHONY: all kernel iso run run-panic clean distclean setup layout \
-        test-unit test-harness test-e2e test-e2e-panic test test-kernel \
-        test-kernel-smp4 test-lapic-fallback
+        test-unit test-harness test-e2e test-e2e-panic test-e2e-gp test \
+        test-kernel test-kernel-smp4 test-lapic-fallback
 
 all: $(ISO)
 
@@ -143,6 +143,32 @@ test-e2e-uefi: $(ISO)
 test-e2e-panic: $(ISO_PANIC)
 	VIBEOS_ISO=$(ISO_PANIC) VIBEOS_EXPECT_PANIC=1 python3 tests/harness/run_e2e.py
 
+# Deliberate #GP after IDT install: dump + halt. Separate target dir so
+# it cannot leak into the production ISO.
+ISO_GP        := vibeos-gp.iso
+ISO_ROOT_GP   := iso_root_gp
+
+$(ISO_GP): $(KERNEL_DEPS) limine.conf $(LIMINE_BIN)
+	CARGO_TARGET_DIR=$(CURDIR)/target-gp $(CARGO) build $(CARGO_FLAGS) --features gp-test
+	@rm -rf $(ISO_ROOT_GP)
+	@mkdir -p $(ISO_ROOT_GP)/boot $(ISO_ROOT_GP)/EFI/BOOT
+	@cp $(CURDIR)/target-gp/$(TARGET)/$(PROFILE_DIR)/vibeos $(ISO_ROOT_GP)/boot/vibeos
+	@cp limine.conf $(ISO_ROOT_GP)/boot/
+	@cp $(LIMINE_DIR)/limine-bios.sys $(ISO_ROOT_GP)/boot/
+	@cp $(LIMINE_DIR)/limine-bios-cd.bin $(ISO_ROOT_GP)/boot/
+	@cp $(LIMINE_DIR)/limine-uefi-cd.bin $(ISO_ROOT_GP)/boot/
+	@cp $(LIMINE_DIR)/BOOTX64.EFI $(ISO_ROOT_GP)/EFI/BOOT/
+	@xorriso -as mkisofs -quiet \
+	    -b boot/limine-bios-cd.bin \
+	    -no-emul-boot -boot-load-size 4 -boot-info-table \
+	    --efi-boot boot/limine-uefi-cd.bin \
+	    -efi-boot-part --efi-boot-image --protective-msdos-label \
+	    $(ISO_ROOT_GP) -o $(ISO_GP)
+	@$(LIMINE_BIN) bios-install $(ISO_GP) >/dev/null
+
+test-e2e-gp: $(ISO_GP)
+	VIBEOS_ISO=$(ISO_GP) VIBEOS_GP_TEST=1 python3 tests/harness/run_e2e.py
+
 # In-guest tests: separate target dir + ISO so a test build can never be
 # packaged as production (DESIGN §8.2 / §9.7).
 KERNEL_TESTS_DIR := $(CURDIR)/target-kernel-tests
@@ -177,10 +203,10 @@ test-kernel-smp4: $(ISO_KTEST)
 test-lapic-fallback: $(ISO_KTEST)
 	VIBEOS_ISO=$(ISO_KTEST) VIBEOS_QEMU_CPU=qemu64,-tsc-deadline python3 tests/kernel_boot.py
 
-test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-kernel
+test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-kernel
 
 clean:
-	rm -rf $(ISO_ROOT) $(ISO_ROOT_PANIC) $(ISO_ROOT_KTEST) $(ISO) $(ISO_PANIC) $(ISO_KTEST) target-panic $(KERNEL_TESTS_DIR)
+	rm -rf $(ISO_ROOT) $(ISO_ROOT_PANIC) $(ISO_ROOT_GP) $(ISO_ROOT_KTEST) $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_KTEST) target-panic target-gp $(KERNEL_TESTS_DIR)
 	$(CARGO) clean
 
 distclean: clean

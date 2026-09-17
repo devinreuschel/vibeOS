@@ -229,35 +229,35 @@ and a monotonic clock nobody has to distrust.
 
 **Exit gate**
 - [ ] `gdt ok`, `pic: remapped`, `idt ok`, `acpi: xsdt <n> tables`, `time: tsc <n>/ms` in the order [DESIGN.md](DESIGN.md#33-_start-order) specifies
-- [ ] `int3` returns cleanly; a deliberate `#GP` prints a full register dump and halts
-- [ ] a deliberate stack overflow lands in the double fault handler on its IST stack, proven by an in-guest test
+- [x] `int3` returns cleanly; a deliberate `#GP` prints a full register dump and halts
+- [x] a deliberate stack overflow lands in the double fault handler on its IST stack, proven by an in-guest test
 - [ ] PIT tick advances `uptime_ms` at 1 kHz within tolerance
 - [ ] TSC calibrated against the HPET when present, PIT channel 2 otherwise, both paths tested
 - [ ] `now_us` monotonic across 10k reads with a timer firing underneath, both straight-line and under yields
 - [ ] host tests: RSDP v1 and v2 checksum rejection, HPET table validation, MADT iteration over truncated input, `now_us` seqlock retry under a simulated concurrent writer
 
 ### 2.1 GDT, TSS, IST
-- [ ] flat GDT: null, kernel code, kernel data, user code, user data, TSS
-- [ ] user selectors placed in the order `syscall`/`sysret` requires, before ring 3 exists
-- [ ] TSS with `RSP0` and the IST array
-- [ ] IST stacks page-aligned and per-CPU: 1 double fault, 2 NMI, 3 machine check, 4 debug
-- [ ] structure it so per-CPU GDT and TSS instances are natural, since phase 4 needs them
+- [x] flat GDT: null, kernel code, kernel data, user code, user data, TSS
+- [x] user selectors placed in the order `syscall`/`sysret` requires, before ring 3 exists
+- [x] TSS with `RSP0` and the IST array
+- [x] IST stacks page-aligned and per-CPU: 1 double fault, 2 NMI, 3 machine check, 4 debug
+- [x] structure it so per-CPU GDT and TSS instances are natural, since phase 4 needs them
 
 ### 2.2 IDT and exceptions
-- [ ] all 256 entries populated; unhandled vectors get a diagnostic default rather than a reserved gate
-- [ ] `x86-interrupt` ABI handlers
-- [ ] halting handlers dump RIP, CS, RFLAGS, RSP, SS, the error code, and CR2 for faults
-- [ ] `#BP` logs and returns; `#UD`, `#GP`, `#PF`, `#DF`, `#MC` log and halt
-- [ ] a scoped transient fault handler for tests: install, run a faulting operation, step RIP past it, restore
-- [ ] named vector constants in one module with a host test asserting uniqueness
-- [ ] in-guest tests: `int3` roundtrip, double fault on IST via stack overflow, the scoped handler catching a deliberate `#PF`
+- [x] all 256 entries populated; unhandled vectors get a diagnostic default rather than a reserved gate
+- [x] `x86-interrupt` ABI handlers
+- [x] halting handlers dump RIP, CS, RFLAGS, RSP, SS, the error code, and CR2 for faults
+- [x] `#BP` logs and returns; `#UD`, `#GP`, `#PF`, `#DF`, `#MC` log and halt
+- [x] a scoped transient fault handler for tests: install, run a faulting operation, step RIP past it, restore
+- [x] named vector constants in one module with a host test asserting uniqueness
+- [x] in-guest tests: `int3` roundtrip, double fault on IST via stack overflow, the scoped handler catching a deliberate `#PF`
 
 ### 2.3 8259 PIC
-- [ ] remap master to `0x20`, slave to `0x28`, ICW sequence with `io_wait` between writes
-- [ ] mask everything immediately after remap
-- [ ] `unmask(irq)` / `mask(irq)` / `disable_all()`
-- [ ] read FADT `iapc_boot_arch` bit 0 and skip PIC setup entirely when no legacy 8259 exists
-- [ ] spurious IRQ7 and IRQ15 handled without a bogus EOI
+- [x] remap master to `0x20`, slave to `0x28`, ICW sequence with `io_wait` between writes
+- [x] mask everything immediately after remap
+- [x] `unmask(irq)` / `mask(irq)` / `disable_all()`
+- [x] read FADT `iapc_boot_arch` bit 0 and skip PIC setup entirely when no legacy 8259 exists
+- [x] spurious IRQ7 and IRQ15 handled without a bogus EOI
 
 ### 2.4 ACPI
 - [x] RSDP validation: signature, v1 checksum over 20 bytes, v2 extended checksum over the full length
