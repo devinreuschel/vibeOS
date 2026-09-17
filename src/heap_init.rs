@@ -100,20 +100,26 @@ fn grow_for(layout: Layout) -> bool {
     if mapped <= old {
         return false;
     }
-    {
-        let mut h = HEAP.lock();
-        let mut n = h.0.mapped();
-        while n < mapped && n < h.0.cap() {
-            if !page_present(HEAP_START + n as u64) {
-                break;
-            }
-            n += PAGE_SIZE;
+    // translate takes PT (rank 1); HEAP is rank 3. Do not invert.
+    let (cur, cap) = {
+        let h = HEAP.lock();
+        (h.0.mapped(), h.0.cap())
+    };
+    let mut n = cur;
+    while n < mapped && n < cap {
+        if !page_present(HEAP_START + n as u64) {
+            break;
         }
-        if n > h.0.mapped() {
+        n += PAGE_SIZE;
+    }
+    if n > cur {
+        let mut h = HEAP.lock();
+        let now = h.0.mapped();
+        if n > now && n <= h.0.cap() {
             unsafe { h.0.extend(n) };
         }
     }
-    mapped >= want
+    n >= want
 }
 
 struct KernelAlloc;
