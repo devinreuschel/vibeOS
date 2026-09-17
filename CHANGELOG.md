@@ -70,6 +70,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Shootdown publish→wait→clear runs under `InterruptGuard` so a tick
+  cannot switch away and reuse this CPU's `SHOOT` slot mid-ack.
+- Heap `alloc`/`realloc` retry grow after a concurrent CPU consumes the
+  newly extended window, instead of one refill and OOM.
 - Heap grow walked `translate` (PT, rank 1) while holding HEAP (rank 3).
   Snapshot mapped/cap, walk PT with HEAP dropped, then `extend` under HEAP.
 - `spawn_here` copies `irq_nest`. `switch_to` into nest 0 would `sti` the

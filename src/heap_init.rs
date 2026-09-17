@@ -126,18 +126,18 @@ struct KernelAlloc;
 
 unsafe impl GlobalAlloc for KernelAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        {
-            let mut h = HEAP.lock();
-            let p = unsafe { h.0.alloc(layout) };
-            if !p.is_null() {
-                return p;
+        loop {
+            {
+                let mut h = HEAP.lock();
+                let p = unsafe { h.0.alloc(layout) };
+                if !p.is_null() {
+                    return p;
+                }
+            }
+            if !grow_for(layout) {
+                return ptr::null_mut();
             }
         }
-        if !grow_for(layout) {
-            return ptr::null_mut();
-        }
-        let mut h = HEAP.lock();
-        unsafe { h.0.alloc(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -145,19 +145,19 @@ unsafe impl GlobalAlloc for KernelAlloc {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        {
-            let mut h = HEAP.lock();
-            let p = unsafe { h.0.realloc(ptr, layout, new_size) };
-            if !p.is_null() || new_size == 0 {
-                return p;
+        loop {
+            {
+                let mut h = HEAP.lock();
+                let p = unsafe { h.0.realloc(ptr, layout, new_size) };
+                if !p.is_null() || new_size == 0 {
+                    return p;
+                }
+            }
+            let new_layout = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
+            if !grow_for(new_layout) {
+                return ptr::null_mut();
             }
         }
-        let new_layout = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
-        if !grow_for(new_layout) {
-            return ptr::null_mut();
-        }
-        let mut h = HEAP.lock();
-        unsafe { h.0.realloc(ptr, layout, new_size) }
     }
 }
 

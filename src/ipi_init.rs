@@ -153,7 +153,12 @@ fn wait_acks(waiters: u64, acked: &AtomicU64) {
 }
 
 /// After local `invlpg`. Broadcast 0xFC, wait, service inbound.
+///
+/// IRQ-off for publish→wait→clear: this CPU's `SHOOT` slot is not
+/// reentered by a timer/reschedule switch. Inbound shootdowns still
+/// run through `service_incoming` (IF off cannot take the IPI).
 pub fn shootdown_va(va: VirtAddr) {
+    let _irq = x86::InterruptGuard::enter();
     let me = my_index() as u32;
     let waiters = waiter_mask(per_cpu_init::online_mask(), me);
     if waiters == 0 {
