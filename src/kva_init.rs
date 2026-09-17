@@ -9,7 +9,6 @@
 // error rather than a surprise in the test ISO.
 #![allow(dead_code)]
 
-
 use core::cell::UnsafeCell;
 
 use vibeos::kva::{Kva, KvaStats, KVA_END, KVA_SIZE, KVA_START, PAGE_SIZE};

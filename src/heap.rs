@@ -395,6 +395,25 @@ mod tests {
     }
 
     #[test]
+    fn sandwich_hole_is_reused() {
+        let mut p = Pool::new(64 * 1024, 64 * 1024);
+        let small = layout(16, 8);
+        let l = layout(64, 8);
+        let pad = unsafe { p.heap.alloc(small) };
+        let a = unsafe { p.heap.alloc(l) };
+        let keep = unsafe { p.heap.alloc(l) };
+        assert!(!pad.is_null() && !a.is_null() && !keep.is_null());
+        unsafe { p.heap.dealloc(a, l) };
+        let b = unsafe { p.heap.alloc(l) };
+        assert_eq!(a, b, "hole between live neighbours must be first-fit");
+        unsafe {
+            p.heap.dealloc(b, l);
+            p.heap.dealloc(keep, l);
+            p.heap.dealloc(pad, small);
+        }
+    }
+
+    #[test]
     fn alloc_free_realloc_reuses() {
         let mut p = Pool::new(64 * 1024, 64 * 1024);
         let l = layout(64, 8);

@@ -7,7 +7,6 @@
 #![no_std]
 #![no_main]
 #![feature(alloc_error_handler)]
-#![cfg_attr(feature = "kernel_tests", feature(ffi_returns_twice))]
 // The panic-test build gates the entire non-panic tail behind
 // `#[cfg(not(feature = "panic-test"))]`, which leaves the Limine
 // requests, paging init, and helpers technically dead. That is

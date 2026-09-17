@@ -9,7 +9,9 @@ use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::arch::asm;
 use core::arch::global_asm;
+use core::cell::UnsafeCell;
 use core::fmt::Write;
+use core::ptr;
 
 use vibeos::heap::HEAP_SIZE;
 use vibeos::kva::PAGE_SIZE;
@@ -29,6 +31,7 @@ const EXIT_FAIL: u32 = 0x11;
 enum Outcome {
     Ok,
     Fail(&'static str),
+    #[allow(dead_code)] // protocol is first-class; no skips in this slice
     Skip(&'static str),
 }
 
@@ -38,9 +41,9 @@ const TESTS: &[(&str, TestFn)] = &[
     ("map_unmap", test_map_unmap),
     ("nx_enforcement", test_nx_enforcement),
     ("heap_box", test_heap_box),
-    ("heap_growth", test_heap_growth),
-    ("heap_align", test_heap_align),
     ("heap_reuse", test_heap_reuse),
+    ("heap_align", test_heap_align),
+    ("heap_growth", test_heap_growth),
     ("heap_oom", test_heap_oom),
     ("stack_guard", test_stack_guard),
     ("kva_roundtrip", test_kva_roundtrip),
@@ -113,80 +116,110 @@ struct Fault {
     error: u64,
 }
 
+#[derive(Clone, Copy)]
 enum CatchState {
     Off,
     Fault,
     Alloc,
 }
 
-static mut CATCH: CatchState = CatchState::Off;
-static mut LAST_FAULT: Fault = Fault { cr2: 0, error: 0 };
-static mut JMPBUF: JmpBuf = JmpBuf {
-    rbx: 0,
-    rbp: 0,
-    r12: 0,
-    r13: 0,
-    r14: 0,
-    r15: 0,
-    rsp: 0,
-    rip: 0,
-};
+/// Interior mutability so we never form `&mut` to a `static mut` (2024 deny).
+struct Cell<T>(UnsafeCell<T>);
+unsafe impl<T> Sync for Cell<T> {}
+impl<T> Cell<T> {
+    const fn new(v: T) -> Self {
+        Self(UnsafeCell::new(v))
+    }
+    fn ptr(&self) -> *mut T {
+        self.0.get()
+    }
+}
+
+static CATCH: Cell<CatchState> = Cell::new(CatchState::Off);
+static LAST_FAULT: Cell<Fault> = Cell::new(Fault { cr2: 0, error: 0 });
+static THUNK_DATA: Cell<*mut u8> = Cell::new(core::ptr::null_mut());
+static THUNK_CALL: Cell<Option<unsafe fn(*mut u8)>> = Cell::new(None);
 
 unsafe extern "C" {
-    #[ffi_returns_twice]
-    fn vibeos_setjmp(buf: *mut JmpBuf) -> i32;
+    fn vibeos_catch() -> i32;
     fn vibeos_longjmp(buf: *mut JmpBuf, val: i32) -> !;
     fn ktest_pf_stub();
     fn ktest_unhandled_stub();
+    static mut vibeos_jmpbuf: JmpBuf;
 }
 
-// AT&T: `global_asm!` default on x86_64. JMPBUF is a static so longjmp
-// never reads a stack copy that dies when we restore RSP.
+// Catch lives in asm so LLVM never sees setjmp (ffi_returns_twice is gone).
+// `vibeos_catch` setjmps, calls `ktest_run_thunk`, returns 0; longjmp
+// returns 1 through the same asm frame, which then rets into Rust.
 global_asm!(
     r#"
+    .pushsection .bss
+    .align 8
+    .global vibeos_jmpbuf
+    vibeos_jmpbuf:
+        .skip 64
+    .popsection
+
     .pushsection .text
 
     .global vibeos_setjmp
     vibeos_setjmp:
-        movq %rbx, 0x00(%rdi)
-        movq %rbp, 0x08(%rdi)
-        movq %r12, 0x10(%rdi)
-        movq %r13, 0x18(%rdi)
-        movq %r14, 0x20(%rdi)
-        movq %r15, 0x28(%rdi)
-        leaq 8(%rsp), %rax
-        movq %rax, 0x30(%rdi)
-        movq (%rsp), %rax
-        movq %rax, 0x38(%rdi)
-        xorl %eax, %eax
+        mov [rdi + 0x00], rbx
+        mov [rdi + 0x08], rbp
+        mov [rdi + 0x10], r12
+        mov [rdi + 0x18], r13
+        mov [rdi + 0x20], r14
+        mov [rdi + 0x28], r15
+        lea rax, [rsp + 8]
+        mov [rdi + 0x30], rax
+        mov rax, [rsp]
+        mov [rdi + 0x38], rax
+        xor eax, eax
         ret
 
     .global vibeos_longjmp
     vibeos_longjmp:
-        movq 0x00(%rdi), %rbx
-        movq 0x08(%rdi), %rbp
-        movq 0x10(%rdi), %r12
-        movq 0x18(%rdi), %r13
-        movq 0x20(%rdi), %r14
-        movq 0x28(%rdi), %r15
-        movq 0x30(%rdi), %rsp
-        movl %esi, %eax
-        testl %eax, %eax
+        mov rbx, [rdi + 0x00]
+        mov rbp, [rdi + 0x08]
+        mov r12, [rdi + 0x10]
+        mov r13, [rdi + 0x18]
+        mov r14, [rdi + 0x20]
+        mov r15, [rdi + 0x28]
+        mov rsp, [rdi + 0x30]
+        mov eax, esi
+        test eax, eax
         jnz 1f
-        movl $1, %eax
+        mov eax, 1
     1:
-        jmpq *0x38(%rdi)
+        jmp [rdi + 0x38]
+
+    .global vibeos_catch
+    vibeos_catch:
+        push rbp
+        mov rbp, rsp
+        lea rdi, [rip + vibeos_jmpbuf]
+        call vibeos_setjmp
+        test eax, eax
+        jnz 1f
+        call ktest_run_thunk
+        xor eax, eax
+        pop rbp
+        ret
+    1:
+        mov eax, 1
+        pop rbp
+        ret
 
     .global ktest_pf_stub
     ktest_pf_stub:
-        pushq %rdi
-        pushq %rsi
-        movq %cr2, %rdi
-        movq 16(%rsp), %rsi
+        push rdi
+        push rsi
+        mov rdi, cr2
+        mov rsi, [rsp + 16]
         call ktest_page_fault
-        popq %rsi
-        popq %rdi
-        addq $8, %rsp
+        pop rsi
+        pop rdi
+        add rsp, 8
         iretq
 
     .global ktest_unhandled_stub
@@ -202,11 +235,11 @@ global_asm!(
 #[unsafe(no_mangle)]
 extern "C" fn ktest_page_fault(cr2: u64, error: u64) {
     unsafe {
-        match CATCH {
+        match ptr::read(CATCH.ptr()) {
             CatchState::Fault => {
-                LAST_FAULT = Fault { cr2, error };
-                CATCH = CatchState::Off;
-                vibeos_longjmp(core::ptr::addr_of_mut!(JMPBUF), 1);
+                ptr::write(LAST_FAULT.ptr(), Fault { cr2, error });
+                ptr::write(CATCH.ptr(), CatchState::Off);
+                vibeos_longjmp(core::ptr::addr_of_mut!(vibeos_jmpbuf), 1);
             }
             CatchState::Off | CatchState::Alloc => {}
         }
@@ -227,41 +260,59 @@ extern "C" fn ktest_unhandled() {
 /// Called from `#[alloc_error_handler]`. Longjmps if a test is catching.
 pub fn on_alloc_error(layout: Layout) {
     unsafe {
-        if let CatchState::Alloc = CATCH {
-            CATCH = CatchState::Off;
-            vibeos_longjmp(core::ptr::addr_of_mut!(JMPBUF), 1);
+        if let CatchState::Alloc = ptr::read(CATCH.ptr()) {
+            ptr::write(CATCH.ptr(), CatchState::Off);
+            vibeos_longjmp(core::ptr::addr_of_mut!(vibeos_jmpbuf), 1);
         }
     }
     let _ = layout;
 }
 
-fn catch_fault<F: FnOnce()>(f: F) -> Option<Fault> {
+unsafe fn invoke<F: FnOnce()>(p: *mut u8) {
+    let slot = unsafe { &mut *(p as *mut Option<F>) };
+    slot.take().unwrap()();
+}
+
+fn catch_with<F: FnOnce()>(kind: CatchState, f: F) -> i32 {
+    let mut slot = Some(f);
     unsafe {
-        if vibeos_setjmp(core::ptr::addr_of_mut!(JMPBUF)) != 0 {
-            CATCH = CatchState::Off;
-            return Some(LAST_FAULT);
+        ptr::write(THUNK_DATA.ptr(), (&raw mut slot).cast());
+        ptr::write(THUNK_CALL.ptr(), Some(invoke::<F>));
+        ptr::write(CATCH.ptr(), kind);
+        let rc = vibeos_catch();
+        ptr::write(CATCH.ptr(), CatchState::Off);
+        ptr::write(THUNK_CALL.ptr(), None);
+        rc
+    }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn ktest_run_thunk() {
+    unsafe {
+        let call = ptr::read(THUNK_CALL.ptr());
+        ptr::write(THUNK_CALL.ptr(), None);
+        if let Some(call) = call {
+            let data = ptr::read(THUNK_DATA.ptr());
+            ptr::write(THUNK_DATA.ptr(), core::ptr::null_mut());
+            call(data);
         }
-        CATCH = CatchState::Fault;
-        f();
-        CATCH = CatchState::Off;
+    }
+}
+
+fn catch_fault<F: FnOnce()>(f: F) -> Option<Fault> {
+    if catch_with(CatchState::Fault, f) != 0 {
+        Some(unsafe { ptr::read(LAST_FAULT.ptr()) })
+    } else {
         None
     }
 }
 
 fn catch_alloc_error<F: FnOnce()>(f: F) -> bool {
-    unsafe {
-        if vibeos_setjmp(core::ptr::addr_of_mut!(JMPBUF)) != 0 {
-            CATCH = CatchState::Off;
-            return true;
-        }
-        CATCH = CatchState::Alloc;
-        f();
-        CATCH = CatchState::Off;
-        false
-    }
+    catch_with(CatchState::Alloc, f) != 0
 }
 
 #[repr(C, packed)]
+#[derive(Clone, Copy)]
 struct IdtEntry {
     off_lo: u16,
     selector: u16,
@@ -296,7 +347,7 @@ impl IdtEntry {
 #[repr(C, align(16))]
 struct IdtTable([IdtEntry; 256]);
 
-static mut IDT: IdtTable = IdtTable([IdtEntry::EMPTY; 256]);
+static IDT: Cell<IdtTable> = Cell::new(IdtTable([IdtEntry::EMPTY; 256]));
 
 #[repr(C, packed)]
 struct Idtr {
@@ -306,16 +357,17 @@ struct Idtr {
 
 fn install_idt() {
     let cs = x86::read_cs();
-    let unhandled = ktest_unhandled_stub as u64;
-    let pf = ktest_pf_stub as u64;
+    let unhandled = ktest_unhandled_stub as *const () as u64;
+    let pf = ktest_pf_stub as *const () as u64;
     unsafe {
-        for slot in IDT.0.iter_mut() {
+        let idt = &mut *IDT.ptr();
+        for slot in idt.0.iter_mut() {
             *slot = IdtEntry::gate(unhandled, cs);
         }
-        IDT.0[14] = IdtEntry::gate(pf, cs);
+        idt.0[14] = IdtEntry::gate(pf, cs);
         let idtr = Idtr {
             limit: (core::mem::size_of::<IdtTable>() - 1) as u16,
-            base: core::ptr::addr_of!(IDT) as u64,
+            base: IDT.ptr() as u64,
         };
         asm!(
             "lidt [{}]",
@@ -441,25 +493,51 @@ fn test_heap_align() -> Outcome {
 }
 
 fn test_heap_reuse() -> Outcome {
+    let Ok(small) = Layout::from_size_align(16, 8) else {
+        return Outcome::Fail("layout");
+    };
     let Ok(layout) = Layout::from_size_align(64, 8) else {
         return Outcome::Fail("layout");
     };
+    // Sandwich: live blocks on both sides so the hole cannot coalesce
+    // with a larger neighbour (first-fit would then carve a different VA).
+    let pad = unsafe { alloc::alloc::alloc(small) };
     let a = unsafe { alloc::alloc::alloc(layout) };
-    if a.is_null() {
-        return Outcome::Fail("first alloc");
+    let keep = unsafe { alloc::alloc::alloc(layout) };
+    if pad.is_null() || a.is_null() || keep.is_null() {
+        return Outcome::Fail("setup alloc");
     }
     unsafe { alloc::alloc::dealloc(a, layout) };
     let b = unsafe { alloc::alloc::alloc(layout) };
     if b.is_null() {
         return Outcome::Fail("second alloc");
     }
-    let reuse = a == b;
-    unsafe { alloc::alloc::dealloc(b, layout) };
-    if reuse {
-        Outcome::Ok
-    } else {
-        Outcome::Fail("did not reuse freed block")
+    // Compare as usize through black_box: LLVM treats GlobalAlloc like
+    // malloc and will fold `a == b` after free at opt-level 1.
+    let reused = core::hint::black_box(a as usize) == core::hint::black_box(b as usize);
+    if !reused {
+        let _ = writeln!(
+            Serial,
+            "vibeOS: ktest:   reuse pad={pad:p} a={a:p} keep={keep:p} b={b:p}"
+        );
+        unsafe {
+            alloc::alloc::dealloc(b, layout);
+            alloc::alloc::dealloc(keep, layout);
+            alloc::alloc::dealloc(pad, small);
+        };
+        return Outcome::Fail("did not reuse freed block");
     }
+    let c = unsafe { alloc::alloc::realloc(b, layout, 32) };
+    let same = core::hint::black_box(c as usize) == core::hint::black_box(b as usize);
+    if !c.is_null() {
+        unsafe { alloc::alloc::dealloc(c, Layout::from_size_align(32, 8).unwrap()) };
+    }
+    unsafe { alloc::alloc::dealloc(keep, layout) };
+    unsafe { alloc::alloc::dealloc(pad, small) };
+    if !same {
+        return Outcome::Fail("realloc shrink moved");
+    }
+    Outcome::Ok
 }
 
 fn test_heap_oom() -> Outcome {
@@ -567,10 +645,10 @@ fn test_vmap() -> Outcome {
 }
 
 fn test_mmio_uc_flags() -> Outcome {
-    // Default LAPIC base sits in the physmap (well under the 8 GiB cap).
-    // Patching that 2 MiB leaf UC is the §1.3 read-back; QEMU does not
-    // care about cache attributes, so this is safe on the boot path.
-    let phys = PhysAddr(0xFEE0_0000);
+    // LAPIC (0xFEE0_0000) sits above this QEMU map_end (~4 GiB of RAM),
+    // so patch a physmap leaf we know exists: 2 MiB, inside the identity
+    // rest / physmap and well under the 8 GiB cap.
+    let phys = PhysAddr(0x0020_0000);
     if unsafe { paging_init::patch_physmap_uc(phys, 4096) }.is_err() {
         return Outcome::Fail("patch_physmap_uc");
     }

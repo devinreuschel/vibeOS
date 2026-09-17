@@ -561,9 +561,14 @@ impl Mapper {
                     let span = size.bytes();
                     let leaf_base = va & !(span - 1);
                     let leaf_end = leaf_base.saturating_add(span);
+                    // A/D bits are hardware-updated and must not split a
+                    // run of otherwise identical leaves (DESIGN §1.7).
+                    const AD: u64 = PageFlags::ACCESSED | PageFlags::DIRTY;
                     match run {
                         Some((rva, rlen, rf, rs))
-                            if rs == size && rf == flags && rva + rlen == leaf_base =>
+                            if rs == size
+                                && (rf.0 & !AD) == (flags.0 & !AD)
+                                && rva + rlen == leaf_base =>
                         {
                             run = Some((rva, rlen + span, rf, rs));
                         }
