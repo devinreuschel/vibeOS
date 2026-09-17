@@ -344,11 +344,11 @@ def run_qemu_and_check(
 
 
 # Boot contract, in order. Extended per DESIGN §8.3 as each phase lands.
-# Phase 0 gave us serial + limine + boot done; phase 1 slice A adds the
-# PMM free-frames line. The frame count is runtime-derived, so the PMM
-# marker is pinned to both fragments of `vibeOS: pmm: <n> free 4KiB
-# frames` — matching only the suffix would let a stray `<n> free 4KiB
-# frames` line elsewhere satisfy the contract.
+# Phase 0 gave us serial + limine + boot done; phase 1 slice A added the
+# PMM free-frames line; slice B adds `paging: cr3 ok` (DESIGN §3.3 step
+# 7). Any runtime-derived payload uses `and_contains` so the full
+# `vibeOS: <subsystem>: <state>` shape is pinned rather than the suffix
+# alone.
 PHASE0_MARKERS: list[Marker] = [
     Marker("vibeOS: serial online", "serial_online"),
     Marker("vibeOS: limine: rev 3 ok", "limine_ok"),
@@ -357,6 +357,7 @@ PHASE0_MARKERS: list[Marker] = [
         "pmm_free_frames",
         and_contains=(" free 4KiB frames",),
     ),
+    Marker("vibeOS: paging: cr3 ok", "paging_cr3_ok"),
     Marker("vibeOS: boot: phase0 done", "boot_done"),
 ]
 
