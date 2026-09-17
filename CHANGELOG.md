@@ -22,6 +22,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- `switch_context` no longer `popfq`s with IF set before `jmp`. A timer
+  in that window preempted a first-run thread, overwrote the trampoline
+  frame, and `iret` jumped into `schedule_inner` on `stack_top-8` (`#PF`
+  in `spawn_exit_thousands`). Incoming IF uses delayed `sti` before the
+  `jmp`.
 - Dead-stack reap no longer waits for the outgoing `schedule` call to
   resume. Idle's timer resume is `from_irq` (skips reap) and idle
   `yield_now` often takes the no-switch return; both leaked the last

@@ -683,10 +683,14 @@ before calling the scheduler. Interrupts are already disabled inside the handler
 skipping it loses a tick whenever the handler preempts.
 
 **IF on resume.** `prepare_thread` seeds `rflags = 0x2` (IF clear). `schedule` applies
-`apply_if_on_resume` to the incoming TCB before `popfq`: IF is set when `irq_nest == 0`, and kept
+`apply_if_on_resume` to the incoming TCB before the restore: IF is set when `irq_nest == 0`, and kept
 clear while an `InterruptGuard` is live on that stack. Without this, a first-run thread or a thread
 saved from the timer ISR stays tick-deaf until some later `sti`. A thread resumed in the ISR still
-gets IF back from `iret`.
+gets IF back from `iret`. `switch_context` must not `popfq` with IF set and then `jmp`. A timer in
+that one-instruction window preempts a first-run thread whose `CpuContext` is still the synthetic
+trampoline frame; `schedule_preempt` overwrites it with a nested save; `iret` then `jmp`s to
+`schedule_inner` on `stack_top-8`. Strip IF from the popped flags and `sti` immediately before `jmp`
+(STI takes effect after the next instruction).
 
 A post-EOI switch to a thread with `irq_nest == 0` therefore enables IF on the incoming thread even
 if the preempted stack still has an open ISR / `InterruptGuard` frame. That is expected: the guard
@@ -1399,6 +1403,11 @@ spinlock type and it is IRQ-aware.
 The wakeup arrived in the window between deciding to block and actually blocking. Rule: enqueue onto
 the wait queue, mark self blocked, drop the inner lock, then schedule. In that order, so there is no
 point where the thread is both on the wait queue and considered runnable.
+
+**First-run thread `#PF`s in `schedule_inner` at `rsp = stack_top-8`.**
+`popfq` restored IF before `jmp` to the trampoline. A tick landed in that window, `schedule_preempt`
+saved over the synthetic frame, and `iret` jumped to the nested save's RIP with the prepared RSP.
+Rule: delayed `sti` immediately before `jmp`; never `popfq` with IF set across a stack switch.
 
 **Two `&mut T` from the same mutex in release builds only.**
 The spinlock's re-entrancy check was a `debug_assert!`. Rule: real CAS spin loop, and any invariant

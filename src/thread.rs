@@ -288,6 +288,14 @@ mod switch_asm {
             mov r15, [rsi + {r15}]
             mov rsp, [rsi + {rsp}]
             mov rax, [rsi + {rflags}]
+            test rax, {rflags_if}
+            jz 2f
+            and rax, {rflags_no_if}
+            push rax
+            popfq
+            sti
+            jmp qword ptr [rsi + {rip}]
+        2:
             push rax
             popfq
             jmp qword ptr [rsi + {rip}]
@@ -300,6 +308,8 @@ mod switch_asm {
         r14 = const CpuContext::R14,
         r15 = const CpuContext::R15,
         rflags = const CpuContext::RFLAGS,
+        rflags_if = const RFLAGS_IF,
+        rflags_no_if = const !RFLAGS_IF,
         rsp = const CpuContext::RSP,
         rip = const CpuContext::RIP,
     );
@@ -312,7 +322,11 @@ unsafe extern "C" {
 /// Save callee-saved GPRs, rflags, rsp, return address; restore `new`.
 ///
 /// Kernel builds `cli` after the save so a timer cannot observe mixed
-/// GPRs. Host tests skip `cli` (ring 3). No FPU/SSE.
+/// GPRs. Incoming IF is applied with delayed `sti` immediately before
+/// `jmp`, not `popfq` with IF set: a tick in that window preempts a
+/// first-run thread, `schedule_preempt` overwrites the synthetic
+/// trampoline frame, and `iret` then `jmp`s into `schedule_inner` on
+/// `stack_top-8`. Host tests skip `cli` (ring 3). No FPU/SSE.
 ///
 /// # Safety
 /// `old` and `new` must be valid. `new.rsp` must point at a live stack.
