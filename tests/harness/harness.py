@@ -357,6 +357,10 @@ PHASE0_MARKERS: list[Marker] = [
         "pmm_free_frames",
         and_contains=(" free 4KiB frames",),
     ),
+    # Phase 1 slice B: paging markers follow the counted PMM line
+    # (DESIGN §3.3 steps 7 and 8). Both are fixed strings.
+    Marker("vibeOS: paging: cr3 ok", "paging_cr3_ok"),
+    Marker("vibeOS: paging: mmio uc", "paging_mmio_uc"),
     Marker("vibeOS: boot: phase0 done", "boot_done"),
 ]
 

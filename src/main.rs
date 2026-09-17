@@ -9,6 +9,7 @@
 #![no_std]
 #![no_main]
 
+mod paging_init;
 mod panic;
 mod pmm_init;
 mod serial;
@@ -131,11 +132,24 @@ pub extern "C" fn _start() -> ! {
         stats.total_frames, largest
     );
 
+    // ---- Phase 1 slice B: page tables + MMIO attributes. ----
+    // Build a fresh PML4 from buddy frames, install it, then run the
+    // MMIO PTE-attribute step. Emits `paging: cr3 ok` and
+    // `paging: mmio uc` (DESIGN §3.3 steps 7 and 8). Kept inside the
+    // `not(panic-test)` cfg so the panic-test build still trips its
+    // panic right after the limine handshake without dragging the whole
+    // paging bringup along.
     #[cfg(not(feature = "panic-test"))]
     {
+        unsafe {
+            paging_init::init(memmap.entries(), hhdm.offset, exec.physical_base);
+        }
         serial::line(marker::BOOT_DONE);
         x86::halt();
     }
+
+    #[cfg(feature = "panic-test")]
+    x86::halt();
 }
 
 /// Halt with a serial line. Used when a Limine response we depend on is
