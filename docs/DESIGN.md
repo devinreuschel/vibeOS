@@ -1204,13 +1204,14 @@ vibeOS: shell ready
 ```
 
 Live e2e through Phase 4 slice A asserts through `idt ok`, then `per_cpu: bsp ready`,
-then `acpi: xsdt`, then `time: tsc <n>/ms`, then
-`time: lapic_timer ok (tsc-deadline)` on `-cpu max`, then `sched: cpu0 ready`, then
-`irq: enabled`, then `boot: phase1 done`.
-Default QEMU also requires the diagnostic `time: calibrated hpet <n>/ms`; `make test-e2e-pit`
-(`-machine pc,hpet=off`) asserts `calibrated pit` instead. `pic: remapped` on that path means the PIC
-step finished (ICW programmed, or FADT skip), not that ports were necessarily written.
-`make test-lapic-fallback` (`-cpu qemu64,-tsc-deadline`) runs in-guest tests on the periodic path.
+then `acpi: xsdt`, then `time: tsc <n>/ms`, then `time: lapic_timer ok (<mode>)`, then
+`sched: cpu0 ready`, then `irq: enabled`, then `boot: phase1 done`.
+The harness pins `<mode>` for the QEMU config: TCG (CI, `make test`) cannot
+advertise `CPUID.01H:ECX[24]`, so `-cpu max` expects `periodic`; `-machine pc,hpet=off`
+expects `pit`; KVM `-cpu max` expects `tsc-deadline`. Default QEMU also requires
+the diagnostic `time: calibrated hpet <n>/ms`; `make test-e2e-pit` asserts
+`calibrated pit` instead. `make test-lapic-fallback`
+(`-cpu qemu64,-tsc-deadline`) runs in-guest tests on the periodic path.
 
 `smp: done` before `shell ready` is deliberate. Put SMP bring-up after the shell starts and an AP
 failure becomes invisible, because the harness sees its last marker and passes.

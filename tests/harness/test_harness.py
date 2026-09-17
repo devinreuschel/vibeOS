@@ -279,5 +279,53 @@ class TestQemuArgv(unittest.TestCase):
         self.assertNotIn("-accel", argv)
 
 
+class TestLapicMode(unittest.TestCase):
+    def test_tcg_max_is_periodic(self) -> None:
+        from harness import expected_lapic_mode
+
+        self.assertEqual(
+            expected_lapic_mode(cpu="max", hpet=True, accel="tcg"),
+            "periodic",
+        )
+
+    def test_hpet_off_is_pit(self) -> None:
+        from harness import expected_lapic_mode
+
+        self.assertEqual(
+            expected_lapic_mode(cpu="max", hpet=False, accel="tcg"),
+            "pit",
+        )
+
+    def test_kvm_max_is_tsc_deadline(self) -> None:
+        from harness import expected_lapic_mode
+
+        self.assertEqual(
+            expected_lapic_mode(cpu="max", hpet=True, accel="kvm"),
+            "tsc-deadline",
+        )
+
+    def test_cpu_flag_disables_deadline(self) -> None:
+        from harness import expected_lapic_mode
+
+        self.assertEqual(
+            expected_lapic_mode(
+                cpu="qemu64,-tsc-deadline", hpet=True, accel="kvm"
+            ),
+            "periodic",
+        )
+
+    def test_boot_contract_pins_mode(self) -> None:
+        from harness import boot_contract_markers
+
+        m = boot_contract_markers(hpet=True, cpu="max", accel="tcg")
+        names = [x.name for x in m]
+        self.assertIn("lapic_timer_ok", names)
+        lapic = next(x for x in m if x.name == "lapic_timer_ok")
+        self.assertIn("periodic", lapic.substring)
+        pit = boot_contract_markers(hpet=False, cpu="max", accel="tcg")
+        lapic_pit = next(x for x in pit if x.name == "lapic_timer_ok")
+        self.assertIn("(pit)", lapic_pit.substring)
+
+
 if __name__ == "__main__":
     unittest.main()
