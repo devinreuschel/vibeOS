@@ -619,7 +619,9 @@ The PIC is a bootstrap artifact and a fallback, nothing more.
 - Remap master to `0x20`, slave to `0x28`. Firmware may leave them at vectors 0x08–0x0F, which collide
   with `#DF` and friends, so a spurious IRQ before remap looks like a CPU exception.
 - Mask everything (`0xFF` to both data ports) immediately after remap.
-- Unmask IRQ0 and IRQ1 only after the timer is calibrated and the scheduler exists.
+- Unmask IRQ0 after calibration so the bootstrap tick can prove timekeeping (live
+  [section 3.3](#33-_start-order)). `sti` is allowed then; the handler does not schedule.
+  Unmask IRQ1 only after the scheduler exists. `irq: enabled` is Phase 3.
 - Once the I/O APIC routes devices and the LAPIC timer is verified ticking, mask the PIC completely.
   Leaving it live means every interrupt is delivered twice.
 - Keep the PIT driver code. It is still the calibration fallback and still provides the delays that AP
