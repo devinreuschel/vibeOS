@@ -481,6 +481,110 @@ impl Mapper {
         Ok(touched)
     }
 
+    /// What covers `va`: a present leaf, or how far we can skip because
+    /// a higher table slot is empty. Used by the range walker and by
+    /// "assert this region is unmapped" checks (DESIGN §4.1).
+    pub fn probe(&self, va: VirtAddr) -> Probe {
+        if !is_canonical(va.0) {
+            if va.0 < 0xFFFF_8000_0000_0000 {
+                return Probe::Skip(0xFFFF_8000_0000_0000 - va.0);
+            }
+            return Probe::Skip(PAGE_SIZE_4K);
+        }
+        let mut table_phys = self.root;
+        let mut level: u8 = 4;
+        loop {
+            let idx = va.index(level);
+            let entry = unsafe { self.table_ptr(table_phys).add(idx).read_volatile() };
+            if entry & PageFlags::PRESENT == 0 {
+                return Probe::Skip(slot_remaining(va.0, level));
+            }
+            let is_leaf = level == 1 || (entry & PageFlags::HUGE) != 0;
+            if is_leaf {
+                let size = if level == 1 {
+                    PageSize::Size4K
+                } else {
+                    PageSize::Size2M
+                };
+                return Probe::Mapped {
+                    pa: pte_phys(entry),
+                    size,
+                    flags: pte_flags(entry),
+                };
+            }
+            table_phys = pte_phys(entry);
+            level -= 1;
+        }
+    }
+
+    /// True iff nothing in `[start, end)` is present. Walks by table
+    /// slot so a 64 GiB hole is not 16 million 4 KiB probes.
+    pub fn range_unmapped(&self, start: VirtAddr, end: VirtAddr) -> bool {
+        let mut va = start.0;
+        while va < end.0 {
+            match self.probe(VirtAddr(va)) {
+                Probe::Skip(n) => {
+                    let step = n.max(1);
+                    va = va.saturating_add(step);
+                    if va <= start.0 {
+                        break;
+                    }
+                }
+                Probe::Mapped { .. } => return false,
+            }
+        }
+        true
+    }
+
+    /// Walk `[start, end)` coalescing adjacent leaves that share flags
+    /// and page size. `visit(va, len, flags, size)`.
+    pub fn walk_ranges<F>(&self, start: VirtAddr, end: VirtAddr, mut visit: F)
+    where
+        F: FnMut(u64, u64, PageFlags, PageSize),
+    {
+        let mut va = start.0;
+        let mut run: Option<(u64, u64, PageFlags, PageSize)> = None;
+        while va < end.0 {
+            match self.probe(VirtAddr(va)) {
+                Probe::Skip(n) => {
+                    if let Some((rva, rlen, rf, rs)) = run.take() {
+                        visit(rva, rlen, rf, rs);
+                    }
+                    let step = n.max(1);
+                    let next = va.saturating_add(step);
+                    if next <= va {
+                        break;
+                    }
+                    va = next;
+                }
+                Probe::Mapped { size, flags, .. } => {
+                    let span = size.bytes();
+                    let leaf_base = va & !(span - 1);
+                    let leaf_end = leaf_base.saturating_add(span);
+                    match run {
+                        Some((rva, rlen, rf, rs))
+                            if rs == size && rf == flags && rva + rlen == leaf_base =>
+                        {
+                            run = Some((rva, rlen + span, rf, rs));
+                        }
+                        Some((rva, rlen, rf, rs)) => {
+                            visit(rva, rlen, rf, rs);
+                            run = Some((leaf_base, span, flags, size));
+                        }
+                        None => run = Some((leaf_base, span, flags, size)),
+                    }
+                    if leaf_end <= va {
+                        break;
+                    }
+                    va = leaf_end;
+                }
+            }
+        }
+        if let Some((rva, rlen, rf, rs)) = run {
+            visit(rva, rlen, rf, rs);
+        }
+    }
+
     /// Zero a freshly-allocated frame through the HHDM.
     ///
     /// # Safety
@@ -548,6 +652,30 @@ const fn align_up(x: u64, a: u64) -> u64 {
     (x + a - 1) & !(a - 1)
 }
 
+/// Result of [`Mapper::probe`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Probe {
+    /// No present leaf; skip this many bytes (at least one table slot).
+    Skip(u64),
+    Mapped {
+        pa: PhysAddr,
+        size: PageSize,
+        flags: PageFlags,
+    },
+}
+
+/// Bytes from `va` to the end of the page-table slot at `level`.
+fn slot_remaining(va: u64, level: u8) -> u64 {
+    let span = 1u64 << (12 + 9 * (level as u32 - 1));
+    let slot_base = va & !(span - 1);
+    let slot_end = slot_base.wrapping_add(span);
+    if slot_end > va {
+        slot_end - va
+    } else {
+        span
+    }
+}
+
 /// Standard MMIO leaf flags per DESIGN §4.3 PTE flag policy table.
 pub const fn mmio_flags() -> PageFlags {
     PageFlags(PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::GLOBAL | PageFlags::NX
@@ -572,6 +700,15 @@ pub const fn kernel_rodata_flags() -> PageFlags {
 /// Kernel `.data` / `.bss` flags: writable, NX, global.
 pub const fn kernel_data_flags() -> PageFlags {
     PageFlags(PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::GLOBAL | PageFlags::NX)
+}
+
+/// Heap and kernel-stack leaves: same as data (writable, NX, global).
+pub const fn heap_flags() -> PageFlags {
+    kernel_data_flags()
+}
+
+pub const fn stack_flags() -> PageFlags {
+    kernel_data_flags()
 }
 
 /// TLB shootdown hook. Single-CPU no-op today; phase 4 replaces this
@@ -874,5 +1011,37 @@ mod tests {
         // Exhaustion returns None.
         let mut w = IoremapWindow::new();
         assert!(w.reserve(PhysAddr(0), IOREMAP_LEN + 4096).is_none());
+    }
+
+    #[test]
+    fn walk_ranges_coalesces_and_skips_holes() {
+        let mut pool = TestPool::new(256);
+        let mut m = fresh_mapper(&mut pool);
+        let a = VirtAddr(0xFFFF_C000_0000_0000);
+        let b = VirtAddr(0xFFFF_C000_0020_0000); // 2 MiB later
+        unsafe {
+            m.map_page(a, PhysAddr(0x0080_0000), physmap_flags(), PageSize::Size4K, MapMode::Fresh, &mut pool)
+                .unwrap();
+            m.map_page(
+                VirtAddr(a.0 + PAGE_SIZE_4K),
+                PhysAddr(0x0080_1000),
+                physmap_flags(),
+                PageSize::Size4K,
+                MapMode::Fresh,
+                &mut pool,
+            )
+            .unwrap();
+            m.map_page(b, PhysAddr(0x0090_0000), physmap_flags(), PageSize::Size4K, MapMode::Fresh, &mut pool)
+                .unwrap();
+        }
+        let mut ranges = Vec::new();
+        m.walk_ranges(VirtAddr(0xFFFF_C000_0000_0000), VirtAddr(0xFFFF_C000_0040_0000), |va, len, _, size| {
+            ranges.push((va, len, size));
+        });
+        assert_eq!(ranges.len(), 2, "two 4K pages should coalesce; hole splits");
+        assert_eq!(ranges[0], (a.0, 2 * PAGE_SIZE_4K, PageSize::Size4K));
+        assert_eq!(ranges[1], (b.0, PAGE_SIZE_4K, PageSize::Size4K));
+        assert!(m.range_unmapped(VirtAddr(0xFFFF_D000_0000_0000), VirtAddr(0xFFFF_D000_0010_0000)));
+        assert!(!m.range_unmapped(a, VirtAddr(a.0 + PAGE_SIZE_4K)));
     }
 }

@@ -114,3 +114,68 @@ pub fn halt() -> ! {
         unsafe { asm!("cli; hlt", options(nomem, nostack)) };
     }
 }
+
+/// Save `RFLAGS.IF`, `cli`, restore on drop. DESIGN §2.3: the heap
+/// (and later the buddy) is taken with interrupts off. Nested guards
+/// are fine: only the outermost restores IF.
+pub struct InterruptGuard {
+    restore: bool,
+}
+
+impl InterruptGuard {
+    pub fn enter() -> Self {
+        let rflags: u64;
+        unsafe {
+            asm!(
+                "pushfq",
+                "pop {0}",
+                "cli",
+                out(reg) rflags,
+            );
+        }
+        Self {
+            restore: rflags & (1 << 9) != 0,
+        }
+    }
+}
+
+impl Drop for InterruptGuard {
+    fn drop(&mut self) {
+        if self.restore {
+            unsafe { asm!("sti", options(nomem, nostack)) };
+        }
+    }
+}
+
+/// # Safety
+/// Caller vouches that `port` is a valid I/O port for a 32-bit write.
+#[inline]
+#[allow(dead_code)]
+pub unsafe fn outl(port: u16, val: u32) {
+    unsafe {
+        asm!(
+            "out dx, eax",
+            in("dx") port,
+            in("eax") val,
+            options(nomem, nostack, preserves_flags)
+        )
+    };
+}
+
+/// Read `cr2` (page-fault address). Used by the ktest scoped #PF catcher.
+#[inline]
+#[allow(dead_code)]
+pub fn read_cr2() -> u64 {
+    let val: u64;
+    unsafe { asm!("mov {}, cr2", out(reg) val, options(nomem, nostack, preserves_flags)) };
+    val
+}
+
+/// Current code selector. The ktest IDT needs it for gate descriptors.
+#[inline]
+#[allow(dead_code)]
+pub fn read_cs() -> u16 {
+    let val: u16;
+    unsafe { asm!("mov {0:x}, cs", out(reg) val, options(nomem, nostack, preserves_flags)) };
+    val
+}

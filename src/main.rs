@@ -1,24 +1,32 @@
 //! vibeOS kernel entry.
 //!
-//! Phase 0 brought serial, panic, and the Limine handshake. Phase 1 slice
-//! A adds the physical memory manager: walk Limine's memory map, exclude
-//! frame 0 / the kernel image / the AP trampoline / the framebuffer,
-//! hand the rest to the buddy allocator, and print the phase-1 exit
-//! marker. Paging, heap, and KVA come in later slices.
+//! Boot order is DESIGN §3.3: serial, Limine, PMM, paging, heap, KVA,
+//! then a shell-less meminfo dump. The `kernel_tests` build runs the
+//! in-guest registry after that and exits through isa-debug-exit.
 
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
+#![cfg_attr(feature = "kernel_tests", feature(ffi_returns_twice))]
 // The panic-test build gates the entire non-panic tail behind
 // `#[cfg(not(feature = "panic-test"))]`, which leaves the Limine
 // requests, paging init, and helpers technically dead. That is
 // deliberate — silence the noise so a real warning is not lost.
 #![cfg_attr(feature = "panic-test", allow(dead_code, unused_imports))]
 
+extern crate alloc;
+
+mod diag;
+mod heap_init;
+mod kva_init;
 mod paging_init;
 mod panic;
 mod pmm_init;
 mod serial;
 mod x86;
+
+#[cfg(feature = "kernel_tests")]
+mod ktest;
 
 use core::fmt::Write;
 
@@ -168,7 +176,32 @@ fn normal_boot_tail() {
     };
     paging_init::report(&paging_report);
 
+    // ---- Phase 1 slice C: heap, KVA, diagnostics. ----
+    unsafe { heap_init::init() };
+    {
+        let probe = alloc::boxed::Box::new(0xC0FFEEu64);
+        if *probe != 0xC0FFEE {
+            panic!("heap probe mismatch");
+        }
+    }
+    serial::line(marker::HEAP_OK);
+
+    unsafe { kva_init::init() };
+    {
+        let stack = kva_init::alloc_guarded_stack(4).expect("kva stack probe");
+        unsafe {
+            (stack.mapped_base().as_u64() as *mut u64).write_volatile(0x5A5A_5A5A_5A5A_5A5A)
+        };
+        kva_init::free_stack(stack);
+    }
+    serial::line(marker::KVA_READY);
+
+    diag::meminfo();
+
     serial::line(marker::BOOT_DONE);
+
+    #[cfg(feature = "kernel_tests")]
+    crate::ktest::run();
 }
 
 /// Highest end address of any USABLE memmap entry, in physical bytes.

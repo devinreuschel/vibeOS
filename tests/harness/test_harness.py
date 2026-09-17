@@ -207,5 +207,45 @@ class TestDeadlineReader(unittest.TestCase):
             os.close(w)
 
 
+class TestKtestProtocol(unittest.TestCase):
+    def test_begin_end_pass_status(self) -> None:
+        from harness import ISA_DEBUG_PASS, check_ktest_output
+
+        lines = [
+            "vibeOS: ktest: begin",
+            "vibeOS: ktest: ok map_unmap",
+            "vibeOS: ktest: end",
+        ]
+        check_ktest_output(lines, ISA_DEBUG_PASS)
+
+    def test_fail_line_rejected(self) -> None:
+        from harness import ISA_DEBUG_PASS, HarnessError, check_ktest_output
+
+        lines = [
+            "vibeOS: ktest: begin",
+            "vibeOS: ktest: FAIL nx_enforcement",
+            "vibeOS: ktest: end",
+        ]
+        with self.assertRaises(HarnessError) as cm:
+            check_ktest_output(lines, ISA_DEBUG_PASS)
+        self.assertIn("FAIL", str(cm.exception))
+
+    def test_missing_begin_or_end(self) -> None:
+        from harness import ISA_DEBUG_PASS, HarnessError, check_ktest_output
+
+        with self.assertRaises(HarnessError):
+            check_ktest_output(["vibeOS: ktest: end"], ISA_DEBUG_PASS)
+        with self.assertRaises(HarnessError):
+            check_ktest_output(["vibeOS: ktest: begin"], ISA_DEBUG_PASS)
+
+    def test_wrong_exit_status(self) -> None:
+        from harness import ISA_DEBUG_FAIL, HarnessError, check_ktest_output
+
+        lines = ["vibeOS: ktest: begin", "vibeOS: ktest: end"]
+        with self.assertRaises(HarnessError) as cm:
+            check_ktest_output(lines, ISA_DEBUG_FAIL)
+        self.assertIn("isa-debug-exit", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
