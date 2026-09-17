@@ -8,4 +8,5 @@
 
 pub mod fmt_util;
 pub mod marker;
+pub mod pmm;
 pub mod uart;
