@@ -388,22 +388,31 @@ fn bootstrap_entry() {
 }
 
 pub fn spawn(name: &'static str, entry: fn()) -> ThreadHandle {
-    spawn_inner(name, entry, CpuAffinity::Any, true)
+    spawn_inner(name, entry, CpuAffinity::Any, true, 0)
 }
 
 /// Pin to this CPU. In-guest tests that `switch_to` / `yield_now` a
 /// worker must use this: `ktest::run` holds IF off on the BSP, so an
 /// `Any` spawn would RR onto an AP the BSP cannot switch to.
+///
+/// Copies `irq_nest` so `switch_to` does not `sti` the worker (incoming
+/// nest 0 would enable IF; a tick then preempts the cooperative chain).
 pub fn spawn_here(name: &'static str, entry: fn()) -> ThreadHandle {
-    spawn_inner(name, entry, CpuAffinity::Pinned(current_cpu()), true)
+    spawn_inner(
+        name,
+        entry,
+        CpuAffinity::Pinned(current_cpu()),
+        true,
+        per_cpu_init::irq_nest(),
+    )
 }
 
 pub fn spawn_on(name: &'static str, entry: fn(), cpu: u32) -> ThreadHandle {
-    spawn_inner(name, entry, CpuAffinity::Pinned(cpu), true)
+    spawn_inner(name, entry, CpuAffinity::Pinned(cpu), true, 0)
 }
 
 pub(crate) fn spawn_idle(entry: fn()) -> ThreadHandle {
-    spawn_inner("idle", entry, CpuAffinity::Pinned(0), false)
+    spawn_inner("idle", entry, CpuAffinity::Pinned(0), false, 0)
 }
 
 /// AP idle: running on `stack` already. No synthetic frame, not on the FIFO.
@@ -469,6 +478,7 @@ fn spawn_inner(
     entry: fn(),
     affinity: CpuAffinity,
     enqueue: bool,
+    irq_nest: u32,
 ) -> ThreadHandle {
     let stack = kva_init::alloc_guarded_stack(DEFAULT_STACK_PAGES).expect("thread stack");
     let top = stack.top().as_u64();
@@ -493,7 +503,7 @@ fn spawn_inner(
         s.timeouts.remove(id);
         let tcb = s.slots[slot].as_mut().expect("dead slot");
         assert!(tcb.stack.is_none(), "dead tcb still owns stack");
-        fill_tcb(tcb, name, entry, affinity, cpu, ks, top, tramp);
+        fill_tcb(tcb, name, entry, affinity, cpu, ks, top, tramp, irq_nest);
         if enqueue {
             s.place(cpu, id);
         }
@@ -513,7 +523,7 @@ fn spawn_inner(
         prev: None,
         affinity,
         cpu,
-        irq_nest: 0,
+        irq_nest,
         switches: 0,
         run_tsc: 0,
         wait_outcome: WaitOutcome::Woken,
@@ -548,6 +558,7 @@ fn fill_tcb(
     ks: KernelStack,
     top: u64,
     tramp: u64,
+    irq_nest: u32,
 ) {
     tcb.name = name;
     tcb.state = ThreadState::Ready;
@@ -557,7 +568,7 @@ fn fill_tcb(
     tcb.prev = None;
     tcb.affinity = affinity;
     tcb.cpu = cpu;
-    tcb.irq_nest = 0;
+    tcb.irq_nest = irq_nest;
     tcb.switches = 0;
     tcb.run_tsc = 0;
     tcb.wait_outcome = WaitOutcome::Woken;
