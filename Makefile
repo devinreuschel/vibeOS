@@ -7,7 +7,9 @@ TARGET_JSON := x86_64-unknown-none-executable.json
 TARGET      := x86_64-unknown-none-executable
 
 # Nightly cargo needs -Zjson-target-spec to accept our custom target JSON.
-CARGO         := cargo -Zjson-target-spec
+# build-std lives here rather than in .cargo/config.toml so hostlib tests
+# (a nested cargo workspace) do not inherit a second `core`.
+CARGO         := cargo -Zjson-target-spec -Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem
 export CARGO_TARGET_DIR := $(CURDIR)/target
 CARGO_PROFILE ?= dev
 ifeq ($(CARGO_PROFILE),release)
@@ -45,7 +47,8 @@ KERNEL_SRCS := $(shell find src -type f \( -name '*.rs' -o -name '*.asm' -o -nam
 KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml $(TARGET_JSON) linker.ld Makefile rust-toolchain.toml
 
 .PHONY: all kernel iso run run-panic clean distclean setup layout \
-        test-unit test-harness test-e2e test-e2e-panic test
+        test-unit test-harness test-e2e test-e2e-panic test test-kernel \
+        test-kernel-smp4 test-lapic-fallback
 
 all: $(ISO)
 
@@ -140,10 +143,44 @@ test-e2e-uefi: $(ISO)
 test-e2e-panic: $(ISO_PANIC)
 	VIBEOS_ISO=$(ISO_PANIC) VIBEOS_EXPECT_PANIC=1 python3 tests/harness/run_e2e.py
 
-test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic
+# In-guest tests: separate target dir + ISO so a test build can never be
+# packaged as production (DESIGN §8.2 / §9.7).
+KERNEL_TESTS_DIR := $(CURDIR)/target-kernel-tests
+ISO_KTEST        := vibeos-ktest.iso
+ISO_ROOT_KTEST   := iso_root_ktest
+
+$(ISO_KTEST): $(KERNEL_DEPS) limine.conf $(LIMINE_BIN)
+	CARGO_TARGET_DIR=$(KERNEL_TESTS_DIR) $(CARGO) build $(CARGO_FLAGS) --features kernel_tests
+	@echo "  ISO $(ISO_KTEST)"
+	@rm -rf $(ISO_ROOT_KTEST)
+	@mkdir -p $(ISO_ROOT_KTEST)/boot $(ISO_ROOT_KTEST)/EFI/BOOT
+	@cp $(KERNEL_TESTS_DIR)/$(TARGET)/$(PROFILE_DIR)/vibeos $(ISO_ROOT_KTEST)/boot/vibeos
+	@cp limine.conf $(ISO_ROOT_KTEST)/boot/
+	@cp $(LIMINE_DIR)/limine-bios.sys $(ISO_ROOT_KTEST)/boot/
+	@cp $(LIMINE_DIR)/limine-bios-cd.bin $(ISO_ROOT_KTEST)/boot/
+	@cp $(LIMINE_DIR)/limine-uefi-cd.bin $(ISO_ROOT_KTEST)/boot/
+	@cp $(LIMINE_DIR)/BOOTX64.EFI $(ISO_ROOT_KTEST)/EFI/BOOT/
+	@xorriso -as mkisofs -quiet \
+	    -b boot/limine-bios-cd.bin \
+	    -no-emul-boot -boot-load-size 4 -boot-info-table \
+	    --efi-boot boot/limine-uefi-cd.bin \
+	    -efi-boot-part --efi-boot-image --protective-msdos-label \
+	    $(ISO_ROOT_KTEST) -o $(ISO_KTEST)
+	@$(LIMINE_BIN) bios-install $(ISO_KTEST) >/dev/null
+
+test-kernel: $(ISO_KTEST)
+	VIBEOS_ISO=$(ISO_KTEST) python3 tests/kernel_boot.py
+
+test-kernel-smp4: $(ISO_KTEST)
+	VIBEOS_ISO=$(ISO_KTEST) VIBEOS_SMP=4 python3 tests/kernel_boot.py
+
+test-lapic-fallback: $(ISO_KTEST)
+	VIBEOS_ISO=$(ISO_KTEST) VIBEOS_QEMU_CPU=qemu64,-tsc-deadline python3 tests/kernel_boot.py
+
+test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-kernel
 
 clean:
-	rm -rf $(ISO_ROOT) $(ISO_ROOT_PANIC) $(ISO) $(ISO_PANIC) target-panic
+	rm -rf $(ISO_ROOT) $(ISO_ROOT_PANIC) $(ISO_ROOT_KTEST) $(ISO) $(ISO_PANIC) $(ISO_KTEST) target-panic $(KERNEL_TESTS_DIR)
 	$(CARGO) clean
 
 distclean: clean

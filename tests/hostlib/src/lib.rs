@@ -10,6 +10,12 @@ pub mod fmt_util;
 #[path = "../../../src/marker.rs"]
 pub mod marker;
 
+#[path = "../../../src/heap.rs"]
+pub mod heap;
+
+#[path = "../../../src/kva.rs"]
+pub mod kva;
+
 #[path = "../../../src/paging.rs"]
 pub mod paging;
 
@@ -30,6 +36,8 @@ mod smoke {
             marker::LIMINE_OK,
             marker::PMM_PREFIX,
             marker::PAGING_CR3_OK,
+            marker::HEAP_OK,
+            marker::KVA_READY,
             marker::BOOT_DONE,
         ] {
             assert!(m.starts_with("vibeOS: "), "marker missing prefix: {m}");
@@ -43,6 +51,8 @@ mod smoke {
         // Paging §1.2 exit marker is a fixed string; must match the
         // harness contract byte-for-byte.
         assert_eq!(marker::PAGING_CR3_OK, "vibeOS: paging: cr3 ok");
+        assert_eq!(marker::HEAP_OK, "vibeOS: heap ok");
+        assert_eq!(marker::KVA_READY, "vibeOS: kva: ready");
     }
 
     #[test]

@@ -9,6 +9,36 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Phase 1 slice C: kernel heap, KVA allocator, in-guest tests, meminfo.
+  Free-list heap at `HEAP_START` (1 MiB initial, grows in 4 KiB steps to
+  the 64 MiB cap), `GlobalAlloc` with interrupts off, and
+  `#[alloc_error_handler]` panicking with the failed `Layout`. KVA is a
+  first-fit range allocator over the 64 GiB window; `alloc_guarded_stack`
+  maps order-0 frames above an unmapped guard, `vmap` presents
+  non-contiguous frames contiguously, and a deferred-free list has an
+  explicit drain. Boot prints `vibeOS: heap ok` then `vibeOS: kva: ready`,
+  then a shell-less meminfo dump (PMM totals, heap used/capacity, KVA
+  used) plus a coalesced page-table range walk.
+- `kernel_tests` feature builds a second kernel into `target-kernel-tests`
+  / `vibeos-ktest.iso`. After init it runs a registry over serial
+  (`ktest: begin` / `ok` / `FAIL` / `skip` / `end`) and exits QEMU via
+  `isa-debug-exit` at `0xf4` (`0x10` pass, `0x11` fail).
+  `make test-kernel` drives `tests/kernel_boot.py`. In-guest coverage:
+  map/unmap, NX instruction-fetch, heap Box/growth/align/reuse/OOM,
+  stack guard-page fault, KVA frame-count roundtrip, deferred drain,
+  vmap, and physmap UC PTE flag read-back (§1.3).
+- Host tests for the heap (alignment, reuse, OOM-without-corruption,
+  extend, coalesce, double-free), the KVA first-fit/tail-free rules, and
+  page-table range walking.
+- Harness contract picks up `vibeOS: heap ok` and `vibeOS: kva: ready`
+  between `paging: cr3 ok` and boot-done.
+
+### Changed
+
+- `-Z build-std` moved off `.cargo/config.toml` onto the Makefile `CARGO`
+  line. Cargo merges parent config into `tests/hostlib`, and an inherited
+  `build-std` compiles a second `core` that collides with std.
+
 - Phase 1 slice B: page tables + MMIO attributes. `vibeos::paging` in the
   library half carries typed `PhysAddr` / `VirtAddr` newtypes, a
   `PageFlags` bitset, a 4-level walk over 4 KiB and 2 MiB leaves, and
@@ -51,9 +81,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   to the buddy after subtracting frame 0, the loaded kernel image (via
   Limine's executable-address response), the AP trampoline page at
   `0x8000`, and every framebuffer. Prints `vibeOS: pmm: <n> free 4KiB
-  frames` as the phase-1 exit-gate marker, followed by a diagnostic
-  totals/largest-order line. Paging, heap, and KVA are deliberately
-  deferred to slices B–D.
+  frames` as the phase-1 slice-A marker, followed by a diagnostic
+  totals/largest-order line.
 - Phase 0 kernel: `_start` verifies the Limine base revision, brings up COM1,
   and prints the phase 0 marker contract before halting.
 - `x86_64-unknown-none-executable.json` custom target: no PIE, static reloc,

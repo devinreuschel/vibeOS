@@ -17,6 +17,9 @@ path = "src/main.rs"
 default = []
 # Force a panic early in boot so the panic path can be exercised end to end.
 panic-test = []
+# Second kernel build: run the in-guest test registry after init (DESIGN §8.2).
+# Packaged into its own Cargo target dir / ISO; never the production image.
+kernel_tests = []
 
 [dependencies]
 limine = "0.6"

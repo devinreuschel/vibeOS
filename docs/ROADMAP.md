@@ -97,10 +97,10 @@ rest of the project, which is the single most consequential decision in this pha
 - [x] `rust-toolchain.toml`: nightly, `rust-src`, `llvm-tools`
 - [x] `x86_64-unknown-none-executable.json`: `executable: true`, no PIE, static relocation model, `disable-redzone: true`, `-mmx,-sse,+soft-float`, `code-model: kernel`
 - [x] no RELRO in pre-link args; it conflicts with a non-PIE static kernel
-- [x] `.cargo/config.toml`: default target, `-Z build-std=core,compiler_builtins,alloc`, linker script flag
+- [x] `.cargo/config.toml`: default target; `-Z build-std=core,compiler_builtins,alloc` is on the Makefile `CARGO` invocation so `tests/hostlib` does not inherit a second `core`; linker script lives in the target JSON
 - [x] `Cargo.toml`: `panic = "abort"` in both profiles, `opt-level = 1` for dev
 - [x] library and binary targets split from the first commit, not retrofitted
-- [ ] `kernel_tests` feature declared now, wired in phase 1
+- [x] `kernel_tests` feature declared now, wired in phase 1
 
 ### 0.2 Linker and image layout
 - [x] `linker.ld` places the image at `0xFFFF_FFFF_8000_0000`
@@ -161,11 +161,11 @@ paging cannot be verified from the host.
 **Unlocks.** Every data structure in the kernel. `Vec`, `Box`, `String`. Thread stacks.
 
 **Exit gate**
-- [ ] `vibeOS: pmm: <n> free 4KiB frames`, `paging: cr3 ok`, `heap ok`, `kva: ready` in order
-- [ ] kernel runs entirely on its own PML4 with Limine's tables abandoned
-- [ ] `make test-kernel` passes with in-guest tests for map/unmap, NX enforcement, heap growth, and the stack guard page
-- [ ] host tests cover the buddy allocator including fragmentation and exhaustion
-- [ ] a shell-less `meminfo` dump on the boot log reports plausible totals
+- [x] `vibeOS: pmm: <n> free 4KiB frames`, `paging: cr3 ok`, `heap ok`, `kva: ready` in order
+- [x] kernel runs entirely on its own PML4 with Limine's tables abandoned
+- [x] `make test-kernel` passes with in-guest tests for map/unmap, NX enforcement, heap growth, and the stack guard page
+- [x] host tests cover the buddy allocator including fragmentation and exhaustion
+- [x] a shell-less `meminfo` dump on the boot log reports plausible totals
 
 ### 1.1 Buddy physical allocator
 - [x] `Buddy` in the library half: `allocate(order)`, `deallocate(phys, order)`, intrusive free lists stored in the free pages
@@ -189,34 +189,34 @@ paging cannot be verified from the host.
 ### 1.3 MMIO attributes
 - [x] `patch_physmap_uc(phys, len)` setting PCD and PWT without splitting 2 MiB entries
 - [x] `ioremap(phys, len)` reserving from the dedicated MMIO window for devices that should not be reached through the physmap
-- [~] in-guest test: patch a page, verify the PTE flags read back  (host-only for slice B: `paging::patch_physmap_uc` covered via a synthetic mapper; the in-guest variant waits for the `kernel_tests` ISO in §1.6)
+- [x] in-guest test: patch a page, verify the PTE flags read back
 
 ### 1.4 Kernel heap
-- [ ] free-list heap at `HEAP_START`, 1 MiB initial, growing in page increments to the 64 MiB region cap
-- [ ] backing pages from the buddy allocator, mapped writable and NX
-- [ ] `GlobalAlloc` wrapper disabling interrupts across `alloc` and `dealloc`
-- [ ] `#[alloc_error_handler]` panicking with the failed `Layout`
-- [ ] in-guest tests: `Box`, `Vec` growth past the initial mapping, alignment from 1 to 4096, allocate/free/reallocate reuse, OOM reaching the error handler rather than corrupting
+- [x] free-list heap at `HEAP_START`, 1 MiB initial, growing in page increments to the 64 MiB region cap
+- [x] backing pages from the buddy allocator, mapped writable and NX
+- [x] `GlobalAlloc` wrapper disabling interrupts across `alloc` and `dealloc`
+- [x] `#[alloc_error_handler]` panicking with the failed `Layout`
+- [x] in-guest tests: `Box`, `Vec` growth past the initial mapping, alignment from 1 to 4096, allocate/free/reallocate reuse, OOM reaching the error handler rather than corrupting
 
 ### 1.5 Kernel VA allocator
-- [ ] range allocator over the 64 GiB KVA region, first fit, freed ranges to the tail of the free list
-- [ ] `alloc_guarded_stack(pages)`: reserve `pages + 1`, map the upper `pages` from separate order-0 frames, leave the bottom unmapped
-- [ ] `vmap(frames)` for non-contiguous physical memory presented contiguously
-- [ ] deferred free list for stacks that cannot be unmapped yet, with an explicit drain
-- [ ] assert the region is entirely unmapped before claiming it
-- [ ] in-guest tests: guard page write faults, alloc/free roundtrip restores the frame count, deferred drain actually frees
+- [x] range allocator over the 64 GiB KVA region, first fit, freed ranges to the tail of the free list
+- [x] `alloc_guarded_stack(pages)`: reserve `pages + 1`, map the upper `pages` from separate order-0 frames, leave the bottom unmapped
+- [x] `vmap(frames)` for non-contiguous physical memory presented contiguously
+- [x] deferred free list for stacks that cannot be unmapped yet, with an explicit drain
+- [x] assert the region is entirely unmapped before claiming it
+- [x] in-guest tests: guard page write faults, alloc/free roundtrip restores the frame count, deferred drain actually frees
 
 ### 1.6 In-guest test infrastructure
-- [ ] `kernel_tests` feature builds a second kernel that runs a test registry after init
-- [ ] separate Cargo target directory and separate ISO, so a test build can never be packaged as production
-- [ ] `ktest_ok` / `ktest_fail` / `ktest_skip(name, reason)` with the serial protocol from [DESIGN.md](DESIGN.md#82-in-guest-tests)
-- [ ] `isa-debug-exit` at port `0xf4`: `0x10` for pass, `0x11` for fail
-- [ ] `tests/kernel_boot.py` requiring `begin` and `end`, rejecting any `FAIL`, checking the exit status
-- [ ] failing tests print enough context to diagnose without a rerun
+- [x] `kernel_tests` feature builds a second kernel that runs a test registry after init
+- [x] separate Cargo target directory and separate ISO, so a test build can never be packaged as production
+- [x] `ktest_ok` / `ktest_fail` / `ktest_skip(name, reason)` with the serial protocol from [DESIGN.md](DESIGN.md#82-in-guest-tests)
+- [x] `isa-debug-exit` at port `0xf4`: `0x10` for pass, `0x11` for fail
+- [x] `tests/kernel_boot.py` requiring `begin` and `end`, rejecting any `FAIL`, checking the exit status
+- [x] failing tests print enough context to diagnose without a rerun
 
 ### 1.7 Diagnostics
-- [ ] `meminfo`-style dump: total, free, used, largest order, heap used and capacity, KVA used
-- [ ] page table dump walker for debugging, printing ranges rather than individual entries
+- [x] `meminfo`-style dump: total, free, used, largest order, heap used and capacity, KVA used
+- [x] page table dump walker for debugging, printing ranges rather than individual entries
 
 ---
 

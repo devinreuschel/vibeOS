@@ -163,12 +163,78 @@ pub unsafe fn patch_physmap_uc(phys: PhysAddr, len: u64) -> Result<usize, MapErr
 
 /// Fabricate a `Mapper` pointing at the current CR3. Only safe after
 /// [`install`] has installed our own PML4.
-#[allow(dead_code)]
-fn current_mapper() -> Mapper {
+pub(crate) fn current_mapper() -> Mapper {
     // CR3 low bits are flags (PCID etc); the physical address lives at
     // 12..52. Same mask used by the paging library on PTEs.
     let cr3 = x86::read_cr3() & paging::PTE_ADDR_MASK;
     unsafe { Mapper::new(PhysAddr(cr3), HHDM_BASE) }
+}
+
+/// Map one 4 KiB leaf in the live tables and `invlpg`.
+///
+/// # Safety
+/// Same contract as `Mapper::map_page`. Must run after [`install`].
+pub unsafe fn map_4k(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(), MapError> {
+    let mut alloc = BuddyFrames;
+    let mut mapper = current_mapper();
+    unsafe {
+        mapper.map_page(va, pa, flags, PageSize::Size4K, MapMode::Fresh, &mut alloc)?;
+    }
+    x86::invlpg(va.as_u64());
+    paging::tlb_shootdown_others(va);
+    Ok(())
+}
+
+/// Unmap one leaf in the live tables and `invlpg`. Returns the frame.
+///
+/// # Safety
+/// Caller is responsible for not unmapping a page the CPU is using
+/// (stack, code, the heap it is currently allocating from, …).
+#[allow(dead_code)]
+pub unsafe fn unmap_4k(va: VirtAddr) -> Option<(PhysAddr, PageSize)> {
+    let mut mapper = current_mapper();
+    let r = unsafe { mapper.unmap_page(va) }?;
+    x86::invlpg(va.as_u64());
+    paging::tlb_shootdown_others(va);
+    Some(r)
+}
+
+#[allow(dead_code)]
+pub fn translate(va: VirtAddr) -> Option<(PhysAddr, PageSize, PageFlags)> {
+    current_mapper().translate(va)
+}
+
+/// DESIGN §4.1: every region asserts it is unmapped before claiming it.
+pub fn assert_unmapped(start: VirtAddr, end: VirtAddr) {
+    let mapper = current_mapper();
+    assert!(
+        mapper.range_unmapped(start, end),
+        "paging: region {:#x}..{:#x} already mapped",
+        start.as_u64(),
+        end.as_u64()
+    );
+}
+
+/// Range dump of the live tables. Coalesces adjacent leaves (DESIGN §1.7).
+pub fn dump_ranges() {
+    let mapper = current_mapper();
+    let mut n = 0usize;
+    let mut visit = |va: u64, len: u64, flags: PageFlags, size: PageSize| {
+        n += 1;
+        let sz = match size {
+            PageSize::Size4K => "4k",
+            PageSize::Size2M => "2m",
+        };
+        let _ = writeln!(
+            Serial,
+            "vibeOS: pt: {va:#x}..{:#x} {sz} flags {:#x}",
+            va + len,
+            flags.0
+        );
+    };
+    mapper.walk_ranges(VirtAddr(0), VirtAddr(0x0000_8000_0000_0000), &mut visit);
+    mapper.walk_ranges(VirtAddr(0xFFFF_8000_0000_0000), VirtAddr(u64::MAX), &mut visit);
+    let _ = writeln!(Serial, "vibeOS: pt: {n} ranges");
 }
 
 // ------------------ install ------------------

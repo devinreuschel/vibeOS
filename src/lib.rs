@@ -7,6 +7,8 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod fmt_util;
+pub mod heap;
+pub mod kva;
 pub mod marker;
 pub mod paging;
 pub mod pmm;

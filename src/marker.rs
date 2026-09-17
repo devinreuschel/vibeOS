@@ -18,6 +18,10 @@ pub const PMM_FREE_SUFFIX: &str = " free 4KiB frames";
 /// space, not merely built its tables.
 pub const PAGING_CR3_OK: &str = "vibeOS: paging: cr3 ok";
 
+/// Phase 1 §1.4 / §1.5 exit-gate markers. DESIGN §3.3 steps 9 and 10.
+pub const HEAP_OK: &str = "vibeOS: heap ok";
+pub const KVA_READY: &str = "vibeOS: kva: ready";
+
 pub const BOOT_DONE: &str = "vibeOS: boot: phase0 done";
 
 /// Panic banner. Kept short so the panic path allocates nothing.

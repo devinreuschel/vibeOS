@@ -343,12 +343,116 @@ def run_qemu_and_check(
     return result
 
 
+# isa-debug-exit at 0xf4: host status = (value << 1) | 1. DESIGN §8.2.
+ISA_DEBUG_PASS = 33  # write 0x10
+ISA_DEBUG_FAIL = 35  # write 0x11
+
+KTEST_BEGIN = "vibeOS: ktest: begin"
+KTEST_END = "vibeOS: ktest: end"
+KTEST_FAIL_PREFIX = "vibeOS: ktest: FAIL"
+
+
+def check_ktest_output(
+    lines: Iterable[str],
+    exit_code: int | None,
+    *,
+    pass_status: int = ISA_DEBUG_PASS,
+) -> RunResult:
+    """Require begin then end, reject any FAIL line, require pass exit status."""
+    result = RunResult()
+    result.exit_code = exit_code
+    saw_begin = False
+    saw_end = False
+    fails: list[str] = []
+    for line in lines:
+        result.lines.append(line)
+        for sig in PANIC_SIGNATURES:
+            if sig in line:
+                result.panic_line = line
+                raise HarnessError(f"panic signature {sig!r} in: {line!r}")
+        if KTEST_BEGIN in line:
+            if saw_end:
+                raise HarnessError("ktest begin after end")
+            saw_begin = True
+        if KTEST_FAIL_PREFIX in line:
+            fails.append(line)
+        if KTEST_END in line:
+            if not saw_begin:
+                raise HarnessError("ktest end without begin")
+            saw_end = True
+    if not saw_begin:
+        raise HarnessError("missing marker 'ktest_begin'")
+    if not saw_end:
+        raise HarnessError("missing marker 'ktest_end'")
+    if fails:
+        raise HarnessError(f"ktest FAIL: {fails[0]}")
+    if exit_code != pass_status:
+        raise HarnessError(
+            f"isa-debug-exit status {exit_code}, expected {pass_status}"
+        )
+    return result
+
+
+def run_qemu_until_exit(
+    cfg: QemuConfig,
+    timeout_s: float = 60.0,
+    panic_signatures: tuple[str, ...] = PANIC_SIGNATURES,
+) -> RunResult:
+    """Boot the ISO and wait for QEMU to exit (isa-debug-exit)."""
+    if not shutil.which("qemu-system-x86_64"):
+        raise HarnessError("qemu-system-x86_64 not on PATH")
+    if not os.path.exists(cfg.iso):
+        raise HarnessError(f"ISO missing: {cfg.iso}")
+
+    monitor_sock = _pick_monitor_path()
+    argv = _qemu_argv(cfg, monitor_sock)
+
+    proc = subprocess.Popen(
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        bufsize=1,
+        text=True,
+    )
+    assert proc.stdout is not None
+
+    result = RunResult()
+    deadline = time.monotonic() + timeout_s
+    reader = DeadlineReader(proc.stdout.fileno(), deadline)
+
+    try:
+        while True:
+            kind, line = reader.next_event()
+            if kind == "timeout":
+                result.timed_out = True
+                proc.kill()
+                break
+            if kind == "eof":
+                break
+            result.lines.append(line)
+            for sig in panic_signatures:
+                if sig in line:
+                    result.panic_line = line
+                    proc.kill()
+                    raise HarnessError(f"panic signature {sig!r} in: {line!r}")
+    finally:
+        try:
+            result.exit_code = proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            result.exit_code = proc.wait()
+
+    if result.timed_out:
+        raise HarnessError(f"timed out after {timeout_s}s; {len(result.lines)} lines")
+    return result
+
+
 # Boot contract, in order. Extended per DESIGN §8.3 as each phase lands.
 # Phase 0 gave us serial + limine + boot done; phase 1 slice A added the
-# PMM free-frames line; slice B adds `paging: cr3 ok` (DESIGN §3.3 step
-# 7). Any runtime-derived payload uses `and_contains` so the full
-# `vibeOS: <subsystem>: <state>` shape is pinned rather than the suffix
-# alone.
+# PMM free-frames line; slice B adds `paging: cr3 ok`; slice C adds
+# `heap ok` and `kva: ready` (DESIGN §3.3 steps 9–10). Runtime-derived
+# payload uses `and_contains` so the full `vibeOS: …` shape is pinned.
 PHASE0_MARKERS: list[Marker] = [
     Marker("vibeOS: serial online", "serial_online"),
     Marker("vibeOS: limine: rev 3 ok", "limine_ok"),
@@ -358,6 +462,8 @@ PHASE0_MARKERS: list[Marker] = [
         and_contains=(" free 4KiB frames",),
     ),
     Marker("vibeOS: paging: cr3 ok", "paging_cr3_ok"),
+    Marker("vibeOS: heap ok", "heap_ok"),
+    Marker("vibeOS: kva: ready", "kva_ready"),
     Marker("vibeOS: boot: phase0 done", "boot_done"),
 ]
 
