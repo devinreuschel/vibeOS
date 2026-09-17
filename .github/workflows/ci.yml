@@ -62,5 +62,8 @@ jobs:
       - name: e2e (panic path)
         run: make test-e2e-panic
 
+      - name: e2e (#GP dump+halt)
+        run: make test-e2e-gp
+
       - name: in-guest kernel tests
         run: make test-kernel

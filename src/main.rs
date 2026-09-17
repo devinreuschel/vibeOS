@@ -1,13 +1,15 @@
 //! vibeOS kernel entry.
 //!
-//! Boot order is DESIGN §3.3: serial, Limine, PMM, paging, ACPI parse +
-//! MMIO UC patch, heap, KVA, ACPI marker, then a shell-less meminfo dump.
-//! The `kernel_tests` build runs the in-guest registry after that and
+//! Boot order: serial, Limine, PMM, paging, ACPI parse + MMIO UC, heap,
+//! KVA, then GDT/TSS/IST, PIC remap, IDT, ACPI marker, meminfo.
+//! GDT after KVA because IST stacks are guarded KVA stacks. The
+//! `kernel_tests` build runs the in-guest registry after that and
 //! exits through isa-debug-exit.
 
 #![no_std]
 #![no_main]
 #![feature(alloc_error_handler)]
+#![feature(abi_x86_interrupt)]
 // The panic-test build gates the entire non-panic tail behind
 // `#[cfg(not(feature = "panic-test"))]`, which leaves the Limine
 // requests, paging init, and helpers technically dead. That is
@@ -17,6 +19,7 @@
 extern crate alloc;
 
 mod acpi_init;
+mod arch;
 mod diag;
 mod heap_init;
 mod kva_init;
@@ -173,9 +176,8 @@ fn normal_boot_tail() {
     // ---- Phase 2 slice B: ACPI discovery + MMIO UC. ----
     // Parse before heap so LAPIC/IOAPIC/HPET PTEs are uncacheable
     // before anything touches those bases (DESIGN §3.3 step 8, §4.3).
-    // The `acpi: xsdt N tables` marker waits until after KVA so the
-    // contract stays a superset of phase 1 when slice A (GDT/IDT/PIC)
-    // is still absent.
+    // The `acpi: xsdt N tables` marker waits until after GDT/PIC/IDT
+    // (steps 3–5 live after KVA; step 12 relative to them).
     let rsdp = RSDP
         .response()
         .unwrap_or_else(|| halt_with("vibeOS: limine: rsdp missing"));
@@ -207,11 +209,27 @@ fn normal_boot_tail() {
     }
     serial::line(marker::KVA_READY);
 
+    // ---- Phase 2 slice A: GDT/TSS/IST, PIC, IDT. ----
+    // After KVA so IST stacks are guarded KVA stacks. PIC remap before
+    // LIDT so firmware 8259 vectors cannot alias CPU exceptions. PIC
+    // consults FADT bit 0 from the walk above.
+    unsafe { arch::gdt::init_bsp() };
+    serial::line(marker::GDT_OK);
+
+    unsafe { arch::pic::remap_and_mask() };
+    serial::line(marker::PIC_REMAPPED);
+
+    unsafe { arch::idt::init() };
+    serial::line(marker::IDT_OK);
+
     acpi_init::report();
 
     diag::meminfo();
 
     serial::line(marker::BOOT_DONE);
+
+    #[cfg(feature = "gp-test")]
+    gp_test_trip();
 
     #[cfg(feature = "kernel_tests")]
     crate::ktest::run();
@@ -261,4 +279,17 @@ fn framebuffer_phys_end(hhdm_offset: u64) -> u64 {
 fn halt_with(msg: &str) -> ! {
     serial::line(msg);
     x86::halt();
+}
+
+#[cfg(feature = "gp-test")]
+fn gp_test_trip() {
+    serial::line("vibeOS: boot: gp-test armed");
+    // Kernel code selector with RPL=3 into DS: not a data segment, #GP.
+    unsafe {
+        core::arch::asm!(
+            "mov ds, {0:x}",
+            in(reg) 0x0Bu16,
+            options(nostack, preserves_flags)
+        );
+    }
 }

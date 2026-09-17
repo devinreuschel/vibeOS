@@ -9,6 +9,25 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Phase 2 slice A: GDT/TSS/IST, IDT/exceptions, 8259 PIC. Boot prints
+  `vibeOS: gdt ok`, `vibeOS: pic: remapped`, `vibeOS: idt ok` after
+  `kva: ready` (IST stacks come from KVA guarded stacks; relative order
+  matches DESIGN §3.3), then the ACPI `xsdt` marker from slice B. PIC
+  reads FADT `iapc_boot_arch` bit 0 and skips the ICW sequence when the
+  legacy 8259 is absent; missing FADT still remaps+masks.
+- Flat GDT with sysret selector order (null, kernel code/data, user
+  data, user code, TSS). Per-CPU `CpuTables` (GDT+TSS) with RSP0 and
+  IST1–4 (DF/NMI/MC/debug). 256-entry IDT, `x86-interrupt` handlers;
+  `#BP` logs and returns; `#UD`/`#GP`/`#PF`/`#DF`/`#MC` dump RIP/CS/
+  RFLAGS/RSP/SS/error/CR2 and halt. Scoped catcher for tests (longjmp
+  or step RIP). Named vector constants with a host uniqueness test.
+- 8259 remap to 0x20/0x28 with `io_wait`, mask-all, `mask`/`unmask`/
+  `disable_all`, spurious IRQ7/15 without a bogus EOI.
+- In-guest: `int3` roundtrip, scoped `#PF` skip, `#GP` catch, DF-on-IST
+  via a poisoned RSP. `make test-e2e-gp` boots a `gp-test` kernel that
+  dumps `#GP` and halts.
+- Host tests for GDT/TSS/IDT packing, sysret selector arithmetic, PIC
+  ICW plan, FADT skip policy, spurious EOI policy, and vector uniqueness.
 - Phase 2 slice B: ACPI discovery. `vibeos::acpi` in the library half
   validates RSDP (signature, v1 20-byte checksum, v2 extended checksum),
   walks XSDT with per-table checksums (RSDT fallback), and parses MADT
@@ -24,10 +43,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `patch_physmap_uc` (mapping missing 4 KiB leaves first — those bases
   sit above a 128 MiB physmap), then reads the HPET GEN_CAP period.
   Emits `vibeOS: paging: mmio uc` only when a real leaf was patched, and
-  `vibeOS: acpi: xsdt <n> tables` after the phase-1 heap/KVA markers,
-  plus a summary of CPU count, I/O APIC count, and HPET presence. No
-  GDT/IDT/PIC or timekeeping. In-guest `acpi_discovery` checks table
-  counts against QEMU and that LAPIC/IOAPIC/HPET physmap leaves are UC.
+  `vibeOS: acpi: xsdt <n> tables` after GDT/PIC/IDT, plus a summary of
+  CPU count, I/O APIC count, and HPET presence. In-guest `acpi_discovery`
+  checks table counts against QEMU and that LAPIC/IOAPIC/HPET physmap
+  leaves are UC.
 
 - Phase 1 slice C: kernel heap, KVA allocator, in-guest tests, meminfo.
   Free-list heap at `HEAP_START` (1 MiB initial, grows in 4 KiB steps to

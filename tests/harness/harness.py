@@ -452,9 +452,10 @@ def run_qemu_until_exit(
 # Phase 0 gave us serial + limine; slice A added PMM free-frames; slice B
 # `paging: cr3 ok`; slice C `heap ok` / `kva: ready`. Phase 2 slice B
 # (ACPI) inserts `paging: mmio uc` after CR3 (only emitted when a real
-# LAPIC/IOAPIC/HPET leaf was patched) and `acpi: xsdt <n> tables` after
-# KVA, skipping still-absent GDT/IDT/PIC markers. Trailing marker is
-# `boot: phase1 done`. Runtime-derived payload uses `and_contains`.
+# LAPIC/IOAPIC/HPET leaf was patched). Phase 2 slice A then emits
+# `gdt ok` / `pic: remapped` / `idt ok` after KVA (IST from KVA), then
+# `acpi: xsdt <n> tables`. Trailing marker is `boot: phase1 done`.
+# Runtime-derived payload uses `and_contains`.
 PHASE0_MARKERS: list[Marker] = [
     Marker("vibeOS: serial online", "serial_online"),
     Marker("vibeOS: limine: rev 3 ok", "limine_ok"),
@@ -467,6 +468,9 @@ PHASE0_MARKERS: list[Marker] = [
     Marker("vibeOS: paging: mmio uc", "paging_mmio_uc"),
     Marker("vibeOS: heap ok", "heap_ok"),
     Marker("vibeOS: kva: ready", "kva_ready"),
+    Marker("vibeOS: gdt ok", "gdt_ok"),
+    Marker("vibeOS: pic: remapped", "pic_remapped"),
+    Marker("vibeOS: idt ok", "idt_ok"),
     Marker(
         "vibeOS: acpi: xsdt ",
         "acpi_xsdt",
@@ -482,4 +486,10 @@ PHASE0_PANIC_PREFIX: list[Marker] = [
     Marker("vibeOS: serial online", "serial_online"),
     Marker("vibeOS: limine: rev 3 ok", "limine_ok"),
     Marker("vibeOS: boot: panic-test armed", "panic_test_armed"),
+]
+
+# gp-test boots all the way through IDT, then a deliberate #GP dumps and
+# halts. Same expect_panic scanner; full marker contract plus the armed line.
+PHASE0_GP_MARKERS: list[Marker] = PHASE0_MARKERS + [
+    Marker("vibeOS: boot: gp-test armed", "gp_test_armed"),
 ]

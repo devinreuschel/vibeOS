@@ -9,6 +9,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from harness import (  # noqa: E402
+    PHASE0_GP_MARKERS,
     PHASE0_MARKERS,
     PHASE0_PANIC_PREFIX,
     HarnessError,
@@ -24,9 +25,16 @@ def main() -> int:
     mem = os.environ.get("VIBEOS_MEM", "128M")
     bios = os.environ.get("VIBEOS_BIOS")  # e.g. path to OVMF_CODE.fd
     expect_panic = os.environ.get("VIBEOS_EXPECT_PANIC", "") not in ("", "0")
+    gp_test = os.environ.get("VIBEOS_GP_TEST", "") not in ("", "0")
 
     cfg = QemuConfig(iso=iso, smp=smp, cpu=cpu, mem=mem, bios=bios)
-    markers = PHASE0_PANIC_PREFIX if expect_panic else PHASE0_MARKERS
+    if gp_test:
+        markers = PHASE0_GP_MARKERS
+        expect_panic = True
+    elif expect_panic:
+        markers = PHASE0_PANIC_PREFIX
+    else:
+        markers = PHASE0_MARKERS
 
     try:
         result = run_qemu_and_check(

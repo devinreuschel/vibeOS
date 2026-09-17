@@ -25,6 +25,27 @@ pub fn write_dec(mut n: u64, buf: &mut [u8]) -> &[u8] {
     &buf[..len]
 }
 
+/// Write `n` as 16 lowercase hex digits (no `0x` prefix) into `buf`.
+/// Truncates from the left if `buf` is short. Never allocates; used by
+/// exception dumps on IST stacks (DESIGN §5.2).
+pub fn write_hex(n: u64, buf: &mut [u8]) -> &[u8] {
+    if buf.is_empty() {
+        return &buf[..0];
+    }
+    let mut tmp = [b'0'; 16];
+    let mut x = n;
+    let mut i = 16;
+    while i > 0 {
+        i -= 1;
+        let d = (x & 0xF) as u8;
+        tmp[i] = if d < 10 { b'0' + d } else { b'a' + (d - 10) };
+        x >>= 4;
+    }
+    let len = 16.min(buf.len());
+    buf[..len].copy_from_slice(&tmp[..len]);
+    &buf[..len]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -52,5 +73,24 @@ mod tests {
         let mut b = [0u8; 2];
         // 12345 -> first two digits fit
         assert_eq!(write_dec(12345, &mut b), b"12");
+    }
+
+    #[test]
+    fn hex_zero_padded() {
+        let mut b = [0u8; 16];
+        assert_eq!(write_hex(0, &mut b), b"0000000000000000");
+        assert_eq!(write_hex(0xAB, &mut b), b"00000000000000ab");
+    }
+
+    #[test]
+    fn hex_max() {
+        let mut b = [0u8; 16];
+        assert_eq!(write_hex(u64::MAX, &mut b), b"ffffffffffffffff");
+    }
+
+    #[test]
+    fn hex_truncates_high_digits() {
+        let mut b = [0u8; 4];
+        assert_eq!(write_hex(0x1234_5678_9ABC_DEF0, &mut b), b"1234");
     }
 }

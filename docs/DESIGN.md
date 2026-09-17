@@ -200,6 +200,10 @@ vibeOS: pmm: 32741 free 4KiB frames
 vibeOS: paging: cr3 ok
 vibeOS: paging: mmio uc
 vibeOS: heap ok
+vibeOS: kva: ready
+vibeOS: gdt ok
+vibeOS: pic: remapped
+vibeOS: idt ok
 vibeOS: acpi: xsdt 9 tables
 ```
 
@@ -301,6 +305,12 @@ Ordering rules worth stating separately because they were learned the hard way:
 - ACPI discovery for the step-8 UC patch may run immediately after CR3 (alongside `paging: mmio uc`).
   The `acpi: xsdt N tables` marker stays at step 12. Do not "fix" that by moving the walk after the
   heap: first touch of LAPIC/IOAPIC/HPET would then be cacheable.
+
+Live boot through Phase 2 slices A and B runs steps 6–10 (PMM, paging, heap, KVA) before steps 3–5
+(GDT/TSS/IST, PIC remap, IDT). IST stacks are allocated from the KVA allocator, which does not exist
+until step 10. Relative order among those three is unchanged: GDT, then PIC remap, then IDT. ACPI
+table walk + `paging: mmio uc` still run after CR3 (step 8); the `acpi: xsdt N tables` marker stays
+after IDT (step 12). The e2e contract in [section 8.3](#83-end-to-end) is the live order.
 
 ## 3.4 Linker script
 
@@ -514,16 +524,18 @@ Flat segmentation. Segments exist because the CPU requires them, not because we 
 | `0x00` | null |
 | `0x08` | kernel code, 64-bit, ring 0 |
 | `0x10` | kernel data, ring 0 |
-| `0x18` | user code, ring 3 |
-| `0x20` | user data, ring 3 |
+| `0x18` | user data, ring 3 |
+| `0x20` | user code, 64-bit, ring 3 |
 | `0x28` | TSS (16 bytes, two GDT entries) |
 
 User selectors go in from the start even before ring 3 exists. `syscall`/`sysret` reads segment
-selectors out of `IA32_STAR` with a fixed layout relative to the kernel selectors, so getting the
-order right up front avoids a rebuild of the GDT later.
+selectors out of `IA32_STAR` with a fixed layout: `STAR.SYSCALL_CS = 0x08` so kernel SS is CS+8, and
+`STAR.SYSRET_CS = 0x10` so user SS is +8 (`0x18`) and user CS is +16 (`0x20`). User *data* therefore
+sits before user *code*. Getting the order right up front avoids a rebuild of the GDT later.
 
 Each CPU gets its own GDT and TSS. The TSS holds `RSP0` (the kernel stack that `syscall` and ring
-transitions land on) and the IST array.
+transitions land on) and the IST array. `CpuTables` is the per-CPU bundle; the BSP keeps one in a
+static, phase 4 allocates one per AP.
 
 | IST index | Use |
 |-----------|-----|
@@ -532,10 +544,10 @@ transitions land on) and the IST array.
 | 3 | `#MC` machine check |
 | 4 | `#DB` debug |
 
-IST stacks are `#[repr(C, align(4096))]`, one page each, statically allocated per CPU. The software
-index is zero-based; the hardware field in the TSS descriptor is one-based. Off by one here means the
-double fault handler runs on the broken stack and turns into a triple fault, which QEMU reports as a
-silent reboot loop.
+IST stacks are page-aligned guarded stacks from the KVA allocator (4 mapped pages + unmapped guard),
+one per slot, per CPU. The software index is zero-based; the hardware field in the TSS descriptor is
+one-based. Off by one here means the double fault handler runs on the broken stack and turns into a
+triple fault, which QEMU reports as a silent reboot loop.
 
 ## 5.2 IDT and exceptions
 
@@ -609,7 +621,9 @@ The PIC is a bootstrap artifact and a fallback, nothing more.
   bring-up needs.
 
 FADT `iapc_boot_arch` bit 0 says whether the legacy 8259 exists at all. Modern hardware may not have
-one, and assuming it does means an early write to a port nobody answers.
+one, and assuming it does means an early write to a port nobody answers. The PIC step reads that bit
+from the FADT already parsed after CR3 and skips the ICW sequence when the legacy controller is
+absent. Missing FADT still remaps and masks.
 
 ## 5.6 I/O APIC
 
@@ -1125,13 +1139,15 @@ removed silently. The authoritative ordering is the `_start` table in [section 3
 
 ```
 vibeOS: serial online
-vibeOS: gdt ok
-vibeOS: idt ok
+vibeOS: limine: rev 3 ok
 vibeOS: pmm: <n> free 4KiB frames
 vibeOS: paging: cr3 ok
 vibeOS: paging: mmio uc
 vibeOS: heap ok
 vibeOS: kva: ready
+vibeOS: gdt ok
+vibeOS: pic: remapped
+vibeOS: idt ok
 vibeOS: per_cpu: bsp ready
 vibeOS: acpi: xsdt <n> tables
 vibeOS: time: tsc <n>/ms
@@ -1140,6 +1156,9 @@ vibeOS: console ok
 vibeOS: smp: done
 vibeOS: shell ready
 ```
+
+Live e2e through Phase 2 slices A and B asserts through `idt ok`, then `acpi: xsdt`, then
+`boot: phase1 done`, omitting `per_cpu` and everything after ACPI.
 
 `smp: done` before `shell ready` is deliberate. Put SMP bring-up after the shell starts and an AP
 failure becomes invisible, because the harness sees its last marker and passes.
