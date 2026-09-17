@@ -124,8 +124,13 @@ fn grow_for(layout: Layout) -> bool {
 
 struct KernelAlloc;
 
+/// Grow rounds before giving up. Cap is 64 MiB; this is a fuse, not the
+/// real bound (`grow_for` returns false at the window cap).
+const GROW_ROUNDS: u32 = 4096;
+
 unsafe impl GlobalAlloc for KernelAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let mut n = 0u32;
         loop {
             {
                 let mut h = HEAP.lock();
@@ -134,9 +139,10 @@ unsafe impl GlobalAlloc for KernelAlloc {
                     return p;
                 }
             }
-            if !grow_for(layout) {
+            if n >= GROW_ROUNDS || !grow_for(layout) {
                 return ptr::null_mut();
             }
+            n += 1;
         }
     }
 
@@ -145,6 +151,7 @@ unsafe impl GlobalAlloc for KernelAlloc {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let mut n = 0u32;
         loop {
             {
                 let mut h = HEAP.lock();
@@ -154,9 +161,10 @@ unsafe impl GlobalAlloc for KernelAlloc {
                 }
             }
             let new_layout = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
-            if !grow_for(new_layout) {
+            if n >= GROW_ROUNDS || !grow_for(new_layout) {
                 return ptr::null_mut();
             }
+            n += 1;
         }
     }
 }

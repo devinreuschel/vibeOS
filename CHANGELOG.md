@@ -13,9 +13,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   Global TCB table with per-CPU ready queues; `CpuAffinity::{Any, Pinned}`
   (`Any` round-robins). Cross-CPU wake is the target inbox plus reschedule
   IPI `0xFD` (never a remote runq lock). Each CPU has its own idle
-  (`sti; hlt` with a closed lost-wakeup window). IPI handlers for
-  `0xFD`/`0xFC`/`0xFB`/`0xFE` are allocation-free and take neither the
-  page-table nor SCHED lock. Shootdown wait services inbound slots so two
+  (`sti; hlt` with a closed lost-wakeup window). IPI handlers are
+  allocation-free. Shootdown (`0xFC`) and call-function (`0xFB`) take
+  neither PT nor SCHED; reschedule (`0xFD`) runs `schedule_preempt`
+  IRQ-off; panic halt is Fixed IPI `0xFE` (not NMI). Shootdown and
+  call-function waits are IRQ-off and poll inbound slots so two
   concurrent shootdowns cannot deadlock; KVA is freed to the free-list tail
   only after ack. ISR-taken locks stay IRQ-off; rank order is page tables →
   buddy → heap → scheduler → device → serial (cheap held-mask tracker).
@@ -70,10 +72,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
-- Shootdown publish→wait→clear runs under `InterruptGuard` so a tick
-  cannot switch away and reuse this CPU's `SHOOT` slot mid-ack.
-- Heap `alloc`/`realloc` retry grow after a concurrent CPU consumes the
-  newly extended window, instead of one refill and OOM.
+- Shootdown and call-function publish→wait→clear run under
+  `InterruptGuard` so a tick cannot reuse `SHOOT[me]` or the global CALL
+  slot mid-ack. `wait_acks` panics if IF is on.
+- Heap `alloc`/`realloc` retry grow (capped) after a concurrent CPU
+  consumes the newly extended window, instead of one refill and OOM.
+- Failed guarded-stack unwind shootdowns before returning frames.
 - Heap grow walked `translate` (PT, rank 1) while holding HEAP (rank 3).
   Snapshot mapped/cap, walk PT with HEAP dropped, then `extend` under HEAP.
 - `spawn_here` copies `irq_nest`. `switch_to` into nest 0 would `sti` the
