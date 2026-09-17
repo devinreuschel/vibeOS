@@ -2,38 +2,24 @@
 //!
 //! Portable free-list logic is `vibeos::heap`. This module pulls order-0
 //! frames from the buddy, maps them writable+NX, and grows in page
-//! increments up to the 64 MiB cap.
+//! increments up to the 64 MiB cap. Heap lock is dropped before PT/buddy
+//! on grow (lock order: page tables → buddy → heap).
 
 use core::alloc::{GlobalAlloc, Layout};
-use core::cell::UnsafeCell;
 use core::ptr;
 
 use vibeos::heap::{Heap, HeapStats, HEAP_END, HEAP_INITIAL, HEAP_SIZE, HEAP_START, PAGE_SIZE};
+use vibeos::lock::RANK_HEAP;
 use vibeos::paging::{heap_flags, PhysAddr, VirtAddr};
 
 use crate::paging_init;
 use crate::pmm_init;
-use crate::x86;
+use crate::sync_init::SpinMutex;
 
-struct BootCell<T>(UnsafeCell<T>);
-unsafe impl<T> Sync for BootCell<T> {}
-impl<T> BootCell<T> {
-    const fn new(v: T) -> Self {
-        Self(UnsafeCell::new(v))
-    }
-    /// # Safety
-    /// Single-threaded, interrupts off (the `GlobalAlloc` wrapper holds
-    /// an [`InterruptGuard`] for the whole call).
-    #[allow(clippy::mut_from_ref)]
-    unsafe fn get_mut(&self) -> &mut T {
-        unsafe { &mut *self.0.get() }
-    }
-    unsafe fn get(&self) -> &T {
-        unsafe { &*self.0.get() }
-    }
-}
+struct LockedHeap(Heap);
+unsafe impl Send for LockedHeap {}
 
-static HEAP: BootCell<Heap> = BootCell::new(Heap::empty());
+static HEAP: SpinMutex<LockedHeap> = SpinMutex::with_rank(LockedHeap(Heap::empty()), RANK_HEAP);
 
 /// Map the initial 1 MiB and hand it to the free-list. Must run after
 /// paging install, before any `alloc` use.
@@ -48,24 +34,34 @@ pub unsafe fn init() {
         mapped += PAGE_SIZE;
     }
     unsafe {
-        HEAP.get_mut()
-            .init(HEAP_START as usize, HEAP_INITIAL as usize, HEAP_SIZE as usize)
-    };
+        HEAP.lock()
+            .0
+            .init(HEAP_START as usize, HEAP_INITIAL as usize, HEAP_SIZE as usize);
+    }
 }
 
 pub fn stats() -> HeapStats {
-    let _g = x86::InterruptGuard::enter();
-    unsafe { HEAP.get().stats() }
+    HEAP.lock().0.stats()
 }
 
 fn map_one(va: u64) -> Result<(), ()> {
-    let pa = unsafe { pmm_init::with_buddy(|b| b.allocate_frame()) }.ok_or(())?;
-    unsafe {
-        paging_init::map_4k(VirtAddr(va), PhysAddr(pa), heap_flags()).map_err(|_| {
-            pmm_init::with_buddy(|b| b.deallocate_frame(pa));
-            ()
-        })
+    let va = VirtAddr(va);
+    let r = paging_init::with_pt(|| {
+        let pa = pmm_init::with_buddy(|b| b.allocate_frame()).ok_or(())?;
+        unsafe {
+            paging_init::map_4k_locked(va, PhysAddr(pa), heap_flags()).map_err(|_| {
+                pmm_init::with_buddy(|b| b.deallocate_frame(pa));
+            })
+        }
+    });
+    if r.is_ok() {
+        vibeos::paging::tlb_shootdown_others(va);
     }
+    r
+}
+
+fn page_present(va: u64) -> bool {
+    paging_init::translate(VirtAddr(va)).is_some()
 }
 
 fn grow_for(layout: Layout) -> bool {
@@ -73,62 +69,95 @@ fn grow_for(layout: Layout) -> bool {
     if extra == 0 {
         return false;
     }
-    let heap = unsafe { HEAP.get_mut() };
-    let old = heap.mapped();
+    let (old, cap) = {
+        let h = HEAP.lock();
+        (h.0.mapped(), h.0.cap())
+    };
     let Some(want) = old.checked_add(extra) else {
         return false;
     };
-    if want > heap.cap() {
+    if want > cap {
         return false;
     }
     let mut mapped = old;
     while mapped < want {
-        match map_one(HEAP_START + mapped as u64) {
+        let va = HEAP_START + mapped as u64;
+        if page_present(va) {
+            mapped += PAGE_SIZE;
+            continue;
+        }
+        match map_one(va) {
             Ok(()) => mapped += PAGE_SIZE,
-            Err(()) => break,
+            Err(()) => {
+                if page_present(va) {
+                    mapped += PAGE_SIZE;
+                    continue;
+                }
+                break;
+            }
         }
     }
     if mapped <= old {
         return false;
     }
-    unsafe { heap.extend(mapped) };
-    mapped >= want
+    // translate takes PT (rank 1); HEAP is rank 3. Do not invert.
+    let (cur, cap) = {
+        let h = HEAP.lock();
+        (h.0.mapped(), h.0.cap())
+    };
+    let mut n = cur;
+    while n < mapped && n < cap {
+        if !page_present(HEAP_START + n as u64) {
+            break;
+        }
+        n += PAGE_SIZE;
+    }
+    if n > cur {
+        let mut h = HEAP.lock();
+        let now = h.0.mapped();
+        if n > now && n <= h.0.cap() {
+            unsafe { h.0.extend(n) };
+        }
+    }
+    n >= want
 }
 
 struct KernelAlloc;
 
 unsafe impl GlobalAlloc for KernelAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let _g = x86::InterruptGuard::enter();
-        {
-            let p = unsafe { HEAP.get_mut().alloc(layout) };
-            if !p.is_null() {
-                return p;
+        loop {
+            {
+                let mut h = HEAP.lock();
+                let p = unsafe { h.0.alloc(layout) };
+                if !p.is_null() {
+                    return p;
+                }
+            }
+            if !grow_for(layout) {
+                return ptr::null_mut();
             }
         }
-        if !grow_for(layout) {
-            return ptr::null_mut();
-        }
-        unsafe { HEAP.get_mut().alloc(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        let _g = x86::InterruptGuard::enter();
-        unsafe { HEAP.get_mut().dealloc(ptr, layout) };
+        unsafe { HEAP.lock().0.dealloc(ptr, layout) };
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let _g = x86::InterruptGuard::enter();
-        let p = unsafe { HEAP.get_mut().realloc(ptr, layout, new_size) };
-        if !p.is_null() || new_size == 0 {
-            return p;
+        loop {
+            {
+                let mut h = HEAP.lock();
+                let p = unsafe { h.0.realloc(ptr, layout, new_size) };
+                if !p.is_null() || new_size == 0 {
+                    return p;
+                }
+            }
+            let new_layout = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
+            if !grow_for(new_layout) {
+                return ptr::null_mut();
+            }
         }
-        // In-place failed and the fresh alloc missed; try growing.
-        let new_layout = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
-        if !grow_for(new_layout) {
-            return ptr::null_mut();
-        }
-        unsafe { HEAP.get_mut().realloc(ptr, layout, new_size) }
     }
 }
 

@@ -26,6 +26,7 @@ mod apic_init;
 mod arch;
 mod diag;
 mod heap_init;
+mod ipi_init;
 mod kva_init;
 mod paging_init;
 mod panic;
@@ -266,8 +267,11 @@ fn normal_boot_tail() {
     serial::line(marker::IRQ_ENABLED);
 
     // DESIGN §3.3 step 17. After the scheduler: APs enter as idle.
-    // One AP at a time. `smp: done` before the boot-done stand-in for shell.
+    // IPI vectors are in the shared IDT; install the shootdown hook
+    // before the first AP is live.
+    crate::ipi_init::init();
     unsafe { smp_init::init() };
+    diag::cpus();
 
     serial::line(marker::BOOT_DONE);
 

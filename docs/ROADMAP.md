@@ -377,12 +377,12 @@ comes before drivers rather than after.
 
 **Exit gate**
 - [x] `smp: done` before `shell ready`, with exactly `N-1` `smp: ap online` lines at `-smp N`
-- [ ] `sched: cpu<i> ready` for every CPU
+- [x] `sched: cpu<i> ready` for every CPU
 - [x] `time: lapic_timer ok (<mode>)` naming the mode that was selected
 - [x] `make test-kernel` at `-smp 2` and `-smp 4` both pass
 - [x] `make test-lapic-fallback` passes with `-cpu qemu64,-tsc-deadline`
-- [ ] a thread spawned on CPU 0 observably runs on another CPU
-- [ ] remote unmap and remap through the shootdown path passes in-guest with 2+ CPUs
+- [x] a thread spawned on CPU 0 observably runs on another CPU
+- [x] remote unmap and remap through the shootdown path passes in-guest with 2+ CPUs
 - [x] failed AP bring-up frees everything it allocated, verified by frame count with a fault injected
 
 ### 4.1 LAPIC
@@ -436,41 +436,41 @@ comes before drivers rather than after.
 - [x] in-guest identity tests on both BSP and AP
 
 ### 4.7 Locking audit
-- [ ] every lock taken from an ISR audited for interrupt-disabled acquisition in all contexts
-- [ ] the documented global lock order enforced by review, and by a debug-build lock order tracker if that turns out to be cheap
-- [ ] serial TX locked at byte granularity
-- [ ] buddy, heap, page tables, scheduler all confirmed SMP-safe under contention
-- [ ] a stress test hammering the allocator from every CPU simultaneously
+- [x] every lock taken from an ISR audited for interrupt-disabled acquisition in all contexts
+- [x] the documented global lock order enforced by review, and by a debug-build lock order tracker if that turns out to be cheap
+- [x] serial TX locked at byte granularity
+- [x] buddy, heap, page tables, scheduler all confirmed SMP-safe under contention
+- [x] a stress test hammering the allocator from every CPU simultaneously
 
 ### 4.8 Per-CPU scheduling
-- [ ] per-CPU ready queues, global TCB table
-- [ ] `CpuAffinity::{Any, Pinned(cpu)}`
-- [ ] round-robin placement for `Any`
-- [ ] cross-CPU wake through the target's inbox plus a reschedule IPI, never a remote queue lock
-- [ ] one idle thread per CPU with its own stack
-- [ ] global sleep queue under one lock for now
-- [ ] when locking two CPU-local structures, lower `cpu_id` first
-- [ ] in-guest: cross-CPU spawn roundtrip, reschedule IPI delivery, waking an idle AP
+- [x] per-CPU ready queues, global TCB table
+- [x] `CpuAffinity::{Any, Pinned(cpu)}`
+- [x] round-robin placement for `Any`
+- [x] cross-CPU wake through the target's inbox plus a reschedule IPI, never a remote queue lock
+- [x] one idle thread per CPU with its own stack
+- [x] global sleep queue under one lock for now
+- [x] when locking two CPU-local structures, lower `cpu_id` first
+- [x] in-guest: cross-CPU spawn roundtrip, reschedule IPI delivery, waking an idle AP
 
 ### 4.9 IPIs
-- [ ] `0xFD` reschedule
-- [ ] `0xFC` TLB shootdown
-- [ ] `0xFB` call-function, with a wait-for-completion variant
-- [ ] `0xFE` panic halt broadcast, so a panic stops the other cores before they overwrite the log
-- [ ] every handler allocation-free and lock-free with respect to the page table and scheduler locks
+- [x] `0xFD` reschedule
+- [x] `0xFC` TLB shootdown
+- [x] `0xFB` call-function, with a wait-for-completion variant
+- [x] `0xFE` panic halt broadcast, so a panic stops the other cores before they overwrite the log
+- [x] every handler allocation-free and lock-free with respect to the page table and scheduler locks
 
 ### 4.10 TLB shootdown
-- [ ] update the PTE, broadcast, wait for acknowledgement from every online CPU
-- [ ] the waiting initiator services incoming shootdown requests so two simultaneous shootdowns cannot deadlock
-- [ ] KVA free deferred until the shootdown completes; freed ranges to the tail of the free list
-- [ ] in-guest: unmap on one CPU, verify a fault on another, remap, verify access
+- [x] update the PTE, broadcast, wait for acknowledgement from every online CPU
+- [x] the waiting initiator services incoming shootdown requests so two simultaneous shootdowns cannot deadlock
+- [x] KVA free deferred until the shootdown completes; freed ranges to the tail of the free list
+- [x] in-guest: unmap on one CPU, verify a fault on another, remap, verify access
 
 ### 4.11 CI variants
-- [ ] `-smp 2` as the default everywhere including e2e
-- [ ] `-smp 4` target
-- [ ] `-cpu qemu64,-tsc-deadline` target
-- [ ] a longer-running high-CPU stress variant on a schedule rather than every push
-- [ ] `cpus` diagnostic output: logical and APIC id, online mask, timer mode, local ticks, ready depth, context switches
+- [x] `-smp 2` as the default everywhere including e2e
+- [x] `-smp 4` target
+- [x] `-cpu qemu64,-tsc-deadline` target
+- [x] a longer-running high-CPU stress variant on a schedule rather than every push
+- [x] `cpus` diagnostic output: logical and APIC id, online mask, timer mode, local ticks, ready depth, context switches
 
 ---
 

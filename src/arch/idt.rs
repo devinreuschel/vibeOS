@@ -146,6 +146,26 @@ extern "x86-interrupt" fn lapic_spurious_irq(_frame: InterruptFrame) {
     crate::apic_init::on_spurious_irq();
 }
 
+extern "x86-interrupt" fn ipi_reschedule(_frame: InterruptFrame) {
+    crate::apic_init::eoi();
+    crate::ipi_init::on_reschedule_ipi();
+}
+
+extern "x86-interrupt" fn ipi_shootdown(_frame: InterruptFrame) {
+    crate::apic_init::eoi();
+    crate::ipi_init::on_shootdown_ipi();
+}
+
+extern "x86-interrupt" fn ipi_call(_frame: InterruptFrame) {
+    crate::apic_init::eoi();
+    crate::ipi_init::on_call_ipi();
+}
+
+extern "x86-interrupt" fn ipi_halt(_frame: InterruptFrame) {
+    crate::apic_init::eoi();
+    crate::ipi_init::on_halt_ipi();
+}
+
 pub fn pointer() -> (u16, u64) {
     (
         (core::mem::size_of::<Idt>() - 1) as u16,
@@ -227,6 +247,11 @@ unsafe fn overlay_named() {
     set_noerr(vectors::LAPIC_ERROR, lapic_error_irq, 0);
     set_noerr(vectors::LAPIC_THERMAL, lapic_thermal_irq, 0);
     set_noerr(vectors::LAPIC_SPURIOUS, lapic_spurious_irq, 0);
+
+    set_noerr(vectors::IPI_CALL, ipi_call, 0);
+    set_noerr(vectors::IPI_SHOOTDOWN, ipi_shootdown, 0);
+    set_noerr(vectors::IPI_RESCHEDULE, ipi_reschedule, 0);
+    set_noerr(vectors::IPI_HALT, ipi_halt, 0);
 }
 
 fn ist_for(vec: u8) -> u8 {

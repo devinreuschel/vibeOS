@@ -71,5 +71,8 @@ jobs:
       - name: in-guest kernel tests
         run: make test-kernel
 
+      - name: in-guest kernel tests (-smp 4)
+        run: make test-kernel-smp4
+
       - name: in-guest LAPIC periodic fallback
         run: make test-lapic-fallback

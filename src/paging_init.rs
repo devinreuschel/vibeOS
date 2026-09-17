@@ -14,6 +14,7 @@
 
 use core::fmt::Write;
 
+use vibeos::lock::RANK_PT;
 use vibeos::marker;
 use vibeos::paging::{
     self, FrameAlloc, IoremapWindow, MapError, MapMode, Mapper, PAGE_SIZE_2M, PAGE_SIZE_4K,
@@ -22,6 +23,7 @@ use vibeos::paging::{
 
 use crate::pmm_init;
 use crate::serial::Serial;
+use crate::sync_init::SpinMutex;
 use crate::x86;
 
 // ------------------ constants matching DESIGN §4.1 ------------------
@@ -89,16 +91,23 @@ struct BuddyFrames;
 
 unsafe impl FrameAlloc for BuddyFrames {
     fn alloc_frame(&mut self) -> Option<PhysAddr> {
-        let raw = unsafe { pmm_init::with_buddy(|b| b.allocate_frame()) }?;
+        let raw = pmm_init::with_buddy(|b| b.allocate_frame())?;
         Some(PhysAddr(raw))
     }
 }
 
 // ------------------ MMIO window (ioremap) ------------------
 
-/// Global reservation state for the ioremap window (DESIGN §4.1). No
-/// lock: single-CPU during boot; phase 4 wraps this alongside the
-/// buddy behind an IRQ-aware mutex.
+/// Page-table + ioremap lock. Rank PT. Callers that already hold it use
+/// the `_locked` map/unmap helpers and drop before a shootdown wait.
+static PT: SpinMutex<()> = SpinMutex::with_rank((), RANK_PT);
+
+pub fn with_pt<R>(f: impl FnOnce() -> R) -> R {
+    let _g = PT.lock();
+    f()
+}
+
+/// Global reservation state for the ioremap window (DESIGN §4.1).
 ///
 /// Reachable from phase 2 (APIC/HPET) via `ioremap` below; keeps the
 /// item pub-reachable so the linker does not GC it.
@@ -115,21 +124,32 @@ static mut IOREMAP: IoremapWindow = IoremapWindow::new();
 /// same registers with cacheable attributes.
 #[allow(dead_code)] // wired for phase 2 (APIC/HPET); slice B ships the API only
 pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
-    let va_offset = unsafe { &mut *core::ptr::addr_of_mut!(IOREMAP) }.reserve(phys, len)?;
-    // Aligned base for the map_range call: strip the intra-page offset
-    // so we map on whole 4 KiB grains, then hand the caller the original
-    // offset-preserving VA.
-    let base_va = VirtAddr(va_offset.as_u64() & !(PAGE_SIZE_4K - 1));
-    let base_pa = PhysAddr(phys.as_u64() & !(PAGE_SIZE_4K - 1));
-    let head = phys.as_u64() & (PAGE_SIZE_4K - 1);
-    let round_len = paging_align_up(head + len, PAGE_SIZE_4K);
-    let mut alloc = BuddyFrames;
-    let mut mapper = current_mapper();
-    unsafe {
-        mapper
-            .map_range(base_va, base_pa, round_len, paging::mmio_flags(),
-                       MapMode::Fresh, &mut alloc)
-            .ok()?;
+    let (va_offset, base_va, round_len) = with_pt(|| {
+        let va_offset = unsafe { &mut *core::ptr::addr_of_mut!(IOREMAP) }.reserve(phys, len)?;
+        let base_va = VirtAddr(va_offset.as_u64() & !(PAGE_SIZE_4K - 1));
+        let base_pa = PhysAddr(phys.as_u64() & !(PAGE_SIZE_4K - 1));
+        let head = phys.as_u64() & (PAGE_SIZE_4K - 1);
+        let round_len = paging_align_up(head + len, PAGE_SIZE_4K);
+        let mut alloc = BuddyFrames;
+        let mut mapper = current_mapper();
+        unsafe {
+            mapper
+                .map_range(
+                    base_va,
+                    base_pa,
+                    round_len,
+                    paging::mmio_flags(),
+                    MapMode::Fresh,
+                    &mut alloc,
+                )
+                .ok()?;
+        }
+        Some((va_offset, base_va, round_len))
+    })?;
+    let mut off = 0u64;
+    while off < round_len {
+        paging::tlb_shootdown_others(VirtAddr(base_va.as_u64() + off));
+        off += PAGE_SIZE_4K;
     }
     Some(va_offset)
 }
@@ -142,12 +162,10 @@ pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
 /// # Safety
 /// Only sound after `install`; the physmap must cover `[phys, phys+len)`.
 pub unsafe fn patch_physmap_uc(phys: PhysAddr, len: u64) -> Result<usize, MapError> {
-    let mut mapper = current_mapper();
-    let n = unsafe { mapper.patch_physmap_uc(VirtAddr(HHDM_BASE), phys, len)? };
-    // DESIGN §4.3: invlpg after every single-PTE edit, even MMIO patches.
-    // Iterate over the whole range in 4 KiB grains; over-invalidating a
-    // 2 MiB leaf is harmless and much simpler than mirroring the walk's
-    // step choices back out here.
+    let n = with_pt(|| {
+        let mut mapper = current_mapper();
+        unsafe { mapper.patch_physmap_uc(VirtAddr(HHDM_BASE), phys, len) }
+    })?;
     let mut off: u64 = 0;
     let hhdm_end = HHDM_BASE.wrapping_add(phys.as_u64()).wrapping_add(len);
     let mut va = HHDM_BASE.wrapping_add(phys.as_u64());
@@ -169,45 +187,60 @@ pub(crate) fn current_mapper() -> Mapper {
     unsafe { Mapper::new(PhysAddr(cr3), HHDM_BASE) }
 }
 
-/// Map one 4 KiB leaf in the live tables and `invlpg`.
-///
-/// # Safety
-/// Same contract as `Mapper::map_page`. Must run after [`install`].
-pub unsafe fn map_4k(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(), MapError> {
+/// Map one 4 KiB leaf. Caller holds [`with_pt`]. Local `invlpg` only;
+/// the caller broadcasts shootdown after dropping PT.
+pub unsafe fn map_4k_locked(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(), MapError> {
     let mut alloc = BuddyFrames;
     let mut mapper = current_mapper();
     unsafe {
         mapper.map_page(va, pa, flags, PageSize::Size4K, MapMode::Fresh, &mut alloc)?;
     }
     x86::invlpg(va.as_u64());
+    Ok(())
+}
+
+/// Map one 4 KiB leaf in the live tables, drop PT, then shootdown.
+///
+/// # Safety
+/// Same contract as `Mapper::map_page`. Must run after [`install`].
+pub unsafe fn map_4k(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(), MapError> {
+    with_pt(|| unsafe { map_4k_locked(va, pa, flags) })?;
     paging::tlb_shootdown_others(va);
     Ok(())
 }
 
-/// Unmap one leaf in the live tables and `invlpg`. Returns the frame.
+/// Unmap one leaf. Caller holds PT. Local `invlpg` only.
+pub unsafe fn unmap_4k_locked(va: VirtAddr) -> Option<(PhysAddr, PageSize)> {
+    let mut mapper = current_mapper();
+    let r = unsafe { mapper.unmap_page(va) }?;
+    x86::invlpg(va.as_u64());
+    Some(r)
+}
+
+/// Unmap one leaf, drop PT, then shootdown. Returns the frame.
 ///
 /// # Safety
 /// Caller is responsible for not unmapping a page the CPU is using
 /// (stack, code, the heap it is currently allocating from, …).
 #[allow(dead_code)]
 pub unsafe fn unmap_4k(va: VirtAddr) -> Option<(PhysAddr, PageSize)> {
-    let mut mapper = current_mapper();
-    let r = unsafe { mapper.unmap_page(va) }?;
-    x86::invlpg(va.as_u64());
-    paging::tlb_shootdown_others(va);
-    Some(r)
+    let r = with_pt(|| unsafe { unmap_4k_locked(va) });
+    if r.is_some() {
+        paging::tlb_shootdown_others(va);
+    }
+    r
 }
 
 #[allow(dead_code)]
 pub fn translate(va: VirtAddr) -> Option<(PhysAddr, PageSize, PageFlags)> {
-    current_mapper().translate(va)
+    with_pt(|| current_mapper().translate(va))
 }
 
 /// DESIGN §4.1: every region asserts it is unmapped before claiming it.
 pub fn assert_unmapped(start: VirtAddr, end: VirtAddr) {
-    let mapper = current_mapper();
+    let ok = with_pt(|| current_mapper().range_unmapped(start, end));
     assert!(
-        mapper.range_unmapped(start, end),
+        ok,
         "paging: region {:#x}..{:#x} already mapped",
         start.as_u64(),
         end.as_u64()
@@ -216,24 +249,26 @@ pub fn assert_unmapped(start: VirtAddr, end: VirtAddr) {
 
 /// Range dump of the live tables. Coalesces adjacent leaves (DESIGN §1.7).
 pub fn dump_ranges() {
-    let mapper = current_mapper();
-    let mut n = 0usize;
-    let mut visit = |va: u64, len: u64, flags: PageFlags, size: PageSize| {
-        n += 1;
-        let sz = match size {
-            PageSize::Size4K => "4k",
-            PageSize::Size2M => "2m",
+    with_pt(|| {
+        let mapper = current_mapper();
+        let mut n = 0usize;
+        let mut visit = |va: u64, len: u64, flags: PageFlags, size: PageSize| {
+            n += 1;
+            let sz = match size {
+                PageSize::Size4K => "4k",
+                PageSize::Size2M => "2m",
+            };
+            let _ = writeln!(
+                Serial,
+                "vibeOS: pt: {va:#x}..{:#x} {sz} flags {:#x}",
+                va + len,
+                flags.0
+            );
         };
-        let _ = writeln!(
-            Serial,
-            "vibeOS: pt: {va:#x}..{:#x} {sz} flags {:#x}",
-            va + len,
-            flags.0
-        );
-    };
-    mapper.walk_ranges(VirtAddr(0), VirtAddr(0x0000_8000_0000_0000), &mut visit);
-    mapper.walk_ranges(VirtAddr(0xFFFF_8000_0000_0000), VirtAddr(u64::MAX), &mut visit);
-    let _ = writeln!(Serial, "vibeOS: pt: {n} ranges");
+        mapper.walk_ranges(VirtAddr(0), VirtAddr(0x0000_8000_0000_0000), &mut visit);
+        mapper.walk_ranges(VirtAddr(0xFFFF_8000_0000_0000), VirtAddr(u64::MAX), &mut visit);
+        let _ = writeln!(Serial, "vibeOS: pt: {n} ranges");
+    });
 }
 
 // ------------------ install ------------------

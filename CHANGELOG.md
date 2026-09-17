@@ -9,6 +9,23 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Phase 4 slice C: per-CPU scheduling, IPIs, TLB shootdown, CI matrix.
+  Global TCB table with per-CPU ready queues; `CpuAffinity::{Any, Pinned}`
+  (`Any` round-robins). Cross-CPU wake is the target inbox plus reschedule
+  IPI `0xFD` (never a remote runq lock). Each CPU has its own idle
+  (`sti; hlt` with a closed lost-wakeup window). IPI handlers for
+  `0xFD`/`0xFC`/`0xFB`/`0xFE` are allocation-free and take neither the
+  page-table nor SCHED lock. Shootdown wait services inbound slots so two
+  concurrent shootdowns cannot deadlock; KVA is freed to the free-list tail
+  only after ack. ISR-taken locks stay IRQ-off; rank order is page tables →
+  buddy → heap → scheduler → device → serial (cheap held-mask tracker).
+  Serial TX is byte-locked; panic broadcasts halt first and skips that lock.
+  Markers: `sched: cpu<i> ready` on each AP before `smp: ap online`.
+  Diagnostic `cpus` line. In-guest: cross-CPU spawn, reschedule IPI wakes
+  an idle AP, remote unmap/fault/remap, allocator hammer from every CPU.
+  `make test` includes `-smp 4`; `make test-smp-stress` is weekly CI, not
+  every push. TCG remains the guest-test default.
+
 - Phase 4 slice B: AP trampoline, INIT/SIPI bring-up, and PerCpu expansion.
   After `irq: enabled`, the BSP copies `trampoline.asm` (`nasm -f bin` via
   `build.rs` / `CARGO_MANIFEST_DIR`) to identity-mapped `0x8000`, starts
@@ -53,6 +70,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Shootdown publish→wait→clear runs under `InterruptGuard` so a tick
+  cannot switch away and reuse this CPU's `SHOOT` slot mid-ack.
+- Heap `alloc`/`realloc` retry grow after a concurrent CPU consumes the
+  newly extended window, instead of one refill and OOM.
+- Heap grow walked `translate` (PT, rank 1) while holding HEAP (rank 3).
+  Snapshot mapped/cap, walk PT with HEAP dropped, then `extend` under HEAP.
+- `spawn_here` copies `irq_nest`. `switch_to` into nest 0 would `sti` the
+  worker; a tick then preempted the cooperative `switch_two_threads` chain
+  (flake at `-smp 4`).
 - TSC-deadline arm: `MFENCE` after the LVT timer write so `IA32_TSC_DEADLINE`
   cannot retire against the old masked one-shot (SDM Vol. 3A). Host test
   asserts LVT → MFENCE → deadline. DESIGN §3.3 lists step 13b

@@ -52,8 +52,11 @@ pub const TIME_LAPIC_PREFIX: &str = "vibeOS: time: lapic_timer ok (";
 pub const TIME_LAPIC_SUFFIX: &str = ")";
 
 /// Phase 3 slice B. DESIGN §3.3 steps 14 and 16. `irq: enabled` is after
-/// `sched: cpu0 ready`.
+/// `sched: cpu0 ready`. Slice C emits `sched: cpu<i> ready` on each AP
+/// before `smp: ap online`.
 pub const SCHED_CPU0: &str = "vibeOS: sched: cpu0 ready";
+pub const SCHED_CPU_PREFIX: &str = "vibeOS: sched: cpu";
+pub const SCHED_CPU_SUFFIX: &str = " ready";
 pub const IRQ_ENABLED: &str = "vibeOS: irq: enabled";
 
 /// Phase 4 slice B. After `irq: enabled`, before `boot: phase1 done`.

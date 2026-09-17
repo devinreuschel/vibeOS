@@ -63,14 +63,22 @@ pub fn begin_wait(
     timeouts.insert(id, deadline);
 }
 
+/// Dequeue one waiter and drop its timeout. Caller places it (local
+/// ready or remote inbox). Host tests use [`wake_one`] which also
+/// pushes the global FIFO.
+pub fn take_one(wq: &mut WaitQueue, timeouts: &mut TimeoutQueue) -> Option<ThreadId> {
+    let id = wq.dequeue()?;
+    timeouts.remove(id);
+    Some(id)
+}
+
 /// Dequeue one waiter, drop its timeout, put it on ready.
 pub fn wake_one(
     wq: &mut WaitQueue,
     ready: &mut ReadyQueue,
     timeouts: &mut TimeoutQueue,
 ) -> Option<ThreadId> {
-    let id = wq.dequeue()?;
-    timeouts.remove(id);
+    let id = take_one(wq, timeouts)?;
     ready.push_back(id);
     Some(id)
 }
@@ -522,6 +530,17 @@ mod tests {
             Some(tid(4))
         );
         assert_eq!(ch.try_recv(), Some(7));
+    }
+
+    #[test]
+    fn take_one_does_not_touch_ready() {
+        let mut wq = WaitQueue::new();
+        let mut ready = ReadyQueue::empty();
+        let mut timeouts = TimeoutQueue::empty();
+        begin_wait(&mut wq, &mut ready, &mut timeouts, tid(1), at(1));
+        assert_eq!(take_one(&mut wq, &mut timeouts), Some(tid(1)));
+        assert!(ready.is_empty());
+        assert!(timeouts.is_empty());
     }
 
     #[test]

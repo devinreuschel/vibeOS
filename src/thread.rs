@@ -34,7 +34,7 @@ impl ThreadId {
     }
 }
 
-/// Placement for phase 4 per-CPU queues. Slice A stores it; Slice B/4 use it.
+/// Placement for per-CPU queues. `Any` round-robins; `Pinned` stays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CpuAffinity {
     Any,

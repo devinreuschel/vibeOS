@@ -49,6 +49,12 @@ pub const TIMER_DIV_16: u32 = 0b0011;
 pub const ICR_DELIVERY_PENDING: u32 = 1 << 12;
 pub const ICR_LEVEL_ASSERT: u32 = 1 << 14;
 pub const ICR_TRIGGER_LEVEL: u32 = 1 << 15;
+/// ICR bits 18–19: 00 dest in ICR high, 01 self, 10 all, 11 all-ex-self.
+pub const ICR_SHORTHAND_SHIFT: u32 = 18;
+pub const ICR_SHORTHAND_NONE: u32 = 0;
+pub const ICR_SHORTHAND_SELF: u32 = 0b01 << ICR_SHORTHAND_SHIFT;
+pub const ICR_SHORTHAND_ALL: u32 = 0b10 << ICR_SHORTHAND_SHIFT;
+pub const ICR_SHORTHAND_ALL_EX_SELF: u32 = 0b11 << ICR_SHORTHAND_SHIFT;
 /// Bound so a stuck ICR under `cli` cannot hang silently. DESIGN §7.2.
 pub const ICR_POLL_CAP: u32 = 1000;
 
@@ -222,6 +228,14 @@ pub fn send_ipi_plan(
     mode: IpiMode,
 ) -> (u32, u32) {
     (icr_high(dest), icr_low(vector, mode))
+}
+
+pub const fn icr_low_shorthand(vector: u8, mode: IpiMode, shorthand: u32) -> u32 {
+    icr_low(vector, mode) | shorthand
+}
+
+pub fn send_ipi_all_ex_self_plan(vector: u8, mode: IpiMode) -> (u32, u32) {
+    (0, icr_low_shorthand(vector, mode, ICR_SHORTHAND_ALL_EX_SELF))
 }
 
 /// VER bits 16–23 are the last redirection index, not the count.
@@ -421,6 +435,10 @@ mod tests {
         let sipi = icr_low(0x08, IpiMode::Sipi);
         assert_eq!(sipi & 0xFF, 0x08);
         assert_eq!((sipi >> 8) & 7, 0b110);
+        let (hi, lo) = send_ipi_all_ex_self_plan(vectors::IPI_SHOOTDOWN, IpiMode::Fixed);
+        assert_eq!(hi, 0);
+        assert_eq!(lo & 0xFF, vectors::IPI_SHOOTDOWN as u32);
+        assert_eq!(lo & ICR_SHORTHAND_ALL_EX_SELF, ICR_SHORTHAND_ALL_EX_SELF);
     }
 
     #[test]

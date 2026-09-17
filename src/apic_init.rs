@@ -337,6 +337,35 @@ pub fn send_ipi(dest: u8, vector: u8, mode: IpiMode) -> Result<(), IpiError> {
     Ok(())
 }
 
+pub fn send_ipi_cpu(cpu: u32, vector: u8) -> Result<(), IpiError> {
+    let Some(c) = crate::per_cpu_init::cpu(cpu) else {
+        return Err(IpiError::NotReady);
+    };
+    send_ipi(c.apic_id as u8, vector, IpiMode::Fixed)
+}
+
+/// All-excluding-self shorthand. No-op with one online CPU.
+pub fn send_ipi_all_ex_self(vector: u8) -> Result<(), IpiError> {
+    let st = STATE.get();
+    if st.lapic_va == 0 {
+        return Err(IpiError::NotReady);
+    }
+    if crate::per_cpu_init::online_mask().count_ones() <= 1 {
+        return Ok(());
+    }
+    let va = st.lapic_va;
+    if !poll_delivery_pending(|| lapic_read(va, LAPIC_ICR_LOW), ICR_POLL_CAP) {
+        return Err(IpiError::DeliveryPendingTimeout);
+    }
+    let (hi, lo) = apic::send_ipi_all_ex_self_plan(vector, IpiMode::Fixed);
+    lapic_write(va, LAPIC_ICR_HIGH, hi);
+    lapic_write(va, LAPIC_ICR_LOW, lo);
+    if !poll_delivery_pending(|| lapic_read(va, LAPIC_ICR_LOW), ICR_POLL_CAP) {
+        return Err(IpiError::DeliveryPendingTimeout);
+    }
+    Ok(())
+}
+
 fn calib_periodic(va: u64) -> Option<u64> {
     let (hpet_va, period_fs) = time_init::hpet_ready()?;
     if !hpet_period_ok(period_fs) {

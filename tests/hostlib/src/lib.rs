@@ -19,8 +19,14 @@ pub mod marker;
 #[path = "../../../src/heap.rs"]
 pub mod heap;
 
+#[path = "../../../src/ipi.rs"]
+pub mod ipi;
+
 #[path = "../../../src/kva.rs"]
 pub mod kva;
+
+#[path = "../../../src/lock.rs"]
+pub mod lock;
 
 #[path = "../../../src/paging.rs"]
 pub mod paging;
@@ -113,6 +119,8 @@ mod smoke {
         assert_eq!(marker::TIME_LAPIC_PREFIX, "vibeOS: time: lapic_timer ok (");
         assert_eq!(marker::TIME_LAPIC_SUFFIX, ")");
         assert_eq!(marker::SCHED_CPU0, "vibeOS: sched: cpu0 ready");
+        assert_eq!(marker::SCHED_CPU_PREFIX, "vibeOS: sched: cpu");
+        assert_eq!(marker::SCHED_CPU_SUFFIX, " ready");
         assert_eq!(marker::IRQ_ENABLED, "vibeOS: irq: enabled");
         assert_eq!(marker::SMP_AP_ONLINE, "vibeOS: smp: ap online");
         assert_eq!(marker::SMP_DONE, "vibeOS: smp: done");

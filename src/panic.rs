@@ -1,5 +1,5 @@
-//! Panic handler. Re-inits serial from scratch (the panic may have come from
-//! inside the serial path), prints the location and message, then halts.
+//! Panic handler. Halt other CPUs first so they stop trashing the log,
+//! re-init serial from scratch, print location and message, then halt.
 //! No unwinding: `panic = "abort"` in both profiles.
 
 use core::fmt::Write;
@@ -11,6 +11,7 @@ use vibeos::marker;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    crate::ipi_init::halt_others();
     Serial::init();
 
     // Banner first so a grep for `vibeOS: panic:` finds every panic even

@@ -32,23 +32,31 @@ impl SpinLock {
 
     /// CAS acquire. Panics on recursive lock by `owner`.
     pub fn acquire(&self, owner: usize) {
-        assert!(owner != UNLOCKED, "spin: owner 0 is reserved");
         loop {
-            match self.locked.compare_exchange(
-                false,
-                true,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    self.owner.store(owner, Ordering::Relaxed);
-                    return;
-                }
-                Err(_) => {
-                    let held = self.owner.load(Ordering::Relaxed);
-                    assert!(held != owner, "spin: recursive lock");
-                    core::hint::spin_loop();
-                }
+            if self.try_acquire(owner) {
+                return;
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    /// One CAS. `false` if held by someone else. Panics on recurse.
+    pub fn try_acquire(&self, owner: usize) -> bool {
+        assert!(owner != UNLOCKED, "spin: owner 0 is reserved");
+        match self.locked.compare_exchange(
+            false,
+            true,
+            Ordering::Acquire,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => {
+                self.owner.store(owner, Ordering::Relaxed);
+                true
+            }
+            Err(_) => {
+                let held = self.owner.load(Ordering::Relaxed);
+                assert!(held != owner, "spin: recursive lock");
+                false
             }
         }
     }
@@ -80,7 +88,17 @@ mod tests {
     }
 
     #[test]
-    fn two_owners_serialize() {
+    fn try_acquire_fails_when_held() {
+        let l = SpinLock::new();
+        assert!(l.try_acquire(1));
+        assert!(!l.try_acquire(2));
+        l.release(1);
+        assert!(l.try_acquire(2));
+        l.release(2);
+    }
+
+    #[test]
+    fn reacquire_changes_owner() {
         let l = SpinLock::new();
         l.acquire(1);
         l.release(1);
