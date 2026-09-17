@@ -70,6 +70,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Heap grow walked `translate` (PT, rank 1) while holding HEAP (rank 3).
+  Snapshot mapped/cap, walk PT with HEAP dropped, then `extend` under HEAP.
+- `spawn_here` copies `irq_nest`. `switch_to` into nest 0 would `sti` the
+  worker; a tick then preempted the cooperative `switch_two_threads` chain
+  (flake at `-smp 4`).
 - TSC-deadline arm: `MFENCE` after the LVT timer write so `IA32_TSC_DEADLINE`
   cannot retire against the old masked one-shot (SDM Vol. 3A). Host test
   asserts LVT → MFENCE → deadline. DESIGN §3.3 lists step 13b
