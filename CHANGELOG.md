@@ -17,8 +17,41 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   tear (`seqlock_threaded_writer_never_tears`).
 - `make test-e2e-pit` disables HPET with `-machine pc,hpet=off`. QEMU
   10.x rejects `-no-hpet`; 8.x only deprecates it.
+- `switch_to` swaps `PerCpu.irq_nest` with the outgoing/incoming TCB.
+  `InterruptGuard` lives on the outgoing stack, so a one-way exit
+  (`thread_exit` → idle) never dropped that guard and left the CPU
+  nest permanently raised. In-guest spawn/switch tests assert nest is
+  unchanged.
 
 ### Added
+
+- Phase 3 slice A: BSP per-CPU area, kernel threads, context switch,
+  `InterruptGuard` / `SpinMutex`. After `idt ok`, boot prints
+  `vibeOS: per_cpu: bsp ready` (DESIGN §3.3 step 11) then the ACPI
+  `xsdt` marker. Does not emit `sched: cpu0 ready` or `irq: enabled`.
+- BSP `PerCpu` at `GS_BASE` / `KERNEL_GS_BASE`, `self_ptr` at offset 0,
+  `current`/`idle` as `*mut Tcb`, `idle_id`, `ready_head` (null until
+  Slice B; UP TCB table is the queue), `irq_nest` for `InterruptGuard`,
+  switch scratch. Idle is bootstrap until Slice B's `sti; hlt`
+  citizen. `per_cpu!` field access. After TSC calibration, `tsc_per_ms`
+  is copied onto the BSP area (the slot phase 4 owns). Boot order is
+  allocate → `wrmsr` both GS bases → bootstrap current/idle → marker;
+  no switch before that.
+- `ThreadId` / `Tcb` / `spawn(name, fn)`: guarded 16 KiB KVA stacks,
+  states ready/running/sleeping(deadline)/blocked/dead, global TCB
+  table with run-queue link fields for phase 4. New threads start on a
+  synthetic frame into a trampoline; returning marks dead, parks the
+  stack on the KVA deferred list (never unmaps the stack it is on), and
+  hits a `schedule` stub that switches to `PerCpu.idle` (bootstrap).
+  Slice B owns the ready queue and drain.
+- `switch_context` in `global_asm!`: callee-saved GPRs, rflags, rsp,
+  return address. No XMM (soft-float). Host unit test switches two
+  stacks; in-guest tests spawn a sentinel and ping-pong two threads
+  via `switch_to`.
+- `InterruptGuard` nested IF save/cli/restore plus per-CPU nest.
+  `SpinMutex<T>` is IRQ-aware CAS with `assert!` on recursive lock
+  and wrong-owner unlock. Host tests cover the CAS core; in-guest
+  covers nest and a mutex store.
 
 - Phase 2 slice C: PIT bootstrap tick, TSC calibration, seqlock
   timekeeping, RTC wall-clock offset. After `acpi: xsdt`, boot prints

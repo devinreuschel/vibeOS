@@ -9,20 +9,25 @@ use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::arch::global_asm;
 use core::fmt::Write;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use vibeos::desc::{IstSlot, KERNEL_CS, TSS_SEL};
 use vibeos::heap::HEAP_SIZE;
 use vibeos::kva::PAGE_SIZE;
 use vibeos::paging::{heap_flags, PageFlags, PhysAddr, VirtAddr};
 use vibeos::time::{CalibSource, Instant};
+use vibeos::thread::{ThreadId, ThreadState};
 use vibeos::vectors;
 
 use crate::acpi_init;
 use crate::arch;
 use crate::kva_init;
 use crate::paging_init;
+use crate::per_cpu_init;
 use crate::pmm_init;
 use crate::serial::{self, Serial};
+use crate::sync_init::SpinMutex;
+use crate::thread_init;
 use crate::time_init;
 use crate::x86;
 
@@ -64,6 +69,11 @@ const TESTS: &[(&str, TestFn)] = &[
     ("tsc_calib_source", test_tsc_calib_source),
     ("uptime_sides", test_uptime_sides),
     ("rtc_offset", test_rtc_offset),
+    ("per_cpu_bsp", test_per_cpu_bsp),
+    ("spawn_sentinel", test_spawn_sentinel),
+    ("switch_two_threads", test_switch_two_threads),
+    ("irq_guard_nest", test_irq_guard_nest),
+    ("spin_mutex", test_spin_mutex),
 ];
 
 pub fn run() -> ! {
@@ -706,4 +716,171 @@ fn test_rtc_offset() -> Outcome {
         let _ = time_init::deadline_after(Instant { ns: time_init::now_ns() });
         Outcome::Ok
     })
+}
+
+fn test_per_cpu_bsp() -> Outcome {
+    if !per_cpu_init::is_live() {
+        return Outcome::Fail("per_cpu not live");
+    }
+    let cpu = per_cpu_init::current();
+    if cpu.cpu_id != 0 {
+        return Outcome::Fail("cpu_id not 0");
+    }
+    let addr = cpu as *const _ as u64;
+    if cpu.self_ptr as u64 != addr {
+        return Outcome::Fail("self_ptr mismatch");
+    }
+    if per_cpu_init::gs_self() as u64 != addr {
+        return Outcome::Fail("gs:[0] != PerCpu");
+    }
+    if crate::per_cpu!(cpu_id) != 0 {
+        return Outcome::Fail("per_cpu! cpu_id");
+    }
+    if thread_init::current_id() != ThreadId::BOOTSTRAP {
+        return Outcome::Fail("current not bootstrap");
+    }
+    if cpu.idle_id != ThreadId::BOOTSTRAP {
+        return Outcome::Fail("idle_id not bootstrap");
+    }
+    if cpu.idle as *const _ != cpu.current as *const _ {
+        return Outcome::Fail("idle != current");
+    }
+    if cpu.current.is_null() {
+        return Outcome::Fail("current null");
+    }
+    if !cpu.ready_head.is_null() {
+        return Outcome::Fail("ready_head should be empty");
+    }
+    Outcome::Ok
+}
+
+static SENTINEL: AtomicU64 = AtomicU64::new(0);
+
+fn sentinel_entry() {
+    SENTINEL.store(0xC0FFEE, Ordering::SeqCst);
+}
+
+fn test_spawn_sentinel() -> Outcome {
+    SENTINEL.store(0, Ordering::SeqCst);
+    let nest0 = per_cpu_init::irq_nest();
+    let h = thread_init::spawn("sentinel", sentinel_entry);
+    if h.id() == ThreadId::BOOTSTRAP {
+        return Outcome::Fail("spawned bootstrap id");
+    }
+    thread_init::switch_to(h.id());
+    if SENTINEL.load(Ordering::SeqCst) != 0xC0FFEE {
+        return Outcome::Fail("sentinel not written");
+    }
+    if thread_init::name(h.id()) != "sentinel" {
+        return Outcome::Fail("name lost");
+    }
+    if thread_init::current_id() != ThreadId::BOOTSTRAP {
+        return Outcome::Fail("did not return to bootstrap");
+    }
+    if thread_init::state(h.id()) != ThreadState::Dead {
+        return Outcome::Fail("returned thread not dead");
+    }
+    if per_cpu_init::irq_nest() != nest0 {
+        return Outcome::Fail("irq_nest leaked across spawn");
+    }
+    Outcome::Ok
+}
+
+static STEPS: AtomicU64 = AtomicU64::new(0);
+static A_ID: AtomicU32 = AtomicU32::new(0);
+static B_ID: AtomicU32 = AtomicU32::new(0);
+
+fn thread_a() {
+    STEPS.fetch_add(1, Ordering::SeqCst);
+    thread_init::switch_to(ThreadId(B_ID.load(Ordering::SeqCst)));
+    STEPS.fetch_add(1, Ordering::SeqCst);
+}
+
+fn thread_b() {
+    STEPS.fetch_add(1, Ordering::SeqCst);
+    thread_init::switch_to(ThreadId::BOOTSTRAP);
+}
+
+fn test_switch_two_threads() -> Outcome {
+    STEPS.store(0, Ordering::SeqCst);
+    let nest0 = per_cpu_init::irq_nest();
+    let a = thread_init::spawn("a", thread_a);
+    let b = thread_init::spawn("b", thread_b);
+    A_ID.store(a.id().raw(), Ordering::SeqCst);
+    B_ID.store(b.id().raw(), Ordering::SeqCst);
+    thread_init::switch_to(a.id());
+    if STEPS.load(Ordering::SeqCst) != 2 {
+        return Outcome::Fail("expected a then b (2 steps)");
+    }
+    if thread_init::state(a.id()) != ThreadState::Ready {
+        return Outcome::Fail("a should still be ready");
+    }
+    thread_init::switch_to(a.id());
+    if STEPS.load(Ordering::SeqCst) != 3 {
+        return Outcome::Fail("a did not resume");
+    }
+    if thread_init::state(a.id()) != ThreadState::Dead {
+        return Outcome::Fail("a not dead after return");
+    }
+    if per_cpu_init::irq_nest() != nest0 {
+        return Outcome::Fail("irq_nest leaked across switch");
+    }
+    Outcome::Ok
+}
+
+fn test_irq_guard_nest() -> Outcome {
+    let _off = IrqsOffOnDrop;
+    x86::sti();
+    if !x86::interrupts_enabled() {
+        return Outcome::Fail("sti did not set IF");
+    }
+    let nest0 = per_cpu_init::irq_nest();
+    {
+        let g1 = x86::InterruptGuard::enter();
+        if x86::interrupts_enabled() {
+            return Outcome::Fail("g1 left IF on");
+        }
+        if per_cpu_init::irq_nest() != nest0 + 1 {
+            return Outcome::Fail("g1 nest");
+        }
+        {
+            let g2 = x86::InterruptGuard::enter();
+            if x86::interrupts_enabled() {
+                return Outcome::Fail("g2 left IF on");
+            }
+            if per_cpu_init::irq_nest() != nest0 + 2 {
+                return Outcome::Fail("g2 nest");
+            }
+            core::mem::drop(g2);
+        }
+        if x86::interrupts_enabled() {
+            return Outcome::Fail("after g2 IF on");
+        }
+        if per_cpu_init::irq_nest() != nest0 + 1 {
+            return Outcome::Fail("after g2 nest");
+        }
+        core::mem::drop(g1);
+    }
+    if !x86::interrupts_enabled() {
+        return Outcome::Fail("outer drop did not restore IF");
+    }
+    if per_cpu_init::irq_nest() != nest0 {
+        return Outcome::Fail("nest not restored");
+    }
+    Outcome::Ok
+}
+
+fn test_spin_mutex() -> Outcome {
+    let m = SpinMutex::new(0u64);
+    {
+        let mut g = m.lock();
+        if x86::interrupts_enabled() {
+            return Outcome::Fail("lock left IF on");
+        }
+        *g = 42;
+    }
+    if *m.lock() != 42 {
+        return Outcome::Fail("value lost");
+    }
+    Outcome::Ok
 }

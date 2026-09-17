@@ -115,9 +115,12 @@ pub fn halt() -> ! {
     }
 }
 
-/// Save `RFLAGS.IF`, `cli`, restore on drop. DESIGN §2.3: the heap
-/// (and later the buddy) is taken with interrupts off. Nested guards
-/// are fine: only the outermost restores IF.
+/// Save `RFLAGS.IF`, `cli`, restore on drop. DESIGN §2.3 / ROADMAP §3.5.
+/// Nested: each guard saves IF as it found it; only a guard that saw
+/// IF=1 restores it, so inner drops do not `sti` while an outer holds.
+/// `irq_nest` on the per-CPU area tracks live `InterruptGuard` depth
+/// on this CPU. `switch_to` swaps it with the TCB because the guard
+/// object stays on the outgoing stack.
 pub struct InterruptGuard {
     restore: bool,
 }
@@ -133,6 +136,7 @@ impl InterruptGuard {
                 out(reg) rflags,
             );
         }
+        crate::per_cpu_init::irq_nest_enter();
         Self {
             restore: rflags & (1 << 9) != 0,
         }
@@ -141,6 +145,7 @@ impl InterruptGuard {
 
 impl Drop for InterruptGuard {
     fn drop(&mut self) {
+        crate::per_cpu_init::irq_nest_leave();
         if self.restore {
             unsafe { asm!("sti", options(nomem, nostack)) };
         }

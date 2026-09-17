@@ -35,6 +35,9 @@ pub const GDT_OK: &str = "vibeOS: gdt ok";
 pub const PIC_REMAPPED: &str = "vibeOS: pic: remapped";
 pub const IDT_OK: &str = "vibeOS: idt ok";
 
+/// DESIGN §3.3 step 11. After IDT (GDT already loaded). Before ACPI marker.
+pub const PER_CPU_BSP: &str = "vibeOS: per_cpu: bsp ready";
+
 /// Phase 2 §2.4. Runtime table count via `writeln!`; harness pins the
 /// shape with `and_contains`. Live order is after IDT (step 12 after 3–5).
 pub const ACPI_XSDT_PREFIX: &str = "vibeOS: acpi: xsdt ";
