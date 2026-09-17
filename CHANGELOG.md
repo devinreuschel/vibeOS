@@ -38,6 +38,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `-Z build-std` moved off `.cargo/config.toml` onto the Makefile `CARGO`
   line. Cargo merges parent config into `tests/hostlib`, and an inherited
   `build-std` compiles a second `core` that collides with std.
+- `ktest` FAIL lines match skip: `vibeOS: ktest: FAIL <name>: <why>`.
+- Boot-done marker is `vibeOS: boot: phase1 done` (was `phase0 done`).
 
 - Phase 1 slice B: page tables + MMIO attributes. `vibeos::paging` in the
   library half carries typed `PhysAddr` / `VirtAddr` newtypes, a

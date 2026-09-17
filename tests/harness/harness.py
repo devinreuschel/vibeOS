@@ -449,10 +449,9 @@ def run_qemu_until_exit(
 
 
 # Boot contract, in order. Extended per DESIGN §8.3 as each phase lands.
-# Phase 0 gave us serial + limine + boot done; phase 1 slice A added the
-# PMM free-frames line; slice B adds `paging: cr3 ok`; slice C adds
-# `heap ok` and `kva: ready` (DESIGN §3.3 steps 9–10). Runtime-derived
-# payload uses `and_contains` so the full `vibeOS: …` shape is pinned.
+# Phase 0 gave us serial + limine; slice A added PMM free-frames; slice B
+# `paging: cr3 ok`; slice C `heap ok` / `kva: ready`. The trailing marker
+# is `boot: phase1 done` now that the phase-1 exit gate is closed.
 PHASE0_MARKERS: list[Marker] = [
     Marker("vibeOS: serial online", "serial_online"),
     Marker("vibeOS: limine: rev 3 ok", "limine_ok"),
@@ -464,7 +463,7 @@ PHASE0_MARKERS: list[Marker] = [
     Marker("vibeOS: paging: cr3 ok", "paging_cr3_ok"),
     Marker("vibeOS: heap ok", "heap_ok"),
     Marker("vibeOS: kva: ready", "kva_ready"),
-    Marker("vibeOS: boot: phase0 done", "boot_done"),
+    Marker("vibeOS: boot: phase1 done", "boot_done"),
 ]
 
 # Markers that must appear *before* the deliberate panic in the panic-test

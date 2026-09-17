@@ -22,7 +22,9 @@ pub const PAGING_CR3_OK: &str = "vibeOS: paging: cr3 ok";
 pub const HEAP_OK: &str = "vibeOS: heap ok";
 pub const KVA_READY: &str = "vibeOS: kva: ready";
 
-pub const BOOT_DONE: &str = "vibeOS: boot: phase0 done";
+/// Last marker of the current boot contract. Phase 1 closed the memory
+/// exit gate; later phases replace this with `shell ready` (DESIGN §3.3).
+pub const BOOT_DONE: &str = "vibeOS: boot: phase1 done";
 
 /// Panic banner. Kept short so the panic path allocates nothing.
 pub const PANIC_BANNER: &str = "vibeOS: panic:";
