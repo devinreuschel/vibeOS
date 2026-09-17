@@ -111,6 +111,7 @@ pub enum Trigger {
     Level,
 }
 
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimerMode {
     TscDeadline,

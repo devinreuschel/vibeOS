@@ -146,6 +146,21 @@ extern "x86-interrupt" fn lapic_spurious_irq(_frame: InterruptFrame) {
     crate::apic_init::on_spurious_irq();
 }
 
+pub fn pointer() -> (u16, u64) {
+    (
+        (core::mem::size_of::<Idt>() - 1) as u16,
+        IDT.ptr() as u64,
+    )
+}
+
+/// # Safety
+/// Shared IDT already filled. GDT loaded so KERNEL_CS and IST TSS match.
+pub unsafe fn load() {
+    let (limit, base) = pointer();
+    let idtr = DtPtr { limit, base };
+    unsafe { x86::lidt(&idtr) };
+}
+
 /// Fill all 256 entries, overlay named handlers, `lidt`.
 ///
 /// # Safety
@@ -154,11 +169,7 @@ pub unsafe fn init() {
     unsafe {
         install_defaults();
         overlay_named();
-        let idtr = DtPtr {
-            limit: (core::mem::size_of::<Idt>() - 1) as u16,
-            base: IDT.ptr() as u64,
-        };
-        x86::lidt(&idtr);
+        load();
     }
 }
 

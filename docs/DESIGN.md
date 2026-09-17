@@ -326,7 +326,8 @@ when LAPIC owns the tick. PIT fallback keeps IRQ0 unmasked with LINT0 ExtINT.
 The handler updates the clock, EOIs, rearms (TSC-deadline), then
 `on_timer_tick`, a no-op until the idle thread exists. Step 14
 (`sched: cpu0 ready`) then step 16 (`irq: enabled`) follow meminfo: IF on,
-preemption live. IRQ1 stays masked until the keyboard driver (phase 5): the
+preemption live. Step 17 brings APs up one at a time and emits `smp: done`
+before the boot-done stand-in for `shell ready`. IRQ1 stays masked until the keyboard driver (phase 5): the
 default PIC handler halts on an unexpected line. The timer path re-runs the
 8259 ICW sequence even when FADT bit 0 skipped the boot remap (QEMU clears
 that bit but still has a PIC on 0x08).
@@ -977,13 +978,13 @@ For each enabled APIC ID that is not the BSP:
 6. On timeout: free the stack and the per-CPU area, log the failure, continue with the remaining CPUs.
    Leaking a 16 KiB stack per failed AP is exactly the kind of thing that goes unnoticed for months.
 
-On the AP side, in order: load per-CPU GDT and TSS, load the IDT, enable the LAPIC, set `GS_BASE` and
-`KERNEL_GS_BASE`, calibrate and arm the LAPIC timer, publish the ready flag, `sti`, enter the scheduler
-as the idle thread.
+On the AP side, in order: load per-CPU GDT and TSS, set `GS_BASE` and
+`KERNEL_GS_BASE`, load the IDT, enable the LAPIC, calibrate and arm the LAPIC timer, publish the ready
+flag, `sti`, enter the scheduler as the idle thread.
 
-`GS_BASE` must be set before any code that touches per-CPU state, which includes any ISR. Setting it
-late means the window between `sti` and the per-CPU setup is a null dereference waiting for a timer
-interrupt.
+`GS_BASE` must be set before any `lidt` and before `sti`. NMI and timer IRQs both
+read per-CPU state through `gs:[0]`. Setting it after `lidt` is a null dereference
+waiting for a non-maskable interrupt, even with IF off.
 
 ## 7.5 Per-CPU data
 
@@ -1004,10 +1005,10 @@ Contents:
 - reserved scratch for the syscall entry path
 
 Phase 3 slice A installs one BSP `PerCpu` through `GS_BASE` and
-`KERNEL_GS_BASE` (not a `MAX_CPUS` array, no `swapgs`). `current` and
-`idle` are `*mut Tcb`; until Slice B, idle is the bootstrap thread.
-`ready_head` is null — the UP global TCB table is the queue. Wake inbox,
-timer mode, and the heap-sized array wait for phase 4.
+`KERNEL_GS_BASE` (not a `MAX_CPUS` array, no `swapgs`). Slice B allocates
+the array from the MADT CPU count, brings up APs, and fills timer mode,
+wake inbox (stub), and `ready`. `current` and `idle` are `*mut Tcb`.
+`ready_head` is still the UP queue head — Slice C splits it per CPU.
 
 Allocate the array on the heap once the CPU count is known from the MADT rather than sizing a static
 array by a `MAX_CPUS` guess.
@@ -1211,9 +1212,10 @@ vibeOS: smp: done
 vibeOS: shell ready
 ```
 
-Live e2e through Phase 4 slice A asserts through `idt ok`, then `per_cpu: bsp ready`,
+Live e2e through Phase 4 slice B asserts through `idt ok`, then `per_cpu: bsp ready`,
 then `acpi: xsdt`, then `time: tsc <n>/ms`, then `time: lapic_timer ok (<mode>)`, then
-`sched: cpu0 ready`, then `irq: enabled`, then `boot: phase1 done`.
+`sched: cpu0 ready`, then `irq: enabled`, then `N-1` × `smp: ap online`, then
+`smp: done`, then `boot: phase1 done`.
 The harness pins `<mode>` for the QEMU config: TCG (CI, `make test`) cannot
 advertise `CPUID.01H:ECX[24]`, so `-cpu max` expects `periodic`; `-machine pc,hpet=off`
 expects `pit`; KVM `-cpu max` expects `tsc-deadline`. Default QEMU also requires

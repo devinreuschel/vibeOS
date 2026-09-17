@@ -3,27 +3,27 @@
 //! `self_ptr` is at offset 0 so `gs:[0]` yields the struct address.
 //! Hardware install (`GS_BASE`) lives in the binary crate.
 //!
-//! Slice A installs the BSP only. No `MAX_CPUS` array, no swapgs.
-//! Slice B's idle is a real `sti; hlt` thread; `ready_head` walks the
-//! UP FIFO (phase 4 splits this per CPU).
+//! Heap array sized from the MADT CPU count (no `MAX_CPUS` static).
+//! `ready_head` is a stub until Slice C splits the UP ready queue.
 
 use core::mem::offset_of;
+use core::sync::atomic::{AtomicBool, AtomicU64};
 
+use crate::apic::TimerMode;
 use crate::thread::{CpuContext, Tcb, ThreadId};
 
-/// BSP / AP local state. Wake inbox / timer mode / heap array: phase 4.
+/// One CPU's local state, reached through `GS_BASE`.
 #[repr(C)]
 pub struct PerCpu {
     pub self_ptr: *mut PerCpu,
     pub cpu_id: u32,
     pub apic_id: u32,
     pub irq_nest: u32,
-    /// `ThreadId::NONE` until bootstrap is installed.
+    /// `ThreadId::NONE` until bootstrap / AP idle is installed.
     pub idle_id: ThreadId,
     pub current: *mut Tcb,
     pub idle: *mut Tcb,
-    /// Ready-list head. Null = empty. Slice B fills this (or points it
-    /// at the first ready TCB from the UP global table).
+    /// Ready-list head. Null = empty. Slice C owns per-CPU queues.
     pub ready_head: *mut Tcb,
     pub tsc_per_ms: u64,
     pub ticks: u64,
@@ -33,7 +33,13 @@ pub struct PerCpu {
     /// TSC at the start of the current slice.
     pub slice_tsc: u64,
     pub switch_scratch: CpuContext,
-    pub _reserved: [u64; 6],
+    /// Cross-CPU wake stub. Slice C: inbox + reschedule IPI `0xFD`.
+    pub wake_inbox: AtomicU64,
+    pub timer_mode: TimerMode,
+    /// Set by the AP after GS/IDT/LAPIC/timer; BSP waits on this.
+    pub ready: AtomicBool,
+    /// Future `syscall` entry scratch. `KERNEL_GS_BASE` matches `GS_BASE`.
+    pub syscall_scratch: [u64; 6],
 }
 
 impl PerCpu {
@@ -53,7 +59,10 @@ impl PerCpu {
             idle_tsc: 0,
             slice_tsc: 0,
             switch_scratch: CpuContext::empty(),
-            _reserved: [0; 6],
+            wake_inbox: AtomicU64::new(0),
+            timer_mode: TimerMode::Pit,
+            ready: AtomicBool::new(false),
+            syscall_scratch: [0; 6],
         }
     }
 }
@@ -70,6 +79,7 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::sync::atomic::Ordering;
 
     #[test]
     fn self_ptr_is_offset_zero() {
@@ -84,5 +94,9 @@ mod tests {
         assert!(p.current.is_null());
         assert!(p.idle.is_null());
         assert!(p.ready_head.is_null());
+        assert_eq!(p.timer_mode, TimerMode::Pit);
+        assert!(!p.ready.load(Ordering::Relaxed));
+        assert_eq!(p.wake_inbox.load(Ordering::Relaxed), 0);
+        assert_eq!(p.syscall_scratch, [0; 6]);
     }
 }

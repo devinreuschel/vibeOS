@@ -56,6 +56,11 @@ pub const TIME_LAPIC_SUFFIX: &str = ")";
 pub const SCHED_CPU0: &str = "vibeOS: sched: cpu0 ready";
 pub const IRQ_ENABLED: &str = "vibeOS: irq: enabled";
 
+/// Phase 4 slice B. After `irq: enabled`, before `boot: phase1 done`.
+/// Exactly `N-1` `ap online` lines at `-smp N`, then `smp: done`.
+pub const SMP_AP_ONLINE: &str = "vibeOS: smp: ap online";
+pub const SMP_DONE: &str = "vibeOS: smp: done";
+
 /// Last marker of the current boot contract. Phase 1 closed the memory
 /// exit gate; later phases replace this with `shell ready` (DESIGN §3.3).
 pub const BOOT_DONE: &str = "vibeOS: boot: phase1 done";

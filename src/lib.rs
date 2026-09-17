@@ -18,6 +18,7 @@ pub mod per_cpu;
 pub mod pic;
 pub mod pmm;
 pub mod sched;
+pub mod smp;
 pub mod sync;
 pub mod thread;
 pub mod time;

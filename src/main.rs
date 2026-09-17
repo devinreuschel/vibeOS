@@ -2,11 +2,11 @@
 //!
 //! Boot order: serial, Limine, PMM, paging, ACPI parse + MMIO UC, heap,
 //! KVA, then GDT/TSS/IST, PIC remap, IDT, BSP per_cpu, ACPI marker, time,
-//! LAPIC+IOAPIC, timer prove, scheduler+idle, irq enabled, meminfo. GDT
-//! after KVA because IST stacks are guarded KVA stacks. per_cpu after GDT
-//! because `mov gs` zeros the hidden base. Scheduler after time so the
-//! tick can preempt. The
-//! `kernel_tests` build runs the in-guest registry after that and
+//! LAPIC+IOAPIC, timer prove, scheduler+idle, irq enabled, SMP, meminfo.
+//! GDT after KVA because IST stacks are guarded KVA stacks. per_cpu after
+//! GDT because `mov gs` zeros the hidden base. Scheduler after time so
+//! the tick can preempt. SMP after irq-enabled so APs enter as idle.
+//! The `kernel_tests` build runs the in-guest registry after that and
 //! exits through isa-debug-exit.
 
 #![no_std]
@@ -33,6 +33,7 @@ mod per_cpu_init;
 mod pmm_init;
 mod sched_init;
 mod serial;
+mod smp_init;
 mod sync_init;
 mod thread_init;
 mod time_init;
@@ -263,6 +264,10 @@ fn normal_boot_tail() {
     unsafe { sched_init::init() };
     serial::line(marker::SCHED_CPU0);
     serial::line(marker::IRQ_ENABLED);
+
+    // DESIGN §3.3 step 17. After the scheduler: APs enter as idle.
+    // One AP at a time. `smp: done` before the boot-done stand-in for shell.
+    unsafe { smp_init::init() };
 
     serial::line(marker::BOOT_DONE);
 

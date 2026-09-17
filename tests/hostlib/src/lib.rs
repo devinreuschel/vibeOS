@@ -31,6 +31,9 @@ pub mod pmm;
 #[path = "../../../src/sched.rs"]
 pub mod sched;
 
+#[path = "../../../src/smp.rs"]
+pub mod smp;
+
 #[path = "../../../src/uart.rs"]
 pub mod uart;
 
@@ -81,6 +84,8 @@ mod smoke {
             marker::TIME_LAPIC_PREFIX,
             marker::SCHED_CPU0,
             marker::IRQ_ENABLED,
+            marker::SMP_AP_ONLINE,
+            marker::SMP_DONE,
             marker::BOOT_DONE,
         ] {
             assert!(m.starts_with("vibeOS: "), "marker missing prefix: {m}");
@@ -109,6 +114,8 @@ mod smoke {
         assert_eq!(marker::TIME_LAPIC_SUFFIX, ")");
         assert_eq!(marker::SCHED_CPU0, "vibeOS: sched: cpu0 ready");
         assert_eq!(marker::IRQ_ENABLED, "vibeOS: irq: enabled");
+        assert_eq!(marker::SMP_AP_ONLINE, "vibeOS: smp: ap online");
+        assert_eq!(marker::SMP_DONE, "vibeOS: smp: done");
         assert_eq!(marker::BOOT_DONE, "vibeOS: boot: phase1 done");
     }
 
