@@ -130,12 +130,13 @@ Acquire in this order, release in reverse. Never take a lower number while holdi
 1. page tables
 2. physical allocator (buddy)
 3. heap
-4. scheduler
+4. scheduler (also: wait-queue lists and blocking-primitive predicates)
 5. device / driver locks
 6. serial
 
 Serial is last so any lock holder can still log. Page tables are first because unmapping needs to
-allocate and free through everything below it.
+allocate and free through everything below it. Blocking `WaitQueue`s are serialized by the scheduler
+lock: the predicate check and the enqueue happen under that same lock (DESIGN [§9.4](#94-concurrency)).
 
 ## 2.2 Interrupt handler rules
 
@@ -294,14 +295,15 @@ of it.
 | 13 | Time: HPET or PIT, TSC calibration | `time: tsc N/ms` | The scheduler needs a tick, and AP bring-up needs `busy_wait_ms`. |
 | 14 | Scheduler, idle thread on BSP | `sched: cpu0 ready` | Preemption target must exist before the timer starts firing into it. |
 | 15 | Framebuffer console, input | `console ok` | Cosmetic but wanted before the shell. |
-| 16 | Unmask timer + keyboard, `sti` | `irq: enabled` | First moment interrupts actually arrive. |
+| 16 | Arm scheduler; emit `irq: enabled` | `irq: enabled` | Scheduler is live. IRQ0 already ticks from step 13; this marker is post-sched arming (IF on, preemption live), not the first STI. IRQ1 stays masked until the keyboard driver. |
 | 17 | APIC + SMP bring-up | `smp: done` | Needs time (delays), heap (per-CPU allocation), scheduler (AP entry point). |
 | 18 | Hand off | `shell ready` | Last marker. Everything above it must have appeared in order. |
 
 Ordering rules worth stating separately because they were learned the hard way:
 
-- IRQs stay masked at the controller until step 16. An interrupt arriving between IDT install and a
-  working scheduler is a fault with no useful backtrace.
+- IRQ0 is unmasked at step 13 so the bootstrap tick can prove timekeeping (§5.5). Other PIC
+  lines stay masked; step 16 is `irq: enabled` (IF on, preemption live), not the first unmask.
+  An unexpected line before its driver is a halt, not a useful backtrace.
 - `smp: done` precedes `shell ready`. The e2e harness enforces it. If SMP moves after the shell, AP
   failures become invisible in CI.
 - ACPI discovery for the step-8 UC patch may run immediately after CR3 (alongside `paging: mmio uc`).
@@ -682,10 +684,19 @@ before calling the scheduler. Interrupts are already disabled inside the handler
 skipping it loses a tick whenever the handler preempts.
 
 **IF on resume.** `prepare_thread` seeds `rflags = 0x2` (IF clear). `schedule` applies
-`apply_if_on_resume` to the incoming TCB before `popfq`: IF is set when `irq_nest == 0`, and kept
+`apply_if_on_resume` to the incoming TCB before the restore: IF is set when `irq_nest == 0`, and kept
 clear while an `InterruptGuard` is live on that stack. Without this, a first-run thread or a thread
 saved from the timer ISR stays tick-deaf until some later `sti`. A thread resumed in the ISR still
-gets IF back from `iret`.
+gets IF back from `iret`. `switch_context` must not `popfq` with IF set and then `jmp`. A timer in
+that one-instruction window preempts a first-run thread whose `CpuContext` is still the synthetic
+trampoline frame; `schedule_preempt` overwrites it with a nested save; `iret` then `jmp`s to
+`schedule_inner` on `stack_top-8`. Strip IF from the popped flags and `sti` immediately before `jmp`
+(STI takes effect after the next instruction).
+
+A post-EOI switch to a thread with `irq_nest == 0` therefore enables IF on the incoming thread even
+if the preempted stack still has an open ISR / `InterruptGuard` frame. That is expected: the guard
+lives on the outgoing stack and will drop (or `iret` will restore IF) when that thread resumes. Do
+not "fix" this by inheriting the outgoing nest onto the incoming thread.
 
 ## 5.9 Later
 
@@ -1230,18 +1241,21 @@ in the test harness produces either false confidence or a debugging session in t
 
 | Context | Flags |
 |---------|-------|
-| `make run` | `-cdrom myos.iso -m 128M -smp 2 -cpu max -serial stdio` |
+| `make run` | `-cdrom myos.iso -m 128M -smp 2 -cpu max -serial stdio -accel tcg` |
 | e2e | as above plus `-display none -no-reboot -monitor unix:...,server=on,wait=off` |
 | ktest | as e2e plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04` |
 | LAPIC fallback | `-cpu qemu64,-tsc-deadline` |
 | SMP stress | `-smp 4` |
 | Interrupt debugging | `-d int,cpu_reset`, plus `-machine q35` when chipset behavior matters |
 
+Harness and `make test` default to `-accel tcg` so KVM does not introduce timing flakes.
+`VIBEOS_QEMU_ACCEL` overrides (`kvm`, or empty to let QEMU pick).
+
 `-no-reboot` matters: a triple fault otherwise reboots and loops, and the serial log fills with
 repeated boot attempts instead of stopping at the interesting one.
 
 Override the CPU count and model with `VIBEOS_SMP` and `VIBEOS_QEMU_CPU` so a single harness covers
-every variant.
+every variant. Acceleration is `VIBEOS_QEMU_ACCEL` (default `tcg`).
 
 ## 8.5 Make targets
 
@@ -1390,6 +1404,25 @@ spinlock type and it is IRQ-aware.
 The wakeup arrived in the window between deciding to block and actually blocking. Rule: enqueue onto
 the wait queue, mark self blocked, drop the inner lock, then schedule. In that order, so there is no
 point where the thread is both on the wait queue and considered runnable.
+
+**Wait queue cookie is a dangling pointer.**
+`ThreadState::Blocked { wq }` stores the `WaitQueue` address so timeout can unlink. The object that
+owns the queue (mutex, rwlock, condvar, channel) must outlive every waiter. Dropping it with threads
+still blocked is a use-after-free on the next timeout or wake.
+
+**Condvar waiter never sees the predicate.**
+Wake does not carry the condition. Mesa: `wait` re-acquires the mutex and returns; the caller loops
+on the predicate. Timeout is the same path.
+
+**Condvar wait parks still holding the mutex.**
+`begin_wait` marked Blocked, SCHED dropped, then `drop(guard)` released the mutex. A timer in that
+window switched the waiter off-CPU still owning it; the notifier blocked on the mutex forever. Rule:
+enqueue on the CV and unlock the mutex under the same SCHED, then schedule.
+
+**First-run thread `#PF`s in `schedule_inner` at `rsp = stack_top-8`.**
+`popfq` restored IF before `jmp` to the trampoline. A tick landed in that window, `schedule_preempt`
+saved over the synthetic frame, and `iret` jumped to the nested save's RIP with the prepared RSP.
+Rule: delayed `sti` immediately before `jmp`; never `popfq` with IF set across a stack switch.
 
 **Two `&mut T` from the same mutex in release builds only.**
 The spinlock's re-entrancy check was a `debug_assert!`. Rule: real CAS spin loop, and any invariant

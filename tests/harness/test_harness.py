@@ -264,6 +264,20 @@ class TestQemuArgv(unittest.TestCase):
         self.assertNotIn("-machine", argv)
         self.assertNotIn("-no-hpet", argv)
 
+    def test_default_accel_is_tcg(self) -> None:
+        argv = _qemu_argv(QemuConfig(iso="x.iso", accel="tcg"), "/tmp/mon")
+        i = argv.index("-accel")
+        self.assertEqual(argv[i : i + 2], ["-accel", "tcg"])
+
+    def test_accel_kvm_override(self) -> None:
+        argv = _qemu_argv(QemuConfig(iso="x.iso", accel="kvm"), "/tmp/mon")
+        i = argv.index("-accel")
+        self.assertEqual(argv[i : i + 2], ["-accel", "kvm"])
+
+    def test_accel_empty_omits_flag(self) -> None:
+        argv = _qemu_argv(QemuConfig(iso="x.iso", accel=""), "/tmp/mon")
+        self.assertNotIn("-accel", argv)
+
 
 if __name__ == "__main__":
     unittest.main()

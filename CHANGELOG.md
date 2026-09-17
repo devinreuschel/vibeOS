@@ -7,8 +7,32 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Phase 3 slice C: `WaitQueue` plus `BlockingMutex`, `RwLock`, `Semaphore`,
+  `Condvar`, and bounded MPSC `Channel<T>`. Every wait takes an optional
+  deadline (`None` → far-future sentinel). Enqueue → Blocked → drop SCHED →
+  schedule; wake under the same lock (DESIGN §9.4). In-guest: 1000-iter
+  two-thread mutex counter, rwlock/sema/condvar/channel, mutex deadline,
+  hold SCHED (ticks freeze under IF=0) then force timer IRQ after drop,
+  spawn/exit 2000 with frame count back to baseline. Host: wait-queue
+  FIFO, lost-wakeup protocol, timeout unlink, primitive state machines.
+- Harness / `make test` default to `-accel tcg` (`VIBEOS_QEMU_ACCEL`
+  overrides) so KVM timing does not flake the PIT/sleep tests.
+
 ### Fixed
 
+- `switch_context` no longer `popfq`s with IF set before `jmp`. A timer
+  in that window preempted a first-run thread, overwrote the trampoline
+  frame, and `iret` jumped into `schedule_inner` on `stack_top-8` (`#PF`
+  in `spawn_exit_thousands`). Incoming IF uses delayed `sti` before the
+  `jmp`.
+- `spawn` rewrites a `Dead` TCB in place instead of `Box::new` + drop,
+  so spawn/exit stress does not grow the heap by a page.
+- `Condvar::wait` unlocks the mutex under the same SCHED as `begin_wait`,
+  so a timer cannot park a waiter that still owns the mutex.
+- `RwLock::write_until` timeout wakes `read_wq` when no writer remains
+  (writer preference otherwise stranded those readers).
 - Dead-stack reap no longer waits for the outgoing `schedule` call to
   resume. Idle's timer resume is `from_irq` (skips reap) and idle
   `yield_now` often takes the no-switch return; both leaked the last

@@ -32,12 +32,16 @@ LIMINE_BIN := $(LIMINE_DIR)/limine
 VIBEOS_SMP      ?= 2
 VIBEOS_QEMU_CPU ?= max
 VIBEOS_MEM      ?= 128M
+# TCG by default: KVM on a loaded host makes PIT/sleep tests flake.
+# Override with VIBEOS_QEMU_ACCEL=kvm (or empty for QEMU's default).
+VIBEOS_QEMU_ACCEL ?= tcg
 
 QEMU_BASE = qemu-system-x86_64 \
     -cdrom $(ISO) \
     -m $(VIBEOS_MEM) \
     -smp $(VIBEOS_SMP) \
     -cpu $(VIBEOS_QEMU_CPU) \
+    -accel $(VIBEOS_QEMU_ACCEL) \
     -no-reboot
 
 # Prerequisites: everything under src/, the linker script, the target spec, the
@@ -110,7 +114,7 @@ $(ISO_PANIC): $(KERNEL_DEPS) limine.conf $(LIMINE_BIN)
 
 run-panic: $(ISO_PANIC)
 	qemu-system-x86_64 -cdrom $(ISO_PANIC) -m $(VIBEOS_MEM) -smp $(VIBEOS_SMP) \
-	    -cpu $(VIBEOS_QEMU_CPU) -no-reboot -serial stdio -display none
+	    -cpu $(VIBEOS_QEMU_CPU) -accel $(VIBEOS_QEMU_ACCEL) -no-reboot -serial stdio -display none
 
 LLVM_TOOL_DIR := $(shell rustc --print sysroot)/lib/rustlib/$(shell rustc -vV | sed -n 's/^host: //p')/bin
 OBJDUMP := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-objdump),$(LLVM_TOOL_DIR)/llvm-objdump,llvm-objdump)
