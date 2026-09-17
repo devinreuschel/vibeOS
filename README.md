@@ -28,6 +28,11 @@ Quickstart:
     make run            # boot in QEMU with COM1 on stdio, -smp 2
     make test           # host units + harness units + e2e (BIOS, UEFI, panic)
 
+QEMU guest tests (`make test`, e2e, `test-kernel`) and `make run` default to
+`-accel tcg`. Override with `VIBEOS_QEMU_ACCEL=kvm` or
+`VIBEOS_QEMU_EXTRA='-accel kvm'`. Empty / `default` accel omits `-accel` so
+QEMU picks (usually KVM).
+
 A previous iteration got to SMP with a preemptive scheduler before being scrapped; what survived is
 written down in `docs/`.
 

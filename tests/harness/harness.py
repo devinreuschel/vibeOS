@@ -211,6 +211,19 @@ def iter_lines_with_deadline(fd: int, deadline: float) -> Iterator[str]:
 # 8.x (where -no-hpet is only deprecated) and on 10.x.
 HPET_OFF_MACHINE = ("-machine", "pc,hpet=off")
 
+# Guest tests and `make run` use TCG. KVM is faster but not the contract;
+# override with VIBEOS_QEMU_ACCEL or `-accel` in VIBEOS_QEMU_EXTRA.
+DEFAULT_QEMU_ACCEL = "tcg"
+
+
+def _qemu_accel_argv(extra: tuple[str, ...] = ()) -> list[str]:
+    if "-accel" in extra:
+        return []
+    accel = os.environ.get("VIBEOS_QEMU_ACCEL", DEFAULT_QEMU_ACCEL)
+    if accel in ("", "default"):
+        return []
+    return ["-accel", accel]
+
 
 @dataclass
 class QemuConfig:
@@ -226,6 +239,7 @@ class QemuConfig:
 def _qemu_argv(cfg: QemuConfig, monitor_sock: str) -> list[str]:
     argv = [
         "qemu-system-x86_64",
+        *_qemu_accel_argv(cfg.extra),
         "-cdrom", cfg.iso,
         "-m", cfg.mem,
         "-smp", str(cfg.smp),

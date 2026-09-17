@@ -1230,7 +1230,7 @@ in the test harness produces either false confidence or a debugging session in t
 
 | Context | Flags |
 |---------|-------|
-| `make run` | `-cdrom myos.iso -m 128M -smp 2 -cpu max -serial stdio` |
+| `make run` | `-accel tcg -cdrom myos.iso -m 128M -smp 2 -cpu max -serial stdio` |
 | e2e | as above plus `-display none -no-reboot -monitor unix:...,server=on,wait=off` |
 | ktest | as e2e plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04` |
 | LAPIC fallback | `-cpu qemu64,-tsc-deadline` |
@@ -1240,8 +1240,10 @@ in the test harness produces either false confidence or a debugging session in t
 `-no-reboot` matters: a triple fault otherwise reboots and loops, and the serial log fills with
 repeated boot attempts instead of stopping at the interesting one.
 
-Override the CPU count and model with `VIBEOS_SMP` and `VIBEOS_QEMU_CPU` so a single harness covers
-every variant.
+TCG is the contract: QEMU otherwise prefers KVM when `/dev/kvm` exists, and that
+is not what CI/QA run. Override with `VIBEOS_QEMU_ACCEL` (`kvm`, or `default` to
+omit `-accel`) or put `-accel …` in `VIBEOS_QEMU_EXTRA`. `VIBEOS_SMP` and
+`VIBEOS_QEMU_CPU` still cover CPU count and model.
 
 ## 8.5 Make targets
 

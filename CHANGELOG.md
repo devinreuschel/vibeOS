@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed
+
+- QEMU guest tests (`make test` / e2e / `test-kernel`) and `make run`
+  pass `-accel tcg` unless `VIBEOS_QEMU_ACCEL` or `VIBEOS_QEMU_EXTRA`
+  already chooses an accelerator.
+
 ### Fixed
 
 - Dead-stack reap no longer waits for the outgoing `schedule` call to

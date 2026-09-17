@@ -29,11 +29,15 @@ LIMINE_BIN := $(LIMINE_DIR)/limine
 
 # QEMU config. `-smp 2` from day one, DESIGN §0.5. VIBEOS_SMP / VIBEOS_QEMU_CPU
 # override so a single Makefile covers the SMP and LAPIC fallback variants.
-VIBEOS_SMP      ?= 2
-VIBEOS_QEMU_CPU ?= max
-VIBEOS_MEM      ?= 128M
+# Accel defaults to TCG (the test contract). Override: VIBEOS_QEMU_ACCEL=kvm
+# or, for the Python harness, VIBEOS_QEMU_EXTRA='-accel kvm'.
+VIBEOS_SMP        ?= 2
+VIBEOS_QEMU_CPU   ?= max
+VIBEOS_MEM        ?= 128M
+VIBEOS_QEMU_ACCEL ?= tcg
 
 QEMU_BASE = qemu-system-x86_64 \
+    -accel $(VIBEOS_QEMU_ACCEL) \
     -cdrom $(ISO) \
     -m $(VIBEOS_MEM) \
     -smp $(VIBEOS_SMP) \
@@ -109,7 +113,8 @@ $(ISO_PANIC): $(KERNEL_DEPS) limine.conf $(LIMINE_BIN)
 	@$(LIMINE_BIN) bios-install $(ISO_PANIC) >/dev/null
 
 run-panic: $(ISO_PANIC)
-	qemu-system-x86_64 -cdrom $(ISO_PANIC) -m $(VIBEOS_MEM) -smp $(VIBEOS_SMP) \
+	qemu-system-x86_64 -accel $(VIBEOS_QEMU_ACCEL) -cdrom $(ISO_PANIC) \
+	    -m $(VIBEOS_MEM) -smp $(VIBEOS_SMP) \
 	    -cpu $(VIBEOS_QEMU_CPU) -no-reboot -serial stdio -display none
 
 LLVM_TOOL_DIR := $(shell rustc --print sysroot)/lib/rustlib/$(shell rustc -vV | sed -n 's/^host: //p')/bin

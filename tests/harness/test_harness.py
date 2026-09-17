@@ -252,6 +252,15 @@ class TestKtestProtocol(unittest.TestCase):
 
 
 class TestQemuArgv(unittest.TestCase):
+    def setUp(self) -> None:
+        self._old_accel = os.environ.pop("VIBEOS_QEMU_ACCEL", None)
+
+    def tearDown(self) -> None:
+        if self._old_accel is None:
+            os.environ.pop("VIBEOS_QEMU_ACCEL", None)
+        else:
+            os.environ["VIBEOS_QEMU_ACCEL"] = self._old_accel
+
     def test_hpet_off_uses_machine_property(self) -> None:
         argv = _qemu_argv(QemuConfig(iso="x.iso", hpet=False), "/tmp/mon")
         self.assertEqual(HPET_OFF_MACHINE, ("-machine", "pc,hpet=off"))
@@ -263,6 +272,36 @@ class TestQemuArgv(unittest.TestCase):
         argv = _qemu_argv(QemuConfig(iso="x.iso"), "/tmp/mon")
         self.assertNotIn("-machine", argv)
         self.assertNotIn("-no-hpet", argv)
+
+    def test_default_accel_is_tcg(self) -> None:
+        argv = _qemu_argv(QemuConfig(iso="x.iso"), "/tmp/mon")
+        i = argv.index("-accel")
+        self.assertEqual(argv[i : i + 2], ["-accel", "tcg"])
+
+    def test_accel_env_override(self) -> None:
+        os.environ["VIBEOS_QEMU_ACCEL"] = "kvm"
+        argv = _qemu_argv(QemuConfig(iso="x.iso"), "/tmp/mon")
+        i = argv.index("-accel")
+        self.assertEqual(argv[i : i + 2], ["-accel", "kvm"])
+        self.assertEqual(argv.count("-accel"), 1)
+
+    def test_extra_accel_wins(self) -> None:
+        argv = _qemu_argv(
+            QemuConfig(iso="x.iso", extra=("-accel", "hvf")), "/tmp/mon"
+        )
+        self.assertEqual(argv.count("-accel"), 1)
+        i = argv.index("-accel")
+        self.assertEqual(argv[i : i + 2], ["-accel", "hvf"])
+
+    def test_accel_default_omits_flag(self) -> None:
+        os.environ["VIBEOS_QEMU_ACCEL"] = "default"
+        argv = _qemu_argv(QemuConfig(iso="x.iso"), "/tmp/mon")
+        self.assertNotIn("-accel", argv)
+
+    def test_accel_empty_omits_flag(self) -> None:
+        os.environ["VIBEOS_QEMU_ACCEL"] = ""
+        argv = _qemu_argv(QemuConfig(iso="x.iso"), "/tmp/mon")
+        self.assertNotIn("-accel", argv)
 
 
 if __name__ == "__main__":
