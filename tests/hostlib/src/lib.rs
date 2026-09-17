@@ -28,6 +28,9 @@ pub mod kva;
 #[path = "../../../src/lock.rs"]
 pub mod lock;
 
+#[path = "../../../src/log.rs"]
+pub mod log;
+
 #[path = "../../../src/paging.rs"]
 pub mod paging;
 
@@ -57,6 +60,9 @@ pub mod per_cpu;
 
 #[path = "../../../src/sync.rs"]
 pub mod sync;
+
+#[path = "../../../src/symtab.rs"]
+pub mod symtab;
 
 #[path = "../../../src/thread.rs"]
 pub mod thread;

@@ -241,7 +241,8 @@ pub fn on_halt_ipi() -> ! {
     x86::halt();
 }
 
-/// Broadcast halt so others stop before we trash the log. DESIGN §2.5 / §7.6.
+/// Broadcast halt so others stop before we trash the log.
+/// Fixed IPI `0xFE`, not NMI (DESIGN §2.5 / §7.6).
 pub fn halt_others() {
     HALTING.store(true, Ordering::Release);
     let _ = apic_init::send_ipi_all_ex_self(vectors::IPI_HALT);

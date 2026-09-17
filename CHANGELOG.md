@@ -9,6 +9,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Phase 5 slice A: kernel log and panic/diagnostics. Levels
+  `error|warn|info|debug|trace` with a compile-time ceiling and an
+  `AtomicU8` runtime filter. Fixed ring (wrap drops oldest) stores
+  `{timestamp, cpu_id, level, msg}`; serial output is captured so boot
+  lines exist in the ring before a framebuffer. Host tests cover wrap,
+  filter, and overflow. ISR path: no alloc, no SCHED, serial TX is
+  IRQ-off or try-lock + drop. Printer thread parked (Design ACK): global
+  IRQ-safe ring + serial sink. Panic order is halt IPI `0xFE` (Fixed,
+  not NMI), re-init serial, dump regs/thread/last N log records,
+  symbolized FP backtrace, then `hlt` or `panic_exit` isa-debug-exit.
+  Bounded THRE poll still drops the byte. E2E panic scanner waits for
+  `vibeOS: panic: halted` and checks dump needles; still matches `#PF`
+  `#GP` `#UD` `#DF` `panicked at`, not English "page fault". No new boot
+  markers; `smp: done` stays where Phase 4 put it.
+
 - Phase 4 slice C: per-CPU scheduling, IPIs, TLB shootdown, CI matrix.
   Global TCB table with per-CPU ready queues; `CpuAffinity::{Any, Pinned}`
   (`Any` round-robins). Cross-CPU wake is the target inbox plus reschedule

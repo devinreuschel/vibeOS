@@ -3,7 +3,7 @@
 //! Polled TX with a bounded THRE wait; a dead UART drops the byte rather
 //! than wedging the panic handler (DESIGN §9.6). Byte-granularity TX lock
 //! so SMP CPUs do not interleave bytes (DESIGN §7.7). Panic/halt skips
-//! the lock so a holder cannot stall the dump.
+//! the lock so a holder cannot stall the dump. `log!` uses try-lock + drop.
 
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -50,22 +50,38 @@ impl Serial {
         }
     }
 
-    fn write_byte(b: u8) {
-        if crate::ipi_init::is_halting() {
+    fn write_bytes_raw(bytes: &[u8]) {
+        for &b in bytes {
+            if b == b'\n' {
+                Self::write_byte_raw(b'\r');
+            }
             Self::write_byte_raw(b);
-            return;
         }
-        let _g = TX.lock();
-        Self::write_byte_raw(b);
     }
 
     pub fn write_bytes(bytes: &[u8]) {
-        for &b in bytes {
-            if b == b'\n' {
-                Self::write_byte(b'\r');
-            }
-            Self::write_byte(b);
+        if !crate::ipi_init::is_halting() && !crate::log_init::is_emitting() {
+            crate::log_init::capture_serial(bytes);
         }
+        if crate::ipi_init::is_halting() {
+            Self::write_bytes_raw(bytes);
+            return;
+        }
+        let _g = TX.lock();
+        Self::write_bytes_raw(bytes);
+    }
+
+    /// ISR / log sink: one lock for the whole buffer, drop the line if busy.
+    pub fn try_write_bytes(bytes: &[u8]) -> bool {
+        if crate::ipi_init::is_halting() {
+            Self::write_bytes_raw(bytes);
+            return true;
+        }
+        let Some(_g) = TX.try_lock() else {
+            return false;
+        };
+        Self::write_bytes_raw(bytes);
+        true
     }
 }
 
@@ -76,7 +92,7 @@ impl fmt::Write for Serial {
     }
 }
 
-/// Write a marker line: `<msg>\n`.
+/// Write a marker line: `<msg>\n`. Captured into the log ring.
 pub fn line(msg: &str) {
     Serial::write_bytes(msg.as_bytes());
     Serial::write_bytes(b"\n");

@@ -182,13 +182,28 @@ per-CPU inbox plus a reschedule IPI. More SMP-specific rules in [section 7.7](#7
 
 ## 2.5 Panic policy
 
-`#[panic_handler]` re-initializes serial from scratch (the panic may be *in* the serial path), prints
-location and message, dumps a backtrace when frame pointers permit, then broadcasts Fixed IPI `0xFE`
-(`halt_others`) so the other CPUs stop before they overwrite the log, and `hlt`s. NMI stays on IST
-for real NMIs; it is not the panic IPI. No unwinding: `panic = "abort"`.
+Binding order (do not invert):
+
+1. Broadcast halt IPI `0xFE` first (Fixed delivery, not NMI) so other CPUs stop before the dump.
+2. Re-initialize serial from scratch (the panic may be *in* the serial path).
+3. Print location and message; dump registers, the current thread, and the last N log records.
+4. Symbolized backtrace when frame pointers exist (in-image sorted table, binary search, no alloc).
+5. `cli; hlt` loop, or QEMU `isa-debug-exit` under the `panic_exit` test feature.
+
+No unwinding: `panic = "abort"`. Serial TX in this path is a bounded THRE poll; drop the byte on
+timeout (see [§9.6](#96-hardware-polling)). Do not take SCHED. The log ring is readable after the
+halt IPI without taking its TAS (force-unlock if the panicking CPU held it).
+
+Log ring (ROADMAP §5.5): 256 records × 96-byte messages. Wrap **drops oldest**. Compile-time max is
+`trace` (debug) / `debug` (release); runtime filter is `AtomicU8`, default `info`. Panic dump prints
+the last 16. The ring TAS is IRQ-off and is not in the ranked lock order; never hold it across serial
+TX. Two-pass `nm` fills an in-image `.rodata` symbol table so `.text` stays put; the target JSON
+keeps `frame-pointer: always`. Overflow, filter, and lookup are host-tested. Printer thread parked
+(Design ACK): global IRQ-safe ring + serial try-lock sink.
 
 Exceptions split into two groups. Recoverable ones (`#BP`, and `#PF` once demand paging exists) log
-and continue. Everything else logs and halts. Nothing is silently swallowed.
+and continue. Everything else dumps and halts through the same order as `#[panic_handler]`. Nothing
+is silently swallowed. NMI stays on IST for real NMIs; it is not the panic broadcast.
 
 ## 2.6 Serial markers
 
@@ -296,7 +311,7 @@ of it.
 | 13 | Time: HPET or PIT, TSC calibration | `time: tsc N/ms` | The scheduler needs a tick, and AP bring-up needs `busy_wait_ms`. |
 | 13b | BSP LAPIC, I/O APIC, LAPIC timer | `time: lapic_timer ok (<mode>)` | After TSC calib. Prove a tick (TSC-deadline → periodic → PIT), then mask PIC + PIT GSI if LAPIC owns it. |
 | 14 | Scheduler, idle thread on BSP | `sched: cpu0 ready` | Preemption target must exist before the timer starts firing into it. |
-| 15 | Framebuffer console, input | `console ok` | Cosmetic but wanted before the shell. |
+| 15 | Framebuffer console, input | `console ok` | Cosmetic but wanted before the shell. **Live:** after `smp: done`. See note below. |
 | 16 | Arm scheduler; emit `irq: enabled` | `irq: enabled` | Scheduler is live. The timer already ticks from steps 13/13b; this marker is post-sched arming (IF on, preemption live), not the first STI. IRQ1 stays masked until the keyboard driver. |
 | 17 | APIC + SMP bring-up | `smp: done` | Needs time (delays), heap (per-CPU allocation), scheduler (AP entry point). |
 | 18 | Hand off | `shell ready` | Last marker. Everything above it must have appeared in order. |
@@ -309,6 +324,10 @@ Ordering rules worth stating separately because they were learned the hard way:
   line before its driver is a halt, not a useful backtrace.
 - `smp: done` precedes `shell ready`. The e2e harness enforces it. If SMP moves after the shell, AP
   failures become invisible in CI.
+- **Live boot vs this table.** Phase 4 shipped SMP (step 17) before console/shell. Slice A does not
+  emit `console ok` / `shell ready` and does **not** reorder SMP. Prefer live order:
+  `smp: done` → (Slice B) `console ok` → (Slice C) `shell ready`. The numbered table still lists
+  console as step 15; that is doc drift, not a request to move SMP after the shell.
 - ACPI discovery for the step-8 UC patch may run immediately after CR3 (alongside `paging: mmio uc`).
   The `acpi: xsdt N tables` marker stays at step 12. Do not "fix" that by moving the walk after the
   heap: first touch of LAPIC/IOAPIC/HPET would then be cacheable.
@@ -585,7 +604,7 @@ triple fault, which QEMU reports as a silent reboot loop.
 | `0x0D` | `#GP` general protection | log selector/error code, halt |
 | `0x08` | `#DF` double fault | log on IST stack, halt |
 | `0x12` | `#MC` machine check | log, halt |
-| `0x02` | NMI | IST; log and halt. Panic stop is IPI `0xFE`, not NMI. |
+| `0x02` | NMI | real NMIs on IST; panic halt is Fixed IPI `0xFE`, not NMI |
 | rest | | log vector + error code, halt |
 
 Every halting handler prints the interrupt frame (RIP, CS, RFLAGS, RSP, SS), the error code, and CR2
@@ -1046,8 +1065,9 @@ The global lock order is in [section 2.1](#21-lock-order) and the one-spinlock r
   lock is the canonical case: the timer ISR calls into the scheduler, so any holder with interrupts
   enabled deadlocks the moment its own timer fires.
 - Serial TX takes a lock so bytes from different CPUs do not interleave into unreadable garbage. Byte
-  granularity, not line granularity; full line atomicity needs per-CPU buffers and a printer thread,
-  which is a later problem.
+  granularity, not line granularity; full line atomicity needs per-CPU buffers and a printer thread.
+  Slice A ships a global IRQ-safe log ring plus a serial try-lock sink; the printer thread is parked
+  (Design ACK). Per-CPU serial capture still assembles lines into the ring.
 
 ## 7.8 Per-CPU scheduling
 
@@ -1213,8 +1233,8 @@ vibeOS: acpi: xsdt <n> tables
 vibeOS: time: tsc <n>/ms
 vibeOS: sched: cpu0 ready
 vibeOS: irq: enabled
-vibeOS: console ok
 vibeOS: smp: done
+vibeOS: console ok
 vibeOS: shell ready
 ```
 
@@ -1222,6 +1242,10 @@ Live e2e through Phase 4 slice C asserts through `idt ok`, then `per_cpu: bsp re
 then `acpi: xsdt`, then `time: tsc <n>/ms`, then `time: lapic_timer ok (<mode>)`, then
 `sched: cpu0 ready`, then `irq: enabled`, then for each AP `sched: cpu<i> ready`
 followed by `smp: ap online`, then `smp: done`, then `boot: phase1 done`.
+Phase 5 Slice A adds no new boot markers (`console ok` / `shell ready` wait for B/C) and
+does not move `smp: done`. The sample list above is the *eventual* console-phase contract
+with SMP before console/shell (live order). The old table that put `console ok` before
+`smp: done` was drift.
 The harness pins `<mode>` for the QEMU config: TCG (CI, `make test`) cannot
 advertise `CPUID.01H:ECX[24]`, so `-cpu max` expects `periodic`; `-machine pc,hpet=off`
 expects `pit`; KVM `-cpu max` expects `tsc-deadline`. Default QEMU also requires
@@ -1249,6 +1273,10 @@ panicked at   #PF   #GP   #UD   #DF   double fault   stack overflow
 
 Match the exception mnemonics, not the phrase "page fault". Shell help text and log messages contain
 English words, and a substring match on prose produces false failures that erode trust in the suite.
+
+Expected-panic e2e waits for `vibeOS: panic: halted` so the dump (regs, thread, last log records,
+backtrace) is in the captured log, then checks dump needles. `panic_exit` writes isa-debug-exit
+`0x11` so QEMU leaves instead of sitting in `hlt`.
 
 On success, exit through the QEMU monitor's `quit` rather than waiting for the timeout. Two seconds
 versus forty five, on every CI run and every local invocation.
@@ -1345,6 +1373,11 @@ and capture the assembler's stderr into the build output so the failure is reada
 The request static was not in the `.limine_requests` section, so the loader never saw it. Rule: every
 request is `#[used]` with an explicit `link_section`, and the base revision is verified before any other
 response is read.
+
+**Panic backtrace addresses have no names, or the second link moves every RIP.**
+The symbol table lived in `.text` or was patched in place. Rule: first link with an empty `.rodata`
+table, `nm --demangle` the ELF, second link with the filled table. `.text` must not move. Do not wrap
+`$(CARGO)` in `$(call …)`: `-Zbuild-std=core,compiler_builtins,alloc` splits on commas.
 
 ## 9.2 Memory
 

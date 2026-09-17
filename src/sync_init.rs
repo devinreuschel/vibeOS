@@ -67,6 +67,28 @@ impl<T> SpinMutex<T> {
             _irq: irq,
         }
     }
+
+    /// One shot. `None` if held (including by us: recursive would panic
+    /// the TAS, so we treat same-owner as fail without a second CAS).
+    pub fn try_lock(&self) -> Option<SpinMutexGuard<'_, T>> {
+        let irq = InterruptGuard::enter();
+        let owner = owner_token();
+        if self.lock.is_locked() && self.lock.owner() == owner {
+            return None;
+        }
+        lock_enter(self.rank);
+        if self.lock.try_acquire(owner) {
+            Some(SpinMutexGuard {
+                mutex: self,
+                owner,
+                rank: self.rank,
+                _irq: irq,
+            })
+        } else {
+            lock_leave(self.rank);
+            None
+        }
+    }
 }
 
 impl<T> Drop for SpinMutexGuard<'_, T> {

@@ -28,6 +28,8 @@ mod diag;
 mod heap_init;
 mod ipi_init;
 mod kva_init;
+mod log_init;
+mod ksyms;
 mod paging_init;
 mod panic;
 mod per_cpu_init;
