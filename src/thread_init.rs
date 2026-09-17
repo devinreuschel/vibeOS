@@ -116,6 +116,7 @@ pub unsafe fn init_bootstrap() {
         prev: None,
         affinity: CpuAffinity::Pinned(0),
         cpu: 0,
+        irq_nest: 0,
         switches: 0,
     });
     let ptr = &mut *tcb as *mut Tcb;
@@ -155,6 +156,7 @@ pub fn spawn(name: &'static str, entry: fn()) -> ThreadHandle {
         prev: None,
         affinity: CpuAffinity::Any,
         cpu: 0,
+        irq_nest: 0,
         switches: 0,
     });
     prepare_thread(&mut tcb.context, top, trampoline as *const () as u64);
@@ -176,6 +178,11 @@ pub fn spawn(name: &'static str, entry: fn()) -> ThreadHandle {
 }
 
 /// Voluntary switch. Test helper; Slice B's `schedule` picks from a queue.
+///
+/// `InterruptGuard` stays on the outgoing stack across `switch_context`
+/// so IF is restored only if this thread resumes. Swap `irq_nest` with
+/// the incoming TCB: a dead thread never drops its guard, and must not
+/// leave that increment on the CPU.
 pub fn switch_to(id: ThreadId) {
     let _irq = InterruptGuard::enter();
     let old_id = current_id();
@@ -200,9 +207,11 @@ pub fn switch_to(id: ThreadId) {
     };
 
     per_cpu_init::set_current_thread(new_ptr);
-    per_cpu_init::current_mut().switches = per_cpu_init::current().switches.wrapping_add(1);
-
+    let cpu = per_cpu_init::current_mut();
+    cpu.switches = cpu.switches.wrapping_add(1);
     unsafe {
+        (*old_ptr).irq_nest = cpu.irq_nest;
+        cpu.irq_nest = (*new_ptr).irq_nest;
         switch_context(&mut (*old_ptr).context, &(*new_ptr).context);
     }
 }

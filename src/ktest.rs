@@ -762,6 +762,7 @@ fn sentinel_entry() {
 
 fn test_spawn_sentinel() -> Outcome {
     SENTINEL.store(0, Ordering::SeqCst);
+    let nest0 = per_cpu_init::irq_nest();
     let h = thread_init::spawn("sentinel", sentinel_entry);
     if h.id() == ThreadId::BOOTSTRAP {
         return Outcome::Fail("spawned bootstrap id");
@@ -778,6 +779,9 @@ fn test_spawn_sentinel() -> Outcome {
     }
     if thread_init::state(h.id()) != ThreadState::Dead {
         return Outcome::Fail("returned thread not dead");
+    }
+    if per_cpu_init::irq_nest() != nest0 {
+        return Outcome::Fail("irq_nest leaked across spawn");
     }
     Outcome::Ok
 }
@@ -799,6 +803,7 @@ fn thread_b() {
 
 fn test_switch_two_threads() -> Outcome {
     STEPS.store(0, Ordering::SeqCst);
+    let nest0 = per_cpu_init::irq_nest();
     let a = thread_init::spawn("a", thread_a);
     let b = thread_init::spawn("b", thread_b);
     A_ID.store(a.id().raw(), Ordering::SeqCst);
@@ -816,6 +821,9 @@ fn test_switch_two_threads() -> Outcome {
     }
     if thread_init::state(a.id()) != ThreadState::Dead {
         return Outcome::Fail("a not dead after return");
+    }
+    if per_cpu_init::irq_nest() != nest0 {
+        return Outcome::Fail("irq_nest leaked across switch");
     }
     Outcome::Ok
 }

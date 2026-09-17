@@ -88,6 +88,10 @@ pub struct Tcb {
     pub prev: Option<ThreadId>,
     pub affinity: CpuAffinity,
     pub cpu: u32,
+    /// `InterruptGuard` depth frozen while this thread is off-CPU.
+    /// `switch_to` swaps it with `PerCpu.irq_nest` so a one-way exit
+    /// does not leak the dying stack's nest onto the CPU.
+    pub irq_nest: u32,
     pub switches: u64,
 }
 

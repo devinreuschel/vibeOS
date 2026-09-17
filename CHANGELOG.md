@@ -17,6 +17,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   tear (`seqlock_threaded_writer_never_tears`).
 - `make test-e2e-pit` disables HPET with `-machine pc,hpet=off`. QEMU
   10.x rejects `-no-hpet`; 8.x only deprecates it.
+- `switch_to` swaps `PerCpu.irq_nest` with the outgoing/incoming TCB.
+  `InterruptGuard` lives on the outgoing stack, so a one-way exit
+  (`thread_exit` → idle) never dropped that guard and left the CPU
+  nest permanently raised. In-guest spawn/switch tests assert nest is
+  unchanged.
 
 ### Added
 
