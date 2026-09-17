@@ -8,7 +8,13 @@
 
 #![no_std]
 #![no_main]
+// The panic-test build gates the entire non-panic tail behind
+// `#[cfg(not(feature = "panic-test"))]`, which leaves the Limine
+// requests, paging init, and helpers technically dead. That is
+// deliberate — silence the noise so a real warning is not lost.
+#![cfg_attr(feature = "panic-test", allow(dead_code, unused_imports))]
 
+mod paging_init;
 mod panic;
 mod pmm_init;
 mod serial;
@@ -89,13 +95,27 @@ pub extern "C" fn _start() -> ! {
 
     // With `--features panic-test`, prove the panic path end to end.
     // Kept before PMM init so the panic path still exercises only the
-    // minimum machinery it needs to be diagnostic.
+    // minimum machinery it needs to be diagnostic. Guarding both this
+    // branch and the "normal path" tail avoids `unreachable_code`
+    // warnings in the panic-test build.
     #[cfg(feature = "panic-test")]
     {
         serial::line("vibeOS: boot: panic-test armed");
         panic!("intentional panic-test trip");
     }
 
+    #[cfg(not(feature = "panic-test"))]
+    {
+        normal_boot_tail();
+        x86::halt();
+    }
+}
+
+/// The non-panic-test tail of `_start`. Kept as a fn so a `#[cfg]` on
+/// the call site silences `unreachable_code` in panic-test builds
+/// without duplicating markers.
+#[cfg(not(feature = "panic-test"))]
+fn normal_boot_tail() {
     // ---- Phase 1 slice A: physical memory manager. ----
     let hhdm = HHDM
         .response()
@@ -131,15 +151,62 @@ pub extern "C" fn _start() -> ! {
         stats.total_frames, largest
     );
 
-    #[cfg(not(feature = "panic-test"))]
-    {
-        serial::line(marker::BOOT_DONE);
-        x86::halt();
+    // ---- Phase 1 slice B: page tables + MMIO attributes. ----
+    // Feed the physmap extent computation from what we already have:
+    // usable-RAM high water from the memmap, plus each framebuffer's
+    // `base + size` so scanout lands inside the physmap. DESIGN §4.1
+    // caps at 8 GiB regardless.
+    let ram_high_water = memmap_high_water(memmap.entries());
+    let fb_phys_end = framebuffer_phys_end(hhdm.offset);
+    let paging_report = unsafe {
+        paging_init::install(exec.physical_base, ram_high_water, fb_phys_end)
+    };
+    paging_init::report(&paging_report);
+
+    serial::line(marker::BOOT_DONE);
+}
+
+/// Highest end address of any USABLE memmap entry, in physical bytes.
+/// Zero when the map has no USABLE entries (unreachable in practice).
+#[cfg(not(feature = "panic-test"))]
+fn memmap_high_water(entries: &[&limine::memmap::Entry]) -> u64 {
+    let mut hi = 0u64;
+    for e in entries {
+        if e.type_ == limine::memmap::MEMMAP_USABLE {
+            let end = e.base + e.length;
+            if end > hi {
+                hi = end;
+            }
+        }
     }
+    hi
+}
+
+/// Highest `base + size` across all framebuffers, in physical bytes.
+/// Zero when Limine returns no framebuffers.
+#[cfg(not(feature = "panic-test"))]
+fn framebuffer_phys_end(hhdm_offset: u64) -> u64 {
+    let Some(resp) = FRAMEBUFFER.response() else {
+        return 0;
+    };
+    let mut hi = 0u64;
+    for fb in resp.framebuffers() {
+        let virt = fb.address() as u64;
+        if virt == 0 {
+            continue;
+        }
+        let phys = virt.wrapping_sub(hhdm_offset);
+        let end = phys + fb.size() as u64;
+        if end > hi {
+            hi = end;
+        }
+    }
+    hi
 }
 
 /// Halt with a serial line. Used when a Limine response we depend on is
 /// missing; nothing after this point would work without it.
+#[cfg(not(feature = "panic-test"))]
 fn halt_with(msg: &str) -> ! {
     serial::line(msg);
     x86::halt();

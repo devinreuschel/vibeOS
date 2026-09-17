@@ -47,6 +47,16 @@ impl<T> BootCell<T> {
 
 static BUDDY: BootCell<Buddy> = BootCell::new(Buddy::new());
 
+/// Post-init access to the global buddy. Paging bring-up pulls table
+/// frames through this; later slices add heap-backing and KVA calls.
+///
+/// # Safety
+/// Same rule as [`init`]: single-threaded, interrupts off. Phase 4
+/// wraps the underlying storage in a real IRQ-aware mutex.
+pub unsafe fn with_buddy<R>(f: impl FnOnce(&mut Buddy) -> R) -> R {
+    f(unsafe { BUDDY.get_mut() })
+}
+
 // Bounds of the loaded kernel image. Declared in linker.ld (DESIGN §3.4).
 // These are virtual addresses; the physical span is derived from Limine's
 // executable-address response.
