@@ -308,8 +308,8 @@ mod switch_asm {
         r14 = const CpuContext::R14,
         r15 = const CpuContext::R15,
         rflags = const CpuContext::RFLAGS,
-        rflags_if = const RFLAGS_IF,
-        rflags_no_if = const !RFLAGS_IF,
+        rflags_if = const super::RFLAGS_IF,
+        rflags_no_if = const !super::RFLAGS_IF,
         rsp = const CpuContext::RSP,
         rip = const CpuContext::RIP,
     );
