@@ -119,17 +119,35 @@ fn dump_thread() {
     );
 }
 
+fn in_image(p: u64) -> bool {
+    p >= kstart() && p < kend()
+}
+
+fn hex_trim(n: u64) {
+    let mut b = [0u8; 16];
+    let s = fmt_util::write_hex(n, &mut b);
+    let mut i = 0;
+    while i + 1 < s.len() && s[i] == b'0' {
+        i += 1;
+    }
+    Serial::write_bytes(&s[i..]);
+}
+
 fn print_frame_addr(addr: u64) {
     Serial::write_bytes(b"  ");
     Serial::write_bytes(b"0x");
     hex(addr);
     if let Some(e) = symtab::lookup(KSYMS, addr) {
-        Serial::write_bytes(b" ");
-        Serial::write_bytes(e.name.as_bytes());
         let off = symtab::offset(e, addr);
-        if off != 0 {
-            Serial::write_bytes(b"+0x");
-            hex(off);
+        // Sparse tables (panic-test) would otherwise pin a RIP to the
+        // previous function with a huge offset.
+        if off < 0x1_0000 {
+            Serial::write_bytes(b" ");
+            Serial::write_bytes(e.name.as_bytes());
+            if off != 0 {
+                Serial::write_bytes(b"+0x");
+                hex_trim(off);
+            }
         }
     }
     Serial::write_bytes(b"\n");
@@ -141,9 +159,13 @@ fn dump_backtrace(rip: u64, rbp: u64) {
     let mut rbp = rbp;
     let mut n = 0usize;
     while n < BT_MAX {
-        if rip != 0 {
-            print_frame_addr(rip);
+        if !in_image(rip) {
+            if n == 0 && rip != 0 {
+                print_frame_addr(rip);
+            }
+            break;
         }
+        print_frame_addr(rip);
         if !stackish(rbp) {
             break;
         }
@@ -176,6 +198,10 @@ fn dump_common(rip: u64, rbp: u64, rsp: u64, rflags: u64) {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    let rip = x86::read_rip();
+    let rbp = x86::read_rbp();
+    let rsp = x86::read_rsp();
+    let rflags = x86::rflags();
     begin_dump();
 
     Serial::write_bytes(marker::PANIC_BANNER.as_bytes());
@@ -195,7 +221,7 @@ fn panic(info: &PanicInfo) -> ! {
 
     let _ = writeln!(Serial, "vibeOS: panic: msg: {}", info.message());
 
-    dump_common(x86::read_rip(), x86::read_rbp(), x86::read_rsp(), x86::rflags());
+    dump_common(rip, rbp, rsp, rflags);
     finish();
 }
 

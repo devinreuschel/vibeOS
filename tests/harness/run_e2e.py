@@ -49,6 +49,7 @@ def main() -> int:
             "vibeOS: backtrace:",
             "vibeOS: panic: thread",
             ("vibeOS: logrec:", "smp: done"),
+            ("  0x", "_start"),
             "vibeOS: panic: halted",
         )
     elif expect_panic:
@@ -57,6 +58,7 @@ def main() -> int:
             "vibeOS: panic: at",
             "intentional panic-test",
             ("vibeOS: logrec:", "serial online"),
+            "rust_begin_unwind",
             "vibeOS: panic: halted",
         )
     else:

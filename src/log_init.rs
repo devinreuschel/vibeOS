@@ -1,4 +1,4 @@
-#![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+#![allow(dead_code)] // dmesg/follow/printer wait for B/C; keep the hooks compiled
 //! Kernel wiring for the log ring. ROADMAP §5.5.
 //!
 //! Global IRQ-safe ring + serial sink. Per-CPU printer thread is a
@@ -243,10 +243,12 @@ pub fn dmesg(view: Option<Level>) {
         if !allowed(r.level, view, COMPILE_MAX) {
             continue;
         }
+        let unit = if time_init::tsc_per_ms() != 0 { "ms" } else { "tsc" };
         let _ = writeln!(
             Serial,
-            "vibeOS: dmesg: {}ms cpu{} {} {}",
+            "vibeOS: dmesg: {}{} cpu{} {} {}",
             r.timestamp,
+            unit,
             r.cpu_id,
             r.level.as_str(),
             r.msg_str()
@@ -265,11 +267,13 @@ pub fn dump_tail(n: usize) {
             n.min(l.ring.len()),
             l.ring.dropped()
         );
+        let unit = if time_init::tsc_per_ms() != 0 { "ms" } else { "tsc" };
         for r in l.ring.last_n(n) {
             let _ = writeln!(
                 Serial,
-                "vibeOS: logrec: {}ms cpu{} {} {}",
+                "vibeOS: logrec: {}{} cpu{} {} {}",
                 r.timestamp,
+                unit,
                 r.cpu_id,
                 r.level.as_str(),
                 r.msg_str()

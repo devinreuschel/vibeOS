@@ -11,7 +11,7 @@ import sys
 
 # Keep names short enough for a panic line.
 NAME_MAX = 80
-SKIP_PREFIXES = ("$", ".L", "__dso", "__rustc", "anon.")
+SKIP_PREFIXES = ("$", ".L", "__dso", "anon.")
 
 
 def rust_string(s: str) -> str:
@@ -31,6 +31,9 @@ def rust_string(s: str) -> str:
 
 def skip_name(name: str) -> bool:
     if not name or name in (".text", "start"):
+        return True
+    # Keep the panic_handler; drop other compiler-rt names.
+    if name.startswith("__rustc") and "rust_begin_unwind" not in name:
         return True
     for p in SKIP_PREFIXES:
         if name.startswith(p):
