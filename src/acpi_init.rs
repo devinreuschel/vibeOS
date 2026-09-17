@@ -169,12 +169,12 @@ pub fn report() {
     );
 }
 
-#[allow(dead_code)] // phase 4 / timekeeping
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn info() -> Option<&'static AcpiInfo> {
     unsafe { (*INFO.0.get()).as_ref() }
 }
 
-#[allow(dead_code)] // ktest / later slices
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn mmio_uc_patched() -> bool {
     unsafe { MMIO_UC }
 }

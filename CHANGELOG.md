@@ -26,7 +26,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   Emits `vibeOS: paging: mmio uc` only when a real leaf was patched, and
   `vibeOS: acpi: xsdt <n> tables` after the phase-1 heap/KVA markers,
   plus a summary of CPU count, I/O APIC count, and HPET presence. No
-  GDT/IDT/PIC or timekeeping.
+  GDT/IDT/PIC or timekeeping. In-guest `acpi_discovery` checks table
+  counts against QEMU and that LAPIC/IOAPIC/HPET physmap leaves are UC.
 
 - Phase 1 slice C: kernel heap, KVA allocator, in-guest tests, meminfo.
   Free-list heap at `HEAP_START` (1 MiB initial, grows in 4 KiB steps to
