@@ -13,6 +13,11 @@ pub const LIMINE_OK: &str = "vibeOS: limine: rev 3 ok";
 pub const PMM_PREFIX: &str = "vibeOS: pmm: ";
 pub const PMM_FREE_SUFFIX: &str = " free 4KiB frames";
 
+/// Phase 1 §1.2 exit-gate marker. Emitted the instant CR3 is loaded with
+/// our own PML4 so the harness can pin the moment we own the address
+/// space, not merely built its tables.
+pub const PAGING_CR3_OK: &str = "vibeOS: paging: cr3 ok";
+
 pub const BOOT_DONE: &str = "vibeOS: boot: phase0 done";
 
 /// Panic banner. Kept short so the panic path allocates nothing.

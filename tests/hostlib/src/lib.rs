@@ -10,6 +10,9 @@ pub mod fmt_util;
 #[path = "../../../src/marker.rs"]
 pub mod marker;
 
+#[path = "../../../src/paging.rs"]
+pub mod paging;
+
 #[path = "../../../src/pmm.rs"]
 pub mod pmm;
 
@@ -26,6 +29,7 @@ mod smoke {
             marker::SERIAL_ONLINE,
             marker::LIMINE_OK,
             marker::PMM_PREFIX,
+            marker::PAGING_CR3_OK,
             marker::BOOT_DONE,
         ] {
             assert!(m.starts_with("vibeOS: "), "marker missing prefix: {m}");
@@ -36,6 +40,9 @@ mod smoke {
         // string in the roadmap.
         assert_eq!(marker::PMM_PREFIX, "vibeOS: pmm: ");
         assert_eq!(marker::PMM_FREE_SUFFIX, " free 4KiB frames");
+        // Paging §1.2 exit marker is a fixed string; must match the
+        // harness contract byte-for-byte.
+        assert_eq!(marker::PAGING_CR3_OK, "vibeOS: paging: cr3 ok");
     }
 
     #[test]
