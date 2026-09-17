@@ -228,13 +228,13 @@ and a monotonic clock nobody has to distrust.
 **Unlocks.** Preemption. Delays that AP bring-up needs. Every driver.
 
 **Exit gate**
-- [ ] `gdt ok`, `pic: remapped`, `idt ok`, `acpi: xsdt <n> tables`, `time: tsc <n>/ms` in the order [DESIGN.md](DESIGN.md#33-_start-order) specifies
+- [x] `gdt ok`, `pic: remapped`, `idt ok`, `acpi: xsdt <n> tables`, `time: tsc <n>/ms` in the order [DESIGN.md](DESIGN.md#33-_start-order) specifies
 - [x] `int3` returns cleanly; a deliberate `#GP` prints a full register dump and halts
 - [x] a deliberate stack overflow lands in the double fault handler on its IST stack, proven by an in-guest test
-- [ ] PIT tick advances `uptime_ms` at 1 kHz within tolerance
-- [ ] TSC calibrated against the HPET when present, PIT channel 2 otherwise, both paths tested
-- [ ] `now_us` monotonic across 10k reads with a timer firing underneath, both straight-line and under yields
-- [ ] host tests: RSDP v1 and v2 checksum rejection, HPET table validation, MADT iteration over truncated input, `now_us` seqlock retry under a simulated concurrent writer
+- [x] PIT tick advances `uptime_ms` at 1 kHz within tolerance
+- [x] TSC calibrated against the HPET when present, PIT channel 2 otherwise, both paths tested
+- [x] `now_us` monotonic across 10k reads with a timer firing underneath, both straight-line and under yields
+- [x] host tests: RSDP v1 and v2 checksum rejection, HPET table validation, MADT iteration over truncated input, `now_us` seqlock retry under a simulated concurrent writer
 
 ### 2.1 GDT, TSS, IST
 - [x] flat GDT: null, kernel code, kernel data, user code, user data, TSS
@@ -272,32 +272,32 @@ and a monotonic clock nobody has to distrust.
 - [x] boot log summarizing what was found: table count, CPU count, I/O APIC count, HPET presence
 
 ### 2.5 PIT and the bootstrap tick
-- [ ] channel 0, mode 2, divisor 1193 for ~1 kHz on IRQ0
-- [ ] `io_wait` between the low and high divisor byte writes
-- [ ] handler: increment the tick counter, snapshot the TSC, EOI, return. No allocation, no logging.
-- [ ] channel 2 one-shot for calibration, gated through port `0x61`
+- [x] channel 0, mode 2, divisor 1193 for ~1 kHz on IRQ0
+- [x] `io_wait` between the low and high divisor byte writes
+- [x] handler: increment the tick counter, snapshot the TSC, EOI, return. No allocation, no logging.
+- [x] channel 2 one-shot for calibration, gated through port `0x61`
 
 ### 2.6 TSC calibration
-- [ ] check the invariant TSC CPUID bit and log loudly if absent
-- [ ] `lfence` before `rdtsc`, or use `rdtscp`
-- [ ] calibrate against the HPET main counter over ~10 ms when available
-- [ ] fall back to PIT channel 2 with a count of 11932
-- [ ] store `tsc_per_ms` per CPU, not globally
-- [ ] sanity-check the result against a plausible range and refuse a value that would poison every delay downstream
-- [ ] `busy_wait_ms` on the TSC, using `hlt` when interrupts are enabled
+- [x] check the invariant TSC CPUID bit and log loudly if absent
+- [x] `lfence` before `rdtsc`, or use `rdtscp`
+- [x] calibrate against the HPET main counter over ~10 ms when available
+- [x] fall back to PIT channel 2 with a count of 11932
+- [x] store `tsc_per_ms` per CPU, not globally
+- [x] sanity-check the result against a plausible range and refuse a value that would poison every delay downstream
+- [x] `busy_wait_ms` on the TSC, using `hlt` when interrupts are enabled
 
 ### 2.7 Timekeeping
-- [ ] tick counter and TSC snapshot published under a seqlock: bump, write both, bump, with release ordering
-- [ ] reader retries until it sees a stable even sequence, with acquire ordering
-- [ ] `uptime_ms`, `now_us`, `now_ns` built on it
-- [ ] the interpolation arithmetic lives in the library half and is host-tested including near `u64::MAX`
-- [ ] seqlock test publishes an independent observed timestamp so a torn read actually fails the test
-- [ ] a `next_deadline(instant)` interface rather than a hardcoded periodic tick, so tickless is possible later
-- [ ] RTC read once at boot for wall clock, tracked forward with the monotonic clock plus an offset
+- [x] tick counter and TSC snapshot published under a seqlock: bump, write both, bump, with release ordering
+- [x] reader retries until it sees a stable even sequence, with acquire ordering
+- [x] `uptime_ms`, `now_us`, `now_ns` built on it
+- [x] the interpolation arithmetic lives in the library half and is host-tested including near `u64::MAX`
+- [x] seqlock test publishes an independent observed timestamp so a torn read actually fails the test
+- [x] a `next_deadline(instant)` interface rather than a hardcoded periodic tick, so tickless is possible later
+- [x] RTC read once at boot for wall clock, tracked forward with the monotonic clock plus an offset
 
 ### 2.8 Diagnostics
-- [ ] `uptime` reporting tick milliseconds and TSC microseconds side by side, so divergence is visible
-- [ ] a boot line naming the calibration source and the measured frequency
+- [x] `uptime` reporting tick milliseconds and TSC microseconds side by side, so divergence is visible
+- [x] a boot line naming the calibration source and the measured frequency
 
 ---
 

@@ -9,6 +9,29 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Phase 2 slice C: PIT bootstrap tick, TSC calibration, seqlock
+  timekeeping, RTC wall-clock offset. After `acpi: xsdt`, boot prints
+  `vibeOS: time: calibrated hpet|pit <n>/ms` then the exit-gate
+  `vibeOS: time: tsc <n>/ms`. IRQ0 is unmasked and `sti` runs after
+  calibration (keyboard stays masked; `irq: enabled` is still Phase 3).
+  `uptime` reports tick milliseconds next to TSC microseconds.
+- PIT channel 0 mode 2, divisor 1193 (~1 kHz), `io_wait` between
+  divisor bytes. IRQ0 handler increments the tick, snapshots TSC, EOI,
+  returns — no alloc, no logging. Channel 2 one-shot via port `0x61` is
+  the HPET-less calibration path (count 11932, ~10 ms).
+- TSC: invariant-TSC CPUID check (loud log if absent), `lfence`/`rdtscp`,
+  HPET main counter over ~10 ms when the ACPI table is usable, PIT
+  channel 2 fallback. `tsc_per_ms` lives on the BSP `TimeState` (the
+  per-CPU slot Phase 4 will own). Poison frequencies are refused.
+  `busy_wait_ms` spins on TSC and `hlt`s when IF is set.
+- `vibeos::time` in the library half: interpolation including near
+  `u64::MAX`, seqlock retry under a simulated concurrent writer with an
+  independent published timestamp, `next_deadline`. Host tests cover
+  those plus PIT/HPET calib math and wall-clock offset.
+- In-guest: PIT ~1 kHz, `now_us` monotonic over 10k reads (straight-line
+  and under `hlt` yields), HPET vs PIT-ch2 agreement, uptime sides, RTC
+  offset. `make test-e2e-pit` boots the production ISO with `-no-hpet`.
+
 - Phase 2 slice A: GDT/TSS/IST, IDT/exceptions, 8259 PIC. Boot prints
   `vibeOS: gdt ok`, `vibeOS: pic: remapped`, `vibeOS: idt ok` after
   `kva: ready` (IST stacks come from KVA guarded stacks; relative order

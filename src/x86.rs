@@ -230,3 +230,81 @@ pub unsafe fn lidt(ptr: &DtPtr) {
 pub unsafe fn ltr(sel: u16) {
     unsafe { asm!("ltr {0:x}", in(reg) sel, options(nomem, nostack, preserves_flags)) };
 }
+
+/// `CPUID` leaf / subleaf.
+#[inline]
+pub fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
+    let r = core::arch::x86_64::__cpuid_count(leaf, subleaf);
+    (r.eax, r.ebx, r.ecx, r.edx)
+}
+
+/// `lfence; rdtsc`. DESIGN §6.2: serialize so the read cannot move
+/// across a calibration interval boundary.
+#[inline]
+pub fn lfence_rdtsc() -> u64 {
+    let lo: u32;
+    let hi: u32;
+    unsafe {
+        asm!(
+            "lfence",
+            "rdtsc",
+            out("eax") lo,
+            out("edx") hi,
+            options(nostack, nomem, preserves_flags),
+        );
+    }
+    ((hi as u64) << 32) | (lo as u64)
+}
+
+/// `rdtscp` serializes on its own. The aux CPU number is discarded.
+#[inline]
+pub fn rdtscp() -> u64 {
+    let lo: u32;
+    let hi: u32;
+    unsafe {
+        asm!(
+            "rdtscp",
+            out("eax") lo,
+            out("edx") hi,
+            out("ecx") _,
+            options(nostack, nomem, preserves_flags),
+        );
+    }
+    ((hi as u64) << 32) | (lo as u64)
+}
+
+#[inline]
+pub fn sti() {
+    unsafe { asm!("sti", options(nomem, nostack, preserves_flags)) };
+}
+
+#[inline]
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+pub fn cli() {
+    unsafe { asm!("cli", options(nomem, nostack, preserves_flags)) };
+}
+
+/// One `hlt`. Returns when the next interrupt (or NMI) arrives.
+#[inline]
+pub fn hlt_once() {
+    unsafe { asm!("hlt", options(nomem, nostack, preserves_flags)) };
+}
+
+#[inline]
+pub fn rflags() -> u64 {
+    let v: u64;
+    unsafe {
+        asm!(
+            "pushfq",
+            "pop {}",
+            out(reg) v,
+            options(preserves_flags),
+        );
+    }
+    v
+}
+
+#[inline]
+pub fn interrupts_enabled() -> bool {
+    rflags() & (1 << 9) != 0
+}

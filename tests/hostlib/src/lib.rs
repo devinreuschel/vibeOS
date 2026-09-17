@@ -37,6 +37,9 @@ pub mod desc;
 #[path = "../../../src/pic.rs"]
 pub mod pic;
 
+#[path = "../../../src/time.rs"]
+pub mod time;
+
 #[cfg(test)]
 mod smoke {
     use super::marker;
@@ -55,6 +58,7 @@ mod smoke {
             marker::PIC_REMAPPED,
             marker::IDT_OK,
             marker::ACPI_XSDT_PREFIX,
+            marker::TIME_TSC_PREFIX,
             marker::BOOT_DONE,
         ] {
             assert!(m.starts_with("vibeOS: "), "marker missing prefix: {m}");
@@ -76,6 +80,8 @@ mod smoke {
         assert_eq!(marker::IDT_OK, "vibeOS: idt ok");
         assert_eq!(marker::ACPI_XSDT_PREFIX, "vibeOS: acpi: xsdt ");
         assert_eq!(marker::ACPI_XSDT_SUFFIX, " tables");
+        assert_eq!(marker::TIME_TSC_PREFIX, "vibeOS: time: tsc ");
+        assert_eq!(marker::TIME_TSC_SUFFIX, "/ms");
         assert_eq!(marker::BOOT_DONE, "vibeOS: boot: phase1 done");
     }
 

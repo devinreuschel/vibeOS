@@ -48,7 +48,7 @@ KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml $(TARGET_JSON) linker.ld Makefile rust-
 
 .PHONY: all kernel iso run run-panic clean distclean setup layout \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-gp test \
-        test-kernel test-kernel-smp4 test-lapic-fallback
+        test-e2e-pit test-kernel test-kernel-smp4 test-lapic-fallback
 
 all: $(ISO)
 
@@ -169,6 +169,11 @@ $(ISO_GP): $(KERNEL_DEPS) limine.conf $(LIMINE_BIN)
 test-e2e-gp: $(ISO_GP)
 	VIBEOS_ISO=$(ISO_GP) VIBEOS_GP_TEST=1 python3 tests/harness/run_e2e.py
 
+# PIT channel 2 calibration: HPET device off. Same ISO, same markers
+# except the diagnostic names `pit` instead of `hpet`.
+test-e2e-pit: $(ISO)
+	VIBEOS_ISO=$(ISO) VIBEOS_EXPECT_PIT=1 VIBEOS_QEMU_EXTRA=-no-hpet python3 tests/harness/run_e2e.py
+
 # In-guest tests: separate target dir + ISO so a test build can never be
 # packaged as production (DESIGN §8.2 / §9.7).
 KERNEL_TESTS_DIR := $(CURDIR)/target-kernel-tests
@@ -203,7 +208,7 @@ test-kernel-smp4: $(ISO_KTEST)
 test-lapic-fallback: $(ISO_KTEST)
 	VIBEOS_ISO=$(ISO_KTEST) VIBEOS_QEMU_CPU=qemu64,-tsc-deadline python3 tests/kernel_boot.py
 
-test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-kernel
+test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-pit test-kernel
 
 clean:
 	rm -rf $(ISO_ROOT) $(ISO_ROOT_PANIC) $(ISO_ROOT_GP) $(ISO_ROOT_KTEST) $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_KTEST) target-panic target-gp $(KERNEL_TESTS_DIR)

@@ -123,6 +123,12 @@ extern "x86-interrupt" fn irq<const N: u8>(_frame: InterruptFrame) {
     pic::handle(N);
 }
 
+extern "x86-interrupt" fn pit_irq(_frame: InterruptFrame) {
+    let tsc = crate::time_init::read_tsc();
+    crate::time_init::on_pit_tick(tsc);
+    crate::time_init::eoi_pit();
+}
+
 /// Fill all 256 entries, overlay named handlers, `lidt`.
 ///
 /// # Safety
@@ -172,7 +178,7 @@ unsafe fn overlay_named() {
     set_err(vectors::PF, page_fault, 0);
     set_noerr(vectors::MC, machine_check, IstSlot::MachineCheck.hardware());
 
-    set_noerr(vectors::IRQ_BASE, irq::<{ vectors::IRQ_BASE }>, 0);
+    set_noerr(vectors::IRQ_BASE, pit_irq, 0);
     set_noerr(vectors::IRQ_BASE + 1, irq::<{ vectors::IRQ_BASE + 1 }>, 0);
     set_noerr(vectors::IRQ_BASE + 2, irq::<{ vectors::IRQ_BASE + 2 }>, 0);
     set_noerr(vectors::IRQ_BASE + 3, irq::<{ vectors::IRQ_BASE + 3 }>, 0);

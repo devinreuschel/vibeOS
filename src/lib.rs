@@ -15,5 +15,6 @@ pub mod marker;
 pub mod paging;
 pub mod pic;
 pub mod pmm;
+pub mod time;
 pub mod uart;
 pub mod vectors;

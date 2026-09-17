@@ -31,7 +31,7 @@ pub unsafe fn remap_and_mask() {
     }
 }
 
-#[allow(dead_code)] // PIT/keyboard unmask in §2.5 / phase 5
+#[allow(dead_code)] // keyboard unmask in phase 5
 pub fn mask(irq: u8) {
     let Some((port, bit)) = irq_port_bit(irq) else {
         return;
@@ -42,7 +42,6 @@ pub fn mask(irq: u8) {
     }
 }
 
-#[allow(dead_code)] // PIT/keyboard unmask in §2.5 / phase 5
 pub fn unmask(irq: u8) {
     let Some((port, bit)) = irq_port_bit(irq) else {
         return;

@@ -65,5 +65,8 @@ jobs:
       - name: e2e (#GP dump+halt)
         run: make test-e2e-gp
 
+      - name: e2e (PIT calibration fallback)
+        run: make test-e2e-pit
+
       - name: in-guest kernel tests
         run: make test-kernel

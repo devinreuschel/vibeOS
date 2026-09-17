@@ -1,7 +1,7 @@
 //! vibeOS kernel entry.
 //!
 //! Boot order: serial, Limine, PMM, paging, ACPI parse + MMIO UC, heap,
-//! KVA, then GDT/TSS/IST, PIC remap, IDT, ACPI marker, meminfo.
+//! KVA, then GDT/TSS/IST, PIC remap, IDT, ACPI marker, time, meminfo.
 //! GDT after KVA because IST stacks are guarded KVA stacks. The
 //! `kernel_tests` build runs the in-guest registry after that and
 //! exits through isa-debug-exit.
@@ -27,6 +27,7 @@ mod paging_init;
 mod panic;
 mod pmm_init;
 mod serial;
+mod time_init;
 mod x86;
 
 #[cfg(feature = "kernel_tests")]
@@ -223,6 +224,16 @@ fn normal_boot_tail() {
     serial::line(marker::IDT_OK);
 
     acpi_init::report();
+
+    // ---- Phase 2 slice C: PIT, TSC calibration, timekeeping. ----
+    // After IDT so IRQ0 has a gate. IRQs stay masked until we unmask
+    // IRQ0 below; keyboard stays masked until the scheduler exists.
+    unsafe { time_init::init() };
+
+    arch::pic::unmask(0);
+    x86::sti();
+    time_init::busy_wait_ms(20);
+    diag::uptime();
 
     diag::meminfo();
 
