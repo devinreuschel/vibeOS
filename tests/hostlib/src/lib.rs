@@ -10,6 +10,9 @@ pub mod fmt_util;
 #[path = "../../../src/marker.rs"]
 pub mod marker;
 
+#[path = "../../../src/paging.rs"]
+pub mod paging;
+
 #[path = "../../../src/pmm.rs"]
 pub mod pmm;
 
