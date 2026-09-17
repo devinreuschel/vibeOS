@@ -177,19 +177,19 @@ paging cannot be verified from the host.
 - [x] design for a future per-frame metadata array; do not paint into a corner where refcounts cannot be added
 
 ### 1.2 Page tables
-- [ ] 4-level walk with typed abstractions for `PhysAddr`, `VirtAddr`, and PTE flags
-- [ ] `map_page`, `map_range`, `unmap_page`, `translate`, with 2 MiB page support
-- [ ] build a fresh PML4 from buddy frames: kernel image per section, physmap at the HHDM offset with 2 MiB pages, 512 MiB low identity with the first 2 MiB executable, bootloader stack window duplicated from Limine's tables
-- [ ] `map_end` derived from usable RAM, kernel image end, and framebuffer extent, capped at 8 GiB
-- [ ] set `EFER.NXE` before installing, then `mov cr3`
-- [ ] `invlpg` after every single-PTE edit
-- [ ] TLB shootdown hook present as a single-CPU no-op so phase 4 changes one function, not fifty call sites
-- [ ] assert on overlapping regions and on mapping over an existing present entry unless explicitly asked to remap
+- [x] 4-level walk with typed abstractions for `PhysAddr`, `VirtAddr`, and PTE flags
+- [x] `map_page`, `map_range`, `unmap_page`, `translate`, with 2 MiB page support
+- [x] build a fresh PML4 from buddy frames: kernel image per section, physmap at the HHDM offset with 2 MiB pages, 512 MiB low identity with the first 2 MiB executable, bootloader stack window duplicated from Limine's tables
+- [x] `map_end` derived from usable RAM, kernel image end, and framebuffer extent, capped at 8 GiB
+- [x] set `EFER.NXE` before installing, then `mov cr3`
+- [x] `invlpg` after every single-PTE edit
+- [x] TLB shootdown hook present as a single-CPU no-op so phase 4 changes one function, not fifty call sites
+- [x] assert on overlapping regions and on mapping over an existing present entry unless explicitly asked to remap
 
 ### 1.3 MMIO attributes
-- [ ] `patch_physmap_uc(phys, len)` setting PCD and PWT without splitting 2 MiB entries
-- [ ] `ioremap(phys, len)` reserving from the dedicated MMIO window for devices that should not be reached through the physmap
-- [ ] in-guest test: patch a page, verify the PTE flags read back
+- [x] `patch_physmap_uc(phys, len)` setting PCD and PWT without splitting 2 MiB entries
+- [x] `ioremap(phys, len)` reserving from the dedicated MMIO window for devices that should not be reached through the physmap
+- [~] in-guest test: patch a page, verify the PTE flags read back  (deferred to Slice C: `kernel_tests` infra lands with §1.6. Host tests in `vibeos::paging` cover the PTE flag machinery for now: `patch_physmap_uc_sets_pcd_pwt` verifies PCD+PWT are set on the covering 2 MiB entries without splitting)
 
 ### 1.4 Kernel heap
 - [ ] free-list heap at `HEAP_START`, 1 MiB initial, growing in page increments to the 64 MiB region cap
