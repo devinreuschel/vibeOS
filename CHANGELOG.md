@@ -7,6 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Phase 3 slice C: `WaitQueue` plus `BlockingMutex`, `RwLock`, `Semaphore`,
+  `Condvar`, and bounded MPSC `Channel<T>`. Every wait takes an optional
+  deadline (`None` → far-future sentinel). Enqueue → Blocked → drop SCHED →
+  schedule; wake under the same lock (DESIGN §9.4). In-guest: 1000-iter
+  two-thread mutex counter, rwlock/sema/condvar/channel, mutex deadline,
+  hold SCHED + force timer IRQ (no deadlock), spawn/exit 2000 with frame
+  count back to baseline. Host: wait-queue FIFO, lost-wakeup protocol,
+  timeout unlink, primitive state machines.
+- Harness / `make test` default to `-accel tcg` (`VIBEOS_QEMU_ACCEL`
+  overrides) so KVM timing does not flake the PIT/sleep tests.
+
 ### Fixed
 
 - Dead-stack reap no longer waits for the outgoing `schedule` call to

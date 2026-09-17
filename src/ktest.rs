@@ -27,7 +27,7 @@ use crate::per_cpu_init;
 use crate::pmm_init;
 use crate::sched_init;
 use crate::serial::{self, Serial};
-use crate::sync_init::SpinMutex;
+use crate::sync_init::{BlockingMutex, Channel, Condvar, RwLock, Semaphore, SpinMutex};
 use crate::thread_init;
 use crate::time_init;
 use crate::x86;
@@ -81,6 +81,15 @@ const TESTS: &[(&str, TestFn)] = &[
     ("idle_runs", test_idle_runs),
     ("reap_returns_frames", test_reap_returns_frames),
     ("reap_many_via_idle", test_reap_many_via_idle),
+    ("blocking_mutex_counter", test_blocking_mutex_counter),
+    ("rwlock_exclusion", test_rwlock_exclusion),
+    ("semaphore_wake", test_semaphore_wake),
+    ("condvar_signal", test_condvar_signal),
+    ("channel_mpsc", test_channel_mpsc),
+    ("mutex_deadline", test_mutex_deadline),
+    ("sync_try_paths", test_sync_try_paths),
+    ("sched_lock_timer_irq", test_sched_lock_timer_irq),
+    ("spawn_exit_thousands", test_spawn_exit_thousands),
 ];
 
 pub fn run() -> ! {
@@ -1071,4 +1080,320 @@ fn test_reap_many_via_idle() -> Outcome {
         }
         Outcome::Ok
     })
+}
+
+const MUTEX_ITERS: u64 = 1000;
+static COUNTER: BlockingMutex<u64> = BlockingMutex::new(0);
+static MUTEX_DONE: AtomicU32 = AtomicU32::new(0);
+
+fn mutex_worker() {
+    let mut i = 0u64;
+    while i < MUTEX_ITERS {
+        let mut g = COUNTER.lock();
+        *g = (*g).wrapping_add(1);
+        i += 1;
+    }
+    MUTEX_DONE.fetch_add(1, Ordering::SeqCst);
+}
+
+fn test_blocking_mutex_counter() -> Outcome {
+    MUTEX_DONE.store(0, Ordering::SeqCst);
+    *COUNTER.lock() = 0;
+    let _a = thread_init::spawn("mu-a", mutex_worker);
+    let _b = thread_init::spawn("mu-b", mutex_worker);
+    with_timer(|| {
+        let t0 = time_init::uptime_ms();
+        loop {
+            if MUTEX_DONE.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            if time_init::uptime_ms().saturating_sub(t0) > 8_000 {
+                let n = MUTEX_DONE.load(Ordering::SeqCst);
+                let c = *COUNTER.lock();
+                let _ = writeln!(Serial, "vibeOS: ktest:   mutex done={n} count={c}");
+                return Outcome::Fail("mutex stall");
+            }
+            thread_init::yield_now();
+        }
+        let c = *COUNTER.lock();
+        if c != MUTEX_ITERS * 2 {
+            let _ = writeln!(Serial, "vibeOS: ktest:   mutex count={c}");
+            return Outcome::Fail("mutex count");
+        }
+        Outcome::Ok
+    })
+}
+
+static RW: RwLock<u64> = RwLock::new(0);
+static RW_DONE: AtomicU32 = AtomicU32::new(0);
+
+fn rw_writer() {
+    let mut g = RW.write();
+    *g = (*g).wrapping_add(1);
+    RW_DONE.fetch_add(1, Ordering::SeqCst);
+}
+
+fn test_rwlock_exclusion() -> Outcome {
+    RW_DONE.store(0, Ordering::SeqCst);
+    *RW.write() = 0;
+    with_timer(|| {
+        {
+            let r = RW.read();
+            let _a = thread_init::spawn("rw-a", rw_writer);
+            let _b = thread_init::spawn("rw-b", rw_writer);
+            thread_init::yield_now();
+            thread_init::sleep_ms(5);
+            if RW_DONE.load(Ordering::SeqCst) != 0 {
+                return Outcome::Fail("writer ran under read");
+            }
+            if *r != 0 {
+                return Outcome::Fail("reader saw writer");
+            }
+            drop(r);
+        }
+        let t0 = time_init::uptime_ms();
+        loop {
+            if RW_DONE.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            if time_init::uptime_ms().saturating_sub(t0) > 2_000 {
+                return Outcome::Fail("rwlock stall");
+            }
+            thread_init::yield_now();
+        }
+        if *RW.read() != 2 {
+            return Outcome::Fail("rwlock count");
+        }
+        Outcome::Ok
+    })
+}
+
+static SEM: Semaphore = Semaphore::new(0);
+static SEM_N: AtomicU32 = AtomicU32::new(0);
+
+fn sem_waiter() {
+    SEM.acquire();
+    SEM_N.fetch_add(1, Ordering::SeqCst);
+}
+
+fn test_semaphore_wake() -> Outcome {
+    SEM_N.store(0, Ordering::SeqCst);
+    let _a = thread_init::spawn("sem-a", sem_waiter);
+    let _b = thread_init::spawn("sem-b", sem_waiter);
+    with_timer(|| {
+        thread_init::yield_now();
+        thread_init::sleep_ms(5);
+        if SEM_N.load(Ordering::SeqCst) != 0 {
+            return Outcome::Fail("sema acquired empty");
+        }
+        SEM.release();
+        SEM.release();
+        let t0 = time_init::uptime_ms();
+        loop {
+            if SEM_N.load(Ordering::SeqCst) == 2 {
+                return Outcome::Ok;
+            }
+            if time_init::uptime_ms().saturating_sub(t0) > 2_000 {
+                return Outcome::Fail("sema stall");
+            }
+            thread_init::yield_now();
+        }
+    })
+}
+
+static CM: BlockingMutex<bool> = BlockingMutex::new(false);
+static CV: Condvar = Condvar::new();
+static CV_DONE: AtomicBool = AtomicBool::new(false);
+
+fn cv_waiter() {
+    let mut g = CM.lock();
+    while !*g {
+        g = CV.wait(g);
+    }
+    CV_DONE.store(true, Ordering::SeqCst);
+}
+
+fn test_condvar_signal() -> Outcome {
+    CV_DONE.store(false, Ordering::SeqCst);
+    *CM.lock() = false;
+    let _h = thread_init::spawn("cv", cv_waiter);
+    with_timer(|| {
+        thread_init::sleep_ms(10);
+        {
+            let mut g = CM.lock();
+            *g = true;
+            CV.notify_one();
+        }
+        let t0 = time_init::uptime_ms();
+        loop {
+            if CV_DONE.load(Ordering::SeqCst) {
+                return Outcome::Ok;
+            }
+            if time_init::uptime_ms().saturating_sub(t0) > 2_000 {
+                return Outcome::Fail("condvar stall");
+            }
+            thread_init::yield_now();
+        }
+    })
+}
+
+static CH: Channel<u64, 4> = Channel::new();
+static CH_SUM: AtomicU64 = AtomicU64::new(0);
+
+fn ch_consumer() {
+    let mut i = 0u64;
+    let mut sum = 0u64;
+    while i < 32 {
+        sum = sum.wrapping_add(CH.recv());
+        i += 1;
+    }
+    CH_SUM.store(sum, Ordering::SeqCst);
+}
+
+fn test_channel_mpsc() -> Outcome {
+    CH_SUM.store(0, Ordering::SeqCst);
+    let _c = thread_init::spawn("ch-rx", ch_consumer);
+    with_timer(|| {
+        let mut i = 1u64;
+        while i <= 32 {
+            CH.send(i);
+            i += 1;
+        }
+        let t0 = time_init::uptime_ms();
+        loop {
+            let s = CH_SUM.load(Ordering::SeqCst);
+            if s != 0 {
+                if s != 32 * 33 / 2 {
+                    let _ = writeln!(Serial, "vibeOS: ktest:   chan sum={s}");
+                    return Outcome::Fail("channel sum");
+                }
+                return Outcome::Ok;
+            }
+            if time_init::uptime_ms().saturating_sub(t0) > 2_000 {
+                return Outcome::Fail("channel stall");
+            }
+            thread_init::yield_now();
+        }
+    })
+}
+
+static TM: BlockingMutex<u64> = BlockingMutex::new(0);
+static TM_OUT: AtomicU32 = AtomicU32::new(0);
+
+fn timeout_waiter() {
+    let ns = time_init::now_ns().saturating_add(15_000_000);
+    match TM.lock_until(Some(Instant { ns })) {
+        None => TM_OUT.store(1, Ordering::SeqCst),
+        Some(_g) => TM_OUT.store(2, Ordering::SeqCst),
+    }
+}
+
+fn test_mutex_deadline() -> Outcome {
+    TM_OUT.store(0, Ordering::SeqCst);
+    with_timer(|| {
+        let g = TM.lock();
+        let _h = thread_init::spawn("tm", timeout_waiter);
+        thread_init::sleep_ms(40);
+        if TM_OUT.load(Ordering::SeqCst) != 1 {
+            drop(g);
+            return Outcome::Fail("deadline did not fire");
+        }
+        drop(g);
+        Outcome::Ok
+    })
+}
+
+fn test_sync_try_paths() -> Outcome {
+    let m = BlockingMutex::new(1u64);
+    {
+        let _g = m.lock();
+        if m.try_lock().is_some() {
+            return Outcome::Fail("try_lock while held");
+        }
+    }
+    if m.try_lock().is_none() {
+        return Outcome::Fail("try_lock free");
+    }
+    let ch = Channel::<u64, 2>::new();
+    if ch.try_send(3).is_err() {
+        return Outcome::Fail("try_send");
+    }
+    if ch.try_recv() != Some(3) {
+        return Outcome::Fail("try_recv");
+    }
+    if ch.try_recv().is_some() {
+        return Outcome::Fail("try_recv empty");
+    }
+    CV.notify_all();
+    Outcome::Ok
+}
+
+fn test_sched_lock_timer_irq() -> Outcome {
+    with_timer(|| {
+        let nest0 = per_cpu_init::irq_nest();
+        let t0 = per_cpu_init::current().ticks;
+        let wall0 = time_init::uptime_ms();
+        loop {
+            if per_cpu_init::current().ticks != t0 {
+                break;
+            }
+            if time_init::uptime_ms().saturating_sub(wall0) > 200 {
+                return Outcome::Fail("no ticks before lock");
+            }
+            core::hint::spin_loop();
+        }
+        let held = per_cpu_init::current().ticks;
+        let inner = thread_init::with_sched_lock(|| {
+            if x86::interrupts_enabled() {
+                return Outcome::Fail("SCHED left IF on");
+            }
+            time_init::busy_wait_ms(20);
+            if x86::interrupts_enabled() {
+                return Outcome::Fail("IF on during hold");
+            }
+            if per_cpu_init::current().ticks != held {
+                return Outcome::Fail("timer ran under SCHED");
+            }
+            Outcome::Ok
+        });
+        match inner {
+            Outcome::Ok => {}
+            other => return other,
+        }
+        unsafe {
+            core::arch::asm!("int $0x20");
+        }
+        if per_cpu_init::current().ticks <= held {
+            return Outcome::Fail("forced timer IRQ did not run");
+        }
+        if per_cpu_init::irq_nest() != nest0 {
+            return Outcome::Fail("irq_nest leaked");
+        }
+        Outcome::Ok
+    })
+}
+
+const SPAWN_EXIT_N: usize = 2000;
+
+fn test_spawn_exit_thousands() -> Outcome {
+    let before = free_frames();
+    let mut i = 0usize;
+    while i < SPAWN_EXIT_N {
+        let h = thread_init::spawn("die", dying_entry);
+        thread_init::yield_now();
+        if thread_init::try_state(h.id()) != Some(ThreadState::Dead) {
+            thread_init::yield_now();
+        }
+        if thread_init::try_state(h.id()) != Some(ThreadState::Dead) {
+            return Outcome::Fail("returned thread not dead");
+        }
+        i += 1;
+    }
+    thread_init::reap_zombies();
+    let after = free_frames();
+    if after != before {
+        let _ = writeln!(Serial, "vibeOS: ktest:   frames {before} -> {after} n={SPAWN_EXIT_N}");
+        return Outcome::Fail("spawn/exit leaked frames");
+    }
+    Outcome::Ok
 }

@@ -130,12 +130,13 @@ Acquire in this order, release in reverse. Never take a lower number while holdi
 1. page tables
 2. physical allocator (buddy)
 3. heap
-4. scheduler
+4. scheduler (also: wait-queue lists and blocking-primitive predicates)
 5. device / driver locks
 6. serial
 
 Serial is last so any lock holder can still log. Page tables are first because unmapping needs to
-allocate and free through everything below it.
+allocate and free through everything below it. Blocking `WaitQueue`s are serialized by the scheduler
+lock: the predicate check and the enqueue happen under that same lock (DESIGN [§9.4](#94-concurrency)).
 
 ## 2.2 Interrupt handler rules
 
@@ -294,7 +295,7 @@ of it.
 | 13 | Time: HPET or PIT, TSC calibration | `time: tsc N/ms` | The scheduler needs a tick, and AP bring-up needs `busy_wait_ms`. |
 | 14 | Scheduler, idle thread on BSP | `sched: cpu0 ready` | Preemption target must exist before the timer starts firing into it. |
 | 15 | Framebuffer console, input | `console ok` | Cosmetic but wanted before the shell. |
-| 16 | Unmask timer + keyboard, `sti` | `irq: enabled` | First moment interrupts actually arrive. |
+| 16 | Arm scheduler; emit `irq: enabled` | `irq: enabled` | Scheduler is live. IRQ0 already ticks from step 13; this marker is post-sched arming (IF on, preemption live), not the first STI. IRQ1 stays masked until the keyboard driver. |
 | 17 | APIC + SMP bring-up | `smp: done` | Needs time (delays), heap (per-CPU allocation), scheduler (AP entry point). |
 | 18 | Hand off | `shell ready` | Last marker. Everything above it must have appeared in order. |
 
@@ -686,6 +687,11 @@ skipping it loses a tick whenever the handler preempts.
 clear while an `InterruptGuard` is live on that stack. Without this, a first-run thread or a thread
 saved from the timer ISR stays tick-deaf until some later `sti`. A thread resumed in the ISR still
 gets IF back from `iret`.
+
+A post-EOI switch to a thread with `irq_nest == 0` therefore enables IF on the incoming thread even
+if the preempted stack still has an open ISR / `InterruptGuard` frame. That is expected: the guard
+lives on the outgoing stack and will drop (or `iret` will restore IF) when that thread resumes. Do
+not "fix" this by inheriting the outgoing nest onto the incoming thread.
 
 ## 5.9 Later
 
@@ -1230,18 +1236,21 @@ in the test harness produces either false confidence or a debugging session in t
 
 | Context | Flags |
 |---------|-------|
-| `make run` | `-cdrom myos.iso -m 128M -smp 2 -cpu max -serial stdio` |
+| `make run` | `-cdrom myos.iso -m 128M -smp 2 -cpu max -serial stdio -accel tcg` |
 | e2e | as above plus `-display none -no-reboot -monitor unix:...,server=on,wait=off` |
 | ktest | as e2e plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04` |
 | LAPIC fallback | `-cpu qemu64,-tsc-deadline` |
 | SMP stress | `-smp 4` |
 | Interrupt debugging | `-d int,cpu_reset`, plus `-machine q35` when chipset behavior matters |
 
+Harness and `make test` default to `-accel tcg` so KVM does not introduce timing flakes.
+`VIBEOS_QEMU_ACCEL` overrides (`kvm`, or empty to let QEMU pick).
+
 `-no-reboot` matters: a triple fault otherwise reboots and loops, and the serial log fills with
 repeated boot attempts instead of stopping at the interesting one.
 
 Override the CPU count and model with `VIBEOS_SMP` and `VIBEOS_QEMU_CPU` so a single harness covers
-every variant.
+every variant. Acceleration is `VIBEOS_QEMU_ACCEL` (default `tcg`).
 
 ## 8.5 Make targets
 

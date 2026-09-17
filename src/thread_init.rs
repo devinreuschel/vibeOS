@@ -10,14 +10,14 @@ use core::fmt::Write;
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::paging::VirtAddr;
 use vibeos::sched::{
-    effective_deadline, enqueue_runnable, take_next, BlockedList, ReadyQueue, TimeoutQueue,
-    SWEEP_TICKS,
+    effective_deadline, enqueue_runnable, take_next, ReadyQueue, TimeoutQueue, SWEEP_TICKS,
 };
 use vibeos::thread::{
     apply_if_on_resume, prepare_thread, switch_context, CpuAffinity, CpuContext, KernelStack, Tcb,
-    ThreadId, ThreadState, MAX_THREADS,
+    ThreadId, ThreadState, WaitOutcome, MAX_THREADS,
 };
 use vibeos::time::Instant;
+use vibeos::wait::{self, WaitQueue};
 
 use crate::kva_init::{self, GuardedStack};
 use crate::per_cpu_init;
@@ -37,11 +37,10 @@ impl ThreadHandle {
     }
 }
 
-struct Sched {
+pub(crate) struct Sched {
     slots: [Option<Box<Tcb>>; MAX_THREADS],
     ready: ReadyQueue,
     timeouts: TimeoutQueue,
-    blocked: BlockedList,
 }
 
 impl Sched {
@@ -50,7 +49,6 @@ impl Sched {
             slots: [const { None }; MAX_THREADS],
             ready: ReadyQueue::empty(),
             timeouts: TimeoutQueue::empty(),
-            blocked: BlockedList::empty(),
         }
     }
 
@@ -66,6 +64,47 @@ impl Sched {
         match self.get_mut(id) {
             Some(t) => t as *mut Tcb,
             None => core::ptr::null_mut(),
+        }
+    }
+
+    /// Enqueue → Blocked → still holding SCHED. Caller drops, then `schedule`.
+    pub(crate) fn begin_wait(&mut self, wq: &mut WaitQueue, deadline: Instant) {
+        let id = current_id();
+        wait::begin_wait(wq, &mut self.ready, &mut self.timeouts, id, deadline);
+        let cookie = wq.cookie();
+        if let Some(t) = self.get_mut(id) {
+            t.state = ThreadState::Blocked { wq: cookie };
+            t.wait_outcome = WaitOutcome::Woken;
+        }
+        relink(self);
+    }
+
+    pub(crate) fn wake_one(&mut self, wq: &mut WaitQueue) -> Option<ThreadId> {
+        let id = wait::wake_one(wq, &mut self.ready, &mut self.timeouts)?;
+        if let Some(t) = self.get_mut(id) {
+            t.state = ThreadState::Ready;
+            t.wait_outcome = WaitOutcome::Woken;
+        }
+        relink(self);
+        Some(id)
+    }
+
+    pub(crate) fn wake_all(&mut self, wq: &mut WaitQueue) -> usize {
+        let mut n = 0usize;
+        while self.wake_one(wq).is_some() {
+            n += 1;
+        }
+        n
+    }
+
+    fn unlink_wait(&mut self, id: ThreadId) {
+        let cookie = match self.get(id).map(|t| t.state) {
+            Some(ThreadState::Blocked { wq }) => wq,
+            _ => 0,
+        };
+        if cookie != 0 {
+            // SAFETY: cookie is a WaitQueue living under SCHED (mutex / chan / …).
+            unsafe { &mut *(cookie as *mut WaitQueue) }.remove(id);
         }
     }
 }
@@ -131,11 +170,12 @@ fn schedule_inner(from_irq: bool) {
         let mut i = 0;
         while i < n {
             let id = expired[i];
-            s.blocked.remove(id);
+            s.unlink_wait(id);
             if let Some(t) = s.get_mut(id) {
                 match t.state {
-                    ThreadState::Sleeping { .. } | ThreadState::Blocked => {
+                    ThreadState::Sleeping { .. } | ThreadState::Blocked { .. } => {
                         t.state = ThreadState::Ready;
+                        t.wait_outcome = WaitOutcome::Timeout;
                     }
                     ThreadState::Ready | ThreadState::Running | ThreadState::Dead => {}
                 }
@@ -163,7 +203,7 @@ fn schedule_inner(from_irq: bool) {
                 ThreadState::Running => t.state = ThreadState::Ready,
                 ThreadState::Ready
                 | ThreadState::Sleeping { .. }
-                | ThreadState::Blocked
+                | ThreadState::Blocked { .. }
                 | ThreadState::Dead => {}
             }
         }
@@ -276,6 +316,7 @@ pub unsafe fn init_bootstrap() {
         irq_nest: 0,
         switches: 0,
         run_tsc: 0,
+        wait_outcome: WaitOutcome::Woken,
     });
     let ptr = &mut *tcb as *mut Tcb;
     {
@@ -330,6 +371,7 @@ fn spawn_inner(
         irq_nest: 0,
         switches: 0,
         run_tsc: 0,
+        wait_outcome: WaitOutcome::Woken,
     });
     prepare_thread(&mut tcb.context, top, trampoline as *const () as u64);
     unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
@@ -352,7 +394,6 @@ fn spawn_inner(
         let id = ThreadId(slot as u32);
         s.ready.remove(id);
         s.timeouts.remove(id);
-        s.blocked.remove(id);
         let old = s.slots[slot].take();
         tcb.id = id;
         s.slots[slot] = Some(tcb);
@@ -368,31 +409,40 @@ fn spawn_inner(
 
 pub fn sleep_ms(ms: u64) {
     let ns = time_init::now_ns().saturating_add(ms.saturating_mul(1_000_000));
-    park(Some(Instant { ns }), false);
+    park(Some(Instant { ns }));
 }
 
-/// Park until `deadline` (or a far-future sentinel). Slice C WaitQueue
-/// uses the same timeout structure; `blocked` is the stub list.
-pub fn park(deadline: Option<Instant>, blocked: bool) {
+/// Park until `deadline` (or a far-future sentinel). Sleep path only.
+pub fn park(deadline: Option<Instant>) {
     let d = effective_deadline(deadline);
     let id = current_id();
     {
         let mut s = SCHED.lock();
         if let Some(t) = s.get_mut(id) {
-            t.state = if blocked {
-                ThreadState::Blocked
-            } else {
-                ThreadState::Sleeping { deadline: d }
-            };
+            t.state = ThreadState::Sleeping { deadline: d };
         }
         s.ready.remove(id);
-        if blocked {
-            s.blocked.push_back(id);
-        }
         s.timeouts.insert(id, d);
         relink(&mut s);
     }
     schedule();
+}
+
+/// Hold SCHED for `f`. IF is off for the whole call (IRQ-aware lock).
+pub fn with_sched_lock<R>(f: impl FnOnce() -> R) -> R {
+    let _g = SCHED.lock();
+    f()
+}
+
+pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
+    let mut s = SCHED.lock();
+    f(&mut s)
+}
+
+pub fn last_wait_outcome() -> WaitOutcome {
+    let p = per_cpu_init::current_thread();
+    assert!(!p.is_null(), "no current thread");
+    unsafe { (*p).wait_outcome }
 }
 
 /// Test helper. Same nest-swap as `schedule`.

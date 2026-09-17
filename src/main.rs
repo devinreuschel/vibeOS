@@ -268,7 +268,7 @@ fn normal_boot_tail() {
 
     #[cfg(not(feature = "kernel_tests"))]
     {
-        thread_init::park(None, false);
+        thread_init::park(None);
         x86::halt();
     }
 }

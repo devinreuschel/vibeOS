@@ -312,7 +312,7 @@ synchronization primitives.
 - [x] `sched: cpu0 ready` marker, and `irq: enabled` after it
 - [x] two spawned threads interleave visibly in the log without either yielding voluntarily
 - [x] `sleep_ms(50)` returns between 50 and 100 ms, measured in-guest
-- [ ] in-guest: 1000 iterations of two threads contending a blocking mutex, no deadlock, correct final count
+- [x] in-guest: 1000 iterations of two threads contending a blocking mutex, no deadlock, correct final count
 - [x] a thread that returns is reaped and its stack returned to the allocator, proven by the frame count
 - [x] the idle thread runs when nothing else is ready and the system does not wedge
 - [x] host tests for the run queue state machine and the timeout ordering structure
@@ -332,7 +332,7 @@ synchronization primitives.
 - [x] no FPU or SSE state yet, consistent with the soft-float target; revisit deliberately, not accidentally
 
 ### 3.3 Scheduler
-- [x] ready queue, sleep queue ordered by deadline, per-wait-queue blocked lists
+- [x] ready queue, sleep queue ordered by deadline, per-wait-queue blocked lists (`WaitQueue`)
 - [x] `schedule()` for the voluntary path
 - [x] `on_timer_tick()` called after EOI, preempting every 10 ticks
 - [x] `yield_now()`
@@ -349,11 +349,11 @@ synchronization primitives.
 ### 3.5 Synchronization
 - [x] `InterruptGuard`: save `RFLAGS.IF`, `cli`, restore on drop, correctly nested
 - [x] one `SpinMutex`: CAS acquire, IRQ-aware, `assert!` not `debug_assert!` on misuse
-- [ ] `BlockingMutex` over a wait queue, with the enqueue then mark then drop then schedule ordering
-- [ ] `RwLock`, `Semaphore`, `Condvar`
-- [ ] `Channel<T>` bounded MPSC for producer/consumer between threads
-- [ ] `WaitQueue` as the shared primitive underneath all of them
-- [ ] host tests for whatever is testable without hardware; in-guest tests for contention
+- [x] `BlockingMutex` over a wait queue, with the enqueue then mark then drop then schedule ordering
+- [x] `RwLock`, `Semaphore`, `Condvar`
+- [x] `Channel<T>` bounded MPSC for producer/consumer between threads
+- [x] `WaitQueue` as the shared primitive underneath all of them
+- [x] host tests for whatever is testable without hardware; in-guest tests for contention
 
 ### 3.6 Idle
 - [x] one idle thread, always runnable, lowest priority, `sti; hlt`
@@ -361,9 +361,9 @@ synchronization primitives.
 - [x] structured for one idle thread per CPU in phase 4
 
 ### 3.7 Verification
-- [~] in-guest: spawn writes a sentinel; N threads increment a shared counter under the blocking mutex; `sleep_ms` accuracy; `yield_now` actually switches; the idle thread runs
-- [ ] hold the scheduler lock and force a timer interrupt, asserting no deadlock. This is a regression test for a bug that already happened.
-- [ ] stress: spawn and exit thousands of threads, assert the frame count returns to baseline
+- [x] in-guest: spawn writes a sentinel; N threads increment a shared counter under the blocking mutex; `sleep_ms` accuracy; `yield_now` actually switches; the idle thread runs
+- [x] hold the scheduler lock and force a timer interrupt, asserting no deadlock. This is a regression test for a bug that already happened.
+- [x] stress: spawn and exit thousands of threads, assert the frame count returns to baseline
 
 ---
 

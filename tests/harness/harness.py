@@ -210,6 +210,7 @@ def iter_lines_with_deadline(fd: int, deadline: float) -> Iterator[str]:
 # QEMU 10 dropped `-no-hpet`. `pc,hpet=off` is the machine property on
 # 8.x (where -no-hpet is only deprecated) and on 10.x.
 HPET_OFF_MACHINE = ("-machine", "pc,hpet=off")
+DEFAULT_ACCEL = "tcg"
 
 
 @dataclass
@@ -221,6 +222,19 @@ class QemuConfig:
     bios: str | None = None  # None = QEMU default (SeaBIOS)
     extra: tuple[str, ...] = ()
     hpet: bool = True
+    # None → VIBEOS_QEMU_ACCEL, else "tcg". Empty string omits -accel.
+    accel: str | None = None
+
+
+def _accel_args(cfg: QemuConfig) -> list[str]:
+    """`-accel tcg` unless overridden. Empty env/config skips the flag."""
+    if cfg.accel is not None:
+        accel = cfg.accel
+    else:
+        accel = os.environ.get("VIBEOS_QEMU_ACCEL", DEFAULT_ACCEL)
+    if accel == "":
+        return []
+    return ["-accel", accel]
 
 
 def _qemu_argv(cfg: QemuConfig, monitor_sock: str) -> list[str]:
@@ -235,6 +249,7 @@ def _qemu_argv(cfg: QemuConfig, monitor_sock: str) -> list[str]:
         "-serial", "stdio",
         "-monitor", f"unix:{monitor_sock},server=on,wait=off",
     ]
+    argv += _accel_args(cfg)
     if not cfg.hpet:
         argv += list(HPET_OFF_MACHINE)
     if cfg.bios:

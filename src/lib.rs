@@ -22,3 +22,4 @@ pub mod thread;
 pub mod time;
 pub mod uart;
 pub mod vectors;
+pub mod wait;

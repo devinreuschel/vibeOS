@@ -57,8 +57,10 @@ pub enum ThreadState {
     Sleeping {
         deadline: Instant,
     },
-    /// Wait-queue cookie filled by Slice C. 0 means "blocked, queue unknown".
-    Blocked,
+    /// Blocked on a wait queue. `wq` is the `WaitQueue` address, or 0.
+    Blocked {
+        wq: usize,
+    },
     Dead,
 }
 
@@ -68,8 +70,24 @@ impl ThreadState {
             Self::Ready => "ready",
             Self::Running => "running",
             Self::Sleeping { .. } => "sleeping",
-            Self::Blocked => "blocked",
+            Self::Blocked { .. } => "blocked",
             Self::Dead => "dead",
+        }
+    }
+}
+
+/// Why `wait` resumed. Timeout path writes this under SCHED before ready.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitOutcome {
+    Woken,
+    Timeout,
+}
+
+impl WaitOutcome {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Woken => "woken",
+            Self::Timeout => "timeout",
         }
     }
 }
@@ -103,6 +121,8 @@ pub struct Tcb {
     pub switches: u64,
     /// TSC cycles accounted while this thread was current.
     pub run_tsc: u64,
+    /// Last `wait` result. Valid after `schedule` returns from a wait.
+    pub wait_outcome: WaitOutcome,
 }
 
 /// Callee-saved GPRs, rflags, rsp, return address. No XMM: soft-float.
@@ -176,7 +196,10 @@ pub fn prepare_thread(ctx: &mut CpuContext, stack_top: u64, entry: u64) {
 /// that is IF=0, so a raw restore would leave the thread deaf until some
 /// later `sti`. Incoming threads with `irq_nest == 0` run with IF set.
 /// Nested guards keep IF clear until that stack's guard drops (or `iret`
-/// restores IF from the interrupt frame).
+/// restores IF from the interrupt frame). A switch to `irq_nest == 0`
+/// therefore enables IF on the incoming thread even if the outgoing
+/// stack still has an open ISR / `InterruptGuard` — expected; the
+/// guard lives on the preempted stack.
 pub fn apply_if_on_resume(rflags: &mut u64, irq_nest: u32) {
     if irq_nest == 0 {
         *rflags |= RFLAGS_IF;
@@ -351,8 +374,10 @@ mod tests {
             .name(),
             "sleeping"
         );
-        assert_eq!(ThreadState::Blocked.name(), "blocked");
+        assert_eq!(ThreadState::Blocked { wq: 0 }.name(), "blocked");
         assert_eq!(ThreadState::Dead.name(), "dead");
+        assert_eq!(WaitOutcome::Woken.name(), "woken");
+        assert_eq!(WaitOutcome::Timeout.name(), "timeout");
         assert_eq!(CpuAffinity::Any.name(), "any");
         assert_eq!(CpuAffinity::Pinned(1).name(), "pinned");
         assert_eq!(ThreadId::BOOTSTRAP.raw(), 0);

@@ -52,6 +52,9 @@ pub mod thread;
 #[path = "../../../src/time.rs"]
 pub mod time;
 
+#[path = "../../../src/wait.rs"]
+pub mod wait;
+
 #[cfg(test)]
 mod smoke {
     use super::marker;

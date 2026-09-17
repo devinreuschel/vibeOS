@@ -1,8 +1,9 @@
 //! Run queue and timeout ordering. ROADMAP §3.3–§3.4, DESIGN §6.5, §7.8.
 //!
-//! Portable: FIFO ready queue, one sorted timeout list, blocked-list stub.
-//! A timing wheel can replace `TimeoutQueue` without changing callers.
-//! Kernel `schedule` / idle live in the binary crate.
+//! Portable: FIFO ready queue, one sorted timeout list.
+//! Wait queues are per-object (`wait::WaitQueue`); this file does not
+//! keep a global blocked list. A timing wheel can replace `TimeoutQueue`
+//! without changing callers. Kernel `schedule` / idle live in the binary crate.
 
 use crate::thread::{MAX_THREADS, ThreadId, ThreadState};
 use crate::time::Instant;
@@ -136,7 +137,7 @@ pub struct Timeout {
     pub deadline: Instant,
 }
 
-/// Sorted by deadline, then id. One structure for sleep and (later) waits.
+/// Sorted by deadline, then id. Sleep and wait share this list.
 #[derive(Clone, Copy)]
 pub struct TimeoutQueue {
     items: [Timeout; MAX_THREADS],
@@ -258,9 +259,6 @@ impl TimeoutQueue {
     }
 }
 
-/// Wait-queue cookie list. Slice C owns `WaitQueue`; this is the stub.
-pub type BlockedList = ReadyQueue;
-
 /// Enqueue current if it still wants the CPU. Idle is never on the FIFO.
 pub fn enqueue_runnable(ready: &mut ReadyQueue, id: ThreadId, idle: ThreadId, state: ThreadState) {
     if id == idle || id.is_none() {
@@ -268,7 +266,7 @@ pub fn enqueue_runnable(ready: &mut ReadyQueue, id: ThreadId, idle: ThreadId, st
     }
     match state {
         ThreadState::Running | ThreadState::Ready => ready.push_back(id),
-        ThreadState::Sleeping { .. } | ThreadState::Blocked | ThreadState::Dead => {}
+        ThreadState::Sleeping { .. } | ThreadState::Blocked { .. } | ThreadState::Dead => {}
     }
 }
 
@@ -276,17 +274,16 @@ pub fn take_next(ready: &mut ReadyQueue, idle: ThreadId) -> ThreadId {
     ready.pop_front().unwrap_or(idle)
 }
 
-/// Move expired timeouts onto the ready FIFO. `on_wake` sets TCB state.
+/// Move expired timeouts onto the ready FIFO. `on_wake` unlinks wait queues
+/// and sets TCB state.
 pub fn wake_expired(
     timeouts: &mut TimeoutQueue,
     ready: &mut ReadyQueue,
-    blocked: &mut BlockedList,
     now: Instant,
     mut on_wake: impl FnMut(ThreadId),
 ) -> usize {
     let mut n = 0usize;
     while let Some(id) = timeouts.pop_expired(now) {
-        blocked.remove(id);
         on_wake(id);
         ready.push_back(id);
         n += 1;
@@ -423,7 +420,6 @@ mod tests {
         let a = tid(1);
         let mut ready = ReadyQueue::empty();
         let mut timeouts = TimeoutQueue::empty();
-        let mut blocked = BlockedList::empty();
         enqueue_runnable(
             &mut ready,
             a,
@@ -433,7 +429,7 @@ mod tests {
         assert!(ready.is_empty());
         timeouts.insert(a, at(50));
         let mut woke = 0u32;
-        let n = wake_expired(&mut timeouts, &mut ready, &mut blocked, at(50), |_| {
+        let n = wake_expired(&mut timeouts, &mut ready, at(50), |_| {
             woke += 1;
         });
         assert_eq!(n, 1);
@@ -448,17 +444,19 @@ mod tests {
         let a = tid(1);
         let mut ready = ReadyQueue::empty();
         let mut timeouts = TimeoutQueue::empty();
-        let mut blocked = BlockedList::empty();
-        blocked.push_back(a);
+        let mut wq = crate::wait::WaitQueue::new();
+        wq.enqueue(a);
         timeouts.insert(a, effective_deadline(None));
-        let n = wake_expired(&mut timeouts, &mut ready, &mut blocked, at(1), |_| {});
+        let n = wake_expired(&mut timeouts, &mut ready, at(1), |_| {});
         assert_eq!(n, 0);
-        assert!(blocked.contains(a));
+        assert!(wq.contains(a));
         timeouts.remove(a);
         timeouts.insert(a, at(5));
-        let n = wake_expired(&mut timeouts, &mut ready, &mut blocked, at(5), |_| {});
+        let n = wake_expired(&mut timeouts, &mut ready, at(5), |id| {
+            wq.remove(id);
+        });
         assert_eq!(n, 1);
-        assert!(!blocked.contains(a));
+        assert!(!wq.contains(a));
         assert_eq!(take_next(&mut ready, idle), a);
     }
 

@@ -23,7 +23,7 @@ def main() -> int:
     mem = os.environ.get("VIBEOS_MEM", "128M")
     bios = os.environ.get("VIBEOS_BIOS")
     extra = tuple(os.environ.get("VIBEOS_QEMU_EXTRA", "").split())
-    timeout = float(os.environ.get("VIBEOS_TIMEOUT", "60"))
+    timeout = float(os.environ.get("VIBEOS_TIMEOUT", "90"))
 
     cfg = QemuConfig(
         iso=iso,
