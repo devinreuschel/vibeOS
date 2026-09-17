@@ -65,8 +65,10 @@ pub fn run() -> ! {
                 let _ = writeln!(Serial, "vibeOS: ktest: ok {name}");
             }
             Outcome::Fail(why) => {
-                let _ = writeln!(Serial, "vibeOS: ktest: FAIL {name}");
-                let _ = writeln!(Serial, "vibeOS: ktest:   {why}");
+                // Same shape as skip: reason on the protocol line so
+                // check_ktest_output (which raises on that line alone)
+                // is enough to diagnose (DESIGN §8.2).
+                let _ = writeln!(Serial, "vibeOS: ktest: FAIL {name}: {why}");
                 failed = true;
             }
             Outcome::Skip(reason) => {

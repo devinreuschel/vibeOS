@@ -53,6 +53,7 @@ mod smoke {
         assert_eq!(marker::PAGING_CR3_OK, "vibeOS: paging: cr3 ok");
         assert_eq!(marker::HEAP_OK, "vibeOS: heap ok");
         assert_eq!(marker::KVA_READY, "vibeOS: kva: ready");
+        assert_eq!(marker::BOOT_DONE, "vibeOS: boot: phase1 done");
     }
 
     #[test]

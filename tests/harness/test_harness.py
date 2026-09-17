@@ -26,26 +26,26 @@ class TestOrderedMarkerCheck(unittest.TestCase):
         lines = [
             "vibeOS: serial online",
             "vibeOS: limine: rev 3 ok",
-            "vibeOS: boot: phase0 done",
+            "vibeOS: boot: phase1 done",
         ]
         markers = [
             Marker("vibeOS: serial online", "a"),
             Marker("vibeOS: limine: rev 3 ok", "b"),
-            Marker("vibeOS: boot: phase0 done", "c"),
+            Marker("vibeOS: boot: phase1 done", "c"),
         ]
         result = check_markers_in_order(lines, markers)
         self.assertEqual(result.matched, ["a", "b", "c"])
 
     def test_out_of_order_fails(self) -> None:
         lines = [
-            "vibeOS: boot: phase0 done",  # too early
+            "vibeOS: boot: phase1 done",  # too early
             "vibeOS: serial online",
             "vibeOS: limine: rev 3 ok",
         ]
         markers = [
             Marker("vibeOS: serial online", "a"),
             Marker("vibeOS: limine: rev 3 ok", "b"),
-            Marker("vibeOS: boot: phase0 done", "c"),
+            Marker("vibeOS: boot: phase1 done", "c"),
         ]
         with self.assertRaises(HarnessError):
             check_markers_in_order(lines, markers)
@@ -55,7 +55,7 @@ class TestOrderedMarkerCheck(unittest.TestCase):
         markers = [
             Marker("vibeOS: serial online", "a"),
             Marker("vibeOS: limine: rev 3 ok", "b"),
-            Marker("vibeOS: boot: phase0 done", "c"),
+            Marker("vibeOS: boot: phase1 done", "c"),
         ]
         with self.assertRaises(HarnessError) as cm:
             check_markers_in_order(lines, markers)
@@ -66,9 +66,9 @@ class TestOrderedMarkerCheck(unittest.TestCase):
         lines = [
             "vibeOS: serial online",
             "panicked at src/foo.rs:1:1",
-            "vibeOS: boot: phase0 done",
+            "vibeOS: boot: phase1 done",
         ]
-        markers = [Marker("vibeOS: boot: phase0 done", "c")]
+        markers = [Marker("vibeOS: boot: phase1 done", "c")]
         with self.assertRaises(HarnessError) as cm:
             check_markers_in_order(lines, markers)
         self.assertIn("panicked at", str(cm.exception))
@@ -91,7 +91,7 @@ class TestOrderedMarkerCheck(unittest.TestCase):
         lines = [
             "vibeOS: serial online",
             "diagnostic: 12 free 4KiB frames on some other subsystem",
-            "vibeOS: boot: phase0 done",
+            "vibeOS: boot: phase1 done",
         ]
         markers = [
             Marker("vibeOS: serial online", "a"),
@@ -100,7 +100,7 @@ class TestOrderedMarkerCheck(unittest.TestCase):
                 "pmm",
                 and_contains=(" free 4KiB frames",),
             ),
-            Marker("vibeOS: boot: phase0 done", "b"),
+            Marker("vibeOS: boot: phase1 done", "b"),
         ]
         with self.assertRaises(HarnessError) as cm:
             check_markers_in_order(lines, markers)
@@ -113,12 +113,12 @@ class TestOrderedMarkerCheck(unittest.TestCase):
             "more chatter",
             "vibeOS: limine: rev 3 ok",
             "even more",
-            "vibeOS: boot: phase0 done",
+            "vibeOS: boot: phase1 done",
         ]
         markers = [
             Marker("vibeOS: serial online", "a"),
             Marker("vibeOS: limine: rev 3 ok", "b"),
-            Marker("vibeOS: boot: phase0 done", "c"),
+            Marker("vibeOS: boot: phase1 done", "c"),
         ]
         check_markers_in_order(lines, markers)
 
@@ -223,12 +223,13 @@ class TestKtestProtocol(unittest.TestCase):
 
         lines = [
             "vibeOS: ktest: begin",
-            "vibeOS: ktest: FAIL nx_enforcement",
+            "vibeOS: ktest: FAIL nx_enforcement: PF was not instruction-fetch",
             "vibeOS: ktest: end",
         ]
         with self.assertRaises(HarnessError) as cm:
             check_ktest_output(lines, ISA_DEBUG_PASS)
         self.assertIn("FAIL", str(cm.exception))
+        self.assertIn("instruction-fetch", str(cm.exception))
 
     def test_missing_begin_or_end(self) -> None:
         from harness import ISA_DEBUG_PASS, HarnessError, check_ktest_output
