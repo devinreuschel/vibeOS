@@ -450,8 +450,11 @@ def run_qemu_until_exit(
 
 # Boot contract, in order. Extended per DESIGN §8.3 as each phase lands.
 # Phase 0 gave us serial + limine; slice A added PMM free-frames; slice B
-# `paging: cr3 ok`; slice C `heap ok` / `kva: ready`. The trailing marker
-# is `boot: phase1 done` now that the phase-1 exit gate is closed.
+# `paging: cr3 ok`; slice C `heap ok` / `kva: ready`. Phase 2 slice B
+# (ACPI) inserts `paging: mmio uc` after CR3 (only emitted when a real
+# LAPIC/IOAPIC/HPET leaf was patched) and `acpi: xsdt <n> tables` after
+# KVA, skipping still-absent GDT/IDT/PIC markers. Trailing marker is
+# `boot: phase1 done`. Runtime-derived payload uses `and_contains`.
 PHASE0_MARKERS: list[Marker] = [
     Marker("vibeOS: serial online", "serial_online"),
     Marker("vibeOS: limine: rev 3 ok", "limine_ok"),
@@ -461,8 +464,14 @@ PHASE0_MARKERS: list[Marker] = [
         and_contains=(" free 4KiB frames",),
     ),
     Marker("vibeOS: paging: cr3 ok", "paging_cr3_ok"),
+    Marker("vibeOS: paging: mmio uc", "paging_mmio_uc"),
     Marker("vibeOS: heap ok", "heap_ok"),
     Marker("vibeOS: kva: ready", "kva_ready"),
+    Marker(
+        "vibeOS: acpi: xsdt ",
+        "acpi_xsdt",
+        and_contains=(" tables",),
+    ),
     Marker("vibeOS: boot: phase1 done", "boot_done"),
 ]
 

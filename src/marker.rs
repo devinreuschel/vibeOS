@@ -18,9 +18,19 @@ pub const PMM_FREE_SUFFIX: &str = " free 4KiB frames";
 /// space, not merely built its tables.
 pub const PAGING_CR3_OK: &str = "vibeOS: paging: cr3 ok";
 
+/// DESIGN §3.3 step 8. Emitted only after `patch_physmap_uc` actually
+/// touches a discovered LAPIC / I/O APIC / HPET leaf — never as a hollow
+/// claim.
+pub const PAGING_MMIO_UC: &str = "vibeOS: paging: mmio uc";
+
 /// Phase 1 §1.4 / §1.5 exit-gate markers. DESIGN §3.3 steps 9 and 10.
 pub const HEAP_OK: &str = "vibeOS: heap ok";
 pub const KVA_READY: &str = "vibeOS: kva: ready";
+
+/// Phase 2 §2.4. Runtime table count via `writeln!`; harness pins the
+/// shape with `and_contains`.
+pub const ACPI_XSDT_PREFIX: &str = "vibeOS: acpi: xsdt ";
+pub const ACPI_XSDT_SUFFIX: &str = " tables";
 
 /// Last marker of the current boot contract. Phase 1 closed the memory
 /// exit gate; later phases replace this with `shell ready` (DESIGN §3.3).

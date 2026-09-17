@@ -198,7 +198,9 @@ markers are asserted by the e2e harness in order. Adding a marker means updating
 vibeOS: serial online
 vibeOS: pmm: 32741 free 4KiB frames
 vibeOS: paging: cr3 ok
+vibeOS: paging: mmio uc
 vibeOS: heap ok
+vibeOS: acpi: xsdt 9 tables
 ```
 
 ---
@@ -1124,9 +1126,11 @@ vibeOS: gdt ok
 vibeOS: idt ok
 vibeOS: pmm: <n> free 4KiB frames
 vibeOS: paging: cr3 ok
+vibeOS: paging: mmio uc
 vibeOS: heap ok
 vibeOS: kva: ready
 vibeOS: per_cpu: bsp ready
+vibeOS: acpi: xsdt <n> tables
 vibeOS: time: tsc <n>/ms
 vibeOS: sched: cpu0 ready
 vibeOS: console ok

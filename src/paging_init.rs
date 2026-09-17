@@ -141,7 +141,6 @@ pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
 ///
 /// # Safety
 /// Only sound after `install`; the physmap must cover `[phys, phys+len)`.
-#[allow(dead_code)] // wired for phase 2; slice B ships the API only
 pub unsafe fn patch_physmap_uc(phys: PhysAddr, len: u64) -> Result<usize, MapError> {
     let mut mapper = current_mapper();
     let n = unsafe { mapper.patch_physmap_uc(VirtAddr(HHDM_BASE), phys, len)? };

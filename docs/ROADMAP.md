@@ -260,16 +260,16 @@ and a monotonic clock nobody has to distrust.
 - [ ] spurious IRQ7 and IRQ15 handled without a bogus EOI
 
 ### 2.4 ACPI
-- [ ] RSDP validation: signature, v1 checksum over 20 bytes, v2 extended checksum over the full length
-- [ ] XSDT walk with per-table checksum validation, RSDT fallback
-- [ ] all packed field access through `read_unaligned`
-- [ ] MADT: LAPIC base, type 5 address override, I/O APIC entries with GSI bases, type 2 interrupt source overrides, enabled processor APIC IDs
-- [ ] HPET: main counter base and period, rejecting zero addresses and I/O-space generic address structures
-- [ ] FADT: legacy 8259 presence, and the reset and shutdown registers for later
-- [ ] MCFG: PCIe ECAM base, stored for phase 6
-- [ ] parsing lives in the library half against synthetic table bytes, so all of it is host-tested
-- [ ] MMIO for every discovered table patched uncacheable before first access
-- [ ] boot log summarizing what was found: table count, CPU count, I/O APIC count, HPET presence
+- [x] RSDP validation: signature, v1 checksum over 20 bytes, v2 extended checksum over the full length
+- [x] XSDT walk with per-table checksum validation, RSDT fallback
+- [x] all packed field access through `read_unaligned`
+- [x] MADT: LAPIC base, type 5 address override, I/O APIC entries with GSI bases, type 2 interrupt source overrides, enabled processor APIC IDs
+- [x] HPET: main counter base and period, rejecting zero addresses and I/O-space generic address structures
+- [x] FADT: legacy 8259 presence, and the reset and shutdown registers for later
+- [x] MCFG: PCIe ECAM base, stored for phase 6
+- [x] parsing lives in the library half against synthetic table bytes, so all of it is host-tested
+- [x] MMIO for every discovered table patched uncacheable before first access
+- [x] boot log summarizing what was found: table count, CPU count, I/O APIC count, HPET presence
 
 ### 2.5 PIT and the bootstrap tick
 - [ ] channel 0, mode 2, divisor 1193 for ~1 kHz on IRQ0
