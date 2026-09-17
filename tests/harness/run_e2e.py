@@ -49,7 +49,7 @@ def main() -> int:
             "vibeOS: backtrace:",
             "vibeOS: panic: thread",
             ("vibeOS: logrec:", "smp: done"),
-            ("  0x", "_start"),
+            ("  0x", "normal_boot_tail"),
             "vibeOS: panic: halted",
         )
     elif expect_panic:
