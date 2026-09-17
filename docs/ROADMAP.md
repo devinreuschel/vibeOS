@@ -318,18 +318,18 @@ synchronization primitives.
 - [ ] host tests for the run queue state machine and the timeout ordering structure
 
 ### 3.1 Thread abstraction
-- [ ] `ThreadId`, `Tcb` with state, kernel stack handle, saved context, entry point, name
-- [ ] states: ready, running, sleeping with deadline, blocked on a wait queue, dead
-- [ ] guarded 16 KiB kernel stack per thread from the KVA allocator
-- [ ] `spawn(name, fn)` returning a handle
-- [ ] a global TCB table so a thread is addressable by id from anywhere, laid out for per-CPU queues in phase 4
+- [x] `ThreadId`, `Tcb` with state, kernel stack handle, saved context, entry point, name
+- [x] states: ready, running, sleeping with deadline, blocked on a wait queue, dead
+- [x] guarded 16 KiB kernel stack per thread from the KVA allocator
+- [x] `spawn(name, fn)` returning a handle
+- [x] a global TCB table so a thread is addressable by id from anywhere, laid out for per-CPU queues in phase 4
 
 ### 3.2 Context switch
-- [ ] `switch_context(old: *mut CpuContext, new: *const CpuContext)` in `global_asm!`
-- [ ] save and restore callee-saved GPRs, `rflags`, `rsp`, and the return address
-- [ ] new threads start on a synthetic frame that returns into the trampoline that calls the entry point
-- [ ] a thread returning from its entry point marks itself dead and schedules, never falls off the stack
-- [ ] no FPU or SSE state yet, consistent with the soft-float target; revisit deliberately, not accidentally
+- [x] `switch_context(old: *mut CpuContext, new: *const CpuContext)` in `global_asm!`
+- [x] save and restore callee-saved GPRs, `rflags`, `rsp`, and the return address
+- [x] new threads start on a synthetic frame that returns into the trampoline that calls the entry point
+- [x] a thread returning from its entry point marks itself dead and schedules, never falls off the stack
+- [x] no FPU or SSE state yet, consistent with the soft-float target; revisit deliberately, not accidentally
 
 ### 3.3 Scheduler
 - [ ] ready queue, sleep queue ordered by deadline, per-wait-queue blocked lists
@@ -347,8 +347,8 @@ synchronization primitives.
 - [ ] a periodic sweep that logs threads blocked far past any plausible timeout
 
 ### 3.5 Synchronization
-- [ ] `InterruptGuard`: save `RFLAGS.IF`, `cli`, restore on drop, correctly nested
-- [ ] one `SpinMutex`: CAS acquire, IRQ-aware, `assert!` not `debug_assert!` on misuse
+- [x] `InterruptGuard`: save `RFLAGS.IF`, `cli`, restore on drop, correctly nested
+- [x] one `SpinMutex`: CAS acquire, IRQ-aware, `assert!` not `debug_assert!` on misuse
 - [ ] `BlockingMutex` over a wait queue, with the enqueue then mark then drop then schedule ordering
 - [ ] `RwLock`, `Semaphore`, `Condvar`
 - [ ] `Channel<T>` bounded MPSC for producer/consumer between threads

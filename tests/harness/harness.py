@@ -462,8 +462,10 @@ def run_qemu_until_exit(
 # (ACPI) inserts `paging: mmio uc` after CR3 (only emitted when a real
 # LAPIC/IOAPIC/HPET leaf was patched). Phase 2 slice A then emits
 # `gdt ok` / `pic: remapped` / `idt ok` after KVA (IST from KVA), then
-# `acpi: xsdt <n> tables`. Slice C adds TSC calibration: a diagnostic
-# `time: calibrated hpet|pit <n>/ms` then the exit-gate `time: tsc <n>/ms`.
+# `per_cpu: bsp ready` (GS_BASE; DESIGN step 11, after GDT because
+# `mov gs` zeros the hidden base), then `acpi: xsdt <n> tables`. Slice C
+# adds TSC calibration: a diagnostic `time: calibrated hpet|pit <n>/ms`
+# then the exit-gate `time: tsc <n>/ms`.
 # `pic: remapped` means the PIC step finished (ICW ran, or FADT skip);
 # unlike `paging: mmio uc` it is not a claim that ports were programmed.
 # Trailing marker is `boot: phase1 done`. Runtime-derived payload uses
@@ -483,6 +485,7 @@ _PHASE0_BEFORE_TIME: list[Marker] = [
     Marker("vibeOS: gdt ok", "gdt_ok"),
     Marker("vibeOS: pic: remapped", "pic_remapped"),
     Marker("vibeOS: idt ok", "idt_ok"),
+    Marker("vibeOS: per_cpu: bsp ready", "per_cpu_bsp"),
     Marker(
         "vibeOS: acpi: xsdt ",
         "acpi_xsdt",

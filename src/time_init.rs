@@ -318,7 +318,6 @@ pub fn now_ns() -> u64 {
     st.clock.now_ns_with(|| rdtsc_ser(st.use_rdtscp), st.tsc_per_ms)
 }
 
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn tsc_per_ms() -> u64 {
     STATE.get().tsc_per_ms
 }

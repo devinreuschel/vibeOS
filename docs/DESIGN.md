@@ -204,6 +204,7 @@ vibeOS: kva: ready
 vibeOS: gdt ok
 vibeOS: pic: remapped
 vibeOS: idt ok
+vibeOS: per_cpu: bsp ready
 vibeOS: acpi: xsdt 9 tables
 vibeOS: time: tsc 2500000/ms
 ```
@@ -307,14 +308,18 @@ Ordering rules worth stating separately because they were learned the hard way:
   The `acpi: xsdt N tables` marker stays at step 12. Do not "fix" that by moving the walk after the
   heap: first touch of LAPIC/IOAPIC/HPET would then be cacheable.
 
-Live boot through Phase 2 slices A–C runs steps 6–10 (PMM, paging, heap, KVA) before steps 3–5
-(GDT/TSS/IST, PIC remap, IDT). IST stacks are allocated from the KVA allocator, which does not exist
-until step 10. Relative order among those three is unchanged: GDT, then PIC remap, then IDT. ACPI
-table walk + `paging: mmio uc` still run after CR3 (step 8); the `acpi: xsdt N tables` marker stays
-after IDT (step 12), then `time: tsc N/ms` (step 13). IRQ0 is unmasked and `sti` runs after
-calibration so the bootstrap tick can prove timekeeping; IRQ1 stays masked and `irq: enabled` is
-still Phase 3. The handler does not schedule. The timer path re-runs the 8259 ICW sequence even
-when FADT bit 0 skipped the boot remap (QEMU clears that bit but still has a PIC on 0x08).
+Live boot through Phase 3 slice A runs steps 6–10 (PMM, paging, heap, KVA) before
+steps 3–5 (GDT/TSS/IST, PIC remap, IDT). IST stacks are allocated from the KVA
+allocator, which does not exist until step 10. Relative order among those three
+is unchanged: GDT, then PIC remap, then IDT. Step 11 (`per_cpu: bsp ready`) runs
+after IDT: `mov gs` during GDT load zeros the hidden base, so `GS_BASE` is
+written after that, and before IRQ0 so an ISR can `gs:[0]`. ACPI table walk +
+`paging: mmio uc` still run after CR3 (step 8); the `acpi: xsdt N tables` marker
+stays after per_cpu (step 12), then `time: tsc N/ms` (step 13). IRQ0 is unmasked
+and `sti` runs after calibration so the bootstrap tick can prove timekeeping;
+IRQ1 stays masked and `irq: enabled` is still Phase 3 slice B. The handler does
+not schedule. The timer path re-runs the 8259 ICW sequence even when FADT bit 0
+skipped the boot remap (QEMU clears that bit but still has a PIC on 0x08).
 The e2e contract in [section 8.3](#83-end-to-end) is the live order.
 
 ## 3.4 Linker script
@@ -1166,8 +1171,9 @@ vibeOS: smp: done
 vibeOS: shell ready
 ```
 
-Live e2e through Phase 2 slice C asserts through `idt ok`, then `acpi: xsdt`, then
-`time: tsc <n>/ms`, then `boot: phase1 done`, omitting `per_cpu` and everything after time.
+Live e2e through Phase 3 slice A asserts through `idt ok`, then `per_cpu: bsp ready`,
+then `acpi: xsdt`, then `time: tsc <n>/ms`, then `boot: phase1 done`, omitting
+`sched: cpu0 ready` and everything after time.
 Default QEMU also requires the diagnostic `time: calibrated hpet <n>/ms`; `make test-e2e-pit`
 (`-machine pc,hpet=off`) asserts `calibrated pit` instead. `pic: remapped` on that path means the PIC
 step finished (ICW programmed, or FADT skip), not that ports were necessarily written.

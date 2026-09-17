@@ -1,8 +1,9 @@
 //! vibeOS kernel entry.
 //!
 //! Boot order: serial, Limine, PMM, paging, ACPI parse + MMIO UC, heap,
-//! KVA, then GDT/TSS/IST, PIC remap, IDT, ACPI marker, time, meminfo.
-//! GDT after KVA because IST stacks are guarded KVA stacks. The
+//! KVA, then GDT/TSS/IST, PIC remap, IDT, BSP per_cpu, ACPI marker, time,
+//! meminfo. GDT after KVA because IST stacks are guarded KVA stacks.
+//! per_cpu after GDT because `mov gs` zeros the hidden base. The
 //! `kernel_tests` build runs the in-guest registry after that and
 //! exits through isa-debug-exit.
 
@@ -25,8 +26,11 @@ mod heap_init;
 mod kva_init;
 mod paging_init;
 mod panic;
+mod per_cpu_init;
 mod pmm_init;
 mod serial;
+mod sync_init;
+mod thread_init;
 mod time_init;
 mod x86;
 
@@ -223,12 +227,20 @@ fn normal_boot_tail() {
     unsafe { arch::idt::init() };
     serial::line(marker::IDT_OK);
 
+    // DESIGN §3.3 step 11. After GDT: `mov gs` already ran. Before
+    // IRQ0 so ISRs can `gs:[0]`. Marker sits between `idt ok` and
+    // `acpi: xsdt` (live contract).
+    unsafe { per_cpu_init::init_bsp() };
+    unsafe { thread_init::init_bootstrap() };
+    serial::line(marker::PER_CPU_BSP);
+
     acpi_init::report();
 
     // ---- Phase 2 slice C: PIT, TSC calibration, timekeeping. ----
     // After IDT so IRQ0 has a gate. IRQs stay masked until we unmask
     // IRQ0 below; keyboard stays masked until the scheduler exists.
     unsafe { time_init::init() };
+    per_cpu_init::set_tsc_per_ms(time_init::tsc_per_ms());
 
     // FADT bit 0 may have skipped the boot remap (QEMU clears it). IRQ0
     // still needs the 8259 at 0x20, not 0x08.

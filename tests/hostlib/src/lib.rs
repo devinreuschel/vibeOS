@@ -37,6 +37,15 @@ pub mod desc;
 #[path = "../../../src/pic.rs"]
 pub mod pic;
 
+#[path = "../../../src/per_cpu.rs"]
+pub mod per_cpu;
+
+#[path = "../../../src/sync.rs"]
+pub mod sync;
+
+#[path = "../../../src/thread.rs"]
+pub mod thread;
+
 #[path = "../../../src/time.rs"]
 pub mod time;
 
@@ -57,6 +66,7 @@ mod smoke {
             marker::GDT_OK,
             marker::PIC_REMAPPED,
             marker::IDT_OK,
+            marker::PER_CPU_BSP,
             marker::ACPI_XSDT_PREFIX,
             marker::TIME_TSC_PREFIX,
             marker::BOOT_DONE,
@@ -78,6 +88,7 @@ mod smoke {
         assert_eq!(marker::GDT_OK, "vibeOS: gdt ok");
         assert_eq!(marker::PIC_REMAPPED, "vibeOS: pic: remapped");
         assert_eq!(marker::IDT_OK, "vibeOS: idt ok");
+        assert_eq!(marker::PER_CPU_BSP, "vibeOS: per_cpu: bsp ready");
         assert_eq!(marker::ACPI_XSDT_PREFIX, "vibeOS: acpi: xsdt ");
         assert_eq!(marker::ACPI_XSDT_SUFFIX, " tables");
         assert_eq!(marker::TIME_TSC_PREFIX, "vibeOS: time: tsc ");
