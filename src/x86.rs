@@ -243,6 +243,15 @@ pub fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
     (r.eax, r.ebx, r.ecx, r.edx)
 }
 
+/// Drain prior stores, including UC MMIO. Not `lfence`: that only
+/// serializes loads. SDM Vol. 3A (LAPIC timer TSC-deadline): `MFENCE`
+/// or another serializing insn after the LVT timer write, before
+/// `IA32_TSC_DEADLINE`. `lfence;rdtsc` / `rdtscp` do not count.
+#[inline]
+pub fn mfence() {
+    unsafe { asm!("mfence", options(nostack, preserves_flags)) };
+}
+
 /// `lfence; rdtsc`. DESIGN §6.2: serialize so the read cannot move
 /// across a calibration interval boundary.
 #[inline]

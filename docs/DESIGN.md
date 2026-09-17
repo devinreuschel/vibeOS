@@ -293,17 +293,19 @@ of it.
 | 11 | Per-CPU area for the BSP | `per_cpu: bsp ready` | `GS_BASE` must be valid before any `per_cpu!` access, including from ISRs. |
 | 12 | ACPI tables | `acpi: xsdt N tables` | MADT drives APIC and SMP, HPET drives calibration. |
 | 13 | Time: HPET or PIT, TSC calibration | `time: tsc N/ms` | The scheduler needs a tick, and AP bring-up needs `busy_wait_ms`. |
+| 13b | BSP LAPIC, I/O APIC, LAPIC timer | `time: lapic_timer ok (<mode>)` | After TSC calib. Prove a tick (TSC-deadline → periodic → PIT), then mask PIC + PIT GSI if LAPIC owns it. |
 | 14 | Scheduler, idle thread on BSP | `sched: cpu0 ready` | Preemption target must exist before the timer starts firing into it. |
 | 15 | Framebuffer console, input | `console ok` | Cosmetic but wanted before the shell. |
-| 16 | Arm scheduler; emit `irq: enabled` | `irq: enabled` | Scheduler is live. IRQ0 already ticks from step 13; this marker is post-sched arming (IF on, preemption live), not the first STI. IRQ1 stays masked until the keyboard driver. |
+| 16 | Arm scheduler; emit `irq: enabled` | `irq: enabled` | Scheduler is live. The timer already ticks from steps 13/13b; this marker is post-sched arming (IF on, preemption live), not the first STI. IRQ1 stays masked until the keyboard driver. |
 | 17 | APIC + SMP bring-up | `smp: done` | Needs time (delays), heap (per-CPU allocation), scheduler (AP entry point). |
 | 18 | Hand off | `shell ready` | Last marker. Everything above it must have appeared in order. |
 
 Ordering rules worth stating separately because they were learned the hard way:
 
-- IRQ0 is unmasked at step 13 so the bootstrap tick can prove timekeeping (§5.5). Other PIC
-  lines stay masked; step 16 is `irq: enabled` (IF on, preemption live), not the first unmask.
-  An unexpected line before its driver is a halt, not a useful backtrace.
+- The bootstrap tick is the LAPIC timer after step 13b, or PIC IRQ0 only on the
+  PIT fallback (LINT0 ExtINT). Other PIC lines stay masked; step 16 is
+  `irq: enabled` (IF on, preemption live), not the first unmask. An unexpected
+  line before its driver is a halt, not a useful backtrace.
 - `smp: done` precedes `shell ready`. The e2e harness enforces it. If SMP moves after the shell, AP
   failures become invisible in CI.
 - ACPI discovery for the step-8 UC patch may run immediately after CR3 (alongside `paging: mmio uc`).
@@ -315,19 +317,19 @@ steps 3–5 (GDT/TSS/IST, PIC remap, IDT). IST stacks are allocated from the KVA
 allocator, which does not exist until step 10. Relative order among those three
 is unchanged: GDT, then PIC remap, then IDT. Step 11 (`per_cpu: bsp ready`) runs
 after IDT: `mov gs` during GDT load zeros the hidden base, so `GS_BASE` is
-written after that, and before IRQ0 so an ISR can `gs:[0]`. ACPI table walk +
+written after that, and before the first timer IRQ so an ISR can `gs:[0]`. ACPI table walk +
 `paging: mmio uc` still run after CR3 (step 8); the `acpi: xsdt N tables` marker
-stays after per_cpu (step 12), then `time: tsc N/ms` (step 13). IRQ0 is unmasked
-and `sti` runs after calibration so the bootstrap tick can prove timekeeping;
-the handler updates the clock, EOIs, then calls `on_timer_tick`, which is a
-no-op until the idle thread exists. Phase 4 slice A then enables the LAPIC,
-programs the I/O APIC (masked), arms the per-CPU timer, and emits
-`time: lapic_timer ok (<mode>)` before masking the PIC and the PIT GSI.
-Step 14 (`sched: cpu0 ready`) then step 16
-(`irq: enabled`) follow meminfo. IRQ1 stays masked until the keyboard driver
-(phase 5): the default PIC handler halts on an unexpected line. The timer path
-re-runs the 8259 ICW sequence even when FADT bit 0 skipped the boot remap
-(QEMU clears that bit but still has a PIC on 0x08).
+stays after per_cpu (step 12), then `time: tsc N/ms` (step 13). Step 13b enables
+the LAPIC, programs the I/O APIC (masked), enables IF, proves the per-CPU timer, and
+emits `time: lapic_timer ok (<mode>)` before masking the PIC and the PIT GSI
+when LAPIC owns the tick. PIT fallback keeps IRQ0 unmasked with LINT0 ExtINT.
+The handler updates the clock, EOIs, rearms (TSC-deadline), then
+`on_timer_tick`, a no-op until the idle thread exists. Step 14
+(`sched: cpu0 ready`) then step 16 (`irq: enabled`) follow meminfo: IF on,
+preemption live. IRQ1 stays masked until the keyboard driver (phase 5): the
+default PIC handler halts on an unexpected line. The timer path re-runs the
+8259 ICW sequence even when FADT bit 0 skipped the boot remap (QEMU clears
+that bit but still has a PIC on 0x08).
 The e2e contract in [section 8.3](#83-end-to-end) is the live order.
 
 ## 3.4 Linker script
@@ -632,11 +634,12 @@ The PIC is a bootstrap artifact and a fallback, nothing more.
 - Remap master to `0x20`, slave to `0x28`. Firmware may leave them at vectors 0x08–0x0F, which collide
   with `#DF` and friends, so a spurious IRQ before remap looks like a CPU exception.
 - Mask everything (`0xFF` to both data ports) immediately after remap.
-- Unmask IRQ0 after calibration so the bootstrap tick can prove timekeeping (live
-  [section 3.3](#33-_start-order)). `sti` is allowed then; `on_timer_tick` is a
-  no-op until the idle thread exists. `irq: enabled` is Phase 3 slice B, after
-  `sched: cpu0 ready`. Unmask IRQ1 only once a keyboard handler exists (phase 5);
-  the default PIC path halts on an unexpected line.
+- After TSC calibration, the bootstrap tick is the LAPIC timer when it proves
+  (live [section 3.3](#33-_start-order) step 13b). Unmask PIC IRQ0 only on the
+  PIT fallback (LINT0 ExtINT). `sti` is allowed for that prove; `on_timer_tick`
+  is a no-op until the idle thread exists. `irq: enabled` is Phase 3 slice B,
+  after `sched: cpu0 ready`. Unmask IRQ1 only once a keyboard handler exists
+  (phase 5); the default PIC path halts on an unexpected line.
 - Once the I/O APIC routes devices and the LAPIC timer is verified ticking, mask the PIC completely.
   Leaving it live means every interrupt is delivered twice.
 - Keep the PIT driver code. It is still the calibration fallback and still provides the delays that AP
@@ -770,6 +773,11 @@ LAPIC periodic mode    LAPIC present, no TSC-deadline
 PIT IRQ0               no usable LAPIC
   ~1 kHz on vector 0x20, single global tick, no per-CPU preemption
 ```
+
+Arming TSC-deadline: write the LVT timer register, then `MFENCE` (or another
+serializing instruction), then `IA32_TSC_DEADLINE`. `lfence;rdtsc` / `rdtscp` do
+not drain the UC LVT store (SDM Vol. 3A). Rearm on the IRQ path only writes the
+MSR; LVT is already in deadline mode.
 
 Each fallback is worse than the one above it and all three must work, because the difference between
 them is a QEMU flag and CI runs both. `-cpu qemu64,-tsc-deadline` forces the periodic path.
@@ -917,7 +925,7 @@ Relevant MSRs across this section:
 | MSR | Meaning |
 |-----|---------|
 | `0x1B` | `IA32_APIC_BASE`. Bit 11 global enable, bits 12–35 base, bit 8 BSP flag. |
-| `0x6E0` | `IA32_TSC_DEADLINE`. Write 0 to disarm. |
+| `0x6E0` | `IA32_TSC_DEADLINE`. Write 0 to disarm. After an LVT timer write into TSC-deadline mode, `MFENCE` before this MSR. |
 | `0xC000_0080` | `IA32_EFER`. Bit 8 LME, bit 11 NXE. |
 | `0xC000_0101` | `IA32_GS_BASE`. Per-CPU struct pointer. |
 | `0xC000_0102` | `IA32_KERNEL_GS_BASE`. Equal to `GS_BASE` until userspace and `swapgs`. |
@@ -1220,8 +1228,8 @@ With `-smp N`, additionally:
 
 - exactly `N-1` occurrences of `vibeOS: smp: ap online`
 - `vibeOS: sched: cpu<i> ready` for every `i` in `0..N`
-- either `vibeOS: time: lapic_timer ok (<mode>)` or the PIT fallback line, so which timer path ran is
-  recorded rather than inferred
+- `vibeOS: time: lapic_timer ok (<mode>)` naming the selected timer path
+  (`tsc-deadline`, `periodic`, or `pit`) rather than inferring it
 
 ### Failing fast
 

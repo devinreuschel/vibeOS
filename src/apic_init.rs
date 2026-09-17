@@ -9,9 +9,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use vibeos::acpi::{IoApic, MadtInfo, MAX_IOAPICS};
 use vibeos::apic::{
     self, has_tsc_deadline, ioapic_max_index, ioapic_pin, lvt_timer_periodic,
-    lvt_timer_tsc_deadline, poll_delivery_pending, redir_high, redir_is_masked, redir_low,
-    redir_set_mask, svr_value, tsc_deadline_value, write_redir, EoiDomain, IpiError, IpiMode,
-    Polarity, TimerMode,     Trigger, APIC_BASE_ENABLE, DEFAULT_LAPIC_PHYS, IA32_APIC_BASE,
+    poll_delivery_pending, redir_high, redir_is_masked, redir_low, redir_set_mask, svr_value,
+    tsc_deadline_arm_plan, tsc_deadline_value, write_redir, EoiDomain, IpiError, IpiMode, Polarity,
+    TimerMode, Trigger, TscDeadlineStep, APIC_BASE_ENABLE, DEFAULT_LAPIC_PHYS, IA32_APIC_BASE,
     IA32_TSC_DEADLINE, ICR_POLL_CAP, IOAPIC_VER, IOREGSEL, IOWIN, LAPIC_EOI, LAPIC_ESR,
     LAPIC_ICR_HIGH, LAPIC_ICR_LOW, LAPIC_ID, LAPIC_LVT_ERROR, LAPIC_LVT_LINT0, LAPIC_LVT_LINT1,
     LAPIC_LVT_PERF, LAPIC_LVT_THERMAL, LAPIC_LVT_TIMER, LAPIC_SVR, LAPIC_TIMER_CCR, LAPIC_TIMER_DCR,
@@ -220,6 +220,8 @@ fn apply_isos(st: &ApicState, madt: &MadtInfo) {
         let iso = madt.isos[i];
         let trig = apic::iso_trigger(iso.flags);
         let pol = apic::iso_polarity(iso.flags);
+        // Shared placeholder vector: every ISO stays masked until a driver
+        // calls `route_gsi` with a real vector.
         let _ = route_gsi_inner(st, iso.gsi, vectors::DEVICE_VEC_START, dest, trig, pol, true);
         i += 1;
     }
@@ -247,7 +249,7 @@ fn route_gsi_inner(
     masked: bool,
 ) -> Result<(), IpiError> {
     let Some((io, pin)) = find_ioapic(st, gsi) else {
-        return Err(IpiError::DeliveryPendingTimeout);
+        return Err(IpiError::NoRoute);
     };
     let high = redir_high(cpu);
     let low = redir_low(vector, trigger, polarity, masked);
@@ -266,7 +268,7 @@ pub fn route_gsi(
 ) -> Result<(), IpiError> {
     let st = STATE.get();
     if !st.ready {
-        return Err(IpiError::DeliveryPendingTimeout);
+        return Err(IpiError::NotReady);
     }
     route_gsi_inner(st, gsi, vector, cpu, trigger, polarity, true)
 }
@@ -310,6 +312,7 @@ pub fn eoi() {
 pub fn eoi_for(vec: u8) {
     match apic::eoi_domain(vec) {
         EoiDomain::None => {}
+        // PIC paths EOI the 8259 themselves (`pit_irq`, `pic::handle`).
         EoiDomain::Pic => {}
         EoiDomain::Lapic => eoi(),
     }
@@ -320,7 +323,7 @@ pub fn eoi_for(vec: u8) {
 pub fn send_ipi(dest: u8, vector: u8, mode: IpiMode) -> Result<(), IpiError> {
     let st = STATE.get();
     if st.lapic_va == 0 {
-        return Err(IpiError::DeliveryPendingTimeout);
+        return Err(IpiError::NotReady);
     }
     let va = st.lapic_va;
     if !poll_delivery_pending(|| lapic_read(va, LAPIC_ICR_LOW), ICR_POLL_CAP) {
@@ -381,13 +384,14 @@ fn calib_periodic(va: u64) -> Option<u64> {
 }
 
 fn arm_tsc_deadline(va: u64, tsc_per_ms: u64) {
-    lapic_write(
-        va,
-        LAPIC_LVT_TIMER,
-        lvt_timer_tsc_deadline(vectors::LAPIC_TIMER, false),
-    );
-    let d = tsc_deadline_value(time_init::read_tsc(), tsc_per_ms);
-    unsafe { x86::wrmsr(IA32_TSC_DEADLINE, d) };
+    let now = time_init::read_tsc();
+    for step in tsc_deadline_arm_plan(vectors::LAPIC_TIMER, now, tsc_per_ms) {
+        match step {
+            TscDeadlineStep::Lvt(v) => lapic_write(va, LAPIC_LVT_TIMER, v),
+            TscDeadlineStep::Mfence => x86::mfence(),
+            TscDeadlineStep::Deadline(d) => unsafe { x86::wrmsr(IA32_TSC_DEADLINE, d) },
+        }
+    }
 }
 
 fn arm_periodic(va: u64, ticks_per_ms: u64) {
@@ -430,6 +434,7 @@ fn rearm_deadline() {
     if st.mode != TimerMode::TscDeadline || st.lapic_va == 0 {
         return;
     }
+    // LVT already in TSC-deadline mode. SDM fence is LVT → deadline only.
     let k = time_init::tsc_per_ms();
     let d = tsc_deadline_value(time_init::read_tsc(), k);
     unsafe { x86::wrmsr(IA32_TSC_DEADLINE, d) };

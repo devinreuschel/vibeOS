@@ -85,12 +85,16 @@ impl IpiMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IpiError {
     DeliveryPendingTimeout,
+    NotReady,
+    NoRoute,
 }
 
 impl IpiError {
     pub const fn as_str(self) -> &'static str {
         match self {
             IpiError::DeliveryPendingTimeout => "delivery pending timeout",
+            IpiError::NotReady => "not ready",
+            IpiError::NoRoute => "no ioapic route",
         }
     }
 }
@@ -320,6 +324,26 @@ pub const fn tsc_deadline_value(now: u64, tsc_per_ms: u64) -> u64 {
     if d == 0 { 1 } else { d }
 }
 
+/// Arm sequence for TSC-deadline. SDM Vol. 3A (local APIC timer,
+/// TSC-deadline mode): LVT write, then `MFENCE` (or another serializing
+/// insn), then `IA32_TSC_DEADLINE`. `lfence;rdtsc` / `rdtscp` do not
+/// drain the UC LVT store, so the MSR write can retire against the old
+/// masked one-shot and the first deadline is dropped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TscDeadlineStep {
+    Lvt(u32),
+    Mfence,
+    Deadline(u64),
+}
+
+pub fn tsc_deadline_arm_plan(vec: u8, now: u64, tsc_per_ms: u64) -> [TscDeadlineStep; 3] {
+    [
+        TscDeadlineStep::Lvt(lvt_timer_tsc_deadline(vec, false)),
+        TscDeadlineStep::Mfence,
+        TscDeadlineStep::Deadline(tsc_deadline_value(now, tsc_per_ms)),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,6 +516,29 @@ mod tests {
         assert!(!has_tsc_deadline(0));
         assert_eq!(tsc_deadline_value(0, 0), 1);
         assert_eq!(tsc_deadline_value(10, 5), 15);
+    }
+
+    #[test]
+    fn tsc_deadline_arm_mfence_before_wrmsr() {
+        let plan = tsc_deadline_arm_plan(vectors::LAPIC_TIMER, 10, 5);
+        assert_eq!(
+            plan,
+            [
+                TscDeadlineStep::Lvt(lvt_timer_tsc_deadline(vectors::LAPIC_TIMER, false)),
+                TscDeadlineStep::Mfence,
+                TscDeadlineStep::Deadline(15),
+            ]
+        );
+    }
+
+    #[test]
+    fn ipi_error_variants() {
+        assert_eq!(
+            IpiError::DeliveryPendingTimeout.as_str(),
+            "delivery pending timeout",
+        );
+        assert_eq!(IpiError::NotReady.as_str(), "not ready");
+        assert_eq!(IpiError::NoRoute.as_str(), "no ioapic route");
     }
 
     #[test]

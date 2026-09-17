@@ -37,6 +37,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- TSC-deadline arm: `MFENCE` after the LVT timer write so `IA32_TSC_DEADLINE`
+  cannot retire against the old masked one-shot (SDM Vol. 3A). Host test
+  asserts LVT → MFENCE → deadline. DESIGN §3.3 lists step 13b
+  (`time: lapic_timer ok`).
 - `switch_context` no longer `popfq`s with IF set before `jmp`. A timer
   in that window preempted a first-run thread, overwrote the trampoline
   frame, and `iret` jumped into `schedule_inner` on `stack_top-8` (`#PF`
