@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Seqlock `TickClock::write` odd-bumps with `fetch_add(AcqRel)` and
+  stores (tick, tsc) as atomics, then Release-publishes the even
+  sequence. Relaxed load/store on the odd bump let a torn pair stay
+  visible while seq still looked even
+  (`seqlock_threaded_writer_never_tears`).
+
 ### Added
 
 - Phase 2 slice C: PIT bootstrap tick, TSC calibration, seqlock

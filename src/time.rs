@@ -3,8 +3,7 @@
 //! Portable half: interpolation, seqlock, deadline math, wall-clock offset.
 //! Port I/O, HPET MMIO, and the IRQ0 handler live in the binary crate.
 
-use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{fence, AtomicU64, Ordering};
 
 /// PIT input frequency in Hz. DESIGN §6.1.
 pub const PIT_HZ: u64 = 1_193_182;
@@ -147,31 +146,31 @@ fn clamp_u64(v: u128) -> u64 {
 /// release. Reader: acquire, retry until a stable even sequence. DESIGN §6.4.
 pub struct TickClock {
     seq: AtomicU64,
-    tick: UnsafeCell<u64>,
-    tsc: UnsafeCell<u64>,
+    tick: AtomicU64,
+    tsc: AtomicU64,
 }
-
-unsafe impl Sync for TickClock {}
-unsafe impl Send for TickClock {}
 
 impl TickClock {
     pub const fn new() -> Self {
         Self {
             seq: AtomicU64::new(0),
-            tick: UnsafeCell::new(0),
-            tsc: UnsafeCell::new(0),
+            tick: AtomicU64::new(0),
+            tsc: AtomicU64::new(0),
         }
     }
 
     /// ISR path. No alloc, no logging.
+    ///
+    /// Odd bump is `fetch_add(AcqRel)`, not Relaxed load/store. Relaxed
+    /// lets the compiler publish (tick, tsc) while seq still looks even.
+    /// Release on that RMW is the wrong side of the increment (it orders
+    /// writes *before* it). Acquire keeps the payload stores after seq is
+    /// odd. Even bump is Release.
     pub fn write(&self, tick: u64, tsc: u64) {
-        let s = self.seq.load(Ordering::Relaxed);
-        self.seq.store(s.wrapping_add(1), Ordering::Relaxed);
-        unsafe {
-            *self.tick.get() = tick;
-            *self.tsc.get() = tsc;
-        }
-        self.seq.store(s.wrapping_add(2), Ordering::Release);
+        self.seq.fetch_add(1, Ordering::AcqRel);
+        self.tick.store(tick, Ordering::Relaxed);
+        self.tsc.store(tsc, Ordering::Relaxed);
+        self.seq.fetch_add(1, Ordering::Release);
     }
 
     /// Stable (tick, tsc_at_tick). Retries on odd or changed sequence.
@@ -181,9 +180,11 @@ impl TickClock {
             if s1 & 1 != 0 {
                 continue;
             }
-            let tick = unsafe { *self.tick.get() };
-            let tsc = unsafe { *self.tsc.get() };
-            let s2 = self.seq.load(Ordering::Acquire);
+            let tick = self.tick.load(Ordering::Relaxed);
+            let tsc = self.tsc.load(Ordering::Relaxed);
+            // Payload loads must not move past the seq re-check.
+            fence(Ordering::Acquire);
+            let s2 = self.seq.load(Ordering::Relaxed);
             if s1 == s2 {
                 return (tick, tsc);
             }
@@ -211,10 +212,11 @@ impl TickClock {
             if s1 & 1 != 0 {
                 continue;
             }
-            let tick = unsafe { *self.tick.get() };
-            let tsc = unsafe { *self.tsc.get() };
+            let tick = self.tick.load(Ordering::Relaxed);
+            let tsc = self.tsc.load(Ordering::Relaxed);
             let tsc_now = read_tsc();
-            let s2 = self.seq.load(Ordering::Acquire);
+            fence(Ordering::Acquire);
+            let s2 = self.seq.load(Ordering::Relaxed);
             if s1 == s2 {
                 return interp(tick, tsc, tsc_now, tsc_per_ms);
             }
