@@ -1374,18 +1374,41 @@ fn test_sched_lock_timer_irq() -> Outcome {
 }
 
 const SPAWN_EXIT_N: usize = 2000;
+const SPAWN_EXIT_WARMUP: usize = 256;
+
+fn spawn_until_dead(name: &'static str) -> Outcome {
+    let h = thread_init::spawn(name, dying_entry);
+    thread_init::yield_now();
+    if thread_init::try_state(h.id()) != Some(ThreadState::Dead) {
+        thread_init::yield_now();
+    }
+    if thread_init::try_state(h.id()) != Some(ThreadState::Dead) {
+        Outcome::Fail("returned thread not dead")
+    } else {
+        Outcome::Ok
+    }
+}
 
 fn test_spawn_exit_thousands() -> Outcome {
-    let before = free_frames();
+    // First-fit KVA walks new VA until coalesce. Mapping a fresh 2MiB
+    // window allocates a PT page that unmap_4k does not free. Warm up
+    // past one free-list overflow so the 2000 recycle already-mapped VA.
     let mut i = 0usize;
-    while i < SPAWN_EXIT_N {
-        let h = thread_init::spawn("die", dying_entry);
-        thread_init::yield_now();
-        if thread_init::try_state(h.id()) != Some(ThreadState::Dead) {
-            thread_init::yield_now();
+    while i < SPAWN_EXIT_WARMUP {
+        match spawn_until_dead("die") {
+            Outcome::Ok => {}
+            other => return other,
         }
-        if thread_init::try_state(h.id()) != Some(ThreadState::Dead) {
-            return Outcome::Fail("returned thread not dead");
+        i += 1;
+    }
+    thread_init::reap_zombies();
+
+    let before = free_frames();
+    i = 0;
+    while i < SPAWN_EXIT_N {
+        match spawn_until_dead("die") {
+            Outcome::Ok => {}
+            other => return other,
         }
         i += 1;
     }
