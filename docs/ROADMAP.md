@@ -379,7 +379,7 @@ comes before drivers rather than after.
 - [x] `smp: done` before `shell ready`, with exactly `N-1` `smp: ap online` lines at `-smp N`
 - [ ] `sched: cpu<i> ready` for every CPU
 - [x] `time: lapic_timer ok (<mode>)` naming the mode that was selected
-- [ ] `make test-kernel` at `-smp 2` and `-smp 4` both pass
+- [x] `make test-kernel` at `-smp 2` and `-smp 4` both pass
 - [x] `make test-lapic-fallback` passes with `-cpu qemu64,-tsc-deadline`
 - [ ] a thread spawned on CPU 0 observably runs on another CPU
 - [ ] remote unmap and remap through the shootdown path passes in-guest with 2+ CPUs
