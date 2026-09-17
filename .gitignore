@@ -37,6 +37,9 @@ obj/
 isodir/
 /iso_root/
 /iso_root_ktest/
+/iso_root_panic/
+/target-panic/
+/tests/hostlib/target/
 /limine
 sysroot/
 

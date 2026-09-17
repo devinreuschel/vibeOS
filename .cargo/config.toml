@@ -1,0 +1,13 @@
+[build]
+target = "x86_64-unknown-none-executable.json"
+rustflags = ["-Z", "unstable-options"]
+
+# build-std is only correct when we are targeting the bare-metal kernel.
+# Applying it to host builds (`cargo test --lib --target
+# x86_64-unknown-linux-gnu`) drags a fresh core into the mix and clashes with
+# the sysroot's own. Cargo has no "only for target X" build-std toggle, so we
+# leave it here and drive host tests through a separate workspace root (see
+# tests/hostlib/).
+[unstable]
+build-std = ["core", "compiler_builtins", "alloc"]
+build-std-features = ["compiler-builtins-mem"]

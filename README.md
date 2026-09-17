@@ -16,8 +16,20 @@ If you learn something about hardware or Rust from reading this, good, but that'
 
 ## Status
 
-Nothing yet. The tree is fresh and phase 0 is not done. A previous iteration got to SMP with a
-preemptive scheduler before being scrapped; what survived is written down in `docs/`.
+Phase 0 (Ignition) is mostly landed: `make` builds a hybrid BIOS + UEFI ISO, boots under QEMU on
+both firmware paths, prints `vibeOS: serial online` first, and a `--features panic-test` build
+exercises the panic path (file, line, message, halt without reboot). See
+[ROADMAP.md](docs/ROADMAP.md#phase-0-ignition) for the exact checklist and what is deferred.
+
+Quickstart:
+
+    ./setup.sh          # fetches Limine binaries, verifies host tools
+    make                # kernel + vibeos.iso (hybrid BIOS/UEFI)
+    make run            # boot in QEMU with COM1 on stdio, -smp 2
+    make test           # host units + harness units + e2e (BIOS, UEFI, panic)
+
+A previous iteration got to SMP with a preemptive scheduler before being scrapped; what survived is
+written down in `docs/`.
 
 ## Docs
 
