@@ -15,6 +15,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   visible while seq still looked even. The threaded tear test also
   seeds a consistent pair so the default `(0, 0)` is not counted as a
   tear (`seqlock_threaded_writer_never_tears`).
+- `make test-e2e-pit` disables HPET with `-machine pc,hpet=off`. QEMU
+  10.x rejects `-no-hpet`; 8.x only deprecates it.
 
 ### Added
 
@@ -41,7 +43,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   those plus PIT/HPET calib math and wall-clock offset.
 - In-guest: PIT ~1 kHz, `now_us` monotonic over 10k reads (straight-line
   and under `hlt` yields), HPET vs PIT-ch2 agreement, uptime sides, RTC
-  offset. `make test-e2e-pit` boots the production ISO with `-no-hpet`.
+  offset. `make test-e2e-pit` boots the production ISO with HPET off.
 
 - Phase 2 slice A: GDT/TSS/IST, IDT/exceptions, 8259 PIC. Boot prints
   `vibeOS: gdt ok`, `vibeOS: pic: remapped`, `vibeOS: idt ok` after

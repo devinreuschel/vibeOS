@@ -207,6 +207,11 @@ def iter_lines_with_deadline(fd: int, deadline: float) -> Iterator[str]:
             return
 
 
+# QEMU 10 dropped `-no-hpet`. `pc,hpet=off` is the machine property on
+# 8.x (where -no-hpet is only deprecated) and on 10.x.
+HPET_OFF_MACHINE = ("-machine", "pc,hpet=off")
+
+
 @dataclass
 class QemuConfig:
     iso: str
@@ -215,6 +220,7 @@ class QemuConfig:
     mem: str = "128M"
     bios: str | None = None  # None = QEMU default (SeaBIOS)
     extra: tuple[str, ...] = ()
+    hpet: bool = True
 
 
 def _qemu_argv(cfg: QemuConfig, monitor_sock: str) -> list[str]:
@@ -229,6 +235,8 @@ def _qemu_argv(cfg: QemuConfig, monitor_sock: str) -> list[str]:
         "-serial", "stdio",
         "-monitor", f"unix:{monitor_sock},server=on,wait=off",
     ]
+    if not cfg.hpet:
+        argv += list(HPET_OFF_MACHINE)
     if cfg.bios:
         argv += ["-bios", cfg.bios]
     argv += list(cfg.extra)
@@ -499,7 +507,7 @@ PHASE0_MARKERS: list[Marker] = _PHASE0_BEFORE_TIME + [
     ),
 ] + _PHASE0_AFTER_CALIB
 
-# Production ISO with QEMU `-no-hpet`: same contract, PIT channel 2.
+# Production ISO with HPET emulation off: same contract, PIT channel 2.
 PHASE0_PIT_MARKERS: list[Marker] = _PHASE0_BEFORE_TIME + [
     Marker(
         "vibeOS: time: calibrated pit ",

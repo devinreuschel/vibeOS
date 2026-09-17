@@ -16,8 +16,11 @@ from harness import (  # noqa: E402
     DeadlineReader,
     HarnessError,
     Marker,
+    QemuConfig,
     check_markers_in_order,
     contains_panic,
+    HPET_OFF_MACHINE,
+    _qemu_argv,
 )
 
 
@@ -246,6 +249,20 @@ class TestKtestProtocol(unittest.TestCase):
         with self.assertRaises(HarnessError) as cm:
             check_ktest_output(lines, ISA_DEBUG_FAIL)
         self.assertIn("isa-debug-exit", str(cm.exception))
+
+
+class TestQemuArgv(unittest.TestCase):
+    def test_hpet_off_uses_machine_property(self) -> None:
+        argv = _qemu_argv(QemuConfig(iso="x.iso", hpet=False), "/tmp/mon")
+        self.assertEqual(HPET_OFF_MACHINE, ("-machine", "pc,hpet=off"))
+        i = argv.index("-machine")
+        self.assertEqual(argv[i : i + 2], ["-machine", "pc,hpet=off"])
+        self.assertNotIn("-no-hpet", argv)
+
+    def test_hpet_on_has_no_machine_override(self) -> None:
+        argv = _qemu_argv(QemuConfig(iso="x.iso"), "/tmp/mon")
+        self.assertNotIn("-machine", argv)
+        self.assertNotIn("-no-hpet", argv)
 
 
 if __name__ == "__main__":

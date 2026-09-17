@@ -169,10 +169,10 @@ $(ISO_GP): $(KERNEL_DEPS) limine.conf $(LIMINE_BIN)
 test-e2e-gp: $(ISO_GP)
 	VIBEOS_ISO=$(ISO_GP) VIBEOS_GP_TEST=1 python3 tests/harness/run_e2e.py
 
-# PIT channel 2 calibration: HPET device off. Same ISO, same markers
-# except the diagnostic names `pit` instead of `hpet`.
+# PIT channel 2 calibration: HPET emulation off (`-machine pc,hpet=off`).
+# Same ISO, same markers except the diagnostic names `pit` instead of `hpet`.
 test-e2e-pit: $(ISO)
-	VIBEOS_ISO=$(ISO) VIBEOS_EXPECT_PIT=1 VIBEOS_QEMU_EXTRA=-no-hpet python3 tests/harness/run_e2e.py
+	VIBEOS_ISO=$(ISO) VIBEOS_EXPECT_PIT=1 python3 tests/harness/run_e2e.py
 
 # In-guest tests: separate target dir + ISO so a test build can never be
 # packaged as production (DESIGN §8.2 / §9.7).

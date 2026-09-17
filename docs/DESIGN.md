@@ -1169,7 +1169,7 @@ vibeOS: shell ready
 Live e2e through Phase 2 slice C asserts through `idt ok`, then `acpi: xsdt`, then
 `time: tsc <n>/ms`, then `boot: phase1 done`, omitting `per_cpu` and everything after time.
 Default QEMU also requires the diagnostic `time: calibrated hpet <n>/ms`; `make test-e2e-pit`
-(`-no-hpet`) asserts `calibrated pit` instead. `pic: remapped` on that path means the PIC
+(`-machine pc,hpet=off`) asserts `calibrated pit` instead. `pic: remapped` on that path means the PIC
 step finished (ICW programmed, or FADT skip), not that ports were necessarily written.
 
 `smp: done` before `shell ready` is deliberate. Put SMP bring-up after the shell starts and an AP

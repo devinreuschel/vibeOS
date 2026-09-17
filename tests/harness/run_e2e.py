@@ -30,7 +30,15 @@ def main() -> int:
     expect_pit = os.environ.get("VIBEOS_EXPECT_PIT", "") not in ("", "0")
     extra = tuple(os.environ.get("VIBEOS_QEMU_EXTRA", "").split())
 
-    cfg = QemuConfig(iso=iso, smp=smp, cpu=cpu, mem=mem, bios=bios, extra=extra)
+    cfg = QemuConfig(
+        iso=iso,
+        smp=smp,
+        cpu=cpu,
+        mem=mem,
+        bios=bios,
+        extra=extra,
+        hpet=not expect_pit,
+    )
     if gp_test:
         markers = PHASE0_GP_MARKERS
         expect_panic = True
