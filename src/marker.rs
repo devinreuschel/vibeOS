@@ -47,6 +47,11 @@ pub const ACPI_XSDT_SUFFIX: &str = " tables";
 pub const TIME_TSC_PREFIX: &str = "vibeOS: time: tsc ";
 pub const TIME_TSC_SUFFIX: &str = "/ms";
 
+/// Phase 3 slice B. DESIGN §3.3 steps 14 and 16. `irq: enabled` is after
+/// `sched: cpu0 ready`.
+pub const SCHED_CPU0: &str = "vibeOS: sched: cpu0 ready";
+pub const IRQ_ENABLED: &str = "vibeOS: irq: enabled";
+
 /// Last marker of the current boot contract. Phase 1 closed the memory
 /// exit gate; later phases replace this with `shell ready` (DESIGN §3.3).
 pub const BOOT_DONE: &str = "vibeOS: boot: phase1 done";

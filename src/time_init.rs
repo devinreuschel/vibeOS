@@ -295,8 +295,8 @@ fn read_rtc_unix() -> Option<u64> {
     unix_from_civil(civil.0, civil.1, civil.2, civil.3, civil.4, civil.5)
 }
 
-/// IRQ0 body: increment tick, snapshot TSC, return. Caller EOIs.
-/// No allocation, no logging. DESIGN §2.5 / §2.2.
+/// IRQ0 body: increment tick, snapshot TSC. Caller EOIs, then
+/// `sched_init::on_timer_tick` (DESIGN §5.8). No allocation, no logging.
 pub fn on_pit_tick(tsc: u64) {
     let st = unsafe { STATE.get_mut() };
     st.ticks = st.ticks.wrapping_add(1);

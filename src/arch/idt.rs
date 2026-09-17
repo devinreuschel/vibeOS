@@ -127,6 +127,7 @@ extern "x86-interrupt" fn pit_irq(_frame: InterruptFrame) {
     let tsc = crate::time_init::read_tsc();
     crate::time_init::on_pit_tick(tsc);
     crate::time_init::eoi_pit();
+    crate::sched_init::on_timer_tick();
 }
 
 /// Fill all 256 entries, overlay named handlers, `lidt`.

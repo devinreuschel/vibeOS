@@ -308,7 +308,7 @@ Ordering rules worth stating separately because they were learned the hard way:
   The `acpi: xsdt N tables` marker stays at step 12. Do not "fix" that by moving the walk after the
   heap: first touch of LAPIC/IOAPIC/HPET would then be cacheable.
 
-Live boot through Phase 3 slice A runs steps 6–10 (PMM, paging, heap, KVA) before
+Live boot through Phase 3 slice B runs steps 6–10 (PMM, paging, heap, KVA) before
 steps 3–5 (GDT/TSS/IST, PIC remap, IDT). IST stacks are allocated from the KVA
 allocator, which does not exist until step 10. Relative order among those three
 is unchanged: GDT, then PIC remap, then IDT. Step 11 (`per_cpu: bsp ready`) runs
@@ -317,9 +317,12 @@ written after that, and before IRQ0 so an ISR can `gs:[0]`. ACPI table walk +
 `paging: mmio uc` still run after CR3 (step 8); the `acpi: xsdt N tables` marker
 stays after per_cpu (step 12), then `time: tsc N/ms` (step 13). IRQ0 is unmasked
 and `sti` runs after calibration so the bootstrap tick can prove timekeeping;
-IRQ1 stays masked and `irq: enabled` is still Phase 3 slice B. The handler does
-not schedule. The timer path re-runs the 8259 ICW sequence even when FADT bit 0
-skipped the boot remap (QEMU clears that bit but still has a PIC on 0x08).
+the handler updates the clock, EOIs, then calls `on_timer_tick`, which is a
+no-op until the idle thread exists. Step 14 (`sched: cpu0 ready`) then step 16
+(`irq: enabled`) follow meminfo. IRQ1 stays masked until the keyboard driver
+(phase 5): the default PIC handler halts on an unexpected line. The timer path
+re-runs the 8259 ICW sequence even when FADT bit 0 skipped the boot remap
+(QEMU clears that bit but still has a PIC on 0x08).
 The e2e contract in [section 8.3](#83-end-to-end) is the live order.
 
 ## 3.4 Linker script
@@ -625,8 +628,10 @@ The PIC is a bootstrap artifact and a fallback, nothing more.
   with `#DF` and friends, so a spurious IRQ before remap looks like a CPU exception.
 - Mask everything (`0xFF` to both data ports) immediately after remap.
 - Unmask IRQ0 after calibration so the bootstrap tick can prove timekeeping (live
-  [section 3.3](#33-_start-order)). `sti` is allowed then; the handler does not schedule.
-  Unmask IRQ1 only after the scheduler exists. `irq: enabled` is Phase 3.
+  [section 3.3](#33-_start-order)). `sti` is allowed then; `on_timer_tick` is a
+  no-op until the idle thread exists. `irq: enabled` is Phase 3 slice B, after
+  `sched: cpu0 ready`. Unmask IRQ1 only once a keyboard handler exists (phase 5);
+  the default PIC path halts on an unexpected line.
 - Once the I/O APIC routes devices and the LAPIC timer is verified ticking, mask the PIC completely.
   Leaving it live means every interrupt is delivered twice.
 - Keep the PIT driver code. It is still the calibration fallback and still provides the delays that AP
@@ -669,12 +674,18 @@ handling:
 ## 5.8 Handler ordering rules
 
 **EOI before any possible context switch.** The timer handler increments its counters, EOIs, and only
-then calls into the scheduler. A context switch with the interrupt controller still holding the
+then calls `on_timer_tick` / the scheduler. A context switch with the interrupt controller still holding the
 in-service bit means that source never fires again on the CPU that switched away.
 
 **Rearm before yielding.** With a one-shot timer (TSC-deadline), the handler writes the next deadline
 before calling the scheduler. Interrupts are already disabled inside the handler, so this is safe, and
 skipping it loses a tick whenever the handler preempts.
+
+**IF on resume.** `prepare_thread` seeds `rflags = 0x2` (IF clear). `schedule` applies
+`apply_if_on_resume` to the incoming TCB before `popfq`: IF is set when `irq_nest == 0`, and kept
+clear while an `InterruptGuard` is live on that stack. Without this, a first-run thread or a thread
+saved from the timer ISR stays tick-deaf until some later `sti`. A thread resumed in the ISR still
+gets IF back from `iret`.
 
 ## 5.9 Later
 
@@ -1172,14 +1183,15 @@ vibeOS: per_cpu: bsp ready
 vibeOS: acpi: xsdt <n> tables
 vibeOS: time: tsc <n>/ms
 vibeOS: sched: cpu0 ready
+vibeOS: irq: enabled
 vibeOS: console ok
 vibeOS: smp: done
 vibeOS: shell ready
 ```
 
-Live e2e through Phase 3 slice A asserts through `idt ok`, then `per_cpu: bsp ready`,
-then `acpi: xsdt`, then `time: tsc <n>/ms`, then `boot: phase1 done`, omitting
-`sched: cpu0 ready` and everything after time.
+Live e2e through Phase 3 slice B asserts through `idt ok`, then `per_cpu: bsp ready`,
+then `acpi: xsdt`, then `time: tsc <n>/ms`, then `sched: cpu0 ready`, then
+`irq: enabled`, then `boot: phase1 done`.
 Default QEMU also requires the diagnostic `time: calibrated hpet <n>/ms`; `make test-e2e-pit`
 (`-machine pc,hpet=off`) asserts `calibrated pit` instead. `pic: remapped` on that path means the PIC
 step finished (ICW programmed, or FADT skip), not that ports were necessarily written.
