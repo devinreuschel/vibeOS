@@ -22,8 +22,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   count (`self_ptr` at 0, wake-inbox stub, timer mode, syscall scratch).
   In-guest: identity on BSP and AP, trampoline `cli` at `0x8000`, failed
   AP path restores the frame count. Host tests cover trampoline offsets
-  and SIPI vector arithmetic. AP timers tick locally and do not take the
-  UP run queue (Slice C).
+  and SIPI vector arithmetic. The trampoline clears `CR0.CD`/`CR0.NW`
+  (INIT leaves caches off) and `WBINVD`s so APs are not uncached vs the
+  BSP. AP timers tick locally and do not take the UP run queue (Slice C).
 - Phase 4 slice A: BSP LAPIC, I/O APIC, and LAPIC timer. After `time: tsc`,
   boot enables the local APIC (`IA32_APIC_BASE` bit 11, MADT type-5 base),
   programs every I/O APIC with ISOs (high dword before low, still masked),

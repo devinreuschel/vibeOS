@@ -25,9 +25,13 @@ start:
     mov es, ax
     mov ss, ax
     lgdt [gdt_ptr]
+    ; INIT leaves CR0 = 0x60000010 (CD|NW|ET). OR PE only keeps caches
+    ; off. SDM: clear CD|NW, then WBINVD, so APs match the BSP.
     mov eax, cr0
-    or eax, 1
+    or eax, 1                       ; PE
+    and eax, ~((1 << 29) | (1 << 30))
     mov cr0, eax
+    wbinvd
     jmp 0x18:pm32
 
 bits 32
