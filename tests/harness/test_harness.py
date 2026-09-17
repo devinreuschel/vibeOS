@@ -325,6 +325,14 @@ class TestLapicMode(unittest.TestCase):
         pit = boot_contract_markers(hpet=False, cpu="max", accel="tcg")
         lapic_pit = next(x for x in pit if x.name == "lapic_timer_ok")
         self.assertIn("(pit)", lapic_pit.substring)
+        names = [x.name for x in boot_contract_markers(smp=2)]
+        self.assertIn("smp_ap_online_0", names)
+        self.assertIn("smp_done", names)
+        names1 = [x.name for x in boot_contract_markers(smp=1)]
+        self.assertNotIn("smp_ap_online_0", names1)
+        self.assertIn("smp_done", names1)
+        names4 = [x.name for x in boot_contract_markers(smp=4)]
+        self.assertEqual(sum(1 for n in names4 if n.startswith("smp_ap_online_")), 3)
 
 
 if __name__ == "__main__":

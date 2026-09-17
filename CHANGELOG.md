@@ -9,6 +9,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Phase 4 slice B: AP trampoline, INIT/SIPI bring-up, and PerCpu expansion.
+  After `irq: enabled`, the BSP copies `trampoline.asm` (`nasm -f bin` via
+  `build.rs` / `CARGO_MANIFEST_DIR`) to identity-mapped `0x8000`, starts
+  each enabled MADT CPU one at a time (INIT, 10 ms, SIPI, ~1 ms, SIPI),
+  and waits on a ready flag (3 s timeout; timeout frees the stack, IST,
+  GDT/TSS, and idle TCB). APs load a per-CPU GDT/TSS, the shared IDT,
+  enable the LAPIC, set `GS_BASE`/`KERNEL_GS_BASE` before `sti`, arm the
+  same timer mode as the BSP, then idle. Markers: `N-1` ×
+  `vibeOS: smp: ap online`, then `vibeOS: smp: done`, still before
+  `boot: phase1 done`. `PerCpu` is a heap array sized from the MADT CPU
+  count (`self_ptr` at 0, wake-inbox stub, timer mode, syscall scratch).
+  In-guest: identity on BSP and AP, trampoline `cli` at `0x8000`, failed
+  AP path restores the frame count. Host tests cover trampoline offsets
+  and SIPI vector arithmetic. AP timers tick locally and do not take the
+  UP run queue (Slice C).
 - Phase 4 slice A: BSP LAPIC, I/O APIC, and LAPIC timer. After `time: tsc`,
   boot enables the local APIC (`IA32_APIC_BASE` bit 11, MADT type-5 base),
   programs every I/O APIC with ISOs (high dword before low, still masked),

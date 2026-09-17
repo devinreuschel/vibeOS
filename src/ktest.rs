@@ -29,6 +29,7 @@ use crate::per_cpu_init;
 use crate::pmm_init;
 use crate::sched_init;
 use crate::serial::{self, Serial};
+use crate::smp_init;
 use crate::sync_init::{BlockingMutex, Channel, Condvar, RwLock, Semaphore, SpinMutex};
 use crate::thread_init;
 use crate::time_init;
@@ -76,6 +77,9 @@ const TESTS: &[(&str, TestFn)] = &[
     ("lapic_timer_rearm", test_lapic_timer_rearm),
     ("ioapic_pit_gsi_masked", test_ioapic_pit_gsi_masked),
     ("per_cpu_bsp", test_per_cpu_bsp),
+    ("per_cpu_identity", test_per_cpu_identity),
+    ("trampoline_page", test_trampoline_page),
+    ("failed_ap_cleanup", test_failed_ap_cleanup),
     ("spawn_sentinel", test_spawn_sentinel),
     ("switch_two_threads", test_switch_two_threads),
     ("irq_guard_nest", test_irq_guard_nest),
@@ -854,6 +858,85 @@ fn test_per_cpu_bsp() -> Outcome {
         return Outcome::Fail("sched not live");
     }
     Outcome::Ok
+}
+
+fn test_per_cpu_identity() -> Outcome {
+    let n = per_cpu_init::cpu_count();
+    if n == 0 {
+        return Outcome::Fail("cpu array empty");
+    }
+    let bsp = per_cpu_init::current();
+    if bsp.cpu_id != 0 {
+        return Outcome::Fail("not on bsp");
+    }
+    if bsp.self_ptr as u64 != bsp as *const _ as u64 {
+        return Outcome::Fail("bsp self_ptr");
+    }
+    if per_cpu_init::gs_self() as u64 != bsp.self_ptr as u64 {
+        return Outcome::Fail("bsp gs:[0]");
+    }
+    if crate::per_cpu!(cpu_id) != 0 {
+        return Outcome::Fail("per_cpu! on bsp");
+    }
+    if !per_cpu_init::is_online(0) {
+        return Outcome::Fail("bsp offline");
+    }
+    if n < 2 {
+        return Outcome::Skip("no AP");
+    }
+    let mut i = 1u32;
+    while i < n as u32 {
+        let Some(c) = per_cpu_init::cpu(i) else {
+            return Outcome::Fail("missing slot");
+        };
+        if !c.ready.load(Ordering::Acquire) {
+            return Outcome::Fail("ap not ready");
+        }
+        if c.cpu_id != i {
+            return Outcome::Fail("ap cpu_id");
+        }
+        if c.self_ptr as u64 != c as *const _ as u64 {
+            return Outcome::Fail("ap self_ptr");
+        }
+        if c.idle.is_null() || c.current.is_null() {
+            return Outcome::Fail("ap idle/current");
+        }
+        if c.apic_id == bsp.apic_id {
+            return Outcome::Fail("ap apic_id");
+        }
+        if !per_cpu_init::is_online(i) {
+            return Outcome::Fail("ap online mask");
+        }
+        if c.tsc_per_ms == 0 {
+            return Outcome::Fail("ap tsc_per_ms");
+        }
+        i += 1;
+    }
+    Outcome::Ok
+}
+
+fn test_trampoline_page() -> Outcome {
+    if smp_init::trampoline_installed() {
+        Outcome::Ok
+    } else {
+        Outcome::Fail("no cli opcode at 0x8000")
+    }
+}
+
+fn test_failed_ap_cleanup() -> Outcome {
+    // First-fit KVA may map a fresh PT page on the first IST/stack wave.
+    // unmap_4k does not return that PT. Warm up, then the measured wave
+    // must restore the frame count (ROADMAP failed-AP exit gate).
+    smp_init::exercise_fail_cleanup();
+    let n0 = free_frames();
+    smp_init::exercise_fail_cleanup();
+    let n1 = free_frames();
+    if n0 != n1 {
+        let _ = writeln!(Serial, "vibeOS: ktest:   frames {n0} -> {n1}");
+        Outcome::Fail("failed AP leaked frames")
+    } else {
+        Outcome::Ok
+    }
 }
 
 static SENTINEL: AtomicU64 = AtomicU64::new(0);

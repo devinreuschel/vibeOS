@@ -376,14 +376,14 @@ under load.
 comes before drivers rather than after.
 
 **Exit gate**
-- [ ] `smp: done` before `shell ready`, with exactly `N-1` `smp: ap online` lines at `-smp N`
+- [x] `smp: done` before `shell ready`, with exactly `N-1` `smp: ap online` lines at `-smp N`
 - [ ] `sched: cpu<i> ready` for every CPU
 - [x] `time: lapic_timer ok (<mode>)` naming the mode that was selected
 - [ ] `make test-kernel` at `-smp 2` and `-smp 4` both pass
 - [x] `make test-lapic-fallback` passes with `-cpu qemu64,-tsc-deadline`
 - [ ] a thread spawned on CPU 0 observably runs on another CPU
 - [ ] remote unmap and remap through the shootdown path passes in-guest with 2+ CPUs
-- [ ] failed AP bring-up frees everything it allocated, verified by frame count with a fault injected
+- [x] failed AP bring-up frees everything it allocated, verified by frame count with a fault injected
 
 ### 4.1 LAPIC
 - [x] enable via `IA32_APIC_BASE` bit 11, honoring the MADT type 5 address override
@@ -412,28 +412,28 @@ comes before drivers rather than after.
 - [x] in-guest tests: the timer fires, and rearm works across many ticks
 
 ### 4.4 AP trampoline
-- [ ] `trampoline.asm` assembled with `nasm -f bin`, included as a blob, `build.rs` anchored to `CARGO_MANIFEST_DIR` with assembler stderr captured
-- [ ] real mode to protected mode to long mode, setting `EFER.LME` and `EFER.NXE`
-- [ ] parameter block at the documented offsets: CR3, stack top, entry point, IDT pointer
-- [ ] each parameter written with `write_volatile`, `compiler_fence(SeqCst)` before the SIPI
-- [ ] `0x8000` identity mapped, executable, and permanently excluded from the PMM
-- [ ] a static assertion that the blob fits below its parameter block
+- [x] `trampoline.asm` assembled with `nasm -f bin`, included as a blob, `build.rs` anchored to `CARGO_MANIFEST_DIR` with assembler stderr captured
+- [x] real mode to protected mode to long mode, setting `EFER.LME` and `EFER.NXE`
+- [x] parameter block at the documented offsets: CR3, stack top, entry point, IDT pointer
+- [x] each parameter written with `write_volatile`, `compiler_fence(SeqCst)` before the SIPI
+- [x] `0x8000` identity mapped, executable, and permanently excluded from the PMM
+- [x] a static assertion that the blob fits below its parameter block
 
 ### 4.5 AP bring-up
-- [ ] one AP at a time, INIT, 10 ms, SIPI, ~1 ms, SIPI
-- [ ] per-CPU area and guarded stack allocated and published with a fence before the SIPI
-- [ ] 3 second ready-flag timeout; on failure free the stack and per-CPU area, log, and continue
-- [ ] AP path in order: per-CPU GDT and TSS, IDT, LAPIC enable, per-CPU MSRs, timer calibrate and arm, ready flag, `sti`, enter as idle
-- [ ] `GS_BASE` set before the IDT is live and before `sti`
-- [ ] an online mask, and a barrier the BSP waits on before declaring `smp: done`
+- [x] one AP at a time, INIT, 10 ms, SIPI, ~1 ms, SIPI
+- [x] per-CPU area and guarded stack allocated and published with a fence before the SIPI
+- [x] 3 second ready-flag timeout; on failure free the stack and per-CPU area, log, and continue
+- [x] AP path in order: per-CPU GDT and TSS, IDT, LAPIC enable, per-CPU MSRs, timer calibrate and arm, ready flag, `sti`, enter as idle
+- [x] `GS_BASE` set before the IDT is live and before `sti`
+- [x] an online mask, and a barrier the BSP waits on before declaring `smp: done`
 
 ### 4.6 Per-CPU data
-- [ ] `PerCpu` with `self_ptr` at offset 0, reached through `GS_BASE`
-- [ ] `KERNEL_GS_BASE` set to the same value, with scratch fields reserved for the future syscall path
-- [ ] heap-allocated array sized from the actual MADT CPU count
-- [ ] `per_cpu!` accessors safe from interrupt context
-- [ ] contents: cpu id, APIC id, ready queue, wake inbox, idle handle, current thread, local ticks, context switches, `tsc_per_ms`, timer mode
-- [ ] in-guest identity tests on both BSP and AP
+- [x] `PerCpu` with `self_ptr` at offset 0, reached through `GS_BASE`
+- [x] `KERNEL_GS_BASE` set to the same value, with scratch fields reserved for the future syscall path
+- [x] heap-allocated array sized from the actual MADT CPU count
+- [x] `per_cpu!` accessors safe from interrupt context
+- [x] contents: cpu id, APIC id, ready queue, wake inbox, idle handle, current thread, local ticks, context switches, `tsc_per_ms`, timer mode
+- [x] in-guest identity tests on both BSP and AP
 
 ### 4.7 Locking audit
 - [ ] every lock taken from an ISR audited for interrupt-disabled acquisition in all contexts

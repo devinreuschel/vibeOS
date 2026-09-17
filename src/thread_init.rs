@@ -343,6 +343,57 @@ pub(crate) fn spawn_idle(entry: fn()) -> ThreadHandle {
     spawn_inner("idle", entry, CpuAffinity::Pinned(0), false)
 }
 
+/// AP idle: running on `stack` already. No synthetic frame, not on the FIFO.
+pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Option<ThreadId> {
+    let ks = KernelStack {
+        guard: stack.guard.as_u64(),
+        pages: stack.pages,
+    };
+    let mut tcb = Box::new(Tcb {
+        id: ThreadId(0),
+        name: "idle",
+        state: ThreadState::Running,
+        stack: Some(ks),
+        context: CpuContext::empty(),
+        entry: ap_idle_entry,
+        next: None,
+        prev: None,
+        affinity: CpuAffinity::Pinned(cpu_id),
+        cpu: cpu_id,
+        irq_nest: 0,
+        switches: 0,
+        run_tsc: 0,
+        wait_outcome: WaitOutcome::Woken,
+    });
+    let id = {
+        let mut s = SCHED.lock();
+        let slot = s.slots.iter().position(|x| x.is_none())?;
+        let id = ThreadId(slot as u32);
+        tcb.id = id;
+        s.slots[slot] = Some(tcb);
+        id
+    };
+    Some(id)
+}
+
+/// Timeout path: TCB never ran. Return the stack so the caller can free it.
+pub fn abandon_ap_idle(id: ThreadId) -> Option<GuardedStack> {
+    let mut s = SCHED.lock();
+    s.ready.remove(id);
+    s.timeouts.remove(id);
+    let t = s.get_mut(id)?;
+    t.state = ThreadState::Dead;
+    let ks = t.stack.take()?;
+    Some(GuardedStack {
+        guard: VirtAddr(ks.guard),
+        pages: ks.pages,
+    })
+}
+
+fn ap_idle_entry() {
+    panic!("ap idle entry called");
+}
+
 fn spawn_inner(
     name: &'static str,
     entry: fn(),

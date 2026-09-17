@@ -5,6 +5,7 @@
 //! come from the KVA allocator (guarded), which is why this runs after
 //! `kva: ready` rather than before PMM.
 
+use alloc::boxed::Box;
 use core::mem::size_of;
 
 use vibeos::desc::{Gdt, IstSlot, Tss, GDT_LIMIT, KERNEL_CS, KERNEL_DS, TSS_SEL};
@@ -95,6 +96,61 @@ impl Bsp {
 }
 
 static BSP: BootCell<Bsp> = BootCell::new(Bsp::empty());
+
+/// Per-AP GDT/TSS plus the IST/RSP0 stacks they point at.
+pub struct ApTables {
+    pub tables: Box<CpuTables>,
+    pub ist: [GuardedStack; 4],
+    pub rsp0: GuardedStack,
+}
+
+/// Allocate per-CPU GDT/TSS and guarded IST/RSP0 stacks. Caller `load`s.
+pub fn alloc_ap_tables() -> Option<ApTables> {
+    let ist0 = kva_init::alloc_guarded_stack(IST_PAGES)?;
+    let ist1 = kva_init::alloc_guarded_stack(IST_PAGES).or_else(|| {
+        kva_init::free_stack(ist0);
+        None
+    })?;
+    let ist2 = kva_init::alloc_guarded_stack(IST_PAGES).or_else(|| {
+        kva_init::free_stack(ist0);
+        kva_init::free_stack(ist1);
+        None
+    })?;
+    let ist3 = kva_init::alloc_guarded_stack(IST_PAGES).or_else(|| {
+        kva_init::free_stack(ist0);
+        kva_init::free_stack(ist1);
+        kva_init::free_stack(ist2);
+        None
+    })?;
+    let rsp0 = kva_init::alloc_guarded_stack(RSP0_PAGES).or_else(|| {
+        kva_init::free_stack(ist0);
+        kva_init::free_stack(ist1);
+        kva_init::free_stack(ist2);
+        kva_init::free_stack(ist3);
+        None
+    })?;
+    let ist = [ist0, ist1, ist2, ist3];
+    let mut tables = Box::new(CpuTables::empty());
+    tables.init(
+        [
+            ist[0].top().as_u64(),
+            ist[1].top().as_u64(),
+            ist[2].top().as_u64(),
+            ist[3].top().as_u64(),
+        ],
+        rsp0.top().as_u64(),
+    );
+    Some(ApTables { tables, ist, rsp0 })
+}
+
+pub fn free_ap_tables(t: ApTables) {
+    kva_init::free_stack(t.rsp0);
+    let mut i = 0;
+    while i < t.ist.len() {
+        kva_init::free_stack(t.ist[i]);
+        i += 1;
+    }
+}
 
 /// Allocate IST + RSP0 stacks, fill GDT/TSS, load them.
 ///

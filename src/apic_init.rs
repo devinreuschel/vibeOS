@@ -319,7 +319,6 @@ pub fn eoi_for(vec: u8) {
 }
 
 /// ICR high then low; bounded delivery-pending poll. ROADMAP §4.1.
-#[allow(dead_code)] // Slice B sends INIT/SIPI / IPIs.
 pub fn send_ipi(dest: u8, vector: u8, mode: IpiMode) -> Result<(), IpiError> {
     let st = STATE.get();
     if st.lapic_va == 0 {
@@ -441,9 +440,14 @@ fn rearm_deadline() {
 }
 
 pub fn on_timer_irq() {
-    TIMER_FIRES.fetch_add(1, Ordering::Relaxed);
+    let cpu_id = crate::per_cpu_init::try_current()
+        .map(|c| c.cpu_id)
+        .unwrap_or(0);
     let tsc = time_init::read_tsc();
-    time_init::on_hw_tick(tsc);
+    if cpu_id == 0 {
+        TIMER_FIRES.fetch_add(1, Ordering::Relaxed);
+        time_init::on_hw_tick(tsc);
+    }
     eoi();
     rearm_deadline();
     crate::sched_init::on_timer_tick();
@@ -528,6 +532,7 @@ pub fn prove() {
     let st = unsafe { STATE.get_mut() };
     if !st.ready {
         st.mode = TimerMode::Pit;
+        crate::per_cpu_init::set_timer_mode(TimerMode::Pit);
         unmask_pit_fallback();
         emit_marker(TimerMode::Pit);
         return;
@@ -565,6 +570,7 @@ pub fn prove() {
 
     st.mode = TimerMode::Pit;
     st.owns_tick = false;
+    crate::per_cpu_init::set_timer_mode(TimerMode::Pit);
     unmask_pit_fallback();
     emit_marker(TimerMode::Pit);
 }
@@ -572,6 +578,7 @@ pub fn prove() {
 fn commit_lapic(st: &mut ApicState, mode: TimerMode) {
     st.mode = mode;
     st.owns_tick = true;
+    crate::per_cpu_init::set_timer_mode(mode);
     if let Some(madt) = acpi_init::info().and_then(|i| i.madt.as_ref()) {
         mask_pic_and_pit(st, madt);
     } else {
@@ -604,3 +611,35 @@ pub fn cpuid_has_tsc_deadline() -> bool {
 pub fn is_ready() -> bool {
     STATE.get().ready
 }
+
+/// Enable this CPU's LAPIC (INIT resets it). Same MMIO VA as the BSP.
+///
+/// # Safety
+/// LAPIC page already UC. IF off.
+pub unsafe fn enable_ap() {
+    let Some(info) = acpi_init::info() else {
+        return;
+    };
+    let Some(madt) = info.madt.as_ref() else {
+        return;
+    };
+    let _ = unsafe { enable_lapic(madt) };
+}
+
+/// Arm this CPU's timer in the mode the BSP proved. PIT: no local tick.
+pub fn arm_ap() {
+    let st = STATE.get();
+    if st.lapic_va == 0 {
+        return;
+    }
+    match st.mode {
+        TimerMode::TscDeadline => arm_tsc_deadline(st.lapic_va, time_init::tsc_per_ms()),
+        TimerMode::Periodic => {
+            if st.ticks_per_ms != 0 {
+                arm_periodic(st.lapic_va, st.ticks_per_ms);
+            }
+        }
+        TimerMode::Pit => {}
+    }
+}
+

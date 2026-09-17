@@ -38,12 +38,12 @@ def main() -> int:
         hpet=not expect_pit,
     )
     if gp_test:
-        markers = boot_contract_markers(cpu=cpu, gp=True)
+        markers = boot_contract_markers(cpu=cpu, gp=True, smp=smp)
         expect_panic = True
     elif expect_panic:
         markers = PHASE0_PANIC_PREFIX
     else:
-        markers = boot_contract_markers(cpu=cpu, hpet=not expect_pit)
+        markers = boot_contract_markers(cpu=cpu, hpet=not expect_pit, smp=smp)
 
     try:
         result = run_qemu_and_check(

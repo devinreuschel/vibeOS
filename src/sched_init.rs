@@ -33,13 +33,17 @@ pub fn is_live() -> bool {
 }
 
 /// After EOI. Preempt every `QUANTUM_TICKS`, or every tick while idle
-/// so a sleeper can displace `sti; hlt`.
+/// so a sleeper can displace `sti; hlt`. AP timers tick locally; Slice C
+/// owns per-CPU ready queues, so do not steal the UP queue.
 pub fn on_timer_tick() {
     if !is_live() {
         return;
     }
     let cpu = per_cpu_init::current_mut();
     cpu.ticks = cpu.ticks.wrapping_add(1);
+    if cpu.cpu_id != 0 {
+        return;
+    }
     let idle = cpu.current == cpu.idle && !cpu.idle.is_null();
     if vibeos::sched::should_preempt(cpu.ticks, idle) {
         thread_init::schedule_preempt();
