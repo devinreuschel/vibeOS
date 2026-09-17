@@ -309,13 +309,13 @@ synchronization primitives.
 **Unlocks.** Blocking drivers. Anything that waits. Processes, eventually.
 
 **Exit gate**
-- [ ] `sched: cpu0 ready` marker, and `irq: enabled` after it
-- [ ] two spawned threads interleave visibly in the log without either yielding voluntarily
-- [ ] `sleep_ms(50)` returns between 50 and 100 ms, measured in-guest
+- [x] `sched: cpu0 ready` marker, and `irq: enabled` after it
+- [x] two spawned threads interleave visibly in the log without either yielding voluntarily
+- [x] `sleep_ms(50)` returns between 50 and 100 ms, measured in-guest
 - [ ] in-guest: 1000 iterations of two threads contending a blocking mutex, no deadlock, correct final count
-- [ ] a thread that returns is reaped and its stack returned to the allocator, proven by the frame count
-- [ ] the idle thread runs when nothing else is ready and the system does not wedge
-- [ ] host tests for the run queue state machine and the timeout ordering structure
+- [x] a thread that returns is reaped and its stack returned to the allocator, proven by the frame count
+- [x] the idle thread runs when nothing else is ready and the system does not wedge
+- [x] host tests for the run queue state machine and the timeout ordering structure
 
 ### 3.1 Thread abstraction
 - [x] `ThreadId`, `Tcb` with state, kernel stack handle, saved context, entry point, name
@@ -332,19 +332,19 @@ synchronization primitives.
 - [x] no FPU or SSE state yet, consistent with the soft-float target; revisit deliberately, not accidentally
 
 ### 3.3 Scheduler
-- [ ] ready queue, sleep queue ordered by deadline, per-wait-queue blocked lists
-- [ ] `schedule()` for the voluntary path
-- [ ] `on_timer_tick()` called after EOI, preempting every 10 ticks
-- [ ] `yield_now()`
-- [ ] dead thread reaping deferred to a context not running on the dying stack
-- [ ] every scheduler lock acquisition inside an interrupt guard, no exceptions
-- [ ] context switch counter and per-thread run time accounting from the start; retrofitting instrumentation is worse than building it in
+- [x] ready queue, sleep queue ordered by deadline, per-wait-queue blocked lists
+- [x] `schedule()` for the voluntary path
+- [x] `on_timer_tick()` called after EOI, preempting every 10 ticks
+- [x] `yield_now()`
+- [x] dead thread reaping deferred to a context not running on the dying stack
+- [x] every scheduler lock acquisition inside an interrupt guard, no exceptions
+- [x] context switch counter and per-thread run time accounting from the start; retrofitting instrumentation is worse than building it in
 
 ### 3.4 Sleep and timeouts
-- [ ] `thread::sleep_ms` parks on the sleep queue and wakes from the timer path
-- [ ] one timeout structure: sorted list under a lock initially, with the interface a timing wheel can replace
-- [ ] every blocking primitive takes an optional deadline. No exceptions, so a permanently blocked thread is impossible by construction
-- [ ] a periodic sweep that logs threads blocked far past any plausible timeout
+- [x] `thread::sleep_ms` parks on the sleep queue and wakes from the timer path
+- [x] one timeout structure: sorted list under a lock initially, with the interface a timing wheel can replace
+- [x] every blocking primitive takes an optional deadline. No exceptions, so a permanently blocked thread is impossible by construction
+- [x] a periodic sweep that logs threads blocked far past any plausible timeout
 
 ### 3.5 Synchronization
 - [x] `InterruptGuard`: save `RFLAGS.IF`, `cli`, restore on drop, correctly nested
@@ -356,12 +356,12 @@ synchronization primitives.
 - [ ] host tests for whatever is testable without hardware; in-guest tests for contention
 
 ### 3.6 Idle
-- [ ] one idle thread, always runnable, lowest priority, `sti; hlt`
-- [ ] idle time accounted so a load figure is possible later
-- [ ] structured for one idle thread per CPU in phase 4
+- [x] one idle thread, always runnable, lowest priority, `sti; hlt`
+- [x] idle time accounted so a load figure is possible later
+- [x] structured for one idle thread per CPU in phase 4
 
 ### 3.7 Verification
-- [ ] in-guest: spawn writes a sentinel; N threads increment a shared counter under the blocking mutex; `sleep_ms` accuracy; `yield_now` actually switches; the idle thread runs
+- [~] in-guest: spawn writes a sentinel; N threads increment a shared counter under the blocking mutex; `sleep_ms` accuracy; `yield_now` actually switches; the idle thread runs
 - [ ] hold the scheduler lock and force a timer interrupt, asserting no deadlock. This is a regression test for a bug that already happened.
 - [ ] stress: spawn and exit thousands of threads, assert the frame count returns to baseline
 

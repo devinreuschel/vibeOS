@@ -2,8 +2,9 @@
 //!
 //! Boot order: serial, Limine, PMM, paging, ACPI parse + MMIO UC, heap,
 //! KVA, then GDT/TSS/IST, PIC remap, IDT, BSP per_cpu, ACPI marker, time,
-//! meminfo. GDT after KVA because IST stacks are guarded KVA stacks.
-//! per_cpu after GDT because `mov gs` zeros the hidden base. The
+//! scheduler+idle, irq enabled, meminfo. GDT after KVA because IST stacks
+//! are guarded KVA stacks. per_cpu after GDT because `mov gs` zeros the
+//! hidden base. Scheduler after time so the tick can preempt. The
 //! `kernel_tests` build runs the in-guest registry after that and
 //! exits through isa-debug-exit.
 
@@ -28,6 +29,7 @@ mod paging_init;
 mod panic;
 mod per_cpu_init;
 mod pmm_init;
+mod sched_init;
 mod serial;
 mod sync_init;
 mod thread_init;
@@ -142,9 +144,7 @@ fn normal_boot_tail() {
         .response()
         .unwrap_or_else(|| halt_with("vibeOS: limine: executable_address missing"));
 
-    let stats = unsafe {
-        pmm_init::init(memmap.entries(), hhdm.offset, exec.physical_base)
-    };
+    let stats = unsafe { pmm_init::init(memmap.entries(), hhdm.offset, exec.physical_base) };
 
     // Exit-gate marker for phase 1 slice A. DESIGN §2.6 marker shape.
     let _ = writeln!(
@@ -163,7 +163,8 @@ fn normal_boot_tail() {
     let _ = writeln!(
         serial::Serial,
         "vibeOS: pmm: {} total, largest order {}",
-        stats.total_frames, largest
+        stats.total_frames,
+        largest
     );
 
     // ---- Phase 1 slice B: page tables + MMIO attributes. ----
@@ -173,9 +174,8 @@ fn normal_boot_tail() {
     // caps at 8 GiB regardless.
     let ram_high_water = memmap_high_water(memmap.entries());
     let fb_phys_end = framebuffer_phys_end(hhdm.offset);
-    let paging_report = unsafe {
-        paging_init::install(exec.physical_base, ram_high_water, fb_phys_end)
-    };
+    let paging_report =
+        unsafe { paging_init::install(exec.physical_base, ram_high_water, fb_phys_end) };
     paging_init::report(&paging_report);
 
     // ---- Phase 2 slice B: ACPI discovery + MMIO UC. ----
@@ -207,9 +207,7 @@ fn normal_boot_tail() {
     unsafe { kva_init::init() };
     {
         let stack = kva_init::alloc_guarded_stack(4).expect("kva stack probe");
-        unsafe {
-            (stack.mapped_base().as_u64() as *mut u64).write_volatile(0x5A5A_5A5A_5A5A_5A5A)
-        };
+        unsafe { (stack.mapped_base().as_u64() as *mut u64).write_volatile(0x5A5A_5A5A_5A5A_5A5A) };
         kva_init::free_stack(stack);
     }
     serial::line(marker::KVA_READY);
@@ -237,8 +235,9 @@ fn normal_boot_tail() {
     acpi_init::report();
 
     // ---- Phase 2 slice C: PIT, TSC calibration, timekeeping. ----
-    // After IDT so IRQ0 has a gate. IRQs stay masked until we unmask
-    // IRQ0 below; keyboard stays masked until the scheduler exists.
+    // After IDT so IRQ0 has a gate. IRQ0 is unmasked for timekeeping;
+    // the handler does not schedule until `sched_init` sets LIVE.
+    // Keyboard stays masked until a real IRQ1 handler exists (phase 5).
     unsafe { time_init::init() };
     per_cpu_init::set_tsc_per_ms(time_init::tsc_per_ms());
 
@@ -252,6 +251,13 @@ fn normal_boot_tail() {
 
     diag::meminfo();
 
+    // DESIGN §3.3 steps 14 then 16. Idle must exist before the timer
+    // can preempt. `irq: enabled` is IF-on + scheduler armed; IRQ0 was
+    // already live for the calib proof.
+    unsafe { sched_init::init() };
+    serial::line(marker::SCHED_CPU0);
+    serial::line(marker::IRQ_ENABLED);
+
     serial::line(marker::BOOT_DONE);
 
     #[cfg(feature = "gp-test")]
@@ -259,6 +265,12 @@ fn normal_boot_tail() {
 
     #[cfg(feature = "kernel_tests")]
     crate::ktest::run();
+
+    #[cfg(not(feature = "kernel_tests"))]
+    {
+        thread_init::park(None, false);
+        x86::halt();
+    }
 }
 
 /// Highest end address of any USABLE memmap entry, in physical bytes.

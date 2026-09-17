@@ -16,6 +16,7 @@ pub mod paging;
 pub mod per_cpu;
 pub mod pic;
 pub mod pmm;
+pub mod sched;
 pub mod sync;
 pub mod thread;
 pub mod time;

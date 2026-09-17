@@ -25,6 +25,9 @@ pub mod paging;
 #[path = "../../../src/pmm.rs"]
 pub mod pmm;
 
+#[path = "../../../src/sched.rs"]
+pub mod sched;
+
 #[path = "../../../src/uart.rs"]
 pub mod uart;
 
@@ -69,6 +72,8 @@ mod smoke {
             marker::PER_CPU_BSP,
             marker::ACPI_XSDT_PREFIX,
             marker::TIME_TSC_PREFIX,
+            marker::SCHED_CPU0,
+            marker::IRQ_ENABLED,
             marker::BOOT_DONE,
         ] {
             assert!(m.starts_with("vibeOS: "), "marker missing prefix: {m}");
@@ -93,6 +98,8 @@ mod smoke {
         assert_eq!(marker::ACPI_XSDT_SUFFIX, " tables");
         assert_eq!(marker::TIME_TSC_PREFIX, "vibeOS: time: tsc ");
         assert_eq!(marker::TIME_TSC_SUFFIX, "/ms");
+        assert_eq!(marker::SCHED_CPU0, "vibeOS: sched: cpu0 ready");
+        assert_eq!(marker::IRQ_ENABLED, "vibeOS: irq: enabled");
         assert_eq!(marker::BOOT_DONE, "vibeOS: boot: phase1 done");
     }
 

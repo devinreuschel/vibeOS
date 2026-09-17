@@ -7,6 +7,14 @@ use core::mem::{offset_of, size_of};
 
 use crate::time::Instant;
 
+/// Global TCB table size. UP today; phase 4 still addresses by id.
+pub const MAX_THREADS: usize = 64;
+
+/// x86 reserved-1 bit. `prepare_thread` seeds this and leaves IF clear.
+pub const RFLAGS_RESERVED1: u64 = 0x2;
+/// `RFLAGS.IF`. `schedule` ORs this on resume when `irq_nest == 0`.
+pub const RFLAGS_IF: u64 = 1 << 9;
+
 /// Slot index in the global TCB table. 0 is the bootstrap thread.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -89,10 +97,12 @@ pub struct Tcb {
     pub affinity: CpuAffinity,
     pub cpu: u32,
     /// `InterruptGuard` depth frozen while this thread is off-CPU.
-    /// `switch_to` swaps it with `PerCpu.irq_nest` so a one-way exit
-    /// does not leak the dying stack's nest onto the CPU.
+    /// `switch_to` / `schedule` swap it with `PerCpu.irq_nest` so a
+    /// one-way exit does not leak the dying stack's nest onto the CPU.
     pub irq_nest: u32,
     pub switches: u64,
+    /// TSC cycles accounted while this thread was current.
+    pub run_tsc: u64,
 }
 
 /// Callee-saved GPRs, rflags, rsp, return address. No XMM: soft-float.
@@ -129,8 +139,7 @@ impl CpuContext {
             r13: 0,
             r14: 0,
             r15: 0,
-            // Bit 1 is reserved-1 on x86 flags.
-            rflags: 0x2,
+            rflags: RFLAGS_RESERVED1,
             rsp: 0,
             rip: 0,
         }
@@ -152,12 +161,28 @@ const _: () = {
 };
 
 /// SysV: `rsp % 16 == 8` on function entry. `stack_top` must be 16-aligned.
-/// IF is off. Caller may store a dummy 0 at `rsp` so a stray `ret` faults.
+/// IF is off (`rflags = 0x2`). `schedule` applies [`apply_if_on_resume`]
+/// so a first-run or timer-preempted thread is not stuck tick-deaf.
 pub fn prepare_thread(ctx: &mut CpuContext, stack_top: u64, entry: u64) {
     assert!(stack_top % 16 == 0, "thread stack top must be 16-aligned");
     *ctx = CpuContext::empty();
     ctx.rip = entry;
     ctx.rsp = stack_top - 8;
+}
+
+/// IF-on-resume policy (Kernel Design, Slice A nit).
+///
+/// `switch_context` saves CPU rflags. Inside an ISR or `InterruptGuard`
+/// that is IF=0, so a raw restore would leave the thread deaf until some
+/// later `sti`. Incoming threads with `irq_nest == 0` run with IF set.
+/// Nested guards keep IF clear until that stack's guard drops (or `iret`
+/// restores IF from the interrupt frame).
+pub fn apply_if_on_resume(rflags: &mut u64, irq_nest: u32) {
+    if irq_nest == 0 {
+        *rflags |= RFLAGS_IF;
+    } else {
+        *rflags &= !RFLAGS_IF;
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -300,7 +325,19 @@ mod tests {
         prepare_thread(&mut ctx, top, 0x1111);
         assert_eq!(ctx.rsp % 16, 8);
         assert_eq!(ctx.rip, 0x1111);
-        assert_eq!(ctx.rflags, 0x2);
+        assert_eq!(ctx.rflags, RFLAGS_RESERVED1);
+        assert_eq!(ctx.rflags & RFLAGS_IF, 0);
+    }
+
+    #[test]
+    fn if_on_resume_policy() {
+        let mut r = RFLAGS_RESERVED1;
+        apply_if_on_resume(&mut r, 0);
+        assert_eq!(r & RFLAGS_IF, RFLAGS_IF);
+        apply_if_on_resume(&mut r, 1);
+        assert_eq!(r & RFLAGS_IF, 0);
+        apply_if_on_resume(&mut r, 0);
+        assert_eq!(r & RFLAGS_IF, RFLAGS_IF);
     }
 
     #[test]

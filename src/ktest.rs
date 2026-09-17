@@ -9,14 +9,14 @@ use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::arch::global_asm;
 use core::fmt::Write;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::desc::{IstSlot, KERNEL_CS, TSS_SEL};
 use vibeos::heap::HEAP_SIZE;
 use vibeos::kva::PAGE_SIZE;
 use vibeos::paging::{heap_flags, PageFlags, PhysAddr, VirtAddr};
-use vibeos::time::{CalibSource, Instant};
 use vibeos::thread::{ThreadId, ThreadState};
+use vibeos::time::{CalibSource, Instant};
 use vibeos::vectors;
 
 use crate::acpi_init;
@@ -25,6 +25,7 @@ use crate::kva_init;
 use crate::paging_init;
 use crate::per_cpu_init;
 use crate::pmm_init;
+use crate::sched_init;
 use crate::serial::{self, Serial};
 use crate::sync_init::SpinMutex;
 use crate::thread_init;
@@ -74,6 +75,12 @@ const TESTS: &[(&str, TestFn)] = &[
     ("switch_two_threads", test_switch_two_threads),
     ("irq_guard_nest", test_irq_guard_nest),
     ("spin_mutex", test_spin_mutex),
+    ("yield_now_switches", test_yield_now_switches),
+    ("sleep_ms_50", test_sleep_ms_50),
+    ("preempt_two_threads", test_preempt_two_threads),
+    ("idle_runs", test_idle_runs),
+    ("reap_returns_frames", test_reap_returns_frames),
+    ("reap_many_via_idle", test_reap_many_via_idle),
 ];
 
 pub fn run() -> ! {
@@ -341,9 +348,7 @@ fn test_stack_guard() -> Outcome {
     let Some(stack) = kva_init::alloc_guarded_stack(4) else {
         return Outcome::Fail("alloc_guarded_stack");
     };
-    unsafe {
-        (stack.mapped_base().as_u64() as *mut u64).write_volatile(0x1111_2222)
-    };
+    unsafe { (stack.mapped_base().as_u64() as *mut u64).write_volatile(0x1111_2222) };
     let got = unsafe { (stack.mapped_base().as_u64() as *const u64).read_volatile() };
     if got != 0x1111_2222 {
         kva_init::free_stack(stack);
@@ -544,9 +549,7 @@ fn test_gp_catch() -> Outcome {
     });
     match caught {
         Some(c)
-            if c.vector == vectors::GP
-                && c.frame.cs == KERNEL_CS as u64
-                && c.frame.rip != 0 =>
+            if c.vector == vectors::GP && c.frame.cs == KERNEL_CS as u64 && c.frame.rip != 0 =>
         {
             Outcome::Ok
         }
@@ -713,7 +716,9 @@ fn test_rtc_offset() -> Outcome {
         if b < a {
             return Outcome::Fail("wall clock went backwards");
         }
-        let _ = time_init::deadline_after(Instant { ns: time_init::now_ns() });
+        let _ = time_init::deadline_after(Instant {
+            ns: time_init::now_ns(),
+        });
         Outcome::Ok
     })
 }
@@ -739,17 +744,23 @@ fn test_per_cpu_bsp() -> Outcome {
     if thread_init::current_id() != ThreadId::BOOTSTRAP {
         return Outcome::Fail("current not bootstrap");
     }
-    if cpu.idle_id != ThreadId::BOOTSTRAP {
-        return Outcome::Fail("idle_id not bootstrap");
+    if cpu.idle_id == ThreadId::BOOTSTRAP {
+        return Outcome::Fail("idle still bootstrap");
     }
-    if cpu.idle as *const _ != cpu.current as *const _ {
-        return Outcome::Fail("idle != current");
+    if thread_init::name(cpu.idle_id) != "idle" {
+        return Outcome::Fail("idle name");
     }
-    if cpu.current.is_null() {
-        return Outcome::Fail("current null");
+    if cpu.idle as *const _ == cpu.current as *const _ {
+        return Outcome::Fail("idle == current");
+    }
+    if cpu.current.is_null() || cpu.idle.is_null() {
+        return Outcome::Fail("current or idle null");
     }
     if !cpu.ready_head.is_null() {
         return Outcome::Fail("ready_head should be empty");
+    }
+    if !sched_init::is_live() {
+        return Outcome::Fail("sched not live");
     }
     Outcome::Ok
 }
@@ -883,4 +894,181 @@ fn test_spin_mutex() -> Outcome {
         return Outcome::Fail("value lost");
     }
     Outcome::Ok
+}
+
+static YIELD_FLAG: AtomicU64 = AtomicU64::new(0);
+
+fn yielder_entry() {
+    YIELD_FLAG.store(1, Ordering::SeqCst);
+    thread_init::yield_now();
+    YIELD_FLAG.store(2, Ordering::SeqCst);
+}
+
+fn test_yield_now_switches() -> Outcome {
+    YIELD_FLAG.store(0, Ordering::SeqCst);
+    let _h = thread_init::spawn("yielder", yielder_entry);
+    thread_init::yield_now();
+    if YIELD_FLAG.load(Ordering::SeqCst) != 1 {
+        return Outcome::Fail("yielder did not run");
+    }
+    thread_init::yield_now();
+    if YIELD_FLAG.load(Ordering::SeqCst) != 2 {
+        return Outcome::Fail("yielder did not resume");
+    }
+    Outcome::Ok
+}
+
+fn test_sleep_ms_50() -> Outcome {
+    with_timer(|| {
+        let t0 = time_init::uptime_ms();
+        thread_init::sleep_ms(50);
+        let dt = time_init::uptime_ms().saturating_sub(t0);
+        if (50..=100).contains(&dt) {
+            Outcome::Ok
+        } else {
+            let _ = writeln!(Serial, "vibeOS: ktest:   sleep_ms dt={dt}");
+            Outcome::Fail("sleep_ms not 50-100ms")
+        }
+    })
+}
+
+static PREEMPT_A: AtomicU64 = AtomicU64::new(0);
+static PREEMPT_B: AtomicU64 = AtomicU64::new(0);
+static PREEMPT_STOP: AtomicBool = AtomicBool::new(false);
+
+fn preempt_a() {
+    while !PREEMPT_STOP.load(Ordering::Relaxed) {
+        PREEMPT_A.fetch_add(1, Ordering::Relaxed);
+        core::hint::spin_loop();
+    }
+}
+
+fn preempt_b() {
+    while !PREEMPT_STOP.load(Ordering::Relaxed) {
+        PREEMPT_B.fetch_add(1, Ordering::Relaxed);
+        core::hint::spin_loop();
+    }
+}
+
+fn test_preempt_two_threads() -> Outcome {
+    PREEMPT_A.store(0, Ordering::SeqCst);
+    PREEMPT_B.store(0, Ordering::SeqCst);
+    PREEMPT_STOP.store(false, Ordering::SeqCst);
+    let _a = thread_init::spawn("preempt-a", preempt_a);
+    let _b = thread_init::spawn("preempt-b", preempt_b);
+    with_timer(|| {
+        let t0 = time_init::uptime_ms();
+        loop {
+            let a = PREEMPT_A.load(Ordering::Relaxed);
+            let b = PREEMPT_B.load(Ordering::Relaxed);
+            if a > 0 && b > 0 {
+                PREEMPT_STOP.store(true, Ordering::SeqCst);
+                let t1 = time_init::uptime_ms();
+                while time_init::uptime_ms().saturating_sub(t1) < 50 {
+                    core::hint::spin_loop();
+                }
+                let _ = writeln!(Serial, "vibeOS: ktest:   preempt a={a} b={b}");
+                return Outcome::Ok;
+            }
+            if time_init::uptime_ms().saturating_sub(t0) > 500 {
+                PREEMPT_STOP.store(true, Ordering::SeqCst);
+                let _ = writeln!(Serial, "vibeOS: ktest:   preempt a={a} b={b}");
+                return Outcome::Fail("no preemption");
+            }
+            core::hint::spin_loop();
+        }
+    })
+}
+
+fn test_idle_runs() -> Outcome {
+    with_timer(|| {
+        let t0 = sched_init::idle_tsc();
+        thread_init::sleep_ms(20);
+        let t1 = sched_init::idle_tsc();
+        if t1 > t0 {
+            Outcome::Ok
+        } else {
+            let _ = writeln!(Serial, "vibeOS: ktest:   idle_tsc {t0} -> {t1}");
+            Outcome::Fail("idle did not run")
+        }
+    })
+}
+
+fn dying_entry() {}
+
+fn test_reap_returns_frames() -> Outcome {
+    let before = free_frames();
+    let h = thread_init::spawn("dying", dying_entry);
+    thread_init::yield_now();
+    if thread_init::current_id() != ThreadId::BOOTSTRAP {
+        return Outcome::Fail("did not return to bootstrap");
+    }
+    if thread_init::try_state(h.id()) != Some(ThreadState::Dead) {
+        return Outcome::Fail("returned thread not dead");
+    }
+    let after = free_frames();
+    if after != before {
+        let _ = writeln!(Serial, "vibeOS: ktest:   frames {before} -> {after}");
+        return Outcome::Fail("reap did not restore frames");
+    }
+    Outcome::Ok
+}
+
+const REAP_MANY: usize = 16;
+
+fn test_reap_many_via_idle() -> Outcome {
+    with_timer(|| {
+        let before = free_frames();
+        let mut ids = [ThreadId::NONE; REAP_MANY];
+
+        // Park bootstrap so the last death switches to idle. Idle's
+        // from_irq resume skips reap; the idle loop must drain.
+        let mut i = 0;
+        while i < REAP_MANY {
+            ids[i] = thread_init::spawn("dying", dying_entry).id();
+            i += 1;
+        }
+        thread_init::sleep_ms(30);
+        i = 0;
+        while i < REAP_MANY {
+            if thread_init::try_state(ids[i]) != Some(ThreadState::Dead) {
+                return Outcome::Fail("parked wave not dead");
+            }
+            i += 1;
+        }
+
+        // Stay Running. Last death resumes us on the IRQ path (no reap).
+        // yield_now no-switch must drain.
+        i = 0;
+        while i < REAP_MANY {
+            ids[i] = thread_init::spawn("dying", dying_entry).id();
+            i += 1;
+        }
+        let t0 = time_init::uptime_ms();
+        loop {
+            let mut n = 0usize;
+            i = 0;
+            while i < REAP_MANY {
+                if thread_init::try_state(ids[i]) == Some(ThreadState::Dead) {
+                    n += 1;
+                }
+                i += 1;
+            }
+            if n == REAP_MANY {
+                break;
+            }
+            if time_init::uptime_ms().saturating_sub(t0) > 200 {
+                return Outcome::Fail("running wave not dead");
+            }
+            core::hint::spin_loop();
+        }
+        thread_init::yield_now();
+
+        let after = free_frames();
+        if after != before {
+            let _ = writeln!(Serial, "vibeOS: ktest:   frames {before} -> {after}");
+            return Outcome::Fail("reap did not restore frames");
+        }
+        Outcome::Ok
+    })
 }

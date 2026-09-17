@@ -9,6 +9,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Dead-stack reap no longer waits for the outgoing `schedule` call to
+  resume. Idle's timer resume is `from_irq` (skips reap) and idle
+  `yield_now` often takes the no-switch return; both leaked the last
+  worker stack until `defer_free` panicked. Drain on the voluntary
+  no-switch return and in the idle loop (never on the IRQ path, never
+  the stack we are on). `thread_exit` holds `InterruptGuard` across
+  Dead → `defer_free` → `schedule` so a tick cannot preempt a Dead
+  thread still on-CPU. In-guest `reap_many_via_idle` spawn/exits 16
+  twice (parked + running) and checks the frame count.
 - Seqlock `TickClock::write` odd-bumps with `fetch_add(AcqRel)` and
   stores (tick, tsc) as atomics, then Release-publishes the even
   sequence. Relaxed load/store on the odd bump let a torn pair stay
@@ -24,6 +33,29 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   unchanged.
 
 ### Added
+
+- Phase 3 slice B: preemptive RR scheduler, `sleep_ms`, idle thread.
+  After `time: tsc`, boot prints `vibeOS: sched: cpu0 ready` then
+  `vibeOS: irq: enabled`. IRQ0 stays the timekeeping tick from slice C;
+  the PIT handler EOIs, then `on_timer_tick` (no-op until idle exists).
+  IRQ1 stays masked until the keyboard driver. Two spinning threads
+  interleave without `yield_now`; `sleep_ms(50)` returns 50–100 ms
+  in-guest; idle `sti; hlt`s when the ready FIFO is empty.
+- Ready FIFO (idle stays off it) and one sorted timeout list under the
+  IRQ-aware scheduler lock. `schedule` / `yield_now` for the voluntary
+  path; preempt every 10 ticks, or every tick while idle so a sleeper
+  can displace halt. Blocking APIs take `Option<deadline>` (`None` → a
+  far-future sentinel). Dead stacks are reaped off the dying stack
+  (trampoline / non-IRQ `schedule`); TCB slots stay `Dead` until spawn
+  reuses them. Per-thread `run_tsc` and per-CPU
+  idle-time accounting. `PerCpu.idle` is a real idle thread, shaped for
+  one per CPU in phase 4.
+- `prepare_thread` still seeds `rflags=0x2`. `schedule` applies
+  `apply_if_on_resume`: IF on when `irq_nest == 0`, so first-run and
+  timer-preempted threads are not tick-deaf. `irq_nest` still swaps
+  with the TCB across `switch_context`.
+- Host tests: ready FIFO RR, timeout ordering, sleep/block wake state
+  machine. In-guest: yield, sleep, preemption, idle, reap frame count.
 
 - Phase 3 slice A: BSP per-CPU area, kernel threads, context switch,
   `InterruptGuard` / `SpinMutex`. After `idt ok`, boot prints
