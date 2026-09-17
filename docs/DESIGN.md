@@ -301,8 +301,9 @@ of it.
 
 Ordering rules worth stating separately because they were learned the hard way:
 
-- IRQs stay masked at the controller until step 16. An interrupt arriving between IDT install and a
-  working scheduler is a fault with no useful backtrace.
+- IRQ0 is unmasked at step 13 so the bootstrap tick can prove timekeeping (§5.5). Other PIC
+  lines stay masked; step 16 is `irq: enabled` (IF on, preemption live), not the first unmask.
+  An unexpected line before its driver is a halt, not a useful backtrace.
 - `smp: done` precedes `shell ready`. The e2e harness enforces it. If SMP moves after the shell, AP
   failures become invisible in CI.
 - ACPI discovery for the step-8 UC patch may run immediately after CR3 (alongside `paging: mmio uc`).

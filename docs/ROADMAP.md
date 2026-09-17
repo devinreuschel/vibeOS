@@ -362,7 +362,7 @@ synchronization primitives.
 
 ### 3.7 Verification
 - [x] in-guest: spawn writes a sentinel; N threads increment a shared counter under the blocking mutex; `sleep_ms` accuracy; `yield_now` actually switches; the idle thread runs
-- [x] hold the scheduler lock and force a timer interrupt, asserting no deadlock. This is a regression test for a bug that already happened.
+- [x] hold the scheduler lock with IF off, assert ticks freeze (cannot `int $0x20` while holding: recursive SCHED), then force a timer IRQ after drop and check nest. Regression for a lock taken with interrupts enabled.
 - [x] stress: spawn and exit thousands of threads, assert the frame count returns to baseline
 
 ---
