@@ -7,6 +7,9 @@
 #[path = "../../../src/acpi.rs"]
 pub mod acpi;
 
+#[path = "../../../src/apic.rs"]
+pub mod apic;
+
 #[path = "../../../src/fmt_util.rs"]
 pub mod fmt_util;
 
@@ -75,6 +78,7 @@ mod smoke {
             marker::PER_CPU_BSP,
             marker::ACPI_XSDT_PREFIX,
             marker::TIME_TSC_PREFIX,
+            marker::TIME_LAPIC_PREFIX,
             marker::SCHED_CPU0,
             marker::IRQ_ENABLED,
             marker::BOOT_DONE,
@@ -101,6 +105,8 @@ mod smoke {
         assert_eq!(marker::ACPI_XSDT_SUFFIX, " tables");
         assert_eq!(marker::TIME_TSC_PREFIX, "vibeOS: time: tsc ");
         assert_eq!(marker::TIME_TSC_SUFFIX, "/ms");
+        assert_eq!(marker::TIME_LAPIC_PREFIX, "vibeOS: time: lapic_timer ok (");
+        assert_eq!(marker::TIME_LAPIC_SUFFIX, ")");
         assert_eq!(marker::SCHED_CPU0, "vibeOS: sched: cpu0 ready");
         assert_eq!(marker::IRQ_ENABLED, "vibeOS: irq: enabled");
         assert_eq!(marker::BOOT_DONE, "vibeOS: boot: phase1 done");

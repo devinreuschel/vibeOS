@@ -9,6 +9,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Phase 4 slice A: BSP LAPIC, I/O APIC, and LAPIC timer. After `time: tsc`,
+  boot enables the local APIC (`IA32_APIC_BASE` bit 11, MADT type-5 base),
+  programs every I/O APIC with ISOs (high dword before low, still masked),
+  then proves a tick and prints `vibeOS: time: lapic_timer ok (<mode>)`.
+  Preference is TSC-deadline, then periodic (HPET, divider 16), then PIT.
+  PIC and the PIT GSI are masked only after that proof (no double delivery).
+  Spurious `0xFF` does not EOI. `send_ipi` polls delivery-pending with a
+  cap of 1000. Host tests cover the poll (clear + timeout), redir write
+  order, and ISO IRQ0→GSI. In-guest: mode matches CPUID (no silent
+  downgrade), rearm across many ticks, PIT GSI masked when LAPIC owns
+  the tick. `make test-lapic-fallback` (`-cpu qemu64,-tsc-deadline`) is
+  in `make test` and CI.
 - Phase 3 slice C: `WaitQueue` plus `BlockingMutex`, `RwLock`, `Semaphore`,
   `Condvar`, and bounded MPSC `Channel<T>`. Every wait takes an optional
   deadline (`None` → far-future sentinel). Enqueue → Blocked → drop SCHED →

@@ -2,9 +2,10 @@
 //!
 //! Boot order: serial, Limine, PMM, paging, ACPI parse + MMIO UC, heap,
 //! KVA, then GDT/TSS/IST, PIC remap, IDT, BSP per_cpu, ACPI marker, time,
-//! scheduler+idle, irq enabled, meminfo. GDT after KVA because IST stacks
-//! are guarded KVA stacks. per_cpu after GDT because `mov gs` zeros the
-//! hidden base. Scheduler after time so the tick can preempt. The
+//! LAPIC+IOAPIC, timer prove, scheduler+idle, irq enabled, meminfo. GDT
+//! after KVA because IST stacks are guarded KVA stacks. per_cpu after GDT
+//! because `mov gs` zeros the hidden base. Scheduler after time so the
+//! tick can preempt. The
 //! `kernel_tests` build runs the in-guest registry after that and
 //! exits through isa-debug-exit.
 
@@ -21,6 +22,7 @@
 extern crate alloc;
 
 mod acpi_init;
+mod apic_init;
 mod arch;
 mod diag;
 mod heap_init;
@@ -235,17 +237,21 @@ fn normal_boot_tail() {
     acpi_init::report();
 
     // ---- Phase 2 slice C: PIT, TSC calibration, timekeeping. ----
-    // After IDT so IRQ0 has a gate. IRQ0 is unmasked for timekeeping;
-    // the handler does not schedule until `sched_init` sets LIVE.
-    // Keyboard stays masked until a real IRQ1 handler exists (phase 5).
+    // After IDT so IRQ0 has a gate. The handler does not schedule until
+    // `sched_init` sets LIVE. Keyboard stays masked until phase 5.
     unsafe { time_init::init() };
     per_cpu_init::set_tsc_per_ms(time_init::tsc_per_ms());
 
     // FADT bit 0 may have skipped the boot remap (QEMU clears it). IRQ0
-    // still needs the 8259 at 0x20, not 0x08.
+    // still needs the 8259 at 0x20, not 0x08, if we fall back to the PIT.
     unsafe { arch::pic::program() };
-    arch::pic::unmask(0);
+
+    // ---- Phase 4 slice A: LAPIC + I/O APIC + timer (BSP). ----
+    // UC already done. Enable LAPIC, program IOAPIC masked, then sti and
+    // prove the timer before masking PIC (DESIGN §5.5 double-delivery).
+    unsafe { apic_init::init() };
     x86::sti();
+    apic_init::prove();
     time_init::busy_wait_ms(20);
     diag::uptime();
 

@@ -378,38 +378,38 @@ comes before drivers rather than after.
 **Exit gate**
 - [ ] `smp: done` before `shell ready`, with exactly `N-1` `smp: ap online` lines at `-smp N`
 - [ ] `sched: cpu<i> ready` for every CPU
-- [ ] `time: lapic_timer ok (<mode>)` naming the mode that was selected
+- [x] `time: lapic_timer ok (<mode>)` naming the mode that was selected
 - [ ] `make test-kernel` at `-smp 2` and `-smp 4` both pass
-- [ ] `make test-lapic-fallback` passes with `-cpu qemu64,-tsc-deadline`
+- [x] `make test-lapic-fallback` passes with `-cpu qemu64,-tsc-deadline`
 - [ ] a thread spawned on CPU 0 observably runs on another CPU
 - [ ] remote unmap and remap through the shootdown path passes in-guest with 2+ CPUs
 - [ ] failed AP bring-up frees everything it allocated, verified by frame count with a fault injected
 
 ### 4.1 LAPIC
-- [ ] enable via `IA32_APIC_BASE` bit 11, honoring the MADT type 5 address override
-- [ ] spurious vector register set to `0xFF` with the enable bit
-- [ ] TPR set to 0
-- [ ] EOI helper, and dispatch that knows PIC-routed from APIC-routed vectors
-- [ ] `send_ipi(dest, vector, mode)` with a bounded delivery-pending poll
-- [ ] the poll loop in the library half with host tests for both the clears and the timeout case
-- [ ] LVT setup for error and thermal, so a LAPIC error is reported rather than silent
+- [x] enable via `IA32_APIC_BASE` bit 11, honoring the MADT type 5 address override
+- [x] spurious vector register set to `0xFF` with the enable bit
+- [x] TPR set to 0
+- [x] EOI helper, and dispatch that knows PIC-routed from APIC-routed vectors
+- [x] `send_ipi(dest, vector, mode)` with a bounded delivery-pending poll
+- [x] the poll loop in the library half with host tests for both the clears and the timeout case
+- [x] LVT setup for error and thermal, so a LAPIC error is reported rather than silent
 
 ### 4.2 I/O APIC
-- [ ] enumerate every I/O APIC from the MADT with its GSI base
-- [ ] indirect register access through `IOREGSEL` and `IOWIN`
-- [ ] `route_gsi(gsi, vector, cpu, trigger, polarity)` writing the high dword before the low
-- [ ] apply interrupt source overrides; never assume ISA IRQ *n* is GSI *n*
-- [ ] `mask_gsi` / `unmask_gsi`
-- [ ] mask the PIC completely once routing is live and the LAPIC timer is verified
+- [x] enumerate every I/O APIC from the MADT with its GSI base
+- [x] indirect register access through `IOREGSEL` and `IOWIN`
+- [x] `route_gsi(gsi, vector, cpu, trigger, polarity)` writing the high dword before the low
+- [x] apply interrupt source overrides; never assume ISA IRQ *n* is GSI *n*
+- [x] `mask_gsi` / `unmask_gsi`
+- [x] mask the PIC completely once routing is live and the LAPIC timer is verified
 
 ### 4.3 LAPIC timer
-- [ ] detect TSC-deadline via `CPUID.01H:ECX[24]`; LVT mode `10b`, arm `IA32_TSC_DEADLINE`
-- [ ] fall back to periodic mode, calibrating LAPIC ticks per millisecond against the HPET with divider 16
-- [ ] fall back to the PIT with a single global tick and no per-CPU preemption
-- [ ] rearm before calling the scheduler
-- [ ] mask the PIT's GSI when the LAPIC owns the tick
-- [ ] log which mode was chosen, and make it an e2e assertion so a silent downgrade is not invisible
-- [ ] in-guest tests: the timer fires, and rearm works across many ticks
+- [x] detect TSC-deadline via `CPUID.01H:ECX[24]`; LVT mode `10b`, arm `IA32_TSC_DEADLINE`
+- [x] fall back to periodic mode, calibrating LAPIC ticks per millisecond against the HPET with divider 16
+- [x] fall back to the PIT with a single global tick and no per-CPU preemption
+- [x] rearm before calling the scheduler
+- [x] mask the PIT's GSI when the LAPIC owns the tick
+- [x] log which mode was chosen, and make it an e2e assertion so a silent downgrade is not invisible
+- [x] in-guest tests: the timer fires, and rearm works across many ticks
 
 ### 4.4 AP trampoline
 - [ ] `trampoline.asm` assembled with `nasm -f bin`, included as a blob, `build.rs` anchored to `CARGO_MANIFEST_DIR` with assembler stderr captured

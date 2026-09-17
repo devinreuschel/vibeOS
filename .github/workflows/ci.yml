@@ -70,3 +70,6 @@ jobs:
 
       - name: in-guest kernel tests
         run: make test-kernel
+
+      - name: in-guest LAPIC periodic fallback
+        run: make test-lapic-fallback

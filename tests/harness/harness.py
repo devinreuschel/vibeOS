@@ -480,9 +480,11 @@ def run_qemu_until_exit(
 # `per_cpu: bsp ready` (GS_BASE; DESIGN step 11, after GDT because
 # `mov gs` zeros the hidden base), then `acpi: xsdt <n> tables`. Slice C
 # adds TSC calibration: a diagnostic `time: calibrated hpet|pit <n>/ms`
-# then the exit-gate `time: tsc <n>/ms`. Phase 3 slice B then emits
-# `sched: cpu0 ready` and `irq: enabled` (IRQ0 already live for
-# timekeeping; keyboard stays masked until phase 5).
+# then the exit-gate `time: tsc <n>/ms`. Phase 4 slice A then emits
+# `time: lapic_timer ok (<mode>)` after the LAPIC timer is proven (PIC
+# masked only then). Phase 3 slice B then emits
+# `sched: cpu0 ready` and `irq: enabled` (keyboard stays masked until
+# phase 5).
 # `pic: remapped` means the PIC step finished (ICW ran, or FADT skip);
 # unlike `paging: mmio uc` it is not a claim that ports were programmed.
 # Trailing marker is `boot: phase1 done`. Runtime-derived payload uses
@@ -515,6 +517,10 @@ _PHASE0_AFTER_CALIB: list[Marker] = [
         "vibeOS: time: tsc ",
         "time_tsc",
         and_contains=("/ms",),
+    ),
+    Marker(
+        "vibeOS: time: lapic_timer ok (tsc-deadline)",
+        "lapic_timer_ok",
     ),
     Marker("vibeOS: sched: cpu0 ready", "sched_cpu0"),
     Marker("vibeOS: irq: enabled", "irq_enabled"),

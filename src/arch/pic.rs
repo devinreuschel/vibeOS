@@ -63,7 +63,6 @@ pub fn unmask(irq: u8) {
     }
 }
 
-#[allow(dead_code)]
 pub fn disable_all() {
     unsafe {
         x86::outb(PIC1_DATA, 0xFF);

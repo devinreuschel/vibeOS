@@ -11,6 +11,7 @@ use core::arch::global_asm;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use vibeos::apic::TimerMode;
 use vibeos::desc::{IstSlot, KERNEL_CS, TSS_SEL};
 use vibeos::heap::HEAP_SIZE;
 use vibeos::kva::PAGE_SIZE;
@@ -20,6 +21,7 @@ use vibeos::time::{CalibSource, Instant};
 use vibeos::vectors;
 
 use crate::acpi_init;
+use crate::apic_init;
 use crate::arch;
 use crate::kva_init;
 use crate::paging_init;
@@ -70,6 +72,9 @@ const TESTS: &[(&str, TestFn)] = &[
     ("tsc_calib_source", test_tsc_calib_source),
     ("uptime_sides", test_uptime_sides),
     ("rtc_offset", test_rtc_offset),
+    ("lapic_timer_mode", test_lapic_timer_mode),
+    ("lapic_timer_rearm", test_lapic_timer_rearm),
+    ("ioapic_pit_gsi_masked", test_ioapic_pit_gsi_masked),
     ("per_cpu_bsp", test_per_cpu_bsp),
     ("spawn_sentinel", test_spawn_sentinel),
     ("switch_two_threads", test_switch_two_threads),
@@ -732,6 +737,81 @@ fn test_rtc_offset() -> Outcome {
         });
         Outcome::Ok
     })
+}
+
+fn test_lapic_timer_mode() -> Outcome {
+    if !apic_init::is_ready() {
+        return Outcome::Fail("lapic not ready");
+    }
+    if !apic_init::owns_tick() && apic_init::timer_mode() != TimerMode::Pit {
+        return Outcome::Fail("lapic mode without owning tick");
+    }
+    let mode = apic_init::timer_mode();
+    let cpuid = apic_init::cpuid_has_tsc_deadline();
+    match (cpuid, mode) {
+        (true, TimerMode::TscDeadline) => Outcome::Ok,
+        (true, TimerMode::Periodic | TimerMode::Pit) => {
+            Outcome::Fail("silent downgrade from tsc-deadline")
+        }
+        (false, TimerMode::Periodic) => Outcome::Ok,
+        (false, TimerMode::Pit) => {
+            if acpi_init::info().is_some_and(|i| i.hpet_present()) {
+                Outcome::Fail("pit despite hpet")
+            } else {
+                Outcome::Ok
+            }
+        }
+        (false, TimerMode::TscDeadline) => Outcome::Fail("tsc-deadline without cpuid"),
+    }
+}
+
+fn test_lapic_timer_rearm() -> Outcome {
+    with_timer(|| {
+        match apic_init::timer_mode() {
+            TimerMode::Pit => {
+                let t0 = time_init::uptime_ms();
+                time_init::busy_wait_ms(50);
+                let dt = time_init::uptime_ms().saturating_sub(t0);
+                if (20..=100).contains(&dt) {
+                    Outcome::Ok
+                } else {
+                    let _ = writeln!(Serial, "vibeOS: ktest:   pit dt={dt}");
+                    Outcome::Fail("pit ticks stalled")
+                }
+            }
+            TimerMode::TscDeadline | TimerMode::Periodic => {
+                let t0 = apic_init::timer_fires();
+                time_init::busy_wait_ms(50);
+                let n = apic_init::timer_fires().saturating_sub(t0);
+                if n >= 20 {
+                    Outcome::Ok
+                } else {
+                    let _ = writeln!(Serial, "vibeOS: ktest:   lapic fires {n}");
+                    Outcome::Fail("rearm stalled")
+                }
+            }
+        }
+    })
+}
+
+fn test_ioapic_pit_gsi_masked() -> Outcome {
+    match apic_init::timer_mode() {
+        TimerMode::Pit => Outcome::Skip("pit owns tick"),
+        TimerMode::TscDeadline | TimerMode::Periodic => {
+            let Some(info) = acpi_init::info() else {
+                return Outcome::Fail("no acpi");
+            };
+            let Some(madt) = info.madt.as_ref() else {
+                return Outcome::Fail("no madt");
+            };
+            let gsi = vibeos::apic::gsi_for_isa_irq(0, &madt.isos[..madt.iso_count]);
+            match apic_init::gsi_masked(gsi) {
+                Some(true) => Outcome::Ok,
+                Some(false) => Outcome::Fail("pit gsi unmasked"),
+                None => Outcome::Fail("pit gsi not on ioapic"),
+            }
+        }
+    }
 }
 
 fn test_per_cpu_bsp() -> Outcome {
@@ -1456,8 +1536,13 @@ fn test_sched_lock_timer_irq() -> Outcome {
             Outcome::Ok => {}
             other => return other,
         }
-        unsafe {
-            core::arch::asm!("int $0x20");
+        match apic_init::timer_mode() {
+            TimerMode::Pit => unsafe {
+                core::arch::asm!("int $0x20");
+            },
+            TimerMode::TscDeadline | TimerMode::Periodic => unsafe {
+                core::arch::asm!("int $0xF0");
+            },
         }
         if per_cpu_init::current().ticks <= held {
             return Outcome::Fail("forced timer IRQ did not run");

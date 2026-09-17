@@ -320,7 +320,10 @@ written after that, and before IRQ0 so an ISR can `gs:[0]`. ACPI table walk +
 stays after per_cpu (step 12), then `time: tsc N/ms` (step 13). IRQ0 is unmasked
 and `sti` runs after calibration so the bootstrap tick can prove timekeeping;
 the handler updates the clock, EOIs, then calls `on_timer_tick`, which is a
-no-op until the idle thread exists. Step 14 (`sched: cpu0 ready`) then step 16
+no-op until the idle thread exists. Phase 4 slice A then enables the LAPIC,
+programs the I/O APIC (masked), arms the per-CPU timer, and emits
+`time: lapic_timer ok (<mode>)` before masking the PIC and the PIT GSI.
+Step 14 (`sched: cpu0 ready`) then step 16
 (`irq: enabled`) follow meminfo. IRQ1 stays masked until the keyboard driver
 (phase 5): the default PIC handler halts on an unexpected line. The timer path
 re-runs the 8259 ICW sequence even when FADT bit 0 skipped the boot remap
@@ -1200,12 +1203,14 @@ vibeOS: smp: done
 vibeOS: shell ready
 ```
 
-Live e2e through Phase 3 slice B asserts through `idt ok`, then `per_cpu: bsp ready`,
-then `acpi: xsdt`, then `time: tsc <n>/ms`, then `sched: cpu0 ready`, then
+Live e2e through Phase 4 slice A asserts through `idt ok`, then `per_cpu: bsp ready`,
+then `acpi: xsdt`, then `time: tsc <n>/ms`, then
+`time: lapic_timer ok (tsc-deadline)` on `-cpu max`, then `sched: cpu0 ready`, then
 `irq: enabled`, then `boot: phase1 done`.
 Default QEMU also requires the diagnostic `time: calibrated hpet <n>/ms`; `make test-e2e-pit`
 (`-machine pc,hpet=off`) asserts `calibrated pit` instead. `pic: remapped` on that path means the PIC
 step finished (ICW programmed, or FADT skip), not that ports were necessarily written.
+`make test-lapic-fallback` (`-cpu qemu64,-tsc-deadline`) runs in-guest tests on the periodic path.
 
 `smp: done` before `shell ready` is deliberate. Put SMP bring-up after the shell starts and an AP
 failure becomes invisible, because the harness sees its last marker and passes.
