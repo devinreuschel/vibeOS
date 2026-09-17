@@ -207,6 +207,11 @@ def iter_lines_with_deadline(fd: int, deadline: float) -> Iterator[str]:
             return
 
 
+# QEMU 10 dropped `-no-hpet`. `pc,hpet=off` is the machine property on
+# 8.x (where -no-hpet is only deprecated) and on 10.x.
+HPET_OFF_MACHINE = ("-machine", "pc,hpet=off")
+
+
 @dataclass
 class QemuConfig:
     iso: str
@@ -215,6 +220,7 @@ class QemuConfig:
     mem: str = "128M"
     bios: str | None = None  # None = QEMU default (SeaBIOS)
     extra: tuple[str, ...] = ()
+    hpet: bool = True
 
 
 def _qemu_argv(cfg: QemuConfig, monitor_sock: str) -> list[str]:
@@ -229,6 +235,8 @@ def _qemu_argv(cfg: QemuConfig, monitor_sock: str) -> list[str]:
         "-serial", "stdio",
         "-monitor", f"unix:{monitor_sock},server=on,wait=off",
     ]
+    if not cfg.hpet:
+        argv += list(HPET_OFF_MACHINE)
     if cfg.bios:
         argv += ["-bios", cfg.bios]
     argv += list(cfg.extra)
@@ -454,11 +462,13 @@ def run_qemu_until_exit(
 # (ACPI) inserts `paging: mmio uc` after CR3 (only emitted when a real
 # LAPIC/IOAPIC/HPET leaf was patched). Phase 2 slice A then emits
 # `gdt ok` / `pic: remapped` / `idt ok` after KVA (IST from KVA), then
-# `acpi: xsdt <n> tables`. `pic: remapped` means the PIC step finished
-# (ICW ran, or FADT skip); unlike `paging: mmio uc` it is not a claim
-# that ports were programmed. Trailing marker is `boot: phase1 done`.
-# Runtime-derived payload uses `and_contains`.
-PHASE0_MARKERS: list[Marker] = [
+# `acpi: xsdt <n> tables`. Slice C adds TSC calibration: a diagnostic
+# `time: calibrated hpet|pit <n>/ms` then the exit-gate `time: tsc <n>/ms`.
+# `pic: remapped` means the PIC step finished (ICW ran, or FADT skip);
+# unlike `paging: mmio uc` it is not a claim that ports were programmed.
+# Trailing marker is `boot: phase1 done`. Runtime-derived payload uses
+# `and_contains`.
+_PHASE0_BEFORE_TIME: list[Marker] = [
     Marker("vibeOS: serial online", "serial_online"),
     Marker("vibeOS: limine: rev 3 ok", "limine_ok"),
     Marker(
@@ -478,8 +488,33 @@ PHASE0_MARKERS: list[Marker] = [
         "acpi_xsdt",
         and_contains=(" tables",),
     ),
+]
+
+_PHASE0_AFTER_CALIB: list[Marker] = [
+    Marker(
+        "vibeOS: time: tsc ",
+        "time_tsc",
+        and_contains=("/ms",),
+    ),
     Marker("vibeOS: boot: phase1 done", "boot_done"),
 ]
+
+PHASE0_MARKERS: list[Marker] = _PHASE0_BEFORE_TIME + [
+    Marker(
+        "vibeOS: time: calibrated hpet ",
+        "time_calib_hpet",
+        and_contains=("/ms",),
+    ),
+] + _PHASE0_AFTER_CALIB
+
+# Production ISO with HPET emulation off: same contract, PIT channel 2.
+PHASE0_PIT_MARKERS: list[Marker] = _PHASE0_BEFORE_TIME + [
+    Marker(
+        "vibeOS: time: calibrated pit ",
+        "time_calib_pit",
+        and_contains=("/ms",),
+    ),
+] + _PHASE0_AFTER_CALIB
 
 # Markers that must appear *before* the deliberate panic in the panic-test
 # build. panic-test panics right after the limine handshake, so PMM never

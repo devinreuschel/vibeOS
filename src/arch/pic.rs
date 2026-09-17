@@ -26,12 +26,23 @@ pub unsafe fn remap_and_mask() {
     if !should_program(legacy) {
         return;
     }
+    unsafe { program() };
+}
+
+/// Always run the ICW sequence. Slice C needs this even when FADT bit 0
+/// skipped the boot remap: QEMU clears that bit (LEGACY_DEVICES) but
+/// still has an 8259 parked on vectors 0x08–0x0F. Unmasking IRQ0
+/// without a remap turns the PIT into a #DF.
+///
+/// # Safety
+/// IRQs off. IDT already loaded so 0x20 is `pit_irq`, not #DF.
+pub unsafe fn program() {
     for &(port, val) in REMAP_WRITES {
         unsafe { x86::outb(port, val) };
     }
 }
 
-#[allow(dead_code)] // PIT/keyboard unmask in §2.5 / phase 5
+#[allow(dead_code)] // keyboard unmask in phase 5
 pub fn mask(irq: u8) {
     let Some((port, bit)) = irq_port_bit(irq) else {
         return;
@@ -42,7 +53,6 @@ pub fn mask(irq: u8) {
     }
 }
 
-#[allow(dead_code)] // PIT/keyboard unmask in §2.5 / phase 5
 pub fn unmask(irq: u8) {
     let Some((port, bit)) = irq_port_bit(irq) else {
         return;

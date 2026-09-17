@@ -40,6 +40,10 @@ pub const IDT_OK: &str = "vibeOS: idt ok";
 pub const ACPI_XSDT_PREFIX: &str = "vibeOS: acpi: xsdt ";
 pub const ACPI_XSDT_SUFFIX: &str = " tables";
 
+/// Phase 2 §2.6. Runtime frequency via `writeln!`. DESIGN §3.3 step 13.
+pub const TIME_TSC_PREFIX: &str = "vibeOS: time: tsc ";
+pub const TIME_TSC_SUFFIX: &str = "/ms";
+
 /// Last marker of the current boot contract. Phase 1 closed the memory
 /// exit gate; later phases replace this with `shell ready` (DESIGN §3.3).
 pub const BOOT_DONE: &str = "vibeOS: boot: phase1 done";

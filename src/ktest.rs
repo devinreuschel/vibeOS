@@ -14,6 +14,7 @@ use vibeos::desc::{IstSlot, KERNEL_CS, TSS_SEL};
 use vibeos::heap::HEAP_SIZE;
 use vibeos::kva::PAGE_SIZE;
 use vibeos::paging::{heap_flags, PageFlags, PhysAddr, VirtAddr};
+use vibeos::time::{CalibSource, Instant};
 use vibeos::vectors;
 
 use crate::acpi_init;
@@ -22,6 +23,7 @@ use crate::kva_init;
 use crate::paging_init;
 use crate::pmm_init;
 use crate::serial::{self, Serial};
+use crate::time_init;
 use crate::x86;
 
 const ISA_DEBUG_EXIT: u16 = 0xF4;
@@ -32,7 +34,6 @@ const EXIT_FAIL: u32 = 0x11;
 enum Outcome {
     Ok,
     Fail(&'static str),
-    #[allow(dead_code)] // protocol is first-class; no skips in this slice
     Skip(&'static str),
 }
 
@@ -57,6 +58,12 @@ const TESTS: &[(&str, TestFn)] = &[
     ("scoped_pf", test_scoped_pf),
     ("gp_catch", test_gp_catch),
     ("df_on_ist", test_df_on_ist),
+    ("pit_tick_rate", test_pit_tick_rate),
+    ("now_us_monotonic", test_now_us_monotonic),
+    ("now_us_under_yields", test_now_us_under_yields),
+    ("tsc_calib_source", test_tsc_calib_source),
+    ("uptime_sides", test_uptime_sides),
+    ("rtc_offset", test_rtc_offset),
 ];
 
 pub fn run() -> ! {
@@ -561,4 +568,142 @@ fn test_df_on_ist() -> Outcome {
         );
         Outcome::Fail("handler rsp not on ist1")
     }
+}
+
+struct IrqsOffOnDrop;
+impl Drop for IrqsOffOnDrop {
+    fn drop(&mut self) {
+        x86::cli();
+    }
+}
+
+fn with_timer<F: FnOnce() -> Outcome>(f: F) -> Outcome {
+    let _off = IrqsOffOnDrop;
+    x86::sti();
+    f()
+}
+
+fn test_pit_tick_rate() -> Outcome {
+    with_timer(|| {
+        let t0 = time_init::uptime_ms();
+        time_init::busy_wait_ms(80);
+        let t1 = time_init::uptime_ms();
+        let dt = t1.saturating_sub(t0);
+        if (40..=160).contains(&dt) {
+            Outcome::Ok
+        } else {
+            let _ = writeln!(Serial, "vibeOS: ktest:   ticks {t0} -> {t1} dt={dt}");
+            Outcome::Fail("pit not ~1 kHz")
+        }
+    })
+}
+
+fn test_now_us_monotonic() -> Outcome {
+    with_timer(|| {
+        let mut last = time_init::now_us();
+        let mut i = 0u32;
+        while i < 10_000 {
+            let n = time_init::now_us();
+            if n < last {
+                let _ = writeln!(Serial, "vibeOS: ktest:   now_us {last} -> {n} at {i}");
+                return Outcome::Fail("now_us went backwards");
+            }
+            last = n;
+            i += 1;
+        }
+        Outcome::Ok
+    })
+}
+
+fn test_now_us_under_yields() -> Outcome {
+    with_timer(|| {
+        let mut last = time_init::now_us();
+        let mut i = 0u32;
+        while i < 10_000 {
+            let n = time_init::now_us();
+            if n < last {
+                let _ = writeln!(Serial, "vibeOS: ktest:   yield now_us {last} -> {n} at {i}");
+                return Outcome::Fail("now_us went backwards under yield");
+            }
+            last = n;
+            if i % 200 == 0 {
+                x86::hlt_once();
+            }
+            i += 1;
+        }
+        Outcome::Ok
+    })
+}
+
+fn test_tsc_calib_source() -> Outcome {
+    let present = acpi_init::info().is_some_and(|i| i.hpet_present());
+    match time_init::source() {
+        CalibSource::Hpet => {
+            if !present {
+                return Outcome::Fail("hpet source without table");
+            }
+            let k = time_init::tsc_per_ms();
+            if k < 50_000 || k > 10_000_000 {
+                return Outcome::Fail("tsc_per_ms out of range");
+            }
+            let Some(pit) = time_init::measure_pit_ch2() else {
+                return Outcome::Fail("pit ch2 calib failed");
+            };
+            let lo = k.saturating_mul(75) / 100;
+            let hi = k.saturating_mul(125) / 100;
+            if (lo..=hi).contains(&pit) {
+                Outcome::Ok
+            } else {
+                let _ = writeln!(Serial, "vibeOS: ktest:   hpet {k}/ms pit {pit}/ms");
+                Outcome::Fail("pit ch2 disagreed with hpet")
+            }
+        }
+        CalibSource::Pit => {
+            if present {
+                return Outcome::Fail("pit source despite hpet table");
+            }
+            let k = time_init::tsc_per_ms();
+            if k < 50_000 || k > 10_000_000 {
+                return Outcome::Fail("tsc_per_ms out of range");
+            }
+            Outcome::Ok
+        }
+    }
+}
+
+fn test_uptime_sides() -> Outcome {
+    with_timer(|| {
+        time_init::busy_wait_ms(30);
+        let tick = time_init::uptime_ms();
+        let us = time_init::now_us();
+        if tick == 0 {
+            return Outcome::Fail("tick still 0");
+        }
+        let tick_us = tick.saturating_mul(1000);
+        let lo = tick_us.saturating_mul(50) / 100;
+        let hi = tick_us.saturating_mul(150) / 100 + 2000;
+        if us >= lo && us <= hi {
+            Outcome::Ok
+        } else {
+            let _ = writeln!(Serial, "vibeOS: ktest:   tick {tick} ms tsc {us} us");
+            Outcome::Fail("tick and tsc sides diverged")
+        }
+    })
+}
+
+fn test_rtc_offset() -> Outcome {
+    let Some(a) = time_init::unix_time_s() else {
+        return Outcome::Skip("rtc unread");
+    };
+    with_timer(|| {
+        time_init::busy_wait_ms(20);
+        let Some(b) = time_init::unix_time_s() else {
+            return Outcome::Fail("rtc lost");
+        };
+        if b < a {
+            return Outcome::Fail("wall clock went backwards");
+        }
+        let _ = time_init::deadline_after(Instant { ns: time_init::now_ns() });
+        Outcome::Ok
+    })
 }
