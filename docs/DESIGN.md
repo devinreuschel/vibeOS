@@ -292,12 +292,15 @@ of it.
 | 17 | APIC + SMP bring-up | `smp: done` | Needs time (delays), heap (per-CPU allocation), scheduler (AP entry point). |
 | 18 | Hand off | `shell ready` | Last marker. Everything above it must have appeared in order. |
 
-Two ordering rules worth stating separately because both were learned the hard way:
+Ordering rules worth stating separately because they were learned the hard way:
 
 - IRQs stay masked at the controller until step 16. An interrupt arriving between IDT install and a
   working scheduler is a fault with no useful backtrace.
 - `smp: done` precedes `shell ready`. The e2e harness enforces it. If SMP moves after the shell, AP
   failures become invisible in CI.
+- ACPI discovery for the step-8 UC patch may run immediately after CR3 (alongside `paging: mmio uc`).
+  The `acpi: xsdt N tables` marker stays at step 12. Do not "fix" that by moving the walk after the
+  heap: first touch of LAPIC/IOAPIC/HPET would then be cacheable.
 
 ## 3.4 Linker script
 
