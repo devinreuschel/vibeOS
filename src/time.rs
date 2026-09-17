@@ -405,12 +405,15 @@ mod tests {
         let reads = Arc::new(AtomicU64::new(0));
         const K: u64 = 1_000;
         const MAGIC: u64 = 7;
+        // Default (0, 0) is even-seq but fails MAGIC. Seed so a reader
+        // that wins the first timeslice is not counted as a tear.
+        clock.write(1, 1u64.wrapping_mul(K).wrapping_add(MAGIC));
 
         let w = {
             let clock = clock.clone();
             let stop = stop.clone();
             thread::spawn(move || {
-                let mut i = 1u64;
+                let mut i = 2u64;
                 while !stop.load(Ordering::Relaxed) {
                     clock.write(i, i.wrapping_mul(K).wrapping_add(MAGIC));
                     i = i.wrapping_add(1);

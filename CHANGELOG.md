@@ -12,8 +12,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Seqlock `TickClock::write` odd-bumps with `fetch_add(AcqRel)` and
   stores (tick, tsc) as atomics, then Release-publishes the even
   sequence. Relaxed load/store on the odd bump let a torn pair stay
-  visible while seq still looked even
-  (`seqlock_threaded_writer_never_tears`).
+  visible while seq still looked even. The threaded tear test also
+  seeds a consistent pair so the default `(0, 0)` is not counted as a
+  tear (`seqlock_threaded_writer_never_tears`).
 
 ### Added
 
