@@ -916,11 +916,38 @@ fn test_per_cpu_identity() -> Outcome {
 }
 
 fn test_trampoline_page() -> Outcome {
-    if smp_init::trampoline_installed() {
-        Outcome::Ok
-    } else {
-        Outcome::Fail("no cli opcode at 0x8000")
+    if !smp_init::trampoline_installed() {
+        return Outcome::Fail("no cli opcode at 0x8000");
     }
+    // INIT leaves CR0.CD|NW. Blob must AND 0x9FFFFFFF then WBINVD.
+    let p = 0x8000 as *const u8;
+    let mut and_cdnw = false;
+    let mut wbinvd = false;
+    let mut i = 0usize;
+    while i + 1 < 0xD0 {
+        let a = unsafe { p.add(i).read_volatile() };
+        let b = unsafe { p.add(i + 1).read_volatile() };
+        if a == 0x0F && b == 0x09 {
+            wbinvd = true;
+        }
+        if i + 4 < 0xD0
+            && a == 0x25
+            && b == 0xFF
+            && unsafe { p.add(i + 2).read_volatile() } == 0xFF
+            && unsafe { p.add(i + 3).read_volatile() } == 0xFF
+            && unsafe { p.add(i + 4).read_volatile() } == 0x9F
+        {
+            and_cdnw = true;
+        }
+        i += 1;
+    }
+    if !and_cdnw {
+        return Outcome::Fail("trampoline missing CR0.CD/NW clear");
+    }
+    if !wbinvd {
+        return Outcome::Fail("trampoline missing wbinvd");
+    }
+    Outcome::Ok
 }
 
 fn test_failed_ap_cleanup() -> Outcome {
