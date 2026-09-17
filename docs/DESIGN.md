@@ -313,8 +313,9 @@ until step 10. Relative order among those three is unchanged: GDT, then PIC rema
 table walk + `paging: mmio uc` still run after CR3 (step 8); the `acpi: xsdt N tables` marker stays
 after IDT (step 12), then `time: tsc N/ms` (step 13). IRQ0 is unmasked and `sti` runs after
 calibration so the bootstrap tick can prove timekeeping; IRQ1 stays masked and `irq: enabled` is
-still Phase 3. The handler does not schedule. The e2e contract in [section 8.3](#83-end-to-end)
-is the live order.
+still Phase 3. The handler does not schedule. The timer path re-runs the 8259 ICW sequence even
+when FADT bit 0 skipped the boot remap (QEMU clears that bit but still has a PIC on 0x08).
+The e2e contract in [section 8.3](#83-end-to-end) is the live order.
 
 ## 3.4 Linker script
 

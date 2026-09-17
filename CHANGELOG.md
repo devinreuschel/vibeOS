@@ -15,6 +15,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `vibeOS: time: tsc <n>/ms`. IRQ0 is unmasked and `sti` runs after
   calibration (keyboard stays masked; `irq: enabled` is still Phase 3).
   `uptime` reports tick milliseconds next to TSC microseconds.
+  If FADT bit 0 skipped the boot PIC remap, the timer path still
+  programs the 8259 so IRQ0 is vector `0x20` rather than `#DF`.
 - PIT channel 0 mode 2, divisor 1193 (~1 kHz), `io_wait` between
   divisor bytes. IRQ0 handler increments the tick, snapshots TSC, EOI,
   returns — no alloc, no logging. Channel 2 one-shot via port `0x61` is

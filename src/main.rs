@@ -230,6 +230,9 @@ fn normal_boot_tail() {
     // IRQ0 below; keyboard stays masked until the scheduler exists.
     unsafe { time_init::init() };
 
+    // FADT bit 0 may have skipped the boot remap (QEMU clears it). IRQ0
+    // still needs the 8259 at 0x20, not 0x08.
+    unsafe { arch::pic::program() };
     arch::pic::unmask(0);
     x86::sti();
     time_init::busy_wait_ms(20);
