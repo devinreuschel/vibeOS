@@ -11,14 +11,14 @@ because macOS coreutils lacks it (DESIGN §0.6).
 from __future__ import annotations
 
 import os
-import re
+import select
 import shutil
 import socket
 import subprocess
 import tempfile
 import time
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Iterable, Iterator
 
 
 # Any of these substrings in a serial line means the run has failed. Matches
@@ -115,6 +115,88 @@ def _send_monitor_quit(sock_path: str) -> None:
         pass
 
 
+class DeadlineReader:
+    """Deadline-aware line reader over a file descriptor.
+
+    The point is that `file.readline()` blocks on the underlying `read(2)`
+    with no way to bail on a wall-clock deadline. QEMU's serial pipe stays
+    open long after the guest has printed a partial contract and hlt'd, so
+    a blocking readline would wedge forever. This class polls the fd with
+    `select` and buffers partial reads until a newline arrives, or the
+    deadline passes, or the pipe closes.
+
+    Yields `(kind, payload)`:
+      ("line", str)   - one line of serial output, without trailing \\n
+      ("timeout", "") - the deadline arrived
+      ("eof", "")     - the pipe closed
+    """
+
+    def __init__(self, fd: int, deadline: float) -> None:
+        self._fd = fd
+        self._deadline = deadline
+        self._buf = bytearray()
+        os.set_blocking(fd, False)
+
+    def set_deadline(self, deadline: float) -> None:
+        self._deadline = deadline
+
+    def _pop_line(self) -> str | None:
+        i = self._buf.find(b"\n")
+        if i < 0:
+            return None
+        line = bytes(self._buf[:i])
+        del self._buf[: i + 1]
+        return line.rstrip(b"\r").decode("utf-8", errors="replace")
+
+    def next_event(self) -> tuple[str, str]:
+        # Emit a buffered complete line first.
+        line = self._pop_line()
+        if line is not None:
+            return ("line", line)
+
+        while True:
+            remaining = self._deadline - time.monotonic()
+            if remaining <= 0:
+                return ("timeout", "")
+
+            # Cap select's own wait so the deadline is honored precisely.
+            r, _, _ = select.select([self._fd], [], [], min(remaining, 0.5))
+            if not r:
+                # No data; loop and re-check the deadline.
+                continue
+
+            try:
+                chunk = os.read(self._fd, 4096)
+            except BlockingIOError:
+                continue
+            if not chunk:
+                # Pipe closed. Flush anything trailing without a newline.
+                if self._buf:
+                    tail = bytes(self._buf).rstrip(b"\r").decode(
+                        "utf-8", errors="replace"
+                    )
+                    self._buf.clear()
+                    return ("line", tail)
+                return ("eof", "")
+
+            self._buf.extend(chunk)
+            line = self._pop_line()
+            if line is not None:
+                return ("line", line)
+            # No complete line yet, keep pumping.
+
+
+def iter_lines_with_deadline(fd: int, deadline: float) -> Iterator[str]:
+    """Small helper: yield lines until deadline / EOF. For tests."""
+    reader = DeadlineReader(fd, deadline)
+    while True:
+        kind, payload = reader.next_event()
+        if kind == "line":
+            yield payload
+        else:
+            return
+
+
 @dataclass
 class QemuConfig:
     iso: str
@@ -181,19 +263,19 @@ def run_qemu_and_check(
     marker_idx = 0
     deadline = time.monotonic() + timeout_s
     panic_seen: str | None = None
+    reader = DeadlineReader(proc.stdout.fileno(), deadline)
 
     try:
         while True:
-            if time.monotonic() > deadline:
+            kind, line = reader.next_event()
+            if kind == "timeout":
                 result.timed_out = True
                 proc.kill()
                 break
-
-            line = proc.stdout.readline()
-            if not line:
-                # QEMU exited (or the pipe was closed).
+            if kind == "eof":
+                # QEMU closed its stdout (usually because it exited).
                 break
-            line = line.rstrip("\r\n")
+
             result.lines.append(line)
 
             if not expect_panic:

@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from harness import (  # noqa: E402
+    DeadlineReader,
     HarnessError,
     Marker,
     check_markers_in_order,
@@ -104,6 +106,72 @@ class TestPanicSignatureScan(unittest.TestCase):
         # If someone puts it in help text later, they need to rename the
         # help text, not the harness.
         self.assertTrue(contains_panic("we hit a double fault"))
+
+
+class TestDeadlineReader(unittest.TestCase):
+    """Regression coverage for the wedged-pipe bug: a still-open serial pipe
+    that stopped producing bytes must not hold the harness past `timeout_s`.
+    """
+
+    def test_silent_open_pipe_hits_timeout(self) -> None:
+        # Fresh pipe, nothing written. Reader must return ("timeout", "")
+        # within a small multiple of the requested deadline.
+        r, w = os.pipe()
+        try:
+            deadline = time.monotonic() + 0.2
+            reader = DeadlineReader(r, deadline)
+            t0 = time.monotonic()
+            kind, _ = reader.next_event()
+            elapsed = time.monotonic() - t0
+            self.assertEqual(kind, "timeout")
+            # Generous slack for CI schedulers; the point is bounded, not zero.
+            self.assertLess(elapsed, 1.5)
+        finally:
+            os.close(r)
+            os.close(w)
+
+    def test_reads_available_line_then_times_out(self) -> None:
+        r, w = os.pipe()
+        try:
+            os.write(w, b"vibeOS: serial online\n")
+            deadline = time.monotonic() + 0.3
+            reader = DeadlineReader(r, deadline)
+            kind, payload = reader.next_event()
+            self.assertEqual(kind, "line")
+            self.assertEqual(payload, "vibeOS: serial online")
+            kind2, _ = reader.next_event()
+            self.assertEqual(kind2, "timeout")
+        finally:
+            os.close(r)
+            os.close(w)
+
+    def test_partial_line_then_close_flushes_tail(self) -> None:
+        r, w = os.pipe()
+        try:
+            os.write(w, b"partial-without-newline")
+            os.close(w)
+            w = -1
+            reader = DeadlineReader(r, time.monotonic() + 1.0)
+            kind, payload = reader.next_event()
+            self.assertEqual(kind, "line")
+            self.assertEqual(payload, "partial-without-newline")
+            kind2, _ = reader.next_event()
+            self.assertEqual(kind2, "eof")
+        finally:
+            os.close(r)
+            if w != -1:
+                os.close(w)
+
+    def test_crlf_stripped(self) -> None:
+        r, w = os.pipe()
+        try:
+            os.write(w, b"a\r\nb\r\n")
+            reader = DeadlineReader(r, time.monotonic() + 0.5)
+            self.assertEqual(reader.next_event(), ("line", "a"))
+            self.assertEqual(reader.next_event(), ("line", "b"))
+        finally:
+            os.close(r)
+            os.close(w)
 
 
 if __name__ == "__main__":
