@@ -4,6 +4,9 @@
 
 // The kernel's own lib.rs also references these modules, so this stays in
 // sync automatically.
+#[path = "../../../src/acpi.rs"]
+pub mod acpi;
+
 #[path = "../../../src/fmt_util.rs"]
 pub mod fmt_util;
 
@@ -36,8 +39,10 @@ mod smoke {
             marker::LIMINE_OK,
             marker::PMM_PREFIX,
             marker::PAGING_CR3_OK,
+            marker::PAGING_MMIO_UC,
             marker::HEAP_OK,
             marker::KVA_READY,
+            marker::ACPI_XSDT_PREFIX,
             marker::BOOT_DONE,
         ] {
             assert!(m.starts_with("vibeOS: "), "marker missing prefix: {m}");
@@ -51,8 +56,11 @@ mod smoke {
         // Paging §1.2 exit marker is a fixed string; must match the
         // harness contract byte-for-byte.
         assert_eq!(marker::PAGING_CR3_OK, "vibeOS: paging: cr3 ok");
+        assert_eq!(marker::PAGING_MMIO_UC, "vibeOS: paging: mmio uc");
         assert_eq!(marker::HEAP_OK, "vibeOS: heap ok");
         assert_eq!(marker::KVA_READY, "vibeOS: kva: ready");
+        assert_eq!(marker::ACPI_XSDT_PREFIX, "vibeOS: acpi: xsdt ");
+        assert_eq!(marker::ACPI_XSDT_SUFFIX, " tables");
         assert_eq!(marker::BOOT_DONE, "vibeOS: boot: phase1 done");
     }
 

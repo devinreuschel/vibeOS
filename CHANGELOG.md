@@ -9,6 +9,26 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Phase 2 slice B: ACPI discovery. `vibeos::acpi` in the library half
+  validates RSDP (signature, v1 20-byte checksum, v2 extended checksum),
+  walks XSDT with per-table checksums (RSDT fallback), and parses MADT
+  (LAPIC base, type 5 override, I/O APIC+GSI, type 2 ISOs, enabled APIC
+  IDs), HPET (rejecting zero addresses and I/O-space GAS), FADT
+  (`iapc_boot_arch` bit 0, reset/sleep GAS), and MCFG (ECAM base stored
+  for phase 6; ECAM is not walked). Packed fields go through
+  `read_unaligned_*`. Host tests cover RSDP checksum rejection, HPET
+  validation, and MADT iteration over truncated / zero-length input.
+- Kernel `acpi_init` reads Limine's RSDP (physical at base revision 3),
+  maps any ACPI-table pages that sit outside `map_end`, UC-patches
+  discovered LAPIC / I/O APIC / HPET physmap leaves via
+  `patch_physmap_uc` (mapping missing 4 KiB leaves first — those bases
+  sit above a 128 MiB physmap), then reads the HPET GEN_CAP period.
+  Emits `vibeOS: paging: mmio uc` only when a real leaf was patched, and
+  `vibeOS: acpi: xsdt <n> tables` after the phase-1 heap/KVA markers,
+  plus a summary of CPU count, I/O APIC count, and HPET presence. No
+  GDT/IDT/PIC or timekeeping. In-guest `acpi_discovery` checks table
+  counts against QEMU and that LAPIC/IOAPIC/HPET physmap leaves are UC.
+
 - Phase 1 slice C: kernel heap, KVA allocator, in-guest tests, meminfo.
   Free-list heap at `HEAP_START` (1 MiB initial, grows in 4 KiB steps to
   the 64 MiB cap), `GlobalAlloc` with interrupts off, and

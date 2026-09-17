@@ -17,6 +17,7 @@ use vibeos::heap::HEAP_SIZE;
 use vibeos::kva::PAGE_SIZE;
 use vibeos::paging::{heap_flags, PageFlags, PhysAddr, VirtAddr};
 
+use crate::acpi_init;
 use crate::kva_init;
 use crate::paging_init;
 use crate::pmm_init;
@@ -50,6 +51,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("kva_deferred", test_kva_deferred),
     ("vmap", test_vmap),
     ("mmio_uc_flags", test_mmio_uc_flags),
+    ("acpi_discovery", test_acpi_discovery),
 ];
 
 pub fn run() -> ! {
@@ -647,9 +649,10 @@ fn test_vmap() -> Outcome {
 }
 
 fn test_mmio_uc_flags() -> Outcome {
-    // LAPIC (0xFEE0_0000) sits above this QEMU map_end (~4 GiB of RAM),
-    // so patch a physmap leaf we know exists: 2 MiB, inside the identity
-    // rest / physmap and well under the 8 GiB cap.
+    // LAPIC (0xFEE0_0000) sits above QEMU's 128 MiB map_end, so the
+    // generic patch API is still proven on a leaf we know exists:
+    // 2 MiB, inside the identity rest / physmap. ACPI's real bases
+    // are checked by `acpi_discovery`.
     let phys = PhysAddr(0x0020_0000);
     if unsafe { paging_init::patch_physmap_uc(phys, 4096) }.is_err() {
         return Outcome::Fail("patch_physmap_uc");
@@ -660,6 +663,59 @@ fn test_mmio_uc_flags() -> Outcome {
     };
     if !flags.contains(PageFlags::PCD | PageFlags::PWT) {
         return Outcome::Fail("PCD/PWT not set on physmap leaf");
+    }
+    Outcome::Ok
+}
+
+fn leaf_is_uc(phys: u64) -> bool {
+    if phys == 0 {
+        return false;
+    }
+    let va = VirtAddr(paging_init::HHDM_BASE.wrapping_add(phys));
+    match paging_init::translate(va) {
+        Some((_, _, flags)) => flags.contains(PageFlags::PCD | PageFlags::PWT),
+        None => false,
+    }
+}
+
+fn test_acpi_discovery() -> Outcome {
+    let Some(info) = acpi_init::info() else {
+        return Outcome::Fail("no acpi info");
+    };
+    if info.table_count == 0 {
+        return Outcome::Fail("zero tables");
+    }
+    if info.cpu_count() == 0 {
+        return Outcome::Fail("no enabled cpus");
+    }
+    if info.ioapic_count() == 0 {
+        return Outcome::Fail("no ioapic");
+    }
+    if !info.hpet_present() {
+        return Outcome::Fail("no hpet");
+    }
+    if !acpi_init::mmio_uc_patched() {
+        return Outcome::Fail("mmio uc not patched");
+    }
+    let Some(madt) = info.madt.as_ref() else {
+        return Outcome::Fail("no madt");
+    };
+    if !leaf_is_uc(madt.lapic_base) {
+        return Outcome::Fail("lapic not uc");
+    }
+    for i in 0..madt.ioapic_count {
+        if !leaf_is_uc(madt.ioapics[i].addr as u64) {
+            return Outcome::Fail("ioapic not uc");
+        }
+    }
+    let Some(hpet) = info.hpet else {
+        return Outcome::Fail("no hpet");
+    };
+    if !leaf_is_uc(hpet.base) {
+        return Outcome::Fail("hpet not uc");
+    }
+    if hpet.period_fs == 0 {
+        return Outcome::Fail("hpet period unread");
     }
     Outcome::Ok
 }

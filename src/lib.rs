@@ -6,6 +6,7 @@
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod acpi;
 pub mod fmt_util;
 pub mod heap;
 pub mod kva;

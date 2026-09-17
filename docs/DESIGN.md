@@ -198,7 +198,9 @@ markers are asserted by the e2e harness in order. Adding a marker means updating
 vibeOS: serial online
 vibeOS: pmm: 32741 free 4KiB frames
 vibeOS: paging: cr3 ok
+vibeOS: paging: mmio uc
 vibeOS: heap ok
+vibeOS: acpi: xsdt 9 tables
 ```
 
 ---
@@ -290,12 +292,15 @@ of it.
 | 17 | APIC + SMP bring-up | `smp: done` | Needs time (delays), heap (per-CPU allocation), scheduler (AP entry point). |
 | 18 | Hand off | `shell ready` | Last marker. Everything above it must have appeared in order. |
 
-Two ordering rules worth stating separately because both were learned the hard way:
+Ordering rules worth stating separately because they were learned the hard way:
 
 - IRQs stay masked at the controller until step 16. An interrupt arriving between IDT install and a
   working scheduler is a fault with no useful backtrace.
 - `smp: done` precedes `shell ready`. The e2e harness enforces it. If SMP moves after the shell, AP
   failures become invisible in CI.
+- ACPI discovery for the step-8 UC patch may run immediately after CR3 (alongside `paging: mmio uc`).
+  The `acpi: xsdt N tables` marker stays at step 12. Do not "fix" that by moving the walk after the
+  heap: first touch of LAPIC/IOAPIC/HPET would then be cacheable.
 
 ## 3.4 Linker script
 
@@ -1124,9 +1129,11 @@ vibeOS: gdt ok
 vibeOS: idt ok
 vibeOS: pmm: <n> free 4KiB frames
 vibeOS: paging: cr3 ok
+vibeOS: paging: mmio uc
 vibeOS: heap ok
 vibeOS: kva: ready
 vibeOS: per_cpu: bsp ready
+vibeOS: acpi: xsdt <n> tables
 vibeOS: time: tsc <n>/ms
 vibeOS: sched: cpu0 ready
 vibeOS: console ok

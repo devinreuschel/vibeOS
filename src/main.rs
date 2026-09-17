@@ -1,8 +1,9 @@
 //! vibeOS kernel entry.
 //!
-//! Boot order is DESIGN §3.3: serial, Limine, PMM, paging, heap, KVA,
-//! then a shell-less meminfo dump. The `kernel_tests` build runs the
-//! in-guest registry after that and exits through isa-debug-exit.
+//! Boot order is DESIGN §3.3: serial, Limine, PMM, paging, ACPI parse +
+//! MMIO UC patch, heap, KVA, ACPI marker, then a shell-less meminfo dump.
+//! The `kernel_tests` build runs the in-guest registry after that and
+//! exits through isa-debug-exit.
 
 #![no_std]
 #![no_main]
@@ -15,6 +16,7 @@
 
 extern crate alloc;
 
+mod acpi_init;
 mod diag;
 mod heap_init;
 mod kva_init;
@@ -93,13 +95,6 @@ pub extern "C" fn _start() -> ! {
     }
     serial::line(marker::LIMINE_OK);
 
-    // Optional smoke checks: log presence of the responses we asked for so
-    // future phases have signal when a Limine upgrade drops a response
-    // silently. Not part of the marker contract.
-    if RSDP.response().is_some() {
-        serial::line("vibeOS: limine: rsdp present");
-    }
-
     // With `--features panic-test`, prove the panic path end to end.
     // Kept before PMM init so the panic path still exercises only the
     // minimum machinery it needs to be diagnostic. Guarding both this
@@ -175,6 +170,23 @@ fn normal_boot_tail() {
     };
     paging_init::report(&paging_report);
 
+    // ---- Phase 2 slice B: ACPI discovery + MMIO UC. ----
+    // Parse before heap so LAPIC/IOAPIC/HPET PTEs are uncacheable
+    // before anything touches those bases (DESIGN §3.3 step 8, §4.3).
+    // The `acpi: xsdt N tables` marker waits until after KVA so the
+    // contract stays a superset of phase 1 when slice A (GDT/IDT/PIC)
+    // is still absent.
+    let rsdp = RSDP
+        .response()
+        .unwrap_or_else(|| halt_with("vibeOS: limine: rsdp missing"));
+    let rsdp_raw = rsdp.address as u64;
+    let rsdp_phys = if rsdp_raw >= paging_init::HHDM_BASE {
+        rsdp_raw - paging_init::HHDM_BASE
+    } else {
+        rsdp_raw
+    };
+    unsafe { acpi_init::init(rsdp_phys) };
+
     // ---- Phase 1 slice C: heap, KVA, diagnostics. ----
     unsafe { heap_init::init() };
     {
@@ -194,6 +206,8 @@ fn normal_boot_tail() {
         kva_init::free_stack(stack);
     }
     serial::line(marker::KVA_READY);
+
+    acpi_init::report();
 
     diag::meminfo();
 
