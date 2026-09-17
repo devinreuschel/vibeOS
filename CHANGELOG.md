@@ -27,6 +27,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   frame, and `iret` jumped into `schedule_inner` on `stack_top-8` (`#PF`
   in `spawn_exit_thousands`). Incoming IF uses delayed `sti` before the
   `jmp`.
+- `spawn` rewrites a `Dead` TCB in place instead of `Box::new` + drop,
+  so spawn/exit stress does not grow the heap by a page.
 - Dead-stack reap no longer waits for the outgoing `schedule` call to
   resume. Idle's timer resume is `from_irq` (skips reap) and idle
   `yield_now` often takes the no-switch return; both leaked the last

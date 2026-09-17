@@ -356,6 +356,31 @@ fn spawn_inner(
         guard: stack.guard.as_u64(),
         pages: stack.pages,
     };
+    let tramp = trampoline as *const () as u64;
+    let cur = current_id();
+    let idle = per_cpu_init::current().idle_id;
+
+    // Dead slot: rewrite the Box. 2000 spawn/exit must not churn the
+    // heap (one extra mapped page shows up as a leaked frame).
+    {
+        let mut s = SCHED.lock();
+        if let Some(slot) = s.slots.iter().position(|x| match x.as_ref() {
+            Some(t) => t.state == ThreadState::Dead && t.id != cur && t.id != idle,
+            None => false,
+        }) {
+            let id = ThreadId(slot as u32);
+            s.ready.remove(id);
+            s.timeouts.remove(id);
+            let tcb = s.slots[slot].as_mut().expect("dead slot");
+            assert!(tcb.stack.is_none(), "dead tcb still owns stack");
+            fill_tcb(tcb, name, entry, affinity, ks, top, tramp);
+            if enqueue {
+                s.ready.push_back(id);
+            }
+            relink(&mut s);
+            return ThreadHandle { id };
+        }
+    }
 
     let mut tcb = Box::new(Tcb {
         id: ThreadId(0),
@@ -373,38 +398,53 @@ fn spawn_inner(
         run_tsc: 0,
         wait_outcome: WaitOutcome::Woken,
     });
-    prepare_thread(&mut tcb.context, top, trampoline as *const () as u64);
+    prepare_thread(&mut tcb.context, top, tramp);
     unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
 
-    let cur = current_id();
-    let idle = per_cpu_init::current().idle_id;
-    let (id, old) = {
+    let id = {
         let mut s = SCHED.lock();
         let slot = s
             .slots
             .iter()
             .position(|x| x.is_none())
-            .or_else(|| {
-                s.slots.iter().position(|x| match x.as_ref() {
-                    Some(t) => t.state == ThreadState::Dead && t.id != cur && t.id != idle,
-                    None => false,
-                })
-            })
             .expect("thread table full");
         let id = ThreadId(slot as u32);
         s.ready.remove(id);
         s.timeouts.remove(id);
-        let old = s.slots[slot].take();
         tcb.id = id;
         s.slots[slot] = Some(tcb);
         if enqueue {
             s.ready.push_back(id);
         }
         relink(&mut s);
-        (id, old)
+        id
     };
-    drop(old);
     ThreadHandle { id }
+}
+
+fn fill_tcb(
+    tcb: &mut Tcb,
+    name: &'static str,
+    entry: fn(),
+    affinity: CpuAffinity,
+    ks: KernelStack,
+    top: u64,
+    tramp: u64,
+) {
+    tcb.name = name;
+    tcb.state = ThreadState::Ready;
+    tcb.stack = Some(ks);
+    tcb.entry = entry;
+    tcb.next = None;
+    tcb.prev = None;
+    tcb.affinity = affinity;
+    tcb.cpu = 0;
+    tcb.irq_nest = 0;
+    tcb.switches = 0;
+    tcb.run_tsc = 0;
+    tcb.wait_outcome = WaitOutcome::Woken;
+    prepare_thread(&mut tcb.context, top, tramp);
+    unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
 }
 
 pub fn sleep_ms(ms: u64) {

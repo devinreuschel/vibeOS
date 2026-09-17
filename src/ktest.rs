@@ -1392,7 +1392,13 @@ fn test_spawn_exit_thousands() -> Outcome {
     thread_init::reap_zombies();
     let after = free_frames();
     if after != before {
-        let _ = writeln!(Serial, "vibeOS: ktest:   frames {before} -> {after} n={SPAWN_EXIT_N}");
+        let h = crate::heap_init::stats();
+        let k = kva_init::stats();
+        let _ = writeln!(
+            Serial,
+            "vibeOS: ktest:   frames {before} -> {after} n={SPAWN_EXIT_N} heap {}/{} kva {}",
+            h.used, h.capacity, k.used
+        );
         return Outcome::Fail("spawn/exit leaked frames");
     }
     Outcome::Ok
