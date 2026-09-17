@@ -970,6 +970,12 @@ Contents:
 - `tsc_per_ms` and timer mode
 - reserved scratch for the syscall entry path
 
+Phase 3 slice A installs one BSP `PerCpu` through `GS_BASE` and
+`KERNEL_GS_BASE` (not a `MAX_CPUS` array, no `swapgs`). `current` and
+`idle` are `*mut Tcb`; until Slice B, idle is the bootstrap thread.
+`ready_head` is null — the UP global TCB table is the queue. Wake inbox,
+timer mode, and the heap-sized array wait for phase 4.
+
 Allocate the array on the heap once the CPU count is known from the MADT rather than sizing a static
 array by a `MAX_CPUS` guess.
 

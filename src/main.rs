@@ -228,8 +228,8 @@ fn normal_boot_tail() {
     serial::line(marker::IDT_OK);
 
     // DESIGN §3.3 step 11. After GDT: `mov gs` already ran. Before
-    // IRQ0 so ISRs can `gs:[0]`. Marker sits between `idt ok` and
-    // `acpi: xsdt` (live contract).
+    // IRQ0 so ISRs can `gs:[0]`. Allocate + wrmsr GS bases, then
+    // bootstrap current/idle, then the marker. No switch before that.
     unsafe { per_cpu_init::init_bsp() };
     unsafe { thread_init::init_bootstrap() };
     serial::line(marker::PER_CPU_BSP);

@@ -739,6 +739,18 @@ fn test_per_cpu_bsp() -> Outcome {
     if thread_init::current_id() != ThreadId::BOOTSTRAP {
         return Outcome::Fail("current not bootstrap");
     }
+    if cpu.idle_id != ThreadId::BOOTSTRAP {
+        return Outcome::Fail("idle_id not bootstrap");
+    }
+    if cpu.idle as *const _ != cpu.current as *const _ {
+        return Outcome::Fail("idle != current");
+    }
+    if cpu.current.is_null() {
+        return Outcome::Fail("current null");
+    }
+    if !cpu.ready_head.is_null() {
+        return Outcome::Fail("ready_head should be empty");
+    }
     Outcome::Ok
 }
 

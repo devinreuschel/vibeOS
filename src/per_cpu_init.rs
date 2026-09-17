@@ -7,6 +7,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use vibeos::per_cpu::PerCpu;
+use vibeos::thread::Tcb;
 
 use crate::x86;
 
@@ -37,6 +38,9 @@ fn apic_id() -> u32 {
 }
 
 /// Allocate the BSP area, set `GS_BASE` / `KERNEL_GS_BASE`.
+///
+/// `current` / `idle` stay null until [`crate::thread_init::init_bootstrap`].
+/// Order: this, then bootstrap current, then any path that can switch.
 ///
 /// # Safety
 /// GDT already loaded (`mov gs` already happened). Single-CPU. IRQs
@@ -119,11 +123,11 @@ pub fn gs_self() -> *mut PerCpu {
     ptr as *mut PerCpu
 }
 
-pub fn set_current_thread(tcb: *mut u8) {
+pub fn set_current_thread(tcb: *mut Tcb) {
     current_mut().current = tcb;
 }
 
-pub fn current_thread() -> *mut u8 {
+pub fn current_thread() -> *mut Tcb {
     current().current
 }
 

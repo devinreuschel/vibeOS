@@ -1,19 +1,28 @@
-//! Thread ids, states, and context-switch frame. ROADMAP §3.1–§3.2.
+//! Thread ids, TCB, and context-switch frame. ROADMAP §3.1–§3.2.
 //!
 //! Portable half: types, synthetic frame layout, `switch_context` asm.
-//! Kernel stacks, the TCB table, and `spawn` live in the binary crate.
+//! The TCB table, KVA mapping, and `spawn` live in the binary crate.
+
+use core::mem::{offset_of, size_of};
 
 use crate::time::Instant;
 
 /// Slot index in the global TCB table. 0 is the bootstrap thread.
+#[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ThreadId(pub u32);
 
 impl ThreadId {
     pub const BOOTSTRAP: Self = Self(0);
+    /// Empty idle / ready-head slot. Not a table index.
+    pub const NONE: Self = Self(u32::MAX);
 
     pub const fn raw(self) -> u32 {
         self.0
+    }
+
+    pub const fn is_none(self) -> bool {
+        self.0 == u32::MAX
     }
 }
 
@@ -37,7 +46,9 @@ impl CpuAffinity {
 pub enum ThreadState {
     Ready,
     Running,
-    Sleeping { deadline: Instant },
+    Sleeping {
+        deadline: Instant,
+    },
     /// Wait-queue cookie filled by Slice C. 0 means "blocked, queue unknown".
     Blocked,
     Dead,
@@ -53,6 +64,31 @@ impl ThreadState {
             Self::Dead => "dead",
         }
     }
+}
+
+/// Guarded kernel stack identity (default 4×4 KiB + unmapped guard).
+/// Mapping is `kva_init`'s; this is only the VA so `Tcb` can live here.
+#[derive(Clone, Copy, Debug)]
+pub struct KernelStack {
+    pub guard: u64,
+    pub pages: usize,
+}
+
+/// Global TCB. `next`/`prev` are the run-queue links Slice B fills.
+#[repr(C)]
+pub struct Tcb {
+    pub id: ThreadId,
+    pub name: &'static str,
+    pub state: ThreadState,
+    pub stack: Option<KernelStack>,
+    pub context: CpuContext,
+    pub entry: fn(),
+    /// Intrusive ready-list link. Slice B; phase 4 is per-CPU.
+    pub next: Option<ThreadId>,
+    pub prev: Option<ThreadId>,
+    pub affinity: CpuAffinity,
+    pub cpu: u32,
+    pub switches: u64,
 }
 
 /// Callee-saved GPRs, rflags, rsp, return address. No XMM: soft-float.
@@ -96,6 +132,20 @@ impl CpuContext {
         }
     }
 }
+
+const _: () = {
+    assert!(offset_of!(CpuContext, rbx) == CpuContext::RBX);
+    assert!(offset_of!(CpuContext, rbp) == CpuContext::RBP);
+    assert!(offset_of!(CpuContext, r12) == CpuContext::R12);
+    assert!(offset_of!(CpuContext, r13) == CpuContext::R13);
+    assert!(offset_of!(CpuContext, r14) == CpuContext::R14);
+    assert!(offset_of!(CpuContext, r15) == CpuContext::R15);
+    assert!(offset_of!(CpuContext, rflags) == CpuContext::RFLAGS);
+    assert!(offset_of!(CpuContext, rsp) == CpuContext::RSP);
+    assert!(offset_of!(CpuContext, rip) == CpuContext::RIP);
+    assert!(size_of::<CpuContext>() == 72);
+    assert!(size_of::<ThreadId>() == 4);
+};
 
 /// SysV: `rsp % 16 == 8` on function entry. `stack_top` must be 16-aligned.
 /// IF is off. Caller may store a dummy 0 at `rsp` so a stray `ret` faults.
@@ -222,8 +272,7 @@ pub unsafe fn switch_context(old: *mut CpuContext, new: *const CpuContext) {
 #[cfg(test)]
 mod tests {
     use super::*;
-        use core::mem::offset_of;
-        use core::mem::size_of;
+    use core::mem::{offset_of, size_of};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
@@ -266,6 +315,8 @@ mod tests {
         assert_eq!(CpuAffinity::Any.name(), "any");
         assert_eq!(CpuAffinity::Pinned(1).name(), "pinned");
         assert_eq!(ThreadId::BOOTSTRAP.raw(), 0);
+        assert!(ThreadId::NONE.is_none());
+        assert_eq!(size_of::<ThreadId>(), 4);
     }
 
     static FLAG: AtomicU64 = AtomicU64::new(0);
@@ -277,7 +328,10 @@ mod tests {
     extern "C" fn worker_entry() {
         FLAG.store(0xC0FFEE, Ordering::SeqCst);
         unsafe {
-            switch_context(WORKER_PTR.load(Ordering::SeqCst), MAIN_PTR.load(Ordering::SeqCst));
+            switch_context(
+                WORKER_PTR.load(Ordering::SeqCst),
+                MAIN_PTR.load(Ordering::SeqCst),
+            );
         }
         panic!("worker resumed");
     }
