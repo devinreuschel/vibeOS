@@ -163,6 +163,28 @@ impl RwLockModel {
     pub fn drop_write(&mut self) {
         self.writer = ThreadId::NONE;
     }
+
+    /// After a queued writer times out and is unlinked. Writer preference
+    /// otherwise leaves `read_wq` parked forever.
+    pub fn after_writer_wait_timeout(&self) -> WriterTimeoutWake {
+        match (
+            self.writer.is_none(),
+            self.write_wq.is_empty(),
+            self.readers == 0,
+        ) {
+            (true, true, _) => WriterTimeoutWake::Readers,
+            (true, false, true) => WriterTimeoutWake::NextWriter,
+            (true, false, false) | (false, _, _) => WriterTimeoutWake::None,
+        }
+    }
+}
+
+/// Who to wake when a writer wait returns `Timeout`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriterTimeoutWake {
+    None,
+    NextWriter,
+    Readers,
 }
 
 pub struct SemaModel {
@@ -415,6 +437,37 @@ mod tests {
             Some(tid(2))
         );
         assert!(r.try_write(tid(2)));
+    }
+
+    #[test]
+    fn rwlock_writer_timeout_wakes_readers() {
+        let mut r = RwLockModel::new();
+        let mut ready = ReadyQueue::empty();
+        let mut timeouts = TimeoutQueue::empty();
+        assert!(r.try_read());
+        begin_wait(&mut r.write_wq, &mut ready, &mut timeouts, tid(2), at(5));
+        begin_wait(&mut r.read_wq, &mut ready, &mut timeouts, tid(3), at(50));
+        assert_eq!(r.after_writer_wait_timeout(), WriterTimeoutWake::None);
+        r.write_wq.remove(tid(2));
+        timeouts.remove(tid(2));
+        assert_eq!(r.after_writer_wait_timeout(), WriterTimeoutWake::Readers);
+        assert_eq!(wake_all(&mut r.read_wq, &mut ready, &mut timeouts), 1);
+        assert!(ready.contains(tid(3)));
+        r.drop_read();
+        assert!(r.try_read());
+    }
+
+    #[test]
+    fn rwlock_writer_timeout_wakes_next_writer() {
+        let mut r = RwLockModel::new();
+        let mut ready = ReadyQueue::empty();
+        let mut timeouts = TimeoutQueue::empty();
+        begin_wait(&mut r.write_wq, &mut ready, &mut timeouts, tid(2), at(5));
+        begin_wait(&mut r.write_wq, &mut ready, &mut timeouts, tid(3), at(50));
+        r.write_wq.remove(tid(2));
+        timeouts.remove(tid(2));
+        assert_eq!(r.after_writer_wait_timeout(), WriterTimeoutWake::NextWriter);
+        assert_eq!(wake_one(&mut r.write_wq, &mut ready, &mut timeouts), Some(tid(3)));
     }
 
     #[test]

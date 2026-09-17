@@ -6,6 +6,7 @@
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
 use core::cell::UnsafeCell;
+use core::mem::ManuallyDrop;
 use core::ops::{Deref, DerefMut};
 
 use vibeos::sync::SpinLock;
@@ -13,6 +14,7 @@ use vibeos::thread::{ThreadId, WaitOutcome};
 use vibeos::time::Instant;
 use vibeos::wait::{
     deadline_of, ChannelModel, CondModel, MutexModel, RwLockModel, SemaModel,
+    WriterTimeoutWake,
 };
 
 use crate::per_cpu_init;
@@ -267,6 +269,18 @@ impl<T> RwLock<T> {
                 Err(false) => return None,
                 Err(true) => {
                     if wait_resume() == WaitOutcome::Timeout {
+                        thread_init::with_sched(|s| {
+                            let st = unsafe { &mut *self.state.get() };
+                            match st.after_writer_wait_timeout() {
+                                WriterTimeoutWake::Readers => {
+                                    s.wake_all(&mut st.read_wq);
+                                }
+                                WriterTimeoutWake::NextWriter => {
+                                    s.wake_one(&mut st.write_wq);
+                                }
+                                WriterTimeoutWake::None => {}
+                            }
+                        });
                         return None;
                     }
                 }
@@ -400,19 +414,23 @@ impl Condvar {
         self.wait_until(guard, None).0
     }
 
-    /// Enqueue first (lost-wakeup), then drop the mutex, then schedule.
+    /// Enqueue on the CV (lost-wakeup), unlock the mutex under the same
+    /// SCHED, then schedule. Mesa: caller rechecks the predicate.
     pub fn wait_until<'a, T>(
         &self,
         guard: BlockingMutexGuard<'a, T>,
         deadline: Option<Instant>,
     ) -> (BlockingMutexGuard<'a, T>, WaitOutcome) {
+        let guard = ManuallyDrop::new(guard);
         let mutex = guard.mutex;
         let d = deadline_of(deadline);
         thread_init::with_sched(|s| {
             let st = unsafe { &mut *self.state.get() };
             s.begin_wait(&mut st.wq, d);
+            let mst = unsafe { &mut *mutex.state.get() };
+            mst.release();
+            s.wake_one(&mut mst.wq);
         });
-        drop(guard);
         let outcome = wait_resume();
         (mutex.lock(), outcome)
     }

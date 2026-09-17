@@ -29,6 +29,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `jmp`.
 - `spawn` rewrites a `Dead` TCB in place instead of `Box::new` + drop,
   so spawn/exit stress does not grow the heap by a page.
+- `Condvar::wait` unlocks the mutex under the same SCHED as `begin_wait`,
+  so a timer cannot park a waiter that still owns the mutex.
+- `RwLock::write_until` timeout wakes `read_wq` when no writer remains
+  (writer preference otherwise stranded those readers).
 - Dead-stack reap no longer waits for the outgoing `schedule` call to
   resume. Idle's timer resume is `from_irq` (skips reap) and idle
   `yield_now` often takes the no-switch return; both leaked the last

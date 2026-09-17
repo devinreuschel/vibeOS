@@ -83,8 +83,10 @@ const TESTS: &[(&str, TestFn)] = &[
     ("reap_many_via_idle", test_reap_many_via_idle),
     ("blocking_mutex_counter", test_blocking_mutex_counter),
     ("rwlock_exclusion", test_rwlock_exclusion),
+    ("rwlock_writer_timeout", test_rwlock_writer_timeout),
     ("semaphore_wake", test_semaphore_wake),
     ("condvar_signal", test_condvar_signal),
+    ("condvar_wait_releases", test_condvar_wait_releases),
     ("channel_mpsc", test_channel_mpsc),
     ("mutex_deadline", test_mutex_deadline),
     ("sync_try_paths", test_sync_try_paths),
@@ -1168,6 +1170,54 @@ fn test_rwlock_exclusion() -> Outcome {
     })
 }
 
+static RW_TO: RwLock<u64> = RwLock::new(0);
+static RW_WR_OUT: AtomicU32 = AtomicU32::new(0);
+static RW_RD_GOT: AtomicU32 = AtomicU32::new(0);
+
+fn rw_timeout_writer() {
+    let ns = time_init::now_ns().saturating_add(15_000_000);
+    match RW_TO.write_until(Some(Instant { ns })) {
+        None => RW_WR_OUT.store(1, Ordering::SeqCst),
+        Some(_g) => RW_WR_OUT.store(2, Ordering::SeqCst),
+    }
+}
+
+fn rw_pref_reader() {
+    let _g = RW_TO.read();
+    RW_RD_GOT.store(1, Ordering::SeqCst);
+}
+
+fn test_rwlock_writer_timeout() -> Outcome {
+    RW_WR_OUT.store(0, Ordering::SeqCst);
+    RW_RD_GOT.store(0, Ordering::SeqCst);
+    *RW_TO.write() = 0;
+    with_timer(|| {
+        let r = RW_TO.read();
+        let _w = thread_init::spawn("rw-to-w", rw_timeout_writer);
+        thread_init::yield_now();
+        thread_init::sleep_ms(5);
+        let _rd = thread_init::spawn("rw-to-r", rw_pref_reader);
+        thread_init::yield_now();
+        thread_init::sleep_ms(40);
+        if RW_WR_OUT.load(Ordering::SeqCst) != 1 {
+            drop(r);
+            return Outcome::Fail("writer did not timeout");
+        }
+        let t0 = time_init::uptime_ms();
+        loop {
+            if RW_RD_GOT.load(Ordering::SeqCst) == 1 {
+                drop(r);
+                return Outcome::Ok;
+            }
+            if time_init::uptime_ms().saturating_sub(t0) > 2_000 {
+                drop(r);
+                return Outcome::Fail("reader stranded after writer timeout");
+            }
+            thread_init::yield_now();
+        }
+    })
+}
+
 static SEM: Semaphore = Semaphore::new(0);
 static SEM_N: AtomicU32 = AtomicU32::new(0);
 
@@ -1231,6 +1281,52 @@ fn test_condvar_signal() -> Outcome {
             }
             if time_init::uptime_ms().saturating_sub(t0) > 2_000 {
                 return Outcome::Fail("condvar stall");
+            }
+            thread_init::yield_now();
+        }
+    })
+}
+
+static CVREL_M: BlockingMutex<u32> = BlockingMutex::new(0);
+static CVREL_CV: Condvar = Condvar::new();
+static CVREL_WAITING: AtomicBool = AtomicBool::new(false);
+static CVREL_DONE: AtomicBool = AtomicBool::new(false);
+
+fn cvrel_waiter() {
+    let g = CVREL_M.lock();
+    CVREL_WAITING.store(true, Ordering::SeqCst);
+    let _g = CVREL_CV.wait(g);
+    CVREL_DONE.store(true, Ordering::SeqCst);
+}
+
+fn test_condvar_wait_releases() -> Outcome {
+    CVREL_WAITING.store(false, Ordering::SeqCst);
+    CVREL_DONE.store(false, Ordering::SeqCst);
+    *CVREL_M.lock() = 0;
+    let _h = thread_init::spawn("cvrel", cvrel_waiter);
+    with_timer(|| {
+        let t0 = time_init::uptime_ms();
+        loop {
+            if CVREL_WAITING.load(Ordering::SeqCst) {
+                break;
+            }
+            if time_init::uptime_ms().saturating_sub(t0) > 2_000 {
+                return Outcome::Fail("waiter never locked");
+            }
+            thread_init::yield_now();
+        }
+        {
+            let mut g = CVREL_M.lock();
+            *g = 1;
+            CVREL_CV.notify_one();
+        }
+        let t1 = time_init::uptime_ms();
+        loop {
+            if CVREL_DONE.load(Ordering::SeqCst) {
+                return Outcome::Ok;
+            }
+            if time_init::uptime_ms().saturating_sub(t1) > 2_000 {
+                return Outcome::Fail("condvar wait held mutex");
             }
             thread_init::yield_now();
         }

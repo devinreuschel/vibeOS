@@ -1405,6 +1405,20 @@ The wakeup arrived in the window between deciding to block and actually blocking
 the wait queue, mark self blocked, drop the inner lock, then schedule. In that order, so there is no
 point where the thread is both on the wait queue and considered runnable.
 
+**Wait queue cookie is a dangling pointer.**
+`ThreadState::Blocked { wq }` stores the `WaitQueue` address so timeout can unlink. The object that
+owns the queue (mutex, rwlock, condvar, channel) must outlive every waiter. Dropping it with threads
+still blocked is a use-after-free on the next timeout or wake.
+
+**Condvar waiter never sees the predicate.**
+Wake does not carry the condition. Mesa: `wait` re-acquires the mutex and returns; the caller loops
+on the predicate. Timeout is the same path.
+
+**Condvar wait parks still holding the mutex.**
+`begin_wait` marked Blocked, SCHED dropped, then `drop(guard)` released the mutex. A timer in that
+window switched the waiter off-CPU still owning it; the notifier blocked on the mutex forever. Rule:
+enqueue on the CV and unlock the mutex under the same SCHED, then schedule.
+
 **First-run thread `#PF`s in `schedule_inner` at `rsp = stack_top-8`.**
 `popfq` restored IF before `jmp` to the trampoline. A tick landed in that window, `schedule_preempt`
 saved over the synthetic frame, and `iret` jumped to the nested save's RIP with the prepared RSP.
