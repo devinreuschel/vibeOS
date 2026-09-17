@@ -30,6 +30,8 @@ pub const KVA_READY: &str = "vibeOS: kva: ready";
 /// Phase 2 slice A. Live order is after KVA (IST stacks come from it);
 /// relative order matches DESIGN §3.3 steps 3–5.
 pub const GDT_OK: &str = "vibeOS: gdt ok";
+/// PIC boot step finished: ICW remap+mask ran, or FADT skip. Not a claim
+/// that ports were programmed (unlike `paging: mmio uc`).
 pub const PIC_REMAPPED: &str = "vibeOS: pic: remapped";
 pub const IDT_OK: &str = "vibeOS: idt ok";
 

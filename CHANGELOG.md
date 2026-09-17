@@ -14,7 +14,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `kva: ready` (IST stacks come from KVA guarded stacks; relative order
   matches DESIGN §3.3), then the ACPI `xsdt` marker from slice B. PIC
   reads FADT `iapc_boot_arch` bit 0 and skips the ICW sequence when the
-  legacy 8259 is absent; missing FADT still remaps+masks.
+  legacy 8259 is absent; missing FADT still remaps+masks. `pic: remapped`
+  is emitted after that step either way.
 - Flat GDT with sysret selector order (null, kernel code/data, user
   data, user code, TSS). Per-CPU `CpuTables` (GDT+TSS) with RSP0 and
   IST1–4 (DF/NMI/MC/debug). 256-entry IDT, `x86-interrupt` handlers;
@@ -73,6 +74,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   between `paging: cr3 ok` and boot-done.
 
 ### Changed
+
+- `vibeOS: pic: remapped` means the PIC boot step finished: ICW
+  remap+mask ran, or FADT skipped the ports. Unlike `paging: mmio uc`,
+  it is not a claim that hardware was programmed.
 
 - `-Z build-std` moved off `.cargo/config.toml` onto the Makefile `CARGO`
   line. Cargo merges parent config into `tests/hostlib`, and an inherited

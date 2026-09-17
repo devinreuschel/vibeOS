@@ -211,8 +211,8 @@ fn normal_boot_tail() {
 
     // ---- Phase 2 slice A: GDT/TSS/IST, PIC, IDT. ----
     // After KVA so IST stacks are guarded KVA stacks. PIC remap before
-    // LIDT so firmware 8259 vectors cannot alias CPU exceptions. PIC
-    // consults FADT bit 0 from the walk above.
+    // LIDT so firmware 8259 vectors cannot alias CPU exceptions. FADT
+    // bit 0 may skip ICW; `pic: remapped` still means the step finished.
     unsafe { arch::gdt::init_bsp() };
     serial::line(marker::GDT_OK);
 

@@ -623,7 +623,9 @@ The PIC is a bootstrap artifact and a fallback, nothing more.
 FADT `iapc_boot_arch` bit 0 says whether the legacy 8259 exists at all. Modern hardware may not have
 one, and assuming it does means an early write to a port nobody answers. The PIC step reads that bit
 from the FADT already parsed after CR3 and skips the ICW sequence when the legacy controller is
-absent. Missing FADT still remaps and masks.
+absent. Missing FADT still remaps and masks. `pic: remapped` means this step finished: the ICW
+sequence ran, or FADT skip declined the ports. Unlike `paging: mmio uc`, it is not a claim that
+ports were programmed.
 
 ## 5.6 I/O APIC
 
@@ -1158,7 +1160,9 @@ vibeOS: shell ready
 ```
 
 Live e2e through Phase 2 slices A and B asserts through `idt ok`, then `acpi: xsdt`, then
-`boot: phase1 done`, omitting `per_cpu` and everything after ACPI.
+`boot: phase1 done`, omitting `per_cpu` and everything after ACPI. `pic: remapped` on that
+path means the PIC step finished (ICW programmed, or FADT skip), not that ports were
+necessarily written.
 
 `smp: done` before `shell ready` is deliberate. Put SMP bring-up after the shell starts and an AP
 failure becomes invisible, because the harness sees its last marker and passes.

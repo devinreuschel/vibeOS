@@ -1,7 +1,8 @@
 //! 8259 PIC: remap, mask, spurious. DESIGN §5.5 / ROADMAP §2.3.
 //!
 //! FADT `iapc_boot_arch` bit 0: skip the ICW sequence when the legacy
-//! 8259 is absent. Missing FADT still remaps+masks.
+//! 8259 is absent. Missing FADT still remaps+masks. `pic: remapped` is
+//! emitted after this step either way (programmed or skipped).
 
 use vibeos::fmt_util;
 use vibeos::pic::{
