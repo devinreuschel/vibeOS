@@ -37,6 +37,8 @@ pub const LAPIC_TIMER_DCR: u32 = 0x3E0;
 
 pub const SVR_ENABLE: u32 = 1 << 8;
 pub const LVT_MASKED: u32 = 1 << 16;
+/// LINT0 ExtINT: PIC virtual-wire when the LAPIC timer is not the tick.
+pub const LVT_DELIVERY_EXTINT: u32 = 0b111 << 8;
 /// LVT timer bits 17:18: 00 one-shot, 01 periodic, 10 TSC-deadline.
 pub const LVT_TIMER_PERIODIC: u32 = 1 << 17;
 pub const LVT_TIMER_TSC_DEADLINE: u32 = 1 << 18;
@@ -468,6 +470,7 @@ mod tests {
             LVT_TIMER_PERIODIC,
         );
         assert_ne!(lvt_timer_oneshot(vectors::LAPIC_TIMER, true) & LVT_MASKED, 0);
+        assert_eq!(LVT_DELIVERY_EXTINT, 0b111 << 8);
     }
 
     #[test]

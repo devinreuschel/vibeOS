@@ -11,11 +11,11 @@ use vibeos::apic::{
     self, has_tsc_deadline, ioapic_max_index, ioapic_pin, lvt_timer_periodic,
     lvt_timer_tsc_deadline, poll_delivery_pending, redir_high, redir_is_masked, redir_low,
     redir_set_mask, svr_value, tsc_deadline_value, write_redir, EoiDomain, IpiError, IpiMode,
-    Polarity, TimerMode, Trigger, APIC_BASE_ENABLE, DEFAULT_LAPIC_PHYS, IA32_APIC_BASE,
+    Polarity, TimerMode,     Trigger, APIC_BASE_ENABLE, DEFAULT_LAPIC_PHYS, IA32_APIC_BASE,
     IA32_TSC_DEADLINE, ICR_POLL_CAP, IOAPIC_VER, IOREGSEL, IOWIN, LAPIC_EOI, LAPIC_ESR,
     LAPIC_ICR_HIGH, LAPIC_ICR_LOW, LAPIC_ID, LAPIC_LVT_ERROR, LAPIC_LVT_LINT0, LAPIC_LVT_LINT1,
     LAPIC_LVT_PERF, LAPIC_LVT_THERMAL, LAPIC_LVT_TIMER, LAPIC_SVR, LAPIC_TIMER_CCR, LAPIC_TIMER_DCR,
-    LAPIC_TIMER_ICR, LAPIC_TPR, LVT_MASKED, TIMER_DIV_16,
+    LAPIC_TIMER_ICR, LAPIC_TPR, LVT_DELIVERY_EXTINT, LVT_MASKED, TIMER_DIV_16,
 };
 use vibeos::fmt_util;
 use vibeos::marker;
@@ -484,6 +484,12 @@ fn emit_marker(mode: TimerMode) {
 }
 
 fn unmask_pit_fallback() {
+    let st = STATE.get();
+    if st.lapic_va != 0 {
+        // PIC virtual-wire: ExtINT on LINT0. Masked LINT0 (enable path)
+        // swallows IRQ0 even after unmasking the 8259.
+        lapic_write(st.lapic_va, LAPIC_LVT_LINT0, LVT_DELIVERY_EXTINT);
+    }
     arch::pic::unmask(0);
 }
 
