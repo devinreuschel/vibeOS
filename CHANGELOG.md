@@ -21,7 +21,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   downgrade), rearm across many ticks, PIT GSI masked when LAPIC owns
   the tick. `make test-lapic-fallback` (`-cpu qemu64,-tsc-deadline`) is
   in `make test` and CI. TCG cannot advertise TSC-deadline, so default
-  e2e pins `periodic`; `make test-e2e-pit` pins `pit`.
+  e2e pins `periodic`; `make test-e2e-pit` pins `pit`. PIT fallback
+  programs LINT0 as ExtINT so the 8259 virtual-wire still delivers IRQ0
+  after LAPIC enable (a masked LINT0 swallowed the tick).
 - Phase 3 slice C: `WaitQueue` plus `BlockingMutex`, `RwLock`, `Semaphore`,
   `Condvar`, and bounded MPSC `Channel<T>`. Every wait takes an optional
   deadline (`None` → far-future sentinel). Enqueue → Blocked → drop SCHED →
