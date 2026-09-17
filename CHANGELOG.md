@@ -9,6 +9,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Dead-stack reap no longer waits for the outgoing `schedule` call to
+  resume. Idle's timer resume is `from_irq` (skips reap) and idle
+  `yield_now` often takes the no-switch return; both leaked the last
+  worker stack until `defer_free` panicked. Drain on the voluntary
+  no-switch return and in the idle loop (never on the IRQ path, never
+  the stack we are on). `thread_exit` holds `InterruptGuard` across
+  Dead → `defer_free` → `schedule` so a tick cannot preempt a Dead
+  thread still on-CPU. In-guest `reap_many_via_idle` spawn/exits 16
+  twice (parked + running) and checks the frame count.
 - Seqlock `TickClock::write` odd-bumps with `fetch_add(AcqRel)` and
   stores (tick, tsc) as atomics, then Release-publishes the even
   sequence. Relaxed load/store on the odd bump let a torn pair stay

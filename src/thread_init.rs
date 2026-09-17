@@ -10,12 +10,12 @@ use core::fmt::Write;
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::paging::VirtAddr;
 use vibeos::sched::{
-    BlockedList, ReadyQueue, SWEEP_TICKS, TimeoutQueue, effective_deadline, enqueue_runnable,
-    take_next,
+    effective_deadline, enqueue_runnable, take_next, BlockedList, ReadyQueue, TimeoutQueue,
+    SWEEP_TICKS,
 };
 use vibeos::thread::{
-    CpuAffinity, CpuContext, KernelStack, MAX_THREADS, Tcb, ThreadId, ThreadState,
-    apply_if_on_resume, prepare_thread, switch_context,
+    apply_if_on_resume, prepare_thread, switch_context, CpuAffinity, CpuContext, KernelStack, Tcb,
+    ThreadId, ThreadState, MAX_THREADS,
 };
 use vibeos::time::Instant;
 
@@ -80,6 +80,9 @@ extern "C" fn trampoline() {
 }
 
 fn thread_exit() -> ! {
+    // IF-on-resume leaves IF set. Hold it off across Dead → defer_free →
+    // schedule so a tick cannot preempt a Dead thread still on-CPU.
+    let _irq = InterruptGuard::enter();
     unsafe {
         let p = per_cpu_init::current_thread();
         (*p).state = ThreadState::Dead;
@@ -186,6 +189,12 @@ fn schedule_inner(from_irq: bool) {
     }
 
     if old_id == new_id || old_ptr.is_null() || new_ptr.is_null() {
+        // Idle/voluntary no-switch. Drain here: after-switch reap only
+        // runs when this call site resumes, which a from_irq idle
+        // resume never does.
+        if !from_irq {
+            reap_zombies();
+        }
         return;
     }
     assert!(!new_ptr.is_null(), "schedule: next vanished");
@@ -242,7 +251,7 @@ fn relink(s: &mut Sched) {
     }
 }
 
-fn reap_zombies() {
+pub(crate) fn reap_zombies() {
     // Stacks only. Dead TCBs stay queryable (`state == Dead`) until spawn
     // reuses the slot. Never unmap a stack we are running on.
     kva_init::drain_deferred();
@@ -335,9 +344,7 @@ fn spawn_inner(
             .position(|x| x.is_none())
             .or_else(|| {
                 s.slots.iter().position(|x| match x.as_ref() {
-                    Some(t) => {
-                        t.state == ThreadState::Dead && t.id != cur && t.id != idle
-                    }
+                    Some(t) => t.state == ThreadState::Dead && t.id != cur && t.id != idle,
                     None => false,
                 })
             })

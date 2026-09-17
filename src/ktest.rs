@@ -14,7 +14,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use vibeos::desc::{IstSlot, KERNEL_CS, TSS_SEL};
 use vibeos::heap::HEAP_SIZE;
 use vibeos::kva::PAGE_SIZE;
-use vibeos::paging::{PageFlags, PhysAddr, VirtAddr, heap_flags};
+use vibeos::paging::{heap_flags, PageFlags, PhysAddr, VirtAddr};
 use vibeos::thread::{ThreadId, ThreadState};
 use vibeos::time::{CalibSource, Instant};
 use vibeos::vectors;
@@ -80,6 +80,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("preempt_two_threads", test_preempt_two_threads),
     ("idle_runs", test_idle_runs),
     ("reap_returns_frames", test_reap_returns_frames),
+    ("reap_many_via_idle", test_reap_many_via_idle),
 ];
 
 pub fn run() -> ! {
@@ -1011,4 +1012,63 @@ fn test_reap_returns_frames() -> Outcome {
         return Outcome::Fail("reap did not restore frames");
     }
     Outcome::Ok
+}
+
+const REAP_MANY: usize = 16;
+
+fn test_reap_many_via_idle() -> Outcome {
+    with_timer(|| {
+        let before = free_frames();
+        let mut ids = [ThreadId::NONE; REAP_MANY];
+
+        // Park bootstrap so the last death switches to idle. Idle's
+        // from_irq resume skips reap; the idle loop must drain.
+        let mut i = 0;
+        while i < REAP_MANY {
+            ids[i] = thread_init::spawn("dying", dying_entry).id();
+            i += 1;
+        }
+        thread_init::sleep_ms(30);
+        i = 0;
+        while i < REAP_MANY {
+            if thread_init::try_state(ids[i]) != Some(ThreadState::Dead) {
+                return Outcome::Fail("parked wave not dead");
+            }
+            i += 1;
+        }
+
+        // Stay Running. Last death resumes us on the IRQ path (no reap).
+        // yield_now no-switch must drain.
+        i = 0;
+        while i < REAP_MANY {
+            ids[i] = thread_init::spawn("dying", dying_entry).id();
+            i += 1;
+        }
+        let t0 = time_init::uptime_ms();
+        loop {
+            let mut n = 0usize;
+            i = 0;
+            while i < REAP_MANY {
+                if thread_init::try_state(ids[i]) == Some(ThreadState::Dead) {
+                    n += 1;
+                }
+                i += 1;
+            }
+            if n == REAP_MANY {
+                break;
+            }
+            if time_init::uptime_ms().saturating_sub(t0) > 200 {
+                return Outcome::Fail("running wave not dead");
+            }
+            core::hint::spin_loop();
+        }
+        thread_init::yield_now();
+
+        let after = free_frames();
+        if after != before {
+            let _ = writeln!(Serial, "vibeOS: ktest:   frames {before} -> {after}");
+            return Outcome::Fail("reap did not restore frames");
+        }
+        Outcome::Ok
+    })
 }

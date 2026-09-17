@@ -48,6 +48,9 @@ pub fn on_timer_tick() {
 
 fn idle_main() {
     loop {
+        // Timer preempt resumes idle with from_irq, so schedule skips
+        // reap. Drain here: not on a dying stack, not on the IRQ path.
+        thread_init::reap_zombies();
         thread_init::yield_now();
         // `sti; hlt` is one instruction pair so IF cannot open a window
         // before halt. Always runnable, lowest priority (not on the FIFO).
