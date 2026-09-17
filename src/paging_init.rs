@@ -383,6 +383,17 @@ fn physmap_extent(kernel_phys_base: u64, ram_high_water: u64, fb_phys_end: u64) 
 /// covering `va` into `mapper`'s new PML4. Preserves the sub-tree so
 /// the stack keeps working after `mov cr3`.
 ///
+/// Assumption: the destination PML4 slot is empty. That holds when the
+/// mapper's own regions (physmap at 0xFFFF_8000_*, heap at 0xFFFF_C000_*,
+/// KVA at 0xFFFF_D000_*, ioremap at 0xFFFF_E000_*, kernel image at
+/// 0xFFFF_FFFF_8000_*, low identity at 0x0000_0000_*) do not share a
+/// PML4 index with the bootloader's stack. In practice `_start` is only
+/// called after Limine translates via HHDM which our physmap covers, so
+/// `install`'s `translate(rsp)` returns `Some` and this function is
+/// never invoked — but if it is, an overlap would silently overwrite
+/// one of our slots with Limine's sub-tree. Trip loudly on that class
+/// of failure rather than lose the physmap after `mov cr3`.
+///
 /// # Safety
 /// Only sound during boot, with Limine's tables still installed as CR3.
 unsafe fn duplicate_pml4_entry_from_current(mapper: &mut Mapper, va: VirtAddr) {
@@ -400,6 +411,14 @@ unsafe fn duplicate_pml4_entry_from_current(mapper: &mut Mapper, va: VirtAddr) {
         .root()
         .as_u64()
         .wrapping_add(HHDM_BASE) as *mut u64;
+    let existing = unsafe { dst.add(idx).read_volatile() };
+    assert!(
+        existing & PageFlags::PRESENT == 0,
+        "paging: bootloader stack {:#x} shares pml4 slot {} with an already-mapped region; \
+         Limine duplicate would clobber it (physmap? heap? kva? kernel?)",
+        va.as_u64(),
+        idx,
+    );
     unsafe { dst.add(idx).write_volatile(entry) };
 }
 
