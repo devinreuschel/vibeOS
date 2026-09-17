@@ -183,8 +183,9 @@ per-CPU inbox plus a reschedule IPI. More SMP-specific rules in [section 7.7](#7
 ## 2.5 Panic policy
 
 `#[panic_handler]` re-initializes serial from scratch (the panic may be *in* the serial path), prints
-location and message, dumps a backtrace when frame pointers permit, then halts every CPU with an NMI
-broadcast and `hlt`. No unwinding: `panic = "abort"`.
+location and message, dumps a backtrace when frame pointers permit, then broadcasts Fixed IPI `0xFE`
+(`halt_others`) so the other CPUs stop before they overwrite the log, and `hlt`s. NMI stays on IST
+for real NMIs; it is not the panic IPI. No unwinding: `panic = "abort"`.
 
 Exceptions split into two groups. Recoverable ones (`#BP`, and `#PF` once demand paging exists) log
 and continue. Everything else logs and halts. Nothing is silently swallowed.
@@ -584,7 +585,7 @@ triple fault, which QEMU reports as a silent reboot loop.
 | `0x0D` | `#GP` general protection | log selector/error code, halt |
 | `0x08` | `#DF` double fault | log on IST stack, halt |
 | `0x12` | `#MC` machine check | log, halt |
-| `0x02` | NMI | used for the panic halt broadcast |
+| `0x02` | NMI | IST; log and halt. Panic stop is IPI `0xFE`, not NMI. |
 | rest | | log vector + error code, halt |
 
 Every halting handler prints the interrupt frame (RIP, CS, RFLAGS, RSP, SS), the error code, and CR2
@@ -1028,7 +1029,9 @@ array by a `MAX_CPUS` guess.
 | `0xFE` | Panic halt. Broadcast so a panic on one CPU stops the others before they overwrite the log. |
 
 The reschedule IPI is what makes cross-CPU wakeups work without ever locking a remote run queue: push
-onto the target's inbox, send `0xFD`, done.
+onto the target's inbox, send `0xFD`, done. `0xFD` then takes SCHED IRQ-off via `schedule_preempt`.
+Shootdown and call-function take neither the page-table lock nor SCHED. Call-function uses one global
+slot; the initiator holds IF off from publish through reclaim, polling inbound work while it waits.
 
 ## 7.7 Locking with more than one CPU
 
@@ -1070,10 +1073,11 @@ to invalidate before the virtual address is reused.
 Protocol: update the PTE, then broadcast `0xFC` with the target address, then wait for acknowledgement
 from every online CPU.
 
-The initiator waits with interrupts disabled, which means it cannot service an incoming shootdown from
-another CPU, which means two CPUs shooting down simultaneously deadlock. The fix is that the wait loop
-also processes pending shootdown requests, so a spinning initiator still helps its peers make progress.
-This is not optional; it is the difference between working and a hang that only appears under load.
+The initiator waits with interrupts disabled (`InterruptGuard` around publish → IPI → ack → clear
+waiters). A waiter with IF off cannot take an incoming shootdown as an IRQ, which would deadlock two
+CPUs shooting down at once. The wait loop therefore calls `service_incoming` and processes pending
+slots so a spinning initiator still helps its peers. This is not optional; it is the difference
+between working and a hang that only appears under load.
 
 The shootdown handler must not allocate and must not take the page table or scheduler lock. It reads a
 request slot and executes `invlpg`.

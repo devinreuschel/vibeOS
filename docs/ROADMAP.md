@@ -457,11 +457,11 @@ comes before drivers rather than after.
 - [x] `0xFC` TLB shootdown
 - [x] `0xFB` call-function, with a wait-for-completion variant
 - [x] `0xFE` panic halt broadcast, so a panic stops the other cores before they overwrite the log
-- [x] every handler allocation-free and lock-free with respect to the page table and scheduler locks
+- [x] handlers allocation-free; shootdown/call/halt take neither PT nor SCHED; reschedule takes SCHED IRQ-off
 
 ### 4.10 TLB shootdown
 - [x] update the PTE, broadcast, wait for acknowledgement from every online CPU
-- [x] the waiting initiator services incoming shootdown requests so two simultaneous shootdowns cannot deadlock
+- [x] the waiting initiator keeps IF off and services incoming shootdown requests so two simultaneous shootdowns cannot deadlock
 - [x] KVA free deferred until the shootdown completes; freed ranges to the tail of the free list
 - [x] in-guest: unmap on one CPU, verify a fault on another, remap, verify access
 
