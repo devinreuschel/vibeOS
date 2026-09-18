@@ -21,7 +21,11 @@ DISK_BYTES = 4 * 1024 * 1024
 
 
 def _blk_extra(disk: str, smp: int) -> tuple[str, ...]:
+    # Boot the ISO, not the virtio disk. Stamping a protective MBR (0x55AA)
+    # makes SeaBIOS prefer the HDD on reboot unless CD is first.
     return (
+        "-boot",
+        "order=d",
         "-drive",
         f"file={disk},if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
         "-device",

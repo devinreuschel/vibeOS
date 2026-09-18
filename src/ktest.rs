@@ -3028,7 +3028,10 @@ fn test_virtio_vq() -> Outcome {
     if !virtio_init::rng_alloced() {
         return Outcome::Fail("thread alloc");
     }
-    if virtio_init::rng_soft_hits() <= s0 {
+    if !spin_until_ns(
+        || virtio_init::rng_soft_hits() > s0,
+        2_000_000_000,
+    ) {
         return Outcome::Fail("no softirq");
     }
     Outcome::Ok

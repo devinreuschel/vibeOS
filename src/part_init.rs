@@ -70,14 +70,6 @@ fn parent_raw_read(dev: u32, lba: u64, buf: &mut [u8]) -> Result<(), BlockError>
     }
 }
 
-fn parent_raw_write(dev: u32, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
-    match dev {
-        DEV_RAM0 => block_init::write(lba, buf),
-        DEV_VDA => virtio_blk_init::write(lba, buf),
-        _ => Err(BlockError::Inval),
-    }
-}
-
 fn parent_bs_cap(dev: u32) -> Result<(u32, u64), BlockError> {
     match dev {
         DEV_RAM0 => Ok((

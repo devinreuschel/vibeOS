@@ -393,6 +393,7 @@ pub fn flush(dev: u32) -> Result<(), BlockError> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn barrier(dev: u32) -> Result<(), BlockError> {
     writeback_dev(Some(dev))
 }
