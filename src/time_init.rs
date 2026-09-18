@@ -11,9 +11,9 @@ use vibeos::acpi::HpetInfo;
 use vibeos::pic::{PIC1_CMD, PIC_EOI};
 use vibeos::time::{
     bcd_to_bin, hpet_period_ok, monotonic_max, next_deadline, tsc_per_ms_from_hpet,
-    tsc_per_ms_from_pit, unix_from_civil, wall_unix_s, CalibSource, Instant, TickClock,
-    WallOrigin, IO_WAIT_PORT, PIT_CALIB_COUNT, PIT_CALIB_MS, PIT_CH0_WRITES, PIT_CH2, PIT_CMD,
-    PIT_CMD_CH2_ONESHOT, PIT_GATE, FS_PER_MS,
+    tsc_per_ms_from_pit, unix_from_civil, wall_unix_s, CalibSource, Instant, TickClock, WallOrigin,
+    FS_PER_MS, IO_WAIT_PORT, PIT_CALIB_COUNT, PIT_CALIB_MS, PIT_CH0_WRITES, PIT_CH2, PIT_CMD,
+    PIT_CMD_CH2_ONESHOT, PIT_GATE,
 };
 
 use crate::acpi_init;
@@ -65,6 +65,7 @@ struct TimeState {
     tsc_per_ms: u64,
     source: CalibSource,
     use_rdtscp: bool,
+    invariant_tsc: bool,
     rtc: Option<WallOrigin>,
 }
 
@@ -76,6 +77,7 @@ impl TimeState {
             tsc_per_ms: 0,
             source: CalibSource::Pit,
             use_rdtscp: false,
+            invariant_tsc: false,
             rtc: None,
         }
     }
@@ -204,6 +206,14 @@ fn calibrate_hpet(hpet: &HpetInfo, use_rdtscp: bool) -> Option<u64> {
 pub fn measure_pit_ch2() -> Option<u64> {
     let use_rdtscp = STATE.get().use_rdtscp;
     calibrate_pit(use_rdtscp)
+}
+
+/// Fresh HPET window. ktest compares this to PIT under the same SMP load;
+/// boot `tsc_per_ms` was sampled before APs came up.
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+pub fn measure_hpet() -> Option<u64> {
+    let hpet = acpi_init::info()?.hpet?;
+    calibrate_hpet(&hpet, STATE.get().use_rdtscp)
 }
 
 fn calibrate_pit(use_rdtscp: bool) -> Option<u64> {
@@ -340,7 +350,10 @@ pub fn now_us() -> u64 {
 
 pub fn now_ns() -> u64 {
     let st = STATE.get();
-    publish_ns(st.clock.now_ns_with(|| rdtsc_ser(st.use_rdtscp), st.tsc_per_ms))
+    publish_ns(
+        st.clock
+            .now_ns_with(|| rdtsc_ser(st.use_rdtscp), st.tsc_per_ms),
+    )
 }
 
 pub fn tsc_per_ms() -> u64 {
@@ -350,6 +363,12 @@ pub fn tsc_per_ms() -> u64 {
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn source() -> CalibSource {
     STATE.get().source
+}
+
+/// CPUID.8000_0007H:EDX[8]. TCG leaves this clear; KVM and real silicon set it.
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+pub fn tsc_invariant() -> bool {
+    STATE.get().invariant_tsc
 }
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
@@ -400,12 +419,14 @@ pub fn eoi_pit() {
 /// IDT and PIC remap already done. IRQs still masked at the controller.
 pub unsafe fn init() {
     let use_rdtscp = has_rdtscp();
-    if !invariant_tsc() {
+    let inv = invariant_tsc();
+    if !inv {
         serial::line("vibeOS: time: invariant tsc absent");
     }
 
     let st = unsafe { STATE.get_mut() };
     st.use_rdtscp = use_rdtscp;
+    st.invariant_tsc = inv;
 
     let mut source = CalibSource::Pit;
     let mut per_ms = None;

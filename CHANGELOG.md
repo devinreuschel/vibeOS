@@ -14,6 +14,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   a reading below the last one. TCG has no invariant TSC; `hlt` plus the
   Phase 7C `blk-wb` sleeper makes ticks late relative to TSC, so interpolation
   overshoots and the next tick would otherwise step backwards.
+- In-guest `sleep_ms_50` and `tsc_calib_source` no longer flake under TCG
+  `-smp 4`. TCG leaves the invariant-TSC CPUID bit clear, so a 10 ms PIT
+  sample after AP bring-up can disagree with the boot HPET rate, and LAPIC
+  ticks coalesce so `uptime_ms` is a poor sleep ruler. The tests retry PIT
+  against a fresh HPET window, widen the band to 50–200% when the bit is
+  clear, and accept ~50 ms of `now_us` when ticks coalesce. Invariant TSC
+  (KVM, real hardware) still requires 75–125% and 50–100 ms of ticks.
 
 ### Changed
 

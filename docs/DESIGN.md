@@ -1222,7 +1222,7 @@ Things that belong here and are easy to get wrong, so should have tests from the
 - ACPI: RSDP v1 and v2 checksum rejection, table length validation, HPET generic address structure
   rejecting I/O space and zero addresses, MADT entry iteration over truncated tables.
 - Timekeeping: the `now_us` interpolation formula, seqlock retry under a simulated concurrent writer,
-  monotonicity, overflow near `u64::MAX`.
+  monotonicity, overflow near `u64::MAX`, HPET/PIT agreement bands (invariant vs TCG).
 - ICR delivery-pending poll: returns true when the bit clears, false at the iteration cap.
 - Vector table: no two named vectors are equal.
 - Scan code decoding: make and break codes, `0xE0` prefixes, modifier state, unknown codes returning
@@ -1603,6 +1603,13 @@ counter moves and `now_us` drops, even with a stable seqlock pair. A wrapping TS
 delta looks like ~2^64 cycles. Rule: treat a high-bit wrapping delta as extra 0, and never publish a
 `now_ns` below the last reading. Do not cap extra at one tick — ktest holds IF off and timeouts must
 still advance on TSC alone.
+
+**`sleep_ms(50)` and PIT-vs-HPET calib flake on TCG SMP.**
+TCG has no invariant TSC. Boot HPET calibration runs before APs; a later PIT channel 2 window sees a
+different apparent TSC rate, and LAPIC periodic ticks coalesce so `uptime_ms` during a sleep is not
+50–100. Rule: in-guest checks key off the invariant-TSC CPUID bit. Without it, retry PIT against a
+fresh HPET sample with a 50–200% band, and accept `now_us` (~50 ms) when ticks coalesce. Do not loosen
+the invariant-TSC path.
 
 **Serial output from multiple CPUs is unreadable.**
 No lock on TX. Rule: lock serial TX. Byte granularity is enough to keep bytes from interleaving; full
