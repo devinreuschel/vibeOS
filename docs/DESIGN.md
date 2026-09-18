@@ -27,6 +27,8 @@ landed.
 | 9 | [Pitfalls](#9-pitfalls) | Bugs already paid for once |
 | 10 | [Block I/O](#10-block-io) | Requests, barrier vs flush, ramdisk, virtio-blk, partitions, cache |
 
+On-disk filesystem formats live in their own docs, not here ([§1.4](#14-documentation-rules)): [VIBEFS.md](VIBEFS.md) (vibefs **version 1**, CoW metadata + atomic superblock switch).
+
 ---
 
 # 1. Overview
@@ -99,6 +101,7 @@ Target layout. Not all of it exists; the roadmap says when each lands.
 | `src/block/` | Block layer, partitions, request queues, cache |
 | `src/fs/` | VFS, mounts, dentry/inode cache, kernfs/pseudo |
 | `src/fat.rs` | FAT32 parse/alloc (library) |
+| `src/vibefs.rs` | vibefs format, mkfs, fsck (library; [VIBEFS.md](VIBEFS.md)) |
 | `src/proc/` | Address spaces, processes, ELF loading, fork/exec/wait, signals |
 | `src/syscall/` | Entry point, dispatch table, argument validation |
 | `src/net/` | netdev, ethernet, ARP, IP, ICMP, UDP, TCP, sockets |
@@ -117,7 +120,8 @@ Target layout. Not all of it exists; the roadmap says when each lands.
 - Constants appear once, here, and are cross-referenced rather than restated. Address map in
   [section 4.1](#41-virtual-address-map), vector numbers in [section 5.3](#53-vector-map).
 - When this file outgrows one page per subsystem, split it into `docs/<topic>.md` and leave an index
-  behind. Not before.
+  behind. Not before. On-disk formats are that split: [VIBEFS.md](VIBEFS.md), not a novel in this
+  file.
 
 ---
 
@@ -338,7 +342,7 @@ of it.
 | 17 | Framebuffer console, PS/2, mux | `console ok` | After `smp: done`. Install the IRQ1 / keyboard GSI handler, init the 8042, then unmask. Replay the pre-FB log ring onto the framebuffer. |
 | 17b | PCI enum + device registry | `pci: N devices` | After `console ok`. Legacy `0xCF8`/`0xCFC` for bus 0; MCFG → ECAM beyond. Scan builds a device list. Workqueue + threaded IRQ start, then drivers bind by id. Memory BARs are mapped through ioremap or the capped physmap; sizes above 32 MiB are recorded and skipped (DESIGN §4.1). |
 | 17c | Block layer + ramdisk + virtio-blk + partitions | `block: <name> <n> sectors` | After bind. One line per device. virtio-blk (`vda`) emits during probe; ramdisk (`ram0`) follows in `block_init`; partition children (`<parent>p<N>`) after that. |
-| 17d | VFS + FAT initrd root + pseudo mounts | (none) | After block. Makefile FAT32 initrd at `/` when live, else dummy ramfs. Then devfs/procfs/tmpfs/sysfs on `/dev` `/proc` `/tmp` `/sys`. No serial marker (Phase 8A/B/C). |
+| 17d | VFS + FAT initrd root + pseudo mounts + vibefs | (none) | After block. Makefile FAT32 initrd at `/` when live, else dummy ramfs. Then devfs/procfs/tmpfs/sysfs on `/dev` `/proc` `/tmp` `/sys`. BSS vibefs at `/vibe` (Phase 8D). No serial marker. |
 | 18 | Shell thread, builtins | `shell ready` | Last marker. Spawn a kernel thread (not `_start`, not idle, not an ISR), register builtins into the command table, print the prompt. `lspci` / `devices` / `blk` are live. |
 
 Ordering rules worth stating separately because they were learned the hard way:
@@ -1401,6 +1405,7 @@ make test-e2e           boot contract on the normal ISO
 make test-kernel        in-guest tests, -smp 2
 make test-kernel-smp4   in-guest tests, -smp 4
 make test-lapic-fallback  in-guest tests with TSC-deadline disabled
+make test-vibefs-crash  QEMU-kill + host fsck-vibefs (docs/VIBEFS.md §12)
 make test-smp-stress    -smp 4, longer timeout (scheduled CI)
 make test               all of the above except test-smp-stress
 ```
@@ -1740,7 +1745,10 @@ request submitted after it starts. It does not make writes durable.
 
 `Flush` is a barrier plus a device durable-write. Ramdisk flush is a successful
 no-op (the backing is already memory). A journaling filesystem must issue flush,
-not only barrier, before treating a commit as persistent.
+not only barrier, before treating a commit as persistent. vibefs is not journaled:
+CoW metadata plus atomic superblock switch ([VIBEFS.md](VIBEFS.md) §2 / §10). The
+same flush rule applies: a generation is not durable until `Flush` after the new
+super slot is written.
 
 The elevator will not dispatch seq numbers past an in-queue fence. Adjacent
 read/write/discard requests merge; fences do not, and they split merge runs.

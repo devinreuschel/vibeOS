@@ -17,6 +17,7 @@ pub mod dma;
 pub mod fb;
 pub mod fat;
 pub mod font;
+pub mod vibefs;
 pub mod fs;
 pub mod fmt_util;
 pub mod heap;

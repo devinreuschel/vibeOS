@@ -81,3 +81,6 @@ jobs:
 
       - name: in-guest LAPIC periodic fallback
         run: make test-lapic-fallback
+
+      - name: vibefs QEMU-kill crash consistency
+        run: make test-vibefs-crash

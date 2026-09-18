@@ -24,6 +24,9 @@ kernel_tests = []
 gp-test = []
 # Panic dump ends with QEMU isa-debug-exit (nonzero) instead of an infinite hlt.
 panic_exit = []
+# Write-loop kernel for QEMU-kill crash consistency (docs/VIBEFS.md §12).
+# Separate ISO / target dir; never the production image.
+vibefs_crash = []
 
 [dependencies]
 limine = "0.6"
