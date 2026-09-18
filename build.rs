@@ -59,4 +59,34 @@ fn main() {
         )
         .unwrap();
     }
+
+    // FAT32 initrd (ROADMAP §8.6). Makefile also builds initrd.fat;
+    // cargo needs the blob in OUT_DIR for include_bytes!.
+    let script = manifest.join("scripts/mkinitrd.py");
+    println!("cargo:rerun-if-changed={}", script.display());
+    let initrd = out.join("initrd.fat");
+    let staged = manifest.join("initrd.fat");
+    if staged.is_file() {
+        println!("cargo:rerun-if-changed={}", staged.display());
+        std::fs::copy(&staged, &initrd).unwrap_or_else(|e| {
+            panic!("copy initrd.fat: {e}");
+        });
+    } else {
+        let output = Command::new("python3")
+            .arg(&script)
+            .arg(&initrd)
+            .output()
+            .unwrap_or_else(|e| panic!("mkinitrd.py spawn: {e}"));
+        if !output.status.success() {
+            panic!(
+                "mkinitrd.py failed ({}):\nstdout:\n{}\nstderr:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+    }
+    if !initrd.is_file() {
+        panic!("no {}", initrd.display());
+    }
 }

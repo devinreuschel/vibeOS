@@ -9,7 +9,7 @@ use crate::kbd::{DecodedKey, NamedKey};
 pub const LINE_CAP: usize = 128;
 pub const HIST_CAP: usize = 16;
 pub const MAX_TOKENS: usize = 16;
-pub const MAX_COMMANDS: usize = 32;
+pub const MAX_COMMANDS: usize = 48;
 pub const PROMPT: &str = "vibeos> ";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,6 +17,7 @@ pub enum Feed {
     Pending,
     Submit,
     Cancel,
+    Complete,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,6 +90,14 @@ impl LineEditor {
         self.draft_len = 0;
     }
 
+    pub fn set_line(&mut self, s: &[u8]) {
+        let n = s.len().min(LINE_CAP);
+        self.buf[..n].copy_from_slice(&s[..n]);
+        self.len = n;
+        self.cur = n;
+        self.hist_view = None;
+    }
+
     pub fn feed(&mut self, key: DecodedKey) -> Feed {
         match key {
             DecodedKey::Char(c) => self.feed_char(c),
@@ -139,7 +148,7 @@ impl LineEditor {
                 Feed::Pending
             }
             b'\n' | b'\r' => self.submit(),
-            b'\t' => Feed::Pending,
+            b'\t' => Feed::Complete,
             0x20..=0x7E => {
                 self.insert(c);
                 Feed::Pending
@@ -163,8 +172,8 @@ impl LineEditor {
                 self.clear();
                 return Feed::Cancel;
             }
-            NamedKey::Tab
-            | NamedKey::Insert
+            NamedKey::Tab => return Feed::Complete,
+            NamedKey::Insert
             | NamedKey::PageUp
             | NamedKey::PageDown
             | NamedKey::F1
@@ -628,6 +637,20 @@ mod tests {
         assert_eq!(r.len(), 2);
         assert_eq!(r.get(0).unwrap().name, "help");
         assert!(r.get(9).is_none());
+    }
+
+    #[test]
+    fn tab_is_complete() {
+        let mut ed = LineEditor::new();
+        feed_str(&mut ed, "ls he");
+        assert_eq!(ed.feed(DecodedKey::Char(b'\t')), Feed::Complete);
+        assert_eq!(
+            ed.feed(DecodedKey::Named(NamedKey::Tab)),
+            Feed::Complete
+        );
+        ed.set_line(b"cat hello");
+        assert_eq!(ed.line(), b"cat hello");
+        assert_eq!(ed.cursor(), 9);
     }
 
     #[test]

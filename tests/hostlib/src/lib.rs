@@ -22,6 +22,9 @@ pub mod cache;
 #[path = "../../../src/fb.rs"]
 pub mod fb;
 
+#[path = "../../../src/fat.rs"]
+pub mod fat;
+
 #[path = "../../../src/font.rs"]
 pub mod font;
 

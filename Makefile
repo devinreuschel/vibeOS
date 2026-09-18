@@ -48,7 +48,7 @@ QEMU_BASE = qemu-system-x86_64 \
 # limine config, and this Makefile. A find(1) so newly added source dirs are
 # not silently missed (DESIGN §9.1).
 KERNEL_SRCS := $(shell find src -type f \( -name '*.rs' -o -name '*.asm' -o -name '*.S' \) 2>/dev/null)
-KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml $(TARGET_JSON) linker.ld Makefile rust-toolchain.toml scripts/gen_ksyms.py
+KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml $(TARGET_JSON) linker.ld Makefile rust-toolchain.toml scripts/gen_ksyms.py scripts/mkinitrd.py initrd.fat
 
 LLVM_TOOL_DIR := $(shell rustc --print sysroot)/lib/rustlib/$(shell rustc -vV | sed -n 's/^host: //p')/bin
 OBJDUMP := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-objdump),$(LLVM_TOOL_DIR)/llvm-objdump,llvm-objdump)
@@ -74,6 +74,9 @@ $(KERNEL_ELF): $(KERNEL_DEPS)
 $(LIMINE_BIN):
 	@echo "limine binaries missing; run ./setup.sh" >&2
 	@exit 1
+
+initrd.fat: scripts/mkinitrd.py
+	python3 scripts/mkinitrd.py $@
 
 $(ISO): $(KERNEL_ELF) limine.conf $(LIMINE_BIN)
 	@echo "  ISO $(ISO)"
@@ -231,7 +234,7 @@ test-smp-stress: $(ISO_KTEST)
 	VIBEOS_ISO=$(ISO_KTEST) VIBEOS_SMP=4 VIBEOS_TIMEOUT=180 python3 tests/kernel_boot.py
 
 clean:
-	rm -rf $(ISO_ROOT) $(ISO_ROOT_PANIC) $(ISO_ROOT_GP) $(ISO_ROOT_KTEST) $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_KTEST) target-panic target-gp $(KERNEL_TESTS_DIR)
+	rm -rf $(ISO_ROOT) $(ISO_ROOT_PANIC) $(ISO_ROOT_GP) $(ISO_ROOT_KTEST) $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_KTEST) target-panic target-gp $(KERNEL_TESTS_DIR) initrd.fat
 	$(CARGO) clean
 
 distclean: clean

@@ -35,6 +35,8 @@ use crate::cache_init;
 use crate::part_init;
 use crate::dev_init;
 use crate::dma_init;
+use crate::fat_init;
+use crate::file_init;
 use crate::fs_init;
 use crate::ipi_init;
 use crate::irq_init;
@@ -169,6 +171,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("block_cache_evict", test_block_cache_evict),
     ("vfs_walk", test_vfs_walk),
     ("pseudo_fs", test_pseudo_fs),
+    ("fat_initrd", test_fat_initrd),
 ];
 
 pub fn run() -> ! {
@@ -3762,45 +3765,48 @@ fn test_vfs_walk() -> Outcome {
     if !fs_init::live() {
         return Outcome::Fail("not live");
     }
+    if file_init::mkdir("/a", 0o755).is_err() {
+        return Outcome::Fail("mkdir");
+    }
+    if file_init::creat("/a/f").is_err() {
+        return Outcome::Fail("creat");
+    }
+    match file_init::stat_path("/a/./f") {
+        Ok(s) if s.kind == InodeKind::Reg => {}
+        _ => return Outcome::Fail("dot walk"),
+    }
+    match file_init::stat_path("/a/f/../f") {
+        Ok(s) if s.kind == InodeKind::Reg => {}
+        _ => return Outcome::Fail("dotdot"),
+    }
+    if file_init::mkdir("/ram", 0o755).is_err() {
+        return Outcome::Fail("ramdir");
+    }
+    if file_init::vfs_attach("/ram").is_err() {
+        return Outcome::Fail("attach");
+    }
     fs_init::with(|v| {
-        if v.mkdir(None, "/a", 0o755).is_err() {
-            return Outcome::Fail("mkdir");
+        if v.mount(None, "/ram", &vibeos::fs::RamFs).is_err() {
+            return Outcome::Fail("mount");
         }
-        if v.creat(None, "/a/f", 0o644).is_err() {
-            return Outcome::Fail("creat");
+        if v.creat(None, "/ram/f", 0o644).is_err() {
+            return Outcome::Fail("rf");
         }
-        match v.stat(None, "/a/./f") {
-            Ok(s) if s.kind == InodeKind::Reg => {}
-            _ => return Outcome::Fail("dot walk"),
-        }
-        match v.stat(None, "/a/f/../f") {
-            Ok(s) if s.kind == InodeKind::Reg => {}
-            _ => return Outcome::Fail("dotdot"),
-        }
-        if v.symlink(None, "/a/l", "/a/f").is_err() {
+        if v.symlink(None, "/ram/l", "/ram/f").is_err() {
             return Outcome::Fail("symlink");
         }
-        match v.stat(None, "/a/l") {
+        match v.stat(None, "/ram/l") {
             Ok(s) if s.kind == InodeKind::Reg => {}
             _ => return Outcome::Fail("follow"),
         }
-        if v.symlink(None, "/loop", "/loop").is_err() {
+        if v.symlink(None, "/ram/loop", "/ram/loop").is_err() {
             return Outcome::Fail("loopc");
         }
-        match v.stat(None, "/loop") {
+        match v.stat(None, "/ram/loop") {
             Err(FsError::Loop) => {}
             _ => return Outcome::Fail("noloop"),
         }
-        if v.mkdir(None, "/mnt", 0o755).is_err() {
-            return Outcome::Fail("mnt");
-        }
-        if v.mount(None, "/mnt", &vibeos::fs::RamFs).is_err() {
-            return Outcome::Fail("mount");
-        }
-        if v.creat(None, "/mnt/x", 0o644).is_err() {
-            return Outcome::Fail("mx");
-        }
-        match v.stat(None, "/mnt/..") {
+        match v.stat(None, "/ram/..") {
             Ok(s) if s.kind == InodeKind::Dir => {}
             _ => return Outcome::Fail("cross"),
         }
@@ -3939,4 +3945,62 @@ fn test_pseudo_fs() -> Outcome {
         }
         Outcome::Ok
     })
+}
+
+fn test_fat_initrd() -> Outcome {
+    if !fat_init::live() {
+        return Outcome::Fail("not live");
+    }
+    if fat_init::nvol() == 0 {
+        return Outcome::Fail("nvol");
+    }
+    match file_init::stat_path("/hello.txt") {
+        Ok(s) if s.kind == InodeKind::Reg && s.size > 0 => {}
+        Ok(_) => return Outcome::Fail("hello meta"),
+        Err(_) => match file_init::stat_path("/HELLO.TXT") {
+            Ok(s) if s.kind == InodeKind::Reg && s.size > 0 => {}
+            _ => return Outcome::Fail("hello"),
+        },
+    }
+    if file_init::mkdir("/kt", 0o755).is_err() {
+        return Outcome::Fail("mkdir");
+    }
+    match file_init::open("/kt/w.txt", vibeos::fs::O_RDWR | vibeos::fs::O_CREAT, 0o644) {
+        Ok(fid) => {
+            if file_init::write(fid, b"abc").ok() != Some(3) {
+                let _ = file_init::close(fid);
+                return Outcome::Fail("write");
+            }
+            if file_init::seek(fid, 0, vibeos::fs::SEEK_SET).is_err() {
+                let _ = file_init::close(fid);
+                return Outcome::Fail("seek");
+            }
+            let mut buf = [0u8; 4];
+            match file_init::read(fid, &mut buf) {
+                Ok(3) if &buf[..3] == b"abc" => {}
+                _ => {
+                    let _ = file_init::close(fid);
+                    return Outcome::Fail("read");
+                }
+            }
+            let _ = file_init::close(fid);
+        }
+        Err(_) => return Outcome::Fail("open"),
+    }
+    if file_init::truncate_path("/kt/w.txt", 1).is_err() {
+        return Outcome::Fail("trunc");
+    }
+    if file_init::unlink_path("/kt/w.txt", false).is_err() {
+        return Outcome::Fail("unlink");
+    }
+    if file_init::symlink_path("/s", "/kt").err() != Some(FsError::NotSupp) {
+        return Outcome::Fail("symlink supp");
+    }
+    if file_init::link_path("/hello.txt", "/h2").err() != Some(FsError::NotSupp) {
+        return Outcome::Fail("link supp");
+    }
+    if file_init::sync_fs().is_err() {
+        return Outcome::Fail("sync");
+    }
+    Outcome::Ok
 }

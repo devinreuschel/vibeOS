@@ -303,16 +303,28 @@ kern_ops!(SysFs);
 
 impl Vfs {
     /// Mount the four pseudo filesystems. Call after [`Vfs::mount_root`].
+    /// FAT root cannot mkdir through VFS; those mount points are created
+    /// via the File API and attached first (Exist / already-a-dir is ok).
     pub fn mount_pseudo(&mut self) -> Result<(), FsError> {
-        self.mkdir(None, "/dev", 0o755)?;
-        self.mkdir(None, "/proc", 0o755)?;
-        self.mkdir(None, "/tmp", 0o755)?;
-        self.mkdir(None, "/sys", 0o755)?;
+        self.ensure_mount_dir("/dev")?;
+        self.ensure_mount_dir("/proc")?;
+        self.ensure_mount_dir("/tmp")?;
+        self.ensure_mount_dir("/sys")?;
         self.mount(None, "/dev", &DevFs)?;
         self.mount(None, "/proc", &ProcFs)?;
         self.mount(None, "/tmp", &TmpFs)?;
         self.mount(None, "/sys", &SysFs)?;
         Ok(())
+    }
+
+    fn ensure_mount_dir(&mut self, path: &str) -> Result<(), FsError> {
+        match self.mkdir(None, path, 0o755) {
+            Ok(_) | Err(FsError::Exists) => Ok(()),
+            Err(e) => match self.stat(None, path) {
+                Ok(s) if s.kind == InodeKind::Dir => Ok(()),
+                _ => Err(e),
+            },
+        }
     }
 
     pub fn tmp_cache_stats(&self) -> CacheStats {
@@ -759,6 +771,7 @@ pub(super) fn kern_fill_inode(vfs: &mut Vfs, slot: u16, sb: u8, ino: u32) -> Res
         atime: m.atime,
         mtime: m.mtime,
         ctime: m.ctime,
+        data0: 0,
     };
     Ok(())
 }

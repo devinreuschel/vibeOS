@@ -41,6 +41,7 @@ isodir/
 /iso_root_gp/
 /target-panic/
 /target-gp/
+/initrd.fat
 /tests/hostlib/target/
 /limine
 sysroot/

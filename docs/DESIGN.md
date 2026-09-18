@@ -97,7 +97,8 @@ Target layout. Not all of it exists; the roadmap says when each lands.
 | `src/dev/` | Device model, PCI(e), MSI/MSI-X, DMA, virtio transport |
 | `src/drivers/` | Concrete drivers by class |
 | `src/block/` | Block layer, partitions, request queues, cache |
-| `src/fs/` | VFS, mounts, dentry/inode cache, concrete filesystems |
+| `src/fs/` | VFS, mounts, dentry/inode cache, kernfs/pseudo |
+| `src/fat.rs` | FAT32 parse/alloc (library) |
 | `src/proc/` | Address spaces, processes, ELF loading, fork/exec/wait, signals |
 | `src/syscall/` | Entry point, dispatch table, argument validation |
 | `src/net/` | netdev, ethernet, ARP, IP, ICMP, UDP, TCP, sockets |
@@ -141,7 +142,9 @@ lock: the predicate check and the enqueue happen under that same lock (DESIGN [�
 
 Filesystem (dentry / inode / super / mount) locks are **device-rank**. The tables are static, so
 bring-up does not take RANK_HEAP under them. Do not allocate while holding them; do not hold them
-across serial. A dedicated numbered rank is a Design ACK, not a seventh global lock.
+across serial. A dedicated numbered rank is a Design ACK, not a seventh global lock. Drop the VFS
+lock before blocking block I/O (the FAT File API never holds VFS across FAT or block waits; the
+volume lives in BSS behind a busy flag, not an IRQ-off mutex). Do not nest VFS with the FAT volume.
 
 ## 2.2 Interrupt handler rules
 
@@ -261,7 +264,7 @@ Power-on to `sti`. Limine does the ugly part (real mode, A20, long mode, ELF loa
 | Target | `x86_64-unknown-none-executable.json`, custom spec in the repo root |
 | Build | `cargo build -Z build-std=core,compiler_builtins,alloc --target x86_64-unknown-none-executable.json` |
 | Panic | `abort`, both profiles |
-| Extra host tools | `xorriso`, `nasm` (AP trampoline), `qemu-system-x86_64`, `python3` |
+| Extra host tools | `xorriso`, `nasm` (AP trampoline), `qemu-system-x86_64`, `python3`, `dosfstools` (`fsck.fat`) |
 
 Plain `cargo build` does not produce a usable kernel. Use `make`. `cargo test --lib` is the only cargo
 invocation that runs bare.
@@ -335,7 +338,7 @@ of it.
 | 17 | Framebuffer console, PS/2, mux | `console ok` | After `smp: done`. Install the IRQ1 / keyboard GSI handler, init the 8042, then unmask. Replay the pre-FB log ring onto the framebuffer. |
 | 17b | PCI enum + device registry | `pci: N devices` | After `console ok`. Legacy `0xCF8`/`0xCFC` for bus 0; MCFG → ECAM beyond. Scan builds a device list. Workqueue + threaded IRQ start, then drivers bind by id. Memory BARs are mapped through ioremap or the capped physmap; sizes above 32 MiB are recorded and skipped (DESIGN §4.1). |
 | 17c | Block layer + ramdisk + virtio-blk + partitions | `block: <name> <n> sectors` | After bind. One line per device. virtio-blk (`vda`) emits during probe; ramdisk (`ram0`) follows in `block_init`; partition children (`<parent>p<N>`) after that. |
-| 17d | VFS + ramfs root + pseudo mounts | (none) | After block. Dummy ramfs at `/`, then devfs/procfs/tmpfs/sysfs on `/dev` `/proc` `/tmp` `/sys`. No serial marker (Phase 8A/C). |
+| 17d | VFS + FAT initrd root + pseudo mounts | (none) | After block. Makefile FAT32 initrd at `/` when live, else dummy ramfs. Then devfs/procfs/tmpfs/sysfs on `/dev` `/proc` `/tmp` `/sys`. No serial marker (Phase 8A/B/C). |
 | 18 | Shell thread, builtins | `shell ready` | Last marker. Spawn a kernel thread (not `_start`, not idle, not an ISR), register builtins into the command table, print the prompt. `lspci` / `devices` / `blk` are live. |
 
 Ordering rules worth stating separately because they were learned the hard way:
