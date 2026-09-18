@@ -28,6 +28,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- `irq::free_vector` masks an I/O APIC GSI before clearing the handler
+  and dropping `Route::IoApic`. A still-asserted level line no longer
+  storms empty `dispatch`, and a later allocate of the same vector
+  cannot inherit the old device's IRQs. MSI/MSI-X free is unchanged.
 - Shell `lspci` / `devices` copy one `Device` at a time. A full
   `[Device; 64]` snapshot (and a second `Registry` on `devices`) overflowed
   the 16 KiB shell stack into the guard. RANK_DEVICE is still dropped

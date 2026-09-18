@@ -118,11 +118,20 @@ pub fn free_vector(vec: u8) -> Result<(), IrqError> {
     if in_hard_irq() {
         return Err(IrqError::InIrq);
     }
-    if let Some(i) = handler_slot(vec) {
-        HANDLERS[i].store(0, Ordering::Release);
-        routes()[i] = Route::None;
-    }
-    with_pool(|p| p.free(vec))
+    with_pool(|p| {
+        if let Some(i) = handler_slot(vec) {
+            // Mask IOAPIC before dropping the handler. A still-asserted
+            // level line would storm empty dispatch, and a later allocate
+            // of this vector would inherit the old GSI.
+            match routes()[i] {
+                Route::IoApic { gsi, .. } => apic_init::mask_gsi(gsi),
+                Route::None | Route::Msi | Route::Msix => {}
+            }
+            HANDLERS[i].store(0, Ordering::Release);
+            routes()[i] = Route::None;
+        }
+        p.free(vec)
+    })
 }
 
 pub fn set_handler(vec: u8, h: Handler) -> Result<(), IrqError> {

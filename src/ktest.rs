@@ -137,6 +137,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("irq_pool", test_irq_pool),
     ("msix_cpu", test_msix_cpu),
     ("intx_fallback", test_intx_fallback),
+    ("intx_free_masks", test_intx_free_masks),
     ("dma_alloc", test_dma_alloc),
     ("dma_edu", test_dma_edu),
 ];
@@ -2449,6 +2450,10 @@ fn on_intx() {
     record_irq_cpu();
 }
 
+fn on_intx_no_ack() {
+    record_irq_cpu();
+}
+
 fn bar0_va(dev: &Device) -> Option<u64> {
     let r = dev.resources[0];
     if r.mapped_va != 0 {
@@ -2617,6 +2622,113 @@ fn test_intx_fallback() -> Outcome {
     }
     if IRQ_CPU.load(Ordering::SeqCst) != ap {
         return Outcome::Fail("wrong cpu");
+    }
+    Outcome::Ok
+}
+
+fn edu_intx_teardown(bdf: Bdf, gsi: u32, vec: Option<u8>, mmio: u64) {
+    let st = mmio_r32(mmio, EDU_IRQSTAT);
+    if st != 0 {
+        mmio_w32(mmio, EDU_ACK, st);
+    }
+    apic_init::mask_gsi(gsi);
+    irq_init::mask_intx(bdf, true);
+    if let Some(v) = vec {
+        let _ = irq_init::free_vector(v);
+    }
+    IRQ_MMIO.store(0, Ordering::SeqCst);
+}
+
+fn test_intx_free_masks() -> Outcome {
+    let Some(ap) = second_cpu() else {
+        return Outcome::Skip("no AP");
+    };
+    let Some((_, dev)) = find_edu() else {
+        return Outcome::Skip("no edu");
+    };
+    if dev.irq.pin == 0 {
+        return Outcome::Fail("no pin");
+    }
+    let line = dev.irq.line;
+    if line == 0 || line == 0xFF {
+        return Outcome::Fail("irq line");
+    }
+    let Some(mmio) = bar0_va(&dev) else {
+        return Outcome::Fail("edu bar0");
+    };
+    if mmio_r32(mmio, EDU_IDENT) != EDU_IDENT_VAL {
+        return Outcome::Fail("edu ident");
+    }
+    let vec = match irq_init::allocate_vector(0) {
+        Ok(v) => v,
+        Err(e) => return Outcome::Fail(e.as_str()),
+    };
+    let gsi = line as u32;
+    let fail = |why, live: Option<u8>| {
+        edu_intx_teardown(dev.addr, gsi, live, mmio);
+        Outcome::Fail(why)
+    };
+    if irq_init::set_handler(vec, on_intx_no_ack).is_err() {
+        return fail("handler", Some(vec));
+    }
+    irq_init::mask_intx(dev.addr, false);
+    if irq_init::route_intx(gsi, vec, 0, Trigger::Level, Polarity::Low).is_err() {
+        return fail("route", Some(vec));
+    }
+    if irq_init::set_affinity(vec, ap).is_err() {
+        return fail("affinity", Some(vec));
+    }
+    match apic_init::gsi_masked(gsi) {
+        Some(false) => {}
+        Some(true) => return fail("masked before free", Some(vec)),
+        None => return fail("gsi not on ioapic", Some(vec)),
+    }
+    reset_irq_obs();
+    IRQ_MMIO.store(mmio, Ordering::SeqCst);
+    mmio_w32(mmio, EDU_RAISE, 1);
+    if !spin_until_ns(|| IRQ_HITS.load(Ordering::SeqCst) != 0, 500_000_000) {
+        return fail("no intx", Some(vec));
+    }
+    // Line stays asserted (no ack). Free must mask before dropping the route.
+    if irq_init::free_vector(vec).is_err() {
+        return fail("free", Some(vec));
+    }
+    match apic_init::gsi_masked(gsi) {
+        Some(true) => {}
+        Some(false) => return fail("gsi live after free", None),
+        None => return fail("gsi vanished", None),
+    }
+    let after_free = IRQ_HITS.load(Ordering::SeqCst);
+    time_init::busy_wait_ms(20);
+    if IRQ_HITS.load(Ordering::SeqCst).saturating_sub(after_free) > 8 {
+        return fail("storm after free", None);
+    }
+    let st = mmio_r32(mmio, EDU_IRQSTAT);
+    if st != 0 {
+        mmio_w32(mmio, EDU_ACK, st);
+    }
+    let vec2 = match irq_init::allocate_vector(0) {
+        Ok(v) => v,
+        Err(e) => return fail(e.as_str(), None),
+    };
+    if vec2 != vec {
+        return fail("realloc other vec", Some(vec2));
+    }
+    if irq_init::set_handler(vec2, on_intx).is_err() {
+        return fail("handler2", Some(vec2));
+    }
+    reset_irq_obs();
+    mmio_w32(mmio, EDU_RAISE, 1);
+    if spin_until_ns(|| IRQ_HITS.load(Ordering::SeqCst) != 0, 50_000_000) {
+        return fail("delivery after free", Some(vec2));
+    }
+    if irq_init::route_intx(gsi, vec2, ap, Trigger::Level, Polarity::Low).is_err() {
+        return fail("reroute", Some(vec2));
+    }
+    let fired2 = spin_until_ns(|| IRQ_HITS.load(Ordering::SeqCst) != 0, 500_000_000);
+    edu_intx_teardown(dev.addr, gsi, Some(vec2), mmio);
+    if !fired2 {
+        return Outcome::Fail("no intx after reroute");
     }
     Outcome::Ok
 }

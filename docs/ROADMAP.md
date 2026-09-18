@@ -579,6 +579,7 @@ enumeration and DMA.
 - [x] MSI-X table in a BAR, per-vector address and data, per-vector mask
 - [x] allocate vectors from the dynamic pool, bound to a chosen CPU
 - [x] fall back to legacy INTx through the I/O APIC when a device has neither
+- [x] `free_vector` masks the I/O APIC GSI before dropping an INTx route
 - [x] in-guest test: trigger a device interrupt, assert it arrived on the intended CPU
 - [x] interrupt affinity API, so phase 17 can rebalance without redesign
 
