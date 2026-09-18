@@ -28,6 +28,7 @@ mod arch;
 mod console_init;
 mod dev_init;
 mod diag;
+mod dma_init;
 mod fb_init;
 mod heap_init;
 mod ipi_init;

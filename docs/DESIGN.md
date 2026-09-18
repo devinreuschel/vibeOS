@@ -559,6 +559,16 @@ mind:
 The per-frame metadata array is the pivot. Refcounting, reverse mapping, and page cache all need it,
 so the PMM should be built expecting it to appear.
 
+## 4.7 DMA
+
+`DmaBuffer` is physically contiguous (buddy `allocate_constrained`: size, alignment, optional
+power-of-two boundary including 4 GiB for 32-bit devices). The device-visible address is
+`dma_to_device(phys)` — identity until an IOMMU exists — never the HHDM virtual address.
+
+`sync_for_device` / `sync_for_cpu` always run at the API boundary. On x86 they are `fence(Release)` +
+`sfence` and `fence(Acquire)` + `lfence`. Descriptor publish stores the index after that store-side
+barrier, not a bare `compiler_fence`.
+
 ---
 
 # 5. Interrupts

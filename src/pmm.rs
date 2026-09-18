@@ -216,6 +216,65 @@ impl Buddy {
         unsafe { self.deallocate(phys, 0) }
     }
 
+    /// Order whose block covers `bytes` and is aligned to `align`.
+    pub fn order_for(bytes: u64, align: u64) -> Option<u8> {
+        if bytes == 0 {
+            return None;
+        }
+        let align = if align == 0 { PAGE_SIZE } else { align };
+        if !align.is_power_of_two() {
+            return None;
+        }
+        let need_size = bytes.max(PAGE_SIZE).next_power_of_two();
+        let need_align = align.max(PAGE_SIZE);
+        let need = need_size.max(need_align);
+        let pages = need / PAGE_SIZE;
+        if pages == 0 || (pages & (pages - 1)) != 0 {
+            return None;
+        }
+        let order = pages.trailing_zeros() as u8;
+        if (order as usize) > MAX_ORDER {
+            None
+        } else {
+            Some(order)
+        }
+    }
+
+    /// Allocate a block that does not straddle `boundary` (0 = none).
+    pub fn allocate_constrained(
+        &mut self,
+        bytes: u64,
+        align: u64,
+        boundary: u64,
+    ) -> Option<(PhysAddr, u8)> {
+        let order = Self::order_for(bytes, align)?;
+        if boundary != 0 && !boundary.is_power_of_two() {
+            return None;
+        }
+        const MAX_TRY: usize = 16;
+        let mut stash = [0u64; MAX_TRY];
+        let mut n = 0usize;
+        let mut found = None;
+        while n < MAX_TRY {
+            let Some(phys) = self.allocate(order) else {
+                break;
+            };
+            let ok_align = align <= 1 || phys & (align - 1) == 0;
+            if ok_align && !crosses_boundary(phys, bytes, boundary) {
+                found = Some((phys, order));
+                break;
+            }
+            stash[n] = phys;
+            n += 1;
+        }
+        let mut i = 0usize;
+        while i < n {
+            unsafe { self.deallocate(stash[i], order) };
+            i += 1;
+        }
+        found
+    }
+
     // ------------------ private helpers ------------------
 
     #[inline]
@@ -320,6 +379,15 @@ const fn align_up(x: u64, align: u64) -> u64 {
 #[inline]
 const fn align_down(x: u64, align: u64) -> u64 {
     x & !(align - 1)
+}
+
+/// True if `[phys, phys+size)` straddles a power-of-two `boundary`.
+pub const fn crosses_boundary(phys: u64, size: u64, boundary: u64) -> bool {
+    if boundary == 0 || size == 0 {
+        return false;
+    }
+    let mask = boundary - 1;
+    (phys & mask) + size > boundary
 }
 
 // ------------------ host tests ------------------
@@ -561,5 +629,25 @@ mod tests {
             );
         }
         assert_eq!(buddy.stats().total_frames, 8);
+    }
+
+    #[test]
+    fn constrained_alloc_align_and_boundary() {
+        assert_eq!(Buddy::order_for(1, PAGE_SIZE), Some(0));
+        assert_eq!(Buddy::order_for(0x1800, 0x2000), Some(1));
+        assert!(Buddy::order_for(0, PAGE_SIZE).is_none());
+        assert!(crosses_boundary(0xFFFF_F800, 0x1000, 1u64 << 32));
+        assert!(!crosses_boundary(0x1000, 0x1000, 1u64 << 32));
+        let mut p = Pool::new(64);
+        let (phys, order) = p
+            .buddy
+            .allocate_constrained(0x1000, 0x2000, 1u64 << 32)
+            .unwrap();
+        assert_eq!(order, 1);
+        assert_eq!(phys & 0x1FFF, 0);
+        unsafe { p.buddy.deallocate(phys, order) };
+        // 4K request with a 2K boundary always straddles: refuse.
+        assert!(p.buddy.allocate_constrained(0x1000, PAGE_SIZE, 0x800).is_none());
+        assert_eq!(p.buddy.stats().free_frames, 64);
     }
 }

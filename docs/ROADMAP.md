@@ -554,7 +554,7 @@ enumeration and DMA.
 - [x] `pci: <n> devices` marker and `lspci` output matching QEMU's configuration
 - [x] MSI-X interrupts delivered to a chosen CPU, verified in-guest
 - [ ] a virtio device negotiated through modern PCI capabilities with a working virtqueue
-- [ ] DMA buffers allocated, mapped, and verified for correct device-visible addresses
+- [x] DMA buffers allocated, mapped, and verified for correct device-visible addresses
 - [ ] a driver bound to a device automatically by id match, not by hardcoded probing order
 - [ ] workqueue and threaded IRQ handlers exercised in-guest
 
@@ -583,12 +583,12 @@ enumeration and DMA.
 - [x] interrupt affinity API, so phase 17 can rebalance without redesign
 
 ### 6.4 DMA
-- [ ] `DmaBuffer`: physically contiguous, known device address, explicit coherency
-- [ ] allocation from the buddy allocator with an alignment and boundary constraint
-- [ ] `sync_for_device` and `sync_for_cpu` as explicit calls even when they are no-ops on x86, because aarch64 will need them
-- [ ] scatter-gather list construction for devices that support it
-- [ ] barriers around descriptor publication, using the right fences rather than `compiler_fence` everywhere
-- [ ] IOMMU support deferred but the address translation kept behind an interface so it can be inserted
+- [x] `DmaBuffer`: physically contiguous, known device address, explicit coherency
+- [x] allocation from the buddy allocator with an alignment and boundary constraint
+- [x] `sync_for_device` and `sync_for_cpu` as explicit calls even when they are no-ops on x86, because aarch64 will need them
+- [x] scatter-gather list construction for devices that support it
+- [x] barriers around descriptor publication, using the right fences rather than `compiler_fence` everywhere
+- [x] IOMMU support deferred but the address translation kept behind an interface so it can be inserted
 
 ### 6.5 virtio
 - [ ] modern virtio over PCI: common configuration, notify, ISR, and device-specific capability regions

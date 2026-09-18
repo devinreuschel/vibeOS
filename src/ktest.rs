@@ -12,6 +12,7 @@ use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::apic::{Polarity, TimerMode, Trigger};
+use vibeos::dma::{self, DmaAlloc, DMA32_BOUNDARY};
 use vibeos::irq::{self, IrqError};
 use vibeos::desc::{IstSlot, KERNEL_CS, TSS_SEL};
 use vibeos::dev::{ClaimError, Device, Driver, IdMatch, ProbeError};
@@ -27,6 +28,7 @@ use crate::acpi_init;
 use crate::apic_init;
 use crate::arch;
 use crate::dev_init;
+use crate::dma_init;
 use crate::ipi_init;
 use crate::irq_init;
 use crate::kva_init;
@@ -135,6 +137,8 @@ const TESTS: &[(&str, TestFn)] = &[
     ("irq_pool", test_irq_pool),
     ("msix_cpu", test_msix_cpu),
     ("intx_fallback", test_intx_fallback),
+    ("dma_alloc", test_dma_alloc),
+    ("dma_edu", test_dma_edu),
 ];
 
 pub fn run() -> ! {
@@ -2603,4 +2607,138 @@ fn test_intx_fallback() -> Outcome {
         return Outcome::Fail("wrong cpu");
     }
     Outcome::Ok
+}
+
+fn test_dma_alloc() -> Outcome {
+    let before = free_frames();
+    let Some(buf) = dma_init::alloc(DmaAlloc::dma32(0x1000)) else {
+        return Outcome::Fail("alloc");
+    };
+    if buf.device.as_u64() != buf.phys {
+        dma_init::free(buf);
+        return Outcome::Fail("device != phys");
+    }
+    if buf.virt != paging_init::HHDM_BASE.wrapping_add(buf.phys) {
+        dma_init::free(buf);
+        return Outcome::Fail("virt not hhdm");
+    }
+    if buf.device.as_u64() == buf.virt {
+        dma_init::free(buf);
+        return Outcome::Fail("device is va");
+    }
+    if buf.phys >= DMA32_BOUNDARY || dma::crosses_boundary(buf.phys, buf.len, DMA32_BOUNDARY) {
+        dma_init::free(buf);
+        return Outcome::Fail("dma32");
+    }
+    buf.sync_for_device();
+    unsafe {
+        buf.as_ptr().write_volatile(0xA5);
+    }
+    buf.sync_for_cpu();
+    let sg = match dma::SgList::from_buffer(&buf) {
+        Ok(s) => s,
+        Err(_) => {
+            dma_init::free(buf);
+            return Outcome::Fail("sg");
+        }
+    };
+    if sg.n != 1 || sg.entries[0].addr != buf.device {
+        dma_init::free(buf);
+        return Outcome::Fail("sg entry");
+    }
+    dma_init::free(buf);
+    if dma_init::alloc(DmaAlloc {
+        size: 0x1000,
+        align: 0x1000,
+        boundary: 0x800,
+    })
+    .is_some()
+    {
+        return Outcome::Fail("boundary refuse");
+    }
+    if free_frames() != before {
+        return Outcome::Fail("leak");
+    }
+    Outcome::Ok
+}
+
+const EDU_DMA_SRC: u32 = 0x80;
+const EDU_DMA_DST: u32 = 0x88;
+const EDU_DMA_CNT: u32 = 0x90;
+const EDU_DMA_CMD: u32 = 0x98;
+const EDU_DMA_BUF: u32 = 0x4_0000;
+const EDU_DMA_RUN: u32 = 1;
+const EDU_DMA_TO_PCI: u32 = 2;
+
+fn test_dma_edu() -> Outcome {
+    let Some((_, dev)) = dev_init::find_id(0x1b36, 0x11e8) else {
+        return Outcome::Skip("no edu");
+    };
+    let Some(mmio) = bar0_va(&dev) else {
+        return Outcome::Fail("edu bar0");
+    };
+    if mmio_r32(mmio, EDU_IDENT) != EDU_IDENT_VAL {
+        return Outcome::Fail("edu ident");
+    }
+    pci_init::enable_mem_master(dev.addr);
+    let Some(src) = dma_init::alloc(DmaAlloc::dma32(64)) else {
+        return Outcome::Fail("src");
+    };
+    let Some(dst) = dma_init::alloc(DmaAlloc::dma32(64)) else {
+        dma_init::free(src);
+        return Outcome::Fail("dst");
+    };
+    unsafe {
+        let p = src.as_ptr();
+        let q = dst.as_ptr();
+        let mut i = 0u32;
+        while i < 64 {
+            p.add(i as usize).write_volatile((0xC0 + i) as u8);
+            q.add(i as usize).write_volatile(0);
+            i += 1;
+        }
+    }
+    src.sync_for_device();
+    dst.sync_for_device();
+    mmio_w32(mmio, EDU_DMA_SRC, src.device.as_u64() as u32);
+    mmio_w32(mmio, EDU_DMA_DST, EDU_DMA_BUF);
+    mmio_w32(mmio, EDU_DMA_CNT, 64);
+    dma::dma_wmb();
+    mmio_w32(mmio, EDU_DMA_CMD, EDU_DMA_RUN);
+    if !spin_until_ns(|| mmio_r32(mmio, EDU_DMA_CMD) & EDU_DMA_RUN == 0, 2_000_000_000) {
+        dma_init::free(src);
+        dma_init::free(dst);
+        return Outcome::Fail("dma to edu");
+    }
+    mmio_w32(mmio, EDU_DMA_SRC, EDU_DMA_BUF);
+    mmio_w32(mmio, EDU_DMA_DST, dst.device.as_u64() as u32);
+    mmio_w32(mmio, EDU_DMA_CNT, 64);
+    dma::dma_wmb();
+    mmio_w32(mmio, EDU_DMA_CMD, EDU_DMA_RUN | EDU_DMA_TO_PCI);
+    if !spin_until_ns(|| mmio_r32(mmio, EDU_DMA_CMD) & EDU_DMA_RUN == 0, 2_000_000_000) {
+        dma_init::free(src);
+        dma_init::free(dst);
+        return Outcome::Fail("dma from edu");
+    }
+    dst.sync_for_cpu();
+    let mut bad = false;
+    unsafe {
+        let p = src.as_ptr();
+        let q = dst.as_ptr();
+        let mut i = 0usize;
+        while i < 64 {
+            if p.add(i).read_volatile() != q.add(i).read_volatile() {
+                bad = true;
+                break;
+            }
+            i += 1;
+        }
+    }
+    dma_init::free(src);
+    dma_init::free(dst);
+    if bad {
+        Outcome::Fail("mismatch")
+    } else {
+        Outcome::Ok
+    }
 }

@@ -11,6 +11,7 @@ pub mod apic;
 pub mod console;
 pub mod desc;
 pub mod dev;
+pub mod dma;
 pub mod fb;
 pub mod font;
 pub mod fmt_util;
