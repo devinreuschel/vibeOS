@@ -27,6 +27,8 @@ landed.
 | 9 | [Pitfalls](#9-pitfalls) | Bugs already paid for once |
 | 10 | [Block I/O](#10-block-io) | Requests, barrier vs flush, ramdisk, virtio-blk, partitions, cache |
 
+On-disk filesystem formats live in their own docs, not here ([§1.4](#14-documentation-rules)): [VIBEFS.md](VIBEFS.md) (vibefs **version 1**, CoW metadata + atomic superblock switch).
+
 ---
 
 # 1. Overview
@@ -117,7 +119,8 @@ Target layout. Not all of it exists; the roadmap says when each lands.
 - Constants appear once, here, and are cross-referenced rather than restated. Address map in
   [section 4.1](#41-virtual-address-map), vector numbers in [section 5.3](#53-vector-map).
 - When this file outgrows one page per subsystem, split it into `docs/<topic>.md` and leave an index
-  behind. Not before.
+  behind. Not before. On-disk formats are that split: [VIBEFS.md](VIBEFS.md), not a novel in this
+  file.
 
 ---
 
@@ -1740,7 +1743,10 @@ request submitted after it starts. It does not make writes durable.
 
 `Flush` is a barrier plus a device durable-write. Ramdisk flush is a successful
 no-op (the backing is already memory). A journaling filesystem must issue flush,
-not only barrier, before treating a commit as persistent.
+not only barrier, before treating a commit as persistent. vibefs is not journaled:
+CoW metadata plus atomic superblock switch ([VIBEFS.md](VIBEFS.md) §2 / §10). The
+same flush rule applies: a generation is not durable until `Flush` after the new
+super slot is written.
 
 The elevator will not dispatch seq numbers past an in-queue fence. Adjacent
 read/write/discard requests merge; fences do not, and they split merge runs.

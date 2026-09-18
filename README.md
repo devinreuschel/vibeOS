@@ -33,12 +33,13 @@ written down in `docs/`.
 
 ## Docs
 
-Two files in [`docs/`](docs/). Root stays at a readme and a changelog.
+Docs live in [`docs/`](docs/). Root stays at a readme and a changelog.
 
 - [DESIGN.md](docs/DESIGN.md): invariants, boot order, address map, interrupts, time, SMP, testing, and
   a list of bugs already paid for once. Decisions, not narration.
 - [ROADMAP.md](docs/ROADMAP.md): 21 phases from boot to self-hosting, each with a goal, an exit gate,
   and per-part task lists.
+- [VIBEFS.md](docs/VIBEFS.md): vibefs on-disk format (version field in that file). Not DESIGN.
 
 Read [section 9](docs/DESIGN.md#9-pitfalls) before touching boot, paging, interrupts, or AP bring-up.
 
