@@ -110,6 +110,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("log_boot_captured", test_log_boot_captured),
     ("log_runtime_filter", test_log_runtime_filter),
     ("log_emit_roundtrip", test_log_emit_roundtrip),
+    ("log_dmesg_no_recapture", test_log_dmesg_no_recapture),
 ];
 
 pub fn run() -> ! {
@@ -1989,4 +1990,16 @@ fn test_log_emit_roundtrip() -> Outcome {
     } else {
         Outcome::Fail("info record missing")
     }
+}
+
+fn test_log_dmesg_no_recapture() -> Outcome {
+    let n = crate::log_init::ring_len();
+    crate::log_init::dmesg(Some(vibeos::log::Level::Info));
+    if crate::log_init::ring_len() != n {
+        return Outcome::Fail("dmesg recaptured into ring");
+    }
+    if crate::log_init::contains_msg("vibeOS: dmesg:") {
+        return Outcome::Fail("dmesg line stored");
+    }
+    Outcome::Ok
 }

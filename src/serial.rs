@@ -5,14 +5,14 @@
 //! so SMP CPUs do not interleave bytes (DESIGN §7.7). Panic/halt skips
 //! the lock so a holder cannot stall the dump. `log!` uses try-lock + drop.
 
-use core::fmt;
+use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use vibeos::lock::RANK_SERIAL;
 use vibeos::uart::*;
 
 use crate::sync_init::SpinMutex;
-use crate::x86;
+use crate::x86::{self, InterruptGuard};
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static TX: SpinMutex<()> = SpinMutex::with_rank((), RANK_SERIAL);
@@ -60,9 +60,16 @@ impl Serial {
     }
 
     pub fn write_bytes(bytes: &[u8]) {
+        let _irq = InterruptGuard::enter();
         if !crate::ipi_init::is_halting() && !crate::log_init::is_emitting() {
             crate::log_init::capture_serial(bytes);
         }
+        Self::write_bytes_plain(bytes);
+    }
+
+    /// TX without ring capture. `dmesg` uses this so a dump cannot wrap
+    /// the ring in copies of itself.
+    pub fn write_bytes_plain(bytes: &[u8]) {
         if crate::ipi_init::is_halting() {
             Self::write_bytes_raw(bytes);
             return;
@@ -90,12 +97,33 @@ impl fmt::Write for Serial {
         Self::write_bytes(s.as_bytes());
         Ok(())
     }
+
+    fn write_fmt(&mut self, args: fmt::Arguments<'_>) -> fmt::Result {
+        // One IRQ-off region for the whole formatted write so per-CPU
+        // capture stage cannot mix with a preempting thread (or ISR).
+        let _irq = InterruptGuard::enter();
+        fmt::write(self, args)
+    }
+}
+
+/// Serial TX that does not land in the log ring.
+pub struct PlainSerial;
+
+impl fmt::Write for PlainSerial {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        Serial::write_bytes_plain(s.as_bytes());
+        Ok(())
+    }
+
+    fn write_fmt(&mut self, args: fmt::Arguments<'_>) -> fmt::Result {
+        let _irq = InterruptGuard::enter();
+        fmt::write(self, args)
+    }
 }
 
 /// Write a marker line: `<msg>\n`. Captured into the log ring.
 pub fn line(msg: &str) {
-    Serial::write_bytes(msg.as_bytes());
-    Serial::write_bytes(b"\n");
+    let _ = writeln!(Serial, "{msg}");
 }
 
 #[macro_export]
@@ -108,9 +136,12 @@ macro_rules! print {
 
 #[macro_export]
 macro_rules! println {
-    () => { $crate::print!("\n") };
+    () => {{
+        use core::fmt::Write;
+        let _ = writeln!($crate::serial::Serial);
+    }};
     ($($arg:tt)*) => {{
-        $crate::print!($($arg)*);
-        $crate::print!("\n");
+        use core::fmt::Write;
+        let _ = writeln!($crate::serial::Serial, $($arg)*);
     }};
 }

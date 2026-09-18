@@ -15,7 +15,7 @@ use vibeos::log::{
 };
 
 use crate::per_cpu_init;
-use crate::serial::Serial;
+use crate::serial::{PlainSerial, Serial};
 use crate::time_init;
 use crate::x86::InterruptGuard;
 
@@ -129,10 +129,13 @@ fn push_record(level: Level, msg: &[u8]) -> bool {
 }
 
 /// `klog!` / formatted emit. Serial is try-lock + drop (DESIGN §5.5).
+/// IRQ-off for the whole emit so `EMITTING` / try-write cannot race a
+/// preempting thread on this CPU.
 pub fn log_fmt(level: Level, args: fmt::Arguments<'_>) {
     if !allowed(level, runtime(), COMPILE_MAX) {
         return;
     }
+    let _irq = InterruptGuard::enter();
     let i = cpu_index();
     if EMITTING[i]
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -175,7 +178,8 @@ impl fmt::Write for StackBuf<'_> {
 }
 
 /// Assemble COM1 bytes into records so boot `writeln!(Serial)` is captured
-/// before a framebuffer exists.
+/// before a framebuffer exists. Caller holds IRQs off (`Serial::write_bytes`
+/// / `write_fmt`); `STAGE` is CPU-local and must not outlive that.
 pub fn capture_serial(bytes: &[u8]) {
     if crate::ipi_init::is_halting() || is_emitting() {
         return;
@@ -245,7 +249,7 @@ pub fn dmesg(view: Option<Level>) {
         }
         let unit = if time_init::tsc_per_ms() != 0 { "ms" } else { "tsc" };
         let _ = writeln!(
-            Serial,
+            PlainSerial,
             "vibeOS: dmesg: {}{} cpu{} {} {}",
             r.timestamp,
             unit,

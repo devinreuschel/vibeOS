@@ -197,9 +197,11 @@ halt IPI without taking its TAS (force-unlock if the panicking CPU held it).
 Log ring (ROADMAP §5.5): 256 records × 96-byte messages. Wrap **drops oldest**. Compile-time max is
 `trace` (debug) / `debug` (release); runtime filter is `AtomicU8`, default `info`. Panic dump prints
 the last 16. The ring TAS is IRQ-off and is not in the ranked lock order; never hold it across serial
-TX. Two-pass `nm` fills an in-image `.rodata` symbol table so `.text` stays put; the target JSON
-keeps `frame-pointer: always`. Overflow, filter, and lookup are host-tested. Printer thread parked
-(Design ACK): global IRQ-safe ring + serial try-lock sink.
+TX. `klog!` and `Serial` formatted writes keep IF off for the whole emit so the per-CPU capture
+stage cannot mix with a preempting thread. `dmesg` prints through a plain serial path that does not
+re-capture. Two-pass `nm` fills an in-image `.rodata` symbol table so `.text` stays put; the target
+JSON keeps `frame-pointer: always`. Overflow, filter, and lookup are host-tested. Printer thread
+parked (Design ACK): global IRQ-safe ring + serial try-lock sink.
 
 Exceptions split into two groups. Recoverable ones (`#BP`, and `#PF` once demand paging exists) log
 and continue. Everything else dumps and halts through the same order as `#[panic_handler]`. Nothing

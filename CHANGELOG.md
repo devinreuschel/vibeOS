@@ -87,6 +87,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Kernel log: `klog!` and serial formatted writes keep IF off for the
+  whole emit so per-CPU capture/`EMITTING` cannot race a preempting
+  thread. `dmesg` uses a plain serial path and does not recapture into
+  the ring.
 - Shootdown and call-function publish→wait→clear run under
   `InterruptGuard` so a tick cannot reuse `SHOOT[me]` or the global CALL
   slot mid-ack. `wait_acks` panics if IF is on.
