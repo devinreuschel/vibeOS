@@ -128,6 +128,7 @@ fn wait_acks(waiters: u64, acked: &AtomicU64) {
     if waiters == 0 {
         return;
     }
+    assert!(!x86::interrupts_enabled(), "ipi: ack wait with IF on");
     let k = time_init::tsc_per_ms();
     let start = time_init::read_tsc();
     let cap = if k == 0 {
@@ -250,14 +251,17 @@ pub fn is_halting() -> bool {
     HALTING.load(Ordering::Acquire)
 }
 
-/// Run `f(arg)` on every online CPU in `mask` except self. `wait` blocks
-/// until every target has run it. Services inbound while waiting.
+/// Run `f(arg)` on every online CPU in `mask` except self. Always waits
+/// to reclaim the single CALL slot (`wait` is the public completion
+/// contract). IRQ-off for publish → IPI → ack → clear; inbound still
+/// polls `service_incoming`.
 pub fn call_mask(mask: u64, f: fn(*mut ()), arg: *mut (), wait: bool) {
     let me = my_index() as u32;
     let waiters = waiter_mask(mask & per_cpu_init::online_mask(), me);
     if waiters == 0 {
         return;
     }
+    let _irq = x86::InterruptGuard::enter();
     while CALL_BUSY
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
@@ -277,8 +281,6 @@ pub fn call_mask(mask: u64, f: fn(*mut ()), arg: *mut (), wait: bool) {
         }
         c += 1;
     }
-    // Always wait to reclaim the slot. `wait` is the public completion
-    // contract; fire-and-forget still cannot reuse CALL until acked.
     wait_acks(waiters, &CALL.acked);
     let _ = wait;
     CALL.waiters.store(0, Ordering::Release);
