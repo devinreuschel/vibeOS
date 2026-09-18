@@ -28,9 +28,11 @@ mod arch;
 mod console_init;
 mod dev_init;
 mod diag;
+mod dma_init;
 mod fb_init;
 mod heap_init;
 mod ipi_init;
+mod irq_init;
 mod kbd_init;
 mod kva_init;
 mod log_init;
@@ -261,6 +263,7 @@ fn normal_boot_tail() {
     // UC already done. Enable LAPIC, program IOAPIC masked, then sti and
     // prove the timer before masking PIC (DESIGN §5.5 double-delivery).
     unsafe { apic_init::init() };
+    crate::irq_init::init();
     x86::sti();
     apic_init::prove();
     time_init::busy_wait_ms(20);

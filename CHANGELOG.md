@@ -7,8 +7,31 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Phase 6 slice B: MSI/MSI-X and DMA. Device IRQs allocate from the
+  `0x30..=0x7F` pool (`0x30` stays keyboard) bound to a chosen CPU.
+  Drivers call `irq::allocate_vector` + `set_handler`; they do not pick
+  IDT slots. Allocate is refused in a hard-IRQ (dispatcher `IN_ISR`,
+  not `InterruptGuard` nest). MSI message address is
+  `0xFEE00000 | (apic_id << 12)`; MSI-X table entries live in a BAR.
+  COMMAND.INTX# is set when MSI/MSI-X is armed. INTx fallback routes
+  the GSI through the I/O APIC (level, active low). `set_affinity`
+  records dest CPU and rewrites IOAPIC routes; MSI callers reprogram
+  the message. In-guest: e1000e MSI-X and edu INTx arrive on a chosen
+  AP (ktest adds those devices; e2e stays `pci: 6 devices`).
+  `DmaBuffer` is physically contiguous from the buddy with alignment
+  and boundary (including 4 GiB / DMA32). Device address is
+  `dma_to_device(phys)` (identity; never HHDM VA).
+  `sync_for_device` / `sync_for_cpu` always run (`sfence`/`lfence` on
+  x86). SG lists and Release+sfence descriptor publish. IOMMU later.
+
 ### Fixed
 
+- `irq::free_vector` masks an I/O APIC GSI before clearing the handler
+  and dropping `Route::IoApic`. A still-asserted level line no longer
+  storms empty `dispatch`, and a later allocate of the same vector
+  cannot inherit the old device's IRQs. MSI/MSI-X free is unchanged.
 - Shell `lspci` / `devices` copy one `Device` at a time. A full
   `[Device; 64]` snapshot (and a second `Registry` on `devices`) overflowed
   the 16 KiB shell stack into the guard. RANK_DEVICE is still dropped

@@ -71,6 +71,8 @@ pub const CFG_SEC_BUS: u16 = 0x19;
 pub const CMD_IO: u16 = 1 << 0;
 pub const CMD_MEM: u16 = 1 << 1;
 pub const CMD_MASTER: u16 = 1 << 2;
+/// Mask INTx when MSI/MSI-X is armed (PCI 3.0).
+pub const CMD_INTX_DISABLE: u16 = 1 << 10;
 
 pub const STATUS_CAPS: u16 = 1 << 4;
 
@@ -531,6 +533,118 @@ pub fn enable_mem_master(cmd: u16) -> u16 {
     cmd | CMD_MEM | CMD_MASTER
 }
 
+pub fn with_intx_disabled(cmd: u16) -> u16 {
+    cmd | CMD_INTX_DISABLE
+}
+
+pub const MSI_CTL_ENABLE: u16 = 1 << 0;
+pub const MSI_CTL_64BIT: u16 = 1 << 7;
+pub const MSIX_CTL_TABLE_SIZE: u16 = 0x07FF;
+pub const MSIX_CTL_MASKALL: u16 = 1 << 14;
+pub const MSIX_CTL_ENABLE: u16 = 1 << 15;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MsiCap {
+    pub cap: u8,
+    pub control: u16,
+    pub is_64: bool,
+    pub addr_off: u16,
+    pub data_off: u16,
+}
+
+impl MsiCap {
+    pub fn parse(cap: u8, control: u16) -> Self {
+        let is_64 = control & MSI_CTL_64BIT != 0;
+        Self {
+            cap,
+            control,
+            is_64,
+            addr_off: cap as u16 + 4,
+            data_off: cap as u16 + if is_64 { 12 } else { 8 },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MsixCap {
+    pub cap: u8,
+    pub table_size: u16,
+    pub table_bir: u8,
+    pub table_off: u32,
+    pub pba_bir: u8,
+    pub pba_off: u32,
+    pub enable: bool,
+    pub func_mask: bool,
+}
+
+impl MsixCap {
+    pub fn parse(cap: u8, control: u16, table: u32, pba: u32) -> Self {
+        Self {
+            cap,
+            table_size: (control & MSIX_CTL_TABLE_SIZE) + 1,
+            table_bir: (table & 7) as u8,
+            table_off: table & !7,
+            pba_bir: (pba & 7) as u8,
+            pba_off: pba & !7,
+            enable: control & MSIX_CTL_ENABLE != 0,
+            func_mask: control & MSIX_CTL_MASKALL != 0,
+        }
+    }
+}
+
+pub fn read_msi_cap<C: CfgIo>(cfg: &mut C, bdf: Bdf, cap: u8) -> MsiCap {
+    let control = read16(cfg, bdf, cap as u16 + 2);
+    MsiCap::parse(cap, control)
+}
+
+pub fn write_msi_message<C: CfgIo>(cfg: &mut C, bdf: Bdf, msi: MsiCap, addr: u32, data: u16) {
+    cfg.write32(bdf, msi.addr_off, addr);
+    if msi.is_64 {
+        cfg.write32(bdf, msi.addr_off + 4, 0);
+    }
+    write16(cfg, bdf, msi.data_off, data);
+}
+
+pub fn set_msi_enable<C: CfgIo>(cfg: &mut C, bdf: Bdf, cap: u8, enable: bool) {
+    let off = cap as u16 + 2;
+    let mut ctl = read16(cfg, bdf, off);
+    if enable {
+        ctl |= MSI_CTL_ENABLE;
+    } else {
+        ctl &= !MSI_CTL_ENABLE;
+    }
+    write16(cfg, bdf, off, ctl);
+}
+
+pub fn read_msix_cap<C: CfgIo>(cfg: &mut C, bdf: Bdf, cap: u8) -> MsixCap {
+    let control = read16(cfg, bdf, cap as u16 + 2);
+    let table = cfg.read32(bdf, cap as u16 + 4);
+    let pba = cfg.read32(bdf, cap as u16 + 8);
+    MsixCap::parse(cap, control, table, pba)
+}
+
+pub fn set_msix_enable<C: CfgIo>(
+    cfg: &mut C,
+    bdf: Bdf,
+    cap: u8,
+    enable: bool,
+    func_mask: bool,
+) {
+    let off = cap as u16 + 2;
+    let mut ctl = read16(cfg, bdf, off);
+    if enable {
+        ctl |= MSIX_CTL_ENABLE;
+    } else {
+        ctl &= !MSIX_CTL_ENABLE;
+    }
+    if func_mask {
+        ctl |= MSIX_CTL_MASKALL;
+    } else {
+        ctl &= !MSIX_CTL_MASKALL;
+    }
+    write16(cfg, bdf, off, ctl);
+}
+
 /// Class/subclass one-liner for `lspci`. Unknown stays `device`.
 pub fn class_name(class: u8, subclass: u8) -> &'static str {
     match (class, subclass) {
@@ -566,11 +680,13 @@ pub fn friendly_name(vendor: u16, device: u16) -> Option<&'static str> {
         (0x8086, 0x2922) => Some("ICH9 SATA"),
         (0x8086, 0x2930) => Some("ICH9 SMBus"),
         (0x1234, 0x1111) => Some("bochs"),
+        (0x1234, 0x11e8) => Some("edu"),
         (0x1af4, 0x1000) => Some("virtio-net"),
         (0x1af4, 0x1001) => Some("virtio-blk"),
         (0x1af4, 0x1041) => Some("virtio-net"),
         (0x1af4, 0x1042) => Some("virtio-blk"),
         (0x1af4, 0x1050) => Some("virtio-gpu"),
+        (0x1b36, 0x11e8) => Some("edu"),
         _ => None,
     }
 }
@@ -921,6 +1037,50 @@ mod tests {
     }
 
     #[test]
+    fn msi_and_msix_cap_program() {
+        let mut f = Fake::new();
+        let b = Bdf::new(0, 3, 0);
+        f.device(b, 0x8086, 0x100e, 0x02, 0x00);
+        f.put16(b, CFG_STATUS, STATUS_CAPS);
+        f.put8(b, CFG_CAP_PTR, 0x50);
+        f.put8(b, 0x50, CAP_MSI);
+        f.put8(b, 0x51, 0x60);
+        f.put16(b, 0x52, MSI_CTL_64BIT);
+        f.put8(b, 0x60, CAP_MSIX);
+        f.put8(b, 0x61, 0);
+        // 5 vectors, table BIR 3 off 0, PBA BIR 3 off 0x2000
+        f.put16(b, 0x62, 4);
+        f.put32(b, 0x64, 3);
+        f.put32(b, 0x68, 0x2000 | 3);
+
+        let msi = read_msi_cap(&mut f, b, 0x50);
+        assert!(msi.is_64);
+        assert_eq!(msi.data_off, 0x5C);
+        write_msi_message(&mut f, b, msi, 0xFEE0_1000, 0x40);
+        set_msi_enable(&mut f, b, 0x50, true);
+        assert_eq!(f.read32(b, 0x54), 0xFEE0_1000);
+        assert_eq!(f.read32(b, 0x58), 0);
+        assert_eq!(read16(&mut f, b, 0x5C), 0x40);
+        assert_ne!(read16(&mut f, b, 0x52) & MSI_CTL_ENABLE, 0);
+
+        let msix = read_msix_cap(&mut f, b, 0x60);
+        assert_eq!(msix.table_size, 5);
+        assert_eq!(msix.table_bir, 3);
+        assert_eq!(msix.table_off, 0);
+        assert_eq!(msix.pba_off, 0x2000);
+        set_msix_enable(&mut f, b, 0x60, true, false);
+        let ctl = read16(&mut f, b, 0x62);
+        assert_ne!(ctl & MSIX_CTL_ENABLE, 0);
+        assert_eq!(ctl & MSIX_CTL_MASKALL, 0);
+        assert_eq!(with_intx_disabled(0), CMD_INTX_DISABLE);
+        let parsed = MsixCap::parse(0xA0, 4 | MSIX_CTL_ENABLE, 0x1000 | 2, 0x2000);
+        assert_eq!(parsed.table_bir, 2);
+        assert_eq!(parsed.table_off, 0x1000);
+        assert!(parsed.enable);
+        assert_eq!(MsiCap::parse(0x50, 0).data_off, 0x58);
+    }
+
+    #[test]
     fn enumerate_follows_bridge() {
         let mut f = Fake::new();
         let host = Bdf::new(0, 0, 0);
@@ -992,6 +1152,8 @@ mod tests {
         assert_eq!(friendly_name(0x8086, 0x1237), Some("440FX"));
         assert_eq!(friendly_name(0x1234, 0x1111), Some("bochs"));
         assert_eq!(friendly_name(0x8086, 0x100e), Some("e1000"));
+        assert_eq!(friendly_name(0x1b36, 0x11e8), Some("edu"));
+        assert_eq!(friendly_name(0x1234, 0x11e8), Some("edu"));
         assert_eq!(friendly_name(0x0000, 0x0000), None);
         let mut info = FuncInfo::empty();
         info.bdf = Bdf::new(0, 2, 0);

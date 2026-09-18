@@ -31,6 +31,9 @@ pub mod heap;
 #[path = "../../../src/ipi.rs"]
 pub mod ipi;
 
+#[path = "../../../src/irq.rs"]
+pub mod irq;
+
 #[path = "../../../src/kbd.rs"]
 pub mod kbd;
 
@@ -72,6 +75,9 @@ pub mod desc;
 
 #[path = "../../../src/dev.rs"]
 pub mod dev;
+
+#[path = "../../../src/dma.rs"]
+pub mod dma;
 
 #[path = "../../../src/pic.rs"]
 pub mod pic;

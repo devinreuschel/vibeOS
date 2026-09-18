@@ -559,6 +559,16 @@ mind:
 The per-frame metadata array is the pivot. Refcounting, reverse mapping, and page cache all need it,
 so the PMM should be built expecting it to appear.
 
+## 4.7 DMA
+
+`DmaBuffer` is physically contiguous (buddy `allocate_constrained`: size, alignment, optional
+power-of-two boundary including 4 GiB for 32-bit devices). The device-visible address is
+`dma_to_device(phys)` — identity until an IOMMU exists — never the HHDM virtual address.
+
+`sync_for_device` / `sync_for_cpu` always run at the API boundary. On x86 they are `fence(Release)` +
+`sfence` and `fence(Acquire)` + `lfence`. Descriptor publish stores the index after that store-side
+barrier, not a bare `compiler_fence`.
+
 ---
 
 # 5. Interrupts
@@ -647,16 +657,35 @@ equal. That test costs nothing and catches the copy-paste that assigns two subsy
 Drivers do not write to the IDT. They ask for a vector:
 
 ```rust
-let vec = irq::allocate_vector()?;            // from the 0x30..=0x7F pool
+let vec = irq::allocate_vector(cpu)?;     // from the 0x30..=0x7F pool
 irq::set_handler(vec, my_handler);
-ioapic::route_gsi(gsi, vec, cpu, TriggerMode::Edge, Polarity::High);
 ```
 
-The vector allocator tracks which cpu a vector was bound on, so MSI-X queues can be spread across CPUs
-later without a redesign.
+The kernel binary exposes this as `irq_init::allocate_vector`. Allocate is refused
+inside a hard-IRQ (a per-CPU `IN_ISR` flag set by the dispatcher). That flag is not
+`InterruptGuard` nest: in-guest tests hold a guard on the BSP, so a nest check would
+false-refuse every allocate from `ktest`.
 
-EOI is the dispatcher's job, not the driver's. The dispatch layer knows whether a vector arrived via
-PIC or LAPIC and signals the right controller.
+The allocator records the dest CPU. `set_affinity` updates that binding. I/O APIC
+routes are rewritten immediately; MSI/MSI-X callers reprogram the message from
+`cpu_of`. Phase 17 rebalance uses this table rather than a second map.
+
+MSI message address is `0xFEE0_0000 | (apic_id << 12)` (physical dest, RH=0). Data is
+the vector (fixed, edge). MSI-X table entries live in a BAR (BIR + offset from the
+capability). The dispatcher writes mask, then addr/data, then the caller's mask bit,
+sets COMMAND.INTX# disable, and enables MSI-X. Leaving INTx unmasked while MSI-X is
+armed duplicates IRQs.
+
+INTx remains the fallback when a function has neither MSI nor MSI-X: route the GSI
+through the I/O APIC (PCI is level, active low). Keyboard keeps hardcoded vector
+`0x30`; the pool starts handing out `0x31`. `free_vector` masks that GSI before it
+clears the handler and forgets a `Route::IoApic` record. MSI and MSI-X are
+message-based and do not need an I/O APIC mask on free. Clearing first would let a
+still-asserted level line storm empty `dispatch` calls, and a later
+`allocate_vector` could take IRQs from the old device.
+
+EOI is the dispatcher's job, not the driver's. The dispatch layer knows whether a
+vector arrived via PIC or LAPIC and signals the right controller.
 
 ## 5.5 8259 PIC
 
@@ -737,12 +766,12 @@ not "fix" this by inheriting the outgoing nest onto the incoming thread.
 
 ## 5.9 Later
 
-- MSI and MSI-X, which skip the I/O APIC entirely and let a device write a vector directly. Needed for
-  any PCIe device with multiple queues.
 - x2APIC, for more than 255 CPUs and MSR-based register access instead of MMIO.
-- Interrupt affinity and rebalancing, so a saturated NIC does not pin one core.
-- Threaded interrupt handlers: the top half acknowledges, a kernel thread does the work. Required once
-  a driver needs to allocate or block.
+- Interrupt affinity *rebalancing* (Phase 17). The dest-CPU table and `set_affinity`
+  already exist; what is left is a policy that moves MSI-X messages and IOAPIC
+  dests when a queue saturates one core.
+- Threaded interrupt handlers: the top half acknowledges, a kernel thread does the
+  work. Required once a driver needs to allocate or block (Phase 6 slice C).
 
 ---
 
@@ -1304,7 +1333,7 @@ in the test harness produces either false confidence or a debugging session in t
 |---------|-------|
 | `make run` | `-cdrom myos.iso -m 128M -smp 2 -cpu max -serial stdio -accel tcg` |
 | e2e | as above plus `-display none -no-reboot -monitor unix:...,server=on,wait=off` |
-| ktest | as e2e plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04` |
+| ktest | as e2e plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04`, `-device e1000e`, `-device edu`. Extra NICs/edu are ktest-only; e2e stays the default `pc` set (`pci: 6 devices`). |
 | LAPIC fallback | `-cpu qemu64,-tsc-deadline` |
 | SMP stress | `-smp 4` |
 | Interrupt debugging | `-d int,cpu_reset`, plus `-machine q35` when chipset behavior matters |
