@@ -77,6 +77,11 @@ pub const CONSOLE_OK: &str = "vibeOS: console ok";
 pub const PCI_PREFIX: &str = "vibeOS: pci: ";
 pub const PCI_DEVICES_SUFFIX: &str = " devices";
 
+/// Phase 7 slice A. Runtime name + sector count. After `pci: N devices`,
+/// before `shell ready`. ROADMAP §7.1 / DESIGN §8.3.
+pub const BLOCK_PREFIX: &str = "vibeOS: block: ";
+pub const BLOCK_SECTORS_SUFFIX: &str = " sectors";
+
 /// Phase 5 slice C. Last boot marker. Shell thread is running, builtins
 /// registered, prompt live. Always after `smp: done` and `console ok`.
 pub const SHELL_READY: &str = "vibeOS: shell ready";

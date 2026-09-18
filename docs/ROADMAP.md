@@ -623,12 +623,12 @@ enumeration and DMA.
 - [ ] host tests: partition table parsing including deliberately corrupt tables, request merging, cache eviction
 
 ### 7.1 Block layer
-- [ ] `BlockDevice` trait: logical block size, capacity, read, write, flush, discard
-- [ ] a request structure with a completion, supporting both blocking and async submission
-- [ ] per-device request queue with adjacent-request merging and a simple elevator
-- [ ] barrier and flush semantics defined, since a journaling filesystem depends on them
-- [ ] a ramdisk implementation first, so the layer is testable before any real driver
-- [ ] error propagation with retry, and a device marked failed rather than retried forever
+- [x] `BlockDevice` trait: logical block size, capacity, read, write, flush, discard
+- [x] a request structure with a completion, supporting both blocking and async submission
+- [x] per-device request queue with adjacent-request merging and a simple elevator
+- [x] barrier and flush semantics defined, since a journaling filesystem depends on them
+- [x] a ramdisk implementation first, so the layer is testable before any real driver
+- [x] error propagation with retry, and a device marked failed rather than retried forever
 
 ### 7.2 virtio-blk
 - [ ] probe and configuration read: capacity, block size, topology
