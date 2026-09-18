@@ -481,8 +481,10 @@ pub fn stat_path(path: &str) -> Result<Stat, FsError> {
 
 pub fn mkdir_one(path: &str) -> Result<(), FsError> {
     let (vol, dir, name, nlen) = vol_parent(path)?;
-    fat_init::create(vol, dir.clu, &name[..nlen as usize], true)?;
-    Ok(())
+    match fat_init::create(vol, dir.clu, &name[..nlen as usize], true) {
+        Ok(_) | Err(FsError::Exists) => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 pub fn mkdir_p(path: &str) -> Result<(), FsError> {
@@ -528,7 +530,13 @@ pub fn vfs_attach(path: &str) -> Result<PathRef, FsError> {
             let s = core::str::from_utf8(parent).map_err(|_| FsError::Inval)?;
             v.resolve(None, s, true)?
         };
-        let islot = v.fat_iget(0, node.ino, node.kind, node.size as u64, node.clu)?;
+        let islot = v.fat_iget(
+            v.sb_of_path(pdir)?,
+            node.ino,
+            node.kind,
+            node.size as u64,
+            node.clu,
+        )?;
         match v.fat_dcache(pdir, name, islot) {
             Ok(p) => Ok(p),
             Err(e) => {

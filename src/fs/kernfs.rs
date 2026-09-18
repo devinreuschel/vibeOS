@@ -319,11 +319,42 @@ impl Vfs {
 
     fn ensure_mount_dir(&mut self, path: &str) -> Result<(), FsError> {
         match self.mkdir(None, path, 0o755) {
-            Ok(_) | Err(FsError::Exists) => Ok(()),
-            Err(e) => match self.stat(None, path) {
-                Ok(s) if s.kind == InodeKind::Dir => Ok(()),
-                _ => Err(e),
-            },
+            Ok(_) | Err(FsError::Exists) => return Ok(()),
+            Err(_) => {}
+        }
+        match self.resolve(None, path, true) {
+            Ok(p) => {
+                let islot = self.d_islot(p.dslot)?;
+                if self.inodes[islot as usize].kind == InodeKind::Dir {
+                    return Ok(());
+                }
+                return Err(FsError::NotDir);
+            }
+            Err(_) => {}
+        }
+        // FAT has no VFS mkdir. Plant a dir dentry so `mount` can cover it.
+        let (parent, name) = super::split_basename(path.as_bytes())?;
+        if super::name_is_dot(name) || super::name_is_dotdot(name) {
+            return Err(FsError::Inval);
+        }
+        let dir = self.walk(None, parent, true)?;
+        let sb = self.sb_of(dir.mount);
+        let mut ino = 0x8000_0000u32;
+        let mut i = 0usize;
+        while i < name.len() {
+            ino = ino.wrapping_mul(33).wrapping_add(name[i] as u32);
+            i += 1;
+        }
+        let islot = self.fat_iget(sb, ino, InodeKind::Dir, 0, 0)?;
+        match self.fat_dcache(dir, name, islot) {
+            Ok(p) => {
+                self.dentries[p.dslot as usize].pinned = true;
+                Ok(())
+            }
+            Err(e) => {
+                self.release_inode(islot);
+                Err(e)
+            }
         }
     }
 
@@ -1438,6 +1469,24 @@ mod tests {
         v.mount_root().unwrap();
         v.mount_pseudo().unwrap();
         v
+    }
+
+    #[test]
+    fn mount_pseudo_on_fat_root() {
+        let mut v = Vfs::new();
+        v.mount_root_fs(&crate::fs::FatFs {
+            root_clu: 2,
+            vol: 0,
+        })
+        .unwrap();
+        v.mount_pseudo().unwrap();
+        assert_eq!(v.stat(None, "/dev").unwrap().kind, InodeKind::Dir);
+        assert_eq!(v.stat(None, "/proc").unwrap().kind, InodeKind::Dir);
+        assert_eq!(v.stat(None, "/tmp").unwrap().kind, InodeKind::Dir);
+        assert_eq!(v.stat(None, "/sys").unwrap().kind, InodeKind::Dir);
+        let fid = v.open(None, "/dev/null", O_RDWR, 0).unwrap();
+        assert_eq!(v.write(fid, b"x").unwrap(), 1);
+        v.close(fid).unwrap();
     }
 
     fn readdir_names(v: &mut Vfs, path: &str, out: &mut [[u8; 16]; 32]) -> usize {

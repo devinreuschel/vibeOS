@@ -1139,6 +1139,13 @@ impl Vfs {
         Ok(self.fstype(self.sb_of(p.mount)))
     }
 
+    pub fn sb_of_path(&self, p: PathRef) -> Result<u8, FsError> {
+        if (p.mount as usize) >= MAX_MOUNTS || !self.mounts[p.mount as usize].used {
+            return Err(FsError::Io);
+        }
+        Ok(self.sb_of(p.mount))
+    }
+
     pub fn fat_vol_of(&self, p: PathRef) -> Result<u8, FsError> {
         if (p.mount as usize) >= MAX_MOUNTS || !self.mounts[p.mount as usize].used {
             return Err(FsError::Io);
@@ -1198,6 +1205,7 @@ impl Vfs {
         self.dcache_drop_name(parent.dslot, name);
         self.dcache_drop_neg_in_dir(parent.dslot);
         let ds = self.dcache_insert(parent.dslot, name, parent.mount, Some(islot))?;
+        self.dentries[ds as usize].pinned = true;
         Ok(PathRef {
             mount: parent.mount,
             dslot: ds,
