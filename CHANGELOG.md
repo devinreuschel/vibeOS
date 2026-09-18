@@ -9,6 +9,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Phase 7 slice B: virtio-blk on the Phase 6 modern transport. Probe reads
+  capacity, `blk_size` (512 if `F_BLK_SIZE` is missing), and topology.
+  Requests are descriptor chains (hdr + data + DMA status byte); kick uses
+  the existing `dma_wmb` / notify-cap formula. Completions harvest the used
+  ring on the threaded IRQ into `IoWaiter` cookies — the ramdisk sync pump
+  is not used for this device. `F_MQ` gets one virtqueue per CPU (single
+  queue if the feature is absent). Flush and discard are issued when the
+  device offers them. Marker `vibeOS: block: vda <n> sectors` (ktest adds
+  `virtio-blk-pci,disable-legacy=on` + a raw `-drive`; e2e stays
+  `pci: 6 devices`). Host tests pack the virtio-blk header/discard against
+  spec constants. In-guest: sector roundtrip, unaligned multi-sector, deep
+  queue, concurrent submitters, IRQ completions, and write → reboot → read
+  back intact (`vibeOS: persist: wrote` / `intact`).
+
 - Phase 7 slice A: block layer + ramdisk. `BlockDevice` (logical block
   size, capacity in those blocks, read/write/flush/discard) with a
   per-device request queue: adjacent merge, C-LOOK elevator, barrier vs

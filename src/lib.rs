@@ -39,5 +39,6 @@ pub mod time;
 pub mod uart;
 pub mod vectors;
 pub mod virtio;
+pub mod virtio_blk;
 pub mod wait;
 pub mod work;

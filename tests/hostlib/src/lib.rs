@@ -103,6 +103,9 @@ pub mod time;
 #[path = "../../../src/virtio.rs"]
 pub mod virtio;
 
+#[path = "../../../src/virtio_blk.rs"]
+pub mod virtio_blk;
+
 #[path = "../../../src/wait.rs"]
 pub mod wait;
 

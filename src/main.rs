@@ -8,8 +8,8 @@
 //! stacks are guarded KVA stacks. per_cpu after GDT because `mov gs`
 //! zeros the hidden base. Scheduler after time so the tick can preempt.
 //! SMP after irq-enabled so APs enter as idle. Console after `smp: done`.
-//! PCI after console. Workqueue + virtio driver register, then bind.
-//! Ramdisk block device after that. Shell last. The `kernel_tests` build
+//! PCI after console. Workqueue + virtio (rng, blk) register, then bind.
+//! Ramdisk after bind. Shell last. The `kernel_tests` build
 //! runs the in-guest registry after that and exits through isa-debug-exit.
 
 #![no_std]
@@ -52,6 +52,7 @@ mod smp_init;
 mod sync_init;
 mod thread_init;
 mod time_init;
+mod virtio_blk_init;
 mod virtio_init;
 mod work_init;
 mod x86;
@@ -298,6 +299,7 @@ fn normal_boot_tail() {
     crate::pci_init::init();
     crate::work_init::init();
     crate::virtio_init::init();
+    crate::virtio_blk_init::init();
     crate::dev_init::init();
     crate::block_init::init();
 

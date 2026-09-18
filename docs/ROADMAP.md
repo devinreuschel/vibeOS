@@ -631,12 +631,12 @@ enumeration and DMA.
 - [x] error propagation with retry, and a device marked failed rather than retried forever
 
 ### 7.2 virtio-blk
-- [ ] probe and configuration read: capacity, block size, topology
-- [ ] request submission through the virtqueue with proper descriptor chaining
-- [ ] completion through the interrupt path into request completions
-- [ ] multi-queue with one queue per CPU
-- [ ] flush and discard support
-- [ ] in-guest: sector roundtrip, unaligned multi-sector, deep queue with concurrent submitters
+- [x] probe and configuration read: capacity, block size, topology
+- [x] request submission through the virtqueue with proper descriptor chaining
+- [x] completion through the interrupt path into request completions
+- [x] multi-queue with one queue per CPU
+- [x] flush and discard support
+- [x] in-guest: sector roundtrip, unaligned multi-sector, deep queue with concurrent submitters
 
 ### 7.3 NVMe
 - [ ] controller identify, admin queue setup, I/O queue creation per CPU

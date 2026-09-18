@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "harness"))
 
@@ -16,46 +17,106 @@ from harness import (  # noqa: E402
 )
 
 
+DISK_BYTES = 4 * 1024 * 1024
+
+
+def _blk_extra(disk: str, smp: int) -> tuple[str, ...]:
+    return (
+        "-drive",
+        f"file={disk},if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
+        "-device",
+        f"virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues={smp}",
+    )
+
+
+def _require_line(lines: list[str], pred, msg: str) -> None:
+    if not any(pred(ln) for ln in lines):
+        raise HarnessError(msg)
+
+
+def _vda_marker(ln: str) -> bool:
+    return ln.startswith("vibeOS: block: vda ") and ln.endswith(" sectors")
+
+
 def main() -> int:
     iso = os.environ.get("VIBEOS_ISO", "vibeos-ktest.iso")
     smp = int(os.environ.get("VIBEOS_SMP", "2"))
     cpu = os.environ.get("VIBEOS_QEMU_CPU", "max")
     mem = os.environ.get("VIBEOS_MEM", "128M")
     bios = os.environ.get("VIBEOS_BIOS")
-    # ktest-only: e1000e (MSI-X), edu (INTx + DMA), virtio-rng (modern VQ).
+    # ktest-only: e1000e (MSI-X), edu (INTx + DMA), virtio-rng, virtio-blk.
     # e2e stays the default pc device set so `pci: 6 devices` does not move.
-    extra = tuple(os.environ.get("VIBEOS_QEMU_EXTRA", "").split())
+    extra = tuple(x for x in os.environ.get("VIBEOS_QEMU_EXTRA", "").split() if x)
     timeout = float(os.environ.get("VIBEOS_TIMEOUT", "90"))
+    skip_persist = os.environ.get("VIBEOS_SKIP_PERSIST", "") not in ("", "0")
 
-    cfg = QemuConfig(
-        iso=iso,
-        smp=smp,
-        cpu=cpu,
-        mem=mem,
-        bios=bios,
-        extra=("-device", "isa-debug-exit,iobase=0xf4,iosize=0x04")
-        + ("-device", "e1000e")
-        + ("-device", "edu")
-        + ("-device", "virtio-rng-pci,disable-legacy=on")
-        + extra,
-    )
-
+    fd, disk = tempfile.mkstemp(prefix="vibeos-vblk-", suffix=".img")
     try:
-        raw = run_qemu_until_exit(cfg, timeout_s=timeout)
-        check_ktest_output(raw.lines, raw.exit_code)
-    except HarnessError as e:
-        print(f"[ktest] FAIL: {e}", file=sys.stderr)
-        return 1
+        os.ftruncate(fd, DISK_BYTES)
+        os.close(fd)
+        fd = -1
 
-    oks = [ln for ln in raw.lines if ln.startswith("vibeOS: ktest: ok ")]
-    skips = [ln for ln in raw.lines if ln.startswith("vibeOS: ktest: skip ")]
-    print(
-        f"[ktest] ok: {len(oks)} passed, {len(skips)} skipped, exit {raw.exit_code}",
-        file=sys.stderr,
-    )
-    for ln in oks + skips:
-        print(f"[ktest]   . {ln}", file=sys.stderr)
-    return 0
+        cfg = QemuConfig(
+            iso=iso,
+            smp=smp,
+            cpu=cpu,
+            mem=mem,
+            bios=bios,
+            extra=("-device", "isa-debug-exit,iobase=0xf4,iosize=0x04")
+            + ("-device", "e1000e")
+            + ("-device", "edu")
+            + ("-device", "virtio-rng-pci,disable-legacy=on")
+            + _blk_extra(disk, smp)
+            + extra,
+        )
+
+        try:
+            raw = run_qemu_until_exit(cfg, timeout_s=timeout)
+            check_ktest_output(raw.lines, raw.exit_code)
+            _require_line(raw.lines, _vda_marker, "missing virtio-blk marker")
+            _require_line(
+                raw.lines,
+                lambda ln: ln == "vibeOS: persist: wrote",
+                "missing persist wrote",
+            )
+        except HarnessError as e:
+            print(f"[ktest] FAIL: {e}", file=sys.stderr)
+            return 1
+
+        oks = [ln for ln in raw.lines if ln.startswith("vibeOS: ktest: ok ")]
+        skips = [ln for ln in raw.lines if ln.startswith("vibeOS: ktest: skip ")]
+        print(
+            f"[ktest] ok: {len(oks)} passed, {len(skips)} skipped, exit {raw.exit_code}",
+            file=sys.stderr,
+        )
+        for ln in oks + skips:
+            print(f"[ktest]   . {ln}", file=sys.stderr)
+
+        if skip_persist:
+            return 0
+
+        try:
+            raw2 = run_qemu_until_exit(cfg, timeout_s=timeout)
+            check_ktest_output(raw2.lines, raw2.exit_code)
+            _require_line(raw2.lines, _vda_marker, "missing virtio-blk marker (reboot)")
+            _require_line(
+                raw2.lines,
+                lambda ln: ln == "vibeOS: persist: intact",
+                "persist pattern did not survive reboot",
+            )
+        except HarnessError as e:
+            print(f"[ktest] FAIL persist reboot: {e}", file=sys.stderr)
+            return 1
+
+        print("[ktest] persist reboot: intact", file=sys.stderr)
+        return 0
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(disk)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

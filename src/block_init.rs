@@ -132,6 +132,11 @@ fn complete_req(req: &Request, res: Result<(), BlockError>) {
     }
 }
 
+/// Wake request cookies. Caller must not hold RANK_DEVICE (SCHED wake).
+pub fn complete_waiters(req: &Request, res: Result<(), BlockError>) {
+    complete_req(req, res);
+}
+
 fn execute(req: &Request) -> Result<(), BlockError> {
     if DeviceState::from_u8(STATE.load(Ordering::Acquire)) == DeviceState::Failed {
         return Err(BlockError::Failed);
@@ -395,6 +400,7 @@ fn cmd_blk(_args: &[&str]) {
         "vibeOS: blk: {} {} {} sectors {st}",
         RAM0_NAME, RAM0_BLOCK_SIZE, RAM0_SECTORS
     );
+    let _ = crate::virtio_blk_init::shell_line(&mut Console);
 }
 
 pub fn init() {
