@@ -5,15 +5,15 @@
 
 use core::cell::UnsafeCell;
 use core::fmt::Write;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::AtomicU64;
 
 use vibeos::acpi::HpetInfo;
 use vibeos::pic::{PIC1_CMD, PIC_EOI};
 use vibeos::time::{
-    bcd_to_bin, hpet_period_ok, next_deadline, tsc_per_ms_from_hpet, tsc_per_ms_from_pit,
-    unix_from_civil, wall_unix_s, CalibSource, Instant, TickClock, WallOrigin, IO_WAIT_PORT,
-    PIT_CALIB_COUNT, PIT_CALIB_MS, PIT_CH0_WRITES, PIT_CH2, PIT_CMD, PIT_CMD_CH2_ONESHOT,
-    PIT_GATE, FS_PER_MS,
+    bcd_to_bin, hpet_period_ok, monotonic_max, next_deadline, tsc_per_ms_from_hpet,
+    tsc_per_ms_from_pit, unix_from_civil, wall_unix_s, CalibSource, Instant, TickClock,
+    WallOrigin, IO_WAIT_PORT, PIT_CALIB_COUNT, PIT_CALIB_MS, PIT_CH0_WRITES, PIT_CH2, PIT_CMD,
+    PIT_CMD_CH2_ONESHOT, PIT_GATE, FS_PER_MS,
 };
 
 use crate::acpi_init;
@@ -87,7 +87,7 @@ static STATE: BootCell<TimeState> = BootCell::new(TimeState::empty());
 static LAST_NS: AtomicU64 = AtomicU64::new(0);
 
 fn publish_ns(n: u64) -> u64 {
-    LAST_NS.fetch_max(n, Ordering::Relaxed).max(n)
+    monotonic_max(&LAST_NS, n)
 }
 
 fn io_wait() {

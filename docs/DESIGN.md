@@ -1583,15 +1583,14 @@ consumer. Rule: same as the scheduler lock. Interrupts off around the critical s
 
 **Timestamps occasionally go backwards.**
 The tick counter and the TSC snapshot were read as two independent relaxed loads. Rule: publish them
-under a seqlock, release on write, acquire on read, retry on an odd or changed sequence. A late tick
-plus TSC interpolation past the next millisecond (TCG `hlt`, no invariant TSC, extra runnable threads)
-still goes backwards with a stable pair: clamp extra to one tick, and never publish below the last
-reading.
+under a seqlock, release on write, acquire on read, retry on an odd or changed sequence.
 
 **Timestamps go backwards after `hlt` on TCG.**
-QEMU TCG does not set the invariant-TSC CPUID bit; `rdtsc` around `hlt` can jump or step back relative
-to the IRQ0 snapshot. Rule: same clamp as above. Do not assume interpolation is monotonic just because
-the seqlock did not tear.
+QEMU TCG does not set the invariant-TSC CPUID bit. Interpolation can overshoot a late tick, then the
+counter moves and `now_us` drops, even with a stable seqlock pair. A wrapping TSC-behind-snapshot
+delta looks like ~2^64 cycles. Rule: treat a high-bit wrapping delta as extra 0, and never publish a
+`now_ns` below the last reading. Do not cap extra at one tick — ktest holds IF off and timeouts must
+still advance on TSC alone.
 
 **Serial output from multiple CPUs is unreadable.**
 No lock on TX. Rule: lock serial TX. Byte granularity is enough to keep bytes from interleaving; full
