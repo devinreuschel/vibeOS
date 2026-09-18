@@ -681,7 +681,7 @@ limitations.
 - [x] mount a FAT32 image and `ls`, `cat`, `mkdir`, `rm`, `cp` behave correctly
 - [x] write, unmount, and verify the image with host `fsck.fat` clean
 - [x] `/dev`, `/proc`, and `/tmp` populated by their respective filesystems
-- [ ] vibefs survives injected power loss during a write, verified by a crash-consistency test
+- [x] vibefs survives injected power loss during a write, verified by a crash-consistency test
 - [x] path resolution handles `.`, `..`, symlinks, mount point crossing, and a symlink loop without recursing to death
 - [x] host tests over synthetic filesystem images, including deliberately corrupted ones
 
@@ -719,16 +719,16 @@ limitations.
 - [x] a `kernfs`-style shared implementation so the four do not duplicate directory logic
 
 ### 8.5 vibefs
-- [ ] the case for it: FAT32 has no permissions, no symlinks, no journaling, and no checksums, and every one of those becomes a wall
-- [ ] on-disk format documented in `docs/` before any code, with an explicit version field
-- [ ] extent-based allocation rather than block lists
-- [ ] B-tree directories, so a large directory is not a linear scan
-- [ ] checksums on metadata and optionally on data, with corruption reported rather than propagated
-- [ ] copy-on-write metadata updates with atomic superblock switching, or a write-ahead journal. Pick one, document why.
-- [ ] snapshots, which fall out nearly free from copy-on-write
-- [ ] inline data for small files
-- [ ] a host-side `mkfs` and `fsck` sharing the same format code as the kernel, so they cannot disagree
-- [ ] crash consistency testing by killing QEMU at randomized points during a write workload, then checking with `fsck`
+- [x] the case for it: FAT32 has no permissions, no symlinks, no journaling, and no checksums, and every one of those becomes a wall
+- [x] on-disk format documented in `docs/` before any code, with an explicit version field
+- [x] extent-based allocation rather than block lists
+- [x] B-tree directories, so a large directory is not a linear scan
+- [x] checksums on metadata and optionally on data, with corruption reported rather than propagated
+- [x] copy-on-write metadata updates with atomic superblock switching, or a write-ahead journal. Pick one, document why.
+- [x] snapshots, which fall out nearly free from copy-on-write
+- [x] inline data for small files
+- [x] a host-side `mkfs` and `fsck` sharing the same format code as the kernel, so they cannot disagree
+- [x] crash consistency testing by killing QEMU at randomized points during a write workload, then checking with `fsck`
 
 ### 8.6 File API and shell
 - [x] kernel-side open, read, write, seek, close, stat, readdir, mkdir, unlink, rename, symlink, link, truncate

@@ -29,6 +29,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Phase 8 slice D: vibefs (format version 1). CoW metadata + dual
+  superblocks + generation + CRC-32; not a write-ahead journal
+  (`docs/VIBEFS.md`). Extents, B-tree directories, metadata and data
+  checksums, 128-byte inline files, snapshots as pinned roots. Host
+  `mkfs-vibefs` / `fsck-vibefs` share `src/vibefs.rs` with the kernel.
+  BSS volume at `/vibe`; optional `mount vibefs <dev> <path>`. Host
+  tests cover synthetic and corrupt images plus a CrashDisk that drops
+  writes mid-commit. `make test-vibefs-crash` mkfs's a virtio-blk
+  image, boots a write+fsync loop, SIGKILLs QEMU, and requires
+  `fsck-vibefs` clean. No new boot marker. Phase 8 exit; Phase 9 is
+  paused.
+
 - Phase 8 slice B: FAT32 read/write, kernel File API, shell file
   commands, Makefile initrd. BPB validate, FAT chain cache, 8.3 + LFN
   checksum, reads across clusters, readdir/stat/timestamps. Write

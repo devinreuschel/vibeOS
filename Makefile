@@ -60,7 +60,8 @@ NM      := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-nm),$(LLVM_TOOL_DIR)/llvm-nm,ll
 
 .PHONY: all kernel iso run run-panic clean distclean setup layout \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-gp test \
-        test-e2e-pit test-kernel test-kernel-smp4 test-lapic-fallback test-smp-stress
+        test-e2e-pit test-kernel test-kernel-smp4 test-lapic-fallback \
+        test-smp-stress test-vibefs-crash
 
 all: $(ISO)
 
@@ -227,14 +228,56 @@ test-kernel-smp4: $(ISO_KTEST)
 test-lapic-fallback: $(ISO_KTEST)
 	VIBEOS_ISO=$(ISO_KTEST) VIBEOS_QEMU_CPU=qemu64,-tsc-deadline python3 tests/kernel_boot.py
 
-test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-pit test-kernel test-kernel-smp4 test-lapic-fallback
+# Host mkfs/fsck share src/vibefs.rs. CARGO_TARGET_DIR is the kernel's
+# `./target`; hostlib's .cargo/config selects the GNU triple.
+HOST_TRIPLE := x86_64-unknown-linux-gnu
+MKFS_VIBEFS := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/mkfs-vibefs
+FSCK_VIBEFS := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/fsck-vibefs
+
+$(MKFS_VIBEFS) $(FSCK_VIBEFS): src/vibefs.rs tests/hostlib/src/bin/mkfs_vibefs.rs \
+		tests/hostlib/src/bin/fsck_vibefs.rs tests/hostlib/Cargo.toml tests/hostlib/src/lib.rs
+	cd tests/hostlib && cargo build --bins
+
+# QEMU-kill crash consistency. Separate target dir so the write-loop
+# kernel cannot land in the production ISO (DESIGN §8.2 / §9.7).
+KERNEL_VIBEFS_CRASH_DIR := $(CURDIR)/target-vibefs-crash
+ISO_VIBEFS_CRASH        := vibeos-vibefs-crash.iso
+ISO_ROOT_VIBEFS_CRASH   := iso_root_vibefs_crash
+
+$(ISO_VIBEFS_CRASH): $(KERNEL_DEPS) limine.conf $(LIMINE_BIN)
+	CARGO_TARGET_DIR=$(KERNEL_VIBEFS_CRASH_DIR) $(CARGO) build $(CARGO_FLAGS) --features vibefs_crash
+	python3 scripts/gen_ksyms.py --nm "$(NM)" $(KERNEL_VIBEFS_CRASH_DIR)/$(TARGET)/$(PROFILE_DIR)/vibeos $(KERNEL_VIBEFS_CRASH_DIR)/vibeos-ksyms.rs
+	VIBEOS_KSYMS=$(KERNEL_VIBEFS_CRASH_DIR)/vibeos-ksyms.rs CARGO_TARGET_DIR=$(KERNEL_VIBEFS_CRASH_DIR) $(CARGO) build $(CARGO_FLAGS) --features vibefs_crash
+	@echo "  ISO $(ISO_VIBEFS_CRASH)"
+	@rm -rf $(ISO_ROOT_VIBEFS_CRASH)
+	@mkdir -p $(ISO_ROOT_VIBEFS_CRASH)/boot $(ISO_ROOT_VIBEFS_CRASH)/EFI/BOOT
+	@cp $(KERNEL_VIBEFS_CRASH_DIR)/$(TARGET)/$(PROFILE_DIR)/vibeos $(ISO_ROOT_VIBEFS_CRASH)/boot/vibeos
+	@cp limine.conf $(ISO_ROOT_VIBEFS_CRASH)/boot/
+	@cp $(LIMINE_DIR)/limine-bios.sys $(ISO_ROOT_VIBEFS_CRASH)/boot/
+	@cp $(LIMINE_DIR)/limine-bios-cd.bin $(ISO_ROOT_VIBEFS_CRASH)/boot/
+	@cp $(LIMINE_DIR)/limine-uefi-cd.bin $(ISO_ROOT_VIBEFS_CRASH)/boot/
+	@cp $(LIMINE_DIR)/BOOTX64.EFI $(ISO_ROOT_VIBEFS_CRASH)/EFI/BOOT/
+	@xorriso -as mkisofs -quiet \
+	    -b boot/limine-bios-cd.bin \
+	    -no-emul-boot -boot-load-size 4 -boot-info-table \
+	    --efi-boot boot/limine-uefi-cd.bin \
+	    -efi-boot-part --efi-boot-image --protective-msdos-label \
+	    $(ISO_ROOT_VIBEFS_CRASH) -o $(ISO_VIBEFS_CRASH)
+	@$(LIMINE_BIN) bios-install $(ISO_VIBEFS_CRASH) >/dev/null
+
+test-vibefs-crash: $(ISO_VIBEFS_CRASH) $(MKFS_VIBEFS) $(FSCK_VIBEFS)
+	VIBEOS_ISO=$(ISO_VIBEFS_CRASH) VIBEOS_MKFS=$(MKFS_VIBEFS) VIBEOS_FSCK=$(FSCK_VIBEFS) python3 tests/vibefs_crash.py
+
+test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-pit test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
 
 # Longer high-CPU stress. Scheduled CI, not every push. ROADMAP §4.11.
 test-smp-stress: $(ISO_KTEST)
 	VIBEOS_ISO=$(ISO_KTEST) VIBEOS_SMP=4 VIBEOS_TIMEOUT=180 python3 tests/kernel_boot.py
 
 clean:
-	rm -rf $(ISO_ROOT) $(ISO_ROOT_PANIC) $(ISO_ROOT_GP) $(ISO_ROOT_KTEST) $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_KTEST) target-panic target-gp $(KERNEL_TESTS_DIR) initrd.fat
+	rm -rf $(ISO_ROOT) $(ISO_ROOT_PANIC) $(ISO_ROOT_GP) $(ISO_ROOT_KTEST) $(ISO_ROOT_VIBEFS_CRASH) \
+	    $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_KTEST) $(ISO_VIBEFS_CRASH) \
+	    target-panic target-gp $(KERNEL_TESTS_DIR) $(KERNEL_VIBEFS_CRASH_DIR) initrd.fat
 	$(CARGO) clean
 
 distclean: clean
