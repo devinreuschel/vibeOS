@@ -551,7 +551,7 @@ enumeration and DMA.
 **Unlocks.** All of storage, network, and graphics.
 
 **Exit gate**
-- [ ] `pci: <n> devices` marker and `lspci` output matching QEMU's configuration
+- [x] `pci: <n> devices` marker and `lspci` output matching QEMU's configuration
 - [ ] MSI-X interrupts delivered to a chosen CPU, verified in-guest
 - [ ] a virtio device negotiated through modern PCI capabilities with a working virtqueue
 - [ ] DMA buffers allocated, mapped, and verified for correct device-visible addresses
@@ -559,20 +559,20 @@ enumeration and DMA.
 - [ ] workqueue and threaded IRQ handlers exercised in-guest
 
 ### 6.1 Device model
-- [ ] `Device` with a bus address, ids, resources, and an interrupt binding
-- [ ] `Driver` trait: `probe`, `remove`, plus an id match table
-- [ ] a registry matching drivers to devices, with driver init ordered by dependency
-- [ ] resource tracking so two drivers cannot claim the same BAR
-- [ ] a device tree dump for the shell
+- [x] `Device` with a bus address, ids, resources, and an interrupt binding
+- [x] `Driver` trait: `probe`, `remove`, plus an id match table
+- [x] a registry matching drivers to devices, with driver init ordered by dependency
+- [x] resource tracking so two drivers cannot claim the same BAR
+- [x] a device tree dump for the shell
 
 ### 6.2 PCI and PCIe
-- [ ] legacy configuration access through ports `0xCF8` and `0xCFC`
-- [ ] ECAM through the MCFG base, which is required for anything beyond bus 0
-- [ ] recursive bus enumeration across bridges
-- [ ] BAR decoding: memory versus I/O, 32 versus 64 bit, size probing, `ioremap` of memory BARs
-- [ ] capability list walk: MSI, MSI-X, PCIe, vendor specific, power management
-- [ ] enable bus master and memory space in the command register
-- [ ] `lspci` with vendor and device names for the handful worth naming
+- [x] legacy configuration access through ports `0xCF8` and `0xCFC`
+- [x] ECAM through the MCFG base, which is required for anything beyond bus 0
+- [x] recursive bus enumeration across bridges
+- [x] BAR decoding: memory versus I/O, 32 versus 64 bit, size probing, `ioremap` of memory BARs
+- [x] capability list walk: MSI, MSI-X, PCIe, vendor specific, power management
+- [x] enable bus master and memory space in the command register
+- [x] `lspci` with vendor and device names for the handful worth naming
 
 ### 6.3 MSI and MSI-X
 - [ ] MSI configuration: message address, message data, enable

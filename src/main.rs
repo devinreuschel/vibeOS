@@ -3,12 +3,12 @@
 //! Boot order: serial, Limine, PMM, paging, ACPI parse + MMIO UC, heap,
 //! KVA, then GDT/TSS/IST, PIC remap, IDT, BSP per_cpu, ACPI marker, time,
 //! LAPIC+IOAPIC, timer prove, scheduler+idle, irq enabled, SMP, meminfo,
-//! console, shell thread. GDT after KVA because IST stacks are guarded
-//! KVA stacks. per_cpu after GDT because `mov gs` zeros the hidden base.
-//! Scheduler after time so the tick can preempt. SMP after irq-enabled so
-//! APs enter as idle. Console after `smp: done`. Shell last. The
-//! `kernel_tests` build runs the in-guest registry after that and exits
-//! through isa-debug-exit.
+//! console, PCI scan + registry, shell thread. GDT after KVA because IST
+//! stacks are guarded KVA stacks. per_cpu after GDT because `mov gs`
+//! zeros the hidden base. Scheduler after time so the tick can preempt.
+//! SMP after irq-enabled so APs enter as idle. Console after `smp: done`.
+//! PCI after console. Shell last. The `kernel_tests` build runs the
+//! in-guest registry after that and exits through isa-debug-exit.
 
 #![no_std]
 #![no_main]
@@ -26,6 +26,7 @@ mod acpi_init;
 mod apic_init;
 mod arch;
 mod console_init;
+mod dev_init;
 mod diag;
 mod fb_init;
 mod heap_init;
@@ -36,6 +37,7 @@ mod log_init;
 mod ksyms;
 mod paging_init;
 mod panic;
+mod pci_init;
 mod per_cpu_init;
 mod pmm_init;
 mod sched_init;
@@ -282,6 +284,11 @@ fn normal_boot_tail() {
 
     // DESIGN §3.3 live: after smp: done. Handler, 8042, then unmask IRQ1.
     crate::console_init::init();
+
+    // Phase 6 slice A: scan → list → bind. Marker before `shell ready`
+    // so lspci is available once the shell thread runs.
+    crate::pci_init::init();
+    crate::dev_init::init();
 
     #[cfg(feature = "gp-test")]
     gp_test_trip();

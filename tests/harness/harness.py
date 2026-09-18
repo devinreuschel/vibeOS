@@ -561,8 +561,9 @@ def run_qemu_until_exit(
 # `smp: ap online` for each AP, then `smp: done` before `console ok` /
 # `shell ready`. `boot: phase1 done` was retired when `shell ready` became
 # the trailing marker (DESIGN §3.3 / §8.3).
-# Phase 5 slice B then emits `console ok` after SMP. Slice C emits
-# `shell ready` last. IRQ1 is unmasked
+# Phase 5 slice B then emits `console ok` after SMP. Phase 6 slice A
+# emits `pci: <n> devices` (and per-device lines) after that. Slice C
+# emits `shell ready` last. IRQ1 is unmasked
 # only after the handler exists. TCG: `VIBEOS_QEMU_ACCEL=tcg` (make default)
 # or `VIBEOS_QEMU_EXTRA="-accel tcg"`.
 # `pic: remapped` means the PIC step finished (ICW ran, or FADT skip);
@@ -621,7 +622,14 @@ def boot_contract_markers(
         after.append(Marker("vibeOS: smp: ap online", f"smp_ap_online_{i - 1}"))
     after.append(Marker("vibeOS: smp: done", "smp_done"))
     after.append(Marker("vibeOS: console ok", "console_ok"))
-    # gp-test trips after console init and never reaches the shell thread.
+    after.append(
+        Marker(
+            "vibeOS: pci: ",
+            "pci_devices",
+            and_contains=(" devices",),
+        )
+    )
+    # gp-test trips after PCI enum and never reaches the shell thread.
     if not gp:
         after.append(Marker("vibeOS: shell ready", "shell_ready"))
     if hpet:

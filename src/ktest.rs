@@ -13,9 +13,11 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::apic::TimerMode;
 use vibeos::desc::{IstSlot, KERNEL_CS, TSS_SEL};
+use vibeos::dev::{ClaimError, Device, Driver, IdMatch, ProbeError};
 use vibeos::heap::HEAP_SIZE;
 use vibeos::kva::PAGE_SIZE;
 use vibeos::paging::{heap_flags, PageFlags, PhysAddr, VirtAddr};
+use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_MASTER, CMD_MEM};
 use vibeos::thread::{ThreadId, ThreadState};
 use vibeos::time::{CalibSource, Instant};
 use vibeos::vectors;
@@ -23,9 +25,11 @@ use vibeos::vectors;
 use crate::acpi_init;
 use crate::apic_init;
 use crate::arch;
+use crate::dev_init;
 use crate::ipi_init;
 use crate::kva_init;
 use crate::paging_init;
+use crate::pci_init;
 use crate::per_cpu_init;
 use crate::pmm_init;
 use crate::sched_init;
@@ -120,6 +124,12 @@ const TESTS: &[(&str, TestFn)] = &[
     ("shell_registry", test_shell_registry),
     ("shell_dispatch", test_shell_dispatch),
     ("shell_dmesg_level", test_shell_dmesg_level),
+    ("pci_qemu_set", test_pci_qemu_set),
+    ("pci_bar_map", test_pci_bar_map),
+    ("pci_cfg_rw", test_pci_cfg_rw),
+    ("pci_claim_exclusive", test_pci_claim_exclusive),
+    ("pci_bind_order", test_pci_bind_order),
+    ("lspci_cmd", test_lspci_cmd),
 ];
 
 pub fn run() -> ! {
@@ -2197,5 +2207,161 @@ fn test_shell_dmesg_level() -> Outcome {
         Outcome::Ok
     } else {
         Outcome::Fail("debug missing after -n trace")
+    }
+}
+
+const PCI_QEMU_IDS: &[(u16, u16)] = &[
+    (0x8086, 0x1237), // 440FX
+    (0x8086, 0x7000), // PIIX3 ISA
+    (0x8086, 0x7010), // PIIX3 IDE
+    (0x8086, 0x7113), // PIIX4 ACPI
+    (0x1234, 0x1111), // Bochs VGA
+    (0x8086, 0x100e), // e1000
+];
+
+fn test_pci_qemu_set() -> Outcome {
+    if !pci_init::live() {
+        return Outcome::Fail("pci not live");
+    }
+    if dev_init::len() < PCI_QEMU_IDS.len() {
+        return Outcome::Fail("device count");
+    }
+    let mut i = 0usize;
+    while i < PCI_QEMU_IDS.len() {
+        let (v, d) = PCI_QEMU_IDS[i];
+        if dev_init::find_id(v, d).is_none() {
+            return Outcome::Fail("missing qemu id");
+        }
+        i += 1;
+    }
+    Outcome::Ok
+}
+
+fn test_pci_bar_map() -> Outcome {
+    let Some((_, d)) = dev_init::find_id(0x1234, 0x1111) else {
+        return Outcome::Fail("no vga");
+    };
+    let r = d.resources[0];
+    if r.is_empty() {
+        return Outcome::Fail("vga bar0 empty");
+    }
+    if r.size == 0 || r.size > pci::MAX_BAR_MAP {
+        return Outcome::Fail("vga bar0 size");
+    }
+    if r.mapped_va == 0 {
+        return Outcome::Fail("vga bar0 unmapped");
+    }
+    // WB physmap alias, not an ioremap UC window over the console FB.
+    if r.mapped_va != paging_init::HHDM_BASE.wrapping_add(r.addr) {
+        return Outcome::Fail("vga bar0 not wb physmap");
+    }
+    Outcome::Ok
+}
+
+fn test_pci_cfg_rw() -> Outcome {
+    let bdf = Bdf::new(0, 0, 0);
+    let id = pci_init::cfg_read32(bdf, CFG_VENDOR);
+    if id as u16 != 0x8086 {
+        return Outcome::Fail("host vendor");
+    }
+    if (id >> 16) as u16 != 0x1237 {
+        return Outcome::Fail("host device");
+    }
+    let prev = pci_init::cfg_read32(bdf, CFG_COMMAND) as u16;
+    pci_init::enable_mem_master(bdf);
+    let now = pci_init::cfg_read32(bdf, CFG_COMMAND) as u16;
+    pci_init::cfg_write32(bdf, CFG_COMMAND, prev as u32);
+    if now & (CMD_MEM | CMD_MASTER) != CMD_MEM | CMD_MASTER {
+        return Outcome::Fail("cmd bits");
+    }
+    Outcome::Ok
+}
+
+fn test_pci_claim_exclusive() -> Outcome {
+    let Some((i, d)) = dev_init::find_id(0x8086, 0x100e) else {
+        return Outcome::Fail("no e1000");
+    };
+    let mut b = 0u8;
+    let mut found = false;
+    while (b as usize) < pci::MAX_BARS {
+        if !d.resources[b as usize].is_empty() {
+            found = true;
+            break;
+        }
+        b += 1;
+    }
+    if !found {
+        return Outcome::Fail("e1000 no bar");
+    }
+    if let Err(e) = dev_init::claim(i, b) {
+        return Outcome::Fail(e.as_str());
+    }
+    match dev_init::claim(i, b) {
+        Err(ClaimError::Already) => Outcome::Ok,
+        Err(_) => Outcome::Fail("wrong claim err"),
+        Ok(()) => Outcome::Fail("double claim"),
+    }
+}
+
+struct HostBridgeDrv;
+
+static HOST_BRIDGE_IDS: &[IdMatch] = &[IdMatch::vid_did(0x8086, 0x1237)];
+static HOST_BRIDGE_DRV: HostBridgeDrv = HostBridgeDrv;
+
+impl Driver for HostBridgeDrv {
+    fn name(&self) -> &'static str {
+        "host-bridge"
+    }
+    fn ids(&self) -> &'static [IdMatch] {
+        HOST_BRIDGE_IDS
+    }
+    fn order(&self) -> u8 {
+        1
+    }
+    fn probe(&self, _dev: &mut Device) -> Result<(), ProbeError> {
+        Ok(())
+    }
+    fn remove(&self, _dev: &mut Device) {}
+}
+
+fn test_pci_bind_order() -> Outcome {
+    if !dev_init::register_driver(&HOST_BRIDGE_DRV) {
+        return Outcome::Fail("register");
+    }
+    dev_init::bind_all();
+    let Some((_, d)) = dev_init::find_id(0x8086, 0x1237) else {
+        return Outcome::Fail("no host");
+    };
+    match d.bound {
+        Some("host-bridge") => Outcome::Ok,
+        Some(_) => Outcome::Fail("wrong driver"),
+        None => Outcome::Fail("unbound"),
+    }
+}
+
+static LSPCI_STACK: AtomicU32 = AtomicU32::new(0);
+
+fn lspci_stack_entry() {
+    let ok = crate::shell_init::dispatch_line("lspci").is_ok()
+        && crate::shell_init::dispatch_line("devices").is_ok();
+    LSPCI_STACK.store(if ok { 1 } else { 2 }, Ordering::SeqCst);
+}
+
+fn test_lspci_cmd() -> Outcome {
+    if !crate::shell_init::has_command("lspci") {
+        return Outcome::Fail("no lspci");
+    }
+    if !crate::shell_init::has_command("devices") {
+        return Outcome::Fail("no devices");
+    }
+    // Shell stacks are 16 KiB. lspci on _start would miss a full
+    // [Device; 64] snapshot overflowing the guard.
+    LSPCI_STACK.store(0, Ordering::SeqCst);
+    let h = thread_init::spawn_here("lspci-stk", lspci_stack_entry);
+    thread_init::switch_to(h.id());
+    match LSPCI_STACK.load(Ordering::SeqCst) {
+        1 => Outcome::Ok,
+        2 => Outcome::Fail("lspci/devices"),
+        _ => Outcome::Fail("did not run"),
     }
 }

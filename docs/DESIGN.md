@@ -316,7 +316,8 @@ of it.
 | 15 | Arm scheduler; emit `irq: enabled` | `irq: enabled` | Scheduler is live. The timer already ticks from steps 13/13b; this marker is post-sched arming (IF on, preemption live), not the first STI. IRQ1 stays masked until the keyboard driver (step 17). |
 | 16 | APIC + SMP bring-up | `smp: done` | Needs time (delays), heap (per-CPU allocation), scheduler (AP entry point). Live Phase 4 order: SMP before console. |
 | 17 | Framebuffer console, PS/2, mux | `console ok` | After `smp: done`. Install the IRQ1 / keyboard GSI handler, init the 8042, then unmask. Replay the pre-FB log ring onto the framebuffer. |
-| 18 | Shell thread, builtins | `shell ready` | Last marker. Spawn a kernel thread (not `_start`, not idle, not an ISR), register builtins into the command table, print the prompt. |
+| 17b | PCI enum + device registry | `pci: N devices` | After `console ok`. Legacy `0xCF8`/`0xCFC` for bus 0; MCFG → ECAM beyond. Scan builds a device list, then the registry binds. Memory BARs are mapped through ioremap or the capped physmap; sizes above 32 MiB are recorded and skipped (DESIGN §4.1). |
+| 18 | Shell thread, builtins | `shell ready` | Last marker. Spawn a kernel thread (not `_start`, not idle, not an ISR), register builtins into the command table, print the prompt. `lspci` / `devices` are live. |
 
 Ordering rules worth stating separately because they were learned the hard way:
 
@@ -324,7 +325,7 @@ Ordering rules worth stating separately because they were learned the hard way:
   PIT fallback (LINT0 ExtINT). Other PIC lines stay masked; step 15 is
   `irq: enabled` (IF on, preemption live), not the first unmask. An unexpected
   line before its driver is a halt, not a useful backtrace.
-- `smp: done` precedes `console ok` and `shell ready`. The e2e harness enforces
+- `smp: done` precedes `console ok`, `pci: N devices`, and `shell ready`. The e2e harness enforces
   it. If SMP moves after the shell, AP failures become invisible in CI.
 - ACPI discovery for the step-8 UC patch may run immediately after CR3 (alongside `paging: mmio uc`).
   The `acpi: xsdt N tables` marker stays at step 12. Do not "fix" that by moving the walk after the
@@ -352,8 +353,11 @@ initialized, then the keyboard GSI is unmasked. The default PIC handler still
 halts on an unexpected line. The timer path re-runs the
 8259 ICW sequence even when FADT bit 0 skipped the boot remap (QEMU clears
 that bit but still has a PIC on 0x08).
-Step 18 spawns the shell as a kernel thread after `console ok` and emits
-`shell ready` last. `boot: phase1 done` was a Phase 1–4 stand-in and is no
+Step 17b enumerates PCI (CF8 on bus 0, ECAM from MCFG otherwise), maps
+memory BARs under the 32 MiB cap, fills the device registry, and emits
+`pci: N devices`. Drivers bind after the scan, not inline.
+Step 18 spawns the shell as a kernel thread after `console ok` / `pci: N devices`
+and emits `shell ready` last. `boot: phase1 done` was a Phase 1–4 stand-in and is no
 longer emitted; the trailing contract line is `shell ready`.
 The e2e contract in [section 8.3](#83-end-to-end) is the live order.
 
@@ -1240,13 +1244,15 @@ vibeOS: sched: cpu0 ready
 vibeOS: irq: enabled
 vibeOS: smp: done
 vibeOS: console ok
+vibeOS: pci: <n> devices
 vibeOS: shell ready
 ```
 
-Live e2e through Phase 5 slice C asserts through `idt ok`, then `per_cpu: bsp ready`,
+Live e2e through Phase 6 slice A asserts through `idt ok`, then `per_cpu: bsp ready`,
 then `acpi: xsdt`, then `time: tsc <n>/ms`, then `time: lapic_timer ok (<mode>)`, then
 `sched: cpu0 ready`, then `irq: enabled`, then for each AP `sched: cpu<i> ready`
-followed by `smp: ap online`, then `smp: done`, then `console ok`, then `shell ready`.
+followed by `smp: ap online`, then `smp: done`, then `console ok`, then
+`pci: <n> devices`, then `shell ready`.
 `boot: phase1 done` was a Phase 1–4 stand-in and is no longer in the contract; the
 trailing marker is `shell ready`. SMP stays before console; the old
 table that listed console as step 15 before SMP was drift and is gone.
@@ -1258,7 +1264,8 @@ the diagnostic `time: calibrated hpet <n>/ms`; `make test-e2e-pit` asserts
 (`-cpu qemu64,-tsc-deadline`) runs in-guest tests on the periodic path.
 
 `smp: done` before `shell ready` is deliberate. Put SMP bring-up after the shell starts and an AP
-failure becomes invisible, because the harness sees its last marker and passes.
+failure becomes invisible, because the harness sees its last marker and passes. `pci: <n> devices`
+sits between `console ok` and `shell ready` so `lspci` is registered before the prompt.
 
 With `-smp N`, additionally:
 
@@ -1398,12 +1405,19 @@ else stays NX.
 **Building page tables at boot never finishes.**
 `map_end` was computed from raw memory map entries, and firmware described an MMIO BAR as a
 multi-terabyte region. Rule: derive the physmap extent from usable RAM, kernel image end, and
-framebuffer extent, and cap it (8 GiB).
+framebuffer extent, and cap it (8 GiB). PCI BAR size probes that return > 32 MiB are recorded
+and not page-walked into the ioremap window or physmap.
 
 **Device reads return stale values on real hardware but work in QEMU.**
 MMIO reached through a write-back physmap mapping. QEMU does not enforce cache attributes; hardware
 does. Rule: LAPIC, I/O APIC, HPET, and every device MMIO page gets PCD + PWT, patched immediately after
 CR3 install and before first access. Preserve the 2 MiB page size when patching rather than splitting.
+Do not UC-patch the console framebuffer when it aliases VGA BAR0; leave that physmap WB.
+
+**Config space beyond bus 0 is all `0xFFFF`.**
+Legacy `0xCF8`/`0xCFC` only addresses bus 0 on typical host bridges. Rule: walk MCFG and use ECAM
+(`base + (bus<<20)|(dev<<15)|(fn<<12)|off`) for any bus outside that. Type-1 headers reuse BAR
+slots as bus-number registers; size-probe only the BAR count for that header type.
 
 **Two subsystems designed for the same virtual address range.**
 The heap and the kernel VA allocator were both specified at `0xFFFF_C000_*` in different documents, and
@@ -1580,7 +1594,8 @@ target directory and separate ISO for the test build.
 **A boot regression passes CI.**
 The e2e harness checked that markers were present but not that they were ordered, and SMP bring-up ran
 after the last marker it looked for. Rule: markers are asserted in order, and `smp: done` comes before
-`shell ready`.
+`console ok`, `pci: N devices`, and `shell ready`. A new marker is added to the harness in the same
+commit that emits it.
 
 ## 9.8 Meta
 

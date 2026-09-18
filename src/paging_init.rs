@@ -13,6 +13,7 @@
 //! when patching MMIO attributes.
 
 use core::fmt::Write;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use vibeos::lock::RANK_PT;
 use vibeos::marker;
@@ -108,11 +109,14 @@ pub fn with_pt<R>(f: impl FnOnce() -> R) -> R {
 }
 
 /// Global reservation state for the ioremap window (DESIGN §4.1).
-///
-/// Reachable from phase 2 (APIC/HPET) via `ioremap` below; keeps the
-/// item pub-reachable so the linker does not GC it.
-#[allow(dead_code)]
 static mut IOREMAP: IoremapWindow = IoremapWindow::new();
+
+static MAP_END: AtomicU64 = AtomicU64::new(0);
+
+/// Physmap high water from [`install`]. BARs above this go through ioremap.
+pub fn map_end() -> u64 {
+    MAP_END.load(Ordering::Relaxed)
+}
 
 /// Reserve and map `[phys, phys+len)` into the ioremap window with UC
 /// attributes. Returns the VA (offset within the page preserved so a
@@ -122,7 +126,6 @@ static mut IOREMAP: IoremapWindow = IoremapWindow::new();
 /// Caller vouches that `[phys, phys+len)` is real device MMIO and that
 /// no aliased mapping through the physmap will be used to touch the
 /// same registers with cacheable attributes.
-#[allow(dead_code)] // wired for phase 2 (APIC/HPET); slice B ships the API only
 pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
     let (va_offset, base_va, round_len) = with_pt(|| {
         let va_offset = unsafe { &mut *core::ptr::addr_of_mut!(IOREMAP) }.reserve(phys, len)?;
@@ -207,6 +210,85 @@ pub unsafe fn map_4k(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(),
     with_pt(|| unsafe { map_4k_locked(va, pa, flags) })?;
     paging::tlb_shootdown_others(va);
     Ok(())
+}
+
+/// Map one 2 MiB leaf. Caller holds PT. Local `invlpg` only.
+pub unsafe fn map_2m_locked(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(), MapError> {
+    let mut alloc = BuddyFrames;
+    let mut mapper = current_mapper();
+    unsafe {
+        mapper.map_page(va, pa, flags, PageSize::Size2M, MapMode::Fresh, &mut alloc)?;
+    }
+    x86::invlpg(va.as_u64());
+    Ok(())
+}
+
+/// Map one 2 MiB leaf in the live tables, drop PT, then shootdown.
+///
+/// # Safety
+/// Same contract as `Mapper::map_page`. Must run after [`install`].
+pub unsafe fn map_2m(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(), MapError> {
+    with_pt(|| unsafe { map_2m_locked(va, pa, flags) })?;
+    paging::tlb_shootdown_others(va);
+    Ok(())
+}
+
+/// Map missing physmap leaves covering `[phys, phys+len)` as write-back.
+/// Already-present leaves are left alone (so a WB framebuffer is not
+/// UC-patched). Used for VGA BAR0 when the BAR outruns Limine's surface.
+///
+/// Returns whether `phys` itself translates through the HHDM physmap.
+pub fn ensure_physmap_wb(phys: PhysAddr, len: u64) -> bool {
+    if len == 0 {
+        return true;
+    }
+    let start = phys.as_u64() & !(PAGE_SIZE_4K - 1);
+    if start >= PHYSMAP_CAP {
+        return false;
+    }
+    let Some(raw_end) = phys.as_u64().checked_add(len) else {
+        return false;
+    };
+    let end = paging_align_up(raw_end, PAGE_SIZE_4K).min(PHYSMAP_CAP);
+    let flags = paging::physmap_flags();
+    let mut p = start;
+    while p < end {
+        let va = VirtAddr(HHDM_BASE.wrapping_add(p));
+        if let Some((_, sz, _)) = translate(va) {
+            let span = sz.bytes();
+            let next = (p & !(span - 1)).saturating_add(span);
+            p = if next > p { next } else { p + PAGE_SIZE_4K };
+            continue;
+        }
+        let rem = end - p;
+        let try_2m = p & (PAGE_SIZE_2M - 1) == 0 && rem >= PAGE_SIZE_2M;
+        if try_2m {
+            match unsafe { map_2m(va, PhysAddr(p), flags) } {
+                Ok(()) => {
+                    p += PAGE_SIZE_2M;
+                    continue;
+                }
+                Err(MapError::AlreadyMapped) => {
+                    p += PAGE_SIZE_4K;
+                    continue;
+                }
+                Err(MapError::Misaligned)
+                | Err(MapError::NotMapped)
+                | Err(MapError::OutOfFrames)
+                | Err(MapError::PageSizeMismatch)
+                | Err(MapError::NonCanonical) => {}
+            }
+        }
+        match unsafe { map_4k(va, PhysAddr(p), flags) } {
+            Ok(()) | Err(MapError::AlreadyMapped) => p += PAGE_SIZE_4K,
+            Err(MapError::Misaligned)
+            | Err(MapError::NotMapped)
+            | Err(MapError::OutOfFrames)
+            | Err(MapError::PageSizeMismatch)
+            | Err(MapError::NonCanonical) => break,
+        }
+    }
+    translate(VirtAddr(HHDM_BASE.wrapping_add(phys.as_u64()))).is_some()
 }
 
 /// Unmap one leaf. Caller holds PT. Local `invlpg` only.
@@ -408,6 +490,7 @@ pub unsafe fn install(
 
     // ---- 6. Install ----
     unsafe { x86::write_cr3(mapper.root().as_u64()) };
+    MAP_END.store(map_end, Ordering::Relaxed);
 
     PagingReport {
         map_end,

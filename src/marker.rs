@@ -72,6 +72,11 @@ pub const BOOT_DONE: &str = "vibeOS: boot: phase1 done";
 /// IRQ1 was unmasked after the handler.
 pub const CONSOLE_OK: &str = "vibeOS: console ok";
 
+/// Phase 6 slice A. Runtime count via `writeln!`. After `console ok`,
+/// before `shell ready`. DESIGN §3.3 / §8.3.
+pub const PCI_PREFIX: &str = "vibeOS: pci: ";
+pub const PCI_DEVICES_SUFFIX: &str = " devices";
+
 /// Phase 5 slice C. Last boot marker. Shell thread is running, builtins
 /// registered, prompt live. Always after `smp: done` and `console ok`.
 pub const SHELL_READY: &str = "vibeOS: shell ready";
