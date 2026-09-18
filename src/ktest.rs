@@ -11,13 +11,14 @@ use core::arch::global_asm;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use vibeos::apic::TimerMode;
+use vibeos::apic::{Polarity, TimerMode, Trigger};
+use vibeos::irq::{self, IrqError};
 use vibeos::desc::{IstSlot, KERNEL_CS, TSS_SEL};
 use vibeos::dev::{ClaimError, Device, Driver, IdMatch, ProbeError};
 use vibeos::heap::HEAP_SIZE;
 use vibeos::kva::PAGE_SIZE;
 use vibeos::paging::{heap_flags, PageFlags, PhysAddr, VirtAddr};
-use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_MASTER, CMD_MEM};
+use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
 use vibeos::thread::{ThreadId, ThreadState};
 use vibeos::time::{CalibSource, Instant};
 use vibeos::vectors;
@@ -27,6 +28,7 @@ use crate::apic_init;
 use crate::arch;
 use crate::dev_init;
 use crate::ipi_init;
+use crate::irq_init;
 use crate::kva_init;
 use crate::paging_init;
 use crate::pci_init;
@@ -130,6 +132,9 @@ const TESTS: &[(&str, TestFn)] = &[
     ("pci_claim_exclusive", test_pci_claim_exclusive),
     ("pci_bind_order", test_pci_bind_order),
     ("lspci_cmd", test_lspci_cmd),
+    ("irq_pool", test_irq_pool),
+    ("msix_cpu", test_msix_cpu),
+    ("intx_fallback", test_intx_fallback),
 ];
 
 pub fn run() -> ! {
@@ -2364,4 +2369,238 @@ fn test_lspci_cmd() -> Outcome {
         2 => Outcome::Fail("lspci/devices"),
         _ => Outcome::Fail("did not run"),
     }
+}
+
+fn mmio_r32(va: u64, off: u32) -> u32 {
+    unsafe { core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u32) }
+}
+
+fn mmio_w32(va: u64, off: u32, val: u32) {
+    unsafe { core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u32, val) }
+}
+
+const E1000_ICR: u32 = 0xC0;
+const E1000_ICS: u32 = 0xC8;
+const E1000_IMS: u32 = 0xD0;
+const E1000_IMC: u32 = 0xD8;
+const E1000_IVAR: u32 = 0xE4;
+const E1000_ICR_LSC: u32 = 1 << 2;
+const E1000_ICR_OTHER: u32 = 1 << 24;
+/// Other -> MSI-X table entry 0, valid.
+const E1000_IVAR_OTHER0: u32 = (0 | 0x8) << 16;
+
+const EDU_IDENT: u32 = 0x00;
+const EDU_IRQSTAT: u32 = 0x24;
+const EDU_RAISE: u32 = 0x60;
+const EDU_ACK: u32 = 0x64;
+const EDU_IDENT_VAL: u32 = 0x0100_00ED;
+
+static IRQ_CPU: AtomicU32 = AtomicU32::new(0xFFFF);
+static IRQ_HITS: AtomicU32 = AtomicU32::new(0);
+static IRQ_ALLOC: AtomicU32 = AtomicU32::new(0);
+static IRQ_MMIO: AtomicU64 = AtomicU64::new(0);
+static CPU_HITS: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
+
+fn reset_irq_obs() {
+    IRQ_CPU.store(0xFFFF, Ordering::SeqCst);
+    IRQ_HITS.store(0, Ordering::SeqCst);
+    IRQ_ALLOC.store(0, Ordering::SeqCst);
+    let mut i = 0usize;
+    while i < CPU_HITS.len() {
+        CPU_HITS[i].store(0, Ordering::SeqCst);
+        i += 1;
+    }
+}
+
+fn record_irq_cpu() {
+    let cpu = per_cpu_init::current().cpu_id;
+    IRQ_CPU.store(cpu, Ordering::SeqCst);
+    IRQ_HITS.fetch_add(1, Ordering::SeqCst);
+    if (cpu as usize) < CPU_HITS.len() {
+        CPU_HITS[cpu as usize].fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn on_msix() {
+    record_irq_cpu();
+    match irq_init::allocate_vector(0) {
+        Err(IrqError::InIrq) => IRQ_ALLOC.store(1, Ordering::SeqCst),
+        Ok(_) => IRQ_ALLOC.store(2, Ordering::SeqCst),
+        Err(_) => IRQ_ALLOC.store(3, Ordering::SeqCst),
+    }
+    let va = IRQ_MMIO.load(Ordering::SeqCst);
+    if va != 0 {
+        mmio_w32(va, E1000_ICR, 0xFFFF_FFFF);
+    }
+}
+
+fn on_intx() {
+    let va = IRQ_MMIO.load(Ordering::SeqCst);
+    if va != 0 {
+        let st = mmio_r32(va, EDU_IRQSTAT);
+        if st != 0 {
+            mmio_w32(va, EDU_ACK, st);
+        }
+    }
+    record_irq_cpu();
+}
+
+fn bar0_va(dev: &Device) -> Option<u64> {
+    let r = dev.resources[0];
+    if r.mapped_va != 0 {
+        Some(r.mapped_va)
+    } else {
+        None
+    }
+}
+
+fn test_irq_pool() -> Outcome {
+    let v = match irq_init::allocate_vector(0) {
+        Ok(v) => v,
+        Err(e) => return Outcome::Fail(e.as_str()),
+    };
+    if !irq::in_pool(v) || v == vectors::KBD {
+        let _ = irq_init::free_vector(v);
+        return Outcome::Fail("out of pool");
+    }
+    if irq_init::cpu_of(v) != Some(0) {
+        let _ = irq_init::free_vector(v);
+        return Outcome::Fail("cpu_of");
+    }
+    if irq_init::set_affinity(v, 0).is_err() {
+        let _ = irq_init::free_vector(v);
+        return Outcome::Fail("affinity");
+    }
+    match irq_init::free_vector(v) {
+        Ok(()) => Outcome::Ok,
+        Err(e) => Outcome::Fail(e.as_str()),
+    }
+}
+
+fn test_msix_cpu() -> Outcome {
+    let Some(ap) = second_cpu() else {
+        return Outcome::Skip("no AP");
+    };
+    let Some((_, dev)) = dev_init::find_id(0x8086, 0x10d3) else {
+        return Outcome::Skip("no e1000e");
+    };
+    if dev.caps.msix.is_none() {
+        return Outcome::Fail("no msix cap");
+    }
+    let Some(mmio) = bar0_va(&dev) else {
+        return Outcome::Fail("e1000e bar0");
+    };
+    let Some(cpu) = per_cpu_init::cpu(ap) else {
+        return Outcome::Fail("no apic id");
+    };
+    let vec = match irq_init::allocate_vector(0) {
+        Ok(v) => v,
+        Err(e) => return Outcome::Fail(e.as_str()),
+    };
+    if irq_init::set_handler(vec, on_msix).is_err() {
+        let _ = irq_init::free_vector(vec);
+        return Outcome::Fail("handler");
+    }
+    if irq_init::set_affinity(vec, ap).is_err() {
+        let _ = irq_init::free_vector(vec);
+        return Outcome::Fail("affinity");
+    }
+    if irq_init::cpu_of(vec) != Some(ap) {
+        let _ = irq_init::free_vector(vec);
+        return Outcome::Fail("cpu_of ap");
+    }
+    reset_irq_obs();
+    IRQ_MMIO.store(mmio, Ordering::SeqCst);
+    if let Err(e) = irq_init::enable_msix(&dev, 0, vec, cpu.apic_id as u8) {
+        let _ = irq_init::free_vector(vec);
+        return Outcome::Fail(e.as_str());
+    }
+    let cmd = pci_init::cfg_read16(dev.addr, CFG_COMMAND);
+    if cmd & CMD_INTX_DISABLE == 0 {
+        irq_init::disable_msix(&dev);
+        let _ = irq_init::free_vector(vec);
+        return Outcome::Fail("intx live");
+    }
+    mmio_w32(mmio, E1000_IMC, 0xFFFF_FFFF);
+    mmio_w32(mmio, E1000_IVAR, E1000_IVAR_OTHER0);
+    mmio_w32(mmio, E1000_IMS, E1000_ICR_LSC | E1000_ICR_OTHER);
+    mmio_w32(mmio, E1000_ICS, E1000_ICR_LSC);
+    let fired = spin_until_ns(|| IRQ_HITS.load(Ordering::SeqCst) != 0, 500_000_000);
+    mmio_w32(mmio, E1000_IMC, 0xFFFF_FFFF);
+    irq_init::disable_msix(&dev);
+    let _ = irq_init::free_vector(vec);
+    IRQ_MMIO.store(0, Ordering::SeqCst);
+    if !fired {
+        return Outcome::Fail("no msix");
+    }
+    if IRQ_CPU.load(Ordering::SeqCst) != ap {
+        return Outcome::Fail("wrong cpu");
+    }
+    if CPU_HITS[ap as usize].load(Ordering::SeqCst) == 0 {
+        return Outcome::Fail("ap counter");
+    }
+    if IRQ_ALLOC.load(Ordering::SeqCst) != 1 {
+        return Outcome::Fail("alloc in irq");
+    }
+    Outcome::Ok
+}
+
+fn test_intx_fallback() -> Outcome {
+    let Some(ap) = second_cpu() else {
+        return Outcome::Skip("no AP");
+    };
+    let Some((_, dev)) = dev_init::find_id(0x1b36, 0x11e8) else {
+        return Outcome::Skip("no edu");
+    };
+    if dev.irq.pin == 0 {
+        return Outcome::Fail("no pin");
+    }
+    let line = dev.irq.line;
+    if line == 0 || line == 0xFF {
+        return Outcome::Fail("irq line");
+    }
+    let Some(mmio) = bar0_va(&dev) else {
+        return Outcome::Fail("edu bar0");
+    };
+    if mmio_r32(mmio, EDU_IDENT) != EDU_IDENT_VAL {
+        return Outcome::Fail("edu ident");
+    }
+    let vec = match irq_init::allocate_vector(0) {
+        Ok(v) => v,
+        Err(e) => return Outcome::Fail(e.as_str()),
+    };
+    if irq_init::set_handler(vec, on_intx).is_err() {
+        let _ = irq_init::free_vector(vec);
+        return Outcome::Fail("handler");
+    }
+    let gsi = line as u32;
+    irq_init::mask_intx(dev.addr, false);
+    if irq_init::route_intx(gsi, vec, 0, Trigger::Level, Polarity::Low).is_err() {
+        let _ = irq_init::free_vector(vec);
+        return Outcome::Fail("route");
+    }
+    if irq_init::set_affinity(vec, ap).is_err() {
+        apic_init::mask_gsi(gsi);
+        let _ = irq_init::free_vector(vec);
+        return Outcome::Fail("affinity");
+    }
+    reset_irq_obs();
+    IRQ_MMIO.store(mmio, Ordering::SeqCst);
+    mmio_w32(mmio, EDU_RAISE, 1);
+    let fired = spin_until_ns(|| IRQ_HITS.load(Ordering::SeqCst) != 0, 500_000_000);
+    let st = mmio_r32(mmio, EDU_IRQSTAT);
+    if st != 0 {
+        mmio_w32(mmio, EDU_ACK, st);
+    }
+    apic_init::mask_gsi(gsi);
+    irq_init::mask_intx(dev.addr, true);
+    let _ = irq_init::free_vector(vec);
+    IRQ_MMIO.store(0, Ordering::SeqCst);
+    if !fired {
+        return Outcome::Fail("no intx");
+    }
+    if IRQ_CPU.load(Ordering::SeqCst) != ap {
+        return Outcome::Fail("wrong cpu");
+    }
+    Outcome::Ok
 }

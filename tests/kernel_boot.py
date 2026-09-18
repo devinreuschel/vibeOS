@@ -22,6 +22,8 @@ def main() -> int:
     cpu = os.environ.get("VIBEOS_QEMU_CPU", "max")
     mem = os.environ.get("VIBEOS_MEM", "128M")
     bios = os.environ.get("VIBEOS_BIOS")
+    # ktest-only: e1000e (MSI-X) and edu (INTx + DMA). e2e stays the default
+    # pc device set so `pci: 6 devices` does not move.
     extra = tuple(os.environ.get("VIBEOS_QEMU_EXTRA", "").split())
     timeout = float(os.environ.get("VIBEOS_TIMEOUT", "90"))
 
@@ -31,7 +33,10 @@ def main() -> int:
         cpu=cpu,
         mem=mem,
         bios=bios,
-        extra=("-device", "isa-debug-exit,iobase=0xf4,iosize=0x04") + extra,
+        extra=("-device", "isa-debug-exit,iobase=0xf4,iosize=0x04")
+        + ("-device", "e1000e")
+        + ("-device", "edu")
+        + extra,
     )
 
     try:

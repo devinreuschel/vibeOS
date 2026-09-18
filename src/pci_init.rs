@@ -160,7 +160,7 @@ fn ecam_write_at(va: u64, val: u32) {
     unsafe { (va as *mut u32).write_volatile(val) }
 }
 
-struct HwCfg;
+pub struct HwCfg;
 
 impl CfgIo for HwCfg {
     fn read32(&mut self, bdf: Bdf, offset: u16) -> u32 {
@@ -259,6 +259,14 @@ pub fn enable_mem_master(bdf: Bdf) {
     let mut hw = HwCfg;
     let cmd = pci::read16(&mut hw, bdf, CFG_COMMAND);
     pci::write_command(&mut hw, bdf, pci::enable_mem_master(cmd));
+}
+
+pub fn cfg_read16(bdf: Bdf, offset: u16) -> u16 {
+    pci::read16(&mut HwCfg, bdf, offset)
+}
+
+pub fn cfg_write_command(bdf: Bdf, cmd: u16) {
+    pci::write_command(&mut HwCfg, bdf, cmd)
 }
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]

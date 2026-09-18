@@ -16,6 +16,7 @@ pub mod font;
 pub mod fmt_util;
 pub mod heap;
 pub mod ipi;
+pub mod irq;
 pub mod kbd;
 pub mod kva;
 pub mod lock;

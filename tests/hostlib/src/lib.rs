@@ -31,6 +31,9 @@ pub mod heap;
 #[path = "../../../src/ipi.rs"]
 pub mod ipi;
 
+#[path = "../../../src/irq.rs"]
+pub mod irq;
+
 #[path = "../../../src/kbd.rs"]
 pub mod kbd;
 
