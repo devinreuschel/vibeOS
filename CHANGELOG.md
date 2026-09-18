@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed
+
+- CI: cancel superseded GitHub Actions runs for the same branch or PR so
+  only the latest tip stays in the queue.
+
 ### Added
 
 - Phase 7 slice B: virtio-blk on the Phase 6 modern transport. Probe reads
