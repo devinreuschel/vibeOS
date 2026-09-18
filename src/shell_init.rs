@@ -180,6 +180,7 @@ fn write_prompt(painted: &mut usize) {
 
 #[cfg_attr(feature = "kernel_tests", allow(dead_code))]
 fn paint(ed: &LineEditor, painted: &mut usize) {
+    // `\r` homes serial and FB (column 0, same row). Do not use `\n`.
     console_init::write(b"\r");
     console_init::write(PROMPT.as_bytes());
     console_init::write(ed.line());

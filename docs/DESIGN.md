@@ -1383,6 +1383,11 @@ The symbol table lived in `.text` or was patched in place. Rule: first link with
 table, `nm --demangle` the ELF, second link with the filled table. `.text` must not move. Do not wrap
 `$(CARGO)` in `$(call …)`: `-Zbuild-std=core,compiler_builtins,alloc` splits on commas.
 
+**QEMU framebuffer reprints the prompt on every key; serial looks fine.**
+The FB write path skipped `\r` before the text grid saw it, so the line editor's in-place paint
+(`\r` + rewrite) homed only on serial. Rule: `\r` sets column 0 on the same row; do not drop it.
+Host: `cr_homes_column_same_row`, `cr_paint_overwrites_in_place`.
+
 ## 9.2 Memory
 
 **AP bring-up hangs with no output, or faults at a low address.**

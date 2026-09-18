@@ -205,11 +205,10 @@ impl Fb {
         }
     }
 
+    /// `\r` homes the column (same row). The line editor paints in place
+    /// with it; dropping CR made the FB reprint the prompt.
     fn write_bytes(&mut self, bytes: &[u8]) {
         for &b in bytes {
-            if b == b'\r' {
-                continue;
-            }
             match self.grid.put(b) {
                 CellAction::None => {}
                 CellAction::Glyph { col, row, ch } => self.paint_glyph(col, row, ch),
