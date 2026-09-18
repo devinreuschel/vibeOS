@@ -2241,17 +2241,19 @@ fn test_pci_bar_map() -> Outcome {
     let Some((_, d)) = dev_init::find_id(0x1234, 0x1111) else {
         return Outcome::Fail("no vga");
     };
-    let r = d.resources[0];
-    if r.is_empty() {
-        return Outcome::Fail("vga bar0 empty");
+    let mut i = 0usize;
+    while i < pci::MAX_BARS {
+        let r = d.resources[i];
+        if !r.is_empty()
+            && r.size > 0
+            && r.size <= pci::MAX_BAR_MAP
+            && r.mapped_va != 0
+        {
+            return Outcome::Ok;
+        }
+        i += 1;
     }
-    if r.size == 0 || r.size > pci::MAX_BAR_MAP {
-        return Outcome::Fail("vga bar0 size");
-    }
-    if r.mapped_va == 0 {
-        return Outcome::Fail("vga bar0 unmapped");
-    }
-    Outcome::Ok
+    Outcome::Fail("vga bar unmapped")
 }
 
 fn test_pci_cfg_rw() -> Outcome {

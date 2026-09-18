@@ -92,9 +92,11 @@ fn map_mmio(phys: u64, len: u64) -> Option<u64> {
     }
     let end = phys.checked_add(len)?;
     // VGA BAR0 is the Limine FB. It is already WB on the physmap.
-    // UC-patching it would alias the console (DESIGN §4.1 / §9.2).
+    // UC-patching or ioremap would alias the console (DESIGN §4.1 / §9.2).
+    // Limine's FB size is the visible surface, often smaller than the BAR
+    // (16 MiB), so map_end may not cover the whole window.
     if fb_init::overlaps_phys(phys, len) {
-        if end <= paging_init::map_end() {
+        if phys < paging_init::map_end() {
             return Some(paging_init::HHDM_BASE.wrapping_add(phys));
         }
         return None;

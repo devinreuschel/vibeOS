@@ -18,6 +18,7 @@ pub fn push(d: Device) -> bool {
     REG.lock().push(d)
 }
 
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn register_driver(drv: &'static dyn Driver) -> bool {
     REG.lock().register(drv)
 }
@@ -26,16 +27,17 @@ pub fn bind_all() {
     REG.lock().bind_all(|d| pci_init::enable_mem_master(d.addr));
 }
 
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn len() -> usize {
     REG.lock().len()
 }
 
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+#[allow(dead_code)]
 pub fn get(i: usize) -> Option<Device> {
     REG.lock().get(i).copied()
 }
 
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+#[allow(dead_code)]
 pub fn find_bdf(bdf: Bdf) -> Option<(usize, Device)> {
     let g = REG.lock();
     let mut i = 0usize;
@@ -65,6 +67,7 @@ pub fn find_id(vendor: u16, device: u16) -> Option<(usize, Device)> {
     None
 }
 
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn claim(dev_i: usize, bar: u8) -> Result<(), ClaimError> {
     REG.lock().claim(dev_i, bar)
 }
