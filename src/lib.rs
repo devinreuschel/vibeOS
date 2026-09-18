@@ -9,6 +9,7 @@
 pub mod acpi;
 pub mod apic;
 pub mod block;
+pub mod cache;
 pub mod console;
 pub mod desc;
 pub mod dev;
@@ -25,6 +26,7 @@ pub mod lock;
 pub mod log;
 pub mod marker;
 pub mod paging;
+pub mod part;
 pub mod pci;
 pub mod per_cpu;
 pub mod pic;

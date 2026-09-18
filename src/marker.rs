@@ -78,7 +78,9 @@ pub const PCI_PREFIX: &str = "vibeOS: pci: ";
 pub const PCI_DEVICES_SUFFIX: &str = " devices";
 
 /// Phase 7 slice A. Runtime name + sector count. After `pci: N devices`,
-/// before `shell ready`. ROADMAP §7.1 / DESIGN §8.3.
+/// before `shell ready`. ROADMAP §7.1 / DESIGN §8.3. Slice C adds
+/// `block: <parent>p<N> <n> sectors` for each partition child after the
+/// parent line.
 pub const BLOCK_PREFIX: &str = "vibeOS: block: ";
 pub const BLOCK_SECTORS_SUFFIX: &str = " sectors";
 

@@ -16,6 +16,9 @@ pub mod apic;
 #[path = "../../../src/block.rs"]
 pub mod block;
 
+#[path = "../../../src/cache.rs"]
+pub mod cache;
+
 #[path = "../../../src/fb.rs"]
 pub mod fb;
 
@@ -51,6 +54,9 @@ pub mod log;
 
 #[path = "../../../src/paging.rs"]
 pub mod paging;
+
+#[path = "../../../src/part.rs"]
+pub mod part;
 
 #[path = "../../../src/pci.rs"]
 pub mod pci;

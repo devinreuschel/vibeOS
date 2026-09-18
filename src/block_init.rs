@@ -7,7 +7,7 @@
 
 use core::cell::UnsafeCell;
 use core::fmt::Write;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 use vibeos::block::{
     self, write_marker, BlockError, DeviceState, Op, Queue, Ramdisk, Request, MAX_QUEUE,
@@ -42,6 +42,7 @@ static DATA: SpinMutex<[u8; RAM0_BYTES]> =
 static STATE: AtomicU8 = AtomicU8::new(0);
 static FAIL_NEXT: AtomicU32 = AtomicU32::new(0);
 static LIVE: AtomicBool = AtomicBool::new(false);
+static IO_REQS: AtomicU64 = AtomicU64::new(0);
 
 fn ram() -> Ramdisk {
     Ramdisk::new(RAM0_NAME, RAM0_BLOCK_SIZE, RAM0_SECTORS).expect("ram0 geom")
@@ -138,6 +139,7 @@ pub fn complete_waiters(req: &Request, res: Result<(), BlockError>) {
 }
 
 fn execute(req: &Request) -> Result<(), BlockError> {
+    IO_REQS.fetch_add(1, Ordering::Relaxed);
     if DeviceState::from_u8(STATE.load(Ordering::Acquire)) == DeviceState::Failed {
         return Err(BlockError::Failed);
     }
@@ -334,6 +336,10 @@ pub fn capacity_sectors() -> u64 {
     RAM0_SECTORS
 }
 
+pub fn io_reqs() -> u64 {
+    IO_REQS.load(Ordering::Relaxed)
+}
+
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn inject_io_fails(n: u32) {
     FAIL_NEXT.store(n, Ordering::SeqCst);
@@ -397,10 +403,15 @@ fn cmd_blk(_args: &[&str]) {
     let st = state().as_str();
     let _ = writeln!(
         Console,
-        "vibeOS: blk: {} {} {} sectors {st}",
-        RAM0_NAME, RAM0_BLOCK_SIZE, RAM0_SECTORS
+        "vibeOS: blk: {} {} {} sectors {st} io {}",
+        RAM0_NAME,
+        RAM0_BLOCK_SIZE,
+        RAM0_SECTORS,
+        io_reqs()
     );
     let _ = crate::virtio_blk_init::shell_line(&mut Console);
+    let _ = crate::part_init::shell_lines(&mut Console);
+    let _ = crate::cache_init::shell_line(&mut Console);
 }
 
 pub fn init() {

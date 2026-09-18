@@ -615,12 +615,12 @@ enumeration and DMA.
 **Unlocks.** Filesystems, swap, a real userspace on disk.
 
 **Exit gate**
-- [ ] `block: <name> <n> sectors` for each detected device
-- [ ] write a pattern, reboot the VM, read it back intact
-- [ ] GPT and MBR partition tables parsed and exposed as separate block devices
-- [ ] concurrent reads and writes from multiple threads with no corruption, verified in-guest
-- [ ] the cache demonstrably reduces device requests, measured by a counter not by assertion
-- [ ] host tests: partition table parsing including deliberately corrupt tables, request merging, cache eviction
+- [x] `block: <name> <n> sectors` for each detected device
+- [x] write a pattern, reboot the VM, read it back intact
+- [x] GPT and MBR partition tables parsed and exposed as separate block devices
+- [x] concurrent reads and writes from multiple threads with no corruption, verified in-guest
+- [x] the cache demonstrably reduces device requests, measured by a counter not by assertion
+- [x] host tests: partition table parsing including deliberately corrupt tables, request merging, cache eviction
 
 ### 7.1 Block layer
 - [x] `BlockDevice` trait: logical block size, capacity, read, write, flush, discard
@@ -653,20 +653,20 @@ enumeration and DMA.
 - [ ] present mainly because real hardware has it; QEMU testing via `-device ahci`
 
 ### 7.5 Partitions
-- [ ] MBR parsing including extended and logical partitions
-- [ ] GPT parsing with header and entry CRC validation and backup header fallback
-- [ ] partitions exposed as offset-limited block devices
-- [ ] type GUID recognition for the ones that matter
-- [ ] host tests over real table images, including truncated and CRC-broken cases
+- [x] MBR parsing including extended and logical partitions
+- [x] GPT parsing with header and entry CRC validation and backup header fallback
+- [x] partitions exposed as offset-limited block devices
+- [x] type GUID recognition for the ones that matter
+- [x] host tests over real table images, including truncated and CRC-broken cases
 
 ### 7.6 Cache
-- [ ] a page-granular cache over block devices, keyed by device and offset
-- [ ] read-through, write-back with an explicit flush, and dirty tracking
-- [ ] LRU eviction with a clock or second-chance approximation
-- [ ] readahead on detected sequential access
-- [ ] a writeback thread with a bounded dirty ratio
-- [ ] built so phase 10 can unify it with the page cache rather than maintaining two caches
-- [ ] hit and miss counters exposed in the shell
+- [x] a page-granular cache over block devices, keyed by device and offset
+- [x] read-through, write-back with an explicit flush, and dirty tracking
+- [x] LRU eviction with a clock or second-chance approximation
+- [x] readahead on detected sequential access
+- [x] a writeback thread with a bounded dirty ratio
+- [x] built so phase 10 can unify it with the page cache rather than maintaining two caches
+- [x] hit and miss counters exposed in the shell
 
 ---
 

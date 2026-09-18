@@ -25,7 +25,7 @@ landed.
 | 7 | [SMP](#7-smp) | ACPI, AP bring-up, per-CPU, IPIs, shootdown |
 | 8 | [Testing](#8-testing) | Tiers, marker contract, QEMU flags, CI |
 | 9 | [Pitfalls](#9-pitfalls) | Bugs already paid for once |
-| 10 | [Block I/O](#10-block-io) | Requests, barrier vs flush, ramdisk, virtio-blk |
+| 10 | [Block I/O](#10-block-io) | Requests, barrier vs flush, ramdisk, virtio-blk, partitions, cache |
 
 ---
 
@@ -330,7 +330,7 @@ of it.
 | 16 | APIC + SMP bring-up | `smp: done` | Needs time (delays), heap (per-CPU allocation), scheduler (AP entry point). Live Phase 4 order: SMP before console. |
 | 17 | Framebuffer console, PS/2, mux | `console ok` | After `smp: done`. Install the IRQ1 / keyboard GSI handler, init the 8042, then unmask. Replay the pre-FB log ring onto the framebuffer. |
 | 17b | PCI enum + device registry | `pci: N devices` | After `console ok`. Legacy `0xCF8`/`0xCFC` for bus 0; MCFG → ECAM beyond. Scan builds a device list. Workqueue + threaded IRQ start, then drivers bind by id. Memory BARs are mapped through ioremap or the capped physmap; sizes above 32 MiB are recorded and skipped (DESIGN §4.1). |
-| 17c | Block layer + ramdisk + virtio-blk | `block: <name> <n> sectors` | After bind. One line per device. virtio-blk (`vda`) emits during probe; ramdisk (`ram0`) follows in `block_init`. |
+| 17c | Block layer + ramdisk + virtio-blk + partitions | `block: <name> <n> sectors` | After bind. One line per device. virtio-blk (`vda`) emits during probe; ramdisk (`ram0`) follows in `block_init`; partition children (`<parent>p<N>`) after that. |
 | 18 | Shell thread, builtins | `shell ready` | Last marker. Spawn a kernel thread (not `_start`, not idle, not an ISR), register builtins into the command table, print the prompt. `lspci` / `devices` / `blk` are live. |
 
 Ordering rules worth stating separately because they were learned the hard way:
@@ -373,7 +373,9 @@ memory BARs under the 32 MiB cap, fills the device registry, and emits
 next. Drivers register, then bind after the scan, not inline. Virtio-rng
 matches by id when a modern virtio device is present (ktest adds one; e2e
 does not). Ramdisk init follows bind and emits `block: <name> <n> sectors`.
-Step 18 spawns the shell as a kernel thread after `console ok` / `pci: N devices`
+Partition scan stamps an MBR on `ram0` and a GPT on `vda` (if empty) and emits
+`block: <parent>p<N> <n> sectors` per child. A writeback cache thread starts
+before the scan. Step 18 spawns the shell as a kernel thread after `console ok` / `pci: N devices`
 / `block: …` and emits `shell ready` last. `boot: phase1 done` was a Phase 1–4 stand-in and is no
 longer emitted; the trailing contract line is `shell ready`.
 The e2e contract in [section 8.3](#83-end-to-end) is the live order.
@@ -1318,8 +1320,9 @@ the diagnostic `time: calibrated hpet <n>/ms`; `make test-e2e-pit` asserts
 `smp: done` before `shell ready` is deliberate. Put SMP bring-up after the shell starts and an AP
 failure becomes invisible, because the harness sees its last marker and passes. `pci: <n> devices`
 sits between `console ok` and `shell ready` so `lspci` is registered before the prompt. The ramdisk
-`block: <name> <n> sectors` line sits after PCI and still before the shell. virtio-blk adds another
-`block: vda <n> sectors` line when the ktest disk is present (not on the production e2e `pc` set).
+`block: <name> <n> sectors` line sits after PCI and still before the shell. Partition children emit
+`block: <parent>p<N> <n> sectors` after the parent (e2e: `ram0p1`, `ram0p2`). virtio-blk adds
+`block: vda <n> sectors` and `vdapN` when the ktest disk is present (not on the production e2e `pc` set).
 
 With `-smp N`, additionally:
 
@@ -1681,9 +1684,11 @@ deferred with a roadmap line. "Documented" is not a state a critical bug gets to
 
 # 10. Block I/O
 
-Phase 7. Portable types live in `src/block.rs`. Kernel ramdisk, waiters, and the
-boot marker live in `src/block_init.rs`. virtio-blk packing is `src/virtio_blk.rs`;
-the driver is `src/virtio_blk_init.rs`. Partitions and cache are later slices.
+Phase 7. Portable types live in `src/block.rs`, `src/part.rs`, and
+`src/cache.rs`. Kernel ramdisk, waiters, and the boot marker live in
+`src/block_init.rs`. virtio-blk packing is `src/virtio_blk.rs`;
+the driver is `src/virtio_blk_init.rs`. Partition children are
+`src/part_init.rs`. The write-back cache is `src/cache_init.rs`.
 
 ## 10.1 Completions
 
@@ -1735,3 +1740,27 @@ Without `F_MQ`, a single request queue. Flush and discard go to the device
 when those features are negotiated; flush without `F_FLUSH` is a successful
 no-op (nothing to make durable). Kick uses the Phase 6 notify formula and
 `dma_wmb`; the blk driver does not invent a second fence.
+
+## 10.5 Partitions
+
+MBR (primary + extended/logical) and GPT parse in `src/part.rs`. Protective
+MBR type `0xEE` is not a data device; GPT is. Header and entry CRCs are
+checked; a bad primary falls back to the backup header at the last LBA.
+EBR walk is capped at 128; a corrupt next-LBA stops the chain.
+
+Children are offset-limited `BlockDevice`s. Child LBA `l` maps to
+`start + l` and I/O past `nsectors` is `Inval`. Marker
+`vibeOS: block: <parent>p<N> <n> sectors` (e.g. `ram0p1`, `vdap1`).
+
+## 10.6 Block cache
+
+Page-granular (4 KiB), keyed by `(dev_id, page offset)`. Read-through,
+write-back, clock eviction, sequential readahead, dirty-ratio writeback
+thread. `flush` writes dirty pages then calls the device `flush`.
+`barrier` writes dirty pages and does not device-flush.
+
+The cache sits above `BlockDevice`. Drivers are the miss
+path. Phase 10 page cache reuses these pages (same clock, same writeback);
+do not grow a second private cache. Hit/miss/device-request counters are
+in the `blk` shell command. The cache lock is RANK_DEVICE and is dropped
+before blocking device I/O.
