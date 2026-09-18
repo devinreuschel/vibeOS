@@ -138,6 +138,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("pci_bind_order", test_pci_bind_order),
     ("lspci_cmd", test_lspci_cmd),
     ("irq_pool", test_irq_pool),
+    ("irq_free_threaded", test_irq_free_threaded),
     ("msix_cpu", test_msix_cpu),
     ("intx_fallback", test_intx_fallback),
     ("intx_free_masks", test_intx_free_masks),
@@ -2502,6 +2503,57 @@ fn test_irq_pool() -> Outcome {
         }
         Err(e) => Outcome::Fail(e.as_str()),
     }
+}
+
+fn irq_th_nop() {}
+
+fn test_irq_free_threaded() -> Outcome {
+    let n0 = irq_init::allocated_count();
+    let v = match irq_init::allocate_vector(0) {
+        Ok(v) => v,
+        Err(e) => return Outcome::Fail(e.as_str()),
+    };
+    if irq_init::set_threaded(v, Some(irq_th_nop), irq_th_nop).is_err() {
+        let _ = irq_init::free_vector(v);
+        return Outcome::Fail("set_threaded");
+    }
+    if !irq_init::has_threaded(v) {
+        let _ = irq_init::free_vector(v);
+        return Outcome::Fail("threaded not armed");
+    }
+    if irq_init::free_vector(v).is_err() {
+        return Outcome::Fail("free");
+    }
+    if irq_init::has_threaded(v) {
+        return Outcome::Fail("threaded after free");
+    }
+    let v2 = match irq_init::allocate_vector(0) {
+        Ok(v) => v,
+        Err(e) => return Outcome::Fail(e.as_str()),
+    };
+    if v2 != v {
+        let _ = irq_init::free_vector(v2);
+        return Outcome::Fail("realloc other vec");
+    }
+    if irq_init::has_threaded(v2) {
+        let _ = irq_init::free_vector(v2);
+        return Outcome::Fail("recycle threaded");
+    }
+    if irq_init::set_handler(v2, irq_th_nop).is_err() {
+        let _ = irq_init::free_vector(v2);
+        return Outcome::Fail("set_handler");
+    }
+    if irq_init::has_threaded(v2) {
+        let _ = irq_init::free_vector(v2);
+        return Outcome::Fail("handler still threaded");
+    }
+    if irq_init::free_vector(v2).is_err() {
+        return Outcome::Fail("free2");
+    }
+    if irq_init::allocated_count() != n0 {
+        return Outcome::Fail("count");
+    }
+    Outcome::Ok
 }
 
 fn test_msix_cpu() -> Outcome {

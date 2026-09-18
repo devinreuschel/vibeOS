@@ -170,6 +170,12 @@ pub fn free_vector(vec: u8) -> Result<(), IrqError> {
             }
             HANDLERS[i].store(0, Ordering::Release);
             routes()[i] = Route::None;
+            // dispatch prefers threaded state whenever top/work is set, so a
+            // recycled vector would ignore a later set_handler if we left it.
+            let t = th();
+            t.top[i] = 0;
+            t.work[i] = 0;
+            t.pending[i] = false;
         }
         p.free(vec)
     })
@@ -439,4 +445,15 @@ fn install_pool_stubs() {
 #[cfg(feature = "kernel_tests")]
 pub fn allocated_count() -> usize {
     with_pool(|p| p.allocated())
+}
+
+#[cfg(feature = "kernel_tests")]
+pub fn has_threaded(vec: u8) -> bool {
+    match handler_slot(vec) {
+        Some(i) => {
+            let t = th();
+            t.top[i] != 0 || t.work[i] != 0 || t.pending[i]
+        }
+        None => false,
+    }
 }

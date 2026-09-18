@@ -695,10 +695,11 @@ armed duplicates IRQs.
 INTx remains the fallback when a function has neither MSI nor MSI-X: route the GSI
 through the I/O APIC (PCI is level, active low). Keyboard keeps hardcoded vector
 `0x30`; the pool starts handing out `0x31`. `free_vector` masks that GSI before it
-clears the handler and forgets a `Route::IoApic` record. MSI and MSI-X are
-message-based and do not need an I/O APIC mask on free. Clearing first would let a
-still-asserted level line storm empty `dispatch` calls, and a later
-`allocate_vector` could take IRQs from the old device.
+clears the handler and forgets a `Route::IoApic` record. It also zeros threaded
+`top`/`work`/`pending` so a recycled vector cannot keep the old bottom half. MSI
+and MSI-X are message-based and do not need an I/O APIC mask on free. Clearing
+first would let a still-asserted level line storm empty `dispatch` calls, and a
+later `allocate_vector` could take IRQs from the old device.
 
 EOI is the dispatcher's job, not the driver's. The dispatch layer knows whether a
 vector arrived via PIC or LAPIC and signals the right controller.

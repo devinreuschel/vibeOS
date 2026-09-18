@@ -142,6 +142,12 @@ fn fail_status(common: u64) {
     w8(common, COMMON_OFF_STATUS, st | virtio::STATUS_FAILED);
 }
 
+fn fail_armed(dev: &Device, common: u64, vec: u8) {
+    irq_init::disable_msix(dev);
+    let _ = irq_init::free_vector(vec);
+    fail_status(common);
+}
+
 fn on_soft(_arg: usize) {
     let _b = Box::new(0x22u8);
     SOFT_HITS.fetch_add(1, Ordering::SeqCst);
@@ -257,19 +263,21 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
     let hw_qs = r16(common, COMMON_OFF_QSIZE);
     let qsz = clamp_qsize(hw_qs);
     if qsz == 0 {
-        irq_init::disable_msix(dev);
-        let _ = irq_init::free_vector(vec);
-        fail_status(common);
+        fail_armed(dev, common, vec);
         return Err(VirtioError::BadQueue);
     }
     w16(common, COMMON_OFF_QSIZE, qsz);
-    let layout = SplitLayout::new(qsz).ok_or(VirtioError::BadQueue)?;
-    let qdma = dma_init::alloc(DmaAlloc::dma32(layout.total as u64)).ok_or(VirtioError::Failed)?;
+    let Some(layout) = SplitLayout::new(qsz) else {
+        fail_armed(dev, common, vec);
+        return Err(VirtioError::BadQueue);
+    };
+    let Some(qdma) = dma_init::alloc(DmaAlloc::dma32(layout.total as u64)) else {
+        fail_armed(dev, common, vec);
+        return Err(VirtioError::Failed);
+    };
     let Some(data) = dma_init::alloc(DmaAlloc::dma32(64)) else {
         dma_init::free(qdma);
-        irq_init::disable_msix(dev);
-        let _ = irq_init::free_vector(vec);
-        fail_status(common);
+        fail_armed(dev, common, vec);
         return Err(VirtioError::Failed);
     };
     unsafe {
@@ -302,9 +310,7 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
     ) else {
         dma_init::free(qdma);
         dma_init::free(data);
-        irq_init::disable_msix(dev);
-        let _ = irq_init::free_vector(vec);
-        fail_status(common);
+        fail_armed(dev, common, vec);
         return Err(VirtioError::Notify);
     };
 

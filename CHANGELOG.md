@@ -47,6 +47,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- `irq::free_vector` zeros threaded `top`/`work`/`pending` with the
+  handler and route. Recycled vectors were still taking the threaded
+  path, so a later `set_handler` was ignored (virtio probe-fail recycle).
+- virtio-rng probe tears down MSI-X, the vector, and device status when
+  `SplitLayout` or the virtqueue `DmaBuffer` fails after MSI-X is armed.
+  Those paths used `?` and skipped the teardown used on later failures.
 - `irq::free_vector` masks an I/O APIC GSI before clearing the handler
   and dropping `Route::IoApic`. A still-asserted level line no longer
   storms empty `dispatch`, and a later allocate of the same vector
