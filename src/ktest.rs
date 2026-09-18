@@ -24,6 +24,7 @@ use vibeos::thread::{ThreadId, ThreadState};
 use vibeos::time::{CalibSource, Instant};
 use vibeos::vectors;
 use vibeos::block::{BlockError, DeviceState, Op};
+use vibeos::fs::{FsError, InodeKind};
 use vibeos::virtio::F_VERSION_1;
 
 use crate::acpi_init;
@@ -34,6 +35,7 @@ use crate::cache_init;
 use crate::part_init;
 use crate::dev_init;
 use crate::dma_init;
+use crate::fs_init;
 use crate::ipi_init;
 use crate::irq_init;
 use crate::kva_init;
@@ -165,6 +167,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("block_part_gpt", test_block_part_gpt),
     ("block_cache_hit", test_block_cache_hit),
     ("block_cache_evict", test_block_cache_evict),
+    ("vfs_walk", test_vfs_walk),
 ];
 
 pub fn run() -> ! {
@@ -3734,4 +3737,54 @@ fn test_block_cache_evict() -> Outcome {
         return Outcome::Fail("no evict");
     }
     Outcome::Ok
+}
+
+fn test_vfs_walk() -> Outcome {
+    if !fs_init::live() {
+        return Outcome::Fail("not live");
+    }
+    fs_init::with(|v| {
+        if v.mkdir(None, "/a", 0o755).is_err() {
+            return Outcome::Fail("mkdir");
+        }
+        if v.creat(None, "/a/f", 0o644).is_err() {
+            return Outcome::Fail("creat");
+        }
+        match v.stat(None, "/a/./f") {
+            Ok(s) if s.kind == InodeKind::Reg => {}
+            _ => return Outcome::Fail("dot walk"),
+        }
+        match v.stat(None, "/a/f/../f") {
+            Ok(s) if s.kind == InodeKind::Reg => {}
+            _ => return Outcome::Fail("dotdot"),
+        }
+        if v.symlink(None, "/a/l", "/a/f").is_err() {
+            return Outcome::Fail("symlink");
+        }
+        match v.stat(None, "/a/l") {
+            Ok(s) if s.kind == InodeKind::Reg => {}
+            _ => return Outcome::Fail("follow"),
+        }
+        if v.symlink(None, "/loop", "/loop").is_err() {
+            return Outcome::Fail("loopc");
+        }
+        match v.stat(None, "/loop") {
+            Err(FsError::Loop) => {}
+            _ => return Outcome::Fail("noloop"),
+        }
+        if v.mkdir(None, "/mnt", 0o755).is_err() {
+            return Outcome::Fail("mnt");
+        }
+        if v.mount(None, "/mnt", &vibeos::fs::RamFs).is_err() {
+            return Outcome::Fail("mount");
+        }
+        if v.creat(None, "/mnt/x", 0o644).is_err() {
+            return Outcome::Fail("mx");
+        }
+        match v.stat(None, "/mnt/..") {
+            Ok(s) if s.kind == InodeKind::Dir => {}
+            _ => return Outcome::Fail("cross"),
+        }
+        Outcome::Ok
+    })
 }

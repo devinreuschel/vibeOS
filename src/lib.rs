@@ -16,6 +16,7 @@ pub mod dev;
 pub mod dma;
 pub mod fb;
 pub mod font;
+pub mod fs;
 pub mod fmt_util;
 pub mod heap;
 pub mod ipi;
