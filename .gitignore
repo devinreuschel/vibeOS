@@ -39,8 +39,10 @@ isodir/
 /iso_root_ktest/
 /iso_root_panic/
 /iso_root_gp/
+/iso_root_vibefs_crash/
 /target-panic/
 /target-gp/
+/target-vibefs-crash/
 /initrd.fat
 /tests/hostlib/target/
 /limine
