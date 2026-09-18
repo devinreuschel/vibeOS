@@ -183,6 +183,23 @@ pub unsafe fn outw(port: u16, val: u16) {
 }
 
 /// # Safety
+/// Caller vouches that `port` is a valid I/O port for a 16-bit read.
+#[inline]
+#[allow(dead_code)]
+pub unsafe fn inw(port: u16) -> u16 {
+    let val: u16;
+    unsafe {
+        asm!(
+            "in ax, dx",
+            out("ax") val,
+            in("dx") port,
+            options(nomem, nostack, preserves_flags)
+        )
+    };
+    val
+}
+
+/// # Safety
 /// Caller vouches that `port` is a valid I/O port for a 32-bit write.
 #[inline]
 #[allow(dead_code)]
@@ -195,6 +212,22 @@ pub unsafe fn outl(port: u16, val: u32) {
             options(nomem, nostack, preserves_flags)
         )
     };
+}
+
+/// # Safety
+/// Caller vouches that `port` is a valid I/O port for a 32-bit read.
+#[inline]
+pub unsafe fn inl(port: u16) -> u32 {
+    let val: u32;
+    unsafe {
+        asm!(
+            "in eax, dx",
+            out("eax") val,
+            in("dx") port,
+            options(nomem, nostack, preserves_flags)
+        )
+    };
+    val
 }
 
 /// Read `cr2` (page-fault address). Used by the ktest scoped #PF catcher.

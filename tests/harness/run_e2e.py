@@ -16,6 +16,38 @@ from harness import (  # noqa: E402
     run_qemu_and_check,
 )
 
+# Default QEMU `pc` (i440fx) set used by vibeOS e2e. No UHCI unless `-usb`.
+PCI_GOLDEN = (
+    "8086:1237",  # 440FX host
+    "8086:7000",  # PIIX3 ISA
+    "8086:7010",  # PIIX3 IDE
+    "8086:7113",  # PIIX4 ACPI
+    "1234:1111",  # Bochs VGA
+    "8086:100e",  # e1000 (QEMU default NIC)
+)
+
+
+def _check_pci_qemu_set(lines: list[str]) -> None:
+    """lspci-adjacent boot dump must name the default QEMU `pc` devices."""
+    blob = "\n".join(lines)
+    missing = [id_ for id_ in PCI_GOLDEN if id_ not in blob]
+    if missing:
+        raise HarnessError(f"pci dump missing {missing!r}")
+    count_line = None
+    for line in lines:
+        if line.startswith("vibeOS: pci: ") and line.endswith(" devices"):
+            count_line = line
+            break
+    if count_line is None:
+        raise HarnessError("pci count marker missing")
+    n_s = count_line[len("vibeOS: pci: ") : -len(" devices")]
+    try:
+        n = int(n_s)
+    except ValueError as e:
+        raise HarnessError(f"pci count not an int: {count_line!r}") from e
+    if n < len(PCI_GOLDEN):
+        raise HarnessError(f"pci count {n} < golden {len(PCI_GOLDEN)}")
+
 
 def main() -> int:
     iso = os.environ.get("VIBEOS_ISO", "vibeos.iso")
@@ -81,6 +113,13 @@ def main() -> int:
         print(f"[e2e]   . {name}", file=sys.stderr)
     if expect_panic and result.panic_line:
         print(f"[e2e]   . panic seen: {result.panic_line!r}", file=sys.stderr)
+    if not expect_panic and not gp_test:
+        try:
+            _check_pci_qemu_set(result.lines)
+        except HarnessError as e:
+            print(f"[e2e] FAIL: {e}", file=sys.stderr)
+            return 1
+        print("[e2e]   . pci qemu set ok", file=sys.stderr)
     return 0
 
 

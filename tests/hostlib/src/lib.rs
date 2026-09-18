@@ -46,6 +46,9 @@ pub mod log;
 #[path = "../../../src/paging.rs"]
 pub mod paging;
 
+#[path = "../../../src/pci.rs"]
+pub mod pci;
+
 #[path = "../../../src/pmm.rs"]
 pub mod pmm;
 
@@ -66,6 +69,9 @@ pub mod vectors;
 
 #[path = "../../../src/desc.rs"]
 pub mod desc;
+
+#[path = "../../../src/dev.rs"]
+pub mod dev;
 
 #[path = "../../../src/pic.rs"]
 pub mod pic;
@@ -115,6 +121,7 @@ mod smoke {
             marker::SMP_DONE,
             marker::BOOT_DONE,
             marker::CONSOLE_OK,
+            marker::PCI_PREFIX,
             marker::SHELL_READY,
         ] {
             assert!(m.starts_with("vibeOS: "), "marker missing prefix: {m}");
@@ -149,6 +156,8 @@ mod smoke {
         assert_eq!(marker::SMP_DONE, "vibeOS: smp: done");
         assert_eq!(marker::BOOT_DONE, "vibeOS: boot: phase1 done");
         assert_eq!(marker::CONSOLE_OK, "vibeOS: console ok");
+        assert_eq!(marker::PCI_PREFIX, "vibeOS: pci: ");
+        assert_eq!(marker::PCI_DEVICES_SUFFIX, " devices");
         assert_eq!(marker::SHELL_READY, "vibeOS: shell ready");
     }
 

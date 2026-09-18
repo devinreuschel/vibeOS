@@ -9,6 +9,22 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Phase 6 slice A: device model + PCI/PCIe enumeration. `Device` / `Driver`
+  trait (probe/remove + id table) and a registry that matches by id and
+  probes in dependency order, with exclusive BAR/resource claims. Scan
+  fills the device list, then bind — not inline probe from the walk.
+  Legacy config via `0xCF8`/`0xCFC` on bus 0; MCFG → ECAM beyond.
+  Recursive bridge enum, BAR decode (mem/IO, 32/64, all-1s size probe),
+  capability offsets recorded (MSI/MSI-X/PCIe/PM; not enabled). Memory
+  BARs map through ioremap or the capped physmap; sizes above 32 MiB are
+  skipped (DESIGN §4.1). VGA BAR0 is not UC-patched over the console FB.
+  Memory Space + Bus Master on bind. Marker `vibeOS: pci: <n> devices`
+  after `console ok`, before `shell ready`. Shell `lspci` / `devices`.
+  Host tests: CF8/ECAM encoding, config R/W, BAR size (including huge-BAR
+  refuse), cap walk, bridge recurse. In-guest: QEMU `pc` id set, VGA BAR
+  map, config R/W, exclusive claim, bind, `lspci`. Harness asserts the
+  new marker in this change set.
+
 - Phase 5 slice C: kernel shell thread, command registry, and
   `vibeOS: shell ready` as the last boot marker (`smp: done` →
   `console ok` → `shell ready`). Line editor (echo, backspace, ctrl+C,

@@ -13,6 +13,7 @@
 //! when patching MMIO attributes.
 
 use core::fmt::Write;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use vibeos::lock::RANK_PT;
 use vibeos::marker;
@@ -108,11 +109,14 @@ pub fn with_pt<R>(f: impl FnOnce() -> R) -> R {
 }
 
 /// Global reservation state for the ioremap window (DESIGN §4.1).
-///
-/// Reachable from phase 2 (APIC/HPET) via `ioremap` below; keeps the
-/// item pub-reachable so the linker does not GC it.
-#[allow(dead_code)]
 static mut IOREMAP: IoremapWindow = IoremapWindow::new();
+
+static MAP_END: AtomicU64 = AtomicU64::new(0);
+
+/// Physmap high water from [`install`]. BARs above this go through ioremap.
+pub fn map_end() -> u64 {
+    MAP_END.load(Ordering::Relaxed)
+}
 
 /// Reserve and map `[phys, phys+len)` into the ioremap window with UC
 /// attributes. Returns the VA (offset within the page preserved so a
@@ -122,7 +126,6 @@ static mut IOREMAP: IoremapWindow = IoremapWindow::new();
 /// Caller vouches that `[phys, phys+len)` is real device MMIO and that
 /// no aliased mapping through the physmap will be used to touch the
 /// same registers with cacheable attributes.
-#[allow(dead_code)] // wired for phase 2 (APIC/HPET); slice B ships the API only
 pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
     let (va_offset, base_va, round_len) = with_pt(|| {
         let va_offset = unsafe { &mut *core::ptr::addr_of_mut!(IOREMAP) }.reserve(phys, len)?;
@@ -408,6 +411,7 @@ pub unsafe fn install(
 
     // ---- 6. Install ----
     unsafe { x86::write_cr3(mapper.root().as_u64()) };
+    MAP_END.store(map_end, Ordering::Relaxed);
 
     PagingReport {
         map_end,

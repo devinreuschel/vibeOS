@@ -4,7 +4,7 @@
 //! IRQ path. Double buffering is parked (Design ACK).
 
 use core::ptr;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use vibeos::fb::{
     glyph_origin, last_text_row_offset, pack_bgrx, pixel_offset, scroll_copy, text_row_bytes,
@@ -33,9 +33,23 @@ struct Fb {
 
 static READY: AtomicBool = AtomicBool::new(false);
 static FB: SpinMutex<Option<Fb>> = SpinMutex::with_rank(None, RANK_DEVICE);
+static FB_PHYS: AtomicU64 = AtomicU64::new(0);
+static FB_LEN: AtomicU64 = AtomicU64::new(0);
 
 pub fn ready() -> bool {
     READY.load(Ordering::Acquire)
+}
+
+/// Physical `[base, base+len)` of the console framebuffer, if any.
+/// Atomically readable so PCI BAR mapping can skip a UC patch without
+/// taking RANK_DEVICE (ioremap needs PT, which ranks below DEVICE).
+pub fn overlaps_phys(phys: u64, len: u64) -> bool {
+    let span = FB_LEN.load(Ordering::Acquire);
+    if span == 0 || len == 0 {
+        return false;
+    }
+    let base = FB_PHYS.load(Ordering::Acquire);
+    phys < base.saturating_add(span) && base < phys.saturating_add(len)
 }
 
 /// Attach the first Limine 32bpp framebuffer.
@@ -59,12 +73,17 @@ pub fn init() -> bool {
         let Some(grid) = TextGrid::new(width, height, BANNER_ROWS) else {
             continue;
         };
+        let size = fb.size() as u64;
+        if base >= crate::paging_init::HHDM_BASE {
+            FB_PHYS.store(base - crate::paging_init::HHDM_BASE, Ordering::Release);
+            FB_LEN.store(size, Ordering::Release);
+        }
         chosen = Some(Fb {
             base,
             width,
             height,
             pitch,
-            size: fb.size() as u64,
+            size,
             grid,
         });
         break;
