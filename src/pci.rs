@@ -680,6 +680,7 @@ pub fn friendly_name(vendor: u16, device: u16) -> Option<&'static str> {
         (0x8086, 0x2922) => Some("ICH9 SATA"),
         (0x8086, 0x2930) => Some("ICH9 SMBus"),
         (0x1234, 0x1111) => Some("bochs"),
+        (0x1234, 0x11e8) => Some("edu"),
         (0x1af4, 0x1000) => Some("virtio-net"),
         (0x1af4, 0x1001) => Some("virtio-blk"),
         (0x1af4, 0x1041) => Some("virtio-net"),
@@ -1152,6 +1153,7 @@ mod tests {
         assert_eq!(friendly_name(0x1234, 0x1111), Some("bochs"));
         assert_eq!(friendly_name(0x8086, 0x100e), Some("e1000"));
         assert_eq!(friendly_name(0x1b36, 0x11e8), Some("edu"));
+        assert_eq!(friendly_name(0x1234, 0x11e8), Some("edu"));
         assert_eq!(friendly_name(0x0000, 0x0000), None);
         let mut info = FuncInfo::empty();
         info.bdf = Bdf::new(0, 2, 0);

@@ -41,6 +41,7 @@ enum Route {
         trigger: Trigger,
         polarity: Polarity,
     },
+    #[allow(dead_code)] // enable_msi; virtio/C will arm it
     Msi,
     Msix,
 }
@@ -196,6 +197,7 @@ pub fn mask_intx(bdf: Bdf, disable: bool) {
     pci_init::cfg_write_command(bdf, cmd);
 }
 
+#[allow(dead_code)]
 pub fn enable_msi(bdf: Bdf, cap: u8, vector: u8, apic_id: u8) -> Result<(), IrqError> {
     if !in_pool(vector) {
         return Err(IrqError::BadVector);
@@ -218,6 +220,7 @@ pub fn enable_msi(bdf: Bdf, cap: u8, vector: u8, apic_id: u8) -> Result<(), IrqE
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn disable_msi(bdf: Bdf, cap: u8) {
     let mut hw = pci_init::HwCfg;
     pci::set_msi_enable(&mut hw, bdf, cap, false);

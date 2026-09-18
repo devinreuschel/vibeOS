@@ -2458,7 +2458,13 @@ fn bar0_va(dev: &Device) -> Option<u64> {
     }
 }
 
+fn find_edu() -> Option<(usize, Device)> {
+    // QEMU 8.x edu is 1234:11e8 (old QEMU vendor). Later trees use 1b36:11e8.
+    dev_init::find_id(0x1234, 0x11e8).or_else(|| dev_init::find_id(0x1b36, 0x11e8))
+}
+
 fn test_irq_pool() -> Outcome {
+    let n0 = irq_init::allocated_count();
     let v = match irq_init::allocate_vector(0) {
         Ok(v) => v,
         Err(e) => return Outcome::Fail(e.as_str()),
@@ -2476,7 +2482,13 @@ fn test_irq_pool() -> Outcome {
         return Outcome::Fail("affinity");
     }
     match irq_init::free_vector(v) {
-        Ok(()) => Outcome::Ok,
+        Ok(()) => {
+            if irq_init::allocated_count() != n0 {
+                Outcome::Fail("count")
+            } else {
+                Outcome::Ok
+            }
+        }
         Err(e) => Outcome::Fail(e.as_str()),
     }
 }
@@ -2553,7 +2565,7 @@ fn test_intx_fallback() -> Outcome {
     let Some(ap) = second_cpu() else {
         return Outcome::Skip("no AP");
     };
-    let Some((_, dev)) = dev_init::find_id(0x1b36, 0x11e8) else {
+    let Some((_, dev)) = find_edu() else {
         return Outcome::Skip("no edu");
     };
     if dev.irq.pin == 0 {
@@ -2671,7 +2683,7 @@ const EDU_DMA_RUN: u32 = 1;
 const EDU_DMA_TO_PCI: u32 = 2;
 
 fn test_dma_edu() -> Outcome {
-    let Some((_, dev)) = dev_init::find_id(0x1b36, 0x11e8) else {
+    let Some((_, dev)) = find_edu() else {
         return Outcome::Skip("no edu");
     };
     let Some(mmio) = bar0_va(&dev) else {
