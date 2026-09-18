@@ -110,6 +110,11 @@ pub fn tsc_per_ms_from_pit(tsc_delta: u64, count: u16) -> Option<u64> {
 
 /// Tick milliseconds plus TSC interpolation since that tick.
 /// Wrapping TSC delta; saturates at `u64::MAX`.
+///
+/// Extra is clamped to one tick so a late IRQ cannot publish past the
+/// next tick's base (`now_us` would then go backwards when the counter
+/// moves). A delta larger than 1s of TSC is "behind the snapshot"
+/// (TCG/`hlt` without invariant TSC), not a late tick.
 pub fn interpolate_us(tick_ms: u64, tsc_at_tick: u64, tsc_now: u64, tsc_per_ms: u64) -> u64 {
     interpolate(tick_ms, tsc_at_tick, tsc_now, tsc_per_ms, 1_000)
 }
@@ -129,9 +134,12 @@ fn interpolate(
     if tsc_per_ms == 0 {
         return clamp_u64(base);
     }
-    let delta = tsc_now.wrapping_sub(tsc_at_tick) as u128;
-    let extra = delta.saturating_mul(per_ms) / tsc_per_ms as u128;
-    clamp_u64(base.saturating_add(extra))
+    let delta = tsc_now.wrapping_sub(tsc_at_tick);
+    if delta > tsc_per_ms.saturating_mul(1_000) {
+        return clamp_u64(base);
+    }
+    let extra = (delta as u128).saturating_mul(per_ms) / tsc_per_ms as u128;
+    clamp_u64(base.saturating_add(extra.min(per_ms)))
 }
 
 fn clamp_u64(v: u128) -> u64 {
@@ -290,6 +298,21 @@ mod tests {
         assert_eq!(interpolate_us(5, 0, k, k), 6_000);
         assert_eq!(interpolate_ns(5, 0, k, k), 6_000_000);
         assert_eq!(interpolate_us(1, 0, 0, 0), 1_000);
+    }
+
+    /// Late tick: 2.5ms of TSC after tick 5, then the IRQ publishes tick 6.
+    /// Uncapped extra is 7500us and the next base (6000) goes backwards.
+    #[test]
+    fn interpolate_late_tick_not_past_next_base() {
+        let k = 1_000_000;
+        let late = interpolate_us(5, 0, k * 5 / 2, k);
+        let after = interpolate_us(6, k * 5 / 2, k * 5 / 2, k);
+        assert_eq!(late, 6_000);
+        assert_eq!(after, 6_000);
+        assert!(after >= late);
+        assert_eq!(interpolate_ns(5, 0, k * 5 / 2, k), 6_000_000);
+        // TSC behind the snapshot wraps to ~2^64; treat as extra 0.
+        assert_eq!(interpolate_us(5, 100, 99, k), 5_000);
     }
 
     #[test]

@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- `now_us` / `now_ns` no longer go backwards under `hlt` on TCG. Interpolation
+  is clamped to one tick (a late IRQ used to publish past the next tick's
+  base), a wrapping "TSC behind snapshot" delta interpolates as 0, and the
+  kernel never publishes a reading below the last one. Hits
+  `now_us_under_yields` once Phase 7C's `blk-wb` sleeper is on the timeout
+  queue (more schedule work on the tick path; TCG has no invariant TSC).
+
 ### Added
 
 - Phase 7 slice C: GPT/MBR partition children and a write-back block cache.
