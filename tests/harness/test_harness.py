@@ -113,6 +113,17 @@ class TestOrderedMarkerCheck(unittest.TestCase):
         self.assertFalse(m.matches("vibeOS: block: ram0"))
         self.assertFalse(m.matches("ram0 256 sectors"))
 
+    def test_block_vda_marker_needs_name_and_sectors(self) -> None:
+        m = Marker(
+            "vibeOS: block: ",
+            "block_vda",
+            and_contains=("vda", " sectors"),
+        )
+        self.assertTrue(m.matches("vibeOS: block: vda 8192 sectors"))
+        self.assertFalse(m.matches("vibeOS: block: ram0 256 sectors"))
+        self.assertFalse(m.matches("vibeOS: block: vda"))
+        self.assertFalse(m.matches("vibeOS: virtio: blk vda"))
+
     def test_and_contains_wrong_shape_fails_ordered_check(self) -> None:
         # The pmm marker must not accept a line that lacks the prefix.
         lines = [

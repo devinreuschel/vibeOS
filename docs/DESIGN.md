@@ -25,7 +25,7 @@ landed.
 | 7 | [SMP](#7-smp) | ACPI, AP bring-up, per-CPU, IPIs, shootdown |
 | 8 | [Testing](#8-testing) | Tiers, marker contract, QEMU flags, CI |
 | 9 | [Pitfalls](#9-pitfalls) | Bugs already paid for once |
-| 10 | [Block I/O](#10-block-io) | Requests, barrier vs flush, ramdisk |
+| 10 | [Block I/O](#10-block-io) | Requests, barrier vs flush, ramdisk, virtio-blk |
 
 ---
 
@@ -330,7 +330,7 @@ of it.
 | 16 | APIC + SMP bring-up | `smp: done` | Needs time (delays), heap (per-CPU allocation), scheduler (AP entry point). Live Phase 4 order: SMP before console. |
 | 17 | Framebuffer console, PS/2, mux | `console ok` | After `smp: done`. Install the IRQ1 / keyboard GSI handler, init the 8042, then unmask. Replay the pre-FB log ring onto the framebuffer. |
 | 17b | PCI enum + device registry | `pci: N devices` | After `console ok`. Legacy `0xCF8`/`0xCFC` for bus 0; MCFG → ECAM beyond. Scan builds a device list. Workqueue + threaded IRQ start, then drivers bind by id. Memory BARs are mapped through ioremap or the capped physmap; sizes above 32 MiB are recorded and skipped (DESIGN §4.1). |
-| 17c | Block layer + ramdisk | `block: <name> <n> sectors` | After bind. In-memory `BlockDevice` so the request queue is testable before virtio-blk. One line per device. |
+| 17c | Block layer + ramdisk + virtio-blk | `block: <name> <n> sectors` | After bind. One line per device. virtio-blk (`vda`) emits during probe; ramdisk (`ram0`) follows in `block_init`. |
 | 18 | Shell thread, builtins | `shell ready` | Last marker. Spawn a kernel thread (not `_start`, not idle, not an ISR), register builtins into the command table, print the prompt. `lspci` / `devices` / `blk` are live. |
 
 Ordering rules worth stating separately because they were learned the hard way:
@@ -1318,7 +1318,8 @@ the diagnostic `time: calibrated hpet <n>/ms`; `make test-e2e-pit` asserts
 `smp: done` before `shell ready` is deliberate. Put SMP bring-up after the shell starts and an AP
 failure becomes invisible, because the harness sees its last marker and passes. `pci: <n> devices`
 sits between `console ok` and `shell ready` so `lspci` is registered before the prompt. The ramdisk
-`block: <name> <n> sectors` line sits after PCI and still before the shell.
+`block: <name> <n> sectors` line sits after PCI and still before the shell. virtio-blk adds another
+`block: vda <n> sectors` line when the ktest disk is present (not on the production e2e `pc` set).
 
 With `-smp N`, additionally:
 
@@ -1357,7 +1358,7 @@ in the test harness produces either false confidence or a debugging session in t
 |---------|-------|
 | `make run` | `-cdrom myos.iso -m 128M -smp 2 -cpu max -serial stdio -accel tcg` |
 | e2e | as above plus `-display none -no-reboot -monitor unix:...,server=on,wait=off` |
-| ktest | as e2e plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04`, `-device e1000e`, `-device edu`, `-device virtio-rng-pci,disable-legacy=on`. Extra NICs/edu/virtio are ktest-only; e2e stays the default `pc` set (`pci: 6 devices`). |
+| ktest | as e2e plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04`, `-device e1000e`, `-device edu`, `-device virtio-rng-pci,disable-legacy=on`, virtio-blk (`-drive file=…,if=none,id=vibehd` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>`). Extra NICs/edu/virtio are ktest-only; e2e stays the default `pc` set (`pci: 6 devices`). After a green first boot the harness reboots the same disk and requires `vibeOS: persist: intact`. |
 | LAPIC fallback | `-cpu qemu64,-tsc-deadline` |
 | SMP stress | `-smp 4` |
 | Interrupt debugging | `-d int,cpu_reset`, plus `-machine q35` when chipset behavior matters |
@@ -1681,14 +1682,15 @@ deferred with a roadmap line. "Documented" is not a state a critical bug gets to
 # 10. Block I/O
 
 Phase 7. Portable types live in `src/block.rs`. Kernel ramdisk, waiters, and the
-boot marker live in `src/block_init.rs`. Partitions and cache are later slices.
+boot marker live in `src/block_init.rs`. virtio-blk packing is `src/virtio_blk.rs`;
+the driver is `src/virtio_blk_init.rs`. Partitions and cache are later slices.
 
 ## 10.1 Completions
 
 A request carries waiter cookies, not a locked queue. Submit takes the per-device
 queue lock (RANK_DEVICE), merges or enqueues, and drops the lock before any copy.
-The ramdisk pump runs after that drop; virtio-blk will submit to a virtqueue here
-and complete from a threaded IRQ instead. `complete` stores the status then wakes
+The ramdisk pump runs after that drop; virtio-blk submits to a virtqueue after
+the same drop and completes from a threaded IRQ. `complete` stores the status then wakes
 waiters under SCHED. Never hold the queue lock across I/O or across that wake
 (DEVICE then SCHED is the wrong order). Hard IRQ must not run this path: enqueue
 work only (DESIGN [§2.2](#22-interrupt-handler-rules)). Ramdisk backing is BSS, not
@@ -1717,3 +1719,19 @@ retried and does not fail the device. No infinite retry loop.
 
 Logical block size is per device. Do not assume 512. Capacity is in those
 blocks. Discard on ramdisk validates the range and otherwise no-ops.
+
+## 10.4 virtio-blk
+
+Modern virtio-blk (`1af4:1042`, `VERSION_1` required) binds by id on the
+Phase 6 transport. Config reads capacity (512-byte units), `blk_size` (512
+if `F_BLK_SIZE` is absent), and topology when offered. Each request is a
+descriptor chain: header + data (or discard range) + status. The status
+byte is device-writable DMA, never a stack slot. Completions harvest the
+used ring on the threaded IRQ and wake the same `IoWaiter` cookies as the
+ramdisk. Hard IRQ only acks ISR.
+
+`F_MQ`: one virtqueue per online CPU, capped by the device `num_queues`.
+Without `F_MQ`, a single request queue. Flush and discard go to the device
+when those features are negotiated; flush without `F_FLUSH` is a successful
+no-op (nothing to make durable). Kick uses the Phase 6 notify formula and
+`dma_wmb`; the blk driver does not invent a second fence.

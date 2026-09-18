@@ -1155,6 +1155,8 @@ mod tests {
         assert_eq!(friendly_name(0x1234, 0x1111), Some("bochs"));
         assert_eq!(friendly_name(0x1af4, 0x1044), Some("virtio-rng"));
         assert_eq!(friendly_name(0x1af4, 0x1004), Some("virtio-rng"));
+        assert_eq!(friendly_name(0x1af4, 0x1042), Some("virtio-blk"));
+        assert_eq!(friendly_name(0x1af4, 0x1001), Some("virtio-blk"));
         assert_eq!(friendly_name(0x1b36, 0x11e8), Some("edu"));
         assert_eq!(friendly_name(0x1234, 0x11e8), Some("edu"));
         assert_eq!(friendly_name(0x0000, 0x0000), None);

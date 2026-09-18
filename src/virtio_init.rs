@@ -1,7 +1,6 @@
 //! Modern virtio-pci transport + virtio-rng. ROADMAP §6.5.
 //!
-//! Transport + one split VQ. No net/block. MSI-X from the pool; kick uses
-//! the notify cap's offset multiplier.
+//! Transport + virtio-rng. virtio-blk is `virtio_blk_init`. ROADMAP §6.5.
 
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 

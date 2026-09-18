@@ -15,6 +15,10 @@ pub const VENDOR_ID: u16 = 0x1AF4;
 pub const DEV_RNG_MODERN: u16 = 0x1044;
 /// Transitional rng. Probe still requires [`F_VERSION_1`].
 pub const DEV_RNG_LEGACY: u16 = 0x1004;
+/// Modern virtio-blk (`0x1040 + 2`).
+pub const DEV_BLK_MODERN: u16 = 0x1042;
+/// Transitional virtio-blk. Probe still requires [`F_VERSION_1`].
+pub const DEV_BLK_LEGACY: u16 = 0x1001;
 
 pub const F_INDIRECT_DESC: u64 = 1 << 28;
 pub const F_EVENT_IDX: u64 = 1 << 29;
@@ -207,6 +211,10 @@ pub fn is_rng(vendor: u16, device: u16) -> bool {
     vendor == VENDOR_ID && (device == DEV_RNG_MODERN || device == DEV_RNG_LEGACY)
 }
 
+pub fn is_blk(vendor: u16, device: u16) -> bool {
+    vendor == VENDOR_ID && (device == DEV_BLK_MODERN || device == DEV_BLK_LEGACY)
+}
+
 pub fn is_pow2_u16(n: u16) -> bool {
     n != 0 && n & n.wrapping_sub(1) == 0
 }
@@ -343,6 +351,16 @@ pub struct UsedElem {
     pub len: u32,
 }
 
+/// One buffer in a descriptor chain. [`DESC_F_NEXT`] is applied by [`SplitQueue::add_chain`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DescBuf {
+    pub addr: u64,
+    pub len: u32,
+    pub flags: u16,
+}
+
+pub const MAX_CHAIN: usize = 8;
+
 /// Split VQ over a caller-owned DMA / sim buffer.
 pub struct SplitQueue {
     pub layout: SplitLayout,
@@ -427,11 +445,63 @@ impl SplitQueue {
         len: u32,
         flags: u16,
     ) -> Result<u16, VirtioError> {
-        let i = self.pop_free().ok_or(VirtioError::NoDesc)?;
-        self.write_desc(i, addr, len, flags, 0);
+        self.add_chain(&[DescBuf {
+            addr,
+            len,
+            flags,
+        }])
+    }
+
+    /// Chain `bufs` with [`DESC_F_NEXT`]. Head goes in the avail ring.
+    /// `flags` is WRITE/INDIRECT; NEXT is added on every desc but the last.
+    pub fn add_chain(&mut self, bufs: &[DescBuf]) -> Result<u16, VirtioError> {
+        let n = bufs.len();
+        if n == 0 || n > MAX_CHAIN {
+            return Err(VirtioError::NoDesc);
+        }
+        if (self.num_free as usize) < n {
+            return Err(VirtioError::NoDesc);
+        }
+        let mut ids = [0u16; MAX_CHAIN];
+        let mut i = 0usize;
+        while i < n {
+            ids[i] = self.pop_free().ok_or(VirtioError::NoDesc)?;
+            i += 1;
+        }
+        i = 0;
+        while i < n {
+            let last = i + 1 == n;
+            let flags = if last {
+                bufs[i].flags
+            } else {
+                bufs[i].flags | DESC_F_NEXT
+            };
+            let next = if last { 0 } else { ids[i + 1] };
+            self.write_desc(ids[i], bufs[i].addr, bufs[i].len, flags, next);
+            i += 1;
+        }
+        let head = ids[0];
         let aidx = load_u16(self.base, self.layout.avail_idx());
-        store_u16(self.base, self.layout.avail_ring(aidx), i);
-        Ok(i)
+        store_u16(self.base, self.layout.avail_ring(aidx), head);
+        Ok(head)
+    }
+
+    fn free_chain(&mut self, mut i: u16) {
+        let cap = self.layout.size;
+        let mut n = 0u16;
+        loop {
+            if n >= cap {
+                break;
+            }
+            n += 1;
+            let flags = self.desc_flags(i);
+            let next = self.desc_next(i);
+            self.push_free(i);
+            if flags & DESC_F_NEXT == 0 {
+                break;
+            }
+            i = next;
+        }
     }
 
     /// One main desc with [`DESC_F_INDIRECT`] pointing at a table.
@@ -480,7 +550,7 @@ impl SplitQueue {
         let id = load_u32(self.base, off) as u16;
         let len = load_u32(self.base, off + 4);
         self.last_used = self.last_used.wrapping_add(1);
-        self.push_free(id);
+        self.free_chain(id);
         if self.event_idx {
             store_u16(self.base, self.layout.used_event(), self.last_used);
         }
@@ -660,6 +730,9 @@ mod tests {
         assert!(is_rng(VENDOR_ID, DEV_RNG_MODERN));
         assert!(is_rng(VENDOR_ID, DEV_RNG_LEGACY));
         assert!(!is_rng(0x8086, DEV_RNG_MODERN));
+        assert!(is_blk(VENDOR_ID, DEV_BLK_MODERN));
+        assert!(is_blk(VENDOR_ID, DEV_BLK_LEGACY));
+        assert!(!is_blk(VENDOR_ID, DEV_RNG_MODERN));
     }
 
     #[test]
@@ -784,5 +857,53 @@ mod tests {
         q.add(0x1000, 4, DESC_F_WRITE).unwrap();
         q.add(0x2000, 4, DESC_F_WRITE).unwrap();
         assert_eq!(q.add(0x3000, 4, DESC_F_WRITE), Err(VirtioError::NoDesc));
+    }
+
+    #[test]
+    fn chain_three_and_free() {
+        let layout = SplitLayout::new(8).unwrap();
+        let (_keep, base) = pool(layout.total);
+        let mut q = SplitQueue::new(layout, base, false);
+        q.init();
+        let head = q
+            .add_chain(&[
+                DescBuf {
+                    addr: 0x1000,
+                    len: 16,
+                    flags: 0,
+                },
+                DescBuf {
+                    addr: 0x2000,
+                    len: 512,
+                    flags: 0,
+                },
+                DescBuf {
+                    addr: 0x3000,
+                    len: 1,
+                    flags: DESC_F_WRITE,
+                },
+            ])
+            .unwrap();
+        assert_eq!(q.num_free, 5);
+        assert_eq!(q.desc_flags(head) & DESC_F_NEXT, DESC_F_NEXT);
+        let d1 = q.desc_next(head);
+        assert_eq!(q.desc_flags(d1) & DESC_F_NEXT, DESC_F_NEXT);
+        let d2 = q.desc_next(d1);
+        assert_eq!(q.desc_flags(d2) & DESC_F_NEXT, 0);
+        assert_eq!(q.desc_flags(d2) & DESC_F_WRITE, DESC_F_WRITE);
+        assert_eq!(q.desc_addr(head), 0x1000);
+        assert_eq!(q.desc_len(d1), 512);
+        q.publish();
+        let used = q.used_idx();
+        let uoff = q.layout.used_elem(used);
+        store_u32(base, uoff, head as u32);
+        store_u32(base, uoff + 4, 513);
+        dma::dma_wmb();
+        store_u16(base, q.layout.used_idx(), used.wrapping_add(1));
+        let u = q.get_used().unwrap();
+        assert_eq!(u.id, head);
+        assert_eq!(u.len, 513);
+        assert_eq!(q.num_free, 8);
+        assert_eq!(q.get_used(), None);
     }
 }
