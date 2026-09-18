@@ -5,8 +5,6 @@
 //! `IoWaiter` path. Kick is inline for ramdisk; virtio-blk replaces it.
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
-use alloc::vec;
-use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
@@ -28,6 +26,7 @@ use crate::thread_init;
 pub const RAM0_NAME: &str = "ram0";
 pub const RAM0_BLOCK_SIZE: u32 = 512;
 pub const RAM0_SECTORS: u64 = 256;
+const RAM0_BYTES: usize = RAM0_BLOCK_SIZE as usize * RAM0_SECTORS as usize;
 
 const ST_PEND: u32 = 0;
 const ST_OK: u32 = 1;
@@ -37,7 +36,9 @@ const ST_FAILED: u32 = 4;
 const ST_QFULL: u32 = 5;
 
 static Q: SpinMutex<Queue> = SpinMutex::with_rank(Queue::new(), RANK_DEVICE);
-static DATA: SpinMutex<Vec<u8>> = SpinMutex::with_rank(Vec::new(), RANK_DEVICE);
+// BSS, not a heap Vec: init must not take RANK_HEAP under RANK_DEVICE.
+static DATA: SpinMutex<[u8; RAM0_BYTES]> =
+    SpinMutex::with_rank([0u8; RAM0_BYTES], RANK_DEVICE);
 static STATE: AtomicU8 = AtomicU8::new(0);
 static FAIL_NEXT: AtomicU32 = AtomicU32::new(0);
 static LIVE: AtomicBool = AtomicBool::new(false);
@@ -397,10 +398,10 @@ fn cmd_blk(_args: &[&str]) {
 }
 
 pub fn init() {
-    let r = ram();
+    debug_assert_eq!(ram().byte_len(), RAM0_BYTES);
     {
         let mut d = DATA.lock();
-        *d = vec![0u8; r.byte_len()];
+        d.fill(0);
     }
     STATE.store(DeviceState::Ready.as_u8(), Ordering::Release);
     LIVE.store(true, Ordering::Release);

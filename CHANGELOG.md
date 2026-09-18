@@ -15,8 +15,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   flush (DESIGN §10). Completions are waiter cookies; the queue lock is
   not held across the copy so a later virtio-blk threaded IRQ can signal
   the same path. I/O errors retry a bounded number of times, then the
-  device is `Failed`. Ramdisk `ram0` (256 × 512 B) is registered at boot;
-  discard is a range-checked no-op. Marker
+  device is `Failed`. Ramdisk `ram0` (256 × 512 B) is registered at boot
+  with BSS backing (no heap alloc under RANK_DEVICE); discard is a
+  range-checked no-op. Marker
   `vibeOS: block: <name> <n> sectors` after `pci: N devices`, before
   `shell ready`. Shell `blk`. Host tests cover merge, elevator, fences,
   retry, and 4K geometry. In-guest: ramdisk R/W, concurrent threads,

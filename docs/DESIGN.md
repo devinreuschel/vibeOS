@@ -1691,7 +1691,8 @@ The ramdisk pump runs after that drop; virtio-blk will submit to a virtqueue her
 and complete from a threaded IRQ instead. `complete` stores the status then wakes
 waiters under SCHED. Never hold the queue lock across I/O or across that wake
 (DEVICE then SCHED is the wrong order). Hard IRQ must not run this path: enqueue
-work only (DESIGN [§2.2](#22-interrupt-handler-rules)).
+work only (DESIGN [§2.2](#22-interrupt-handler-rules)). Ramdisk backing is BSS, not
+a heap `Vec`: allocating under RANK_DEVICE would take RANK_HEAP (lock order).
 
 Blocking wait and async submit share the same cookie. The buffer and waiter must
 outlive the request.
