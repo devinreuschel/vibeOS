@@ -680,10 +680,17 @@ mod tests {
     #[test]
     fn one_device_fits_shell_stack_full_table_does_not() {
         // Shell stacks are 16 KiB. Copy one Device at a time; a full
-        // [Device; MAX_DEVICES] (and a second Registry) overflows.
-        assert!(core::mem::size_of::<Device>() < 2048);
-        assert!(core::mem::size_of::<[Device; MAX_DEVICES]>() > 16 * 1024);
-        assert!(core::mem::size_of::<Registry>() > 16 * 1024);
+        // [Device; MAX_DEVICES] plus a second Registry overflows.
+        let one = core::mem::size_of::<Device>();
+        let table = core::mem::size_of::<[Device; MAX_DEVICES]>();
+        let reg = core::mem::size_of::<Registry>();
+        assert!(one < 2048, "one Device {one}");
+        assert!(
+            table + reg > 16 * 1024,
+            "table {table} + registry {reg} should exceed 16KiB"
+        );
+        // cmd_devices stacked both; even lspci's table plus frame is tight.
+        assert!(reg > 16 * 1024, "Registry {reg} should exceed 16KiB");
     }
 
     #[test]
