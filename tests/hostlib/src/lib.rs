@@ -25,7 +25,7 @@ pub mod fb;
 #[path = "../../../src/font.rs"]
 pub mod font;
 
-#[path = "../../../src/fs.rs"]
+#[path = "../../../src/fs/mod.rs"]
 pub mod fs;
 
 #[path = "../../../src/fmt_util.rs"]

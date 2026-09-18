@@ -108,6 +108,25 @@ pub fn tsc_per_ms_from_pit(tsc_delta: u64, count: u16) -> Option<u64> {
     tsc_per_ms_sane(v).then_some(v)
 }
 
+/// Invariant TSC: PIT vs HPET must land in 75–125%. TCG (bit clear): 50–200%.
+pub const CALIB_BAND_INVARIANT: (u64, u64) = (75, 125);
+pub const CALIB_BAND_TCG: (u64, u64) = (50, 200);
+
+/// True if `sample` is in `[lo_pct, hi_pct]` percent of `reference`.
+pub const fn calib_in_band(reference: u64, sample: u64, lo_pct: u64, hi_pct: u64) -> bool {
+    let lo = reference.saturating_mul(lo_pct) / 100;
+    let hi = reference.saturating_mul(hi_pct) / 100;
+    sample >= lo && sample <= hi
+}
+
+pub const fn calib_band(invariant_tsc: bool) -> (u64, u64) {
+    if invariant_tsc {
+        CALIB_BAND_INVARIANT
+    } else {
+        CALIB_BAND_TCG
+    }
+}
+
 /// Tick milliseconds plus TSC interpolation since that tick.
 /// Wrapping TSC delta; saturates at `u64::MAX`.
 ///
@@ -124,13 +143,7 @@ pub fn interpolate_ns(tick_ms: u64, tsc_at_tick: u64, tsc_now: u64, tsc_per_ms: 
     interpolate(tick_ms, tsc_at_tick, tsc_now, tsc_per_ms, 1_000_000)
 }
 
-fn interpolate(
-    tick_ms: u64,
-    tsc_at_tick: u64,
-    tsc_now: u64,
-    tsc_per_ms: u64,
-    per_ms: u128,
-) -> u64 {
+fn interpolate(tick_ms: u64, tsc_at_tick: u64, tsc_now: u64, tsc_per_ms: u64, per_ms: u128) -> u64 {
     let base = (tick_ms as u128).saturating_mul(per_ms);
     if tsc_per_ms == 0 {
         return clamp_u64(base);
@@ -351,6 +364,19 @@ mod tests {
         assert!(!tsc_per_ms_sane(1));
         assert!(!tsc_per_ms_sane(u64::MAX));
         assert!(tsc_per_ms_sane(1_000_000));
+    }
+
+    #[test]
+    fn calib_band_invariant_vs_tcg() {
+        assert!(calib_in_band(1_000_000, 750_000, 75, 125));
+        assert!(calib_in_band(1_000_000, 1_250_000, 75, 125));
+        assert!(!calib_in_band(1_000_000, 749_999, 75, 125));
+        assert!(!calib_in_band(1_000_000, 1_250_001, 75, 125));
+        assert!(calib_in_band(1_000_000, 500_000, 50, 200));
+        assert!(calib_in_band(1_000_000, 2_000_000, 50, 200));
+        assert!(!calib_in_band(1_000_000, 499_999, 50, 200));
+        assert_eq!(calib_band(true), CALIB_BAND_INVARIANT);
+        assert_eq!(calib_band(false), CALIB_BAND_TCG);
     }
 
     #[test]

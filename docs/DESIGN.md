@@ -335,7 +335,7 @@ of it.
 | 17 | Framebuffer console, PS/2, mux | `console ok` | After `smp: done`. Install the IRQ1 / keyboard GSI handler, init the 8042, then unmask. Replay the pre-FB log ring onto the framebuffer. |
 | 17b | PCI enum + device registry | `pci: N devices` | After `console ok`. Legacy `0xCF8`/`0xCFC` for bus 0; MCFG → ECAM beyond. Scan builds a device list. Workqueue + threaded IRQ start, then drivers bind by id. Memory BARs are mapped through ioremap or the capped physmap; sizes above 32 MiB are recorded and skipped (DESIGN §4.1). |
 | 17c | Block layer + ramdisk + virtio-blk + partitions | `block: <name> <n> sectors` | After bind. One line per device. virtio-blk (`vda`) emits during probe; ramdisk (`ram0`) follows in `block_init`; partition children (`<parent>p<N>`) after that. |
-| 17d | VFS + ramfs root | (none) | After block. Mount table and a dummy ramfs at `/` so later FAT/pseudo can mount. No serial marker (Phase 8A). |
+| 17d | VFS + ramfs root + pseudo mounts | (none) | After block. Dummy ramfs at `/`, then devfs/procfs/tmpfs/sysfs on `/dev` `/proc` `/tmp` `/sys`. No serial marker (Phase 8A/C). |
 | 18 | Shell thread, builtins | `shell ready` | Last marker. Spawn a kernel thread (not `_start`, not idle, not an ISR), register builtins into the command table, print the prompt. `lspci` / `devices` / `blk` are live. |
 
 Ordering rules worth stating separately because they were learned the hard way:
@@ -380,7 +380,8 @@ matches by id when a modern virtio device is present (ktest adds one; e2e
 does not). Ramdisk init follows bind and emits `block: <name> <n> sectors`.
 Partition scan stamps an MBR on `ram0` and a GPT on `vda` (if empty) and emits
 `block: <parent>p<N> <n> sectors` per child. A writeback cache thread starts
-before the scan. VFS mounts a dummy ramfs at `/` after that with no serial
+before the scan. VFS mounts a dummy ramfs at `/` after that, then mounts
+devfs / procfs / tmpfs / sysfs on `/dev` `/proc` `/tmp` `/sys`, with no serial
 marker. Step 18 spawns the shell as a kernel thread after `console ok` / `pci: N devices`
 / `block: …` and emits `shell ready` last. `boot: phase1 done` was a Phase 1–4 stand-in and is no
 longer emitted; the trailing contract line is `shell ready`.
@@ -1221,7 +1222,7 @@ Things that belong here and are easy to get wrong, so should have tests from the
 - ACPI: RSDP v1 and v2 checksum rejection, table length validation, HPET generic address structure
   rejecting I/O space and zero addresses, MADT entry iteration over truncated tables.
 - Timekeeping: the `now_us` interpolation formula, seqlock retry under a simulated concurrent writer,
-  monotonicity, overflow near `u64::MAX`.
+  monotonicity, overflow near `u64::MAX`, HPET/PIT agreement bands (invariant vs TCG).
 - ICR delivery-pending poll: returns true when the bit clears, false at the iteration cap.
 - Vector table: no two named vectors are equal.
 - Scan code decoding: make and break codes, `0xE0` prefixes, modifier state, unknown codes returning
@@ -1232,6 +1233,9 @@ Things that belong here and are easy to get wrong, so should have tests from the
 - `align_up` and friends at 0, at exactly aligned, and near overflow.
 - VFS path walk: `.` / `..`, bounded symlink depth, symlink loop → error, negative dentry
   invalidate-on-create, mount-point crossing.
+- kernfs: one directory implementation shared by devfs/tmpfs/procfs/sysfs; tmpfs
+  writes evict through the Phase 7 block cache rather than pinning a grow-only
+  buffer; `/dev/null` `/dev/zero` `/dev/random`; procfs stubs do not panic.
 
 Two lessons about writing these:
 
@@ -1599,6 +1603,13 @@ counter moves and `now_us` drops, even with a stable seqlock pair. A wrapping TS
 delta looks like ~2^64 cycles. Rule: treat a high-bit wrapping delta as extra 0, and never publish a
 `now_ns` below the last reading. Do not cap extra at one tick — ktest holds IF off and timeouts must
 still advance on TSC alone.
+
+**`sleep_ms(50)` and PIT-vs-HPET calib flake on TCG SMP.**
+TCG has no invariant TSC. Boot HPET calibration runs before APs; a later PIT channel 2 window sees a
+different apparent TSC rate, and LAPIC periodic ticks coalesce so `uptime_ms` during a sleep is not
+50–100. Rule: in-guest checks key off the invariant-TSC CPUID bit. Without it, retry PIT against a
+fresh HPET sample with a 50–200% band, and accept `now_us` (~50 ms) when ticks coalesce. Do not loosen
+the invariant-TSC path.
 
 **Serial output from multiple CPUs is unreadable.**
 No lock on TX. Rule: lock serial TX. Byte granularity is enough to keep bytes from interleaving; full

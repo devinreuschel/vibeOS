@@ -1,20 +1,26 @@
-//! VFS: inodes, dentries, mounts, path walk. ROADMAP §8.1.
+//! VFS: inodes, dentries, mounts, path walk. ROADMAP §8.1 / §8.4.
 //!
 //! Bounded caches with clock eviction. Path walk is iterative with a
 //! symlink-depth cap (loop → [`FsError::Loop`], not stack smash).
-//! Dummy [`RamFs`] is enough to unit-test walks before FAT/pseudo.
+//! Dummy [`RamFs`] is enough to unit-test walks. Pseudo filesystems
+//! share [`kernfs`] (one dir tree, four skins).
 //!
 //! Locks (kernel): RANK_DEVICE. Tables are static; do not allocate
 //! under the lock. No FS work from hard IRQ (DESIGN §2.2).
 
+mod kernfs;
+
+pub use kernfs::{DevFs, ProcFs, SysFs, TmpFs};
+
 pub const MAX_NAME: usize = 64;
 pub const MAX_PATH: usize = 256;
 pub const MAX_FILE_BYTES: usize = 256;
-pub const MAX_DIR_ENTS: usize = 20;
-pub const MAX_INODES: usize = 16;
-pub const MAX_RAM_NODES: usize = 32;
-pub const MAX_DENTRIES: usize = 16;
-pub const MAX_MOUNTS: usize = 4;
+pub const MAX_DIR_ENTS: usize = 32;
+pub const MAX_INODES: usize = 48;
+pub const MAX_RAM_NODES: usize = 64;
+pub const MAX_DENTRIES: usize = 48;
+pub const MAX_MOUNTS: usize = 8;
+pub const MAX_KERN_NODES: usize = 128;
 pub const MAX_FILES: usize = 16;
 pub const MAX_FDS: usize = 16;
 pub const MAX_SYMLINK: u32 = 8;
@@ -23,6 +29,8 @@ pub const MAX_WALK: u32 = 80;
 pub const S_IFMT: u16 = 0o170000;
 pub const S_IFREG: u16 = 0o100000;
 pub const S_IFDIR: u16 = 0o040000;
+pub const S_IFCHR: u16 = 0o020000;
+pub const S_IFBLK: u16 = 0o060000;
 pub const S_IFLNK: u16 = 0o120000;
 pub const S_IRWXU: u16 = 0o700;
 pub const S_IRWXG: u16 = 0o070;
@@ -88,6 +96,8 @@ pub enum InodeKind {
     Reg,
     Dir,
     Lnk,
+    Chr,
+    Blk,
 }
 
 impl InodeKind {
@@ -96,6 +106,8 @@ impl InodeKind {
             InodeKind::Reg => "reg",
             InodeKind::Dir => "dir",
             InodeKind::Lnk => "lnk",
+            InodeKind::Chr => "chr",
+            InodeKind::Blk => "blk",
         }
     }
 
@@ -104,6 +116,8 @@ impl InodeKind {
             InodeKind::Reg => S_IFREG,
             InodeKind::Dir => S_IFDIR,
             InodeKind::Lnk => S_IFLNK,
+            InodeKind::Chr => S_IFCHR,
+            InodeKind::Blk => S_IFBLK,
         }
     }
 
@@ -111,6 +125,8 @@ impl InodeKind {
         match mode & S_IFMT {
             S_IFDIR => InodeKind::Dir,
             S_IFLNK => InodeKind::Lnk,
+            S_IFCHR => InodeKind::Chr,
+            S_IFBLK => InodeKind::Blk,
             _ => InodeKind::Reg,
         }
     }
@@ -119,12 +135,20 @@ impl InodeKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FsType {
     Ram,
+    Dev,
+    Tmp,
+    Proc,
+    Sys,
 }
 
 impl FsType {
     pub fn as_str(self) -> &'static str {
         match self {
             FsType::Ram => "ramfs",
+            FsType::Dev => "devfs",
+            FsType::Tmp => "tmpfs",
+            FsType::Proc => "procfs",
+            FsType::Sys => "sysfs",
         }
     }
 }
@@ -307,7 +331,7 @@ impl InodeOps for RamFs {
 }
 
 #[derive(Clone, Copy)]
-struct Inode {
+pub(crate) struct Inode {
     used: bool,
     clock: bool,
     refs: u16,
@@ -522,6 +546,7 @@ pub struct Vfs {
     mounts: [Mount; MAX_MOUNTS],
     files: [File; MAX_FILES],
     ram: [RamNode; MAX_RAM_NODES],
+    kern: kernfs::KernState,
     ihand: u16,
     dhand: u16,
     pub now: u64,
@@ -537,6 +562,7 @@ impl Vfs {
             mounts: [Mount::EMPTY; MAX_MOUNTS],
             files: [File::EMPTY; MAX_FILES],
             ram: [RamNode::EMPTY; MAX_RAM_NODES],
+            kern: kernfs::KernState::new(),
             ihand: 0,
             dhand: 0,
             now: 0,
@@ -685,7 +711,12 @@ impl Vfs {
             }
             n += 1;
         }
-        ram_drop_sb(self, sb);
+        match self.fstype(sb) {
+            FsType::Ram => ram_drop_sb(self, sb),
+            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
+                kernfs::kern_drop_sb(self, sb)
+            }
+        }
         self.supers[sb as usize] = Super::EMPTY;
         self.mounts[m as usize] = Mount::EMPTY;
         Ok(())
@@ -786,7 +817,7 @@ impl Vfs {
                     return Err(FsError::IsDir);
                 }
             }
-            InodeKind::Reg => {
+            InodeKind::Reg | InodeKind::Chr | InodeKind::Blk => {
                 if flags & O_DIRECTORY != 0 {
                     return Err(FsError::NotDir);
                 }
@@ -916,8 +947,10 @@ impl Vfs {
     pub fn truncate(&mut self, cwd: Option<PathRef>, path: &str, size: u64) -> Result<(), FsError> {
         let p = self.resolve(cwd, path, true)?;
         let islot = self.d_islot(p.dslot)?;
-        if self.inodes[islot as usize].kind != InodeKind::Reg {
-            return Err(FsError::IsDir);
+        match self.inodes[islot as usize].kind {
+            InodeKind::Reg => {}
+            InodeKind::Dir => return Err(FsError::IsDir),
+            InodeKind::Lnk | InodeKind::Chr | InodeKind::Blk => return Err(FsError::Inval),
         }
         let sb = self.sb_of(p.mount);
         self.ops_truncate(sb, islot, size)?;
@@ -1014,6 +1047,9 @@ impl Vfs {
     fn ops_lookup(&mut self, sb: u8, dir: u16, name: &[u8]) -> Result<u32, FsError> {
         match self.fstype(sb) {
             FsType::Ram => RamFs.lookup(self, dir, name),
+            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
+                kernfs::kern_lookup(self, dir, name)
+            }
         }
     }
 
@@ -1028,30 +1064,45 @@ impl Vfs {
     ) -> Result<u32, FsError> {
         match self.fstype(sb) {
             FsType::Ram => RamFs.create(self, dir, name, kind, mode, target),
+            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
+                kernfs::kern_create(self, dir, name, kind, mode, target)
+            }
         }
     }
 
     fn ops_unlink(&mut self, sb: u8, dir: u16, name: &[u8]) -> Result<(), FsError> {
         match self.fstype(sb) {
             FsType::Ram => RamFs.unlink(self, dir, name),
+            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
+                kernfs::kern_unlink(self, dir, name)
+            }
         }
     }
 
     fn ops_read(&mut self, sb: u8, islot: u16, off: u64, buf: &mut [u8]) -> Result<usize, FsError> {
         match self.fstype(sb) {
             FsType::Ram => RamFs.read(self, islot, off, buf),
+            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
+                kernfs::kern_read(self, islot, off, buf)
+            }
         }
     }
 
     fn ops_write(&mut self, sb: u8, islot: u16, off: u64, buf: &[u8]) -> Result<usize, FsError> {
         match self.fstype(sb) {
             FsType::Ram => RamFs.write(self, islot, off, buf),
+            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
+                kernfs::kern_write(self, islot, off, buf)
+            }
         }
     }
 
     fn ops_truncate(&mut self, sb: u8, islot: u16, size: u64) -> Result<(), FsError> {
         match self.fstype(sb) {
             FsType::Ram => RamFs.truncate(self, islot, size),
+            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
+                kernfs::kern_truncate(self, islot, size)
+            }
         }
     }
 
@@ -1064,18 +1115,27 @@ impl Vfs {
     ) -> Result<Option<u64>, FsError> {
         match self.fstype(sb) {
             FsType::Ram => RamFs.readdir(self, islot, cookie, out),
+            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
+                kernfs::kern_readdir(self, islot, cookie, out)
+            }
         }
     }
 
     fn ops_stat(&mut self, sb: u8, islot: u16) -> Result<Stat, FsError> {
         match self.fstype(sb) {
             FsType::Ram => RamFs.stat(self, islot),
+            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
+                kernfs::kern_stat(self, islot)
+            }
         }
     }
 
     fn ops_readlink(&mut self, sb: u8, islot: u16, buf: &mut [u8]) -> Result<usize, FsError> {
         match self.fstype(sb) {
             FsType::Ram => ram_readlink(self, islot, buf),
+            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
+                kernfs::kern_readlink(self, islot, buf)
+            }
         }
     }
 
@@ -1171,9 +1231,19 @@ impl Vfs {
         if self.inodes[i].refs == 0 {
             let sb = self.inodes[i].sb;
             let ino = self.inodes[i].ino;
-            ram_try_free(self, sb, ino);
-            if ram_nlink(self, sb, ino) == 0 {
-                self.inodes[i] = Inode::EMPTY;
+            match self.fstype(sb) {
+                FsType::Ram => {
+                    ram_try_free(self, sb, ino);
+                    if ram_nlink(self, sb, ino) == 0 {
+                        self.inodes[i] = Inode::EMPTY;
+                    }
+                }
+                FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
+                    kernfs::kern_try_free(self, sb, ino);
+                    if kernfs::kern_nlink(self, sb, ino) == 0 {
+                        self.inodes[i] = Inode::EMPTY;
+                    }
+                }
             }
         }
     }
@@ -1224,13 +1294,21 @@ impl Vfs {
         self.stats.i_evicts = self.stats.i_evicts.saturating_add(1);
         let sb = self.inodes[i].sb;
         let ino = self.inodes[i].ino;
-        ram_try_free(self, sb, ino);
+        match self.fstype(sb) {
+            FsType::Ram => ram_try_free(self, sb, ino),
+            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
+                kernfs::kern_try_free(self, sb, ino)
+            }
+        }
         self.inodes[i] = Inode::EMPTY;
     }
 
     fn inode_load(&mut self, slot: u16, sb: u8, ino: u32) -> Result<(), FsError> {
         match self.fstype(sb) {
             FsType::Ram => ram_fill_inode(self, slot, sb, ino),
+            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
+                kernfs::kern_fill_inode(self, slot, sb, ino)
+            }
         }
     }
 
@@ -1240,6 +1318,17 @@ impl Vfs {
         match self.fstype(sb) {
             FsType::Ram => {
                 if let Some(r) = ram_meta(self, sb, ino) {
+                    self.inodes[islot as usize].size = r.size;
+                    self.inodes[islot as usize].nlink = r.nlink;
+                    self.inodes[islot as usize].mode = r.mode;
+                    self.inodes[islot as usize].kind = r.kind;
+                    self.inodes[islot as usize].mtime = r.mtime;
+                    self.inodes[islot as usize].ctime = r.ctime;
+                    self.inodes[islot as usize].atime = r.atime;
+                }
+            }
+            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
+                if let Some(r) = kernfs::kern_meta(self, sb, ino) {
                     self.inodes[islot as usize].size = r.size;
                     self.inodes[islot as usize].nlink = r.nlink;
                     self.inodes[islot as usize].mode = r.mode;
@@ -1796,6 +1885,10 @@ fn ram_create(
             return Err(FsError::Inval);
         }
     }
+    match kind {
+        InodeKind::Reg | InodeKind::Dir | InodeKind::Lnk => {}
+        InodeKind::Chr | InodeKind::Blk => return Err(FsError::NotSupp),
+    }
     let sb = vfs.inodes[dir_islot as usize].sb;
     let dir_ino = vfs.inodes[dir_islot as usize].ino;
     {
@@ -1831,6 +1924,9 @@ fn ram_create(
                 }
             }
             InodeKind::Reg | InodeKind::Dir => {
+                r.size = 0;
+            }
+            InodeKind::Chr | InodeKind::Blk => {
                 r.size = 0;
             }
         }
@@ -1923,6 +2019,7 @@ fn ram_read(vfs: &mut Vfs, islot: u16, off: u64, buf: &mut [u8]) -> Result<usize
             buf[..n].copy_from_slice(&r.data[start..start + n]);
             Ok(n)
         }
+        InodeKind::Chr | InodeKind::Blk => Err(FsError::NotSupp),
     }
 }
 
@@ -1933,7 +2030,7 @@ fn ram_write(vfs: &mut Vfs, islot: u16, off: u64, buf: &[u8]) -> Result<usize, F
     let r = ram_get_mut(vfs, sb, ino).ok_or(FsError::NotFound)?;
     match r.kind {
         InodeKind::Dir => Err(FsError::IsDir),
-        InodeKind::Lnk => Err(FsError::Inval),
+        InodeKind::Lnk | InodeKind::Chr | InodeKind::Blk => Err(FsError::Inval),
         InodeKind::Reg => {
             if off as usize > MAX_FILE_BYTES {
                 return Err(FsError::NoSpace);
@@ -1964,7 +2061,7 @@ fn ram_truncate(vfs: &mut Vfs, islot: u16, size: u64) -> Result<(), FsError> {
     let r = ram_get_mut(vfs, sb, ino).ok_or(FsError::NotFound)?;
     match r.kind {
         InodeKind::Dir => Err(FsError::IsDir),
-        InodeKind::Lnk => Err(FsError::Inval),
+        InodeKind::Lnk | InodeKind::Chr | InodeKind::Blk => Err(FsError::Inval),
         InodeKind::Reg => {
             let old = r.size as usize;
             let n = size as usize;
@@ -2054,7 +2151,7 @@ fn ram_readlink(vfs: &mut Vfs, islot: u16, buf: &mut [u8]) -> Result<usize, FsEr
             Ok(n)
         }
         InodeKind::Dir => Err(FsError::IsDir),
-        InodeKind::Reg => Err(FsError::Inval),
+        InodeKind::Reg | InodeKind::Chr | InodeKind::Blk => Err(FsError::Inval),
     }
 }
 
@@ -2294,11 +2391,11 @@ mod tests {
     fn dentry_clock_eviction() {
         let mut v = ram();
         let mut i = 0u32;
-        while i < 40 {
+        while v.stats.d_evicts == 0 && i < 200 {
             let mut path = [0u8; 5];
             path[0] = b'/';
             path[1] = b'n';
-            path[2] = b'0' + ((i / 10) as u8);
+            path[2] = b'0' + ((i / 10) as u8 % 10);
             path[3] = b'0' + ((i % 10) as u8);
             let s = core::str::from_utf8(&path[..4]).unwrap();
             let _ = v.stat(None, s);
@@ -2312,41 +2409,43 @@ mod tests {
     #[test]
     fn inode_cache_evicts_idle() {
         let mut v = ram();
+        v.mkdir(None, "/d", 0o755).unwrap();
         let mut i = 0u32;
-        while i < 12 {
-            let mut path = [0u8; 6];
-            path[0] = b'/';
-            path[1] = b'f';
-            path[2] = b'0' + ((i / 10) as u8);
-            path[3] = b'0' + ((i % 10) as u8);
-            let s = core::str::from_utf8(&path[..4]).unwrap();
+        while i < 20 {
+            let mut path = [0u8; 8];
+            path[..3].copy_from_slice(b"/d/");
+            path[3] = b'f';
+            path[4] = b'0' + ((i / 10) as u8);
+            path[5] = b'0' + ((i % 10) as u8);
+            let s = core::str::from_utf8(&path[..6]).unwrap();
             v.creat(None, s, 0o644).unwrap();
             i += 1;
         }
         i = 0;
-        while i < 40 {
-            let mut path = [0u8; 6];
-            path[0] = b'/';
-            path[1] = b'n';
-            path[2] = b'0' + ((i / 10) as u8);
-            path[3] = b'0' + ((i % 10) as u8);
-            let s = core::str::from_utf8(&path[..4]).unwrap();
+        while v.stats.d_evicts == 0 && i < 200 {
+            let mut path = [0u8; 8];
+            path[..3].copy_from_slice(b"/d/");
+            path[3] = b'n';
+            path[4] = b'0' + ((i / 10) as u8 % 10);
+            path[5] = b'0' + ((i % 10) as u8);
+            let s = core::str::from_utf8(&path[..6]).unwrap();
             let _ = v.stat(None, s);
             i += 1;
         }
         v.mkdir(None, "/z", 0o755).unwrap();
         let mut j = 0u32;
-        while j < 8 {
+        while v.stats.i_evicts == 0 && j < 80 {
             let mut path = [0u8; 8];
             path[..3].copy_from_slice(b"/z/");
             path[3] = b'g';
-            path[4] = b'0' + (j as u8);
-            let s = core::str::from_utf8(&path[..5]).unwrap();
+            path[4] = b'0' + ((j % 10) as u8);
+            path[5] = b'0' + (((j / 10) % 10) as u8);
+            let s = core::str::from_utf8(&path[..6]).unwrap();
             let _ = v.creat(None, s, 0o644);
             j += 1;
         }
         assert!(v.stats.i_evicts >= 1);
-        assert_eq!(v.stat(None, "/f00").unwrap().kind, InodeKind::Reg);
+        assert_eq!(v.stat(None, "/d/f00").unwrap().kind, InodeKind::Reg);
     }
 
     #[test]

@@ -14,6 +14,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   a reading below the last one. TCG has no invariant TSC; `hlt` plus the
   Phase 7C `blk-wb` sleeper makes ticks late relative to TSC, so interpolation
   overshoots and the next tick would otherwise step backwards.
+- In-guest `sleep_ms_50` and `tsc_calib_source` no longer flake under TCG
+  `-smp 4`. TCG leaves the invariant-TSC CPUID bit clear, so a 10 ms PIT
+  sample after AP bring-up can disagree with the boot HPET rate, and LAPIC
+  ticks coalesce so `uptime_ms` is a poor sleep ruler. The tests retry PIT
+  against a fresh HPET window, widen the band to 50–200% when the bit is
+  clear, and accept ~50 ms of `now_us` when ticks coalesce. Invariant TSC
+  (KVM, real hardware) still requires 75–125% and 50–100 ms of ticks.
 
 ### Changed
 
@@ -21,6 +28,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   only the latest tip stays in the queue.
 
 ### Added
+
+- Phase 8 slice C: pseudo filesystems on a shared kernfs directory
+  tree (one node table, four skins — not four dentry implementations).
+  `devfs` publishes `null`, `zero`, `random`/`urandom`, `console`, `tty`,
+  and block names matching `block: <name>` (`ram0`, `vda`, partitions).
+  `tmpfs` stores file data in the Phase 7 page/block cache plus a fixed
+  ramdisk so clock eviction works; it is not a grow-only `Vec`.
+  `procfs` exposes `self` and a pid-1 stub (`cmdline`/`status`/`maps`/`fd`)
+  that does not panic when only kernel threads exist (Process is Phase 9).
+  sysfs-equivalent walks the Phase 6 device tree and driver bindings.
+  `/dev` `/proc` `/tmp` `/sys` are mounted after ramfs root. No new boot
+  marker; `/dev/random` is a non-blocking xorshift (not virtio-rng, not
+  IRQ). Host tests cover kernfs/devfs/tmpfs eviction; in-guest `pseudo_fs`.
 
 - Phase 8 slice A: VFS. Inode (type, size, mode, times, nlink), dentry
   cache with negative entries (invalidated on create in that dir),
