@@ -22,6 +22,8 @@ panic-test = []
 kernel_tests = []
 # After a full boot, trigger a #GP so the dump+halt path is e2e-tested.
 gp-test = []
+# Panic dump ends with QEMU isa-debug-exit (nonzero) instead of an infinite hlt.
+panic_exit = []
 
 [dependencies]
 limine = "0.6"

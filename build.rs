@@ -43,4 +43,20 @@ fn main() {
     if !blob.is_file() {
         panic!("nasm produced no {}", blob.display());
     }
+
+    println!("cargo:rerun-if-env-changed=VIBEOS_KSYMS");
+    let ksyms_out = out.join("ksyms.rs");
+    if let Ok(src) = env::var("VIBEOS_KSYMS") {
+        println!("cargo:rerun-if-changed={src}");
+        let body = std::fs::read_to_string(&src).unwrap_or_else(|e| {
+            panic!("read VIBEOS_KSYMS {src}: {e}");
+        });
+        std::fs::write(&ksyms_out, body).unwrap();
+    } else {
+        std::fs::write(
+            &ksyms_out,
+            "pub static KSYMS: &[vibeos::symtab::Entry] = &[];\n",
+        )
+        .unwrap();
+    }
 }

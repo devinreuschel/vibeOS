@@ -524,18 +524,20 @@ From a kernel that schedules to an operating system that runs programs against f
 - [ ] running as a kernel thread, not in `_start`, so it can block
 
 ### 5.5 Kernel log
-- [ ] levels: error, warn, info, debug, trace, with compile-time and runtime filtering
-- [ ] a lock-free-enough ring buffer that survives a panic and is readable afterward
-- [ ] every record timestamped from the monotonic clock and tagged with its CPU
-- [ ] boot lines captured into the ring before the framebuffer exists, replayed when it does
-- [ ] `dmesg` with level filtering and a follow mode
+- [x] levels: error, warn, info, debug, trace, with compile-time and runtime filtering
+- [x] a lock-free-enough ring buffer that survives a panic and is readable afterward
+- [x] every record timestamped from the monotonic clock and tagged with its CPU
+- [x] boot lines captured into the ring before the framebuffer exists (replay when FB lands in B)
+- [x] `dmesg` with level filtering (follow mode waits for the shell in C)
 - [ ] a per-CPU buffer with a printer thread, so log lines become atomic rather than merely non-interleaved bytes
 
+Printer thread parked: global IRQ-safe ring + serial try-lock sink (Design ACK).
+
 ### 5.6 Panic and diagnostics
-- [ ] broadcast the halt IPI first so other cores stop before the log is written
-- [ ] symbolized backtrace: keep a symbol table in the image, walk frame pointers
-- [ ] dump the register state, the current thread, and the last few log records
-- [ ] optional QEMU exit on panic under a test feature, so a panic fails a run immediately instead of hanging
+- [x] broadcast the halt IPI first so other cores stop before the log is written
+- [x] symbolized backtrace: keep a symbol table in the image, walk frame pointers
+- [x] dump the register state, the current thread, and the last few log records
+- [x] optional QEMU exit on panic under a test feature, so a panic fails a run immediately instead of hanging
 
 ---
 

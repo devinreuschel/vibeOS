@@ -338,5 +338,39 @@ class TestLapicMode(unittest.TestCase):
         self.assertIn("sched_cpu3", names4)
 
 
+class TestDumpNeedles(unittest.TestCase):
+    def test_joint_needle_on_one_line(self) -> None:
+        from harness import check_dump_needles, dump_after_panic
+
+        lines = [
+            "vibeOS: smp: done",
+            "vibeOS: #GP rip=0x1",
+            "vibeOS: logrec: 3ms cpu0 info vibeOS: smp: done",
+            "vibeOS: backtrace:",
+            "vibeOS: panic: halted",
+        ]
+        dump = dump_after_panic(lines)
+        self.assertTrue(dump[0].startswith("vibeOS: #GP"))
+        check_dump_needles(
+            dump,
+            ("#GP", "vibeOS: backtrace:", ("vibeOS: logrec:", "smp: done")),
+        )
+
+    def test_english_page_fault_still_ignored(self) -> None:
+        from harness import contains_panic
+
+        self.assertFalse(contains_panic("dmesg: page fault help text"))
+        self.assertTrue(contains_panic("vibeOS: #PF rip=0x1"))
+
+    def test_missing_joint_needle_fails(self) -> None:
+        from harness import HarnessError, check_dump_needles
+
+        with self.assertRaises(HarnessError):
+            check_dump_needles(
+                ["vibeOS: logrec: hello", "vibeOS: smp: done"],
+                (("vibeOS: logrec:", "smp: done"),),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

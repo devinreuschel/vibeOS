@@ -48,7 +48,15 @@ QEMU_BASE = qemu-system-x86_64 \
 # limine config, and this Makefile. A find(1) so newly added source dirs are
 # not silently missed (DESIGN §9.1).
 KERNEL_SRCS := $(shell find src -type f \( -name '*.rs' -o -name '*.asm' -o -name '*.S' \) 2>/dev/null)
-KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml $(TARGET_JSON) linker.ld Makefile rust-toolchain.toml
+KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml $(TARGET_JSON) linker.ld Makefile rust-toolchain.toml scripts/gen_ksyms.py
+
+LLVM_TOOL_DIR := $(shell rustc --print sysroot)/lib/rustlib/$(shell rustc -vV | sed -n 's/^host: //p')/bin
+OBJDUMP := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-objdump),$(LLVM_TOOL_DIR)/llvm-objdump,llvm-objdump)
+NM      := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-nm),$(LLVM_TOOL_DIR)/llvm-nm,llvm-nm)
+
+# Two-pass ksyms: first link has an empty table in .rodata, nm fills it,
+# second link does not move .text (DESIGN §5.6). Do not wrap `$(CARGO)` in
+# `$(call ...)`: `-Zbuild-std=core,compiler_builtins,alloc` contains commas.
 
 .PHONY: all kernel iso run run-panic clean distclean setup layout \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-gp test \
@@ -60,6 +68,8 @@ kernel: $(KERNEL_ELF)
 
 $(KERNEL_ELF): $(KERNEL_DEPS)
 	$(CARGO) build $(CARGO_FLAGS)
+	python3 scripts/gen_ksyms.py --nm "$(NM)" $(KERNEL_ELF) $(CARGO_TARGET_DIR)/vibeos-ksyms.rs
+	VIBEOS_KSYMS=$(CARGO_TARGET_DIR)/vibeos-ksyms.rs $(CARGO) build $(CARGO_FLAGS)
 
 $(LIMINE_BIN):
 	@echo "limine binaries missing; run ./setup.sh" >&2
@@ -95,7 +105,9 @@ ISO_PANIC        := vibeos-panic.iso
 ISO_ROOT_PANIC   := iso_root_panic
 
 $(ISO_PANIC): $(KERNEL_DEPS) limine.conf $(LIMINE_BIN)
-	CARGO_TARGET_DIR=$(CURDIR)/target-panic $(CARGO) build $(CARGO_FLAGS) --features panic-test
+	CARGO_TARGET_DIR=$(CURDIR)/target-panic $(CARGO) build $(CARGO_FLAGS) --features panic-test --features panic_exit
+	python3 scripts/gen_ksyms.py --nm "$(NM)" $(CURDIR)/target-panic/$(TARGET)/$(PROFILE_DIR)/vibeos $(CURDIR)/target-panic/vibeos-ksyms.rs
+	VIBEOS_KSYMS=$(CURDIR)/target-panic/vibeos-ksyms.rs CARGO_TARGET_DIR=$(CURDIR)/target-panic $(CARGO) build $(CARGO_FLAGS) --features panic-test --features panic_exit
 	@rm -rf $(ISO_ROOT_PANIC)
 	@mkdir -p $(ISO_ROOT_PANIC)/boot $(ISO_ROOT_PANIC)/EFI/BOOT
 	@cp $(CURDIR)/target-panic/$(TARGET)/$(PROFILE_DIR)/vibeos $(ISO_ROOT_PANIC)/boot/vibeos
@@ -115,10 +127,6 @@ $(ISO_PANIC): $(KERNEL_DEPS) limine.conf $(LIMINE_BIN)
 run-panic: $(ISO_PANIC)
 	qemu-system-x86_64 -cdrom $(ISO_PANIC) -m $(VIBEOS_MEM) -smp $(VIBEOS_SMP) \
 	    -cpu $(VIBEOS_QEMU_CPU) -accel $(VIBEOS_QEMU_ACCEL) -no-reboot -serial stdio -display none
-
-LLVM_TOOL_DIR := $(shell rustc --print sysroot)/lib/rustlib/$(shell rustc -vV | sed -n 's/^host: //p')/bin
-OBJDUMP := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-objdump),$(LLVM_TOOL_DIR)/llvm-objdump,llvm-objdump)
-NM      := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-nm),$(LLVM_TOOL_DIR)/llvm-nm,llvm-nm)
 
 layout: $(KERNEL_ELF)
 	@echo "== sections =="
@@ -153,7 +161,9 @@ ISO_GP        := vibeos-gp.iso
 ISO_ROOT_GP   := iso_root_gp
 
 $(ISO_GP): $(KERNEL_DEPS) limine.conf $(LIMINE_BIN)
-	CARGO_TARGET_DIR=$(CURDIR)/target-gp $(CARGO) build $(CARGO_FLAGS) --features gp-test
+	CARGO_TARGET_DIR=$(CURDIR)/target-gp $(CARGO) build $(CARGO_FLAGS) --features gp-test --features panic_exit
+	python3 scripts/gen_ksyms.py --nm "$(NM)" $(CURDIR)/target-gp/$(TARGET)/$(PROFILE_DIR)/vibeos $(CURDIR)/target-gp/vibeos-ksyms.rs
+	VIBEOS_KSYMS=$(CURDIR)/target-gp/vibeos-ksyms.rs CARGO_TARGET_DIR=$(CURDIR)/target-gp $(CARGO) build $(CARGO_FLAGS) --features gp-test --features panic_exit
 	@rm -rf $(ISO_ROOT_GP)
 	@mkdir -p $(ISO_ROOT_GP)/boot $(ISO_ROOT_GP)/EFI/BOOT
 	@cp $(CURDIR)/target-gp/$(TARGET)/$(PROFILE_DIR)/vibeos $(ISO_ROOT_GP)/boot/vibeos
@@ -186,6 +196,8 @@ ISO_ROOT_KTEST   := iso_root_ktest
 
 $(ISO_KTEST): $(KERNEL_DEPS) limine.conf $(LIMINE_BIN)
 	CARGO_TARGET_DIR=$(KERNEL_TESTS_DIR) $(CARGO) build $(CARGO_FLAGS) --features kernel_tests
+	python3 scripts/gen_ksyms.py --nm "$(NM)" $(KERNEL_TESTS_DIR)/$(TARGET)/$(PROFILE_DIR)/vibeos $(KERNEL_TESTS_DIR)/vibeos-ksyms.rs
+	VIBEOS_KSYMS=$(KERNEL_TESTS_DIR)/vibeos-ksyms.rs CARGO_TARGET_DIR=$(KERNEL_TESTS_DIR) $(CARGO) build $(CARGO_FLAGS) --features kernel_tests
 	@echo "  ISO $(ISO_KTEST)"
 	@rm -rf $(ISO_ROOT_KTEST)
 	@mkdir -p $(ISO_ROOT_KTEST)/boot $(ISO_ROOT_KTEST)/EFI/BOOT

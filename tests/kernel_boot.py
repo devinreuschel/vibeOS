@@ -41,8 +41,8 @@ def main() -> int:
         print(f"[ktest] FAIL: {e}", file=sys.stderr)
         return 1
 
-    oks = [ln for ln in raw.lines if "vibeOS: ktest: ok " in ln]
-    skips = [ln for ln in raw.lines if "vibeOS: ktest: skip " in ln]
+    oks = [ln for ln in raw.lines if ln.startswith("vibeOS: ktest: ok ")]
+    skips = [ln for ln in raw.lines if ln.startswith("vibeOS: ktest: skip ")]
     print(
         f"[ktest] ok: {len(oks)} passed, {len(skips)} skipped, exit {raw.exit_code}",
         file=sys.stderr,

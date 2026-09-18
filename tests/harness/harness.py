@@ -35,6 +35,9 @@ PANIC_SIGNATURES: tuple[str, ...] = (
     "stack overflow",
 )
 
+# End of the dump. expect_panic waits for this so backtrace/logrec are in the log.
+PANIC_DONE = "vibeOS: panic: halted"
+
 
 class HarnessError(Exception):
     """Raised when a harness invariant is violated (bad ordering, panic, etc)."""
@@ -106,6 +109,34 @@ def check_markers_in_order(
 
 def contains_panic(line: str, sigs: tuple[str, ...] = PANIC_SIGNATURES) -> bool:
     return any(s in line for s in sigs)
+
+
+def dump_after_panic(
+    lines: Iterable[str],
+    panic_signatures: tuple[str, ...] = PANIC_SIGNATURES,
+) -> list[str]:
+    """Lines from the first panic signature through the end."""
+    out = list(lines)
+    for i, line in enumerate(out):
+        if contains_panic(line, panic_signatures):
+            return out[i:]
+    return []
+
+
+def check_dump_needles(
+    dump: Iterable[str],
+    needles: tuple[str | tuple[str, ...], ...] = (),
+) -> None:
+    """Each needle must appear. A tuple means all fragments on one line."""
+    lines = list(dump)
+    for needle in needles:
+        if isinstance(needle, tuple):
+            if not any(all(part in line for part in needle) for line in lines):
+                raise HarnessError(
+                    f"dump missing joint needle {needle!r} in {lines[-8:]!r}"
+                )
+        elif not any(needle in line for line in lines):
+            raise HarnessError(f"dump missing {needle!r} in {lines[-8:]!r}")
 
 
 def _pick_monitor_path() -> str:
@@ -298,6 +329,7 @@ def run_qemu_and_check(
     timeout_s: float = 45.0,
     panic_signatures: tuple[str, ...] = PANIC_SIGNATURES,
     expect_panic: bool = False,
+    dump_needles: tuple[str | tuple[str, ...], ...] = (),
 ) -> RunResult:
     """Boot the ISO, stream serial, and assert the boot contract.
 
@@ -330,6 +362,7 @@ def run_qemu_and_check(
     marker_idx = 0
     deadline = time.monotonic() + timeout_s
     panic_seen: str | None = None
+    panic_done = False
     reader = DeadlineReader(proc.stdout.fileno(), deadline)
 
     try:
@@ -358,6 +391,8 @@ def run_qemu_and_check(
                     if sig in line and panic_seen is None:
                         panic_seen = line
                         result.panic_line = line
+                if PANIC_DONE in line:
+                    panic_done = True
 
             if marker_idx < len(markers) and markers[marker_idx].matches(line):
                 result.matched.append(markers[marker_idx].name)
@@ -372,10 +407,10 @@ def run_qemu_and_check(
                     break
 
             if expect_panic and panic_seen is not None and marker_idx == len(markers):
-                # In panic mode, success means: expected markers were seen
-                # AND a panic signature followed. Kill and return.
-                proc.kill()
-                break
+                # Wait for the dump trailer so backtrace / logrec are captured.
+                if panic_done:
+                    proc.kill()
+                    break
     finally:
         try:
             result.exit_code = proc.wait(timeout=5.0)
@@ -396,6 +431,10 @@ def run_qemu_and_check(
 
     if expect_panic and panic_seen is None:
         raise HarnessError("expected a panic signature; none seen")
+
+    if expect_panic and dump_needles:
+        dump = dump_after_panic(result.lines, panic_signatures)
+        check_dump_needles(dump, dump_needles)
 
     return result
 

@@ -104,6 +104,21 @@ pub fn read_rsp() -> u64 {
     val
 }
 
+#[inline]
+pub fn read_rbp() -> u64 {
+    let val: u64;
+    unsafe { asm!("mov {}, rbp", out(reg) val, options(nomem, nostack, preserves_flags)) };
+    val
+}
+
+/// Approximate RIP of the caller-ish (`lea` of the next insn).
+#[inline]
+pub fn read_rip() -> u64 {
+    let val: u64;
+    unsafe { asm!("lea {}, [rip]", out(reg) val, options(nomem, nostack, preserves_flags)) };
+    val
+}
+
 /// `cli; hlt` loop. Never returns.
 ///
 /// Used by the panic handler and by the boot path once phase 0 has printed

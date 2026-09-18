@@ -70,3 +70,6 @@ pub const BOOT_DONE: &str = "vibeOS: boot: phase1 done";
 
 /// Panic banner. Kept short so the panic path allocates nothing.
 pub const PANIC_BANNER: &str = "vibeOS: panic:";
+
+/// End of a panic/exception dump. Harness waits for this after a signature.
+pub const PANIC_HALTED: &str = "vibeOS: panic: halted";

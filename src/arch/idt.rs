@@ -48,7 +48,7 @@ extern "x86-interrupt" fn default_noerr<const N: u8>(mut frame: InterruptFrame) 
     if catch::intercept(N, &mut frame, 0) {
         return;
     }
-    halt_vec(N, &frame, None, None);
+    crate::panic::exception_vec(N, &frame, None, None);
 }
 
 extern "x86-interrupt" fn default_err<const N: u8>(mut frame: InterruptFrame, err: u64) {
@@ -60,7 +60,7 @@ extern "x86-interrupt" fn default_err<const N: u8>(mut frame: InterruptFrame, er
     } else {
         None
     };
-    halt_vec(N, &frame, Some(err), cr2);
+    crate::panic::exception_vec(N, &frame, Some(err), cr2);
 }
 
 extern "x86-interrupt" fn breakpoint(mut frame: InterruptFrame) {
@@ -74,49 +74,49 @@ extern "x86-interrupt" fn invalid_opcode(mut frame: InterruptFrame) {
     if catch::intercept(vectors::UD, &mut frame, 0) {
         return;
     }
-    halt_named(b"#UD", &frame, None, None);
+    crate::panic::exception_halt(b"#UD", &frame, None, None);
 }
 
 extern "x86-interrupt" fn nmi(mut frame: InterruptFrame) {
     if catch::intercept(vectors::NMI, &mut frame, 0) {
         return;
     }
-    halt_named(b"nmi", &frame, None, None);
+    crate::panic::exception_halt(b"nmi", &frame, None, None);
 }
 
 extern "x86-interrupt" fn debug_ex(mut frame: InterruptFrame) {
     if catch::intercept(vectors::DB, &mut frame, 0) {
         return;
     }
-    halt_named(b"#DB", &frame, None, None);
+    crate::panic::exception_halt(b"#DB", &frame, None, None);
 }
 
 extern "x86-interrupt" fn general_protection(mut frame: InterruptFrame, err: u64) {
     if catch::intercept(vectors::GP, &mut frame, err) {
         return;
     }
-    halt_named(b"#GP", &frame, Some(err), None);
+    crate::panic::exception_halt(b"#GP", &frame, Some(err), None);
 }
 
 extern "x86-interrupt" fn page_fault(mut frame: InterruptFrame, err: u64) {
     if catch::intercept(vectors::PF, &mut frame, err) {
         return;
     }
-    halt_named(b"#PF", &frame, Some(err), Some(x86::read_cr2()));
+    crate::panic::exception_halt(b"#PF", &frame, Some(err), Some(x86::read_cr2()));
 }
 
 extern "x86-interrupt" fn double_fault(mut frame: InterruptFrame, err: u64) {
     if catch::intercept(vectors::DF, &mut frame, err) {
         return;
     }
-    halt_named(b"#DF", &frame, Some(err), None);
+    crate::panic::exception_halt(b"#DF", &frame, Some(err), None);
 }
 
 extern "x86-interrupt" fn machine_check(mut frame: InterruptFrame) {
     if catch::intercept(vectors::MC, &mut frame, 0) {
         return;
     }
-    halt_named(b"#MC", &frame, None, None);
+    crate::panic::exception_halt(b"#MC", &frame, None, None);
 }
 
 extern "x86-interrupt" fn irq<const N: u8>(_frame: InterruptFrame) {
@@ -318,33 +318,3 @@ fn dump(kind: &[u8], frame: &InterruptFrame, err: Option<u64>, cr2: Option<u64>)
     Serial::write_bytes(b"\n");
 }
 
-fn halt_named(kind: &[u8], frame: &InterruptFrame, err: Option<u64>, cr2: Option<u64>) -> ! {
-    dump(kind, frame, err, cr2);
-    x86::halt();
-}
-
-fn halt_vec(n: u8, frame: &InterruptFrame, err: Option<u64>, cr2: Option<u64>) -> ! {
-    Serial::write_bytes(b"vibeOS: exception: vector ");
-    let mut b = [0u8; 4];
-    Serial::write_bytes(fmt_util::write_dec(n as u64, &mut b));
-    Serial::write_bytes(b" rip=0x");
-    hex(frame.rip);
-    Serial::write_bytes(b" cs=0x");
-    hex(frame.cs);
-    Serial::write_bytes(b" rflags=0x");
-    hex(frame.rflags);
-    Serial::write_bytes(b" rsp=0x");
-    hex(frame.rsp);
-    Serial::write_bytes(b" ss=0x");
-    hex(frame.ss);
-    if let Some(e) = err {
-        Serial::write_bytes(b" err=0x");
-        hex(e);
-    }
-    if let Some(c) = cr2 {
-        Serial::write_bytes(b" cr2=0x");
-        hex(c);
-    }
-    Serial::write_bytes(b"\n");
-    x86::halt();
-}
