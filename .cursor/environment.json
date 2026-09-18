@@ -1,0 +1,5 @@
+{
+  "name": "vibeOS",
+  "user": "ubuntu",
+  "install": "sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-system-x86 xorriso nasm ovmf && rustup component add rust-src llvm-tools && ./setup.sh"
+}
