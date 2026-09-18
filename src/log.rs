@@ -59,6 +59,17 @@ impl Level {
             Self::Trace => "trace",
         }
     }
+
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s {
+            "error" | "0" => Some(Self::Error),
+            "warn" | "1" => Some(Self::Warn),
+            "info" | "2" => Some(Self::Info),
+            "debug" | "3" => Some(Self::Debug),
+            "trace" | "4" => Some(Self::Trace),
+            _ => None,
+        }
+    }
 }
 
 /// True when `level` should be stored / shown given compile and runtime caps.
@@ -301,6 +312,9 @@ mod tests {
         assert_eq!(Level::from_u8(9), None);
         assert_eq!(Level::Error.as_str(), "error");
         assert_eq!(Level::Trace.as_str(), "trace");
+        assert_eq!(Level::from_name("debug"), Some(Level::Debug));
+        assert_eq!(Level::from_name("3"), Some(Level::Debug));
+        assert_eq!(Level::from_name("nope"), None);
     }
 
     #[test]

@@ -248,7 +248,7 @@ pub fn assert_unmapped(start: VirtAddr, end: VirtAddr) {
 }
 
 /// Range dump of the live tables. Coalesces adjacent leaves (DESIGN §1.7).
-pub fn dump_ranges() {
+pub fn dump_ranges_to(w: &mut impl Write) {
     with_pt(|| {
         let mapper = current_mapper();
         let mut n = 0usize;
@@ -259,7 +259,7 @@ pub fn dump_ranges() {
                 PageSize::Size2M => "2m",
             };
             let _ = writeln!(
-                Serial,
+                w,
                 "vibeOS: pt: {va:#x}..{:#x} {sz} flags {:#x}",
                 va + len,
                 flags.0
@@ -267,7 +267,7 @@ pub fn dump_ranges() {
         };
         mapper.walk_ranges(VirtAddr(0), VirtAddr(0x0000_8000_0000_0000), &mut visit);
         mapper.walk_ranges(VirtAddr(0xFFFF_8000_0000_0000), VirtAddr(u64::MAX), &mut visit);
-        let _ = writeln!(Serial, "vibeOS: pt: {n} ranges");
+        let _ = writeln!(w, "vibeOS: pt: {n} ranges");
     });
 }
 

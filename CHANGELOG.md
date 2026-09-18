@@ -9,6 +9,22 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Phase 5 slice C: kernel shell thread, command registry, and
+  `vibeOS: shell ready` as the last boot marker (`smp: done` →
+  `console ok` → `shell ready`). Line editor (echo, backspace, ctrl+C,
+  ctrl+U, cursor, history) and quote/whitespace tokenizer in the library
+  half with host tests. Built-ins register into a table rather than a
+  `match`: `help`, `echo`, `meminfo`, `uptime`, `cpus`, `dmesg`, `ps`,
+  `panic`, `reboot`, `poweroff`. `dmesg` dumps the log ring (pre-FB boot
+  lines included) with a level filter, `-n` to change the runtime max,
+  and `-f` follow. `panic` exercises the §5.6 dump. `reboot`/`poweroff`
+  use FADT reset/S5 when present, then the 8042 pulse / QEMU ports; they
+  do not busy-loop. Input drain is IRQ-off for both the PS/2 ring and
+  serial RX (DESIGN §9.4). TCG remains the guest-test default
+  (`VIBEOS_QEMU_ACCEL=tcg` or `VIBEOS_QEMU_EXTRA="-accel tcg"`).
+  `boot: phase1 done` is retired; the constant remains as a spelling
+  alias. Double buffering and FB write-back/WC physmap stay parked.
+
 - Phase 5 slice B: framebuffer text console, PS/2 keyboard, and console
   mux. BGRX pixels at `base + y * pitch + x * 4` with release bounds
   checks (Limine pitch, not `width*4`). 8×8 font, LSB leftmost, ASCII
@@ -102,6 +118,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   overrides) so KVM timing does not flake the PIT/sleep tests.
 
 ### Fixed
+
+- Framebuffer text: `\r` homes the column on the same row instead of
+  being dropped before the text grid. The shell line editor paints
+  in place with CR; serial already homed, the QEMU FB was reprinting
+  the prompt on every key. Host tests cover CR overwrite and CRLF.
+  In-guest: `fb_cr_home` overwrites a glyph cell after CR.
 
 - PS/2 decoder: typematic repeats no longer retoggle Caps/Num or
   re-enqueue modifiers. Down-bits; only the first make is an edge.

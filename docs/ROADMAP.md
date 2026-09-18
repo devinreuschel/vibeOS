@@ -485,12 +485,12 @@ From a kernel that schedules to an operating system that runs programs against f
 **Unlocks.** Manual exploration. `dmesg`. A shell to hang commands off.
 
 **Exit gate**
-- [ ] `console ok` and `shell ready` markers
-- [ ] typing in the QEMU window echoes on the framebuffer and drives commands
-- [ ] `dmesg` shows the full boot log including lines emitted before the framebuffer existed
-- [ ] a panic on any CPU stops the others and leaves a readable dump with a symbolized backtrace
-- [ ] host tests: scan code decoding, ring buffer wrap, line editing, command tokenization
-- [ ] log level filtering changeable at runtime and visible in output
+- [x] `console ok` and `shell ready` markers
+- [x] typing in the QEMU window echoes on the framebuffer and drives commands
+- [x] `dmesg` shows the full boot log including lines emitted before the framebuffer existed
+- [x] a panic on any CPU stops the others and leaves a readable dump with a symbolized backtrace
+- [x] host tests: scan code decoding, ring buffer wrap, line editing, command tokenization
+- [x] log level filtering changeable at runtime and visible in output
 
 ### 5.1 Framebuffer console
 - [x] BGRX pixel writes at `base + y * pitch + x * 4`, with bounds checks that are not `debug_assert`
@@ -519,18 +519,18 @@ Double buffering parked (Design ACK).
 - [x] runtime enable and disable per backend
 
 ### 5.4 Shell
-- [ ] line editor: echo, backspace, ctrl+C, ctrl+U, cursor movement, history
-- [ ] tokenizer handling quotes and consistent whitespace behavior, in the library half with host tests
-- [ ] built-ins: `help`, `echo`, `meminfo`, `uptime`, `cpus`, `dmesg`, `ps`, `panic`, `reboot`, `poweroff`
-- [ ] a command table that new subsystems register into rather than a growing match arm
-- [ ] running as a kernel thread, not in `_start`, so it can block
+- [x] line editor: echo, backspace, ctrl+C, ctrl+U, cursor movement, history
+- [x] tokenizer handling quotes and consistent whitespace behavior, in the library half with host tests
+- [x] built-ins: `help`, `echo`, `meminfo`, `uptime`, `cpus`, `dmesg`, `ps`, `panic`, `reboot`, `poweroff`
+- [x] a command table that new subsystems register into rather than a growing match arm
+- [x] running as a kernel thread, not in `_start`, so it can block
 
 ### 5.5 Kernel log
 - [x] levels: error, warn, info, debug, trace, with compile-time and runtime filtering
 - [x] a lock-free-enough ring buffer that survives a panic and is readable afterward
 - [x] every record timestamped from the monotonic clock and tagged with its CPU
 - [x] boot lines captured into the ring before the framebuffer exists (replay when FB lands in B)
-- [x] `dmesg` with level filtering (follow mode waits for the shell in C)
+- [x] `dmesg` with level filtering and follow (`dmesg -f`; Ctrl+C to stop)
 - [ ] a per-CPU buffer with a printer thread, so log lines become atomic rather than merely non-interleaved bytes
 
 Printer thread parked: global IRQ-safe ring + serial try-lock sink (Design ACK).

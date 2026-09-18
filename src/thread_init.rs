@@ -707,3 +707,33 @@ pub fn run_tsc(id: ThreadId) -> u64 {
 pub fn tcb_ptr(id: ThreadId) -> *mut Tcb {
     SCHED.lock().ptr(id)
 }
+
+#[derive(Clone, Copy)]
+pub struct ThreadInfo {
+    pub id: ThreadId,
+    pub name: &'static str,
+    pub state: ThreadState,
+    pub cpu: u32,
+}
+
+/// Snapshot under SCHED, then drop the lock. `ps` must not hold SCHED
+/// across console writes.
+pub fn snapshot(out: &mut [ThreadInfo]) -> usize {
+    with_sched(|s| {
+        let mut n = 0usize;
+        let mut i = 0usize;
+        while i < MAX_THREADS && n < out.len() {
+            if let Some(t) = s.slots[i].as_ref() {
+                out[n] = ThreadInfo {
+                    id: t.id,
+                    name: t.name,
+                    state: t.state,
+                    cpu: t.cpu,
+                };
+                n += 1;
+            }
+            i += 1;
+        }
+        n
+    })
+}

@@ -3,6 +3,7 @@
 //! Backends never call `log!`. Keyboard ISR does not take this path;
 //! input is popped with IRQs off.
 
+use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use vibeos::console::BackendId;
@@ -13,6 +14,7 @@ use crate::fb_init;
 use crate::kbd_init;
 use crate::log_init;
 use crate::serial::{self, Serial};
+use crate::x86::InterruptGuard;
 
 static SERIAL_ON: AtomicBool = AtomicBool::new(false);
 static FB_ON: AtomicBool = AtomicBool::new(false);
@@ -44,8 +46,8 @@ pub fn enabled(id: BackendId) -> bool {
     }
 }
 
-/// Fan-out. Silent backends.
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+/// Fan-out. Silent backends. Serial TX lock is dropped before the FB lock
+/// (ranks SERIAL then DEVICE are not nested).
 pub fn write(bytes: &[u8]) {
     if SERIAL_ON.load(Ordering::Acquire) {
         Serial::write_bytes_plain(bytes);
@@ -55,9 +57,21 @@ pub fn write(bytes: &[u8]) {
     }
 }
 
-/// PS/2 first, then serial RX. IRQs off in the keyboard pop.
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+/// `fmt::Write` onto the mux. Does not capture into the log ring.
+pub struct Console;
+
+impl fmt::Write for Console {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        write(s.as_bytes());
+        Ok(())
+    }
+}
+
+/// PS/2 first, then serial RX. Whole consumer critical section is IRQ-off
+/// (DESIGN §9.4): `pop` already cli's, and serial RX must too — a nested
+/// guard keeps IF off across both so we never poll COM1 with IF=1.
 pub fn read() -> Option<DecodedKey> {
+    let _irq = InterruptGuard::enter();
     if let Some(k) = kbd_init::pop() {
         return Some(k);
     }

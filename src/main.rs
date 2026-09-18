@@ -2,12 +2,13 @@
 //!
 //! Boot order: serial, Limine, PMM, paging, ACPI parse + MMIO UC, heap,
 //! KVA, then GDT/TSS/IST, PIC remap, IDT, BSP per_cpu, ACPI marker, time,
-//! LAPIC+IOAPIC, timer prove, scheduler+idle, irq enabled, SMP, meminfo.
-//! GDT after KVA because IST stacks are guarded KVA stacks. per_cpu after
-//! GDT because `mov gs` zeros the hidden base. Scheduler after time so
-//! the tick can preempt. SMP after irq-enabled so APs enter as idle.
-//! The `kernel_tests` build runs the in-guest registry after that and
-//! exits through isa-debug-exit.
+//! LAPIC+IOAPIC, timer prove, scheduler+idle, irq enabled, SMP, meminfo,
+//! console, shell thread. GDT after KVA because IST stacks are guarded
+//! KVA stacks. per_cpu after GDT because `mov gs` zeros the hidden base.
+//! Scheduler after time so the tick can preempt. SMP after irq-enabled so
+//! APs enter as idle. Console after `smp: done`. Shell last. The
+//! `kernel_tests` build runs the in-guest registry after that and exits
+//! through isa-debug-exit.
 
 #![no_std]
 #![no_main]
@@ -39,6 +40,7 @@ mod per_cpu_init;
 mod pmm_init;
 mod sched_init;
 mod serial;
+mod shell_init;
 mod smp_init;
 mod sync_init;
 mod thread_init;
@@ -278,13 +280,15 @@ fn normal_boot_tail() {
     unsafe { smp_init::init() };
     diag::cpus();
 
-    serial::line(marker::BOOT_DONE);
-
     // DESIGN §3.3 live: after smp: done. Handler, 8042, then unmask IRQ1.
     crate::console_init::init();
 
     #[cfg(feature = "gp-test")]
     gp_test_trip();
+
+    // Slice C: kernel thread + registry. `shell ready` is the last marker.
+    // gp-test trips before this so a #GP dump still has a clean contract.
+    crate::shell_init::init();
 
     #[cfg(feature = "kernel_tests")]
     crate::ktest::run();

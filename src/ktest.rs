@@ -113,9 +113,13 @@ const TESTS: &[(&str, TestFn)] = &[
     ("log_dmesg_no_recapture", test_log_dmesg_no_recapture),
     ("fb_bgrx_roundtrip", test_fb_bgrx_roundtrip),
     ("fb_pitch", test_fb_pitch),
+    ("fb_cr_home", test_fb_cr_home),
     ("kbd_gsi_unmasked", test_kbd_gsi_unmasked),
     ("console_mux", test_console_mux),
     ("kbd_ring_drain", test_kbd_ring_drain),
+    ("shell_registry", test_shell_registry),
+    ("shell_dispatch", test_shell_dispatch),
+    ("shell_dmesg_level", test_shell_dmesg_level),
 ];
 
 pub fn run() -> ! {
@@ -2049,6 +2053,46 @@ fn test_fb_pitch() -> Outcome {
     }
 }
 
+fn test_fb_cr_home() -> Outcome {
+    if !crate::fb_init::ready() {
+        return Outcome::Fail("no framebuffer");
+    }
+    crate::fb_init::write(b"\n");
+    let Some((col, row)) = crate::fb_init::cursor() else {
+        return Outcome::Fail("no cursor");
+    };
+    if col != 0 {
+        return Outcome::Fail("newline not col0");
+    }
+    crate::fb_init::write(b"X");
+    let mut hit: Option<(u32, u32)> = None;
+    let mut gy = 0u8;
+    while gy < vibeos::font::FONT_H as u8 && hit.is_none() {
+        let mut gx = 0u8;
+        while gx < vibeos::font::FONT_W as u8 {
+            if vibeos::font::glyph_pixel(b'X', gx, gy) {
+                hit = Some((gx as u32, gy as u32));
+                break;
+            }
+            gx += 1;
+        }
+        gy += 1;
+    }
+    let Some((gx, gy)) = hit else {
+        return Outcome::Fail("X glyph empty");
+    };
+    let (ox, oy) = vibeos::fb::glyph_origin(0, row);
+    let Some(lit) = crate::fb_init::get_pixel(ox + gx, oy + gy) else {
+        return Outcome::Fail("get lit");
+    };
+    crate::fb_init::write(b"\r ");
+    match crate::fb_init::get_pixel(ox + gx, oy + gy) {
+        Some(after) if after != lit => Outcome::Ok,
+        Some(_) => Outcome::Fail("CR did not home"),
+        None => Outcome::Fail("get after"),
+    }
+}
+
 fn test_kbd_gsi_unmasked() -> Outcome {
     if crate::kbd_init::pic_fallback() {
         return Outcome::Skip("pic fallback");
@@ -2096,5 +2140,62 @@ fn test_kbd_ring_drain() -> Outcome {
         Some(vibeos::kbd::DecodedKey::Char(b'q')) => Outcome::Ok,
         Some(_) => Outcome::Fail("wrong key"),
         None => Outcome::Fail("ring empty"),
+    }
+}
+
+fn test_shell_registry() -> Outcome {
+    for name in crate::shell_init::builtin_names() {
+        if !crate::shell_init::has_command(name) {
+            return Outcome::Fail("missing builtin");
+        }
+    }
+    if crate::shell_init::command_count() < 10 {
+        return Outcome::Fail("registry short");
+    }
+    if crate::shell_init::has_command("not-a-cmd") {
+        return Outcome::Fail("unknown present");
+    }
+    Outcome::Ok
+}
+
+fn test_shell_dispatch() -> Outcome {
+    if crate::shell_init::dispatch_line("echo ktest-shell-echo").is_err() {
+        return Outcome::Fail("echo");
+    }
+    if crate::shell_init::dispatch_line("").is_err() {
+        return Outcome::Fail("empty");
+    }
+    if crate::shell_init::dispatch_line("not-a-cmd").is_ok() {
+        return Outcome::Fail("unknown succeeded");
+    }
+    if crate::shell_init::dispatch_line("dmesg info").is_err() {
+        return Outcome::Fail("dmesg");
+    }
+    Outcome::Ok
+}
+
+fn test_shell_dmesg_level() -> Outcome {
+    use vibeos::log::Level;
+    let old = crate::log_init::max_level();
+    if crate::shell_init::dispatch_line("dmesg -n error").is_err() {
+        crate::log_init::set_max_level(old);
+        return Outcome::Fail("dmesg -n");
+    }
+    crate::klog!(Level::Debug, "vibeOS: ktest: shell-level-hidden");
+    if crate::log_init::contains_msg("shell-level-hidden") {
+        crate::log_init::set_max_level(old);
+        return Outcome::Fail("debug stored at error");
+    }
+    if crate::shell_init::dispatch_line("dmesg -n trace").is_err() {
+        crate::log_init::set_max_level(old);
+        return Outcome::Fail("dmesg -n trace");
+    }
+    crate::klog!(Level::Debug, "vibeOS: ktest: shell-level-visible");
+    let ok = crate::log_init::contains_msg("shell-level-visible");
+    crate::log_init::set_max_level(old);
+    if ok {
+        Outcome::Ok
+    } else {
+        Outcome::Fail("debug missing after -n trace")
     }
 }
