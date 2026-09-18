@@ -30,6 +30,8 @@ use crate::acpi_init;
 use crate::apic_init;
 use crate::arch;
 use crate::block_init::{self, IoWaiter};
+use crate::cache_init;
+use crate::part_init;
 use crate::dev_init;
 use crate::dma_init;
 use crate::ipi_init;
@@ -159,6 +161,10 @@ const TESTS: &[(&str, TestFn)] = &[
     ("block_vblk_concurrent", test_block_vblk_concurrent),
     ("block_vblk_mq", test_block_vblk_mq),
     ("block_persist", test_block_persist),
+    ("block_part_mbr", test_block_part_mbr),
+    ("block_part_gpt", test_block_part_gpt),
+    ("block_cache_hit", test_block_cache_hit),
+    ("block_cache_evict", test_block_cache_evict),
 ];
 
 pub fn run() -> ! {
@@ -3022,7 +3028,10 @@ fn test_virtio_vq() -> Outcome {
     if !virtio_init::rng_alloced() {
         return Outcome::Fail("thread alloc");
     }
-    if virtio_init::rng_soft_hits() <= s0 {
+    if !spin_until_ns(
+        || virtio_init::rng_soft_hits() > s0,
+        2_000_000_000,
+    ) {
         return Outcome::Fail("no softirq");
     }
     Outcome::Ok
@@ -3546,4 +3555,183 @@ fn test_block_persist() -> Outcome {
         serial::line("vibeOS: persist: wrote");
         Outcome::Ok
     })
+}
+
+fn test_block_part_mbr() -> Outcome {
+    if !part_init::live() {
+        return Outcome::Fail("parts not live");
+    }
+    let Some(i) = part_init::find_name("ram0p1") else {
+        return Outcome::Fail("no ram0p1");
+    };
+    let Some(i2) = part_init::find_name("ram0p2") else {
+        return Outcome::Fail("no ram0p2");
+    };
+    if part_init::find_name("ram0p3").is_none() {
+        return Outcome::Fail("no ram0p3");
+    }
+    let Some(d) = part_init::device(i) else {
+        return Outcome::Fail("no device");
+    };
+    if d.name() != "ram0p1" {
+        return Outcome::Fail("name");
+    }
+    if d.capacity_sectors() != 32 {
+        return Outcome::Fail("cap");
+    }
+    let mut buf = [0u8; 512];
+    buf[0] = 0xC1;
+    buf[511] = 0xC2;
+    if d.write(0, &buf).is_err() {
+        return Outcome::Fail("write");
+    }
+    let mut out = [0u8; 512];
+    if d.read(0, &mut out).is_err() || out != buf {
+        return Outcome::Fail("read");
+    }
+    match d.write(32, &buf) {
+        Err(BlockError::Inval) => {}
+        _ => return Outcome::Fail("overflow"),
+    }
+    match d.read(31, &mut [0u8; 1024]) {
+        Err(BlockError::Inval) => {}
+        _ => return Outcome::Fail("overflow 2"),
+    }
+    let Some((_, n2, _, k2)) = part_init::info(i2) else {
+        return Outcome::Fail("info p2");
+    };
+    if n2 != 24 {
+        return Outcome::Fail("logical size");
+    }
+    if part_init::type_str(k2) != "linux" {
+        return Outcome::Fail("type");
+    }
+    Outcome::Ok
+}
+
+fn test_block_part_gpt() -> Outcome {
+    if !virtio_blk_init::live() {
+        return Outcome::Skip("no virtio-blk");
+    }
+    with_timer(|| {
+        let Some(i1) = part_init::find_name("vdap1") else {
+            return Outcome::Fail("no vdap1");
+        };
+        let Some(i2) = part_init::find_name("vdap2") else {
+            return Outcome::Fail("no vdap2");
+        };
+        let Some((_, _, _, k1)) = part_init::info(i1) else {
+            return Outcome::Fail("info p1");
+        };
+        let Some((_, n2, _, k2)) = part_init::info(i2) else {
+            return Outcome::Fail("info p2");
+        };
+        if part_init::type_str(k1) != "efi" {
+            return Outcome::Fail("efi guid");
+        }
+        if part_init::type_str(k2) != "linux" {
+            return Outcome::Fail("linux guid");
+        }
+        if n2 < 16 {
+            return Outcome::Fail("linux small");
+        }
+        let Some(d) = part_init::device(i1) else {
+            return Outcome::Fail("no d1");
+        };
+        let mut buf = [0u8; 512];
+        buf[0] = 0xE1;
+        buf[100] = 0xE2;
+        if d.write(1, &buf).is_err() {
+            return Outcome::Fail("write");
+        }
+        let mut out = [0u8; 512];
+        if d.read(1, &mut out).is_err() || out != buf {
+            return Outcome::Fail("read");
+        }
+        if d.flush().is_err() {
+            return Outcome::Fail("flush");
+        }
+        match d.write(d.capacity_sectors(), &buf) {
+            Err(BlockError::Inval) => {}
+            _ => return Outcome::Fail("gpt overflow"),
+        }
+        Outcome::Ok
+    })
+}
+
+fn test_block_cache_hit() -> Outcome {
+    if !cache_init::live() || !block_init::live() {
+        return Outcome::Fail("not live");
+    }
+    let lba = 200u64;
+    let mut buf = [0u8; 512];
+    buf[3] = 0x44;
+    if block_init::write(lba, &buf).is_err() {
+        return Outcome::Fail("seed");
+    }
+    let raw0 = block_init::io_reqs();
+    if block_init::read(lba, &mut [0u8; 512]).is_err() {
+        return Outcome::Fail("raw1");
+    }
+    if block_init::read(lba, &mut [0u8; 512]).is_err() {
+        return Outcome::Fail("raw2");
+    }
+    let raw_delta = block_init::io_reqs().saturating_sub(raw0);
+    let s0 = cache_init::stats();
+    let mut out = [0u8; 512];
+    if cache_init::read(cache_init::DEV_RAM0, lba, &mut out).is_err() {
+        return Outcome::Fail("c1");
+    }
+    if out != buf {
+        return Outcome::Fail("data");
+    }
+    let s1 = cache_init::stats();
+    if cache_init::read(cache_init::DEV_RAM0, lba, &mut out).is_err() || out != buf {
+        return Outcome::Fail("c2");
+    }
+    let s2 = cache_init::stats();
+    if s1.device_reads <= s0.device_reads {
+        return Outcome::Fail("miss reqs");
+    }
+    if s2.device_reads != s1.device_reads {
+        return Outcome::Fail("hit extra req");
+    }
+    if s2.hits <= s1.hits {
+        return Outcome::Fail("no hit");
+    }
+    if raw_delta < 2 {
+        return Outcome::Fail("raw not 2");
+    }
+    let cached = s2.device_reads.saturating_sub(s0.device_reads);
+    if cached >= raw_delta {
+        return Outcome::Fail("no reduce");
+    }
+    let _ = writeln!(
+        Serial,
+        "vibeOS: cache: hits {} misses {} device {} raw {}",
+        s2.hits, s2.misses, s2.device_reqs(), raw_delta
+    );
+    Outcome::Ok
+}
+
+fn test_block_cache_evict() -> Outcome {
+    if !cache_init::live() || !block_init::live() {
+        return Outcome::Fail("not live");
+    }
+    let s0 = cache_init::stats();
+    let mut buf = [0u8; 512];
+    let mut i = 0u64;
+    while i < 18 {
+        let lba = i * 8;
+        buf[0] = i as u8;
+        if cache_init::read(cache_init::DEV_RAM0, lba, &mut buf).is_err() {
+            return Outcome::Fail("fill");
+        }
+        i += 1;
+    }
+    let s1 = cache_init::stats();
+    if s1.evicts <= s0.evicts {
+        return Outcome::Fail("no evict");
+    }
+    Outcome::Ok
 }

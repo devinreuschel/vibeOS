@@ -89,6 +89,7 @@ static ALIGN_OFF: AtomicU8 = AtomicU8::new(0);
 static MIN_IO: AtomicU16 = AtomicU16::new(0);
 static OPT_IO: AtomicU32 = AtomicU32::new(0);
 static MAX_DISCARD: AtomicU32 = AtomicU32::new(0);
+static IO_REQS: AtomicU64 = AtomicU64::new(0);
 
 fn r8(va: u64, off: u16) -> u8 {
     unsafe { core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u8) }
@@ -499,6 +500,7 @@ fn pump() {
             };
             match issue(blk, req) {
                 Issued::Device { qi, kick } => {
+                    IO_REQS.fetch_add(1, Ordering::Relaxed);
                     if kick {
                         if let Some(v) = blk.vqs[qi].as_ref() {
                             kicks[qi] = v.doorbell;
@@ -1099,7 +1101,18 @@ pub fn completions() -> u32 {
 }
 
 pub fn persist_lba() -> u64 {
-    capacity_sectors().saturating_sub(1)
+    // Inside the Linux GPT partition (starts at 512). Not GPT backup.
+    const LBA: u64 = 2048;
+    let cap = capacity_sectors();
+    if cap > LBA + 1 {
+        LBA
+    } else {
+        cap.saturating_sub(1)
+    }
+}
+
+pub fn io_reqs() -> u64 {
+    IO_REQS.load(Ordering::Relaxed)
 }
 
 fn submit_req(req: Request) -> Result<bool, BlockError> {
@@ -1260,10 +1273,11 @@ pub fn shell_line(f: &mut impl core::fmt::Write) -> core::fmt::Result {
     }
     writeln!(
         f,
-        "vibeOS: blk: {NAME} {} {} sectors {} nq={}",
+        "vibeOS: blk: {NAME} {} {} sectors {} nq={} io={}",
         logical_block_size(),
         capacity_sectors(),
         state().as_str(),
-        num_queues()
+        num_queues(),
+        io_reqs()
     )
 }

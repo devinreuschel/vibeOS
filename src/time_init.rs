@@ -5,14 +5,15 @@
 
 use core::cell::UnsafeCell;
 use core::fmt::Write;
+use core::sync::atomic::AtomicU64;
 
 use vibeos::acpi::HpetInfo;
 use vibeos::pic::{PIC1_CMD, PIC_EOI};
 use vibeos::time::{
-    bcd_to_bin, hpet_period_ok, next_deadline, tsc_per_ms_from_hpet, tsc_per_ms_from_pit,
-    unix_from_civil, wall_unix_s, CalibSource, Instant, TickClock, WallOrigin, IO_WAIT_PORT,
-    PIT_CALIB_COUNT, PIT_CALIB_MS, PIT_CH0_WRITES, PIT_CH2, PIT_CMD, PIT_CMD_CH2_ONESHOT,
-    PIT_GATE, FS_PER_MS,
+    bcd_to_bin, hpet_period_ok, monotonic_max, next_deadline, tsc_per_ms_from_hpet,
+    tsc_per_ms_from_pit, unix_from_civil, wall_unix_s, CalibSource, Instant, TickClock,
+    WallOrigin, IO_WAIT_PORT, PIT_CALIB_COUNT, PIT_CALIB_MS, PIT_CH0_WRITES, PIT_CH2, PIT_CMD,
+    PIT_CMD_CH2_ONESHOT, PIT_GATE, FS_PER_MS,
 };
 
 use crate::acpi_init;
@@ -81,6 +82,13 @@ impl TimeState {
 }
 
 static STATE: BootCell<TimeState> = BootCell::new(TimeState::empty());
+/// Highest `now_ns` published. TCG has no invariant TSC; `hlt` can make
+/// interpolation step backwards even with a stable seqlock pair.
+static LAST_NS: AtomicU64 = AtomicU64::new(0);
+
+fn publish_ns(n: u64) -> u64 {
+    monotonic_max(&LAST_NS, n)
+}
 
 fn io_wait() {
     unsafe { x86::outb(IO_WAIT_PORT, 0) };
@@ -327,14 +335,12 @@ pub fn uptime_ms() -> u64 {
 }
 
 pub fn now_us() -> u64 {
-    let st = STATE.get();
-    st.clock.now_us_with(|| rdtsc_ser(st.use_rdtscp), st.tsc_per_ms)
+    now_ns() / 1_000
 }
 
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn now_ns() -> u64 {
     let st = STATE.get();
-    st.clock.now_ns_with(|| rdtsc_ser(st.use_rdtscp), st.tsc_per_ms)
+    publish_ns(st.clock.now_ns_with(|| rdtsc_ser(st.use_rdtscp), st.tsc_per_ms))
 }
 
 pub fn tsc_per_ms() -> u64 {

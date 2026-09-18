@@ -9,7 +9,7 @@
 //! zeros the hidden base. Scheduler after time so the tick can preempt.
 //! SMP after irq-enabled so APs enter as idle. Console after `smp: done`.
 //! PCI after console. Workqueue + virtio (rng, blk) register, then bind.
-//! Ramdisk after bind. Shell last. The `kernel_tests` build
+//! Ramdisk after bind. Partition scan + cache next. Shell last. The `kernel_tests` build
 //! runs the in-guest registry after that and exits through isa-debug-exit.
 
 #![no_std]
@@ -28,6 +28,7 @@ mod acpi_init;
 mod apic_init;
 mod arch;
 mod block_init;
+mod cache_init;
 mod console_init;
 mod dev_init;
 mod diag;
@@ -42,6 +43,7 @@ mod log_init;
 mod ksyms;
 mod paging_init;
 mod panic;
+mod part_init;
 mod pci_init;
 mod per_cpu_init;
 mod pmm_init;
@@ -302,6 +304,8 @@ fn normal_boot_tail() {
     crate::virtio_blk_init::init();
     crate::dev_init::init();
     crate::block_init::init();
+    crate::cache_init::init();
+    crate::part_init::init();
 
     #[cfg(feature = "gp-test")]
     gp_test_trip();

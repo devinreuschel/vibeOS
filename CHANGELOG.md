@@ -7,12 +7,38 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- `now_us` / `now_ns` no longer go backwards under `hlt` on TCG. A wrapping
+  TSC-behind-snapshot delta interpolates as 0, and the kernel never publishes
+  a reading below the last one. TCG has no invariant TSC; `hlt` plus the
+  Phase 7C `blk-wb` sleeper makes ticks late relative to TSC, so interpolation
+  overshoots and the next tick would otherwise step backwards.
+
 ### Changed
 
 - CI: cancel superseded GitHub Actions runs for the same branch or PR so
   only the latest tip stays in the queue.
 
 ### Added
+
+- Phase 7 slice C: GPT/MBR partition children and a write-back block cache.
+  MBR walks primary plus extended/logical (depth-bounded; corrupt next-LBA
+  stops). GPT checks header and entry CRC and falls back to the backup
+  header; a protective 0xEE MBR is not treated as the disk. Children are
+  offset-limited `BlockDevice`s (`block: <parent>p<N> <n> sectors`). The
+  cache is 4 KiB pages keyed by `(device, offset)`: read-through,
+  write-back, clock eviction, sequential readahead, dirty-ratio writeback
+  thread. `flush` writes dirty pages then calls the device; `barrier`
+  writes dirty only. Hit/miss/device-request counters are on `blk`. Built
+  so Phase 10 can reuse the same pages. Host tests: real table blobs,
+  truncated/bad CRC, eviction, and a measured device-request drop on
+  repeat reads. In-guest: MBR+GPT children, cache hit vs uncached
+  counters, eviction. Persist LBA moved inside the Linux GPT partition
+  so it does not sit on the backup header. Panic dump tail is 24 records
+  so `smp: done` still appears after the extra partition markers. ktest
+  boots the ISO first (`-boot order=d`) so a protective MBR on vda does
+  not steal SeaBIOS from the CD on reboot.
 
 - Phase 7 slice B: virtio-blk on the Phase 6 modern transport. Probe reads
   capacity, `blk_size` (512 if `F_BLK_SIZE` is missing), and topology.

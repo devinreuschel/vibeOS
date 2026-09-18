@@ -21,7 +21,11 @@ DISK_BYTES = 4 * 1024 * 1024
 
 
 def _blk_extra(disk: str, smp: int) -> tuple[str, ...]:
+    # Boot the ISO, not the virtio disk. Stamping a protective MBR (0x55AA)
+    # makes SeaBIOS prefer the HDD on reboot unless CD is first.
     return (
+        "-boot",
+        "order=d",
         "-drive",
         f"file={disk},if=none,id=vibehd,format=raw,cache=writeback,discard=unmap",
         "-device",
@@ -34,8 +38,18 @@ def _require_line(lines: list[str], pred, msg: str) -> None:
         raise HarnessError(msg)
 
 
-def _vda_marker(ln: str) -> bool:
-    return ln.startswith("vibeOS: block: vda ") and ln.endswith(" sectors")
+def _block_name(name: str):
+    def pred(ln: str) -> bool:
+        bits = ln.split()
+        return (
+            len(bits) == 5
+            and bits[0] == "vibeOS:"
+            and bits[1] == "block:"
+            and bits[2] == name
+            and bits[4] == "sectors"
+        )
+
+    return pred
 
 
 def main() -> int:
@@ -73,7 +87,9 @@ def main() -> int:
         try:
             raw = run_qemu_until_exit(cfg, timeout_s=timeout)
             check_ktest_output(raw.lines, raw.exit_code)
-            _require_line(raw.lines, _vda_marker, "missing virtio-blk marker")
+            _require_line(raw.lines, _block_name("vda"), "missing virtio-blk marker")
+            _require_line(raw.lines, _block_name("vdap1"), "missing vdap1 marker")
+            _require_line(raw.lines, _block_name("vdap2"), "missing vdap2 marker")
             _require_line(
                 raw.lines,
                 lambda ln: ln == "vibeOS: persist: wrote",
@@ -98,7 +114,8 @@ def main() -> int:
         try:
             raw2 = run_qemu_until_exit(cfg, timeout_s=timeout)
             check_ktest_output(raw2.lines, raw2.exit_code)
-            _require_line(raw2.lines, _vda_marker, "missing virtio-blk marker (reboot)")
+            _require_line(raw2.lines, _block_name("vda"), "missing virtio-blk marker (reboot)")
+            _require_line(raw2.lines, _block_name("vdap1"), "missing vdap1 marker (reboot)")
             _require_line(
                 raw2.lines,
                 lambda ln: ln == "vibeOS: persist: intact",

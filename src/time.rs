@@ -110,6 +110,12 @@ pub fn tsc_per_ms_from_pit(tsc_delta: u64, count: u16) -> Option<u64> {
 
 /// Tick milliseconds plus TSC interpolation since that tick.
 /// Wrapping TSC delta; saturates at `u64::MAX`.
+///
+/// A delta with the high bit set is TSC behind the snapshot (TCG/`hlt`
+/// without invariant TSC), not a 2^64-cycle jump. Do not cap extra at one
+/// tick: ktest holds IF off for long stretches and `spin_until_ns` has to
+/// keep moving on TSC alone. Late-tick overshoot is clamped by
+/// [`monotonic_max`] in the kernel publisher.
 pub fn interpolate_us(tick_ms: u64, tsc_at_tick: u64, tsc_now: u64, tsc_per_ms: u64) -> u64 {
     interpolate(tick_ms, tsc_at_tick, tsc_now, tsc_per_ms, 1_000)
 }
@@ -129,9 +135,17 @@ fn interpolate(
     if tsc_per_ms == 0 {
         return clamp_u64(base);
     }
-    let delta = tsc_now.wrapping_sub(tsc_at_tick) as u128;
-    let extra = delta.saturating_mul(per_ms) / tsc_per_ms as u128;
+    let delta = tsc_now.wrapping_sub(tsc_at_tick);
+    if delta & (1u64 << 63) != 0 {
+        return clamp_u64(base);
+    }
+    let extra = (delta as u128).saturating_mul(per_ms) / tsc_per_ms as u128;
     clamp_u64(base.saturating_add(extra))
+}
+
+/// `fetch_max` then return the larger of previous and `n`.
+pub fn monotonic_max(last: &AtomicU64, n: u64) -> u64 {
+    last.fetch_max(n, Ordering::Relaxed).max(n)
 }
 
 fn clamp_u64(v: u128) -> u64 {
@@ -290,6 +304,22 @@ mod tests {
         assert_eq!(interpolate_us(5, 0, k, k), 6_000);
         assert_eq!(interpolate_ns(5, 0, k, k), 6_000_000);
         assert_eq!(interpolate_us(1, 0, 0, 0), 1_000);
+    }
+
+    /// Late tick overshoots; kernel [`monotonic_max`] holds the high water.
+    #[test]
+    fn interpolate_late_tick_overshoots_next_base() {
+        let k = 1_000_000;
+        let late = interpolate_us(5, 0, k * 5 / 2, k);
+        let after = interpolate_us(6, k * 5 / 2, k * 5 / 2, k);
+        assert_eq!(late, 7_500);
+        assert_eq!(after, 6_000);
+        assert!(after < late);
+        assert_eq!(interpolate_us(5, 100, 99, k), 5_000);
+        let last = AtomicU64::new(0);
+        assert_eq!(monotonic_max(&last, late), late);
+        assert_eq!(monotonic_max(&last, after), late);
+        assert_eq!(monotonic_max(&last, 8_000), 8_000);
     }
 
     #[test]

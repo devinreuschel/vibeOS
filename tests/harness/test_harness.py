@@ -106,23 +106,35 @@ class TestOrderedMarkerCheck(unittest.TestCase):
         m = Marker(
             "vibeOS: block: ",
             "block_ramdisk",
-            and_contains=("ram0", " sectors"),
+            and_contains=(" ram0 ", " sectors"),
         )
         self.assertTrue(m.matches("vibeOS: block: ram0 256 sectors"))
         self.assertFalse(m.matches("vibeOS: block: init"))
         self.assertFalse(m.matches("vibeOS: block: ram0"))
         self.assertFalse(m.matches("ram0 256 sectors"))
+        self.assertFalse(m.matches("vibeOS: block: ram0p1 32 sectors"))
+
+    def test_block_partition_marker_parent_pN(self) -> None:
+        m = Marker(
+            "vibeOS: block: ",
+            "block_ram0p1",
+            and_contains=(" ram0p1 ", " sectors"),
+        )
+        self.assertTrue(m.matches("vibeOS: block: ram0p1 32 sectors"))
+        self.assertFalse(m.matches("vibeOS: block: ram0 256 sectors"))
+        self.assertFalse(m.matches("vibeOS: block: ram0p2 24 sectors"))
 
     def test_block_vda_marker_needs_name_and_sectors(self) -> None:
         m = Marker(
             "vibeOS: block: ",
             "block_vda",
-            and_contains=("vda", " sectors"),
+            and_contains=(" vda ", " sectors"),
         )
         self.assertTrue(m.matches("vibeOS: block: vda 8192 sectors"))
         self.assertFalse(m.matches("vibeOS: block: ram0 256 sectors"))
         self.assertFalse(m.matches("vibeOS: block: vda"))
         self.assertFalse(m.matches("vibeOS: virtio: blk vda"))
+        self.assertFalse(m.matches("vibeOS: block: vdap1 128 sectors"))
 
     def test_and_contains_wrong_shape_fails_ordered_check(self) -> None:
         # The pmm marker must not accept a line that lacks the prefix.
@@ -368,20 +380,25 @@ class TestLapicMode(unittest.TestCase):
         self.assertIn("console_ok", names)
         self.assertIn("pci_devices", names)
         self.assertIn("block_ramdisk", names)
+        self.assertIn("block_ram0p1", names)
+        self.assertIn("block_ram0p2", names)
         self.assertIn("shell_ready", names)
         smp_i = names.index("smp_done")
         con_i = names.index("console_ok")
         pci_i = names.index("pci_devices")
         blk_i = names.index("block_ramdisk")
+        p1_i = names.index("block_ram0p1")
         sh_i = names.index("shell_ready")
         self.assertLess(smp_i, con_i)
         self.assertLess(con_i, pci_i)
         self.assertLess(pci_i, blk_i)
-        self.assertLess(blk_i, sh_i)
+        self.assertLess(blk_i, p1_i)
+        self.assertLess(p1_i, sh_i)
         gp_names = [x.name for x in boot_contract_markers(smp=2, gp=True)]
         self.assertIn("console_ok", gp_names)
         self.assertIn("pci_devices", gp_names)
         self.assertIn("block_ramdisk", gp_names)
+        self.assertIn("block_ram0p1", gp_names)
         self.assertNotIn("shell_ready", gp_names)
         names1 = [x.name for x in boot_contract_markers(smp=1)]
         self.assertNotIn("smp_ap_online_0", names1)
