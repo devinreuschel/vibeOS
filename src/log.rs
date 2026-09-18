@@ -20,8 +20,9 @@ pub const DEFAULT_RUNTIME_MAX: Level = Level::Info;
 pub const RING_CAP: usize = 256;
 /// Bytes of message text kept per record. Longer lines truncate.
 pub const MSG_CAP: usize = 96;
-/// Panic dump prints this many newest records.
-pub const DUMP_LAST: usize = 16;
+/// Panic dump prints this many newest records. Sized so `smp: done`
+/// still appears after PCI + ram0 + partition children.
+pub const DUMP_LAST: usize = 24;
 
 /// Severity. Smaller is more severe. Emit if `level <= max`.
 #[repr(u8)]
