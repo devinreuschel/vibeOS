@@ -212,6 +212,85 @@ pub unsafe fn map_4k(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(),
     Ok(())
 }
 
+/// Map one 2 MiB leaf. Caller holds PT. Local `invlpg` only.
+pub unsafe fn map_2m_locked(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(), MapError> {
+    let mut alloc = BuddyFrames;
+    let mut mapper = current_mapper();
+    unsafe {
+        mapper.map_page(va, pa, flags, PageSize::Size2M, MapMode::Fresh, &mut alloc)?;
+    }
+    x86::invlpg(va.as_u64());
+    Ok(())
+}
+
+/// Map one 2 MiB leaf in the live tables, drop PT, then shootdown.
+///
+/// # Safety
+/// Same contract as `Mapper::map_page`. Must run after [`install`].
+pub unsafe fn map_2m(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(), MapError> {
+    with_pt(|| unsafe { map_2m_locked(va, pa, flags) })?;
+    paging::tlb_shootdown_others(va);
+    Ok(())
+}
+
+/// Map missing physmap leaves covering `[phys, phys+len)` as write-back.
+/// Already-present leaves are left alone (so a WB framebuffer is not
+/// UC-patched). Used for VGA BAR0 when the BAR outruns Limine's surface.
+///
+/// Returns whether `phys` itself translates through the HHDM physmap.
+pub fn ensure_physmap_wb(phys: PhysAddr, len: u64) -> bool {
+    if len == 0 {
+        return true;
+    }
+    let start = phys.as_u64() & !(PAGE_SIZE_4K - 1);
+    if start >= PHYSMAP_CAP {
+        return false;
+    }
+    let Some(raw_end) = phys.as_u64().checked_add(len) else {
+        return false;
+    };
+    let end = paging_align_up(raw_end, PAGE_SIZE_4K).min(PHYSMAP_CAP);
+    let flags = paging::physmap_flags();
+    let mut p = start;
+    while p < end {
+        let va = VirtAddr(HHDM_BASE.wrapping_add(p));
+        if let Some((_, sz, _)) = translate(va) {
+            let span = sz.bytes();
+            let next = (p & !(span - 1)).saturating_add(span);
+            p = if next > p { next } else { p + PAGE_SIZE_4K };
+            continue;
+        }
+        let rem = end - p;
+        let try_2m = p & (PAGE_SIZE_2M - 1) == 0 && rem >= PAGE_SIZE_2M;
+        if try_2m {
+            match unsafe { map_2m(va, PhysAddr(p), flags) } {
+                Ok(()) => {
+                    p += PAGE_SIZE_2M;
+                    continue;
+                }
+                Err(MapError::AlreadyMapped) => {
+                    p += PAGE_SIZE_4K;
+                    continue;
+                }
+                Err(MapError::Misaligned)
+                | Err(MapError::NotMapped)
+                | Err(MapError::OutOfFrames)
+                | Err(MapError::PageSizeMismatch)
+                | Err(MapError::NonCanonical) => {}
+            }
+        }
+        match unsafe { map_4k(va, PhysAddr(p), flags) } {
+            Ok(()) | Err(MapError::AlreadyMapped) => p += PAGE_SIZE_4K,
+            Err(MapError::Misaligned)
+            | Err(MapError::NotMapped)
+            | Err(MapError::OutOfFrames)
+            | Err(MapError::PageSizeMismatch)
+            | Err(MapError::NonCanonical) => break,
+        }
+    }
+    translate(VirtAddr(HHDM_BASE.wrapping_add(phys.as_u64()))).is_some()
+}
+
 /// Unmap one leaf. Caller holds PT. Local `invlpg` only.
 pub unsafe fn unmap_4k_locked(va: VirtAddr) -> Option<(PhysAddr, PageSize)> {
     let mut mapper = current_mapper();

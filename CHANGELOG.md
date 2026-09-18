@@ -27,7 +27,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   Recursive bridge enum, BAR decode (mem/IO, 32/64, all-1s size probe),
   capability offsets recorded (MSI/MSI-X/PCIe/PM; not enabled). Memory
   BARs map through ioremap or the capped physmap; sizes above 32 MiB are
-  skipped (DESIGN §4.1). VGA BAR0 is not UC-patched over the console FB.
+  skipped (DESIGN §4.1). VGA BAR0 is not UC-patched over the console FB;
+  the BAR is mapped through the existing WB physmap alias even when it
+  outruns Limine's visible surface / `map_end`.
   Memory Space + Bus Master on bind. Marker `vibeOS: pci: <n> devices`
   after `console ok`, before `shell ready`. Shell `lspci` / `devices`.
   Host tests: CF8/ECAM encoding, config R/W, BAR size (including huge-BAR

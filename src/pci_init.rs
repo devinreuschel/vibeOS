@@ -86,17 +86,19 @@ fn cf8_write32(bdf: Bdf, offset: u16, val: u32) {
     }
 }
 
-fn map_mmio(phys: u64, len: u64) -> Option<u64> {
+fn map_mmio(phys: u64, len: u64, keep_wb: bool) -> Option<u64> {
     if phys == 0 || len == 0 {
         return None;
     }
     let end = phys.checked_add(len)?;
-    // VGA BAR0 is the Limine FB. It is already WB on the physmap.
-    // UC-patching or ioremap would alias the console (DESIGN §4.1 / §9.2).
-    // Limine's FB size is the visible surface, often smaller than the BAR
-    // (16 MiB), so map_end may not cover the whole window.
-    if fb_init::overlaps_phys(phys, len) {
-        if phys < paging_init::map_end() {
+    // VGA BAR0 aliases the Limine FB. It stays WB on the physmap.
+    // UC-patch or ioremap would alias the console UC (DESIGN §4.1 / §9.2).
+    // Limine's surface (and thus map_end) is often smaller than the BAR
+    // (16 MiB); fill missing physmap leaves as WB so BAR0 is mapped.
+    if keep_wb || fb_init::overlaps_phys(phys, len) {
+        if paging_init::ensure_physmap_wb(PhysAddr(phys), len)
+            || phys < paging_init::map_end()
+        {
             return Some(paging_init::HHDM_BASE.wrapping_add(phys));
         }
         return None;
@@ -140,7 +142,7 @@ fn ecam_va(phys: u64) -> Option<u64> {
         }
         i += 1;
     }
-    let va = map_mmio(page, PAGE_SIZE_4K)?;
+    let va = map_mmio(page, PAGE_SIZE_4K, false)?;
     let slot = pci::ecam_cache_slot(e.n, ECAM_CACHE);
     if e.n < ECAM_CACHE {
         e.n += 1;
@@ -212,7 +214,10 @@ fn map_func_bars(info: &FuncInfo, dev: &mut Device) {
             i += 1;
             continue;
         }
-        if let Some(va) = map_mmio(bar.addr, bar.size) {
+        // Class 03.00 BAR0 is the scanout aperture. Keep it WB even when
+        // Limine's FB record does not overlap the full BAR.
+        let keep_wb = i == 0 && info.class == 0x03 && info.subclass == 0x00;
+        if let Some(va) = map_mmio(bar.addr, bar.size, keep_wb) {
             dev.resources[i].mapped_va = va;
         }
         i += 1;
