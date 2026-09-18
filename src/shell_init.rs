@@ -32,6 +32,7 @@ unsafe impl<T> Sync for Cell<T> {}
 
 static REG: Cell<Registry> = Cell(core::cell::UnsafeCell::new(Registry::new()));
 static LOCK: AtomicBool = AtomicBool::new(false);
+#[cfg_attr(feature = "kernel_tests", allow(dead_code))]
 static READY: AtomicBool = AtomicBool::new(false);
 
 fn with_reg<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
@@ -52,7 +53,7 @@ pub fn register(cmd: Command) -> bool {
     with_reg(|r| r.register(cmd))
 }
 
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+#[cfg_attr(feature = "kernel_tests", allow(dead_code))]
 pub fn ready() -> bool {
     READY.load(Ordering::Acquire)
 }
@@ -135,6 +136,7 @@ fn register_builtins() {
     }
 }
 
+#[cfg_attr(feature = "kernel_tests", allow(dead_code))]
 fn shell_main() {
     let mut ed = LineEditor::new();
     let mut painted = 0usize;
@@ -170,11 +172,13 @@ fn shell_main() {
     }
 }
 
+#[cfg_attr(feature = "kernel_tests", allow(dead_code))]
 fn write_prompt(painted: &mut usize) {
     console_init::write(PROMPT.as_bytes());
     *painted = PROMPT.len();
 }
 
+#[cfg_attr(feature = "kernel_tests", allow(dead_code))]
 fn paint(ed: &LineEditor, painted: &mut usize) {
     console_init::write(b"\r");
     console_init::write(PROMPT.as_bytes());
@@ -196,6 +200,7 @@ fn paint(ed: &LineEditor, painted: &mut usize) {
 /// Block for one key. Drain with IRQs off; never hold the FB/serial lock
 /// across the wait. `sti; hlt` is one instruction so a keyboard IRQ
 /// cannot slip between enable and halt.
+#[cfg_attr(feature = "kernel_tests", allow(dead_code))]
 fn wait_key() -> DecodedKey {
     loop {
         if let Some(k) = console_init::read() {
