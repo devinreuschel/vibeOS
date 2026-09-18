@@ -8,6 +8,7 @@
 
 pub mod acpi;
 pub mod apic;
+pub mod block;
 pub mod console;
 pub mod desc;
 pub mod dev;

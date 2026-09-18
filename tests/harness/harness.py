@@ -564,7 +564,8 @@ def run_qemu_until_exit(
 # Phase 5 slice B then emits `console ok` after SMP. Phase 6 slice A
 # emits `pci: <n> devices` (and per-device lines) after that. Phase 6
 # slice C may emit diagnostic `work: ready` / virtio lines (not contract
-# markers). Shell `shell ready` is last. IRQ1 is unmasked
+# markers). Phase 7 slice A emits `block: <name> <n> sectors` for the
+# ramdisk, still before `shell ready`. Shell `shell ready` is last. IRQ1 is unmasked
 # only after the handler exists. TCG: `VIBEOS_QEMU_ACCEL=tcg` (make default)
 # or `VIBEOS_QEMU_EXTRA="-accel tcg"`.
 # `pic: remapped` means the PIC step finished (ICW ran, or FADT skip);
@@ -630,7 +631,14 @@ def boot_contract_markers(
             and_contains=(" devices",),
         )
     )
-    # gp-test trips after PCI enum and never reaches the shell thread.
+    after.append(
+        Marker(
+            "vibeOS: block: ",
+            "block_ramdisk",
+            and_contains=("ram0", " sectors"),
+        )
+    )
+    # gp-test trips after PCI enum / ramdisk and never reaches the shell thread.
     if not gp:
         after.append(Marker("vibeOS: shell ready", "shell_ready"))
     if hpet:

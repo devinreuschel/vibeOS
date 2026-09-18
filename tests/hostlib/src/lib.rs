@@ -13,6 +13,9 @@ pub mod console;
 #[path = "../../../src/apic.rs"]
 pub mod apic;
 
+#[path = "../../../src/block.rs"]
+pub mod block;
+
 #[path = "../../../src/fb.rs"]
 pub mod fb;
 
@@ -134,6 +137,7 @@ mod smoke {
             marker::BOOT_DONE,
             marker::CONSOLE_OK,
             marker::PCI_PREFIX,
+            marker::BLOCK_PREFIX,
             marker::SHELL_READY,
         ] {
             assert!(m.starts_with("vibeOS: "), "marker missing prefix: {m}");
@@ -170,6 +174,8 @@ mod smoke {
         assert_eq!(marker::CONSOLE_OK, "vibeOS: console ok");
         assert_eq!(marker::PCI_PREFIX, "vibeOS: pci: ");
         assert_eq!(marker::PCI_DEVICES_SUFFIX, " devices");
+        assert_eq!(marker::BLOCK_PREFIX, "vibeOS: block: ");
+        assert_eq!(marker::BLOCK_SECTORS_SUFFIX, " sectors");
         assert_eq!(marker::SHELL_READY, "vibeOS: shell ready");
     }
 

@@ -25,6 +25,7 @@ landed.
 | 7 | [SMP](#7-smp) | ACPI, AP bring-up, per-CPU, IPIs, shootdown |
 | 8 | [Testing](#8-testing) | Tiers, marker contract, QEMU flags, CI |
 | 9 | [Pitfalls](#9-pitfalls) | Bugs already paid for once |
+| 10 | [Block I/O](#10-block-io) | Requests, barrier vs flush, ramdisk |
 
 ---
 
@@ -329,7 +330,8 @@ of it.
 | 16 | APIC + SMP bring-up | `smp: done` | Needs time (delays), heap (per-CPU allocation), scheduler (AP entry point). Live Phase 4 order: SMP before console. |
 | 17 | Framebuffer console, PS/2, mux | `console ok` | After `smp: done`. Install the IRQ1 / keyboard GSI handler, init the 8042, then unmask. Replay the pre-FB log ring onto the framebuffer. |
 | 17b | PCI enum + device registry | `pci: N devices` | After `console ok`. Legacy `0xCF8`/`0xCFC` for bus 0; MCFG → ECAM beyond. Scan builds a device list. Workqueue + threaded IRQ start, then drivers bind by id. Memory BARs are mapped through ioremap or the capped physmap; sizes above 32 MiB are recorded and skipped (DESIGN §4.1). |
-| 18 | Shell thread, builtins | `shell ready` | Last marker. Spawn a kernel thread (not `_start`, not idle, not an ISR), register builtins into the command table, print the prompt. `lspci` / `devices` are live. |
+| 17c | Block layer + ramdisk | `block: <name> <n> sectors` | After bind. In-memory `BlockDevice` so the request queue is testable before virtio-blk. One line per device. |
+| 18 | Shell thread, builtins | `shell ready` | Last marker. Spawn a kernel thread (not `_start`, not idle, not an ISR), register builtins into the command table, print the prompt. `lspci` / `devices` / `blk` are live. |
 
 Ordering rules worth stating separately because they were learned the hard way:
 
@@ -370,9 +372,9 @@ memory BARs under the 32 MiB cap, fills the device registry, and emits
 `pci: N devices`. Workqueue workers and the threaded-IRQ bottom half start
 next. Drivers register, then bind after the scan, not inline. Virtio-rng
 matches by id when a modern virtio device is present (ktest adds one; e2e
-does not).
+does not). Ramdisk init follows bind and emits `block: <name> <n> sectors`.
 Step 18 spawns the shell as a kernel thread after `console ok` / `pci: N devices`
-and emits `shell ready` last. `boot: phase1 done` was a Phase 1–4 stand-in and is no
+/ `block: …` and emits `shell ready` last. `boot: phase1 done` was a Phase 1–4 stand-in and is no
 longer emitted; the trailing contract line is `shell ready`.
 The e2e contract in [section 8.3](#83-end-to-end) is the live order.
 
@@ -1294,6 +1296,7 @@ vibeOS: irq: enabled
 vibeOS: smp: done
 vibeOS: console ok
 vibeOS: pci: <n> devices
+vibeOS: block: <name> <n> sectors
 vibeOS: shell ready
 ```
 
@@ -1301,7 +1304,7 @@ Live e2e through Phase 6 slice A asserts through `idt ok`, then `per_cpu: bsp re
 then `acpi: xsdt`, then `time: tsc <n>/ms`, then `time: lapic_timer ok (<mode>)`, then
 `sched: cpu0 ready`, then `irq: enabled`, then for each AP `sched: cpu<i> ready`
 followed by `smp: ap online`, then `smp: done`, then `console ok`, then
-`pci: <n> devices`, then `shell ready`.
+`pci: <n> devices`, then `block: <name> <n> sectors`, then `shell ready`.
 `boot: phase1 done` was a Phase 1–4 stand-in and is no longer in the contract; the
 trailing marker is `shell ready`. SMP stays before console; the old
 table that listed console as step 15 before SMP was drift and is gone.
@@ -1314,7 +1317,8 @@ the diagnostic `time: calibrated hpet <n>/ms`; `make test-e2e-pit` asserts
 
 `smp: done` before `shell ready` is deliberate. Put SMP bring-up after the shell starts and an AP
 failure becomes invisible, because the harness sees its last marker and passes. `pci: <n> devices`
-sits between `console ok` and `shell ready` so `lspci` is registered before the prompt.
+sits between `console ok` and `shell ready` so `lspci` is registered before the prompt. The ramdisk
+`block: <name> <n> sectors` line sits after PCI and still before the shell.
 
 With `-smp N`, additionally:
 
@@ -1656,7 +1660,7 @@ target directory and separate ISO for the test build.
 **A boot regression passes CI.**
 The e2e harness checked that markers were present but not that they were ordered, and SMP bring-up ran
 after the last marker it looked for. Rule: markers are asserted in order, and `smp: done` comes before
-`console ok`, `pci: N devices`, and `shell ready`. A new marker is added to the harness in the same
+`console ok`, `pci: N devices`, `block: <name> <n> sectors`, and `shell ready`. A new marker is added to the harness in the same
 commit that emits it.
 
 ## 9.8 Meta
@@ -1671,3 +1675,44 @@ place, this file, and a change updates it in the same commit.
 The old tree carried four issues marked critical, with named regression tests planned for each, for the
 rest of its life. Rule: a bug that is understood well enough to write down is fixed or explicitly
 deferred with a roadmap line. "Documented" is not a state a critical bug gets to rest in.
+
+---
+
+# 10. Block I/O
+
+Phase 7. Portable types live in `src/block.rs`. Kernel ramdisk, waiters, and the
+boot marker live in `src/block_init.rs`. Partitions and cache are later slices.
+
+## 10.1 Completions
+
+A request carries waiter cookies, not a locked queue. Submit takes the per-device
+queue lock (RANK_DEVICE), merges or enqueues, and drops the lock before any copy.
+The ramdisk pump runs after that drop; virtio-blk will submit to a virtqueue here
+and complete from a threaded IRQ instead. `complete` stores the status then wakes
+waiters under SCHED. Never hold the queue lock across I/O or across that wake
+(DEVICE then SCHED is the wrong order). Hard IRQ must not run this path: enqueue
+work only (DESIGN [§2.2](#22-interrupt-handler-rules)).
+
+Blocking wait and async submit share the same cookie. The buffer and waiter must
+outlive the request.
+
+## 10.2 Barrier vs flush
+
+`Barrier` is an order fence: every request submitted before it finishes before any
+request submitted after it starts. It does not make writes durable.
+
+`Flush` is a barrier plus a device durable-write. Ramdisk flush is a successful
+no-op (the backing is already memory). A journaling filesystem must issue flush,
+not only barrier, before treating a commit as persistent.
+
+The elevator will not dispatch seq numbers past an in-queue fence. Adjacent
+read/write/discard requests merge; fences do not, and they split merge runs.
+
+## 10.3 Failure
+
+I/O errors retry up to `DEFAULT_RETRY_BUDGET` extra attempts, then the device
+goes `Failed`. Further submits return `Failed`. `Inval` (range, size) is not
+retried and does not fail the device. No infinite retry loop.
+
+Logical block size is per device. Do not assume 512. Capacity is in those
+blocks. Discard on ramdisk validates the range and otherwise no-ops.

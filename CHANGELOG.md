@@ -9,6 +9,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Phase 7 slice A: block layer + ramdisk. `BlockDevice` (logical block
+  size, capacity in those blocks, read/write/flush/discard) with a
+  per-device request queue: adjacent merge, C-LOOK elevator, barrier vs
+  flush (DESIGN §10). Completions are waiter cookies; the queue lock is
+  not held across the copy so a later virtio-blk threaded IRQ can signal
+  the same path. I/O errors retry a bounded number of times, then the
+  device is `Failed`. Ramdisk `ram0` (256 × 512 B) is registered at boot;
+  discard is a range-checked no-op. Marker
+  `vibeOS: block: <name> <n> sectors` after `pci: N devices`, before
+  `shell ready`. Shell `blk`. Host tests cover merge, elevator, fences,
+  retry, and 4K geometry. In-guest: ramdisk R/W, concurrent threads,
+  retry-to-failed.
+
 - Phase 6 slice C: modern virtio PCI transport, workqueue / threaded IRQ,
   and the Phase 6 exit gate. Vendor caps locate common, notify, ISR, and
   device-specific regions. `VIRTIO_F_VERSION_1` is required (probe fails

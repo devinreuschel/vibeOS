@@ -23,11 +23,13 @@ use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_INTX_DISABLE, CMD_MAST
 use vibeos::thread::{ThreadId, ThreadState};
 use vibeos::time::{CalibSource, Instant};
 use vibeos::vectors;
+use vibeos::block::{BlockError, DeviceState};
 use vibeos::virtio::F_VERSION_1;
 
 use crate::acpi_init;
 use crate::apic_init;
 use crate::arch;
+use crate::block_init;
 use crate::dev_init;
 use crate::dma_init;
 use crate::ipi_init;
@@ -147,6 +149,9 @@ const TESTS: &[(&str, TestFn)] = &[
     ("workqueue", test_workqueue),
     ("virtio_bind", test_virtio_bind),
     ("virtio_vq", test_virtio_vq),
+    ("block_ramdisk_rw", test_block_ramdisk_rw),
+    ("block_concurrent", test_block_concurrent),
+    ("block_retry", test_block_retry),
 ];
 
 pub fn run() -> ! {
@@ -3012,6 +3017,216 @@ fn test_virtio_vq() -> Outcome {
     }
     if virtio_init::rng_soft_hits() <= s0 {
         return Outcome::Fail("no softirq");
+    }
+    Outcome::Ok
+}
+
+fn test_block_ramdisk_rw() -> Outcome {
+    if !block_init::live() {
+        return Outcome::Fail("block not live");
+    }
+    block_init::reset();
+    let d = block_init::device();
+    if d.name() != block_init::name() {
+        return Outcome::Fail("name");
+    }
+    if d.logical_block_size() != block_init::logical_block_size() {
+        return Outcome::Fail("bs");
+    }
+    if d.capacity_sectors() != block_init::capacity_sectors() {
+        return Outcome::Fail("cap");
+    }
+    if d.state() != DeviceState::Ready {
+        return Outcome::Fail("state");
+    }
+    let mut buf = [0u8; 512];
+    let mut i = 0usize;
+    while i < 512 {
+        buf[i] = (i as u8).wrapping_add(0x3C);
+        i += 1;
+    }
+    if d.write(1, &buf).is_err() {
+        return Outcome::Fail("write");
+    }
+    let mut out = [0u8; 512];
+    if d.read(1, &mut out).is_err() {
+        return Outcome::Fail("read");
+    }
+    if out != buf {
+        return Outcome::Fail("mismatch");
+    }
+    if d.flush().is_err() {
+        return Outcome::Fail("flush");
+    }
+    if block_init::barrier().is_err() {
+        return Outcome::Fail("barrier");
+    }
+    if d.discard(1, 1).is_err() {
+        return Outcome::Fail("discard");
+    }
+    out = [0u8; 512];
+    if d.read(1, &mut out).is_err() || out != buf {
+        return Outcome::Fail("discard clobber");
+    }
+    let mut odd = [0u8; 100];
+    match d.read(0, &mut odd) {
+        Err(BlockError::Inval) => {}
+        _ => return Outcome::Fail("unaligned"),
+    }
+    match d.write(block_init::RAM0_SECTORS, &buf) {
+        Err(BlockError::Inval) => {}
+        _ => return Outcome::Fail("past end"),
+    }
+    match d.discard(block_init::RAM0_SECTORS, 1) {
+        Err(BlockError::Inval) => {}
+        _ => return Outcome::Fail("discard past"),
+    }
+    if !crate::shell_init::has_command("blk") {
+        return Outcome::Fail("no blk");
+    }
+    if crate::shell_init::dispatch_line("blk").is_err() {
+        return Outcome::Fail("blk cmd");
+    }
+    Outcome::Ok
+}
+
+const BLK_ITERS: u32 = 60;
+const BLK_SPAN: u64 = 32;
+static BLK_WID: AtomicU32 = AtomicU32::new(0);
+static BLK_DONE: AtomicU32 = AtomicU32::new(0);
+static BLK_FAIL: AtomicU32 = AtomicU32::new(0);
+
+fn blk_worker() {
+    let id = BLK_WID.fetch_add(1, Ordering::SeqCst);
+    let base = id as u64 * BLK_SPAN;
+    let mut i = 0u32;
+    while i < BLK_ITERS {
+        let lba = base + (i as u64 % BLK_SPAN);
+        let mut buf = [0u8; 512];
+        let mut j = 0usize;
+        while j < 512 {
+            buf[j] = (id as u8)
+                .wrapping_add(i as u8)
+                .wrapping_add(j as u8);
+            j += 1;
+        }
+        if block_init::write(lba, &buf).is_err() {
+            BLK_FAIL.fetch_add(1, Ordering::SeqCst);
+            break;
+        }
+        let mut out = [0u8; 512];
+        if block_init::read(lba, &mut out).is_err() || out != buf {
+            BLK_FAIL.fetch_add(1, Ordering::SeqCst);
+            break;
+        }
+        i += 1;
+    }
+    BLK_DONE.fetch_add(1, Ordering::SeqCst);
+}
+
+static TEAR_ID: AtomicU32 = AtomicU32::new(0);
+static TEAR_DONE: AtomicU32 = AtomicU32::new(0);
+
+fn tear_worker() {
+    let id = TEAR_ID.fetch_add(1, Ordering::SeqCst);
+    let fill = if id == 0 { 0xAAu8 } else { 0x55u8 };
+    let buf = [fill; 512];
+    if block_init::write(0, &buf).is_err() {
+        BLK_FAIL.fetch_add(1, Ordering::SeqCst);
+    }
+    TEAR_DONE.fetch_add(1, Ordering::SeqCst);
+}
+
+fn test_block_concurrent() -> Outcome {
+    if !block_init::live() {
+        return Outcome::Fail("block not live");
+    }
+    block_init::reset();
+    BLK_WID.store(0, Ordering::SeqCst);
+    BLK_DONE.store(0, Ordering::SeqCst);
+    BLK_FAIL.store(0, Ordering::SeqCst);
+    let _a = thread_init::spawn("blk-a", blk_worker);
+    let _b = thread_init::spawn("blk-b", blk_worker);
+    with_timer(|| {
+        let t0 = time_init::uptime_ms();
+        loop {
+            if BLK_DONE.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            if time_init::uptime_ms().saturating_sub(t0) > 8_000 {
+                return Outcome::Fail("rw stall");
+            }
+            thread_init::yield_now();
+        }
+        if BLK_FAIL.load(Ordering::SeqCst) != 0 {
+            return Outcome::Fail("rw corrupt");
+        }
+        TEAR_ID.store(0, Ordering::SeqCst);
+        TEAR_DONE.store(0, Ordering::SeqCst);
+        let _c = thread_init::spawn("tear-a", tear_worker);
+        let _d = thread_init::spawn("tear-b", tear_worker);
+        let t1 = time_init::uptime_ms();
+        loop {
+            if TEAR_DONE.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            if time_init::uptime_ms().saturating_sub(t1) > 8_000 {
+                return Outcome::Fail("tear stall");
+            }
+            thread_init::yield_now();
+        }
+        if BLK_FAIL.load(Ordering::SeqCst) != 0 {
+            return Outcome::Fail("tear write");
+        }
+        let mut out = [0u8; 512];
+        if block_init::read(0, &mut out).is_err() {
+            return Outcome::Fail("tear read");
+        }
+        let b0 = out[0];
+        if b0 != 0xAA && b0 != 0x55 {
+            return Outcome::Fail("tear pattern");
+        }
+        let mut i = 1usize;
+        while i < 512 {
+            if out[i] != b0 {
+                return Outcome::Fail("torn sector");
+            }
+            i += 1;
+        }
+        Outcome::Ok
+    })
+}
+
+fn test_block_retry() -> Outcome {
+    if !block_init::live() {
+        return Outcome::Fail("block not live");
+    }
+    block_init::reset();
+    let mut buf = [0x11u8; 512];
+    block_init::inject_io_fails(3);
+    if block_init::write(3, &buf).is_err() {
+        return Outcome::Fail("retry should pass");
+    }
+    let mut out = [0u8; 512];
+    if block_init::read(3, &mut out).is_err() || out != buf {
+        return Outcome::Fail("after retry");
+    }
+    block_init::inject_io_fails(4);
+    match block_init::write(4, &buf) {
+        Err(BlockError::Failed) => {}
+        _ => return Outcome::Fail("expected failed"),
+    }
+    if block_init::state() != DeviceState::Failed {
+        return Outcome::Fail("not marked failed");
+    }
+    match block_init::read(3, &mut out) {
+        Err(BlockError::Failed) => {}
+        _ => return Outcome::Fail("submit after fail"),
+    }
+    block_init::reset();
+    buf[0] = 0x22;
+    if block_init::write(3, &buf).is_err() {
+        return Outcome::Fail("reset");
     }
     Outcome::Ok
 }

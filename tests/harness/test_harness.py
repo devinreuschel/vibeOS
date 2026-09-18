@@ -102,6 +102,17 @@ class TestOrderedMarkerCheck(unittest.TestCase):
         self.assertFalse(m.matches("vibeOS: pci: ecam 0xe0000000 buses 0-255"))
         self.assertFalse(m.matches("vibeOS: pci: skip bar 00:02.0 size 0x10000000000"))
 
+    def test_block_ramdisk_marker_needs_name_and_sectors(self) -> None:
+        m = Marker(
+            "vibeOS: block: ",
+            "block_ramdisk",
+            and_contains=("ram0", " sectors"),
+        )
+        self.assertTrue(m.matches("vibeOS: block: ram0 256 sectors"))
+        self.assertFalse(m.matches("vibeOS: block: init"))
+        self.assertFalse(m.matches("vibeOS: block: ram0"))
+        self.assertFalse(m.matches("ram0 256 sectors"))
+
     def test_and_contains_wrong_shape_fails_ordered_check(self) -> None:
         # The pmm marker must not accept a line that lacks the prefix.
         lines = [
@@ -345,17 +356,21 @@ class TestLapicMode(unittest.TestCase):
         self.assertNotIn("boot_done", names)
         self.assertIn("console_ok", names)
         self.assertIn("pci_devices", names)
+        self.assertIn("block_ramdisk", names)
         self.assertIn("shell_ready", names)
         smp_i = names.index("smp_done")
         con_i = names.index("console_ok")
         pci_i = names.index("pci_devices")
+        blk_i = names.index("block_ramdisk")
         sh_i = names.index("shell_ready")
         self.assertLess(smp_i, con_i)
         self.assertLess(con_i, pci_i)
-        self.assertLess(pci_i, sh_i)
+        self.assertLess(pci_i, blk_i)
+        self.assertLess(blk_i, sh_i)
         gp_names = [x.name for x in boot_contract_markers(smp=2, gp=True)]
         self.assertIn("console_ok", gp_names)
         self.assertIn("pci_devices", gp_names)
+        self.assertIn("block_ramdisk", gp_names)
         self.assertNotIn("shell_ready", gp_names)
         names1 = [x.name for x in boot_contract_markers(smp=1)]
         self.assertNotIn("smp_ap_online_0", names1)

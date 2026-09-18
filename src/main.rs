@@ -3,13 +3,14 @@
 //! Boot order: serial, Limine, PMM, paging, ACPI parse + MMIO UC, heap,
 //! KVA, then GDT/TSS/IST, PIC remap, IDT, BSP per_cpu, ACPI marker, time,
 //! LAPIC+IOAPIC, timer prove, scheduler+idle, irq enabled, SMP, meminfo,
-//! console, PCI scan + registry, shell thread. GDT after KVA because IST
+//! console, PCI scan + registry, workqueue + virtio bind, ramdisk, then
+//! the shell thread. GDT after KVA because IST
 //! stacks are guarded KVA stacks. per_cpu after GDT because `mov gs`
 //! zeros the hidden base. Scheduler after time so the tick can preempt.
 //! SMP after irq-enabled so APs enter as idle. Console after `smp: done`.
 //! PCI after console. Workqueue + virtio driver register, then bind.
-//! Shell last. The `kernel_tests` build runs the
-//! in-guest registry after that and exits through isa-debug-exit.
+//! Ramdisk block device after that. Shell last. The `kernel_tests` build
+//! runs the in-guest registry after that and exits through isa-debug-exit.
 
 #![no_std]
 #![no_main]
@@ -26,6 +27,7 @@ extern crate alloc;
 mod acpi_init;
 mod apic_init;
 mod arch;
+mod block_init;
 mod console_init;
 mod dev_init;
 mod diag;
@@ -297,12 +299,13 @@ fn normal_boot_tail() {
     crate::work_init::init();
     crate::virtio_init::init();
     crate::dev_init::init();
+    crate::block_init::init();
 
     #[cfg(feature = "gp-test")]
     gp_test_trip();
 
-    // Slice C: kernel thread + registry. `shell ready` is the last marker.
-    // gp-test trips before this so a #GP dump still has a clean contract.
+    // `shell ready` is last. gp-test trips after ramdisk so a #GP dump
+    // still has a clean contract through `block: …`.
     crate::shell_init::init();
 
     #[cfg(feature = "kernel_tests")]
