@@ -10,7 +10,7 @@
 //! SMP after irq-enabled so APs enter as idle. Console after `smp: done`.
 //! PCI after console. Workqueue + virtio (rng, blk) register, then bind.
 //! Ramdisk after bind. Partition scan + cache next. VFS ramfs root
-//! (no marker). Shell last. The `kernel_tests` build
+//! plus `/dev` `/proc` `/tmp` `/sys` (no marker). Shell last. The `kernel_tests` build
 //! runs the in-guest registry after that and exits through isa-debug-exit.
 
 #![no_std]

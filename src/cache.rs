@@ -439,6 +439,14 @@ impl<const N: usize> Cache<N> {
             i += 1;
         }
     }
+
+    /// Drop a page without writeback. tmpfs uses this when a file
+    /// frees or relocates backing so a later alloc cannot see stale data.
+    pub fn invalidate(&mut self, key: CacheKey) {
+        if let Some(i) = self.find(key) {
+            self.meta[i].flags = 0;
+        }
+    }
 }
 
 fn page_off(byte: u64) -> usize {

@@ -712,11 +712,11 @@ limitations.
 - [ ] verified by mounting the result on the host and running `fsck.fat`
 
 ### 8.4 Pseudo filesystems
-- [ ] `devfs`: block devices, `null`, `zero`, `random`, `console`, `tty`
-- [ ] `tmpfs` backed by the page cache, so it participates in eviction rather than pinning memory
-- [ ] `procfs`: per-process directories, `cmdline`, `status`, `maps`, `fd`
-- [ ] `sysfs`-equivalent for the device tree and driver bindings
-- [ ] a `kernfs`-style shared implementation so the four do not duplicate directory logic
+- [x] `devfs`: block devices, `null`, `zero`, `random`, `console`, `tty`
+- [x] `tmpfs` backed by the page cache, so it participates in eviction rather than pinning memory
+- [x] `procfs`: per-process directories, `cmdline`, `status`, `maps`, `fd`
+- [x] `sysfs`-equivalent for the device tree and driver bindings
+- [x] a `kernfs`-style shared implementation so the four do not duplicate directory logic
 
 ### 8.5 vibefs
 - [ ] the case for it: FAT32 has no permissions, no symlinks, no journaling, and no checksums, and every one of those becomes a wall

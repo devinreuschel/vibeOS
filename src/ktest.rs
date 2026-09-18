@@ -24,7 +24,7 @@ use vibeos::thread::{ThreadId, ThreadState};
 use vibeos::time::{CalibSource, Instant};
 use vibeos::vectors;
 use vibeos::block::{BlockError, DeviceState, Op};
-use vibeos::fs::{FsError, InodeKind};
+use vibeos::fs::{FsError, InodeKind, O_CREAT, O_RDWR};
 use vibeos::virtio::F_VERSION_1;
 
 use crate::acpi_init;
@@ -168,6 +168,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("block_cache_hit", test_block_cache_hit),
     ("block_cache_evict", test_block_cache_evict),
     ("vfs_walk", test_vfs_walk),
+    ("pseudo_fs", test_pseudo_fs),
 ];
 
 pub fn run() -> ! {
@@ -3784,6 +3785,139 @@ fn test_vfs_walk() -> Outcome {
         match v.stat(None, "/mnt/..") {
             Ok(s) if s.kind == InodeKind::Dir => {}
             _ => return Outcome::Fail("cross"),
+        }
+        Outcome::Ok
+    })
+}
+
+fn dir_has(v: &mut vibeos::fs::Vfs, path: &str, want: &[u8]) -> bool {
+    let Ok(dir) = v.resolve(None, path, true) else {
+        return false;
+    };
+    let mut d = vibeos::fs::Dirent {
+        ino: 0,
+        kind: InodeKind::Reg,
+        name: vibeos::fs::Name::EMPTY,
+    };
+    let mut cookie = 0u64;
+    loop {
+        match v.readdir(dir, cookie, &mut d) {
+            Ok(Some(next)) => {
+                if d.name.eq_bytes(want) {
+                    return true;
+                }
+                cookie = next;
+            }
+            _ => return false,
+        }
+    }
+}
+
+fn test_pseudo_fs() -> Outcome {
+    if !fs_init::live() {
+        return Outcome::Fail("not live");
+    }
+    fs_init::with(|v| {
+        match v.stat(None, "/dev") {
+            Ok(s) if s.kind == InodeKind::Dir => {}
+            _ => return Outcome::Fail("/dev"),
+        }
+        match v.stat(None, "/proc") {
+            Ok(s) if s.kind == InodeKind::Dir => {}
+            _ => return Outcome::Fail("/proc"),
+        }
+        match v.stat(None, "/tmp") {
+            Ok(s) if s.kind == InodeKind::Dir => {}
+            _ => return Outcome::Fail("/tmp"),
+        }
+        match v.stat(None, "/sys") {
+            Ok(s) if s.kind == InodeKind::Dir => {}
+            _ => return Outcome::Fail("/sys"),
+        }
+        if !dir_has(v, "/dev", b"null")
+            || !dir_has(v, "/dev", b"zero")
+            || !dir_has(v, "/dev", b"random")
+            || !dir_has(v, "/dev", b"console")
+            || !dir_has(v, "/dev", b"tty")
+        {
+            return Outcome::Fail("dev chars");
+        }
+        if !dir_has(v, "/dev", b"ram0") {
+            return Outcome::Fail("dev ram0");
+        }
+        match v.stat(None, "/dev/null") {
+            Ok(s) if s.kind == InodeKind::Chr => {}
+            _ => return Outcome::Fail("null kind"),
+        }
+        let Ok(fid) = v.open(None, "/dev/null", O_RDWR, 0) else {
+            return Outcome::Fail("open null");
+        };
+        if v.write(fid, b"x").ok() != Some(1) {
+            let _ = v.close(fid);
+            return Outcome::Fail("write null");
+        }
+        let _ = v.close(fid);
+        let Ok(z) = v.open(None, "/dev/zero", O_RDWR, 0) else {
+            return Outcome::Fail("open zero");
+        };
+        let mut buf = [0xFFu8; 4];
+        if v.read(z, &mut buf).ok() != Some(4) || buf != [0u8; 4] {
+            let _ = v.close(z);
+            return Outcome::Fail("read zero");
+        }
+        let _ = v.close(z);
+        let Ok(r) = v.open(None, "/dev/random", O_RDWR, 0) else {
+            return Outcome::Fail("open rand");
+        };
+        if v.read(r, &mut buf).ok() != Some(4) {
+            let _ = v.close(r);
+            return Outcome::Fail("read rand");
+        }
+        let _ = v.close(r);
+        if v.creat(None, "/tmp/f", 0o644).is_err() {
+            return Outcome::Fail("tmp creat");
+        }
+        let Ok(t) = v.open(None, "/tmp/f", O_RDWR | O_CREAT, 0o644) else {
+            return Outcome::Fail("tmp open");
+        };
+        if v.write(t, b"ok").ok() != Some(2) {
+            let _ = v.close(t);
+            return Outcome::Fail("tmp write");
+        }
+        if v.seek(t, 0, vibeos::fs::SEEK_SET).is_err() {
+            let _ = v.close(t);
+            return Outcome::Fail("tmp seek");
+        }
+        buf = [0u8; 4];
+        if v.read(t, &mut buf).ok() != Some(2) || &buf[..2] != b"ok" {
+            let _ = v.close(t);
+            return Outcome::Fail("tmp read");
+        }
+        let _ = v.close(t);
+        if !dir_has(v, "/proc", b"1") || !dir_has(v, "/proc", b"self") {
+            return Outcome::Fail("proc stubs");
+        }
+        if !dir_has(v, "/proc/1", b"cmdline")
+            || !dir_has(v, "/proc/1", b"status")
+            || !dir_has(v, "/proc/1", b"maps")
+            || !dir_has(v, "/proc/1", b"fd")
+        {
+            return Outcome::Fail("proc/1");
+        }
+        let Ok(c) = v.open(None, "/proc/1/cmdline", O_RDWR, 0) else {
+            return Outcome::Fail("cmdline");
+        };
+        buf = [0u8; 4];
+        match v.read(c, &mut buf) {
+            Ok(n) if n > 0 => {}
+            _ => {
+                let _ = v.close(c);
+                return Outcome::Fail("cmdline read");
+            }
+        }
+        let _ = v.close(c);
+        if !dir_has(v, "/sys", b"devices") || !dir_has(v, "/sys", b"bus") {
+            return Outcome::Fail("sys skeleton");
         }
         Outcome::Ok
     })

@@ -22,6 +22,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Phase 8 slice C: pseudo filesystems on a shared kernfs directory
+  tree (one node table, four skins — not four dentry implementations).
+  `devfs` publishes `null`, `zero`, `random`/`urandom`, `console`, `tty`,
+  and block names matching `block: <name>` (`ram0`, `vda`, partitions).
+  `tmpfs` stores file data in the Phase 7 page/block cache plus a fixed
+  ramdisk so clock eviction works; it is not a grow-only `Vec`.
+  `procfs` exposes `self` and a pid-1 stub (`cmdline`/`status`/`maps`/`fd`)
+  that does not panic when only kernel threads exist (Process is Phase 9).
+  sysfs-equivalent walks the Phase 6 device tree and driver bindings.
+  `/dev` `/proc` `/tmp` `/sys` are mounted after ramfs root. No new boot
+  marker; `/dev/random` is a non-blocking xorshift (not virtio-rng, not
+  IRQ). Host tests cover kernfs/devfs/tmpfs eviction; in-guest `pseudo_fs`.
+
 - Phase 8 slice A: VFS. Inode (type, size, mode, times, nlink), dentry
   cache with negative entries (invalidated on create in that dir),
   superblock + mount table, mount-point crossing (`..` from a mount
