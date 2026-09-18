@@ -3650,7 +3650,7 @@ fn test_block_part_gpt() -> Outcome {
         }
         match d.write(d.capacity_sectors(), &buf) {
             Err(BlockError::Inval) => {}
-            _ => return Outcome::Fail("gpt overflow");
+            _ => return Outcome::Fail("gpt overflow"),
         }
         Outcome::Ok
     })
