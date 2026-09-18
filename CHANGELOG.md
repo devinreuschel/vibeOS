@@ -22,7 +22,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   truncated/bad CRC, eviction, and a measured device-request drop on
   repeat reads. In-guest: MBR+GPT children, cache hit vs uncached
   counters, eviction. Persist LBA moved inside the Linux GPT partition
-  so it does not sit on the backup header.
+  so it does not sit on the backup header. Panic dump tail is 24 records
+  so `smp: done` still appears after the extra partition markers. ktest
+  boots the ISO first (`-boot order=d`) so a protective MBR on vda does
+  not steal SeaBIOS from the CD on reboot.
 
 - Phase 7 slice B: virtio-blk on the Phase 6 modern transport. Probe reads
   capacity, `blk_size` (512 if `F_BLK_SIZE` is missing), and topology.
