@@ -9,6 +9,25 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Phase 6 slice C: modern virtio PCI transport, workqueue / threaded IRQ,
+  and the Phase 6 exit gate. Vendor caps locate common, notify, ISR, and
+  device-specific regions. `VIRTIO_F_VERSION_1` is required (probe fails
+  cleanly without it). Split virtqueue kick/complete uses `dma_wmb` /
+  `dma_rmb` around avail/used index publish, not a blanket
+  `compiler_fence`. Notify doorbell is
+  `cap.offset + queue_notify_off * notify_off_multiplier`. Indirect
+  descriptors and `VIRTIO_F_EVENT_IDX` are negotiated when the device
+  offers them. Packed VQ is deferred. Ring index wrap, `need_event`, and
+  a simulated device live in the library half. virtio-rng binds by id
+  (`1af4:1044` / `1004`), not probe order, and exercises one VQ.
+  Workqueue workers consume `fn(usize)` items; the high-prio ring is the
+  softirq stand-in (IRQ enqueues, does not block). Threaded IRQ: top half
+  acks/wakes only; the bottom-half thread may `Box` and block. Blocking
+  rules are in DESIGN §2.2. In-guest: virtio-rng (ktest adds
+  `virtio-rng-pci,disable-legacy=on`; e2e stays `pci: 6 devices`),
+  workqueue, threaded IRQ + softirq from the MSI-X top half. MSI-X still
+  comes from the `0x30..=0x7F` pool.
+
 - Phase 6 slice B: MSI/MSI-X and DMA. Device IRQs allocate from the
   `0x30..=0x7F` pool (`0x30` stays keyboard) bound to a chosen CPU.
   Drivers call `irq::allocate_vector` + `set_handler`; they do not pick
@@ -28,6 +47,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- `irq::free_vector` zeros threaded `top`/`work`/`pending` with the
+  handler and route. Recycled vectors were still taking the threaded
+  path, so a later `set_handler` was ignored (virtio probe-fail recycle).
+- virtio-rng probe tears down MSI-X, the vector, and device status when
+  `SplitLayout` or the virtqueue `DmaBuffer` fails after MSI-X is armed.
+  Those paths used `?` and skipped the teardown used on later failures.
 - `irq::free_vector` masks an I/O APIC GSI before clearing the handler
   and dropping `Route::IoApic`. A still-asserted level line no longer
   storms empty `dispatch`, and a later allocate of the same vector

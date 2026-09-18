@@ -435,11 +435,11 @@ impl Registry {
         Ok(())
     }
 
-    /// Match unbound devices to drivers. `enable` runs before `probe`
-    /// (command bits, etc). Drivers are sorted by [`Driver::order`].
-    pub fn bind_all(&mut self, mut enable: impl FnMut(&Device)) {
-        let mut order = [0u8; MAX_DRIVERS];
-        let mut idx = [0u8; MAX_DRIVERS];
+    pub fn driver_at(&self, i: usize) -> Option<&'static dyn Driver> {
+        self.drivers.get(i).and_then(|d| *d)
+    }
+
+    fn sorted_driver_idx(&self, idx: &mut [u8; MAX_DRIVERS], order: &mut [u8; MAX_DRIVERS]) -> usize {
         let mut n = 0usize;
         let mut i = 0usize;
         while i < self.n_drv {
@@ -450,7 +450,6 @@ impl Registry {
             }
             i += 1;
         }
-        // Insertion sort: lower order first, registration as tie-break.
         let mut a = 1usize;
         while a < n {
             let mut b = a;
@@ -463,6 +462,44 @@ impl Registry {
             }
             a += 1;
         }
+        n
+    }
+
+    /// `(driver_slot, device_slot)` in bind order. Probe outside the
+    /// registry lock: drivers may alloc and take RANK_DEVICE.
+    pub fn collect_bind_jobs(&self, out: &mut [(u8, u8)]) -> usize {
+        let mut order = [0u8; MAX_DRIVERS];
+        let mut idx = [0u8; MAX_DRIVERS];
+        let n = self.sorted_driver_idx(&mut idx, &mut order);
+        let mut w = 0usize;
+        let mut di = 0usize;
+        while di < n && w < out.len() {
+            let drv = match self.drivers[idx[di] as usize] {
+                Some(d) => d,
+                None => {
+                    di += 1;
+                    continue;
+                }
+            };
+            let mut dv = 0usize;
+            while dv < self.n_dev && w < out.len() {
+                if self.devices[dv].bound.is_none() && self.devices[dv].matches_driver(drv) {
+                    out[w] = (idx[di], dv as u8);
+                    w += 1;
+                }
+                dv += 1;
+            }
+            di += 1;
+        }
+        w
+    }
+
+    /// Match unbound devices to drivers. `enable` runs before `probe`
+    /// (command bits, etc). Drivers are sorted by [`Driver::order`].
+    pub fn bind_all(&mut self, mut enable: impl FnMut(&Device)) {
+        let mut order = [0u8; MAX_DRIVERS];
+        let mut idx = [0u8; MAX_DRIVERS];
+        let n = self.sorted_driver_idx(&mut idx, &mut order);
         let mut di = 0usize;
         while di < n {
             let drv = match self.drivers[idx[di] as usize] {
@@ -662,6 +699,10 @@ mod tests {
         assert!(r.register(&LATE));
         assert!(r.register(&EARLY));
         assert!(r.register(&VGA));
+        let mut jobs = [(0u8, 0u8); MAX_DEVICES];
+        let nj = r.collect_bind_jobs(&mut jobs);
+        assert!(nj >= 2);
+        assert_eq!(r.driver_at(jobs[0].0 as usize).unwrap().name(), "early-nic");
         let mut enables = 0u32;
         r.bind_all(|_| enables += 1);
         assert_eq!(enables, 2);

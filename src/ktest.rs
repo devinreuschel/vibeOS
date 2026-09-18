@@ -23,6 +23,7 @@ use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_INTX_DISABLE, CMD_MAST
 use vibeos::thread::{ThreadId, ThreadState};
 use vibeos::time::{CalibSource, Instant};
 use vibeos::vectors;
+use vibeos::virtio::F_VERSION_1;
 
 use crate::acpi_init;
 use crate::apic_init;
@@ -42,6 +43,8 @@ use crate::smp_init;
 use crate::sync_init::{BlockingMutex, Channel, Condvar, RwLock, Semaphore, SpinMutex};
 use crate::thread_init;
 use crate::time_init;
+use crate::virtio_init;
+use crate::work_init;
 use crate::x86;
 
 const ISA_DEBUG_EXIT: u16 = 0xF4;
@@ -135,11 +138,15 @@ const TESTS: &[(&str, TestFn)] = &[
     ("pci_bind_order", test_pci_bind_order),
     ("lspci_cmd", test_lspci_cmd),
     ("irq_pool", test_irq_pool),
+    ("irq_free_threaded", test_irq_free_threaded),
     ("msix_cpu", test_msix_cpu),
     ("intx_fallback", test_intx_fallback),
     ("intx_free_masks", test_intx_free_masks),
     ("dma_alloc", test_dma_alloc),
     ("dma_edu", test_dma_edu),
+    ("workqueue", test_workqueue),
+    ("virtio_bind", test_virtio_bind),
+    ("virtio_vq", test_virtio_vq),
 ];
 
 pub fn run() -> ! {
@@ -2498,6 +2505,57 @@ fn test_irq_pool() -> Outcome {
     }
 }
 
+fn irq_th_nop() {}
+
+fn test_irq_free_threaded() -> Outcome {
+    let n0 = irq_init::allocated_count();
+    let v = match irq_init::allocate_vector(0) {
+        Ok(v) => v,
+        Err(e) => return Outcome::Fail(e.as_str()),
+    };
+    if irq_init::set_threaded(v, Some(irq_th_nop), irq_th_nop).is_err() {
+        let _ = irq_init::free_vector(v);
+        return Outcome::Fail("set_threaded");
+    }
+    if !irq_init::has_threaded(v) {
+        let _ = irq_init::free_vector(v);
+        return Outcome::Fail("threaded not armed");
+    }
+    if irq_init::free_vector(v).is_err() {
+        return Outcome::Fail("free");
+    }
+    if irq_init::has_threaded(v) {
+        return Outcome::Fail("threaded after free");
+    }
+    let v2 = match irq_init::allocate_vector(0) {
+        Ok(v) => v,
+        Err(e) => return Outcome::Fail(e.as_str()),
+    };
+    if v2 != v {
+        let _ = irq_init::free_vector(v2);
+        return Outcome::Fail("realloc other vec");
+    }
+    if irq_init::has_threaded(v2) {
+        let _ = irq_init::free_vector(v2);
+        return Outcome::Fail("recycle threaded");
+    }
+    if irq_init::set_handler(v2, irq_th_nop).is_err() {
+        let _ = irq_init::free_vector(v2);
+        return Outcome::Fail("set_handler");
+    }
+    if irq_init::has_threaded(v2) {
+        let _ = irq_init::free_vector(v2);
+        return Outcome::Fail("handler still threaded");
+    }
+    if irq_init::free_vector(v2).is_err() {
+        return Outcome::Fail("free2");
+    }
+    if irq_init::allocated_count() != n0 {
+        return Outcome::Fail("count");
+    }
+    Outcome::Ok
+}
+
 fn test_msix_cpu() -> Outcome {
     let Some(ap) = second_cpu() else {
         return Outcome::Skip("no AP");
@@ -2865,4 +2923,95 @@ fn test_dma_edu() -> Outcome {
     } else {
         Outcome::Ok
     }
+}
+
+static WQ_HITS: AtomicU32 = AtomicU32::new(0);
+
+fn wq_mark(arg: usize) {
+    let _b = Box::new(arg as u8);
+    WQ_HITS.fetch_add(arg as u32, Ordering::SeqCst);
+}
+
+fn test_workqueue() -> Outcome {
+    if !work_init::live() {
+        return Outcome::Fail("work not live");
+    }
+    WQ_HITS.store(0, Ordering::SeqCst);
+    if !work_init::enqueue(wq_mark, 3) {
+        return Outcome::Fail("enqueue");
+    }
+    if !spin_until_ns(|| WQ_HITS.load(Ordering::SeqCst) == 3, 2_000_000_000) {
+        return Outcome::Fail("no worker");
+    }
+    Outcome::Ok
+}
+
+fn find_rng() -> Option<(usize, Device)> {
+    dev_init::find_id(0x1af4, 0x1044).or_else(|| dev_init::find_id(0x1af4, 0x1004))
+}
+
+fn test_virtio_bind() -> Outcome {
+    let Some((_, d)) = find_rng() else {
+        return Outcome::Skip("no virtio-rng");
+    };
+    if !virtio_init::rng_bound() {
+        return Outcome::Fail("unbound");
+    }
+    match d.bound {
+        Some("virtio-rng") => {}
+        Some(_) => return Outcome::Fail("wrong driver"),
+        None => return Outcome::Fail("id match"),
+    }
+    if virtio_init::rng_features() & F_VERSION_1 == 0 {
+        return Outcome::Fail("no VERSION_1");
+    }
+    if !virtio_init::rng_uses_indirect() && !virtio_init::rng_uses_event_idx() {
+        // Modern QEMU offers both; either is enough to prove negotiation.
+        return Outcome::Fail("no optional feats");
+    }
+    Outcome::Ok
+}
+
+fn test_virtio_vq() -> Outcome {
+    if !virtio_init::rng_bound() {
+        return Outcome::Skip("no virtio-rng");
+    }
+    let qdev = virtio_init::rng_qdma_device();
+    let ddev = virtio_init::rng_data_device();
+    let dvirt = virtio_init::rng_data_virt();
+    if qdev == 0 || ddev == 0 {
+        return Outcome::Fail("dma");
+    }
+    if ddev == dvirt {
+        return Outcome::Fail("device is va");
+    }
+    let c0 = virtio_init::rng_completions();
+    let t0 = virtio_init::rng_top_hits();
+    let th0 = virtio_init::rng_thread_hits();
+    let s0 = virtio_init::rng_soft_hits();
+    if virtio_init::rng_request().is_err() {
+        return Outcome::Fail("request");
+    }
+    if !spin_until_ns(
+        || virtio_init::rng_completions() > c0,
+        2_000_000_000,
+    ) {
+        return Outcome::Fail("no complete");
+    }
+    if virtio_init::rng_last_len() == 0 {
+        return Outcome::Fail("empty");
+    }
+    if virtio_init::rng_top_hits() <= t0 {
+        return Outcome::Fail("no top");
+    }
+    if virtio_init::rng_thread_hits() <= th0 {
+        return Outcome::Fail("no thread");
+    }
+    if !virtio_init::rng_alloced() {
+        return Outcome::Fail("thread alloc");
+    }
+    if virtio_init::rng_soft_hits() <= s0 {
+        return Outcome::Fail("no softirq");
+    }
+    Outcome::Ok
 }

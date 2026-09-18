@@ -37,4 +37,6 @@ pub mod thread;
 pub mod time;
 pub mod uart;
 pub mod vectors;
+pub mod virtio;
 pub mod wait;
+pub mod work;

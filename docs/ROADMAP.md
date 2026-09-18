@@ -553,10 +553,10 @@ enumeration and DMA.
 **Exit gate**
 - [x] `pci: <n> devices` marker and `lspci` output matching QEMU's configuration
 - [x] MSI-X interrupts delivered to a chosen CPU, verified in-guest
-- [ ] a virtio device negotiated through modern PCI capabilities with a working virtqueue
+- [x] a virtio device negotiated through modern PCI capabilities with a working virtqueue
 - [x] DMA buffers allocated, mapped, and verified for correct device-visible addresses
-- [ ] a driver bound to a device automatically by id match, not by hardcoded probing order
-- [ ] workqueue and threaded IRQ handlers exercised in-guest
+- [x] a driver bound to a device automatically by id match, not by hardcoded probing order
+- [x] workqueue and threaded IRQ handlers exercised in-guest
 
 ### 6.1 Device model
 - [x] `Device` with a bus address, ids, resources, and an interrupt binding
@@ -592,19 +592,19 @@ enumeration and DMA.
 - [x] IOMMU support deferred but the address translation kept behind an interface so it can be inserted
 
 ### 6.5 virtio
-- [ ] modern virtio over PCI: common configuration, notify, ISR, and device-specific capability regions
-- [ ] feature negotiation with the `VIRTIO_F_VERSION_1` handshake and a clear failure when features are missing
-- [ ] split virtqueue: descriptor table, available ring, used ring
-- [ ] queue setup, kick, and completion handling with the correct barriers
-- [ ] indirect descriptors, and `VIRTIO_F_EVENT_IDX` for interrupt suppression
+- [x] modern virtio over PCI: common configuration, notify, ISR, and device-specific capability regions
+- [x] feature negotiation with the `VIRTIO_F_VERSION_1` handshake and a clear failure when features are missing
+- [x] split virtqueue: descriptor table, available ring, used ring
+- [x] queue setup, kick, and completion handling with the correct barriers
+- [x] indirect descriptors, and `VIRTIO_F_EVENT_IDX` for interrupt suppression
 - [ ] packed virtqueue as a later optimization
-- [ ] the ring index arithmetic in the library half, host-tested against a simulated device
+- [x] the ring index arithmetic in the library half, host-tested against a simulated device
 
 ### 6.6 Deferred work
-- [ ] a workqueue: kernel threads consuming queued work items
-- [ ] threaded IRQ handlers, where the top half acknowledges and wakes a thread that may allocate and block
-- [ ] softirq-equivalent for latency-sensitive deferred work such as network receive
-- [ ] a documented rule for which handlers may block, because getting this wrong is a class of bug rather than an instance
+- [x] a workqueue: kernel threads consuming queued work items
+- [x] threaded IRQ handlers, where the top half acknowledges and wakes a thread that may allocate and block
+- [x] softirq-equivalent for latency-sensitive deferred work such as network receive
+- [x] a documented rule for which handlers may block, because getting this wrong is a class of bug rather than an instance
 
 ---
 

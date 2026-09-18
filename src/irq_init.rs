@@ -1,11 +1,12 @@
 //! Device IRQ dispatcher, vector allocation, MSI/MSI-X enable. DESIGN §5.4.
 //!
-//! EOI is here. Drivers register `fn()` only. Allocate is refused in a
-//! hard-IRQ (the dispatcher flag, not `InterruptGuard`).
+//! EOI is here. Hard-IRQ `fn()` acks and wakes; threaded handlers may
+//! allocate and block. Allocate is refused in a hard-IRQ (the dispatcher
+//! flag, not `InterruptGuard`).
 
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use vibeos::apic::{Polarity, Trigger};
 use vibeos::desc::InterruptFrame;
@@ -15,12 +16,15 @@ use vibeos::irq::{
     POOL_END, POOL_START,
 };
 use vibeos::pci::{self, Bdf};
+use vibeos::sched::FAR_DEADLINE;
 use vibeos::vectors;
+use vibeos::wait::WaitQueue;
 
 use crate::apic_init;
 use crate::arch;
 use crate::pci_init;
 use crate::per_cpu_init;
+use crate::thread_init;
 use crate::x86::InterruptGuard;
 
 type Handler = fn();
@@ -49,12 +53,33 @@ enum Route {
 static ROUTES: Cell<[Route; irq::POOL_LEN]> =
     Cell(core::cell::UnsafeCell::new([Route::None; irq::POOL_LEN]));
 
+struct Threaded {
+    wq: WaitQueue,
+    pending: [bool; irq::POOL_LEN],
+    top: [usize; irq::POOL_LEN],
+    work: [usize; irq::POOL_LEN],
+    started: bool,
+}
+
+static TH: Cell<Threaded> = Cell(core::cell::UnsafeCell::new(Threaded {
+    wq: WaitQueue::new(),
+    pending: [false; irq::POOL_LEN],
+    top: [0; irq::POOL_LEN],
+    work: [0; irq::POOL_LEN],
+    started: false,
+}));
+static THREAD_CPU: AtomicU32 = AtomicU32::new(0);
+
 fn pool() -> &'static mut VectorPool {
     unsafe { &mut *POOL.0.get() }
 }
 
 fn routes() -> &'static mut [Route; irq::POOL_LEN] {
     unsafe { &mut *ROUTES.0.get() }
+}
+
+fn th() -> &'static mut Threaded {
+    unsafe { &mut *TH.0.get() }
 }
 
 fn with_pool<R>(f: impl FnOnce(&mut VectorPool) -> R) -> R {
@@ -97,10 +122,26 @@ extern "x86-interrupt" fn device_irq<const N: u8>(_frame: InterruptFrame) {
 pub fn dispatch(vec: u8) {
     set_in_isr(true);
     if let Some(i) = handler_slot(vec) {
-        let p = HANDLERS[i].load(Ordering::Acquire);
-        if p != 0 {
-            let h: Handler = unsafe { core::mem::transmute(p) };
-            h();
+        let top = th().top[i];
+        let work = th().work[i];
+        if work != 0 || top != 0 {
+            if top != 0 {
+                let h: Handler = unsafe { core::mem::transmute(top) };
+                h();
+            }
+            thread_init::with_sched(|s| {
+                let t = th();
+                t.pending[i] = true;
+                if t.started {
+                    s.wake_one(&mut t.wq);
+                }
+            });
+        } else {
+            let p = HANDLERS[i].load(Ordering::Acquire);
+            if p != 0 {
+                let h: Handler = unsafe { core::mem::transmute(p) };
+                h();
+            }
         }
     }
     apic_init::eoi_for(vec);
@@ -129,6 +170,12 @@ pub fn free_vector(vec: u8) -> Result<(), IrqError> {
             }
             HANDLERS[i].store(0, Ordering::Release);
             routes()[i] = Route::None;
+            // dispatch prefers threaded state whenever top/work is set, so a
+            // recycled vector would ignore a later set_handler if we left it.
+            let t = th();
+            t.top[i] = 0;
+            t.work[i] = 0;
+            t.pending[i] = false;
         }
         p.free(vec)
     })
@@ -140,6 +187,75 @@ pub fn set_handler(vec: u8, h: Handler) -> Result<(), IrqError> {
     };
     HANDLERS[i].store(h as usize, Ordering::Release);
     Ok(())
+}
+
+/// Top half runs in hard IRQ (ack only). `work` runs in the IRQ thread.
+pub fn set_threaded(vec: u8, top: Option<Handler>, work: Handler) -> Result<(), IrqError> {
+    if in_hard_irq() {
+        return Err(IrqError::InIrq);
+    }
+    let Some(i) = handler_slot(vec) else {
+        return Err(IrqError::BadVector);
+    };
+    thread_init::with_sched(|_| {
+        let t = th();
+        t.top[i] = top.map(|f| f as usize).unwrap_or(0);
+        t.work[i] = work as usize;
+        t.pending[i] = false;
+    });
+    Ok(())
+}
+
+pub fn threaded_cpu() -> u32 {
+    THREAD_CPU.load(Ordering::Acquire)
+}
+
+fn last_online_cpu() -> u32 {
+    let m = per_cpu_init::online_mask();
+    if m == 0 {
+        0
+    } else {
+        63 - m.leading_zeros()
+    }
+}
+
+fn take_work() -> Option<Handler> {
+    thread_init::with_sched(|s| {
+        let t = th();
+        let mut i = 0usize;
+        while i < irq::POOL_LEN {
+            if t.pending[i] {
+                t.pending[i] = false;
+                let p = t.work[i];
+                if p != 0 {
+                    let h: Handler = unsafe { core::mem::transmute(p) };
+                    return Some(h);
+                }
+            }
+            i += 1;
+        }
+        s.begin_wait(&mut t.wq, FAR_DEADLINE);
+        None
+    })
+}
+
+fn irq_thread() {
+    loop {
+        match take_work() {
+            Some(h) => h(),
+            None => thread_init::schedule(),
+        }
+    }
+}
+
+/// Bottom-half thread on the last online CPU (AP when SMP).
+pub fn start_threaded() {
+    let cpu = last_online_cpu();
+    THREAD_CPU.store(cpu, Ordering::Release);
+    let _ = thread_init::spawn_on("irqth", irq_thread, cpu);
+    thread_init::with_sched(|_| {
+        th().started = true;
+    });
 }
 
 pub fn cpu_of(vec: u8) -> Option<u32> {
@@ -329,4 +445,15 @@ fn install_pool_stubs() {
 #[cfg(feature = "kernel_tests")]
 pub fn allocated_count() -> usize {
     with_pool(|p| p.allocated())
+}
+
+#[cfg(feature = "kernel_tests")]
+pub fn has_threaded(vec: u8) -> bool {
+    match handler_slot(vec) {
+        Some(i) => {
+            let t = th();
+            t.top[i] != 0 || t.work[i] != 0 || t.pending[i]
+        }
+        None => false,
+    }
 }

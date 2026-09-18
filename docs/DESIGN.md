@@ -156,6 +156,18 @@ An interrupt handler must:
 Both of the "must" rules are expanded in [section 5.8](#58-handler-ordering-rules), because both are
 easy to violate and expensive to debug.
 
+Blocking and allocation are a class of bug, not an instance. Context rules:
+
+| Context | May block? | May alloc? |
+|---------|------------|------------|
+| Hard IRQ / MSI handler | No | No |
+| Softirq equivalent (high-prio workqueue) | No | No (enqueue only from IRQ) |
+| Threaded IRQ / workqueue worker | Yes | Yes |
+| Driver `probe` | Yes | Yes |
+
+The hard-IRQ top half acknowledges and wakes. Work that allocates or blocks runs on a kernel thread
+([section 5.4](#54-irq-registration), ROADMAP §6.6).
+
 ## 2.3 Locking with interrupts
 
 Every spinlock that is taken from both an ISR and normal context disables interrupts for the whole
@@ -316,7 +328,7 @@ of it.
 | 15 | Arm scheduler; emit `irq: enabled` | `irq: enabled` | Scheduler is live. The timer already ticks from steps 13/13b; this marker is post-sched arming (IF on, preemption live), not the first STI. IRQ1 stays masked until the keyboard driver (step 17). |
 | 16 | APIC + SMP bring-up | `smp: done` | Needs time (delays), heap (per-CPU allocation), scheduler (AP entry point). Live Phase 4 order: SMP before console. |
 | 17 | Framebuffer console, PS/2, mux | `console ok` | After `smp: done`. Install the IRQ1 / keyboard GSI handler, init the 8042, then unmask. Replay the pre-FB log ring onto the framebuffer. |
-| 17b | PCI enum + device registry | `pci: N devices` | After `console ok`. Legacy `0xCF8`/`0xCFC` for bus 0; MCFG → ECAM beyond. Scan builds a device list, then the registry binds. Memory BARs are mapped through ioremap or the capped physmap; sizes above 32 MiB are recorded and skipped (DESIGN §4.1). |
+| 17b | PCI enum + device registry | `pci: N devices` | After `console ok`. Legacy `0xCF8`/`0xCFC` for bus 0; MCFG → ECAM beyond. Scan builds a device list. Workqueue + threaded IRQ start, then drivers bind by id. Memory BARs are mapped through ioremap or the capped physmap; sizes above 32 MiB are recorded and skipped (DESIGN §4.1). |
 | 18 | Shell thread, builtins | `shell ready` | Last marker. Spawn a kernel thread (not `_start`, not idle, not an ISR), register builtins into the command table, print the prompt. `lspci` / `devices` are live. |
 
 Ordering rules worth stating separately because they were learned the hard way:
@@ -355,7 +367,10 @@ halts on an unexpected line. The timer path re-runs the
 that bit but still has a PIC on 0x08).
 Step 17b enumerates PCI (CF8 on bus 0, ECAM from MCFG otherwise), maps
 memory BARs under the 32 MiB cap, fills the device registry, and emits
-`pci: N devices`. Drivers bind after the scan, not inline.
+`pci: N devices`. Workqueue workers and the threaded-IRQ bottom half start
+next. Drivers register, then bind after the scan, not inline. Virtio-rng
+matches by id when a modern virtio device is present (ktest adds one; e2e
+does not).
 Step 18 spawns the shell as a kernel thread after `console ok` / `pci: N devices`
 and emits `shell ready` last. `boot: phase1 done` was a Phase 1–4 stand-in and is no
 longer emitted; the trailing contract line is `shell ready`.
@@ -659,6 +674,7 @@ Drivers do not write to the IDT. They ask for a vector:
 ```rust
 let vec = irq::allocate_vector(cpu)?;     // from the 0x30..=0x7F pool
 irq::set_handler(vec, my_handler);
+// or: irq::set_threaded(vec, Some(top_half), thread_fn);
 ```
 
 The kernel binary exposes this as `irq_init::allocate_vector`. Allocate is refused
@@ -679,13 +695,19 @@ armed duplicates IRQs.
 INTx remains the fallback when a function has neither MSI nor MSI-X: route the GSI
 through the I/O APIC (PCI is level, active low). Keyboard keeps hardcoded vector
 `0x30`; the pool starts handing out `0x31`. `free_vector` masks that GSI before it
-clears the handler and forgets a `Route::IoApic` record. MSI and MSI-X are
-message-based and do not need an I/O APIC mask on free. Clearing first would let a
-still-asserted level line storm empty `dispatch` calls, and a later
-`allocate_vector` could take IRQs from the old device.
+clears the handler and forgets a `Route::IoApic` record. It also zeros threaded
+`top`/`work`/`pending` so a recycled vector cannot keep the old bottom half. MSI
+and MSI-X are message-based and do not need an I/O APIC mask on free. Clearing
+first would let a still-asserted level line storm empty `dispatch` calls, and a
+later `allocate_vector` could take IRQs from the old device.
 
 EOI is the dispatcher's job, not the driver's. The dispatch layer knows whether a
 vector arrived via PIC or LAPIC and signals the right controller.
+
+A threaded handler's top half runs in `dispatch` (ack / mask / wake only). The
+bottom half is a kernel thread pinned to the last online CPU; it may allocate and
+block. `set_threaded` is refused inside a hard-IRQ. The softirq stand-in is the
+high-prio workqueue: IRQ context enqueues a `fn(usize)` and wakes workers.
 
 ## 5.5 8259 PIC
 
@@ -770,8 +792,6 @@ not "fix" this by inheriting the outgoing nest onto the incoming thread.
 - Interrupt affinity *rebalancing* (Phase 17). The dest-CPU table and `set_affinity`
   already exist; what is left is a policy that moves MSI-X messages and IOAPIC
   dests when a queue saturates one core.
-- Threaded interrupt handlers: the top half acknowledges, a kernel thread does the
-  work. Required once a driver needs to allocate or block (Phase 6 slice C).
 
 ---
 
@@ -1333,7 +1353,7 @@ in the test harness produces either false confidence or a debugging session in t
 |---------|-------|
 | `make run` | `-cdrom myos.iso -m 128M -smp 2 -cpu max -serial stdio -accel tcg` |
 | e2e | as above plus `-display none -no-reboot -monitor unix:...,server=on,wait=off` |
-| ktest | as e2e plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04`, `-device e1000e`, `-device edu`. Extra NICs/edu are ktest-only; e2e stays the default `pc` set (`pci: 6 devices`). |
+| ktest | as e2e plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04`, `-device e1000e`, `-device edu`, `-device virtio-rng-pci,disable-legacy=on`. Extra NICs/edu/virtio are ktest-only; e2e stays the default `pc` set (`pci: 6 devices`). |
 | LAPIC fallback | `-cpu qemu64,-tsc-deadline` |
 | SMP stress | `-smp 4` |
 | Interrupt debugging | `-d int,cpu_reset`, plus `-machine q35` when chipset behavior matters |
@@ -1500,6 +1520,19 @@ stack overflow test.
 **Lost timer ticks under load.**
 With a one-shot timer, the handler called the scheduler before rearming, so a preemption dropped the
 next deadline. Rule: rearm the timer before doing anything that can yield.
+
+**Virtio kicks vanish.**
+Notify used the wrong BAR offset or ignored `notify_off_multiplier`. Rule: doorbell =
+`cap.offset + queue_notify_off * multiplier` inside the notify capability; wrap or past `length` is
+a failed kick, not a store into some other register.
+
+**Device sees a virtqueue index and stale descriptors.**
+`avail.idx` was published with a compiler fence. Rule: descriptor stores, then `dma_wmb` /
+`fence(Release)` + `sfence`, then the index. Used-ring harvest is `dma_rmb` after observing `used.idx`.
+
+**Allocate or block in a hard-IRQ / MSI handler.**
+The top half ran `Box` / `sleep` / `WaitQueue` wait. Rule: ack, set pending, wake the IRQ thread or
+enqueue work. The thread may alloc and block ([section 2.2](#22-interrupt-handler-rules)).
 
 ## 9.4 Concurrency
 
