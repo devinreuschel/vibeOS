@@ -15,6 +15,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   Phase 7C `blk-wb` sleeper makes ticks late relative to TSC, so interpolation
   overshoots and the next tick would otherwise step backwards.
 
+### Changed
+
+- CI: cancel superseded GitHub Actions runs for the same branch or PR so
+  only the latest tip stays in the queue.
+
 ### Added
 
 - Phase 7 slice C: GPT/MBR partition children and a write-back block cache.

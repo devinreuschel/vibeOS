@@ -5,6 +5,11 @@ on:
     branches: ["**"]
   pull_request:
 
+# Push + PR share one slot per branch; older SHAs get cancelled.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   phase0:
     name: phase 0 ladder
