@@ -1386,7 +1386,7 @@ table, `nm --demangle` the ELF, second link with the filled table. `.text` must 
 **QEMU framebuffer reprints the prompt on every key; serial looks fine.**
 The FB write path skipped `\r` before the text grid saw it, so the line editor's in-place paint
 (`\r` + rewrite) homed only on serial. Rule: `\r` sets column 0 on the same row; do not drop it.
-Host: `cr_homes_column_same_row`, `cr_paint_overwrites_in_place`.
+Host: `cr_homes_column_same_row`, `cr_paint_overwrites_in_place`. In-guest: `fb_cr_home`.
 
 ## 9.2 Memory
 

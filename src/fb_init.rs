@@ -263,3 +263,9 @@ pub fn width() -> Option<u32> {
     let g = FB.lock();
     g.as_ref().map(|f| f.width)
 }
+
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+pub fn cursor() -> Option<(u32, u32)> {
+    let g = FB.lock();
+    g.as_ref().map(|f| (f.grid.col, f.grid.row))
+}

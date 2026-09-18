@@ -113,6 +113,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("log_dmesg_no_recapture", test_log_dmesg_no_recapture),
     ("fb_bgrx_roundtrip", test_fb_bgrx_roundtrip),
     ("fb_pitch", test_fb_pitch),
+    ("fb_cr_home", test_fb_cr_home),
     ("kbd_gsi_unmasked", test_kbd_gsi_unmasked),
     ("console_mux", test_console_mux),
     ("kbd_ring_drain", test_kbd_ring_drain),
@@ -2049,6 +2050,46 @@ fn test_fb_pitch() -> Outcome {
         Some(got) if got == color => Outcome::Ok,
         Some(_) => Outcome::Fail("row1 mismatch"),
         None => Outcome::Fail("get row1"),
+    }
+}
+
+fn test_fb_cr_home() -> Outcome {
+    if !crate::fb_init::ready() {
+        return Outcome::Fail("no framebuffer");
+    }
+    crate::fb_init::write(b"\n");
+    let Some((col, row)) = crate::fb_init::cursor() else {
+        return Outcome::Fail("no cursor");
+    };
+    if col != 0 {
+        return Outcome::Fail("newline not col0");
+    }
+    crate::fb_init::write(b"X");
+    let mut hit: Option<(u32, u32)> = None;
+    let mut gy = 0u8;
+    while gy < vibeos::font::FONT_H as u8 && hit.is_none() {
+        let mut gx = 0u8;
+        while gx < vibeos::font::FONT_W as u8 {
+            if vibeos::font::glyph_pixel(b'X', gx, gy) {
+                hit = Some((gx as u32, gy as u32));
+                break;
+            }
+            gx += 1;
+        }
+        gy += 1;
+    }
+    let Some((gx, gy)) = hit else {
+        return Outcome::Fail("X glyph empty");
+    };
+    let (ox, oy) = vibeos::fb::glyph_origin(0, row);
+    let Some(lit) = crate::fb_init::get_pixel(ox + gx, oy + gy) else {
+        return Outcome::Fail("get lit");
+    };
+    crate::fb_init::write(b"\r ");
+    match crate::fb_init::get_pixel(ox + gx, oy + gy) {
+        Some(after) if after != lit => Outcome::Ok,
+        Some(_) => Outcome::Fail("CR did not home"),
+        None => Outcome::Fail("get after"),
     }
 }
 

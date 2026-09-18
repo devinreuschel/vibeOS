@@ -123,6 +123,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   being dropped before the text grid. The shell line editor paints
   in place with CR; serial already homed, the QEMU FB was reprinting
   the prompt on every key. Host tests cover CR overwrite and CRLF.
+  In-guest: `fb_cr_home` overwrites a glyph cell after CR.
 
 - PS/2 decoder: typematic repeats no longer retoggle Caps/Num or
   re-enqueue modifiers. Down-bits; only the first make is an edge.
