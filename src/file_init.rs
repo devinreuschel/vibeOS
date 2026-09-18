@@ -1,7 +1,8 @@
 //! Kernel File API + shell file commands. ROADMAP §8.6.
 //!
-//! VFS lock is not held across FAT/block I/O. `sync` issues a block
-//! Flush (DESIGN §10.2). FAT rejects symlink/link with `NotSupp`.
+//! VFS lock is not held across FAT/vibefs/block I/O. `sync` issues a block
+//! Flush (DESIGN §10.2). FAT rejects symlink/link with `NotSupp`; vibefs
+//! stores POSIX mode and symlinks (docs/VIBEFS.md).
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -9,7 +10,7 @@ use vibeos::fat::Node;
 use vibeos::fs::{
     self, split_basename, Dirent, FsError, FsType, InodeKind, Name, PathRef, Stat, MAX_NAME,
     MAX_PATH, O_ACCMODE, O_APPEND, O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC,
-    O_WRONLY, SEEK_CUR, SEEK_END, SEEK_SET, S_IFDIR_MODE, S_IFREG_MODE,
+    O_WRONLY, SEEK_CUR, SEEK_END, SEEK_SET, S_IFDIR_MODE, S_IFLNK_MODE, S_IFREG_MODE,
 };
 use vibeos::lock::RANK_DEVICE;
 use vibeos::shell::{Command, LineEditor, MAX_COMMANDS};
@@ -19,14 +20,83 @@ use crate::fat_init;
 use crate::fs_init;
 use crate::shell_init;
 use crate::sync_init::SpinMutex;
+use crate::vibefs_init;
 
 use core::fmt::Write;
 
 const MAX_OPEN: usize = 16;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Back {
+    Fat,
+    Vibe,
+}
+
+#[derive(Clone, Copy)]
+struct Walked {
+    back: Back,
+    vol: u8,
+    ino: u32,
+    kind: InodeKind,
+    size: u32,
+    clu: u32,
+    dir_clu: u32,
+    dir_off: u32,
+    mode: u16,
+    nlink: u32,
+    mtime: u64,
+}
+
+impl Walked {
+    fn from_fat(vol: u8, n: Node) -> Self {
+        Self {
+            back: Back::Fat,
+            vol,
+            ino: n.ino,
+            kind: n.kind,
+            size: n.size,
+            clu: n.clu,
+            dir_clu: n.dir_clu,
+            dir_off: n.dir_off,
+            mode: if n.kind == InodeKind::Dir {
+                S_IFDIR_MODE
+            } else {
+                S_IFREG_MODE
+            },
+            nlink: if n.kind == InodeKind::Dir { 2 } else { 1 },
+            mtime: n.mtime,
+        }
+    }
+
+    fn from_vibe(vol: u8, n: vibeos::vibefs::Node) -> Self {
+        Self {
+            back: Back::Vibe,
+            vol,
+            ino: n.ino,
+            kind: n.kind,
+            size: n.size,
+            clu: n.ino,
+            dir_clu: n.ino,
+            dir_off: 0,
+            mode: n.mode,
+            nlink: n.nlink,
+            mtime: n.mtime,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn dir_key(self) -> u32 {
+        match self.back {
+            Back::Fat => self.clu,
+            Back::Vibe => self.ino,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct OpenFile {
     used: bool,
+    back: Back,
     vol: u8,
     flags: u32,
     offset: u64,
@@ -41,6 +111,7 @@ struct OpenFile {
 impl OpenFile {
     const EMPTY: Self = Self {
         used: false,
+        back: Back::Fat,
         vol: 0,
         flags: 0,
         offset: 0,
@@ -114,7 +185,7 @@ fn path_used(buf: &[u8; MAX_PATH]) -> &[u8] {
     &buf[..n]
 }
 
-fn vol_walk(path: &str) -> Result<(u8, Node), FsError> {
+fn vol_walk(path: &str) -> Result<Walked, FsError> {
     let abs = join_cwd(path)?;
     walk_abs(path_used(&abs))
 }
@@ -122,7 +193,7 @@ fn vol_walk(path: &str) -> Result<(u8, Node), FsError> {
 fn is_kernfs(t: FsType) -> bool {
     match t {
         FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => true,
-        FsType::Ram | FsType::Fat => false,
+        FsType::Ram | FsType::Fat | FsType::Vibe => false,
     }
 }
 
@@ -198,28 +269,49 @@ fn vfs_ls_snap(
     })
 }
 
-fn walk_abs(pb: &[u8]) -> Result<(u8, Node), FsError> {
-    let (vol, strip) = fat_init::route(pb);
-    let rest = fat_init::routed_rest(pb, strip);
-    Ok((vol, fat_init::walk(vol, rest)?))
+fn walk_abs(pb: &[u8]) -> Result<Walked, FsError> {
+    let (vv, vs) = vibefs_init::route(pb);
+    let (fv, fs) = fat_init::route(pb);
+    if vs > fs {
+        let rest = vibefs_init::routed_rest(pb, vs);
+        Ok(Walked::from_vibe(vv, vibefs_init::walk(vv, rest)?))
+    } else {
+        let rest = fat_init::routed_rest(pb, fs);
+        Ok(Walked::from_fat(fv, fat_init::walk(fv, rest)?))
+    }
 }
 
-fn vol_parent(path: &str) -> Result<(u8, Node, [u8; MAX_NAME], u8), FsError> {
+fn vol_parent(path: &str) -> Result<(Walked, [u8; MAX_NAME], u8), FsError> {
     let abs = join_cwd(path)?;
     let pb = path_used(&abs);
-    let (vol, strip) = fat_init::route(pb);
-    let rest = fat_init::routed_rest(pb, strip);
+    let (vv, vs) = vibefs_init::route(pb);
+    let (fv, fs) = fat_init::route(pb);
+    let (back, vol, strip) = if vs > fs {
+        (Back::Vibe, vv, vs)
+    } else {
+        (Back::Fat, fv, fs)
+    };
+    let rest = if back == Back::Vibe {
+        vibefs_init::routed_rest(pb, strip)
+    } else {
+        fat_init::routed_rest(pb, strip)
+    };
     let (parent, name) = split_basename(rest)?;
     if name.len() > MAX_NAME {
         return Err(FsError::NameTooLong);
     }
-    let dir = fat_init::walk(vol, if parent.is_empty() { b"/" } else { parent })?;
+    let pth = if parent.is_empty() { b"/" } else { parent };
+    let dir = if back == Back::Vibe {
+        Walked::from_vibe(vol, vibefs_init::walk(vol, pth)?)
+    } else {
+        Walked::from_fat(vol, fat_init::walk(vol, pth)?)
+    };
     if dir.kind != InodeKind::Dir {
         return Err(FsError::NotDir);
     }
     let mut nb = [0u8; MAX_NAME];
     nb[..name.len()].copy_from_slice(name);
-    Ok((vol, dir, nb, name.len() as u8))
+    Ok((dir, nb, name.len() as u8))
 }
 
 fn alloc_fid(f: OpenFile) -> Result<u16, FsError> {
@@ -310,7 +402,7 @@ pub fn init() {
         },
         Command {
             name: "mount",
-            help: "mount fat32 <dev> <path> | ramfs <path>",
+            help: "mount fat32|vibefs <dev> <path> | ramfs <path>",
             run: cmd_mount,
         },
         Command {
@@ -320,7 +412,7 @@ pub fn init() {
         },
         Command {
             name: "sync",
-            help: "flush FAT + block Flush",
+            help: "flush FAT + vibefs + block Flush",
             run: cmd_sync,
         },
         Command {
@@ -349,13 +441,27 @@ pub fn open(path: &str, flags: u32, _mode: u16) -> Result<u16, FsError> {
                 }
             }
             Err(FsError::NotFound) => {
-                let (vol, dir, name, nlen) = vol_parent(path)?;
-                fat_init::create(vol, dir.clu, &name[..nlen as usize], false)?;
+                let (dir, name, nlen) = vol_parent(path)?;
+                match dir.back {
+                    Back::Fat => {
+                        fat_init::create(dir.vol, dir.clu, &name[..nlen as usize], false)?;
+                    }
+                    Back::Vibe => {
+                        vibefs_init::create(
+                            dir.vol,
+                            dir.ino,
+                            &name[..nlen as usize],
+                            InodeKind::Reg,
+                            0o644,
+                            None,
+                        )?;
+                    }
+                }
             }
             Err(e) => return Err(e),
         }
     }
-    let (vol, mut node) = vol_walk(path)?;
+    let mut node = vol_walk(path)?;
     if node.kind == InodeKind::Dir {
         let acc = flags & O_ACCMODE;
         if acc == O_WRONLY || acc == O_RDWR || flags & O_TRUNC != 0 {
@@ -365,23 +471,32 @@ pub fn open(path: &str, flags: u32, _mode: u16) -> Result<u16, FsError> {
         return Err(FsError::NotDir);
     }
     if flags & O_TRUNC != 0 && node.kind == InodeKind::Reg {
-        let mut clu = node.clu;
-        let mut size = node.size;
-        fat_init::truncate(
-            vol,
-            node.dir_clu,
-            node.dir_off,
-            node.ino,
-            &mut clu,
-            &mut size,
-            0,
-        )?;
-        node.clu = clu;
-        node.size = size;
+        match node.back {
+            Back::Fat => {
+                let mut clu = node.clu;
+                let mut size = node.size;
+                fat_init::truncate(
+                    node.vol,
+                    node.dir_clu,
+                    node.dir_off,
+                    node.ino,
+                    &mut clu,
+                    &mut size,
+                    0,
+                )?;
+                node.clu = clu;
+                node.size = size;
+            }
+            Back::Vibe => {
+                vibefs_init::truncate(node.vol, node.ino, 0)?;
+                node.size = 0;
+            }
+        }
     }
     alloc_fid(OpenFile {
         used: true,
-        vol,
+        back: node.back,
+        vol: node.vol,
         flags,
         offset: 0,
         ino: node.ino,
@@ -411,7 +526,10 @@ pub fn read(fid: u16, buf: &mut [u8]) -> Result<usize, FsError> {
     if f.kind == InodeKind::Dir {
         return Err(FsError::IsDir);
     }
-    let n = fat_init::read(f.vol, f.clu, f.size, f.offset, buf)?;
+    let n = match f.back {
+        Back::Fat => fat_init::read(f.vol, f.clu, f.size, f.offset, buf)?,
+        Back::Vibe => vibefs_init::read(f.vol, f.ino, f.offset, buf)?,
+    };
     f.offset = f.offset.saturating_add(n as u64);
     put_file(fid, f)?;
     Ok(n)
@@ -428,16 +546,23 @@ pub fn write(fid: u16, buf: &[u8]) -> Result<usize, FsError> {
     if f.flags & O_APPEND != 0 {
         f.offset = f.size as u64;
     }
-    let n = fat_init::write(
-        f.vol,
-        f.dir_clu,
-        f.dir_off,
-        f.ino,
-        &mut f.clu,
-        &mut f.size,
-        f.offset,
-        buf,
-    )?;
+    let n = match f.back {
+        Back::Fat => fat_init::write(
+            f.vol,
+            f.dir_clu,
+            f.dir_off,
+            f.ino,
+            &mut f.clu,
+            &mut f.size,
+            f.offset,
+            buf,
+        )?,
+        Back::Vibe => {
+            let n = vibefs_init::write(f.vol, f.ino, f.offset, buf)?;
+            f.size = f.size.max((f.offset as u32).saturating_add(n as u32));
+            n
+        }
+    };
     f.offset = f.offset.saturating_add(n as u64);
     put_file(fid, f)?;
     Ok(n)
@@ -462,16 +587,12 @@ pub fn seek(fid: u16, off: i64, whence: u32) -> Result<u64, FsError> {
 }
 
 pub fn stat_path(path: &str) -> Result<Stat, FsError> {
-    let (_vol, node) = vol_walk(path)?;
+    let node = vol_walk(path)?;
     Ok(Stat {
         ino: node.ino,
         kind: node.kind,
-        mode: if node.kind == InodeKind::Dir {
-            S_IFDIR_MODE
-        } else {
-            S_IFREG_MODE
-        },
-        nlink: if node.kind == InodeKind::Dir { 2 } else { 1 },
+        mode: node.mode,
+        nlink: node.nlink,
         size: node.size as u64,
         atime: node.mtime,
         mtime: node.mtime,
@@ -480,10 +601,25 @@ pub fn stat_path(path: &str) -> Result<Stat, FsError> {
 }
 
 pub fn mkdir_one(path: &str) -> Result<(), FsError> {
-    let (vol, dir, name, nlen) = vol_parent(path)?;
-    match fat_init::create(vol, dir.clu, &name[..nlen as usize], true) {
-        Ok(_) | Err(FsError::Exists) => Ok(()),
-        Err(e) => Err(e),
+    let (dir, name, nlen) = vol_parent(path)?;
+    match dir.back {
+        Back::Fat => match fat_init::create(dir.vol, dir.clu, &name[..nlen as usize], true) {
+            Ok(_) | Err(FsError::Exists) => Ok(()),
+            Err(e) => Err(e),
+        },
+        Back::Vibe => {
+            match vibefs_init::create(
+                dir.vol,
+                dir.ino,
+                &name[..nlen as usize],
+                InodeKind::Dir,
+                0o755,
+                None,
+            ) {
+                Ok(_) | Err(FsError::Exists) => Ok(()),
+                Err(e) => Err(e),
+            }
+        }
     }
 }
 
@@ -503,7 +639,7 @@ pub fn mkdir_p(path: &str) -> Result<(), FsError> {
         if slice.len() > 1 {
             let s = core::str::from_utf8(slice).map_err(|_| FsError::Inval)?;
             match vol_walk(s) {
-                Ok((_, n)) if n.kind == InodeKind::Dir => {}
+                Ok(n) if n.kind == InodeKind::Dir => {}
                 Ok(_) => return Err(FsError::NotDir),
                 Err(FsError::NotFound) => mkdir_one(s)?,
                 Err(e) => return Err(e),
@@ -518,11 +654,10 @@ pub fn mkdir_p(path: &str) -> Result<(), FsError> {
 }
 
 pub fn vfs_attach(path: &str) -> Result<PathRef, FsError> {
-    let (vol, node) = vol_walk(path)?;
+    let node = vol_walk(path)?;
     let abs = join_cwd(path)?;
     let pb = path_used(&abs);
     let (parent, name) = split_basename(pb)?;
-    let _ = vol;
     fs_init::with(|v| {
         let pdir = if parent.is_empty() || parent == b"/" {
             v.root()?
@@ -548,8 +683,11 @@ pub fn vfs_attach(path: &str) -> Result<PathRef, FsError> {
 }
 
 pub fn unlink_path(path: &str, rmdir: bool) -> Result<(), FsError> {
-    let (vol, dir, name, nlen) = vol_parent(path)?;
-    fat_init::unlink(vol, dir.clu, &name[..nlen as usize], rmdir)?;
+    let (dir, name, nlen) = vol_parent(path)?;
+    match dir.back {
+        Back::Fat => fat_init::unlink(dir.vol, dir.clu, &name[..nlen as usize], rmdir)?,
+        Back::Vibe => vibefs_init::unlink(dir.vol, dir.ino, &name[..nlen as usize], rmdir)?,
+    }
     if let Ok(pref) = fs_init::with(|v| v.resolve(None, "/", true)) {
         fs_init::with(|v| v.drop_name(pref, &name[..nlen as usize]));
     }
@@ -557,28 +695,44 @@ pub fn unlink_path(path: &str, rmdir: bool) -> Result<(), FsError> {
 }
 
 fn rm_r(path: &str) -> Result<(), FsError> {
-    let (vol, node) = vol_walk(path)?;
+    let node = vol_walk(path)?;
     if node.kind == InodeKind::Dir {
         let mut cookie = 0u64;
         let mut kids: [[u8; MAX_NAME]; 16] = [[0; MAX_NAME]; 16];
         let mut klens = [0u8; 16];
         let mut nk = 0usize;
         loop {
-            let mut n = Node::EMPTY;
-            match fat_init::readdir(vol, node.clu, cookie, &mut n)? {
-                None => break,
-                Some(next) => {
-                    cookie = next;
-                    if n.name() == b"." || n.name() == b".." {
-                        continue;
+            let next = match node.back {
+                Back::Fat => {
+                    let mut n = Node::EMPTY;
+                    let r = fat_init::readdir(node.vol, node.clu, cookie, &mut n)?;
+                    if r.is_some() {
+                        if n.name() != b"." && n.name() != b".." && nk < 16 {
+                            let l = n.name_len as usize;
+                            kids[nk][..l].copy_from_slice(n.name());
+                            klens[nk] = n.name_len;
+                            nk += 1;
+                        }
                     }
-                    if nk < 16 {
-                        let l = n.name_len as usize;
-                        kids[nk][..l].copy_from_slice(n.name());
-                        klens[nk] = n.name_len;
-                        nk += 1;
-                    }
+                    r
                 }
+                Back::Vibe => {
+                    let mut n = vibeos::vibefs::Node::EMPTY;
+                    let r = vibefs_init::readdir(node.vol, node.ino, cookie, &mut n)?;
+                    if r.is_some() {
+                        if n.name() != b"." && n.name() != b".." && nk < 16 {
+                            let l = n.name_len as usize;
+                            kids[nk][..l].copy_from_slice(n.name());
+                            klens[nk] = n.name_len;
+                            nk += 1;
+                        }
+                    }
+                    r
+                }
+            };
+            match next {
+                None => break,
+                Some(nx) => cookie = nx,
             }
         }
         let abs = join_cwd(path)?;
@@ -605,23 +759,46 @@ fn rm_r(path: &str) -> Result<(), FsError> {
 }
 
 pub fn rename_path(old: &str, new: &str) -> Result<(), FsError> {
-    let (sv, sd, sn, sl) = vol_parent(old)?;
-    let (dv, dd, dn, dl) = vol_parent(new)?;
-    if sv != dv {
+    let (sd, sn, sl) = vol_parent(old)?;
+    let (dd, dn, dl) = vol_parent(new)?;
+    if sd.vol != dd.vol || sd.back != dd.back {
         return Err(FsError::Inval);
     }
-    fat_init::rename(
-        sv,
-        sd.clu,
-        &sn[..sl as usize],
-        dd.clu,
-        &dn[..dl as usize],
-    )
+    match sd.back {
+        Back::Fat => fat_init::rename(
+            sd.vol,
+            sd.clu,
+            &sn[..sl as usize],
+            dd.clu,
+            &dn[..dl as usize],
+        ),
+        Back::Vibe => vibefs_init::rename(
+            sd.vol,
+            sd.ino,
+            &sn[..sl as usize],
+            dd.ino,
+            &dn[..dl as usize],
+        ),
+    }
 }
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn symlink_path(_path: &str, _target: &str) -> Result<(), FsError> {
-    Err(FsError::NotSupp)
+pub fn symlink_path(path: &str, target: &str) -> Result<(), FsError> {
+    let (dir, name, nlen) = vol_parent(path)?;
+    match dir.back {
+        Back::Fat => Err(FsError::NotSupp),
+        Back::Vibe => {
+            vibefs_init::create(
+                dir.vol,
+                dir.ino,
+                &name[..nlen as usize],
+                InodeKind::Lnk,
+                S_IFLNK_MODE,
+                Some(target.as_bytes()),
+            )?;
+            Ok(())
+        }
+    }
 }
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
@@ -631,33 +808,38 @@ pub fn link_path(_old: &str, _new: &str) -> Result<(), FsError> {
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn truncate_path(path: &str, size: u64) -> Result<(), FsError> {
-    let (vol, node) = vol_walk(path)?;
+    let node = vol_walk(path)?;
     if node.kind != InodeKind::Reg {
         return Err(FsError::IsDir);
     }
-    if size > u32::MAX as u64 {
-        return Err(FsError::Inval);
+    match node.back {
+        Back::Fat => {
+            if size > u32::MAX as u64 {
+                return Err(FsError::Inval);
+            }
+            let mut clu = node.clu;
+            let mut sz = node.size;
+            fat_init::truncate(
+                node.vol,
+                node.dir_clu,
+                node.dir_off,
+                node.ino,
+                &mut clu,
+                &mut sz,
+                size as u32,
+            )
+        }
+        Back::Vibe => vibefs_init::truncate(node.vol, node.ino, size),
     }
-    let mut clu = node.clu;
-    let mut sz = node.size;
-    fat_init::truncate(
-        vol,
-        node.dir_clu,
-        node.dir_off,
-        node.ino,
-        &mut clu,
-        &mut sz,
-        size as u32,
-    )
 }
 
 pub fn sync_fs() -> Result<(), FsError> {
-    fat_init::sync_all()
+    fat_init::sync_all()?;
+    vibefs_init::sync_all()
 }
 
 fn names_in(
-    vol: u8,
-    dir_clu: u32,
+    dir: Walked,
     prefix: &[u8],
     out: &mut [[u8; MAX_NAME]; 16],
     lens: &mut [u8; 16],
@@ -665,24 +847,58 @@ fn names_in(
     let mut n = 0usize;
     let mut cookie = 0u64;
     loop {
-        let mut node = Node::EMPTY;
-        match fat_init::readdir(vol, dir_clu, cookie, &mut node) {
-            Ok(Some(next)) => {
-                cookie = next;
-                let nm = node.name();
-                if nm == b"." || nm == b".." {
-                    continue;
-                }
-                if nm.len() >= prefix.len() && nm[..prefix.len()].eq_ignore_ascii_case(prefix) {
-                    if n < 16 {
-                        let l = nm.len().min(MAX_NAME);
-                        out[n][..l].copy_from_slice(&nm[..l]);
-                        lens[n] = l as u8;
-                        n += 1;
+        let nm_ok: Option<(usize, [u8; MAX_NAME], u8)> = match dir.back {
+            Back::Fat => {
+                let mut node = Node::EMPTY;
+                match fat_init::readdir(dir.vol, dir.clu, cookie, &mut node) {
+                    Ok(Some(next)) => {
+                        cookie = next;
+                        let nm = node.name();
+                        if nm == b"." || nm == b".." {
+                            None
+                        } else if nm.len() >= prefix.len()
+                            && nm[..prefix.len()].eq_ignore_ascii_case(prefix)
+                        {
+                            let mut buf = [0u8; MAX_NAME];
+                            let l = nm.len().min(MAX_NAME);
+                            buf[..l].copy_from_slice(&nm[..l]);
+                            Some((1, buf, l as u8))
+                        } else {
+                            None
+                        }
                     }
+                    _ => break,
                 }
             }
-            _ => break,
+            Back::Vibe => {
+                let mut node = vibeos::vibefs::Node::EMPTY;
+                match vibefs_init::readdir(dir.vol, dir.ino, cookie, &mut node) {
+                    Ok(Some(next)) => {
+                        cookie = next;
+                        let nm = node.name();
+                        if nm == b"." || nm == b".." {
+                            None
+                        } else if nm.len() >= prefix.len()
+                            && nm[..prefix.len()].eq_ignore_ascii_case(prefix)
+                        {
+                            let mut buf = [0u8; MAX_NAME];
+                            let l = nm.len().min(MAX_NAME);
+                            buf[..l].copy_from_slice(&nm[..l]);
+                            Some((1, buf, l as u8))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        };
+        if let Some((_, buf, l)) = nm_ok {
+            if n < 16 {
+                out[n] = buf;
+                lens[n] = l;
+                n += 1;
+            }
         }
     }
     n
@@ -771,13 +987,13 @@ pub fn complete_line(ed: &mut LineEditor) {
                 t[n..n + add].copy_from_slice(&dirp[..add]);
                 walk_abs(&t[..n + add])
             };
-            let Ok((vol, dir)) = dir_node else {
+            let Ok(dir) = dir_node else {
                 return;
             };
             if dir.kind != InodeKind::Dir {
                 return;
             }
-            names_in(vol, dir.clu, pref, &mut names, &mut lens)
+            names_in(dir, pref, &mut names, &mut lens)
         }
     };
     if n == 0 {
@@ -911,16 +1127,14 @@ fn cmd_ls(args: &[&str]) {
             return;
         }
     }
-    let (vol, node) = match vol_walk(path) {
+    let node = match vol_walk(path) {
         Ok(n) => n,
         Err(e) => {
             err_line("ls", e);
             return;
         }
     };
-    let dir_clu = if node.kind == InodeKind::Dir {
-        node.clu
-    } else {
+    if node.kind != InodeKind::Dir {
         if long {
             let _ = writeln!(
                 Console,
@@ -933,30 +1147,59 @@ fn cmd_ls(args: &[&str]) {
             let _ = writeln!(Console, "{path}");
         }
         return;
-    };
+    }
     let mut cookie = 0u64;
     loop {
-        let mut n = Node::EMPTY;
-        match fat_init::readdir(vol, dir_clu, cookie, &mut n) {
-            Ok(None) => break,
-            Ok(Some(next)) => {
-                cookie = next;
-                if n.name() == b"." || n.name() == b".." {
-                    continue;
-                }
-                if long {
-                    let k = n.kind.as_str();
-                    let _ = write!(Console, "{k} {:>8} ", n.size);
-                    console_init_write_name(n.name());
-                    console_init_write(b"\n");
-                } else {
-                    console_init_write_name(n.name());
-                    console_init_write(b"\n");
+        match node.back {
+            Back::Fat => {
+                let mut n = Node::EMPTY;
+                match fat_init::readdir(node.vol, node.clu, cookie, &mut n) {
+                    Ok(None) => break,
+                    Ok(Some(next)) => {
+                        cookie = next;
+                        if n.name() == b"." || n.name() == b".." {
+                            continue;
+                        }
+                        if long {
+                            let k = n.kind.as_str();
+                            let _ = write!(Console, "{k} {:>8} ", n.size);
+                            console_init_write_name(n.name());
+                            console_init_write(b"\n");
+                        } else {
+                            console_init_write_name(n.name());
+                            console_init_write(b"\n");
+                        }
+                    }
+                    Err(e) => {
+                        err_line("ls", e);
+                        return;
+                    }
                 }
             }
-            Err(e) => {
-                err_line("ls", e);
-                return;
+            Back::Vibe => {
+                let mut n = vibeos::vibefs::Node::EMPTY;
+                match vibefs_init::readdir(node.vol, node.ino, cookie, &mut n) {
+                    Ok(None) => break,
+                    Ok(Some(next)) => {
+                        cookie = next;
+                        if n.name() == b"." || n.name() == b".." {
+                            continue;
+                        }
+                        if long {
+                            let k = n.kind.as_str();
+                            let _ = write!(Console, "{k} {:>8} ", n.size);
+                            console_init_write_name(n.name());
+                            console_init_write(b"\n");
+                        } else {
+                            console_init_write_name(n.name());
+                            console_init_write(b"\n");
+                        }
+                    }
+                    Err(e) => {
+                        err_line("ls", e);
+                        return;
+                    }
+                }
             }
         }
     }
@@ -1133,11 +1376,29 @@ fn cmd_df(_args: &[&str]) {
         }
         Err(e) => err_line("df", e),
     }
+    if vibefs_init::live() {
+        match vibefs_init::df(vibefs_init::VOL_MEM) {
+            Ok((ft, tot, free, nblk)) => {
+                let _ = writeln!(
+                    Console,
+                    "vibeOS: df: {} total {} free {} blocks {}",
+                    ft.as_str(),
+                    tot,
+                    free,
+                    nblk
+                );
+            }
+            Err(_) => {}
+        }
+    }
 }
 
 fn cmd_mount(args: &[&str]) {
     if args.len() < 2 {
-        let _ = writeln!(Console, "vibeOS: mount: fat32 <dev> <path> | ramfs <path>");
+        let _ = writeln!(
+            Console,
+            "vibeOS: mount: fat32 <dev> <path> | vibefs <dev> <path> | ramfs <path>"
+        );
         return;
     }
     match args[1] {
@@ -1151,6 +1412,20 @@ fn cmd_mount(args: &[&str]) {
             match fat_init::mount_dev(args[2], args[3]) {
                 Ok(_) => {
                     let _ = writeln!(Console, "vibeOS: mount: fat32 {} on {}", args[2], args[3]);
+                }
+                Err(e) => err_line("mount", e),
+            }
+        }
+        "vibefs" => {
+            if args.len() < 4 {
+                err_line("mount", FsError::Inval);
+                return;
+            }
+            let _ = mkdir_p(args[3]);
+            let _ = vfs_attach(args[3]);
+            match vibefs_init::mount_dev(args[2], args[3]) {
+                Ok(_) => {
+                    let _ = writeln!(Console, "vibeOS: mount: vibefs {} on {}", args[2], args[3]);
                 }
                 Err(e) => err_line("mount", e),
             }
@@ -1178,7 +1453,10 @@ fn cmd_umount(args: &[&str]) {
         err_line("umount", FsError::Inval);
         return;
     }
-    if let Err(e) = fat_init::umount(args[1]) {
+    if fat_init::umount(args[1]).is_ok() {
+        return;
+    }
+    if let Err(e) = vibefs_init::umount(args[1]) {
         err_line("umount", e);
     }
 }
@@ -1199,7 +1477,7 @@ fn cmd_cd(args: &[&str]) {
         }
     };
     match vol_walk(path) {
-        Ok((_, n)) if n.kind == InodeKind::Dir => {
+        Ok(n) if n.kind == InodeKind::Dir => {
             let pb = path_used(&abs);
             let mut norm = [0u8; MAX_PATH];
             let nlen = if pb.is_empty() {

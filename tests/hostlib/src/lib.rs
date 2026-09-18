@@ -25,6 +25,9 @@ pub mod fb;
 #[path = "../../../src/fat.rs"]
 pub mod fat;
 
+#[path = "../../../src/vibefs.rs"]
+pub mod vibefs;
+
 #[path = "../../../src/font.rs"]
 pub mod font;
 

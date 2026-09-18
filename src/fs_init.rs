@@ -15,6 +15,7 @@ use crate::fat_init;
 use crate::file_init;
 use crate::part_init;
 use crate::sync_init::SpinMutex;
+use crate::vibefs_init;
 use crate::virtio_blk_init;
 
 static VFS: SpinMutex<Vfs> = SpinMutex::with_rank(Vfs::new(), RANK_DEVICE);
@@ -22,6 +23,7 @@ static LIVE: AtomicBool = AtomicBool::new(false);
 
 pub fn init() {
     fat_init::init();
+    vibefs_init::init();
     if fat_init::live() {
         LIVE.store(true, Ordering::Release);
     } else {
@@ -36,8 +38,18 @@ pub fn init() {
         let _ = with(|v| v.mount_pseudo());
         populate_devfs();
         populate_sysfs();
+        attach_vibefs();
     }
     file_init::init();
+}
+
+fn attach_vibefs() {
+    if !vibefs_init::live() {
+        return;
+    }
+    let _ = file_init::mkdir("/vibe", 0o755);
+    let _ = file_init::vfs_attach("/vibe");
+    let _ = vibefs_init::mount_mem("/vibe");
 }
 
 /// FAT has no VFS mkdir. Create the mount points via the File API and

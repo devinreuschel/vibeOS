@@ -38,6 +38,7 @@ use crate::dma_init;
 use crate::fat_init;
 use crate::file_init;
 use crate::fs_init;
+use crate::vibefs_init;
 use crate::ipi_init;
 use crate::irq_init;
 use crate::kva_init;
@@ -172,6 +173,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("vfs_walk", test_vfs_walk),
     ("pseudo_fs", test_pseudo_fs),
     ("fat_initrd", test_fat_initrd),
+    ("vibefs", test_vibefs),
 ];
 
 pub fn run() -> ! {
@@ -3998,6 +4000,81 @@ fn test_fat_initrd() -> Outcome {
     }
     if file_init::link_path("/hello.txt", "/h2").err() != Some(FsError::NotSupp) {
         return Outcome::Fail("link supp");
+    }
+    if file_init::sync_fs().is_err() {
+        return Outcome::Fail("sync");
+    }
+    Outcome::Ok
+}
+
+fn test_vibefs() -> Outcome {
+    if !vibefs_init::live() {
+        return Outcome::Fail("not live");
+    }
+    if vibefs_init::nvol() == 0 {
+        return Outcome::Fail("nvol");
+    }
+    match file_init::stat_path("/vibe") {
+        Ok(s) if s.kind == InodeKind::Dir => {}
+        _ => return Outcome::Fail("mount"),
+    }
+    if file_init::mkdir("/vibe/d", 0o755).is_err() {
+        return Outcome::Fail("mkdir");
+    }
+    match file_init::open("/vibe/d/f", O_RDWR | O_CREAT, 0o644) {
+        Ok(fid) => {
+            if file_init::write(fid, b"hello").ok() != Some(5) {
+                let _ = file_init::close(fid);
+                return Outcome::Fail("write");
+            }
+            if file_init::seek(fid, 0, vibeos::fs::SEEK_SET).is_err() {
+                let _ = file_init::close(fid);
+                return Outcome::Fail("seek");
+            }
+            let mut buf = [0u8; 8];
+            match file_init::read(fid, &mut buf) {
+                Ok(5) if &buf[..5] == b"hello" => {}
+                _ => {
+                    let _ = file_init::close(fid);
+                    return Outcome::Fail("read");
+                }
+            }
+            let _ = file_init::close(fid);
+        }
+        Err(_) => return Outcome::Fail("open"),
+    }
+    match file_init::stat_path("/vibe/d/f") {
+        Ok(s) if s.kind == InodeKind::Reg && (s.mode & 0o777) == 0o644 => {}
+        _ => return Outcome::Fail("mode"),
+    }
+    if file_init::symlink_path("/vibe/l", "/vibe/d/f").is_err() {
+        return Outcome::Fail("symlink");
+    }
+    match file_init::open("/vibe/big", O_RDWR | O_CREAT, 0o644) {
+        Ok(fid) => {
+            let payload = [b'x'; 200];
+            if file_init::write(fid, &payload).ok() != Some(200) {
+                let _ = file_init::close(fid);
+                return Outcome::Fail("extent w");
+            }
+            if file_init::seek(fid, 0, vibeos::fs::SEEK_SET).is_err() {
+                let _ = file_init::close(fid);
+                return Outcome::Fail("extent seek");
+            }
+            let mut out = [0u8; 200];
+            match file_init::read(fid, &mut out) {
+                Ok(200) if out == payload => {}
+                _ => {
+                    let _ = file_init::close(fid);
+                    return Outcome::Fail("extent r");
+                }
+            }
+            let _ = file_init::close(fid);
+        }
+        Err(_) => return Outcome::Fail("extent open"),
+    }
+    if vibefs_init::snapshot(vibefs_init::VOL_MEM, b"s0").is_err() {
+        return Outcome::Fail("snap");
     }
     if file_init::sync_fs().is_err() {
         return Outcome::Fail("sync");

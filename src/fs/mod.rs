@@ -137,6 +137,7 @@ impl InodeKind {
 pub enum FsType {
     Ram,
     Fat,
+    Vibe,
     Dev,
     Tmp,
     Proc,
@@ -148,6 +149,7 @@ impl FsType {
         match self {
             FsType::Ram => "ramfs",
             FsType::Fat => "fat32",
+            FsType::Vibe => "vibefs",
             FsType::Dev => "devfs",
             FsType::Tmp => "tmpfs",
             FsType::Proc => "procfs",
@@ -353,6 +355,28 @@ impl FileSystem for FatFs {
         vfs.supers[sb as usize].fat_clu = self.root_clu;
         vfs.supers[sb as usize].fat_vol = self.vol;
         Ok(1)
+    }
+}
+
+/// vibefs super fill. On-disk I/O lives in `vibefs` / `vibefs_init`.
+pub struct VibeFs {
+    pub root_ino: u32,
+    pub vol: u8,
+}
+
+impl FileSystem for VibeFs {
+    fn name(&self) -> &'static str {
+        "vibefs"
+    }
+
+    fn fstype(&self) -> FsType {
+        FsType::Vibe
+    }
+
+    fn fill_super(&self, vfs: &mut Vfs, sb: u8) -> Result<u32, FsError> {
+        vfs.supers[sb as usize].fat_clu = self.root_ino;
+        vfs.supers[sb as usize].fat_vol = self.vol;
+        Ok(self.root_ino)
     }
 }
 
@@ -745,7 +769,7 @@ impl Vfs {
         }
         match self.fstype(sb) {
             FsType::Ram => ram_drop_sb(self, sb),
-            FsType::Fat => {}
+            FsType::Fat | FsType::Vibe => {}
             FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
                 kernfs::kern_drop_sb(self, sb)
             }
@@ -837,7 +861,7 @@ impl Vfs {
                 let islot = self.d_islot(dir.dslot)?;
                 self.ops_unlink(sb, islot, name)?;
             }
-            FsType::Fat => return Err(FsError::NotSupp),
+            FsType::Fat | FsType::Vibe => return Err(FsError::NotSupp),
         }
         Ok(())
     }
@@ -851,7 +875,7 @@ impl Vfs {
         }
         let sb = self.sb_of(src.mount);
         match self.fstype(sb) {
-            FsType::Fat | FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
+            FsType::Fat | FsType::Vibe | FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
                 return Err(FsError::NotSupp)
             }
             FsType::Ram => {}
@@ -886,7 +910,7 @@ impl Vfs {
             return Err(FsError::Inval);
         }
         match self.fstype(osb) {
-            FsType::Fat | FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
+            FsType::Fat | FsType::Vibe | FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
                 return Err(FsError::NotSupp)
             }
             FsType::Ram => {
@@ -1250,7 +1274,7 @@ impl Vfs {
     fn ops_lookup(&mut self, sb: u8, dir: u16, name: &[u8]) -> Result<u32, FsError> {
         match self.fstype(sb) {
             FsType::Ram => RamFs.lookup(self, dir, name),
-            FsType::Fat => Err(FsError::NotSupp),
+            FsType::Fat | FsType::Vibe => Err(FsError::NotSupp),
             FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
                 kernfs::kern_lookup(self, dir, name)
             }
@@ -1268,7 +1292,7 @@ impl Vfs {
     ) -> Result<u32, FsError> {
         match self.fstype(sb) {
             FsType::Ram => RamFs.create(self, dir, name, kind, mode, target),
-            FsType::Fat => Err(FsError::NotSupp),
+            FsType::Fat | FsType::Vibe => Err(FsError::NotSupp),
             FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
                 kernfs::kern_create(self, dir, name, kind, mode, target)
             }
@@ -1278,7 +1302,7 @@ impl Vfs {
     fn ops_unlink(&mut self, sb: u8, dir: u16, name: &[u8]) -> Result<(), FsError> {
         match self.fstype(sb) {
             FsType::Ram => RamFs.unlink(self, dir, name),
-            FsType::Fat => Err(FsError::NotSupp),
+            FsType::Fat | FsType::Vibe => Err(FsError::NotSupp),
             FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
                 kernfs::kern_unlink(self, dir, name)
             }
@@ -1288,7 +1312,7 @@ impl Vfs {
     fn ops_read(&mut self, sb: u8, islot: u16, off: u64, buf: &mut [u8]) -> Result<usize, FsError> {
         match self.fstype(sb) {
             FsType::Ram => RamFs.read(self, islot, off, buf),
-            FsType::Fat => Err(FsError::NotSupp),
+            FsType::Fat | FsType::Vibe => Err(FsError::NotSupp),
             FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
                 kernfs::kern_read(self, islot, off, buf)
             }
@@ -1298,7 +1322,7 @@ impl Vfs {
     fn ops_write(&mut self, sb: u8, islot: u16, off: u64, buf: &[u8]) -> Result<usize, FsError> {
         match self.fstype(sb) {
             FsType::Ram => RamFs.write(self, islot, off, buf),
-            FsType::Fat => Err(FsError::NotSupp),
+            FsType::Fat | FsType::Vibe => Err(FsError::NotSupp),
             FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
                 kernfs::kern_write(self, islot, off, buf)
             }
@@ -1308,7 +1332,7 @@ impl Vfs {
     fn ops_truncate(&mut self, sb: u8, islot: u16, size: u64) -> Result<(), FsError> {
         match self.fstype(sb) {
             FsType::Ram => RamFs.truncate(self, islot, size),
-            FsType::Fat => Err(FsError::NotSupp),
+            FsType::Fat | FsType::Vibe => Err(FsError::NotSupp),
             FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
                 kernfs::kern_truncate(self, islot, size)
             }
@@ -1324,7 +1348,7 @@ impl Vfs {
     ) -> Result<Option<u64>, FsError> {
         match self.fstype(sb) {
             FsType::Ram => RamFs.readdir(self, islot, cookie, out),
-            FsType::Fat => Err(FsError::NotSupp),
+            FsType::Fat | FsType::Vibe => Err(FsError::NotSupp),
             FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
                 kernfs::kern_readdir(self, islot, cookie, out)
             }
@@ -1334,7 +1358,7 @@ impl Vfs {
     fn ops_stat(&mut self, sb: u8, islot: u16) -> Result<Stat, FsError> {
         match self.fstype(sb) {
             FsType::Ram => RamFs.stat(self, islot),
-            FsType::Fat => fat_stat_inode(self, islot),
+            FsType::Fat | FsType::Vibe => fat_stat_inode(self, islot),
             FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
                 kernfs::kern_stat(self, islot)
             }
@@ -1344,7 +1368,7 @@ impl Vfs {
     fn ops_readlink(&mut self, sb: u8, islot: u16, buf: &mut [u8]) -> Result<usize, FsError> {
         match self.fstype(sb) {
             FsType::Ram => ram_readlink(self, islot, buf),
-            FsType::Fat => Err(FsError::NotSupp),
+            FsType::Fat | FsType::Vibe => Err(FsError::NotSupp),
             FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
                 kernfs::kern_readlink(self, islot, buf)
             }
@@ -1450,7 +1474,7 @@ impl Vfs {
                         self.inodes[i] = Inode::EMPTY;
                     }
                 }
-                FsType::Fat => {}
+                FsType::Fat | FsType::Vibe => {}
                 FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
                     kernfs::kern_try_free(self, sb, ino);
                     if kernfs::kern_nlink(self, sb, ino) == 0 {
@@ -1509,7 +1533,7 @@ impl Vfs {
         let ino = self.inodes[i].ino;
         match self.fstype(sb) {
             FsType::Ram => ram_try_free(self, sb, ino),
-            FsType::Fat => {}
+            FsType::Fat | FsType::Vibe => {}
             FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
                 kernfs::kern_try_free(self, sb, ino)
             }
@@ -1520,7 +1544,7 @@ impl Vfs {
     fn inode_load(&mut self, slot: u16, sb: u8, ino: u32) -> Result<(), FsError> {
         match self.fstype(sb) {
             FsType::Ram => ram_fill_inode(self, slot, sb, ino),
-            FsType::Fat => fat_fill_inode(self, slot, sb, ino),
+            FsType::Fat | FsType::Vibe => fat_fill_inode(self, slot, sb, ino),
             FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
                 kernfs::kern_fill_inode(self, slot, sb, ino)
             }
@@ -1542,7 +1566,7 @@ impl Vfs {
                     self.inodes[islot as usize].atime = r.atime;
                 }
             }
-            FsType::Fat => {}
+            FsType::Fat | FsType::Vibe => {}
             FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
                 if let Some(r) = kernfs::kern_meta(self, sb, ino) {
                     self.inodes[islot as usize].size = r.size;

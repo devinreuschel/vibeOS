@@ -11,4 +11,12 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "mkfs-vibefs"
+path = "src/bin/mkfs_vibefs.rs"
+
+[[bin]]
+name = "fsck-vibefs"
+path = "src/bin/fsck_vibefs.rs"
+
 [dependencies]

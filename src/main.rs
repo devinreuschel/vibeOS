@@ -38,6 +38,7 @@ mod fb_init;
 mod fat_init;
 mod file_init;
 mod fs_init;
+mod vibefs_init;
 mod heap_init;
 mod ipi_init;
 mod irq_init;
@@ -316,13 +317,18 @@ fn normal_boot_tail() {
     gp_test_trip();
 
     // `shell ready` is last. gp-test trips after ramdisk so a #GP dump
-    // still has a clean contract through `block: …`.
+    // still has a clean contract through `block: …`. Crash-consistency
+    // builds skip the shell and write a vibefs virtio image until killed.
+    #[cfg(not(feature = "vibefs_crash"))]
     crate::shell_init::init();
+
+    #[cfg(feature = "vibefs_crash")]
+    crate::vibefs_init::crash_loop();
 
     #[cfg(feature = "kernel_tests")]
     crate::ktest::run();
 
-    #[cfg(not(feature = "kernel_tests"))]
+    #[cfg(not(any(feature = "kernel_tests", feature = "vibefs_crash")))]
     {
         thread_init::park(None);
         x86::halt();
