@@ -103,6 +103,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- PS/2 decoder: typematic repeats no longer retoggle Caps/Num or
+  re-enqueue modifiers. Down-bits; only the first make is an edge.
+  Host tests cover Caps, Num, and shift. Letters still repeat.
 - Kernel log: `klog!` and serial formatted writes keep IF off for the
   whole emit so per-CPU capture/`EMITTING` cannot race a preempting
   thread. `dmesg` uses a plain serial path and does not recapture into

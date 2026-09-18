@@ -38,6 +38,22 @@ pub const SC_RELEASE: u8 = 0x80;
 
 pub const RING_CAP: usize = 64;
 
+// Keys whose make is an edge, not a hold. Typematic repeats the last
+// scancode; treating those as new presses flips Caps/Num and floods
+// the ISR ring with modifiers.
+const DOWN_LSHIFT: u16 = 1 << 0;
+const DOWN_RSHIFT: u16 = 1 << 1;
+const DOWN_LCTRL: u16 = 1 << 2;
+const DOWN_RCTRL: u16 = 1 << 3;
+const DOWN_LALT: u16 = 1 << 4;
+const DOWN_RALT: u16 = 1 << 5;
+const DOWN_CAPS: u16 = 1 << 6;
+const DOWN_NUM: u16 = 1 << 7;
+const DOWN_SCROLL: u16 = 1 << 8;
+const DOWN_SHIFT: u16 = DOWN_LSHIFT | DOWN_RSHIFT;
+const DOWN_CTRL: u16 = DOWN_LCTRL | DOWN_RCTRL;
+const DOWN_ALT: u16 = DOWN_LALT | DOWN_RALT;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NamedKey {
     Esc,
@@ -139,6 +155,7 @@ pub struct Decoder {
     e0: bool,
     e1: u8,
     mods: Mods,
+    down: u16,
 }
 
 impl Decoder {
@@ -153,6 +170,7 @@ impl Decoder {
                 caps: false,
                 num: false,
             },
+            down: 0,
         }
     }
 
@@ -160,7 +178,8 @@ impl Decoder {
         self.mods
     }
 
-    /// Consume one set-1 byte. `None` for prefix / break / unknown.
+    /// Consume one set-1 byte. `None` for prefix, break, unknown, or a
+    /// typematic make of a lock/modifier (already down).
     pub fn feed(&mut self, sc: u8) -> Option<DecodedKey> {
         if self.e1 > 0 {
             self.e1 -= 1;
@@ -186,59 +205,64 @@ impl Decoder {
         }
     }
 
+    /// First make → true. Typematic make and every break → false.
+    fn make_edge(&mut self, bit: u16, release: bool) -> bool {
+        if release {
+            self.down &= !bit;
+            return false;
+        }
+        if self.down & bit != 0 {
+            return false;
+        }
+        self.down |= bit;
+        true
+    }
+
+    fn sync_mods(&mut self) {
+        self.mods.shift = self.down & DOWN_SHIFT != 0;
+        self.mods.ctrl = self.down & DOWN_CTRL != 0;
+        self.mods.alt = self.down & DOWN_ALT != 0;
+    }
+
+    fn modifier(&mut self, bit: u16, release: bool, named: NamedKey) -> Option<DecodedKey> {
+        let first = self.make_edge(bit, release);
+        self.sync_mods();
+        if first {
+            Some(DecodedKey::Named(named))
+        } else {
+            None
+        }
+    }
+
+    fn lock_toggle(
+        &mut self,
+        bit: u16,
+        release: bool,
+        named: NamedKey,
+        toggle: impl FnOnce(&mut Mods),
+    ) -> Option<DecodedKey> {
+        if !self.make_edge(bit, release) {
+            return None;
+        }
+        toggle(&mut self.mods);
+        Some(DecodedKey::Named(named))
+    }
+
     fn feed_plain(&mut self, make: u8, release: bool) -> Option<DecodedKey> {
         match make {
-            0x2A => {
-                self.mods.shift = !release;
-                if release {
-                    None
-                } else {
-                    Some(DecodedKey::Named(NamedKey::LeftShift))
-                }
-            }
-            0x36 => {
-                self.mods.shift = !release;
-                if release {
-                    None
-                } else {
-                    Some(DecodedKey::Named(NamedKey::RightShift))
-                }
-            }
-            0x1D => {
-                self.mods.ctrl = !release;
-                if release {
-                    None
-                } else {
-                    Some(DecodedKey::Named(NamedKey::LeftCtrl))
-                }
-            }
-            0x38 => {
-                self.mods.alt = !release;
-                if release {
-                    None
-                } else {
-                    Some(DecodedKey::Named(NamedKey::LeftAlt))
-                }
-            }
-            0x3A => {
-                if release {
-                    return None;
-                }
-                self.mods.caps = !self.mods.caps;
-                Some(DecodedKey::Named(NamedKey::CapsLock))
-            }
-            0x45 => {
-                if release {
-                    return None;
-                }
-                self.mods.num = !self.mods.num;
-                Some(DecodedKey::Named(NamedKey::NumLock))
-            }
+            0x2A => self.modifier(DOWN_LSHIFT, release, NamedKey::LeftShift),
+            0x36 => self.modifier(DOWN_RSHIFT, release, NamedKey::RightShift),
+            0x1D => self.modifier(DOWN_LCTRL, release, NamedKey::LeftCtrl),
+            0x38 => self.modifier(DOWN_LALT, release, NamedKey::LeftAlt),
+            0x3A => self.lock_toggle(DOWN_CAPS, release, NamedKey::CapsLock, |m| {
+                m.caps = !m.caps;
+            }),
+            0x45 => self.lock_toggle(DOWN_NUM, release, NamedKey::NumLock, |m| m.num = !m.num),
             0x46 => {
-                if release {
-                    None
-                } else {
+                if self.make_edge(DOWN_SCROLL, release) {
                     Some(DecodedKey::Named(NamedKey::ScrollLock))
+                } else {
+                    None
                 }
             }
             _ => {
@@ -252,22 +276,8 @@ impl Decoder {
 
     fn feed_e0(&mut self, make: u8, release: bool) -> Option<DecodedKey> {
         match make {
-            0x1D => {
-                self.mods.ctrl = !release;
-                if release {
-                    None
-                } else {
-                    Some(DecodedKey::Named(NamedKey::RightCtrl))
-                }
-            }
-            0x38 => {
-                self.mods.alt = !release;
-                if release {
-                    None
-                } else {
-                    Some(DecodedKey::Named(NamedKey::RightAlt))
-                }
-            }
+            0x1D => self.modifier(DOWN_RCTRL, release, NamedKey::RightCtrl),
+            0x38 => self.modifier(DOWN_RALT, release, NamedKey::RightAlt),
             _ => {
                 if release {
                     None
@@ -680,8 +690,66 @@ mod tests {
     fn numlock_keypad() {
         let mut d = Decoder::new();
         assert_eq!(d.feed(0x45), Some(DecodedKey::Named(NamedKey::NumLock)));
+        assert_eq!(d.feed(0xC5), None); // break, else the next make is typematic
         assert_eq!(d.feed(0x47), Some(DecodedKey::Char(b'7')));
-        d.feed(0x45); // toggle off
+        assert_eq!(d.feed(0x45), Some(DecodedKey::Named(NamedKey::NumLock)));
+        assert_eq!(d.feed(0xC5), None);
+        assert!(!d.mods().num);
         assert_eq!(d.feed(0x47), Some(DecodedKey::Named(NamedKey::Home)));
+    }
+
+    #[test]
+    fn typematic_caps_does_not_retoggle() {
+        let mut d = Decoder::new();
+        assert_eq!(d.feed(0x3A), Some(DecodedKey::Named(NamedKey::CapsLock)));
+        assert!(d.mods().caps);
+        assert_eq!(d.feed(0x3A), None);
+        assert_eq!(d.feed(0x3A), None);
+        assert!(d.mods().caps);
+        assert_eq!(d.feed(0xBA), None);
+        assert!(d.mods().caps);
+        assert_eq!(d.feed(0x1E), Some(DecodedKey::Char(b'A')));
+        assert_eq!(d.feed(0x3A), Some(DecodedKey::Named(NamedKey::CapsLock)));
+        assert!(!d.mods().caps);
+        assert_eq!(d.feed(0x1E), Some(DecodedKey::Char(b'a')));
+    }
+
+    #[test]
+    fn typematic_num_does_not_retoggle() {
+        let mut d = Decoder::new();
+        assert_eq!(d.feed(0x45), Some(DecodedKey::Named(NamedKey::NumLock)));
+        assert!(d.mods().num);
+        assert_eq!(d.feed(0x45), None);
+        assert_eq!(d.feed(0x45), None);
+        assert!(d.mods().num);
+        assert_eq!(d.feed(0xC5), None);
+        assert!(d.mods().num);
+        assert_eq!(d.feed(0x47), Some(DecodedKey::Char(b'7')));
+    }
+
+    #[test]
+    fn typematic_shift_does_not_reenqueue() {
+        let mut d = Decoder::new();
+        assert_eq!(d.feed(0x2A), Some(DecodedKey::Named(NamedKey::LeftShift)));
+        assert!(d.mods().shift);
+        assert_eq!(d.feed(0x2A), None);
+        assert_eq!(d.feed(0x2A), None);
+        assert!(d.mods().shift);
+        assert_eq!(d.feed(0x1E), Some(DecodedKey::Char(b'A')));
+        assert_eq!(d.feed(0xAA), None);
+        assert!(!d.mods().shift);
+        assert_eq!(d.feed(0x1E), Some(DecodedKey::Char(b'a')));
+    }
+
+    #[test]
+    fn typematic_letter_still_repeats() {
+        assert_eq!(
+            feed(&[0x1E, 0x1E, 0x1E, 0x9E]),
+            [
+                DecodedKey::Char(b'a'),
+                DecodedKey::Char(b'a'),
+                DecodedKey::Char(b'a'),
+            ]
+        );
     }
 }
