@@ -68,6 +68,10 @@ pub const SMP_DONE: &str = "vibeOS: smp: done";
 /// exit gate; later phases replace this with `shell ready` (DESIGN §3.3).
 pub const BOOT_DONE: &str = "vibeOS: boot: phase1 done";
 
+/// Phase 5 slice B. After `smp: done` (and the phase-1 stand-in). FB text,
+/// PS/2, and the mux are live; IRQ1 was unmasked after the handler.
+pub const CONSOLE_OK: &str = "vibeOS: console ok";
+
 /// Panic banner. Kept short so the panic path allocates nothing.
 pub const PANIC_BANNER: &str = "vibeOS: panic:";
 

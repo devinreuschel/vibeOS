@@ -258,7 +258,6 @@ fn route_gsi_inner(
 }
 
 /// High dword before low. Entries stay masked until `unmask_gsi`.
-#[allow(dead_code)]
 pub fn route_gsi(
     gsi: u32,
     vector: u8,
@@ -277,7 +276,6 @@ pub fn mask_gsi(gsi: u32) {
     set_gsi_mask(gsi, true);
 }
 
-#[allow(dead_code)]
 pub fn unmask_gsi(gsi: u32) {
     set_gsi_mask(gsi, false);
 }

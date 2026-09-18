@@ -24,9 +24,12 @@ extern crate alloc;
 mod acpi_init;
 mod apic_init;
 mod arch;
+mod console_init;
 mod diag;
+mod fb_init;
 mod heap_init;
 mod ipi_init;
+mod kbd_init;
 mod kva_init;
 mod log_init;
 mod ksyms;
@@ -276,6 +279,9 @@ fn normal_boot_tail() {
     diag::cpus();
 
     serial::line(marker::BOOT_DONE);
+
+    // DESIGN §3.3 live: after smp: done. Handler, 8042, then unmask IRQ1.
+    crate::console_init::init();
 
     #[cfg(feature = "gp-test")]
     gp_test_trip();

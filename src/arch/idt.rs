@@ -268,6 +268,12 @@ fn ist_for(vec: u8) -> u8 {
     }
 }
 
+/// Overlay a no-error handler. Keyboard uses this after PIC/IOAPIC
+/// defaults so IRQ1 is not unmasked onto `pic::handle`'s halt path.
+pub fn set_handler(vec: u8, h: extern "x86-interrupt" fn(InterruptFrame)) {
+    set_noerr(vec, h, 0);
+}
+
 fn set_noerr(vec: u8, h: extern "x86-interrupt" fn(InterruptFrame), ist: u8) {
     unsafe {
         (*IDT.ptr()).0[vec as usize] =

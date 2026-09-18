@@ -35,8 +35,11 @@ pub const IRQ_CASCADE: u8 = IRQ_BASE + 2;
 pub const IRQ_SPURIOUS_MASTER: u8 = IRQ_BASE + 7;
 pub const IRQ_SPURIOUS_SLAVE: u8 = IRQ_SLAVE_BASE + 7;
 
-/// Dynamic device pool (I/O APIC / MSI). Unused until phase 6.
-pub const DEVICE_VEC_START: u8 = 0x30;
+/// I/O APIC keyboard (ISA IRQ1 / GSI). First device vector.
+pub const KBD: u8 = 0x30;
+
+/// Dynamic device pool (I/O APIC / MSI). Keyboard took 0x30.
+pub const DEVICE_VEC_START: u8 = 0x31;
 pub const DEVICE_VEC_END: u8 = 0x7F;
 
 /// LAPIC LVT + IPI. High numbers so they are not starved by device IRQs.
@@ -86,6 +89,7 @@ pub const NAMED: &[(&str, u8)] = &[
     ("IRQ_CASCADE", IRQ_CASCADE),
     ("IRQ_SPURIOUS_MASTER", IRQ_SPURIOUS_MASTER),
     ("IRQ_SPURIOUS_SLAVE", IRQ_SPURIOUS_SLAVE),
+    ("KBD", KBD),
     ("DEVICE_VEC_START", DEVICE_VEC_START),
     ("DEVICE_VEC_END", DEVICE_VEC_END),
     ("LAPIC_TIMER", LAPIC_TIMER),

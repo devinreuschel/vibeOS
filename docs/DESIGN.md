@@ -313,23 +313,19 @@ of it.
 | 13 | Time: HPET or PIT, TSC calibration | `time: tsc N/ms` | The scheduler needs a tick, and AP bring-up needs `busy_wait_ms`. |
 | 13b | BSP LAPIC, I/O APIC, LAPIC timer | `time: lapic_timer ok (<mode>)` | After TSC calib. Prove a tick (TSC-deadline → periodic → PIT), then mask PIC + PIT GSI if LAPIC owns it. |
 | 14 | Scheduler, idle thread on BSP | `sched: cpu0 ready` | Preemption target must exist before the timer starts firing into it. |
-| 15 | Framebuffer console, input | `console ok` | Cosmetic but wanted before the shell. **Live:** after `smp: done`. See note below. |
-| 16 | Arm scheduler; emit `irq: enabled` | `irq: enabled` | Scheduler is live. The timer already ticks from steps 13/13b; this marker is post-sched arming (IF on, preemption live), not the first STI. IRQ1 stays masked until the keyboard driver. |
-| 17 | APIC + SMP bring-up | `smp: done` | Needs time (delays), heap (per-CPU allocation), scheduler (AP entry point). |
-| 18 | Hand off | `shell ready` | Last marker. Everything above it must have appeared in order. |
+| 15 | Arm scheduler; emit `irq: enabled` | `irq: enabled` | Scheduler is live. The timer already ticks from steps 13/13b; this marker is post-sched arming (IF on, preemption live), not the first STI. IRQ1 stays masked until the keyboard driver (step 17). |
+| 16 | APIC + SMP bring-up | `smp: done` | Needs time (delays), heap (per-CPU allocation), scheduler (AP entry point). Live Phase 4 order: SMP before console. |
+| 17 | Framebuffer console, PS/2, mux | `console ok` | After `smp: done`. Install the IRQ1 / keyboard GSI handler, init the 8042, then unmask. Replay the pre-FB log ring onto the framebuffer. |
+| 18 | Hand off | `shell ready` | Last marker (Slice C). Everything above it must have appeared in order. |
 
 Ordering rules worth stating separately because they were learned the hard way:
 
 - The bootstrap tick is the LAPIC timer after step 13b, or PIC IRQ0 only on the
-  PIT fallback (LINT0 ExtINT). Other PIC lines stay masked; step 16 is
+  PIT fallback (LINT0 ExtINT). Other PIC lines stay masked; step 15 is
   `irq: enabled` (IF on, preemption live), not the first unmask. An unexpected
   line before its driver is a halt, not a useful backtrace.
-- `smp: done` precedes `shell ready`. The e2e harness enforces it. If SMP moves after the shell, AP
-  failures become invisible in CI.
-- **Live boot vs this table.** Phase 4 shipped SMP (step 17) before console/shell. Slice A does not
-  emit `console ok` / `shell ready` and does **not** reorder SMP. Prefer live order:
-  `smp: done` → (Slice B) `console ok` → (Slice C) `shell ready`. The numbered table still lists
-  console as step 15; that is doc drift, not a request to move SMP after the shell.
+- `smp: done` precedes `console ok` and `shell ready`. The e2e harness enforces
+  it. If SMP moves after the shell, AP failures become invisible in CI.
 - ACPI discovery for the step-8 UC patch may run immediately after CR3 (alongside `paging: mmio uc`).
   The `acpi: xsdt N tables` marker stays at step 12. Do not "fix" that by moving the walk after the
   heap: first touch of LAPIC/IOAPIC/HPET would then be cacheable.
@@ -347,11 +343,13 @@ emits `time: lapic_timer ok (<mode>)` before masking the PIC and the PIT GSI
 when LAPIC owns the tick. PIT fallback keeps IRQ0 unmasked with LINT0 ExtINT.
 The handler updates the clock, EOIs, rearms (TSC-deadline), then
 `on_timer_tick`, a no-op until the idle thread exists. Step 14
-(`sched: cpu0 ready`) then step 16 (`irq: enabled`) follow meminfo: IF on,
-preemption live. Step 17 brings APs up one at a time; each AP prints
-`sched: cpu<i> ready` then the BSP prints `smp: ap online`, then `smp: done`
-before the boot-done stand-in for `shell ready`. IRQ1 stays masked until the keyboard driver (phase 5): the
-default PIC handler halts on an unexpected line. The timer path re-runs the
+(`sched: cpu0 ready`) then step 15 (`irq: enabled`) follow meminfo: IF on,
+preemption live. Step 16 brings APs up one at a time; each AP prints
+`sched: cpu<i> ready` then the BSP prints `smp: ap online`, then `smp: done`.
+Step 17 is the framebuffer console, PS/2, and mux (`console ok`) after SMP.
+IRQ1 stays masked until the keyboard handler is installed, then the 8042 is
+initialized, then the keyboard GSI is unmasked. The default PIC handler still
+halts on an unexpected line. The timer path re-runs the
 8259 ICW sequence even when FADT bit 0 skipped the boot remap (QEMU clears
 that bit but still has a PIC on 0x08).
 The e2e contract in [section 8.3](#83-end-to-end) is the live order.
@@ -663,7 +661,7 @@ The PIC is a bootstrap artifact and a fallback, nothing more.
   PIT fallback (LINT0 ExtINT). `sti` is allowed for that prove; `on_timer_tick`
   is a no-op until the idle thread exists. `irq: enabled` is Phase 3 slice B,
   after `sched: cpu0 ready`. Unmask IRQ1 only once a keyboard handler exists
-  (phase 5); the default PIC path halts on an unexpected line.
+  (phase 5 step 17); the default PIC path halts on an unexpected line.
 - Once the I/O APIC routes devices and the LAPIC timer is verified ticking, mask the PIC completely.
   Leaving it live means every interrupt is delivered twice.
 - Keep the PIT driver code. It is still the calibration fallback and still provides the delays that AP
@@ -1240,14 +1238,12 @@ vibeOS: console ok
 vibeOS: shell ready
 ```
 
-Live e2e through Phase 4 slice C asserts through `idt ok`, then `per_cpu: bsp ready`,
+Live e2e through Phase 5 slice B asserts through `idt ok`, then `per_cpu: bsp ready`,
 then `acpi: xsdt`, then `time: tsc <n>/ms`, then `time: lapic_timer ok (<mode>)`, then
 `sched: cpu0 ready`, then `irq: enabled`, then for each AP `sched: cpu<i> ready`
-followed by `smp: ap online`, then `smp: done`, then `boot: phase1 done`.
-Phase 5 Slice A adds no new boot markers (`console ok` / `shell ready` wait for B/C) and
-does not move `smp: done`. The sample list above is the *eventual* console-phase contract
-with SMP before console/shell (live order). The old table that put `console ok` before
-`smp: done` was drift.
+followed by `smp: ap online`, then `smp: done`, then `boot: phase1 done`, then
+`console ok`. `shell ready` waits for Slice C. SMP stays before console; the old
+table that listed console as step 15 before SMP was drift and is gone.
 The harness pins `<mode>` for the QEMU config: TCG (CI, `make test`) cannot
 advertise `CPUID.01H:ECX[24]`, so `-cpu max` expects `periodic`; `-machine pc,hpet=off`
 expects `pit`; KVM `-cpu max` expects `tsc-deadline`. Default QEMU also requires
