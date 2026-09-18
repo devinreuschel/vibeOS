@@ -270,6 +270,39 @@ impl Device {
         }
         Ok(())
     }
+
+    pub fn write_tree(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        let drv = self.bound.unwrap_or("-");
+        write!(
+            f,
+            "{} {:04x}:{:04x} {} drv={drv}",
+            self.addr,
+            self.vendor,
+            self.device_id,
+            pci::class_name(self.class, self.subclass)
+        )?;
+        if let Some(n) = pci::friendly_name(self.vendor, self.device_id) {
+            write!(f, " [{n}]")?;
+        }
+        writeln!(f)?;
+        let mut b = 0usize;
+        while b < MAX_BARS {
+            let r = self.resources[b];
+            if !r.is_empty() {
+                writeln!(
+                    f,
+                    "  bar{} {} {:#x}/{:#x}{}",
+                    r.bar,
+                    r.kind.name(),
+                    r.addr,
+                    r.size,
+                    if r.claimed { " claimed" } else { "" }
+                )?;
+            }
+            b += 1;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -457,36 +490,7 @@ impl Registry {
     pub fn write_tree(&self, f: &mut impl fmt::Write) -> fmt::Result {
         let mut i = 0usize;
         while i < self.n_dev {
-            let d = &self.devices[i];
-            let drv = d.bound.unwrap_or("-");
-            write!(
-                f,
-                "{} {:04x}:{:04x} {} drv={drv}",
-                d.addr,
-                d.vendor,
-                d.device_id,
-                pci::class_name(d.class, d.subclass)
-            )?;
-            if let Some(n) = pci::friendly_name(d.vendor, d.device_id) {
-                write!(f, " [{n}]")?;
-            }
-            writeln!(f)?;
-            let mut b = 0usize;
-            while b < MAX_BARS {
-                let r = d.resources[b];
-                if !r.is_empty() {
-                    writeln!(
-                        f,
-                        "  bar{} {} {:#x}/{:#x}{}",
-                        r.bar,
-                        r.kind.name(),
-                        r.addr,
-                        r.size,
-                        if r.claimed { " claimed" } else { "" }
-                    )?;
-                }
-                b += 1;
-            }
+            self.devices[i].write_tree(f)?;
             i += 1;
         }
         Ok(())
@@ -671,6 +675,15 @@ mod tests {
         assert!(tree.contains("early-nic"));
         assert!(tree.contains("00:03.0"));
         assert!(tree.contains("bar0 mem"));
+    }
+
+    #[test]
+    fn one_device_fits_shell_stack_full_table_does_not() {
+        // Shell stacks are 16 KiB. Copy one Device at a time; a full
+        // [Device; MAX_DEVICES] (and a second Registry) overflows.
+        assert!(core::mem::size_of::<Device>() < 2048);
+        assert!(core::mem::size_of::<[Device; MAX_DEVICES]>() > 16 * 1024);
+        assert!(core::mem::size_of::<Registry>() > 16 * 1024);
     }
 
     #[test]

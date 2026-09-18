@@ -40,6 +40,22 @@ pub const fn ecam_phys(
     Some(base.wrapping_add(ecam_off(bus - start_bus, dev, func, offset)))
 }
 
+/// Cache slot for a newly mapped ECAM page. Overflow replaces the last
+/// entry so the just-mapped page stays readable (later buses must not
+/// vanish as `0xFFFF_FFFF`).
+pub const fn ecam_cache_slot(filled: usize, cap: usize) -> usize {
+    if filled < cap {
+        filled
+    } else {
+        cap.saturating_sub(1)
+    }
+}
+
+/// Byte VA inside a mapped 4K ECAM function page.
+pub const fn ecam_byte_va(page_va: u64, phys: u64) -> u64 {
+    page_va.wrapping_add(phys & 0xFFF)
+}
+
 pub const CFG_VENDOR: u16 = 0x00;
 pub const CFG_DEVICE: u16 = 0x02;
 pub const CFG_COMMAND: u16 = 0x04;
@@ -748,6 +764,43 @@ mod tests {
             ecam_phys(0xB000_0000, 1, 3, 2, 0, 1, 4),
             Some(0xB000_0000 + ecam_off(1, 0, 1, 4))
         );
+    }
+
+    #[test]
+    fn ecam_cache_overflow_keeps_mapped_va() {
+        const CAP: usize = 4;
+        let mut phys = [0u64; CAP];
+        let mut va = [0u64; CAP];
+        let mut n = 0usize;
+        let mut i = 0u64;
+        while i < 6 {
+            let page = (i + 1) << 12;
+            let mapped = 0xFFFF_E000_0000_0000 + page;
+            let slot = ecam_cache_slot(n, CAP);
+            if n < CAP {
+                n += 1;
+            }
+            phys[slot] = page;
+            va[slot] = mapped;
+            // The page we just mapped must be findable, including after
+            // the table is full — a cache-only miss would be 0xFFFFFFFF.
+            let mut hit = None;
+            let mut s = 0usize;
+            while s < n {
+                if phys[s] == page {
+                    hit = Some(ecam_byte_va(va[s], page + 0x10));
+                    break;
+                }
+                s += 1;
+            }
+            assert_eq!(hit, Some(mapped + 0x10), "page {page:#x} vanished");
+            i += 1;
+        }
+        assert_eq!(n, CAP);
+        assert_eq!(ecam_cache_slot(0, 64), 0);
+        assert_eq!(ecam_cache_slot(63, 64), 63);
+        assert_eq!(ecam_cache_slot(64, 64), 63);
+        assert_eq!(ecam_byte_va(0x1000, 0x1234), 0x1234);
     }
 
     #[test]

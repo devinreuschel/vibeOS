@@ -2,7 +2,7 @@
 
 use core::fmt::Write;
 
-use vibeos::dev::{ClaimError, Device, Driver, MAX_DEVICES, Registry};
+use vibeos::dev::{ClaimError, Device, Driver, Registry};
 use vibeos::lock::RANK_DEVICE;
 use vibeos::pci::Bdf;
 use vibeos::shell::Command;
@@ -32,7 +32,6 @@ pub fn len() -> usize {
     REG.lock().len()
 }
 
-#[allow(dead_code)]
 pub fn get(i: usize) -> Option<Device> {
     REG.lock().get(i).copied()
 }
@@ -87,25 +86,21 @@ pub fn init() {
     });
 }
 
+/// One Device at a time: a full [Device; MAX] (and a second Registry)
+/// overflows the 16 KiB shell stack. Drop RANK_DEVICE before FB print.
 fn cmd_lspci(_args: &[&str]) {
-    let mut buf = [Device::empty(); MAX_DEVICES];
-    let n = REG.lock().snapshot(&mut buf);
     let mut i = 0usize;
-    while i < n {
-        let _ = buf[i].write_lspci(&mut Console);
+    while let Some(d) = get(i) {
+        let _ = d.write_lspci(&mut Console);
         let _ = writeln!(Console);
         i += 1;
     }
 }
 
 fn cmd_devices(_args: &[&str]) {
-    let mut buf = [Device::empty(); MAX_DEVICES];
-    let n = REG.lock().snapshot(&mut buf);
-    let mut tmp = Registry::new();
     let mut i = 0usize;
-    while i < n {
-        let _ = tmp.push(buf[i]);
+    while let Some(d) = get(i) {
+        let _ = d.write_tree(&mut Console);
         i += 1;
     }
-    let _ = tmp.write_tree(&mut Console);
 }

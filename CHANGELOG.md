@@ -7,6 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Shell `lspci` / `devices` copy one `Device` at a time. A full
+  `[Device; 64]` snapshot (and a second `Registry` on `devices`) overflowed
+  the 16 KiB shell stack into the guard. RANK_DEVICE is still dropped
+  before FB print.
+- ECAM cfg reads/writes use the VA from the page map, including when the
+  64-page cache is full (last slot is replaced). Cache-only lookup had
+  returned `0xFFFF_FFFF` so later buses vanished.
+
 ### Added
 
 - Phase 6 slice A: device model + PCI/PCIe enumeration. `Device` / `Driver`

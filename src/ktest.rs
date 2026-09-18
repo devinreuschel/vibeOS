@@ -2337,6 +2337,14 @@ fn test_pci_bind_order() -> Outcome {
     }
 }
 
+static LSPCI_STACK: AtomicU32 = AtomicU32::new(0);
+
+fn lspci_stack_entry() {
+    let ok = crate::shell_init::dispatch_line("lspci").is_ok()
+        && crate::shell_init::dispatch_line("devices").is_ok();
+    LSPCI_STACK.store(if ok { 1 } else { 2 }, Ordering::SeqCst);
+}
+
 fn test_lspci_cmd() -> Outcome {
     if !crate::shell_init::has_command("lspci") {
         return Outcome::Fail("no lspci");
@@ -2344,11 +2352,14 @@ fn test_lspci_cmd() -> Outcome {
     if !crate::shell_init::has_command("devices") {
         return Outcome::Fail("no devices");
     }
-    if crate::shell_init::dispatch_line("lspci").is_err() {
-        return Outcome::Fail("lspci");
+    // Shell stacks are 16 KiB. lspci on _start would miss a full
+    // [Device; 64] snapshot overflowing the guard.
+    LSPCI_STACK.store(0, Ordering::SeqCst);
+    let h = thread_init::spawn_here("lspci-stk", lspci_stack_entry);
+    thread_init::switch_to(h.id());
+    match LSPCI_STACK.load(Ordering::SeqCst) {
+        1 => Outcome::Ok,
+        2 => Outcome::Fail("lspci/devices"),
+        _ => Outcome::Fail("did not run"),
     }
-    if crate::shell_init::dispatch_line("devices").is_err() {
-        return Outcome::Fail("devices");
-    }
-    Outcome::Ok
 }

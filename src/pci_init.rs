@@ -109,100 +109,68 @@ fn map_mmio(phys: u64, len: u64) -> Option<u64> {
     }
 }
 
-fn ecam_cached_va(phys: u64) -> Option<u64> {
-    let page = phys & !(PAGE_SIZE_4K - 1);
+fn ecam_covers(bus: u8) -> bool {
     let e = ecam();
-    let mut i = 0usize;
-    while i < e.n {
-        if e.phys[i] == page {
-            return Some(e.va[i].wrapping_add(phys & (PAGE_SIZE_4K - 1)));
-        }
-        i += 1;
-    }
-    None
+    e.base != 0 && bus >= e.start && bus <= e.end
 }
 
-fn ecam_page(phys: u64) -> Option<u64> {
+fn ecam_phys_of(bdf: Bdf, offset: u16) -> Option<u64> {
+    let e = ecam();
+    pci::ecam_phys(
+        e.base,
+        e.start,
+        e.end,
+        bdf.bus,
+        bdf.device,
+        bdf.function,
+        offset,
+    )
+}
+
+/// Map the 4K function page for `phys` and return the byte VA.
+/// Cache miss still ioremaps; the returned VA is always used, even when
+/// the table is full (a cache-only lookup would vanish later buses).
+fn ecam_va(phys: u64) -> Option<u64> {
     let page = phys & !(PAGE_SIZE_4K - 1);
     let e = ecam();
     let mut i = 0usize;
     while i < e.n {
         if e.phys[i] == page {
-            return Some(e.va[i]);
+            return Some(pci::ecam_byte_va(e.va[i], phys));
         }
         i += 1;
     }
     let va = map_mmio(page, PAGE_SIZE_4K)?;
+    let slot = pci::ecam_cache_slot(e.n, ECAM_CACHE);
     if e.n < ECAM_CACHE {
-        e.phys[e.n] = page;
-        e.va[e.n] = va;
         e.n += 1;
     }
-    Some(va)
+    e.phys[slot] = page;
+    e.va[slot] = va;
+    Some(pci::ecam_byte_va(va, phys))
 }
 
-fn ecam_read32(bdf: Bdf, offset: u16) -> Option<u32> {
-    let e = ecam();
-    if e.base == 0 {
-        return None;
-    }
-    let phys = pci::ecam_phys(
-        e.base,
-        e.start,
-        e.end,
-        bdf.bus,
-        bdf.device,
-        bdf.function,
-        offset,
-    )?;
-    // Caller mapped the page first. Do not ioremap while CFG is held.
-    let va = ecam_cached_va(phys)?;
-    Some(unsafe { (va as *const u32).read_volatile() })
+fn ecam_read_at(va: u64) -> u32 {
+    unsafe { (va as *const u32).read_volatile() }
 }
 
-fn ecam_write32(bdf: Bdf, offset: u16, val: u32) -> bool {
-    let e = ecam();
-    if e.base == 0 {
-        return false;
-    }
-    let Some(phys) = pci::ecam_phys(
-        e.base,
-        e.start,
-        e.end,
-        bdf.bus,
-        bdf.device,
-        bdf.function,
-        offset,
-    ) else {
-        return false;
-    };
-    let Some(va) = ecam_cached_va(phys) else {
-        return false;
-    };
-    unsafe { (va as *mut u32).write_volatile(val) };
-    true
+fn ecam_write_at(va: u64, val: u32) {
+    unsafe { (va as *mut u32).write_volatile(val) }
 }
 
 struct HwCfg;
 
 impl CfgIo for HwCfg {
     fn read32(&mut self, bdf: Bdf, offset: u16) -> u32 {
-        let e = ecam();
-        if e.base != 0 && bdf.bus >= e.start && bdf.bus <= e.end {
-            // Map the page without CFG held (ioremap takes PT).
-            let phys = pci::ecam_phys(
-                e.base,
-                e.start,
-                e.end,
-                bdf.bus,
-                bdf.device,
-                bdf.function,
-                offset,
-            );
-            if let Some(p) = phys {
-                let _ = ecam_page(p);
-            }
-            return with_cfg(|| ecam_read32(bdf, offset).unwrap_or(0xFFFF_FFFF));
+        if ecam_covers(bdf.bus) {
+            let Some(phys) = ecam_phys_of(bdf, offset) else {
+                return 0xFFFF_FFFF;
+            };
+            // Map without CFG held (ioremap takes PT).
+            let Some(va) = ecam_va(phys) else {
+                return 0xFFFF_FFFF;
+            };
+            return with_cfg(|| ecam_read_at(va));
         }
         if bdf.bus == 0 {
             return with_cfg(|| cf8_read32(bdf, offset));
@@ -211,23 +179,14 @@ impl CfgIo for HwCfg {
     }
 
     fn write32(&mut self, bdf: Bdf, offset: u16, value: u32) {
-        let e = ecam();
-        if e.base != 0 && bdf.bus >= e.start && bdf.bus <= e.end {
-            let phys = pci::ecam_phys(
-                e.base,
-                e.start,
-                e.end,
-                bdf.bus,
-                bdf.device,
-                bdf.function,
-                offset,
-            );
-            if let Some(p) = phys {
-                let _ = ecam_page(p);
-            }
-            with_cfg(|| {
-                let _ = ecam_write32(bdf, offset, value);
-            });
+        if ecam_covers(bdf.bus) {
+            let Some(phys) = ecam_phys_of(bdf, offset) else {
+                return;
+            };
+            let Some(va) = ecam_va(phys) else {
+                return;
+            };
+            with_cfg(|| ecam_write_at(va, value));
             return;
         }
         if bdf.bus == 0 {
