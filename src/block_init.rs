@@ -149,7 +149,7 @@ fn execute(req: &Request) -> Result<(), BlockError> {
         }
     }
     let mut data = DATA.lock();
-    ram().apply(&mut data, req)
+    ram().apply(&mut data[..], req)
 }
 
 fn fail_rest() {
