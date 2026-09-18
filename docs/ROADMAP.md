@@ -686,14 +686,14 @@ limitations.
 - [ ] host tests over synthetic filesystem images, including deliberately corrupted ones
 
 ### 8.1 VFS
-- [ ] `Inode` with a type, size, mode, times, and link count
-- [ ] `Dentry` with a name-to-inode cache and negative caching
-- [ ] `Superblock` per mount, with a mount table and mount point crossing
-- [ ] `FileSystem` trait for mount and root lookup; `InodeOps` for lookup, create, unlink, read, write, truncate, readdir, stat
-- [ ] path resolution with a bounded symlink depth
-- [ ] `File` with an offset and flags, and a descriptor table that phase 9 hands to processes
-- [ ] reference counting and a defined lifetime for an unlinked-but-open file
-- [ ] inode and dentry caches with eviction, since an unbounded cache is a slow memory leak
+- [x] `Inode` with a type, size, mode, times, and link count
+- [x] `Dentry` with a name-to-inode cache and negative caching
+- [x] `Superblock` per mount, with a mount table and mount point crossing
+- [x] `FileSystem` trait for mount and root lookup; `InodeOps` for lookup, create, unlink, read, write, truncate, readdir, stat
+- [x] path resolution with a bounded symlink depth
+- [x] `File` with an offset and flags, and a descriptor table that phase 9 hands to processes
+- [x] reference counting and a defined lifetime for an unlinked-but-open file
+- [x] inode and dentry caches with eviction, since an unbounded cache is a slow memory leak
 
 ### 8.2 FAT32 read
 - [ ] BPB parsing and validation

@@ -22,6 +22,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Phase 8 slice A: VFS. Inode (type, size, mode, times, nlink), dentry
+  cache with negative entries (invalidated on create in that dir),
+  superblock + mount table, mount-point crossing (`..` from a mount
+  root walks to the parent of the covered dentry). `FileSystem` /
+  `InodeOps` (lookup/create/unlink/read/write/truncate/readdir/stat).
+  Iterative path walk with a symlink-depth cap; a loop is `FsError::Loop`,
+  not a stack smash. `File` (offset, flags) and `FdTable` for Phase 9.
+  Refcount: unlinked-but-open data lives until last close. Inode and
+  dentry caches are bounded with clock eviction. Dummy ramfs is enough
+  to host-test walks; the kernel mounts it at `/` with no new boot
+  marker. VFS lock is RANK_DEVICE (DESIGN §2.1; a numbered slot is a
+  Design ACK). Host tests: `.`/`..`, symlink bound/loop, negative
+  dentry, mount crossing, unlinked-open, eviction.
+
 - Phase 7 slice C: GPT/MBR partition children and a write-back block cache.
   MBR walks primary plus extended/logical (depth-bounded; corrupt next-LBA
   stops). GPT checks header and entry CRC and falls back to the backup
