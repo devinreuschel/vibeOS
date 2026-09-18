@@ -562,8 +562,9 @@ def run_qemu_until_exit(
 # `shell ready`. `boot: phase1 done` was retired when `shell ready` became
 # the trailing marker (DESIGN §3.3 / §8.3).
 # Phase 5 slice B then emits `console ok` after SMP. Phase 6 slice A
-# emits `pci: <n> devices` (and per-device lines) after that. Slice C
-# emits `shell ready` last. IRQ1 is unmasked
+# emits `pci: <n> devices` (and per-device lines) after that. Phase 6
+# slice C may emit diagnostic `work: ready` / virtio lines (not contract
+# markers). Shell `shell ready` is last. IRQ1 is unmasked
 # only after the handler exists. TCG: `VIBEOS_QEMU_ACCEL=tcg` (make default)
 # or `VIBEOS_QEMU_EXTRA="-accel tcg"`.
 # `pic: remapped` means the PIC step finished (ICW ran, or FADT skip);

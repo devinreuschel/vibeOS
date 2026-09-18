@@ -97,8 +97,14 @@ pub mod thread;
 #[path = "../../../src/time.rs"]
 pub mod time;
 
+#[path = "../../../src/virtio.rs"]
+pub mod virtio;
+
 #[path = "../../../src/wait.rs"]
 pub mod wait;
+
+#[path = "../../../src/work.rs"]
+pub mod work;
 
 #[cfg(test)]
 mod smoke {
