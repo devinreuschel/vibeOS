@@ -9,7 +9,23 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
-- Phase 5 slice A: kernel log and panic/diagnostics. Levels
+- Phase 5 slice B: framebuffer text console, PS/2 keyboard, and console
+  mux. BGRX pixels at `base + y * pitch + x * 4` with release bounds
+  checks (Limine pitch, not `width*4`). 8×8 font, LSB leftmost, ASCII
+  32–126 plus a replacement glyph. Text grid wrap + `memmove` scroll
+  with a banner row that stays put. 8042 init (self-test, port 1);
+  scan-code set 1 including `0xE0`; shift/ctrl/alt/caps/num. ISR writes
+  a fixed ring only (no alloc, no log); consumer drains IRQ-off.
+  IRQ1 / keyboard GSI stays masked until the handler is installed, then
+  the controller is initialized, then unmasked (IOAPIC vector `0x30`).
+  Mux fans writes to serial + FB and merges PS/2 with polled serial RX;
+  backends do not call `log!`. Pre-FB boot lines are replayed onto the
+  FB when the mux comes up. Marker `vibeOS: console ok` after
+  `smp: done` / `boot: phase1 done`. Host tests: font, pitch/bounds,
+  scancodes, ring wrap. In-guest: BGRX round-trip, pitch, GSI unmask,
+  mux enable/disable, ring drain. Double buffering parked. DESIGN §3.3
+  table now matches live SMP-then-console order.
+
   `error|warn|info|debug|trace` with a compile-time ceiling and an
   `AtomicU8` runtime filter. Fixed ring (wrap drops oldest) stores
   `{timestamp, cpu_id, level, msg}`; serial output is captured so boot

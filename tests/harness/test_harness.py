@@ -329,6 +329,13 @@ class TestLapicMode(unittest.TestCase):
         self.assertIn("smp_ap_online_0", names)
         self.assertIn("sched_cpu1", names)
         self.assertIn("smp_done", names)
+        self.assertIn("boot_done", names)
+        self.assertIn("console_ok", names)
+        smp_i = names.index("smp_done")
+        boot_i = names.index("boot_done")
+        con_i = names.index("console_ok")
+        self.assertLess(smp_i, boot_i)
+        self.assertLess(boot_i, con_i)
         names1 = [x.name for x in boot_contract_markers(smp=1)]
         self.assertNotIn("smp_ap_online_0", names1)
         self.assertNotIn("sched_cpu1", names1)

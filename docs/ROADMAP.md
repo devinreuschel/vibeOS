@@ -493,28 +493,30 @@ From a kernel that schedules to an operating system that runs programs against f
 - [ ] log level filtering changeable at runtime and visible in output
 
 ### 5.1 Framebuffer console
-- [ ] BGRX pixel writes at `base + y * pitch + x * 4`, with bounds checks that are not `debug_assert`
-- [ ] 8x8 bitmap font, LSB leftmost, ASCII 32 to 126, with a defined glyph for everything else
-- [ ] text grid with wrap and scroll; scroll by `memmove` of whole rows
-- [ ] a banner region that survives scrolling
-- [ ] host tests for the font table and for the pixel bounds arithmetic
+- [x] BGRX pixel writes at `base + y * pitch + x * 4`, with bounds checks that are not `debug_assert`
+- [x] 8x8 bitmap font, LSB leftmost, ASCII 32 to 126, with a defined glyph for everything else
+- [x] text grid with wrap and scroll; scroll by `memmove` of whole rows
+- [x] a banner region that survives scrolling
+- [x] host tests for the font table and for the pixel bounds arithmetic
 - [ ] double buffering off the physmap once there is memory to spare, so scrolling stops tearing
 
+Double buffering parked (Design ACK).
+
 ### 5.2 PS/2 keyboard
-- [ ] controller init, self test, and enabling the first port
-- [ ] scan code set 1 decoding including `0xE0` prefixes
-- [ ] modifier state: shift, ctrl, alt, caps lock, num lock
-- [ ] `DecodedKey` as either a character or a named non-printing key
-- [ ] fixed-size ring buffer written by the ISR, drained by the consumer with interrupts disabled
-- [ ] the decoder and ring buffer in the library half, fully host-tested
-- [ ] ISR does no allocation and no logging
+- [x] controller init, self test, and enabling the first port
+- [x] scan code set 1 decoding including `0xE0` prefixes
+- [x] modifier state: shift, ctrl, alt, caps lock, num lock
+- [x] `DecodedKey` as either a character or a named non-printing key
+- [x] fixed-size ring buffer written by the ISR, drained by the consumer with interrupts disabled
+- [x] the decoder and ring buffer in the library half, fully host-tested
+- [x] ISR does no allocation and no logging
 
 ### 5.3 Console multiplexer
-- [ ] `ConsoleBackend` trait: write, and optional read
-- [ ] serial and framebuffer backends registered, output fanned out to both
-- [ ] input merged from the PS/2 ring and from serial RX
-- [ ] one lock discipline that does not deadlock against the keyboard ISR
-- [ ] runtime enable and disable per backend
+- [x] `ConsoleBackend` trait: write, and optional read
+- [x] serial and framebuffer backends registered, output fanned out to both
+- [x] input merged from the PS/2 ring and from serial RX
+- [x] one lock discipline that does not deadlock against the keyboard ISR
+- [x] runtime enable and disable per backend
 
 ### 5.4 Shell
 - [ ] line editor: echo, backspace, ctrl+C, ctrl+U, cursor movement, history

@@ -78,6 +78,15 @@ impl Serial {
         Self::write_bytes_raw(bytes);
     }
 
+    /// Poll COM1 RX. No lock; caller holds IRQs off if racing a consumer.
+    pub fn try_read_byte() -> Option<u8> {
+        let lsr = unsafe { x86::inb(COM1_BASE + REG_LSR) };
+        if lsr & LSR_DR == 0 {
+            return None;
+        }
+        Some(unsafe { x86::inb(COM1_BASE + REG_DATA) })
+    }
+
     /// ISR / log sink: one lock for the whole buffer, drop the line if busy.
     pub fn try_write_bytes(bytes: &[u8]) -> bool {
         if crate::ipi_init::is_halting() {

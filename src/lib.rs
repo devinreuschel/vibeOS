@@ -8,10 +8,14 @@
 
 pub mod acpi;
 pub mod apic;
+pub mod console;
 pub mod desc;
+pub mod fb;
+pub mod font;
 pub mod fmt_util;
 pub mod heap;
 pub mod ipi;
+pub mod kbd;
 pub mod kva;
 pub mod lock;
 pub mod log;

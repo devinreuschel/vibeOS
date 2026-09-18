@@ -228,6 +228,20 @@ pub fn ring_len() -> usize {
     with_logger(|l| l.ring.len())
 }
 
+/// Copy each message out, then call `f`. Lock is not held across `f`.
+pub fn for_each_msg(mut f: impl FnMut(&[u8])) {
+    let len = with_logger(|l| l.ring.len());
+    let mut i = 0usize;
+    while i < len {
+        let rec = with_logger(|l| l.ring.get(i).copied());
+        i += 1;
+        let Some(r) = rec else {
+            break;
+        };
+        f(r.msg());
+    }
+}
+
 pub fn dropped() -> u64 {
     with_logger(|l| l.ring.dropped())
 }

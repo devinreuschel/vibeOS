@@ -18,6 +18,7 @@ pub const REG_DLL: u16 = 0;
 pub const REG_DLM: u16 = 1;
 
 // LSR bits.
+pub const LSR_DR: u8 = 1 << 0;
 pub const LSR_THRE: u8 = 1 << 5;
 
 // Divisor for 115200 baud (input clock 1.8432 MHz / 16 = 115200).
@@ -55,6 +56,8 @@ mod tests {
     fn dlab_bit_is_high() {
         assert_eq!(LCR_DLAB & 0x80, 0x80);
         assert_eq!(LCR_8N1 & 0x80, 0);
+        assert_ne!(LSR_DR, LSR_THRE);
+        assert_eq!(LSR_DR, 1);
     }
 
     #[test]

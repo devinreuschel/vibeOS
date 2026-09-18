@@ -111,6 +111,11 @@ const TESTS: &[(&str, TestFn)] = &[
     ("log_runtime_filter", test_log_runtime_filter),
     ("log_emit_roundtrip", test_log_emit_roundtrip),
     ("log_dmesg_no_recapture", test_log_dmesg_no_recapture),
+    ("fb_bgrx_roundtrip", test_fb_bgrx_roundtrip),
+    ("fb_pitch", test_fb_pitch),
+    ("kbd_gsi_unmasked", test_kbd_gsi_unmasked),
+    ("console_mux", test_console_mux),
+    ("kbd_ring_drain", test_kbd_ring_drain),
 ];
 
 pub fn run() -> ! {
@@ -1960,6 +1965,9 @@ fn test_log_boot_captured() -> Outcome {
     if !crate::log_init::contains_msg("smp: done") {
         return Outcome::Fail("smp: done missing from ring");
     }
+    if !crate::log_init::contains_msg("console ok") {
+        return Outcome::Fail("console ok missing from ring");
+    }
     Outcome::Ok
 }
 
@@ -2002,4 +2010,91 @@ fn test_log_dmesg_no_recapture() -> Outcome {
         return Outcome::Fail("dmesg line stored");
     }
     Outcome::Ok
+}
+
+fn test_fb_bgrx_roundtrip() -> Outcome {
+    if !crate::fb_init::ready() {
+        return Outcome::Fail("no framebuffer");
+    }
+    let color = vibeos::fb::pack_bgrx(0x11, 0x22, 0x33);
+    if !crate::fb_init::put_pixel(0, 0, color) {
+        return Outcome::Fail("put origin");
+    }
+    match crate::fb_init::get_pixel(0, 0) {
+        Some(got) if got == color => Outcome::Ok,
+        Some(_) => Outcome::Fail("pixel mismatch"),
+        None => Outcome::Fail("get origin"),
+    }
+}
+
+fn test_fb_pitch() -> Outcome {
+    let Some(pitch) = crate::fb_init::pitch() else {
+        return Outcome::Fail("no pitch");
+    };
+    let Some(width) = crate::fb_init::width() else {
+        return Outcome::Fail("no width");
+    };
+    // Must not assume pitch == width*4. QEMU often equals; still use pitch.
+    if pitch < (width as u64) * 4 {
+        return Outcome::Fail("pitch smaller than width*4");
+    }
+    let color = vibeos::fb::pack_bgrx(0x44, 0x55, 0x66);
+    if !crate::fb_init::put_pixel(0, 1, color) {
+        return Outcome::Fail("put row1");
+    }
+    match crate::fb_init::get_pixel(0, 1) {
+        Some(got) if got == color => Outcome::Ok,
+        Some(_) => Outcome::Fail("row1 mismatch"),
+        None => Outcome::Fail("get row1"),
+    }
+}
+
+fn test_kbd_gsi_unmasked() -> Outcome {
+    if crate::kbd_init::pic_fallback() {
+        return Outcome::Skip("pic fallback");
+    }
+    let Some(gsi) = crate::kbd_init::gsi() else {
+        return Outcome::Fail("no keyboard gsi");
+    };
+    match crate::apic_init::gsi_masked(gsi) {
+        Some(false) => Outcome::Ok,
+        Some(true) => Outcome::Fail("keyboard gsi still masked"),
+        None => Outcome::Fail("gsi not on ioapic"),
+    }
+}
+
+fn test_console_mux() -> Outcome {
+    use vibeos::console::BackendId;
+    if !crate::console_init::live() {
+        return Outcome::Fail("mux not live");
+    }
+    if !crate::console_init::enabled(BackendId::Serial) {
+        return Outcome::Fail("serial off");
+    }
+    if crate::fb_init::ready() && !crate::console_init::enabled(BackendId::Framebuffer) {
+        return Outcome::Fail("fb off");
+    }
+    crate::console_init::write(b"");
+    crate::console_init::set_enabled(BackendId::Framebuffer, false);
+    if crate::console_init::enabled(BackendId::Framebuffer) {
+        crate::console_init::set_enabled(BackendId::Framebuffer, true);
+        return Outcome::Fail("disable failed");
+    }
+    crate::console_init::set_enabled(BackendId::Framebuffer, true);
+    if crate::fb_init::ready() && !crate::console_init::enabled(BackendId::Framebuffer) {
+        return Outcome::Fail("re-enable failed");
+    }
+    Outcome::Ok
+}
+
+fn test_kbd_ring_drain() -> Outcome {
+    if !crate::kbd_init::live() {
+        return Outcome::Fail("kbd not live");
+    }
+    crate::kbd_init::push_for_test(vibeos::kbd::DecodedKey::Char(b'q'));
+    match crate::console_init::read() {
+        Some(vibeos::kbd::DecodedKey::Char(b'q')) => Outcome::Ok,
+        Some(_) => Outcome::Fail("wrong key"),
+        None => Outcome::Fail("ring empty"),
+    }
 }

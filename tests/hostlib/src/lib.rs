@@ -7,8 +7,17 @@
 #[path = "../../../src/acpi.rs"]
 pub mod acpi;
 
+#[path = "../../../src/console.rs"]
+pub mod console;
+
 #[path = "../../../src/apic.rs"]
 pub mod apic;
+
+#[path = "../../../src/fb.rs"]
+pub mod fb;
+
+#[path = "../../../src/font.rs"]
+pub mod font;
 
 #[path = "../../../src/fmt_util.rs"]
 pub mod fmt_util;
@@ -21,6 +30,9 @@ pub mod heap;
 
 #[path = "../../../src/ipi.rs"]
 pub mod ipi;
+
+#[path = "../../../src/kbd.rs"]
+pub mod kbd;
 
 #[path = "../../../src/kva.rs"]
 pub mod kva;
@@ -99,6 +111,7 @@ mod smoke {
             marker::SMP_AP_ONLINE,
             marker::SMP_DONE,
             marker::BOOT_DONE,
+            marker::CONSOLE_OK,
         ] {
             assert!(m.starts_with("vibeOS: "), "marker missing prefix: {m}");
             assert!(!m.ends_with(['.', '!']), "marker has trailing punct: {m}");
@@ -131,6 +144,7 @@ mod smoke {
         assert_eq!(marker::SMP_AP_ONLINE, "vibeOS: smp: ap online");
         assert_eq!(marker::SMP_DONE, "vibeOS: smp: done");
         assert_eq!(marker::BOOT_DONE, "vibeOS: boot: phase1 done");
+        assert_eq!(marker::CONSOLE_OK, "vibeOS: console ok");
     }
 
     #[test]
