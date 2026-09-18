@@ -116,6 +116,9 @@ const TESTS: &[(&str, TestFn)] = &[
     ("kbd_gsi_unmasked", test_kbd_gsi_unmasked),
     ("console_mux", test_console_mux),
     ("kbd_ring_drain", test_kbd_ring_drain),
+    ("shell_registry", test_shell_registry),
+    ("shell_dispatch", test_shell_dispatch),
+    ("shell_dmesg_level", test_shell_dmesg_level),
 ];
 
 pub fn run() -> ! {
@@ -2096,5 +2099,62 @@ fn test_kbd_ring_drain() -> Outcome {
         Some(vibeos::kbd::DecodedKey::Char(b'q')) => Outcome::Ok,
         Some(_) => Outcome::Fail("wrong key"),
         None => Outcome::Fail("ring empty"),
+    }
+}
+
+fn test_shell_registry() -> Outcome {
+    for name in crate::shell_init::builtin_names() {
+        if !crate::shell_init::has_command(name) {
+            return Outcome::Fail("missing builtin");
+        }
+    }
+    if crate::shell_init::command_count() < 10 {
+        return Outcome::Fail("registry short");
+    }
+    if crate::shell_init::has_command("not-a-cmd") {
+        return Outcome::Fail("unknown present");
+    }
+    Outcome::Ok
+}
+
+fn test_shell_dispatch() -> Outcome {
+    if crate::shell_init::dispatch_line("echo ktest-shell-echo").is_err() {
+        return Outcome::Fail("echo");
+    }
+    if crate::shell_init::dispatch_line("").is_err() {
+        return Outcome::Fail("empty");
+    }
+    if crate::shell_init::dispatch_line("not-a-cmd").is_ok() {
+        return Outcome::Fail("unknown succeeded");
+    }
+    if crate::shell_init::dispatch_line("dmesg info").is_err() {
+        return Outcome::Fail("dmesg");
+    }
+    Outcome::Ok
+}
+
+fn test_shell_dmesg_level() -> Outcome {
+    use vibeos::log::Level;
+    let old = crate::log_init::max_level();
+    if crate::shell_init::dispatch_line("dmesg -n error").is_err() {
+        crate::log_init::set_max_level(old);
+        return Outcome::Fail("dmesg -n");
+    }
+    crate::klog!(Level::Debug, "vibeOS: ktest: shell-level-hidden");
+    if crate::log_init::contains_msg("shell-level-hidden") {
+        crate::log_init::set_max_level(old);
+        return Outcome::Fail("debug stored at error");
+    }
+    if crate::shell_init::dispatch_line("dmesg -n trace").is_err() {
+        crate::log_init::set_max_level(old);
+        return Outcome::Fail("dmesg -n trace");
+    }
+    crate::klog!(Level::Debug, "vibeOS: ktest: shell-level-visible");
+    let ok = crate::log_init::contains_msg("shell-level-visible");
+    crate::log_init::set_max_level(old);
+    if ok {
+        Outcome::Ok
+    } else {
+        Outcome::Fail("debug missing after -n trace")
     }
 }

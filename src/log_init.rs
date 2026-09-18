@@ -1,4 +1,4 @@
-#![allow(dead_code)] // dmesg/follow/printer wait for B/C; keep the hooks compiled
+#![allow(dead_code)] // printer thread stays parked
 //! Kernel wiring for the log ring. ROADMAP §5.5.
 //!
 //! Global IRQ-safe ring + serial sink. Per-CPU printer thread is a
@@ -228,6 +228,15 @@ pub fn ring_len() -> usize {
     with_logger(|l| l.ring.len())
 }
 
+pub fn written() -> u64 {
+    with_logger(|l| l.ring.written())
+}
+
+/// Copy record `i` (oldest-first). Lock is not held after return.
+pub fn record_at(i: usize) -> Option<vibeos::log::Record<MSG_CAP>> {
+    with_logger(|l| l.ring.get(i).copied())
+}
+
 /// Copy each message out, then call `f`. Lock is not held across `f`.
 pub fn for_each_msg(mut f: impl FnMut(&[u8])) {
     let len = with_logger(|l| l.ring.len());
@@ -246,9 +255,13 @@ pub fn dropped() -> u64 {
     with_logger(|l| l.ring.dropped())
 }
 
-/// `dmesg` dump to serial. `view` None → current runtime max.
+/// `dmesg` dump. `view` None → current runtime max.
 /// Does not hold the ring lock across TX (capture would deadlock).
 pub fn dmesg(view: Option<Level>) {
+    dmesg_write(&mut PlainSerial, view);
+}
+
+pub fn dmesg_write(w: &mut impl Write, view: Option<Level>) {
     let view = view.unwrap_or_else(max_level);
     let len = with_logger(|l| l.ring.len());
     let mut i = 0usize;
@@ -261,17 +274,25 @@ pub fn dmesg(view: Option<Level>) {
         if !allowed(r.level, view, COMPILE_MAX) {
             continue;
         }
-        let unit = if time_init::tsc_per_ms() != 0 { "ms" } else { "tsc" };
-        let _ = writeln!(
-            PlainSerial,
-            "vibeOS: dmesg: {}{} cpu{} {} {}",
-            r.timestamp,
-            unit,
-            r.cpu_id,
-            r.level.as_str(),
-            r.msg_str()
-        );
+        write_record(w, &r);
     }
+}
+
+pub fn write_record(w: &mut impl Write, r: &vibeos::log::Record<MSG_CAP>) {
+    let unit = if time_init::tsc_per_ms() != 0 {
+        "ms"
+    } else {
+        "tsc"
+    };
+    let _ = writeln!(
+        w,
+        "vibeOS: dmesg: {}{} cpu{} {} {}",
+        r.timestamp,
+        unit,
+        r.cpu_id,
+        r.level.as_str(),
+        r.msg_str()
+    );
 }
 
 /// Last N records for the panic dump. Caller holds no log lock.
@@ -303,9 +324,6 @@ pub fn dump_tail(n: usize) {
 /// Parked. DESIGN §7.7 line atomicity wants per-CPU staging + a printer
 /// thread. Slice A keeps the global ring + serial try-lock sink.
 pub fn start_printer_thread() {}
-
-/// Follow mode waits for the shell (Slice C).
-pub fn dmesg_follow_stub() {}
 
 /// `fmt::Write` that emits one Info record per newline, plus serial.
 pub struct Log;

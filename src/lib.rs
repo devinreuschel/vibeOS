@@ -25,6 +25,7 @@ pub mod per_cpu;
 pub mod pic;
 pub mod pmm;
 pub mod sched;
+pub mod shell;
 pub mod smp;
 pub mod sync;
 pub mod symtab;

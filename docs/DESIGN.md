@@ -316,7 +316,7 @@ of it.
 | 15 | Arm scheduler; emit `irq: enabled` | `irq: enabled` | Scheduler is live. The timer already ticks from steps 13/13b; this marker is post-sched arming (IF on, preemption live), not the first STI. IRQ1 stays masked until the keyboard driver (step 17). |
 | 16 | APIC + SMP bring-up | `smp: done` | Needs time (delays), heap (per-CPU allocation), scheduler (AP entry point). Live Phase 4 order: SMP before console. |
 | 17 | Framebuffer console, PS/2, mux | `console ok` | After `smp: done`. Install the IRQ1 / keyboard GSI handler, init the 8042, then unmask. Replay the pre-FB log ring onto the framebuffer. |
-| 18 | Hand off | `shell ready` | Last marker (Slice C). Everything above it must have appeared in order. |
+| 18 | Shell thread, builtins | `shell ready` | Last marker. Spawn a kernel thread (not `_start`, not idle, not an ISR), register builtins into the command table, print the prompt. |
 
 Ordering rules worth stating separately because they were learned the hard way:
 
@@ -352,6 +352,9 @@ initialized, then the keyboard GSI is unmasked. The default PIC handler still
 halts on an unexpected line. The timer path re-runs the
 8259 ICW sequence even when FADT bit 0 skipped the boot remap (QEMU clears
 that bit but still has a PIC on 0x08).
+Step 18 spawns the shell as a kernel thread after `console ok` and emits
+`shell ready` last. `boot: phase1 done` was a Phase 1–4 stand-in and is no
+longer emitted; the trailing contract line is `shell ready`.
 The e2e contract in [section 8.3](#83-end-to-end) is the live order.
 
 ## 3.4 Linker script
@@ -494,6 +497,8 @@ looked exactly like a hang.
 
 MMIO gets PCD + PWT unconditionally. QEMU ignores cache attributes and write-back MMIO appears to
 work, so this bug only shows up on real hardware, months later, as inexplicable device behavior.
+The Limine framebuffer stays write-back on the HHDM physmap for now (QEMU-tolerant). WC/UC remap of
+scanout is a later polish pass; double buffering is also parked (ROADMAP §5.1).
 
 ### TLB
 
@@ -1238,11 +1243,12 @@ vibeOS: console ok
 vibeOS: shell ready
 ```
 
-Live e2e through Phase 5 slice B asserts through `idt ok`, then `per_cpu: bsp ready`,
+Live e2e through Phase 5 slice C asserts through `idt ok`, then `per_cpu: bsp ready`,
 then `acpi: xsdt`, then `time: tsc <n>/ms`, then `time: lapic_timer ok (<mode>)`, then
 `sched: cpu0 ready`, then `irq: enabled`, then for each AP `sched: cpu<i> ready`
-followed by `smp: ap online`, then `smp: done`, then `boot: phase1 done`, then
-`console ok`. `shell ready` waits for Slice C. SMP stays before console; the old
+followed by `smp: ap online`, then `smp: done`, then `console ok`, then `shell ready`.
+`boot: phase1 done` was a Phase 1–4 stand-in and is no longer in the contract; the
+trailing marker is `shell ready`. SMP stays before console; the old
 table that listed console as step 15 before SMP was drift and is gone.
 The harness pins `<mode>` for the QEMU config: TCG (CI, `make test`) cannot
 advertise `CPUID.01H:ECX[24]`, so `-cpu max` expects `periodic`; `-machine pc,hpet=off`

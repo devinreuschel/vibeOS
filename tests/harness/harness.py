@@ -558,13 +558,16 @@ def run_qemu_until_exit(
 # masked only then). Phase 3 slice B then emits
 # `sched: cpu0 ready` and `irq: enabled` (keyboard stays masked until
 # phase 5). Phase 4 slice C then emits `sched: cpu<i> ready` then
-# `smp: ap online` for each AP, then `smp: done` before `boot: phase1 done`.
-# Phase 5 slice B then emits `console ok` after that pair. IRQ1 is unmasked
+# `smp: ap online` for each AP, then `smp: done` before `console ok` /
+# `shell ready`. `boot: phase1 done` was retired when `shell ready` became
+# the trailing marker (DESIGN §3.3 / §8.3).
+# Phase 5 slice B then emits `console ok` after SMP. Slice C emits
+# `shell ready` last. IRQ1 is unmasked
 # only after the handler exists. TCG: `VIBEOS_QEMU_ACCEL=tcg` (make default)
 # or `VIBEOS_QEMU_EXTRA="-accel tcg"`.
 # `pic: remapped` means the PIC step finished (ICW ran, or FADT skip);
 # unlike `paging: mmio uc` it is not a claim that ports were programmed.
-# Trailing live marker is `console ok`. Runtime-derived payload uses
+# Trailing live marker is `shell ready`. Runtime-derived payload uses
 # `and_contains`.
 _PHASE0_BEFORE_TIME: list[Marker] = [
     Marker("vibeOS: serial online", "serial_online"),
@@ -617,8 +620,10 @@ def boot_contract_markers(
         )
         after.append(Marker("vibeOS: smp: ap online", f"smp_ap_online_{i - 1}"))
     after.append(Marker("vibeOS: smp: done", "smp_done"))
-    after.append(Marker("vibeOS: boot: phase1 done", "boot_done"))
     after.append(Marker("vibeOS: console ok", "console_ok"))
+    # gp-test trips after console init and never reaches the shell thread.
+    if not gp:
+        after.append(Marker("vibeOS: shell ready", "shell_ready"))
     if hpet:
         calib = Marker(
             "vibeOS: time: calibrated hpet ",

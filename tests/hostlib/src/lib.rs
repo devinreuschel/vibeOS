@@ -52,6 +52,9 @@ pub mod pmm;
 #[path = "../../../src/sched.rs"]
 pub mod sched;
 
+#[path = "../../../src/shell.rs"]
+pub mod shell;
+
 #[path = "../../../src/smp.rs"]
 pub mod smp;
 
@@ -112,6 +115,7 @@ mod smoke {
             marker::SMP_DONE,
             marker::BOOT_DONE,
             marker::CONSOLE_OK,
+            marker::SHELL_READY,
         ] {
             assert!(m.starts_with("vibeOS: "), "marker missing prefix: {m}");
             assert!(!m.ends_with(['.', '!']), "marker has trailing punct: {m}");
@@ -145,6 +149,7 @@ mod smoke {
         assert_eq!(marker::SMP_DONE, "vibeOS: smp: done");
         assert_eq!(marker::BOOT_DONE, "vibeOS: boot: phase1 done");
         assert_eq!(marker::CONSOLE_OK, "vibeOS: console ok");
+        assert_eq!(marker::SHELL_READY, "vibeOS: shell ready");
     }
 
     #[test]

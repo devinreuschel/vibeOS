@@ -168,6 +168,21 @@ impl Drop for InterruptGuard {
 }
 
 /// # Safety
+/// Caller vouches that `port` is a valid I/O port for a 16-bit write.
+#[inline]
+#[allow(dead_code)]
+pub unsafe fn outw(port: u16, val: u16) {
+    unsafe {
+        asm!(
+            "out dx, ax",
+            in("dx") port,
+            in("ax") val,
+            options(nomem, nostack, preserves_flags)
+        )
+    };
+}
+
+/// # Safety
 /// Caller vouches that `port` is a valid I/O port for a 32-bit write.
 #[inline]
 #[allow(dead_code)]

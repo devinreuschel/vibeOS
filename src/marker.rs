@@ -59,18 +59,22 @@ pub const SCHED_CPU_PREFIX: &str = "vibeOS: sched: cpu";
 pub const SCHED_CPU_SUFFIX: &str = " ready";
 pub const IRQ_ENABLED: &str = "vibeOS: irq: enabled";
 
-/// Phase 4 slice B. After `irq: enabled`, before `boot: phase1 done`.
+/// Phase 4 slice B. After `irq: enabled`, before `console ok`.
 /// Exactly `N-1` `ap online` lines at `-smp N`, then `smp: done`.
 pub const SMP_AP_ONLINE: &str = "vibeOS: smp: ap online";
 pub const SMP_DONE: &str = "vibeOS: smp: done";
 
-/// Last marker of the current boot contract. Phase 1 closed the memory
-/// exit gate; later phases replace this with `shell ready` (DESIGN §3.3).
+/// Retired Phase 1–4 stand-in. Kept as a spelling constant; boot no longer
+/// emits it. Trailing marker is [`SHELL_READY`] (DESIGN §3.3 / §8.3).
 pub const BOOT_DONE: &str = "vibeOS: boot: phase1 done";
 
-/// Phase 5 slice B. After `smp: done` (and the phase-1 stand-in). FB text,
-/// PS/2, and the mux are live; IRQ1 was unmasked after the handler.
+/// Phase 5 slice B. After `smp: done`. FB text, PS/2, and the mux are live;
+/// IRQ1 was unmasked after the handler.
 pub const CONSOLE_OK: &str = "vibeOS: console ok";
+
+/// Phase 5 slice C. Last boot marker. Shell thread is running, builtins
+/// registered, prompt live. Always after `smp: done` and `console ok`.
+pub const SHELL_READY: &str = "vibeOS: shell ready";
 
 /// Panic banner. Kept short so the panic path allocates nothing.
 pub const PANIC_BANNER: &str = "vibeOS: panic:";
