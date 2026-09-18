@@ -153,6 +153,10 @@ fn shell_main() {
         let k = wait_key();
         match ed.feed(k) {
             Feed::Pending => paint(&ed, &mut painted),
+            Feed::Complete => {
+                crate::file_init::complete_line(&mut ed);
+                paint(&ed, &mut painted);
+            }
             Feed::Cancel => {
                 console_init::write(b"^C\n");
                 ed.clear();

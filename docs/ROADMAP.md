@@ -678,12 +678,12 @@ limitations.
 **Unlocks.** Loading binaries. A userspace that persists. Configuration.
 
 **Exit gate**
-- [ ] mount a FAT32 image and `ls`, `cat`, `mkdir`, `rm`, `cp` behave correctly
-- [ ] write, unmount, and verify the image with host `fsck.fat` clean
-- [ ] `/dev`, `/proc`, and `/tmp` populated by their respective filesystems
+- [x] mount a FAT32 image and `ls`, `cat`, `mkdir`, `rm`, `cp` behave correctly
+- [x] write, unmount, and verify the image with host `fsck.fat` clean
+- [x] `/dev`, `/proc`, and `/tmp` populated by their respective filesystems
 - [ ] vibefs survives injected power loss during a write, verified by a crash-consistency test
-- [ ] path resolution handles `.`, `..`, symlinks, mount point crossing, and a symlink loop without recursing to death
-- [ ] host tests over synthetic filesystem images, including deliberately corrupted ones
+- [x] path resolution handles `.`, `..`, symlinks, mount point crossing, and a symlink loop without recursing to death
+- [x] host tests over synthetic filesystem images, including deliberately corrupted ones
 
 ### 8.1 VFS
 - [x] `Inode` with a type, size, mode, times, and link count
@@ -696,20 +696,20 @@ limitations.
 - [x] inode and dentry caches with eviction, since an unbounded cache is a slow memory leak
 
 ### 8.2 FAT32 read
-- [ ] BPB parsing and validation
-- [ ] FAT chain walking with a cluster cache
-- [ ] directory entry parsing, including long file names and their checksum validation
-- [ ] file read across cluster boundaries
-- [ ] `readdir`, `stat`, timestamp conversion
-- [ ] the on-disk structure parsing in the library half, host-tested against a generated image
+- [x] BPB parsing and validation
+- [x] FAT chain walking with a cluster cache
+- [x] directory entry parsing, including long file names and their checksum validation
+- [x] file read across cluster boundaries
+- [x] `readdir`, `stat`, timestamp conversion
+- [x] the on-disk structure parsing in the library half, host-tested against a generated image
 
 ### 8.3 FAT32 write
-- [ ] cluster allocation with a free cluster hint, FAT chain extension
-- [ ] file create, write, truncate, delete
-- [ ] directory create and delete, including long file name entry generation
-- [ ] both FAT copies and `FSInfo` kept in sync
-- [ ] flush ordering that does not leave a directory entry pointing at unallocated clusters
-- [ ] verified by mounting the result on the host and running `fsck.fat`
+- [x] cluster allocation with a free cluster hint, FAT chain extension
+- [x] file create, write, truncate, delete
+- [x] directory create and delete, including long file name entry generation
+- [x] both FAT copies and `FSInfo` kept in sync
+- [x] flush ordering that does not leave a directory entry pointing at unallocated clusters
+- [x] verified by mounting the result on the host and running `fsck.fat`
 
 ### 8.4 Pseudo filesystems
 - [x] `devfs`: block devices, `null`, `zero`, `random`, `console`, `tty`
@@ -731,10 +731,10 @@ limitations.
 - [ ] crash consistency testing by killing QEMU at randomized points during a write workload, then checking with `fsck`
 
 ### 8.6 File API and shell
-- [ ] kernel-side open, read, write, seek, close, stat, readdir, mkdir, unlink, rename, symlink, link, truncate
-- [ ] shell commands: `ls -l`, `cat`, `cp`, `mv`, `rm -r`, `mkdir -p`, `touch`, `stat`, `df`, `mount`, `umount`, `sync`
-- [ ] tab completion over the current directory, which is disproportionately useful when debugging by hand
-- [ ] an initial ramdisk image built by the Makefile and mounted at boot, so there is a root filesystem before block drivers are trustworthy
+- [x] kernel-side open, read, write, seek, close, stat, readdir, mkdir, unlink, rename, symlink, link, truncate
+- [x] shell commands: `ls -l`, `cat`, `cp`, `mv`, `rm -r`, `mkdir -p`, `touch`, `stat`, `df`, `mount`, `umount`, `sync`
+- [x] tab completion over the current directory, which is disproportionately useful when debugging by hand
+- [x] an initial ramdisk image built by the Makefile and mounted at boot, so there is a root filesystem before block drivers are trustworthy
 
 ---
 

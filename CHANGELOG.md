@@ -29,6 +29,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Phase 8 slice B: FAT32 read/write, kernel File API, shell file
+  commands, Makefile initrd. BPB validate, FAT chain cache, 8.3 + LFN
+  checksum, reads across clusters, readdir/stat/timestamps. Write
+  allocates from a free-cluster hint; create/write/truncate/delete;
+  mkdir/rmdir with LFN generation. Both FAT copies and FSInfo stay in
+  sync. Flush order never leaves a dirent pointing at free clusters.
+  `sync` issues block `Flush`, not only Barrier (DESIGN §10.2). The
+  VFS lock is dropped before blocking block I/O (FAT volume stays in BSS
+  behind a busy flag). FAT `symlink`/`link` return `FsError::NotSupp`
+  (no POSIX perms/links on FAT). Shell: `ls -l`, `cat`, `cp`, `mv`,
+  `rm -r`, `mkdir -p`, `touch`, `stat`, `df`, `mount`, `umount`,
+  `sync`, plus `cd`/`pwd`; tab completes the current directory.
+  Initrd is a Makefile-built FAT32 image mounted as root. Host tests
+  cover generated and corrupt images; write/unmount is `fsck.fat`
+  clean. No new boot marker.
 - Phase 8 slice C: pseudo filesystems on a shared kernfs directory
   tree (one node table, four skins — not four dentry implementations).
   `devfs` publishes `null`, `zero`, `random`/`urandom`, `console`, `tty`,
@@ -38,9 +53,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `procfs` exposes `self` and a pid-1 stub (`cmdline`/`status`/`maps`/`fd`)
   that does not panic when only kernel threads exist (Process is Phase 9).
   sysfs-equivalent walks the Phase 6 device tree and driver bindings.
-  `/dev` `/proc` `/tmp` `/sys` are mounted after ramfs root. No new boot
-  marker; `/dev/random` is a non-blocking xorshift (not virtio-rng, not
-  IRQ). Host tests cover kernfs/devfs/tmpfs eviction; in-guest `pseudo_fs`.
+  `/dev` `/proc` `/tmp` `/sys` are mounted after FAT initrd (or ramfs
+  fallback) root. No new boot marker; `/dev/random` is a non-blocking
+  xorshift (not virtio-rng, not IRQ). Host tests cover kernfs/devfs/tmpfs
+  eviction; in-guest `pseudo_fs`.
 
 - Phase 8 slice A: VFS. Inode (type, size, mode, times, nlink), dentry
   cache with negative entries (invalidated on create in that dir),

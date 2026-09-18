@@ -9,8 +9,8 @@
 //! zeros the hidden base. Scheduler after time so the tick can preempt.
 //! SMP after irq-enabled so APs enter as idle. Console after `smp: done`.
 //! PCI after console. Workqueue + virtio (rng, blk) register, then bind.
-//! Ramdisk after bind. Partition scan + cache next. VFS ramfs root
-//! plus `/dev` `/proc` `/tmp` `/sys` (no marker). Shell last. The `kernel_tests` build
+//! Ramdisk after bind. Partition scan + cache next. FAT initrd is VFS
+//! root, then `/dev` `/proc` `/tmp` `/sys` (no marker). Shell last. The `kernel_tests` build
 //! runs the in-guest registry after that and exits through isa-debug-exit.
 
 #![no_std]
@@ -35,6 +35,8 @@ mod dev_init;
 mod diag;
 mod dma_init;
 mod fb_init;
+mod fat_init;
+mod file_init;
 mod fs_init;
 mod heap_init;
 mod ipi_init;

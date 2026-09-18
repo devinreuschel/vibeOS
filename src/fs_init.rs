@@ -1,8 +1,8 @@
-//! VFS bring-up. ROADMAP §8.1 / §8.4.
+//! VFS bring-up. ROADMAP §8.1 / §8.4 / §8.6.
 //!
-//! Static tables behind RANK_DEVICE (DESIGN §2.1: device-rank peer,
-//! not a seventh global lock). Dummy ramfs at `/`, then devfs / procfs
-//! / tmpfs / sysfs on `/dev` `/proc` `/tmp` `/sys`. No serial marker.
+//! RANK_DEVICE (DESIGN §2.1). FAT initrd is root when live; otherwise
+//! ramfs. Then kernfs skins on `/dev` `/proc` `/tmp` `/sys`. File I/O
+//! drops this lock before block waits. No serial marker.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -11,6 +11,8 @@ use vibeos::lock::RANK_DEVICE;
 
 use crate::block_init;
 use crate::dev_init;
+use crate::fat_init;
+use crate::file_init;
 use crate::part_init;
 use crate::sync_init::SpinMutex;
 use crate::virtio_blk_init;
@@ -19,14 +21,34 @@ static VFS: SpinMutex<Vfs> = SpinMutex::with_rank(Vfs::new(), RANK_DEVICE);
 static LIVE: AtomicBool = AtomicBool::new(false);
 
 pub fn init() {
-    let ok = {
-        let mut g = VFS.lock();
-        g.mount_root().and_then(|_| g.mount_pseudo()).is_ok()
-    };
-    LIVE.store(ok, Ordering::Release);
-    if ok {
+    fat_init::init();
+    if fat_init::live() {
+        LIVE.store(true, Ordering::Release);
+    } else {
+        let ok = {
+            let mut g = VFS.lock();
+            g.mount_root().is_ok()
+        };
+        LIVE.store(ok, Ordering::Release);
+    }
+    if live() {
+        attach_pseudo_dirs();
+        let _ = with(|v| v.mount_pseudo());
         populate_devfs();
         populate_sysfs();
+    }
+    file_init::init();
+}
+
+/// FAT has no VFS mkdir. Create the mount points via the File API and
+/// warm the dcache so `mount_pseudo` can cover them.
+fn attach_pseudo_dirs() {
+    if !fat_init::live() {
+        return;
+    }
+    for p in ["/dev", "/proc", "/tmp", "/sys"] {
+        let _ = file_init::mkdir(p, 0o755);
+        let _ = file_init::vfs_attach(p);
     }
 }
 

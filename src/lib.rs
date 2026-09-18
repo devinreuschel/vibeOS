@@ -15,6 +15,7 @@ pub mod desc;
 pub mod dev;
 pub mod dma;
 pub mod fb;
+pub mod fat;
 pub mod font;
 pub mod fs;
 pub mod fmt_util;
