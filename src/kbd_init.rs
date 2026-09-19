@@ -1,7 +1,9 @@
 //! PS/2 8042 + IRQ1. ROADMAP §5.2, DESIGN §3.3 / §5.5 / §9.4.
 //!
-//! Order: install the handler, init the controller, then unmask the
-//! keyboard GSI. ISR only enqueues; no alloc, no log.
+//! Order is load-bearing: handler, route ISA IRQ1 → IOAPIC GSI, init
+//! 8042, then unmask the GSI. After LAPIC owns the tick the 8259 is
+//! masked — do not fall back to PIC IRQ1. ISR only enqueues; no alloc,
+//! no log.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -88,7 +90,7 @@ pub fn pic_fallback() -> bool {
     PIC_FALLBACK.load(Ordering::Acquire)
 }
 
-/// Install handler, init 8042, then unmask.
+/// Handler, route GSI, 8042, then unmask. Not PIC IRQ1 after PIC mask.
 pub fn init() -> bool {
     arch::idt::set_handler(vectors::KBD, kbd_ioapic);
     arch::idt::set_handler(vectors::IRQ_KEYBOARD, kbd_pic);
@@ -103,9 +105,15 @@ pub fn init() -> bool {
             apic_init::unmask_gsi(gsi);
             GSI.store(gsi, Ordering::Release);
         }
-        None => {
+        None if !apic_init::owns_tick() => {
+            // PIT path: 8259 still live via LINT0 ExtINT.
             arch::pic::unmask(1);
             PIC_FALLBACK.store(true, Ordering::Release);
+        }
+        None => {
+            // LAPIC owns the tick: PIC is masked. Unmasking IRQ1 is a
+            // silent no-op (window PS/2 dead, polled COM1 still works).
+            serial::line("vibeOS: kbd: no ioapic route");
         }
     }
     LIVE.store(true, Ordering::Release);

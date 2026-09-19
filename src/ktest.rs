@@ -2168,6 +2168,9 @@ fn test_fb_cr_home() -> Outcome {
 
 fn test_kbd_gsi_unmasked() -> Outcome {
     if crate::kbd_init::pic_fallback() {
+        if crate::apic_init::owns_tick() {
+            return Outcome::Fail("pic fallback after pic masked");
+        }
         return Outcome::Skip("pic fallback");
     }
     let Some(gsi) = crate::kbd_init::gsi() else {

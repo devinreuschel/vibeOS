@@ -375,8 +375,9 @@ preemption live. Step 16 brings APs up one at a time; each AP prints
 `sched: cpu<i> ready` then the BSP prints `smp: ap online`, then `smp: done`.
 Step 17 is the framebuffer console, PS/2, and mux (`console ok`) after SMP.
 IRQ1 stays masked until the keyboard handler is installed, then the 8042 is
-initialized, then the keyboard GSI is unmasked. The default PIC handler still
-halts on an unexpected line. The timer path re-runs the
+initialized, then the keyboard GSI is unmasked. After LAPIC owns the tick the
+8259 is masked: IRQ1 is IOAPIC-only. Do not unmask PIC IRQ1 as a fallback. The
+default PIC handler still halts on an unexpected line. The timer path re-runs the
 8259 ICW sequence even when FADT bit 0 skipped the boot remap (QEMU clears
 that bit but still has a PIC on 0x08).
 Step 17b enumerates PCI (CF8 on bus 0, ECAM from MCFG otherwise), maps
@@ -428,10 +429,17 @@ produced stale ISOs when new subsystem directories appeared.
 `make run` boots with COM1 on stdio and more than one CPU, so the default developer loop exercises SMP
 rather than discovering AP bugs only in CI. Full flag set in [section 8.4](#84-qemu-flags).
 
-One note on interactive use: many IDE-embedded terminals do not forward keystrokes to QEMU's
-`-serial stdio`. Output appears, input goes nowhere. Type in the QEMU window, or run from a real
-terminal. The window path is PS/2 (i8042 / IRQ1), not USB HID. QEMU monitor `sendkey` hits the same
-controller; `make test-e2e` uses that as the TCG stand-in for window keys.
+Interactive input, two paths (not USB HID):
+
+| Where you type | What the guest sees |
+|----------------|---------------------|
+| QEMU window (focused) | PS/2 i8042 → IRQ1/GSI → `kbd_init` ring |
+| Controlling terminal | COM1 (`-serial stdio`), polled after the PS/2 pop |
+
+Many IDE-embedded terminals do not forward keystrokes to `-serial stdio`. Output
+appears, input goes nowhere. Type in the QEMU window, or run from a real terminal.
+QEMU monitor `sendkey` hits the same i8042 as the window; `make test-e2e` uses that
+as the TCG stand-in.
 
 ---
 
@@ -1605,10 +1613,17 @@ The input ring was guarded by a lock that IRQ1 also takes, held with interrupts 
 consumer. Rule: same as the scheduler lock. Interrupts off around the critical section.
 
 **QEMU window keys never reach the shell; serial stdio does.**
-`DISABLE_1` sets controller config bit 4 (keyboard clock off). The init path rewrote that byte to
-enable INT1 and translation without clearing bit 4, so the port stayed clock-gated after `console ok`.
-IRQ1 never fired. Rule: config writes go through `cfg_probe` / `cfg_run`, which clear `CFG_CLOCK1_OFF`.
-Host-test the mask; ktest reads the live byte; e2e types via COM1 and via `sendkey`.
+Two independent kills, same symptom (COM1 is polled; PS/2 needs IRQ1):
+
+1. `DISABLE_1` sets controller config bit 4 (keyboard clock off). Rewriting that byte to enable INT1
+   and translation without clearing bit 4 leaves the port clock-gated after `console ok`. Rule: config
+   writes go through `cfg_probe` / `cfg_run`, which clear `CFG_CLOCK1_OFF`. Host-test the mask; ktest
+   reads the live byte.
+2. `route_keyboard` failing then unmasking PIC IRQ1 after step 13b masked the 8259. Window PS/2 is
+   silent; serial still works. Rule: after LAPIC owns the tick, IRQ1 is IOAPIC-only. PIC IRQ1 is
+   fallback only on the PIT path (LINT0 ExtINT). Not a new boot marker.
+
+E2E types via COM1 and via `sendkey` (same i8042 as the window).
 
 **Timestamps occasionally go backwards.**
 The tick counter and the TSC snapshot were read as two independent relaxed loads. Rule: publish them
