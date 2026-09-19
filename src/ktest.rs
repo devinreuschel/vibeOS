@@ -136,6 +136,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("fb_pitch", test_fb_pitch),
     ("fb_cr_home", test_fb_cr_home),
     ("kbd_gsi_unmasked", test_kbd_gsi_unmasked),
+    ("kbd_8042_clock", test_kbd_8042_clock),
     ("console_mux", test_console_mux),
     ("kbd_ring_drain", test_kbd_ring_drain),
     ("shell_registry", test_shell_registry),
@@ -2177,6 +2178,22 @@ fn test_kbd_gsi_unmasked() -> Outcome {
         Some(true) => Outcome::Fail("keyboard gsi still masked"),
         None => Outcome::Fail("gsi not on ioapic"),
     }
+}
+
+fn test_kbd_8042_clock() -> Outcome {
+    if !crate::kbd_init::live() {
+        return Outcome::Fail("kbd not live");
+    }
+    let Some(cfg) = crate::kbd_init::read_cfg() else {
+        return Outcome::Fail("cfg read failed");
+    };
+    if !vibeos::kbd::cfg_clock1_on(cfg) {
+        return Outcome::Fail("clock1 disabled");
+    }
+    if !vibeos::kbd::cfg_int1_on(cfg) {
+        return Outcome::Fail("int1 off");
+    }
+    Outcome::Ok
 }
 
 fn test_console_mux() -> Outcome {

@@ -156,6 +156,57 @@ def _send_monitor_quit(sock_path: str) -> None:
         pass
 
 
+def sendkey_chars(s: str) -> str:
+    """QEMU `sendkey` chord for lowercase letters, digits, space, minus.
+
+    Window keyboard and monitor sendkey both go through the i8042. This
+    is the TCG stand-in for typing in the QEMU window (DESIGN §3.6 / #66).
+    """
+    parts: list[str] = []
+    for c in s:
+        if c == " ":
+            parts.append("spc")
+        elif c == "-":
+            parts.append("minus")
+        elif c == "\n":
+            parts.append("ret")
+        elif "a" <= c <= "z" or "0" <= c <= "9":
+            parts.append(c)
+        else:
+            raise HarnessError(f"unsupported sendkey char {c!r}")
+    if not parts:
+        raise HarnessError("empty sendkey")
+    return "-".join(parts)
+
+
+def _connect_monitor(sock_path: str, timeout: float = 5.0) -> socket.socket:
+    deadline = time.monotonic() + timeout
+    last: OSError | None = None
+    while time.monotonic() < deadline:
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(2.0)
+            s.connect(sock_path)
+            try:
+                s.recv(4096)
+            except socket.timeout:
+                pass
+            return s
+        except OSError as e:
+            last = e
+            time.sleep(0.05)
+    raise HarnessError(f"monitor connect failed: {last}")
+
+
+def _monitor_cmd(mon: socket.socket, cmd: str) -> None:
+    mon.sendall((cmd + "\n").encode())
+    try:
+        mon.settimeout(0.5)
+        mon.recv(4096)
+    except socket.timeout:
+        pass
+
+
 class DeadlineReader:
     """Deadline-aware line reader over a file descriptor.
 
@@ -436,6 +487,123 @@ def run_qemu_and_check(
         dump = dump_after_panic(result.lines, panic_signatures)
         check_dump_needles(dump, dump_needles)
 
+    return result
+
+
+SERIAL_ECHO_TOKEN = "serial-ok"
+PS2_ECHO_TOKEN = "ps2-ok"
+SHELL_READY_NEEDLE = "vibeOS: shell ready"
+
+
+def run_qemu_console_input(
+    cfg: QemuConfig,
+    timeout_s: float = 45.0,
+) -> RunResult:
+    """Boot, then type via COM1 and via PS/2 (`sendkey`). Both must echo.
+
+    `-display none` still has an i8042; QEMU `sendkey` injects set-1
+    scancodes on IRQ1, the same path as a focused QEMU window.
+    """
+    if not shutil.which("qemu-system-x86_64"):
+        raise HarnessError("qemu-system-x86_64 not on PATH")
+    if not os.path.exists(cfg.iso):
+        raise HarnessError(f"ISO missing: {cfg.iso}")
+
+    monitor_sock = _pick_monitor_path()
+    argv = _qemu_argv(cfg, monitor_sock)
+    proc = subprocess.Popen(
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.PIPE,
+        bufsize=0,
+    )
+    assert proc.stdout is not None
+    assert proc.stdin is not None
+
+    result = RunResult()
+    deadline = time.monotonic() + timeout_s
+    reader = DeadlineReader(proc.stdout.fileno(), deadline)
+    saw_ready = False
+    saw_serial = False
+    saw_ps2 = False
+    mon: socket.socket | None = None
+
+    try:
+        while True:
+            kind, line = reader.next_event()
+            if kind == "timeout":
+                result.timed_out = True
+                proc.kill()
+                break
+            if kind == "eof":
+                break
+            result.lines.append(line)
+            for sig in PANIC_SIGNATURES:
+                if sig in line:
+                    result.panic_line = line
+                    proc.kill()
+                    raise HarnessError(
+                        f"panic signature {sig!r} in: {line!r}"
+                    )
+            if not saw_ready and SHELL_READY_NEEDLE in line:
+                saw_ready = True
+                result.matched.append("shell_ready")
+                # Prompt is written without a newline; give the shell
+                # thread a beat before stuffing COM1.
+                time.sleep(0.2)
+                proc.stdin.write(f"echo {SERIAL_ECHO_TOKEN}\n".encode())
+                proc.stdin.flush()
+                continue
+            if saw_ready and not saw_serial and SERIAL_ECHO_TOKEN in line:
+                # Line editor reprints the command; wait for the echo
+                # payload, not only the typed line.
+                if line.strip() == SERIAL_ECHO_TOKEN:
+                    saw_serial = True
+                    result.matched.append("serial_echo")
+                    if mon is None:
+                        mon = _connect_monitor(monitor_sock)
+                    _monitor_cmd(
+                        mon, "sendkey " + sendkey_chars(f"echo {PS2_ECHO_TOKEN}\n")
+                    )
+                    continue
+            if saw_serial and not saw_ps2 and line.strip() == PS2_ECHO_TOKEN:
+                saw_ps2 = True
+                result.matched.append("ps2_echo")
+                if mon is None:
+                    mon = _connect_monitor(monitor_sock)
+                _monitor_cmd(mon, "quit")
+                try:
+                    proc.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                break
+    finally:
+        if mon is not None:
+            try:
+                mon.close()
+            except OSError:
+                pass
+        try:
+            result.exit_code = proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            result.exit_code = proc.wait()
+
+    if result.timed_out or not saw_ready:
+        raise HarnessError(
+            f"console input: no shell ready after {timeout_s}s; "
+            f"matched={result.matched}"
+        )
+    if not saw_serial:
+        raise HarnessError(
+            f"console input: serial echo missing; last={result.lines[-8:]}"
+        )
+    if not saw_ps2:
+        raise HarnessError(
+            f"console input: PS/2 sendkey echo missing (i8042); "
+            f"last={result.lines[-8:]}"
+        )
     return result
 
 

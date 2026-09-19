@@ -430,7 +430,8 @@ rather than discovering AP bugs only in CI. Full flag set in [section 8.4](#84-q
 
 One note on interactive use: many IDE-embedded terminals do not forward keystrokes to QEMU's
 `-serial stdio`. Output appears, input goes nowhere. Type in the QEMU window, or run from a real
-terminal.
+terminal. The window path is PS/2 (i8042 / IRQ1), not USB HID. QEMU monitor `sendkey` hits the same
+controller; `make test-e2e` uses that as the TCG stand-in for window keys.
 
 ---
 
@@ -1327,7 +1328,9 @@ then `acpi: xsdt`, then `time: tsc <n>/ms`, then `time: lapic_timer ok (<mode>)`
 followed by `smp: ap online`, then `smp: done`, then `console ok`, then
 `pci: <n> devices`, then `block: <name> <n> sectors`, then `shell ready`.
 `boot: phase1 done` was a Phase 1–4 stand-in and is no longer in the contract; the
-trailing marker is `shell ready`. SMP stays before console; the old
+trailing marker is `shell ready`. After that, the same ISO is booted again and the
+harness types `echo serial-ok` on COM1 and `echo ps2-ok` via QEMU `sendkey` (i8042 /
+IRQ1, the window-keyboard path). Both replies are required. SMP stays before console; the old
 table that listed console as step 15 before SMP was drift and is gone.
 The harness pins `<mode>` for the QEMU config: TCG (CI, `make test`) cannot
 advertise `CPUID.01H:ECX[24]`, so `-cpu max` expects `periodic`; `-machine pc,hpet=off`
@@ -1600,6 +1603,12 @@ that must hold in release is an `assert!`.
 **Keyboard input deadlocks the shell.**
 The input ring was guarded by a lock that IRQ1 also takes, held with interrupts enabled by the
 consumer. Rule: same as the scheduler lock. Interrupts off around the critical section.
+
+**QEMU window keys never reach the shell; serial stdio does.**
+`DISABLE_1` sets controller config bit 4 (keyboard clock off). The init path rewrote that byte to
+enable INT1 and translation without clearing bit 4, so the port stayed clock-gated after `console ok`.
+IRQ1 never fired. Rule: config writes go through `cfg_probe` / `cfg_run`, which clear `CFG_CLOCK1_OFF`.
+Host-test the mask; ktest reads the live byte; e2e types via COM1 and via `sendkey`.
 
 **Timestamps occasionally go backwards.**
 The tick counter and the TSC snapshot were read as two independent relaxed loads. Rule: publish them

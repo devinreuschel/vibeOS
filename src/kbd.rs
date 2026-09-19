@@ -25,8 +25,31 @@ pub const PORT_TEST_OK: u8 = 0x00;
 
 pub const CFG_INT1: u8 = 1 << 0;
 pub const CFG_INT2: u8 = 1 << 1;
+/// First PS/2 port clock. 1 = disabled. Command 0xAD sets this; 0xAE
+/// clears it. A config rewrite that leaves it set kills IRQ1.
+pub const CFG_CLOCK1_OFF: u8 = 1 << 4;
 pub const CFG_CLOCK2_OFF: u8 = 1 << 5;
 pub const CFG_TRANSLATE: u8 = 1 << 6;
+
+/// IRQs off, keyboard clock on, aux clock off, set-1 translate.
+/// `DISABLE_1` sets bit 4; this must clear it or the later live write
+/// re-disables the port.
+pub const fn cfg_probe(raw: u8) -> u8 {
+    (raw & !(CFG_INT1 | CFG_INT2 | CFG_CLOCK1_OFF)) | CFG_CLOCK2_OFF | CFG_TRANSLATE
+}
+
+/// Port-1 IRQ on, keyboard clock on, aux clock off, set-1 translate.
+pub const fn cfg_run(raw: u8) -> u8 {
+    cfg_probe(raw) | CFG_INT1
+}
+
+pub const fn cfg_clock1_on(cfg: u8) -> bool {
+    cfg & CFG_CLOCK1_OFF == 0
+}
+
+pub const fn cfg_int1_on(cfg: u8) -> bool {
+    cfg & CFG_INT1 != 0
+}
 
 pub const KBD_RESET: u8 = 0xFF;
 pub const KBD_ACK: u8 = 0xFA;
@@ -532,6 +555,29 @@ mod tests {
     fn feed(bytes: &[u8]) -> Vec<DecodedKey> {
         let mut d = Decoder::new();
         bytes.iter().filter_map(|b| d.feed(*b)).collect()
+    }
+
+    #[test]
+    fn cfg_run_clears_clock1_left_by_disable() {
+        // 0xAD sets bit 4. Rewriting that byte with only INT1 or'd on
+        // used to leave the keyboard clock off (#66).
+        let after_disable = CFG_CLOCK1_OFF | CFG_TRANSLATE;
+        let probe = cfg_probe(after_disable);
+        assert!(cfg_clock1_on(probe));
+        assert!(!cfg_int1_on(probe));
+        assert_eq!(probe & CFG_INT2, 0);
+        assert_ne!(probe & CFG_CLOCK2_OFF, 0);
+        assert_ne!(probe & CFG_TRANSLATE, 0);
+        let live = cfg_run(after_disable);
+        assert!(cfg_clock1_on(live));
+        assert!(cfg_int1_on(live));
+        assert_eq!(live & CFG_INT2, 0);
+        assert_ne!(live & CFG_CLOCK2_OFF, 0);
+        assert_ne!(live & CFG_TRANSLATE, 0);
+        // Stale rewrite: INT1 on, bit 4 still set. That is the bug.
+        let stale = after_disable | CFG_INT1;
+        assert!(!cfg_clock1_on(stale));
+        assert!(cfg_int1_on(stale));
     }
 
     #[test]

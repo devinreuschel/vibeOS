@@ -9,6 +9,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- QEMU window / PS/2 keyboard input never reached the shell while COM1
+  (`-serial stdio`) did. 8042 init rewrote the controller config after
+  `DISABLE_1` without clearing bit 4 (keyboard clock off), so IRQ1 stayed
+  dead. Config writes now clear that bit; e2e types via serial and via
+  QEMU `sendkey`. Soft parks from #66 (FB sizing, cursor/`%` glitch,
+  unused `shell_init::ready`) are unchanged.
 - `now_us` / `now_ns` no longer go backwards under `hlt` on TCG. A wrapping
   TSC-behind-snapshot delta interpolates as 0, and the kernel never publishes
   a reading below the last one. TCG has no invariant TSC; `hlt` plus the

@@ -8,10 +8,10 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use vibeos::acpi::Iso;
 use vibeos::apic::{self, Polarity, Trigger};
 use vibeos::kbd::{
-    self, DecodedKey, Decoder, Ring, CFG_CLOCK2_OFF, CFG_INT1, CFG_INT2, CFG_TRANSLATE,
-    CMD_DISABLE_1, CMD_DISABLE_2, CMD_ENABLE_1, CMD_READ_CFG, CMD_SELF_TEST, CMD_TEST_1,
-    CMD_WRITE_CFG, DATA, KBD_ACK, KBD_BAT_OK, KBD_RESET, PORT_TEST_OK, RING_CAP, SELF_TEST_OK,
-    STAT_IBF, STAT_MOUSE, STAT_OBF, STATUS,
+    self, cfg_probe, cfg_run, DecodedKey, Decoder, Ring, CMD_DISABLE_1, CMD_DISABLE_2,
+    CMD_ENABLE_1, CMD_READ_CFG, CMD_SELF_TEST, CMD_TEST_1, CMD_WRITE_CFG, DATA, KBD_ACK,
+    KBD_BAT_OK, KBD_RESET, PORT_TEST_OK, RING_CAP, SELF_TEST_OK, STAT_IBF, STAT_MOUSE,
+    STAT_OBF, STATUS,
 };
 use vibeos::pic::{PIC1_CMD, PIC_EOI};
 use vibeos::vectors;
@@ -202,11 +202,10 @@ fn init_8042() -> bool {
     if !write_cmd(CMD_READ_CFG) {
         return false;
     }
-    let Some(mut cfg) = read_data() else {
+    let Some(raw) = read_data() else {
         return false;
     };
-    cfg &= !(CFG_INT1 | CFG_INT2);
-    cfg |= CFG_CLOCK2_OFF | CFG_TRANSLATE;
+    let mut cfg = cfg_probe(raw);
     if !write_cmd(CMD_WRITE_CFG) || !write_data(cfg) {
         return false;
     }
@@ -242,9 +241,7 @@ fn init_8042() -> bool {
         }
     }
 
-    cfg |= CFG_INT1;
-    cfg &= !CFG_INT2;
-    cfg |= CFG_TRANSLATE | CFG_CLOCK2_OFF;
+    cfg = cfg_run(cfg);
     if !write_cmd(CMD_WRITE_CFG) || !write_data(cfg) {
         return false;
     }
@@ -256,4 +253,15 @@ fn init_8042() -> bool {
 pub fn push_for_test(k: DecodedKey) {
     let _irq = InterruptGuard::enter();
     unsafe { (*RING.0.get()).push(k) };
+}
+
+/// Read the 8042 config byte. CLI so the IRQ1 ISR cannot steal it.
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+pub fn read_cfg() -> Option<u8> {
+    let _irq = InterruptGuard::enter();
+    flush_obf();
+    if !write_cmd(CMD_READ_CFG) {
+        return None;
+    }
+    read_data()
 }
