@@ -60,7 +60,7 @@ NM      := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-nm),$(LLVM_TOOL_DIR)/llvm-nm,ll
 
 .PHONY: all kernel iso run run-panic clean distclean setup layout \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-gp test \
-        test-e2e-pit test-kernel test-kernel-smp4 test-lapic-fallback \
+        test-e2e-pit test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
         test-smp-stress test-vibefs-crash
 
 all: $(ISO)
@@ -146,6 +146,11 @@ test-harness:
 
 test-e2e: $(ISO)
 	VIBEOS_ISO=$(ISO) python3 tests/harness/run_e2e.py
+
+# Focused #66 check: COM1 echo then QEMU `sendkey` (same i8042 as the
+# window). Already part of `test-e2e`; not a second boot in `make test`.
+test-ps2: $(ISO)
+	VIBEOS_ISO=$(ISO) python3 tests/harness/run_ps2.py
 
 # UEFI path via OVMF. Skipped if OVMF is not installed.
 OVMF ?= /usr/share/ovmf/OVMF.fd

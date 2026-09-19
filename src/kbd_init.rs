@@ -11,9 +11,9 @@ use vibeos::acpi::Iso;
 use vibeos::apic::{self, Polarity, Trigger};
 use vibeos::kbd::{
     self, cfg_probe, cfg_run, DecodedKey, Decoder, Ring, CMD_DISABLE_1, CMD_DISABLE_2,
-    CMD_ENABLE_1, CMD_READ_CFG, CMD_SELF_TEST, CMD_TEST_1, CMD_WRITE_CFG, DATA, KBD_ACK,
-    KBD_BAT_OK, KBD_RESET, PORT_TEST_OK, RING_CAP, SELF_TEST_OK, STAT_IBF, STAT_MOUSE,
-    STAT_OBF, STATUS,
+    CMD_ENABLE_1, CMD_READ_CFG, CMD_SELF_TEST, CMD_TEST_1, CMD_WRITE_CFG, CMD_WRITE_KBD_OUT,
+    DATA, KBD_ACK, KBD_BAT_OK, KBD_RESET, PORT_TEST_OK, RING_CAP, SELF_TEST_OK, STAT_IBF,
+    STAT_MOUSE, STAT_OBF, STATUS,
 };
 use vibeos::pic::{PIC1_CMD, PIC_EOI};
 use vibeos::vectors;
@@ -272,4 +272,14 @@ pub fn read_cfg() -> Option<u8> {
         return None;
     }
     read_data()
+}
+
+/// Present `sc` as a keyboard byte (cmd 0xD2). IRQ1 runs after this
+/// returns if INT1 is armed and the GSI is unmasked. Not the device
+/// clock: that is `cfg_clock1_on` / QEMU `sendkey`.
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+pub fn inject_scancode(sc: u8) -> bool {
+    let _irq = InterruptGuard::enter();
+    flush_obf();
+    write_cmd(CMD_WRITE_KBD_OUT) && write_data(sc)
 }

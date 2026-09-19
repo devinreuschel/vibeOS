@@ -19,6 +19,8 @@ pub const CMD_SELF_TEST: u8 = 0xAA;
 pub const CMD_TEST_1: u8 = 0xAB;
 pub const CMD_DISABLE_1: u8 = 0xAD;
 pub const CMD_ENABLE_1: u8 = 0xAE;
+/// Next data byte is presented as keyboard input and raises IRQ1 if INT1.
+pub const CMD_WRITE_KBD_OUT: u8 = 0xD2;
 
 pub const SELF_TEST_OK: u8 = 0x55;
 pub const PORT_TEST_OK: u8 = 0x00;

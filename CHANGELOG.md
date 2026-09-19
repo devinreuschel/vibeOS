@@ -14,9 +14,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   init rewrote the controller config after `DISABLE_1` without clearing
   bit 4 (keyboard clock off), and `route_keyboard` could unmask PIC IRQ1
   after LAPIC already masked the 8259. Config writes now clear bit 4;
-  IRQ1 is IOAPIC-only once the LAPIC owns the tick. E2E types via serial
-  and via QEMU `sendkey`. Soft parks from #66 (FB sizing, cursor/`%`
-  glitch, unused `shell_init::ready`) are unchanged.
+  IRQ1 is IOAPIC-only once the LAPIC owns the tick. Soft parks from #66
+  (FB sizing, cursor/`%` glitch, unused `shell_init::ready`) are
+  unchanged.
 - `now_us` / `now_ns` no longer go backwards under `hlt` on TCG. A wrapping
   TSC-behind-snapshot delta interpolates as 0, and the kernel never publishes
   a reading below the last one. TCG has no invariant TSC; `hlt` plus the
@@ -37,6 +37,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- #66 PS/2 regressions: host `cfg_run_clears_clock1_left_by_disable`;
+  in-guest `kbd_gsi_unmasked`, `kbd_8042_clock`, and `kbd_ps2_irq` (8042
+  `0xD2` injects set-1 `0x1E`, expects `a` on the PS/2 ring — serial
+  cannot satisfy it). `make test-e2e` / `make test-ps2` type `echo
+  serial-ok` on COM1 then `echo ps2-ok` via QEMU `sendkey` (same i8042 as
+  the window). `0xD2` does not cover the device clock; that is
+  `kbd_8042_clock` plus `sendkey`.
 - Phase 8 slice D: vibefs (format version 1). CoW metadata + dual
   superblocks + generation + CRC-32; not a write-ahead journal
   (`docs/VIBEFS.md`). Extents, B-tree directories, metadata and data
