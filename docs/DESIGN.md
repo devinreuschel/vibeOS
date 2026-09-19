@@ -1427,11 +1427,12 @@ make test-kernel-smp4   in-guest tests, -smp 4
 make test-lapic-fallback  in-guest tests with TSC-deadline disabled
 make test-vibefs-crash  QEMU-kill + host fsck-vibefs (docs/VIBEFS.md §12)
 make test-smp-stress    -smp 4, longer timeout (scheduled CI)
-make test               all of the above except test-smp-stress
+make test               all of the above except test-smp-stress and test-ps2
 ```
 
 `make test-e2e` alone is the right check when only boot output or QEMU wiring changed. `make test` is
-the gate before calling anything done.
+the gate before calling anything done. `make test-ps2` is the focused #66 sendkey boot; `make test-e2e`
+already runs it, so `make test` does not boot it twice.
 
 ## 8.6 CI and coverage
 
