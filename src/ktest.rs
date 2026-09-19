@@ -136,6 +136,8 @@ const TESTS: &[(&str, TestFn)] = &[
     ("fb_pitch", test_fb_pitch),
     ("fb_cr_home", test_fb_cr_home),
     ("kbd_gsi_unmasked", test_kbd_gsi_unmasked),
+    ("kbd_8042_clock", test_kbd_8042_clock),
+    ("kbd_ps2_irq", test_kbd_ps2_irq),
     ("console_mux", test_console_mux),
     ("kbd_ring_drain", test_kbd_ring_drain),
     ("shell_registry", test_shell_registry),
@@ -2167,6 +2169,9 @@ fn test_fb_cr_home() -> Outcome {
 
 fn test_kbd_gsi_unmasked() -> Outcome {
     if crate::kbd_init::pic_fallback() {
+        if crate::apic_init::owns_tick() {
+            return Outcome::Fail("pic fallback after pic masked");
+        }
         return Outcome::Skip("pic fallback");
     }
     let Some(gsi) = crate::kbd_init::gsi() else {
@@ -2177,6 +2182,50 @@ fn test_kbd_gsi_unmasked() -> Outcome {
         Some(true) => Outcome::Fail("keyboard gsi still masked"),
         None => Outcome::Fail("gsi not on ioapic"),
     }
+}
+
+fn test_kbd_8042_clock() -> Outcome {
+    if !crate::kbd_init::live() {
+        return Outcome::Fail("kbd not live");
+    }
+    let Some(cfg) = crate::kbd_init::read_cfg() else {
+        return Outcome::Fail("cfg read failed");
+    };
+    if !vibeos::kbd::cfg_clock1_on(cfg) {
+        return Outcome::Fail("clock1 disabled");
+    }
+    if !vibeos::kbd::cfg_int1_on(cfg) {
+        return Outcome::Fail("int1 off");
+    }
+    Outcome::Ok
+}
+
+/// 0xD2 → IRQ1 → decoder → PS/2 ring. Serial mux cannot satisfy this.
+/// ktest holds IF off; pulse it. Device clock is `kbd_8042_clock` / sendkey.
+fn test_kbd_ps2_irq() -> Outcome {
+    if !crate::kbd_init::live() {
+        return Outcome::Fail("kbd not live");
+    }
+    with_timer(|| {
+        let mut n = 64u32;
+        while n > 0 && crate::console_init::read().is_some() {
+            n -= 1;
+        }
+        if !crate::kbd_init::inject_scancode(0x1E) {
+            return Outcome::Fail("0xD2 inject");
+        }
+        let t0 = crate::time_init::now_us();
+        loop {
+            match crate::kbd_init::pop() {
+                Some(vibeos::kbd::DecodedKey::Char(b'a')) => return Outcome::Ok,
+                Some(_) | None => {}
+            }
+            if crate::time_init::now_us().saturating_sub(t0) > 50_000 {
+                return Outcome::Fail("no irq key");
+            }
+            core::hint::spin_loop();
+        }
+    })
 }
 
 fn test_console_mux() -> Outcome {

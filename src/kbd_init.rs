@@ -1,17 +1,19 @@
 //! PS/2 8042 + IRQ1. ROADMAP §5.2, DESIGN §3.3 / §5.5 / §9.4.
 //!
-//! Order: install the handler, init the controller, then unmask the
-//! keyboard GSI. ISR only enqueues; no alloc, no log.
+//! Order is load-bearing: handler, route ISA IRQ1 → IOAPIC GSI, init
+//! 8042, then unmask the GSI. After LAPIC owns the tick the 8259 is
+//! masked — do not fall back to PIC IRQ1. ISR only enqueues; no alloc,
+//! no log.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use vibeos::acpi::Iso;
 use vibeos::apic::{self, Polarity, Trigger};
 use vibeos::kbd::{
-    self, DecodedKey, Decoder, Ring, CFG_CLOCK2_OFF, CFG_INT1, CFG_INT2, CFG_TRANSLATE,
-    CMD_DISABLE_1, CMD_DISABLE_2, CMD_ENABLE_1, CMD_READ_CFG, CMD_SELF_TEST, CMD_TEST_1,
-    CMD_WRITE_CFG, DATA, KBD_ACK, KBD_BAT_OK, KBD_RESET, PORT_TEST_OK, RING_CAP, SELF_TEST_OK,
-    STAT_IBF, STAT_MOUSE, STAT_OBF, STATUS,
+    self, cfg_probe, cfg_run, DecodedKey, Decoder, Ring, CMD_DISABLE_1, CMD_DISABLE_2,
+    CMD_ENABLE_1, CMD_READ_CFG, CMD_SELF_TEST, CMD_TEST_1, CMD_WRITE_CFG, CMD_WRITE_KBD_OUT,
+    DATA, KBD_ACK, KBD_BAT_OK, KBD_RESET, PORT_TEST_OK, RING_CAP, SELF_TEST_OK, STAT_IBF,
+    STAT_MOUSE, STAT_OBF, STATUS,
 };
 use vibeos::pic::{PIC1_CMD, PIC_EOI};
 use vibeos::vectors;
@@ -88,7 +90,7 @@ pub fn pic_fallback() -> bool {
     PIC_FALLBACK.load(Ordering::Acquire)
 }
 
-/// Install handler, init 8042, then unmask.
+/// Handler, route GSI, 8042, then unmask. Not PIC IRQ1 after PIC mask.
 pub fn init() -> bool {
     arch::idt::set_handler(vectors::KBD, kbd_ioapic);
     arch::idt::set_handler(vectors::IRQ_KEYBOARD, kbd_pic);
@@ -103,9 +105,15 @@ pub fn init() -> bool {
             apic_init::unmask_gsi(gsi);
             GSI.store(gsi, Ordering::Release);
         }
-        None => {
+        None if !apic_init::owns_tick() => {
+            // PIT path: 8259 still live via LINT0 ExtINT.
             arch::pic::unmask(1);
             PIC_FALLBACK.store(true, Ordering::Release);
+        }
+        None => {
+            // LAPIC owns the tick: PIC is masked. Unmasking IRQ1 is a
+            // silent no-op (window PS/2 dead, polled COM1 still works).
+            serial::line("vibeOS: kbd: no ioapic route");
         }
     }
     LIVE.store(true, Ordering::Release);
@@ -202,11 +210,10 @@ fn init_8042() -> bool {
     if !write_cmd(CMD_READ_CFG) {
         return false;
     }
-    let Some(mut cfg) = read_data() else {
+    let Some(raw) = read_data() else {
         return false;
     };
-    cfg &= !(CFG_INT1 | CFG_INT2);
-    cfg |= CFG_CLOCK2_OFF | CFG_TRANSLATE;
+    let mut cfg = cfg_probe(raw);
     if !write_cmd(CMD_WRITE_CFG) || !write_data(cfg) {
         return false;
     }
@@ -242,9 +249,7 @@ fn init_8042() -> bool {
         }
     }
 
-    cfg |= CFG_INT1;
-    cfg &= !CFG_INT2;
-    cfg |= CFG_TRANSLATE | CFG_CLOCK2_OFF;
+    cfg = cfg_run(cfg);
     if !write_cmd(CMD_WRITE_CFG) || !write_data(cfg) {
         return false;
     }
@@ -256,4 +261,25 @@ fn init_8042() -> bool {
 pub fn push_for_test(k: DecodedKey) {
     let _irq = InterruptGuard::enter();
     unsafe { (*RING.0.get()).push(k) };
+}
+
+/// Read the 8042 config byte. CLI so the IRQ1 ISR cannot steal it.
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+pub fn read_cfg() -> Option<u8> {
+    let _irq = InterruptGuard::enter();
+    flush_obf();
+    if !write_cmd(CMD_READ_CFG) {
+        return None;
+    }
+    read_data()
+}
+
+/// Present `sc` as a keyboard byte (cmd 0xD2). IRQ1 runs after this
+/// returns if INT1 is armed and the GSI is unmasked. Not the device
+/// clock: that is `cfg_clock1_on` / QEMU `sendkey`.
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+pub fn inject_scancode(sc: u8) -> bool {
+    let _irq = InterruptGuard::enter();
+    flush_obf();
+    write_cmd(CMD_WRITE_KBD_OUT) && write_data(sc)
 }

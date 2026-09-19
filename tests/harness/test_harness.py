@@ -443,5 +443,24 @@ class TestDumpNeedles(unittest.TestCase):
             )
 
 
+class TestSendkeyChars(unittest.TestCase):
+    def test_help_and_echo_chords(self) -> None:
+        from harness import sendkey_chars
+
+        self.assertEqual(sendkey_chars("help\n"), "h-e-l-p-ret")
+        self.assertEqual(
+            sendkey_chars("echo ps2-ok\n"),
+            "e-c-h-o-spc-p-s-2-minus-o-k-ret",
+        )
+
+    def test_rejects_empty_and_unknown(self) -> None:
+        from harness import HarnessError, sendkey_chars
+
+        with self.assertRaises(HarnessError):
+            sendkey_chars("")
+        with self.assertRaises(HarnessError):
+            sendkey_chars("A")
+
+
 if __name__ == "__main__":
     unittest.main()

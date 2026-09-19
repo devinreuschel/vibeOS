@@ -375,8 +375,9 @@ preemption live. Step 16 brings APs up one at a time; each AP prints
 `sched: cpu<i> ready` then the BSP prints `smp: ap online`, then `smp: done`.
 Step 17 is the framebuffer console, PS/2, and mux (`console ok`) after SMP.
 IRQ1 stays masked until the keyboard handler is installed, then the 8042 is
-initialized, then the keyboard GSI is unmasked. The default PIC handler still
-halts on an unexpected line. The timer path re-runs the
+initialized, then the keyboard GSI is unmasked. After LAPIC owns the tick the
+8259 is masked: IRQ1 is IOAPIC-only. Do not unmask PIC IRQ1 as a fallback. The
+default PIC handler still halts on an unexpected line. The timer path re-runs the
 8259 ICW sequence even when FADT bit 0 skipped the boot remap (QEMU clears
 that bit but still has a PIC on 0x08).
 Step 17b enumerates PCI (CF8 on bus 0, ECAM from MCFG otherwise), maps
@@ -428,9 +429,17 @@ produced stale ISOs when new subsystem directories appeared.
 `make run` boots with COM1 on stdio and more than one CPU, so the default developer loop exercises SMP
 rather than discovering AP bugs only in CI. Full flag set in [section 8.4](#84-qemu-flags).
 
-One note on interactive use: many IDE-embedded terminals do not forward keystrokes to QEMU's
-`-serial stdio`. Output appears, input goes nowhere. Type in the QEMU window, or run from a real
-terminal.
+Interactive input, two paths (not USB HID):
+
+| Where you type | What the guest sees |
+|----------------|---------------------|
+| QEMU window (focused) | PS/2 i8042 → IRQ1/GSI → `kbd_init` ring |
+| Controlling terminal | COM1 (`-serial stdio`), polled after the PS/2 pop |
+
+Many IDE-embedded terminals do not forward keystrokes to `-serial stdio`. Output
+appears, input goes nowhere. Type in the QEMU window, or run from a real terminal.
+QEMU monitor `sendkey` hits the same i8042 as the window; `make test-e2e` and
+`make test-ps2` use that as the TCG stand-in.
 
 ---
 
@@ -1287,6 +1296,13 @@ loopback test cannot run under `-serial stdio` because that chardev is one-way.
 When a test fails, print enough to diagnose it without a rerun. A failing test that only prints its
 name costs a full debug cycle to learn anything.
 
+Keyboard IRQ regressions (#66). `kbd_gsi_unmasked` requires a live IOAPIC route (fails if PIC IRQ1
+is the fallback after the LAPIC already masked the 8259). `kbd_8042_clock` reads the live controller
+byte (clock on, INT1 on). `kbd_ps2_irq` writes 8042 command `0xD2` (present the next data byte as
+keyboard input) with scancode `0x1E` and expects `a` on the PS/2 ring after pulsing IF — handler,
+INT1, GSI, ISR, decoder. Command `0xD2` does not exercise the device clock; that is
+`kbd_8042_clock` plus e2e / `make test-ps2` `sendkey`. Serial mux cannot satisfy `kbd_ps2_irq`.
+
 ## 8.3 End to end
 
 Boot the real ISO, capture serial, assert the boot contract. This is the test that notices when
@@ -1327,7 +1343,10 @@ then `acpi: xsdt`, then `time: tsc <n>/ms`, then `time: lapic_timer ok (<mode>)`
 followed by `smp: ap online`, then `smp: done`, then `console ok`, then
 `pci: <n> devices`, then `block: <name> <n> sectors`, then `shell ready`.
 `boot: phase1 done` was a Phase 1–4 stand-in and is no longer in the contract; the
-trailing marker is `shell ready`. SMP stays before console; the old
+trailing marker is `shell ready`. After that, the same ISO is booted again and the
+harness types `echo serial-ok` on COM1 and `echo ps2-ok` via QEMU `sendkey` (i8042 /
+IRQ1, the window-keyboard path). Both replies are required. `make test-ps2` is that
+second boot alone. SMP stays before console; the old
 table that listed console as step 15 before SMP was drift and is gone.
 The harness pins `<mode>` for the QEMU config: TCG (CI, `make test`) cannot
 advertise `CPUID.01H:ECX[24]`, so `-cpu max` expects `periodic`; `-machine pc,hpet=off`
@@ -1402,16 +1421,18 @@ make run                boot it in QEMU
 make test-unit          cargo test --lib
 make test-harness       python unit tests for the harness itself
 make test-e2e           boot contract on the normal ISO
+make test-ps2           QEMU sendkey echo (window i8042); also part of test-e2e
 make test-kernel        in-guest tests, -smp 2
 make test-kernel-smp4   in-guest tests, -smp 4
 make test-lapic-fallback  in-guest tests with TSC-deadline disabled
 make test-vibefs-crash  QEMU-kill + host fsck-vibefs (docs/VIBEFS.md §12)
 make test-smp-stress    -smp 4, longer timeout (scheduled CI)
-make test               all of the above except test-smp-stress
+make test               all of the above except test-smp-stress and test-ps2
 ```
 
 `make test-e2e` alone is the right check when only boot output or QEMU wiring changed. `make test` is
-the gate before calling anything done.
+the gate before calling anything done. `make test-ps2` is the focused #66 sendkey boot; `make test-e2e`
+already runs it, so `make test` does not boot it twice.
 
 ## 8.6 CI and coverage
 
@@ -1600,6 +1621,20 @@ that must hold in release is an `assert!`.
 **Keyboard input deadlocks the shell.**
 The input ring was guarded by a lock that IRQ1 also takes, held with interrupts enabled by the
 consumer. Rule: same as the scheduler lock. Interrupts off around the critical section.
+
+**QEMU window keys never reach the shell; serial stdio does.**
+Two independent kills, same symptom (COM1 is polled; PS/2 needs IRQ1):
+
+1. `DISABLE_1` sets controller config bit 4 (keyboard clock off). Rewriting that byte to enable INT1
+   and translation without clearing bit 4 leaves the port clock-gated after `console ok`. Rule: config
+   writes go through `cfg_probe` / `cfg_run`, which clear `CFG_CLOCK1_OFF`. Host-test the mask; ktest
+   `kbd_8042_clock` reads the live byte.
+2. `route_keyboard` failing then unmasking PIC IRQ1 after step 13b masked the 8259. Window PS/2 is
+   silent; serial still works. Rule: after LAPIC owns the tick, IRQ1 is IOAPIC-only. PIC IRQ1 is
+   fallback only on the PIT path (LINT0 ExtINT). Not a new boot marker. ktest `kbd_gsi_unmasked`.
+
+ktest `kbd_ps2_irq` injects a scancode with 8042 `0xD2` (IRQ path; not the device clock). E2E and
+`make test-ps2` type via COM1 and via `sendkey` (same i8042 as the window).
 
 **Timestamps occasionally go backwards.**
 The tick counter and the TSC snapshot were read as two independent relaxed loads. Rule: publish them

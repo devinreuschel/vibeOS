@@ -14,6 +14,7 @@ from harness import (  # noqa: E402
     QemuConfig,
     boot_contract_markers,
     run_qemu_and_check,
+    run_qemu_console_input,
 )
 
 # Default QEMU `pc` (i440fx) set used by vibeOS e2e. No UHCI unless `-usb`.
@@ -120,6 +121,17 @@ def main() -> int:
             print(f"[e2e] FAIL: {e}", file=sys.stderr)
             return 1
         print("[e2e]   . pci qemu set ok", file=sys.stderr)
+        try:
+            inp = run_qemu_console_input(
+                cfg,
+                timeout_s=float(os.environ.get("VIBEOS_TIMEOUT", "60")),
+            )
+        except HarnessError as e:
+            print(f"[e2e] FAIL: {e}", file=sys.stderr)
+            return 1
+        print("[e2e]   . console input serial+ps2 ok", file=sys.stderr)
+        for name in inp.matched:
+            print(f"[e2e]     . {name}", file=sys.stderr)
     return 0
 
 

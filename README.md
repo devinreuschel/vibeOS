@@ -25,7 +25,7 @@ Quickstart:
 
     ./setup.sh          # fetches Limine binaries, verifies host tools
     make                # kernel + vibeos.iso (hybrid BIOS/UEFI)
-    make run            # boot in QEMU with COM1 on stdio, -smp 2
+    make run            # QEMU window = PS/2; the terminal is COM1 (`-serial stdio`)
     make test           # host units + harness units + e2e (BIOS, UEFI, panic)
 
 A previous iteration got to SMP with a preemptive scheduler before being scrapped; what survived is
