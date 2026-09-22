@@ -670,10 +670,13 @@ fn test_addrspace_map_unmap_teardown() -> Outcome {
     }
     addr_space_init::load_cr3(&space);
     x86::invlpg(va);
+    // User PTE: SMAP would #PF a kernel store/load via this VA.
+    x86::stac();
     unsafe {
         (va as *mut u64).write_volatile(0x1111_2222_3333_4444);
     }
     let got = unsafe { (va as *const u64).read_volatile() };
+    x86::clac();
     if got != 0x1111_2222_3333_4444 {
         addr_space_init::load_kernel_cr3();
         addr_space_init::teardown(space);
