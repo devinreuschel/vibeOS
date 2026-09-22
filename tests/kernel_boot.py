@@ -6,10 +6,9 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from collections.abc import Callable
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "harness"))
-
-from harness import (  # noqa: E402
+from tests.harness.harness import (
     HarnessError,
     QemuConfig,
     check_ktest_output,
@@ -17,7 +16,6 @@ from harness import (  # noqa: E402
     retryable_ktest_failure,
     run_qemu_until_exit,
 )
-
 
 DISK_BYTES = 4 * 1024 * 1024
 
@@ -35,12 +33,12 @@ def _blk_extra(disk: str, smp: int) -> tuple[str, ...]:
     )
 
 
-def _require_line(lines: list[str], pred, msg: str) -> None:
+def _require_line(lines: list[str], pred: Callable[[str], bool], msg: str) -> None:
     if not any(pred(ln) for ln in lines):
         raise HarnessError(msg)
 
 
-def _block_name(name: str):
+def _block_name(name: str) -> Callable[[str], bool]:
     def pred(ln: str) -> bool:
         bits = ln.split()
         return (

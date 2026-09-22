@@ -6,9 +6,7 @@ from __future__ import annotations
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from harness import (  # noqa: E402
+from tests.harness.harness import (
     PHASE0_PANIC_PREFIX,
     HarnessError,
     QemuConfig,

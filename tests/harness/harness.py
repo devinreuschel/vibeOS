@@ -17,9 +17,8 @@ import socket
 import subprocess
 import tempfile
 import time
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
-from typing import Iterable, Iterator
-
 
 # Any of these substrings in a serial line means the run has failed. Matches
 # exception mnemonics rather than English so shell prose does not false-fire
@@ -198,7 +197,7 @@ def _connect_monitor(sock_path: str, timeout: float = 5.0) -> socket.socket:
             s.connect(sock_path)
             try:
                 s.recv(4096)
-            except socket.timeout:
+            except TimeoutError:
                 pass
             return s
         except OSError as e:
@@ -212,7 +211,7 @@ def _monitor_cmd(mon: socket.socket, cmd: str) -> None:
     try:
         mon.settimeout(0.5)
         mon.recv(4096)
-    except socket.timeout:
+    except TimeoutError:
         pass
 
 

@@ -23,6 +23,7 @@ Phase 10 (demand paging / COW) is not started. See [The arc](docs/ROADMAP.md#the
 Quickstart:
 
     ./setup.sh          # fetches Limine binaries, verifies host tools
+    make check          # fast local gate (clippy, host unit, harness, ruff/mypy)
     make                # kernel + vibeos.iso (hybrid BIOS/UEFI)
     make run            # QEMU window = PS/2; the terminal is COM1 (`-serial stdio`)
     make test           # host units + harness units + e2e (BIOS, UEFI, panic) + in-guest

@@ -15,7 +15,7 @@ This file is the contract. Cursor rules and `CLAUDE.md` point here. Longer mater
 
 From ROADMAP "How to read this". Not optional.
 
-- `make test` green, all tiers. `make check` is not a target yet (Q1 / B1 / DX1); until then `make test-unit` and `make test-harness` are the fast gate.
+- `make check` green (fast local gate: host clippy, host units, harness, ruff/mypy when installed). Run it before every commit. `make test` green, all tiers, before every PR.
 - new serial markers registered in the harness in the same commit ([DESIGN §8.3](docs/DESIGN.md#83-end-to-end))
 - new portable logic gets host tests; new hardware behaviour gets a ktest
 - every fixed bug gets a regression test in the cheapest tier that catches it
@@ -33,6 +33,7 @@ From ROADMAP "How to read this". Not optional.
 ## How to run
 
     ./setup.sh          # Limine clone + host-tool check (verifies pinned Limine commit)
+    make check          # fast local gate (clippy, host unit, harness, ruff/mypy)
     make                # kernel + vibeos.iso
     make run            # QEMU window = PS/2; the terminal is COM1
     make test-unit      # tests/hostlib
@@ -40,6 +41,8 @@ From ROADMAP "How to read this". Not optional.
     make test-e2e       # BIOS boot contract (tests/harness/run_e2e.py)
     make test-kernel    # in-guest registry (tests/kernel_boot.py)
     make test           # full ladder
+
+`make help` lists targets. Optional: `pre-commit install` (ruff + `scripts/check_*.py` when those exist). rustfmt `--check` and clippy `-D warnings` land with Q1.
 
 `VIBEOS_*` overrides: `SMP`, `QEMU_CPU`, `MEM`, `QEMU_ACCEL` (default `tcg`), `ISO`, `TIMEOUT`, `BIOS`, `QEMU_EXTRA`. Makefile `?=` defaults are the source for `make run`. One reader is C2, not landed.
 
