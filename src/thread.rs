@@ -5,6 +5,7 @@
 
 use core::mem::{offset_of, size_of};
 
+use crate::paging::PAGE_SIZE_4K;
 use crate::time::Instant;
 
 /// Global TCB table size. UP today; phase 4 still addresses by id.
@@ -100,8 +101,27 @@ pub struct KernelStack {
     pub pages: usize,
 }
 
+impl KernelStack {
+    pub fn top(self) -> u64 {
+        self.guard + (self.pages as u64 + 1) * PAGE_SIZE_4K
+    }
+}
+
+/// FXSAVE area. 16-byte aligned. Initialized from a template at FPU bring-up.
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+pub struct Fxsave {
+    pub bytes: [u8; 512],
+}
+
+impl Fxsave {
+    pub const fn empty() -> Self {
+        Self { bytes: [0; 512] }
+    }
+}
+
 /// Global TCB. `next`/`prev` are the run-queue links Slice B fills.
-#[repr(C)]
+#[repr(C, align(16))]
 pub struct Tcb {
     pub id: ThreadId,
     pub name: &'static str,
@@ -123,6 +143,9 @@ pub struct Tcb {
     pub run_tsc: u64,
     /// Last `wait` result. Valid after `schedule` returns from a wait.
     pub wait_outcome: WaitOutcome,
+    /// User CR3. 0 means the shared kernel PML4.
+    pub as_cr3: u64,
+    pub fpu: Fxsave,
 }
 
 /// Callee-saved GPRs, rflags, rsp, return address. No XMM: soft-float.
@@ -178,6 +201,7 @@ const _: () = {
     assert!(offset_of!(CpuContext, rip) == CpuContext::RIP);
     assert!(size_of::<CpuContext>() == 72);
     assert!(size_of::<ThreadId>() == 4);
+    assert!(offset_of!(Tcb, fpu) % 16 == 0);
 };
 
 /// SysV: `rsp % 16 == 8` on function entry. `stack_top` must be 16-aligned.

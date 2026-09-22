@@ -225,12 +225,13 @@ fn start_one(a: ApAlloc) -> bool {
 extern "C" fn ap_entry() -> ! {
     x86::cli();
     let st = STARTING.get();
-    let tables = unsafe { &*st.cpu_tables };
+    let tables = unsafe { &mut *st.cpu_tables };
     let cpu = unsafe { &mut *st.cpu };
     // `mov gs` zeros the hidden base. GS_BASE before any lidt so NMI
     // cannot gs:[0] a null PerCpu (DESIGN §7.4 / ROADMAP).
     unsafe { tables.load() };
     unsafe { per_cpu_init::install_gs(cpu) };
+    unsafe { crate::syscall_init::init_ap(tables.tss_ptr(), tables.rsp0()) };
     unsafe { arch::idt::load() };
     unsafe { apic_init::enable_ap() };
     cpu.tsc_per_ms = time_init::tsc_per_ms();

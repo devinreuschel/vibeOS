@@ -7,6 +7,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod acpi;
+pub mod addr_space;
 pub mod apic;
 pub mod block;
 pub mod cache;
@@ -37,6 +38,7 @@ pub mod pmm;
 pub mod sched;
 pub mod shell;
 pub mod smp;
+pub mod syscall;
 pub mod sync;
 pub mod symtab;
 pub mod thread;

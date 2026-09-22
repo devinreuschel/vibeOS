@@ -8,6 +8,7 @@ use vibeos::fmt_util;
 use vibeos::vectors;
 
 use crate::arch::catch;
+use crate::arch::gs;
 use crate::arch::pic;
 use crate::serial::Serial;
 use crate::x86::{self, DtPtr};
@@ -45,14 +46,18 @@ macro_rules! install_err {
 }
 
 extern "x86-interrupt" fn default_noerr<const N: u8>(mut frame: InterruptFrame) {
+    let user = gs_enter(&frame);
     if catch::intercept(N, &mut frame, 0) {
+        gs_leave(user);
         return;
     }
     crate::panic::exception_vec(N, &frame, None, None);
 }
 
 extern "x86-interrupt" fn default_err<const N: u8>(mut frame: InterruptFrame, err: u64) {
+    let user = gs_enter(&frame);
     if catch::intercept(N, &mut frame, err) {
+        gs_leave(user);
         return;
     }
     let cr2 = if N == vectors::PF {
@@ -64,106 +69,152 @@ extern "x86-interrupt" fn default_err<const N: u8>(mut frame: InterruptFrame, er
 }
 
 extern "x86-interrupt" fn breakpoint(mut frame: InterruptFrame) {
+    let user = gs_enter(&frame);
     if catch::intercept(vectors::BP, &mut frame, 0) {
+        gs_leave(user);
         return;
     }
     dump(b"#BP", &frame, None, None);
+    gs_leave(user);
 }
 
 extern "x86-interrupt" fn invalid_opcode(mut frame: InterruptFrame) {
+    let user = gs_enter(&frame);
     if catch::intercept(vectors::UD, &mut frame, 0) {
+        gs_leave(user);
         return;
     }
     crate::panic::exception_halt(b"#UD", &frame, None, None);
 }
 
 extern "x86-interrupt" fn nmi(mut frame: InterruptFrame) {
+    let user = gs_enter(&frame);
     if catch::intercept(vectors::NMI, &mut frame, 0) {
+        gs_leave(user);
         return;
     }
     crate::panic::exception_halt(b"nmi", &frame, None, None);
 }
 
 extern "x86-interrupt" fn debug_ex(mut frame: InterruptFrame) {
+    let user = gs_enter(&frame);
     if catch::intercept(vectors::DB, &mut frame, 0) {
+        gs_leave(user);
         return;
     }
     crate::panic::exception_halt(b"#DB", &frame, None, None);
 }
 
 extern "x86-interrupt" fn general_protection(mut frame: InterruptFrame, err: u64) {
+    let user = gs_enter(&frame);
     if catch::intercept(vectors::GP, &mut frame, err) {
+        gs_leave(user);
         return;
     }
     crate::panic::exception_halt(b"#GP", &frame, Some(err), None);
 }
 
 extern "x86-interrupt" fn page_fault(mut frame: InterruptFrame, err: u64) {
+    let user = gs_enter(&frame);
     if catch::intercept(vectors::PF, &mut frame, err) {
+        gs_leave(user);
         return;
     }
     crate::panic::exception_halt(b"#PF", &frame, Some(err), Some(x86::read_cr2()));
 }
 
 extern "x86-interrupt" fn double_fault(mut frame: InterruptFrame, err: u64) {
+    let user = gs_enter(&frame);
     if catch::intercept(vectors::DF, &mut frame, err) {
+        gs_leave(user);
         return;
     }
     crate::panic::exception_halt(b"#DF", &frame, Some(err), None);
 }
 
 extern "x86-interrupt" fn machine_check(mut frame: InterruptFrame) {
+    let user = gs_enter(&frame);
     if catch::intercept(vectors::MC, &mut frame, 0) {
+        gs_leave(user);
         return;
     }
     crate::panic::exception_halt(b"#MC", &frame, None, None);
 }
 
-extern "x86-interrupt" fn irq<const N: u8>(_frame: InterruptFrame) {
+extern "x86-interrupt" fn irq<const N: u8>(frame: InterruptFrame) {
+    let user = gs_enter(&frame);
     pic::handle(N);
+    gs_leave(user);
 }
 
-extern "x86-interrupt" fn pit_irq(_frame: InterruptFrame) {
+extern "x86-interrupt" fn pit_irq(frame: InterruptFrame) {
+    let user = gs_enter(&frame);
     let tsc = crate::time_init::read_tsc();
     crate::time_init::on_pit_tick(tsc);
     crate::time_init::eoi_pit();
     crate::sched_init::on_timer_tick();
+    gs_leave(user);
 }
 
-extern "x86-interrupt" fn lapic_timer_irq(_frame: InterruptFrame) {
+extern "x86-interrupt" fn lapic_timer_irq(frame: InterruptFrame) {
+    let user = gs_enter(&frame);
     crate::apic_init::on_timer_irq();
+    gs_leave(user);
 }
 
-extern "x86-interrupt" fn lapic_error_irq(_frame: InterruptFrame) {
+extern "x86-interrupt" fn lapic_error_irq(frame: InterruptFrame) {
+    let user = gs_enter(&frame);
     crate::apic_init::on_error_irq();
+    gs_leave(user);
 }
 
-extern "x86-interrupt" fn lapic_thermal_irq(_frame: InterruptFrame) {
+extern "x86-interrupt" fn lapic_thermal_irq(frame: InterruptFrame) {
+    let user = gs_enter(&frame);
     crate::apic_init::on_thermal_irq();
+    gs_leave(user);
 }
 
-extern "x86-interrupt" fn lapic_spurious_irq(_frame: InterruptFrame) {
+extern "x86-interrupt" fn lapic_spurious_irq(frame: InterruptFrame) {
+    let user = gs_enter(&frame);
     crate::apic_init::on_spurious_irq();
+    gs_leave(user);
 }
 
-extern "x86-interrupt" fn ipi_reschedule(_frame: InterruptFrame) {
+extern "x86-interrupt" fn ipi_reschedule(frame: InterruptFrame) {
+    let user = gs_enter(&frame);
     crate::apic_init::eoi();
     crate::ipi_init::on_reschedule_ipi();
+    gs_leave(user);
 }
 
-extern "x86-interrupt" fn ipi_shootdown(_frame: InterruptFrame) {
+extern "x86-interrupt" fn ipi_shootdown(frame: InterruptFrame) {
+    let user = gs_enter(&frame);
     crate::apic_init::eoi();
     crate::ipi_init::on_shootdown_ipi();
+    gs_leave(user);
 }
 
-extern "x86-interrupt" fn ipi_call(_frame: InterruptFrame) {
+extern "x86-interrupt" fn ipi_call(frame: InterruptFrame) {
+    let user = gs_enter(&frame);
     crate::apic_init::eoi();
     crate::ipi_init::on_call_ipi();
+    gs_leave(user);
 }
 
-extern "x86-interrupt" fn ipi_halt(_frame: InterruptFrame) {
+extern "x86-interrupt" fn ipi_halt(frame: InterruptFrame) {
+    let _user = gs_enter(&frame);
     crate::apic_init::eoi();
     crate::ipi_init::on_halt_ipi();
+}
+
+fn gs_enter(frame: &InterruptFrame) -> bool {
+    let user = gs::from_user(frame.cs);
+    unsafe { gs::enter(user) };
+    user
+}
+
+fn gs_leave(user: bool) {
+    unsafe { gs::leave(user) };
 }
 
 pub fn pointer() -> (u16, u64) {

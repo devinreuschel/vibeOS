@@ -112,10 +112,18 @@ pub fn with_pt<R>(f: impl FnOnce() -> R) -> R {
 static mut IOREMAP: IoremapWindow = IoremapWindow::new();
 
 static MAP_END: AtomicU64 = AtomicU64::new(0);
+static KERNEL_CR3: AtomicU64 = AtomicU64::new(0);
 
 /// Physmap high water from [`install`]. BARs above this go through ioremap.
 pub fn map_end() -> u64 {
     MAP_END.load(Ordering::Relaxed)
+}
+
+/// Kernel PML4 physical address. User address spaces copy the upper half
+/// from this root; `current_mapper` always walks it so later kernel maps
+/// do not land on a private user PML4 slot.
+pub fn kernel_cr3() -> u64 {
+    KERNEL_CR3.load(Ordering::Acquire)
 }
 
 /// Reserve and map `[phys, phys+len)` into the ioremap window with UC
@@ -181,12 +189,18 @@ pub unsafe fn patch_physmap_uc(phys: PhysAddr, len: u64) -> Result<usize, MapErr
     Ok(n)
 }
 
-/// Fabricate a `Mapper` pointing at the current CR3. Only safe after
-/// [`install`] has installed our own PML4.
+/// Fabricate a `Mapper` pointing at the kernel PML4. Only safe after
+/// [`install`] has installed our own tables. Does not follow the current
+/// CR3 (a user thread may have switched it).
 pub(crate) fn current_mapper() -> Mapper {
-    // CR3 low bits are flags (PCID etc); the physical address lives at
-    // 12..52. Same mask used by the paging library on PTEs.
-    let cr3 = x86::read_cr3() & paging::PTE_ADDR_MASK;
+    let cr3 = {
+        let k = kernel_cr3();
+        if k != 0 {
+            k
+        } else {
+            x86::read_cr3() & paging::PTE_ADDR_MASK
+        }
+    };
     unsafe { Mapper::new(PhysAddr(cr3), HHDM_BASE) }
 }
 
@@ -489,6 +503,7 @@ pub unsafe fn install(
     }
 
     // ---- 6. Install ----
+    KERNEL_CR3.store(mapper.root().as_u64(), Ordering::Release);
     unsafe { x86::write_cr3(mapper.root().as_u64()) };
     MAP_END.store(map_end, Ordering::Relaxed);
 

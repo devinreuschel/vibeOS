@@ -292,6 +292,7 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
         cpu.irq_nest = (*new_ptr).irq_nest;
         apply_if_on_resume(&mut (*new_ptr).context.rflags, cpu.irq_nest);
         per_cpu_init::set_current_thread(new_ptr);
+        crate::syscall_init::on_switch(old_ptr, new_ptr);
         switch_context(&mut (*old_ptr).context, &(*new_ptr).context);
     }
 }
@@ -369,6 +370,8 @@ pub unsafe fn init_bootstrap() {
         switches: 0,
         run_tsc: 0,
         wait_outcome: WaitOutcome::Woken,
+        as_cr3: 0,
+        fpu: crate::syscall_init::fpu_template(),
     });
     let ptr = &mut *tcb as *mut Tcb;
     {
@@ -436,6 +439,8 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Option<ThreadId> {
         switches: 0,
         run_tsc: 0,
         wait_outcome: WaitOutcome::Woken,
+        as_cr3: 0,
+        fpu: crate::syscall_init::fpu_template(),
     });
     let id = with_sched(|s| {
         let slot = s.slots.iter().position(|x| x.is_none())?;
@@ -527,6 +532,8 @@ fn spawn_inner(
         switches: 0,
         run_tsc: 0,
         wait_outcome: WaitOutcome::Woken,
+        as_cr3: 0,
+        fpu: crate::syscall_init::fpu_template(),
     });
     prepare_thread(&mut tcb.context, top, tramp);
     unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
@@ -572,6 +579,8 @@ fn fill_tcb(
     tcb.switches = 0;
     tcb.run_tsc = 0;
     tcb.wait_outcome = WaitOutcome::Woken;
+    tcb.as_cr3 = 0;
+    tcb.fpu = crate::syscall_init::fpu_template();
     prepare_thread(&mut tcb.context, top, tramp);
     unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
 }

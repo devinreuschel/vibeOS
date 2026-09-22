@@ -89,6 +89,48 @@ pub unsafe fn wrmsr(msr: u32, val: u64) {
 
 pub const IA32_EFER: u32 = 0xC000_0080;
 pub const EFER_NXE: u64 = 1 << 11;
+pub const EFER_SCE: u64 = 1 << 0;
+pub const IA32_STAR: u32 = 0xC000_0081;
+pub const IA32_LSTAR: u32 = 0xC000_0082;
+pub const IA32_FMASK: u32 = 0xC000_0084;
+pub const IA32_GS_BASE: u32 = 0xC000_0101;
+pub const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
+
+/// TF|IF|DF|IOPL|NT|AC. Cleared on `syscall`.
+pub const FMASK_SYSCALL: u64 = 0x47700;
+
+pub const CR0_EM: u64 = 1 << 2;
+pub const CR0_MP: u64 = 1 << 1;
+pub const CR0_TS: u64 = 1 << 3;
+pub const CR4_OSFXSR: u64 = 1 << 9;
+
+#[inline]
+pub fn read_cr0() -> u64 {
+    let val: u64;
+    unsafe { asm!("mov {}, cr0", out(reg) val, options(nomem, nostack, preserves_flags)) };
+    val
+}
+
+/// # Safety
+/// Caller vouches CR0 bits are valid for this CPU.
+#[inline]
+pub unsafe fn write_cr0(val: u64) {
+    unsafe { asm!("mov cr0, {}", in(reg) val, options(nostack, preserves_flags)) };
+}
+
+#[inline]
+pub fn read_cr4() -> u64 {
+    let val: u64;
+    unsafe { asm!("mov {}, cr4", out(reg) val, options(nomem, nostack, preserves_flags)) };
+    val
+}
+
+/// # Safety
+/// Caller vouches CR4 bits are valid for this CPU.
+#[inline]
+pub unsafe fn write_cr4(val: u64) {
+    unsafe { asm!("mov cr4, {}", in(reg) val, options(nostack, preserves_flags)) };
+}
 
 /// Read `rsp`. Used by paging bring-up to find which top-level PML4
 /// entry covers Limine's boot stack, so the switch to our own PML4

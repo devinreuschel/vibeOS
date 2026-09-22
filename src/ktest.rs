@@ -11,16 +11,18 @@ use core::arch::global_asm;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use vibeos::addr_space::{UserMemError, UserPerms};
 use vibeos::apic::{Polarity, TimerMode, Trigger};
 use vibeos::dma::{self, DmaAlloc, DMA32_BOUNDARY};
 use vibeos::irq::{self, IrqError};
-use vibeos::desc::{IstSlot, KERNEL_CS, TSS_SEL};
+use vibeos::desc::{IstSlot, KERNEL_CS, TSS_SEL, USER_CS_RPL};
 use vibeos::dev::{ClaimError, Device, Driver, IdMatch, ProbeError};
 use vibeos::heap::HEAP_SIZE;
 use vibeos::kva::PAGE_SIZE;
-use vibeos::paging::{heap_flags, PageFlags, PhysAddr, VirtAddr};
+use vibeos::paging::{heap_flags, PageFlags, PhysAddr, VirtAddr, PAGE_SIZE_4K, USER_END};
+use vibeos::syscall;
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
-use vibeos::thread::{ThreadId, ThreadState};
+use vibeos::thread::{ThreadId, ThreadState, RFLAGS_RESERVED1};
 use vibeos::time::{calib_band, calib_in_band, CalibSource, Instant};
 use vibeos::vectors;
 use vibeos::block::{BlockError, DeviceState, Op};
@@ -28,6 +30,7 @@ use vibeos::fs::{FsError, InodeKind, O_CREAT, O_RDWR};
 use vibeos::virtio::F_VERSION_1;
 
 use crate::acpi_init;
+use crate::addr_space_init;
 use crate::apic_init;
 use crate::arch;
 use crate::block_init::{self, IoWaiter};
@@ -49,6 +52,7 @@ use crate::pmm_init;
 use crate::sched_init;
 use crate::serial::{self, Serial};
 use crate::smp_init;
+use crate::syscall_init;
 use crate::sync_init::{BlockingMutex, Channel, Condvar, RwLock, Semaphore, SpinMutex};
 use crate::thread_init;
 use crate::time_init;
@@ -85,6 +89,11 @@ const TESTS: &[(&str, TestFn)] = &[
     ("mmio_uc_flags", test_mmio_uc_flags),
     ("acpi_discovery", test_acpi_discovery),
     ("gdt_selectors", test_gdt_selectors),
+    ("star_sysret_layout", test_star_sysret_layout),
+    ("addrspace_map_unmap_teardown", test_addrspace_map_unmap_teardown),
+    ("user_ptr_helpers", test_user_ptr_helpers),
+    ("cr3_switch_skip", test_cr3_switch_skip),
+    ("ring3_syscall_enosys", test_ring3_syscall_enosys),
     ("int3_roundtrip", test_int3_roundtrip),
     ("scoped_pf", test_scoped_pf),
     ("gp_catch", test_gp_catch),
@@ -605,6 +614,222 @@ fn test_gdt_selectors() -> Outcome {
     }
     if x86::read_tr() != TSS_SEL {
         return Outcome::Fail("tr not tss");
+    }
+    Outcome::Ok
+}
+
+fn test_star_sysret_layout() -> Outcome {
+    if !syscall_init::star_configured() {
+        return Outcome::Fail("STAR.SYSCALL_CS/SYSRET_CS or EFER.SCE");
+    }
+    Outcome::Ok
+}
+
+fn hhdm_mut(pa: PhysAddr) -> *mut u8 {
+    (paging_init::HHDM_BASE.wrapping_add(pa.as_u64())) as *mut u8
+}
+
+fn write_user_va(space: &vibeos::addr_space::AddressSpace, va: u64, bytes: &[u8]) -> bool {
+    let Some((pa, _, _)) = space.mapper().translate(VirtAddr(va)) else {
+        return false;
+    };
+    let dst = hhdm_mut(PhysAddr(pa.as_u64() & !0xFFF));
+    let off = (va & 0xFFF) as usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        unsafe { dst.add(off + i).write_volatile(bytes[i]) };
+        i += 1;
+    }
+    true
+}
+
+fn read_user_u64(space: &vibeos::addr_space::AddressSpace, va: u64) -> Option<u64> {
+    let (pa, _, _) = space.mapper().translate(VirtAddr(va))?;
+    let src = hhdm_mut(PhysAddr(pa.as_u64() & !0xFFF)) as *const u64;
+    let off = ((va & 0xFFF) / 8) as usize;
+    Some(unsafe { src.add(off).read_volatile() })
+}
+
+fn test_addrspace_map_unmap_teardown() -> Outcome {
+    let before = free_frames();
+    let Some(mut space) = addr_space_init::create() else {
+        return Outcome::Fail("create");
+    };
+    // Above the 512 MiB GLOBAL low-identity window (DESIGN §4.1).
+    let va = 0x0000_0000_4000_0000u64;
+    if unsafe { addr_space_init::map_anon(&mut space, va, PAGE_SIZE_4K * 2, UserPerms::RW) }.is_err()
+    {
+        return Outcome::Fail("map_anon");
+    }
+    addr_space_init::load_cr3(&space);
+    x86::invlpg(va);
+    unsafe {
+        (va as *mut u64).write_volatile(0x1111_2222_3333_4444);
+    }
+    let got = unsafe { (va as *const u64).read_volatile() };
+    if got != 0x1111_2222_3333_4444 {
+        addr_space_init::load_kernel_cr3();
+        addr_space_init::teardown(space);
+        return Outcome::Fail("readback");
+    }
+    if unsafe { addr_space_init::unmap(&mut space, va, PAGE_SIZE_4K * 2) }.is_err() {
+        addr_space_init::load_kernel_cr3();
+        addr_space_init::teardown(space);
+        return Outcome::Fail("unmap");
+    }
+    addr_space_init::load_kernel_cr3();
+    let st = addr_space_init::teardown(space);
+    if st.pt_frames == 0 {
+        return Outcome::Fail("teardown pt");
+    }
+    if free_frames() != before {
+        return Outcome::Fail("frame leak");
+    }
+    Outcome::Ok
+}
+
+fn test_user_ptr_helpers() -> Outcome {
+    let Some(mut space) = addr_space_init::create() else {
+        return Outcome::Fail("create");
+    };
+    let va = 0x0000_0000_4000_0000u64;
+    if unsafe { addr_space_init::map_anon(&mut space, va, PAGE_SIZE_4K, UserPerms::RW) }.is_err() {
+        addr_space_init::teardown(space);
+        return Outcome::Fail("map");
+    }
+    if space.check_user_range(va, 8).is_err() {
+        addr_space_init::teardown(space);
+        return Outcome::Fail("mapped range");
+    }
+    if space.check_user_range(0, 8) != Err(UserMemError::NullGuard) {
+        addr_space_init::teardown(space);
+        return Outcome::Fail("null guard");
+    }
+    if space.check_user_range(0xFFFF_8000_0000_1000, 8) != Err(UserMemError::Kernel) {
+        addr_space_init::teardown(space);
+        return Outcome::Fail("kernel ptr");
+    }
+    if space.check_user_range(u64::MAX, 2) != Err(UserMemError::Overflow) {
+        addr_space_init::teardown(space);
+        return Outcome::Fail("overflow");
+    }
+    if space.check_user_range(va + PAGE_SIZE_4K, 8) != Err(UserMemError::Unmapped) {
+        addr_space_init::teardown(space);
+        return Outcome::Fail("unmapped");
+    }
+    if space.check_user_range(USER_END, 8) != Err(UserMemError::NonCanonical) {
+        addr_space_init::teardown(space);
+        return Outcome::Fail("user end");
+    }
+    addr_space_init::teardown(space);
+    Outcome::Ok
+}
+
+fn test_cr3_switch_skip() -> Outcome {
+    let Some(a) = addr_space_init::create() else {
+        return Outcome::Fail("create a");
+    };
+    let Some(b) = addr_space_init::create() else {
+        addr_space_init::teardown(a);
+        return Outcome::Fail("create b");
+    };
+    addr_space_init::load_cr3(&a);
+    let cr3_a = x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK;
+    if !addr_space_init::cr3_was_skipped(&a) {
+        addr_space_init::load_kernel_cr3();
+        addr_space_init::teardown(a);
+        addr_space_init::teardown(b);
+        return Outcome::Fail("a not recorded");
+    }
+    addr_space_init::load_cr3(&a);
+    if (x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK) != cr3_a {
+        addr_space_init::load_kernel_cr3();
+        addr_space_init::teardown(a);
+        addr_space_init::teardown(b);
+        return Outcome::Fail("skip mutated cr3");
+    }
+    addr_space_init::load_cr3(&b);
+    let cr3_b = x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK;
+    if cr3_b == cr3_a {
+        addr_space_init::load_kernel_cr3();
+        addr_space_init::teardown(a);
+        addr_space_init::teardown(b);
+        return Outcome::Fail("b shares a cr3");
+    }
+    addr_space_init::load_kernel_cr3();
+    addr_space_init::teardown(a);
+    addr_space_init::teardown(b);
+    Outcome::Ok
+}
+
+fn trampoline_bytes(result_va: u64) -> [u8; 19] {
+    let mut b = [0u8; 19];
+    b[0] = 0xB8;
+    b[1..5].copy_from_slice(&0x00C0_FFEEu32.to_le_bytes());
+    b[5] = 0x0F;
+    b[6] = 0x05;
+    b[7] = 0x48;
+    b[8] = 0xA3;
+    b[9..17].copy_from_slice(&result_va.to_le_bytes());
+    b[17] = 0x0F;
+    b[18] = 0x0B;
+    b
+}
+
+fn test_ring3_syscall_enosys() -> Outcome {
+    // 1 GiB: past the 512 MiB GLOBAL identity window so a stale TLB
+    // entry cannot alias the trampoline as NX kernel pages.
+    const CODE: u64 = 0x0000_0000_4000_0000;
+    const STACK: u64 = 0x0000_0000_4000_1000;
+    const DATA: u64 = 0x0000_0000_4000_2000;
+    let before = free_frames();
+    let Some(mut space) = addr_space_init::create() else {
+        return Outcome::Fail("create");
+    };
+    let map_ok = unsafe {
+        addr_space_init::map_anon(&mut space, CODE, PAGE_SIZE_4K, UserPerms::RX).is_ok()
+            && addr_space_init::map_anon(&mut space, STACK, PAGE_SIZE_4K, UserPerms::RW).is_ok()
+            && addr_space_init::map_anon(&mut space, DATA, PAGE_SIZE_4K, UserPerms::RW).is_ok()
+    };
+    if !map_ok {
+        addr_space_init::teardown(space);
+        return Outcome::Fail("map trampoline");
+    }
+    let bytes = trampoline_bytes(DATA);
+    if !write_user_va(&space, CODE, &bytes) {
+        addr_space_init::teardown(space);
+        return Outcome::Fail("write trampoline");
+    }
+    if !write_user_va(&space, DATA, &[0u8; 8]) {
+        addr_space_init::teardown(space);
+        return Outcome::Fail("zero result");
+    }
+    addr_space_init::load_cr3(&space);
+    x86::invlpg(CODE);
+    x86::invlpg(STACK);
+    x86::invlpg(DATA);
+    let caught = arch::catch::catch(vectors::UD, || unsafe {
+        syscall_init::enter_user(CODE, STACK + PAGE_SIZE_4K, RFLAGS_RESERVED1);
+    });
+    arch::gs::force_kernel();
+    addr_space_init::load_kernel_cr3();
+    let got = read_user_u64(&space, DATA);
+    addr_space_init::teardown(space);
+    let Some(c) = caught else {
+        return Outcome::Fail("no #UD after trampoline");
+    };
+    if c.frame.cs != USER_CS_RPL as u64 {
+        return Outcome::Fail("ud cs not user");
+    }
+    let Some(val) = got else {
+        return Outcome::Fail("result unmapped");
+    };
+    if val != syscall::stub(0) as u64 {
+        let _ = writeln!(Serial, "vibeOS: ktest:   enosys rax={val:#x}");
+        return Outcome::Fail("rax not -ENOSYS");
+    }
+    if free_frames() != before {
+        return Outcome::Fail("trampoline frame leak");
     }
     Outcome::Ok
 }
