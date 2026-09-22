@@ -106,3 +106,12 @@ jobs:
 
       - name: vibefs QEMU-kill crash consistency
         run: make test-vibefs-crash
+
+      - name: upload production ISO
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: vibeos.iso
+          path: vibeos.iso
+          if-no-files-found: error
+          retention-days: 7

@@ -26,7 +26,8 @@ not a gate. If a gate cannot be checked by running something, it is written wron
 - new serial markers registered in the contract in [DESIGN.md](DESIGN.md#83-end-to-end), same commit
 - new portable logic has host unit tests; new hardware behavior has an in-guest test
 - every fixed bug gets a regression test in the cheapest tier that catches it
-- `CHANGELOG.md` entry for anything visible to someone running the kernel
+- `CHANGELOG.md` entry for anything visible to someone running the kernel (≤ 2 lines, user-facing)
+- tag `v0.<phase>.0` at phase exit (first published tag is `v0.8.0` for Phase 8)
 - design docs updated in the same commit as any change to an invariant or a constant
 - no `TODO` describing a correctness gap. Those become lines in this file.
 
@@ -685,6 +686,7 @@ limitations.
 - [x] vibefs survives injected power loss during a write, verified by a crash-consistency test
 - [x] path resolution handles `.`, `..`, symlinks, mount point crossing, and a symlink loop without recursing to death
 - [x] host tests over synthetic filesystem images, including deliberately corrupted ones
+- [ ] tag `v0.8.0`
 
 ### 8.1 VFS
 - [x] `Inode` with a type, size, mode, times, and link count
@@ -753,6 +755,7 @@ limitations.
 - [x] the interactive shell runs as a user process, not in the kernel
 - [x] every syscall argument validated: an in-guest test passes kernel pointers, unmapped pointers, and huge lengths and gets `EFAULT` rather than a panic
 - [x] `ps` lists processes with real state
+- [ ] tag `v0.9.0`
 
 ### 9.1 Ring 3 plumbing
 - [x] user code and data selectors already in the GDT, verified against the `sysret` layout
@@ -837,6 +840,7 @@ overcommit survivable.
 - [ ] the OOM path kills a chosen process with a logged reason rather than panicking or hanging
 - [ ] slab statistics show per-cache object counts, and the buddy lock is measurably less contended
 - [ ] no frame leaks: a long allocation-heavy workload returns the frame count to baseline
+- [ ] tag `v0.10.0`
 
 ### 10.1 Frame metadata
 - [ ] a `Frame` array indexed by physical frame number, allocated at boot from a known-size region
@@ -919,6 +923,7 @@ that real software can be ported without patching every call site.
 - [ ] `poll` on 100 descriptors wakes only for the ready ones, verified by a syscall counter
 - [ ] a futex-based userspace mutex under contention across processes, correct and without spinning
 - [ ] a Unix domain socket carries a passed file descriptor between processes
+- [ ] tag `v0.11.0`
 
 ### 11.1 Pipes
 - [ ] a bounded ring buffer with blocking read and write and correct partial-write semantics
@@ -1006,6 +1011,7 @@ the shell is useful.
 - [ ] a shell script with pipes, redirection, variables, conditionals, and loops runs
 - [ ] the userspace test suite passes, run automatically in CI inside the VM
 - [ ] a package installs, upgrades, and removes cleanly with file conflict detection
+- [ ] tag `v0.12.0`
 
 ### 12.1 libc
 - [ ] decide and document: write our own, or port musl or relibc. Porting gets to real software faster; writing our own is more of what this project is for. Lean toward our own for the core and port where the surface is enormous and uninteresting.
@@ -1085,6 +1091,7 @@ protocol work for an agent to get wrong in interesting ways.
 - [ ] the stack survives a packet fuzzer: malformed headers, bad checksums, overlapping fragments, no panics
 - [ ] `netstat`-equivalent shows sockets in correct states through a full connection lifecycle
 - [ ] host tests for header parsing, checksums, TCP state transitions, and sequence arithmetic
+- [ ] tag `v0.13.0`
 
 ### 13.1 netdev layer
 - [ ] a `NetDevice` trait: transmit, MTU, MAC, link state, and statistics
@@ -1181,6 +1188,7 @@ protocol work for an agent to get wrong in interesting ways.
 - [ ] a screenshot captured programmatically and compared against a reference in CI
 - [ ] a resolution change at runtime with clients reacting correctly
 - [ ] the compositor holds a steady frame rate under a moving-window workload, measured
+- [ ] tag `v0.14.0`
 
 ### 14.1 Display abstraction
 - [ ] a `Display` with a mode list, current mode, and framebuffer access
@@ -1258,6 +1266,7 @@ everything.
 - [ ] that ISO boots and rebuilds itself: two generations, with matching output
 - [ ] the test suite runs on vibeOS, on hardware, reporting results the same way CI does
 - [ ] the whole loop is scripted, not a sequence of manual steps someone remembers
+- [ ] tag `v0.15.0`
 
 ### 15.1 POSIX completeness
 - [ ] audit against what a real toolchain needs, and close the gaps rather than guessing
@@ -1315,6 +1324,7 @@ The parts that separate a working system from a serious one.
 - [ ] KASAN builds pass the full test suite
 - [ ] a sandboxed process cannot reach the filesystem or network outside its policy, tested
 - [ ] a documented threat model, with the deliberate gaps named
+- [ ] tag `v0.16.0`
 
 ### 16.1 Kernel memory protection
 - [ ] per-section permissions applied after boot, with the init sections freed or made NX
@@ -1390,6 +1400,7 @@ The parts that separate a working system from a serious one.
 - [ ] scheduler latency under load within a stated bound, measured not asserted
 - [ ] a tickless idle CPU takes near zero timer interrupts, measured
 - [ ] lock contention profiled, and the top contended lock addressed rather than noted
+- [ ] tag `v0.17.0`
 
 ### 17.1 Tracing
 - [ ] static tracepoints at the boundaries that matter: syscall entry and exit, scheduler switch, page fault, IRQ, block and network I/O
@@ -1467,6 +1478,7 @@ The parts that separate a working system from a serious one.
 - [ ] suspend to RAM and resume, with devices restored
 - [ ] an aarch64 target boots to a shell under QEMU
 - [ ] hardware CI: a physical machine that netboots and reports results automatically
+- [ ] tag `v0.18.0`
 
 ### 18.1 Bare metal x86_64
 - [ ] a real UEFI boot path and a real BIOS boot path, both tested on hardware rather than assumed
@@ -1541,6 +1553,7 @@ The parts that separate a working system from a serious one.
 - [ ] guests get virtio block and network devices with reasonable throughput
 - [ ] a container-equivalent runs an isolated process tree with its own filesystem view and resource limits
 - [ ] vibeOS as a guest under Linux KVM performs comparably to native, using paravirtual interfaces
+- [ ] tag `v0.19.0`
 
 ### 19.1 Hypervisor
 - [ ] VMX and SVM detection and enablement, with the feature MSR checks
@@ -1594,6 +1607,7 @@ The parts that separate a working system from a serious one.
 - [ ] artifacts are signed and verified on install
 - [ ] the CI that gates releases runs on vibeOS
 - [ ] a fresh install can build and release the next version of vibeOS
+- [ ] tag `v0.20.0`
 
 ### 20.1 Release engineering
 - [ ] versioning with a defined policy for what constitutes a break
