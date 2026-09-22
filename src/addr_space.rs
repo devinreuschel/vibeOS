@@ -32,9 +32,17 @@ impl UserPerms {
         write: false,
         exec: true,
     };
+    pub const RWX: Self = Self {
+        write: true,
+        exec: true,
+    };
 
     pub const fn flags(self) -> PageFlags {
         user_leaf_flags(self.write, self.exec)
+    }
+
+    pub const fn from_elf(write: bool, exec: bool) -> Self {
+        Self { write, exec }
     }
 }
 
@@ -287,6 +295,73 @@ impl AddressSpace {
                     va = next;
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Copy through HHDM after [`check_user_range`]. All-or-nothing.
+    pub fn read_bytes(&self, src: u64, dst: &mut [u8]) -> Result<(), UserMemError> {
+        if dst.is_empty() {
+            return Ok(());
+        }
+        self.check_user_range(src, dst.len() as u64)?;
+        unsafe { self.copy_via_hhdm(src, dst.as_mut_ptr(), dst.len(), false) }
+    }
+
+    /// Copy through HHDM after [`check_user_range`]. All-or-nothing.
+    /// Does not require the PTE to be writable (ELF load onto RX pages).
+    pub fn write_bytes(&self, dst: u64, src: &[u8]) -> Result<(), UserMemError> {
+        if src.is_empty() {
+            return Ok(());
+        }
+        self.check_user_range(dst, src.len() as u64)?;
+        unsafe { self.copy_via_hhdm(dst, src.as_ptr() as *mut u8, src.len(), true) }
+    }
+
+    pub fn zero_bytes(&self, dst: u64, len: u64) -> Result<(), UserMemError> {
+        if len == 0 {
+            return Ok(());
+        }
+        self.check_user_range(dst, len)?;
+        let mut off = 0u64;
+        while off < len {
+            let va = dst + off;
+            let Some((pa, size, _)) = self.mapper.translate(VirtAddr(va)) else {
+                return Err(UserMemError::Unmapped);
+            };
+            let span = size.bytes();
+            let page_off = va & (span - 1);
+            let chunk = (span - page_off).min(len - off);
+            let ptr = (pa.as_u64().wrapping_add(self.mapper.hhdm_offset())) as *mut u8;
+            unsafe { core::ptr::write_bytes(ptr, 0, chunk as usize) };
+            off += chunk;
+        }
+        Ok(())
+    }
+
+    unsafe fn copy_via_hhdm(
+        &self,
+        va: u64,
+        buf: *mut u8,
+        len: usize,
+        to_user: bool,
+    ) -> Result<(), UserMemError> {
+        let mut off = 0usize;
+        while off < len {
+            let cur = va + off as u64;
+            let Some((pa, size, _)) = self.mapper.translate(VirtAddr(cur)) else {
+                return Err(UserMemError::Unmapped);
+            };
+            let span = size.bytes();
+            let page_off = cur & (span - 1);
+            let chunk = (span - page_off).min((len - off) as u64) as usize;
+            let user = (pa.as_u64().wrapping_add(self.mapper.hhdm_offset())) as *mut u8;
+            if to_user {
+                unsafe { core::ptr::copy_nonoverlapping(buf.add(off) as *const u8, user, chunk) };
+            } else {
+                unsafe { core::ptr::copy_nonoverlapping(user as *const u8, buf.add(off), chunk) };
+            }
+            off += chunk;
         }
         Ok(())
     }
@@ -557,6 +632,17 @@ mod tests {
         );
         assert!(aspace.check_user_range(va, 8).is_ok());
         assert!(aspace.check_user_range(va, 0).is_ok());
+        aspace.write_bytes(va, b"abcd").unwrap();
+        let mut got = [0u8; 4];
+        aspace.read_bytes(va, &mut got).unwrap();
+        assert_eq!(&got, b"abcd");
+        aspace.zero_bytes(va, 2).unwrap();
+        aspace.read_bytes(va, &mut got).unwrap();
+        assert_eq!(&got, b"\0\0cd");
+        assert_eq!(
+            aspace.write_bytes(0, b"x"),
+            Err(UserMemError::NullGuard)
+        );
         let _ = UserMemError::Kernel.errno();
         unsafe { aspace.teardown_pool(&mut pool) };
         let _ = PTE_ADDR_MASK;

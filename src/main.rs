@@ -61,6 +61,7 @@ mod syscall_init;
 mod sync_init;
 mod thread_init;
 mod time_init;
+mod user_init;
 mod virtio_blk_init;
 mod virtio_init;
 mod work_init;
@@ -315,6 +316,8 @@ fn normal_boot_tail() {
     crate::cache_init::init();
     crate::part_init::init();
     crate::fs_init::init();
+
+    crate::user_init::boot_hello();
 
     #[cfg(feature = "gp-test")]
     gp_test_trip();

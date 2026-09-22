@@ -103,6 +103,9 @@ pub mod dev;
 #[path = "../../../src/dma.rs"]
 pub mod dma;
 
+#[path = "../../../src/elf.rs"]
+pub mod elf;
+
 #[path = "../../../src/pic.rs"]
 pub mod pic;
 

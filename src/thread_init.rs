@@ -372,6 +372,7 @@ pub unsafe fn init_bootstrap() {
         wait_outcome: WaitOutcome::Woken,
         as_cr3: 0,
         fpu: crate::syscall_init::fpu_template(),
+        syscall_count: 0,
     });
     let ptr = &mut *tcb as *mut Tcb;
     {
@@ -441,6 +442,7 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Option<ThreadId> {
         wait_outcome: WaitOutcome::Woken,
         as_cr3: 0,
         fpu: crate::syscall_init::fpu_template(),
+        syscall_count: 0,
     });
     let id = with_sched(|s| {
         let slot = s.slots.iter().position(|x| x.is_none())?;
@@ -534,6 +536,7 @@ fn spawn_inner(
         wait_outcome: WaitOutcome::Woken,
         as_cr3: 0,
         fpu: crate::syscall_init::fpu_template(),
+        syscall_count: 0,
     });
     prepare_thread(&mut tcb.context, top, tramp);
     unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
@@ -581,6 +584,7 @@ fn fill_tcb(
     tcb.wait_outcome = WaitOutcome::Woken;
     tcb.as_cr3 = 0;
     tcb.fpu = crate::syscall_init::fpu_template();
+    tcb.syscall_count = 0;
     prepare_thread(&mut tcb.context, top, tramp);
     unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
 }

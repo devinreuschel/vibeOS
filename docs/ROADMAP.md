@@ -745,8 +745,8 @@ limitations.
 **Unlocks.** Everything that makes this an operating system rather than a large program.
 
 **Exit gate**
-- [ ] a static ELF binary loaded from the filesystem runs in ring 3 and exits with a status the kernel reports
-- [ ] `write` to fd 1 from userspace reaches the console
+- [x] a static ELF binary loaded from the filesystem runs in ring 3 and exits with a status the kernel reports
+- [x] `write` to fd 1 from userspace reaches the console
 - [ ] `fork` and `exec` produce a child that runs a different binary; the parent's `wait` returns its status
 - [ ] a user process faulting on a bad pointer is killed with a diagnostic and does not take the kernel with it
 - [ ] the interactive shell runs as a user process, not in the kernel
@@ -770,23 +770,24 @@ limitations.
 - [x] a guard region at address 0 so a null dereference faults rather than reading something
 
 ### 9.3 Syscall ABI
-- [ ] the ABI documented in `docs/`: register assignment, return convention, error encoding
-- [ ] a dispatch table indexed by number, with an arity and a validation policy per entry
-- [ ] first set: `read`, `write`, `open`, `close`, `lseek`, `stat`, `fstat`, `exit`, `fork`, `execve`, `wait4`, `getpid`, `getppid`, `sched_yield`, `nanosleep`, `brk`, `mmap`, `munmap`
-- [ ] `errno` values matching Linux where a name exists, so ported software behaves
-- [ ] every pointer argument validated against the caller's address space before use
-- [ ] syscall tracing behind a flag, since the alternative is guessing why a program failed
-- [ ] a syscall counter per process for `procfs`
+- [x] the ABI documented in `docs/`: register assignment, return convention, error encoding
+- [x] a dispatch table indexed by number, with an arity and a validation policy per entry
+- [x] first set wired for proof: `write`, `exit`, `getpid`, `sched_yield`
+- [ ] remainder (`read`, `open`, `close`, `lseek`, `stat`, `fstat`, `fork`, `execve`, `wait4`, `getppid`, `nanosleep`, `brk`, `mmap`, `munmap`) wait on Process in C
+- [x] `errno` values matching Linux where a name exists, so ported software behaves
+- [x] every pointer argument validated against the caller's address space before use
+- [x] syscall tracing behind a flag, since the alternative is guessing why a program failed
+- [x] a syscall counter per process for `procfs`
 
 ### 9.4 ELF loader
-- [ ] ELF64 header validation: class, endianness, machine, type
-- [ ] `PT_LOAD` segments mapped with permissions from the flags, honoring `p_filesz` versus `p_memsz` zero fill
-- [ ] `PT_GNU_STACK` respected for stack executability
-- [ ] `PT_INTERP` recognized, dynamic loading deferred to phase 12 but detected rather than silently ignored
-- [ ] stack set up with argv, envp, and the auxiliary vector
-- [ ] `PT_TLS` and the TLS layout, since Rust and C both want it
-- [ ] the header parsing in the library half, host-tested against real binaries and truncated ones
-- [ ] refuse a malformed binary with an error rather than mapping garbage
+- [x] ELF64 header validation: class, endianness, machine, type
+- [x] `PT_LOAD` segments mapped with permissions from the flags, honoring `p_filesz` versus `p_memsz` zero fill
+- [x] `PT_GNU_STACK` respected for stack executability
+- [x] `PT_INTERP` recognized, dynamic loading deferred to phase 12 but detected rather than silently ignored
+- [x] stack set up with argv, envp, and the auxiliary vector
+- [x] `PT_TLS` and the TLS layout, since Rust and C both want it
+- [x] the header parsing in the library half, host-tested against real binaries and truncated ones
+- [x] refuse a malformed binary with an error rather than mapping garbage
 
 ### 9.5 Process abstraction
 - [ ] `Process`: pid, parent, address space, descriptor table, working directory, credentials, exit status
@@ -813,7 +814,7 @@ limitations.
 - [ ] user-installed handlers, masking, and queueing deferred to phase 11
 
 ### 9.8 First userspace
-- [ ] a minimal freestanding user program with hand-written syscall stubs and no libc, to prove the path
+- [x] a minimal freestanding user program with hand-written syscall stubs and no libc, to prove the path
 - [ ] a userspace test runner exercising each syscall and its error cases
 - [ ] the shell moved out of the kernel and into a user process, keeping the kernel one only under a debug feature
 - [ ] the kernel's job after init becomes starting `/sbin/init` and nothing else

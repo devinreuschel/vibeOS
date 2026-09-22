@@ -15,6 +15,7 @@ pub mod console;
 pub mod desc;
 pub mod dev;
 pub mod dma;
+pub mod elf;
 pub mod fb;
 pub mod fat;
 pub mod font;

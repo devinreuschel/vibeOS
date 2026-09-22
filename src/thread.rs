@@ -146,6 +146,8 @@ pub struct Tcb {
     /// User CR3. 0 means the shared kernel PML4.
     pub as_cr3: u64,
     pub fpu: Fxsave,
+    /// Procfs hook until Process exists. Bumped on every syscall entry.
+    pub syscall_count: u64,
 }
 
 /// Callee-saved GPRs, rflags, rsp, return address. No XMM: soft-float.

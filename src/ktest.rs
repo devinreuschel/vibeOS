@@ -56,6 +56,7 @@ use crate::syscall_init;
 use crate::sync_init::{BlockingMutex, Channel, Condvar, RwLock, Semaphore, SpinMutex};
 use crate::thread_init;
 use crate::time_init;
+use crate::user_init;
 use crate::virtio_blk_init;
 use crate::virtio_init;
 use crate::work_init;
@@ -94,6 +95,9 @@ const TESTS: &[(&str, TestFn)] = &[
     ("user_ptr_helpers", test_user_ptr_helpers),
     ("cr3_switch_skip", test_cr3_switch_skip),
     ("ring3_syscall_enosys", test_ring3_syscall_enosys),
+    ("ring3_hello_exit", test_ring3_hello_exit),
+    ("syscall_dispatch", test_syscall_dispatch),
+    ("syscall_ptr_validate", test_syscall_ptr_validate),
     ("int3_roundtrip", test_int3_roundtrip),
     ("scoped_pf", test_scoped_pf),
     ("gp_catch", test_gp_catch),
@@ -809,7 +813,7 @@ fn test_ring3_syscall_enosys() -> Outcome {
     x86::invlpg(STACK);
     x86::invlpg(DATA);
     let caught = arch::catch::catch(vectors::UD, || unsafe {
-        syscall_init::enter_user(CODE, STACK + PAGE_SIZE_4K, RFLAGS_RESERVED1);
+        syscall_init::enter_user(CODE, STACK + PAGE_SIZE_4K, RFLAGS_RESERVED1, 0);
     });
     arch::gs::force_kernel();
     addr_space_init::load_kernel_cr3();
@@ -824,12 +828,99 @@ fn test_ring3_syscall_enosys() -> Outcome {
     let Some(val) = got else {
         return Outcome::Fail("result unmapped");
     };
-    if val != syscall::stub(0) as u64 {
+    if val != (-(syscall::ENOSYS as i64)) as u64 {
         let _ = writeln!(Serial, "vibeOS: ktest:   enosys rax={val:#x}");
         return Outcome::Fail("rax not -ENOSYS");
     }
     if free_frames() != before {
         return Outcome::Fail("trampoline frame leak");
+    }
+    Outcome::Ok
+}
+
+fn test_ring3_hello_exit() -> Outcome {
+    let before = free_frames();
+    match user_init::run_path("/hello") {
+        Ok(42) => {}
+        Ok(st) => {
+            let _ = writeln!(Serial, "vibeOS: ktest:   hello status={st}");
+            return Outcome::Fail("status not 42");
+        }
+        Err(e) => {
+            let _ = writeln!(Serial, "vibeOS: ktest:   hello err={}", e.as_str());
+            return Outcome::Fail("load/run");
+        }
+    }
+    let out = syscall_init::stdout_bytes();
+    if !out.windows(b"hello from ring3".len()).any(|w| w == b"hello from ring3") {
+        return Outcome::Fail("stdout missing hello");
+    }
+    arch::gs::force_kernel();
+    if free_frames() != before {
+        return Outcome::Fail("hello frame leak");
+    }
+    Outcome::Ok
+}
+
+fn test_syscall_dispatch() -> Outcome {
+    if syscall_init::dispatch(vibeos::syscall::SYS_GETPID, [0; 6]) != vibeos::syscall::BOOTSTRAP_PID {
+        return Outcome::Fail("getpid");
+    }
+    if syscall_init::dispatch(vibeos::syscall::SYS_SCHED_YIELD, [0; 6]) != 0 {
+        return Outcome::Fail("yield");
+    }
+    if syscall_init::dispatch(vibeos::syscall::SYS_WRITE, [3, 0, 1, 0, 0, 0])
+        != vibeos::syscall::neg(vibeos::syscall::EBADF)
+    {
+        return Outcome::Fail("ebadf");
+    }
+    if syscall_init::dispatch(0xC0FFEE, [0; 6]) != vibeos::syscall::neg(vibeos::syscall::ENOSYS) {
+        return Outcome::Fail("enosys");
+    }
+    Outcome::Ok
+}
+
+fn test_syscall_ptr_validate() -> Outcome {
+    let Some(mut space) = addr_space_init::create() else {
+        return Outcome::Fail("create");
+    };
+    let va = 0x0000_0000_4000_0000u64;
+    if unsafe { addr_space_init::map_anon(&mut space, va, PAGE_SIZE_4K, UserPerms::RW) }.is_err() {
+        addr_space_init::teardown(space);
+        return Outcome::Fail("map");
+    }
+    if space.write_bytes(va, b"hi\n").is_err() {
+        addr_space_init::teardown(space);
+        return Outcome::Fail("poke");
+    }
+    syscall_init::reset_stdout();
+    let rc = syscall_init::with_user_as(&mut space, || {
+        let ok = syscall_init::dispatch(vibeos::syscall::SYS_WRITE, [1, va, 3, 0, 0, 0]);
+        let n = syscall_init::dispatch(vibeos::syscall::SYS_WRITE, [1, 0, 8, 0, 0, 0]);
+        let k = syscall_init::dispatch(
+            vibeos::syscall::SYS_WRITE,
+            [1, 0xFFFF_8000_0000_1000, 8, 0, 0, 0],
+        );
+        let u = syscall_init::dispatch(vibeos::syscall::SYS_WRITE, [1, va + PAGE_SIZE_4K, 8, 0, 0, 0]);
+        let o = syscall_init::dispatch(vibeos::syscall::SYS_WRITE, [1, u64::MAX, 2, 0, 0, 0]);
+        (ok, n, k, u, o)
+    });
+    addr_space_init::teardown(space);
+    if rc.0 != 3 {
+        return Outcome::Fail("good write");
+    }
+    let ef = vibeos::syscall::neg(vibeos::syscall::EFAULT);
+    if rc.1 != ef {
+        return Outcome::Fail("null");
+    }
+    if rc.2 != ef {
+        return Outcome::Fail("kernel ptr");
+    }
+    if rc.3 != ef {
+        return Outcome::Fail("unmapped");
+    }
+    if rc.4 != ef {
+        return Outcome::Fail("overflow");
     }
     Outcome::Ok
 }
