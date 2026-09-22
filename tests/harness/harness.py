@@ -636,6 +636,13 @@ ISA_DEBUG_FAIL = 35  # write 0x11
 KTEST_BEGIN = "vibeOS: ktest: begin"
 KTEST_END = "vibeOS: ktest: end"
 KTEST_FAIL_PREFIX = "vibeOS: ktest: FAIL"
+SMP4_MSIX_AP_COUNTER_FLAKE = (
+    "ktest FAIL: vibeOS: ktest: FAIL msix_cpu: ap counter"
+)
+
+
+def retryable_ktest_failure(smp: int, message: str) -> bool:
+    return smp == 4 and message == SMP4_MSIX_AP_COUNTER_FLAKE
 
 
 def check_ktest_output(

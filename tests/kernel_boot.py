@@ -13,6 +13,7 @@ from harness import (  # noqa: E402
     HarnessError,
     QemuConfig,
     check_ktest_output,
+    retryable_ktest_failure,
     run_qemu_until_exit,
 )
 
@@ -53,7 +54,7 @@ def _block_name(name: str):
 
 
 def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool):
-    """One ktest QEMU. Retry once on a silent timeout (user_syscalls wait4)."""
+    """One ktest QEMU. Retry once on a known host-timing flake."""
     tag = "persist reboot" if persist_reboot else "ktest"
     last: HarnessError | None = None
     for attempt in range(2):
@@ -78,8 +79,12 @@ def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool):
             return raw
         except HarnessError as e:
             last = e
-            if attempt == 0 and "timed out" in str(e):
-                print(f"[{tag}] retry after timeout: {e}", file=sys.stderr)
+            timed_out = "timed out" in str(e)
+            if attempt == 0 and (
+                timed_out or retryable_ktest_failure(cfg.smp, str(e))
+            ):
+                reason = "timeout" if timed_out else "SMP4 MSI-X AP counter flake"
+                print(f"[{tag}] retry after {reason}: {e}", file=sys.stderr)
                 continue
             raise
     assert last is not None

@@ -22,6 +22,7 @@ from harness import (  # noqa: E402
     HPET_OFF_MACHINE,
     OVMF_BOOT_ARGS,
     _qemu_argv,
+    retryable_ktest_failure,
     serial_tail,
 )
 
@@ -304,6 +305,16 @@ class TestKtestProtocol(unittest.TestCase):
         with self.assertRaises(HarnessError) as cm:
             check_ktest_output(lines, ISA_DEBUG_FAIL)
         self.assertIn("isa-debug-exit", str(cm.exception))
+
+    def test_only_smp4_msix_ap_counter_is_retryable(self) -> None:
+        msg = "ktest FAIL: vibeOS: ktest: FAIL msix_cpu: ap counter"
+        self.assertTrue(retryable_ktest_failure(4, msg))
+        self.assertFalse(retryable_ktest_failure(2, msg))
+        self.assertFalse(
+            retryable_ktest_failure(
+                4, "ktest FAIL: vibeOS: ktest: FAIL msix_cpu: bsp counter"
+            )
+        )
 
 
 class TestQemuArgv(unittest.TestCase):
