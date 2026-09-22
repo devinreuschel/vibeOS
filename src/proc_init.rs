@@ -405,9 +405,10 @@ fn spawn_elf(path: &str, prefer: u32, ppid: u32) -> Result<u32, LoadError> {
     entry.rsp = loaded.rsp;
     entry.rflags = RFLAGS_RESERVED1 | RFLAGS_IF;
     entry.fs_base = loaded.fs;
+    let boxed = Box::new(loaded.space);
     with_table(|t| {
         init_slot(t, pid, ppid, name, false);
-        t.procs[pid as usize].space = Some(Box::new(loaded.space));
+        t.procs[pid as usize].space = Some(boxed);
         t.procs[pid as usize].entry = entry;
     });
     let h = thread_init::spawn_user(name, user_thread_entry, pid, cr3);
@@ -874,6 +875,7 @@ fn sys_fork(frame: *mut SyscallFrame) -> i64 {
     let fs = crate::x86::rdmsr(crate::x86::IA32_FS_BASE);
     let mut child_regs = child_regs;
     child_regs.fs_base = fs;
+    let boxed = Box::new(cloned);
     let h = thread_init::spawn_user("user", user_thread_entry, pid, cr3);
     with_table(|t| {
         init_slot(t, pid, ppid, "user", false);
@@ -881,7 +883,7 @@ fn sys_fork(frame: *mut SyscallFrame) -> i64 {
         p.fds = fds;
         p.cwd = cwd;
         p.creds = creds;
-        p.space = Some(Box::new(cloned));
+        p.space = Some(boxed);
         p.entry = child_regs;
         p.tid = h.id();
         p.bound = false;
