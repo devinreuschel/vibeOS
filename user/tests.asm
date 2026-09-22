@@ -150,6 +150,12 @@ _start:
     cmp eax, SIGSEGV
     jne fail
 
+    mov eax, SYS_WRITE
+    mov edi, 1
+    lea rsi, [rel waits]
+    mov edx, waits_len
+    syscall
+
     ; bounded fork bomb. Yield so the child can exit to zombie before
     ; the next fork; wait4 then reaps without sleeping on a live herd.
     xor r13, r13
@@ -208,6 +214,8 @@ banner:     db "user: tests begin", 10
 banner_len  equ $ - banner
 dupmsg:     db "user: dup ok", 10
 dupmsg_len  equ $ - dupmsg
+waits:      db "user: waits ok", 10
+waits_len   equ $ - waits
 ok:         db "user: tests ok", 10
 ok_len      equ $ - ok
 bad:        db "user: tests fail", 10
