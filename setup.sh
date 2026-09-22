@@ -61,7 +61,7 @@ if [ -f "$TOOLCHAIN_FILE" ]; then
             echo "setup: $PINNED already installed"
         else
             echo "setup: installing $PINNED"
-            rustup toolchain install "$PINNED" --component rust-src --component llvm-tools
+            rustup toolchain install "$PINNED" --component rust-src --component llvm-tools --no-self-update
         fi
     else
         echo "setup: rustup not found; install $PINNED with rust-src and llvm-tools" >&2
