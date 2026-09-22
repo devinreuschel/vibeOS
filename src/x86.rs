@@ -2,6 +2,7 @@
 //! CPU state work lives under `src/arch/` in later phases.
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 /// # Safety
 /// Caller vouches that `port` is a valid I/O port for a byte write.
@@ -107,7 +108,97 @@ pub const FMASK_SYSCALL: u64 = 0x47700;
 pub const CR0_EM: u64 = 1 << 2;
 pub const CR0_MP: u64 = 1 << 1;
 pub const CR0_TS: u64 = 1 << 3;
+pub const CR0_WP: u64 = 1 << 16;
 pub const CR4_OSFXSR: u64 = 1 << 9;
+pub const CR4_UMIP: u64 = 1 << 11;
+pub const CR4_SMEP: u64 = 1 << 20;
+pub const CR4_SMAP: u64 = 1 << 21;
+
+/// CPUID.01H:ECX[30]
+pub const CPUID_ECX_RDRAND: u32 = 1 << 30;
+/// CPUID.(EAX=7,ECX=0):EBX[7]
+pub const CPUID_EBX_SMEP: u32 = 1 << 7;
+/// CPUID.(EAX=7,ECX=0):EBX[20]
+pub const CPUID_EBX_SMAP: u32 = 1 << 20;
+/// CPUID.(EAX=7,ECX=0):ECX[2]
+pub const CPUID_ECX_UMIP: u32 = 1 << 2;
+
+static SMAP_LIVE: AtomicBool = AtomicBool::new(false);
+
+/// `stac`/`clac` are #UD when SMAP is not present. Harden sets this.
+#[inline]
+pub fn smap_live() -> bool {
+    SMAP_LIVE.load(Ordering::Acquire)
+}
+
+#[inline]
+pub fn set_smap_live(on: bool) {
+    SMAP_LIVE.store(on, Ordering::Release);
+}
+
+/// Set `RFLAGS.AC`. No-op when SMAP is unsupported.
+#[inline]
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+pub fn stac() {
+    if !smap_live() {
+        return;
+    }
+    unsafe { asm!("stac", options(nomem, nostack)) };
+}
+
+/// Clear `RFLAGS.AC`. No-op when SMAP is unsupported.
+#[inline]
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+pub fn clac() {
+    if !smap_live() {
+        return;
+    }
+    unsafe { asm!("clac", options(nomem, nostack)) };
+}
+
+/// CPUID leaf 7 EBX/ECX, or zeros if the leaf is missing.
+#[inline]
+pub fn cpuid_leaf7() -> (u32, u32) {
+    let (max, _, _, _) = cpuid(0, 0);
+    if max < 7 {
+        return (0, 0);
+    }
+    let (_, ebx, ecx, _) = cpuid(7, 0);
+    (ebx, ecx)
+}
+
+#[inline]
+pub fn has_rdrand() -> bool {
+    let (_, _, ecx, _) = cpuid(1, 0);
+    ecx & CPUID_ECX_RDRAND != 0
+}
+
+/// One `RDRAND`. `None` if the feature is missing or the instruction fails.
+#[inline]
+pub fn rdrand64() -> Option<u64> {
+    if !has_rdrand() {
+        return None;
+    }
+    let mut tries = 0u8;
+    while tries < 10 {
+        let val: u64;
+        let ok: u8;
+        unsafe {
+            asm!(
+                "rdrand {val}",
+                "setc {ok}",
+                val = out(reg) val,
+                ok = out(reg_byte) ok,
+                options(nomem, nostack),
+            );
+        }
+        if ok != 0 {
+            return Some(val);
+        }
+        tries += 1;
+    }
+    None
+}
 
 #[inline]
 pub fn read_cr0() -> u64 {

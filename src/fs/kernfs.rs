@@ -997,15 +997,20 @@ pub(super) fn kern_read(
             Ok(buf.len())
         }
         KernKind::Random | KernKind::Urandom => {
-            // Weak xorshift. Do not wait on virtio-rng; that path is
-            // IRQ-threaded. Phase 14 owns a real pool.
-            let mut i = 0usize;
-            while i < buf.len() {
-                let x = mix_rng(vfs);
-                let b = x.to_le_bytes();
-                let n = (buf.len() - i).min(8);
-                buf[i..i + n].copy_from_slice(&b[..n]);
-                i += n;
+            let mut i = crate::entropy::hw_fill(buf);
+            if i < buf.len() {
+                // Weak xorshift fallback when virtio-rng and rdrand are dry.
+                crate::entropy::warn_xorshift();
+                if i == 0 {
+                    crate::entropy::set_last_source(crate::entropy::Source::XorShift);
+                }
+                while i < buf.len() {
+                    let x = mix_rng(vfs);
+                    let b = x.to_le_bytes();
+                    let n = (buf.len() - i).min(8);
+                    buf[i..i + n].copy_from_slice(&b[..n]);
+                    i += n;
+                }
             }
             Ok(buf.len())
         }

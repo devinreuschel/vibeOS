@@ -5,7 +5,7 @@
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::dev::{Device, Driver, IdMatch, ProbeError};
 use vibeos::dma::{self, DmaAlloc, DmaBuffer};
@@ -52,6 +52,13 @@ static FEATURES: AtomicU64 = AtomicU64::new(0);
 static QDMA_DEV: AtomicU64 = AtomicU64::new(0);
 static DATA_DEV: AtomicU64 = AtomicU64::new(0);
 static DATA_VIRT: AtomicU64 = AtomicU64::new(0);
+static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+const RNG_PAYLOAD: usize = 32;
+const RNG_PAYLOAD_OFF: usize = 16;
+static POOL: [AtomicU8; RNG_PAYLOAD] = [const { AtomicU8::new(0) }; RNG_PAYLOAD];
+static POOL_LEN: AtomicU32 = AtomicU32::new(0);
+static POOL_POS: AtomicU32 = AtomicU32::new(0);
 
 fn r8(va: u64, off: u16) -> u8 {
     unsafe { core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u8) }
@@ -167,6 +174,19 @@ fn rng_top() {
     let _ = work_init::raise_softirq(on_soft, 1);
 }
 
+fn publish_pool(virt: u64, len: u32) {
+    let n = (len as usize).min(RNG_PAYLOAD);
+    let p = virt.wrapping_add(RNG_PAYLOAD_OFF as u64) as *const u8;
+    let mut i = 0usize;
+    while i < n {
+        let b = unsafe { p.add(i).read_volatile() };
+        POOL[i].store(b, Ordering::Relaxed);
+        i += 1;
+    }
+    POOL_LEN.store(n as u32, Ordering::Release);
+    POOL_POS.store(0, Ordering::Release);
+}
+
 fn harvest() {
     let mut n = 0u32;
     let mut last = 0u32;
@@ -179,6 +199,8 @@ fn harvest() {
             }
             if n != 0 {
                 q.data.sync_for_cpu();
+                publish_pool(q.data.virt, last);
+                IN_FLIGHT.store(false, Ordering::Release);
             }
         }
     }
@@ -469,21 +491,48 @@ pub fn rng_last_len() -> u32 {
     LAST_LEN.load(Ordering::Acquire)
 }
 
+/// Copy harvested virtio-rng bytes. Does not take the queue lock.
+pub fn rng_take(buf: &mut [u8]) -> usize {
+    let mut i = 0usize;
+    while i < buf.len() {
+        let pos = POOL_POS.load(Ordering::Relaxed);
+        let len = POOL_LEN.load(Ordering::Acquire);
+        if pos >= len {
+            break;
+        }
+        if POOL_POS
+            .compare_exchange(pos, pos + 1, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            buf[i] = POOL[pos as usize].load(Ordering::Relaxed);
+            i += 1;
+        }
+    }
+    i
+}
+
 /// Submit one entropy buffer. Completion is harvested by the IRQ thread.
 pub fn rng_request() -> Result<(), VirtioError> {
     let mut g = Q.lock();
     let q = g.as_mut().ok_or(VirtioError::Failed)?;
+    if IN_FLIGHT.load(Ordering::Acquire) {
+        return Ok(());
+    }
     let table = q.data.device.as_u64();
-    let payload = table + 16;
+    let payload = table + RNG_PAYLOAD_OFF as u64;
     unsafe {
-        core::ptr::write_bytes((q.data.virt as *mut u8).add(16), 0, 32);
-        write_indirect_write(q.data.virt as *mut u8, payload, 32);
+        core::ptr::write_bytes(
+            (q.data.virt as *mut u8).add(RNG_PAYLOAD_OFF),
+            0,
+            RNG_PAYLOAD,
+        );
+        write_indirect_write(q.data.virt as *mut u8, payload, RNG_PAYLOAD as u32);
     }
     q.data.sync_for_device();
     if q.features & F_INDIRECT_DESC != 0 {
         q.vq.add_indirect(table, 16)?;
     } else {
-        q.vq.add(payload, 32, virtio::DESC_F_WRITE)?;
+        q.vq.add(payload, RNG_PAYLOAD as u32, virtio::DESC_F_WRITE)?;
     }
     let old = q.vq.last_avail;
     q.vq.publish();
@@ -491,6 +540,7 @@ pub fn rng_request() -> Result<(), VirtioError> {
     if q.vq.should_kick(old) {
         kick(q.doorbell);
     }
+    IN_FLIGHT.store(true, Ordering::Release);
     let _ = q.common;
     let _ = q.vec;
     Ok(())
