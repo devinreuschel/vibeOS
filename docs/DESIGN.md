@@ -6,11 +6,11 @@ firmware except through ACPI tables.
 
 Monolithic on purpose. Microkernel IPC design is a rabbit hole.
 
-**The tree is new. Almost nothing described here exists as code yet.** This is a design doc:
-decisions already made so an agent implementing a subsystem does not get to re-litigate the address
-map, the vector numbers, or the lock order halfway through. The numbers are load-bearing. Change them
-deliberately and update this doc in the same commit. [ROADMAP.md](ROADMAP.md) tracks what has actually
-landed.
+This file records decisions. [ROADMAP.md](ROADMAP.md) records what has landed; as of Phase 9 nearly
+everything in §2–§10 exists as code. When code and this file disagree, one of them is a bug
+([§1.4](#14-documentation-rules)). The numbers are load-bearing. Change them deliberately and update
+this doc in the same commit. An agent implementing a subsystem does not get to re-litigate the
+address map, the vector numbers, or the lock order halfway through.
 
 ## Contents
 
@@ -73,40 +73,32 @@ Cross-cutting and allowed from anywhere: `serial`, `panic`, `sync`, `log`.
 
 ## 1.3 Module map
 
-Target layout. Not all of it exists; the roadmap says when each lands.
+As of 2026-09-22 (Phase 9). Files that exist, not a target layout. [A1](reviews/issues/A1-directory-per-subsystem.md)
+will nest this pairing; do not invent `src/mm/` or `src/drivers/` until then.
 
-| Path | Role |
-|------|------|
-| `src/main.rs` | `_start`, Limine request statics, boot sequence, handoff to shell/init |
-| `src/lib.rs` | Portable half of the crate. Host-testable. No hardware access. |
-| `src/boot/` | Limine response handling, memory map ingestion, early console |
-| `src/mm/pmm/` | Buddy physical allocator, frame accounting |
-| `src/mm/paging/` | PML4 construction, map/unmap, physmap, PTE flags, TLB |
-| `src/mm/heap/` | Kernel heap and `GlobalAlloc` |
-| `src/mm/kva/` | Kernel virtual address allocator, guarded stacks |
-| `src/mm/slab/` | Object caches for hot kernel types |
-| `src/arch/x86_64/` | GDT, TSS, IDT, exception stubs, MSRs, context switch asm, CPUID |
-| `src/interrupts/` | Vector table ownership, IRQ registration, EOI dispatch |
-| `src/apic/` | LAPIC, I/O APIC, IPIs, x2APIC |
-| `src/acpi/` | RSDP, XSDT walk, MADT, HPET, FADT, MCFG |
-| `src/time/` | PIT, HPET, TSC calibration, monotonic clock, timers |
-| `src/smp/` | AP trampoline, AP bring-up, CPU topology |
-| `src/per_cpu/` | `GS_BASE` per-CPU struct and accessors |
-| `src/sched/` | Run queues, thread state machine, load balance |
-| `src/thread/` | TCB, kernel stacks, context switch, spawn/yield/sleep |
-| `src/sync/` | Interrupt guard, spinlock, blocking mutex, rwlock, condvar, futex |
-| `src/log/` | Level-filtered kernel log, ring buffer, `dmesg` |
-| `src/dev/` | Device model, PCI(e), MSI/MSI-X, DMA, virtio transport |
-| `src/drivers/` | Concrete drivers by class |
-| `src/block/` | Block layer, partitions, request queues, cache |
-| `src/fs/` | VFS, mounts, dentry/inode cache, kernfs/pseudo |
-| `src/fat.rs` | FAT32 parse/alloc (library) |
-| `src/vibefs.rs` | vibefs format, mkfs, fsck (library; [VIBEFS.md](VIBEFS.md)) |
-| `src/proc/` | Address spaces, processes, ELF loading, fork/exec/wait, signals |
-| `src/syscall/` | Entry point, dispatch table, argument validation |
-| `src/net/` | netdev, ethernet, ARP, IP, ICMP, UDP, TCP, sockets |
-| `src/console/` | Backend trait, framebuffer text, serial, input multiplexing |
-| `src/ktest/` | In-guest test registry, only built with the `kernel_tests` feature |
+**Naming.** Portable logic is `src/<name>.rs`, declared in `src/lib.rs`, host-tested via
+`tests/hostlib`. Hardware and boot live in `src/<name>_init.rs` or a kernel-only file, declared in
+`src/main.rs`. Nested today: `src/arch/` (GDT, IDT, PIC, catch, gs) and `src/fs/` (VFS + kernfs).
+`user/` is freestanding ELFs, not kernel modules.
+
+| Subsystem | Portable | Kernel |
+|-----------|----------|--------|
+| crate | `src/lib.rs` | `src/main.rs` (`_start`, Limine requests, boot order) |
+| boot / serial | `uart.rs`, `marker.rs`, `fmt_util.rs`, `symtab.rs` | `serial.rs`, `panic.rs`, `diag.rs`, `ksyms.rs` |
+| arch | `desc.rs`, `pic.rs`, `vectors.rs` | `arch/mod.rs`, `arch/gdt.rs`, `arch/idt.rs`, `arch/pic.rs`, `arch/catch.rs`, `arch/gs.rs`, `x86.rs` |
+| mm | `pmm.rs`, `paging.rs`, `heap.rs`, `kva.rs` | `pmm_init.rs`, `paging_init.rs`, `heap_init.rs`, `kva_init.rs` |
+| time | `time.rs` | `time_init.rs` |
+| acpi | `acpi.rs` | `acpi_init.rs` |
+| interrupts | `irq.rs`, `apic.rs`, `ipi.rs` | `irq_init.rs`, `apic_init.rs`, `ipi_init.rs` |
+| smp | `smp.rs`, `per_cpu.rs` | `smp_init.rs`, `per_cpu_init.rs` |
+| sched | `thread.rs`, `sched.rs`, `wait.rs`, `sync.rs`, `lock.rs`, `work.rs` | `thread_init.rs`, `sched_init.rs`, `sync_init.rs`, `work_init.rs` |
+| log | `log.rs` | `log_init.rs` |
+| console | `console.rs`, `kbd.rs`, `fb.rs`, `font.rs`, `shell.rs` | `console_init.rs`, `kbd_init.rs`, `fb_init.rs`, `shell_init.rs` |
+| devices | `pci.rs`, `dev.rs`, `dma.rs`, `virtio.rs` | `pci_init.rs`, `dev_init.rs`, `dma_init.rs`, `virtio_init.rs` |
+| block | `block.rs`, `virtio_blk.rs`, `part.rs`, `cache.rs` | `block_init.rs`, `virtio_blk_init.rs`, `part_init.rs`, `cache_init.rs` |
+| fs | `fs/mod.rs`, `fs/kernfs.rs`, `fat.rs`, `vibefs.rs` | `fs_init.rs`, `fat_init.rs`, `vibefs_init.rs`, `file_init.rs` |
+| proc | `addr_space.rs`, `elf.rs`, `proc.rs`, `syscall.rs` | `addr_space_init.rs`, `user_init.rs`, `proc_init.rs`, `syscall_init.rs` |
+| ktest | — | `ktest.rs` (`kernel_tests` only) |
 
 ## 1.4 Documentation rules
 
@@ -239,6 +231,9 @@ the panic broadcast.
 Every boot line is `vibeOS: <subsystem>: <state>`, lowercase, no punctuation at the end. Success
 markers are asserted by the e2e harness in order. Adding a marker means updating the contract in
 [section 8.3](#83-end-to-end) in the same commit.
+
+Contract lines go through `serial::line` / `writeln!(Serial)` so they bypass the log filter and still
+land in the ring. `klog!` is filtered. `PlainSerial` is only for `dmesg` and panic dumps.
 
 ```
 vibeOS: serial online

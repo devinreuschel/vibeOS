@@ -2,6 +2,7 @@
 name = "vibeos-hostlib-tests"
 version = "0.0.0"
 edition = "2024"
+license = "MIT"
 publish = false
 
 # Host-side wrapper around the portable half of the kernel.
