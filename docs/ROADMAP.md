@@ -100,7 +100,7 @@ rest of the project, which is the single most consequential decision in this pha
 - [x] built-in `x86_64-unknown-none`: `code-model: kernel`, `disable-redzone`, `-mmx,-sse,+soft-float`; rustflags force frame pointers, static relocation, `-no-pie`, `-znorelro`
 - [x] no RELRO (`-znorelro`); it conflicts with a non-PIE static kernel
 - [x] `.cargo/config.toml`: default target `x86_64-unknown-none`; linker script is an absolute `-T` from `build.rs`
-- [x] `Cargo.toml`: `panic = "abort"` in both profiles, `opt-level = 1` for dev
+- [x] `Cargo.toml`: kernel target aborts; host tests unwind (`profile.dev`); `opt-level = 1` for dev
 - [x] library and binary targets split from the first commit, not retrofitted
 - [x] `kernel_tests` feature declared now, wired in phase 1
 

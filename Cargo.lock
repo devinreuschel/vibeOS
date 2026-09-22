@@ -13,4 +13,16 @@ name = "vibeos"
 version = "0.8.0"
 dependencies = [
  "limine",
+ "vibeos-core",
+]
+
+[[package]]
+name = "vibeos-core"
+version = "0.8.0"
+
+[[package]]
+name = "vibeos-hostlib-tests"
+version = "0.8.0"
+dependencies = [
+ "vibeos-core",
 ]

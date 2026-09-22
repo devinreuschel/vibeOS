@@ -1,6 +1,6 @@
-//! vibeOS: portable, host-testable half.
+//! vibeOS: portable, host-testable half (`vibeos-core`).
 //!
-//! Anything that has no hardware access lives here so `cargo test --lib`
+//! Anything that has no hardware access lives here so host `cargo test`
 //! covers it. Serial byte formatting, marker strings, small utilities.
 //! Hardware pokes live in the binary crate. See DESIGN §1.1.
 //!
@@ -9,7 +9,7 @@
 //! warn (not deny) until the parser modules are clean; Q1 `-D warnings`
 //! would promote a crate-level warn.
 
-#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 

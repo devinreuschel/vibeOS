@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::Read;
 use std::process::ExitCode;
 
-use vibeos_hostlib_tests::vibefs::{self, MemDisk};
+use vibeos::vibefs::{self, MemDisk};
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);

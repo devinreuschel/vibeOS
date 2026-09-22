@@ -25,7 +25,7 @@ From ROADMAP "How to read this". Not optional.
 
 ## Conventions
 
-- **lib/bin pairing:** `src/foo.rs` is portable (`src/lib.rs`, host-tested). `src/foo_init.rs` is the kernel half (`src/main.rs`). Nested today: `src/arch/`, `src/fs/`. Do not invent `src/mm/` until A1. Map: [DESIGN §1.3](docs/DESIGN.md#13-module-map).
+- **lib/bin pairing:** `src/foo.rs` is portable (`vibeos-core` / `src/lib.rs`, host-tested). `src/foo_init.rs` is the kernel half (`src/main.rs`). Nested today: `src/arch/`, `src/fs/`. Do not invent `src/mm/` until A1. Map: [DESIGN §1.3](docs/DESIGN.md#13-module-map).
 - **Emit:** `marker!` for contract lines (never filtered, always captured); `klog!` for everything else; `PlainSerial` only for `dmesg` and panic dumps.
 - **Cells:** modules roll their own `UnsafeCell` wrappers. Q3 will replace them with `BootCell` / `IrqCell` plus `SpinMutex`. Do not add another copy.
 - No ephemeral "fixed X" comments ([DESIGN §1.4](docs/DESIGN.md#14-documentation-rules)).
@@ -48,7 +48,9 @@ Kernel target is built-in `x86_64-unknown-none` (B2). `./setup.sh` runs `rustup 
 
 `VIBEOS_*` overrides: `SMP`, `QEMU_CPU`, `MEM`, `QEMU_ACCEL` (default `tcg`), `ISO`, `TIMEOUT`, `BIOS`, `QEMU_EXTRA`. Makefile `?=` defaults are the source for `make run`. One reader: `tests/harness/harness.py` (`env_config`).
 
-macOS: `brew install qemu xorriso nasm python`. Hostlib and QEMU e2e work. Kernel-crate `cargo test --lib` is not portable yet (A2). UEFI e2e needs OVMF (`OVMF=`); Homebrew qemu ships `share/qemu/edk2-x86_64-code.fd`.
+macOS: `brew install qemu xorriso nasm python`. Hostlib and QEMU e2e work. `make test-unit` runs
+`vibeos-core` on the host triple (A2). UEFI e2e needs OVMF (`OVMF=`); Homebrew qemu ships
+`share/qemu/edk2-x86_64-code.fd`.
 
 ## Toolchain bump (C1)
 

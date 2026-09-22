@@ -1,0 +1,17 @@
+[package]
+name = "vibeos-core"
+version = "0.8.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# Portable half. Sources stay in `src/*.rs` (DESIGN §1.3) until A1 nests
+# them. Host tests: `cargo test -p vibeos-core --features std`.
+[lib]
+name = "vibeos"
+path = "../../src/lib.rs"
+
+[features]
+default = []
+# Host tools and `cargo test`. Kernel builds leave this off (`no_std`).
+std = []

@@ -41,8 +41,8 @@ These are not style preferences. They shape every subsystem.
    the second implementation nobody is writing. Traits appear where there are genuinely N backends
    (console output, block devices, filesystems).
 2. **Test the algorithm on the host.** Anything that is pure logic (parsers, allocators, state
-   machines, encodings) lives in the library half of the crate so `cargo test --lib` covers it.
-   Hardware pokes stay in the kernel half. This split is the single biggest lever on iteration speed.
+   machines, encodings) lives in `vibeos-core` so `make test-unit` covers it. Hardware pokes stay
+   in the kernel half. This split is the single biggest lever on iteration speed.
 3. **Serial is the ground truth.** Every subsystem prints one line when it comes up. Those lines are
    a contract enforced by the e2e harness, not debug noise.
 4. **Fail loud, fail early.** Assert invariants at boot. Bounded spins everywhere so a wedged device
@@ -76,14 +76,14 @@ Cross-cutting and allowed from anywhere: `serial`, `panic`, `sync`, `log`.
 As of 2026-09-22 (Phase 9). Files that exist, not a target layout. [A1](reviews/issues/A1-directory-per-subsystem.md)
 will nest this pairing; do not invent `src/mm/` or `src/drivers/` until then.
 
-**Naming.** `src/<name>.rs` is the portable half (`src/lib.rs`, host-tested via `tests/hostlib`).
-`src/<name>_init.rs` is the kernel half (`src/main.rs`). A few kernel-only files have no portable
-pair. `src/arch/` holds only what touches privileged CPU state (GDT, IDT, PIC, catch, gs, cpu). Nested
-also: `src/fs/` (VFS + kernfs). `user/` is freestanding ELFs, not kernel modules.
+**Naming.** `src/<name>.rs` is the portable half (`vibeos-core`, `src/lib.rs`, host-tested via
+`make test-unit`). `src/<name>_init.rs` is the kernel half (`src/main.rs`). A few kernel-only files
+have no portable pair. `src/arch/` holds only what touches privileged CPU state (GDT, IDT, PIC, catch,
+gs, cpu). Nested also: `src/fs/` (VFS + kernfs). `user/` is freestanding ELFs, not kernel modules.
 
 | Subsystem | Portable | Kernel |
 |-----------|----------|--------|
-| crate | `src/lib.rs` | `src/main.rs` (`_start`, Limine requests, boot order) |
+| crate | `src/lib.rs` (`vibeos-core`) | `src/main.rs` (`_start`, Limine requests, boot order) |
 | boot / serial | `uart.rs`, `marker.rs`, `fmt_util.rs`, `symtab.rs` | `serial.rs`, `panic.rs`, `diag.rs`, `ksyms.rs` |
 | arch | `desc.rs`, `pic.rs`, `vectors.rs` | `arch/mod.rs`, `arch/gdt.rs`, `arch/idt.rs`, `arch/pic.rs`, `arch/catch.rs`, `arch/gs.rs`, `arch/cpu.rs`, `x86.rs` |
 | mm | `pmm.rs`, `paging.rs`, `heap.rs`, `kva.rs` | `pmm_init.rs`, `paging_init.rs`, `heap_init.rs`, `kva_init.rs` |
@@ -272,12 +272,12 @@ Power-on to `sti`. Limine does the ugly part (real mode, A20, long mode, ELF loa
 | Components | `llvm-tools` (objdump/nm/size), `rustfmt`, `clippy`; `rust-src` for rust-analyzer |
 | Target | built-in `x86_64-unknown-none` (`rust-toolchain.toml` `targets`) |
 | Build | `cargo build` (default target in `.cargo/config.toml`) |
-| Panic | `abort`, both profiles |
-| Extra host tools | `xorriso`, `nasm` (AP trampoline), `qemu-system-x86_64`, `python3`, `dosfstools` (`fsck.fat`) |
+| Panic | kernel target `abort`; host tests `unwind` (`profile.dev`) |
+| Extra host tools | `xorriso`, `nasm` (AP trampoline), `qemu-system-x86_64`, `python3`, `dosfstools` (`fsck.fat`; host FAT tests skip if missing) |
 
 `make` is the usual entry. `cd src && cargo build` also works: `build.rs` passes
-`-T$CARGO_MANIFEST_DIR/linker.ld`. `cargo test --lib` on the kernel crate is not portable yet
-(A2); host tests live in `tests/hostlib`.
+`-T$CARGO_MANIFEST_DIR/linker.ld`. Host tests: `make test-unit` (`cargo test -p vibeos-core
+--features std --target $HOST`). `tests/hostlib` is mkfs/fsck only.
 
 `make` pins `CARGO_TARGET_DIR` to `./target`. Some environments point it at a shared cache, which
 leaves the ISO packaging a stale ELF from a previous build and produces genuinely baffling debugging
@@ -1238,7 +1238,7 @@ decision of where a test goes matters.
 
 | Tier | Runs | Speed | Catches |
 |------|------|-------|---------|
-| Host unit | `cargo test --lib`, on the dev machine | milliseconds | Algorithms: allocators, parsers, state machines, encodings, arithmetic |
+| Host unit | `make test-unit` (`vibeos-core`, any host triple) | milliseconds | Algorithms: allocators, parsers, state machines, encodings, arithmetic |
 | In-guest (ktest) | QEMU, kernel built with the `kernel_tests` feature | seconds | Anything needing real hardware state: page tables, MMIO, interrupts, threads, SMP |
 | End to end | QEMU boot of the normal ISO, serial captured | ~10 s | Boot regressions, marker ordering, panics, subsystem interaction |
 
@@ -1248,8 +1248,9 @@ weakness was that nearly everything lived behind `main.rs` and was therefore unt
 
 ## 8.1 Host unit tests
 
-Anything in `src/lib.rs` and its submodules. No hardware access, no `unsafe` port I/O, no MMIO. The
-kernel half calls into it.
+Anything in `src/lib.rs` and its submodules, compiled as `vibeos-core` on the host. No hardware
+access, no `unsafe` port I/O, no MMIO. The kernel half calls into it. x86-only pieces
+(`switch_context`) are `cfg(target_arch = "x86_64")`; they still run on Linux CI.
 
 Things that belong here and are easy to get wrong, so should have tests from the day they are written:
 
@@ -1459,7 +1460,7 @@ harness defaults match them.
 
 `make help` prints the live inventory. Do not hand-maintain a second list here.
 
-`make check` is the fast local gate (rustfmt `--check`, hostlib clippy `-D warnings`, host unit tests,
+`make check` is the fast local gate (rustfmt `--check`, `vibeos-core` clippy `-D warnings`, host unit tests,
 harness unit tests, ruff/mypy when installed). CI runs it as the `check` job before QEMU (DESIGN §8.6).
 `make test-e2e` is enough when only boot output or QEMU wiring changed. `make test` is the gate before
 a PR. `make test-ps2` is the focused #66 sendkey boot; `make test-e2e` already runs it, so `make test`
@@ -1473,7 +1474,7 @@ minutes and GitHub runner queues are sometimes full.
 
 | Job | When | What |
 |---|---|---|
-| `check` | push / PR | `make check` (fmt, hostlib clippy `-D warnings`, host units, harness, ruff/mypy, `scripts/check_*.py`) then `cd tests/hostlib && cargo llvm-cov --lib --fail-under-lines 87`. No QEMU, no `setup.sh`. HTML report is a 7-day `hostlib-coverage` artifact. |
+| `check` | push / PR | `make check` (fmt, `vibeos-core` clippy `-D warnings`, host units, harness, ruff/mypy, `scripts/check_*.py`) then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines 87`. No QEMU, no `setup.sh`. HTML report is a 7-day `hostlib-coverage` artifact. |
 | `phase 0 ladder` | push / PR, `needs: check` | Limine, QEMU/nasm/xorriso/OVMF, kernel clippy, ISO, e2e (BIOS/UEFI/panic/#GP/PIT), in-guest at `-smp 2` and `-smp 4`, LAPIC fallback, vibefs crash. Green `main` uploads `vibeos.iso` (7 days). |
 | `smp-stress` | weekly Monday 06:00 UTC + dispatch | `-smp 4`, longer timeout |
 | `nightly-canary` | same workflow, non-blocking | undated latest nightly, `make iso && make test-unit` |
@@ -1485,8 +1486,8 @@ that; kernel clippy ~22s; QEMU the rest. After T3, wall time is `check` plus the
 hostlib lint failure should go red in about a minute without starting QEMU.
 
 Hostlib line-coverage floor is **87%** (`--fail-under-lines 87` in `.github/workflows/ci.yml`).
-Measured 87.60% on `nightly-2026-09-22` (`cargo llvm-cov --lib` in `tests/hostlib`). Ratchet the
-integer only upward. Coverage is still not a percentage target for the kernel: every bug that gets
+Measured 87.60% on `nightly-2026-09-22` (`cargo llvm-cov --lib` in `tests/hostlib`; A2 runs the
+same portable sources as `vibeos-core`). Ratchet the integer only upward. Coverage is still not a percentage target for the kernel: every bug that gets
 fixed gets a test that would have caught it, in the cheapest tier that can catch it. Every entry in
 [section 9](#9-pitfalls) names the rule that guards it, and where that rule is only an invariant in
 code with no test, that is a weaker guarantee and should be visible as such.

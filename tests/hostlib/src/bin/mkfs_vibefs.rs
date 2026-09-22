@@ -5,7 +5,7 @@ use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 use std::process::ExitCode;
 
-use vibeos_hostlib_tests::vibefs::{self, MemDisk, Vol};
+use vibeos::vibefs::{self, MemDisk, Vol};
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();

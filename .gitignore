@@ -65,7 +65,7 @@ qemu_trace*
 .gdb_history
 gdb_history
 *.core
-core
+/core
 core.*
 vgcore.*
 *.dSYM/

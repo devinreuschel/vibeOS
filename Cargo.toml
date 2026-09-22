@@ -1,13 +1,14 @@
+[workspace]
+members = ["crates/core", "tests/hostlib"]
+resolver = "3"
+
 [package]
 name = "vibeos"
 version = "0.8.0"
 edition = "2024"
 license = "MIT"
 publish = false
-
-[lib]
-name = "vibeos"
-path = "src/lib.rs"
+autolib = false
 
 [[bin]]
 name = "vibeos"
@@ -32,11 +33,14 @@ vibefs_crash = []
 
 [dependencies]
 limine = "0.6"
+vibeos = { path = "crates/core", package = "vibeos-core" }
 
 [profile.dev]
 # opt-level 0 makes page-table setup overflow the boot stack; DESIGN §3.5.
 opt-level = 1
-panic = "abort"
+# Unwind so host `#[should_panic]` / `catch_unwind` work. The
+# `x86_64-unknown-none` target still aborts (A2).
+panic = "unwind"
 overflow-checks = true
 debug = true
 

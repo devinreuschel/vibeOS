@@ -5,6 +5,9 @@
 TARGET := x86_64-unknown-none
 CARGO  := cargo
 export CARGO_TARGET_DIR := $(CURDIR)/target
+# Host triple for vibeos-core tests and mkfs/fsck. Parent cargo config
+# defaults to $(TARGET), so host recipes pass --target $(HOST_TRIPLE).
+HOST_TRIPLE := $(shell rustc -vV | sed -n 's/^host: //p')
 # Script-style Python runners (`python3 tests/harness/run_e2e.py`) need the
 # repo root on sys.path so `from tests.harness.harness import` resolves.
 export PYTHONPATH := $(CURDIR)
@@ -51,7 +54,7 @@ USER_HELLO  := user/hello
 USER_INIT   := user/init
 USER_SH     := user/sh
 USER_TESTS  := user/tests
-KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml build.rs linker.ld Makefile rust-toolchain.toml \
+KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml crates/core/Cargo.toml build.rs linker.ld Makefile rust-toolchain.toml \
 	scripts/gen_ksyms.py scripts/mkinitrd.py scripts/mkuserelf.py scripts/mkiso.sh \
 	user/hello.asm user/init.asm user/sh.asm user/tests.asm user/sys.inc initrd.fat
 
@@ -102,7 +105,7 @@ help:
 	  '  run                   boot production ISO in QEMU' \
 	  '  run-panic             boot panic-test ISO' \
 	  '  layout                objdump sections + __kernel_ symbols' \
-	  '  test-unit             hostlib cargo test --lib' \
+	  '  test-unit             vibeos-core host tests (any host triple)' \
 	  '  test-harness          python unit tests for the harness' \
 	  '  test-e2e              boot contract on the production ISO' \
 	  '  test-e2e-uefi         same, OVMF (skipped if missing)' \
@@ -122,9 +125,9 @@ help:
 # compile; CI runs it in the QEMU ladder so `target/` stays warm for `make iso`.
 # Guard scripts (scripts/check_*.py) run when present (A4, Q5, A1).
 check:
-	cargo fmt --check
-	(cd tests/hostlib && cargo fmt --check)
-	cd tests/hostlib && cargo clippy --all-targets -- -D warnings
+	cargo fmt --check --all
+	cargo clippy -p vibeos-core --all-targets --features std --target $(HOST_TRIPLE) -- -D warnings
+	cargo clippy -p vibeos-hostlib-tests --all-targets --target $(HOST_TRIPLE) -- -D warnings
 	$(MAKE) test-unit
 	$(MAKE) test-harness
 	@if command -v ruff >/dev/null 2>&1; then \
@@ -195,7 +198,7 @@ layout: $(KERNEL_ELF)
 	@$(NM) $(KERNEL_ELF) | grep __kernel_
 
 test-unit:
-	cd tests/hostlib && cargo test --lib
+	cargo test -p vibeos-core --lib --features std --target $(HOST_TRIPLE)
 
 test-harness:
 	python3 -m unittest discover -s tests/harness -t . -v
@@ -237,15 +240,14 @@ test-kernel-smp4: $(ISO_KTEST)
 test-lapic-fallback: $(ISO_KTEST)
 	VIBEOS_ISO=$(ISO_KTEST) VIBEOS_QEMU_CPU=qemu64,-tsc-deadline python3 tests/harness/run_ktest.py
 
-# Host mkfs/fsck share src/vibefs.rs. CARGO_TARGET_DIR is the kernel's
-# `./target`; hostlib's .cargo/config selects the GNU triple.
-HOST_TRIPLE := x86_64-unknown-linux-gnu
+# Host mkfs/fsck share src/vibefs.rs. Artifacts land under
+# $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/ (A2).
 MKFS_VIBEFS := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/mkfs-vibefs
 FSCK_VIBEFS := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/fsck-vibefs
 
 $(MKFS_VIBEFS) $(FSCK_VIBEFS): src/vibefs.rs tests/hostlib/src/bin/mkfs_vibefs.rs \
-		tests/hostlib/src/bin/fsck_vibefs.rs tests/hostlib/Cargo.toml tests/hostlib/src/lib.rs
-	cd tests/hostlib && cargo build --bins
+		tests/hostlib/src/bin/fsck_vibefs.rs tests/hostlib/Cargo.toml crates/core/Cargo.toml
+	cargo build -p vibeos-hostlib-tests --bins --target $(HOST_TRIPLE)
 
 test-vibefs-crash: $(ISO_VIBEFS_CRASH) $(MKFS_VIBEFS) $(FSCK_VIBEFS)
 	VIBEOS_ISO=$(ISO_VIBEFS_CRASH) VIBEOS_MKFS=$(MKFS_VIBEFS) VIBEOS_FSCK=$(FSCK_VIBEFS) python3 tests/harness/run_vibefs_crash.py

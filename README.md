@@ -28,9 +28,9 @@ Quickstart:
     make run            # QEMU window = PS/2; the terminal is COM1 (`-serial stdio`)
     make test           # host units + harness units + e2e (BIOS, UEFI, panic) + in-guest
 
-macOS: `brew install qemu xorriso nasm python`. `make test-unit` (hostlib) and QEMU e2e work. Host
-tests of the kernel crate itself are not portable yet. UEFI e2e needs OVMF (`OVMF=/path/to/OVMF.fd`);
-Homebrew qemu ships `share/qemu/edk2-x86_64-code.fd`.
+macOS: `brew install qemu xorriso nasm python`. `make test-unit` (`vibeos-core` on the host triple)
+and QEMU e2e work. UEFI e2e needs OVMF (`OVMF=/path/to/OVMF.fd`); Homebrew qemu ships
+`share/qemu/edk2-x86_64-code.fd`.
 
 A previous iteration got to SMP with a preemptive scheduler before being scrapped; what survived is
 written down in `docs/`.
