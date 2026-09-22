@@ -268,28 +268,31 @@ Power-on to `sti`. Limine does the ugly part (real mode, A20, long mode, ELF loa
 | Piece | Value |
 |-------|-------|
 | Channel | dated nightly in `rust-toolchain.toml` (bump with CI in one PR) |
-| Components | `rust-src` (required by `build-std`), `llvm-tools` (objdump/nm/size) |
-| Target | `x86_64-unknown-none-executable.json`, custom spec in the repo root |
-| Build | `cargo build -Z build-std=core,compiler_builtins,alloc --target x86_64-unknown-none-executable.json` |
+| Components | `llvm-tools` (objdump/nm/size), `rustfmt`, `clippy`; `rust-src` for rust-analyzer |
+| Target | built-in `x86_64-unknown-none` (`rust-toolchain.toml` `targets`) |
+| Build | `cargo build` (default target in `.cargo/config.toml`) |
 | Panic | `abort`, both profiles |
 | Extra host tools | `xorriso`, `nasm` (AP trampoline), `qemu-system-x86_64`, `python3`, `dosfstools` (`fsck.fat`) |
 
-Plain `cargo build` does not produce a usable kernel. Use `make`. `cargo test --lib` is the only cargo
-invocation that runs bare.
+`make` is the usual entry. `cd src && cargo build` also works: `build.rs` passes
+`-T$CARGO_MANIFEST_DIR/linker.ld`. `cargo test --lib` on the kernel crate is not portable yet
+(A2); host tests live in `tests/hostlib`.
 
 `make` pins `CARGO_TARGET_DIR` to `./target`. Some environments point it at a shared cache, which
 leaves the ISO packaging a stale ELF from a previous build and produces genuinely baffling debugging
 sessions.
 
-Target spec notes:
+Target notes:
 
-- `"executable": true`, no PIE, static relocation model, `code-model: kernel`.
+- Built-in `x86_64-unknown-none` already has `code-model: kernel`, `disable-redzone`,
+  `-mmx,-sse,+soft-float`, `panic=abort`, and `rust-lld`.
+- The builtin spec defaults to PIE and full RELRO. rustflags override to static relocation,
+  `-no-pie`, and `-znorelro`. RELRO fights a non-PIE static kernel.
 - `disable-redzone: true`. Interrupt handlers clobber the red zone.
-- `features: "-mmx,-sse,+soft-float"` until the kernel explicitly enables SSE and saves state on
-  context switch. Enabling it early means the first floating point use in a driver silently corrupts
-  another thread.
-- No RELRO in `pre-link-args`. It conflicts with a non-PIE static kernel and only produces confusing
-  linker output.
+- Frame pointers are forced (`-C force-frame-pointers=yes`) so panic dumps can symbolize.
+- SSE stays off until the kernel explicitly enables it and saves state on context switch.
+  Enabling it early means the first floating point use in a driver silently corrupts another thread.
+- `build.rs` passes the linker script as an absolute `-T` so the link does not depend on cwd.
 
 ## 3.2 Limine protocol
 
@@ -1494,8 +1497,9 @@ directories. Rule: `make` pins `CARGO_TARGET_DIR` to `./target`, and prerequisit
 `src/`.
 
 **Build works from the repo root and fails from anywhere else.**
-`build.rs` invoked `nasm` on a relative path. Rule: anchor build script paths to `CARGO_MANIFEST_DIR`,
-and capture the assembler's stderr into the build output so the failure is readable.
+`build.rs` invoked `nasm` on a relative path, and the linker script was a cwd-relative `--script`.
+Rule: anchor assembler paths and `-T linker.ld` to `CARGO_MANIFEST_DIR`, and capture the assembler's
+stderr into the build output so the failure is readable.
 
 **A Limine response pointer is null and the kernel dies with no explanation.**
 The request static was not in the `.limine_requests` section, so the loader never saw it. Rule: every
@@ -1505,8 +1509,7 @@ response is read.
 **Panic backtrace addresses have no names, or the second link moves every RIP.**
 The symbol table lived in `.text` or was patched in place. Rule: first link with an empty `.rodata`
 table, `nm --demangle` the ELF, second link with the filled table. `.text` must not move. The
-two-pass lives in `KERNEL_VARIANT`; commas in `-Zbuild-std` stay in `BUILD_STD` and recipes
-reference `$$(CARGO)` so `$(call …)` does not split them.
+two-pass lives in `KERNEL_VARIANT`. `.text` must not move.
 
 **QEMU framebuffer reprints the prompt on every key; serial looks fine.**
 The FB write path skipped `\r` before the text grid saw it, so the line editor's in-place paint

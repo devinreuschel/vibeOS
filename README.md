@@ -10,8 +10,7 @@ If you learn something about hardware or Rust from reading this, good, but that'
 
 ## Stack
 
-- Dated Rust nightly with `rust-src`, pinned in `rust-toolchain.toml`, for `-Z build-std`
-- Custom target spec: `x86_64-unknown-none-executable.json`
+- Dated Rust nightly, pinned in `rust-toolchain.toml`, with built-in `x86_64-unknown-none`
 - Limine to boot, `linker.ld` for layout, `Makefile` to build the ISO, QEMU to run and test
 
 ## Status

@@ -2,8 +2,8 @@
 //!
 //! Teach cargo about kernel inputs that live outside the crate root:
 //!
-//!   - linker.ld and the custom target JSON (rustc reads them; cargo
-//!     would otherwise leave a stale ELF).
+//!   - linker.ld as an absolute `-T` so the link works from any cwd
+//!     (DESIGN §9.1).
 //!   - the AP trampoline: `nasm -f bin`, path anchored at
 //!     `CARGO_MANIFEST_DIR`, assembler stderr captured (DESIGN §9.1).
 
@@ -12,11 +12,14 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-changed=linker.ld");
-    println!("cargo:rerun-if-changed=x86_64-unknown-none-executable.json");
     println!("cargo:rerun-if-changed=build.rs");
 
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let linker = manifest.join("linker.ld");
+    println!("cargo:rerun-if-changed={}", linker.display());
+    // First link arg so rust-lld sees the script before other flags.
+    println!("cargo:rustc-link-arg-bins=-T{}", linker.display());
+
     let asm = manifest.join("src/trampoline.asm");
     println!("cargo:rerun-if-changed={}", asm.display());
 

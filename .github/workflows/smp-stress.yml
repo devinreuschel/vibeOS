@@ -22,6 +22,7 @@ jobs:
         with:
           toolchain: nightly-2026-09-22
           components: rust-src, llvm-tools
+          targets: x86_64-unknown-none
 
       - name: cache cargo registry
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -63,6 +64,7 @@ jobs:
         with:
           toolchain: nightly
           components: rust-src, llvm-tools
+          targets: x86_64-unknown-none
 
       - name: cache cargo registry
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
