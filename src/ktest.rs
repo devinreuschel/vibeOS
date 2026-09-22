@@ -121,6 +121,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("switch_two_threads", test_switch_two_threads),
     ("irq_guard_nest", test_irq_guard_nest),
     ("spin_mutex", test_spin_mutex),
+    ("lock_spins", test_lock_spins),
     ("yield_now_switches", test_yield_now_switches),
     ("sleep_ms_50", test_sleep_ms_50),
     ("preempt_two_threads", test_preempt_two_threads),
@@ -1531,6 +1532,20 @@ fn test_spin_mutex() -> Outcome {
     if *m.lock() != 42 {
         return Outcome::Fail("value lost");
     }
+    Outcome::Ok
+}
+
+fn test_lock_spins() -> Outcome {
+    let c = crate::sync_init::spin_counts();
+    crate::marker!(
+        "vibeOS: ktest:   spins pt={} buddy={} heap={} sched={} device={} serial={}",
+        c[1],
+        c[2],
+        c[3],
+        c[4],
+        c[5],
+        c[6]
+    );
     Outcome::Ok
 }
 

@@ -8,6 +8,8 @@
 use core::cell::UnsafeCell;
 use core::mem::ManuallyDrop;
 use core::ops::{Deref, DerefMut};
+#[cfg(feature = "kernel_tests")]
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use vibeos::lock::{acquire_mask, can_acquire, release_mask};
 use vibeos::sync::SpinLock;
@@ -56,6 +58,8 @@ impl<T> SpinMutex<T> {
         let owner = owner_token();
         lock_enter(self.rank);
         while !self.lock.try_acquire(owner) {
+            #[cfg(feature = "kernel_tests")]
+            record_spin(self.rank);
             crate::ipi_init::service_incoming();
             core::hint::spin_loop();
         }
@@ -115,6 +119,26 @@ fn owner_token() -> usize {
         Some(c) => c.cpu_id as usize + 1,
         None => 1,
     }
+}
+
+#[cfg(feature = "kernel_tests")]
+const SPIN_RANKS: usize = 7;
+
+#[cfg(feature = "kernel_tests")]
+static SPINS: [AtomicU64; SPIN_RANKS] = [const { AtomicU64::new(0) }; SPIN_RANKS];
+
+#[cfg(feature = "kernel_tests")]
+fn record_spin(rank: u8) {
+    let i = rank as usize;
+    if i < SPIN_RANKS {
+        SPINS[i].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Spin iterations per lock rank (index by rank; 0 unused). Phase 17 baseline.
+#[cfg(feature = "kernel_tests")]
+pub fn spin_counts() -> [u64; SPIN_RANKS] {
+    core::array::from_fn(|i| SPINS[i].load(Ordering::Relaxed))
 }
 
 fn lock_cpu() -> usize {

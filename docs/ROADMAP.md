@@ -1433,6 +1433,7 @@ The parts that separate a working system from a serious one.
 - [ ] topology awareness from CPUID: prefer a sibling core, keep a thread near its cache
 - [ ] cgroup-style group scheduling with CPU shares and quotas
 - [ ] latency measured under load, since the whole point is the tail and not the average
+- [ ] per-CPU TCB ownership or a sharded TCB table; timeouts per CPU (timing wheel, `TimeoutQueue` replacement already anticipated in `src/sched.rs`)
 
 ### 17.5 Scalability
 - [ ] RCU for read-mostly structures: the dentry cache, the routing table, the module list
@@ -1441,6 +1442,7 @@ The parts that separate a working system from a serious one.
 - [ ] lock-free queues on the paths that need them, with a documented memory ordering argument
 - [ ] the global locks split by hash or by CPU where profiling says it matters
 - [ ] contention measured before and after each change, with the numbers recorded
+- [ ] block cache: per-device or hashed locks; VFS: RCU-style dentry lookup or per-mount locks; log ring: per-CPU staging with a printer thread (ROADMAP §5.5 item already open)
 
 ### 17.6 Power and idle
 - [ ] tickless idle: arm the next real deadline instead of a periodic tick
@@ -1464,6 +1466,7 @@ The parts that separate a working system from a serious one.
 - [ ] direct I/O bypassing the page cache
 - [ ] polled I/O for NVMe, where the interrupt costs more than the spin
 - [ ] boot time reduced by parallelizing device probing and deferring what can be deferred
+- [ ] virtio-blk zero-copy: DMA directly from page-cache pages once ROADMAP §10.6 unifies the caches; drop the bounce path
 
 ---
 

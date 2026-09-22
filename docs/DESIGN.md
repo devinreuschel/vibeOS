@@ -1154,7 +1154,9 @@ The global lock order is in [section 2.1](#21-lock-order) and the one-spinlock r
 - Serial TX takes a lock so bytes from different CPUs do not interleave into unreadable garbage. Byte
   granularity, not line granularity; full line atomicity needs per-CPU buffers and a printer thread.
   Slice A ships a global IRQ-safe log ring plus a serial try-lock sink; the printer thread is parked
-  (Design ACK). Per-CPU serial capture still assembles lines into the ring.
+  (Design ACK). Per-CPU serial capture still assembles lines into the ring. The global SCHED lock,
+  one `SpinMutex` on the block cache, one VFS lock, the log-ring TAS, and virtio-blk bounce copies
+  are known scale limits; see ROADMAP §17.
 
 ## 7.8 Per-CPU scheduling
 
