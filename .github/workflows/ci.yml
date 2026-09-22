@@ -15,7 +15,7 @@ jobs:
     name: phase 0 ladder
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: install host tools
         run: |
@@ -23,26 +23,27 @@ jobs:
           sudo apt-get install -y qemu-system-x86 xorriso nasm ovmf dosfstools
 
       - name: install rust nightly
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
+          toolchain: nightly-2026-09-21
           components: rust-src, llvm-tools
 
       - name: cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
       - name: cache limine binaries
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: limine
-          key: limine-v9.6.7-binary
+          key: limine-v9.6.7-binary-ee5d29cd0a8034612dcd1df3f00052480db785c5
 
       - name: setup
         run: ./setup.sh

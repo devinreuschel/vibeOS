@@ -38,6 +38,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- Pin the Rust nightly date, GitHub Action SHAs, and Limine commit so CI
+  cannot go red from a floating toolchain. Cargo cache keys include
+  `Cargo.lock` and `rust-toolchain.toml`. Weekly smp-stress runs a
+  non-blocking latest-nightly canary.
 - CI: cancel superseded GitHub Actions runs for the same branch or PR so
   only the latest tip stays in the queue.
 
