@@ -235,6 +235,7 @@ extern "C" fn ap_entry() -> ! {
     unsafe { per_cpu_init::install_gs(cpu) };
     unsafe { crate::syscall_init::init_ap(tables.tss_ptr(), tables.rsp0()) };
     unsafe { arch::idt::load() };
+    arch::cpu::harden();
     unsafe { apic_init::enable_ap() };
     cpu.tsc_per_ms = time_init::tsc_per_ms();
     cpu.timer_mode = apic_init::timer_mode();

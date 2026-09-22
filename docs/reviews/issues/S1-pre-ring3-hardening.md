@@ -1,5 +1,10 @@
 # S1 · Finish the pre-ring-3 hardening checklist
 
+**Landed** (this PR). SMEP/SMAP/UMIP/`CR0.WP` via `arch::cpu::harden` on BSP and APs;
+ktest `cpu_hardening` (skip on `qemu64`); `/dev/random` via virtio-rng then RDRAND then
+xorshift (`dev_random_source`). Soft parks as PR comments: SMAP fault test (Phase 16),
+user-VA `copy_from_user` rewrite, `VIBEOS_NO_HARDEN`, entropy pool.
+
 | | |
 |---|---|
 | **Area** | 4.8 Security |

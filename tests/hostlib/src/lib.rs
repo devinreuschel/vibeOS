@@ -114,6 +114,9 @@ pub mod dma;
 #[path = "../../../src/elf.rs"]
 pub mod elf;
 
+#[path = "../../../src/entropy.rs"]
+pub mod entropy;
+
 #[path = "../../../src/pic.rs"]
 pub mod pic;
 

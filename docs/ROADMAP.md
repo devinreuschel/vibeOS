@@ -764,6 +764,7 @@ limitations.
 - [x] exit path restoring the context and `sysretq`, with the `iretq` slow path for cases `sysret` cannot express
 - [x] `RSP0` in the TSS updated on every context switch so an interrupt in ring 3 lands on the right kernel stack
 - [x] SSE and FPU state actually saved and restored now: `fxsave`/`xsave`, lazily if the accounting is right, and the target spec's float settings revisited
+- [x] SMEP/SMAP/UMIP where CPUID allows, `CR0.WP` asserted on every CPU, `stac`/`clac` helpers (S1)
 
 ### 9.2 Address spaces
 - [x] `AddressSpace` owning a PML4, with the kernel half shared by mapping the same upper entries
@@ -1341,6 +1342,10 @@ The parts that separate a working system from a serious one.
 - [ ] user address space randomization: stack, heap, and mmap bases
 
 ### 16.3 CPU features
+
+S1 turns SMEP/SMAP/UMIP/`CR0.WP` on at boot (`arch::cpu::harden`). These items are the
+in-guest fault tests and wiring `stac`/`clac` into a user-VA accessor (today copies go through HHDM).
+
 - [ ] SMEP, so the kernel cannot execute user pages
 - [ ] SMAP, with explicit `stac`/`clac` in the user access accessors and nowhere else
 - [ ] UMIP, so userspace cannot read descriptor table registers
@@ -1374,6 +1379,7 @@ The parts that separate a working system from a serious one.
 
 ### 16.7 Crypto and boot integrity
 - [ ] an entropy pool: `RDRAND`, timer jitter, interrupt timing, with health checks
+  (`/dev/random` already prefers virtio-rng then RDRAND; S1)
 - [ ] a CSPRNG, `/dev/random` and `/dev/urandom`, and `getrandom`
 - [ ] hashes and ciphers: SHA-2, SHA-3, AES-GCM, ChaCha20-Poly1305
 - [ ] public key: Ed25519, X25519, RSA verification

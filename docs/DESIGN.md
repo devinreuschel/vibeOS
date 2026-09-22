@@ -78,14 +78,14 @@ will nest this pairing; do not invent `src/mm/` or `src/drivers/` until then.
 
 **Naming.** `src/<name>.rs` is the portable half (`src/lib.rs`, host-tested via `tests/hostlib`).
 `src/<name>_init.rs` is the kernel half (`src/main.rs`). A few kernel-only files have no portable
-pair. `src/arch/` holds only what touches privileged CPU state (GDT, IDT, PIC, catch, gs). Nested
+pair. `src/arch/` holds only what touches privileged CPU state (GDT, IDT, PIC, catch, gs, cpu). Nested
 also: `src/fs/` (VFS + kernfs). `user/` is freestanding ELFs, not kernel modules.
 
 | Subsystem | Portable | Kernel |
 |-----------|----------|--------|
 | crate | `src/lib.rs` | `src/main.rs` (`_start`, Limine requests, boot order) |
 | boot / serial | `uart.rs`, `marker.rs`, `fmt_util.rs`, `symtab.rs` | `serial.rs`, `panic.rs`, `diag.rs`, `ksyms.rs` |
-| arch | `desc.rs`, `pic.rs`, `vectors.rs` | `arch/mod.rs`, `arch/gdt.rs`, `arch/idt.rs`, `arch/pic.rs`, `arch/catch.rs`, `arch/gs.rs`, `x86.rs` |
+| arch | `desc.rs`, `pic.rs`, `vectors.rs` | `arch/mod.rs`, `arch/gdt.rs`, `arch/idt.rs`, `arch/pic.rs`, `arch/catch.rs`, `arch/gs.rs`, `arch/cpu.rs`, `x86.rs` |
 | mm | `pmm.rs`, `paging.rs`, `heap.rs`, `kva.rs` | `pmm_init.rs`, `paging_init.rs`, `heap_init.rs`, `kva_init.rs` |
 | time | `time.rs` | `time_init.rs` |
 | acpi | `acpi.rs` | `acpi_init.rs` |
@@ -97,6 +97,7 @@ also: `src/fs/` (VFS + kernfs). `user/` is freestanding ELFs, not kernel modules
 | devices | `pci.rs`, `dev.rs`, `dma.rs`, `virtio.rs` | `pci_init.rs`, `dev_init.rs`, `dma_init.rs`, `virtio_init.rs` |
 | block | `block.rs`, `virtio_blk.rs`, `part.rs`, `cache.rs` | `block_init.rs`, `virtio_blk_init.rs`, `part_init.rs`, `cache_init.rs` |
 | fs | `fs/mod.rs`, `fs/kernfs.rs`, `fat.rs`, `vibefs.rs` | `fs_init.rs`, `fat_init.rs`, `vibefs_init.rs`, `file_init.rs` |
+| entropy | `entropy.rs` | `entropy_init.rs` |
 | proc | `addr_space.rs`, `elf.rs`, `proc.rs`, `syscall.rs` | `addr_space_init.rs`, `user_init.rs`, `proc_init.rs`, `syscall_init.rs` |
 | ktest | — | `ktest.rs` (`kernel_tests` only) |
 
@@ -642,6 +643,12 @@ User selectors go in from the start even before ring 3 exists. `syscall`/`sysret
 selectors out of `IA32_STAR` with a fixed layout: `STAR.SYSCALL_CS = 0x08` so kernel SS is CS+8, and
 `STAR.SYSRET_CS = 0x10` so user SS is +8 (`0x18`) and user CS is +16 (`0x20`). User *data* therefore
 sits before user *code*. Getting the order right up front avoids a rebuild of the GDT later.
+
+All user-memory access goes through `copy_from_user`/`copy_to_user` which bracket with `stac`/`clac`
+and validate ranges (ROADMAP §9.3). Today that is `AddressSpace::read_bytes`/`write_bytes` after
+`check_user_range`, copying through the HHDM physmap (a supervisor mapping, so SMAP does not apply
+until a user-VA accessor exists). `arch::cpu::harden()` sets `CR4.SMEP|SMAP|UMIP` where CPUID allows
+and asserts `CR0.WP` on every CPU; `stac`/`clac` are no-ops when SMAP is missing.
 
 Each CPU gets its own GDT and TSS. The TSS holds `RSP0` (the kernel stack that `syscall` and ring
 transitions land on) and the IST array. `CpuTables` is the per-CPU bundle; the BSP keeps one in a
@@ -1264,7 +1271,8 @@ Things that belong here and are easy to get wrong, so should have tests from the
   invalidate-on-create, mount-point crossing.
 - kernfs: one directory implementation shared by devfs/tmpfs/procfs/sysfs; tmpfs
   writes evict through the Phase 7 block cache rather than pinning a grow-only
-  buffer; `/dev/null` `/dev/zero` `/dev/random`; procfs stubs do not panic.
+  buffer; `/dev/null` `/dev/zero` `/dev/random` (virtio-rng, then RDRAND, then xorshift);
+  procfs stubs do not panic.
 
 Two lessons about writing these:
 

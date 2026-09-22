@@ -142,6 +142,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("cross_cpu_spawn", test_cross_cpu_spawn),
     ("reschedule_ipi_wake_ap", test_reschedule_ipi_wake_ap),
     ("call_function_ipi", test_call_function_ipi),
+    ("cpu_hardening", test_cpu_hardening),
     ("tlb_shootdown_remote", test_tlb_shootdown_remote),
     ("alloc_stress_smp", test_alloc_stress_smp),
     ("log_boot_captured", test_log_boot_captured),
@@ -175,6 +176,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("workqueue", test_workqueue),
     ("virtio_bind", test_virtio_bind),
     ("virtio_vq", test_virtio_vq),
+    ("dev_random_source", test_dev_random_source),
     ("block_ramdisk_rw", test_block_ramdisk_rw),
     ("block_concurrent", test_block_concurrent),
     ("block_retry", test_block_retry),
@@ -668,10 +670,13 @@ fn test_addrspace_map_unmap_teardown() -> Outcome {
     }
     addr_space_init::load_cr3(&space);
     x86::invlpg(va);
+    // User PTE: SMAP would #PF a kernel store/load via this VA.
+    x86::stac();
     unsafe {
         (va as *mut u64).write_volatile(0x1111_2222_3333_4444);
     }
     let got = unsafe { (va as *const u64).read_volatile() };
+    x86::clac();
     if got != 0x1111_2222_3333_4444 {
         addr_space_init::load_kernel_cr3();
         addr_space_init::teardown(space);
@@ -2280,6 +2285,63 @@ fn test_call_function_ipi() -> Outcome {
     Outcome::Ok
 }
 
+struct CrSnap {
+    cr0: AtomicU64,
+    cr4: AtomicU64,
+}
+
+fn read_cr_remote(arg: *mut ()) {
+    let s = unsafe { &*(arg as *const CrSnap) };
+    s.cr0.store(x86::read_cr0(), Ordering::SeqCst);
+    s.cr4.store(x86::read_cr4(), Ordering::SeqCst);
+}
+
+fn test_cpu_hardening() -> Outcome {
+    let f = arch::cpu::cpuid_features();
+    if !f.smep && !f.smap && !f.umip {
+        return Outcome::Skip("no smep/smap/umip");
+    }
+    x86::clac();
+    x86::stac();
+    x86::clac();
+
+    let me = per_cpu_init::current().cpu_id;
+    let mask = per_cpu_init::online_mask();
+    let mut cpu = 0u32;
+    while cpu < 64 {
+        if mask & (1u64 << cpu) == 0 {
+            cpu += 1;
+            continue;
+        }
+        let snap = CrSnap {
+            cr0: AtomicU64::new(0),
+            cr4: AtomicU64::new(0),
+        };
+        if cpu == me {
+            snap.cr0.store(x86::read_cr0(), Ordering::SeqCst);
+            snap.cr4.store(x86::read_cr4(), Ordering::SeqCst);
+        } else {
+            ipi_init::call_cpu(cpu, read_cr_remote, &snap as *const _ as *mut (), true);
+        }
+        let cr0 = snap.cr0.load(Ordering::SeqCst);
+        let cr4 = snap.cr4.load(Ordering::SeqCst);
+        if cr0 & x86::CR0_WP == 0 {
+            return Outcome::Fail("wp");
+        }
+        if f.smep != (cr4 & x86::CR4_SMEP != 0) {
+            return Outcome::Fail("smep");
+        }
+        if f.smap != (cr4 & x86::CR4_SMAP != 0) {
+            return Outcome::Fail("smap");
+        }
+        if f.umip != (cr4 & x86::CR4_UMIP != 0) {
+            return Outcome::Fail("umip");
+        }
+        cpu += 1;
+    }
+    Outcome::Ok
+}
+
 struct ShootProbe {
     va: u64,
     /// 0 idle, 1 access ok, 2 fault.
@@ -3473,6 +3535,30 @@ fn test_virtio_vq() -> Outcome {
         return Outcome::Fail("no softirq");
     }
     Outcome::Ok
+}
+
+fn test_dev_random_source() -> Outcome {
+    if !virtio_init::rng_bound() {
+        return Outcome::Skip("no virtio-rng");
+    }
+    if !fs_init::live() {
+        return Outcome::Fail("not live");
+    }
+    fs_init::with(|v| {
+        let Ok(fid) = v.open(None, "/dev/random", O_RDWR, 0) else {
+            return Outcome::Fail("open");
+        };
+        let mut buf = [0u8; 16];
+        let n = v.read(fid, &mut buf);
+        let _ = v.close(fid);
+        if n.ok() != Some(16) {
+            return Outcome::Fail("read");
+        }
+        match vibeos::entropy::last_source() {
+            vibeos::entropy::Source::XorShift => Outcome::Fail("xorshift"),
+            vibeos::entropy::Source::VirtioRng | vibeos::entropy::Source::RdRand => Outcome::Ok,
+        }
+    })
 }
 
 fn test_block_ramdisk_rw() -> Outcome {

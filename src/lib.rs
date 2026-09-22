@@ -23,6 +23,7 @@ pub mod desc;
 pub mod dev;
 pub mod dma;
 pub mod elf;
+pub mod entropy;
 pub mod fat;
 pub mod fb;
 pub mod fmt_util;

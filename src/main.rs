@@ -35,6 +35,7 @@ mod console_init;
 mod dev_init;
 mod diag;
 mod dma_init;
+mod entropy_init;
 mod fat_init;
 mod fb_init;
 mod file_init;
@@ -249,6 +250,7 @@ fn normal_boot_tail() {
 
     unsafe { arch::idt::init() };
     crate::marker!(marker::IDT_OK);
+    arch::cpu::harden();
 
     // DESIGN §3.3 step 11. After GDT: `mov gs` already ran. Before
     // IRQ0 so ISRs can `gs:[0]`. Allocate + wrmsr GS bases, then
@@ -306,6 +308,7 @@ fn normal_boot_tail() {
     crate::virtio_init::init();
     crate::virtio_blk_init::init();
     crate::dev_init::init();
+    crate::entropy_init::init();
     crate::block_init::init();
     crate::cache_init::init();
     crate::part_init::init();
