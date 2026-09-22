@@ -8,6 +8,7 @@ version = "0.8.0"
 edition = "2024"
 license = "MIT"
 publish = false
+autolib = false
 
 [[bin]]
 name = "vibeos"
