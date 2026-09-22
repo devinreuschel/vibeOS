@@ -206,6 +206,9 @@ pub(crate) fn current_mapper() -> Mapper {
 
 /// Map one 4 KiB leaf. Caller holds [`with_pt`]. Local `invlpg` only;
 /// the caller broadcasts shootdown after dropping PT.
+///
+/// # Safety
+/// Same contract as `Mapper::map_page`. Caller holds the PT lock.
 pub unsafe fn map_4k_locked(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(), MapError> {
     let mut alloc = BuddyFrames;
     let mut mapper = current_mapper();
@@ -227,6 +230,9 @@ pub unsafe fn map_4k(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(),
 }
 
 /// Map one 2 MiB leaf. Caller holds PT. Local `invlpg` only.
+///
+/// # Safety
+/// Same contract as `Mapper::map_page`. Caller holds the PT lock.
 pub unsafe fn map_2m_locked(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(), MapError> {
     let mut alloc = BuddyFrames;
     let mut mapper = current_mapper();
@@ -306,6 +312,9 @@ pub fn ensure_physmap_wb(phys: PhysAddr, len: u64) -> bool {
 }
 
 /// Unmap one leaf. Caller holds PT. Local `invlpg` only.
+///
+/// # Safety
+/// Caller holds PT and will not use `va` until shootdown.
 pub unsafe fn unmap_4k_locked(va: VirtAddr) -> Option<(PhysAddr, PageSize)> {
     let mut mapper = current_mapper();
     let r = unsafe { mapper.unmap_page(va) }?;

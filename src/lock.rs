@@ -51,11 +51,13 @@ mod tests {
         assert_eq!(RANK_SCHED, 4);
         assert_eq!(RANK_DEVICE, 5);
         assert_eq!(RANK_SERIAL, 6);
-        assert!(RANK_PT < RANK_BUDDY);
-        assert!(RANK_BUDDY < RANK_HEAP);
-        assert!(RANK_HEAP < RANK_SCHED);
-        assert!(RANK_SCHED < RANK_DEVICE);
-        assert!(RANK_DEVICE < RANK_SERIAL);
+        const {
+            assert!(RANK_PT < RANK_BUDDY);
+            assert!(RANK_BUDDY < RANK_HEAP);
+            assert!(RANK_HEAP < RANK_SCHED);
+            assert!(RANK_SCHED < RANK_DEVICE);
+            assert!(RANK_DEVICE < RANK_SERIAL);
+        }
     }
 
     #[test]

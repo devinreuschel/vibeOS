@@ -99,7 +99,7 @@ pub struct MemDisk<'a> {
 
 impl<'a> MemDisk<'a> {
     pub fn new(data: &'a mut [u8], sec: u32) -> Result<Self, FatError> {
-        if sec == 0 || data.len() < sec as usize || data.len() % sec as usize != 0 {
+        if sec == 0 || data.len() < sec as usize || !data.len().is_multiple_of(sec as usize) {
             return Err(FatError::Inval);
         }
         Ok(Self { data, sec })
@@ -436,6 +436,7 @@ impl FatVol {
         Ok(n)
     }
 
+    #[allow(clippy::too_many_arguments)] // FAT dirent + cluster + size update
     pub fn write<D: Disk>(
         &mut self,
         d: &mut D,
@@ -487,7 +488,7 @@ impl FatVol {
         self.update_short(d, dir_clu, dir_off, *first, new)?;
         d.flush()?;
         let cb = self.info.clus_bytes() as u32;
-        let keep = if new == 0 { 0 } else { (new + cb - 1) / cb };
+        let keep = if new == 0 { 0 } else { new.div_ceil(cb) };
         if keep == 0 {
             let old = *first;
             *first = 0;
@@ -537,7 +538,7 @@ impl FatVol {
         let mut short = [0u8; 11];
         let lfn = self.pick_short(d, dir_clu, name, &mut short)?;
         let n_lfn = if lfn {
-            (utf16_len(name) + LFN_CHARS - 1) / LFN_CHARS
+            utf16_len(name).div_ceil(LFN_CHARS)
         } else {
             0
         };
@@ -578,7 +579,7 @@ impl FatVol {
         self.write_dir_raw(d, dir_clu, short_off, &ent)?;
         d.flush()?;
         let _ = (ent_clu, date, time);
-        Ok(self.node_from_short(dir_clu, short_off, &ent, name)?)
+        self.node_from_short(dir_clu, short_off, &ent, name)
     }
 
     pub fn unlink<D: Disk>(
@@ -638,7 +639,7 @@ impl FatVol {
         let mut short = [0u8; 11];
         let lfn = self.pick_short(d, dst_dir, dst_name, &mut short)?;
         let n_lfn = if lfn {
-            (utf16_len(dst_name) + LFN_CHARS - 1) / LFN_CHARS
+            utf16_len(dst_name).div_ceil(LFN_CHARS)
         } else {
             0
         };
@@ -1125,7 +1126,7 @@ impl FatVol {
             return Ok(());
         }
         let cb = self.info.clus_bytes() as u32;
-        let need = if new == 0 { 0 } else { (new + cb - 1) / cb };
+        let need = if new == 0 { 0 } else { new.div_ceil(cb) };
         if need == 0 {
             return Ok(());
         }
@@ -1592,7 +1593,7 @@ fn parse_bpb(boot: &[u8; SEC], nsectors: u32) -> Result<FatInfo, FatError> {
 
 /// Format `buf` as FAT32. Size must be a multiple of 512 and at least 64 KiB.
 pub fn mkfs(buf: &mut [u8], label: &[u8]) -> Result<FatInfo, FatError> {
-    if buf.len() < INITRD_BYTES || buf.len() % SEC != 0 {
+    if buf.len() < INITRD_BYTES || !buf.len().is_multiple_of(SEC) {
         return Err(FatError::Inval);
     }
     buf.fill(0);
@@ -1607,7 +1608,7 @@ pub fn mkfs(buf: &mut [u8], label: &[u8]) -> Result<FatInfo, FatError> {
         if nclus < 2 {
             return Err(FatError::Inval);
         }
-        let need = ((nclus + 2) * 4 + (SEC as u32 - 1)) / SEC as u32;
+        let need = ((nclus + 2) * 4).div_ceil(SEC as u32);
         if need <= fatsz {
             break;
         }
@@ -2000,7 +2001,7 @@ fn fat_datetime(secs: u32) -> (u16, u16) {
     let mut days = secs / 86400;
     let mut y = 0u16;
     loop {
-        let ly = if y % 4 == 0 { 366 } else { 365 };
+        let ly = if y.is_multiple_of(4) { 366 } else { 365 };
         if days < ly {
             break;
         }
@@ -2012,7 +2013,7 @@ fn fat_datetime(secs: u32) -> (u16, u16) {
             break;
         }
     }
-    let leap = y % 4 == 0;
+    let leap = y.is_multiple_of(4);
     let md = [
         31u32,
         if leap { 29 } else { 28 },

@@ -21,10 +21,14 @@ impl<T> BootCell<T> {
     const fn new(v: T) -> Self {
         Self(UnsafeCell::new(v))
     }
-    #[allow(clippy::mut_from_ref)]
+    /// # Safety
+    /// Exclusive boot/IRQ-off access; cell is initialized.
+    #[allow(clippy::mut_from_ref)] // boot cell, IRQ-off exclusive
     unsafe fn get_mut(&self) -> &mut T {
         unsafe { &mut *self.0.get() }
     }
+    /// # Safety
+    /// Cell is initialized; shared reads are ok after boot.
     unsafe fn get(&self) -> &T {
         unsafe { &*self.0.get() }
     }
@@ -88,7 +92,7 @@ pub fn alloc_guarded_stack(pages: usize) -> Option<GuardedStack> {
     let stack = paging_init::with_pt(|| {
         let guard_u = unsafe { KVA.get_mut().alloc_guarded(pages) }?;
         let guard = VirtAddr(guard_u);
-        for i in 0..pages {
+        for (i, slot) in vas.iter_mut().take(pages).enumerate() {
             let va = VirtAddr(guard_u + PAGE_SIZE * (i as u64 + 1));
             let Some(pa) = pmm_init::with_buddy(|b| b.allocate_frame()) else {
                 failed_mapped = i;
@@ -101,7 +105,7 @@ pub fn alloc_guarded_stack(pages: usize) -> Option<GuardedStack> {
                 failed_n = unsafe { unwind_stack_locked(guard, i, pages, &mut failed_pas) };
                 return None;
             }
-            vas[i] = va;
+            *slot = va;
         }
         Some(GuardedStack { guard, pages })
     });
@@ -203,6 +207,8 @@ pub fn vunmap(va: VirtAddr, nframes: usize) {
     paging_init::with_pt(|| unsafe { KVA.get_mut().free(va.as_u64(), nframes as u64 * PAGE_SIZE) });
 }
 
+/// # Safety
+/// `stack` was allocated by this KVA; not the running stack.
 unsafe fn free_stack_shootdown(stack: GuardedStack) {
     let base = stack.mapped_base();
     unmap_shootdown(base, stack.pages, true);
@@ -245,6 +251,8 @@ fn unmap_shootdown(va: VirtAddr, n: usize, free_frames: bool) {
     }
 }
 
+/// # Safety
+/// Caller holds the PT lock.
 unsafe fn unmap_only_locked(va: VirtAddr, n: usize) {
     let mut i = 0;
     while i < n {
@@ -255,6 +263,9 @@ unsafe fn unmap_only_locked(va: VirtAddr, n: usize) {
 }
 
 /// Unmap `n` pages under PT. Caller shootdowns, then frees frames.
+///
+/// # Safety
+/// Caller holds the PT lock; `out` is large enough.
 unsafe fn unmap_collect_locked(va: VirtAddr, n: usize, out: &mut [u64; MAX_UNMAP]) -> usize {
     let mut np = 0usize;
     let mut i = 0;
@@ -271,6 +282,9 @@ unsafe fn unmap_collect_locked(va: VirtAddr, n: usize, out: &mut [u64; MAX_UNMAP
 
 /// Partial guarded-stack construction failed after `mapped` upper pages.
 /// Caller holds PT. Unmap + free VA; frames are returned after shootdown.
+///
+/// # Safety
+/// Caller holds the PT lock; `guard` is the failed allocation.
 unsafe fn unwind_stack_locked(
     guard: VirtAddr,
     mapped: usize,

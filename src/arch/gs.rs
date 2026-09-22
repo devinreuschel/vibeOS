@@ -22,6 +22,9 @@ pub fn from_user(cs: u64) -> bool {
 }
 
 /// The ISR `swapgs`. Syscall inlines the same insn as its first byte.
+///
+/// # Safety
+/// Must pair with the matching `swapgs` on the opposite CPL transition.
 #[inline(always)]
 pub unsafe fn do_swapgs() {
     unsafe {
@@ -29,6 +32,8 @@ pub unsafe fn do_swapgs() {
     }
 }
 
+/// # Safety
+/// `from_user` is the interrupted CS.RPL==3; GS must not already be swapped.
 #[inline(always)]
 pub unsafe fn enter(from_user: bool) {
     if from_user {
@@ -36,6 +41,8 @@ pub unsafe fn enter(from_user: bool) {
     }
 }
 
+/// # Safety
+/// `to_user` matches the `enter`/`swapgs` already done for this frame.
 #[inline(always)]
 pub unsafe fn leave(to_user: bool) {
     if to_user {
@@ -60,6 +67,8 @@ pub fn force_kernel() {
     }
 }
 
+/// # Safety
+/// `sel` is a valid data selector; clobbers DS/ES/SS/FS/GS.
 unsafe fn load_data_segs(sel: u16) {
     unsafe {
         core::arch::asm!(

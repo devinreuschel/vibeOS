@@ -114,13 +114,15 @@ mod tests {
 
     #[test]
     fn pic_and_exception_ranges_do_not_overlap() {
-        assert!(IRQ_BASE >= 0x20);
+        const {
+            assert!(IRQ_BASE >= 0x20);
+            assert!(DEVICE_VEC_START > IRQ_SPURIOUS_SLAVE);
+        }
         assert_eq!(IRQ_SLAVE_BASE, IRQ_BASE + 8);
         assert_eq!(IRQ_SPURIOUS_MASTER, 0x27);
         assert_eq!(IRQ_SPURIOUS_SLAVE, 0x2F);
         assert_eq!(IRQ_PIT, IRQ_BASE);
         assert_eq!(IRQ_KEYBOARD, IRQ_BASE + 1);
-        assert!(DEVICE_VEC_START > IRQ_SPURIOUS_SLAVE);
     }
 
     #[test]

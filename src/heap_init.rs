@@ -131,6 +131,8 @@ struct KernelAlloc;
 const GROW_ROUNDS: u32 = 4096;
 
 unsafe impl GlobalAlloc for KernelAlloc {
+    /// # Safety
+    /// `layout` is a valid allocation request.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let mut n = 0u32;
         loop {
@@ -148,10 +150,14 @@ unsafe impl GlobalAlloc for KernelAlloc {
         }
     }
 
+    /// # Safety
+    /// `ptr` came from `alloc` with the same `layout`.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         unsafe { HEAP.lock().0.dealloc(ptr, layout) };
     }
 
+    /// # Safety
+    /// `ptr` came from `alloc` with `layout`; the returned pointer replaces it.
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let mut n = 0u32;
         loop {

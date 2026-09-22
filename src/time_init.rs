@@ -49,6 +49,9 @@ impl<T> BootCell<T> {
     const fn new(v: T) -> Self {
         Self(UnsafeCell::new(v))
     }
+    /// # Safety
+    /// Exclusive boot/IRQ-off access; cell is initialized.
+    #[allow(clippy::mut_from_ref)] // boot cell, IRQ-off exclusive
     unsafe fn get_mut(&self) -> &mut T {
         unsafe { &mut *self.0.get() }
     }
@@ -312,7 +315,7 @@ fn rtc_decode(raw: RtcRaw) -> Option<(i32, u8, u8, u8, u8, u8)> {
     } else {
         hour = cvt(hour);
     }
-    let year = if century >= 19 && century <= 21 {
+    let year = if (19..=21).contains(&century) {
         century as i32 * 100 + year_2 as i32
     } else {
         2000 + year_2 as i32

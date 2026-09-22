@@ -140,6 +140,8 @@ global_asm!(
     "#
 );
 
+/// # Safety
+/// `p` is `Option<F>` for the active catch thunk.
 unsafe fn invoke<F: FnOnce()>(p: *mut u8) {
     let slot = unsafe { &mut *(p as *mut Option<F>) };
     slot.take().unwrap()();

@@ -220,7 +220,7 @@ fn schedule_inner(from_irq: bool) {
 
         if !from_irq {
             let ticks = per_cpu_init::current().ticks;
-            if ticks % SWEEP_TICKS == 0 {
+            if ticks.is_multiple_of(SWEEP_TICKS) {
                 for t in s.timeouts.overdue(now) {
                     if n_overdue < overdue.len() {
                         overdue[n_overdue] = t.id;
@@ -524,7 +524,7 @@ fn spawn_inner(
 ) -> ThreadHandle {
     let stack = kva_init::alloc_guarded_stack(DEFAULT_STACK_PAGES).expect("thread stack");
     let top = stack.top().as_u64();
-    assert!(top % 16 == 0, "kva stack top not 16-aligned");
+    assert!(top.is_multiple_of(16), "kva stack top not 16-aligned");
     let ks = KernelStack {
         guard: stack.guard.as_u64(),
         pages: stack.pages,
@@ -597,6 +597,7 @@ fn spawn_inner(
     ThreadHandle { id }
 }
 
+#[allow(clippy::too_many_arguments)] // TCB fields filled at spawn
 fn fill_tcb(
     tcb: &mut Tcb,
     name: &'static str,
@@ -704,10 +705,11 @@ pub fn switch_to(id: ThreadId) {
         enqueue_runnable(&mut cpu.runq, old_id, idle, cur_state);
     }
     let (old_ptr, new_ptr) = with_sched(|s| {
-        if let Some(t) = s.get_mut(old_id) {
-            if t.state != ThreadState::Dead && old_id != idle {
-                t.state = ThreadState::Ready;
-            }
+        if let Some(t) = s.get_mut(old_id)
+            && t.state != ThreadState::Dead
+            && old_id != idle
+        {
+            t.state = ThreadState::Ready;
         }
         if let Some(t) = s.get_mut(id) {
             t.state = ThreadState::Running;

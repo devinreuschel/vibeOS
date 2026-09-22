@@ -383,7 +383,7 @@ fn test_heap_align() -> Outcome {
         if p.is_null() {
             return Outcome::Fail("alloc null");
         }
-        if p as usize % align != 0 {
+        if !(p as usize).is_multiple_of(align) {
             unsafe { alloc::alloc::dealloc(p, layout) };
             return Outcome::Fail("alignment");
         }
@@ -599,8 +599,8 @@ fn test_acpi_discovery() -> Outcome {
     if !leaf_is_uc(madt.lapic_base) {
         return Outcome::Fail("lapic not uc");
     }
-    for i in 0..madt.ioapic_count {
-        if !leaf_is_uc(madt.ioapics[i].addr as u64) {
+    for io in madt.ioapics.iter().take(madt.ioapic_count) {
+        if !leaf_is_uc(io.addr as u64) {
             return Outcome::Fail("ioapic not uc");
         }
     }
@@ -1093,7 +1093,7 @@ fn test_now_us_under_yields() -> Outcome {
                 return Outcome::Fail("now_us went backwards under yield");
             }
             last = n;
-            if i % 200 == 0 {
+            if i.is_multiple_of(200) {
                 x86::hlt_once();
             }
             i += 1;
@@ -1110,7 +1110,7 @@ fn test_tsc_calib_source() -> Outcome {
                 return Outcome::Fail("hpet source without table");
             }
             let k = time_init::tsc_per_ms();
-            if k < 50_000 || k > 10_000_000 {
+            if !(50_000..=10_000_000).contains(&k) {
                 return Outcome::Fail("tsc_per_ms out of range");
             }
             // Boot HPET ran before APs. Remeasure both under this SMP load.
@@ -1142,7 +1142,7 @@ fn test_tsc_calib_source() -> Outcome {
                 return Outcome::Fail("pit source despite hpet table");
             }
             let k = time_init::tsc_per_ms();
-            if k < 50_000 || k > 10_000_000 {
+            if !(50_000..=10_000_000).contains(&k) {
                 return Outcome::Fail("tsc_per_ms out of range");
             }
             Outcome::Ok
@@ -1289,7 +1289,7 @@ fn test_per_cpu_bsp() -> Outcome {
     if thread_init::name(cpu.idle_id) != "idle" {
         return Outcome::Fail("idle name");
     }
-    if cpu.idle as *const _ == cpu.current as *const _ {
+    if core::ptr::eq(cpu.idle, cpu.current) {
         return Outcome::Fail("idle == current");
     }
     if cpu.current.is_null() || cpu.idle.is_null() {
@@ -1575,7 +1575,7 @@ fn test_sleep_ms_50() -> Outcome {
         }
         // TCG: ticks coalesce under SMP; sleep is now_ns. Keep 50–100 on
         // invariant TSC.
-        if !time_init::tsc_invariant() && (40..=400).contains(&du) && dt >= 1 && dt <= 400 {
+        if !time_init::tsc_invariant() && (40..=400).contains(&du) && (1..=400).contains(&dt) {
             return Outcome::Ok;
         }
         let _ = writeln!(Serial, "vibeOS: ktest:   sleep_ms dt={dt} du={du}");
@@ -2571,9 +2571,8 @@ fn test_kbd_ps2_irq() -> Outcome {
         }
         let t0 = crate::time_init::now_us();
         loop {
-            match crate::kbd_init::pop() {
-                Some(vibeos::kbd::DecodedKey::Char(b'a')) => return Outcome::Ok,
-                Some(_) | None => {}
+            if let Some(vibeos::kbd::DecodedKey::Char(b'a')) = crate::kbd_init::pop() {
+                return Outcome::Ok;
             }
             if crate::time_init::now_us().saturating_sub(t0) > 50_000 {
                 return Outcome::Fail("no irq key");
@@ -2848,7 +2847,7 @@ const E1000_IVAR: u32 = 0xE4;
 const E1000_ICR_LSC: u32 = 1 << 2;
 const E1000_ICR_OTHER: u32 = 1 << 24;
 /// Other -> MSI-X table entry 0, valid.
-const E1000_IVAR_OTHER0: u32 = (0 | 0x8) << 16;
+const E1000_IVAR_OTHER0: u32 = 0x8 << 16;
 
 const EDU_IDENT: u32 = 0x00;
 const EDU_IRQSTAT: u32 = 0x24;
@@ -3752,10 +3751,8 @@ fn test_block_vblk_rw() -> Outcome {
         if virtio_blk_init::barrier().is_err() {
             return Outcome::Fail("barrier");
         }
-        if virtio_blk_init::has_discard() {
-            if d.discard(5, 1).is_err() {
-                return Outcome::Fail("discard");
-            }
+        if virtio_blk_init::has_discard() && d.discard(5, 1).is_err() {
+            return Outcome::Fail("discard");
         }
         match d.read(0, &mut [0u8; 100]) {
             Err(BlockError::Inval) => {}

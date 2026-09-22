@@ -584,7 +584,15 @@ pub fn write_indirect_write(table: *mut u8, addr: u64, len: u32) {
 }
 
 /// Simulated device: consume avail, complete WRITE / INDIRECT WRITE descs.
-pub fn sim_complete(q: &mut SplitQueue, fill: u8, guest_mem: *mut u8, guest_off: u64) -> u16 {
+///
+/// # Safety
+/// `guest_mem` covers the queue's guest physical addresses minus `guest_off`.
+pub unsafe fn sim_complete(
+    q: &mut SplitQueue,
+    fill: u8,
+    guest_mem: *mut u8,
+    guest_off: u64,
+) -> u16 {
     let avail = q.avail_idx();
     let used = q.used_idx();
     let n = used_pending(avail, used);
@@ -678,6 +686,7 @@ mod tests {
             self.put16(CFG_STATUS, STATUS_CAPS);
             self.put16(CFG_COMMAND, 0);
         }
+        #[allow(clippy::too_many_arguments)] // PCI vendor-cap fields
         fn vend(&mut self, off: u8, next: u8, typ: u8, bar: u8, cap_off: u32, len: u32, mult: u32) {
             self.put8(off as u16, CAP_VENDOR);
             self.put8(off as u16 + 1, next);
@@ -814,7 +823,10 @@ mod tests {
             q.add(da, 8, DESC_F_WRITE).unwrap();
             let old = q.last_avail;
             q.publish();
-            assert_eq!(sim_complete(&mut q, (0xA0 + n) as u8, base, 0), 1);
+            assert_eq!(
+                unsafe { sim_complete(&mut q, (0xA0 + n) as u8, base, 0) },
+                1
+            );
             let u = q.get_used().unwrap();
             assert_eq!(u.len, 8);
             assert_eq!(q.get_used(), None);
@@ -839,7 +851,7 @@ mod tests {
         let slot = AtomicU16::new(0);
         q.publish_atomic(&slot);
         assert_eq!(slot.load(core::sync::atomic::Ordering::Acquire), 1);
-        assert_eq!(sim_complete(&mut q, 0x5A, base, 0), 1);
+        assert_eq!(unsafe { sim_complete(&mut q, 0x5A, base, 0) }, 1);
         let u = q.get_used().unwrap();
         assert_eq!(u.len, 4);
         unsafe {

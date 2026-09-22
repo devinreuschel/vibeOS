@@ -26,9 +26,14 @@ impl<T> BootCell<T> {
     const fn new(v: T) -> Self {
         Self(core::cell::UnsafeCell::new(v))
     }
+    /// # Safety
+    /// Exclusive boot/IRQ-off access; cell is initialized.
+    #[allow(clippy::mut_from_ref)] // boot cell, IRQ-off exclusive
     unsafe fn get_mut(&self) -> &mut T {
         unsafe { &mut *self.0.get() }
     }
+    /// # Safety
+    /// Cell is initialized.
     unsafe fn get(&self) -> &T {
         unsafe { &*self.0.get() }
     }
@@ -61,6 +66,9 @@ impl CpuTables {
     }
 
     /// lgdt, reload CS/data segs, ltr. IRQs stay masked.
+    ///
+    /// # Safety
+    /// `self` is the live tables for this CPU; IRQs off.
     pub unsafe fn load(&self) {
         let gdtr = DtPtr {
             limit: GDT_LIMIT,
@@ -189,7 +197,7 @@ pub unsafe fn init_bsp() {
 
 /// TSS for the BSP. Call after [`init_bsp`].
 pub fn bsp_tss_ptr() -> *mut Tss {
-    unsafe { core::ptr::addr_of_mut!((*BSP.get_mut()).tables.tss) }
+    unsafe { core::ptr::addr_of_mut!(BSP.get_mut().tables.tss) }
 }
 
 pub fn bsp_rsp0_top() -> u64 {
@@ -203,12 +211,16 @@ pub fn ist_span(slot: IstSlot) -> (u64, u64) {
     (s.mapped_base().as_u64(), s.top().as_u64())
 }
 
+/// # Safety
+/// `sel` is a valid code selector in the loaded GDT.
 unsafe fn reload_cs(sel: u16) {
     unsafe {
         asm_reload_cs(sel as u64);
     }
 }
 
+/// # Safety
+/// `sel` is a valid 64-bit code selector; this far-returns onto it.
 unsafe fn asm_reload_cs(sel: u64) {
     unsafe {
         core::arch::asm!(
@@ -224,6 +236,8 @@ unsafe fn asm_reload_cs(sel: u64) {
     }
 }
 
+/// # Safety
+/// `sel` is a valid data selector in the loaded GDT.
 unsafe fn load_data_segs(sel: u16) {
     unsafe {
         core::arch::asm!(

@@ -164,6 +164,8 @@ impl AddressSpace {
         self.regions.iter().filter_map(|r| *r)
     }
 
+    /// # Safety
+    /// `alloc` returns owned frames; `va` is the user half and not already mapped.
     pub unsafe fn map_anon<A: FrameAlloc + FrameFree>(
         &mut self,
         va: u64,
@@ -240,6 +242,9 @@ impl AddressSpace {
 
     /// Free every user leaf + user PT page + the PML4. Kernel-half
     /// PDPTs are not touched. `free` must return frames to `alloc`.
+    ///
+    /// # Safety
+    /// `free` may only be called with frames this space still owns.
     pub unsafe fn teardown<F>(&mut self, free: &mut F) -> TeardownStats
     where
         F: FnMut(PhysAddr),
@@ -339,6 +344,8 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// # Safety
+    /// `buf` is `len` live bytes; `va` is mapped in this space.
     unsafe fn copy_via_hhdm(
         &self,
         va: u64,
@@ -393,7 +400,7 @@ fn check_map_range(va: u64, len: u64) -> Result<(), AsError> {
     if len == 0 {
         return Ok(());
     }
-    if va % PAGE_SIZE_4K != 0 || len % PAGE_SIZE_4K != 0 {
+    if !va.is_multiple_of(PAGE_SIZE_4K) || !len.is_multiple_of(PAGE_SIZE_4K) {
         return Err(AsError::Misaligned);
     }
     let end = va.checked_add(len).ok_or(AsError::Overflow)?;
@@ -410,11 +417,18 @@ fn check_map_range(va: u64, len: u64) -> Result<(), AsError> {
 }
 
 /// Allocator that can return frames. Kernel buddy and host tests.
+///
+/// # Safety
+/// `free_frame` may only be called with a frame the caller still owns.
 pub unsafe trait FrameFree {
+    /// # Safety
+    /// `pa` is an owned frame this allocator may recycle.
     unsafe fn free_frame(&mut self, pa: PhysAddr);
 }
 
 impl AddressSpace {
+    /// # Safety
+    /// Pages in `[va, va+len)` are mapped by this space; `pool` owns the unmapped frames.
     pub unsafe fn unmap_free<A>(&mut self, va: u64, len: u64, pool: &mut A) -> Result<(), AsError>
     where
         A: FrameAlloc + FrameFree,
@@ -442,6 +456,8 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// # Safety
+    /// `pool` may recycle every user/PT/PML4 frame this space still owns.
     pub unsafe fn teardown_pool<A: FrameFree>(&mut self, pool: &mut A) -> TeardownStats {
         let mut free = |pa: PhysAddr| unsafe { pool.free_frame(pa) };
         unsafe { self.teardown(&mut free) }
@@ -547,6 +563,8 @@ mod tests {
     }
 
     unsafe impl FrameFree for TestPool {
+        /// # Safety
+        /// `pa` is a frame this pool handed out and has not freed.
         unsafe fn free_frame(&mut self, pa: PhysAddr) {
             let p = pa.as_u64();
             let i = self

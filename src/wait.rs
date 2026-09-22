@@ -50,6 +50,12 @@ impl WaitQueue {
     }
 }
 
+impl Default for WaitQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Enqueue, leave the ready FIFO, arm the deadline. Not runnable.
 pub fn begin_wait(
     wq: &mut WaitQueue,
@@ -125,6 +131,12 @@ impl MutexModel {
     }
 }
 
+impl Default for MutexModel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct RwLockModel {
     pub readers: u32,
     pub writer: ThreadId,
@@ -183,6 +195,12 @@ impl RwLockModel {
     }
 }
 
+impl Default for RwLockModel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Who to wake when a writer wait returns `Timeout`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WriterTimeoutWake {
@@ -226,6 +244,12 @@ impl CondModel {
         Self {
             wq: WaitQueue::new(),
         }
+    }
+}
+
+impl Default for CondModel {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -285,6 +309,12 @@ impl<T, const N: usize> ChannelModel<T, N> {
         self.head = (self.head + 1) % N;
         self.len -= 1;
         Some(v)
+    }
+}
+
+impl<T, const N: usize> Default for ChannelModel<T, N> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

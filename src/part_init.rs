@@ -282,7 +282,7 @@ pub fn info(i: usize) -> Option<(&'static str, u64, u32, PartKind)> {
 
 pub fn read(i: usize, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
     let s = slot(i).ok_or(BlockError::Failed)?;
-    if s.bs == 0 || buf.len() % s.bs as usize != 0 {
+    if s.bs == 0 || !buf.len().is_multiple_of(s.bs as usize) {
         return Err(BlockError::Inval);
     }
     let nsect = (buf.len() / s.bs as usize) as u64;
@@ -292,7 +292,7 @@ pub fn read(i: usize, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
 
 pub fn write(i: usize, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
     let s = slot(i).ok_or(BlockError::Failed)?;
-    if s.bs == 0 || buf.len() % s.bs as usize != 0 {
+    if s.bs == 0 || !buf.len().is_multiple_of(s.bs as usize) {
         return Err(BlockError::Inval);
     }
     let nsect = (buf.len() / s.bs as usize) as u64;
@@ -309,10 +309,10 @@ pub fn find_name(name: &str) -> Option<usize> {
     let n = count();
     let mut i = 0usize;
     while i < n {
-        if let Some(s) = slot(i) {
-            if s.name == name {
-                return Some(i);
-            }
+        if let Some(s) = slot(i)
+            && s.name == name
+        {
+            return Some(i);
         }
         i += 1;
     }
@@ -410,11 +410,10 @@ pub fn shell_lines(f: &mut impl core::fmt::Write) -> core::fmt::Result {
         if let Some(s) = slot(i) {
             writeln!(
                 f,
-                "vibeOS: blk: {} {} {} sectors {} {}",
+                "vibeOS: blk: {} {} {} sectors ready {}",
                 s.name,
                 s.bs,
                 s.nsect,
-                "ready",
                 type_str(s.kind)
             )?;
         }
@@ -428,12 +427,11 @@ pub fn live() -> bool {
 }
 
 pub fn init() {
-    if block_init::live() {
-        if stamp_ram0_mbr().is_ok() {
-            if let Ok(t) = parse_dev(DEV_RAM0) {
-                let _ = register_table(DEV_RAM0, &t);
-            }
-        }
+    if block_init::live()
+        && stamp_ram0_mbr().is_ok()
+        && let Ok(t) = parse_dev(DEV_RAM0)
+    {
+        let _ = register_table(DEV_RAM0, &t);
     }
     if virtio_blk_init::live() {
         let have = parse_dev(DEV_VDA);
@@ -444,12 +442,11 @@ pub fn init() {
             }
             _ => false,
         };
-        if !ok {
-            if stamp_vda_gpt().is_ok() {
-                if let Ok(t) = parse_dev(DEV_VDA) {
-                    let _ = register_table(DEV_VDA, &t);
-                }
-            }
+        if !ok
+            && stamp_vda_gpt().is_ok()
+            && let Ok(t) = parse_dev(DEV_VDA)
+        {
+            let _ = register_table(DEV_VDA, &t);
         }
     }
     LIVE.store(true, Ordering::Release);

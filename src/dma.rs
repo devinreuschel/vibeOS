@@ -173,6 +173,12 @@ impl SgList {
     }
 }
 
+impl Default for SgList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Store-side barrier before a device may observe a published index.
 #[inline]
 pub fn dma_wmb() {

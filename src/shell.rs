@@ -71,6 +71,10 @@ impl LineEditor {
         self.len
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     pub fn cursor(&self) -> usize {
         self.cur
     }
@@ -352,6 +356,12 @@ impl LineEditor {
     }
 }
 
+impl Default for LineEditor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn hist_index(head: usize, view: usize) -> usize {
     (head + view) % HIST_CAP
 }
@@ -452,10 +462,10 @@ impl Registry {
     pub fn lookup(&self, name: &str) -> Option<Command> {
         let mut i = 0;
         while i < self.n {
-            if let Some(c) = self.cmds[i] {
-                if c.name == name {
-                    return Some(c);
-                }
+            if let Some(c) = self.cmds[i]
+                && c.name == name
+            {
+                return Some(c);
             }
             i += 1;
         }
@@ -467,6 +477,12 @@ impl Registry {
             return None;
         }
         self.cmds[i]
+    }
+}
+
+impl Default for Registry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

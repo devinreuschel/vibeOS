@@ -102,6 +102,10 @@ impl Fd {
     }
 }
 
+/// Fd table is full or the number is out of range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FdError;
+
 #[derive(Clone, Copy, Debug)]
 pub struct FdTable {
     slots: [Fd; MAX_FDS],
@@ -140,16 +144,16 @@ impl FdTable {
         }
     }
 
-    pub fn set(&mut self, fd: u32, slot: Fd) -> Result<(), ()> {
+    pub fn set(&mut self, fd: u32, slot: Fd) -> Result<(), FdError> {
         let i = fd as usize;
         if i >= MAX_FDS {
-            return Err(());
+            return Err(FdError);
         }
         self.slots[i] = slot;
         Ok(())
     }
 
-    pub fn alloc(&mut self, slot: Fd) -> Result<u32, ()> {
+    pub fn alloc(&mut self, slot: Fd) -> Result<u32, FdError> {
         let mut i = 0u32;
         while i < MAX_FDS as u32 {
             if !self.slots[i as usize].is_open() {
@@ -158,7 +162,7 @@ impl FdTable {
             }
             i += 1;
         }
-        Err(())
+        Err(FdError)
     }
 
     /// Close and return the old slot. `None` if not open.
@@ -173,8 +177,8 @@ impl FdTable {
     }
 
     /// New fd, CLOEXEC cleared (Linux `dup`).
-    pub fn dup(&mut self, old: u32) -> Result<u32, ()> {
-        let s = self.get(old).ok_or(())?;
+    pub fn dup(&mut self, old: u32) -> Result<u32, FdError> {
+        let s = self.get(old).ok_or(FdError)?;
         self.alloc(Fd {
             kind: s.kind,
             flags: s.flags & !FD_CLOEXEC,
@@ -183,14 +187,14 @@ impl FdTable {
 
     /// Linux `dup2`: copy `old` onto `new`. CLOEXEC cleared on `new`.
     /// Returns the slot that occupied `new` (to drop the file).
-    pub fn dup2(&mut self, old: u32, new: u32) -> Result<Option<Fd>, ()> {
+    pub fn dup2(&mut self, old: u32, new: u32) -> Result<Option<Fd>, FdError> {
         if old == new {
-            let _ = self.get(old).ok_or(())?;
+            let _ = self.get(old).ok_or(FdError)?;
             return Ok(None);
         }
-        let s = self.get(old).ok_or(())?;
+        let s = self.get(old).ok_or(FdError)?;
         if new as usize >= MAX_FDS {
-            return Err(());
+            return Err(FdError);
         }
         let displaced = self.close(new);
         self.slots[new as usize] = Fd {

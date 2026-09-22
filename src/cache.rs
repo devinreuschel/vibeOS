@@ -395,11 +395,11 @@ impl<const N: usize> Cache<N> {
             let f = self.meta[s].flags;
             if f & (F_VALID | F_DIRTY | F_FILL) == F_VALID | F_DIRTY {
                 let key = self.meta[s].key;
-                if let Some(d) = dev {
-                    if key.dev != d {
-                        s += 1;
-                        continue;
-                    }
+                if let Some(d) = dev
+                    && key.dev != d
+                {
+                    s += 1;
+                    continue;
                 }
                 dst[..PAGE].copy_from_slice(&self.data[s]);
                 self.meta[s].flags = f & !F_DIRTY;
@@ -452,6 +452,12 @@ impl<const N: usize> Cache<N> {
     }
 }
 
+impl<const N: usize> Default for Cache<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn page_off(byte: u64) -> usize {
     (byte as usize) & (PAGE - 1)
 }
@@ -500,29 +506,17 @@ pub fn cached_read<B: Backend, const N: usize>(
         }
         done += n;
     }
-    if let Some(rk) = c.want_readahead() {
-        if c.find(rk).is_none() {
-            let mut dummy = [0u8; 1];
-            if let Ok(Some(fill)) = c.plan_read(rk, 0, &mut dummy, &mut evict) {
-                match fill.need {
-                    FillNeed::None => c.abort_fill(fill.slot),
-                    FillNeed::Writeback | FillNeed::WritebackThenRead => {
-                        let _ = b.write(fill.evict_key.offset, &evict);
-                        c.stats.device_writes = c.stats.device_writes.saturating_add(1);
-                        if matches!(fill.need, FillNeed::WritebackThenRead | FillNeed::Read) {
-                            let mut page = [0u8; PAGE];
-                            if b.read(rk.offset, &mut page).is_ok() {
-                                c.stats.device_reads = c.stats.device_reads.saturating_add(1);
-                                let mut one = [0u8; 1];
-                                let _ = c.install_read(&fill, &page, 0, &mut one);
-                            } else {
-                                c.abort_fill(fill.slot);
-                            }
-                        } else {
-                            c.abort_fill(fill.slot);
-                        }
-                    }
-                    FillNeed::Read => {
+    if let Some(rk) = c.want_readahead()
+        && c.find(rk).is_none()
+    {
+        let mut dummy = [0u8; 1];
+        if let Ok(Some(fill)) = c.plan_read(rk, 0, &mut dummy, &mut evict) {
+            match fill.need {
+                FillNeed::None => c.abort_fill(fill.slot),
+                FillNeed::Writeback | FillNeed::WritebackThenRead => {
+                    let _ = b.write(fill.evict_key.offset, &evict);
+                    c.stats.device_writes = c.stats.device_writes.saturating_add(1);
+                    if matches!(fill.need, FillNeed::WritebackThenRead | FillNeed::Read) {
                         let mut page = [0u8; PAGE];
                         if b.read(rk.offset, &mut page).is_ok() {
                             c.stats.device_reads = c.stats.device_reads.saturating_add(1);
@@ -531,6 +525,18 @@ pub fn cached_read<B: Backend, const N: usize>(
                         } else {
                             c.abort_fill(fill.slot);
                         }
+                    } else {
+                        c.abort_fill(fill.slot);
+                    }
+                }
+                FillNeed::Read => {
+                    let mut page = [0u8; PAGE];
+                    if b.read(rk.offset, &mut page).is_ok() {
+                        c.stats.device_reads = c.stats.device_reads.saturating_add(1);
+                        let mut one = [0u8; 1];
+                        let _ = c.install_read(&fill, &page, 0, &mut one);
+                    } else {
+                        c.abort_fill(fill.slot);
                     }
                 }
             }
@@ -594,10 +600,7 @@ fn writeback_all<B: Backend, const N: usize>(
 ) -> Result<(), BlockError> {
     let mut data = [0u8; PAGE];
     let mut start = 0usize;
-    loop {
-        let Some((slot, key)) = c.take_dirty(start, dev, &mut data) else {
-            break;
-        };
+    while let Some((slot, key)) = c.take_dirty(start, dev, &mut data) {
         if let Err(e) = b.write(key.offset, &data) {
             c.mark_dirty(slot, key);
             return Err(e);

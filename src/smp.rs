@@ -51,7 +51,9 @@ mod tests {
         assert_eq!(SIPI_VECTOR, 0x08);
         assert_eq!((SIPI_VECTOR as u64) << 12, TRAMPOLINE_PHYS);
         assert_eq!(TRAMPOLINE_PHYS % 4096, 0);
-        assert!(TRAMPOLINE_PHYS < 0x100000);
+        const {
+            assert!(TRAMPOLINE_PHYS < 0x100000);
+        }
     }
 
     #[test]

@@ -244,6 +244,9 @@ pub unsafe fn init_cpu() {
 }
 
 /// BSP: attach the GDT TSS and the dedicated RSP0 stack.
+///
+/// # Safety
+/// GDT loaded, `GS_BASE` is the BSP `PerCpu`.
 pub unsafe fn init_bsp() {
     unsafe { init_cpu() };
     let cpu = per_cpu_init::current_mut();
@@ -256,6 +259,9 @@ pub unsafe fn init_bsp() {
 }
 
 /// AP: `tables` is this CPU's GDT/TSS. Call after `install_gs`.
+///
+/// # Safety
+/// `tss` is this CPU's live TSS; `rsp0` is its kernel stack top.
 pub unsafe fn init_ap(tss: *mut Tss, rsp0: u64) {
     unsafe { init_cpu() };
     let cpu = per_cpu_init::current_mut();

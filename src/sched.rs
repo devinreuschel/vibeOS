@@ -292,7 +292,7 @@ pub fn wake_expired(
 }
 
 pub fn should_preempt(ticks: u64, current_is_idle: bool) -> bool {
-    current_is_idle || ticks % QUANTUM_TICKS == 0
+    current_is_idle || ticks.is_multiple_of(QUANTUM_TICKS)
 }
 
 #[cfg(test)]

@@ -330,15 +330,12 @@ impl Vfs {
             Ok(_) | Err(FsError::Exists) => return Ok(()),
             Err(_) => {}
         }
-        match self.resolve(None, path, true) {
-            Ok(p) => {
-                let islot = self.d_islot(p.dslot)?;
-                if self.inodes[islot as usize].kind == InodeKind::Dir {
-                    return Ok(());
-                }
-                return Err(FsError::NotDir);
+        if let Ok(p) = self.resolve(None, path, true) {
+            let islot = self.d_islot(p.dslot)?;
+            if self.inodes[islot as usize].kind == InodeKind::Dir {
+                return Ok(());
             }
-            Err(_) => {}
+            return Err(FsError::NotDir);
         }
         // FAT has no VFS mkdir. Plant a dir dentry so `mount` can cover it.
         let (parent, name) = super::split_basename(path.as_bytes())?;
@@ -746,15 +743,16 @@ fn kern_mk_special(
         n.tag = tag;
     }
     kern_link(vfs, parent, ino);
-    if kind.inode_kind() == InodeKind::Dir {
-        if let Some(p) = kern_get_mut(vfs, sb, parent) {
-            p.nlink = p.nlink.saturating_add(1);
-        }
+    if kind.inode_kind() == InodeKind::Dir
+        && let Some(p) = kern_get_mut(vfs, sb, parent)
+    {
+        p.nlink = p.nlink.saturating_add(1);
     }
     touch_dir(vfs, sb, parent, t);
     Ok(ino)
 }
 
+#[allow(clippy::too_many_arguments)] // sysfs attr packed PCI identity
 fn kern_mk_sys_attr(
     vfs: &mut Vfs,
     sb: u8,
@@ -959,10 +957,10 @@ pub(super) fn kern_unlink(vfs: &mut Vfs, dir_islot: u16, name: &[u8]) -> Result<
     }
     let t = vfs.now;
     kern_unlink_child(vfs, dir_ino, child);
-    if kind.inode_kind() == InodeKind::Dir {
-        if let Some(p) = kern_get_mut(vfs, sb, dir_ino) {
-            p.nlink = p.nlink.saturating_sub(1);
-        }
+    if kind.inode_kind() == InodeKind::Dir
+        && let Some(p) = kern_get_mut(vfs, sb, dir_ino)
+    {
+        p.nlink = p.nlink.saturating_sub(1);
     }
     if let Some(c) = kern_get_mut(vfs, sb, child) {
         c.nlink = c.nlink.saturating_sub(1);
@@ -1311,7 +1309,7 @@ fn tmp_pages_for(size: u64) -> usize {
     if size == 0 {
         0
     } else {
-        ((size as usize) + PAGE - 1) / PAGE
+        (size as usize).div_ceil(PAGE)
     }
 }
 

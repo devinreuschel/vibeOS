@@ -257,6 +257,8 @@ pub unsafe fn init() {
     }
 }
 
+/// # Safety
+/// IDT array is writable; PIC already remapped.
 unsafe fn install_defaults() {
     install_noerr!(
         0, 1, 2, 3, 4, 5, 6, 7, 9, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34,
@@ -276,6 +278,8 @@ unsafe fn install_defaults() {
     install_err!(8, 10, 11, 12, 13, 14, 17, 21, 29, 30);
 }
 
+/// # Safety
+/// IDT is writable; named vectors match the handlers below.
 unsafe fn overlay_named() {
     set_noerr(vectors::DB, debug_ex, IstSlot::Debug.hardware());
     set_noerr(vectors::NMI, nmi, IstSlot::Nmi.hardware());

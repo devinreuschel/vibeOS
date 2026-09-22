@@ -968,10 +968,10 @@ mod tests {
         let mut saw_ee = false;
         let mut i = 0usize;
         while i < t.n {
-            if let PartKind::Mbr { sys } = t.parts[i].kind {
-                if sys == MBR_PROTECTIVE {
-                    saw_ee = true;
-                }
+            if let PartKind::Mbr { sys } = t.parts[i].kind
+                && sys == MBR_PROTECTIVE
+            {
+                saw_ee = true;
             }
             i += 1;
         }

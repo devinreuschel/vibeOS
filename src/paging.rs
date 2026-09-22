@@ -30,7 +30,7 @@
 //! Real TLB shootdown IPIs: `tlb_shootdown_others` is a hook the
 //! kernel installs (DESIGN §4.3 / §7.9). Host tests leave it unset.
 
-#![allow(clippy::identity_op)]
+#![allow(clippy::identity_op)] // PTE masks read as `x << n` even when n is 0
 
 pub const PAGE_SHIFT: u32 = 12;
 pub const PAGE_SIZE_4K: u64 = 1 << PAGE_SHIFT;
@@ -677,7 +677,7 @@ impl Mapper {
     /// `phys` must be an owned, page-sized frame reachable via
     /// `hhdm_offset`.
     pub unsafe fn zero_frame(&self, phys: PhysAddr) {
-        let ptr = self.table_ptr(phys) as *mut u64;
+        let ptr = self.table_ptr(phys);
         for i in 0..PTES_PER_TABLE {
             unsafe { ptr.add(i).write_volatile(0) };
         }

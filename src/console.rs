@@ -40,10 +40,10 @@ pub fn fanout(backends: &mut [&mut dyn ConsoleBackend], bytes: &[u8]) {
 /// First enabled backend that has a byte.
 pub fn merge_read(backends: &mut [&mut dyn ConsoleBackend]) -> Option<u8> {
     for b in backends.iter_mut() {
-        if b.enabled() {
-            if let Some(c) = b.read() {
-                return Some(c);
-            }
+        if b.enabled()
+            && let Some(c) = b.read()
+        {
+            return Some(c);
         }
     }
     None

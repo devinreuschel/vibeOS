@@ -251,6 +251,12 @@ impl TickClock {
     }
 }
 
+impl Default for TickClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Wall clock = RTC unix seconds at boot plus monotonic elapsed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WallOrigin {

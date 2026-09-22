@@ -597,6 +597,12 @@ impl FdTable {
     }
 }
 
+impl Default for FdTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct Vfs {
     inodes: [Inode; MAX_INODES],
     dentries: [Dentry; MAX_DENTRIES],
@@ -1264,6 +1270,12 @@ impl Vfs {
 
     pub fn release_inode(&mut self, islot: u16) {
         self.iput(islot);
+    }
+}
+
+impl Default for Vfs {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

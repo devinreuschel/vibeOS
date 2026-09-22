@@ -30,7 +30,7 @@
 //!   for phase 1; a per-order bitmap or an XOR-tag scheme replaces it in
 //!   the SMP-hardened rewrite.
 
-#![allow(clippy::identity_op)]
+#![allow(clippy::identity_op)] // order-0 size is `1 << 0` on purpose
 
 pub const PAGE_BITS: u32 = 12;
 pub const PAGE_SIZE: u64 = 1 << PAGE_BITS;
@@ -285,6 +285,8 @@ impl Buddy {
         (phys.wrapping_add(self.hhdm_offset) as usize) as *mut FreeNode
     }
 
+    /// # Safety
+    /// `phys` is an unused frame of `order` that this buddy owns.
     unsafe fn push_free(&mut self, phys: u64, order: u8) {
         let k = order as usize;
         let head = self.heads[k];
@@ -303,6 +305,8 @@ impl Buddy {
         self.free_frames += 1 << k;
     }
 
+    /// # Safety
+    /// Order `order` has a free head; list nodes live in free pages.
     unsafe fn pop_head(&mut self, order: u8) -> u64 {
         let k = order as usize;
         let head = self.heads[k];
@@ -320,6 +324,8 @@ impl Buddy {
         head
     }
 
+    /// # Safety
+    /// `phys` is currently a free-list node of `order`.
     unsafe fn unlink(&mut self, phys: u64, order: u8) {
         let k = order as usize;
         let node = self.node_ptr(phys);
@@ -340,6 +346,8 @@ impl Buddy {
         self.free_frames -= 1 << k;
     }
 
+    /// # Safety
+    /// Free-list nodes of `order` are intact.
     unsafe fn in_free_list(&self, phys: u64, order: u8) -> bool {
         let mut cur = self.heads[order as usize];
         while cur != NULL {
@@ -354,6 +362,9 @@ impl Buddy {
     /// True iff `phys` is currently inside some free block at `at_least_order`
     /// or larger. Used to detect double-free even when the freed piece has
     /// already been coalesced into a bigger block.
+    ///
+    /// # Safety
+    /// Free-list nodes are intact.
     unsafe fn covered_by_free_block(&self, phys: u64, at_least_order: u8) -> bool {
         for k in (at_least_order as usize)..=MAX_ORDER {
             let block_start = phys & !((PAGE_SIZE << k) - 1);

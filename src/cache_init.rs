@@ -85,7 +85,7 @@ fn backend_read(dev: u32, offset: u64, page: &mut [u8]) -> Result<(), BlockError
     }
     let (bs, cap) = geom(dev)?;
     let bs = bs as u64;
-    if bs == 0 || offset % bs != 0 {
+    if bs == 0 || !offset.is_multiple_of(bs) {
         return Err(BlockError::Inval);
     }
     let nbytes = (cap as u128)
@@ -105,7 +105,7 @@ fn backend_write(dev: u32, offset: u64, page: &[u8]) -> Result<(), BlockError> {
     }
     let (bs, cap) = geom(dev)?;
     let bs = bs as u64;
-    if bs == 0 || offset % bs != 0 {
+    if bs == 0 || !offset.is_multiple_of(bs) {
         return Err(BlockError::Inval);
     }
     let nbytes = (cap as u128)
@@ -205,7 +205,7 @@ pub fn read(dev: u32, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
         return raw_read(dev, lba, buf);
     }
     let (bs, cap) = geom(dev)?;
-    if bs == 0 || buf.len() % bs as usize != 0 {
+    if bs == 0 || !buf.len().is_multiple_of(bs as usize) {
         return Err(BlockError::Inval);
     }
     let nsect = (buf.len() / bs as usize) as u64;
@@ -267,7 +267,7 @@ pub fn write(dev: u32, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
         return raw_write(dev, lba, buf);
     }
     let (bs, cap) = geom(dev)?;
-    if bs == 0 || buf.len() % bs as usize != 0 {
+    if bs == 0 || !buf.len().is_multiple_of(bs as usize) {
         return Err(BlockError::Inval);
     }
     let nsect = (buf.len() / bs as usize) as u64;

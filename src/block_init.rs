@@ -278,7 +278,7 @@ fn blocking(op: Op, lba: u64, nsect: u32, ptr: usize, len: usize) -> Result<(), 
 
 pub fn read(lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
     let bs = RAM0_BLOCK_SIZE as usize;
-    if bs == 0 || buf.len() % bs != 0 {
+    if bs == 0 || !buf.len().is_multiple_of(bs) {
         return Err(BlockError::Inval);
     }
     let nsect = (buf.len() / bs) as u32;
@@ -287,7 +287,7 @@ pub fn read(lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
 
 pub fn write(lba: u64, buf: &[u8]) -> Result<(), BlockError> {
     let bs = RAM0_BLOCK_SIZE as usize;
-    if bs == 0 || buf.len() % bs != 0 {
+    if bs == 0 || !buf.len().is_multiple_of(bs) {
         return Err(BlockError::Inval);
     }
     let nsect = (buf.len() / bs) as u32;

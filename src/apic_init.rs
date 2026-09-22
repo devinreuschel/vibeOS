@@ -40,6 +40,9 @@ impl<T> BootCell<T> {
     const fn new(v: T) -> Self {
         Self(core::cell::UnsafeCell::new(v))
     }
+    /// # Safety
+    /// Exclusive boot/IRQ-off access; cell is initialized.
+    #[allow(clippy::mut_from_ref)] // boot cell, IRQ-off exclusive
     unsafe fn get_mut(&self) -> &mut T {
         unsafe { &mut *self.0.get() }
     }
@@ -411,7 +414,7 @@ fn calib_periodic(va: u64) -> Option<u64> {
     }
     let delta = (start_c - end_c) as u64;
     let per_ms = delta / PIT_CALIB_MS;
-    if per_ms < LAPIC_TICKS_PER_MS_MIN || per_ms > LAPIC_TICKS_PER_MS_MAX {
+    if !(LAPIC_TICKS_PER_MS_MIN..=LAPIC_TICKS_PER_MS_MAX).contains(&per_ms) {
         return None;
     }
     Some(per_ms)

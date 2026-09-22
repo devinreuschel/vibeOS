@@ -66,8 +66,8 @@ fn attach_pseudo_dirs() {
 
 fn populate_devfs() {
     with(|v| {
-        let sz = (block_init::capacity_sectors() as u64)
-            .saturating_mul(block_init::logical_block_size() as u64);
+        let sz =
+            block_init::capacity_sectors().saturating_mul(block_init::logical_block_size() as u64);
         let _ = v.devfs_add_block(block_init::name().as_bytes(), sz);
         if virtio_blk_init::live() {
             let sz = virtio_blk_init::capacity_sectors()

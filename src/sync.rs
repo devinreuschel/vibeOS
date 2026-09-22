@@ -72,6 +72,12 @@ impl SpinLock {
     }
 }
 
+impl Default for SpinLock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

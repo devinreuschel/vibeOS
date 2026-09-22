@@ -258,17 +258,17 @@ fn pick_vq(blk: &Blk, need: u16) -> Option<usize> {
         return None;
     }
     let pref = prefer_vq() % nq;
-    if let Some(v) = blk.vqs[pref].as_ref() {
-        if vq_has_room(v, need) {
-            return Some(pref);
-        }
+    if let Some(v) = blk.vqs[pref].as_ref()
+        && vq_has_room(v, need)
+    {
+        return Some(pref);
     }
     let mut i = 0usize;
     while i < nq {
-        if let Some(v) = blk.vqs[i].as_ref() {
-            if vq_has_room(v, need) {
-                return Some(i);
-            }
+        if let Some(v) = blk.vqs[i].as_ref()
+            && vq_has_room(v, need)
+        {
+            return Some(i);
         }
         i += 1;
     }
@@ -507,11 +507,9 @@ fn pump() {
             match issue(blk, req) {
                 Issued::Device { qi, kick } => {
                     IO_REQS.fetch_add(1, Ordering::Relaxed);
-                    if kick {
-                        if let Some(v) = blk.vqs[qi].as_ref() {
-                            kicks[qi] = v.doorbell;
-                            want[qi] = true;
-                        }
+                    if kick && let Some(v) = blk.vqs[qi].as_ref() {
+                        kicks[qi] = v.doorbell;
+                        want[qi] = true;
                     }
                 }
                 Issued::Local(req, res) => {
@@ -831,7 +829,7 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
                 fail_armed(dev, common, &vecs, nvec);
                 return Err(VirtioError::Failed);
             }
-            if let Err(_) = irq_init::enable_msix(dev, qi as u16, vec, pc.apic_id as u8) {
+            if irq_init::enable_msix(dev, qi as u16, vec, pc.apic_id as u8).is_err() {
                 let _ = irq_init::free_vector(vec);
                 dma_init::free(slots);
                 let mut j = 0usize;
@@ -1213,7 +1211,7 @@ fn blocking(op: Op, lba: u64, nsect: u32, ptr: usize, len: usize) -> Result<(), 
 
 pub fn read(lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
     let bs = logical_block_size() as usize;
-    if bs == 0 || buf.len() % bs != 0 {
+    if bs == 0 || !buf.len().is_multiple_of(bs) {
         return Err(BlockError::Inval);
     }
     let nsect = (buf.len() / bs) as u32;
@@ -1222,7 +1220,7 @@ pub fn read(lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
 
 pub fn write(lba: u64, buf: &[u8]) -> Result<(), BlockError> {
     let bs = logical_block_size() as usize;
-    if bs == 0 || buf.len() % bs != 0 {
+    if bs == 0 || !buf.len().is_multiple_of(bs) {
         return Err(BlockError::Inval);
     }
     let nsect = (buf.len() / bs) as u32;

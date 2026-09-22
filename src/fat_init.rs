@@ -256,6 +256,7 @@ pub fn read(id: u8, clu: u32, size: u32, off: u64, buf: &mut [u8]) -> Result<usi
     with_slot(id, |v, d| v.read(d, clu, size, off, buf)).map_err(FatError::to_fs)
 }
 
+#[allow(clippy::too_many_arguments)] // FAT dirent + cluster + size update
 pub fn write(
     id: u8,
     dir_clu: u32,
@@ -364,11 +365,10 @@ pub fn route(path: &[u8]) -> (u8, usize) {
         if mnts[i].used {
             let n = mnts[i].len as usize;
             let p = &mnts[i].path[..n];
-            if path == p || (path.len() > n && path[..n] == p[..] && path[n] == b'/') {
-                if n >= best {
-                    best = n;
-                    vol = mnts[i].vol;
-                }
+            if (path == p || (path.len() > n && path[..n] == p[..] && path[n] == b'/')) && n >= best
+            {
+                best = n;
+                vol = mnts[i].vol;
             }
         }
         i += 1;
@@ -535,6 +535,6 @@ pub fn umount(at: &str) -> Result<(), FsError> {
 }
 
 const _: () = {
-    assert!(INITRD_BYTES % SEC == 0);
+    assert!(INITRD_BYTES.is_multiple_of(SEC));
     assert!(MAX_PATH >= MNT_PATH);
 };

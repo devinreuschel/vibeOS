@@ -155,7 +155,7 @@ pub fn log_fmt(level: Level, args: fmt::Arguments<'_>) {
     let msg = &buf[..n];
     let _ = push_record(level, msg);
     let _ = crate::serial::Serial::try_write_bytes(msg);
-    if !msg.ends_with(&[b'\n']) {
+    if !msg.ends_with(b"\n") {
         let _ = crate::serial::Serial::try_write_bytes(b"\n");
     }
     EMITTING[i].store(false, Ordering::Release);

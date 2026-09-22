@@ -73,6 +73,12 @@ impl WorkRing {
     }
 }
 
+impl Default for WorkRing {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct WorkQueues {
     pub hi: WorkRing,
@@ -101,6 +107,12 @@ impl WorkQueues {
 
     pub fn is_empty(self) -> bool {
         self.hi.is_empty() && self.norm.is_empty()
+    }
+}
+
+impl Default for WorkQueues {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

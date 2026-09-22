@@ -177,6 +177,10 @@ impl<const N: usize, const M: usize> Ring<N, M> {
         self.len
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     pub fn dropped(&self) -> u64 {
         self.dropped
     }
@@ -222,6 +226,12 @@ impl<const N: usize, const M: usize> Ring<N, M> {
             // first index in oldest-first order of the newest `take`
             next: self.len - take,
         }
+    }
+}
+
+impl<const N: usize, const M: usize> Default for Ring<N, M> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -288,6 +298,12 @@ impl<const N: usize, const M: usize> Logger<N, M> {
         self.ring
             .iter()
             .filter(move |r| allowed(r.level, view, COMPILE_MAX))
+    }
+}
+
+impl<const N: usize, const M: usize> Default for Logger<N, M> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

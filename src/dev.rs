@@ -54,15 +54,15 @@ impl IdMatch {
         if self.device != 0xFFFF && self.device != device {
             return false;
         }
-        if let Some(c) = self.class {
-            if c != class {
-                return false;
-            }
+        if let Some(c) = self.class
+            && c != class
+        {
+            return false;
         }
-        if let Some(s) = self.subclass {
-            if s != subclass {
-                return false;
-            }
+        if let Some(s) = self.subclass
+            && s != subclass
+        {
+            return false;
         }
         true
     }
@@ -347,6 +347,10 @@ impl Registry {
         self.n_dev
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.n_dev == 0
+    }
+
     pub fn driver_count(&self) -> usize {
         self.n_drv
     }
@@ -382,10 +386,10 @@ impl Registry {
         }
         let mut i = 0usize;
         while i < self.n_drv {
-            if let Some(d) = self.drivers[i] {
-                if d.name() == drv.name() {
-                    return false;
-                }
+            if let Some(d) = self.drivers[i]
+                && d.name() == drv.name()
+            {
+                return false;
             }
             i += 1;
         }
@@ -415,10 +419,11 @@ impl Registry {
         let mem = matches!(res.kind, ResourceKind::Memory);
         let mut i = 0usize;
         while i < self.n_claim {
-            if let Some(c) = self.claims[i] {
-                if c.mem == mem && Self::range_overlap(c.addr, c.size, res.addr, res.size) {
-                    return Err(ClaimError::Overlap);
-                }
+            if let Some(c) = self.claims[i]
+                && c.mem == mem
+                && Self::range_overlap(c.addr, c.size, res.addr, res.size)
+            {
+                return Err(ClaimError::Overlap);
             }
             i += 1;
         }
@@ -517,9 +522,8 @@ impl Registry {
             while dv < self.n_dev {
                 if self.devices[dv].bound.is_none() && self.devices[dv].matches_driver(drv) {
                     enable(&self.devices[dv]);
-                    match drv.probe(&mut self.devices[dv]) {
-                        Ok(()) => self.devices[dv].bound = Some(drv.name()),
-                        Err(_) => {}
+                    if let Ok(()) = drv.probe(&mut self.devices[dv]) {
+                        self.devices[dv].bound = Some(drv.name())
                     }
                 }
                 dv += 1;
@@ -535,6 +539,12 @@ impl Registry {
             i += 1;
         }
         Ok(())
+    }
+}
+
+impl Default for Registry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -32,7 +32,10 @@ unsafe impl<T> Sync for Cell<T> {}
 
 static REG: Cell<Registry> = Cell(core::cell::UnsafeCell::new(Registry::new()));
 static LOCK: AtomicBool = AtomicBool::new(false);
-#[cfg_attr(feature = "kernel_tests", allow(dead_code))]
+#[cfg_attr(
+    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
+    allow(dead_code)
+)] // parked REPL; production is userspace /bin/sh
 static READY: AtomicBool = AtomicBool::new(false);
 
 fn with_reg<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
@@ -53,7 +56,7 @@ pub fn register(cmd: Command) -> bool {
     with_reg(|r| r.register(cmd))
 }
 
-#[cfg_attr(feature = "kernel_tests", allow(dead_code))]
+#[allow(dead_code)] // parked #66; userspace /bin/sh is the shell
 pub fn ready() -> bool {
     READY.load(Ordering::Acquire)
 }
@@ -136,7 +139,10 @@ fn register_builtins() {
     }
 }
 
-#[cfg_attr(feature = "kernel_tests", allow(dead_code))]
+#[cfg_attr(
+    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
+    allow(dead_code)
+)]
 fn shell_main() {
     let mut ed = LineEditor::new();
     let mut painted = 0usize;
@@ -176,13 +182,19 @@ fn shell_main() {
     }
 }
 
-#[cfg_attr(feature = "kernel_tests", allow(dead_code))]
+#[cfg_attr(
+    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
+    allow(dead_code)
+)]
 fn write_prompt(painted: &mut usize) {
     console_init::write(PROMPT.as_bytes());
     *painted = PROMPT.len();
 }
 
-#[cfg_attr(feature = "kernel_tests", allow(dead_code))]
+#[cfg_attr(
+    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
+    allow(dead_code)
+)]
 fn paint(ed: &LineEditor, painted: &mut usize) {
     // `\r` homes serial and FB (column 0, same row). Do not use `\n`.
     console_init::write(b"\r");
@@ -309,10 +321,10 @@ fn dmesg_follow(view: Level) {
             let start = len.saturating_sub(extra);
             let mut i = start;
             while i < len {
-                if let Some(r) = log_init::record_at(i) {
-                    if vibeos::log::allowed(r.level, view, log_init::compile_max()) {
-                        log_init::write_record(&mut Console, &r);
-                    }
+                if let Some(r) = log_init::record_at(i)
+                    && vibeos::log::allowed(r.level, view, log_init::compile_max())
+                {
+                    log_init::write_record(&mut Console, &r);
                 }
                 i += 1;
             }

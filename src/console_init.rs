@@ -77,10 +77,10 @@ pub fn read() -> Option<DecodedKey> {
     if let Some(k) = kbd_init::pop() {
         return Some(k);
     }
-    if SERIAL_ON.load(Ordering::Acquire) {
-        if let Some(b) = Serial::try_read_byte() {
-            return Some(DecodedKey::Char(b));
-        }
+    if SERIAL_ON.load(Ordering::Acquire)
+        && let Some(b) = Serial::try_read_byte()
+    {
+        return Some(DecodedKey::Char(b));
     }
     None
 }

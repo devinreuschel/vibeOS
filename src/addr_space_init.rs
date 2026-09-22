@@ -17,6 +17,8 @@ unsafe impl FrameAlloc for BuddyPool {
 }
 
 unsafe impl FrameFree for BuddyPool {
+    /// # Safety
+    /// `pa` is an owned frame this pool may return to the buddy.
     unsafe fn free_frame(&mut self, pa: PhysAddr) {
         pmm_init::with_buddy(|b| unsafe { b.deallocate_frame(pa.as_u64()) });
     }
@@ -31,20 +33,24 @@ pub fn create() -> Option<AddressSpace> {
     })
 }
 
+/// # Safety
+/// Same contract as `AddressSpace::map_anon`.
 pub unsafe fn map_anon(
     space: &mut AddressSpace,
     va: u64,
     len: u64,
     perms: UserPerms,
 ) -> Result<(), AsError> {
-    let rc = paging_init::with_pt(|| {
+    paging_init::with_pt(|| {
         let mut pool = BuddyPool;
         unsafe { space.map_anon(va, len, perms, &mut pool) }
     })?;
     shootdown_user(space, va, len);
-    Ok(rc)
+    Ok(())
 }
 
+/// # Safety
+/// Same contract as `AddressSpace::unmap_free`.
 pub unsafe fn unmap(space: &mut AddressSpace, va: u64, len: u64) -> Result<(), AsError> {
     paging_init::with_pt(|| {
         let mut pool = BuddyPool;

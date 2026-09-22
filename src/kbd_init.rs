@@ -236,13 +236,13 @@ fn init_8042() -> bool {
     }
 
     // Device reset is best-effort; the controller is already live.
-    if write_data(KBD_RESET) {
-        if let Some(b) = read_data() {
-            if b == KBD_ACK {
-                let _ = read_data(); // BAT, expect 0xAA
-            } else if b != KBD_BAT_OK {
-                flush_obf();
-            }
+    if write_data(KBD_RESET)
+        && let Some(b) = read_data()
+    {
+        if b == KBD_ACK {
+            let _ = read_data(); // BAT, expect 0xAA
+        } else if b != KBD_BAT_OK {
+            flush_obf();
         }
     }
 
