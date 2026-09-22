@@ -121,14 +121,22 @@ def main() -> int:
             print(f"[e2e] FAIL: {e}", file=sys.stderr)
             return 1
         print("[e2e]   . pci qemu set ok", file=sys.stderr)
+        timeout_s = float(os.environ.get("VIBEOS_TIMEOUT", "60"))
         try:
-            inp = run_qemu_console_input(
-                cfg,
-                timeout_s=float(os.environ.get("VIBEOS_TIMEOUT", "60")),
-            )
+            inp = run_qemu_console_input(cfg, timeout_s=timeout_s)
         except HarnessError as e:
-            print(f"[e2e] FAIL: {e}", file=sys.stderr)
-            return 1
+            # OVMF second boot has raced PXE / firmware setup with an
+            # open COM1 pipe. Retry once; BIOS path fails immediately.
+            if cfg.bios and "no shell ready" in str(e):
+                print(f"[e2e] retry console input: {e}", file=sys.stderr)
+                try:
+                    inp = run_qemu_console_input(cfg, timeout_s=timeout_s)
+                except HarnessError as e2:
+                    print(f"[e2e] FAIL: {e2}", file=sys.stderr)
+                    return 1
+            else:
+                print(f"[e2e] FAIL: {e}", file=sys.stderr)
+                return 1
         print("[e2e]   . console input serial+ps2 ok", file=sys.stderr)
         for name in inp.matched:
             print(f"[e2e]     . {name}", file=sys.stderr)

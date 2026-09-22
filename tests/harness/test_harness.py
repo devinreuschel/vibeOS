@@ -20,6 +20,7 @@ from harness import (  # noqa: E402
     check_markers_in_order,
     contains_panic,
     HPET_OFF_MACHINE,
+    OVMF_BOOT_ARGS,
     _qemu_argv,
     serial_tail,
 )
@@ -331,6 +332,21 @@ class TestQemuArgv(unittest.TestCase):
     def test_accel_empty_omits_flag(self) -> None:
         argv = _qemu_argv(QemuConfig(iso="x.iso", accel=""), "/tmp/mon")
         self.assertNotIn("-accel", argv)
+
+    def test_ovmf_boots_cd_and_disables_pxe(self) -> None:
+        argv = _qemu_argv(
+            QemuConfig(iso="x.iso", bios="/usr/share/ovmf/OVMF.fd"),
+            "/tmp/mon",
+        )
+        self.assertEqual(argv[argv.index("-bios") + 1], "/usr/share/ovmf/OVMF.fd")
+        i = argv.index("-boot")
+        self.assertEqual(argv[i : i + len(OVMF_BOOT_ARGS)], list(OVMF_BOOT_ARGS))
+
+    def test_seabios_omits_ovmf_boot_args(self) -> None:
+        argv = _qemu_argv(QemuConfig(iso="x.iso"), "/tmp/mon")
+        self.assertNotIn("-bios", argv)
+        self.assertNotIn("-boot", argv)
+        self.assertNotIn("-fw_cfg", argv)
 
 
 class TestLapicMode(unittest.TestCase):

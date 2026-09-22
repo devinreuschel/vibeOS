@@ -9,6 +9,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- UEFI e2e (`make test-e2e-uefi`) could hang the console-input second
+  boot for the full 60s with no `shell ready` after a green marker boot.
+  OVMF was falling through to PXE on the default e1000 (slirp DHCP, no
+  TFTP) when COM1 was an open pipe. QEMU now boots CD first and disables
+  OVMF PXE / firmware setup via fw_cfg; the harness retries that boot
+  once and prints a serial tail on timeout.
 - In-guest `user_syscalls` could hang `wait4` on a live fork-bomb herd
   under `make test-lapic-fallback` persist reboot (periodic LAPIC, 90s
   timeout, ~101 serial lines, no dump). `/bin/tests` now yields after

@@ -362,6 +362,17 @@ def _accel_args(cfg: QemuConfig) -> list[str]:
     return ["-accel", accel]
 
 
+# OVMF BDS PXEs the default e1000 if the CD isn't first/ready. slirp
+# answers DHCP; TFTP does not. Silent stall matches VIBEOS_TIMEOUT.
+# Hits the UEFI e2e second boot (COM1 is an open pipe; marker boot is not).
+OVMF_BOOT_ARGS: tuple[str, ...] = (
+    "-boot", "order=d,menu=off",
+    "-fw_cfg", "name=opt/org.tianocore/IPv4PXESupport,string=no",
+    "-fw_cfg", "name=opt/org.tianocore/IPv6PXESupport,string=no",
+    "-fw_cfg", "name=opt/org.tianocore/FirmwareSetupSupport,string=no",
+)
+
+
 def _qemu_argv(cfg: QemuConfig, monitor_sock: str) -> list[str]:
     argv = [
         "qemu-system-x86_64",
@@ -379,6 +390,7 @@ def _qemu_argv(cfg: QemuConfig, monitor_sock: str) -> list[str]:
         argv += list(HPET_OFF_MACHINE)
     if cfg.bios:
         argv += ["-bios", cfg.bios]
+        argv += list(OVMF_BOOT_ARGS)
     argv += list(cfg.extra)
     return argv
 
@@ -481,6 +493,7 @@ def run_qemu_and_check(
     if result.timed_out:
         raise HarnessError(
             f"timed out after {timeout_s}s; {len(result.matched)}/{len(markers)} markers"
+            f"{serial_tail(result.lines)}"
         )
 
     if marker_idx < len(markers):
@@ -602,16 +615,16 @@ def run_qemu_console_input(
     if result.timed_out or not saw_ready:
         raise HarnessError(
             f"console input: no shell ready after {timeout_s}s; "
-            f"matched={result.matched}"
+            f"matched={result.matched}{serial_tail(result.lines)}"
         )
     if not saw_serial:
         raise HarnessError(
-            f"console input: serial echo missing; last={result.lines[-8:]}"
+            f"console input: serial echo missing{serial_tail(result.lines)}"
         )
     if not saw_ps2:
         raise HarnessError(
-            f"console input: PS/2 sendkey echo missing (i8042); "
-            f"last={result.lines[-8:]}"
+            f"console input: PS/2 sendkey echo missing (i8042)"
+            f"{serial_tail(result.lines)}"
         )
     return result
 
