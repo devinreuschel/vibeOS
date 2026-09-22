@@ -12,16 +12,16 @@ from unittest import mock
 
 import tests.kernel_boot as kernel_boot
 from tests.harness.harness import (
-    DeadlineReader,
-    HarnessError,
     HPET_OFF_MACHINE,
     ISA_DEBUG_FAIL,
     ISA_DEBUG_PASS,
-    Marker,
     OVMF_BOOT_ARGS,
+    SMP2_TCG_PER_CPU_READY_HEAD_FLAKE,
+    DeadlineReader,
+    HarnessError,
+    Marker,
     QemuConfig,
     RunResult,
-    SMP2_TCG_PER_CPU_READY_HEAD_FLAKE,
     _qemu_argv,
     check_markers_in_order,
     contains_panic,

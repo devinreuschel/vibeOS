@@ -11,6 +11,7 @@ from collections.abc import Callable
 from tests.harness.harness import (
     HarnessError,
     QemuConfig,
+    RunResult,
     check_ktest_output,
     effective_accel_name,
     retryable_ktest_failure,
@@ -52,7 +53,7 @@ def _block_name(name: str) -> Callable[[str], bool]:
     return pred
 
 
-def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool):
+def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool) -> RunResult:
     """One ktest QEMU. Retry once on a known host-timing flake."""
     tag = "persist reboot" if persist_reboot else "ktest"
     last: HarnessError | None = None
@@ -159,7 +160,7 @@ def main() -> int:
             return 0
 
         try:
-            raw2 = _ktest_boot(cfg, timeout, persist_reboot=True)
+            _ktest_boot(cfg, timeout, persist_reboot=True)
         except HarnessError as e:
             print(f"[ktest] FAIL persist reboot: {e}", file=sys.stderr)
             return 1
