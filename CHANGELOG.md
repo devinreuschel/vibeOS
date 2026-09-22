@@ -33,6 +33,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
   `VIBEOS_*` is read there; drivers are `tests/harness/run_*.py`.
 - README / DESIGN header / §1.3 match the tree. O1 superseded: Phase 9 closed 2026-09-22;
   no pause/resume note.
+- Portable crate denies clippy `unwrap`/`expect`/`panic!` (E1). Parsers still return
+  `Result` on bad data; `indexing_slicing` stays warn until those modules are clean.
 
 ### Fixed
 

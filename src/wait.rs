@@ -231,7 +231,7 @@ impl SemaModel {
     }
 
     pub fn release(&mut self) {
-        self.count = self.count.checked_add(1).expect("sema: overflow");
+        self.count = self.count.saturating_add(1);
     }
 }
 
@@ -520,6 +520,13 @@ mod tests {
         assert_eq!(wake_one(&mut s.wq, &mut ready, &mut timeouts), Some(tid(3)));
         assert!(s.try_acquire());
         assert_eq!(s.count, 0);
+    }
+
+    #[test]
+    fn semaphore_release_saturates() {
+        let mut s = SemaModel::new(usize::MAX);
+        s.release();
+        assert_eq!(s.count, usize::MAX);
     }
 
     #[test]

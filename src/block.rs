@@ -417,10 +417,10 @@ impl Queue {
         self.insert_slot(req)
     }
 
-    fn take(&mut self, i: usize) -> Request {
-        let r = self.slots[i].take().expect("empty slot");
-        self.n -= 1;
-        r
+    fn take(&mut self, i: usize) -> Option<Request> {
+        let r = self.slots.get_mut(i)?.take()?;
+        self.n = self.n.saturating_sub(1);
+        Some(r)
     }
 
     /// Next dispatchable request. None if idle.
@@ -465,7 +465,7 @@ impl Queue {
         } else {
             fence_i?
         };
-        let r = self.take(idx);
+        let r = self.take(idx)?;
         self.last_lba = r.end_lba();
         Some(r)
     }

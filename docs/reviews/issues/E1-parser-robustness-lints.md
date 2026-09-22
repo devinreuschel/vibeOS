@@ -1,5 +1,9 @@
 # E1 · Lock in parser robustness with restriction lints
 
+**Status:** implemented. Nine production `unwrap`/`expect` sites return errors or
+cannot-fail rewrites. Clippy `unwrap_used` / `expect_used` / `panic` deny on the
+portable crate. `indexing_slicing` stays warn (not deny) until parsers are clean.
+
 | | |
 |---|---|
 | **Area** | 4.4 Error handling, logging & observability |

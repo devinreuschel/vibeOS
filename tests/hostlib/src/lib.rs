@@ -1,6 +1,11 @@
 //! Host wrapper. Pulls in the same portable modules as `src/lib.rs`, but
 //! compiled against the host toolchain so `cargo test --lib` runs their unit
 //! tests without any kernel-target machinery.
+//!
+//! Same E1 restriction lints as `src/lib.rs` (deny unwrap/expect/panic).
+
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 // The kernel's own lib.rs also references these modules, so this stays in
 // sync automatically.

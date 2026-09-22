@@ -3,8 +3,15 @@
 //! Anything that has no hardware access lives here so `cargo test --lib`
 //! covers it. Serial byte formatting, marker strings, small utilities.
 //! Hardware pokes live in the binary crate. See DESIGN §1.1.
+//!
+//! Restriction lints (E1 / DESIGN §2.5): the portable half returns the
+//! module error instead of panicking on data. `indexing_slicing` stays
+//! warn (not deny) until the parser modules are clean; Q1 `-D warnings`
+//! would promote a crate-level warn.
 
 #![cfg_attr(not(test), no_std)]
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod acpi;
 pub mod addr_space;

@@ -1055,12 +1055,15 @@ impl Vol {
         if self.find_dent(dir, name).is_ok() {
             return Err(Error::Exists);
         }
-        if kind == InodeKind::Lnk {
+        let link_target = if kind == InodeKind::Lnk {
             let t = target.ok_or(Error::Inval)?;
             if t.is_empty() || t.len() > INLINE {
                 return Err(Error::Inval);
             }
-        }
+            Some(t)
+        } else {
+            None
+        };
         if kind == InodeKind::Chr || kind == InodeKind::Blk {
             return Err(Error::NotSupp);
         }
@@ -1078,8 +1081,7 @@ impl Vol {
         rec.mode = mode;
         rec.nlink = 1;
         rec.flags = if kind != InodeKind::Dir { F_INLINE } else { 0 };
-        if kind == InodeKind::Lnk {
-            let t = target.unwrap();
+        if let Some(t) = link_target {
             rec.inline_len = t.len() as u8;
             rec.size = t.len() as u64;
             rec.inline_data[..t.len()].copy_from_slice(t);
@@ -1328,8 +1330,8 @@ impl Vol {
             let fblk = (pos / BLOCK as u64) as u32;
             let pin = (pos as usize) % BLOCK;
             let n = (BLOCK - pin).min(want - done);
-            let phys = match self.map_block(is, fblk) {
-                Some((_, p)) => p,
+            let (ei, phys) = match self.map_block(is, fblk) {
+                Some(mapping) => mapping,
                 None => {
                     buf[done..done + n].fill(0);
                     done += n;
@@ -1338,8 +1340,8 @@ impl Vol {
             };
             d.read_block(phys, &mut self.iobuf)?;
             buf[done..done + n].copy_from_slice(&self.iobuf[pin..pin + n]);
-            let (ei, _) = self.map_block(is, fblk).unwrap();
-            let e = self.inodes[is].extents[ei];
+            let e = self.inodes.get(is).and_then(|ino| ino.extents.get(ei));
+            let e = *e.ok_or(Error::Corrupt)?;
             self.check_extent(d, e)?;
             done += n;
         }

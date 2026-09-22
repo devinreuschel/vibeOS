@@ -673,8 +673,8 @@ fn kern_mk_lnk(
     name: &[u8],
     target: &[u8],
 ) -> Result<u32, FsError> {
-    if kern_find_child(vfs, sb, parent, name).is_some() {
-        return Ok(kern_find_child(vfs, sb, parent, name).unwrap());
+    if let Some(ino) = kern_find_child(vfs, sb, parent, name) {
+        return Ok(ino);
     }
     let nm = Name::from_bytes(name)?;
     let ino = kern_alloc(vfs, sb)?;
