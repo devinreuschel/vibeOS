@@ -64,7 +64,7 @@ const MAX_UNMAP: usize = 32;
 /// Single-CPU, IRQs off, live page tables already ours.
 pub unsafe fn init() {
     paging_init::assert_unmapped(VirtAddr(KVA_START), VirtAddr(KVA_END));
-    paging_init::with_pt(|| unsafe { KVA.get_mut().init(KVA_START, KVA_SIZE) });
+    paging_init::with_pt(|| unsafe { KVA.get_mut().init(KVA_START, KVA_SIZE) }.expect("kva: init"));
 }
 
 pub fn stats() -> KvaStats {
@@ -76,7 +76,9 @@ pub fn alloc_va(len: u64) -> Option<VirtAddr> {
 }
 
 pub fn free_va(va: VirtAddr, len: u64) {
-    paging_init::with_pt(|| unsafe { KVA.get_mut().free(va.as_u64(), len) });
+    paging_init::with_pt(|| {
+        unsafe { KVA.get_mut().free(va.as_u64(), len) }.expect("kva: free-list")
+    });
 }
 
 /// Reserve `pages+1` VA, map the upper `pages` from separate order-0
@@ -187,7 +189,7 @@ pub fn vmap(frames: &[PhysAddr]) -> Option<VirtAddr> {
             let page = VirtAddr(va_u + i as u64 * PAGE_SIZE);
             if unsafe { paging_init::map_4k_locked(page, pa, heap_flags()) }.is_err() {
                 unsafe { unmap_only_locked(VirtAddr(va_u), i) };
-                unsafe { KVA.get_mut().free(va_u, len) };
+                unsafe { KVA.get_mut().free(va_u, len) }.expect("kva: free-list");
                 return None;
             }
             vas[i] = page;
@@ -204,7 +206,10 @@ pub fn vmap(frames: &[PhysAddr]) -> Option<VirtAddr> {
 
 pub fn vunmap(va: VirtAddr, nframes: usize) {
     unmap_shootdown(va, nframes, false);
-    paging_init::with_pt(|| unsafe { KVA.get_mut().free(va.as_u64(), nframes as u64 * PAGE_SIZE) });
+    paging_init::with_pt(|| {
+        unsafe { KVA.get_mut().free(va.as_u64(), nframes as u64 * PAGE_SIZE) }
+            .expect("kva: free-list")
+    });
 }
 
 /// # Safety
@@ -214,7 +219,8 @@ unsafe fn free_stack_shootdown(stack: GuardedStack) {
     unmap_shootdown(base, stack.pages, true);
     paging_init::with_pt(|| unsafe {
         KVA.get_mut()
-            .free(stack.guard.as_u64(), (stack.pages as u64 + 1) * PAGE_SIZE);
+            .free(stack.guard.as_u64(), (stack.pages as u64 + 1) * PAGE_SIZE)
+            .expect("kva: free-list");
     });
 }
 
@@ -295,6 +301,7 @@ unsafe fn unwind_stack_locked(
     unsafe {
         KVA.get_mut()
             .free(guard.as_u64(), (pages as u64 + 1) * PAGE_SIZE)
+            .expect("kva: free-list")
     };
     np
 }

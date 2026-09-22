@@ -292,8 +292,7 @@ impl Heap {
             }
         }
 
-        if reuse_prev {
-            let p = prev.expect("heap: reuse_prev without prev");
+        if reuse_prev && let Some(p) = prev {
             unsafe {
                 (*p.as_ptr()).size = block_size;
                 (*p.as_ptr()).next = cur;

@@ -219,6 +219,12 @@ re-capture. Two-pass `nm` fills an in-image `.rodata` symbol table so `.text` st
 JSON keeps `frame-pointer: always`. Overflow, filter, and lookup are host-tested. Printer thread
 parked (Design ACK): global IRQ-safe ring + serial try-lock sink.
 
+The portable half (`src/lib.rs`, host-tested) never panics on data: parsers and table walks return
+the module error. Clippy restriction lints `unwrap_used`, `expect_used`, and `panic` are deny on that
+crate (allowed in `#[cfg(test)]`). `indexing_slicing` stays warn, not deny, until the parser modules
+(`acpi`, `part`, `fat`, `vibefs`, `pci`) are clean; it is not crate-enabled under `-D warnings`.
+Hardware-half panics still halt in the binding order above.
+
 Exceptions split into two groups. Recoverable ones (`#BP`, and `#PF` once demand paging exists)
 log and continue. **Ring-3 faults** (`#PF`/`#GP`/`#UD`/`#DE`/…) kill the user process with a
 diagnostic (`user: pid N killed SIG…`) and the kernel keeps running; they do not take the
