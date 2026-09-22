@@ -266,7 +266,7 @@ Power-on to `sti`. Limine does the ugly part (real mode, A20, long mode, ELF loa
 
 | Piece | Value |
 |-------|-------|
-| Channel | `nightly`, pinned in `rust-toolchain.toml` |
+| Channel | dated nightly in `rust-toolchain.toml` (bump with CI in one PR) |
 | Components | `rust-src` (required by `build-std`), `llvm-tools` (objdump/nm/size) |
 | Target | `x86_64-unknown-none-executable.json`, custom spec in the repo root |
 | Build | `cargo build -Z build-std=core,compiler_builtins,alloc --target x86_64-unknown-none-executable.json` |
