@@ -58,6 +58,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   cannot go red from a floating toolchain. Cargo cache keys include
   `Cargo.lock` and `rust-toolchain.toml`. Weekly smp-stress runs a
   non-blocking latest-nightly canary.
+- ISO and two-pass ksyms recipes are one `KERNEL_VARIANT` template plus
+  `scripts/mkiso.sh`. Five copies of xorriso assembly are gone.
 - CI: cancel superseded GitHub Actions runs for the same branch or PR so
   only the latest tip stays in the queue.
 
@@ -66,7 +68,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - MIT license (`LICENSE`). Both `Cargo.toml` and `tests/hostlib/Cargo.toml`
   declare `license = "MIT"`.
 - Tracked `AGENTS.md` (DOC3). Cursor rules and `CLAUDE.md` point at it.
-
+- `make check` as the fast local gate (host clippy, host units, harness
+  units, ruff/mypy when installed). `make help` is the target inventory.
 - Phase 9 slice C: Process + fork/exec/wait + early signals + userspace
   shell. `Process` (pid, parent, AS, fd table, cwd, creds, exit status).
   Threads belong to a process. Real fd table replaces B's early fd1/fd2

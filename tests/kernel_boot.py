@@ -6,18 +6,17 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from collections.abc import Callable
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "harness"))
-
-from harness import (  # noqa: E402
+from tests.harness.harness import (
     HarnessError,
     QemuConfig,
+    RunResult,
     check_ktest_output,
     effective_accel_name,
     retryable_ktest_failure,
     run_qemu_until_exit,
 )
-
 
 DISK_BYTES = 4 * 1024 * 1024
 
@@ -35,12 +34,12 @@ def _blk_extra(disk: str, smp: int) -> tuple[str, ...]:
     )
 
 
-def _require_line(lines: list[str], pred, msg: str) -> None:
+def _require_line(lines: list[str], pred: Callable[[str], bool], msg: str) -> None:
     if not any(pred(ln) for ln in lines):
         raise HarnessError(msg)
 
 
-def _block_name(name: str):
+def _block_name(name: str) -> Callable[[str], bool]:
     def pred(ln: str) -> bool:
         bits = ln.split()
         return (
@@ -54,7 +53,7 @@ def _block_name(name: str):
     return pred
 
 
-def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool):
+def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool) -> RunResult:
     """One ktest QEMU. Retry once on a known host-timing flake."""
     tag = "persist reboot" if persist_reboot else "ktest"
     last: HarnessError | None = None
@@ -161,7 +160,7 @@ def main() -> int:
             return 0
 
         try:
-            raw2 = _ktest_boot(cfg, timeout, persist_reboot=True)
+            _ktest_boot(cfg, timeout, persist_reboot=True)
         except HarnessError as e:
             print(f"[ktest] FAIL persist reboot: {e}", file=sys.stderr)
             return 1

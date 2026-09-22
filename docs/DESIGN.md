@@ -1417,24 +1417,12 @@ every variant. Acceleration is `VIBEOS_QEMU_ACCEL` (default `tcg`).
 
 ## 8.5 Make targets
 
-```
-make                    kernel + myos.iso
-make run                boot it in QEMU
-make test-unit          cargo test --lib
-make test-harness       python unit tests for the harness itself
-make test-e2e           boot contract on the normal ISO
-make test-ps2           QEMU sendkey echo (window i8042); also part of test-e2e
-make test-kernel        in-guest tests, -smp 2
-make test-kernel-smp4   in-guest tests, -smp 4
-make test-lapic-fallback  in-guest tests with TSC-deadline disabled
-make test-vibefs-crash  QEMU-kill + host fsck-vibefs (docs/VIBEFS.md §12)
-make test-smp-stress    -smp 4, longer timeout (scheduled CI)
-make test               all of the above except test-smp-stress and test-ps2
-```
+`make help` prints the live inventory. Do not hand-maintain a second list here.
 
-`make test-e2e` alone is the right check when only boot output or QEMU wiring changed. `make test` is
-the gate before calling anything done. `make test-ps2` is the focused #66 sendkey boot; `make test-e2e`
-already runs it, so `make test` does not boot it twice.
+`make check` is the fast local gate (host clippy, host unit tests, harness unit tests, ruff/mypy when
+installed). rustfmt `--check` and clippy `-D warnings` land with Q1. `make test-e2e` is enough when
+only boot output or QEMU wiring changed. `make test` is the gate before a PR. `make test-ps2` is the
+focused #66 sendkey boot; `make test-e2e` already runs it, so `make test` does not boot it twice.
 
 ## 8.6 CI and coverage
 
@@ -1487,8 +1475,9 @@ response is read.
 
 **Panic backtrace addresses have no names, or the second link moves every RIP.**
 The symbol table lived in `.text` or was patched in place. Rule: first link with an empty `.rodata`
-table, `nm --demangle` the ELF, second link with the filled table. `.text` must not move. Do not wrap
-`$(CARGO)` in `$(call …)`: `-Zbuild-std=core,compiler_builtins,alloc` splits on commas.
+table, `nm --demangle` the ELF, second link with the filled table. `.text` must not move. The
+two-pass lives in `KERNEL_VARIANT`; commas in `-Zbuild-std` stay in `BUILD_STD` and recipes
+reference `$$(CARGO)` so `$(call …)` does not split them.
 
 **QEMU framebuffer reprints the prompt on every key; serial looks fine.**
 The FB write path skipped `\r` before the text grid saw it, so the line editor's in-place paint

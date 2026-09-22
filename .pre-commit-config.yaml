@@ -1,0 +1,16 @@
+# Optional local hooks. Install with `pre-commit install`.
+# rustfmt --check is Q1 (the tree is not formatted yet).
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff check tests scripts
+        language: system
+        entry: ruff check tests scripts
+        pass_filenames: false
+        types: [python]
+      - id: check-scripts
+        name: scripts/check_*.py
+        language: system
+        entry: bash -c 'shopt -s nullglob; for s in scripts/check_*.py; do python3 "$s" || exit 1; done'
+        pass_filenames: false

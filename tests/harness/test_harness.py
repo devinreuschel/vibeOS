@@ -6,30 +6,26 @@ Runs under `python3 -m unittest discover`. Standard-library only.
 from __future__ import annotations
 
 import os
-import sys
 import time
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import kernel_boot  # noqa: E402
-from harness import (  # noqa: E402
-    DeadlineReader,
-    HarnessError,
+import tests.kernel_boot as kernel_boot
+from tests.harness.harness import (
+    HPET_OFF_MACHINE,
     ISA_DEBUG_FAIL,
     ISA_DEBUG_PASS,
+    OVMF_BOOT_ARGS,
+    SMP2_TCG_PER_CPU_READY_HEAD_FLAKE,
+    DeadlineReader,
+    HarnessError,
     Marker,
     QemuConfig,
     RunResult,
+    _qemu_argv,
     check_markers_in_order,
     contains_panic,
     effective_accel_name,
-    HPET_OFF_MACHINE,
-    OVMF_BOOT_ARGS,
-    SMP2_TCG_PER_CPU_READY_HEAD_FLAKE,
-    _qemu_argv,
     retryable_ktest_failure,
     serial_tail,
 )
@@ -276,7 +272,7 @@ class TestDeadlineReader(unittest.TestCase):
 
 class TestKtestProtocol(unittest.TestCase):
     def test_begin_end_pass_status(self) -> None:
-        from harness import ISA_DEBUG_PASS, check_ktest_output
+        from tests.harness.harness import ISA_DEBUG_PASS, check_ktest_output
 
         lines = [
             "vibeOS: ktest: begin",
@@ -286,7 +282,7 @@ class TestKtestProtocol(unittest.TestCase):
         check_ktest_output(lines, ISA_DEBUG_PASS)
 
     def test_fail_line_rejected(self) -> None:
-        from harness import ISA_DEBUG_PASS, HarnessError, check_ktest_output
+        from tests.harness.harness import ISA_DEBUG_PASS, HarnessError, check_ktest_output
 
         lines = [
             "vibeOS: ktest: begin",
@@ -299,7 +295,7 @@ class TestKtestProtocol(unittest.TestCase):
         self.assertIn("instruction-fetch", str(cm.exception))
 
     def test_missing_begin_or_end(self) -> None:
-        from harness import ISA_DEBUG_PASS, HarnessError, check_ktest_output
+        from tests.harness.harness import ISA_DEBUG_PASS, HarnessError, check_ktest_output
 
         with self.assertRaises(HarnessError):
             check_ktest_output(["vibeOS: ktest: end"], ISA_DEBUG_PASS)
@@ -307,7 +303,7 @@ class TestKtestProtocol(unittest.TestCase):
             check_ktest_output(["vibeOS: ktest: begin"], ISA_DEBUG_PASS)
 
     def test_wrong_exit_status(self) -> None:
-        from harness import ISA_DEBUG_FAIL, HarnessError, check_ktest_output
+        from tests.harness.harness import ISA_DEBUG_FAIL, HarnessError, check_ktest_output
 
         lines = ["vibeOS: ktest: begin", "vibeOS: ktest: end"]
         with self.assertRaises(HarnessError) as cm:
@@ -517,7 +513,7 @@ class TestQemuArgv(unittest.TestCase):
 
 class TestLapicMode(unittest.TestCase):
     def test_tcg_max_is_periodic(self) -> None:
-        from harness import expected_lapic_mode
+        from tests.harness.harness import expected_lapic_mode
 
         self.assertEqual(
             expected_lapic_mode(cpu="max", hpet=True, accel="tcg"),
@@ -525,7 +521,7 @@ class TestLapicMode(unittest.TestCase):
         )
 
     def test_hpet_off_is_pit(self) -> None:
-        from harness import expected_lapic_mode
+        from tests.harness.harness import expected_lapic_mode
 
         self.assertEqual(
             expected_lapic_mode(cpu="max", hpet=False, accel="tcg"),
@@ -533,7 +529,7 @@ class TestLapicMode(unittest.TestCase):
         )
 
     def test_kvm_max_is_tsc_deadline(self) -> None:
-        from harness import expected_lapic_mode
+        from tests.harness.harness import expected_lapic_mode
 
         self.assertEqual(
             expected_lapic_mode(cpu="max", hpet=True, accel="kvm"),
@@ -541,7 +537,7 @@ class TestLapicMode(unittest.TestCase):
         )
 
     def test_cpu_flag_disables_deadline(self) -> None:
-        from harness import expected_lapic_mode
+        from tests.harness.harness import expected_lapic_mode
 
         self.assertEqual(
             expected_lapic_mode(
@@ -551,7 +547,7 @@ class TestLapicMode(unittest.TestCase):
         )
 
     def test_boot_contract_pins_mode(self) -> None:
-        from harness import boot_contract_markers
+        from tests.harness.harness import boot_contract_markers
 
         m = boot_contract_markers(hpet=True, cpu="max", accel="tcg")
         names = [x.name for x in m]
@@ -600,7 +596,7 @@ class TestLapicMode(unittest.TestCase):
 
 class TestDumpNeedles(unittest.TestCase):
     def test_joint_needle_on_one_line(self) -> None:
-        from harness import check_dump_needles, dump_after_panic
+        from tests.harness.harness import check_dump_needles, dump_after_panic
 
         lines = [
             "vibeOS: smp: done",
@@ -617,13 +613,13 @@ class TestDumpNeedles(unittest.TestCase):
         )
 
     def test_english_page_fault_still_ignored(self) -> None:
-        from harness import contains_panic
+        from tests.harness.harness import contains_panic
 
         self.assertFalse(contains_panic("dmesg: page fault help text"))
         self.assertTrue(contains_panic("vibeOS: #PF rip=0x1"))
 
     def test_missing_joint_needle_fails(self) -> None:
-        from harness import HarnessError, check_dump_needles
+        from tests.harness.harness import HarnessError, check_dump_needles
 
         with self.assertRaises(HarnessError):
             check_dump_needles(
@@ -634,7 +630,7 @@ class TestDumpNeedles(unittest.TestCase):
 
 class TestSendkeyChars(unittest.TestCase):
     def test_help_and_echo_chords(self) -> None:
-        from harness import sendkey_chars
+        from tests.harness.harness import sendkey_chars
 
         self.assertEqual(sendkey_chars("help\n"), "h-e-l-p-ret")
         self.assertEqual(
@@ -643,7 +639,7 @@ class TestSendkeyChars(unittest.TestCase):
         )
 
     def test_rejects_empty_and_unknown(self) -> None:
-        from harness import HarnessError, sendkey_chars
+        from tests.harness.harness import HarnessError, sendkey_chars
 
         with self.assertRaises(HarnessError):
             sendkey_chars("")

@@ -20,6 +20,7 @@ not a gate. If a gate cannot be checked by running something, it is written wron
 **Standing gates** apply to every phase and are not repeated:
 
 - `make` builds clean with warnings denied
+- `make check` green (fast local gate)
 - `make test` green, all tiers, including the SMP and timer fallback variants once they exist
 - CI green
 - new serial markers registered in the contract in [DESIGN.md](DESIGN.md#83-end-to-end), same commit

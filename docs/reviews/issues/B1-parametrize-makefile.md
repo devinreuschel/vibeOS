@@ -1,5 +1,7 @@
 # B1 · Parametrize the Makefile's ISO recipes; add `make check`
 
+**Status:** implemented (with DX1).
+
 | | |
 |---|---|
 | **Area** | 4.10 Build |

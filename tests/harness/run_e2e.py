@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Callable
+from typing import TypeVar
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from harness import (  # noqa: E402
+from tests.harness.harness import (
     PHASE0_PANIC_PREFIX,
     HarnessError,
     QemuConfig,
@@ -16,6 +16,8 @@ from harness import (  # noqa: E402
     run_qemu_and_check,
     run_qemu_console_input,
 )
+
+_T = TypeVar("_T")
 
 # Default QEMU `pc` (i440fx) set used by vibeOS e2e. No UHCI unless `-usb`.
 PCI_GOLDEN = (
@@ -50,7 +52,7 @@ def _check_pci_qemu_set(lines: list[str]) -> None:
         raise HarnessError(f"pci count {n} < golden {len(PCI_GOLDEN)}")
 
 
-def _retry_hang(label: str, fn):
+def _retry_hang(label: str, fn: Callable[[], _T]) -> _T:
     """One silent timeout / missing last marker is a QEMU hang, not a contract fail."""
     try:
         return fn()

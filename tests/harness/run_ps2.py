@@ -14,9 +14,7 @@ from __future__ import annotations
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from harness import HarnessError, QemuConfig, run_qemu_console_input  # noqa: E402
+from tests.harness.harness import HarnessError, QemuConfig, run_qemu_console_input
 
 
 def main() -> int:

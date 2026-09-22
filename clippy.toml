@@ -1,0 +1,2 @@
+# Shared clippy settings. `clippy -D warnings` is Q1; this file exists so
+# `make check` and ad hoc `cargo clippy` share one config.
