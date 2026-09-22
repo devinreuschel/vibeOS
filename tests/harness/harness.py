@@ -835,6 +835,23 @@ SMP4_MSIX_AP_COUNTER_FLAKE = (
     "ktest FAIL: vibeOS: ktest: FAIL msix_cpu: ap counter"
 )
 SMP4_IPI_ACK_PANIC = "ipi: ack timeout waiters="
+# TCG SMP serial glues a ktest ok line to the panic banner; kill-on-sig
+# then drops `msg: ipi: ack timeout` so #75's needle never appears.
+PANIC_DRAIN_S = 0.4
+
+
+def _same_line_ktest_ok_panic(message: str) -> bool:
+    """True when `ktest: ok` and `vibeOS: panic:` share a serial line."""
+    start = 0
+    while True:
+        i = message.find("vibeOS: ktest: ok ", start)
+        if i < 0:
+            return False
+        nl = message.find("\n", i)
+        panic = message.find("vibeOS: panic:", i)
+        if panic >= 0 and (nl < 0 or panic < nl):
+            return True
+        start = i + 1
 
 
 def silent_user_syscalls_hang(message: str) -> bool:
@@ -863,11 +880,25 @@ def retryable_ktest_failure(
         return False
     if message == SMP4_MSIX_AP_COUNTER_FLAKE:
         return True
-    return (
-        persist_reboot
-        and "panic signature 'vibeOS: panic:'" in message
-        and SMP4_IPI_ACK_PANIC in message
-    )
+    if "panic signature 'vibeOS: panic:'" not in message:
+        return False
+    # First boot or persist. Drain puts `ipi: ack timeout` in the error;
+    # UART merge is the same flake with the body chopped.
+    return SMP4_IPI_ACK_PANIC in message or _same_line_ktest_ok_panic(message)
+
+
+def drain_panic_tail(
+    reader: DeadlineReader, result: RunResult, window_s: float = PANIC_DRAIN_S
+) -> None:
+    """Read a bit more after the banner so `msg:` is in the HarnessError."""
+    reader.set_deadline(time.monotonic() + window_s)
+    while True:
+        kind, line = reader.next_event()
+        if kind != "line":
+            return
+        result.lines.append(line)
+        if PANIC_DONE in line:
+            return
 
 
 def check_ktest_output(
@@ -964,8 +995,12 @@ def run_qemu_until_exit(
             for sig in panic_signatures:
                 if sig in line:
                     result.panic_line = line
+                    drain_panic_tail(reader, result)
                     proc.kill()
-                    raise HarnessError(f"panic signature {sig!r} in: {line!r}")
+                    raise HarnessError(
+                        f"panic signature {sig!r} in: {line!r}"
+                        f"{serial_tail(result.lines)}"
+                    )
             if kill_after is not None and kill_at is None:
                 delay = kill_after(line)
                 if delay is not None:

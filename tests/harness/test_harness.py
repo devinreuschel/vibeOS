@@ -24,6 +24,7 @@ from tests.harness.harness import (
     RunResult,
     check_markers_in_order,
     contains_panic,
+    drain_panic_tail,
     effective_accel_name,
     qemu_argv,
     retryable_ktest_failure,
@@ -270,6 +271,33 @@ class TestDeadlineReader(unittest.TestCase):
             os.close(r)
             os.close(w)
 
+    def test_drain_panic_tail_stops_at_halted(self) -> None:
+        r, w = os.pipe()
+        try:
+            os.write(
+                w,
+                b"msg: ipi: ack timeout waiters=0xd\n"
+                b"vibeOS: panic: halted\n"
+                b"ignored\n",
+            )
+            os.close(w)
+            w = -1
+            result = RunResult(lines=["vibeOS: panic:"])
+            reader = DeadlineReader(r, time.monotonic() + 1.0)
+            drain_panic_tail(reader, result, window_s=0.5)
+            self.assertEqual(
+                result.lines,
+                [
+                    "vibeOS: panic:",
+                    "msg: ipi: ack timeout waiters=0xd",
+                    "vibeOS: panic: halted",
+                ],
+            )
+        finally:
+            os.close(r)
+            if w != -1:
+                os.close(w)
+
 
 class TestKtestProtocol(unittest.TestCase):
     def test_begin_end_pass_status(self) -> None:
@@ -382,18 +410,16 @@ class TestKtestProtocol(unittest.TestCase):
             )
         )
 
-    def test_only_smp4_persist_ipi_ack_panic_is_retryable(self) -> None:
+    def test_smp4_ipi_ack_panic_is_retryable_on_first_boot(self) -> None:
         msg = (
             "panic signature 'vibeOS: panic:' in: "
             "'infovibeOS: panic: msg:  ipi: ack timeout waiters=0xdvibeOS: ktes'"
         )
+        self.assertTrue(retryable_ktest_failure(4, msg))
         self.assertTrue(
             retryable_ktest_failure(4, msg, persist_reboot=True)
         )
-        self.assertFalse(retryable_ktest_failure(4, msg))
-        self.assertFalse(
-            retryable_ktest_failure(2, msg, persist_reboot=True)
-        )
+        self.assertFalse(retryable_ktest_failure(2, msg, persist_reboot=True))
         self.assertFalse(
             retryable_ktest_failure(
                 4,
@@ -401,6 +427,27 @@ class TestKtestProtocol(unittest.TestCase):
                 persist_reboot=True,
             )
         )
+
+    def test_smp4_uart_merged_ktest_panic_is_retryable(self) -> None:
+        # CI 35726400930: first-boot smp4, banner glued to ktest ok, no IPI body.
+        msg = (
+            "panic signature 'vibeOS: panic:' in: "
+            "'vibeOS: dmesg: 803ms cpu0 info vibeOS: ktest: ok "
+            "tlb_shootdown_remotevibeOS: panic:'"
+        )
+        self.assertTrue(retryable_ktest_failure(4, msg))
+        self.assertTrue(
+            retryable_ktest_failure(4, msg, persist_reboot=True)
+        )
+        self.assertFalse(retryable_ktest_failure(2, msg))
+        # serial_tail from an earlier ktest ok must not trip this.
+        tailed = (
+            "panic signature 'vibeOS: panic:' in: 'vibeOS: panic: at foo.rs'"
+            "\n--- serial tail ---\n"
+            "vibeOS: ktest: ok map_unmap\n"
+            "vibeOS: panic: at foo.rs"
+        )
+        self.assertFalse(retryable_ktest_failure(4, tailed))
 
 
 class TestSilentUserSyscallsHang(unittest.TestCase):
@@ -492,11 +539,11 @@ class TestKernelBootRetry(unittest.TestCase):
         passed = self._passing_initial_boot()
         cfg = QemuConfig(iso="x.iso", smp=2)
         with mock.patch.object(
-            kernel_boot,
+            run_ktest,
             "run_qemu_until_exit",
             side_effect=(hang, hang, passed),
         ) as run:
-            result = kernel_boot._ktest_boot(
+            result = run_ktest._ktest_boot(
                 cfg,
                 timeout=1.0,
                 persist_reboot=False,
@@ -508,12 +555,12 @@ class TestKernelBootRetry(unittest.TestCase):
         hang = self._dup_ok_timeout()
         cfg = QemuConfig(iso="x.iso", smp=2)
         with mock.patch.object(
-            kernel_boot,
+            run_ktest,
             "run_qemu_until_exit",
             side_effect=(hang, hang, hang),
         ) as run:
             with self.assertRaises(HarnessError):
-                kernel_boot._ktest_boot(
+                run_ktest._ktest_boot(
                     cfg,
                     timeout=1.0,
                     persist_reboot=False,
@@ -524,16 +571,37 @@ class TestKernelBootRetry(unittest.TestCase):
         other = HarnessError("timed out after 90.0s; 40 lines")
         cfg = QemuConfig(iso="x.iso", smp=2)
         with mock.patch.object(
-            kernel_boot,
+            run_ktest,
             "run_qemu_until_exit",
             side_effect=(other, other),
         ) as run:
             with self.assertRaises(HarnessError):
-                kernel_boot._ktest_boot(
+                run_ktest._ktest_boot(
                     cfg,
                     timeout=1.0,
                     persist_reboot=False,
                 )
+        self.assertEqual(run.call_count, 2)
+
+    def test_smp4_uart_merged_panic_retries_once_then_passes(self) -> None:
+        err = HarnessError(
+            "panic signature 'vibeOS: panic:' in: "
+            "'vibeOS: dmesg: 803ms cpu0 info vibeOS: ktest: ok "
+            "tlb_shootdown_remotevibeOS: panic:'"
+        )
+        passed = self._passing_initial_boot()
+        cfg = QemuConfig(iso="x.iso", smp=4, extra=("-accel", "tcg"))
+        with mock.patch.object(
+            run_ktest,
+            "run_qemu_until_exit",
+            side_effect=(err, passed),
+        ) as run:
+            result = run_ktest._ktest_boot(
+                cfg,
+                timeout=1.0,
+                persist_reboot=False,
+            )
+        self.assertIs(result, passed)
         self.assertEqual(run.call_count, 2)
 
 
