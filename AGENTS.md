@@ -26,7 +26,7 @@ From ROADMAP "How to read this". Not optional.
 ## Conventions
 
 - **lib/bin pairing:** `src/foo.rs` is portable (`src/lib.rs`, host-tested). `src/foo_init.rs` is the kernel half (`src/main.rs`). Nested today: `src/arch/`, `src/fs/`. Do not invent `src/mm/` until A1. Map: [DESIGN §1.3](docs/DESIGN.md#13-module-map).
-- **Emit:** `serial::line(marker::…)` / `writeln!(Serial, "vibeOS: …")` for contract lines (never filtered, captured into the log). `klog!` for everything else. `PlainSerial` only for `dmesg` and panic dumps. (`marker!` is E3, not landed.)
+- **Emit:** `marker!` for contract lines (never filtered, always captured); `klog!` for everything else; `PlainSerial` only for `dmesg` and panic dumps.
 - **Cells:** modules roll their own `UnsafeCell` wrappers. Q3 will replace them with `BootCell` / `IrqCell` plus `SpinMutex`. Do not add another copy.
 - No ephemeral "fixed X" comments ([DESIGN §1.4](docs/DESIGN.md#14-documentation-rules)).
 

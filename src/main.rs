@@ -71,8 +71,6 @@ mod x86;
 #[cfg(feature = "kernel_tests")]
 mod ktest;
 
-use core::fmt::Write;
-
 use limine::request::{
     ExecutableAddressRequest, FramebufferRequest, HhdmRequest, MemmapRequest, RsdpRequest,
 };
@@ -126,16 +124,16 @@ static REQ_END: RequestsEndMarker = RequestsEndMarker::new();
 pub extern "C" fn _start() -> ! {
     // Step 1: serial. Nothing before this is debuggable.
     serial::Serial::init();
-    serial::line(marker::SERIAL_ONLINE);
+    crate::marker!(marker::SERIAL_ONLINE);
 
     // Step 2: base revision. DESIGN §3.3 puts this immediately after serial.
     // Missing / older Limine responds by not clearing the request, and
     // `is_supported()` returns false.
     if !BASE_REV.is_supported() {
-        serial::line("vibeOS: limine: base revision unsupported");
+        crate::marker!("vibeOS: limine: base revision unsupported");
         x86::halt();
     }
-    serial::line(marker::LIMINE_OK);
+    crate::marker!(marker::LIMINE_OK);
 
     // With `--features panic_test`, prove the panic path end to end.
     // Kept before PMM init so the panic path still exercises only the
@@ -144,7 +142,7 @@ pub extern "C" fn _start() -> ! {
     // warnings in the panic-test build.
     #[cfg(feature = "panic_test")]
     {
-        serial::line("vibeOS: boot: panic-test armed");
+        crate::marker!("vibeOS: boot: panic-test armed");
         panic!("intentional panic-test trip");
     }
 
@@ -179,11 +177,7 @@ fn normal_boot_tail() {
     let stats = unsafe { pmm_init::init(memmap.entries(), hhdm.offset, exec.physical_base) };
 
     // Exit-gate marker for phase 1 slice A. DESIGN §2.6 marker shape.
-    let _ = writeln!(
-        serial::Serial,
-        "vibeOS: pmm: {} free 4KiB frames",
-        stats.free_frames
-    );
+    crate::marker!("vibeOS: pmm: {} free 4KiB frames", stats.free_frames);
 
     // Diagnostic follow-up: totals and largest available order. Not part
     // of the exit-gate contract, but useful when the free count is
@@ -192,8 +186,7 @@ fn normal_boot_tail() {
         Some(o) => o as i32,
         None => -1,
     };
-    let _ = writeln!(
-        serial::Serial,
+    crate::marker!(
         "vibeOS: pmm: {} total, largest order {}",
         stats.total_frames,
         largest
@@ -234,7 +227,7 @@ fn normal_boot_tail() {
             panic!("heap probe mismatch");
         }
     }
-    serial::line(marker::HEAP_OK);
+    crate::marker!(marker::HEAP_OK);
 
     unsafe { kva_init::init() };
     {
@@ -242,20 +235,20 @@ fn normal_boot_tail() {
         unsafe { (stack.mapped_base().as_u64() as *mut u64).write_volatile(0x5A5A_5A5A_5A5A_5A5A) };
         kva_init::free_stack(stack);
     }
-    serial::line(marker::KVA_READY);
+    crate::marker!(marker::KVA_READY);
 
     // ---- Phase 2 slice A: GDT/TSS/IST, PIC, IDT. ----
     // After KVA so IST stacks are guarded KVA stacks. PIC remap before
     // LIDT so firmware 8259 vectors cannot alias CPU exceptions. FADT
     // bit 0 may skip ICW; `pic: remapped` still means the step finished.
     unsafe { arch::gdt::init_bsp() };
-    serial::line(marker::GDT_OK);
+    crate::marker!(marker::GDT_OK);
 
     unsafe { arch::pic::remap_and_mask() };
-    serial::line(marker::PIC_REMAPPED);
+    crate::marker!(marker::PIC_REMAPPED);
 
     unsafe { arch::idt::init() };
-    serial::line(marker::IDT_OK);
+    crate::marker!(marker::IDT_OK);
 
     // DESIGN §3.3 step 11. After GDT: `mov gs` already ran. Before
     // IRQ0 so ISRs can `gs:[0]`. Allocate + wrmsr GS bases, then
@@ -263,7 +256,7 @@ fn normal_boot_tail() {
     unsafe { per_cpu_init::init_bsp() };
     unsafe { thread_init::init_bootstrap() };
     unsafe { syscall_init::init_bsp() };
-    serial::line(marker::PER_CPU_BSP);
+    crate::marker!(marker::PER_CPU_BSP);
 
     acpi_init::report();
 
@@ -293,8 +286,8 @@ fn normal_boot_tail() {
     // can preempt. `irq: enabled` is IF-on + scheduler armed; IRQ0 was
     // already live for the calib proof.
     unsafe { sched_init::init() };
-    serial::line(marker::SCHED_CPU0);
-    serial::line(marker::IRQ_ENABLED);
+    crate::marker!(marker::SCHED_CPU0);
+    crate::marker!(marker::IRQ_ENABLED);
 
     // DESIGN §3.3 step 17. After the scheduler: APs enter as idle.
     // IPI vectors are in the shared IDT; install the shootdown hook
@@ -391,13 +384,13 @@ fn framebuffer_phys_end(hhdm_offset: u64) -> u64 {
 /// missing; nothing after this point would work without it.
 #[cfg(not(feature = "panic_test"))]
 fn halt_with(msg: &str) -> ! {
-    serial::line(msg);
+    crate::marker!(msg);
     x86::halt();
 }
 
 #[cfg(feature = "gp_test")]
 fn gp_test_trip() {
-    serial::line("vibeOS: boot: gp-test armed");
+    crate::marker!("vibeOS: boot: gp-test armed");
     // Kernel code selector with RPL=3 into DS: not a data segment, #GP.
     unsafe {
         core::arch::asm!(

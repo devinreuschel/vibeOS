@@ -232,8 +232,8 @@ Every boot line is `vibeOS: <subsystem>: <state>`, lowercase, no punctuation at 
 markers are asserted by the e2e harness in order. Adding a marker means updating the contract in
 [section 8.3](#83-end-to-end) in the same commit.
 
-Contract lines go through `serial::line` / `writeln!(Serial)` so they bypass the log filter and still
-land in the ring. `klog!` is filtered. `PlainSerial` is only for `dmesg` and panic dumps.
+`marker!` for contract lines (never filtered, always captured); `klog!` for everything else;
+`PlainSerial` only for `dmesg` and panic dumps.
 
 ```
 vibeOS: serial online

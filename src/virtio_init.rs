@@ -5,7 +5,6 @@
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
 use alloc::boxed::Box;
-use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::dev::{Device, Driver, IdMatch, ProbeError};
@@ -27,7 +26,6 @@ use crate::dma_init;
 use crate::irq_init;
 use crate::pci_init;
 use crate::per_cpu_init;
-use crate::serial::{self, Serial};
 use crate::sync_init::SpinMutex;
 use crate::work_init;
 
@@ -345,10 +343,13 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
         vec,
     });
 
-    let _ = writeln!(
-        Serial,
+    crate::marker!(
         "vibeOS: virtio: rng {} qsz={} feat={:#x} notify_off={}*{}",
-        dev.addr, qsz, feat, qoff, notify_cap.notify_off_multiplier
+        dev.addr,
+        qsz,
+        feat,
+        qoff,
+        notify_cap.notify_off_multiplier
     );
     Ok(())
 }
@@ -390,7 +391,7 @@ impl Driver for RngDriver {
     fn probe(&self, dev: &mut Device) -> Result<(), ProbeError> {
         let caps = virtio::read_modern_caps(&mut pci_init::HwCfg, dev.addr);
         if !caps.is_complete() {
-            serial::line("vibeOS: virtio: missing modern caps");
+            crate::marker!("vibeOS: virtio: missing modern caps");
             return Err(ProbeError::NoResource);
         }
         claim_bars(dev, &caps);
@@ -400,11 +401,11 @@ impl Driver for RngDriver {
                 Ok(())
             }
             Err(VirtioError::NoVersion1) => {
-                serial::line("vibeOS: virtio: no VERSION_1");
+                crate::marker!("vibeOS: virtio: no VERSION_1");
                 Err(ProbeError::Failed)
             }
             Err(e) => {
-                let _ = writeln!(Serial, "vibeOS: virtio: probe {}", e.as_str());
+                crate::marker!("vibeOS: virtio: probe {}", e.as_str());
                 Err(ProbeError::Failed)
             }
         }

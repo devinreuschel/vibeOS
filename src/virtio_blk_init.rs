@@ -38,7 +38,7 @@ use crate::dma_init;
 use crate::irq_init;
 use crate::pci_init;
 use crate::per_cpu_init;
-use crate::serial::{self, Serial};
+use crate::serial::Serial;
 use crate::sync_init::SpinMutex;
 use crate::thread_init;
 
@@ -976,8 +976,7 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
     let _ = write_marker(&mut Serial, NAME, capacity);
     let _ = writeln!(Serial);
     let mq = if feat & F_MQ != 0 { "mq" } else { "sq" };
-    let _ = writeln!(
-        Serial,
+    crate::marker!(
         "vibeOS: virtio: blk {NAME} {} qsz={q0sz} nq={nq} {mq} feat={:#x} bs={blk_size} topo={}/{} discard={}",
         dev.addr,
         feat,
@@ -1024,23 +1023,23 @@ impl Driver for BlkDriver {
     }
     fn probe(&self, dev: &mut Device) -> Result<(), ProbeError> {
         if LIVE.load(Ordering::Acquire) {
-            serial::line("vibeOS: virtio: blk already bound");
+            crate::marker!("vibeOS: virtio: blk already bound");
             return Err(ProbeError::Failed);
         }
         let caps = virtio::read_modern_caps(&mut pci_init::HwCfg, dev.addr);
         if !caps.is_complete() || caps.device.is_none() {
-            serial::line("vibeOS: virtio: blk missing modern caps");
+            crate::marker!("vibeOS: virtio: blk missing modern caps");
             return Err(ProbeError::NoResource);
         }
         claim_bars(dev, &caps);
         match setup(dev, caps) {
             Ok(()) => Ok(()),
             Err(VirtioError::NoVersion1) => {
-                serial::line("vibeOS: virtio: blk no VERSION_1");
+                crate::marker!("vibeOS: virtio: blk no VERSION_1");
                 Err(ProbeError::Failed)
             }
             Err(e) => {
-                let _ = writeln!(Serial, "vibeOS: virtio: blk probe {}", e.as_str());
+                crate::marker!("vibeOS: virtio: blk probe {}", e.as_str());
                 Err(ProbeError::Failed)
             }
         }

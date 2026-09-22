@@ -8,7 +8,6 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::arch::global_asm;
-use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::addr_space::{UserMemError, UserPerms};
@@ -49,7 +48,6 @@ use crate::pci_init;
 use crate::per_cpu_init;
 use crate::pmm_init;
 use crate::sched_init;
-use crate::serial::{self, Serial};
 use crate::smp_init;
 use crate::sync_init::{BlockingMutex, Channel, Condvar, RwLock, Semaphore, SpinMutex};
 use crate::syscall_init;
@@ -199,26 +197,26 @@ pub fn run() -> ! {
     // IRQs off: PIC is masked, but page-table walks should not race a
     // stray spurious line.
     let _cli = x86::InterruptGuard::enter();
-    serial::line("vibeOS: ktest: begin");
+    crate::marker!("vibeOS: ktest: begin");
     let mut failed = false;
     for &(name, f) in TESTS {
         match f() {
             Outcome::Ok => {
-                let _ = writeln!(Serial, "vibeOS: ktest: ok {name}");
+                crate::marker!("vibeOS: ktest: ok {name}");
             }
             Outcome::Fail(why) => {
                 // Same shape as skip: reason on the protocol line so
                 // check_ktest_output (which raises on that line alone)
                 // is enough to diagnose (DESIGN §8.2).
-                let _ = writeln!(Serial, "vibeOS: ktest: FAIL {name}: {why}");
+                crate::marker!("vibeOS: ktest: FAIL {name}: {why}");
                 failed = true;
             }
             Outcome::Skip(reason) => {
-                let _ = writeln!(Serial, "vibeOS: ktest: skip {name}: {reason}");
+                crate::marker!("vibeOS: ktest: skip {name}: {reason}");
             }
         }
     }
-    serial::line("vibeOS: ktest: end");
+    crate::marker!("vibeOS: ktest: end");
     qemu_exit(if failed { EXIT_FAIL } else { EXIT_PASS });
 }
 
@@ -341,10 +339,10 @@ fn test_nx_enforcement() -> Outcome {
     };
     // Error-code bit 4 is instruction-fetch (Intel SDM).
     if fault.error & (1 << 4) == 0 {
-        let _ = writeln!(
-            Serial,
+        crate::marker!(
             "vibeOS: ktest:   nx err={:#x} cr2={:#x}",
-            fault.error, fault.cr2
+            fault.error,
+            fault.cr2
         );
         return Outcome::Fail("PF was not instruction-fetch");
     }
@@ -418,10 +416,7 @@ fn test_heap_reuse() -> Outcome {
     // malloc and will fold `a == b` after free at opt-level 1.
     let reused = core::hint::black_box(a as usize) == core::hint::black_box(b as usize);
     if !reused {
-        let _ = writeln!(
-            Serial,
-            "vibeOS: ktest:   reuse pad={pad:p} a={a:p} keep={keep:p} b={b:p}"
-        );
+        crate::marker!("vibeOS: ktest:   reuse pad={pad:p} a={a:p} keep={keep:p} b={b:p}");
         unsafe {
             alloc::alloc::dealloc(b, layout);
             alloc::alloc::dealloc(keep, layout);
@@ -486,13 +481,13 @@ fn test_kva_roundtrip() -> Outcome {
     let mid = free_frames();
     if mid + 4 != before {
         kva_init::free_stack(stack);
-        let _ = writeln!(Serial, "vibeOS: ktest:   before={before} mid={mid}");
+        crate::marker!("vibeOS: ktest:   before={before} mid={mid}");
         return Outcome::Fail("stack did not take 4 frames");
     }
     kva_init::free_stack(stack);
     let after = free_frames();
     if after != before {
-        let _ = writeln!(Serial, "vibeOS: ktest:   before={before} after={after}");
+        crate::marker!("vibeOS: ktest:   before={before} after={after}");
         return Outcome::Fail("free did not restore frame count");
     }
     Outcome::Ok
@@ -512,7 +507,7 @@ fn test_kva_deferred() -> Outcome {
     kva_init::drain_deferred();
     let after = free_frames();
     if after != before {
-        let _ = writeln!(Serial, "vibeOS: ktest:   before={before} after={after}");
+        crate::marker!("vibeOS: ktest:   before={before} after={after}");
         return Outcome::Fail("drain did not free");
     }
     Outcome::Ok
@@ -834,7 +829,7 @@ fn test_ring3_syscall_enosys() -> Outcome {
         return Outcome::Fail("result unmapped");
     };
     if val != (-(syscall::ENOSYS as i64)) as u64 {
-        let _ = writeln!(Serial, "vibeOS: ktest:   enosys rax={val:#x}");
+        crate::marker!("vibeOS: ktest:   enosys rax={val:#x}");
         return Outcome::Fail("rax not -ENOSYS");
     }
     if free_frames() != before {
@@ -848,11 +843,11 @@ fn test_ring3_hello_exit() -> Outcome {
     match user_init::run_path("/hello") {
         Ok(42) => {}
         Ok(st) => {
-            let _ = writeln!(Serial, "vibeOS: ktest:   hello status={st}");
+            crate::marker!("vibeOS: ktest:   hello status={st}");
             return Outcome::Fail("status not 42");
         }
         Err(e) => {
-            let _ = writeln!(Serial, "vibeOS: ktest:   hello err={}", e.as_str());
+            crate::marker!("vibeOS: ktest:   hello err={}", e.as_str());
             return Outcome::Fail("load/run");
         }
     }
@@ -945,11 +940,11 @@ fn test_user_syscalls() -> Outcome {
         match user_init::run_path("/bin/tests") {
             Ok(0) => {}
             Ok(st) => {
-                let _ = writeln!(Serial, "vibeOS: ktest:   tests status={st}");
+                crate::marker!("vibeOS: ktest:   tests status={st}");
                 return Outcome::Fail("status not 0");
             }
             Err(e) => {
-                let _ = writeln!(Serial, "vibeOS: ktest:   tests err={}", e.as_str());
+                crate::marker!("vibeOS: ktest:   tests err={}", e.as_str());
                 return Outcome::Fail("load/run");
             }
         }
@@ -1028,10 +1023,11 @@ fn test_df_on_ist() -> Outcome {
     if c.handler_rsp >= lo && c.handler_rsp < hi {
         Outcome::Ok
     } else {
-        let _ = writeln!(
-            Serial,
+        crate::marker!(
             "vibeOS: ktest:   rsp={:#x} lo={:#x} hi={:#x}",
-            c.handler_rsp, lo, hi
+            c.handler_rsp,
+            lo,
+            hi
         );
         Outcome::Fail("handler rsp not on ist1")
     }
@@ -1059,7 +1055,7 @@ fn test_pit_tick_rate() -> Outcome {
         if (40..=160).contains(&dt) {
             Outcome::Ok
         } else {
-            let _ = writeln!(Serial, "vibeOS: ktest:   ticks {t0} -> {t1} dt={dt}");
+            crate::marker!("vibeOS: ktest:   ticks {t0} -> {t1} dt={dt}");
             Outcome::Fail("pit not ~1 kHz")
         }
     })
@@ -1072,7 +1068,7 @@ fn test_now_us_monotonic() -> Outcome {
         while i < 10_000 {
             let n = time_init::now_us();
             if n < last {
-                let _ = writeln!(Serial, "vibeOS: ktest:   now_us {last} -> {n} at {i}");
+                crate::marker!("vibeOS: ktest:   now_us {last} -> {n} at {i}");
                 return Outcome::Fail("now_us went backwards");
             }
             last = n;
@@ -1089,7 +1085,7 @@ fn test_now_us_under_yields() -> Outcome {
         while i < 10_000 {
             let n = time_init::now_us();
             if n < last {
-                let _ = writeln!(Serial, "vibeOS: ktest:   yield now_us {last} -> {n} at {i}");
+                crate::marker!("vibeOS: ktest:   yield now_us {last} -> {n} at {i}");
                 return Outcome::Fail("now_us went backwards under yield");
             }
             last = n;
@@ -1127,10 +1123,7 @@ fn test_tsc_calib_source() -> Outcome {
                 }
                 i += 1;
             }
-            let _ = writeln!(
-                Serial,
-                "vibeOS: ktest:   hpet {k}/ms ref {ref_k}/ms pit {last_pit}/ms"
-            );
+            crate::marker!("vibeOS: ktest:   hpet {k}/ms ref {ref_k}/ms pit {last_pit}/ms");
             if last_pit == 0 {
                 Outcome::Fail("pit ch2 calib failed")
             } else {
@@ -1164,7 +1157,7 @@ fn test_uptime_sides() -> Outcome {
         if us >= lo && us <= hi {
             Outcome::Ok
         } else {
-            let _ = writeln!(Serial, "vibeOS: ktest:   tick {tick} ms tsc {us} us");
+            crate::marker!("vibeOS: ktest:   tick {tick} ms tsc {us} us");
             Outcome::Fail("tick and tsc sides diverged")
         }
     })
@@ -1224,7 +1217,7 @@ fn test_lapic_timer_rearm() -> Outcome {
             if (20..=100).contains(&dt) {
                 Outcome::Ok
             } else {
-                let _ = writeln!(Serial, "vibeOS: ktest:   pit dt={dt}");
+                crate::marker!("vibeOS: ktest:   pit dt={dt}");
                 Outcome::Fail("pit ticks stalled")
             }
         }
@@ -1235,7 +1228,7 @@ fn test_lapic_timer_rearm() -> Outcome {
             if n >= 20 {
                 Outcome::Ok
             } else {
-                let _ = writeln!(Serial, "vibeOS: ktest:   lapic fires {n}");
+                crate::marker!("vibeOS: ktest:   lapic fires {n}");
                 Outcome::Fail("rearm stalled")
             }
         }
@@ -1403,7 +1396,7 @@ fn test_failed_ap_cleanup() -> Outcome {
     smp_init::exercise_fail_cleanup();
     let n1 = free_frames();
     if n0 != n1 {
-        let _ = writeln!(Serial, "vibeOS: ktest:   frames {n0} -> {n1}");
+        crate::marker!("vibeOS: ktest:   frames {n0} -> {n1}");
         Outcome::Fail("failed AP leaked frames")
     } else {
         Outcome::Ok
@@ -1578,7 +1571,7 @@ fn test_sleep_ms_50() -> Outcome {
         if !time_init::tsc_invariant() && (40..=400).contains(&du) && (1..=400).contains(&dt) {
             return Outcome::Ok;
         }
-        let _ = writeln!(Serial, "vibeOS: ktest:   sleep_ms dt={dt} du={du}");
+        crate::marker!("vibeOS: ktest:   sleep_ms dt={dt} du={du}");
         Outcome::Fail("sleep_ms not 50-100ms")
     })
 }
@@ -1618,12 +1611,12 @@ fn test_preempt_two_threads() -> Outcome {
                 while time_init::uptime_ms().saturating_sub(t1) < 50 {
                     core::hint::spin_loop();
                 }
-                let _ = writeln!(Serial, "vibeOS: ktest:   preempt a={a} b={b}");
+                crate::marker!("vibeOS: ktest:   preempt a={a} b={b}");
                 return Outcome::Ok;
             }
             if time_init::uptime_ms().saturating_sub(t0) > 500 {
                 PREEMPT_STOP.store(true, Ordering::SeqCst);
-                let _ = writeln!(Serial, "vibeOS: ktest:   preempt a={a} b={b}");
+                crate::marker!("vibeOS: ktest:   preempt a={a} b={b}");
                 return Outcome::Fail("no preemption");
             }
             core::hint::spin_loop();
@@ -1639,7 +1632,7 @@ fn test_idle_runs() -> Outcome {
         if t1 > t0 {
             Outcome::Ok
         } else {
-            let _ = writeln!(Serial, "vibeOS: ktest:   idle_tsc {t0} -> {t1}");
+            crate::marker!("vibeOS: ktest:   idle_tsc {t0} -> {t1}");
             Outcome::Fail("idle did not run")
         }
     })
@@ -1659,7 +1652,7 @@ fn test_reap_returns_frames() -> Outcome {
     }
     let after = free_frames();
     if after != before {
-        let _ = writeln!(Serial, "vibeOS: ktest:   frames {before} -> {after}");
+        crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
         return Outcome::Fail("reap did not restore frames");
     }
     Outcome::Ok
@@ -1717,7 +1710,7 @@ fn test_reap_many_via_idle() -> Outcome {
 
         let after = free_frames();
         if after != before {
-            let _ = writeln!(Serial, "vibeOS: ktest:   frames {before} -> {after}");
+            crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
             return Outcome::Fail("reap did not restore frames");
         }
         Outcome::Ok
@@ -1752,14 +1745,14 @@ fn test_blocking_mutex_counter() -> Outcome {
             if time_init::uptime_ms().saturating_sub(t0) > 8_000 {
                 let n = MUTEX_DONE.load(Ordering::SeqCst);
                 let c = *COUNTER.lock();
-                let _ = writeln!(Serial, "vibeOS: ktest:   mutex done={n} count={c}");
+                crate::marker!("vibeOS: ktest:   mutex done={n} count={c}");
                 return Outcome::Fail("mutex stall");
             }
             thread_init::yield_now();
         }
         let c = *COUNTER.lock();
         if c != MUTEX_ITERS * 2 {
-            let _ = writeln!(Serial, "vibeOS: ktest:   mutex count={c}");
+            crate::marker!("vibeOS: ktest:   mutex count={c}");
             return Outcome::Fail("mutex count");
         }
         Outcome::Ok
@@ -2000,7 +1993,7 @@ fn test_channel_mpsc() -> Outcome {
             let s = CH_SUM.load(Ordering::SeqCst);
             if s != 0 {
                 if s != 32 * 33 / 2 {
-                    let _ = writeln!(Serial, "vibeOS: ktest:   chan sum={s}");
+                    crate::marker!("vibeOS: ktest:   chan sum={s}");
                     return Outcome::Fail("channel sum");
                 }
                 return Outcome::Ok;
@@ -2158,10 +2151,11 @@ fn test_spawn_exit_thousands() -> Outcome {
     if after != before {
         let h = crate::heap_init::stats();
         let k = kva_init::stats();
-        let _ = writeln!(
-            Serial,
+        crate::marker!(
             "vibeOS: ktest:   frames {before} -> {after} n={SPAWN_EXIT_N} heap {}/{} kva {}",
-            h.used, h.capacity, k.used
+            h.used,
+            h.capacity,
+            k.used
         );
         return Outcome::Fail("spawn/exit leaked frames");
     }
@@ -2381,8 +2375,7 @@ fn test_alloc_stress_smp() -> Outcome {
     }
     alloc_hammer();
     if !spin_until_ns(|| HAMMER_DONE.load(Ordering::SeqCst) >= n, 2_000_000_000) {
-        let _ = writeln!(
-            Serial,
+        crate::marker!(
             "vibeOS: ktest:   hammers {}",
             HAMMER_DONE.load(Ordering::SeqCst)
         );
@@ -3963,7 +3956,7 @@ fn test_block_persist() -> Outcome {
                 }
                 i += 1;
             }
-            serial::line("vibeOS: persist: intact");
+            crate::marker!("vibeOS: persist: intact");
             return Outcome::Ok;
         }
         buf[0..8].copy_from_slice(&PERSIST_MAGIC);
@@ -3978,7 +3971,7 @@ fn test_block_persist() -> Outcome {
         if virtio_blk_init::flush().is_err() {
             return Outcome::Fail("flush");
         }
-        serial::line("vibeOS: persist: wrote");
+        crate::marker!("vibeOS: persist: wrote");
         Outcome::Ok
     })
 }
@@ -4132,8 +4125,7 @@ fn test_block_cache_hit() -> Outcome {
     if cached >= raw_delta {
         return Outcome::Fail("no reduce");
     }
-    let _ = writeln!(
-        Serial,
+    crate::marker!(
         "vibeOS: cache: hits {} misses {} device {} raw {}",
         s2.hits,
         s2.misses,

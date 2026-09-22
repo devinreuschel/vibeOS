@@ -14,7 +14,7 @@ use crate::fb_init;
 use crate::kbd_init;
 use crate::log_init;
 use crate::per_cpu_init;
-use crate::serial::{self, Serial};
+use crate::serial::Serial;
 use crate::thread_init;
 use crate::x86::InterruptGuard;
 
@@ -129,7 +129,7 @@ pub fn init() {
     }
     let _kbd = kbd_init::init();
     LIVE.store(true, Ordering::Release);
-    serial::line(marker::CONSOLE_OK);
+    crate::marker!(marker::CONSOLE_OK);
     if fb {
         fb_init::write(marker::CONSOLE_OK.as_bytes());
         fb_init::write(b"\n");

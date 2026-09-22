@@ -12,7 +12,6 @@ use vibeos::work::{WorkItem, WorkQueues};
 
 use crate::irq_init;
 use crate::per_cpu_init;
-use crate::serial;
 use crate::thread_init;
 
 struct Cell<T>(UnsafeCell<T>);
@@ -93,5 +92,5 @@ pub fn init() {
     }
     irq_init::start_threaded();
     LIVE.store(true, Ordering::Release);
-    serial::line("vibeOS: work: ready");
+    crate::marker!("vibeOS: work: ready");
 }

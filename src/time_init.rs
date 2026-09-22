@@ -4,7 +4,6 @@
 //! HPET MMIO, the IRQ0 handler body, and the BSP `tsc_per_ms`.
 
 use core::cell::UnsafeCell;
-use core::fmt::Write;
 use core::sync::atomic::AtomicU64;
 
 use vibeos::acpi::HpetInfo;
@@ -18,7 +17,6 @@ use vibeos::time::{
 
 use crate::acpi_init;
 use crate::paging_init;
-use crate::serial::{self, Serial};
 use crate::x86;
 
 const HPET_GEN_CFG: u64 = 0x10;
@@ -424,7 +422,7 @@ pub unsafe fn init() {
     let use_rdtscp = has_rdtscp();
     let inv = invariant_tsc();
     if !inv {
-        serial::line("vibeOS: time: invariant tsc absent");
+        crate::marker!("vibeOS: time: invariant tsc absent");
     }
 
     let st = unsafe { STATE.get_mut() };
@@ -440,7 +438,7 @@ pub unsafe fn init() {
                 source = CalibSource::Hpet;
                 per_ms = Some(v);
             }
-            None => serial::line("vibeOS: time: hpet calib refused"),
+            None => crate::marker!("vibeOS: time: hpet calib refused"),
         }
     }
     if per_ms.is_none() {
@@ -472,16 +470,11 @@ pub unsafe fn init() {
     // Re-enable NMI after CMOS index bit 7.
     unsafe { x86::outb(RTC_INDEX, 0x0D) };
 
-    let _ = writeln!(
-        Serial,
-        "vibeOS: time: calibrated {} {}/ms",
-        source.as_str(),
-        per_ms
-    );
-    let _ = writeln!(Serial, "vibeOS: time: tsc {}/ms", per_ms);
+    crate::marker!("vibeOS: time: calibrated {} {}/ms", source.as_str(), per_ms);
+    crate::marker!("vibeOS: time: tsc {}/ms", per_ms);
 }
 
 fn halt_time(msg: &str) -> ! {
-    serial::line(msg);
+    crate::marker!(msg);
     x86::halt();
 }

@@ -23,7 +23,6 @@ use vibeos::paging::{
 };
 
 use crate::pmm_init;
-use crate::serial::Serial;
 use crate::sync_init::SpinMutex;
 use crate::x86;
 
@@ -549,22 +548,21 @@ pub unsafe fn install(
 /// its own follow-up printing.
 pub fn report(r: &PagingReport) {
     // Exit-gate marker: DESIGN §2.6 shape.
-    Serial::write_bytes(marker::PAGING_CR3_OK.as_bytes());
-    Serial::write_bytes(b"\n");
+    crate::marker!(marker::PAGING_CR3_OK);
 
-    let _ = writeln!(
-        Serial,
+    crate::marker!(
         "vibeOS: paging: map_end {:#x} ({} MiB)",
         r.map_end,
         r.map_end / (1024 * 1024)
     );
-    let _ = writeln!(
-        Serial,
+    crate::marker!(
         "vibeOS: paging: kernel .text {} B, .rodata {} B, .data+bss {} B",
-        r.kernel_text_bytes, r.kernel_rodata_bytes, r.kernel_data_bytes
+        r.kernel_text_bytes,
+        r.kernel_rodata_bytes,
+        r.kernel_data_bytes
     );
     if r.duplicated_stack_entry {
-        Serial::write_bytes(b"vibeOS: paging: bootloader stack pml4 entry duplicated\n");
+        crate::marker!("vibeOS: paging: bootloader stack pml4 entry duplicated");
     }
 }
 
