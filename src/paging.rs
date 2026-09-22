@@ -25,7 +25,7 @@
 //!   remapping".
 //!
 //! User half is `0x0`..`USER_END` (DESIGN §4.1). Address spaces live in
-//! [`crate::addr_space`]. 1 GiB pages and demand paging stay phase 10.
+//! [`crate::addr_space`]. 1 GiB pages and demand paging stay phase 12.
 //!
 //! Real TLB shootdown IPIs: `tlb_shootdown_others` is a hook the
 //! kernel installs (DESIGN §4.3 / §7.9). Host tests leave it unset.
@@ -103,7 +103,7 @@ impl PageSize {
 }
 
 /// PTE flag set. Held as a raw u64 so table entries round-trip losslessly
-/// (including the OS-reserved bits phase 10 will want for e.g. CoW).
+/// (including the OS-reserved bits phase 12 will want for e.g. CoW).
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct PageFlags(pub u64);
@@ -376,7 +376,7 @@ impl Mapper {
     /// was mapped, or `None` if the VA was not present.
     ///
     /// Interior tables are NOT freed — that requires refcounting and
-    /// belongs in phase 10.
+    /// belongs in phase 12.
     ///
     /// # Safety
     /// Caller is responsible for TLB invalidation via

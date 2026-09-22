@@ -690,7 +690,7 @@ Policy is **CPL-split** (Phase 9C). Catch intercept (in-guest tests) still wins 
 | Vector | Exception | Kernel (CPL=0) | User (CPL=3) |
 |--------|-----------|----------------|--------------|
 | `0x03` | `#BP` breakpoint | log, continue | log, continue |
-| `0x0E` | `#PF` page fault | halt (demand paging: Phase 10) | `SIGSEGV`, kill + diagnostic |
+| `0x0E` | `#PF` page fault | halt (demand paging: Phase 12) | `SIGSEGV`, kill + diagnostic |
 | `0x0D` | `#GP` general protection | log selector/error code, halt | `SIGSEGV`, kill + diagnostic |
 | `0x06` | `#UD` invalid opcode | log CR2/RIP, halt | `SIGILL`, kill + diagnostic |
 | `0x00`/`0x10`/`0x13` | `#DE`/`#MF`/`#XF` | halt | `SIGFPE`, kill + diagnostic |
@@ -743,7 +743,7 @@ false-refuse every allocate from `ktest`.
 
 The allocator records the dest CPU. `set_affinity` updates that binding. I/O APIC
 routes are rewritten immediately; MSI/MSI-X callers reprogram the message from
-`cpu_of`. Phase 17 rebalance uses this table rather than a second map.
+`cpu_of`. Phase 19 rebalance uses this table rather than a second map.
 
 MSI message address is `0xFEE0_0000 | (apic_id << 12)` (physical dest, RH=0). Data is
 the vector (fixed, edge). MSI-X table entries live in a BAR (BIR + offset from the
@@ -848,7 +848,7 @@ not "fix" this by inheriting the outgoing nest onto the incoming thread.
 ## 5.9 Later
 
 - x2APIC, for more than 255 CPUs and MSR-based register access instead of MMIO.
-- Interrupt affinity *rebalancing* (Phase 17). The dest-CPU table and `set_affinity`
+- Interrupt affinity *rebalancing* (Phase 19). The dest-CPU table and `set_affinity`
   already exist; what is left is a policy that moves MSI-X messages and IOAPIC
   dests when a queue saturates one core.
 
@@ -1909,7 +1909,7 @@ thread. `flush` writes dirty pages then calls the device `flush`.
 `barrier` writes dirty pages and does not device-flush.
 
 The cache sits above `BlockDevice`. Drivers are the miss
-path. Phase 10 page cache reuses these pages (same clock, same writeback);
+path. Phase 12 page cache reuses these pages (same clock, same writeback);
 do not grow a second private cache. Hit/miss/device-request counters are
 in the `blk` shell command. The cache lock is RANK_DEVICE and is dropped
 before blocking device I/O.

@@ -17,7 +17,7 @@
 
 ## Decision (maintainer deferred)
 
-Keep static tables where bounded by hardware. For threads, inodes, dentries, files, fds, mounts, open files, and commands, allocate at init from the heap (`Box<[T]>`) sized from one `limits` module, so raising a cap is a constant change rather than a type change. Keep the clock-eviction logic unchanged. A real slab stays at ROADMAP §10.5. Add a Phase 9 gate line stating the limits Phase 9 is tested against.
+Keep static tables where bounded by hardware. For threads, inodes, dentries, files, fds, mounts, open files, and commands, allocate at init from the heap (`Box<[T]>`) sized from one `limits` module, so raising a cap is a constant change rather than a type change. Keep the clock-eviction logic unchanged. A real slab stays at ROADMAP §19.9. Add a Phase 9 gate line stating the limits Phase 9 is tested against.
 
 ## Implementation plan
 
@@ -47,4 +47,4 @@ Init-order: every table must be built after `heap ok` and before first use (`thr
 
 ## Out of scope
 
-A slab allocator (§10.5); vibefs v2.
+A slab allocator (§19.9); vibefs v2.

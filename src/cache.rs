@@ -3,7 +3,7 @@
 //! Keyed by `(dev, page-aligned byte offset)`. Read-through, write-back,
 //! clock (second-chance) eviction, sequential readahead, dirty-ratio cap.
 //!
-//! Phase 10 will unify this with the file page cache: same frames, same
+//! Phase 12 will unify this with the file page cache: same frames, same
 //! clock, same writeback. The key grows an inode id; do not add a second
 //! private cache beside this one.
 

@@ -135,7 +135,7 @@ fn record_spin(rank: u8) {
     }
 }
 
-/// Spin iterations per lock rank (index by rank; 0 unused). Phase 17 baseline.
+/// Spin iterations per lock rank (index by rank; 0 unused). Phase 19 baseline.
 #[cfg(feature = "kernel_tests")]
 pub fn spin_counts() -> [u64; SPIN_RANKS] {
     core::array::from_fn(|i| SPINS[i].load(Ordering::Relaxed))

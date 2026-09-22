@@ -1,7 +1,7 @@
 //! Process types: pid, fd table, wait status, early signals. ROADMAP §9.5–9.7.
 //!
-//! Kernel table / fork / exec live in `proc_init`. COW is Phase 10.
-//! User signal handlers are Phase 11.
+//! Kernel table / fork / exec live in `proc_init`. COW is Phase 12.
+//! User signal handlers are Phase 13.
 
 use crate::fs::{MAX_PATH, O_CLOEXEC};
 
@@ -296,7 +296,7 @@ pub const fn default_action(sig: u32) -> SigAct {
     }
 }
 
-/// Uncatchable even when Phase 11 grows handlers.
+/// Uncatchable even when Phase 13 grows handlers.
 pub const fn forced(sig: u32) -> bool {
     sig == SIGKILL || sig == SIGSTOP
 }

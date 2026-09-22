@@ -2,6 +2,8 @@
 
 One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVIEW.md). Each has the observation with evidence, the recommended fix, a step-by-step implementation plan, acceptance criteria, tests, and risks. Phases: **I** quick wins, **II** near term, **III** strategic (alongside Phase 9–10). Effort: S ≤ 1 day, M a few days, L 1–2 weeks.
 
+**Phase numbers (2026-09-22).** The roadmap was restructured after this review: phases from 10 up were renumbered (old 10 → 12, 11 → 13, 12 → 14, 13 → 15, 14 → 16, 15 → 17, 16 → 18, 17 → 19, 18 → 20, 19 → 21, 20 → 22), and these items are tracked as [ROADMAP Phase 10: Consolidation](../../ROADMAP.md#phase-10-consolidation). Section numbers quoted in the issue documents were updated where an item is still open; the review itself keeps the old numbers.
+
 | ID | Title | Impact | Effort | Phase | Depends on |
 |---|---|---|---|---|---|
 | [A1](A1-directory-per-subsystem.md) | Directory per subsystem, matching a corrected module map | High | L | III | Q1, A2 |

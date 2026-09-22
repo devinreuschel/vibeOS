@@ -2,7 +2,7 @@
 //!
 //! Drivers ask [`VectorPool::allocate`] (kernel: `irq::allocate_vector`).
 //! They never pick IDT slots. CPU binding is recorded so MSI-X dest and
-//! Phase 17 affinity rebalance share one table.
+//! Phase 19 affinity rebalance share one table.
 
 use crate::vectors;
 
@@ -176,7 +176,7 @@ impl VectorPool {
         }
     }
 
-    /// Phase 17 rebalance: record dest CPU. Caller reprograms MSI/IOAPIC.
+    /// Phase 19 rebalance: record dest CPU. Caller reprograms MSI/IOAPIC.
     pub fn set_affinity(&mut self, vec: u8, cpu: u32) -> Result<(), IrqError> {
         let Some(i) = pool_index(vec) else {
             return Err(IrqError::BadVector);

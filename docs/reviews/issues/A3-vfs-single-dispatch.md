@@ -47,4 +47,4 @@ The lock-kind change is the risky step. Land steps 1–4 first (backends still c
 
 ## Out of scope
 
-Per-process fd tables (D1, Phase 9); page-cache unification (ROADMAP §10.6).
+Per-process fd tables (D1, Phase 9); page-cache unification (ROADMAP §12.5).

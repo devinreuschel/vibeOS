@@ -158,5 +158,5 @@ low 8 bits (`user: exit N` diagnostic for the bootstrap hello).
 The kernel REPL is debug-only (`--features kernel_shell`). Production
 starts `/sbin/init` and parks.
 
-`fork` is a **full AS copy**. COW is Phase 10. `execve` builds the new
+`fork` is a **full AS copy**. COW is Phase 12. `execve` builds the new
 AS first and replaces only after a successful load.

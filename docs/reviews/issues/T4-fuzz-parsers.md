@@ -10,7 +10,7 @@
 
 ## Problem
 
-The byte-slice-in, `Result`-out parsers already have test doubles: `acpi::walk<P: PhysMem>` and `parse_rsdp/parse_madt/parse_hpet/parse_fadt/parse_mcfg`, `part::parse_image(disk, sector_size)`, `fat::FatVol::mount(&mut MemDisk)`, `vibefs::{probe, mount, fsck}(&mut MemDisk)`, `pci::read_function<C: CfgIo>` and `walk_caps`, `virtio::read_modern_caps`, `shell::tokenize`, `kbd` scan-code decoding. ROADMAP §16.5 schedules fuzzing for Phase 16; nothing blocks doing it today with `cargo-fuzz` (nightly is already required).
+The byte-slice-in, `Result`-out parsers already have test doubles: `acpi::walk<P: PhysMem>` and `parse_rsdp/parse_madt/parse_hpet/parse_fadt/parse_mcfg`, `part::parse_image(disk, sector_size)`, `fat::FatVol::mount(&mut MemDisk)`, `vibefs::{probe, mount, fsck}(&mut MemDisk)`, `pci::read_function<C: CfgIo>` and `walk_caps`, `virtio::read_modern_caps`, `shell::tokenize`, `kbd` scan-code decoding. ROADMAP §10.2 schedules the parser fuzzers now and §18.5 the syscall, ELF, and network fuzzers; nothing blocks doing it today with `cargo-fuzz` (nightly is already required).
 
 ## Recommended fix
 
@@ -28,7 +28,7 @@ A `tests/fuzz` crate with one target per parser, seeded from the generators the 
 2. **Seeds:** write `fat::mkinitrd` output, `vibefs::mkfs` output, the real MBR/GPT blobs from `part.rs` tests, and the ACPI fixtures from `acpi.rs` tests into `tests/fuzz/corpus/<target>/` via a small `seed.rs` example.
 3. **Weekly:** in `smp-stress.yml`, `cargo fuzz run <target> -- -max_total_time=300` per target, `continue-on-error: false`; artifacts uploaded on crash.
 4. **Regressions:** any crash input is minimized (`cargo fuzz tmin`) and committed under `tests/fuzz/regressions/<target>/`; a hostlib `#[test]` replays every file in that directory through the target function so the fix is guarded in the fast tier.
-5. **Docs:** DESIGN §8.1 gains a "fuzz" paragraph; ROADMAP §16.5 references it as already started.
+5. **Docs:** DESIGN §8.1 gains a "fuzz" paragraph; ROADMAP §18.5 references it as already started.
 
 ## Acceptance criteria
 

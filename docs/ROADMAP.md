@@ -8,10 +8,23 @@ That is absurd. Good. The interesting failures happen past the point where the t
 
 ## How to read this
 
-Twenty one phases in four eras. Ordering is by dependency, not by preference: a phase's exit gate is
-the thing the next phase assumes. Within a phase, parts are mostly parallelizable.
+Twenty-three phases in four eras, then a list of what comes after. Ordering is by dependency, not by
+preference: a phase's exit gate is the thing the next phase assumes. Within a phase, parts are mostly
+parallelizable. Where two phases are independent, the era preamble says so; the numbers are not a queue.
 
-`- [ ]` and `- [x]` are the live status. Edit them in the commit that lands the work.
+**Two architectures.** x86_64 and aarch64 are both first class from [Phase 11](#phase-11-portability)
+on. A gate is met on both, or the phase says which lines are single-architecture and why. x86_64 came
+first and is the reference when they disagree.
+
+`- [ ]` and `- [x]` are the live status. Edit them in the commit that lands the work. There is no third
+state. A deferral is an open box with a trailing note naming the phase that lands it, and that phase's
+gate cannot close while the box is open.
+
+**Slices.** A phase lands as two to four PRs named A, B, C, D, each with its own in-guest tests and each
+leaving `main` green. The last slice closes the gate and tags the release.
+
+**Stretch** subsections and the [Beyond](#beyond) list are excluded from exit gates. They are where the
+hard, optional things go, so that a phase is either done or not.
 
 **Exit gate** is the definition of done. Gates are verifiable from outside the code: a marker appears
 in serial output, a test target passes, a command produces the right result. "The code is written" is
@@ -21,7 +34,7 @@ not a gate. If a gate cannot be checked by running something, it is written wron
 
 - `make` builds clean with warnings denied
 - `make check` green (fast local gate)
-- `make test` green, all tiers, including the SMP and timer fallback variants once they exist
+- `make test` green, all tiers, including the SMP and timer fallback variants once they exist, and on both architectures once Phase 11 lands
 - CI green
 - new serial markers registered in the contract in [DESIGN.md](DESIGN.md#83-end-to-end), same commit
 - new portable logic has host unit tests; new hardware behavior has an in-guest test
@@ -30,6 +43,7 @@ not a gate. If a gate cannot be checked by running something, it is written wron
 - tag `v0.<phase>.0` at phase exit (first published tag is `v0.8.0` for Phase 8)
 - design docs updated in the same commit as any change to an invariant or a constant
 - no `TODO` describing a correctness gap. Those become lines in this file.
+- every `unsafe fn` has a `# Safety` section and every `unsafe` block a one-line reason; clippy's `missing_safety_doc` is denied
 
 ## Non-goals
 
@@ -37,8 +51,9 @@ Stated so nobody spends a week on them.
 
 - POSIX certification. Compatibility is a means to running real software, not a goal.
 - Microkernel architecture. Monolithic, deliberately.
+- Loadable kernel modules. One image, drivers in-tree. Signing and KASLR cover a single ELF.
 - Windows or macOS binary compatibility.
-- CPU hotplug.
+- CPU hotplug. Offlining a core for power management is not hotplug; that is §19.6.
 - 32-bit x86. Long mode only.
 - Being a good first kernel to read. Other projects do that better and on purpose.
 
@@ -56,17 +71,20 @@ Stated so nobody spends a week on them.
 | | 7 | [Block storage](#phase-7-block-storage) | Persistent bytes |
 | | 8 | [Filesystems](#phase-8-filesystems) | Files, paths, mounts |
 | | 9 | [User mode](#phase-9-user-mode-and-processes) | Ring 3, syscalls, processes |
-| | 10 | [Advanced memory](#phase-10-advanced-memory-management) | Demand paging, COW, mmap, swap |
-| | 11 | [IPC](#phase-11-ipc-signals-and-the-posix-surface) | Pipes, sockets, futex, TTY |
-| **III. Platform** | 12 | [Userspace](#phase-12-userspace) | libc, init, coreutils, real shell |
-| | 13 | [Network](#phase-13-networking) | TCP/IP, sockets, DNS |
-| | 14 | [Graphics](#phase-14-graphics-and-windowing) | Compositor, windows, terminal |
-| | 15 | [Self-hosting](#phase-15-self-hosting-toolchain) | vibeOS compiles vibeOS |
-| **IV. Frontier** | 16 | [Hardening](#phase-16-hardening) | KASLR, W^X, sandboxing, fuzzing |
-| | 17 | [Performance](#phase-17-performance-and-observability) | Tracing, RCU, tickless, NUMA |
-| | 18 | [Real hardware](#phase-18-real-hardware-and-portability) | Bare metal, USB, aarch64 |
-| | 19 | [Virtualization](#phase-19-virtualization) | Hypervisor, containers |
-| | 20 | [Distribution](#phase-20-distribution) | Installer, releases, self-hosted CI |
+| | 10 | [Consolidation](#phase-10-consolidation) | Portable core, user runtime, real tables |
+| | 11 | [Portability](#phase-11-portability) | aarch64 first class, native runs on the dev host |
+| | 12 | [Fault-driven memory](#phase-12-fault-driven-memory) | Demand paging, COW, mmap |
+| | 13 | [Threads and IPC](#phase-13-threads-ipc-signals-and-the-posix-surface) | clone, pipes, sockets, futex, TTY, signals |
+| **III. Platform** | 14 | [Userspace](#phase-14-userspace) | libc, init, coreutils, real shell |
+| | 15 | [Network](#phase-15-networking) | TCP/IP, sockets, DNS, TLS |
+| | 16 | [Graphics](#phase-16-graphics-and-windowing) | Compositor, windows, terminal |
+| | 17 | [Self-hosting](#phase-17-self-hosting-toolchain) | vibeOS compiles vibeOS, on both architectures |
+| **IV. Frontier** | 18 | [Hardening](#phase-18-hardening) | KASLR, W^X, sandboxing, fuzzing |
+| | 19 | [Performance](#phase-19-performance-and-observability) | Tracing, RCU, tickless, NUMA, slab |
+| | 20 | [Real hardware](#phase-20-real-hardware) | Bare metal on both architectures, USB, hardware CI |
+| | 21 | [Virtualization](#phase-21-virtualization) | Hypervisor, containers |
+| | 22 | [Distribution](#phase-22-distribution) | Installer, releases, self-hosted CI |
+| | | [Beyond](#beyond) | Hard things with no gate |
 
 Eras I and II are the ones with known answers, so they are where agent performance is measurable
 against a clear correct result. Eras III and IV are where it stops being clear, which is the point.
@@ -116,13 +134,13 @@ rest of the project, which is the single most consequential decision in this pha
 - [x] base revision verified before reading any other response, with its own marker
 - [x] requests: framebuffer, memory map, HHDM, executable address, RSDP  (all five wired as of phase 1 slice A; framebuffer response only used for pmm exclusion so far)
 - [x] a `BootInfo` struct captured once at entry; nothing else reads Limine statics
-- [~] each null response produces a named halt, not an unwrap panic in a function with no context  (base revision path only for now)
+- [x] each null response produces a named halt, not an unwrap panic in a function with no context
 - [x] `limine.conf` with a single entry, serial console enabled
 
 ### 0.4 Serial and panic
 - [x] COM1 16550 init: 115200 8N1, FIFO enabled, DLAB dance
 - [x] polled TX with a bounded THRE wait; drop the byte at the cap rather than spinning forever
-- [ ] polled RX on the data-ready bit  (input arrives in phase 5)
+- [x] polled RX on the data-ready bit  (landed with §5.3)
 - [x] `fmt::Write` implementation with no allocation, usable before the heap exists
 - [x] `print!` / `println!` macros routed to it
 - [x] `#[panic_handler]`: re-init the port from scratch, print location and message, `cli; hlt` loop
@@ -479,7 +497,8 @@ comes before drivers rather than after.
 
 # Era II. System
 
-From a kernel that schedules to an operating system that runs programs against files.
+From a kernel that schedules to an operating system that runs programs against files, then the same
+operating system on a second architecture, then the memory and process semantics real software assumes.
 
 ## Phase 5: Console, Input, and Logging
 
@@ -503,7 +522,7 @@ From a kernel that schedules to an operating system that runs programs against f
 - [x] host tests for the font table and for the pixel bounds arithmetic
 - [ ] double buffering off the physmap once there is memory to spare, so scrolling stops tearing
 
-Double buffering parked (Design ACK).
+Double buffering parked (Design ACK). Lands with §16.1, where the display abstraction owns the scanout buffer.
 
 ### 5.2 PS/2 keyboard
 - [x] controller init, self test, and enabling the first port
@@ -536,7 +555,7 @@ Double buffering parked (Design ACK).
 - [x] `dmesg` with level filtering and follow (`dmesg -f`; Ctrl+C to stop)
 - [ ] a per-CPU buffer with a printer thread, so log lines become atomic rather than merely non-interleaved bytes
 
-Printer thread parked: global IRQ-safe ring + serial try-lock sink (Design ACK).
+Printer thread parked: global IRQ-safe ring + serial try-lock sink (Design ACK). Lands with §19.5.
 
 ### 5.6 Panic and diagnostics
 - [x] broadcast the halt IPI first so other cores stop before the log is written
@@ -584,7 +603,7 @@ enumeration and DMA.
 - [x] fall back to legacy INTx through the I/O APIC when a device has neither
 - [x] `free_vector` masks the I/O APIC GSI before dropping an INTx route
 - [x] in-guest test: trigger a device interrupt, assert it arrived on the intended CPU
-- [x] interrupt affinity API, so phase 17 can rebalance without redesign
+- [x] interrupt affinity API, so phase 19 can rebalance without redesign
 
 ### 6.4 DMA
 - [x] `DmaBuffer`: physically contiguous, known device address, explicit coherency
@@ -600,7 +619,6 @@ enumeration and DMA.
 - [x] split virtqueue: descriptor table, available ring, used ring
 - [x] queue setup, kick, and completion handling with the correct barriers
 - [x] indirect descriptors, and `VIRTIO_F_EVENT_IDX` for interrupt suppression
-- [ ] packed virtqueue as a later optimization
 - [x] the ring index arithmetic in the library half, host-tested against a simulated device
 
 ### 6.6 Deferred work
@@ -641,34 +659,20 @@ enumeration and DMA.
 - [x] flush and discard support
 - [x] in-guest: sector roundtrip, unaligned multi-sector, deep queue with concurrent submitters
 
-### 7.3 NVMe
-- [ ] controller identify, admin queue setup, I/O queue creation per CPU
-- [ ] submission and completion queue handling with doorbells and phase tags
-- [ ] namespace enumeration
-- [ ] read and write commands, flush, dataset management for discard
-- [ ] MSI-X per queue
-- [ ] the fast path built for depth from the start, since NVMe's whole point is parallelism
-
-### 7.4 AHCI
-- [ ] HBA and port initialization, command list and FIS structures
-- [ ] identify device, LBA48 read and write
-- [ ] ATAPI detection so a CD-ROM does not look like a broken disk
-- [ ] present mainly because real hardware has it; QEMU testing via `-device ahci`
-
-### 7.5 Partitions
+### 7.3 Partitions
 - [x] MBR parsing including extended and logical partitions
 - [x] GPT parsing with header and entry CRC validation and backup header fallback
 - [x] partitions exposed as offset-limited block devices
 - [x] type GUID recognition for the ones that matter
 - [x] host tests over real table images, including truncated and CRC-broken cases
 
-### 7.6 Cache
+### 7.4 Cache
 - [x] a page-granular cache over block devices, keyed by device and offset
 - [x] read-through, write-back with an explicit flush, and dirty tracking
 - [x] LRU eviction with a clock or second-chance approximation
 - [x] readahead on detected sequential access
 - [x] a writeback thread with a bounded dirty ratio
-- [x] built so phase 10 can unify it with the page cache rather than maintaining two caches
+- [x] built so phase 12 can unify it with the page cache rather than maintaining two caches
 - [x] hit and miss counters exposed in the shell
 
 ---
@@ -718,7 +722,7 @@ limitations.
 ### 8.4 Pseudo filesystems
 - [x] `devfs`: block devices, `null`, `zero`, `random`, `console`, `tty`
 - [x] `tmpfs` backed by the page cache, so it participates in eviction rather than pinning memory
-- [x] `procfs`: per-process directories, `cmdline`, `status`, `maps`, `fd`
+- [x] `procfs`: per-process directories, `cmdline`, `status`, `maps`, `fd`  (a pid-1 stub until §13.9 backs it with the process table)
 - [x] `sysfs`-equivalent for the device tree and driver bindings
 - [x] a `kernfs`-style shared implementation so the four do not duplicate directory logic
 
@@ -779,7 +783,8 @@ limitations.
 - [x] the ABI documented in `docs/`: register assignment, return convention, error encoding
 - [x] a dispatch table indexed by number, with an arity and a validation policy per entry
 - [x] first set wired for proof: `write`, `exit`, `getpid`, `sched_yield`
-- [x] remainder (`read`, `open`, `close`, `lseek`, `fork`, `execve`, `wait4`, `getppid`); `stat`/`fstat`/`nanosleep`/`brk`/`mmap`/`munmap` still later
+- [x] remainder: `read`, `open`, `close`, `lseek`, `fork`, `execve`, `wait4`, `getppid`, `dup`, `dup2`, `kill`, `fcntl`
+- [ ] `brk` and anonymous `mmap`/`munmap` land in §10.5; `stat`/`fstat`/`nanosleep` and the rest of the floor in §13.9
 - [x] `errno` values matching Linux where a name exists, so ported software behaves
 - [x] every pointer argument validated against the caller's address space before use
 - [x] syscall tracing behind a flag, since the alternative is guessing why a program failed
@@ -789,7 +794,7 @@ limitations.
 - [x] ELF64 header validation: class, endianness, machine, type
 - [x] `PT_LOAD` segments mapped with permissions from the flags, honoring `p_filesz` versus `p_memsz` zero fill
 - [x] `PT_GNU_STACK` respected for stack executability
-- [x] `PT_INTERP` recognized, dynamic loading deferred to phase 12 but detected rather than silently ignored
+- [x] `PT_INTERP` recognized, dynamic loading deferred to phase 14 but detected rather than silently ignored
 - [x] stack set up with argv, envp, and the auxiliary vector
 - [x] `PT_TLS` and the TLS layout, since Rust and C both want it
 - [x] the header parsing in the library half, host-tested against real binaries and truncated ones
@@ -805,7 +810,7 @@ limitations.
 
 ### 9.6 fork, exec, wait
 - [x] `fork`: clone the address space, duplicate descriptors, copy the thread context, return 0 in the child
-- [x] initially a full copy; copy-on-write in phase 10, with the interface unchanged
+- [x] initially a full copy; copy-on-write in phase 12, with the interface unchanged
 - [x] `execve`: build the new address space first, and only replace the old one after the load succeeds, so a failed exec leaves the caller intact
 - [x] `exit`: release resources, become a zombie, signal the parent
 - [x] `wait4`: block for a child, return its status, reap it, with `WNOHANG`
@@ -817,7 +822,7 @@ limitations.
 - [x] `SIGSEGV`, `SIGBUS`, `SIGFPE`, `SIGILL` generated from the corresponding exceptions
 - [x] `SIGCHLD` on child exit
 - [x] default actions: terminate, ignore, stop
-- [x] user-installed handlers, masking, and queueing deferred to phase 11
+- [x] user-installed handlers, masking, and queueing deferred to phase 13
 
 ### 9.8 First userspace
 - [x] a minimal freestanding user program with hand-written syscall stubs and no libc, to prove the path
@@ -827,31 +832,197 @@ limitations.
 
 ---
 
-## Phase 10: Advanced Memory Management
+## Phase 10: Consolidation
 
-**Goal.** Stop pretending memory is infinite and eagerly mapped. Make `fork` cheap, `mmap` real, and
-overcommit survivable.
+**Goal.** Pay down what Phase 0 laid down in a hurry, before the kernel grows a second architecture and
+a real userspace. Everything here came out of the 2026-09-22
+[architecture review](reviews/ARCHITECTURE_REVIEW.md); the per-item plans are under
+[reviews/issues/](reviews/issues/README.md) and the letter codes below name them. Nothing here is a
+feature. All of it is what makes the next three phases checkable.
 
-**Unlocks.** Real program startup costs. Large sparse allocations. File-backed memory.
+**Unlocks.** A portable core that a second architecture can share. A user runtime that can express the
+Phase 12 and Phase 13 gates. Tables that do not cap a shell pipeline at sixteen processes.
+
+**Exit gate**
+- [x] `make check` (fmt, clippy with warnings denied, host units, harness units) gates CI ahead of the QEMU ladder
+- [ ] `make check` passes on macOS and Linux, and a macOS CI job proves it
+- [x] the nightly is pinned by date; Limine and every GitHub action are pinned by hash
+- [ ] the portable crate contains no inline assembly and no `cfg(target_arch)`; hostlib is a normal workspace member
+- [ ] the growable tables are heap-sized at init from one `limits` module, and this gate states the limits Phase 12 is tested against: 256 processes, 256 descriptors per process, 1024 threads, 256 regions per address space
+- [ ] FAT and vibefs implement `InodeOps`; the `Back` enum in `file_init` is gone; every file operation goes through `Vfs`
+- [ ] one errno-shaped kernel error type; `docs/SYSCALL.md` §2 is generated from it
+- [ ] a Rust user runtime replaces the four assembly programs; `utest_*` results are asserted by the harness the way `ktest_*` are
+- [x] SMEP, SMAP, UMIP, and `CR0.WP` set on every CPU; `/dev/random` fed by virtio-rng or `RDRAND`
+- [x] `BootInfo` captured once; nothing outside `boot` reads a Limine response
+- [x] `AGENTS.md` and an MIT `LICENSE` in the tree; README status current
+- [ ] every item in [reviews/issues/README.md](reviews/issues/README.md) is marked implemented or declined with a reason
+- [ ] tag `v0.10.0`
+
+### 10.1 Gates and pinning
+- [x] `rustfmt.toml`, one `cargo fmt` commit, `cargo clippy -- -D warnings`, `RUSTFLAGS=-Dwarnings` (Q1)
+- [x] a fast `check` CI job before the QEMU ladder, with an llvm-cov floor on the portable crate that only ratchets up (T3)
+- [x] dated nightly; action SHAs; Limine commit verified after clone; cargo cache keyed on `Cargo.lock` (C1)
+- [x] `make check` as the local gate; `ruff` and `mypy --strict` for `tests/` (DX1)
+- [x] restriction lints on the portable crate: no `unwrap`, `expect`, or `panic!` outside tests (E1)
+- [ ] a KVM leg of `make test-kernel` in CI, since TCG and KVM each hide bugs the other finds
+- [ ] `make debug`: QEMU `-s -S` plus a `gdb` script that loads the kernel ELF and the user ELFs, documented in DESIGN §8.4
+
+### 10.2 Build and harness
+- [x] built-in `x86_64-unknown-none` target; the custom JSON, `-Zbuild-std`, and `-Zjson-target-spec` deleted (B2)
+- [x] one parametrized ISO recipe; a variant is one line (B1)
+- [x] one QEMU launcher and one `VIBEOS_*` reader shared by every driver (T2, C2)
+- [ ] the feature builds share `core`/`alloc` artifacts; every target dir cached in CI (P1)
+- [x] one initrd generator; the trampoline assembled by `global_asm!` so the kernel build no longer needs `nasm` (B4); the assembly user programs still do until §10.5
+- [ ] the in-guest registry split per subsystem; a test's name printed before it runs; a per-test deadline (T1)
+- [ ] `kernel_tests` hooks isolated in per-subsystem `ktest.rs` files; no blanket `allow(dead_code)` in production modules (Q2)
+- [ ] `cargo-fuzz` targets for every byte-slice parser on the weekly job; each crash becomes a replayed regression (T4)
+- [ ] a macOS CI job running `make check`; OVMF located by a probe list, and a skip made visible (I1)
+
+### 10.3 Portable core and the architecture seam
+- [ ] `switch_context` and the DMA fences out of the portable half; hostlib as a workspace member; host tests on any OS (A2 landed the crate and host tests; `thread.rs` still carries `cfg(target_arch)` and `global_asm!`)
+- [ ] an `arch` module boundary with one trait per concern: page table format and flags, context switch, interrupt controller and vector map, timer and cycle counter, atomics and barriers, MMIO accessors, per-CPU base register, syscall entry and user context, cache maintenance, the boot handshake
+- [ ] every x86 assumption outside `arch/` found by grep for `asm!`, `x86`, and CR and MSR names, then moved or fenced; the audit checked in as `docs/ARCH.md`
+- [ ] the seam proven by a host build of the portable core against a stub `arch`, which is the cheapest second architecture there is
+- [ ] one directory per subsystem, portable and hardware halves adjacent; DESIGN §1.3 rewritten to match the tree (A1)
+- [ ] `fs/mod.rs`, `vibefs.rs`, `fat.rs`, and `ktest.rs` split by responsibility; a file-size guard in `make check` (Q5)
+- [ ] the nine two-way module dependencies broken; `serial` has a raw layer with no upward calls (A4)
+- [x] one `BootCell` and one `IrqCell`; no `static mut`; no `&'static mut` accessors (Q3; the asm-owned setjmp buffer in `arch/catch.rs` is the documented exception)
+- [x] `BootInfo` captured once at entry, the only consumer of Limine responses (D3)
+- [ ] DESIGN.md split per its own §1.4 rule: invariants and pitfalls as their own files, the boot order as a table not prose (DOC2)
+
+### 10.4 Tables, VFS, errors
+- [ ] threads, processes, descriptors, inodes, dentries, files, mounts, and regions allocated at init from a `limits` module; a cap is a constant, not a type (D1)
+- [ ] `MAX_ELF` removed: the loader maps segments from the file instead of reading the whole binary into a bounded buffer
+- [ ] FAT and vibefs behind `InodeOps`; `Vfs` owns inodes, dentries, mounts, and files and nothing backend-specific (A3)
+- [ ] driver and volume state as instances referenced from the device registry, so a second disk is a second instance (D2)
+- [ ] one `KError` with `From` for every module error and the Linux errno mapping in one table; syscall dispatch returns `Result<usize, KError>` (E2)
+
+### 10.5 User runtime
+- [ ] a `no_std` Rust crate under `user/` as a workspace member, statically linked, with `_start`, argument and environment parsing, and a panic reported on fd 2 and turned into a non-zero exit
+- [ ] built for the bare target with the small code model for now; the `std` port in Phase 17 introduces the `*-unknown-vibeos` triples
+- [ ] syscall stubs generated from one table shared with the kernel, so numbers and arities cannot drift; the same generator emits `docs/SYSCALL.md` §3
+- [ ] `brk` and anonymous `mmap`, eagerly backed for now; Phase 12 makes them lazy without changing the interface
+- [ ] an allocator over `brk`, so `alloc` works in userspace
+- [ ] `utest_ok` / `utest_fail` / `utest_skip` on serial, asserted by `tests/harness` like the `ktest_*` protocol; a failing user test fails `make test`
+- [ ] `/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello` rewritten in the crate; the assembly sources and `mkuserelf.py` deleted
+- [ ] `ls`, `cat`, `echo`, `grep`, `wc`, `true`, `false`, `sleep`, `yes`, and `cmp`, each a few dozen lines, because the Phase 13 gate is a pipeline of them
+- [ ] nothing in the crate names an architecture outside one `arch` module, so Phase 11 builds it for aarch64 by adding a directory
+
+---
+
+## Phase 11: Portability
+
+**Goal.** A second architecture, first class. aarch64 boots the same kernel to the same Phase 9 gate,
+under the same harness, with the same markers. x86_64 and aarch64 are peers from here on: every later
+phase lands on both, or says which lines are single-architecture and why.
+
+**Unlocks.** Native-speed local runs on Apple Silicon, which is where the kernel is booted by hand.
+Proof that the seam from §10.3 is real. Every phase after this one designed for two architectures at
+design time rather than retrofitted, which matters most for page faults, signal frames, TLS, and the
+syscall ABI.
+
+Why here rather than at the end: Phase 12 (the page fault path) and Phase 13 (signal frames, futex,
+user copy) are where the kernel's architecture-specific surface grows most. Doing them with two ports
+in the tree forces the seam to be right where it is designed rather than where it is discovered. The
+cost is that Phase 12 waits for this phase. x86_64 came first and stays the reference when the two
+disagree.
+
+**Exit gate**
+- [ ] `make ARCH=aarch64` produces a bootable image; `make ARCH=aarch64 run` boots under `qemu-system-aarch64 -M virt`, with `-accel hvf` on macOS and `-accel kvm` on an arm64 Linux host
+- [ ] every marker in the [DESIGN.md](DESIGN.md#83-end-to-end) contract from `serial online` through `shell ready` appears in order on aarch64, from one harness with an `ARCH` parameter
+- [ ] `make test-kernel ARCH=aarch64` passes every in-guest test that is not x86-specific; the x86-specific ones are `ktest_skip`ped with a reason, and the skip list is short and reviewed
+- [ ] `/bin/tests` from the Phase 10 user crate passes on aarch64 at EL0
+- [ ] `-smp 4` under `virt` brings up every core through PSCI, and the TLB shootdown test passes
+- [ ] CI runs the aarch64 ladder on every push: under TCG on the x86 runner, and under KVM on an arm64 runner if one is available to this repository
+- [ ] `docs/ARCH.md` lists every architecture-specific module for both ports, and the two lists have the same shape
+- [ ] no x86 regression: the full x86 ladder stays green on every commit of this phase
+- [ ] tag `v0.11.0`
+
+### 11.1 Boot
+- [ ] Limine on aarch64 over UEFI, so the boot protocol, memory map, HHDM, and framebuffer handshake are shared with x86 rather than reimplemented
+- [ ] exception level: enter EL1 from EL2 when the firmware allows, and record which; EL2 stays reachable for Phase 21
+- [ ] MMU enable: 4 KiB granule, 48-bit VA, TTBR0 for user and TTBR1 for kernel, which maps onto the existing address map split
+- [ ] MAIR and the memory attribute policy: normal write-back for RAM, device-nGnRE for MMIO, the equivalents of the x86 UC patches
+- [ ] the `_start` order table in DESIGN §3.3 gains an aarch64 column
+- [ ] early serial on PL011; the same `serial online` first line
+
+### 11.2 Memory
+- [ ] the page table format behind the §10.3 trait: descriptor bits, access permissions, `UXN` and `PXN`, the access flag, shareability
+- [ ] TLB maintenance: `tlbi` by VA and by ASID, with the `dsb` and `isb` sequencing that x86 never needed
+- [ ] ASIDs, so a context switch does not flush the TLB
+- [ ] cache maintenance for DMA and for code loading: `dc cvau` and `ic ivau` on ELF load, which x86 got for free
+- [ ] the buddy, heap, and KVA allocators unchanged; that is the point of the split
+
+### 11.3 Interrupts and time
+- [ ] exception vectors: the sixteen-entry table, synchronous versus IRQ versus FIQ versus SError, and `ESR_EL1` decoded into the same fault kinds the x86 handlers produce
+- [ ] GICv2 and GICv3: distributor, redistributors, CPU interface, priorities; the ITS deferred until MSI is needed
+- [ ] the generic timer: `CNTVCT` as the cycle counter, `CNTV_TVAL` for the tick, the same `next_deadline` interface
+- [ ] a monotonic clock on `CNTVCT` with the same seqlock publication and the same host tests
+- [ ] SGIs as the IPI mechanism: reschedule, shootdown, call-function, panic halt, the same four
+
+### 11.4 SMP and per-CPU
+- [ ] PSCI `CPU_ON` for secondary cores, with the same online mask and barrier as the x86 path
+- [ ] `TPIDR_EL1` as the per-CPU base; the `per_cpu!` accessors unchanged above the seam
+- [ ] per-CPU GIC redistributor and timer setup on each core
+- [ ] the bring-up failure path: a core that never arrives frees what it was given, as on x86
+
+### 11.5 Devices
+- [ ] device tree parsing for the `virt` machine: memory, CPUs, GIC, timer, PL011, PCIe ECAM, virtio-mmio
+- [ ] PCIe through the ECAM the device tree names, so virtio-pci, MSI-X, and the block driver are shared with x86
+- [ ] virtio-mmio transport as well, since single-board hardware uses it
+- [ ] the framebuffer console over the Limine framebuffer, unchanged
+
+### 11.6 User mode
+- [ ] `svc` entry and `eret` exit, the user context saved in the same shape the x86 path produces
+- [ ] `TTBR0` switch on context switch, skipped when the address space is shared
+- [ ] PAN enabled, toggled only inside the user-copy accessors, which is SMAP's equivalent
+- [ ] `TPIDR_EL0` for user TLS; the ELF loader's TLS layout handles variant I on aarch64 and variant II on x86_64
+- [ ] the aarch64 syscall convention documented in `docs/SYSCALL.md`: `x8` number, `x0` to `x5` arguments, the same numbers and errnos
+- [ ] `/sbin/init`, `/bin/sh`, `/bin/tests` from the user crate, built for `aarch64-unknown-none`
+- [ ] FP and SIMD state saved lazily on first use, since every aarch64 compiler emits NEON
+
+### 11.7 Build, harness, CI
+- [ ] `ARCH=` in the Makefile and `--arch` in the harness; one code path, two QEMU command lines
+- [ ] the panic path, backtrace, and symbol table working on aarch64: a frame-pointer walk along the `x29` chain
+- [ ] `make test-kernel ARCH=aarch64` and the e2e ladder in CI
+- [ ] an arm64 CI runner with KVM if GitHub provides one for this repository; TCG otherwise, and this line says which
+- [ ] the weekly smp-stress job on both architectures
+
+### 11.8 Stretch: riscv64
+- [ ] mostly a test of whether the §10.3 seam was real: SBI, PLIC and CLINT, Sv39 and Sv48 paging, QEMU `virt`
+- [ ] a third port that costs a week says the seam is right; one that costs a month says where it is wrong
+
+---
+
+## Phase 12: Fault-driven Memory
+
+**Goal.** Stop pretending memory is eagerly mapped. Make `fork` cheap, `mmap` real, and a page fault a
+routine event on both architectures. Slab and swap used to live here. Slab is §19.9 because its gate is a
+contention measurement; swap is a stretch at the end of this phase because nothing before Phase 19
+needs it.
+
+**Unlocks.** Real program startup costs. Large sparse allocations. File-backed memory, which the dynamic
+linker in §14.2 needs. A `fork` cheap enough that Phase 13's pipelines and Phase 14's shell are not
+dominated by it.
 
 **Exit gate**
 - [ ] `fork` of a 100 MB process completes in single-digit milliseconds, measured
 - [ ] `#PF` becomes a routine recoverable event; the fault counter climbs during normal operation
+- [ ] `brk` and anonymous `mmap` regions from §10.5 are demand-faulted: touching one page maps one page, verified by the frame count
+- [ ] the same fault tests pass on x86_64 and aarch64, with the error code and `ESR_EL1` decoded into one fault kind
 - [ ] `mmap` of a file, modify, `msync`, and the change is on disk
-- [ ] allocate well past physical memory with swap enabled and the workload completes
 - [ ] the OOM path kills a chosen process with a logged reason rather than panicking or hanging
-- [ ] slab statistics show per-cache object counts, and the buddy lock is measurably less contended
 - [ ] no frame leaks: a long allocation-heavy workload returns the frame count to baseline
-- [ ] tag `v0.10.0`
+- [ ] tag `v0.12.0`
 
-### 10.1 Frame metadata
+### 12.1 Frame metadata
 - [ ] a `Frame` array indexed by physical frame number, allocated at boot from a known-size region
 - [ ] per-frame: refcount, flags, owner, and a list link for LRU
 - [ ] `get_frame` / `put_frame` with the last reference freeing to the buddy allocator
 - [ ] reverse mapping from a frame to the PTEs referencing it, which swap requires and COW makes easier
 - [ ] accounting by category: kernel, user anonymous, page cache, slab, free
 
-### 10.2 Demand paging
+### 12.2 Demand paging
 - [ ] a real `#PF` handler decoding the error code: present, write, user, reserved, instruction fetch
 - [ ] region lookup for the faulting address, then a per-region fault handler
 - [ ] anonymous regions faulting in a zero page; a shared read-only zero page until first write
@@ -860,15 +1031,15 @@ overcommit survivable.
 - [ ] a fault that resolves to no region is `SIGSEGV` for user, panic for kernel
 - [ ] the fault path must be reentrant-safe: it can block on I/O, so it cannot hold the page table lock across a read
 
-### 10.3 Copy on write
+### 12.3 Copy on write
 - [ ] `fork` marks every writable private mapping read-only in both address spaces and increments frame refcounts
 - [ ] a write fault on a COW frame with refcount 1 just makes it writable again; with refcount above 1 it copies
 - [ ] shared mappings excluded correctly, since getting this wrong silently breaks shared memory
 - [ ] a TLB shootdown on the write-protect step, which is the expensive part and worth measuring
 - [ ] in-guest: fork, write in the child, assert the parent's memory is unchanged; assert the frame count matches expectations at each step
 
-### 10.4 mmap
-- [ ] `mmap`, `munmap`, `mprotect`, `mremap`, `msync`, `madvise`
+### 12.4 mmap
+- [ ] `mmap`, `munmap`, `mprotect`, `mremap`, `msync`, `madvise`; `brk` and anonymous `mmap` from §10.5 become lazy behind the same interface
 - [ ] anonymous private, anonymous shared, file private, file shared
 - [ ] `MAP_FIXED` handling, including replacing existing mappings
 - [ ] region splitting and merging on partial unmap and protect
@@ -876,24 +1047,25 @@ overcommit survivable.
 - [ ] dirty page writeback for shared file mappings
 - [ ] `mlock` for pages that must not be evicted
 
-### 10.5 Slab allocator
-- [ ] object caches with a constructor, sized for a specific type
-- [ ] slabs of one or more pages carved into objects, with a freelist in the unused object space
-- [ ] per-CPU magazines so the common path takes no global lock
-- [ ] caches for the hot types: TCB, process, inode, dentry, file, network buffer, request
-- [ ] shrinking under memory pressure, driven by the same reclaim path as the page cache
-- [ ] `slabinfo` in the shell: per cache, objects active and total, pages used
-- [ ] the general heap stays for odd-sized allocations; slab is not a replacement for it
-
-### 10.6 Unified page cache
+### 12.5 Unified page cache
 - [ ] one cache serving file reads, `mmap`, and the block layer, rather than a block cache and a page cache disagreeing
 - [ ] radix tree or B-tree per inode mapping offset to frame
 - [ ] writeback threads with a dirty limit and per-inode ordering
 - [ ] reclaim with an active and inactive LRU pair, so a single sequential scan does not evict the working set
 - [ ] readahead driven by detected access patterns
-- [ ] `tmpfs` pages participating, so a full `tmpfs` is reclaimable to swap rather than pinned
+- [ ] `tmpfs` pages participating, replacing the §8.4 version that sits on the block cache plus a fixed ramdisk, so a full `tmpfs` is reclaimable rather than pinned
 
-### 10.7 Swap
+### 12.6 Pressure and OOM
+- [ ] watermarks: low, high, min, with a background reclaim thread and direct reclaim when allocation fails
+- [ ] a reserve pool for allocations that must succeed to make progress, since reclaim itself needs memory
+- [ ] an OOM killer scoring by resident size and priority, logging the score table before killing
+- [ ] a kernel allocation failure that cannot be resolved panics with the full memory state, rather than returning an error nobody checks
+- [ ] in-guest: allocate to exhaustion and assert the system survives, with the expected process killed
+
+### 12.7 Stretch: swap
+Nothing before Phase 19 needs swap; a self-hosting build is given RAM, not swap. Not gating.
+
+- [ ] allocate well past physical memory with swap enabled and the workload completes
 - [ ] a swap device or file with a slot allocator
 - [ ] page-out: pick a victim via reclaim, write it, replace the PTE with a swap entry, free the frame
 - [ ] page-in on fault from the swap entry
@@ -902,32 +1074,37 @@ overcommit survivable.
 - [ ] a swap cache to avoid duplicate I/O for a shared page
 - [ ] `swapon` / `swapoff`, with `swapoff` faulting everything back in
 
-### 10.8 Pressure and OOM
-- [ ] watermarks: low, high, min, with a background reclaim thread and direct reclaim when allocation fails
-- [ ] a reserve pool for allocations that must succeed to make progress, since reclaim itself needs memory
-- [ ] an OOM killer scoring by resident size and priority, logging the score table before killing
-- [ ] a kernel allocation failure that cannot be resolved panics with the full memory state, rather than returning an error nobody checks
-- [ ] in-guest: allocate to exhaustion and assert the system survives, with the expected process killed
-
 ---
 
-## Phase 11: IPC, Signals, and the POSIX Surface
+## Phase 13: Threads, IPC, Signals, and the POSIX Surface
 
-**Goal.** Processes that talk to each other, respond to events, and present enough of a POSIX surface
-that real software can be ported without patching every call site.
+**Goal.** Processes with more than one thread, that talk to each other, respond to events, and present
+enough of a POSIX surface that real software can be ported without patching every call site.
 
-**Unlocks.** Shell pipelines. Job control. Anything ported from Unix.
+**Unlocks.** Shell pipelines. Job control. `pthreads`. Anything ported from Unix.
 
 **Exit gate**
-- [ ] `ls | grep foo | wc -l` works with correct exit statuses and no deadlock on a full pipe
+- [ ] `ls | grep foo | wc -l`, with the §10.5 utilities, works with correct exit statuses and no deadlock on a full pipe
 - [ ] ctrl+C kills the foreground job and leaves the shell alive; ctrl+Z stops it and `fg` resumes it
 - [ ] a user signal handler runs on a proper user stack and returns correctly through `sigreturn`
 - [ ] `poll` on 100 descriptors wakes only for the ready ones, verified by a syscall counter
 - [ ] a futex-based userspace mutex under contention across processes, correct and without spinning
 - [ ] a Unix domain socket carries a passed file descriptor between processes
-- [ ] tag `v0.11.0`
+- [ ] sixteen user threads in one process contend a futex mutex from the user crate: the count is right, `exit_group` tears all of them down while some are blocked in `read`, and the frame count returns to baseline
+- [ ] `ps` and `/proc/<pid>/*` come from the process table; syscall 500 is gone
+- [ ] tag `v0.13.0`
 
-### 11.1 Pipes
+### 13.1 Threads
+- [ ] `clone` with `CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID`; a plain `fork` stays `fork`
+- [ ] `exit` ends a thread and `exit_group` ends the process; the last thread out releases the address space
+- [ ] TLS through `clone`'s `tls` argument: `FS_BASE` on x86_64 and `TPIDR_EL0` on aarch64, plus `arch_prctl(ARCH_SET_FS)` for musl
+- [ ] `set_tid_address` and the clear-child-tid wake, which is what `pthread_join` stands on
+- [ ] a per-thread kernel stack, signal mask, and pending set; process-directed signals delivered to one eligible thread
+- [ ] `gettid`, `tgkill`
+- [ ] thread-group exit while other threads are in a blocking syscall, which is the case everyone gets wrong
+- [ ] in-guest: the counter test from the gate; create and join a thousand threads; `exit_group` from a non-main thread
+
+### 13.2 Pipes
 - [ ] a bounded ring buffer with blocking read and write and correct partial-write semantics
 - [ ] read end closed produces `SIGPIPE` and `EPIPE`; write end closed produces EOF
 - [ ] `pipe` and `pipe2` with `O_CLOEXEC` and `O_NONBLOCK`
@@ -935,28 +1112,28 @@ that real software can be ported without patching every call site.
 - [ ] `PIPE_BUF` atomicity guarantee actually honored
 - [ ] in-guest: fill the pipe, assert the writer blocks, drain, assert it proceeds
 
-### 11.2 Unix domain sockets
+### 13.3 Unix domain sockets
 - [ ] `socket`, `bind`, `listen`, `accept`, `connect`, `send`, `recv`, `shutdown` for `AF_UNIX`
 - [ ] stream and datagram types
 - [ ] filesystem-bound and abstract namespaces
 - [ ] `SCM_RIGHTS` file descriptor passing, and `SCM_CREDENTIALS`
 - [ ] socketpair
-- [ ] the same buffering machinery reused for network sockets in phase 13, decided now rather than duplicated later
+- [ ] the same buffering machinery reused for network sockets in phase 15, decided now rather than duplicated later
 
-### 11.3 Shared memory
+### 13.4 Shared memory
 - [ ] POSIX `shm_open` backed by `tmpfs`
 - [ ] anonymous shared mappings inherited across `fork`
 - [ ] `memfd`-equivalent for anonymous named regions
 - [ ] correct refcounting so a region survives until the last mapper unmaps
 
-### 11.4 futex
+### 13.5 futex
 - [ ] `FUTEX_WAIT` and `FUTEX_WAKE` on a user address, with a hash table of wait queues keyed by physical address so it works across processes
 - [ ] requeue and `WAKE_OP` for condition variables
 - [ ] priority inheritance deferred, but the interface not precluding it
 - [ ] a timeout on every wait
 - [ ] this is the primitive userspace threading stands on; correctness matters more than speed here
 
-### 11.5 Event notification
+### 13.6 Event notification
 - [ ] `poll` and `ppoll`
 - [ ] `select` for compatibility
 - [ ] an `epoll`-equivalent with edge and level triggering, since `poll` is O(n) per call and that becomes the bottleneck
@@ -964,17 +1141,17 @@ that real software can be ported without patching every call site.
 - [ ] one internal readiness and wait-queue mechanism underneath all of them
 - [ ] in-guest: a thousand descriptors with a handful ready, asserting the wakeup count
 
-### 11.6 TTY
+### 13.7 TTY
 - [ ] a TTY layer between the console and processes, with a line discipline
 - [ ] canonical mode: line buffering, erase, kill, EOF
 - [ ] raw mode, and the `termios` interface to switch between them
 - [ ] control character handling generating signals: ctrl+C, ctrl+Z, ctrl+\
 - [ ] sessions, process groups, controlling terminal, foreground group
 - [ ] `SIGTTIN` and `SIGTTOU` for background access
-- [ ] pseudo-terminals, which a terminal emulator in phase 14 requires
+- [ ] pseudo-terminals, which a terminal emulator in phase 16 requires
 - [ ] window size and `SIGWINCH`
 
-### 11.7 Full signals
+### 13.8 Full signals
 - [ ] the full signal set with correct default actions
 - [ ] `sigaction` with `SA_RESTART`, `SA_SIGINFO`, and an alternate stack
 - [ ] `sigprocmask`, `sigpending`, `sigsuspend`, `sigwaitinfo`
@@ -983,9 +1160,11 @@ that real software can be ported without patching every call site.
 - [ ] interaction with blocking syscalls: interrupt with `EINTR` or restart, per `SA_RESTART`
 - [ ] per-thread signal masks with process-directed signals delivered to an eligible thread
 
-### 11.8 POSIX floor
+### 13.9 POSIX floor
 - [ ] a tracked list of the syscalls needed to build and run the target software set, checked off as implemented
 - [ ] `getcwd`, `chdir`, `fchdir`, `access`, `chmod`, `chown`, `umask`, `utimensat`
+- [ ] `stat`, `fstat`, `lstat`, `fstatat`, `readlink`, `getdents64`, `openat`, `pread64`, `pwrite64`, `readv`, `writev`, `nanosleep`, which every coreutil calls before anything else
+- [ ] `procfs` backed by the process table: `cmdline`, `status`, `maps`, `fd`, `stat` per pid; `ps` reads it and syscall 500 is deleted
 - [ ] `getrlimit` / `setrlimit`, `getrusage`
 - [ ] `uname`, `sysinfo`, `gettimeofday`, `clock_gettime`, `clock_nanosleep`
 - [ ] `ioctl` with a registry rather than a growing match arm
@@ -999,7 +1178,10 @@ that real software can be ported without patching every call site.
 Where it stops being a kernel demo and becomes something you can use. Nothing here has a canonical
 right answer, which is the interesting part.
 
-## Phase 12: Userspace
+Phases 15, 16, and 17 fan out from 14 and do not depend on each other. Self-hosting does not wait for
+a compositor. The numbering is a reading order, not a build order.
+
+## Phase 14: Userspace
 
 **Goal.** A real userspace: a C library, a dynamic linker, an init system, and enough utilities that
 the shell is useful.
@@ -1013,10 +1195,11 @@ the shell is useful.
 - [ ] a shell script with pipes, redirection, variables, conditionals, and loops runs
 - [ ] the userspace test suite passes, run automatically in CI inside the VM
 - [ ] a package installs, upgrades, and removes cleanly with file conflict detection
-- [ ] tag `v0.12.0`
+- [ ] tag `v0.14.0`
 
-### 12.1 libc
-- [ ] decide and document: write our own, or port musl or relibc. Porting gets to real software faster; writing our own is more of what this project is for. Lean toward our own for the core and port where the surface is enormous and uninteresting.
+### 14.1 libc
+- [x] decided in Phase 10: the Rust user runtime from §10.5 is the native library for everything vibeOS ships; musl is ported for the C surface, since Phase 17's toolchains need it anyway. Both bind to the one generated syscall table.
+- [ ] the musl port: `crt1`, the `syscall` shim, `errno`, `__set_thread_area` over §13.1's TLS, and `libc-test` as the conformance suite
 - [ ] `crt0`: entry, stack argument extraction, TLS setup, `__libc_start_main`, `atexit`
 - [ ] syscall stubs generated from one table shared with the kernel, so they cannot drift
 - [ ] `malloc`: a real allocator, not a bump. Size classes, thread caches, `mmap` for large allocations.
@@ -1028,7 +1211,7 @@ the shell is useful.
 - [ ] locale enough to not break, not more
 - [ ] a conformance test suite, and the honesty to record what is deliberately unimplemented
 
-### 12.2 Dynamic linking
+### 14.2 Dynamic linking
 - [ ] shared object loading: `PT_DYNAMIC`, `DT_NEEDED`, search paths
 - [ ] relocation processing: `RELA`, `JMPREL`, `RELR`
 - [ ] symbol resolution with correct scope and interposition order
@@ -1038,7 +1221,7 @@ the shell is useful.
 - [ ] `LD_PRELOAD` and `LD_LIBRARY_PATH`, useful for debugging more than for anything else
 - [ ] the linker itself is static and self-relocating, which is the fiddly part
 
-### 12.3 init and services
+### 14.3 init and services
 - [ ] PID 1: mount the base filesystems, start services, reap orphans, handle shutdown
 - [ ] a declarative service definition: dependencies, restart policy, environment, working directory
 - [ ] dependency-ordered parallel startup
@@ -1047,8 +1230,9 @@ the shell is useful.
 - [ ] socket activation, which is genuinely elegant and not much work once sockets exist
 - [ ] shutdown: signal services, wait with a timeout, unmount, ACPI power off
 - [ ] a control tool for start, stop, restart, status, and logs
+- [ ] `login` and a getty on the console and on serial; `passwd` and `su`; a shadow file hashed with §15.11's primitives
 
-### 12.4 Coreutils
+### 14.4 Coreutils
 - [ ] file and directory: `ls`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `ln`, `touch`, `stat`, `find`, `du`, `df`
 - [ ] text: `cat`, `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `tr`, `grep`, `sed`, `diff`
 - [ ] process: `ps`, `kill`, `top`, `time`, `nice`
@@ -1057,7 +1241,7 @@ the shell is useful.
 - [ ] editor: something small, `vi`-flavored. Editing on the machine matters more than it sounds like.
 - [ ] each with real argument parsing and correct exit statuses, because scripts depend on both
 
-### 12.5 Shell
+### 14.5 Shell
 - [ ] a POSIX-shaped shell: word splitting, quoting, expansion, globbing
 - [ ] redirection including here-documents and file descriptor manipulation
 - [ ] pipelines, `&&`, `||`, `;`, subshells, command substitution
@@ -1067,7 +1251,7 @@ the shell is useful.
 - [ ] interactive: history, completion, line editing, prompt expansion
 - [ ] scripts with a shebang, and enough correctness to run a build script
 
-### 12.6 Packaging
+### 14.6 Packaging
 - [ ] a package format: metadata, dependencies, file list, checksums, install scripts
 - [ ] a local package database with installed files and owners
 - [ ] install, remove, upgrade, query, verify, with file conflict detection
@@ -1078,7 +1262,7 @@ the shell is useful.
 
 ---
 
-## Phase 13: Networking
+## Phase 15: Networking
 
 **Goal.** A TCP/IP stack good enough to serve requests and fetch a package repository.
 
@@ -1089,13 +1273,15 @@ protocol work for an agent to get wrong in interesting ways.
 - [ ] `ping` from the host to the guest and back
 - [ ] DHCP acquires an address, and DNS resolves a name
 - [ ] a TCP server in the guest serves a file to `curl` on the host, and the bytes match
-- [ ] a TCP client fetches from the host through a large transfer with no corruption and reasonable throughput
+- [ ] a TCP client fetches 1 GiB from the host with no corruption, at 1 Gbit/s or better over virtio-net under KVM and 4 Gbit/s or better over loopback
 - [ ] the stack survives a packet fuzzer: malformed headers, bad checksums, overlapping fragments, no panics
 - [ ] `netstat`-equivalent shows sockets in correct states through a full connection lifecycle
+- [ ] an HTTPS fetch from a public host completes with certificate verification, using §15.11
+- [ ] SNTP sets the wall clock to within 100 ms of the host
 - [ ] host tests for header parsing, checksums, TCP state transitions, and sequence arithmetic
-- [ ] tag `v0.13.0`
+- [ ] tag `v0.15.0`
 
-### 13.1 netdev layer
+### 15.1 netdev layer
 - [ ] a `NetDevice` trait: transmit, MTU, MAC, link state, and statistics
 - [ ] receive queues delivering into the stack from a softirq or a dedicated thread, never from the hard IRQ
 - [ ] a packet buffer type with headroom and tailroom so headers can be prepended without copying
@@ -1103,19 +1289,19 @@ protocol work for an agent to get wrong in interesting ways.
 - [ ] a loopback device, which is also the easiest way to test everything above it
 - [ ] per-device statistics: packets, bytes, errors, drops
 
-### 13.2 Drivers
+### 15.2 Drivers
 - [ ] virtio-net: receive and transmit virtqueues, mergeable receive buffers, checksum offload, multi-queue
 - [ ] e1000, for real hardware and because it is well documented
 - [ ] a Realtek 8168-family driver, since it is what cheap hardware actually has
 - [ ] in-guest driver tests against a loopback QEMU network configuration
 
-### 13.3 Link layer
+### 15.3 Link layer
 - [ ] Ethernet framing, parsing, and dispatch by EtherType
 - [ ] ARP with a cache, timeouts, request queueing for unresolved destinations, and gratuitous ARP handling
 - [ ] VLAN tagging, cheap to add and annoying to retrofit
 - [ ] neighbor discovery for IPv6 later, with ARP structured so it is not a special case
 
-### 13.4 IP
+### 15.4 IP
 - [ ] IPv4 header parse, validate, and construct, with checksum
 - [ ] routing table with longest-prefix match, a default route, and per-route MTU
 - [ ] fragmentation and reassembly, with a reassembly timeout and a bound on held fragments so it is not a memory attack
@@ -1123,14 +1309,14 @@ protocol work for an agent to get wrong in interesting ways.
 - [ ] TTL handling and forwarding, which makes it a router with very little extra work
 - [ ] the header code in the library half, host-tested against captured packets
 
-### 13.5 UDP
+### 15.5 UDP
 - [ ] datagram send and receive with port binding and demultiplexing
 - [ ] checksum computation and validation, including the optional-zero case
 - [ ] receive queue per socket with a bound and a drop counter
 - [ ] connected UDP sockets
 - [ ] enough to run DNS and DHCP, which is what unblocks everything else
 
-### 13.6 TCP
+### 15.6 TCP
 - [ ] the full state machine, transitions tested exhaustively as a host test
 - [ ] three-way handshake, and connection teardown including simultaneous close and `TIME_WAIT`
 - [ ] sequence and acknowledgement arithmetic with wraparound handled, host-tested
@@ -1144,7 +1330,7 @@ protocol work for an agent to get wrong in interesting ways.
 - [ ] path MTU discovery
 - [ ] this is the single largest correctness surface in the project; the test suite matters more than the implementation
 
-### 13.7 Socket API
+### 15.7 Socket API
 - [ ] `socket`, `bind`, `listen`, `accept`, `connect`, `send`, `recv`, `sendto`, `recvfrom`, `shutdown`
 - [ ] `getsockopt` and `setsockopt` for the options that exist, and a clear error for those that do not
 - [ ] `getsockname`, `getpeername`
@@ -1152,22 +1338,23 @@ protocol work for an agent to get wrong in interesting ways.
 - [ ] `sendmsg` and `recvmsg` with scatter-gather and control messages
 - [ ] `accept4`, `SO_REUSEADDR`, `SO_REUSEPORT`
 
-### 13.8 Configuration and tools
+### 15.8 Configuration and tools
 - [ ] DHCP client: discover, request, lease renewal, and correct behavior on lease expiry
 - [ ] DNS resolver: A, AAAA, CNAME, with a cache honoring TTLs, retries, and multiple servers
 - [ ] static configuration files and an `ip`-equivalent tool
 - [ ] `ping`, `traceroute`, `netstat`, `ss`, `tcpdump`-equivalent
 - [ ] an HTTP client good enough to fetch packages, and a server good enough to prove the stack
-- [ ] `sshd`, eventually, which requires the crypto from phase 16 and is the point at which the machine becomes genuinely usable remotely
+- [ ] an SNTP client so `date` is right, and NTP proper later
+- [ ] `sshd`, on the crypto from §15.11, which is the point at which the machine becomes genuinely usable remotely
 
-### 13.9 IPv6
+### 15.9 IPv6
 - [ ] addressing, header parsing, extension headers
 - [ ] neighbor discovery and stateless address autoconfiguration
 - [ ] ICMPv6
 - [ ] dual stack sockets
 - [ ] deliberately after IPv4 works, and deliberately not skipped
 
-### 13.10 Testing
+### 15.10 Testing
 - [ ] a packet injection interface so the stack can be tested without a real device
 - [ ] replay of captured traffic as host tests
 - [ ] a fuzzer over every parser, run in CI
@@ -1175,9 +1362,25 @@ protocol work for an agent to get wrong in interesting ways.
 - [ ] host-to-guest integration tests in CI over QEMU user networking and a tap device
 - [ ] a deliberately hostile peer: reordering, duplication, loss, tiny windows
 
+### 15.11 Crypto and TLS
+Moved here from Hardening: package signatures (§14.6), `sshd` (§15.8), `cargo` (§17.3), and KASLR (§18.2) all
+need it before that phase. Secure boot, measured boot, and disk encryption stay in §18.7.
+
+- [ ] an entropy pool: `RDRAND`, timer jitter, interrupt timing, with health checks
+  (`/dev/random` already prefers virtio-rng then RDRAND; S1)
+- [ ] a CSPRNG, `/dev/random` and `/dev/urandom`, and `getrandom`
+- [ ] hashes and ciphers: SHA-2, SHA-3, AES-GCM, ChaCha20-Poly1305
+- [ ] public key: Ed25519, X25519, RSA verification
+- [ ] TLS in userspace, needed for package fetching and `sshd`
+- [ ] constant-time primitives with the RFC test vectors as host tests, and a host-side comparison against a reference implementation
+- [ ] X.509 parsing and chain validation with a bundled root store, host-tested against real certificates and fuzzed like every parser
+- [ ] TLS 1.3 client and server in userspace; 1.2 only if a peer that matters demands it
+- [ ] `getrandom` and `/dev/urandom` never block after the pool is seeded; `/dev/random` blocks only until then
+- [ ] an HTTPS fetch and an `sshd` login are the two integration tests, and both run in CI against a host peer
+
 ---
 
-## Phase 14: Graphics and Windowing
+## Phase 16: Graphics and Windowing
 
 **Goal.** More than one window. A compositor, an input stack, and a terminal emulator running in it.
 
@@ -1189,10 +1392,10 @@ protocol work for an agent to get wrong in interesting ways.
 - [ ] mouse and keyboard events routed to the focused window
 - [ ] a screenshot captured programmatically and compared against a reference in CI
 - [ ] a resolution change at runtime with clients reacting correctly
-- [ ] the compositor holds a steady frame rate under a moving-window workload, measured
-- [ ] tag `v0.14.0`
+- [ ] the compositor holds 60 frames per second at 1920×1080 with ten windows moving, fewer than 1% of frames dropped over ten seconds, measured
+- [ ] tag `v0.16.0`
 
-### 14.1 Display abstraction
+### 16.1 Display abstraction
 - [ ] a `Display` with a mode list, current mode, and framebuffer access
 - [ ] the Limine framebuffer as the fallback, always available
 - [ ] mode setting where the hardware supports it
@@ -1200,14 +1403,14 @@ protocol work for an agent to get wrong in interesting ways.
 - [ ] vsync and page flipping, so tearing is fixable rather than inherent
 - [ ] a pixel format abstraction that is not hardcoded to BGRX
 
-### 14.2 GPU
+### 16.2 GPU
 - [ ] virtio-gpu 2D: resource creation, transfer, `set_scanout`, flush
 - [ ] virtio-gpu cursor plane, which is worth it for the latency alone
 - [ ] EDID for mode discovery
-- [ ] virtio-gpu 3D with a graphics API on top, as a much later stretch
+- [ ] virtio-gpu 3D with a graphics API on top: Beyond, not gating; the display abstraction must not preclude it
 - [ ] a software rasterizer good enough that 3D is optional: lines, rects, blits, alpha, text
 
-### 14.3 Compositor
+### 16.3 Compositor
 - [ ] a surface tree with position, size, stacking order, and transforms
 - [ ] damage tracking so only changed regions are recomposited
 - [ ] alpha blending and clipping
@@ -1216,25 +1419,25 @@ protocol work for an agent to get wrong in interesting ways.
 - [ ] fullscreen bypass, sending a client's buffer straight to scanout
 - [ ] the frame loop must not depend on client responsiveness; a hung client freezing the desktop is the failure mode to design against
 
-### 14.4 Input
+### 16.4 Input
 - [ ] an input event abstraction: keyboard, pointer, and touch, with timestamps
-- [ ] PS/2 mouse, then USB HID once phase 18 lands xHCI
+- [ ] PS/2 mouse, then USB HID once phase 20 lands xHCI
 - [ ] event routing: pointer to the surface under the cursor, keyboard to the focused surface
 - [ ] focus policy, grabs, and click-to-focus
 - [ ] keyboard layout handling with dead keys and compose, which is more work than it looks
 - [ ] pointer acceleration, and scroll with kinetic behavior
 - [ ] repeat rate and delay
 
-### 14.5 Display protocol
+### 16.5 Display protocol
 - [ ] a client-server protocol over a Unix socket, with buffer sharing through shared memory or dma-buf-equivalent
 - [ ] surface lifecycle, commit semantics, and damage submission
 - [ ] input event delivery
 - [ ] window management: title, class, minimum and maximum size, state
 - [ ] clipboard and drag and drop
 - [ ] the protocol documented in `docs/` before implementation, since two implementations must agree
-- [ ] Wayland compatibility as a stretch, which would let real applications run
+- [ ] Wayland compatibility: Beyond, not gating; the protocol must not preclude it
 
-### 14.6 Window management and toolkit
+### 16.6 Window management and toolkit
 - [ ] window decorations, or a client-side decoration protocol
 - [ ] move, resize, minimize, maximize, close
 - [ ] tiling and floating layouts, workspaces
@@ -1243,7 +1446,7 @@ protocol work for an agent to get wrong in interesting ways.
 - [ ] font rendering with real glyph rasterization, hinting, kerning, and subpixel positioning, which is a project in itself
 - [ ] a panel with a clock, a launcher, and a system tray
 
-### 14.7 Terminal emulator
+### 16.7 Terminal emulator
 - [ ] a pty client with correct `termios` interaction
 - [ ] VT100 and xterm escape sequence handling: cursor, colors, attributes, scroll regions, alternate screen
 - [ ] 256-color and true color
@@ -1254,7 +1457,7 @@ protocol work for an agent to get wrong in interesting ways.
 
 ---
 
-## Phase 15: Self-hosting Toolchain
+## Phase 17: Self-hosting Toolchain
 
 **Goal.** vibeOS compiles vibeOS. Check out the source on the machine, build it, boot the result.
 
@@ -1266,11 +1469,12 @@ everything.
 - [ ] `rustc` runs on vibeOS
 - [ ] the vibeOS source tree builds on vibeOS into a bootable ISO
 - [ ] that ISO boots and rebuilds itself: two generations, with matching output
-- [ ] the test suite runs on vibeOS, on hardware, reporting results the same way CI does
+- [ ] the test suite runs on vibeOS under QEMU with KVM, reporting results the same way CI does; the on-hardware run is §20.8's gate
+- [ ] the loop runs on aarch64 as well as x86_64, and each architecture can cross-build the other
 - [ ] the whole loop is scripted, not a sequence of manual steps someone remembers
-- [ ] tag `v0.15.0`
+- [ ] tag `v0.17.0`
 
-### 15.1 POSIX completeness
+### 17.1 POSIX completeness
 - [ ] audit against what a real toolchain needs, and close the gaps rather than guessing
 - [ ] filesystem behavior compilers depend on: `rename` atomicity, `O_TMPFILE`, `fsync` semantics, correct `mtime`
 - [ ] process behavior: `posix_spawn`, large environments, long argument lists, pipe-heavy pipelines
@@ -1278,7 +1482,7 @@ everything.
 - [ ] `/proc` entries that build systems read
 - [ ] a large-file test, since compilers write big object files and every off-by-one shows up there
 
-### 15.2 C toolchain
+### 17.2 C toolchain
 - [ ] port `tcc` first: small, self-hosting, and a fast way to prove the environment works
 - [ ] an assembler and linker, either ported or written, with ELF output and relocation support
 - [ ] `ar`, `nm`, `objdump`, `strip`, `readelf`
@@ -1286,22 +1490,22 @@ everything.
 - [ ] `make`, and enough of `sh` and `awk` for configure scripts to survive
 - [ ] `cmake` and `ninja`, which most real projects assume
 
-### 15.3 Rust toolchain
-- [ ] a `std` port: a new target triple with the `sys` layer implemented over our syscalls
+### 17.3 Rust toolchain
+- [ ] a `std` port: `x86_64-unknown-vibeos` and `aarch64-unknown-vibeos`, with the `sys` layer implemented over our syscalls
 - [ ] thread, file, socket, process, and time support in `std`
 - [ ] `rustc` running on vibeOS, which requires LLVM working first
 - [ ] `cargo`, which requires networking, TLS, and git
 - [ ] a cross-compiled bootstrap first, then a native build, in that order
 - [ ] the kernel itself builds on-device (built-in `x86_64-unknown-none`, no `build-std`)
 
-### 15.4 Development environment
+### 17.4 Development environment
 - [ ] a git implementation or port, enough for clone, commit, branch, and push
 - [ ] a real editor, ported rather than written
 - [ ] a debugger: ptrace-equivalent, breakpoints, single stepping, symbol and DWARF reading
-- [ ] a profiler using the perf counters from phase 17
+- [ ] virtio-fs or 9p to mount the host checkout, so the build loop does not start by copying the tree into an image
 - [ ] `strace`-equivalent, which the kernel syscall tracing already mostly provides
 
-### 15.5 The loop
+### 17.5 The loop
 - [ ] a build script that goes from a clean checkout to a bootable ISO on vibeOS
 - [ ] a second-generation build, comparing the two ISOs and explaining any difference
 - [ ] the test suite running on-device
@@ -1314,35 +1518,41 @@ everything.
 
 The parts that separate a working system from a serious one.
 
-## Phase 16: Hardening
+Phases 18 and 19 are independent of each other. Phase 20 needs both architectures from 11 and the
+drivers from 7 and 15. Phase 21 needs 20 for its test environment. Phase 22 needs everything.
+
+## Phase 18: Hardening
 
 **Goal.** Assume everything in userspace is hostile and the kernel has bugs. Make both survivable.
 
+**Unlocks.** Trusting the machine with anything that matters. Running untrusted code on purpose, which
+Phase 21's containers and Phase 22's users both are.
+
 **Exit gate**
 - [ ] kernel `.text` read-only and executable, `.rodata` read-only and NX, `.data` NX, verified at runtime
-- [ ] KASLR active, and a crash dump still symbolizes correctly
+- [ ] KASLR active on both architectures, and a crash dump still symbolizes correctly
 - [ ] SMEP and SMAP enabled, with an in-guest test proving a kernel access to a user pointer faults outside the explicit accessor
 - [ ] a syscall fuzzer runs for hours without a kernel panic
 - [ ] KASAN builds pass the full test suite
 - [ ] a sandboxed process cannot reach the filesystem or network outside its policy, tested
 - [ ] a documented threat model, with the deliberate gaps named
-- [ ] tag `v0.16.0`
+- [ ] tag `v0.18.0`
 
-### 16.1 Kernel memory protection
+### 18.1 Kernel memory protection
 - [ ] per-section permissions applied after boot, with the init sections freed or made NX
 - [ ] no writable-and-executable kernel mapping anywhere, asserted by a page table audit at boot
 - [ ] the physmap NX, which is easy to get wrong and a straightforward escalation primitive
 - [ ] guard pages on every kernel stack including the IST stacks
 - [ ] a page table walker that verifies the whole address space against a policy, run as an in-guest test
 
-### 16.2 KASLR
+### 18.2 KASLR
 - [ ] a random kernel base at boot, from a real entropy source
 - [ ] relocation processing for the chosen base
 - [ ] randomized physmap and KVA region bases
 - [ ] the offset recorded so a crash dump symbolizes, and not otherwise exposed
 - [ ] user address space randomization: stack, heap, and mmap bases
 
-### 16.3 CPU features
+### 18.3 CPU features
 
 S1 turns SMEP/SMAP/UMIP/`CR0.WP` on at boot (`arch::cpu::harden`). These items are the
 in-guest fault tests and wiring `stac`/`clac` into a user-VA accessor (today copies go through HHDM).
@@ -1351,26 +1561,27 @@ in-guest fault tests and wiring `stac`/`clac` into a user-VA accessor (today cop
 - [ ] SMAP, with explicit `stac`/`clac` in the user access accessors and nowhere else
 - [ ] UMIP, so userspace cannot read descriptor table registers
 - [ ] `CR4.FSGSBASE` handled correctly with respect to `swapgs`
-- [ ] CET shadow stacks and indirect branch tracking, as a stretch
+- [ ] aarch64: `PXN` and `UXN` as the SMEP equivalent, PAN as the SMAP equivalent, and `UAO`; the same in-guest fault tests as x86
+- [ ] Stretch: CET shadow stacks and indirect branch tracking on x86_64; pointer authentication and BTI on aarch64
 - [ ] speculation mitigations, measured before enabling, since some cost more than the risk
 
-### 16.4 Stack and memory safety
+### 18.4 Stack and memory safety
 - [ ] stack canaries in both kernel and userspace
 - [ ] `FORTIFY`-equivalent checks in libc
 - [ ] a hardened `malloc`: guard pages, delayed reuse, randomized placement, double free detection
 - [ ] a KASAN build with a shadow map, red zones, and quarantined frees
 - [ ] a UBSAN build
-- [ ] `unsafe` blocks audited and each given a documented invariant, since a growing pile of unaudited `unsafe` is where this ends up otherwise
+- [ ] the `unsafe` audit: every block's one-line reason from the standing gate reviewed against the invariant it claims, since a pile of stale one-liners is where this ends up otherwise
 
-### 16.5 Fuzzing
-- [ ] a syscall fuzzer generating structured calls with valid and invalid arguments, running in CI
+### 18.5 Fuzzing
+- [ ] a syscall fuzzer generating structured calls with valid and invalid arguments, running in CI; the parser fuzzers already run from §10.2
 - [ ] filesystem image fuzzing against every filesystem parser
 - [ ] network packet fuzzing against every protocol parser
 - [ ] ELF fuzzing against the loader
 - [ ] coverage-guided where feasible, with crash reproduction as a checked-in test case
 - [ ] every crash found becomes a regression test, without exception
 
-### 16.6 Access control
+### 18.6 Access control
 - [ ] uid and gid actually enforced: file permissions, ownership, `setuid`
 - [ ] capability-style privilege splitting rather than a single root bit
 - [ ] a syscall filter, `seccomp`-shaped, per process
@@ -1378,38 +1589,37 @@ in-guest fault tests and wiring `stac`/`clac` into a user-VA accessor (today cop
 - [ ] resource limits enforced: memory, descriptors, processes, CPU time
 - [ ] an audit log for privileged operations
 
-### 16.7 Crypto and boot integrity
-- [ ] an entropy pool: `RDRAND`, timer jitter, interrupt timing, with health checks
-  (`/dev/random` already prefers virtio-rng then RDRAND; S1)
-- [ ] a CSPRNG, `/dev/random` and `/dev/urandom`, and `getrandom`
-- [ ] hashes and ciphers: SHA-2, SHA-3, AES-GCM, ChaCha20-Poly1305
-- [ ] public key: Ed25519, X25519, RSA verification
-- [ ] TLS in userspace, needed for package fetching and `sshd`
+### 18.7 Crypto and boot integrity
+The primitives, the CSPRNG, and TLS are §15.11. This is what needs a boot chain.
+
 - [ ] UEFI secure boot: a signed bootloader and kernel
-- [ ] measured boot with a TPM, and signature verification on module and package loading
+- [ ] measured boot with a TPM, and signature verification on package installation
 - [ ] full disk encryption, which needs the block layer to support a transform
 
-### 16.8 Threat model
+### 18.8 Threat model
 - [ ] documented in `docs/`: what is trusted, what is not, what is deliberately out of scope
 - [ ] the escalation paths that are known to exist and why they are still open
 - [ ] a security response process, however informal, so the answer is not improvised
 
 ---
 
-## Phase 17: Performance and Observability
+## Phase 19: Performance and Observability
 
 **Goal.** Know why it is slow, then stop being slow. Neither is possible without measurement first.
+
+**Unlocks.** Numbers instead of adjectives, and every later performance claim in this file.
 
 **Exit gate**
 - [ ] a flamegraph produced from a sampling profile on the machine
 - [ ] tracing captures a full request path across syscall, scheduler, and driver with correlated timestamps
 - [ ] benchmarks in CI with thresholds, and a regression actually fails a build
-- [ ] scheduler latency under load within a stated bound, measured not asserted
+- [ ] scheduler wakeup latency at the 99th percentile under 1 ms with a CPU-bound load of four times the core count, measured
 - [ ] a tickless idle CPU takes near zero timer interrupts, measured
-- [ ] lock contention profiled, and the top contended lock addressed rather than noted
-- [ ] tag `v0.17.0`
+- [ ] lock contention profiled; the most contended lock's spin time cut by at least half, with before and after numbers recorded
+- [ ] slab statistics show per-cache object counts, and the buddy lock is measurably less contended
+- [ ] tag `v0.19.0`
 
-### 17.1 Tracing
+### 19.1 Tracing
 - [ ] static tracepoints at the boundaries that matter: syscall entry and exit, scheduler switch, page fault, IRQ, block and network I/O
 - [ ] a per-CPU lock-free ring buffer with a fixed-size record
 - [ ] dynamic enable and disable per tracepoint, with near-zero cost when off
@@ -1417,7 +1627,7 @@ in-guest fault tests and wiring `stac`/`clac` into a user-VA accessor (today cop
 - [ ] a userspace tracing interface so applications can emit into the same timeline
 - [ ] the timestamp source must be globally monotonic, which is the phase 2 TSC work finally paying off
 
-### 17.2 Profiling
+### 19.2 Profiling
 - [ ] PMU setup: cycles, instructions, cache misses, branch misses
 - [ ] sampling on a counter overflow interrupt with a stack walk
 - [ ] per-process and per-thread accounting
@@ -1425,25 +1635,25 @@ in-guest fault tests and wiring `stac`/`clac` into a user-VA accessor (today cop
 - [ ] `perf`-equivalent for stat and record
 - [ ] last branch records and precise event sampling where the hardware offers them
 
-### 17.3 Benchmarks
+### 19.3 Benchmarks
 - [ ] microbenchmarks: syscall latency, context switch, page fault, allocation, lock acquire
 - [ ] subsystem: file read and write throughput, network throughput and latency, process creation rate
 - [ ] macro: kernel build time, boot time, a mixed interactive workload
 - [ ] all of it in CI with recorded history and a threshold that fails
 - [ ] variance controlled well enough that the numbers mean something, which is most of the work
 
-### 17.4 Scheduler
+### 19.4 Scheduler
 - [ ] replace round-robin with something latency-aware: weighted fair queueing or a virtual-deadline scheme
 - [ ] priorities and nice values with real effect
 - [ ] a real-time class with `FIFO` and `RR` policies
 - [ ] load balancing: periodic first, then work stealing, measured against the periodic baseline before keeping it
 - [ ] topology awareness from CPUID: prefer a sibling core, keep a thread near its cache
-- [ ] cgroup-style group scheduling with CPU shares and quotas
+- [ ] group scheduling with CPU shares and quotas: the scheduler half of the cgroup-equivalent in §21.5
 - [ ] latency measured under load, since the whole point is the tail and not the average
 - [ ] per-CPU TCB ownership or a sharded TCB table; timeouts per CPU (timing wheel, `TimeoutQueue` replacement already anticipated in `src/sched.rs`)
 
-### 17.5 Scalability
-- [ ] RCU for read-mostly structures: the dentry cache, the routing table, the module list
+### 19.5 Scalability
+- [ ] RCU for read-mostly structures: the dentry cache, the routing table, the mount table
 - [ ] seqlocks where readers dominate and writers are rare
 - [ ] per-CPU counters aggregated on read, instead of a shared atomic on the hot path
 - [ ] lock-free queues on the paths that need them, with a documented memory ordering argument
@@ -1451,54 +1661,72 @@ in-guest fault tests and wiring `stac`/`clac` into a user-VA accessor (today cop
 - [ ] contention measured before and after each change, with the numbers recorded
 - [ ] block cache: per-device or hashed locks; VFS: RCU-style dentry lookup or per-mount locks; log ring: per-CPU staging with a printer thread (ROADMAP §5.5 item already open)
 
-### 17.6 Power and idle
+### 19.6 Power and idle
 - [ ] tickless idle: arm the next real deadline instead of a periodic tick
 - [ ] `mwait` and C-state entry with a governor choosing depth by predicted idle duration
 - [ ] P-state and frequency scaling
 - [ ] interrupt coalescing on the network and storage paths
 - [ ] timer slack, so unrelated wakeups can batch
 - [ ] measured idle power on real hardware, which is the only honest test
+- [ ] CPU offlining for power management: migrate threads, redirect interrupts, park the core; the reverse of bring-up, and not hotplug
 
-### 17.7 NUMA
+### 19.7 NUMA
 - [ ] SRAT and SLIT parsing for node topology and distances
 - [ ] per-node buddy allocators with node-local allocation as the default
 - [ ] NUMA-aware scheduling, keeping a thread near its memory
 - [ ] page migration on persistent remote access
 - [ ] per-node statistics, because the failure mode is invisible without them
 
-### 17.8 I/O
+### 19.8 I/O
 - [ ] an async submission interface, `io_uring`-shaped: submission and completion rings shared with userspace
 - [ ] zero-copy paths for network send and file read
 - [ ] `sendfile` and `splice`
 - [ ] direct I/O bypassing the page cache
 - [ ] polled I/O for NVMe, where the interrupt costs more than the spin
 - [ ] boot time reduced by parallelizing device probing and deferring what can be deferred
-- [ ] virtio-blk zero-copy: DMA directly from page-cache pages once ROADMAP §10.6 unifies the caches; drop the bounce path
+- [ ] virtio-blk zero-copy: DMA directly from page-cache pages once §12.5 unifies the caches; drop the bounce path
+- [ ] packed virtqueues, measured against split before keeping them
+
+### 19.9 Slab allocator
+Moved from the memory phase: nothing before this phase needs it, and its gate is a contention measurement.
+
+- [ ] object caches with a constructor, sized for a specific type
+- [ ] slabs of one or more pages carved into objects, with a freelist in the unused object space
+- [ ] per-CPU magazines so the common path takes no global lock
+- [ ] caches for the hot types: TCB, process, inode, dentry, file, network buffer, request
+- [ ] shrinking under memory pressure, driven by the same reclaim path as the page cache
+- [ ] `slabinfo` in the shell: per cache, objects active and total, pages used
+- [ ] the general heap stays for odd-sized allocations; slab is not a replacement for it
 
 ---
 
-## Phase 18: Real Hardware and Portability
+## Phase 20: Real Hardware
 
-**Goal.** Boot on a physical machine. Then boot on a machine that is not x86.
+**Goal.** Boot on physical machines of both architectures, and keep booting on them.
+
+**Unlocks.** The only honest test of everything QEMU forgives. A hardware compatibility list. Hardware
+CI, which Phases 21 and 22 assume.
 
 **Exit gate**
 - [ ] boots from USB on at least two physically different x86_64 machines, with output on a serial adapter or the screen
 - [ ] real disk, real NIC, real USB keyboard, all functional
 - [ ] clean shutdown and reboot through ACPI
 - [ ] suspend to RAM and resume, with devices restored
-- [ ] an aarch64 target boots to a shell under QEMU
+- [ ] a real aarch64 board boots to the shell with a working disk and NIC
+- [ ] NVMe and AHCI drives detected and used as root on real x86 machines
 - [ ] hardware CI: a physical machine that netboots and reports results automatically
-- [ ] tag `v0.18.0`
+- [ ] tag `v0.20.0`
 
-### 18.1 Bare metal x86_64
+### 20.1 Bare metal x86_64
 - [ ] a real UEFI boot path and a real BIOS boot path, both tested on hardware rather than assumed
+- [ ] x2APIC, since some machines and most large VMs expose nothing else
 - [ ] the memory map from real firmware, which is messier than QEMU's in ways that break assumptions
 - [ ] real ACPI tables, which are also messier, including vendor quirks
 - [ ] serial output over a USB adapter, and early output on the framebuffer for machines without one
 - [ ] a crash dump written somewhere persistent, since there is no host to catch it
 - [ ] a hardware compatibility list, honestly maintained
 
-### 18.2 ACPI runtime
+### 20.2 ACPI runtime
 - [ ] an AML interpreter, which is a large and genuinely unpleasant subproject and unavoidable
 - [ ] the device tree from the DSDT and SSDTs, resource assignment, `_CRS` parsing
 - [ ] power management: S5 shutdown, S3 suspend, S4 hibernate
@@ -1507,7 +1735,7 @@ in-guest fault tests and wiring `stac`/`clac` into a user-VA accessor (today cop
 - [ ] hotplug notifications, lid switch, power button
 - [ ] `_OSI` handling and the vendor quirks that come with it
 
-### 18.3 USB
+### 20.3 USB
 - [ ] xHCI: controller init, command and event rings, device slots, endpoint contexts
 - [ ] enumeration: address assignment, descriptor parsing, configuration selection
 - [ ] hub support, including nested hubs
@@ -1516,7 +1744,23 @@ in-guest fault tests and wiring `stac`/`clac` into a user-VA accessor (today cop
 - [ ] USB serial, which is how debugging a modern laptop works
 - [ ] EHCI and UHCI for older hardware, if the hardware in hand needs it
 
-### 18.4 Real devices
+### 20.4 NVMe
+Moved from Phase 7: nothing before real hardware needs either driver. QEMU `-device nvme` and `-device ahci` first, real drives in §20.6.
+
+- [ ] controller identify, admin queue setup, I/O queue creation per CPU
+- [ ] submission and completion queue handling with doorbells and phase tags
+- [ ] namespace enumeration
+- [ ] read and write commands, flush, dataset management for discard
+- [ ] MSI-X per queue
+- [ ] the fast path built for depth from the start, since NVMe's whole point is parallelism
+
+### 20.5 AHCI
+- [ ] HBA and port initialization, command list and FIS structures
+- [ ] identify device, LBA48 read and write
+- [ ] ATAPI detection so a CD-ROM does not look like a broken disk
+- [ ] present mainly because real hardware has it; QEMU testing via `-device ahci`
+
+### 20.6 Real devices
 - [ ] AHCI and NVMe validated on real drives, with real error handling
 - [ ] SMART reporting
 - [ ] real NICs: e1000e, igb, Realtek, and the firmware loading some of them require
@@ -1524,38 +1768,33 @@ in-guest fault tests and wiring `stac`/`clac` into a user-VA accessor (today cop
 - [ ] SD and eMMC for single-board machines
 - [ ] i2c and SMBus, needed for sensors and embedded controllers
 
-### 18.5 Architecture abstraction
-- [ ] audit every architecture assumption and move it behind a trait or a module boundary
-- [ ] abstract: page table format, context switch, interrupt controller, timer, atomics and barriers, MMIO accessors, per-CPU access, syscall entry
-- [ ] keep x86_64 working at every step; a refactor that breaks the working port to enable a hypothetical one is a bad trade
-- [ ] a documented list of what is architecture-specific and where it lives
+### 20.7 Bare metal aarch64
+- [ ] a real board: a Raspberry Pi 5, or an Ampere or Graviton class machine, chosen for a working UEFI so §11.1's boot path applies
+- [ ] the device tree from real firmware, which disagrees with QEMU's in the same ways real ACPI disagrees with QEMU's
+- [ ] GICv3 with the ITS, since real PCIe on aarch64 means MSI
+- [ ] SD or eMMC root on a board, NVMe root on a server
+- [ ] USB over xHCI, shared with §20.3
+- [ ] serial over the board's own UART, and the same hardware CI treatment as x86 in §20.8
+- [ ] Apple Silicon bare metal is in Beyond, not here
 
-### 18.6 aarch64
-- [ ] a boot path: UEFI or device tree, exception level setup, MMU enable
-- [ ] page tables: 4KB granule, TTBR0 and TTBR1 split, which maps cleanly onto the existing user and kernel split
-- [ ] GIC v2 and v3 for interrupts
-- [ ] the generic timer
-- [ ] PSCI for secondary core bring-up, which is far more civilized than INIT/SIPI
-- [ ] device tree parsing for hardware discovery
-- [ ] a virt machine target under QEMU first, then a real board
-- [ ] cache maintenance and barriers, which x86 let us be sloppy about and aarch64 will not
-
-### 18.7 riscv64
-- [ ] a stretch, and mostly a test of whether the abstraction from 18.5 was real
-- [ ] SBI, PLIC and CLINT, Sv39 and Sv48 paging
-- [ ] QEMU virt, then a real board
-
-### 18.8 Hardware CI
+### 20.8 Hardware CI
 - [ ] a physical machine that netboots a built image
 - [ ] serial captured automatically and results reported like any other CI job
 - [ ] power control so a hung run can be recovered without a human
 - [ ] a nightly run against real hardware, since QEMU-only testing hides an entire class of bug
+- [ ] one machine of each architecture
 
 ---
 
-## Phase 19: Virtualization
+## Phase 21: Virtualization
 
 **Goal.** Run other operating systems on vibeOS, and run vibeOS on vibeOS.
+
+**Unlocks.** Containers, which the release CI in Phase 22 runs in. A conformance test for every
+paravirtual interface the kernel consumes as a guest.
+
+The hypervisor gate needs hardware virtualization nested inside the test environment. Hosted CI does not
+promise that, so this phase depends on §20.8.
 
 **Exit gate**
 - [ ] a Linux kernel boots to userspace as a guest under vibeOS
@@ -1563,9 +1802,9 @@ in-guest fault tests and wiring `stac`/`clac` into a user-VA accessor (today cop
 - [ ] guests get virtio block and network devices with reasonable throughput
 - [ ] a container-equivalent runs an isolated process tree with its own filesystem view and resource limits
 - [ ] vibeOS as a guest under Linux KVM performs comparably to native, using paravirtual interfaces
-- [ ] tag `v0.19.0`
+- [ ] tag `v0.21.0`
 
-### 19.1 Hypervisor
+### 21.1 Hypervisor
 - [ ] VMX and SVM detection and enablement, with the feature MSR checks
 - [ ] a VMCS or VMCB per vCPU, with guest and host state areas
 - [ ] the VM entry and exit path, and exit reason decoding
@@ -1573,8 +1812,9 @@ in-guest fault tests and wiring `stac`/`clac` into a user-VA accessor (today cop
 - [ ] guest interrupt injection, virtual APIC, and posted interrupts where available
 - [ ] MSR and I/O bitmaps, and instruction emulation for the exits that need it
 - [ ] a vCPU as a schedulable entity, so the existing scheduler runs guests
+- [ ] aarch64: EL2 entry, stage-2 translation, the virtual GIC and timer, behind the same VM abstraction
 
-### 19.2 Virtual machines
+### 21.2 Virtual machines
 - [ ] a VM abstraction: memory regions, vCPUs, devices, lifecycle
 - [ ] guest memory as an address space, with host page faults servicing guest access
 - [ ] a virtual interrupt controller and timer
@@ -1583,20 +1823,20 @@ in-guest fault tests and wiring `stac`/`clac` into a user-VA accessor (today cop
 - [ ] a management interface and tool: create, start, stop, inspect
 - [ ] a serial console per guest, which is how anything gets debugged
 
-### 19.3 Nesting
+### 21.3 Nesting
 - [ ] vibeOS on vibeOS, which mostly tests that the paravirtual interfaces are honest
 - [ ] Linux as a guest, which is the real conformance test of the hypervisor
 - [ ] nested virtualization, so a guest can itself be a hypervisor
 - [ ] a documented performance comparison against KVM, with the gaps explained rather than hidden
 
-### 19.4 Guest support
+### 21.4 Guest support
 - [ ] detect running under a hypervisor via CPUID
 - [ ] KVM paravirtual clock, so timekeeping is not calibrated against a lying TSC
 - [ ] paravirtual spinlocks, since spinning in a preempted vCPU is a disaster
 - [ ] balloon driver for memory reclaim by the host
 - [ ] Hyper-V and VMware enlightenments, so it runs well on the platforms people actually have
 
-### 19.5 Containers
+### 21.5 Containers
 - [ ] namespaces: pid, mount, network, uts, ipc, user
 - [ ] cgroup-equivalent: CPU, memory, and I/O limits with accounting
 - [ ] an overlay filesystem for layered images
@@ -1606,27 +1846,29 @@ in-guest fault tests and wiring `stac`/`clac` into a user-VA accessor (today cop
 
 ---
 
-## Phase 20: Distribution
+## Phase 22: Distribution
 
 **Goal.** Something another person can install and run, released by a process that runs on itself.
 
+**Unlocks.** Users. The end of the roadmap and the start of the [Beyond](#beyond) list.
+
 **Exit gate**
-- [ ] a live ISO boots to a graphical desktop on real hardware
+- [ ] a live image for each architecture boots to a graphical desktop on real hardware
 - [ ] the installer partitions, installs, and produces a bootable system
 - [ ] a release is built reproducibly: the same source produces byte-identical artifacts
 - [ ] artifacts are signed and verified on install
 - [ ] the CI that gates releases runs on vibeOS
 - [ ] a fresh install can build and release the next version of vibeOS
-- [ ] tag `v0.20.0`
+- [ ] tag `v0.22.0`
 
-### 20.1 Release engineering
+### 22.1 Release engineering
 - [ ] versioning with a defined policy for what constitutes a break
 - [ ] reproducible builds: no timestamps, no paths, no nondeterministic ordering in any artifact
 - [ ] a signed manifest of everything in a release
 - [ ] a release branch and backport process
 - [ ] release notes generated from the changelog, which is what the changelog discipline was for
 
-### 20.2 Installation
+### 22.2 Installation
 - [ ] a live ISO with a full desktop and an installer
 - [ ] partitioning: automatic and manual, GPT with a UEFI system partition
 - [ ] filesystem creation, base system install, bootloader install
@@ -1635,19 +1877,42 @@ in-guest fault tests and wiring `stac`/`clac` into a user-VA accessor (today cop
 - [ ] upgrade in place between releases, tested from every supported prior version
 - [ ] recovery: a rescue shell, `fsck` on boot, and a rollback path
 
-### 20.3 Documentation
+### 22.3 Documentation
 - [ ] an installation guide and a user handbook
 - [ ] a developer guide covering the build, the test tiers, and the subsystem docs in this directory
 - [ ] a hardware compatibility list from real testing
 - [ ] man pages for everything shipped
-- [ ] an honest known-issues list
+- [ ] a known-issues list that includes every open box in every shipped phase, generated from this file
 
-### 20.4 The loop
+### 22.4 The loop
 - [ ] CI running on vibeOS hardware: checkout, build, test, publish
 - [ ] a release produced entirely on vibeOS, signed on vibeOS
 - [ ] the resulting artifact installed on a clean machine, which then builds the next release
 - [ ] the whole thing scripted and documented so it is a procedure rather than a story
 - [ ] and then, having proven the point, keep going, because there is no version of this where the work is finished
+
+---
+
+# Beyond
+
+Not phases. No gates, no tags. Things that are hard, well specified, and welcome as soon as the phase
+that enables them is closed. Each names that phase. Take one when the queue is empty, and move it into a
+phase with a gate before starting it.
+
+- **Wayland compatibility** (after 16): real applications run unmodified. §16.5 keeps the door open.
+- **virtio-gpu 3D and a graphics API** (after 16): Vulkan or OpenGL ES over virgl, then the toolkit on it.
+- **A web browser port** (after 16 and 17): the single largest test of the POSIX surface, threads, and font rendering there is.
+- **Apple Silicon bare metal** (after 20): m1n1 as the bootloader, the DART IOMMU, the AIC interrupt controller. Native hardware for the dev host.
+- **riscv64 on a real board** (after §11.8 and 20).
+- **Formal verification of one subsystem** (after 10): the buddy allocator or the vibefs commit protocol, proven rather than tested. Which one, and with what tool, is the first deliverable.
+- **Deterministic simulation testing** (after 15): the network stack and both filesystems driven by a simulated clock and a seeded fault injector, every failure replayable from its seed.
+- **Live kernel patching** (after 18): a fix applied to a running kernel without a reboot, with the KASLR and W^X story intact.
+- **A `std`-native Rust userspace** (after 17): coreutils, shell, and init on the vibeOS `std` target, replacing the C ports.
+- **Real-time guarantees** (after 19 and 20): bounded interrupt and scheduling latency measured on hardware, and a scheduling class that documents its bound.
+- **A network filesystem client** (after 15): NFS or 9p over TCP, so a cluster of vibeOS machines shares one tree.
+- **A WASM runtime** (after 14): a sandbox that is not a process.
+- **Cross self-hosting** (after 11 and 17): aarch64 vibeOS builds x86_64 vibeOS and the reverse, byte-identical to the native build.
+- **vibefs v2** (after 12): designed for the unified page cache it has rather than the block cache it had; larger volumes, a real journal or a log structure, and an upgrade path from v1.
 
 ---
 

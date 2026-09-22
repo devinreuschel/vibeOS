@@ -15,7 +15,7 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 - SMEP/SMAP/UMIP and `CR0.WP` on every CPU (`arch::cpu::harden`). `/dev/random` prefers
   virtio-rng, then RDRAND, then xorshift.
 - [Phase 9](docs/ROADMAP.md#phase-9-user-mode-and-processes): ring 3, syscalls, ELF `/hello`,
-  `fork`/`execve`/`wait4`, userspace `/sbin/init` and `/bin/sh`. Phase 9 exit; COW is Phase 10.
+  `fork`/`execve`/`wait4`, userspace `/sbin/init` and `/bin/sh`. Phase 9 exit; COW is Phase 12.
 - MIT license (`LICENSE`). Both crate manifests declare `license = "MIT"`.
 - Tracked `AGENTS.md` (DOC3). Cursor rules and `CLAUDE.md` point at it.
 - `make check` as the fast local gate (host clippy, host units, harness, ruff/mypy).
@@ -25,6 +25,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Changed
 
+- Roadmap restructured to 23 phases: [Phase 10 Consolidation](docs/ROADMAP.md#phase-10-consolidation)
+  and [Phase 11 Portability](docs/ROADMAP.md#phase-11-portability) added; old phases 10–20 are now 12–22.
 - CI: `check` job (`make check` + hostlib llvm-cov floor 87%) runs before the QEMU ladder.
   rustflags deny warnings; kernel clippy still warms `target/` for `make iso`.
 - Crate version is `0.8.0` (Phase 8 backfill). Changelog cut; entries are ≤ 2 lines.

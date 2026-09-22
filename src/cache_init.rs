@@ -2,7 +2,7 @@
 //!
 //! Sits above [`BlockDevice`] miss paths. Lock dropped before device
 //! I/O (RANK_DEVICE + blocking wait). Flush/barrier write dirty pages
-//! then call down into the device. Phase 10 reuses these pages.
+//! then call down into the device. Phase 12 reuses these pages.
 
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 

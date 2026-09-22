@@ -47,4 +47,4 @@ Step 3 changes where host binaries land; the Makefile and `tests/harness/run_vib
 
 ## Out of scope
 
-Making the kernel itself build for another architecture (ROADMAP §18.5).
+Making the kernel itself build for another architecture (ROADMAP §10.3 and Phase 11).

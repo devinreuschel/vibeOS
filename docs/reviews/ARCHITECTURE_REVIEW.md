@@ -6,6 +6,8 @@
 
 **Revision 2 (2026-09-22):** maintainer answers to §8 folded in (macOS is a supported dev host, MIT license, Phase 9 resumed, custom target was not a deliberate choice, CI takes a few minutes). E1 corrected after a non-test-only recount; see §9.3.
 
+**Revision 3 (2026-09-22):** the roadmap was restructured after this review ([ROADMAP_REVIEW.md](ROADMAP_REVIEW.md)). Phase numbers from 10 up quoted below are the pre-restructure ones (old 10 → 12 … 20 → 22); the items are tracked as ROADMAP Phase 10: Consolidation.
+
 Effort scale used below: **S** ≤ 1 day, **M** a few days, **L** 1–2 weeks, **XL** longer. Impact is relative to the project's stated goal (a testable, agent-written kernel that keeps advancing through the roadmap).
 
 ---

@@ -1,8 +1,8 @@
 //! Process table, fork/exec/wait, fd syscalls, early signals. ROADMAP §9.5–9.7.
 //!
 //! Table lives under SCHED (wait/zombie). Do not hold SCHED across AS
-//! clone, ELF load, or heap teardown. COW is Phase 10. User handlers are
-//! Phase 11.
+//! clone, ELF load, or heap teardown. COW is Phase 12. User handlers are
+//! Phase 13.
 
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
