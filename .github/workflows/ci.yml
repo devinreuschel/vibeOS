@@ -61,7 +61,10 @@ jobs:
           CARGO_UNSTABLE_JSON_TARGET_SPEC: "true"
           CARGO_UNSTABLE_BUILD_STD: core,compiler_builtins,alloc
           CARGO_UNSTABLE_BUILD_STD_FEATURES: compiler-builtins-mem
-        run: cargo clippy --lib --bin vibeos --all-features -- -D warnings
+        run: |
+          cargo clippy --lib --bin vibeos --all-features -- -D warnings
+          cargo clippy --lib --bin vibeos --features kernel_tests -- -D warnings
+          cargo clippy --lib --bin vibeos --features vibefs_crash -- -D warnings
 
       - name: cargo clippy -D warnings (hostlib)
         run: cd tests/hostlib && cargo clippy --all-targets -- -D warnings

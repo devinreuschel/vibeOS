@@ -3,6 +3,7 @@
 //! Runs as a real thread (not `_start`, not an ISR, not idle). Input
 //! drain is IRQ-off; we never wait for keys while holding a console lock
 //! with IF=1 (DESIGN §9.4). Commands live in the registry table.
+#![cfg_attr(feature = "vibefs_crash", allow(dead_code))]
 
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, Ordering};

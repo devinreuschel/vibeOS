@@ -511,14 +511,17 @@ global_asm!(
     "#
 );
 
+#[cfg_attr(feature = "kernel_tests", allow(dead_code))] // tracing / procfs; parked
 pub fn set_trace(on: bool) {
     TRACE.store(on, Ordering::Release);
 }
 
+#[cfg_attr(feature = "kernel_tests", allow(dead_code))] // tracing / procfs; parked
 pub fn trace_enabled() -> bool {
     TRACE.load(Ordering::Acquire)
 }
 
+#[cfg_attr(feature = "kernel_tests", allow(dead_code))] // tracing / procfs; parked
 pub fn syscall_count() -> u64 {
     let t = per_cpu_init::current_thread();
     if !t.is_null() {
