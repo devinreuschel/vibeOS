@@ -110,7 +110,7 @@ fn alloc_ap_resources(cpu_id: u32, apic_id: u8, publish: bool) -> Option<ApAlloc
             cpu.apic_id = apic_id as u32;
             cpu.idle_id = idle_id;
             cpu.idle = idle_ptr;
-            cpu.current = idle_ptr;
+            per_cpu_init::set_current_thread(cpu, idle_ptr);
             cpu.tsc_per_ms = time_init::tsc_per_ms();
             cpu.timer_mode = apic_init::timer_mode();
             cpu.ready.store(false, Ordering::Relaxed);
@@ -131,7 +131,7 @@ fn free_ap_resources(a: ApAlloc) {
     if a.published {
         let _ = per_cpu_init::with_cpu(a.cpu_id, |cpu| {
             cpu.idle = core::ptr::null_mut();
-            cpu.current = core::ptr::null_mut();
+            per_cpu_init::set_current_thread(cpu, core::ptr::null_mut());
             cpu.idle_id = ThreadId::NONE;
             cpu.ready.store(false, Ordering::Relaxed);
             cpu.apic_id = 0;

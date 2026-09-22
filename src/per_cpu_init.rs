@@ -201,9 +201,8 @@ pub fn gs_self() -> *mut PerCpu {
     ptr as *mut PerCpu
 }
 
-#[allow(dead_code)]
-pub fn set_current_thread(tcb: *mut Tcb) {
-    with_current(|c| c.current = tcb);
+pub fn set_current_thread(cpu: &mut PerCpu, tcb: *mut Tcb) {
+    cpu.current = tcb;
 }
 
 pub fn current_thread() -> *mut Tcb {

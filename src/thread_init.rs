@@ -295,8 +295,8 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
                 &mut (*new_ptr).context.rflags,
                 cpu.irq_nest.load(Ordering::Relaxed),
             );
-            cpu.current = new_ptr;
-            crate::syscall_init::apply_on_cpu(cpu, old_ptr, new_ptr);
+            per_cpu_init::set_current_thread(cpu, new_ptr);
+            crate::syscall_init::on_switch(cpu, old_ptr, new_ptr);
             switch_context(&mut (*old_ptr).context, &(*new_ptr).context);
         }
     });
@@ -388,7 +388,7 @@ pub unsafe fn init_bootstrap() {
         s.slots[0] = Some(tcb);
     }
     per_cpu_init::with_current(|cpu| {
-        cpu.current = ptr;
+        per_cpu_init::set_current_thread(cpu, ptr);
         cpu.idle = ptr;
         cpu.idle_id = ThreadId::BOOTSTRAP;
         cpu.ready_head = core::ptr::null_mut();

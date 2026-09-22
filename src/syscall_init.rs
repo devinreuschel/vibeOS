@@ -300,12 +300,8 @@ pub fn fpu_template() -> Fxsave {
 }
 
 /// Update TSS.RSP0 + `kernel_rsp0` for `tcb`. Every context switch.
-#[allow(dead_code)]
-pub fn set_rsp0_for(tcb: &Tcb) {
-    per_cpu_init::with_current(|cpu| apply_rsp0(cpu, tcb));
-}
-
-fn apply_rsp0(cpu: &mut PerCpu, tcb: &Tcb) {
+/// Caller already holds `&mut PerCpu` (IRQ-off).
+pub fn set_rsp0_for(cpu: &mut PerCpu, tcb: &Tcb) {
     let top = match tcb.stack {
         Some(ks) => ks.top(),
         None => cpu.fallback_rsp0,
@@ -317,12 +313,8 @@ fn apply_rsp0(cpu: &mut PerCpu, tcb: &Tcb) {
 }
 
 /// Load `tcb`'s CR3 if it differs. Skip when the next thread shares AS.
-#[allow(dead_code)]
-pub fn switch_cr3_for(tcb: &Tcb) -> bool {
-    per_cpu_init::with_current(|cpu| apply_cr3(cpu, tcb))
-}
-
-fn apply_cr3(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
+/// Caller already holds `&mut PerCpu` (IRQ-off).
+pub fn switch_cr3_for(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
     let want = if tcb.as_cr3 == 0 {
         crate::paging_init::kernel_cr3()
     } else {
@@ -353,20 +345,13 @@ pub fn switch_fpu(old: *mut Tcb, new: *mut Tcb) {
 }
 
 /// Hardware side of a context switch: FPU, RSP0, CR3. Call before
-/// `switch_context`. `switch_now` uses [`apply_on_cpu`] because it
-/// already holds the CPU.
-#[allow(dead_code)]
-pub fn on_switch(old: *mut Tcb, new: *mut Tcb) {
-    per_cpu_init::with_current(|cpu| apply_on_cpu(cpu, old, new));
-}
-
-/// Same as [`on_switch`] when the caller already holds `with_current`.
-pub(crate) fn apply_on_cpu(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
+/// `switch_context`. Caller already holds `&mut PerCpu` (IRQ-off).
+pub fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
     switch_fpu(old, new);
     if !new.is_null() {
         unsafe {
-            apply_rsp0(cpu, &*new);
-            apply_cr3(cpu, &*new);
+            set_rsp0_for(cpu, &*new);
+            switch_cr3_for(cpu, &*new);
         }
     }
 }
