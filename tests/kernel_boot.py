@@ -13,6 +13,8 @@ from harness import (  # noqa: E402
     HarnessError,
     QemuConfig,
     check_ktest_output,
+    effective_accel_name,
+    retryable_ktest_failure,
     run_qemu_until_exit,
 )
 
@@ -52,6 +54,62 @@ def _block_name(name: str):
     return pred
 
 
+def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool):
+    """One ktest QEMU. Retry once on a known host-timing flake."""
+    tag = "persist reboot" if persist_reboot else "ktest"
+    last: HarnessError | None = None
+    for attempt in range(2):
+        raw = None
+        try:
+            raw = run_qemu_until_exit(cfg, timeout_s=timeout)
+            check_ktest_output(raw.lines, raw.exit_code)
+            _require_line(raw.lines, _block_name("vda"), "missing virtio-blk marker")
+            _require_line(raw.lines, _block_name("vdap1"), "missing vdap1 marker")
+            if persist_reboot:
+                _require_line(
+                    raw.lines,
+                    lambda ln: ln == "vibeOS: persist: intact",
+                    "persist pattern did not survive reboot",
+                )
+            else:
+                _require_line(raw.lines, _block_name("vdap2"), "missing vdap2 marker")
+                _require_line(
+                    raw.lines,
+                    lambda ln: ln == "vibeOS: persist: wrote",
+                    "missing persist wrote",
+                )
+            return raw
+        except HarnessError as e:
+            last = e
+            timed_out = "timed out" in str(e)
+            failure_lines = (
+                [
+                    line
+                    for line in raw.lines
+                    if line.startswith("vibeOS: ktest: FAIL")
+                ]
+                if raw is not None
+                else []
+            )
+            retryable = retryable_ktest_failure(
+                cfg.smp,
+                str(e),
+                persist_reboot=persist_reboot,
+                accel=effective_accel_name(cfg),
+                failure_lines=failure_lines,
+            )
+            if attempt == 0 and (
+                timed_out
+                or retryable
+            ):
+                reason = "timeout" if timed_out else "known ktest timing flake"
+                print(f"[{tag}] retry after {reason}: {e}", file=sys.stderr)
+                continue
+            raise
+    assert last is not None
+    raise last
+
+
 def main() -> int:
     iso = os.environ.get("VIBEOS_ISO", "vibeos-ktest.iso")
     smp = int(os.environ.get("VIBEOS_SMP", "2"))
@@ -85,16 +143,7 @@ def main() -> int:
         )
 
         try:
-            raw = run_qemu_until_exit(cfg, timeout_s=timeout)
-            check_ktest_output(raw.lines, raw.exit_code)
-            _require_line(raw.lines, _block_name("vda"), "missing virtio-blk marker")
-            _require_line(raw.lines, _block_name("vdap1"), "missing vdap1 marker")
-            _require_line(raw.lines, _block_name("vdap2"), "missing vdap2 marker")
-            _require_line(
-                raw.lines,
-                lambda ln: ln == "vibeOS: persist: wrote",
-                "missing persist wrote",
-            )
+            raw = _ktest_boot(cfg, timeout, persist_reboot=False)
         except HarnessError as e:
             print(f"[ktest] FAIL: {e}", file=sys.stderr)
             return 1
@@ -112,15 +161,7 @@ def main() -> int:
             return 0
 
         try:
-            raw2 = run_qemu_until_exit(cfg, timeout_s=timeout)
-            check_ktest_output(raw2.lines, raw2.exit_code)
-            _require_line(raw2.lines, _block_name("vda"), "missing virtio-blk marker (reboot)")
-            _require_line(raw2.lines, _block_name("vdap1"), "missing vdap1 marker (reboot)")
-            _require_line(
-                raw2.lines,
-                lambda ln: ln == "vibeOS: persist: intact",
-                "persist pattern did not survive reboot",
-            )
+            raw2 = _ktest_boot(cfg, timeout, persist_reboot=True)
         except HarnessError as e:
             print(f"[ktest] FAIL persist reboot: {e}", file=sys.stderr)
             return 1

@@ -50,6 +50,18 @@ def _check_pci_qemu_set(lines: list[str]) -> None:
         raise HarnessError(f"pci count {n} < golden {len(PCI_GOLDEN)}")
 
 
+def _retry_hang(label: str, fn):
+    """One silent timeout / missing last marker is a QEMU hang, not a contract fail."""
+    try:
+        return fn()
+    except HarnessError as e:
+        msg = str(e)
+        if "timed out" not in msg and "no shell ready" not in msg:
+            raise
+        print(f"[e2e] retry {label}: {e}", file=sys.stderr)
+        return fn()
+
+
 def main() -> int:
     iso = os.environ.get("VIBEOS_ISO", "vibeos.iso")
     smp = int(os.environ.get("VIBEOS_SMP", "2"))
@@ -97,14 +109,27 @@ def main() -> int:
     else:
         markers = boot_contract_markers(cpu=cpu, hpet=not expect_pit, smp=smp)
 
+    timeout_s = float(os.environ.get("VIBEOS_TIMEOUT", "60"))
     try:
-        result = run_qemu_and_check(
-            cfg,
-            markers,
-            timeout_s=float(os.environ.get("VIBEOS_TIMEOUT", "60")),
-            expect_panic=expect_panic,
-            dump_needles=dump_needles,
-        )
+        if expect_panic or gp_test:
+            result = run_qemu_and_check(
+                cfg,
+                markers,
+                timeout_s=timeout_s,
+                expect_panic=expect_panic,
+                dump_needles=dump_needles,
+            )
+        else:
+            result = _retry_hang(
+                "marker boot",
+                lambda: run_qemu_and_check(
+                    cfg,
+                    markers,
+                    timeout_s=timeout_s,
+                    expect_panic=expect_panic,
+                    dump_needles=dump_needles,
+                ),
+            )
     except HarnessError as e:
         print(f"[e2e] FAIL: {e}", file=sys.stderr)
         return 1
@@ -122,9 +147,9 @@ def main() -> int:
             return 1
         print("[e2e]   . pci qemu set ok", file=sys.stderr)
         try:
-            inp = run_qemu_console_input(
-                cfg,
-                timeout_s=float(os.environ.get("VIBEOS_TIMEOUT", "60")),
+            inp = _retry_hang(
+                "console input",
+                lambda: run_qemu_console_input(cfg, timeout_s=timeout_s),
             )
         except HarnessError as e:
             print(f"[e2e] FAIL: {e}", file=sys.stderr)

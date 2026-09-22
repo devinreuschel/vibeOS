@@ -9,18 +9,28 @@ import os
 import sys
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import kernel_boot  # noqa: E402
 from harness import (  # noqa: E402
     DeadlineReader,
     HarnessError,
+    ISA_DEBUG_FAIL,
+    ISA_DEBUG_PASS,
     Marker,
     QemuConfig,
+    RunResult,
     check_markers_in_order,
     contains_panic,
+    effective_accel_name,
     HPET_OFF_MACHINE,
+    OVMF_BOOT_ARGS,
+    SMP2_TCG_PER_CPU_READY_HEAD_FLAKE,
     _qemu_argv,
+    retryable_ktest_failure,
     serial_tail,
 )
 
@@ -304,8 +314,165 @@ class TestKtestProtocol(unittest.TestCase):
             check_ktest_output(lines, ISA_DEBUG_FAIL)
         self.assertIn("isa-debug-exit", str(cm.exception))
 
+    def test_only_smp4_msix_ap_counter_is_retryable(self) -> None:
+        msg = "ktest FAIL: vibeOS: ktest: FAIL msix_cpu: ap counter"
+        self.assertTrue(retryable_ktest_failure(4, msg))
+        self.assertFalse(retryable_ktest_failure(2, msg))
+        self.assertFalse(
+            retryable_ktest_failure(
+                4, "ktest FAIL: vibeOS: ktest: FAIL msix_cpu: bsp counter"
+            )
+        )
+
+    def test_smp2_tcg_per_cpu_ready_head_sole_failure_is_retryable(self) -> None:
+        line = SMP2_TCG_PER_CPU_READY_HEAD_FLAKE
+        msg = f"ktest FAIL: {line}"
+        self.assertTrue(
+            retryable_ktest_failure(
+                2,
+                msg,
+                accel="tcg",
+                failure_lines=(line,),
+            )
+        )
+
+    def test_per_cpu_ready_head_retry_requires_exact_scope(self) -> None:
+        line = SMP2_TCG_PER_CPU_READY_HEAD_FLAKE
+        msg = f"ktest FAIL: {line}"
+        other = "vibeOS: ktest: FAIL unrelated: reason"
+        self.assertFalse(
+            retryable_ktest_failure(
+                4,
+                msg,
+                accel="tcg",
+                failure_lines=(line,),
+            )
+        )
+        self.assertFalse(
+            retryable_ktest_failure(
+                2,
+                msg,
+                accel="kvm",
+                failure_lines=(line,),
+            )
+        )
+        self.assertFalse(
+            retryable_ktest_failure(
+                2,
+                msg,
+                persist_reboot=True,
+                accel="tcg",
+                failure_lines=(line,),
+            )
+        )
+        self.assertFalse(
+            retryable_ktest_failure(2, msg, accel="tcg")
+        )
+        self.assertFalse(
+            retryable_ktest_failure(
+                2,
+                msg,
+                accel="tcg",
+                failure_lines=(line, other),
+            )
+        )
+        self.assertFalse(
+            retryable_ktest_failure(
+                2,
+                msg + "!",
+                accel="tcg",
+                failure_lines=(line,),
+            )
+        )
+
+    def test_only_smp4_persist_ipi_ack_panic_is_retryable(self) -> None:
+        msg = (
+            "panic signature 'vibeOS: panic:' in: "
+            "'infovibeOS: panic: msg:  ipi: ack timeout waiters=0xdvibeOS: ktes'"
+        )
+        self.assertTrue(
+            retryable_ktest_failure(4, msg, persist_reboot=True)
+        )
+        self.assertFalse(retryable_ktest_failure(4, msg))
+        self.assertFalse(
+            retryable_ktest_failure(2, msg, persist_reboot=True)
+        )
+        self.assertFalse(
+            retryable_ktest_failure(
+                4,
+                "panic signature 'vibeOS: panic:' in: 'unrelated panic'",
+                persist_reboot=True,
+            )
+        )
+
+
+class TestKernelBootRetry(unittest.TestCase):
+    @staticmethod
+    def _per_cpu_ready_head_failure() -> RunResult:
+        return RunResult(
+            lines=[
+                "vibeOS: ktest: begin",
+                SMP2_TCG_PER_CPU_READY_HEAD_FLAKE,
+                "vibeOS: ktest: end",
+            ],
+            exit_code=ISA_DEBUG_FAIL,
+        )
+
+    @staticmethod
+    def _passing_initial_boot() -> RunResult:
+        return RunResult(
+            lines=[
+                "vibeOS: block: vda 8192 sectors",
+                "vibeOS: block: vdap1 128 sectors",
+                "vibeOS: block: vdap2 7647 sectors",
+                "vibeOS: persist: wrote",
+                "vibeOS: ktest: begin",
+                "vibeOS: ktest: end",
+            ],
+            exit_code=ISA_DEBUG_PASS,
+        )
+
+    def test_exact_failure_retries_once_then_passes(self) -> None:
+        failed = self._per_cpu_ready_head_failure()
+        passed = self._passing_initial_boot()
+        cfg = QemuConfig(iso="x.iso", smp=2, extra=("-accel", "tcg"))
+        with mock.patch.object(
+            kernel_boot,
+            "run_qemu_until_exit",
+            side_effect=(failed, passed),
+        ) as run:
+            result = kernel_boot._ktest_boot(
+                cfg,
+                timeout=1.0,
+                persist_reboot=False,
+            )
+        self.assertIs(result, passed)
+        self.assertEqual(run.call_count, 2)
+
+    def test_exact_failure_stops_after_one_retry(self) -> None:
+        failed = self._per_cpu_ready_head_failure()
+        cfg = QemuConfig(iso="x.iso", smp=2, extra=("-accel", "tcg"))
+        with mock.patch.object(
+            kernel_boot,
+            "run_qemu_until_exit",
+            side_effect=(failed, failed),
+        ) as run:
+            with self.assertRaises(HarnessError):
+                kernel_boot._ktest_boot(
+                    cfg,
+                    timeout=1.0,
+                    persist_reboot=False,
+                )
+        self.assertEqual(run.call_count, 2)
+
 
 class TestQemuArgv(unittest.TestCase):
+    def test_extra_accel_is_effective(self) -> None:
+        tcg = QemuConfig(iso="x.iso", extra=("-accel", "tcg,thread=multi"))
+        kvm = QemuConfig(iso="x.iso", extra=("-accel", "kvm"))
+        self.assertEqual(effective_accel_name(tcg), "tcg")
+        self.assertEqual(effective_accel_name(kvm), "kvm")
+
     def test_hpet_off_uses_machine_property(self) -> None:
         argv = _qemu_argv(QemuConfig(iso="x.iso", hpet=False), "/tmp/mon")
         self.assertEqual(HPET_OFF_MACHINE, ("-machine", "pc,hpet=off"))
@@ -331,6 +498,21 @@ class TestQemuArgv(unittest.TestCase):
     def test_accel_empty_omits_flag(self) -> None:
         argv = _qemu_argv(QemuConfig(iso="x.iso", accel=""), "/tmp/mon")
         self.assertNotIn("-accel", argv)
+
+    def test_ovmf_boots_cd_and_disables_pxe(self) -> None:
+        argv = _qemu_argv(
+            QemuConfig(iso="x.iso", bios="/usr/share/ovmf/OVMF.fd"),
+            "/tmp/mon",
+        )
+        self.assertEqual(argv[argv.index("-bios") + 1], "/usr/share/ovmf/OVMF.fd")
+        i = argv.index("-boot")
+        self.assertEqual(argv[i : i + len(OVMF_BOOT_ARGS)], list(OVMF_BOOT_ARGS))
+
+    def test_seabios_omits_ovmf_boot_args(self) -> None:
+        argv = _qemu_argv(QemuConfig(iso="x.iso"), "/tmp/mon")
+        self.assertNotIn("-bios", argv)
+        self.assertNotIn("-boot", argv)
+        self.assertNotIn("-fw_cfg", argv)
 
 
 class TestLapicMode(unittest.TestCase):

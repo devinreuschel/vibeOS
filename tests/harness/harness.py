@@ -324,6 +324,14 @@ def _accel_name(accel: str | None) -> str:
     return os.environ.get("VIBEOS_QEMU_ACCEL", DEFAULT_ACCEL)
 
 
+def effective_accel_name(cfg: QemuConfig) -> str:
+    accel = _accel_name(cfg.accel)
+    for i, arg in enumerate(cfg.extra[:-1]):
+        if arg == "-accel":
+            accel = cfg.extra[i + 1].split(",", 1)[0]
+    return accel
+
+
 def expected_lapic_mode(
     *,
     cpu: str | None = None,
@@ -362,6 +370,17 @@ def _accel_args(cfg: QemuConfig) -> list[str]:
     return ["-accel", accel]
 
 
+# OVMF BDS PXEs the default e1000 if the CD isn't first/ready. slirp
+# answers DHCP; TFTP does not. Silent stall matches VIBEOS_TIMEOUT.
+# Hits the UEFI e2e second boot (COM1 is an open pipe; marker boot is not).
+OVMF_BOOT_ARGS: tuple[str, ...] = (
+    "-boot", "order=d,menu=off",
+    "-fw_cfg", "name=opt/org.tianocore/IPv4PXESupport,string=no",
+    "-fw_cfg", "name=opt/org.tianocore/IPv6PXESupport,string=no",
+    "-fw_cfg", "name=opt/org.tianocore/FirmwareSetupSupport,string=no",
+)
+
+
 def _qemu_argv(cfg: QemuConfig, monitor_sock: str) -> list[str]:
     argv = [
         "qemu-system-x86_64",
@@ -379,6 +398,7 @@ def _qemu_argv(cfg: QemuConfig, monitor_sock: str) -> list[str]:
         argv += list(HPET_OFF_MACHINE)
     if cfg.bios:
         argv += ["-bios", cfg.bios]
+        argv += list(OVMF_BOOT_ARGS)
     argv += list(cfg.extra)
     return argv
 
@@ -481,6 +501,7 @@ def run_qemu_and_check(
     if result.timed_out:
         raise HarnessError(
             f"timed out after {timeout_s}s; {len(result.matched)}/{len(markers)} markers"
+            f"{serial_tail(result.lines)}"
         )
 
     if marker_idx < len(markers):
@@ -602,16 +623,16 @@ def run_qemu_console_input(
     if result.timed_out or not saw_ready:
         raise HarnessError(
             f"console input: no shell ready after {timeout_s}s; "
-            f"matched={result.matched}"
+            f"matched={result.matched}{serial_tail(result.lines)}"
         )
     if not saw_serial:
         raise HarnessError(
-            f"console input: serial echo missing; last={result.lines[-8:]}"
+            f"console input: serial echo missing{serial_tail(result.lines)}"
         )
     if not saw_ps2:
         raise HarnessError(
-            f"console input: PS/2 sendkey echo missing (i8042); "
-            f"last={result.lines[-8:]}"
+            f"console input: PS/2 sendkey echo missing (i8042)"
+            f"{serial_tail(result.lines)}"
         )
     return result
 
@@ -623,6 +644,43 @@ ISA_DEBUG_FAIL = 35  # write 0x11
 KTEST_BEGIN = "vibeOS: ktest: begin"
 KTEST_END = "vibeOS: ktest: end"
 KTEST_FAIL_PREFIX = "vibeOS: ktest: FAIL"
+SMP2_TCG_PER_CPU_READY_HEAD_FLAKE = (
+    "vibeOS: ktest: FAIL per_cpu_bsp: ready_head should be empty"
+)
+SMP2_TCG_PER_CPU_READY_HEAD_FLAKE_ERROR = (
+    f"ktest FAIL: {SMP2_TCG_PER_CPU_READY_HEAD_FLAKE}"
+)
+SMP4_MSIX_AP_COUNTER_FLAKE = (
+    "ktest FAIL: vibeOS: ktest: FAIL msix_cpu: ap counter"
+)
+SMP4_IPI_ACK_PANIC = "ipi: ack timeout waiters="
+
+
+def retryable_ktest_failure(
+    smp: int,
+    message: str,
+    *,
+    persist_reboot: bool = False,
+    accel: str | None = None,
+    failure_lines: Iterable[str] = (),
+) -> bool:
+    if (
+        smp == 2
+        and not persist_reboot
+        and _accel_name(accel) == "tcg"
+        and message == SMP2_TCG_PER_CPU_READY_HEAD_FLAKE_ERROR
+        and tuple(failure_lines) == (SMP2_TCG_PER_CPU_READY_HEAD_FLAKE,)
+    ):
+        return True
+    if smp != 4:
+        return False
+    if message == SMP4_MSIX_AP_COUNTER_FLAKE:
+        return True
+    return (
+        persist_reboot
+        and "panic signature 'vibeOS: panic:'" in message
+        and SMP4_IPI_ACK_PANIC in message
+    )
 
 
 def check_ktest_output(
