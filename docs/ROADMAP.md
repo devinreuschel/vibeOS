@@ -212,7 +212,7 @@ paging cannot be verified from the host.
 - [x] separate Cargo target directory and separate ISO, so a test build can never be packaged as production
 - [x] `ktest_ok` / `ktest_fail` / `ktest_skip(name, reason)` with the serial protocol from [DESIGN.md](DESIGN.md#82-in-guest-tests)
 - [x] `isa-debug-exit` at port `0xf4`: `0x10` for pass, `0x11` for fail
-- [x] `tests/kernel_boot.py` requiring `begin` and `end`, rejecting any `FAIL`, checking the exit status
+- [x] `tests/harness/run_ktest.py` requiring `begin` and `end`, rejecting any `FAIL`, checking the exit status
 - [x] failing tests print enough context to diagnose without a rerun
 
 ### 1.7 Diagnostics

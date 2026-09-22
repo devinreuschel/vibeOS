@@ -43,4 +43,4 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 
 Suggested order for Phase I (all independent unless noted): DOC1, DOC3, C1, Q1, B1, T2 → C2, DX1, B3 → DOC4, D3, R1.
 
-**Status (2026-09-22).** C1 landed on main (#77). DOC1 and DOC3 landed (#78). R1: merged `feature/*` branches pruned; Python driver moves wait on T2 (`tests/e2e/` already gone). **B1** and **DX1** implemented. **O1 superseded** — Phase 9 exit closed 2026-09-22; do not add a "Phase 9 resumed" note. Everything else still proposed.
+**Status (2026-09-22).** C1 landed (#77). DOC1+DOC3+R1 landed (#78). Harness CI flakes (#75) and **B1+DX1** (#76) on main. **T2** and **C2** implemented (this PR). **O1 superseded** — Phase 9 exit closed 2026-09-22. Everything else still proposed.

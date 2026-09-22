@@ -79,7 +79,7 @@ Size and shape at a glance:
 flowchart TB
   subgraph host["Host side (x86_64 Linux only today)"]
     HL["tests/hostlib: #[path] includes of src/*.rs; 367 unit tests; mkfs/fsck-vibefs bins"]
-    PY["tests/harness/*.py, tests/kernel_boot.py, tests/vibefs_crash.py: QEMU drivers + marker contract"]
+    PY["tests/harness/*.py: QEMU drivers + marker contract"]
   end
   subgraph pkg["Cargo package vibeos (single flat src/)"]
     subgraph lib["lib.rs: portable half (41 modules, host-testable in principle)"]
@@ -120,7 +120,7 @@ These are working and should survive any restructuring untouched in spirit.
 - **Lock discipline made concrete.** `src/lock.rs` encodes the DESIGN §2.1 ranks as testable bit math; `src/sync_init.rs` has exactly one spinlock type and it is IRQ-aware. The "Design ACK" convention for documented deviations (FS locks at device rank) is a good pattern.
 - **Panic path.** `src/panic.rs` follows the documented binding order (halt IPI → serial re-init → regs/thread/log tail → symbolized backtrace → halt or `isa-debug-exit`), with a two-pass `nm` symbol table (`scripts/gen_ksyms.py`) so `.text` does not move. Expected-panic and #GP e2e variants verify the dump content.
 - **Test builds cannot leak into production.** Each feature build (`panic-test`, `gp-test`, `kernel_tests`, `vibefs_crash`) uses its own `CARGO_TARGET_DIR` and ISO (`Makefile`, DESIGN §8.2).
-- **vibefs engineering.** Format documented before code (`docs/VIBEFS.md` with a version field), kernel and host `mkfs`/`fsck` share `src/vibefs.rs`, a host `CrashDisk` drops writes mid-commit, and `tests/vibefs_crash.py` SIGKILLs QEMU at random points and requires a clean `fsck`.
+- **vibefs engineering.** Format documented before code (`docs/VIBEFS.md` with a version field), kernel and host `mkfs`/`fsck` share `src/vibefs.rs`, a host `CrashDisk` drops writes mid-commit, and `tests/harness/run_vibefs_crash.py` SIGKILLs QEMU at random points and requires a clean `fsck`.
 - **Institutional memory.** `docs/DESIGN.md §9` records 53 symptom-first pitfalls, each naming the rule that guards it. The `_start` order table (§3.3) and address map (§4.1) are load-bearing and cited from module headers.
 - **Dependency footprint.** One crate (`limine`), lockfiles committed, standard-library-only Python. Nothing to audit.
 - **Every module has a `//!` header** naming its responsibility and the DESIGN/ROADMAP section it implements. This is worth more than any generated API doc.
@@ -225,7 +225,8 @@ There are no secrets in this project and none should exist; `.gitignore` already
 
 **C2 · Centralize `VIBEOS_*` handling**
 - **Observation:** `VIBEOS_ISO`, `VIBEOS_SMP`, `VIBEOS_QEMU_CPU`, `VIBEOS_MEM`, `VIBEOS_BIOS`, `VIBEOS_QEMU_ACCEL`, `VIBEOS_TIMEOUT`, `VIBEOS_QEMU_EXTRA` are each parsed with their own defaults in `Makefile`, `tests/harness/run_e2e.py`, `tests/kernel_boot.py`, and `tests/vibefs_crash.py` (which also carries its own copy of the panic-signature list and QEMU argv).
-- **Recommendation:** One `harness.env_config()` returning a `QemuConfig`, used by all drivers (see T2). Document the variables in one table in DESIGN §8.4.
+- **Recommendation:** One `harness.env_config()` returning an `EnvConfig` (drivers call `.qemu()`), used by all drivers (see T2). Document the variables in one table in DESIGN §8.4.
+- **Status:** Implemented.
 - **Impact:** Low · **Effort:** S · **Risk if ignored:** Drivers drift (defaults already differ: e2e timeout 60 s, ktest 90 s, crash 90 s).
 
 ### 4.6 Testing strategy & coverage
@@ -239,7 +240,8 @@ The three-tier strategy is right and well executed. Findings are about infrastru
 
 **T2 · One QEMU launcher for all drivers**
 - **Observation:** QEMU argument construction exists three times: `harness._qemu_argv` (monitor socket, accel, HPET), `kernel_boot._blk_extra` (virtio-blk drive, boot order), and `vibefs_crash._qemu_argv` (its own accel/bios handling, no monitor). `vibefs_crash.py` also redefines `PANIC` signatures and a line-reader loop instead of using `DeadlineReader`. `tests/e2e/` is an empty directory holding only an untracked `__pycache__` (a moved file).
-- **Recommendation:** Put device presets (`ktest_devices(disk, smp)`, `crash_disk(disk)`) and the launcher in `harness.py`, have all drivers use `DeadlineReader`, delete `tests/e2e/`, and move `kernel_boot.py`/`vibefs_crash.py` into `tests/harness/`.
+- **Recommendation:** Put device presets (`ktest_devices(disk, smp)`, `virtio_blk_args(disk, smp)`) and the launcher in `harness.py`, have all drivers use `DeadlineReader`, delete `tests/e2e/`, and move `kernel_boot.py`/`vibefs_crash.py` into `tests/harness/` as `run_ktest.py` / `run_vibefs_crash.py`.
+- **Status:** Implemented.
 - **Impact:** Medium · **Effort:** S · **Risk if ignored:** A fix to the reader or panic list lands in one driver and not the others (this has already happened with the panic list).
 
 **T3 · Parallelize the CI ladder and add a fast `check` job**
@@ -425,8 +427,8 @@ Nothing in this sketch requires changing an algorithm. Locks, ranks, markers, th
 | C1 | Pin nightly date, action SHAs, Limine commit; cache on `Cargo.lock` | Prevents "red CI, no diff" |
 | DX1 | `make check`; ruff/mypy for `tests/` | Fast local gate |
 | B1 | Parametrize ISO recipes / two-pass build | Enables T3 and P1 |
-| T2 | One QEMU launcher; delete `tests/e2e/`; move loose drivers | Enables T3 |
-| C2 | One `VIBEOS_*` reader | Falls out of T2 |
+| T2 | One QEMU launcher; delete `tests/e2e/`; move loose drivers | Enables T3 · **done** |
+| C2 | One `VIBEOS_*` reader | Falls out of T2 · **done** |
 | B3 | Tag `v0.8.0`, cut changelog, publish ISO artifact | |
 | DOC4 | Shorter changelog entries | With B3 |
 | D3 | `BootInfo` captured once | Deferred since Phase 0 |
@@ -538,7 +540,7 @@ Nothing remains open that blocks the Phase I items.
 - **Docs:** `README.md`, `CHANGELOG.md` (head), `docs/DESIGN.md` (§1–3, §4.1, §8, §9 headings, `_start` table), `docs/ROADMAP.md` (intro, arc, Phase 0/8/9, checkbox state), `docs/VIBEFS.md` (§1–2, TOC).
 - **Kernel source, read in full:** `src/lib.rs`, `src/main.rs`, `src/lock.rs`, `src/panic.rs`, `src/serial.rs`, `src/per_cpu_init.rs` (first 140 lines), `src/sync_init.rs` (first 120 lines), `src/heap_init.rs` (first 80 lines), `src/thread_init.rs` (first 90 lines), `src/pic.rs` and `src/arch/pic.rs` (heads), `src/ktest.rs` (first 200 lines), `src/arch/mod.rs`, `src/ksyms.rs`, `src/x86.rs` (API surface).
 - **Kernel source, structure-level:** every file's `//!` header (all 84), public item maps of `src/fs/mod.rs`, `src/fs/kernfs.rs`, `src/vibefs.rs`, `src/fat.rs`, `src/file_init.rs`, `src/virtio_blk_init.rs`, `src/block_init.rs`, `src/cache_init.rs`, `src/log.rs`, `src/log_init.rs`, `src/shell_init.rs`; the `FileSystem`/`InodeOps` traits and `Vfs` struct; `FatFs`/`VibeFs` impls; the `Back`/`Walked` dispatch in `file_init.rs`.
-- **Tests:** `tests/harness/harness.py` (full), `run_e2e.py`, `test_harness.py` (test list), `tests/kernel_boot.py`, `tests/vibefs_crash.py`, `tests/hostlib/{Cargo.toml,.cargo/config.toml,src/lib.rs,src/bin/*.rs}`, `scripts/gen_ksyms.py`, `scripts/mkinitrd.py`.
+- **Tests:** `tests/harness/harness.py` (full), `run_e2e.py`, `run_ktest.py`, `run_vibefs_crash.py`, `run_ps2.py`, `test_harness.py` (test list), `tests/hostlib/{Cargo.toml,.cargo/config.toml,src/lib.rs,src/bin/*.rs}`, `scripts/gen_ksyms.py`, `scripts/mkinitrd.py`.
 - **Git:** full log, authorship, per-file churn, branch list, last-10 PR sizes, `git show --stat HEAD`.
 
 ### 9.2 Skipped and why

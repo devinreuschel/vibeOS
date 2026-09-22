@@ -39,12 +39,12 @@ From ROADMAP "How to read this". Not optional.
     make test-unit      # tests/hostlib
     make test-harness   # Python harness units
     make test-e2e       # BIOS boot contract (tests/harness/run_e2e.py)
-    make test-kernel    # in-guest registry (tests/kernel_boot.py)
+    make test-kernel    # in-guest registry (tests/harness/run_ktest.py)
     make test           # full ladder
 
 `make help` lists targets. Optional: `pre-commit install` (ruff + `scripts/check_*.py` when those exist). rustfmt `--check` and clippy `-D warnings` land with Q1.
 
-`VIBEOS_*` overrides: `SMP`, `QEMU_CPU`, `MEM`, `QEMU_ACCEL` (default `tcg`), `ISO`, `TIMEOUT`, `BIOS`, `QEMU_EXTRA`. Makefile `?=` defaults are the source for `make run`. One reader is C2, not landed.
+`VIBEOS_*` overrides: `SMP`, `QEMU_CPU`, `MEM`, `QEMU_ACCEL` (default `tcg`), `ISO`, `TIMEOUT`, `BIOS`, `QEMU_EXTRA`. Makefile `?=` defaults are the source for `make run`. One reader: `tests/harness/harness.py` (`env_config`).
 
 macOS: `brew install qemu xorriso nasm python`. Hostlib and QEMU e2e work. Kernel-crate `cargo test --lib` is not portable yet (A2). UEFI e2e needs OVMF (`OVMF=`); Homebrew qemu ships `share/qemu/edk2-x86_64-code.fd`.
 

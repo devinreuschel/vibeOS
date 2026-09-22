@@ -1,12 +1,10 @@
 # R1 · Tidy the root, `tests/`, and remote branches
 
-**This PR (docs/meta):** pruned 34 leftover `feature/*` remotes (squash-merged
-PRs plus closed-superseded PR 7 / PR 24). `tests/e2e/` is already gone. Live
-heads left alone: other agents' in-flight branches. **Deferred:** ISO/`iso_root`/
-`initrd.fat` → `build/` (B1); `tests/kernel_boot.py` / `tests/vibefs_crash.py` →
-`tests/harness/run_*.py` (T2); `tests/hostlib` → `crates/hostlib` (A2). GitHub
-"Automatically delete head branches" is a repo setting the maintainer still
-needs to flip.
+**Landed on main:** leftover `feature/*` remotes pruned (#78); ISO recipes
+parametrized and `make check` added (#76 B1+DX1). **T2 (this PR):**
+`tests/kernel_boot.py` / `tests/vibefs_crash.py` → `tests/harness/run_*.py`.
+**Deferred:** `tests/hostlib` → `crates/hostlib` (A2). GitHub "Automatically
+delete head branches" is a repo setting the maintainer still needs to flip.
 
 | | |
 |---|---|
@@ -19,7 +17,7 @@ needs to flip.
 ## Problem
 
 - Build products land in the repo root: `vibeos*.iso`, `iso_root*/`, `initrd.fat`, `target-*/`, `limine/` (all gitignored, ten `.gitignore` entries wide).
-- `tests/` mixes a Python package (`harness/`), two loose drivers (`kernel_boot.py`, `vibefs_crash.py`), an empty `e2e/`, stray `__pycache__` directories, and a Rust crate (`hostlib/`).
+- `tests/` mixes a Python package (`harness/`; T2 moved the loose drivers here), and a Rust crate (`hostlib/`).
 - The remote has 30+ merged `feature/*` branches and a local `phase_0` branch.
 
 ## Recommended fix
@@ -29,7 +27,7 @@ Build products under `build/`; Python under `tests/harness/`; the Rust host crat
 ## Implementation plan
 
 1. **`build/`:** Makefile `ISO := build/vibeos.iso` (and the four variants), `ISO_ROOT := build/iso_root_<variant>`, `initrd.fat` → `build/initrd.fat` (B4), ksyms files → `build/`. `CARGO_TARGET_DIR` stays `target/`. `.gitignore` collapses the ten entries into `/build/`, `/target*/`, `/limine/`. `make clean` removes `build/` and `target*/`; `distclean` also `limine/`.
-2. **`tests/`:** per T2, everything Python in `tests/harness/`; delete `tests/e2e/`; after A2 step 5 move `tests/hostlib` to `crates/hostlib` (it is a crate, not a test directory) and update the Makefile.
+2. **`tests/`:** T2 put Python in `tests/harness/`. After A2 step 5 move `tests/hostlib` to `crates/hostlib` (it is a crate, not a test directory) and update the Makefile.
 3. **Branches:** enable "Automatically delete head branches" in the GitHub repo settings; one-time cleanup `git branch -r --merged origin/main | grep 'origin/feature/' | sed 's#origin/##' | xargs -n1 git push origin --delete` after the maintainer confirms; delete local `phase_0` (`git branch -d phase_0`, it is merged).
 4. **Root listing goal:** `Cargo.toml Cargo.lock Makefile README.md CHANGELOG.md LICENSE AGENTS.md CLAUDE.md rust-toolchain.toml rustfmt.toml pyproject.toml build.rs linker.ld limine.conf setup.sh crates/ docs/ scripts/ tests/ .cargo/ .github/ .cursor/`.
 

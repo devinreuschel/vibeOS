@@ -65,6 +65,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `scripts/mkiso.sh`. Five copies of xorriso assembly are gone.
 - CI: cancel superseded GitHub Actions runs for the same branch or PR so
   only the latest tip stays in the queue.
+- One QEMU launcher (`tests/harness/harness.py`) for e2e, ktest, PS/2, and
+  vibefs-crash. `VIBEOS_*` is read there. Drivers are `tests/harness/run_*.py`.
 
 ### Added
 

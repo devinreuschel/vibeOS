@@ -10,7 +10,7 @@ import time
 import unittest
 from unittest import mock
 
-import tests.kernel_boot as kernel_boot
+import tests.harness.run_ktest as run_ktest
 from tests.harness.harness import (
     HPET_OFF_MACHINE,
     ISA_DEBUG_FAIL,
@@ -22,10 +22,10 @@ from tests.harness.harness import (
     Marker,
     QemuConfig,
     RunResult,
-    _qemu_argv,
     check_markers_in_order,
     contains_panic,
     effective_accel_name,
+    qemu_argv,
     retryable_ktest_failure,
     serial_tail,
     silent_user_syscalls_hang,
@@ -199,7 +199,7 @@ class TestPanicSignatureScan(unittest.TestCase):
         self.assertFalse(contains_panic("help text about general protection"))
 
     def test_double_fault_phrase_matches_intentionally(self) -> None:
-        # The literal phrase 'double fault' IS listed in PANIC_SIGNATURES.
+        # The literal phrase 'double fault' is in the harness signature list.
         # If someone puts it in help text later, they need to rename the
         # help text, not the harness.
         self.assertTrue(contains_panic("we hit a double fault"))
@@ -450,11 +450,11 @@ class TestKernelBootRetry(unittest.TestCase):
         passed = self._passing_initial_boot()
         cfg = QemuConfig(iso="x.iso", smp=2, extra=("-accel", "tcg"))
         with mock.patch.object(
-            kernel_boot,
+            run_ktest,
             "run_qemu_until_exit",
             side_effect=(failed, passed),
         ) as run:
-            result = kernel_boot._ktest_boot(
+            result = run_ktest._ktest_boot(
                 cfg,
                 timeout=1.0,
                 persist_reboot=False,
@@ -466,12 +466,12 @@ class TestKernelBootRetry(unittest.TestCase):
         failed = self._per_cpu_ready_head_failure()
         cfg = QemuConfig(iso="x.iso", smp=2, extra=("-accel", "tcg"))
         with mock.patch.object(
-            kernel_boot,
+            run_ktest,
             "run_qemu_until_exit",
             side_effect=(failed, failed),
         ) as run:
             with self.assertRaises(HarnessError):
-                kernel_boot._ktest_boot(
+                run_ktest._ktest_boot(
                     cfg,
                     timeout=1.0,
                     persist_reboot=False,
@@ -545,33 +545,33 @@ class TestQemuArgv(unittest.TestCase):
         self.assertEqual(effective_accel_name(kvm), "kvm")
 
     def test_hpet_off_uses_machine_property(self) -> None:
-        argv = _qemu_argv(QemuConfig(iso="x.iso", hpet=False), "/tmp/mon")
+        argv = qemu_argv(QemuConfig(iso="x.iso", hpet=False), "/tmp/mon")
         self.assertEqual(HPET_OFF_MACHINE, ("-machine", "pc,hpet=off"))
         i = argv.index("-machine")
         self.assertEqual(argv[i : i + 2], ["-machine", "pc,hpet=off"])
         self.assertNotIn("-no-hpet", argv)
 
     def test_hpet_on_has_no_machine_override(self) -> None:
-        argv = _qemu_argv(QemuConfig(iso="x.iso"), "/tmp/mon")
+        argv = qemu_argv(QemuConfig(iso="x.iso"), "/tmp/mon")
         self.assertNotIn("-machine", argv)
         self.assertNotIn("-no-hpet", argv)
 
     def test_default_accel_is_tcg(self) -> None:
-        argv = _qemu_argv(QemuConfig(iso="x.iso", accel="tcg"), "/tmp/mon")
+        argv = qemu_argv(QemuConfig(iso="x.iso", accel="tcg"), "/tmp/mon")
         i = argv.index("-accel")
         self.assertEqual(argv[i : i + 2], ["-accel", "tcg"])
 
     def test_accel_kvm_override(self) -> None:
-        argv = _qemu_argv(QemuConfig(iso="x.iso", accel="kvm"), "/tmp/mon")
+        argv = qemu_argv(QemuConfig(iso="x.iso", accel="kvm"), "/tmp/mon")
         i = argv.index("-accel")
         self.assertEqual(argv[i : i + 2], ["-accel", "kvm"])
 
     def test_accel_empty_omits_flag(self) -> None:
-        argv = _qemu_argv(QemuConfig(iso="x.iso", accel=""), "/tmp/mon")
+        argv = qemu_argv(QemuConfig(iso="x.iso", accel=""), "/tmp/mon")
         self.assertNotIn("-accel", argv)
 
     def test_ovmf_boots_cd_and_disables_pxe(self) -> None:
-        argv = _qemu_argv(
+        argv = qemu_argv(
             QemuConfig(iso="x.iso", bios="/usr/share/ovmf/OVMF.fd"),
             "/tmp/mon",
         )
@@ -580,10 +580,27 @@ class TestQemuArgv(unittest.TestCase):
         self.assertEqual(argv[i : i + len(OVMF_BOOT_ARGS)], list(OVMF_BOOT_ARGS))
 
     def test_seabios_omits_ovmf_boot_args(self) -> None:
-        argv = _qemu_argv(QemuConfig(iso="x.iso"), "/tmp/mon")
+        argv = qemu_argv(QemuConfig(iso="x.iso"), "/tmp/mon")
         self.assertNotIn("-bios", argv)
         self.assertNotIn("-boot", argv)
         self.assertNotIn("-fw_cfg", argv)
+
+    def test_no_monitor_omits_flag(self) -> None:
+        argv = qemu_argv(QemuConfig(iso="x.iso"), None)
+        self.assertNotIn("-monitor", argv)
+
+    def test_boot_order(self) -> None:
+        argv = qemu_argv(QemuConfig(iso="x.iso", boot_order="d"), None)
+        i = argv.index("-boot")
+        self.assertEqual(argv[i : i + 2], ["-boot", "order=d"])
+
+    def test_ovmf_bios_wins_over_boot_order(self) -> None:
+        argv = qemu_argv(
+            QemuConfig(iso="x.iso", bios="/ovmf.fd", boot_order="d"),
+            None,
+        )
+        self.assertEqual(argv[argv.index("-boot") + 1], "order=d,menu=off")
+        self.assertEqual(argv.count("-boot"), 1)
 
 
 class TestLapicMode(unittest.TestCase):
@@ -720,6 +737,145 @@ class TestSendkeyChars(unittest.TestCase):
             sendkey_chars("")
         with self.assertRaises(HarnessError):
             sendkey_chars("A")
+
+
+class TestDevicePresets(unittest.TestCase):
+    def test_ktest_devices_legacy_off_and_num_queues(self) -> None:
+        from tests.harness.harness import ktest_devices
+
+        args = ktest_devices("/tmp/disk.img", 4)
+        blob = " ".join(args)
+        self.assertIn("disable-legacy=on", blob)
+        self.assertIn("num-queues=4", blob)
+        self.assertIn("isa-debug-exit", blob)
+        self.assertIn("edu", args)
+        self.assertIn("e1000e", args)
+        self.assertIn("virtio-rng-pci", blob)
+        self.assertIn("virtio-blk-pci", blob)
+        self.assertIn("discard=unmap", blob)
+
+    def test_ktest_qemu_argv_boot_and_queues(self) -> None:
+        from tests.harness.harness import ktest_devices, qemu_argv
+
+        cfg = QemuConfig(
+            iso="ktest.iso",
+            smp=4,
+            extra=ktest_devices("/d", 4),
+            boot_order="d",
+            accel="tcg",
+        )
+        argv = qemu_argv(cfg, "/tmp/mon")
+        blob = " ".join(argv)
+        self.assertIn("-boot order=d", blob)
+        self.assertIn("num-queues=4", blob)
+        self.assertIn("disable-legacy=on", blob)
+        self.assertIn("-monitor unix:/tmp/mon", blob)
+
+    def test_virtio_blk_omit_discard(self) -> None:
+        from tests.harness.harness import virtio_blk_args
+
+        with_d = " ".join(virtio_blk_args("/d", 2, discard=True))
+        self.assertIn("discard=unmap", with_d)
+        without = " ".join(virtio_blk_args("/d", 2, discard=False))
+        self.assertNotIn("discard=unmap", without)
+        self.assertIn("disable-legacy=on", without)
+        self.assertIn("num-queues=2", without)
+
+    def test_kill_delay_window(self) -> None:
+        import random
+
+        from tests.harness.harness import CRASH_KILL_MAX_S, kill_delay
+
+        rng = random.Random(0)
+        for _ in range(256):
+            d = kill_delay(rng)
+            self.assertGreaterEqual(d, 0.0)
+            self.assertLessEqual(d, CRASH_KILL_MAX_S)
+
+
+class TestEnvConfig(unittest.TestCase):
+    def test_env_flag(self) -> None:
+        from tests.harness.harness import env_flag, overlay_env
+
+        with overlay_env({"VIBEOS_GP_TEST": "1"}):
+            self.assertTrue(env_flag("VIBEOS_GP_TEST"))
+        with overlay_env({"VIBEOS_GP_TEST": "0"}):
+            self.assertFalse(env_flag("VIBEOS_GP_TEST"))
+        with overlay_env({"VIBEOS_GP_TEST": ""}):
+            self.assertFalse(env_flag("VIBEOS_GP_TEST"))
+        with overlay_env({}, clear=True):
+            self.assertFalse(env_flag("VIBEOS_GP_TEST"))
+
+    def test_env_int(self) -> None:
+        from tests.harness.harness import env_int, overlay_env
+
+        with overlay_env({}, clear=True):
+            self.assertEqual(env_int("VIBEOS_SMP", 2), 2)
+        with overlay_env({"VIBEOS_SMP": "4"}):
+            self.assertEqual(env_int("VIBEOS_SMP", 2), 4)
+        with overlay_env({"VIBEOS_SMP": ""}):
+            self.assertEqual(env_int("VIBEOS_SMP", 2), 2)
+
+    def test_env_config_defaults_match_makefile(self) -> None:
+        # Keep in sync with Makefile VIBEOS_* ?= (make run). C2.
+        import pathlib
+        import re
+
+        from tests.harness.harness import env_config, overlay_env
+
+        text = pathlib.Path(__file__).resolve().parents[2].joinpath("Makefile").read_text()
+        for key, val in (
+            ("VIBEOS_SMP", "2"),
+            ("VIBEOS_QEMU_CPU", "max"),
+            ("VIBEOS_MEM", "128M"),
+            ("VIBEOS_QEMU_ACCEL", "tcg"),
+        ):
+            self.assertRegex(
+                text,
+                re.compile(rf"^{re.escape(key)}\s*\?=\s*{re.escape(val)}\s*$", re.M),
+            )
+        with overlay_env({}, clear=True):
+            env = env_config(default_iso="vibeos.iso", default_timeout=60.0)
+            self.assertEqual(env.iso, "vibeos.iso")
+            self.assertEqual(env.smp, 2)
+            self.assertEqual(env.cpu, "max")
+            self.assertEqual(env.mem, "128M")
+            self.assertIsNone(env.bios)
+            self.assertEqual(env.accel, "tcg")
+            self.assertEqual(env.timeout, 60.0)
+            self.assertEqual(env.extra, ())
+            cfg = env.qemu()
+            self.assertEqual(cfg.iso, "vibeos.iso")
+            self.assertEqual(cfg.smp, 2)
+            self.assertEqual(cfg.cpu, "max")
+            self.assertEqual(cfg.mem, "128M")
+            self.assertEqual(cfg.accel, "tcg")
+
+    def test_env_config_overrides(self) -> None:
+        from tests.harness.harness import env_config, overlay_env
+
+        with overlay_env(
+            {
+                "VIBEOS_ISO": "custom.iso",
+                "VIBEOS_SMP": "4",
+                "VIBEOS_QEMU_CPU": "qemu64",
+                "VIBEOS_MEM": "256M",
+                "VIBEOS_BIOS": "/ovmf.fd",
+                "VIBEOS_QEMU_ACCEL": "",
+                "VIBEOS_TIMEOUT": "12.5",
+                "VIBEOS_QEMU_EXTRA": "-nic none",
+            },
+            clear=True,
+        ):
+            env = env_config(default_iso="vibeos.iso", default_timeout=60.0)
+            self.assertEqual(env.iso, "custom.iso")
+            self.assertEqual(env.smp, 4)
+            self.assertEqual(env.cpu, "qemu64")
+            self.assertEqual(env.mem, "256M")
+            self.assertEqual(env.bios, "/ovmf.fd")
+            self.assertEqual(env.accel, "")
+            self.assertEqual(env.timeout, 12.5)
+            self.assertEqual(env.extra, ("-nic", "none"))
 
 
 if __name__ == "__main__":
