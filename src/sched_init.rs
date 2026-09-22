@@ -19,10 +19,11 @@ pub unsafe fn init() {
     let h = thread_init::spawn_idle(idle_main);
     let ptr = thread_init::tcb_ptr(h.id());
     assert!(!ptr.is_null(), "idle tcb");
-    let cpu = per_cpu_init::current_mut();
-    cpu.idle = ptr;
-    cpu.idle_id = h.id();
-    cpu.slice_tsc = crate::time_init::read_tsc();
+    per_cpu_init::with_current(|cpu| {
+        cpu.idle = ptr;
+        cpu.idle_id = h.id();
+        cpu.slice_tsc = crate::time_init::read_tsc();
+    });
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
     LIVE.store(true, Ordering::Release);
 }
@@ -37,10 +38,12 @@ pub fn on_timer_tick() {
     if !is_live() {
         return;
     }
-    let cpu = per_cpu_init::current_mut();
-    cpu.ticks = cpu.ticks.wrapping_add(1);
-    let idle = cpu.current == cpu.idle && !cpu.idle.is_null();
-    if vibeos::sched::should_preempt(cpu.ticks, idle) {
+    let preempt = per_cpu_init::with_current(|cpu| {
+        cpu.ticks = cpu.ticks.wrapping_add(1);
+        let idle = cpu.current == cpu.idle && !cpu.idle.is_null();
+        vibeos::sched::should_preempt(cpu.ticks, idle)
+    });
+    if preempt {
         thread_init::schedule_preempt();
     }
 }

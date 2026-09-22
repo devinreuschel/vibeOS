@@ -5,6 +5,7 @@ use vibeos::addr_space::{AddressSpace, AsError, FrameFree, TeardownStats, UserPe
 use vibeos::paging::{FrameAlloc, PAGE_SIZE_4K, PhysAddr};
 
 use crate::paging_init;
+use crate::per_cpu_init;
 use crate::pmm_init;
 use crate::x86;
 
@@ -81,21 +82,23 @@ fn shootdown_user(space: &AddressSpace, va: u64, len: u64) {
 
 pub fn load_cr3(space: &AddressSpace) {
     let want = space.root().as_u64();
-    let cpu = crate::per_cpu_init::current_mut();
-    if cpu.as_cr3 == want {
-        return;
-    }
-    unsafe { x86::write_cr3(want) };
-    cpu.as_cr3 = want;
+    per_cpu_init::with_current(|cpu| {
+        if cpu.as_cr3 == want {
+            return;
+        }
+        unsafe { x86::write_cr3(want) };
+        cpu.as_cr3 = want;
+    });
 }
 
 pub fn load_cr3_u64(want: u64) {
-    let cpu = crate::per_cpu_init::current_mut();
-    if cpu.as_cr3 == want || want == 0 {
-        return;
-    }
-    unsafe { x86::write_cr3(want) };
-    cpu.as_cr3 = want;
+    per_cpu_init::with_current(|cpu| {
+        if cpu.as_cr3 == want || want == 0 {
+            return;
+        }
+        unsafe { x86::write_cr3(want) };
+        cpu.as_cr3 = want;
+    });
 }
 
 pub fn load_kernel_cr3() {

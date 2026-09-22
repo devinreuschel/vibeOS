@@ -11,6 +11,7 @@ use core::mem::size_of;
 use vibeos::desc::{GDT_LIMIT, Gdt, IstSlot, KERNEL_CS, KERNEL_DS, TSS_SEL, Tss};
 use vibeos::paging::VirtAddr;
 
+use crate::cell::BootCell;
 use crate::kva_init::{self, GuardedStack};
 use crate::x86::{self, DtPtr};
 
@@ -19,25 +20,6 @@ use crate::x86::{self, DtPtr};
 /// the IST. Guard page is still unmapped below.
 const IST_PAGES: usize = 4;
 const RSP0_PAGES: usize = 4;
-
-struct BootCell<T>(core::cell::UnsafeCell<T>);
-unsafe impl<T> Sync for BootCell<T> {}
-impl<T> BootCell<T> {
-    const fn new(v: T) -> Self {
-        Self(core::cell::UnsafeCell::new(v))
-    }
-    /// # Safety
-    /// Exclusive boot/IRQ-off access; cell is initialized.
-    #[allow(clippy::mut_from_ref)] // boot cell, IRQ-off exclusive
-    unsafe fn get_mut(&self) -> &mut T {
-        unsafe { &mut *self.0.get() }
-    }
-    /// # Safety
-    /// Cell is initialized.
-    unsafe fn get(&self) -> &T {
-        unsafe { &*self.0.get() }
-    }
-}
 
 /// GDT+TSS for one CPU. Phase 4 allocates one of these per AP.
 #[repr(C, align(16))]
@@ -111,7 +93,7 @@ impl Bsp {
     }
 }
 
-static BSP: BootCell<Bsp> = BootCell::new(Bsp::empty());
+static BSP: BootCell<Bsp> = BootCell::new();
 
 /// Per-AP GDT/TSS plus the IST/RSP0 stacks they point at.
 pub struct ApTables {
@@ -180,34 +162,37 @@ pub unsafe fn init_bsp() {
         kva_init::alloc_guarded_stack(IST_PAGES).expect("ist db"),
     ];
     let rsp0 = kva_init::alloc_guarded_stack(RSP0_PAGES).expect("tss rsp0");
-    let bsp = unsafe { BSP.get_mut() };
+    let ist_tops = [
+        ist[0].top().as_u64(),
+        ist[1].top().as_u64(),
+        ist[2].top().as_u64(),
+        ist[3].top().as_u64(),
+    ];
+    let rsp0_top = rsp0.top().as_u64();
+    let mut bsp = Bsp::empty();
     bsp.ist = ist;
     bsp.rsp0 = rsp0;
-    bsp.tables.init(
-        [
-            ist[0].top().as_u64(),
-            ist[1].top().as_u64(),
-            ist[2].top().as_u64(),
-            ist[3].top().as_u64(),
-        ],
-        rsp0.top().as_u64(),
-    );
-    unsafe { bsp.tables.load() };
+    // `tables.init` writes the TSS base into the GDT. Do that after
+    // `set` so the base is the BootCell address, not this stack slot.
+    unsafe { BSP.set(bsp) };
+    let p = unsafe { &mut *BSP.as_ptr() };
+    p.tables.init(ist_tops, rsp0_top);
+    unsafe { p.tables.load() };
 }
 
-/// TSS for the BSP. Call after [`init_bsp`].
+/// TSS for the BSP. Call after [`init_bsp`]. Hardware updates RSP0.
 pub fn bsp_tss_ptr() -> *mut Tss {
-    unsafe { core::ptr::addr_of_mut!(BSP.get_mut().tables.tss) }
+    core::ptr::addr_of!(BSP.get().tables.tss) as *mut Tss
 }
 
 pub fn bsp_rsp0_top() -> u64 {
-    unsafe { BSP.get().rsp0.top().as_u64() }
+    BSP.get().rsp0.top().as_u64()
 }
 
 /// `[mapped_base, top)` of an IST stack. Used by the in-guest DF test.
 #[allow(dead_code)]
 pub fn ist_span(slot: IstSlot) -> (u64, u64) {
-    let s = unsafe { BSP.get().ist[slot.index()] };
+    let s = BSP.get().ist[slot.index()];
     (s.mapped_base().as_u64(), s.top().as_u64())
 }
 

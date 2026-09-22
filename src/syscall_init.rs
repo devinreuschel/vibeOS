@@ -14,6 +14,7 @@ use vibeos::syscall::{SyscallFrame, UserRegs};
 use vibeos::thread::{Fxsave, RFLAGS_IF, RFLAGS_RESERVED1, Tcb};
 
 use crate::arch::gdt;
+use crate::cell::{BootCell, IrqCell};
 use crate::per_cpu_init;
 use crate::x86::{
     self, CR0_EM, CR0_MP, CR0_TS, CR4_OSFXSR, EFER_SCE, FMASK_SYSCALL, IA32_EFER, IA32_FMASK,
@@ -21,7 +22,7 @@ use crate::x86::{
 };
 
 static FPU_READY: AtomicBool = AtomicBool::new(false);
-static FPU_TEMPLATE: spin_cell::Cell<Fxsave> = spin_cell::Cell::new(Fxsave::empty());
+static FPU_TEMPLATE: BootCell<Fxsave> = BootCell::new();
 
 const SCRATCH: usize = offset_of!(PerCpu, syscall_scratch);
 const RETVAL: usize = SCRATCH + 8;
@@ -32,20 +33,6 @@ const KSP: usize = offset_of!(PerCpu, kernel_rsp0);
 const CURRENT: usize = offset_of!(PerCpu, current);
 const FPU: usize = offset_of!(Tcb, fpu);
 const RF_VM: u64 = (1 << 16) | (1 << 17);
-
-mod spin_cell {
-    use core::cell::UnsafeCell;
-    pub struct Cell<T>(UnsafeCell<T>);
-    unsafe impl<T> Sync for Cell<T> {}
-    impl<T> Cell<T> {
-        pub const fn new(v: T) -> Self {
-            Self(UnsafeCell::new(v))
-        }
-        pub fn ptr(&self) -> *mut T {
-            self.0.get()
-        }
-    }
-}
 
 global_asm!(
     r#"
@@ -249,12 +236,13 @@ pub unsafe fn init_cpu() {
 /// GDT loaded, `GS_BASE` is the BSP `PerCpu`.
 pub unsafe fn init_bsp() {
     unsafe { init_cpu() };
-    let cpu = per_cpu_init::current_mut();
-    cpu.tss = gdt::bsp_tss_ptr();
-    let top = gdt::bsp_rsp0_top();
-    cpu.fallback_rsp0 = top;
-    cpu.kernel_rsp0 = top;
-    cpu.as_cr3 = crate::paging_init::kernel_cr3();
+    per_cpu_init::with_current(|cpu| {
+        cpu.tss = gdt::bsp_tss_ptr();
+        let top = gdt::bsp_rsp0_top();
+        cpu.fallback_rsp0 = top;
+        cpu.kernel_rsp0 = top;
+        cpu.as_cr3 = crate::paging_init::kernel_cr3();
+    });
     seed_current_fpu();
 }
 
@@ -264,11 +252,12 @@ pub unsafe fn init_bsp() {
 /// `tss` is this CPU's live TSS; `rsp0` is its kernel stack top.
 pub unsafe fn init_ap(tss: *mut Tss, rsp0: u64) {
     unsafe { init_cpu() };
-    let cpu = per_cpu_init::current_mut();
-    cpu.tss = tss;
-    cpu.fallback_rsp0 = rsp0;
-    cpu.kernel_rsp0 = rsp0;
-    cpu.as_cr3 = crate::paging_init::kernel_cr3();
+    per_cpu_init::with_current(|cpu| {
+        cpu.tss = tss;
+        cpu.fallback_rsp0 = rsp0;
+        cpu.kernel_rsp0 = rsp0;
+        cpu.as_cr3 = crate::paging_init::kernel_cr3();
+    });
     seed_current_fpu();
 }
 
@@ -282,15 +271,16 @@ fn init_fpu() {
     unsafe {
         core::arch::asm!("fninit", options(nomem, nostack));
     }
-    if !FPU_READY.load(Ordering::Acquire) {
-        let tmpl = FPU_TEMPLATE.ptr();
+    if FPU_TEMPLATE.try_get().is_none() {
+        let mut tmpl = Fxsave::empty();
         unsafe {
             core::arch::asm!(
                 "fxsave64 [{p}]",
-                p = in(reg) tmpl,
+                p = in(reg) &mut tmpl,
                 options(nostack),
             );
         }
+        unsafe { FPU_TEMPLATE.set(tmpl) };
         FPU_READY.store(true, Ordering::Release);
     }
 }
@@ -303,16 +293,19 @@ fn seed_current_fpu() {
 }
 
 pub fn fpu_template() -> Fxsave {
-    if FPU_READY.load(Ordering::Acquire) {
-        unsafe { *FPU_TEMPLATE.ptr() }
-    } else {
-        Fxsave::empty()
-    }
+    FPU_TEMPLATE
+        .try_get()
+        .copied()
+        .unwrap_or_else(Fxsave::empty)
 }
 
 /// Update TSS.RSP0 + `kernel_rsp0` for `tcb`. Every context switch.
+#[allow(dead_code)]
 pub fn set_rsp0_for(tcb: &Tcb) {
-    let cpu = per_cpu_init::current_mut();
+    per_cpu_init::with_current(|cpu| apply_rsp0(cpu, tcb));
+}
+
+fn apply_rsp0(cpu: &mut PerCpu, tcb: &Tcb) {
     let top = match tcb.stack {
         Some(ks) => ks.top(),
         None => cpu.fallback_rsp0,
@@ -324,13 +317,17 @@ pub fn set_rsp0_for(tcb: &Tcb) {
 }
 
 /// Load `tcb`'s CR3 if it differs. Skip when the next thread shares AS.
+#[allow(dead_code)]
 pub fn switch_cr3_for(tcb: &Tcb) -> bool {
+    per_cpu_init::with_current(|cpu| apply_cr3(cpu, tcb))
+}
+
+fn apply_cr3(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
     let want = if tcb.as_cr3 == 0 {
         crate::paging_init::kernel_cr3()
     } else {
         tcb.as_cr3
     };
-    let cpu = per_cpu_init::current_mut();
     if cpu.as_cr3 == want || want == 0 {
         return true;
     }
@@ -356,13 +353,20 @@ pub fn switch_fpu(old: *mut Tcb, new: *mut Tcb) {
 }
 
 /// Hardware side of a context switch: FPU, RSP0, CR3. Call before
-/// `switch_context`.
+/// `switch_context`. `switch_now` uses [`apply_on_cpu`] because it
+/// already holds the CPU.
+#[allow(dead_code)]
 pub fn on_switch(old: *mut Tcb, new: *mut Tcb) {
+    per_cpu_init::with_current(|cpu| apply_on_cpu(cpu, old, new));
+}
+
+/// Same as [`on_switch`] when the caller already holds `with_current`.
+pub(crate) fn apply_on_cpu(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
     switch_fpu(old, new);
     if !new.is_null() {
         unsafe {
-            set_rsp0_for(&*new);
-            switch_cr3_for(&*new);
+            apply_rsp0(cpu, &*new);
+            apply_cr3(cpu, &*new);
         }
     }
 }
@@ -438,22 +442,11 @@ struct JmpBuf {
     rip: u64,
 }
 
-struct Cell<T>(core::cell::UnsafeCell<T>);
-unsafe impl<T> Sync for Cell<T> {}
-impl<T> Cell<T> {
-    const fn new(v: T) -> Self {
-        Self(core::cell::UnsafeCell::new(v))
-    }
-    fn ptr(&self) -> *mut T {
-        self.0.get()
-    }
-}
-
 static TRACE: AtomicBool = AtomicBool::new(false);
 static IN_USER: AtomicBool = AtomicBool::new(false);
 static EXIT_STATUS: AtomicI32 = AtomicI32::new(0);
 static CURRENT_AS: AtomicPtr<AddressSpace> = AtomicPtr::new(ptr::null_mut());
-static USER_JMP: Cell<JmpBuf> = Cell::new(JmpBuf {
+static USER_JMP: IrqCell<JmpBuf> = IrqCell::new(JmpBuf {
     rbx: 0,
     rbp: 0,
     r12: 0,
@@ -464,7 +457,7 @@ static USER_JMP: Cell<JmpBuf> = Cell::new(JmpBuf {
     rip: 0,
 });
 static STDOUT_LEN: AtomicUsize = AtomicUsize::new(0);
-static STDOUT: Cell<[u8; 256]> = Cell::new([0; 256]);
+static STDOUT: IrqCell<[u8; 256]> = IrqCell::new([0; 256]);
 static SYSCALLS: AtomicU64 = AtomicU64::new(0);
 
 unsafe extern "C" {
@@ -535,9 +528,13 @@ pub fn reset_stdout() {
     STDOUT_LEN.store(0, Ordering::Release);
 }
 
-pub fn stdout_bytes() -> &'static [u8] {
-    let n = STDOUT_LEN.load(Ordering::Acquire).min(256);
-    unsafe { core::slice::from_raw_parts(STDOUT.ptr() as *const u8, n) }
+pub fn stdout_bytes() -> ([u8; 256], usize) {
+    STDOUT.with(|buf| {
+        let n = STDOUT_LEN.load(Ordering::Acquire).min(256);
+        let mut out = [0u8; 256];
+        out[..n].copy_from_slice(&buf[..n]);
+        (out, n)
+    })
 }
 
 fn current_as() -> Option<&'static AddressSpace> {
@@ -576,15 +573,16 @@ pub fn in_user() -> bool {
 }
 
 pub fn capture_stdout(bytes: &[u8]) {
-    let mut n = STDOUT_LEN.load(Ordering::Relaxed);
-    let p = STDOUT.ptr() as *mut u8;
-    let mut i = 0;
-    while i < bytes.len() && n < 256 {
-        unsafe { p.add(n).write(bytes[i]) };
-        n += 1;
-        i += 1;
-    }
-    STDOUT_LEN.store(n, Ordering::Release);
+    STDOUT.with(|buf| {
+        let mut n = STDOUT_LEN.load(Ordering::Relaxed);
+        let mut i = 0;
+        while i < bytes.len() && n < 256 {
+            buf[n] = bytes[i];
+            n += 1;
+            i += 1;
+        }
+        STDOUT_LEN.store(n, Ordering::Release);
+    });
 }
 
 pub fn set_exit_status(st: i32) {
@@ -598,7 +596,7 @@ pub fn exit_status() -> i32 {
 pub fn longjmp_user(status: i32) -> ! {
     EXIT_STATUS.store(status, Ordering::Release);
     crate::arch::gs::force_kernel();
-    unsafe { vibeos_user_longjmp(USER_JMP.ptr(), 1) };
+    unsafe { vibeos_user_longjmp(USER_JMP.as_ptr(), 1) };
 }
 
 fn bump_counter() {
@@ -632,7 +630,7 @@ pub unsafe fn run_user(space: &mut AddressSpace, rip: u64, rsp: u64, fs_base: u6
         unsafe { (*t).as_cr3 = space.root().as_u64() };
     }
     crate::addr_space_init::load_cr3(space);
-    let rc = unsafe { vibeos_user_setjmp(USER_JMP.ptr()) };
+    let rc = unsafe { vibeos_user_setjmp(USER_JMP.as_ptr()) };
     if rc != 0 {
         crate::arch::gs::force_kernel();
         crate::addr_space_init::load_kernel_cr3();

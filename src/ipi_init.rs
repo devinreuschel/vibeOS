@@ -175,7 +175,7 @@ fn inbox_push(cpu: u32, id: ThreadId) {
     let Some(bit) = inbox_bit(id) else {
         return;
     };
-    let Some(pc) = per_cpu_init::cpu_mut(cpu) else {
+    let Some(pc) = per_cpu_init::cpu(cpu) else {
         return;
     };
     pc.wake_inbox.fetch_or(bit, Ordering::Release);
@@ -192,8 +192,9 @@ pub fn place_ready(cpu: u32, id: ThreadId) {
         me
     };
     if cpu == me {
-        let pc = per_cpu_init::current_mut();
-        pc.runq.push_back(id);
+        per_cpu_init::with_current(|pc| {
+            pc.runq.push_back(id);
+        });
         return;
     }
     inbox_push(cpu, id);
@@ -201,21 +202,22 @@ pub fn place_ready(cpu: u32, id: ThreadId) {
 }
 
 pub fn drain_inbox() -> bool {
-    let pc = per_cpu_init::current_mut();
-    let bits = pc.wake_inbox.swap(0, Ordering::Acquire);
-    if bits == 0 {
-        return false;
-    }
-    let mut b = bits;
-    let mut id = 0u32;
-    while b != 0 {
-        if b & 1 != 0 {
-            pc.runq.push_back(ThreadId(id));
+    per_cpu_init::with_current(|pc| {
+        let bits = pc.wake_inbox.swap(0, Ordering::Acquire);
+        if bits == 0 {
+            return false;
         }
-        b >>= 1;
-        id += 1;
-    }
-    true
+        let mut b = bits;
+        let mut id = 0u32;
+        while b != 0 {
+            if b & 1 != 0 {
+                pc.runq.push_back(ThreadId(id));
+            }
+            b >>= 1;
+            id += 1;
+        }
+        true
+    })
 }
 
 pub fn on_reschedule_ipi() {

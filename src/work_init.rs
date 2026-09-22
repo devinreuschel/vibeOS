@@ -3,47 +3,41 @@
 //! Hard IRQ / MSI: enqueue only. Workers may allocate and block.
 //! High-prio ring is the softirq stand-in.
 
-use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::wait::WaitQueue;
 use vibeos::work::{WorkItem, WorkQueues};
 
+use crate::cell::IrqCell;
 use crate::irq_init;
 use crate::per_cpu_init;
 use crate::thread_init;
-
-struct Cell<T>(UnsafeCell<T>);
-unsafe impl<T> Sync for Cell<T> {}
 
 struct State {
     q: WorkQueues,
     wq: WaitQueue,
 }
 
-static ST: Cell<State> = Cell(UnsafeCell::new(State {
+static ST: IrqCell<State> = IrqCell::new(State {
     q: WorkQueues::new(),
     wq: WaitQueue::new(),
-}));
+});
 static LIVE: AtomicBool = AtomicBool::new(false);
-
-fn st() -> &'static mut State {
-    unsafe { &mut *ST.0.get() }
-}
 
 fn push(hi: bool, item: WorkItem) -> bool {
     thread_init::with_sched(|s| {
-        let st = st();
-        let ok = if hi {
-            st.q.push_hi(item)
-        } else {
-            st.q.push(item)
-        };
-        if ok {
-            s.wake_all(&mut st.wq);
-        }
-        ok
+        ST.with(|st| {
+            let ok = if hi {
+                st.q.push_hi(item)
+            } else {
+                st.q.push(item)
+            };
+            if ok {
+                s.wake_all(&mut st.wq);
+            }
+            ok
+        })
     })
 }
 
@@ -61,12 +55,13 @@ pub fn raise_softirq(func: fn(usize), arg: usize) -> bool {
 fn worker() {
     loop {
         let item = thread_init::with_sched(|s| {
-            let st = st();
-            if let Some(w) = st.q.pop() {
-                return Some(w);
-            }
-            s.begin_wait(&mut st.wq, FAR_DEADLINE);
-            None
+            ST.with(|st| {
+                if let Some(w) = st.q.pop() {
+                    return Some(w);
+                }
+                s.begin_wait(&mut st.wq, FAR_DEADLINE);
+                None
+            })
         });
         match item {
             Some(w) => w.run(),

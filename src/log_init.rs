@@ -14,13 +14,11 @@ use vibeos::log::{
     COMPILE_MAX, DEFAULT_RUNTIME_MAX, DUMP_LAST, Level, Logger, MSG_CAP, RING_CAP, Record, allowed,
 };
 
+use crate::cell::IrqCell;
 use crate::per_cpu_init;
 use crate::serial::{PlainSerial, Serial};
 use crate::time_init;
 use crate::x86::InterruptGuard;
-
-struct Cell<T>(core::cell::UnsafeCell<T>);
-unsafe impl<T> Sync for Cell<T> {}
 
 struct Stage {
     buf: [u8; MSG_CAP],
@@ -36,12 +34,11 @@ impl Stage {
     }
 }
 
-static LOG: Cell<Logger<RING_CAP, MSG_CAP>> = Cell(core::cell::UnsafeCell::new(Logger::new()));
-static LOCK: AtomicBool = AtomicBool::new(false);
+static LOG: IrqCell<Logger<RING_CAP, MSG_CAP>> = IrqCell::new(Logger::new());
 /// Per-CPU: set while this CPU is inside `emit` so serial capture does
 /// not store a duplicate.
 static EMITTING: [AtomicBool; 64] = [const { AtomicBool::new(false) }; 64];
-static STAGE: [Cell<Stage>; 64] = [const { Cell(core::cell::UnsafeCell::new(Stage::empty())) }; 64];
+static STAGE: [IrqCell<Stage>; 64] = [const { IrqCell::new(Stage::empty()) }; 64];
 /// Extra runtime copy so `allows` can be checked without the ring lock
 /// on the serial capture path. Kept in sync with `Logger.filter`.
 static RUNTIME: AtomicU8 = AtomicU8::new(DEFAULT_RUNTIME_MAX as u8);
@@ -73,34 +70,17 @@ fn cpu_id() -> u8 {
         .unwrap_or(0)
 }
 
-fn lock_ring() {
-    while LOCK
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
-}
-
-fn unlock_ring() {
-    LOCK.store(false, Ordering::Release);
-}
-
 fn with_logger<R>(f: impl FnOnce(&mut Logger<RING_CAP, MSG_CAP>) -> R) -> R {
-    let _irq = InterruptGuard::enter();
-    lock_ring();
-    let r = f(unsafe { &mut *LOG.0.get() });
-    unlock_ring();
-    r
+    LOG.with(f)
 }
 
 /// Panic path: other CPUs are halted. Drop a held TAS and read.
 pub fn force_unlock() {
-    LOCK.store(false, Ordering::Release);
+    LOG.force_unlock();
 }
 
 pub fn with_logger_unlocked<R>(f: impl FnOnce(&Logger<RING_CAP, MSG_CAP>) -> R) -> R {
-    f(unsafe { &*LOG.0.get() })
+    f(unsafe { &*LOG.as_ptr() })
 }
 
 pub fn is_emitting() -> bool {
@@ -189,26 +169,26 @@ pub fn capture_serial(bytes: &[u8]) {
     }
     let _irq = InterruptGuard::enter();
     let i = cpu_index();
-    let st = unsafe { &mut *STAGE[i].0.get() };
-    for &b in bytes {
-        if b == b'\r' {
-            continue;
-        }
-        if b == b'\n' {
-            if st.len > 0 {
-                let rec = Record::from_msg(timestamp(), cpu_id(), Level::Info, &st.buf[..st.len]);
-                st.len = 0;
-                lock_ring();
-                let _ = unsafe { &mut *LOG.0.get() }.emit(rec);
-                unlock_ring();
+    STAGE[i].with(|st| {
+        for &b in bytes {
+            if b == b'\r' {
+                continue;
             }
-            continue;
+            if b == b'\n' {
+                if st.len > 0 {
+                    let rec =
+                        Record::from_msg(timestamp(), cpu_id(), Level::Info, &st.buf[..st.len]);
+                    st.len = 0;
+                    let _ = LOG.with(|l| l.emit(rec));
+                }
+                continue;
+            }
+            if st.len < MSG_CAP {
+                st.buf[st.len] = b;
+                st.len += 1;
+            }
         }
-        if st.len < MSG_CAP {
-            st.buf[st.len] = b;
-            st.len += 1;
-        }
-    }
+    });
 }
 
 pub fn contains_msg(needle: &str) -> bool {

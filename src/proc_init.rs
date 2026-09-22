@@ -8,7 +8,6 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::cell::UnsafeCell;
 use core::fmt::Write;
 
 use vibeos::addr_space::AddressSpace;
@@ -33,23 +32,13 @@ use vibeos::vectors;
 use vibeos::wait::WaitQueue;
 
 use crate::addr_space_init;
+use crate::cell::IrqCell;
 use crate::console_init;
 use crate::file_init;
 use crate::serial::Serial;
 use crate::syscall_init;
 use crate::thread_init;
 use crate::user_init::{self, LoadError};
-
-struct Cell<T>(UnsafeCell<T>);
-unsafe impl<T> Sync for Cell<T> {}
-impl<T> Cell<T> {
-    const fn new(v: T) -> Self {
-        Self(UnsafeCell::new(v))
-    }
-    fn ptr(&self) -> *mut T {
-        self.0.get()
-    }
-}
 
 struct Proc {
     state: ProcState,
@@ -132,14 +121,10 @@ impl Table {
     }
 }
 
-static TABLE: Cell<Table> = Cell::new(Table::empty());
-
-fn table() -> &'static mut Table {
-    unsafe { &mut *TABLE.ptr() }
-}
+static TABLE: IrqCell<Table> = IrqCell::new(Table::empty());
 
 fn with_table<R>(f: impl FnOnce(&mut Table) -> R) -> R {
-    thread_init::with_sched(|_| f(table()))
+    thread_init::with_sched(|_| TABLE.with(f))
 }
 
 fn intern_name(path: &str) -> &'static str {
@@ -510,7 +495,7 @@ fn apply_pending(frame: *mut SyscallFrame) {
                 finish_exit(wait_signaled(sig), true);
             }
             Pending::Stop => {
-                let wq = unsafe { &mut (*TABLE.ptr()).procs[pid as usize].stop_wq };
+                let wq = unsafe { &mut (*TABLE.as_ptr()).procs[pid as usize].stop_wq };
                 thread_init::wait_on(wq);
             }
         }
@@ -1005,31 +990,32 @@ fn finish_exit(wait_status: u32, from_fault: bool) -> ! {
         return_status_or_die(wait_status);
     }
     let (old, ppid, fds, tid) = thread_init::with_sched(|s| {
-        let t = table();
-        reparent_children(t, pid);
-        if t.procs[INIT_PID as usize].state != ProcState::Unused {
-            s.wake_all(&mut t.procs[INIT_PID as usize].wait_wq);
-        }
-        let p = t.get_mut(pid);
-        let (space, ppid, fds, tid) = match p {
-            Some(p) => {
-                p.state = ProcState::Zombie;
-                p.wait_status = wait_status;
-                p.pending = 0;
-                let space = p.space.take();
-                let fds = p.fds;
-                p.fds = FdTable::empty();
-                (space, p.ppid, fds, p.tid)
+        TABLE.with(|t| {
+            reparent_children(t, pid);
+            if t.procs[INIT_PID as usize].state != ProcState::Unused {
+                s.wake_all(&mut t.procs[INIT_PID as usize].wait_wq);
             }
-            None => (None, 0, FdTable::empty(), ThreadId::NONE),
-        };
-        if ppid != 0 {
-            if let Some(par) = t.get_mut(ppid) {
-                par.pending |= bit(SIGCHLD);
+            let p = t.get_mut(pid);
+            let (space, ppid, fds, tid) = match p {
+                Some(p) => {
+                    p.state = ProcState::Zombie;
+                    p.wait_status = wait_status;
+                    p.pending = 0;
+                    let space = p.space.take();
+                    let fds = p.fds;
+                    p.fds = FdTable::empty();
+                    (space, p.ppid, fds, p.tid)
+                }
+                None => (None, 0, FdTable::empty(), ThreadId::NONE),
+            };
+            if ppid != 0 {
+                if let Some(par) = t.get_mut(ppid) {
+                    par.pending |= bit(SIGCHLD);
+                }
+                s.wake_all(&mut t.procs[ppid as usize].wait_wq);
             }
-            s.wake_all(&mut t.procs[ppid as usize].wait_wq);
-        }
-        (space, ppid, fds, tid)
+            (space, ppid, fds, tid)
+        })
     });
     let _ = tid;
     let mut fds = fds;
@@ -1073,20 +1059,21 @@ fn sys_wait4(pid: u64, status: u64, options: u64) -> i64 {
     let nohang = options & WNOHANG != 0;
     loop {
         let r = thread_init::with_sched(|s| {
-            let t = table();
-            if let Some((cpid, st, ztid)) = find_zombie(t, self_pid, want) {
-                reap_zombie(t, cpid);
-                let _ = ztid;
-                return WaitAct::Done(cpid, st);
-            }
-            if !has_child(t, self_pid, want) {
-                return WaitAct::Err(ECHILD);
-            }
-            if nohang {
-                return WaitAct::Done(0, 0);
-            }
-            s.begin_wait(&mut t.procs[self_pid as usize].wait_wq, FAR_DEADLINE);
-            WaitAct::Sleep
+            TABLE.with(|t| {
+                if let Some((cpid, st, ztid)) = find_zombie(t, self_pid, want) {
+                    reap_zombie(t, cpid);
+                    let _ = ztid;
+                    return WaitAct::Done(cpid, st);
+                }
+                if !has_child(t, self_pid, want) {
+                    return WaitAct::Err(ECHILD);
+                }
+                if nohang {
+                    return WaitAct::Done(0, 0);
+                }
+                s.begin_wait(&mut t.procs[self_pid as usize].wait_wq, FAR_DEADLINE);
+                WaitAct::Sleep
+            })
         });
         match r {
             WaitAct::Done(0, _) => return 0,
@@ -1198,11 +1185,11 @@ fn sys_kill(pid: u64, sig: u64) -> i64 {
         Ok((tid, cont, wake)) => {
             let _ = tid;
             if cont {
-                let wq = unsafe { &mut (*TABLE.ptr()).procs[target as usize].stop_wq };
+                let wq = unsafe { &mut (*TABLE.as_ptr()).procs[target as usize].stop_wq };
                 thread_init::wake_queue(wq);
             }
             if wake {
-                let t = unsafe { &mut (*TABLE.ptr()).procs[target as usize] };
+                let t = unsafe { &mut (*TABLE.as_ptr()).procs[target as usize] };
                 thread_init::wake_queue(&mut t.wait_wq);
                 thread_init::wake_queue(&mut t.stop_wq);
             }

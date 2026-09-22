@@ -18,6 +18,7 @@ use vibeos::shell::{
 use vibeos::thread::{MAX_THREADS, ThreadId, ThreadState};
 
 use crate::acpi_init;
+use crate::cell::IrqCell;
 use crate::console_init::{self, Console};
 use crate::diag;
 use crate::fb_init;
@@ -25,13 +26,9 @@ use crate::log_init;
 use crate::paging_init;
 use crate::per_cpu_init;
 use crate::thread_init::{self, ThreadInfo};
-use crate::x86::{self, InterruptGuard};
+use crate::x86;
 
-struct Cell<T>(core::cell::UnsafeCell<T>);
-unsafe impl<T> Sync for Cell<T> {}
-
-static REG: Cell<Registry> = Cell(core::cell::UnsafeCell::new(Registry::new()));
-static LOCK: AtomicBool = AtomicBool::new(false);
+static REG: IrqCell<Registry> = IrqCell::new(Registry::new());
 #[cfg_attr(
     not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
     allow(dead_code)
@@ -39,16 +36,7 @@ static LOCK: AtomicBool = AtomicBool::new(false);
 static READY: AtomicBool = AtomicBool::new(false);
 
 fn with_reg<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
-    let _irq = InterruptGuard::enter();
-    while LOCK
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
-    let r = f(unsafe { &mut *REG.0.get() });
-    LOCK.store(false, Ordering::Release);
-    r
+    REG.with(f)
 }
 
 /// Subsystems register here. Not a growing `match` on the name.

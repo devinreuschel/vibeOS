@@ -31,6 +31,7 @@ mod apic_init;
 mod arch;
 mod block_init;
 mod cache_init;
+mod cell;
 mod console_init;
 mod dev_init;
 mod diag;

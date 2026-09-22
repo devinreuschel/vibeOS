@@ -7,23 +7,18 @@
 
 use core::alloc::Layout;
 use core::arch::global_asm;
-use core::cell::UnsafeCell;
-use core::ptr;
+use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 
 use vibeos::desc::InterruptFrame;
 
+use crate::cell::IrqCell;
 use crate::x86;
 
-struct Cell<T>(UnsafeCell<T>);
-unsafe impl<T> Sync for Cell<T> {}
-impl<T> Cell<T> {
-    const fn new(v: T) -> Self {
-        Self(UnsafeCell::new(v))
-    }
-    fn ptr(&self) -> *mut T {
-        self.0.get()
-    }
-}
+const ST_OFF: u8 = 0;
+const ST_VECTOR: u8 = 1;
+const ST_SKIP: u8 = 2;
+const ST_ALLOC: u8 = 3;
+const ST_PANIC: u8 = 4;
 
 #[repr(C)]
 struct JmpBuf {
@@ -37,14 +32,6 @@ struct JmpBuf {
     rip: u64,
 }
 
-#[derive(Clone, Copy)]
-enum State {
-    Off,
-    Vector(u8),
-    Skip { vector: u8, len: u8 },
-    Alloc,
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct Caught {
     pub vector: u8,
@@ -54,8 +41,10 @@ pub struct Caught {
     pub handler_rsp: u64,
 }
 
-static STATE: Cell<State> = Cell::new(State::Off);
-static LAST: Cell<Caught> = Cell::new(Caught {
+static KIND: AtomicU8 = AtomicU8::new(ST_OFF);
+static WANT: AtomicU8 = AtomicU8::new(0);
+static SKIP_LEN: AtomicU8 = AtomicU8::new(0);
+static LAST: IrqCell<Caught> = IrqCell::new(Caught {
     vector: 0,
     error: 0,
     cr2: 0,
@@ -68,12 +57,13 @@ static LAST: Cell<Caught> = Cell::new(Caught {
     },
     handler_rsp: 0,
 });
-static THUNK_DATA: Cell<*mut u8> = Cell::new(core::ptr::null_mut());
-static THUNK_CALL: Cell<Option<unsafe fn(*mut u8)>> = Cell::new(None);
+static THUNK_DATA: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+static THUNK_CALL: AtomicUsize = AtomicUsize::new(0);
 
 unsafe extern "C" {
     fn vibeos_catch() -> i32;
     fn vibeos_longjmp(buf: *mut JmpBuf, val: i32) -> !;
+    /// Asm-owned setjmp buffer. The only remaining `static mut` (Q3).
     static mut vibeos_jmpbuf: JmpBuf;
 }
 
@@ -149,25 +139,20 @@ unsafe fn invoke<F: FnOnce()>(p: *mut u8) {
 
 fn with_thunk<F: FnOnce()>(f: F) -> i32 {
     let mut slot = Some(f);
-    unsafe {
-        ptr::write(THUNK_DATA.ptr(), (&raw mut slot).cast());
-        ptr::write(THUNK_CALL.ptr(), Some(invoke::<F>));
-        let rc = vibeos_catch();
-        ptr::write(THUNK_CALL.ptr(), None);
-        rc
-    }
+    THUNK_DATA.store((&raw mut slot).cast(), Ordering::Release);
+    THUNK_CALL.store(invoke::<F> as *const () as usize, Ordering::Release);
+    let rc = unsafe { vibeos_catch() };
+    THUNK_CALL.store(0, Ordering::Release);
+    rc
 }
 
 #[unsafe(no_mangle)]
 extern "C" fn vibeos_catch_thunk() {
-    unsafe {
-        let call = ptr::read(THUNK_CALL.ptr());
-        ptr::write(THUNK_CALL.ptr(), None);
-        if let Some(call) = call {
-            let data = ptr::read(THUNK_DATA.ptr());
-            ptr::write(THUNK_DATA.ptr(), core::ptr::null_mut());
-            call(data);
-        }
+    let call = THUNK_CALL.swap(0, Ordering::Acquire);
+    if call != 0 {
+        let data = THUNK_DATA.swap(core::ptr::null_mut(), Ordering::Acquire);
+        let f: unsafe fn(*mut u8) = unsafe { core::mem::transmute(call) };
+        unsafe { f(data) };
     }
 }
 
@@ -179,36 +164,41 @@ fn record(vector: u8, frame: &InterruptFrame, err: u64) {
         frame: *frame,
         handler_rsp: x86::read_rsp(),
     };
-    unsafe { ptr::write(LAST.ptr(), caught) };
+    LAST.with(|last| *last = caught);
 }
 
 /// Called from every IDT handler. `true` means the handler should iret
 /// (RIP already adjusted). Longjmp never returns.
 pub fn intercept(vector: u8, frame: &mut InterruptFrame, err: u64) -> bool {
-    let state = unsafe { ptr::read(STATE.ptr()) };
-    match state {
-        State::Off | State::Alloc => false,
-        State::Vector(want) if want == vector => {
+    let kind = KIND.load(Ordering::Acquire);
+    let want = WANT.load(Ordering::Relaxed);
+    match kind {
+        ST_OFF | ST_ALLOC | ST_PANIC => false,
+        ST_VECTOR if want == vector => {
             record(vector, frame, err);
-            unsafe { ptr::write(STATE.ptr(), State::Off) };
+            KIND.store(ST_OFF, Ordering::Release);
             unsafe { vibeos_longjmp(core::ptr::addr_of_mut!(vibeos_jmpbuf), 1) };
         }
-        State::Skip { vector: want, len } if want == vector => {
+        ST_SKIP if want == vector => {
             record(vector, frame, err);
-            frame.rip = frame.rip.wrapping_add(len as u64);
-            unsafe { ptr::write(STATE.ptr(), State::Off) };
+            frame.rip = frame
+                .rip
+                .wrapping_add(SKIP_LEN.load(Ordering::Relaxed) as u64);
+            KIND.store(ST_OFF, Ordering::Release);
             true
         }
-        State::Vector(_) | State::Skip { .. } => false,
+        ST_VECTOR | ST_SKIP => false,
+        _ => false,
     }
 }
 
 pub fn catch<F: FnOnce()>(vector: u8, f: F) -> Option<Caught> {
-    unsafe { ptr::write(STATE.ptr(), State::Vector(vector)) };
+    WANT.store(vector, Ordering::Relaxed);
+    KIND.store(ST_VECTOR, Ordering::Release);
     let rc = with_thunk(f);
-    unsafe { ptr::write(STATE.ptr(), State::Off) };
+    KIND.store(ST_OFF, Ordering::Release);
     if rc != 0 {
-        Some(unsafe { ptr::read(LAST.ptr()) })
+        Some(LAST.with(|c| *c))
     } else {
         None
     }
@@ -216,37 +206,44 @@ pub fn catch<F: FnOnce()>(vector: u8, f: F) -> Option<Caught> {
 
 /// Run `f`; on `vector`, add `insn_len` to RIP and continue.
 pub fn catch_skip<F: FnOnce()>(vector: u8, insn_len: u8, f: F) -> Option<Caught> {
-    unsafe {
-        ptr::write(
-            STATE.ptr(),
-            State::Skip {
-                vector,
-                len: insn_len,
-            },
-        )
-    };
+    WANT.store(vector, Ordering::Relaxed);
+    SKIP_LEN.store(insn_len, Ordering::Relaxed);
+    KIND.store(ST_SKIP, Ordering::Release);
     let rc = with_thunk(f);
-    let skipped = unsafe { ptr::read(STATE.ptr()) };
-    unsafe { ptr::write(STATE.ptr(), State::Off) };
+    let skipped = KIND.load(Ordering::Acquire);
+    KIND.store(ST_OFF, Ordering::Release);
     match skipped {
-        State::Off if rc == 0 => Some(unsafe { ptr::read(LAST.ptr()) }),
+        ST_OFF if rc == 0 => Some(LAST.with(|c| *c)),
         _ => None,
     }
 }
 
 pub fn catch_alloc<F: FnOnce()>(f: F) -> bool {
-    unsafe { ptr::write(STATE.ptr(), State::Alloc) };
+    KIND.store(ST_ALLOC, Ordering::Release);
     let rc = with_thunk(f);
-    unsafe { ptr::write(STATE.ptr(), State::Off) };
+    KIND.store(ST_OFF, Ordering::Release);
+    rc != 0
+}
+
+/// Catch a Rust `panic!` via longjmp. Used by `irqcell_reentry_panics`.
+pub fn catch_panic<F: FnOnce()>(f: F) -> bool {
+    KIND.store(ST_PANIC, Ordering::Release);
+    let rc = with_thunk(f);
+    KIND.store(ST_OFF, Ordering::Release);
     rc != 0
 }
 
 pub fn on_alloc_error(layout: Layout) {
-    unsafe {
-        if let State::Alloc = ptr::read(STATE.ptr()) {
-            ptr::write(STATE.ptr(), State::Off);
-            vibeos_longjmp(core::ptr::addr_of_mut!(vibeos_jmpbuf), 1);
-        }
+    if KIND.load(Ordering::Acquire) == ST_ALLOC {
+        KIND.store(ST_OFF, Ordering::Release);
+        unsafe { vibeos_longjmp(core::ptr::addr_of_mut!(vibeos_jmpbuf), 1) };
     }
     let _ = layout;
+}
+
+pub fn on_panic() {
+    if KIND.load(Ordering::Acquire) == ST_PANIC {
+        KIND.store(ST_OFF, Ordering::Release);
+        unsafe { vibeos_longjmp(core::ptr::addr_of_mut!(vibeos_jmpbuf), 1) };
+    }
 }

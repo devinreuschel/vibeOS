@@ -7,34 +7,14 @@
 //! shootdown, then free VA to the tail.
 #![allow(dead_code)]
 
-use core::cell::UnsafeCell;
-
 use vibeos::kva::{KVA_END, KVA_SIZE, KVA_START, Kva, KvaStats, PAGE_SIZE};
 use vibeos::paging::{PhysAddr, VirtAddr, heap_flags, stack_flags};
 
+use crate::cell::IrqCell;
 use crate::paging_init;
 use crate::pmm_init;
 
-struct BootCell<T>(UnsafeCell<T>);
-unsafe impl<T> Sync for BootCell<T> {}
-impl<T> BootCell<T> {
-    const fn new(v: T) -> Self {
-        Self(UnsafeCell::new(v))
-    }
-    /// # Safety
-    /// Exclusive boot/IRQ-off access; cell is initialized.
-    #[allow(clippy::mut_from_ref)] // boot cell, IRQ-off exclusive
-    unsafe fn get_mut(&self) -> &mut T {
-        unsafe { &mut *self.0.get() }
-    }
-    /// # Safety
-    /// Cell is initialized; shared reads are ok after boot.
-    unsafe fn get(&self) -> &T {
-        unsafe { &*self.0.get() }
-    }
-}
-
-static KVA: BootCell<Kva> = BootCell::new(Kva::empty());
+static KVA: IrqCell<Kva> = IrqCell::new(Kva::empty());
 
 #[derive(Clone, Copy, Debug)]
 pub struct GuardedStack {
@@ -53,8 +33,7 @@ impl GuardedStack {
 }
 
 const MAX_DEFERRED: usize = 8;
-static DEFERRED: BootCell<[Option<GuardedStack>; MAX_DEFERRED]> =
-    BootCell::new([None; MAX_DEFERRED]);
+static DEFERRED: IrqCell<[Option<GuardedStack>; MAX_DEFERRED]> = IrqCell::new([None; MAX_DEFERRED]);
 
 const MAX_UNMAP: usize = 32;
 
@@ -64,21 +43,19 @@ const MAX_UNMAP: usize = 32;
 /// Single-CPU, IRQs off, live page tables already ours.
 pub unsafe fn init() {
     paging_init::assert_unmapped(VirtAddr(KVA_START), VirtAddr(KVA_END));
-    paging_init::with_pt(|| unsafe { KVA.get_mut().init(KVA_START, KVA_SIZE) }.expect("kva: init"));
+    paging_init::with_pt(|| KVA.with(|k| k.init(KVA_START, KVA_SIZE).expect("kva: init")));
 }
 
 pub fn stats() -> KvaStats {
-    paging_init::with_pt(|| unsafe { KVA.get().stats() })
+    paging_init::with_pt(|| KVA.with(|k| k.stats()))
 }
 
 pub fn alloc_va(len: u64) -> Option<VirtAddr> {
-    paging_init::with_pt(|| unsafe { KVA.get_mut().alloc(len) }.map(VirtAddr))
+    paging_init::with_pt(|| KVA.with(|k| k.alloc(len)).map(VirtAddr))
 }
 
 pub fn free_va(va: VirtAddr, len: u64) {
-    paging_init::with_pt(|| {
-        unsafe { KVA.get_mut().free(va.as_u64(), len) }.expect("kva: free-list")
-    });
+    paging_init::with_pt(|| KVA.with(|k| k.free(va.as_u64(), len).expect("kva: free-list")));
 }
 
 /// Reserve `pages+1` VA, map the upper `pages` from separate order-0
@@ -92,7 +69,7 @@ pub fn alloc_guarded_stack(pages: usize) -> Option<GuardedStack> {
     let mut failed_n = 0usize;
     let mut failed_mapped = 0usize;
     let stack = paging_init::with_pt(|| {
-        let guard_u = unsafe { KVA.get_mut().alloc_guarded(pages) }?;
+        let guard_u = KVA.with(|k| k.alloc_guarded(pages))?;
         let guard = VirtAddr(guard_u);
         for (i, slot) in vas.iter_mut().take(pages).enumerate() {
             let va = VirtAddr(guard_u + PAGE_SIZE * (i as u64 + 1));
@@ -144,26 +121,28 @@ pub fn free_stack(stack: GuardedStack) {
 /// running on it.
 pub fn defer_free(stack: GuardedStack) {
     paging_init::with_pt(|| {
-        let slots = unsafe { DEFERRED.get_mut() };
-        for slot in slots.iter_mut() {
-            if slot.is_none() {
-                *slot = Some(stack);
-                return;
+        DEFERRED.with(|slots| {
+            for slot in slots.iter_mut() {
+                if slot.is_none() {
+                    *slot = Some(stack);
+                    return;
+                }
             }
-        }
-        panic!("kva: deferred free list full");
+            panic!("kva: deferred free list full");
+        });
     });
 }
 
 pub fn drain_deferred() {
     let mut pending = [None; MAX_DEFERRED];
     paging_init::with_pt(|| {
-        let slots = unsafe { DEFERRED.get_mut() };
-        let mut i = 0;
-        while i < MAX_DEFERRED {
-            pending[i] = slots[i].take();
-            i += 1;
-        }
+        DEFERRED.with(|slots| {
+            let mut i = 0;
+            while i < MAX_DEFERRED {
+                pending[i] = slots[i].take();
+                i += 1;
+            }
+        });
     });
     let mut i = 0;
     while i < MAX_DEFERRED {
@@ -184,12 +163,12 @@ pub fn vmap(frames: &[PhysAddr]) -> Option<VirtAddr> {
     let n = frames.len();
     let va = paging_init::with_pt(|| {
         let len = n as u64 * PAGE_SIZE;
-        let va_u = unsafe { KVA.get_mut().alloc(len) }?;
+        let va_u = KVA.with(|k| k.alloc(len))?;
         for (i, &pa) in frames.iter().enumerate() {
             let page = VirtAddr(va_u + i as u64 * PAGE_SIZE);
             if unsafe { paging_init::map_4k_locked(page, pa, heap_flags()) }.is_err() {
                 unsafe { unmap_only_locked(VirtAddr(va_u), i) };
-                unsafe { KVA.get_mut().free(va_u, len) }.expect("kva: free-list");
+                KVA.with(|k| k.free(va_u, len).expect("kva: free-list"));
                 return None;
             }
             vas[i] = page;
@@ -207,8 +186,10 @@ pub fn vmap(frames: &[PhysAddr]) -> Option<VirtAddr> {
 pub fn vunmap(va: VirtAddr, nframes: usize) {
     unmap_shootdown(va, nframes, false);
     paging_init::with_pt(|| {
-        unsafe { KVA.get_mut().free(va.as_u64(), nframes as u64 * PAGE_SIZE) }
-            .expect("kva: free-list")
+        KVA.with(|k| {
+            k.free(va.as_u64(), nframes as u64 * PAGE_SIZE)
+                .expect("kva: free-list")
+        })
     });
 }
 
@@ -217,10 +198,11 @@ pub fn vunmap(va: VirtAddr, nframes: usize) {
 unsafe fn free_stack_shootdown(stack: GuardedStack) {
     let base = stack.mapped_base();
     unmap_shootdown(base, stack.pages, true);
-    paging_init::with_pt(|| unsafe {
-        KVA.get_mut()
-            .free(stack.guard.as_u64(), (stack.pages as u64 + 1) * PAGE_SIZE)
-            .expect("kva: free-list");
+    paging_init::with_pt(|| {
+        KVA.with(|k| {
+            k.free(stack.guard.as_u64(), (stack.pages as u64 + 1) * PAGE_SIZE)
+                .expect("kva: free-list");
+        });
     });
 }
 
@@ -298,10 +280,9 @@ unsafe fn unwind_stack_locked(
     out_pas: &mut [u64; MAX_UNMAP],
 ) -> usize {
     let np = unsafe { unmap_collect_locked(VirtAddr(guard.as_u64() + PAGE_SIZE), mapped, out_pas) };
-    unsafe {
-        KVA.get_mut()
-            .free(guard.as_u64(), (pages as u64 + 1) * PAGE_SIZE)
+    KVA.with(|k| {
+        k.free(guard.as_u64(), (pages as u64 + 1) * PAGE_SIZE)
             .expect("kva: free-list")
-    };
+    });
     np
 }

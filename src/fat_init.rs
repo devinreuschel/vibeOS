@@ -14,6 +14,7 @@ use vibeos::lock::RANK_DEVICE;
 
 use crate::block_init;
 use crate::cache_init;
+use crate::cell::IrqCell;
 use crate::fs_init;
 use crate::sync_init::SpinMutex;
 use crate::thread_init;
@@ -23,9 +24,6 @@ const MAX_VOLS: usize = 2;
 pub const VOL_INITRD: u8 = 0;
 const MNT_MAX: usize = 2;
 const MNT_PATH: usize = 64;
-
-struct Cell<T>(UnsafeCell<T>);
-unsafe impl<T> Sync for Cell<T> {}
 
 #[derive(Clone, Copy)]
 enum Back {
@@ -74,7 +72,7 @@ static SLOTS: [Slot; MAX_VOLS] = [Slot::empty(), Slot::empty()];
 static ALLOC: SpinMutex<()> = SpinMutex::with_rank((), RANK_DEVICE);
 static MNTS: SpinMutex<[Mnt; MNT_MAX]> =
     SpinMutex::with_rank([Mnt::EMPTY, Mnt::EMPTY], RANK_DEVICE);
-static INITRD: Cell<[u8; INITRD_BYTES]> = Cell(UnsafeCell::new([0; INITRD_BYTES]));
+static INITRD: IrqCell<[u8; INITRD_BYTES]> = IrqCell::new([0; INITRD_BYTES]);
 static LIVE: AtomicBool = AtomicBool::new(false);
 static NVOL: AtomicU8 = AtomicU8::new(0);
 
@@ -104,12 +102,13 @@ impl Disk for Io {
                 let ss = SEC;
                 let off = (lba as usize).checked_mul(ss).ok_or(FatError::Inval)?;
                 let end = off.checked_add(ss).ok_or(FatError::Inval)?;
-                let data = unsafe { &*INITRD.0.get() };
-                if end > data.len() || buf.len() != ss {
-                    return Err(FatError::Io);
-                }
-                buf.copy_from_slice(&data[off..end]);
-                Ok(())
+                INITRD.with(|data| {
+                    if end > data.len() || buf.len() != ss {
+                        return Err(FatError::Io);
+                    }
+                    buf.copy_from_slice(&data[off..end]);
+                    Ok(())
+                })
             }
             Back::Dev(dev) => cache_init::read(dev, lba as u64, buf).map_err(|_| FatError::Io),
         }
@@ -121,12 +120,13 @@ impl Disk for Io {
                 let ss = SEC;
                 let off = (lba as usize).checked_mul(ss).ok_or(FatError::Inval)?;
                 let end = off.checked_add(ss).ok_or(FatError::Inval)?;
-                let data = unsafe { &mut *INITRD.0.get() };
-                if end > data.len() || buf.len() != ss {
-                    return Err(FatError::Io);
-                }
-                data[off..end].copy_from_slice(buf);
-                Ok(())
+                INITRD.with(|data| {
+                    if end > data.len() || buf.len() != ss {
+                        return Err(FatError::Io);
+                    }
+                    data[off..end].copy_from_slice(buf);
+                    Ok(())
+                })
             }
             Back::Dev(dev) => cache_init::write(dev, lba as u64, buf).map_err(|_| FatError::Io),
         }
@@ -203,15 +203,18 @@ pub fn nvol() -> u8 {
 }
 
 pub fn init() {
-    let buf = unsafe { &mut *INITRD.0.get() };
-    if INITRD_RO.len() == INITRD_BYTES {
-        buf.copy_from_slice(INITRD_RO);
-    } else {
-        buf.fill(0);
-        if fat::mkinitrd(buf).is_err() {
-            LIVE.store(false, Ordering::Release);
-            return;
+    let ok_image = INITRD.with(|buf| {
+        if INITRD_RO.len() == INITRD_BYTES {
+            buf.copy_from_slice(INITRD_RO);
+            true
+        } else {
+            buf.fill(0);
+            fat::mkinitrd(buf).is_ok()
         }
+    });
+    if !ok_image {
+        LIVE.store(false, Ordering::Release);
+        return;
     }
     let mut io = Io { back: Back::Initrd };
     let vol = match FatVol::mount(&mut io) {
