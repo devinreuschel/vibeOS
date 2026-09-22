@@ -33,6 +33,22 @@ need nasm
 need python3
 need cargo
 
+pyver=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' \
+    || { echo "setup: python3 >= 3.11 required (found $pyver)" >&2; exit 1; }
+echo "setup: python3 $pyver"
+
+if command -v ruff >/dev/null 2>&1; then
+    echo "setup: found ruff ($(ruff --version))"
+else
+    echo "setup: ruff not installed (optional; pip install ruff)"
+fi
+if command -v mypy >/dev/null 2>&1; then
+    echo "setup: found mypy ($(mypy --version | head -1))"
+else
+    echo "setup: mypy not installed (optional; pip install mypy)"
+fi
+
 if [ -f "$TOOLCHAIN_FILE" ]; then
     PINNED=$(sed -n 's/^channel = "\(.*\)"/\1/p' "$TOOLCHAIN_FILE" | head -n1)
     if [ -z "$PINNED" ]; then
@@ -45,7 +61,7 @@ if [ -f "$TOOLCHAIN_FILE" ]; then
             echo "setup: $PINNED already installed"
         else
             echo "setup: installing $PINNED"
-            rustup toolchain install "$PINNED" --component rust-src --component llvm-tools
+            rustup toolchain install "$PINNED" --component rust-src --component llvm-tools --no-self-update
         fi
     else
         echo "setup: rustup not found; install $PINNED with rust-src and llvm-tools" >&2

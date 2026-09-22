@@ -18,7 +18,6 @@ import sys
 import tempfile
 import time
 
-
 IMAGE_BYTES = 256 * 1024
 WR_PREFIX = "vibeOS: vibefs: wr "
 READY = "vibeOS: vibefs: crash-ready"
