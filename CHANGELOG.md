@@ -37,6 +37,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Phase 9 slice B: syscall ABI + ELF64 + freestanding userspace. Dispatch
+  table plugs into Slice A's `vibeos_syscall_stub` (same entry, no second
+  path). Wired: `write`, `exit`, `getpid`, `sched_yield`. Linux errno
+  names. Early fd1/fd2 → console sink until Process (no half-Process).
+  User pointers validated then copied via HHDM (`EFAULT`, not panic).
+  Tracing behind `set_trace`; per-TCB `syscall_count` for procfs.
+  ELF64 parse in the library (host tests: good, truncated, bad
+  class/endian/machine, `PT_INTERP` refused). `/hello` on the initrd is
+  a nasm stub that `write`s then `exit`s 42; kernel reports `user: exit
+  42`. ABI: `docs/SYSCALL.md`. In-guest: `ring3_hello_exit`,
+  `syscall_dispatch`, `syscall_ptr_validate`. No new boot marker.
+  Phase 5–8 contract untouched.
+
 - Phase 9 slice A: ring 3 plumbing + `AddressSpace`. `syscall`/`sysretq`
   (plus `iretq` when `sysret` cannot express), one `swapgs` policy
   (`vibeos_syscall_entry` first insn + `arch::gs::do_swapgs` for CPL=3

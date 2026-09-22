@@ -44,6 +44,7 @@ isodir/
 /target-gp/
 /target-vibefs-crash/
 /initrd.fat
+/user/hello
 /tests/hostlib/target/
 /limine
 sysroot/

@@ -9,13 +9,11 @@
 //!    the CPU has already switched to TSS.RSP0.
 //!
 //! Kernel ISRs do not `swapgs` when CS.RPL=0. Do not add a third site.
+//! [`force_kernel`] writes GS MSRs; it is not a `swapgs` site.
 
-#[cfg(feature = "kernel_tests")]
 use vibeos::desc::KERNEL_DS;
 
-#[cfg(feature = "kernel_tests")]
 use crate::per_cpu_init;
-#[cfg(feature = "kernel_tests")]
 use crate::x86::{self, IA32_GS_BASE, IA32_KERNEL_GS_BASE};
 
 #[inline]
@@ -47,10 +45,9 @@ pub unsafe fn leave(to_user: bool) {
 
 /// Reload kernel data segs and both GS bases to `PerCpu`.
 ///
-/// After a user exception `longjmp`s into `catch`, GS_BASE is already
-/// kernel (we swapped on entry) but KERNEL_GS_BASE still holds the user
-/// base and DS/ES may be the user selectors.
-#[cfg(feature = "kernel_tests")]
+/// After a user exception `longjmp`s into `catch`, or `exit` longjmps
+/// out of `run_user`, GS_BASE is already kernel (swapped on entry) but
+/// KERNEL_GS_BASE still holds the user base and DS/ES may be user.
 pub fn force_kernel() {
     let Some(cpu) = per_cpu_init::try_current() else {
         return;
@@ -63,7 +60,6 @@ pub fn force_kernel() {
     }
 }
 
-#[cfg(feature = "kernel_tests")]
 unsafe fn load_data_segs(sel: u16) {
     unsafe {
         core::arch::asm!(

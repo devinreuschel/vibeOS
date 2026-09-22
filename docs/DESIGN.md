@@ -27,7 +27,7 @@ landed.
 | 9 | [Pitfalls](#9-pitfalls) | Bugs already paid for once |
 | 10 | [Block I/O](#10-block-io) | Requests, barrier vs flush, ramdisk, virtio-blk, partitions, cache |
 
-On-disk filesystem formats live in their own docs, not here ([§1.4](#14-documentation-rules)): [VIBEFS.md](VIBEFS.md) (vibefs **version 1**, CoW metadata + atomic superblock switch).
+On-disk filesystem formats live in their own docs, not here ([§1.4](#14-documentation-rules)): [VIBEFS.md](VIBEFS.md) (vibefs **version 1**, CoW metadata + atomic superblock switch). Syscall ABI: [SYSCALL.md](SYSCALL.md).
 
 ---
 
@@ -121,7 +121,7 @@ Target layout. Not all of it exists; the roadmap says when each lands.
   [section 4.1](#41-virtual-address-map), vector numbers in [section 5.3](#53-vector-map).
 - When this file outgrows one page per subsystem, split it into `docs/<topic>.md` and leave an index
   behind. Not before. On-disk formats are that split: [VIBEFS.md](VIBEFS.md), not a novel in this
-  file.
+  file. Syscall ABI: [SYSCALL.md](SYSCALL.md) (Phase 9B).
 
 ---
 

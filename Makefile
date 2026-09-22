@@ -48,7 +48,9 @@ QEMU_BASE = qemu-system-x86_64 \
 # limine config, and this Makefile. A find(1) so newly added source dirs are
 # not silently missed (DESIGN §9.1).
 KERNEL_SRCS := $(shell find src -type f \( -name '*.rs' -o -name '*.asm' -o -name '*.S' \) 2>/dev/null)
-KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml $(TARGET_JSON) linker.ld Makefile rust-toolchain.toml scripts/gen_ksyms.py scripts/mkinitrd.py initrd.fat
+USER_HELLO  := user/hello
+KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml $(TARGET_JSON) linker.ld Makefile rust-toolchain.toml \
+	scripts/gen_ksyms.py scripts/mkinitrd.py scripts/mkuserelf.py user/hello.asm initrd.fat
 
 LLVM_TOOL_DIR := $(shell rustc --print sysroot)/lib/rustlib/$(shell rustc -vV | sed -n 's/^host: //p')/bin
 OBJDUMP := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-objdump),$(LLVM_TOOL_DIR)/llvm-objdump,llvm-objdump)
@@ -76,8 +78,14 @@ $(LIMINE_BIN):
 	@echo "limine binaries missing; run ./setup.sh" >&2
 	@exit 1
 
-initrd.fat: scripts/mkinitrd.py
-	python3 scripts/mkinitrd.py $@
+initrd.fat: scripts/mkinitrd.py $(USER_HELLO)
+	python3 scripts/mkinitrd.py $@ --add $(USER_HELLO):/hello
+
+user/hello.bin: user/hello.asm
+	nasm -f bin -o $@ $<
+
+$(USER_HELLO): user/hello.bin scripts/mkuserelf.py
+	python3 scripts/mkuserelf.py user/hello.bin $@
 
 $(ISO): $(KERNEL_ELF) limine.conf $(LIMINE_BIN)
 	@echo "  ISO $(ISO)"
@@ -282,7 +290,8 @@ test-smp-stress: $(ISO_KTEST)
 clean:
 	rm -rf $(ISO_ROOT) $(ISO_ROOT_PANIC) $(ISO_ROOT_GP) $(ISO_ROOT_KTEST) $(ISO_ROOT_VIBEFS_CRASH) \
 	    $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_KTEST) $(ISO_VIBEFS_CRASH) \
-	    target-panic target-gp $(KERNEL_TESTS_DIR) $(KERNEL_VIBEFS_CRASH_DIR) initrd.fat
+	    target-panic target-gp $(KERNEL_TESTS_DIR) $(KERNEL_VIBEFS_CRASH_DIR) initrd.fat \
+	    user/hello user/hello.bin
 	$(CARGO) clean
 
 distclean: clean
