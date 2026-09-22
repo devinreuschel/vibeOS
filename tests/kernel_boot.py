@@ -16,6 +16,7 @@ from tests.harness.harness import (
     effective_accel_name,
     retryable_ktest_failure,
     run_qemu_until_exit,
+    silent_user_syscalls_hang,
 )
 
 DISK_BYTES = 4 * 1024 * 1024
@@ -54,10 +55,14 @@ def _block_name(name: str) -> Callable[[str], bool]:
 
 
 def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool) -> RunResult:
-    """One ktest QEMU. Retry once on a known host-timing flake."""
+    """One ktest QEMU. Retry once on a known host-timing flake.
+
+    The #75 `user: dup ok` wait4 stall can survive that first retry under
+    periodic LAPIC; give that exact timeout class one extra attempt.
+    """
     tag = "persist reboot" if persist_reboot else "ktest"
     last: HarnessError | None = None
-    for attempt in range(2):
+    for attempt in range(3):
         raw = None
         try:
             raw = run_qemu_until_exit(cfg, timeout_s=timeout)
@@ -97,9 +102,9 @@ def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool) -> Run
                 accel=effective_accel_name(cfg),
                 failure_lines=failure_lines,
             )
-            if attempt == 0 and (
-                timed_out
-                or retryable
+            extra_dup_ok = timed_out and silent_user_syscalls_hang(str(e))
+            if (attempt == 0 and (timed_out or retryable)) or (
+                attempt == 1 and extra_dup_ok
             ):
                 reason = "timeout" if timed_out else "known ktest timing flake"
                 print(f"[{tag}] retry after {reason}: {e}", file=sys.stderr)
