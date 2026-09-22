@@ -4,14 +4,11 @@
 //!
 //!   - linker.ld as an absolute `-T` so the link works from any cwd
 //!     (DESIGN §9.1).
-//!   - the AP trampoline: `nasm -f bin`, path anchored at
-//!     `CARGO_MANIFEST_DIR`, assembler stderr captured (DESIGN §9.1).
 //!   - `VIBEOS_KSYMS` / `VIBEOS_INITRD` staged by the Makefile. Empty
 //!     fallbacks so `cargo check` works without `make`.
 
 use std::env;
 use std::path::PathBuf;
-use std::process::Command;
 
 const INITRD_BYTES: usize = 64 * 1024;
 
@@ -24,32 +21,7 @@ fn main() {
     // First link arg so rust-lld sees the script before other flags.
     println!("cargo:rustc-link-arg-bins=-T{}", linker.display());
 
-    let asm = manifest.join("src/trampoline.asm");
-    println!("cargo:rerun-if-changed={}", asm.display());
-
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let blob = out.join("trampoline.bin");
-
-    let output = Command::new("nasm")
-        .args(["-f", "bin"])
-        .arg(&asm)
-        .arg("-o")
-        .arg(&blob)
-        .output()
-        .unwrap_or_else(|e| panic!("nasm spawn failed: {e}"));
-
-    if !output.status.success() {
-        panic!(
-            "nasm -f bin {} failed ({}):\nstdout:\n{}\nstderr:\n{}",
-            asm.display(),
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
-    }
-    if !blob.is_file() {
-        panic!("nasm produced no {}", blob.display());
-    }
 
     println!("cargo:rerun-if-env-changed=VIBEOS_KSYMS");
     let ksyms_out = out.join("ksyms.rs");

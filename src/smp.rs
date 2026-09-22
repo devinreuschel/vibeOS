@@ -1,7 +1,7 @@
 //! AP trampoline layout. DESIGN §7.3 / ROADMAP §4.4.
 //!
-//! Portable: offsets, SIPI vector, timeouts. The nasm blob and INIT/SIPI
-//! live in the binary crate. One AP at a time: they share this page.
+//! Portable: offsets, SIPI vector, timeouts. The `.trampoline` blob and
+//! INIT/SIPI live in the binary crate. One AP at a time: they share this page.
 
 /// SIPI vector `0x08` → physical `0x8000`. 4 KiB aligned, below 1 MiB.
 pub const TRAMPOLINE_PHYS: u64 = 0x8000;

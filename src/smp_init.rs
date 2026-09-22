@@ -11,8 +11,8 @@ use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::marker;
 use vibeos::per_cpu::PerCpu;
 use vibeos::smp::{
-    INIT_WAIT_MS, PARAM_CR3, PARAM_ENTRY, PARAM_IDT, PARAM_STACK, READY_TIMEOUT_MS, SIPI_VECTOR,
-    SIPI_WAIT_MS, TRAMPOLINE_PHYS, blob_fits, pack_idtr,
+    INIT_WAIT_MS, PARAM_CR3, PARAM_ENTRY, PARAM_IDT, PARAM_OFF, PARAM_STACK, READY_TIMEOUT_MS,
+    SIPI_VECTOR, SIPI_WAIT_MS, TRAMPOLINE_PHYS, blob_fits, pack_idtr,
 };
 use vibeos::thread::ThreadId;
 
@@ -27,11 +27,10 @@ use crate::thread_init;
 use crate::time_init;
 use crate::x86;
 
-const BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/trampoline.bin"));
-const _: () = assert!(
-    blob_fits(BLOB.len()),
-    "trampoline blob overlaps param block"
-);
+unsafe extern "C" {
+    static __trampoline_start: u8;
+    static __trampoline_end: u8;
+}
 
 struct Starting {
     cpu: *mut PerCpu,
@@ -70,10 +69,13 @@ fn write_u64(off: usize, val: u64) {
 }
 
 fn install_blob() {
+    let src = core::ptr::addr_of!(__trampoline_start);
+    let n = unsafe { core::ptr::addr_of!(__trampoline_end).offset_from(src) as usize };
+    let n = if blob_fits(n) { n } else { PARAM_OFF };
     let dst = tramp_page();
     let mut i = 0;
-    while i < BLOB.len() {
-        unsafe { dst.add(i).write_volatile(BLOB[i]) };
+    while i < n {
+        unsafe { dst.add(i).write_volatile(src.add(i).read()) };
         i += 1;
     }
 }

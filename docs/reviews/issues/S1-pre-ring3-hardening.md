@@ -16,7 +16,7 @@ user-VA `copy_from_user` rewrite, `VIBEOS_NO_HARDEN`, entropy pool.
 ## Problem
 
 - `src/paging_init.rs` enables `EFER.NXE` (line 481–487), maps `.text` executable-only and `.rodata`/`.data`/`.bss`/heap NX; stacks have guard pages; MMIO is UC. Good.
-- No references to SMEP, SMAP, UMIP, or `CR0.WP` exist in `src/` (only the AP trampoline sets `CR0.WP` for APs, `src/trampoline.asm`). `src/x86.rs` has no CR4 accessors. `src/desc.rs` already lays out user selectors for `syscall`/`sysret`, so ring 3 is close.
+- No references to SMEP, SMAP, UMIP, or `CR0.WP` exist in `src/` (only the AP trampoline sets `CR0.WP` for APs, `src/arch/trampoline.S`). `src/x86.rs` has no CR4 accessors. `src/desc.rs` already lays out user selectors for `syscall`/`sysret`, so ring 3 is close.
 - `/dev/random` is a non-blocking xorshift (`CHANGELOG.md`, Phase 8C entry) even though virtio-rng is bound when present (`src/virtio_init.rs::rng_*`) and `rdrand` is available on `-cpu max`.
 
 ## Recommended fix

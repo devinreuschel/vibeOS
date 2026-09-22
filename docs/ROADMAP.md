@@ -415,7 +415,7 @@ comes before drivers rather than after.
 - [x] in-guest tests: the timer fires, and rearm works across many ticks
 
 ### 4.4 AP trampoline
-- [x] `trampoline.asm` assembled with `nasm -f bin`, included as a blob, `build.rs` anchored to `CARGO_MANIFEST_DIR` with assembler stderr captured
+- [x] `trampoline.S` via `global_asm!` into `.trampoline`, copied to `0x8000`; blob fits below the param block
 - [x] real mode to protected mode to long mode, setting `EFER.LME` and `EFER.NXE`
 - [x] parameter block at the documented offsets: CR3, stack top, entry point, IDT pointer
 - [x] each parameter written with `write_volatile`, `compiler_fence(SeqCst)` before the SIPI

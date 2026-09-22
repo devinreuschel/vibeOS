@@ -48,6 +48,13 @@ SECTIONS
     } :rodata
     __rodata_end = .;
 
+    /* AP trampoline blob. Copied to 0x8000; not executed here. */
+    .trampoline : ALIGN(16) {
+        __trampoline_start = .;
+        KEEP(*(.trampoline))
+        __trampoline_end = .;
+    } :rodata
+
     . = ALIGN(4K);
     __data_start = .;
     .data : ALIGN(4K) {
