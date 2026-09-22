@@ -1,5 +1,5 @@
 [toolchain]
-# Dated pin from last green `ci` on main (Phase 9C): rustc 1.100.0-nightly
-# (1303417c4 2026-09-21). Bump the date here and in CI in one PR; see AGENTS.md.
-channel = "nightly-2026-09-21"
+# rustup date of last green `ci` on main (Phase 9C, rustc 1303417c4).
+# Bump the date here and in CI in one PR; see AGENTS.md.
+channel = "nightly-2026-09-22"
 components = ["rust-src", "llvm-tools"]
