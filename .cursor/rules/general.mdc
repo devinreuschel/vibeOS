@@ -1,0 +1,11 @@
+---
+description: vibeOS agent contract
+alwaysApply: true
+---
+
+Follow [`AGENTS.md`](../../AGENTS.md).
+
+Machine facts:
+- Primary human host is macOS; Apple Silicon is supported. Cloud agents are Linux.
+- QEMU is the guest. The QEMU window is PS/2; the terminal is COM1 (`make run` uses `-serial stdio`).
+- Default accel is TCG (`VIBEOS_QEMU_ACCEL=tcg`). KVM flakes PIT/sleep tests on a loaded host.

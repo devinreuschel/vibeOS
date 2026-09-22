@@ -49,10 +49,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- O1 superseded: Phase 9 exit closed 2026-09-22; no "Phase 9 resumed"
+  note. README / DESIGN header / §1.3 now match the tree (DOC1).
+- Pin the Rust nightly date, GitHub Action SHAs, and Limine commit so CI
+  cannot go red from a floating toolchain. Cargo cache keys include
+  `Cargo.lock` and `rust-toolchain.toml`. Weekly smp-stress runs a
+  non-blocking latest-nightly canary.
 - CI: cancel superseded GitHub Actions runs for the same branch or PR so
   only the latest tip stays in the queue.
 
 ### Added
+
+- MIT license (`LICENSE`). Both `Cargo.toml` and `tests/hostlib/Cargo.toml`
+  declare `license = "MIT"`.
+- Tracked `AGENTS.md` (DOC3). Cursor rules and `CLAUDE.md` point at it.
 
 - Phase 9 slice C: Process + fork/exec/wait + early signals + userspace
   shell. `Process` (pid, parent, AS, fd table, cwd, creds, exit status).
@@ -112,8 +122,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   tests cover synthetic and corrupt images plus a CrashDisk that drops
   writes mid-commit. `make test-vibefs-crash` mkfs's a virtio-blk
   image, boots a write+fsync loop, SIGKILLs QEMU, and requires
-  `fsck-vibefs` clean. No new boot marker. Phase 8 exit; Phase 9 is
-  paused.
+  `fsck-vibefs` clean. No new boot marker. Phase 8 exit.
 
 - Phase 8 slice B: FAT32 read/write, kernel File API, shell file
   commands, Makefile initrd. BPB validate, FAT chain cache, 8.3 + LFN
