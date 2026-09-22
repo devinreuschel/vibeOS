@@ -73,6 +73,15 @@ class RunResult:
     panic_line: str | None = None
 
 
+def serial_tail(lines: list[str], n: int = 40) -> str:
+    """Last `n` serial lines, for timeout / hang errors."""
+    if not lines:
+        return " (no serial)"
+    tail = lines[-n:]
+    body = "\n".join(tail)
+    return f"\n--- serial tail {len(tail)}/{len(lines)} ---\n{body}"
+
+
 def check_markers_in_order(
     lines: Iterable[str],
     markers: list[Marker],
@@ -708,7 +717,10 @@ def run_qemu_until_exit(
             result.exit_code = proc.wait()
 
     if result.timed_out:
-        raise HarnessError(f"timed out after {timeout_s}s; {len(result.lines)} lines")
+        raise HarnessError(
+            f"timed out after {timeout_s}s; {len(result.lines)} lines"
+            f"{serial_tail(result.lines)}"
+        )
     return result
 
 

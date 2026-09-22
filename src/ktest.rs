@@ -927,27 +927,35 @@ fn test_syscall_ptr_validate() -> Outcome {
 }
 
 fn test_user_syscalls() -> Outcome {
-    let before = free_frames();
-    match user_init::run_path("/bin/tests") {
-        Ok(0) => {}
-        Ok(st) => {
-            let _ = writeln!(Serial, "vibeOS: ktest:   tests status={st}");
-            return Outcome::Fail("status not 0");
+    // Spawned fork children enter with IF on. The ktest registry holds
+    // IF off; enable the tick so wait4/yield can run them, same as the
+    // later block tests. Bound `run_user` still cli's around setjmp.
+    with_timer(|| {
+        let before = free_frames();
+        match user_init::run_path("/bin/tests") {
+            Ok(0) => {}
+            Ok(st) => {
+                let _ = writeln!(Serial, "vibeOS: ktest:   tests status={st}");
+                return Outcome::Fail("status not 0");
+            }
+            Err(e) => {
+                let _ = writeln!(Serial, "vibeOS: ktest:   tests err={}", e.as_str());
+                return Outcome::Fail("load/run");
+            }
         }
-        Err(e) => {
-            let _ = writeln!(Serial, "vibeOS: ktest:   tests err={}", e.as_str());
-            return Outcome::Fail("load/run");
+        let out = syscall_init::stdout_bytes();
+        if !out
+            .windows(b"user: tests ok".len())
+            .any(|w| w == b"user: tests ok")
+        {
+            return Outcome::Fail("stdout missing ok");
         }
-    }
-    let out = syscall_init::stdout_bytes();
-    if !out.windows(b"user: tests ok".len()).any(|w| w == b"user: tests ok") {
-        return Outcome::Fail("stdout missing ok");
-    }
-    arch::gs::force_kernel();
-    if free_frames() != before {
-        return Outcome::Fail("tests frame leak");
-    }
-    Outcome::Ok
+        arch::gs::force_kernel();
+        if free_frames() != before {
+            return Outcome::Fail("tests frame leak");
+        }
+        Outcome::Ok
+    })
 }
 
 fn test_int3_roundtrip() -> Outcome {

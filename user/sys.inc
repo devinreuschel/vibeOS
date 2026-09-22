@@ -4,6 +4,7 @@ SYS_READ      equ 0
 SYS_WRITE     equ 1
 SYS_OPEN      equ 2
 SYS_CLOSE     equ 3
+SYS_SCHED_YIELD equ 24
 SYS_DUP       equ 32
 SYS_DUP2      equ 33
 SYS_GETPID    equ 39

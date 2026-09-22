@@ -889,6 +889,10 @@ fn sys_fork(frame: *mut SyscallFrame) -> i64 {
         p.bound = false;
     });
     thread_init::make_ready(h.id());
+    // Child may run (and exit) before we return. POSIX allows either order.
+    // Lets a fork-bomb fill the table with zombies instead of a live herd
+    // that wait4 would have to schedule under ktest's IF-off registry.
+    thread_init::yield_now();
     pid as i64
 }
 

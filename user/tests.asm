@@ -150,7 +150,8 @@ _start:
     cmp eax, SIGSEGV
     jne fail
 
-    ; bounded fork bomb
+    ; bounded fork bomb. Yield so the child can exit to zombie before
+    ; the next fork; wait4 then reaps without sleeping on a live herd.
     xor r13, r13
 .bomb:
     mov eax, SYS_FORK
@@ -162,6 +163,10 @@ _start:
     mov eax, SYS_EXIT
     syscall
 .parentb:
+    mov eax, SYS_SCHED_YIELD
+    syscall
+    mov eax, SYS_SCHED_YIELD
+    syscall
     inc r13
     cmp r13, 32
     jb .bomb
