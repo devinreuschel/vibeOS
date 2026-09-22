@@ -30,6 +30,7 @@ mod addr_space_init;
 mod apic_init;
 mod arch;
 mod block_init;
+mod boot;
 mod cache_init;
 mod cell;
 mod console_init;
@@ -73,9 +74,6 @@ mod x86;
 #[cfg(feature = "kernel_tests")]
 mod ktest;
 
-use limine::request::{
-    ExecutableAddressRequest, FramebufferRequest, HhdmRequest, MemmapRequest, RsdpRequest,
-};
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
 use vibeos::marker;
@@ -90,33 +88,6 @@ static REQ_START: RequestsStartMarker = RequestsStartMarker::new();
 #[used]
 #[unsafe(link_section = ".limine_requests")]
 static BASE_REV: BaseRevision = BaseRevision::with_revision(3);
-
-#[used]
-#[unsafe(link_section = ".limine_requests")]
-static HHDM: HhdmRequest = HhdmRequest::new();
-
-#[used]
-#[unsafe(link_section = ".limine_requests")]
-static MEMMAP: MemmapRequest = MemmapRequest::new();
-
-#[used]
-#[unsafe(link_section = ".limine_requests")]
-static RSDP: RsdpRequest = RsdpRequest::new();
-
-// Executable address: physical + virtual base of the loaded kernel image.
-// The PMM subtracts this from the free lists so we do not hand our own
-// code and data back out as regular RAM.
-#[used]
-#[unsafe(link_section = ".limine_requests")]
-static EXEC_ADDR: ExecutableAddressRequest = ExecutableAddressRequest::new();
-
-// Framebuffer: same reasoning, plus Limine's memmap already marks the
-// framebuffer non-USABLE on most firmwares, but DESIGN §4.2 asks for
-// an explicit exclude so a stray USABLE entry from a quirky BIOS cannot
-// hand us the scanout region.
-#[used]
-#[unsafe(link_section = ".limine_requests")]
-pub(crate) static FRAMEBUFFER: FramebufferRequest = FramebufferRequest::new();
 
 #[used]
 #[unsafe(link_section = ".limine_requests_end")]
@@ -161,22 +132,9 @@ pub extern "C" fn _start() -> ! {
 #[cfg(not(feature = "panic_test"))]
 fn normal_boot_tail() {
     // ---- Phase 1 slice A: physical memory manager. ----
-    let hhdm = HHDM
-        .response()
-        .unwrap_or_else(|| halt_with("vibeOS: limine: hhdm missing"));
-    // Slice B pins the physmap VA at `paging_init::HHDM_BASE`. If Limine
-    // drifts to a different offset, buddy free-list nodes (reached via
-    // `phys + hhdm_offset`) fault the moment we install our own PML4.
-    // Fail loud here instead of chasing that later.
-    paging_init::assert_limine_hhdm(hhdm.offset);
-    let memmap = MEMMAP
-        .response()
-        .unwrap_or_else(|| halt_with("vibeOS: limine: memmap missing"));
-    let exec = EXEC_ADDR
-        .response()
-        .unwrap_or_else(|| halt_with("vibeOS: limine: executable_address missing"));
-
-    let stats = unsafe { pmm_init::init(memmap.entries(), hhdm.offset, exec.physical_base) };
+    // Capture Limine once. Nothing else reads the request statics.
+    let info = boot::capture();
+    let stats = unsafe { pmm_init::init(&info) };
 
     // Exit-gate marker for phase 1 slice A. DESIGN §2.6 marker shape.
     crate::marker!("vibeOS: pmm: {} free 4KiB frames", stats.free_frames);
@@ -199,10 +157,13 @@ fn normal_boot_tail() {
     // usable-RAM high water from the memmap, plus each framebuffer's
     // `base + size` so scanout lands inside the physmap. DESIGN §4.1
     // caps at 8 GiB regardless.
-    let ram_high_water = memmap_high_water(memmap.entries());
-    let fb_phys_end = framebuffer_phys_end(hhdm.offset);
-    let paging_report =
-        unsafe { paging_init::install(exec.physical_base, ram_high_water, fb_phys_end) };
+    let paging_report = unsafe {
+        paging_init::install(
+            info.kernel_phys_base,
+            info.usable_high_water,
+            info.framebuffer_phys_end(),
+        )
+    };
     paging_init::report(&paging_report);
 
     // ---- Phase 2 slice B: ACPI discovery + MMIO UC. ----
@@ -210,16 +171,7 @@ fn normal_boot_tail() {
     // before anything touches those bases (DESIGN §3.3 step 8, §4.3).
     // The `acpi: xsdt N tables` marker waits until after GDT/PIC/IDT
     // (steps 3–5 live after KVA; step 12 relative to them).
-    let rsdp = RSDP
-        .response()
-        .unwrap_or_else(|| halt_with("vibeOS: limine: rsdp missing"));
-    let rsdp_raw = rsdp.address as u64;
-    let rsdp_phys = if rsdp_raw >= paging_init::HHDM_BASE {
-        rsdp_raw - paging_init::HHDM_BASE
-    } else {
-        rsdp_raw
-    };
-    unsafe { acpi_init::init(rsdp_phys) };
+    unsafe { acpi_init::init(info.rsdp_phys) };
 
     // ---- Phase 1 slice C: heap, KVA, diagnostics. ----
     unsafe { heap_init::init() };
@@ -344,52 +296,6 @@ fn normal_boot_tail() {
         thread_init::park(None);
         x86::halt();
     }
-}
-
-/// Highest end address of any USABLE memmap entry, in physical bytes.
-/// Zero when the map has no USABLE entries (unreachable in practice).
-#[cfg(not(feature = "panic_test"))]
-fn memmap_high_water(entries: &[&limine::memmap::Entry]) -> u64 {
-    let mut hi = 0u64;
-    for e in entries {
-        if e.type_ == limine::memmap::MEMMAP_USABLE {
-            let end = e.base + e.length;
-            if end > hi {
-                hi = end;
-            }
-        }
-    }
-    hi
-}
-
-/// Highest `base + size` across all framebuffers, in physical bytes.
-/// Zero when Limine returns no framebuffers.
-#[cfg(not(feature = "panic_test"))]
-fn framebuffer_phys_end(hhdm_offset: u64) -> u64 {
-    let Some(resp) = FRAMEBUFFER.response() else {
-        return 0;
-    };
-    let mut hi = 0u64;
-    for fb in resp.framebuffers() {
-        let virt = fb.address() as u64;
-        if virt == 0 {
-            continue;
-        }
-        let phys = virt.wrapping_sub(hhdm_offset);
-        let end = phys + fb.size() as u64;
-        if end > hi {
-            hi = end;
-        }
-    }
-    hi
-}
-
-/// Halt with a serial line. Used when a Limine response we depend on is
-/// missing; nothing after this point would work without it.
-#[cfg(not(feature = "panic_test"))]
-fn halt_with(msg: &str) -> ! {
-    crate::marker!(msg);
-    x86::halt();
 }
 
 #[cfg(feature = "gp_test")]

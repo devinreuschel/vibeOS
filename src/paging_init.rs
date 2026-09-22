@@ -39,9 +39,9 @@ use crate::x86;
 pub const HHDM_BASE: u64 = 0xFFFF_8000_0000_0000;
 
 /// Panic if Limine handed us an HHDM offset different from
-/// [`HHDM_BASE`]. Kept out of `install` so `main` can call it right
-/// after reading the HHDM response, before any code has committed to
-/// the constant.
+/// [`HHDM_BASE`]. Kept out of `install` so `boot::capture` can call it
+/// right after reading the HHDM response, before any code has committed
+/// to the constant.
 pub fn assert_limine_hhdm(offset: u64) {
     assert!(
         offset == HHDM_BASE,

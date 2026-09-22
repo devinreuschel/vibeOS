@@ -1,6 +1,6 @@
-//! Kernel-side wiring: turn Limine's memory map into a running Buddy
-//! allocator. Portable buddy logic lives in `vibeos::pmm`; this module is
-//! the binary-crate half that pokes hardware/limine.
+//! Kernel-side wiring: turn [`crate::boot::BootInfo`]'s memory map into a
+//! running Buddy allocator. Portable buddy logic lives in `vibeos::pmm`;
+//! this module is the binary-crate half.
 //!
 //! DESIGN §4.2 lists the regions that must not enter the free lists:
 //!   - physical frame 0
@@ -14,11 +14,12 @@
 //! sorted into an "excludes" list and subtracted from every USABLE range
 //! before it is inserted.
 
-use limine::memmap::{Entry, MEMMAP_USABLE};
+use limine::memmap::MEMMAP_USABLE;
 
 use vibeos::lock::RANK_BUDDY;
 use vibeos::pmm::{Buddy, PAGE_SIZE, PmmStats};
 
+use crate::boot::BootInfo;
 use crate::sync_init::SpinMutex;
 
 /// AP trampoline page. DESIGN §7.3 fixes the SIPI vector at 0x08, which
@@ -97,21 +98,20 @@ impl Excludes {
     }
 }
 
-/// Ingest the memory map into the global buddy. Returns the resulting
-/// stats snapshot. Idempotent-unfriendly: call at most once.
+/// Ingest the captured memory map into the global buddy. Returns the
+/// resulting stats snapshot. Idempotent-unfriendly: call at most once.
 ///
 /// # Safety
-/// - `entries` must be Limine's response, valid for the lifetime of the
-///   call.
-/// - `hhdm_offset` must be Limine's HHDM offset (so `phys + offset` lands
-///   in the higher-half direct map, which Limine set up for us).
+/// - `info` is the snapshot from [`crate::boot::capture`].
+/// - `info.hhdm_offset` must be Limine's HHDM offset (so `phys + offset`
+///   lands in the higher-half direct map, which Limine set up for us).
 /// - Every USABLE range must be real RAM the buddy can safely write
-///   free-list nodes into via HHDM.
+///   free-list nodes into via the HHDM physmap.
 /// - Must run before interrupts are enabled and before any other CPU is
 ///   started, since `BUDDY` has no lock.
-pub unsafe fn init(entries: &[&Entry], hhdm_offset: u64, kernel_phys_base: u64) -> PmmStats {
+pub unsafe fn init(info: &BootInfo) -> PmmStats {
     let mut buddy = BUDDY.lock();
-    buddy.set_hhdm_offset(hhdm_offset);
+    buddy.set_hhdm_offset(info.hhdm_offset);
 
     // Build the sorted excludes list. Frame 0 is implicit.
     let mut excl = Excludes::new();
@@ -123,31 +123,25 @@ pub unsafe fn init(entries: &[&Entry], hhdm_offset: u64, kernel_phys_base: u64) 
     // Kernel image. Size comes from the linker symbols; the physical
     // base is what Limine loaded us at. The range is rounded out to
     // page boundaries so no partial page leaks in.
+    let kernel_phys_base = info.kernel_phys_base;
     let kernel_size = kernel_end_virt().wrapping_sub(kernel_start_virt());
     excl.push(
         align_down(kernel_phys_base, PAGE_SIZE),
         align_up(kernel_phys_base + kernel_size, PAGE_SIZE),
     );
 
-    // Framebuffer, if Limine gave us one. Limine hands back HHDM
-    // pointers; subtracting the offset yields the physical base. Every
-    // framebuffer's payload is `height * pitch` bytes long.
-    if let Some(fb_resp) = crate::FRAMEBUFFER.response() {
-        for fb in fb_resp.framebuffers() {
-            let virt = fb.address() as u64;
-            if virt == 0 {
-                continue;
-            }
-            let phys = virt.wrapping_sub(hhdm_offset);
-            let len = fb.size() as u64;
-            excl.push(align_down(phys, PAGE_SIZE), align_up(phys + len, PAGE_SIZE));
-        }
+    // Framebuffer, if capture saw one. Payload is `height * pitch`.
+    for fb in info.framebuffers.iter().flatten() {
+        excl.push(
+            align_down(fb.phys, PAGE_SIZE),
+            align_up(fb.phys + fb.size, PAGE_SIZE),
+        );
     }
 
     excl.sort();
 
     // Walk USABLE entries and hand each surviving segment to the buddy.
-    for entry in entries {
+    for entry in info.memmap {
         if entry.type_ != MEMMAP_USABLE {
             continue;
         }
@@ -164,7 +158,7 @@ pub unsafe fn init(entries: &[&Entry], hhdm_offset: u64, kernel_phys_base: u64) 
 ///
 /// # Safety
 /// Same contract as `Buddy::insert_region`: caller vouches for the
-/// physical pages being real, writable memory accessible via HHDM.
+/// physical pages being real, writable memory accessible via the HHDM physmap.
 unsafe fn insert_clipped(buddy: &mut Buddy, base: u64, end: u64, sorted: &[Range]) {
     let mut cur = base;
     for r in sorted {

@@ -52,30 +52,27 @@ pub fn overlaps_phys(phys: u64, len: u64) -> bool {
     phys < base.saturating_add(span) && base < phys.saturating_add(len)
 }
 
-/// Attach the first Limine 32bpp framebuffer.
+/// Attach the first captured 32bpp framebuffer.
 pub fn init() -> bool {
-    let Some(resp) = crate::FRAMEBUFFER.response() else {
-        return false;
-    };
+    let info = crate::boot::info();
     let mut chosen: Option<Fb> = None;
-    for fb in resp.framebuffers() {
-        let bpp = fb.bpp;
-        if bpp != 32 {
+    for fb in info.framebuffers.iter().flatten() {
+        if fb.bpp != 32 {
             continue;
         }
-        let width = fb.width as u32;
-        let height = fb.height as u32;
-        let pitch = fb.pitch;
-        let base = fb.address() as u64;
+        let width = fb.width;
+        let height = fb.height;
+        let pitch = fb.pitch as u64;
+        let base = fb.virt;
         if width < FONT_W || height < FONT_H * (BANNER_ROWS + 1) || base == 0 || pitch < 4 {
             continue;
         }
         let Some(grid) = TextGrid::new(width, height, BANNER_ROWS) else {
             continue;
         };
-        let size = fb.size() as u64;
+        let size = fb.size;
         if base >= crate::paging_init::HHDM_BASE {
-            FB_PHYS.store(base - crate::paging_init::HHDM_BASE, Ordering::Release);
+            FB_PHYS.store(fb.phys, Ordering::Release);
             FB_LEN.store(size, Ordering::Release);
         }
         chosen = Some(Fb {

@@ -115,7 +115,7 @@ rest of the project, which is the single most consequential decision in this pha
 - [x] request statics in `.limine_requests` with the start and end markers, all `#[used]`
 - [x] base revision verified before reading any other response, with its own marker
 - [x] requests: framebuffer, memory map, HHDM, executable address, RSDP  (all five wired as of phase 1 slice A; framebuffer response only used for pmm exclusion so far)
-- [ ] a `BootInfo` struct captured once at entry; nothing else reads Limine statics  (deferred: phase 0 only queries a handful of responses inline)
+- [x] a `BootInfo` struct captured once at entry; nothing else reads Limine statics
 - [~] each null response produces a named halt, not an unwrap panic in a function with no context  (base revision path only for now)
 - [x] `limine.conf` with a single entry, serial console enabled
 
