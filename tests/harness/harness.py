@@ -835,6 +835,9 @@ SMP4_MSIX_AP_COUNTER_FLAKE = (
     "ktest FAIL: vibeOS: ktest: FAIL msix_cpu: ap counter"
 )
 SMP4_IPI_ACK_PANIC = "ipi: ack timeout waiters="
+# Backtrace frame when UART/dmesg chops `msg: ipi: ack timeout` out of
+# the last-40 serial tail (CI 35789075345: idle drain_deferred shootdown).
+SMP4_IPI_WAIT_ACKS_FRAME = "ipi_init::wait_acks"
 # TCG SMP serial glues a ktest ok line to the panic banner; kill-on-sig
 # then drops `msg: ipi: ack timeout` so #75's needle never appears.
 PANIC_DRAIN_S = 0.4
@@ -883,8 +886,13 @@ def retryable_ktest_failure(
     if "panic signature 'vibeOS: panic:'" not in message:
         return False
     # First boot or persist. Drain puts `ipi: ack timeout` in the error;
-    # UART merge is the same flake with the body chopped.
-    return SMP4_IPI_ACK_PANIC in message or _same_line_ktest_ok_panic(message)
+    # UART merge is the same flake with the body chopped. When the banner
+    # is its own line, last-40 often keeps the wait_acks frame instead.
+    return (
+        SMP4_IPI_ACK_PANIC in message
+        or SMP4_IPI_WAIT_ACKS_FRAME in message
+        or _same_line_ktest_ok_panic(message)
+    )
 
 
 def drain_panic_tail(

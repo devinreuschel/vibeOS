@@ -17,6 +17,7 @@ from tests.harness.harness import (
     ISA_DEBUG_PASS,
     OVMF_BOOT_ARGS,
     SMP2_TCG_PER_CPU_READY_HEAD_FLAKE,
+    SMP4_IPI_WAIT_ACKS_FRAME,
     DeadlineReader,
     HarnessError,
     Marker,
@@ -449,6 +450,31 @@ class TestKtestProtocol(unittest.TestCase):
         )
         self.assertFalse(retryable_ktest_failure(4, tailed))
 
+    def test_smp4_wait_acks_frame_is_retryable_when_timeout_line_chopped(self) -> None:
+        # CI 35789075345: banner is its own line; last-40 has the idle
+        # drain_deferred shootdown backtrace, not `ipi: ack timeout waiters=`.
+        msg = (
+            "panic signature 'vibeOS: panic:' in: 'vibeOS: panic:'"
+            "\n--- serial tail 40/696 ---\n"
+            "vibeOS: panic: thread cpu=2 tid=3 idle\n"
+            "vibeOS: logrec: 802ms cpu0 info vibeOS: ktest: ok tlb_shootdown_remote\n"
+            "vibeOS: logrec: 805msvibeOS: d cpu0mesg:  info vibeOS: ktest: ok shell_dispatch\n"
+            "vibeOS: backtrace:\n"
+            f"  0xffffffff80049570 vibeos::{SMP4_IPI_WAIT_ACKS_FRAME} "
+            "(.llvm.7908952045829238127)+0x100\n"
+            "  0xffffffff80049152 vibeos::ipi_init::shootdown_va "
+            "(.llvm.7908952045829238127)+0x132\n"
+            "  0xffffffff8003dfeb vibeos::kva_init::drain_deferred+0x2ab\n"
+            "vibeOS: panic: halted"
+        )
+        self.assertTrue(retryable_ktest_failure(4, msg))
+        self.assertTrue(
+            retryable_ktest_failure(4, msg, persist_reboot=True)
+        )
+        self.assertFalse(retryable_ktest_failure(2, msg))
+        chopped = msg.replace(SMP4_IPI_WAIT_ACKS_FRAME, "kva_init::drain_deferred")
+        self.assertFalse(retryable_ktest_failure(4, chopped))
+
 
 class TestSilentUserSyscallsHang(unittest.TestCase):
     def test_dup_ok_timeout_matches(self) -> None:
@@ -588,6 +614,29 @@ class TestKernelBootRetry(unittest.TestCase):
             "panic signature 'vibeOS: panic:' in: "
             "'vibeOS: dmesg: 803ms cpu0 info vibeOS: ktest: ok "
             "tlb_shootdown_remotevibeOS: panic:'"
+        )
+        passed = self._passing_initial_boot()
+        cfg = QemuConfig(iso="x.iso", smp=4, extra=("-accel", "tcg"))
+        with mock.patch.object(
+            run_ktest,
+            "run_qemu_until_exit",
+            side_effect=(err, passed),
+        ) as run:
+            result = run_ktest._ktest_boot(
+                cfg,
+                timeout=1.0,
+                persist_reboot=False,
+            )
+        self.assertIs(result, passed)
+        self.assertEqual(run.call_count, 2)
+
+    def test_smp4_wait_acks_frame_retries_once_then_passes(self) -> None:
+        err = HarnessError(
+            "panic signature 'vibeOS: panic:' in: 'vibeOS: panic:'"
+            "\n--- serial tail 40/696 ---\n"
+            "vibeOS: panic: thread cpu=2 tid=3 idle\n"
+            f"  0xffffffff80049570 vibeos::{SMP4_IPI_WAIT_ACKS_FRAME}+0x100\n"
+            "vibeOS: panic: halted"
         )
         passed = self._passing_initial_boot()
         cfg = QemuConfig(iso="x.iso", smp=4, extra=("-accel", "tcg"))
