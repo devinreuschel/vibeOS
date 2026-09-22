@@ -18,5 +18,9 @@ path = "src/bin/mkfs_vibefs.rs"
 name = "fsck-vibefs"
 path = "src/bin/fsck_vibefs.rs"
 
+[[bin]]
+name = "mkinitrd"
+path = "src/bin/mkinitrd.rs"
+
 [dependencies]
 vibeos = { path = "../../crates/core", package = "vibeos-core", features = ["std"] }

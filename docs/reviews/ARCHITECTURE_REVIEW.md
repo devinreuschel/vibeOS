@@ -45,7 +45,7 @@ A x86_64 kernel used to measure how far coding agents get on low-level systems w
 | Boot | Limine v9.6.7 (binary branch cloned by `setup.sh`), hybrid BIOS+UEFI ISO via xorriso | `setup.sh`, `Makefile`, `limine.conf` |
 | Link | `linker.ld`, higher-half at `0xFFFF_FFFF_8000_0000`, per-section PHDRs for W^X | `linker.ld` |
 | Dependencies | One crate: `limine 0.6.5` | `Cargo.lock` |
-| Build glue | `build.rs` (nasm trampoline, ksyms include, FAT initrd), `scripts/gen_ksyms.py`, `scripts/mkinitrd.py` | `build.rs`, `scripts/` |
+| Build glue | `build.rs` (ksyms/initrd env, linker `-T`), `scripts/gen_ksyms.py` | `build.rs`, `scripts/` |
 | Tests | Rust host tests via `tests/hostlib` (`#[path]` includes), in-guest `ktest` feature build, Python QEMU harness | `tests/`, `src/ktest.rs` |
 | CI | GitHub Actions, one Ubuntu job running the whole ladder; weekly SMP stress | `.github/workflows/ci.yml`, `smp-stress.yml` |
 | Agent env | `.cursor/environment.json` (tracked), `.cursor/rules/general.mdc` (ignored) | `.gitignore:160` |
@@ -64,7 +64,7 @@ Size and shape at a glance:
 | Metric | Value |
 |---|---|
 | Rust source lines (`src/`) | 46,064 (incl. `ktest.rs` 4,083) |
-| Rust files in `src/` | 84 (+ `trampoline.asm`) |
+| Rust files in `src/` | 84 (+ `arch/trampoline.S`) |
 | Largest files | `ktest.rs` 4,083 · `fs/mod.rs` 2,873 · `vibefs.rs` 2,549 · `fat.rs` 2,387 · `fs/kernfs.rs` 1,704 · `file_init.rs` 1,516 |
 | Host `#[test]` / in-guest tests / harness tests | 367 / 103 / 37 |
 | `unsafe` occurrences · `unsafe fn` · `# Safety` sections | 734 · 90 · 50 |
@@ -282,7 +282,7 @@ Pre-user-mode, the security surface is kernel self-protection and input robustne
 
 ### 4.9 Dependencies & supply chain
 
-In good shape: one crate, lockfiles committed, standard-library-only Python, host tools verified by `setup.sh`. Remaining items are the pinning gaps in C1 and the build-time dependency on `nasm` and `python3` from `build.rs` (B4). No further recommendation.
+In good shape: one crate, lockfiles committed, standard-library-only Python, host tools verified by `setup.sh`. Remaining items are the pinning gaps in C1. `build.rs` no longer shells out to `nasm` or `mkinitrd.py` (B4). `nasm` stays for `user/*.asm`. No further recommendation.
 
 ### 4.10 Build, CI/CD & release process
 
@@ -302,6 +302,7 @@ In good shape: one crate, lockfiles committed, standard-library-only Python, hos
 - **Impact:** Low · **Effort:** S · **Risk if ignored:** No way to bisect by phase or hand someone a bootable image.
 
 **B4 · Simplify `build.rs` inputs and the initrd path**
+- **Status:** **Implemented (this PR).** One generator (`tests/hostlib` `mkinitrd` → `build/initrd.fat`); `build.rs` consumes `VIBEOS_INITRD` like `VIBEOS_KSYMS`. AP trampoline is `global_asm!` into `.trampoline`. `nasm` remains for `user/*.asm` only.
 - **Observation:** `build.rs` shells out to `nasm` and, if `initrd.fat` is not staged in the repo root, to `python3 scripts/mkinitrd.py`; the Makefile has its own `initrd.fat:` rule; and `src/fat.rs:1690 fat::mkinitrd` is a second, Rust implementation of the same image used by `fat_init.rs:208` as a fallback. `initrd.fat` is both a build product and a listed prerequisite (`KERNEL_DEPS`) that lives at the repo root.
 - **Recommendation:** Keep one initrd generator (the Rust one, since it is host-tested and can run from `build.rs` via the hostlib crate or a tiny `xtask`), delete `scripts/mkinitrd.py`, and write the image only under `OUT_DIR`/`target/`. Consider assembling the trampoline with `global_asm!` to drop the `nasm` dependency (the file is 90 lines).
 - **Impact:** Low · **Effort:** S · **Risk if ignored:** Two initrd implementations drift; a stale `initrd.fat` in the root silently wins.
@@ -450,7 +451,7 @@ Nothing in this sketch requires changing an algorithm. Locks, ranks, markers, th
 | T4 | `cargo-fuzz` targets for the parsers on the weekly job | A2 |
 | E1 | Restriction lints on the portable crate; fix the nine non-test `unwrap`s | — |
 | S1 | SMEP/SMAP/UMIP/WP + in-guest test; real entropy for `/dev/random` | Before Phase 9.1 |
-| B4 | One initrd generator; asm trampoline via `global_asm!` | — |
+| B4 | One initrd generator; asm trampoline via `global_asm!` | **done (this PR)** |
 | Q4, E3, P2 | Naming/feature consistency; emit-path rule; Phase 17 notes | — |
 | O1 | One changelog line for the Phase 9 resume (research notes deferred by the maintainer) | **Superseded 2026-09-22:** Phase 9 exit already closed. Do not implement as written. |
 
@@ -541,7 +542,7 @@ Nothing remains open that blocks the Phase I items.
 - **Docs:** `README.md`, `CHANGELOG.md` (head), `docs/DESIGN.md` (§1–3, §4.1, §8, §9 headings, `_start` table), `docs/ROADMAP.md` (intro, arc, Phase 0/8/9, checkbox state), `docs/VIBEFS.md` (§1–2, TOC).
 - **Kernel source, read in full:** `src/lib.rs`, `src/main.rs`, `src/lock.rs`, `src/panic.rs`, `src/serial.rs`, `src/per_cpu_init.rs` (first 140 lines), `src/sync_init.rs` (first 120 lines), `src/heap_init.rs` (first 80 lines), `src/thread_init.rs` (first 90 lines), `src/pic.rs` and `src/arch/pic.rs` (heads), `src/ktest.rs` (first 200 lines), `src/arch/mod.rs`, `src/ksyms.rs`, `src/x86.rs` (API surface).
 - **Kernel source, structure-level:** every file's `//!` header (all 84), public item maps of `src/fs/mod.rs`, `src/fs/kernfs.rs`, `src/vibefs.rs`, `src/fat.rs`, `src/file_init.rs`, `src/virtio_blk_init.rs`, `src/block_init.rs`, `src/cache_init.rs`, `src/log.rs`, `src/log_init.rs`, `src/shell_init.rs`; the `FileSystem`/`InodeOps` traits and `Vfs` struct; `FatFs`/`VibeFs` impls; the `Back`/`Walked` dispatch in `file_init.rs`.
-- **Tests:** `tests/harness/harness.py` (full), `run_e2e.py`, `run_ktest.py`, `run_vibefs_crash.py`, `run_ps2.py`, `test_harness.py` (test list), `tests/hostlib/{Cargo.toml,.cargo/config.toml,src/lib.rs,src/bin/*.rs}`, `scripts/gen_ksyms.py`, `scripts/mkinitrd.py`.
+- **Tests:** `tests/harness/harness.py` (full), `run_e2e.py`, `run_ktest.py`, `run_vibefs_crash.py`, `run_ps2.py`, `test_harness.py` (test list), `tests/hostlib/{Cargo.toml,.cargo/config.toml,src/lib.rs,src/bin/*.rs}`, `scripts/gen_ksyms.py`.
 - **Git:** full log, authorship, per-file churn, branch list, last-10 PR sizes, `git show --stat HEAD`.
 
 ### 9.2 Skipped and why

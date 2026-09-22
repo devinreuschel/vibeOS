@@ -62,7 +62,7 @@ weekly canary job in `smp-stress.yml`. Not a drive-by.
 
 ## Do not
 
-- commit build products (`vibeos*.iso`, `iso_root*`, `initrd.fat`, `target*/`, `limine/`)
+- commit build products (`vibeos*.iso`, `iso_root*`, `build/initrd.fat`, `target*/`, `limine/`)
 - edit `limine/` (cloned by `setup.sh`)
 - add dependencies without a note in the PR
 - disable a test to make CI green

@@ -79,13 +79,13 @@ will nest this pairing; do not invent `src/mm/` or `src/drivers/` until then.
 **Naming.** `src/<name>.rs` is the portable half (`vibeos-core`, `src/lib.rs`, host-tested via
 `make test-unit`). `src/<name>_init.rs` is the kernel half (`src/main.rs`). A few kernel-only files
 have no portable pair. `src/arch/` holds only what touches privileged CPU state (GDT, IDT, PIC, catch,
-gs, cpu). Nested also: `src/fs/` (VFS + kernfs). `user/` is freestanding ELFs, not kernel modules.
+gs, cpu, AP trampoline). Nested also: `src/fs/` (VFS + kernfs). `user/` is freestanding ELFs, not kernel modules.
 
 | Subsystem | Portable | Kernel |
 |-----------|----------|--------|
 | crate | `src/lib.rs` (`vibeos-core`) | `src/main.rs` (`_start`, Limine requests, boot order) |
 | boot / serial | `uart.rs`, `marker.rs`, `fmt_util.rs`, `symtab.rs` | `serial.rs`, `panic.rs`, `diag.rs`, `ksyms.rs` |
-| arch | `desc.rs`, `pic.rs`, `vectors.rs` | `arch/mod.rs`, `arch/gdt.rs`, `arch/idt.rs`, `arch/pic.rs`, `arch/catch.rs`, `arch/gs.rs`, `arch/cpu.rs`, `x86.rs` |
+| arch | `desc.rs`, `pic.rs`, `vectors.rs` | `arch/mod.rs`, `arch/gdt.rs`, `arch/idt.rs`, `arch/pic.rs`, `arch/catch.rs`, `arch/gs.rs`, `arch/cpu.rs`, `arch/trampoline.rs`, `arch/trampoline.S`, `x86.rs` |
 | mm | `pmm.rs`, `paging.rs`, `heap.rs`, `kva.rs` | `pmm_init.rs`, `paging_init.rs`, `heap_init.rs`, `kva_init.rs` |
 | time | `time.rs` | `time_init.rs` |
 | acpi | `acpi.rs` | `acpi_init.rs` |
@@ -284,11 +284,12 @@ Power-on to `sti`. Limine does the ugly part (real mode, A20, long mode, ELF loa
 | Target | built-in `x86_64-unknown-none` (`rust-toolchain.toml` `targets`) |
 | Build | `cargo build` (default target in `.cargo/config.toml`) |
 | Panic | kernel target `abort`; host tests `unwind` (`profile.dev`) |
-| Extra host tools | `xorriso`, `nasm` (AP trampoline), `qemu-system-x86_64`, `python3`, `dosfstools` (`fsck.fat`; host FAT tests skip if missing) |
+| Extra host tools | `xorriso`, `nasm` (`user/*.asm`), `qemu-system-x86_64`, `python3`, `dosfstools` (`fsck.fat`; host FAT tests skip if missing) |
 
-`make` is the usual entry. `cd src && cargo build` also works: `build.rs` passes
-`-T$CARGO_MANIFEST_DIR/linker.ld`. Host tests: `make test-unit` (`cargo test -p vibeos-core
---features std --target $HOST`). `tests/hostlib` is mkfs/fsck only.
+`make` is the usual entry. It stages `build/initrd.fat` and passes `VIBEOS_INITRD` into `build.rs`.
+Bare `cargo check` / `cargo build` works: `build.rs` passes `-T$CARGO_MANIFEST_DIR/linker.ld` and
+embeds an empty 64 KiB initrd if the env is unset. Host tests: `make test-unit` (`cargo test -p vibeos-core
+--features std --target $HOST`). `tests/hostlib` is mkfs/fsck/`mkinitrd` only.
 
 `make` pins `CARGO_TARGET_DIR` to `./target`. Some environments point it at a shared cache, which
 leaves the ISO packaging a stale ELF from a previous build and produces genuinely baffling debugging
@@ -1071,9 +1072,11 @@ Relevant MSRs across this section:
 An AP comes out of SIPI in real mode at `CS:IP = vector<<8 : 0`, so the entry point must be a 4 KiB
 aligned physical page below 1 MiB. We use `0x8000`, SIPI vector `0x08`.
 
-The trampoline is assembled separately with `nasm -f bin` and included as a blob. It goes: real mode,
-set up a GDT, enable protected mode, build page tables pointer from the passed CR3, set `EFER.LME` and
-`EFER.NXE`, enable paging, long jump to 64-bit, load the stack, call the Rust entry point.
+The trampoline is `src/arch/trampoline.S`, assembled with `global_asm!` into `.trampoline`
+(inside `__rodata_start..__rodata_end` so the kernel map covers the copy source) and copied
+to `0x8000`. It goes: real mode, set up a GDT, enable protected mode, load CR3 from the param block,
+set `EFER.LME` and `EFER.NXE`, enable paging, long jump to 64-bit, load the stack, call the Rust
+entry point. Addresses in the blob are physical (`0x8000`), not the kernel VMA.
 
 `EFER.NXE` matters. Kernel pages are mapped NX, and if the AP enters long mode without NXE the NX bits
 are reserved-bit violations and the first kernel page it touches faults.
@@ -1529,10 +1532,10 @@ separately the Makefile's prerequisite list was hand-maintained and did not incl
 directories. Rule: `make` pins `CARGO_TARGET_DIR` to `./target`, and prerequisites are a `find` over
 `src/`.
 
-**Build works from the repo root and fails from anywhere else.**
-`build.rs` invoked `nasm` on a relative path, and the linker script was a cwd-relative `--script`.
-Rule: anchor assembler paths and `-T linker.ld` to `CARGO_MANIFEST_DIR`, and capture the assembler's
-stderr into the build output so the failure is readable.
+**Bare `cargo build` has an empty initrd; a relative linker script used to fail off-root.**
+`build.rs` only copies `VIBEOS_INITRD` (64 KiB) and passes an absolute `-T linker.ld`. Unset
+`VIBEOS_INITRD` embeds zeros so `cargo check` works. Rule: `make` stages `build/initrd.fat` via
+hostlib `mkinitrd`. Do not generate the image inside `build.rs`.
 
 **A Limine response pointer is null and the kernel dies with no explanation.**
 The request static was not in the `.limine_requests` section, so the loader never saw it. Rule: every
