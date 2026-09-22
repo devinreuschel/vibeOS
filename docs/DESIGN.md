@@ -1072,7 +1072,8 @@ Relevant MSRs across this section:
 An AP comes out of SIPI in real mode at `CS:IP = vector<<8 : 0`, so the entry point must be a 4 KiB
 aligned physical page below 1 MiB. We use `0x8000`, SIPI vector `0x08`.
 
-The trampoline is `src/arch/trampoline.S`, assembled with `global_asm!` into `.trampoline` and copied
+The trampoline is `src/arch/trampoline.S`, assembled with `global_asm!` into `.trampoline`
+(inside `__rodata_start..__rodata_end` so the kernel map covers the copy source) and copied
 to `0x8000`. It goes: real mode, set up a GDT, enable protected mode, load CR3 from the param block,
 set `EFER.LME` and `EFER.NXE`, enable paging, long jump to 64-bit, load the stack, call the Rust
 entry point. Addresses in the blob are physical (`0x8000`), not the kernel VMA.

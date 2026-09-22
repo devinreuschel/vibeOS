@@ -46,14 +46,14 @@ SECTIONS
     .rodata : ALIGN(4K) {
         *(.rodata .rodata.*)
     } :rodata
-    __rodata_end = .;
 
-    /* AP trampoline blob. Copied to 0x8000; not executed here. */
+    /* Inside __rodata_* so paging maps it (copied to 0x8000, not executed here). */
     .trampoline : ALIGN(16) {
         __trampoline_start = .;
         KEEP(*(.trampoline))
         __trampoline_end = .;
     } :rodata
+    __rodata_end = .;
 
     . = ALIGN(4K);
     __data_start = .;
