@@ -5,6 +5,8 @@ ORG 0x40000000
 %include "sys.inc"
 
 _start:
+    sub rsp, 16
+
     ; write fd1
     mov eax, SYS_WRITE
     mov edi, 1
@@ -95,12 +97,12 @@ _start:
     syscall
 .wait7:
     mov rdi, rax
-    lea rsi, [rel st]
+    lea rsi, [rsp]
     xor rdx, rdx
     xor r10, r10
     mov eax, SYS_WAIT4
     syscall
-    cmp dword [st], 0x0700
+    cmp dword [rsp], 0x0700
     jne fail
 
     ; fork + exec /hello + wait 42
@@ -119,12 +121,12 @@ _start:
     syscall
 .waith:
     mov rdi, rax
-    lea rsi, [rel st]
+    lea rsi, [rsp]
     xor rdx, rdx
     xor r10, r10
     mov eax, SYS_WAIT4
     syscall
-    cmp dword [st], 0x2A00
+    cmp dword [rsp], 0x2A00
     jne fail
 
     ; fork + null deref → SIGSEGV
@@ -138,12 +140,12 @@ _start:
     ud2
 .waitf:
     mov rdi, rax
-    lea rsi, [rel st]
+    lea rsi, [rsp]
     xor rdx, rdx
     xor r10, r10
     mov eax, SYS_WAIT4
     syscall
-    mov eax, [st]
+    mov eax, [rsp]
     and eax, 0x7f
     cmp eax, SIGSEGV
     jne fail
@@ -208,4 +210,3 @@ bad_len     equ $ - bad
 hello_path: db "/hello", 0
 hello_arg0: db "/hello", 0
 hello_argv: dq hello_arg0, 0
-st:         dd 0

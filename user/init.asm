@@ -21,7 +21,7 @@ _start:
 
 .wait_tests:
     mov rdi, rax
-    lea rsi, [rel st]
+    xor rsi, rsi
     xor rdx, rdx
     xor r10, r10
     mov eax, SYS_WAIT4
@@ -57,4 +57,3 @@ tests_argv: dq tests_arg0, 0
 sh_path:    db "/bin/sh", 0
 sh_arg0:    db "/bin/sh", 0
 sh_argv:    dq sh_arg0, 0
-st:         dd 0

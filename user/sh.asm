@@ -1,11 +1,17 @@
 ; Interactive user shell. Prints the existing boot marker, then vibeos>.
 ; echo is enough for the e2e COM1 / PS/2 contract. ps uses SYS_PSINFO.
+; Image is PT_LOAD RX; scratch lives on the kernel-provided stack.
 
 BITS 64
 ORG 0x40000000
 %include "sys.inc"
 
 _start:
+    sub rsp, 656
+    mov rbx, rsp            ; line[128]
+    lea r15, [rsp + 128]    ; keyb[1]
+    lea r14, [rsp + 136]    ; pbuf[512]
+
     mov eax, SYS_WRITE
     mov edi, 1
     lea rsi, [rel ready]
@@ -19,17 +25,16 @@ _start:
     mov edx, prompt_len
     syscall
 
-    lea rbx, [rel line]
     xor r12, r12
 .read:
     mov eax, SYS_READ
     xor edi, edi
-    lea rsi, [rel keyb]
+    mov rsi, r15
     mov edx, 1
     syscall
     cmp rax, 1
     jl .loop
-    mov al, [keyb]
+    mov al, [r15]
     cmp al, 13
     je .submit
     cmp al, 10
@@ -44,7 +49,7 @@ _start:
     inc r12
     mov eax, SYS_WRITE
     mov edi, 1
-    lea rsi, [rel keyb]
+    mov rsi, r15
     mov edx, 1
     syscall
     jmp .read
@@ -90,8 +95,7 @@ _start:
     jmp .echo_sp
 .echo_out:
     mov rdx, rsi
-    lea rcx, [rel line]
-    add rcx, r12
+    lea rcx, [rbx + r12]
     sub rcx, rdx
     mov rdx, rcx
     mov eax, SYS_WRITE
@@ -106,7 +110,7 @@ _start:
 
 .do_ps:
     mov eax, SYS_PSINFO
-    lea rdi, [rel pbuf]
+    mov rdi, r14
     mov esi, 512
     syscall
     test rax, rax
@@ -114,14 +118,12 @@ _start:
     mov rdx, rax
     mov eax, SYS_WRITE
     mov edi, 1
-    lea rsi, [rel pbuf]
+    mov rsi, r14
     syscall
     jmp .loop
 
-; rsi = line start after skip_sp. rdi = prefix, ecx = prefix len.
-; returns rax=1 match, rsi unchanged? we use rsi as line ptr.
 skip_sp:
-    lea rsi, [rel line]
+    mov rsi, rbx
 .ss:
     cmp byte [rsi], 32
     jne .ss_done
@@ -162,6 +164,3 @@ echo_s:     db "echo"
 ps_s:       db "ps"
 nl:         db 10
 bseq:       db 8, 32, 8
-keyb:       db 0
-line:       times 128 db 0
-pbuf:       times 512 db 0
