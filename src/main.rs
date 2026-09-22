@@ -18,10 +18,10 @@
 #![feature(alloc_error_handler)]
 #![feature(abi_x86_interrupt)]
 // The panic-test build gates the entire non-panic tail behind
-// `#[cfg(not(feature = "panic-test"))]`, which leaves the Limine
+// `#[cfg(not(feature = "panic_test"))]`, which leaves the Limine
 // requests, paging init, and helpers technically dead. That is
 // deliberate — silence the noise so a real warning is not lost.
-#![cfg_attr(feature = "panic-test", allow(dead_code, unused_imports))]
+#![cfg_attr(feature = "panic_test", allow(dead_code, unused_imports))]
 
 extern crate alloc;
 
@@ -137,18 +137,18 @@ pub extern "C" fn _start() -> ! {
     }
     serial::line(marker::LIMINE_OK);
 
-    // With `--features panic-test`, prove the panic path end to end.
+    // With `--features panic_test`, prove the panic path end to end.
     // Kept before PMM init so the panic path still exercises only the
     // minimum machinery it needs to be diagnostic. Guarding both this
     // branch and the "normal path" tail avoids `unreachable_code`
     // warnings in the panic-test build.
-    #[cfg(feature = "panic-test")]
+    #[cfg(feature = "panic_test")]
     {
         serial::line("vibeOS: boot: panic-test armed");
         panic!("intentional panic-test trip");
     }
 
-    #[cfg(not(feature = "panic-test"))]
+    #[cfg(not(feature = "panic_test"))]
     {
         normal_boot_tail();
         x86::halt();
@@ -158,7 +158,7 @@ pub extern "C" fn _start() -> ! {
 /// The non-panic-test tail of `_start`. Kept as a fn so a `#[cfg]` on
 /// the call site silences `unreachable_code` in panic-test builds
 /// without duplicating markers.
-#[cfg(not(feature = "panic-test"))]
+#[cfg(not(feature = "panic_test"))]
 fn normal_boot_tail() {
     // ---- Phase 1 slice A: physical memory manager. ----
     let hhdm = HHDM
@@ -320,7 +320,7 @@ fn normal_boot_tail() {
 
     crate::user_init::boot_hello();
 
-    #[cfg(feature = "gp-test")]
+    #[cfg(feature = "gp_test")]
     gp_test_trip();
 
     // `shell ready` is last. gp-test trips after ramdisk so a #GP dump
@@ -351,7 +351,7 @@ fn normal_boot_tail() {
 
 /// Highest end address of any USABLE memmap entry, in physical bytes.
 /// Zero when the map has no USABLE entries (unreachable in practice).
-#[cfg(not(feature = "panic-test"))]
+#[cfg(not(feature = "panic_test"))]
 fn memmap_high_water(entries: &[&limine::memmap::Entry]) -> u64 {
     let mut hi = 0u64;
     for e in entries {
@@ -367,7 +367,7 @@ fn memmap_high_water(entries: &[&limine::memmap::Entry]) -> u64 {
 
 /// Highest `base + size` across all framebuffers, in physical bytes.
 /// Zero when Limine returns no framebuffers.
-#[cfg(not(feature = "panic-test"))]
+#[cfg(not(feature = "panic_test"))]
 fn framebuffer_phys_end(hhdm_offset: u64) -> u64 {
     let Some(resp) = FRAMEBUFFER.response() else {
         return 0;
@@ -389,13 +389,13 @@ fn framebuffer_phys_end(hhdm_offset: u64) -> u64 {
 
 /// Halt with a serial line. Used when a Limine response we depend on is
 /// missing; nothing after this point would work without it.
-#[cfg(not(feature = "panic-test"))]
+#[cfg(not(feature = "panic_test"))]
 fn halt_with(msg: &str) -> ! {
     serial::line(msg);
     x86::halt();
 }
 
-#[cfg(feature = "gp-test")]
+#[cfg(feature = "gp_test")]
 fn gp_test_trip() {
     serial::line("vibeOS: boot: gp-test armed");
     // Kernel code selector with RPL=3 into DS: not a data segment, #GP.

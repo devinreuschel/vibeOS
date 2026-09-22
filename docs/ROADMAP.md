@@ -126,7 +126,7 @@ rest of the project, which is the single most consequential decision in this pha
 - [x] `fmt::Write` implementation with no allocation, usable before the heap exists
 - [x] `print!` / `println!` macros routed to it
 - [x] `#[panic_handler]`: re-init the port from scratch, print location and message, `cli; hlt` loop
-- [x] a `panic-test` build feature or shell command so the panic path is exercised, not assumed
+- [x] a `panic_test` build feature or shell command so the panic path is exercised, not assumed
 
 ### 0.5 Build system
 - [x] `Makefile`: `all`, `run`, `clean`, plus the test targets

@@ -76,10 +76,10 @@ Cross-cutting and allowed from anywhere: `serial`, `panic`, `sync`, `log`.
 As of 2026-09-22 (Phase 9). Files that exist, not a target layout. [A1](reviews/issues/A1-directory-per-subsystem.md)
 will nest this pairing; do not invent `src/mm/` or `src/drivers/` until then.
 
-**Naming.** Portable logic is `src/<name>.rs`, declared in `src/lib.rs`, host-tested via
-`tests/hostlib`. Hardware and boot live in `src/<name>_init.rs` or a kernel-only file, declared in
-`src/main.rs`. Nested today: `src/arch/` (GDT, IDT, PIC, catch, gs) and `src/fs/` (VFS + kernfs).
-`user/` is freestanding ELFs, not kernel modules.
+**Naming.** `src/<name>.rs` is the portable half (`src/lib.rs`, host-tested via `tests/hostlib`).
+`src/<name>_init.rs` is the kernel half (`src/main.rs`). A few kernel-only files have no portable
+pair. `src/arch/` holds only what touches privileged CPU state (GDT, IDT, PIC, catch, gs). Nested
+also: `src/fs/` (VFS + kernfs). `user/` is freestanding ELFs, not kernel modules.
 
 | Subsystem | Portable | Kernel |
 |-----------|----------|--------|
@@ -1272,7 +1272,9 @@ functions after init, reports over serial, and exits QEMU through the `isa-debug
 
 Built into a separate Cargo target directory (`target-kernel-tests`) with its own ISO. This is not
 fussiness: sharing a target directory means a feature-enabled ELF can end up packaged into the
-production ISO, and the difference is not visible from the outside.
+production ISO, and the difference is not visible from the outside. The panic-dump and `#GP` ISOs
+are `--features panic_test --features panic_exit` and `--features gp_test --features panic_exit`
+(underscores everywhere; Cargo features in this crate do not use hyphens).
 
 ```
 vibeOS: ktest: begin
