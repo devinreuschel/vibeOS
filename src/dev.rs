@@ -439,7 +439,11 @@ impl Registry {
         self.drivers.get(i).and_then(|d| *d)
     }
 
-    fn sorted_driver_idx(&self, idx: &mut [u8; MAX_DRIVERS], order: &mut [u8; MAX_DRIVERS]) -> usize {
+    fn sorted_driver_idx(
+        &self,
+        idx: &mut [u8; MAX_DRIVERS],
+        order: &mut [u8; MAX_DRIVERS],
+    ) -> usize {
         let mut n = 0usize;
         let mut i = 0usize;
         while i < self.n_drv {

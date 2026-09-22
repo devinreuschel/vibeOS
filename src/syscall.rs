@@ -98,7 +98,9 @@ pub struct SyscallFrame {
 
 impl SyscallFrame {
     pub const fn args(self) -> [u64; 6] {
-        [self.arg0, self.arg1, self.arg2, self.arg3, self.arg4, self.arg5]
+        [
+            self.arg0, self.arg1, self.arg2, self.arg3, self.arg4, self.arg5,
+        ]
     }
 }
 
@@ -435,23 +437,9 @@ mod tests {
         for e in TABLE {
             n += 1;
             match e.nr {
-                SYS_READ
-                | SYS_WRITE
-                | SYS_OPEN
-                | SYS_CLOSE
-                | SYS_LSEEK
-                | SYS_DUP
-                | SYS_DUP2
-                | SYS_SCHED_YIELD
-                | SYS_GETPID
-                | SYS_GETPPID
-                | SYS_FORK
-                | SYS_EXECVE
-                | SYS_EXIT
-                | SYS_WAIT4
-                | SYS_KILL
-                | SYS_FCNTL
-                | SYS_PSINFO => {}
+                SYS_READ | SYS_WRITE | SYS_OPEN | SYS_CLOSE | SYS_LSEEK | SYS_DUP | SYS_DUP2
+                | SYS_SCHED_YIELD | SYS_GETPID | SYS_GETPPID | SYS_FORK | SYS_EXECVE | SYS_EXIT
+                | SYS_WAIT4 | SYS_KILL | SYS_FCNTL | SYS_PSINFO => {}
                 _ => panic!("unexpected nr"),
             }
         }

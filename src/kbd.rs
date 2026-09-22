@@ -390,11 +390,7 @@ fn from_row(make: u8, base: u8, map: &[u8], shifted: bool, caps: bool) -> Option
 fn case_letter(c: u8, shifted: bool, caps: bool) -> u8 {
     if (b'a'..=b'z').contains(&c) {
         let upper = shifted != caps;
-        if upper {
-            c.to_ascii_uppercase()
-        } else {
-            c
-        }
+        if upper { c.to_ascii_uppercase() } else { c }
     } else if shifted {
         match c {
             b'[' => b'{',

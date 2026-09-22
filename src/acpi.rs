@@ -728,7 +728,11 @@ mod tests {
         let mut b = rsdp_v2(0x2000, 0x1000);
         // Flip a v2-only byte so the 20-byte checksum still passes.
         b[33] ^= 0xFF;
-        assert_eq!(checksum(&b[..RSDP_V1_LEN]), 0, "v1 checksum must still pass");
+        assert_eq!(
+            checksum(&b[..RSDP_V1_LEN]),
+            0,
+            "v1 checksum must still pass"
+        );
         assert_eq!(parse_rsdp(&b), Err(AcpiError::BadChecksum));
     }
 

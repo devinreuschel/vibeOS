@@ -3,7 +3,7 @@
 //! Portable: inbox bits, RR placement, shootdown waiter/ack math.
 //! MMIO and IDT live in the binary crate.
 
-use crate::thread::{CpuAffinity, ThreadId, MAX_THREADS};
+use crate::thread::{CpuAffinity, MAX_THREADS, ThreadId};
 
 /// Matches the 64-bit online mask. PerCpu is heap-sized from MADT.
 pub const MAX_IPI_CPUS: usize = 64;

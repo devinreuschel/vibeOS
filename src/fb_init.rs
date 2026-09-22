@@ -7,8 +7,8 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use vibeos::fb::{
-    glyph_origin, last_text_row_offset, pack_bgrx, pixel_offset, scroll_copy, text_row_bytes,
-    CellAction, TextGrid,
+    CellAction, TextGrid, glyph_origin, last_text_row_offset, pack_bgrx, pixel_offset, scroll_copy,
+    text_row_bytes,
 };
 use vibeos::font::{self, FONT_H, FONT_W};
 use vibeos::lock::RANK_DEVICE;
@@ -182,8 +182,7 @@ impl Fb {
     }
 
     fn scroll(&self) {
-        let Some((src, dst, len)) =
-            scroll_copy(self.grid.banner_rows, self.grid.rows, self.pitch)
+        let Some((src, dst, len)) = scroll_copy(self.grid.banner_rows, self.grid.rows, self.pitch)
         else {
             return;
         };
@@ -209,7 +208,11 @@ impl Fb {
         let Some(row_bytes) = text_row_bytes(self.pitch) else {
             return;
         };
-        if off.checked_add(row_bytes).map(|e| e > self.size).unwrap_or(true) {
+        if off
+            .checked_add(row_bytes)
+            .map(|e| e > self.size)
+            .unwrap_or(true)
+        {
             return;
         }
         let y0 = (self.grid.rows - 1) * FONT_H;

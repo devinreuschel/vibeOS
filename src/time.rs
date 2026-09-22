@@ -3,7 +3,7 @@
 //! Portable half: interpolation, seqlock, deadline math, wall-clock offset.
 //! Port I/O, HPET MMIO, and the IRQ0 handler live in the binary crate.
 
-use core::sync::atomic::{fence, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering, fence};
 
 /// PIT input frequency in Hz. DESIGN §6.1.
 pub const PIT_HZ: u64 = 1_193_182;
@@ -294,8 +294,8 @@ pub const fn bcd_to_bin(v: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::thread;
     use std::time::Duration;
 

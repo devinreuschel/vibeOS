@@ -10,7 +10,8 @@ use crate::paging_init;
 use crate::pmm_init;
 
 pub fn alloc(spec: DmaAlloc) -> Option<DmaBuffer> {
-    let (phys, order) = pmm_init::with_buddy(|b| b.allocate_constrained(spec.size, spec.align, spec.boundary))?;
+    let (phys, order) =
+        pmm_init::with_buddy(|b| b.allocate_constrained(spec.size, spec.align, spec.boundary))?;
     let virt = paging_init::HHDM_BASE.wrapping_add(phys);
     let buf = DmaBuffer::from_phys(phys, virt, spec.size, order);
     buf.sync_for_device();

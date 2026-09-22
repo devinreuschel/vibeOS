@@ -115,11 +115,7 @@ impl Excludes {
 ///   free-list nodes into via HHDM.
 /// - Must run before interrupts are enabled and before any other CPU is
 ///   started, since `BUDDY` has no lock.
-pub unsafe fn init(
-    entries: &[&Entry],
-    hhdm_offset: u64,
-    kernel_phys_base: u64,
-) -> PmmStats {
+pub unsafe fn init(entries: &[&Entry], hhdm_offset: u64, kernel_phys_base: u64) -> PmmStats {
     let mut buddy = BUDDY.lock();
     buddy.set_hhdm_offset(hhdm_offset);
 

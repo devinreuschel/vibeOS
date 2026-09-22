@@ -5,7 +5,7 @@
 
 use core::mem::MaybeUninit;
 
-use crate::sched::{effective_deadline, ReadyQueue, TimeoutQueue};
+use crate::sched::{ReadyQueue, TimeoutQueue, effective_deadline};
 use crate::thread::ThreadId;
 use crate::time::Instant;
 
@@ -83,11 +83,7 @@ pub fn wake_one(
     Some(id)
 }
 
-pub fn wake_all(
-    wq: &mut WaitQueue,
-    ready: &mut ReadyQueue,
-    timeouts: &mut TimeoutQueue,
-) -> usize {
+pub fn wake_all(wq: &mut WaitQueue, ready: &mut ReadyQueue, timeouts: &mut TimeoutQueue) -> usize {
     let mut n = 0usize;
     while wake_one(wq, ready, timeouts).is_some() {
         n += 1;
@@ -301,7 +297,7 @@ impl<T, const N: usize> Drop for ChannelModel<T, N> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sched::{enqueue_runnable, take_next, wake_expired, FAR_DEADLINE};
+    use crate::sched::{FAR_DEADLINE, enqueue_runnable, take_next, wake_expired};
     use crate::thread::ThreadState;
 
     fn tid(n: u32) -> ThreadId {
@@ -475,7 +471,10 @@ mod tests {
         r.write_wq.remove(tid(2));
         timeouts.remove(tid(2));
         assert_eq!(r.after_writer_wait_timeout(), WriterTimeoutWake::NextWriter);
-        assert_eq!(wake_one(&mut r.write_wq, &mut ready, &mut timeouts), Some(tid(3)));
+        assert_eq!(
+            wake_one(&mut r.write_wq, &mut ready, &mut timeouts),
+            Some(tid(3))
+        );
     }
 
     #[test]

@@ -53,10 +53,18 @@ pub fn last_text_row_offset(rows: u32, pitch: u64) -> Option<u64> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CellAction {
     None,
-    Glyph { col: u32, row: u32, ch: u8 },
+    Glyph {
+        col: u32,
+        row: u32,
+        ch: u8,
+    },
     Scroll,
     /// Wrap off the last row: scroll first, then paint.
-    GlyphThenScroll { col: u32, row: u32, ch: u8 },
+    GlyphThenScroll {
+        col: u32,
+        row: u32,
+        ch: u8,
+    },
 }
 
 /// Text cursor + wrap/scroll. Banner rows are never the cursor's home
@@ -201,11 +209,39 @@ mod tests {
         assert_eq!(g.cols, 2);
         assert_eq!(g.rows, 3);
         assert_eq!(g.row, 1);
-        assert_eq!(g.put(b'A'), CellAction::Glyph { col: 0, row: 1, ch: b'A' });
-        assert_eq!(g.put(b'B'), CellAction::Glyph { col: 1, row: 1, ch: b'B' });
+        assert_eq!(
+            g.put(b'A'),
+            CellAction::Glyph {
+                col: 0,
+                row: 1,
+                ch: b'A'
+            }
+        );
+        assert_eq!(
+            g.put(b'B'),
+            CellAction::Glyph {
+                col: 1,
+                row: 1,
+                ch: b'B'
+            }
+        );
         // wrap to next text row
-        assert_eq!(g.put(b'C'), CellAction::Glyph { col: 0, row: 2, ch: b'C' });
-        assert_eq!(g.put(b'D'), CellAction::Glyph { col: 1, row: 2, ch: b'D' });
+        assert_eq!(
+            g.put(b'C'),
+            CellAction::Glyph {
+                col: 0,
+                row: 2,
+                ch: b'C'
+            }
+        );
+        assert_eq!(
+            g.put(b'D'),
+            CellAction::Glyph {
+                col: 1,
+                row: 2,
+                ch: b'D'
+            }
+        );
         // next wrap scrolls; banner row 0 is not the cursor
         let a = g.put(b'E');
         assert_eq!(
@@ -253,14 +289,42 @@ mod tests {
     fn cr_homes_column_same_row() {
         let mut g = TextGrid::new(80, 32, 1).unwrap(); // 10 cols, 4 rows
         let row = g.row;
-        assert_eq!(g.put(b'A'), CellAction::Glyph { col: 0, row, ch: b'A' });
-        assert_eq!(g.put(b'B'), CellAction::Glyph { col: 1, row, ch: b'B' });
-        assert_eq!(g.put(b'C'), CellAction::Glyph { col: 2, row, ch: b'C' });
+        assert_eq!(
+            g.put(b'A'),
+            CellAction::Glyph {
+                col: 0,
+                row,
+                ch: b'A'
+            }
+        );
+        assert_eq!(
+            g.put(b'B'),
+            CellAction::Glyph {
+                col: 1,
+                row,
+                ch: b'B'
+            }
+        );
+        assert_eq!(
+            g.put(b'C'),
+            CellAction::Glyph {
+                col: 2,
+                row,
+                ch: b'C'
+            }
+        );
         assert_eq!(g.col, 3);
         assert_eq!(g.put(b'\r'), CellAction::None);
         assert_eq!(g.col, 0);
         assert_eq!(g.row, row);
-        assert_eq!(g.put(b'X'), CellAction::Glyph { col: 0, row, ch: b'X' });
+        assert_eq!(
+            g.put(b'X'),
+            CellAction::Glyph {
+                col: 0,
+                row,
+                ch: b'X'
+            }
+        );
         assert_eq!(g.col, 1);
         assert_eq!(g.row, row);
     }
@@ -286,10 +350,31 @@ mod tests {
         }
         assert_eq!(g.col, 2);
         assert_eq!(g.put(b'\r'), CellAction::None);
-        assert_eq!(g.put(b'a'), CellAction::Glyph { col: 0, row: home, ch: b'a' });
-        assert_eq!(g.put(b' '), CellAction::Glyph { col: 1, row: home, ch: b' ' });
+        assert_eq!(
+            g.put(b'a'),
+            CellAction::Glyph {
+                col: 0,
+                row: home,
+                ch: b'a'
+            }
+        );
+        assert_eq!(
+            g.put(b' '),
+            CellAction::Glyph {
+                col: 1,
+                row: home,
+                ch: b' '
+            }
+        );
         assert_eq!(g.put(b'\r'), CellAction::None);
-        assert_eq!(g.put(b'a'), CellAction::Glyph { col: 0, row: home, ch: b'a' });
+        assert_eq!(
+            g.put(b'a'),
+            CellAction::Glyph {
+                col: 0,
+                row: home,
+                ch: b'a'
+            }
+        );
         assert_eq!(g.col, 1);
         assert_eq!(g.row, home);
     }

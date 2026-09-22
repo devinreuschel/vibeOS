@@ -9,8 +9,8 @@
 
 use core::cell::UnsafeCell;
 
-use vibeos::kva::{Kva, KvaStats, KVA_END, KVA_SIZE, KVA_START, PAGE_SIZE};
-use vibeos::paging::{heap_flags, stack_flags, PhysAddr, VirtAddr};
+use vibeos::kva::{KVA_END, KVA_SIZE, KVA_START, Kva, KvaStats, PAGE_SIZE};
+use vibeos::paging::{PhysAddr, VirtAddr, heap_flags, stack_flags};
 
 use crate::paging_init;
 use crate::pmm_init;
@@ -200,20 +200,15 @@ pub fn vmap(frames: &[PhysAddr]) -> Option<VirtAddr> {
 
 pub fn vunmap(va: VirtAddr, nframes: usize) {
     unmap_shootdown(va, nframes, false);
-    paging_init::with_pt(|| unsafe {
-        KVA.get_mut()
-            .free(va.as_u64(), nframes as u64 * PAGE_SIZE)
-    });
+    paging_init::with_pt(|| unsafe { KVA.get_mut().free(va.as_u64(), nframes as u64 * PAGE_SIZE) });
 }
 
 unsafe fn free_stack_shootdown(stack: GuardedStack) {
     let base = stack.mapped_base();
     unmap_shootdown(base, stack.pages, true);
     paging_init::with_pt(|| unsafe {
-        KVA.get_mut().free(
-            stack.guard.as_u64(),
-            (stack.pages as u64 + 1) * PAGE_SIZE,
-        );
+        KVA.get_mut()
+            .free(stack.guard.as_u64(), (stack.pages as u64 + 1) * PAGE_SIZE);
     });
 }
 

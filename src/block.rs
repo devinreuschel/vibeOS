@@ -16,7 +16,6 @@
 /// Completions: the queue lock is never held across `BlockDevice` I/O
 /// or a waiter wake. A later virtio-blk threaded IRQ (DESIGN §2.2 / §5.4)
 /// can call the same complete path. Hard IRQ only enqueues work.
-
 use crate::fmt_util;
 
 pub const DEFAULT_BLOCK_SIZE: u32 = 512;
@@ -505,18 +504,11 @@ pub struct Ramdisk {
 }
 
 impl Ramdisk {
-    pub fn new(
-        name: &'static str,
-        block_size: u32,
-        nsectors: u64,
-    ) -> Result<Self, BlockError> {
+    pub fn new(name: &'static str, block_size: u32, nsectors: u64) -> Result<Self, BlockError> {
         if name.is_empty() || block_size == 0 || nsectors == 0 {
             return Err(BlockError::Inval);
         }
-        if (nsectors as u128)
-            .checked_mul(block_size as u128)
-            .is_none()
-        {
+        if (nsectors as u128).checked_mul(block_size as u128).is_none() {
             return Err(BlockError::Inval);
         }
         Ok(Self {
@@ -549,9 +541,7 @@ impl Ramdisk {
         }
         let nsect = (buf.len() / bs) as u32;
         self.check_range(lba, nsect as u64)?;
-        let off = (lba as usize)
-            .checked_mul(bs)
-            .ok_or(BlockError::Inval)?;
+        let off = (lba as usize).checked_mul(bs).ok_or(BlockError::Inval)?;
         Ok((off, nsect))
     }
 
@@ -611,14 +601,11 @@ impl Ramdisk {
                         return Err(BlockError::Inval);
                     }
                     if req.bio.op == Op::Read {
-                        let buf = unsafe {
-                            core::slice::from_raw_parts_mut(s.ptr as *mut u8, s.len)
-                        };
+                        let buf =
+                            unsafe { core::slice::from_raw_parts_mut(s.ptr as *mut u8, s.len) };
                         self.read(data, lba, buf)?;
                     } else {
-                        let buf = unsafe {
-                            core::slice::from_raw_parts(s.ptr as *const u8, s.len)
-                        };
+                        let buf = unsafe { core::slice::from_raw_parts(s.ptr as *const u8, s.len) };
                         self.write(data, lba, buf)?;
                     }
                     lba = lba.saturating_add((s.len / bs) as u64);
@@ -631,11 +618,7 @@ impl Ramdisk {
 }
 
 /// `vibeOS: block: <name> <n> sectors` without allocating.
-pub fn write_marker(
-    f: &mut impl core::fmt::Write,
-    name: &str,
-    sectors: u64,
-) -> core::fmt::Result {
+pub fn write_marker(f: &mut impl core::fmt::Write, name: &str, sectors: u64) -> core::fmt::Result {
     let mut nbuf = [0u8; 20];
     let n = fmt_util::write_dec(sectors, &mut nbuf);
     f.write_str("vibeOS: block: ")?;

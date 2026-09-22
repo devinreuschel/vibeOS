@@ -6,9 +6,9 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use vibeos::fs::{FsError, FsType, VibeFs, MAX_PATH};
+use vibeos::fs::{FsError, FsType, MAX_PATH, VibeFs};
 use vibeos::lock::RANK_DEVICE;
-use vibeos::vibefs::{self, Disk, Error, Node, Vol, BLOCK, ROOT_INO};
+use vibeos::vibefs::{self, BLOCK, Disk, Error, Node, ROOT_INO, Vol};
 
 use crate::block_init;
 use crate::cache_init;
@@ -368,20 +368,12 @@ pub fn route(path: &[u8]) -> (u8, usize) {
         }
         i += 1;
     }
-    if hit {
-        (vol, best)
-    } else {
-        (0, 0)
-    }
+    if hit { (vol, best) } else { (0, 0) }
 }
 
 pub fn routed_rest(path: &[u8], strip: usize) -> &[u8] {
     if strip == 0 {
-        if path.is_empty() {
-            b"/"
-        } else {
-            path
-        }
+        if path.is_empty() { b"/" } else { path }
     } else if strip >= path.len() {
         b"/"
     } else {

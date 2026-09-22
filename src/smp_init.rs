@@ -12,8 +12,8 @@ use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::marker;
 use vibeos::per_cpu::PerCpu;
 use vibeos::smp::{
-    blob_fits, pack_idtr, INIT_WAIT_MS, PARAM_CR3, PARAM_ENTRY, PARAM_IDT, PARAM_STACK,
-    READY_TIMEOUT_MS, SIPI_VECTOR, SIPI_WAIT_MS, TRAMPOLINE_PHYS,
+    INIT_WAIT_MS, PARAM_CR3, PARAM_ENTRY, PARAM_IDT, PARAM_STACK, READY_TIMEOUT_MS, SIPI_VECTOR,
+    SIPI_WAIT_MS, TRAMPOLINE_PHYS, blob_fits, pack_idtr,
 };
 use vibeos::thread::ThreadId;
 
@@ -29,7 +29,10 @@ use crate::time_init;
 use crate::x86;
 
 const BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/trampoline.bin"));
-const _: () = assert!(blob_fits(BLOB.len()), "trampoline blob overlaps param block");
+const _: () = assert!(
+    blob_fits(BLOB.len()),
+    "trampoline blob overlaps param block"
+);
 
 struct BootCell<T>(core::cell::UnsafeCell<T>);
 unsafe impl<T> Sync for BootCell<T> {}

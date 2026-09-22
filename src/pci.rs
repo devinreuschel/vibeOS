@@ -623,13 +623,7 @@ pub fn read_msix_cap<C: CfgIo>(cfg: &mut C, bdf: Bdf, cap: u8) -> MsixCap {
     MsixCap::parse(cap, control, table, pba)
 }
 
-pub fn set_msix_enable<C: CfgIo>(
-    cfg: &mut C,
-    bdf: Bdf,
-    cap: u8,
-    enable: bool,
-    func_mask: bool,
-) {
+pub fn set_msix_enable<C: CfgIo>(cfg: &mut C, bdf: Bdf, cap: u8, enable: bool, func_mask: bool) {
     let off = cap as u16 + 2;
     let mut ctl = read16(cfg, bdf, off);
     if enable {

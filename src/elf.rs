@@ -1,6 +1,6 @@
 //! ELF64 parse + initial stack. ROADMAP §9.4. Mapping is the kernel half.
 
-use crate::paging::{is_canonical, NULL_GUARD_LEN, PAGE_SIZE_4K, USER_END};
+use crate::paging::{NULL_GUARD_LEN, PAGE_SIZE_4K, USER_END, is_canonical};
 
 pub const ELFMAG0: u8 = 0x7F;
 pub const ELFCLASS64: u8 = 2;
@@ -318,7 +318,8 @@ pub fn parse(data: &[u8]) -> Result<Image<'_>, ElfError> {
         let mut j = 0;
         while j < nload {
             let s = loads[j];
-            if s.offset <= phoff && phoff + (phnum as u64) * (phentsize as u64) <= s.offset + s.filesz
+            if s.offset <= phoff
+                && phoff + (phnum as u64) * (phentsize as u64) <= s.offset + s.filesz
             {
                 phdr_va = Some(s.vaddr + (phoff - s.offset));
                 break;
@@ -411,10 +412,7 @@ pub fn build_initial_stack(
     let random_off = sp;
 
     let naux = aux.len() + 2; // AT_RANDOM + AT_NULL
-    let ptr_bytes = 8
-        + 8 * (argv.len() + 1)
-        + 8 * (envp.len() + 1)
-        + 16 * naux;
+    let ptr_bytes = 8 + 8 * (argv.len() + 1) + 8 * (envp.len() + 1) + 16 * naux;
     if sp < ptr_bytes {
         return Err(ElfError::Stack);
     }
@@ -589,15 +587,7 @@ mod tests {
 
     #[test]
     fn pt_interp_refused() {
-        let extra = [(
-            PT_INTERP,
-            PF_R,
-            0u64,
-            0u64,
-            0u64,
-            0u64,
-            1u64,
-        )];
+        let extra = [(PT_INTERP, PF_R, 0u64, 0u64, 0u64, 0u64, 1u64)];
         let elf = build_elf(0x4000_0000, &[0x90], &extra);
         assert_eq!(parse_err(&elf), ElfError::HasInterp);
     }
@@ -605,24 +595,8 @@ mod tests {
     #[test]
     fn gnu_stack_and_tls_and_bss() {
         let extra = [
-            (
-                PT_GNU_STACK,
-                PF_R | PF_W,
-                0u64,
-                0u64,
-                0,
-                0,
-                16u64,
-            ),
-            (
-                PT_TLS,
-                PF_R | PF_W,
-                0x1000u64,
-                0x4000_0000u64,
-                1,
-                8,
-                8u64,
-            ),
+            (PT_GNU_STACK, PF_R | PF_W, 0u64, 0u64, 0, 0, 16u64),
+            (PT_TLS, PF_R | PF_W, 0x1000u64, 0x4000_0000u64, 1, 8, 8u64),
         ];
         let elf = build_elf(0x4000_0000, &[0x90, 0, 0, 0, 0, 0, 0, 0], &extra);
         let img = parse(&elf).unwrap();
@@ -641,7 +615,15 @@ mod tests {
 
     #[test]
     fn filesz_gt_memsz_and_kernel_va() {
-        let extra = [(PT_LOAD, PF_R, 0x1000u64, 0x4000_1000u64, 16u64, 4u64, 0x1000u64)];
+        let extra = [(
+            PT_LOAD,
+            PF_R,
+            0x1000u64,
+            0x4000_1000u64,
+            16u64,
+            4u64,
+            0x1000u64,
+        )];
         // two PT_LOADs: builder always emits one; extra adds a bad one.
         // The extra is a second LOAD with filesz>memsz.
         let elf = build_elf(0x4000_0000, &[0u8; 32], &extra);
@@ -679,22 +661,17 @@ mod tests {
     fn stack_argv_auxv() {
         let mut mem = [0u8; 512];
         let top = 0x0000_0000_8000_0000u64;
-        let aux = [Auxv {
-            tag: AT_PAGESZ,
-            val: 4096,
-        }, Auxv {
-            tag: AT_ENTRY,
-            val: 0x4000_0000,
-        }];
-        let rsp = build_initial_stack(
-            top,
-            &mut mem,
-            &[b"/hello"],
-            &[],
-            &aux,
-            &[0x11; 16],
-        )
-        .unwrap();
+        let aux = [
+            Auxv {
+                tag: AT_PAGESZ,
+                val: 4096,
+            },
+            Auxv {
+                tag: AT_ENTRY,
+                val: 0x4000_0000,
+            },
+        ];
+        let rsp = build_initial_stack(top, &mut mem, &[b"/hello"], &[], &aux, &[0x11; 16]).unwrap();
         assert_eq!(rsp & 0xf, 0);
         let base = top - mem.len() as u64;
         let off = (rsp - base) as usize;

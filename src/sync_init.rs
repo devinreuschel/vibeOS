@@ -9,13 +9,12 @@ use core::cell::UnsafeCell;
 use core::mem::ManuallyDrop;
 use core::ops::{Deref, DerefMut};
 
-use vibeos::lock::{can_acquire, acquire_mask, release_mask};
+use vibeos::lock::{acquire_mask, can_acquire, release_mask};
 use vibeos::sync::SpinLock;
 use vibeos::thread::{ThreadId, WaitOutcome};
 use vibeos::time::Instant;
 use vibeos::wait::{
-    deadline_of, ChannelModel, CondModel, MutexModel, RwLockModel, SemaModel,
-    WriterTimeoutWake,
+    ChannelModel, CondModel, MutexModel, RwLockModel, SemaModel, WriterTimeoutWake, deadline_of,
 };
 
 use crate::per_cpu_init;
@@ -295,13 +294,11 @@ impl<T> RwLock<T> {
     }
 
     pub fn read(&self) -> RwLockReadGuard<'_, T> {
-        self.read_until(None)
-            .expect("rwlock: far deadline fired")
+        self.read_until(None).expect("rwlock: far deadline fired")
     }
 
     pub fn write(&self) -> RwLockWriteGuard<'_, T> {
-        self.write_until(None)
-            .expect("rwlock: far deadline fired")
+        self.write_until(None).expect("rwlock: far deadline fired")
     }
 
     pub fn read_until(&self, deadline: Option<Instant>) -> Option<RwLockReadGuard<'_, T>> {
@@ -433,8 +430,7 @@ impl Semaphore {
     }
 
     pub fn acquire(&self) {
-        self.acquire_until(None)
-            .expect("sema: far deadline fired");
+        self.acquire_until(None).expect("sema: far deadline fired");
     }
 
     pub fn acquire_until(&self, deadline: Option<Instant>) -> Option<()> {
@@ -488,10 +484,7 @@ impl Condvar {
         }
     }
 
-    pub fn wait<'a, T>(
-        &self,
-        guard: BlockingMutexGuard<'a, T>,
-    ) -> BlockingMutexGuard<'a, T> {
+    pub fn wait<'a, T>(&self, guard: BlockingMutexGuard<'a, T>) -> BlockingMutexGuard<'a, T> {
         self.wait_until(guard, None).0
     }
 

@@ -11,7 +11,7 @@ use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use vibeos::log::{
-    allowed, Level, Logger, Record, COMPILE_MAX, DEFAULT_RUNTIME_MAX, DUMP_LAST, MSG_CAP, RING_CAP,
+    COMPILE_MAX, DEFAULT_RUNTIME_MAX, DUMP_LAST, Level, Logger, MSG_CAP, RING_CAP, Record, allowed,
 };
 
 use crate::per_cpu_init;
@@ -196,12 +196,7 @@ pub fn capture_serial(bytes: &[u8]) {
         }
         if b == b'\n' {
             if st.len > 0 {
-                let rec = Record::from_msg(
-                    timestamp(),
-                    cpu_id(),
-                    Level::Info,
-                    &st.buf[..st.len],
-                );
+                let rec = Record::from_msg(timestamp(), cpu_id(), Level::Info, &st.buf[..st.len]);
                 st.len = 0;
                 lock_ring();
                 let _ = unsafe { &mut *LOG.0.get() }.emit(rec);
@@ -221,7 +216,11 @@ pub fn contains_msg(needle: &str) -> bool {
     if n.is_empty() {
         return true;
     }
-    with_logger(|l| l.ring.iter().any(|r| r.msg().windows(n.len()).any(|w| w == n)))
+    with_logger(|l| {
+        l.ring
+            .iter()
+            .any(|r| r.msg().windows(n.len()).any(|w| w == n))
+    })
 }
 
 pub fn ring_len() -> usize {
@@ -306,7 +305,11 @@ pub fn dump_tail(n: usize) {
             n.min(l.ring.len()),
             l.ring.dropped()
         );
-        let unit = if time_init::tsc_per_ms() != 0 { "ms" } else { "tsc" };
+        let unit = if time_init::tsc_per_ms() != 0 {
+            "ms"
+        } else {
+            "tsc"
+        };
         for r in l.ring.last_n(n) {
             let _ = writeln!(
                 Serial,

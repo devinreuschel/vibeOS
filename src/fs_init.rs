@@ -87,11 +87,7 @@ fn populate_devfs() {
 }
 
 fn hex_nib(d: u8) -> u8 {
-    if d < 10 {
-        b'0' + d
-    } else {
-        b'a' + (d - 10)
-    }
+    if d < 10 { b'0' + d } else { b'a' + (d - 10) }
 }
 
 fn bdf_name(bus: u8, device: u8, function: u8, out: &mut [u8; 8]) -> &[u8] {

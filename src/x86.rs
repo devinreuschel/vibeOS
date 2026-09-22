@@ -7,7 +7,9 @@ use core::arch::asm;
 /// Caller vouches that `port` is a valid I/O port for a byte write.
 #[inline]
 pub unsafe fn outb(port: u16, val: u8) {
-    unsafe { asm!("out dx, al", in("dx") port, in("al") val, options(nomem, nostack, preserves_flags)) };
+    unsafe {
+        asm!("out dx, al", in("dx") port, in("al") val, options(nomem, nostack, preserves_flags))
+    };
 }
 
 /// # Safety
@@ -15,7 +17,9 @@ pub unsafe fn outb(port: u16, val: u8) {
 #[inline]
 pub unsafe fn inb(port: u16) -> u8 {
     let val: u8;
-    unsafe { asm!("in al, dx", out("al") val, in("dx") port, options(nomem, nostack, preserves_flags)) };
+    unsafe {
+        asm!("in al, dx", out("al") val, in("dx") port, options(nomem, nostack, preserves_flags))
+    };
     val
 }
 

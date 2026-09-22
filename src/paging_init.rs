@@ -362,7 +362,11 @@ pub fn dump_ranges_to(w: &mut impl Write) {
             );
         };
         mapper.walk_ranges(VirtAddr(0), VirtAddr(0x0000_8000_0000_0000), &mut visit);
-        mapper.walk_ranges(VirtAddr(0xFFFF_8000_0000_0000), VirtAddr(u64::MAX), &mut visit);
+        mapper.walk_ranges(
+            VirtAddr(0xFFFF_8000_0000_0000),
+            VirtAddr(u64::MAX),
+            &mut visit,
+        );
         let _ = writeln!(w, "vibeOS: pt: {n} ranges");
     });
 }
@@ -411,27 +415,42 @@ pub unsafe fn install(
     // ---- 1. Kernel image, per section ----
     let vma_start = sym_addr(unsafe { &__kernel_vma_start });
     let text_bytes = map_kernel_section(
-        &mut mapper, &mut alloc, kernel_phys_base, vma_start,
-        sym_addr(unsafe { &__text_start }), sym_addr(unsafe { &__text_end }),
+        &mut mapper,
+        &mut alloc,
+        kernel_phys_base,
+        vma_start,
+        sym_addr(unsafe { &__text_start }),
+        sym_addr(unsafe { &__text_end }),
         paging::kernel_text_flags(),
     );
     let rodata_bytes = map_kernel_section(
-        &mut mapper, &mut alloc, kernel_phys_base, vma_start,
-        sym_addr(unsafe { &__rodata_start }), sym_addr(unsafe { &__rodata_end }),
+        &mut mapper,
+        &mut alloc,
+        kernel_phys_base,
+        vma_start,
+        sym_addr(unsafe { &__rodata_start }),
+        sym_addr(unsafe { &__rodata_end }),
         paging::kernel_rodata_flags(),
     );
     // Limine's request table sits before .text but must remain readable
     // (Limine walks it during handoff; we still read `is_supported`
     // etc after paging is up on future paths). Read-only + NX.
     let _limine_req_bytes = map_kernel_section(
-        &mut mapper, &mut alloc, kernel_phys_base, vma_start,
+        &mut mapper,
+        &mut alloc,
+        kernel_phys_base,
+        vma_start,
         sym_addr(unsafe { &__limine_requests_start }),
         sym_addr(unsafe { &__limine_requests_end }),
         paging::kernel_rodata_flags(),
     );
     let data_bytes = map_kernel_section(
-        &mut mapper, &mut alloc, kernel_phys_base, vma_start,
-        sym_addr(unsafe { &__data_start }), sym_addr(unsafe { &__data_end }),
+        &mut mapper,
+        &mut alloc,
+        kernel_phys_base,
+        vma_start,
+        sym_addr(unsafe { &__data_start }),
+        sym_addr(unsafe { &__data_end }),
         paging::kernel_data_flags(),
     );
 
@@ -562,7 +581,14 @@ fn map_kernel_section(
     let phys = kernel_phys_base + (start - vma_start);
     unsafe {
         mapper
-            .map_range(VirtAddr(start), PhysAddr(phys), len, flags, MapMode::Fresh, alloc)
+            .map_range(
+                VirtAddr(start),
+                PhysAddr(phys),
+                len,
+                flags,
+                MapMode::Fresh,
+                alloc,
+            )
             .expect("kernel section map_range");
     }
     len
@@ -603,12 +629,12 @@ unsafe fn duplicate_pml4_entry_from_current(mapper: &mut Mapper, va: VirtAddr) {
         // Nothing to duplicate; the switch would fault anyway. Better to
         // trip that fault immediately with a clear panic than to succeed
         // and lose the log.
-        panic!("paging: rsp {:#x} not mapped in Limine's PML4 either", va.as_u64());
+        panic!(
+            "paging: rsp {:#x} not mapped in Limine's PML4 either",
+            va.as_u64()
+        );
     }
-    let dst = mapper
-        .root()
-        .as_u64()
-        .wrapping_add(HHDM_BASE) as *mut u64;
+    let dst = mapper.root().as_u64().wrapping_add(HHDM_BASE) as *mut u64;
     let existing = unsafe { dst.add(idx).read_volatile() };
     assert!(
         existing & PageFlags::PRESENT == 0,

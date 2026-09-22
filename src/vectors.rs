@@ -55,10 +55,7 @@ pub const LAPIC_SPURIOUS: u8 = 0xFF;
 /// Exception vectors that push an error code. Installing a no-code
 /// `x86-interrupt` handler on these misaligns the iret frame.
 pub const fn pushes_error_code(vec: u8) -> bool {
-    matches!(
-        vec,
-        DF | TS | NP | SS | GP | PF | AC | CP | 29 | 30
-    )
+    matches!(vec, DF | TS | NP | SS | GP | PF | AC | CP | 29 | 30)
 }
 
 /// Every distinct named vector, for the uniqueness test. Aliases
@@ -110,10 +107,7 @@ mod tests {
     fn named_vectors_are_unique() {
         for (i, (a, va)) in NAMED.iter().enumerate() {
             for (b, vb) in NAMED.iter().skip(i + 1) {
-                assert_ne!(
-                    va, vb,
-                    "{a} and {b} both claimed vector {va:#x}"
-                );
+                assert_ne!(va, vb, "{a} and {b} both claimed vector {va:#x}");
             }
         }
     }

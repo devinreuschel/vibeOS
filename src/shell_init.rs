@@ -7,14 +7,14 @@
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use vibeos::acpi::{Gas, GAS_SYSTEM_IO, GAS_SYSTEM_MEMORY};
+use vibeos::acpi::{GAS_SYSTEM_IO, GAS_SYSTEM_MEMORY, Gas};
 use vibeos::kbd::DecodedKey;
 use vibeos::log::Level;
 use vibeos::marker;
 use vibeos::shell::{
-    Command, Feed, LineEditor, Registry, LINE_CAP, MAX_COMMANDS, MAX_TOKENS, PROMPT,
+    Command, Feed, LINE_CAP, LineEditor, MAX_COMMANDS, MAX_TOKENS, PROMPT, Registry,
 };
-use vibeos::thread::{ThreadId, ThreadState, MAX_THREADS};
+use vibeos::thread::{MAX_THREADS, ThreadId, ThreadState};
 
 use crate::acpi_init;
 use crate::console_init::{self, Console};
@@ -436,8 +436,7 @@ fn pulse_8042() {
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn builtin_names() -> [&'static str; 10] {
     [
-        "help", "echo", "meminfo", "uptime", "cpus", "dmesg", "ps", "panic", "reboot",
-        "poweroff",
+        "help", "echo", "meminfo", "uptime", "cpus", "dmesg", "ps", "panic", "reboot", "poweroff",
     ]
 }
 

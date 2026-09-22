@@ -307,7 +307,9 @@ impl FatVol {
         if info.fsinfo != 0 && info.fsinfo < info.rsvd {
             let mut fs = [0u8; SEC];
             d.read(info.fsinfo, &mut fs)?;
-            if le32(&fs, 0) == 0x4161_5252 && le32(&fs, 484) == 0x6141_7272 && le32(&fs, 508) == 0xAA55_0000
+            if le32(&fs, 0) == 0x4161_5252
+                && le32(&fs, 484) == 0x6141_7272
+                && le32(&fs, 508) == 0xAA55_0000
             {
                 let free = le32(&fs, 488);
                 let hint = le32(&fs, 492);
@@ -447,9 +449,7 @@ impl FatVol {
         if buf.is_empty() {
             return Ok(0);
         }
-        let end = off
-            .checked_add(buf.len() as u64)
-            .ok_or(FatError::NoSpace)?;
+        let end = off.checked_add(buf.len() as u64).ok_or(FatError::NoSpace)?;
         if end > u32::MAX as u64 {
             return Err(FatError::NoSpace);
         }
@@ -986,11 +986,7 @@ impl FatVol {
         self.fat_set(d, new, EOC_MIN)?;
         self.commit_fat(d)?;
         d.flush()?;
-        let start = if run > 0 {
-            run_off
-        } else {
-            off
-        };
+        let start = if run > 0 { run_off } else { off };
         let have = run * ENT;
         if have + cb < need {
             return Err(FatError::NoSpace);
@@ -998,7 +994,12 @@ impl FatVol {
         Ok((dir, start))
     }
 
-    fn mark_deleted<D: Disk>(&mut self, d: &mut D, dir: u32, short_off: u32) -> Result<(), FatError> {
+    fn mark_deleted<D: Disk>(
+        &mut self,
+        d: &mut D,
+        dir: u32,
+        short_off: u32,
+    ) -> Result<(), FatError> {
         // Walk back over LFN entries.
         let mut off = short_off;
         loop {
@@ -1104,7 +1105,11 @@ impl FatVol {
         let mut buf = [0u8; MAX_CLUS_BYTES];
         let n = self.info.clus_bytes();
         fill_dot(&mut buf[0..ENT], b".          ", clu, self.now);
-        let p = if parent == self.info.root_clus { 0 } else { parent };
+        let p = if parent == self.info.root_clus {
+            0
+        } else {
+            parent
+        };
         fill_dot(&mut buf[ENT..ENT * 2], b"..         ", p, self.now);
         self.write_cluster(d, clu, &buf[..n])
     }
@@ -1776,11 +1781,7 @@ fn take_lfn(ent: &[u8; ENT], out: &mut [u8; MAX_NAME], _len: usize) -> usize {
         return 0;
     }
     let base = ((ord as usize) - 1) * LFN_CHARS;
-    let slots = [
-        (1usize, 5usize),
-        (14usize, 6usize),
-        (28usize, 2usize),
-    ];
+    let slots = [(1usize, 5usize), (14usize, 6usize), (28usize, 2usize)];
     let mut i = 0usize;
     let mut n = 0usize;
     while i < 3 {
@@ -1806,11 +1807,7 @@ fn take_lfn(ent: &[u8; ENT], out: &mut [u8; MAX_NAME], _len: usize) -> usize {
         i += 1;
     }
     let total = base + n;
-    if total > MAX_NAME {
-        MAX_NAME
-    } else {
-        total
-    }
+    if total > MAX_NAME { MAX_NAME } else { total }
 }
 
 fn fill_lfn(ent: &mut [u8; ENT], ord: u8, last: bool, cs: u8, name: &[u8]) {
@@ -2047,7 +2044,12 @@ fn fat_to_unix(date: u16, time: u16) -> u64 {
     let h = ((time >> 11) & 0x1F) as u64;
     let mi = ((time >> 5) & 0x3F) as u64;
     let s = (time & 0x1F) as u64 * 2;
-    y * 365 * 86400 + m.saturating_sub(1) * 30 * 86400 + d.saturating_sub(1) * 86400 + h * 3600 + mi * 60 + s
+    y * 365 * 86400
+        + m.saturating_sub(1) * 30 * 86400
+        + d.saturating_sub(1) * 86400
+        + h * 3600
+        + mi * 60
+        + s
 }
 
 #[cfg(test)]
@@ -2190,7 +2192,9 @@ mod tests {
             assert_eq!(n.name(), b"hello.txt");
             let n = v.lookup(d, v.info.root_clus, b"HELLO.TXT").unwrap();
             assert_eq!(n.kind, InodeKind::Reg);
-            let n = v.lookup(d, v.info.root_clus, b"Long File Name.dat").unwrap();
+            let n = v
+                .lookup(d, v.info.root_clus, b"Long File Name.dat")
+                .unwrap();
             assert_eq!(n.name(), b"Long File Name.dat");
             let mut names = 0u32;
             let mut cookie = 0u64;
@@ -2224,7 +2228,9 @@ mod tests {
             disk.write(lba, &sec).unwrap();
         }
         let mut vol = FatVol::mount(&mut disk).unwrap();
-        let n = vol.lookup(&mut disk, vol.info.root_clus, b"HELLO.TXT").unwrap();
+        let n = vol
+            .lookup(&mut disk, vol.info.root_clus, b"HELLO.TXT")
+            .unwrap();
         assert_eq!(n.kind, InodeKind::Reg);
     }
 
@@ -2283,7 +2289,10 @@ mod tests {
             v.write(d, f.dir_clu, f.dir_off, &mut clu, &mut size, 0, b"hi")
                 .unwrap();
             v.rename(d, a.clu, b"x.txt", bb.clu, b"y.txt").unwrap();
-            assert_eq!(v.lookup(d, a.clu, b"x.txt").unwrap_err(), FatError::NotFound);
+            assert_eq!(
+                v.lookup(d, a.clu, b"x.txt").unwrap_err(),
+                FatError::NotFound
+            );
             let y = v.lookup(d, bb.clu, b"y.txt").unwrap();
             let mut out = [0u8; 2];
             v.read(d, y.clu, y.size, 0, &mut out).unwrap();

@@ -12,8 +12,8 @@ use vibeos::apic::{Polarity, Trigger};
 use vibeos::desc::InterruptFrame;
 use vibeos::dev::Device;
 use vibeos::irq::{
-    self, in_pool, msi_message_addr, msi_message_data, pool_index, IrqError, MsixEntry, VectorPool,
-    POOL_END, POOL_START,
+    self, IrqError, MsixEntry, POOL_END, POOL_START, VectorPool, in_pool, msi_message_addr,
+    msi_message_data, pool_index,
 };
 use vibeos::pci::{self, Bdf};
 use vibeos::sched::FAR_DEADLINE;
@@ -212,11 +212,7 @@ pub fn threaded_cpu() -> u32 {
 
 fn last_online_cpu() -> u32 {
     let m = per_cpu_init::online_mask();
-    if m == 0 {
-        0
-    } else {
-        63 - m.leading_zeros()
-    }
+    if m == 0 { 0 } else { 63 - m.leading_zeros() }
 }
 
 fn take_work() -> Option<Handler> {
@@ -279,7 +275,8 @@ pub fn set_affinity(vec: u8, cpu: u32) -> Result<(), IrqError> {
             trigger,
             polarity,
         } => {
-            apic_init::route_gsi(gsi, vec, dest, trigger, polarity).map_err(|_| IrqError::BadCpu)?;
+            apic_init::route_gsi(gsi, vec, dest, trigger, polarity)
+                .map_err(|_| IrqError::BadCpu)?;
             apic_init::unmask_gsi(gsi);
         }
         Route::None | Route::Msi | Route::Msix => {}

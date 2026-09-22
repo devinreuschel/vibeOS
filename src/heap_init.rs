@@ -8,9 +8,9 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
 
-use vibeos::heap::{Heap, HeapStats, HEAP_END, HEAP_INITIAL, HEAP_SIZE, HEAP_START, PAGE_SIZE};
+use vibeos::heap::{HEAP_END, HEAP_INITIAL, HEAP_SIZE, HEAP_START, Heap, HeapStats, PAGE_SIZE};
 use vibeos::lock::RANK_HEAP;
-use vibeos::paging::{heap_flags, PhysAddr, VirtAddr};
+use vibeos::paging::{PhysAddr, VirtAddr, heap_flags};
 
 use crate::paging_init;
 use crate::pmm_init;
@@ -34,9 +34,11 @@ pub unsafe fn init() {
         mapped += PAGE_SIZE;
     }
     unsafe {
-        HEAP.lock()
-            .0
-            .init(HEAP_START as usize, HEAP_INITIAL as usize, HEAP_SIZE as usize);
+        HEAP.lock().0.init(
+            HEAP_START as usize,
+            HEAP_INITIAL as usize,
+            HEAP_SIZE as usize,
+        );
     }
 }
 

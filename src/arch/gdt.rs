@@ -8,7 +8,7 @@
 use alloc::boxed::Box;
 use core::mem::size_of;
 
-use vibeos::desc::{Gdt, IstSlot, Tss, GDT_LIMIT, KERNEL_CS, KERNEL_DS, TSS_SEL};
+use vibeos::desc::{GDT_LIMIT, Gdt, IstSlot, KERNEL_CS, KERNEL_DS, TSS_SEL, Tss};
 use vibeos::paging::VirtAddr;
 
 use crate::kva_init::{self, GuardedStack};

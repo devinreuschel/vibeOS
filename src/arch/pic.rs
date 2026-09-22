@@ -6,8 +6,8 @@
 
 use vibeos::fmt_util;
 use vibeos::pic::{
-    self, irq15_eoi, irq7_eoi, irq_port_bit, should_program, Eoi, IRQ15, IRQ7, PIC1_CMD, PIC1_DATA,
-    PIC2_CMD, PIC2_DATA, PIC_EOI, REMAP_WRITES,
+    self, Eoi, IRQ7, IRQ15, PIC_EOI, PIC1_CMD, PIC1_DATA, PIC2_CMD, PIC2_DATA, REMAP_WRITES,
+    irq_port_bit, irq7_eoi, irq15_eoi, should_program,
 };
 use vibeos::vectors;
 

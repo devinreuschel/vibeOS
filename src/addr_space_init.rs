@@ -2,7 +2,7 @@
 //! Kernel AddressSpace: buddy + PT lock. ROADMAP §9.2.
 
 use vibeos::addr_space::{AddressSpace, AsError, FrameFree, TeardownStats, UserPerms};
-use vibeos::paging::{FrameAlloc, PhysAddr, PAGE_SIZE_4K};
+use vibeos::paging::{FrameAlloc, PAGE_SIZE_4K, PhysAddr};
 
 use crate::paging_init;
 use crate::pmm_init;

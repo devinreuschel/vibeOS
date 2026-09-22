@@ -68,11 +68,7 @@ pub struct MsixEntry {
 
 impl MsixEntry {
     pub const fn new(addr: u64, data: u32, masked: bool) -> Self {
-        Self {
-            addr,
-            data,
-            masked,
-        }
+        Self { addr, data, masked }
     }
 
     pub const fn for_lapic(vector: u8, apic_id: u8, masked: bool) -> Self {

@@ -7,7 +7,9 @@
 use core::sync::atomic::AtomicU16;
 
 use crate::dma::{self, publish_index};
-use crate::pci::{self, Bdf, CfgIo, CAP_VENDOR, CFG_CAP_PTR, CFG_STATUS, STATUS_CAPS, MAX_CAP_WALK};
+use crate::pci::{
+    self, Bdf, CAP_VENDOR, CFG_CAP_PTR, CFG_STATUS, CfgIo, MAX_CAP_WALK, STATUS_CAPS,
+};
 
 pub const VENDOR_ID: u16 = 0x1AF4;
 
@@ -245,9 +247,7 @@ pub fn notify_addr(
     if cap_length != 0 && delta >= cap_length as u64 {
         return None;
     }
-    bar_va
-        .checked_add(cap_offset as u64)?
-        .checked_add(delta)
+    bar_va.checked_add(cap_offset as u64)?.checked_add(delta)
 }
 
 pub fn pick_features(device: u64, offer: u64) -> Result<u64, VirtioError> {
@@ -439,17 +439,8 @@ impl SplitQueue {
         store_u16(self.base, off + 14, next);
     }
 
-    pub fn add(
-        &mut self,
-        addr: u64,
-        len: u32,
-        flags: u16,
-    ) -> Result<u16, VirtioError> {
-        self.add_chain(&[DescBuf {
-            addr,
-            len,
-            flags,
-        }])
+    pub fn add(&mut self, addr: u64, len: u32, flags: u16) -> Result<u16, VirtioError> {
+        self.add_chain(&[DescBuf { addr, len, flags }])
     }
 
     /// Chain `bufs` with [`DESC_F_NEXT`]. Head goes in the avail ring.
@@ -655,7 +646,8 @@ fn fill_bytes(p: *mut u8, len: usize, fill: u8) {
 mod tests {
     use super::*;
     use crate::pci::{
-        write16, CFG_COMMAND, CFG_DEVICE, CFG_HEADER_TYPE, CFG_REVID_CLASS, CFG_VENDOR, HEADER_DEVICE,
+        CFG_COMMAND, CFG_DEVICE, CFG_HEADER_TYPE, CFG_REVID_CLASS, CFG_VENDOR, HEADER_DEVICE,
+        write16,
     };
     use std::vec;
     use std::vec::Vec;
@@ -721,7 +713,10 @@ mod tests {
     #[test]
     fn version1_required() {
         assert_eq!(pick_features(0, OFFER), Err(VirtioError::NoVersion1));
-        assert_eq!(pick_features(F_EVENT_IDX, OFFER), Err(VirtioError::NoVersion1));
+        assert_eq!(
+            pick_features(F_EVENT_IDX, OFFER),
+            Err(VirtioError::NoVersion1)
+        );
         let f = pick_features(F_VERSION_1 | F_EVENT_IDX | (1 << 5), OFFER).unwrap();
         assert_eq!(f & F_VERSION_1, F_VERSION_1);
         assert_eq!(f & F_EVENT_IDX, F_EVENT_IDX);
@@ -737,12 +732,21 @@ mod tests {
 
     #[test]
     fn notify_uses_multiplier() {
-        assert_eq!(notify_addr(0x1000, 0x200, 0x1000, 3, 4), Some(0x1000 + 0x200 + 12));
+        assert_eq!(
+            notify_addr(0x1000, 0x200, 0x1000, 3, 4),
+            Some(0x1000 + 0x200 + 12)
+        );
         assert_eq!(notify_addr(0x1000, 0x200, 0x1000, 1, 0), Some(0x1200));
         assert_eq!(notify_addr(0x1000, 0x10, 8, 3, 4), None);
         assert!(notify_addr(u64::MAX - 8, 16, 4, 1, 1).is_none());
-        assert_eq!(PciCap::parse(PCI_CAP_NOTIFY, 1, 0x10, 0x100, 4).notify_off_multiplier, 4);
-        assert_eq!(PciCap::parse(PCI_CAP_COMMON, 0, 0, 0x38, 99).notify_off_multiplier, 0);
+        assert_eq!(
+            PciCap::parse(PCI_CAP_NOTIFY, 1, 0x10, 0x100, 4).notify_off_multiplier,
+            4
+        );
+        assert_eq!(
+            PciCap::parse(PCI_CAP_COMMON, 0, 0, 0x38, 99).notify_off_multiplier,
+            0
+        );
     }
 
     #[test]

@@ -15,11 +15,11 @@ use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::lock::RANK_SCHED;
 use vibeos::paging::VirtAddr;
 use vibeos::sched::{
-    effective_deadline, enqueue_runnable, take_next, TimeoutQueue, FAR_DEADLINE, SWEEP_TICKS,
+    FAR_DEADLINE, SWEEP_TICKS, TimeoutQueue, effective_deadline, enqueue_runnable, take_next,
 };
 use vibeos::thread::{
-    apply_if_on_resume, prepare_thread, switch_context, CpuAffinity, CpuContext, KernelStack, Tcb,
-    ThreadId, ThreadState, WaitOutcome, MAX_THREADS,
+    CpuAffinity, CpuContext, KernelStack, MAX_THREADS, Tcb, ThreadId, ThreadState, WaitOutcome,
+    apply_if_on_resume, prepare_thread, switch_context,
 };
 use vibeos::time::Instant;
 use vibeos::wait::{self, WaitQueue};
@@ -427,12 +427,7 @@ pub(crate) fn spawn_idle(entry: fn()) -> ThreadHandle {
 }
 
 /// User process thread. Not runnable until [`make_ready`].
-pub fn spawn_user(
-    name: &'static str,
-    entry: fn(),
-    pid: u32,
-    cr3: u64,
-) -> ThreadHandle {
+pub fn spawn_user(name: &'static str, entry: fn(), pid: u32, cr3: u64) -> ThreadHandle {
     spawn_inner(
         name,
         entry,
@@ -550,7 +545,9 @@ fn spawn_inner(
         s.timeouts.remove(id);
         let tcb = s.slots[slot].as_mut().expect("dead slot");
         assert!(tcb.stack.is_none(), "dead tcb still owns stack");
-        fill_tcb(tcb, name, entry, affinity, cpu, ks, top, tramp, irq_nest, pid, as_cr3);
+        fill_tcb(
+            tcb, name, entry, affinity, cpu, ks, top, tramp, irq_nest, pid, as_cr3,
+        );
         if enqueue {
             s.place(cpu, id);
         }
@@ -731,11 +728,7 @@ pub fn current_id() -> ThreadId {
 
 pub fn current_pid() -> u32 {
     let p = per_cpu_init::current_thread();
-    if p.is_null() {
-        0
-    } else {
-        unsafe { (*p).pid }
-    }
+    if p.is_null() { 0 } else { unsafe { (*p).pid } }
 }
 
 pub fn set_pid_cr3(id: ThreadId, pid: u32, cr3: u64) {

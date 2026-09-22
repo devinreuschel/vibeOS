@@ -109,7 +109,10 @@ impl<const N: usize> Cache<N> {
             meta: [Meta::EMPTY; N],
             data: [[0u8; PAGE]; N],
             hand: 0,
-            last: CacheKey { dev: u32::MAX, offset: u64::MAX },
+            last: CacheKey {
+                dev: u32::MAX,
+                offset: u64::MAX,
+            },
             seq: 0,
             stats: CacheStats {
                 hits: 0,
@@ -181,8 +184,8 @@ impl<const N: usize> Cache<N> {
     }
 
     fn note_seq(&mut self, key: CacheKey) -> bool {
-        let seq = self.last.dev == key.dev
-            && self.last.offset.saturating_add(PAGE as u64) == key.offset;
+        let seq =
+            self.last.dev == key.dev && self.last.offset.saturating_add(PAGE as u64) == key.offset;
         self.last = key;
         if seq {
             self.seq = self.seq.saturating_add(1);
@@ -200,11 +203,7 @@ impl<const N: usize> Cache<N> {
         Ok(())
     }
 
-    fn stash_evict(
-        &self,
-        slot: usize,
-        evict_out: &mut [u8],
-    ) -> Result<(), BlockError> {
+    fn stash_evict(&self, slot: usize, evict_out: &mut [u8]) -> Result<(), BlockError> {
         self.copy_page(slot, evict_out)
     }
 
@@ -289,7 +288,11 @@ impl<const N: usize> Cache<N> {
         let mut fill = Fill {
             slot,
             key,
-            need: if whole { FillNeed::None } else { FillNeed::Read },
+            need: if whole {
+                FillNeed::None
+            } else {
+                FillNeed::Read
+            },
             evict_key: CacheKey { dev: 0, offset: 0 },
         };
         let f = self.meta[slot].flags;
@@ -477,10 +480,7 @@ pub fn cached_read<B: Backend, const N: usize>(
                 if matches!(fill.need, FillNeed::None) {
                     return Err(BlockError::Io);
                 }
-                if matches!(
-                    fill.need,
-                    FillNeed::Writeback | FillNeed::WritebackThenRead
-                ) {
+                if matches!(fill.need, FillNeed::Writeback | FillNeed::WritebackThenRead) {
                     if let Err(e) = b.write(fill.evict_key.offset, &evict) {
                         c.restore_evict(fill.slot, fill.evict_key, &evict);
                         return Err(e);
@@ -562,10 +562,7 @@ pub fn cached_write<B: Backend, const N: usize>(
                 if matches!(fill.need, FillNeed::None) {
                     return Err(BlockError::Io);
                 }
-                if matches!(
-                    fill.need,
-                    FillNeed::Writeback | FillNeed::WritebackThenRead
-                ) {
+                if matches!(fill.need, FillNeed::Writeback | FillNeed::WritebackThenRead) {
                     if let Err(e) = b.write(fill.evict_key.offset, &evict) {
                         c.restore_evict(fill.slot, fill.evict_key, &evict);
                         return Err(e);

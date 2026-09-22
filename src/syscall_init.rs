@@ -11,7 +11,7 @@ use vibeos::addr_space::AddressSpace;
 use vibeos::desc::{KERNEL_CS, STAR_SYSRET, Tss, USER_CS_RPL, USER_DS_RPL};
 use vibeos::per_cpu::PerCpu;
 use vibeos::syscall::{SyscallFrame, UserRegs};
-use vibeos::thread::{Fxsave, Tcb, RFLAGS_IF, RFLAGS_RESERVED1};
+use vibeos::thread::{Fxsave, RFLAGS_IF, RFLAGS_RESERVED1, Tcb};
 
 use crate::arch::gdt;
 use crate::per_cpu_init;
@@ -552,7 +552,10 @@ pub fn peek_user_as() -> Option<&'static AddressSpace> {
 }
 
 pub fn set_user_as(space: &AddressSpace) {
-    CURRENT_AS.store(space as *const AddressSpace as *mut AddressSpace, Ordering::Release);
+    CURRENT_AS.store(
+        space as *const AddressSpace as *mut AddressSpace,
+        Ordering::Release,
+    );
 }
 
 pub fn clear_user_as() {

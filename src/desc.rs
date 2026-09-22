@@ -5,9 +5,9 @@
 //! `STAR.SYSRET_CS = KERNEL_DS` so user SS is +8 and user CS is +16.
 //! That is why user *data* sits at `0x18` and user *code* at `0x20`.
 
-use core::mem::size_of;
 #[cfg(test)]
 use core::mem::offset_of;
+use core::mem::size_of;
 
 /// CPU-pushed iret frame. First argument of `extern "x86-interrupt"`.
 #[repr(C)]
@@ -168,9 +168,7 @@ impl IdtEntry {
     }
 
     pub const fn handler(self) -> u64 {
-        self.off_lo as u64
-            | ((self.off_mid as u64) << 16)
-            | ((self.off_hi as u64) << 32)
+        self.off_lo as u64 | ((self.off_mid as u64) << 16) | ((self.off_hi as u64) << 32)
     }
 
     pub const fn ist(self) -> u8 {

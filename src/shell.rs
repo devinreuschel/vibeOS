@@ -286,7 +286,8 @@ impl LineEditor {
         }
         if self.hist_n > 0 {
             let last = hist_index(self.hist_head, self.hist_n - 1);
-            if self.hist_len[last] == self.len && self.hist[last][..self.len] == self.buf[..self.len]
+            if self.hist_len[last] == self.len
+                && self.hist[last][..self.len] == self.buf[..self.len]
             {
                 return;
             }
@@ -602,7 +603,10 @@ mod tests {
     #[test]
     fn tokenize_unclosed_quote() {
         let mut buf = [""; 4];
-        assert_eq!(tokenize("echo \"hi", &mut buf), Err(TokenError::UnclosedQuote));
+        assert_eq!(
+            tokenize("echo \"hi", &mut buf),
+            Err(TokenError::UnclosedQuote)
+        );
         assert_eq!(TokenError::UnclosedQuote.as_str(), "unclosed quote");
         assert_eq!(TokenError::TooMany.as_str(), "too many tokens");
     }
@@ -644,10 +648,7 @@ mod tests {
         let mut ed = LineEditor::new();
         feed_str(&mut ed, "ls he");
         assert_eq!(ed.feed(DecodedKey::Char(b'\t')), Feed::Complete);
-        assert_eq!(
-            ed.feed(DecodedKey::Named(NamedKey::Tab)),
-            Feed::Complete
-        );
+        assert_eq!(ed.feed(DecodedKey::Named(NamedKey::Tab)), Feed::Complete);
         ed.set_line(b"cat hello");
         assert_eq!(ed.line(), b"cat hello");
         assert_eq!(ed.cursor(), 9);

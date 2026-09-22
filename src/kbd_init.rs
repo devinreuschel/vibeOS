@@ -10,12 +10,12 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use vibeos::acpi::Iso;
 use vibeos::apic::{self, Polarity, Trigger};
 use vibeos::kbd::{
-    self, cfg_probe, cfg_run, DecodedKey, Decoder, Ring, CMD_DISABLE_1, CMD_DISABLE_2,
-    CMD_ENABLE_1, CMD_READ_CFG, CMD_SELF_TEST, CMD_TEST_1, CMD_WRITE_CFG, CMD_WRITE_KBD_OUT,
-    DATA, KBD_ACK, KBD_BAT_OK, KBD_RESET, PORT_TEST_OK, RING_CAP, SELF_TEST_OK, STAT_IBF,
-    STAT_MOUSE, STAT_OBF, STATUS,
+    self, CMD_DISABLE_1, CMD_DISABLE_2, CMD_ENABLE_1, CMD_READ_CFG, CMD_SELF_TEST, CMD_TEST_1,
+    CMD_WRITE_CFG, CMD_WRITE_KBD_OUT, DATA, DecodedKey, Decoder, KBD_ACK, KBD_BAT_OK, KBD_RESET,
+    PORT_TEST_OK, RING_CAP, Ring, SELF_TEST_OK, STAT_IBF, STAT_MOUSE, STAT_OBF, STATUS, cfg_probe,
+    cfg_run,
 };
-use vibeos::pic::{PIC1_CMD, PIC_EOI};
+use vibeos::pic::{PIC_EOI, PIC1_CMD};
 use vibeos::vectors;
 
 use crate::acpi_init;
@@ -32,8 +32,9 @@ struct Cell<T>(core::cell::UnsafeCell<T>);
 unsafe impl<T> Sync for Cell<T> {}
 
 static DECODER: Cell<Decoder> = Cell(core::cell::UnsafeCell::new(Decoder::new()));
-static RING: Cell<Ring<DecodedKey, RING_CAP>> =
-    Cell(core::cell::UnsafeCell::new(Ring::empty(DecodedKey::Char(0))));
+static RING: Cell<Ring<DecodedKey, RING_CAP>> = Cell(core::cell::UnsafeCell::new(Ring::empty(
+    DecodedKey::Char(0),
+)));
 static LIVE: AtomicBool = AtomicBool::new(false);
 static GSI: AtomicU32 = AtomicU32::new(GSI_NONE);
 static PIC_FALLBACK: AtomicBool = AtomicBool::new(false);
@@ -78,11 +79,7 @@ pub fn live() -> bool {
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn gsi() -> Option<u32> {
     let g = GSI.load(Ordering::Acquire);
-    if g == GSI_NONE {
-        None
-    } else {
-        Some(g)
-    }
+    if g == GSI_NONE { None } else { Some(g) }
 }
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]

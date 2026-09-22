@@ -425,10 +425,7 @@ mod tests {
             let mut buddy = Buddy::new();
             buddy.set_hhdm_offset(hhdm_offset);
             unsafe {
-                buddy.insert_region(
-                    TEST_PHYS_BASE,
-                    TEST_PHYS_BASE + (frames as u64) * PAGE_SIZE,
-                );
+                buddy.insert_region(TEST_PHYS_BASE, TEST_PHYS_BASE + (frames as u64) * PAGE_SIZE);
             }
             Self {
                 _mem: mem,
@@ -553,7 +550,9 @@ mod tests {
         // dev-dependency on rand.
         let mut rng: u64 = 0x1234_5678_9abc_def0;
         let mut next = || {
-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             rng
         };
 
@@ -623,10 +622,7 @@ mod tests {
         let mut buddy = Buddy::new();
         buddy.set_hhdm_offset(ptr.wrapping_sub(TEST_PHYS_BASE));
         unsafe {
-            buddy.insert_region(
-                TEST_PHYS_BASE + 100,
-                TEST_PHYS_BASE + 9 * PAGE_SIZE + 200,
-            );
+            buddy.insert_region(TEST_PHYS_BASE + 100, TEST_PHYS_BASE + 9 * PAGE_SIZE + 200);
         }
         assert_eq!(buddy.stats().total_frames, 8);
     }
@@ -647,7 +643,11 @@ mod tests {
         assert_eq!(phys & 0x1FFF, 0);
         unsafe { p.buddy.deallocate(phys, order) };
         // 4K request with a 2K boundary always straddles: refuse.
-        assert!(p.buddy.allocate_constrained(0x1000, PAGE_SIZE, 0x800).is_none());
+        assert!(
+            p.buddy
+                .allocate_constrained(0x1000, PAGE_SIZE, 0x800)
+                .is_none()
+        );
         assert_eq!(p.buddy.stats().free_frames, 64);
     }
 }

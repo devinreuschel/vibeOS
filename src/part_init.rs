@@ -7,12 +7,12 @@
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use vibeos::block::{self, write_marker, BlockError, DeviceState};
+use vibeos::block::{self, BlockError, DeviceState, write_marker};
 use vibeos::lock::RANK_DEVICE;
 use vibeos::part::{
-    self, entries_crc, gpt_type_name, map_child_lba, mbr_type_name, pack_ebr, pack_gpt_entry,
-    pack_gpt_header, pack_mbr, pack_protective_mbr, GptHeaderInfo, PartKind, Table, GUID_EFI,
-    GUID_LINUX, GPT_ENTRY_SIZE, MAX_PARTS, MBR_EXTENDED, MBR_LINUX,
+    self, GPT_ENTRY_SIZE, GUID_EFI, GUID_LINUX, GptHeaderInfo, MAX_PARTS, MBR_EXTENDED, MBR_LINUX,
+    PartKind, Table, entries_crc, gpt_type_name, map_child_lba, mbr_type_name, pack_ebr,
+    pack_gpt_entry, pack_gpt_header, pack_mbr, pack_protective_mbr,
 };
 
 use crate::block_init;
@@ -162,14 +162,7 @@ fn stamp_ram0_mbr() -> Result<(), BlockError> {
     );
     block_init::write(0, &mbr)?;
     let mut e1 = [0u8; 512];
-    pack_ebr(
-        &mut e1,
-        MBR_LINUX,
-        1,
-        24,
-        RAM0_EBR2 - RAM0_EXT,
-        32,
-    );
+    pack_ebr(&mut e1, MBR_LINUX, 1, 24, RAM0_EBR2 - RAM0_EXT, 32);
     block_init::write(RAM0_EXT as u64, &e1)?;
     let mut e2 = [0u8; 512];
     pack_ebr(&mut e2, MBR_LINUX, 1, 24, 0, 0);
@@ -282,7 +275,7 @@ pub fn count() -> usize {
     N.load(Ordering::Acquire) as usize
 }
 
-pub fn info(i: usize) -> Option<( &'static str, u64, u32, PartKind)> {
+pub fn info(i: usize) -> Option<(&'static str, u64, u32, PartKind)> {
     let s = slot(i)?;
     Some((s.name, s.nsect, s.bs, s.kind))
 }

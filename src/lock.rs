@@ -18,20 +18,12 @@ pub const RANK_SERIAL: u8 = 6;
 
 /// Bit for `rank` in a held mask. Rank 0 → 0.
 pub const fn rank_bit(rank: u8) -> u8 {
-    if rank == 0 {
-        0
-    } else {
-        1u8 << (rank - 1)
-    }
+    if rank == 0 { 0 } else { 1u8 << (rank - 1) }
 }
 
 /// No held rank is strictly above `rank`. Rank 0 always allowed.
 pub const fn can_acquire(held: u8, rank: u8) -> bool {
-    if rank == 0 {
-        true
-    } else {
-        held >> rank == 0
-    }
+    if rank == 0 { true } else { held >> rank == 0 }
 }
 
 pub const fn acquire_mask(held: u8, rank: u8) -> u8 {
@@ -44,11 +36,7 @@ pub const fn release_mask(held: u8, rank: u8) -> u8 {
 
 /// Two CPU-local locks: lower `cpu_id` first. DESIGN §7.7.
 pub const fn cpu_lock_order(a: u32, b: u32) -> (u32, u32) {
-    if a <= b {
-        (a, b)
-    } else {
-        (b, a)
-    }
+    if a <= b { (a, b) } else { (b, a) }
 }
 
 #[cfg(test)]

@@ -16,19 +16,19 @@ use vibeos::desc::InterruptFrame;
 use vibeos::fs::FsError;
 use vibeos::kbd::{DecodedKey, NamedKey};
 use vibeos::proc::{
-    default_action, fd_flags_from_open, sig_name, wait_exited, wait_signaled, wait_stopped,
-    Cwd, Creds, Fd, FdKind, FdTable, ProcState, SigAct, FD_CLOEXEC, INIT_PID, MAX_FDS, MAX_PROCS,
-    SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGSTOP, WNOHANG,
+    Creds, Cwd, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, MAX_FDS, MAX_PROCS, ProcState, SIGBUS,
+    SIGCHLD, SIGCONT, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGSTOP, SigAct, WNOHANG, default_action,
+    fd_flags_from_open, sig_name, wait_exited, wait_signaled, wait_stopped,
 };
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::syscall::{
-    self, SyscallFrame, UserRegs, EAGAIN, EBADF, EBUSY, ECHILD, EEXIST, EFAULT, EINVAL, EIO,
-    EISDIR, EMFILE, ENAMETOOLONG, ENOENT, ENOEXEC, ENOMEM, ENOSYS, ENOTDIR, ESRCH, F_GETFD, F_SETFD,
-    SYS_CLOSE, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_EXIT, SYS_FCNTL, SYS_FORK, SYS_GETPID,
-    SYS_GETPPID, SYS_KILL, SYS_LSEEK, SYS_OPEN, SYS_PSINFO, SYS_READ, SYS_SCHED_YIELD, SYS_WAIT4,
-    SYS_WRITE, E2BIG,
+    self, E2BIG, EAGAIN, EBADF, EBUSY, ECHILD, EEXIST, EFAULT, EINVAL, EIO, EISDIR, EMFILE,
+    ENAMETOOLONG, ENOENT, ENOEXEC, ENOMEM, ENOSYS, ENOTDIR, ESRCH, F_GETFD, F_SETFD, SYS_CLOSE,
+    SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_EXIT, SYS_FCNTL, SYS_FORK, SYS_GETPID, SYS_GETPPID,
+    SYS_KILL, SYS_LSEEK, SYS_OPEN, SYS_PSINFO, SYS_READ, SYS_SCHED_YIELD, SYS_WAIT4, SYS_WRITE,
+    SyscallFrame, UserRegs,
 };
-use vibeos::thread::{ThreadId, RFLAGS_IF, RFLAGS_RESERVED1};
+use vibeos::thread::{RFLAGS_IF, RFLAGS_RESERVED1, ThreadId};
 use vibeos::vectors;
 use vibeos::wait::WaitQueue;
 
@@ -185,11 +185,7 @@ fn load_errno(e: LoadError) -> i32 {
 }
 
 fn bit(sig: u32) -> u32 {
-    if sig == 0 || sig > 31 {
-        0
-    } else {
-        1u32 << sig
-    }
+    if sig == 0 || sig > 31 { 0 } else { 1u32 << sig }
 }
 
 fn current_pid() -> u32 {

@@ -43,10 +43,7 @@ fn apic_id() -> u32 {
 }
 
 fn madt_cpu_count() -> usize {
-    acpi_init::info()
-        .map(|i| i.cpu_count())
-        .unwrap_or(0)
-        .max(1)
+    acpi_init::info().map(|i| i.cpu_count()).unwrap_or(0).max(1)
 }
 
 /// Allocate the heap array, install the BSP at slot 0.

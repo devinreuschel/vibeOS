@@ -921,7 +921,8 @@ impl Vol {
     fn find_dent(&self, parent: u32, name: &[u8]) -> Result<usize, Error> {
         let mut i = 0usize;
         while i < MAX_DENTS {
-            if self.dents[i].used && self.dents[i].parent == parent && self.dents[i].name() == name {
+            if self.dents[i].used && self.dents[i].parent == parent && self.dents[i].name() == name
+            {
                 return Ok(i);
             }
             i += 1;
@@ -1343,7 +1344,14 @@ impl Vol {
         Ok(want)
     }
 
-    fn add_extent(&mut self, is: usize, log: u32, phys: u32, len: u32, crc: u32) -> Result<(), Error> {
+    fn add_extent(
+        &mut self,
+        is: usize,
+        log: u32,
+        phys: u32,
+        len: u32,
+        crc: u32,
+    ) -> Result<(), Error> {
         let n = self.inodes[is].n_ext as usize;
         if n >= MAX_EXT {
             return Err(Error::NoSpace);
@@ -1373,7 +1381,9 @@ impl Vol {
             return Err(Error::Inval);
         }
         let end = off.saturating_add(buf.len() as u64);
-        if end <= INLINE as u64 && (self.inodes[is].flags & F_INLINE != 0) && self.inodes[is].n_ext == 0
+        if end <= INLINE as u64
+            && (self.inodes[is].flags & F_INLINE != 0)
+            && self.inodes[is].n_ext == 0
         {
             let s = off as usize;
             self.inodes[is].inline_data[s..s + buf.len()].copy_from_slice(buf);
@@ -1572,7 +1582,12 @@ impl Vol {
         Ok(())
     }
 
-    pub fn readlink<D: Disk>(&mut self, _d: &mut D, ino: u32, buf: &mut [u8]) -> Result<usize, Error> {
+    pub fn readlink<D: Disk>(
+        &mut self,
+        _d: &mut D,
+        ino: u32,
+        buf: &mut [u8],
+    ) -> Result<usize, Error> {
         let is = self.inode_slot(ino)?;
         if self.inodes[is].kind != KIND_LNK {
             return Err(Error::Inval);
@@ -1703,7 +1718,8 @@ impl Vol {
         let mut a = 1usize;
         while a < n {
             let mut b = a;
-            while b > 0 && name_cmp(self.dents[out[b - 1]].name(), self.dents[out[b]].name()).is_gt()
+            while b > 0
+                && name_cmp(self.dents[out[b - 1]].name(), self.dents[out[b]].name()).is_gt()
             {
                 let t = out[b - 1];
                 out[b - 1] = out[b];
@@ -2169,10 +2185,7 @@ pub fn fsck<D: Disk>(d: &mut D) -> Result<FsckReport, Error> {
             let mut e = 0usize;
             while e < n_ext {
                 let ex = v.inodes[i].extents[e];
-                if ex.len == 0
-                    || ex.phys < 2
-                    || ex.phys as u64 + ex.len as u64 > v.nblocks as u64
-                {
+                if ex.len == 0 || ex.phys < 2 || ex.phys as u64 + ex.len as u64 > v.nblocks as u64 {
                     errors += 1;
                 } else {
                     let mut b = 0u32;
@@ -2321,15 +2334,8 @@ mod tests {
             let sub = v.lookup(d, ROOT_INO, b"sub").unwrap();
             v.create(d, sub.ino, b"f", InodeKind::Reg, 0o644, None)
                 .unwrap();
-            v.create(
-                d,
-                ROOT_INO,
-                b"l",
-                InodeKind::Lnk,
-                0o777,
-                Some(b"/sub/f"),
-            )
-            .unwrap();
+            v.create(d, ROOT_INO, b"l", InodeKind::Lnk, 0o777, Some(b"/sub/f"))
+                .unwrap();
             v.sync(d).unwrap();
             let mut node = Node::EMPTY;
             let mut n = 0u32;

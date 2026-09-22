@@ -8,9 +8,9 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use vibeos::fat::Node;
 use vibeos::fs::{
-    self, split_basename, Dirent, FsError, FsType, InodeKind, Name, PathRef, Stat, MAX_NAME,
-    MAX_PATH, O_ACCMODE, O_APPEND, O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC,
-    O_WRONLY, SEEK_CUR, SEEK_END, SEEK_SET, S_IFDIR_MODE, S_IFLNK_MODE, S_IFREG_MODE,
+    self, Dirent, FsError, FsType, InodeKind, MAX_NAME, MAX_PATH, Name, O_ACCMODE, O_APPEND,
+    O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, PathRef, S_IFDIR_MODE,
+    S_IFLNK_MODE, S_IFREG_MODE, SEEK_CUR, SEEK_END, SEEK_SET, Stat, split_basename,
 };
 use vibeos::lock::RANK_DEVICE;
 use vibeos::shell::{Command, LineEditor, MAX_COMMANDS};
@@ -1032,9 +1032,9 @@ fn complete_cmd(ed: &mut LineEditor, start: usize, pref: &[u8]) {
     let mut hit: Option<&'static str> = None;
     let mut n = 0u32;
     let names = [
-        "help", "echo", "meminfo", "uptime", "cpus", "dmesg", "ps", "panic", "reboot",
-        "poweroff", "ls", "cat", "cp", "mv", "rm", "mkdir", "touch", "stat", "df", "mount",
-        "umount", "sync", "cd", "pwd", "blk", "lspci", "devices",
+        "help", "echo", "meminfo", "uptime", "cpus", "dmesg", "ps", "panic", "reboot", "poweroff",
+        "ls", "cat", "cp", "mv", "rm", "mkdir", "touch", "stat", "df", "mount", "umount", "sync",
+        "cd", "pwd", "blk", "lspci", "devices",
     ];
     for nm in names {
         if nm.as_bytes().starts_with(pref) {
@@ -1082,7 +1082,14 @@ fn to_up(c: u8) -> u8 {
     }
 }
 
-fn apply_word(ed: &mut LineEditor, start: usize, cur: usize, dirp: &[u8], name: &[u8], unique: bool) {
+fn apply_word(
+    ed: &mut LineEditor,
+    start: usize,
+    cur: usize,
+    dirp: &[u8],
+    name: &[u8],
+    unique: bool,
+) {
     let mut tmp = [0u8; 128];
     let mut n = 0usize;
     n += copy_to(&mut tmp[n..], dirp);
@@ -1157,13 +1164,7 @@ fn cmd_ls(args: &[&str]) {
     };
     if node.kind != InodeKind::Dir {
         if long {
-            let _ = writeln!(
-                Console,
-                "{} {} {}",
-                node.kind.as_str(),
-                node.size,
-                path
-            );
+            let _ = writeln!(Console, "{} {} {}", node.kind.as_str(), node.size, path);
         } else {
             let _ = writeln!(Console, "{path}");
         }

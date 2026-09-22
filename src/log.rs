@@ -205,11 +205,7 @@ impl<const N: usize, const M: usize> Ring<N, M> {
         if i >= self.len {
             return None;
         }
-        let idx = if self.len < N {
-            i
-        } else {
-            (self.head + i) % N
-        };
+        let idx = if self.len < N { i } else { (self.head + i) % N };
         Some(&self.recs[idx])
     }
 

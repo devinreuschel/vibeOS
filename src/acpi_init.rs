@@ -9,7 +9,7 @@ use core::fmt::Write;
 
 use vibeos::acpi::{self, AcpiError, AcpiInfo, PhysMem};
 use vibeos::marker;
-use vibeos::paging::{self, PhysAddr, VirtAddr, PAGE_SIZE_4K};
+use vibeos::paging::{self, PAGE_SIZE_4K, PhysAddr, VirtAddr};
 
 use crate::paging_init;
 use crate::serial::{self, Serial};
@@ -151,11 +151,7 @@ pub fn report() {
     let Some(info) = INFO.get() else {
         return;
     };
-    let _ = writeln!(
-        Serial,
-        "vibeOS: acpi: xsdt {} tables",
-        info.table_count
-    );
+    let _ = writeln!(Serial, "vibeOS: acpi: xsdt {} tables", info.table_count);
     let hpet = if info.hpet_present() {
         "present"
     } else {

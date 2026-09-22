@@ -10,10 +10,7 @@ pub struct WorkItem {
 }
 
 impl WorkItem {
-    pub const EMPTY: Self = Self {
-        func: nop,
-        arg: 0,
-    };
+    pub const EMPTY: Self = Self { func: nop, arg: 0 };
 
     pub fn new(func: fn(usize), arg: usize) -> Self {
         Self { func, arg }

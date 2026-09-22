@@ -8,12 +8,12 @@ use core::fmt::Write;
 use core::sync::atomic::AtomicU64;
 
 use vibeos::acpi::HpetInfo;
-use vibeos::pic::{PIC1_CMD, PIC_EOI};
+use vibeos::pic::{PIC_EOI, PIC1_CMD};
 use vibeos::time::{
-    bcd_to_bin, hpet_period_ok, monotonic_max, next_deadline, tsc_per_ms_from_hpet,
-    tsc_per_ms_from_pit, unix_from_civil, wall_unix_s, CalibSource, Instant, TickClock, WallOrigin,
-    FS_PER_MS, IO_WAIT_PORT, PIT_CALIB_COUNT, PIT_CALIB_MS, PIT_CH0_WRITES, PIT_CH2, PIT_CMD,
-    PIT_CMD_CH2_ONESHOT, PIT_GATE,
+    CalibSource, FS_PER_MS, IO_WAIT_PORT, Instant, PIT_CALIB_COUNT, PIT_CALIB_MS, PIT_CH0_WRITES,
+    PIT_CH2, PIT_CMD, PIT_CMD_CH2_ONESHOT, PIT_GATE, TickClock, WallOrigin, bcd_to_bin,
+    hpet_period_ok, monotonic_max, next_deadline, tsc_per_ms_from_hpet, tsc_per_ms_from_pit,
+    unix_from_civil, wall_unix_s,
 };
 
 use crate::acpi_init;

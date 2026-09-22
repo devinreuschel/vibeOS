@@ -6,20 +6,20 @@
 use core::fmt::Write;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use vibeos::acpi::{IoApic, MadtInfo, MAX_IOAPICS};
+use vibeos::acpi::{IoApic, MAX_IOAPICS, MadtInfo};
 use vibeos::apic::{
-    self, has_tsc_deadline, ioapic_max_index, ioapic_pin, lvt_timer_periodic,
-    poll_delivery_pending, redir_high, redir_is_masked, redir_low, redir_set_mask, svr_value,
-    tsc_deadline_arm_plan, tsc_deadline_value, write_redir, EoiDomain, IpiError, IpiMode, Polarity,
-    TimerMode, Trigger, TscDeadlineStep, APIC_BASE_ENABLE, DEFAULT_LAPIC_PHYS, IA32_APIC_BASE,
-    IA32_TSC_DEADLINE, ICR_POLL_CAP, IOAPIC_VER, IOREGSEL, IOWIN, LAPIC_EOI, LAPIC_ESR,
+    self, APIC_BASE_ENABLE, DEFAULT_LAPIC_PHYS, EoiDomain, IA32_APIC_BASE, IA32_TSC_DEADLINE,
+    ICR_POLL_CAP, IOAPIC_VER, IOREGSEL, IOWIN, IpiError, IpiMode, LAPIC_EOI, LAPIC_ESR,
     LAPIC_ICR_HIGH, LAPIC_ICR_LOW, LAPIC_ID, LAPIC_LVT_ERROR, LAPIC_LVT_LINT0, LAPIC_LVT_LINT1,
-    LAPIC_LVT_PERF, LAPIC_LVT_THERMAL, LAPIC_LVT_TIMER, LAPIC_SVR, LAPIC_TIMER_CCR, LAPIC_TIMER_DCR,
-    LAPIC_TIMER_ICR, LAPIC_TPR, LVT_DELIVERY_EXTINT, LVT_MASKED, TIMER_DIV_16,
+    LAPIC_LVT_PERF, LAPIC_LVT_THERMAL, LAPIC_LVT_TIMER, LAPIC_SVR, LAPIC_TIMER_CCR,
+    LAPIC_TIMER_DCR, LAPIC_TIMER_ICR, LAPIC_TPR, LVT_DELIVERY_EXTINT, LVT_MASKED, Polarity,
+    TIMER_DIV_16, TimerMode, Trigger, TscDeadlineStep, has_tsc_deadline, ioapic_max_index,
+    ioapic_pin, lvt_timer_periodic, poll_delivery_pending, redir_high, redir_is_masked, redir_low,
+    redir_set_mask, svr_value, tsc_deadline_arm_plan, tsc_deadline_value, write_redir,
 };
 use vibeos::fmt_util;
 use vibeos::marker;
-use vibeos::time::{hpet_period_ok, FS_PER_MS, PIT_CALIB_MS};
+use vibeos::time::{FS_PER_MS, PIT_CALIB_MS, hpet_period_ok};
 use vibeos::vectors;
 
 use crate::acpi_init;
@@ -222,7 +222,15 @@ fn apply_isos(st: &ApicState, madt: &MadtInfo) {
         let pol = apic::iso_polarity(iso.flags);
         // Shared placeholder vector: every ISO stays masked until a driver
         // calls `route_gsi` with a real vector.
-        let _ = route_gsi_inner(st, iso.gsi, vectors::DEVICE_VEC_START, dest, trig, pol, true);
+        let _ = route_gsi_inner(
+            st,
+            iso.gsi,
+            vectors::DEVICE_VEC_START,
+            dest,
+            trig,
+            pol,
+            true,
+        );
         i += 1;
     }
 }
@@ -511,12 +519,7 @@ fn mask_pic_and_pit(st: &ApicState, madt: &MadtInfo) {
 }
 
 fn emit_marker(mode: TimerMode) {
-    let _ = writeln!(
-        Serial,
-        "{}{})",
-        marker::TIME_LAPIC_PREFIX,
-        mode.as_str()
-    );
+    let _ = writeln!(Serial, "{}{})", marker::TIME_LAPIC_PREFIX, mode.as_str());
 }
 
 fn unmask_pit_fallback() {
@@ -669,4 +672,3 @@ pub fn arm_ap() {
         TimerMode::Pit => {}
     }
 }
-

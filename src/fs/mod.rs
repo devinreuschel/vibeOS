@@ -677,15 +677,17 @@ impl Vfs {
         self.supers[sb as usize].root_ino = ino;
         self.supers[sb as usize].root_islot = islot;
         self.supers[sb as usize].root_dslot = dslot;
-        Ok(PathRef {
-            mount: 0,
-            dslot,
-        })
+        Ok(PathRef { mount: 0, dslot })
     }
 
     /// Mount `fs` on an existing directory. `..` from the new root
     /// walks to the parent of the covered dentry.
-    pub fn mount(&mut self, cwd: Option<PathRef>, at: &str, fs: &dyn FileSystem) -> Result<u8, FsError> {
+    pub fn mount(
+        &mut self,
+        cwd: Option<PathRef>,
+        at: &str,
+        fs: &dyn FileSystem,
+    ) -> Result<u8, FsError> {
         let dir = self.resolve(cwd, at, true)?;
         let islot = self.d_islot(dir.dslot)?;
         if self.inodes[islot as usize].kind != InodeKind::Dir {
@@ -806,15 +808,30 @@ impl Vfs {
         self.ops_stat(self.sb_of(p.mount), islot)
     }
 
-    pub fn mkdir(&mut self, cwd: Option<PathRef>, path: &str, mode: u16) -> Result<PathRef, FsError> {
+    pub fn mkdir(
+        &mut self,
+        cwd: Option<PathRef>,
+        path: &str,
+        mode: u16,
+    ) -> Result<PathRef, FsError> {
         self.create_node(cwd, path, InodeKind::Dir, mode | S_IFDIR, None)
     }
 
-    pub fn creat(&mut self, cwd: Option<PathRef>, path: &str, mode: u16) -> Result<PathRef, FsError> {
+    pub fn creat(
+        &mut self,
+        cwd: Option<PathRef>,
+        path: &str,
+        mode: u16,
+    ) -> Result<PathRef, FsError> {
         self.create_node(cwd, path, InodeKind::Reg, mode | S_IFREG, None)
     }
 
-    pub fn symlink(&mut self, cwd: Option<PathRef>, path: &str, target: &str) -> Result<PathRef, FsError> {
+    pub fn symlink(
+        &mut self,
+        cwd: Option<PathRef>,
+        path: &str,
+        target: &str,
+    ) -> Result<PathRef, FsError> {
         if target.is_empty() || target.len() > MAX_FILE_BYTES {
             return Err(FsError::Inval);
         }
@@ -878,7 +895,7 @@ impl Vfs {
         let sb = self.sb_of(src.mount);
         match self.fstype(sb) {
             FsType::Fat | FsType::Vibe | FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
-                return Err(FsError::NotSupp)
+                return Err(FsError::NotSupp);
             }
             FsType::Ram => {}
         }
@@ -900,7 +917,10 @@ impl Vfs {
     pub fn rename(&mut self, cwd: Option<PathRef>, old: &str, new: &str) -> Result<(), FsError> {
         let (op, oname) = split_basename(old.as_bytes())?;
         let (np, nname) = split_basename(new.as_bytes())?;
-        if name_is_dot(oname) || name_is_dotdot(oname) || name_is_dot(nname) || name_is_dotdot(nname)
+        if name_is_dot(oname)
+            || name_is_dotdot(oname)
+            || name_is_dot(nname)
+            || name_is_dotdot(nname)
         {
             return Err(FsError::Inval);
         }
@@ -913,7 +933,7 @@ impl Vfs {
         }
         match self.fstype(osb) {
             FsType::Fat | FsType::Vibe | FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
-                return Err(FsError::NotSupp)
+                return Err(FsError::NotSupp);
             }
             FsType::Ram => {
                 let oslot = self.d_islot(od.dslot)?;
@@ -1692,7 +1712,9 @@ impl Vfs {
     fn dcache_drop_neg_in_dir(&mut self, parent: u16) {
         let mut i = 0usize;
         while i < MAX_DENTRIES {
-            if self.dentries[i].used && self.dentries[i].parent == parent && self.dentries[i].negative
+            if self.dentries[i].used
+                && self.dentries[i].parent == parent
+                && self.dentries[i].negative
             {
                 self.dentry_evict(i as u16);
             }
@@ -1728,7 +1750,12 @@ impl Vfs {
         }
     }
 
-    fn walk(&mut self, cwd: Option<PathRef>, path: &[u8], follow_last: bool) -> Result<PathRef, FsError> {
+    fn walk(
+        &mut self,
+        cwd: Option<PathRef>,
+        path: &[u8],
+        follow_last: bool,
+    ) -> Result<PathRef, FsError> {
         if path.is_empty() {
             return Err(FsError::Inval);
         }
@@ -1859,7 +1886,8 @@ impl Vfs {
         let mut i = 0usize;
         while i < MAX_FILES {
             if !self.files[i].used {
-                self.inodes[islot as usize].refs = self.inodes[islot as usize].refs.saturating_add(1);
+                self.inodes[islot as usize].refs =
+                    self.inodes[islot as usize].refs.saturating_add(1);
                 self.files[i] = File {
                     used: true,
                     refs: 1,
@@ -1955,31 +1983,19 @@ fn ram_idx(ino: u32) -> Option<usize> {
         return None;
     }
     let i = (ino - 1) as usize;
-    if i >= MAX_RAM_NODES {
-        None
-    } else {
-        Some(i)
-    }
+    if i >= MAX_RAM_NODES { None } else { Some(i) }
 }
 
 fn ram_get(vfs: &Vfs, sb: u8, ino: u32) -> Option<&RamNode> {
     let i = ram_idx(ino)?;
     let r = &vfs.ram[i];
-    if r.used && r.sb == sb {
-        Some(r)
-    } else {
-        None
-    }
+    if r.used && r.sb == sb { Some(r) } else { None }
 }
 
 fn ram_get_mut(vfs: &mut Vfs, sb: u8, ino: u32) -> Option<&mut RamNode> {
     let i = ram_idx(ino)?;
     let r = &mut vfs.ram[i];
-    if r.used && r.sb == sb {
-        Some(r)
-    } else {
-        None
-    }
+    if r.used && r.sb == sb { Some(r) } else { None }
 }
 
 fn ram_nlink(vfs: &Vfs, sb: u8, ino: u32) -> u32 {
@@ -2427,7 +2443,10 @@ fn ram_link(vfs: &mut Vfs, dir_islot: u16, name: &[u8], target: u32) -> Result<(
     {
         let r = ram_get_mut(vfs, sb, dir_ino).ok_or(FsError::NotFound)?;
         let n = r.ndent as usize;
-        r.dents[n] = RamDent { name: nm, ino: target };
+        r.dents[n] = RamDent {
+            name: nm,
+            ino: target,
+        };
         r.ndent += 1;
         r.mtime = tnow;
         r.ctime = tnow;

@@ -9,9 +9,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use vibeos::block::BlockError;
-use vibeos::cache::{
-    self, Cache, CacheKey, CacheStats, FillNeed, DEFAULT_PAGES, PAGE,
-};
+use vibeos::cache::{self, Cache, CacheKey, CacheStats, DEFAULT_PAGES, FillNeed, PAGE};
 use vibeos::lock::RANK_DEVICE;
 
 use crate::block_init;
@@ -22,8 +20,7 @@ use crate::virtio_blk_init;
 pub const DEV_RAM0: u32 = 0;
 pub const DEV_VDA: u32 = 1;
 
-static CACHE: SpinMutex<Cache<DEFAULT_PAGES>> =
-    SpinMutex::with_rank(Cache::new(), RANK_DEVICE);
+static CACHE: SpinMutex<Cache<DEFAULT_PAGES>> = SpinMutex::with_rank(Cache::new(), RANK_DEVICE);
 static LIVE: AtomicBool = AtomicBool::new(false);
 
 fn geom(dev: u32) -> Result<(u32, u64), BlockError> {
@@ -179,9 +176,7 @@ fn bump_readahead(evict: &mut [u8], page: &mut [u8]) {
         }
         FillNeed::Writeback => {
             if backend_write(fill.evict_key.dev, fill.evict_key.offset, evict).is_err() {
-                CACHE
-                    .lock()
-                    .restore_evict(fill.slot, fill.evict_key, evict);
+                CACHE.lock().restore_evict(fill.slot, fill.evict_key, evict);
                 return;
             }
             CACHE.lock().abort_fill(fill.slot);
@@ -190,9 +185,7 @@ fn bump_readahead(evict: &mut [u8], page: &mut [u8]) {
             if matches!(fill.need, FillNeed::WritebackThenRead)
                 && backend_write(fill.evict_key.dev, fill.evict_key.offset, evict).is_err()
             {
-                CACHE
-                    .lock()
-                    .restore_evict(fill.slot, fill.evict_key, evict);
+                CACHE.lock().restore_evict(fill.slot, fill.evict_key, evict);
                 return;
             }
             if backend_read(rk.dev, rk.offset, page).is_ok() {
@@ -246,19 +239,13 @@ pub fn read(dev: u32, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
                 }
                 match do_fill_io(&fill, &evict, &mut page) {
                     Ok(()) => {
-                        CACHE.lock().install_read(
-                            &fill,
-                            &page,
-                            pin,
-                            &mut buf[done..done + n],
-                        )?;
+                        CACHE
+                            .lock()
+                            .install_read(&fill, &page, pin, &mut buf[done..done + n])?;
                     }
                     Err(e) => {
                         let mut c = CACHE.lock();
-                        if matches!(
-                            fill.need,
-                            FillNeed::Writeback | FillNeed::WritebackThenRead
-                        ) {
+                        if matches!(fill.need, FillNeed::Writeback | FillNeed::WritebackThenRead) {
                             c.restore_evict(fill.slot, fill.evict_key, &evict);
                         } else {
                             c.abort_fill(fill.slot);
@@ -303,55 +290,45 @@ pub fn write(dev: u32, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
         };
         match plan {
             None => {}
-            Some(fill) => {
-                match fill.need {
-                    FillNeed::None => {
-                        spins = spins.saturating_add(1);
-                        if spins > 1_000_000 {
-                            return Err(BlockError::Io);
-                        }
-                        thread_init::yield_now();
-                        continue;
+            Some(fill) => match fill.need {
+                FillNeed::None => {
+                    spins = spins.saturating_add(1);
+                    if spins > 1_000_000 {
+                        return Err(BlockError::Io);
                     }
-                    FillNeed::Writeback => {
-                        if let Err(e) = backend_write(
-                            fill.evict_key.dev,
-                            fill.evict_key.offset,
-                            &evict,
-                        ) {
-                            CACHE.lock().restore_evict(
-                                fill.slot,
-                                fill.evict_key,
-                                &evict,
-                            );
+                    thread_init::yield_now();
+                    continue;
+                }
+                FillNeed::Writeback => {
+                    if let Err(e) = backend_write(fill.evict_key.dev, fill.evict_key.offset, &evict)
+                    {
+                        CACHE
+                            .lock()
+                            .restore_evict(fill.slot, fill.evict_key, &evict);
+                        return Err(e);
+                    }
+                    let mut c = CACHE.lock();
+                    c.stats.device_writes = c.stats.device_writes.saturating_add(1);
+                }
+                FillNeed::Read | FillNeed::WritebackThenRead => {
+                    match do_fill_io(&fill, &evict, &mut page) {
+                        Ok(()) => {
+                            CACHE
+                                .lock()
+                                .install_write(&fill, &page, pin, &buf[done..done + n])?;
+                        }
+                        Err(e) => {
+                            let mut c = CACHE.lock();
+                            if matches!(fill.need, FillNeed::WritebackThenRead) {
+                                c.restore_evict(fill.slot, fill.evict_key, &evict);
+                            } else {
+                                c.abort_fill(fill.slot);
+                            }
                             return Err(e);
-                        }
-                        let mut c = CACHE.lock();
-                        c.stats.device_writes = c.stats.device_writes.saturating_add(1);
-                    }
-                    FillNeed::Read | FillNeed::WritebackThenRead => {
-                        match do_fill_io(&fill, &evict, &mut page) {
-                            Ok(()) => {
-                                CACHE.lock().install_write(
-                                    &fill,
-                                    &page,
-                                    pin,
-                                    &buf[done..done + n],
-                                )?;
-                            }
-                            Err(e) => {
-                                let mut c = CACHE.lock();
-                                if matches!(fill.need, FillNeed::WritebackThenRead) {
-                                    c.restore_evict(fill.slot, fill.evict_key, &evict);
-                                } else {
-                                    c.abort_fill(fill.slot);
-                                }
-                                return Err(e);
-                            }
                         }
                     }
                 }
-            }
+            },
         }
         done += n;
         spins = 0;

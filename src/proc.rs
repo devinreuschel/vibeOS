@@ -416,17 +416,21 @@ mod tests {
             .unwrap();
             n += 1;
         }
-        assert!(t
-            .alloc(Fd {
+        assert!(
+            t.alloc(Fd {
                 kind: FdKind::Console,
                 flags: 0,
             })
-            .is_err());
+            .is_err()
+        );
         t.close(0);
-        assert_eq!(t.alloc(Fd {
-            kind: FdKind::File(1),
-            flags: 0,
-        })
-        .unwrap(), 0);
+        assert_eq!(
+            t.alloc(Fd {
+                kind: FdKind::File(1),
+                flags: 0,
+            })
+            .unwrap(),
+            0
+        );
     }
 }

@@ -115,7 +115,9 @@ fn main() {
         mk.arg("--add").arg(format!("{}:{dest}", elf.display()));
     }
 
-    let output = mk.output().unwrap_or_else(|e| panic!("mkinitrd.py spawn: {e}"));
+    let output = mk
+        .output()
+        .unwrap_or_else(|e| panic!("mkinitrd.py spawn: {e}"));
     if !output.status.success() {
         panic!(
             "mkinitrd.py failed ({}):\nstdout:\n{}\nstderr:\n{}",
