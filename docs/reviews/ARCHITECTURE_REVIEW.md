@@ -353,7 +353,8 @@ The deployment target is QEMU under CI; real hardware is Phase 18. `.cursor/envi
 **O1 · Note the Phase 9 pause and resume; research notes deferred**
 - **Observation:** `CHANGELOG.md:57` says "Phase 9 is paused" with no reason. The maintainer clarified (2026-09-22) that the pause was a usage-limit matter the agents recorded on their own, and that it is now lifted. The README's promise to record "where the models fall over" has no artifact yet; the maintainer considers that premature.
 - **Recommendation:** One line in the CHANGELOG `[Unreleased]` section ("Phase 9 resumed") and remove the "paused" wording from the Phase 8D entry when the section is cut (B3). Defer any research-notes document until the maintainer asks for it.
-- **Impact:** Low · **Effort:** S · **Risk if ignored:** A reader of the changelog thinks Phase 9 is blocked.
+- **Status:** **Superseded 2026-09-22.** Phase 9 exit closed the same day. Do not implement as written.
+- **Impact:** Low · **Effort:** S · **Risk if ignored:** None; Phase 9 is done.
 
 ---
 
@@ -418,8 +419,8 @@ Nothing in this sketch requires changing an algorithm. Locks, ranks, markers, th
 
 | ID | Item | Note |
 |---|---|---|
-| DOC1 | README/DESIGN header/module map/LICENSE | Agents read these first |
-| DOC3 | Tracked `AGENTS.md`; fix stale rule references | Same reason |
+| DOC1 | README/DESIGN header/module map/LICENSE | Agents read these first. **Landed** (docs/meta PR). |
+| DOC3 | Tracked `AGENTS.md`; fix stale rule references | Same reason. **Landed** (docs/meta PR). |
 | Q1 | `cargo fmt` commit, `rustfmt.toml`, clippy + `-Dwarnings` gate | Do the fmt commit before any file moves |
 | C1 | Pin nightly date, action SHAs, Limine commit; cache on `Cargo.lock` | Prevents "red CI, no diff" |
 | DX1 | `make check`; ruff/mypy for `tests/` | Fast local gate |
@@ -429,7 +430,7 @@ Nothing in this sketch requires changing an algorithm. Locks, ranks, markers, th
 | B3 | Tag `v0.8.0`, cut changelog, publish ISO artifact | |
 | DOC4 | Shorter changelog entries | With B3 |
 | D3 | `BootInfo` captured once | Deferred since Phase 0 |
-| R1 | Root/tests tidy; prune merged branches | |
+| R1 | Root/tests tidy; prune merged branches | Branch prune in docs/meta PR. ISO→`build/` waits on B1; Python driver moves wait on T2. |
 
 ### Phase II — Near term (2–4 weeks; Phase 9 is resuming, so interleave with it)
 
@@ -448,7 +449,7 @@ Nothing in this sketch requires changing an algorithm. Locks, ranks, markers, th
 | S1 | SMEP/SMAP/UMIP/WP + in-guest test; real entropy for `/dev/random` | Before Phase 9.1 |
 | B4 | One initrd generator; asm trampoline via `global_asm!` | — |
 | Q4, E3, P2 | Naming/feature consistency; emit-path rule; Phase 17 notes | — |
-| O1 | One changelog line for the Phase 9 resume (research notes deferred by the maintainer) | — |
+| O1 | One changelog line for the Phase 9 resume (research notes deferred by the maintainer) | **Superseded 2026-09-22:** Phase 9 exit already closed. Do not implement as written. |
 
 ### Phase III — Strategic (alongside Phase 9–10)
 
@@ -515,7 +516,7 @@ The maintainer answered the first draft's questions; where they deferred, the de
 | # | Question | Answer | Decision recorded in |
 |---|---|---|---|
 | 1 | Is macOS/Apple Silicon a supported dev host? | **Yes.** The maintainer boots the kernel and types commands there and reports bugs from it. | A2, I1, DX1 now firm; host tests must pass on macOS. |
-| 2 | Why was Phase 9 paused? | Usage limits; the agents recorded the pause on their own. **Lifted now.** | O1 (one changelog line); "paused" wording removed elsewhere. |
+| 2 | Why was Phase 9 paused? | Usage limits; the agents recorded the pause on their own. **Lifted now.** Phase 9 exit closed 2026-09-22. | O1 **superseded** (no "resumed" note). |
 | 3 | Is the custom target JSON deliberate? | No; it was the agents' choice. | B2: proceed with the spike and expect to delete the JSON. |
 | 4 | Which module map wins? | The flat `_init` pairing came later (2026-09-16) than the DESIGN map (2026-08-01); maintainer leans "the later one", otherwise defers. | A1: keep the pairing, nest it per subsystem, rewrite DESIGN §1.3 to match. |
 | 5 | Do the `MAX_*` caps survive Phase 9? | Deferred to this review. | D1: heap-allocate the growable tables at init behind a `limits` module; slab stays at §10.5. |

@@ -43,4 +43,4 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 
 Suggested order for Phase I (all independent unless noted): DOC1, DOC3, C1, Q1, B1, T2 → C2, DX1, B3 → DOC4, D3, R1.
 
-Status: all **proposed**; nothing has been implemented or committed.
+**Status (2026-09-22).** DOC1 and DOC3 landed in the docs/meta PR. R1: merged `feature/*` branches pruned; ISO→`build/` waits on B1; Python driver moves wait on T2 (`tests/e2e/` already gone). **O1 superseded** — Phase 9 exit closed 2026-09-22; do not add a "Phase 9 resumed" note. Everything else still proposed.

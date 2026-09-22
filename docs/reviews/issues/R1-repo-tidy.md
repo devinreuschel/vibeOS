@@ -1,5 +1,11 @@
 # R1 · Tidy the root, `tests/`, and remote branches
 
+**This PR (docs/meta):** prune squash-merged `feature/*` remotes; `tests/e2e/`
+is already gone. **Deferred:** ISO/`iso_root`/`initrd.fat` → `build/` (B1);
+`tests/kernel_boot.py` / `tests/vibefs_crash.py` → `tests/harness/run_*.py` (T2);
+`tests/hostlib` → `crates/hostlib` (A2). GitHub "Automatically delete head
+branches" is a repo setting the maintainer still needs to flip.
+
 | | |
 |---|---|
 | **Area** | 4.14 Repository structure |
