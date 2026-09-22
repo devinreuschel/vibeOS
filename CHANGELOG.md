@@ -52,6 +52,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- CI: `cargo fmt --check` and `cargo clippy -- -D warnings` on the kernel
+  and `tests/hostlib`. rustflags deny warnings in both cargo configs.
 - O1 superseded: Phase 9 exit closed 2026-09-22; no "Phase 9 resumed"
   note. README / DESIGN header / §1.3 now match the tree (DOC1).
 - Pin the Rust nightly date, GitHub Action SHAs, and Limine commit so CI

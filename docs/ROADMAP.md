@@ -147,7 +147,7 @@ rest of the project, which is the single most consequential decision in this pha
 ### 0.7 CI
 - [x] GitHub Actions on push and pull request, Linux runner
 - [x] install `qemu-system-x86`, `nasm`, `xorriso`; bootstrap Limine
-- [ ] `RUSTFLAGS=-Dwarnings`, `cargo clippy -- -D warnings`, `cargo fmt --check`  (deferred: clippy/fmt gates land with phase 1)
+- [x] `RUSTFLAGS=-Dwarnings`, `cargo clippy -- -D warnings`, `cargo fmt --check`
 - [x] run host units, harness units, ISO build, e2e
 - [x] cache the cargo registry and the Limine checkout so the loop stays fast
 
