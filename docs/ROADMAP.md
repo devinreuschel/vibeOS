@@ -747,11 +747,11 @@ limitations.
 **Exit gate**
 - [x] a static ELF binary loaded from the filesystem runs in ring 3 and exits with a status the kernel reports
 - [x] `write` to fd 1 from userspace reaches the console
-- [ ] `fork` and `exec` produce a child that runs a different binary; the parent's `wait` returns its status
-- [ ] a user process faulting on a bad pointer is killed with a diagnostic and does not take the kernel with it
-- [ ] the interactive shell runs as a user process, not in the kernel
-- [ ] every syscall argument validated: an in-guest test passes kernel pointers, unmapped pointers, and huge lengths and gets `EFAULT` rather than a panic
-- [ ] `ps` lists processes with real state
+- [x] `fork` and `exec` produce a child that runs a different binary; the parent's `wait` returns its status
+- [x] a user process faulting on a bad pointer is killed with a diagnostic and does not take the kernel with it
+- [x] the interactive shell runs as a user process, not in the kernel
+- [x] every syscall argument validated: an in-guest test passes kernel pointers, unmapped pointers, and huge lengths and gets `EFAULT` rather than a panic
+- [x] `ps` lists processes with real state
 
 ### 9.1 Ring 3 plumbing
 - [x] user code and data selectors already in the GDT, verified against the `sysret` layout
@@ -773,7 +773,7 @@ limitations.
 - [x] the ABI documented in `docs/`: register assignment, return convention, error encoding
 - [x] a dispatch table indexed by number, with an arity and a validation policy per entry
 - [x] first set wired for proof: `write`, `exit`, `getpid`, `sched_yield`
-- [ ] remainder (`read`, `open`, `close`, `lseek`, `stat`, `fstat`, `fork`, `execve`, `wait4`, `getppid`, `nanosleep`, `brk`, `mmap`, `munmap`) wait on Process in C
+- [x] remainder (`read`, `open`, `close`, `lseek`, `fork`, `execve`, `wait4`, `getppid`); `stat`/`fstat`/`nanosleep`/`brk`/`mmap`/`munmap` still later
 - [x] `errno` values matching Linux where a name exists, so ported software behaves
 - [x] every pointer argument validated against the caller's address space before use
 - [x] syscall tracing behind a flag, since the alternative is guessing why a program failed
@@ -790,34 +790,34 @@ limitations.
 - [x] refuse a malformed binary with an error rather than mapping garbage
 
 ### 9.5 Process abstraction
-- [ ] `Process`: pid, parent, address space, descriptor table, working directory, credentials, exit status
-- [ ] threads belong to a process; a process is one or more threads sharing an address space
-- [ ] the descriptor table with per-fd flags, `dup`, `dup2`, and close-on-exec
-- [ ] a process tree with reparenting to init on parent death
-- [ ] zombie state until reaped, and a defined resource release point
-- [ ] uid and gid present from the start even if nothing enforces them yet, because retrofitting credentials is painful
+- [x] `Process`: pid, parent, address space, descriptor table, working directory, credentials, exit status
+- [x] threads belong to a process; a process is one or more threads sharing an address space
+- [x] the descriptor table with per-fd flags, `dup`, `dup2`, and close-on-exec
+- [x] a process tree with reparenting to init on parent death
+- [x] zombie state until reaped, and a defined resource release point
+- [x] uid and gid present from the start even if nothing enforces them yet, because retrofitting credentials is painful
 
 ### 9.6 fork, exec, wait
-- [ ] `fork`: clone the address space, duplicate descriptors, copy the thread context, return 0 in the child
-- [ ] initially a full copy; copy-on-write in phase 10, with the interface unchanged
-- [ ] `execve`: build the new address space first, and only replace the old one after the load succeeds, so a failed exec leaves the caller intact
-- [ ] `exit`: release resources, become a zombie, signal the parent
-- [ ] `wait4`: block for a child, return its status, reap it, with `WNOHANG`
-- [ ] orphan reaping by init
-- [ ] in-guest: fork bomb bounded by a process limit, exec chain, wait ordering, orphan reparenting
+- [x] `fork`: clone the address space, duplicate descriptors, copy the thread context, return 0 in the child
+- [x] initially a full copy; copy-on-write in phase 10, with the interface unchanged
+- [x] `execve`: build the new address space first, and only replace the old one after the load succeeds, so a failed exec leaves the caller intact
+- [x] `exit`: release resources, become a zombie, signal the parent
+- [x] `wait4`: block for a child, return its status, reap it, with `WNOHANG`
+- [x] orphan reaping by init
+- [x] in-guest: fork bomb bounded by a process limit, exec chain, wait ordering, orphan reparenting
 
 ### 9.7 Early signals
-- [ ] `SIGKILL` and `SIGSTOP` handled in the kernel with no user handler
-- [ ] `SIGSEGV`, `SIGBUS`, `SIGFPE`, `SIGILL` generated from the corresponding exceptions
-- [ ] `SIGCHLD` on child exit
-- [ ] default actions: terminate, ignore, stop
-- [ ] user-installed handlers, masking, and queueing deferred to phase 11
+- [x] `SIGKILL` and `SIGSTOP` handled in the kernel with no user handler
+- [x] `SIGSEGV`, `SIGBUS`, `SIGFPE`, `SIGILL` generated from the corresponding exceptions
+- [x] `SIGCHLD` on child exit
+- [x] default actions: terminate, ignore, stop
+- [x] user-installed handlers, masking, and queueing deferred to phase 11
 
 ### 9.8 First userspace
 - [x] a minimal freestanding user program with hand-written syscall stubs and no libc, to prove the path
-- [ ] a userspace test runner exercising each syscall and its error cases
-- [ ] the shell moved out of the kernel and into a user process, keeping the kernel one only under a debug feature
-- [ ] the kernel's job after init becomes starting `/sbin/init` and nothing else
+- [x] a userspace test runner exercising each syscall and its error cases
+- [x] the shell moved out of the kernel and into a user process, keeping the kernel one only under a debug feature
+- [x] the kernel's job after init becomes starting `/sbin/init` and nothing else
 
 ---
 

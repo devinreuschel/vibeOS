@@ -98,6 +98,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("ring3_hello_exit", test_ring3_hello_exit),
     ("syscall_dispatch", test_syscall_dispatch),
     ("syscall_ptr_validate", test_syscall_ptr_validate),
+    ("user_syscalls", test_user_syscalls),
     ("int3_roundtrip", test_int3_roundtrip),
     ("scoped_pf", test_scoped_pf),
     ("gp_catch", test_gp_catch),
@@ -863,7 +864,7 @@ fn test_ring3_hello_exit() -> Outcome {
 }
 
 fn test_syscall_dispatch() -> Outcome {
-    if syscall_init::dispatch(vibeos::syscall::SYS_GETPID, [0; 6]) != vibeos::syscall::BOOTSTRAP_PID {
+    if syscall_init::dispatch(vibeos::syscall::SYS_GETPID, [0; 6]) != 0 {
         return Outcome::Fail("getpid");
     }
     if syscall_init::dispatch(vibeos::syscall::SYS_SCHED_YIELD, [0; 6]) != 0 {
@@ -923,6 +924,38 @@ fn test_syscall_ptr_validate() -> Outcome {
         return Outcome::Fail("overflow");
     }
     Outcome::Ok
+}
+
+fn test_user_syscalls() -> Outcome {
+    // Spawned fork children enter with IF on. The ktest registry holds
+    // IF off; enable the tick so wait4/yield can run them, same as the
+    // later block tests. Bound `run_user` still cli's around setjmp.
+    with_timer(|| {
+        let before = free_frames();
+        match user_init::run_path("/bin/tests") {
+            Ok(0) => {}
+            Ok(st) => {
+                let _ = writeln!(Serial, "vibeOS: ktest:   tests status={st}");
+                return Outcome::Fail("status not 0");
+            }
+            Err(e) => {
+                let _ = writeln!(Serial, "vibeOS: ktest:   tests err={}", e.as_str());
+                return Outcome::Fail("load/run");
+            }
+        }
+        let out = syscall_init::stdout_bytes();
+        if !out
+            .windows(b"user: tests ok".len())
+            .any(|w| w == b"user: tests ok")
+        {
+            return Outcome::Fail("stdout missing ok");
+        }
+        arch::gs::force_kernel();
+        if free_frames() != before {
+            return Outcome::Fail("tests frame leak");
+        }
+        Outcome::Ok
+    })
 }
 
 fn test_int3_roundtrip() -> Outcome {

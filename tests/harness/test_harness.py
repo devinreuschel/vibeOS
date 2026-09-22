@@ -21,6 +21,7 @@ from harness import (  # noqa: E402
     contains_panic,
     HPET_OFF_MACHINE,
     _qemu_argv,
+    serial_tail,
 )
 
 
@@ -38,6 +39,12 @@ class TestOrderedMarkerCheck(unittest.TestCase):
         ]
         result = check_markers_in_order(lines, markers)
         self.assertEqual(result.matched, ["a", "b", "c"])
+
+    def test_serial_tail(self) -> None:
+        self.assertEqual(serial_tail([]), " (no serial)")
+        self.assertIn("b", serial_tail(["a", "b"], n=1))
+        self.assertIn("1/2", serial_tail(["a", "b"], n=1))
+        self.assertNotIn("\na\n", serial_tail(["a", "b"], n=1))
 
     def test_out_of_order_fails(self) -> None:
         lines = [

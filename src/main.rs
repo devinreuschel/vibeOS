@@ -53,6 +53,7 @@ mod part_init;
 mod pci_init;
 mod per_cpu_init;
 mod pmm_init;
+mod proc_init;
 mod sched_init;
 mod serial;
 mod shell_init;
@@ -327,6 +328,13 @@ fn normal_boot_tail() {
     // builds skip the shell and write a vibefs virtio image until killed.
     #[cfg(not(feature = "vibefs_crash"))]
     crate::shell_init::init();
+
+    #[cfg(all(
+        not(feature = "kernel_tests"),
+        not(feature = "vibefs_crash"),
+        not(feature = "kernel_shell")
+    ))]
+    crate::proc_init::start_init();
 
     #[cfg(feature = "vibefs_crash")]
     crate::vibefs_init::crash_loop();

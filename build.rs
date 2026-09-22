@@ -60,49 +60,62 @@ fn main() {
         .unwrap();
     }
 
-    // FAT32 initrd (ROADMAP §8.6 / §9.8). Always wrap /hello so a stale
-    // workspace initrd.fat cannot boot a kernel without the user ELF.
+    // FAT32 initrd (ROADMAP §8.6 / §9.8). Always wrap user ELFs so a stale
+    // workspace initrd.fat cannot boot a kernel without them.
     let script = manifest.join("scripts/mkinitrd.py");
     println!("cargo:rerun-if-changed={}", script.display());
     println!("cargo:rerun-if-changed=scripts/mkuserelf.py");
     println!("cargo:rerun-if-changed=user/hello.asm");
+    println!("cargo:rerun-if-changed=user/init.asm");
+    println!("cargo:rerun-if-changed=user/sh.asm");
+    println!("cargo:rerun-if-changed=user/tests.asm");
+    println!("cargo:rerun-if-changed=user/sys.inc");
     let initrd = out.join("initrd.fat");
-    let hello_asm = manifest.join("user/hello.asm");
     let wrap = manifest.join("scripts/mkuserelf.py");
-    let blob = out.join("hello.bin");
-    let elf = out.join("hello.elf");
-    let nasm = Command::new("nasm")
-        .args(["-f", "bin"])
-        .arg(&hello_asm)
-        .arg("-o")
-        .arg(&blob)
-        .output()
-        .unwrap_or_else(|e| panic!("nasm hello.asm: {e}"));
-    if !nasm.status.success() {
-        panic!(
-            "nasm hello.asm failed:\n{}",
-            String::from_utf8_lossy(&nasm.stderr)
-        );
+    let user_dir = manifest.join("user");
+
+    let mut mk = Command::new("python3");
+    mk.arg(&script).arg(&initrd);
+
+    for (stem, dest) in [
+        ("hello", "/hello"),
+        ("init", "/sbin/init"),
+        ("sh", "/bin/sh"),
+        ("tests", "/bin/tests"),
+    ] {
+        let asm = user_dir.join(format!("{stem}.asm"));
+        let blob = out.join(format!("{stem}.bin"));
+        let elf = out.join(format!("{stem}.elf"));
+        let nasm = Command::new("nasm")
+            .args(["-f", "bin", "-I"])
+            .arg(format!("{}/", user_dir.display()))
+            .arg(&asm)
+            .arg("-o")
+            .arg(&blob)
+            .output()
+            .unwrap_or_else(|e| panic!("nasm {stem}.asm: {e}"));
+        if !nasm.status.success() {
+            panic!(
+                "nasm {stem}.asm failed:\n{}",
+                String::from_utf8_lossy(&nasm.stderr)
+            );
+        }
+        let wrap_out = Command::new("python3")
+            .arg(&wrap)
+            .arg(&blob)
+            .arg(&elf)
+            .output()
+            .unwrap_or_else(|e| panic!("mkuserelf.py {stem}: {e}"));
+        if !wrap_out.status.success() {
+            panic!(
+                "mkuserelf.py {stem} failed:\n{}",
+                String::from_utf8_lossy(&wrap_out.stderr)
+            );
+        }
+        mk.arg("--add").arg(format!("{}:{dest}", elf.display()));
     }
-    let wrap_out = Command::new("python3")
-        .arg(&wrap)
-        .arg(&blob)
-        .arg(&elf)
-        .output()
-        .unwrap_or_else(|e| panic!("mkuserelf.py: {e}"));
-    if !wrap_out.status.success() {
-        panic!(
-            "mkuserelf.py failed:\n{}",
-            String::from_utf8_lossy(&wrap_out.stderr)
-        );
-    }
-    let output = Command::new("python3")
-        .arg(&script)
-        .arg(&initrd)
-        .arg("--add")
-        .arg(format!("{}:/hello", elf.display()))
-        .output()
-        .unwrap_or_else(|e| panic!("mkinitrd.py spawn: {e}"));
+
+    let output = mk.output().unwrap_or_else(|e| panic!("mkinitrd.py spawn: {e}"));
     if !output.status.success() {
         panic!(
             "mkinitrd.py failed ({}):\nstdout:\n{}\nstderr:\n{}",

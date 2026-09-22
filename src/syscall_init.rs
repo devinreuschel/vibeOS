@@ -7,13 +7,10 @@ use core::mem::offset_of;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
-use vibeos::addr_space::{AddressSpace, UserMemError};
+use vibeos::addr_space::AddressSpace;
 use vibeos::desc::{KERNEL_CS, STAR_SYSRET, Tss, USER_CS_RPL, USER_DS_RPL};
 use vibeos::per_cpu::PerCpu;
-use vibeos::syscall::{
-    self, SyscallFrame, EARLY_STDERR_FD, EARLY_STDOUT_FD, EBADF, ENOSYS, SYS_EXIT, SYS_GETPID,
-    SYS_SCHED_YIELD, SYS_WRITE,
-};
+use vibeos::syscall::{SyscallFrame, UserRegs};
 use vibeos::thread::{Fxsave, Tcb, RFLAGS_IF, RFLAGS_RESERVED1};
 
 use crate::arch::gdt;
@@ -165,6 +162,31 @@ global_asm!(
         push {user_cs}
         push rdi
         iretq
+
+    .global vibeos_iret_user_full
+    .type vibeos_iret_user_full, @function
+    vibeos_iret_user_full:
+        push {user_ss}
+        push qword ptr [rdi + {ur_rsp}]
+        push qword ptr [rdi + {ur_rflags}]
+        push {user_cs}
+        push qword ptr [rdi + {ur_rip}]
+        mov rax, [rdi + {ur_rax}]
+        mov rbx, [rdi + {ur_rbx}]
+        mov rcx, [rdi + {ur_rcx}]
+        mov rdx, [rdi + {ur_rdx}]
+        mov rsi, [rdi + {ur_rsi}]
+        mov rbp, [rdi + {ur_rbp}]
+        mov r8,  [rdi + {ur_r8}]
+        mov r9,  [rdi + {ur_r9}]
+        mov r10, [rdi + {ur_r10}]
+        mov r11, [rdi + {ur_r11}]
+        mov r12, [rdi + {ur_r12}]
+        mov r13, [rdi + {ur_r13}]
+        mov r14, [rdi + {ur_r14}]
+        mov r15, [rdi + {ur_r15}]
+        mov rdi, [rdi + {ur_rdi}]
+        iretq
     .popsection
     "#,
     user_rsp = const SCRATCH,
@@ -178,11 +200,30 @@ global_asm!(
     rf_vm = const RF_VM,
     user_cs = const USER_CS_RPL as u64,
     user_ss = const USER_DS_RPL as u64,
+    ur_rax = const offset_of!(UserRegs, rax),
+    ur_rbx = const offset_of!(UserRegs, rbx),
+    ur_rcx = const offset_of!(UserRegs, rcx),
+    ur_rdx = const offset_of!(UserRegs, rdx),
+    ur_rsi = const offset_of!(UserRegs, rsi),
+    ur_rdi = const offset_of!(UserRegs, rdi),
+    ur_rbp = const offset_of!(UserRegs, rbp),
+    ur_r8 = const offset_of!(UserRegs, r8),
+    ur_r9 = const offset_of!(UserRegs, r9),
+    ur_r10 = const offset_of!(UserRegs, r10),
+    ur_r11 = const offset_of!(UserRegs, r11),
+    ur_r12 = const offset_of!(UserRegs, r12),
+    ur_r13 = const offset_of!(UserRegs, r13),
+    ur_r14 = const offset_of!(UserRegs, r14),
+    ur_r15 = const offset_of!(UserRegs, r15),
+    ur_rip = const offset_of!(UserRegs, rip),
+    ur_rsp = const offset_of!(UserRegs, rsp),
+    ur_rflags = const offset_of!(UserRegs, rflags),
 );
 
 unsafe extern "C" {
     fn vibeos_syscall_entry();
     fn vibeos_iret_user(rip: u64, rsp: u64, rflags: u64) -> !;
+    fn vibeos_iret_user_full(regs: *const UserRegs) -> !;
 }
 
 /// Program SYSCALL MSRs, FPU, and TSS.RSP0 wiring. Per CPU.
@@ -345,6 +386,30 @@ pub unsafe fn enter_user(rip: u64, rsp: u64, rflags: u64, fs_base: u64) -> ! {
     }
 }
 
+/// `iretq` into ring 3 with a full GPR set (fork child / spawned process).
+///
+/// # Safety
+/// `regs.rip`/`regs.rsp` are mapped in the loaded CR3. `regs.rflags`
+/// should include the reserved-1 bit.
+pub unsafe fn enter_user_full(regs: &UserRegs) -> ! {
+    let cpu = per_cpu_init::current();
+    let ptr = cpu.self_ptr as u64;
+    unsafe {
+        x86::wrmsr(IA32_KERNEL_GS_BASE, ptr);
+        core::arch::asm!(
+            "mov ds, {0:x}",
+            "mov es, {0:x}",
+            "mov fs, {0:x}",
+            "mov gs, {0:x}",
+            in(reg) USER_DS_RPL,
+            options(nostack, preserves_flags),
+        );
+        x86::wrmsr(IA32_GS_BASE, 0);
+        x86::wrmsr(IA32_FS_BASE, regs.fs_base);
+        vibeos_iret_user_full(regs as *const UserRegs);
+    }
+}
+
 pub fn star_configured() -> bool {
     let star = x86::rdmsr(IA32_STAR);
     let efer = x86::rdmsr(IA32_EFER);
@@ -466,7 +531,39 @@ pub fn stdout_bytes() -> &'static [u8] {
     unsafe { core::slice::from_raw_parts(STDOUT.ptr() as *const u8, n) }
 }
 
-fn capture_stdout(bytes: &[u8]) {
+fn current_as() -> Option<&'static AddressSpace> {
+    let p = CURRENT_AS.load(Ordering::Acquire);
+    if p.is_null() {
+        None
+    } else {
+        Some(unsafe { &*p })
+    }
+}
+
+pub fn with_user_as<R>(space: &mut AddressSpace, f: impl FnOnce() -> R) -> R {
+    crate::proc_init::bind_probe(space);
+    let r = f();
+    crate::proc_init::unbind_probe();
+    r
+}
+
+pub fn peek_user_as() -> Option<&'static AddressSpace> {
+    current_as()
+}
+
+pub fn set_user_as(space: &AddressSpace) {
+    CURRENT_AS.store(space as *const AddressSpace as *mut AddressSpace, Ordering::Release);
+}
+
+pub fn clear_user_as() {
+    CURRENT_AS.store(ptr::null_mut(), Ordering::Release);
+}
+
+pub fn in_user() -> bool {
+    IN_USER.load(Ordering::Acquire)
+}
+
+pub fn capture_stdout(bytes: &[u8]) {
     let mut n = STDOUT_LEN.load(Ordering::Relaxed);
     let p = STDOUT.ptr() as *mut u8;
     let mut i = 0;
@@ -478,20 +575,18 @@ fn capture_stdout(bytes: &[u8]) {
     STDOUT_LEN.store(n, Ordering::Release);
 }
 
-fn current_as() -> Option<&'static AddressSpace> {
-    let p = CURRENT_AS.load(Ordering::Acquire);
-    if p.is_null() {
-        None
-    } else {
-        Some(unsafe { &*p })
-    }
+pub fn set_exit_status(st: i32) {
+    EXIT_STATUS.store(st, Ordering::Release);
 }
 
-pub fn with_user_as<R>(space: &mut AddressSpace, f: impl FnOnce() -> R) -> R {
-    let prev = CURRENT_AS.swap(space as *mut AddressSpace, Ordering::AcqRel);
-    let r = f();
-    CURRENT_AS.store(prev, Ordering::Release);
-    r
+pub fn exit_status() -> i32 {
+    EXIT_STATUS.load(Ordering::Acquire)
+}
+
+pub fn longjmp_user(status: i32) -> ! {
+    EXIT_STATUS.store(status, Ordering::Release);
+    crate::arch::gs::force_kernel();
+    unsafe { vibeos_user_longjmp(USER_JMP.ptr(), 1) };
 }
 
 fn bump_counter() {
@@ -544,92 +639,11 @@ pub unsafe fn run_user(space: &mut AddressSpace, rip: u64, rsp: u64, fs_base: u6
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn vibeos_syscall_stub(frame: *const SyscallFrame) -> i64 {
+pub extern "C" fn vibeos_syscall_stub(frame: *mut SyscallFrame) -> i64 {
     bump_counter();
-    let f = unsafe { &*frame };
-    let nr = f.nr;
-    let args = f.args();
-    let ret = dispatch(nr, args);
-    if TRACE.load(Ordering::Acquire) {
-        let name = syscall::info(nr).map(|i| i.name).unwrap_or("?");
-        let _ = core::fmt::Write::write_fmt(
-            &mut crate::serial::Serial,
-            format_args!("user: syscall {name} nr={nr} = {ret}\n"),
-        );
-    }
-    ret
+    crate::proc_init::syscall(frame)
 }
 
 pub fn dispatch(nr: u64, args: [u64; 6]) -> i64 {
-    match nr {
-        SYS_WRITE => sys_write(args[0], args[1], args[2]),
-        SYS_GETPID => syscall::BOOTSTRAP_PID,
-        SYS_SCHED_YIELD => {
-            // ktest holds IF off on the bootstrap stack. Yielding from a
-            // kernel-side dispatch() probe can land in idle with IF=0.
-            if IN_USER.load(Ordering::Acquire) {
-                crate::thread_init::yield_now();
-            }
-            0
-        }
-        SYS_EXIT => sys_exit(args[0]),
-        _ => syscall::neg(ENOSYS),
-    }
-}
-
-fn sys_write(fd: u64, buf: u64, len: u64) -> i64 {
-    if fd != EARLY_STDOUT_FD && fd != EARLY_STDERR_FD {
-        return syscall::neg(EBADF);
-    }
-    if len == 0 {
-        return 0;
-    }
-    let Some(space) = current_as() else {
-        return syscall::neg(syscall::EFAULT);
-    };
-    if let Some(inf) = syscall::info(SYS_WRITE) {
-        if let Err(e) = syscall::validate_args(inf, [fd, buf, len, 0, 0, 0], |p, n| {
-            space.check_user_range(p, n)
-        }) {
-            return syscall::neg(e);
-        }
-    }
-    let mut scratch = [0u8; 256];
-    let mut done = 0u64;
-    while done < len {
-        let n = (len - done).min(scratch.len() as u64) as usize;
-        match space.read_bytes(buf + done, &mut scratch[..n]) {
-            Ok(()) => {}
-            Err(e) => {
-                match e {
-                    UserMemError::NonCanonical
-                    | UserMemError::Kernel
-                    | UserMemError::Overflow
-                    | UserMemError::Unmapped
-                    | UserMemError::NullGuard => {
-                        return if done == 0 {
-                            syscall::neg(e.errno())
-                        } else {
-                            done as i64
-                        };
-                    }
-                }
-            }
-        }
-        capture_stdout(&scratch[..n]);
-        crate::console_init::write(&scratch[..n]);
-        done += n as u64;
-    }
-    done as i64
-}
-
-fn sys_exit(status: u64) -> i64 {
-    EXIT_STATUS.store((status as i32) & 0xff, Ordering::Release);
-    if !IN_USER.load(Ordering::Acquire) {
-        return 0;
-    }
-    // Longjmp out of the stub; entry asm skips fxrstor/sysret. Status
-    // lives in EXIT_STATUS because longjmp 0 is rewritten to 1.
-    crate::arch::gs::force_kernel();
-    unsafe { vibeos_user_longjmp(USER_JMP.ptr(), 1) };
+    crate::proc_init::dispatch(nr, args)
 }

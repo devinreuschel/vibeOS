@@ -20,6 +20,8 @@ panic-test = []
 # Second kernel build: run the in-guest test registry after init (DESIGN §8.2).
 # Packaged into its own Cargo target dir / ISO; never the production image.
 kernel_tests = []
+# Debug: keep the kernel interactive REPL instead of `/sbin/init`.
+kernel_shell = []
 # After a full boot, trigger a #GP so the dump+halt path is e2e-tested.
 gp-test = []
 # Panic dump ends with QEMU isa-debug-exit (nonzero) instead of an infinite hlt.

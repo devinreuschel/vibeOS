@@ -83,14 +83,27 @@ pub fn load_cr3(space: &AddressSpace) {
     cpu.as_cr3 = want;
 }
 
-pub fn load_kernel_cr3() {
-    let want = paging_init::kernel_cr3();
+pub fn load_cr3_u64(want: u64) {
     let cpu = crate::per_cpu_init::current_mut();
     if cpu.as_cr3 == want || want == 0 {
         return;
     }
     unsafe { x86::write_cr3(want) };
     cpu.as_cr3 = want;
+}
+
+pub fn load_kernel_cr3() {
+    load_cr3_u64(paging_init::kernel_cr3());
+}
+
+/// Full AS copy for fork. Caller must not be running on `src`'s CR3
+/// teardown path; clone allocates a new PML4.
+pub fn clone_full(src: &vibeos::addr_space::AddressSpace) -> Option<AddressSpace> {
+    paging_init::with_pt(|| {
+        let kernel = paging_init::current_mapper();
+        let mut pool = BuddyPool;
+        unsafe { src.clone_anon(&kernel, &mut pool) }.ok()
+    })
 }
 
 pub fn cr3_was_skipped(space: &AddressSpace) -> bool {

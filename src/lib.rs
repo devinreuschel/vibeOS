@@ -36,6 +36,7 @@ pub mod pci;
 pub mod per_cpu;
 pub mod pic;
 pub mod pmm;
+pub mod proc;
 pub mod sched;
 pub mod shell;
 pub mod smp;
