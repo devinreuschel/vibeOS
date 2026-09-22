@@ -1,5 +1,8 @@
 # DOC1 · Fix the top of the documentation funnel: README, DESIGN header, module map, MIT LICENSE
 
+**Landed** in the docs/meta PR (2026-09-22). README status is Phases 0–9 (Phase 9
+exit closed the same day; the review text still said "Phase 9 in progress").
+
 | | |
 |---|---|
 | **Area** | 4.12 Documentation |

@@ -1,5 +1,7 @@
 # DOC3 · Version the agent instructions in the repo (`AGENTS.md`)
 
+**Landed** in the docs/meta PR (2026-09-22).
+
 | | |
 |---|---|
 | **Area** | 4.12 Documentation |

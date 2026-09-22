@@ -1,5 +1,9 @@
 # O1 · Note the Phase 9 pause and resume; research notes deferred
 
+**Superseded 2026-09-22.** Phase 9 exit closed the same day (9C, CHANGELOG
+`[Unreleased]`). Do not implement this issue as written — there is nothing
+to "resume". Research notes stay deferred (maintainer: "not there yet").
+
 | | |
 |---|---|
 | **Area** | 4.15 Other |
@@ -10,7 +14,11 @@
 
 ## Problem
 
-`CHANGELOG.md:57` says "Phase 9 is paused" with no reason. The maintainer clarified (2026-09-22) that the pause was a usage-limit matter the agents recorded on their own, and that it is lifted. The README's promise to record "where the models fall over" has no artifact yet; the maintainer considers that premature ("not there yet").
+The review snapshot had `CHANGELOG.md` saying "Phase 9 is paused" with no
+reason. The maintainer clarified (2026-09-22) that the pause was a usage-limit
+matter the agents recorded on their own, and that it is lifted. The README's
+promise to record "where the models fall over" has no artifact yet; the
+maintainer considers that premature ("not there yet").
 
 ## Recommended fix
 

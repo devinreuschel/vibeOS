@@ -2,7 +2,7 @@
 name = "vibeos"
 version = "0.0.0"
 edition = "2024"
-license = "UNLICENSED"
+license = "MIT"
 publish = false
 
 [lib]

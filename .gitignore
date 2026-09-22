@@ -163,5 +163,7 @@ node_modules/
 .continue/
 .cursor/*
 !.cursor/environment.json
+!.cursor/rules/
+!.cursor/rules/**
 .cursor.chat.history.md
 .cursor.chat.history.md
