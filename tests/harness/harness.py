@@ -1,4 +1,4 @@
-"""vibeOS end-to-end serial harness. DESIGN §8.3.
+"""vibeOS end-to-end serial harness. DESIGN §8.3 / §8.4.
 
 Runs QEMU with serial captured, asserts marker strings appear in order, fails
 fast on panic / exception signatures, and quits QEMU the moment the last
@@ -6,18 +6,42 @@ expected marker is seen so a green run takes ~2s rather than the full timeout.
 
 Standard library only. `subprocess` with its own timeout, not shell `timeout`,
 because macOS coreutils lacks it (DESIGN §0.6).
+
+One QEMU launcher (`qemu_argv`) and one `VIBEOS_*` reader (`env_config`).
+Drivers live in `run_*.py` and must not parse the environment or build argv.
+
+| Variable | Default | Drivers |
+|---|---|---|
+| `VIBEOS_ISO` | per driver | all |
+| `VIBEOS_SMP` | `2` (Makefile `?=`) | all |
+| `VIBEOS_QEMU_CPU` | `max` | all |
+| `VIBEOS_MEM` | `128M` | all |
+| `VIBEOS_BIOS` | unset (SeaBIOS) | all |
+| `VIBEOS_QEMU_ACCEL` | `tcg` (empty omits `-accel`) | all |
+| `VIBEOS_TIMEOUT` | `60` e2e/ps2, `90` ktest/crash | all |
+| `VIBEOS_QEMU_EXTRA` | empty | all |
+| `VIBEOS_EXPECT_PANIC` | off (`""` / `0`) | `run_e2e` |
+| `VIBEOS_GP_TEST` | off | `run_e2e` |
+| `VIBEOS_EXPECT_PIT` | off | `run_e2e` |
+| `VIBEOS_SKIP_PERSIST` | off | `run_ktest` |
+| `VIBEOS_CRASH_ROUNDS` | `8` | `run_vibefs_crash` |
+| `VIBEOS_CRASH_SEED` | time-based | `run_vibefs_crash` |
+| `VIBEOS_MKFS` | `mkfs-vibefs` | `run_vibefs_crash` |
+| `VIBEOS_FSCK` | `fsck-vibefs` | `run_vibefs_crash` |
 """
 
 from __future__ import annotations
 
 import os
+import random
 import select
 import shutil
 import socket
 import subprocess
 import tempfile
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 # Any of these substrings in a serial line means the run has failed. Matches
@@ -300,21 +324,159 @@ def iter_lines_with_deadline(fd: int, deadline: float) -> Iterator[str]:
 # QEMU 10 dropped `-no-hpet`. `pc,hpet=off` is the machine property on
 # 8.x (where -no-hpet is only deprecated) and on 10.x.
 HPET_OFF_MACHINE = ("-machine", "pc,hpet=off")
+# Keep in sync with Makefile `VIBEOS_* ?=` (`make run`).
+DEFAULT_SMP = 2
+DEFAULT_CPU = "max"
+DEFAULT_MEM = "128M"
 DEFAULT_ACCEL = "tcg"
 LAPIC_TIMER_MODES = ("tsc-deadline", "periodic", "pit")
+CRASH_KILL_MAX_S = 0.18
 
 
 @dataclass
 class QemuConfig:
     iso: str
-    smp: int = 2
-    cpu: str = "max"
-    mem: str = "128M"
+    smp: int = DEFAULT_SMP
+    cpu: str = DEFAULT_CPU
+    mem: str = DEFAULT_MEM
     bios: str | None = None  # None = QEMU default (SeaBIOS)
     extra: tuple[str, ...] = ()
     hpet: bool = True
-    # None → VIBEOS_QEMU_ACCEL, else "tcg". Empty string omits -accel.
+    # None → VIBEOS_QEMU_ACCEL, else DEFAULT_ACCEL. Empty string omits -accel.
     accel: str | None = None
+    boot_order: str | None = None
+    extra_panic: tuple[str, ...] = ()
+
+
+@dataclass
+class EnvConfig:
+    iso: str
+    smp: int
+    cpu: str
+    mem: str
+    bios: str | None
+    accel: str | None
+    timeout: float
+    extra: tuple[str, ...]
+
+    def qemu(
+        self,
+        *,
+        extra: tuple[str, ...] = (),
+        hpet: bool = True,
+        boot_order: str | None = None,
+        extra_panic: tuple[str, ...] = (),
+    ) -> QemuConfig:
+        return QemuConfig(
+            iso=self.iso,
+            smp=self.smp,
+            cpu=self.cpu,
+            mem=self.mem,
+            bios=self.bios,
+            extra=extra + self.extra,
+            hpet=hpet,
+            accel=self.accel,
+            boot_order=boot_order,
+            extra_panic=extra_panic,
+        )
+
+
+def env_flag(name: str) -> bool:
+    """True unless unset, empty, or `"0"`."""
+    return os.environ.get(name, "") not in ("", "0")
+
+
+def env_expect_panic() -> bool:
+    return env_flag("VIBEOS_EXPECT_PANIC")
+
+
+def env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return int(raw)
+
+
+def env_str(name: str, default: str) -> str:
+    return os.environ.get(name, default)
+
+
+def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
+    bios = os.environ.get("VIBEOS_BIOS")
+    if bios == "":
+        bios = None
+    accel_raw = os.environ.get("VIBEOS_QEMU_ACCEL")
+    extra = tuple(x for x in os.environ.get("VIBEOS_QEMU_EXTRA", "").split() if x)
+    timeout_raw = os.environ.get("VIBEOS_TIMEOUT")
+    if timeout_raw is None or timeout_raw == "":
+        timeout = default_timeout
+    else:
+        timeout = float(timeout_raw)
+    return EnvConfig(
+        iso=os.environ.get("VIBEOS_ISO", default_iso),
+        smp=env_int("VIBEOS_SMP", DEFAULT_SMP),
+        cpu=os.environ.get("VIBEOS_QEMU_CPU", DEFAULT_CPU),
+        mem=os.environ.get("VIBEOS_MEM", DEFAULT_MEM),
+        bios=bios,
+        accel=DEFAULT_ACCEL if accel_raw is None else accel_raw,
+        timeout=timeout,
+        extra=extra,
+    )
+
+
+@contextmanager
+def overlay_env(mapping: dict[str, str] | None = None, *, clear: bool = False):
+    """Temporarily replace process env. For harness unit tests (C2)."""
+    old = os.environ.copy()
+    try:
+        if clear:
+            os.environ.clear()
+        if mapping:
+            os.environ.update(mapping)
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(old)
+
+
+def make_disk(nbytes: int, prefix: str) -> str:
+    """tempfile + ftruncate. Caller unlinks."""
+    fd, path = tempfile.mkstemp(prefix=prefix, suffix=".img")
+    try:
+        os.ftruncate(fd, nbytes)
+    finally:
+        os.close(fd)
+    return path
+
+
+def virtio_blk_args(disk: str, smp: int, *, discard: bool = True) -> tuple[str, ...]:
+    drive = f"file={disk},if=none,id=vibehd,format=raw,cache=writeback"
+    if discard:
+        drive += ",discard=unmap"
+    return (
+        "-drive",
+        drive,
+        "-device",
+        f"virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues={smp}",
+    )
+
+
+def ktest_devices(disk: str, smp: int) -> tuple[str, ...]:
+    return (
+        "-device",
+        "isa-debug-exit,iobase=0xf4,iosize=0x04",
+        "-device",
+        "e1000e",
+        "-device",
+        "edu",
+        "-device",
+        "virtio-rng-pci,disable-legacy=on",
+    ) + virtio_blk_args(disk, smp)
+
+
+def kill_delay(rng: random.Random) -> float:
+    """SIGKILL wait after the first `vibeOS: vibefs: wr` line. In `[0, 0.18]` s."""
+    return rng.uniform(0.0, CRASH_KILL_MAX_S)
 
 
 def _accel_name(accel: str | None) -> str:
@@ -343,7 +505,7 @@ def expected_lapic_mode(
     """
     if not hpet:
         return "pit"
-    cpu = cpu if cpu is not None else os.environ.get("VIBEOS_QEMU_CPU", "max")
+    cpu = cpu if cpu is not None else env_str("VIBEOS_QEMU_CPU", DEFAULT_CPU)
     parts = [p.strip() for p in cpu.split(",")]
     accel_s = _accel_name(accel)
     if accel_s == "tcg" or "-tsc-deadline" in parts:
@@ -380,7 +542,7 @@ OVMF_BOOT_ARGS: tuple[str, ...] = (
 )
 
 
-def _qemu_argv(cfg: QemuConfig, monitor_sock: str) -> list[str]:
+def qemu_argv(cfg: QemuConfig, monitor_sock: str | None) -> list[str]:
     argv = [
         "qemu-system-x86_64",
         "-cdrom", cfg.iso,
@@ -390,16 +552,30 @@ def _qemu_argv(cfg: QemuConfig, monitor_sock: str) -> list[str]:
         "-no-reboot",
         "-display", "none",
         "-serial", "stdio",
-        "-monitor", f"unix:{monitor_sock},server=on,wait=off",
     ]
+    if monitor_sock is not None:
+        argv += ["-monitor", f"unix:{monitor_sock},server=on,wait=off"]
     argv += _accel_args(cfg)
     if not cfg.hpet:
         argv += list(HPET_OFF_MACHINE)
     if cfg.bios:
         argv += ["-bios", cfg.bios]
         argv += list(OVMF_BOOT_ARGS)
+    elif cfg.boot_order:
+        argv += ["-boot", f"order={cfg.boot_order}"]
     argv += list(cfg.extra)
     return argv
+
+
+def _panic_sigs(
+    cfg: QemuConfig,
+    base: tuple[str, ...],
+    extra: tuple[str, ...],
+) -> tuple[str, ...]:
+    more = cfg.extra_panic + extra
+    if not more:
+        return base
+    return base + more
 
 
 def run_qemu_and_check(
@@ -407,6 +583,7 @@ def run_qemu_and_check(
     markers: list[Marker],
     timeout_s: float = 45.0,
     panic_signatures: tuple[str, ...] = PANIC_SIGNATURES,
+    extra_panic: tuple[str, ...] = (),
     expect_panic: bool = False,
     dump_needles: tuple[str | tuple[str, ...], ...] = (),
 ) -> RunResult:
@@ -425,7 +602,8 @@ def run_qemu_and_check(
         raise HarnessError(f"ISO missing: {cfg.iso}")
 
     monitor_sock = _pick_monitor_path()
-    argv = _qemu_argv(cfg, monitor_sock)
+    argv = qemu_argv(cfg, monitor_sock)
+    panic_signatures = _panic_sigs(cfg, panic_signatures, extra_panic)
 
     proc = subprocess.Popen(
         argv,
@@ -542,7 +720,8 @@ def run_qemu_console_input(
         raise HarnessError(f"ISO missing: {cfg.iso}")
 
     monitor_sock = _pick_monitor_path()
-    argv = _qemu_argv(cfg, monitor_sock)
+    argv = qemu_argv(cfg, monitor_sock)
+    panic_signatures = _panic_sigs(cfg, PANIC_SIGNATURES, ())
     proc = subprocess.Popen(
         argv,
         stdout=subprocess.PIPE,
@@ -571,7 +750,7 @@ def run_qemu_console_input(
             if kind == "eof":
                 break
             result.lines.append(line)
-            for sig in PANIC_SIGNATURES:
+            for sig in panic_signatures:
                 if sig in line:
                     result.panic_line = line
                     proc.kill()
@@ -656,6 +835,23 @@ SMP4_MSIX_AP_COUNTER_FLAKE = (
     "ktest FAIL: vibeOS: ktest: FAIL msix_cpu: ap counter"
 )
 SMP4_IPI_ACK_PANIC = "ipi: ack timeout waiters="
+# TCG SMP serial glues a ktest ok line to the panic banner; kill-on-sig
+# then drops `msg: ipi: ack timeout` so #75's needle never appears.
+PANIC_DRAIN_S = 0.4
+
+
+def _same_line_ktest_ok_panic(message: str) -> bool:
+    """True when `ktest: ok` and `vibeOS: panic:` share a serial line."""
+    start = 0
+    while True:
+        i = message.find("vibeOS: ktest: ok ", start)
+        if i < 0:
+            return False
+        nl = message.find("\n", i)
+        panic = message.find("vibeOS: panic:", i)
+        if panic >= 0 and (nl < 0 or panic < nl):
+            return True
+        start = i + 1
 
 
 def silent_user_syscalls_hang(message: str) -> bool:
@@ -684,11 +880,25 @@ def retryable_ktest_failure(
         return False
     if message == SMP4_MSIX_AP_COUNTER_FLAKE:
         return True
-    return (
-        persist_reboot
-        and "panic signature 'vibeOS: panic:'" in message
-        and SMP4_IPI_ACK_PANIC in message
-    )
+    if "panic signature 'vibeOS: panic:'" not in message:
+        return False
+    # First boot or persist. Drain puts `ipi: ack timeout` in the error;
+    # UART merge is the same flake with the body chopped.
+    return SMP4_IPI_ACK_PANIC in message or _same_line_ktest_ok_panic(message)
+
+
+def drain_panic_tail(
+    reader: DeadlineReader, result: RunResult, window_s: float = PANIC_DRAIN_S
+) -> None:
+    """Read a bit more after the banner so `msg:` is in the HarnessError."""
+    reader.set_deadline(time.monotonic() + window_s)
+    while True:
+        kind, line = reader.next_event()
+        if kind != "line":
+            return
+        result.lines.append(line)
+        if PANIC_DONE in line:
+            return
 
 
 def check_ktest_output(
@@ -736,15 +946,22 @@ def run_qemu_until_exit(
     cfg: QemuConfig,
     timeout_s: float = 60.0,
     panic_signatures: tuple[str, ...] = PANIC_SIGNATURES,
+    extra_panic: tuple[str, ...] = (),
+    kill_after: Callable[[str], float | None] | None = None,
 ) -> RunResult:
-    """Boot the ISO and wait for QEMU to exit (isa-debug-exit)."""
+    """Boot the ISO and wait for QEMU to exit (isa-debug-exit).
+
+    `kill_after(line)` may return seconds-until-SIGKILL. The first non-None
+    wins (vibefs crash consistency). A kill is not a harness timeout.
+    """
     if not shutil.which("qemu-system-x86_64"):
         raise HarnessError("qemu-system-x86_64 not on PATH")
     if not os.path.exists(cfg.iso):
         raise HarnessError(f"ISO missing: {cfg.iso}")
 
     monitor_sock = _pick_monitor_path()
-    argv = _qemu_argv(cfg, monitor_sock)
+    argv = qemu_argv(cfg, monitor_sock)
+    panic_signatures = _panic_sigs(cfg, panic_signatures, extra_panic)
 
     proc = subprocess.Popen(
         argv,
@@ -758,12 +975,17 @@ def run_qemu_until_exit(
 
     result = RunResult()
     deadline = time.monotonic() + timeout_s
+    kill_at: float | None = None
     reader = DeadlineReader(proc.stdout.fileno(), deadline)
 
     try:
         while True:
             kind, line = reader.next_event()
             if kind == "timeout":
+                now = time.monotonic()
+                if kill_at is not None and now < deadline:
+                    proc.kill()
+                    break
                 result.timed_out = True
                 proc.kill()
                 break
@@ -773,8 +995,17 @@ def run_qemu_until_exit(
             for sig in panic_signatures:
                 if sig in line:
                     result.panic_line = line
+                    drain_panic_tail(reader, result)
                     proc.kill()
-                    raise HarnessError(f"panic signature {sig!r} in: {line!r}")
+                    raise HarnessError(
+                        f"panic signature {sig!r} in: {line!r}"
+                        f"{serial_tail(result.lines)}"
+                    )
+            if kill_after is not None and kill_at is None:
+                delay = kill_after(line)
+                if delay is not None:
+                    kill_at = time.monotonic() + delay
+                    reader.set_deadline(min(deadline, kill_at))
     finally:
         try:
             result.exit_code = proc.wait(timeout=5.0)
@@ -854,7 +1085,7 @@ def boot_contract_markers(
 ) -> list[Marker]:
     """Live e2e contract. Pins the LAPIC timer mode and SMP AP count."""
     if smp is None:
-        smp = int(os.environ.get("VIBEOS_SMP", "2"))
+        smp = env_int("VIBEOS_SMP", DEFAULT_SMP)
     after = [
         Marker(
             "vibeOS: time: tsc ",
@@ -936,6 +1167,12 @@ PHASE0_PANIC_PREFIX: list[Marker] = [
     Marker("vibeOS: limine: rev 3 ok", "limine_ok"),
     Marker("vibeOS: boot: panic-test armed", "panic_test_armed"),
 ]
+
+
+def halt_test_markers() -> list[Marker]:
+    """Prefix markers for the intentional panic-test ISO."""
+    return list(PHASE0_PANIC_PREFIX)
+
 
 # gp-test boots all the way through IDT, then a deliberate #GP dumps and
 # halts. Same expect_panic scanner; full marker contract plus the armed line.

@@ -7,6 +7,7 @@
 | **Depends on** | — (do with T2) |
 | **Blocks** | — |
 | **Review** | [ARCHITECTURE_REVIEW.md §4.5](../ARCHITECTURE_REVIEW.md#45-configuration--secrets-management) |
+| **Status** | Implemented |
 
 ## Problem
 

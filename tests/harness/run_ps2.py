@@ -11,32 +11,16 @@ is the focused rerun without the marker walk.
 
 from __future__ import annotations
 
-import os
 import sys
 
-from tests.harness.harness import HarnessError, QemuConfig, run_qemu_console_input
+from tests.harness.harness import HarnessError, env_config, run_qemu_console_input
 
 
 def main() -> int:
-    iso = os.environ.get("VIBEOS_ISO", "vibeos.iso")
-    smp = int(os.environ.get("VIBEOS_SMP", "2"))
-    cpu = os.environ.get("VIBEOS_QEMU_CPU", "max")
-    mem = os.environ.get("VIBEOS_MEM", "128M")
-    bios = os.environ.get("VIBEOS_BIOS")
-    extra = tuple(x for x in os.environ.get("VIBEOS_QEMU_EXTRA", "").split() if x)
-    cfg = QemuConfig(
-        iso=iso,
-        smp=smp,
-        cpu=cpu,
-        mem=mem,
-        bios=bios,
-        extra=extra,
-    )
+    env = env_config(default_iso="vibeos.iso", default_timeout=60)
+    cfg = env.qemu()
     try:
-        inp = run_qemu_console_input(
-            cfg,
-            timeout_s=float(os.environ.get("VIBEOS_TIMEOUT", "60")),
-        )
+        inp = run_qemu_console_input(cfg, timeout_s=env.timeout)
     except HarnessError as e:
         print(f"[ps2] FAIL: {e}", file=sys.stderr)
         return 1

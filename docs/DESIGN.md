@@ -1407,13 +1407,32 @@ in the test harness produces either false confidence or a debugging session in t
 | Interrupt debugging | `-d int,cpu_reset`, plus `-machine q35` when chipset behavior matters |
 
 Harness and `make test` default to `-accel tcg` so KVM does not introduce timing flakes.
-`VIBEOS_QEMU_ACCEL` overrides (`kvm`, or empty to let QEMU pick).
 
 `-no-reboot` matters: a triple fault otherwise reboots and loops, and the serial log fills with
 repeated boot attempts instead of stopping at the interesting one.
 
-Override the CPU count and model with `VIBEOS_SMP` and `VIBEOS_QEMU_CPU` so a single harness covers
-every variant. Acceleration is `VIBEOS_QEMU_ACCEL` (default `tcg`).
+All `VIBEOS_*` overrides are read in `tests/harness/harness.py` (`env_config` / `env_flag` /
+`env_int`). Drivers do not parse the environment. Makefile `?=` values are the `make run` source;
+harness defaults match them.
+
+| Variable | Default | Who honours it |
+|----------|---------|----------------|
+| `VIBEOS_ISO` | per driver (`vibeos.iso`, `vibeos-ktest.iso`, `vibeos-vibefs-crash.iso`) | all drivers |
+| `VIBEOS_SMP` | `2` | all; `make run` |
+| `VIBEOS_QEMU_CPU` | `max` | all; `make run` |
+| `VIBEOS_MEM` | `128M` | all; `make run` |
+| `VIBEOS_BIOS` | unset (SeaBIOS) | all |
+| `VIBEOS_QEMU_ACCEL` | `tcg` (empty omits `-accel`) | all; `make run` |
+| `VIBEOS_TIMEOUT` | `60` e2e/ps2, `90` ktest/crash | all drivers |
+| `VIBEOS_QEMU_EXTRA` | empty | all drivers |
+| `VIBEOS_EXPECT_PANIC` | off (`""` / `0`) | `run_e2e` |
+| `VIBEOS_GP_TEST` | off | `run_e2e` |
+| `VIBEOS_EXPECT_PIT` | off | `run_e2e` |
+| `VIBEOS_SKIP_PERSIST` | off | `run_ktest` |
+| `VIBEOS_CRASH_ROUNDS` | `8` | `run_vibefs_crash` |
+| `VIBEOS_CRASH_SEED` | time-based | `run_vibefs_crash` |
+| `VIBEOS_MKFS` | `mkfs-vibefs` | `run_vibefs_crash` |
+| `VIBEOS_FSCK` | `fsck-vibefs` | `run_vibefs_crash` |
 
 ## 8.5 Make targets
 

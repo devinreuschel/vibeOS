@@ -246,13 +246,13 @@ test-e2e-pit: $(ISO)
 	VIBEOS_ISO=$(ISO) VIBEOS_EXPECT_PIT=1 python3 tests/harness/run_e2e.py
 
 test-kernel: $(ISO_KTEST)
-	VIBEOS_ISO=$(ISO_KTEST) python3 tests/kernel_boot.py
+	VIBEOS_ISO=$(ISO_KTEST) python3 tests/harness/run_ktest.py
 
 test-kernel-smp4: $(ISO_KTEST)
-	VIBEOS_ISO=$(ISO_KTEST) VIBEOS_SMP=4 python3 tests/kernel_boot.py
+	VIBEOS_ISO=$(ISO_KTEST) VIBEOS_SMP=4 python3 tests/harness/run_ktest.py
 
 test-lapic-fallback: $(ISO_KTEST)
-	VIBEOS_ISO=$(ISO_KTEST) VIBEOS_QEMU_CPU=qemu64,-tsc-deadline python3 tests/kernel_boot.py
+	VIBEOS_ISO=$(ISO_KTEST) VIBEOS_QEMU_CPU=qemu64,-tsc-deadline python3 tests/harness/run_ktest.py
 
 # Host mkfs/fsck share src/vibefs.rs. CARGO_TARGET_DIR is the kernel's
 # `./target`; hostlib's .cargo/config selects the GNU triple.
@@ -265,13 +265,13 @@ $(MKFS_VIBEFS) $(FSCK_VIBEFS): src/vibefs.rs tests/hostlib/src/bin/mkfs_vibefs.r
 	cd tests/hostlib && cargo build --bins
 
 test-vibefs-crash: $(ISO_VIBEFS_CRASH) $(MKFS_VIBEFS) $(FSCK_VIBEFS)
-	VIBEOS_ISO=$(ISO_VIBEFS_CRASH) VIBEOS_MKFS=$(MKFS_VIBEFS) VIBEOS_FSCK=$(FSCK_VIBEFS) python3 tests/vibefs_crash.py
+	VIBEOS_ISO=$(ISO_VIBEFS_CRASH) VIBEOS_MKFS=$(MKFS_VIBEFS) VIBEOS_FSCK=$(FSCK_VIBEFS) python3 tests/harness/run_vibefs_crash.py
 
 test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-pit test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
 
 # Longer high-CPU stress. Scheduled CI, not every push. ROADMAP §4.11.
 test-smp-stress: $(ISO_KTEST)
-	VIBEOS_ISO=$(ISO_KTEST) VIBEOS_SMP=4 VIBEOS_TIMEOUT=180 python3 tests/kernel_boot.py
+	VIBEOS_ISO=$(ISO_KTEST) VIBEOS_SMP=4 VIBEOS_TIMEOUT=180 python3 tests/harness/run_ktest.py
 
 clean:
 	rm -rf build/iso_root_* iso_root iso_root_panic iso_root_gp iso_root_ktest iso_root_vibefs_crash \

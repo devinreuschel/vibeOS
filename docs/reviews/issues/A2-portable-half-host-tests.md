@@ -42,7 +42,7 @@ Existing 367 host tests; the new module-list guard; the x86-only context-switch 
 
 ## Risks and rollback
 
-Step 3 changes where host binaries land; the Makefile and `tests/vibefs_crash.py` (via `VIBEOS_MKFS`) are the only consumers. Rollback: restore the config file.
+Step 3 changes where host binaries land; the Makefile and `tests/harness/run_vibefs_crash.py` (via `VIBEOS_MKFS`) are the only consumers. Rollback: restore the config file.
 
 ## Out of scope
 

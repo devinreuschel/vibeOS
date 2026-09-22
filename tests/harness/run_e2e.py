@@ -3,16 +3,17 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from collections.abc import Callable
 from typing import TypeVar
 
 from tests.harness.harness import (
-    PHASE0_PANIC_PREFIX,
     HarnessError,
-    QemuConfig,
     boot_contract_markers,
+    env_config,
+    env_expect_panic,
+    env_flag,
+    halt_test_markers,
     run_qemu_and_check,
     run_qemu_console_input,
 )
@@ -28,6 +29,8 @@ PCI_GOLDEN = (
     "1234:1111",  # Bochs VGA
     "8086:100e",  # e1000 (QEMU default NIC)
 )
+
+ISA_DEBUG_EXIT = ("-device", "isa-debug-exit,iobase=0xf4,iosize=0x04")
 
 
 def _check_pci_qemu_set(lines: list[str]) -> None:
@@ -65,31 +68,19 @@ def _retry_hang(label: str, fn: Callable[[], _T]) -> _T:
 
 
 def main() -> int:
-    iso = os.environ.get("VIBEOS_ISO", "vibeos.iso")
-    smp = int(os.environ.get("VIBEOS_SMP", "2"))
-    cpu = os.environ.get("VIBEOS_QEMU_CPU", "max")
-    mem = os.environ.get("VIBEOS_MEM", "128M")
-    bios = os.environ.get("VIBEOS_BIOS")  # e.g. path to OVMF_CODE.fd
-    expect_panic = os.environ.get("VIBEOS_EXPECT_PANIC", "") not in ("", "0")
-    gp_test = os.environ.get("VIBEOS_GP_TEST", "") not in ("", "0")
-    expect_pit = os.environ.get("VIBEOS_EXPECT_PIT", "") not in ("", "0")
-    extra = tuple(x for x in os.environ.get("VIBEOS_QEMU_EXTRA", "").split() if x)
+    env = env_config(default_iso="vibeos.iso", default_timeout=60)
+    expect_panic = env_expect_panic()
+    gp_test = env_flag("VIBEOS_GP_TEST")
+    expect_pit = env_flag("VIBEOS_EXPECT_PIT")
 
+    extra: tuple[str, ...] = ()
     if expect_panic or gp_test:
-        extra = extra + ("-device", "isa-debug-exit,iobase=0xf4,iosize=0x04")
+        extra = ISA_DEBUG_EXIT
 
-    cfg = QemuConfig(
-        iso=iso,
-        smp=smp,
-        cpu=cpu,
-        mem=mem,
-        bios=bios,
-        extra=extra,
-        hpet=not expect_pit,
-    )
+    cfg = env.qemu(extra=extra, hpet=not expect_pit)
     dump_needles: tuple[str | tuple[str, ...], ...] = ()
     if gp_test:
-        markers = boot_contract_markers(cpu=cpu, gp=True, smp=smp)
+        markers = boot_contract_markers(cpu=env.cpu, gp=True, smp=env.smp)
         expect_panic = True
         dump_needles = (
             "#GP",
@@ -100,7 +91,7 @@ def main() -> int:
             "vibeOS: panic: halted",
         )
     elif expect_panic:
-        markers = PHASE0_PANIC_PREFIX
+        markers = halt_test_markers()
         dump_needles = (
             "vibeOS: panic: at",
             "intentional panic-test",
@@ -109,15 +100,16 @@ def main() -> int:
             "vibeOS: panic: halted",
         )
     else:
-        markers = boot_contract_markers(cpu=cpu, hpet=not expect_pit, smp=smp)
+        markers = boot_contract_markers(
+            cpu=env.cpu, hpet=not expect_pit, smp=env.smp
+        )
 
-    timeout_s = float(os.environ.get("VIBEOS_TIMEOUT", "60"))
     try:
         if expect_panic or gp_test:
             result = run_qemu_and_check(
                 cfg,
                 markers,
-                timeout_s=timeout_s,
+                timeout_s=env.timeout,
                 expect_panic=expect_panic,
                 dump_needles=dump_needles,
             )
@@ -127,7 +119,7 @@ def main() -> int:
                 lambda: run_qemu_and_check(
                     cfg,
                     markers,
-                    timeout_s=timeout_s,
+                    timeout_s=env.timeout,
                     expect_panic=expect_panic,
                     dump_needles=dump_needles,
                 ),
@@ -151,7 +143,7 @@ def main() -> int:
         try:
             inp = _retry_hang(
                 "console input",
-                lambda: run_qemu_console_input(cfg, timeout_s=timeout_s),
+                lambda: run_qemu_console_input(cfg, timeout_s=env.timeout),
             )
         except HarnessError as e:
             print(f"[e2e] FAIL: {e}", file=sys.stderr)
