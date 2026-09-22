@@ -28,7 +28,6 @@ from tests.harness.harness import (
     virtio_blk_args,
 )
 
-
 IMAGE_BYTES = 256 * 1024
 WR_PREFIX = "vibeOS: vibefs: wr "
 READY = "vibeOS: vibefs: crash-ready"

@@ -150,6 +150,7 @@ rest of the project, which is the single most consequential decision in this pha
 - [x] GitHub Actions on push and pull request, Linux runner
 - [x] install `qemu-system-x86`, `nasm`, `xorriso`; bootstrap Limine
 - [x] `RUSTFLAGS=-Dwarnings`, `cargo clippy -- -D warnings`, `cargo fmt --check`
+- [x] `check` job (`make check` + hostlib llvm-cov floor) before the QEMU ladder
 - [x] run host units, harness units, ISO build, e2e
 - [x] cache the cargo registry and the Limine checkout so the loop stays fast
 

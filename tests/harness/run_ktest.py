@@ -22,7 +22,6 @@ from tests.harness.harness import (
     silent_user_syscalls_hang,
 )
 
-
 DISK_BYTES = 4 * 1024 * 1024
 
 

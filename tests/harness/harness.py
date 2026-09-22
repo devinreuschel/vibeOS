@@ -425,7 +425,7 @@ def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
 
 
 @contextmanager
-def overlay_env(mapping: dict[str, str] | None = None, *, clear: bool = False):
+def overlay_env(mapping: dict[str, str] | None = None, *, clear: bool = False) -> Iterator[None]:
     """Temporarily replace process env. For harness unit tests (C2)."""
     old = os.environ.copy()
     try:
