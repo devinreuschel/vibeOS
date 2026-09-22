@@ -12,6 +12,7 @@ use vibeos::vibefs::{self, BLOCK, Disk, Error, Node, ROOT_INO, Vol};
 
 use crate::block_init;
 use crate::cache_init;
+use crate::cell::IrqCell;
 use crate::fs_init;
 use crate::sync_init::SpinMutex;
 use crate::thread_init;
@@ -25,9 +26,6 @@ pub const IMAGE_BYTES: usize = 256 * 1024;
 
 const _: () = assert!(IMAGE_BYTES / BLOCK <= vibeos::vibefs::MAX_BLOCKS);
 const _: () = assert!(IMAGE_BYTES.is_multiple_of(BLOCK));
-
-struct Cell<T>(UnsafeCell<T>);
-unsafe impl<T> Sync for Cell<T> {}
 
 #[derive(Clone, Copy)]
 enum Back {
@@ -76,7 +74,7 @@ static SLOTS: [Slot; MAX_VOLS] = [Slot::empty(), Slot::empty()];
 static ALLOC: SpinMutex<()> = SpinMutex::with_rank((), RANK_DEVICE);
 static MNTS: SpinMutex<[Mnt; MNT_MAX]> =
     SpinMutex::with_rank([Mnt::EMPTY, Mnt::EMPTY], RANK_DEVICE);
-static IMAGE: Cell<[u8; IMAGE_BYTES]> = Cell(UnsafeCell::new([0; IMAGE_BYTES]));
+static IMAGE: IrqCell<[u8; IMAGE_BYTES]> = IrqCell::new([0; IMAGE_BYTES]);
 static LIVE: AtomicBool = AtomicBool::new(false);
 static NVOL: AtomicU8 = AtomicU8::new(0);
 
@@ -122,12 +120,13 @@ impl Disk for Io {
             Back::Mem => {
                 let off = (bno as usize).checked_mul(BLOCK).ok_or(Error::Inval)?;
                 let end = off.checked_add(BLOCK).ok_or(Error::Inval)?;
-                let data = unsafe { &*IMAGE.0.get() };
-                if end > data.len() {
-                    return Err(Error::Io);
-                }
-                buf.copy_from_slice(&data[off..end]);
-                Ok(())
+                IMAGE.with(|data| {
+                    if end > data.len() {
+                        return Err(Error::Io);
+                    }
+                    buf.copy_from_slice(&data[off..end]);
+                    Ok(())
+                })
             }
             Back::Dev(dev) => {
                 let bs = match dev {
@@ -146,12 +145,13 @@ impl Disk for Io {
             Back::Mem => {
                 let off = (bno as usize).checked_mul(BLOCK).ok_or(Error::Inval)?;
                 let end = off.checked_add(BLOCK).ok_or(Error::Inval)?;
-                let data = unsafe { &mut *IMAGE.0.get() };
-                if end > data.len() {
-                    return Err(Error::Io);
-                }
-                data[off..end].copy_from_slice(buf);
-                Ok(())
+                IMAGE.with(|data| {
+                    if end > data.len() {
+                        return Err(Error::Io);
+                    }
+                    data[off..end].copy_from_slice(buf);
+                    Ok(())
+                })
             }
             Back::Dev(dev) => {
                 let bs = match dev {
@@ -228,8 +228,7 @@ pub fn nvol() -> u8 {
 }
 
 pub fn init() {
-    let buf = unsafe { &mut *IMAGE.0.get() };
-    buf.fill(0);
+    IMAGE.with(|buf| buf.fill(0));
     let mut io = Io { back: Back::Mem };
     let vref = unsafe { &mut *SLOTS[0].vol.get() };
     vref.clear();

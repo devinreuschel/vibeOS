@@ -7,7 +7,7 @@
 //! `runq` is this CPU's ready FIFO; remotes use `wake_inbox` + IPI.
 
 use core::mem::offset_of;
-use core::sync::atomic::{AtomicBool, AtomicU64};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 
 use crate::apic::TimerMode;
 use crate::desc::Tss;
@@ -20,7 +20,7 @@ pub struct PerCpu {
     pub self_ptr: *mut PerCpu,
     pub cpu_id: u32,
     pub apic_id: u32,
-    pub irq_nest: u32,
+    pub irq_nest: AtomicU32,
     /// `ThreadId::NONE` until bootstrap / AP idle is installed.
     pub idle_id: ThreadId,
     pub current: *mut Tcb,
@@ -63,7 +63,7 @@ impl PerCpu {
             self_ptr: core::ptr::null_mut(),
             cpu_id: 0,
             apic_id: 0,
-            irq_nest: 0,
+            irq_nest: AtomicU32::new(0),
             idle_id: ThreadId::NONE,
             current: core::ptr::null_mut(),
             idle: core::ptr::null_mut(),

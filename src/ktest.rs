@@ -103,6 +103,8 @@ const TESTS: &[(&str, TestFn)] = &[
     ("int3_roundtrip", test_int3_roundtrip),
     ("scoped_pf", test_scoped_pf),
     ("gp_catch", test_gp_catch),
+    ("irqcell_reentry_panics", test_irqcell_reentry_panics),
+    ("bootcell_set_once", test_bootcell_set_once),
     ("df_on_ist", test_df_on_ist),
     ("pit_tick_rate", test_pit_tick_rate),
     ("now_us_monotonic", test_now_us_monotonic),
@@ -857,7 +859,8 @@ fn test_ring3_hello_exit() -> Outcome {
             return Outcome::Fail("load/run");
         }
     }
-    let out = syscall_init::stdout_bytes();
+    let (buf, n) = syscall_init::stdout_bytes();
+    let out = &buf[..n];
     if !out
         .windows(b"hello from ring3".len())
         .any(|w| w == b"hello from ring3")
@@ -954,7 +957,8 @@ fn test_user_syscalls() -> Outcome {
                 return Outcome::Fail("load/run");
             }
         }
-        let out = syscall_init::stdout_bytes();
+        let (buf, n) = syscall_init::stdout_bytes();
+        let out = &buf[..n];
         if !out
             .windows(b"user: tests ok".len())
             .any(|w| w == b"user: tests ok")
@@ -1011,6 +1015,55 @@ fn test_gp_catch() -> Outcome {
         Some(_) => Outcome::Fail("wrong vector or frame"),
         None => Outcome::Fail("no gp"),
     }
+}
+
+fn test_irqcell_reentry_panics() -> Outcome {
+    static C: crate::cell::IrqCell<u32> = crate::cell::IrqCell::new(0);
+    let nest0 = per_cpu_init::irq_nest();
+    let hit = arch::catch::catch_panic(|| {
+        C.with(|_| {
+            C.with(|_| {});
+        });
+    });
+    C.force_unlock();
+    per_cpu_init::current()
+        .irq_nest
+        .store(nest0, Ordering::Relaxed);
+    if !hit {
+        return Outcome::Fail("no panic");
+    }
+    C.with(|v| *v = 3);
+    if C.with(|v| *v) != 3 {
+        return Outcome::Fail("after unlock");
+    }
+    if per_cpu_init::irq_nest() != nest0 {
+        return Outcome::Fail("irq_nest leaked");
+    }
+    Outcome::Ok
+}
+
+fn test_bootcell_set_once() -> Outcome {
+    static C: crate::cell::BootCell<u32> = crate::cell::BootCell::new();
+    if C.try_get().is_some() {
+        return Outcome::Fail("already set");
+    }
+    unsafe { C.set(7) };
+    match C.try_get() {
+        Some(&7) => {}
+        _ => return Outcome::Fail("get"),
+    }
+    static U: crate::cell::BootCell<u32> = crate::cell::BootCell::new();
+    let nest0 = per_cpu_init::irq_nest();
+    let hit = arch::catch::catch_panic(|| {
+        let _ = U.get();
+    });
+    per_cpu_init::current()
+        .irq_nest
+        .store(nest0, Ordering::Relaxed);
+    if !hit {
+        return Outcome::Fail("unset get");
+    }
+    Outcome::Ok
 }
 
 fn test_df_on_ist() -> Outcome {

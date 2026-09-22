@@ -4,8 +4,6 @@
 //! Flush (DESIGN §10.2). FAT rejects symlink/link with `NotSupp`; vibefs
 //! stores POSIX mode and symlinks (docs/VIBEFS.md).
 
-use core::sync::atomic::{AtomicUsize, Ordering};
-
 use vibeos::fat::Node;
 use vibeos::fs::{
     self, Dirent, FsError, FsType, InodeKind, MAX_NAME, MAX_PATH, Name, O_ACCMODE, O_APPEND,
@@ -15,6 +13,7 @@ use vibeos::fs::{
 use vibeos::lock::RANK_DEVICE;
 use vibeos::shell::{Command, LineEditor, MAX_COMMANDS};
 
+use crate::cell::IrqCell;
 use crate::console_init::Console;
 use crate::fat_init;
 use crate::fs_init;
@@ -129,24 +128,33 @@ impl OpenFile {
 static FILES: SpinMutex<[OpenFile; MAX_OPEN]> =
     SpinMutex::with_rank([OpenFile::EMPTY; MAX_OPEN], RANK_DEVICE);
 
-static CWD_LEN: AtomicUsize = AtomicUsize::new(1);
-static mut CWD_BUF: [u8; MAX_PATH] = {
-    let mut b = [0u8; MAX_PATH];
-    b[0] = b'/';
-    b
-};
+struct CwdBuf {
+    buf: [u8; MAX_PATH],
+    len: usize,
+}
 
-fn cwd_bytes() -> &'static [u8] {
-    let n = CWD_LEN.load(Ordering::Acquire);
-    unsafe { &CWD_BUF[..n] }
+const fn cwd_root() -> CwdBuf {
+    let mut buf = [0u8; MAX_PATH];
+    buf[0] = b'/';
+    CwdBuf { buf, len: 1 }
+}
+
+static CWD: IrqCell<CwdBuf> = IrqCell::new(cwd_root());
+
+fn cwd_copy() -> ([u8; MAX_PATH], usize) {
+    CWD.with(|c| {
+        let mut buf = [0u8; MAX_PATH];
+        buf[..c.len].copy_from_slice(&c.buf[..c.len]);
+        (buf, c.len)
+    })
 }
 
 fn set_cwd(p: &[u8]) {
-    let n = p.len().min(MAX_PATH);
-    unsafe {
-        CWD_BUF[..n].copy_from_slice(&p[..n]);
-    }
-    CWD_LEN.store(n, Ordering::Release);
+    CWD.with(|c| {
+        let n = p.len().min(MAX_PATH);
+        c.buf[..n].copy_from_slice(&p[..n]);
+        c.len = n;
+    });
 }
 
 fn join_cwd(path: &str) -> Result<[u8; MAX_PATH], FsError> {
@@ -159,12 +167,12 @@ fn join_cwd(path: &str) -> Result<[u8; MAX_PATH], FsError> {
         out[..p.len()].copy_from_slice(p);
         return Ok(out);
     }
-    let cwd = cwd_bytes();
-    let mut n = cwd.len();
+    let cwd = cwd_copy();
+    let mut n = cwd.1;
     if n > MAX_PATH {
         return Err(FsError::NameTooLong);
     }
-    out[..n].copy_from_slice(cwd);
+    out[..n].copy_from_slice(&cwd.0[..n]);
     if n == 0 || out[n - 1] != b'/' {
         if n >= MAX_PATH {
             return Err(FsError::NameTooLong);
@@ -994,7 +1002,8 @@ pub fn complete_line(ed: &mut LineEditor) {
         Some(n) => n,
         None => {
             let dir_node = if dirp.is_empty() {
-                walk_abs(cwd_bytes())
+                let (b, n) = cwd_copy();
+                walk_abs(&b[..n])
             } else if dirp.first() == Some(&b'/') {
                 let mut t = [0u8; MAX_PATH];
                 let n = dirp.len().min(MAX_PATH);
@@ -1002,9 +1011,9 @@ pub fn complete_line(ed: &mut LineEditor) {
                 walk_abs(&t[..n])
             } else {
                 let mut t = [0u8; MAX_PATH];
-                let cwd = cwd_bytes();
-                let mut n = cwd.len();
-                t[..n].copy_from_slice(cwd);
+                let (cwd, n0) = cwd_copy();
+                let mut n = n0;
+                t[..n].copy_from_slice(&cwd[..n]);
                 if n > 0 && t[n - 1] != b'/' {
                     t[n] = b'/';
                     n += 1;
@@ -1540,7 +1549,8 @@ fn cmd_cd(args: &[&str]) {
 }
 
 fn cmd_pwd(_args: &[&str]) {
-    crate::console_init::write(cwd_bytes());
+    let (b, n) = cwd_copy();
+    crate::console_init::write(&b[..n]);
     crate::console_init::write(b"\n");
 }
 

@@ -249,12 +249,11 @@ fn schedule_inner(from_irq: bool) {
         }
     }
 
-    let next = {
-        let cpu = per_cpu_init::current_mut();
+    let next = per_cpu_init::with_current(|cpu| {
         enqueue_runnable(&mut cpu.runq, cur, idle, cur_state);
         cpu.runq.remove(idle);
         take_next(&mut cpu.runq, idle)
-    };
+    });
 
     let (old_ptr, new_ptr, old_id, new_id) = with_sched(|s| {
         if let Some(t) = s.get_mut(next) {
@@ -280,50 +279,55 @@ fn schedule_inner(from_irq: bool) {
 
 fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
     let now = time_init::read_tsc();
-    let cpu = per_cpu_init::current_mut();
-    let delta = now.wrapping_sub(cpu.slice_tsc);
-    cpu.slice_tsc = now;
-    cpu.switches = cpu.switches.wrapping_add(1);
-    unsafe {
-        (*old_ptr).run_tsc = (*old_ptr).run_tsc.wrapping_add(delta);
-        (*old_ptr).switches = (*old_ptr).switches.wrapping_add(1);
-        if old_ptr == cpu.idle {
-            cpu.idle_tsc = cpu.idle_tsc.wrapping_add(delta);
+    per_cpu_init::with_current_switch(|cpu| {
+        let delta = now.wrapping_sub(cpu.slice_tsc);
+        cpu.slice_tsc = now;
+        cpu.switches = cpu.switches.wrapping_add(1);
+        unsafe {
+            (*old_ptr).run_tsc = (*old_ptr).run_tsc.wrapping_add(delta);
+            (*old_ptr).switches = (*old_ptr).switches.wrapping_add(1);
+            if old_ptr == cpu.idle {
+                cpu.idle_tsc = cpu.idle_tsc.wrapping_add(delta);
+            }
+            (*old_ptr).irq_nest = cpu.irq_nest.load(Ordering::Relaxed);
+            cpu.irq_nest.store((*new_ptr).irq_nest, Ordering::Relaxed);
+            apply_if_on_resume(
+                &mut (*new_ptr).context.rflags,
+                cpu.irq_nest.load(Ordering::Relaxed),
+            );
+            per_cpu_init::set_current_thread(cpu, new_ptr);
+            crate::syscall_init::on_switch(cpu, old_ptr, new_ptr);
+            switch_context(&mut (*old_ptr).context, &(*new_ptr).context);
         }
-        (*old_ptr).irq_nest = cpu.irq_nest;
-        cpu.irq_nest = (*new_ptr).irq_nest;
-        apply_if_on_resume(&mut (*new_ptr).context.rflags, cpu.irq_nest);
-        per_cpu_init::set_current_thread(new_ptr);
-        crate::syscall_init::on_switch(old_ptr, new_ptr);
-        switch_context(&mut (*old_ptr).context, &(*new_ptr).context);
-    }
+    });
 }
 
 fn relink(s: &mut Sched) {
-    let cpu = per_cpu_init::current_mut();
-    let n = cpu.runq.len();
-    let mut ids = [ThreadId::NONE; MAX_THREADS];
-    let mut i = 0;
-    while i < n {
-        ids[i] = cpu.runq.at(i);
-        i += 1;
-    }
-    i = 0;
-    while i < n {
-        let prev = if i == 0 { None } else { Some(ids[i - 1]) };
-        let next = if i + 1 == n { None } else { Some(ids[i + 1]) };
-        if let Some(t) = s.get_mut(ids[i]) {
-            t.prev = prev;
-            t.next = next;
+    per_cpu_init::with_current(|cpu| {
+        let n = cpu.runq.len();
+        let mut ids = [ThreadId::NONE; MAX_THREADS];
+        let mut i = 0;
+        while i < n {
+            ids[i] = cpu.runq.at(i);
+            i += 1;
         }
-        i += 1;
-    }
-    let front = cpu.runq.front();
-    let head = match front {
-        Some(id) => s.ptr(id),
-        None => core::ptr::null_mut(),
-    };
-    cpu.ready_head = head;
+        i = 0;
+        while i < n {
+            let prev = if i == 0 { None } else { Some(ids[i - 1]) };
+            let next = if i + 1 == n { None } else { Some(ids[i + 1]) };
+            if let Some(t) = s.get_mut(ids[i]) {
+                t.prev = prev;
+                t.next = next;
+            }
+            i += 1;
+        }
+        let front = cpu.runq.front();
+        let head = match front {
+            Some(id) => s.ptr(id),
+            None => core::ptr::null_mut(),
+        };
+        cpu.ready_head = head;
+    });
 }
 
 pub(crate) fn reap_zombies() {
@@ -383,11 +387,12 @@ pub unsafe fn init_bootstrap() {
         assert!(s.slots[0].is_none(), "bootstrap twice");
         s.slots[0] = Some(tcb);
     }
-    let cpu = per_cpu_init::current_mut();
-    cpu.current = ptr;
-    cpu.idle = ptr;
-    cpu.idle_id = ThreadId::BOOTSTRAP;
-    cpu.ready_head = core::ptr::null_mut();
+    per_cpu_init::with_current(|cpu| {
+        per_cpu_init::set_current_thread(cpu, ptr);
+        cpu.idle = ptr;
+        cpu.idle_id = ThreadId::BOOTSTRAP;
+        cpu.ready_head = core::ptr::null_mut();
+    });
 }
 
 fn bootstrap_entry() {
@@ -697,11 +702,10 @@ pub fn switch_to(id: ThreadId) {
         let s = SCHED.lock();
         s.get(old_id).map(|t| t.state).unwrap_or(ThreadState::Dead)
     };
-    {
-        let cpu = per_cpu_init::current_mut();
+    per_cpu_init::with_current(|cpu| {
         cpu.runq.remove(id);
         enqueue_runnable(&mut cpu.runq, old_id, idle, cur_state);
-    }
+    });
     let (old_ptr, new_ptr) = with_sched(|s| {
         if let Some(t) = s.get_mut(old_id)
             && t.state != ThreadState::Dead
@@ -757,10 +761,10 @@ pub fn current_cpu() -> u32 {
 }
 
 #[allow(dead_code)]
-pub fn current_tcb() -> &'static mut Tcb {
+pub fn current_tcb() -> *mut Tcb {
     let p = per_cpu_init::current_thread();
     assert!(!p.is_null(), "no current thread");
-    unsafe { &mut *p }
+    p
 }
 
 pub fn state(id: ThreadId) -> ThreadState {

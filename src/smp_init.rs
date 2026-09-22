@@ -20,6 +20,7 @@ use crate::acpi_init;
 use crate::apic_init;
 use crate::arch;
 use crate::arch::gdt::{self, ApTables, CpuTables};
+use crate::cell::IrqCell;
 use crate::kva_init::{self, GuardedStack};
 use crate::per_cpu_init;
 use crate::thread_init;
@@ -32,24 +33,6 @@ const _: () = assert!(
     "trampoline blob overlaps param block"
 );
 
-struct BootCell<T>(core::cell::UnsafeCell<T>);
-unsafe impl<T> Sync for BootCell<T> {}
-impl<T> BootCell<T> {
-    const fn new(v: T) -> Self {
-        Self(core::cell::UnsafeCell::new(v))
-    }
-    /// # Safety
-    /// Exclusive boot/IRQ-off access; cell is initialized.
-    #[allow(clippy::mut_from_ref)] // boot cell, IRQ-off exclusive
-    unsafe fn get_mut(&self) -> &mut T {
-        unsafe { &mut *self.0.get() }
-    }
-    fn get(&self) -> &T {
-        unsafe { &*self.0.get() }
-    }
-}
-
-/// What the AP reads before it has GS. One AP at a time.
 struct Starting {
     cpu: *mut PerCpu,
     cpu_tables: *mut CpuTables,
@@ -64,8 +47,8 @@ impl Starting {
     }
 }
 
-static STARTING: BootCell<Starting> = BootCell::new(Starting::empty());
-static LIVE_TABLES: BootCell<Vec<ApTables>> = BootCell::new(Vec::new());
+static STARTING: IrqCell<Starting> = IrqCell::new(Starting::empty());
+static LIVE_TABLES: IrqCell<Vec<ApTables>> = IrqCell::new(Vec::new());
 
 struct ApAlloc {
     cpu_id: u32,
@@ -122,15 +105,17 @@ fn alloc_ap_resources(cpu_id: u32, apic_id: u8, publish: bool) -> Option<ApAlloc
         return None;
     };
     let idle_ptr = thread_init::tcb_ptr(idle_id);
-    if publish && let Some(cpu) = per_cpu_init::cpu_mut(cpu_id) {
-        cpu.apic_id = apic_id as u32;
-        cpu.idle_id = idle_id;
-        cpu.idle = idle_ptr;
-        cpu.current = idle_ptr;
-        cpu.tsc_per_ms = time_init::tsc_per_ms();
-        cpu.timer_mode = apic_init::timer_mode();
-        cpu.ready.store(false, Ordering::Relaxed);
-        core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    if publish {
+        let _ = per_cpu_init::with_cpu(cpu_id, |cpu| {
+            cpu.apic_id = apic_id as u32;
+            cpu.idle_id = idle_id;
+            cpu.idle = idle_ptr;
+            per_cpu_init::set_current_thread(cpu, idle_ptr);
+            cpu.tsc_per_ms = time_init::tsc_per_ms();
+            cpu.timer_mode = apic_init::timer_mode();
+            cpu.ready.store(false, Ordering::Relaxed);
+            core::sync::atomic::compiler_fence(Ordering::SeqCst);
+        });
     }
     Some(ApAlloc {
         cpu_id,
@@ -143,14 +128,14 @@ fn alloc_ap_resources(cpu_id: u32, apic_id: u8, publish: bool) -> Option<ApAlloc
 }
 
 fn free_ap_resources(a: ApAlloc) {
-    if a.published
-        && let Some(cpu) = per_cpu_init::cpu_mut(a.cpu_id)
-    {
-        cpu.idle = core::ptr::null_mut();
-        cpu.current = core::ptr::null_mut();
-        cpu.idle_id = ThreadId::NONE;
-        cpu.ready.store(false, Ordering::Relaxed);
-        cpu.apic_id = 0;
+    if a.published {
+        let _ = per_cpu_init::with_cpu(a.cpu_id, |cpu| {
+            cpu.idle = core::ptr::null_mut();
+            per_cpu_init::set_current_thread(cpu, core::ptr::null_mut());
+            cpu.idle_id = ThreadId::NONE;
+            cpu.ready.store(false, Ordering::Relaxed);
+            cpu.apic_id = 0;
+        });
     }
     if let Some(stack) = thread_init::abandon_ap_idle(a.idle_id) {
         kva_init::free_stack(stack);
@@ -185,17 +170,18 @@ fn start_one(a: ApAlloc) -> bool {
     let entry = ap_entry as *const () as usize as u64;
     let (idt_limit, idt_base) = arch::idt::pointer();
 
-    let cpu_ptr = match per_cpu_init::cpu_mut(cpu_id) {
-        Some(c) => c as *mut PerCpu,
+    let cpu_ptr = match per_cpu_init::cpu(cpu_id) {
+        Some(c) => c.self_ptr,
         None => {
             free_ap_resources(a);
             return false;
         }
     };
     let tables_ptr = a.tables.tables.as_ref() as *const CpuTables as *mut CpuTables;
-    let starting = unsafe { STARTING.get_mut() };
-    starting.cpu = cpu_ptr;
-    starting.cpu_tables = tables_ptr;
+    STARTING.with(|starting| {
+        starting.cpu = cpu_ptr;
+        starting.cpu_tables = tables_ptr;
+    });
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
 
     patch_params(cr3, stack_top, entry, idt_limit, idt_base);
@@ -219,16 +205,21 @@ fn start_one(a: ApAlloc) -> bool {
     }
 
     let ApAlloc { tables, .. } = a;
-    unsafe { LIVE_TABLES.get_mut().push(tables) };
+    LIVE_TABLES.with(|live| live.push(tables));
     crate::marker!(marker::SMP_AP_ONLINE);
     true
 }
 
 extern "C" fn ap_entry() -> ! {
     x86::cli();
-    let st = STARTING.get();
-    let tables = unsafe { &mut *st.cpu_tables };
-    let cpu = unsafe { &mut *st.cpu };
+    // GS is still 0. IrqCell.with / InterruptGuard would `gs:[0]` via
+    // try_current and triple-fault (IDT not loaded yet).
+    let (cpu, tables_ptr) = unsafe {
+        let st = &mut *STARTING.as_ptr();
+        (st.cpu, st.cpu_tables)
+    };
+    let tables = unsafe { &mut *tables_ptr };
+    let cpu = unsafe { &mut *cpu };
     // `mov gs` zeros the hidden base. GS_BASE before any lidt so NMI
     // cannot gs:[0] a null PerCpu (DESIGN §7.4 / ROADMAP).
     unsafe { tables.load() };

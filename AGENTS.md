@@ -27,7 +27,7 @@ From ROADMAP "How to read this". Not optional.
 
 - **lib/bin pairing:** `src/foo.rs` is portable (`vibeos-core` / `src/lib.rs`, host-tested). `src/foo_init.rs` is the kernel half (`src/main.rs`). Nested today: `src/arch/`, `src/fs/`. Do not invent `src/mm/` until A1. Map: [DESIGN §1.3](docs/DESIGN.md#13-module-map).
 - **Emit:** `marker!` for contract lines (never filtered, always captured); `klog!` for everything else; `PlainSerial` only for `dmesg` and panic dumps.
-- **Cells:** modules roll their own `UnsafeCell` wrappers. Q3 will replace them with `BootCell` / `IrqCell` plus `SpinMutex`. Do not add another copy.
+- **Cells:** `BootCell` (write-once) and `IrqCell` (IRQ-off exclusive) in `src/cell.rs`, plus `SpinMutex` for cross-CPU shared data. Do not add another `unsafe impl<T> Sync` wrapper.
 - No ephemeral "fixed X" comments ([DESIGN §1.4](docs/DESIGN.md#14-documentation-rules)).
 
 ## How to run

@@ -3,8 +3,7 @@
 //! Library math lives in `vibeos::time`. This module owns port I/O,
 //! HPET MMIO, the IRQ0 handler body, and the BSP `tsc_per_ms`.
 
-use core::cell::UnsafeCell;
-use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use vibeos::acpi::HpetInfo;
 use vibeos::pic::{PIC_EOI, PIC1_CMD};
@@ -16,6 +15,7 @@ use vibeos::time::{
 };
 
 use crate::acpi_init;
+use crate::cell::BootCell;
 use crate::paging_init;
 use crate::x86;
 
@@ -41,28 +41,9 @@ const RTC_DM_BINARY: u8 = 1 << 2;
 const RTC_24H: u8 = 1 << 1;
 const RTC_NMI_OFF: u8 = 0x80;
 
-struct BootCell<T>(UnsafeCell<T>);
-unsafe impl<T> Sync for BootCell<T> {}
-impl<T> BootCell<T> {
-    const fn new(v: T) -> Self {
-        Self(UnsafeCell::new(v))
-    }
-    /// # Safety
-    /// Exclusive boot/IRQ-off access; cell is initialized.
-    #[allow(clippy::mut_from_ref)] // boot cell, IRQ-off exclusive
-    unsafe fn get_mut(&self) -> &mut T {
-        unsafe { &mut *self.0.get() }
-    }
-    fn get(&self) -> &T {
-        unsafe { &*self.0.get() }
-    }
-}
-
-/// BSP time. Phase 4 puts `tsc_per_ms` in the per-CPU area; until then
-/// there is one writer (IRQ0) and this one calibration sample.
 struct TimeState {
     clock: TickClock,
-    ticks: u64,
+    ticks: AtomicU64,
     tsc_per_ms: u64,
     source: CalibSource,
     use_rdtscp: bool,
@@ -74,7 +55,7 @@ impl TimeState {
     const fn empty() -> Self {
         Self {
             clock: TickClock::new(),
-            ticks: 0,
+            ticks: AtomicU64::new(0),
             tsc_per_ms: 0,
             source: CalibSource::Pit,
             use_rdtscp: false,
@@ -84,7 +65,7 @@ impl TimeState {
     }
 }
 
-static STATE: BootCell<TimeState> = BootCell::new(TimeState::empty());
+static STATE: BootCell<TimeState> = BootCell::new();
 /// Highest `now_ns` published. TCG has no invariant TSC; `hlt` can make
 /// interpolation step backwards even with a stable seqlock pair.
 static LAST_NS: AtomicU64 = AtomicU64::new(0);
@@ -125,7 +106,7 @@ fn rdtsc_ser(use_rdtscp: bool) -> u64 {
 
 /// Serialized TSC. IRQ0 and `now_us` both use this.
 pub fn read_tsc() -> u64 {
-    rdtsc_ser(STATE.get().use_rdtscp)
+    rdtsc_ser(STATE.try_get().is_some_and(|s| s.use_rdtscp))
 }
 
 fn hpet_read(va: u64, off: u64) -> u64 {
@@ -205,7 +186,7 @@ fn calibrate_hpet(hpet: &HpetInfo, use_rdtscp: bool) -> Option<u64> {
 /// Channel 2 one-shot, gated through 0x61. Does not touch channel 0.
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn measure_pit_ch2() -> Option<u64> {
-    let use_rdtscp = STATE.get().use_rdtscp;
+    let use_rdtscp = STATE.try_get().is_some_and(|s| s.use_rdtscp);
     calibrate_pit(use_rdtscp)
 }
 
@@ -214,7 +195,7 @@ pub fn measure_pit_ch2() -> Option<u64> {
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn measure_hpet() -> Option<u64> {
     let hpet = acpi_init::info()?.hpet?;
-    calibrate_hpet(&hpet, STATE.get().use_rdtscp)
+    calibrate_hpet(&hpet, STATE.try_get().is_some_and(|s| s.use_rdtscp))
 }
 
 fn calibrate_pit(use_rdtscp: bool) -> Option<u64> {
@@ -332,9 +313,11 @@ fn read_rtc_unix() -> Option<u64> {
 /// Tick body: increment, snapshot TSC. Caller EOIs, rearms, then
 /// `sched_init::on_timer_tick` (DESIGN §5.8). No allocation, no logging.
 pub fn on_hw_tick(tsc: u64) {
-    let st = unsafe { STATE.get_mut() };
-    st.ticks = st.ticks.wrapping_add(1);
-    st.clock.write(st.ticks, tsc);
+    let Some(st) = STATE.try_get() else {
+        return;
+    };
+    let ticks = st.ticks.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    st.clock.write(ticks, tsc);
 }
 
 pub fn on_pit_tick(tsc: u64) {
@@ -342,7 +325,7 @@ pub fn on_pit_tick(tsc: u64) {
 }
 
 pub fn uptime_ms() -> u64 {
-    STATE.get().clock.read().0
+    STATE.try_get().map(|s| s.clock.read().0).unwrap_or(0)
 }
 
 pub fn now_us() -> u64 {
@@ -350,7 +333,9 @@ pub fn now_us() -> u64 {
 }
 
 pub fn now_ns() -> u64 {
-    let st = STATE.get();
+    let Some(st) = STATE.try_get() else {
+        return 0;
+    };
     publish_ns(
         st.clock
             .now_ns_with(|| rdtsc_ser(st.use_rdtscp), st.tsc_per_ms),
@@ -358,18 +343,21 @@ pub fn now_ns() -> u64 {
 }
 
 pub fn tsc_per_ms() -> u64 {
-    STATE.get().tsc_per_ms
+    STATE.try_get().map(|s| s.tsc_per_ms).unwrap_or(0)
 }
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn source() -> CalibSource {
-    STATE.get().source
+    STATE
+        .try_get()
+        .map(|s| s.source)
+        .unwrap_or(CalibSource::Pit)
 }
 
 /// CPUID.8000_0007H:EDX[8]. TCG leaves this clear; KVM and real silicon set it.
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn tsc_invariant() -> bool {
-    STATE.get().invariant_tsc
+    STATE.try_get().is_some_and(|s| s.invariant_tsc)
 }
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
@@ -379,7 +367,7 @@ pub fn deadline_after(now: Instant) -> Instant {
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn unix_time_s() -> Option<u64> {
-    let st = STATE.get();
+    let st = STATE.try_get()?;
     st.rtc.map(|o| wall_unix_s(o, now_ns()))
 }
 
@@ -425,7 +413,7 @@ pub unsafe fn init() {
         crate::marker!("vibeOS: time: invariant tsc absent");
     }
 
-    let st = unsafe { STATE.get_mut() };
+    let mut st = TimeState::empty();
     st.use_rdtscp = use_rdtscp;
     st.invariant_tsc = inv;
 
@@ -472,6 +460,7 @@ pub unsafe fn init() {
 
     crate::marker!("vibeOS: time: calibrated {} {}/ms", source.as_str(), per_ms);
     crate::marker!("vibeOS: time: tsc {}/ms", per_ms);
+    unsafe { STATE.set(st) };
 }
 
 fn halt_time(msg: &str) -> ! {

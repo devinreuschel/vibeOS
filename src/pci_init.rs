@@ -13,6 +13,7 @@ use vibeos::paging::{PAGE_SIZE_4K, PhysAddr};
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CfgIo, FuncInfo, MAX_SCAN, bar_map_allowed};
 
 use crate::acpi_init;
+use crate::cell::IrqCell;
 use crate::dev_init;
 use crate::fb_init;
 use crate::paging_init;
@@ -46,16 +47,9 @@ impl Ecam {
     }
 }
 
-struct Cell<T>(core::cell::UnsafeCell<T>);
-unsafe impl<T> Sync for Cell<T> {}
-
-static ECAM: Cell<Ecam> = Cell(core::cell::UnsafeCell::new(Ecam::empty()));
+static ECAM: IrqCell<Ecam> = IrqCell::new(Ecam::empty());
 static CFG_LOCK: AtomicBool = AtomicBool::new(false);
 static LIVE: AtomicBool = AtomicBool::new(false);
-
-fn ecam() -> &'static mut Ecam {
-    unsafe { &mut *ECAM.0.get() }
-}
 
 fn with_cfg<R>(f: impl FnOnce() -> R) -> R {
     let _irq = InterruptGuard::enter();
@@ -110,21 +104,21 @@ fn map_mmio(phys: u64, len: u64, keep_wb: bool) -> Option<u64> {
 }
 
 fn ecam_covers(bus: u8) -> bool {
-    let e = ecam();
-    e.base != 0 && bus >= e.start && bus <= e.end
+    ECAM.with(|e| e.base != 0 && bus >= e.start && bus <= e.end)
 }
 
 fn ecam_phys_of(bdf: Bdf, offset: u16) -> Option<u64> {
-    let e = ecam();
-    pci::ecam_phys(
-        e.base,
-        e.start,
-        e.end,
-        bdf.bus,
-        bdf.device,
-        bdf.function,
-        offset,
-    )
+    ECAM.with(|e| {
+        pci::ecam_phys(
+            e.base,
+            e.start,
+            e.end,
+            bdf.bus,
+            bdf.device,
+            bdf.function,
+            offset,
+        )
+    })
 }
 
 /// Map the 4K function page for `phys` and return the byte VA.
@@ -132,21 +126,27 @@ fn ecam_phys_of(bdf: Bdf, offset: u16) -> Option<u64> {
 /// the table is full (a cache-only lookup would vanish later buses).
 fn ecam_va(phys: u64) -> Option<u64> {
     let page = phys & !(PAGE_SIZE_4K - 1);
-    let e = ecam();
-    let mut i = 0usize;
-    while i < e.n {
-        if e.phys[i] == page {
-            return Some(pci::ecam_byte_va(e.va[i], phys));
+    if let Some(va) = ECAM.with(|e| {
+        let mut i = 0usize;
+        while i < e.n {
+            if e.phys[i] == page {
+                return Some(pci::ecam_byte_va(e.va[i], phys));
+            }
+            i += 1;
         }
-        i += 1;
+        None
+    }) {
+        return Some(va);
     }
     let va = map_mmio(page, PAGE_SIZE_4K, false)?;
-    let slot = pci::ecam_cache_slot(e.n, ECAM_CACHE);
-    if e.n < ECAM_CACHE {
-        e.n += 1;
-    }
-    e.phys[slot] = page;
-    e.va[slot] = va;
+    ECAM.with(|e| {
+        let slot = pci::ecam_cache_slot(e.n, ECAM_CACHE);
+        if e.n < ECAM_CACHE {
+            e.n += 1;
+        }
+        e.phys[slot] = page;
+        e.va[slot] = va;
+    });
     Some(pci::ecam_byte_va(va, phys))
 }
 
@@ -221,10 +221,11 @@ fn map_func_bars(info: &FuncInfo, dev: &mut Device) {
 /// Scan, map memory BARs, publish devices, emit `pci: N devices`.
 pub fn init() {
     if let Some(m) = acpi_init::info().and_then(|i| i.mcfg) {
-        let e = ecam();
-        e.base = m.ecam_base;
-        e.start = m.start_bus;
-        e.end = m.end_bus;
+        ECAM.with(|e| {
+            e.base = m.ecam_base;
+            e.start = m.start_bus;
+            e.end = m.end_bus;
+        });
         crate::marker!(
             "vibeOS: pci: ecam {:#x} buses {}-{}",
             m.ecam_base,

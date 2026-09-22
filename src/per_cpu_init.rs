@@ -13,34 +13,18 @@ use vibeos::per_cpu::PerCpu;
 use vibeos::thread::Tcb;
 
 use crate::acpi_init;
+use crate::cell::BootCell;
 use crate::x86;
+use crate::x86::InterruptGuard;
 
 pub const IA32_GS_BASE: u32 = 0xC000_0101;
 pub const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
 
-struct BootCell<T>(core::cell::UnsafeCell<T>);
-unsafe impl<T> Sync for BootCell<T> {}
-impl<T> BootCell<T> {
-    const fn new(v: T) -> Self {
-        Self(core::cell::UnsafeCell::new(v))
-    }
-    /// # Safety
-    /// Exclusive boot/IRQ-off access; cell is initialized.
-    #[allow(clippy::mut_from_ref)] // boot cell, IRQ-off exclusive
-    unsafe fn get_mut(&self) -> &mut T {
-        unsafe { &mut *self.0.get() }
-    }
-    /// # Safety
-    /// Cell is initialized.
-    unsafe fn get(&self) -> &T {
-        unsafe { &*self.0.get() }
-    }
-}
-
-static CPUS: BootCell<Option<Box<[PerCpu]>>> = BootCell::new(None);
+static CPUS: BootCell<Box<[PerCpu]>> = BootCell::new();
 static LIVE: AtomicBool = AtomicBool::new(false);
 /// Bit `cpu_id`. MADTs with >64 CPUs need a wider mask later.
 static ONLINE: AtomicU64 = AtomicU64::new(0);
+static WITH_BUSY: [AtomicBool; 64] = [const { AtomicBool::new(false) }; 64];
 
 fn apic_id() -> u32 {
     let (_, ebx, _, _) = x86::cpuid(1, 0);
@@ -82,7 +66,7 @@ pub unsafe fn init_bsp() {
         x86::wrmsr(IA32_KERNEL_GS_BASE, ptr);
     }
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
-    *unsafe { CPUS.get_mut() } = Some(boxed);
+    unsafe { CPUS.set(boxed) };
     LIVE.store(true, Ordering::Release);
     ONLINE.store(1, Ordering::Release);
 }
@@ -92,17 +76,11 @@ pub fn is_live() -> bool {
 }
 
 pub fn cpu_count() -> usize {
-    unsafe { CPUS.get().as_ref().map(|c| c.len()).unwrap_or(0) }
+    CPUS.try_get().map(|c| c.len()).unwrap_or(0)
 }
 
 pub fn cpu(id: u32) -> Option<&'static PerCpu> {
-    let cpus = unsafe { CPUS.get().as_ref()? };
-    cpus.get(id as usize)
-}
-
-pub fn cpu_mut(id: u32) -> Option<&'static mut PerCpu> {
-    let cpus = unsafe { CPUS.get_mut().as_mut()? };
-    cpus.get_mut(id as usize)
+    CPUS.try_get()?.get(id as usize)
 }
 
 /// `gs:[0]` == `self_ptr`. Only after [`init_bsp`] (and AP `install_gs`).
@@ -111,13 +89,6 @@ pub fn current() -> &'static PerCpu {
     let p = gs_self();
     assert!(!p.is_null(), "per_cpu: gs null");
     unsafe { &*p }
-}
-
-pub fn current_mut() -> &'static mut PerCpu {
-    assert!(is_live(), "per_cpu: not live");
-    let p = gs_self();
-    assert!(!p.is_null(), "per_cpu: gs null");
-    unsafe { &mut *p }
 }
 
 pub fn try_current() -> Option<&'static PerCpu> {
@@ -131,15 +102,57 @@ pub fn try_current() -> Option<&'static PerCpu> {
     Some(unsafe { &*p })
 }
 
-pub fn try_current_mut() -> Option<&'static mut PerCpu> {
-    if !is_live() {
-        return None;
-    }
+/// Exclusive `&mut PerCpu` for this CPU. IRQs off. Panics on re-entry.
+///
+/// Do not `switch_context` inside `f`. The busy flag lives on this stack;
+/// the incoming thread would see it set with IF possibly on (DESIGN §9.4).
+#[inline(always)]
+pub fn with_current<R>(f: impl FnOnce(&mut PerCpu) -> R) -> R {
+    let _irq = InterruptGuard::enter();
+    assert!(is_live(), "per_cpu: not live");
     let p = gs_self();
-    if p.is_null() {
-        return None;
+    assert!(!p.is_null(), "per_cpu: gs null");
+    with_ptr(p, f)
+}
+
+/// `&mut PerCpu` for `switch_now`. IRQs off; no busy flag.
+///
+/// `InterruptGuard` spans `switch_context` (object stays on the outgoing
+/// stack; `irq_nest` is swapped onto the incoming TCB). `WITH_BUSY` must
+/// not: the incoming thread takes IRQs and `with_current`.
+#[inline(always)]
+pub fn with_current_switch<R>(f: impl FnOnce(&mut PerCpu) -> R) -> R {
+    let _irq = InterruptGuard::enter();
+    assert!(is_live(), "per_cpu: not live");
+    let p = gs_self();
+    assert!(!p.is_null(), "per_cpu: gs null");
+    f(unsafe { &mut *p })
+}
+
+/// Exclusive `&mut PerCpu` for `id`. IRQs off. BSP bring-up of APs, owner
+/// CPU runq. Never a remote run queue (DESIGN §7.7).
+#[inline(always)]
+pub fn with_cpu<R>(id: u32, f: impl FnOnce(&mut PerCpu) -> R) -> Option<R> {
+    let _irq = InterruptGuard::enter();
+    let cpus = CPUS.try_get()?;
+    let cpu = cpus.get(id as usize)?;
+    Some(with_ptr(cpu.self_ptr, f))
+}
+
+#[inline(always)]
+fn with_ptr<R>(p: *mut PerCpu, f: impl FnOnce(&mut PerCpu) -> R) -> R {
+    let id = unsafe { (*p).cpu_id as usize }.min(63);
+    if WITH_BUSY[id].swap(true, Ordering::Acquire) {
+        panic!("per_cpu: with_current re-entry");
     }
-    Some(unsafe { &mut *p })
+    struct Unlock<'a>(&'a AtomicBool);
+    impl Drop for Unlock<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+    let _u = Unlock(&WITH_BUSY[id]);
+    f(unsafe { &mut *p })
 }
 
 /// Write `GS_BASE` and `KERNEL_GS_BASE` to this CPU's slot.
@@ -158,20 +171,22 @@ pub unsafe fn install_gs(cpu: &PerCpu) {
 
 /// InterruptGuard nesting. No-op before [`init_bsp`], or if GS is still 0.
 pub fn irq_nest_enter() {
-    if let Some(c) = try_current_mut() {
-        c.irq_nest = c.irq_nest.saturating_add(1);
+    if let Some(c) = try_current() {
+        c.irq_nest.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 pub fn irq_nest_leave() {
-    if let Some(c) = try_current_mut() {
-        assert!(c.irq_nest > 0, "irq nest underflow");
-        c.irq_nest -= 1;
+    if let Some(c) = try_current() {
+        let old = c.irq_nest.fetch_sub(1, Ordering::Relaxed);
+        assert!(old > 0, "irq nest underflow");
     }
 }
 
 pub fn irq_nest() -> u32 {
-    try_current().map(|c| c.irq_nest).unwrap_or(0)
+    try_current()
+        .map(|c| c.irq_nest.load(Ordering::Relaxed))
+        .unwrap_or(0)
 }
 
 pub fn gs_self() -> *mut PerCpu {
@@ -186,8 +201,8 @@ pub fn gs_self() -> *mut PerCpu {
     ptr as *mut PerCpu
 }
 
-pub fn set_current_thread(tcb: *mut Tcb) {
-    current_mut().current = tcb;
+pub fn set_current_thread(cpu: &mut PerCpu, tcb: *mut Tcb) {
+    cpu.current = tcb;
 }
 
 pub fn current_thread() -> *mut Tcb {
@@ -195,14 +210,14 @@ pub fn current_thread() -> *mut Tcb {
 }
 
 pub fn set_tsc_per_ms(v: u64) {
-    if let Some(c) = try_current_mut() {
-        c.tsc_per_ms = v;
+    if try_current().is_some() {
+        with_current(|c| c.tsc_per_ms = v);
     }
 }
 
 pub fn set_timer_mode(mode: vibeos::apic::TimerMode) {
-    if let Some(c) = try_current_mut() {
-        c.timer_mode = mode;
+    if try_current().is_some() {
+        with_current(|c| c.timer_mode = mode);
     }
 }
 

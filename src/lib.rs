@@ -18,6 +18,10 @@ pub mod addr_space;
 pub mod apic;
 pub mod block;
 pub mod cache;
+// Kernel `mod cell` in main.rs. Host tests only: production vibeos-core
+// has no InterruptGuard / per_cpu_init.
+#[cfg(test)]
+pub mod cell;
 pub mod console;
 pub mod desc;
 pub mod dev;

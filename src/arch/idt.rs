@@ -10,24 +10,14 @@ use vibeos::vectors;
 use crate::arch::catch;
 use crate::arch::gs;
 use crate::arch::pic;
+use crate::cell::IrqCell;
 use crate::serial::Serial;
 use crate::x86::{self, DtPtr};
-
-struct Cell<T>(core::cell::UnsafeCell<T>);
-unsafe impl<T> Sync for Cell<T> {}
-impl<T> Cell<T> {
-    const fn new(v: T) -> Self {
-        Self(core::cell::UnsafeCell::new(v))
-    }
-    fn ptr(&self) -> *mut T {
-        self.0.get()
-    }
-}
 
 #[repr(C, align(16))]
 struct Idt([IdtEntry; 256]);
 
-static IDT: Cell<Idt> = Cell::new(Idt([IdtEntry::EMPTY; 256]));
+static IDT: IrqCell<Idt> = IrqCell::new(Idt([IdtEntry::EMPTY; 256]));
 
 macro_rules! install_noerr {
     ($($n:literal),* $(,)?) => {
@@ -234,7 +224,10 @@ fn gs_leave(user: bool) {
 }
 
 pub fn pointer() -> (u16, u64) {
-    ((core::mem::size_of::<Idt>() - 1) as u16, IDT.ptr() as u64)
+    (
+        (core::mem::size_of::<Idt>() - 1) as u16,
+        IDT.as_ptr() as u64,
+    )
 }
 
 /// # Safety
@@ -375,15 +368,15 @@ pub fn set_handler(vec: u8, h: extern "x86-interrupt" fn(InterruptFrame)) {
 }
 
 fn set_noerr(vec: u8, h: extern "x86-interrupt" fn(InterruptFrame), ist: u8) {
-    unsafe {
-        (*IDT.ptr()).0[vec as usize] = IdtEntry::interrupt(fn_addr_noerr(h), KERNEL_CS, ist);
-    }
+    IDT.with(|idt| {
+        idt.0[vec as usize] = IdtEntry::interrupt(fn_addr_noerr(h), KERNEL_CS, ist);
+    });
 }
 
 fn set_err(vec: u8, h: extern "x86-interrupt" fn(InterruptFrame, u64), ist: u8) {
-    unsafe {
-        (*IDT.ptr()).0[vec as usize] = IdtEntry::interrupt(fn_addr_err(h), KERNEL_CS, ist);
-    }
+    IDT.with(|idt| {
+        idt.0[vec as usize] = IdtEntry::interrupt(fn_addr_err(h), KERNEL_CS, ist);
+    });
 }
 
 fn fn_addr_noerr(h: extern "x86-interrupt" fn(InterruptFrame)) -> u64 {

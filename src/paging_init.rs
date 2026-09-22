@@ -100,15 +100,12 @@ unsafe impl FrameAlloc for BuddyFrames {
 
 /// Page-table + ioremap lock. Rank PT. Callers that already hold it use
 /// the `_locked` map/unmap helpers and drop before a shootdown wait.
-static PT: SpinMutex<()> = SpinMutex::with_rank((), RANK_PT);
+static PT: SpinMutex<IoremapWindow> = SpinMutex::with_rank(IoremapWindow::new(), RANK_PT);
 
 pub fn with_pt<R>(f: impl FnOnce() -> R) -> R {
     let _g = PT.lock();
     f()
 }
-
-/// Global reservation state for the ioremap window (DESIGN §4.1).
-static mut IOREMAP: IoremapWindow = IoremapWindow::new();
 
 static MAP_END: AtomicU64 = AtomicU64::new(0);
 static KERNEL_CR3: AtomicU64 = AtomicU64::new(0);
@@ -134,8 +131,9 @@ pub fn kernel_cr3() -> u64 {
 /// no aliased mapping through the physmap will be used to touch the
 /// same registers with cacheable attributes.
 pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
-    let (va_offset, base_va, round_len) = with_pt(|| {
-        let va_offset = unsafe { &mut *core::ptr::addr_of_mut!(IOREMAP) }.reserve(phys, len)?;
+    let (va_offset, base_va, round_len) = {
+        let mut win = PT.lock();
+        let va_offset = win.reserve(phys, len)?;
         let base_va = VirtAddr(va_offset.as_u64() & !(PAGE_SIZE_4K - 1));
         let base_pa = PhysAddr(phys.as_u64() & !(PAGE_SIZE_4K - 1));
         let head = phys.as_u64() & (PAGE_SIZE_4K - 1);
@@ -155,7 +153,7 @@ pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
                 .ok()?;
         }
         Some((va_offset, base_va, round_len))
-    })?;
+    }?;
     let mut off = 0u64;
     while off < round_len {
         paging::tlb_shootdown_others(VirtAddr(base_va.as_u64() + off));

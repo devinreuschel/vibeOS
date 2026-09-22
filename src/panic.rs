@@ -195,6 +195,8 @@ fn dump_common(rip: u64, rbp: u64, rsp: u64, rflags: u64) {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    #[cfg(feature = "kernel_tests")]
+    crate::arch::catch::on_panic();
     let rip = x86::read_rip();
     let rbp = x86::read_rbp();
     let rsp = x86::read_rsp();

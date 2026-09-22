@@ -4,38 +4,17 @@
 //! LAPIC / I/O APIC / HPET before first MMIO touch, then later print
 //! `acpi: xsdt N tables` after GDT/PIC/IDT (live steps 3–5 after KVA).
 
-use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use vibeos::acpi::{self, AcpiError, AcpiInfo, PhysMem};
 use vibeos::marker;
 use vibeos::paging::{self, PAGE_SIZE_4K, PhysAddr, VirtAddr};
 
+use crate::cell::BootCell;
 use crate::paging_init;
 
-struct BootCell<T>(UnsafeCell<Option<T>>);
-unsafe impl<T> Sync for BootCell<T> {}
-impl<T> BootCell<T> {
-    const fn new() -> Self {
-        Self(UnsafeCell::new(None))
-    }
-    /// # Safety
-    /// Single writer during boot; IRQs off.
-    unsafe fn set(&self, v: T) {
-        unsafe { *self.0.get() = Some(v) };
-    }
-    fn get(&self) -> Option<&T> {
-        unsafe { (*self.0.get()).as_ref() }
-    }
-    /// # Safety
-    /// Exclusive boot/IRQ-off access.
-    #[allow(clippy::mut_from_ref)] // boot cell, IRQ-off exclusive
-    unsafe fn get_mut(&self) -> Option<&mut T> {
-        unsafe { (*self.0.get()).as_mut() }
-    }
-}
-
 static INFO: BootCell<AcpiInfo> = BootCell::new();
-static mut MMIO_UC: bool = false;
+static MMIO_UC: AtomicBool = AtomicBool::new(false);
 
 struct HhdmPhys;
 
@@ -114,7 +93,7 @@ fn uc_mmio(phys: u64, len: u64) -> bool {
 /// # Safety
 /// After `paging_init::install`, single-CPU, IRQs off.
 pub unsafe fn init(rsdp_phys: u64) {
-    let info = match acpi::walk(&HhdmPhys, rsdp_phys) {
+    let mut info = match acpi::walk(&HhdmPhys, rsdp_phys) {
         Ok(i) => i,
         Err(e) => halt_acpi(e),
     };
@@ -132,24 +111,23 @@ pub unsafe fn init(rsdp_phys: u64) {
         patched |= hpet_uc;
     }
 
-    unsafe { INFO.set(info) };
-
     if patched {
-        unsafe { MMIO_UC = true };
+        MMIO_UC.store(true, Ordering::Release);
         crate::marker!(marker::PAGING_MMIO_UC);
     }
 
     // First MMIO touch: HPET GEN_CAP period, only after that page is UC.
-    if hpet_uc && let Some(hpet) = unsafe { INFO.get_mut() }.and_then(|i| i.hpet.as_mut()) {
+    if hpet_uc && let Some(hpet) = info.hpet.as_mut() {
         let va = (paging_init::HHDM_BASE.wrapping_add(hpet.base)) as *const u64;
         let cap = unsafe { va.read_volatile() };
         hpet.period_fs = (cap >> 32) as u32;
     }
+    unsafe { INFO.set(info) };
 }
 
 /// Marker + summary. DESIGN §3.3 step 12, after GDT/PIC/IDT.
 pub fn report() {
-    let Some(info) = INFO.get() else {
+    let Some(info) = INFO.try_get() else {
         return;
     };
     crate::marker!("vibeOS: acpi: xsdt {} tables", info.table_count);
@@ -166,12 +144,12 @@ pub fn report() {
 }
 
 pub fn info() -> Option<&'static AcpiInfo> {
-    unsafe { (*INFO.0.get()).as_ref() }
+    INFO.try_get()
 }
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn mmio_uc_patched() -> bool {
-    unsafe { MMIO_UC }
+    MMIO_UC.load(Ordering::Acquire)
 }
 
 fn halt_acpi(e: AcpiError) -> ! {

@@ -21,19 +21,22 @@ use vibeos::vectors;
 use crate::acpi_init;
 use crate::apic_init;
 use crate::arch;
+use crate::cell::IrqCell;
 use crate::per_cpu_init;
 use crate::x86::{self, InterruptGuard};
 
 const POLL_CAP: u32 = 100_000;
 const GSI_NONE: u32 = u32::MAX;
 
-struct Cell<T>(core::cell::UnsafeCell<T>);
-unsafe impl<T> Sync for Cell<T> {}
+struct Kbd {
+    decoder: Decoder,
+    ring: Ring<DecodedKey, RING_CAP>,
+}
 
-static DECODER: Cell<Decoder> = Cell(core::cell::UnsafeCell::new(Decoder::new()));
-static RING: Cell<Ring<DecodedKey, RING_CAP>> = Cell(core::cell::UnsafeCell::new(Ring::empty(
-    DecodedKey::Char(0),
-)));
+static KBD: IrqCell<Kbd> = IrqCell::new(Kbd {
+    decoder: Decoder::new(),
+    ring: Ring::empty(DecodedKey::Char(0)),
+});
 static LIVE: AtomicBool = AtomicBool::new(false);
 static GSI: AtomicU32 = AtomicU32::new(GSI_NONE);
 static PIC_FALLBACK: AtomicBool = AtomicBool::new(false);
@@ -58,16 +61,16 @@ pub fn on_irq() {
     if status & STAT_MOUSE != 0 {
         return;
     }
-    let dec = unsafe { &mut *DECODER.0.get() };
-    if let Some(k) = dec.feed(data) {
-        unsafe { (*RING.0.get()).push(k) };
-    }
+    KBD.with(|k| {
+        if let Some(key) = k.decoder.feed(data) {
+            k.ring.push(key);
+        }
+    });
 }
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn pop() -> Option<DecodedKey> {
-    let _irq = InterruptGuard::enter();
-    unsafe { (*RING.0.get()).pop() }
+    KBD.with(|k| k.ring.pop())
 }
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
@@ -255,8 +258,7 @@ fn init_8042() -> bool {
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn push_for_test(k: DecodedKey) {
-    let _irq = InterruptGuard::enter();
-    unsafe { (*RING.0.get()).push(k) };
+    KBD.with(|kbd| kbd.ring.push(k));
 }
 
 /// Read the 8042 config byte. CLI so the IRQ1 ISR cannot steal it.

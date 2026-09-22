@@ -92,6 +92,7 @@ gs, cpu). Nested also: `src/fs/` (VFS + kernfs). `user/` is freestanding ELFs, n
 | interrupts | `irq.rs`, `apic.rs`, `ipi.rs` | `irq_init.rs`, `apic_init.rs`, `ipi_init.rs` |
 | smp | `smp.rs`, `per_cpu.rs` | `smp_init.rs`, `per_cpu_init.rs` |
 | sched | `thread.rs`, `sched.rs`, `wait.rs`, `sync.rs`, `lock.rs`, `work.rs` | `thread_init.rs`, `sched_init.rs`, `sync_init.rs`, `work_init.rs` |
+| cell | `cell.rs` (`#[cfg(test)]` in `vibeos-core`) | `cell.rs` (`BootCell`, `IrqCell`) |
 | log | `log.rs` | `log_init.rs` |
 | console | `console.rs`, `kbd.rs`, `fb.rs`, `font.rs`, `shell.rs` | `console_init.rs`, `kbd_init.rs`, `fb_init.rs`, `shell_init.rs` |
 | devices | `pci.rs`, `dev.rs`, `dma.rs`, `virtio.rs` | `pci_init.rs`, `dev_init.rs`, `dma_init.rs`, `virtio_init.rs` |
@@ -182,6 +183,16 @@ not exist. The scheduler lock, the input ring, the buddy allocator, and the heap
 Pick one spinlock implementation and use it everywhere. The old tree ended up with two (a ticket lock
 in one design doc, an IRQ-guarded spin mutex in the code) and the mismatch was a source of confusion
 for weeks.
+
+Three cells:
+
+| Cell | Use |
+|------|-----|
+| `SpinMutex` | Shared across CPUs. IRQ-aware. Ranked. |
+| `IrqCell` | CPU-local or boot-only mutable. `with` takes IRQs off, panics on same-CPU re-entry, spins if another CPU holds it. |
+| `BootCell` | Write once before `smp: done`, then shared `&T`. |
+
+They live in `src/cell.rs` (`BootCell`, `IrqCell`) and `src/sync_init.rs` (`SpinMutex`). Do not add another `UnsafeCell` + `unsafe impl<T> Sync` wrapper. `static mut` is only the asm-owned `vibeos_jmpbuf` in `arch/catch.rs`. Accessors do not return `&'static mut`.
 
 Cross-CPU rule: a CPU never touches another CPU's run queue directly. Work is handed over through a
 per-CPU inbox plus a reschedule IPI. More SMP-specific rules in [section 7.7](#77-locking-with-more-than-one-cpu).
@@ -1141,6 +1152,10 @@ array by a `MAX_CPUS` guess.
 `PerCpu::current()` is safe from an ISR because the GS base never changes on a given CPU. Do not use
 `swapgs` in kernel-entry ISRs until user mode exists, and when it does, do it in exactly one place.
 
+Exclusive `&mut PerCpu` is `with_current` (IRQs off, panics on re-entry). `switch_now` uses
+`with_current_switch`: the `InterruptGuard` spans `switch_context` (it lives on the outgoing stack)
+but the re-entry flag does not, so the incoming thread can take IRQs and `with_current`.
+
 ## 7.6 IPIs
 
 | Vector | Purpose |
@@ -1659,6 +1674,12 @@ Rule: delayed `sti` immediately before `jmp`; never `popfq` with IF set across a
 The spinlock's re-entrancy check was a `debug_assert!`. Rule: real CAS spin loop, and any invariant
 that must hold in release is an `assert!`.
 
+**`per_cpu: with_current re-entry` on the first workqueue IPI.**
+`with_current`'s busy flag spanned `switch_context`. The incoming thread resumed with the flag still
+set and IF on (`irq_nest == 0` / `apply_if_on_resume`), then `0xFD` called `drain_inbox` →
+`with_current` and panicked. Rule: `InterruptGuard` may span the switch (it lives on the outgoing
+stack); the busy flag must not.
+
 **Keyboard input deadlocks the shell.**
 The input ring was guarded by a lock that IRQ1 also takes, held with interrupts enabled by the
 consumer. Rule: same as the scheduler lock. Interrupts off around the critical section.
@@ -1725,6 +1746,16 @@ it allocated.
 **A null dereference in an ISR shortly after an AP comes up.**
 `sti` happened before `GS_BASE` was set, and a timer interrupt landed in code that reads per-CPU state.
 Rule: per-CPU MSRs are set before the IDT is live and before `sti`.
+
+**AP triple-faults in `ap_entry` before `lidt`.**
+`IrqCell.with` / `InterruptGuard` call `try_current` → `gs:[0]` while GS is still 0 and the IDT is
+not loaded. Rule: read trampoline bring-up params through `IrqCell::as_ptr()`, install `GS_BASE`,
+then use cells.
+
+**First ring-3 timer IRQ triple-faults (`#PF` at `0xffffffe8`).**
+`BootCell::set` moved the BSP GDT/TSS after `tables.init` baked the stack address of that TSS into
+the GDT. CPL=0 IRQs keep the current RSP so boot looked fine; the first CPL=3 IRQ loads stale
+`TSS.RSP0`. Rule: init descriptor bases after the cell owns the tables (`BootCell::as_ptr`).
 
 **A CPU never sees itself in the per-CPU table.**
 The table entry was published without a fence before the SIPI. Rule: publish, fence, then start.

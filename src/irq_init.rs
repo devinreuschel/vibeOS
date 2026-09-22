@@ -22,18 +22,30 @@ use vibeos::wait::WaitQueue;
 
 use crate::apic_init;
 use crate::arch;
+use crate::cell::IrqCell;
 use crate::pci_init;
 use crate::per_cpu_init;
 use crate::thread_init;
-use crate::x86::InterruptGuard;
 
 type Handler = fn();
 
-struct Cell<T>(core::cell::UnsafeCell<T>);
-unsafe impl<T> Sync for Cell<T> {}
+struct IrqState {
+    pool: VectorPool,
+    routes: [Route; irq::POOL_LEN],
+    th: Threaded,
+}
 
-static POOL: Cell<VectorPool> = Cell(core::cell::UnsafeCell::new(VectorPool::new()));
-static POOL_LOCK: AtomicBool = AtomicBool::new(false);
+static IRQ: IrqCell<IrqState> = IrqCell::new(IrqState {
+    pool: VectorPool::new(),
+    routes: [Route::None; irq::POOL_LEN],
+    th: Threaded {
+        wq: WaitQueue::new(),
+        pending: [false; irq::POOL_LEN],
+        top: [0; irq::POOL_LEN],
+        work: [0; irq::POOL_LEN],
+        started: false,
+    },
+});
 static HANDLERS: [AtomicUsize; irq::POOL_LEN] = [const { AtomicUsize::new(0) }; irq::POOL_LEN];
 static IN_ISR: [AtomicBool; 64] = [const { AtomicBool::new(false) }; 64];
 
@@ -50,9 +62,6 @@ enum Route {
     Msix,
 }
 
-static ROUTES: Cell<[Route; irq::POOL_LEN]> =
-    Cell(core::cell::UnsafeCell::new([Route::None; irq::POOL_LEN]));
-
 struct Threaded {
     wq: WaitQueue,
     pending: [bool; irq::POOL_LEN],
@@ -61,38 +70,10 @@ struct Threaded {
     started: bool,
 }
 
-static TH: Cell<Threaded> = Cell(core::cell::UnsafeCell::new(Threaded {
-    wq: WaitQueue::new(),
-    pending: [false; irq::POOL_LEN],
-    top: [0; irq::POOL_LEN],
-    work: [0; irq::POOL_LEN],
-    started: false,
-}));
 static THREAD_CPU: AtomicU32 = AtomicU32::new(0);
 
-fn pool() -> &'static mut VectorPool {
-    unsafe { &mut *POOL.0.get() }
-}
-
-fn routes() -> &'static mut [Route; irq::POOL_LEN] {
-    unsafe { &mut *ROUTES.0.get() }
-}
-
-fn th() -> &'static mut Threaded {
-    unsafe { &mut *TH.0.get() }
-}
-
 fn with_pool<R>(f: impl FnOnce(&mut VectorPool) -> R) -> R {
-    let _irq = InterruptGuard::enter();
-    while POOL_LOCK
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
-    }
-    let r = f(pool());
-    POOL_LOCK.store(false, Ordering::Release);
-    r
+    IRQ.with(|s| f(&mut s.pool))
 }
 
 fn handler_slot(vec: u8) -> Option<usize> {
@@ -122,19 +103,19 @@ extern "x86-interrupt" fn device_irq<const N: u8>(_frame: InterruptFrame) {
 pub fn dispatch(vec: u8) {
     set_in_isr(true);
     if let Some(i) = handler_slot(vec) {
-        let top = th().top[i];
-        let work = th().work[i];
+        let (top, work) = IRQ.with(|s| (s.th.top[i], s.th.work[i]));
         if work != 0 || top != 0 {
             if top != 0 {
                 let h: Handler = unsafe { core::mem::transmute(top) };
                 h();
             }
-            thread_init::with_sched(|s| {
-                let t = th();
-                t.pending[i] = true;
-                if t.started {
-                    s.wake_one(&mut t.wq);
-                }
+            thread_init::with_sched(|sched| {
+                IRQ.with(|s| {
+                    s.th.pending[i] = true;
+                    if s.th.started {
+                        sched.wake_one(&mut s.th.wq);
+                    }
+                });
             });
         } else {
             let p = HANDLERS[i].load(Ordering::Acquire);
@@ -159,25 +140,24 @@ pub fn free_vector(vec: u8) -> Result<(), IrqError> {
     if in_hard_irq() {
         return Err(IrqError::InIrq);
     }
-    with_pool(|p| {
+    let gsi = IRQ.with(|s| {
+        handler_slot(vec).and_then(|i| match s.routes[i] {
+            Route::IoApic { gsi, .. } => Some(gsi),
+            Route::None | Route::Msi | Route::Msix => None,
+        })
+    });
+    if let Some(gsi) = gsi {
+        apic_init::mask_gsi(gsi);
+    }
+    IRQ.with(|s| {
         if let Some(i) = handler_slot(vec) {
-            // Mask IOAPIC before dropping the handler. A still-asserted
-            // level line would storm empty dispatch, and a later allocate
-            // of this vector would inherit the old GSI.
-            match routes()[i] {
-                Route::IoApic { gsi, .. } => apic_init::mask_gsi(gsi),
-                Route::None | Route::Msi | Route::Msix => {}
-            }
             HANDLERS[i].store(0, Ordering::Release);
-            routes()[i] = Route::None;
-            // dispatch prefers threaded state whenever top/work is set, so a
-            // recycled vector would ignore a later set_handler if we left it.
-            let t = th();
-            t.top[i] = 0;
-            t.work[i] = 0;
-            t.pending[i] = false;
+            s.routes[i] = Route::None;
+            s.th.top[i] = 0;
+            s.th.work[i] = 0;
+            s.th.pending[i] = false;
         }
-        p.free(vec)
+        s.pool.free(vec)
     })
 }
 
@@ -198,10 +178,11 @@ pub fn set_threaded(vec: u8, top: Option<Handler>, work: Handler) -> Result<(), 
         return Err(IrqError::BadVector);
     };
     thread_init::with_sched(|_| {
-        let t = th();
-        t.top[i] = top.map(|f| f as usize).unwrap_or(0);
-        t.work[i] = work as usize;
-        t.pending[i] = false;
+        IRQ.with(|s| {
+            s.th.top[i] = top.map(|f| f as usize).unwrap_or(0);
+            s.th.work[i] = work as usize;
+            s.th.pending[i] = false;
+        });
     });
     Ok(())
 }
@@ -217,21 +198,22 @@ fn last_online_cpu() -> u32 {
 
 fn take_work() -> Option<Handler> {
     thread_init::with_sched(|s| {
-        let t = th();
-        let mut i = 0usize;
-        while i < irq::POOL_LEN {
-            if t.pending[i] {
-                t.pending[i] = false;
-                let p = t.work[i];
-                if p != 0 {
-                    let h: Handler = unsafe { core::mem::transmute(p) };
-                    return Some(h);
+        IRQ.with(|st| {
+            let mut i = 0usize;
+            while i < irq::POOL_LEN {
+                if st.th.pending[i] {
+                    st.th.pending[i] = false;
+                    let p = st.th.work[i];
+                    if p != 0 {
+                        let h: Handler = unsafe { core::mem::transmute(p) };
+                        return Some(h);
+                    }
                 }
+                i += 1;
             }
-            i += 1;
-        }
-        s.begin_wait(&mut t.wq, FAR_DEADLINE);
-        None
+            s.begin_wait(&mut st.th.wq, FAR_DEADLINE);
+            None
+        })
     })
 }
 
@@ -250,7 +232,7 @@ pub fn start_threaded() {
     THREAD_CPU.store(cpu, Ordering::Release);
     let _ = thread_init::spawn_on("irqth", irq_thread, cpu);
     thread_init::with_sched(|_| {
-        th().started = true;
+        IRQ.with(|s| s.th.started = true);
     });
 }
 
@@ -269,7 +251,8 @@ pub fn set_affinity(vec: u8, cpu: u32) -> Result<(), IrqError> {
         return Err(IrqError::BadVector);
     };
     let dest = apic_id(cpu).ok_or(IrqError::BadCpu)?;
-    match routes()[i] {
+    let route = IRQ.with(|s| s.routes[i]);
+    match route {
         Route::IoApic {
             gsi,
             trigger,
@@ -300,11 +283,13 @@ pub fn route_intx(
     let Some(i) = handler_slot(vec) else {
         return Err(IrqError::BadVector);
     };
-    routes()[i] = Route::IoApic {
-        gsi,
-        trigger,
-        polarity,
-    };
+    IRQ.with(|s| {
+        s.routes[i] = Route::IoApic {
+            gsi,
+            trigger,
+            polarity,
+        };
+    });
     apic_init::unmask_gsi(gsi);
     Ok(())
 }
@@ -337,7 +322,7 @@ pub fn enable_msi(bdf: Bdf, cap: u8, vector: u8, apic_id: u8) -> Result<(), IrqE
     mask_intx(bdf, true);
     pci::set_msi_enable(&mut hw, bdf, cap, true);
     if let Some(i) = handler_slot(vector) {
-        routes()[i] = Route::Msi;
+        IRQ.with(|s| s.routes[i] = Route::Msi);
     }
     Ok(())
 }
@@ -404,7 +389,7 @@ pub fn enable_msix(
     mask_intx(dev.addr, true);
     pci::set_msix_enable(&mut hw, dev.addr, cap_off, true, false);
     if let Some(i) = handler_slot(vector) {
-        routes()[i] = Route::Msix;
+        IRQ.with(|s| s.routes[i] = Route::Msix);
     }
     Ok(())
 }
@@ -447,10 +432,10 @@ pub fn allocated_count() -> usize {
 #[cfg(feature = "kernel_tests")]
 pub fn has_threaded(vec: u8) -> bool {
     match handler_slot(vec) {
-        Some(i) => {
-            let t = th();
+        Some(i) => IRQ.with(|s| {
+            let t = &s.th;
             t.top[i] != 0 || t.work[i] != 0 || t.pending[i]
-        }
+        }),
         None => false,
     }
 }
