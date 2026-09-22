@@ -498,9 +498,12 @@ def run_qemu_and_check(
             result.exit_code = proc.wait()
 
     if result.timed_out:
+        missing = (
+            markers[marker_idx].name if marker_idx < len(markers) else "none"
+        )
         raise HarnessError(
-            f"timed out after {timeout_s}s; {len(result.matched)}/{len(markers)} markers"
-            f"{serial_tail(result.lines)}"
+            f"timed out after {timeout_s}s; {len(result.matched)}/{len(markers)} markers; "
+            f"missing {missing!r}{serial_tail(result.lines)}"
         )
 
     if marker_idx < len(markers):
