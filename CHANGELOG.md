@@ -31,6 +31,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 - Nightly date, Action SHAs, and Limine commit are pinned so CI cannot drift.
   Weekly smp-stress runs a non-blocking latest-nightly canary.
 - Kernel builds with built-in `x86_64-unknown-none` (no custom target JSON, no `build-std`).
+- Host tests (`make test-unit`) run `vibeos-core` on the host triple; `mkfs`/`fsck-vibefs` follow.
+  Context-switch asm stays `x86_64`. I1 (macOS CI job) is still parked.
 - ISO and ksyms recipes are one `KERNEL_VARIANT` template plus `scripts/mkiso.sh`.
 - One QEMU launcher (`tests/harness/harness.py`) for e2e, ktest, PS/2, and vibefs-crash.
   `VIBEOS_*` is read there; drivers are `tests/harness/run_*.py`.

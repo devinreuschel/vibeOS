@@ -23,7 +23,7 @@ Make the discipline mechanical: clippy restriction lints scoped to the portable 
 ## Implementation plan
 
 1. **Fix the nine sites.** For each, either prove it cannot fail and rewrite as `match` / `unwrap_or` / `let-else` with an error return, or return the module error. Expected: `kva.rs` free-list invariants (return `Err`), `vibefs.rs` (checksum/slot lookups → `Error::Corrupt`), `block.rs`, `heap.rs`, `wait.rs`, `kernfs.rs` similar.
-2. **Lints.** In `src/lib.rs` (and `tests/hostlib/src/lib.rs` until the workspace split, then `crates/core/Cargo.toml [lints.clippy]`):
+2. **Lints.** In `src/lib.rs` (`crates/core` after A2):
    `unwrap_used = "deny"`, `expect_used = "deny"`, `panic = "deny"`, `indexing_slicing = "warn"` (start as warn; slice indexing is pervasive and mostly bounds-checked by construction), `arithmetic_side_effects = "warn"` for the parser modules only (`acpi`, `part`, `fat`, `vibefs`, `pci`).
    Test modules: `#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]`.
 3. **Triage `indexing_slicing`** warnings in the five parser modules: convert to `.get(..)` with `?` where the index comes from disk/firmware data; allow with a comment where it comes from a constant.

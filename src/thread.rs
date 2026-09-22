@@ -346,6 +346,7 @@ mod switch_asm {
     );
 }
 
+#[cfg(target_arch = "x86_64")]
 unsafe extern "C" {
     fn vibeos_switch_context(old: *mut CpuContext, new: *const CpuContext);
 }
@@ -362,6 +363,7 @@ unsafe extern "C" {
 /// # Safety
 /// `old` and `new` must be valid. `new.rsp` must point at a live stack.
 /// Caller is not using the red zone below either rsp.
+#[cfg(target_arch = "x86_64")]
 pub unsafe fn switch_context(old: *mut CpuContext, new: *const CpuContext) {
     unsafe { vibeos_switch_context(old, new) };
 }
@@ -370,6 +372,7 @@ pub unsafe fn switch_context(old: *mut CpuContext, new: *const CpuContext) {
 mod tests {
     use super::*;
     use core::mem::{offset_of, size_of};
+    #[cfg(target_arch = "x86_64")]
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
@@ -430,12 +433,16 @@ mod tests {
         assert_eq!(size_of::<ThreadId>(), 4);
     }
 
+    #[cfg(target_arch = "x86_64")]
     static FLAG: AtomicU64 = AtomicU64::new(0);
+    #[cfg(target_arch = "x86_64")]
     static MAIN_PTR: std::sync::atomic::AtomicPtr<CpuContext> =
         std::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+    #[cfg(target_arch = "x86_64")]
     static WORKER_PTR: std::sync::atomic::AtomicPtr<CpuContext> =
         std::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
+    #[cfg(target_arch = "x86_64")]
     extern "C" fn worker_entry() {
         FLAG.store(0xC0FFEE, Ordering::SeqCst);
         unsafe {
@@ -447,6 +454,7 @@ mod tests {
         panic!("worker resumed");
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn switch_context_roundtrip() {
         FLAG.store(0, Ordering::SeqCst);

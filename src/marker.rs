@@ -93,3 +93,81 @@ pub const PANIC_BANNER: &str = "vibeOS: panic:";
 
 /// End of a panic/exception dump. Harness waits for this after a signature.
 pub const PANIC_HALTED: &str = "vibeOS: panic: halted";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markers_are_lowercase_prefixed() {
+        for m in [
+            SERIAL_ONLINE,
+            LIMINE_OK,
+            PMM_PREFIX,
+            PAGING_CR3_OK,
+            PAGING_MMIO_UC,
+            HEAP_OK,
+            KVA_READY,
+            GDT_OK,
+            PIC_REMAPPED,
+            IDT_OK,
+            PER_CPU_BSP,
+            ACPI_XSDT_PREFIX,
+            TIME_TSC_PREFIX,
+            TIME_LAPIC_PREFIX,
+            SCHED_CPU0,
+            IRQ_ENABLED,
+            SMP_AP_ONLINE,
+            SMP_DONE,
+            BOOT_DONE,
+            CONSOLE_OK,
+            PCI_PREFIX,
+            BLOCK_PREFIX,
+            SHELL_READY,
+        ] {
+            assert!(m.starts_with("vibeOS: "), "marker missing prefix: {m}");
+            assert!(!m.ends_with(['.', '!']), "marker has trailing punct: {m}");
+        }
+        // The PMM line is assembled at runtime: prefix, decimal count,
+        // suffix. Confirm the fragments agree with the phase-1 exit-gate
+        // string in the roadmap.
+        assert_eq!(PMM_PREFIX, "vibeOS: pmm: ");
+        assert_eq!(PMM_FREE_SUFFIX, " free 4KiB frames");
+        // Paging §1.2 exit marker is a fixed string; must match the
+        // harness contract byte-for-byte.
+        assert_eq!(PAGING_CR3_OK, "vibeOS: paging: cr3 ok");
+        assert_eq!(PAGING_MMIO_UC, "vibeOS: paging: mmio uc");
+        assert_eq!(HEAP_OK, "vibeOS: heap ok");
+        assert_eq!(KVA_READY, "vibeOS: kva: ready");
+        assert_eq!(GDT_OK, "vibeOS: gdt ok");
+        assert_eq!(PIC_REMAPPED, "vibeOS: pic: remapped");
+        assert_eq!(IDT_OK, "vibeOS: idt ok");
+        assert_eq!(PER_CPU_BSP, "vibeOS: per_cpu: bsp ready");
+        assert_eq!(ACPI_XSDT_PREFIX, "vibeOS: acpi: xsdt ");
+        assert_eq!(ACPI_XSDT_SUFFIX, " tables");
+        assert_eq!(TIME_TSC_PREFIX, "vibeOS: time: tsc ");
+        assert_eq!(TIME_TSC_SUFFIX, "/ms");
+        assert_eq!(TIME_LAPIC_PREFIX, "vibeOS: time: lapic_timer ok (");
+        assert_eq!(TIME_LAPIC_SUFFIX, ")");
+        assert_eq!(SCHED_CPU0, "vibeOS: sched: cpu0 ready");
+        assert_eq!(SCHED_CPU_PREFIX, "vibeOS: sched: cpu");
+        assert_eq!(SCHED_CPU_SUFFIX, " ready");
+        assert_eq!(IRQ_ENABLED, "vibeOS: irq: enabled");
+        assert_eq!(SMP_AP_ONLINE, "vibeOS: smp: ap online");
+        assert_eq!(SMP_DONE, "vibeOS: smp: done");
+        assert_eq!(BOOT_DONE, "vibeOS: boot: phase1 done");
+        assert_eq!(CONSOLE_OK, "vibeOS: console ok");
+        assert_eq!(PCI_PREFIX, "vibeOS: pci: ");
+        assert_eq!(PCI_DEVICES_SUFFIX, " devices");
+        assert_eq!(BLOCK_PREFIX, "vibeOS: block: ");
+        assert_eq!(BLOCK_SECTORS_SUFFIX, " sectors");
+        assert_eq!(SHELL_READY, "vibeOS: shell ready");
+    }
+
+    #[test]
+    fn panic_banner_short_enough_for_uart() {
+        // The panic path prints this before allocating anything. Keep it
+        // small enough that the DESIGN §9.6 tx-poll cap never bites.
+        assert!(PANIC_BANNER.len() < 64);
+    }
+}

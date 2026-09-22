@@ -39,7 +39,6 @@ jobs:
             ~/.cargo/git
             ~/.cargo/bin/cargo-llvm-cov
             target
-            tests/hostlib/target
           key: ${{ runner.os }}-cargo-check-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-check-
@@ -59,12 +58,13 @@ jobs:
           fi
 
       # Floor measured 2026-09-22 on nightly-2026-09-22: 87.60% lines
-      # (`cargo llvm-cov --lib` on tests/hostlib). Ratchet only upward.
-      - name: hostlib llvm-cov floor
+      # (`cargo llvm-cov --lib` on tests/hostlib). After A2 the portable
+      # tests live in vibeos-core; ratchet only upward.
+      - name: vibeos-core llvm-cov floor
         run: |
-          time cargo llvm-cov --lib --html --output-dir ../../coverage \
-            --fail-under-lines 87
-        working-directory: tests/hostlib
+          HOST=$(rustc -vV | sed -n 's/^host: //p')
+          time cargo llvm-cov -p vibeos-core --lib --features std --target "$HOST" \
+            --html --output-dir coverage --fail-under-lines 87
 
       - name: upload hostlib coverage HTML
         if: always()
@@ -120,10 +120,10 @@ jobs:
       # static relocation, linker flags).
       - name: cargo clippy -D warnings (kernel)
         run: |
-          cargo clippy --lib --bin vibeos --all-features -- -D warnings
-          cargo clippy --lib --bin vibeos --features kernel_tests -- -D warnings
-          cargo clippy --lib --bin vibeos --features vibefs_crash -- -D warnings
-
+          cargo clippy -p vibeos-core -- -D warnings
+          cargo clippy --bin vibeos --all-features -- -D warnings
+          cargo clippy --bin vibeos --features kernel_tests -- -D warnings
+          cargo clippy --bin vibeos --features vibefs_crash -- -D warnings
       - name: build kernel + hybrid ISO
         run: make iso
 

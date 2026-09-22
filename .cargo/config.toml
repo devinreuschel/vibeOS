@@ -2,9 +2,9 @@
 target = "x86_64-unknown-none"
 rustflags = ["-D", "warnings"]
 
-# Kernel-only flags. Keep them off [build] rustflags so tests/hostlib does
-# not inherit linker/code-gen overrides. Hostlib still pins a GNU triple
-# in its own config (A2 step 3 removes that pin).
+# Kernel-only flags. Keep them off [build] rustflags so host `cargo test
+# --target $HOST` does not inherit linker/code-gen overrides. Host recipes
+# pass `--target $(HOST_TRIPLE)` (A2); do not pin a GNU triple.
 [target.x86_64-unknown-none]
 rustflags = [
     "-C", "force-frame-pointers=yes",

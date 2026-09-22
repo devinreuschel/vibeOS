@@ -7,7 +7,7 @@
 | **Depends on** | C1 (pinned nightly) |
 | **Blocks** | A2 step 5 (workspace), P1 |
 | **Review** | [ARCHITECTURE_REVIEW.md §4.10](../ARCHITECTURE_REVIEW.md#410-build-cicd--release-process) |
-| **Status** | Implemented (this PR). Builtin target + rustflags; custom JSON deleted. Hostlib's nested cargo config is parked for A2 step 3 (parent still sets the kernel default target). |
+| **Status** | Implemented (#84). Builtin target + rustflags; custom JSON deleted. Hostlib nested cargo config removed in A2. |
 
 ## Problem
 

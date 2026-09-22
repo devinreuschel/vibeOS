@@ -723,22 +723,22 @@ mod tests {
         }
 
         fn slot_mut(&mut self, bdf: Bdf) -> &mut Slot {
-            for s in &mut self.slots {
-                if let Some(sl) = s.as_mut()
-                    && sl.bdf == bdf
-                {
-                    return sl;
-                }
+            // Index then borrow once. A loop that returns `&mut` from a
+            // match arm is E0499 on older nightlies (NLL; A2).
+            if let Some(i) = self
+                .slots
+                .iter()
+                .position(|s| s.as_ref().is_some_and(|sl| sl.bdf == bdf))
+            {
+                return self.slots[i].as_mut().unwrap();
             }
-            for s in &mut self.slots {
-                if s.is_none() {
-                    *s = Some(Slot {
-                        bdf,
-                        data: [0xFF; 256],
-                        bar_rw: [0; 6],
-                    });
-                    return s.as_mut().unwrap();
-                }
+            if let Some(i) = self.slots.iter().position(|s| s.is_none()) {
+                self.slots[i] = Some(Slot {
+                    bdf,
+                    data: [0xFF; 256],
+                    bar_rw: [0; 6],
+                });
+                return self.slots[i].as_mut().unwrap();
             }
             panic!("fake bus full");
         }
