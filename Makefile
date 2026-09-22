@@ -84,9 +84,9 @@ endef
 # prod: no extra features
 $(eval $(call KERNEL_VARIANT,prod,$(CURDIR)/target,,$(ISO)))
 # panic: deliberate panic-test dump
-$(eval $(call KERNEL_VARIANT,panic,$(CURDIR)/target-panic,--features panic-test --features panic_exit,$(ISO_PANIC)))
+$(eval $(call KERNEL_VARIANT,panic,$(CURDIR)/target-panic,--features panic_test --features panic_exit,$(ISO_PANIC)))
 # gp: deliberate #GP after IDT
-$(eval $(call KERNEL_VARIANT,gp,$(CURDIR)/target-gp,--features gp-test --features panic_exit,$(ISO_GP)))
+$(eval $(call KERNEL_VARIANT,gp,$(CURDIR)/target-gp,--features gp_test --features panic_exit,$(ISO_GP)))
 # ktest: in-guest registry; own dir so it cannot leak into production
 $(eval $(call KERNEL_VARIANT,ktest,$(CURDIR)/target-kernel-tests,--features kernel_tests,$(ISO_KTEST)))
 # vibefs_crash: write-loop kernel for QEMU-kill fsck

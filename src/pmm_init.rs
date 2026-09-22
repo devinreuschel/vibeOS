@@ -14,14 +14,11 @@
 //! sorted into an "excludes" list and subtracted from every USABLE range
 //! before it is inserted.
 
-use core::fmt::Write;
-
 use limine::memmap::{Entry, MEMMAP_USABLE};
 
 use vibeos::lock::RANK_BUDDY;
 use vibeos::pmm::{Buddy, PAGE_SIZE, PmmStats};
 
-use crate::serial::Serial;
 use crate::sync_init::SpinMutex;
 
 /// AP trampoline page. DESIGN §7.3 fixes the SIPI vector at 0x08, which
@@ -76,10 +73,7 @@ impl Excludes {
         if self.len >= MAX_EXCLUDES {
             // Slice A never fills MAX_EXCLUDES. If a future subsystem
             // adds more, bump the cap rather than silently dropping.
-            let _ = writeln!(
-                Serial,
-                "vibeOS: pmm: excludes overflow, dropping {start:#x}..{end:#x}"
-            );
+            crate::marker!("vibeOS: pmm: excludes overflow, dropping {start:#x}..{end:#x}");
             return;
         }
         self.ranges[self.len] = Range { start, end };

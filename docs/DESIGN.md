@@ -76,10 +76,10 @@ Cross-cutting and allowed from anywhere: `serial`, `panic`, `sync`, `log`.
 As of 2026-09-22 (Phase 9). Files that exist, not a target layout. [A1](reviews/issues/A1-directory-per-subsystem.md)
 will nest this pairing; do not invent `src/mm/` or `src/drivers/` until then.
 
-**Naming.** Portable logic is `src/<name>.rs`, declared in `src/lib.rs`, host-tested via
-`tests/hostlib`. Hardware and boot live in `src/<name>_init.rs` or a kernel-only file, declared in
-`src/main.rs`. Nested today: `src/arch/` (GDT, IDT, PIC, catch, gs) and `src/fs/` (VFS + kernfs).
-`user/` is freestanding ELFs, not kernel modules.
+**Naming.** `src/<name>.rs` is the portable half (`src/lib.rs`, host-tested via `tests/hostlib`).
+`src/<name>_init.rs` is the kernel half (`src/main.rs`). A few kernel-only files have no portable
+pair. `src/arch/` holds only what touches privileged CPU state (GDT, IDT, PIC, catch, gs). Nested
+also: `src/fs/` (VFS + kernfs). `user/` is freestanding ELFs, not kernel modules.
 
 | Subsystem | Portable | Kernel |
 |-----------|----------|--------|
@@ -232,8 +232,8 @@ Every boot line is `vibeOS: <subsystem>: <state>`, lowercase, no punctuation at 
 markers are asserted by the e2e harness in order. Adding a marker means updating the contract in
 [section 8.3](#83-end-to-end) in the same commit.
 
-Contract lines go through `serial::line` / `writeln!(Serial)` so they bypass the log filter and still
-land in the ring. `klog!` is filtered. `PlainSerial` is only for `dmesg` and panic dumps.
+`marker!` for contract lines (never filtered, always captured); `klog!` for everything else;
+`PlainSerial` only for `dmesg` and panic dumps.
 
 ```
 vibeOS: serial online
@@ -1154,7 +1154,9 @@ The global lock order is in [section 2.1](#21-lock-order) and the one-spinlock r
 - Serial TX takes a lock so bytes from different CPUs do not interleave into unreadable garbage. Byte
   granularity, not line granularity; full line atomicity needs per-CPU buffers and a printer thread.
   Slice A ships a global IRQ-safe log ring plus a serial try-lock sink; the printer thread is parked
-  (Design ACK). Per-CPU serial capture still assembles lines into the ring.
+  (Design ACK). Per-CPU serial capture still assembles lines into the ring. The global SCHED lock,
+  one `SpinMutex` on the block cache, one VFS lock, the log-ring TAS, and virtio-blk bounce copies
+  are known scale limits; see ROADMAP §17.
 
 ## 7.8 Per-CPU scheduling
 
@@ -1272,7 +1274,9 @@ functions after init, reports over serial, and exits QEMU through the `isa-debug
 
 Built into a separate Cargo target directory (`target-kernel-tests`) with its own ISO. This is not
 fussiness: sharing a target directory means a feature-enabled ELF can end up packaged into the
-production ISO, and the difference is not visible from the outside.
+production ISO, and the difference is not visible from the outside. The panic-dump and `#GP` ISOs
+are `--features panic_test --features panic_exit` and `--features gp_test --features panic_exit`
+(underscores everywhere; Cargo features in this crate do not use hyphens).
 
 ```
 vibeOS: ktest: begin

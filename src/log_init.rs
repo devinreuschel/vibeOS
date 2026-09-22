@@ -177,7 +177,7 @@ impl fmt::Write for StackBuf<'_> {
     }
 }
 
-/// Assemble COM1 bytes into records so boot `writeln!(Serial)` is captured
+/// Assemble COM1 bytes into records so boot `marker!` / `writeln!(Serial)` is captured
 /// before a framebuffer exists. Caller holds IRQs off (`Serial::write_bytes`
 /// / `write_fmt`); `STAGE` is CPU-local and must not outlive that.
 pub fn capture_serial(bytes: &[u8]) {

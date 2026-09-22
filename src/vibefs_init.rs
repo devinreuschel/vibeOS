@@ -569,21 +569,19 @@ const _: () = {
 #[cfg(feature = "vibefs_crash")]
 pub fn crash_loop() -> ! {
     use crate::file_init;
-    use crate::serial::{self, Serial};
     use crate::x86;
-    use core::fmt::Write;
     use vibeos::fs::{O_CREAT, O_RDWR, O_TRUNC};
 
     let _ = file_init::mkdir("/crash", 0o755);
     let _ = file_init::vfs_attach("/crash");
     if mount_dev("vda", "/crash").is_err() {
-        serial::line("vibeOS: vibefs: mount fail");
+        crate::marker!("vibeOS: vibefs: mount fail");
         x86::halt();
     }
-    serial::line("vibeOS: vibefs: crash-ready");
+    crate::marker!("vibeOS: vibefs: crash-ready");
     let mut i = 0u32;
     loop {
-        let _ = writeln!(Serial, "vibeOS: vibefs: wr {i}");
+        crate::marker!("vibeOS: vibefs: wr {i}");
         if let Ok(fid) = file_init::open("/crash/w", O_RDWR | O_CREAT | O_TRUNC, 0o644) {
             let mut buf = [0u8; 300];
             let mut k = 0usize;

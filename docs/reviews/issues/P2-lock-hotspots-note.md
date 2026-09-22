@@ -1,5 +1,8 @@
 # P2 · Record the known single-lock hotspots as Phase 17 items
 
+**Status:** implemented. ROADMAP §17.4/§17.5/§17.8 and DESIGN §7.7 note the hotspots.
+`kernel_tests` spin counters dump per lock rank from ktest `lock_spins`.
+
 | | |
 |---|---|
 | **Area** | 4.7 Performance & scalability |

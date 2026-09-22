@@ -24,7 +24,6 @@ use crate::fb_init;
 use crate::log_init;
 use crate::paging_init;
 use crate::per_cpu_init;
-use crate::serial;
 use crate::thread_init::{self, ThreadInfo};
 use crate::x86::{self, InterruptGuard};
 
@@ -149,7 +148,7 @@ fn shell_main() {
     let mut painted = 0usize;
     // Last boot marker, then the prompt. Harness treats this as the
     // trailing contract line (after smp: done / console ok).
-    serial::line(marker::SHELL_READY);
+    crate::marker!(marker::SHELL_READY);
     if fb_init::ready() {
         fb_init::write(marker::SHELL_READY.as_bytes());
         fb_init::write(b"\n");

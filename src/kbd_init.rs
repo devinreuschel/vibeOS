@@ -22,7 +22,6 @@ use crate::acpi_init;
 use crate::apic_init;
 use crate::arch;
 use crate::per_cpu_init;
-use crate::serial;
 use crate::x86::{self, InterruptGuard};
 
 const POLL_CAP: u32 = 100_000;
@@ -94,7 +93,7 @@ pub fn init() -> bool {
 
     let routed = route_keyboard();
     if !init_8042() {
-        serial::line("vibeOS: kbd: 8042 init failed");
+        crate::marker!("vibeOS: kbd: 8042 init failed");
         return false;
     }
     match routed {
@@ -110,7 +109,7 @@ pub fn init() -> bool {
         None => {
             // LAPIC owns the tick: PIC is masked. Unmasking IRQ1 is a
             // silent no-op (window PS/2 dead, polled COM1 still works).
-            serial::line("vibeOS: kbd: no ioapic route");
+            crate::marker!("vibeOS: kbd: no ioapic route");
         }
     }
     LIVE.store(true, Ordering::Release);

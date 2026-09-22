@@ -204,11 +204,7 @@ fn map_func_bars(info: &FuncInfo, dev: &mut Device) {
             continue;
         }
         if !bar_map_allowed(bar.size) {
-            let _ = writeln!(
-                Serial,
-                "vibeOS: pci: skip bar {} size {:#x}",
-                info.bdf, bar.size
-            );
+            crate::marker!("vibeOS: pci: skip bar {} size {:#x}", info.bdf, bar.size);
             i += 1;
             continue;
         }
@@ -229,10 +225,11 @@ pub fn init() {
         e.base = m.ecam_base;
         e.start = m.start_bus;
         e.end = m.end_bus;
-        let _ = writeln!(
-            Serial,
+        crate::marker!(
             "vibeOS: pci: ecam {:#x} buses {}-{}",
-            m.ecam_base, m.start_bus, m.end_bus
+            m.ecam_base,
+            m.start_bus,
+            m.end_bus
         );
     }
 
@@ -249,7 +246,7 @@ pub fn init() {
         let _ = dev_init::push(dev);
         i += 1;
     }
-    let _ = writeln!(Serial, "vibeOS: pci: {} devices", n);
+    crate::marker!("vibeOS: pci: {} devices", n);
     LIVE.store(true, Ordering::Release);
 }
 

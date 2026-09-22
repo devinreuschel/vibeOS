@@ -3,7 +3,6 @@
 //! Order: UC already done in `acpi_init` → enable LAPIC → program IOAPIC
 //! (masked) → detect/calib/arm timer → prove → marker → mask PIC + PIT GSI.
 
-use core::fmt::Write;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use vibeos::acpi::{IoApic, MAX_IOAPICS, MadtInfo};
@@ -17,7 +16,6 @@ use vibeos::apic::{
     ioapic_pin, lvt_timer_periodic, poll_delivery_pending, redir_high, redir_is_masked, redir_low,
     redir_set_mask, svr_value, tsc_deadline_arm_plan, tsc_deadline_value, write_redir,
 };
-use vibeos::fmt_util;
 use vibeos::marker;
 use vibeos::time::{FS_PER_MS, PIT_CALIB_MS, hpet_period_ok};
 use vibeos::vectors;
@@ -25,7 +23,6 @@ use vibeos::vectors;
 use crate::acpi_init;
 use crate::arch;
 use crate::paging_init;
-use crate::serial::{self, Serial};
 use crate::time_init;
 use crate::x86;
 
@@ -140,7 +137,7 @@ unsafe fn enable_lapic(madt: &MadtInfo) -> Option<u64> {
     unsafe { x86::wrmsr(IA32_APIC_BASE, next) };
     let got = x86::rdmsr(IA32_APIC_BASE);
     if got & APIC_BASE_ENABLE == 0 {
-        serial::line("vibeOS: lapic: enable bit clear");
+        crate::marker!("vibeOS: lapic: enable bit clear");
         return None;
     }
     let va = phys_va(phys);
@@ -149,7 +146,7 @@ unsafe fn enable_lapic(madt: &MadtInfo) -> Option<u64> {
     lapic_write(va, LAPIC_SVR, svr_value());
     let svr = lapic_read(va, LAPIC_SVR);
     if svr & apic::SVR_ENABLE == 0 {
-        serial::line("vibeOS: lapic: svr enable failed");
+        crate::marker!("vibeOS: lapic: svr enable failed");
         return None;
     }
     lapic_write(va, LAPIC_ESR, 0);
@@ -500,17 +497,14 @@ pub fn on_error_irq() {
     if st.lapic_va != 0 {
         lapic_write(st.lapic_va, LAPIC_ESR, 0);
         let esr = lapic_read(st.lapic_va, LAPIC_ESR);
-        Serial::write_bytes(b"vibeOS: lapic: error esr=0x");
-        let mut buf = [0u8; 16];
-        Serial::write_bytes(fmt_util::write_hex(esr as u64, &mut buf));
-        Serial::write_bytes(b"\n");
+        crate::marker!("vibeOS: lapic: error esr={:#x}", esr);
         lapic_write(st.lapic_va, LAPIC_ESR, 0);
     }
     eoi();
 }
 
 pub fn on_thermal_irq() {
-    serial::line("vibeOS: lapic: thermal");
+    crate::marker!("vibeOS: lapic: thermal");
     eoi();
 }
 
@@ -522,7 +516,7 @@ fn mask_pic_and_pit(st: &ApicState, madt: &MadtInfo) {
 }
 
 fn emit_marker(mode: TimerMode) {
-    let _ = writeln!(Serial, "{}{})", marker::TIME_LAPIC_PREFIX, mode.as_str());
+    crate::marker!("{}{})", marker::TIME_LAPIC_PREFIX, mode.as_str());
 }
 
 fn unmask_pit_fallback() {
@@ -582,7 +576,7 @@ pub fn prove() {
             return;
         }
         disarm_timer(va);
-        serial::line("vibeOS: time: tsc-deadline no ticks");
+        crate::marker!("vibeOS: time: tsc-deadline no ticks");
     }
 
     match calib_periodic(va) {
@@ -596,9 +590,9 @@ pub fn prove() {
                 return;
             }
             disarm_timer(va);
-            serial::line("vibeOS: time: periodic no ticks");
+            crate::marker!("vibeOS: time: periodic no ticks");
         }
-        None => serial::line("vibeOS: time: periodic calib refused"),
+        None => crate::marker!("vibeOS: time: periodic calib refused"),
     }
 
     st.mode = TimerMode::Pit;

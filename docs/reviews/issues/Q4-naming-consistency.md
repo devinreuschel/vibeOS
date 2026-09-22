@@ -1,5 +1,8 @@
 # Q4 · Naming and feature-flag consistency
 
+**Status:** implemented. Feature names are `panic_test` / `gp_test`. Unused `print!`/`println!`
+removed with E3. `pic` pairing waits for A1.
+
 | | |
 |---|---|
 | **Area** | 4.2 Code quality & consistency |

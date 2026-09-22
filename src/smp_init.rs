@@ -4,7 +4,6 @@
 //! `write_volatile` + `compiler_fence(SeqCst)` before SIPI.
 
 use alloc::vec::Vec;
-use core::fmt::Write;
 use core::sync::atomic::Ordering;
 
 use vibeos::apic::IpiMode;
@@ -23,7 +22,6 @@ use crate::arch;
 use crate::arch::gdt::{self, ApTables, CpuTables};
 use crate::kva_init::{self, GuardedStack};
 use crate::per_cpu_init;
-use crate::serial::{self, Serial};
 use crate::thread_init;
 use crate::time_init;
 use crate::x86;
@@ -179,7 +177,7 @@ fn start_one(a: ApAlloc) -> bool {
     let apic_id = a.apic_id;
     let cr3 = x86::read_cr3();
     if cr3 > 0xFFFF_FFFF {
-        serial::line("vibeOS: smp: cr3 above 4GiB");
+        crate::marker!("vibeOS: smp: cr3 above 4GiB");
         free_ap_resources(a);
         return false;
     }
@@ -205,7 +203,7 @@ fn start_one(a: ApAlloc) -> bool {
     x86::mfence();
 
     if apic_init::send_ipi(apic_id, 0, IpiMode::Init).is_err() {
-        serial::line("vibeOS: smp: INIT failed");
+        crate::marker!("vibeOS: smp: INIT failed");
         free_ap_resources(a);
         return false;
     }
@@ -215,14 +213,14 @@ fn start_one(a: ApAlloc) -> bool {
     let _ = apic_init::send_ipi(apic_id, SIPI_VECTOR, IpiMode::Sipi);
 
     if !wait_ready(cpu_id) {
-        let _ = writeln!(Serial, "vibeOS: smp: apic {apic_id} timed out");
+        crate::marker!("vibeOS: smp: apic {apic_id} timed out");
         free_ap_resources(a);
         return false;
     }
 
     let ApAlloc { tables, .. } = a;
     unsafe { LIVE_TABLES.get_mut().push(tables) };
-    serial::line(marker::SMP_AP_ONLINE);
+    crate::marker!(marker::SMP_AP_ONLINE);
     true
 }
 
@@ -242,8 +240,7 @@ extern "C" fn ap_entry() -> ! {
     cpu.timer_mode = apic_init::timer_mode();
     apic_init::arm_ap();
     per_cpu_init::mark_online(cpu.cpu_id);
-    let _ = writeln!(
-        Serial,
+    crate::marker!(
         "{}{}{}",
         marker::SCHED_CPU_PREFIX,
         cpu.cpu_id,
@@ -265,11 +262,11 @@ pub unsafe fn init() {
 
     let bsp_apic = per_cpu_init::current().apic_id as u8;
     let Some(info) = acpi_init::info() else {
-        serial::line(marker::SMP_DONE);
+        crate::marker!(marker::SMP_DONE);
         return;
     };
     let Some(madt) = info.madt.as_ref() else {
-        serial::line(marker::SMP_DONE);
+        crate::marker!(marker::SMP_DONE);
         return;
     };
 
@@ -285,7 +282,7 @@ pub unsafe fn init() {
             break;
         }
         let Some(alloc) = alloc_ap_resources(logical, apic_id, true) else {
-            let _ = writeln!(Serial, "vibeOS: smp: apic {apic_id} alloc failed");
+            crate::marker!("vibeOS: smp: apic {apic_id} alloc failed");
             logical += 1;
             continue;
         };
@@ -293,7 +290,7 @@ pub unsafe fn init() {
         logical += 1;
     }
 
-    serial::line(marker::SMP_DONE);
+    crate::marker!(marker::SMP_DONE);
 }
 
 /// Allocate the same resources as bring-up, then take the timeout free

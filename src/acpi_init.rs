@@ -5,14 +5,12 @@
 //! `acpi: xsdt N tables` after GDT/PIC/IDT (live steps 3–5 after KVA).
 
 use core::cell::UnsafeCell;
-use core::fmt::Write;
 
 use vibeos::acpi::{self, AcpiError, AcpiInfo, PhysMem};
 use vibeos::marker;
 use vibeos::paging::{self, PAGE_SIZE_4K, PhysAddr, VirtAddr};
 
 use crate::paging_init;
-use crate::serial::{self, Serial};
 
 struct BootCell<T>(UnsafeCell<Option<T>>);
 unsafe impl<T> Sync for BootCell<T> {}
@@ -138,7 +136,7 @@ pub unsafe fn init(rsdp_phys: u64) {
 
     if patched {
         unsafe { MMIO_UC = true };
-        serial::line(marker::PAGING_MMIO_UC);
+        crate::marker!(marker::PAGING_MMIO_UC);
     }
 
     // First MMIO touch: HPET GEN_CAP period, only after that page is UC.
@@ -154,14 +152,13 @@ pub fn report() {
     let Some(info) = INFO.get() else {
         return;
     };
-    let _ = writeln!(Serial, "vibeOS: acpi: xsdt {} tables", info.table_count);
+    crate::marker!("vibeOS: acpi: xsdt {} tables", info.table_count);
     let hpet = if info.hpet_present() {
         "present"
     } else {
         "absent"
     };
-    let _ = writeln!(
-        Serial,
+    crate::marker!(
         "vibeOS: acpi: {} cpus, {} ioapics, hpet {hpet}",
         info.cpu_count(),
         info.ioapic_count()
@@ -178,6 +175,6 @@ pub fn mmio_uc_patched() -> bool {
 }
 
 fn halt_acpi(e: AcpiError) -> ! {
-    let _ = writeln!(Serial, "vibeOS: acpi: {}", e.as_str());
+    crate::marker!("vibeOS: acpi: {}", e.as_str());
     crate::x86::halt();
 }

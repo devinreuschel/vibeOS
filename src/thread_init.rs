@@ -7,7 +7,6 @@
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
 use alloc::boxed::Box;
-use core::fmt::Write;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use vibeos::ipi::{home_cpu, pick_cpu};
@@ -26,7 +25,6 @@ use vibeos::wait::{self, WaitQueue};
 
 use crate::kva_init::{self, GuardedStack};
 use crate::per_cpu_init;
-use crate::serial::Serial;
 use crate::sync_init::SpinMutex;
 use crate::time_init;
 use crate::x86::InterruptGuard;
@@ -246,7 +244,7 @@ fn schedule_inner(from_irq: bool) {
     if n_overdue != 0 {
         let mut i = 0;
         while i < n_overdue {
-            let _ = writeln!(Serial, "vibeOS: sched: overdue tid {}", overdue[i].raw());
+            crate::marker!("vibeOS: sched: overdue tid {}", overdue[i].raw());
             i += 1;
         }
     }

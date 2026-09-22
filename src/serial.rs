@@ -131,26 +131,23 @@ impl fmt::Write for PlainSerial {
 }
 
 /// Write a marker line: `<msg>\n`. Captured into the log ring.
+/// Prefer `marker!` at call sites (DESIGN §2.6).
 pub fn line(msg: &str) {
     let _ = writeln!(Serial, "{msg}");
 }
 
+/// Contract serial line. Never filtered; always captured into the log ring.
+///
+/// `marker!(marker::X)` / `marker!("vibeOS: …")` for a full line;
+/// `marker!("vibeOS: … {}", x)` for formatted contract lines.
+/// `klog!` is filtered. `PlainSerial` is only for `dmesg` and panic dumps.
 #[macro_export]
-macro_rules! print {
-    ($($arg:tt)*) => {{
+macro_rules! marker {
+    ($fmt:literal $(, $($arg:tt)*)?) => {{
         use core::fmt::Write;
-        let _ = write!($crate::serial::Serial, $($arg)*);
+        let _ = writeln!($crate::serial::Serial, $fmt $(, $($arg)*)?);
     }};
-}
-
-#[macro_export]
-macro_rules! println {
-    () => {{
-        use core::fmt::Write;
-        let _ = writeln!($crate::serial::Serial);
-    }};
-    ($($arg:tt)*) => {{
-        use core::fmt::Write;
-        let _ = writeln!($crate::serial::Serial, $($arg)*);
-    }};
+    ($msg:expr) => {
+        $crate::serial::line($msg)
+    };
 }
