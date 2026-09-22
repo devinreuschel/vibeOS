@@ -18,33 +18,27 @@ pub const GPT_REVISION: u32 = 0x0001_0000;
 
 /// EFI System Partition. On-disk mixed-endian GUID.
 pub const GUID_EFI: [u8; 16] = [
-    0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11, 0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9,
-    0x3B,
+    0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11, 0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B,
 ];
 /// Linux filesystem.
 pub const GUID_LINUX: [u8; 16] = [
-    0xAF, 0x3D, 0xC6, 0x0F, 0x83, 0x84, 0x72, 0x47, 0x8E, 0x79, 0x3D, 0x69, 0xD8, 0x47, 0x7D,
-    0xE4,
+    0xAF, 0x3D, 0xC6, 0x0F, 0x83, 0x84, 0x72, 0x47, 0x8E, 0x79, 0x3D, 0x69, 0xD8, 0x47, 0x7D, 0xE4,
 ];
 /// Linux swap.
 pub const GUID_SWAP: [u8; 16] = [
-    0x6D, 0xFD, 0x57, 0x06, 0xAB, 0xA4, 0xC4, 0x43, 0x84, 0xE5, 0x09, 0x33, 0xC8, 0x4B, 0x4F,
-    0x4F,
+    0x6D, 0xFD, 0x57, 0x06, 0xAB, 0xA4, 0xC4, 0x43, 0x84, 0xE5, 0x09, 0x33, 0xC8, 0x4B, 0x4F, 0x4F,
 ];
 /// Microsoft basic data.
 pub const GUID_BASIC: [u8; 16] = [
-    0xA2, 0xA0, 0xD0, 0xEB, 0xE5, 0xB9, 0x33, 0x44, 0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99,
-    0xC7,
+    0xA2, 0xA0, 0xD0, 0xEB, 0xE5, 0xB9, 0x33, 0x44, 0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7,
 ];
 /// Linux LVM.
 pub const GUID_LVM: [u8; 16] = [
-    0x79, 0xD3, 0xD6, 0xE6, 0x07, 0xF5, 0xC2, 0x44, 0xA2, 0x3C, 0x23, 0x8F, 0x2A, 0x3D, 0xF9,
-    0x28,
+    0x79, 0xD3, 0xD6, 0xE6, 0x07, 0xF5, 0xC2, 0x44, 0xA2, 0x3C, 0x23, 0x8F, 0x2A, 0x3D, 0xF9, 0x28,
 ];
 /// BIOS boot (GRUB).
 pub const GUID_BIOS_BOOT: [u8; 16] = [
-    0x48, 0x61, 0x68, 0x21, 0x49, 0x64, 0x6F, 0x6E, 0x74, 0x4E, 0x65, 0x65, 0x64, 0x45, 0x46,
-    0x49,
+    0x48, 0x61, 0x68, 0x21, 0x49, 0x64, 0x6F, 0x6E, 0x74, 0x4E, 0x65, 0x65, 0x64, 0x45, 0x46, 0x49,
 ];
 pub const GUID_UNUSED: [u8; 16] = [0u8; 16];
 
@@ -274,10 +268,20 @@ pub fn pack_protective_mbr(buf: &mut [u8], nsectors: u64) {
     } else {
         0
     };
-    pack_mbr(buf, &[(MBR_PROTECTIVE, 1, count), (0, 0, 0), (0, 0, 0), (0, 0, 0)]);
+    pack_mbr(
+        buf,
+        &[(MBR_PROTECTIVE, 1, count), (0, 0, 0), (0, 0, 0), (0, 0, 0)],
+    );
 }
 
-pub fn pack_ebr(buf: &mut [u8], sys: u8, first_rel: u32, first_count: u32, next_rel: u32, next_count: u32) {
+pub fn pack_ebr(
+    buf: &mut [u8],
+    sys: u8,
+    first_rel: u32,
+    first_count: u32,
+    next_rel: u32,
+    next_count: u32,
+) {
     let next_sys = if next_rel == 0 { 0 } else { MBR_EXTENDED };
     pack_mbr(
         buf,
@@ -421,7 +425,11 @@ fn load_entries<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
     }
     let nbytes = want as u64;
     let nsec = nbytes.div_ceil(bs);
-    if part_lba.checked_add(nsec).map(|e| e > nsectors).unwrap_or(true) {
+    if part_lba
+        .checked_add(nsec)
+        .map(|e| e > nsectors)
+        .unwrap_or(true)
+    {
         return Err(PartError::Truncated);
     }
     let mut done = 0usize;
@@ -738,7 +746,10 @@ mod tests {
         assert_eq!(map_child_lba(100, 50, 40, 10).unwrap(), 140);
         assert_eq!(map_child_lba(100, 50, 41, 10), Err(BlockError::Inval));
         assert_eq!(map_child_lba(100, 50, 50, 1), Err(BlockError::Inval));
-        assert_eq!(map_child_lba(u64::MAX - 5, 10, 6, 1), Err(BlockError::Inval));
+        assert_eq!(
+            map_child_lba(u64::MAX - 5, 10, 6, 1),
+            Err(BlockError::Inval)
+        );
         assert_eq!(map_child_lba(100, 50, 0, 0), Err(BlockError::Inval));
     }
 
@@ -782,10 +793,13 @@ mod tests {
         assert_eq!(t.parts[0].nsectors, 16);
         assert_eq!(t.parts[0].index, 1);
         assert_eq!(t.parts[1].start_lba, 32);
-        assert_eq!(mbr_type_name(match t.parts[0].kind {
-            PartKind::Mbr { sys } => sys,
-            PartKind::Gpt { .. } => panic!("gpt"),
-        }), "linux");
+        assert_eq!(
+            mbr_type_name(match t.parts[0].kind {
+                PartKind::Mbr { sys } => sys,
+                PartKind::Gpt { .. } => panic!("gpt"),
+            }),
+            "linux"
+        );
     }
 
     #[test]
@@ -935,10 +949,7 @@ mod tests {
     fn gpt_roundtrip_and_types() {
         let d = gpt_disk(
             1024,
-            &[
-                (GUID_EFI, 34, 97, "EFI"),
-                (GUID_LINUX, 98, 500, "Linux"),
-            ],
+            &[(GUID_EFI, 34, 97, "EFI"), (GUID_LINUX, 98, 500, "Linux")],
         );
         let t = parse_image(&d, 512).unwrap();
         assert_eq!(t.origin, TableOrigin::Gpt { used_backup: false });
@@ -957,10 +968,10 @@ mod tests {
         let mut saw_ee = false;
         let mut i = 0usize;
         while i < t.n {
-            if let PartKind::Mbr { sys } = t.parts[i].kind {
-                if sys == MBR_PROTECTIVE {
-                    saw_ee = true;
-                }
+            if let PartKind::Mbr { sys } = t.parts[i].kind
+                && sys == MBR_PROTECTIVE
+            {
+                saw_ee = true;
             }
             i += 1;
         }

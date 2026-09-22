@@ -28,6 +28,7 @@ from tests.harness.harness import (
     effective_accel_name,
     retryable_ktest_failure,
     serial_tail,
+    silent_user_syscalls_hang,
 )
 
 
@@ -402,6 +403,22 @@ class TestKtestProtocol(unittest.TestCase):
         )
 
 
+class TestSilentUserSyscallsHang(unittest.TestCase):
+    def test_dup_ok_timeout_matches(self) -> None:
+        msg = (
+            "timed out after 90.0s; 101 lines"
+            "\n--- serial tail 40/101 ---\n"
+            "user: tests begin\n"
+            "user: dup ok"
+        )
+        self.assertTrue(silent_user_syscalls_hang(msg))
+
+    def test_other_timeout_does_not_match(self) -> None:
+        msg = "timed out after 90.0s; 40 lines\n--- serial tail 40/40 ---\nvibeOS: ktest: begin"
+        self.assertFalse(silent_user_syscalls_hang(msg))
+        self.assertFalse(silent_user_syscalls_hang("ktest FAIL: vibeOS: ktest: FAIL x"))
+
+
 class TestKernelBootRetry(unittest.TestCase):
     @staticmethod
     def _per_cpu_ready_head_failure() -> RunResult:
@@ -452,6 +469,64 @@ class TestKernelBootRetry(unittest.TestCase):
             kernel_boot,
             "run_qemu_until_exit",
             side_effect=(failed, failed),
+        ) as run:
+            with self.assertRaises(HarnessError):
+                kernel_boot._ktest_boot(
+                    cfg,
+                    timeout=1.0,
+                    persist_reboot=False,
+                )
+        self.assertEqual(run.call_count, 2)
+
+    @staticmethod
+    def _dup_ok_timeout() -> HarnessError:
+        return HarnessError(
+            "timed out after 90.0s; 101 lines"
+            "\n--- serial tail 40/101 ---\n"
+            "user: tests begin\n"
+            "user: dup ok"
+        )
+
+    def test_dup_ok_timeout_gets_a_second_retry(self) -> None:
+        hang = self._dup_ok_timeout()
+        passed = self._passing_initial_boot()
+        cfg = QemuConfig(iso="x.iso", smp=2)
+        with mock.patch.object(
+            kernel_boot,
+            "run_qemu_until_exit",
+            side_effect=(hang, hang, passed),
+        ) as run:
+            result = kernel_boot._ktest_boot(
+                cfg,
+                timeout=1.0,
+                persist_reboot=False,
+            )
+        self.assertIs(result, passed)
+        self.assertEqual(run.call_count, 3)
+
+    def test_dup_ok_timeout_stops_after_two_retries(self) -> None:
+        hang = self._dup_ok_timeout()
+        cfg = QemuConfig(iso="x.iso", smp=2)
+        with mock.patch.object(
+            kernel_boot,
+            "run_qemu_until_exit",
+            side_effect=(hang, hang, hang),
+        ) as run:
+            with self.assertRaises(HarnessError):
+                kernel_boot._ktest_boot(
+                    cfg,
+                    timeout=1.0,
+                    persist_reboot=False,
+                )
+        self.assertEqual(run.call_count, 3)
+
+    def test_other_timeout_still_retries_once(self) -> None:
+        other = HarnessError("timed out after 90.0s; 40 lines")
+        cfg = QemuConfig(iso="x.iso", smp=2)
+        with mock.patch.object(
+            kernel_boot,
+            "run_qemu_until_exit",
+            side_effect=(other, other),
         ) as run:
             with self.assertRaises(HarnessError):
                 kernel_boot._ktest_boot(

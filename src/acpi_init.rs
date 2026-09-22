@@ -9,7 +9,7 @@ use core::fmt::Write;
 
 use vibeos::acpi::{self, AcpiError, AcpiInfo, PhysMem};
 use vibeos::marker;
-use vibeos::paging::{self, PhysAddr, VirtAddr, PAGE_SIZE_4K};
+use vibeos::paging::{self, PAGE_SIZE_4K, PhysAddr, VirtAddr};
 
 use crate::paging_init;
 use crate::serial::{self, Serial};
@@ -20,12 +20,17 @@ impl<T> BootCell<T> {
     const fn new() -> Self {
         Self(UnsafeCell::new(None))
     }
+    /// # Safety
+    /// Single writer during boot; IRQs off.
     unsafe fn set(&self, v: T) {
         unsafe { *self.0.get() = Some(v) };
     }
     fn get(&self) -> Option<&T> {
         unsafe { (*self.0.get()).as_ref() }
     }
+    /// # Safety
+    /// Exclusive boot/IRQ-off access.
+    #[allow(clippy::mut_from_ref)] // boot cell, IRQ-off exclusive
     unsafe fn get_mut(&self) -> Option<&mut T> {
         unsafe { (*self.0.get()).as_mut() }
     }
@@ -75,10 +80,10 @@ fn map_gap(phys: u64, len: u64, flags: paging::PageFlags) -> bool {
     let mut p = start;
     while p < end {
         let va = VirtAddr(paging_init::HHDM_BASE.wrapping_add(p));
-        if paging_init::translate(va).is_none() {
-            if unsafe { paging_init::map_4k(va, PhysAddr(p), flags) }.is_err() {
-                return false;
-            }
+        if paging_init::translate(va).is_none()
+            && unsafe { paging_init::map_4k(va, PhysAddr(p), flags) }.is_err()
+        {
+            return false;
         }
         p = match p.checked_add(PAGE_SIZE_4K) {
             Some(n) => n,
@@ -100,10 +105,10 @@ fn uc_mmio(phys: u64, len: u64) -> bool {
     if !map_gap(phys, len, paging::mmio_flags()) {
         return false;
     }
-    match unsafe { paging_init::patch_physmap_uc(PhysAddr(phys), len) } {
-        Ok(n) if n > 0 => true,
-        _ => false,
-    }
+    matches!(
+        unsafe { paging_init::patch_physmap_uc(PhysAddr(phys), len) },
+        Ok(n) if n > 0
+    )
 }
 
 /// Parse ACPI, UC-patch discovered MMIO, stash the result.
@@ -119,8 +124,8 @@ pub unsafe fn init(rsdp_phys: u64) {
     let mut patched = false;
     if let Some(madt) = &info.madt {
         patched |= uc_mmio(madt.lapic_base, PAGE_SIZE_4K);
-        for i in 0..madt.ioapic_count {
-            patched |= uc_mmio(madt.ioapics[i].addr as u64, PAGE_SIZE_4K);
+        for io in madt.ioapics.iter().take(madt.ioapic_count) {
+            patched |= uc_mmio(io.addr as u64, PAGE_SIZE_4K);
         }
     }
     let mut hpet_uc = false;
@@ -137,12 +142,10 @@ pub unsafe fn init(rsdp_phys: u64) {
     }
 
     // First MMIO touch: HPET GEN_CAP period, only after that page is UC.
-    if hpet_uc {
-        if let Some(hpet) = unsafe { INFO.get_mut() }.and_then(|i| i.hpet.as_mut()) {
-            let va = (paging_init::HHDM_BASE.wrapping_add(hpet.base)) as *const u64;
-            let cap = unsafe { va.read_volatile() };
-            hpet.period_fs = (cap >> 32) as u32;
-        }
+    if hpet_uc && let Some(hpet) = unsafe { INFO.get_mut() }.and_then(|i| i.hpet.as_mut()) {
+        let va = (paging_init::HHDM_BASE.wrapping_add(hpet.base)) as *const u64;
+        let cap = unsafe { va.read_volatile() };
+        hpet.period_fs = (cap >> 32) as u32;
     }
 }
 
@@ -151,11 +154,7 @@ pub fn report() {
     let Some(info) = INFO.get() else {
         return;
     };
-    let _ = writeln!(
-        Serial,
-        "vibeOS: acpi: xsdt {} tables",
-        info.table_count
-    );
+    let _ = writeln!(Serial, "vibeOS: acpi: xsdt {} tables", info.table_count);
     let hpet = if info.hpet_present() {
         "present"
     } else {

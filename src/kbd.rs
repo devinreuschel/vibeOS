@@ -315,7 +315,7 @@ impl Decoder {
 
     fn decode_make(&self, make: u8, e0: bool) -> Option<DecodedKey> {
         if e0 {
-            return e0_named(make).map(DecodedKey::Named).or_else(|| {
+            return e0_named(make).map(DecodedKey::Named).or({
                 if make == 0x1C {
                     Some(DecodedKey::Char(b'\n'))
                 } else {
@@ -361,11 +361,17 @@ impl Decoder {
     fn apply_ctrl(&self, ch: u8) -> DecodedKey {
         if self.mods.ctrl {
             let up = ch.to_ascii_uppercase();
-            if (b'A'..=b'Z').contains(&up) {
+            if up.is_ascii_uppercase() {
                 return DecodedKey::Char(up - b'A' + 1);
             }
         }
         DecodedKey::Char(ch)
+    }
+}
+
+impl Default for Decoder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -388,13 +394,9 @@ fn from_row(make: u8, base: u8, map: &[u8], shifted: bool, caps: bool) -> Option
 }
 
 fn case_letter(c: u8, shifted: bool, caps: bool) -> u8 {
-    if (b'a'..=b'z').contains(&c) {
+    if c.is_ascii_lowercase() {
         let upper = shifted != caps;
-        if upper {
-            c.to_ascii_uppercase()
-        } else {
-            c
-        }
+        if upper { c.to_ascii_uppercase() } else { c }
     } else if shifted {
         match c {
             b'[' => b'{',
@@ -492,6 +494,12 @@ impl<T: Copy + Default, const N: usize> Ring<T, N> {
             len: 0,
             dropped: 0,
         }
+    }
+}
+
+impl<T: Copy + Default, const N: usize> Default for Ring<T, N> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

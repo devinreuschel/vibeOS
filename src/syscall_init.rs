@@ -11,7 +11,7 @@ use vibeos::addr_space::AddressSpace;
 use vibeos::desc::{KERNEL_CS, STAR_SYSRET, Tss, USER_CS_RPL, USER_DS_RPL};
 use vibeos::per_cpu::PerCpu;
 use vibeos::syscall::{SyscallFrame, UserRegs};
-use vibeos::thread::{Fxsave, Tcb, RFLAGS_IF, RFLAGS_RESERVED1};
+use vibeos::thread::{Fxsave, RFLAGS_IF, RFLAGS_RESERVED1, Tcb};
 
 use crate::arch::gdt;
 use crate::per_cpu_init;
@@ -244,6 +244,9 @@ pub unsafe fn init_cpu() {
 }
 
 /// BSP: attach the GDT TSS and the dedicated RSP0 stack.
+///
+/// # Safety
+/// GDT loaded, `GS_BASE` is the BSP `PerCpu`.
 pub unsafe fn init_bsp() {
     unsafe { init_cpu() };
     let cpu = per_cpu_init::current_mut();
@@ -256,6 +259,9 @@ pub unsafe fn init_bsp() {
 }
 
 /// AP: `tables` is this CPU's GDT/TSS. Call after `install_gs`.
+///
+/// # Safety
+/// `tss` is this CPU's live TSS; `rsp0` is its kernel stack top.
 pub unsafe fn init_ap(tss: *mut Tss, rsp0: u64) {
     unsafe { init_cpu() };
     let cpu = per_cpu_init::current_mut();
@@ -505,14 +511,17 @@ global_asm!(
     "#
 );
 
+#[cfg_attr(feature = "kernel_tests", allow(dead_code))] // tracing / procfs; parked
 pub fn set_trace(on: bool) {
     TRACE.store(on, Ordering::Release);
 }
 
+#[cfg_attr(feature = "kernel_tests", allow(dead_code))] // tracing / procfs; parked
 pub fn trace_enabled() -> bool {
     TRACE.load(Ordering::Acquire)
 }
 
+#[cfg_attr(feature = "kernel_tests", allow(dead_code))] // tracing / procfs; parked
 pub fn syscall_count() -> u64 {
     let t = per_cpu_init::current_thread();
     if !t.is_null() {
@@ -552,7 +561,10 @@ pub fn peek_user_as() -> Option<&'static AddressSpace> {
 }
 
 pub fn set_user_as(space: &AddressSpace) {
-    CURRENT_AS.store(space as *const AddressSpace as *mut AddressSpace, Ordering::Release);
+    CURRENT_AS.store(
+        space as *const AddressSpace as *mut AddressSpace,
+        Ordering::Release,
+    );
 }
 
 pub fn clear_user_as() {

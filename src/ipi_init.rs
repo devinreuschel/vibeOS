@@ -8,7 +8,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
-use vibeos::ipi::{all_acked, inbox_bit, waiter_mask, MAX_IPI_CPUS};
+use vibeos::ipi::{MAX_IPI_CPUS, all_acked, inbox_bit, waiter_mask};
 use vibeos::paging::VirtAddr;
 use vibeos::thread::ThreadId;
 use vibeos::vectors;
@@ -63,11 +63,7 @@ static CALL_COUNT: AtomicU64 = AtomicU64::new(0);
 
 fn my_bit() -> u64 {
     let id = per_cpu_init::try_current().map(|c| c.cpu_id).unwrap_or(0);
-    if id >= 64 {
-        0
-    } else {
-        1u64 << id
-    }
+    if id >= 64 { 0 } else { 1u64 << id }
 }
 
 fn my_index() -> usize {

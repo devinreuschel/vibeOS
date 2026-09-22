@@ -61,11 +61,11 @@ impl Kva {
     }
 
     pub fn init(&mut self, start: u64, size: u64) {
-        assert!(size % PAGE_SIZE == 0);
-        assert!(start % PAGE_SIZE == 0);
+        assert!(size.is_multiple_of(PAGE_SIZE));
+        assert!(start.is_multiple_of(PAGE_SIZE));
         *self = Self::empty();
-        for i in 0..MAX_RANGES {
-            self.slots[i] = i as u8;
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            *slot = i as u8;
         }
         self.nslots = MAX_RANGES as u8;
         self.capacity = size;
@@ -92,7 +92,7 @@ impl Kva {
 
     /// First-fit. `len` page-aligned. Returns the start VA.
     pub fn alloc(&mut self, len: u64) -> Option<u64> {
-        if len == 0 || len % PAGE_SIZE != 0 {
+        if len == 0 || !len.is_multiple_of(PAGE_SIZE) {
             return None;
         }
         let mut prev: Option<u8> = None;
@@ -134,7 +134,7 @@ impl Kva {
     /// path: DESIGN wants recently-freed VA at the tail so it is not
     /// the next first-fit hit.
     pub fn free(&mut self, start: u64, len: u64) {
-        assert!(len % PAGE_SIZE == 0 && start % PAGE_SIZE == 0);
+        assert!(len.is_multiple_of(PAGE_SIZE) && start.is_multiple_of(PAGE_SIZE));
         assert!(len > 0);
         assert!(
             self.used >= len,

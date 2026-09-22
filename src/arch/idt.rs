@@ -234,10 +234,7 @@ fn gs_leave(user: bool) {
 }
 
 pub fn pointer() -> (u16, u64) {
-    (
-        (core::mem::size_of::<Idt>() - 1) as u16,
-        IDT.ptr() as u64,
-    )
+    ((core::mem::size_of::<Idt>() - 1) as u16, IDT.ptr() as u64)
 }
 
 /// # Safety
@@ -260,6 +257,8 @@ pub unsafe fn init() {
     }
 }
 
+/// # Safety
+/// IDT array is writable; PIC already remapped.
 unsafe fn install_defaults() {
     install_noerr!(
         0, 1, 2, 3, 4, 5, 6, 7, 9, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34,
@@ -279,16 +278,14 @@ unsafe fn install_defaults() {
     install_err!(8, 10, 11, 12, 13, 14, 17, 21, 29, 30);
 }
 
+/// # Safety
+/// IDT is writable; named vectors match the handlers below.
 unsafe fn overlay_named() {
     set_noerr(vectors::DB, debug_ex, IstSlot::Debug.hardware());
     set_noerr(vectors::NMI, nmi, IstSlot::Nmi.hardware());
     set_noerr(vectors::BP, breakpoint, 0);
     set_noerr(vectors::UD, invalid_opcode, 0);
-    set_err(
-        vectors::DF,
-        double_fault,
-        IstSlot::DoubleFault.hardware(),
-    );
+    set_err(vectors::DF, double_fault, IstSlot::DoubleFault.hardware());
     set_err(vectors::GP, general_protection, 0);
     set_err(vectors::PF, page_fault, 0);
     set_noerr(vectors::MC, machine_check, IstSlot::MachineCheck.hardware());
@@ -300,15 +297,51 @@ unsafe fn overlay_named() {
     set_noerr(vectors::IRQ_BASE + 4, irq::<{ vectors::IRQ_BASE + 4 }>, 0);
     set_noerr(vectors::IRQ_BASE + 5, irq::<{ vectors::IRQ_BASE + 5 }>, 0);
     set_noerr(vectors::IRQ_BASE + 6, irq::<{ vectors::IRQ_BASE + 6 }>, 0);
-    set_noerr(vectors::IRQ_SPURIOUS_MASTER, irq::<{ vectors::IRQ_SPURIOUS_MASTER }>, 0);
-    set_noerr(vectors::IRQ_SLAVE_BASE, irq::<{ vectors::IRQ_SLAVE_BASE }>, 0);
-    set_noerr(vectors::IRQ_SLAVE_BASE + 1, irq::<{ vectors::IRQ_SLAVE_BASE + 1 }>, 0);
-    set_noerr(vectors::IRQ_SLAVE_BASE + 2, irq::<{ vectors::IRQ_SLAVE_BASE + 2 }>, 0);
-    set_noerr(vectors::IRQ_SLAVE_BASE + 3, irq::<{ vectors::IRQ_SLAVE_BASE + 3 }>, 0);
-    set_noerr(vectors::IRQ_SLAVE_BASE + 4, irq::<{ vectors::IRQ_SLAVE_BASE + 4 }>, 0);
-    set_noerr(vectors::IRQ_SLAVE_BASE + 5, irq::<{ vectors::IRQ_SLAVE_BASE + 5 }>, 0);
-    set_noerr(vectors::IRQ_SLAVE_BASE + 6, irq::<{ vectors::IRQ_SLAVE_BASE + 6 }>, 0);
-    set_noerr(vectors::IRQ_SPURIOUS_SLAVE, irq::<{ vectors::IRQ_SPURIOUS_SLAVE }>, 0);
+    set_noerr(
+        vectors::IRQ_SPURIOUS_MASTER,
+        irq::<{ vectors::IRQ_SPURIOUS_MASTER }>,
+        0,
+    );
+    set_noerr(
+        vectors::IRQ_SLAVE_BASE,
+        irq::<{ vectors::IRQ_SLAVE_BASE }>,
+        0,
+    );
+    set_noerr(
+        vectors::IRQ_SLAVE_BASE + 1,
+        irq::<{ vectors::IRQ_SLAVE_BASE + 1 }>,
+        0,
+    );
+    set_noerr(
+        vectors::IRQ_SLAVE_BASE + 2,
+        irq::<{ vectors::IRQ_SLAVE_BASE + 2 }>,
+        0,
+    );
+    set_noerr(
+        vectors::IRQ_SLAVE_BASE + 3,
+        irq::<{ vectors::IRQ_SLAVE_BASE + 3 }>,
+        0,
+    );
+    set_noerr(
+        vectors::IRQ_SLAVE_BASE + 4,
+        irq::<{ vectors::IRQ_SLAVE_BASE + 4 }>,
+        0,
+    );
+    set_noerr(
+        vectors::IRQ_SLAVE_BASE + 5,
+        irq::<{ vectors::IRQ_SLAVE_BASE + 5 }>,
+        0,
+    );
+    set_noerr(
+        vectors::IRQ_SLAVE_BASE + 6,
+        irq::<{ vectors::IRQ_SLAVE_BASE + 6 }>,
+        0,
+    );
+    set_noerr(
+        vectors::IRQ_SPURIOUS_SLAVE,
+        irq::<{ vectors::IRQ_SPURIOUS_SLAVE }>,
+        0,
+    );
 
     set_noerr(vectors::LAPIC_TIMER, lapic_timer_irq, 0);
     set_noerr(vectors::LAPIC_ERROR, lapic_error_irq, 0);
@@ -343,8 +376,7 @@ pub fn set_handler(vec: u8, h: extern "x86-interrupt" fn(InterruptFrame)) {
 
 fn set_noerr(vec: u8, h: extern "x86-interrupt" fn(InterruptFrame), ist: u8) {
     unsafe {
-        (*IDT.ptr()).0[vec as usize] =
-            IdtEntry::interrupt(fn_addr_noerr(h), KERNEL_CS, ist);
+        (*IDT.ptr()).0[vec as usize] = IdtEntry::interrupt(fn_addr_noerr(h), KERNEL_CS, ist);
     }
 }
 
@@ -390,4 +422,3 @@ fn dump(kind: &[u8], frame: &InterruptFrame, err: Option<u64>, cr2: Option<u64>)
     }
     Serial::write_bytes(b"\n");
 }
-

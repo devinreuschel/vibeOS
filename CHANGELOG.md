@@ -18,8 +18,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   serial tail on timeout.
 - In-guest ktest retries a silent 90s timeout once (`user_syscalls`
   wait4 can stall `/bin/tests` after `user: dup ok` with ~101 lines),
-  the known SMP4 `msix_cpu: ap counter` timing flake, and the SMP4
-  persist-reboot `ipi: ack timeout` panic. The exact SMP2 TCG-only
+  and a second time if that retry still ends at `user: dup ok`. Also
+  retries the known SMP4 `msix_cpu: ap counter` timing flake, and the
+  SMP4 persist-reboot `ipi: ack timeout` panic. The exact SMP2 TCG-only
   `per_cpu_bsp: ready_head should be empty` timing flake also gets one
   retry on the initial boot. Other in-guest assertions and panics remain
   hard failures.
@@ -52,6 +53,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- CI: `cargo fmt --check` and `cargo clippy -- -D warnings` on the kernel
+  and `tests/hostlib`. rustflags deny warnings in both cargo configs.
 - O1 superseded: Phase 9 exit closed 2026-09-22; no "Phase 9 resumed"
   note. README / DESIGN header / §1.3 now match the tree (DOC1).
 - Pin the Rust nightly date, GitHub Action SHAs, and Limine commit so CI

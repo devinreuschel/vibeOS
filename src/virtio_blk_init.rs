@@ -9,29 +9,27 @@
 
 use alloc::boxed::Box;
 use core::fmt::Write;
-use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
-use vibeos::block::{
-    self, write_marker, BlockError, DeviceState, Op, Queue, Request, MAX_QUEUE,
-};
+use vibeos::block::{self, BlockError, DeviceState, MAX_QUEUE, Op, Queue, Request, write_marker};
 use vibeos::dev::{Device, Driver, IdMatch, ProbeError};
 use vibeos::dma::{self, DmaAlloc, DmaBuffer};
 use vibeos::irq::IrqError;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::pci::MAX_BARS;
 use vibeos::virtio::{
-    self, notify_addr, DescBuf, ModernCaps, PciCap, SplitLayout, SplitQueue, VirtioError,
-    COMMON_OFF_DF, COMMON_OFF_DFSEL, COMMON_OFF_DR, COMMON_OFF_DRSEL, COMMON_OFF_MSIX_CFG,
+    self, COMMON_OFF_DF, COMMON_OFF_DFSEL, COMMON_OFF_DR, COMMON_OFF_DRSEL, COMMON_OFF_MSIX_CFG,
     COMMON_OFF_NUM_QUEUES, COMMON_OFF_QDESC, COMMON_OFF_QDEVICE, COMMON_OFF_QDRIVER,
     COMMON_OFF_QENABLE, COMMON_OFF_QMSIX, COMMON_OFF_QNOTIFY, COMMON_OFF_QSEL, COMMON_OFF_QSIZE,
-    COMMON_OFF_STATUS, DESC_F_WRITE, DEV_BLK_LEGACY, DEV_BLK_MODERN, F_EVENT_IDX, MSI_NO_VECTOR,
-    STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK, STATUS_FEATURES_OK, VENDOR_ID,
+    COMMON_OFF_STATUS, DESC_F_WRITE, DEV_BLK_LEGACY, DEV_BLK_MODERN, DescBuf, F_EVENT_IDX,
+    MSI_NO_VECTOR, ModernCaps, PciCap, STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK,
+    STATUS_FEATURES_OK, SplitLayout, SplitQueue, VENDOR_ID, VirtioError, notify_addr,
 };
 use vibeos::virtio_blk::{
-    logical_capacity, map_status, nq_from_config, pack_discard, pack_header, pick_blk_size,
-    pick_features, sector_for_lba, CFG_BLK_SIZE, CFG_CAPACITY, CFG_DISCARD_ALIGN,
-    CFG_MAX_DISCARD_SECTORS, CFG_MAX_DISCARD_SEG, CFG_NUM_QUEUES, CFG_TOPOLOGY, F_DISCARD, F_FLUSH,
-    F_MQ, F_TOPOLOGY, NAME, SECTOR, T_DISCARD, T_FLUSH, T_IN, T_OUT,
+    CFG_BLK_SIZE, CFG_CAPACITY, CFG_DISCARD_ALIGN, CFG_MAX_DISCARD_SECTORS, CFG_MAX_DISCARD_SEG,
+    CFG_NUM_QUEUES, CFG_TOPOLOGY, F_DISCARD, F_FLUSH, F_MQ, F_TOPOLOGY, NAME, SECTOR, T_DISCARD,
+    T_FLUSH, T_IN, T_OUT, logical_capacity, map_status, nq_from_config, pack_discard, pack_header,
+    pick_blk_size, pick_features, sector_for_lba,
 };
 
 use crate::block_init::{self, IoWaiter};
@@ -100,7 +98,11 @@ fn w8(va: u64, off: u16, v: u8) {
 }
 
 fn r16(va: u64, off: u16) -> u16 {
-    unsafe { u16::from_le(core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u16)) }
+    unsafe {
+        u16::from_le(core::ptr::read_volatile(
+            (va.wrapping_add(off as u64)) as *const u16,
+        ))
+    }
 }
 
 fn w16(va: u64, off: u16, v: u16) {
@@ -110,7 +112,11 @@ fn w16(va: u64, off: u16, v: u16) {
 }
 
 fn r32(va: u64, off: u16) -> u32 {
-    unsafe { u32::from_le(core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u32)) }
+    unsafe {
+        u32::from_le(core::ptr::read_volatile(
+            (va.wrapping_add(off as u64)) as *const u32,
+        ))
+    }
 }
 
 fn w32(va: u64, off: u16, v: u32) {
@@ -252,17 +258,17 @@ fn pick_vq(blk: &Blk, need: u16) -> Option<usize> {
         return None;
     }
     let pref = prefer_vq() % nq;
-    if let Some(v) = blk.vqs[pref].as_ref() {
-        if vq_has_room(v, need) {
-            return Some(pref);
-        }
+    if let Some(v) = blk.vqs[pref].as_ref()
+        && vq_has_room(v, need)
+    {
+        return Some(pref);
     }
     let mut i = 0usize;
     while i < nq {
-        if let Some(v) = blk.vqs[i].as_ref() {
-            if vq_has_room(v, need) {
-                return Some(i);
-            }
+        if let Some(v) = blk.vqs[i].as_ref()
+            && vq_has_room(v, need)
+        {
+            return Some(i);
         }
         i += 1;
     }
@@ -295,7 +301,7 @@ fn issue(blk: &mut Blk, req: Request) -> Issued {
         Op::Barrier => return Issued::Local(req, Ok(())),
         Op::Flush if blk.features & F_FLUSH == 0 => return Issued::Local(req, Ok(())),
         Op::Discard if blk.features & F_DISCARD == 0 => {
-            return Issued::Local(req, Err(BlockError::Inval))
+            return Issued::Local(req, Err(BlockError::Inval));
         }
         Op::Read | Op::Write | Op::Flush | Op::Discard => {}
     }
@@ -501,11 +507,9 @@ fn pump() {
             match issue(blk, req) {
                 Issued::Device { qi, kick } => {
                     IO_REQS.fetch_add(1, Ordering::Relaxed);
-                    if kick {
-                        if let Some(v) = blk.vqs[qi].as_ref() {
-                            kicks[qi] = v.doorbell;
-                            want[qi] = true;
-                        }
+                    if kick && let Some(v) = blk.vqs[qi].as_ref() {
+                        kicks[qi] = v.doorbell;
+                        want[qi] = true;
                     }
                 }
                 Issued::Local(req, res) => {
@@ -825,7 +829,7 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
                 fail_armed(dev, common, &vecs, nvec);
                 return Err(VirtioError::Failed);
             }
-            if let Err(_) = irq_init::enable_msix(dev, qi as u16, vec, pc.apic_id as u8) {
+            if irq_init::enable_msix(dev, qi as u16, vec, pc.apic_id as u8).is_err() {
                 let _ = irq_init::free_vector(vec);
                 dma_init::free(slots);
                 let mut j = 0usize;
@@ -1153,7 +1157,11 @@ pub fn submit(
             if nsect == 0 || (nsect as usize).checked_mul(bs) != Some(len) {
                 return Err(BlockError::Inval);
             }
-            if lba.checked_add(nsect as u64).map(|e| e > cap).unwrap_or(true) {
+            if lba
+                .checked_add(nsect as u64)
+                .map(|e| e > cap)
+                .unwrap_or(true)
+            {
                 return Err(BlockError::Inval);
             }
             req = req.with_seg(ptr, len);
@@ -1167,7 +1175,11 @@ pub fn submit(
             if len != 0 || nsect == 0 {
                 return Err(BlockError::Inval);
             }
-            if lba.checked_add(nsect as u64).map(|e| e > cap).unwrap_or(true) {
+            if lba
+                .checked_add(nsect as u64)
+                .map(|e| e > cap)
+                .unwrap_or(true)
+            {
                 return Err(BlockError::Inval);
             }
         }
@@ -1199,7 +1211,7 @@ fn blocking(op: Op, lba: u64, nsect: u32, ptr: usize, len: usize) -> Result<(), 
 
 pub fn read(lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
     let bs = logical_block_size() as usize;
-    if bs == 0 || buf.len() % bs != 0 {
+    if bs == 0 || !buf.len().is_multiple_of(bs) {
         return Err(BlockError::Inval);
     }
     let nsect = (buf.len() / bs) as u32;
@@ -1208,7 +1220,7 @@ pub fn read(lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
 
 pub fn write(lba: u64, buf: &[u8]) -> Result<(), BlockError> {
     let bs = logical_block_size() as usize;
-    if bs == 0 || buf.len() % bs != 0 {
+    if bs == 0 || !buf.len().is_multiple_of(bs) {
         return Err(BlockError::Inval);
     }
     let nsect = (buf.len() / bs) as u32;
@@ -1260,11 +1272,7 @@ impl block::BlockDevice for Vda {
 }
 
 pub fn device() -> Option<&'static dyn block::BlockDevice> {
-    if live() {
-        Some(&Vda)
-    } else {
-        None
-    }
+    if live() { Some(&Vda) } else { None }
 }
 
 pub fn shell_line(f: &mut impl core::fmt::Write) -> core::fmt::Result {

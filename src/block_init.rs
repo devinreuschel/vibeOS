@@ -7,10 +7,10 @@
 
 use core::cell::UnsafeCell;
 use core::fmt::Write;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::block::{
-    self, write_marker, BlockError, DeviceState, Op, Queue, Ramdisk, Request, MAX_QUEUE,
+    self, BlockError, DeviceState, MAX_QUEUE, Op, Queue, Ramdisk, Request, write_marker,
 };
 use vibeos::lock::RANK_DEVICE;
 use vibeos::sched::FAR_DEADLINE;
@@ -37,8 +37,7 @@ const ST_QFULL: u32 = 5;
 
 static Q: SpinMutex<Queue> = SpinMutex::with_rank(Queue::new(), RANK_DEVICE);
 // BSS, not a heap Vec: init must not take RANK_HEAP under RANK_DEVICE.
-static DATA: SpinMutex<[u8; RAM0_BYTES]> =
-    SpinMutex::with_rank([0u8; RAM0_BYTES], RANK_DEVICE);
+static DATA: SpinMutex<[u8; RAM0_BYTES]> = SpinMutex::with_rank([0u8; RAM0_BYTES], RANK_DEVICE);
 static STATE: AtomicU8 = AtomicU8::new(0);
 static FAIL_NEXT: AtomicU32 = AtomicU32::new(0);
 static LIVE: AtomicBool = AtomicBool::new(false);
@@ -279,22 +278,16 @@ fn blocking(op: Op, lba: u64, nsect: u32, ptr: usize, len: usize) -> Result<(), 
 
 pub fn read(lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
     let bs = RAM0_BLOCK_SIZE as usize;
-    if bs == 0 || buf.len() % bs != 0 {
+    if bs == 0 || !buf.len().is_multiple_of(bs) {
         return Err(BlockError::Inval);
     }
     let nsect = (buf.len() / bs) as u32;
-    blocking(
-        Op::Read,
-        lba,
-        nsect,
-        buf.as_mut_ptr() as usize,
-        buf.len(),
-    )
+    blocking(Op::Read, lba, nsect, buf.as_mut_ptr() as usize, buf.len())
 }
 
 pub fn write(lba: u64, buf: &[u8]) -> Result<(), BlockError> {
     let bs = RAM0_BLOCK_SIZE as usize;
-    if bs == 0 || buf.len() % bs != 0 {
+    if bs == 0 || !buf.len().is_multiple_of(bs) {
         return Err(BlockError::Inval);
     }
     let nsect = (buf.len() / bs) as u32;

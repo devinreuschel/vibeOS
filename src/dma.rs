@@ -5,7 +5,7 @@
 //! aarch64 can fill them in. Descriptor publish uses real fences, not
 //! `compiler_fence`.
 
-use core::sync::atomic::{compiler_fence, fence, Ordering};
+use core::sync::atomic::{Ordering, compiler_fence, fence};
 
 use crate::pmm::{self, Buddy, PAGE_SIZE};
 
@@ -173,6 +173,12 @@ impl SgList {
     }
 }
 
+impl Default for SgList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Store-side barrier before a device may observe a published index.
 #[inline]
 pub fn dma_wmb() {
@@ -204,7 +210,11 @@ pub fn publish_index(slot: &core::sync::atomic::AtomicU16, idx: u16) {
     slot.store(idx, Ordering::Release);
 }
 
-pub fn alloc_from_buddy(buddy: &mut Buddy, spec: DmaAlloc, virt_of: impl Fn(u64) -> u64) -> Option<DmaBuffer> {
+pub fn alloc_from_buddy(
+    buddy: &mut Buddy,
+    spec: DmaAlloc,
+    virt_of: impl Fn(u64) -> u64,
+) -> Option<DmaBuffer> {
     let (phys, order) = buddy.allocate_constrained(spec.size, spec.align, spec.boundary)?;
     let buf = DmaBuffer::from_phys(phys, virt_of(phys), spec.size, order);
     buf.sync_for_device();
@@ -314,7 +324,11 @@ mod tests {
     #[test]
     fn four_gib_boundary_helper() {
         assert!(!crosses_boundary(0x1000, 0x1000, DMA32_BOUNDARY));
-        assert!(crosses_boundary(DMA32_BOUNDARY - 0x800, 0x1000, DMA32_BOUNDARY));
+        assert!(crosses_boundary(
+            DMA32_BOUNDARY - 0x800,
+            0x1000,
+            DMA32_BOUNDARY
+        ));
         assert!(!crosses_boundary(0x1000, 0x1000, 0));
     }
 }

@@ -113,10 +113,7 @@ fn dump_thread() {
             }
         }
     };
-    let _ = writeln!(
-        Serial,
-        "vibeOS: panic: thread cpu={cpu} tid={tid} {name}"
-    );
+    let _ = writeln!(Serial, "vibeOS: panic: thread cpu={cpu} tid={tid} {name}");
 }
 
 fn in_image(p: u64) -> bool {

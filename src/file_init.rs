@@ -8,9 +8,9 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use vibeos::fat::Node;
 use vibeos::fs::{
-    self, split_basename, Dirent, FsError, FsType, InodeKind, Name, PathRef, Stat, MAX_NAME,
-    MAX_PATH, O_ACCMODE, O_APPEND, O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC,
-    O_WRONLY, SEEK_CUR, SEEK_END, SEEK_SET, S_IFDIR_MODE, S_IFLNK_MODE, S_IFREG_MODE,
+    self, Dirent, FsError, FsType, InodeKind, MAX_NAME, MAX_PATH, Name, O_ACCMODE, O_APPEND,
+    O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, PathRef, S_IFDIR_MODE,
+    S_IFLNK_MODE, S_IFREG_MODE, SEEK_CUR, SEEK_END, SEEK_SET, Stat, split_basename,
 };
 use vibeos::lock::RANK_DEVICE;
 use vibeos::shell::{Command, LineEditor, MAX_COMMANDS};
@@ -217,12 +217,11 @@ impl VfsLsEnt {
 }
 
 const VFS_LS_MAX: usize = 32;
+type VfsLsSnap = (InodeKind, u64, [VfsLsEnt; VFS_LS_MAX], usize);
 
 /// Snapshot a kernfs node. None = not kernfs (caller uses FAT).
 /// Does not print; VFS is not held across serial.
-fn vfs_ls_snap(
-    path: &str,
-) -> Result<Option<(InodeKind, u64, [VfsLsEnt; VFS_LS_MAX], usize)>, FsError> {
+fn vfs_ls_snap(path: &str) -> Result<Option<VfsLsSnap>, FsError> {
     let abs = join_cwd(path)?;
     let s = core::str::from_utf8(path_used(&abs)).map_err(|_| FsError::Inval)?;
     fs_init::with(|v| {
@@ -727,26 +726,22 @@ fn rm_r(path: &str) -> Result<(), FsError> {
                 Back::Fat => {
                     let mut n = Node::EMPTY;
                     let r = fat_init::readdir(node.vol, node.clu, cookie, &mut n)?;
-                    if r.is_some() {
-                        if n.name() != b"." && n.name() != b".." && nk < 16 {
-                            let l = n.name_len as usize;
-                            kids[nk][..l].copy_from_slice(n.name());
-                            klens[nk] = n.name_len;
-                            nk += 1;
-                        }
+                    if r.is_some() && n.name() != b"." && n.name() != b".." && nk < 16 {
+                        let l = n.name_len as usize;
+                        kids[nk][..l].copy_from_slice(n.name());
+                        klens[nk] = n.name_len;
+                        nk += 1;
                     }
                     r
                 }
                 Back::Vibe => {
                     let mut n = vibeos::vibefs::Node::EMPTY;
                     let r = vibefs_init::readdir(node.vol, node.ino, cookie, &mut n)?;
-                    if r.is_some() {
-                        if n.name() != b"." && n.name() != b".." && nk < 16 {
-                            let l = n.name_len as usize;
-                            kids[nk][..l].copy_from_slice(n.name());
-                            klens[nk] = n.name_len;
-                            nk += 1;
-                        }
+                    if r.is_some() && n.name() != b"." && n.name() != b".." && nk < 16 {
+                        let l = n.name_len as usize;
+                        kids[nk][..l].copy_from_slice(n.name());
+                        klens[nk] = n.name_len;
+                        nk += 1;
                     }
                     r
                 }
@@ -859,6 +854,10 @@ pub fn sync_fs() -> Result<(), FsError> {
     vibefs_init::sync_all()
 }
 
+#[cfg_attr(
+    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
+    allow(dead_code)
+)]
 fn names_in(
     dir: Walked,
     prefix: &[u8],
@@ -914,17 +913,21 @@ fn names_in(
                 }
             }
         };
-        if let Some((_, buf, l)) = nm_ok {
-            if n < 16 {
-                out[n] = buf;
-                lens[n] = l;
-                n += 1;
-            }
+        if let Some((_, buf, l)) = nm_ok
+            && n < 16
+        {
+            out[n] = buf;
+            lens[n] = l;
+            n += 1;
         }
     }
     n
 }
 
+#[cfg_attr(
+    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
+    allow(dead_code)
+)]
 fn vfs_complete_names(
     dirp: &[u8],
     prefix: &[u8],
@@ -941,13 +944,11 @@ fn vfs_complete_names(
     let mut i = 0usize;
     while i < n {
         let nm = &ents[i].name[..ents[i].nlen as usize];
-        if nm.len() >= prefix.len() && nm[..prefix.len()].eq_ignore_ascii_case(prefix) {
-            if k < 16 {
-                let l = nm.len().min(MAX_NAME);
-                out[k][..l].copy_from_slice(&nm[..l]);
-                lens[k] = l as u8;
-                k += 1;
-            }
+        if nm.len() >= prefix.len() && nm[..prefix.len()].eq_ignore_ascii_case(prefix) && k < 16 {
+            let l = nm.len().min(MAX_NAME);
+            out[k][..l].copy_from_slice(&nm[..l]);
+            lens[k] = l as u8;
+            k += 1;
         }
         i += 1;
     }
@@ -956,6 +957,10 @@ fn vfs_complete_names(
 
 /// Tab: complete the word at the cursor against the current directory
 /// (or the directory prefix of that word).
+#[cfg_attr(
+    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
+    allow(dead_code)
+)]
 pub fn complete_line(ed: &mut LineEditor) {
     let mut line_buf = [0u8; 128];
     let line_n = ed.line().len().min(128);
@@ -1028,13 +1033,17 @@ pub fn complete_line(ed: &mut LineEditor) {
     apply_word(ed, start, cur, dirp, fill, n == 1);
 }
 
+#[cfg_attr(
+    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
+    allow(dead_code)
+)]
 fn complete_cmd(ed: &mut LineEditor, start: usize, pref: &[u8]) {
     let mut hit: Option<&'static str> = None;
     let mut n = 0u32;
     let names = [
-        "help", "echo", "meminfo", "uptime", "cpus", "dmesg", "ps", "panic", "reboot",
-        "poweroff", "ls", "cat", "cp", "mv", "rm", "mkdir", "touch", "stat", "df", "mount",
-        "umount", "sync", "cd", "pwd", "blk", "lspci", "devices",
+        "help", "echo", "meminfo", "uptime", "cpus", "dmesg", "ps", "panic", "reboot", "poweroff",
+        "ls", "cat", "cp", "mv", "rm", "mkdir", "touch", "stat", "df", "mount", "umount", "sync",
+        "cd", "pwd", "blk", "lspci", "devices",
     ];
     for nm in names {
         if nm.as_bytes().starts_with(pref) {
@@ -1045,14 +1054,18 @@ fn complete_cmd(ed: &mut LineEditor, start: usize, pref: &[u8]) {
             }
         }
     }
-    if n == 1 {
-        if let Some(h) = hit {
-            apply_word(ed, start, ed.cursor(), b"", h.as_bytes(), true);
-        }
+    if n == 1
+        && let Some(h) = hit
+    {
+        apply_word(ed, start, ed.cursor(), b"", h.as_bytes(), true);
     }
     let _ = shell_init::command_count();
 }
 
+#[cfg_attr(
+    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
+    allow(dead_code)
+)]
 fn common_prefix(names: &[[u8; MAX_NAME]; 16], lens: &[u8; 16], n: usize) -> usize {
     if n == 0 {
         return 0;
@@ -1074,6 +1087,10 @@ fn common_prefix(names: &[[u8; MAX_NAME]; 16], lens: &[u8; 16], n: usize) -> usi
     c
 }
 
+#[cfg_attr(
+    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
+    allow(dead_code)
+)]
 fn to_up(c: u8) -> u8 {
     if c.is_ascii_lowercase() {
         c - b'a' + b'A'
@@ -1082,7 +1099,18 @@ fn to_up(c: u8) -> u8 {
     }
 }
 
-fn apply_word(ed: &mut LineEditor, start: usize, cur: usize, dirp: &[u8], name: &[u8], unique: bool) {
+#[cfg_attr(
+    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
+    allow(dead_code)
+)]
+fn apply_word(
+    ed: &mut LineEditor,
+    start: usize,
+    cur: usize,
+    dirp: &[u8],
+    name: &[u8],
+    unique: bool,
+) {
     let mut tmp = [0u8; 128];
     let mut n = 0usize;
     n += copy_to(&mut tmp[n..], dirp);
@@ -1100,6 +1128,10 @@ fn apply_word(ed: &mut LineEditor, start: usize, cur: usize, dirp: &[u8], name: 
     ed.set_line(&neu[..m]);
 }
 
+#[cfg_attr(
+    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
+    allow(dead_code)
+)]
 fn copy_to(dst: &mut [u8], src: &[u8]) -> usize {
     let n = src.len().min(dst.len());
     dst[..n].copy_from_slice(&src[..n]);
@@ -1157,13 +1189,7 @@ fn cmd_ls(args: &[&str]) {
     };
     if node.kind != InodeKind::Dir {
         if long {
-            let _ = writeln!(
-                Console,
-                "{} {} {}",
-                node.kind.as_str(),
-                node.size,
-                path
-            );
+            let _ = writeln!(Console, "{} {} {}", node.kind.as_str(), node.size, path);
         } else {
             let _ = writeln!(Console, "{path}");
         }
@@ -1397,20 +1423,17 @@ fn cmd_df(_args: &[&str]) {
         }
         Err(e) => err_line("df", e),
     }
-    if vibefs_init::live() {
-        match vibefs_init::df(vibefs_init::VOL_MEM) {
-            Ok((ft, tot, free, nblk)) => {
-                let _ = writeln!(
-                    Console,
-                    "vibeOS: df: {} total {} free {} blocks {}",
-                    ft.as_str(),
-                    tot,
-                    free,
-                    nblk
-                );
-            }
-            Err(_) => {}
-        }
+    if vibefs_init::live()
+        && let Ok((ft, tot, free, nblk)) = vibefs_init::df(vibefs_init::VOL_MEM)
+    {
+        let _ = writeln!(
+            Console,
+            "vibeOS: df: {} total {} free {} blocks {}",
+            ft.as_str(),
+            tot,
+            free,
+            nblk
+        );
     }
 }
 

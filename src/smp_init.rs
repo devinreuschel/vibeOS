@@ -12,8 +12,8 @@ use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::marker;
 use vibeos::per_cpu::PerCpu;
 use vibeos::smp::{
-    blob_fits, pack_idtr, INIT_WAIT_MS, PARAM_CR3, PARAM_ENTRY, PARAM_IDT, PARAM_STACK,
-    READY_TIMEOUT_MS, SIPI_VECTOR, SIPI_WAIT_MS, TRAMPOLINE_PHYS,
+    INIT_WAIT_MS, PARAM_CR3, PARAM_ENTRY, PARAM_IDT, PARAM_STACK, READY_TIMEOUT_MS, SIPI_VECTOR,
+    SIPI_WAIT_MS, TRAMPOLINE_PHYS, blob_fits, pack_idtr,
 };
 use vibeos::thread::ThreadId;
 
@@ -29,7 +29,10 @@ use crate::time_init;
 use crate::x86;
 
 const BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/trampoline.bin"));
-const _: () = assert!(blob_fits(BLOB.len()), "trampoline blob overlaps param block");
+const _: () = assert!(
+    blob_fits(BLOB.len()),
+    "trampoline blob overlaps param block"
+);
 
 struct BootCell<T>(core::cell::UnsafeCell<T>);
 unsafe impl<T> Sync for BootCell<T> {}
@@ -37,6 +40,9 @@ impl<T> BootCell<T> {
     const fn new(v: T) -> Self {
         Self(core::cell::UnsafeCell::new(v))
     }
+    /// # Safety
+    /// Exclusive boot/IRQ-off access; cell is initialized.
+    #[allow(clippy::mut_from_ref)] // boot cell, IRQ-off exclusive
     unsafe fn get_mut(&self) -> &mut T {
         unsafe { &mut *self.0.get() }
     }
@@ -118,17 +124,15 @@ fn alloc_ap_resources(cpu_id: u32, apic_id: u8, publish: bool) -> Option<ApAlloc
         return None;
     };
     let idle_ptr = thread_init::tcb_ptr(idle_id);
-    if publish {
-        if let Some(cpu) = per_cpu_init::cpu_mut(cpu_id) {
-            cpu.apic_id = apic_id as u32;
-            cpu.idle_id = idle_id;
-            cpu.idle = idle_ptr;
-            cpu.current = idle_ptr;
-            cpu.tsc_per_ms = time_init::tsc_per_ms();
-            cpu.timer_mode = apic_init::timer_mode();
-            cpu.ready.store(false, Ordering::Relaxed);
-            core::sync::atomic::compiler_fence(Ordering::SeqCst);
-        }
+    if publish && let Some(cpu) = per_cpu_init::cpu_mut(cpu_id) {
+        cpu.apic_id = apic_id as u32;
+        cpu.idle_id = idle_id;
+        cpu.idle = idle_ptr;
+        cpu.current = idle_ptr;
+        cpu.tsc_per_ms = time_init::tsc_per_ms();
+        cpu.timer_mode = apic_init::timer_mode();
+        cpu.ready.store(false, Ordering::Relaxed);
+        core::sync::atomic::compiler_fence(Ordering::SeqCst);
     }
     Some(ApAlloc {
         cpu_id,
@@ -141,14 +145,14 @@ fn alloc_ap_resources(cpu_id: u32, apic_id: u8, publish: bool) -> Option<ApAlloc
 }
 
 fn free_ap_resources(a: ApAlloc) {
-    if a.published {
-        if let Some(cpu) = per_cpu_init::cpu_mut(a.cpu_id) {
-            cpu.idle = core::ptr::null_mut();
-            cpu.current = core::ptr::null_mut();
-            cpu.idle_id = ThreadId::NONE;
-            cpu.ready.store(false, Ordering::Relaxed);
-            cpu.apic_id = 0;
-        }
+    if a.published
+        && let Some(cpu) = per_cpu_init::cpu_mut(a.cpu_id)
+    {
+        cpu.idle = core::ptr::null_mut();
+        cpu.current = core::ptr::null_mut();
+        cpu.idle_id = ThreadId::NONE;
+        cpu.ready.store(false, Ordering::Relaxed);
+        cpu.apic_id = 0;
     }
     if let Some(stack) = thread_init::abandon_ap_idle(a.idle_id) {
         kva_init::free_stack(stack);

@@ -222,11 +222,7 @@ where
     false
 }
 
-pub fn send_ipi_plan(
-    dest: u8,
-    vector: u8,
-    mode: IpiMode,
-) -> (u32, u32) {
+pub fn send_ipi_plan(dest: u8, vector: u8, mode: IpiMode) -> (u32, u32) {
     (icr_high(dest), icr_low(vector, mode))
 }
 
@@ -235,7 +231,10 @@ pub const fn icr_low_shorthand(vector: u8, mode: IpiMode, shorthand: u32) -> u32
 }
 
 pub fn send_ipi_all_ex_self_plan(vector: u8, mode: IpiMode) -> (u32, u32) {
-    (0, icr_low_shorthand(vector, mode, ICR_SHORTHAND_ALL_EX_SELF))
+    (
+        0,
+        icr_low_shorthand(vector, mode, ICR_SHORTHAND_ALL_EX_SELF),
+    )
 }
 
 /// VER bits 16–23 are the last redirection index, not the count.
@@ -384,11 +383,7 @@ mod tests {
         let ok = poll_delivery_pending(
             || {
                 n += 1;
-                if n < 4 {
-                    ICR_DELIVERY_PENDING
-                } else {
-                    0
-                }
+                if n < 4 { ICR_DELIVERY_PENDING } else { 0 }
             },
             ICR_POLL_CAP,
         );
@@ -446,12 +441,7 @@ mod tests {
         let mut log: Vec<(u8, u32)> = Vec::new();
         let high = redir_high(1);
         let low = redir_low(0x30, Trigger::Edge, Polarity::High, true);
-        write_redir(
-            |reg, val| log.push((reg, val)),
-            2,
-            high,
-            low,
-        );
+        write_redir(|reg, val| log.push((reg, val)), 2, high, low);
         assert_eq!(log.len(), 2);
         let (lo, hi) = ioapic_redir_regs(2);
         assert_eq!(log[0], (hi, high));
@@ -512,7 +502,10 @@ mod tests {
             lvt_timer_periodic(vectors::LAPIC_TIMER, false) & LVT_TIMER_PERIODIC,
             LVT_TIMER_PERIODIC,
         );
-        assert_ne!(lvt_timer_oneshot(vectors::LAPIC_TIMER, true) & LVT_MASKED, 0);
+        assert_ne!(
+            lvt_timer_oneshot(vectors::LAPIC_TIMER, true) & LVT_MASKED,
+            0
+        );
         assert_eq!(LVT_DELIVERY_EXTINT, 0b111 << 8);
     }
 

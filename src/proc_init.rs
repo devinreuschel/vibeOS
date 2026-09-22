@@ -16,19 +16,19 @@ use vibeos::desc::InterruptFrame;
 use vibeos::fs::FsError;
 use vibeos::kbd::{DecodedKey, NamedKey};
 use vibeos::proc::{
-    default_action, fd_flags_from_open, sig_name, wait_exited, wait_signaled, wait_stopped,
-    Cwd, Creds, Fd, FdKind, FdTable, ProcState, SigAct, FD_CLOEXEC, INIT_PID, MAX_FDS, MAX_PROCS,
-    SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGSTOP, WNOHANG,
+    Creds, Cwd, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, MAX_FDS, MAX_PROCS, ProcState, SIGBUS,
+    SIGCHLD, SIGCONT, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGSTOP, SigAct, WNOHANG, default_action,
+    fd_flags_from_open, sig_name, wait_exited, wait_signaled, wait_stopped,
 };
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::syscall::{
-    self, SyscallFrame, UserRegs, EAGAIN, EBADF, EBUSY, ECHILD, EEXIST, EFAULT, EINVAL, EIO,
-    EISDIR, EMFILE, ENAMETOOLONG, ENOENT, ENOEXEC, ENOMEM, ENOSYS, ENOTDIR, ESRCH, F_GETFD, F_SETFD,
-    SYS_CLOSE, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_EXIT, SYS_FCNTL, SYS_FORK, SYS_GETPID,
-    SYS_GETPPID, SYS_KILL, SYS_LSEEK, SYS_OPEN, SYS_PSINFO, SYS_READ, SYS_SCHED_YIELD, SYS_WAIT4,
-    SYS_WRITE, E2BIG,
+    self, E2BIG, EAGAIN, EBADF, EBUSY, ECHILD, EEXIST, EFAULT, EINVAL, EIO, EISDIR, EMFILE,
+    ENAMETOOLONG, ENOENT, ENOEXEC, ENOMEM, ENOSYS, ENOTDIR, ESRCH, F_GETFD, F_SETFD, SYS_CLOSE,
+    SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_EXIT, SYS_FCNTL, SYS_FORK, SYS_GETPID, SYS_GETPPID,
+    SYS_KILL, SYS_LSEEK, SYS_OPEN, SYS_PSINFO, SYS_READ, SYS_SCHED_YIELD, SYS_WAIT4, SYS_WRITE,
+    SyscallFrame, UserRegs,
 };
-use vibeos::thread::{ThreadId, RFLAGS_IF, RFLAGS_RESERVED1};
+use vibeos::thread::{RFLAGS_IF, RFLAGS_RESERVED1, ThreadId};
 use vibeos::vectors;
 use vibeos::wait::WaitQueue;
 
@@ -185,11 +185,7 @@ fn load_errno(e: LoadError) -> i32 {
 }
 
 fn bit(sig: u32) -> u32 {
-    if sig == 0 || sig > 31 {
-        0
-    } else {
-        1u32 << sig
-    }
+    if sig == 0 || sig > 31 { 0 } else { 1u32 << sig }
 }
 
 fn current_pid() -> u32 {
@@ -201,10 +197,10 @@ fn current_pid() -> u32 {
 /// so a child's `clear_as` cannot steal the parent's.
 pub fn current_space() -> Option<&'static AddressSpace> {
     let pid = current_pid();
-    if pid != 0 {
-        if let Some(s) = space_of(pid) {
-            return Some(s);
-        }
+    if pid != 0
+        && let Some(s) = space_of(pid)
+    {
+        return Some(s);
     }
     syscall_init::peek_user_as()
 }
@@ -237,8 +233,6 @@ fn alloc_pid(prefer: u32) -> Option<u32> {
             let i = prefer as usize;
             if i < MAX_PROCS && t.procs[i].state == ProcState::Unused {
                 Some(prefer)
-            } else if prefer == INIT_PID {
-                None
             } else {
                 None
             }
@@ -299,21 +293,20 @@ fn close_all_fds(fds: &mut FdTable) {
 fn dup_table(src: FdTable) -> Option<FdTable> {
     let mut i = 0u32;
     while i < MAX_FDS as u32 {
-        if let Some(fd) = src.get(i) {
-            if let FdKind::File(fid) = fd.kind {
-                if file_init::addref(fid).is_err() {
-                    let mut j = 0u32;
-                    while j < i {
-                        if let Some(fd) = src.get(j) {
-                            if let FdKind::File(fid) = fd.kind {
-                                let _ = file_init::close(fid);
-                            }
-                        }
-                        j += 1;
-                    }
-                    return None;
+        if let Some(fd) = src.get(i)
+            && let FdKind::File(fid) = fd.kind
+            && file_init::addref(fid).is_err()
+        {
+            let mut j = 0u32;
+            while j < i {
+                if let Some(fd) = src.get(j)
+                    && let FdKind::File(fid) = fd.kind
+                {
+                    let _ = file_init::close(fid);
                 }
+                j += 1;
             }
+            return None;
         }
         i += 1;
     }
@@ -429,7 +422,7 @@ pub fn syscall(frame: *mut SyscallFrame) -> i64 {
     let ret = dispatch_frame(nr, args, f);
     if syscall_init::trace_enabled() {
         let name = syscall::info(nr).map(|i| i.name).unwrap_or("?");
-        let _ = write!(Serial, "user: syscall {name} nr={nr} = {ret}\n");
+        let _ = writeln!(Serial, "user: syscall {name} nr={nr} = {ret}");
     }
     ret
 }
@@ -771,7 +764,7 @@ fn sys_dup(old: u64) -> i64 {
         }
         match p.fds.dup(old as u32) {
             Ok(n) => Some(n),
-            Err(()) => {
+            Err(_) => {
                 if let FdKind::File(fid) = s.kind {
                     let _ = file_init::close(fid);
                 }
@@ -794,14 +787,14 @@ fn sys_dup2(old: u64, new: u64) -> i64 {
             return Some((new as u32, None));
         }
         let s = p.fds.get(old as u32)?;
-        if let FdKind::File(fid) = s.kind {
-            if file_init::addref(fid).is_err() {
-                return None;
-            }
+        if let FdKind::File(fid) = s.kind
+            && file_init::addref(fid).is_err()
+        {
+            return None;
         }
         match p.fds.dup2(old as u32, new as u32) {
             Ok(displaced) => Some((new as u32, displaced)),
-            Err(()) => {
+            Err(_) => {
                 if let FdKind::File(fid) = s.kind {
                     let _ = file_init::close(fid);
                 }
@@ -939,9 +932,7 @@ fn sys_execve(path: u64, argv: u64, envp: u64, frame: *mut SyscallFrame) -> i64 
     let mut boxed = Some(Box::new(loaded.space));
     let cr3 = boxed.as_ref().map(|s| s.root().as_u64()).unwrap_or(0);
     let old = with_table(|t| {
-        let Some(p) = t.get_mut(pid) else {
-            return None;
-        };
+        let p = t.get_mut(pid)?;
         let gone = p.fds.apply_cloexec();
         p.name = name;
         p.entry.rip = entry;
@@ -1100,17 +1091,17 @@ fn sys_wait4(pid: u64, status: u64, options: u64) -> i64 {
         match r {
             WaitAct::Done(0, _) => return 0,
             WaitAct::Done(cpid, st) => {
-                if status != 0 {
-                    if let Some(space) = current_space() {
-                        if syscall::check_user_ptr(|p, n| space.check_user_range(p, n), status, 4)
-                            .is_err()
-                        {
-                            return syscall::neg(EFAULT);
-                        }
-                        let bytes = (st as u32).to_le_bytes();
-                        if space.write_bytes(status, &bytes).is_err() {
-                            return syscall::neg(EFAULT);
-                        }
+                if status != 0
+                    && let Some(space) = current_space()
+                {
+                    if syscall::check_user_ptr(|p, n| space.check_user_range(p, n), status, 4)
+                        .is_err()
+                    {
+                        return syscall::neg(EFAULT);
+                    }
+                    let bytes = st.to_le_bytes();
+                    if space.write_bytes(status, &bytes).is_err() {
+                        return syscall::neg(EFAULT);
                     }
                 }
                 return cpid as i64;
@@ -1137,10 +1128,8 @@ fn find_zombie(t: &Table, parent: u32, want: i64) -> Option<(u32, u32, ThreadId)
     let mut i = 1usize;
     while i < MAX_PROCS {
         let p = &t.procs[i];
-        if p.state == ProcState::Zombie && p.ppid == parent {
-            if want < 0 || want == p.pid as i64 {
-                return Some((p.pid, p.wait_status, p.tid));
-            }
+        if p.state == ProcState::Zombie && p.ppid == parent && (want < 0 || want == p.pid as i64) {
+            return Some((p.pid, p.wait_status, p.tid));
         }
         i += 1;
     }
@@ -1151,10 +1140,8 @@ fn has_child(t: &Table, parent: u32, want: i64) -> bool {
     let mut i = 1usize;
     while i < MAX_PROCS {
         let p = &t.procs[i];
-        if p.state != ProcState::Unused && p.ppid == parent {
-            if want < 0 || want == p.pid as i64 {
-                return true;
-            }
+        if p.state != ProcState::Unused && p.ppid == parent && (want < 0 || want == p.pid as i64) {
+            return true;
         }
         i += 1;
     }

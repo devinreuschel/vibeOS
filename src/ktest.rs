@@ -13,20 +13,20 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::addr_space::{UserMemError, UserPerms};
 use vibeos::apic::{Polarity, TimerMode, Trigger};
-use vibeos::dma::{self, DmaAlloc, DMA32_BOUNDARY};
-use vibeos::irq::{self, IrqError};
+use vibeos::block::{BlockError, DeviceState, Op};
 use vibeos::desc::{IstSlot, KERNEL_CS, TSS_SEL, USER_CS_RPL};
 use vibeos::dev::{ClaimError, Device, Driver, IdMatch, ProbeError};
-use vibeos::heap::HEAP_SIZE;
-use vibeos::kva::PAGE_SIZE;
-use vibeos::paging::{heap_flags, PageFlags, PhysAddr, VirtAddr, PAGE_SIZE_4K, USER_END};
-use vibeos::syscall;
-use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
-use vibeos::thread::{ThreadId, ThreadState, RFLAGS_RESERVED1};
-use vibeos::time::{calib_band, calib_in_band, CalibSource, Instant};
-use vibeos::vectors;
-use vibeos::block::{BlockError, DeviceState, Op};
+use vibeos::dma::{self, DMA32_BOUNDARY, DmaAlloc};
 use vibeos::fs::{FsError, InodeKind, O_CREAT, O_RDWR};
+use vibeos::heap::HEAP_SIZE;
+use vibeos::irq::{self, IrqError};
+use vibeos::kva::PAGE_SIZE;
+use vibeos::paging::{PAGE_SIZE_4K, PageFlags, PhysAddr, USER_END, VirtAddr, heap_flags};
+use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
+use vibeos::syscall;
+use vibeos::thread::{RFLAGS_RESERVED1, ThreadId, ThreadState};
+use vibeos::time::{CalibSource, Instant, calib_band, calib_in_band};
+use vibeos::vectors;
 use vibeos::virtio::F_VERSION_1;
 
 use crate::acpi_init;
@@ -35,28 +35,28 @@ use crate::apic_init;
 use crate::arch;
 use crate::block_init::{self, IoWaiter};
 use crate::cache_init;
-use crate::part_init;
 use crate::dev_init;
 use crate::dma_init;
 use crate::fat_init;
 use crate::file_init;
 use crate::fs_init;
-use crate::vibefs_init;
 use crate::ipi_init;
 use crate::irq_init;
 use crate::kva_init;
 use crate::paging_init;
+use crate::part_init;
 use crate::pci_init;
 use crate::per_cpu_init;
 use crate::pmm_init;
 use crate::sched_init;
 use crate::serial::{self, Serial};
 use crate::smp_init;
-use crate::syscall_init;
 use crate::sync_init::{BlockingMutex, Channel, Condvar, RwLock, Semaphore, SpinMutex};
+use crate::syscall_init;
 use crate::thread_init;
 use crate::time_init;
 use crate::user_init;
+use crate::vibefs_init;
 use crate::virtio_blk_init;
 use crate::virtio_init;
 use crate::work_init;
@@ -91,7 +91,10 @@ const TESTS: &[(&str, TestFn)] = &[
     ("acpi_discovery", test_acpi_discovery),
     ("gdt_selectors", test_gdt_selectors),
     ("star_sysret_layout", test_star_sysret_layout),
-    ("addrspace_map_unmap_teardown", test_addrspace_map_unmap_teardown),
+    (
+        "addrspace_map_unmap_teardown",
+        test_addrspace_map_unmap_teardown,
+    ),
     ("user_ptr_helpers", test_user_ptr_helpers),
     ("cr3_switch_skip", test_cr3_switch_skip),
     ("ring3_syscall_enosys", test_ring3_syscall_enosys),
@@ -380,7 +383,7 @@ fn test_heap_align() -> Outcome {
         if p.is_null() {
             return Outcome::Fail("alloc null");
         }
-        if p as usize % align != 0 {
+        if !(p as usize).is_multiple_of(align) {
             unsafe { alloc::alloc::dealloc(p, layout) };
             return Outcome::Fail("alignment");
         }
@@ -596,8 +599,8 @@ fn test_acpi_discovery() -> Outcome {
     if !leaf_is_uc(madt.lapic_base) {
         return Outcome::Fail("lapic not uc");
     }
-    for i in 0..madt.ioapic_count {
-        if !leaf_is_uc(madt.ioapics[i].addr as u64) {
+    for io in madt.ioapics.iter().take(madt.ioapic_count) {
+        if !leaf_is_uc(io.addr as u64) {
             return Outcome::Fail("ioapic not uc");
         }
     }
@@ -662,7 +665,8 @@ fn test_addrspace_map_unmap_teardown() -> Outcome {
     };
     // Above the 512 MiB GLOBAL low-identity window (DESIGN §4.1).
     let va = 0x0000_0000_4000_0000u64;
-    if unsafe { addr_space_init::map_anon(&mut space, va, PAGE_SIZE_4K * 2, UserPerms::RW) }.is_err()
+    if unsafe { addr_space_init::map_anon(&mut space, va, PAGE_SIZE_4K * 2, UserPerms::RW) }
+        .is_err()
     {
         return Outcome::Fail("map_anon");
     }
@@ -853,7 +857,10 @@ fn test_ring3_hello_exit() -> Outcome {
         }
     }
     let out = syscall_init::stdout_bytes();
-    if !out.windows(b"hello from ring3".len()).any(|w| w == b"hello from ring3") {
+    if !out
+        .windows(b"hello from ring3".len())
+        .any(|w| w == b"hello from ring3")
+    {
         return Outcome::Fail("stdout missing hello");
     }
     arch::gs::force_kernel();
@@ -902,7 +909,10 @@ fn test_syscall_ptr_validate() -> Outcome {
             vibeos::syscall::SYS_WRITE,
             [1, 0xFFFF_8000_0000_1000, 8, 0, 0, 0],
         );
-        let u = syscall_init::dispatch(vibeos::syscall::SYS_WRITE, [1, va + PAGE_SIZE_4K, 8, 0, 0, 0]);
+        let u = syscall_init::dispatch(
+            vibeos::syscall::SYS_WRITE,
+            [1, va + PAGE_SIZE_4K, 8, 0, 0, 0],
+        );
         let o = syscall_init::dispatch(vibeos::syscall::SYS_WRITE, [1, u64::MAX, 2, 0, 0, 0]);
         (ok, n, k, u, o)
     });
@@ -1083,7 +1093,7 @@ fn test_now_us_under_yields() -> Outcome {
                 return Outcome::Fail("now_us went backwards under yield");
             }
             last = n;
-            if i % 200 == 0 {
+            if i.is_multiple_of(200) {
                 x86::hlt_once();
             }
             i += 1;
@@ -1100,7 +1110,7 @@ fn test_tsc_calib_source() -> Outcome {
                 return Outcome::Fail("hpet source without table");
             }
             let k = time_init::tsc_per_ms();
-            if k < 50_000 || k > 10_000_000 {
+            if !(50_000..=10_000_000).contains(&k) {
                 return Outcome::Fail("tsc_per_ms out of range");
             }
             // Boot HPET ran before APs. Remeasure both under this SMP load.
@@ -1132,7 +1142,7 @@ fn test_tsc_calib_source() -> Outcome {
                 return Outcome::Fail("pit source despite hpet table");
             }
             let k = time_init::tsc_per_ms();
-            if k < 50_000 || k > 10_000_000 {
+            if !(50_000..=10_000_000).contains(&k) {
                 return Outcome::Fail("tsc_per_ms out of range");
             }
             Outcome::Ok
@@ -1206,29 +1216,27 @@ fn test_lapic_timer_mode() -> Outcome {
 }
 
 fn test_lapic_timer_rearm() -> Outcome {
-    with_timer(|| {
-        match apic_init::timer_mode() {
-            TimerMode::Pit => {
-                let t0 = time_init::uptime_ms();
-                time_init::busy_wait_ms(50);
-                let dt = time_init::uptime_ms().saturating_sub(t0);
-                if (20..=100).contains(&dt) {
-                    Outcome::Ok
-                } else {
-                    let _ = writeln!(Serial, "vibeOS: ktest:   pit dt={dt}");
-                    Outcome::Fail("pit ticks stalled")
-                }
+    with_timer(|| match apic_init::timer_mode() {
+        TimerMode::Pit => {
+            let t0 = time_init::uptime_ms();
+            time_init::busy_wait_ms(50);
+            let dt = time_init::uptime_ms().saturating_sub(t0);
+            if (20..=100).contains(&dt) {
+                Outcome::Ok
+            } else {
+                let _ = writeln!(Serial, "vibeOS: ktest:   pit dt={dt}");
+                Outcome::Fail("pit ticks stalled")
             }
-            TimerMode::TscDeadline | TimerMode::Periodic => {
-                let t0 = apic_init::timer_fires();
-                time_init::busy_wait_ms(50);
-                let n = apic_init::timer_fires().saturating_sub(t0);
-                if n >= 20 {
-                    Outcome::Ok
-                } else {
-                    let _ = writeln!(Serial, "vibeOS: ktest:   lapic fires {n}");
-                    Outcome::Fail("rearm stalled")
-                }
+        }
+        TimerMode::TscDeadline | TimerMode::Periodic => {
+            let t0 = apic_init::timer_fires();
+            time_init::busy_wait_ms(50);
+            let n = apic_init::timer_fires().saturating_sub(t0);
+            if n >= 20 {
+                Outcome::Ok
+            } else {
+                let _ = writeln!(Serial, "vibeOS: ktest:   lapic fires {n}");
+                Outcome::Fail("rearm stalled")
             }
         }
     })
@@ -1281,7 +1289,7 @@ fn test_per_cpu_bsp() -> Outcome {
     if thread_init::name(cpu.idle_id) != "idle" {
         return Outcome::Fail("idle name");
     }
-    if cpu.idle as *const _ == cpu.current as *const _ {
+    if core::ptr::eq(cpu.idle, cpu.current) {
         return Outcome::Fail("idle == current");
     }
     if cpu.current.is_null() || cpu.idle.is_null() {
@@ -1567,7 +1575,7 @@ fn test_sleep_ms_50() -> Outcome {
         }
         // TCG: ticks coalesce under SMP; sleep is now_ns. Keep 50–100 on
         // invariant TSC.
-        if !time_init::tsc_invariant() && (40..=400).contains(&du) && dt >= 1 && dt <= 400 {
+        if !time_init::tsc_invariant() && (40..=400).contains(&du) && (1..=400).contains(&dt) {
             return Outcome::Ok;
         }
         let _ = writeln!(Serial, "vibeOS: ktest:   sleep_ms dt={dt} du={du}");
@@ -2274,10 +2282,8 @@ fn shoot_touch(arg: *mut ()) {
     let fault = catch_fault(|| unsafe {
         core::ptr::read_volatile(p.va as *const u64);
     });
-    p.result.store(
-        if fault.is_some() { 2 } else { 1 },
-        Ordering::SeqCst,
-    );
+    p.result
+        .store(if fault.is_some() { 2 } else { 1 }, Ordering::SeqCst);
 }
 
 fn test_tlb_shootdown_remote() -> Outcome {
@@ -2565,9 +2571,8 @@ fn test_kbd_ps2_irq() -> Outcome {
         }
         let t0 = crate::time_init::now_us();
         loop {
-            match crate::kbd_init::pop() {
-                Some(vibeos::kbd::DecodedKey::Char(b'a')) => return Outcome::Ok,
-                Some(_) | None => {}
+            if let Some(vibeos::kbd::DecodedKey::Char(b'a')) = crate::kbd_init::pop() {
+                return Outcome::Ok;
             }
             if crate::time_init::now_us().saturating_sub(t0) > 50_000 {
                 return Outcome::Fail("no irq key");
@@ -2842,7 +2847,7 @@ const E1000_IVAR: u32 = 0xE4;
 const E1000_ICR_LSC: u32 = 1 << 2;
 const E1000_ICR_OTHER: u32 = 1 << 24;
 /// Other -> MSI-X table entry 0, valid.
-const E1000_IVAR_OTHER0: u32 = (0 | 0x8) << 16;
+const E1000_IVAR_OTHER0: u32 = 0x8 << 16;
 
 const EDU_IDENT: u32 = 0x00;
 const EDU_IRQSTAT: u32 = 0x24;
@@ -3330,7 +3335,10 @@ fn test_dma_edu() -> Outcome {
     mmio_w32(mmio, EDU_DMA_CNT, 64);
     dma::dma_wmb();
     mmio_w32(mmio, EDU_DMA_CMD, EDU_DMA_RUN);
-    if !spin_until_ns(|| mmio_r32(mmio, EDU_DMA_CMD) & EDU_DMA_RUN == 0, 2_000_000_000) {
+    if !spin_until_ns(
+        || mmio_r32(mmio, EDU_DMA_CMD) & EDU_DMA_RUN == 0,
+        2_000_000_000,
+    ) {
         dma_init::free(src);
         dma_init::free(dst);
         return Outcome::Fail("dma to edu");
@@ -3340,7 +3348,10 @@ fn test_dma_edu() -> Outcome {
     mmio_w32(mmio, EDU_DMA_CNT, 64);
     dma::dma_wmb();
     mmio_w32(mmio, EDU_DMA_CMD, EDU_DMA_RUN | EDU_DMA_TO_PCI);
-    if !spin_until_ns(|| mmio_r32(mmio, EDU_DMA_CMD) & EDU_DMA_RUN == 0, 2_000_000_000) {
+    if !spin_until_ns(
+        || mmio_r32(mmio, EDU_DMA_CMD) & EDU_DMA_RUN == 0,
+        2_000_000_000,
+    ) {
         dma_init::free(src);
         dma_init::free(dst);
         return Outcome::Fail("dma from edu");
@@ -3435,10 +3446,7 @@ fn test_virtio_vq() -> Outcome {
     if virtio_init::rng_request().is_err() {
         return Outcome::Fail("request");
     }
-    if !spin_until_ns(
-        || virtio_init::rng_completions() > c0,
-        2_000_000_000,
-    ) {
+    if !spin_until_ns(|| virtio_init::rng_completions() > c0, 2_000_000_000) {
         return Outcome::Fail("no complete");
     }
     if virtio_init::rng_last_len() == 0 {
@@ -3453,10 +3461,7 @@ fn test_virtio_vq() -> Outcome {
     if !virtio_init::rng_alloced() {
         return Outcome::Fail("thread alloc");
     }
-    if !spin_until_ns(
-        || virtio_init::rng_soft_hits() > s0,
-        2_000_000_000,
-    ) {
+    if !spin_until_ns(|| virtio_init::rng_soft_hits() > s0, 2_000_000_000) {
         return Outcome::Fail("no softirq");
     }
     Outcome::Ok
@@ -3546,9 +3551,7 @@ fn blk_worker() {
         let mut buf = [0u8; 512];
         let mut j = 0usize;
         while j < 512 {
-            buf[j] = (id as u8)
-                .wrapping_add(i as u8)
-                .wrapping_add(j as u8);
+            buf[j] = (id as u8).wrapping_add(i as u8).wrapping_add(j as u8);
             j += 1;
         }
         if block_init::write(lba, &buf).is_err() {
@@ -3748,10 +3751,8 @@ fn test_block_vblk_rw() -> Outcome {
         if virtio_blk_init::barrier().is_err() {
             return Outcome::Fail("barrier");
         }
-        if virtio_blk_init::has_discard() {
-            if d.discard(5, 1).is_err() {
-                return Outcome::Fail("discard");
-            }
+        if virtio_blk_init::has_discard() && d.discard(5, 1).is_err() {
+            return Outcome::Fail("discard");
         }
         match d.read(0, &mut [0u8; 100]) {
             Err(BlockError::Inval) => {}
@@ -4134,7 +4135,10 @@ fn test_block_cache_hit() -> Outcome {
     let _ = writeln!(
         Serial,
         "vibeOS: cache: hits {} misses {} device {} raw {}",
-        s2.hits, s2.misses, s2.device_reqs(), raw_delta
+        s2.hits,
+        s2.misses,
+        s2.device_reqs(),
+        raw_delta
     );
     Outcome::Ok
 }

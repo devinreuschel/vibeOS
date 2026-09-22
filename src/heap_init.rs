@@ -8,9 +8,9 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
 
-use vibeos::heap::{Heap, HeapStats, HEAP_END, HEAP_INITIAL, HEAP_SIZE, HEAP_START, PAGE_SIZE};
+use vibeos::heap::{HEAP_END, HEAP_INITIAL, HEAP_SIZE, HEAP_START, Heap, HeapStats, PAGE_SIZE};
 use vibeos::lock::RANK_HEAP;
-use vibeos::paging::{heap_flags, PhysAddr, VirtAddr};
+use vibeos::paging::{PhysAddr, VirtAddr, heap_flags};
 
 use crate::paging_init;
 use crate::pmm_init;
@@ -34,9 +34,11 @@ pub unsafe fn init() {
         mapped += PAGE_SIZE;
     }
     unsafe {
-        HEAP.lock()
-            .0
-            .init(HEAP_START as usize, HEAP_INITIAL as usize, HEAP_SIZE as usize);
+        HEAP.lock().0.init(
+            HEAP_START as usize,
+            HEAP_INITIAL as usize,
+            HEAP_SIZE as usize,
+        );
     }
 }
 
@@ -129,6 +131,8 @@ struct KernelAlloc;
 const GROW_ROUNDS: u32 = 4096;
 
 unsafe impl GlobalAlloc for KernelAlloc {
+    /// # Safety
+    /// `layout` is a valid allocation request.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let mut n = 0u32;
         loop {
@@ -146,10 +150,14 @@ unsafe impl GlobalAlloc for KernelAlloc {
         }
     }
 
+    /// # Safety
+    /// `ptr` came from `alloc` with the same `layout`.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         unsafe { HEAP.lock().0.dealloc(ptr, layout) };
     }
 
+    /// # Safety
+    /// `ptr` came from `alloc` with `layout`; the returned pointer replaces it.
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let mut n = 0u32;
         loop {

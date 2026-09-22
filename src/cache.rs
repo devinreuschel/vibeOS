@@ -109,7 +109,10 @@ impl<const N: usize> Cache<N> {
             meta: [Meta::EMPTY; N],
             data: [[0u8; PAGE]; N],
             hand: 0,
-            last: CacheKey { dev: u32::MAX, offset: u64::MAX },
+            last: CacheKey {
+                dev: u32::MAX,
+                offset: u64::MAX,
+            },
             seq: 0,
             stats: CacheStats {
                 hits: 0,
@@ -181,8 +184,8 @@ impl<const N: usize> Cache<N> {
     }
 
     fn note_seq(&mut self, key: CacheKey) -> bool {
-        let seq = self.last.dev == key.dev
-            && self.last.offset.saturating_add(PAGE as u64) == key.offset;
+        let seq =
+            self.last.dev == key.dev && self.last.offset.saturating_add(PAGE as u64) == key.offset;
         self.last = key;
         if seq {
             self.seq = self.seq.saturating_add(1);
@@ -200,11 +203,7 @@ impl<const N: usize> Cache<N> {
         Ok(())
     }
 
-    fn stash_evict(
-        &self,
-        slot: usize,
-        evict_out: &mut [u8],
-    ) -> Result<(), BlockError> {
+    fn stash_evict(&self, slot: usize, evict_out: &mut [u8]) -> Result<(), BlockError> {
         self.copy_page(slot, evict_out)
     }
 
@@ -289,7 +288,11 @@ impl<const N: usize> Cache<N> {
         let mut fill = Fill {
             slot,
             key,
-            need: if whole { FillNeed::None } else { FillNeed::Read },
+            need: if whole {
+                FillNeed::None
+            } else {
+                FillNeed::Read
+            },
             evict_key: CacheKey { dev: 0, offset: 0 },
         };
         let f = self.meta[slot].flags;
@@ -392,11 +395,11 @@ impl<const N: usize> Cache<N> {
             let f = self.meta[s].flags;
             if f & (F_VALID | F_DIRTY | F_FILL) == F_VALID | F_DIRTY {
                 let key = self.meta[s].key;
-                if let Some(d) = dev {
-                    if key.dev != d {
-                        s += 1;
-                        continue;
-                    }
+                if let Some(d) = dev
+                    && key.dev != d
+                {
+                    s += 1;
+                    continue;
                 }
                 dst[..PAGE].copy_from_slice(&self.data[s]);
                 self.meta[s].flags = f & !F_DIRTY;
@@ -449,6 +452,12 @@ impl<const N: usize> Cache<N> {
     }
 }
 
+impl<const N: usize> Default for Cache<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn page_off(byte: u64) -> usize {
     (byte as usize) & (PAGE - 1)
 }
@@ -477,10 +486,7 @@ pub fn cached_read<B: Backend, const N: usize>(
                 if matches!(fill.need, FillNeed::None) {
                     return Err(BlockError::Io);
                 }
-                if matches!(
-                    fill.need,
-                    FillNeed::Writeback | FillNeed::WritebackThenRead
-                ) {
+                if matches!(fill.need, FillNeed::Writeback | FillNeed::WritebackThenRead) {
                     if let Err(e) = b.write(fill.evict_key.offset, &evict) {
                         c.restore_evict(fill.slot, fill.evict_key, &evict);
                         return Err(e);
@@ -500,29 +506,17 @@ pub fn cached_read<B: Backend, const N: usize>(
         }
         done += n;
     }
-    if let Some(rk) = c.want_readahead() {
-        if c.find(rk).is_none() {
-            let mut dummy = [0u8; 1];
-            if let Ok(Some(fill)) = c.plan_read(rk, 0, &mut dummy, &mut evict) {
-                match fill.need {
-                    FillNeed::None => c.abort_fill(fill.slot),
-                    FillNeed::Writeback | FillNeed::WritebackThenRead => {
-                        let _ = b.write(fill.evict_key.offset, &evict);
-                        c.stats.device_writes = c.stats.device_writes.saturating_add(1);
-                        if matches!(fill.need, FillNeed::WritebackThenRead | FillNeed::Read) {
-                            let mut page = [0u8; PAGE];
-                            if b.read(rk.offset, &mut page).is_ok() {
-                                c.stats.device_reads = c.stats.device_reads.saturating_add(1);
-                                let mut one = [0u8; 1];
-                                let _ = c.install_read(&fill, &page, 0, &mut one);
-                            } else {
-                                c.abort_fill(fill.slot);
-                            }
-                        } else {
-                            c.abort_fill(fill.slot);
-                        }
-                    }
-                    FillNeed::Read => {
+    if let Some(rk) = c.want_readahead()
+        && c.find(rk).is_none()
+    {
+        let mut dummy = [0u8; 1];
+        if let Ok(Some(fill)) = c.plan_read(rk, 0, &mut dummy, &mut evict) {
+            match fill.need {
+                FillNeed::None => c.abort_fill(fill.slot),
+                FillNeed::Writeback | FillNeed::WritebackThenRead => {
+                    let _ = b.write(fill.evict_key.offset, &evict);
+                    c.stats.device_writes = c.stats.device_writes.saturating_add(1);
+                    if matches!(fill.need, FillNeed::WritebackThenRead | FillNeed::Read) {
                         let mut page = [0u8; PAGE];
                         if b.read(rk.offset, &mut page).is_ok() {
                             c.stats.device_reads = c.stats.device_reads.saturating_add(1);
@@ -531,6 +525,18 @@ pub fn cached_read<B: Backend, const N: usize>(
                         } else {
                             c.abort_fill(fill.slot);
                         }
+                    } else {
+                        c.abort_fill(fill.slot);
+                    }
+                }
+                FillNeed::Read => {
+                    let mut page = [0u8; PAGE];
+                    if b.read(rk.offset, &mut page).is_ok() {
+                        c.stats.device_reads = c.stats.device_reads.saturating_add(1);
+                        let mut one = [0u8; 1];
+                        let _ = c.install_read(&fill, &page, 0, &mut one);
+                    } else {
+                        c.abort_fill(fill.slot);
                     }
                 }
             }
@@ -562,10 +568,7 @@ pub fn cached_write<B: Backend, const N: usize>(
                 if matches!(fill.need, FillNeed::None) {
                     return Err(BlockError::Io);
                 }
-                if matches!(
-                    fill.need,
-                    FillNeed::Writeback | FillNeed::WritebackThenRead
-                ) {
+                if matches!(fill.need, FillNeed::Writeback | FillNeed::WritebackThenRead) {
                     if let Err(e) = b.write(fill.evict_key.offset, &evict) {
                         c.restore_evict(fill.slot, fill.evict_key, &evict);
                         return Err(e);
@@ -597,10 +600,7 @@ fn writeback_all<B: Backend, const N: usize>(
 ) -> Result<(), BlockError> {
     let mut data = [0u8; PAGE];
     let mut start = 0usize;
-    loop {
-        let Some((slot, key)) = c.take_dirty(start, dev, &mut data) else {
-            break;
-        };
+    while let Some((slot, key)) = c.take_dirty(start, dev, &mut data) {
         if let Err(e) = b.write(key.offset, &data) {
             c.mark_dirty(slot, key);
             return Err(e);

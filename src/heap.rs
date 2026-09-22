@@ -80,7 +80,7 @@ impl Heap {
     /// `[base, base+mapped)` must be writable, unused, and not overlap
     /// any live allocation. `base` 16-aligned.
     pub unsafe fn init(&mut self, base: usize, mapped: usize, cap: usize) {
-        assert!(base % core::mem::align_of::<FreeBlock>() == 0);
+        assert!(base.is_multiple_of(core::mem::align_of::<FreeBlock>()));
         assert!(mapped >= MIN_SPLIT);
         assert!(mapped <= cap);
         self.base = base;
@@ -136,6 +136,8 @@ impl Heap {
         unsafe { self.insert_free(start as *mut u8, add) };
     }
 
+    /// # Safety
+    /// Caller must treat the returned pointer as `layout`-sized until `dealloc`.
     pub unsafe fn alloc(&mut self, layout: Layout) -> *mut u8 {
         if layout.size() == 0 {
             return dangling(layout.align());
@@ -158,6 +160,8 @@ impl Heap {
         ptr::null_mut()
     }
 
+    /// # Safety
+    /// `ptr` came from `alloc` with the same `layout` and is not used after.
     pub unsafe fn dealloc(&mut self, ptr: *mut u8, layout: Layout) {
         if layout.size() == 0 || ptr.is_null() {
             return;
@@ -169,6 +173,9 @@ impl Heap {
     /// In-place if the existing block fits `new_size` at the same align;
     /// otherwise allocate / copy / free. Returns null on failure and
     /// leaves the original allocation live (GlobalAlloc contract).
+    ///
+    /// # Safety
+    /// `ptr` came from `alloc` with `layout`; the returned pointer replaces it.
     pub unsafe fn realloc(&mut self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         if ptr.is_null() {
             return unsafe {
@@ -205,11 +212,16 @@ impl Heap {
         new_ptr
     }
 
+    /// # Safety
+    /// `start` is a live block header this heap owns.
     unsafe fn resize_block(&mut self, start: *mut u8, new_size: usize) {
         unsafe { (start as *mut usize).write(new_size) };
     }
 
     /// Place `layout` inside `[block, block+size)`, splitting the tail.
+    ///
+    /// # Safety
+    /// `block` is an unlinked free block of `size` bytes this heap owns.
     unsafe fn carve(&mut self, block: *mut u8, size: usize, layout: Layout) -> *mut u8 {
         let user = align_up(block as usize + HEADER + BACKPTR, layout.align());
         debug_assert!(user + layout.size() <= block as usize + size);
@@ -230,6 +242,9 @@ impl Heap {
     /// Insert `[ptr, ptr+size)` into the address-sorted free list,
     /// coalescing with immediate neighbours. Panics on overlap (double
     /// free or a wild pointer).
+    ///
+    /// # Safety
+    /// `[ptr, ptr+size)` is unused heap memory this allocator owns.
     unsafe fn insert_free(&mut self, ptr: *mut u8, size: usize) {
         assert!(size >= HEADER);
         let start = ptr as usize;
@@ -308,6 +323,8 @@ fn dangling(align: usize) -> *mut u8 {
     align as *mut u8
 }
 
+/// # Safety
+/// `user` is a live allocation from this heap.
 unsafe fn recover(user: *mut u8) -> (*mut u8, usize) {
     let back = (user as usize - BACKPTR) as *const usize;
     let off = unsafe { back.read() };

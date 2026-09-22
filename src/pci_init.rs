@@ -96,9 +96,7 @@ fn map_mmio(phys: u64, len: u64, keep_wb: bool) -> Option<u64> {
     // Limine's surface (and thus map_end) is often smaller than the BAR
     // (16 MiB); fill missing physmap leaves as WB so BAR0 is mapped.
     if keep_wb || fb_init::overlaps_phys(phys, len) {
-        if paging_init::ensure_physmap_wb(PhysAddr(phys), len)
-            || phys < paging_init::map_end()
-        {
+        if paging_init::ensure_physmap_wb(PhysAddr(phys), len) || phys < paging_init::map_end() {
             return Some(paging_init::HHDM_BASE.wrapping_add(phys));
         }
         return None;

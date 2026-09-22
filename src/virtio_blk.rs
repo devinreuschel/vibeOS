@@ -68,7 +68,7 @@ pub fn pick_features(device: u64) -> Result<u64, virtio::VirtioError> {
 /// Logical block size. Missing [`F_BLK_SIZE`] → 512. Never trust a
 /// zero or non-multiple-of-512 `blk_size` from config.
 pub fn pick_blk_size(feat: u64, cfg_blk_size: u32) -> u32 {
-    if feat & F_BLK_SIZE != 0 && cfg_blk_size >= SECTOR && cfg_blk_size % SECTOR == 0 {
+    if feat & F_BLK_SIZE != 0 && cfg_blk_size >= SECTOR && cfg_blk_size.is_multiple_of(SECTOR) {
         cfg_blk_size
     } else {
         SECTOR
@@ -76,14 +76,14 @@ pub fn pick_blk_size(feat: u64, cfg_blk_size: u32) -> u32 {
 }
 
 pub fn sector_for_lba(lba: u64, blk_size: u32) -> Option<u64> {
-    if blk_size < SECTOR || blk_size % SECTOR != 0 {
+    if blk_size < SECTOR || !blk_size.is_multiple_of(SECTOR) {
         return None;
     }
     lba.checked_mul((blk_size / SECTOR) as u64)
 }
 
 pub fn logical_capacity(capacity_512: u64, blk_size: u32) -> Option<u64> {
-    if blk_size < SECTOR || blk_size % SECTOR != 0 {
+    if blk_size < SECTOR || !blk_size.is_multiple_of(SECTOR) {
         return None;
     }
     let n = (blk_size / SECTOR) as u64;

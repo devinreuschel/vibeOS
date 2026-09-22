@@ -324,42 +324,40 @@ pub fn parse_madt(bytes: &[u8]) -> Result<MadtInfo, AcpiError> {
             MADT_TYPE_LAPIC => {
                 if len >= 8 {
                     let flags = read_unaligned_u32(rec, 4).unwrap_or(0);
-                    if flags & LAPIC_ENABLED != 0 {
-                        if let Some(slot) = info.apic_ids.get_mut(info.cpu_count) {
-                            *slot = rec[3];
-                            info.cpu_count += 1;
-                        }
+                    if flags & LAPIC_ENABLED != 0
+                        && let Some(slot) = info.apic_ids.get_mut(info.cpu_count)
+                    {
+                        *slot = rec[3];
+                        info.cpu_count += 1;
                     }
                 }
             }
             MADT_TYPE_IOAPIC => {
-                if len >= 12 {
-                    if let Some(slot) = info.ioapics.get_mut(info.ioapic_count) {
-                        *slot = IoApic {
-                            id: rec[2],
-                            addr: read_unaligned_u32(rec, 4).unwrap_or(0),
-                            gsi_base: read_unaligned_u32(rec, 8).unwrap_or(0),
-                        };
-                        info.ioapic_count += 1;
-                    }
+                if len >= 12
+                    && let Some(slot) = info.ioapics.get_mut(info.ioapic_count)
+                {
+                    *slot = IoApic {
+                        id: rec[2],
+                        addr: read_unaligned_u32(rec, 4).unwrap_or(0),
+                        gsi_base: read_unaligned_u32(rec, 8).unwrap_or(0),
+                    };
+                    info.ioapic_count += 1;
                 }
             }
             MADT_TYPE_ISO => {
-                if len >= 10 {
-                    if let Some(slot) = info.isos.get_mut(info.iso_count) {
-                        *slot = Iso {
-                            irq: rec[3],
-                            gsi: read_unaligned_u32(rec, 4).unwrap_or(0),
-                            flags: read_unaligned_u16(rec, 8).unwrap_or(0),
-                        };
-                        info.iso_count += 1;
-                    }
+                if len >= 10
+                    && let Some(slot) = info.isos.get_mut(info.iso_count)
+                {
+                    *slot = Iso {
+                        irq: rec[3],
+                        gsi: read_unaligned_u32(rec, 4).unwrap_or(0),
+                        flags: read_unaligned_u16(rec, 8).unwrap_or(0),
+                    };
+                    info.iso_count += 1;
                 }
             }
-            MADT_TYPE_LAPIC_ADDR_OVERRIDE => {
-                if len >= 12 {
-                    info.lapic_base = read_unaligned_u64(rec, 4).unwrap_or(info.lapic_base);
-                }
+            MADT_TYPE_LAPIC_ADDR_OVERRIDE if len >= 12 => {
+                info.lapic_base = read_unaligned_u64(rec, 4).unwrap_or(info.lapic_base);
             }
             _ => {}
         }
@@ -728,7 +726,11 @@ mod tests {
         let mut b = rsdp_v2(0x2000, 0x1000);
         // Flip a v2-only byte so the 20-byte checksum still passes.
         b[33] ^= 0xFF;
-        assert_eq!(checksum(&b[..RSDP_V1_LEN]), 0, "v1 checksum must still pass");
+        assert_eq!(
+            checksum(&b[..RSDP_V1_LEN]),
+            0,
+            "v1 checksum must still pass"
+        );
         assert_eq!(parse_rsdp(&b), Err(AcpiError::BadChecksum));
     }
 

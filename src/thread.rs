@@ -212,7 +212,10 @@ const _: () = {
 /// IF is off (`rflags = 0x2`). `schedule` applies [`apply_if_on_resume`]
 /// so a first-run or timer-preempted thread is not stuck tick-deaf.
 pub fn prepare_thread(ctx: &mut CpuContext, stack_top: u64, entry: u64) {
-    assert!(stack_top % 16 == 0, "thread stack top must be 16-aligned");
+    assert!(
+        stack_top.is_multiple_of(16),
+        "thread stack top must be 16-aligned"
+    );
     *ctx = CpuContext::empty();
     ctx.rip = entry;
     ctx.rsp = stack_top - 8;

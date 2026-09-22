@@ -24,9 +24,14 @@ impl<T> BootCell<T> {
     const fn new(v: T) -> Self {
         Self(core::cell::UnsafeCell::new(v))
     }
+    /// # Safety
+    /// Exclusive boot/IRQ-off access; cell is initialized.
+    #[allow(clippy::mut_from_ref)] // boot cell, IRQ-off exclusive
     unsafe fn get_mut(&self) -> &mut T {
         unsafe { &mut *self.0.get() }
     }
+    /// # Safety
+    /// Cell is initialized.
     unsafe fn get(&self) -> &T {
         unsafe { &*self.0.get() }
     }
@@ -43,10 +48,7 @@ fn apic_id() -> u32 {
 }
 
 fn madt_cpu_count() -> usize {
-    acpi_init::info()
-        .map(|i| i.cpu_count())
-        .unwrap_or(0)
-        .max(1)
+    acpi_init::info().map(|i| i.cpu_count()).unwrap_or(0).max(1)
 }
 
 /// Allocate the heap array, install the BSP at slot 0.

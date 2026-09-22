@@ -6,8 +6,8 @@ use core::fmt::Write;
 
 use vibeos::addr_space::{AddressSpace, AsError, UserMemError, UserPerms};
 use vibeos::elf::{
-    self, Auxv, ElfError, Image, AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_FLAGS, AT_GID,
-    AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM, AT_SECURE, AT_UID,
+    self, AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_FLAGS, AT_GID, AT_PAGESZ, AT_PHDR,
+    AT_PHENT, AT_PHNUM, AT_SECURE, AT_UID, Auxv, ElfError, Image,
 };
 use vibeos::fs::{FsError, O_RDONLY};
 use vibeos::paging::PAGE_SIZE_4K;
@@ -117,21 +117,13 @@ fn map_loads(space: &mut AddressSpace, img: &Image<'_>) -> Result<(), LoadError>
 fn map_stack(space: &mut AddressSpace, exec: bool) -> Result<(u64, u64), LoadError> {
     let len = STACK_PAGES * PAGE_SIZE_4K;
     let base = STACK_TOP - len;
-    let perms = if exec {
-        UserPerms::RWX
-    } else {
-        UserPerms::RW
-    };
+    let perms = if exec { UserPerms::RWX } else { UserPerms::RW };
     unsafe { addr_space_init::map_anon(space, base, len, perms) }.map_err(LoadError::As)?;
     space.zero_bytes(base, len).map_err(LoadError::Mem)?;
     Ok((base, STACK_TOP))
 }
 
-fn setup_tls(
-    space: &mut AddressSpace,
-    img: &Image<'_>,
-    stack_base: u64,
-) -> Result<u64, LoadError> {
+fn setup_tls(space: &mut AddressSpace, img: &Image<'_>, stack_base: u64) -> Result<u64, LoadError> {
     let Some(tls) = img.tls else {
         return Ok(0);
     };
@@ -172,11 +164,7 @@ fn at_random() -> [u8; 16] {
     b
 }
 
-fn fill_stack(
-    space: &AddressSpace,
-    img: &Image<'_>,
-    argv: &[&str],
-) -> Result<u64, LoadError> {
+fn fill_stack(space: &AddressSpace, img: &Image<'_>, argv: &[&str]) -> Result<u64, LoadError> {
     let len = (STACK_PAGES * PAGE_SIZE_4K) as usize;
     let mut mem = vec![0u8; len];
     let mut argv_b: Vec<&[u8]> = Vec::new();
@@ -206,14 +194,38 @@ fn fill_stack(
             tag: AT_PHDR,
             val: img.phdr_va.unwrap_or(0),
         },
-        Auxv { tag: AT_BASE, val: 0 },
-        Auxv { tag: AT_FLAGS, val: 0 },
-        Auxv { tag: AT_UID, val: 0 },
-        Auxv { tag: AT_EUID, val: 0 },
-        Auxv { tag: AT_GID, val: 0 },
-        Auxv { tag: AT_EGID, val: 0 },
-        Auxv { tag: AT_CLKTCK, val: 100 },
-        Auxv { tag: AT_SECURE, val: 0 },
+        Auxv {
+            tag: AT_BASE,
+            val: 0,
+        },
+        Auxv {
+            tag: AT_FLAGS,
+            val: 0,
+        },
+        Auxv {
+            tag: AT_UID,
+            val: 0,
+        },
+        Auxv {
+            tag: AT_EUID,
+            val: 0,
+        },
+        Auxv {
+            tag: AT_GID,
+            val: 0,
+        },
+        Auxv {
+            tag: AT_EGID,
+            val: 0,
+        },
+        Auxv {
+            tag: AT_CLKTCK,
+            val: 100,
+        },
+        Auxv {
+            tag: AT_SECURE,
+            val: 0,
+        },
     ];
     if img.phdr_va.is_none() {
         aux[4].val = 0;
@@ -258,9 +270,8 @@ pub fn load_path(path: &str, argv: &[&str]) -> Result<Loaded, LoadError> {
 pub fn run_path(path: &str) -> Result<i32, LoadError> {
     let mut loaded = load_path(path, &[path])?;
     let _pid = proc_init::bind_current(&mut loaded.space, intern(path));
-    let status = unsafe {
-        syscall_init::run_user(&mut loaded.space, loaded.entry, loaded.rsp, loaded.fs)
-    };
+    let status =
+        unsafe { syscall_init::run_user(&mut loaded.space, loaded.entry, loaded.rsp, loaded.fs) };
     proc_init::unbind_current();
     crate::addr_space_init::load_kernel_cr3();
     addr_space_init::teardown(loaded.space);

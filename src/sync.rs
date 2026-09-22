@@ -43,12 +43,10 @@ impl SpinLock {
     /// One CAS. `false` if held by someone else. Panics on recurse.
     pub fn try_acquire(&self, owner: usize) -> bool {
         assert!(owner != UNLOCKED, "spin: owner 0 is reserved");
-        match self.locked.compare_exchange(
-            false,
-            true,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        ) {
+        match self
+            .locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        {
             Ok(_) => {
                 self.owner.store(owner, Ordering::Relaxed);
                 true
@@ -63,11 +61,20 @@ impl SpinLock {
 
     /// Release. Panics if free or `owner` does not hold it.
     pub fn release(&self, owner: usize) {
-        assert!(self.locked.load(Ordering::Relaxed), "spin: unlock of free lock");
+        assert!(
+            self.locked.load(Ordering::Relaxed),
+            "spin: unlock of free lock"
+        );
         let held = self.owner.load(Ordering::Relaxed);
         assert!(held == owner, "spin: unlock by non-owner");
         self.owner.store(UNLOCKED, Ordering::Relaxed);
         self.locked.store(false, Ordering::Release);
+    }
+}
+
+impl Default for SpinLock {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

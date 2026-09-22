@@ -30,7 +30,7 @@
 //! Real TLB shootdown IPIs: `tlb_shootdown_others` is a hook the
 //! kernel installs (DESIGN §4.3 / §7.9). Host tests leave it unset.
 
-#![allow(clippy::identity_op)]
+#![allow(clippy::identity_op)] // PTE masks read as `x << n` even when n is 0
 
 pub const PAGE_SHIFT: u32 = 12;
 pub const PAGE_SIZE_4K: u64 = 1 << PAGE_SHIFT;
@@ -289,9 +289,8 @@ impl Mapper {
                 // Interior tables always writable, always non-NX.
                 // Setting USER here is fine — permission is masked by
                 // the leaf's flags for kernel VAs.
-                let interior = PageFlags(
-                    PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER,
-                );
+                let interior =
+                    PageFlags(PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER);
                 unsafe { entry_ptr.write_volatile(make_pte(new, interior)) };
                 table_phys = new;
             } else {
@@ -659,10 +658,7 @@ impl Mapper {
             let huge = (e & PageFlags::HUGE) != 0;
             let leaf = level == 1 || huge;
             if leaf {
-                assert!(
-                    level == 1 && !huge,
-                    "addrspace: unexpected huge user leaf"
-                );
+                assert!(level == 1 && !huge, "addrspace: unexpected huge user leaf");
                 free(child);
                 stats.leaves += 1;
             } else {
@@ -681,7 +677,7 @@ impl Mapper {
     /// `phys` must be an owned, page-sized frame reachable via
     /// `hhdm_offset`.
     pub unsafe fn zero_frame(&self, phys: PhysAddr) {
-        let ptr = self.table_ptr(phys) as *mut u64;
+        let ptr = self.table_ptr(phys);
         for i in 0..PTES_PER_TABLE {
             unsafe { ptr.add(i).write_volatile(0) };
         }
@@ -759,17 +755,19 @@ fn slot_remaining(va: u64, level: u8) -> u64 {
     let span = 1u64 << (12 + 9 * (level as u32 - 1));
     let slot_base = va & !(span - 1);
     let slot_end = slot_base.wrapping_add(span);
-    if slot_end > va {
-        slot_end - va
-    } else {
-        span
-    }
+    if slot_end > va { slot_end - va } else { span }
 }
 
 /// Standard MMIO leaf flags per DESIGN §4.3 PTE flag policy table.
 pub const fn mmio_flags() -> PageFlags {
-    PageFlags(PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::GLOBAL | PageFlags::NX
-              | PageFlags::PCD | PageFlags::PWT)
+    PageFlags(
+        PageFlags::PRESENT
+            | PageFlags::WRITABLE
+            | PageFlags::GLOBAL
+            | PageFlags::NX
+            | PageFlags::PCD
+            | PageFlags::PWT,
+    )
 }
 
 /// Physmap leaf flags: writable, NX, global.
@@ -904,10 +902,22 @@ mod tests {
         // 0x1_2345_6789_abcd: pick out per-level indices.
         let v = VirtAddr(0x0000_1234_5678_9abc);
         // l1 = bits 12..21, l2 = 21..30, l3 = 30..39, l4 = 39..48.
-        assert_eq!(v.index(1), ((0x0000_1234_5678_9abcu64 >> 12) & 0x1FF) as usize);
-        assert_eq!(v.index(2), ((0x0000_1234_5678_9abcu64 >> 21) & 0x1FF) as usize);
-        assert_eq!(v.index(3), ((0x0000_1234_5678_9abcu64 >> 30) & 0x1FF) as usize);
-        assert_eq!(v.index(4), ((0x0000_1234_5678_9abcu64 >> 39) & 0x1FF) as usize);
+        assert_eq!(
+            v.index(1),
+            ((0x0000_1234_5678_9abcu64 >> 12) & 0x1FF) as usize
+        );
+        assert_eq!(
+            v.index(2),
+            ((0x0000_1234_5678_9abcu64 >> 21) & 0x1FF) as usize
+        );
+        assert_eq!(
+            v.index(3),
+            ((0x0000_1234_5678_9abcu64 >> 30) & 0x1FF) as usize
+        );
+        assert_eq!(
+            v.index(4),
+            ((0x0000_1234_5678_9abcu64 >> 39) & 0x1FF) as usize
+        );
     }
 
     #[test]
@@ -938,8 +948,15 @@ mod tests {
         let va = VirtAddr(0xFFFF_C000_0010_0000);
         let pa = PhysAddr(0x0080_0000);
         unsafe {
-            m.map_page(va, pa, physmap_flags(), PageSize::Size4K, MapMode::Fresh, &mut pool)
-                .unwrap();
+            m.map_page(
+                va,
+                pa,
+                physmap_flags(),
+                PageSize::Size4K,
+                MapMode::Fresh,
+                &mut pool,
+            )
+            .unwrap();
         }
         let (got, size, flags) = m.translate(va).unwrap();
         assert_eq!(got, pa);
@@ -962,8 +979,15 @@ mod tests {
         let va = VirtAddr(0xFFFF_8000_0020_0000);
         let pa = PhysAddr(0x0040_0000);
         unsafe {
-            m.map_page(va, pa, physmap_flags(), PageSize::Size2M, MapMode::Fresh, &mut pool)
-                .unwrap();
+            m.map_page(
+                va,
+                pa,
+                physmap_flags(),
+                PageSize::Size2M,
+                MapMode::Fresh,
+                &mut pool,
+            )
+            .unwrap();
         }
         let (got, size, _) = m.translate(va).unwrap();
         assert_eq!(got, pa);
@@ -981,8 +1005,15 @@ mod tests {
         let va = VirtAddr(0xFFFF_8000_0020_1000); // not 2M-aligned
         let pa = PhysAddr(0x0040_0000);
         let err = unsafe {
-            m.map_page(va, pa, physmap_flags(), PageSize::Size2M, MapMode::Fresh, &mut pool)
-                .unwrap_err()
+            m.map_page(
+                va,
+                pa,
+                physmap_flags(),
+                PageSize::Size2M,
+                MapMode::Fresh,
+                &mut pool,
+            )
+            .unwrap_err()
         };
         assert_eq!(err, MapError::Misaligned);
     }
@@ -995,8 +1026,15 @@ mod tests {
         let pa = PhysAddr(0);
         // 6 MiB: three whole 2M pages, no tail.
         unsafe {
-            m.map_range(va, pa, 6 * PAGE_SIZE_2M, physmap_flags(), MapMode::Fresh, &mut pool)
-                .unwrap();
+            m.map_range(
+                va,
+                pa,
+                6 * PAGE_SIZE_2M,
+                physmap_flags(),
+                MapMode::Fresh,
+                &mut pool,
+            )
+            .unwrap();
         }
         for i in 0..3 {
             let (got, size, _) = m.translate(VirtAddr(va.0 + i * PAGE_SIZE_2M)).unwrap();
@@ -1035,20 +1073,39 @@ mod tests {
         let va = VirtAddr(0xFFFF_C000_0000_0000);
         let pa = PhysAddr(0x0080_0000);
         unsafe {
-            m.map_page(va, pa, physmap_flags(), PageSize::Size4K, MapMode::Fresh, &mut pool)
-                .unwrap();
+            m.map_page(
+                va,
+                pa,
+                physmap_flags(),
+                PageSize::Size4K,
+                MapMode::Fresh,
+                &mut pool,
+            )
+            .unwrap();
         }
         let err = unsafe {
-            m.map_page(va, PhysAddr(0x0090_0000), physmap_flags(),
-                       PageSize::Size4K, MapMode::Fresh, &mut pool)
-                .unwrap_err()
+            m.map_page(
+                va,
+                PhysAddr(0x0090_0000),
+                physmap_flags(),
+                PageSize::Size4K,
+                MapMode::Fresh,
+                &mut pool,
+            )
+            .unwrap_err()
         };
         assert_eq!(err, MapError::AlreadyMapped);
         // Remap replaces the leaf.
         unsafe {
-            m.map_page(va, PhysAddr(0x0090_0000), physmap_flags(),
-                       PageSize::Size4K, MapMode::Remap, &mut pool)
-                .unwrap();
+            m.map_page(
+                va,
+                PhysAddr(0x0090_0000),
+                physmap_flags(),
+                PageSize::Size4K,
+                MapMode::Remap,
+                &mut pool,
+            )
+            .unwrap();
         }
         assert_eq!(m.translate(va).unwrap().0, PhysAddr(0x0090_0000));
     }
@@ -1060,17 +1117,29 @@ mod tests {
         let va = VirtAddr(0xFFFF_8000_0040_0000);
         // Place a 2M leaf.
         unsafe {
-            m.map_page(va, PhysAddr(0x0080_0000), physmap_flags(),
-                       PageSize::Size2M, MapMode::Fresh, &mut pool)
-                .unwrap();
+            m.map_page(
+                va,
+                PhysAddr(0x0080_0000),
+                physmap_flags(),
+                PageSize::Size2M,
+                MapMode::Fresh,
+                &mut pool,
+            )
+            .unwrap();
         }
         // Attempt a 4K page inside the 2M region: the L2 slot is a huge
         // leaf, so the walk to L1 fails with PageSizeMismatch.
         let inside = VirtAddr(va.0 + PAGE_SIZE_4K);
         let err = unsafe {
-            m.map_page(inside, PhysAddr(0x0090_0000), physmap_flags(),
-                       PageSize::Size4K, MapMode::Fresh, &mut pool)
-                .unwrap_err()
+            m.map_page(
+                inside,
+                PhysAddr(0x0090_0000),
+                physmap_flags(),
+                PageSize::Size4K,
+                MapMode::Fresh,
+                &mut pool,
+            )
+            .unwrap_err()
         };
         assert_eq!(err, MapError::PageSizeMismatch);
     }
@@ -1082,9 +1151,15 @@ mod tests {
         // Fake up a physmap at HHDM_START mapping [0, 4 MiB) with 2M pages.
         let hhdm = VirtAddr(0xFFFF_8000_0000_0000);
         unsafe {
-            m.map_range(hhdm, PhysAddr(0), 4 * PAGE_SIZE_2M,
-                        physmap_flags(), MapMode::Fresh, &mut pool)
-                .unwrap();
+            m.map_range(
+                hhdm,
+                PhysAddr(0),
+                4 * PAGE_SIZE_2M,
+                physmap_flags(),
+                MapMode::Fresh,
+                &mut pool,
+            )
+            .unwrap();
         }
         // Patch 8 KiB starting at phys 0x0020_1000: falls inside the
         // second 2M page. patch should touch exactly one 2M leaf and
@@ -1113,7 +1188,10 @@ mod tests {
         let mut m = fresh_mapper(&mut pool);
         let hhdm = VirtAddr(0xFFFF_8000_0000_0000);
         // Deliberately do NOT map anything into hhdm before patching.
-        let err = unsafe { m.patch_physmap_uc(hhdm, PhysAddr(0), PAGE_SIZE_4K).unwrap_err() };
+        let err = unsafe {
+            m.patch_physmap_uc(hhdm, PhysAddr(0), PAGE_SIZE_4K)
+                .unwrap_err()
+        };
         assert_eq!(err, MapError::NotMapped);
     }
 
@@ -1139,8 +1217,15 @@ mod tests {
         let a = VirtAddr(0xFFFF_C000_0000_0000);
         let b = VirtAddr(0xFFFF_C000_0020_0000); // 2 MiB later
         unsafe {
-            m.map_page(a, PhysAddr(0x0080_0000), physmap_flags(), PageSize::Size4K, MapMode::Fresh, &mut pool)
-                .unwrap();
+            m.map_page(
+                a,
+                PhysAddr(0x0080_0000),
+                physmap_flags(),
+                PageSize::Size4K,
+                MapMode::Fresh,
+                &mut pool,
+            )
+            .unwrap();
             m.map_page(
                 VirtAddr(a.0 + PAGE_SIZE_4K),
                 PhysAddr(0x0080_1000),
@@ -1150,17 +1235,31 @@ mod tests {
                 &mut pool,
             )
             .unwrap();
-            m.map_page(b, PhysAddr(0x0090_0000), physmap_flags(), PageSize::Size4K, MapMode::Fresh, &mut pool)
-                .unwrap();
+            m.map_page(
+                b,
+                PhysAddr(0x0090_0000),
+                physmap_flags(),
+                PageSize::Size4K,
+                MapMode::Fresh,
+                &mut pool,
+            )
+            .unwrap();
         }
         let mut ranges = Vec::new();
-        m.walk_ranges(VirtAddr(0xFFFF_C000_0000_0000), VirtAddr(0xFFFF_C000_0040_0000), |va, len, _, size| {
-            ranges.push((va, len, size));
-        });
+        m.walk_ranges(
+            VirtAddr(0xFFFF_C000_0000_0000),
+            VirtAddr(0xFFFF_C000_0040_0000),
+            |va, len, _, size| {
+                ranges.push((va, len, size));
+            },
+        );
         assert_eq!(ranges.len(), 2, "two 4K pages should coalesce; hole splits");
         assert_eq!(ranges[0], (a.0, 2 * PAGE_SIZE_4K, PageSize::Size4K));
         assert_eq!(ranges[1], (b.0, PAGE_SIZE_4K, PageSize::Size4K));
-        assert!(m.range_unmapped(VirtAddr(0xFFFF_D000_0000_0000), VirtAddr(0xFFFF_D000_0010_0000)));
+        assert!(m.range_unmapped(
+            VirtAddr(0xFFFF_D000_0000_0000),
+            VirtAddr(0xFFFF_D000_0010_0000)
+        ));
         assert!(!m.range_unmapped(a, VirtAddr(a.0 + PAGE_SIZE_4K)));
     }
 }

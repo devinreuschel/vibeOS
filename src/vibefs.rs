@@ -105,7 +105,7 @@ pub struct MemDisk<'a> {
 
 impl<'a> MemDisk<'a> {
     pub fn new(data: &'a mut [u8]) -> Result<Self, Error> {
-        if data.len() < MIN_BLOCKS as usize * BLOCK || data.len() % BLOCK != 0 {
+        if data.len() < MIN_BLOCKS as usize * BLOCK || !data.len().is_multiple_of(BLOCK) {
             return Err(Error::Inval);
         }
         if data.len() / BLOCK > MAX_BLOCKS {
@@ -159,7 +159,7 @@ pub struct CrashDisk<'a> {
 
 impl<'a> CrashDisk<'a> {
     pub fn new(data: &'a mut [u8], limit: u64) -> Result<Self, Error> {
-        if data.len() < MIN_BLOCKS as usize * BLOCK || data.len() % BLOCK != 0 {
+        if data.len() < MIN_BLOCKS as usize * BLOCK || !data.len().is_multiple_of(BLOCK) {
             return Err(Error::Inval);
         }
         Ok(Self {
@@ -440,9 +440,9 @@ pub struct Vol {
     pub label: [u8; 32],
     pub flags: u8,
     pub dirty: bool,
-    bitmap: [u8; (MAX_BLOCKS + 7) / 8],
+    bitmap: [u8; MAX_BLOCKS.div_ceil(8)],
     refc: [u8; MAX_BLOCKS],
-    txn: [u8; (MAX_BLOCKS + 7) / 8],
+    txn: [u8; MAX_BLOCKS.div_ceil(8)],
     inodes: [Inode; MAX_INODES],
     dents: [Dent; MAX_DENTS],
     pub snaps: [Snap; MAX_SNAPS],
@@ -466,9 +466,9 @@ impl Vol {
             label: [0; 32],
             flags: FLAG_DATA_CRC,
             dirty: false,
-            bitmap: [0; (MAX_BLOCKS + 7) / 8],
+            bitmap: [0; MAX_BLOCKS.div_ceil(8)],
             refc: [0; MAX_BLOCKS],
-            txn: [0; (MAX_BLOCKS + 7) / 8],
+            txn: [0; MAX_BLOCKS.div_ceil(8)],
             inodes: [Inode::EMPTY; MAX_INODES],
             dents: [Dent::EMPTY; MAX_DENTS],
             snaps: [Snap::EMPTY; MAX_SNAPS],
@@ -524,6 +524,12 @@ impl Vol {
         }
         self.ndrop = 0;
         self.iobuf.fill(0);
+    }
+}
+
+impl Default for Vol {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -779,22 +785,18 @@ fn pick_super<D: Disk>(d: &mut D, buf: &mut [u8; BLOCK]) -> Result<SuperInfo, Er
     let mut best: Option<SuperInfo> = None;
     let mut slot = 0u8;
     while slot < 2 {
-        match d.read_block(slot as u32, buf) {
-            Ok(()) => {
-                if let Ok(s) = parse_super(buf, slot) {
-                    let take = match &best {
-                        None => true,
-                        Some(b) => {
-                            s.generation > b.generation
-                                || (s.generation == b.generation && slot == 0)
-                        }
-                    };
-                    if take {
-                        best = Some(s);
-                    }
+        if let Ok(()) = d.read_block(slot as u32, buf)
+            && let Ok(s) = parse_super(buf, slot)
+        {
+            let take = match &best {
+                None => true,
+                Some(b) => {
+                    s.generation > b.generation || (s.generation == b.generation && slot == 0)
                 }
+            };
+            if take {
+                best = Some(s);
             }
-            Err(_) => {}
         }
         slot += 1;
     }
@@ -807,7 +809,7 @@ pub fn probe<D: Disk>(d: &mut D) -> bool {
 }
 
 fn write_alloc_into(v: &Vol, buf: &mut [u8; BLOCK]) {
-    let nbytes = ((v.nblocks as usize) + 7) / 8;
+    let nbytes = (v.nblocks as usize).div_ceil(8);
     meta_hdr(buf, META_ALLOC, 0, v.nblocks as u16, v.generation, 0);
     buf[HDR..HDR + nbytes].copy_from_slice(&v.bitmap[..nbytes]);
     buf[HDR + nbytes..HDR + nbytes + v.nblocks as usize]
@@ -817,7 +819,7 @@ fn write_alloc_into(v: &Vol, buf: &mut [u8; BLOCK]) {
 
 fn load_alloc(v: &mut Vol, buf: &[u8; BLOCK]) -> Result<(), Error> {
     parse_meta(buf, META_ALLOC)?;
-    let nbytes = ((v.nblocks as usize) + 7) / 8;
+    let nbytes = (v.nblocks as usize).div_ceil(8);
     if HDR + nbytes + v.nblocks as usize > BLOCK {
         return Err(Error::Corrupt);
     }
@@ -921,7 +923,8 @@ impl Vol {
     fn find_dent(&self, parent: u32, name: &[u8]) -> Result<usize, Error> {
         let mut i = 0usize;
         while i < MAX_DENTS {
-            if self.dents[i].used && self.dents[i].parent == parent && self.dents[i].name() == name {
+            if self.dents[i].used && self.dents[i].parent == parent && self.dents[i].name() == name
+            {
                 return Ok(i);
             }
             i += 1;
@@ -1254,7 +1257,7 @@ impl Vol {
             self.inodes[is].n_ext = 0;
             return Ok(());
         }
-        let nb = ((size + BLOCK - 1) / BLOCK) as u32;
+        let nb = size.div_ceil(BLOCK) as u32;
         if nb as usize > MAX_EXT {
             return Err(Error::NoSpace);
         }
@@ -1343,7 +1346,14 @@ impl Vol {
         Ok(want)
     }
 
-    fn add_extent(&mut self, is: usize, log: u32, phys: u32, len: u32, crc: u32) -> Result<(), Error> {
+    fn add_extent(
+        &mut self,
+        is: usize,
+        log: u32,
+        phys: u32,
+        len: u32,
+        crc: u32,
+    ) -> Result<(), Error> {
         let n = self.inodes[is].n_ext as usize;
         if n >= MAX_EXT {
             return Err(Error::NoSpace);
@@ -1373,7 +1383,9 @@ impl Vol {
             return Err(Error::Inval);
         }
         let end = off.saturating_add(buf.len() as u64);
-        if end <= INLINE as u64 && (self.inodes[is].flags & F_INLINE != 0) && self.inodes[is].n_ext == 0
+        if end <= INLINE as u64
+            && (self.inodes[is].flags & F_INLINE != 0)
+            && self.inodes[is].n_ext == 0
         {
             let s = off as usize;
             self.inodes[is].inline_data[s..s + buf.len()].copy_from_slice(buf);
@@ -1470,11 +1482,7 @@ impl Vol {
             self.add_extent(is, fblk, newp, 1, crc)?;
         }
         if right_len > 0 {
-            if left_len == 0 {
-                self.add_extent(is, right_log, right_phys, right_len, e.crc)?;
-            } else {
-                self.add_extent(is, right_log, right_phys, right_len, e.crc)?;
-            }
+            self.add_extent(is, right_log, right_phys, right_len, e.crc)?;
         }
         Ok(())
     }
@@ -1508,7 +1516,7 @@ impl Vol {
         let keep_blks = if new == 0 {
             0
         } else {
-            ((new as usize + BLOCK - 1) / BLOCK) as u32
+            (new as usize).div_ceil(BLOCK) as u32
         };
         let n_ext = self.inodes[is].n_ext as usize;
         let mut i = 0usize;
@@ -1572,7 +1580,12 @@ impl Vol {
         Ok(())
     }
 
-    pub fn readlink<D: Disk>(&mut self, _d: &mut D, ino: u32, buf: &mut [u8]) -> Result<usize, Error> {
+    pub fn readlink<D: Disk>(
+        &mut self,
+        _d: &mut D,
+        ino: u32,
+        buf: &mut [u8],
+    ) -> Result<usize, Error> {
         let is = self.inode_slot(ino)?;
         if self.inodes[is].kind != KIND_LNK {
             return Err(Error::Inval);
@@ -1651,7 +1664,7 @@ fn inode_need(n: usize) -> (usize, usize) {
     if n == 0 {
         return (1, 0);
     }
-    let leaves = (n + INODE_PER_LEAF - 1) / INODE_PER_LEAF;
+    let leaves = n.div_ceil(INODE_PER_LEAF);
     let ints = if leaves > 1 { 1 } else { 0 };
     (leaves, ints)
 }
@@ -1660,7 +1673,7 @@ fn dir_need(n: usize) -> (usize, usize) {
     if n == 0 {
         return (0, 0);
     }
-    let leaves = (n + DENT_PER_LEAF - 1) / DENT_PER_LEAF;
+    let leaves = n.div_ceil(DENT_PER_LEAF);
     let ints = if leaves > 1 { 1 } else { 0 };
     (leaves, ints)
 }
@@ -1680,9 +1693,7 @@ impl Vol {
         while a < n {
             let mut b = a;
             while b > 0 && self.inodes[out[b - 1]].ino > self.inodes[out[b]].ino {
-                let t = out[b - 1];
-                out[b - 1] = out[b];
-                out[b] = t;
+                out.swap(b - 1, b);
                 b -= 1;
             }
             a += 1;
@@ -1703,11 +1714,10 @@ impl Vol {
         let mut a = 1usize;
         while a < n {
             let mut b = a;
-            while b > 0 && name_cmp(self.dents[out[b - 1]].name(), self.dents[out[b]].name()).is_gt()
+            while b > 0
+                && name_cmp(self.dents[out[b - 1]].name(), self.dents[out[b]].name()).is_gt()
             {
-                let t = out[b - 1];
-                out[b - 1] = out[b];
-                out[b] = t;
+                out.swap(b - 1, b);
                 b -= 1;
             }
             a += 1;
@@ -1925,7 +1935,7 @@ impl Vol {
             p += 1;
         }
         self.ndrop = 0;
-        self.txn = [0; (MAX_BLOCKS + 7) / 8];
+        self.txn = [0; MAX_BLOCKS.div_ceil(8)];
         self.nmeta = 0;
         self.mark_meta(alloc_bno)?;
         li = 0;
@@ -2034,11 +2044,11 @@ pub fn mkfs<D: Disk>(d: &mut D, label: &[u8], v: &mut Vol) -> Result<(), Error> 
     finish_meta(&mut v.iobuf);
     d.write_block(leaf, &v.iobuf)?;
     let mut sbuf = [0u8; BLOCK];
-    write_alloc_into(&v, &mut sbuf);
+    write_alloc_into(v, &mut sbuf);
     d.write_block(alloc_bno, &sbuf)?;
-    pack_super(&mut sbuf, &v, 0);
+    pack_super(&mut sbuf, v, 0);
     d.write_block(0, &sbuf)?;
-    pack_super(&mut sbuf, &v, 1);
+    pack_super(&mut sbuf, v, 1);
     d.write_block(1, &sbuf)?;
     d.flush()
 }
@@ -2169,10 +2179,7 @@ pub fn fsck<D: Disk>(d: &mut D) -> Result<FsckReport, Error> {
             let mut e = 0usize;
             while e < n_ext {
                 let ex = v.inodes[i].extents[e];
-                if ex.len == 0
-                    || ex.phys < 2
-                    || ex.phys as u64 + ex.len as u64 > v.nblocks as u64
-                {
+                if ex.len == 0 || ex.phys < 2 || ex.phys as u64 + ex.len as u64 > v.nblocks as u64 {
                     errors += 1;
                 } else {
                     let mut b = 0u32;
@@ -2321,15 +2328,8 @@ mod tests {
             let sub = v.lookup(d, ROOT_INO, b"sub").unwrap();
             v.create(d, sub.ino, b"f", InodeKind::Reg, 0o644, None)
                 .unwrap();
-            v.create(
-                d,
-                ROOT_INO,
-                b"l",
-                InodeKind::Lnk,
-                0o777,
-                Some(b"/sub/f"),
-            )
-            .unwrap();
+            v.create(d, ROOT_INO, b"l", InodeKind::Lnk, 0o777, Some(b"/sub/f"))
+                .unwrap();
             v.sync(d).unwrap();
             let mut node = Node::EMPTY;
             let mut n = 0u32;
@@ -2491,7 +2491,6 @@ mod tests {
             v.sync(&mut c).unwrap();
             assert!(c.ops > 4);
             let total = c.ops;
-            drop(c);
             let mut i = 1u64;
             while i <= total {
                 let mut img = base.clone();

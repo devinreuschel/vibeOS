@@ -658,6 +658,12 @@ SMP4_MSIX_AP_COUNTER_FLAKE = (
 SMP4_IPI_ACK_PANIC = "ipi: ack timeout waiters="
 
 
+def silent_user_syscalls_hang(message: str) -> bool:
+    # #75 class: wait4 stall after userspace `dup`, ~101 lines, no ktest_end.
+    # run_qemu_until_exit raises (raw is None); match the serial tail instead.
+    return "timed out after" in message and message.rstrip().endswith("user: dup ok")
+
+
 def retryable_ktest_failure(
     smp: int,
     message: str,

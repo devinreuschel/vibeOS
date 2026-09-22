@@ -6,9 +6,9 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use vibeos::fs::{FsError, FsType, VibeFs, MAX_PATH};
+use vibeos::fs::{FsError, FsType, MAX_PATH, VibeFs};
 use vibeos::lock::RANK_DEVICE;
-use vibeos::vibefs::{self, Disk, Error, Node, Vol, BLOCK, ROOT_INO};
+use vibeos::vibefs::{self, BLOCK, Disk, Error, Node, ROOT_INO, Vol};
 
 use crate::block_init;
 use crate::cache_init;
@@ -24,7 +24,7 @@ const MNT_PATH: usize = 64;
 pub const IMAGE_BYTES: usize = 256 * 1024;
 
 const _: () = assert!(IMAGE_BYTES / BLOCK <= vibeos::vibefs::MAX_BLOCKS);
-const _: () = assert!(IMAGE_BYTES % BLOCK == 0);
+const _: () = assert!(IMAGE_BYTES.is_multiple_of(BLOCK));
 
 struct Cell<T>(UnsafeCell<T>);
 unsafe impl<T> Sync for Cell<T> {}
@@ -85,7 +85,7 @@ struct Io {
 }
 
 fn secs_per_blk(bs: u32) -> Result<u32, Error> {
-    if bs == 0 || BLOCK as u32 % bs != 0 {
+    if bs == 0 || !(BLOCK as u32).is_multiple_of(bs) {
         return Err(Error::Inval);
     }
     Ok(BLOCK as u32 / bs)
@@ -101,7 +101,7 @@ impl Disk for Io {
                 if bs == 0 {
                     0
                 } else {
-                    ((n as u64 * bs as u64) / BLOCK as u64) as u32
+                    ((n * bs as u64) / BLOCK as u64) as u32
                 }
             }
             Back::Dev(cache_init::DEV_VDA) => {
@@ -358,30 +358,21 @@ pub fn route(path: &[u8]) -> (u8, usize) {
         if mnts[i].used {
             let n = mnts[i].len as usize;
             let p = &mnts[i].path[..n];
-            if path == p || (path.len() > n && path[..n] == p[..] && path[n] == b'/') {
-                if n >= best {
-                    best = n;
-                    vol = mnts[i].vol;
-                    hit = true;
-                }
+            if (path == p || (path.len() > n && path[..n] == p[..] && path[n] == b'/')) && n >= best
+            {
+                best = n;
+                vol = mnts[i].vol;
+                hit = true;
             }
         }
         i += 1;
     }
-    if hit {
-        (vol, best)
-    } else {
-        (0, 0)
-    }
+    if hit { (vol, best) } else { (0, 0) }
 }
 
 pub fn routed_rest(path: &[u8], strip: usize) -> &[u8] {
     if strip == 0 {
-        if path.is_empty() {
-            b"/"
-        } else {
-            path
-        }
+        if path.is_empty() { b"/" } else { path }
     } else if strip >= path.len() {
         b"/"
     } else {
@@ -593,18 +584,15 @@ pub fn crash_loop() -> ! {
     let mut i = 0u32;
     loop {
         let _ = writeln!(Serial, "vibeOS: vibefs: wr {i}");
-        match file_init::open("/crash/w", O_RDWR | O_CREAT | O_TRUNC, 0o644) {
-            Ok(fid) => {
-                let mut buf = [0u8; 300];
-                let mut k = 0usize;
-                while k < buf.len() {
-                    buf[k] = i.wrapping_add(k as u32) as u8;
-                    k += 1;
-                }
-                let _ = file_init::write(fid, &buf);
-                let _ = file_init::close(fid);
+        if let Ok(fid) = file_init::open("/crash/w", O_RDWR | O_CREAT | O_TRUNC, 0o644) {
+            let mut buf = [0u8; 300];
+            let mut k = 0usize;
+            while k < buf.len() {
+                buf[k] = i.wrapping_add(k as u32) as u8;
+                k += 1;
             }
-            Err(_) => {}
+            let _ = file_init::write(fid, &buf);
+            let _ = file_init::close(fid);
         }
         let _ = file_init::sync_fs();
         i = i.wrapping_add(1);

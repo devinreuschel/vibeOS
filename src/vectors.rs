@@ -55,10 +55,7 @@ pub const LAPIC_SPURIOUS: u8 = 0xFF;
 /// Exception vectors that push an error code. Installing a no-code
 /// `x86-interrupt` handler on these misaligns the iret frame.
 pub const fn pushes_error_code(vec: u8) -> bool {
-    matches!(
-        vec,
-        DF | TS | NP | SS | GP | PF | AC | CP | 29 | 30
-    )
+    matches!(vec, DF | TS | NP | SS | GP | PF | AC | CP | 29 | 30)
 }
 
 /// Every distinct named vector, for the uniqueness test. Aliases
@@ -110,23 +107,22 @@ mod tests {
     fn named_vectors_are_unique() {
         for (i, (a, va)) in NAMED.iter().enumerate() {
             for (b, vb) in NAMED.iter().skip(i + 1) {
-                assert_ne!(
-                    va, vb,
-                    "{a} and {b} both claimed vector {va:#x}"
-                );
+                assert_ne!(va, vb, "{a} and {b} both claimed vector {va:#x}");
             }
         }
     }
 
     #[test]
     fn pic_and_exception_ranges_do_not_overlap() {
-        assert!(IRQ_BASE >= 0x20);
+        const {
+            assert!(IRQ_BASE >= 0x20);
+            assert!(DEVICE_VEC_START > IRQ_SPURIOUS_SLAVE);
+        }
         assert_eq!(IRQ_SLAVE_BASE, IRQ_BASE + 8);
         assert_eq!(IRQ_SPURIOUS_MASTER, 0x27);
         assert_eq!(IRQ_SPURIOUS_SLAVE, 0x2F);
         assert_eq!(IRQ_PIT, IRQ_BASE);
         assert_eq!(IRQ_KEYBOARD, IRQ_BASE + 1);
-        assert!(DEVICE_VEC_START > IRQ_SPURIOUS_SLAVE);
     }
 
     #[test]

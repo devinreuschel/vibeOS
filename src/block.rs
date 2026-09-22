@@ -16,7 +16,6 @@
 /// Completions: the queue lock is never held across `BlockDevice` I/O
 /// or a waiter wake. A later virtio-blk threaded IRQ (DESIGN §2.2 / §5.4)
 /// can call the same complete path. Hard IRQ only enqueues work.
-
 use crate::fmt_util;
 
 pub const DEFAULT_BLOCK_SIZE: u32 = 512;
@@ -338,10 +337,11 @@ impl Queue {
         let mut fence = u32::MAX;
         let mut i = 0usize;
         while i < MAX_QUEUE {
-            if let Some(r) = self.slots[i] {
-                if r.bio.op.is_fence() && r.seq < fence {
-                    fence = r.seq;
-                }
+            if let Some(r) = self.slots[i]
+                && r.bio.op.is_fence()
+                && r.seq < fence
+            {
+                fence = r.seq;
             }
             i += 1;
         }
@@ -365,12 +365,11 @@ impl Queue {
             let after_fence = fence == u32::MAX || slot.seq > fence;
             if after_fence {
                 let kind = merge_kind(&slot, req);
-                if !matches!(kind, MergeKind::None) {
-                    if let Some(dst) = self.slots[i].as_mut() {
-                        if merge_into(dst, *req, kind) {
-                            return true;
-                        }
-                    }
+                if !matches!(kind, MergeKind::None)
+                    && let Some(dst) = self.slots[i].as_mut()
+                    && merge_into(dst, *req, kind)
+                {
+                    return true;
                 }
             }
             i += 1;
@@ -435,24 +434,24 @@ impl Queue {
         let mut fence_i: Option<usize> = None;
         let mut i = 0usize;
         while i < MAX_QUEUE {
-            if let Some(r) = self.slots[i] {
-                if r.seq <= fence {
-                    if r.bio.op.is_fence() {
-                        if r.seq == fence {
-                            fence_i = Some(i);
+            if let Some(r) = self.slots[i]
+                && r.seq <= fence
+            {
+                if r.bio.op.is_fence() {
+                    if r.seq == fence {
+                        fence_i = Some(i);
+                    }
+                } else {
+                    let lba = r.bio.lba;
+                    if lba >= self.last_lba {
+                        match best_fwd {
+                            Some((b, _)) if lba >= b => {}
+                            _ => best_fwd = Some((lba, i)),
                         }
                     } else {
-                        let lba = r.bio.lba;
-                        if lba >= self.last_lba {
-                            match best_fwd {
-                                Some((b, _)) if lba >= b => {}
-                                _ => best_fwd = Some((lba, i)),
-                            }
-                        } else {
-                            match best_wrap {
-                                Some((b, _)) if lba >= b => {}
-                                _ => best_wrap = Some((lba, i)),
-                            }
+                        match best_wrap {
+                            Some((b, _)) if lba >= b => {}
+                            _ => best_wrap = Some((lba, i)),
                         }
                     }
                 }
@@ -463,10 +462,8 @@ impl Queue {
             i
         } else if let Some((_, i)) = best_wrap {
             i
-        } else if let Some(i) = fence_i {
-            i
         } else {
-            return None;
+            fence_i?
         };
         let r = self.take(idx);
         self.last_lba = r.end_lba();
@@ -478,11 +475,11 @@ impl Queue {
         let mut n = 0usize;
         let mut i = 0usize;
         while i < MAX_QUEUE {
-            if let Some(r) = self.slots[i].take() {
-                if n < MAX_QUEUE {
-                    out[n] = Some(r);
-                    n += 1;
-                }
+            if let Some(r) = self.slots[i].take()
+                && n < MAX_QUEUE
+            {
+                out[n] = Some(r);
+                n += 1;
             }
             i += 1;
         }
@@ -492,6 +489,12 @@ impl Queue {
 
     pub fn fail(&mut self) {
         self.failed = true;
+    }
+}
+
+impl Default for Queue {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -505,18 +508,11 @@ pub struct Ramdisk {
 }
 
 impl Ramdisk {
-    pub fn new(
-        name: &'static str,
-        block_size: u32,
-        nsectors: u64,
-    ) -> Result<Self, BlockError> {
+    pub fn new(name: &'static str, block_size: u32, nsectors: u64) -> Result<Self, BlockError> {
         if name.is_empty() || block_size == 0 || nsectors == 0 {
             return Err(BlockError::Inval);
         }
-        if (nsectors as u128)
-            .checked_mul(block_size as u128)
-            .is_none()
-        {
+        if (nsectors as u128).checked_mul(block_size as u128).is_none() {
             return Err(BlockError::Inval);
         }
         Ok(Self {
@@ -544,14 +540,12 @@ impl Ramdisk {
 
     fn check_buf(self, lba: u64, buf: &[u8]) -> Result<(usize, u32), BlockError> {
         let bs = self.block_size as usize;
-        if bs == 0 || buf.len() % bs != 0 {
+        if bs == 0 || !buf.len().is_multiple_of(bs) {
             return Err(BlockError::Inval);
         }
         let nsect = (buf.len() / bs) as u32;
         self.check_range(lba, nsect as u64)?;
-        let off = (lba as usize)
-            .checked_mul(bs)
-            .ok_or(BlockError::Inval)?;
+        let off = (lba as usize).checked_mul(bs).ok_or(BlockError::Inval)?;
         Ok((off, nsect))
     }
 
@@ -607,18 +601,15 @@ impl Ramdisk {
                 let mut i = 0u8;
                 while i < req.nseg {
                     let s = req.segs[i as usize];
-                    if s.len == 0 || s.len % bs != 0 {
+                    if s.len == 0 || !s.len.is_multiple_of(bs) {
                         return Err(BlockError::Inval);
                     }
                     if req.bio.op == Op::Read {
-                        let buf = unsafe {
-                            core::slice::from_raw_parts_mut(s.ptr as *mut u8, s.len)
-                        };
+                        let buf =
+                            unsafe { core::slice::from_raw_parts_mut(s.ptr as *mut u8, s.len) };
                         self.read(data, lba, buf)?;
                     } else {
-                        let buf = unsafe {
-                            core::slice::from_raw_parts(s.ptr as *const u8, s.len)
-                        };
+                        let buf = unsafe { core::slice::from_raw_parts(s.ptr as *const u8, s.len) };
                         self.write(data, lba, buf)?;
                     }
                     lba = lba.saturating_add((s.len / bs) as u64);
@@ -631,11 +622,7 @@ impl Ramdisk {
 }
 
 /// `vibeOS: block: <name> <n> sectors` without allocating.
-pub fn write_marker(
-    f: &mut impl core::fmt::Write,
-    name: &str,
-    sectors: u64,
-) -> core::fmt::Result {
+pub fn write_marker(f: &mut impl core::fmt::Write, name: &str, sectors: u64) -> core::fmt::Result {
     let mut nbuf = [0u8; 20];
     let n = fmt_util::write_dec(sectors, &mut nbuf);
     f.write_str("vibeOS: block: ")?;

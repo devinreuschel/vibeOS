@@ -8,7 +8,7 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use vibeos::fat::{self, Disk, FatError, FatVol, Node, INITRD_BYTES, SEC};
+use vibeos::fat::{self, Disk, FatError, FatVol, INITRD_BYTES, Node, SEC};
 use vibeos::fs::{FatFs, FsError, FsType, MAX_PATH};
 use vibeos::lock::RANK_DEVICE;
 
@@ -171,7 +171,10 @@ fn drop_busy(id: u8) {
     }
 }
 
-fn with_slot<R>(id: u8, f: impl FnOnce(&mut FatVol, &mut Io) -> Result<R, FatError>) -> Result<R, FatError> {
+fn with_slot<R>(
+    id: u8,
+    f: impl FnOnce(&mut FatVol, &mut Io) -> Result<R, FatError>,
+) -> Result<R, FatError> {
     grab(id)?;
     let i = id as usize;
     let r = unsafe {
@@ -253,6 +256,7 @@ pub fn read(id: u8, clu: u32, size: u32, off: u64, buf: &mut [u8]) -> Result<usi
     with_slot(id, |v, d| v.read(d, clu, size, off, buf)).map_err(FatError::to_fs)
 }
 
+#[allow(clippy::too_many_arguments)] // FAT dirent + cluster + size update
 pub fn write(
     id: u8,
     dir_clu: u32,
@@ -361,11 +365,10 @@ pub fn route(path: &[u8]) -> (u8, usize) {
         if mnts[i].used {
             let n = mnts[i].len as usize;
             let p = &mnts[i].path[..n];
-            if path == p || (path.len() > n && path[..n] == p[..] && path[n] == b'/') {
-                if n >= best {
-                    best = n;
-                    vol = mnts[i].vol;
-                }
+            if (path == p || (path.len() > n && path[..n] == p[..] && path[n] == b'/')) && n >= best
+            {
+                best = n;
+                vol = mnts[i].vol;
             }
         }
         i += 1;
@@ -375,11 +378,7 @@ pub fn route(path: &[u8]) -> (u8, usize) {
 
 pub fn routed_rest(path: &[u8], strip: usize) -> &[u8] {
     if strip == 0 {
-        if path.is_empty() {
-            b"/"
-        } else {
-            path
-        }
+        if path.is_empty() { b"/" } else { path }
     } else if strip >= path.len() {
         b"/"
     } else {
@@ -503,16 +502,7 @@ pub fn mount_dev(name: &str, at: &str) -> Result<u8, FsError> {
         drop_slot(id);
         return Err(e);
     }
-    match fs_init::with(|v| {
-        v.mount(
-            None,
-            at,
-            &FatFs {
-                root_clu,
-                vol: id,
-            },
-        )
-    }) {
+    match fs_init::with(|v| v.mount(None, at, &FatFs { root_clu, vol: id })) {
         Ok(_) => Ok(id),
         Err(e) => {
             let _ = unregister_mnt(at);
@@ -545,6 +535,6 @@ pub fn umount(at: &str) -> Result<(), FsError> {
 }
 
 const _: () = {
-    assert!(INITRD_BYTES % SEC == 0);
+    assert!(INITRD_BYTES.is_multiple_of(SEC));
     assert!(MAX_PATH >= MNT_PATH);
 };

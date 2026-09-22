@@ -3,18 +3,19 @@
 //! Runs as a real thread (not `_start`, not an ISR, not idle). Input
 //! drain is IRQ-off; we never wait for keys while holding a console lock
 //! with IF=1 (DESIGN §9.4). Commands live in the registry table.
+#![cfg_attr(feature = "vibefs_crash", allow(dead_code))]
 
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use vibeos::acpi::{Gas, GAS_SYSTEM_IO, GAS_SYSTEM_MEMORY};
+use vibeos::acpi::{GAS_SYSTEM_IO, GAS_SYSTEM_MEMORY, Gas};
 use vibeos::kbd::DecodedKey;
 use vibeos::log::Level;
 use vibeos::marker;
 use vibeos::shell::{
-    Command, Feed, LineEditor, Registry, LINE_CAP, MAX_COMMANDS, MAX_TOKENS, PROMPT,
+    Command, Feed, LINE_CAP, LineEditor, MAX_COMMANDS, MAX_TOKENS, PROMPT, Registry,
 };
-use vibeos::thread::{ThreadId, ThreadState, MAX_THREADS};
+use vibeos::thread::{MAX_THREADS, ThreadId, ThreadState};
 
 use crate::acpi_init;
 use crate::console_init::{self, Console};
@@ -32,7 +33,10 @@ unsafe impl<T> Sync for Cell<T> {}
 
 static REG: Cell<Registry> = Cell(core::cell::UnsafeCell::new(Registry::new()));
 static LOCK: AtomicBool = AtomicBool::new(false);
-#[cfg_attr(feature = "kernel_tests", allow(dead_code))]
+#[cfg_attr(
+    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
+    allow(dead_code)
+)] // parked REPL; production is userspace /bin/sh
 static READY: AtomicBool = AtomicBool::new(false);
 
 fn with_reg<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
@@ -53,7 +57,7 @@ pub fn register(cmd: Command) -> bool {
     with_reg(|r| r.register(cmd))
 }
 
-#[cfg_attr(feature = "kernel_tests", allow(dead_code))]
+#[allow(dead_code)] // parked #66; userspace /bin/sh is the shell
 pub fn ready() -> bool {
     READY.load(Ordering::Acquire)
 }
@@ -136,7 +140,10 @@ fn register_builtins() {
     }
 }
 
-#[cfg_attr(feature = "kernel_tests", allow(dead_code))]
+#[cfg_attr(
+    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
+    allow(dead_code)
+)]
 fn shell_main() {
     let mut ed = LineEditor::new();
     let mut painted = 0usize;
@@ -176,13 +183,19 @@ fn shell_main() {
     }
 }
 
-#[cfg_attr(feature = "kernel_tests", allow(dead_code))]
+#[cfg_attr(
+    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
+    allow(dead_code)
+)]
 fn write_prompt(painted: &mut usize) {
     console_init::write(PROMPT.as_bytes());
     *painted = PROMPT.len();
 }
 
-#[cfg_attr(feature = "kernel_tests", allow(dead_code))]
+#[cfg_attr(
+    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
+    allow(dead_code)
+)]
 fn paint(ed: &LineEditor, painted: &mut usize) {
     // `\r` homes serial and FB (column 0, same row). Do not use `\n`.
     console_init::write(b"\r");
@@ -309,10 +322,10 @@ fn dmesg_follow(view: Level) {
             let start = len.saturating_sub(extra);
             let mut i = start;
             while i < len {
-                if let Some(r) = log_init::record_at(i) {
-                    if vibeos::log::allowed(r.level, view, log_init::compile_max()) {
-                        log_init::write_record(&mut Console, &r);
-                    }
+                if let Some(r) = log_init::record_at(i)
+                    && vibeos::log::allowed(r.level, view, log_init::compile_max())
+                {
+                    log_init::write_record(&mut Console, &r);
                 }
                 i += 1;
             }
@@ -436,8 +449,7 @@ fn pulse_8042() {
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn builtin_names() -> [&'static str; 10] {
     [
-        "help", "echo", "meminfo", "uptime", "cpus", "dmesg", "ps", "panic", "reboot",
-        "poweroff",
+        "help", "echo", "meminfo", "uptime", "cpus", "dmesg", "ps", "panic", "reboot", "poweroff",
     ]
 }
 

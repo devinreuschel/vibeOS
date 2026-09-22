@@ -11,9 +11,8 @@ use crate::block::BlockError;
 use crate::cache::{self, Backend, Cache, CacheKey, CacheStats, PAGE};
 
 use super::{
-    Dirent, FileSystem, FsError, FsType, Inode, InodeKind, InodeOps, Name, Stat, Vfs,
-    MAX_KERN_NODES, MAX_MOUNTS, MAX_NAME, S_IFBLK, S_IFCHR, S_IFDIR_MODE, S_IFLNK_MODE,
-    S_IFMT, S_IFREG_MODE,
+    Dirent, FileSystem, FsError, FsType, Inode, InodeKind, InodeOps, MAX_KERN_NODES, MAX_MOUNTS,
+    MAX_NAME, Name, S_IFBLK, S_IFCHR, S_IFDIR_MODE, S_IFLNK_MODE, S_IFMT, S_IFREG_MODE, Stat, Vfs,
 };
 
 pub const TMPFS_CACHE_PAGES: usize = 4;
@@ -52,7 +51,10 @@ impl KernKind {
             | KernKind::Urandom
             | KernKind::Console
             | KernKind::Tty => InodeKind::Chr,
-            KernKind::File | KernKind::ProcCmdline | KernKind::ProcStatus | KernKind::ProcMaps
+            KernKind::File
+            | KernKind::ProcCmdline
+            | KernKind::ProcStatus
+            | KernKind::ProcMaps
             | KernKind::SysAttr => InodeKind::Reg,
         }
     }
@@ -142,7 +144,10 @@ impl Backend for SliceBack<'_> {
     fn read(&self, offset: u64, buf: &mut [u8]) -> Result<(), BlockError> {
         let d = self.data.borrow();
         let o = offset as usize;
-        if o.checked_add(buf.len()).map(|e| e > d.len()).unwrap_or(true) {
+        if o.checked_add(buf.len())
+            .map(|e| e > d.len())
+            .unwrap_or(true)
+        {
             return Err(BlockError::Inval);
         }
         buf.copy_from_slice(&d[o..o + buf.len()]);
@@ -152,7 +157,10 @@ impl Backend for SliceBack<'_> {
     fn write(&self, offset: u64, buf: &[u8]) -> Result<(), BlockError> {
         let mut d = self.data.borrow_mut();
         let o = offset as usize;
-        if o.checked_add(buf.len()).map(|e| e > d.len()).unwrap_or(true) {
+        if o.checked_add(buf.len())
+            .map(|e| e > d.len())
+            .unwrap_or(true)
+        {
             return Err(BlockError::Inval);
         }
         d[o..o + buf.len()].copy_from_slice(buf);
@@ -322,15 +330,12 @@ impl Vfs {
             Ok(_) | Err(FsError::Exists) => return Ok(()),
             Err(_) => {}
         }
-        match self.resolve(None, path, true) {
-            Ok(p) => {
-                let islot = self.d_islot(p.dslot)?;
-                if self.inodes[islot as usize].kind == InodeKind::Dir {
-                    return Ok(());
-                }
-                return Err(FsError::NotDir);
+        if let Ok(p) = self.resolve(None, path, true) {
+            let islot = self.d_islot(p.dslot)?;
+            if self.inodes[islot as usize].kind == InodeKind::Dir {
+                return Ok(());
             }
-            Err(_) => {}
+            return Err(FsError::NotDir);
         }
         // FAT has no VFS mkdir. Plant a dir dentry so `mount` can cover it.
         let (parent, name) = super::split_basename(path.as_bytes())?;
@@ -398,9 +403,36 @@ impl Vfs {
             Err(e) => return Err(e),
         };
         let packed = ((vendor as u64) << 16) | (device as u64);
-        kern_mk_sys_attr(self, sb, ddir, b"vendor", SYS_ATTR_VENDOR, packed, class, None)?;
-        kern_mk_sys_attr(self, sb, ddir, b"device", SYS_ATTR_DEVICE, packed, class, None)?;
-        kern_mk_sys_attr(self, sb, ddir, b"class", SYS_ATTR_CLASS, packed, class, None)?;
+        kern_mk_sys_attr(
+            self,
+            sb,
+            ddir,
+            b"vendor",
+            SYS_ATTR_VENDOR,
+            packed,
+            class,
+            None,
+        )?;
+        kern_mk_sys_attr(
+            self,
+            sb,
+            ddir,
+            b"device",
+            SYS_ATTR_DEVICE,
+            packed,
+            class,
+            None,
+        )?;
+        kern_mk_sys_attr(
+            self,
+            sb,
+            ddir,
+            b"class",
+            SYS_ATTR_CLASS,
+            packed,
+            class,
+            None,
+        )?;
         let drv_bytes = match driver {
             Some(d) if !d.is_empty() => d,
             _ => b"-",
@@ -482,31 +514,19 @@ fn kern_idx(ino: u32) -> Option<usize> {
         return None;
     }
     let i = (ino - 1) as usize;
-    if i >= MAX_KERN_NODES {
-        None
-    } else {
-        Some(i)
-    }
+    if i >= MAX_KERN_NODES { None } else { Some(i) }
 }
 
 fn kern_get(vfs: &Vfs, sb: u8, ino: u32) -> Option<&KernNode> {
     let i = kern_idx(ino)?;
     let n = &vfs.kern.nodes[i];
-    if n.used && n.sb == sb {
-        Some(n)
-    } else {
-        None
-    }
+    if n.used && n.sb == sb { Some(n) } else { None }
 }
 
 fn kern_get_mut(vfs: &mut Vfs, sb: u8, ino: u32) -> Option<&mut KernNode> {
     let i = kern_idx(ino)?;
     let n = &mut vfs.kern.nodes[i];
-    if n.used && n.sb == sb {
-        Some(n)
-    } else {
-        None
-    }
+    if n.used && n.sb == sb { Some(n) } else { None }
 }
 
 pub(super) fn kern_nlink(vfs: &Vfs, sb: u8, ino: u32) -> u32 {
@@ -723,15 +743,16 @@ fn kern_mk_special(
         n.tag = tag;
     }
     kern_link(vfs, parent, ino);
-    if kind.inode_kind() == InodeKind::Dir {
-        if let Some(p) = kern_get_mut(vfs, sb, parent) {
-            p.nlink = p.nlink.saturating_add(1);
-        }
+    if kind.inode_kind() == InodeKind::Dir
+        && let Some(p) = kern_get_mut(vfs, sb, parent)
+    {
+        p.nlink = p.nlink.saturating_add(1);
     }
     touch_dir(vfs, sb, parent, t);
     Ok(ino)
 }
 
+#[allow(clippy::too_many_arguments)] // sysfs attr packed PCI identity
 fn kern_mk_sys_attr(
     vfs: &mut Vfs,
     sb: u8,
@@ -936,10 +957,10 @@ pub(super) fn kern_unlink(vfs: &mut Vfs, dir_islot: u16, name: &[u8]) -> Result<
     }
     let t = vfs.now;
     kern_unlink_child(vfs, dir_ino, child);
-    if kind.inode_kind() == InodeKind::Dir {
-        if let Some(p) = kern_get_mut(vfs, sb, dir_ino) {
-            p.nlink = p.nlink.saturating_sub(1);
-        }
+    if kind.inode_kind() == InodeKind::Dir
+        && let Some(p) = kern_get_mut(vfs, sb, dir_ino)
+    {
+        p.nlink = p.nlink.saturating_sub(1);
     }
     if let Some(c) = kern_get_mut(vfs, sb, child) {
         c.nlink = c.nlink.saturating_sub(1);
@@ -1025,7 +1046,10 @@ pub(super) fn kern_write(
             Ok(buf.len())
         }
         KernKind::Block => Err(FsError::NotSupp),
-        KernKind::Lnk | KernKind::ProcCmdline | KernKind::ProcStatus | KernKind::ProcMaps
+        KernKind::Lnk
+        | KernKind::ProcCmdline
+        | KernKind::ProcStatus
+        | KernKind::ProcMaps
         | KernKind::SysAttr => Err(FsError::Inval),
         KernKind::File => tmp_write(vfs, sb, ino, off, buf),
     }
@@ -1126,17 +1150,10 @@ fn copy_off(src: &[u8], off: u64, buf: &mut [u8]) -> Result<usize, FsError> {
 }
 
 const PROC_CMDLINE: &[u8] = b"vibeos\0";
-const PROC_STATUS: &[u8] =
-    b"Name:\tvibeos\nState:\tR (running)\nPid:\t1\nThreads:\t1\n";
+const PROC_STATUS: &[u8] = b"Name:\tvibeos\nState:\tR (running)\nPid:\t1\nThreads:\t1\n";
 const PROC_MAPS: &[u8] = b"# no user mappings; process objects are phase 9\n";
 
-fn sys_attr_read(
-    vfs: &Vfs,
-    sb: u8,
-    ino: u32,
-    off: u64,
-    buf: &mut [u8],
-) -> Result<usize, FsError> {
+fn sys_attr_read(vfs: &Vfs, sb: u8, ino: u32, off: u64, buf: &mut [u8]) -> Result<usize, FsError> {
     let n = kern_get(vfs, sb, ino).ok_or(FsError::NotFound)?;
     let which = (n.tag2 & 0xff) as u8;
     let class = ((n.tag2 >> 8) & 0xff) as u8;
@@ -1166,11 +1183,7 @@ fn sys_attr_read(
 }
 
 fn hex_nib(d: u8) -> u8 {
-    if d < 10 {
-        b'0' + d
-    } else {
-        b'a' + (d - 10)
-    }
+    if d < 10 { b'0' + d } else { b'a' + (d - 10) }
 }
 
 fn fmt_hex_u16(n: u16, out: &mut [u8]) -> usize {
@@ -1277,7 +1290,9 @@ fn tmp_invalidate_pages(vfs: &mut Vfs, start: u16, n: u16) {
     let mut j = 0u16;
     while j < n {
         let off = (start as u64 + j as u64) * PAGE as u64;
-        vfs.kern.tmp_cache.invalidate(CacheKey::page(TMPFS_DEV, off));
+        vfs.kern
+            .tmp_cache
+            .invalidate(CacheKey::page(TMPFS_DEV, off));
         j += 1;
     }
 }
@@ -1294,7 +1309,7 @@ fn tmp_pages_for(size: u64) -> usize {
     if size == 0 {
         0
     } else {
-        ((size as usize) + PAGE - 1) / PAGE
+        (size as usize).div_ceil(PAGE)
     }
 }
 
@@ -1383,13 +1398,7 @@ fn tmp_rw_cache(
     r.map_err(|_| FsError::Io)
 }
 
-fn tmp_read(
-    vfs: &mut Vfs,
-    sb: u8,
-    ino: u32,
-    off: u64,
-    buf: &mut [u8],
-) -> Result<usize, FsError> {
+fn tmp_read(vfs: &mut Vfs, sb: u8, ino: u32, off: u64, buf: &mut [u8]) -> Result<usize, FsError> {
     let size = kern_get(vfs, sb, ino).ok_or(FsError::NotFound)?.size;
     if off >= size {
         return Ok(0);
@@ -1404,13 +1413,7 @@ fn tmp_read(
     Ok(n)
 }
 
-fn tmp_write(
-    vfs: &mut Vfs,
-    sb: u8,
-    ino: u32,
-    off: u64,
-    buf: &[u8],
-) -> Result<usize, FsError> {
+fn tmp_write(vfs: &mut Vfs, sb: u8, ino: u32, off: u64, buf: &[u8]) -> Result<usize, FsError> {
     if buf.is_empty() {
         return Ok(0);
     }
@@ -1601,9 +1604,7 @@ mod tests {
     #[test]
     fn tmpfs_uses_cache_and_evicts() {
         let mut v = boot();
-        let fid = v
-            .open(None, "/tmp/big", O_RDWR | O_CREAT, 0o644)
-            .unwrap();
+        let fid = v.open(None, "/tmp/big", O_RDWR | O_CREAT, 0o644).unwrap();
         let one = [0x5Au8; 1];
         let mut i = 0u64;
         while i < 6 {
@@ -1671,7 +1672,9 @@ mod tests {
         v.sysfs_add_device(b"00:02.0", 0x8086, 0x100e, 0x02, None)
             .unwrap();
         assert!(has_name(&mut v, "/sys/devices", b"00:01.0"));
-        let fid = v.open(None, "/sys/devices/00:01.0/vendor", O_RDWR, 0).unwrap();
+        let fid = v
+            .open(None, "/sys/devices/00:01.0/vendor", O_RDWR, 0)
+            .unwrap();
         let mut buf = [0u8; 16];
         let n = v.read(fid, &mut buf).unwrap();
         assert_eq!(&buf[..n], b"0x1af4\n");

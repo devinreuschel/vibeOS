@@ -15,11 +15,11 @@ use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::lock::RANK_SCHED;
 use vibeos::paging::VirtAddr;
 use vibeos::sched::{
-    effective_deadline, enqueue_runnable, take_next, TimeoutQueue, FAR_DEADLINE, SWEEP_TICKS,
+    FAR_DEADLINE, SWEEP_TICKS, TimeoutQueue, effective_deadline, enqueue_runnable, take_next,
 };
 use vibeos::thread::{
-    apply_if_on_resume, prepare_thread, switch_context, CpuAffinity, CpuContext, KernelStack, Tcb,
-    ThreadId, ThreadState, WaitOutcome, MAX_THREADS,
+    CpuAffinity, CpuContext, KernelStack, MAX_THREADS, Tcb, ThreadId, ThreadState, WaitOutcome,
+    apply_if_on_resume, prepare_thread, switch_context,
 };
 use vibeos::time::Instant;
 use vibeos::wait::{self, WaitQueue};
@@ -220,7 +220,7 @@ fn schedule_inner(from_irq: bool) {
 
         if !from_irq {
             let ticks = per_cpu_init::current().ticks;
-            if ticks % SWEEP_TICKS == 0 {
+            if ticks.is_multiple_of(SWEEP_TICKS) {
                 for t in s.timeouts.overdue(now) {
                     if n_overdue < overdue.len() {
                         overdue[n_overdue] = t.id;
@@ -427,12 +427,7 @@ pub(crate) fn spawn_idle(entry: fn()) -> ThreadHandle {
 }
 
 /// User process thread. Not runnable until [`make_ready`].
-pub fn spawn_user(
-    name: &'static str,
-    entry: fn(),
-    pid: u32,
-    cr3: u64,
-) -> ThreadHandle {
+pub fn spawn_user(name: &'static str, entry: fn(), pid: u32, cr3: u64) -> ThreadHandle {
     spawn_inner(
         name,
         entry,
@@ -529,7 +524,7 @@ fn spawn_inner(
 ) -> ThreadHandle {
     let stack = kva_init::alloc_guarded_stack(DEFAULT_STACK_PAGES).expect("thread stack");
     let top = stack.top().as_u64();
-    assert!(top % 16 == 0, "kva stack top not 16-aligned");
+    assert!(top.is_multiple_of(16), "kva stack top not 16-aligned");
     let ks = KernelStack {
         guard: stack.guard.as_u64(),
         pages: stack.pages,
@@ -550,7 +545,9 @@ fn spawn_inner(
         s.timeouts.remove(id);
         let tcb = s.slots[slot].as_mut().expect("dead slot");
         assert!(tcb.stack.is_none(), "dead tcb still owns stack");
-        fill_tcb(tcb, name, entry, affinity, cpu, ks, top, tramp, irq_nest, pid, as_cr3);
+        fill_tcb(
+            tcb, name, entry, affinity, cpu, ks, top, tramp, irq_nest, pid, as_cr3,
+        );
         if enqueue {
             s.place(cpu, id);
         }
@@ -600,6 +597,7 @@ fn spawn_inner(
     ThreadHandle { id }
 }
 
+#[allow(clippy::too_many_arguments)] // TCB fields filled at spawn
 fn fill_tcb(
     tcb: &mut Tcb,
     name: &'static str,
@@ -707,10 +705,11 @@ pub fn switch_to(id: ThreadId) {
         enqueue_runnable(&mut cpu.runq, old_id, idle, cur_state);
     }
     let (old_ptr, new_ptr) = with_sched(|s| {
-        if let Some(t) = s.get_mut(old_id) {
-            if t.state != ThreadState::Dead && old_id != idle {
-                t.state = ThreadState::Ready;
-            }
+        if let Some(t) = s.get_mut(old_id)
+            && t.state != ThreadState::Dead
+            && old_id != idle
+        {
+            t.state = ThreadState::Ready;
         }
         if let Some(t) = s.get_mut(id) {
             t.state = ThreadState::Running;
@@ -731,11 +730,7 @@ pub fn current_id() -> ThreadId {
 
 pub fn current_pid() -> u32 {
     let p = per_cpu_init::current_thread();
-    if p.is_null() {
-        0
-    } else {
-        unsafe { (*p).pid }
-    }
+    if p.is_null() { 0 } else { unsafe { (*p).pid } }
 }
 
 pub fn set_pid_cr3(id: ThreadId, pid: u32, cr3: u64) {

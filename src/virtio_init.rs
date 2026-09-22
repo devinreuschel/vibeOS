@@ -14,12 +14,12 @@ use vibeos::irq::IrqError;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::pci::MAX_BARS;
 use vibeos::virtio::{
-    self, notify_addr, pick_features, write_indirect_write, ModernCaps, PciCap, SplitLayout,
-    SplitQueue, VirtioError, COMMON_OFF_DF, COMMON_OFF_DFSEL, COMMON_OFF_DR, COMMON_OFF_DRSEL,
-    COMMON_OFF_MSIX_CFG, COMMON_OFF_QDESC, COMMON_OFF_QDEVICE, COMMON_OFF_QDRIVER,
-    COMMON_OFF_QENABLE, COMMON_OFF_QMSIX, COMMON_OFF_QNOTIFY, COMMON_OFF_QSEL, COMMON_OFF_QSIZE,
-    COMMON_OFF_STATUS, DEV_RNG_LEGACY, DEV_RNG_MODERN, F_EVENT_IDX, F_INDIRECT_DESC, MSI_NO_VECTOR,
-    OFFER, STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK, STATUS_FEATURES_OK, VENDOR_ID,
+    self, COMMON_OFF_DF, COMMON_OFF_DFSEL, COMMON_OFF_DR, COMMON_OFF_DRSEL, COMMON_OFF_MSIX_CFG,
+    COMMON_OFF_QDESC, COMMON_OFF_QDEVICE, COMMON_OFF_QDRIVER, COMMON_OFF_QENABLE, COMMON_OFF_QMSIX,
+    COMMON_OFF_QNOTIFY, COMMON_OFF_QSEL, COMMON_OFF_QSIZE, COMMON_OFF_STATUS, DEV_RNG_LEGACY,
+    DEV_RNG_MODERN, F_EVENT_IDX, F_INDIRECT_DESC, MSI_NO_VECTOR, ModernCaps, OFFER, PciCap,
+    STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK, STATUS_FEATURES_OK, SplitLayout,
+    SplitQueue, VENDOR_ID, VirtioError, notify_addr, pick_features, write_indirect_write,
 };
 
 use crate::dev_init;
@@ -64,7 +64,11 @@ fn w8(va: u64, off: u16, v: u8) {
 }
 
 fn r16(va: u64, off: u16) -> u16 {
-    unsafe { u16::from_le(core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u16)) }
+    unsafe {
+        u16::from_le(core::ptr::read_volatile(
+            (va.wrapping_add(off as u64)) as *const u16,
+        ))
+    }
 }
 
 fn w16(va: u64, off: u16, v: u16) {
@@ -74,7 +78,11 @@ fn w16(va: u64, off: u16, v: u16) {
 }
 
 fn r32(va: u64, off: u16) -> u32 {
-    unsafe { u32::from_le(core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u32)) }
+    unsafe {
+        u32::from_le(core::ptr::read_volatile(
+            (va.wrapping_add(off as u64)) as *const u32,
+        ))
+    }
 }
 
 fn w32(va: u64, off: u16, v: u32) {
@@ -286,7 +294,11 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
     let mut vq = SplitQueue::new(layout, qdma.virt as *mut u8, feat & F_EVENT_IDX != 0);
     vq.init();
     qdma.sync_for_device();
-    w64(common, COMMON_OFF_QDESC, qdma.device.as_u64() + layout.desc_off as u64);
+    w64(
+        common,
+        COMMON_OFF_QDESC,
+        qdma.device.as_u64() + layout.desc_off as u64,
+    );
     w64(
         common,
         COMMON_OFF_QDRIVER,

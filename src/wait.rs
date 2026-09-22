@@ -5,7 +5,7 @@
 
 use core::mem::MaybeUninit;
 
-use crate::sched::{effective_deadline, ReadyQueue, TimeoutQueue};
+use crate::sched::{ReadyQueue, TimeoutQueue, effective_deadline};
 use crate::thread::ThreadId;
 use crate::time::Instant;
 
@@ -50,6 +50,12 @@ impl WaitQueue {
     }
 }
 
+impl Default for WaitQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Enqueue, leave the ready FIFO, arm the deadline. Not runnable.
 pub fn begin_wait(
     wq: &mut WaitQueue,
@@ -83,11 +89,7 @@ pub fn wake_one(
     Some(id)
 }
 
-pub fn wake_all(
-    wq: &mut WaitQueue,
-    ready: &mut ReadyQueue,
-    timeouts: &mut TimeoutQueue,
-) -> usize {
+pub fn wake_all(wq: &mut WaitQueue, ready: &mut ReadyQueue, timeouts: &mut TimeoutQueue) -> usize {
     let mut n = 0usize;
     while wake_one(wq, ready, timeouts).is_some() {
         n += 1;
@@ -126,6 +128,12 @@ impl MutexModel {
     pub fn release(&mut self) {
         self.held = false;
         self.owner = ThreadId::NONE;
+    }
+}
+
+impl Default for MutexModel {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -187,6 +195,12 @@ impl RwLockModel {
     }
 }
 
+impl Default for RwLockModel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Who to wake when a writer wait returns `Timeout`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WriterTimeoutWake {
@@ -230,6 +244,12 @@ impl CondModel {
         Self {
             wq: WaitQueue::new(),
         }
+    }
+}
+
+impl Default for CondModel {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -292,6 +312,12 @@ impl<T, const N: usize> ChannelModel<T, N> {
     }
 }
 
+impl<T, const N: usize> Default for ChannelModel<T, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T, const N: usize> Drop for ChannelModel<T, N> {
     fn drop(&mut self) {
         while self.try_recv().is_some() {}
@@ -301,7 +327,7 @@ impl<T, const N: usize> Drop for ChannelModel<T, N> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sched::{enqueue_runnable, take_next, wake_expired, FAR_DEADLINE};
+    use crate::sched::{FAR_DEADLINE, enqueue_runnable, take_next, wake_expired};
     use crate::thread::ThreadState;
 
     fn tid(n: u32) -> ThreadId {
@@ -475,7 +501,10 @@ mod tests {
         r.write_wq.remove(tid(2));
         timeouts.remove(tid(2));
         assert_eq!(r.after_writer_wait_timeout(), WriterTimeoutWake::NextWriter);
-        assert_eq!(wake_one(&mut r.write_wq, &mut ready, &mut timeouts), Some(tid(3)));
+        assert_eq!(
+            wake_one(&mut r.write_wq, &mut ready, &mut timeouts),
+            Some(tid(3))
+        );
     }
 
     #[test]

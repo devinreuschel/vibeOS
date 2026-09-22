@@ -26,7 +26,7 @@ jobs:
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: nightly-2026-09-22
-          components: rust-src, llvm-tools
+          components: rust-src, llvm-tools, rustfmt, clippy
 
       - name: cache cargo registry
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -47,6 +47,27 @@ jobs:
 
       - name: setup
         run: ./setup.sh
+
+      # Q1: fmt + clippy with -D warnings. rustflags in .cargo/config.toml
+      # also deny warnings on `make iso` / `make test-unit`. Do not set
+      # RUSTFLAGS here: it replaces the kernel's `-Z unstable-options`.
+      - name: cargo fmt --check
+        run: |
+          cargo fmt --check
+          (cd tests/hostlib && cargo fmt --check)
+
+      - name: cargo clippy -D warnings (kernel)
+        env:
+          CARGO_UNSTABLE_JSON_TARGET_SPEC: "true"
+          CARGO_UNSTABLE_BUILD_STD: core,compiler_builtins,alloc
+          CARGO_UNSTABLE_BUILD_STD_FEATURES: compiler-builtins-mem
+        run: |
+          cargo clippy --lib --bin vibeos --all-features -- -D warnings
+          cargo clippy --lib --bin vibeos --features kernel_tests -- -D warnings
+          cargo clippy --lib --bin vibeos --features vibefs_crash -- -D warnings
+
+      - name: cargo clippy -D warnings (hostlib)
+        run: cd tests/hostlib && cargo clippy --all-targets -- -D warnings
 
       - name: build kernel + hybrid ISO
         run: make iso

@@ -36,7 +36,11 @@ fn st() -> &'static mut State {
 fn push(hi: bool, item: WorkItem) -> bool {
     thread_init::with_sched(|s| {
         let st = st();
-        let ok = if hi { st.q.push_hi(item) } else { st.q.push(item) };
+        let ok = if hi {
+            st.q.push_hi(item)
+        } else {
+            st.q.push(item)
+        };
         if ok {
             s.wake_all(&mut st.wq);
         }

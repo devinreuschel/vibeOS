@@ -6,9 +6,9 @@
 //! range can alias a stale TLB until identity is torn down.
 
 use crate::paging::{
-    is_canonical, user_leaf_flags, FrameAlloc, MapError, MapMode, Mapper, PageFlags, PageSize,
-    PhysAddr, Probe, VirtAddr, KERNEL_PML4_FIRST, NULL_GUARD_LEN, PAGE_SIZE_4K,
-    PTES_PER_TABLE, USER_END,
+    FrameAlloc, KERNEL_PML4_FIRST, MapError, MapMode, Mapper, NULL_GUARD_LEN, PAGE_SIZE_4K,
+    PTES_PER_TABLE, PageFlags, PageSize, PhysAddr, Probe, USER_END, VirtAddr, is_canonical,
+    user_leaf_flags,
 };
 
 pub const MAX_REGIONS: usize = 32;
@@ -164,6 +164,8 @@ impl AddressSpace {
         self.regions.iter().filter_map(|r| *r)
     }
 
+    /// # Safety
+    /// `alloc` returns owned frames; `va` is the user half and not already mapped.
     pub unsafe fn map_anon<A: FrameAlloc + FrameFree>(
         &mut self,
         va: u64,
@@ -240,6 +242,9 @@ impl AddressSpace {
 
     /// Free every user leaf + user PT page + the PML4. Kernel-half
     /// PDPTs are not touched. `free` must return frames to `alloc`.
+    ///
+    /// # Safety
+    /// `free` may only be called with frames this space still owns.
     pub unsafe fn teardown<F>(&mut self, free: &mut F) -> TeardownStats
     where
         F: FnMut(PhysAddr),
@@ -339,6 +344,8 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// # Safety
+    /// `buf` is `len` live bytes; `va` is mapped in this space.
     unsafe fn copy_via_hhdm(
         &self,
         va: u64,
@@ -393,7 +400,7 @@ fn check_map_range(va: u64, len: u64) -> Result<(), AsError> {
     if len == 0 {
         return Ok(());
     }
-    if va % PAGE_SIZE_4K != 0 || len % PAGE_SIZE_4K != 0 {
+    if !va.is_multiple_of(PAGE_SIZE_4K) || !len.is_multiple_of(PAGE_SIZE_4K) {
         return Err(AsError::Misaligned);
     }
     let end = va.checked_add(len).ok_or(AsError::Overflow)?;
@@ -410,11 +417,18 @@ fn check_map_range(va: u64, len: u64) -> Result<(), AsError> {
 }
 
 /// Allocator that can return frames. Kernel buddy and host tests.
+///
+/// # Safety
+/// `free_frame` may only be called with a frame the caller still owns.
 pub unsafe trait FrameFree {
+    /// # Safety
+    /// `pa` is an owned frame this allocator may recycle.
     unsafe fn free_frame(&mut self, pa: PhysAddr);
 }
 
 impl AddressSpace {
+    /// # Safety
+    /// Pages in `[va, va+len)` are mapped by this space; `pool` owns the unmapped frames.
     pub unsafe fn unmap_free<A>(&mut self, va: u64, len: u64, pool: &mut A) -> Result<(), AsError>
     where
         A: FrameAlloc + FrameFree,
@@ -442,6 +456,8 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// # Safety
+    /// `pool` may recycle every user/PT/PML4 frame this space still owns.
     pub unsafe fn teardown_pool<A: FrameFree>(&mut self, pool: &mut A) -> TeardownStats {
         let mut free = |pa: PhysAddr| unsafe { pool.free_frame(pa) };
         unsafe { self.teardown(&mut free) }
@@ -494,7 +510,7 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paging::{physmap_flags, PTE_ADDR_MASK, UserFreeStats};
+    use crate::paging::{PTE_ADDR_MASK, UserFreeStats, physmap_flags};
     use std::vec;
     use std::vec::Vec;
 
@@ -547,6 +563,8 @@ mod tests {
     }
 
     unsafe impl FrameFree for TestPool {
+        /// # Safety
+        /// `pa` is a frame this pool handed out and has not freed.
         unsafe fn free_frame(&mut self, pa: PhysAddr) {
             let p = pa.as_u64();
             let i = self
@@ -581,7 +599,12 @@ mod tests {
         );
         assert_eq!(
             unsafe {
-                aspace.map_anon(0xFFFF_8000_0000_0000, PAGE_SIZE_4K, UserPerms::RW, &mut pool)
+                aspace.map_anon(
+                    0xFFFF_8000_0000_0000,
+                    PAGE_SIZE_4K,
+                    UserPerms::RW,
+                    &mut pool,
+                )
             },
             Err(AsError::KernelRange)
         );
@@ -648,10 +671,7 @@ mod tests {
                 .map_anon(va, PAGE_SIZE_4K, UserPerms::RW, &mut pool)
                 .unwrap();
         }
-        assert_eq!(
-            aspace.check_user_range(0, 8),
-            Err(UserMemError::NullGuard)
-        );
+        assert_eq!(aspace.check_user_range(0, 8), Err(UserMemError::NullGuard));
         assert_eq!(
             aspace.check_user_range(0xFFFF_8000_0000_1000, 8),
             Err(UserMemError::Kernel)
@@ -677,10 +697,7 @@ mod tests {
         aspace.zero_bytes(va, 2).unwrap();
         aspace.read_bytes(va, &mut got).unwrap();
         assert_eq!(&got, b"\0\0cd");
-        assert_eq!(
-            aspace.write_bytes(0, b"x"),
-            Err(UserMemError::NullGuard)
-        );
+        assert_eq!(aspace.write_bytes(0, b"x"), Err(UserMemError::NullGuard));
         let _ = UserMemError::Kernel.errno();
         unsafe { aspace.teardown_pool(&mut pool) };
         let _ = PTE_ADDR_MASK;
@@ -738,9 +755,7 @@ mod tests {
             kernel.pml4_entry(256) & PTE_ADDR_MASK
         );
         unsafe { aspace.teardown_pool(&mut pool) };
-        assert!(kernel
-            .translate(VirtAddr(0xFFFF_8000_0020_0000))
-            .is_some());
+        assert!(kernel.translate(VirtAddr(0xFFFF_8000_0020_0000)).is_some());
     }
 
     #[test]

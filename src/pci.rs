@@ -359,10 +359,8 @@ pub fn walk_caps<C: CfgIo>(cfg: &mut C, bdf: Bdf) -> CapSet {
             CAP_MSI => out.msi = Some(ptr),
             CAP_MSIX => out.msix = Some(ptr),
             CAP_PCIE => out.pcie = Some(ptr),
-            CAP_VENDOR => {
-                if out.vendor.is_none() {
-                    out.vendor = Some(ptr);
-                }
+            CAP_VENDOR if out.vendor.is_none() => {
+                out.vendor = Some(ptr);
             }
             _ => {}
         }
@@ -623,13 +621,7 @@ pub fn read_msix_cap<C: CfgIo>(cfg: &mut C, bdf: Bdf, cap: u8) -> MsixCap {
     MsixCap::parse(cap, control, table, pba)
 }
 
-pub fn set_msix_enable<C: CfgIo>(
-    cfg: &mut C,
-    bdf: Bdf,
-    cap: u8,
-    enable: bool,
-    func_mask: bool,
-) {
+pub fn set_msix_enable<C: CfgIo>(cfg: &mut C, bdf: Bdf, cap: u8, enable: bool, func_mask: bool) {
     let off = cap as u16 + 2;
     let mut ctl = read16(cfg, bdf, off);
     if enable {
@@ -732,10 +724,10 @@ mod tests {
 
         fn slot_mut(&mut self, bdf: Bdf) -> &mut Slot {
             for s in &mut self.slots {
-                if let Some(sl) = s.as_mut() {
-                    if sl.bdf == bdf {
-                        return sl;
-                    }
+                if let Some(sl) = s.as_mut()
+                    && sl.bdf == bdf
+                {
+                    return sl;
                 }
             }
             for s in &mut self.slots {
@@ -818,10 +810,11 @@ mod tests {
         fn read32(&mut self, bdf: Bdf, offset: u16) -> u32 {
             let off = (offset as usize) & !3;
             for s in &self.slots {
-                if let Some(sl) = s {
-                    if sl.bdf == bdf && off + 4 <= 256 {
-                        return u32::from_le_bytes(sl.data[off..off + 4].try_into().unwrap());
-                    }
+                if let Some(sl) = s
+                    && sl.bdf == bdf
+                    && off + 4 <= 256
+                {
+                    return u32::from_le_bytes(sl.data[off..off + 4].try_into().unwrap());
                 }
             }
             0xFFFF_FFFF
@@ -838,7 +831,7 @@ mod tests {
                     let i = (off - CFG_BAR0 as usize) / 4;
                     let rw = sl.bar_rw[i];
                     let cur = u32::from_le_bytes(sl.data[off..off + 4].try_into().unwrap());
-                    let flags = if i + 1 < 6 && sl.bar_rw[i + 1] != 0 && i % 2 == 0 {
+                    let flags = if i + 1 < 6 && sl.bar_rw[i + 1] != 0 && i.is_multiple_of(2) {
                         cur & 0xF
                     } else if cur & 1 != 0 {
                         cur & 0x3
