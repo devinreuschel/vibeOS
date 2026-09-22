@@ -635,9 +635,7 @@ pub unsafe fn run_user(space: &mut AddressSpace, rip: u64, rsp: u64, fs_base: u6
         return EXIT_STATUS.load(Ordering::Acquire) & 0xff;
     }
     IN_USER.store(true, Ordering::Release);
-    // with_timer sti's so SMP wait4 can take the reschedule IPI.
-    let rf = RFLAGS_RESERVED1 | if if_on { RFLAGS_IF } else { 0u64 };
-    unsafe { enter_user(rip, rsp, rf, fs_base) };
+    unsafe { enter_user(rip, rsp, RFLAGS_RESERVED1, fs_base) };
 }
 
 #[unsafe(no_mangle)]
