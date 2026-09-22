@@ -105,6 +105,7 @@ const TESTS: &[(&str, TestFn)] = &[
     ("gp_catch", test_gp_catch),
     ("irqcell_reentry_panics", test_irqcell_reentry_panics),
     ("bootcell_set_once", test_bootcell_set_once),
+    ("bootinfo_consistent", test_bootinfo_consistent),
     ("df_on_ist", test_df_on_ist),
     ("pit_tick_rate", test_pit_tick_rate),
     ("now_us_monotonic", test_now_us_monotonic),
@@ -1040,6 +1041,13 @@ fn test_irqcell_reentry_panics() -> Outcome {
         return Outcome::Fail("irq_nest leaked");
     }
     Outcome::Ok
+}
+
+fn test_bootinfo_consistent() -> Outcome {
+    match crate::boot::check_consistent() {
+        Ok(()) => Outcome::Ok,
+        Err(why) => Outcome::Fail(why),
+    }
 }
 
 fn test_bootcell_set_once() -> Outcome {

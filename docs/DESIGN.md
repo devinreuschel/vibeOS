@@ -83,8 +83,8 @@ gs, cpu, AP trampoline). Nested also: `src/fs/` (VFS + kernfs). `user/` is frees
 
 | Subsystem | Portable | Kernel |
 |-----------|----------|--------|
-| crate | `src/lib.rs` (`vibeos-core`) | `src/main.rs` (`_start`, Limine requests, boot order) |
-| boot / serial | `uart.rs`, `marker.rs`, `fmt_util.rs`, `symtab.rs` | `serial.rs`, `panic.rs`, `diag.rs`, `ksyms.rs` |
+| crate | `src/lib.rs` (`vibeos-core`) | `src/main.rs` (`_start`, base revision, boot order) |
+| boot / serial | `uart.rs`, `marker.rs`, `fmt_util.rs`, `symtab.rs` | `boot.rs` (`BootInfo`, Limine requests), `serial.rs`, `panic.rs`, `diag.rs`, `ksyms.rs` |
 | arch | `desc.rs`, `pic.rs`, `vectors.rs` | `arch/mod.rs`, `arch/gdt.rs`, `arch/idt.rs`, `arch/pic.rs`, `arch/catch.rs`, `arch/gs.rs`, `arch/cpu.rs`, `arch/trampoline.rs`, `arch/trampoline.S`, `x86.rs` |
 | mm | `pmm.rs`, `paging.rs`, `heap.rs`, `kva.rs` | `pmm_init.rs`, `paging_init.rs`, `heap_init.rs`, `kva_init.rs` |
 | time | `time.rs` | `time_init.rs` |
@@ -319,7 +319,9 @@ Limine scans the loaded ELF for request structures in linker sections, in this o
 
 Every request is a `#[used]` `static` placed in `.limine_requests`. Miss the section attribute and the
 loader never sees the request, so the response pointer is null and the kernel dies on the first unwrap
-with no explanation. Check the base revision before trusting any other response.
+with no explanation. Check the base revision before trusting any other response. After that handshake,
+`boot::capture` reads every response once into a write-once `BootInfo` (`BootCell`). Nothing else
+touches the Limine request statics.
 
 | Request | What we need from it |
 |---------|---------------------|

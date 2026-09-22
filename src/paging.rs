@@ -671,7 +671,7 @@ impl Mapper {
         }
     }
 
-    /// Zero a freshly-allocated frame through the HHDM.
+    /// Zero a freshly-allocated frame through the HHDM physmap.
     ///
     /// # Safety
     /// `phys` must be an owned, page-sized frame reachable via
@@ -889,7 +889,7 @@ mod tests {
 
     fn fresh_mapper(pool: &mut TestPool) -> Mapper {
         let root = <TestPool as FrameAlloc>::alloc_frame(pool).unwrap();
-        // Zero via HHDM.
+        // Zero via the HHDM physmap.
         let ptr = root.0.wrapping_add(pool.hhdm_offset) as *mut u64;
         for i in 0..PTES_PER_TABLE {
             unsafe { ptr.add(i).write_volatile(0) };

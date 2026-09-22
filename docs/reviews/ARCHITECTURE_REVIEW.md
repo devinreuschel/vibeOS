@@ -302,7 +302,7 @@ In good shape: one crate, lockfiles committed, standard-library-only Python, hos
 - **Impact:** Low · **Effort:** S · **Risk if ignored:** No way to bisect by phase or hand someone a bootable image.
 
 **B4 · Simplify `build.rs` inputs and the initrd path**
-- **Status:** **Implemented (this PR).** One generator (`tests/hostlib` `mkinitrd` → `build/initrd.fat`); `build.rs` consumes `VIBEOS_INITRD` like `VIBEOS_KSYMS`. AP trampoline is `global_asm!` into `.trampoline`. `nasm` remains for `user/*.asm` only.
+- **Status:** **Implemented (#89).** One generator (`tests/hostlib` `mkinitrd` → `build/initrd.fat`); `build.rs` consumes `VIBEOS_INITRD` like `VIBEOS_KSYMS`. AP trampoline is `global_asm!` into `.trampoline`. `nasm` remains for `user/*.asm` only.
 - **Observation:** `build.rs` shells out to `nasm` and, if `initrd.fat` is not staged in the repo root, to `python3 scripts/mkinitrd.py`; the Makefile has its own `initrd.fat:` rule; and `src/fat.rs:1690 fat::mkinitrd` is a second, Rust implementation of the same image used by `fat_init.rs:208` as a fallback. `initrd.fat` is both a build product and a listed prerequisite (`KERNEL_DEPS`) that lives at the repo root.
 - **Recommendation:** Keep one initrd generator (the Rust one, since it is host-tested and can run from `build.rs` via the hostlib crate or a tiny `xtask`), delete `scripts/mkinitrd.py`, and write the image only under `OUT_DIR`/`target/`. Consider assembling the trampoline with `global_asm!` to drop the `nasm` dependency (the file is 90 lines).
 - **Impact:** Low · **Effort:** S · **Risk if ignored:** Two initrd implementations drift; a stale `initrd.fat` in the root silently wins.
@@ -433,7 +433,7 @@ Nothing in this sketch requires changing an algorithm. Locks, ranks, markers, th
 | C2 | One `VIBEOS_*` reader | Falls out of T2 · **done** |
 | B3 | Tag `v0.8.0`, cut changelog, publish ISO artifact | |
 | DOC4 | Shorter changelog entries | With B3 |
-| D3 | `BootInfo` captured once | Deferred since Phase 0 |
+| D3 | `BootInfo` captured once | **Landed** (this PR) |
 | R1 | Root/tests tidy; prune merged branches | Branch prune in docs/meta PR. ISO→`build/` waits on B1; Python driver moves wait on T2. |
 
 ### Phase II — Near term (2–4 weeks; Phase 9 is resuming, so interleave with it)
@@ -451,7 +451,7 @@ Nothing in this sketch requires changing an algorithm. Locks, ranks, markers, th
 | T4 | `cargo-fuzz` targets for the parsers on the weekly job | A2 |
 | E1 | Restriction lints on the portable crate; fix the nine non-test `unwrap`s | — |
 | S1 | SMEP/SMAP/UMIP/WP + in-guest test; real entropy for `/dev/random` | Before Phase 9.1 |
-| B4 | One initrd generator; asm trampoline via `global_asm!` | **done (this PR)** |
+| B4 | One initrd generator; asm trampoline via `global_asm!` | **done** (#89) |
 | Q4, E3, P2 | Naming/feature consistency; emit-path rule; Phase 17 notes | — |
 | O1 | One changelog line for the Phase 9 resume (research notes deferred by the maintainer) | **Superseded 2026-09-22:** Phase 9 exit already closed. Do not implement as written. |
 

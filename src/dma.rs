@@ -94,7 +94,7 @@ impl DmaAlloc {
     }
 }
 
-/// Physically contiguous. `device` is the translated phys, never HHDM.
+/// Physically contiguous. `device` is the translated phys, never a HHDM VA.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DmaBuffer {
     pub virt: u64,
