@@ -19,7 +19,7 @@ From ROADMAP "How to read this". Not optional.
 - new serial markers registered in the harness in the same commit ([DESIGN §8.3](docs/DESIGN.md#83-end-to-end))
 - new portable logic gets host tests; new hardware behaviour gets a ktest
 - every fixed bug gets a regression test in the cheapest tier that catches it
-- `CHANGELOG.md` entry for anything visible to someone running the kernel
+- `CHANGELOG.md` entry for anything visible to someone running the kernel (≤ 2 lines, user-facing)
 - design docs updated in the same commit as any change to an invariant or a constant
 - no `TODO` describing a correctness gap — those become lines in the ROADMAP
 
@@ -42,7 +42,7 @@ From ROADMAP "How to read this". Not optional.
     make test-kernel    # in-guest registry (tests/harness/run_ktest.py)
     make test           # full ladder
 
-`make help` lists targets. Optional: `pre-commit install` (ruff + `scripts/check_*.py` when those exist). rustfmt `--check` and clippy `-D warnings` land with Q1.
+`make help` lists targets. Optional: `pre-commit install` (ruff + `scripts/check_*.py` when those exist). rustfmt `--check` and clippy `-D warnings` landed with Q1 (#80).
 
 `VIBEOS_*` overrides: `SMP`, `QEMU_CPU`, `MEM`, `QEMU_ACCEL` (default `tcg`), `ISO`, `TIMEOUT`, `BIOS`, `QEMU_EXTRA`. Makefile `?=` defaults are the source for `make run`. One reader: `tests/harness/harness.py` (`env_config`).
 
@@ -51,7 +51,8 @@ macOS: `brew install qemu xorriso nasm python`. Hostlib and QEMU e2e work. Kerne
 ## Toolchain bump (C1)
 
 Bump the date in `rust-toolchain.toml` and the matching `toolchain:` inputs in
-`.github/workflows/ci.yml` and `.github/workflows/smp-stress.yml` in one PR.
+`.github/workflows/ci.yml`, `.github/workflows/smp-stress.yml`, and
+`.github/workflows/release.yml` in one PR.
 `make test` must be green. Do not re-introduce an undated nightly except the
 weekly canary job in `smp-stress.yml`. Not a drive-by.
 

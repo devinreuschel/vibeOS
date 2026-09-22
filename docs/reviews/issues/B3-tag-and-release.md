@@ -1,5 +1,8 @@
 # B3 · Version, tag phases, and publish the ISO
 
+**Status:** implemented. Version `0.8.0`, changelog cut, `release.yml`, CI ISO artifact.
+Maintainer tags `v0.8.0` later — this change does not push tags.
+
 | | |
 |---|---|
 | **Area** | 4.10 Release |

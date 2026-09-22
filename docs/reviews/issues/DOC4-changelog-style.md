@@ -1,5 +1,7 @@
 # DOC4 · Keep `CHANGELOG.md` short and user-facing
 
+**Status:** implemented.
+
 | | |
 |---|---|
 | **Area** | 4.12 Documentation |
