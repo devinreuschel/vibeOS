@@ -13,7 +13,9 @@ use vibeos::marker;
 use crate::fb_init;
 use crate::kbd_init;
 use crate::log_init;
+use crate::per_cpu_init;
 use crate::serial::{self, Serial};
+use crate::thread_init;
 use crate::x86::InterruptGuard;
 
 static SERIAL_ON: AtomicBool = AtomicBool::new(false);
@@ -81,6 +83,40 @@ pub fn read() -> Option<DecodedKey> {
         }
     }
     None
+}
+
+/// Block for one key. Drain with IRQs off; never hold the FB/serial lock
+/// across the wait. `sti; hlt` is one instruction so a keyboard IRQ
+/// cannot slip between enable and halt.
+pub fn wait_key() -> DecodedKey {
+    loop {
+        if let Some(k) = read() {
+            return k;
+        }
+        if !per_cpu_init::current().runq.is_empty() {
+            thread_init::yield_now();
+            continue;
+        }
+        unsafe {
+            core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+        }
+        if let Some(k) = read() {
+            unsafe {
+                core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+            }
+            return k;
+        }
+        if !per_cpu_init::current().runq.is_empty() {
+            unsafe {
+                core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+            }
+            thread_init::yield_now();
+            continue;
+        }
+        unsafe {
+            core::arch::asm!("sti; hlt", options(nomem, nostack));
+        }
+    }
 }
 
 /// FB text, replay the pre-FB ring, PS/2, then `console ok`.

@@ -76,6 +76,9 @@ pub mod pci;
 #[path = "../../../src/pmm.rs"]
 pub mod pmm;
 
+#[path = "../../../src/proc.rs"]
+pub mod proc;
+
 #[path = "../../../src/sched.rs"]
 pub mod sched;
 

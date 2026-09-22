@@ -37,6 +37,22 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Phase 9 slice C: Process + fork/exec/wait + early signals + userspace
+  shell. `Process` (pid, parent, AS, fd table, cwd, creds, exit status).
+  Threads belong to a process. Real fd table replaces B's early fd1/fd2
+  console sink (`dup`/`dup2`/`CLOEXEC`, refcounted kernel files).
+  `fork` is a full AS copy (COW = Phase 10). `execve` builds the new AS
+  first and replaces only after load. `wait4` + `WNOHANG`, zombies,
+  reparent to init. Early signals: `SIGKILL`/`SIGSTOP` plus fault
+  defaults (`SIGSEGV`/`SIGILL`/`SIGFPE`) and `SIGCHLD`; no user handlers.
+  DESIGN §5.2 is CPL-split: user fault → kill + diagnostic, kernel
+  still panics. `/sbin/init` is the post-init kernel job; `/bin/sh` is
+  the interactive shell (`vibeOS: shell ready` unchanged); `/bin/tests`
+  is the userspace EFAULT/fork/exec runner. Kernel shell only under
+  `kernel_shell`. `ps` lists process state (`SYS_PSINFO=500` until
+  procfs). In-guest: existing ring3 tests plus `user_syscalls`. No new
+  boot marker. Phase 9 exit gate closed; Phase 10 (COW) not started.
+
 - Phase 9 slice B: syscall ABI + ELF64 + freestanding userspace. Dispatch
   table plugs into Slice A's `vibeos_syscall_stub` (same entry, no second
   path). Wired: `write`, `exit`, `getpid`, `sched_yield`. Linux errno

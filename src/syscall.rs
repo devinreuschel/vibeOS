@@ -10,29 +10,64 @@ use crate::addr_space::UserMemError;
 pub const EPERM: i32 = 1;
 /// Linux `ENOENT`.
 pub const ENOENT: i32 = 2;
-/// Linux `EBADF`.
-pub const EBADF: i32 = 9;
+/// Linux `ESRCH`.
+pub const ESRCH: i32 = 3;
+/// Linux `ECHILD`.
+pub const ECHILD: i32 = 10;
+/// Linux `EAGAIN`.
+pub const EAGAIN: i32 = 11;
 /// Linux `ENOMEM`.
 pub const ENOMEM: i32 = 12;
+/// Linux `EACCES`.
+pub const EACCES: i32 = 13;
 /// Linux `EFAULT`.
 pub const EFAULT: i32 = 14;
+/// Linux `EBADF`.
+pub const EBADF: i32 = 9;
+/// Linux `EBUSY`.
+pub const EBUSY: i32 = 16;
+/// Linux `EEXIST`.
+pub const EEXIST: i32 = 17;
+/// Linux `ENOTDIR`.
+pub const ENOTDIR: i32 = 20;
+/// Linux `EISDIR`.
+pub const EISDIR: i32 = 21;
 /// Linux `EINVAL`.
 pub const EINVAL: i32 = 22;
+/// Linux `EMFILE`.
+pub const EMFILE: i32 = 24;
 /// Linux `ENOSYS`.
 pub const ENOSYS: i32 = 38;
+/// Linux `ENAMETOOLONG`.
+pub const ENAMETOOLONG: i32 = 36;
+/// Linux `EIO`.
+pub const EIO: i32 = 5;
+/// Linux `E2BIG`.
+pub const E2BIG: i32 = 7;
+/// Linux `ENOEXEC`.
+pub const ENOEXEC: i32 = 8;
 
 pub const SYS_READ: u64 = 0;
 pub const SYS_WRITE: u64 = 1;
-pub const SYS_SCHED_YIELD: u64 = 24;
+pub const SYS_OPEN: u64 = 2;
+pub const SYS_CLOSE: u64 = 3;
+pub const SYS_LSEEK: u64 = 8;
+pub const SYS_DUP: u64 = 32;
+pub const SYS_DUP2: u64 = 33;
 pub const SYS_GETPID: u64 = 39;
+pub const SYS_FORK: u64 = 57;
+pub const SYS_EXECVE: u64 = 59;
 pub const SYS_EXIT: u64 = 60;
+pub const SYS_WAIT4: u64 = 61;
+pub const SYS_KILL: u64 = 62;
+pub const SYS_FCNTL: u64 = 72;
+pub const SYS_GETPPID: u64 = 110;
+pub const SYS_SCHED_YIELD: u64 = 24;
+/// vibeOS-specific until Phase 12 getdents/procfs. `rdi` buf, `rsi` len.
+pub const SYS_PSINFO: u64 = 500;
 
-/// Bootstrap pid until Slice C’s `Process`. Documented in `docs/SYSCALL.md`.
-pub const BOOTSTRAP_PID: i64 = 1;
-
-/// Early stdout/stderr until C’s fd table. Not a Process.
-pub const EARLY_STDOUT_FD: u64 = 1;
-pub const EARLY_STDERR_FD: u64 = 2;
+pub const F_GETFD: u64 = 1;
+pub const F_SETFD: u64 = 2;
 
 pub const fn neg(errno: i32) -> i64 {
     -(errno as i64)
@@ -67,6 +102,99 @@ impl SyscallFrame {
     }
 }
 
+/// Full user GPR set for fork child / exec / iret-into-user.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct UserRegs {
+    pub rax: u64,
+    pub rbx: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub rbp: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    pub rip: u64,
+    pub rsp: u64,
+    pub rflags: u64,
+    pub fs_base: u64,
+}
+
+impl UserRegs {
+    pub const fn empty() -> Self {
+        Self {
+            rax: 0,
+            rbx: 0,
+            rcx: 0,
+            rdx: 0,
+            rsi: 0,
+            rdi: 0,
+            rbp: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r11: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            rip: 0,
+            rsp: 0,
+            rflags: 0,
+            fs_base: 0,
+        }
+    }
+
+    pub fn from_syscall(f: &SyscallFrame, retval: u64) -> Self {
+        Self {
+            rax: retval,
+            rbx: f.rbx,
+            rcx: f.rip,
+            rdx: f.arg2,
+            rsi: f.arg1,
+            rdi: f.arg0,
+            rbp: f.rbp,
+            r8: f.arg4,
+            r9: f.arg5,
+            r10: f.arg3,
+            r11: f.r11,
+            r12: f.r12,
+            r13: f.r13,
+            r14: f.r14,
+            r15: f.r15,
+            rip: f.rip,
+            rsp: f.user_rsp,
+            rflags: f.r11,
+            fs_base: 0,
+        }
+    }
+
+    pub fn apply_to_syscall(self, f: &mut SyscallFrame) {
+        f.user_rsp = self.rsp;
+        f.rip = self.rip;
+        f.arg2 = self.rdx;
+        f.rbx = self.rbx;
+        f.rbp = self.rbp;
+        f.arg1 = self.rsi;
+        f.arg0 = self.rdi;
+        f.arg4 = self.r8;
+        f.arg5 = self.r9;
+        f.arg3 = self.r10;
+        f.r11 = self.rflags;
+        f.r12 = self.r12;
+        f.r13 = self.r13;
+        f.r14 = self.r14;
+        f.r15 = self.r15;
+    }
+}
+
 /// Per-entry arity + which args are user pointers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SyscallInfo {
@@ -86,6 +214,48 @@ const WRITE: SyscallInfo = SyscallInfo {
     ptr_mask: 1 << 1,
     len_arg: 2,
 };
+const READ: SyscallInfo = SyscallInfo {
+    name: "read",
+    nr: SYS_READ,
+    arity: 3,
+    ptr_mask: 1 << 1,
+    len_arg: 2,
+};
+const OPEN: SyscallInfo = SyscallInfo {
+    name: "open",
+    nr: SYS_OPEN,
+    arity: 3,
+    ptr_mask: 0,
+    len_arg: 0xff,
+};
+const CLOSE: SyscallInfo = SyscallInfo {
+    name: "close",
+    nr: SYS_CLOSE,
+    arity: 1,
+    ptr_mask: 0,
+    len_arg: 0xff,
+};
+const LSEEK: SyscallInfo = SyscallInfo {
+    name: "lseek",
+    nr: SYS_LSEEK,
+    arity: 3,
+    ptr_mask: 0,
+    len_arg: 0xff,
+};
+const DUP: SyscallInfo = SyscallInfo {
+    name: "dup",
+    nr: SYS_DUP,
+    arity: 1,
+    ptr_mask: 0,
+    len_arg: 0xff,
+};
+const DUP2: SyscallInfo = SyscallInfo {
+    name: "dup2",
+    nr: SYS_DUP2,
+    arity: 2,
+    ptr_mask: 0,
+    len_arg: 0xff,
+};
 const YIELD: SyscallInfo = SyscallInfo {
     name: "sched_yield",
     nr: SYS_SCHED_YIELD,
@@ -100,6 +270,27 @@ const GETPID: SyscallInfo = SyscallInfo {
     ptr_mask: 0,
     len_arg: 0xff,
 };
+const GETPPID: SyscallInfo = SyscallInfo {
+    name: "getppid",
+    nr: SYS_GETPPID,
+    arity: 0,
+    ptr_mask: 0,
+    len_arg: 0xff,
+};
+const FORK: SyscallInfo = SyscallInfo {
+    name: "fork",
+    nr: SYS_FORK,
+    arity: 0,
+    ptr_mask: 0,
+    len_arg: 0xff,
+};
+const EXECVE: SyscallInfo = SyscallInfo {
+    name: "execve",
+    nr: SYS_EXECVE,
+    arity: 3,
+    ptr_mask: 0,
+    len_arg: 0xff,
+};
 const EXIT: SyscallInfo = SyscallInfo {
     name: "exit",
     nr: SYS_EXIT,
@@ -107,8 +298,39 @@ const EXIT: SyscallInfo = SyscallInfo {
     ptr_mask: 0,
     len_arg: 0xff,
 };
+const WAIT4: SyscallInfo = SyscallInfo {
+    name: "wait4",
+    nr: SYS_WAIT4,
+    arity: 4,
+    ptr_mask: 0,
+    len_arg: 0xff,
+};
+const KILL: SyscallInfo = SyscallInfo {
+    name: "kill",
+    nr: SYS_KILL,
+    arity: 2,
+    ptr_mask: 0,
+    len_arg: 0xff,
+};
+const FCNTL: SyscallInfo = SyscallInfo {
+    name: "fcntl",
+    nr: SYS_FCNTL,
+    arity: 3,
+    ptr_mask: 0,
+    len_arg: 0xff,
+};
+const PSINFO: SyscallInfo = SyscallInfo {
+    name: "psinfo",
+    nr: SYS_PSINFO,
+    arity: 2,
+    ptr_mask: 1 << 0,
+    len_arg: 1,
+};
 
-const TABLE: &[SyscallInfo] = &[WRITE, YIELD, GETPID, EXIT];
+const TABLE: &[SyscallInfo] = &[
+    READ, WRITE, OPEN, CLOSE, LSEEK, DUP, DUP2, YIELD, GETPID, GETPPID, FORK, EXECVE, EXIT, WAIT4,
+    KILL, FCNTL, PSINFO,
+];
 
 pub fn info(nr: u64) -> Option<SyscallInfo> {
     let mut i = 0;
@@ -173,10 +395,19 @@ mod tests {
     fn errno_linux_values() {
         assert_eq!(EPERM, 1);
         assert_eq!(ENOENT, 2);
+        assert_eq!(ESRCH, 3);
+        assert_eq!(EIO, 5);
+        assert_eq!(E2BIG, 7);
+        assert_eq!(ENOEXEC, 8);
         assert_eq!(EBADF, 9);
+        assert_eq!(ECHILD, 10);
+        assert_eq!(EAGAIN, 11);
         assert_eq!(ENOMEM, 12);
+        assert_eq!(EACCES, 13);
         assert_eq!(EFAULT, 14);
         assert_eq!(EINVAL, 22);
+        assert_eq!(EMFILE, 24);
+        assert_eq!(ENAMETOOLONG, 36);
         assert_eq!(ENOSYS, 38);
         assert_eq!(neg(ENOSYS), -38);
         assert_eq!(UserMemError::EFAULT, EFAULT);
@@ -192,18 +423,40 @@ mod tests {
         assert!(info(SYS_GETPID).is_some());
         assert!(info(SYS_EXIT).is_some());
         assert!(info(SYS_SCHED_YIELD).is_some());
-        assert!(info(SYS_READ).is_none());
+        assert!(info(SYS_FORK).is_some());
+        assert!(info(SYS_EXECVE).is_some());
+        assert!(info(SYS_WAIT4).is_some());
+        assert!(info(SYS_READ).is_some());
+        assert!(info(SYS_OPEN).is_some());
+        assert!(info(SYS_PSINFO).is_some());
         assert!(info(0xC0FFEE).is_none());
         assert!(info(u64::MAX).is_none());
         let mut n = 0;
         for e in TABLE {
             n += 1;
             match e.nr {
-                SYS_WRITE | SYS_SCHED_YIELD | SYS_GETPID | SYS_EXIT => {}
+                SYS_READ
+                | SYS_WRITE
+                | SYS_OPEN
+                | SYS_CLOSE
+                | SYS_LSEEK
+                | SYS_DUP
+                | SYS_DUP2
+                | SYS_SCHED_YIELD
+                | SYS_GETPID
+                | SYS_GETPPID
+                | SYS_FORK
+                | SYS_EXECVE
+                | SYS_EXIT
+                | SYS_WAIT4
+                | SYS_KILL
+                | SYS_FCNTL
+                | SYS_PSINFO => {}
                 _ => panic!("unexpected nr"),
             }
         }
-        assert_eq!(n, 4);
+        assert_eq!(n, TABLE.len());
+        assert_eq!(n, 17);
     }
 
     #[test]

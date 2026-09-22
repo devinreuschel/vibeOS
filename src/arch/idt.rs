@@ -51,6 +51,9 @@ extern "x86-interrupt" fn default_noerr<const N: u8>(mut frame: InterruptFrame) 
         gs_leave(user);
         return;
     }
+    if user {
+        crate::proc_init::try_user_fault(N, &frame, 0, None);
+    }
     crate::panic::exception_vec(N, &frame, None, None);
 }
 
@@ -65,6 +68,9 @@ extern "x86-interrupt" fn default_err<const N: u8>(mut frame: InterruptFrame, er
     } else {
         None
     };
+    if user {
+        crate::proc_init::try_user_fault(N, &frame, err, cr2);
+    }
     crate::panic::exception_vec(N, &frame, Some(err), cr2);
 }
 
@@ -83,6 +89,9 @@ extern "x86-interrupt" fn invalid_opcode(mut frame: InterruptFrame) {
     if catch::intercept(vectors::UD, &mut frame, 0) {
         gs_leave(user);
         return;
+    }
+    if user {
+        crate::proc_init::try_user_fault(vectors::UD, &frame, 0, None);
     }
     crate::panic::exception_halt(b"#UD", &frame, None, None);
 }
@@ -111,6 +120,9 @@ extern "x86-interrupt" fn general_protection(mut frame: InterruptFrame, err: u64
         gs_leave(user);
         return;
     }
+    if user {
+        crate::proc_init::try_user_fault(vectors::GP, &frame, err, None);
+    }
     crate::panic::exception_halt(b"#GP", &frame, Some(err), None);
 }
 
@@ -120,7 +132,11 @@ extern "x86-interrupt" fn page_fault(mut frame: InterruptFrame, err: u64) {
         gs_leave(user);
         return;
     }
-    crate::panic::exception_halt(b"#PF", &frame, Some(err), Some(x86::read_cr2()));
+    let cr2 = x86::read_cr2();
+    if user {
+        crate::proc_init::try_user_fault(vectors::PF, &frame, err, Some(cr2));
+    }
+    crate::panic::exception_halt(b"#PF", &frame, Some(err), Some(cr2));
 }
 
 extern "x86-interrupt" fn double_fault(mut frame: InterruptFrame, err: u64) {

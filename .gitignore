@@ -45,6 +45,9 @@ isodir/
 /target-vibefs-crash/
 /initrd.fat
 /user/hello
+/user/init
+/user/sh
+/user/tests
 /tests/hostlib/target/
 /limine
 sysroot/

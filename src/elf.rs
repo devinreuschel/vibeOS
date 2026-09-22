@@ -326,6 +326,10 @@ pub fn parse(data: &[u8]) -> Result<Image<'_>, ElfError> {
             j += 1;
         }
     }
+    if let Some(va) = phdr_va {
+        let ph_len = (phnum as u64).saturating_mul(phentsize as u64).max(1);
+        check_user_va(va, ph_len)?;
+    }
     Ok(Image {
         data,
         entry,

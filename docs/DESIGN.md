@@ -227,9 +227,12 @@ re-capture. Two-pass `nm` fills an in-image `.rodata` symbol table so `.text` st
 JSON keeps `frame-pointer: always`. Overflow, filter, and lookup are host-tested. Printer thread
 parked (Design ACK): global IRQ-safe ring + serial try-lock sink.
 
-Exceptions split into two groups. Recoverable ones (`#BP`, and `#PF` once demand paging exists) log
-and continue. Everything else dumps and halts through the same order as `#[panic_handler]`. Nothing
-is silently swallowed. NMI stays on IST for real NMIs; it is not the panic broadcast.
+Exceptions split into two groups. Recoverable ones (`#BP`, and `#PF` once demand paging exists)
+log and continue. **Ring-3 faults** (`#PF`/`#GP`/`#UD`/`#DE`/…) kill the user process with a
+diagnostic (`user: pid N killed SIG…`) and the kernel keeps running; they do not take the
+DESIGN panic-halt path. **Kernel faults** dump and halt through the same order as
+`#[panic_handler]`. Nothing is silently swallowed. NMI stays on IST for real NMIs; it is not
+the panic broadcast.
 
 ## 2.6 Serial markers
 
@@ -657,19 +660,23 @@ triple fault, which QEMU reports as a silent reboot loop.
 256 entries, filled at boot, one shared IDT for exceptions plus per-CPU LVT vectors. Handlers use
 `x86-interrupt` ABI so the compiler emits the correct frame and `iretq`.
 
-| Vector | Exception | Policy |
-|--------|-----------|--------|
-| `0x03` | `#BP` breakpoint | log, continue |
-| `0x0E` | `#PF` page fault | halt now, recoverable once demand paging exists |
-| `0x06` | `#UD` invalid opcode | log CR2/RIP, halt |
-| `0x0D` | `#GP` general protection | log selector/error code, halt |
-| `0x08` | `#DF` double fault | log on IST stack, halt |
-| `0x12` | `#MC` machine check | log, halt |
-| `0x02` | NMI | real NMIs on IST; panic halt is Fixed IPI `0xFE`, not NMI |
-| rest | | log vector + error code, halt |
+Policy is **CPL-split** (Phase 9C). Catch intercept (in-guest tests) still wins first.
 
-Every halting handler prints the interrupt frame (RIP, CS, RFLAGS, RSP, SS), the error code, and CR2
-for faults. A halt with no register dump is a wasted crash.
+| Vector | Exception | Kernel (CPL=0) | User (CPL=3) |
+|--------|-----------|----------------|--------------|
+| `0x03` | `#BP` breakpoint | log, continue | log, continue |
+| `0x0E` | `#PF` page fault | halt (demand paging: Phase 10) | `SIGSEGV`, kill + diagnostic |
+| `0x0D` | `#GP` general protection | log selector/error code, halt | `SIGSEGV`, kill + diagnostic |
+| `0x06` | `#UD` invalid opcode | log CR2/RIP, halt | `SIGILL`, kill + diagnostic |
+| `0x00`/`0x10`/`0x13` | `#DE`/`#MF`/`#XF` | halt | `SIGFPE`, kill + diagnostic |
+| `0x08` | `#DF` double fault | log on IST stack, halt | halt (not a process kill) |
+| `0x12` | `#MC` machine check | log, halt | halt |
+| `0x02` | NMI | real NMIs on IST; panic halt is Fixed IPI `0xFE`, not NMI | same |
+| rest | | log vector + error code, halt | halt unless mapped above |
+
+Every **halting** handler prints the interrupt frame (RIP, CS, RFLAGS, RSP, SS), the error code, and CR2
+for faults. A halt with no register dump is a wasted crash. User-kill prints
+`user: pid N killed SIG…` (not a `vibeOS:` boot marker) and reaps the process.
 
 ## 5.3 Vector map
 

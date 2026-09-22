@@ -50,6 +50,8 @@ pub const O_TRUNC: u32 = 0x200;
 pub const O_APPEND: u32 = 0x400;
 pub const O_DIRECTORY: u32 = 0x10000;
 pub const O_NOFOLLOW: u32 = 0x20000;
+/// Linux `O_CLOEXEC`. Process fd table turns this into `FD_CLOEXEC`.
+pub const O_CLOEXEC: u32 = 0x80000;
 
 pub const SEEK_SET: u32 = 0;
 pub const SEEK_CUR: u32 = 1;

@@ -15,7 +15,7 @@ use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::lock::RANK_SCHED;
 use vibeos::paging::VirtAddr;
 use vibeos::sched::{
-    effective_deadline, enqueue_runnable, take_next, TimeoutQueue, SWEEP_TICKS,
+    effective_deadline, enqueue_runnable, take_next, TimeoutQueue, FAR_DEADLINE, SWEEP_TICKS,
 };
 use vibeos::thread::{
     apply_if_on_resume, prepare_thread, switch_context, CpuAffinity, CpuContext, KernelStack, Tcb,
@@ -143,6 +143,10 @@ extern "C" fn trampoline() {
     reap_zombies();
     let entry = unsafe { (*per_cpu_init::current_thread()).entry };
     entry();
+    thread_exit();
+}
+
+pub fn exit_current() -> ! {
     thread_exit();
 }
 
@@ -373,6 +377,7 @@ pub unsafe fn init_bootstrap() {
         as_cr3: 0,
         fpu: crate::syscall_init::fpu_template(),
         syscall_count: 0,
+        pid: 0,
     });
     let ptr = &mut *tcb as *mut Tcb;
     {
@@ -392,7 +397,7 @@ fn bootstrap_entry() {
 }
 
 pub fn spawn(name: &'static str, entry: fn()) -> ThreadHandle {
-    spawn_inner(name, entry, CpuAffinity::Any, true, 0)
+    spawn_inner(name, entry, CpuAffinity::Any, true, 0, 0, 0)
 }
 
 /// Pin to this CPU. In-guest tests that `switch_to` / `yield_now` a
@@ -408,15 +413,47 @@ pub fn spawn_here(name: &'static str, entry: fn()) -> ThreadHandle {
         CpuAffinity::Pinned(current_cpu()),
         true,
         per_cpu_init::irq_nest(),
+        0,
+        0,
     )
 }
 
 pub fn spawn_on(name: &'static str, entry: fn(), cpu: u32) -> ThreadHandle {
-    spawn_inner(name, entry, CpuAffinity::Pinned(cpu), true, 0)
+    spawn_inner(name, entry, CpuAffinity::Pinned(cpu), true, 0, 0, 0)
 }
 
 pub(crate) fn spawn_idle(entry: fn()) -> ThreadHandle {
-    spawn_inner("idle", entry, CpuAffinity::Pinned(0), false, 0)
+    spawn_inner("idle", entry, CpuAffinity::Pinned(0), false, 0, 0, 0)
+}
+
+/// User process thread. Not runnable until [`make_ready`].
+pub fn spawn_user(
+    name: &'static str,
+    entry: fn(),
+    pid: u32,
+    cr3: u64,
+) -> ThreadHandle {
+    spawn_inner(
+        name,
+        entry,
+        CpuAffinity::Pinned(current_cpu()),
+        false,
+        0,
+        pid,
+        cr3,
+    )
+}
+
+pub fn make_ready(id: ThreadId) {
+    with_sched(|s| {
+        if let Some(t) = s.get_mut(id) {
+            if t.state == ThreadState::Dead {
+                return;
+            }
+            t.state = ThreadState::Ready;
+        }
+        s.place_home(id);
+    });
 }
 
 /// AP idle: running on `stack` already. No synthetic frame, not on the FIFO.
@@ -443,6 +480,7 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Option<ThreadId> {
         as_cr3: 0,
         fpu: crate::syscall_init::fpu_template(),
         syscall_count: 0,
+        pid: 0,
     });
     let id = with_sched(|s| {
         let slot = s.slots.iter().position(|x| x.is_none())?;
@@ -486,6 +524,8 @@ fn spawn_inner(
     affinity: CpuAffinity,
     enqueue: bool,
     irq_nest: u32,
+    pid: u32,
+    as_cr3: u64,
 ) -> ThreadHandle {
     let stack = kva_init::alloc_guarded_stack(DEFAULT_STACK_PAGES).expect("thread stack");
     let top = stack.top().as_u64();
@@ -510,7 +550,7 @@ fn spawn_inner(
         s.timeouts.remove(id);
         let tcb = s.slots[slot].as_mut().expect("dead slot");
         assert!(tcb.stack.is_none(), "dead tcb still owns stack");
-        fill_tcb(tcb, name, entry, affinity, cpu, ks, top, tramp, irq_nest);
+        fill_tcb(tcb, name, entry, affinity, cpu, ks, top, tramp, irq_nest, pid, as_cr3);
         if enqueue {
             s.place(cpu, id);
         }
@@ -534,9 +574,10 @@ fn spawn_inner(
         switches: 0,
         run_tsc: 0,
         wait_outcome: WaitOutcome::Woken,
-        as_cr3: 0,
+        as_cr3,
         fpu: crate::syscall_init::fpu_template(),
         syscall_count: 0,
+        pid,
     });
     prepare_thread(&mut tcb.context, top, tramp);
     unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
@@ -569,6 +610,8 @@ fn fill_tcb(
     top: u64,
     tramp: u64,
     irq_nest: u32,
+    pid: u32,
+    as_cr3: u64,
 ) {
     tcb.name = name;
     tcb.state = ThreadState::Ready;
@@ -582,9 +625,10 @@ fn fill_tcb(
     tcb.switches = 0;
     tcb.run_tsc = 0;
     tcb.wait_outcome = WaitOutcome::Woken;
-    tcb.as_cr3 = 0;
+    tcb.as_cr3 = as_cr3;
     tcb.fpu = crate::syscall_init::fpu_template();
     tcb.syscall_count = 0;
+    tcb.pid = pid;
     prepare_thread(&mut tcb.context, top, tramp);
     unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
 }
@@ -683,6 +727,36 @@ pub fn current_id() -> ThreadId {
     let p = per_cpu_init::current_thread();
     assert!(!p.is_null(), "no current thread");
     unsafe { (*p).id }
+}
+
+pub fn current_pid() -> u32 {
+    let p = per_cpu_init::current_thread();
+    if p.is_null() {
+        0
+    } else {
+        unsafe { (*p).pid }
+    }
+}
+
+pub fn set_pid_cr3(id: ThreadId, pid: u32, cr3: u64) {
+    with_sched(|s| {
+        if let Some(t) = s.get_mut(id) {
+            t.pid = pid;
+            t.as_cr3 = cr3;
+        }
+    });
+}
+
+/// Park on `wq` forever (still a far deadline). SCHED dropped before switch.
+pub fn wait_on(wq: &mut WaitQueue) {
+    with_sched(|s| s.begin_wait(wq, FAR_DEADLINE));
+    schedule();
+}
+
+pub fn wake_queue(wq: &mut WaitQueue) {
+    with_sched(|s| {
+        s.wake_all(wq);
+    });
 }
 
 pub fn current_cpu() -> u32 {

@@ -49,8 +49,12 @@ QEMU_BASE = qemu-system-x86_64 \
 # not silently missed (DESIGN §9.1).
 KERNEL_SRCS := $(shell find src -type f \( -name '*.rs' -o -name '*.asm' -o -name '*.S' \) 2>/dev/null)
 USER_HELLO  := user/hello
+USER_INIT   := user/init
+USER_SH     := user/sh
+USER_TESTS  := user/tests
 KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml $(TARGET_JSON) linker.ld Makefile rust-toolchain.toml \
-	scripts/gen_ksyms.py scripts/mkinitrd.py scripts/mkuserelf.py user/hello.asm initrd.fat
+	scripts/gen_ksyms.py scripts/mkinitrd.py scripts/mkuserelf.py \
+	user/hello.asm user/init.asm user/sh.asm user/tests.asm user/sys.inc initrd.fat
 
 LLVM_TOOL_DIR := $(shell rustc --print sysroot)/lib/rustlib/$(shell rustc -vV | sed -n 's/^host: //p')/bin
 OBJDUMP := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-objdump),$(LLVM_TOOL_DIR)/llvm-objdump,llvm-objdump)
@@ -78,14 +82,27 @@ $(LIMINE_BIN):
 	@echo "limine binaries missing; run ./setup.sh" >&2
 	@exit 1
 
-initrd.fat: scripts/mkinitrd.py $(USER_HELLO)
-	python3 scripts/mkinitrd.py $@ --add $(USER_HELLO):/hello
+initrd.fat: scripts/mkinitrd.py $(USER_HELLO) $(USER_INIT) $(USER_SH) $(USER_TESTS)
+	python3 scripts/mkinitrd.py $@ \
+	    --add $(USER_HELLO):/hello \
+	    --add $(USER_INIT):/sbin/init \
+	    --add $(USER_SH):/bin/sh \
+	    --add $(USER_TESTS):/bin/tests
 
-user/hello.bin: user/hello.asm
-	nasm -f bin -o $@ $<
+user/%.bin: user/%.asm user/sys.inc
+	nasm -f bin -I user/ -o $@ $<
 
-$(USER_HELLO): user/hello.bin scripts/mkuserelf.py
+user/hello: user/hello.bin scripts/mkuserelf.py
 	python3 scripts/mkuserelf.py user/hello.bin $@
+
+user/init: user/init.bin scripts/mkuserelf.py
+	python3 scripts/mkuserelf.py user/init.bin $@
+
+user/sh: user/sh.bin scripts/mkuserelf.py
+	python3 scripts/mkuserelf.py user/sh.bin $@
+
+user/tests: user/tests.bin scripts/mkuserelf.py
+	python3 scripts/mkuserelf.py user/tests.bin $@
 
 $(ISO): $(KERNEL_ELF) limine.conf $(LIMINE_BIN)
 	@echo "  ISO $(ISO)"
@@ -291,7 +308,8 @@ clean:
 	rm -rf $(ISO_ROOT) $(ISO_ROOT_PANIC) $(ISO_ROOT_GP) $(ISO_ROOT_KTEST) $(ISO_ROOT_VIBEFS_CRASH) \
 	    $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_KTEST) $(ISO_VIBEFS_CRASH) \
 	    target-panic target-gp $(KERNEL_TESTS_DIR) $(KERNEL_VIBEFS_CRASH_DIR) initrd.fat \
-	    user/hello user/hello.bin
+	    user/hello user/hello.bin user/init user/init.bin user/sh user/sh.bin \
+	    user/tests user/tests.bin
 	$(CARGO) clean
 
 distclean: clean

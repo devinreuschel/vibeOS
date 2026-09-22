@@ -138,16 +138,15 @@ def main() -> int:
     fat_eoc(hello_clu)
     fat_eoc(etc_clu)
 
-    extra_ents: list[bytes] = []
-    for dest, blob in extras:
+    def alloc_file(blob: bytes) -> tuple[int, int]:
+        nonlocal next_clu, used_data
         n = max(1, (len(blob) + SEC - 1) // SEC)
         first = next_clu
         rest = blob
         clu = first
         for k in range(n):
             if clu >= 2 + nclus:
-                print("out of clusters", file=sys.stderr)
-                return 1
+                raise RuntimeError("out of clusters")
             chunk = rest[:SEC]
             rest = rest[SEC:]
             off = clu_off(clu)
@@ -159,7 +158,43 @@ def main() -> int:
             clu += 1
         next_clu = clu
         used_data += n
-        extra_ents.append(short_ent(name11(dest), 0x20, first, len(blob)))
+        return first, len(blob)
+
+    dirs: dict[str, int] = {}
+    dir_ents: dict[str, list[bytes]] = {}
+    extra_root: list[bytes] = []
+
+    try:
+        for dest, blob in extras:
+            dest = dest.replace("\\", "/")
+            while dest.startswith("/"):
+                dest = dest[1:]
+            if not dest:
+                continue
+            if "/" in dest:
+                dname, fname = dest.split("/", 1)
+                if "/" in fname:
+                    print("only one-level dirs", file=sys.stderr)
+                    return 1
+                if dname not in dirs:
+                    dclu = next_clu
+                    if dclu >= 2 + nclus:
+                        print("out of clusters", file=sys.stderr)
+                        return 1
+                    fat_eoc(dclu)
+                    next_clu += 1
+                    used_data += 1
+                    dirs[dname] = dclu
+                    dir_ents[dname] = []
+                    extra_root.append(short_ent(name11(dname), 0x10, dclu, 0))
+                first, sz = alloc_file(blob)
+                dir_ents[dname].append(short_ent(name11(fname), 0x20, first, sz))
+            else:
+                first, sz = alloc_file(blob)
+                extra_root.append(short_ent(name11(dest), 0x20, first, sz))
+    except RuntimeError as e:
+        print(e, file=sys.stderr)
+        return 1
 
     fsinfo = bytearray(SEC)
     put32(fsinfo, 0, 0x41615252)
@@ -174,7 +209,7 @@ def main() -> int:
     root[0:32] = short_ent(b"VIBEOS     ", 0x08, 0, 0)
     root[32:64] = short_ent(b"HELLO   TXT", 0x20, hello_clu, len(msg))
     root[64:96] = short_ent(b"ETC        ", 0x10, etc_clu, 0)
-    for i, ent in enumerate(extra_ents):
+    for i, ent in enumerate(extra_root):
         o = 96 + i * 32
         if o + 32 > SEC:
             print("root dir full", file=sys.stderr)
@@ -191,6 +226,18 @@ def main() -> int:
     etc[32:64] = short_ent(b"..         ", 0x10, 0, 0)
     etc_off = clu_off(etc_clu)
     img[etc_off : etc_off + SEC] = etc
+
+    for dname, dclu in dirs.items():
+        d = bytearray(SEC)
+        d[0:32] = short_ent(b".          ", 0x10, dclu, 0)
+        d[32:64] = short_ent(b"..         ", 0x10, ROOT, 0)
+        for i, ent in enumerate(dir_ents[dname]):
+            o = 64 + i * 32
+            if o + 32 > SEC:
+                print("subdir full", file=sys.stderr)
+                return 1
+            d[o : o + 32] = ent
+        img[clu_off(dclu) : clu_off(dclu) + SEC] = d
 
     with open(path, "wb") as f:
         f.write(img)

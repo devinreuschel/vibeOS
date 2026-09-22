@@ -446,6 +446,44 @@ impl AddressSpace {
         let mut free = |pa: PhysAddr| unsafe { pool.free_frame(pa) };
         unsafe { self.teardown(&mut free) }
     }
+
+    /// Full copy of user regions (Phase 9 fork). New frames, same bytes.
+    ///
+    /// # Safety
+    /// `kernel` is the live kernel mapper. `alloc` supplies owned frames.
+    pub unsafe fn clone_anon<A: FrameAlloc + FrameFree>(
+        &self,
+        kernel: &Mapper,
+        alloc: &mut A,
+    ) -> Result<AddressSpace, AsError> {
+        let mut dst = unsafe { AddressSpace::new(kernel, alloc) }.ok_or(AsError::OutOfFrames)?;
+        let rc = (|| {
+            let mut buf = [0u8; 256];
+            for r in self.regions() {
+                if r.len == 0 {
+                    continue;
+                }
+                unsafe { dst.map_anon(r.start, r.len, r.perms, alloc)? };
+                let mut off = 0u64;
+                while off < r.len {
+                    let n = (r.len - off).min(buf.len() as u64) as usize;
+                    self.read_bytes(r.start + off, &mut buf[..n])
+                        .map_err(|_| AsError::NotMapped)?;
+                    dst.write_bytes(r.start + off, &buf[..n])
+                        .map_err(|_| AsError::NotMapped)?;
+                    off += n as u64;
+                }
+            }
+            Ok(())
+        })();
+        match rc {
+            Ok(()) => Ok(dst),
+            Err(e) => {
+                let _ = unsafe { dst.teardown_pool(alloc) };
+                Err(e)
+            }
+        }
+    }
 }
 
 const _: () = {
@@ -650,6 +688,32 @@ mod tests {
             leaves: 0,
             tables: 0,
         };
+    }
+
+    #[test]
+    fn clone_anon_copies_bytes_not_frames() {
+        let mut pool = TestPool::new(128);
+        let kernel = kernel_mapper(&mut pool);
+        let mut src = unsafe { AddressSpace::new(&kernel, &mut pool) }.unwrap();
+        let va = 0x0000_0000_0040_0000u64;
+        unsafe {
+            src.map_anon(va, PAGE_SIZE_4K, UserPerms::RW, &mut pool)
+                .unwrap();
+        }
+        src.write_bytes(va, b"fork-me").unwrap();
+        let dst = unsafe { src.clone_anon(&kernel, &mut pool) }.unwrap();
+        let mut got = [0u8; 7];
+        dst.read_bytes(va, &mut got).unwrap();
+        assert_eq!(&got, b"fork-me");
+        src.write_bytes(va, b"parent!").unwrap();
+        dst.read_bytes(va, &mut got).unwrap();
+        assert_eq!(&got, b"fork-me");
+        unsafe {
+            let mut src = src;
+            src.teardown_pool(&mut pool);
+            let mut dst = dst;
+            dst.teardown_pool(&mut pool);
+        }
     }
 
     #[test]

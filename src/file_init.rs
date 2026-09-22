@@ -96,6 +96,7 @@ impl Walked {
 #[derive(Clone, Copy)]
 struct OpenFile {
     used: bool,
+    refs: u16,
     back: Back,
     vol: u8,
     flags: u32,
@@ -111,6 +112,7 @@ struct OpenFile {
 impl OpenFile {
     const EMPTY: Self = Self {
         used: false,
+        refs: 0,
         back: Back::Fat,
         vol: 0,
         flags: 0,
@@ -321,6 +323,9 @@ fn alloc_fid(f: OpenFile) -> Result<u16, FsError> {
         if !g[i].used {
             g[i] = f;
             g[i].used = true;
+            if g[i].refs == 0 {
+                g[i].refs = 1;
+            }
             return Ok(i as u16);
         }
         i += 1;
@@ -495,6 +500,7 @@ pub fn open(path: &str, flags: u32, _mode: u16) -> Result<u16, FsError> {
     }
     alloc_fid(OpenFile {
         used: true,
+        refs: 1,
         back: node.back,
         vol: node.vol,
         flags,
@@ -514,7 +520,22 @@ pub fn close(fid: u16) -> Result<(), FsError> {
     if i >= MAX_OPEN || !g[i].used {
         return Err(FsError::Badf);
     }
+    if g[i].refs > 1 {
+        g[i].refs -= 1;
+        return Ok(());
+    }
     g[i] = OpenFile::EMPTY;
+    Ok(())
+}
+
+/// Extra process fd pointing at the same kernel file.
+pub fn addref(fid: u16) -> Result<(), FsError> {
+    let mut g = FILES.lock();
+    let i = fid as usize;
+    if i >= MAX_OPEN || !g[i].used {
+        return Err(FsError::Badf);
+    }
+    g[i].refs = g[i].refs.saturating_add(1);
     Ok(())
 }
 

@@ -68,11 +68,11 @@ pub fn has_command(name: &str) -> bool {
     with_reg(|r| r.lookup(name).is_some())
 }
 
-/// Register builtins, then spawn the shell thread (not in ktest: the
-/// interactive loop would sit on the runq under IF-off tests).
+/// Register builtins. Production shell is a user process (`/bin/sh`).
+/// The kernel REPL is debug-only (`kernel_shell`).
 pub fn init() {
     register_builtins();
-    #[cfg(not(feature = "kernel_tests"))]
+    #[cfg(all(not(feature = "kernel_tests"), feature = "kernel_shell"))]
     {
         let _ = thread_init::spawn_on("shell", shell_main, 0);
     }
@@ -150,7 +150,7 @@ fn shell_main() {
     READY.store(true, Ordering::Release);
     write_prompt(&mut painted);
     loop {
-        let k = wait_key();
+        let k = console_init::wait_key();
         match ed.feed(k) {
             Feed::Pending => paint(&ed, &mut painted),
             Feed::Complete => {
@@ -200,41 +200,6 @@ fn paint(ed: &LineEditor, painted: &mut usize) {
     console_init::write(b"\r");
     console_init::write(PROMPT.as_bytes());
     console_init::write(&ed.line()[..ed.cursor()]);
-}
-
-/// Block for one key. Drain with IRQs off; never hold the FB/serial lock
-/// across the wait. `sti; hlt` is one instruction so a keyboard IRQ
-/// cannot slip between enable and halt.
-#[cfg_attr(feature = "kernel_tests", allow(dead_code))]
-fn wait_key() -> DecodedKey {
-    loop {
-        if let Some(k) = console_init::read() {
-            return k;
-        }
-        if !per_cpu_init::current().runq.is_empty() {
-            thread_init::yield_now();
-            continue;
-        }
-        unsafe {
-            core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
-        }
-        if let Some(k) = console_init::read() {
-            unsafe {
-                core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
-            }
-            return k;
-        }
-        if !per_cpu_init::current().runq.is_empty() {
-            unsafe {
-                core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
-            }
-            thread_init::yield_now();
-            continue;
-        }
-        unsafe {
-            core::arch::asm!("sti; hlt", options(nomem, nostack));
-        }
-    }
 }
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
@@ -362,6 +327,7 @@ fn dmesg_follow(view: Level) {
 }
 
 fn cmd_ps(_args: &[&str]) {
+    crate::proc_init::write_ps(&mut Console);
     let mut buf = [ThreadInfo {
         id: ThreadId::NONE,
         name: "",
