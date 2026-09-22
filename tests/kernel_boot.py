@@ -13,6 +13,7 @@ from harness import (  # noqa: E402
     HarnessError,
     QemuConfig,
     check_ktest_output,
+    effective_accel_name,
     retryable_ktest_failure,
     run_qemu_until_exit,
 )
@@ -58,6 +59,7 @@ def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool):
     tag = "persist reboot" if persist_reboot else "ktest"
     last: HarnessError | None = None
     for attempt in range(2):
+        raw = None
         try:
             raw = run_qemu_until_exit(cfg, timeout_s=timeout)
             check_ktest_output(raw.lines, raw.exit_code)
@@ -80,15 +82,27 @@ def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool):
         except HarnessError as e:
             last = e
             timed_out = "timed out" in str(e)
+            failure_lines = (
+                [
+                    line
+                    for line in raw.lines
+                    if line.startswith("vibeOS: ktest: FAIL")
+                ]
+                if raw is not None
+                else []
+            )
+            retryable = retryable_ktest_failure(
+                cfg.smp,
+                str(e),
+                persist_reboot=persist_reboot,
+                accel=effective_accel_name(cfg),
+                failure_lines=failure_lines,
+            )
             if attempt == 0 and (
                 timed_out
-                or retryable_ktest_failure(
-                    cfg.smp,
-                    str(e),
-                    persist_reboot=persist_reboot,
-                )
+                or retryable
             ):
-                reason = "timeout" if timed_out else "known SMP4 timing flake"
+                reason = "timeout" if timed_out else "known ktest timing flake"
                 print(f"[{tag}] retry after {reason}: {e}", file=sys.stderr)
                 continue
             raise

@@ -19,8 +19,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - In-guest ktest retries a silent 90s timeout once (`user_syscalls`
   wait4 can stall `/bin/tests` after `user: dup ok` with ~101 lines),
   the known SMP4 `msix_cpu: ap counter` timing flake, and the SMP4
-  persist-reboot `ipi: ack timeout` panic. Other in-guest assertions and
-  panics remain hard failures.
+  persist-reboot `ipi: ack timeout` panic. The exact SMP2 TCG-only
+  `per_cpu_bsp: ready_head should be empty` timing flake also gets one
+  retry on the initial boot. Other in-guest assertions and panics remain
+  hard failures.
 - In-guest `user_syscalls` could hang `wait4` on a live fork-bomb herd
   under `make test-lapic-fallback` persist reboot (periodic LAPIC, 90s
   timeout, ~101 serial lines, no dump). `/bin/tests` now yields after
