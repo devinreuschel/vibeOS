@@ -316,6 +316,26 @@ class TestKtestProtocol(unittest.TestCase):
             )
         )
 
+    def test_only_smp4_persist_ipi_ack_panic_is_retryable(self) -> None:
+        msg = (
+            "panic signature 'vibeOS: panic:' in: "
+            "'infovibeOS: panic: msg:  ipi: ack timeout waiters=0xdvibeOS: ktes'"
+        )
+        self.assertTrue(
+            retryable_ktest_failure(4, msg, persist_reboot=True)
+        )
+        self.assertFalse(retryable_ktest_failure(4, msg))
+        self.assertFalse(
+            retryable_ktest_failure(2, msg, persist_reboot=True)
+        )
+        self.assertFalse(
+            retryable_ktest_failure(
+                4,
+                "panic signature 'vibeOS: panic:' in: 'unrelated panic'",
+                persist_reboot=True,
+            )
+        )
+
 
 class TestQemuArgv(unittest.TestCase):
     def test_hpet_off_uses_machine_property(self) -> None:

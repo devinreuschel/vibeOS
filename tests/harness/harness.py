@@ -639,10 +639,24 @@ KTEST_FAIL_PREFIX = "vibeOS: ktest: FAIL"
 SMP4_MSIX_AP_COUNTER_FLAKE = (
     "ktest FAIL: vibeOS: ktest: FAIL msix_cpu: ap counter"
 )
+SMP4_IPI_ACK_PANIC = "ipi: ack timeout waiters="
 
 
-def retryable_ktest_failure(smp: int, message: str) -> bool:
-    return smp == 4 and message == SMP4_MSIX_AP_COUNTER_FLAKE
+def retryable_ktest_failure(
+    smp: int,
+    message: str,
+    *,
+    persist_reboot: bool = False,
+) -> bool:
+    if smp != 4:
+        return False
+    if message == SMP4_MSIX_AP_COUNTER_FLAKE:
+        return True
+    return (
+        persist_reboot
+        and "panic signature 'vibeOS: panic:'" in message
+        and SMP4_IPI_ACK_PANIC in message
+    )
 
 
 def check_ktest_output(

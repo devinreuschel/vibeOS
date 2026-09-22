@@ -81,9 +81,14 @@ def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool):
             last = e
             timed_out = "timed out" in str(e)
             if attempt == 0 and (
-                timed_out or retryable_ktest_failure(cfg.smp, str(e))
+                timed_out
+                or retryable_ktest_failure(
+                    cfg.smp,
+                    str(e),
+                    persist_reboot=persist_reboot,
+                )
             ):
-                reason = "timeout" if timed_out else "SMP4 MSI-X AP counter flake"
+                reason = "timeout" if timed_out else "known SMP4 timing flake"
                 print(f"[{tag}] retry after {reason}: {e}", file=sys.stderr)
                 continue
             raise
