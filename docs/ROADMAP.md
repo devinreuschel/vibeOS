@@ -96,10 +96,10 @@ rest of the project, which is the single most consequential decision in this pha
 - [x] CI runs the full ladder on push and pull request
 
 ### 0.1 Toolchain and target
-- [x] `rust-toolchain.toml`: nightly, `rust-src`, `llvm-tools`
-- [x] `x86_64-unknown-none-executable.json`: `executable: true`, no PIE, static relocation model, `disable-redzone: true`, `-mmx,-sse,+soft-float`, `code-model: kernel`
-- [x] no RELRO in pre-link args; it conflicts with a non-PIE static kernel
-- [x] `.cargo/config.toml`: default target; `-Z build-std=core,compiler_builtins,alloc` is on the Makefile `CARGO` invocation so `tests/hostlib` does not inherit a second `core`; linker script lives in the target JSON
+- [x] `rust-toolchain.toml`: dated nightly, `rust-src`, `llvm-tools`, `targets = ["x86_64-unknown-none"]`
+- [x] built-in `x86_64-unknown-none`: `code-model: kernel`, `disable-redzone`, `-mmx,-sse,+soft-float`; rustflags force frame pointers, static relocation, `-no-pie`, `-znorelro`
+- [x] no RELRO (`-znorelro`); it conflicts with a non-PIE static kernel
+- [x] `.cargo/config.toml`: default target `x86_64-unknown-none`; linker script is an absolute `-T` from `build.rs`
 - [x] `Cargo.toml`: `panic = "abort"` in both profiles, `opt-level = 1` for dev
 - [x] library and binary targets split from the first commit, not retrofitted
 - [x] `kernel_tests` feature declared now, wired in phase 1
@@ -1290,7 +1290,7 @@ everything.
 - [ ] `rustc` running on vibeOS, which requires LLVM working first
 - [ ] `cargo`, which requires networking, TLS, and git
 - [ ] a cross-compiled bootstrap first, then a native build, in that order
-- [ ] the kernel's own `build-std` requirement met on-device, which is the actual goal
+- [ ] the kernel itself builds on-device (built-in `x86_64-unknown-none`, no `build-std`)
 
 ### 15.4 Development environment
 - [ ] a git implementation or port, enough for clone, commit, branch, and push

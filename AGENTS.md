@@ -44,6 +44,8 @@ From ROADMAP "How to read this". Not optional.
 
 `make help` lists targets. Optional: `pre-commit install` (ruff + `scripts/check_*.py` when those exist). rustfmt `--check` and clippy `-D warnings` landed with Q1 (#80).
 
+Kernel target is built-in `x86_64-unknown-none` (B2). `./setup.sh` runs `rustup target add`.
+
 `VIBEOS_*` overrides: `SMP`, `QEMU_CPU`, `MEM`, `QEMU_ACCEL` (default `tcg`), `ISO`, `TIMEOUT`, `BIOS`, `QEMU_EXTRA`. Makefile `?=` defaults are the source for `make run`. One reader: `tests/harness/harness.py` (`env_config`).
 
 macOS: `brew install qemu xorriso nasm python`. Hostlib and QEMU e2e work. Kernel-crate `cargo test --lib` is not portable yet (A2). UEFI e2e needs OVMF (`OVMF=`); Homebrew qemu ships `share/qemu/edk2-x86_64-code.fd`.

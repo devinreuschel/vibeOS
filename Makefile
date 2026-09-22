@@ -2,17 +2,8 @@
 #
 # `make help` is the live target inventory (DESIGN §8.5).
 
-TARGET_JSON := x86_64-unknown-none-executable.json
-TARGET      := x86_64-unknown-none-executable
-
-# Nightly cargo needs -Zjson-target-spec to accept our custom target JSON.
-# build-std lives here rather than in .cargo/config.toml so hostlib tests
-# (a nested cargo workspace) do not inherit a second `core`.
-# Commas in -Zbuild-std cannot appear in $(call ...) arguments; keep them
-# in BUILD_STD and reference $$(CARGO) inside KERNEL_VARIANT.
-comma := ,
-BUILD_STD := core$(comma)compiler_builtins$(comma)alloc
-CARGO = cargo -Zjson-target-spec -Zbuild-std=$(BUILD_STD) -Zbuild-std-features=compiler-builtins-mem
+TARGET := x86_64-unknown-none
+CARGO  := cargo
 export CARGO_TARGET_DIR := $(CURDIR)/target
 # Script-style Python runners (`python3 tests/harness/run_e2e.py`) need the
 # repo root on sys.path so `from tests.harness.harness import` resolves.
@@ -52,15 +43,15 @@ QEMU_BASE = qemu-system-x86_64 \
     -accel $(VIBEOS_QEMU_ACCEL) \
     -no-reboot
 
-# Prerequisites: everything under src/, the linker script, the target spec, the
-# limine config, and this Makefile. A find(1) so newly added source dirs are
-# not silently missed (DESIGN §9.1).
+# Prerequisites: everything under src/, the linker script, the limine config,
+# and this Makefile. A find(1) so newly added source dirs are not silently
+# missed (DESIGN §9.1).
 KERNEL_SRCS := $(shell find src -type f \( -name '*.rs' -o -name '*.asm' -o -name '*.S' \) 2>/dev/null)
 USER_HELLO  := user/hello
 USER_INIT   := user/init
 USER_SH     := user/sh
 USER_TESTS  := user/tests
-KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml $(TARGET_JSON) linker.ld Makefile rust-toolchain.toml \
+KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml build.rs linker.ld Makefile rust-toolchain.toml \
 	scripts/gen_ksyms.py scripts/mkinitrd.py scripts/mkuserelf.py scripts/mkiso.sh \
 	user/hello.asm user/init.asm user/sh.asm user/tests.asm user/sys.inc initrd.fat
 
@@ -72,6 +63,7 @@ NM      := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-nm),$(LLVM_TOOL_DIR)/llvm-nm,ll
 # second link does not move .text (DESIGN §5.6).
 # $(1)=variant name  $(2)=target dir  $(3)=feature flags  $(4)=iso file
 # Feature flags use repeated --features, never commas (those split $(call)).
+# $$ so $(CARGO) is expanded when the recipe runs, not at $(eval) time.
 define KERNEL_VARIANT
 $(2)/$(TARGET)/$(PROFILE_DIR)/vibeos: $(KERNEL_DEPS)
 	CARGO_TARGET_DIR=$(2) $$(CARGO) build $$(CARGO_FLAGS) $(3)
@@ -130,9 +122,7 @@ help:
 	  '  clean / distclean     build products; distclean also drops limine/'
 
 # Fast local gate. Kernel clippy -Dwarnings and rustfmt --check are Q1
-# (kernel clippy is a full custom-target compile; fmt fails on 65 files).
-# Hostlib clippy currently hits deny-level correctness lints (e.g.
-# not_unsafe_ptr_arg_deref); cap those at warn until Q1. Guard scripts
+# (CI runs them; CHECK_FMT=1 enables rustfmt here). Guard scripts
 # (scripts/check_*.py) run when present (A4, Q5, A1).
 check:
 	@if [ "$(CHECK_FMT)" = "1" ]; then \

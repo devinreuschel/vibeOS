@@ -3,3 +3,4 @@
 # Bump the date here and in CI in one PR; see AGENTS.md.
 channel = "nightly-2026-09-22"
 components = ["rust-src", "llvm-tools", "rustfmt", "clippy"]
+targets = ["x86_64-unknown-none"]

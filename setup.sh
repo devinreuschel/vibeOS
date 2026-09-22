@@ -63,8 +63,10 @@ if [ -f "$TOOLCHAIN_FILE" ]; then
             echo "setup: installing $PINNED"
             rustup toolchain install "$PINNED" --component rust-src --component llvm-tools --no-self-update
         fi
+        echo "setup: adding target x86_64-unknown-none"
+        rustup target add x86_64-unknown-none --toolchain "$PINNED"
     else
-        echo "setup: rustup not found; install $PINNED with rust-src and llvm-tools" >&2
+        echo "setup: rustup not found; install $PINNED with rust-src, llvm-tools, and target x86_64-unknown-none" >&2
     fi
 fi
 

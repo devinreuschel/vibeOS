@@ -28,6 +28,7 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 - Crate version is `0.8.0` (Phase 8 backfill). Changelog cut; entries are ≤ 2 lines.
 - Nightly date, Action SHAs, and Limine commit are pinned so CI cannot drift.
   Weekly smp-stress runs a non-blocking latest-nightly canary.
+- Kernel builds with built-in `x86_64-unknown-none` (no custom target JSON, no `build-std`).
 - ISO and ksyms recipes are one `KERNEL_VARIANT` template plus `scripts/mkiso.sh`.
 - One QEMU launcher (`tests/harness/harness.py`) for e2e, ktest, PS/2, and vibefs-crash.
   `VIBEOS_*` is read there; drivers are `tests/harness/run_*.py`.
