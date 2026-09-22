@@ -37,6 +37,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Phase 9 slice A: ring 3 plumbing + `AddressSpace`. `syscall`/`sysretq`
+  (plus `iretq` when `sysret` cannot express), one `swapgs` policy
+  (`vibeos_syscall_entry` first insn + `arch::gs::do_swapgs` for CPL=3
+  IRQs/exceptions), TSS `RSP0` on every context switch, eager
+  `fxsave`/`fxrstor` (target stays soft-float; no SSE feature flip).
+  `AddressSpace` shares the kernel PML4 half, tracks user regions,
+  skips CR3 when the next thread has the same root, tears down user
+  frames vs a frame count, and rejects kernel/unmapped/overflow user
+  pointers with `EFAULT` rather than a panic. Null page stays unmapped.
+  Entry stub returns `ENOSYS` for any number; no dispatch table.
+  In-guest: `star_sysret_layout`, `addrspace_map_unmap_teardown`,
+  `user_ptr_helpers`, `cr3_switch_skip`, `ring3_syscall_enosys`.
+  No new boot marker.
 - #66 PS/2 regressions: host `cfg_run_clears_clock1_left_by_disable`;
   in-guest `kbd_gsi_unmasked`, `kbd_8042_clock`, and `kbd_ps2_irq` (8042
   `0xD2` injects set-1 `0x1E`, expects `a` on the PS/2 ring — serial

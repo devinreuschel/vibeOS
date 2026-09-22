@@ -26,6 +26,7 @@
 extern crate alloc;
 
 mod acpi_init;
+mod addr_space_init;
 mod apic_init;
 mod arch;
 mod block_init;
@@ -56,6 +57,7 @@ mod sched_init;
 mod serial;
 mod shell_init;
 mod smp_init;
+mod syscall_init;
 mod sync_init;
 mod thread_init;
 mod time_init;
@@ -258,6 +260,7 @@ fn normal_boot_tail() {
     // bootstrap current/idle, then the marker. No switch before that.
     unsafe { per_cpu_init::init_bsp() };
     unsafe { thread_init::init_bootstrap() };
+    unsafe { syscall_init::init_bsp() };
     serial::line(marker::PER_CPU_BSP);
 
     acpi_init::report();

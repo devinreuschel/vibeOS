@@ -10,6 +10,7 @@ use core::mem::offset_of;
 use core::sync::atomic::{AtomicBool, AtomicU64};
 
 use crate::apic::TimerMode;
+use crate::desc::Tss;
 use crate::sched::ReadyQueue;
 use crate::thread::{CpuContext, Tcb, ThreadId};
 
@@ -39,10 +40,21 @@ pub struct PerCpu {
     pub timer_mode: TimerMode,
     /// Set by the AP after GS/IDT/LAPIC/timer; BSP waits on this.
     pub ready: AtomicBool,
-    /// Future `syscall` entry scratch. `KERNEL_GS_BASE` matches `GS_BASE`.
+    /// Future `syscall` entry scratch. `[0]` is user RSP while switching
+    /// stacks. `KERNEL_GS_BASE` holds `PerCpu` while CPL=3; see
+    /// `arch::gs`.
     pub syscall_scratch: [u64; 6],
     /// Local ready FIFO. Owner CPU only, IRQs off. DESIGN §7.8.
     pub runq: ReadyQueue,
+    /// Kernel stack top used by `syscall` and written into TSS.RSP0.
+    pub kernel_rsp0: u64,
+    /// Current CPU TSS. RSP0 updates go through here.
+    pub tss: *mut Tss,
+    /// CR3 this CPU last loaded. 0 until paging publishes the kernel root.
+    pub as_cr3: u64,
+    /// Dedicated TSS stack from GDT init. Used when the TCB has no stack
+    /// (bootstrap).
+    pub fallback_rsp0: u64,
 }
 
 impl PerCpu {
@@ -67,6 +79,10 @@ impl PerCpu {
             ready: AtomicBool::new(false),
             syscall_scratch: [0; 6],
             runq: ReadyQueue::empty(),
+            kernel_rsp0: 0,
+            tss: core::ptr::null_mut(),
+            as_cr3: 0,
+            fallback_rsp0: 0,
         }
     }
 }
@@ -103,5 +119,8 @@ mod tests {
         assert!(!p.ready.load(Ordering::Relaxed));
         assert_eq!(p.wake_inbox.load(Ordering::Relaxed), 0);
         assert_eq!(p.syscall_scratch, [0; 6]);
+        assert!(p.tss.is_null());
+        assert_eq!(p.kernel_rsp0, 0);
+        assert_eq!(p.as_cr3, 0);
     }
 }

@@ -7,6 +7,9 @@
 #[path = "../../../src/acpi.rs"]
 pub mod acpi;
 
+#[path = "../../../src/addr_space.rs"]
+pub mod addr_space;
+
 #[path = "../../../src/console.rs"]
 pub mod console;
 
@@ -81,6 +84,9 @@ pub mod shell;
 
 #[path = "../../../src/smp.rs"]
 pub mod smp;
+
+#[path = "../../../src/syscall.rs"]
+pub mod syscall;
 
 #[path = "../../../src/uart.rs"]
 pub mod uart;

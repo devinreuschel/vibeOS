@@ -754,20 +754,20 @@ limitations.
 - [ ] `ps` lists processes with real state
 
 ### 9.1 Ring 3 plumbing
-- [ ] user code and data selectors already in the GDT, verified against the `sysret` layout
-- [ ] `IA32_STAR`, `IA32_LSTAR`, `IA32_FMASK` configured; `EFER.SCE` enabled
-- [ ] `syscall` entry: `swapgs`, switch to the kernel stack from `PerCpu`, save the user context, dispatch
-- [ ] exit path restoring the context and `sysretq`, with the `iretq` slow path for cases `sysret` cannot express
-- [ ] `RSP0` in the TSS updated on every context switch so an interrupt in ring 3 lands on the right kernel stack
-- [ ] SSE and FPU state actually saved and restored now: `fxsave`/`xsave`, lazily if the accounting is right, and the target spec's float settings revisited
+- [x] user code and data selectors already in the GDT, verified against the `sysret` layout
+- [x] `IA32_STAR`, `IA32_LSTAR`, `IA32_FMASK` configured; `EFER.SCE` enabled
+- [x] `syscall` entry: `swapgs`, switch to the kernel stack from `PerCpu`, save the user context, dispatch
+- [x] exit path restoring the context and `sysretq`, with the `iretq` slow path for cases `sysret` cannot express
+- [x] `RSP0` in the TSS updated on every context switch so an interrupt in ring 3 lands on the right kernel stack
+- [x] SSE and FPU state actually saved and restored now: `fxsave`/`xsave`, lazily if the accounting is right, and the target spec's float settings revisited
 
 ### 9.2 Address spaces
-- [ ] `AddressSpace` owning a PML4, with the kernel half shared by mapping the same upper entries
-- [ ] user mappings tracked as regions with permissions and a backing source, not just raw PTEs
-- [ ] CR3 switch on context switch, skipped when the next thread shares the address space
-- [ ] teardown freeing every user frame and page table page, verified against the frame count
-- [ ] user pointer access helpers that check the range and handle a fault, rather than trusting and hoping
-- [ ] a guard region at address 0 so a null dereference faults rather than reading something
+- [x] `AddressSpace` owning a PML4, with the kernel half shared by mapping the same upper entries
+- [x] user mappings tracked as regions with permissions and a backing source, not just raw PTEs
+- [x] CR3 switch on context switch, skipped when the next thread shares the address space
+- [x] teardown freeing every user frame and page table page, verified against the frame count
+- [x] user pointer access helpers that check the range and handle a fault, rather than trusting and hoping
+- [x] a guard region at address 0 so a null dereference faults rather than reading something
 
 ### 9.3 Syscall ABI
 - [ ] the ABI documented in `docs/`: register assignment, return convention, error encoding

@@ -24,12 +24,11 @@
 //!   on mapping over an existing present entry unless explicitly
 //!   remapping".
 //!
-//! ## Deliberately out of scope for Slice B
+//! User half is `0x0`..`USER_END` (DESIGN §4.1). Address spaces live in
+//! [`crate::addr_space`]. 1 GiB pages and demand paging stay phase 10.
 //!
-//! - 1 GiB pages, per-process address-space objects, and the demand-paging
-//!   fault handler (all phase 9/10).
-//! - Real TLB shootdown IPIs: `tlb_shootdown_others` is a hook the
-//!   kernel installs (DESIGN §4.3 / §7.9). Host tests leave it unset.
+//! Real TLB shootdown IPIs: `tlb_shootdown_others` is a hook the
+//! kernel installs (DESIGN §4.3 / §7.9). Host tests leave it unset.
 
 #![allow(clippy::identity_op)]
 
@@ -37,6 +36,14 @@ pub const PAGE_SHIFT: u32 = 12;
 pub const PAGE_SIZE_4K: u64 = 1 << PAGE_SHIFT;
 pub const PAGE_SIZE_2M: u64 = 1 << 21;
 pub const PTES_PER_TABLE: usize = 512;
+
+/// User canonical half, exclusive end. DESIGN §4.1.
+pub const USER_END: u64 = 0x0000_8000_0000_0000;
+pub const USER_MAX: u64 = USER_END - 1;
+/// First page of the user half stays unmapped (null deref). ROADMAP §9.2.
+pub const NULL_GUARD_LEN: u64 = PAGE_SIZE_4K;
+/// PML4 indices `KERNEL_PML4_FIRST..512` are the shared kernel half.
+pub const KERNEL_PML4_FIRST: usize = 256;
 
 /// Physical byte address. Newtype so a physical value cannot silently
 /// stand in for a virtual one, and vice versa (DESIGN §1.1).
@@ -589,12 +596,91 @@ impl Mapper {
         }
     }
 
+    /// Copy PML4[`KERNEL_PML4_FIRST`..] from `src`. Those entries point
+    /// at the same kernel PDPTs; later leaf maps in the kernel half are
+    /// visible to every address space. Do not copy `0..KERNEL_PML4_FIRST`
+    /// (low identity stays on the kernel CR3 only).
+    pub fn copy_kernel_half_from(&mut self, src: &Mapper) {
+        let src_ptr = src.table_ptr(src.root);
+        let dst_ptr = self.table_ptr(self.root);
+        let mut i = KERNEL_PML4_FIRST;
+        while i < PTES_PER_TABLE {
+            let e = unsafe { src_ptr.add(i).read_volatile() };
+            unsafe { dst_ptr.add(i).write_volatile(e) };
+            i += 1;
+        }
+    }
+
+    pub fn pml4_entry(&self, idx: usize) -> u64 {
+        unsafe { self.table_ptr(self.root).add(idx).read_volatile() }
+    }
+
+    /// Walk the user half (`PML4[0..KERNEL_PML4_FIRST)`), free every
+    /// present leaf and interior table, leave kernel-half entries
+    /// untouched. Does not free `self.root`.
+    ///
+    /// # Safety
+    /// `free` must return each frame to the allocator that produced it.
+    /// User leaves are 4 KiB; a 2 MiB leaf is a kernel bug.
+    pub unsafe fn free_user_half<F>(&mut self, free: &mut F) -> UserFreeStats
+    where
+        F: FnMut(PhysAddr),
+    {
+        let mut stats = UserFreeStats {
+            leaves: 0,
+            tables: 0,
+        };
+        unsafe { self.free_level(self.root, 4, true, free, &mut stats) };
+        stats
+    }
+
+    unsafe fn free_level<F: FnMut(PhysAddr)>(
+        &mut self,
+        table: PhysAddr,
+        level: u8,
+        pml4: bool,
+        free: &mut F,
+        stats: &mut UserFreeStats,
+    ) {
+        let ptr = self.table_ptr(table);
+        let end = if pml4 && level == 4 {
+            KERNEL_PML4_FIRST
+        } else {
+            PTES_PER_TABLE
+        };
+        let mut i = 0usize;
+        while i < end {
+            let e = unsafe { ptr.add(i).read_volatile() };
+            if e & PageFlags::PRESENT == 0 {
+                i += 1;
+                continue;
+            }
+            let child = pte_phys(e);
+            let huge = (e & PageFlags::HUGE) != 0;
+            let leaf = level == 1 || huge;
+            if leaf {
+                assert!(
+                    level == 1 && !huge,
+                    "addrspace: unexpected huge user leaf"
+                );
+                free(child);
+                stats.leaves += 1;
+            } else {
+                unsafe { self.free_level(child, level - 1, false, free, stats) };
+                free(child);
+                stats.tables += 1;
+            }
+            unsafe { ptr.add(i).write_volatile(0) };
+            i += 1;
+        }
+    }
+
     /// Zero a freshly-allocated frame through the HHDM.
     ///
     /// # Safety
     /// `phys` must be an owned, page-sized frame reachable via
     /// `hhdm_offset`.
-    unsafe fn zero_frame(&self, phys: PhysAddr) {
+    pub unsafe fn zero_frame(&self, phys: PhysAddr) {
         let ptr = self.table_ptr(phys) as *mut u64;
         for i in 0..PTES_PER_TABLE {
             unsafe { ptr.add(i).write_volatile(0) };
@@ -713,6 +799,26 @@ pub const fn heap_flags() -> PageFlags {
 
 pub const fn stack_flags() -> PageFlags {
     kernel_data_flags()
+}
+
+/// User leaf: present + U. `write` / `exec` as requested. Never GLOBAL.
+pub const fn user_leaf_flags(write: bool, exec: bool) -> PageFlags {
+    let mut f = PageFlags::PRESENT | PageFlags::USER;
+    if write {
+        f |= PageFlags::WRITABLE;
+    }
+    if !exec {
+        f |= PageFlags::NX;
+    }
+    PageFlags(f)
+}
+
+/// Frames reclaimed from the user half of a PML4. `tables` excludes the
+/// PML4 itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UserFreeStats {
+    pub leaves: usize,
+    pub tables: usize,
 }
 
 /// TLB shootdown hook. Kernel installs the IPI 0xFC path (DESIGN §7.9).

@@ -71,6 +71,14 @@ impl CpuTables {
         unsafe { load_data_segs(KERNEL_DS) };
         unsafe { x86::ltr(TSS_SEL) };
     }
+
+    pub fn tss_ptr(&mut self) -> *mut Tss {
+        core::ptr::addr_of_mut!(self.tss)
+    }
+
+    pub fn rsp0(&self) -> u64 {
+        unsafe { core::ptr::addr_of!(self.tss.rsp[0]).read_unaligned() }
+    }
 }
 
 struct Bsp {
@@ -177,6 +185,15 @@ pub unsafe fn init_bsp() {
         rsp0.top().as_u64(),
     );
     unsafe { bsp.tables.load() };
+}
+
+/// TSS for the BSP. Call after [`init_bsp`].
+pub fn bsp_tss_ptr() -> *mut Tss {
+    unsafe { core::ptr::addr_of_mut!((*BSP.get_mut()).tables.tss) }
+}
+
+pub fn bsp_rsp0_top() -> u64 {
+    unsafe { BSP.get().rsp0.top().as_u64() }
 }
 
 /// `[mapped_base, top)` of an IST stack. Used by the in-guest DF test.
