@@ -25,8 +25,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Changed
 
-- CI: `cargo fmt --check` and `cargo clippy -- -D warnings` on the kernel and hostlib.
-  rustflags deny warnings in both cargo configs.
+- CI: `check` job (`make check` + hostlib llvm-cov floor 87%) runs before the QEMU ladder.
+  rustflags deny warnings; kernel clippy still warms `target/` for `make iso`.
 - Crate version is `0.8.0` (Phase 8 backfill). Changelog cut; entries are ≤ 2 lines.
 - Nightly date, Action SHAs, and Limine commit are pinned so CI cannot drift.
   Weekly smp-stress runs a non-blocking latest-nightly canary.

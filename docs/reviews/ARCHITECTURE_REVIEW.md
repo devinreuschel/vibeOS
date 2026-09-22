@@ -247,6 +247,7 @@ The three-tier strategy is right and well executed. Findings are about infrastru
 **T3 · Parallelize the CI ladder and add a fast `check` job**
 - **Observation:** `.github/workflows/ci.yml` is one job running 12 sequential QEMU steps after five separate kernel builds; nothing runs fmt, clippy, or coverage; `DESIGN §8.6` lists clippy, `rustfmt --check`, and `cargo-llvm-cov` on the lib half as "additions as they become relevant". There is no macOS job. The maintainer reports the ladder takes "a few minutes" and that GitHub runner queues are sometimes full.
 - **Recommendation:** Add a `check` job (fmt + clippy + host unit + harness unit) that fails in about a minute and runs before the QEMU ladder, so a formatting or lint failure never costs a full ladder. Do **not** fan the ladder out into a nine-way matrix: with a few-minute ladder and contended runners, extra jobs would wait longer than they save. Add `cargo llvm-cov` on hostlib with a floor that only ratchets up.
+- **Status:** Implemented.
 - **Impact:** Medium · **Effort:** S · **Risk if ignored:** A fmt or lint failure costs a full QEMU ladder to discover.
 
 **T4 · Fuzz the pure parsers now**
@@ -442,7 +443,7 @@ Nothing in this sketch requires changing an algorithm. Locks, ranks, markers, th
 | A2 | Move asm out of the portable half; hostlib as workspace member; host tests on any OS | B2 (for the workspace part) |
 | I1 | macOS `check` job; OVMF probing | A2 |
 | P1 | Share/cut std builds across variants; cache all target dirs | B1, B2 |
-| T3 | Fast `check` CI job ahead of the QEMU ladder; llvm-cov floor | T2 |
+| T3 | Fast `check` CI job ahead of the QEMU ladder; llvm-cov floor | T2 · **done** |
 | Q3 | One `BootCell`/`IrqCell`; remove `static mut` and `&'static mut` accessors | — |
 | Q2 | Test hooks into per-subsystem `ktest.rs`; drop blanket `allow(dead_code)` | Q1 |
 | T1 | Split the in-guest registry; name-before-run; per-test timeout | Q2 |

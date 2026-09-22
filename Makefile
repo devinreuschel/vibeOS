@@ -88,9 +88,6 @@ KERNEL_ELF := $(CURDIR)/target/$(TARGET)/$(PROFILE_DIR)/vibeos
 KERNEL_TESTS_DIR := $(CURDIR)/target-kernel-tests
 KERNEL_VIBEFS_CRASH_DIR := $(CURDIR)/target-vibefs-crash
 
-# rustfmt --check is Q1 (65 files currently fail). Flip to 1 when Q1 lands.
-CHECK_FMT ?= 0
-
 .PHONY: help check all kernel iso run run-panic clean distclean setup layout \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-gp test \
         test-e2e-pit test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
@@ -121,17 +118,13 @@ help:
 	  '  test                  all of the above except test-smp-stress and test-ps2' \
 	  '  clean / distclean     build products; distclean also drops limine/'
 
-# Fast local gate. Kernel clippy -Dwarnings and rustfmt --check are Q1
-# (CI runs them; CHECK_FMT=1 enables rustfmt here). Guard scripts
-# (scripts/check_*.py) run when present (A4, Q5, A1).
+# Fast local / CI `check` job gate (T3). Kernel clippy is a full kernel
+# compile; CI runs it in the QEMU ladder so `target/` stays warm for `make iso`.
+# Guard scripts (scripts/check_*.py) run when present (A4, Q5, A1).
 check:
-	@if [ "$(CHECK_FMT)" = "1" ]; then \
-	    cargo fmt --check; \
-	    (cd tests/hostlib && cargo fmt --check); \
-	else \
-	    echo "check: rustfmt --check deferred to Q1 (CHECK_FMT=1 to enable)"; \
-	fi
-	cd tests/hostlib && cargo clippy --all-targets --quiet -- --cap-lints warn
+	cargo fmt --check
+	(cd tests/hostlib && cargo fmt --check)
+	cd tests/hostlib && cargo clippy --all-targets -- -D warnings
 	$(MAKE) test-unit
 	$(MAKE) test-harness
 	@if command -v ruff >/dev/null 2>&1; then \

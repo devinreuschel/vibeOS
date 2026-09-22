@@ -1459,28 +1459,37 @@ harness defaults match them.
 
 `make help` prints the live inventory. Do not hand-maintain a second list here.
 
-`make check` is the fast local gate (host clippy, host unit tests, harness unit tests, ruff/mypy when
-installed). rustfmt `--check` and clippy `-D warnings` land with Q1. `make test-e2e` is enough when
-only boot output or QEMU wiring changed. `make test` is the gate before a PR. `make test-ps2` is the
-focused #66 sendkey boot; `make test-e2e` already runs it, so `make test` does not boot it twice.
+`make check` is the fast local gate (rustfmt `--check`, hostlib clippy `-D warnings`, host unit tests,
+harness unit tests, ruff/mypy when installed). CI runs it as the `check` job before QEMU (DESIGN §8.6).
+`make test-e2e` is enough when only boot output or QEMU wiring changed. `make test` is the gate before
+a PR. `make test-ps2` is the focused #66 sendkey boot; `make test-e2e` already runs it, so `make test`
+does not boot it twice.
 
 ## 8.6 CI and coverage
 
-Runs on every push and pull request, on Linux, from the first commit. Bootstrap Limine, install
-`qemu-system-x86`, `nasm`, `xorriso`, then run the full ladder: host units, harness units, ISO build,
-e2e, in-guest at `-smp 2` and `-smp 4`, and the LAPIC fallback variant.
+Two jobs on every push and pull request, Linux. `concurrency` cancels superseded runs for the same
+branch (push and PR share one slot). Do not fan the QEMU ladder into a matrix: the ladder is a few
+minutes and GitHub runner queues are sometimes full.
 
-CI existing from day one is a deliberate reordering versus the old tree, where it arrived late enough
-that several regressions shipped in between.
+| Job | When | What |
+|---|---|---|
+| `check` | push / PR | `make check` (fmt, hostlib clippy `-D warnings`, host units, harness, ruff/mypy, `scripts/check_*.py`) then `cd tests/hostlib && cargo llvm-cov --lib --fail-under-lines 87`. No QEMU, no `setup.sh`. HTML report is a 7-day `hostlib-coverage` artifact. |
+| `phase 0 ladder` | push / PR, `needs: check` | Limine, QEMU/nasm/xorriso/OVMF, kernel clippy, ISO, e2e (BIOS/UEFI/panic/#GP/PIT), in-guest at `-smp 2` and `-smp 4`, LAPIC fallback, vibefs crash. Green `main` uploads `vibeos.iso` (7 days). |
+| `smp-stress` | weekly Monday 06:00 UTC + dispatch | `-smp 4`, longer timeout |
+| `nightly-canary` | same workflow, non-blocking | undated latest nightly, `make iso && make test-unit` |
+| `release` | `v*` tags | production + ktest ISO, changelog section, GitHub Release |
 
-Additions as they become relevant: `clippy` with warnings denied, `rustfmt --check`, a coverage floor
-on the library half via `cargo-llvm-cov`, and a nightly long-running variant with more CPUs and more
-memory pressure.
+GitHub Actions records per-step duration. Measured on `main` at `b40c69f` (warm cache, 2026-09-22):
+one-job ladder wall **4m32s**. Cheap host checks (fmt, hostlib clippy, units, harness) were ~7s of
+that; kernel clippy ~22s; QEMU the rest. After T3, wall time is `check` plus the ladder. A fmt or
+hostlib lint failure should go red in about a minute without starting QEMU.
 
-Coverage is not a percentage target, it is a rule: every bug that gets fixed gets a test that would
-have caught it, in the cheapest tier that can catch it. Every entry in [section 9](#9-pitfalls) names
-the rule that guards it, and where that rule is only an invariant in code with no test, that is a
-weaker guarantee and should be visible as such.
+Hostlib line-coverage floor is **87%** (`--fail-under-lines 87` in `.github/workflows/ci.yml`).
+Measured 87.60% on `nightly-2026-09-22` (`cargo llvm-cov --lib` in `tests/hostlib`). Ratchet the
+integer only upward. Coverage is still not a percentage target for the kernel: every bug that gets
+fixed gets a test that would have caught it, in the cheapest tier that can catch it. Every entry in
+[section 9](#9-pitfalls) names the rule that guards it, and where that rule is only an invariant in
+code with no test, that is a weaker guarantee and should be visible as such.
 
 ---
 
