@@ -2329,6 +2329,39 @@ mod tests {
     }
 
     #[test]
+    fn initrd_add_one_level_dir() {
+        let mut b = vec![0u8; INITRD_BYTES];
+        mkinitrd(&mut b).unwrap();
+        with_vol(&mut b, |v, d| {
+            v.now = 1_262_304_000;
+            let sbin = v.create(d, v.info.root_clus, b"sbin", true).unwrap();
+            let init = v.create(d, sbin.clu, b"init", false).unwrap();
+            let mut clu = init.clu;
+            let mut size = init.size;
+            v.write(
+                d,
+                init.dir_clu,
+                init.dir_off,
+                &mut clu,
+                &mut size,
+                0,
+                b"\x7fELF",
+            )
+            .unwrap();
+            v.sync(d).unwrap();
+        });
+        with_vol(&mut b, |v, d| {
+            let sbin = v.lookup(d, v.info.root_clus, b"sbin").unwrap();
+            assert!(sbin.is_dir());
+            let init = v.lookup(d, sbin.clu, b"init").unwrap();
+            let mut buf = [0u8; 4];
+            let n = v.read(d, init.clu, init.size, 0, &mut buf).unwrap();
+            assert_eq!(&buf[..n], b"\x7fELF");
+        });
+        fsck(&b);
+    }
+
+    #[test]
     fn chain_loop_is_corrupt() {
         let mut b = fresh(INITRD_BYTES);
         with_vol(&mut b, |v, d| {

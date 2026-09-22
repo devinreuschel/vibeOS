@@ -6,10 +6,14 @@
 //!     (DESIGN §9.1).
 //!   - the AP trampoline: `nasm -f bin`, path anchored at
 //!     `CARGO_MANIFEST_DIR`, assembler stderr captured (DESIGN §9.1).
+//!   - `VIBEOS_KSYMS` / `VIBEOS_INITRD` staged by the Makefile. Empty
+//!     fallbacks so `cargo check` works without `make`.
 
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
+
+const INITRD_BYTES: usize = 64 * 1024;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -63,73 +67,24 @@ fn main() {
         .unwrap();
     }
 
-    // FAT32 initrd (ROADMAP §8.6 / §9.8). Always wrap user ELFs so a stale
-    // workspace initrd.fat cannot boot a kernel without them.
-    let script = manifest.join("scripts/mkinitrd.py");
-    println!("cargo:rerun-if-changed={}", script.display());
-    println!("cargo:rerun-if-changed=scripts/mkuserelf.py");
-    println!("cargo:rerun-if-changed=user/hello.asm");
-    println!("cargo:rerun-if-changed=user/init.asm");
-    println!("cargo:rerun-if-changed=user/sh.asm");
-    println!("cargo:rerun-if-changed=user/tests.asm");
-    println!("cargo:rerun-if-changed=user/sys.inc");
+    println!("cargo:rerun-if-env-changed=VIBEOS_INITRD");
     let initrd = out.join("initrd.fat");
-    let wrap = manifest.join("scripts/mkuserelf.py");
-    let user_dir = manifest.join("user");
-
-    let mut mk = Command::new("python3");
-    mk.arg(&script).arg(&initrd);
-
-    for (stem, dest) in [
-        ("hello", "/hello"),
-        ("init", "/sbin/init"),
-        ("sh", "/bin/sh"),
-        ("tests", "/bin/tests"),
-    ] {
-        let asm = user_dir.join(format!("{stem}.asm"));
-        let blob = out.join(format!("{stem}.bin"));
-        let elf = out.join(format!("{stem}.elf"));
-        let nasm = Command::new("nasm")
-            .args(["-f", "bin", "-I"])
-            .arg(format!("{}/", user_dir.display()))
-            .arg(&asm)
-            .arg("-o")
-            .arg(&blob)
-            .output()
-            .unwrap_or_else(|e| panic!("nasm {stem}.asm: {e}"));
-        if !nasm.status.success() {
+    if let Ok(src) = env::var("VIBEOS_INITRD") {
+        println!("cargo:rerun-if-changed={src}");
+        let body = std::fs::read(&src).unwrap_or_else(|e| {
+            panic!("read VIBEOS_INITRD {src}: {e}");
+        });
+        if body.len() != INITRD_BYTES {
             panic!(
-                "nasm {stem}.asm failed:\n{}",
-                String::from_utf8_lossy(&nasm.stderr)
+                "VIBEOS_INITRD {src} is {} bytes, expected {INITRD_BYTES}; run `make`, not bare `cargo build`",
+                body.len()
             );
         }
-        let wrap_out = Command::new("python3")
-            .arg(&wrap)
-            .arg(&blob)
-            .arg(&elf)
-            .output()
-            .unwrap_or_else(|e| panic!("mkuserelf.py {stem}: {e}"));
-        if !wrap_out.status.success() {
-            panic!(
-                "mkuserelf.py {stem} failed:\n{}",
-                String::from_utf8_lossy(&wrap_out.stderr)
-            );
-        }
-        mk.arg("--add").arg(format!("{}:{dest}", elf.display()));
-    }
-
-    let output = mk
-        .output()
-        .unwrap_or_else(|e| panic!("mkinitrd.py spawn: {e}"));
-    if !output.status.success() {
-        panic!(
-            "mkinitrd.py failed ({}):\nstdout:\n{}\nstderr:\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
+        std::fs::write(&initrd, body).unwrap();
+    } else {
+        println!(
+            "cargo:warning=VIBEOS_INITRD unset; embedding empty initrd. Run `make`, not bare `cargo build`."
         );
-    }
-    if !initrd.is_file() {
-        panic!("no {}", initrd.display());
+        std::fs::write(&initrd, [0u8; INITRD_BYTES]).unwrap();
     }
 }

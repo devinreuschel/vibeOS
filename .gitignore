@@ -43,7 +43,6 @@ isodir/
 /target-panic/
 /target-gp/
 /target-vibefs-crash/
-/initrd.fat
 /user/hello
 /user/init
 /user/sh

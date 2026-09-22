@@ -54,9 +54,10 @@ USER_HELLO  := user/hello
 USER_INIT   := user/init
 USER_SH     := user/sh
 USER_TESTS  := user/tests
+INITRD := $(CURDIR)/build/initrd.fat
 KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml crates/core/Cargo.toml build.rs linker.ld Makefile rust-toolchain.toml \
-	scripts/gen_ksyms.py scripts/mkinitrd.py scripts/mkuserelf.py scripts/mkiso.sh \
-	user/hello.asm user/init.asm user/sh.asm user/tests.asm user/sys.inc initrd.fat
+	scripts/gen_ksyms.py scripts/mkuserelf.py scripts/mkiso.sh \
+	user/hello.asm user/init.asm user/sh.asm user/tests.asm user/sys.inc $(INITRD)
 
 LLVM_TOOL_DIR := $(shell rustc --print sysroot)/lib/rustlib/$(shell rustc -vV | sed -n 's/^host: //p')/bin
 OBJDUMP := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-objdump),$(LLVM_TOOL_DIR)/llvm-objdump,llvm-objdump)
@@ -69,9 +70,9 @@ NM      := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-nm),$(LLVM_TOOL_DIR)/llvm-nm,ll
 # $$ so $(CARGO) is expanded when the recipe runs, not at $(eval) time.
 define KERNEL_VARIANT
 $(2)/$(TARGET)/$(PROFILE_DIR)/vibeos: $(KERNEL_DEPS)
-	CARGO_TARGET_DIR=$(2) $$(CARGO) build $$(CARGO_FLAGS) $(3)
+	VIBEOS_INITRD=$(INITRD) CARGO_TARGET_DIR=$(2) $$(CARGO) build $$(CARGO_FLAGS) $(3)
 	python3 scripts/gen_ksyms.py --nm "$$(NM)" $$@ $(2)/vibeos-ksyms.rs
-	VIBEOS_KSYMS=$(2)/vibeos-ksyms.rs CARGO_TARGET_DIR=$(2) $$(CARGO) build $$(CARGO_FLAGS) $(3)
+	VIBEOS_INITRD=$(INITRD) VIBEOS_KSYMS=$(2)/vibeos-ksyms.rs CARGO_TARGET_DIR=$(2) $$(CARGO) build $$(CARGO_FLAGS) $(3)
 $(4): $(2)/$(TARGET)/$(PROFILE_DIR)/vibeos limine.conf $(LIMINE_BIN)
 	LIMINE_DIR=$$(LIMINE_DIR) scripts/mkiso.sh $$< $$@ build/iso_root_$(1)
 endef
@@ -160,12 +161,14 @@ $(LIMINE_BIN):
 	@echo "limine binaries missing; run ./setup.sh" >&2
 	@exit 1
 
-initrd.fat: scripts/mkinitrd.py $(USER_HELLO) $(USER_INIT) $(USER_SH) $(USER_TESTS)
-	python3 scripts/mkinitrd.py $@ \
-	    --add $(USER_HELLO):/hello \
-	    --add $(USER_INIT):/sbin/init \
-	    --add $(USER_SH):/bin/sh \
-	    --add $(USER_TESTS):/bin/tests
+$(INITRD): src/fat.rs tests/hostlib/src/bin/mkinitrd.rs tests/hostlib/Cargo.toml \
+		crates/core/Cargo.toml $(USER_HELLO) $(USER_INIT) $(USER_SH) $(USER_TESTS)
+	mkdir -p $(dir $@)
+	cargo run -p vibeos-hostlib-tests --bin mkinitrd --target $(HOST_TRIPLE) --quiet -- $(abspath $@) \
+	    --add $(abspath $(USER_HELLO)):/hello \
+	    --add $(abspath $(USER_INIT)):/sbin/init \
+	    --add $(abspath $(USER_SH)):/bin/sh \
+	    --add $(abspath $(USER_TESTS)):/bin/tests
 
 user/%.bin: user/%.asm user/sys.inc
 	nasm -f bin -I user/ -o $@ $<
@@ -261,7 +264,8 @@ test-smp-stress: $(ISO_KTEST)
 clean:
 	rm -rf build/iso_root_* iso_root iso_root_panic iso_root_gp iso_root_ktest iso_root_vibefs_crash \
 	    $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_KTEST) $(ISO_VIBEFS_CRASH) \
-	    target-panic target-gp $(KERNEL_TESTS_DIR) $(KERNEL_VIBEFS_CRASH_DIR) initrd.fat \
+	    target-panic target-gp $(KERNEL_TESTS_DIR) $(KERNEL_VIBEFS_CRASH_DIR) \
+	    $(INITRD) initrd.fat \
 	    user/hello user/hello.bin user/init user/init.bin user/sh user/sh.bin \
 	    user/tests user/tests.bin
 	$(CARGO) clean
