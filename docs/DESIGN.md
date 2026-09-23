@@ -5,7 +5,18 @@ vibeOS is a monolithic kernel in Rust for x86_64 and, from ROADMAP Phase 11, aar
 mode (at EL1, or at EL2 with VHE, on aarch64); the kernel then takes over its own page tables and never
 looks back at firmware except through ACPI tables (a device tree on aarch64 until ROADMAP §20.7).
 
-Monolithic on purpose. Microkernel IPC design is a rabbit hole.
+Monolithic on purpose: drivers, filesystems, and the network stack run in the kernel's address space,
+as Linux's do. Why: vibeOS implements Linux's interfaces (ROADMAP, How to read this), and each is
+specified as a call into one kernel, so the shortest path to self-hosting, and to being measured
+against Linux in the same VM, is to implement them where Linux does. Rejected:
+- a microkernel, which would restate every Linux interface as messages between servers and spend the
+  project on IPC design before any of it runs;
+- a hybrid with drivers in user space, which no QEMU device model needs;
+- loadable modules (ROADMAP Non-goals).
+
+Cost: a driver bug is a kernel bug. The design answers with Rust's type rules (AGENTS.md rules 4 and
+6), an IOMMU domain per device from ROADMAP §18.1, fuzzing of every parser that reads device or disk
+data, and Phase 38's proofs, not with address-space isolation.
 
 This file records decisions. [ROADMAP.md](ROADMAP.md) records what has landed. Present tense
 describes the code at the commit that last changed the sentence. A rule the code does not meet yet
@@ -76,9 +87,9 @@ other means, and the measurement that justifies the path is recorded beside it.
 ## 1.2 Layers
 
 ```
-                     shell / userspace
+        userspace: init, shell, services, the Wayland compositor
    ------------------------------------------------------
-    syscall  |  vfs  |  net stack  |  window server
+    syscall  |  vfs  |  net stack  |  display and input (DRM, evdev)
    ------------------------------------------------------
     process / thread / scheduler / sync
    ------------------------------------------------------
@@ -139,7 +150,7 @@ gs, cpu, AP trampoline). Nested also: `src/fs/` (VFS + kernfs). `user/` is frees
   [section 4.1](#41-virtual-address-map), vector numbers in [section 5.3](#53-vector-map).
 - When this file outgrows one page per subsystem, split it into `docs/<topic>.md` and leave an index
   behind. Not before. On-disk formats are that split: [VIBEFS.md](VIBEFS.md), not a novel in this
-  file. Syscall ABI: [SYSCALL.md](SYSCALL.md) (Phase 9B).
+  file. Syscall ABI: [SYSCALL.md](SYSCALL.md).
 
 ## 1.5 Sources and licenses
 
@@ -388,6 +399,7 @@ markers are asserted by the e2e harness in order. Adding a marker means updating
 
 ```
 vibeOS: serial online
+vibeOS: limine: rev 3 ok
 vibeOS: pmm: 32741 free 4KiB frames
 vibeOS: paging: cr3 ok
 vibeOS: paging: mmio uc
@@ -420,7 +432,7 @@ separate namespace.
 | I5 | One entry stub per vector makes the `swapgs` decision (§5.10 rule 1) | `arch/idt.rs` | documented | No: the `irq_init` pool gates `0x31`–`0x7F` and the `kbd_init` gates `0x30` and `0x21` skip it (ROADMAP §10.6, F004) |
 | I6 | Ring 3 never halts the kernel (§2.5, §5.2) | `proc_init::try_user_fault` | documented | No: ring-3 `#DB`, and `#AC` when `CR0.AM` is set, halt (F005), and so do the I4 windows (ROADMAP §10.6) |
 | I7 | The kernel never dereferences a user VA; copies go through the physmap after `check_user_range` (§5.1) | `addr_space.rs` | enforced | Yes, but `write_bytes` ignores the PTE's `WRITABLE` bit (ROADMAP §10.6, F023) |
-| I8 | One thread per address space; nothing mutates an address space concurrently | process model | assumed | Yes. Lock-free user copies, local-only `invlpg`, and `&'static AddressSpace` depend on it |
+| I8 | One thread per address space; nothing mutates an address space concurrently | process model | assumed | Yes. Lock-free user copies, local-only `invlpg`, and `&'static AddressSpace` depend on it. ROADMAP §13.1's threads end it, and bring the address-space lock and a counted handle in place of those three |
 | I9 | TCBs are never freed, so a `*mut Tcb` stays valid | 64-slot table, `thread_init` | assumed | Yes, but `spawn_inner` can reuse a Dead slot whose thread is still switching out (ROADMAP §10.10, F012) |
 | I10 | A dead thread's stack is freed only after its CPU has switched off it (§2.8, §4.5) | `kva_init::DEFERRED` | documented | No: any CPU drains the global list (F012), and the 8-slot list panics when full (F010) (ROADMAP §10.10) |
 | I11 | A completer's publishing store is its last access to the waiter (§2.8) | `block_init::IoWaiter` | documented | No: `IoWaiter::finish` runs `wake_all` after it stores `done` (ROADMAP §10.10, F002) |
@@ -474,6 +486,10 @@ Rule; not yet enforced. The violations, and the ROADMAP lines that fix them:
   F032).
 
 ## 2.9 Preemption and interrupt state
+
+IF here means this CPU's maskable-interrupt enable: RFLAGS.IF on x86_64, and PSTATE.I clear on
+aarch64, where ROADMAP §25.5's pseudo-NMIs later make `InterruptGuard` mask by priority instead. The
+rules below hold on both architectures.
 
 The kernel is preemptible wherever IF=1. The timer tick and the reschedule IPI call
 `schedule_preempt`, which may switch away from any thread whose `irq_nest` is 0: kernel threads,
@@ -666,8 +682,10 @@ nonzero chance of stomping something ACPI still points at.
 ## 3.3 `_start` order
 
 Ordering here is not a suggestion. Each step depends on state the previous one established. This table
-is the authority for boot ordering; the e2e contract in [section 8.3](#83-end-to-end) asserts a subset
-of it.
+says what each step needs and why. Its numbers are the design order, and the live order differs
+where the paragraphs below the table say so. The executable contract for the markers is
+`boot_contract_markers()` in `tests/harness/harness.py` ([section 8.3](#83-end-to-end)). DOC2 (ROADMAP
+§10.3) rewrites this table in live order and deletes those paragraphs.
 
 | # | Step | Marker | Why here |
 |---|------|--------|----------|
@@ -743,7 +761,7 @@ before the scan. `fs_init` then makes the FAT initrd `/` (a ramfs root only when
 live) and mounts devfs / procfs / tmpfs / sysfs on `/dev` `/proc` `/tmp` `/sys` and vibefs at
 `/vibe`, with no serial marker. Step 18 runs `/hello`, then starts `/sbin/init`; the trailing
 contract line is `shell ready`, from `/bin/sh` (row 18).
-The e2e contract in [section 8.3](#83-end-to-end) is the live order.
+The harness's `boot_contract_markers()` asserts the live order ([section 8.3](#83-end-to-end)).
 
 ## 3.4 Linker script
 
@@ -801,7 +819,9 @@ addresses come from a range allocator. Small objects come from a heap layered on
 ## 4.1 Virtual address map
 
 x86_64 canonical addressing splits at bit 47. Low half is user, high half is kernel, with a
-non-canonical hole between. Kernel regions are fixed, not discovered, except the physmap base
+non-canonical hole between. The map assumes 4-level paging (48-bit virtual addresses) on x86_64, as
+§11.2 does on aarch64; 5-level paging (LA57, and LPA2 on aarch64) is ROADMAP §27.6's stretch, and
+adopting it re-plans this table. Kernel regions are fixed, not discovered, except the physmap base
 (below the table):
 
 | Range | Size | Role |
@@ -1577,7 +1597,9 @@ TSC-deadline mode each rearm starts from a TSC read inside the ISR, so a period 
 latency but counts as 1 ms (ROADMAP §10.3, F027).
 
 Option 2 is the destination: with an invariant, synchronized TSC and a single calibration constant,
-`now_ns` is a `rdtsc` and a multiply with no shared state at all. Get there before relying on
+`now_ns` is a `rdtsc` and a multiply with no shared state at all. Planned: ROADMAP §10.3 (F027)
+derives `now_ns` from the TSC alone when the TSC is invariant, and §10.7's warp test decides when it
+is synchronized enough to order a trace. Get there before relying on
 timestamps for tracing, because option 1 will silently produce non-monotonic values the moment the BSP
 goes idle in a deep C-state.
 
@@ -1586,8 +1608,8 @@ goes idle in a deep C-state.
 The `sleep_ms` path needs a data structure, not a linear scan of every thread on every tick:
 
 - Start with a single sorted list of pending timeouts guarded by one lock. Fine for tens of threads.
-- Move to a hierarchical timing wheel when the count grows, or a per-CPU red-black tree keyed on
-  expiry.
+- Move to a hierarchical timing wheel when the count grows. Planned: ROADMAP §19.4 keeps timeouts
+  per CPU in a timing wheel.
 - Every blocking operation takes an optional deadline. A blocked thread with no timeout and no waker
   is a permanent leak, and the only way to find one is to have made timeouts mandatory from the start.
 - The blocked-thread sweep in `schedule_inner` (every `SWEEP_TICKS` ticks, for timeouts at least
@@ -1600,7 +1622,7 @@ A fixed 1 kHz tick on an idle CPU is wasted interrupts and, on real hardware, wa
 deadline mode makes tickless operation possible: when a CPU goes idle, arm the deadline for the next
 pending timer instead of the next millisecond, and skip the timer entirely if there is nothing pending.
 Not day-one work, but the timer abstraction should be "next deadline" rather than "periodic tick" so
-this does not require rewriting the scheduler.
+this does not require rewriting the scheduler. Planned: ROADMAP §19.6 lands tickless idle.
 
 The RTC gives date and time to one-second resolution over ports `0x70`/`0x71`, with the usual
 century-register and BCD-versus-binary quirks to detect. Read it once at boot, then track time with the
@@ -2063,7 +2085,8 @@ something two subsystems away breaks.
 
 This is the full contract once the kernel is complete through the console phase. It grows one phase at
 a time: a phase adds its markers to the harness in the same commit that emits them, and nothing is ever
-removed silently. The authoritative ordering is the `_start` table in [section 3.3](#33-_start-order).
+removed silently. The executable contract is `boot_contract_markers()` in `tests/harness/harness.py`; the list
+below mirrors it, and the `_start` table in [section 3.3](#33-_start-order) says why each step sits where it does.
 
 ```
 vibeOS: serial online
