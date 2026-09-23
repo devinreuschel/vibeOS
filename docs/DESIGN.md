@@ -1144,6 +1144,13 @@ and MSI-X are message-based and do not need an I/O APIC mask on free. Clearing
 first would let a still-asserted level line storm empty `dispatch` calls, and a
 later `allocate_vector` could take IRQs from the old device.
 
+Rule: `free_vector` returns only after no CPU is running that vector's top half
+and its threaded bottom half has finished or been cancelled, so a driver may free
+the state its handlers touch as soon as it returns. Teardown order for a device
+is: stop the device (status 0, bus mastering off), free its vectors, then free
+its DMA memory and handler state (§2.11 rule 3). Not yet enforced: `free_vector`
+does not wait for a handler already running on another CPU (ROADMAP §20.9).
+
 EOI is the dispatcher's job, not the driver's. The dispatch layer knows whether a
 vector arrived via PIC or LAPIC and signals the right controller.
 
