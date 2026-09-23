@@ -1,14 +1,17 @@
 # Roadmap
 
-Where this goes. The destination is a self-hosting operating system: one that boots on real hardware,
-runs a graphical userspace, has a network stack you can serve from, and can compile and test its own
-source tree on itself. Written by agents.
+Where this goes. The first destination is a self-hosting operating system: one that boots on real
+hardware, runs a graphical userspace, has a network stack you can serve from, and can compile and test
+its own source tree on itself. Past it, vibeOS runs the Linux software people already have, runs
+production servers on owned hardware and public clouds, becomes the laptop and desktop someone uses
+every day, and reaches a 1.0 whose interfaces hold still and whose allocator and page tables are proved.
+Written by agents.
 
 That is absurd. Good. The interesting failures happen past the point where the tutorials stop.
 
 ## How to read this
 
-Twenty-three phases in four eras, then a list of what comes after. Ordering is by dependency, not by
+Forty-one phases in eight eras, then a list of what comes after. Ordering is by dependency, not by
 preference: a phase's exit gate is the thing the next phase assumes. Within a phase, parts are mostly
 parallelizable. Where two phases are independent, the era preamble says so; the numbers are not a queue.
 
@@ -17,14 +20,22 @@ on. A gate is met on both, or the phase says which lines are single-architecture
 on, every phase has an **Architectures** line that says which. x86_64 came first and is the reference
 when they disagree.
 
+**Linux interfaces.** Where Linux defines a kernel interface that vibeOS also offers (a syscall, an
+`ioctl`, a `/proc` or `/sys` file, a netlink family, the protocol of a device node), vibeOS implements
+Linux's, in each architecture's layout, so unmodified Linux software runs; §13.11 and
+[Phase 23](#phase-23-linux-compatibility) test it against Linux. A native interface or a deliberate
+divergence is listed with its reason in `docs/LINUX.md` (§13.11), or has a line in this file naming the
+phase that replaces it.
+
 `- [ ]` and `- [x]` are the live status. Edit them in the commit that lands the work. There is no third
 state. A deferral is an open box with a trailing note naming the phase that lands it, and that phase's
 gate cannot close while the box is open.
 
 **Slices.** A phase lands as two to four PRs named A, B, C, D, each with its own in-guest tests and each
-leaving `main` green. The last slice closes the gate and tags the release. Phase 10 is the exception. It
-lands as one PR per review-issue code or small group of codes, named by those codes (for example
-`B1+DX1`), and its lines without a code land as PRs named after their subsection.
+leaving `main` green. The last slice closes the gate, and its commit gets the `phase-<N>` tag and the
+next release (see the standing gates). Phase 10 is the exception. It lands as one PR per review-issue
+code or small group of codes, named by those codes (for example `B1+DX1`), and its lines without a code
+land as PRs named after their subsection.
 
 **Stretch** subsections and the [Beyond](#beyond) list are excluded from exit gates. They are where the
 hard, optional things go, so that a phase is either done or not.
@@ -36,13 +47,21 @@ gate only when a script in `make check` verifies its required parts.
 
 A gate that measures time, a rate, or throughput, or sizes its test against memory, names the
 conditions it holds under. In a guest those are the accelerator, guest memory, and CPU count; on real
-hardware, the machine. A gate that names none holds in the default harness guest (the `VIBEOS_*`
-defaults: TCG, 128 MiB, 2 CPUs). "Under KVM" means KVM on an x86_64 host, and KVM or HVF on an arm64 host.
+hardware, the machine; on a public cloud, the instance type. A gate that names none holds in the default
+harness guest (the `VIBEOS_*` defaults: TCG, 128 MiB, 2 CPUs). "Under KVM" means KVM on an x86_64 host,
+and KVM or HVF on an arm64 host.
 
 A line in phase *N* never depends on work in a later phase. When it would, the work moves earlier or the
 line moves later. A pointer to a later phase is only a cross-reference, such as "USB HID arrives through
 §20.3". A deferral box is the one exception: it stays open in its own phase and blocks only the gate of
 the phase it names.
+
+**Budget.** Spending money is the maintainer's decision. A phase whose gate needs bought or rented
+hardware or a paid service has a **Budget** line after its **Architectures** line, naming what it needs
+and a rough cost, and does not start until the maintainer approves that budget; the agents state the
+cost before asking. A phase with no **Budget** line needs no hardware or service beyond what its
+dependencies bought, so it starts as soon as they close. If the maintainer declines, the phase stays
+unstarted until an edit to this file moves its paid lines to [Beyond](#beyond).
 
 **Standing gates** apply to every phase and are not repeated:
 
@@ -54,10 +73,12 @@ the phase it names.
 - new portable logic has host unit tests; new hardware behavior has an in-guest test
 - every fixed bug gets a regression test in the cheapest tier that catches it
 - `CHANGELOG.md` entry for anything visible to someone running the kernel (≤ 2 lines, user-facing)
-- tag `v0.<phase>.0` at phase exit (first published tag is `v0.8.0` for Phase 8)
+- from Phase 8 on, the commit that closes a phase's gate gets an annotated `phase-<N>` tag and the next release, `v0.<m>.0`, where *m* is one more than the last release's. Phases 8 to 14 close in order, so their releases are `v0.8.0` to `v0.14.0`. From Phase 15 on, phases close side by side, *m* follows closing order, and the release notes name the phase. Phase 40's release is `v1.0.0`; a phase that closes after it cuts the next `v1.<m>.0` (§40.3)
 - design docs updated in the same commit as any change to an invariant or a constant
 - no `TODO` describing a correctness gap. Those become lines in this file.
 - every `unsafe fn` has a `# Safety` section and every `unsafe` block a one-line `// SAFETY:` reason; clippy's `missing_safety_doc` (with `check-private-items`) and `undocumented_unsafe_blocks` are denied from §10.1 on
+- from Phase 10 on, a phase is tagged only when `make gate PHASE=N` passes; that command fails for any gate line but the tag line that has no §10.9 gate-map entry naming the command or CI job that proves it
+- from §11.7's ordering check on, every atomic ordering other than `SeqCst` outside test code, fences included, carries a one-line comment naming the access it pairs with, or saying it pairs with none; `scripts/check_orderings.py` in `make check` fails on one without
 
 ## Non-goals
 
@@ -69,6 +90,7 @@ Stated so nobody spends a week on them.
 - Windows or macOS binary compatibility.
 - CPU hotplug. Offlining a core for power management is not hotplug; that is §19.6.
 - 32-bit x86. Long mode only.
+- 32-bit user programs: ia32 and x32 on x86_64, AArch32 on aarch64. Linux compatibility covers 64-bit (LP64) binaries only.
 - Being a good first kernel to read. Other projects do that better and on purpose.
 
 ## The arc
@@ -98,10 +120,35 @@ Stated so nobody spends a week on them.
 | | 20 | [Real hardware](#phase-20-real-hardware) | Bare metal on both architectures, USB, hardware CI |
 | | 21 | [Virtualization](#phase-21-virtualization) | Hypervisor, containers |
 | | 22 | [Distribution](#phase-22-distribution) | Installer, releases, self-hosted CI |
+| **V. Ecosystem** | 23 | [Linux compatibility](#phase-23-linux-compatibility) | glibc and Debian, language runtimes, LTP |
+| | 24 | [Source bootstrap and ports](#phase-24-source-bootstrap-and-ports) | Toolchains built from source, a ports tree |
+| **VI. Production** | 25 | [Reliability](#phase-25-reliability) | Machine checks, crash dumps, watchdogs, persistent logs |
+| | 26 | [Cloud](#phase-26-cloud) | Public cloud instances on both architectures |
+| | 27 | [Scale-up](#phase-27-scale-up) | 256+ CPUs, 1 TiB of memory, huge pages |
+| | 28 | [Network at scale](#phase-28-network-at-scale) | 100GbE NICs, RSS, SR-IOV, 100k connections |
+| | 29 | [Storage at scale](#phase-29-storage-at-scale) | RAID, volumes, scrub, NVMe IOPS against Linux |
+| | 30 | [Operations](#phase-30-operations) | Server software unattended for a month, with metrics |
+| **VII. Daily Driver** | 31 | [Laptop platform](#phase-31-laptop-platform) | Suspend, battery, touchpads, device firmware |
+| | 32 | [Display engines](#phase-32-display-engines) | Native modesetting, hotplug, docks |
+| | 33 | [GPU acceleration](#phase-33-gpu-acceleration) | Mesa on native render drivers, video decode |
+| | 34 | [Audio and cameras](#phase-34-audio-and-cameras) | Sound in and out, webcams |
+| | 35 | [Wireless](#phase-35-wireless) | Wi-Fi with WPA3, Bluetooth |
+| | 36 | [Desktop session](#phase-36-desktop-session-and-applications) | Wayland session, GTK and Qt, a browser, a screen reader |
+| | 37 | [Daily driver](#phase-37-daily-driver) | A scripted day, nightly, measured against Linux on the same machine |
+| | 38 | [Apple Silicon](#phase-38-apple-silicon) | An Apple Silicon laptop |
+| **VIII. Assurance** | 39 | [Verification](#phase-39-verification) | Proved allocator and page tables, checked protocols |
+| | 40 | [Stability](#phase-40-stability) | 1.0, frozen interfaces, supported releases |
 | | | [Beyond](#beyond) | Hard things with no gate |
 
 Eras I and II are the ones with known answers, so they are where agent performance is measurable
 against a clear correct result. Eras III and IV are where it stops being clear, which is the point.
+Eras V to VIII are judged by things vibeOS does not control: other projects' test suites, Linux on the
+same machine, public clouds, and a proof checker.
+
+From Phase 23 on the numbers are a reading order: Phase 23 runs beside Phases 18 to 22, Phase 27 can
+start beside 21 and 22, and Phase 39 beside everything from Phase 20 on. 1.0 (Phase 40) needs Phases 22
+to 25, 30, and 39, and none of 26 to 29 or 31 to 38, which continue beside it and after it (§40.3). Each
+era's preamble gives its phases' exact dependencies.
 
 ---
 
@@ -853,14 +900,17 @@ limitations.
 **Goal.** Pay down what Phase 0 laid down in a hurry, before the kernel grows a second architecture and
 a real userspace. Most of it came out of the 2026-09-22
 [architecture review](reviews/ARCHITECTURE_REVIEW.md); the per-item plans are under
-[reviews/issues/](reviews/issues/README.md) and the letter codes below name them. The rest came out of
-the [roadmap review](reviews/ROADMAP_REVIEW.md): the entry paths and user memory, the user runtime, and
-the CI budget. Nothing here is a feature for its own sake. All of it is what makes the next three phases
-checkable.
+[reviews/issues/](reviews/issues/README.md) and the letter codes below name them. Most of the
+rest came out of the [roadmap review](reviews/ROADMAP_REVIEW.md): the entry paths and user memory,
+the user runtime, and the CI budget. §10.7 to §10.9 (forensics, models and proofs, and the engineering
+system), the §10.2 command line, and the §10.2 deterministic build have no issue files; their boxes are the plan. Nothing here is a feature for its own sake. All
+of it is what makes the next three phases checkable.
 
 **Unlocks.** A portable core that a second architecture can share. A user runtime that can express the
 Phase 12 and Phase 13 gates. Tables that do not cap a shell pipeline at sixteen processes. Kernel entry
-and user-memory paths that copy-on-write and demand paging can build on without a security hole.
+and user-memory paths that copy-on-write and demand paging can build on without a security hole. Hangs
+that explain themselves from the host. The seqlock, the wake inbox, and the log ring model-checked before
+Phase 11 runs them on a weakly ordered CPU.
 
 **Exit gate**
 - [x] `make check` (fmt, clippy with warnings denied, host units, harness units) gates CI ahead of the QEMU ladder
@@ -874,11 +924,14 @@ and user-memory paths that copy-on-write and demand paging can build on without 
 - [ ] FAT and vibefs implement `InodeOps`; the `Back` enum in `file_init` is gone; every file operation goes through `Vfs`
 - [ ] one errno-shaped kernel error type; the errno table in `docs/SYSCALL.md` §2 is generated from it
 - [ ] a Rust user runtime replaces the four assembly programs; `utest_*` results are asserted by the harness the way `ktest_*` are; the user `/bin/sh` runs programs from `PATH` and reports their exit status
-- [ ] `make test` is green with no retry left in the harness (§10.2)
+- [ ] `make test` is green with no retry left in the harness, and `make test-kernel` and `make test-kernel-smp4`, each with `VIBEOS_KTEST_REPEAT=20`, run the in-guest suite 20 times in one boot under TCG with no failure on the weekly job (§10.2)
 - [x] SMEP, SMAP, UMIP, and `CR0.WP` set on every CPU; `/dev/random` fed by virtio-rng or `RDRAND`
 - [x] `BootInfo` captured once; nothing outside `boot` reads a Limine response
 - [x] `AGENTS.md` and an MIT `LICENSE` in the tree; README status current
 - [ ] every item in [reviews/issues/README.md](reviews/issues/README.md) is marked implemented or declined with a reason
+- [ ] the `hang_test` ISO at `-smp 4` under TCG hangs, and from the guest core and the kernel ELF, without the serial log, the harness prints a symbolized backtrace for every CPU, every thread's state, and the last 64 log records, and exports every CPU's trace ring as Chrome trace-event JSON (§10.7)
+- [ ] `make models` and Miri are green on the nightly job: every loom model passes and fails its weakened variant, Kani proves the buddy allocator and the §10.6 user-range check to their stated bounds, and Miri passes over the portable crate's host tests (§10.8)
+- [ ] `make gate PHASE=10` passes with an entry for every Phase 10 gate line but the tag, `cargo deny check` passes with advisories included, and `scripts/ci_history.py` finds a record for every `ci` run on `main` since the history landed (§10.9)
 - [ ] tag `v0.10.0`
 
 ### 10.1 Gates and pinning
@@ -889,7 +942,7 @@ and user-memory paths that copy-on-write and demand paging can build on without 
 - [x] restriction lints on the portable crate: no `unwrap`, `expect`, or `panic!` outside tests (E1)
 - [ ] the `unsafe` standing gate enforced by lint: `clippy::undocumented_unsafe_blocks` denied through `[workspace.lints.clippy]`, so every member inherits it (including `user/` from §10.5), and `check-private-items = true` in `clippy.toml`, so `missing_safety_doc` reaches the kernel binary's private items; a `// SAFETY:` line on every existing `unsafe` block (653 at `90ce475`)
 - [ ] a nightly x86_64 KVM leg that runs `make test-kernel` now and, from Phase 12 on, every benchmark and every gate number measured under KVM, since TCG and KVM each hide bugs the other finds; the timing tests that made the harness default to TCG are fixed first, which HVF in Phase 11 also needs
-- [ ] the CI budget, written into DESIGN §8.6 in the same commit as the workflow change. Every push runs `check` and, alongside it, one `build` job per architecture (x86_64 now, aarch64 from Phase 11). The build job builds every ISO variant and the host `mkfs`/`fsck` tools once and uploads them. A matrix of tier jobs per architecture (`needs: [check, build]`, `fail-fast: false`, TCG) downloads them and runs the same `make test-*` targets through a prebuilt-ISO switch, so the Makefile stays the one definition of each tier. Tiers are grouped to about 40 s of QEMU each (x86_64 at `88370e5`: the five e2e boots; in-guest at `-smp 2` and `-smp 4` plus the LAPIC fallback; the vibefs crash test), and each gets its own check name, so a red PR names the failing tier. Everything else runs on a schedule: the macOS job, the KVM leg, the fuzzers, stress, and any job with a performance threshold. A later line that says "in CI" for a functional test means a ladder tier; for a benchmark or a threshold it means the KVM leg. A red scheduled job blocks the next phase tag. The earlier no-matrix rule (runner queues) is lifted: the repository is public, so minutes are free, and the limit that matters is 20 concurrent jobs per account
+- [ ] the CI budget, written into DESIGN §8.6 in the same commit as the workflow change. Every push runs `check` and, alongside it, one `build` job per architecture (x86_64 now, aarch64 from Phase 11). The build job builds every ISO variant and the host `mkfs`/`fsck` tools once and uploads them. A matrix of tier jobs per architecture (`needs: [check, build]`, `fail-fast: false`, TCG) downloads them and runs the same `make test-*` targets through a prebuilt-ISO switch, so the Makefile stays the one definition of each tier. Tiers are grouped to about 40 s of QEMU each (x86_64 at `88370e5`: the five e2e boots; in-guest at `-smp 2` and `-smp 4` plus the LAPIC fallback; the vibefs crash test), and each gets its own check name, so a red PR names the failing tier. Everything else runs on a schedule: the macOS job, the KVM leg, the fuzzers, stress, and any job with a performance threshold. Later lines name two scheduled workflows, both on the pinned toolchain: the nightly job, which carries the KVM leg, and the weekly job (`smp-stress` today); the non-blocking `nightly-canary`, the one job on an undated nightly, is neither. A later line that says "in CI" for a functional test means a ladder tier; for a benchmark or a threshold it means the KVM leg. A red scheduled job blocks the next phase tag. The earlier no-matrix rule (runner queues) is lifted: the repository is public, so minutes are free, and the limit that matters is 20 concurrent jobs per account
 - [ ] CI wall time cut inside each job: host packages from a cache or a prebuilt image rather than `apt-get` on every run (about 20 s of every job at `88370e5`), and independent QEMU runs in parallel inside a tier once the timing tests and the §10.2 retried failures are fixed, since concurrent QEMU under TCG makes both more likely. Push-to-green wall time is recorded in DESIGN §8.6 before and after; the target is under two minutes for x86_64 (3m40s at `88370e5` with no retry; a retried hang adds 60 to 90 s)
 - [ ] `make debug`: QEMU `-s -S` plus a `gdb` script that loads the kernel ELF and the user ELFs, documented in DESIGN §8.4
 
@@ -899,8 +952,11 @@ and user-memory paths that copy-on-write and demand paging can build on without 
 - [x] one QEMU launcher and one `VIBEOS_*` reader shared by every driver (T2, C2)
 - [ ] one `target/` for every feature build: each variant's ELF is copied to a named output under `build/`, and every ISO recipe reads only its own named ELF, so a test build still cannot be packaged as production; DESIGN §8.2 and the pitfall that says "separate target directory" rewritten to that guard; `target/` is the only kernel target directory cached in CI (P1)
 - [x] one initrd generator; the trampoline assembled by `global_asm!` so the kernel build no longer needs `nasm` (B4); the assembly user programs still do until §10.5
+- [ ] a deterministic kernel, initrd, and ISO build (moved from §17.5): `SOURCE_DATE_EPOCH` from the commit, honored by `mkinitrd` and the ISO writer, fixed volume and GPT GUIDs, staged file times pinned, `--remap-path-prefix` for rustc, sorted inputs; a scheduled job builds every ISO variant twice from one commit in two checkout paths and fails unless they are byte-identical; §17.5's second-generation comparison and §22.1's release artifacts build on it
 - [ ] the in-guest registry split per subsystem; a test's name printed before it runs; a per-test deadline (T1)
 - [ ] `kernel_tests` hooks isolated in per-subsystem `ktest.rs` files; no blanket `allow(dead_code)` in production modules (Q2)
+- [ ] a kernel command line: `cmdline:` in the `limine.conf` entry, captured in `BootInfo` through Limine's executable command line request, then an `opt/vibeos/cmdline` fw_cfg file appended when QEMU's fw_cfg is present (probed on x86_64 only when CPUID reports a hypervisor, so bare metal never sees a write to port `0x510`), so the harness sets options on the unmodified ISO; parsed in the portable half with host tests; DESIGN §3.2 lists every option, and later phases add theirs to the same parser
+- [ ] `ktest=<glob>` runs only the matching in-guest tests and `ktest_repeat=<n>` runs them `n` times in one boot (a test that cannot run twice says so in the registry and runs once), set by `VIBEOS_KTEST` and `VIBEOS_KTEST_REPEAT`, with the harness reporting passes out of runs and multiplying its boot timeout by the repeat count; `loglevel=` sets the §5.5 runtime level at boot
 - [ ] `cargo-fuzz` targets for every byte-slice parser, the ELF header parser included, on the weekly job; each crash becomes a replayed regression (T4)
 - [ ] a scheduled macOS CI job running `make check`; OVMF and the aarch64 edk2 firmware located by one probe mechanism with one variable per architecture, and a skip made visible (I1)
 - [ ] the harness retries nothing. Each failure it retries today is root-caused and fixed, with a regression test in the cheapest tier that catches it: the `/bin/tests` stall after `user: dup ok` (sometimes after `user: pid 3 killed SIGSEGV`) that leaves the e2e boot short of `shell ready` and the in-guest boot hanging under the periodic LAPIC (retried since PR #75); the `ipi: ack timeout` panic on the `-smp 4` persist reboot; the `-smp 4` `msix_cpu: ap counter` assertion; and the `-smp 2` `per_cpu_bsp: ready_head should be empty` assertion. Then `_retry_hang`, `retryable_ktest_failure`, `silent_user_syscalls_hang`, and the retry loop in `_ktest_boot` are deleted. A failure that proves to be a QEMU bug keeps its retry only with an upstream report linked from DESIGN §8.6
@@ -916,7 +972,7 @@ and user-memory paths that copy-on-write and demand paging can build on without 
 - [ ] the nine two-way module dependencies broken; `serial` has a raw layer with no upward calls (A4)
 - [x] one `BootCell` and one `IrqCell`; no `static mut`; no `&'static mut` accessors (Q3; the asm-owned setjmp buffer in `arch/catch.rs` is the documented exception)
 - [x] `BootInfo` captured once at entry, the only consumer of Limine responses (D3)
-- [ ] DESIGN.md split per its own §1.4 rule: invariants and pitfalls as their own files, the boot order as a table not prose (DOC2); its `scripts/doc_refs.py` resolves both `DESIGN §x.y` and `ROADMAP §x.y` citations in docs, source comments, and scripts against the headings, and runs in `make check`
+- [ ] DESIGN.md split per its own §1.4 rule: invariants and pitfalls as their own files, the boot order as a table not prose (DOC2); its `scripts/doc_refs.py` resolves `DESIGN §x.y` and `ROADMAP §x.y` citations in docs, source comments, and scripts, and every bare `§x.y` in ROADMAP.md, against the headings, and runs in `make check`
 
 ### 10.4 Tables, VFS, errors
 - [ ] threads, processes, descriptors, inodes, dentries, files, mounts, and regions allocated at init from a `limits` module; a cap is a constant, not a type (D1)
@@ -928,7 +984,7 @@ and user-memory paths that copy-on-write and demand paging can build on without 
 
 ### 10.5 User runtime
 - [ ] a `no_std` Rust crate under `user/` as a workspace member, statically linked, with `_start`, argument and environment parsing, and a panic reported on fd 2 and turned into a non-zero exit
-- [ ] built for the bare target as a non-PIE `ET_EXEC` with the small code model, through the static relocation model the `[target.x86_64-unknown-none]` rustflags already set (the built-in spec defaults to static-PIE, which the loader refuses until §14.2); the `std` port in Phase 17 introduces the `*-unknown-vibeos` triples
+- [ ] built for the bare target as a non-PIE `ET_EXEC` with the small code model, through the static relocation model the `[target.x86_64-unknown-none]` rustflags already set (the built-in spec defaults to static-PIE, which the loader refuses until §13.10); the triple for Rust code with `std` (`*-unknown-linux-musl` or a `*-unknown-vibeos` one) is §24.3's decision
 - [ ] syscall stubs generated from one table shared with the kernel, with a number column per architecture (§11.6) and an argument order where Linux's differs by architecture (raw `clone`: arm64 swaps `tls` and `ctid`), so numbers, arities, and argument positions cannot drift; the same generator emits `docs/SYSCALL.md` §3
 - [ ] `brk` and anonymous `mmap`/`munmap`, eagerly backed for now; Phase 12 makes them lazy without changing the interface
 - [ ] `getdents64`, `fstat`, and `nanosleep`, which `ls` and `sleep` below need; the rest of the floor stays in §13.9
@@ -952,6 +1008,41 @@ return. Each item here is a live bug or a trap for Phase 12 and 13.
 - [ ] the IST vectors (NMI, `#MC`, `#DB`, `#DF`) decide whether to `swapgs` from the sign of `GS_BASE`, not from CS.RPL. The syscall entry before its `swapgs` and the exit's `swapgs; sysretq` and `swapgs; iretq` run at CPL 0 with the user GS base loaded. An in-guest test puts hardware execute breakpoints on those instructions, and the `#DB` handler finds its `PerCpu`. The sign check holds until §18.3 lets userspace write a kernel-half GS base
 - [ ] the 512 MiB low identity window torn down after `smp: done`, so VA 0 faults in kernel mode as it does in user mode. Only the `0x8000` trampoline page stays: 4 KiB, read-only, executable, not global, with the trampoline GDT's accessed bits preset so the AP never writes it. The BSP writes the blob and parameter block through the physmap. The teardown flushes global TLB entries on every CPU. An in-guest test finds that a kernel read of VA 0 faults. DESIGN §4.1 and §4.3 updated in the same commit
 
+### 10.7 Forensics and tracing
+A hang or a panic under QEMU explains itself from the host, without a rerun. It lands early: the §10.2
+retry root-causing and Phases 11 to 13 debug their hangs with it.
+
+- [ ] on a timeout, or on a panic once the kernel's dump has ended, the harness takes a guest core over the QEMU monitor before it stops QEMU: `dump-guest-memory -p`, an ELF core with the kernel's virtual mappings and one register note per CPU, which `gdb` and the §10.1 `make debug` script open (not `-z`, whose kdump format `gdb` cannot read); an x86_64 panic signals the ISA `pvpanic` device with `-action panic=pause`, as aarch64 does (§11.7), instead of `isa-debug-exit`, so QEMU stays up for the dump and the harness then fails the run; CI uploads a failed run's core (compressed with zstd on the host), kernel ELF, and QEMU command line as one artifact
+- [ ] a hostlib core tool reads a core with the kernel ELF and prints a symbolized frame-pointer backtrace for every CPU, every thread's state and saved context from the TCB table, each CPU's current thread and run queue, and the last 64 records of the §5.5 log ring; the harness prints its report after the serial tail
+- [ ] the log ring, TCB, and per-CPU types the tool reads are the portable crate's and `#[repr(C)]` (`IrqCell`, `log::Record`, `Ring`, and `Logger` are not today), with `const` assertions on their sizes and field offsets, outside `cfg(loom)`, that compile into both the kernel and the host tool, so the kernel and a tool on either dev host cannot disagree, as `mkfs-vibefs` and `fsck-vibefs` share vibefs's format
+- [ ] a flight recorder (moved from §19.1): a per-CPU ring of fixed-size records (timestamp, CPU, event, two arguments); each CPU writes only its own ring, with interrupts off for the few stores a record takes, so no lock is taken; the NMI, `#MC`, and `#DB` handlers do not record, since `cli` does not mask them, and each record carries a sequence number so the tool drops a torn last record; it is on in every build, so a hang of the production ISO carries a trace too
+- [ ] tracepoints at the boundaries that exist now: syscall entry and exit, scheduler switch and wake, IRQ entry and exit, IPI send and acknowledge, page fault, and block request submit and complete; §19.1 adds the later subsystems and per-tracepoint runtime enable
+- [ ] timestamps from the §10.3 cycle counter (the invariant TSC on x86_64, §2.6); each AP measures its TSC against the BSP's at bring-up with a warp test over a shared cache line, and a registered marker reports the largest skew, which DESIGN §6.4 requires before timestamps order a trace; when the TSC is not invariant or the skew exceeds the bound DESIGN §6.4 records, the export orders records within each CPU only and says so; the core tool converts them to nanoseconds with the calibration it reads from the core and exports every CPU's ring as one Chrome trace-event JSON timeline, which Perfetto opens; a host test checks the export's required fields
+- [ ] a `hang_test` feature build in which, after `smp: done`, one CPU prints a registered `hang_test: armed` marker, takes a spinlock the others then wait on, and spins with interrupts off; `make test-forensics`, in `make test`, boots it at `-smp 4`, gives up 5 s after the marker rather than at the harness timeout, so its tier stays inside the §10.1 budget, and asserts the report and the export, so the forensics are tested the way the panic path is
+
+### 10.8 Models and proofs
+Tests sample interleavings and inputs. These cover all of them up to a stated bound, on the code the
+kernel links rather than a transcription of it. They run on the host and land before Phase 11 runs the
+kernel on a weakly ordered CPU.
+
+- [ ] portable code reaches atomics, fences, and the spin-loop hint only through the §10.3 atomics seam, which is `loom`'s under `cfg(loom)`. Because `loom`'s atomics have no `const fn new`, the seam also re-exports `core`'s atomics for `static`s (`entropy`'s and `paging`'s today), which stay `core`'s under `cfg(loom)` and out of every model, and a constructor built from seam atomics (`TickClock`, `IrqCell`, `BootCell`) is `const fn` only outside `cfg(loom)`. `scripts/check_atomics.py` in `make check` fails on `core::sync::atomic` or `core::hint::spin_loop` anywhere else in the portable crate outside tests; `loom` enters as a `cfg(loom)` dev-dependency listed in the §10.9 policy
+- [ ] the §10.4 wake inbox's push and drain (in `ipi_init.rs` today) and `IrqCell`, the log ring's lock (in `cell.rs`, which the portable crate compiles only for tests), move into the portable half beside the §2.7 seqlock (`TickClock`), taking the interrupt guard and the CPU id through the §10.3 seam, so each model runs the kernel's code; the host owner token becomes per thread (loom's `thread_local!` under `cfg(loom)`), since today every host caller is owner 1 and a contended lock reads as re-entry
+- [ ] loom models: the seqlock against a writer that publishes an independent timestamp, so a torn read fails; the wake inbox with pushes from three CPUs against a drain, so no `ThreadId` is lost or delivered twice; the log ring's writers against a `dmesg` reader. Each model has a variant with one ordering weakened or one step moved, run as a test that passes only when loom finds the failure
+- [ ] Kani proofs, each harness stating its bound: the buddy allocator on a 16-frame arena with orders 0 to 4, where every sequence of up to six allocate and free calls keeps allocations disjoint and aligned, the free count exact, and freed buddies merged; the §10.6 user-range check, as a pure function of `(addr, len)`, accepts exactly the non-empty ranges that do not overflow and lie wholly between the null guard and `USER_MAP_END`, and an empty range at any address below `USER_MAP_END`, the null page included, as Linux's `read(fd, NULL, 0)` needs, for every pair of 64-bit values
+- [ ] Miri runs the portable crate's host tests; a test Miri cannot run is skipped under `cfg(miri)` with its reason, and each finding becomes a regression test; `miri` joins the `rust-toolchain.toml` components, so a C1 bump picks a nightly that ships it
+- [ ] `make models` runs the loom models and the Kani proofs on Linux and on the Apple Silicon dev host, with `kani-verifier` at a pinned version, since Kani brings its own compiler; the nightly job runs it and Miri, and the scheduled macOS job (I1) runs `make models`
+- [ ] DESIGN §8 gains a models-and-proofs tier and its routing rule: a protocol whose correctness depends on an interleaving gets a loom model, not only a stress test
+
+### 10.9 Engineering system
+Gate lines, CI timings, and dependencies as data a script reads.
+
+- [ ] a gate map from Phase 10 on: `tests/gates/phase-<N>.toml` gives each exit-gate line of phase N, keyed by its text, the command that proves it, either a local command or a scheduled CI job that must be green on the gated commit, read through `gh`; each later phase adds its map in the slice that closes its gate, and Phases 0 to 9 get none
+- [ ] `make gate PHASE=N` runs every entry, prints pass or fail per gate line, and fails when a gate line other than the tag has no entry; no entry runs `make gate` itself, so the entry for a line that names it runs that line's other checks; the maintainer runs it before tagging, and `release.yml` runs it for the phase a tag closes and publishes nothing when it fails; `scripts/check_gates.py` in `make check` fails when an entry's text matches no gate line in this file
+- [ ] CI history: when a `ci` run completes, a `workflow_run` job reads its jobs and steps from the Actions API and commits one JSON record (commit, event, conclusion, per-job and per-step wall time) to an orphan `ci-history` branch, which outlives the 90-day limit on Actions logs and artifacts; the job has `contents: write` only, checks out only `ci-history`, runs no code from the triggering commit, never puts run fields (which a fork's pull request sets) into a shell line, writes one file per run id, and retries its push after a rebase, so concurrent runs lose no record; later lines add workflows and fields to the record; `scripts/ci_history.py` prints any step's series and fails when a `ci` run on `main` since the history landed has no record; §10.1's push-to-green numbers are read from it
+- [ ] `deny.toml`, and `cargo deny check licenses bans sources` in `make check` (skipped with a hint when `cargo-deny` is not installed, and installed at a pinned version in the `check` job): licenses from an allowlist compatible with the tree's MIT license, crates.io as the only source, and a `[bans]` allow list naming every crate in the graph, so a pull request that adds a dependency fails until it names the crate there, which turns AGENTS.md's dependency note into a check; `cargo deny check advisories` on the nightly job, since it fetches the RustSec database
+
+---
+
 ## Phase 11: Portability
 
 **Goal.** A second architecture, first class. aarch64 boots the same kernel to the same Phase 9 gate,
@@ -970,9 +1061,9 @@ right where it is designed rather than where it is discovered. The cost is that 
 phase. x86_64 came first and stays the reference when the two disagree.
 
 **Exit gate**
-- [ ] `make ARCH=aarch64` produces a bootable image; `make ARCH=aarch64 run` boots under `qemu-system-aarch64 -machine virt,acpi=off` (§11.5), with `-accel hvf` on macOS and `-accel kvm` on an arm64 Linux host
+- [ ] `make ARCH=aarch64` produces a bootable image; `make ARCH=aarch64 run` boots under `qemu-system-aarch64 -machine virt,acpi=off` (§11.5), with `-accel hvf` on the macOS dev host (the project has no arm64 KVM host before §20.8)
 - [ ] every marker in the shared and aarch64 lists of the [DESIGN.md](DESIGN.md#83-end-to-end) contract, from `serial online` through `shell ready`, appears in order on aarch64, from one harness with an `ARCH` parameter
-- [ ] `make test-kernel ARCH=aarch64` passes every in-guest test that is not x86-specific, including the Phase 6 MSI-X tests and the §10.6 user-memory tests, and the harness reads the verdict from the exit status under TCG, HVF, and KVM (§11.7); each x86-specific test is `ktest_skip`ped with a reason naming the x86 feature it needs, and the harness fails if the skipped set differs from the list in `docs/ARCH.md`
+- [ ] `make test-kernel ARCH=aarch64` passes every in-guest test that is not x86-specific, including the Phase 6 MSI-X tests and the §10.6 user-memory tests, and the harness reads the verdict from QEMU's exit status and its QMP `GUEST_PANICKED` event under TCG and HVF (§11.7); each x86-specific test is `ktest_skip`ped with a reason naming the x86 feature it needs, and the harness fails if the skipped set differs from the list in `docs/ARCH.md`
 - [ ] `/bin/tests` from the Phase 10 user crate passes on aarch64 at EL0, against the arm64 syscall numbers
 - [ ] the harness types a command into the shell on aarch64 through the QEMU monitor's `sendkey` and virtio-keyboard, and reads the echo on serial, as the x86 e2e boot does through PS/2
 - [ ] `-smp 4` under `virt` brings up every core through PSCI, and the TLB shootdown test passes
@@ -981,6 +1072,7 @@ phase. x86_64 came first and stays the reference when the two disagree.
 - [ ] `docs/ARCH.md` maps each §10.3 seam trait to its module in each port and lists every other architecture-specific module; `scripts/check_arch.py` in `make check` fails when a file under either port's `arch/` directory is missing from it, or a module it names does not exist
 - [ ] README describes both architectures, with the aarch64 quickstart on Apple Silicon
 - [ ] no x86 regression: the full x86 ladder stays green on every commit of this phase
+- [ ] `make litmus` passes: every `tests/litmus/` test holds under `aarch64.cat` and its x86_64 version under `x86tso.cat`, and each barrier-removed twin allows its bad outcome; host tests show the page-table code refusing every change §11.2's break-before-make rule forbids
 - [ ] tag `v0.11.0`
 
 ### 11.1 Boot
@@ -996,7 +1088,7 @@ phase. x86_64 came first and stays the reference when the two disagree.
 ### 11.2 Memory
 - [ ] the page table format behind the §10.3 trait: descriptor bits, access permissions, `UXN` and `PXN`, the access flag, shareability
 - [ ] TLB maintenance with the Inner Shareable broadcast forms, so the §1.2 shootdown hook needs no IPI: `dsb ishst` after the PTE write, then `tlbi vale1is` for a leaf change (`vae1is` when a table page is freed, `aside1is` for one ASID, `vmalle1is` on ASID rollover), then `dsb ish`, and `isb` on the issuing core; the §4.10 KVA-free deferral is satisfied once the `dsb ish` completes. DESIGN §7.9 gains an aarch64 paragraph
-- [ ] break-before-make for any change to a live descriptor's memory type, cacheability, shareability, output address, or block size: write an invalid entry, `dsb ishst`, `tlbi ...is`, `dsb ish`, write the new entry, `dsb ishst`, `isb`; permission-only changes need only the TLB maintenance above
+- [ ] break-before-make for any change to a live descriptor's memory type, cacheability, shareability, output address, or block size: write an invalid entry, `dsb ishst`, `tlbi ...is`, `dsb ish`, write the new entry, `dsb ishst`, `isb`; permission-only changes need only the TLB maintenance above. The portable page-table code is the only writer of live entries and enforces the rule: a store that changes one of those fields in a valid entry is refused unless the entry was made invalid and its TLB maintenance completed first, and host tests cover each refused change. A live block that the change path itself reads or runs from (the physmap holding the page tables, the kernel image) cannot be broken, so such a mapping is built at the granularity it will need rather than split live
 - [ ] ASIDs, so a context switch does not flush the TLB
 - [ ] cache maintenance for DMA, and for code: whenever a user page becomes executable, `dc cvau` over it (omitted when `CTR_EL0.IDC` is set), `dsb ish`, `ic ivau` (omitted when `CTR_EL0.DIC` is set), `dsb ish`, `isb`, which x86 got for free; ELF load is the first caller, and §12.2 adds the fault path
 - [ ] the buddy, heap, and KVA allocators unchanged; that is the point of the split
@@ -1017,7 +1109,7 @@ phase. x86_64 came first and stays the reference when the two disagree.
 - [ ] PSCI `SYSTEM_OFF` and `SYSTEM_RESET` behind the §10.5 `reboot` syscall, through the same conduit
 
 ### 11.5 Devices
-- [ ] the device tree from Limine's DTB response, parsed in the portable half and host-tested like the ACPI parser: CPUs, GIC and ITS, timer, PL011, PL031, PCIe ECAM with its `interrupt-map`, virtio-mmio, `/psci`. RAM comes from the Limine memory map, never from `memory@` nodes, which Limine removes. `/chosen` is ignored as the protocol requires, so the console is the PL011 that `/aliases` names `serial0`
+- [ ] the device tree from Limine's DTB response, parsed in the portable half and host-tested like the ACPI parser: CPUs, GIC and ITS, timer, PL011, PL031, PCIe ECAM with its `interrupt-map`, virtio-mmio, `/psci`, and QEMU's `fw-cfg` node, so the §10.2 command line and the `vmcoreinfo` note use the same fw_cfg interface as on x86_64. RAM comes from the Limine memory map, never from `memory@` nodes, which Limine removes. `/chosen` is ignored as the protocol requires, so the console is the PL011 that `/aliases` names `serial0`
 - [ ] PCIe through the ECAM the device tree names, so virtio-pci, MSI-X, and the block driver are shared with x86
 - [ ] virtio-mmio transport as well, since single-board hardware uses it
 - [ ] virtio-input for keyboard and pointer, since `virt` has no PS/2 controller; x86 can use it too, and §16.4 builds on it
@@ -1042,14 +1134,18 @@ interpreter.
 - [ ] user FP and SIMD state saved lazily on first use, since every aarch64 user compiler emits NEON; the kernel itself never touches those registers (§11.1)
 
 ### 11.7 Build, harness, CI
-- [ ] `ARCH=` in the Makefile and `--arch` in the harness; one code path, two QEMU command lines; the aarch64 line carries `-machine virt,acpi=off`, `-device ramfb`, `virtio-keyboard-pci`, `virtio-tablet-pci`, and `pvpanic-pci`
+- [ ] `ARCH=` in the Makefile and `--arch` in the harness; one code path, two QEMU command lines; the aarch64 line carries `-machine virt,acpi=off`, `-device ramfb`, `virtio-keyboard-pci`, `virtio-tablet-pci`, `pvpanic-pci`, and `vmcoreinfo`
 - [ ] the DESIGN §8.3 marker contract split into a shared list and one list per architecture; x86-only markers (`gdt ok`, `pic: remapped`, `time: tsc`, `lapic_timer`) get aarch64 counterparts or are listed as x86-only, and the harness picks lists by `--arch`
-- [ ] a test verdict leaves the guest as an exit status that works under TCG, HVF, and KVM: pass is PSCI `SYSTEM_OFF` (QEMU exits 0), and fail triggers `pvpanic-pci` with `-action panic=exit-failure`; the harness also requires the serial `begin` and `end` lines, as §1.6 does. Semihosting is not used, because QEMU supports it only under TCG
+- [ ] a test verdict leaves the guest in a form that works under TCG, HVF, and KVM: pass is PSCI `SYSTEM_OFF` (QEMU exits 0), and fail triggers `pvpanic-pci`, which QEMU run with `-action panic=pause` reports over QMP as `GUEST_PANICKED`, so the harness takes the §10.7 core before it ends QEMU and fails the run; the harness also requires the serial `begin` and `end` lines, as §1.6 does. Semihosting is not used, because QEMU supports it only under TCG
 - [ ] the panic path, backtrace, and symbol table working on aarch64: a frame-pointer walk along the `x29` chain
 - [ ] `make test-kernel ARCH=aarch64` and the e2e ladder, including the `sendkey` echo through virtio-keyboard, in the aarch64 CI tier jobs
 - [ ] the aarch64 CI jobs run under TCG: GitHub-hosted arm64 runners have no `/dev/kvm` (the request was closed as not planned); native aarch64 runs are HVF on the dev host until §20.8
 - [ ] the timing tests pass under HVF on the dev host, the same fix as the §10.1 KVM leg
 - [ ] the weekly smp-stress job on both architectures
+- [ ] a litmus test under `tests/litmus/` for each barrier idiom the aarch64 port uses: the §2.7 seqlock publish and read, the log ring publish, `SpinMutex` release and acquire, the §10.4 wake inbox hand-off, and the virtio descriptor write before the avail index update. herd7 with Arm's `aarch64.cat` shows the bad outcome forbidden, a twin with the barrier removed shows it allowed, and the x86_64 versions run under `x86tso.cat` to record which barriers x86 elides
+- [ ] each barrier helper in the aarch64 port names its litmus test in a doc comment, and `scripts/check_litmus.py` in `make check` fails when a helper names none or names a missing test; an idiom herd7 cannot express (TLB maintenance, the `dsb` before an SGI system-register write) cites the Arm ARM rule instead. `make litmus` runs herd7, pinned and installed from opam on Linux and macOS, on the nightly job beside `make models` (§10.8)
+- [ ] `scripts/check_orderings.py` in `make check`: every `Relaxed`, `Acquire`, `Release`, and `AcqRel` ordering outside test code, fences included, has a one-line comment naming the access it pairs with or saying it pairs with none; the existing sites (376 in `src/` outside ktest files at `2daed69`) are annotated in the same PR
+- [ ] the §10.1 `make debug` script and the §10.7 forensics on aarch64 `virt`. QEMU's `dump-guest-memory -p` walks guest page tables only on x86, so an aarch64 core is addressed physically. The kernel publishes the physical address of its TTBR1 root table in a `VMCOREINFO` note through QEMU's `vmcoreinfo` device (a fw_cfg file). The hostlib core tool walks those tables to read kernel addresses, since heap and KVA stacks are not linear in the physmap, and writes the virtually addressed core `gdb` opens. The tool reads the aarch64 thread, log-ring, and trace layouts, and converts the flight recorder's raw `CNTVCT` timestamps (§11.3) with the `CNTFRQ_EL0` value the kernel records. `make test-forensics` passes under `--arch aarch64`, so a hung aarch64 guest yields the same symbolized per-CPU PCs, log tail, and trace as x86_64
 
 ### 11.8 Stretch: riscv64
 - [ ] mostly a test of whether the §10.3 seam was real: SBI, PLIC and CLINT, Sv39 and Sv48 paging, QEMU `virt`
@@ -1082,6 +1178,8 @@ so do TLB maintenance and the §11.2 I-cache maintenance aarch64 needs whenever 
 - [ ] `mmap` of a file, modify, `msync`, and the change is on disk
 - [ ] the OOM path kills a chosen process with a logged reason rather than panicking or hanging
 - [ ] no frame leaks: after 1000 fork, exec, `mmap`, `munmap`, and exit cycles and the §12.6 exhaustion test, the §12.1 user-anonymous and page-table counts return to baseline, and free plus page-cache frames return to baseline, on both architectures
+- [ ] the `debug_mm` build catches a deliberate use after free and a double free of a frame, and the KASAN build a use after free of a heap block, each as an in-guest test that expects the report; both builds pass `make test-kernel` on both architectures on the nightly job
+- [ ] vibefs crash-state enumeration passes every §12.5 workload on the nightly job, over traces recorded from the guest through the page-cache writeback path on both architectures: every flush-epoch subset up to eight writes and every torn superblock recovers to a committed generation at or after the last acknowledged `fsync`
 - [ ] tag `v0.12.0`
 
 ### 12.1 Frame metadata
@@ -1090,6 +1188,9 @@ so do TLB maintenance and the §11.2 I-cache maintenance aarch64 needs whenever 
 - [ ] `get_frame` / `put_frame` with the last reference freeing to the buddy allocator
 - [ ] reverse mapping from a frame to the PTEs referencing it, which reclaiming a mapped page-cache page requires (§12.6) and swap reuses
 - [ ] accounting by category: kernel heap, page tables, user anonymous, page cache, free; §19.9 adds slab
+- [ ] a `debug_mm` build: freed frames and heap blocks filled with a poison pattern checked on reallocation; freed frames unmapped from the physmap, so a use after free of a frame faults at the access instead of corrupting the next owner; a second free of a frame or heap block panics, naming the earlier free's caller. The buddy keeps its free-list links inside free frames (DESIGN §2.4), so in this build they move into the `Frame` array above. Frames are unmapped and remapped outside the buddy lock, since the page-table lock is never taken under it (DESIGN §2.1). This build maps the physmap at 4 KiB from boot, since splitting a live block is §11.2 break-before-make on the mapping the page-table code reads through
+- [ ] a KASAN build (moved from §18.4): `-Zsanitizer=kernel-address`, which both kernel targets support, with a shadow map over the heap, KVA, and kernel stacks, red zones, and a free quarantine; memory-intrinsic calls are range-checked against the shadow, since `core` and `compiler_builtins` come prebuilt and uninstrumented. The pinned nightly refuses to link a `-Zsanitizer` crate against that prebuilt `core` (an ABI-mismatch error), so this build passes `-Cunsafe-allow-abi-mismatch=sanitizer`; `-Zbuild-std` stays deleted (B2)
+- [ ] both builds are named §10.2 variants and run `make test-kernel` on both architectures on the nightly job from this phase on, because frame refcounts, COW (§12.3), and reclaim through the reverse map (§12.6) are where use after free enters
 
 ### 12.2 Demand paging
 - [ ] a real page-fault handler decoding the fault: present, write, user, reserved, instruction fetch (the x86 error code, `ESR_EL1` on aarch64)
@@ -1112,6 +1213,8 @@ so do TLB maintenance and the §11.2 I-cache maintenance aarch64 needs whenever 
 - [ ] a TLB shootdown on the write-protect step, which is the expensive part and worth measuring
 - [ ] in-guest: fork, write in the child, assert the parent's memory is unchanged; the same with the child's write done by a `read()` syscall into the page; assert the frame count matches expectations at each step
 - [ ] a ktest that times `fork` of a process with 100 MB resident against the kernel's monotonic clock and fails at 10 ms or more; it skips with a reason unless the guest has at least 512 MiB under KVM or HVF, so the per-push TCG tiers skip it, and the §10.1 KVM leg runs it on x86_64; the aarch64 number is taken under HVF on the dev host and recorded in DESIGN §8.6
+- [ ] the COW break decision (read the refcount, copy or reuse, swap the PTE, drop the old reference) in the portable half with a loom model (§10.8): parent and child write-faulting the same frame on two CPUs, and a fault racing §12.6 reclaim unmapping the frame through the reverse map; a mutant that reads the refcount outside the page-table lock must fail the model
+- [ ] the eager-copy `fork` of the 100 MB process measured before this subsection replaces it, and demand-zero, COW-break, and file-fault latency after, in the same guests as the ktest above, recorded in DESIGN §8.6 per architecture; §19.3's page-fault microbenchmark starts from these numbers
 
 ### 12.4 mmap
 - [ ] `mmap`, `munmap`, `mprotect`, `mremap`, `msync`, `madvise`; `brk` and anonymous `mmap` from §10.5 become lazy behind the same interface
@@ -1129,6 +1232,11 @@ so do TLB maintenance and the §11.2 I-cache maintenance aarch64 needs whenever 
 - [ ] one LRU with second-chance aging, which §12.6 reclaims from; §19.10 splits it into an active and an inactive list
 - [ ] readahead driven by detected access patterns
 - [ ] `tmpfs` pages participating, replacing the §8.4 version that sits on the block cache plus a fixed ramdisk, so a full `tmpfs` is reclaimable rather than pinned
+- [ ] a volatile-cache block device: an NBD server in hostlib, advertising flush so QEMU forwards every guest flush, serves the guest's virtio-blk disk with `write-cache=on`, so every flush is the guest's own, and records every write and flush the page cache and writeback threads issue. Killing QEMU, as the §8.5 test does, loses no write the host already received, so only this device can catch a missing flush. It lands before the writeback threads replace today's write path
+- [ ] a crash-state enumerator on the host rebuilds the disk from a trace: after each flush epoch, the durable prefix plus every subset of that epoch's writes up to eight, a seeded sample of larger subsets, and every superblock write torn at a 512-byte sector boundary, so each state costs a host mount, not a boot; the host tests of the portable volume run the same enumeration beside `CrashDisk`'s suffix drop
+- [ ] the oracle checks content, not only `fsck`: the mounted tree equals the tree of a committed generation, and that generation is at or after the last `fsync` or `sync` that returned before the crash point
+- [ ] workloads: `crash_at_each_write_is_consistent`'s script; a temporary file written, `fsync`ed, and `rename`d over the original, as editors and compilers save; `fsync` of a file and then of its directory; a snapshot created and deleted mid-workload. In this phase they run as in-guest tests through `Vfs`, whose `rename` exists and which gains a per-inode `fsync` with the writeback threads above, since the `fsync`, `renameat`, and `sync` syscalls are §13.9's
+- [ ] FAT enumerated against its weaker oracle: `fsck.fat -n` finds no directory entry pointing at a free cluster and no cross-linked chain
 
 ### 12.6 Reclaim and OOM
 - [ ] direct reclaim when an allocation fails: drop clean page-cache pages, write dirty ones back and then drop them, and unmap mapped pages through §12.1's reverse map; §19.10 adds watermarks and a background thread
@@ -1156,22 +1264,26 @@ Nothing before Phase 19 needs swap; a self-hosting build is given RAM, not swap.
 **Goal.** Processes with more than one thread, that talk to each other, respond to events, and present
 enough of a POSIX surface that real software can be ported without patching every call site.
 
-**Unlocks.** Shell pipelines. Job control. `pthreads`. Anything ported from Unix.
+**Unlocks.** Shell pipelines. Job control. `pthreads`. Anything ported from Unix. Unmodified static Linux binaries, checked against Linux itself (§13.11).
 
 **Architectures.** Both. Signal frames, `sigreturn`, the TLS register, `clone`'s argument order, and the
 user-visible structs Linux defines per architecture (`stat`, `epoll_event`, `sigaction`, `ucontext`) are
 per architecture, each pinned by a size-and-offset host test; the rest is shared. Every call lands under
-its asm-generic name, which both architectures have; the legacy x86_64 names are entry points onto it.
+its asm-generic name, which both architectures have; the legacy x86_64 names are entry points onto it. §13.11's Linux oracle for each architecture is a GitHub-hosted Linux runner of that architecture, which runs a static binary natively without KVM.
 
 **Exit gate**
 - [ ] `ls | grep foo | wc -l`, typed into the §13.7 `/bin/sh` with the §10.5 utilities, works with correct exit statuses and no deadlock on a full pipe
 - [ ] ctrl+C kills the foreground job and leaves the shell alive; ctrl+Z stops it and `fg` resumes it
-- [ ] a user signal handler runs on a proper user stack and returns correctly through `sigreturn`, and a crafted frame cannot leave user mode or crash the kernel (§13.8)
+- [ ] a user signal handler runs on a proper user stack and returns correctly through `sigreturn`, a crafted frame cannot leave user mode or crash the kernel, and a process killed by `SIGSEGV` leaves a core that host `gdb` backtraces to the faulting function (§13.8)
 - [ ] `ppoll` on 100 descriptors wakes only for the ready ones, verified by a syscall counter
 - [ ] a futex-based userspace mutex under contention across processes, correct and without spinning
 - [ ] a Unix domain socket carries a passed file descriptor between processes
 - [ ] sixteen user threads in one process contend a futex mutex from the user crate: the count is right, `exit_group` tears all of them down while some are blocked in `read`, and the frame count returns to baseline
 - [ ] `ps` and `/proc/<pid>/*` come from the process table; syscall 500 is gone
+- [ ] unmodified static `busybox` and `toybox` from the §13.11 corpus pass the differential runner on both architectures, busybox's own test suite passes minus its checked-in expected-failure list, and the pipeline and job-control lines above pass again with that `busybox` as `/bin/sh` and the utilities
+- [ ] on the nightly job, on both architectures: 10,000 generated syscall sequences agree with Linux on every return value, errno, and resulting file tree, on vibefs and on tmpfs, and the §13.11 LTP subset passes except its checked-in expected-failure list; every accepted difference is in `docs/LINUX.md`
+- [ ] the in-guest ladder in the §13.12 lock-dependency build reports no cycle, no IRQ-safety inversion, and no sleep under a spinlock on both architectures, and it does report the planted same-rank AB-BA test
+- [ ] the §13.13 fuzzer runs one hour per architecture on the nightly job, in a 2-CPU, 512 MiB guest (KVM on x86_64, TCG on aarch64), with no kernel panic, hang, KASAN report, lock-dependency report, or leaked frame, and every crash it has found is a checked-in replay
 - [ ] tag `v0.13.0`
 
 ### 13.1 Threads
@@ -1203,13 +1315,14 @@ its asm-generic name, which both architectures have; the legacy x86_64 names are
 ### 13.4 Shared memory
 - [ ] POSIX `shm_open` backed by `tmpfs`, sized with §13.9's `ftruncate`
 - [ ] anonymous shared mappings inherited across `fork`
-- [ ] `memfd_create` for anonymous named regions
+- [ ] `memfd_create` for anonymous named regions, with `MFD_CLOEXEC`, `MFD_ALLOW_SEALING`, `F_ADD_SEALS`, and `F_GET_SEALS` as Linux defines them, since Wayland clients share buffers through sealed memfds
 - [ ] correct refcounting so a region survives until the last mapper unmaps
 
 ### 13.5 futex
 - [ ] `FUTEX_WAIT` and `FUTEX_WAKE` on a user address, with a hash table of wait queues
 - [ ] private futexes keyed by (address space, virtual address); shared futexes by (backing object, offset), which is the inode for `shm_open` and `memfd_create`. Never by physical frame: COW, page migration, and swap all move a frame under a sleeping waiter, and after `fork` unrelated processes share frames
 - [ ] requeue and `WAKE_OP` for condition variables
+- [ ] `set_robust_list` and `get_robust_list`, and the robust-list walk at thread exit that marks each held robust futex `FUTEX_OWNER_DIED` and wakes a waiter, so a dead owner's robust mutex returns `EOWNERDEAD`; musl registers a list on first robust lock, glibc for every thread
 - [ ] the wait queue can record a lock owner, so §19.4 adds priority inheritance without changing this interface
 - [ ] a timeout on every wait
 - [ ] in-guest: a forked parent and child wait and wake on the same private address without seeing each other's wakes; two processes mapping one `shm_open` object do see them; a waiter survives a COW break on its page
@@ -1225,7 +1338,7 @@ its asm-generic name, which both architectures have; the legacy x86_64 names are
 
 ### 13.7 TTY and job control
 - [ ] a TTY layer between the console and processes, with a line discipline
-- [ ] one TTY per console backend, each with its own input queue: `/dev/ttyS0` over the serial port and `/dev/tty1` over the framebuffer with the PS/2 or virtio-input keyboard. §5.3's merged input stops reaching userspace. `/dev/console` resolves to one of them for init's stdio, serial by default, and `/dev/tty` becomes the controlling-terminal alias. Kernel log lines and markers keep fanning out to every backend
+- [ ] one TTY per console backend, each with its own input queue: the serial port as Linux names it (`/dev/ttyS0`, the 16550 on x86_64; `/dev/ttyAMA0`, the PL011 on aarch64) and `/dev/tty1` over the framebuffer with the PS/2 or virtio-input keyboard. §5.3's merged input stops reaching userspace. `/dev/console` resolves to one of them for init's stdio, serial by default, and `/dev/tty` becomes the controlling-terminal alias. Kernel log lines and markers keep fanning out to every backend
 - [ ] the e2e console-input check (DESIGN §8.3) follows the split: the `sendkey` line goes to the shell on `/dev/tty1`, and its reply is made visible on serial; DESIGN §8.3 updated in the same commit
 - [ ] in-guest: bytes injected on serial RX reach only `/dev/ttyS0`'s reader, and a keypress reaches only `/dev/tty1`'s
 - [ ] canonical mode: line buffering, erase, kill, EOF
@@ -1241,7 +1354,7 @@ its asm-generic name, which both architectures have; the legacy x86_64 names are
 ### 13.8 Full signals
 - [ ] the full signal set with correct default actions
 - [ ] `rt_sigaction` with `SA_RESTART`, `SA_SIGINFO`, and an alternate stack (`sigaltstack`); the kernel `struct sigaction` per architecture as Linux defines it
-- [ ] `rt_sigaction` honors `SA_RESTORER`. On x86_64 it is the only return path: a handler installed without it is not run, and the process gets `SIGSEGV`, as on Linux; nothing is ever written to the NX stack as code. On aarch64, a handler without a restorer returns through a read-only, user-executable trampoline page the kernel maps into every process at `exec`, so glibc-static binaries work. The user crate gains `sigaction`, `sigprocmask`, and a restorer stub per architecture, which the gate's handler test uses
+- [ ] `rt_sigaction` honors `SA_RESTORER`. On x86_64 it is the only return path: a handler installed without it is not run, and the process gets `SIGSEGV`, as on Linux; nothing is ever written to the NX stack as code. On aarch64, a handler without a restorer returns through a read-only, user-executable trampoline page the kernel maps into every process at `exec`, so glibc-static binaries work; the page holds Linux's `mov x8, #139` and `svc #0`, the pair libgcc's and LLVM's unwinders match to step through a signal frame, and §13.10's vDSO exports it as `__kernel_rt_sigreturn`. The user crate gains `sigaction`, `sigprocmask`, and a restorer stub per architecture, which the gate's handler test uses
 - [ ] `rt_sigprocmask`, `rt_sigpending`, `rt_sigsuspend`, `rt_sigtimedwait`
 - [ ] delivery on the return to userspace: build a Linux `rt_sigframe` on the user stack (`siginfo`, `ucontext` with `uc_mcontext`, and the FP state), run the handler, return through `rt_sigreturn`; the `ucontext` layout per architecture is pinned by a host test, since musl reads it
 - [ ] x86_64 frame: on the current stack it begins at least 128 bytes below the interrupted RSP (the red zone), on the alternate stack at that stack's top, and RSP+8 is 16-byte aligned at handler entry. The frame carries the FPU image, with lazily held live state saved first. aarch64 frame: the FPSIMD record, SP 16-byte aligned
@@ -1250,21 +1363,74 @@ its asm-generic name, which both architectures have; the legacy x86_64 names are
 - [ ] real-time signals with queueing, since standard signals coalesce and that surprises people
 - [ ] interaction with blocking syscalls: interrupt with `EINTR` or restart, per `SA_RESTART`
 - [ ] per-thread signal masks with process-directed signals delivered to an eligible thread
+- [ ] the `core` default action writes an ELF core in Linux's per-architecture note layouts: one `NT_PRSTATUS` per thread, `NT_PRFPREG`, `NT_PRPSINFO`, `NT_SIGINFO`, `NT_AUXV`, and `NT_FILE`, plus the writable and anonymous mappings, to the path a `core_pattern=` option on the §10.2 kernel command line names (`%p` and `%e` expanded; `core` in the working directory when absent, as on Linux), under `RLIMIT_CORE`. A process §13.9 marks not dumpable leaves none. Host `gdb` and `lldb` open it against the binary
+- [ ] utest runs attach a scratch FAT disk and set `core_pattern=` to a path on it; after QEMU exits the harness copies each core off it and prints a host backtrace beside the failing utest (`gdb-multiarch` in CI, `lldb` on the macOS dev host)
 
 ### 13.9 POSIX floor
-- [ ] a tracked list of the syscalls needed to build and run the target software set, checked off as implemented
+- [ ] a tracked list of the syscalls needed to build and run the target software set: every number in a pinned copy of musl's `arch/<arch>/bits/syscall.h.in` for each architecture has a row in the §10.5 table with the same number, marked implemented, partial, or `ENOSYS` by design with the fallback its known callers take, and `make check` fails on a missing row or a differing number; `docs/SYSCALL.md` §3 renders the status, and the §13.11 runner lists in its job summary every `ENOSYS` the corpus hits
 - [ ] every call in this phase lands under its asm-generic name, which x86_64 also has; the legacy names are x86_64-only entry points onto it, as §11.6 does for `openat`, `dup3`, and `clone`: `faccessat` for `access`, `fchmodat` for `chmod`, `fchownat` for `chown`, `newfstatat` for `stat` and `lstat`, `readlinkat` for `readlink`, and the §13.2 and §13.6 pairs
 - [ ] `getcwd`, `chdir`, `fchdir`, `faccessat`, `fchmodat`, `fchownat`, `umask`, `utimensat`
 - [ ] `newfstatat`, `readlinkat`, `openat` with any `dirfd`, `pread64`, `pwrite64`, `readv`, `writev`, which every coreutil calls before anything else; `getdents64`, `fstat`, and `nanosleep` came with §10.5
-- [ ] `mkdirat`, `unlinkat`, `renameat`, `renameat2`, `linkat`, `symlinkat`, `mknodat`, `truncate`, `ftruncate`, `fsync`, `fdatasync`, `sync`, `statfs`, `fstatfs`, `mount`, `umount2`, `sethostname`, `settimeofday`, and `clock_settime`, with the x86_64 legacy names (`mkdir`, `rmdir`, `unlink`, `rename`, `link`, `symlink`, `mknod`) as entry points onto them; §13.2's named pipes, §13.4's `shm_open`, §14.3's init, §14.4's coreutils, §14.6's installs, and §15.8's SNTP client need them; the calls that change system state become root-only when §18.6 enforces credentials
+- [ ] `fcntl` beyond `F_GETFD` and `F_SETFD`: `F_DUPFD`, `F_DUPFD_CLOEXEC`, `F_GETFL`, and `F_SETFL`; POSIX record locks (`F_SETLK`, `F_SETLKW`, `F_GETLK`), OFD locks, and `flock`, with `EDEADLK` when an `F_SETLKW` would close a wait cycle, since parallel `make`, `cargo`, and package managers rely on them for correctness
+- [ ] `mkdirat`, `unlinkat`, `renameat`, `renameat2`, `linkat`, `symlinkat`, `mknodat`, `truncate`, `ftruncate`, `fsync`, `fdatasync`, `sync`, `statfs`, `fstatfs`, `mount`, `umount2`, `sethostname`, `settimeofday`, and `clock_settime`, with the x86_64 legacy names (`mkdir`, `rmdir`, `unlink`, `rename`, `link`, `symlink`, `mknod`) as entry points onto them; §13.2's named pipes, §13.4's `shm_open`, §14.3's init, §14.4's coreutils, §14.6's installs, and §15.8's SNTP client need them; the calls that change system state, and `mknodat` of a device node, are root-only under the enforcement below
+- [ ] the §12.5 crash-state workloads run again from a user program through `fsync`, `renameat`, and `sync`, on the volatile-cache disk, on both architectures on the nightly job
 - [ ] `/dev/kmsg` in devfs, so a user `dmesg` reads the kernel log
-- [ ] credentials in userspace: the §9.5 uid and gid gain saved set-IDs and a supplementary group list, inherited across `fork` and `execve`; `getuid`, `geteuid`, `getgid`, `getegid`, `getresuid`, `getresgid`, `getgroups`, `setuid`, `setgid`, `setreuid`, `setregid`, `setresuid`, `setresgid`, `setgroups` over them. Until §18.6 any caller may make any transition; the privilege check and the set-user-ID bits on `execve` are §18.6
+- [ ] credentials in userspace: the §9.5 uid and gid gain saved set-IDs and a supplementary group list, inherited across `fork` and `execve`; `getuid`, `geteuid`, `getgid`, `getegid`, `getresuid`, `getresgid`, `getgroups`, `setuid`, `setgid`, `setreuid`, `setregid`, `setresuid`, `setresgid`, `setgroups` over them. Each checks privilege as Linux does: effective uid 0 sets any id, any other caller only switches among its own real, effective, and saved ids, and `setgroups` is root-only
+- [ ] uid and gid enforced (moved from §18.6): permission bits and ownership checked on every path walk and file operation; the set-user-ID and set-group-ID bits honored by `execve`, with `AT_SECURE` set so §14.2's dynamic linker ignores `LD_PRELOAD` and `LD_LIBRARY_PATH`; a write or `chown` by a non-root caller clears the set-ID bits; `kill` and `tgkill` to another user's process refused; `/proc/<pid>/environ`, `auxv`, `maps`, and `fd/` readable only by the owner or root, and only by root while the process is not dumpable. A process whose effective uid or gid changes, through a set-ID `execve` or one of the `set*id` calls above, is not dumpable until an `execve` leaves its real and effective ids equal, as under Linux's default `suid_dumpable`; FAT mounts given one owner and a file and directory mode from `uid=`, `gid=`, `fmask=`, and `dmask=`. Root is effective uid 0 until §18.6's capabilities split it
+- [ ] in-guest, as uid 1000: reading a root-owned mode-0600 file and writing another user's file return `EACCES`, `setuid(0)` returns `EPERM`, a set-user-ID-root test binary runs with euid 0 and sees `AT_SECURE` 1, and `kill` of a root-owned process returns `EPERM`
 - [ ] `procfs` backed by the process table: `cmdline`, `status`, `maps`, `fd`, `stat` per pid; `ps` reads it and syscall 500 is deleted
 - [ ] `getrlimit` / `setrlimit` (`prlimit64`), `getrusage`; `RLIMIT_NOFILE` lifts a process from the default of 256 descriptors (Phase 10) to a hard cap in the `limits` module, since toolchains open more than 256 files
-- [ ] `uname`, `sysinfo`, `gettimeofday`, `clock_gettime`, `clock_nanosleep`
+- [ ] `uname`, `sysinfo`, `gettimeofday`, `clock_gettime`, `clock_getres`, and `clock_nanosleep` over Linux's clock ids: `REALTIME`, `MONOTONIC`, `MONOTONIC_RAW`, `BOOTTIME`, the `_COARSE` variants, and the process and thread CPU-time clocks, including the ids that encode a pid or tid, as `clock_getcpuclockid` and `pthread_getcpuclockid` build them
+- [ ] `timer_create`, `timer_settime`, `timer_gettime`, and `timer_delete` with `SIGEV_SIGNAL` and `SIGEV_THREAD_ID` (musl builds `SIGEV_THREAD` on it), and `setitimer` and `getitimer`, with `alarm` as an x86_64 entry point onto `setitimer`, on one timer queue shared with §13.6's `timerfd`
 - [ ] `ioctl` with a registry rather than a growing match arm
 - [ ] `prctl` for the few things that need it
 - [ ] `ENOSYS` for the unimplemented, logged once per syscall number, so a port's failure is immediately legible
+
+### 13.10 Linux ABI fidelity
+§11.6, §13.6, and §13.8 pin `stat`, `epoll_event`, `sigaction`, the signal frame, and `ucontext`. This covers the rest of what an unmodified static Linux binary reads, so it sees what it would see on Linux. `PT_INTERP` and shared objects stay §14.2.
+
+- [ ] static-PIE executables (moved from §14.2): `execve` maps an `ET_DYN` image with no `PT_INTERP` at a page-aligned bias it chooses, `AT_PHDR` and `AT_ENTRY` carry the bias, and the image relocates itself, as on Linux. `src/elf.rs` stops refusing `ET_DYN` without an interpreter, and SYSCALL.md §7 says so. Host tests cover the bias arithmetic; an in-guest test runs a static-PIE user-crate program, whose `_start` applies its own relative relocations, on both architectures. Alpine's static `busybox` and Rust's `*-linux-musl` output are static-PIE
+- [ ] the auxiliary vector Linux passes: `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_PAGESZ`, `AT_BASE`, `AT_FLAGS`, `AT_ENTRY`, `AT_UID`, `AT_EUID`, `AT_GID`, `AT_EGID`, `AT_SECURE` (§13.9), `AT_RANDOM` (16 bytes from the `/dev/random` source, not the TSC), `AT_HWCAP`, `AT_HWCAP2`, `AT_PLATFORM`, `AT_EXECFN`, `AT_CLKTCK`, `AT_MINSIGSTKSZ`, and `AT_SYSINFO_EHDR`. `AT_HWCAP` on aarch64, and XCR0 on x86_64, advertise only register state the kernel saves and restores. A user-crate program that prints its auxv runs in the §13.11 differential runner
+- [ ] a vDSO on both architectures, mapped at `exec` with a read-only data page the §2.7 seqlock publishes, and built from the same portable time code: the calls and symbol names Linux's vDSO exports (`__vdso_clock_gettime` and relatives at version `LINUX_2.6` on x86_64; `__kernel_clock_gettime` and relatives, and `__kernel_rt_sigreturn`, at `LINUX_2.6.39` on aarch64), since musl and Go look them up by name and version. It falls back to the syscall when user mode cannot read the counter
+- [ ] in-guest: 10,000 `clock_gettime(CLOCK_MONOTONIC)` calls through the vDSO add nothing to the §9.3 syscall counter, and interleaved with syscall reads they never run backwards, on both architectures
+- [ ] `sched_getaffinity` and `sched_setaffinity` over a per-thread CPU mask sized from the boot CPU count, which replaces §4.8's `CpuAffinity::{Any, Pinned(cpu)}` (it cannot hold a set) and which placement honors, and `getcpu`, since musl's `sysconf(_SC_NPROCESSORS_ONLN)`, `nproc`, Rust's `available_parallelism`, and Go's `GOMAXPROCS` count CPUs through it, and a build that sees one CPU runs serially
+- [ ] extending §13.9's procfs: `/proc/self` and `/proc/thread-self`; per pid `exe`, `cwd`, and `root` symlinks, `fd/<n>` links that open the descriptor's own file rather than re-walking a path, `auxv`, `environ`, and `task/<tid>/comm`, which Rust's `current_exe`, the sysroot discovery in `rustc` and `clang`, and musl's `ttyname`, `fexecve`, and `pthread_setname_np` use
+- [ ] one host-tested table of Linux struct sizes and field offsets per architecture, whose values cite the uapi header they came from, covering every struct the kernel reads or writes: the §11.6, §13.6, and §13.8 pins move into it, and it adds `termios` (the kernel's 36-byte layout, not libc's larger one), `winsize`, `timespec`, `timeval`, `rlimit`, `rusage`, `utsname`, `sysinfo`, `pollfd`, `iovec`, `linux_dirent64`, `sockaddr_un`, `msghdr`, `cmsghdr`, `ucred`, `siginfo_t`, `signalfd_siginfo`, `itimerspec`, `itimerval`, `sigevent`, `flock` (the `fcntl` lock record), `robust_list_head`, `stack_t`, and `statfs`; a struct a new syscall reads or writes enters the table in the same commit
+- [ ] `ioctl` request numbers and argument layouts are Linux's for every request implemented, each pinned by a host test: `TCGETS`, `TCSETS`, `TCSETSW`, `TCSETSF`, `TIOCGWINSZ`, `TIOCSWINSZ`, `TIOCSCTTY`, `TIOCNOTTY`, `TIOCGPGRP`, `TIOCSPGRP`, `TIOCGSID`, `TIOCGPTN`, `TIOCSPTLCK`, `FIONREAD`, `FIONBIO`, `FIOCLEX`, and `BLKGETSIZE64`
+- [ ] the `uname` policy decided and written in `docs/LINUX.md`: the `sysname` and `release` a process sees, since libcs, runtimes, and configure scripts branch on both; the §13.11 runner's expected differences follow it
+
+### 13.11 Conformance against Linux
+The syscall numbers are Linux's on x86_64 (§9.3) and asm-generic on aarch64 (§11.6), so a static Linux binary is a test that needs no port, and Linux is the oracle. Test inputs are fetched by hash at test time, never committed, and never put in a shipped image.
+
+- [ ] a corpus of unmodified static `*-linux-musl` binaries, built from pinned upstream release sources with Alpine's own toolchain in a digest-pinned Alpine container on each architecture's GitHub-hosted Linux runner: `busybox` in Alpine's `busybox-static` configuration, with its test suite; `toybox`; and LTP's `syscalls` cases for the calls this phase lands. Sources are fetched and checked by SHA-256; prebuilt packages are not used, since Alpine's mirrors drop superseded revisions. The corpus key hashes the sources' SHA-256s and the container digest. The nightly job builds a corpus only for a key that has none, and uploads it as assets of a `corpus-<key>` GitHub pre-release, with the source archives it was built from, which its GPL parts require. Every other run, the macOS dev host's included, downloads the corpus by that key and checks its SHA-256 instead of rebuilding
+- [ ] a differential runner: each corpus command runs in the guest and on Linux, and stdout, stderr, exit status, and the resulting file tree must match, except differences `docs/LINUX.md` lists with the Linux behavior and the reason (pids, times, the §13.10 `uname` policy)
+- [ ] Linux's result for each corpus case, recorded by the hosted runners and uploaded to the same `corpus-<key>` release, so a run on the macOS dev host compares against it
+- [ ] a generator in the user crate emits syscall sequences over this phase's calls from the §10.5 table: files, directories, links, renames, descriptors and offsets, pipes, `fork` and `wait4`, and signals with default actions, sized within vibefs v1's limits (VIBEFS.md §3) until §14.8. The same static binary runs each sequence on Linux in a tmpfs directory and in the guest on vibefs and on tmpfs, recording every return value, errno, and the final file tree
+- [ ] a divergence not listed in `docs/LINUX.md` fails; the sequence is minimized to the shortest one that still diverges and checked in as a `/bin/tests` regression
+- [ ] busybox's own test suite runs in the guest with busybox as its shell, against a checked-in expected-failure list per architecture
+- [ ] the LTP cases run one by one with pass, fail, and `TCONF` read from each exit status, against a checked-in expected-failure list per architecture whose entries name the missing call or the deliberate difference; a listed case that passes fails the run, so the list only shrinks
+- [ ] after a case panics or hangs the kernel, the runner restores a QEMU snapshot taken at `shell ready`, so one bad case costs one restore, not the run
+- [ ] a static Go program (pinned upstream Go toolchain, `CGO_ENABLED=0`, cross-built on any host) runs goroutines on every CPU with async preemption by `SIGURG`, timers, and the netpoller over a pipe, in a 4-CPU, 512 MiB guest under TCG, which checks §13.1's threads, §13.5's futexes, §13.6's `epoll`, and §13.8's frame rewrite together
+- [ ] the corpus, the generator, busybox's suite, LTP, and the Go program run on the nightly job on both architectures
+
+### 13.12 Lock-dependency validation and the futex model
+The §4.7 rank check has six global ranks, allows a rank to be retaken, and skips rank 0, so it cannot see an AB-BA order between two locks of one rank. This phase adds many: pipe ends, socket pairs, and the TTY, session, and process-group locks.
+
+- [ ] every `SpinMutex`, `BlockingMutex`, and `RwLock` gets a lock class keyed by its initialization site, beside its DESIGN §2.1 rank, so every pipe's lock is one class; nesting two locks of one class takes an explicit subclass and a fixed order, such as address order for a socket pair or a two-directory `rename`
+- [ ] a `lockdep` build records each held-class to acquired-class edge and reports the first cycle with both acquisition backtraces, the first time both orders occur in any run rather than when they collide in time
+- [ ] the same build reports a class taken in IRQ context that is elsewhere held with interrupts enabled, and a sleep on a wait queue with a spinlock held
+- [ ] the nightly job runs the in-guest ladder in this build on both architectures and dumps the edge graph, so a report names the path that closed the cycle
+- [ ] an in-guest test takes two device-rank locks in both orders, one after the other on one CPU, and passes only when the checker reports it
+- [ ] the §13.5 futex table, wait, wake, and requeue in the portable half with a loom model (§10.8): a wake racing a timeout, a requeue racing a wake, and a waiter whose page breaks COW; a mutant that checks the futex word outside the bucket lock must fail the model
+
+### 13.13 Syscall fuzzing
+Moved from §18.5: Phases 12 and 13 build the syscall surface and rewrite user-pointer handling, and a fuzzer finds those bugs while the phase that wrote them is open. §18.5 moves on to syzkaller with kernel coverage.
+
+- [ ] the §10.5 table gains an argument kind per parameter: descriptor, user pointer with the index of its length argument, path, flag set with its valid mask, pid, signal, or plain integer; the fuzzer generates from it and the §9.3 syscall trace decodes with it
+- [ ] a fuzzer in the user crate generates calls from those kinds: live, closed, and wrong-type descriptors; pointers into unmapped, read-only, kernel, COW-shared, and not-yet-faulted pages; lengths across page boundaries; every flag bit; several threads at once
+- [ ] every sequence derives from one seed, printed on serial before it runs, so a crash replays from its seed as a utest, and each replay is checked in
+- [ ] after each run the frame count and the process, thread, and descriptor tables return to baseline, so a leak fails the way a panic does
+- [ ] the nightly job runs it one hour per architecture in a build with the §12.1 KASAN and §13.12 lock-dependency checks on
 
 ---
 
@@ -1273,49 +1439,56 @@ its asm-generic name, which both architectures have; the legacy x86_64 names are
 Where it stops being a kernel demo and becomes something you can use. Nothing here has a canonical
 right answer, which is the interesting part.
 
-Phases 15, 16, and 17 all start from 14. Phase 16 needs nothing else, so self-hosting does not wait for a
-compositor. Phase 17 needs 15, because `cargo`, `git` remotes, and fetching sources need TCP and TLS. Its
-C toolchain (§17.2) can start as soon as 14 closes. The numbering is a reading order, not a build order.
+Phases 15, 16, and 17 all start from 14, and each checks its Linux interfaces with unmodified tools from
+§14.9's Alpine userland. Phase 16 needs nothing else, so self-hosting does not wait for a compositor.
+Phase 17's build loop runs offline from a vendored tree on a disk image, so only its network lines
+(`cargo` fetching, `git` remotes, `vim` over `sshd`) wait for 15; the rest starts when 14 closes. Phase 17 runs upstream
+toolchains (§17.7); rebuilding them from source is Phase 24, and glibc userlands are Phase 23. The
+numbering is a reading order, not a build order.
 
 ## Phase 14: Userspace
 
 **Goal.** A real userspace: a C library, a dynamic linker, an init system, crypto primitives, a root
-filesystem on disk, and enough utilities that the shell is useful.
+filesystem on disk, and enough utilities that the shell is useful. It also runs an unmodified Alpine Linux
+userland (§14.9), which Phase 17's toolchains come from.
 
 **Unlocks.** Porting software instead of writing everything. Logins, and packages that can be trusted. A
-root filesystem large enough for the Phase 17 toolchains.
+root filesystem large enough for the Phase 17 toolchains. Unmodified Linux binaries as the test tools of
+Phases 15 and 16 and the toolchains of Phase 17.
 
 **Architectures.** Both. musl's x86_64 and aarch64 ports bind to the one generated table (§11.6). The
-dynamic linker's relocation types and TLS are per architecture.
+dynamic linker's relocation types and TLS are per architecture. Alpine publishes both architectures, so
+§14.9 is both.
 
 **Exit gate**
 - [ ] a C program cross-compiled on the host with the §14.1 sysroot runs correctly on both architectures
 - [ ] a dynamically linked binary against a shared libc runs, and `ldd` lists its dependencies
 - [ ] init starts services from configuration, restarts a crashed one, and reaps orphans
-- [ ] `login` on the serial console accepts a user from the hashed shadow file and refuses a wrong password, and `id` in the new session reports that user's uid, gid, and groups
+- [ ] `login` on the serial console accepts a user from the hashed shadow file and refuses a wrong password, and `id` in the new session reports that user's uid, gid, and groups; that user cannot read `/etc/shadow` or write another user's file, and `passwd` run by that user changes only that user's entry
 - [ ] a shell script with pipes, redirection, variables, conditionals, and loops runs
 - [ ] `/bin/tests` (§10.5) and `libc-test` (§14.1), minus the cases on §14.1's checked-in expected-failure list, pass inside the VM on both architectures, run automatically in CI
 - [ ] a package installs, upgrades, and removes cleanly with file conflict detection, and a package with a bad signature is refused
 - [ ] `getrandom` returns seeded output on both architectures, and the §14.7 primitives pass their published test vectors in-guest
 - [ ] the system boots with root on a vibefs v2 disk image built from the §14.6 packages, on both architectures, and this gate runs from it
+- [ ] on both architectures, in a 1 GiB, 2-CPU guest under TCG, inside a `chroot` of Alpine's pinned `minirootfs` on vibefs v2: `apk add python3 git build-base clang lld` from the §14.9 mirror succeeds with signatures verified, `make test-harness` passes on a copy of the tree, `git` commits to a local repository, and `clang` compiles and links a C program that then runs
+- [ ] every third-party source the tree builds, other than Rust crates and Limine, has a `ports/` manifest with an allowed license, enforced by `make check`, and the scheduled job verifies every archive hash and patch series (§14.10)
 - [ ] tag `v0.14.0`
 
 ### 14.1 libc
-- [x] decided in Phase 10: the Rust user runtime from §10.5 is the native library for everything vibeOS ships; musl is ported for the C surface, since Phase 17's toolchains need it anyway. Both bind to the one generated syscall table.
-- [ ] the musl port: `crt1` and `__libc_start_main`, the `syscall` shim, `errno`, `__set_thread_area` over §13.1's TLS, and `libc-test` as the conformance suite
+- [x] decided in Phase 10: the Rust user runtime from §10.5 is the native library for everything vibeOS ships; musl is ported for the C surface, the libc that §14.9's Alpine userland and §17.7's toolchains also run on. Both bind to the one generated syscall table.
+- [ ] upstream musl, unmodified and pinned by version and SHA-256 under §14.10: its `crt1`, `__libc_start_main`, `syscall` shim, `errno`, and `__set_thread_area` run over §13.1's TLS as they do on Linux; no patch is carried, since a difference that would need one is a kernel bug; `libc-test` as the conformance suite
 - [ ] a host cross toolchain: `make sysroot` builds, for each architecture, musl, our headers, and compiler-rt's builtins and crt objects (aarch64 `long double` is binary128, so musl's `printf` alone needs `__multf3` and relatives). A per-triple clang config file sets `--sysroot`, `-resource-dir`, `-fuse-ld=lld`, and `--rtlib=compiler-rt`, so `clang --config=<it> --target=<arch>-linux-musl` builds and links C for vibeOS on the host. That needs an LLVM clang and `ld.lld`, which on macOS means Homebrew `llvm` and `lld`, since Apple's clang ships neither; README and AGENTS.md gain them in the same commit. The Linux syscall numbers and struct layouts (§11.6) are what make that triple work
-- [ ] musl's `bits/syscall.h` checked against the generated table in `make check`, so the two cannot drift
+- [ ] the §13.9 syscall-table check reads musl's headers from this pinned musl instead of its own copy
 - [ ] musl's `mallocng` over `brk` and §12.4's `mmap`, `mremap`, and `madvise`; §18.4 hardens it
 - [ ] musl's stdio, string, math, `pthreads` (over §13.1 threads and §13.5 futexes, cancellation over §13.8 signals), `setjmp`, `dlopen`, and locale pass `libc-test` on both architectures. Each failure is fixed in the kernel in this phase, or recorded on a checked-in expected-failure list with its reason, or added as an open box to the phase that lands it
-- [ ] unmodified static Linux binaries built against musl run: busybox's own test suite passes on both architectures, minus a checked-in expected-failure list, since the syscall numbers, struct layouts, and auxiliary vector are Linux's
 
 ### 14.2 Dynamic linking
-- [ ] the kernel side: `execve` maps an `ET_DYN` image at a load bias it chooses, and for `PT_INTERP` also maps the named interpreter and enters at its entry point. `AT_BASE` carries the interpreter's base, and `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, and `AT_ENTRY` describe the main program with its bias. `src/elf.rs` stops refusing `ET_DYN` and `PT_INTERP`, and SYSCALL.md §7 says so. Host tests cover the bias arithmetic; an in-guest test runs a static-PIE binary and an interpreted one on both architectures
+- [ ] the kernel side: `execve` of an image with `PT_INTERP` also maps the named interpreter at a load bias it chooses and enters at the interpreter's entry point; the main program is `ET_EXEC`, or `ET_DYN` placed at a bias as §13.10 places static-PIE. `AT_BASE` carries the interpreter's base, and `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, and `AT_ENTRY` describe the main program with its bias. `src/elf.rs` stops refusing `PT_INTERP`, and SYSCALL.md §7 says so. Host tests cover the interpreter's bias arithmetic; an in-guest test runs an interpreted PIE and an interpreted `ET_EXEC` binary on both architectures
 - [ ] musl's dynamic linker, which is `libc.so` itself, static and self-relocating: `DT_NEEDED` and search paths, `RELA`, `JMPREL`, and `RELR`, and symbol resolution with the correct scope and interposition order
 - [ ] binding is immediate, as musl does it; `RTLD_LAZY` defers only unresolved symbols, and there is no lazy PLT binding
 - [ ] TLS: initial-exec and dynamic models, `__tls_get_addr`
 - [ ] `dlopen`, `dlsym`, `dlclose`, `dladdr`
-- [ ] `LD_PRELOAD` and `LD_LIBRARY_PATH`, useful for debugging more than for anything else
+- [ ] `LD_PRELOAD` and `LD_LIBRARY_PATH`, useful for debugging more than for anything else; the loader ignores both for a set-user-ID program, which §13.9 marks with `AT_SECURE`, and an in-guest test, run as an ordinary user, checks that an `LD_PRELOAD` library never loads into a set-user-ID-root C test program linked against the §14.1 sysroot's `libc.so`, since `passwd` is a static §10.5-runtime binary with no interpreter to load one
 - [ ] `libc.so` invoked as `ldd` lists each `DT_NEEDED` object and the path it resolved to
 
 ### 14.3 init and services
@@ -1327,7 +1500,7 @@ dynamic linker's relocation types and TLS are per architecture.
 - [ ] socket activation, which is genuinely elegant and not much work once sockets exist
 - [ ] shutdown: signal services, wait with a timeout, unmount, and power off through `reboot` (ACPI on x86_64, PSCI on aarch64)
 - [ ] a control tool for start, stop, restart, status, and logs
-- [ ] `login` and a getty on `/dev/tty1` and on `/dev/ttyS0` (§13.7); `passwd` and `su`; a shadow file hashed with §14.7's password hash. `login` and `su` switch identity with §13.9's calls; until §18.6 nothing checks the switch, so an ordinary user's `su` and `passwd` do not need the set-user-ID bit until then
+- [ ] `login` and a getty on `/dev/tty1` and on the serial TTY (`/dev/ttyS0` or `/dev/ttyAMA0`, §13.7); `passwd` and `su`, installed set-user-ID root; a shadow file hashed with §14.7's password hash, readable only by root. `login` and `su` switch identity with §13.9's calls, which §13.9 checks, and `passwd` changes only the invoking user's entry unless run by root
 
 ### 14.4 Coreutils
 - [ ] file and directory: `ls`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `ln`, `touch`, `stat`, `find`, `du`, `df`
@@ -1357,6 +1530,8 @@ dynamic linker's relocation types and TLS are per architecture.
 - [ ] a repository format signed with §14.7's Ed25519, read from a local directory or a mounted image; §15.8 fetches it over HTTP
 - [ ] signature verification on every install and upgrade, with an unsigned or tampered package refused
 - [ ] the base system itself shipped as packages, which is the test that the format is real
+- [ ] a signed release manifest: every artifact of a tagged release with its SHA-256, signed with a §14.7 Ed25519 release key and published by the release workflow from `v0.14.0` on. The private key exists only as a secret of that workflow; the public key is in the tree and in every image. §18.7's boot-chain manifest and §22.1 extend this format rather than adding another
+- [ ] the harness verifies a downloaded release ISO against the manifest before booting it, and refuses a tampered one
 
 ### 14.7 Crypto primitives
 Moved here from Networking, which had them from Hardening: login (§14.3) and signed packages (§14.6)
@@ -1368,6 +1543,7 @@ encryption and boot integrity stay in §18.7.
 - [ ] a CSPRNG behind `/dev/random`, `/dev/urandom`, and `getrandom`; `getrandom` and `/dev/urandom` never block after the pool is seeded, and `/dev/random` blocks only until then
 - [ ] hashes and ciphers: SHA-2, SHA-3, AES-GCM, ChaCha20-Poly1305
 - [ ] public key: Ed25519, X25519, RSA verification
+- [ ] NIST P-256 and P-384: ECDSA signing and verification, and ECDH for TLS key exchange, since a large share of web certificate chains (ISRG Root X2 and Let's Encrypt's E-series intermediates among them) and many SSH host keys are ECDSA (§15.11, §15.8); host-tested against the Wycheproof vectors as well as the RFC ones
 - [ ] a memory-hard password hash (Argon2id) for the shadow file
 - [ ] constant-time primitives with the RFC test vectors as host tests, and a host-side comparison against a reference implementation; the same vectors run in-guest from `/bin/tests` on both architectures, which is what the gate checks
 
@@ -1377,8 +1553,38 @@ vibefs v1 holds at most 4 MiB, 64 inodes, and 96 directory entries per volume ([
 
 - [ ] vibefs format version 2, designed for the §12.5 page cache: multi-GiB volumes, at least a million inodes, B-tree directories without a volume-wide entry cap, and extent trees rather than four extents per inode; VIBEFS.md gains the v2 format before any code, as §8.5 did for v1
 - [ ] the kernel, `mkfs-vibefs`, and `fsck-vibefs` share the v2 code, as they do for v1; `fsck` upgrades a v1 volume in place, and a v1 volume still mounts
-- [ ] the §8.5 crash-consistency test runs on a v2 volume larger than any v1 limit
-- [ ] root is vibefs v2 on a virtio-blk disk that `make rootfs` formats and populates on the host from the §14.6 packages, on both architectures; the initrd keeps only what init needs to mount it
+- [ ] extended attributes in the v2 format and in tmpfs: the `getxattr`, `setxattr`, `listxattr`, and `removexattr` families with their `l` and `f` forms, in the `user.` and `trusted.` namespaces, and `EOPNOTSUPP` for `security.` and `system.`
+- [ ] the §8.5 crash-consistency test runs on a v2 volume larger than any v1 limit, and §12.5's crash-state enumerator and volatile-cache block device run over v2's commit protocol
+- [ ] root is vibefs v2 on a virtio-blk disk that `make rootfs` formats and populates on the host from the §14.6 packages, on both architectures; `root=` on the §10.2 command line names it, and the initrd, which keeps only what init needs to mount it, is the root when `root=` is absent
+
+### 14.9 Linux userland
+Unmodified Linux binaries, dynamically linked against musl, from Alpine. §17.7 takes its toolchains from
+here, and Phases 15 and 16 their test tools. No binary is patched to run; a failure is a kernel bug or a
+line in this file. glibc and Debian userlands are Phase 23.
+
+- [ ] `chroot`, and a `vibeos-linux` helper that enters a Linux root with `/proc`, `/dev`, `/dev/pts`, `/dev/shm`, and `/tmp` mounted; `/sys` in Linux's layout is Phase 23
+- [ ] `mkfs-vibefs --from <tarball>` builds a vibefs v2 image from a root filesystem archive on the host, taking owners, modes, device nodes, symlinks, and hard links from the archive headers, so no host needs root or a case-sensitive filesystem to build it
+- [ ] Alpine's `minirootfs` for each architecture, pinned by release and SHA-256, and a package snapshot, a pinned package set with its `APKINDEX` on a disk image that `apk` reads as a repository; `apk` in the guest verifies the index signatures against the minirootfs keys. The set starts with what this phase's gate installs, and each later phase adds the packages its lines name
+- [ ] the snapshot's packages fetched by SHA-256 when the image is built and cached in CI, never committed; Alpine keeps only the latest build of each package, so a pin that stops resolving fails the fetch with the package named, and moving the pin is a commit
+- [ ] `apk` runs only inside a `vibeos-linux` root and never owns a file of the base system, which stays §14.6 packages
+- [ ] §13.9's and §13.10's per-pid `procfs` files in Linux's exact formats, plus the system-wide files Alpine's tools read: `cpuinfo`, `meminfo`, `stat`, `uptime`, `loadavg`, `mounts`, `filesystems`, `version`, `sys/kernel/{osrelease,ostype,hostname,pid_max,random/boot_id}`, and `sys/vm/overcommit_memory`; each format host-tested against output captured from a Linux guest
+- [ ] `/dev/fd`, `/dev/stdin`, `/dev/stdout`, and `/dev/stderr` as the symlinks Linux provides
+- [ ] procps-ng's `ps`, `top`, `free`, and `vmstat` from the snapshot report the same numbers as the native tools
+- [ ] the §13.11 differential runner extended to this dynamic corpus
+- [ ] `docs/LINUX.md` covers the dynamic corpus: what runs, what does not, and why
+
+### 14.10 Ported sources
+Rust crates are covered by §10.9's `cargo deny` policy and Limine by its pinned commit in `setup.sh`. Every
+other third-party source the tree builds arrives this way, musl first. Sources and binaries used only by
+tests and never shipped (packetdrill, the §14.9 mirror) are pinned by hash but need no source offer;
+§13.11's corpus is published with its source archives beside it.
+
+- [ ] `ports/<name>/port.toml` for every third-party source: upstream URL, version, SHA-256 of the archive, SPDX license identifier, and a numbered patch series beside it; the §14.6 recipe builds from it
+- [ ] source archives mirrored as release assets, so a build does not depend on an upstream host staying up
+- [ ] a license policy in `docs/`, decided before §14.9 and before any copyleft binary ships in an image: vibeOS code is MIT, ports keep their licenses, and a copyleft port ships as its own package with its corresponding source beside it
+- [ ] `make check` fails when a port lacks a manifest or has a license the policy does not allow; a scheduled job verifies each archive hash and that each patch series applies
+- [ ] the §14.9 mirror's pin list records each package's license from its own metadata, and the scheduled job checks it against the same policy
+- [ ] a scheduled job looks up each port and each §14.9 mirror package in the OSV database and opens an issue for a known vulnerability
 
 ---
 
@@ -1399,13 +1605,16 @@ measured under HVF on the dev host, since GitHub's arm64 runners have no KVM.
 - [ ] DHCP acquires an address, and DNS resolves a name
 - [ ] a TCP server in the guest serves a file to `curl` on the host, and the bytes match
 - [ ] a TCP client fetches 1 GiB from the host with no corruption, at 1 Gbit/s or better over virtio-net and 4 Gbit/s or better over loopback, both under KVM in a 2-vCPU, 512 MiB guest
-- [ ] the stack survives a packet fuzzer: malformed headers, bad checksums, overlapping fragments, no panics
+- [ ] the §15.10 packet fuzzer, injecting malformed headers, bad checksums, and overlapping fragments through the injection interface, runs one hour per architecture on the nightly job in a 2-CPU, 512 MiB guest (KVM on x86_64, TCG on aarch64) with no panic or hang
 - [ ] `netstat`-equivalent shows sockets in correct states through a full connection lifecycle
 - [ ] an HTTPS fetch from a server on the host completes with the certificate chain verified against a test CA, and a tampered certificate is refused, using §15.11
 - [ ] an `sshd` login from the host reaches a shell on a pty
 - [ ] SNTP against the §15.10 host responder sets the wall clock to within 100 ms of the host
-- [ ] host tests for header parsing, checksums, TCP state transitions, and sequence arithmetic
-- [ ] tag `v0.15.0`
+- [ ] host tests for header parsing, checksums, TCP state transitions, and sequence arithmetic, and a Kani proof of the sequence and window comparisons for every pair of 32-bit values (§15.10)
+- [ ] the nightly sweep of 10,000 seeds of simulated 1 MiB TCP transfers over a lossy, duplicating, reordering, corrupting link finishes with no corruption, hang, or panic, and every past failing seed is a checked-in host test (§15.10)
+- [ ] packetdrill in wire mode runs every upstream TCP script that does not assert a Linux-only socket option, `TCP_INFO` field, or sysctl setting, on both architectures, and each one passes or is on §15.10's checked-in list with the RFC section that allows the difference
+- [ ] on both architectures, unmodified tools from the §14.9 mirror work against virtio-net: iproute2's `ip addr` and `ip route` list and change the interface's address and routes, busybox `udhcpc` acquires a lease, and `tcpdump` with a `tcp port 80` filter captures only that traffic
+- [ ] tag `phase-15` and cut the next release
 
 ### 15.1 netdev layer
 - [ ] a `NetDevice` trait: transmit, MTU, MAC, link state, and statistics
@@ -1414,6 +1623,7 @@ measured under HVF on the dev host, since GitHub's arm64 runners have no KVM.
 - [ ] checksum and segmentation offload flags, used when the device supports them
 - [ ] a loopback device, which is also the easiest way to test everything above it
 - [ ] per-device statistics: packets, bytes, errors, drops
+- [ ] everything above the netdev layer takes time, timers, and randomness through one trait: the kernel implementation uses the monotonic clock and the §14.7 CSPRNG, and the host build drives the stack with a simulated clock and a seeded generator (§15.10)
 
 ### 15.2 Drivers
 - [ ] virtio-net: receive and transmit virtqueues, mergeable receive buffers, checksum offload, multi-queue
@@ -1463,9 +1673,12 @@ measured under HVF on the dev host, since GitHub's arm64 runners have no KVM.
 - [ ] `sendmsg` and `recvmsg` (from §13.3) for `AF_INET`, with scatter-gather and IP-level control messages
 - [ ] `SO_REUSEADDR`, `SO_REUSEPORT`, `SO_BROADCAST`, `SO_BINDTODEVICE`, and sending from `0.0.0.0` on an interface with no address yet, which a DHCP client needs before it has a lease
 - [ ] ICMP sockets for `ping` and `traceroute`: `SOCK_DGRAM`/`IPPROTO_ICMP` ping sockets and `SOCK_RAW` ICMP sockets; `IP_TTL` on UDP and ICMP sockets; ICMP errors delivered to the socket that caused them
-- [ ] an `AF_PACKET`-shaped socket that sends and captures whole frames on one interface, for the `tcpdump`-equivalent
-- [ ] `NETLINK_ROUTE`-shaped configuration and enumeration of interfaces, addresses, link state, and routes, since musl's `getifaddrs` and `if_nameindex` use it; `SIOCGIF*` ioctls through the §13.9 registry for software that still calls them
+- [ ] Linux's `AF_PACKET`: `SOCK_RAW` and `SOCK_DGRAM` bound to one interface with `sockaddr_ll`, `PACKET_ADD_MEMBERSHIP` for promiscuous mode, `PACKET_AUXDATA`, and `PACKET_RX_RING` with `TPACKET_V2` and `TPACKET_V3` rings mapped with `mmap`, which libpcap requires; the `tcpdump`-equivalent and busybox `udhcpc` use it
+- [ ] classic BPF socket filters (`SO_ATTACH_FILTER`, `SO_DETACH_FILTER`, `SO_LOCK_FILTER`) on packet, UDP, and TCP sockets, run by one interpreter in the portable half that validates each program before attaching it; host-tested against filters compiled by libpcap and fuzzed like every parser; §18.6's `seccomp` reuses it
+- [ ] Linux's `AF_NETLINK` `NETLINK_ROUTE`: `RTM_GETLINK`, `RTM_GETADDR`, and `RTM_GETROUTE` dumps with `NLM_F_MULTI`; `RTM_NEWLINK` for link up and down; `RTM_NEWADDR`, `RTM_DELADDR`, `RTM_NEWROUTE`, and `RTM_DELROUTE`; and the `RTMGRP_*` multicast groups for change notifications, so musl's `getifaddrs` and `if_nameindex` and unmodified iproute2 work
+- [ ] `SIOCGIFCONF`, `SIOCGIFFLAGS`, `SIOCGIFADDR`, `SIOCGIFHWADDR`, `SIOCGIFMTU`, and `SIOCGIFINDEX` through the §13.9 registry, for software that still calls them
 - [ ] `/proc/net/tcp`, `/proc/net/udp`, and `/proc/net/unix` list every socket with its addresses and state, which the `netstat`-equivalent and `ss` read
+- [ ] `sockaddr_in`, `sockaddr_in6`, `sockaddr_ll`, `sockaddr_nl`, `ifreq`, `sock_fprog`, `tpacket2_hdr`, `tpacket3_hdr`, `nlmsghdr`, `ifinfomsg`, `ifaddrmsg`, and `rtmsg` added to §13.10's struct table, and the `SOL_SOCKET`, `IPPROTO_IP`, `IPPROTO_IPV6`, and `IPPROTO_TCP` option numbers and `CMSG_ALIGN` checked against the uapi headers on both architectures
 
 ### 15.8 Configuration and tools
 - [ ] a userspace DHCP client over §15.5 UDP broadcast that applies its lease through §15.7's netlink interface: discover, request, lease renewal, and correct behavior on lease expiry
@@ -1491,10 +1704,15 @@ measured under HVF on the dev host, since GitHub's arm64 runners have no KVM.
 - [ ] host-to-guest integration tests in CI over QEMU user networking and a tap device
 - [ ] an SNTP responder on the host that the guest reaches from CI (QEMU user networking has no NTP service of its own), serving the host clock the Phase 15 SNTP gate measures against
 - [ ] a deliberately hostile peer: reordering, duplication, loss, tiny windows
+- [ ] deterministic simulation: instances of the portable stack on the host, over a simulated link that drops, duplicates, reorders, delays, and corrupts, under the §15.1 simulated clock, all driven from one seed
+- [ ] a nightly sweep of seeds; a failing seed is printed, replays bit for bit as a host test, and is checked in
+- [ ] packetdrill, built statically in §13.11's digest-pinned Alpine container with `linux-headers` and pinned under §14.10, run in wire mode inside a §14.9 `vibeos-linux` root, since its client configures the interface by running iproute2's `ip`: the client executes each script's syscalls on vibeOS while its server on the host injects and checks packets on the tap device; the runner replaces upstream's `defaults.sh`, which writes Linux sysctls, with one for vibeOS
+- [ ] the upstream packetdrill TCP scripts that do not assert Linux-only socket options, `TCP_INFO` fields, or sysctl settings run in CI; each passes or is on a checked-in list with the RFC section that allows the difference, and the list only shrinks
+- [ ] sequence-space comparison and window arithmetic from §15.6 proved by Kani (§10.8) for every pair of 32-bit values
 
 ### 15.11 TLS
 The primitives, the entropy pool, and the CSPRNG are §14.7. This is the part that needs a peer. Package
-fetching over HTTPS (§15.8) and `cargo` (§17.3) need it before Hardening. `sshd` does not, since SSH
+fetching over HTTPS (§15.8) needs it before Hardening; the upstream `cargo` and `git` that §17.7 runs bring their own. `sshd` does not, since SSH
 brings its own key exchange.
 
 - [ ] X.509 parsing and chain validation with a bundled root store, host-tested against real certificates and fuzzed like every parser
@@ -1507,38 +1725,43 @@ brings its own key exchange.
 
 **Goal.** More than one window. A compositor, an input stack, and a terminal emulator running in it.
 
-**Unlocks.** The thing that makes people believe it is an operating system.
+**Unlocks.** The thing that makes people believe it is an operating system. Linux's DRM and evdev
+interfaces, which later graphics and desktop software opens unmodified.
 
 **Architectures.** Both. PS/2 is x86_64 only. virtio-input (§11.5) is the keyboard and pointer on
-aarch64 and works on x86_64 too. virtio-gpu is shared.
+aarch64 and works on x86_64 too. virtio-gpu is shared. The frame-rate gate line is measured on the §10.1 KVM leg on x86_64; the aarch64 number is recorded under HVF on the dev host, since GitHub's arm64 runners have no KVM.
 
 **Exit gate**
 - [ ] multiple windows, movable and resizable, with correct overlap and damage handling
 - [ ] the terminal emulator runs the shell through a pty, with correct escape sequence handling
 - [ ] mouse and keyboard events routed to the focused window, on both architectures
+- [ ] unmodified `modetest` (libdrm) and `evtest` from the §14.9 mirror list connectors and set a mode with a dumb buffer on virtio-gpu, and read key and pointer events from virtio-input, on both architectures
 - [ ] a screenshot captured programmatically and compared against a reference in CI (§16.1)
-- [ ] a resolution change at runtime with clients reacting correctly
+- [ ] a resolution change, and a second output added and removed, at runtime with clients reacting correctly (§16.1)
 - [ ] the compositor holds 60 frames per second at 1920×1080 with ten windows moving, fewer than 1% of frames dropped over ten seconds, measured under KVM in a 4-vCPU, 2 GiB guest with virtio-gpu 2D
 - [ ] the compositor killed with `SIGKILL` leaves the text console visible and taking keyboard input, on both architectures
-- [ ] tag `v0.16.0`
+- [ ] tag `phase-16` and cut the next release
 
 ### 16.1 Display abstraction
 - [ ] a `Display` with a mode list, current mode, and framebuffer access
 - [ ] the Limine framebuffer as the fallback, always available
 - [ ] mode setting where the hardware supports it
 - [ ] multiple outputs with positions, because a second monitor should not be a rewrite
+- [ ] outputs added and removed at runtime: a new output gets a mode and a position, and surfaces on a removed output move to one that remains; exercised under QEMU with a two-head virtio-gpu (`max_outputs=2`): the harness sets the second head's size to zero and back through QEMU's D-Bus display (`-display dbus`, `org.qemu.Display1.Console.SetUIInfo`), and virtio-gpu raises its display-config event; the CI runners' QEMU is checked for the D-Bus display before this lands, and the test skips with that reason where QEMU lacks it
+- [ ] an output change reported as Linux reports it, a `change` uevent with `HOTPLUG=1` on a `NETLINK_KOBJECT_UEVENT` socket, after which clients re-read the connectors; the socket is in the `AF_NETLINK` family §15.7 also uses, built by whichever lands first
 - [ ] vsync and page flipping, so tearing is fixable rather than inherent
 - [ ] the text console double-buffered through the display abstraction, which closes §5.1's parked box
 - [ ] a pixel format abstraction that is not hardcoded to BGRX
-- [ ] the `Display` exposed to userspace as a devfs node (DRM/KMS-shaped): the mode list, and mode set where the hardware supports it, through the §13.9 `ioctl` registry; scanout buffers the compositor maps with `mmap` as a device mapping (write-combining, not page-cache frames); page flip; and vblank events that wake `ppoll` and `epoll` (§13.6)
-- [ ] one owner of the display at a time: while a process holds it, the kernel text console stops drawing to the scanout; when the holder closes the node or exits, the kernel restores the console's mode and redraws it, so a crashed compositor leaves a usable console
+- [ ] the `Display` exposed to userspace as `/dev/dri/card<N>`, character device 226:<N>, which libdrm checks, with Linux's DRM uapi for the KMS subset it supports, through the §13.9 `ioctl` registry: `DRM_IOCTL_VERSION`, `GET_CAP`, `SET_CLIENT_CAP`, and the `DRM_IOCTL_MODE_*` calls for resources, connectors, encoders, CRTCs, planes, and properties; atomic commit (`MODE_ATOMIC`, with `TEST_ONLY`) with the property blobs its `MODE_ID` takes (`MODE_CREATEPROPBLOB`, `MODE_DESTROYPROPBLOB`), and legacy `SETCRTC` and `PAGE_FLIP` implemented over it, as Linux's helpers do. Ioctl numbers and struct layouts are host-tested against Linux's uapi headers on both architectures, and the subset, with the reason for each omission, is recorded in `docs/`
+- [ ] dumb buffers (`MODE_CREATE_DUMB`, `MODE_MAP_DUMB`, `MODE_DESTROY_DUMB`), wrapped as framebuffers by `MODE_ADDFB2` and released by `MODE_RMFB`, that the compositor maps with `mmap` as a device mapping, not page-cache frames (cacheable on virtio-gpu, whose host reads the guest-RAM backing through a cacheable mapping, so a write-combining alias would go stale on aarch64 under KVM or HVF), and exports and imports as dma-buf file descriptors (`PRIME_HANDLE_TO_FD`, `PRIME_FD_TO_HANDLE`; the import is how §16.3's fullscreen bypass scans out a client's buffer); page-flip and vblank events read from the file descriptor, which wake `ppoll` and `epoll` (§13.6)
+- [ ] one owner of the display at a time, as Linux's DRM master: the first process to open the primary node while it has no master becomes master, as `modetest` expects, and `SET_MASTER` and `DROP_MASTER` move it; while a process holds it, the kernel text console stops drawing to the scanout; when the holder drops master, closes the node, or exits, the kernel restores the console's mode and redraws it, so a crashed compositor leaves a usable console
 - [ ] the harness captures the framebuffer with QEMU's `screendump` over the monitor and compares it against a checked-in reference image with a stated per-pixel tolerance; a mismatch writes a diff image and fails the test, on both architectures
 
 ### 16.2 GPU
 - [ ] virtio-gpu 2D: resource creation, transfer, `set_scanout`, flush
 - [ ] virtio-gpu cursor plane, which is worth it for the latency alone
 - [ ] EDID for mode discovery
-- [ ] the `Display` and buffer interfaces admit a 3D backend ([Beyond](#beyond)) without changing clients: each buffer carries a type and a completion fence, and a stub second backend builds against the interface
+- [ ] the `Display` and buffer interfaces admit a 3D backend ([Phase 33](#phase-33-gpu-acceleration)) without changing clients: each buffer carries a type and a completion fence, and a stub second backend builds against the interface
 - [ ] a software rasterizer good enough that 3D is optional: lines, rects, blits, alpha, text
 
 ### 16.3 Compositor
@@ -1551,9 +1774,10 @@ aarch64 and works on x86_64 too. virtio-gpu is shared.
 - [ ] the frame loop must not depend on client responsiveness; a hung client freezing the desktop is the failure mode to design against
 
 ### 16.4 Input
-- [ ] an input event abstraction: keyboard, pointer, and touch, with timestamps
+- [ ] an input event abstraction: keyboard, pointer, and touch, with timestamps, in Linux's event types and codes (`input-event-codes.h`), so the evdev nodes below translate nothing
 - [ ] PS/2 mouse on x86_64, and virtio-input keyboard and pointer on both architectures; USB HID arrives through §20.3 into this same abstraction
-- [ ] input devices exposed to userspace as devfs event nodes carrying the timestamped events above, read with `read` and waited on with `ppoll`/`epoll`; an exclusive grab stops the §13.7 console TTY consuming keyboard and pointer input while it is held, serial input is unaffected, and the grab drops when the holder closes the node or exits
+- [ ] input devices exposed to userspace as Linux evdev nodes, `/dev/input/event<N>` (character device 13:64+<N>): `struct input_event` records framed by `EV_SYN`, and `EVIOCGVERSION`, `EVIOCGID`, `EVIOCGNAME`, `EVIOCGPHYS`, `EVIOCGUNIQ` (`ENOENT` for a device with none), `EVIOCGPROP`, `EVIOCGBIT`, `EVIOCGABS`, `EVIOCGKEY`, `EVIOCGLED`, `EVIOCGSW`, `EVIOCGREP`, and `EVIOCSCLOCKID`, which libevdev's `libevdev_set_fd` needs, with ioctl numbers and layouts host-tested against Linux's uapi headers; read with `read` and waited on with `ppoll`/`epoll`
+- [ ] `EVIOCGRAB` as the exclusive grab: while it is held, the §13.7 console TTY stops consuming keyboard and pointer input, serial input is unaffected, and the grab drops when the holder closes the node or exits
 - [ ] event routing: pointer to the surface under the cursor, keyboard to the focused surface
 - [ ] focus policy, grabs, and click-to-focus
 - [ ] keyboard layout handling with dead keys and compose, which is more work than it looks
@@ -1561,13 +1785,14 @@ aarch64 and works on x86_64 too. virtio-gpu is shared.
 - [ ] repeat rate and delay
 
 ### 16.5 Display protocol
-- [ ] a client-server protocol over a Unix socket, with buffer sharing through shared memory or dma-buf-equivalent
+- [ ] a client-server protocol over a Unix socket, with buffer sharing through `memfd_create` shared memory (§13.4) or dma-buf file descriptors from §16.1
 - [ ] surface lifecycle, commit semantics, and damage submission
+- [ ] outputs announced to clients with their position, mode, and integer scale, including their arrival and removal at runtime (§16.1); clients submit buffers at an output's scale, and the protocol leaves room for a fractional scale
 - [ ] input event delivery
 - [ ] window management: title, class, minimum and maximum size, state
 - [ ] clipboard and drag and drop
 - [ ] the protocol documented in `docs/` before implementation, since two implementations must agree
-- [ ] the protocol document maps each request to its Wayland counterpart or says why none exists (Wayland compatibility is in [Beyond](#beyond))
+- [ ] the protocol document maps each request to its Wayland counterpart or says why none exists, and records whether the wire format is Wayland's; Wayland compatibility is Phase 36
 
 ### 16.6 Window management and toolkit
 - [ ] window decorations, or a client-side decoration protocol
@@ -1591,7 +1816,8 @@ aarch64 and works on x86_64 too. virtio-gpu is shared.
 
 ## Phase 17: Self-hosting Toolchain
 
-**Goal.** vibeOS compiles vibeOS. Check out the source on the machine, build it, boot the result.
+**Goal.** vibeOS compiles vibeOS. Check out the source on the machine, build it, boot the result. The
+compilers are upstream Linux builds run unmodified (§17.7); rebuilding them from source is Phase 24.
 
 **Unlocks.** The claim. Also a genuinely brutal test of the POSIX surface, since compilers exercise
 everything.
@@ -1600,14 +1826,15 @@ everything.
 native builds is in [Beyond](#beyond).
 
 **Exit gate**
-- [ ] a C compiler runs on vibeOS and produces working binaries
-- [ ] `rustc` runs on vibeOS
+- [ ] clang and lld from the §17.7 image run on vibeOS unmodified and produce working binaries
+- [ ] the pinned nightly's `rustc` and `cargo` from the §17.7 image run on vibeOS unmodified
 - [ ] the vibeOS source tree builds on vibeOS into a bootable ISO
-- [ ] that ISO boots and rebuilds itself for two generations, and the loop script's comparison reports the first- and second-generation ISOs byte-identical (§17.5)
-- [ ] `make test` runs on vibeOS, itself a guest under QEMU with KVM: the harness on §17.6's CPython drives §17.6's QEMU under TCG and reports results the same way CI does; the on-hardware run is in §20.8
+- [ ] that ISO boots and rebuilds itself for two generations, and the loop script's comparison reports the first- and second-generation ISOs byte-identical (§10.2, §17.5)
+- [ ] `make check` passes and `make test` runs on vibeOS, itself a guest under QEMU with KVM: the harness on §17.6's CPython drives §17.6's QEMU under TCG and reports results the same way CI does; the on-hardware run is in §20.8
 - [ ] the loop runs on aarch64 as well as x86_64, and each architecture can cross-build the other
 - [ ] the whole loop is scripted, not a sequence of manual steps someone remembers
-- [ ] tag `v0.17.0`
+- [ ] unmodified `gdb` and `strace` from the §17.7 image debug and trace a multithreaded C program on both architectures: a breakpoint, a backtrace, a single step, a hardware watchpoint, and `strace -f` across `clone`
+- [ ] tag `phase-17` and cut the next release
 
 ### 17.1 POSIX completeness
 - [ ] audit against what a real toolchain needs, and close the gaps rather than guessing
@@ -1618,32 +1845,25 @@ native builds is in [Beyond](#beyond).
 - [ ] a large-file test, since compilers write big object files and every off-by-one shows up there
 
 ### 17.2 C toolchain
-- [ ] port `tcc` first: small, self-hosting, and a fast way to prove the environment works
-- [ ] an assembler and linker, either ported or written, with ELF output and relocation support
-- [ ] `ar`, `nm`, `objdump`, `strip`, `readelf`
-- [ ] then clang and LLVM, which is a large port and mostly a matter of the C++ standard library and filesystem behavior
-- [ ] `make`, and enough of `sh` and `awk` for configure scripts to survive
-- [ ] `cmake` and `ninja`, which most real projects assume
+- [ ] clang and lld from the §17.7 image, run unmodified, with `musl-dev`'s headers and crt objects from Alpine's `build-base`; rebuilding them from source on vibeOS is Phase 24
+- [ ] `llvm-objdump` and `llvm-nm`, which the build calls, from the pinned nightly's `llvm-tools`, and `llvm-ar`, `llvm-strip`, and `llvm-readelf` from Alpine's LLVM, all in the §17.7 image
+- [ ] `make`, `sh`, and `awk` from the §17.7 image, enough that an autoconf `configure` script runs to completion
+- [ ] `cmake` and `ninja` from the §17.7 image, which most real projects assume
 
 ### 17.3 Rust toolchain
-- [ ] a `std` port: `x86_64-unknown-vibeos` and `aarch64-unknown-vibeos`, with the `sys` layer implemented over our syscalls
-- [ ] thread, file, socket, process, and time support in `std`
-- [ ] `rustc` running on vibeOS, which requires LLVM working first
-- [ ] the kernel uses nightly features (`abi_x86_interrupt`, `alloc_error_handler`), so the on-device `rustc` is the pinned nightly, bootstrapped for the `*-unknown-vibeos` host triples from a patch set carried in-tree until the targets are upstream
-- [ ] `cargo`, which requires networking (Phase 15), TLS (§15.11), and git (§17.4), with an offline vendored mode for the build loop
-- [ ] a cross-compiled bootstrap first, then a native build, in that order
-- [ ] the kernel itself builds on-device for `x86_64-unknown-none` and `aarch64-unknown-none-softfloat`, with no `build-std`
+- [ ] `cargo` fetches the registry and git dependencies over Phase 15's TCP, with the TLS and libgit2 it links itself and the CA bundle in Alpine's minirootfs; the build loop itself runs offline from `cargo vendor` output (§17.7)
+- [ ] the kernel itself builds on-device for `x86_64-unknown-none` and `aarch64-unknown-none-softfloat`, with no `build-std`; the user crate builds for its bare targets, and hostlib's tools for the Linux musl host triple, where they run like any other Linux binary
 
 ### 17.4 Development environment
-- [ ] a git implementation or port, enough for clone, commit, branch, and push
-- [ ] a real editor, ported rather than written
-- [ ] a debugger: `ptrace`, breakpoints, single stepping, symbol and DWARF reading; register writes go through the §13.8 context validation
+- [ ] `git` from the §17.7 image, unmodified: clone, commit, branch, and push over HTTPS on Phase 15's TCP, through Alpine's libcurl and OpenSSL rather than §15.11's TLS
+- [ ] `vim` from the §17.7 image, unmodified, on the serial console and over §15.8's `sshd`
+- [ ] the debugger interface is Linux's `ptrace`, so `gdb` from the §17.7 image runs unmodified: `TRACEME`, `ATTACH`, `SEIZE`, `INTERRUPT`, `LISTEN`, `SETOPTIONS`, `PEEKDATA` and `POKEDATA`, `GETREGSET` and `SETREGSET` with `NT_PRSTATUS` and `NT_PRFPREG` (plus `NT_X86_XSTATE` on x86_64 and `NT_ARM_TLS` on aarch64), `GETREGS`, `SETREGS`, `GETFPREGS`, and `SETFPREGS` on x86_64, where gdb uses them, `CONT`, `SYSCALL`, `SINGLESTEP`, `GETEVENTMSG`, `GETSIGINFO`, `KILL`, and `DETACH`, and the `TRACESYSGOOD`, `TRACECLONE`, `TRACEFORK`, `TRACEVFORK`, `TRACEVFORKDONE`, `TRACEEXEC`, `TRACEEXIT`, and `EXITKILL` options, since `SEIZE` refuses an option it does not know and `strace -f` sets `TRACEVFORK`; `ATTACH` and `SEIZE` pass Linux's credential and dumpable checks (§13.9), and register writes go through the §13.8 context validation
+- [ ] hardware breakpoints and watchpoints for the tracer: the debug registers through `PEEKUSER` and `POKEUSER` on x86_64, `NT_ARM_HW_BREAK` and `NT_ARM_HW_WATCH` on aarch64; the tracee's memory read and written through `/proc/<pid>/mem` and `/proc/<pid>/task/<tid>/mem`, where gdb writes its breakpoints, and read through `process_vm_readv`
 - [ ] virtio-fs or 9p to mount the host checkout, so the build loop does not start by copying the tree into an image
-- [ ] `strace`-equivalent, which the kernel syscall tracing already mostly provides
+- [ ] `strace` from the §17.7 image, unmodified, over the same `ptrace` with `PTRACE_GET_SYSCALL_INFO`, following threads and children with `-f`
 
 ### 17.5 The loop
 - [ ] a build script that goes from a clean checkout to a bootable ISO on vibeOS
-- [ ] a deterministic kernel, initrd, and ISO build: `SOURCE_DATE_EPOCH` honored by `mkinitrd` and the ISO writer, fixed volume and GPT GUIDs, staged file times pinned, `--remap-path-prefix` for rustc, sorted inputs; two builds of one tree on the host are byte-identical in CI before the loop depends on it
 - [ ] a second-generation build, compared byte for byte against the first by the loop script
 - [ ] the test suite running on-device
 - [ ] timings recorded, because "it works" and "it works in under an hour" are different claims
@@ -1652,11 +1872,22 @@ native builds is in [Beyond](#beyond).
 ### 17.6 Build and test dependencies
 Everything the build and the harness run on the host today must run on vibeOS.
 
-- [ ] CPython, since the harness, `scripts/gen_ksyms.py`, and the `scripts/check_*.py` guards are Python; the port is also a hard test of the POSIX surface
-- [ ] `xorriso`, or an ISO writer in hostlib alongside `mkinitrd`, and the Limine host tool built with the §17.2 toolchain
-- [ ] the LLVM binary tools the build calls (`llvm-objdump`, `llvm-nm`), from the §17.2 LLVM port
-- [ ] QEMU, ported and running under TCG, since vibeOS has no hypervisor until Phase 21; the harness gains a backend for the §21.2 VMM when that lands
+- [ ] CPython from the §17.7 image, since the harness, `scripts/gen_ksyms.py`, and the `scripts/check_*.py` guards are Python; running it is also a hard test of the POSIX surface
+- [ ] `xorriso` from the §17.7 image, and the Limine host tool built on vibeOS with §17.2's clang
+- [ ] QEMU and the OVMF and aarch64 edk2 firmware that the §10.2 probe locates, from the §17.7 image, running under TCG, since vibeOS has no hypervisor until Phase 21; the harness gains a backend for the §21.2 VMM when that lands
 - [ ] harness timeouts scaled for nested TCG, set once in the `VIBEOS_*` reader rather than per test
+
+### 17.7 Upstream toolchains first
+The loop closes first on toolchains their upstream projects already build for Linux, run unmodified
+through §13.10 and §14.9. All of them are musl-hosted, so glibc (Phase 23) stays off this path. Rebuilding
+them from source on vibeOS is Phase 24, and this phase does not wait for it. Every compiler, linker, and
+test tool in the loop still runs on vibeOS.
+
+- [ ] the pinned nightly's `rustc` and `cargo`, the `rustfmt`, `clippy`, `llvm-tools`, and `rust-src` components that `make check` and the build use, and `rust-std` for the host and for `x86_64-unknown-none`, `aarch64-unknown-none-softfloat`, and `aarch64-unknown-none`, as rust-lang publishes them for the `<arch>-unknown-linux-musl` host (Tier 2 with host tools on both architectures), run on vibeOS under §14.9's musl. The pin stays a nightly because the kernel uses nightly features (`abi_x86_interrupt`, `alloc_error_handler`); whether a `*-unknown-vibeos` target exists is Phase 24's decision
+- [ ] a `vibeos-build` disk image holding that toolchain, the §14.9 mirror packages §17.2, §17.4, and §17.6 name, a `cargo vendor` tree for the workspace, and the §14.10 source archives the build reads (musl and compiler-rt for `make sysroot`), pinned by hash, built once by the host and cached in CI, so the on-device loop begins with neither a package install nor a download
+- [ ] `cargo build --offline` from that image, with `flock` and `fcntl` locks (§13.9) held across parallel builds, and `-j` equal to the guest's CPU count
+- [ ] no upstream binary is patched, wrapped, or `LD_PRELOAD`ed to run; each workaround is a kernel fix with a regression test in the cheapest tier that catches it
+- [ ] `docs/UPSTREAM.md` lists every upstream bug hit (Limine, QEMU, edk2, musl, Alpine, rustc, LLVM), each with a link to the upstream issue or patch
 
 ---
 
@@ -1667,10 +1898,13 @@ The parts that separate a working system from a serious one.
 Phases 18 and 19 are independent of each other and run under QEMU. Phase 20 needs both architectures
 from 11, the drivers from 7 and 15, and §16.4's input abstraction, which USB HID delivers into. It also
 takes the lines only hardware can close: deeper C-states, frequency scaling, and measured power extend
-the §19.6 idle path, and NVMe polling follows §19.8, so Phase 20 needs those two sections of 19. Phase 21
-needs 20 for its test environment, 18 for the access control and resource limits its containers build on
-(§18.6), and 19 for the §19.3 benchmarks in its gate and the §19.4 group scheduling behind its
-cgroup-equivalent. Phase 22 needs everything.
+the §19.6 idle path, NVMe polling follows §19.8, aarch64 NUMA takes §19.7's code path, and §20.8's
+hardware-event flamegraph uses §19.2's sampling, so Phase 20 needs those four sections of 19. Its
+interrupt routing above APIC ID 254, its IORT parsing of the SMMUv3, and §20.9's `q35` harness machine
+all build on §18.1, so it needs that section of 18. Phase 21 needs 20 for its test environment; 18 for
+the capabilities, `seccomp`, mount namespaces, and resource limits its containers build on (§18.6) and
+the KCOV coverage its hostile-guest fuzzer steers by (§18.5); and 19 for the §19.3 benchmarks in its
+gate and the §19.4 group scheduling behind its cgroups. Phase 22 needs 18 to 21.
 
 ## Phase 18: Hardening
 
@@ -1681,21 +1915,27 @@ Phase 21's containers and Phase 22's users both are.
 
 **Architectures.** Both, except the `FSGSBASE` gate line and its §18.3 box, which are x86_64 only:
 aarch64 keeps the kernel's per-CPU base in a register EL0 cannot write (§11.4), so it has no `swapgs`
-hazard. The `LDTR`/`STTR` box in §18.3 is aarch64 only. SMEP, SMAP, and UMIP landed with S1 (§9.1),
-their fault tests with §10.6, and PAN and PXN in §11.6. Control-flow integrity (CET, pointer
-authentication, BTI) is the per-architecture stretch in §18.9.
+hazard. The `LDTR`/`STTR` box in §18.3 is aarch64 only, and so are the MTE box in §18.4 and its gate
+line: x86_64 has no shipping equivalent. Interrupt remapping in §18.1 is x86_64 only, since the GICv3
+ITS already binds each MSI to its device ID, and so is the RMRR/IVMD box, whose regions come from x86
+ACPI tables. SMEP, SMAP, and UMIP landed with S1 (§9.1), their fault
+tests with §10.6, and PAN and PXN in §11.6. Control-flow integrity (CET, pointer authentication, BTI) is
+the per-architecture stretch in §18.9.
 
 **Exit gate**
 - [ ] kernel `.text` read-only and executable, `.rodata` read-only and NX, `.data` NX, verified at runtime
-- [ ] KASLR active on both architectures, and a crash dump still symbolizes correctly
+- [ ] KASLR active on both architectures, and a deliberate panic's backtrace and the §10.7 core tool's report from a `hang_test` core both still symbolize correctly
 - [ ] `FSGSBASE` enabled; an in-guest test sets the user GS base to a kernel-half value and enters the NMI, `#DB`, and `#MC` handlers from kernel mode with that base live, and on a 2-CPU guest runs a syscall loop while the other CPU sends NMI IPIs; in every case the handlers find this CPU's `PerCpu` and the user's value survives
-- [ ] every speculation mitigation the kernel reports enabled at boot has a measured-cost entry in `docs/`, measured under KVM in a 2-vCPU, 512 MiB guest on each architecture; a harness test compares the boot log's list against the document
-- [ ] a syscall fuzzer accumulates at least 24 hours of fuzzing per architecture each week on the weekly schedule, in shards of at most 5 hours (a GitHub-hosted job stops at 6), each in a 2-CPU, 512 MiB guest under TCG, without a kernel panic; the job summary records the total, and every crash becomes a replayed regression test (§18.5)
-- [ ] KASAN builds pass the full test suite
-- [ ] a DMA outside a device's mapped buffers faults instead of landing, under the §18.1 IOMMU on both architectures
-- [ ] a sandboxed process cannot reach the filesystem or network outside its policy, tested
+- [ ] every speculation mitigation the kernel reports enabled at boot has a measured-cost entry in `docs/`, measured in a 2-vCPU, 512 MiB guest under KVM on x86_64 and under HVF on the aarch64 dev host; a harness test compares the boot log's list against the document
+- [ ] syzkaller with KCOV coverage (§18.5) accumulates at least 24 hours of fuzzing per architecture each week on the weekly schedule, in shards of at most 5 hours (a GitHub-hosted job stops at 6) that carry one corpus, each guest 2 CPUs and 512 MiB under TCG, with no open crash; the job summary records the total and the corpus coverage per subsystem, and every crash becomes a replayed regression test (§18.5)
+- [ ] the §12.1 KASAN build passes the full test suite, userspace included, on both architectures
+- [ ] with the §18.1 IOMMU on, QEMU's `edu` device programmed to DMA outside its mapped buffer is stopped and reported with the device and address, under `intel-iommu` and `amd-iommu` on `q35` and `iommu=smmuv3` on aarch64 `virt`; the virtio-blk and virtio-net in-guest tests pass through each
+- [ ] a process confined by a `seccomp` filter, a mount namespace under `pivot_root`, `PR_SET_NO_NEW_PRIVS`, and an empty capability set cannot open a file outside its new root, create a socket of a family its filter denies, or regain a capability by executing a set-user-ID binary; an in-guest test tries each on both architectures
 - [ ] `docs/THREAT_MODEL.md` has the parts §18.8 names; `scripts/check_threat_model.py` in `make check` fails when a part is missing, or when a known open escalation path does not link to an open box or a [Beyond](#beyond) entry
-- [ ] tag `v0.18.0`
+- [ ] libseccomp's live tests and the kselftest `seccomp_bpf` program, built static from pinned sources in the §13.11 Alpine container and cached by source hash, pass in-guest on both architectures, each with a checked-in skip list under 10% of its cases whose entries name a reason
+- [ ] the §18.4 data-race detector build runs the full in-guest ladder at `-smp 4`, under KVM on x86_64 and TCG on aarch64, reports a seeded race on a plain shared counter within 10 seconds with the sampler pinned to that counter's increment, and every other report is fixed or annotated at its site
+- [ ] aarch64 under TCG with `-machine virt,acpi=off,mte=on -cpu max`: a use-after-free and a linear overflow in the kernel heap and in a user allocation tagged through `PROT_MTE` each raise a tag-check fault naming the allocation, and the full in-guest ladder passes with tagging on
+- [ ] tag `phase-18` and cut the next release
 
 ### 18.1 Kernel memory protection
 - [ ] per-section permissions applied after boot, with the init sections freed or made NX
@@ -1703,15 +1943,21 @@ authentication, BTI) is the per-architecture stretch in §18.9.
 - [ ] the physmap NX, which is easy to get wrong and a straightforward escalation primitive
 - [ ] guard pages on every kernel stack including the IST stacks
 - [ ] a page table walker that verifies the whole address space against a policy, run as an in-guest test
-- [ ] an IOMMU behind the §6.4 translation interface: VT-d on x86_64 (a q35 harness configuration with `-device intel-iommu`, alongside the `pc` default) and SMMUv3 on aarch64 (`-machine virt,acpi=off,iommu=smmuv3`). Each device gets its own DMA domain, and virtio devices negotiate `VIRTIO_F_ACCESS_PLATFORM`
+- [ ] an IOMMU behind the §6.4 translation interface: VT-d and AMD-Vi on x86_64 (a q35 harness configuration, alongside the `pc` default, with `-device intel-iommu,intremap=on` or `-device amd-iommu,intremap=on,pt=off`, plus `dma-remap=on` on QEMU releases that have it, since otherwise QEMU's amd-iommu passes DMA through untranslated; `kernel-irqchip=split` under KVM) and SMMUv3 on aarch64 (`-machine virt,acpi=off,iommu=smmuv3`). Each device gets its own DMA domain, and virtio devices, started with `iommu_platform=on` so QEMU offers `VIRTIO_F_ACCESS_PLATFORM`, negotiate it; without it their DMA bypasses the IOMMU
+- [ ] the DMAR and IVRS tables and the device tree's `iommu-map` parsed in the portable half, host-tested and fuzzed like the other firmware tables; IORT, which describes SMMUv3 on ACPI machines, arrives with §20.7
+- [ ] devices that cannot be isolated from each other (behind a bridge without ACS, or sharing a requester ID) share a domain, and the grouping is recorded, since device assignment works by group
+- [ ] the reserved regions named by DMAR's RMRRs and IVRS's IVMD blocks mapped into their devices' domains, since integrated graphics and USB legacy emulation DMA into them
+- [ ] a translation fault reported with the device, address, and access kind, counted per device, and passed to the driver, which resets its device rather than hanging
+- [ ] IOTLB invalidation in strict and batched modes, each measured on virtio-blk and virtio-net throughput with the IOMMU on and off, on the §10.1 KVM leg and under HVF on the dev host; the default is chosen from the numbers, which are recorded in `docs/`
+- [ ] interrupt remapping on VT-d and AMD-Vi, so a device cannot forge an MSI to an arbitrary vector: an in-guest test has the `edu` device write an MSI whose remapping entry was never programmed, and no interrupt arrives. §20.1 routes to APIC IDs above 254 through it
 
 ### 18.2 KASLR
 - [ ] the kernel linked as a static PIE on both architectures. On x86_64, drop the `relocation-model=static` and `-no-pie` rustflags, since PIE is the built-in target's default and Limine keeps the slid image inside the top 2 GiB the `kernel` code model needs. On aarch64, pass `-C relocation-model=pie` and `-C link-arg=-pie` explicitly. `-znorelro` stays. §0.1 and the rustflags paragraph in DESIGN §1 are updated in the same commit
 - [ ] `kaslr: yes` in `limine.conf`, written explicitly because Limine's default changed across major versions, so Limine picks the slide and applies the relocations before `_start`; the kernel takes its base from `BootInfo` and never computes one
 - [ ] the slide's entropy named as a deliberate gap in the threat model: Limine seeds from `RDSEED`/`RDRAND` and the TSC on x86_64, but only from the generic counter on aarch64, where `RNDR` is optional and absent on Apple M-series, Cortex-A76, and Neoverse N1
 - [ ] randomized physmap and KVA region bases, drawn from the same boot-time sources
-- [ ] the slide (`BootInfo`'s kernel base minus the link base) recorded; ksyms and the backtrace subtract it, so a crash dump symbolizes, and it is not otherwise exposed
-- [ ] user address space randomization: stack, heap, and mmap bases, drawn from the §14.7 pool
+- [ ] the slide (`BootInfo`'s kernel base minus the link base) recorded; ksyms and the backtrace subtract it, so a crash dump symbolizes, and it is not otherwise exposed inside the guest; when QEMU's `vmcoreinfo` device is present the kernel writes it in a VMCOREINFO note (`KERNELOFFSET=`), which `dump-guest-memory` puts in the harness's cores, so the §10.7 core tool finds it
+- [ ] user address space randomization: stack, heap, mmap, and vDSO bases, and the `ET_DYN` load biases of §13.10 and §14.2, drawn from the §14.7 pool
 
 ### 18.3 CPU features
 
@@ -1724,26 +1970,33 @@ S1 turned SMEP, SMAP, UMIP, and `CR0.WP` on at boot (`arch::cpu::harden`). §10.
 
 ### 18.4 Stack and memory safety
 - [ ] stack canaries in both kernel and userspace
-- [ ] `FORTIFY`-equivalent checks in libc
+- [ ] `_FORTIFY_SOURCE` for the C userspace through `fortify-headers`, as Alpine does, since musl has no fortify layer of its own
 - [ ] a hardened `malloc`: guard pages, delayed reuse, randomized placement, double free detection
-- [ ] a KASAN build with a shadow map, red zones, and quarantined frees
-- [ ] a checked kernel build (`-C overflow-checks=on -C debug-assertions -Zub-checks=yes`, since rustc has no UBSAN) passing the full suite on both architectures; Miri over the portable crate's host tests; musl and the C userspace built with `-fsanitize=undefined -fsanitize-trap=undefined`, trap mode because no UBSan runtime exists on vibeOS
+- [ ] the §12.1 KASAN build run over the full test suite, userspace included, on both architectures, with the kernel-side buffer of every §10.6 user copy checked explicitly, since the copy itself is assembly the compiler does not instrument
+- [ ] a checked kernel build (`-C overflow-checks=on -C debug-assertions -Zub-checks=yes`, since rustc has no UBSAN) passing the full suite on both architectures; musl and the C userspace built with `-fsanitize=undefined -fsanitize-trap=undefined`, trap mode because no UBSan runtime exists on vibeOS; Miri over the portable crate's host tests is §10.8
 - [ ] the `unsafe` audit: every block's `// SAFETY:` reason from the standing gate reviewed against the invariant it claims, since a pile of stale one-liners is where this ends up otherwise
+- [ ] a sampling data-race detector build with no compiler instrumentation, since rustc has no ThreadSanitizer for the `*-none` targets: a build-time hostlib pass lists the kernel's plain memory-accessing instructions with their operand forms, excluding atomics and per-CPU accesses; at run time a hardware instruction breakpoint (a debug register on x86_64, a `DBGBVR`/`DBGBCR` pair on aarch64) on a sampled one fires, so kernel text is never patched; the kernel computes the address from the trapped registers, arms a hardware data watchpoint on it on every CPU, and stalls briefly
+- [ ] the detector reports both accesses with backtraces when another CPU hits the watchpoint during the stall, or when the value changed with no hit; an intentional race is annotated at its site with the reason, and only the annotation suppresses it
+- [ ] aarch64 memory tagging (MTE) as tag-based KASAN: a build that tags kernel heap and buddy allocations at the 16-byte granule, retags on free, and checks synchronously, reporting a tag-check fault like a KASAN report; `TCR_EL1.TBI1` for the kernel's tagged pointers; `PROT_MTE` and `PR_SET_TAGGED_ADDR_CTRL` for userspace with `TBI0`, and syscalls from a process that set `PR_TAGGED_ADDR_ENABLE` clear the tag byte of each user pointer before the §10.6 range check, which an in-guest test checks by passing a tagged buffer to `read`; tested under TCG with `-machine virt,acpi=off,mte=on -cpu max`, since HVF does not expose MTE
 
 ### 18.5 Fuzzing
-- [ ] a syscall fuzzer generating structured calls with valid and invalid arguments, in the weekly shards the exit gate describes; the parser-level fuzzers already run from §10.2 (every byte-slice parser, ELF included) and §15.10 (network)
-- [ ] fuzzed FAT and vibefs images mounted in-guest under the §18.4 KASAN build, on the weekly job
+- [ ] Linux's KCOV ABI: the kernel built with SanitizerCoverage `trace-pc` instrumentation (`-C passes=sancov-module` with `-sanitizer-coverage-level=3` and `-sanitizer-coverage-trace-pc` through `-C llvm-args`), `kcov` in a `debugfs` mounted at `/sys/kernel/debug`, with `KCOV_INIT_TRACE`, `KCOV_ENABLE`, and `KCOV_DISABLE`, and a per-thread buffer the fuzzer maps; the §13.13 fuzzer reads the same buffer as its coverage signal. PCs are recorded with the §18.2 slide subtracted, as Linux's are. The `__sanitizer_cov_trace_pc` callback is written in `global_asm!`, so it is not itself instrumented, and records only in thread context for a thread that enabled KCOV, doing nothing before per-CPU data exists
+- [ ] syzkaller's `linux` target runs against vibeOS with `sandbox: none`, an `enable_syscalls` list generated from the §10.5 table, and its Linux-only features off; its executor is built static on the Linux host and runs unmodified. A `vibeos` target is written only if that fails, and this line records which
+- [ ] syzkaller's QEMU backend boots a build with KCOV and the §12.1 KASAN on both architectures and reaches the guest through the §15.8 `sshd`, including its file copy with legacy-protocol `scp -O`, which runs an `scp` sink in the guest; the C reproducer syzkaller writes for every crash is checked in and replayed by the user test runner
+- [ ] a hostlib tool maps the corpus's KCOV program counters to source files through the kernel ELF's line table and reports coverage per subsystem on every run, so a subsystem the fuzzer never reaches is visible
+- [ ] syzkaller is the weekly campaign, in the shards the exit gate describes, with one corpus artifact carried from shard to shard; the §13.13 fuzzer stays on the nightly job, and the parser-level fuzzers run from §10.2 (every byte-slice parser, ELF included) and §15.10 (network)
+- [ ] fuzzed FAT and vibefs images mounted in-guest under the §12.1 KASAN build, on the weekly job
 - [ ] malformed packets injected through the §15.10 interface into a running stack under KASAN, on the weekly job
 - [ ] malformed ELF files exec'd in-guest under KASAN, each refused with an error and none panicking the kernel
-- [ ] coverage-guided where feasible, with crash reproduction as a checked-in test case
 - [ ] every crash found becomes a regression test, without exception
 
 ### 18.6 Access control
-- [ ] uid and gid actually enforced: file permissions, ownership, the privilege check on the `set*id` calls (§13.9), and the set-user-ID and set-group-ID bits on `execve`, with `AT_SECURE` set for them
-- [ ] capability-style privilege splitting rather than a single root bit
-- [ ] a syscall filter, `seccomp`-shaped, per process
-- [ ] mount namespaces and a `pivot_root`-equivalent
-- [ ] resource limits enforced: memory, descriptors, processes, CPU time
+- [ ] the §13.9 permission checks audited: a generated in-guest test calls every syscall that takes a path, a descriptor, or a pid as an unprivileged user against an object that user may not use, and expects `EACCES` or `EPERM`
+- [ ] capability-style privilege splitting through Linux capabilities: `capget` and `capset`, the permitted, effective, inheritable, bounding, and ambient sets with Linux's `execve` rules, and every §13.9 privilege check naming the capability it needs, so uid 0 holds the full set rather than bypassing the checks; the `prctl` controls libcap sets them through: `PR_CAPBSET_READ`, `PR_CAPBSET_DROP`, `PR_CAP_AMBIENT`, `PR_SET_KEEPCAPS`, and `PR_SET_SECUREBITS`
+- [ ] the syscall filter is Linux's `seccomp`: `SECCOMP_SET_MODE_STRICT`, and `SECCOMP_SET_MODE_FILTER` with a classic BPF program over `struct seccomp_data` (whose `arch` is `AUDIT_ARCH_X86_64` or `AUDIT_ARCH_AARCH64`) checked by seccomp's own validator (aligned 32-bit loads inside `struct seccomp_data`, no socket-filter ancillary loads) and then run on the classic BPF interpreter behind §15.7's `SO_ATTACH_FILTER`; `SECCOMP_RET_KILL_PROCESS`, `KILL_THREAD`, `TRAP`, `ERRNO`, `TRACE` (a `PTRACE_EVENT_SECCOMP` stop through §17.4's `ptrace`, which gains `PTRACE_O_TRACESECCOMP` here), `LOG`, and `ALLOW`; filters inherited across `fork` and `clone` and kept across `execve`; `PR_SET_NO_NEW_PRIVS`, which a filter installed without `CAP_SYS_ADMIN` requires
+- [ ] the rest of the interface libseccomp probes for and the kselftest `seccomp_bpf` program covers: `prctl(PR_SET_SECCOMP)` and `PR_GET_SECCOMP` beside the `seccomp()` call; `SECCOMP_FILTER_FLAG_TSYNC`, `FLAG_LOG`, and `FLAG_NEW_LISTENER` with `SECCOMP_RET_USER_NOTIF` and the `SECCOMP_IOCTL_NOTIF_RECV`, `SEND`, `ID_VALID`, and `ADDFD` ioctls; `SECCOMP_GET_ACTION_AVAIL` and `SECCOMP_GET_NOTIF_SIZES`
+- [ ] mount namespaces through `unshare(CLONE_NEWNS)` and `clone(CLONE_NEWNS)`, and `pivot_root`, as Linux defines them; `setns`, `/proc/<pid>/ns/*`, and the other namespaces are §21.5
+- [ ] resource limits enforced through §13.9's `prlimit64`: `RLIMIT_AS`, `RLIMIT_DATA`, `RLIMIT_STACK`, `RLIMIT_NPROC`, `RLIMIT_FSIZE` with `SIGXFSZ`, `RLIMIT_CPU` with `SIGXCPU`, and `RLIMIT_MEMLOCK` over §12.4's `mlock`; `RLIMIT_NOFILE` is §13.9's and `RLIMIT_CORE` §13.8's
 - [ ] an audit log for privileged operations
 
 ### 18.7 Crypto and boot integrity
@@ -1751,8 +2004,8 @@ The primitives and the CSPRNG are §14.7, package signatures §14.6, and TLS §1
 boot chain.
 
 - [ ] UEFI secure boot: a signed bootloader and kernel
-- [ ] measured boot with a TPM (swtpm under QEMU on both architectures): the TPM event log is replayed, and its digests for the bootloader, kernel, initrd, and boot configuration are checked against a boot-chain manifest that the build produces and signs with §14.7's Ed25519; firmware measurements are recorded but not checked, since the build does not produce the firmware
-- [ ] full disk encryption on the §14.7 ciphers, which needs the block layer to support a transform
+- [ ] measured boot with a TPM (swtpm under QEMU on both architectures): the TPM event log is replayed, and its digests for the bootloader, kernel, initrd, and boot configuration are checked against boot-chain entries the build adds to the §14.6 signed release manifest, in the form the event log records them (for the EFI bootloader, the Authenticode image hash the firmware measures, not the file's SHA-256); firmware measurements are recorded but not checked, since the build does not produce the firmware
+- [ ] full disk encryption with AES-XTS, added to the §14.7 crate with the IEEE 1619 vectors as host tests, and the key derived from a passphrase with §14.7's Argon2id; it needs the block layer to support a transform
 
 ### 18.8 Threat model
 - [ ] `docs/THREAT_MODEL.md`: what is trusted, what is not, what is deliberately out of scope and why
@@ -1783,29 +2036,30 @@ machines.
 
 **Exit gate**
 - [ ] a flamegraph produced from a counter-overflow sampling profile on aarch64 under TCG, and from a timer-driven sampling profile on x86_64 under KVM, both in a 2-vCPU, 1 GiB guest
-- [ ] tracing captures a full request path across syscall, scheduler, and driver with correlated timestamps
+- [ ] a live §19.1 trace of a `read` that misses the page cache shows its syscall entry, the virtio-blk submission, the completion IRQ, the reader's wakeup, and the syscall exit in order on one timeline, in an in-guest test on both architectures
 - [ ] benchmarks with thresholds on the §10.1 KVM leg in a 4-vCPU, 1 GiB guest, and a regression fails that job and so blocks the phase tag
 - [ ] scheduler wakeup latency at the 99th percentile under 1 ms with a CPU-bound load of four times the core count, measured under KVM in a 4-vCPU, 1 GiB guest
 - [ ] an idle CPU takes fewer than 5 timer interrupts per second over one minute, measured under KVM in a 2-vCPU, 512 MiB guest
 - [ ] lock contention profiled; the most contended lock's spin time on the §19.3 mixed interactive workload cut by at least half, under KVM in a 4-vCPU, 1 GiB guest, with before and after numbers recorded
 - [ ] slab statistics show per-cache object counts, and buddy-lock spin time on the §19.3 allocation microbenchmark, run on every CPU of a 4-vCPU, 512 MiB guest under KVM, is at least halved by §19.9, with before and after numbers recorded
-- [ ] in a 512 MiB guest, a sequential read of a 1 GiB file leaves a hot working set resident, shown by the §19.10 refault counter
-- [ ] tag `v0.19.0`
+- [ ] in a 2-CPU, 512 MiB guest under TCG on both architectures, a 128 MiB file read three times, then a sequential read of a 1 GiB file, then the 128 MiB file again, refaults fewer than 10% of the 128 MiB file's pages, by the §19.10 refault counter
+- [ ] RCU and every lock-free structure from §19.4 and §19.5 pass their loom models on the nightly job, and each model fails its weakened variant (§10.8)
+- [ ] tag `phase-19` and cut the next release
 
 ### 19.1 Tracing
-- [ ] static tracepoints at the boundaries that matter: syscall entry and exit, scheduler switch, page fault, IRQ, block and network I/O
-- [ ] a per-CPU lock-free ring buffer with a fixed-size record
+- [ ] static tracepoints beyond §10.7's set: network transmit and receive, TCP state changes, futex wait and wake, reclaim and writeback, and signal delivery
+- [ ] the §10.7 per-CPU flight-recorder ring used as the trace buffer, with a reader that drains it live while writers run and a per-CPU count of records overwritten before they were read; the reader is in the portable half with a loom model (§10.8) of it racing a writer that wraps past it
 - [ ] dynamic enable and disable per tracepoint; the cost of a disabled tracepoint measured with the §19.3 syscall-latency microbenchmark against a build without tracepoints, and the number recorded
-- [ ] an export format a host tool can read, ideally one an existing viewer already understands
-- [ ] a userspace tracing interface so applications can emit into the same timeline
-- [ ] the timestamp source must be globally monotonic, which is the phase 2 TSC work finally paying off
+- [ ] a userspace tool that writes the live drain as §10.7's Chrome trace-event JSON, so a live trace opens in Perfetto as a core's does
+- [ ] tracefs's `trace_marker`, so applications emit into the same timeline through Linux's interface
+- [ ] timestamps globally monotonic: an in-guest test merges every CPU's records from a `-smp 4` run and finds no inversion between causally ordered events, such as an IPI's send and its receipt
 
 ### 19.2 Profiling
 - [ ] PMU setup: cycles and instructions where the host provides them, cache and branch misses on hardware that has them (checked on the §20.8 machines); where CPUID leaf 0xA or `ID_AA64DFR0_EL1.PMUVer` reports no PMU, setup skips with a registered marker, so CI and HVF still pass
 - [ ] sampling on a counter overflow interrupt with a stack walk
 - [ ] per-process and per-thread accounting
 - [ ] a flamegraph pipeline from samples to output
-- [ ] `perf`-equivalent for stat and record
+- [ ] Linux's `perf_event_open` for counting and sampling, so unmodified `perf stat` and `perf record` from the §14.9 mirror run
 - [ ] last branch records and precise event sampling where the hardware offers them
 
 ### 19.3 Benchmarks
@@ -1822,15 +2076,17 @@ machines.
 - [ ] priority inheritance for the real-time class: `FUTEX_LOCK_PI` and `FUTEX_UNLOCK_PI` over §13.5's owner field for user mutexes, and the kernel `BlockingMutex`; an in-guest inversion test (low priority holds the lock, medium priority spins, high priority waits) completes within a bound
 - [ ] load balancing: periodic first, then work stealing, measured against the periodic baseline before keeping it
 - [ ] topology awareness from CPUID on x86_64 and MPIDR plus the device tree on aarch64: prefer a sibling core, keep a thread near its cache
-- [ ] group scheduling with CPU shares and quotas: the scheduler half of the cgroup-equivalent in §21.5
+- [ ] group scheduling with CPU shares and quotas: the scheduler half of §21.5's cgroup v2 `cpu.weight` and `cpu.max`
 - [ ] latency measured under load, since the whole point is the tail and not the average
 - [ ] per-CPU TCB ownership or a sharded TCB table; timeouts per CPU (timing wheel, `TimeoutQueue` replacement already anticipated in `src/sched.rs`)
+- [ ] a lock-free structure the scheduler adds, such as a work-stealing deque or a cross-CPU wake list, lands with a loom model (§10.8) and a weakened variant the model rejects, as §19.5's queues do
 
 ### 19.5 Scalability
 - [ ] RCU for read-mostly structures: the dentry cache, the routing table, the mount table
-- [ ] seqlocks where readers dominate and writers are rare
+- [ ] RCU's read side, `synchronize`, and callback processing in the portable half, with loom models (§10.8) of a reader preempted across a grace period, a CPU entering tickless idle (§19.6) mid-grace-period, and a CPU going offline (§19.6) with callbacks queued; each model must reject a weakened variant (§10.8) that ends a grace period before a pre-existing reader exits
+- [ ] seqlocks where readers dominate and writers are rare, all through the one seqlock type the §10.8 loom model covers
 - [ ] per-CPU counters aggregated on read, instead of a shared atomic on the hot path
-- [ ] lock-free queues on the paths that need them, with a documented memory ordering argument
+- [ ] lock-free queues on the paths that need them, each with a loom model (§10.8), a weakened variant (one ordering weakened) that the model rejects, and a litmus test of its publish step in §11.7's `tests/litmus/`; DESIGN links each queue to its model instead of carrying a prose ordering argument
 - [ ] the global locks split by hash or by CPU where profiling says it matters
 - [ ] interrupt affinity rebalancing on the §6.3 table: move MSI-X and I/O APIC destinations (GIC SPIs and LPIs on aarch64) off a saturated core, measured before keeping it
 - [ ] contention measured before and after each change, with the numbers recorded
@@ -1851,7 +2107,9 @@ machines.
 - [ ] per-node statistics, because the failure mode is invisible without them
 
 ### 19.8 I/O
-- [ ] an async submission interface, `io_uring`-shaped: submission and completion rings shared with userspace
+- [ ] an async submission interface that is Linux's `io_uring`: `io_uring_setup`, `io_uring_enter`, and `io_uring_register` with Linux's SQE and CQE layouts and `mmap` offsets; opcodes added as callers need them, starting with `READ`, `WRITE`, `READV`, `WRITEV`, `FSYNC`, `OPENAT`, `CLOSE`, `STATX`, `ACCEPT`, `CONNECT`, `SEND`, `RECV`, `POLL_ADD`, and `TIMEOUT`
+- [ ] `IORING_REGISTER_RESTRICTIONS`, `IORING_SETUP_R_DISABLED`, and the `io_uring_disabled` and `io_uring_group` files under `/proc/sys/kernel`, writable by root, as Linux defines them; a `seccomp` filter never sees an opcode, so a sandbox that must stop ring operations denies `io_uring_setup`, as on Linux
+- [ ] liburing's `test/` suite, pinned, passes in-guest on both architectures with a checked-in skip list whose entries each name the missing opcode or a deliberate gap
 - [ ] zero-copy paths for network send and file read
 - [ ] `sendfile` and `splice`
 - [ ] direct I/O bypassing the page cache
@@ -1888,33 +2146,47 @@ Moved from the memory phase. §12.6 reclaims on demand, which is correct. This m
 **Goal.** Boot on physical machines of both architectures, and keep booting on them.
 
 **Unlocks.** The only honest test of everything QEMU forgives. A hardware compatibility list. Hardware
-CI, which Phases 21 and 22 assume.
+CI, which Phases 21 and 22 assume. UEFI variables and PCIe hotplug (§20.9), which §22.2's unattended
+updates and the later eras build on.
 
-**Architectures.** Both, on real machines: x86_64 in §20.1 to §20.6, aarch64 in §20.7, and hardware CI
-for each in §20.8. The agents choose the machines and state their cost; buying them is the maintainer's
-approval, since it spends money.
+**Architectures.** Both, on real machines. §20.1 is x86_64's bring-up and §20.7 aarch64's. The §20.2
+interpreter and the §20.3 to §20.6 drivers build for both, and §20.7 uses the ones its machine has. The
+suspend and idle-power gate lines are x86_64 only: they rest on ACPI S3 and `_CST`, where arm64 uses PSCI
+and `_LPI`. Hardware CI for each in §20.8. §20.9 is gated under QEMU on both, ACPI hotplug on `q35` only.
+
+**Budget.** Two physically different x86_64 machines, one of them the §20.8 x86_64 CI machine and at
+least one whose firmware offers S3 suspend; the §20.7 aarch64 server, with FEAT_NV2 because it is also
+the §20.8 aarch64 CI machine; real NVMe and SATA drives, the §20.6 NICs, and USB serial adapters; netboot,
+serial capture, and switched power for each CI machine; a power meter for the idle measurements. About
+$1,500 for the x86_64 side, and about $10,000 to $25,000 for an AmpereOne-class server (the CPU alone
+lists near $5,000), 2026 estimates to confirm before buying.
 
 **Exit gate**
 - [ ] boots from USB on at least two physically different x86_64 machines, with output on a serial adapter or the screen
 - [ ] real disk, real NIC, real USB keyboard, all functional
 - [ ] the AML interpreter parses the DSDT and SSDTs of every machine on the compatibility list, host-tested against their `acpidump` output, and `_PRT` resolves PCI interrupt routing on each
-- [ ] clean shutdown and reboot through ACPI
-- [ ] suspend to RAM and resume, with devices restored
+- [ ] clean shutdown and reboot through ACPI on x86_64 and PSCI on aarch64
+- [ ] S3 suspend and resume on the x86_64 machine whose firmware offers S3, with its disk, NIC, and USB keyboard working afterward
 - [ ] idle power measured on each x86_64 machine at the shallowest and deepest C-state, with the numbers in the compatibility list
 - [ ] a real aarch64 machine boots to the shell with a working disk and NIC
 - [ ] NVMe and AHCI drives detected and used as root on real x86 machines
 - [ ] hardware CI: one physical machine of each architecture netboots a built image nightly and reports results automatically
 - [ ] `make test` runs on vibeOS booted on the §20.8 machine of each architecture, nightly, as the Phase 17 gate does under QEMU
-- [ ] tag `v0.20.0`
+- [ ] under QEMU on both architectures (TCG, 2 vCPUs, 1 GiB), a virtio-blk disk added with `device_add` on a PCIe root port during a write workload appears under its persistent name, and one removed with `device_del` fails its in-flight I/O without a panic, through native hotplug (the §20.9 `q35` variant and aarch64 `virt`) and through ACPI hotplug on `q35`; a variable written through efivarfs reads back after a reboot under OVMF and the aarch64 edk2 build
+- [ ] tag `phase-20` and cut the next release
 
 ### 20.1 Bare metal x86_64
 - [ ] a real UEFI boot path and a real BIOS boot path, both tested on hardware rather than assumed
-- [ ] x2APIC: read `IA32_APIC_BASE.EXTD` at LAPIC enable. When firmware hands off in x2APIC mode, which may be locked, drive the LAPIC and ICR through MSRs, never clear EXTD, and never map the xAPIC MMIO page. Parse MADT types 9 and 10 alongside 0 and 4. QEMU exercises the handoff by booting OVMF with more than 255 vCPUs, which hands off in x2APIC mode
-- [ ] interrupt remapping on the §18.1 IOMMU (VT-d, AMD-Vi), so I/O APIC and MSI routes can target APIC IDs above 254; until it lands, the §6.3 affinity API keeps device interrupts on CPUs whose APIC ID is 254 or lower
+- [ ] CPU microcode updates for Intel and AMD from the vendors' published files, pinned by hash with their licenses under the §14.10 policy and loaded from the initrd: applied on the BSP before the §18.3 speculation mitigations read CPUID, and on each AP in its bring-up path; the container parsing and CPU-signature matching in the portable half, host-tested against the published files; each CPU's revision before and after logged, and recorded per machine in the compatibility list
+- [ ] x2APIC: read `IA32_APIC_BASE.EXTD` at LAPIC enable. When firmware hands off in x2APIC mode, which may be locked, drive the LAPIC and ICR through MSRs, never clear EXTD, and never map the xAPIC MMIO page. Parse MADT types 9 and 10 alongside 0 and 4. QEMU exercises the handoff by booting OVMF with more than 255 vCPUs, which hands off in x2APIC mode, under KVM or under TCG from QEMU 9.0, the first release whose TCG models x2APIC
+- [ ] no CPU cap below the x2APIC range: `MAX_CPUS` and the `u8` APIC IDs in `src/acpi.rs`, and the 64-bit online, waiter, and shootdown masks behind `MAX_IPI_CPUS` in `src/ipi.rs`, replaced by tables sized from the MADT with 32-bit APIC IDs and CPU masks sized from the CPU count, so the boot above with more than 255 vCPUs brings every CPU online; today a CPU past the 64th is dropped from the MADT table without a log line
+- [ ] PCI enumeration and the §6.1 device registry sized from what the scan finds: `MAX_SCAN` in `src/pci.rs` and `MAX_DEVICES` in `src/dev.rs` gone, since server boards and §20.9's hotplug root ports pass 64 functions; today the 65th is dropped without a log line
+- [ ] BARs above 32 MiB mapped, with the `ioremap` window sized at boot from the BAR total instead of fixed at 256 MiB (DESIGN §4.1), since real GPUs and 100GbE NICs expose larger BARs
+- [ ] I/O APIC and MSI routes to APIC IDs above 254 through §18.1's interrupt remapping, with its entries in x2APIC format (VT-d's extended interrupt mode, AMD-Vi's `XTEn`), tested on the §18.1 `q35` configuration with `eim=on` or `xtsup=on`; on a machine without a usable IOMMU, the §6.3 affinity API keeps device interrupts on CPUs whose APIC ID is 254 or lower
 - [ ] the memory map from real firmware, which is messier than QEMU's in ways that break assumptions
 - [ ] real ACPI tables, which are also messier, including vendor quirks
 - [ ] serial output over a USB adapter, and early output on the framebuffer for machines without one
-- [ ] a crash dump written somewhere persistent, since there is no host to catch it
+- [ ] a panic record, the §5.6 dump and the last log records, kept with a header and checksum in a RAM region at a physical address fixed by a §10.2 command-line option, which the frame allocator never hands out; at boot the region is checked against the Limine memory map and module placement, a conflict is logged rather than trusted, and a region whose header or checksum fails reads as empty. It is read back and logged on the next boot after a warm reset, since there is no host to catch it; tested under QEMU with a deliberate panic and the monitor's `system_reset` on both architectures, then on each compatibility-list machine. Firmware-backed stores and full memory dumps are Phase 25
 - [ ] a hardware compatibility list, honestly maintained
 
 ### 20.2 ACPI runtime
@@ -1926,8 +2198,7 @@ approval, since it spends money.
 - [ ] deeper C-states from `_CST`, with a governor choosing depth by predicted idle duration; P-states and frequency scaling from `_PSS` or CPPC; the §19.6 idle path gains both
 - [ ] idle power measured on real hardware, which is the only honest test
 - [ ] thermal zones and fan control
-- [ ] battery and AC adapter status
-- [ ] hotplug notifications, lid switch, power button
+- [ ] hotplug notifications and the power button; the lid switch is §31.2's `SW_LID`
 - [ ] `_OSI` handling and the vendor quirks that come with it
 
 ### 20.3 USB
@@ -1959,13 +2230,14 @@ Moved from Phase 7: nothing before real hardware needs either driver. QEMU `-dev
 - [ ] AHCI and NVMe validated on real drives, with real error handling
 - [ ] SMART reporting
 - [ ] real NICs: e1000e and igb, a Realtek 8168-family driver (QEMU has no model of it, so it is validated only on a compatibility-list machine that has one; it is what cheap hardware actually has), and the firmware loading some of them require
-- [ ] Intel HDA audio, so there is sound
+- [ ] USB Ethernet: the CDC-ECM and CDC-NCM class drivers, with CDC-ECM tested under QEMU's `usb-net` first, and the ASIX AX88179 family, since USB-C docks and adapters carry one and most laptops have no Ethernet port
+- [ ] Intel HDA audio, so there is sound; the rest of the audio stack is Phase 34
 - [ ] SD and eMMC for single-board machines
 - [ ] i2c and SMBus, needed for sensors and embedded controllers
 
 ### 20.7 Bare metal aarch64
 - [ ] a real machine whose UEFI firmware is maintained when it is bought and boots Limine, so §11.1's boot path applies: by default a server-class Ampere machine (SBSA, ACPI) with an Intel NIC onboard or in a PCIe slot; a Raspberry Pi 5 only if a maintained edk2 port or U-Boot's EFI layer boots Limine on the board in hand (the original edk2 port was archived in February 2025). The machine that becomes §20.8's aarch64 CI machine also needs FEAT_NV2, because Phase 21's nesting gate runs on it: an AmpereOne-class server has it, while a Raspberry Pi 5 and Neoverse N1 machines do not
-- [ ] ACPI on server-class machines, which ship no device tree: the §2.4 parser for MADT, GTDT, SPCR, MCFG, and SRAT (§19.7's NUMA code path on aarch64), and the §20.2 interpreter for the DSDT
+- [ ] ACPI on server-class machines, which ship no device tree: the §2.4 parser for MADT, GTDT, SPCR, MCFG, IORT (the ITS device IDs behind each root complex, and the §18.1 SMMUv3), and SRAT (§19.7's NUMA code path on aarch64), and the §20.2 interpreter for the DSDT
 - [ ] the device tree from real firmware on a board, which disagrees with QEMU's in the same ways real ACPI disagrees with QEMU's
 - [ ] the GIC and ITS as the firmware describes them, rather than as QEMU's `virt` lays them out (§11.3)
 - [ ] the machine's NIC for the Phase 20 gate: §20.6's igb or e1000e built and exercised on aarch64 on an Ampere machine; on a Raspberry Pi 5, the BCM2712 PCIe root complex (not ECAM, so §11.5's generic path does not reach it), the RP1 southbridge behind it, and RP1's Cadence GEM MAC
@@ -1979,9 +2251,21 @@ Moved from Phase 7: nothing before real hardware needs either driver. QEMU `-dev
 - [ ] serial captured automatically and results reported like any other CI job
 - [ ] power control so a hung run can be recovered without a human
 - [ ] a nightly run against real hardware, since QEMU-only testing hides an entire class of bug; it includes the Phase 17 `make test` running on vibeOS on each machine
-- [ ] a PMU-sampled flamegraph with hardware cache-miss and branch-miss events on each machine, which §19 could not check in hosted CI
+- [ ] a PMU-sampled flamegraph with hardware cache-miss and branch-miss events on each machine, which Phase 19 could not check in hosted CI
 
-### 20.9 Stretch: legacy USB hosts
+### 20.9 Firmware runtime and hotplug
+§22.2's unattended updates choose their trial boot through UEFI variables, and a disk added to or pulled
+from a running machine needs hotplug.
+
+- [ ] Limine's EFI system table and EFI memory map responses captured in `BootInfo`; the runtime regions mapped in a page table of their own, with the choice between `SetVirtualAddressMap` and physical-mode calls recorded in DESIGN; calls made one at a time with interrupts off, on both architectures; around each call the live user FP and SIMD state is saved and FP and SIMD access is enabled (no `CR0.TS` or `CPACR_EL1` trap), since firmware may use those registers and the kernel is soft-float (§11.1, §11.6)
+- [ ] `GetVariable`, `GetNextVariableName`, `SetVariable`, `GetTime`, and `ResetSystem`, with variables exposed as Linux's `efivarfs` at `/sys/firmware/efi/efivars` (`statfs` reporting `EFIVARFS_MAGIC`, which libefivar checks), so `efibootmgr` from the §14.9 mirror, added to its pin list, lists, reorders, and deletes boot entries and sets `BootNext` unmodified; creating an entry from a disk (`-c -d`) reads Linux's `/sys/class/block`, which is Phase 23
+- [ ] native PCIe hotplug: slot capabilities, presence-detect and link-state interrupts, the attention button, slot power, and resource assignment for a new device from bridge windows sized with headroom at boot; the kernel asks for native control through `_OSC` and uses ACPI hotplug when firmware keeps it
+- [ ] ACPI hotplug through bus-check and eject notifications and `_EJ0` (§20.2), which `q35` uses by default
+- [ ] removal: in-flight I/O completes with an error, the driver's `remove` runs, its DMA mappings and interrupt vectors are released, and nothing panics; a surprise removal on hardware takes the same path
+- [ ] persistent block device names from the serial number and NVMe namespace under `/dev/disk/by-id`, never from probe order
+- [ ] the §18.1 `q35` harness configuration gains PCIe root ports and a writable per-run copy of the firmware variable store, with a native-hotplug variant (`-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off`); aarch64 `virt` root ports hotplug natively
+
+### 20.10 Stretch: legacy USB hosts
 - [ ] EHCI, with UHCI and OHCI companion controllers for low- and full-speed devices, tested under QEMU (`-device usb-ehci`, `ich9-usb-uhci1`, `pci-ohci`) before any real machine
 
 ---
@@ -1991,26 +2275,32 @@ Moved from Phase 7: nothing before real hardware needs either driver. QEMU `-dev
 **Goal.** Run other operating systems on vibeOS, and run vibeOS on vibeOS.
 
 **Unlocks.** A hypervisor that Phase 22's CI boots test kernels in, and containers to isolate its jobs.
-A conformance test for every paravirtual interface the kernel consumes as a guest.
+A conformance test for every paravirtual interface the kernel consumes as a guest. Unmodified OCI
+images, run by `crun` or the native runtime.
 
 The hypervisor gate needs hardware virtualization nested inside the test environment. Hosted CI does not
 promise that, nested EL2 cannot be assumed on the dev host, and on aarch64 a guest hypervisor needs
 FEAT_NV2 on the host, so this phase depends on §20.8's machines.
 
 **Architectures.** Both: VMX and SVM on x86_64, EL2 on aarch64, behind one VM abstraction. The gate runs
-on the §20.8 machine of each architecture. §21.4's CPUID detection, paravirtual clock, and paravirtual
-spinlocks are x86_64 only: arm64 KVM offers no paravirtual clock or spinlock interface, because the
-generic timer is already virtualized, so on aarch64 the guest uses the virtual generic timer and SMCCC
-stolen time.
+on the §20.8 machine of each architecture, except the container lines (§21.5, §21.6), which need no
+hardware virtualization and run in the hosted tiers too. §21.4's CPUID detection, paravirtual clock, and
+paravirtual spinlocks are x86_64 only: arm64 KVM offers no paravirtual clock or spinlock interface,
+because the generic timer is already virtualized, so on aarch64 the guest uses the virtual generic timer
+and SMCCC stolen time. §21.8's emulator differential test covers x86_64's instruction emulator and, on
+aarch64, the loads and stores that exit without a valid syndrome.
 
 **Exit gate**
 - [ ] a Linux kernel boots to userspace as a guest under vibeOS, on both architectures
 - [ ] vibeOS boots as a guest under vibeOS, and that guest can do it again
 - [ ] guests get virtio block and network devices whose sequential throughput is at least half of what the same 4-vCPU, 4 GiB guest gets under Linux KVM on the same §20.8 machine
-- [ ] a container-equivalent runs an isolated process tree with its own filesystem view and resource limits
+- [ ] an unmodified static `crun` release runs an OCI bundle with pid, mount, uts, ipc, network, and user namespaces and a cgroup v2 `memory.max` that the OOM path enforces, on both architectures
 - [ ] vibeOS as a 2-vCPU, 2 GiB guest under Linux KVM, using the §21.4 paravirtual interfaces for its architecture, runs the §19.3 microbenchmarks within 20% of the same §20.8 machine booted bare metal with 2 CPUs online (§19.6 offlining)
-- [ ] the harness boots a test kernel under the §21.2 VMM through its §21.2 backend, and `make test-kernel` passes that way on both architectures
-- [ ] tag `v0.21.0`
+- [ ] the harness boots a test kernel under the §21.2 VMM with `-accel kvm` through the §21.2 harness backend, and `make test-kernel` passes that way on both architectures
+- [ ] `alpine` and `busybox` OCI images, pinned by digest and pulled from the §21.6 registry on the CI host, run a shell under the §21.6 runtime, and the Alpine one installs a package with `apk` from a local mirror, on both architectures
+- [ ] a container and a guest on one §21.7 bridge each fetch a file from a server on the CI host through NAT, and a filter rule blocks a named port for the container only, on the §20.8 machine of each architecture
+- [ ] a hostile guest with 2 vCPUs and 1 GiB fuzzes the exit handlers and virtio backends for 24 hours a week on the §20.8 machine of each architecture, with no host panic and no KASAN report, the instruction emulator agrees with the CPU on 1,000,000 generated instruction streams on each machine, and 10,000 of the fuzzing guest's seeded exit sequences end in the same guest-visible state under Linux KVM as under the §21.2 VMM, except the differences `docs/` lists (§21.8)
+- [ ] tag `phase-21` and cut the next release
 
 ### 21.1 Hypervisor
 - [ ] VMX and SVM detection and enablement, with the feature MSR checks
@@ -2023,15 +2313,16 @@ stolen time.
 - [ ] aarch64: run as a VHE host when §11.1 recorded EL2 entry, with stage-2 translation and the virtual GIC and timer behind the same VM abstraction; when entry was at EL1, the VM layer reports that EL2 is unavailable instead of failing
 
 ### 21.2 Virtual machines
-- [ ] a VM abstraction: memory regions, vCPUs, devices, lifecycle
+The VM interface is Linux's: `/dev/kvm`. The VMM is unmodified QEMU from the §17.6 image, so guests
+get the devices, firmware, and management interface the ladder already uses, and "the §21.2 VMM" below
+means QEMU with `-accel kvm` on vibeOS.
+
+- [ ] `/dev/kvm` with Linux's `KVM_*` ioctl ABI over §21.1: VM and vCPU file descriptors, memory slots, `KVM_RUN` with the shared `kvm_run` page, `irqfd` and `ioeventfd`, the capability queries QEMU makes, and each architecture's register ABI, so QEMU runs guests with `-accel kvm`
 - [ ] guest memory as an address space, with host page faults servicing guest access
-- [ ] a virtual interrupt controller and timer
-- [ ] virtio device backends: block, net, console, so guests need no special drivers
-- [ ] a boot path for the harness's test images: SeaBIOS or OVMF (edk2 on aarch64) loaded as guest firmware, with the fw_cfg interface and the ACPI tables (x86_64) or device tree (aarch64) they hand on; direct kernel boot as well
-- [ ] the machine the in-guest tests expect (DESIGN §8.2 and §8.4). On x86_64: MADT, I/O APIC, and HPET in the ACPI tables, a PIT, a 16550 at COM1, an i8042, and the `isa-debug-exit` port at `0xf4` trapped through the §21.1 I/O bitmap into the VM's exit status; HPET on or off, the CPU count, and a CPUID mask set per VM, so the PIT and LAPIC-fallback tiers run. On aarch64: the device tree, a PL011, and the §11.7 PSCI and pvpanic verdict path. Tests for devices the VMM does not model are `ktest_skip`ped with a reason on a short, reviewed list
-- [ ] a `tests/harness` backend that boots test kernels under this VMM, chosen through the `VIBEOS_*` reader, used instead of §17.6's QEMU under TCG where VMX, SVM, or EL2 is available, with QEMU kept as the fallback
-- [ ] a management interface and tool: create, start, stop, inspect
-- [ ] a serial console per guest, which is how anything gets debugged
+- [ ] the in-kernel interrupt controller and timer (`KVM_CREATE_IRQCHIP`, the local APIC and I/O APIC on x86_64, the virtual GIC and timer on aarch64)
+- [ ] `vhost-net` and `vhost-vsock` in the kernel, so QEMU's virtio devices reach the gate's throughput without a userspace hop
+- [ ] the harness backend: on vibeOS, `VIBEOS_QEMU_ACCEL=kvm` selects `/dev/kvm`, so `make test-kernel` boots its test kernels with the devices, firmware (SeaBIOS, OVMF, edk2), and `isa-debug-exit` or pvpanic verdict path it uses everywhere else; where VMX, SVM, or EL2 is absent it falls back to TCG
+- [ ] guests managed through QEMU's QMP socket: create, start, stop, pause, inspect
 
 ### 21.3 Nesting
 - [ ] vibeOS on vibeOS, which mostly tests that the paravirtual interfaces are honest
@@ -2048,12 +2339,38 @@ stolen time.
 - [ ] Hyper-V and VMware enlightenments, so it runs well on the platforms people actually have
 
 ### 21.5 Containers
-- [ ] namespaces: pid, mount, network, uts, ipc, user
-- [ ] cgroup-equivalent: CPU, memory, and I/O limits with accounting
-- [ ] an overlay filesystem for layered images
-- [ ] a container runtime: image unpack, namespace setup, process launch
-- [ ] an image format, ideally one that is already standard
-- [ ] a runtime tool that feels like the ones people know
+- [ ] pid, network, uts, ipc, user, and cgroup namespaces beside §18.6's mount namespace, through Linux's interfaces: `CLONE_NEW*` flags on `clone` and `unshare`, `setns`, and `/proc/<pid>/ns/*`, `mnt` included; user namespaces with `uid_map`, `gid_map`, and `setgroups`; mount propagation (`MS_PRIVATE`, `MS_SLAVE`, `MS_SHARED`) as Linux defines it
+- [ ] cgroup v2 as Linux's `cgroup2` filesystem at `/sys/fs/cgroup`: `cgroup.procs`, `cgroup.subtree_control`, `cpu.max`, `cpu.weight`, `memory.max`, `memory.current`, `memory.events`, `io.max`, and `pids.max`, backed by §19.4's group scheduling and §12.6's OOM path, which enforces `memory.max`
+- [ ] overlayfs as Linux's `mount -t overlay`: `lowerdir`, `upperdir`, and `workdir`, whiteouts as character device 0/0, and opaque directories, so image layers stack as they do on Linux
+- [ ] overlayfs's opaque directories and whiteouts on §14.8's `trusted.` extended attributes, on vibefs v2 and tmpfs
+
+### 21.6 OCI images and the Linux container ABI
+§21.5 builds namespaces, cgroup v2, and overlayfs to Linux's interfaces. This makes unmodified OCI images
+and tools run on them.
+
+- [ ] an OCI image and distribution client: pull by digest over §15.11 HTTPS, verify every layer's digest, and unpack each layer with its whiteouts onto §21.5's overlayfs
+- [ ] an OCI registry on the CI host serving the pinned test images over TLS with the §15.11 test CA, so no CI job pulls from the public internet
+- [ ] a container runtime with the OCI runtime command line (`create`, `start`, `state`, `kill`, `delete`) that runs runtime-spec bundles (`config.json`): namespaces, mounts and `pivot_root`, rlimits, the §18.6 capabilities and `seccomp` profile, cgroup placement, and process launch
+- [ ] the opencontainers `runtime-tools` validation suite, pinned, passes in-guest against the runtime on both architectures, with a checked-in skip list whose entries each name a reason
+- [ ] a runtime tool with `pull`, `run`, `exec`, `ps`, `stop`, and `rm` over the client and the runtime
+
+### 21.7 Virtual networking
+- [ ] Linux's TUN/TAP device: `/dev/net/tun` with `TUNSETIFF`, `IFF_TAP`, and `IFF_NO_PI`, which the §21.2 virtio-net backend and unmodified userspace attach to the same way
+- [ ] veth pairs and a software bridge with MAC learning, shared by §21.5's network namespaces and by guests, managed unmodified by iproute2 from the §14.9 mirror: added here to §15.7's `NETLINK_ROUTE` are `RTM_NEWLINK` with `IFLA_LINKINFO` kinds `veth` and `bridge`, ports attached with `IFLA_MASTER`, a veth end moved into a network namespace with `IFLA_NET_NS_PID` or `IFLA_NET_NS_FD`, and `RTM_DELLINK`
+- [ ] a stateful packet filter in the §15.4 IP layer: rules on interface, address, port, protocol, and connection state, over a connection tracker with timeouts and a bound on tracked connections
+- [ ] NAT on the connection tracker: masquerade for outbound traffic and port forwarding for inbound, so a container or guest reaches the outside through the host's address
+- [ ] the filter and NAT rules are Linux's nf_tables over `NETLINK_NETFILTER`, so unmodified `nft` from the §14.9 mirror loads a rule file at boot and lists rules with their hit counters
+
+### 21.8 Hostile guests
+Every other test in this phase uses a cooperative guest. A guest controls every exit reason, every MMIO
+and port access, every virtio descriptor, and every instruction the emulator decodes.
+
+- [ ] a fuzzing guest: a small vibeOS kernel that generates exits (port and MMIO access, `cpuid`, MSR and system-register access, hypercalls, faults during event delivery) and malformed virtio descriptor chains, seeded and logged so a host failure replays from its seed
+- [ ] the host runs the §12.1 KASAN build with §18.5's KCOV over the VMM, and the coverage steers the fuzzing guest's generator between runs
+- [ ] the x86_64 instruction emulator differential-tested against the CPU: generated instruction streams run natively in a vibeOS user process and through the emulator from the same registers and memory, and the final states compared; each divergence minimized to one instruction and checked in
+- [ ] aarch64 decodes MMIO from the `ESR_EL2` syndrome and emulates only the loads and stores without a valid syndrome, which get the same differential test
+- [ ] the fuzzing guest's seeded exit sequences, other than the virtio ones, replayed under Linux KVM on the same §20.8 machine through a hostlib runner on `/dev/kvm`; in that mode both VMMs answer every MMIO and port access from the seed instead of a device model, and the guest-visible state after each exit (registers, memory, and any injected exception or interrupt) is compared; each difference is fixed or listed in `docs/` with KVM's behavior and the reason
+- [ ] a guest that exhausts its memory, vCPU time, or virtio queues affects only itself: a second guest's §19.3 microbenchmarks stay within 10% on the same §20.8 machine while the first misbehaves, each guest 2 vCPUs and 2 GiB
 
 ---
 
@@ -2061,7 +2378,8 @@ stolen time.
 
 **Goal.** Something another person can install and run, released by a process that runs on itself.
 
-**Unlocks.** Users. The end of the roadmap and the start of the [Beyond](#beyond) list.
+**Unlocks.** Users. An installable, upgradable system with a release process, which the later eras
+ship through and [Phase 40](#phase-40-stability) turns into 1.0.
 
 **Architectures.** Both. Every artifact is built, signed, and installable for each.
 
@@ -2072,14 +2390,21 @@ stolen time.
 - [ ] artifacts are signed and verified on install
 - [ ] the CI that gates releases runs on vibeOS
 - [ ] a fresh install can build and release the next version of vibeOS
-- [ ] tag `v0.22.0`
+- [ ] every release artifact ships an SPDX SBOM that passes the validator, and the release job refuses a component without an entry or with a license outside the §14.10 policy
+- [ ] no release is tagged with an open crash from its candidate's two 72-hour campaigns: syzkaller (§18.5) accumulating 72 hours per architecture in hosted shards of at most 5 hours, each guest 2 CPUs and 512 MiB under TCG, and the §21.8 hostile guest, 2 vCPUs and 1 GiB, running 72 hours on the §20.8 machine of each architecture
+- [ ] an update installs unattended and takes effect on the next boot; three bad updates, one that panics, one that hangs with interrupts off, and one that fails its health check, each come back on the old root with no human action, on both architectures under QEMU with OVMF or edk2 and a writable variable store (TCG, 2 vCPUs, 2 GiB)
+- [ ] the GitHub API reports private vulnerability reporting enabled on the repository, the §22.5 `make check` script passes, and the §22.5 drill has run end to end
+- [ ] tag `phase-22` and cut the next release
 
 ### 22.1 Release engineering
 - [ ] versioning with a defined policy for what constitutes a break
-- [ ] reproducible builds extended from the §17.5 kernel and ISO to every release artifact (packages, installer images, manifests): no timestamps, no paths, no nondeterministic ordering
-- [ ] a signed manifest of everything in a release, which includes §18.7's boot-chain manifest
+- [ ] reproducible builds extended from the §10.2 kernel, initrd, and ISO build to every release artifact (packages, installer images, manifests): no timestamps, no paths, no nondeterministic ordering
+- [ ] the §14.6 signed release manifest extended to the installer images and the package repository of both architectures, with §18.7's boot-chain digests in it
 - [ ] a release branch and backport process
 - [ ] release notes generated from the changelog, which is what the changelog discipline was for
+- [ ] an SPDX SBOM for each release artifact, generated from `Cargo.lock`, the §14.6 package metadata, and the §14.10 provenance records: every component with its version, license, and source hash, checked by a pinned SPDX validator in the release job
+- [ ] the release job refuses a shipped component with no SBOM entry or with a license outside the §14.10 policy, and a shipped package without its license texts under `/usr/share/licenses/<package>`
+- [ ] each release candidate gets both 72-hour fuzz campaigns the exit gate names, seeded with the weekly corpora; a crash found against a candidate blocks its tag until it is fixed with a regression test
 
 ### 22.2 Installation
 - [ ] a live ISO with a full desktop and an installer
@@ -2087,8 +2412,13 @@ stolen time.
 - [ ] filesystem creation, base system install, bootloader install
 - [ ] user creation, locale, timezone, network configuration
 - [ ] an unattended install from a configuration file, which is how CI installs it
-- [ ] upgrade in place between releases, tested from every supported prior version
-- [ ] recovery: a rescue shell, `fsck` on boot, and a rollback path
+- [ ] upgrades between releases through the A/B update below, tested from every supported prior version
+- [ ] recovery: a rescue shell and `fsck` on boot, and the other slot's boot entry kept in `BootOrder` after a commit, so the previous release stays bootable from the firmware menu
+- [ ] two slots, A and B, created by the installer: each a root partition plus an ESP directory holding its own kernel, initrd, Limine binary, and Limine configuration, since Limine reads only FAT and ISO 9660 and cannot load a kernel from the root; each slot has its own UEFI boot entry for its Limine binary, which reads the configuration beside it (Limine 10.3 and later). An update writes the inactive slot from the §14.6 packages its signed release manifest names, fetched over §15.8 HTTP and verified against that manifest before anything is written
+- [ ] a trial boot: the updated slot boots once through UEFI `BootNext` (§20.9), and is committed by rewriting `BootOrder` only when a declarative health check passes (services up under §14.3's init, the network reachable, and a probe each service defines); a failed check reboots
+- [ ] `panic=<seconds>` on the §10.2 command line, set in each slot's Limine configuration: the panic handler prints its dump, waits, and resets through the ACPI or PSCI path the §10.5 `reboot` call uses; halting stays the default, so the harness and the Phase 0 panic gate are unchanged
+- [ ] an `i6300esb` watchdog driver, a PCI device QEMU offers on both architectures, armed at boot and fed by init for as long as the system runs, so a hang during a trial boot, or after one, resets the machine
+- [ ] a trial boot that panics, hangs, or fails its health check comes back on the old root at the next reset with no human action, since `BootNext` lasts one boot; Phase 25 extends the panic policy and the watchdogs
 
 ### 22.3 Documentation
 - [ ] an installation guide and a user handbook
@@ -2104,7 +2434,1443 @@ stolen time.
 - [ ] the resulting artifact installed on a clean machine, which then builds the next release
 - [ ] the whole thing scripted and documented so it is a procedure rather than a story
 
-Then, having proven the point, keep going: there is no version of this where the work is finished.
+### 22.5 Security process
+§18.8 wrote down an informal process. With users, it has to run without improvising.
+
+- [ ] private vulnerability reporting enabled on the repository, a setting only the maintainer can change, and `SECURITY.md` naming how to report, what is in scope, the supported releases, and the response times
+- [ ] an embargo procedure in `SECURITY.md`: the fix developed in the advisory's temporary private fork and tested with `make test` before merge, released to `main` and every supported release branch at once, with the GitHub security advisory published and a CVE identifier requested through GitHub
+- [ ] every advisory names the affected releases (from the §22.1 SBOM for a third-party component), the release that fixed it, and the regression test that proves the fix
+- [ ] a drill: a planted bug reported through private reporting and taken through the embargo procedure to a draft advisory that is closed rather than published, with a record in `docs/` linking the report, the fix, and the test
+- [ ] a script in `make check` verifies that `SECURITY.md` and the drill record have the parts this subsection names
+
+---
+
+# Era V. Ecosystem
+
+Past the first destination: other people's software, unmodified and judged by its own test suites
+against Linux running the same binaries, then a build that takes no upstream binary on trust.
+
+Phase 23 needs 16 and 17 and nothing from Era IV, so it runs beside Phases 18 to 22. A suite case that
+needs an Era IV feature (namespaces, seccomp, `io_uring`, `splice`) stays on its expected-failure list,
+naming that phase, until the phase lands. Phase 24 needs 22, whose §22.4 CI agent runs its builds on the
+§20.8 machines, and 23, whose Debian gcc its diverse double-compiling check uses.
+
+## Phase 23: Linux Compatibility
+
+**Goal.** Unmodified Linux software runs on vibeOS and is judged by suites vibeOS did not write, each
+compared against Linux running the same binaries in the same guest. glibc joins musl and Debian joins
+Alpine, both boot as the whole userspace, and devices reach `/sys` and udev the way they do on Linux.
+
+**Unlocks.** Linux software as vibeOS's application layer: language runtimes, distribution package
+managers, and the libudev, libinput, and libdrm device discovery that Era VII's desktop stack runs on.
+Pass rates against Linux that anyone can reproduce from the pinned inputs.
+
+**Architectures.** Both. Every suite runs on x86_64 and aarch64 in a 4-vCPU, 4 GiB guest, under KVM on
+x86_64 and under TCG on aarch64, since GitHub's arm64 runners have no KVM; a case that passes on one
+architecture and fails on the other is a bug in the other. The §23.6 reference kernel runs each suite in
+the same guest shape and accelerator, so a timing-sensitive case is compared like with like. The
+kselftest `x86` target runs on x86_64 only, and arm64's `signal` and `abi` targets on aarch64 only, since
+each tests its own architecture's entry and signal paths.
+
+**Exit gate**
+- [ ] LTP's `syscalls` scenario, in full, passes at least 80% of the cases that pass on the §23.6 reference kernel, on both architectures, and every other case is on its expected-failure list
+- [ ] the kselftest targets `futex`, `rseq`, `pidfd`, `clone3`, `memfd`, `timers`, `sigaltstack`, `vDSO`, `proc`, `exec`, `mqueue`, and `mincore`, with `x86` on x86_64 and arm64's `signal` and `abi` on aarch64, pass at least 90% of the cases that pass on the reference kernel, on both architectures
+- [ ] glibc's test suite, at the Debian root's glibc version, passes at least 95% of the tests that pass on the reference kernel, on both architectures
+- [ ] CPython's regression suite (Debian's `python3` and its test-suite package) passes at least 95% of the test cases that pass on the reference kernel, on both architectures
+- [ ] `go test std` with the pinned upstream Go release and `CGO_ENABLED=0` passes at least 95% of the tests that pass on the reference kernel, on both architectures
+- [ ] Node.js (Debian's `nodejs`) passes at least 90% of the `test/parallel` cases from its version's source tarball that pass on the reference kernel, on both architectures
+- [ ] OpenJDK (Debian's default JDK) completes every benchmark of the pinned DaCapo release that completes on the reference kernel, each passing DaCapo's own output validation, on both architectures
+- [ ] an unmodified Alpine root boots as the whole userspace on both architectures (§23.5): busybox `init` as pid 1, starting OpenRC's `sysinit`, `boot`, and `default` runlevels from `/etc/inittab`, `mdev` populating `/dev`, networking through `udhcpc`, an `ssh` login from the host, and a clean `poweroff`
+- [ ] an unmodified Debian root boots as the whole userspace on both architectures (§23.5): `sysvinit-core` as pid 1, `udev` populating `/dev`, networking through `ifupdown`, an `ssh` login from the host, and a clean `poweroff`; in it, `apt-get install build-essential` from the §23.2 mirror succeeds with `Release` signatures verified, and `dpkg --audit` reports nothing
+- [ ] on the §23.3 test machine, `udevadm info --export-db` agrees with the reference kernel's on every device the machine's `-device` options add and on their children (subsystem, `DEVNAME`, `ID_PATH`, and the numbers of fixed-major devices); `libinput list-devices` finds the virtio keyboard and tablet; attaching a loop device and QEMU's `block_resize` each produce the kernel uevents the reference kernel produces; on both architectures
+- [ ] the §23.4 shape check passes on both architectures
+- [ ] tag `phase-23` and cut the next release
+
+### 23.1 Surface
+The Linux interfaces that glibc, Debian's tools, and the runtimes call and that Phases 13 to 17 do not
+provide. Each lands with the semantics its LTP and kselftest cases check.
+
+- [ ] `rseq`: registration per thread, `cpu_id` and `node_id` updated on every return to user after a migration, and a critical section aborted to its handler on preemption, migration, and signal delivery, with the `AT_RSEQ_FEATURE_SIZE` and `AT_RSEQ_ALIGN` auxv entries glibc reads; glibc registers every thread
+- [ ] `clone3` over the same code as `clone`, taking every flag `clone` takes, plus `CLONE_PIDFD`, since glibc's `pthread_create` and `posix_spawn` try it first and fall back to `clone` only on `ENOSYS`
+- [ ] pidfds: `pidfd_open`, `pidfd_send_signal`, `pidfd_getfd`, `waitid(P_PIDFD)`, and a pidfd that `ppoll` and `epoll` report readable when the process exits; Go's `os/exec` and Python use them
+- [ ] `close_range`, `copy_file_range`, `statx`, `faccessat2`, `openat2`, and `epoll_pwait2`, which glibc, coreutils, libuv, and Rust's `std` call before any fallback
+- [ ] `membarrier` with `MEMBARRIER_CMD_PRIVATE_EXPEDITED` and its registration, over the §4.9 call-function IPI to the CPUs running the caller's address space
+- [ ] `inotify` on vibefs and tmpfs with Linux's event layout, rename cookies, and `IN_Q_OVERFLOW`; `tail -f`, Node's `fs.watch`, and udev use it
+- [ ] System V IPC: `shmget`, `shmat`, `shmdt`, `shmctl`, `semget`, `semop`, `semtimedop`, `semctl` with `SEM_UNDO`, `msgget`, `msgsnd`, `msgrcv`, and `msgctl`, with `/proc/sysvipc/*`; PostgreSQL still asks for a System V segment at startup; `CLONE_SYSVSEM`, which glibc's `pthread_create` passes, stops being §13.1's no-op: tasks created with it share one `SEM_UNDO` list, applied when the last of them exits
+- [ ] POSIX message queues: `mq_open`, `mq_unlink`, `mq_timedsend`, `mq_timedreceive`, `mq_notify`, and `mq_getsetattr` over an `mqueue` filesystem
+- [ ] `fallocate` (with `FALLOC_FL_KEEP_SIZE` and `FALLOC_FL_PUNCH_HOLE`), `posix_fadvise`, `readahead`, `sync_file_range`, and `syncfs` on vibefs v2 and tmpfs, as PostgreSQL and `dpkg` call them
+- [ ] `madvise` with Linux's semantics: `MADV_DONTNEED` zero-fills a private anonymous page on its next touch, `MADV_FREE` frees lazily, `MADV_DONTFORK` and `MADV_WIPEONFORK` apply at `fork`, and unknown advice returns `EINVAL`; Go's and the JVM's heaps depend on the first two
+- [ ] `prctl` options that runtimes and init systems set: `PR_SET_NAME` and `PR_GET_NAME` (the `comm` files), `PR_SET_PDEATHSIG`, `PR_SET_CHILD_SUBREAPER`, `PR_SET_DUMPABLE`, and `PR_SET_TIMERSLACK` with `PR_GET_TIMERSLACK`, whose per-thread value §19.6's timer slack uses; any other option returns `EINVAL`, as on Linux, which callers such as `apt` read as an older kernel
+- [ ] the smaller calls LTP and common tools reach: `kcmp`, `process_vm_writev` beside §17.4's `process_vm_readv`, `ioprio_get` and `ioprio_set`, `futex_waitv`, `personality`, and `mincore` with Linux's residency semantics over §12.2's demand paging and the §12.5 page cache
+- [ ] the `release` in §13.10's `uname` policy tracks the §23.6 reference kernel's version, so LTP's and kselftest's minimum-kernel-version checks run on vibeOS the cases they run on the reference; the policy entry in `docs/LINUX.md` moves with the pin
+
+### 23.2 glibc and Debian
+- [ ] glibc's dynamic linkers, `ld-linux-x86-64.so.2` through `/lib64` and `ld-linux-aarch64.so.1` in `/lib`, load through §14.2's `PT_INTERP` path unmodified
+- [ ] the pinned Debian root (the `debuerreotype` build behind the official `debian` image) for each architecture, entered the way §14.9 enters Alpine's, with `bash`, coreutils, and `python3` running under glibc; `dpkg` and `apt`, like §14.9's `apk`, own files only inside a Linux root (a `vibeos-linux` chroot or a root booted whole, §23.5), never in the vibeOS base system
+- [ ] glibc's startup, `pthread_create`, `posix_spawn`, multithreaded `setuid`, and thread cancellation paths traced once with §9.3's syscall tracing, and every call they make implemented, none left to a fallback
+- [ ] a pinned local Debian mirror snapshot on a disk image for each architecture, holding the closure of the packages this phase installs, read by `apt-get` through a `file:` source with `Release` signatures verified against Debian's archive keys by the verifier the pinned release's apt uses (`sqv`, or `gpgv`), so nothing here needs a route to the internet
+- [ ] `dpkg` survives a guest killed mid-unpack: after the reboot, `dpkg --configure -a` completes and `dpkg --audit` reports nothing, which holds only if vibefs honors the `fsync` and `rename` ordering `dpkg` relies on
+
+### 23.3 Devices in Linux's layout
+This replaces §8.4's `sysfs`-equivalent layout. libudev, `mdev`, libinput, libdrm, `lsblk`, and `ip` find
+devices here.
+
+- [ ] `/sys/devices` holds every device the kernel enumerates, bound to a driver or not, at Linux's paths (`pci0000:00/0000:00:03.0/virtio0/...`, and on aarch64 the device-tree platform bus named as Linux names it, `<address>.<node>`); `/sys/bus/{pci,virtio,platform}/{devices,drivers}`, `/sys/class/{block,net,input,drm,tty,mem,misc}`, and `/sys/dev/{block,char}/<major>:<minor>` link into it
+- [ ] each device's `uevent`, `dev`, `subsystem`, and `driver` entries, and the bus attributes udev reads (`vendor`, `device`, `class`, `subsystem_vendor`, `subsystem_device`, `modalias`)
+- [ ] block devices with `size`, `ro`, `removable`, `queue/logical_block_size`, and, per partition, `partition` and `start`, which `lsblk` and udev read; `BLKRRPART` rescans a disk's partitions with their uevents; a virtio-blk capacity change (QEMU's `block_resize`) updates `size` and sends `change` with `RESIZE=1`
+- [ ] network interfaces under `/sys/class/net` with `address`, `mtu`, `operstate`, `carrier`, `ifindex`, `type`, and `statistics/`, which `ip`, `ifupdown`, and udev's interface naming read
+- [ ] input devices under `/sys/class/input` with Linux's `capabilities/` bitmaps and `id/` files over §16.4's evdev nodes, since udev's `input_id` classifies keyboards and pointers from them
+- [ ] the display under `/sys/class/drm` (`card0` and its connectors) over §16.1's node, so libdrm enumerates it
+- [ ] device numbers are Linux's: the fixed majors in Linux's `devices.txt` (`mem` 1, `tty` 4 and 5, loop 7, `input` 13, `pts` 136, `ttyAMA` 204, `drm` 226) and dynamic majors for the rest, in `st_rdev`, the `dev` files, and `/proc/devices`; TTYs named as Linux's drivers name them, `ttyS0` for the 16550 and `ttyAMA0` for the PL011
+- [ ] §16.1's `NETLINK_KOBJECT_UEVENT` socket carries every device's events: the kernel multicasts `add`, `remove`, `change`, `move`, `bind`, and `unbind` to group 1 in Linux's format (an `ACTION@DEVPATH` header, then `ACTION`, `DEVPATH`, `SUBSYSTEM`, `SEQNUM`, and the device's own keys), with `SCM_CREDENTIALS` and a sender `nl_pid` of 0, which libudev checks; `SO_ATTACH_FILTER` (§15.7's classic BPF) on these sockets, since libudev filters in the kernel; user processes multicast to group 2, as `udevd` does to libudev monitors
+- [ ] writing an action to a device's `uevent` file replays that event, which `udevadm trigger` depends on; `/sys/kernel/uevent_seqnum` tracks `SEQNUM`
+- [ ] loop devices: `/dev/loop-control` with `LOOP_CTL_GET_FREE`, and `LOOP_CONFIGURE`, `LOOP_SET_FD`, `LOOP_CLR_FD`, and `LOOP_SET_STATUS64` with partition scanning, so `losetup` and `mount -o loop` work; attach and detach send their uevents
+- [ ] `/dev/rtc0` with `RTC_RD_TIME` and `RTC_SET_TIME` over the §2.7 RTC and the PL031 (§11.5), for `hwclock` at boot
+- [ ] `/sys/devices/system/cpu/{online,possible,present}`, each CPU's `topology/`, and `/sys/kernel/mm/transparent_hugepage/{enabled,hpage_pmd_size}` in Linux's formats, which glibc's `get_nprocs`, `lscpu`, Go, and the JVM read
+- [ ] the test machine: one QEMU command line per architecture adding two virtio-blk disks, virtio-net, virtio-gpu, virtio-keyboard, and virtio-tablet, booted by vibeOS and by the reference kernel over the same Debian root; the gate compares every device those `-device` options add, and their children
+
+### 23.4 /proc in Linux's formats
+This extends §13.9's procfs, §13.10's `/proc/self` pieces, §14.9's system-wide files, and §17.1's build-system
+entries to what procps, util-linux, glibc, and the runtimes parse.
+
+- [ ] per process: `statm`, `smaps`, `limits`, `io`, `mounts`, `mountinfo`, `fdinfo/`, `cgroup`, which reports the root group (`0::/`) until §21.5's cgroup v2, and `oom_score_adj`, stored and read back as on Linux, which §19.10's OOM score uses; `task/<tid>/` carries each per-pid file for its thread
+- [ ] system-wide: `vmstat`, `cmdline`, `partitions`, `devices`, `diskstats`, and `swaps`
+- [ ] `/proc/sys`: `kernel/{domainname,threads-max,printk,random/uuid}`, `vm/max_map_count`, `fs/{file-max,nr_open,inotify/*}`, and `net/core/somaxconn` beside §14.9's entries, all writable by root where Linux allows it, so `sysctl -w` works
+- [ ] §14.9's formatter host tests extended to every file this subsection names, against captures from the §23.6 reference kernel
+- [ ] the shape check: an in-guest script reads every `/proc` file this subsection and §14.9 name and every `/sys` attribute §23.3 names for the test machine's devices, replaces each number, run of numbers, and address with a placeholder, and diffs the result against the same normalization of a capture from the reference kernel on the §23.3 test machine; captures checked in and retaken when a pin changes
+- [ ] procps-ng's `sysctl` and util-linux's `lscpu`, `lsblk`, `findmnt`, and `mount` from the Debian root run unmodified, and Debian's `ps -e` lists the processes the native `ps` lists
+
+### 23.5 Distributions booted whole
+- [ ] a distribution root boots without an initrd: the kernel mounts the vibefs v2 disk that §14.8's `root=` names, read-only or read-write as `ro` or `rw` says, mounts `devtmpfs` on its `/dev` as Linux's `CONFIG_DEVTMPFS_MOUNT` does, and runs its `/sbin/init`, or the program `init=` names, as pid 1 with its standard descriptors on `/dev/console`; `ro`, `rw`, and `init=` join the §10.2 parser here; vibeOS loads no modules, so no distribution initramfs is used, and `modprobe`'s failures are a deliberate gap in `docs/LINUX.md`
+- [ ] the pseudo filesystems mount under Linux's type names and options, as init scripts mount them: `devtmpfs` (writable, so `udev` and `mdev` create nodes and links in it), `sysfs`, `proc`, `devpts` with `gid`, `mode`, and `ptmxmode`, `tmpfs` with `mode`, `size`, and `nr_inodes`, and `mqueue`
+- [ ] `mount` honors `MS_REMOUNT` (root from read-only to read-write), `MS_BIND`, `MS_RDONLY`, `MS_NOSUID`, `MS_NODEV`, and `MS_NOEXEC`
+- [ ] the calls init and getty make: `reboot` with Linux's magic numbers and commands, including the ctrl-alt-del ones every init sends; `vhangup`; and `syslog(2)` for `klogd` and busybox `dmesg`
+- [ ] Alpine: a root that `apk` installs from the §14.9 mirror into an empty directory, as `setup-disk` does (`alpine-base`, OpenRC, busybox `mdev`, `openssh`), written to a vibefs v2 disk; the build writes configuration files (`fstab`, `inittab`, `interfaces`) and changes no binary
+- [ ] Debian: the §23.2 root after `apt-get install sysvinit-core udev ifupdown openssh-server` from the mirror, written to a vibefs v2 disk, with configuration written the same way
+- [ ] the harness boots each root, waits for its serial login prompt, logs in over `ssh` through QEMU's user networking, runs a command, and ends with the root's own `poweroff`, so the shutdown path is tested as well
+
+### 23.6 Suites
+- [ ] the reference kernel: Debian's `linux-image` from the §23.2 mirror with its own initramfs, booted on the same QEMU machine, accelerator, CPU count, and memory as the vibeOS guest, over the same root contents on ext4, with each suite's scratch directory on tmpfs in both; a case counts as passing on the reference when it passes in each of three runs, and the passing sets are checked in and retaken when a pin changes
+- [ ] LTP at a pinned release, built as §13.11 builds its static corpus, running every case of the `syscalls` scenario rather than §13.11's subset
+- [ ] the kselftest targets the gate names, from the reference kernel's Linux release, built on the host as test inputs and never shipped
+- [ ] glibc's test suite, built on the host for the Debian root's glibc version, each test run in the guest through glibc's `test-wrapper` hook over the §17.4 host mount
+- [ ] each runtime's suite run by its own runner with per-case results: `python3 -m test -j4 --junit-xml`, `go test -json std`, Node's `tools/test.py` against the packaged binary, and DaCapo's harness under the packaged `java`
+- [ ] one expected-failure list per suite and architecture, extending §13.11's format with a class: each entry names the case, its class (a kernel bug with an issue link, a missing feature with the line in this file that lands it, or a deliberate gap with its `docs/LINUX.md` entry), and a reason; `scripts/check_expected_failures.py` in `make check` fails on an entry without all three
+- [ ] the runner fails on a case from the reference passing set that fails and is not listed, on a listed case that passes, as §13.11's runner does, so the lists only shrink, and on a suite whose pass share falls below its gate line
+- [ ] the suites on a weekly scheduled job, in shards of at most 5 hours (a GitHub-hosted job stops at 6), with per-suite and per-architecture counts in the job summary and in §10.9's CI history, which records this workflow's runs beside `ci`'s, with the counts as added fields
+- [ ] `docs/LINUX.md` carries a section per suite, generated from the lists and the reference sets: cases passing on the reference and on vibeOS per architecture, and every deliberate gap with its reason (loadable modules and 32-bit entry points among them); `make check` fails when it is stale
+
+---
+
+## Phase 24: Source Bootstrap and Ports
+
+**Goal.** Nothing in the image that builds vibeOS is an upstream binary taken on trust. The toolchains
+Phase 17 borrowed through §17.7 are rebuilt from source on vibeOS, reach a fixed point, and are checked by
+diverse double-compiling; the seeds that remain are listed and confined to stage 0. A ports tree turns the
+same machinery into a package collection with a size target.
+
+**Unlocks.** A self-hosting claim with no borrowed binaries past a short, listed seed set. Packages vibeOS
+builds instead of downloading, which Era VII's desktop stack and Phase 40's supported releases build on. A
+decided answer to whether a `*-unknown-vibeos` target is worth having.
+
+**Architectures.** Both. Each architecture rebuilds its own toolchains and ports natively on its §20.8
+machine, where the §22.4 CI agent runs the builds; a from-source LLVM under TCG does not fit a scheduled
+job. Go's bootstrap on aarch64 starts from a toolchain cross-built from source on x86_64 vibeOS, since
+Go 1.4 has no arm64 port; nothing else crosses architectures. The phase buys nothing: its builds share the
+§20.8 machines with their nightly runs, and §24.1 records whether the weekly full rebuild fits beside them;
+if it does not, a build machine becomes a **Budget** line here before the port gate lines are attempted.
+
+**Exit gate**
+- [ ] `tcc`, LLVM with clang and lld, `rustc` and `cargo` at the pinned nightly, CPython, QEMU, `git`, `make`, `cmake`, `ninja`, `xorriso`, `nasm`, and Limine are rebuilt from source natively on vibeOS, starting from §17.7's upstream toolchains, on both architectures (§24.1)
+- [ ] `tcc`, clang with lld, and `rustc` each reach a fixed point on both architectures: rebuilt by its own from-source build, the result is byte-identical
+- [ ] the ISO that the §24.1 toolchains build and the ISO that §17.7's upstream toolchains build have byte-identical kernel ELFs and initrds, and every other differing file is listed with its cause in `docs/BOOTSTRAP.md`, which the §17.5 loop script checks, on both architectures
+- [ ] diverse double-compiling: stage-1 clang and lld built from one source by Alpine's clang and by Debian's gcc (Phase 23) build byte-identical stage-2 toolchains, on both architectures (§24.5)
+- [ ] the chain from stage 0 to the build image runs in roots holding only the seeds `docs/BOOTSTRAP.md` lists or the previous stage's output, and `scripts/check_bootstrap.py`, run by the weekly §24.2 job over the stage manifests, finds no seed and no unlisted binary in the final build image, on both architectures (§24.5)
+- [ ] at least 500 ports build natively into signed §14.6 packages on both architectures in one full rebuild on the §20.8 machines, each with its own test suite passing except the cases on its reasoned expected-failure list
+- [ ] at least 95% of the ports reproduce: built twice from the same commit, their packages are byte-identical
+- [ ] CPython, Go, Node.js, and OpenJDK built as ports pass their §23.6 suites at Phase 23's thresholds, measured against the passing sets of the same port builds run under the §23.6 reference kernel as §24.2 runs them, on both architectures
+- [ ] no port carries a vibeOS-specific source patch that names no `docs/LINUX.md` divergence, and none carries a patch against musl, Limine, or QEMU
+- [ ] `library/std`'s test suite for the §24.3 host triple passes natively on both architectures, except the cases on its reasoned expected-failure list
+- [ ] tag `phase-24` and cut the next release
+
+### 24.1 Toolchain from source
+Moved from §17.2 and §17.3, which close Phase 17 on upstream binaries (§17.7). Each rebuild starts from
+§17.7's upstream toolchains and runs natively on vibeOS.
+
+- [ ] `tcc` first: small, self-hosting, and a fast way to prove the from-source path; built by §17.7's clang, then by itself until two generations match
+- [ ] GNU binutils from source, for the ports that call `as` and `ld` by name
+- [ ] then LLVM with clang, lld, compiler-rt, libunwind, and libc++, built again by itself; mostly a test of the C++ standard library and of filesystem behavior at scale
+- [ ] `rustc` and `cargo` through `x.py` at the pinned nightly, since the kernel uses nightly features: natively, as a local rebuild with §17.7's `rustc` and `cargo` as stage 0, and with rustc's own `src/llvm-project`, so its code generation matches the upstream build's
+- [ ] CPython, QEMU, and `xorriso` (§17.6), `git` (§17.4), `make`, `cmake`, and `ninja` (§17.2), and `nasm`, which Limine's x86 build needs, rebuilt the same way
+- [ ] Limine from its pinned source release, built with the rebuilt clang and `nasm`, in place of the binary branch `setup.sh` fetches, in the ISO the §24.1 toolchains build
+- [ ] build times recorded next to §17.5's, per architecture on the §20.8 machines, with the weekly full rebuild's wall time beside the nightly hardware run's
+
+### 24.2 Ports
+Ports are §14.6 packages, built by §14.6's recipe tool and signed into its repository, like the base system
+and everything a release ships.
+
+- [ ] the recipe source decided on measured yield and written in `docs/PORTS.md`: an importer that turns Alpine's APKBUILDs (musl, both architectures) into §14.6 recipes, pkgsrc (built for new platforms), or recipes written by hand; each tried on the same 50 packages, with the counts recorded
+- [ ] the ports tree grows in §14.10's `ports/` layout, and `make check` fails on a port with no §14.6 recipe
+- [ ] the §24.1 toolchains are ports built by the same machinery, and the tree holds the build closure of each of them and of the Phase 23 runtimes
+- [ ] hermetic builds: each port builds natively in a fresh root holding only its declared build dependencies, from sources fetched and hash-checked beforehand, with no network during the build
+- [ ] each port's own test suite runs after its build; a failure is fixed, or listed in the port's expected-failure list with a class and a reason, which `make check` requires, as it does for §23.6's lists
+- [ ] a port whose build and test suite pass in the same build root run under the §23.6 reference kernel (entered with `chroot` from its Debian root), and fail on vibeOS, is a kernel bug or a missing feature, not a port patch; a vibeOS-specific source patch is allowed only for a divergence `docs/LINUX.md` lists, and `make check` fails on one that names none
+- [ ] every port built twice from the same commit gives byte-identical packages, or is listed with its cause and kept out of the release repository until it does, so §22.1's reproducibility holds for everything a release ships
+- [ ] Go through upstream's bootstrap chain from Go 1.4's C sources, so Go adds no seed; on aarch64 from a bootstrap toolchain cross-built on x86_64 vibeOS
+- [ ] a port whose build needs a binary of itself (a boot JDK for OpenJDK) lists that binary as a port seed in `docs/BOOTSTRAP.md`
+- [ ] a weekly job rebuilds the whole tree on the §20.8 machines through the §22.4 CI agent, and a nightly job rebuilds the ports whose recipe or dependencies changed; per-architecture counts (ports, built, test suites passing, reproducible, carried patches) go to the job summary and to §10.9's `ci-history` branch, as a record the §22.4 agent commits for each of its jobs
+
+### 24.3 Rust target
+Moved from §17.3: the `std` port and the vibeOS host triples it planned, now a decision rather than an
+assumption, since `*-unknown-linux-musl` `std` already runs on vibeOS through §13.10 and §14.9.
+
+- [ ] decided and written in `docs/LINUX.md`: whether `x86_64-unknown-vibeos` and `aarch64-unknown-vibeos` exist, or vibeOS's Rust host and user triple stays `*-unknown-linux-musl`, weighing what a separate triple buys (a `std` over vibeOS-only interfaces, a distinct `target_os`) against what it costs (a patch set rebased at every toolchain bump, a `libc` crate port)
+- [ ] the chosen triple's `std`, with thread, file, socket, process, and time support, built natively by §24.1's `x.py` build; a vibeOS triple brings its `sys` layer over vibeOS's syscalls and its `libc` crate support, carried under `ports/`
+- [ ] `x.py test library/std` for that triple passes natively on both architectures, except the cases on its expected-failure list, each with a reason
+
+### 24.4 Upstream
+- [ ] every carried patch under `ports/` records its upstream status: merged in a named release, filed with a link, or declined with a reason; `make check` fails on a patch without one
+- [ ] no carried patch against musl, Limine, or QEMU, the projects vibeOS's own build and harness run on; a patch there is upstreamed or made unnecessary by a kernel fix
+- [ ] carried patches counted per port by the weekly job, in its §24.2 record on §10.9's `ci-history` branch
+
+### 24.5 Seeds and diverse double-compiling
+Bootstrappable builds: every binary the chain starts from is named, confined to stage 0, and cross-checked.
+
+- [ ] `docs/BOOTSTRAP.md` lists every seed, a binary the chain uses but did not build, with its origin, version, and SHA-256, toolchain seeds and §24.2's port seeds separately; `scripts/check_bootstrap.py` in `make check` fails on a seed missing any of the three
+- [ ] the toolchain seeds are Alpine's clang and lld with the libraries they load, the pinned `rustc` and `cargo`, Alpine's static `busybox` for `awk` and the other POSIX utilities `configure` scripts call that §14.4's base system lacks, and the vibeOS base system; stage 0 runs in a root holding only them, so an unlisted binary cannot be used by accident
+- [ ] stage 0 rebuilds what build systems need before anything uses it: GNU make through its `configure` and `build.sh`, then `busybox` from source in place of the seed, then Perl, CPython, CMake, and ninja
+- [ ] the weekly §24.2 job runs the chain from stage 0; every later stage runs in a root holding only the previous stage's output, and the build image is the last stage alone; each stage writes a manifest of its root (path, SHA-256, producing stage) kept as an artifact of the job, and `scripts/check_bootstrap.py` in that job checks each root against the previous stage's manifest and fails on a seed or an unlisted binary in the build image
+- [ ] diverse double-compiling for clang and lld: stage 1 is built from one source both by Alpine's clang and by Debian's gcc (a check-only seed, run in the Debian root and linking its stage 1 statically so it runs in the stage root); each stage 1 builds stage 2 in the same root, and the two stage-2 toolchains are byte-identical; a difference is a nondeterminism bug, fixed here or reported upstream
+
+### 24.6 Stretch: Rust without a binary seed
+- [ ] `rustc` from mrustc on vibeOS: mrustc builds the newest `rustc` release it supports, each release builds the next up to the pinned nightly, and the result is byte-identical to the §24.1 `rustc`, which removes the Rust seed and double-compiles `rustc` diversely
+- [ ] a vibeOS triple, if §24.3 kept one, proposed to rust-lang/rust at Tier 3; Tier 3 names a person as target maintainer, so this waits for the maintainer to agree to be named
+
+---
+
+# Era VI. Production
+
+From an operating system someone can install to one that runs unattended, at scale, on owned and
+rented machines. Every comparison with Linux runs the same workload on the same machine, device, and
+guest shape, with Linux booted in vibeOS's place.
+
+Phase 25 needs 22, whose panic policy and watchdog it extends. Phase 26 needs 25 for SMBIOS. Phase 27
+needs only 18, 19, and 20, so it can start beside 21 and 22. Phase 28 needs 25 for the AER hook and 27
+for per-CPU vectors. Phase 29 needs 18, 19, 20, and 23, whose surface `fio` runs on.
+Phase 30 needs 23 and 25 and nothing from 26 to 29: [Phase 40](#phase-40-stability) needs it, and 1.0
+does not wait for clouds, large machines, 100 Gbit/s NICs, or disk arrays. Phases 25 to 29 have
+**Budget.** lines. Phase 30 reuses Phase 25's machines.
+
+## Phase 25: Reliability
+
+**Goal.** A machine that reports its own hardware errors, survives the ones that can be survived,
+notices when it has hung, and leaves a dump when it dies, with nobody at the console.
+
+**Unlocks.** Running unattended, which Phase 26's cloud instances need because nobody can reach their
+consoles. Debugging a crash from its dump rather than from a reproduction. The soaks every later phase
+leans on.
+
+**Architectures.** Both. Machine checks are x86_64: MCA banks and CMCI. The aarch64 equivalents are
+SError, synchronous external aborts, and the RAS extension's error records. Both report platform errors
+through APEI on ACPI machines. QEMU injects x86 machine checks through its monitor, so §25.1 and §25.3
+are gated under QEMU on x86_64. aarch64 has no QEMU injection path short of host memory errors, so its
+error lines are proven on the §25.7 aarch64 long-run machine through EINJ. PCIe AER, kexec, crash
+capture, watchdogs, and persistent records are shared and gated under QEMU on both. The hard lockup
+detector's PMU path is checked on the x86_64 long-run machine, since hosted CI has no PMU (Phase 19).
+
+**Budget.** A long-run machine of each architecture, so soaks do not take the §20.8 machines from their
+nightly runs: an x86_64 server with ECC memory, EINJ and ERST in its firmware, a serial port, and a BMC
+(about $1,200 used), and an Ampere Altra-class aarch64 server with ECC memory and EINJ in its firmware,
+confirmed with the vendor before buying (about $3,000). Phase 30's 30-day run reuses them.
+
+**Exit gate**
+- [ ] a corrected memory error injected with the QEMU monitor's `mce` command is logged with its bank, address, and severity and counted per bank; an uncorrected action-required error in a user page mapped by two processes retires the frame and sends `SIGBUS` with `BUS_MCEERR_AR` to the process that consumed it, and to the other when it next touches the page, and the kernel keeps running; x86_64 under TCG and KVM, 4 CPUs, 2 GiB
+- [ ] an uncorrectable error injected with QEMU's `pcie_aer_inject_error` into a virtio-net device (`aer=on`) behind a PCIe root port is logged with the device, the link is reset, the driver's `error_detected` hook runs, and the device carries traffic again without a reboot, on both architectures (x86_64 in §20.9's `q35` configuration)
+- [ ] on the x86_64 long-run machine, a corrected memory error injected through ACPI EINJ arrives as a decoded CPER record naming the DIMM from SMBIOS; the aarch64 long-run machine passes the same test, and an uncorrected error it injects through EINJ into a user page sends `SIGBUS` to the process that reads the page
+- [ ] a panic under QEMU with a capture kernel loaded boots the capture kernel through kexec without firmware; it writes a filtered ELF vmcore, and host `gdb` opens it with the kernel ELF and prints the panicking CPU's backtrace; both architectures under TCG, 4 CPUs, 2 GiB
+- [ ] `kexec` from a running system reaches `shell ready` in the new kernel without firmware in under 2 s, in a 2-vCPU, 1 GiB guest under KVM on the §25.7 long-run machine of each architecture
+- [ ] a CPU spinning with interrupts off for 10 s is reported with its backtrace by the hard lockup detector: through PMU NMIs on the x86_64 long-run machine, GICv3 pseudo-NMIs on aarch64 under TCG, and the buddy check on x86_64 under TCG; a thread that never yields for 20 s is reported by the soft lockup detector, on both architectures under TCG
+- [ ] after §22.2's i6300esb watchdog resets a guest whose CPUs all spin with interrupts off (lockup detectors off), the next boot reports the reset reason as watchdog, and `WDIOC_GETBOOTSTATUS` returns `WDIOF_CARDRESET`, under QEMU on both architectures
+- [ ] after a panic and a cold restart (under QEMU, a new QEMU process on the same variable store), the next boot logs the panic record: from an EFI variable under OVMF and the aarch64 edk2 build, and from ERST on the x86_64 long-run machine
+- [ ] a guest with no serial port (`-serial none`) reports its panic through netconsole to the harness's listener, on both architectures
+- [ ] the §25.7 SQLite test, in WAL mode with `synchronous=FULL` on §12.5's volatile-cache device, loses no acknowledged transaction across 1000 simulated power cuts, on both architectures, on the weekly job in shards of at most 5 hours
+- [ ] the in-guest suite passes with every registered counter narrower than 64 bits started one minute before its wrap (§25.7), on both architectures
+- [ ] a 72-hour soak on the long-run machine of each architecture (fork and exec, file I/O with `fsync`, TCP to a peer on the rig) ends with no panic, and §25.7's slope check projects under 1% growth over 30 days for frame, heap, slab, and descriptor counts; from this phase on the soak runs weekly on `main`, and a red soak blocks the next release like any scheduled job
+- [ ] tag `phase-25` and cut the next release
+
+### 25.1 Machine checks
+- [ ] MCA on every CPU: `CR4.MCE`, the bank count from `MCG_CAP`, every bank enabled, and any status found at boot logged as an error from the previous boot before it is cleared
+- [ ] the `#MC` handler on its §2.1 IST stack reads `MCi_STATUS`, `MCi_ADDR`, and `MCi_MISC`, grades severity (corrected, UCNA, SRAO, SRAR, fatal), and takes no lock that normal code holds
+- [ ] broadcast machine checks rendezvous every CPU and elect one to decide; local machine checks (`LMCE`) stay on one CPU; only fatal severity panics
+- [ ] corrected errors through CMCI with a per-bank threshold, and a poll timer where CMCI is absent
+- [ ] records into a per-CPU lock-free ring with a loom model (§10.8), drained to the log and to Linux's `/dev/mcelog` (`struct mce` records, `MCE_GET_RECORD_LEN`, `MCE_GET_LOG_LEN`, `MCE_GETCLEAR_FLAGS`), which unmodified `mcelog` reads; the decoder in the portable half, host-tested against recorded bank values
+- [ ] every machine-check record carries the CPU's microcode revision from §20.1, since errata fixed in microcode surface as machine checks
+
+### 25.2 Platform errors
+- [ ] SMBIOS from Limine's response, captured in `BootInfo` (§10.3) and parsed in the portable half with host tests: system identity, memory devices, and slot names, so an error names a DIMM rather than an address
+- [ ] HEST, BERT, ERST, and EINJ parsed like the §2.4 tables, host-tested and fuzzed; BERT records from the previous boot logged at boot
+- [ ] GHES error sources: polled, notified by SCI or NMI on x86_64, and by SEA, SEI, or SDEI on aarch64
+- [ ] CPER records decoded for memory, processor, and PCIe sections
+- [ ] PCIe Advanced Error Reporting: correctable errors counted per device; an uncorrectable error resets the link and calls an `error_detected` hook on the §6.1 `Driver` trait, so a failed NIC costs the NIC and not the machine
+- [ ] aarch64: SError and synchronous external aborts decoded from `ESR_EL1` into the §25.3 error kinds, and the RAS extension's error records read where firmware leaves them to the OS
+- [ ] an in-guest EINJ test on machines whose firmware has the table, `ktest_skip`ped with the reason elsewhere
+
+### 25.3 Memory error recovery
+- [ ] a poisoned flag in §12.1's frame metadata; a poisoned frame never returns to the buddy allocator
+- [ ] action-required errors in user memory, with Linux's semantics: the consuming thread gets `SIGBUS` with `BUS_MCEERR_AR` and the address; every other mapping, found through §12.1's reverse map, becomes a poisoned entry that raises the same signal on access, or gets `BUS_MCEERR_AO` at once when its process chose early kill through `PR_MCE_KILL`; a clean page-cache page is dropped and reread instead
+- [ ] action-optional errors handled from a work item: the page unmapped the same way, and `BUS_MCEERR_AO` sent at once only to processes that chose early kill, so no process dies for a page it has not touched
+- [ ] soft offlining: a frame past a corrected-error threshold has its contents migrated and is retired
+- [ ] the retired-frame list kept across reboots in an EFI variable (§20.9) and applied before any user page is allocated
+- [ ] an error in kernel memory panics with the physical address and the frame's owner from §12.1's accounting, rather than as an unexplained crash
+
+### 25.4 kexec and crash capture
+- [ ] Linux's `kexec_file_load`, with `KEXEC_FILE_ON_CRASH` for the capture kernel, and `reboot` with `LINUX_REBOOT_CMD_KEXEC` for the jump, so unmodified `kexec` from kexec-tools drives both: load a kernel and initrd, verify the kernel's signature against the §18.7 keys, and stage the jump
+- [ ] a direct entry that takes a serialized `BootInfo` (§10.3), so a kernel started by kexec needs neither Limine nor firmware, and `BootInfo` stays the only boot input it reads
+- [ ] `shutdown` on the §6.1 `Driver` trait quiescing DMA on every device before the jump, since a NIC still writing into the old kernel's buffers corrupts the new one
+- [ ] x86_64 entry through a purgatory that checks the loaded image's digest; aarch64 entry with the MMU and caches off at the entry exception level, after cleaning to the point of coherency
+- [ ] a capture region reserved at boot by a `crashkernel=` option on the §10.2 command line; the panic path jumps into the loaded capture kernel after the §4.9 halt broadcast, with every CPU's registers saved as ELF notes
+- [ ] the capture kernel presents the old memory as an ELF core at `/proc/vmcore`, as Linux's does, and writes it filtered, reading §12.1's frame metadata from the dump to drop free, zero, page-cache, and user pages
+- [ ] the vmcore written to a local disk, or over TCP to a host collector when there is none
+- [ ] the KASLR offset (§18.2) and the build id in the vmcore notes; the §10.7 core tool reads the capture kernel's ELF vmcores as well as the harness's QEMU dumps
+
+### 25.5 Watchdogs and lockups
+- [ ] a soft lockup detector: a per-CPU timer checks that the scheduler has run within a threshold, and reports the CPU's current thread and backtrace
+- [ ] a hard lockup detector on NMIs: PMU overflow on x86_64 (§19.2), GICv3 pseudo-NMIs through priority masking on aarch64, which changes how `InterruptGuard` masks there; a buddy CPU check where neither is available, as under TCG
+- [ ] an all-CPU backtrace on demand through the NMI IPI, from the shell and from a serial break sequence, which works when the scheduler does not
+- [ ] the §3.4 blocked-thread sweep reports the thread's stack and the lock or wait queue it is on, not only its id
+- [ ] `/dev/watchdog` with Linux's ioctls (`WDIOC_KEEPALIVE`, `WDIOC_SETTIMEOUT`, `WDIOC_GETBOOTSTATUS`) over §22.2's i6300esb driver, and drivers for the Intel TCO timer (QEMU `q35`) and the SBSA generic watchdog; init (§14.3) keeps feeding it after §22.2's health check commits, and stops when a critical service misses its own heartbeat
+- [ ] §22.2's panic-reboot policy records the reason in the §25.6 persistent record and, when a capture kernel is loaded, takes the §25.4 vmcore before the reboot
+- [ ] the reset reason (watchdog, panic, machine check, power) reported at boot from the persistent record or the watchdog's status
+
+### 25.6 Persistent records and remote console
+- [ ] an EFI-variable backend for the panic record over §20.9's runtime services and an ERST backend over §25.2's table, beside §20.1's reserved-RAM record, for machines where RAM does not survive a reset
+- [ ] netconsole: log lines sent as UDP from a NIC driver in polled mode, usable from the panic path with interrupts off; virtio-net and e1000 first
+- [ ] the harness gains a netconsole listener and asserts markers from it as it does from serial
+
+### 25.7 Counter wraps, durability, and long runs
+- [ ] every kernel counter narrower than 64 bits declared through one wrapping-counter type that records its expected rate; DESIGN's table of wrap times is generated from those declarations
+- [ ] a `make check` script that fails on a 32-bit or 16-bit field named as a counter (`*_count`, `*_ticks`, `*_seq`, `*_gen`) outside that type
+- [ ] a boot option on the §10.2 command line that starts every registered counter one minute before its wrap, run as a scheduled test variant
+- [ ] a test program over SQLite from the §14.9 mirror runs WAL-mode transactions against §12.5's volatile-cache device, cuts power at a random point in each iteration, and checks that every acknowledged transaction survived
+- [ ] the long-run machines on the compatibility list (§20.1) and in the §20.8 rig: netboot, serial capture, power control, and a peer for the soak's TCP
+- [ ] the soak workload and its counter sampling scripted in `tests/`, with a leak check that fits a slope to each counter rather than comparing two points
+
+### 25.8 Stretch: BMC
+- [ ] IPMI over KCS or SSIF on the x86_64 long-run machine's BMC: panics and machine checks written to the system event log, and the BMC watchdog as a second watchdog
+
+---
+
+## Phase 26: Cloud
+
+**Goal.** vibeOS images boot on the three largest public clouds, on both architectures, and configure
+themselves from the platform's metadata with nobody at a console.
+
+**Unlocks.** Machines rented by the hour instead of bought. Users who never touch hardware. The
+confidential-guest entry in [Beyond](#beyond).
+
+**Architectures.** Both. AWS on Nitro x86_64 and Graviton, Google Cloud on x86_64 and Tau T2A or Axion,
+Azure on x86_64 and an Ampere Altra or Cobalt shape. aarch64 cloud VMs describe themselves with ACPI
+rather than a device tree, so this phase needs §20.7's ACPI path. The first Google line is x86_64 only,
+since Google's aarch64 shapes offer only gVNIC. Every provisioning path runs under QEMU first, against
+the §26.1 metadata emulator.
+
+**Budget.** Accounts on AWS, Google Cloud, and Azure, each with a spend cap set before the first launch.
+The weekly job runs the smallest shape per cloud and architecture that has the devices under test, for
+minutes at a time; with development instances and stored images, about $100 a month, capped at $200.
+
+**Exit gate**
+- [ ] every provisioning path (AWS, Google, Azure) passes under QEMU against the §26.1 metadata emulator on both architectures, on the nightly job
+- [ ] Google Cloud: an x86_64 instance with virtio-net and NVMe persistent disks boots and accepts an SSH login with the key from the metadata server; it is the first cloud because it needs no new driver
+- [ ] Google Cloud: x86_64 and aarch64 instances boot with gVNIC and NVMe persistent disks, with keys from the metadata server
+- [ ] AWS: x86_64 Nitro and Graviton instances boot with root on EBS over NVMe and network on ENA, and accept an SSH login with the key from IMDSv2
+- [ ] Azure: x86_64 and aarch64 Gen2 VMs boot with root on storvsc and network on netvsc over VMBus, report ready so the deployment succeeds, and accept an SSH login
+- [ ] on every cloud, first boot grows the root partition and its vibefs v2 filesystem to the disk, sets the hostname, generates per-instance SSH host keys, and runs the user data once per instance id
+- [ ] a volume attached to a running instance on each cloud appears under a persistent name, carrying the volume id on AWS, and detaches cleanly
+- [ ] a deliberate panic on each cloud reboots the instance under §22.2's panic policy, and the panic text is in the console output the CI job fetches
+- [ ] a weekly job launches the current image on each cloud and architecture, asserts the DESIGN §8.3 markers from the console output, runs the SSH smoke test, terminates every instance, and records the cost of the run
+- [ ] tag `phase-26` and cut the next release
+
+### 26.1 Platform and metadata
+- [ ] the cloud identified from §25.2's SMBIOS fields (vendor, product, chassis asset tag), not by probing endpoints until one answers
+- [ ] one metadata client with a backend per platform: AWS IMDSv2 with a session token from `PUT` and the hop limit respected, Google with `Metadata-Flavor: Google`, and Azure IMDS with `Metadata: true`
+- [ ] a metadata emulator in `tests/harness`, standard library only, serving every platform's shape on `169.254.169.254` (and Azure's WireServer on `168.63.129.16`) through QEMU user networking, so each path is tested before a paid instance boots
+- [ ] instance credentials from metadata never logged, and on AWS fetched only through the token path
+- [ ] TSC frequency from CPUID leaves `0x15` and `0x16`, or from the hypervisor (Hyper-V's frequency MSR, §21.4's KVM clock), before any HPET or PIT calibration, since a cloud VM may have no HPET; the `time: calibrated <source>` line names the source
+- [ ] the console on each platform: COM1 on x86_64, and the SPCR-described UART on aarch64 (§20.7)
+
+### 26.2 Provisioning
+- [ ] a `cloud-init`-shaped service under §14.3's init, run once per instance id: users and authorized keys, hostname, network from metadata with DHCP as the default, and user data as a script or a declarative file of users, packages, files, and commands
+- [ ] the root partition grown in place (GPT backup header moved, partition extended), and its vibefs v2 filesystem grown by the initrd before root is mounted, through a grow in the shared format code that host tests cover
+- [ ] per-instance SSH host keys, with their fingerprints printed on the console so a first login can be checked
+- [ ] Azure: provisioning data from IMDS, and a ready report to the WireServer, which a deployment waits on; the UDF provisioning disc is not read
+- [ ] a status command listing which stages ran and their output, also in the system log
+
+### 26.3 Volumes
+- [ ] volume attach and detach three ways: through §20.9's hotplug where each volume is its own NVMe controller (EBS on AWS); as a namespace added to or removed from a running NVMe controller, announced by the namespace-attribute-changed asynchronous event and read from the changed-namespace log (Google Cloud's persistent disks); and through §26.6's storvsc LUN rescans on Azure
+- [ ] the cloud's volume id added to §20.9's persistent names where the device reports it (EBS puts it in the NVMe serial number)
+
+### 26.4 AWS: ENA
+- [ ] admin queue, asynchronous event queue, and per-CPU submission and completion queue pairs with an MSI-X vector each
+- [ ] low-latency queue mode: descriptors written into device memory through a write-combining mapping (a PAT entry on x86_64, Normal non-cacheable on aarch64), which newer Nitro shapes expect
+- [ ] device reset and recovery after a missed keep-alive or a device-requested reset, without a reboot
+- [ ] checksum offload and RSS through the §15.1 flags
+- [ ] EBS through §20.4's NVMe driver
+
+### 26.5 Google Cloud: gVNIC
+- [ ] admin queue and both queue formats, GQI with registered queue page lists and DQO with raw addressing, since the machine type picks one
+- [ ] MTU from the device, up to the 8896 bytes Google's networks carry, and RSS
+
+### 26.6 Azure: VMBus
+- [ ] the Hyper-V hypercall interface and the synthetic interrupt controller: MSRs on x86_64, hypercalls on aarch64
+- [ ] VMBus as a bus in the §6.1 device model: channel offers, GPADL buffer sharing, and ring buffers with the host's interrupt-suppression protocol, host-tested against a simulated host as §6.5's rings were
+- [ ] storvsc, with a small SCSI command layer (`INQUIRY`, `REPORT LUNS`, `READ CAPACITY(16)`, `READ(16)`, `WRITE(16)`, `SYNCHRONIZE CACHE`, `UNMAP`) that virtio-scsi can reuse; LUNs added and removed when the host signals a bus change, with I/O to a removed LUN failed as §20.9's removal does
+- [ ] netvsc: NVSP and RNDIS messages, send and receive buffers, and one channel per CPU, with accelerated networking off
+- [ ] the heartbeat, shutdown, and time sync integration services, so the portal's stop and restart work
+- [ ] the Hyper-V reference TSC page as the clock; §21.4's enlightenment line detects Hyper-V, and this uses it
+
+### 26.7 Images and CI
+- [ ] the §22.1 release emits a raw disk image, a Google `disk.raw` tarball, and a fixed-size VHD aligned to 1 MiB, byte-reproducible like its other artifacts
+- [ ] per-cloud registration scripts (an AMI with UEFI boot and ENA support set, a Google image, an Azure gallery image), idempotent and run by the release job
+- [ ] CI authenticates to each cloud through OIDC federation, so no long-lived cloud credential is stored with the repository
+- [ ] every instance the job starts is tagged with the run id and a deadline, and a sweeper deletes anything past its deadline, so a crashed job cannot leave instances billing
+- [ ] the harness gains a cloud backend: console output fetched from the cloud's API and asserted against the same marker contract
+
+### 26.8 Stretch: secure boot and more platforms
+- [ ] UEFI Secure Boot and the virtual TPM on each cloud, with §18.7's signed chain and measured boot
+- [ ] Azure's newer shapes: MANA networking and NVMe remote disks
+- [ ] virtio-scsi on the §26.6 SCSI layer, for older Google machine types and KVM clouds that use it
+- [ ] IPv6-only instances, with metadata over IPv6 where the platform serves it
+- [ ] OpenStack metadata and config drives, and a KVM-based OpenStack cloud in the weekly job
+
+---
+
+## Phase 27: Scale-up
+
+**Goal.** One kernel on hundreds of CPUs and a terabyte of memory, where boot time, locks, and tables
+grow no faster than the machine.
+
+**Unlocks.** Machines with hundreds of CPUs and terabytes of memory, including the large cloud shapes. A
+Phase 21 host that holds many guests. The CXL entry in [Beyond](#beyond).
+
+**Architectures.** Both. Past 255 CPUs, x86_64 needs 32-bit APIC IDs in every interrupt route: §20.1's
+x2APIC mode and interrupt remapping, or KVM's extended destination ID in a guest without an IOMMU.
+aarch64 needs GICv3, since GICv2 stops at 8 CPUs. The functional gates run under QEMU TCG. The scaling
+gates need real cores: a Linux KVM host of each architecture with at least 64 physical cores and
+256 GiB, rented by the hour as a bare-metal cloud instance, with vibeOS and Linux as guests on it.
+
+**Budget.** Hours on the two rented hosts: bare-metal instances of that size cost about $3 to $8 an
+hour, about $1,000 over the phase.
+
+**Exit gate**
+- [ ] 288 CPUs, enough for APIC IDs past 255, reach `smp: done` and `shell ready` under QEMU TCG with 4 GiB: x86_64 on `q35` with `intel-iommu,intremap=on,eim=on`, aarch64 on `virt,gic-version=3`; on the weekly job
+- [ ] AP bring-up from the first SIPI or `CPU_ON` to `smp: done` takes under 500 ms in a 64-vCPU, 8 GiB guest under KVM on the rented host of each architecture, and the time is on the boot line
+- [ ] a 1 TiB guest with sparse host backing boots under KVM on the rented host of each architecture no more than 5 s slower than a 4 GiB guest with the same 8 vCPUs, and `meminfo` reports the full total
+- [ ] no kernel table is sized by a CPU, memory, or device-count constant: the 8 GiB physmap cap and the 64 MiB heap region are gone (§27.3), as the CPU caps, the PCI scan cap, and the BAR mapping cap went in §20.1, and `scripts/check_limits.py` in `make check` fails on a `MAX_*` array or table bound outside the §10.4 `limits` module, except the specification-fixed bounds it lists with their source (such as `MAX_BARS`, six per PCI function)
+- [ ] in a 64-vCPU, 32 GiB guest under KVM on the rented host of each architecture, private page faults, `open`/`close` of per-thread files, `pipe` ping-pong pairs, and per-thread `mmap`/`munmap`, each run as 64 processes and as 64 threads of one process, reach at least 90% of the speedup from 1 to 64 that Linux reaches in the same guest, with both sets of numbers recorded
+- [ ] the §17.5 self-build with 64 jobs in that guest gets at least 70% of the speedup over one job that Linux gets in the same guest
+- [ ] QEMU's `edu` device with a 32-bit DMA mask works in a 16 GiB guest with sparse host backing: through the §27.2 bounce pool with the IOMMU off, and through IOVAs below 4 GiB with the §18.1 IOMMU on; under TCG with 2 vCPUs, on both architectures
+- [ ] in an 8 GiB guest under TCG with 4 vCPUs (`-cpu max` on x86_64), a 4 GiB anonymous mapping touched sequentially is backed by 2 MiB pages, counted per process; a 1 GiB `MAP_HUGETLB` mapping succeeds from the boot pool; after 10 million cycles of the §27.4 fragmentation workload, compaction still satisfies an order-9 allocation; on both architectures
+- [ ] tag `phase-27` and cut the next release
+
+### 27.1 Interrupts past 255 CPUs
+- [ ] x2APIC cluster-mode logical destinations, so an IPI to a set of CPUs is one ICR write per cluster
+- [ ] KVM's extended destination ID, found in KVM's CPUID feature leaf (`0x40000001`) without waiting for §21.4's detection, so a guest with no exposed IOMMU routes MSIs to APIC IDs above 255; on bare metal §20.1's interrupt remapping does it
+- [ ] x86_64 vectors allocated per CPU rather than from one global pool, since one MSI-X vector per queue per CPU exhausts a single space of about 200
+- [ ] aarch64: GICv3 affinity routing over all four affinity levels, redistributors discovered for every core, one ITS collection per CPU, and SGIs sent with the range selector; on GICv2 the boot log says the machine is capped at 8 CPUs
+
+### 27.2 DMA limits
+- [ ] a DMA address mask per device, and a bounce pool (swiotlb-shaped) for devices that cannot reach every frame
+- [ ] a zone below 4 GiB for devices with 32-bit DMA masks, which the bounce pool draws from
+- [ ] IOVAs allocated inside the device's mask when a §18.1 IOMMU domain translates for it, so no bounce is needed
+
+### 27.3 Large memory
+- [ ] the x86_64 physmap maps every usable RAM range and nothing else, as §11.1's does on aarch64; both use 1 GiB pages where the CPU has them (`pdpe1gb`, aarch64 level-1 blocks) and 2 MiB pages otherwise; the 8 GiB cap in DESIGN §4.1 and the firmware MMIO problem it worked around are both gone
+- [ ] the heap and KVA regions in DESIGN §4.1 sized at boot from installed memory, instead of fixed at 64 MiB and 64 GiB; §20.1 already sized the `ioremap` window
+- [ ] frame metadata (§12.1) allocated per memory section so holes cost nothing, placed on its own node (§19.7), and initialized in parallel across CPUs, with the remainder deferred to first allocation
+- [ ] per-CPU free-frame lists in front of each node's buddy, since the buddy lock is the first thing 64 CPUs contend; §19.9 did the same for objects
+- [ ] memory layouts with holes, ranges above 1 TiB, and eight NUMA nodes tested under QEMU `-numa`
+
+### 27.4 Huge pages
+- [ ] 2 MiB and 1 GiB pages for user memory: a 1 GiB pool reserved at boot, `MAP_HUGETLB` with `MAP_HUGE_2MB` and `MAP_HUGE_1GB`, and Linux's `hugetlbfs`
+- [ ] transparent 2 MiB pages for aligned anonymous regions at fault time, and a background collapser for regions first faulted in 4 KiB pages
+- [ ] compaction: movable pages migrated through §12.1's reverse map to rebuild free 2 MiB blocks, on demand and in the background
+- [ ] a fragmentation workload in `tests/`: seeded, mixed-order allocations and frees with long-lived unmovable ones among them, which the gate runs
+- [ ] huge pages split on partial `munmap`, `mprotect`, and COW, with an in-guest test for each
+- [ ] per-process and system counts of huge mappings, which the gate reads
+
+### 27.5 Many CPUs
+- [ ] a host test parses a MADT with 512 processors (types 9 and 10) through §20.1's tables; aarch64's CPU tables, from the device tree and from the MADT's GICC entries, are sized from the firmware CPU count the same way
+- [ ] AP bring-up in parallel: batched INIT-SIPI on x86_64 and concurrent PSCI `CPU_ON` on aarch64, with the timer calibrated once and shared when the counter is invariant, instead of the §4.5 one-at-a-time sequence with its 10 ms per AP
+- [ ] per-CPU areas, stacks, and run queues allocated on the CPU's own node
+- [ ] queued (MCS-style) spinlocks replacing the CAS `SpinMutex` (§3.5) on contended locks, measured at 64 CPUs, since a test-and-set lock collapses under that many waiters; a loom model beside §10.8's
+- [ ] TLB shootdown sent only to CPUs that have run the address space, batched per unmapped range, and skipped for lazy kernel threads; aarch64 keeps broadcast `tlbi ...is` and sends no IPI
+- [ ] load balancing hierarchical over SMT, core, cache, and NUMA levels, extending §19.4's topology and §19.7's nodes to 288 CPUs and 8 nodes, with the balancing cost per tick measured
+- [ ] RCU (§19.5) grace periods tracked in a tree, so one CPU does not poll hundreds of others
+- [ ] `VIBEOS_SMP=288` as a harness profile with scaled timeouts, on the weekly job
+
+### 27.6 Stretch: larger address spaces and hot-add
+- [ ] 5-level paging (LA57) on x86_64 and 52-bit addresses (LPA2) on aarch64, for machines past 64 TiB
+- [ ] memory hot-add through ACPI or virtio-mem, so a VM can grow without a reboot
+
+---
+
+## Phase 28: Network at Scale
+
+**Goal.** Fill a 100 Gbit/s link and hold a hundred thousand connections, with the cost per packet and
+per connection measured against Linux on the same machines.
+
+**Unlocks.** Network-bound services at line rate. Guests at line rate through SR-IOV. The RDMA and
+live-migration entries in [Beyond](#beyond).
+
+**Architectures.** Both. NIC drivers are PCI and shared. Each §20.8 machine gets a 100GbE NIC cabled
+directly to one port of a Linux peer, and every hardware number is compared against Linux booted on the
+same machine with the same NIC, cable, and peer. The virtio-net and connection-scale gates run under KVM
+on the same machines, booted into Linux as the host as Phase 21's gate does.
+
+**Budget.** Three dual-port 100GbE NICs of one model, NVIDIA ConnectX-6 Dx or Intel E810 (about $800
+each), two direct-attach cables (about $100 each), and a Linux peer machine with a PCIe 4.0 x16 slot
+(about $1,500): about $4,100. Each §20.8 machine takes one NIC in a free x16 slot.
+
+**Exit gate**
+- [ ] TCP between each §20.8 machine and the peer, over 8 streams in each direction, reaches at least 80 Gbit/s and at least 80% of Linux's rate on the same machine, NIC, cable, and peer
+- [ ] virtio-net with 4 queue pairs and vhost on the host reaches at least 2.5 times its single-queue TCP throughput, in a 4-vCPU, 4 GiB guest under KVM on the §20.8 machine of each architecture
+- [ ] 64 flows spread across every receive queue within 20% of even, on the 100GbE NIC and on 4-queue virtio-net, and each queue's interrupt lands on its own CPU, shown by per-queue counters
+- [ ] an `epoll` server holds 100,000 idle TCP connections from a load generator on the host, in a 4-vCPU, 4 GiB guest under KVM on the §20.8 machine of each architecture, with kernel memory per idle connection under 10 KiB, and accepts at least 50,000 new connections per second
+- [ ] the 64-byte UDP receive rate on each §20.8 machine is at least 50% of Linux's on the same machine, NIC, and peer
+- [ ] an SR-IOV virtual function assigned to a 4-vCPU, 4 GiB §21.2 guest through the §18.1 IOMMU reaches at least 90% of the host's TCP throughput to the peer, on the §20.8 machine of each architecture
+- [ ] tag `phase-28` and cut the next release
+
+### 28.1 Multiqueue
+- [ ] per-queue receive and transmit rings, one MSI-X vector each (from §27.1's per-CPU pools on x86_64), placed through the §6.3 affinity API with one queue per CPU up to the device's limit
+- [ ] RSS: a Toeplitz hash, a programmable indirection table, and a configurable key, set by `ethtool` from the §14.9 mirror through Linux's `SIOCETHTOOL` ioctl
+- [ ] software receive steering for devices without RSS, and transmit queue selection by the sending CPU
+- [ ] per-queue statistics (packets, bytes, drops, interrupts, and polls), which `ethtool -S` reads
+
+### 28.2 Offloads and batching
+- [ ] TCP segmentation offload on the 100GbE NIC, and GSO, its software fallback at the driver boundary for devices without it; §15.1 already uses virtio-net's
+- [ ] receive coalescing (GRO) in software, and hardware LRO where the device does it correctly
+- [ ] jumbo frames up to 9000 bytes end to end
+- [ ] byte queue limits on transmit, so a deep ring does not add milliseconds of latency
+- [ ] an interrupt followed by budgeted polling until the ring is empty, with adaptive interrupt moderation beside §19.6's coalescing
+- [ ] socket busy polling for latency-bound services, measured against the interrupt path
+
+### 28.3 100GbE driver
+- [ ] one 100GbE PCIe NIC driver for the model this phase's budget buys, NVIDIA ConnectX (mlx5) or Intel E810 (`ice`): firmware command interface, queues, RSS, and offloads, with its BARs mapped through §20.1's sized `ioremap` window
+- [ ] its virtual function driver as well, which §28.4 assigns
+- [ ] link state, speed, and FEC mode reported; §25.2's `error_detected` hook implemented
+- [ ] the rig: the peer's dual-port NIC cabled to each §20.8 machine, and one script that takes the vibeOS and Linux measurements back to back
+
+### 28.4 SR-IOV and passthrough
+- [ ] the SR-IOV capability: virtual functions enabled, their BARs sized, and bound like any PCI device
+- [ ] per-VF MAC and VLAN filters set from the physical function
+- [ ] device assignment to a §21.2 guest through Linux's VFIO interface (`/dev/vfio`), so QEMU's `vfio-pci` uses it: the device's isolation group (§18.1) mapped to guest memory, and its MSI-X delivered as posted interrupts where the CPU has them (§21.1)
+- [ ] the assigned device reset between guests, so no state from one guest reaches the next
+
+### 28.5 Connection scale
+- [ ] TCP lookup tables sized at boot from memory and resizable; listening sockets spread across CPUs with `SO_REUSEPORT` (§15.7) and per-CPU accept queues
+- [ ] TCP timers (retransmit, delayed ACK, keepalive, `TIME_WAIT`) on §19.4's per-CPU timer wheels, so 100,000 connections do not share one sorted list
+- [ ] socket memory accounting with system-wide pressure thresholds, so a connection flood reclaims buffers before the OOM path runs
+- [ ] kernel memory per connection measured and recorded in `docs/`
+
+### 28.6 Stretch: steering and timestamps
+- [ ] receive flow steering that follows the consuming thread's CPU
+- [ ] hardware timestamping and a PTP hardware clock on the 100GbE NIC
+
+---
+
+## Phase 29: Storage at Scale
+
+**Goal.** Several disks act as one volume that grows, survives the loss of a disk, repairs silent
+corruption, and reports a failing disk before it fails; one NVMe drive runs as fast as Linux drives it.
+
+**Unlocks.** Servers whose data outlives any single disk. Large volumes that grow in place. Replicated
+storage in [Beyond](#beyond).
+
+**Architectures.** Both. RAID, the volume manager, and the filesystem are portable and gated under QEMU
+with hot-pluggable disks in §20.9's configuration. The IOPS gate runs on a data-center NVMe drive in the
+§20.8 machine of each architecture.
+
+**Budget.** One data-center NVMe drive of one model for each §20.8 machine, separate from its root disk,
+so the IOPS gate never measures a mounted root: about $300 each, $600 in total.
+
+**Exit gate**
+- [ ] RAID 1, 5, 6, and 10 arrays of four virtio-blk disks keep serving reads and writes when a member is removed with `device_del` mid-workload, and rebuild onto a replacement added with `device_add`; data checksums match afterward; under TCG with 2 vCPUs and 1 GiB, on both architectures
+- [ ] 1000 simulated power cuts during RAID 5 and RAID 6 writes on §12.5's volatile-cache device, each followed by reassembly and the bitmap-bounded resync, leave no stripe whose parity disagrees with its data; 1000 more during degraded writes with the §29.2 journal leave every block the interrupted writes did not touch intact; on the weekly job in shards of at most 5 hours
+- [ ] a logical volume and the vibefs v2 filesystem on it grow online by adding a disk to the group while a write workload runs, and host `fsck` is clean afterward, under TCG with 2 vCPUs and 1 GiB, on both architectures
+- [ ] the §29.4 vibefs v2 scrub finds a block the host corrupted underneath either member of a RAID 1 array, rewrites it from the copy whose checksum verifies, and counts and logs the repair, under TCG with 2 vCPUs and 1 GiB, on both architectures
+- [ ] vibefs v2 on §18.7's encryption on a logical volume on RAID 1 passes the §8.5 crash test on §12.5's volatile-cache device, on both architectures
+- [ ] 4 KiB random reads on the data-center drive in the §20.8 machine of each architecture reach at least 90% of Linux's IOPS, with `fio` from the §14.9 mirror on both, using the `io_uring` engine with `direct=1` (§19.8), at the same queue depth and job count
+- [ ] an NVMe drive whose critical warning is raised at runtime (QEMU's `smart_critical_warning` property) produces an event that the system log and a notification hook both see, on both architectures
+- [ ] tag `phase-29` and cut the next release
+
+### 29.1 Block layer at scale
+- [ ] a mapping-target interface for stacked block devices (linear, striped, mirror, parity, thin, and §18.7's encryption transform), so RAID, volumes, and encryption stack through one mechanism; userspace drives it through Linux's device-mapper ioctls on `/dev/mapper/control` (`DM_DEV_CREATE`, `DM_TABLE_LOAD`, `DM_DEV_SUSPEND`, `DM_TABLE_STATUS`, `DM_DEV_REMOVE`) with the `linear`, `striped`, `raid`, `thin-pool`, and `thin` target names, so unmodified `dmsetup` and LVM2 from the §14.9 mirror run
+- [ ] per-CPU submission kept end to end through stacked devices, onto the hardware queues of §7.2 and §20.4
+- [ ] requests split at stripe and chunk boundaries, and merged below them
+- [ ] arrays and logical volumes listed in §23.4's `/proc/diskstats` and under `/sys/block` with `slaves/` and `holders/` links, as Linux lists `md` and `dm` devices, so `iostat` and `lsblk` see the stack; per-device latency histograms, which Linux exposes only through eBPF, in debugfs under `block/<dev>/`
+- [ ] I/O timeouts escalating from abort to controller reset (NVMe) to device failure, never an indefinite hang
+- [ ] arrays and volumes found by §20.9's persistent names and by filesystem UUID, never by probe order
+
+### 29.2 Software RAID
+- [ ] the member superblock, write-intent bitmap, and write journal in md's version 1.2 formats, documented in `docs/` from Linux's `md_p.h` before any code and host-tested against members that `mdadm` created under Linux, so an array assembles under either kernel
+- [ ] RAID 0, 1, 10, 5, and 6; the RAID 6 P and Q arithmetic in the portable half, host-tested by recovering every pair of lost members
+- [ ] a write-intent bitmap, which bounds resync after an unclean shutdown to the regions it marks, and md's write journal on a separate device, which closes the RAID 5 and 6 write hole (a power cut during a degraded write) that a bitmap leaves open
+- [ ] the §12.5 volatile-cache device serving each member as its own export, with one power cut applied to all of them, which the RAID power-cut gate runs on
+- [ ] degraded operation, hot spares, rebuild throttled against foreground I/O, and a rebuild that resumes after a reboot
+- [ ] unmodified `mdadm` from the §14.9 mirror over Linux's md interface: `/dev/md<N>`, the md ioctls it issues, `/sys/block/md<N>/md/` (`array_state`, `sync_action`, `mismatch_cnt`, and each member's `dev-*/state`), and `/proc/mdstat`; create, assemble, add, fail, remove, and `--detail` work
+- [ ] reshape: a RAID 5 or 6 grown by one member while mounted
+
+### 29.3 Volume management
+- [ ] unmodified LVM2 from the §14.9 mirror over §29.1's device-mapper interface: physical volumes, volume groups, and logical volumes in LVM2's own on-disk metadata, which the kernel never parses
+- [ ] linear and striped logical volumes, extended and shrunk; online extension composed with §29.5's online grow
+- [ ] thin provisioning through the `thin-pool` and `thin` targets, with discard passed down and the pool's low-water-mark event raised before it fills
+
+### 29.4 Integrity and health
+- [ ] scrub on a schedule and on demand: md's `check` and `repair` through `sync_action`, with mismatches counted in `mismatch_cnt` and logged; `repair` rewrites parity from data and mirrors from the first member, as Linux's does, since a mismatch alone does not say which copy is right
+- [ ] a vibefs v2 checksum failure retries the read from another mirror through a per-request hint and rewrites the bad copy; a vibefs v2 scrub reads every mirror copy of every block that way, so a corrupted copy is found and rewritten from one whose checksum verifies, whichever member holds it
+- [ ] NVMe health logs and SMART (§20.6) polled, thresholds turned into events for the system log and a notification hook, and a failing member marked for replacement before it fails
+- [ ] batched discard for SSDs through Linux's `FITRIM` ioctl, so unmodified `fstrim` trims through filesystem, volume, and RAID
+
+### 29.5 Filesystem at scale
+- [ ] vibefs v2 grown online into new space at the end of its device, without unmounting
+- [ ] vibefs v2 at 16 TiB on a sparse image and at 100 million inodes: mount time, `fsck` time and memory, and lookup in a million-entry directory recorded in `docs/`; a v2 limit below either is raised with a new format version that `fsck` upgrades in place
+- [ ] per-user, per-group, and per-project quotas enforced and managed through Linux's `quotactl`, with project ids set through `FS_IOC_FSSETXATTR`
+- [ ] writeback in parallel per filesystem and per device, measured on the data-center drive
+
+### 29.6 Stretch: storage over the network
+- [ ] an NVMe over TCP initiator and target, so one vibeOS machine serves a namespace to another
+- [ ] multipath across two paths to one namespace, with failover time measured
+
+---
+
+## Phase 30: Operations
+
+**Goal.** Real server software, run for a month with nobody at the machine, with its metrics, logs,
+clock, and updates handled from off the machine.
+
+**Unlocks.** The claim that vibeOS runs production services, backed by numbers taken against Linux on the
+same machines. [Phase 40](#phase-40-stability)'s 1.0. Fleets and cluster nodes, in [Beyond](#beyond).
+
+**Architectures.** Both. The services are unmodified Linux binaries from the §14.9 Alpine mirror, on
+Phase 23's surface. The comparisons with Linux run under KVM on the §20.8 machine of each architecture,
+booted into Linux as the host as Phase 21's gate does. The live update gate runs on the same machines
+with vibeOS as the host. The 30-day run uses the §25.7 long-run machines. Nothing here is bought.
+
+**Exit gate**
+- [ ] PostgreSQL's regression suite (§30.1) passes, minus its checked-in expected-failure list, under TCG with 2 vCPUs and 2 GiB on both architectures, on the weekly job
+- [ ] pgbench, a host HTTP load generator against nginx serving static files, and `redis-benchmark` each reach at least 70% of Linux's throughput in the same guest shape (4 vCPUs, 4 GiB, 4-queue virtio-net, virtio-blk) under KVM on the §20.8 machine of each architecture; the numbers are recorded per release
+- [ ] a host client commits numbered rows to PostgreSQL through 100 simulated power cuts on §12.5's volatile-cache device; after each, PostgreSQL recovers and every commit acknowledged to the client is present; under TCG with 2 vCPUs and 2 GiB, on both architectures
+- [ ] a Prometheus server on the host scrapes `node_exporter` on vibeOS, and every query in the checked-in dashboard returns data: CPU, memory, pressure stall, disk, network, and per-service series, on both architectures
+- [ ] kernel and service logs reach a host collector over TLS as RFC 5424 records with structured fields, and a sequence-number check finds none lost across a 10-minute collector outage, on both architectures
+- [ ] an update whose kernel panics, one that hangs with interrupts off, and one that fails its health check each roll back with the trial boot taken through kexec (§30.4), and a good update commits through it, on both architectures under QEMU (TCG, 2 vCPUs, 2 GiB)
+- [ ] with the clock's rate set 200 ppm fast through `adjtimex` before chrony starts, chrony brings its offset from the host NTP server under 1 ms within 30 minutes and holds it there for an hour, in a 2-vCPU, 1 GiB guest under KVM on the §20.8 machine of each architecture
+- [ ] a host kernel is replaced through kexec while a 2-vCPU, 2 GiB §21.2 guest keeps its memory in place, and a ping loop from the guest to the rig misses at most 2 s, on the §20.8 machine of each architecture
+- [ ] 30 days of uptime on the §25.7 long-run machine of each architecture running the §30.1 services and the §17.5 build loop: no panic, no watchdog reset, kernel memory and descriptor counts within 2% of day one, and the wall clock within 10 ms of the rig's NTP server at every hourly sample
+- [ ] tag `phase-30` and cut the next release
+
+### 30.1 Server software
+- [ ] PostgreSQL, nginx, and Redis from the §14.9 mirror, unmodified, each run as a §14.3 service entered through §14.9's `vibeos-linux` helper into one Alpine root; the calls they need are Phase 23's
+- [ ] `pg_regress` from the source tarball matching the packaged PostgreSQL, run against the packaged server, with a checked-in expected-failure list whose entries each name a kernel bug or a missing feature and its box
+- [ ] one script takes the vibeOS and Linux measurements back to back on the same guest shape, with pgbench, a host HTTP load generator, and `redis-benchmark` on the host
+- [ ] results recorded in `docs/` per release, with a regression failing the scheduled job the way §19.3's thresholds do
+
+### 30.2 Metrics
+- [ ] pressure stall accounting: the time runnable threads wait for a CPU, and the time they stall on memory reclaim and on I/O, system-wide in `/proc/pressure/{cpu,memory,io}` and per §21.5 cgroup in its `cpu.pressure`, `memory.pressure`, and `io.pressure` files, in Linux's formats, with triggers written to those files and waited on with `ppoll` and `epoll`
+- [ ] Prometheus's `node_exporter` from the §14.9 mirror runs unmodified over Phase 23's `/proc` and `/sys` and reports CPU, memory, pressure, filesystem, disk, and network series; each collector it cannot serve is listed in `docs/` with the reason
+- [ ] per-service usage from §14.3's init and the Phase 25 error counters (machine checks, retired frames, AER, watchdog) exported through `node_exporter`'s textfile collector
+- [ ] series names documented and stable across releases, with any change listed in the changelog
+- [ ] the exporter's own CPU and memory cost measured and recorded in `docs/`
+
+### 30.3 Logs
+- [ ] kernel log records carry their subsystem and device as `/dev/kmsg`'s `SUBSYSTEM=` and `DEVICE=` continuation lines (§13.9), as Linux's device messages do, so rsyslog keeps them as fields rather than flattening them into text
+- [ ] `/dev/log` as a syslog datagram socket feeding §14.3's system log, so ported daemons log into it unmodified
+- [ ] rsyslog from the §14.9 mirror ships kernel and service logs to a host collector as RFC 5424 records over TLS, with a disk-assisted queue while the collector is away
+- [ ] rotation and a disk quota for the system log, so a noisy service cannot fill the root filesystem
+
+### 30.4 Update reboots
+- [ ] kexec (§25.4) as the §22.2 trial boot when an update changes nothing the firmware loads: the new kernel starts once without touching the boot order, so any reset before the commit returns to the old entry; §25.4's `shutdown` leaves the §22.2 watchdog armed across the jump, so a hang in the new kernel still resets
+- [ ] the time from the reboot request to the health check recorded for the kexec and firmware paths, per architecture
+
+### 30.5 Time
+Moved from Beyond: a month of uptime needs a disciplined clock, not a stepped one. §15.8's SNTP client
+still sets the clock at boot.
+
+- [ ] the kernel clock adjustable in rate and slewed in offset through `adjtimex` and `clock_adjtime` with Linux's `struct timex` (`ADJ_FREQUENCY`, `ADJ_OFFSET`, `ADJ_SETOFFSET`, `ADJ_STATUS`), published through the §2.7 seqlock
+- [ ] chrony from the §14.9 mirror disciplines the clock unmodified: slewing after the first sync, its drift file kept across reboots, and several servers with outlier rejection
+- [ ] leap seconds handled by a documented policy (smear, or step at the boundary through `STA_INS` and `STA_DEL`), tested with a simulated leap from a host NTP server
+
+### 30.6 Live update
+- [ ] a handover table passed beside the serialized `BootInfo` (§25.4), listing memory the new kernel must not touch
+- [ ] §21.2 guests paused, their vCPU and device state serialized, their memory left in place and listed in the handover, and resumed by the new kernel
+- [ ] the pause measured, and reported through QEMU's QMP
+
+### 30.7 Long runs
+- [ ] the §25.7 soak workload extended with the §30.1 services and the §17.5 build loop, and an NTP server on the rig's peer, which chrony on the long-run machines follows and the hourly clock sample compares against
+- [ ] counters sampled every minute and published per run, with §25.7's slope-based leak check
+- [ ] the 30-day run repeated each quarter on the long-run machines, in place of that month's weekly soaks
+
+---
+
+# Era VII. Daily Driver
+
+A person uses vibeOS on their own laptop and desktop every day, on both architectures. Era IV proves the
+kernel on hardware; this era proves the machine. Gates are met on the reference machines below, in the
+§20.8 hardware CI grown into a rig (§31.7), and every power, throughput, or benchmark number is compared
+against Linux on the same machine.
+
+The kernel speaks Linux's interface for each device class it adds here (DRM, evdev, ALSA, V4L2, nl80211,
+Bluetooth sockets, and their sysfs classes), so the userspace above it is upstream's, unmodified. "From
+Alpine" below means a binary from the pinned Alpine release that §14.9 runs. The gates run those
+binaries; Phase 37 ships the same software built from source by the Phase 24 ports tree.
+
+Each phase lands every syscall, `ioctl`, and `/proc` or `/sys` file its gates' software uses that
+Phase 23 did not, found by tracing its gates with `strace` from Alpine, each with a §13.11 differential
+test where it needs no device and an in-guest test where it does. Test suites Alpine does not package
+(libinput's and libevdev's, IGT, dEQP and `deqp-runner`, BlueZ's testers) are built as §13.11 builds its
+corpus, from pinned upstream sources checked by SHA-256, and are never shipped.
+
+Every phase here needs 20, and 23 for sysfs and uevents in Linux's layout, which udev and everything
+above it read. Phase 31 needs nothing else. Phase 32 needs 31, and §18.5's debugfs, which carries the
+DRM counters and pipe CRCs. Phases 33, 34, and 35 need 32; 34 also needs §19.4's real-time class for
+PipeWire's data thread, and 35 also needs 34 for Bluetooth audio. Phase 36 needs 33 to 35, and 21 for
+the browser sandbox's namespaces.
+Phase 37 needs 36, 22 for the installer, unattended updates, and compatibility list, and 24 for the ports
+tree. Phase 38 needs 37, because its gate reruns this era's laptop lines on Apple hardware; its bring-up
+(§38.1 to §38.4) needs only 31 and §18.1, and starts once its budget is approved. Nothing here needs Era
+VI, and nothing in Era VIII needs this era.
+
+x86_64 comes first, on a laptop Linux supports end to end. aarch64 lines run on the §20.7 machine, used
+as a desktop, wherever it has the hardware. Lines that need an aarch64 laptop are gated in Phase 38 on
+the MacBook Air, and each phase's Architectures line names them.
+
+**Reference machines.** Each is bought in the phase whose Budget line names it: about $5,900 over the era
+at 2026 prices, or $5,100 if the §20.8 x86_64 machine can serve as the desktop, estimates to confirm
+before buying. The maintainer's own Apple Silicon Mac is not a test machine: an installer or boot-policy
+bug there costs the dev host.
+
+| Role | Machine | Bought in | What it proves |
+|---|---|---|---|
+| x86_64 laptop | Framework Laptop 13 with the newest Intel Core Ultra that Linux's `xe` driver supports by default, an Intel AX210 in its M.2 slot | 31 | Intel display, GPU, Wi-Fi, and Bluetooth; an I2C-HID touchpad; a UVC camera; Intel audio; s2idle with no S3 |
+| x86_64 desktop | a mini PC with the laptop's Intel Core Ultra generation, two DisplayPort outputs, an Ethernet NIC §20.6 drives, and an AX210; the §20.8 x86_64 machine if it qualifies | 32 | two monitors on the same drivers, a wired network, no battery |
+| aarch64 desktop | the §20.7 machine, with an AX210 on a PCIe adapter, a USB camera, and a USB headset | 20, additions in 34 and 35 | the era's stack on aarch64 hardware, rendering with `llvmpipe` |
+| aarch64 laptop | MacBook Air M1 (2020), used | 38 | the aarch64 laptop Asahi Linux documents most completely: DCP, AGX, SPI keyboard and trackpad, SMC, BCM4378 |
+| aarch64 Apple desktop | Mac mini M1 (2020), used | 38 | the same SoC with HDMI and Ethernet, and m1n1's USB proxy for hardware CI |
+| peripherals | a USB-C dock with DP MST and USB Ethernet §20.6 drives, two 4K 60 Hz DisplayPort monitors, two Wi-Fi 6E access points with WPA3, a UAC2 headset, USB UVC cameras, FAT32 and exFAT USB sticks | 32 to 36 | what a person plugs in |
+| rig | a switched outlet per charger, a microcontroller HID injector per machine (USB keyboard, mouse, and precision touchpad; BLE keyboard and mouse), a lid magnet and power-button actuator per laptop, a Classic Bluetooth A2DP sink, HDMI capture, a USB audio interface, CI-controlled video and USB switches | 31 to 35, and 38 for the Macs | §31.7 |
+
+## Phase 31: Laptop Platform
+
+**Goal.** The reference laptop behaves like a laptop: s2idle that survives hundreds of cycles, a
+suspended battery drain close to Linux's, a touchpad libinput drives, hotkeys, a lid that suspends,
+runtime power management, and firmware loaded for every device. Also the rig and the Linux baseline every
+later gate in this era is measured on.
+
+**Unlocks.** Carrying the machine. Runtime power management that every later driver hooks into. The
+firmware loader, the rig, and the comparison baseline that Phases 32 to 38 use.
+
+**Architectures.** Both. The firmware loader, runtime PM, evdev multitouch, and `uinput` are shared;
+libinput's test suite runs on both in CI, and the rig's USB touchpad drives the §20.7 machine. The ACPI
+plumbing, I2C-HID, and s2idle lines are x86_64 only, on the reference laptop. The aarch64 laptop lines
+(s2idle, battery, lid, built-in keyboard and trackpad) are gated in Phase 38.
+
+**Budget.** The reference laptop, about $1,600. A HID injector per machine, and per laptop a lid magnet,
+a power-button actuator, a switched outlet for its charger, and a USB 3 debug cable, about $200.
+
+**Exit gate**
+- [ ] 500 consecutive s2idle cycles on the reference laptop, woken alternately by the RTC alarm and by a keypress from the rig's HID injector, with no hang, the same device list after every resume, and a 1 GiB fetch from the rig host over a USB Ethernet adapter (§20.6) with no corruption after the last cycle
+- [ ] S0ix residency above 90% over a 10-minute suspend on the reference laptop, from the PMC's `SLP_S0` residency counter
+- [ ] suspended battery drain over 8 hours on the reference laptop at most 1.5 times Fedora's on the same machine (§31.7), from the battery's own charge readings
+- [ ] on the reference laptop, the rig's lid magnet suspends it and releasing the lid resumes it; the power-button actuator starts an orderly shutdown through init; switching the charger's outlet off and on is reported within 2 s by the kernel and by UPower from Alpine
+- [ ] `libinput list-devices` from Alpine reports the reference laptop's touchpad, keyboard, and lid switch with the capabilities Fedora reports on the same machine
+- [ ] libinput's and libevdev's test suites pass through `/dev/uinput` under QEMU on both architectures (TCG, 2 vCPUs, 1 GiB), minus a checked-in expected-failure list, and `libinput replay` of the §31.2 recordings produces the events Fedora produced
+- [ ] the rig's HID injector, presenting as a USB precision touchpad, drives tap, two-finger scroll, pinch, and two-finger right click through libinput on the reference laptop and the §20.7 machine, checked from `libinput debug-events`
+- [ ] every hotkey in a list captured with `evtest` under Fedora on the reference laptop and checked in produces the same evdev key in a host test: scan codes through the §5.2 decoder, and ACPI and WMI events through the §20.2 interpreter on the machine's `acpidump` tables
+- [ ] on the reference laptop and the §20.7 machine, an idle USB device autosuspends, idle PCIe devices reach D3, and their links L1 substates, on every device and link where Fedora reaches them on the same machine (from `lspci -vv` and `power/runtime_status` captured under Fedora and checked in), each resumes on use, and the §31.4 counters show it
+- [ ] the loader serves §20.1's microcode on the reference laptop and a named test blob in-guest on both architectures from the firmware package, and refuses a blob whose hash is not in the signed firmware package
+- [ ] tag `phase-31` and cut the next release
+
+### 31.1 ACPI laptop plumbing
+- [ ] the ACPI embedded controller: `ECDT` for early access, the EC address-space handler in the §20.2 interpreter, `_Qxx` query events from its GPE, and burst mode; §31.5's battery and AC lines, §31.2's lid switch, and the laptop's §20.2 thermal zones read through it
+- [ ] general-purpose events past the fixed ones: `_Lxx` and `_Exx` methods, and wake GPEs armed before suspend
+- [ ] Intel's GPIO pin controllers with `GpioInt` and `GpioIo` resources, since the touchpad's interrupt is a GPIO line
+- [ ] Synopsys DesignWare I2C controllers (Intel LPSS) enumerated from `I2cSerialBusV2` resources, extending §20.6's i2c line past SMBus
+- [ ] hotkeys that arrive through WMI (`PNP0C14`), `_DSM`, or the ACPI video device's notifications rather than as scan codes
+- [ ] UCSI (`PNP0CA0`): each USB-C port's role, partner, and power contract in Linux's `/sys/class/typec` layout; DP alt mode is §32.2
+- [ ] a debug option that writes a hash of each device's name into the RTC before its suspend or resume hook runs, as Linux's `pm_trace` does, and decodes it on the next boot, since the forced power-off that recovers a hung laptop clears §20.1's RAM record; off by default because it overwrites the wall clock
+
+### 31.2 Input
+Gestures, tapping, palm rejection, and pointer acceleration are libinput's, from Alpine. The kernel's
+part is evdev as libinput expects it.
+
+- [ ] a udev daemon from Alpine as a §14.3 service, with its `input_id` rules and hwdb, so libinput, UPower, and PipeWire find devices with the properties they filter on; libinput ignores a device without `ID_INPUT`
+- [ ] I2C-HID: descriptor fetch, input reports on the GPIO interrupt, reset and power commands, sharing §20.3's report parser
+- [ ] HID multitouch (the precision-touchpad usages), over I2C and USB, as evdev's multitouch protocol B on §16.4's nodes, with the properties libinput reads: contact slots, resolution, and `INPUT_PROP_BUTTONPAD`
+- [ ] the lid as `SW_LID`, the power button as `KEY_POWER`, and the §31.1 hotkeys as their named keys (`KEY_BRIGHTNESSUP`, `KEY_MUTE`, `KEY_RFKILL`, and the rest)
+- [ ] `/dev/uinput`, which libinput's and libevdev's test suites, `libinput replay`, and BlueZ's media keys (§35.5) use
+- [ ] `libinput record` captures of the reference laptop's touchpad, taken on Fedora, checked in and replayed through `uinput` in CI on both architectures
+
+### 31.3 Suspend
+- [ ] s2idle as the suspend path, since the reference laptop has no S3: freeze userspace, suspend devices in dependency order through §20.2's hooks, idle every CPU in its deepest state, and resume on a wake interrupt
+- [ ] Linux's interface: `/sys/power/state`, and `/sys/power/mem_sleep` reporting `s2idle`, so suspend callers from Alpine work unmodified
+- [ ] the LPS0 `_DSM` calls around the idle, the PMC's residency read back after resume, and the device that blocked S0ix named when residency is low
+- [ ] wake by timer: `/dev/rtc0`'s `RTC_WKALM_SET` and the `CLOCK_BOOTTIME_ALARM` and `CLOCK_REALTIME_ALARM` timers, which is how the gate's cycles run unattended
+- [ ] clocks across suspend: `CLOCK_MONOTONIC` excludes suspended time, `CLOCK_BOOTTIME` includes it, and the wall clock is re-read from the RTC
+- [ ] per-device suspend and resume times recorded every cycle, so a slow driver is visible
+- [ ] hibernation (§20.2's S4) through `/sys/power/disk`
+
+### 31.4 Runtime power management
+- [ ] a runtime-PM usage count per device on the §6.1 model: an idle device suspends after a delay and I/O resumes it, with Linux's `power/control` and `power/runtime_status` files
+- [ ] PCIe ASPM with L1 substates from the link capabilities, honoring `_OSC` and the FADT's ASPM bit
+- [ ] PCIe D3hot, and D3cold through `_PR0` and `_PR3` power resources
+- [ ] USB autosuspend, with remote wakeup for HID
+- [ ] NVMe autonomous power state transitions
+- [ ] counters for wakeups per second by source and runtime-PM residency per device, and a tool that prints them
+
+### 31.5 Power supply and policy
+- [ ] D-Bus from Alpine as the system bus, with polkit, as §14.3 services, since UPower, power-profiles-daemon, NetworkManager (§35.3), and BlueZ (§35.5) are D-Bus services
+- [ ] the battery and AC adapter in Linux's `power_supply` class: status, charge, design and full capacity, cycle count, and rate, with a uevent on each change, so UPower from Alpine reads them unmodified
+- [ ] a charge limit as `charge_control_end_threshold`, where the EC exposes one
+- [ ] §20.2's frequency governor in Linux's `cpufreq` sysfs layout with the energy-performance preference, and `/sys/firmware/acpi/platform_profile` where the firmware has profiles, so power-profiles-daemon from Alpine switches profiles unmodified
+- [ ] suspend on lid close and on low battery, and hibernation on critical battery (an orderly shutdown where hibernation is unavailable), as a service under §14.3's init rather than kernel policy, logged either way
+
+### 31.6 Firmware
+- [ ] one loader: a driver requests a blob by name; blobs for devices needed before root come from the initrd, the rest from `/lib/firmware` in Linux's layout
+- [ ] firmware as its own §14.6 package, each blob's license recorded under the §14.10 policy; redistributable blobs come from `linux-firmware` and Intel's microcode repository, pinned by commit
+- [ ] each blob's SHA-256 in the firmware package's signed file list (§14.6), checked at load; in-guest tests use a package signed with a test key
+- [ ] §20.1's microcode and §20.6's NIC firmware loaded through it
+
+### 31.7 Rig and comparisons
+- [ ] every reference machine in the §20.8 rig: switched power, with each laptop's charger on its own outlet for battery runs; serial where there is a UART, and the xHCI debug capability over USB-C where there is none, read by the rig host as a serial port
+- [ ] a microcontroller HID injector per machine, presenting as a USB keyboard, mouse, and precision touchpad, driven by the harness; Phase 35 adds its BLE mode
+- [ ] a lid magnet and a power-button actuator per laptop, driven by the harness
+- [ ] a pinned Fedora Workstation image the rig boots on each reference machine (Fedora Asahi Remix on the Phase 38 machines), so vibeOS and Linux are measured the same way on the same hardware
+- [ ] each comparison script runs unchanged on vibeOS and on Fedora and records both results in one format, per release
+
+### 31.8 Stretch: S3 and encrypted hibernation
+- [ ] S3 on a laptop whose firmware still offers it, sharing §31.3's device ordering
+- [ ] the hibernation image encrypted with §18.7's disk key
+
+---
+
+## Phase 32: Display Engines
+
+**Goal.** The kernel drives the display engine itself: native resolution and refresh on every panel and
+monitor, monitors that hotplug, a dock with two monitors, backlight, panel self refresh, and outputs that
+return after suspend. The firmware framebuffer becomes the fallback.
+
+**Unlocks.** A desktop at the panel's resolution. External monitors, which a desk needs. Idle power close
+to Linux's. The display half of the Phase 33 GPU driver.
+
+**Architectures.** Both. The atomic core, EDID, DisplayPort, and HDMI code are portable and host-tested.
+x86_64: Intel's display engine on the reference laptop and desktop. aarch64: the §20.7 machine's own
+display controller on the same core (§32.3). The aarch64 panel, backlight, and resume lines are gated in
+Phase 38, through Apple's DCP.
+
+**Budget.** The x86_64 desktop, about $800, unless the §20.8 x86_64 machine qualifies. Two 4K 60 Hz
+DisplayPort monitors, a USB-C dock with DP MST, HDMI capture with DisplayPort adapters, and a
+CI-controlled video switch, about $1,300.
+
+**Exit gate**
+- [ ] the reference laptop's panel and every monitor on the desktop run at their native mode through the native driver, and the §20.7 machine's monitor at the best mode its controller offers; the §16.1 reference-image comparison passes on each laptop and desktop output that the rig's capture device sees
+- [ ] IGT GPU Tools' KMS tests on a checked-in list (among them `kms_atomic`, `kms_flip`, `kms_plane`, `kms_cursor_legacy`, `kms_vblank`, and `kms_pipe_crc_basic`) pass on the reference laptop and desktop, failing none that passes on Fedora on the same machine
+- [ ] a 4K 60 Hz monitor on the laptop's USB-C port and on each desktop output, disconnected and reconnected 100 times through the rig's video switch, gets its mode and layout back each time, and the card's framebuffer and buffer-object counts return to their starting values
+- [ ] the dock drives two 4K 60 Hz monitors through DP MST from the reference laptop
+- [ ] the laptop panel's brightness takes at least 16 levels through `/sys/class/backlight`, and its level is restored after resume
+- [ ] every output on the reference laptop and desktop returns with its mode, layout, and content after 100 suspend cycles
+- [ ] a page flip on every vblank for 10 minutes at each output's refresh rate on the reference laptop and desktop, with fewer than 0.1% missed, from the vblank counter
+- [ ] a mode the link cannot carry, forced by capping the DisplayPort link rate, falls back to a lower mode instead of a black screen
+- [ ] idle power at the shell on the reference laptop, the panel in self refresh at the `/sys/class/backlight` level Fedora's run used, within 20% of Fedora's (§31.7), from the battery's reported power draw with the charger's outlet off, averaged over 10 minutes
+- [ ] the §16.3 compositor runs on each reference machine's native driver, using overlay and cursor planes when the atomic check accepts them
+- [ ] tag `phase-32` and cut the next release
+
+### 32.1 Display core
+- [ ] §16.1's atomic commit extended to hardware CRTCs, planes, encoders, and connectors, the check refusing a state the hardware cannot scan out, with universal planes and the properties compositors read (`IN_FORMATS` with modifiers, `rotation`, `GAMMA_LUT`, `CTM`, `link-status`, `max bpc`)
+- [ ] EDID and DisplayID parsing with a quirk table, extending §16.2's EDID line to real monitors; host-tested against a corpus of real EDIDs fetched by hash at test time, and fuzzed
+- [ ] DisplayPort: AUX and DPCD, link training through clock recovery and channel equalization, and link-rate and lane-count fallback; the training state machine host-tested
+- [ ] DP MST: sideband messages, topology discovery, and payload allocation; host-tested against captured sideband traffic
+- [ ] Display Stream Compression: the sink's DSC capabilities from the DPCD, the picture parameter set, and slice configuration, used when a mode exceeds the link's bandwidth, over MST too, since two 4K 60 Hz streams exceed a 2-lane DP alt mode link; the parameter computation host-tested
+- [ ] HDMI 2.0: SCDC scrambling for 4K 60 Hz, AVI and audio infoframes, and the ELD that §34.2 reads
+- [ ] hotplug and DisplayPort short-pulse interrupts turned into connector state changes and §16.1's `HOTPLUG=1` uevent, so compositors re-probe
+- [ ] hardware vblank interrupts and counters behind §16.1's flip-completion events
+- [ ] framebuffer and buffer-object counts per card in debugfs, which the hotplug gate reads
+
+### 32.2 Intel display
+- [ ] power wells and the DMC firmware for display power states, loaded through §31.6
+- [ ] pipes, planes including the cursor, transcoders, DDI ports, PLLs, and watermarks, from Intel's published graphics documentation for the reference laptop's generation
+- [ ] the VBT from the ACPI OpRegion: ports, panel, and backlight controller
+- [ ] eDP: panel power sequencing from the VBT, and PSR, or Panel Replay where the panel has it, at idle
+- [ ] backlight through the PWM or the DPCD AUX interface, whichever the VBT names, as Linux's `/sys/class/backlight`
+- [ ] framebuffer compression on the primary plane, measured against idle power without it
+- [ ] Type-C ports: DP alt mode entry from §31.1's UCSI state, and the Type-C PHY ownership handshake
+- [ ] the DSC engines, for §32.1's compressed modes
+- [ ] pipe CRCs in Linux's debugfs layout, which IGT checks pixels with
+
+### 32.3 aarch64 display
+- [ ] the §20.7 machine's display controller as a native driver on §32.1: the ASPEED BMC's on an Ampere machine, with Linux's `ast` driver as the reference, or the HVS and HDMI on a Raspberry Pi 5
+
+### 32.4 Compositor on native display
+- [ ] the §16.3 compositor on §32.1: overlay and cursor planes used when the atomic check accepts them, composition otherwise
+- [ ] fractional scale on §16.5's per-output scale, each output's default taken from its EDID size
+- [ ] output layout stored per monitor identity (the EDID serial), so re-docking restores it
+- [ ] night light through the CRTC's `GAMMA_LUT`
+
+### 32.5 Stretch: AMD display, Thunderbolt, VRR, and HDR
+- [ ] AMD's DCN display engine on an AMD laptop: PSP and SMU bring-up for display clocks, atomfirmware tables, and the DMCUB firmware, from AMD's published register headers
+- [ ] Thunderbolt and USB4 docks: the USB4 connection manager, PCIe tunnels through §20.9's native hotplug, and their DMA confined by §18.1
+- [ ] variable refresh rate, and HDR with 10-bit output
+
+---
+
+## Phase 33: GPU Acceleration
+
+**Goal.** Hardware 3D and video decode through a render interface that speaks Linux's uapi for the
+reference GPU, so Mesa and the VA-API driver run unmodified. virtio-gpu 3D the same way, so CI renders
+on both architectures without a GPU.
+
+**Unlocks.** GPU composition, toolkits, and a browser at native resolution without a saturated CPU
+(Phase 36). Hardware video decode.
+
+**Architectures.** Both for the render core, dma-buf, syncobjs, and virtio-gpu 3D, which CI runs on both
+under QEMU. The hardware driver, Intel's `xe`, is x86_64 only, on the reference laptop and desktop. The
+§20.7 machine renders with Mesa's `llvmpipe` and `lavapipe`; Apple's AGX is gated in Phase 38. The
+virtio-gpu 3D tier needs a QEMU built with virglrenderer, which Homebrew's is not, so it runs in Linux CI
+and is skipped with that reason on the macOS dev host.
+
+**Exit gate**
+- [ ] CI on both architectures under TCG (4 vCPUs, 4 GiB), in a scheduled job: dEQP GLES and Vulkan subsets, run by `deqp-runner` with checked-in fraction and expected-failure lists, pass through Mesa's `virgl` and `venus` drivers on QEMU's `virtio-gpu-gl`, the host rendering with `llvmpipe` and `lavapipe`; `kmscube` scans out through GBM and its last frame matches a reference image
+- [ ] on the reference laptop and desktop, Mesa's CI test lists for `iris` and `anv` (dEQP through `deqp-runner` with Mesa's fraction and skip files) pass within 2 percentage points of the same Mesa release on Fedora on the same machine, with the differing tests listed
+- [ ] IGT's `xe` tests on a checked-in list pass on the reference laptop, failing none that passes on Fedora on the same machine
+- [ ] `glmark2-es2-drm` on the reference laptop scores at least 70% of Fedora's on the same machine with the same Mesa release
+- [ ] on the reference laptop, a shader that never terminates is detected, its context banned, and the engine reset, while another client keeps rendering
+- [ ] a GPU client killed mid-frame leaves no buffer, mapping, or GPU address space behind, from the card's debugfs counts
+- [ ] 4K clips in each codec the reference laptop's hardware decodes (H.264, HEVC, VP9, AV1) decode through VA-API with `ffmpeg` from Alpine at 60 frames per second or better, every frame's checksum matching `ffmpeg`'s software decode
+- [ ] with the hardware render driver disabled on the reference laptop, and on the §20.7 machine, `llvmpipe` from Alpine renders `kmscube` on the native display
+- [ ] tag `phase-33` and cut the next release
+
+### 33.1 Render core
+- [ ] render nodes (`/dev/dri/renderD128` and on) with Linux's GEM handles, `mmap` offsets, and PRIME dma-buf export and import as file descriptors
+- [ ] syncobjs, timeline syncobjs, and sync files, with dma-buf's `EXPORT_SYNC_FILE` and `IMPORT_SYNC_FILE`, so explicit-sync compositors and implicit-sync clients interoperate
+- [ ] a GPU scheduler: per-context queues, fence dependencies, job timeouts, and engine reset
+- [ ] GPU buffers under §12.6 reclaim: purgeable buffers released under pressure, and nothing left behind when a client dies
+- [ ] render nodes in Linux's sysfs and uevent layout, so libdrm's `drmGetDevices2` and Mesa's loader find every GPU
+
+### 33.2 Intel GPU
+- [ ] the `xe` uapi, which Mesa's `iris` and `anv` speak: buffer creation, `VM_BIND` into per-process GPU address spaces, exec queues, and syncobjs; i915's uapi only if `xe` does not support the reference GPU, decided before any code and written down
+- [ ] render, copy, compute, and video engines, with GuC submission and HuC, their firmware through §31.6
+- [ ] GPU page tables per address space, and TLB invalidation through the GuC
+- [ ] engine and GT reset, with the guilty context banned and the others resubmitted
+- [ ] GT power: RC6, and frequency through the GuC's SLPC, under §31.4's runtime PM
+- [ ] VA-API through Intel's media driver from Alpine, and Vulkan Video in `anv` as the second path
+
+### 33.3 virtio-gpu 3D
+- [ ] Linux's virtio-gpu DRM uapi: context init with capsets, blob resources, and fenced execbuffers, so Mesa's `virgl` and `venus` run unmodified; it extends §16.2's driver through the typed, fenced buffers §16.2 left room for
+- [ ] the CI configuration: QEMU's `virtio-gpu-gl` with blob resources, and Venus for Vulkan, the host rendering with Mesa's software drivers because hosted runners have no GPU
+
+### 33.4 Stretch: AMD and discrete GPUs
+- [ ] the `amdgpu` uapi that `radeonsi` and `radv` use, on an AMD laptop's RDNA3 graphics: GFX and compute rings, SDMA, the interrupt ring, GPU virtual memory, SMU power management, and VCN video
+- [ ] a discrete GPU with VRAM: a manager that evicts to system memory, and resizable BAR where the platform allows it
+- [ ] OpenCL through Mesa's `rusticl`
+
+---
+
+## Phase 34: Audio and Cameras
+
+**Goal.** Sound in and out on every reference machine: speakers, the headphone jack, HDMI and DP audio,
+USB headsets, and built-in microphones, through Linux's ALSA interface and PipeWire from Alpine. A
+webcam through V4L2.
+
+**Unlocks.** Media playback and calls (Phase 36). The audio device model Bluetooth audio joins (§35.5).
+
+**Architectures.** Both. ALSA, V4L2, USB audio, UVC, and PipeWire are shared, and virtio-sound and the
+virtual capture device are the CI devices on both. HDA is x86_64 only. On aarch64 hardware, the §20.7
+machine plays and records through a USB headset and captures from a USB camera. The MacBook Air's
+speakers, jack, and microphones, with their speaker protection, are gated in Phase 38.
+
+**Budget.** A USB audio interface and a TRRS loopback cable for the rig, a UAC2 headset, two USB UVC
+cameras, and a CI-controlled USB switch: about $400.
+
+**Exit gate**
+- [ ] CI on both architectures under TCG (2 vCPUs, 1 GiB): a 1 kHz tone played for 60 s through PipeWire on virtio-sound is recorded by QEMU's `wav` audiodev, and a host check finds the peak at 1 kHz ± 1 Hz and no gap over 1 ms; on x86_64 the same through `intel-hda` with `hda-duplex`
+- [ ] CI on both architectures under TCG (2 vCPUs, 1 GiB): `v4l2-compliance` from Alpine passes against the virtual capture device (§34.5), minus a checked-in list
+- [ ] on the reference laptop the tone plays through the headphone jack and through HDMI or DP audio, is recorded on the rig's audio interface and capture device, and passes the same check
+- [ ] the reference laptop's built-in microphone records its own speakers playing the tone, with the rig's cable still in the headphone jack and auto-mute turned off through its ALSA control, and `alsabat` finds the peak
+- [ ] on the reference laptop, with the rig's cable in the headphone jack, the jack control reads plugged and PipeWire routes playback to the jack rather than the speakers; a USB headset plugged in through the rig's USB switch takes the playing streams within 500 ms, and unplugging it moves them back
+- [ ] a USB Audio Class 2 headset plays and records at 48 kHz on the reference laptop, the desktop, and the §20.7 machine
+- [ ] round-trip latency, the headphone output looped to the combo jack's microphone input, under 20 ms at PipeWire's default quantum on the reference laptop
+- [ ] 8 hours of playback during a parallel kernel build on the reference laptop, with no xrun in PipeWire's counters
+- [ ] the reference laptop's camera, and a USB UVC camera on the desktop and the §20.7 machine, stream 1080p at 30 frames per second for 10 minutes with under 1% of frames dropped, from the V4L2 sequence numbers; `v4l2-compliance` fails nothing on each camera that it passes on Fedora on the same machine
+- [ ] tag `phase-34` and cut the next release
+
+### 34.1 ALSA interface
+- [ ] Linux's ALSA PCM ioctls on `/dev/snd/pcmC*D*`: hardware and software parameters, and `mmap` of the DMA ring and of the status and control pages, so the hardware position is readable without a syscall
+- [ ] ALSA control devices: typed elements for volume, mute, and jack state, with change events
+- [ ] `/proc/asound` and `/sys/class/sound` in Linux's layout, which alsa-lib and PipeWire enumerate cards through
+- [ ] underrun and overrun detection, recovery, and counters
+- [ ] large buffers with an accurate position for PipeWire's timer-scheduled playback, so a laptop playing audio is not woken every period
+- [ ] virtio-sound, the CI device on both architectures
+
+### 34.2 HDA
+- [ ] extends §20.6's HDA line: the codec's widget graph parsed into output and input paths from pin defaults, mixers, selectors, amplifiers, and EAPD; host-tested against codec dumps from each reference machine
+- [ ] a quirk table keyed by codec and subsystem id, since laptop pin defaults are routinely wrong
+- [ ] jack detection through unsolicited responses into §34.1's jack controls and evdev's `SW_HEADPHONE_INSERT`
+- [ ] HDMI and DP audio through the HDMI codec, with the ELD from §32.1
+- [ ] controller and codec runtime suspend under §31.4
+- [ ] the reference laptop's microphones on the path Linux uses on that machine, read from Fedora's boot log before any code: the HDA codec, or Intel's SOF DSP with its signed firmware and topology through §31.6
+
+### 34.3 USB audio
+- [ ] xHCI isochronous endpoints with interval scheduling and bandwidth reservation, extending §20.3's control, bulk, and interrupt transfers
+- [ ] USB Audio Class 1 and 2: clock sources, alternate settings, and feedback endpoints for asynchronous devices
+
+### 34.4 Sound server
+- [ ] PipeWire and WirePlumber from Alpine on §34.1, with `pipewire-pulse` and `pipewire-jack`, so applications need no audio patches
+- [ ] PipeWire's data thread in §19.4's real-time class, granted through `RLIMIT_RTPRIO`, which `sched_setscheduler` enforces for an unprivileged caller as Linux does
+
+### 34.5 Video capture
+- [ ] Linux's V4L2 ioctls: capabilities, formats, buffer queues, `mmap`, and dma-buf export
+- [ ] UVC: control and streaming interfaces, isochronous and bulk streaming, MJPEG and YUYV
+- [ ] a virtual capture device shaped like Linux's `vivid`, the CI device for `v4l2-compliance` on both architectures
+
+### 34.6 Stretch: MIDI and compressed audio
+- [ ] the ALSA sequencer and raw MIDI over USB MIDI devices
+- [ ] multichannel HDMI audio, and compressed passthrough to a receiver
+
+---
+
+## Phase 35: Wireless
+
+**Goal.** Wi-Fi and Bluetooth on every reference machine through Linux's nl80211 and Bluetooth sockets,
+so wpa_supplicant, NetworkManager, and BlueZ from Alpine run unmodified: join WPA2 and WPA3 networks,
+roam, stay connected across suspend, and pair a keyboard, a mouse, and headphones.
+
+**Unlocks.** A laptop that works away from a desk. The last device class a daily driver needs.
+
+**Architectures.** Both. The 802.11 stack, the simulated radio, and the Bluetooth host stack are shared
+and run in CI on both. The Intel AX210 over PCIe, with Bluetooth over USB, is the hardware on the
+reference laptop, the desktop, and, on a PCIe adapter, the §20.7 machine. The Macs' BCM4378 is gated in
+Phase 38.
+
+**Budget.** Two Wi-Fi 6E access points with WPA3 that the rig controls, AX210 cards for the desktop and
+the §20.7 machine with a PCIe adapter, and microcontrollers for the rig's BLE keyboard and mouse and its
+A2DP sink: about $450.
+
+**Exit gate**
+- [ ] CI on both architectures under TCG (2 vCPUs, 1 GiB), in a scheduled job: hostap's hwsim tests on a checked-in list pass on the §35.2 simulated radios, covering WPA2-PSK, WPA3-SAE with hash-to-element, transition mode, protected management frames, WPA2-Enterprise with PEAP, TTLS, and TLS, fast-transition roaming, and a wrong password refused with its reason code
+- [ ] CI on both architectures under TCG (2 vCPUs, 1 GiB): over the simulated medium, a station takes a DHCP lease and completes a 1 GiB fetch from the host with no corruption, and a TCP transfer completes while the station roams between two APs on one SSID
+- [ ] CI on both architectures under TCG (2 vCPUs, 1 GiB): BlueZ's `mgmt-tester`, `l2cap-tester`, and `smp-tester` pass on `/dev/vhci` controllers, minus a checked-in list
+- [ ] the reference laptop, the desktop, and the §20.7 machine join the rig's WPA2-PSK and WPA3-SAE networks through NetworkManager on every band the card and regulatory domain allow, and a 1 GiB fetch from the rig host at 2 m runs at 50% or better of Fedora's throughput on the same machine
+- [ ] after each of 100 s2idle cycles on the reference laptop, Wi-Fi reassociates and reaches the rig host within 5 s of resume
+- [ ] the Phase 32 idle-power line still holds with Wi-Fi associated and power save on
+- [ ] the rig's BLE injector pairs as a keyboard and a mouse with LE Secure Connections on each reference machine, drives the terminal and the pointer, and reconnects after a reboot without pairing again
+- [ ] the rig's A2DP sink receives the 1 kHz tone as SBC from the reference laptop for 1 hour with no gap over 20 ms, appears and vanishes as a PipeWire device, and its play and pause commands reach the player through AVRCP
+- [ ] `rfkill block all` stops both radios and `rfkill unblock all` restores them, and `KEY_RFKILL` toggles the same state
+- [ ] the kernel's 802.11 management-frame and information-element parsers and its HCI, L2CAP, and SMP parsers run as §10.2 `cargo-fuzz` targets on the weekly job, with no open crash
+- [ ] tag `phase-35` and cut the next release
+
+### 35.1 802.11 stack
+- [ ] generic netlink on §15.7's netlink sockets: family registration, `CTRL_CMD_GETFAMILY`, and multicast groups
+- [ ] Linux's nl80211 over it: scan, authenticate, associate, keys, station state, regulatory, and events, the interface wpa_supplicant, hostapd, `iw`, and NetworkManager speak
+- [ ] a wireless device class beside §15.1's `NetDevice`, in Linux's `/sys/class/ieee80211` layout
+- [ ] soft-MAC devices with firmware offload, such as the AX210: the host builds and parses management frames and runs the station state machine, and the firmware does rate control; full-MAC devices (Phase 38's BCM4378) sit behind the same nl80211 surface
+- [ ] management frames and information elements parsed and built in the portable half, host-tested against captures, and fuzzed
+- [ ] A-MPDU and A-MSDU aggregation with block-ack sessions, without which 802.11ac and ax rates are unreachable
+- [ ] protected management frames (802.11w), which WPA3 requires, and SAE authentication frames passed to and from the supplicant
+- [ ] power save through the firmware's offloads, and background scans that feed roaming
+- [ ] regulatory: `wireless-regdb`'s signed `regulatory.db` through §31.6, the country from the user setting and the AP, and the 6 GHz rules
+- [ ] MAC address randomization while scanning and per saved network
+- [ ] rfkill: `/dev/rfkill` and `/sys/class/rfkill` in Linux's layout, for Wi-Fi and Bluetooth
+
+### 35.2 Simulated medium
+- [ ] a simulated radio shaped like Linux's `mac80211_hwsim`, with its generic netlink control family: any number of radios on one medium with configurable loss and delay
+- [ ] hostapd and wpa_supplicant built from their pinned releases with the hwsim test configuration, and the test suite's driver run on Python from Alpine
+- [ ] captures from the rig's access points, taken in monitor mode on Fedora, replayed as host tests
+
+### 35.3 Supplicant and network management
+- [ ] wpa_supplicant from Alpine as the supplicant; not iwd, which would need the kernel's `AF_ALG` crypto sockets and keyrings for nothing else
+- [ ] NetworkManager from Alpine: saved networks with priority, autoconnect, and wired, Wi-Fi, and USB tethering (§20.6's CDC-NCM) connections, with DNS following the active connection; `nmcli` as the tool
+- [ ] captive portal detection through NetworkManager's connectivity check against a URL on the rig host
+
+### 35.4 Wi-Fi driver
+- [ ] Intel AX210: the PCIe transport, firmware through §31.6, and the operation-mode command interface
+- [ ] suspend and resume hooks, so §31.3's cycles leave the radio usable
+
+### 35.5 Bluetooth
+- [ ] Linux's `AF_BLUETOOTH` sockets with HCI, the management interface, L2CAP including LE credit-based channels, and SMP with LE Secure Connections in the kernel, so BlueZ from Alpine runs unmodified above them
+- [ ] HCI over USB, and the AX210's controller firmware and patch download through §31.6
+- [ ] `/dev/vhci` virtual controllers, which BlueZ's testers drive, as the CI device on both architectures
+- [ ] `/dev/uhid`, through which BlueZ's HID over GATT delivers keyboards and mice to evdev
+- [ ] A2DP through PipeWire's Bluetooth module with SBC, and AVRCP media keys through §31.2's `uinput`
+- [ ] host tests that replay btsnoop captures of real pairings through the kernel's HCI and SMP code
+
+### 35.6 Stretch: Wi-Fi 7, access point, and headsets
+- [ ] Wi-Fi 7 and multi-link operation on an Intel BE200
+- [ ] access point mode on the AX210, to share the laptop's connection
+- [ ] HFP headset microphones over SCO sockets with mSBC, and LE Audio over ISO sockets with LC3
+- [ ] classic Bluetooth HID through HIDP
+
+---
+
+## Phase 36: Desktop Session and Applications
+
+**Goal.** A desktop a person logs into and works in, all of it upstream Linux software from Alpine,
+unmodified: Wayland compositors and a full desktop environment, GTK and Qt applications, a browser with
+its sandbox, a screen reader over AT-SPI, and input methods.
+
+**Unlocks.** Phase 37's daily use. Desktop software without porting.
+
+**Architectures.** Both. Everything above the kernel is Alpine's build for each architecture. x86_64
+renders on §33.2's `xe` driver; the §20.7 machine renders with `llvmpipe`, and CI with `virgl`. The laptop
+lines on aarch64 (locking on lid close, and a call on the built-in speakers and microphones) are gated in
+Phase 38.
+
+**Budget.** FAT32 and exFAT USB sticks for the removable-media line: about $30.
+
+**Exit gate**
+- [ ] CI on both architectures under TCG (4 vCPUs, 4 GiB), in a scheduled job: Weston on its DRM backend runs `weston-simple-egl` and `weston-simple-dmabuf-egl` on virtio-gpu with `virgl`, and a screenshot matches its reference image
+- [ ] the §36.2 desktop starts from its display manager on the reference laptop, the desktop, and the §20.7 machine, authenticating a user from §14.3's shadow file; logout and a second login work
+- [ ] on the reference laptop, the session locks on lid close, on suspend, and after the idle timeout, each shown by logind's `LockedHint`; after a suspend, the first frame the rig captures from the laptop's external output on resume is the lock screen; killing the locker leaves the session locked or ends it, never unlocked
+- [ ] the §36.2 desktop composes on the GPU on the reference laptop: with ten windows moving at the panel's native resolution, the compositor's CPU time stays under 10% of one core
+- [ ] the browser (§36.4) passes the web-platform-tests subset on a checked-in list, served by the rig host, within 5 percentage points of the same browser version on Fedora on the same machine, on the reference laptop and desktop
+- [ ] Speedometer 3 in the browser, served by the rig host, scores at least 70% of the same browser version's score on Fedora on the same machine, on the reference laptop and desktop
+- [ ] a 1080p60 VP9 video served by the rig host plays in the browser for 10 minutes with under 1% of frames dropped by the browser's own count, on the reference laptop and desktop
+- [ ] a WebRTC call in the browser between the reference laptop and the desktop over the rig's Wi-Fi keeps camera, microphone, and audio output live for 10 minutes with under 1% frame loss in the browser's own statistics
+- [ ] a scripted AT-SPI client lists every widget of the settings app with its role and label; with focus moved by the rig's HID injector, Orca speaks the label of each widget that takes it, checked from Orca's speech log
+- [ ] an automated test drives the settings app's display, Wi-Fi, Bluetooth, sound, power-profile, keyboard-layout, and user pages through AT-SPI, and each change takes effect
+- [ ] a scripted pinyin sequence and a scripted romaji sequence, typed through the rig's HID injector, produce the expected Chinese and Japanese text through the §36.5 input method in a GTK 4 application, a Qt 6 application, and the browser, read back through AT-SPI
+- [ ] the file manager mounts a FAT32 and an exFAT USB stick inserted through the rig's USB switch, copies 1 GiB to vibefs and back with matching checksums, and ejects the stick safely
+- [ ] `mpv` plays a 4K 60 Hz clip in each codec the Phase 33 decode line names, through VA-API and PipeWire, with under 1% of frames dropped and under 15% of one core, on the reference laptop
+- [ ] `xterm -e 'cat > /tmp/typed'` from Alpine runs under XWayland in the §36.2 desktop on the reference laptop and desktop, and a line typed into it through the rig's HID injector lands in that file
+- [ ] tag `phase-36` and cut the next release
+
+### 36.1 Session and seat
+- [ ] virtual terminals `/dev/tty1` to `/dev/tty6` with Linux's VT ioctls (`VT_ACTIVATE`, `VT_WAITACTIVE`, `VT_SETMODE` with `VT_PROCESS`, `KDSETMODE`, `KDSKBMODE`), DRM master handoff on a switch, and `EVIOCREVOKE`, so seatd and elogind switch sessions unmodified
+- [ ] a D-Bus session bus per login, and accountsservice on §31.5's system bus
+- [ ] elogind from Alpine on §21.5's cgroup v2 hierarchy, since both full desktops need logind's interface
+- [ ] a PAM module that verifies §14.3's Argon2id shadow hashes, so the display manager, the lock screen, and `sudo` from Alpine authenticate users unmodified
+- [ ] the §18.7 disk encryption passphrase asked before root is mounted, in the configured keyboard layout
+
+### 36.2 Compositor and desktop
+- [ ] Weston and sway from Alpine on §32.1's KMS and libinput, the small compositors CI runs first
+- [ ] a full desktop, GNOME or KDE Plasma, chosen by a spike that counts the kernel interfaces each is missing, and written down; it runs from Alpine unmodified, with its own display manager, settings app, and file manager
+- [ ] XWayland from Alpine, so X11 applications run
+- [ ] §16.5's native protocol kept beside Wayland or retired in its favor, decided after measuring the overlap, and written down
+- [ ] Linux's FUSE protocol on `/dev/fuse`, since the document portal and GVfs mount through it; `sshfs` from Alpine mounts a directory from the rig host
+
+### 36.3 Applications
+- [ ] GTK 4 and Qt 6 applications from Alpine, with file choosers, screenshots, and screencasts through the XDG desktop portals
+- [ ] `mpv` on `ffmpeg` with VA-API decode and PipeWire audio
+- [ ] an image viewer, a PDF viewer, a text editor, a terminal emulator, a calculator, and an archive tool from Alpine
+
+### 36.4 Browser
+- [ ] Firefox or Chromium from Alpine, chosen by a spike that weighs sandbox requirements and upstream patch count, and written down
+- [ ] its sandbox enabled, on §18.6's seccomp filters and §21.5's namespaces
+- [ ] GPU compositing and WebGL through Phase 33's drivers, video through VA-API, audio through PipeWire, and the camera through the XDG camera portal
+- [ ] the rig's test CA added through the browser's policy file, since the gates serve every page from the rig host
+
+### 36.5 Accessibility and input methods
+- [ ] AT-SPI2 over D-Bus from Alpine, with the GTK and Qt accessibility bridges
+- [ ] Orca from Alpine with speech-dispatcher and espeak-ng, reading the settings app and the browser
+- [ ] every surface of the §36.2 desktop reachable by keyboard, and its high-contrast and large-text settings in effect
+- [ ] IBus or fcitx5 from Alpine over Wayland's text-input and input-method protocols, with Chinese, Japanese, and Korean engines
+- [ ] the gate's UI tests drive applications through the accessibility tree, so an accessibility regression fails CI
+
+### 36.6 Removable media
+- [ ] exFAT read and write in the kernel, from the specification Microsoft published in 2019; host-tested, fuzzed like the other filesystems, and checked with `fsck.exfat` from Alpine
+- [ ] udisks2 from Alpine mounting removable media for the logged-in user, under §13.9's permissions
+
+### 36.7 Stretch: Flatpak and a second desktop
+- [ ] Flatpak with bubblewrap on §21.5's namespaces and FUSE
+- [ ] the full desktop §36.2 did not choose
+- [ ] fast user switching
+
+---
+
+## Phase 37: Daily Driver
+
+**Goal.** Each reference machine runs a scripted day every night, the numbers that decide whether
+someone would keep using it are measured against Linux on the same machine and published, and the
+desktop ships in a vibeOS release built from source.
+
+**Unlocks.** A claim anyone can check. A daily-driver tier in the §22.3 hardware compatibility list.
+
+**Architectures.** Both. x86_64 on the reference laptop and desktop; aarch64 on the §20.7 machine as a
+desktop. The laptop lines on aarch64 (suspend cycles and battery life) are gated in Phase 38.
+
+**Exit gate**
+- [ ] the release image carries the §36.2 desktop as §14.6 packages built by the Phase 24 ports tree, and the §22.2 installer puts it on each reference machine's internal disk beside an existing Fedora install; both boot afterwards
+- [ ] the §37.1 workload runs for 24 hours on each reference machine with no kernel panic, no hang needing a power cycle, no data loss (`fsck` clean and file checksums matching), and no crash outside the injected ones
+- [ ] the 8-hour §37.1 nightly run has passed on each reference machine on 30 consecutive nights, from §10.9's run history
+- [ ] 1000 consecutive s2idle cycles on the reference laptop, with Wi-Fi, Bluetooth, audio, and every output working after the last
+- [ ] battery life on the reference laptop, running §37.1's browsing and video loop from full to 5% at Fedora's backlight level, at least 80% of Fedora's on the same machine
+- [ ] boot to the display manager, resume to the lock screen, and a build of the vibeOS tree each take at most 1.5 times Fedora's time on the same machine, on the reference laptop and desktop
+- [ ] three consecutive release candidates from the §22.1 release job, served from a test update channel on the rig host, update every reference machine unattended through §22.2, and an injected bad candidate rolls back on each
+- [ ] the §22.3 hardware compatibility list gains a daily-driver tier, generated from the rig's results, with each reference machine's numbers
+- [ ] tag `phase-37` and cut the next release
+
+### 37.1 Workload
+- [ ] a scripted day driven through AT-SPI (§36.5) and the rig's HID injectors: log in, browse mirrored sites, edit and save documents, play local video, hold a WebRTC call between two reference machines, copy files to and from USB, suspend and resume, roam between the rig's access points, and dock and undock through the rig's switches; its browsing and local-video steps also run alone as a loop, which the battery-life line runs
+- [ ] fault injection: random application and service kills; init restarts the services and the session survives
+- [ ] per-run measurements: dropped frames, audio xruns, per-device resume time, per-process memory growth, and wakeups per second at idle
+- [ ] an 8-hour run of the workload nightly on the rig, scheduled with §20.8's nightly job on the machines they share, reported like §20.8, with thresholds that fail the job
+
+### 37.2 Shipping
+- [ ] the Phase 24 ports tree builds the §36.2 desktop, the browser included, as §14.6 packages for both architectures; Alpine's binaries stay the test oracle, not what ships
+- [ ] a PackageKit backend for the §14.6 package manager, so the desktop's software center searches, installs, updates, and removes vibeOS packages with their signatures shown, and lists §22.2's updates as pending, applied, or rolled back with the reason
+- [ ] full-disk encryption on by default for laptops in the §22.2 installer
+
+### 37.3 Records
+- [ ] battery life, idle and suspended power, Wi-Fi throughput, GPU and browser scores, suspend reliability, and boot time for each reference machine, and for Fedora on it, written by the rig into a results file in the repository at each release, with history, and summarized in the release notes
+- [ ] a regression past its recorded threshold fails the nightly job
+
+### 37.4 Crashes and reports
+- [ ] a crash reporter: a user crash leaves a §13.8 core and a symbolized backtrace, a kernel panic in §20.1's persistent record is shown after the next boot, and either is filed to the forge with the user's consent
+- [ ] a one-command bug report that attaches the crash data, the kernel log, and the device list
+- [ ] each report becomes a regression test in the cheapest tier or an open box in this file, per the standing gates
+
+### 37.5 Stretch: dogfood
+- [ ] a person uses the reference laptop as their only computer for 14 consecutive days; its session log shows the days, and every problem filed has a regression test or an open box in this file
+
+---
+
+## Phase 38: Apple Silicon
+
+**Goal.** vibeOS on Apple Silicon: an M1 MacBook Air and an M1 Mac mini boot it from their internal
+disks beside macOS, and this era's laptop lines pass on the MacBook Air, so the daily driver exists on
+both architectures.
+
+**Unlocks.** An aarch64 laptop. Native hardware of the kind the dev host is. The Mac mini in hardware
+CI, loading each kernel over USB through m1n1.
+
+**Architectures.** aarch64 only, by definition. It reuses §20.7's device-tree path, §18.1's IOMMU layer
+with DART as a new backend, and every interface Phases 31 to 37 built. Nothing here changes x86_64. It
+is last because it is the hardest: the platform has no documentation beyond Asahi Linux's reverse
+engineering, and no ACPI of its own.
+
+**Budget.** An M1 MacBook Air and an M1 Mac mini, bought used, the parts for a USB-C debug cable, and
+the rig's HID injectors, the MacBook Air's lid magnet and power-button actuator, and switched outlets for
+both: about $1,100. The maintainer's own Mac is not a test machine.
+
+**Exit gate**
+- [ ] both Macs boot vibeOS from internal NVMe, installed beside macOS in its own APFS container, and reach `shell ready` on the built-in display (MacBook Air) or HDMI (Mac mini) and on the debug UART
+- [ ] macOS still boots on both after the install, and the uninstaller returns the disk to its prior partition layout
+- [ ] root on the internal NVMe of both Macs, and the Phase 7 concurrent read-write test passes on each; the §8.5 crash-consistency test passes on the Mac mini, with the rig's outlet cutting power at randomized points during the write workload
+- [ ] every DMA-capable device sits behind its DART, and a DMA outside a mapping is stopped and reported as §18.1 reports it
+- [ ] all eight cores online, with the performance and efficiency clusters named in `cpus`; `poweroff` and `reboot` work on both
+- [ ] the Mac mini's Ethernet, and a USB Ethernet adapter (§20.6) on the MacBook Air, each carry a 1 GiB fetch from the rig host with no corruption
+- [ ] the Mac mini runs the §20.8 nightly job: the rig host loads each built kernel over USB through m1n1's proxy, captures the UART, and power-cycles the machine
+- [ ] on the MacBook Air, the Phase 31 lines for s2idle cycles, suspended drain, lid, power button, AC, and input pass, measured against Fedora Asahi Remix on the same machine
+- [ ] the Phase 32 lines for native resolution, backlight, flips, and resume pass through DCP on the MacBook Air's panel, and the hotplug line on the Mac mini's HDMI
+- [ ] Mesa's `asahi` and `honeykrisp` drivers from a pinned Mesa release run unmodified on both Macs, and the Phase 33 dEQP, `glmark2`, and hang lines pass against Fedora Asahi Remix on the same machine
+- [ ] the Phase 34 speaker, headphone-jack, microphone, and latency lines pass on the MacBook Air, and its log shows the speaker amplifiers never ran without §38.8's protection
+- [ ] the Phase 35 Wi-Fi and Bluetooth hardware lines pass on both Macs over the BCM4378
+- [ ] the Phase 36 session, lock, browser, accessibility, and input-method lines pass on the MacBook Air, with a USB camera for the call, and the lock line's first frame taken from §38.6's swap readback instead of the rig's capture
+- [ ] the Phase 37 workload, s2idle, and battery-life lines pass on the MacBook Air against Fedora Asahi Remix, the workload without its external-display steps, and it joins the daily-driver tier
+- [ ] tag `phase-38` and cut the next release
+
+### 38.1 Boot and installation
+- [ ] Asahi's boot chain: m1n1 stage 1 in a stub macOS container with a permissive boot policy, m1n1 stage 2 with the device tree, U-Boot providing UEFI, then Limine through §11.1's path; a direct m1n1 payload if Limine cannot run on U-Boot's UEFI, decided by a spike
+- [ ] an installer run from macOS that creates the container, sets the boot policy, and lays out the EFI and root partitions, reusing the Asahi installer where its license allows; an uninstaller that restores the prior layout
+- [ ] the Wi-Fi and Bluetooth firmware, which may not be redistributed, extracted from the local macOS install at install time as Asahi does, loaded through §31.6, and never shipped; since no signed package can carry it, the loader checks it against a hash list the installer writes beside it
+- [ ] the Asahi device trees pinned by version, parsed by §11.5's parser, and host-tested
+- [ ] §11.1's exception-level entry checked against an EL2 that implements only VHE
+- [ ] early serial on the SoC's UART through a USB-C debug cable (Asahi's Central Scrutinizer, or `macvdmtool` from a second Mac)
+- [ ] the framebuffer m1n1 leaves configured as the console until §38.6
+- [ ] the Mac mini set to start on power restore, so the rig's switched outlet recovers a hung run
+- [ ] the CI boot path on the Mac mini: m1n1 stage 2 waits a bounded time for the rig host on its USB proxy, through which the host chainloads U-Boot and a RAM disk holding Limine and the built kernel; with no host attached it boots from disk
+
+### 38.2 Cores, interrupts, time
+- [ ] AIC for device interrupts and IPIs, using the cores' fast-IPI system registers
+- [ ] the generic timer and fast IPIs arrive as FIQ; §11.3's vector table routes FIQ instead of treating it as fatal
+- [ ] secondary cores through the device tree's spin-table, since there is no EL3 and no PSCI
+- [ ] cluster performance states through the SoC's DVFS registers, as Asahi's cpufreq driver does, feeding §20.2's governor
+- [ ] `poweroff` and `reboot` through the SMC
+
+### 38.3 Coprocessors and power domains
+- [ ] the ASC mailbox and the RTKit protocol: boot, syslog and crashlog endpoints, and power states; a coprocessor crash log printed rather than lost
+- [ ] PMGR power domains and clock gates from the device tree, with their dependencies honored, under §31.4's runtime PM
+- [ ] the SMC over RTKit: keys for battery, AC, lid, power button, and temperatures
+- [ ] RTKit, AIC, and ANS message encodings host-tested against traces captured with m1n1's hypervisor running macOS
+
+### 38.4 DMA, storage, buses
+- [ ] DART as an IOMMU backend behind §18.1, one domain per device. DART's I/O page is 16 KiB and §11.1's CPU granule is 4 KiB: handle it with 16 KiB-aligned DMA buffers or a 16 KiB granule on Apple Silicon, and record the cost of each choice
+- [ ] ANS, Apple's NVMe controller over RTKit, with its linear submission queue and NVMMU, sharing §20.4's namespace and command code
+- [ ] the Apple PCIe root complex with MSI through AIC, for the Mac mini's Ethernet and USB-A controller and for the BCM4378
+- [ ] the Mac mini's Broadcom Ethernet (Linux's `tg3` family)
+- [ ] USB-C: the DWC3 controllers in host mode through §20.3's xHCI, the ATC PHY, and the TPS6598x port controllers over Apple's I2C controller for orientation and role
+- [ ] the SPI controller and the MacBook Air's SPI HID keyboard and trackpad, through §20.3's report parser into §31.2's evdev multitouch
+
+### 38.5 Laptop platform
+- [ ] SMC notifications for lid, power button, and AC as §31.2's evdev switch and keys, and the battery in §31.5's `power_supply` class
+- [ ] s2idle with every device's PMGR domain off and the cores in their deepest idle, waking through AIC on lid, power button, keyboard, and USB; the rig's HID injector wakes it for timed cycles where the SMC has no alarm
+- [ ] the keyboard backlight through the SoC's PWM, in Linux's `/sys/class/leds`
+
+### 38.6 Display
+- [ ] DCP's RTKit endpoints and the IPC protocol Asahi documented: mode set, swap, hotplug, and brightness. DCP owns the pipe, so §32.1's atomic check describes surfaces rather than programming planes
+- [ ] a DCP swap as the page flip, with its completion as the vblank event; the surface of the last completed swap readable through debugfs, which the gate's lock check compares with the lock screen's reference image, since the rig cannot capture the MacBook Air's panel
+- [ ] the Mac mini's HDMI output, through the DCP instance and the DP-to-HDMI converter the pinned Asahi device tree names
+- [ ] the built-in panel's brightness through DCP, as `/sys/class/backlight`
+
+### 38.7 GPU
+- [ ] the AGX firmware interface over RTKit, following Asahi's Rust driver: the firmware's command queues, the GPU page tables, and the per-SoC initialization data the firmware expects
+- [ ] Asahi's render uapi (`asahi_drm.h`) on §33.1's render core, so Mesa's `asahi` and `honeykrisp` run unmodified
+- [ ] a GPU firmware crash logged from its crashlog endpoint and followed by a reboot, never a silent hang
+
+### 38.8 Audio
+- [ ] the MCA I2S controller and the ADMAC DMA engine from the Asahi device trees, on §34.1's ALSA interface
+- [ ] the headphone jack codec with jack detection
+- [ ] the built-in microphones through the SoC's PDM controller
+- [ ] the speaker amplifiers kept off until a speaker-protection model runs: amplifier voltage and current sense read back and power limited as Asahi's `speakersafetyd` does, because unprotected playback can damage these speakers
+
+### 38.9 Wireless
+- [ ] the BCM4378 over PCIe: the msgbuf full-MAC protocol behind §35.1's nl80211, with Apple's OTP and NVRAM board selection
+- [ ] Bluetooth over the BCM4378's PCIe transport into §35.5's HCI
+
+### 38.10 Stretch: later Macs and Apple engines
+- [ ] the M2 MacBook Air: the keyboard and trackpad behind the MTP coprocessor, and the display and SMC differences, from the Asahi device trees
+- [ ] Apple's AVD video decoder
+- [ ] the built-in camera through the Apple ISP
+- [ ] USB-C display output on the MacBook Air through DCP-ext and the ATC PHY's DisplayPort mode
+
+---
+
+# Era VIII. Assurance
+
+Eras I to VII build the system and measure it. This era proves the parts the rest of the kernel stands
+on, and freezes the interfaces other software stands on.
+
+Phase 39 needs 12, 14, 18, and 19, and nothing after them, so it runs beside everything from Phase 20
+on. Phase 40 needs 22, 23, 24, 25, 30, and 39. It does not need 26 to 29 or 31 to 38, which continue
+beside it and after it (§40.1).
+
+## Phase 39: Verification
+
+**Goal.** Machine-checked proofs of the buddy allocator, both page-table formats, and frame reference
+counts with copy on write, over the `vibeos-core` source the kernel compiles; and model-checked
+specifications of the vibefs commit, TLB shootdown, and RCU, tied to the running kernel by trace
+validation. §10.8 checks parts of this to a bound. This phase removes the bound.
+
+**Unlocks.** Changing proved code, such as a faster allocator or a third page-table format, with the
+proof as the regression test. A trusted base the §18.8 threat model cites instead of assuming. The
+proved core that Phase 40 ships as 1.0, and the proof of isolation in [Beyond](#beyond).
+
+**Architectures.** Both. The page-table proof covers the x86_64 four-level format and the aarch64 4 KiB
+granule format against one abstract map, and the aarch64 half includes break-before-make (§11.2). The
+§39.5 litmus tests are aarch64 only: they check barrier sequences the aarch64 port writes by hand, and
+x86_64's shootdown ordering is the IPI protocol §39.3 models. Proofs and model checks run on the host,
+on Linux and macOS.
+
+**Exit gate**
+- [ ] `make verify` checks every Verus proof and every TLA+ specification, and passes on the Linux CI job and the scheduled macOS job; it runs on every push that changes a proved module or a specification, and in full nightly; a proof over its recorded resource limit fails like a test
+- [ ] Verus checks the `vibeos-core` crate itself, in the configuration the kernel builds (no `std` feature), so every proved module is source the kernel compiles for both kernel targets with specifications and proofs erased; no transcribed or generated copy of a proved module exists, and `scripts/check_verified.py` in `make check` fails when a module `docs/VERIFIED.md` lists is not a `vibeos-core` module
+- [ ] the buddy allocator (§1.1), including §19.7's per-node instances, is proved for every arena size: allocated blocks never overlap each other or a free block, a freed block merges with a free buddy, the free count equals the free lists' contents, and allocation fails only when no free block of the requested order or larger exists
+- [ ] the page-table code refines an abstract map from virtual page to frame and permissions for both formats: `map`, `unmap`, `protect`, and `translate` agree with the map; the mapping API cannot create a kernel mapping that is writable and executable (§18.1); every aarch64 descriptor change that §11.2 says needs break-before-make follows it
+- [ ] frame reference counts and copy on write (§12.1, §12.3) are proved: a frame returns to the buddy exactly when its last reference drops, the reverse map matches the PTEs, and no write through a COW mapping reaches a frame whose count is above one
+- [ ] TLC checks the §39.3 specifications of the vibefs commit, TLB shootdown with deferred KVA free, and RCU grace periods, each to a state bound recorded in the specification
+- [ ] traces from the in-guest shootdown and RCU tests at `-smp 4` on both architectures, and from every crash state the §12.5 enumerator produces on a vibefs v2 volume, validate against those specifications on the nightly job
+- [ ] each §39.5 litmus test passes against Arm's model on the nightly job and fails with any one of its barriers removed
+- [ ] every proof and specification has a recorded mutation that `make verify` must reject, so none holds vacuously
+- [ ] `docs/VERIFIED.md` lists each proved property, its tool, its bound where it has one, and what is trusted: the verifier and its SMT solver, the compiler, the `arch` assembly and trait contracts, and the hardware models; `scripts/check_verified.py` fails when a part is missing, and the §18.8 threat model links it
+- [ ] tag `phase-39` and cut the next release
+
+### 39.1 Tools and the build
+- [ ] Verus for unbounded proofs of code, chosen for its linear ghost permissions over raw memory (the buddy's intrusive free lists, page-table pages); Prusti and Creusot weighed, with the reason recorded in `docs/VERIFIED.md`
+- [ ] TLA+ and TLC for protocols whose state spans CPUs, the disk, and time; Kani and loom stay where §10.8 put them, for bounded proofs and interleavings
+- [ ] Verus with its Z3, the TLA+ tools, and isla-axiomatic pinned like the nightly (C1), herd7 staying on §11.7's pin,, fetched by `setup.sh` and checked by hash, with the bump procedure in `AGENTS.md`; each runs on macOS and Linux
+- [ ] `vstd` and Verus's macro crates build under the kernel's pinned nightly for the host and both kernel targets, and pass the §10.9 `cargo deny` policy
+- [ ] `vibeos-core` keeps building under Verus's pinned Rust as well as the kernel's nightly, so it uses no feature only the nightly has; `make verify` is where that breaks first
+- [ ] `make verify` in `make help` and in AGENTS.md's How to run; a `verify` CI job written into the DESIGN §8.6 budget: per push when a proved module or a specification changes, in full nightly, and on the scheduled macOS job
+- [ ] proof time per module, and the resource limit `make verify` enforces, recorded in DESIGN §8.6
+
+### 39.2 Memory core
+- [ ] both page-table formats (descriptor encoding, walk, `map`, `unmap`, `protect`) and §12.1's frame metadata and reverse map are `vibeos-core` modules compiled for every target, moved there wherever Phases 11 and 12 left them in the kernel binary; only root-register writes and TLB and cache instructions stay behind the §10.3 `arch` trait
+- [ ] the buddy allocator inside `verus!`, with each free block's list node owned by a ghost points-to permission; the §10.8 Kani harness kept as a cross-check
+- [ ] §19.7's per-node buddies are instances of the proved allocator, not a second implementation
+- [ ] the abstract page-table map and the refinement proof for the x86_64 format, then for the aarch64 format behind the same §10.3 trait
+- [ ] the physmap changes (`patch_physmap_uc` on x86_64; on both architectures, the §12.1 `debug_mm` unmap of a freed frame and its remap on reallocation, which need no break-before-make because that build maps the physmap at 4 KiB) proved to leave every other physmap entry unchanged
+- [ ] frame metadata (§12.1): refcount transitions, the reverse map against the PTEs that reference each frame, the COW break (§12.3), and §19.8's rule that a pinned anonymous page is never COW-shared
+- [ ] where proved code calls an `arch` trait, the trait's contract is an assumption listed in `docs/VERIFIED.md`
+
+### 39.3 Protocols
+- [ ] the vibefs v2 commit (§14.8), against a disk that reorders writes between flushes, tears a superblock write, and loses power at any step: the mounted tree is a committed generation at or after the last acknowledged `fsync`, and no block reachable from a committed generation is overwritten after it commits
+- [ ] TLB shootdown with deferred KVA free (§4.10, DESIGN §7.9), with per-CPU TLBs modelled, over x86_64's IPI protocol and aarch64's broadcast TLB maintenance (§11.2): no CPU translates a reallocated address through a stale entry, and two initiators running at once both finish
+- [ ] RCU (§19.5): no grace period ends while a reader that began before it is still inside, including readers on CPUs that entered tickless idle or went offline mid-grace-period (§19.6)
+- [ ] each specification under `docs/specs/`, naming the DESIGN or VIBEFS section it formalizes, and that section linking back
+
+### 39.4 Trace validation
+- [ ] the §10.7 flight recorder and the §19.1 tracepoints record the events each specification's actions name, exported in a form the specification's trace module reads under TLC
+- [ ] the in-guest shootdown and RCU tests, and the §12.5 enumerator on a vibefs v2 volume, produce traces checked against the specifications on the nightly job
+- [ ] a trace the specification rejects fails its test and prints the first step the specification does not allow
+
+### 39.5 aarch64 barrier sequences
+- [ ] litmus tests for the barrier sequences the aarch64 `arch` code writes by hand: the §11.2 PTE update with TLB maintenance, break-before-make, and the ASID rollover flush
+- [ ] each checked against Arm's translation-aware model, herd7's `aarch64.cat` with its VMSA variant (isla-axiomatic where herd7 cannot express a test), and each shown to fail with any one of its barriers removed
+- [ ] each litmus test, §11.7's included, records a hash of the `arch` function it models, and §11.7's `make check` guard fails when the function changes and the test does not; a helper that cites an Arm ARM rule under §11.7 names its test here instead once one covers its sequence
+
+### 39.6 Stretch: proofs past the memory core
+- [ ] the vibefs commit path proved in Verus to refine the §39.3 specification, closing the gap trace validation leaves
+- [ ] the code under the §10.8 loom models run under Miri's GenMC mode, which explores weak-memory outcomes loom does not produce
+- [ ] the syscall dispatch proved to pass every user pointer argument through the §10.6 accessors
+
+---
+
+## Phase 40: Stability
+
+**Goal.** A 1.0 that later releases do not break. The interfaces other software depends on are frozen
+and tested against every commit, supported releases get fixes, and releases come on a calendar.
+
+**Unlocks.** Software built outside the tree that keeps working across upgrades. Releases on a calendar
+as well as at phase exits. A base that the rest of Eras VI and VII, and the [Beyond](#beyond) list,
+build on without moving it.
+
+**Architectures.** Both. Every corpus holds binaries and images for each, and every supported release
+is tested on each.
+
+**Exit gate**
+- [ ] `docs/STABILITY.md` names the §40.1 stable set with a version for each interface, and lists every other user-visible interface as unstable with the phase expected to settle it; `scripts/check_stability.py` in `make check` fails when a part §40.1 names is missing
+- [ ] `make check` compares the generated syscall table (§10.5) with the copy frozen at the `v1.0.0` release candidate, and fails on a removed entry or a changed argument layout
+- [ ] the §40.2 ABI corpus runs unchanged on every push to `main`, on both architectures
+- [ ] vibefs and FAT images and §14.6 packages written by the release candidate pass the §40.2 checks on `main` in CI
+- [ ] an unattended A/B update (§22.2) from each supported release to `main` boots and passes `make test-e2e`, nightly, on both architectures
+- [ ] the release candidate runs §30.7's long-run workload for 7 days on the §25.7 long-run machine of each architecture, in place of the §25.7 soaks it overlaps, and records no panic, no Phase 25 watchdog reset, and no uncorrected machine check
+- [ ] `v1.0.0` is built on vibeOS by the toolchains Phase 24 bootstrapped from source, and a second vibeOS build reproduces every artifact byte for byte
+- [ ] the release candidate completes Phase 22's release-candidate fuzz campaigns with no crash, and no `fuzz-crash` issue (§40.3) has been open more than 14 days
+- [ ] the newest §22.5 drill record is dated within 12 months before the tag and names every supported branch, and the §22.5 `make check` script passes
+- [ ] every machine the compatibility list marks as tested nightly or weekly (§40.4) passed its last run
+- [ ] tag `phase-40` and release `v1.0.0`
+
+### 40.1 Interface freeze
+- [ ] the Linux surface in the stable set, per architecture: the calls, flags, and `ioctl`s vibeOS implements, as the §10.5 table and the §13.9 `ioctl` registry list them, their errno values, the initial stack and auxv (§13.10), signal frames (§13.8), the `/proc` and `/sys` files of §13.10 and Phase 23, and the §16.1 DRM/KMS and §16.4 evdev nodes; for these, stable means they keep matching Linux
+- [ ] vibeOS's own formats in the stable set: the vibefs v2 on-disk format (§14.8), the §14.6 package, repository, and release-manifest formats, and the documented §10.2 command-line options
+- [ ] the §16.5 display protocol listed as unstable until Phase 36 settles whether Wayland replaces it
+- [ ] `make gate PHASE=N` (§10.9) fails while `docs/STABILITY.md` lists an interface as unstable pending phase N, so a phase that closes after `v1.0.0` moves the interfaces it settles into the stable set, or names the later phase that settles them, in the commit that closes its gate
+- [ ] a stable interface changes only by a new version served beside the old one, or by a major version under the §22.1 policy
+- [ ] a stable call, flag, or file is removed only after one release that logs its use once per process
+- [ ] each release checks in the list of conformance cases it passed (§13.11, Phase 23); `make check` fails when an expected-failure list names a case on the last release's list
+
+### 40.2 Compatibility corpora
+- [ ] an ABI corpus built at the release candidate and at each release after it, for both architectures: static binaries from the §10.5 runtime and from musl, dynamic binaries against musl (§14.9) and glibc (Phase 23), and Rust programs built with `std`; kept as release assets and run by a ladder tier on every push
+- [ ] vibefs and FAT images from each release mounted, read, written, and checked with `fsck` on `main`
+- [ ] packages and a signed repository from each release installed, upgraded, and removed on `main`
+- [ ] a corpus failure fails the push like any other test; a deliberate break carries a §22.1 major version bump in the same commit
+
+### 40.3 Releases after 1.0
+- [ ] after `v1.0.0`, releases are `v1.<m>.0` until a §22.1 major version bump: a phase that closes cuts the next one, and the release workflow cuts one from green `main` whenever eight weeks pass without one
+- [ ] the latest two minor releases supported: security and data-loss fixes backported and shipped as `v1.<m>.<p>`, and each supported branch running the full ladder and `make verify` nightly, and the §23.6 suites on the weekly schedule `main` uses, on both architectures
+- [ ] backports by `scripts/backport.py`: `git cherry-pick -x`, and the fix's regression test must fail on the branch without the fix and pass with it, or the backport is refused
+- [ ] each later release candidate, and each patch release on a supported branch, passes a 72-hour §25.7 soak running §30.7's workload on the long-run machines, on the commit being released, before it is cut
+- [ ] a Phase 25 crash record from a supported branch's nightly or long run is filed as an issue against that branch, with the dump attached
+- [ ] every scheduled fuzz job (§10.2, §13.13, §15.10, §18.5, §21.8, and each later one) files a new crash as a `fuzz-crash` issue with its seed or reproducer, and the release workflow refuses to cut a release while one has been open more than 14 days
+- [ ] the release workflow refuses to cut a release when the newest §22.5 drill record is more than 12 months old or does not name every supported branch
+- [ ] the end of a release's support announced one release ahead in the release notes
+
+### 40.4 Hardware
+- [ ] the compatibility list (§20.1) marks each machine as tested nightly in the §20.8 rig, tested weekly there (the §25.7 long-run machines), or tested by hand, with the release it was last tested at; a machine not tested at either of the last two releases leaves the list
+- [ ] the release workflow refuses to cut a release while a nightly machine's last run is red or more than two days old
+- [ ] per-machine results committed as records to §10.9's `ci-history` branch beside the QEMU runs
+
+### 40.5 Stretch: long-term support
+- [ ] one release a year designated long-term and supported for two years, with its own nightly ladder on both architectures
+
+Then keep going: there is no version of this where the work is finished.
 
 ---
 
@@ -2112,23 +3878,46 @@ Then, having proven the point, keep going: there is no version of this where the
 
 Not phases. No gates, no tags. Things that are hard, well specified, and welcome as soon as the phase
 that enables them is closed. Each names that phase. Take one when the queue is empty, and move it into a
-phase with a gate before starting it.
+phase with a gate before starting it. An entry that needs bought hardware, rented machines, or paid API use
+says so, and the phase it moves into follows the **Budget** rule in [How to read this](#how-to-read-this).
 
-- **Wayland compatibility** (after 16): real applications run unmodified. §16.5 keeps the door open.
-- **virtio-gpu 3D and a graphics API** (after 16 and 17): OpenGL ES over virgl or Vulkan over venus, both Mesa drivers that need §17.2's C++ standard library, then the toolkit on it.
-- **A web browser port** (after 16 and 17): the single largest test of the POSIX surface, threads, and font rendering there is.
-- **Apple Silicon bare metal** (after 20): m1n1 as the bootloader, the DART IOMMU, the AIC interrupt controller. Native hardware for the dev host.
-- **riscv64 on a real board** (after §11.8 and 20).
-- **Formal verification of one subsystem** (after 10): the buddy allocator or the vibefs commit protocol, proven rather than tested. Which one, and with what tool, is the first deliverable.
-- **Deterministic simulation testing** (after 15): the network stack and both filesystems driven by a simulated clock and a seeded fault injector, every failure replayable from its seed.
+- **riscv64 on a real board** (after §11.8 and 20). The board needs the maintainer's budget approval.
+- **Whole-kernel deterministic simulation** (after 15): the portable kernel run on the host against a simulated `arch` (§10.3), one simulated CPU at a time chosen by a seed at every lock, atomic, and interrupt point, in virtual time, with §12.5's disk faults and §15.10's faulty link under §15.1's simulated clock, every failure replayable from its seed. §15.1 and §15.10 already do this for the network stack alone, and §12.5 enumerates vibefs crash states.
 - **Live kernel patching** (after 18): a fix applied to a running kernel without a reboot, with the KASLR and W^X story intact.
-- **A `std`-native Rust userspace** (after 17): coreutils, shell, and init moved from the §10.5 `no_std` runtime to the §17.3 `std` target.
+- **A `std`-native Rust userspace** (after 24): coreutils, shell, and init moved from the §10.5 `no_std` runtime to Rust's `std` for the user triple §24.3 chose.
 - **Real-time guarantees** (after 19 and 20): bounded interrupt and scheduling latency measured on hardware, and a scheduling class that documents its bound.
 - **A network filesystem client** (after 15): NFS or 9p over TCP, so a cluster of vibeOS machines shares one tree.
-- **NTP with clock discipline** (after 15): slewing rather than stepping, and a drift estimate. §15.8's SNTP sets the clock; this keeps it right.
 - **A WASM runtime** (after 14): a sandbox that is not a process.
 - **Cross self-hosting** (after 11 and 17): aarch64 vibeOS builds x86_64 vibeOS and the reverse, byte-identical to the native build.
-- **vibefs v3** (after §14.8): a log-structured or journaled design measured against v2's copy-on-write metadata on the §19.3 file benchmarks, with an upgrade path from v2.
+- **vibefs v3** (after 19): a log-structured or journaled design measured against v2's copy-on-write metadata on the §19.3 file benchmarks, with an upgrade path from v2.
+- **Record and replay** (after 10): `make record` boots a ktest ISO under QEMU record/replay (`-accel tcg,thread=single -icount shift=auto,rr=record,rrfile=<path>`, since the ktest tiers run at `-smp 2` and `-smp 4`) with disks through `blkreplay` and a fixed `-seed`, and `make replay` replays it under the §10.1 `make debug` gdb script with `reverse-stepi` and `reverse-continue`; a ladder failure in CI is rerun once under record for diagnosis, the job stays red whatever the rerun shows, and a recording that reproduces it is uploaded. Then the recordings indexed into a database of memory writes, register states, and control flow, so an agent asks which instruction last wrote an address instead of rerunning with prints.
+- **CHERI capability hardware** (after 11 and 18): a port to Arm Morello or CHERI-RISC-V, first under the CHERI QEMU, with every kernel and user pointer a bounded capability. The first deliverable is whether a CHERI-capable Rust compiler is usable; a Morello board needs the maintainer's budget approval.
+- **Gate replay** (after 13): each Era I and II phase replayed as a benchmark. A fresh agent team starts from the commit that closed the previous phase, with only that phase's section and `AGENTS.md`, and `make gate PHASE=N` (§10.9) scores the result; rerun when a new model ships. Phases 0 to 9 first get gate-map entries written against their closing commits. The API spend needs the maintainer's budget approval.
+- **eBPF** (after 19): Linux's `bpf(2)` with a verifier and a JIT on both architectures, attached to §19.1's tracepoints, so unmodified `bpftrace` one-liners run; the verifier fuzzed like every parser.
+- **Memory tagging on silicon** (after 18 and 20): §18.4's MTE build on an MTE-capable aarch64 machine in the §20.8 rig, with asynchronous tag checking on in release images. The machine needs the maintainer's budget approval.
+- **`rr` on vibeOS** (after 18, 19, 20, and 23): unmodified `rr` records and replays a user process on the §20.8 x86_64 machine, which needs Linux's `ptrace`, `perf_event_open` with the retired-conditional-branch counter over §19.2's PMU code, and seccomp-BPF; a miscompile in the self-hosted toolchain is then debugged by replay.
+- **Hypervisor record and replay** (after 21): the §21.1 hypervisor logs a guest's exit results, interrupt injection points, and device completions, and replays the guest deterministically under gdb's reverse execution at hardware speed, one vCPU first.
+- **Live migration** (after 21 and 28): a running §21.2 guest moved over TCP from the §20.8 machine to the §25.7 long-run machine of the same architecture, with a CPU feature set both machines offer, dirty pages tracked through EPT or stage-2 dirty logging and pre-copied, and the downtime of a 4-vCPU, 4 GiB guest running §19.3's mixed interactive workload measured and held under 300 ms.
+- **A Kubernetes worker node** (after 21 and 30): the upstream kubelet with a CRI runtime over §21.6's OCI images and a CNI plugin over §21.7's virtual networking, joined to a real cluster; the upstream node conformance suite becomes the gate when it moves into a phase.
+- **Agent performance ledger** (after 22): which agent and model did what, from commit trailers, and per phase the slices, pull requests, days from first slice to tag, red CI runs, reverts, reopened boxes, and escaped bugs by the tier that should have caught them, computed from git and GitHub history into the release notes. The maintainer deferred this ([ARCHITECTURE_REVIEW](reviews/ARCHITECTURE_REVIEW.md) O1), so it starts only when the maintainer asks for it.
+- **Agents on vibeOS** (after 23): the coding agent that develops vibeOS runs on a vibeOS machine through the Linux ABI (Node.js passes Phase 23's suite), reaches the model API over HTTPS through Phase 15's stack, and lands one slice from there. The API spend needs the maintainer's budget approval.
+- **Foreign-architecture binaries** (after 23): `binfmt_misc` and an unmodified static `qemu-user`, so aarch64 vibeOS runs x86_64 Linux binaries and the reverse, tested by running LTP that way.
+- **Debian with systemd** (after 21 and 23): an unmodified Debian install boots on the vibeOS kernel with systemd as PID 1 on §21.5's cgroup v2 hierarchy, udev, and journald, and Debian's `autopkgtest` runs over a package set with a recorded pass rate.
+- **Full-source bootstrap** (after 24): a chain from a few-hundred-byte `hex0` seed to the §24.1 C toolchain, as stage0-posix and live-bootstrap build one, run on vibeOS through its Linux ABI, so Alpine's clang and lld leave §24.5's seed list. vibeOS runs only the chain's 64-bit ports (no 32-bit user ABI), and whether they reach GCC on both architectures is the first deliverable.
+- **Confidential guests** (after 26 and 27): vibeOS as an AMD SEV-SNP, Intel TDX, and Arm CCA guest on the clouds that offer them, with private memory, Phase 27's bounce pool for shared I/O, and a remote attestation report checked by a host tool. The instances need the maintainer's budget approval.
+- **CXL memory tiering** (after 27): CXL Type 3 memory as a far §19.7 NUMA node, with pages promoted and demoted by measured access, first against QEMU's CXL emulation; CXL hardware after that needs the maintainer's budget approval.
+- **RDMA** (after 28): RoCEv2 on the Phase 28 NIC through Linux's verbs ABI, so unmodified `rdma-core` runs, then NVMe over RDMA; kernel-bypass user queues isolated by the §18.1 IOMMU.
+- **Replicated block storage** (after 29): a volume mirrored synchronously to a second vibeOS machine over TCP, with failover and resync time measured.
+- **Fleet rollouts** (after 30): a control plane that enrolls many vibeOS machines and rolls an update across them in waves, each wave gated on the §22.2 update health check and Phase 30's metrics, halting on a regression.
+- **Touchscreens and pens** (after 31): I2C-HID touchscreens and stylus digitizers with pressure and tilt, and rotation from the sensor hub, on a convertible added to the reference machines. The convertible needs the maintainer's budget approval.
+- **NVIDIA GPUs** (after 33): Turing and later through the GSP firmware, as Linux's `nova` driver does, with the render uapi Mesa's NVK runs on unmodified. The card needs the maintainer's budget approval.
+- **Hybrid graphics** (after 33): a laptop that renders on a discrete GPU and scans out on the integrated one, with the discrete GPU powered off when idle. The laptop needs the maintainer's budget approval.
+- **MIPI cameras** (after 34): Intel's IPU6 and later, through which most recent Intel laptops route their cameras, with `libcamera` and its software ISP as the userspace. The laptop needs the maintainer's budget approval.
+- **Fingerprint readers** (after 36): `libfprint` sensors through `fprintd`, used for the session's login and for `sudo`.
+- **Printing and scanning** (after 36): IPP Everywhere and eSCL through CUPS and `sane-airscan`, which cover most network printers and scanners sold in the last decade. The printer and scanner need the maintainer's budget approval.
+- **Snapdragon X laptops** (after 37): a second aarch64 laptop family, such as the ThinkPad T14s Gen 6: device tree, Adreno through Mesa's `freedreno`, `ath12k` Wi-Fi, and Qualcomm's remote processors. The machine needs the maintainer's budget approval.
+- **Later Apple Silicon** (after 38): Apple Silicon machines past the ones Phase 38 and §38.10 name, such as the M1 Pro, Max, and Ultra and the M2 and later generations, as Asahi Linux documents them. The machines need the maintainer's budget approval.
+- **Proof of isolation** (after 39): a machine-checked statement that no syscall sequence lets one process read or write another's memory, built on Phase 39's page-table and frame proofs and the syscall dispatch.
 
 ---
 
