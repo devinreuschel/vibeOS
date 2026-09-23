@@ -4269,9 +4269,31 @@ records under HVF, as the era preamble says. On the dev host, which has no vhost
 - [ ] a regression past its recorded threshold fails the nightly job; a number measured under KVM is compared only with history from the same runner CPU model (§10.1)
 
 ### 37.4 Crashes and reports
-- [ ] a crash reporter: a user crash leaves a §13.8 core and a symbolized backtrace, a kernel panic in §20.1's persistent record is shown after the next boot, and either is filed to the forge with the user's consent
-- [ ] a one-command bug report that attaches the crash data, the kernel log, and the device list
+- [ ] a crash reporter: a user crash leaves a §13.8 core and a symbolized backtrace, and a kernel panic in §20.1's persistent record is shown after the next boot; what leaves the machine, and where it goes, is the owner decision below
+- [ ] a one-command bug report that gathers the crash data, the kernel log, and the device list, under the same decision
 - [ ] each report becomes a regression test in the cheapest tier or an open box in this file, per the standing gates
+
+> **OWNER DECISION NEEDED (design review H016): what a crash report may send, and where.** A report
+> built from a crash can carry the user's data. A core holds the process's memory: documents,
+> passwords, keys. A kernel log and a device list hold hostnames, paths, serial numbers, and network
+> addresses. This section's boxes said reports are "filed to the forge with the user's consent", and
+> the forge is the project's GitHub, where an issue is public.
+> - **(a) Nothing leaves the machine.** The reporter writes the report locally and prints how to file
+>   it, and the user attaches what they choose. Consequence: fewer reports, and vibeOS itself sends no
+>   user data anywhere.
+> - **(b) One command files a minimal report after per-report consent.** The report holds the
+>   symbolized backtrace, the kernel and package versions, and the device list, with paths, hostnames,
+>   addresses, and serial numbers redacted, and never a core file or raw memory. The user sees the
+>   whole text before it is sent, and it goes to a public issue on the project's GitHub under the
+>   user's own account. Consequence: reports are public and name their filer, and the redaction needs
+>   tests of its own.
+> - **(c) Automatic upload, opt-out, to a private endpoint.** Consequence: it needs an endpoint the
+>   project would pay for or host, which Free by default rules out, and it collects data from users
+>   who did not act.
+>
+> **Recommendation: (a) by default, with (b) as the one command a user runs.** Nothing is sent
+> unless a user asks for it and reads it first, and a core never leaves the machine. Nothing before
+> Phase 37 depends on the answer.
 
 ### 37.5 Stretch: dogfood
 - [ ] a person uses vibeOS in the desktop guest under HVF on the dev host as their only desktop for 14 consecutive days; its session log shows the days, and every problem filed has a regression test or an open box in this file
