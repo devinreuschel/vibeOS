@@ -810,7 +810,7 @@ non-canonical hole between. Kernel regions are fixed, not discovered, except the
 | `0x0000_0000_0000_0000` – `0x0000_0000_2000_0000` | 512 MiB | Low identity window, kernel PML4 only (user PML4s do not copy slot 0). 2 MiB pages, GLOBAL; the first 2 MiB supervisor writable and executable. |
 | *hole* | | Non-canonical. Any pointer here is a bug. |
 | Limine's HHDM offset (`0xFFFF_8000_0000_0000` under the pinned Limine on x86_64) + | `map_end` ≤ 8 GiB, plus leaves added above it | Physmap, `virt = phys + ` the HHDM offset, discovered at boot (below the table); today the constant `HHDM_BASE`, which `boot::capture` asserts Limine's offset equals. 2 MiB pages up to `map_end`. Above it: 4 KiB leaves from `acpi_init::map_gap` (no cap), and write-back leaves for a display BAR0 from `paging_init::ensure_physmap_wb` (below `PHYSMAP_CAP`). |
-| `0xFFFF_C000_0000_0000` – `0xFFFF_C000_0400_0000` | 64 MiB | Kernel heap. Starts at 1 MiB mapped and grows. |
+| `0xFFFF_C000_0000_0000` – `0xFFFF_C000_0400_0000` | 64 MiB | Kernel heap. Starts at 1 MiB mapped and grows. Planned (ROADMAP §12.6): the region's size is set at boot from installed memory, up to the 16 TiB below the KVA region, so the heap can grow as far as RAM does ([§4.4](#44-kernel-heap)). |
 | `0xFFFF_D000_0000_0000` – `0xFFFF_D010_0000_0000` | 64 GiB | Kernel VA allocator: guarded stacks, `vmap`, large transient mappings. |
 | `0xFFFF_E000_0000_0000` – `0xFFFF_E000_1000_0000` | 256 MiB | `ioremap` window for device MMIO that should not be reached through the physmap. |
 | `0xFFFF_FFFF_8000_0000` – `0xFFFF_FFFF_FFFF_FFFF` | 2 GiB | Kernel image. Matches the `kernel` code model so `.text` relocations fit in 32-bit displacements. |
@@ -953,6 +953,12 @@ A free-list heap at `HEAP_START`, backed by buddy frames mapped writable + NX. I
 1 MiB; the allocator grows in page-sized increments up to the 64 MiB region limit. `GlobalAlloc`
 disables interrupts around `alloc` and `dealloc` because allocation happens under locks that ISRs must
 never contend.
+
+Planned (ROADMAP §12.6): the heap region is sized at boot from installed memory, so a heap allocation
+fails only when frames run out. The two limits must be one because the failure policy below treats
+every failure as a shortage of memory. A fixed region smaller than RAM would fail allocations while
+frames are free, and reclaim and the OOM killer would then kill processes to make room that
+memory already had.
 
 Allocation failure has two policies, chosen by who can cause it:
 
