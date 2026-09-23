@@ -671,14 +671,15 @@ addresses come from a range allocator. Small objects come from a heap layered on
 ## 4.1 Virtual address map
 
 x86_64 canonical addressing splits at bit 47. Low half is user, high half is kernel, with a
-non-canonical hole between. Kernel regions are fixed, not discovered:
+non-canonical hole between. Kernel regions are fixed, not discovered, except the physmap base
+(below the table):
 
 | Range | Size | Role |
 |-------|------|------|
 | `0x0000_0000_0000_0000` – `0x0000_7FFF_FFFF_FFFF` | 128 TiB | User address space, one PML4 per process (`AddressSpace`), below `USER_END`. Page 0 is never mapped (`NULL_GUARD_LEN`). The top 4 KiB page is mappable, so a `syscall` in its last two bytes leaves RCX non-canonical (`0x0000_8000_0000_0000`), and on KVM and hardware the exit `iretq` raises `#GP` on the user GS base (ROADMAP §10.6, F007). Each user PML4 copies the kernel's PML4[256..512) at creation, so the whole kernel half stays mapped, supervisor-only, while ring 3 runs: no KPTI (ROADMAP §18.3, F024, F133). |
 | `0x0000_0000_0000_0000` – `0x0000_0000_2000_0000` | 512 MiB | Low identity window, kernel PML4 only (user PML4s do not copy slot 0). 2 MiB pages, GLOBAL; the first 2 MiB supervisor writable and executable. |
 | *hole* | | Non-canonical. Any pointer here is a bug. |
-| `0xFFFF_8000_0000_0000` + | `map_end` ≤ 8 GiB, plus leaves added above it | Physmap, `virt = phys + 0xFFFF_8000_0000_0000` (`HHDM_BASE`); `boot::capture` asserts that Limine's HHDM offset equals it. 2 MiB pages up to `map_end`. Above it: 4 KiB leaves from `acpi_init::map_gap` (no cap), and write-back leaves for a display BAR0 from `paging_init::ensure_physmap_wb` (below `PHYSMAP_CAP`). |
+| Limine's HHDM offset (`0xFFFF_8000_0000_0000` under the pinned Limine on x86_64) + | `map_end` ≤ 8 GiB, plus leaves added above it | Physmap, `virt = phys + ` the HHDM offset, discovered at boot (below the table); today the constant `HHDM_BASE`, which `boot::capture` asserts Limine's offset equals. 2 MiB pages up to `map_end`. Above it: 4 KiB leaves from `acpi_init::map_gap` (no cap), and write-back leaves for a display BAR0 from `paging_init::ensure_physmap_wb` (below `PHYSMAP_CAP`). |
 | `0xFFFF_C000_0000_0000` – `0xFFFF_C000_0400_0000` | 64 MiB | Kernel heap. Starts at 1 MiB mapped and grows. |
 | `0xFFFF_D000_0000_0000` – `0xFFFF_D010_0000_0000` | 64 GiB | Kernel VA allocator: guarded stacks, `vmap`, large transient mappings. |
 | `0xFFFF_E000_0000_0000` – `0xFFFF_E000_1000_0000` | 256 MiB | `ioremap` window for device MMIO that should not be reached through the physmap. |
@@ -687,6 +688,15 @@ non-canonical hole between. Kernel regions are fixed, not discovered:
 Regions must not overlap and every one asserts that its range is unmapped before claiming it. This is
 a real failure mode: two subsystems in the old tree were both designed at `0xFFFF_C000_*` and only one
 noticed.
+
+The physmap base is the one region the kernel discovers. It is Limine's HHDM offset, which the Limine
+protocol says "may vary between boots, including for randomisation", and which an executable "must
+not assume". The kernel adopts that offset as its own physmap base, so a physical address has the
+same alias before and after its `mov cr3`, and reads it once into `BootInfo`; every physical-to-virtual
+translation uses that one value. `boot::capture` checks that the physmap's range overlaps none of the
+fixed regions in the table and halts with a named reason if it does. Rule; not yet enforced:
+`paging_init::HHDM_BASE` is a constant, and `boot::capture` asserts that Limine's offset equals it
+(ROADMAP §11.1). ROADMAP §18.2 later draws the other bases from entropy too.
 
 The low identity window exists for one reason: an AP starting from SIPI runs in real mode and then
 32-bit protected mode at `0x8000`, so that page must be identity mapped and executable. All 512 MiB
