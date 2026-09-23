@@ -371,10 +371,10 @@ own file.
 | I11 | A completer's publishing store is its last access to the waiter (§2.8) | `block_init::IoWaiter` | documented | No: `IoWaiter::finish` runs `wake_all` after it stores `done` (ROADMAP §10.10, F002) |
 | I12 | Every kernel PML4 slot exists before the first user address space | `AddressSpace::new` copies PML4[256..512) once | assumed | Yes, by boot order only: `paging_init::install` creates none of the heap, KVA, and `ioremap` PML4 slots; each appears on its region's first mapping, and no current path makes a first mapping after `/hello` (ROADMAP §18.2, F101) |
 | I13 | The low identity window is removed after `smp: done` (§4.1) | none yet | documented | No: it stays mapped and GLOBAL, VA 0 included (ROADMAP §10.6, F085) |
-| I14 | Every buddy frame and page table lies inside the physmap (§4.1) | `pmm_init::init`, `paging_init::physmap_extent` | enforced | Yes; a framebuffer above the 8 GiB cap is not covered (ROADMAP §20.1, F020) |
+| I14 | Every buddy frame and page table lies inside the physmap (§4.1) | `pmm_init::init`, `paging_init::physmap_extent` | enforced | Yes; a framebuffer above the 8 GiB cap is not covered (ROADMAP §11.2, F020) |
 | I15 | Frame 0, the kernel image, `0x8000`, and the framebuffers never enter the buddy (§2.4) | `pmm_init::init`; `Buddy::insert_region` skips frame 0 | enforced | Yes with at most 6 framebuffers: `Excludes` holds 8 ranges (the trampoline page, the kernel image, one per framebuffer), and a range past the 8th stays in the buddy, with a `pmm: excludes overflow` line |
 | I16 | The kernel PML4 lies below 4 GiB, because the trampoline loads a 32-bit CR3 | `smp_init::start_one` | enforced by skipping every AP | Not guaranteed: the PML4 frame has no address limit, and above 4 GiB every AP is skipped with a `smp: cr3 above 4GiB` line (ROADMAP §20.1) |
-| I17 | MMIO is UC, RAM is WB, and no frame has both (§2.4) | `acpi_init`, `Mapper::patch_physmap_uc` | documented | Partly: a whole 2 MiB leaf goes UC with no RAM check, and a trailing leaf can be skipped (ROADMAP §20.1, F104) |
+| I17 | MMIO is UC, RAM is WB, and no frame has both (§2.4) | `acpi_init`, `Mapper::patch_physmap_uc` | documented | Partly: a whole 2 MiB leaf goes UC with no RAM check, and a trailing leaf can be skipped (ROADMAP §11.2, F104) |
 | I18 | EOI before any switch; a one-shot timer is rearmed before yielding (§5.8) | timer ISRs | documented | Yes; no test tier runs the TSC-deadline timer, the only one-shot source, so nothing exercises the rearm (ROADMAP §10.1, F078) |
 | I19 | I/O APIC high dword written before the low; IST index zero-based in software, one-based in the gate (§5.1, §5.6) | `apic.rs`, `desc.rs` | enforced, host-tested | Yes |
 | I20 | `now_ns` is monotonic | seqlock plus `time::monotonic_max` over `time_init::LAST_NS` | enforced | Yes, by construction, so the monotonicity tests cannot fail (ROADMAP §10.2, F100) |
@@ -714,7 +714,17 @@ for the LAPIC, I/O APIC, and HPET (UC), with no cap. RAM above the cap never ent
 free-list nodes, page tables, and heap pages are all reached through the physmap after `mov cr3`, so a
 frame past it triple-faults on first touch. The physmap covers a framebuffer only below the cap, so for a
 framebuffer that extends past 8 GiB `fb_init` writes through an unmapped address and boot halts at
-console init (ROADMAP §20.1, F020).
+console init (ROADMAP §11.2, F020).
+
+Planned (ROADMAP §11.2): one physmap policy on both architectures. The physmap maps only the
+RAM-typed ranges of the memory map (usable, bootloader-reclaimable, executable and modules, ACPI
+reclaimable, ACPI NVS), plus a write-back leaf for a firmware table outside them when it is first
+read, and never device memory. MMIO is reached only through `ioremap`, and each framebuffer through a
+mapping of its own range. A firmware region described as terabytes of MMIO then costs nothing, which
+removes the reason for the cap, so the cap goes and RAM above 8 GiB joins the buddy. Rejected:
+keeping x86_64's whole-range physmap with in-place UC patches beside aarch64's RAM-only one, which
+would leave the portable page-table code two policies for one primitive (AGENTS.md rule 10) and keeps
+the UC-alias bug class (F104) alive.
 
 ## 4.2 Physical memory: buddy allocator
 
@@ -766,7 +776,8 @@ Then set `EFER.NXE` if it is not already on, load CR3, and print `paging: cr3 ok
 above `map_end` first gets fresh 4 KiB UC leaves (`map_gap`). Inside `map_end`,
 `Mapper::patch_physmap_uc` marks the whole covering 2 MiB leaf UC without splitting it, so RAM that
 shares the leaf becomes UC too, and its walk can skip a trailing leaf of an unaligned range (ROADMAP
-§20.1, F104).
+§11.2, F104). Planned (ROADMAP §11.2): these devices move to `ioremap`, the physmap maps no device
+memory, and this patch and `map_gap`'s UC leaves are deleted (§4.1).
 
 ### PTE flag policy
 
@@ -2078,7 +2089,8 @@ else stays NX.
 `map_end` was computed from raw memory map entries, and firmware described an MMIO BAR as a
 multi-terabyte region. Rule: derive the physmap extent from usable RAM, kernel image end, and
 framebuffer extent, and cap it (8 GiB). PCI BAR size probes that return > 32 MiB are recorded
-and not page-walked into the ioremap window or physmap.
+and not page-walked into the ioremap window or physmap. Planned (ROADMAP §11.2): the physmap maps
+only RAM-typed ranges, so a huge MMIO descriptor is never walked and the cap goes (§4.1).
 
 **Device reads return stale values on real hardware but work in QEMU.**
 MMIO reached through a write-back physmap mapping. QEMU does not enforce cache attributes; hardware
@@ -2086,7 +2098,8 @@ does. Rule: LAPIC, I/O APIC, HPET, and every device MMIO page gets PCD + PWT, pa
 CR3 install and before first access. Patch every physmap leaf the range touches, and split a 2 MiB leaf
 to 4 KiB first when it also holds usable RAM, so no RAM frame gets a UC alias (§2.7, I17). Not yet
 enforced: `Mapper::patch_physmap_uc` marks whole 2 MiB leaves UC and can skip a trailing leaf (ROADMAP
-§20.1, F104).
+§11.2, F104). Planned (ROADMAP §11.2): device MMIO leaves the physmap for `ioremap`, so no physmap leaf
+is ever patched (§4.1).
 Do not UC-patch the console framebuffer when it aliases VGA BAR0; leave that physmap WB.
 
 **Config space beyond bus 0 is all `0xFFFF` on a machine without MCFG.**
