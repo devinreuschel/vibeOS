@@ -22,7 +22,7 @@ halfway through.
 | | Section | Covers |
 |---|---------|--------|
 | 1 | [Overview](#1-overview) | Constraints, layers, module map |
-| 2 | [Invariants](#2-invariants) | Lock order, handler rules, panic policy, markers, invariant register, publish last, preemption, trust boundaries |
+| 2 | [Invariants](#2-invariants) | Lock order, handler rules, panic policy, markers, invariant register, publish last, preemption, trust boundaries, object lifetimes |
 | 3 | [Boot](#3-boot) | Toolchain, Limine, `_start` order, linker |
 | 4 | [Memory](#4-memory) | Address map, buddy allocator, paging, heap |
 | 5 | [Interrupts](#5-interrupts) | GDT/IDT, exception policy, vector map, PIC and APIC, privilege transitions |
@@ -502,6 +502,44 @@ another process's data. README says not to run untrusted code on it or keep secr
 > does not model Meltdown. §10.6 rewrites the entry path as one generated stub per vector, which
 > keeps a later KPTI CR3 switch local. Revisit at Phase 14, whose gate adds `login` and more than
 > one uid. The rest of the design works either way: §18.3's boxes move unchanged under (b) or (c).
+
+## 2.11 Object lifetimes
+
+How an object that more than one thread or CPU can reach is created, shared, and destroyed. §2.8
+covers the last store of a hand-off; these rules cover the rest.
+
+1. One owner, or a count. An object one thread uses is owned by it (a stack value, a `Box`). An
+   object that more than one thread or CPU can reach (an address space, an open file description, an
+   inode, a mount, a device instance, a pipe) is reference-counted, and dropping the last reference
+   tears it down. `&'static` is only for boot-lifetime objects in a `BootCell` (AGENTS.md rule 6).
+2. Tables hold references or quiescent slots. A lookup structure (the process table, the TCB table,
+   the dentry cache, the device registry) holds a counted reference, or a slot it reuses only once
+   the object's count is zero and no CPU still runs on it or through it (a TCB's `on_cpu` flag,
+   ROADMAP §10.10).
+3. Teardown runs in one order: unpublish the object from every lookup structure, so no new
+   reference can be taken; wait until in-flight users drop theirs (the count reaching zero, or,
+   for lockless readers from ROADMAP §19.5 on, an RCU grace period); release what the object holds
+   (frames, vectors, DMA buffers, stopping the device first, [§5.4](#54-irq-registration)); then
+   free it. No step waits for a lock that an in-flight user needs in order to finish.
+4. Ids are not pointers. A pid, tid, descriptor, or device id that crosses the syscall boundary or
+   sits in a table is looked up on each use, never cached as a pointer. Pids and tids are allocated
+   in increasing order up to `pid_max` and then wrap, skipping ids in use, as Linux does, so a freed
+   id is not handed out again at once; an id becomes free only when its object is reaped.
+5. Asynchronous work owns what it touches. A request, timer, work item, or completion that outlives
+   the call that started it holds counted references to every object it will touch (ROADMAP §12.5's
+   owned block submission).
+
+Why: the kernel review's CRITICAL and HIGH lifetime findings (F002, F012, F019) each came from an
+object that one subsystem freed or reused while another could still reach it, under a scheme that
+subsystem invented. Rejected: keeping one scheme per subsystem, which is how those bugs arose; and
+never freeing (today's TCBs), which aliases a dying object as soon as its slot is reused. Epoch or
+RCU reclamation is kept for lockless readers only (ROADMAP §19.5); everything else uses counts.
+
+Today the code breaks rules 1, 2, 4, and 5: TCBs are never freed and their slots are rewritten in
+place (I9; ROADMAP §10.10, F012), address spaces are reached through `&'static` references built
+from table-owned boxes (ROADMAP §13.1, F019), block completions point into stack frames (ROADMAP
+§10.10, F002; §12.5, F042), and a pid is the index of its process-table slot, handed out lowest
+first (ROADMAP §10.4, F127).
 
 ---
 
