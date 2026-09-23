@@ -564,7 +564,7 @@ they are decided here, before a line of v2 is written:
 | File size | up to 2^63 − 1 bytes | Linux's `loff_t` |
 | Names | 1 to 255 bytes of any value but `/` and NUL, not normalized | Linux's `NAME_MAX`; v1's 64-byte cap follows the VFS limit that ROADMAP §13.9 raises |
 | Timestamps | signed 64-bit seconds and 32-bit nanoseconds for atime, mtime, ctime, and a birth time | Linux's `statx`; v1 stores whole seconds |
-| Checksums | CRC-32C (Castagnoli) over every metadata block and every data extent | a hardware instruction on both architectures (SSE4.2 `crc32`, the Armv8 CRC32C instructions), and what ext4, XFS, and btrfs use; v1's CRC-32/ISO-HDLC has no instruction on x86_64 |
+| Checksums | CRC-32C (Castagnoli) over every metadata block, and over every data block on its own: one checksum per block of file data, never one per extent. Data checksums live in a checksum tree keyed by physical block number | a hardware instruction on both architectures (SSE4.2 `crc32`, the Armv8 CRC32C instructions), and what ext4, XFS, and btrfs use; v1's CRC-32/ISO-HDLC has no instruction on x86_64. Per block, a read verifies only the blocks it reads, a write or truncate that splits an extent keeps its neighbours' checksums, and §29.4's scrub repairs one block at a time. A checksum over a whole extent would make a 4 KiB read of a 1 GiB extent read the whole extent, and every split recompute checksums over data it did not touch (F063 is v1's instance). Keyed by physical block, as btrfs keys its checksum tree, a block that snapshots and clones share has one checksum, and extent records stay fixed-size |
 | Self-describing blocks | every metadata block header carries the volume UUID, its own block number, and the generation that wrote it | a checksum accepts a correct block written to the wrong place or left over from an older generation; these fields do not |
 | Reference counts | at least 32 bits per block, or a reference-count tree | v1's `u8` counts overflow once 255 snapshots share a block |
 | Block size | a superblock field: `mkfs` writes 4096, and readers accept every power of two from 4096 to 65536 | a later default needs no format change |
@@ -577,3 +577,9 @@ Rejected: carrying v1's field widths into v2 and raising limits later with
 new versions that `fsck` upgrades in place. Each raise after 1.0 would be a
 migration of every volume in use, where a wider field now costs a few bytes
 per block.
+
+Rejected for data checksums: one checksum per extent, as v1 stores it, for
+the read and split costs above; and a checksum array inside each extent
+record, which makes records variable-sized and stores a shared block's
+checksum once per file that references it. Cost of the checksum tree: one
+more tree lookup per data read, cached like the other metadata.
