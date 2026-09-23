@@ -305,7 +305,7 @@ enabled, and `make` ships the dev profile, whose `overflow-checks = true` turns 
 overflow into a panic. Crafted input panics portable code: a FAT BPB whose
 `rsvd + num_fats * FATSz32` overflows in `parse_bpb` (ROADMAP §10.2, F064); a vibefs write near file
 offset 2^44, which overflows `map_block` (ROADMAP §10.11, F008); a CRC-valid vibefs leaf whose count
-exceeds the per-leaf maximum (ROADMAP §18.5, F061); a vibefs truncate-grow that keeps `F_INLINE`
+exceeds the per-leaf maximum (F061; ROADMAP §14.8 retires v1 for a v2 that validates every block it reads); a vibefs truncate-grow that keeps `F_INLINE`
 past 128 bytes (ROADMAP §13.9, F062). Panics in the kernel binary halt in the binding order above.
 
 Exceptions follow the per-vector table in [section 5.2](#52-idt-and-exceptions). A kernel `#BP`
@@ -383,7 +383,7 @@ own file.
 | I21 | A run queue is touched only by its owner CPU with IF=0 (§2.3) | `per_cpu_init::with_current` | enforced (busy flag) | Partly: only the owner writes it, but `diag::cpus_to` (the shell `cpus` command) and in-guest tests read another CPU's `runq` length with no lock, and `&'static PerCpu` aliases the `&mut` (ROADMAP §10.3, F039) |
 | I22 | A `BootCell` is set once, before SMP, and holds `Sync` data (§2.3) | `cell.rs` | documented | No: `per_cpu_init::CPUS` holds the non-`Sync` `PerCpu`, which the unbounded `Sync` impl allows (ROADMAP §10.3, F017, F039); the set-once check is a `debug_assert!` (ROADMAP §10.2, F137) |
 | I23 | Barrier: every request before it completes before any after it starts. Flush: completed writes are durable (§10.2) | `block.rs` | documented | No: the block queue merges a request across any queued fence but the lowest and can reorder overlapping writes, virtio-blk completes a `Barrier` before earlier requests and sends a `Flush` before earlier writes complete, and a cache flush misses in-flight writeback (ROADMAP §10.11, F043) |
-| I24 | vibefs never overwrites a live block before the newer superblock is durable ([VIBEFS.md](VIBEFS.md)) | vibefs commit | documented | No after a failed commit: the in-memory generation advances before the superblock write, so the retry writes the slot that holds the only valid superblock (ROADMAP §12.5, F050). Otherwise it rests on on-disk refcounts that mount does not check (ROADMAP §18.5, F061) |
+| I24 | vibefs never overwrites a live block before the newer superblock is durable ([VIBEFS.md](VIBEFS.md)) | vibefs commit | documented | No after a failed commit: the in-memory generation advances before the superblock write, so the retry writes the slot that holds the only valid superblock (ROADMAP §12.5, F050). Otherwise it rests on on-disk refcounts that v1's mount does not check (F061), which v2 checks as it reads each block (VIBEFS.md §15; ROADMAP §14.8) |
 | I25 | Per-thread CPU state is saved and restored in full (§7.5) | `syscall_init::on_switch`, `thread::switch_context` | documented | No: `FS_BASE` is not switched (ROADMAP §13.1, F022); `fork` and `execve` get the FPU state wrong (ROADMAP §10.6, F069) |
 | I26 | Every kernel stack has a guard page (§2.4) | `kva_init::alloc_guarded_stack` | documented | No: boot runs on Limine's unguarded stack (ROADMAP §10.6, F072) |
 | I27 | `vibeos-core` does not panic on data (§2.5) | clippy deny on `unwrap`, `expect`, `panic` | enforced in part | No: indexing and overflow checks panic on crafted input; §2.5 lists the cases and their ROADMAP lines |
@@ -472,7 +472,7 @@ must neither halt nor corrupt memory it has not given to that source (AGENTS.md 
 | Principal | Trusted for | Can do today what a hardened kernel stops | Hardens in |
 |---|---|---|---|
 | Ring-3 code | Nothing: it must not halt or corrupt the kernel (I6) | Halt the kernel (F004 to F010); every process is root, so it can read any file and signal any process | ROADMAP §10.6 and §10.10 (halts), §13.9 (uids), §18.6 (capabilities, `seccomp`) |
-| Disk images and partition tables | Nothing: a parse returns `Corrupt` | Panic the kernel with a crafted image or table that root mounts or attaches (F061, F064, F117) | ROADMAP §10.2 (FAT BPB), §13.9 (partition tables), §18.5 (vibefs mount validation) |
+| Disk images and partition tables | Nothing: a parse returns `Corrupt` | Panic the kernel with a crafted image or table that root mounts or attaches (F061, F064, F117) | ROADMAP §10.2 (FAT BPB), §13.9 (partition tables), §14.8 (vibefs v2 validates every block it reads; v1 is retired) |
 | Devices: config space, rings, registers, interrupts | Nothing for halts (rule 4); everything for DMA | Read or write any physical memory by DMA, and forge an MSI | ROADMAP §18.1 (IOMMU, interrupt remapping, used-ring checks, F048) |
 | Firmware tables: ACPI, device tree, SMBIOS, the memory map | What they describe, but not their bounds: a malformed table is refused, never followed out of range | Halt boot with a malformed table before the IDT exists (F136) | ROADMAP §20.1 |
 | The network | Nothing, from the first packet | Not reachable yet | ROADMAP §15.10 fuzzes every parser from the start |

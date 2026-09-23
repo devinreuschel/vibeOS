@@ -6,8 +6,8 @@ This is the format document. Implementation code follows it, not the other way
 around. A change to layout, checksums, or the commit protocol bumps `version`
 in this file and in `src/vibefs.rs` (`VERSION`) in the same commit.
 
-The byte layouts in §4 to §9 are the ones v1 code writes, since every v1
-image was written by that code and ROADMAP §14.8 keeps v1 volumes mountable.
+The byte layouts in §4 to §9 are the ones v1 code writes. v1 is not carried
+forward: ROADMAP §14.8 retires it once root is v2 (§14).
 Where v1 code does not yet meet a guarantee this file states (crash safety,
 space accounting, checksum handling, snapshot delete, `fsck` coverage, the
 file size limit, mount validation, truncate), the guarantee stands and the
@@ -207,7 +207,9 @@ reachable block. A failure is `Corrupt`, never a panic. v1 mount checks none
 of these; of the record fields, it checks only the extent count,
 `inline_len`, the inode kind, and the name length. A crafted image with
 valid checksums can therefore panic the kernel or make copy-on-write
-overwrite a live block (F061; ROADMAP §18.5).
+overwrite a live block (F061). v1 is not fixed for this: its mount is
+reachable only by root, and v2 validates every block as it reads it (§15;
+ROADMAP §14.8, §18.5).
 
 ---
 
@@ -520,6 +522,13 @@ v1's tests do not check this pass criterion yet:
 
 `VERSION` is 1. Readers reject any other value. Additive on-disk changes
 that old readers can ignore use flag bits. Layout changes bump `VERSION`.
+
+v1 is experimental and carries no compatibility promise. The kernel stops
+mounting it when v2 becomes the root filesystem (ROADMAP §14.8), v2 readers
+do not read it, and no tool converts it: no v1 volume holds data anyone
+kept, since every v1 image is a CI artifact or the RAM-backed `/vibe`. From
+v2 on, §15's feature-flag sets carry additive changes, and the v2 format is
+the one ROADMAP §39.1 freezes.
 
 ---
 
