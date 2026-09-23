@@ -520,25 +520,21 @@ must neither halt nor corrupt memory it has not given to that source (AGENTS.md 
 Consequence: until Phase 18 closes, vibeOS stops a process from crashing the kernel, not from reading
 another process's data. README says not to run untrusted code on it or keep secrets on it.
 
-> **OWNER DECISION NEEDED (design review G006): the interim security posture.** The roadmap accepts
-> four known gaps until Phase 18: speculation side channels (with no KPTI, a user process on a
-> Meltdown-affected Intel CPU, bare metal or under KVM, can read all RAM through the physmap), DMA
-> that no IOMMU confines (§18.1), every process running as root (§13.9), and root-mounted crafted
-> images that panic the kernel (the rows above).
-> - **(a) Accept until Phase 18**, as the roadmap does today, with the README warning.
->   Consequence: no confidentiality between processes on affected hardware before Phase 18. QEMU's
->   TCG, the harness default, does not model the speculation Meltdown needs; under KVM the exposure
->   depends on the host CPU model.
-> - **(b) Move KPTI and syscall-index masking** (§18.3's F024 and F025 boxes) into Phase 13, before
->   threads and multiple uids. Costs one slice of entry-path work, a CR3 switch on every entry, and a
->   measurable syscall slowdown on affected CPUs.
-> - **(c) Move all of §18.3** before Phase 14's `login`. Costs most of a phase, ahead of the
->   self-hosting work.
->
-> **Recommendation: (a).** The kernel has no users and no secrets, and its default configuration
-> does not model Meltdown. §10.6 rewrites the entry path as one generated stub per vector, which
-> keeps a later KPTI CR3 switch local. Revisit at Phase 14, whose gate adds `login` and more than
-> one uid. The rest of the design works either way: §18.3's boxes move unchanged under (b) or (c).
+**Interim posture (owner decision, 2026-09-23, design review G006).** The owner accepted the open
+gaps in the table above until the ROADMAP lines that close them, the last in Phase 18: speculation
+side channels (with no KPTI, a user process on a Meltdown-affected Intel CPU, bare metal or under KVM,
+can read all RAM through the physmap), DMA that no IOMMU confines (§18.1), every process running as
+root (§13.9), and root-mounted crafted images that panic the kernel. Why: the kernel has no users and
+no secrets; QEMU's TCG, the harness default, does not model the speculation Meltdown needs, and under
+KVM the exposure depends on the host CPU; and ROADMAP §10.6 rewrites the entry path as one generated
+stub per vector, which keeps a later KPTI CR3 switch local. Rejected: moving KPTI and syscall-index
+masking (§18.3's F024 and F025 boxes) into Phase 13, which costs a slice of entry-path work, a CR3
+switch on every entry, and a measurable syscall slowdown on affected CPUs; and moving all of §18.3
+before Phase 14's `login`, which costs most of a phase ahead of the self-hosting work.
+
+The acceptance assumes one user. It goes back to the owner before `login` lands (ROADMAP §14.3), when
+a second user can share the machine. Keeping any gap past the line that closes it, or adding a gap,
+is likewise the owner's decision, not an agent's.
 
 ## 2.11 Object lifetimes
 
