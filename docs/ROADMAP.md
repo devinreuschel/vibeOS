@@ -65,7 +65,7 @@ the phase it names.
 **Free by default.** The project has no budget: the maintainer spends nothing on vibeOS beyond their own
 agent tokens. Every phase, box, gate, and [Beyond](#beyond) entry is provable on these free resources:
 
-- GitHub-hosted standard runners, free and unlimited for this public repository: x86_64 `ubuntu-24.04` and `ubuntu-26.04` (4 vCPUs, 16 GB, 14 GB of disk) with `/dev/kvm` once a udev rule opens it to the runner user; arm64 `ubuntu-24.04-arm` and `ubuntu-26.04-arm` (4 vCPUs, 16 GB) with no KVM, so aarch64 guests there run under TCG; and macOS arm64 runners with no Hypervisor.framework. None has a GPU. A job runs at most 6 hours, and at most 20 jobs run at once, 5 of them macOS
+- GitHub-hosted standard runners, free and unlimited for this public repository: x86_64 `ubuntu-24.04` and `ubuntu-26.04` (4 vCPUs, 16 GB, 14 GB of disk) with `/dev/kvm` once a udev rule opens it to the runner user; arm64 `ubuntu-24.04-arm` and `ubuntu-26.04-arm` (4 vCPUs, 16 GB, 14 GB of disk) with no KVM, so aarch64 guests there run under TCG; and macOS arm64 runners with no Hypervisor.framework. None has a GPU. A job runs at most 6 hours, and at most 20 jobs run at once, 5 of them macOS
 - QEMU under TCG everywhere, KVM on the x86_64 runners, and HVF on the dev host, with its models of real devices: NVMe with subsystems, SR-IOV, and ZNS; AHCI; xHCI with USB HID, storage, network, and audio devices; e1000, e1000e, rtl8139, and igb with 8 SR-IOV VFs; HDA and virtio-sound, playing back to a WAV file; SD and eMMC; `intel-iommu`, `virtio-iommu`, and SMMUv3; a TPM through `swtpm`; the i6300esb and ICH9 TCO watchdogs, `pvpanic`, and ERST; virtio-gpu with up to 16 heads and EDID; PCIe hotplug; S3 on `q35`; machine-check injection on x86_64 and GHES error injection on aarch64. Under TCG it also runs guests larger than any runner, up to 4096 vCPUs in x2APIC mode on `q35` and 512 with GICv3 on `virt`, with memory the host commits only as the guest touches it, and gives aarch64 guests on `virt` EL2, FEAT_NV2, and an emulated PMUv3
 - free VMMs and mocks on the x86_64 KVM runner: Firecracker with MMDS, cloud-hypervisor, QEMU's `microvm`, Microsoft's OpenVMM with its VMBus devices and MANA, EC2 and GCE metadata mocks, and cloud-init's NoCloud. No free, licensed model of AWS's ENA or Google's gVNIC exists
 - free corpora and suites: the ACPI tables of 815 real machines from linuxhw/ACPI, recompiled with `iasl`; ACPICA's `aslts`; `fwts`; Linux's device-tree sources; LTP and kselftest; BlueZ's testers with its `btdev` controller; `v4l2-compliance`; Mesa's `llvmpipe` and `lavapipe` with dEQP and piglit; and `hostapd` and `wpa_supplicant` over the `mac80211_hwsim` virtio protocol with `wmediumd`
@@ -82,7 +82,7 @@ lasts at most 6 hours, so a longer run is sharded into jobs of at most 5.5 hours
 forward as workflow artifacts, and its gate says so; unsharded uptime counted in weeks is a funded goal.
 Nested virtualization on the hosted x86_64 runners works, but GitHub calls it experimental, and each job
 gets AMD SVM or Intel VMX at random: a gate on it tests the path its job's CPU offers and needs a green
-run of each vendor's path within the last 7 nightly runs. aarch64 hypervisor gates run under TCG with
+run of each vendor's path that §20.8's records show a runner offering within the last 7 nightly runs. aarch64 hypervisor gates run under TCG with
 `virtualization=on`, with FEAT_NV2 when a guest hypervisor nests, and add a dev-host record under HVF
 with QEMU 11.1 or later. A comparison with Linux boots Linux in the same guest shape on the same runner,
 in the same job where it fits, so runner noise cancels.
@@ -966,7 +966,7 @@ Phase 11 runs them on a weakly ordered CPU.
 - [x] restriction lints on the portable crate: no `unwrap`, `expect`, or `panic!` outside tests (E1)
 - [ ] the `unsafe` standing gate enforced by lint: `clippy::undocumented_unsafe_blocks` denied through `[workspace.lints.clippy]`, so every member inherits it (including `user/` from §10.5), and `check-private-items = true` in `clippy.toml`, so `missing_safety_doc` reaches the kernel binary's private items; a `// SAFETY:` line on every existing `unsafe` block (653 at `90ce475`)
 - [ ] a nightly x86_64 KVM leg on the hosted x86_64 runner, whose `/dev/kvm` GitHub's documented udev rule opens to the runner user, that runs `make test-kernel` now and, from Phase 12 on, every benchmark and every gate number measured under KVM, since TCG and KVM each hide bugs the other finds; the timing tests that made the harness default to TCG are fixed first, which HVF in Phase 11 also needs. GitHub assigns each job's host CPU at random (AMD EPYC or Intel Xeon, several models), so the leg writes the CPU model from `/proc/cpuinfo` to its job summary and its §10.9 CI-history record; a regression threshold compares a number only with history from the same model, and a gate's fixed threshold holds on every model the leg draws
-- [ ] the CI budget, written into DESIGN §8.6 in the same commit as the workflow change. Every push runs `check` and, alongside it, one `build` job per architecture (x86_64 now, aarch64 from Phase 11). The build job builds every ISO variant and the host `mkfs`/`fsck` tools once and uploads them. A matrix of tier jobs per architecture (`needs: [check, build]`, `fail-fast: false`, TCG) downloads them and runs the same `make test-*` targets through a prebuilt-ISO switch, so the Makefile stays the one definition of each tier. Tiers are grouped to about 40 s of QEMU each (x86_64 at `88370e5`: the five e2e boots; in-guest at `-smp 2` and `-smp 4` plus the LAPIC fallback; the vibefs crash test), and each gets its own check name, so a red PR names the failing tier. Everything else runs on a schedule: the macOS job, the KVM leg, the fuzzers, stress, and any job with a performance threshold. Later lines name two scheduled workflows, both on the pinned toolchain: the nightly job, which carries the KVM leg, and the weekly job (`smp-stress` today); the non-blocking `nightly-canary`, the one job on an undated nightly, is neither, and a line that needs its own workflow or another cadence names it (§20.8's `hardware-models`, §24.2's rebuilds). A later line that says "in CI" for a functional test means a ladder tier; for a benchmark or a threshold it means the KVM leg. A red scheduled job blocks the next phase tag. The earlier no-matrix rule (runner queues) is lifted: the repository is public, so standard runners are free and unlimited, and the limits that matter are 20 concurrent jobs on the Free plan (at most 5 macOS; scheduled campaigns together hold at most 10, so pushes keep the other 10) and 6 hours per job: a scheduled run longer than 5.5 hours is split into shards that hand their state on as artifacts, and the line that needs one says so; the scheduled workflows are staggered so that together they leave room under the 20 for a push's jobs, and DESIGN §8.6 records each one's schedule and peak job count
+- [ ] the CI budget, written into DESIGN §8.6 in the same commit as the workflow change. Every push runs `check` and, alongside it, one `build` job per architecture (x86_64 now, aarch64 from Phase 11). The build job builds every ISO variant and the host `mkfs`/`fsck` tools once and uploads them. A matrix of tier jobs per architecture (`needs: [check, build]`, `fail-fast: false`, TCG) downloads them and runs the same `make test-*` targets through a prebuilt-ISO switch, so the Makefile stays the one definition of each tier. Tiers are grouped to about 40 s of QEMU each (x86_64 at `88370e5`: the five e2e boots; in-guest at `-smp 2` and `-smp 4` plus the LAPIC fallback; the vibefs crash test), and each gets its own check name, so a red PR names the failing tier. Everything else runs on a schedule: the macOS job, the KVM leg, the fuzzers, stress, and any job with a performance threshold. Later lines name two scheduled workflows, both on the pinned toolchain: the nightly job, which carries the KVM leg, and the weekly job (`smp-stress` today); the non-blocking `nightly-canary`, the one job on an undated nightly, is neither, and a line that needs its own workflow or another cadence names it (§20.8's `hardware-models`, §24.2's rebuilds). A later line that says "in CI" for a functional test means a ladder tier; for a benchmark or a threshold it means the KVM leg. A red scheduled job blocks the next phase tag. The earlier no-matrix rule (runner queues) is lifted: the repository is public, so standard runners are free and unlimited, and the limits that matter are 20 concurrent jobs on the Free plan (at most 5 macOS; scheduled campaigns together hold at most 10, so pushes keep the other 10) and 6 hours per job: a scheduled run longer than 5.5 hours is split into shards that hand their state on as artifacts, and the line that needs one says so; the scheduled workflows are staggered so that together they leave room under the 20 for a push's jobs, and DESIGN §8.6 records each one's schedule and peak job count and its share of the 10 scheduled slots; workflows that can run at the same time hold shares summing to at most 10, a multi-day workflow (§24.2's rebuilds) holds only its share, and a job that finds its share full waits in request order, since GitHub caps no job count across workflows
 - [ ] CI wall time cut inside each job: host packages from a cache or a prebuilt image rather than `apt-get` on every run (about 20 s of every job at `88370e5`), and independent QEMU runs in parallel inside a tier once the timing tests and the §10.2 retried failures are fixed, since concurrent QEMU under TCG makes both more likely. Push-to-green wall time is recorded in DESIGN §8.6 before and after; the aim is under two minutes for x86_64, and the box does not wait for it (3m40s at `88370e5` with no retry; a retried hang adds 60 to 90 s)
 - [ ] `make debug`: QEMU `-s -S` plus a `gdb` script that loads the kernel ELF and the user ELFs, documented in DESIGN §8.4
 - [ ] every Linux CI job runs on GitHub's free `ubuntu-26.04` image (`ubuntu-26.04-arm` for arm64 jobs), whose apt QEMU 10.2.1 meets every QEMU minimum this file names (9.0 for the Phase 11 gate's EL2 boot and §20.1's boot with more than 255 vCPUs, 10.2 for §18.1's amd-iommu `dma-remap` and Phase 25's GHES injection) except a line that names QEMU 11.1 or later, whose jobs build that release from its tarball, checked by SHA-256 and cached by version; when `CI` is set on a Linux runner, the harness's shared QEMU launcher (§10.2) compares `qemu-system-* --version` with the version its job pins (Ubuntu's 10.2.1, or the built release) before its first boot and fails on a mismatch, so an image update that moves QEMU fails loudly; `make check`, the macOS job, and the dev host's Homebrew QEMU are left alone
@@ -1039,7 +1039,7 @@ retry root-causing and Phases 11 to 13 debug their hangs with it.
 
 - [ ] on a timeout, or on a panic once the kernel's dump has ended, the harness takes a guest core over the QEMU monitor before it stops QEMU: `dump-guest-memory -p`, an ELF core with the kernel's virtual mappings and one register note per CPU, which `gdb` and the §10.1 `make debug` script open (not `-z`, whose kdump format `gdb` cannot read); an x86_64 panic signals the ISA `pvpanic` device with `-action panic=pause`, as aarch64 does (§11.7), instead of `isa-debug-exit`, so QEMU stays up for the dump and the harness then fails the run; CI uploads a failed run's core (compressed with zstd on the host), kernel ELF, and QEMU command line as one artifact
 - [ ] a hostlib core tool reads a core with the kernel ELF and prints a symbolized frame-pointer backtrace for every CPU, every thread's state and saved context from the TCB table, each CPU's current thread and run queue, and the last 64 records of the §5.5 log ring; the harness prints its report after the serial tail
-- [ ] the log ring, TCB, and per-CPU types the tool reads are the portable crate's and `#[repr(C)]` (`IrqCell`, `log::Record`, `Ring`, and `Logger` are not today), with `const` assertions on their sizes and field offsets, outside `cfg(loom)`, that compile into both the kernel and the host tool, so the kernel and a tool on either dev host cannot disagree, as `mkfs-vibefs` and `fsck-vibefs` share vibefs's format
+- [ ] the log ring, TCB, and per-CPU types the tool reads are the portable crate's and `#[repr(C)]` (`IrqCell`, `log::Record`, `Ring`, and `Logger` are not today), with `const` assertions on their sizes and field offsets, outside `cfg(loom)`, that compile into both the kernel and the host tool, so the kernel and the host tool, built on Linux or macOS, cannot disagree, as `mkfs-vibefs` and `fsck-vibefs` share vibefs's format
 - [ ] a flight recorder (moved from §19.1): a per-CPU ring of fixed-size records (timestamp, CPU, event, two arguments); each CPU writes only its own ring, with interrupts off for the few stores a record takes, so no lock is taken; the NMI, `#MC`, and `#DB` handlers do not record, since `cli` does not mask them, and each record carries a sequence number so the tool drops a torn last record; it is on in every build, so a hang of the production ISO carries a trace too
 - [ ] tracepoints at the boundaries that exist now: syscall entry and exit, scheduler switch and wake, IRQ entry and exit, IPI send and acknowledge, page fault, and block request submit and complete; §19.1 adds the later subsystems and per-tracepoint runtime enable
 - [ ] timestamps from the §10.3 cycle counter (the invariant TSC on x86_64, §2.6); each AP measures its TSC against the BSP's at bring-up with a warp test over a shared cache line, and a registered marker reports the largest skew, which DESIGN §6.4 requires before timestamps order a trace; when the TSC is not invariant or the warp test saw any backward step (Linux's `check_tsc_warp` rule), the export orders records within each CPU only and says so, and DESIGN §6.4 gains that rule in the same commit; the core tool converts them to nanoseconds with the calibration and the warp result it reads from the core and exports every CPU's ring as one Chrome trace-event JSON timeline, which Perfetto opens; a host test checks the export's required fields
@@ -1629,7 +1629,7 @@ protocol work for an agent to get wrong in interesting ways.
 
 **Architectures.** Both. virtio-net and everything above the netdev layer are shared. e1000 is PCI,
 builds for both, and its in-guest tests run under QEMU (`-device e1000`) on both; Phase 20 runs the
-drivers for other real NICs on QEMU's models of them. The §10.1 KVM leg measures the throughput
+drivers for other real NICs on QEMU's models of them. Strict packetdrill timing is x86_64 only: the arm64 runners have no KVM and the macOS dev host no tap device for its wire server, so aarch64 runs it under TCG with a looser tolerance (§15.10). The §10.1 KVM leg measures the throughput
 numbers on x86_64. The aarch64 numbers are measured under HVF on the dev host, since GitHub's arm64
 runners have no KVM.
 
@@ -1645,7 +1645,7 @@ runners have no KVM.
 - [ ] SNTP against the §15.10 host responder sets the wall clock to within 100 ms of the host
 - [ ] host tests for header parsing, checksums, TCP state transitions, and sequence arithmetic, and a Kani proof of the sequence and window comparisons for every pair of 32-bit values (§15.10)
 - [ ] the nightly sweep of 10,000 seeds of simulated 1 MiB TCP transfers over a lossy, duplicating, reordering, corrupting link finishes with no corruption, hang, or panic, and every past failing seed is a checked-in host test (§15.10)
-- [ ] packetdrill in wire mode runs every upstream TCP script that does not assert a Linux-only socket option, `TCP_INFO` field, or sysctl setting, on both architectures, and each one passes or is on §15.10's checked-in list with the RFC section that allows the difference
+- [ ] packetdrill in wire mode runs every upstream TCP script that does not assert a Linux-only socket option, `TCP_INFO` field, or sysctl setting on the nightly job, in a 2-CPU, 512 MiB guest under KVM on x86_64 and TCG on aarch64, and each one passes or is on §15.10's checked-in list with the RFC section that allows the difference; under TCG, with Linux's slow-machine tolerance, a script that fails only with packetdrill's `timing error` is instead an expected failure in the job summary (§15.10)
 - [ ] on both architectures, unmodified tools from the §14.9 mirror work against virtio-net: iproute2's `ip addr` and `ip route` list and change the interface's address and routes, busybox `udhcpc` acquires a lease, and `tcpdump` with a `tcp port 80` filter captures only that traffic
 - [ ] tag `phase-15` and cut the next release
 
@@ -1741,7 +1741,7 @@ runners have no KVM.
 - [ ] deterministic simulation: instances of the portable stack on the host, over a simulated link that drops, duplicates, reorders, delays, and corrupts, under the §15.1 simulated clock, all driven from one seed
 - [ ] a nightly sweep of seeds; a failing seed is printed, replays bit for bit as a host test, and is checked in
 - [ ] packetdrill, built statically in §13.11's digest-pinned Alpine container with `linux-headers` and pinned under §14.10, run in wire mode inside a §14.9 `vibeos-linux` root, since its client configures the interface by running iproute2's `ip`: the client executes each script's syscalls on vibeOS while its server on the host injects and checks packets on the tap device; the runner replaces upstream's `defaults.sh`, which writes Linux sysctls, with one for vibeOS
-- [ ] the upstream packetdrill TCP scripts that do not assert Linux-only socket options, `TCP_INFO` fields, or sysctl settings run in CI; each passes or is on a checked-in list with the RFC section that allows the difference, and the list only shrinks
+- [ ] the upstream packetdrill TCP scripts that do not assert Linux-only socket options, `TCP_INFO` fields, or sysctl settings run on the nightly job in a 2-CPU, 512 MiB guest, on x86_64 under KVM on the §10.1 KVM leg with packetdrill's default tolerance, and on aarch64 under TCG with `--tolerance_usecs=14000`, which Linux's kselftest runner passes on a slow machine; each passes or is on a checked-in list with the RFC section that allows the difference, and the list only shrinks. On the TCG run alone, a script that fails only with packetdrill's `timing error` is an expected failure written to the job summary, never a list entry
 - [ ] sequence-space comparison and window arithmetic from §15.6 proved by Kani (§10.8) for every pair of 32-bit values
 
 ### 15.11 TLS
@@ -1920,7 +1920,7 @@ them from source on vibeOS is Phase 24, and this phase does not wait for it. Eve
 test tool in the loop still runs on vibeOS.
 
 - [ ] the pinned nightly's `rustc` and `cargo`, the `rustfmt`, `clippy`, `llvm-tools`, and `rust-src` components that `make check` and the build use, and `rust-std` for the host and for `x86_64-unknown-none`, `aarch64-unknown-none-softfloat`, and `aarch64-unknown-none`, as rust-lang publishes them for the `<arch>-unknown-linux-musl` host (Tier 2 with host tools on both architectures), run on vibeOS under §14.9's musl. The pin stays a nightly because the kernel uses nightly features (`abi_x86_interrupt`, `alloc_error_handler`); whether a `*-unknown-vibeos` target exists is Phase 24's decision
-- [ ] a `vibeos-build` disk image holding that toolchain; the pinned §14.9 `minirootfs` and the whole package snapshot, so the packages §17.2, §17.4, and §17.6 name and those `make test`'s tiers build images from are local; a clone of the Limine binary branch at `setup.sh`'s pinned `LIMINE_TAG` and `LIMINE_COMMIT`, which the loop script passes to `setup.sh` as `LIMINE_REPO`; a `cargo vendor` tree for the workspace; and the §14.10 source archives the build reads (musl and compiler-rt for `make sysroot`), pinned by hash, built once by the host and stored by content hash as §13.11 stores its corpus, since the Actions cache holds 10 GB per repository, so the on-device loop begins with neither a package install nor a download; its size is recorded in DESIGN §8.6, and the image, the checkout, and the guest's disks fit the 14 GB disk GitHub documents for a hosted runner
+- [ ] a `vibeos-build` disk image holding that toolchain; the pinned §14.9 `minirootfs` and the whole package snapshot, so the packages §17.2, §17.4, and §17.6 name and those `make test`'s tiers build images from are local; a clone of the Limine binary branch at `setup.sh`'s pinned `LIMINE_TAG` and `LIMINE_COMMIT`, which the loop script passes to `setup.sh` as `LIMINE_REPO`; a `cargo vendor` tree for the workspace; and the §14.10 source archives the build reads (musl and compiler-rt for `make sysroot`), pinned by hash, built once by the host and stored by content hash as §13.11 stores its corpus, since the Actions cache holds 10 GB per repository. A release file must be under 2 GiB, so the image is kept zstd-compressed in parts below that, which a run streams through `zstd -d` into the image and checks against that hash; the on-device loop begins with neither a package install nor a download. The image's compressed and uncompressed sizes are recorded in DESIGN §8.6, and the image, the checkout, and the guest's disks fit the 14 GB disk GitHub documents for a hosted runner
 - [ ] `cargo build --offline` from that image, with `flock` and `fcntl` locks (§13.9) held across parallel builds, and `-j` equal to the guest's CPU count, 4 in the Phase 17 guest
 - [ ] no upstream binary is patched, wrapped, or `LD_PRELOAD`ed to run; each workaround is a kernel fix with a regression test in the cheapest tier that catches it
 - [ ] `docs/UPSTREAM.md` lists every upstream bug hit (Limine, QEMU, edk2, musl, Alpine, rustc, LLVM), each with a link to the upstream issue or patch
@@ -2049,7 +2049,7 @@ S1 turned SMEP, SMAP, UMIP, and `CR0.WP` on at boot (`arch::cpu::harden`). §10.
 The primitives and the CSPRNG are §14.7, package signatures §14.6, and TLS §15.11. This is what needs a
 boot chain.
 
-- [ ] UEFI secure boot: a signed bootloader and kernel
+- [ ] UEFI Secure Boot with vibeOS's own keys, not Microsoft's UEFI CA: `limine.conf` pins the kernel and initrd by hash and is enrolled into Limine's EFI binary with `limine enroll-config`, which `sbsign` then signs with a db key, and the kernel ELF carries a signature by that key for §25.4's `kexec_file_load`; the release db key, like §14.6's release key, exists only as a secret of the release workflow, with its certificate in the tree. A harness test on both architectures generates a throwaway PK, KEK, and db per run, enrolls them with `virt-fw-vars` into a per-run copy of the empty variable store of a Secure Boot edk2 build the §10.2 probe locates (OVMF's on `q35` with SMM, and on `virt` the distribution's AAVMF, since QEMU's bundled aarch64 edk2 has none), signs with that db, and shows the signed chain reaching `shell ready` and an unsigned Limine, an edited `limine.conf`, or a changed kernel or initrd refused
 - [ ] measured boot with a TPM (swtpm under QEMU on both architectures): a TPM 2.0 driver that reads PCRs, found through the ACPI TPM2 table (TIS or CRB) on x86_64 and the device tree's `tcg,tpm-tis-mmio` node on aarch64; the event log from Limine's TPM Event Log response (Limine 12.1 and later, which, with `measured_boot: yes` written in `limine.conf`, also measures the kernel, the initrd, the command line, and `limine.conf` itself), captured in `BootInfo`; the log is replayed against the PCRs, and its digests for the bootloader, kernel, initrd, and boot configuration are checked against boot-chain entries the build adds to the §14.6 signed release manifest, in the form the event log records them (for the EFI bootloader, the Authenticode image hash the firmware measures, not the file's SHA-256); firmware measurements are recorded but not checked, since the build does not produce the firmware
 - [ ] full disk encryption with AES-XTS, added to the §14.7 crate with the IEEE 1619 vectors as host tests, and the key derived from a passphrase with §14.7's Argon2id; the transform is an encrypting block device stacked on any §7.1 `BlockDevice`, built here, which §29.1's mapping interface later drives
 
@@ -2198,10 +2198,10 @@ machines that would close the same lines on silicon are in [Funded goals](#funde
 
 **Unlocks.** USB, NVMe, AHCI, Intel NICs, SD and eMMC, HDA, and watchdogs, each driver tested against a
 QEMU model. An AML interpreter checked against 815 real machines' tables, and aarch64 booted through ACPI
-(§20.7). S3, x2APIC past 255 CPUs, PCIe hotplug, and UEFI variables (§20.9), which §22.2's unattended
-updates and the later eras build on. The §20.8 nightly job on device models and the §20.1 compatibility
-list, which later phases add their profiles and records to; a machine from Funded goals fills the list's
-physical section.
+(§20.7). S3 (§20.2), x2APIC past 255 CPUs (§20.1), and PCIe hotplug and UEFI variables (§20.9), which
+§22.2's unattended updates and the later eras build on. The §20.8 nightly job on device models and the
+§20.1 model list, which later phases add their profiles and records to; a machine from Funded goals
+fills `docs/HARDWARE.md`'s physical section.
 
 **Architectures.** Both, on QEMU. §20.1 is x86_64's platform: `q35` and `pc` under OVMF and SeaBIOS.
 §20.7 is aarch64's: `virt` with a device tree or with ACPI under the aarch64 edk2 build, and `sbsa-ref`
@@ -2241,7 +2241,7 @@ under TCG on the hosted arm64 runner, which has no KVM, and under HVF only as §
 - [ ] 8259 presence decided once, from the MADT `PCAT_COMPAT` flag, with a mask-register read-back probe when the flag is clear, as Linux does; it replaces both the FADT `LEGACY_DEVICES` skip before `lidt` and the unconditional second ICW sequence (§2.3). On a machine with no 8259, the PIT fallback through LINT0 ExtINT halts with a named reason. The decision is in the portable half, host-tested with `PCAT_COMPAT=1, LEGACY_DEVICES=0` and `PCAT_COMPAT=0` tables and against the snapshot's MADTs; DESIGN §5.5 and §7.1 updated in the same commit
 - [ ] a console without a 16550: QEMU's `usb-serial`, an FTDI FT232BM model, behind xHCI as Linux's `/dev/ttyUSB<N>`, which replays the §5.5 log ring when it registers, so a boot with `-serial none` gives the harness every marker from the `usb-serial` chardev; the framebuffer console carries output from the first line
 - [ ] a panic record, the §5.6 dump and the last log records, kept with a header and checksum in a RAM region at a physical address fixed by a §10.2 command-line option, which the frame allocator never hands out; at boot the region is checked against the Limine memory map and module placement, a conflict is logged rather than trusted, and a region whose header or checksum fails reads as empty. It is read back and logged on the next boot after a warm reset, since there is no host to catch it; tested under QEMU with a deliberate panic and the monitor's `system_reset` on both architectures. Firmware-backed stores and full memory dumps are Phase 25
-- [ ] the compatibility list: `docs/HARDWARE.md` names each §20.8 profile with its machine type, the accelerators it runs under, its device models, firmware builds and their hashes, and QEMU version, generated from the harness profiles, with the §20.2 corpus results per machine, the linuxhw/ACPI attribution its CC-BY-4.0 license requires, and a physical section that stays empty until a Funded goal fills it; `scripts/check_hardware.py` in `make check` fails when the generated part differs from the profiles
+- [ ] the model list: `docs/HARDWARE.md` names each §20.8 profile with its machine type, the accelerators it runs under, its device models, firmware builds and their hashes, and QEMU version, generated from the harness profiles, with the §20.2 corpus results per machine, the linuxhw/ACPI attribution its CC-BY-4.0 license requires, and a physical section that stays empty until a Funded goal fills it; `scripts/check_hardware.py` in `make check` fails when the generated part differs from the profiles
 
 ### 20.2 ACPI runtime
 - [ ] an AML interpreter, which is a large and genuinely unpleasant subproject and unavoidable
@@ -2312,8 +2312,8 @@ Every CI machine is a GitHub-hosted runner: `ubuntu-26.04` on x86_64, with `/dev
 opens it to the runner user, and `ubuntu-26.04-arm`, which has no KVM. A job stops at 6 hours, and an
 account runs 20 jobs at once. Hardware performance events and physical machines are Funded goals.
 
-- [ ] a `hardware-models` workflow on the nightly schedule, with the `workflow_dispatch` trigger §10.9 requires: one job per harness profile and accelerator, the profiles named in `docs/HARDWARE.md` (`q35`, `pc`, `virt` with a device tree, `virt` with ACPI, and `sbsa-ref`), each a command line for the §10.1 pinned QEMU that attaches every device model this phase drives that the machine can take: NVMe with several namespaces, AHCI, xHCI with `usb-kbd`, `usb-mouse`, `usb-tablet`, `usb-storage`, `usb-net`, and `usb-serial`, e1000e, igb, HDA, `sdhci-pci` with SD and eMMC, the machine's watchdogs, and `pcie-root-port`s, plus §18.1's IOMMU (`sbsa-ref`'s built-in SMMUv3 there) and §18.7's swtpm TPM on every machine but `sbsa-ref`, which takes none; the x86_64 profiles run under KVM and under TCG, the aarch64 ones under TCG
-- [ ] each job runs the in-guest tiers and this phase's model tests on its profile and commits a record (profile, accelerator, runner CPU, QEMU version, firmware hashes, result) to §10.9's `ci-history`; `scripts/ci_history.py` fails when a night lacks a profile's record, since GitHub delays scheduled runs under load and disables a public repository's schedules after 60 days without activity
+- [ ] a `hardware-models` workflow on the nightly schedule, with the `workflow_dispatch` trigger §10.9 requires: one job per harness profile and accelerator, the profiles named in `docs/HARDWARE.md` (`q35`, `pc`, `virt` with a device tree, `virt` with ACPI, and `sbsa-ref`), each a command line for the §10.1 pinned QEMU that attaches every device model this phase drives that the machine can take: NVMe with several namespaces, AHCI, xHCI with `usb-kbd`, `usb-mouse`, `usb-tablet`, `usb-storage`, `usb-net`, and `usb-serial`, e1000e, igb, HDA, `sdhci-pci` with SD and eMMC, the machine's watchdogs, and `pcie-root-port`s, plus §18.1's IOMMU on every machine but `pc`, which takes none (`intel-iommu` or `amd-iommu` on `q35` as §18.1 runs them, `iommu=smmuv3` on both `virt` profiles, and `sbsa-ref`'s built-in SMMUv3), and §18.7's swtpm TPM on every machine but `sbsa-ref`, which takes none; the x86_64 profiles run under KVM and under TCG, the aarch64 ones under TCG
+- [ ] each job runs the in-guest tiers and this phase's model tests on its profile and commits a record (profile, accelerator, runner CPU, QEMU version, firmware hashes, result, and on an x86_64 KVM job the nesting its runner offers a guest: `vmx`, `svm`, or `none`) to §10.9's `ci-history`; the nesting is read on the host before the boot, with `kvm_intel` or `kvm_amd` loaded with `nested=1`, from the `vmx` and `svm` properties of a `-cpu host` vCPU (QMP `qom-get` on a QEMU started with `-S`), so it does not rest on vibeOS's own VMX or SVM code; `scripts/ci_history.py` fails when a night lacks a profile's record, since GitHub delays scheduled runs under load and disables a public repository's schedules after 60 days without activity
 - [ ] a corpus job runs the §20.2 host tests over the linuxhw/ACPI snapshot, QEMU's `tests/data/acpi`, and aslts, and the §20.7 device-tree tests, with every input fetched by hash and cached between runs
 - [ ] a hung guest ends at the harness timeout with its §10.7 core uploaded, which is the power control a hosted runner needs
 - [ ] the Phase 17 on-device `make test`, nightly, on vibeOS as a 4-vCPU, 4 GiB guest under KVM on the x86_64 runner; on aarch64 it would be TCG inside TCG on the arm64 runner, so its run is a §10.9 dev-host record under HVF
@@ -2350,10 +2350,10 @@ environments give it, and the gate lines name them.
 each on its own runner. Each leg loads `kvm_intel` or `kvm_amd` with `nested=1` and boots vibeOS under
 KVM with `-cpu host`, which passes the runner's VMX or SVM through. GitHub calls nested virtualization
 on its runners experimental and does not support it, and it draws the CPU vendor per job (AMD with SVM
-or Intel with VMX), so a leg tests the path its CPU offers, and on a runner that refuses nesting it
-skips, naming the CPU model in the job summary. A gate line in the nested job passes when a leg passed,
-not skipped, at the gated commit, and the nightly job's last 7 runs include a passing VMX leg and a
-passing SVM leg (§21.1).
+or Intel with VMX), so a leg tests the path its CPU offers, and when §20.8's host-side probe finds
+neither on its runner it skips, naming the CPU model in the job summary. A gate line in the nested job passes when a leg passed,
+not skipped, at the gated commit, and the nightly job's last 7 runs include a passing leg of each path
+that §20.8's records of those nights show a runner offering (§21.1).
 
 **The EL2 job** runs with the nightly job on the hosted arm64 runner, which has no KVM. It boots
 vibeOS under TCG with `-machine virt,gic-version=3,virtualization=on -cpu max` on the §10.1 pinned
@@ -2396,7 +2396,7 @@ emulator and, on aarch64, the loads and stores that exit without a valid syndrom
 - [ ] the harness boots a test kernel under the §21.2 VMM with `-accel kvm` through the §21.2 harness backend, and `make test-kernel` passes that way on vibeOS, in the nested job, the EL2 job, and the HVF record
 - [ ] `alpine` and `busybox` OCI images, pinned by digest and pulled from the §21.6 registry on the CI host, run a shell under the §21.6 runtime, and the Alpine one installs a package with `apk` from a local mirror, on both architectures
 - [ ] a container and an L2 guest on one §21.7 bridge each fetch a file from a server on the CI host through NAT, and a filter rule blocks a named port for the container only, in the nested job and the EL2 job
-- [ ] a hostile L2 guest with 2 vCPUs and 1 GiB fuzzes the exit handlers and virtio backends for 24 hours a week per architecture on the weekly job, in shards of at most 5.5 hours (§10.1) that carry one seed log and coverage corpus as artifacts, set up as the nested job on x86_64, with both the VMX and SVM paths among the last two weeks' shards, and as the EL2 job on aarch64, with no L1 panic and no KASAN report; the instruction emulator agrees with the CPU on 1,000,000 generated instruction streams on each hosted runner architecture; and 10,000 of the fuzzing guest's seeded exit sequences end in the same guest-visible state under the Linux L1's KVM as under the §21.2 VMM, each pair replayed in one nested-job leg or one EL2-job run, except the differences `docs/` lists (§21.8)
+- [ ] a hostile L2 guest with 2 vCPUs and 1 GiB fuzzes the exit handlers and virtio backends for 24 hours a week per architecture on the weekly job, in shards of at most 5.5 hours (§10.1) that carry one seed log and coverage corpus as artifacts, set up as the nested job on x86_64, with each path §20.8's records show offered among the last two weeks' shards, and as the EL2 job on aarch64, with no L1 panic and no KASAN report; the instruction emulator agrees with the CPU on 1,000,000 generated instruction streams on each hosted runner architecture; and 10,000 of the fuzzing guest's seeded exit sequences end in the same guest-visible state under the Linux L1's KVM as under the §21.2 VMM, each pair replayed in one nested-job leg or one EL2-job run, except the differences `docs/` lists (§21.8)
 - [ ] tag `phase-21` and cut the next release
 
 ### 21.1 Hypervisor
@@ -2408,7 +2408,7 @@ emulator and, on aarch64, the loads and stores that exit without a valid syndrom
 - [ ] MSR and I/O bitmaps, and instruction emulation for the exits that need it
 - [ ] a vCPU as a schedulable entity, so the existing scheduler runs guests
 - [ ] aarch64: run as a VHE host when §11.1 recorded EL2 entry, with stage-2 translation and the virtual GIC and timer behind the same VM abstraction; when entry was at EL1, the VM layer reports that EL2 is unavailable instead of failing
-- [ ] every hypervisor test runs on whichever of VMX and SVM the CPU offers and prints a registered marker naming the path; the nested job writes the runner's CPU model and that path to its §10.9 CI-history record, and `scripts/ci_history.py --nested`, which the gate-map entries of the nested-job lines run, fails unless the nightly job's last 7 runs include a passing VMX leg and a passing SVM leg; when one is missing, it reports from §20.8's records of the same nights whether any runner drawn offered a guest that path, so a vendor the fleet did not offer is told apart from a leg that failed
+- [ ] every hypervisor test runs on whichever of VMX and SVM the CPU offers and prints a registered marker naming the path; the nested job writes the runner's CPU model and that path to its §10.9 CI-history record, and `scripts/ci_history.py --nested`, which the gate-map entries of the nested-job lines run, fails unless the nightly job's last 7 runs include a passing leg of each path that §20.8's records of those nights show a runner offering, and a failing leg on an offered path still fails; when one is missing, it reports from the nesting field of the same nights' §20.8 x86_64 KVM records whether any runner drawn offered a guest that path, so a vendor the fleet did not offer is told apart from a leg that failed
 
 ### 21.2 Virtual machines
 The VM interface is Linux's: `/dev/kvm`. The VMM is unmodified QEMU from the §17.6 image, so guests
@@ -2486,10 +2486,10 @@ ship through and [Phase 39](#phase-39-stability) turns into 1.0.
 **Architectures.** Both. Every artifact is built, signed, and installable for each. Every gate line runs
 under QEMU with UEFI firmware, x86_64 on `q35` with OVMF under KVM on the hosted x86_64 runner and
 aarch64 on `virt` with edk2 under TCG on the hosted arm64 runner, unless it names another setup. The
-§22.4 agent runs in a vibeOS guest on either hosted runner; in this phase's gate the x86_64 agent builds
-and tests both architectures, and the native aarch64 build runs under HVF on the dev host as a §10.9
-record, as in Phase 17. Live images, installs, and CI on physical machines, and a hardware compatibility
-list, are [Funded goals](#funded-goals).
+§22.4 agent runs in a vibeOS guest on the hosted x86_64 runner, where it builds and tests both
+architectures (§24.1 adds its arm64 runner's job); the native aarch64 build runs under HVF on the dev
+host as a §10.9 record, as in Phase 17. Live images, installs, and CI on physical machines, and the physical section of
+the §22.3 tested-platforms list, are [Funded goals](#funded-goals).
 
 **Exit gate**
 - [ ] a live image for each architecture boots to a graphical desktop that matches its §16.1 reference image, attached as a `usb-storage` disk on `qemu-xhci`, as a user writes it to a USB stick, with a `usb-kbd` and a `usb-tablet` as its only input devices; the x86_64 image also boots as an AHCI CD-ROM
@@ -2497,9 +2497,9 @@ list, are [Funded goals](#funded-goals).
 - [ ] a release is built reproducibly: the same source produces byte-identical artifacts
 - [ ] artifacts are signed and verified on install
 - [ ] the CI that gates releases runs on vibeOS: in the nightly job, the §22.4 agent on an installed vibeOS, a 4-vCPU, 4 GiB guest under KVM on the hosted x86_64 runner, builds both architectures, runs `make test` for both, and posts the result as a commit status; `release.yml` refuses a candidate without a passing one
-- [ ] a fresh install builds and releases vibeOS: in the release workflow, a fresh unattended install from the candidate's installer image, a 4-vCPU, 4 GiB guest under KVM on the hosted x86_64 runner, builds the release's artifacts for both architectures and signs them there, and those are the ones published (§22.4); a fresh aarch64 install does the same build under HVF on the dev host as a §10.9 record, unsigned, since the key stays with the workflow
+- [ ] a fresh install builds and releases vibeOS: in the release workflow, a fresh unattended install from the candidate's installer image, a 4-vCPU, 4 GiB guest under KVM on the hosted x86_64 runner, builds the release's artifacts for both architectures and signs them there, and those are the ones published (§22.4); a fresh aarch64 install does the same build under HVF on the dev host as a §10.9 record, unsigned, since the keys stay with the workflow
 - [ ] every release artifact ships an SPDX SBOM that passes the validator, and the release job refuses a component without an entry or with a license outside the §14.10 policy
-- [ ] no release is tagged with an open crash from its candidate's two 72-hour campaigns, both in hosted shards of at most 5.5 hours (§10.1) that carry one seed log and coverage corpus as artifacts: syzkaller (§18.5) accumulating 72 hours per architecture, each guest 2 CPUs and 512 MiB under TCG, and the §21.8 hostile guest, 2 vCPUs and 1 GiB, accumulating 72 hours per architecture, set up as Phase 21's nested job on x86_64, with both the VMX and SVM paths among its shards, and as its EL2 job on aarch64
+- [ ] no release is tagged with an open crash from its candidate's two 72-hour campaigns, both in hosted shards of at most 5.5 hours (§10.1) that carry one seed log and coverage corpus as artifacts: syzkaller (§18.5) accumulating 72 hours per architecture, each guest 2 CPUs and 512 MiB under TCG, and the §21.8 hostile guest, 2 vCPUs and 1 GiB, accumulating 72 hours per architecture, set up as Phase 21's nested job on x86_64, with each path §20.8's records show offered among its shards, and as its EL2 job on aarch64
 - [ ] an update installs unattended and takes effect on the next boot; three bad updates, one that panics, one that hangs with interrupts off, and one that fails its health check, each come back on the old root with no human action, on both architectures under QEMU with OVMF or edk2 and a writable variable store (TCG, 2 vCPUs, 2 GiB)
 - [ ] the GitHub API reports private vulnerability reporting enabled on the repository, the §22.5 `make check` script passes, and the §22.5 drill has run end to end
 - [ ] tag `phase-22` and cut the next release
@@ -2533,14 +2533,14 @@ list, are [Funded goals](#funded-goals).
 ### 22.3 Documentation
 - [ ] an installation guide and a user handbook
 - [ ] a developer guide covering the build, the test tiers, and the subsystem docs in this directory
-- [ ] the compatibility list, generated into `docs/HARDWARE.md` beside §20.1's model list from the release's §10.9 gate records: an entry for each QEMU machine type, accelerator, firmware build, and device-model set the gate ran on, and the dev host's macOS and QEMU versions for its records; its entries are virtual machine configurations, and it claims no physical machine
+- [ ] the tested-platforms list, generated into `docs/HARDWARE.md` beside §20.1's model list from the release's §10.9 gate records: an entry for each QEMU machine type, accelerator, firmware build, and device-model set the gate ran on, and the dev host's macOS and QEMU versions for its records; its entries are virtual machine configurations, and it claims no physical machine
 - [ ] man pages for everything shipped
 - [ ] a known-issues list that includes every open box in every shipped phase, generated from this file
 
 ### 22.4 The loop
-- [ ] a CI agent on vibeOS: a workflow job boots an image the §22.2 unattended installer produced, under KVM on the hosted x86_64 runner or under TCG on the hosted arm64 runner, and passes in the commit, the commands to run, and the job's `GITHUB_TOKEN`; the agent checks the commit out, runs the commands, such as the ladder with test kernels booted under the §21.2 VMM (TCG where the guest has no VMX, SVM, or EL2), hands each command's exit status, log, and artifacts back to the job, which uploads them to the workflow run, and posts a commit status through the GitHub REST API over §15.11's TLS
+- [ ] a CI agent on vibeOS: a workflow job boots an image the §22.2 unattended installer produced, under KVM on the hosted x86_64 runner (§24.1 adds the arm64 runner's job, under TCG), and passes in the commit, the commands to run, and the job's `GITHUB_TOKEN`; the agent checks the commit out, runs the commands, such as the ladder with test kernels booted under the §21.2 VMM (TCG where the guest has no VMX, SVM, or EL2), hands each command's exit status, log, and artifacts back to the job, which uploads them to the workflow run, and posts a commit status through the GitHub REST API over §15.11's TLS
 - [ ] CI running on vibeOS in every nightly job: checkout, build, test, and the artifacts published to the workflow run, with the agent's per-step times in its §10.9 CI-history record
-- [ ] a release produced entirely on vibeOS, signed on vibeOS with the release key the release workflow passes into the guest for that job only, so the key still exists only as that workflow's secret (§14.6)
+- [ ] a release produced entirely on vibeOS, signed on vibeOS with §14.6's release key and §18.7's db key, which the release workflow passes into the guest for that job only, so each still exists only as that workflow's secret
 - [ ] the resulting installer image installed unattended onto a blank disk in a new guest, which then builds the next release
 - [ ] the whole thing scripted and documented so it is a procedure rather than a story
 
@@ -2596,7 +2596,7 @@ paths.
 - [ ] CPython's regression suite (Debian's `python3` and its test-suite package) passes at least 95% of the test cases that pass on the reference kernel, on both architectures
 - [ ] `go test std` with the pinned upstream Go release and `CGO_ENABLED=0` passes at least 95% of the tests that pass on the reference kernel, on both architectures
 - [ ] Node.js (Debian's `nodejs`) passes at least 90% of the `test/parallel` cases from its version's source tarball that pass on the reference kernel, on both architectures
-- [ ] OpenJDK (Debian's default JDK) completes every benchmark of the pinned DaCapo release that completes on the reference kernel, each passing DaCapo's own output validation, on both architectures
+- [ ] OpenJDK (Debian's default JDK) completes every benchmark of the pinned DaCapo release, at its `default` size, that completes on the reference kernel, each passing DaCapo's own output validation, on both architectures
 - [ ] an unmodified Alpine root boots as the whole userspace on both architectures (§23.5): busybox `init` as pid 1, starting OpenRC's `sysinit`, `boot`, and `default` runlevels from `/etc/inittab`, `mdev` populating `/dev`, networking through `udhcpc`, an `ssh` login from the host, and a clean `poweroff`
 - [ ] an unmodified Debian root boots as the whole userspace on both architectures (§23.5): `sysvinit-core` as pid 1, `udev` populating `/dev`, networking through `ifupdown`, an `ssh` login from the host, and a clean `poweroff`; in it, `apt-get install build-essential` from the §23.2 mirror succeeds with `Release` signatures verified, and `dpkg --audit` reports nothing
 - [ ] on the §23.3 test machine, `udevadm info --export-db` agrees with the reference kernel's on every device the machine's `-device` options add and on their children (subsystem, `DEVNAME`, `ID_PATH`, and the numbers of fixed-major devices); `libinput list-devices` finds the virtio keyboard and tablet; attaching a loop device and QEMU's `block_resize` each produce the kernel uevents the reference kernel produces; on both architectures
@@ -2673,7 +2673,7 @@ entries to what procps, util-linux, glibc, and the runtimes parse.
 - [ ] LTP at a pinned release, built as §13.11 builds its static corpus, running every case of the `syscalls` scenario rather than §13.11's subset, except the cases LTP's own `ci/alpine.sh` removes at that release as not building against musl; those fail on the reference kernel too, so they are outside its passing set and need no expected-failure entry
 - [ ] the kselftest targets the gate names, from the reference kernel's Linux release, built on the host as test inputs and never shipped
 - [ ] glibc's test suite, built on the host for the Debian root's glibc version, each test run in the guest through glibc's `test-wrapper` hook over the §17.4 host mount
-- [ ] each runtime's suite run by its own runner with per-case results: `python3 -m test -j4 --junit-xml`, `go test -json std`, Node's `tools/test.py` against the packaged binary, and DaCapo's harness under the packaged `java`
+- [ ] each runtime's suite run by its own runner with per-case results: `python3 -m test -j4 --junit-xml`, `go test -json std`, Node's `tools/test.py` against the packaged binary, and DaCapo's harness under the packaged `java` at the `default` size, from the pinned release's `-minimal` distribution, which holds every benchmark with the inputs its `default` size reads (1.8 GB extracted at 23.11-MR2-chopin, against 16 GB for the full one), extracted once on the host and read by both kernels over the §17.4 host mount, as glibc's tests are
 - [ ] one expected-failure list per suite and architecture, extending §13.11's format with a class: each entry names the case, its class (a kernel bug with an issue link, a missing feature with the line in this file that lands it, or a deliberate gap with its `docs/LINUX.md` entry), and a reason; `scripts/check_expected_failures.py` in `make check` fails on an entry without all three
 - [ ] the runner fails on a case from the reference passing set that fails and is not listed, on a listed case that passes, as §13.11's runner does, so the lists only shrink, and on a suite whose pass share falls below its gate line; the share leaves out a listed case that names a line in Phases 18 to 22 until that phase's `phase-<N>` tag exists
 - [ ] the suites on a weekly scheduled job, in shards of at most 5.5 hours (§10.1), since a GitHub-hosted job stops at 6, with per-suite and per-architecture counts, and each x86_64 shard's host CPU model, in the job summary and in §10.9's CI history, which records this workflow's runs beside `ci`'s, with the counts as added fields
@@ -2698,7 +2698,15 @@ build guest on a GitHub-hosted runner where the §22.4 CI agent runs the builds 
 under TCG, since GitHub's arm64 runners have no KVM. The build guest has 4 vCPUs and 6 GiB, the most whose
 RAM on `q35` lies below DESIGN §4.1's 8 GiB physmap cap, which stays until §27.3, and keeps its build
 trees on virtio-blk disk images. A hosted job stops at 6 hours, so a longer build runs as a chain of §24.1
-shards of at most 5.5 hours that carry the disk images from job to job as artifacts. TCG runs aarch64's
+shards of at most 5.5 hours that carry the disk images from job to job as artifacts. The 14 GB disk
+GitHub documents for a hosted runner is less than the 30 GB the rustc-dev-guide asks for a `rustc`
+build, so each shard first frees space as rust-lang's CI does, deleting the runner image's preinstalled
+SDKs and tool caches and keeping the images on `/mnt` where the runner mounts one with more room, and
+writes the free space it measured to its job summary; DESIGN §8.6 records, per runner label, the free
+space after cleanup and each build's peak image size. If a build's recorded peak exceeds that space on
+its architecture's runner, an edit to this file moves the gate lines that need it, for that
+architecture, to the [funded goal](#funded-goals) buying that architecture's test machine, which
+rebuilds bare metal without shards, as Phase 21 moves its nested lines. TCG runs aarch64's
 builds several times slower, so aarch64's full rebuild runs monthly and x86_64's weekly (§24.2). Go's
 bootstrap on aarch64 starts from a toolchain cross-built from source on x86_64 vibeOS and carried over
 as an artifact, since Go 1.4 has no arm64 port; nothing else crosses architectures.
@@ -2721,11 +2729,11 @@ Moved from §17.2 and §17.3, which close Phase 17 on upstream binaries (§17.7)
 §17.7's upstream toolchains and runs natively on vibeOS.
 
 - [ ] the §22.4 CI agent's aarch64 job: §22.4's workflow job also runs on the hosted arm64 runner, booting an aarch64 image from the §22.2 unattended installer under TCG, with the same agent taking the commit and posting its status, so each architecture's build guest is a vibeOS install the agent drives
-- [ ] shards: a hosted job boots the build guest on the disk images the previous shard of its chain uploaded as artifacts, lets the §22.4 CI agent run the build, and stops it with `SIGINT` in time to shut the guest down cleanly and upload the images before the job's 5.5-hour mark, so the next shard resumes from the tree it left; every shard of a chain runs the same QEMU and `-cpu` model, on x86_64 a named model with `enforce`, since hosted x86_64 runners draw AMD and Intel CPUs of several generations; a shard fails before booting, naming the sizes, when its images would not fit the runner's free disk; a harness test stops a small build at a random point and checks that the resumed build's output is byte-identical to an uninterrupted one's
+- [ ] shards: a hosted job boots the build guest on the disk images the previous shard of its chain uploaded as artifacts, lets the §22.4 CI agent run the build, and stops it with `SIGINT` in time to shut the guest down cleanly and upload the images before the job's 5.5-hour mark, so the next shard resumes from the tree it left; every shard of a chain runs the same QEMU and `-cpu` model, on x86_64 a named model with `enforce`, since hosted x86_64 runners draw AMD and Intel CPUs of several generations; each build keeps its tree on a disk image of its own, dropped rather than uploaded once its outputs are copied out, so a shard carries the tree of the build in progress and only the outputs of finished ones; a shard fails before booting, naming the sizes, when its images would not fit the free space left after cleanup; a harness test stops a small build at a random point and checks that the resumed build's output is byte-identical to an uninterrupted one's
 - [ ] `tcc` first: small, self-hosting, and a fast way to prove the from-source path; built by §17.7's clang, then by itself until two generations match
 - [ ] GNU binutils from source, for the ports that call `as` and `ld` by name
-- [ ] then LLVM with clang, lld, compiler-rt, libunwind, and libc++, built first by §17.7's clang and then by itself until two generations of clang and lld match byte for byte; mostly a test of the C++ standard library and of filesystem behavior at scale
-- [ ] `rustc` and `cargo` through `x.py` at the pinned nightly, since the kernel uses nightly features: natively, as a local rebuild with §17.7's `rustc` and `cargo` as stage 0, and with rustc's own `src/llvm-project`, so its code generation matches the upstream build's; then again, as a local rebuild with that build's `rustc` and `cargo` as stage 0, until two generations of `rustc` match byte for byte
+- [ ] then LLVM with clang, lld, compiler-rt, libunwind, and libc++, built first by §17.7's clang and then by itself until two generations of clang and lld match byte for byte, each a Release build without debug info; mostly a test of the C++ standard library and of filesystem behavior at scale
+- [ ] `rustc` and `cargo` through `x.py` at the pinned nightly, since the kernel uses nightly features: natively, as a local rebuild with §17.7's `rustc` and `cargo` as stage 0, and with rustc's own `src/llvm-project`, so its code generation matches the upstream build's, with debug info off for the compiler, the tools, and that LLVM, while `core` and `std` keep upstream's dist debug settings, since the kernel, built with `debug = true`, carries their debug info into the ELFs the §17.5 loop script compares; then again, as a local rebuild with that build's `rustc` and `cargo` as stage 0, until two generations of `rustc` match byte for byte
 - [ ] CPython, QEMU, and `xorriso` (§17.6), `git` (§17.4), `make`, `cmake`, and `ninja` (§17.2), and `nasm`, which Limine's x86 build needs, rebuilt the same way
 - [ ] Limine from its pinned source release, built with the rebuilt clang and `nasm`, in place of the binary branch `setup.sh` fetches, in the ISO the §24.1 toolchains build
 - [ ] the §17.5 loop script builds the ISO once with §17.7's upstream toolchains in the `vibeos-build` image and once with the §24.1 toolchains in the §24.5 build image, and fails when the kernel ELFs or initrds differ, or when another file differs without its cause in `docs/BOOTSTRAP.md`, on both architectures
@@ -2744,7 +2752,7 @@ and everything a release ships.
 - [ ] every port built twice from the same commit gives byte-identical packages, or is listed with its cause and kept out of the release repository until it does, so §22.1's reproducibility holds for everything a release ships; the full rebuild builds each port twice, running its test suite in one of them, in separate shard chains on separate runners whose shard boundaries fall at different points, so neither the runner's CPU nor a resumed build reaches a package unnoticed
 - [ ] Go through upstream's bootstrap chain from Go 1.4's C sources, so Go adds no seed; on aarch64 from a bootstrap toolchain cross-built on x86_64 vibeOS
 - [ ] a port whose build needs a binary of itself (a boot JDK for OpenJDK) lists that binary as a port seed in `docs/BOOTSTRAP.md`
-- [ ] the full rebuild: a scheduled workflow rebuilds the whole tree from §24.5's stage 0 through the §22.4 CI agent in §24.1 shard chains, weekly on x86_64 and monthly on aarch64, whose TCG builds run several times slower; a nightly job, one run at a time per architecture, rebuilds the ports whose recipe or dependencies changed since its last complete run; the rebuild workflows together run at most 10 jobs at once, half the account's 20 concurrent jobs, so per-push CI does not queue behind them; per-architecture counts (ports, built, test suites passing, reproducible, carried patches) go to the job summary and to §10.9's CI history, which records these workflows' runs beside `ci`'s, with the counts as added fields
+- [ ] the full rebuild: a scheduled workflow rebuilds the whole tree from §24.5's stage 0 through the §22.4 CI agent in §24.1 shard chains, weekly on x86_64 and monthly on aarch64, whose TCG builds run several times slower; a nightly job, one run at a time per architecture, rebuilds the ports whose recipe or dependencies changed since its last complete run; the rebuild workflows' peak job counts, recorded in DESIGN §8.6, sum to at most 5, their share of §10.1's 10 scheduled slots, so a rebuild that runs for days leaves the other 5 to the nightly and weekly workflows and per-push CI its own 10; when §24.1's recorded chain times show a full rebuild would not finish within its period at that share, the period lengthens and the share stays, and a rebuild that would outlast GitHub's 35-day limit on a workflow run continues in a run it dispatches; per-architecture counts (ports, built, test suites passing, reproducible, carried patches) go to the job summary and to §10.9's CI history, which records these workflows' runs beside `ci`'s, with the counts as added fields
 
 ### 24.3 Rust target
 Moved from §17.3: the `std` port and the vibeOS host triples it planned, now a decision rather than an
@@ -2795,17 +2803,23 @@ threshold under KVM holds on every CPU model the runner draws, by that leg's rul
 Linux compares the two kernels in one job, on one CPU model. GitHub's arm64 runners have no KVM, so
 aarch64 guests there run under TCG, and an aarch64 number that needs an accelerator is taken under HVF
 on the dev host as a §10.9 record, where the peers, servers, and load generators a line puts on the
-runner run on the dev host. A guest larger than a runner, with hundreds of vCPUs or a terabyte of
-memory, runs under TCG on sparse host memory and checks correctness and counts, not speed. Real servers,
-clouds, 100GbE NICs, data-center drives, and month-long uptime are [Funded goals](#funded-goals); no
-line here waits for one.
+runner run on the dev host. There both kernels' guests reach them over `socket_vmnet` (Apache-2.0), a
+daemon Homebrew installs once as a root service, which QEMU joins unprivileged through a socket netdev,
+since macOS has no tap device and QEMU's `vmnet-*` netdevs need root. A guest larger than a runner,
+with hundreds of vCPUs or a terabyte of memory, runs under TCG on sparse host memory and checks
+correctness and counts, not speed. Real servers, clouds, 100GbE NICs, data-center drives, and
+month-long uptime are [Funded goals](#funded-goals); no line here waits for one.
 
 **Nested virtualization.** A line that runs vibeOS as a hypervisor inside the runner's guest runs in the
 environments [Phase 21](#phase-21-virtualization) defines and passes on its terms: on x86_64 the nested
 job, which GitHub calls experimental and whose runners draw AMD's SVM or Intel's VMX at random, so the
-line needs a passing leg of each within the nightly job's last 7 runs; on aarch64 the EL2 job, under TCG
-with `virtualization=on`, which records its numbers without a threshold, and the HVF record, on QEMU
-11.1 or later.
+line needs, within the nightly job's last 7 runs, a passing leg of each path that §20.8's records of
+those nights show a runner offering; on aarch64 the EL2 job, under TCG with `virtualization=on`, which
+records its numbers without a threshold, and the HVF record, on QEMU 11.1 or later. If those records
+show no runner offering either path for 7 nights running, GitHub has withdrawn nesting, and the edit
+Phase 21 then makes also moves the x86_64 parts of Phase 28's VF-assignment line and Phase 30's
+live-update line to the x86_64 test PC in [Funded goals](#funded-goals); each then closes on its
+aarch64 parts.
 
 **Long runs.** A run longer than one hosted job is a chain of shards of at most 5.5 hours that carry
 their state as artifacts, by the rule in [How to read this](#how-to-read-this) and §10.1's CI budget.
@@ -2890,6 +2904,7 @@ continuous soak on real machines are [Funded goals](#funded-goals).
 - [ ] before a non-crash jump, every CPU but the one making it leaves the old kernel: on aarch64 it goes offline through §19.6 with PSCI `CPU_OFF`, so the new kernel's `CPU_ON` (§11.4) does not return `ALREADY_ON`; on x86_64 it leaves VMX or SVM operation (§21.1), since VMX root operation blocks INIT, and halts with interrupts off until the new kernel's INIT-SIPI
 - [ ] x86_64 entry through a purgatory that checks the loaded image's digest; aarch64 entry with the MMU and caches off at the entry exception level, after cleaning to the point of coherency
 - [ ] a capture region reserved at boot by a `crashkernel=` option on the §10.2 command line; with a capture kernel loaded, the panic path stops every other CPU with the §25.5 NMI IPI instead of the §4.9 halt broadcast, which a CPU with interrupts off never takes, then jumps into the capture kernel; on aarch64 the IPI is a GICv3 pseudo-NMI, and on GICv2 the §11.3 panic-halt SGI; DESIGN §2.5 records this path beside the Fixed `0xFE` halt
+- [ ] `/proc/iomem` in Linux's format: the `System RAM` and `Reserved` ranges from `BootInfo`'s memory map, with the `crashkernel=` region nested under its RAM range as `Crash kernel`, since `kexec -p` from kexec-tools refuses to load a capture kernel without that range; the addresses read as zero to a reader without `CAP_SYS_ADMIN` (§18.6), as on Linux; the format host-tested against output captured from a Linux guest booted with `crashkernel=`, as §14.9's formats are
 - [ ] each stopped CPU saves its interrupted registers as an ELF note, then leaves VMX or SVM operation on x86_64 and calls PSCI `CPU_OFF` on aarch64, as Linux's crash stop does; the panicking CPU saves its own; a CPU that does not answer within a bound is named in the notes; the capture kernel boots with Linux's `maxcpus=1` on the §10.2 command line, since such a CPU is still on, and the harness expects no `smp: ap online` line from it
 - [ ] the capture kernel presents the old memory as an ELF core at `/proc/vmcore`, as Linux's does, and writes it filtered, reading §12.1's frame metadata from the dump to drop free, zero, page-cache, and user pages
 - [ ] the vmcore written to a local disk, or over TCP to a host collector when there is none
@@ -3069,6 +3084,7 @@ host commits only the pages the guest touches. Speedups on real cores are a
 
 ### 27.5 Many CPUs
 - [ ] a host test parses a MADT with 4096 processors, QEMU `q35`'s limit (types 9 and 10), through §20.1's tables; aarch64's CPU tables, from the device tree and from the MADT's GICC entries, are sized from the firmware CPU count the same way
+- [ ] the thread table and every structure §10.4 sizes from the `limits` thread count, the wake inbox and the KVA free-list pool among them, sized at boot for the Phase 10 value (1024) plus each CPU's §4.8 idle thread and other per-CPU kernel threads, counted from the firmware CPU count, so a 1024-vCPU guest keeps the 1024 threads Phase 12 was tested against; once §23.4 has landed, its `kernel/threads-max` governs instead; a host test computes the limits for 4096 CPUs
 - [ ] AP bring-up in parallel: batched INIT-SIPI on x86_64 and concurrent PSCI `CPU_ON` on aarch64, with the timer calibrated once and shared when the counter is invariant, instead of the §4.5 one-at-a-time sequence with its 10 ms per AP
 - [ ] per-CPU areas, stacks, and run queues allocated on the CPU's own node
 - [ ] queued (MCS-style) spinlocks replacing the CAS `SpinMutex` (§3.5) on contended locks, since a test-and-set lock collapses under hundreds of waiters and grants the lock in no order; a loom model beside §10.8's
@@ -3090,14 +3106,14 @@ a guest a virtual function of its own, with the cost per packet and per connecti
 Linux in the same guest on the same runner.
 
 **Unlocks.** Network-bound services that scale with cores. Guests on SR-IOV virtual functions. The
-RDMA and live-migration entries in [Beyond](#beyond). A physical 100GbE NIC at line rate is a
+RDMA entry in [Beyond](#beyond). A physical 100GbE NIC at line rate is a
 [Funded goal](#funded-goals).
 
 **Architectures.** Both. NIC drivers are PCI and shared. The throughput, packet-rate, and
 connection-rate gates run under KVM on the KVM runner, with virtio-net on a multiqueue tap and the
 runner's `vhost-net`, and the peer and load generator as processes on the runner; each number is
 compared with Linux, the §23.6 reference kernel booted in the same guest shape with the same devices, in
-the same job. GitHub's arm64 runners have no KVM, and macOS has neither a multiqueue tap nor `vhost-net`,
+the same job. GitHub's arm64 runners have no KVM, and macOS has no tap device and no `vhost-net`,
 so the aarch64 lines are functional and run under TCG. The SR-IOV lines use QEMU's `igb`, a model of the
 Intel 82576 with 8 virtual functions that QEMU documents as a way to test SR-IOV without hardware,
 behind `intel-iommu` on x86_64 `q35` and SMMUv3 on aarch64 `virt`. Assigning a function to a §21.2 guest
@@ -3209,7 +3225,7 @@ on aarch64 under HVF on the dev host as a §10.9 record. IOPS on data-center dri
 - [ ] unmodified LVM2 from the §14.9 mirror over §29.1's device-mapper interface: physical volumes, volume groups, and logical volumes in LVM2's own on-disk metadata, which the kernel never parses
 - [ ] linear and striped logical volumes, extended and shrunk; online extension composed with §29.5's online grow
 - [ ] thin provisioning through the `thin-pool` and `thin` targets, with discard passed down and the pool's low-water-mark event raised before it fills
-- [ ] a host-side stack reader in hostlib, beside `fsck-vibefs`, that assembles a vibefs volume from member images without root on either dev host: RAID 1 through §29.2's portable md 1.2 code, reading the member md's resync would copy from; LVM2 linear and striped segments mapped from the physical volumes' text metadata, host-tested against volume groups LVM2 created under Linux; §18.7's transform undone through §14.7's AES-XTS and Argon2id, host-tested against volumes the kernel wrote; `fsck-vibefs` and the §12.5 enumerator take the assembled volume, which the Phase 29 host checks run on
+- [ ] a host-side stack reader in hostlib, beside `fsck-vibefs`, that assembles a vibefs volume from member images without root, on Linux and on macOS (the hosted runners and §10.2's scheduled macOS job): RAID 1 through §29.2's portable md 1.2 code, reading the member md's resync would copy from; LVM2 linear and striped segments mapped from the physical volumes' text metadata, host-tested against volume groups LVM2 created under Linux; §18.7's transform undone through §14.7's AES-XTS and Argon2id, host-tested against volumes the kernel wrote; `fsck-vibefs` and the §12.5 enumerator take the assembled volume, which the Phase 29 host checks run on
 
 ### 29.4 Integrity and health
 - [ ] scrub on a schedule and on demand: md's `check` and `repair` through `sync_action`, with mismatches counted in `mismatch_cnt` and logged; `repair` rewrites parity from data and mirrors from the first member, as Linux's does, since a mismatch alone does not say which copy is right
@@ -3219,7 +3235,7 @@ on aarch64 under HVF on the dev host as a §10.9 record. IOPS on data-center dri
 
 ### 29.5 Filesystem at scale
 - [ ] vibefs v2 grown online into new space at the end of its device, without unmounting
-- [ ] vibefs v2 at 16 TiB on a sparse image and at 100 million inodes: mount time, `fsck` time and memory, and lookup in a million-entry directory recorded in `docs/`; a v2 limit below either is raised with a new format version that `fsck` upgrades in place
+- [ ] vibefs v2 at 16 TiB on a sparse image and at 100 million inodes, on aarch64 under HVF on the dev host as a §10.9 record, since 100 million inodes outgrow a hosted runner's 14 GB of disk: mount time, `fsck` time and memory, and lookup in a million-entry directory recorded in `docs/`; a v2 limit below either is raised with a new format version that `fsck` upgrades in place
 - [ ] per-user, per-group, and per-project quotas enforced and managed through Linux's `quotactl`, with project ids set through `FS_IOC_FSSETXATTR`
 - [ ] writeback in parallel per filesystem and per device, measured on the gate's `null-co` NVMe namespaces under KVM on the KVM runner
 
@@ -3236,7 +3252,7 @@ on aarch64 under HVF on the dev host as a §10.9 record. IOPS on data-center dri
 clock, and updates handled from off the machine.
 
 **Unlocks.** The claim that vibeOS runs production services, backed by numbers taken against Linux in
-the same guest on the same runner. [Phase 39](#phase-39-stability)'s 1.0. Fleets and cluster nodes, in
+the same guest on the same runner. [Phase 39](#phase-39-stability)'s 1.0. Fleets, cluster nodes, and live migration, in
 [Beyond](#beyond).
 
 **Architectures.** Both. The services are unmodified Linux binaries from the §14.9 Alpine mirror, on
@@ -3249,7 +3265,7 @@ real machines is a [Funded goal](#funded-goals).
 
 **Exit gate**
 - [ ] PostgreSQL's regression suite (§30.1) passes, minus its checked-in expected-failure list, under TCG with 2 vCPUs and 2 GiB on both architectures, on the weekly job
-- [ ] pgbench, a load generator on the runner against nginx serving static files, and `redis-benchmark` each reach at least 70% of Linux's throughput in the same guest shape (4 vCPUs, 4 GiB, virtio-blk, and virtio-net with 4 queue pairs on a multiqueue tap with `vhost-net`) in the same job, under KVM on the KVM runner; and on aarch64 under HVF on the dev host as a §10.9 record, with one queue pair, since macOS has no multiqueue tap; the numbers are recorded per release
+- [ ] pgbench, a load generator on the runner against nginx serving static files, and `redis-benchmark` each reach at least 70% of Linux's throughput in the same guest shape (4 vCPUs, 4 GiB, virtio-blk, and virtio-net with 4 queue pairs on a multiqueue tap with `vhost-net`) in the same job, under KVM on the KVM runner; and on aarch64 under HVF on the dev host as a §10.9 record, with one queue pair, since QEMU's socket netdev to `socket_vmnet` has only one; the numbers are recorded per release
 - [ ] a host client commits numbered rows to PostgreSQL through 100 simulated power cuts on §12.5's volatile-cache device; after each, PostgreSQL recovers and every commit acknowledged to the client is present; under TCG with 2 vCPUs and 2 GiB, on both architectures
 - [ ] a Prometheus server on the runner scrapes `node_exporter` on vibeOS, and every query in the checked-in dashboard returns data: CPU, memory, pressure stall, disk, network, and per-service series, on both architectures
 - [ ] kernel and service logs reach a collector on the runner over TLS as RFC 5424 records with structured fields, and a sequence-number check finds none lost across a 10-minute collector outage, on both architectures
@@ -3345,10 +3361,11 @@ SHA-256, and are never shipped; so are the peers that run on the host, `wmediumd
 Every phase here needs 20, for QEMU's device models, §20.3's USB, and §20.9's firmware variables and
 hotplug, and 23 for sysfs and uevents in Linux's layout, which udev and everything above it read.
 Phase 31 needs nothing else. Phase 32 needs 31, and §18.5's debugfs, which carries the DRM counters and
-pipe CRCs. Phases 33, 34, and 35 need 32; 34 also needs §19.4's real-time class for PipeWire's data
-thread, and 35 also needs 34 for Bluetooth audio. Phase 36 needs 33 to 35, and 21 for the browser
-sandbox's namespaces. Phase 37 needs 36, 22 for the installer, unattended updates, and tested-platforms
-list, and 24 for the ports tree. Nothing here needs Era VI, and nothing in Era VIII needs this era.
+pipe CRCs. Phase 33 needs 32. Phases 34 and 35 need 31, not 32; 34 also needs §19.4's real-time class
+for PipeWire's data thread, and 35 also needs 34 for Bluetooth audio. Phase 36 needs 33 to 35, and 21
+for the browser sandbox's namespaces. Phase 37 needs 36, 22 for the installer, unattended updates, and
+tested-platforms list, and 24 for the ports tree. Nothing here needs Era VI, and nothing in Era VIII
+needs this era.
 
 ## Phase 31: Desktop Platform
 
@@ -3727,7 +3744,7 @@ with `llvmpipe` (§33.3). The call line runs a second vibeOS guest on the same h
 - [ ] an image viewer, a PDF viewer, a text editor, a terminal emulator, a calculator, and an archive tool from Alpine
 
 ### 36.4 Browser
-- [ ] Firefox or Chromium from Alpine, chosen by a spike that weighs sandbox requirements and upstream patch count, and written down
+- [ ] Firefox or Chromium from Alpine, chosen by a spike that weighs sandbox requirements, upstream patch count, and each candidate's build from its Alpine recipe, and written down. Each is built in an Alpine guest with no swap and the Phase 24 build guest's 4 vCPUs and 6 GiB, under HVF on the dev host, recording its peak memory and disk; a candidate that cannot build within that memory and a hosted runner's free disk, even with recipe options such as dropping PGO or LTO, is out, and the chosen one's options are written down with it
 - [ ] its sandbox enabled, on §18.6's seccomp filters and §21.5's namespaces
 - [ ] compositing and WebGL through Phase 33's `llvmpipe` or the browser's own software path, video decoded in software, audio through PipeWire, and the camera through the XDG camera portal
 - [ ] the harness's test CA added through the browser's policy file, since the gates serve every page from the host
@@ -3765,7 +3782,7 @@ records under HVF, as the era preamble says. On the dev host, which has no vhost
 `btvirt`, the workload uses §35.2's in-kernel radios and `/dev/vhci` in place of the §35.4 peer.
 
 **Exit gate**
-- [ ] the release image carries the §36.2 desktop as §14.6 packages built by the Phase 24 ports tree, and the §22.2 installer puts it on the desktop guest's virtio disk beside an existing Alpine install; both boot afterwards through their firmware boot entries
+- [ ] the release image carries the §36.2 desktop as §14.6 packages built by the Phase 24 ports tree, and the §22.2 installer puts it on the desktop guest's virtio disk beside the §37.2 Alpine install; both boot afterwards through their firmware boot entries
 - [ ] the §37.1 workload accumulates 24 hours under KVM on the hosted x86_64 runner and 24 hours under TCG on the hosted arm64 runner, in shards of at most 5.5 hours that each boot from the previous shard's disk image, with no kernel panic, no hang, no data loss (`fsck` clean and file checksums matching), and no crash outside the injected ones
 - [ ] the §37.1 nightly run on the hosted x86_64 runner has passed on 30 consecutive nights, and the weekly run on the hosted arm64 runner in its last 4 weeks, from §10.9's run history
 - [ ] 1000 consecutive suspend cycles of the desktop guest under KVM on the hosted x86_64 runner, with Wi-Fi, Bluetooth, audio, and every head working after the last
@@ -3781,9 +3798,11 @@ records under HVF, as the era preamble says. On the dev host, which has no vhost
 - [ ] a run of at most 5 hours, nightly on the hosted x86_64 runner and weekly on the hosted arm64 runner, with thresholds that fail the job; each run commits one record, with its result and the measurements above, to §10.9's `ci-history` branch
 
 ### 37.2 Shipping
-- [ ] the Phase 24 ports tree builds the §36.2 desktop, the browser included, as §14.6 packages for both architectures; Alpine's binaries stay the test oracle, not what ships
+- [ ] the Phase 24 ports tree builds the §36.2 desktop, the browser included, with the recipe options §36.4 recorded, as §14.6 packages for both architectures; Alpine's binaries stay the test oracle, not what ships
 - [ ] a PackageKit backend for the §14.6 package manager, so the desktop's software center searches, installs, updates, and removes vibeOS packages with their signatures shown, and lists §22.2's updates as pending, applied, or rolled back with the reason
-- [ ] full-disk encryption on by default in the §22.2 installer's desktop profile
+- [ ] the Alpine install the gate installs beside, built by a harness step: the Linux baseline, booted in the desktop guest, partitions the guest's blank virtio disk into an ESP, an ext4 root, and free space, installs an Alpine root with `linux-lts` on the ext4 partition from the §14.9 mirror as §23.5 builds its root, and installs GRUB to the ESP's `\EFI\alpine` directory with a `Boot####` entry in `BootOrder` in the writable variable store the guest keeps for the §22.2 install; `grub-efi`, `efibootmgr`, and the partitioning and `mkfs` tools the step runs join the mirror's pin list
+- [ ] the §22.2 installer installs into a disk's free space beside an existing GPT system: it puts its slot directories in that system's ESP, leaves every file there it did not write as it was, the `\EFI\BOOT` fallback loader included, and keeps every `Boot####` entry it did not write in `BootOrder`, when it installs and when a §22.2 trial boot commits
+- [ ] full-disk encryption (§18.7) on by default when the §22.2 installer installs the §36.2 desktop
 
 ### 37.3 Records
 - [ ] `llvmpipe` and browser scores, simulated Wi-Fi throughput, suspend reliability, and resume and boot times for each architecture, with the Linux baseline's and the runner's CPU model beside them, written by the jobs into a results file in the repository at each release, with history, and summarized in the release notes
@@ -3930,9 +3949,9 @@ physical machines are [Funded goals](#funded-goals).
 
 ### 39.3 Releases after 1.0
 - [ ] after `v1.0.0`, releases are `v1.<m>.0` until a §22.1 major version bump: a phase that closes cuts the next one, and the release workflow cuts one from green `main` whenever eight weeks pass without one
-- [ ] the latest two minor releases supported: security and data-loss fixes backported and shipped as `v1.<m>.<p>`, and each supported branch running the full ladder and `make verify` nightly, and the §23.6 suites on the weekly schedule `main` uses, on both architectures; GitHub runs scheduled workflows only on the default branch, so `main`'s scheduled workflows start the supported branches' runs through `workflow_dispatch`, staggered so that together they stay under the 20 concurrent hosted jobs (5 of them macOS) the account allows, with the schedule recorded in DESIGN §8.6
+- [ ] the latest two minor releases supported: security and data-loss fixes backported and shipped as `v1.<m>.<p>`, and each supported branch running the full ladder and `make verify` nightly, and the §23.6 suites on the weekly schedule `main` uses, on both architectures; GitHub runs scheduled workflows only on the default branch, so `main`'s scheduled workflows start the supported branches' runs through `workflow_dispatch`, staggered inside §10.1's scheduled share of 10 concurrent jobs (at most 5 of them macOS), which they share with `main`'s own scheduled workflows, the release soaks below, and Phase 22's release-candidate fuzz campaigns, so pushes keep the other 10; a job that finds the share full waits for a slot in the order it was requested, and DESIGN §8.6 records the schedule and each run's peak job count
 - [ ] backports by `scripts/backport.py`: `git cherry-pick -x`, and the fix's regression test must fail on the branch without the fix and pass with it, or the backport is refused
-- [ ] each later release candidate, and each patch release on a supported branch, passes a 72-hour soak of §30.7's workload on the commit being released before it is cut, run and checked as the exit gate's 168-hour run is; each commit's soak is its own chain of §25.7 shards, so soaks of different commits run side by side
+- [ ] each later release candidate, and each patch release on a supported branch, passes a 72-hour soak of §30.7's workload on the commit being released before it is cut, run and checked as the exit gate's 168-hour run is; each commit's soak is its own chain of §25.7 shards, so soaks of different commits run side by side, each shard waiting its turn for a slot in §10.1's scheduled share
 - [ ] a Phase 25 crash record from a supported branch's nightly or soak is filed as an issue against that branch, with the dump attached
 - [ ] every scheduled fuzz job (§10.2, §13.13, §15.10, §18.5, §21.8, and each later one) files a new crash as a `fuzz-crash` issue with its seed or reproducer, and the release workflow refuses to cut a release while one has been open more than 14 days
 - [ ] the release workflow refuses to cut a release when the newest §22.5 drill record is more than 12 months old or does not name every supported branch
@@ -3972,7 +3991,7 @@ hardware, a paid service, or a new account, that version is in [Funded goals](#f
 - **Gate replay** (after 13): each Era I and II phase replayed as a benchmark. A fresh agent team starts from the commit that closed the previous phase, with only that phase's section and `AGENTS.md`, and `make gate PHASE=N` (§10.9) scores the result; rerun when a new model ships. Phases 0 to 9 first get gate-map entries written against their closing commits. It runs in the maintainer's own agent sessions and spends their tokens, so it starts only when the maintainer asks for it.
 - **eBPF** (after 19): Linux's `bpf(2)` with a verifier and a JIT on both architectures, attached to §19.1's tracepoints, so unmodified `bpftrace` one-liners run; the verifier fuzzed like every parser.
 - **Hypervisor record and replay** (after 21): the §21.1 hypervisor logs a guest's exit results, interrupt injection points, and device completions, and replays the guest deterministically under gdb's reverse execution at the hypervisor's speed rather than TCG's, one vCPU first, on the hosts Phase 21's gate runs on.
-- **Live migration** (after 21 and 28): a running §21.2 guest moved over TCP between two vibeOS hosts that are KVM guests on one hosted x86_64 runner, nested (which GitHub calls experimental; each run uses the VMX or SVM path its CPU offers), with dirty pages tracked through EPT or NPT dirty logging and pre-copied, and the downtime of a 1-vCPU, 1 GiB guest running §19.3's mixed interactive workload measured beside two Linux KVM hosts in the same VM shape in the same job; on aarch64 the same under TCG with `virtualization=on` and stage-2 dirty logging. Migration between physical machines is a funded goal.
+- **Live migration** (after 21 and 30): a running §21.2 guest moved over TCP by QEMU's migration, on §30.6's `/dev/kvm` state ioctls, between two vibeOS hosts that are KVM guests on one hosted x86_64 runner, nested (which GitHub calls experimental; each run uses the VMX or SVM path its CPU offers), with dirty pages tracked through EPT or NPT dirty logging and pre-copied, and the downtime of a 1-vCPU, 1 GiB guest running §19.3's mixed interactive workload measured beside two Linux KVM hosts in the same VM shape in the same job; on aarch64 the same under TCG with `virtualization=on` and stage-2 dirty logging. Migration between physical machines is a funded goal.
 - **A Kubernetes worker node** (after 21 and 30): the upstream kubelet with a CRI runtime over §21.6's OCI images and a CNI plugin over §21.7's virtual networking, in a vibeOS guest joined to a k3s control plane on the hosted runner; the upstream node conformance suite becomes the gate when it moves into a phase.
 - **Agent performance ledger** (after 22): which agent and model did what, from commit trailers, and per phase the slices, pull requests, days from first slice to tag, red CI runs, reverts, reopened boxes, and escaped bugs by the tier that should have caught them, computed from git and GitHub history into the release notes. The maintainer deferred this ([ARCHITECTURE_REVIEW](reviews/ARCHITECTURE_REVIEW.md) O1), so it starts only when the maintainer asks for it.
 - **Agents on vibeOS** (after 23): the coding agent that develops vibeOS runs in a vibeOS guest under HVF on the dev host through the Linux ABI (Node.js passes Phase 23's suite), reaches the model API over HTTPS through Phase 15's stack, and lands one slice from there. It runs on the maintainer's own agent account and spends their tokens, so it starts only when the maintainer asks for it.
@@ -3995,13 +4014,18 @@ vibeOS has no budget. This is where money, a machine, or an account would go. Gr
 order and so are the goals within each: the first purchase that unlocks the most comes first. Nothing in a
 phase depends on anything here, and no gate waits for it.
 
-Each goal names what to buy, rent, or open, a rough cost with the year it was estimated, what it
-unlocks, and the lines it adds back. Costs are estimates to confirm before buying. When a goal is met, one
-edit to this file moves its `- [ ]` lines unchanged into the places named above them, makes its other
-edits, drops it from the sentences that list funded goals, and deletes the goal. A line for a phase
-already tagged lands as an open box; the tag stands. With the first goal met, the sentence in How to read
-this, "A gate never needs a physical machine, a rented one, a paid service, or a new account", gains
-"beyond what a met funded goal provides".
+Each goal names what to buy, rent, or open, a rough cost with the year it was estimated (or, where no
+price is published, that fact and the year), what it unlocks, and the lines it adds back. Costs are
+estimates to confirm before buying. When a goal is met, one edit to this file moves its `- [ ]` lines
+unchanged into the places named above them, makes its other edits, drops it from the sentences that list
+funded goals, and deletes the goal. A line for a phase already tagged lands as an open box; the tag
+stands. With the first goal met, that edit also changes the Free by default paragraph in How to read
+this: "beyond their own agent tokens" gains "and the funded goals already met", and after "A gate never
+needs a physical machine, a rented one, a paid service, or a new account" it adds "Lines moved in from a
+met funded goal are the exception: each names the machine, account, or service it needs, and every
+statement in this file that a phase, era, section, gate, or Beyond entry runs on the free resources,
+runs only on hosted runners or QEMU, assumes no physical machine, or buys nothing excludes them". This
+section's "vibeOS has no budget" becomes "vibeOS has no budget beyond the goals already met".
 
 A machine the maintainer owns for other reasons can take a goal's lines without buying anything, by the
 same edit, when it meets the goal's specification. The maintainer's own Mac is not such a machine: it
@@ -4010,10 +4034,15 @@ stays a VM host, since an installer or boot-policy bug there costs the dev host.
 Free cloud tiers are here, not in phases. They cost nothing while use stays inside them, but each needs
 an account and a card the maintainer opens, and some can start billing.
 
-**Self-hosted runners.** Several goals register a self-hosted GitHub Actions runner. GitHub recommends
-self-hosted runners only for private repositories, because a pull request from a fork of a public
-repository can run code on them. A runner here therefore takes only `schedule` and `workflow_dispatch`
-runs on `main`, never `pull_request`, and runs nothing but vibeOS's hardware jobs.
+**Self-hosted runners.** Several goals register a self-hosted GitHub Actions runner to this repository.
+GitHub recommends self-hosted runners only for private repositories: a runner takes any job that names
+its labels, and a pull request from a fork can add a workflow that does, which GitHub runs from the pull
+request's own files. A runner here therefore enforces its rules itself: its job-started hook
+(`ACTIONS_RUNNER_HOOK_JOB_STARTED`) fails every job whose `GITHUB_EVENT_NAME` is not `schedule` or
+`workflow_dispatch`, or whose `GITHUB_REF` is not `refs/heads/main`, before any of its steps runs, and
+vibeOS's own workflows that name its labels have no other trigger. A `workflow_dispatch` run builds a
+commit it takes as input only when that commit is on `main` or on a §39.3 supported branch. The runners
+run nothing but vibeOS's hardware jobs.
 
 **Names.** In the lines below, *the x86_64 test PC*, *the aarch64 server*, *the long-run servers*, *the
 reference laptop*, *the desktop*, and *the rig* are the machines the goals buy. *The test machines* are
@@ -4030,11 +4059,15 @@ internal NVMe or SATA disk. At least one with S3 in its firmware. The first also
 free CPU-attached PCIe 3.0 or newer x16 slot, and a second NVMe slot, so it can carry the NVMe-drive and
 100GbE goals; an Intel CPU is the simpler choice for `rr`, which needs a workaround on AMD Zen. With them:
 real NVMe and SATA drives, a Realtek 8168 NIC, a USB-C dock or adapter with CDC-NCM and an ASIX AX88179,
-USB serial adapters (CDC-ACM, Prolific PL2303, Silicon Labs CP210x), netboot and serial capture on the
-rig host, a switched outlet per machine, and a plug-in power meter.
+USB serial adapters (CDC-ACM, Prolific PL2303, Silicon Labs CP210x), a switched outlet per machine, and a
+plug-in power meter. For the rig, the rig host: an always-on x86_64 mini PC running Linux, with VT-x or
+AMD-V so it can run a vibeOS guest under KVM, gigabit Ethernet, and a powered USB hub for its own serial
+adapters and the rig's injectors; it serves netboot, captures serial, switches the outlets, and runs the
+self-hosted runners.
 
-**Cost.** About $1,500 for both machines and the parts above (2026 estimate). One machine alone is
-roughly half, and closes every line below but the second-machine clauses.
+**Cost.** About $1,500 for both test PCs and the parts above, and about $300 for the rig host (2026
+estimates). One test PC alone is roughly half the $1,500 and, with the rig host, closes every line below
+but the second-machine clauses.
 
 **Unlocks.** Bare-metal boot on real UEFI and BIOS firmware, with real memory maps, MTRRs, ACPI tables
 and their quirks, and microcode that changes the revision. S3 on real firmware, and idle power measured
@@ -4048,14 +4081,20 @@ ERST, GHES, and a BMC, it can also be the x86_64 long-run server; it can be the 
 **Lines.** Elsewhere in this file:
 - the destination paragraph: "boots on QEMU's models of real machines on both architectures" gains "and on a real x86_64 machine"
 - How to read this, the conditions paragraph: "and the VMM when it is not QEMU" gains "; on real hardware, the machine"
-- the standing gates' gate-map line: "a CI job on GitHub-hosted runners" becomes "a CI job on GitHub-hosted runners or on a §20.8 self-hosted runner whose workflow has no `pull_request` trigger", and the record clause also covers "a reading taken by hand on a physical machine, such as a power meter's"
+- the standing gates' gate-map line: "a CI job on GitHub-hosted runners" becomes "a CI job on GitHub-hosted runners or on a self-hosted runner on the rig host whose workflow's only triggers are `schedule` and `workflow_dispatch`", and the record clause also covers "a reading taken by hand on a physical machine, such as a power meter's"
 - the arc, row 20: Unlocks gains ", bare metal on x86_64, hardware CI"
+- §10.9, the gate-map box: "a scheduled CI job on GitHub-hosted runners" becomes "a scheduled CI job on GitHub-hosted runners or on a self-hosted runner on the rig host"
+- §10.9, the `make gate` box: "or a job entry names a workflow whose `runs-on` has a `self-hosted` label" becomes "or a job entry names a workflow whose `runs-on` has a `self-hosted` label and whose `on:` has a trigger other than `schedule` and `workflow_dispatch`"
+- §10.9, the dev-host records box: "with `gh workflow run` on a branch at that commit" gains "(for a workflow on a self-hosted runner, on `main` while `main` is at that commit)", and the box gains "A reading taken by hand on a physical machine, such as a power meter's, is a record too: `make gate PHASE=N RECORD=1` writes it to `ci-history` with the machine and the instrument in place of the host and the command"
 - the Era IV preamble: "deeper C-states and frequency scaling from ACPI extend the §19.6 idle path" becomes "deeper C-states, frequency scaling from ACPI, and measured power extend the §19.6 idle path", and "three sections of 19" becomes "four sections of 19", with "§20.8's hardware-event profiles use §19.2's sampling" added to its list
 - Phase 17 exit gate, the line on `make check` and `make test` passing on vibeOS, gains "; the run on bare metal is Phase 20's"
 - Phase 19 Architectures: hardware events "need a physical machine and are in [Funded goals](#funded-goals)" becomes "are validated on the x86_64 test PC in §20.8"
 - §19.2, the PMU setup box: "which no free host offers a guest ([Funded goals](#funded-goals))" becomes "counted on the x86_64 test PC booted bare metal (§20.8)"
 - §19.6, the idle box: "measured power needs a physical machine ([Funded goals](#funded-goals))" becomes "measured power is §20.2's, on the x86_64 test PC"
-- §22.3, the tested-platforms box: "; it claims no physical machine" becomes ", and a physical section for the machines the project owns or borrows"
+- §22.3, the tested-platforms box: "its entries are virtual machine configurations, and it claims no physical machine" becomes "its QEMU entries are virtual machine configurations, and physical machines are in its physical section" becomes ", and a physical section for the machines the project owns or borrows"
+
+§10.9:
+- [ ] `scripts/check_gates.py` accepts a job entry whose workflow runs on a self-hosted runner only when that workflow's only triggers are `schedule` and `workflow_dispatch`, and `make gate PHASE=N RECORD=1` records a hand reading on a physical machine, each with a host test
 
 Phase 20 exit gate, before the tag line:
 - [ ] boots from USB on the x86_64 test PC, and on a second, physically different x86_64 machine once one exists, with output on a serial adapter or the screen
@@ -4086,7 +4125,7 @@ Phase 20 exit gate, before the tag line:
 - [ ] i2c sensors on each machine's own SMBus
 
 §20.8:
-- [ ] the x86_64 test PC netboots a built image nightly, driven by a self-hosted runner on the rig host, which captures its serial and switches its power, so a hung run recovers without a human; the runner takes only scheduled and `workflow_dispatch` runs on `main`, never a pull request
+- [ ] the x86_64 test PC netboots a built image nightly, driven by a self-hosted runner on the rig host, which captures its serial and switches its power, so a hung run recovers without a human; the runner's job-started hook enforces the **Self-hosted runners** rules, and a `workflow_dispatch` run on another branch fails before its first step
 - [ ] cache and branch misses counted on the x86_64 test PC for a workload with a known miss pattern, and unmodified `perf stat` from the §14.9 mirror reports them
 - [ ] a flamegraph from a §19.2 counter-overflow sampling profile with hardware cache-miss and branch-miss events on the x86_64 test PC, and branch-record and precise sampling through `perf_event_open` (LBR and PEBS on Intel, LBR and IBS on AMD) where its CPU reports them, its support recorded in `docs/HARDWARE.md`
 
@@ -4102,7 +4141,7 @@ Phase 21 exit gate, before the tag line:
 - [ ] the hostile guest fuzzes 24 hours a week on the x86_64 test PC booted bare metal, with no host panic and no KASAN report, and a second guest's §19.3 microbenchmarks stay within 10% there while the first misbehaves, each guest 2 vCPUs and 2 GiB
 
 If GitHub withdraws nested virtualization from its hosted runners, Phase 21's x86_64 nested lines and
-Phase 22's x86_64 hostile-guest campaign move to this machine by the same kind of edit.
+Phase 22's x86_64 hostile-guest campaign move to this machine by the same kind of edit. If a Phase 24 build outgrows the hosted x86_64 runner's disk after cleanup (Phase 24 Architectures), the x86_64 half of the Phase 24 gate lines that need it moves to this machine by the same kind of edit, together with §39.2's and Phase 37's lines that rest on it for that architecture.
 
 Phase 22 exit gate, before the tag line:
 - [ ] the x86_64 live image, written to a USB stick, boots to its graphical desktop on the x86_64 test PC's own display through the UEFI GOP framebuffer, with a USB keyboard and mouse
@@ -4115,7 +4154,7 @@ x86_64 half may run on the x86_64 test PC booted bare metal in place of the host
 - [ ] the tested-platforms list's physical section: one row per machine the project owns or borrows, generated from its gate records
 
 §22.4:
-- [ ] CI on vibeOS hardware: the x86_64 test PC netboots the installed vibeOS nightly and runs the §22.4 agent as the job's host; the self-hosted runner that schedules it runs on the rig host and takes only scheduled and `workflow_dispatch` runs on `main`, never a pull request
+- [ ] CI on vibeOS hardware: the x86_64 test PC netboots the installed vibeOS nightly and runs the §22.4 agent as the job's host; the self-hosted runner that schedules it runs on the rig host under the **Self-hosted runners** rules
 
 §24.1:
 - [ ] build times on the x86_64 test PC, booted bare metal, recorded beside the hosted KVM chains' and §17.5's
@@ -4155,8 +4194,9 @@ CPU-attached x16 slot, and a second NVMe slot. For it to double as the aarch64 l
 GHES reporting of memory errors in its firmware, confirmed with the vendor before buying. It has neither
 FEAT_NV2 nor MTE. With it: netboot, serial capture, and switched power.
 
-**Cost.** About $3,000 (2026 estimate), plus netboot, serial capture, and switched power, not priced. Its
-lines run under the x86_64 test PC goal's rig host and self-hosted runner.
+**Cost.** About $3,000, and about $100 for its serial adapter and switched outlet (2026 estimates); the
+rig host serves its netboot. Its lines run under the x86_64 test PC goal's rig host and self-hosted
+runner.
 
 **Unlocks.** The project's first arm64 KVM host, so aarch64 numbers kept today as HVF dev-host records
 become a nightly CI job, and aarch64 microVMs, which Firecracker and cloud-hypervisor run only on a KVM
@@ -4176,8 +4216,8 @@ nightly hardware-CI run first.
 - Phase 19 Architectures: the test PC goal's "validated on the x86_64 test PC in §20.8" gains "and the aarch64 server", and the paragraph gains "aarch64 NUMA is also checked against the aarch64 server's SRAT (§20.7)"
 - Phase 24 Architectures: "so aarch64's full rebuild runs monthly and x86_64's weekly (§24.2)" becomes "so x86_64's full rebuild runs weekly in hosted shards and aarch64's weekly on the aarch64 server, booted bare metal, with the hosted TCG rebuild kept monthly as a cross-check (§24.2)"
 
-§10.1:
-- [ ] a nightly aarch64 KVM leg on the aarch64 server booted into Linux, driven by a self-hosted runner on the rig host that takes only scheduled and `workflow_dispatch` runs on `main`, that runs `make test-kernel ARCH=aarch64` under KVM and takes over the aarch64 numbers §12.3, Phase 15, Phase 16, Phase 17, §18, and Phase 19 keep as HVF dev-host records
+§11.7:
+- [ ] a nightly aarch64 KVM leg on the aarch64 server booted into Linux, driven by a self-hosted runner on the rig host under the **Self-hosted runners** rules, that runs `make test-kernel ARCH=aarch64` under KVM and takes over, as each phase lands, the aarch64 numbers §12.3, Phase 15, Phase 16, Phase 17, §18, and Phase 19 keep as HVF dev-host records
 
 Phase 20 exit gate, before the tag line:
 - [ ] the aarch64 server boots to the shell with its root on its own NVMe, and the disk, 1 GiB fetch, and USB keyboard checks of the x86_64 test PC pass on it through its Intel NIC and xHCI
@@ -4188,7 +4228,7 @@ Phase 20 exit gate, before the tag line:
 - [ ] §20.6's igb or e1000e built and exercised on it, and serial over its own UART
 
 §20.8:
-- [ ] the aarch64 server gets the x86_64 test PC's treatment: netboot, serial captured, and power switched by the rig host, whose self-hosted runner takes only scheduled and `workflow_dispatch` runs on `main`
+- [ ] the aarch64 server gets the x86_64 test PC's treatment: netboot, serial captured, and power switched by the rig host, whose self-hosted runner follows the **Self-hosted runners** rules
 - [ ] a flamegraph with hardware cache-miss events on the aarch64 server, and SPE and BRBE sampling through `perf_event_open` where its CPU has them, recorded in `docs/HARDWARE.md`
 
 Phase 21 exit gate, before the tag line:
@@ -4261,17 +4301,19 @@ billing.
 - the arc, row 26: Unlocks gains ", one boot on each no-cost cloud tier"
 - the arc's closing paragraph: "other projects' VMMs" becomes "other projects' VMMs, public clouds"
 
-Phase 26, a new subsection before the Stretch, **AWS: ENA** (these instances test it once; the paid
-cloud goal tests it weekly):
+§26.7, Stretch, the ENA driver, tested once on these instances (the paid cloud goal moves these lines into
+a new **AWS: ENA** subsection before the Stretch and tests them weekly):
 - [ ] admin queue, asynchronous event queue, and per-CPU submission and completion queue pairs with an MSI-X vector each
 - [ ] low-latency queue mode: descriptors written into device memory through a write-combining mapping (a PAT entry on x86_64, Normal non-cacheable on aarch64), which newer Nitro shapes expect
 - [ ] device reset and recovery after a missed keep-alive or a device-requested reset, without a reboot
 - [ ] checksum offload through the §15.1 flags, and RSS across the per-CPU queue pairs: the driver sets a Toeplitz key and an even indirection table where the device accepts them, and keeps the device's defaults where it does not
 - [ ] EBS through §20.4's NVMe driver, recognized by its PCI vendor ID and the device name in its vendor-specific Identify bytes
 
-§26.6, as release records rather than gate lines, since each tier ends or can bill:
-- [ ] AWS: the release image boots on `t3.small` (x86_64) and `t4g.small` (Graviton) with root on EBS over NVMe and network on ENA, and accepts an SSH login with the key from IMDSv2, recorded once per release while the Free plan lasts
-- [ ] Oracle: an aarch64 `VM.Standard.A1.Flex` instance boots the release's image, provisions itself from OCI's metadata service through a new §26.1 backend, and accepts an SSH login, if the account takes custom images
+§26.7, Stretch, a metadata backend and one-time checks on each tier while it lasts, since each tier ends
+or can bill:
+- [ ] an OCI backend for the §26.1 metadata client: the platform identified by the SMBIOS chassis asset tag `OracleCloud.com`, and metadata read from the instance metadata service's v2 endpoints under `/opc/v2/` with the `Authorization: Bearer Oracle` header; the §26.1 emulator serves the same shape and asset tag, and the §26.2 service configures an image from it under QEMU on both architectures
+- [ ] AWS: the release image boots on `t3.small` (x86_64) and `t4g.small` (Graviton) with root on EBS over NVMe and network on ENA, and accepts an SSH login with the key from IMDSv2
+- [ ] Oracle: an aarch64 `VM.Standard.A1.Flex` instance boots the release's image, provisions itself through the OCI backend above, and accepts an SSH login, if the account takes custom images
 - [ ] Google: an `e2-micro` boots the release's image with network on virtio-net and accepts an SSH login with the key from the metadata server; its boot disk needs §26.7's virtio-scsi line unless the shape offers NVMe
 - [ ] Azure: `B2ats v2` (x86_64) and `B2pts v2` (aarch64) Gen2 VMs boot with root on storvsc and network on netvsc over VMBus, report ready so the deployment succeeds, and accept an SSH login; the aarch64 VM needs §26.7's aarch64 VMBus line
 
@@ -4305,8 +4347,9 @@ Phase 26 exit gate, before the tag line:
 - [ ] a deliberate panic on each cloud reboots the instance under §22.2's panic policy, and the panic text is in the console output the CI job fetches
 - [ ] a weekly job launches the current image on each cloud and architecture, asserts the DESIGN §8.3 markers from the console output, runs the SSH smoke test, terminates every instance, and records the cost of the run
 
-Phase 26, the no-cost goal's **AWS: ENA** subsection if it is not there yet, and a new subsection before
-the Stretch, **Google Cloud: gVNIC**:
+Phase 26, a new subsection before the Stretch, **AWS: ENA**, holding the no-cost goal's ENA lines, taken
+out of §26.7 if that goal put them there; and a new subsection before the Stretch, **Google Cloud:
+gVNIC**:
 - [ ] admin queue and both queue formats, GQI with registered queue page lists and DQO with raw addressing, since the machine type picks one
 - [ ] MTU from the device, up to the 8896 bytes Google's networks carry, and receive spread across the queues by the device's RSS, with the key and indirection table set by the driver where the device offers RSS configuration
 
@@ -4320,7 +4363,7 @@ the Stretch, **Google Cloud: gVNIC**:
 
 §26.6:
 - [ ] per-cloud registration scripts (an AMI with UEFI boot and ENA support set, a Google image, an Azure gallery image), idempotent and run by the release job
-- [ ] CI authenticates to each cloud through OIDC federation, so no long-lived cloud credential is stored with the repository
+- [ ] CI authenticates to each cloud through OIDC federation, so no long-lived cloud credential is stored with the repository; each cloud trusts only the subject of one GitHub environment, `cloud`, which only the weekly cloud workflow and the release job use and whose deployment policy admits only `main`, the `v*` tags, and `gate/*` branches, those tags and branches created only by the maintainer under a repository ruleset; §10.9's dispatch of the weekly job at a gated commit runs on a `gate/*` branch, and a run from any other ref, a pull request's included, cannot take the launch role
 - [ ] every instance the job starts is tagged with the run id and a deadline, and a sweeper deletes anything past its deadline, so a crashed job cannot leave instances billing
 - [ ] the harness gains a cloud backend: console output fetched from the cloud's API and asserted against the same marker contract
 
@@ -4336,7 +4379,7 @@ Beyond:
 ### Scale-up on rented bare-metal hosts
 
 **Rent.** A Linux KVM host of each architecture with at least 64 physical cores and 256 GiB, rented by
-the hour as a bare-metal cloud instance, two-socket for the NUMA line, with vibeOS and Linux as guests on
+the hour as a bare-metal cloud instance, two-socket for the NUMA lines, with vibeOS and Linux as guests on
 it. Needs the paid cloud accounts.
 
 **Cost.** About $3 to $8 an hour, about $1,000 over Phase 27 (2026 estimate).
@@ -4349,7 +4392,10 @@ real remote-memory latency, which QEMU's `-numa` does not model.
 - the arc, row 27: Unlocks gains ", speedups on 64 real cores"
 
 §19.7:
-- [ ] in a KVM guest whose two virtual nodes are pinned to the two sockets of a rented two-socket bare-metal host of each architecture, node-local allocation and NUMA-aware scheduling cut remote-node accesses and the run time of a memory-bound §19.3 workload against an interleaved baseline, the numbers recorded in `docs/`
+- [ ] in a KVM guest whose two virtual nodes are pinned to the two sockets of the rented x86_64 host, node-local allocation and NUMA-aware scheduling cut remote-node accesses and the run time of a memory-bound §19.3 workload against an interleaved baseline, the numbers recorded in `docs/`
+
+§20.7:
+- [ ] the same on the rented aarch64 host, in a KVM guest booted through ACPI on `virt` under the aarch64 edk2 build, so its nodes come from SRAT
 
 Phase 27 exit gate, before the tag line:
 - [ ] AP bring-up from the first SIPI or `CPU_ON` to `smp: done` takes under 500 ms in a 64-vCPU, 8 GiB guest under KVM on the rented host of each architecture, and the time is on the boot line
@@ -4366,29 +4412,36 @@ Phase 27 exit gate, before the tag line:
 
 **Open.** GitHub Pro on the maintainer's account, which owns the repository.
 
-**Cost.** About $4 a month at 2025 prices, to confirm before buying. Public-repository minutes stay free.
+**Cost.** About $4 a month (2026 price), to confirm before buying. Public-repository minutes stay free.
 
 **Unlocks.** 40 concurrent hosted jobs instead of 20, 5 of them macOS either way, so the Phase 24
-rebuilds take 20 jobs without starving per-push CI and the other scheduled campaigns, which roughly halves
-the wall time of aarch64's TCG full rebuild.
+rebuilds take 10 jobs without starving per-push CI and the other scheduled campaigns, which roughly halves
+the wall time of aarch64's TCG full rebuild. Pro covers only a personal account, so it stops applying if
+the repository moves into an organization (see **GitHub GPU runner**).
 
 **Lines.**
-- §24.2, the full-rebuild box: "the rebuild workflows together run at most 10 jobs at once, half the account's 20 concurrent jobs" becomes "the rebuild workflows together run at most 20 jobs at once, half the account's 40 concurrent jobs (GitHub Pro)"
-- §24.2's "monthly on aarch64" and Phase 24 Architectures' "aarch64's full rebuild runs monthly": "monthly" becomes "every two weeks, once a measured aarch64 full rebuild at 20 jobs finishes in under ten days", unless the aarch64 server goal has already moved aarch64's full rebuild to that server
+- §24.2, the full-rebuild box: "sum to at most 5, their share of §10.1's 10 scheduled slots, so a rebuild that runs for days leaves the other 5" becomes "sum to at most 10, their share of §10.1's 20 scheduled slots (GitHub Pro), so a rebuild that runs for days leaves the other 10"
+- §10.1, the CI-budget box: "20 concurrent jobs on the Free plan (at most 5 macOS; scheduled campaigns together hold at most 10, so pushes keep the other 10)" becomes "40 concurrent jobs with GitHub Pro (at most 5 macOS; scheduled campaigns together hold at most 20, so pushes keep the other 20)"
+- §24.2's "monthly on aarch64" and Phase 24 Architectures' "aarch64's full rebuild runs monthly": "monthly" becomes "every two weeks, once a measured aarch64 full rebuild at 10 jobs finishes in under ten days", unless the aarch64 server goal has already moved aarch64's full rebuild to that server
+- §10.1, the CI-budget box: "20 concurrent jobs on the Free plan (at most 5 macOS; scheduled campaigns together hold at most 10, so pushes keep the other 10)" becomes "40 concurrent jobs on GitHub Pro (at most 5 macOS; scheduled campaigns together hold at most 30, the §24.2 rebuilds 20 of them, so pushes keep the other 10)", and "leave room under the 20" becomes "leave room under the 40"
+- §20.8's preamble: "an account runs 20 jobs at once" becomes "the account runs 40 jobs at once (GitHub Pro)"
+- §39.3, the supported-branches box: "the 20 concurrent hosted jobs (5 of them macOS) the account allows" becomes "§10.1's scheduled share of the 40 concurrent hosted jobs (5 of them macOS) the account's GitHub Pro plan allows"
 
 ### GitHub GPU runner
 
-**Open.** A GitHub Team or Enterprise Cloud organization that owns the repository, with a GPU larger
-runner: Linux, 4 vCPUs, one Tesla T4, 28 GB of RAM, 16 GB of VRAM.
+**Open.** A GitHub Team organization, with the repository transferred into it from the maintainer's
+account, and a GPU larger runner: Linux, 4 vCPUs, one Tesla T4, 28 GB of RAM, 16 GB of VRAM.
 
-**Cost.** $0.052 a minute (2026 price), billed even for public repositories, plus the organization's
-plan, not priced here.
+**Cost.** $0.052 a minute, about $3.12 an hour of GPU run, billed even for public repositories, plus
+GitHub Team at about $4 a member a month (2026 prices), to confirm before buying.
 
 **Unlocks.** virgl and Venus in CI with the host rendering on a GPU instead of `llvmpipe`, so frame rates
-reflect a GPU-backed host.
+reflect a GPU-backed host. The organization's plan replaces the maintainer's account's: 60 concurrent
+hosted jobs, 5 of them macOS.
 
 **Lines.** Elsewhere in this file:
 - the arc, row 33: Unlocks gains ", virgl and Venus on a GPU host"
+- the **GitHub Pro** goal, if still open, is deleted, since Pro covers only a personal account; its Lines are made, or where already made are changed, with GitHub Team's numbers: 60 concurrent jobs for 40, the §24.2 rebuilds and the aarch64 cadence at 30 jobs for 20, and §10.1's scheduled share 40 for 30, so pushes keep 20; "GitHub Pro" becomes "GitHub Team"
 
 §33.4, Stretch:
 - [ ] the virtio-gpu 3D tier also runs nightly on a GitHub GPU runner with the host rendering on its GPU, its frame rates recorded
@@ -4433,7 +4486,7 @@ migration between machines. Soaks run under the same self-hosted runner rules (s
 runners**).
 
 **Lines.** Elsewhere in this file:
-- How to read this, the Free by default paragraph: "uptime counted in weeks is a funded goal" becomes "uptime counted in weeks runs on the long-run servers (§25.7)"
+- How to read this, the long-runs paragraph: "uptime counted in weeks is a funded goal" becomes "uptime counted in weeks runs on the long-run servers (§25.7)"
 - the arc, row 25: Unlocks becomes "Machine checks on real ECC memory, crash dumps, watchdogs, persistent logs"
 - the arc, row 30: Unlocks becomes "Server software unattended for a month, metrics, live update"
 
@@ -4467,7 +4520,7 @@ Phase 39 exit gate, beside the hosted 168-hour line:
 - [ ] the release candidate runs §30.7's long-run workload for 7 days without a reboot on the long-run server of each architecture, starting after any 30-day run in progress ends, and records no panic, no Phase 25 watchdog reset, and no uncorrected machine check
 
 §39.3, beside the hosted 72-hour line, and in its crash-record line "nightly or soak" becomes "nightly, soak, or long run":
-- [ ] each later release candidate, and each patch release on a supported branch, also passes a 72-hour soak of §30.7's workload on the long-run servers on the commit being released, before it is cut. A release candidate due while a 30-day run holds those servers waits for the run to end; a patch release stops the run, which is recorded as neither green nor red, soaks each supported branch's commit in turn, and restarts the 30-day run from day one
+- [ ] each later release candidate, and each patch release on a supported branch, also passes a 72-hour soak of §30.7's workload on the long-run servers on the commit being released, before it is cut. A release candidate due while a 30-day run holds those servers waits for the run to end; a patch release stops the run, which is recorded as neither green nor red, soaks each supported branch's commit in turn, and restarts the 30-day run from day one. Each soak is a `workflow_dispatch` run on `main` that takes the commit as input and names it in its §10.9 CI-history record, which the release workflow checks
 
 Beyond:
 - **Live migration between machines** (after 21, 28, and the live migration entry): a running §21.2 guest moved over TCP from the x86_64 test PC to the x86_64 long-run server, with a CPU feature set both machines offer, dirty pages tracked through EPT or NPT dirty logging and pre-copied, and the downtime of a 4-vCPU, 4 GiB guest running §19.3's mixed interactive workload measured and held under 300 ms; the same between two aarch64 machines with stage-2 dirty logging once both exist.
@@ -4716,9 +4769,9 @@ Phase 36 exit gate, before the tag line:
 
 **Buy.** Two Wi-Fi 6E access points with WPA3 that the rig controls, AX210 cards for the desktop and for
 the aarch64 server on a PCIe adapter, and microcontrollers for a BLE keyboard and mouse and a Classic
-Bluetooth A2DP sink. An Intel BE200 for the Wi-Fi 7 stretch, not priced.
+Bluetooth A2DP sink. An Intel BE200 for the Wi-Fi 7 stretch.
 
-**Cost.** About $450 (2026 estimate). Needs the reference laptop.
+**Cost.** About $450, and about $30 for the BE200 (2026 estimates). Needs the reference laptop.
 
 **Unlocks.** Real radios on real air: association on every band, throughput at distance against Fedora,
 suspend and power save with Wi-Fi up, and BLE and A2DP pairing with real peripherals.
@@ -4754,8 +4807,8 @@ Phase 36 exit gate, before the tag line:
 **Buy.** A USB audio interface and a TRRS loopback cable for the rig, a USB Audio Class 2 headset, two
 USB UVC cameras, a CI-controlled USB switch, and FAT32 and exFAT USB sticks.
 
-**Cost.** About $400, and about $30 for the sticks (2026 estimates). Needs the reference laptop, the
-desktop, or the aarch64 server.
+**Cost.** About $400, and about $30 for the sticks (2026 estimates). Needs the reference laptop, and the
+display peripherals' capture device for its HDMI and DP audio line.
 
 **Unlocks.** Real jacks, HDMI and DP audio, UAC2 headsets, and UVC webcams, recorded and checked by the
 rig; removable media through a real USB switch. The desktop and aarch64 desktop goals repeat the headset
@@ -4791,7 +4844,8 @@ NIC §20.6 drives, and an AX210 from the wireless rig. For the rig: its HID inje
 if it has no UART, and a switched outlet. Nothing, if the x86_64 test PC qualifies.
 
 **Cost.** About $800, and about $80 for its rig parts (2026 estimates). Needs the display peripherals for
-its monitors, and the audio, camera, and removable-media goal for its Phase 34 line.
+its monitors, the wireless rig for its AX210 and Phase 35 line, and the audio, camera, and
+removable-media goal for its Phase 34 line.
 
 **Unlocks.** Two monitors on the same native drivers, a wired network, and a machine with no battery in
 the daily-driver tier, against Fedora on the same machine.
@@ -4862,15 +4916,16 @@ Phase 37 exit gate, before the tag line:
 
 **Buy.** An M1 MacBook Air (2020) and an M1 Mac mini (2020), used; the parts for a USB-C debug cable for
 each; for the rig, a HID injector each, the Air's lid magnet and power-button actuator, and switched
-outlets for both. Later Macs, a second stage, about $700 to $1,500 each used (estimate).
+outlets for both. Later Macs, a second stage, about $700 to $1,500 each used (2026 estimate).
 
-**Cost.** About $1,100 (2026 estimate).
+**Cost.** About $1,100 (2026 estimate). Needs the reference laptop, the display peripherals, the wireless
+rig, and the audio, camera, and removable-media goal, whose lines and rig equipment its gate reuses.
 
 **Unlocks.** An aarch64 laptop on bare metal, native hardware of the kind the dev host is: Apple's DCP
 display, AGX GPU, SPI keyboard and trackpad, SMC, and BCM4378 Wi-Fi and Bluetooth. The Mac mini in
 hardware CI, loading each kernel over USB through m1n1's proxy, driven by a self-hosted runner on the rig
 host (see **Self-hosted runners**). The Era VII laptop lines rerun on Apple hardware against Fedora Asahi
-Remix. Its gate reruns the reference laptop's lines, so it follows that goal.
+Remix.
 
 **Lines.** The Apple Silicon phase, restored as it stands in `docs/ROADMAP.md` at commit `ab67d87`: its
 Goal, Unlocks, Architectures, Exit gate, and its ten subsections (boot and installation; cores,
@@ -4880,7 +4935,10 @@ listed in Era VII after Phase 37 and numbered after the last phase then in force
 renumbered; its tag, its section numbers, and its references to them follow the new number. In its gate,
 "the Mac mini runs the §20.8 nightly job" becomes "the Mac mini runs a nightly hardware job under a
 self-hosted runner on the rig host", and the Phase 31 to 37 lines it names are the reference laptop
-goal's. Its gate, with that edit and its own subsections named rather than numbered:
+goal's, the display peripherals' (the hotplug and lock-frame lines), the wireless rig's (the Wi-Fi and
+Bluetooth lines and the call), the audio, camera, and removable-media goal's (the headphone-jack and
+latency lines and the call's USB camera), and Phase 36's own browser, accessibility, and input-method
+lines. Its gate, with that edit and its own subsections named rather than numbered:
 - [ ] both Macs boot vibeOS from internal NVMe, installed beside macOS in its own APFS container, and reach the login prompt on the built-in display (MacBook Air) or HDMI (Mac mini) and on the debug UART
 - [ ] macOS still boots on both after the install, and the uninstaller returns the disk to its prior partition layout
 - [ ] root on the internal NVMe of both Macs, and the Phase 7 concurrent read-write test passes on each; the §8.5 crash-consistency test passes on the Mac mini, with the rig's outlet cutting power at randomized points during the write workload
@@ -4907,7 +4965,8 @@ Elsewhere in this file:
 
 **Buy.** An AMD laptop with RDNA3 graphics, a Thunderbolt or USB4 dock, and a discrete GPU with VRAM.
 
-**Cost.** Not priced; to price before buying.
+**Cost.** About $1,300 to $1,800: about $800 to $1,200 for the laptop, $200 to $300 for the dock, and
+$250 to $350 for an RDNA3 Radeon card (2026 estimates).
 
 **Unlocks.** A second display engine and render driver family, USB4 tunnels through native hotplug, and
 VRAM management.
@@ -4940,14 +4999,14 @@ runner (see **Self-hosted runners**).
 - [ ] the device tree the board's firmware passes, compared with the Linux tree §20.7's host tests parse, each difference handled or listed in `docs/HARDWARE.md`
 
 §20.8:
-- [ ] the board netboots or boots from a switched SD mux nightly, driven by the rig host's self-hosted runner, which takes only scheduled and `workflow_dispatch` runs on `main`
+- [ ] the board netboots or boots from a switched SD mux nightly, driven by the rig host's self-hosted runner under the **Self-hosted runners** rules
 
 ### riscv64 board
 
 **Buy.** A riscv64 board whose UEFI firmware (edk2 or U-Boot's EFI layer) boots Limine, and a USB serial
 adapter.
 
-**Cost.** About $100 to $300 (estimate).
+**Cost.** About $100 to $300 (2026 estimate).
 
 **Unlocks.** The riscv64 port on real hardware, which exposes what QEMU's `virt` machine forgives.
 
@@ -4956,10 +5015,12 @@ adapter.
 
 ### MTE-capable aarch64 machine
 
-**Buy.** A UEFI-booting aarch64 machine whose CPU implements MTE. The aarch64 server does not: Altra's
-Neoverse N1 cores lack it. Confirm MTE before buying.
+**Buy.** A UEFI-booting aarch64 machine whose CPU implements MTE. The Altra-class server does not: its
+Neoverse N1 cores lack it. The AmpereOne-class server's cores implement it, so buying that server meets
+this goal. Confirm that the firmware enables MTE before buying.
 
-**Cost.** Not priced here.
+**Cost.** About $200 to $500 for a board such as Radxa's Orion O6 (CIX P1), whose edk2 firmware can turn
+MTE on (2026 estimate); nothing of its own once the AmpereOne-class server goal is met.
 
 **Unlocks.** §18.4's tag-based KASAN checked by real tag hardware, with asynchronous tag checking on in
 release images.
@@ -4969,13 +5030,15 @@ release images.
 
 ### AmpereOne-class aarch64 server
 
-**Buy.** An AmpereOne-class server, whose cores have FEAT_NV2. Bought first, it replaces the Altra-class
-server and covers all of that goal's lines.
+**Buy.** An AmpereOne-class server, whose cores have FEAT_NV2 and MTE. Bought first, it replaces the
+Altra-class server and covers all of that goal's lines. It also meets the MTE-capable aarch64 machine
+goal, by the same edit, if that goal is still open.
 
 **Cost.** About $10,000 to $25,000; the CPU alone lists near $5,000 (2026 estimates).
 
 **Unlocks.** FEAT_NV2 on silicon, so Phase 21's aarch64 nesting runs a guest hypervisor on real cores
-rather than only under TCG with `virtualization=on` and in the dev host's HVF record.
+rather than only under TCG with `virtualization=on` and in the dev host's HVF record. MTE on silicon, as
+the MTE-capable aarch64 machine goal describes.
 
 **Lines.** §20.8:
 - [ ] the AmpereOne-class server's nightly record reports FEAT_NV2, which Phase 21's nesting lines read beside the hosted x86_64 runners' vendor records
@@ -4990,7 +5053,8 @@ Phase 21 exit gate, before the tag line:
 
 **Buy.** An Arm Morello board. Not sold retail: boards went out through Arm's Morello research program.
 
-**Cost.** Unknown; availability and price to confirm.
+**Cost.** No list price (2026), since boards went out through Arm's research program; availability and
+price to confirm.
 
 **Unlocks.** Capability hardware under the CHERI port, in place of the CHERI QEMU.
 
@@ -5001,7 +5065,7 @@ Phase 21 exit gate, before the tag line:
 
 **Buy.** A CXL-capable server platform and a CXL Type 3 memory expander.
 
-**Cost.** Several thousand dollars (estimate; confirm before buying).
+**Cost.** Several thousand dollars (2026 estimate; confirm before buying).
 
 **Unlocks.** Tiering measured at real CXL latency instead of under QEMU's emulation.
 
@@ -5015,7 +5079,7 @@ laptops are machines of their own.
 
 ### USB fingerprint reader
 
-**Buy.** A USB fingerprint sensor that libfprint supports. **Cost.** About $30 to $60 (estimate).
+**Buy.** A USB fingerprint sensor that libfprint supports. **Cost.** About $30 to $60 (2026 estimate).
 **Unlocks.** Fingerprint login and `sudo`.
 
 **Lines.** Beyond:
@@ -5023,7 +5087,7 @@ laptops are machines of their own.
 
 ### Network printer and scanner
 
-**Buy.** An IPP Everywhere and eSCL multifunction printer. **Cost.** About $150 to $250 (estimate).
+**Buy.** An IPP Everywhere and eSCL multifunction printer. **Cost.** About $150 to $250 (2026 estimate).
 **Unlocks.** Scanning, and printing to a physical device instead of `ippeveprinter`.
 
 **Lines.** Beyond:
@@ -5032,7 +5096,7 @@ laptops are machines of their own.
 ### IPU6 laptop
 
 **Buy.** A recent Intel laptop whose camera sits behind IPU6; nothing if the reference laptop's does.
-**Cost.** About $1,000 (estimate). **Unlocks.** The built-in cameras of most recent Intel laptops.
+**Cost.** About $1,000 (2026 estimate). **Unlocks.** The built-in cameras of most recent Intel laptops.
 
 **Lines.** Beyond:
 - **MIPI cameras** (after 34 and the media-controller cameras entry): Intel's IPU6 and later, through which most recent Intel laptops route their cameras, with `libcamera` and its software ISP as the userspace.
@@ -5040,7 +5104,7 @@ laptops are machines of their own.
 ### Convertible laptop
 
 **Buy.** A convertible that Linux supports, with an I2C-HID touchscreen, a stylus digitizer, and a sensor
-hub. **Cost.** About $1,000 (estimate). **Unlocks.** Touch and pen input on real I2C-HID hardware, with
+hub. **Cost.** About $1,000 (2026 estimate). **Unlocks.** Touch and pen input on real I2C-HID hardware, with
 rotation from the sensor hub.
 
 **Lines.** Beyond:
@@ -5049,14 +5113,14 @@ rotation from the sensor hub.
 ### NVIDIA GPU
 
 **Buy.** A used Turing-or-later NVIDIA card, for a reference machine or test machine with a free x16
-slot. **Cost.** About $200 to $400 (estimate). **Unlocks.** NVIDIA GPUs through upstream Mesa's NVK.
+slot. **Cost.** About $200 to $400 (2026 estimate). **Unlocks.** NVIDIA GPUs through upstream Mesa's NVK.
 
 **Lines.** Beyond:
 - **NVIDIA GPUs** (after 33): Turing and later through the GSP firmware, as Linux's `nova` driver does, with the render uapi Mesa's NVK runs on unmodified.
 
 ### Hybrid-graphics laptop
 
-**Buy.** A laptop with integrated and discrete GPUs. **Cost.** About $1,500 (estimate). **Unlocks.**
+**Buy.** A laptop with integrated and discrete GPUs. **Cost.** About $1,500 (2026 estimate). **Unlocks.**
 Render offload to a discrete GPU, powered off when idle.
 
 **Lines.** Beyond:
@@ -5064,7 +5128,7 @@ Render offload to a discrete GPU, powered off when idle.
 
 ### Snapdragon X laptop
 
-**Buy.** A machine in the ThinkPad T14s Gen 6 class. **Cost.** About $1,200 to $1,500 (estimate).
+**Buy.** A machine in the ThinkPad T14s Gen 6 class. **Cost.** About $1,200 to $1,500 (2026 estimate).
 **Unlocks.** A second aarch64 laptop family.
 
 **Lines.** Beyond:
@@ -5077,7 +5141,8 @@ Render offload to a discrete GPU, powered off when idle.
 **Open.** A model API key issued by the maintainer's account, kept in the repository's secrets, with
 pay-as-you-go billing.
 
-**Cost.** Replaying one phase costs roughly the tokens that phase took to build (estimate).
+**Cost.** The provider's list price per token (2026) for roughly the tokens each replayed phase took to
+build, held under a monthly spend limit the maintainer sets.
 
 **Unlocks.** Gate replay on a schedule for each new model without the maintainer's own sessions, and an
 agent on a vibeOS machine with a key of its own.
@@ -5088,10 +5153,11 @@ agent on a vibeOS machine with a key of its own.
 
 ### Khronos conformance submission
 
-**Open.** Khronos Adopter status for Vulkan and for OpenGL.
+**Open.** Khronos Adopter status for Vulkan, OpenGL, and OpenGL ES.
 
-**Cost.** $120,000 for Vulkan and $60,000 for OpenGL 3.2 to 4.6 for non-members, from Khronos's adopters
-page (2026), which lists no open-source waiver.
+**Cost.** $120,000 for Vulkan, $60,000 for OpenGL 3.2 to 4.6, and $30,000 for OpenGL ES 1.1 to 3.2 for
+non-members, $210,000 in all, from Khronos's adopters page (2026), which prices each API on its own and
+lists no open-source waiver.
 
 **Unlocks.** An official conformance claim for the render stack. The free Phase 33 lines already run the
 same tests without the claim.
