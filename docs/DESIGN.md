@@ -191,7 +191,9 @@ outermost first:
    memory: the mount table, then a directory, then an inode in it; a parent directory before its
    child; the two directories of one `rename` in address order, after the volume's rename lock
 2. the address-space lock (ROADMAP §13.1: `mmap`, `munmap`, and `mprotect` take it for writing, the
-   fault path for reading)
+   fault path for reading). It guards the region tree only. A page-table entry changes under the
+   page-table spinlock (rank 1 above), so the reverse-map unmap that direct reclaim does
+   ([§4.4](#44-kernel-heap)) takes no address-space lock
 3. waits on a page-cache page or a block buffer (ROADMAP §12.5)
 4. a filesystem's block-mapping and volume I/O locks, which its page-fill and writeback paths take
    and which are never held across a user copy
@@ -246,8 +248,9 @@ Blocking and allocation are a class of bug, not an instance. Context rules:
 | Context | May block? | May alloc? |
 |---------|------------|------------|
 | Hard IRQ / MSI handler | No | No |
-| Softirq equivalent (high-prio workqueue) | No | No (enqueue only from IRQ) |
-| Threaded IRQ / workqueue worker | Yes | Yes |
+| Softirq equivalent (high-prio workqueue) | No | Fallible only, without direct reclaim ([§4.4](#44-kernel-heap)); the hard IRQ only enqueues |
+| Threaded IRQ bottom half | Yes | Fallible only, without direct reclaim ([§4.4](#44-kernel-heap)) |
+| Workqueue worker | Yes | Yes |
 | Driver `probe` | Yes | Yes |
 | Syscall body, fault handler for a CPL-3 fault | Yes ([§2.9](#29-preemption-and-interrupt-state)) | Yes, fallible only ([§4.4](#44-kernel-heap)) |
 
@@ -958,6 +961,41 @@ the allowed sites. Rejected: making small allocations never fail by having the a
 until the OOM killer frees memory (Linux's "too small to fail"), because an allocation made with a
 spinlock held, or on a path the OOM victim needs in order to exit, cannot wait, and a failed
 `Box::new` cannot be handled by its caller; AGENTS.md rule 4 forbids a user-triggerable panic.
+
+Direct reclaim (ROADMAP §12.6) runs inside an allocation that failed, on the allocating thread, so it
+must need nothing that thread might hold. The thread may hold a filesystem's inode or block-mapping
+lock, its own address-space lock, or a busy page-cache page (§2.1's sleeping tier). Rules:
+
+1. Direct reclaim runs only for an allocation that began with IF=1, this CPU's `HELD` rank mask
+   empty, and a calling thread that is not a no-reclaim thread. The allocator reads all three at
+   entry, before it takes the heap lock. Any other allocation draws on the §12.6 reserve pool and
+   then fails.
+2. It frees clean pages only. It drops clean page-cache pages. It unmaps clean mapped ones through
+   the reverse map, taking only each address space's page-table spinlock and a try-lock of the page,
+   and it skips any page it cannot take at once. It takes no sleeping lock, the address-space lock
+   included.
+3. It writes no page. The ROADMAP §12.5 writeback threads write dirty file pages, and §12.7's
+   swap-out thread writes anonymous pages. Direct reclaim wakes those threads and then waits, with a
+   deadline, only for writes already submitted to a device. When that frees too little, the OOM
+   killer runs.
+4. It never recurses. These are no-reclaim threads, whose allocations use the reserve pool and
+   then fail: the writeback threads, the swap-out thread, threaded interrupt bottom halves (§5.4), a
+   workqueue worker while it runs a softirq-equivalent item (§2.2), and a thread already in reclaim.
+
+Why: writeback or an unmap that needed a lock the allocating thread holds would deadlock that thread
+on itself. For example, a filesystem that allocates while holding its volume lock would reach
+writeback of its own dirty pages. A bottom half that waited on reclaim could wait for an I/O
+completion that only it can deliver.
+
+Linux guards the same recursion with per-call `GFP_NOFS` and `GFP_NOIO` flags and has moved page
+writeback out of direct reclaim. These rules take the second route everywhere, so no call site
+carries a flag. Rejected:
+- per-call reclaim flags, the shape of Rust-for-Linux's `KBox::new(x, flags)`, which add one more
+  decision to every allocation;
+- writeback from direct reclaim, which needs those flags.
+
+Cost: when most reclaimable memory is dirty, an allocation waits for the writeback threads rather
+than writing itself. ROADMAP §12.5's dirty limit throttles writers before it comes to that.
 
 An operation past its point of no return cannot unwind what it built, so it makes every allocation it
 needs before that point and only releases after it:
