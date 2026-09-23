@@ -21,7 +21,7 @@ halfway through.
 
 | | Section | Covers |
 |---|---------|--------|
-| 1 | [Overview](#1-overview) | Constraints, layers, module map |
+| 1 | [Overview](#1-overview) | Constraints, layers, module map, sources and licenses |
 | 2 | [Invariants](#2-invariants) | Lock order, handler rules, panic policy, markers, invariant register, publish last, preemption, trust boundaries, object lifetimes |
 | 3 | [Boot](#3-boot) | Toolchain, Limine, `_start` order, linker |
 | 4 | [Memory](#4-memory) | Address map, buddy allocator, paging, heap |
@@ -138,6 +138,24 @@ gs, cpu, AP trampoline). Nested also: `src/fs/` (VFS + kernfs). `user/` is frees
 - When this file outgrows one page per subsystem, split it into `docs/<topic>.md` and leave an index
   behind. Not before. On-disk formats are that split: [VIBEFS.md](VIBEFS.md), not a novel in this
   file. Syscall ABI: [SYSCALL.md](SYSCALL.md) (Phase 9B).
+
+## 1.5 Sources and licenses
+
+vibeOS is MIT ([LICENSE](../LICENSE)). What goes into the tree comes from specifications, manuals,
+and measured behaviour, or from sources whose license lets it into an MIT tree:
+
+- Nothing is copied or translated from GPL or LGPL sources: Linux, glibc, GNU tools, or QEMU's GPL
+  parts. The Linux-interfaces rule asks for Linux's behaviour, which vibeOS learns from man pages,
+  specifications, and running Linux (ROADMAP §13.11), never by porting Linux's code. Numeric
+  constants, struct layouts, and `ioctl` numbers that an interface defines are facts; each is written
+  down with a citation of where it is defined.
+- MIT, BSD, ISC, zlib, or Apache-2.0 code may be adapted, with its copyright and license notice kept
+  beside it (and, for Apache-2.0, its NOTICE text).
+- Third-party sources the tree builds rather than copies follow ROADMAP §14.10's port policy, and test
+  inputs fetched at test time (Linux's device trees, QEMU's ACPI tables) are never committed.
+
+Why: one function derived from GPL code would put the kernel under the GPL, against the project's
+license. The kernel review's spot check found no such copy, but no rule said so.
 
 ---
 

@@ -80,4 +80,5 @@ weekly canary job in `smp-stress.yml`. Not a drive-by.
 - commit build products (`vibeos*.iso`, `iso_root*`, `build/initrd.fat`, `target*/`, `limine/`)
 - edit `limine/` (cloned by `setup.sh`)
 - add dependencies without a note in the PR
+- copy or translate code, comments, or tables from GPL or LGPL sources (Linux, glibc, GNU tools): match Linux's behaviour from its documentation and from running it, and cite where an interface's constants and layouts are defined (DESIGN §1.5)
 - disable, skip, or retry a test, or widen its timeout, to make CI green; record a flaky test as a ROADMAP line instead (DESIGN §9.8)
