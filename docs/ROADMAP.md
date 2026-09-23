@@ -2113,14 +2113,24 @@ aarch64 and works on x86_64 too. virtio-gpu is shared. The frame-rate gate line 
 - [ ] repeat rate and delay
 
 ### 16.5 Display protocol
-- [ ] a client-server protocol over a Unix socket, with buffer sharing through `memfd_create` shared memory (§13.4) or dma-buf file descriptors from §16.1
-- [ ] surface lifecycle, commit semantics, and damage submission
-- [ ] outputs announced to clients with their position, mode, and integer scale, including their arrival and removal at runtime (§16.1); clients submit buffers at an output's scale, and the protocol leaves room for a fractional scale
-- [ ] input event delivery
-- [ ] window management: title, class, minimum and maximum size, state
-- [ ] clipboard and drag and drop
-- [ ] the protocol documented in `docs/` before implementation, since two implementations must agree
-- [ ] the protocol document maps each request to its Wayland counterpart or says why none exists, and records whether the wire format is Wayland's; Wayland compatibility is Phase 36
+Decided: the protocol is Wayland: its wire format, with the core, `xdg-shell`, `linux-dmabuf`,
+`presentation-time`, `viewporter`, and `fractional-scale` protocols, served by the §16.3 compositor
+and spoken by a client library in the user crate. A need no upstream protocol covers becomes an
+extension in Wayland's XML format, documented in `docs/`. Why: Phase 36 runs unmodified Wayland
+compositors and toolkits, so a native protocol would be retired there or kept as a second one beside
+Wayland, and every client written in Phases 16 to 35 (the §16.7 terminal, the §16.6 toolkit) would
+be rewritten. The work with no canonical answer, the compositor's surface tree, damage tracking, and
+frame scheduling, and the toolkit, is unchanged. Rejected: a native protocol mapped onto Wayland
+later, which this subsection planned before, and X11.
+
+- [ ] protocol bindings generated from the pinned upstream XML (`wayland.xml` and `wayland-protocols`, both MIT-licensed, under §14.10), one generator for the compositor and the client library, so the two cannot disagree; `docs/` lists each protocol and version implemented
+- [ ] the compositor socket (`$XDG_RUNTIME_DIR/wayland-0`) over §13.3's Unix sockets, with buffers shared through `wl_shm` over `memfd_create` (§13.4) and through `linux-dmabuf` from §16.1, and descriptors passed with `SCM_RIGHTS`
+- [ ] surface lifecycle, commit semantics, and damage submission as `wl_surface` defines them
+- [ ] outputs announced through `wl_output` with their position, mode, and integer scale, including their arrival and removal at runtime (§16.1); clients submit buffers at an output's scale, and `fractional-scale` carries a fractional one
+- [ ] input event delivery through `wl_seat`'s keyboard, pointer, and touch
+- [ ] window management through `xdg-shell`: title, app id, minimum and maximum size, state
+- [ ] clipboard and drag and drop through `wl_data_device`
+- [ ] unmodified `wayland-info` from the §14.9 mirror lists every global the compositor advertises, with the versions `docs/` records, on both architectures
 
 ### 16.6 Window management and toolkit
 - [ ] window decorations, or a client-side decoration protocol
@@ -4109,7 +4119,7 @@ with `llvmpipe` (§33.3). The call line runs a second vibeOS guest on the same h
 - [ ] Weston and sway from Alpine on §32.1's KMS and libinput, the small compositors CI runs first
 - [ ] a full desktop, GNOME or KDE Plasma, chosen by a spike that counts the kernel interfaces each is missing, and written down; it runs from Alpine unmodified, with its own display manager, settings app, and file manager
 - [ ] XWayland from Alpine, so X11 applications run
-- [ ] §16.5's native protocol kept beside Wayland or retired in its favor, decided after measuring the overlap, and written down
+- [ ] the §16.3 compositor and the upstream compositors run the same clients: the §16.7 terminal emulator and the §16.6 toolkit's test application run unmodified under Weston, sway, and the chosen desktop, since all of them speak §16.5's Wayland
 - [ ] Linux's FUSE protocol on `/dev/fuse`, since the document portal and GVfs mount through it; `sshfs` from Alpine mounts a directory from the host
 
 ### 36.3 Applications
@@ -4310,7 +4320,7 @@ physical machines are [Funded goals](#funded-goals).
 ### 39.1 Interface freeze
 - [ ] the Linux surface in the stable set, per architecture: the calls, flags, and `ioctl`s vibeOS implements, as the §10.5 table and the §13.9 `ioctl` registry list them, their errno values, the initial stack and auxv (§13.10), signal frames (§13.8), the `/proc` and `/sys` files of §13.10 and Phase 23, and the §16.1 DRM/KMS and §16.4 evdev nodes; for these, stable means they keep matching Linux
 - [ ] vibeOS's own formats in the stable set: the vibefs v2 on-disk format (§14.8), the §14.6 package, repository, and release-manifest formats, and the documented §10.2 command-line options
-- [ ] the §16.5 display protocol listed as unstable pending Phase 36 while that phase is open; once it has closed, in the stable set with a version if §36.2 kept the protocol, and absent from `docs/STABILITY.md` if §36.2 retired it
+- [ ] each Wayland extension vibeOS defines (§16.5) in the stable set with a version; the upstream Wayland protocols keep their own stability rules and are listed with the versions implemented
 - [ ] `make gate PHASE=N` (§10.9) fails while `docs/STABILITY.md` lists an interface as unstable pending phase N, so a phase that closes after `v1.0.0` moves the interfaces it settles into the stable set, or names the later phase that settles them, in the commit that closes its gate
 - [ ] a stable interface changes only by a new version served beside the old one, or by a major version under the §22.1 policy
 - [ ] a stable call, flag, or file is removed only after one release that logs its use once per process
