@@ -1020,14 +1020,14 @@ lock, its own address-space lock, or a busy page-cache page (§2.1's sleeping ti
 
 1. Direct reclaim runs only for an allocation that began with IF=1, this CPU's `HELD` rank mask
    empty, and a calling thread that is not a no-reclaim thread. The allocator reads all three at
-   entry, before it takes the heap lock. Any other allocation draws on the §12.6 reserve pool and
-   then fails.
+   entry, before it takes the heap lock. Any other allocation draws on ROADMAP §12.6's reserve pool
+   and then fails.
 2. It frees clean pages only. It drops clean page-cache pages. It unmaps clean mapped ones through
    the reverse map, taking only each address space's page-table spinlock and a try-lock of the page,
    and it skips any page it cannot take at once. It takes no sleeping lock, the address-space lock
    included.
-3. It writes no page. The ROADMAP §12.5 writeback threads write dirty file pages, and §12.7's
-   swap-out thread writes anonymous pages. Direct reclaim wakes those threads and then waits, with a
+3. It writes no page. The ROADMAP §12.5 writeback threads write dirty file pages, and ROADMAP
+   §12.7's swap-out thread writes anonymous pages. Direct reclaim wakes those threads and then waits, with a
    deadline, only for writes already submitted to a device. When that frees too little, the OOM
    killer runs.
 4. It never recurses. These are no-reclaim threads, whose allocations use the reserve pool and
