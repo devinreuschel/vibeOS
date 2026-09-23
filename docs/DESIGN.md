@@ -1,8 +1,9 @@
 # Design
 
-vibeOS is a monolithic x86_64 kernel in Rust. `no_std`, `alloc` enabled once the heap is up. Limine
-boots the ELF in long mode; the kernel then takes over its own page tables and never looks back at
-firmware except through ACPI tables.
+vibeOS is a monolithic kernel in Rust for x86_64 and, from ROADMAP Phase 11, aarch64 as a peer
+([§11](#11-portability)). `no_std`, `alloc` enabled once the heap is up. Limine boots the ELF in long
+mode (at EL1, or at EL2 with VHE, on aarch64); the kernel then takes over its own page tables and never
+looks back at firmware except through ACPI tables (a device tree on aarch64 until ROADMAP §20.7).
 
 Monolithic on purpose. Microkernel IPC design is a rabbit hole.
 
@@ -30,6 +31,7 @@ halfway through.
 | 8 | [Testing](#8-testing) | Tiers, marker contract, QEMU flags, CI |
 | 9 | [Pitfalls](#9-pitfalls) | Bugs already paid for once |
 | 10 | [Block I/O](#10-block-io) | Requests, barrier vs flush, ramdisk, virtio-blk, partitions, cache |
+| 11 | [Portability](#11-portability) | The architecture seam, the aarch64 address space, adding a port |
 
 On-disk filesystem formats live in their own docs, not here ([§1.4](#14-documentation-rules)): [VIBEFS.md](VIBEFS.md) (vibefs **version 1**, CoW metadata + atomic superblock switch). Syscall ABI: [SYSCALL.md](SYSCALL.md).
 
@@ -2565,3 +2567,63 @@ these pages (same clock, same writeback);
 do not grow a second private cache. Hit/miss/device-request counters are
 in the `blk` shell command. The cache lock is RANK_DEVICE and is dropped
 before blocking device I/O.
+
+---
+
+# 11. Portability
+
+x86_64 and aarch64 are peers from ROADMAP Phase 11; x86_64 came first and is the reference when the
+two disagree (ROADMAP, How to read this). This section is the contract for the seam between them.
+`docs/ARCH.md` (ROADMAP §10.3) maps each seam trait to the module that implements it in each port.
+
+## 11.1 The seam
+
+What is architecture-specific: exception entry and exit, the context switch, the page-table format
+and its flags, TLB and cache maintenance, the interrupt controller and vector map, the timer and cycle
+counter, the barrier helpers (`dma_wmb`, `dma_rmb`, `dma_mb`), MMIO accessors, the per-CPU base
+register, the syscall instruction and the user register frame, the user-memory access primitives, FP
+and SIMD state, the user TLS register, AP bring-up, and the machine state the boot handshake hands
+over. Everything else is shared. The syscall table's semantics are shared too; only numbers and
+argument order differ per architecture (ROADMAP §10.5), and user-visible structures keep their
+meaning while their layouts follow Linux's per-architecture uapi (ROADMAP §13.10).
+
+The mechanism:
+
+- Each concern is a trait in `vibeos-core` (`PageTable`, `Barriers`, `CycleCounter`, and so on).
+  Each port implements the traits in the kernel crate, on one zero-sized type: `arch::x86_64::Arch`
+  or `arch::aarch64::Arch`. `vibeos-core` carries a third implementation, `arch::stub::Arch`, which
+  the host tests use.
+- Portable code that needs the seam takes the implementation as a type parameter of the type that
+  uses it (`Mapper<A: PageTable>`, `SplitQueue<B: Barriers>`), never as `dyn`, so every seam call is
+  resolved at compile time and inlines.
+- The kernel binary names its port once, `type Arch = arch::current::Arch;`, chosen by
+  `cfg(target_arch)` in the kernel crate. `vibeos-core` contains no `cfg(target_arch)` and no
+  assembly (ROADMAP Phase 10 gate).
+- The atomics seam is the one exception: a module selected by `cfg(loom)` (ROADMAP §10.8), because
+  loom replaces types, not functions.
+
+Why: the stub port lets the portable crate build and run its tests on any host, which ROADMAP §10.3
+calls the cheapest second architecture, and the compiler checks that a port implements every
+function. §1.1's "concrete over generic" allows the traits because there are three implementations.
+Rejected: `dyn` traits (an indirect call in the page-table and barrier hot paths, and no inlining);
+`cfg`-selected modules inside `vibeos-core` (the portable crate would carry `cfg(target_arch)` and
+could not be built against a stub on a third host); and link-time `extern` symbols (signatures the
+compiler does not check, and one implementation per test binary).
+
+## 11.2 Address space on aarch64
+
+The kernel half is TTBR1 with a 48-bit VA (`T1SZ` 16); user space is TTBR0, also 48-bit, so user
+addresses run to 2^48, Linux arm64's `TASK_SIZE` for 48-bit VAs, where x86_64's stop one page below
+2^47 (`USER_MAP_END`, ROADMAP §10.6); each architecture's limit is a constant of its port (§11.1).
+§4.1's fixed regions sit inside the TTBR1 range unchanged, and the physmap base is Limine's HHDM
+offset, as on x86_64 (§4.1).
+The low identity window and the AP trampoline page have no aarch64 counterpart: cores start through
+PSCI on a temporary TTBR0 identity map that is dropped once they run in the kernel half (ROADMAP
+§11.4). Memory attributes come from MAIR, and MMIO is Device-nGnRE through `ioremap` (ROADMAP §11.1).
+
+## 11.3 Adding an architecture
+
+A port adds `arch/<name>/` implementing every §11.1 trait, its rows in `docs/ARCH.md`, a harness
+profile, and its marker list (ROADMAP §11.7). It changes no portable module. ROADMAP §11.8's riscv64
+stretch measures that: a port that needs a change outside `arch/` has found a seam defect, and the
+fix lands in the seam, not as a special case in portable code.

@@ -1,6 +1,7 @@
 # vibeOS
 
-A toy x86_64 kernel in Rust, written by AI. The point is seeing how far coding agents get.
+A toy kernel in Rust for x86_64, and for aarch64 from Phase 11, written by AI. The point is seeing how
+far coding agents get.
 
 The rule is that no human writes code here. In practice someone will eventually fix a typo or babysit QEMU.
 
