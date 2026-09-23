@@ -1869,7 +1869,32 @@ dynamic linker's relocation types and TLS are per architecture. Alpine publishes
 - [ ] a repository format signed with §14.7's Ed25519, read from a local directory or a mounted image; §15.8 fetches it over HTTP
 - [ ] signature verification on every install and upgrade, with an unsigned or tampered package refused
 - [ ] the base system itself shipped as packages, which is the test that the format is real
-- [ ] a signed release manifest: every artifact of a tagged release with its SHA-256, signed with a §14.7 Ed25519 release key and published by the release workflow from `v0.14.0` on. The private key exists only as a secret of that workflow; the public key is in the tree and in every image. §18.7's boot-chain manifest and §22.1 extend this format rather than adding another
+- [ ] a signed release manifest: every artifact of a tagged release with its SHA-256, signed with a §14.7 Ed25519 release key and published by the release workflow from `v0.14.0` on. Where the private key lives is the owner decision below; its public key reaches the tree and every image only through the key-set record of the next box. §18.7's boot-chain manifest and §22.1 extend this format rather than adding another
+- [ ] signing keys that can be replaced: every signature (package, repository index, release manifest) names its key by a key id; an image trusts a key set, not a single key; each release and each repository publishes a signed key-set record listing the keys to trust, the keys revoked, and a version that only increases, so an installed system moves to a new key, or drops a leaked one, through an ordinary update, and refuses a record whose version is older than the one it holds. A signature by a revoked key is refused. The record is signed by a root key that signs nothing else, so a leaked release key is revoked by a record the thief cannot sign. Host tests rotate the release key twice and revoke it once, and refuse a rolled-back record; an in-guest update across a rotation installs, and a package signed by the revoked key is refused. Without this, the first leaked key stays trusted by every image already installed, and the §39.1 freeze would make that permanent
+
+> **OWNER DECISION NEEDED (design review H007): where the release signing keys live.** From `v0.14.0`,
+> releases and packages are signed, and every installed image trusts what the keys sign. The box above
+> makes keys replaceable either way. The open question is custody, which decides what one compromise
+> costs.
+> - **(a) Both keys are secrets of the release workflow**, as this file said before. No owner steps
+>   after creating the secrets. Consequence: anyone who can run code in that workflow, through a
+>   compromised action, a malicious merge, or a GitHub account takeover, can sign a release and also
+>   sign a key-set record that makes images trust their own key. Recovery then means new images.
+> - **(b) The root key stays offline with the owner; the release key is a GitHub environment secret
+>   that only the release workflow can read, and only after the owner approves that run.** The owner
+>   creates the root key once, signs a key-set record at each rotation (rare), and approves each release
+>   job, which is one click on a run the owner starts anyway (§10.9's `make gate`). Consequence: a CI
+>   compromise can sign at most until the owner revokes the key, and the revocation reaches installed
+>   systems with the next update.
+> - **(c) Keyless signing through Sigstore** with the workflow's OIDC identity. No long-lived key.
+>   Consequence: every image must carry Sigstore's trust root and, to check a signature, reach or
+>   carry its transparency log, which ties offline installs to a third-party service.
+>
+> **Recommendation: (b).** It costs no money, only the steps named. It keeps a CI compromise
+> recoverable, and it is the separation TUF makes between its offline root role and its online
+> signing roles. Nothing else in the design waits on the answer: the key-set
+> record works with one key under (a) and two under (b). §18.7's Secure Boot db key and §22.4's
+> on-vibeOS signing follow the same answer.
 - [ ] the harness verifies a downloaded release ISO against the manifest before booting it, and refuses a tampered one; the check runs a hostlib `release-manifest` tool built from the §14.7 crate, as the harness runs `mkfs-vibefs`, so the harness stays standard library only (§0.6), and the release workflow signs with the same tool
 
 ### 14.7 Crypto primitives
@@ -2393,7 +2418,7 @@ S1 turned SMEP, SMAP, UMIP, and `CR0.WP` on at boot (`arch::cpu::harden`). §10.
 The primitives and the CSPRNG are §14.7, package signatures §14.6, and TLS §15.11. This is what needs a
 boot chain.
 
-- [ ] UEFI Secure Boot with vibeOS's own keys, not Microsoft's UEFI CA: `limine.conf` pins the kernel and initrd by hash and is enrolled into Limine's EFI binary with `limine enroll-config`, which `sbsign` then signs with a db key, and the kernel ELF carries a signature by that key for §25.4's `kexec_file_load`; the release db key, like §14.6's release key, exists only as a secret of the release workflow, with its certificate in the tree. A harness test on both architectures generates a throwaway PK, KEK, and db per run, enrolls them with `virt-fw-vars` into a per-run copy of the empty variable store of a Secure Boot edk2 build the §10.2 probe locates (OVMF's on `q35` with SMM, and on `virt` the distribution's AAVMF, since QEMU's bundled aarch64 edk2 has none), signs with that db, and shows the signed chain reaching `shell ready` and an unsigned Limine, an edited `limine.conf`, or a changed kernel or initrd refused
+- [ ] UEFI Secure Boot with vibeOS's own keys, not Microsoft's UEFI CA: `limine.conf` pins the kernel and initrd by hash and is enrolled into Limine's EFI binary with `limine enroll-config`, which `sbsign` then signs with a db key, and the kernel ELF carries a signature by that key for §25.4's `kexec_file_load`; the release db key is held as §14.6's owner decision holds the release key, with its certificate in the tree. A harness test on both architectures generates a throwaway PK, KEK, and db per run, enrolls them with `virt-fw-vars` into a per-run copy of the empty variable store of a Secure Boot edk2 build the §10.2 probe locates (OVMF's on `q35` with SMM, and on `virt` the distribution's AAVMF, since QEMU's bundled aarch64 edk2 has none), signs with that db, and shows the signed chain reaching `shell ready` and an unsigned Limine, an edited `limine.conf`, or a changed kernel or initrd refused
 - [ ] measured boot with a TPM (swtpm under QEMU on both architectures): a TPM 2.0 driver that reads PCRs, found through the ACPI TPM2 table (TIS or CRB) on x86_64 and the device tree's `tcg,tpm-tis-mmio` node on aarch64; the event log from Limine's TPM Event Log response (Limine 12.1 and later, which, with `measured_boot: yes` written in `limine.conf`, also measures the kernel, the initrd, the command line, and `limine.conf` itself), captured in `BootInfo`; the log is replayed against the PCRs, and its digests for the bootloader, kernel, initrd, and boot configuration are checked against boot-chain entries the build adds to the §14.6 signed release manifest, in the form the event log records them (for the EFI bootloader, the Authenticode image hash the firmware measures, not the file's SHA-256); firmware measurements are recorded but not checked, since the build does not produce the firmware
 - [ ] full disk encryption with AES-XTS, added to the §14.7 crate with the IEEE 1619 vectors as host tests, and the key derived from a passphrase with §14.7's Argon2id; the transform is an encrypting block device stacked on any §7.1 `BlockDevice`, built here, which §29.1's mapping interface later drives
 
@@ -2927,7 +2952,7 @@ the §22.3 tested-platforms list, are [Funded goals](#funded-goals).
 ### 22.4 The loop
 - [ ] a CI agent on vibeOS: a workflow job boots an image the §22.2 unattended installer produced, under KVM on the hosted x86_64 runner (§24.1 adds the arm64 runner's job, under TCG), and passes in the commit, the commands to run, and the job's `GITHUB_TOKEN`; the agent checks the commit out, runs the commands, such as the ladder with test kernels booted under the §21.2 VMM (TCG where the guest has no VMX, SVM, or EL2), hands each command's exit status, log, and artifacts back to the job, which uploads them to the workflow run, and posts a commit status through the GitHub REST API over §15.11's TLS
 - [ ] CI running on vibeOS in every nightly job: checkout, build, test, and the artifacts published to the workflow run, with the agent's per-step times in its §10.9 CI-history record
-- [ ] a release produced entirely on vibeOS, signed on vibeOS with §14.6's release key and §18.7's db key, which the release workflow passes into the guest for that job only, so each still exists only as that workflow's secret
+- [ ] a release produced entirely on vibeOS, signed on vibeOS with §14.6's release key and §18.7's db key, which the release workflow passes into the guest for that job only, under the custody §14.6's owner decision sets
 - [ ] the resulting installer image installed unattended onto a blank disk in a new guest, which then builds the next release
 - [ ] the whole thing scripted and documented so it is a procedure rather than a story
 
@@ -4341,7 +4366,7 @@ physical machines are [Funded goals](#funded-goals).
 
 ### 39.1 Interface freeze
 - [ ] the Linux surface in the stable set, per architecture: the calls, flags, and `ioctl`s vibeOS implements, as the §10.5 table and the §13.9 `ioctl` registry list them, their errno values, the initial stack and auxv (§13.10), signal frames (§13.8), the `/proc` and `/sys` files of §13.10 and Phase 23, and the §16.1 DRM/KMS and §16.4 evdev nodes; for these, stable means they keep matching Linux
-- [ ] vibeOS's own formats in the stable set: the vibefs v2 on-disk format (§14.8), the §14.6 package, repository, and release-manifest formats, and the documented §10.2 command-line options
+- [ ] vibeOS's own formats in the stable set: the vibefs v2 on-disk format (§14.8), the §14.6 package, repository, release-manifest, and key-set record formats, and the documented §10.2 command-line options
 - [ ] each Wayland extension vibeOS defines (§16.5) in the stable set with a version; the upstream Wayland protocols keep their own stability rules and are listed with the versions implemented
 - [ ] `make gate PHASE=N` (§10.9) fails while `docs/STABILITY.md` lists an interface as unstable pending phase N, so a phase that closes after `v1.0.0` moves the interfaces it settles into the stable set, or names the later phase that settles them, in the commit that closes its gate
 - [ ] a stable interface changes only by a new version served beside the old one, or by a major version under the §22.1 policy
