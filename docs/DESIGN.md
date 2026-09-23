@@ -6,21 +6,25 @@ firmware except through ACPI tables.
 
 Monolithic on purpose. Microkernel IPC design is a rabbit hole.
 
-This file records decisions. [ROADMAP.md](ROADMAP.md) records what has landed; as of Phase 9 nearly
-everything in §2–§10 exists as code. When code and this file disagree, one of them is a bug
-([§1.4](#14-documentation-rules)). The numbers are load-bearing. Change them deliberately and update
-this doc in the same commit. An agent implementing a subsystem does not get to re-litigate the
-address map, the vector numbers, or the lock order halfway through.
+This file records decisions. [ROADMAP.md](ROADMAP.md) records what has landed. Present tense
+describes the code at the commit that last changed the sentence. A rule the code does not meet yet
+says "Rule; not yet enforced" or "Planned" and names the ROADMAP line that lands it. An `Fnnn` id
+names a finding in the kernel review ([reviews/KERNEL_REVIEW.md](reviews/KERNEL_REVIEW.md)); the ROADMAP
+section cited with it lands the fix. When code and
+this file disagree, one of them is a bug ([§1.4](#14-documentation-rules)). The numbers are
+load-bearing. Change them deliberately and update this doc in the same commit. An agent implementing
+a subsystem does not get to re-litigate the address map, the vector numbers, or the lock order
+halfway through.
 
 ## Contents
 
 | | Section | Covers |
 |---|---------|--------|
 | 1 | [Overview](#1-overview) | Constraints, layers, module map |
-| 2 | [Invariants](#2-invariants) | Lock order, handler rules, panic policy, markers |
+| 2 | [Invariants](#2-invariants) | Lock order, handler rules, panic policy, markers, invariant register, publish last |
 | 3 | [Boot](#3-boot) | Toolchain, Limine, `_start` order, linker |
 | 4 | [Memory](#4-memory) | Address map, buddy allocator, paging, heap |
-| 5 | [Interrupts](#5-interrupts) | GDT/IDT, exceptions, vector map, PIC and APIC |
+| 5 | [Interrupts](#5-interrupts) | GDT/IDT, exception policy, vector map, PIC and APIC, privilege transitions |
 | 6 | [Time](#6-time) | Clock sources, calibration, timekeeping |
 | 7 | [SMP](#7-smp) | ACPI, AP bring-up, per-CPU, IPIs, shootdown |
 | 8 | [Testing](#8-testing) | Tiers, marker contract, QEMU flags, CI |
@@ -138,11 +142,18 @@ Serial is last so any lock holder can still log. Page tables are first because u
 allocate and free through everything below it. Blocking `WaitQueue`s are serialized by the scheduler
 lock: the predicate check and the enqueue happen under that same lock (DESIGN [§9.4](#94-concurrency)).
 
-Filesystem (dentry / inode / super / mount) locks are **device-rank**. The tables are static, so
-bring-up does not take RANK_HEAP under them. Do not allocate while holding them; do not hold them
-across serial. A dedicated numbered rank is a Design ACK, not a seventh global lock. Drop the VFS
-lock before blocking block I/O (the FAT File API never holds VFS across FAT or block waits; the
-volume lives in BSS behind a busy flag, not an IRQ-off mutex). Do not nest VFS with the FAT volume.
+A heap allocation can grow the heap, and growth takes PT and then BUDDY after dropping HEAP
+(`heap_init::grow_for`). Under SCHED, DEVICE, or SERIAL, taking HEAP fails the rank check on every
+allocation. Under PT or BUDDY, an allocation fails only when it grows the heap (PT's recursive-lock
+check, or the rank check on PT), so the mistake passes every test that does not grow the heap. Rule:
+allocate from the heap before taking PT or BUDDY.
+
+Filesystem locks (dentry, inode, super, mount) take `RANK_DEVICE`. The rank order therefore forbids
+heap allocation under them and allows logging. The VFS tables are static, so bring-up allocates
+nothing under them. Filesystems get no rank of their own; adding one changes this list and
+`src/lock.rs` in the same commit. Drop the VFS lock before blocking block I/O: the FAT File API never
+holds it across a FAT or block wait, and the FAT volume lives in BSS behind a busy flag, not an
+IRQ-off mutex. Do not nest the VFS lock with the FAT volume.
 
 ## 2.2 Interrupt handler rules
 
@@ -157,7 +168,8 @@ An interrupt handler must:
 
 - EOI before it can possibly context switch, so the controller is not held across a switch
 - rearm its own one-shot timer source before doing anything else that can yield
-- keep its stack frame small; the double fault handler is the only one with a dedicated stack
+- keep its stack frame small: only `#DF`, NMI, `#MC`, and `#DB` run on dedicated IST stacks (§5.1);
+  every other vector runs on the interrupted kernel stack, or on TSS.RSP0 when it interrupts ring 3
 
 Both of the "must" rules are expanded in [section 5.8](#58-handler-ordering-rules), because both are
 easy to violate and expensive to debug.
@@ -189,8 +201,8 @@ Three cells:
 | Cell | Use |
 |------|-----|
 | `SpinMutex` | Shared across CPUs. IRQ-aware. Ranked. |
-| `IrqCell` | CPU-local or boot-only mutable. `with` takes IRQs off, panics on same-CPU re-entry, spins if another CPU holds it. |
-| `BootCell` | Write once before `smp: done`, then shared `&T`. |
+| `IrqCell` | IRQ-off exclusive access: `with` takes IRQs off, panics on same-CPU re-entry, and spins while another CPU holds it. Used for CPU-local and boot-only state and as an unranked cross-CPU lock (among them `proc_init::TABLE`, `kva_init::KVA` and `DEFERRED`, `work_init::ST`, `irq_init::IRQ`, `file_init::CWD`, and `log_init::LOG`). Its `Sync` impl has no `T: Send` bound, and `force_unlock` is a safe fn (ROADMAP §10.3, F017). Planned (ROADMAP §10.3, F108): every cross-CPU `IrqCell` but the log ring becomes a ranked `SpinMutex`. |
+| `BootCell` | Write once before `smp: done`, then shared `&T`. The set-once check is a `debug_assert!` (ROADMAP §10.2, F137), and the `Sync` impl has no `T: Send + Sync` bound, so `per_cpu_init::CPUS` shares the non-`Sync` `PerCpu` (ROADMAP §10.3, F017, F039). |
 
 They live in `src/cell.rs` (`BootCell`, `IrqCell`) and `src/sync_init.rs` (`SpinMutex`). Do not add another `UnsafeCell` + `unsafe impl<T> Sync` wrapper. `static mut` is only the asm-owned `vibeos_jmpbuf` in `arch/catch.rs`. Accessors do not return `&'static mut`.
 
@@ -202,17 +214,27 @@ per-CPU inbox plus a reschedule IPI. More SMP-specific rules in [section 7.7](#7
 - Physical page 0, the loaded kernel image, the AP trampoline page, and firmware-reserved regions are
   never in the buddy free lists.
 - Buddy free list nodes live inside the free pages themselves. A stray write into freed memory
-  corrupts the allocator, so guard pages on stacks are not optional.
+  corrupts the allocator, so guard pages on stacks are not optional. One stack has none: Limine's
+  boot stack (at least 64 KiB, no guard page, in bootloader-reclaimable memory), which all of boot
+  and, in `kernel_tests` builds, the in-guest test registry run on, so an overflow there corrupts
+  memory silently (ROADMAP §10.6, F072).
 - Kernel mappings are `GLOBAL`. Unmapping one requires a TLB shootdown on every online CPU before the
   virtual address may be reused.
 - MMIO pages are mapped uncacheable. QEMU tolerates write-back MMIO; real hardware does not.
-- Every mapping is `NO_EXECUTE` unless it holds code that will actually be fetched.
+- Every mapping is `NO_EXECUTE` unless it holds code that is fetched. Exception: the low identity
+  window's first 2 MiB is executable, though only the `0x8000` trampoline page is fetched, and only
+  during AP bring-up (ROADMAP §10.6, F085).
 
 ## 2.5 Panic policy
 
 Binding order (do not invert):
 
-1. Broadcast halt IPI `0xFE` first (Fixed delivery, not NMI) so other CPUs stop before the dump.
+1. Broadcast halt IPI `0xFE` first (Fixed delivery, not NMI). `ipi_init::halt_others` sets `HALTING`
+   and returns without waiting. A CPU spinning with IF=0 does not take the IPI, and once `HALTING` is
+   set its serial writes skip the TX lock, so it can write COM1 during the dump; a second panicking
+   CPU re-runs `Serial::init` mid-dump. Planned (ROADMAP §10.7, F135): `halt_others` waits, with a
+   bound, for every other online CPU to acknowledge `0xFE` and sends NMI to each that has not, and
+   only the first CPU into `begin_dump` runs `Serial::init` and writes COM1.
 2. Re-initialize serial from scratch (the panic may be *in* the serial path).
 3. Print location and message; dump registers, the current thread, and the last N log records.
 4. Symbolized backtrace when frame pointers exist (in-image sorted table, binary search, no alloc).
@@ -222,27 +244,54 @@ No unwinding: `panic = "abort"`. Serial TX in this path is a bounded THRE poll; 
 timeout (see [§9.6](#96-hardware-polling)). Do not take SCHED. The log ring is readable after the
 halt IPI without taking its TAS (force-unlock if the panicking CPU held it).
 
-Log ring (ROADMAP §5.5): 256 records × 96-byte messages. Wrap **drops oldest**. Compile-time max is
-`trace` (debug) / `debug` (release); runtime filter is `AtomicU8`, default `info`. Panic dump prints
-the last 24. The ring TAS is IRQ-off and is not in the ranked lock order; never hold it across serial
-TX. `klog!` and `Serial` formatted writes keep IF off for the whole emit so the per-CPU capture
-stage cannot mix with a preempting thread. `dmesg` prints through a plain serial path that does not
-re-capture. Two-pass `nm` fills an in-image `.rodata` symbol table so `.text` stays put; the target
-JSON keeps `frame-pointer: always`. Overflow, filter, and lookup are host-tested. Printer thread
-parked (Design ACK): global IRQ-safe ring + serial try-lock sink.
+Log ring (ROADMAP §5.5):
 
-The portable half (`src/lib.rs`, host-tested) never panics on data: parsers and table walks return
-the module error. Clippy restriction lints `unwrap_used`, `expect_used`, and `panic` are deny on that
-crate (allowed in `#[cfg(test)]`). `indexing_slicing` stays warn, not deny, until the parser modules
-(`acpi`, `part`, `fat`, `vibefs`, `pci`) are clean; it is not crate-enabled under `-D warnings`.
-Hardware-half panics still halt in the binding order above.
+- 256 records of up to 96 message bytes; a wrap drops the oldest record.
+- Compile-time maximum level: `trace` in debug builds, `debug` in release. Runtime filter: an
+  `AtomicU8`, default `info`.
+- The panic dump prints the last 24 records.
+- The ring's lock (`log_init::LOG`, an `IrqCell`) is IRQ-off and outside the §2.1 rank order; never
+  hold it across serial TX.
+- `klog!` and formatted `Serial` writes keep IF off for the whole emit, so the per-CPU capture stage
+  cannot interleave with a preempting thread.
+- `dmesg` prints through a plain serial path that does not re-capture.
+- Host tests cover overflow, filtering, and symbol lookup.
+- One global IRQ-safe ring and a serial try-lock sink. Planned: a log record reaches serial whole
+  (ROADMAP §10.2, F138); per-CPU buffers drained by a printer thread (ROADMAP §19.5).
 
-Exceptions split into two groups. Recoverable ones (`#BP`, and `#PF` once demand paging exists)
-log and continue. **Ring-3 faults** (`#PF`/`#GP`/`#UD`/`#DE`/…) kill the user process with a
-diagnostic (`user: pid N killed SIG…`) and the kernel keeps running; they do not take the
-DESIGN panic-halt path. **Kernel faults** dump and halt through the same order as
-`#[panic_handler]`. Nothing is silently swallowed. NMI stays on IST for real NMIs; it is not
-the panic broadcast.
+Symbols come from a two-pass link (Makefile `KERNEL_VARIANT`): `nm` output from the first link fills
+an in-image `.rodata` table (`KSYMS`) that the second link builds in. Rule: every function has the same address
+in both links. Not yet enforced: nothing compares them, and in the panic-test build the
+reference to the filled table compiles larger than the empty one and shifts every later function, so
+that ISO's table mis-names frames (ROADMAP §10.2, F084). Frame pointers come from
+`-C force-frame-pointers=yes` in `.cargo/config.toml` (§3.1); there is no target JSON.
+
+Rule: `vibeos-core` (`src/lib.rs`) does not panic on data; its parsers and table walks return the
+module error. Enforced only for `unwrap`, `expect`, and `panic!`: clippy denies `unwrap_used`,
+`expect_used`, and `panic` on that crate (allowed in `#[cfg(test)]`). `indexing_slicing` is not
+enabled, and `make` ships the dev profile, whose `overflow-checks = true` turns an arithmetic
+overflow into a panic. Crafted input panics portable code: a FAT BPB whose
+`rsvd + num_fats * FATSz32` overflows in `parse_bpb` (ROADMAP §10.2, F064); a vibefs write near file
+offset 2^44, which overflows `map_block` (ROADMAP §10.11, F008); a CRC-valid vibefs leaf whose count
+exceeds the per-leaf maximum (ROADMAP §18.5, F061); a vibefs truncate-grow that keeps `F_INLINE`
+past 128 bytes (ROADMAP §13.9, F062). Panics in the kernel binary halt in the binding order above.
+
+Exceptions follow the per-vector table in [section 5.2](#52-idt-and-exceptions). A kernel `#BP`
+logs and continues. Every other exception taken in ring 0 dumps and halts in the same order as
+`#[panic_handler]`. Rule: ring 3 never halts the kernel. An exception raised by ring-3 code, or by a
+return to ring 3, kills
+that process with the signal §5.2 gives the vector, prints `user: pid N killed SIG<name>`, and the
+kernel keeps running. Not yet enforced: ring-3 `#DB`, and `#AC` when `CR0.AM` is set, halt the kernel (ROADMAP §10.6,
+F005), and so do the entry-path windows of §5.10 (ROADMAP §10.6, F004, F006, F007); §5.2's last
+column lists every vector whose ring-3 action differs from the rule. A hardware NMI halts on its IST stack; the panic broadcast is
+IPI `0xFE`, not NMI.
+
+Rule: nothing is silently swallowed. Not yet enforced in three cases. An exception before `idt::init` (PMM, the CR3 switch,
+ACPI discovery, heap, KVA, GDT, PIC) goes to whatever IDT Limine left and resets or hangs with no
+output (ROADMAP §20.1, F136). LINT1 is masked on every CPU and MADT NMI entries (types 3 and 4) are
+not parsed, so a chipset or external NMI never reaches the NMI handler (ROADMAP §20.1, F096).
+`CR4.MCE` and `CR0.NE` are clear on every CPU, so a machine check shuts the CPU down with no dump,
+and an x87 floating-point error raises the masked IRQ13 and is lost (ROADMAP §10.6, F026).
 
 ## 2.6 Serial markers
 
@@ -267,6 +316,77 @@ vibeOS: per_cpu: bsp ready
 vibeOS: acpi: xsdt 9 tables
 vibeOS: time: tsc 2500000/ms
 ```
+
+## 2.7 Invariant register
+
+Every invariant the code relies on, and how it is kept. Status: *enforced* means code, a type, or a
+test fails when the invariant breaks; *documented* means a rule in the section named or in a code
+comment, with nothing that checks it; *assumed* means relied on but stated only in this table.
+"Holds today" is the state at the commit that last changed the row; where the answer is no or
+partly, the row names the ROADMAP line that fixes it. DOC2 (ROADMAP §10.3) moves this table to its
+own file.
+
+| # | Invariant | Established at | Status | Holds today |
+|---|-----------|----------------|--------|-------------|
+| I1 | Lock rank PT < BUDDY < HEAP < SCHED < DEVICE < SERIAL (§2.1) | `lock.rs`, `sync_init::lock_enter` | enforced at runtime, per CPU | Partly: a nested lock of the same rank passes the check and its release clears the rank bit the outer lock still holds, `IrqCell` has no rank, and a lock held across a switch goes unseen (ROADMAP §10.3, §13.12, F108) |
+| I2 | Hard-IRQ context never blocks or allocates (§2.2) | convention | documented | Yes, unchecked: only `irq_init::dispatch` sets `IN_ISR`, and no blocking primitive asserts it (ROADMAP §10.3, F110) |
+| I3 | IF=0 through every return-to-user sequence (§5.10 rule 4) | FMASK `0x47700`; `cli` in `run_user` | documented | No: the syscall exit has no `cli` and `console_init::wait_key` returns with IF=1 (F001); `enter_user_full` runs with IF=1 (F006) (ROADMAP §10.6) |
+| I4 | Kernel code outside the §5.10 entry and exit sequences runs with `GS_BASE` = this CPU's `PerCpu` (§5.10) | `arch::gs`, `per_cpu_init` | documented | No: the raw gates of §5.10 rule 1 (F004), the IF=1 window in `enter_user_full` (F006), an NMI, `#MC`, or `#DB` taken in the syscall entry or exit window, and a fault on the return-to-user `iretq` (both F007) run on the user base (ROADMAP §10.6) |
+| I5 | One entry stub per vector makes the `swapgs` decision (§5.10 rule 1) | `arch/idt.rs` | documented | No: the `irq_init` pool gates `0x31`–`0x7F` and the `kbd_init` gates `0x30` and `0x21` skip it (ROADMAP §10.6, F004) |
+| I6 | Ring 3 never halts the kernel (§2.5, §5.2) | `proc_init::try_user_fault` | documented | No: ring-3 `#DB`, and `#AC` when `CR0.AM` is set, halt (F005), and so do the I4 windows (ROADMAP §10.6) |
+| I7 | The kernel never dereferences a user VA; copies go through the physmap after `check_user_range` (§5.1) | `addr_space.rs` | enforced | Yes, but `write_bytes` ignores the PTE's `WRITABLE` bit (ROADMAP §10.6, F023) |
+| I8 | One thread per address space; nothing mutates an address space concurrently | process model | assumed | Yes. Lock-free user copies, local-only `invlpg`, and `&'static AddressSpace` depend on it |
+| I9 | TCBs are never freed, so a `*mut Tcb` stays valid | 64-slot table, `thread_init` | assumed | Yes, but `spawn_inner` can reuse a Dead slot whose thread is still switching out (ROADMAP §10.10, F012) |
+| I10 | A dead thread's stack is freed only after its CPU has switched off it (§2.8, §4.5) | `kva_init::DEFERRED` | documented | No: any CPU drains the global list (F012), and the 8-slot list panics when full (F010) (ROADMAP §10.10) |
+| I11 | A completer's publishing store is its last access to the waiter (§2.8) | `block_init::IoWaiter` | documented | No: `IoWaiter::finish` runs `wake_all` after it stores `done` (ROADMAP §10.10, F002) |
+| I12 | Every kernel PML4 slot exists before the first user address space | `AddressSpace::new` copies PML4[256..512) once | assumed | Yes, by boot order only: `paging_init::install` creates none of the heap, KVA, and `ioremap` PML4 slots; each appears on its region's first mapping, and no current path makes a first mapping after `/hello` (ROADMAP §18.2, F101) |
+| I13 | The low identity window is removed after `smp: done` (§4.1) | none yet | documented | No: it stays mapped and GLOBAL, VA 0 included (ROADMAP §10.6, F085) |
+| I14 | Every buddy frame and page table lies inside the physmap (§4.1) | `pmm_init::init`, `paging_init::physmap_extent` | enforced | Yes; a framebuffer above the 8 GiB cap is not covered (ROADMAP §20.1, F020) |
+| I15 | Frame 0, the kernel image, `0x8000`, and the framebuffers never enter the buddy (§2.4) | `pmm_init::init`; `Buddy::insert_region` skips frame 0 | enforced | Yes with at most 6 framebuffers: `Excludes` holds 8 ranges (the trampoline page, the kernel image, one per framebuffer), and a range past the 8th stays in the buddy, with a `pmm: excludes overflow` line |
+| I16 | The kernel PML4 lies below 4 GiB, because the trampoline loads a 32-bit CR3 | `smp_init::start_one` | enforced by skipping every AP | Not guaranteed: the PML4 frame has no address limit, and above 4 GiB every AP is skipped with a `smp: cr3 above 4GiB` line (ROADMAP §20.1) |
+| I17 | MMIO is UC, RAM is WB, and no frame has both (§2.4) | `acpi_init`, `Mapper::patch_physmap_uc` | documented | Partly: a whole 2 MiB leaf goes UC with no RAM check, and a trailing leaf can be skipped (ROADMAP §20.1, F104) |
+| I18 | EOI before any switch; a one-shot timer is rearmed before yielding (§5.8) | timer ISRs | documented | Yes; no test tier runs the TSC-deadline timer, the only one-shot source, so nothing exercises the rearm (ROADMAP §10.1, F078) |
+| I19 | I/O APIC high dword written before the low; IST index zero-based in software, one-based in the gate (§5.1, §5.6) | `apic.rs`, `desc.rs` | enforced, host-tested | Yes |
+| I20 | `now_ns` is monotonic | seqlock plus `time::monotonic_max` over `time_init::LAST_NS` | enforced | Yes, by construction, so the monotonicity tests cannot fail (ROADMAP §10.2, F100) |
+| I21 | A run queue is touched only by its owner CPU with IF=0 (§2.3) | `per_cpu_init::with_current` | enforced (busy flag) | Partly: only the owner writes it, but `diag::cpus_to` (the shell `cpus` command) and in-guest tests read another CPU's `runq` length with no lock, and `&'static PerCpu` aliases the `&mut` (ROADMAP §10.3, F039) |
+| I22 | A `BootCell` is set once, before SMP, and holds `Sync` data (§2.3) | `cell.rs` | documented | No: `per_cpu_init::CPUS` holds the non-`Sync` `PerCpu`, which the unbounded `Sync` impl allows (ROADMAP §10.3, F017, F039); the set-once check is a `debug_assert!` (ROADMAP §10.2, F137) |
+| I23 | Barrier: every request before it completes before any after it starts. Flush: completed writes are durable (§10.2) | `block.rs` | documented | No: the block queue merges a request across any queued fence but the lowest and can reorder overlapping writes, virtio-blk completes a `Barrier` before earlier requests and sends a `Flush` before earlier writes complete, and a cache flush misses in-flight writeback (ROADMAP §10.11, F043) |
+| I24 | vibefs never overwrites a live block before the newer superblock is durable ([VIBEFS.md](VIBEFS.md)) | vibefs commit | documented | No after a failed commit: the in-memory generation advances before the superblock write, so the retry writes the slot that holds the only valid superblock (ROADMAP §12.5, F050). Otherwise it rests on on-disk refcounts that mount does not check (ROADMAP §18.5, F061) |
+| I25 | Per-thread CPU state is saved and restored in full (§7.5) | `syscall_init::on_switch`, `thread::switch_context` | documented | No: `FS_BASE` is not switched (ROADMAP §13.1, F022); `fork` and `execve` get the FPU state wrong (ROADMAP §10.6, F069) |
+| I26 | Every kernel stack has a guard page (§2.4) | `kva_init::alloc_guarded_stack` | documented | No: boot runs on Limine's unguarded stack (ROADMAP §10.6, F072) |
+| I27 | `vibeos-core` does not panic on data (§2.5) | clippy deny on `unwrap`, `expect`, `panic` | enforced in part | No: indexing and overflow checks panic on crafted input; §2.5 lists the cases and their ROADMAP lines |
+| I28 | Contract markers are kernel-emitted (§2.6) | `marker!` | documented | No: `shell ready` comes from ring-3 `/bin/sh` (ROADMAP §10.5, F073) |
+| I29 | A catch hook intercepts only a CPL-0 fault on the CPU that armed it, inside an in-guest test's catch window | `arch::catch` | assumed | Partly: production never arms it, but `intercept` runs first in every exception handler of every build, and its armed state is global, so in a `kernel_tests` build a fault with the armed vector on any CPU, at any CPL, is caught (ROADMAP §10.2, F146) |
+| I30 | Interrupt and exception handlers run with RFLAGS.AC=0 (§5.10 rule 5) | none | documented | No: the gates keep ring 3's AC (ROADMAP §10.6, F088) |
+| I31 | IF-off sections stay far below the 1 s `wait_acks` timeout | none | assumed | No: the in-guest test runner and syscall bodies hold IF off with no time bound (ROADMAP §10.10, F011; ROADMAP §10.6, F044) |
+| I32 | A handler on an IST stack never blocks or switches threads (§5.10 rule 6) | IST handlers | documented | Yes: every IST handler halts, except that under `kernel_tests` an armed `catch` steps RIP and returns or longjmps off the IST stack |
+
+## 2.8 Publish last
+
+The rule for every completion, hand-off, and deferred reclaim:
+
+1. In a completion or hand-off, the store that lets the other side return, free, or reuse an object
+   is the publisher's last access to that object; after it the publisher touches only its own stack
+   and statics. The other side can see the store on a lock-free path (`IoWaiter::poll`, any Acquire
+   load of a done flag) and return before the publisher's next instruction, so a lock taken after
+   the store does not make a later access safe.
+2. An object that its owning CPU may still use (the kernel stack it runs on, a TCB that is switching
+   out, an AP's stacks and tables during bring-up) is freed only after that CPU has passed a point
+   the reclaimer can observe: its `switch_context` away from the object has returned, or INIT has
+   stopped the AP. A global list that any CPU drains does not meet this rule.
+
+Rule; not yet enforced. The violations, and the ROADMAP lines that fix them:
+
+- `IoWaiter::finish` stores `done`, then takes SCHED and runs `wake_all` on the `WaitQueue` inside
+  the waiter, which lives on the submitter's stack (ROADMAP §10.10, F002).
+- `thread_exit` puts its own stack on the global `kva_init::DEFERRED` list, and any CPU's
+  `reap_zombies` can unmap it before the exiting CPU has finished `switch_context` (ROADMAP §10.10,
+  F012).
+- `spawn_inner` can reuse a Dead TCB slot while its thread is still switching out on another CPU
+  (ROADMAP §10.10, F012).
+- On the bring-up timeout, `smp_init::start_one` frees an AP's kernel stack, GDT/TSS, and IST and
+  RSP0 stacks without an INIT, so an AP that is still running uses freed memory (ROADMAP §20.1,
+  F032).
 
 ---
 
@@ -303,8 +423,12 @@ Target notes:
   `-no-pie`, and `-znorelro`. RELRO fights a non-PIE static kernel.
 - `disable-redzone: true`. Interrupt handlers clobber the red zone.
 - Frame pointers are forced (`-C force-frame-pointers=yes`) so panic dumps can symbolize.
-- SSE stays off until the kernel explicitly enables it and saves state on context switch.
-  Enabling it early means the first floating point use in a driver silently corrupts another thread.
+- The kernel is built soft-float, so compiled kernel code uses no SSE or x87 registers; kernel SSE
+  would need a save around each use, and none exists. User code gets SSE: `syscall_init::init_fpu`
+  clears `CR0.EM` and `CR0.TS` and sets `CR0.MP` and `CR4.OSFXSR` on every CPU, and
+  `syscall_init::switch_fpu` saves and restores each thread's 512-byte FXSAVE image (`Tcb.fpu`) on
+  every switch. `CR0.NE` and `CR4.OSXMMEXCPT` are not set, so x87 and SSE floating-point errors do
+  not reach `#MF` and `#XF` (§5.2; ROADMAP §10.6, F026).
 - `build.rs` passes the linker script as an absolute `-T` so the link does not depend on cwd.
 
 ## 3.2 Limine protocol
@@ -348,14 +472,14 @@ of it.
 | 1 | Serial (COM1) | `serial online` | Nothing before this is debuggable. The panic handler uses the same port. |
 | 2 | Base revision check | `limine: rev N ok` | Everything downstream reads Limine responses. |
 | 3 | GDT + TSS + IST | `gdt ok` | Need a known code selector and a double-fault stack before the IDT is worth installing. |
-| 4 | PIC remap, all IRQs masked | `pic: remapped` | Firmware may leave the 8259 live with vectors overlapping CPU exceptions. Remap first, mask everything, unmask later. |
+| 4 | PIC remap and mask, skipped when the FADT has `IAPC_BOOT_ARCH` bit 0 clear | `pic: remapped` | Firmware may leave the 8259 live with vectors overlapping CPU exceptions. Bit 0 is `LEGACY_DEVICES`, not 8259 presence. QEMU clears it, so on QEMU this step writes nothing. The remap and mask that always runs is `arch::pic::program`, after TSC calibration and before step 13b's `sti` (§5.5; ROADMAP §20.1, F094). |
 | 5 | IDT | `idt ok` | Exceptions become diagnosable. Hardware IRQs are still masked. |
 | 6 | Buddy PMM from memory map | `pmm: N free 4KiB frames` | Page tables and heap both need frames. |
 | 7 | Page tables, install CR3 | `paging: cr3 ok` | Own the address space before mapping anything device-specific. |
 | 8 | MMIO PTE attribute patch | `paging: mmio uc` | LAPIC/IOAPIC/HPET pages must be uncacheable before first touch. |
 | 9 | Kernel heap | `heap ok` | `alloc` becomes legal. Everything after this can use `Vec` and `Box`. |
 | 10 | Kernel VA allocator | `kva: ready` | Guarded stacks need it, so threads need it. |
-| 11 | Per-CPU area for the BSP | `per_cpu: bsp ready` | `GS_BASE` must be valid before any `per_cpu!` access, including from ISRs. |
+| 11 | Per-CPU area for the BSP, bootstrap TCB, syscall MSRs | `per_cpu: bsp ready` | `GS_BASE` must be valid before any `per_cpu!` access, including from ISRs. Then `thread_init::init_bootstrap` makes `_start`'s context the bootstrap thread, and `syscall_init::init_bsp` programs STAR, LSTAR, FMASK (`0x47700`), and `EFER.SCE`, enables SSE for user code (§3.1), and wires TSS.RSP0. `arch::cpu::harden` (SMEP, SMAP, UMIP, `CR0.WP`) runs just before this step, after `idt ok`. |
 | 12 | ACPI tables | `acpi: xsdt N tables` | MADT drives APIC and SMP, HPET drives calibration. |
 | 13 | Time: HPET or PIT, TSC calibration | `time: tsc N/ms` | The scheduler needs a tick, and AP bring-up needs `busy_wait_ms`. |
 | 13b | BSP LAPIC, I/O APIC, LAPIC timer | `time: lapic_timer ok (<mode>)` | After TSC calib. Prove a tick (TSC-deadline → periodic → PIT), then mask PIC + PIT GSI if LAPIC owns it. |
@@ -363,10 +487,10 @@ of it.
 | 15 | Arm scheduler; emit `irq: enabled` | `irq: enabled` | Scheduler is live. The timer already ticks from steps 13/13b; this marker is post-sched arming (IF on, preemption live), not the first STI. IRQ1 stays masked until the keyboard driver (step 17). |
 | 16 | APIC + SMP bring-up | `smp: done` | Needs time (delays), heap (per-CPU allocation), scheduler (AP entry point). Live Phase 4 order: SMP before console. |
 | 17 | Framebuffer console, PS/2, mux | `console ok` | After `smp: done`. Install the IRQ1 / keyboard GSI handler, init the 8042, then unmask. Replay the pre-FB log ring onto the framebuffer. |
-| 17b | PCI enum + device registry | `pci: N devices` | After `console ok`. Legacy `0xCF8`/`0xCFC` for bus 0; MCFG → ECAM beyond. Scan builds a device list. Workqueue + threaded IRQ start, then drivers bind by id. Memory BARs are mapped through ioremap or the capped physmap; sizes above 32 MiB are recorded and skipped (DESIGN §4.1). |
+| 17b | PCI enum + device registry | `pci: N devices` | After `console ok`. ECAM for the buses the first MCFG allocation covers (`acpi::parse_mcfg` reads no other entry; F045); otherwise `0xCF8`/`0xCFC`, which the kernel uses only for bus 0 (a kernel limit: configuration mechanism #1 addresses any bus; ROADMAP §20.1, F114). Scan builds a device list. Workqueue + threaded IRQ start, then drivers bind by id. Memory BARs are mapped through ioremap or the capped physmap; sizes above 32 MiB are recorded and skipped (DESIGN §4.1). |
 | 17c | Block layer + ramdisk + virtio-blk + partitions | `block: <name> <n> sectors` | After bind. One line per device. virtio-blk (`vda`) emits during probe; ramdisk (`ram0`) follows in `block_init`; partition children (`<parent>p<N>`) after that. |
-| 17d | VFS + FAT initrd root + pseudo mounts + vibefs | (none) | After block. Makefile FAT32 initrd at `/` when live, else dummy ramfs. Then devfs/procfs/tmpfs/sysfs on `/dev` `/proc` `/tmp` `/sys`. BSS vibefs at `/vibe` (Phase 8D). No serial marker. |
-| 18 | Shell thread, builtins | `shell ready` | Last marker. Spawn a kernel thread (not `_start`, not idle, not an ISR), register builtins into the command table, print the prompt. `lspci` / `devices` / `blk` are live. |
+| 17d | VFS + FAT initrd root + pseudo mounts + vibefs | (none) | After block. Makefile FAT32 initrd at `/` when live, else dummy ramfs. Then devfs/procfs/tmpfs/sysfs on `/dev` `/proc` `/tmp` `/sys`. BSS vibefs at `/vibe` (Phase 8D). No serial marker. Syscalls do not reach the VFS or kernfs: `file_init` resolves paths through its own FAT and vibefs route tables (ROADMAP §10.4, F086). |
+| 18 | `/hello`, builtins, `/sbin/init` as pid 1 | `shell ready` | Last marker. `user_init::boot_hello` runs `/hello` bound to the bootstrap thread, `shell_init::init` registers the builtins, and `proc_init::start_init` spawns `/sbin/init` pinned to the BSP. `/sbin/init` forks `/bin/tests` and waits for it without reading its exit status, then forks `/bin/sh`, which writes `shell ready` from ring 3 (`user/sh.asm`); the marker is not kernel-emitted and does not show that `/bin/tests` passed (ROADMAP §10.5, F073). A `kernel_shell` build instead spawns the kernel `shell` thread, which prints `shell ready`; a `kernel_tests` build runs the in-guest registry. |
 
 Ordering rules worth stating separately because they were learned the hard way:
 
@@ -403,19 +527,20 @@ initialized, then the keyboard GSI is unmasked. After LAPIC owns the tick the
 default PIC handler still halts on an unexpected line. The timer path re-runs the
 8259 ICW sequence even when FADT bit 0 skipped the boot remap (QEMU clears
 that bit but still has a PIC on 0x08).
-Step 17b enumerates PCI (CF8 on bus 0, ECAM from MCFG otherwise), maps
+Step 17b enumerates PCI (ECAM where the first MCFG allocation covers the bus, else CF8 on bus 0 only), maps
 memory BARs under the 32 MiB cap, fills the device registry, and emits
 `pci: N devices`. Workqueue workers and the threaded-IRQ bottom half start
 next. Drivers register, then bind after the scan, not inline. Virtio-rng
 matches by id when a modern virtio device is present (ktest adds one; e2e
 does not). Ramdisk init follows bind and emits `block: <name> <n> sectors`.
-Partition scan stamps an MBR on `ram0` and a GPT on `vda` (if empty) and emits
+Partition scan stamps an MBR on `ram0` and, on a `vda` of at least 1024 sectors whose table fails to
+parse or has no entries, a GPT that overwrites LBA 0–33 and the last 33 sectors of a whole-disk image
+on first boot ([section 10.5](#105-partitions); ROADMAP §10.11, F003). It emits
 `block: <parent>p<N> <n> sectors` per child. A writeback cache thread starts
-before the scan. VFS mounts a dummy ramfs at `/` after that, then mounts
-devfs / procfs / tmpfs / sysfs on `/dev` `/proc` `/tmp` `/sys`, with no serial
-marker. Step 18 spawns the shell as a kernel thread after `console ok` / `pci: N devices`
-/ `block: …` and emits `shell ready` last. `boot: phase1 done` was a Phase 1–4 stand-in and is no
-longer emitted; the trailing contract line is `shell ready`.
+before the scan. `fs_init` then makes the FAT initrd `/` (a ramfs root only when the initrd is not
+live) and mounts devfs / procfs / tmpfs / sysfs on `/dev` `/proc` `/tmp` `/sys` and vibefs at
+`/vibe`, with no serial marker. Step 18 runs `/hello`, then starts `/sbin/init`; the trailing
+contract line is `shell ready`, from `/bin/sh` (row 18).
 The e2e contract in [section 8.3](#83-end-to-end) is the live order.
 
 ## 3.4 Linker script
@@ -478,10 +603,10 @@ non-canonical hole between. Kernel regions are fixed, not discovered:
 
 | Range | Size | Role |
 |-------|------|------|
-| `0x0000_0000_0000_0000` – `0x0000_7FFF_FFFF_FFFF` | 128 TiB | User address space. Empty until ring 3 exists. |
-| `0x0000_0000_0000_0000` – `0x0000_0000_2000_0000` | 512 MiB | Low identity window, kernel tables only. First 2 MiB executable. |
+| `0x0000_0000_0000_0000` – `0x0000_7FFF_FFFF_FFFF` | 128 TiB | User address space, one PML4 per process (`AddressSpace`), below `USER_END`. Page 0 is never mapped (`NULL_GUARD_LEN`). The top 4 KiB page is mappable, so a `syscall` in its last two bytes leaves RCX non-canonical (`0x0000_8000_0000_0000`), and on KVM and hardware the exit `iretq` raises `#GP` on the user GS base (ROADMAP §10.6, F007). Each user PML4 copies the kernel's PML4[256..512) at creation, so the whole kernel half stays mapped, supervisor-only, while ring 3 runs: no KPTI (ROADMAP §18.3, F024, F133). |
+| `0x0000_0000_0000_0000` – `0x0000_0000_2000_0000` | 512 MiB | Low identity window, kernel PML4 only (user PML4s do not copy slot 0). 2 MiB pages, GLOBAL; the first 2 MiB supervisor writable and executable. |
 | *hole* | | Non-canonical. Any pointer here is a bug. |
-| `0xFFFF_8000_0000_0000` + | ≤ 8 TiB | HHDM physmap, `virt = phys + HHDM_OFFSET`. Offset comes from Limine. 2 MiB pages. |
+| `0xFFFF_8000_0000_0000` + | `map_end` ≤ 8 GiB, plus leaves added above it | Physmap, `virt = phys + 0xFFFF_8000_0000_0000` (`HHDM_BASE`); `boot::capture` asserts that Limine's HHDM offset equals it. 2 MiB pages up to `map_end`. Above it: 4 KiB leaves from `acpi_init::map_gap` (no cap), and write-back leaves for a display BAR0 from `paging_init::ensure_physmap_wb` (below `PHYSMAP_CAP`). |
 | `0xFFFF_C000_0000_0000` – `0xFFFF_C000_0400_0000` | 64 MiB | Kernel heap. Starts at 1 MiB mapped and grows. |
 | `0xFFFF_D000_0000_0000` – `0xFFFF_D010_0000_0000` | 64 GiB | Kernel VA allocator: guarded stacks, `vmap`, large transient mappings. |
 | `0xFFFF_E000_0000_0000` – `0xFFFF_E000_1000_0000` | 256 MiB | `ioremap` window for device MMIO that should not be reached through the physmap. |
@@ -492,16 +617,22 @@ a real failure mode: two subsystems in the old tree were both designed at `0xFFF
 noticed.
 
 The low identity window exists for one reason: an AP starting from SIPI runs in real mode and then
-32-bit protected mode at a low physical address, so that address must be identity mapped and
-executable. It can be torn down once every AP has reached long mode, and eventually should be, since a
-writable executable identity map of the low 512 MiB is not something to keep around forever.
+32-bit protected mode at `0x8000`, so that page must be identity mapped and executable. All 512 MiB
+stay mapped and GLOBAL for the life of the kernel CR3, so a NULL-plus-offset access from a kernel
+thread reads low RAM instead of faulting, and buddy frames below 2 MiB have a supervisor writable,
+executable alias. Planned (ROADMAP §10.6, F085): the window is torn down after `smp: done`, keeping
+only the trampoline page (4 KiB, read-only, executable, not global).
 
-The physmap is capped at 8 GiB regardless of what the memory map says. Some firmware describes MMIO
-BARs as multi-terabyte regions, and walking that to build page tables at boot does not finish. The cap
-is computed from usable RAM high water mark, kernel image end, and framebuffer extent
-(`base + height * pitch`), not from raw memory map entries. RAM above the cap never enters the buddy:
+The physmap is capped at 8 GiB (`PHYSMAP_CAP`) regardless of what the memory map says. Some firmware
+describes MMIO BARs as multi-terabyte regions, and walking that to build page tables at boot does not
+finish. `paging_init::physmap_extent` sets `map_end` to the 2 MiB-rounded maximum of the usable-RAM
+end, the kernel image end, and each framebuffer's end, capped at 8 GiB, and ignores raw memory map
+entries. `acpi_init::map_gap` then adds 4 KiB leaves above `map_end` for ACPI tables (write-back) and
+for the LAPIC, I/O APIC, and HPET (UC), with no cap. RAM above the cap never enters the buddy:
 free-list nodes, page tables, and heap pages are all reached through the physmap after `mov cr3`, so a
-frame past it triple-faults on first touch.
+frame past it triple-faults on first touch. The physmap covers a framebuffer only below the cap, so for a
+framebuffer that extends past 8 GiB `fb_init` writes through an unmapped address and boot halts at
+console init (ROADMAP §20.1, F020).
 
 ## 4.2 Physical memory: buddy allocator
 
@@ -514,11 +645,13 @@ lists, and the resulting crash happens later, somewhere unrelated. This is exact
 get guard pages.
 
 ```rust
-alloc_frame() -> Option<PhysAddr>          // order 0
-alloc_pages(order: u8) -> Option<PhysAddr>
-free_frame(pa: PhysAddr)
-free_pages(pa: PhysAddr, order: u8)
-stats() -> PmmStats                        // total, free, largest order available
+pmm_init::with_buddy(|b| ..)                       // the global `Buddy`, RANK_BUDDY, IRQ-off
+Buddy::allocate_frame() -> Option<PhysAddr>        // order 0
+Buddy::allocate(order: u8) -> Option<PhysAddr>     // order <= MAX_ORDER (10)
+Buddy::allocate_constrained(bytes, align, boundary) -> Option<(PhysAddr, u8)>  // DMA, §4.7
+unsafe Buddy::deallocate_frame(pa: PhysAddr)
+unsafe Buddy::deallocate(pa: PhysAddr, order: u8)  // asserts alignment and no double free
+Buddy::stats() -> PmmStats                         // total, free, largest free order
 ```
 
 Initialization walks the Limine memory map and ingests every `USABLE` region as power-of-two aligned
@@ -531,8 +664,9 @@ blocks, excluding:
 - anything not marked `USABLE`, including bootloader and ACPI reclaimable
 - anything above the 8 GiB physmap cap (§4.1)
 
-`free_frame_count()` must be O(1). Maintaining a running counter is trivial; walking the free lists to
-answer `meminfo` is not, and it gets called from a shell command that people hammer.
+`stats().free_frames` is a running counter, so `meminfo` costs O(1). `deallocate` does not: its
+double-free check and its buddy lookup walk the free lists, O(`MAX_ORDER` × list length) per call, so
+tearing down a large address space holds PT with IRQs off for that long (ROADMAP §12.1, F029).
 
 ## 4.3 Page tables
 
@@ -546,8 +680,11 @@ time:
    working across the `mov cr3`.
 
 Then set `EFER.NXE` if it is not already on, load CR3, and print `paging: cr3 ok`. Immediately after,
-patch the physmap PTEs covering LAPIC, I/O APIC, and HPET to uncacheable, preserving the 2 MiB page
-size rather than splitting.
+`acpi_init` patches the physmap PTEs covering the LAPIC, I/O APIC, and HPET to PCD + PWT. An address
+above `map_end` first gets fresh 4 KiB UC leaves (`map_gap`). Inside `map_end`,
+`Mapper::patch_physmap_uc` marks the whole covering 2 MiB leaf UC without splitting it, so RAM that
+shares the leaf becomes UC too, and its walk can skip a trailing leaf of an unaligned range (ROADMAP
+§20.1, F104).
 
 ### PTE flag policy
 
@@ -560,12 +697,15 @@ size rather than splitting.
 | Heap | present, global, writable, NX |
 | Kernel stacks | present, global, writable, NX, guard page unmapped below |
 | MMIO | present, global, writable, NX, PCD + PWT |
-| Low identity, first 2 MiB | present, writable, executable (trampoline) |
-| Low identity, rest | present, writable, NX |
+| Low identity, first 2 MiB | present, global, writable, executable (trampoline) |
+| Low identity, rest | present, global, writable, NX |
 
 NX everywhere by default. The one thing that must stay executable low down is the trampoline page;
 mapping the whole identity window NX is how the old tree produced a page fault during AP bring-up that
 looked exactly like a hang.
+
+The physmap covers the kernel image's frames, so it is a writable alias of `.text` and `.rodata`:
+W^X holds per virtual address, not per frame (ROADMAP §18.1, F105).
 
 MMIO gets PCD + PWT unconditionally. QEMU ignores cache attributes and write-back MMIO appears to
 work, so this bug only shows up on real hardware, months later, as inexplicable device behavior.
@@ -575,10 +715,14 @@ scanout is a later polish pass; double buffering is also parked (ROADMAP §5.1).
 ### TLB
 
 - `invlpg` after any single-PTE edit, including MMIO attribute patches.
-- Kernel mappings are `GLOBAL`, so they survive a CR3 reload. Unmapping one requires a shootdown on
-  every online CPU before the VA can be reused. See [section 7.9](#79-tlb-shootdown).
-- Before SMP exists, `invlpg` is sufficient. Write the shootdown hook as a no-op single-CPU function
-  from the start so the call sites are already correct when APs arrive.
+- Kernel mappings are `GLOBAL`. They survive a CR3 reload only where `CR4.PGE` is set: the
+  trampoline sets it on each AP, and the BSP keeps the CR4 Limine left, with PGE clear under the
+  pinned Limine (ROADMAP §10.6, F026, F085). Unmapping one requires a shootdown on every online CPU
+  before the VA can be reused. See [section 7.9](#79-tlb-shootdown).
+- A kernel-half edit runs a local `invlpg`, drops PT, then calls `paging::tlb_shootdown_others(va)`,
+  a hook that `ipi_init::init` points at `ipi_init::shootdown_va` before the first AP starts (§7.9).
+  Host tests, and boot before `ipi_init::init`, leave the hook unset; the local `invlpg` is enough
+  there.
 
 ## 4.4 Kernel heap
 
@@ -605,8 +749,11 @@ non-contiguous frames is the second.
   need physical contiguity and requesting it fragments the buddy allocator for nothing.
 - Freeing a VA range requires a TLB shootdown before reuse. Recently freed ranges go to the tail of
   the free list so the window between free and shootdown is not immediately reused.
-- Freeing the stack you are currently running on does not work. Dead thread stacks go on a deferred
-  reap list, drained by another thread.
+- Freeing the stack you are running on does not work. Rule: a dead thread's stack is freed only
+  after the CPU that ran it has switched off it (§2.8). Not yet enforced: `thread_exit` puts the
+  stack on the global 8-slot `kva_init::DEFERRED` list, and any CPU's `reap_zombies` can drain it
+  while the exiting CPU is still between `defer_free` and `switch_context` on that stack
+  (ROADMAP §10.10, F012); `defer_free` panics when all 8 slots are full (ROADMAP §10.10, F010).
 
 Default kernel stack is 4 pages (16 KiB) plus guard. If that turns out to be tight, raise it rather
 than debugging mysterious corruption.
@@ -629,13 +776,23 @@ so the PMM should be built expecting it to appear.
 
 ## 4.7 DMA
 
-`DmaBuffer` is physically contiguous (buddy `allocate_constrained`: size, alignment, optional
-power-of-two boundary including 4 GiB for 32-bit devices). The device-visible address is
-`dma_to_device(phys)` — identity until an IOMMU exists — never the HHDM virtual address.
+`DmaBuffer` is physically contiguous (buddy `allocate_constrained`: size, alignment, and an optional
+power-of-two boundary the buffer must not cross). A boundary is not an address limit:
+`DmaAlloc::dma32` sets a 4 GiB boundary, so its buffer never crosses a 4 GiB line, but the buffer can
+lie above 4 GiB once RAM extends there, and no allocator keeps a 32-bit device's buffer below 4 GiB
+(ROADMAP §20.6, F030). The device-visible address is `dma_to_device(phys)` (identity until an IOMMU
+exists), never a physmap virtual address.
 
 `sync_for_device` / `sync_for_cpu` always run at the API boundary. On x86 they are `fence(Release)` +
 `sfence` and `fence(Acquire)` + `lfence`. Descriptor publish stores the index after that store-side
 barrier, not a bare `compiler_fence`.
+
+Neither barrier orders a store before a later load from another address. After the driver stores
+`avail.idx`, it loads `avail_event` (EVENT_IDX) or `used.flags` to decide whether to kick; virtio 1.2
+§2.7.13.4.1 requires a full barrier (`mfence`) between the two, and `SplitQueue::get_used` needs one
+after its `used_event` store. Without them the driver and the device can each miss the other's
+update and the queue stops. `SplitQueue::should_kick` and `get_used` have neither (ROADMAP §10.3,
+F016).
 
 ---
 
@@ -669,44 +826,70 @@ is `AddressSpace::read_bytes`/`write_bytes` after `check_user_range`, copying th
 not check the PTE's `WRITABLE` bit. `arch::cpu::harden()` sets `CR4.SMEP|SMAP|UMIP` where CPUID allows
 and asserts `CR0.WP` on every CPU; `stac`/`clac` are no-ops when SMAP is missing.
 
-Each CPU gets its own GDT and TSS. The TSS holds `RSP0` (the kernel stack that `syscall` and ring
-transitions land on) and the IST array. `CpuTables` is the per-CPU bundle; the BSP keeps one in a
-static, phase 4 allocates one per AP.
+Each CPU gets its own GDT and TSS (`gdt::CpuTables`): the BSP's lives in a `BootCell`, and
+`gdt::alloc_ap_tables` allocates each AP's. TSS.RSP0 is the stack an interrupt or exception from
+ring 3 lands on. `syscall` does not read the TSS; its entry loads `PerCpu.kernel_rsp0`.
+`syscall_init::set_rsp0_for` sets both to the incoming thread's stack top on every switch (the
+per-CPU `fallback_rsp0` for a thread with no stack of its own); the CPU never writes RSP0. The TSS
+also holds the IST array.
 
-| IST index | Use |
-|-----------|-----|
-| 1 (`DOUBLE_FAULT_IST_INDEX = 0`) | `#DF`. A double fault often means the stack is gone, so it needs a stack that is known good. |
-| 2 | NMI |
-| 3 | `#MC` machine check |
-| 4 | `#DB` debug |
+| Gate IST field | `IstSlot` (index) | Use |
+|----------------|-------------------|-----|
+| 1 | `DoubleFault` (0) | `#DF`. A double fault often means the stack is gone, so it needs a stack that is known good. |
+| 2 | `Nmi` (1) | NMI |
+| 3 | `MachineCheck` (2) | `#MC` machine check |
+| 4 | `Debug` (3) | `#DB` debug |
 
 IST stacks are page-aligned guarded stacks from the KVA allocator (4 mapped pages + unmapped guard),
-one per slot, per CPU. The software index is zero-based; the hardware field in the TSS descriptor is
-one-based. Off by one here means the double fault handler runs on the broken stack and turns into a
-triple fault, which QEMU reports as a silent reboot loop.
+one per slot, per CPU. `IstSlot::index` is zero-based and selects the TSS `ist` entry;
+`IstSlot::hardware` (index + 1) is the one-based IST field of the IDT gate. Off by one here means the
+double fault handler runs on the broken stack and turns into a triple fault, which QEMU reports as a
+silent reboot loop.
 
 ## 5.2 IDT and exceptions
 
-256 entries, filled at boot, one shared IDT for exceptions plus per-CPU LVT vectors. Handlers use
-`x86-interrupt` ABI so the compiler emits the correct frame and `iretq`.
+One IDT of 256 gates (`arch::idt::IDT`) is shared by every CPU. `idt::init` gives every vector a
+default handler (`install_defaults`) that passes a ring-3 fault to `proc_init::try_user_fault` and
+otherwise dumps and halts, then installs the named exception, PIC, LAPIC, and IPI handlers
+(`overlay_named`). Every gate is a DPL-0 interrupt gate (`IdtEntry::interrupt`, type `0x8E`): it
+clears IF on entry, and `int n` from ring 3 raises `#GP`. `#DF`, NMI, `#MC`, and `#DB` run on IST
+stacks (§5.1). Handlers use the `x86-interrupt` ABI. `idt::set_handler` also lets `irq_init`
+(`0x31`–`0x7F`) and `kbd_init` (`0x21`, `0x30`) install gates of their own, which skip the GS step
+([section 5.10](#510-privilege-transitions) rule 1).
 
-Policy is **CPL-split** (Phase 9C). Catch intercept (in-guest tests) still wins first.
+`catch::intercept` runs first in every exception handler, in every build; only the in-guest test
+registry (`kernel_tests`) arms it. Planned (ROADMAP §10.2, F146): it compiles only under
+`kernel_tests` and acts only on a CPL-0 frame on the CPU that armed it.
 
-| Vector | Exception | Kernel (CPL=0) | User (CPL=3) |
-|--------|-----------|----------------|--------------|
-| `0x03` | `#BP` breakpoint | log, continue | log, continue |
-| `0x0E` | `#PF` page fault | halt (demand paging: Phase 12) | `SIGSEGV`, kill + diagnostic |
-| `0x0D` | `#GP` general protection | log selector/error code, halt | `SIGSEGV`, kill + diagnostic |
-| `0x06` | `#UD` invalid opcode | log CR2/RIP, halt | `SIGILL`, kill + diagnostic |
-| `0x00`/`0x10`/`0x13` | `#DE`/`#MF`/`#XF` | halt | `SIGFPE`, kill + diagnostic |
-| `0x08` | `#DF` double fault | log on IST stack, halt | halt (not a process kill) |
-| `0x12` | `#MC` machine check | log, halt | halt |
-| `0x02` | NMI | real NMIs on IST; panic halt is Fixed IPI `0xFE`, not NMI | same |
-| rest | | log vector + error code, halt | halt unless mapped above |
+Rule: ring 3 never halts the kernel. Each exception vector has one row below. The Ring 3 column is
+the rule; the last column says what the code does where it differs. Planned (ROADMAP §10.6, F005):
+the table lives in code, and a host test checks that each vector `0x00`–`0x1F` has a ring-3 row.
 
-Every **halting** handler prints the interrupt frame (RIP, CS, RFLAGS, RSP, SS), the error code, and CR2
-for faults. A halt with no register dump is a wasted crash. User-kill prints
-`user: pid N killed SIG…` (not a `vibeOS:` boot marker) and reaps the process.
+| Vector | Name | Ring 0 | Ring 3 | Ring 3, as built |
+|--------|------|--------|--------|------------------|
+| `0x00` | `#DE` | dump, halt | `SIGFPE` | as the rule |
+| `0x01` | `#DB` | dump on IST, halt | `SIGTRAP` (RFLAGS.TF, `int1`) | halts the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
+| `0x02` | NMI | dump on IST, halt; the panic stop is IPI `0xFE`, not NMI | not a ring-3 fault: the Ring 0 column applies | as the rule |
+| `0x03` | `#BP` | log, continue | `SIGTRAP` (`int3`) | `int3` hits the DPL-0 gate, raises `#GP`, and gets `SIGSEGV`. Rule; not yet enforced: ROADMAP §10.6 (F148) |
+| `0x04`, `0x05`, `0x07`, `0x0A` | `#OF`, `#BR`, `#NM`, `#TS` | dump, halt | `SIGSEGV` | `sig_for_vec` has no row, so one would halt the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
+| `0x06` | `#UD` | dump, halt | `SIGILL` | as the rule; an SSE floating-point error also arrives here (row `0x13`) |
+| `0x08` | `#DF` | dump on IST, halt | not a ring-3 fault: the Ring 0 column applies | as the rule |
+| `0x0B`, `0x0C` | `#NP`, `#SS` | dump, halt | `SIGBUS`; `SIGSEGV` for a fault on the return-to-user `iretq` (§5.10 rule 2) | the `iretq` case halts. Rule; not yet enforced: ROADMAP §10.6 (F007) |
+| `0x0D` | `#GP` | dump with error code, halt | `SIGSEGV`, including a fault on the return-to-user `iretq` (§5.10 rule 2) | the `iretq` case halts. Rule; not yet enforced: ROADMAP §10.6 (F007) |
+| `0x0E` | `#PF` | dump with CR2, halt. Planned (ROADMAP §10.6): a fault inside a user-memory accessor returns `EFAULT` | `SIGSEGV`. Planned (ROADMAP §12.2): a fault on a page that a region reserves is resolved first | as the rule |
+| `0x10` | `#MF` | dump, halt | `SIGFPE` | cannot fire: `CR0.NE` is clear, so an x87 error raises the masked IRQ13 and is lost. Rule; not yet enforced: ROADMAP §10.6 (F026) |
+| `0x11` | `#AC` | dump, halt | `SIGBUS` | halts the kernel if `CR0.AM` is set (INIT clears it on each AP and no kernel code sets it; the BSP keeps Limine's value). Rule; not yet enforced: ROADMAP §10.6 (F005) |
+| `0x12` | `#MC` | dump on IST, halt; `CR4.MCE` is clear, so a machine check shuts the CPU down with no dump (ROADMAP §10.6, F026) | not a ring-3 fault: the Ring 0 column applies | as the rule |
+| `0x13` | `#XF` | dump, halt | `SIGFPE` | arrives as `#UD` and gets `SIGILL`: `CR4.OSXMMEXCPT` is clear. Rule; not yet enforced: ROADMAP §10.6 (F026) |
+| `0x09`, `0x0F`, `0x14`–`0x1F` | reserved, `#VE`, `#CP`, `#HV`, `#VC`, `#SX` | dump, halt | `SIGSEGV` | `sig_for_vec` has no row, so one would halt the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
+| `0x20`–`0xFF` | IRQs and IPIs | handle, return; an unused vector or an unexpected PIC line halts (§5.5) | handle, return to ring 3 | `0x21`, `0x30`, and `0x31`–`0x7F` run on the user GS base and halt the kernel. Rule; not yet enforced: ROADMAP §10.6 (F004) |
+
+A halting handler prints the interrupt frame (RIP, CS, RFLAGS, RSP, SS), the error code where the
+vector pushes one, and CR2 for `#PF`, then the common dump (§2.5). A halt with no register dump is a
+wasted crash. A ring-3 kill prints `user: pid N killed SIG<name> rip=0x<rip> err=0x<err>`, plus
+` cr2=0x<addr>` for `#PF` (a `user:` line, not a `vibeOS:` marker), and ends the process through
+`finish_exit`. A ring-3 fault with no bound process (the in-guest test that calls `enter_user`
+directly) falls through to the halt; that test's own `#UD` is taken first by the `catch` it armed.
 
 ## 5.3 Vector map
 
@@ -717,7 +900,8 @@ reschedule or shootdown is not starved by a busy NIC.
 |--------|-------|
 | `0x00`–`0x1F` | CPU exceptions. Reserved by hardware. |
 | `0x20`–`0x2F` | Legacy PIC IRQ0–15 after remap. Live only until the I/O APIC takes over. `0x20` PIT, `0x21` keyboard, slave base `0x28`. |
-| `0x30`–`0x7F` | Dynamically allocated device vectors: I/O APIC GSIs and MSI/MSI-X. |
+| `0x30` | Keyboard: the I/O APIC route of ISA IRQ1 (`vectors::KBD`), fixed. |
+| `0x31`–`0x7F` | Device pool (`DEVICE_VEC_START`..=`DEVICE_VEC_END`): I/O APIC GSIs and MSI/MSI-X, allocated at runtime. |
 | `0x80`–`0xEF` | Reserved. Room for more device vectors, per-CPU device queues. |
 | `0xF0` | LAPIC timer |
 | `0xF1` | LAPIC error LVT |
@@ -742,7 +926,9 @@ irq::set_handler(vec, my_handler);
 ```
 
 The kernel binary exposes this as `irq_init::allocate_vector`. Allocate is refused
-inside a hard-IRQ (a per-CPU `IN_ISR` flag set by the dispatcher). That flag is not
+inside a device hard-IRQ: `irq_init::dispatch` sets a per-CPU `IN_ISR` flag around the handler. The
+timer, IPI, and keyboard ISRs do not set it, and no blocking primitive checks it (ROADMAP §10.3,
+F110). That flag is not
 `InterruptGuard` nest: in-guest tests hold a guard on the BSP, so a nest check would
 false-refuse every allocate from `ktest`.
 
@@ -770,22 +956,27 @@ vector arrived via PIC or LAPIC and signals the right controller.
 
 A threaded handler's top half runs in `dispatch` (ack / mask / wake only). The
 bottom half is a kernel thread pinned to the last online CPU; it may allocate and
-block. `set_threaded` is refused inside a hard-IRQ. The softirq stand-in is the
+block. `set_threaded` is refused inside a hard-IRQ. The top half is optional:
+`set_threaded(vec, None, work)` is accepted, and `dispatch` EOIs before the bottom half runs, so on a
+level-triggered INTx route a device that nothing quiets raises the line again at once (ROADMAP §15.2,
+F099). The softirq stand-in is the
 high-prio workqueue: IRQ context enqueues a `fn(usize)` and wakes workers.
 
 ## 5.5 8259 PIC
 
 The PIC is a bootstrap artifact and a fallback, nothing more.
 
-- Remap master to `0x20`, slave to `0x28`. Firmware may leave them at vectors 0x08–0x0F, which collide
-  with `#DF` and friends, so a spurious IRQ before remap looks like a CPU exception.
+- Remap master to `0x20`, slave to `0x28`. Firmware may leave them at vectors `0x08`–`0x0F`, which
+  collide with CPU exceptions (`#DF` at `0x08`, `#TS` through `#PF` at `0x0A`–`0x0E`), so a spurious
+  IRQ before remap looks like a CPU exception.
 - Mask everything (`0xFF` to both data ports) immediately after remap.
-- After TSC calibration, the bootstrap tick is the LAPIC timer when it proves
-  (live [section 3.3](#33-_start-order) step 13b). Unmask PIC IRQ0 only on the
-  PIT fallback (LINT0 ExtINT). `sti` is allowed for that prove; `on_timer_tick`
-  is a no-op until the idle thread exists. `irq: enabled` is Phase 3 slice B,
-  after `sched: cpu0 ready`. Unmask IRQ1 only once a keyboard handler exists
-  (phase 5 step 17); the default PIC path halts on an unexpected line.
+- After TSC calibration ([section 3.3](#33-_start-order) step 13b), `apic_init::prove` arms the LAPIC
+  timer (TSC-deadline, then periodic) with interrupts enabled and checks that it ticks. If it ticks,
+  it is the tick. If not, the PIT drives the tick through LINT0 ExtINT, the only case that unmasks
+  PIC IRQ0. `on_timer_tick` does nothing until the idle thread exists. The `irq: enabled` marker
+  (step 15) follows `sched: cpu0 ready`. The keyboard (step 17) takes vector `0x30` through the
+  I/O APIC whenever `kbd_init` can route ISA IRQ1; PIC IRQ1 is unmasked only when there is no route
+  and the PIT owns the tick. The default PIC handler halts on an unexpected line.
 - Once the I/O APIC routes devices and the LAPIC timer is verified ticking, mask the PIC completely.
   Leaving it live means every interrupt is delivered twice.
 - Keep the PIT driver code. It is still the calibration fallback and still provides the delays that AP
@@ -794,8 +985,8 @@ The PIC is a bootstrap artifact and a fallback, nothing more.
 FADT `iapc_boot_arch` bit 0 is `LEGACY_DEVICES`, not 8259 presence: QEMU clears it and still has an
 8259. The PIC step before `lidt` skips its ICW sequence when the bit is clear, but a second remap and
 mask after TSC calibration always runs, so the PIC is remapped and masked before the first `sti` on
-every boot. `pic: remapped` means this step finished. Deciding presence properly, from the MADT
-`PCAT_COMPAT` flag with a mask read-back probe, is ROADMAP §20.1.
+every boot. `pic: remapped` means this step finished. Deciding presence from the MADT
+`PCAT_COMPAT` flag with a mask read-back probe is ROADMAP §20.1 (F094).
 
 ## 5.6 I/O APIC
 
@@ -856,6 +1047,75 @@ not "fix" this by inheriting the outgoing nest onto the incoming thread.
   already exist; what is left is a policy that moves MSI-X messages and IOAPIC
   dests when a queue saturates one core.
 
+## 5.10 Privilege transitions
+
+Every entry to and exit from ring 3, and the state each boundary must hold. "User GS" means
+`GS_BASE` holds the user base (0; `enter_user` and `enter_user_full` write it) and `KERNEL_GS_BASE`
+holds this CPU's `PerCpu`. "Kernel GS" means `GS_BASE` holds this CPU's `PerCpu`; `KERNEL_GS_BASE`
+then holds the user base after a `swapgs`, or the `PerCpu` address after `per_cpu_init::init_bsp`,
+`install_gs`, or `arch::gs::force_kernel` (§7.5). The table is the required state. A rule the
+code does not meet yet says "Rule; not yet enforced", names the ROADMAP line that lands it, and then
+describes the current code.
+
+| Point | CPL, stack | GS | IF | AC |
+|-------|------------|----|----|----|
+| `vibeos_syscall_entry`, before its `swapgs` | 0, user RSP | user | 0 (FMASK) | 0 (FMASK) |
+| syscall entry after its `swapgs`, and the syscall body | 0, `PerCpu.kernel_rsp0` | kernel | 0 on entry; the body leaves IF as it found it | 0 |
+| syscall exit, from the return of `vibeos_syscall_stub` to `sysretq` or `iretq` | 0, kernel stack, then the user RSP | kernel; user after `swapgs` | 0 (rule 4) | 0 |
+| `enter_user` and `enter_user_full`, from `mov gs` to `iretq` | 0, kernel stack | user | 0 (rule 4) | 0 |
+| non-IST vector taken at CPL 3 | 0, TSS.RSP0 | user until the stub's `swapgs` | 0 (interrupt gate) | ring 3's until the stub's `clac` (rule 5) |
+| non-IST vector taken at CPL 0 | 0, interrupted stack | kernel, except rule 2's case | 0 (interrupt gate) | the interrupted value until the stub's `clac` (rule 5) |
+| IST vector: `#DF`, NMI, `#MC`, `#DB` | 0, its IST stack | whatever the interrupted point held (rule 3) | 0 | the interrupted value until the stub's `clac` (rule 5) |
+| vector exit to CPL 3 | 0, then 3 at `iretq` | user after `swapgs` | 0 until `iretq` restores ring 3's | `iretq` restores ring 3's |
+
+1. One entry stub per vector, owned by `arch/idt.rs` and generated from one table. The stub runs
+   `cld`, `clac` when SMAP is live, and the GS decision, calls a body function, and mirrors the GS
+   decision on exit. `idt::set_handler` takes a body function, never a gate, and no
+   `extern "x86-interrupt"` function exists outside `src/arch/`. Rule; not yet enforced: ROADMAP
+   §10.6 (F004). Each `arch/idt.rs` handler calls `gs_enter` and `gs_leave` itself, and
+   `irq_init::device_irq::<N>` (`0x31`–`0x7F`), `kbd_init::kbd_ioapic` (`0x30`), and
+   `kbd_init::kbd_pic` (`0x21`, replacing the `arch/idt.rs` IRQ1 gate) are installed through
+   `idt::set_handler` with no GS step. One of them taken at CPL 3 reads `gs:[0]` at VA 0 and halts
+   the kernel.
+2. A non-IST vector decides `swapgs` from the saved CS.RPL (`arch::gs::from_user`), with one
+   exception: a `#GP`, `#NP`, or `#SS` whose saved RIP is a return-to-user `iretq` arrives with the
+   kernel CS and the user GS, and its handler swaps GS and sends the process `SIGSEGV`. User
+   mappings end at `USER_MAP_END` (`0x0000_7FFF_FFFF_F000`), so a `syscall` in the last user page
+   cannot leave a non-canonical return RIP. Rule; not yet enforced: ROADMAP §10.6 (F007). The
+   syscall exit sends a non-canonical return RIP to `swapgs; iretq`, and on KVM or hardware the
+   `#GP` that `iretq` raises runs on the user GS base and ends in a silent hang or triple fault;
+   TCG skips the canonical check.
+3. An IST vector decides `swapgs` from the sign of `GS_BASE` (`rdmsr`; a kernel base is negative),
+   because it can interrupt CPL-0 code that has the user GS loaded (the rows above whose GS column
+   says user), and on exit it restores the GS state it found. Rule; not yet enforced: ROADMAP §10.6
+   (F007); the IST handlers decide from CS.RPL. The sign test fails once FSGSBASE lets userspace
+   write a kernel-half GS base. Planned (ROADMAP §18.3, F133): with FSGSBASE on, IST entry saves `GS_BASE` with `rdgsbase`, loads this CPU's
+   `PerCpu` pointer, and restores the saved value on exit.
+4. IF=0 from the first instruction of a return-to-user sequence to its `sysretq` or `iretq`:
+   `PerCpu.syscall_scratch` holds the return value and the `iretq` frame per CPU, not per thread,
+   and the GS base is the user's for part of each sequence. Required: the syscall exit runs `cli` right after
+   `call vibeos_syscall_stub`; `enter_user` and `enter_user_full` run `cli` before `mov gs`; each
+   checks IF=0 in debug builds; `iretq` restores ring 3's IF from the frame. Rule; not yet enforced:
+   ROADMAP §10.6 (F001, F006). The syscall exit has no `cli`, and `console_init::wait_key`
+   returns with IF=1 from its `sti; hlt` (F001); `enter_user_full` runs with IF=1 (F006);
+   `syscall_init::run_user` runs `cli` before `enter_user`.
+5. Every interrupt and exception entry clears RFLAGS.AC before any other code: an interrupt gate
+   clears IF and TF but not AC, and ring 3 can set AC with `popf`. The syscall entry clears AC
+   through FMASK (bit 18). Rule; not yet enforced: ROADMAP §10.6 (F088); no interrupt or exception
+   entry runs `clac`. Planned (ROADMAP §10.6):
+   `stac` appears only inside the user-memory accessors.
+6. A handler on an IST stack does not block and does not switch threads: a nested entry of the same
+   vector restarts at the top of that IST stack and overwrites the first frame. Holds, because every
+   IST handler halts, except that under `kernel_tests` an armed `catch` longjmps off the IST stack.
+   Planned (ROADMAP §10.6, F005): for a CPL-3 frame, `debug_ex` moves from the IST stack to the
+   thread's kernel stack and then calls `try_user_fault` (the ring-3 `#DB` kill §5.2 requires),
+   because `try_user_fault` ends in `finish_exit`, which can switch threads.
+7. Every gate but `#BP` is DPL 0, so `int n` from ring 3 raises `#GP`; the `#BP` gate is DPL 3, so
+   `int3` delivers `SIGTRAP`. RFLAGS.TF and `int1` (`0xF1`) reach `#DB` at any DPL. Rule; not yet
+   enforced: ROADMAP §10.6 (F148). Every gate is DPL 0 today (`IdtEntry::interrupt`, type `0x8E`).
+8. Ring 3 never halts the kernel: §2.5 states the rule, and the §5.2 table gives each vector's ring-3
+   action. Rule; not yet enforced for each §5.2 row whose last column names a ROADMAP line.
+
 ---
 
 # 6. Time
@@ -899,10 +1159,14 @@ bring-up depends on.
 Serialize around `rdtsc`. Out-of-order execution can move the read across the interval boundary. Use
 `lfence` before, or `rdtscp`, which serializes on its own and also gives the CPU number.
 
-Each CPU calibrates and stores its own `tsc_per_ms` in its per-CPU area. TSCs are usually synchronized
-on modern hardware but the frequency measurement is not free of noise, and a shared global means one
-CPU's bad sample skews every other CPU's delays. Check the invariant TSC CPUID bit and log loudly if
-it is absent, because everything downstream assumes the TSC does not change rate.
+The BSP calibrates `tsc_per_ms` once (`time_init::init`), and every CPU uses that value through
+`time_init::tsc_per_ms()`: delays, the TSC-deadline arm, and `now_ns`. Each CPU's `PerCpu.tsc_per_ms`
+holds a copy that only an in-guest test reads (ROADMAP §10.7 deletes it, F111). The LAPIC periodic
+count is also measured once, on the BSP, and `apic_init::arm_ap` reuses it on every AP. Both assume
+one TSC rate and one LAPIC timer rate on every CPU. `time_init::init` checks the invariant TSC CPUID
+bit and prints `vibeOS: time: invariant tsc absent` when it is clear, because everything downstream
+assumes the TSC does not change rate. Planned (ROADMAP §10.7): each AP measures its TSC against the
+BSP's at bring-up, and a marker reports the largest skew.
 
 ## 6.3 The tick
 
@@ -922,8 +1186,13 @@ serializing instruction), then `IA32_TSC_DEADLINE`. `lfence;rdtsc` / `rdtscp` do
 not drain the UC LVT store (SDM Vol. 3A). Rearm on the IRQ path only writes the
 MSR; LVT is already in deadline mode.
 
-Each fallback is worse than the one above it and all three must work, because the difference between
-them is a QEMU flag and CI runs both. `-cpu qemu64,-tsc-deadline` forces the periodic path.
+Each fallback is worse than the one above it, and all three must work. CI runs two of them. Under
+TCG, QEMU never advertises `CPUID.01H:ECX[24]`, so `make test-kernel` (`-cpu max`) and
+`make test-lapic-fallback` (`-cpu qemu64,-tsc-deadline`) both take the periodic path, and
+`make test-e2e-pit` (`-machine pc,hpet=off`) boots on the PIT tick. `arm_tsc_deadline`,
+`rearm_deadline`, and the `TscDeadline` arm of `apic_init::arm_ap` run only under KVM or on hardware,
+and no CI tier runs them. Planned (ROADMAP §10.1, F078): the nightly KVM leg runs them. Under KVM,
+`-cpu qemu64,-tsc-deadline` forces the periodic path.
 
 When the LAPIC timer owns the tick, mask the PIT's GSI at the I/O APIC. Do not merely ignore its
 interrupts.
@@ -942,15 +1211,21 @@ sleep_ms(ms: u64)       // parks the calling thread. Everything after the schedu
 that tick. Read them unprotected and you eventually get one from before an interrupt and one from
 after, producing a timestamp that goes backwards. That is not hypothetical; it happened.
 
-Publish them as a seqlock: the writer bumps a sequence number, writes both fields, bumps it again; the
-reader retries until it sees a stable even sequence. Release ordering on the write, acquire on the
-read.
+Publish them as a seqlock. The writer bumps the sequence to odd, issues `fence(Release)`, stores both
+fields, and bumps the sequence to even with Release. The reader loads the sequence with Acquire, loads
+both fields, issues `fence(Acquire)`, reloads the sequence, and retries on an odd or changed value.
+`TickClock::write` has no release fence after the odd bump, and the release half of its
+`fetch_add(AcqRel)` orders only earlier accesses. x86's locked `fetch_add` is a full barrier and hides
+that; aarch64 with LL/SC atomics does not (ROADMAP §10.8, F098).
 
 Two warnings about testing this. A test that computes the expected "now" from the same tick value it
 just read is monotonic by construction and passes even with torn reads, so the test needs an
-independently published timestamp to compare against. And a single-threaded test will never see the
-race at all, so the real coverage is an in-guest test hammering `now_us` across yields with a timer
-firing underneath.
+independently published timestamp to compare against. And a single-threaded test never sees the race,
+so the in-guest coverage has to read the clock from threads that yield while a timer fires and compare
+it with that independent timestamp. The in-guest tests `now_us_monotonic` and `now_us_under_yields`
+do neither. `now_ns` returns `LAST_NS.fetch_max(n).max(n)`, which never goes below an earlier return,
+so neither test can fail, and the yields variant runs one thread that calls `hlt_once`. Only the host
+tests `now_us_seqlock_retry_under_simulated_writer` and `seqlock_threaded_writer_never_tears` exercise a torn read, and both bypass `LAST_NS` (ROADMAP §10.2, F100).
 
 ### Global monotonicity under SMP
 
@@ -961,6 +1236,13 @@ Once every CPU has its own LAPIC timer, "the tick count" stops having a single w
 2. Per-CPU time, with a global monotonic clock derived from the TSC alone once it is known invariant
    and synchronized.
 3. A real distributed clock with cross-CPU synchronization and drift correction.
+
+The kernel runs option 1. Only CPU 0's timer interrupt advances the tick (`apic_init::on_timer_irq`
+calls `time_init::on_hw_tick` on CPU 0 alone), `now_ns` interpolates from it, and `LAST_NS` clamps it
+monotonic. Timer interrupts that arrive while one is already pending coalesce into one, so a CPU 0
+IF-off window longer than 1 ms loses ticks, and `now_ns` stays behind the TSC from then on. In
+TSC-deadline mode each rearm starts from a TSC read inside the ISR, so a period is 1 ms plus interrupt
+latency but counts as 1 ms (ROADMAP §10.3, F027).
 
 Option 2 is the destination: with an invariant, synchronized TSC and a single calibration constant,
 `now_ns` is a `rdtsc` and a multiply with no shared state at all. Get there before relying on
@@ -976,6 +1258,9 @@ The `sleep_ms` path needs a data structure, not a linear scan of every thread on
   expiry.
 - Every blocking operation takes an optional deadline. A blocked thread with no timeout and no waker
   is a permanent leak, and the only way to find one is to have made timeouts mandatory from the start.
+- The blocked-thread sweep in `schedule_inner` (every `SWEEP_TICKS` ticks, for timeouts at least
+  `OVERDUE_NS`, 5 s, late) never reports: `pop_expired_into` has already drained every expired
+  timeout when `overdue(now)` runs (ROADMAP §10.7, F111).
 
 ## 6.6 Tickless and wall clock
 
@@ -1021,7 +1306,7 @@ Limine hands over the RSDP physical address. From there:
 | MADT | `APIC` | LAPIC MMIO base, I/O APIC bases and GSI bases, interrupt source overrides, per-CPU APIC IDs |
 | HPET | `HPET` | Main counter MMIO base, used for TSC calibration |
 | FADT | `FACP` | `iapc_boot_arch` at offset 109; bit 0 is `LEGACY_DEVICES` (not 8259 presence, §5.5) |
-| MCFG | `MCFG` | PCIe ECAM base, needed for configuration space access |
+| MCFG | `MCFG` | PCIe ECAM base. ECAM reaches extended config space (offsets `0x100` and up); below that offset, `0xCF8`/`0xCFC` reaches every bus ([section 9.2](#92-memory)) |
 
 MADT entry types in use:
 
@@ -1069,9 +1354,13 @@ Relevant MSRs across this section:
 |-----|---------|
 | `0x1B` | `IA32_APIC_BASE`. Bit 11 global enable, bits 12–35 base, bit 8 BSP flag. |
 | `0x6E0` | `IA32_TSC_DEADLINE`. Write 0 to disarm. After an LVT timer write into TSC-deadline mode, `MFENCE` before this MSR. |
-| `0xC000_0080` | `IA32_EFER`. Bit 8 LME, bit 11 NXE. |
-| `0xC000_0101` | `IA32_GS_BASE`. Per-CPU struct pointer. |
-| `0xC000_0102` | `IA32_KERNEL_GS_BASE`. Equal to `GS_BASE` until userspace and `swapgs`. |
+| `0xC000_0080` | `IA32_EFER`. Bit 0 SCE, bit 8 LME, bit 11 NXE. |
+| `0xC000_0081` | `IA32_STAR`. `SYSCALL` loads CS `0x08`; `SYSRET` base `0x10` gives user SS `0x1B` and CS `0x23`. |
+| `0xC000_0082` | `IA32_LSTAR`. `vibeos_syscall_entry`. |
+| `0xC000_0084` | `IA32_FMASK`. `0x47700`: `SYSCALL` clears TF, IF, DF, IOPL, NT, and AC. |
+| `0xC000_0100` | `IA32_FS_BASE`. User TLS base, written by `enter_user`, `enter_user_full`, and `execve`; not switched per thread ([section 7.5](#75-per-cpu-data)). |
+| `0xC000_0101` | `IA32_GS_BASE`. The `PerCpu` address in ring 0; the user GS base (0) in ring 3. |
+| `0xC000_0102` | `IA32_KERNEL_GS_BASE`. The inactive GS base: the `PerCpu` address while the CPU runs ring 3, the user GS base after an entry `swapgs` ([section 7.5](#75-per-cpu-data)). |
 
 ## 7.3 AP trampoline
 
@@ -1082,7 +1371,12 @@ The trampoline is `src/arch/trampoline.S`, assembled with `global_asm!` into `.t
 (inside `__rodata_start..__rodata_end` so the kernel map covers the copy source) and copied
 to `0x8000`. It goes: real mode, set up a GDT, enable protected mode, load CR3 from the param block,
 set `EFER.LME` and `EFER.NXE`, enable paging, long jump to 64-bit, load the stack, call the Rust
-entry point. Addresses in the blob are physical (`0x8000`), not the kernel VMA.
+entry point. Addresses in the blob are physical (`0x8000`), not the kernel VMA. On the way it clears
+`CR0.CD` and `CR0.NW` (then `wbinvd`), sets `CR4.PAE` and `CR4.PGE`, and sets `CR0.PG` and `CR0.WP`.
+
+The blob loads CR3 with a 32-bit `mov`, so the kernel PML4 must lie below 4 GiB.
+`smp_init::start_one` checks it and, when the PML4 is higher, skips the AP with
+`vibeOS: smp: cr3 above 4GiB`; nothing allocates the PML4 below 4 GiB (ROADMAP §20.1).
 
 `EFER.NXE` matters. Kernel pages are mapped NX, and if the AP enters long mode without NXE the NX bits
 are reserved-bit violations and the first kernel page it touches faults.
@@ -1094,7 +1388,7 @@ The BSP patches parameters into the tail of the blob:
 | `0xD0` | CR3 for the AP |
 | `0xD8` | Stack top |
 | `0xE0` | 64-bit Rust entry point |
-| `0xE8` | IDT pointer, 10 bytes |
+| `0xE8` | IDT pointer, 10 bytes. `patch_params` writes it and the blob never reads it; `ap_entry` loads the IDT after `GS_BASE` (ROADMAP §10.7 deletes it, F111). |
 
 Two correctness requirements:
 
@@ -1119,12 +1413,19 @@ For each enabled APIC ID that is not the BSP:
 3. Send INIT. Wait 10 ms, the Intel-specified minimum.
 4. Send SIPI. Wait ~1 ms. Send SIPI again. Some hardware needs the second one; sending two is harmless.
 5. Wait for the AP to set its ready flag, with a 3 second timeout.
-6. On timeout: free the stack and the per-CPU area, log the failure, continue with the remaining CPUs.
-   Leaking a 16 KiB stack per failed AP is exactly the kind of thing that goes unnoticed for months.
+6. On timeout: send INIT to that APIC ID, clear its online bit, log the failure, and continue with the
+   remaining CPUs. Leak the AP's stack, GDT/TSS and IST stacks, `PerCpu` slot, and idle TCB: an AP that accepted a
+   SIPI and then stalled past 3 s can keep running on them, or read the next AP's parameter block, and
+   the BSP cannot tell it from an AP that never started. `smp_init::start_one` breaks this rule: it
+   frees the stacks and GDT/TSS and marks the idle TCB Dead, with no INIT, and does not clear the
+   online bit (ROADMAP §20.1, F032).
 
-On the AP side, in order: load per-CPU GDT and TSS, set `GS_BASE` and
-`KERNEL_GS_BASE`, load the IDT, enable the LAPIC, calibrate and arm the LAPIC timer, publish the ready
-flag, `sti`, enter the scheduler as the idle thread.
+On the AP side (`smp_init::ap_entry`), in order: `cli`; load the per-CPU GDT and TSS; set `GS_BASE`
+and `KERNEL_GS_BASE` (`per_cpu_init::install_gs`); program the syscall MSRs and the FPU bits and set
+RSP0 (`syscall_init::init_ap`); load the shared IDT; `arch::cpu::harden` (SMEP, SMAP, and UMIP where
+CPUID allows); enable the LAPIC; copy the BSP's `tsc_per_ms` and timer mode into `PerCpu`; arm the
+LAPIC timer with the BSP's calibration (`apic_init::arm_ap`); mark the CPU online and print
+`vibeOS: sched: cpu<i> ready`; publish the ready flag; `sti`; enter the idle loop.
 
 `GS_BASE` must be set before any `lidt` and before `sti`. NMI and timer IRQs both
 read per-CPU state through `gs:[0]`. Setting it after `lidt` is a null dereference
@@ -1132,44 +1433,81 @@ waiting for a non-maskable interrupt, even with IF off.
 
 ## 7.5 Per-CPU data
 
-One `PerCpu` struct per CPU, reached through `GS_BASE`. `KERNEL_GS_BASE` is set to the same value until
-userspace exists and `swapgs` becomes meaningful.
+One `PerCpu` struct per CPU. In ring 0, `GS_BASE` holds its address. While the CPU runs ring 3,
+`KERNEL_GS_BASE` holds it and `GS_BASE` holds the user GS base (always 0). `enter_user` and
+`enter_user_full` set that state, each `swapgs` exchanges the two, and `per_cpu_init::init_bsp`,
+`per_cpu_init::install_gs`, and `arch::gs::force_kernel` set both MSRs to the `PerCpu` address.
 
 `self_ptr` sits at offset 0 so `gs:[0]` yields the struct address, which is how a `&PerCpu` is obtained
 without knowing which CPU you are on.
 
-Contents:
+Contents (`src/per_cpu.rs`):
 
-- logical cpu id and APIC id
-- ready queue
-- wake inbox for work handed over from other CPUs
-- idle thread handle, current thread pointer
-- local tick count, context switch count
-- `tsc_per_ms` and timer mode
-- reserved scratch for the syscall entry path
+- `self_ptr`, logical CPU id, APIC id
+- `current`, `idle`, and `idle_id`
+- `runq`, this CPU's ready FIFO (owner only, IRQs off), and `ready_head`, a copy of its head that
+  only an in-guest test reads (ROADMAP §10.7 deletes it, F111)
+- `wake_inbox`, a `u64` `ThreadId` bitset: a remote CPU ORs in a thread's bit and sends IPI `0xFD`
+- `irq_nest`, tick and switch counts, `slice_tsc`, `idle_tsc`, and `switch_scratch`, a `CpuContext` that no code reads or writes
+- `tsc_per_ms` (a copy of the BSP's value, [section 6.2](#62-calibrating-the-tsc)) and `timer_mode`
+- `ready`, the flag an AP sets last in bring-up ([section 7.4](#74-ap-bring-up-sequence))
+- `kernel_rsp0` and `as_cr3`, which the context switch updates; `tss`, through which it writes TSS.RSP0; and `fallback_rsp0`, the RSP0 it uses for a thread without `Tcb.stack` (below)
+- `syscall_scratch`: the user RSP, the syscall return value, and the `iretq` RIP, RFLAGS, and RSP.
+  It is per CPU, not per thread, so it is valid only while IF=0. The syscall exit breaks this: it runs without a
+  `cli`, and a console `read` that waited in `sti; hlt` returns to it with IF=1 (ROADMAP §10.6, F001).
 
-Phase 3 slice A installs one BSP `PerCpu` through `GS_BASE` and
-`KERNEL_GS_BASE` (not a `MAX_CPUS` array, no `swapgs`). Slice B allocates
-the array from the MADT CPU count, brings up APs, and fills timer mode,
-wake inbox (stub), and `ready`. `current` and `idle` are `*mut Tcb`. Slice C owns per-CPU `runq` plus
-`wake_inbox`; `ready_head` is that CPU's FIFO head. Cross-CPU wake is
-inbox + IPI `0xFD`.
+`per_cpu_init::init_bsp` allocates one `PerCpu` per MADT CPU in a heap array, not a static array
+sized by a `MAX_CPUS` guess, and installs the BSP at slot 0; each AP installs its own slot with
+`per_cpu_init::install_gs`. `current` and `idle` are `*mut Tcb`. The other per-CPU tables are static
+and cap the CPU count at 64: the MADT `apic_ids` array (`acpi::MAX_CPUS`), `irq_init::IN_ISR`,
+`ipi_init::SHOOT`, `per_cpu_init::WITH_BUSY`, `sync_init::HELD`, `log_init::EMITTING` and `log_init::STAGE`, and the `u64` online mask. The 64-slot thread table, of which boot takes 2N+3 at
+`-smp N`, limits it further (ROADMAP §10.4, F037).
 
-Allocate the array on the heap once the CPU count is known from the MADT rather than sizing a static
-array by a `MAX_CPUS` guess.
+`per_cpu_init::current()` is valid only after the entry path has put the kernel base in `GS_BASE`. The
+`swapgs` instructions are the three in `vibeos_syscall_entry` (entry, `sysretq` exit, `iretq` exit)
+and the one in `arch::gs::do_swapgs`, which the handlers defined in `arch/idt.rs` call through
+`gs_enter` and `gs_leave` when the saved CS.RPL is 3. The device pool stubs (`0x31`–`0x7F`) and the
+two keyboard ISRs (`0x30`, `0x21`), installed from outside `arch/idt.rs`, never call it; one taken at
+CPL 3 faults on `gs:[0]` and halts the kernel ([section 5.10](#510-privilege-transitions) rule 1;
+ROADMAP §10.6, F004).
 
-`PerCpu::current()` is safe from an ISR once entry has put the kernel base in `GS_BASE`. Since Phase 9
-the GS base changes on every ring transition. `swapgs` lives in the syscall entry and exit and in
-`arch::gs::do_swapgs` (the ISR path, taken when the interrupted CS.RPL is 3), and nowhere else. The
-CS.RPL rule is wrong for NMI, `#MC`, and `#DB`: they can arrive in the one-instruction windows between
-`syscall` and the entry `swapgs`, or between the exit `swapgs` and `sysretq`/`iretq`, with a kernel CS
-and the user base loaded. ROADMAP §10.6 closes that for the current kernel (IST vectors decide from the
-sign of `GS_BASE`) and §18.3 for FSGSBASE, where a user can load a kernel-half base. See
+The CS.RPL rule is also wrong wherever CS is the kernel's while `GS_BASE` holds the user base: NMI,
+`#MC`, and `#DB` in the one-instruction windows between `syscall` and the entry `swapgs` or between
+the exit `swapgs` and `sysretq`/`iretq`; a `#GP` raised by the user-return `iretq` (F007); and an
+interrupt taken inside `enter_user_full`, which runs with IF=1 from its `mov gs` to its `iretq`
+(F006). ROADMAP §10.6 closes these for the current kernel (the IST vectors decide from the sign of
+`GS_BASE`, a `#GP`, `#NP`, or `#SS` on a labeled user-return `iretq` becomes `SIGSEGV`, and
+`enter_user_full` runs `cli` before its `mov gs`) and §18.3 for FSGSBASE, where a user can load a kernel-half base. See
 [section 9.3](#93-interrupts).
 
-Exclusive `&mut PerCpu` is `with_current` (IRQs off, panics on re-entry). `switch_now` uses
+`with_current` gives `&mut PerCpu` with IRQs off and panics on same-CPU re-entry. `switch_now` uses
 `with_current_switch`: the `InterruptGuard` spans `switch_context` (it lives on the outgoing stack)
-but the re-entry flag does not, so the incoming thread can take IRQs and `with_current`.
+but the re-entry flag does not, so the incoming thread can take IRQs and `with_current`. Neither
+`&mut` is exclusive. `with_current_switch` keeps its `&mut` live across `switch_context`, `with_cpu`
+(a safe `pub fn`) returns `&mut` to any CPU's slot, and `ap_entry` builds one from `STARTING`, while
+`cpu(id)`, `current()`, and `try_current()` return `&'static PerCpu` to the same memory.
+`diag::cpus_to` (also the shell `cpus` command) and in-guest tests read another CPU's non-atomic
+`ticks`, `switches`, and `runq` length while its owner writes them (ROADMAP §10.3, F039).
+
+### Per-thread CPU state
+
+`thread_init::switch_now` switches a thread's CPU state inside `with_current_switch`: it swaps
+`irq_nest` between the TCB and `PerCpu`, calls `syscall_init::on_switch` (FPU, RSP0, CR3), then
+`thread::switch_context` (callee-saved GPRs, RSP, RIP, RFLAGS). AGENTS.md rule 8 governs adding
+user-visible CPU state; the commit that adds it also adds its row here.
+
+| State | Saved in | Switched by | Status |
+|---|---|---|---|
+| `rbx`, `rbp`, `r12`–`r15`, RSP, RIP | `Tcb.context` (`CpuContext`) | `switch_context` | switched |
+| RFLAGS | `CpuContext.rflags`; IF comes from `irq_nest` (`apply_if_on_resume`) | `switch_context` | switched |
+| `irq_nest` | `Tcb.irq_nest`, swapped with `PerCpu.irq_nest` | `switch_now` | switched |
+| user GPRs, RIP, RSP, RFLAGS | the thread's kernel stack: the 128-byte syscall frame or the interrupt frame | the RSP0 switch, which gives each thread its own entry stack | switched |
+| x87, SSE, MXCSR | `Tcb.fpu`, a 512-byte FXSAVE image | `switch_fpu` in `on_switch` (`fxsave64` the old thread, `fxrstor64` the new) on every switch; the syscall entry and exit also save and restore it | switched. `fork` gives the child `fpu_template()`, not the parent's image, and `execve` keeps the old image's registers (ROADMAP §10.6, F069). The template is captured after `fninit`, which resets only the x87 control, status, and tag words, so MXCSR and the XMM and ST registers hold whatever the loader left (ROADMAP §13.10, F129). FXSAVE covers no XSAVE state; `CR4.OSXSAVE`, `CR4.PKE`, and `EFER.FFXSR` are assumed clear and never asserted (ROADMAP §11.1, F130). |
+| RSP0 | TSS.RSP0 and `PerCpu.kernel_rsp0`: the top of `Tcb.stack`, or `fallback_rsp0` for the bootstrap thread | `set_rsp0_for` in `on_switch` | switched |
+| CR3 | `Tcb.as_cr3` (0 means the kernel PML4) | `switch_cr3_for` in `on_switch`, skipped when unchanged | switched; no PCID |
+| FS_BASE (user TLS) | not saved | nothing | not switched. `enter_user`, `enter_user_full`, and `execve` write it; `force_kernel`'s `mov fs` zeroes it on every exit or kill; `fork` copies the live MSR, so a child can inherit another process's base (ROADMAP §13.1, F022). |
+| user GS base | not saved; always 0 | nothing | holds while no `ARCH_SET_GS` or FSGSBASE exists (ROADMAP §18.3) |
+| `PerCpu.syscall_scratch` | per CPU | not switched | valid only while IF=0 (above; F001) |
 
 ## 7.6 IPIs
 
@@ -1178,7 +1516,7 @@ but the re-entry flag does not, so the incoming thread can take IRQs and `with_c
 | `0xFB` | Call function. Run a closure on a target CPU, optionally waiting for completion. |
 | `0xFC` | TLB shootdown. |
 | `0xFD` | Reschedule. Target CPU re-evaluates its run queue, waking from `hlt` if idle. |
-| `0xFE` | Panic halt. Broadcast so a panic on one CPU stops the others before they overwrite the log. |
+| `0xFE` | Panic halt, Fixed delivery. `ipi_init::halt_others` broadcasts it and does not wait, and a CPU spinning with IF=0 (in `SpinMutex::lock` or `wait_acks`) never takes it, so another CPU can write to COM1 during the dump (ROADMAP §10.7, F135). |
 
 The reschedule IPI is what makes cross-CPU wakeups work without ever locking a remote run queue: push
 onto the target's inbox, send `0xFD`, done. `0xFD` then takes SCHED IRQ-off via `schedule_preempt`.
@@ -1191,18 +1529,23 @@ The global lock order is in [section 2.1](#21-lock-order) and the one-spinlock r
 [section 2.3](#23-locking-with-interrupts). Additions specific to SMP:
 
 - Never lock a remote CPU's per-CPU state. Per-CPU locks are taken only by the owning CPU, with
-  interrupts off.
+  interrupts off. `per_cpu_init::with_cpu` can reach any CPU's slot ([section 7.5](#75-per-cpu-data),
+  F039).
 - If two CPU-local structures must be locked at once, for instance during load balancing, lock the
   lower `cpu_id` first.
 - A lock taken from an ISR is taken with interrupts disabled in every other context too. The scheduler
   lock is the canonical case: the timer ISR calls into the scheduler, so any holder with interrupts
   enabled deadlocks the moment its own timer fires.
-- Serial TX takes a lock so bytes from different CPUs do not interleave into unreadable garbage. Byte
-  granularity, not line granularity; full line atomicity needs per-CPU buffers and a printer thread.
-  Slice A ships a global IRQ-safe log ring plus a serial try-lock sink; the printer thread is parked
-  (Design ACK). Per-CPU serial capture still assembles lines into the ring. The global SCHED lock,
-  one `SpinMutex` on the block cache, one VFS lock, the log-ring TAS, and virtio-blk bounce copies
-  are known scale limits; see ROADMAP §19.4, §19.5, and §19.8.
+- Serial TX takes a lock so bytes from different CPUs do not interleave. `Serial::write_fmt` keeps
+  IRQs off for the whole line but takes the TX lock once per `write_str` piece, so another CPU can
+  write between two pieces of a formatted line, and `log_fmt` sends a record and its newline as two
+  writes. The harness then misses a contract line split that way. Planned (ROADMAP §10.2, F138):
+  each line is formatted, newline included, into one buffer and written under one TX hold.
+- klog records go to one global IRQ-safe log ring and to a serial sink that only try-locks TX.
+  Per-CPU serial capture assembles serial output into lines for the ring. Per-CPU buffers with a
+  printer thread are planned (ROADMAP §19.5).
+- The global SCHED lock, one `SpinMutex` on the block cache, one VFS lock, the log-ring TAS, and
+  virtio-blk bounce copies are known scale limits; see ROADMAP §19.4, §19.5, and §19.8.
 
 ## 7.8 Per-CPU scheduling
 
@@ -1234,6 +1577,14 @@ CPUs shooting down at once. The wait loop therefore calls `service_incoming` and
 slots so a spinning initiator still helps its peers. This is not optional; it is the difference
 between working and a hang that only appears under load.
 
+The wait is bounded: `ipi_init::wait_acks` panics after 1000 × `tsc_per_ms` TSC cycles (1 s) without
+every acknowledgement. A target CPU that holds IF=0 that long without polling `service_incoming`
+makes a shootdown panic the kernel. The in-guest test runner holds IF=0 for the whole run,
+and a syscall body runs with the IF=0 that FMASK set until it blocks (ROADMAP §10.10, F011); a console
+`write` with many newlines is the long case (ROADMAP §10.6, F044). One round invalidates one VA
+(`shootdown_va`). `kva_init::unmap_shootdown` unmaps at most 32 pages (`MAX_UNMAP`) and leaves the
+rest mapped with no error, while `vunmap` frees the whole VA span it was given (ROADMAP §10.3, F107).
+
 The shootdown handler must not allocate and must not take the page table or scheduler lock. It reads a
 request slot and executes `invlpg`.
 
@@ -1244,7 +1595,9 @@ SMP bugs are timing dependent, so the tests matter more than usual:
 - `-smp 2` is the default for every QEMU invocation including the normal boot test. One AP catches most
   bring-up bugs.
 - `-smp 4` as a separate target to shake out sequencing assumptions that hold for exactly one AP.
-- `-cpu qemu64,-tsc-deadline` to force the LAPIC periodic path.
+- `-cpu qemu64,-tsc-deadline` to force the LAPIC periodic path under KVM. Under TCG every tier but `make test-e2e-pit` (PIT) takes
+  the periodic path already, and no CI tier runs the TSC-deadline path ([section 6.3](#63-the-tick),
+  F078).
 - In-guest tests that need real CPUs: per-CPU identity on BSP and AP, cross-CPU thread spawn, reschedule
   IPI delivery, waking an idle AP, remote unmap and remap through the shootdown path.
 - `qemu` monitor `info cpus` and `info lapic` for interactive debugging, plus `-d int,cpu_reset` when a
@@ -1329,12 +1682,13 @@ are `--features panic_test --features panic_exit` and `--features gp_test --feat
 ```
 vibeOS: ktest: begin
 vibeOS: ktest: ok <name>
-vibeOS: ktest: FAIL <name>
+vibeOS: ktest: FAIL <name>: <reason>
 vibeOS: ktest: skip <name>: <reason>
 vibeOS: ktest: end
 ```
 
-The harness requires `begin` and `end`, rejects any `FAIL` line, and checks the exit status.
+The harness requires `begin` and `end`, rejects any `FAIL` line and any panic signature, and checks
+the exit status.
 `isa-debug-exit` at I/O port `0xf4` maps a written value to host exit status `(value << 1) | 1`:
 
 | Write | Host exit | Meaning |
@@ -1342,10 +1696,18 @@ The harness requires `begin` and `end`, rejects any `FAIL` line, and checks the 
 | `0x10` | 33 | all tests passed |
 | `0x11` | 35 | at least one test failed |
 
-Skips are first class and must carry a reason. Two known ones, both real limitations rather than
-laziness: a bare `ud2` test cannot run while `#UD` is a halting handler, since it aborts the whole run
-(it needs a scoped transient handler that steps RIP past the faulting instruction), and a serial
-loopback test cannot run under `-serial stdio` because that chardev is one-way.
+The harness also retries, and ROADMAP §10.2 removes every retry (F021). `run_ktest.py` boots again
+after any timeout, after the `-smp 2` TCG `FAIL per_cpu_bsp: ready_head should be empty`, after the
+`-smp 4` `FAIL msix_cpu: ap counter`, and after a `-smp 4` panic whose tail holds `ipi: ack timeout`,
+the `ipi_init::wait_acks` frame, or a banner glued to a `ktest: ok` line. A second timeout whose tail
+ends at `user: dup ok` gets a third boot. `make test-smp-stress` uses the same rules, so a green run
+can hide an intermittent hang or panic.
+
+Skips are first class and carry their reason on the `ktest: skip <name>: <reason>` line. Every skip
+names what the configuration lacks: `no AP`, `no virtio-blk`, `no virtio-rng`, `no e1000e`, `no edu`,
+`no smep/smap/umip`, `pit owns tick`, `pic fallback`, and `rtc unread` (the `Outcome::Skip` reasons
+in `src/ktest.rs`). Destructive exception tests run inside `arch::catch` scopes, which longjmp out or
+step RIP past the faulting instruction, instead of skipping.
 
 When a test fails, print enough to diagnose it without a rerun. A failing test that only prints its
 name costs a full debug cycle to learn anything.
@@ -1409,6 +1771,12 @@ the diagnostic `time: calibrated hpet <n>/ms`; `make test-e2e-pit` asserts
 `calibrated pit` instead. `make test-lapic-fallback`
 (`-cpu qemu64,-tsc-deadline`) runs in-guest tests on the periodic path.
 
+In the production ISO, `shell ready` is written from ring 3 by `/bin/sh`, which `/sbin/init` starts
+after waiting for `/bin/tests`. `init` passes no status pointer to `wait4`, and the harness matches
+neither `user: tests ok` nor `user: tests fail`, so a failing `/bin/tests` passes every e2e variant
+(ROADMAP §10.5, F073). `run_e2e.py` boots once more when either boot times out or the console-input boot
+ends without `shell ready` (`_retry_hang`; ROADMAP §10.2, F021).
+
 `smp: done` before `shell ready` is deliberate. Put SMP bring-up after the shell starts and an AP
 failure becomes invisible, because the harness sees its last marker and passes. `pci: <n> devices`
 sits between `console ok` and `shell ready` so `lspci` is registered before the prompt. The ramdisk
@@ -1418,17 +1786,20 @@ sits between `console ok` and `shell ready` so `lspci` is registered before the 
 
 With `-smp N`, additionally:
 
-- exactly `N-1` occurrences of `vibeOS: smp: ap online`
+- for each AP `i` in `1..N`, `vibeOS: sched: cpu<i> ready` then `vibeOS: smp: ap online`, in order,
+  before `smp: done`. The harness requires at least these `N-1` pairs and does not reject an extra
+  `ap online` line; ROADMAP §10.2 makes it count exactly `N-1` (F141)
 - `vibeOS: sched: cpu<i> ready` for every `i` in `0..N`
 - `vibeOS: time: lapic_timer ok (<mode>)` naming the selected timer path
   (`tsc-deadline`, `periodic`, or `pit`) rather than inferring it
 
 ### Failing fast
 
-Scan for these and fail immediately with the captured line rather than waiting out the timeout:
+Scan for these (`PANIC_SIGNATURES` in `tests/harness/harness.py`) and fail immediately with the
+captured line rather than waiting out the timeout:
 
 ```
-panicked at   #PF   #GP   #UD   #DF   double fault   stack overflow
+panicked at   vibeOS: panic:   #PF   #GP   #UD   #DF   double fault   stack overflow
 ```
 
 Match the exception mnemonics, not the phrase "page fault". Shell help text and log messages contain
@@ -1436,7 +1807,10 @@ English words, and a substring match on prose produces false failures that erode
 
 Expected-panic e2e waits for `vibeOS: panic: halted` so the dump (regs, thread, last log records,
 backtrace) is in the captured log, then checks dump needles. `panic_exit` writes isa-debug-exit
-`0x11` so QEMU leaves instead of sitting in `hlt`.
+`0x11` so QEMU leaves instead of sitting in `hlt`. The harness kills QEMU at `panic: halted` instead of
+waiting for that exit, so it never checks status 35. It also matches boot markers on every line,
+including the dump's `vibeOS: logrec:` replay of earlier records, so a marker printed out of order
+before the panic can match again in the dump (ROADMAP §10.2, F141).
 
 On success, exit through the QEMU monitor's `quit` rather than waiting for the timeout. Two seconds
 versus forty five, on every CI run and every local invocation.
@@ -1446,14 +1820,23 @@ versus forty five, on every CI run and every local invocation.
 Python, standard library only. `subprocess` with its own timeout rather than shelling out to GNU
 `timeout`, which does not exist on macOS. The harness helpers get their own unit tests, because a bug
 in the test harness produces either false confidence or a debugging session in the wrong repository.
+Those tests exercise `check_markers_in_order`, which no runner calls; `run_qemu_and_check`, the
+matcher every e2e run uses, has no unit test (ROADMAP §10.2, F141).
+
+`make test-vibefs-crash` (`run_vibefs_crash.py`) formats a 256 KiB image with `mkfs-vibefs`, boots
+the `vibefs_crash` build on it, kills QEMU up to 0.18 s after the first `vibeOS: vibefs: wr` line,
+and passes a round when `fsck-vibefs` exits 0 and prints `errors 0`. It does not mount the image or
+check `/crash/w` for a committed prefix, which [VIBEFS.md](VIBEFS.md) §12 requires, and the guest
+discards `sync_fs` errors, so a round passes after the volume has filled and commits have stopped
+(ROADMAP §10.2, F080).
 
 ## 8.4 QEMU flags
 
 | Context | Flags |
 |---------|-------|
-| `make run` | `-cdrom myos.iso -m 128M -smp 2 -cpu max -serial stdio -accel tcg` |
-| e2e | as above plus `-display none -no-reboot -monitor unix:...,server=on,wait=off` |
-| ktest | as e2e plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04`, `-device e1000e`, `-device edu`, `-device virtio-rng-pci,disable-legacy=on`, virtio-blk (`-drive file=…,if=none,id=vibehd` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>`). Extra NICs/edu/virtio are ktest-only; e2e stays the default `pc` set (`pci: 6 devices`). After a green first boot the harness reboots the same disk and requires `vibeOS: persist: intact`. |
+| `make run` | `-cdrom vibeos.iso -m 128M -smp 2 -cpu max -accel tcg -no-reboot -serial stdio` (Makefile `QEMU_BASE`, plus `-serial stdio` from the `run` recipe) |
+| e2e | as above plus `-display none -monitor unix:...,server=on,wait=off` (`harness.qemu_argv`) |
+| ktest | as e2e plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04`, `-device e1000e`, `-device edu`, `-device virtio-rng-pci,disable-legacy=on`, virtio-blk (`-drive file=…,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>`). Extra NICs/edu/virtio are ktest-only; e2e stays the default `pc` set (`pci: 6 devices`). After a green first boot the harness reboots the same disk and requires `vibeOS: persist: intact`. |
 | LAPIC fallback | `-cpu qemu64,-tsc-deadline` |
 | SMP stress | `-smp 4` |
 | Interrupt debugging | `-d int,cpu_reset`, plus `-machine q35` when chipset behavior matters |
@@ -1486,6 +1869,12 @@ harness defaults match them.
 | `VIBEOS_MKFS` | `mkfs-vibefs` | `run_vibefs_crash` |
 | `VIBEOS_FSCK` | `fsck-vibefs` | `run_vibefs_crash` |
 
+`VIBEOS_BIOS` reaches QEMU as `-bios`, which accepts only an image whose size is a multiple of
+64 KiB. apt's combined `/usr/share/ovmf/OVMF.fd`, the Makefile's `OVMF` default and the one CI uses,
+boots. Homebrew's code-only `edk2-x86_64-code.fd` is refused and needs `-drive if=pflash` instead.
+`make test-e2e-uefi` prints a skip message when `OVMF` does not exist and then runs the harness
+anyway, because the check and the run are separate recipe lines (ROADMAP §10.2, F079).
+
 ## 8.5 Make targets
 
 `make help` prints the live inventory. Do not hand-maintain a second list here.
@@ -1507,10 +1896,14 @@ job.
 | Job | When | What |
 |---|---|---|
 | `check` | push / PR | `make check` (fmt, `vibeos-core` clippy `-D warnings`, host units, harness, ruff/mypy, `scripts/check_*.py`) then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines 87`. No QEMU, no `setup.sh`. HTML report is a 7-day `hostlib-coverage` artifact. |
-| `phase 0 ladder` | push / PR, `needs: check` | Limine, QEMU/nasm/xorriso/OVMF, kernel clippy, ISO, e2e (BIOS/UEFI/panic/#GP/PIT), in-guest at `-smp 2` and `-smp 4`, LAPIC fallback, vibefs crash. Green `main` uploads `vibeos.iso` (7 days). |
+| `phase 0 ladder` | push / PR, `needs: check` | Limine, QEMU/nasm/xorriso/OVMF, kernel clippy `-D warnings` with `--all-features`, `kernel_tests`, and `vibefs_crash` (never the default feature set that ships), ISO, e2e (BIOS/UEFI/panic/#GP/PIT/9 GiB), in-guest at `-smp 2` and `-smp 4`, LAPIC fallback, vibefs crash. Green `main` uploads `vibeos.iso` (7 days). |
 | `smp-stress` | weekly Monday 06:00 UTC + dispatch | `-smp 4`, longer timeout |
 | `nightly-canary` | same workflow, non-blocking | undated latest nightly, `make iso && make test-unit` |
-| `release` | `v*` tags | production + ktest ISO, changelog section, GitHub Release |
+| `release` | `v*` tags | `make test-e2e` (BIOS) only, then production + ktest ISO, changelog section, GitHub Release. It does not wait for `ci` at the tagged commit, and the ktest ISO writes fixed LBAs of any virtio-blk disk attached at boot (ROADMAP §10.1, F145). |
+
+`-D warnings` reaches host builds through `[build] rustflags` and the kernel clippy steps through their own `-- -D warnings`. Kernel builds (`make iso` and
+every ISO variant) run without it, because `[target.x86_64-unknown-none] rustflags` in
+`.cargo/config.toml` replaces `[build] rustflags` (ROADMAP §10.1, F147).
 
 GitHub Actions records per-step duration. Measured on `main` at `88370e5` (run 35796216463): `check`
 53 s, then the ladder 160 s, serialized by `needs: check`. The ladder spends 58 s on setup, toolchain,
@@ -1558,10 +1951,15 @@ The request static was not in the `.limine_requests` section, so the loader neve
 request is `#[used]` with an explicit `link_section`, and the base revision is verified before any other
 response is read.
 
-**Panic backtrace addresses have no names, or the second link moves every RIP.**
-The symbol table lived in `.text` or was patched in place. Rule: first link with an empty `.rodata`
-table, `nm --demangle` the ELF, second link with the filled table. `.text` must not move. The
-two-pass lives in `KERNEL_VARIANT`. `.text` must not move.
+**Panic backtrace addresses have no names, or name the wrong function.**
+Earlier builds put the symbol table in `.text` or patched it in place. Today the second link moves `.text`: with
+pass 1's empty `KSYMS`, `print_frame_addr` encodes the table reference as short immediates, pass 2
+grows it from 0x2a2 to 0x2b2 bytes, and every later function shifts. The panic ISO's table is wrong for
+every function from `panic::finish` on (36 entries), and a `CARGO_PROFILE=release` table is wrong in 499 of 1106 entries.
+Rule: first link with an empty `.rodata` table, `nm --demangle` the ELF, second link with the filled
+table (Makefile `KERNEL_VARIANT`). `.text` must not move, so the reference to the table compiles to
+the same size empty and filled. Planned (ROADMAP §10.2, F084): the build regenerates the table from
+the final ELF and fails on any difference.
 
 **QEMU framebuffer reprints the prompt on every key; serial looks fine.**
 The FB write path skipped `\r` before the text grid saw it, so the line editor's in-place paint
@@ -1584,13 +1982,23 @@ and not page-walked into the ioremap window or physmap.
 **Device reads return stale values on real hardware but work in QEMU.**
 MMIO reached through a write-back physmap mapping. QEMU does not enforce cache attributes; hardware
 does. Rule: LAPIC, I/O APIC, HPET, and every device MMIO page gets PCD + PWT, patched immediately after
-CR3 install and before first access. Preserve the 2 MiB page size when patching rather than splitting.
+CR3 install and before first access. Patch every physmap leaf the range touches, and split a 2 MiB leaf
+to 4 KiB first when it also holds usable RAM, so no RAM frame gets a UC alias (§2.7, I17). Not yet
+enforced: `Mapper::patch_physmap_uc` marks whole 2 MiB leaves UC and can skip a trailing leaf (ROADMAP
+§20.1, F104).
 Do not UC-patch the console framebuffer when it aliases VGA BAR0; leave that physmap WB.
 
-**Config space beyond bus 0 is all `0xFFFF`.**
-Legacy `0xCF8`/`0xCFC` only addresses bus 0 on typical host bridges. Rule: walk MCFG and use ECAM
-(`base + (bus<<20)|(dev<<15)|(fn<<12)|off`) for any bus outside that. Type-1 headers reuse BAR
-slots as bus-number registers; size-probe only the BAR count for that header type.
+**Config space beyond bus 0 is all `0xFFFF` on a machine without MCFG.**
+The kernel sends only bus 0 through `0xCF8`/`0xCFC`: for any other bus ECAM does not cover, `HwCfg::read32`
+returns `0xFFFF_FFFF` and `write32` drops the write, so a device behind a PCI-PCI bridge is never
+found (ROADMAP §20.1, F114). Configuration mechanism #1 addresses every bus (CONFIG_ADDRESS bits
+23:16); its limit is the 256-byte config space. Rule: ECAM where MCFG covers the bus, at
+`base + (bus<<20)|(dev<<15)|(fn<<12)|off`, where `base` is the MCFG entry's base address and
+corresponds to bus 0 even when the entry's start bus is not 0; mechanism #1 for offsets below `0x100`
+elsewhere.
+`pci::ecam_phys` offsets from the start bus instead, and its unit test pins that (ROADMAP §20.1,
+F045). Type-1 headers reuse BAR slots as bus-number registers; size-probe only the BAR count for that
+header type.
 
 **Two subsystems designed for the same virtual address range.**
 The heap and the kernel VA allocator were both specified at `0xFFFF_C000_*` in different documents, and
@@ -1600,18 +2008,26 @@ source of truth, and every region asserts its range is unmapped before claiming 
 **Allocator corruption with a crash in an unrelated subsystem.**
 Buddy free list nodes live inside free pages, and a kernel stack overflow wrote into one. Rule: every
 kernel stack gets an unmapped guard page below it, and stack overflow is a page fault rather than
-silent corruption.
+silent corruption. The bootstrap thread breaks the rule (`stack: None`): `_start`, all of boot, and
+the `kernel_tests` registry run on Limine's stack (at least 64 KiB, no guard page, in
+bootloader-reclaimable memory). The kernel sends no stack size request (ROADMAP §10.6, F072).
 
 **A PTE edit appears to have no effect.**
 No `invlpg` after the edit. Rule: `invlpg` after any single-PTE modification, including MMIO attribute
-patches. Kernel mappings are `GLOBAL` and do not fall out of the TLB on a CR3 reload.
+patches. Kernel mappings are `GLOBAL`, and on a CPU with `CR4.PGE` set they do not fall out of the
+TLB on a CR3 reload. The trampoline sets PGE on the APs only; the BSP runs with Limine's CR4, PGE
+clear (ROADMAP §10.6, F026).
 
 **`meminfo` is slow.**
 `free_page_count()` walked the free lists. Rule: maintain a running counter.
 
 **Freeing a stack while running on it.**
-An AP's stack was unmapped while it was still executing on it. Rule: dead stacks go on a deferred reap
-list, drained by a thread that is not on them.
+An AP's stack was unmapped while it was still executing on it. Rule: a dead thread's stack is freed
+only after the CPU that ran it has switched off it, and the reclaimer observes that; a reaper thread
+that is not on the stack is not enough on SMP ([section 2.8](#28-publish-last) rule 2). `thread_exit` breaks this: it puts its own stack on the
+global `kva_init::DEFERRED` list and keeps running `schedule()` on it, and any CPU's `reap_zombies`
+can unmap it before the exiting CPU reaches `switch_context` (ROADMAP §10.10, F012). The list has 8
+slots, and `defer_free` panics when an exit burst fills it (ROADMAP §10.10, F010).
 
 ## 9.3 Interrupts
 
@@ -1648,11 +2064,19 @@ next deadline. Rule: rearm the timer before doing anything that can yield.
 **Virtio kicks vanish.**
 Notify used the wrong BAR offset or ignored `notify_off_multiplier`. Rule: doorbell =
 `cap.offset + queue_notify_off * multiplier` inside the notify capability; wrap or past `length` is
-a failed kick, not a store into some other register.
+a failed kick, not a store into some other register. The 2-byte store needs
+`queue_notify_off * multiplier + 2 <= length`: `virtio::notify_addr` accepts an offset of
+`length - 1` and skips the bound when `length` is 0 (ROADMAP §18.1, F048). The value written is the
+virtqueue index (without `VIRTIO_F_NOTIFICATION_DATA`); `virtio_blk_init::kick` writes 0 for every
+queue, which QEMU ignores and a device that shares one doorbell does not (ROADMAP §11.5, F047).
 
 **Device sees a virtqueue index and stale descriptors.**
 `avail.idx` was published with a compiler fence. Rule: descriptor stores, then `dma_wmb` /
 `fence(Release)` + `sfence`, then the index. Used-ring harvest is `dma_rmb` after observing `used.idx`.
+`dma_wmb` orders stores only. The kick decision loads `avail_event` or `used.flags` after the
+`avail.idx` store, and the harvest reads `used.idx` again after its `used_event` store, so each needs
+a full barrier (`mfence`) between the store and the load (virtio 1.2 §2.7.13.4.1). No `dma_mb`
+exists, and under `VIRTIO_F_EVENT_IDX` one lost kick stops a queue for good (ROADMAP §10.3, F016).
 
 **Allocate or block in a hard-IRQ / MSI handler.**
 The top half ran `Box` / `sleep` / `WaitQueue` wait. Rule: ack, set pending, wake the IRQ thread or
@@ -1662,9 +2086,25 @@ enqueue work. The thread may alloc and block ([section 2.2](#22-interrupt-handle
 The handler decided `swapgs` from CS.RPL. Between `syscall` and the entry `swapgs`, and between the
 exit `swapgs` and `sysretq`/`iretq`, CS is the kernel's but `GS_BASE` holds the user base, so the
 handler skips the swap and `gs:[0]` is whatever userspace set. Rule: ordinary vectors may trust
-CS.RPL; the IST vectors decide from the sign of `GS_BASE` (ROADMAP §10.6), and once FSGSBASE lets a
-user load a kernel-half base they save `GS_BASE` and load the per-CPU base unconditionally (ROADMAP
-§18.3). Until §10.6 lands every vector still uses CS.RPL ([section 7.5](#75-per-cpu-data)).
+CS.RPL, except a `#GP`, `#NP`, or `#SS` raised by a user-return `iretq`, which arrives with the kernel
+CS and the user GS base (ROADMAP §10.6, F007); the IST vectors decide from the sign of `GS_BASE`
+(ROADMAP §10.6), and once FSGSBASE lets a user load a kernel-half base they save `GS_BASE` and load
+the per-CPU base unconditionally (ROADMAP §18.3). Not yet enforced: the `arch/idt.rs` handlers, IST vectors included,
+decide from CS.RPL, and the device pool stubs and keyboard ISRs make no GS decision at all
+([section 7.5](#75-per-cpu-data), F004).
+
+**A user program halts every CPU.**
+Ring-3 activity reaches `exception_halt` on four paths. `debug_ex` has no ring-3 branch and
+`sig_for_vec` maps neither `#DB` nor `#AC`, so a user `popf` that sets `RFLAGS.TF`, or an `int1`
+(`0xF1`), halts the kernel (F005). A device or keyboard interrupt taken at CPL 3 enters through a
+gate that skips `swapgs` and faults on `gs:[0]` (F004). `enter_user_full` runs with IF=1, so an
+interrupt between its `mov gs` and its `iretq` reads `gs:[0]` at VA 0 (F006). A `syscall` in the last two bytes
+of the top user page leaves RIP at the non-canonical `0x0000_8000_0000_0000`, and the `#GP` on the user-return `iretq` runs on the user GS
+base; TCG skips that canonical check, and KVM and hardware do not (F007). ROADMAP §10.6 closes all
+four. Rule: an exception raised by ring-3 code, or by a return to ring 3, ends in a signal to that
+process; `exception_halt` is for faults in kernel code. Every vector has a ring-3 row in the
+[section 5.2](#52-idt-and-exceptions) table, and a new ring-3 entry or exit path gets an in-guest
+test that runs it with IF=1.
 
 ## 9.4 Concurrency
 
@@ -1683,6 +2123,13 @@ point where the thread is both on the wait queue and considered runnable.
 owns the queue (mutex, rwlock, condvar, channel) must outlive every waiter. Dropping it with threads
 still blocked is a use-after-free on the next timeout or wake.
 
+**An I/O completion writes into a stack frame its waiter has already reused.**
+`IoWaiter` lives on the submitter's stack. `IoWaiter::finish` stores `done` with Release, then takes
+SCHED and runs `wake_all` on the `WaitQueue` inside the waiter; `wait()` returns as soon as its
+lock-free `poll()` sees `done`, so the wake can land in whatever frame reused that stack (ROADMAP
+§10.10, F002). Rule: publish last ([section 2.8](#28-publish-last)). For `IoWaiter`: take SCHED, wake, then store
+`done` inside that section ([section 10.1](#101-completions)).
+
 **Condvar waiter never sees the predicate.**
 Wake does not carry the condition. Mesa: `wait` re-acquires the mutex and returns; the caller loops
 on the predicate. Timeout is the same path.
@@ -1690,7 +2137,10 @@ on the predicate. Timeout is the same path.
 **Condvar wait parks still holding the mutex.**
 `begin_wait` marked Blocked, SCHED dropped, then `drop(guard)` released the mutex. A timer in that
 window switched the waiter off-CPU still owning it; the notifier blocked on the mutex forever. Rule:
-enqueue on the CV and unlock the mutex under the same SCHED, then schedule.
+enqueue on the CV and unlock the mutex under the same SCHED, keep IF off from that section through the
+delivery of the wakes it recorded, then schedule. `with_sched` breaks the second half: it runs
+`place_ready` for the recorded wakes after dropping SCHED, with IF back on, so a preemption there
+switches the waiter out before the woken mutex waiter is on any queue (ROADMAP §13.12, F034).
 
 **First-run thread `#PF`s in `schedule_inner` at `rsp = stack_top-8`.**
 `popfq` restored IF before `jmp` to the trampoline. A tick landed in that window, `schedule_preempt`
@@ -1699,7 +2149,9 @@ Rule: delayed `sti` immediately before `jmp`; never `popfq` with IF set across a
 
 **Two `&mut T` from the same mutex in release builds only.**
 The spinlock's re-entrancy check was a `debug_assert!`. Rule: real CAS spin loop, and any invariant
-that must hold in release is an `assert!`.
+that must hold in release is an `assert!`. These are `debug_assert!`: `BootCell::set`'s set-once check,
+`pmm` `pop_head` on an empty order, and the heap `carve` bounds (ROADMAP §10.2, F041, F137). No CI job
+builds or boots `CARGO_PROFILE=release`, where they compile out (ROADMAP §10.2, F137).
 
 **`per_cpu: with_current re-entry` on the first workqueue IPI.**
 `with_current`'s busy flag spanned `switch_context`. The incoming thread resumed with the flag still
@@ -1744,8 +2196,11 @@ fresh HPET sample with a 50–200% band, and accept `now_us` (~50 ms) when ticks
 the invariant-TSC path.
 
 **Serial output from multiple CPUs is unreadable.**
-No lock on TX. Rule: lock serial TX. Byte granularity is enough to keep bytes from interleaving; full
-line atomicity is a separate, later problem.
+No lock on TX. Rule: lock serial TX, and write each line whole: format it, newline included, into one
+buffer and send it under one TX hold. Byte granularity keeps bytes whole, but `Serial::write_fmt`
+takes TX once per `write_str` piece and `log_fmt` sends the newline separately, so another CPU can
+split a line and the harness then misses a contract line ([section 7.7](#77-locking-with-more-than-one-cpu),
+ROADMAP §10.2, F138).
 
 **Two CPUs performing a TLB shootdown at the same time hang.**
 Both waited with interrupts disabled for acknowledgement the other could not send. Rule: the wait loop
@@ -1766,9 +2221,12 @@ each ready flag before the next.
 The trampoline entered long mode without setting `EFER.NXE`, so NX bits in kernel PTEs were
 reserved-bit violations. Rule: the trampoline sets NXE along with LME.
 
-**Free memory shrinks by 16 KiB per boot on a flaky machine.**
-Failed AP bring-up left its stack and per-CPU area allocated. Rule: the timeout path frees everything
-it allocated.
+**An AP that missed its bring-up timeout runs on freed memory.**
+The timeout path frees the AP's kernel, RSP0, and IST stacks and its GDT/TSS and marks its idle TCB Dead, but an AP that accepted a SIPI and then
+stalled past 3 s can keep running on them, or read the next AP's parameter block. Rule: the timeout path
+sends INIT, clears the AP's online bit, and leaks what it gave the AP; a failed AP costs its stack and
+tables, not a second CPU on the same memory ([section 7.4](#74-ap-bring-up-sequence)).
+`smp_init::start_one` frees without INIT (ROADMAP §20.1, F032).
 
 **A null dereference in an ISR shortly after an AP comes up.**
 `sti` happened before `GS_BASE` was set, and a timer interrupt landed in code that reads per-CPU state.
@@ -1863,14 +2321,18 @@ the driver is `src/virtio_blk_init.rs`. Partition children are
 A request carries waiter cookies, not a locked queue. Submit takes the per-device
 queue lock (RANK_DEVICE), merges or enqueues, and drops the lock before any copy.
 The ramdisk pump runs after that drop; virtio-blk submits to a virtqueue after
-the same drop and completes from a threaded IRQ. `complete` stores the status then wakes
-waiters under SCHED. Never hold the queue lock across I/O or across that wake
+the same drop and completes from a threaded IRQ. Rule: completion wakes the waiters under SCHED
+and then stores the status inside that section, as its last access to each waiter
+([section 2.8](#28-publish-last)). `IoWaiter::finish` breaks this: it stores
+`done` with Release before it takes SCHED, then wakes (ROADMAP §10.10, F002). Never hold
+the queue lock across I/O or across that wake
 (DEVICE then SCHED is the wrong order). Hard IRQ must not run this path: enqueue
 work only (DESIGN [§2.2](#22-interrupt-handler-rules)). Ramdisk backing is BSS, not
 a heap `Vec`: allocating under RANK_DEVICE would take RANK_HEAP (lock order).
 
 Blocking wait and async submit share the same cookie. The buffer and waiter must
-outlive the request.
+outlive the completer's last access to them, which under the rule above is the
+status store.
 
 ## 10.2 Barrier vs flush
 
@@ -1885,13 +2347,26 @@ same flush rule applies: a generation is not durable until `Flush` after the new
 super slot is written.
 
 The elevator will not dispatch seq numbers past an in-queue fence. Adjacent
-read/write/discard requests merge; fences do not, and they split merge runs.
+read/write/discard requests merge; fences do not. `try_merge` checks only the
+lowest queued fence, so a request can merge into one queued before a second
+fence, and a fence whose seq is `u32::MAX` reads as no fence; C-LOOK can also
+reorder overlapping writes whatever their seq (ROADMAP §10.11, F043).
+
+virtio-blk does not implement the contract above. `issue()` completes a `Barrier`
+locally while earlier requests are in flight, and a `Flush` goes to the device
+once earlier writes are dispatched, not completed; virtio 1.2 §5.2.6.2 makes a
+write stable only after a FLUSH sent after that write completed. The block
+cache's `flush` does not wait for writeback in flight either
+([section 10.6](#106-block-cache)). ROADMAP §10.11 lands all of it (F043).
 
 ## 10.3 Failure
 
 I/O errors retry up to `DEFAULT_RETRY_BUDGET` extra attempts, then the device
 goes `Failed`. Further submits return `Failed`. `Inval` (range, size) is not
-retried and does not fail the device. No infinite retry loop.
+retried and does not fail the device. No infinite retry loop. A request that never
+completes is not an error this layer sees: `IoWaiter::wait` parks with
+`FAR_DEADLINE`, so a lost completion, such as one after a missed kick
+([section 10.4](#104-virtio-blk)), blocks the submitter for good.
 
 Logical block size is per device. Do not assume 512. Capacity is in those
 blocks. Discard on ramdisk validates the range and otherwise no-ops.
@@ -1904,34 +2379,75 @@ if `F_BLK_SIZE` is absent), and topology when offered. Each request is a
 descriptor chain: header + data (or discard range) + status. The status
 byte is device-writable DMA, never a stack slot. Completions harvest the
 used ring on the threaded IRQ and wake the same `IoWaiter` cookies as the
-ramdisk. Hard IRQ only acks ISR.
+ramdisk. The hard IRQ only acks ISR, reading it on every interrupt. The driver always runs on
+MSI-X, where virtio 1.2 §4.1.4.5.2 says a driver should not read ISR (ROADMAP §26.4, F122).
 
-`F_MQ`: one virtqueue per online CPU, capped by the device `num_queues`.
-Without `F_MQ`, a single request queue. Flush and discard go to the device
-when those features are negotiated; flush without `F_FLUSH` is a successful
-no-op (nothing to make durable). Kick uses the Phase 6 notify formula and
-`dma_wmb`; the blk driver does not invent a second fence.
+`F_MQ`: one virtqueue per online CPU, capped by the device `num_queues` and by
+`MAX_VQ` (8). Without `F_MQ`, a single request queue. Data goes through 16
+bounce slots of 8 KiB shared by the device's queues; a request over 8 KiB is
+`Inval`, including one the block queue merged past that size (ROADMAP §12.5,
+F119). Flush and discard go to the device when those features are negotiated;
+flush without `F_FLUSH` is a successful no-op (nothing to make durable).
+
+`issue()` publishes `avail.idx` after `dma_wmb`, then `should_kick` loads
+`avail_event` or `used.flags` to decide whether to kick, with no full barrier
+between, so a kick can be lost and the queue stop ([section 4.7](#47-dma);
+ROADMAP §10.3, F016). `kick` writes the doorbell at the notify formula in
+[section 9.3](#93-interrupts). The doorbell
+value is the queue index; `kick` writes 0 for every queue (ROADMAP §11.5, F047).
 
 ## 10.5 Partitions
 
 MBR (primary + extended/logical) and GPT parse in `src/part.rs`. Protective
 MBR type `0xEE` is not a data device; GPT is. Header and entry CRCs are
 checked; a bad primary falls back to the backup header at the last LBA.
-EBR walk is capped at 128; a corrupt next-LBA stops the chain.
+EBR walk is capped at 128; a corrupt next-LBA stops the chain. `parse_mbr`
+reads the four primary entries from `sector_buf`, which the EBR walk reuses,
+so a primary listed after an extended entry is read from the last EBR
+(ROADMAP §10.12, F117). Entries are checked against the disk size only: an
+entry that overlaps another entry or the table itself, a GPT header whose
+MyLBA is not the LBA it was read from, and a GPT entry outside the usable
+range are all accepted (ROADMAP §13.9, F117).
 
 Children are offset-limited `BlockDevice`s. Child LBA `l` maps to
 `start + l` and I/O past `nsectors` is `Inval`. Marker
 `vibeOS: block: <parent>p<N> <n> sectors` (e.g. `ram0p1`, `vdap1`).
+`register_table` takes names from fixed tables (`ram0p1` to `ram0p5`,
+`vdap1` to `vdap4`) and stops without a log line at the first entry past
+them (ROADMAP §10.12, F117). Only in-guest tests use the child devices:
+`mount_dev` accepts only `ram0` and `vda`, and devfs block nodes return
+`NotSupp` (ROADMAP §10.4, F081).
+
+`part_init::init` runs in every build. It stamps an MBR on `ram0`, and it
+stamps a GPT on `vda` whenever `vda`'s table fails to parse or has no
+entries, including after a read error; the only guard is a 512-byte block
+size and at least 1024 sectors. A whole-disk vibefs or FAT32 image on `vda`
+loses LBA 0 to 33 and its last 33 sectors on the first boot (ROADMAP §10.11,
+F003).
 
 ## 10.6 Block cache
 
-Page-granular (4 KiB), keyed by `(dev_id, page offset)`. Read-through,
-write-back, clock eviction, sequential readahead, dirty-ratio writeback
-thread. `flush` writes dirty pages then calls the device `flush`.
+Page-granular (4 KiB), 16 pages (`cache::DEFAULT_PAGES`), keyed by
+`(dev_id, page offset)`. Read-through, write-back, clock eviction,
+sequential readahead, dirty-ratio writeback thread (`blk-wb`). `flush`
+writes the pages marked dirty, then calls the device `flush`.
 `barrier` writes dirty pages and does not device-flush.
 
-The cache sits above `BlockDevice`. Drivers are the miss
-path. Phase 12 page cache reuses these pages (same clock, same writeback);
+A slot has no filling or writeback state. `take_dirty` clears a page's dirty
+bit before `blk-wb` writes it with the lock dropped, so while that write is in
+flight `flush` skips the page and can send the device flush first, a page
+dirtied again can have two writes to one LBA in flight, and the slot can be
+evicted and later read back stale. `find()` matches only valid slots, so a
+second reader of a page being filled does not wait for it (ROADMAP §12.5,
+F015; the `flush` wait lands with ROADMAP §10.11, F043).
+
+The cache reaches the drivers by raw device id: `cache_init::raw_read`,
+`raw_write`, and `raw_flush` match `DEV_RAM0` to `block_init` and `DEV_VDA`
+to `virtio_blk_init`, and only in-guest tests call the `BlockDevice` trait
+objects. Planned (ROADMAP §10.4, D2): the cache takes a handle from one
+registry of `BlockDevice`s, partitions included, instead of matching device
+ids (F081). Phase 12 page cache reuses
+these pages (same clock, same writeback);
 do not grow a second private cache. Hit/miss/device-request counters are
 in the `blk` shell command. The cache lock is RANK_DEVICE and is dropped
 before blocking device I/O.

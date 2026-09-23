@@ -15,9 +15,17 @@ If you learn something about hardware or Rust from reading this, good, but that'
 
 ## Status
 
-Phases 0–9 landed: boot, memory, traps/ACPI/time, threads, SMP, console/log/shell, PCI/virtio, block
+Phases 0–9 are built: boot, memory, traps/ACPI/time, threads, SMP, console/log/shell, PCI/virtio, block
 storage, filesystems including vibefs, and user mode (ring 3, syscalls, processes, userspace shell).
-Phase 10 (consolidation) is in progress; Phase 11 (portability: the aarch64 port) and Phase 12 (demand paging / COW) are not started. See [The arc](docs/ROADMAP.md#the-arc).
+The 2026-09-23 [kernel review](docs/reviews/KERNEL_REVIEW.md) lists 152 findings in that code and its tests,
+docs, and CI, 3 of them critical and 17 high. Among them are three ways a user process can halt the kernel
+(F005, F008, F010). ROADMAP boxes the review showed false are open again or reworded to match the code,
+and the ROADMAP line that fixes each finding cites its id.
+Phase 10 (consolidation) is in progress; Phase 11 (portability: the aarch64 port) and Phase 12 (demand
+paging / COW) are not started. See [The arc](docs/ROADMAP.md#the-arc).
+Do not attach a virtio-blk disk you want to keep: every boot writes a GPT over the first one (`vda`) when
+it is 512 KiB or more and its partition table is missing, empty, or unreadable (F003), and
+`vibeos-ktest.iso` writes fixed sectors of any attached one (F145).
 Releases: [GitHub Releases](https://github.com/devinreuschel/vibeOS/releases). From Phase 8 on, the commit that closes a phase
 gets a `phase-<N>` tag and the next `v0.<m>.0` release, numbered in closing order: `v0.8.0` to `v0.14.0` are Phases 8 to 14,
 later release notes name their phase, and Phase 39 is `v1.0.0` ([How to read this](docs/ROADMAP.md#how-to-read-this)).
@@ -25,14 +33,13 @@ later release notes name their phase, and Phase 39 is `v1.0.0` ([How to read thi
 Quickstart:
 
     ./setup.sh          # fetches Limine binaries, verifies host tools
-    make check          # fast local gate (clippy, host unit, harness, ruff/mypy)
+    make check          # fast local gate (fmt, host clippy, host units, harness, ruff/mypy, check scripts)
     make                # kernel + vibeos.iso (hybrid BIOS/UEFI)
     make run            # QEMU window = PS/2; the terminal is COM1 (`-serial stdio`)
-    make test           # host units + harness units + e2e (BIOS, UEFI, panic) + in-guest
+    make test           # host + harness units, e2e (BIOS, UEFI, panic, #GP, PIT, 9 GiB), in-guest, vibefs crash
 
-macOS: `brew install qemu xorriso nasm python`. `make test-unit` (`vibeos-core` on the host triple)
-and QEMU e2e work. UEFI e2e needs OVMF (`OVMF=/path/to/OVMF.fd`); Homebrew qemu ships
-`share/qemu/edk2-x86_64-code.fd`.
+macOS setup, including the firmware image `make test` needs there:
+[AGENTS.md, How to run](AGENTS.md#how-to-run).
 
 A previous iteration got to SMP with a preemptive scheduler before being scrapped; what survived is
 written down in `docs/`.
@@ -41,7 +48,8 @@ Agents: start at [AGENTS.md](AGENTS.md).
 
 ## Docs
 
-Docs live in [`docs/`](docs/). Root stays at a readme and a changelog.
+Docs live in [`docs/`](docs/). The other docs in the root are the changelog, [AGENTS.md](AGENTS.md) (with its
+`CLAUDE.md` pointer), [CONTRIBUTING.md](CONTRIBUTING.md), and [LICENSE](LICENSE).
 
 - [DESIGN.md](docs/DESIGN.md): invariants, boot order, address map, interrupts, time, SMP, testing, and
   a list of bugs already paid for once. Decisions, not narration.
@@ -50,8 +58,10 @@ Docs live in [`docs/`](docs/). Root stays at a readme and a changelog.
   add is a separate list of funded goals.
 - [VIBEFS.md](docs/VIBEFS.md): vibefs on-disk format (version field in that file). Not DESIGN.
 - [SYSCALL.md](docs/SYSCALL.md): syscall ABI. Not DESIGN.
+- [reviews/](docs/reviews/): the architecture, roadmap, and kernel reviews Phase 10 comes from, and
+  per-item plans in `reviews/issues/`.
 
-Read [section 9](docs/DESIGN.md#9-pitfalls) before touching boot, paging, interrupts, or AP bring-up.
+Read [section 9](docs/DESIGN.md#9-pitfalls) before touching boot, paging, interrupts, syscall entry and exit, or AP bring-up.
 
 ## License
 

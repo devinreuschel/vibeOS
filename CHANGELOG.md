@@ -27,11 +27,11 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 - Roadmap restructured to 40 phases in eight eras, all on free infrastructure: [Phase 10 Consolidation](docs/ROADMAP.md#phase-10-consolidation)
   and [Phase 11 Portability](docs/ROADMAP.md#phase-11-portability) added; old phases 10–20 are now 12–22.
-- CI: `check` job (`make check` + hostlib llvm-cov floor 87%) runs before the QEMU ladder.
-  rustflags deny warnings; kernel clippy still warms `target/` for `make iso`.
+- CI: `check` job (`make check` + `vibeos-core` llvm-cov floor 87%) runs before the QEMU ladder.
+  Host builds deny warnings; kernel builds do not yet.
 - Crate version is `0.8.0` (Phase 8 backfill). Changelog cut; entries are ≤ 2 lines.
-- Nightly date, Action SHAs, and Limine commit are pinned so CI cannot drift.
-  Weekly smp-stress runs a non-blocking latest-nightly canary.
+- Nightly date, Action SHAs, and Limine commit are pinned; `ruff`, `mypy`, and the `ubuntu-latest`
+  runner image are not. Weekly smp-stress runs a non-blocking latest-nightly canary.
 - Kernel builds with built-in `x86_64-unknown-none` (no custom target JSON, no `build-std`).
 - Host tests (`make test-unit`) run `vibeos-core` on the host triple; `mkfs`/`fsck-vibefs` follow.
   Context-switch asm stays `x86_64`. I1 (macOS CI job) is still parked.
@@ -44,17 +44,15 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
   no pause/resume note.
 - Portable crate denies clippy `unwrap`/`expect`/`panic!` (E1). Parsers still return
   `Result` on bad data; `indexing_slicing` stays warn until those modules are clean.
+- The harness retries a timed-out e2e or ktest boot, two known ktest FAIL lines, and at `-smp 4` a ktest
+  panic in `ipi_init::wait_acks` or on the same serial line as `ktest: ok`; [ROADMAP §10.2](docs/ROADMAP.md#102-build-and-harness) removes them.
 
 ### Fixed
 
 - Boot with more than 8 GiB of RAM no longer triple-faults after `heap ok`. RAM above the
   8 GiB physmap cap is left unused; `make test-e2e-highmem` boots with 9 GiB.
-- UEFI e2e no longer hangs on OVMF PXE after a green marker boot; silent boots retry once
-  and print a serial tail on timeout.
-- In-guest ktests retry known TCG timing flakes (wait4 stall, a second try if still
-  at `user: dup ok`, SMP4 msix/ipi/UART-merge, SMP2 ready_head). Other assertions stay hard.
-- `/bin/tests` yields after each fork-bomb spawn so `wait4` cannot hang `user_syscalls`
-  under LAPIC periodic.
+- UEFI e2e no longer hangs on OVMF PXE after a green marker boot; a timed-out boot prints
+  its serial tail.
 
 ## [0.8.0] - 2026-09-19
 
