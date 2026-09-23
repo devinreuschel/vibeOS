@@ -372,7 +372,7 @@ IPI `0xFE`, not NMI.
 
 Rule: nothing is silently swallowed. Not yet enforced in three cases. An exception before `idt::init` (PMM, the CR3 switch,
 ACPI discovery, heap, KVA, GDT, PIC) goes to whatever IDT Limine left and resets or hangs with no
-output (ROADMAP §20.1, F136). LINT1 is masked on every CPU and MADT NMI entries (types 3 and 4) are
+output (ROADMAP §11.1, F136). LINT1 is masked on every CPU and MADT NMI entries (types 3 and 4) are
 not parsed, so a chipset or external NMI never reaches the NMI handler (ROADMAP §20.1, F096).
 `CR4.MCE` and `CR0.NE` are clear on every CPU, so a machine check shuts the CPU down with no dump,
 and an x87 floating-point error raises the masked IRQ13 and is lost (ROADMAP §10.6, F026).
@@ -527,7 +527,7 @@ must neither halt nor corrupt memory it has not given to that source (AGENTS.md 
 | Ring-3 code | Nothing: it must not halt or corrupt the kernel (I6) | Halt the kernel (F004 to F010); every process is root, so it can read any file and signal any process | ROADMAP §10.6 and §10.10 (halts), §13.9 (uids), §18.6 (capabilities, `seccomp`) |
 | Disk images and partition tables | Nothing: a parse returns `Corrupt` | Panic the kernel with a crafted image or table that root mounts or attaches (F061, F064, F117) | ROADMAP §10.2 (FAT BPB), §13.9 (partition tables), §14.8 (vibefs v2 validates every block it reads; v1 is retired) |
 | Devices: config space, rings, registers, interrupts | Nothing for halts (rule 4); everything for DMA | Read or write any physical memory by DMA, and forge an MSI | ROADMAP §18.1 (IOMMU, interrupt remapping, used-ring checks, F048) |
-| Firmware tables: ACPI, device tree, SMBIOS, the memory map | What they describe, but not their bounds: a malformed table is refused, never followed out of range | Halt boot with a malformed table before the IDT exists (F136) | ROADMAP §20.1 |
+| Firmware tables: ACPI, device tree, SMBIOS, the memory map | What they describe, but not their bounds: a malformed table is refused, never followed out of range | Halt boot with a malformed table before the IDT exists (F136) | ROADMAP §11.1 (early exceptions report themselves), §20.1 (table bounds) |
 | The network | Nothing, from the first packet | Not reachable yet | ROADMAP §15.10 fuzzes every parser from the start |
 | Speculation and timing side channels | Out of scope: no KPTI and no Spectre or MDS mitigations; the kernel half is mapped in every user address space (F024, F025, F131, F132) | Read kernel and other processes' memory on an affected CPU | ROADMAP §18.3 |
 | Limine, the firmware, and the CPU | Everything | Not applicable | ROADMAP §18.7 measures and verifies the boot chain |
