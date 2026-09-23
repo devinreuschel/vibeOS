@@ -1514,7 +1514,7 @@ so do TLB maintenance and the §11.2 I-cache maintenance aarch64 needs whenever 
 - [ ] `MAP_FIXED` handling, including replacing existing mappings
 - [ ] region splitting and merging on partial unmap and protect
 - [ ] on x86_64 a non-present user PTE that keeps a frame number, such as a `PROT_NONE` page, stores it inverted, as Linux does against L1TF (CVE-2018-3620), so no non-present PTE names cacheable RAM; a host test decodes each non-present encoding (F133)
-- [ ] a VA space allocator for the user half with a bottom-up hint and a gap search, below the §10.6 `USER_MAP_END`
+- [ ] a VA space allocator for the user half, below the §10.6 `USER_MAP_END`, that places mappings as Linux's default layout does: top-down from an `mmap_base` one stack-size gap below the stack (Linux's `mmap_base()` rule, with the stack's `RLIMIT_STACK` and a gap of at least 128 MiB), honoring a hint address when the range there is free, and bottom-up only under `ADDR_COMPAT_LAYOUT` or an unlimited `RLIMIT_STACK`, as `mmap_is_legacy` decides; host tests place a sequence of mappings and compare the addresses with those a Linux x86_64 and arm64 process gets for the same requests
 - [ ] dirty page writeback for shared file mappings
 - [ ] `mlock` for pages that must not be evicted
 
