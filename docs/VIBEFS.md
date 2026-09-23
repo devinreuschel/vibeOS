@@ -398,7 +398,7 @@ One transaction = one generation bump.
 3. Write those blocks. The alloc map carries this commit's drops (§6).
 4. `Flush`.
 5. Write the inactive super slot (`generation + 1`, new roots, checksum):
-   the slot that does not hold the newest valid super on disk. The
+   the slot opposite the super this mount last mounted or committed. The
    generation and roots change in memory only after step 6 succeeds.
 6. `Flush`.
 7. In memory, drop refcounts on the replaced metadata and data. Optionally
@@ -411,6 +411,16 @@ nothing, so a commit whose super is durable always finishes its switch
 in memory (DESIGN §4.4). v1's commit allocates no kernel memory,
 and ROADMAP §10.11's F014 box moves its one table-slot check, `MAX_META`,
 before step 5.
+
+An error at step 5 or 6 leaves the new super's state unknown: the write
+may have reached the media before the error was reported, and a later
+mount picks it if it did. So the failed commit keeps the blocks it
+allocated. The next commit writes the same slot, allocates none of those
+blocks, and writes an alloc map that counts them free, since its own
+super makes them unreachable (§6); memory frees them after its step 6.
+An error before step 5 frees them at once, since no super on disk reaches
+them. Freeing them at once after a step 5 or 6 error would let the retry
+overwrite the tree of a super that a crash then mounts.
 
 v1 code does not meet step 5 after a failed commit: it advances the
 generation and roots in memory before the alloc write, and picks the slot
