@@ -128,7 +128,9 @@ gs, cpu, AP trampoline). Nested also: `src/fs/` (VFS + kernfs). `user/` is frees
 
 - Durable intent goes in this file. Ephemeral "fixed X" notes go in `CHANGELOG.md` or nowhere.
 - No code review writeups, no phase retrospectives, no status reports. The roadmap checkboxes are the
-  status. `git log` is the history.
+  status. `git log` is the history. The one status this file states is the gap between a rule and the
+  code, written as the header says ("Rule; not yet enforced" with the ROADMAP line that closes it),
+  so a rule is never read as a description of the code.
 - "How does this function work" goes in a doc comment. "Why is this line here at all" goes in a short
   comment on the line. Nothing goes in a comment that describes a past state of the code.
 - If this doc describes behavior the code contradicts, one of them is a bug. Say which in the commit
@@ -262,9 +264,9 @@ Pick one spinlock implementation and use it everywhere. The old tree ended up wi
 in one design doc, an IRQ-guarded spin mutex in the code) and the mismatch was a source of confusion
 for weeks.
 
-Three cells:
+Two cells, and the lock beside them:
 
-| Cell | Use |
+| Primitive | Use |
 |------|-----|
 | `SpinMutex` | Shared across CPUs. IRQ-aware. Ranked. |
 | `IrqCell` | IRQ-off exclusive access: `with` takes IRQs off, panics on same-CPU re-entry, and spins while another CPU holds it. Used for CPU-local and boot-only state and as an unranked cross-CPU lock (among them `proc_init::TABLE`, `kva_init::KVA` and `DEFERRED`, `work_init::ST`, `irq_init::IRQ`, `file_init::CWD`, and `log_init::LOG`). Its `Sync` impl has no `T: Send` bound, and `force_unlock` is a safe fn (ROADMAP §10.3, F017). Planned (ROADMAP §10.3, F108): every cross-CPU `IrqCell` but the log ring becomes a ranked `SpinMutex`. |
@@ -390,7 +392,8 @@ test fails when the invariant breaks; *documented* means a rule in the section n
 comment, with nothing that checks it; *assumed* means relied on but stated only in this table.
 "Holds today" is the state at the commit that last changed the row; where the answer is no or
 partly, the row names the ROADMAP line that fixes it. DOC2 (ROADMAP §10.3) moves this table to its
-own file.
+own file. These ids name invariants; ROADMAP's bare `I1` names the architecture review's issue, a
+separate namespace.
 
 | # | Invariant | Established at | Status | Holds today |
 |---|-----------|----------------|--------|-------------|
@@ -961,7 +964,7 @@ spinlock held, or on a path the OOM victim needs in order to exit, cannot wait, 
 `Box::new` cannot be handled by its caller; AGENTS.md rule 4 forbids a user-triggerable panic.
 
 The heap is deliberately simple and deliberately temporary. A slab allocator for hot object types
-(TCBs, file descriptors, inodes, network buffers) lands in the advanced memory phase; general
+(TCBs, file descriptors, inodes, network buffers) lands in ROADMAP §19.9; general
 allocation stays on the free-list heap.
 
 ## 4.5 Kernel virtual address allocator
@@ -990,13 +993,15 @@ than debugging mysterious corruption.
 The roadmap covers these in detail. Listed here so the interfaces above are designed with them in
 mind:
 
-- Demand paging. `map_page` gains a "reserve VA, populate on fault" mode, and `#PF` becomes a
-  recoverable exception with a real fault handler rather than a halt.
-- Copy on write. `fork` clones an address space by sharing frames read-only with a refcount; the write
-  fault does the copy. Needs per-frame metadata, which means the PMM grows a `struct Frame` array.
-- Slab caches, per-CPU magazines to avoid the global buddy lock on hot paths.
-- Page cache unified with `mmap`, so file-backed pages and anonymous pages share eviction.
-- Swap, which needs reverse mappings from a frame back to every PTE referencing it.
+- Demand paging (ROADMAP §12.2). `map_page` gains a "reserve VA, populate on fault" mode, and `#PF`
+  becomes a recoverable exception with a real fault handler rather than a halt.
+- Copy on write (ROADMAP §12.3). `fork` clones an address space by sharing frames read-only with a
+  refcount; the write fault does the copy. Needs per-frame metadata, which means the PMM grows a
+  `struct Frame` array (ROADMAP §12.1).
+- Slab caches, per-CPU magazines to avoid the global buddy lock on hot paths (ROADMAP §19.9).
+- Page cache unified with `mmap`, so file-backed pages and anonymous pages share eviction (ROADMAP
+  §12.5).
+- Swap, which needs reverse mappings from a frame back to every PTE referencing it (ROADMAP §12.7).
 
 The per-frame metadata array is the pivot. Refcounting, reverse mapping, and page cache all need it,
 so the PMM should be built expecting it to appear.
@@ -1839,12 +1844,13 @@ SMP bugs are timing dependent, so the tests matter more than usual:
 
 Later:
 
-- x2APIC. MSR-based register access, no MMIO, and APIC IDs beyond 255.
-- Topology awareness: cores, threads, packages, and cache sharing from CPUID leaf 0x1F, so the
-  scheduler can prefer a sibling core over a remote package.
-- NUMA. SRAT and SLIT parsing, per-node buddy allocators, node-local allocation policy.
-- CPU offlining for power management, which needs the reverse of bring-up: migrate threads, redirect
-  interrupts, park the core.
+- x2APIC (ROADMAP §20.1). MSR-based register access, no MMIO, and APIC IDs beyond 255.
+- Topology awareness (ROADMAP §19.4): cores, threads, packages, and cache sharing from CPUID leaf
+  0x1F, so the scheduler can prefer a sibling core over a remote package.
+- NUMA (ROADMAP §19.7). SRAT and SLIT parsing, per-node buddy allocators, node-local allocation
+  policy.
+- CPU offlining for power management (ROADMAP §19.6), which needs the reverse of bring-up: migrate
+  threads, redirect interrupts, park the core.
 
 ---
 
@@ -2121,7 +2127,8 @@ does not boot it twice.
 
 ## 8.6 CI and coverage
 
-Two jobs on every push and pull request, Linux. `concurrency` cancels superseded runs for the same
+Two jobs run on every push and pull request, on Linux; the other rows below are scheduled or run on
+a tag. `concurrency` cancels superseded runs for the same
 branch (push and PR share one slot). The earlier one-ladder-job rule (runner queues) was lifted on
 2026-09-22: the repo is public, so Actions minutes are free, and agents own the CI design. ROADMAP
 §10.1 plans a build-once job plus a tier matrix per architecture; until that lands the ladder is one

@@ -32,7 +32,7 @@ A small `KError` in the portable crate with errno values, `From` impls from the 
 2. **Host test** `every_fs_error_maps`: iterate all `FsError` variants (add a `const ALL: [FsError; 13]`) and assert each maps to a distinct, non-zero errno; same for `BlockError`.
 3. **File API** returns `Result<_, KError>` once A3 has made it thin; the shell's `err_line` prints `KError::as_str`.
 4. **Syscall dispatch** (built in Phase 9.3) returns `Result<usize, KError>`; the entry stub converts to `-errno`. Already tracked as ROADMAP §10.4 and a Phase 10 gate line.
-5. **Docs:** a short table in DESIGN (new §11 "Errors") listing which module enums cross the user boundary.
+5. **Docs:** a short table in a new DESIGN section, "Errors", after §11 (Portability) listing which module enums cross the user boundary.
 
 ## Acceptance criteria
 
