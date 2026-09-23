@@ -957,8 +957,8 @@ never contend.
 Allocation failure has two policies, chosen by who can cause it:
 
 - On a path that untrusted input reaches (a syscall, device data, a disk image, a network packet),
-  allocation is fallible: `Vec::try_reserve` and the kernel's `try_*` constructors, whose failure
-  becomes `ENOMEM` (or the errno Linux returns there, such as `EAGAIN` from `fork`). Where the
+  allocation is fallible: through `vibeos::kalloc`'s owning types, whose failure becomes `ENOMEM`
+  (or the errno Linux returns there, such as `EAGAIN` from `fork`). Where the
   context may sleep ([§2.9](#29-preemption-and-interrupt-state) rule 4), ROADMAP §12.6's direct
   reclaim and OOM killer run before the allocation reports failure. A user who exhausts memory
   gets an errno or the OOM killer's verdict, never a kernel halt.
@@ -968,9 +968,22 @@ Allocation failure has two policies, chosen by who can cause it:
   with the requested layout: there, a failure means a kernel invariant is false, and silent OOM is
   worse than a halt.
 
+Fallibility is carried by type, not by a list of methods. The infallible surface of `alloc` is
+large: `BTreeMap::insert`, `extend`, `collect`, `clone`, `to_vec`, `String::from`, and every other
+growing call. On stable Rust, which `vibeos-core` uses (§1.1), `Box`, `Arc`, and `BTreeMap` have no
+fallible constructor at all. So `vibeos-core` has a `kalloc` module of owning types (`TryBox`,
+`TryVec`, `TryString`, `TryArc`, and an ordered map) whose every growing operation returns
+`Result`. They are built on stable Rust: `alloc::alloc::alloc` with a null check for boxes, and
+`try_reserve` for vectors. Clippy's `disallowed-types` denies `alloc`'s owning types (`Box`, `Vec`,
+`String`, `Arc`, `Rc`, and the `alloc::collections` types) in both crates outside `kalloc`, and
+`disallowed-macros` denies `vec!` and `format!`. A boot-time or invariant-bounded site that keeps
+an `alloc` type carries an `#[allow]` whose comment names its bound. This is the shape Rust-for-Linux
+settled on (`KBox`, `KVec`) after starting from `alloc`'s collections. Rejected: a
+`disallowed-methods` list of infallible constructors, which misses the calls it does not name and
+leaves `Box` and `Arc` with no fallible path on stable Rust.
+
 Rule; not yet enforced: syscall paths use the infallible API today, and a `fork` near exhaustion
-panics in `spawn_inner` (F010). ROADMAP §10.4 makes the infallible constructors a lint error outside
-the allowed sites. Rejected: making small allocations never fail by having the allocator wait
+panics in `spawn_inner` (F010). ROADMAP §10.4 lands `kalloc` and the lints. Rejected: making small allocations never fail by having the allocator wait
 until the OOM killer frees memory (Linux's "too small to fail"), because an allocation made with a
 spinlock held, or on a path the OOM victim needs in order to exit, cannot wait, and a failed
 `Box::new` cannot be handled by its caller; AGENTS.md rule 4 forbids a user-triggerable panic.
