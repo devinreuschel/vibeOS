@@ -405,6 +405,13 @@ One transaction = one generation bump.
    mirror the super into the other slot (same generation) and `Flush`
    again; v1 does not mirror.
 
+Steps 1 to 4 make every allocation the commit needs, blocks and kernel
+memory alike, including the memory step 7 uses; steps 5 to 7 allocate
+nothing, so a commit whose super is durable always finishes its switch
+in memory (DESIGN §4.4). v1's commit allocates no kernel memory,
+and ROADMAP §10.11's F014 box moves its one table-slot check, `MAX_META`,
+before step 5.
+
 v1 code does not meet step 5 after a failed commit: it advances the
 generation and roots in memory before the alloc write, and picks the slot
 by generation parity, so the retry after a failed alloc write, first flush,
@@ -554,7 +561,7 @@ they are decided here, before a line of v2 is written:
 | Extension | three feature-flag sets: compat (an older reader ignores the feature), ro_compat (an older reader mounts read-only), and incompat (an older reader refuses to mount); `VERSION` changes only for a change the flags cannot express | additive changes land without a version bump, as in ext4 and XFS; v1 has one flag byte |
 | Validation | every check §5 lists (entry counts, pointers in range, extent bounds, inline sizes, unique inode numbers, each metadata block referenced once) runs when a block is read, before its contents are used | F061: v1's mount trusts on-disk counts, and a crafted image must return `Corrupt`, never panic (DESIGN §2.10) |
 | Directories | an on-disk B-tree per directory with no volume-wide entry cap; a lookup reads one block per level; each entry has a 64-bit position cookie that stays valid while other entries are added and removed | ROADMAP §14.8 (F067); `getdents64`'s `d_off`, `seekdir`, and NFS readdir cookies need stable positions |
-| Commit | §2's copy-on-write with an atomic superblock switch, where a commit writes only the blocks it changed and their ancestors | v1 rewrites every inode and directory tree on every commit (§7, §8) |
+| Commit | §2's copy-on-write with an atomic superblock switch, where a commit writes only the blocks it changed and their ancestors, and makes every allocation before the superblock write (§10) | v1 rewrites every inode and directory tree on every commit (§7, §8) |
 
 Rejected: carrying v1's field widths into v2 and raising limits later with
 new versions that `fsck` upgrades in place. Each raise after 1.0 would be a

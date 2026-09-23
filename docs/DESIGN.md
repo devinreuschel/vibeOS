@@ -963,6 +963,19 @@ until the OOM killer frees memory (Linux's "too small to fail"), because an allo
 spinlock held, or on a path the OOM victim needs in order to exit, cannot wait, and a failed
 `Box::new` cannot be handled by its caller; AGENTS.md rule 4 forbids a user-triggerable panic.
 
+An operation past its point of no return cannot unwind what it built, so it makes every allocation it
+needs before that point and only releases after it:
+
+- A filesystem commit allocates its blocks, and the memory its switch to the new generation uses,
+  before it starts the superblock write ([VIBEFS.md](VIBEFS.md) §10). Once the superblock is
+  durable, memory must switch to the new generation, and a switch that fails halfway for want of
+  memory leaves memory matching neither generation.
+- `execve` builds the new address space, its stack and arguments included, before it swaps it in, and
+  after the swap only releases: close-on-exec descriptors and the old address space. After the swap
+  there is no old image to return an errno to. Rejected: Linux's order, which allocates past its
+  point of no return and kills the process with `SIGSEGV` when that fails; building first costs
+  holding both images' page tables until the swap.
+
 The heap is deliberately simple and deliberately temporary. A slab allocator for hot object types
 (TCBs, file descriptors, inodes, network buffers) lands in ROADMAP §19.9; general
 allocation stays on the free-list heap.
