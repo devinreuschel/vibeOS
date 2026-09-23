@@ -56,6 +56,10 @@ These are not style preferences. They shape every subsystem.
 5. **No unbounded loops against hardware.** Every poll gets an iteration cap and a failure path.
 6. **Layering is enforced by dependency direction**, not by wishful thinking. Lower layers do not
    call up. No callback into the scheduler from the physical allocator.
+7. **The portable crate is stable Rust.** `vibeos-core` enables no `#![feature]`. Kani (ROADMAP
+   §10.8) and Verus (Phase 38) each pin their own toolchain and must build the code the kernel
+   links, and code with no unstable feature builds on all of them. Nightly features stay in the
+   kernel binary. `scripts/check_core_stable.py` in `make check` enforces it.
 
 ## 1.2 Layers
 

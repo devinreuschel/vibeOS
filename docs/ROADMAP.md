@@ -1024,6 +1024,7 @@ force every fix branch to rebase across it.
 - [x] dated nightly; action SHAs; Limine commit verified after clone; cargo cache keyed on `Cargo.lock` (C1)
 - [x] `make check` as the local gate; `ruff` and `mypy --strict` over `tests/` and `scripts/` when they are installed (DX1, F147)
 - [x] restriction lints on the portable crate: no `unwrap`, `expect`, or `panic!` outside tests (E1)
+- [x] `vibeos-core` enables no unstable feature (DESIGN §1.1): `scripts/check_core_stable.py`, which `make check` runs, fails on a feature attribute in `src/lib.rs`, so Kani, loom, and Phase 38's Verus keep building the crate the kernel links; `tests/harness/test_core_stable.py` tests it
 - [ ] `-D warnings` reaches every kernel build: `"-D", "warnings"` joins `[target.x86_64-unknown-none].rustflags` in `.cargo/config.toml`, since Cargo reads one rustflags source and that table shadows `[build].rustflags` (Q1, F147)
 - [ ] CI runs `cargo clippy --bin vibeos -- -D warnings` on the default features that ship, beside its `--all-features`, `kernel_tests`, and `vibefs_crash` runs (Q1, F147)
 - [ ] `ruff` and `mypy` pinned by version in the `check` job, and `make check` fails when either is missing and `CI` is set (DX1, F147)
@@ -4242,7 +4243,7 @@ guests under TCG on the hosted runners.
 - [ ] TLA+ and TLC for protocols whose state spans CPUs, the disk, and time; Kani and loom stay where §10.8 put them, for bounded proofs and interleavings
 - [ ] Verus with its Z3, the TLA+ tools, and isla-axiomatic pinned like the nightly (C1), and herd7 kept on §11.7's pin, all fetched by `setup.sh` and checked by hash, with the bump procedure in `AGENTS.md`; each runs on macOS and Linux
 - [ ] `vstd` and Verus's macro crates build under the kernel's pinned nightly for the host and both kernel targets, and pass the §10.9 `cargo deny` policy
-- [ ] `vibeos-core` keeps building under Verus's pinned Rust as well as the kernel's nightly, so it uses no feature only the nightly has; `make verify` is where that breaks first
+- [ ] `vibeos-core` keeps building under Verus's pinned Rust as well as the kernel's nightly: §10.1's `check_core_stable.py` has kept unstable features out of it since Phase 10, and `make verify` is where any other difference between the two toolchains shows first
 - [ ] `make verify` in `make help` and in AGENTS.md's How to run, and in CI inside the §10.1 budget, recorded in DESIGN §8.6: on every push that changes `vibeos-core` or a file under `docs/specs/`, one ladder tier (not one per architecture, since it runs on the host) checks every Verus proof over the whole crate and runs TLC on the specifications that changed; the nightly job and the scheduled macOS job run it in full
 - [ ] proof time per module, measured on the nightly job's hosted x86_64 runner and on the scheduled macOS job, and the resource limit `make verify` enforces, recorded in DESIGN §8.6
 
