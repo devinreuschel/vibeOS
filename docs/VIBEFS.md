@@ -18,7 +18,8 @@ section whose line cites the same id and fixes the code.
 
 Index: [DESIGN.md](DESIGN.md) §1.4. Block durability: DESIGN §10.2 (`Flush`, not
 `Barrier`). Task list: [ROADMAP.md](ROADMAP.md) §8.5. Open v1 work: ROADMAP
-§10.2, §10.11, §12.5, §13.9, and §18.5. v2: ROADMAP §14.8.
+§10.2, §10.11, §12.5, §13.9, and §18.5. v2: the requirements in §15, and
+ROADMAP §14.8.
 
 ---
 
@@ -519,3 +520,34 @@ v1's tests do not check this pass criterion yet:
 
 `VERSION` is 1. Readers reject any other value. Additive on-disk changes
 that old readers can ignore use flag bits. Layout changes bump `VERSION`.
+
+---
+
+## 15. Version 2 requirements
+
+ROADMAP §14.8 writes the v2 format into this file before any v2 code, as
+§8.5 did for v1. v2 is the format ROADMAP §39.1 freezes for 1.0, and every
+volume written after it carries these choices for as long as it exists, so
+they are decided here, before a line of v2 is written:
+
+| Property | v2 requires | Why |
+|---|---|---|
+| Byte order | little-endian, as v1 | both architectures are little-endian; one byte order has no swap path to test |
+| Block addresses and counts | 64-bit | v1's `u32` block numbers end at 16 TiB of 4 KiB blocks, and F008 is the same truncation in file offsets |
+| Inode numbers | 64-bit, allocated in increasing order and never reused in a volume's life | Linux's `ino_t` is 64-bit; backup tools and NFS key on inode numbers, and no reuse needs no generation field |
+| File size | up to 2^63 − 1 bytes | Linux's `loff_t` |
+| Names | 1 to 255 bytes of any value but `/` and NUL, not normalized | Linux's `NAME_MAX`; v1's 64-byte cap follows the VFS limit that ROADMAP §13.9 raises |
+| Timestamps | signed 64-bit seconds and 32-bit nanoseconds for atime, mtime, ctime, and a birth time | Linux's `statx`; v1 stores whole seconds |
+| Checksums | CRC-32C (Castagnoli) over every metadata block and every data extent | a hardware instruction on both architectures (SSE4.2 `crc32`, the Armv8 CRC32C instructions), and what ext4, XFS, and btrfs use; v1's CRC-32/ISO-HDLC has no instruction on x86_64 |
+| Self-describing blocks | every metadata block header carries the volume UUID, its own block number, and the generation that wrote it | a checksum accepts a correct block written to the wrong place or left over from an older generation; these fields do not |
+| Reference counts | at least 32 bits per block, or a reference-count tree | v1's `u8` counts overflow once 255 snapshots share a block |
+| Block size | a superblock field: `mkfs` writes 4096, and readers accept every power of two from 4096 to 65536 | a later default needs no format change |
+| Extension | three feature-flag sets: compat (an older reader ignores the feature), ro_compat (an older reader mounts read-only), and incompat (an older reader refuses to mount); `VERSION` changes only for a change the flags cannot express | additive changes land without a version bump, as in ext4 and XFS; v1 has one flag byte |
+| Validation | every check §5 lists (entry counts, pointers in range, extent bounds, inline sizes, unique inode numbers, each metadata block referenced once) runs when a block is read, before its contents are used | F061: v1's mount trusts on-disk counts, and a crafted image must return `Corrupt`, never panic (DESIGN §2.10) |
+| Directories | an on-disk B-tree per directory with no volume-wide entry cap; a lookup reads one block per level; each entry has a 64-bit position cookie that stays valid while other entries are added and removed | ROADMAP §14.8 (F067); `getdents64`'s `d_off`, `seekdir`, and NFS readdir cookies need stable positions |
+| Commit | §2's copy-on-write with an atomic superblock switch, where a commit writes only the blocks it changed and their ancestors | v1 rewrites every inode and directory tree on every commit (§7, §8) |
+
+Rejected: carrying v1's field widths into v2 and raising limits later with
+new versions that `fsck` upgrades in place. Each raise after 1.0 would be a
+migration of every volume in use, where a wider field now costs a few bytes
+per block.

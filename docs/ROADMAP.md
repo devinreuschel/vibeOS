@@ -1849,7 +1849,7 @@ encryption and boot integrity stay in §18.7.
 vibefs v1 holds at most 4 MiB, 64 inodes, and 96 directory entries per volume ([VIBEFS.md](VIBEFS.md)
 §3). The base system and the Phase 17 toolchains need a real one.
 
-- [ ] vibefs format version 2, designed for the §12.5 page cache: multi-GiB volumes, at least a million inodes, B-tree directories without a volume-wide entry cap, and extent trees rather than four extents per inode, which `write` fills with multi-block extents; VIBEFS.md gains the v2 format before any code, as §8.5 did for v1 (F051)
+- [ ] vibefs format version 2, designed for the §12.5 page cache: multi-GiB volumes, at least a million inodes, B-tree directories without a volume-wide entry cap, and extent trees rather than four extents per inode, which `write` fills with multi-block extents; VIBEFS.md gains the v2 format before any code, as §8.5 did for v1, and it meets every requirement of VIBEFS.md §15: host tests of the shared format code write and read back a block number above 2^32, an inode number above 2^32, a 255-byte name, and a nanosecond timestamp, check CRC-32C against its published vectors, and refuse a metadata block whose header names another volume, another block number, or an unknown incompat feature (F051)
 - [ ] a v2 directory lookup descends the on-disk B-tree, reading at most one block per tree level, instead of scanning the volume's flat 96-entry table as v1's `find_dent` does; a host test counts block reads for a lookup in a 10,000-entry directory (F067)
 - [ ] the kernel, `mkfs-vibefs`, and `fsck-vibefs` share the v2 code, as they do for v1; `fsck` upgrades a v1 volume in place, and a v1 volume still mounts
 - [ ] extended attributes in the v2 format and in tmpfs: the `getxattr`, `setxattr`, `listxattr`, and `removexattr` families with their `l` and `f` forms, in the `user.` and `trusted.` namespaces, and `EOPNOTSUPP` for `security.` and `system.`
@@ -3582,7 +3582,7 @@ on aarch64 under HVF on the dev host as a §10.9 record. IOPS on data-center dri
 
 ### 29.5 Filesystem at scale
 - [ ] vibefs v2 grown online into new space at the end of its device, without unmounting
-- [ ] vibefs v2 at 16 TiB on a sparse image and at 100 million inodes, on aarch64 under HVF on the dev host as a §10.9 record, since 100 million inodes outgrow a hosted runner's 14 GB of disk: mount time, `fsck` time and memory, and lookup in a million-entry directory recorded in `docs/`; a v2 limit below either is raised with a new format version that `fsck` upgrades in place
+- [ ] vibefs v2 at 16 TiB on a sparse image and at 100 million inodes, on aarch64 under HVF on the dev host as a §10.9 record, since 100 million inodes outgrow a hosted runner's 14 GB of disk: mount time, `fsck` time and memory, and lookup in a million-entry directory recorded in `docs/`; both lie far inside VIBEFS.md §15's 64-bit limits
 - [ ] an in-guest test on a sparse 16 TiB vibefs v2 image writes the volume's last block and the largest file offset the format allows, and a write one byte past that offset returns `EFBIG`; 16 TiB is 2^32 blocks of 4 KiB, so its last block number is the largest 32-bit value and its block count does not fit in 32 bits
 - [ ] per-user, per-group, and per-project quotas enforced and managed through Linux's `quotactl`, with project ids set through `FS_IOC_FSSETXATTR`
 - [ ] writeback in parallel per filesystem and per device, measured on the gate's `null-co` NVMe namespaces under KVM on the KVM runner
