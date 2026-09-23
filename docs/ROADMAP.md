@@ -1950,7 +1950,34 @@ tests and never shipped (packetdrill, the §14.9 mirror) are pinned by hash but 
 
 - [ ] `ports/<name>/port.toml` for every third-party source: upstream URL, version, SHA-256 of the archive, SPDX license identifier, and a numbered patch series beside it; the §14.6 recipe builds from it
 - [ ] source archives mirrored as release assets, so a build does not depend on an upstream host staying up
-- [ ] a license policy in `docs/`, decided before §14.9 and before any copyleft binary ships in an image: vibeOS code is MIT, ports keep their licenses, and a copyleft port ships as its own package with its corresponding source beside it
+- [ ] a license policy in `docs/`, recorded before §14.9 and before any copyleft binary ships in an image, with the owner's answer to the decision below: vibeOS code is MIT, ports keep their licenses, and a copyleft port ships as its own package with its corresponding source beside it
+
+> **OWNER DECISION NEEDED (design review H015): which licenses a release image may carry.** Release
+> images and published assets will carry third-party code: musl (MIT) from Phase 14; the Phase 24 ports
+> tree, from which Phase 37 ships a GNOME or KDE desktop under GPL and LGPL; Linux's redistributable
+> firmware blobs (§31.6); and Intel and AMD microcode (§20.1). The firmware and microcode are
+> proprietary, redistributable under their own terms. §13.11's corpus and §17.7's build image already
+> republish GPL binaries as release assets, with their sources. Each class binds the project
+> differently. The kernel stays MIT in every option, since DESIGN §1.5 keeps GPL code out of it, and
+> shipping a GPL program beside an MIT kernel is aggregation, not a combined work.
+> - **(a) Permissive licenses only** (MIT, BSD, ISC, zlib, Apache-2.0, and the like) in images and
+>   assets. Consequence: Phase 37's desktop and every GPL tool stay test inputs from Alpine and never
+>   ship; Era VII's shipping lines, §13.11's corpus assets, and §17.7's build image change.
+> - **(b) Permissive and copyleft** (GPL, LGPL, MPL), each copyleft package published with its
+>   corresponding source as a release asset beside it, as the box above plans, and no proprietary
+>   binary. Firmware and microcode are fetched only by tests. Consequence: every release's source
+>   archives stay published as long as its binaries do, and users get microcode and device firmware
+>   only from elsewhere.
+> - **(c) As (b), plus proprietary redistributable firmware and microcode** as separate packages, left
+>   out of the default image, each with its license text, as Debian's `non-free-firmware` does.
+>   Consequence: the project redistributes binaries under licenses it did not write and must meet each
+>   one's conditions (no modification, license text shipped, Intel's microcode terms).
+>
+> **Recommendation: (b) now, and (c) when a funded goal brings physical hardware.** Nothing in QEMU
+> needs a firmware blob, and every gate line that touches firmware or microcode uses a test blob or
+> fetches its input at test time and ships nothing. So (b) closes every phase and does not commit the
+> project to proprietary redistribution before it has a machine that benefits. Nothing before §14.9
+> waits on the answer, and the policy file records it.
 - [ ] `make check` fails when a port lacks a manifest or has a license the policy does not allow; a scheduled job verifies each archive hash and that each patch series applies
 - [ ] the §14.9 mirror's pin list records each package's license from its own metadata, and the scheduled job checks it against the same policy
 - [ ] a scheduled job looks up each port and each §14.9 mirror package in the OSV database and opens an issue for a known vulnerability
