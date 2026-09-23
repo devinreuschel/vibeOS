@@ -89,7 +89,7 @@ in the same job where it fits, so runner noise cancels.
 
 **Standing gates** apply to every phase and are not repeated:
 
-- `make` builds clean with warnings denied
+- `make` builds with `-D warnings`, the `x86_64-unknown-none` kernel build included (F147)
 - `make check` green (fast local gate)
 - `make test` green, all tiers, including the SMP and timer fallback variants once they exist, and on both architectures once Phase 11 lands
 - CI green: the per-push jobs, and the scheduled jobs in the §10.1 CI budget before a phase tag
@@ -193,7 +193,7 @@ rest of the project, which is the single most consequential decision in this pha
 - [x] `make` produces a hybrid BIOS + UEFI ISO
 - [x] boots in QEMU under both `-bios` default and OVMF
 - [x] serial shows `vibeOS: serial online` as its first line
-- [x] a deliberate `panic!()` prints file, line, and message and halts without rebooting
+- [x] a deliberate `panic!()` prints file, line, and message, then `vibeOS: panic: halted` (`make test-e2e-panic`); no tier observes the halt, since the `panic_exit` build exits through `isa-debug-exit` and the harness kills QEMU at that line without checking the exit status (F141)
 - [x] `make test-e2e` asserts markers in order, fails fast on panic signatures, exits early on success
 - [x] `make test-harness` passes: the harness has its own unit tests
 - [x] CI runs the full ladder on push and pull request
@@ -217,7 +217,7 @@ rest of the project, which is the single most consequential decision in this pha
 ### 0.3 Limine handshake
 - [x] request statics in `.limine_requests` with the start and end markers, all `#[used]`
 - [x] base revision verified before reading any other response, with its own marker
-- [x] requests: framebuffer, memory map, HHDM, executable address, RSDP  (all five wired as of phase 1 slice A; framebuffer response only used for pmm exclusion so far)
+- [x] requests: framebuffer, memory map, HHDM, executable address, RSDP, all read once by `boot::capture`
 - [x] a `BootInfo` struct captured once at entry; nothing else reads Limine statics
 - [x] each null response produces a named halt, not an unwrap panic in a function with no context
 - [x] `limine.conf` with a single entry, serial console enabled
@@ -227,7 +227,7 @@ rest of the project, which is the single most consequential decision in this pha
 - [x] polled TX with a bounded THRE wait; drop the byte at the cap rather than spinning forever
 - [x] polled RX on the data-ready bit  (landed with §5.3)
 - [x] `fmt::Write` implementation with no allocation, usable before the heap exists
-- [x] `print!` / `println!` macros routed to it
+- [x] `marker!` (contract lines, never filtered) and `klog!` (through the §5.5 log ring) write to it; `print!` and `println!` were removed in E3 (#83)
 - [x] `#[panic_handler]`: re-init the port from scratch, print location and message, `cli; hlt` loop
 - [x] a `panic_test` build feature or shell command so the panic path is exercised, not assumed
 
@@ -246,14 +246,14 @@ rest of the project, which is the single most consequential decision in this pha
 - [x] panic and exception signature scan, fail immediately with the captured line
 - [x] early `quit` through the monitor on success
 - [x] `VIBEOS_SMP` and `VIBEOS_QEMU_CPU` overrides
-- [x] harness helpers have unit tests under `make test-harness`
+- [x] harness helpers have unit tests under `make test-harness`, except the QEMU runners `run_qemu_and_check`, `run_qemu_until_exit`, and `run_qemu_console_input`; `run_e2e.py` matches markers through `run_qemu_and_check` for every `test-e2e*` target, while the marker-order tests exercise `check_markers_in_order`, which no runner calls (F141)
 - [x] targets: `test-unit`, `test-harness`, `test-e2e`, `test`
 
 ### 0.7 CI
 - [x] GitHub Actions on push and pull request, Linux runner
 - [x] install `qemu-system-x86`, `nasm`, `xorriso`; bootstrap Limine
-- [x] `RUSTFLAGS=-Dwarnings`, `cargo clippy -- -D warnings`, `cargo fmt --check`
-- [x] `check` job (`make check` + hostlib llvm-cov floor) before the QEMU ladder
+- [x] `cargo fmt --check` and `cargo clippy -- -D warnings`, with the kernel linted under `--all-features`, `kernel_tests`, and `vibefs_crash` but never the default features; `make` compiles the kernel without `-D warnings`, since the `[target.x86_64-unknown-none]` rustflags shadow `[build]`'s and CI sets no `RUSTFLAGS` (F147)
+- [x] `check` job (`make check`, then an 87% line-coverage floor on `vibeos-core` from `cargo llvm-cov`) before the QEMU ladder
 - [x] run host units, harness units, ISO build, e2e
 - [x] cache the cargo registry and the Limine checkout so the loop stays fast
 
@@ -271,7 +271,7 @@ paging cannot be verified from the host.
 - [x] kernel runs entirely on its own PML4 with Limine's tables abandoned
 - [x] `make test-kernel` passes with in-guest tests for map/unmap, NX enforcement, heap growth, and the stack guard page
 - [x] host tests cover the buddy allocator including fragmentation and exhaustion
-- [x] a shell-less `meminfo` dump on the boot log reports plausible totals
+- [x] a shell-less `meminfo` dump on the boot log (`diag::meminfo`, the `vibeOS: meminfo:` lines); no test checks its totals
 
 ### 1.1 Buddy physical allocator
 - [x] `Buddy` in the library half: `allocate(order)`, `deallocate(phys, order)`, intrusive free lists stored in the free pages
@@ -335,11 +335,12 @@ and a monotonic clock nobody has to distrust.
 
 **Exit gate**
 - [x] `gdt ok`, `pic: remapped`, `idt ok`, `acpi: xsdt <n> tables`, `time: tsc <n>/ms` in the order [DESIGN.md](DESIGN.md#33-_start-order) specifies
-- [x] `int3` returns cleanly; a deliberate `#GP` prints a full register dump and halts
+- [x] a kernel `int3` returns; `int3_roundtrip` does not check that the `#BP` handler ran (F142)
+- [x] a deliberate `#GP` prints its interrupt frame (`rip`, `cs`, `rflags`, `rsp`, `ss`), the error code, `cr3`, and the handler's own `rbp` (F070), not the interrupted general-purpose registers, then `vibeOS: panic: halted` (`make test-e2e-gp`); no tier observes the halt (F141)
 - [x] a deliberate stack overflow lands in the double fault handler on its IST stack, proven by an in-guest test
-- [x] PIT tick advances `uptime_ms` at 1 kHz within tolerance
+- [x] `pit_tick_rate` sees `uptime_ms` advance 40 to 160 ms over an 80 ms TSC busy-wait; in the in-guest tiers the LAPIC periodic timer drives that tick, and the PIT drives it only in `make test-e2e-pit`, which measures no rate
 - [x] TSC calibrated against the HPET when present, PIT channel 2 otherwise, both paths tested
-- [x] `now_us` monotonic across 10k reads with a timer firing underneath, both straight-line and under yields
+- [x] `now_us` monotonic across 10k reads with a timer firing underneath (`now_us_monotonic`, `now_us_under_yields`), by construction: `now_ns` returns `LAST_NS.fetch_max(n).max(n)`, so neither test can fail, and the second calls `hlt` every 200 reads instead of yielding (F100)
 - [x] host tests: RSDP v1 and v2 checksum rejection, HPET table validation, MADT iteration over truncated input, `now_us` seqlock retry under a simulated concurrent writer
 
 ### 2.1 GDT, TSS, IST
@@ -353,9 +354,9 @@ and a monotonic clock nobody has to distrust.
 - [x] all 256 entries populated; unhandled vectors get a diagnostic default rather than a reserved gate
 - [x] `x86-interrupt` ABI handlers
 - [x] halting handlers dump RIP, CS, RFLAGS, RSP, SS, the error code, and CR2 for faults
-- [x] `#BP` logs and returns; `#UD`, `#GP`, `#PF`, `#DF`, `#MC` log and halt
+- [x] `#BP` logs and returns; `#UD`, `#GP`, `#PF`, `#DF` log and halt; the `#MC` handler is installed on IST 3 but cannot run, since no CPU sets `CR4.MCE`, so a machine check shuts the CPU down (F026)
 - [x] a scoped transient fault handler for tests: install, run a faulting operation, step RIP past it, restore
-- [x] named vector constants in one module with a host test asserting uniqueness
+- [x] named vector constants in `vectors.rs`, with a host test asserting that the entries of `NAMED` are unique; `NAMED` omits `MC` (F093)
 - [x] in-guest tests: `int3` roundtrip, double fault on IST via stack overflow, the scoped handler catching a deliberate `#PF`
 
 ### 2.3 8259 PIC
@@ -371,7 +372,7 @@ and a monotonic clock nobody has to distrust.
 - [x] all packed field access through `read_unaligned`
 - [x] MADT: LAPIC base, type 5 address override, I/O APIC entries with GSI bases, type 2 interrupt source overrides, enabled processor APIC IDs
 - [x] HPET: main counter base and period, rejecting zero addresses and I/O-space generic address structures
-- [x] FADT: the `IAPC_BOOT_ARCH` flags, and the reset and shutdown registers for later
+- [x] FADT: `IAPC_BOOT_ARCH`, `RESET_REG` and `RESET_VALUE`, and the HW-reduced `SLEEP_CONTROL_REG` and `SLEEP_STATUS_REG`; the PM1a and PM1b control blocks and the `Flags` field are not parsed (F097)
 - [x] MCFG: PCIe ECAM base, stored for phase 6
 - [x] parsing lives in the library half against synthetic table bytes, so all of it is host-tested
 - [x] MMIO for every discovered table patched uncacheable before first access
@@ -388,17 +389,17 @@ and a monotonic clock nobody has to distrust.
 - [x] `lfence` before `rdtsc`, or use `rdtscp`
 - [x] calibrate against the HPET main counter over ~10 ms when available
 - [x] fall back to PIT channel 2 with a count of 11932
-- [x] store `tsc_per_ms` per CPU, not globally
+- [x] `tsc_per_ms` calibrated once on the BSP and read by every CPU through `time_init::tsc_per_ms()`; `PerCpu.tsc_per_ms` holds a copy that only an in-guest test reads (F027, F111)
 - [x] sanity-check the result against a plausible range and refuse a value that would poison every delay downstream
 - [x] `busy_wait_ms` on the TSC, using `hlt` when interrupts are enabled
 
 ### 2.7 Timekeeping
-- [x] tick counter and TSC snapshot published under a seqlock: bump, write both, bump, with release ordering
+- [x] tick counter and TSC snapshot published under a seqlock: odd bump (`fetch_add(AcqRel)`), `Relaxed` stores of both, even bump (`Release`); no release fence follows the odd bump, so only x86's locked `xadd` keeps a reader from pairing a new payload with an unchanged sequence (F098)
 - [x] reader retries until it sees a stable even sequence, with acquire ordering
 - [x] `uptime_ms`, `now_us`, `now_ns` built on it
 - [x] the interpolation arithmetic lives in the library half and is host-tested including near `u64::MAX`
-- [x] seqlock test publishes an independent observed timestamp so a torn read actually fails the test
-- [x] a `next_deadline(instant)` interface rather than a hardcoded periodic tick, so tickless is possible later
+- [x] the host test `seqlock_threaded_writer_never_tears` writes each tick and TSC pair with a fixed relation between them, so a torn read fails it; no in-guest test can see a tear (F100)
+- [x] `time::next_deadline(instant)` defined and host-tested (`next_deadline_is_1ms_ahead`); no timer path calls it, and every timer mode runs a fixed 1 ms period (tickless idle is §19.6)
 - [x] RTC read once at boot for wall clock, tracked forward with the monotonic clock plus an offset
 
 ### 2.8 Diagnostics
@@ -416,8 +417,8 @@ synchronization primitives.
 
 **Exit gate**
 - [x] `sched: cpu0 ready` marker, and `irq: enabled` after it
-- [x] two spawned threads interleave visibly in the log without either yielding voluntarily
-- [x] `sleep_ms(50)` returns between 50 and 100 ms, measured in-guest
+- [x] timer preemption runs a spawned CPU-bound thread on CPU 0 while the bootstrap thread spins there without yielding (`preempt_two_threads` at `-smp 2`); at `-smp 4` both workers can land on idle APs, and the test then passes with no preemption (F142)
+- [x] `sleep_ms(50)` returns within 50 to 100 ms of `uptime_ms` on an invariant TSC; without one, as under TCG, `sleep_ms_50` accepts 40 to 400 ms of `now_us`, because timer ticks coalesce (F027)
 - [x] in-guest: 1000 iterations of two threads contending a blocking mutex, no deadlock, correct final count
 - [x] a thread that returns is reaped and its stack returned to the allocator, proven by the frame count
 - [x] the idle thread runs when nothing else is ready and the system does not wedge
@@ -426,7 +427,7 @@ synchronization primitives.
 ### 3.1 Thread abstraction
 - [x] `ThreadId`, `Tcb` with state, kernel stack handle, saved context, entry point, name
 - [x] states: ready, running, sleeping with deadline, blocked on a wait queue, dead
-- [x] guarded 16 KiB kernel stack per thread from the KVA allocator
+- [x] guarded 16 KiB kernel stack from the KVA allocator for every spawned thread; the bootstrap thread, which runs boot and, in `kernel_tests` builds, `ktest::run`, stays on Limine's boot stack (at least 64 KiB, no guard page) (F072)
 - [x] `spawn(name, fn)` returning a handle
 - [x] a global TCB table so a thread is addressable by id from anywhere, laid out for per-CPU queues in phase 4
 
@@ -435,22 +436,22 @@ synchronization primitives.
 - [x] save and restore callee-saved GPRs, `rflags`, `rsp`, and the return address
 - [x] new threads start on a synthetic frame that returns into the trampoline that calls the entry point
 - [x] a thread returning from its entry point marks itself dead and schedules, never falls off the stack
-- [x] no FPU or SSE state yet, consistent with the soft-float target; revisit deliberately, not accidentally
+- [x] `switch_context` saves no FPU or SSE state; since §9.1, `syscall_init::on_switch` saves and restores each TCB's FXSAVE area (`switch_fpu`) before calling it
 
 ### 3.3 Scheduler
 - [x] ready queue, sleep queue ordered by deadline, per-wait-queue blocked lists (`WaitQueue`)
 - [x] `schedule()` for the voluntary path
 - [x] `on_timer_tick()` called after EOI, preempting every 10 ticks
 - [x] `yield_now()`
-- [x] dead thread reaping deferred to a context not running on the dying stack
+- [ ] a dead thread's kernel stack is freed only after its own CPU has switched off it, never by another CPU's `reap_zombies` while the exiting CPU still runs on it. Reopened by the kernel review (F012); lands in §10.10.
 - [x] every scheduler lock acquisition inside an interrupt guard, no exceptions
 - [x] context switch counter and per-thread run time accounting from the start; retrofitting instrumentation is worse than building it in
 
 ### 3.4 Sleep and timeouts
 - [x] `thread::sleep_ms` parks on the sleep queue and wakes from the timer path
 - [x] one timeout structure: sorted list under a lock initially, with the interface a timing wheel can replace
-- [x] every blocking primitive takes an optional deadline. No exceptions, so a permanently blocked thread is impossible by construction
-- [x] a periodic sweep that logs threads blocked far past any plausible timeout
+- [x] every blocking primitive except `thread_init::wait_on` and `block_init::IoWaiter::wait` takes an optional deadline; those two, and any primitive given a `None` deadline, park until `FAR_DEADLINE` (`u64::MAX` ns), so a thread whose wake is lost stays blocked (F016, F033, F034)
+- [ ] a periodic sweep that logs each thread still blocked `OVERDUE_NS` (5 s) past its deadline. Reopened by the kernel review (F111); lands in §10.7.
 
 ### 3.5 Synchronization
 - [x] `InterruptGuard`: save `RFLAGS.IF`, `cli`, restore on drop, correctly nested
@@ -482,11 +483,11 @@ under load.
 comes before drivers rather than after.
 
 **Exit gate**
-- [x] `smp: done` before `shell ready`, with exactly `N-1` `smp: ap online` lines at `-smp N`
+- [x] `smp: done` before `shell ready`, with at least `N-1` `smp: ap online` lines before it, in order, at `-smp N`; the harness matches an ordered subsequence, so an extra line passes (F141)
 - [x] `sched: cpu<i> ready` for every CPU
 - [x] `time: lapic_timer ok (<mode>)` naming the mode that was selected
-- [x] `make test-kernel` at `-smp 2` and `-smp 4` both pass
-- [x] `make test-lapic-fallback` passes with `-cpu qemu64,-tsc-deadline`
+- [x] `make test-kernel` at `-smp 2` and `-smp 4` both pass, with the harness retrying a timed-out boot and the known failures §10.2 lists (F011, F021, F074)
+- [x] `make test-lapic-fallback` passes with `-cpu qemu64,-tsc-deadline`; under TCG, which never offers TSC-deadline, it takes the same periodic LAPIC path as `make test-kernel` (F078)
 - [x] a thread spawned on CPU 0 observably runs on another CPU
 - [x] remote unmap and remap through the shootdown path passes in-guest with 2+ CPUs
 - [x] failed AP bring-up frees everything it allocated, verified by frame count with a fault injected
@@ -509,13 +510,13 @@ comes before drivers rather than after.
 - [x] mask the PIC completely once routing is live and the LAPIC timer is verified
 
 ### 4.3 LAPIC timer
-- [x] detect TSC-deadline via `CPUID.01H:ECX[24]`; LVT mode `10b`, arm `IA32_TSC_DEADLINE`
+- [x] detect TSC-deadline via `CPUID.01H:ECX[24]`; LVT mode `10b`, arm `IA32_TSC_DEADLINE`; the arming path has run in no tier, since TCG never sets the bit (F078)
 - [x] fall back to periodic mode, calibrating LAPIC ticks per millisecond against the HPET with divider 16
 - [x] fall back to the PIT with a single global tick and no per-CPU preemption
 - [x] rearm before calling the scheduler
 - [x] mask the PIT's GSI when the LAPIC owns the tick
 - [x] log which mode was chosen, and make it an e2e assertion so a silent downgrade is not invisible
-- [x] in-guest tests: the timer fires, and rearm works across many ticks
+- [x] in-guest tests: the timer fires, and the periodic timer keeps firing across many ticks (`lapic_timer_rearm`); `rearm_deadline`, the only software rearm, returns before its `IA32_TSC_DEADLINE` write in every tier (F078)
 
 ### 4.4 AP trampoline
 - [x] `trampoline.S` via `global_asm!` into `.trampoline`, copied to `0x8000`; blob fits below the param block
@@ -528,24 +529,25 @@ comes before drivers rather than after.
 ### 4.5 AP bring-up
 - [x] one AP at a time, INIT, 10 ms, SIPI, ~1 ms, SIPI
 - [x] per-CPU area and guarded stack allocated and published with a fence before the SIPI
-- [x] 3 second ready-flag timeout; on failure free the stack and per-CPU area, log, and continue
-- [x] AP path in order: per-CPU GDT and TSS, per-CPU MSRs (`GS_BASE` before any `lidt`), IDT, LAPIC enable, timer calibrate and arm, ready flag, `sti`, enter as idle
+- [x] 3 second ready-flag timeout; on failure free the stack and per-CPU area, log, and continue; the free is unsafe for an AP that accepted the SIPI and then stalled, and §20.1 replaces it with INIT and a leak (F032)
+- [x] AP path in order: per-CPU GDT and TSS, per-CPU MSRs (`GS_BASE` before any `lidt`), IDT, LAPIC enable, timer armed with the BSP's calibration (`apic_init::arm_ap`), ready flag, `sti`, enter as idle (F027)
 - [x] `GS_BASE` set before the IDT is live and before `sti`
 - [x] an online mask, and a barrier the BSP waits on before declaring `smp: done`
 
 ### 4.6 Per-CPU data
 - [x] `PerCpu` with `self_ptr` at offset 0, reached through `GS_BASE`
-- [x] `KERNEL_GS_BASE` set to the same value, with scratch fields reserved for the future syscall path
+- [x] `KERNEL_GS_BASE` set to the same value at bring-up; since §9.1, `swapgs` exchanges it with the user GS base, and syscall entry saves the user RSP in `syscall_scratch` (F148)
 - [x] heap-allocated array sized from the actual MADT CPU count
-- [x] `per_cpu!` accessors safe from interrupt context
+- [ ] `per_cpu!` accessors safe from interrupt context, including a device-pool or keyboard interrupt taken at CPL 3. Reopened by the kernel review (F004); lands in §10.6.
 - [x] contents: cpu id, APIC id, ready queue, wake inbox, idle handle, current thread, local ticks, context switches, `tsc_per_ms`, timer mode
 - [x] in-guest identity tests on both BSP and AP
 
 ### 4.7 Locking audit
 - [x] every lock taken from an ISR audited for interrupt-disabled acquisition in all contexts
-- [x] the documented global lock order enforced by review, and by a debug-build lock order tracker if that turns out to be cheap
+- [x] the documented lock rank order enforced by review and by the per-CPU `HELD` rank tracker in `sync_init.rs`, in every build; the tracker misses a spinlock held across a switch, two locks of one rank nested, and the unranked `IrqCell`s other CPUs take (F108)
 - [x] serial TX locked at byte granularity
-- [x] buddy, heap, page tables, scheduler all confirmed SMP-safe under contention
+- [x] remote unmap through the shootdown path (`tlb_shootdown_remote`) passes in-guest
+- [ ] the scheduler is SMP-safe; today another CPU can unmap a dying thread's stack before its CPU switches off it, and other CPUs read `PerCpu` fields while the owner CPU writes them. Reopened by the kernel review (F012, F039); lands in §10.3 and §10.10.
 - [x] a stress test hammering the allocator from every CPU simultaneously
 
 ### 4.8 Per-CPU scheduling
@@ -562,11 +564,11 @@ comes before drivers rather than after.
 - [x] `0xFD` reschedule
 - [x] `0xFC` TLB shootdown
 - [x] `0xFB` call-function, with a wait-for-completion variant
-- [x] `0xFE` panic halt broadcast, so a panic stops the other cores before they overwrite the log
+- [x] `0xFE` panic halt broadcast (Fixed delivery); `halt_others` does not wait for acknowledgement, and a CPU spinning with IF=0 does not take it, so that CPU can still write COM1 during the dump (F135)
 - [x] handlers allocation-free; shootdown/call/halt take neither PT nor SCHED; reschedule takes SCHED IRQ-off
 
 ### 4.10 TLB shootdown
-- [x] update the PTE, broadcast, wait for acknowledgement from every online CPU
+- [x] update the PTE, broadcast, and wait for acknowledgement from every online CPU; `wait_acks` panics after 1000 × `tsc_per_ms` cycles (about 1 s) without every ack (F011)
 - [x] the waiting initiator keeps IF off and services incoming shootdown requests so two simultaneous shootdowns cannot deadlock
 - [x] KVA free deferred until the shootdown completes; freed ranges to the tail of the free list
 - [x] in-guest: unmap on one CPU, verify a fault on another, remap, verify access
@@ -575,7 +577,7 @@ comes before drivers rather than after.
 - [x] `-smp 2` as the default everywhere including e2e
 - [x] `-smp 4` target
 - [x] `-cpu qemu64,-tsc-deadline` target
-- [x] a longer-running high-CPU stress variant on a schedule rather than every push
+- [x] the `-smp 4` in-guest tier re-run weekly by `smp-stress.yml` (`make test-smp-stress`, 180 s timeout); it adds no load over `make test-kernel-smp4` and applies the same retries (F021)
 - [x] `cpus` diagnostic output: logical and APIC id, online mask, timer mode, local ticks, ready depth, context switches
 
 ---
@@ -593,9 +595,9 @@ operating system on a second architecture, then the memory and process semantics
 
 **Exit gate**
 - [x] `console ok` and `shell ready` markers
-- [x] typing in the QEMU window echoes on the framebuffer and drives commands
+- [x] typing in the QEMU window while the shell waits for input echoes on the framebuffer and drives commands (F004)
 - [x] `dmesg` shows the full boot log including lines emitted before the framebuffer existed
-- [x] a panic on any CPU stops the others and leaves a readable dump with a symbolized backtrace
+- [ ] a panic on any CPU stops the others and leaves a readable dump with a symbolized backtrace. Reopened by the kernel review (F070, F084, F135); lands in §10.2 and §10.7.
 - [x] host tests: scan code decoding, ring buffer wrap, line editing, command tokenization
 - [x] log level filtering changeable at runtime and visible in output
 
@@ -605,9 +607,7 @@ operating system on a second architecture, then the memory and process semantics
 - [x] text grid with wrap and scroll; scroll by `memmove` of whole rows
 - [x] a banner region that survives scrolling
 - [x] host tests for the font table and for the pixel bounds arithmetic
-- [ ] double buffering off the physmap once there is memory to spare, so scrolling stops tearing
-
-Double buffering parked (Design ACK). Lands with §16.1, where the display abstraction owns the scanout buffer.
+- [ ] double buffering off the physmap, so scrolling stops tearing (lands in §16.1, where the display abstraction owns the scanout buffer; today the console scrolls the framebuffer in place)
 
 ### 5.2 PS/2 keyboard
 - [x] controller init, self test, and enabling the first port
@@ -638,15 +638,13 @@ Double buffering parked (Design ACK). Lands with §16.1, where the display abstr
 - [x] every record timestamped from the monotonic clock and tagged with its CPU
 - [x] boot lines captured into the ring before the framebuffer exists (replay when FB lands in B)
 - [x] `dmesg` with level filtering and follow (`dmesg -f`; Ctrl+C to stop)
-- [ ] a per-CPU buffer with a printer thread, so log lines become atomic rather than merely non-interleaved bytes
-
-Printer thread parked: global IRQ-safe ring + serial try-lock sink (Design ACK). Lands with §19.5.
+- [ ] a per-CPU log buffer drained by a printer thread (lands in §19.5; today one global IRQ-safe ring and a serial try-lock sink); whole-line serial output lands earlier, in §10.2 (F138)
 
 ### 5.6 Panic and diagnostics
-- [x] broadcast the halt IPI first so other cores stop before the log is written
-- [x] symbolized backtrace: keep a symbol table in the image, walk frame pointers
-- [x] dump the register state, the current thread, and the last few log records
-- [x] optional QEMU exit on panic under a test feature, so a panic fails a run immediately instead of hanging
+- [ ] broadcast the halt IPI first so other cores stop before the log is written. Reopened by the kernel review (F135); lands in §10.7.
+- [ ] symbolized backtrace: keep a symbol table in the image, walk frame pointers. Reopened by the kernel review (F070, F084, F139); lands in §10.2 and §10.7.
+- [x] dump `rip`, `rsp`, `rflags`, and `cr3`; the current thread's CPU, id, and name; and the last 24 log records (F070)
+- [x] under the `panic_exit` feature, `panic::finish` exits QEMU through `isa-debug-exit` with status 35 after the dump (F071, F141)
 
 ---
 
@@ -669,14 +667,14 @@ enumeration and DMA.
 - [x] `Device` with a bus address, ids, resources, and an interrupt binding
 - [x] `Driver` trait: `probe`, `remove`, plus an id match table
 - [x] a registry matching drivers to devices, with driver init ordered by dependency
-- [x] resource tracking so two drivers cannot claim the same BAR
+- [ ] resource tracking so two drivers cannot claim the same BAR. Reopened by the kernel review (F115); lands in §10.12.
 - [x] a device tree dump for the shell
 
 ### 6.2 PCI and PCIe
 - [x] legacy configuration access through ports `0xCF8` and `0xCFC`
-- [x] ECAM through the MCFG base, which is required for anything beyond bus 0
-- [x] recursive bus enumeration across bridges
-- [x] BAR decoding: memory versus I/O, 32 versus 64 bit, size probing, `ioremap` of memory BARs
+- [x] ECAM through the base of the first MCFG allocation, with addresses that match the PCI Firmware spec when that allocation starts at bus 0; only ECAM reaches offsets `0x100` to `0xFFF`, while mechanism #1 (`0xCF8`/`0xCFC`) reaches every bus (F045, F114)
+- [x] recursive bus enumeration across bridges, covered by host tests; the kernel reads a bus other than 0 only through ECAM (F114)
+- [x] BAR decoding: memory versus I/O, 32 versus 64 bit, size probing of memory BARs and of I/O BARs whose bits 31:16 read back set, `ioremap` of memory BARs (F113)
 - [x] capability list walk: MSI, MSI-X, PCIe, vendor specific, power management
 - [x] enable bus master and memory space in the command register
 - [x] `lspci` with vendor and device names for the handful worth naming
@@ -702,7 +700,7 @@ enumeration and DMA.
 - [x] modern virtio over PCI: common configuration, notify, ISR, and device-specific capability regions
 - [x] feature negotiation with the `VIRTIO_F_VERSION_1` handshake and a clear failure when features are missing
 - [x] split virtqueue: descriptor table, available ring, used ring
-- [x] queue setup, kick, and completion handling with the correct barriers
+- [ ] queue setup, kick, and completion handling with the barriers virtio 1.2 requires. Reopened by the kernel review (F016); lands in §10.3.
 - [x] indirect descriptors, and `VIRTIO_F_EVENT_IDX` for interrupt suppression
 - [x] the ring index arithmetic in the library half, host-tested against a simulated device
 
@@ -723,16 +721,16 @@ enumeration and DMA.
 **Exit gate**
 - [x] `block: <name> <n> sectors` for each detected device
 - [x] write a pattern, reboot the VM, read it back intact
-- [x] GPT and MBR partition tables parsed and exposed as separate block devices
-- [x] concurrent reads and writes from multiple threads with no corruption, verified in-guest
+- [ ] GPT and MBR partition tables parsed and exposed as separate block devices. Reopened by the kernel review (F081, F117); lands in §10.4 and §10.12.
+- [ ] concurrent reads and writes from multiple threads with no corruption, verified in-guest. Reopened by the kernel review (F002); lands in §10.10.
 - [x] the cache demonstrably reduces device requests, measured by a counter not by assertion
 - [x] host tests: partition table parsing including deliberately corrupt tables, request merging, cache eviction
 
 ### 7.1 Block layer
 - [x] `BlockDevice` trait: logical block size, capacity, read, write, flush, discard
 - [x] a request structure with a completion, supporting both blocking and async submission
-- [x] per-device request queue with adjacent-request merging and a simple elevator
-- [x] barrier and flush semantics defined, since a journaling filesystem depends on them
+- [x] per-device request queue with a C-LOOK elevator and adjacent-request merging, capped at 8 segments and 8 waiters per merged request (F043, F119)
+- [x] barrier and flush semantics written down in `src/block.rs` and DESIGN §10.2, which a journaling filesystem depends on; the host tests `barrier_holds_later_requests` and `flush_is_fence_then_device_op` check `block::Queue`'s dispatch order around one fence (F043)
 - [x] a ramdisk implementation first, so the layer is testable before any real driver
 - [x] error propagation with retry, and a device marked failed rather than retried forever
 
@@ -740,24 +738,24 @@ enumeration and DMA.
 - [x] probe and configuration read: capacity, block size, topology
 - [x] request submission through the virtqueue with proper descriptor chaining
 - [x] completion through the interrupt path into request completions
-- [x] multi-queue with one queue per CPU
+- [x] multi-queue with one queue per CPU, on a device that takes the queue from the notify address, as QEMU's virtio-blk does (F047)
 - [x] flush and discard support
 - [x] in-guest: sector roundtrip, unaligned multi-sector, deep queue with concurrent submitters
 
 ### 7.3 Partitions
-- [x] MBR parsing including extended and logical partitions
+- [ ] MBR parsing including extended and logical partitions. Reopened by the kernel review (F117); lands in §10.12.
 - [x] GPT parsing with header and entry CRC validation and backup header fallback
-- [x] partitions exposed as offset-limited block devices
+- [ ] partitions exposed as offset-limited block devices. Reopened by the kernel review (F081); lands in §10.4.
 - [x] type GUID recognition for the ones that matter
 - [x] host tests over real table images, including truncated and CRC-broken cases
 
 ### 7.4 Cache
-- [x] a page-granular cache over block devices, keyed by device and offset
-- [x] read-through, write-back with an explicit flush, and dirty tracking
+- [x] a page-granular cache over `ram0` and `vda`, keyed by device id and offset, which reaches the two drivers through `cache_init`'s `raw_read`, `raw_write`, and `raw_flush` rather than `BlockDevice` (F081)
+- [ ] read-through, write-back with an explicit flush, and dirty tracking. Reopened by the kernel review (F015); lands in §12.5.
 - [x] LRU eviction with a clock or second-chance approximation
 - [x] readahead on detected sequential access
 - [x] a writeback thread with a bounded dirty ratio
-- [x] built so phase 12 can unify it with the page cache rather than maintaining two caches
+- [ ] built so Phase 12 can unify it with the page cache rather than maintaining two caches. Reopened by the kernel review (F015); lands in §12.5.
 - [x] hit and miss counters exposed in the shell
 
 ---
@@ -770,11 +768,11 @@ limitations.
 **Unlocks.** Loading binaries. A userspace that persists. Configuration.
 
 **Exit gate**
-- [x] mount a FAT32 image and `ls`, `cat`, `mkdir`, `rm`, `cp` behave correctly
-- [x] write, unmount, and verify the image with host `fsck.fat` clean
-- [x] `/dev`, `/proc`, and `/tmp` populated by their respective filesystems
-- [x] vibefs survives injected power loss during a write, verified by a crash-consistency test
-- [x] path resolution handles `.`, `..`, symlinks, mount point crossing, and a symlink loop without recursing to death
+- [ ] mount a FAT32 image and `ls`, `cat`, `mkdir`, `rm`, `cp` behave correctly. Reopened by the kernel review (F126); lands in §10.4.
+- [x] host tests write an image through the `vibeos-core` FAT code and require host `fsck.fat -n` to report it clean, and skip that check when `fsck.fat` is not installed (F143)
+- [x] `/dev`, `/proc`, and `/tmp` populated by their respective filesystems in the `Vfs` mount table, which in-guest tests and the kernel shell's `ls` reach and no syscall does (F056, F086)
+- [ ] vibefs survives injected power loss during a write, verified by a crash-consistency test. Reopened by the kernel review (F014, F080); lands in §10.2 and §10.11.
+- [x] path resolution in `Vfs` handles `.`, `..`, symlinks, mount point crossing, and a symlink loop, which fails with `FsError::Loop` once a walk follows more than `MAX_SYMLINK` (8) links (F056)
 - [x] host tests over synthetic filesystem images, including deliberately corrupted ones
 - [ ] tag `phase-8` and release `v0.8.0`
 
@@ -784,29 +782,29 @@ limitations.
 - [x] `Superblock` per mount, with a mount table and mount point crossing
 - [x] `FileSystem` trait for mount and root lookup; `InodeOps` for lookup, create, unlink, read, write, truncate, readdir, stat
 - [x] path resolution with a bounded symlink depth
-- [x] `File` with an offset and flags, and a descriptor table that phase 9 hands to processes
-- [x] reference counting and a defined lifetime for an unlinked-but-open file
-- [x] inode and dentry caches with eviction, since an unbounded cache is a slow memory leak
+- [ ] `File` with an offset and flags, and a descriptor table that Phase 9 hands to processes. Reopened by the kernel review (F057, F086); lands in §10.4.
+- [x] reference counting and a defined lifetime for an unlinked-but-open file opened through `Vfs`, which serves ramfs and kernfs files (F013, F067)
+- [ ] inode and dentry caches with eviction, since an unbounded cache is a slow memory leak. Reopened by the kernel review (F065); lands in §10.4.
 
 ### 8.2 FAT32 read
-- [x] BPB parsing and validation
+- [ ] BPB parsing and validation. Reopened by the kernel review (F064); lands in §10.2.
 - [x] FAT chain walking with a cluster cache
-- [x] directory entry parsing, including long file names and their checksum validation
+- [x] directory entry parsing, including ASCII long file names and their checksum validation (F054)
 - [x] file read across cluster boundaries
-- [x] `readdir`, `stat`, timestamp conversion
+- [ ] `readdir`, `stat`, timestamp conversion. Reopened by the kernel review (F123); lands in §10.4.
 - [x] the on-disk structure parsing in the library half, host-tested against a generated image
 
 ### 8.3 FAT32 write
 - [x] cluster allocation with a free cluster hint, FAT chain extension
-- [x] file create, write, truncate, delete
-- [x] directory create and delete, including long file name entry generation
+- [x] file create, write, truncate, and delete through one open of a file at a time (F013)
+- [x] directory create and delete, including long file name entry generation for ASCII names (F054)
 - [x] both FAT copies and `FSInfo` kept in sync
-- [x] flush ordering that does not leave a directory entry pointing at unallocated clusters
+- [ ] flush ordering that does not leave a directory entry pointing at unallocated clusters. Reopened by the kernel review (F013, F059); lands in §10.4 and §10.11.
 - [x] verified by mounting the result on the host and running `fsck.fat`
 
 ### 8.4 Pseudo filesystems
-- [x] `devfs`: block devices, `null`, `zero`, `random`, `console`, `tty`
-- [x] `tmpfs` on the Phase 7 block cache over a fixed-size ramdisk, so writes evict through the cache instead of growing a buffer; the reclaimable page-cache version is §12.5
+- [x] `devfs` mounted in `Vfs`, where in-guest tests reach it: `null`, `zero`, `random`, and `urandom` nodes; `console` and `tty` nodes that read 0 bytes and reach no console until §13.7; and block-device nodes whose read and write return `NotSupp` (F081, F086)
+- [ ] `tmpfs` on a private four-page instance of the Phase 7 cache type over a fixed 64 KiB store, so writes evict through the cache instead of growing a buffer; the reclaimable page-cache version is §12.5. Reopened by the kernel review (F066); lands in §10.4.
 - [x] `procfs`: per-process directories, `cmdline`, `status`, `maps`, `fd`  (a pid-1 stub until §13.9 backs it with the process table)
 - [x] `sysfs`-equivalent for the device tree and driver bindings
 - [x] a `kernfs`-style shared implementation so the four do not duplicate directory logic
@@ -814,18 +812,19 @@ limitations.
 ### 8.5 vibefs
 - [x] the case for it: FAT32 has no permissions, no symlinks, no journaling, and no checksums, and every one of those becomes a wall
 - [x] on-disk format documented in `docs/` before any code, with an explicit version field
-- [x] extent-based allocation rather than block lists
-- [x] B-tree directories, so a large directory is not a linear scan
-- [x] checksums on metadata and optionally on data, with corruption reported rather than propagated
-- [x] copy-on-write metadata updates with atomic superblock switching, or a write-ahead journal. Pick one, document why.
+- [ ] extent-based allocation rather than block lists. Reopened by the kernel review (F051); lands in §10.11.
+- [ ] B-tree directories, so a large directory is not a linear scan. Reopened by the kernel review (F067); lands in §14.8.
+- [ ] checksums on metadata and optionally on data, with corruption reported rather than propagated. Reopened by the kernel review (F063); lands in §10.11.
+- [ ] copy-on-write metadata updates with atomic superblock switching, chosen over a write-ahead journal in VIBEFS.md §2. Reopened by the kernel review (F014, F049); lands in §10.11.
 - [x] snapshots, which fall out nearly free from copy-on-write
-- [x] inline data for small files
+- [x] inline data for files of at most 128 bytes, moved to an extent when a write ends past byte 128 (F062)
 - [x] a host-side `mkfs` and `fsck` sharing the same format code as the kernel, so they cannot disagree
-- [x] crash consistency testing by killing QEMU at randomized points during a write workload, then checking with `fsck`
+- [ ] crash consistency testing by killing QEMU at randomized points during a write workload, then checking with `fsck`. Reopened by the kernel review (F014, F080); lands in §10.2 and §10.11.
 
 ### 8.6 File API and shell
 - [x] kernel-side open, read, write, seek, close, stat, readdir, mkdir, unlink, rename, symlink, link, truncate
-- [x] shell commands: `ls -l`, `cat`, `cp`, `mv`, `rm -r`, `mkdir -p`, `touch`, `stat`, `df`, `mount`, `umount`, `sync`
+- [ ] shell commands: `ls -l`, `cat`, `cp`, `mv`, `rm -r`, `mkdir -p`, `touch`, `stat`, `df`, `sync`. Reopened by the kernel review (F059, F126); lands in §10.4 and §10.11.
+- [ ] shell commands `mount` and `umount`. Reopened by the kernel review (F058, F060, F126); lands in §10.4 and §13.9.
 - [x] tab completion over the current directory, which is disproportionately useful when debugging by hand
 - [x] an initial ramdisk image built by the Makefile and mounted at boot, so there is a root filesystem before block drivers are trustworthy
 
@@ -843,17 +842,18 @@ limitations.
 - [x] `fork` and `exec` produce a child that runs a different binary; the parent's `wait` returns its status
 - [x] a user process faulting on a bad pointer is killed with a diagnostic and does not take the kernel with it
 - [x] the interactive shell runs as a user process, not in the kernel
-- [x] every syscall argument validated: an in-guest test passes kernel pointers, unmapped pointers, and huge lengths and gets `EFAULT` rather than a panic
-- [x] `ps` lists processes with real state
+- [ ] every pointer argument is validated: an in-guest test gives each pointer argument of `read`, `write`, `open`, `execve` (path and `argv`), `wait4` (status), and `psinfo` a kernel-half pointer, an unmapped pointer, a range that crosses `USER_END`, NULL (except `execve`'s `argv` and `wait4`'s status, which accept NULL as on Linux), and, for a pointer with a length, a huge length; every call returns `-EFAULT` and the kernel stays up. Today only `write` is tested (`syscall_ptr_validate`, `/bin/tests`), with NULL, a kernel-half pointer, an unmapped pointer, an overflowing range, and a huge length; no syscall test passes a range that crosses `USER_END`. Reopened by the kernel review (F077); lands in §10.5.
+- [x] `ps` typed into the user `/bin/sh` prints one line per process-table entry: pid, parent pid, state (`run`, `stop`, or `zombie`), and name, read through syscall 500 (`SYS_PSINFO`)
 - [ ] tag `phase-9` and release `v0.9.0`
 
 ### 9.1 Ring 3 plumbing
 - [x] user code and data selectors already in the GDT, verified against the `sysret` layout
 - [x] `IA32_STAR`, `IA32_LSTAR`, `IA32_FMASK` configured; `EFER.SCE` enabled
 - [x] `syscall` entry: `swapgs`, switch to the kernel stack from `PerCpu`, save the user context, dispatch
-- [x] exit path restoring the context and `sysretq`, with the `iretq` slow path for cases `sysret` cannot express
+- [x] exit path restoring the context and `sysretq`, with an `iretq` path when the saved RFLAGS has RF or VM set (F007)
+- [ ] a non-canonical saved RIP gets `SIGSEGV` and never reaches `iretq`; today the exit path sends it to `iretq`, whose `#GP` on KVM and hardware halts the kernel on the user GS base. Reopened by the kernel review (F007); lands in §10.6.
 - [x] `RSP0` in the TSS updated on every context switch so an interrupt in ring 3 lands on the right kernel stack
-- [x] SSE and FPU state actually saved and restored now: `fxsave`/`xsave`, lazily if the accounting is right, and the target spec's float settings revisited
+- [x] x87 and SSE state saved and restored eagerly with `fxsave64` and `fxrstor64` at syscall entry and exit and on every context switch (`switch_fpu`), with no `xsave` and no lazy switching; the kernel itself stays soft-float on the built-in `x86_64-unknown-none` target (B2)
 - [x] SMEP/SMAP/UMIP where CPUID allows, `CR0.WP` asserted on every CPU, `stac`/`clac` helpers (S1)
 
 ### 9.2 Address spaces
@@ -861,59 +861,79 @@ limitations.
 - [x] user mappings tracked as regions with permissions and a backing source, not just raw PTEs
 - [x] CR3 switch on context switch, skipped when the next thread shares the address space
 - [x] teardown freeing every user frame and page table page, verified against the frame count
-- [x] user pointer access helpers that check the range and handle a fault, rather than trusting and hoping
+- [x] user pointer helpers: `AddressSpace::check_user_range` rejects a non-canonical, kernel-half, overflowing, or null-guard range and requires a present `USER` leaf on every page, and `read_bytes`, `write_bytes`, and `zero_bytes` copy through the physmap only after it passes, so a syscall given a bad pointer returns `EFAULT` without a kernel page fault (F023)
+- [ ] user copies dereference the user address inside `stac`/`clac` and turn a fault into `EFAULT` through an exception-table fixup, so a write into a user page mapped without `WRITABLE` fails; today `write_bytes` ignores `WRITABLE`, and `read`, `wait4`, and `psinfo` can write into the caller's own text. Reopened by the kernel review (F023); lands in §10.6.
 - [x] a guard region at address 0 so a null dereference faults rather than reading something
 
 ### 9.3 Syscall ABI
 - [x] the ABI documented in `docs/`: register assignment, return convention, error encoding
-- [x] a dispatch table indexed by number, with an arity and a validation policy per entry
+- [ ] a dispatch table indexed by number, with an arity and a validation policy per entry, that syscall dispatch reads, checking each pointer argument before the handler runs; today `proc_init::dispatch_frame` is a `match nr`, the `SyscallInfo` fields `arity`, `ptr_mask`, and `len_arg` and `validate_args` in `src/syscall.rs` are read only by host tests, and `open`, `execve`, and `wait4` have `ptr_mask: 0`. Reopened by the kernel review (F150); lands in §10.5.
 - [x] first set wired for proof: `write`, `exit`, `getpid`, `sched_yield`
 - [x] remainder: `read`, `open`, `close`, `lseek`, `fork`, `execve`, `wait4`, `getppid`, `dup`, `dup2`, `kill`, `fcntl`
 - [ ] `brk`, anonymous `mmap`/`munmap`, `getdents64`, `fstat`, and `nanosleep`: land in §10.5
 - [ ] `openat`, `dup3`, and fork-shaped `clone`: land in §11.6
 - [ ] `stat` and the rest of the POSIX floor: land in §13.9
-- [x] `errno` values matching Linux where a name exists, so ported software behaves
-- [x] every pointer argument validated against the caller's address space before use
-- [x] syscall tracing behind a flag, since the alternative is guessing why a program failed
-- [x] a syscall counter per process for `procfs`
+- [x] errno numbers equal Linux's for every name `src/syscall.rs` defines (F083)
+- [ ] each error condition returns the errno Linux returns for it; today a full filesystem, a full global open-file table, and FAT's 4 GiB file limit return `EMFILE` instead of `ENOSPC`, `ENFILE`, and `EFBIG`, on-disk corruption returns `EINVAL` instead of `EIO`, and `lseek` on the console returns `EINVAL` instead of `ESPIPE`. Reopened by the kernel review (F083); lands in §10.4.
+- [x] every pointer argument range-checked against the caller's address space before use: canonical, in the user half, above the null guard, no overflow, and a present `USER` leaf on every page; the `WRITABLE` bit of a destination is not checked, which §9.2's open accessor box fixes (F023)
+- [ ] syscall tracing behind a flag that a §10.2 command-line option sets, printing one `user: syscall` line per call with its name, number, and return value; today `syscall_init::set_trace` has no caller, so the trace never prints. Reopened by the kernel review (F150); lands in §10.7.
+- [ ] a syscall count per process, summed over its threads and reported through syscall 500 until §13.9 moves it to procfs; today the per-TCB `syscall_count` and the global `SYSCALLS` are incremented on every syscall and never read. Reopened by the kernel review (F150); lands in §10.7.
 
 ### 9.4 ELF loader
 - [x] ELF64 header validation: class, endianness, machine, type
 - [x] `PT_LOAD` segments mapped with permissions from the flags, honoring `p_filesz` versus `p_memsz` zero fill
 - [x] `PT_GNU_STACK` respected for stack executability
-- [x] `PT_INTERP` recognized, dynamic loading deferred to phase 14 but detected rather than silently ignored
-- [x] stack set up with argv, envp, and the auxiliary vector
-- [x] `PT_TLS` and the TLS layout, since Rust and C both want it
-- [x] the header parsing in the library half, host-tested against real binaries and truncated ones
+- [x] an image with `PT_INTERP` refused with `ElfError::HasInterp` rather than run without its interpreter (dynamic loading is §14.2)
+- [x] initial stack set up with `argv`, an empty `envp`, and the auxiliary vector
+- [ ] `execve` copies the caller's `envp` onto the new image's initial stack, as it copies `argv` (lands in §10.5; today `sys_execve` discards `envp` and `fill_stack` passes an empty one)
+- [x] `PT_TLS` parsed by `elf::parse`, and `setup_tls` places its image below the stack in the x86_64 variant II layout with a self-pointer at the thread pointer; `FS_BASE` is loaded at the first entry to ring 3 and at `execve` (F022)
+- [ ] `FS_BASE` saved and restored per thread on every context switch, and `fork` gives the child the parent's saved value, shown by an in-guest test that runs a `PT_TLS` binary across another process's exit; today `on_switch` does not switch it, so a TLS process resumes with whatever base its CPU last loaded, 0 after any process on that CPU exits or is killed. Reopened by the kernel review (F022); lands in §13.1.
+- [x] header parsing in `vibeos-core` (`src/elf.rs`), host-tested against images the test helper `build_elf` synthesizes and against truncated ones
+- [ ] host tests that parse checked-in binaries linked by `ld.lld` and by GNU `ld` (lands in §10.5; today every host-test image comes from `build_elf`)
 - [x] refuse a malformed binary with an error rather than mapping garbage
 
 ### 9.5 Process abstraction
-- [x] `Process`: pid, parent, address space, descriptor table, working directory, credentials, exit status
-- [x] threads belong to a process; a process is one or more threads sharing an address space
+- [x] `Proc`: pid, parent pid, address space, descriptor table, a `cwd` that `fork` copies, credentials, and wait status (F086)
+- [ ] a relative path in a syscall resolves against the caller's `Proc.cwd`; today `file_init::join_cwd` resolves it against one kernel-global CWD, which the kernel shell's `cd` sets. Reopened by the kernel review (F086); lands in §10.4.
+- [x] each process owns one thread (`Proc.tid`), and the address space, descriptor table, and credentials belong to the process (F077)
+- [ ] a process is one or more threads sharing an address space. Reopened by the kernel review (F077); lands in §13.1.
 - [x] the descriptor table with per-fd flags, `dup`, `dup2`, and close-on-exec
-- [x] a process tree with reparenting to init on parent death
+- [x] a process tree: when a spawned process exits, `finish_exit` reparents its children to pid 1 and wakes init's wait queue (F068, F127)
+- [ ] a bound (`run_path`) process that exits or is killed reparents its children to init; today `finish_exit`'s bound branch leaves through `longjmp_user` or `return_status_or_die` before `reparent_children`, and the next process given that pid adopts the children. Reopened by the kernel review (F127); lands in §10.6, whose one ring-3 entry model box deletes the bound model, `finish_exit`'s bound branch included.
+- [ ] an orphan goes to pid 1 only while init is live or stopped and is otherwise freed when it exits; today `reparent_children` sets `ppid = 1` even when init is dead, or absent as in the `kernel_tests` and `kernel_shell` builds. Reopened by the kernel review (F068); lands in §10.5.
+- [ ] init's own exit panics the kernel with a registered marker; lands in §10.5 (F068)
 - [x] zombie state until reaped, and a defined resource release point
 - [x] uid and gid present from the start even if nothing enforces them yet, because retrofitting credentials is painful
 
 ### 9.6 fork, exec, wait
-- [x] `fork`: clone the address space, duplicate descriptors, copy the thread context, return 0 in the child
-- [x] initially a full copy; copy-on-write in phase 12, with the interface unchanged
+- [x] `fork`: clone the address space, duplicate descriptors, copy the general registers from the syscall frame, and return 0 in the child (F069)
+- [ ] `fork` copies the parent's x87 and SSE state into the child; today the child starts from the boot FPU template. Reopened by the kernel review (F069); lands in §10.6.
+- [x] `fork` makes a full copy (`clone_full`) until §12.3 adds copy-on-write behind the same interface
 - [x] `execve`: build the new address space first, and only replace the old one after the load succeeds, so a failed exec leaves the caller intact
+- [ ] `execve` starts the new image with the psABI initial FP state (FCW `0x037F`, MXCSR `0x1F80`, x87 and XMM registers zeroed); today it keeps the old image's x87 and XMM registers, MXCSR, and FCW; lands in §10.6 (F069)
 - [x] `exit`: release resources, become a zombie, signal the parent
 - [x] `wait4`: block for a child, return its status, reap it, with `WNOHANG`
-- [x] orphan reaping by init
-- [x] in-guest: fork bomb bounded by a process limit, exec chain, wait ordering, orphan reparenting
+- [x] orphan reaping by `/sbin/init` in the production image; the `kernel_tests` and `kernel_shell` builds start no init (F068)
+- [ ] `/bin/tests` fork limit: a fork loop gets `-EAGAIN` once the process table is full and fails on any other result; today the bomb in `user/tests.asm` also passes after 32 forks that all succeed, and on any error after the first. Reopened by the kernel review (F077); lands in §10.5.
+- [ ] `/bin/tests` exec chain: a child `execve`s a second program, which `execve`s a third, and the parent's `wait4` returns the third program's exit status. Reopened by the kernel review (F077); lands in §10.5.
+- [ ] `/bin/tests` wait ordering: `wait4` on a child that has not exited blocks until it exits, and `wait4` on a zombie child returns its status at once. Reopened by the kernel review (F077); lands in §10.5.
+- [ ] `/bin/tests` orphan reparenting: a grandchild whose parent has exited sees `getppid() == 1`, and init reaps it. Reopened by the kernel review (F077); lands in §10.5.
 
 ### 9.7 Early signals
-- [x] `SIGKILL` and `SIGSTOP` handled in the kernel with no user handler
-- [x] `SIGSEGV`, `SIGBUS`, `SIGFPE`, `SIGILL` generated from the corresponding exceptions
+- [x] `SIGKILL` and `SIGSTOP` handled in the kernel with no user handler, applied when the target next enters a syscall or wakes in `wait4`
+- [ ] a pending signal whose default action terminates or stops the process takes effect on every return to ring 3, interrupt returns included, so a process that makes no syscall can be killed or stopped; today `apply_pending` runs only at syscall entry and after the `wait4` sleep; lands in §10.6 (F033)
+- [ ] `/bin/tests` signals: `SIGKILL` ends a child that loops on `sched_yield`, and `SIGSTOP` then `SIGCONT` stops a child and resumes it; lands in §10.5 (F077)
+- [x] `SIGSEGV` from `#GP` and `#PF`, `SIGBUS` from `#NP` and `#SS`, `SIGFPE` from `#DE`, and `SIGILL` from `#UD`, mapped by `sig_for_vec` (F026)
+- [ ] `SIGFPE` from a user x87 `#MF` and a SIMD `#XM`, with `CR0.NE` and `CR4.OSXMMEXCPT` set on every CPU; today neither bit is set, so an unmasked x87 exception raises the masked IRQ13 and is dropped, and on KVM and hardware an unmasked SIMD exception raises `#UD` and gets `SIGILL`. Reopened by the kernel review (F026); lands in §10.6.
 - [x] `SIGCHLD` on child exit
 - [x] default actions: terminate, ignore, stop
-- [x] user-installed handlers, masking, and queueing deferred to phase 13
+- [ ] a signal whose default action terminates or stops is dropped when sent to pid 1, as Linux drops a signal init has no handler for; today any ring-3 process can kill or stop init; lands in §10.5 (F068)
+- [ ] user-installed handlers, masking, and queueing: land in §13.8
 
 ### 9.8 First userspace
 - [x] a minimal freestanding user program with hand-written syscall stubs and no libc, to prove the path
-- [x] a userspace test runner exercising each syscall and its error cases
+- [x] a userspace test runner, `/bin/tests`, that calls `write`, `getpid`, `dup`, `close`, `fork`, `execve`, `wait4`, `exit`, and `sched_yield`, with `EBADF` and `EFAULT` cases for `write` only (F077)
+- [ ] `/bin/tests` calls every §9.3 syscall and asserts each errno it can return; today it never calls `read`, `open`, `lseek`, `dup2`, `fcntl`, `kill`, `getppid`, or `psinfo`. Reopened by the kernel review (F077); lands in §10.5.
 - [x] the shell moved out of the kernel and into a user process, keeping the kernel one only under a debug feature
 - [x] the kernel's job after init becomes starting `/sbin/init` and nothing else
 
@@ -921,55 +941,81 @@ limitations.
 
 ## Phase 10: Consolidation
 
-**Goal.** Pay down what Phase 0 laid down in a hurry, before the kernel grows a second architecture and
-a real userspace. Most of it came out of the 2026-09-22
-[architecture review](reviews/ARCHITECTURE_REVIEW.md); the per-item plans are under
-[reviews/issues/](reviews/issues/README.md) and the letter codes below name them. Most of the
-rest came out of the [roadmap review](reviews/ROADMAP_REVIEW.md): the entry paths and user memory,
-the user runtime, and the CI budget. §10.7 to §10.9 (forensics, models and proofs, and the engineering
-system), the §10.2 command line, and the §10.2 deterministic build have no issue files; their boxes are the plan. Nothing here is a feature for its own sake. All
-of it is what makes the next three phases checkable.
+**Goal.** Pay down what Phase 0 laid down in a hurry, before Phase 11 adds a second architecture and
+Phase 14 a userspace with a C library. The work has three sources. The 2026-09-22
+[architecture review](reviews/ARCHITECTURE_REVIEW.md) has its per-item plans under
+[reviews/issues/](reviews/issues/README.md), and the letter codes below name them. The
+[roadmap review](reviews/ROADMAP_REVIEW.md) is the source of the entry paths and user memory, the user
+runtime, and the CI budget. The 2026-09-23 [kernel review](reviews/KERNEL_REVIEW.md) adds a line for
+each bug it found in the code, in Phase 10 or in the later phase that first needs the fix. A finding id (Fnnn) names the plan for each line that cites it, as the letter codes do for the
+issue files; where a box and its finding's Fix differ, the box decides. §10.7 to
+§10.9 (forensics, models and proofs, and the engineering system), the §10.2 command line, and the §10.2
+deterministic build have no issue files; their boxes are the plan. All of it makes the next
+three phases checkable.
 
-**Unlocks.** A portable core that a second architecture can share. A user runtime that can express the
-Phase 12 and Phase 13 gates. Tables that do not cap a shell pipeline at sixteen processes. Kernel entry
-and user-memory paths that copy-on-write and demand paging can build on without a security hole. Hangs
-that explain themselves from the host. The seqlock, the wake inbox, and the log ring model-checked before
-Phase 11 runs them on a weakly ordered CPU.
+**Unlocks.** A `vibeos-core` crate that a second architecture can share. A user runtime that can
+express the Phase 12 and Phase 13 gates. Tables that do not cap a shell pipeline at sixteen processes.
+Kernel entry and user-memory paths that copy-on-write and demand paging can build on without a
+security hole. Block completions and thread-stack reclaim that Phase 13 can run on every CPU. A boot
+that writes no disk it did not format. Hangs that explain themselves from the host. The seqlock, the
+wake inbox, and the log ring model-checked before Phase 11 runs them on a weakly ordered CPU.
 
 **Exit gate**
 - [x] `make check` (fmt, clippy with warnings denied, host units, harness units) gates CI ahead of the QEMU ladder
 - [ ] `make check` passes on macOS and Linux, and a scheduled macOS CI job proves it
+- [ ] `make test` passes on the scheduled macOS CI job, with Homebrew's QEMU and its code-only `edk2-x86_64-code.fd` as the UEFI firmware (F079)
 - [x] the nightly is pinned by date; Limine and every GitHub action are pinned by hash
-- [ ] the portable crate contains no inline assembly and no `cfg(target_arch)`; hostlib is a normal workspace member
-- [ ] the portable core builds and passes its host tests against the stub `arch` from §10.3, as part of `make check`
+- [ ] `vibeos-core` contains no inline assembly and no `cfg(target_arch)`
+- [ ] `vibeos-core` builds and passes its host tests against the §10.3 stub `arch`, in `make check`
 - [ ] syscall copies to and from the calling process go only through the §10.6 accessors, and only the named fill API writes to an address space that is not running. In-guest tests show three things. SMAP faults a stray kernel data access to a user page, including one from an exception handler entered with the accessor window open. SMEP faults a kernel jump into a user page. A kernel-half pointer, and `read()` into a read-only user page, both return `EFAULT`
 - [ ] no user context reaches `iretq` or `sysretq` with a non-canonical RIP, and the kernel survives an ELF whose last page holds a `syscall` (§10.6)
+- [ ] ring 3 cannot halt the kernel through an exception: the in-guest tests `user_single_step` (`RFLAGS.TF` set with `popf`), `user_int1`, and `user_exceptions` (`int3`, `#DE`, `#UD`, `#GP`, `#PF`, x87 `#MF` raised in ring 3, and SIMD `#XM` in the KVM leg only) each find the program killed by its signal and the kernel running, in `make test-kernel` and `make test-kernel-smp4` under TCG and in the §10.1 KVM leg's `make test-kernel` (§10.5, §10.6)
+- [ ] ring 3 cannot halt the kernel through an interrupt or a return to user mode: the in-guest tests `user_device_irq` (a pool vector and the keyboard vector that CPU 1 sends while CPU 0 runs ring 3 with IF=1), `user_ipi` (a reschedule IPI taken at CPL 3), `console_read_exit` (the return from a `read()` that halted in `wait_key`), and `user_entry_irq` (1,000 forked children entering ring 3 under reschedule IPIs from another CPU) pass in `make test-kernel` and `make test-kernel-smp4` under TCG and in the §10.1 KVM leg's `make test-kernel` (§10.6)
+- [ ] ring 3 cannot halt the kernel by exhausting a resource: the in-guest tests `exit_burst` (16 processes exit back to back, each handing off to a sibling resumed from timer preemption), `fork_oom` (a `fork` whose kernel-stack allocation fails returns `ENOMEM` and leaves the free-frame count at its baseline), and `exec_huge_memsz` (an exec with a 64 GiB `p_memsz`, and one under the §10.6 cap but larger than free memory, each return `ENOMEM` and leave the free-frame count at its baseline) pass in `make test-kernel` and `make test-kernel-smp4` under TCG and in the §10.1 KVM leg's `make test-kernel` (§10.6, §10.10)
+- [ ] the §10.10 completion, stack-reclaim, and TLB-shootdown-ack tests, selected with `VIBEOS_KTEST` and run with `VIBEOS_KTEST_REPEAT=20`, pass in `make test-kernel-smp4` under TCG and under KVM on the §10.1 KVM leg, which runs that target for this line, and those whose box does not name `make test-kernel-smp4` also pass in `make test-kernel` (§10.10)
+- [ ] a boot of the production ISO leaves `vda` byte-identical when it holds a 1 MiB whole-disk vibefs image, and when it holds a 1 MiB image whose only non-zero bytes are `0x55AA` at offset 510 (the empty partition table `part` also finds on a whole-disk FAT32 volume): an e2e case in `make test-e2e` boots once with each image and compares its SHA-256 before and after (§10.11)
+- [ ] a file offset cannot halt the kernel: the §10.11 in-guest tests on `/vibe` get `EFBIG` from a `write` after `lseek` to `2^44 - 4096`, `EINVAL` from `lseek` to `2^44`, and 5 GiB + 1 from `lseek(fd, 0, SEEK_END)` after a one-byte `write` at offset 5 GiB, in `make test-kernel` (§10.11)
+- [ ] `make test-vibefs-crash` passes, and fails against a `vibefs_crash` build with a planted leak of one block per commit, which this line's §10.9 gate-map entry builds and runs (§10.2, §10.11)
 - [ ] the growable tables are heap-sized at init from one `limits` module, and this gate states the limits Phase 12 is tested against: 256 processes, 256 descriptors per process, 1024 threads, 256 regions per address space
 - [ ] FAT and vibefs implement `InodeOps`; the `Back` enum in `file_init` is gone; every file operation goes through `Vfs`
 - [ ] one errno-shaped kernel error type; the errno table in `docs/SYSCALL.md` §2 is generated from it
-- [ ] a Rust user runtime replaces the four assembly programs; `utest_*` results are asserted by the harness the way `ktest_*` are; the user `/bin/sh` runs programs from `PATH` and reports their exit status
+- [ ] a Rust user runtime replaces the four assembly programs
+- [ ] `utest_*` results are asserted by the harness the way `ktest_*` are, in every e2e variant that reaches `shell ready`, from the `/bin/tests` that `/sbin/init`, pid 1, forks (F073)
+- [ ] the user `/bin/sh` runs programs from `PATH` and reports their exit status
 - [ ] `make test` is green with no retry left in the harness, and `make test-kernel` and `make test-kernel-smp4`, each with `VIBEOS_KTEST_REPEAT=20`, run the in-guest suite 20 times in one boot under TCG with no failure on the weekly job (§10.2)
-- [x] SMEP, SMAP, UMIP, and `CR0.WP` set on every CPU; `/dev/random` fed by virtio-rng or `RDRAND`
+- [x] SMEP, SMAP, and UMIP set on every CPU whose CPUID reports them, and `CR0.WP` on every CPU
+- [x] the kernel VFS's `/dev/random` fed by virtio-rng, then `RDRAND`, then a xorshift fallback that §10.12 deletes (F134); no syscall reaches `/dev/random` until §10.4's A3 routes file syscalls through `Vfs` (F086)
 - [x] `BootInfo` captured once; nothing outside `boot` reads a Limine response
 - [x] `AGENTS.md` and an MIT `LICENSE` in the tree; README status current
 - [ ] every item in [reviews/issues/README.md](reviews/issues/README.md) is marked implemented or declined with a reason: the prose status paragraph there becomes a Status column, `scripts/check_issues.py` in `make check` fails on a Status cell other than `proposed`, `implemented (#<PR>)` with one or more PR numbers, or `declined: <reason>`, and its `--closed` mode, which this line's §10.9 gate-map entry runs, fails on any `proposed` row
+- [ ] every finding in the [kernel review](reviews/KERNEL_REVIEW.md) is traced: `scripts/check_review_refs.py` in `make check` fails on a finding id that no line of this file cites and on a cited id the review does not define, and its `--closed` mode, which this line's §10.9 gate-map entry runs, fails while an open box in Phases 0 to 10 cites a CRITICAL or HIGH finding without a LATENT tag
 - [ ] the `hang_test` ISO at `-smp 4` under TCG hangs, and from the guest core and the kernel ELF, without the serial log, the harness prints a symbolized backtrace for every CPU, every thread's state, and the last 64 log records, and exports every CPU's trace ring as Chrome trace-event JSON (§10.7)
 - [ ] `make models` and Miri are green on the nightly job: every loom model passes and fails its weakened variant, Kani proves the buddy allocator and the §10.6 user-range check to their stated bounds, and Miri passes over the portable crate's host tests (§10.8)
 - [ ] `make gate PHASE=10` passes with an entry for every Phase 10 gate line but the tag, `cargo deny check` passes with advisories included, and `scripts/ci_history.py` finds a record for every `ci` run on `main` since the history landed (§10.9)
 - [ ] tag `phase-10` and release `v0.10.0`
 
 ### 10.1 Gates and pinning
-- [x] `rustfmt.toml`, one `cargo fmt` commit, `cargo clippy -- -D warnings`, `RUSTFLAGS=-Dwarnings` (Q1)
+- [x] `rustfmt.toml`, one `cargo fmt` commit, `cargo clippy -- -D warnings`, and `-D warnings` in `[build].rustflags`, which reaches the host builds of `vibeos-core` and hostlib (Q1, F147)
 - [x] a fast `check` CI job before the QEMU ladder, with an llvm-cov floor on the portable crate that only ratchets up (T3)
 - [x] dated nightly; action SHAs; Limine commit verified after clone; cargo cache keyed on `Cargo.lock` (C1)
-- [x] `make check` as the local gate; `ruff` and `mypy --strict` for `tests/` (DX1)
+- [x] `make check` as the local gate; `ruff` and `mypy --strict` over `tests/` and `scripts/` when they are installed (DX1, F147)
 - [x] restriction lints on the portable crate: no `unwrap`, `expect`, or `panic!` outside tests (E1)
-- [ ] the `unsafe` standing gate enforced by lint: `clippy::undocumented_unsafe_blocks` denied through `[workspace.lints.clippy]`, so every member inherits it (including `user/` from §10.5), and `check-private-items = true` in `clippy.toml`, so `missing_safety_doc` reaches the kernel binary's private items; a `// SAFETY:` line on every existing `unsafe` block (653 at `90ce475`)
+- [ ] `-D warnings` reaches every kernel build: `"-D", "warnings"` joins `[target.x86_64-unknown-none].rustflags` in `.cargo/config.toml`, since Cargo reads one rustflags source and that table shadows `[build].rustflags` (Q1, F147)
+- [ ] CI runs `cargo clippy --bin vibeos -- -D warnings` on the default features that ship, beside its `--all-features`, `kernel_tests`, and `vibefs_crash` runs (Q1, F147)
+- [ ] `ruff` and `mypy` pinned by version in the `check` job, and `make check` fails when either is missing and `CI` is set (DX1, F147)
+- [ ] `scripts/check_changelog.py` fails on a changelog entry longer than 2 lines, as the standing gate says; today its `MAX_LINES` is 3 (F147)
+- [ ] the `unsafe` standing gate enforced by lint: `clippy::undocumented_unsafe_blocks` denied through `[workspace.lints.clippy]`, so every member inherits it (including `user/` from §10.5), and `check-private-items = true` in `clippy.toml`, so `missing_safety_doc` reaches the kernel binary's private items; a `// SAFETY:` line on every existing `unsafe` block, 653 at `90ce475` (F041)
+- [ ] four safety comments corrected against the code: `per_cpu_init.rs` says `irq_nest_enter` is a no-op while GS is 0, but `try_current` reads `gs:[0]` once `LIVE` is set; `arch/gdt.rs` says hardware updates `TSS.RSP0`, which software writes; `paging.rs` says `Mapper` is not `Sync`, but it is auto-`Sync`; `cell.rs` calls `IrqCell` CPU-local, but it also guards cross-CPU tables through its owner CAS (F041)
 - [ ] a nightly x86_64 KVM leg on the hosted x86_64 runner, whose `/dev/kvm` GitHub's documented udev rule opens to the runner user, that runs `make test-kernel` now and, from Phase 12 on, every benchmark and every gate number measured under KVM, since TCG and KVM each hide bugs the other finds; the timing tests that made the harness default to TCG are fixed first, which HVF in Phase 11 also needs. GitHub assigns each job's host CPU at random (AMD EPYC or Intel Xeon, several models), so the leg writes the CPU model from `/proc/cpuinfo` to its job summary and its §10.9 CI-history record; a regression threshold compares a number only with history from the same model, and a gate's fixed threshold holds on every model the leg draws
+- [ ] the KVM leg also runs `make test-e2e` and `make test-lapic-fallback` (F078)
+- [ ] `run_ktest.py` checks the `lapic_timer` marker's mode as `run_e2e.py` does: `tsc-deadline` under `-cpu max` and `periodic` under `qemu64,-tsc-deadline` (F078)
+- [ ] an in-guest test finds every CPU's `PerCpu.ticks` advancing, which on the KVM leg shows that `arm_tsc_deadline`, `rearm_deadline`, and the `TscDeadline` arm of `arm_ap` run on every CPU; no TCG tier runs them, because TCG never advertises TSC-deadline (F078)
 - [ ] the CI budget, written into DESIGN §8.6 in the same commit as the workflow change. Every push runs `check` and, alongside it, one `build` job per architecture (x86_64 now, aarch64 from Phase 11). The build job builds every ISO variant and the host `mkfs`/`fsck` tools once and uploads them. A matrix of tier jobs per architecture (`needs: [check, build]`, `fail-fast: false`, TCG) downloads them and runs the same `make test-*` targets through a prebuilt-ISO switch, so the Makefile stays the one definition of each tier. Tiers are grouped to about 40 s of QEMU each (x86_64 at `88370e5`: the five e2e boots; in-guest at `-smp 2` and `-smp 4` plus the LAPIC fallback; the vibefs crash test), and each gets its own check name, so a red PR names the failing tier. Everything else runs on a schedule: the macOS job, the KVM leg, the fuzzers, stress, and any job with a performance threshold. Later lines name two scheduled workflows, both on the pinned toolchain: the nightly job, which carries the KVM leg, and the weekly job (`smp-stress` today); the non-blocking `nightly-canary`, the one job on an undated nightly, is neither, and a line that needs its own workflow or another cadence names it (§20.8's `hardware-models`, §24.2's rebuilds). A later line that says "in CI" for a functional test means a ladder tier; for a benchmark or a threshold it means the KVM leg. A red scheduled job blocks the next phase tag. The earlier no-matrix rule (runner queues) is lifted: the repository is public, so standard runners are free and unlimited, and the limits that matter are 20 concurrent jobs on the Free plan (at most 5 macOS; scheduled campaigns together hold at most 10, so pushes keep the other 10) and 6 hours per job: a scheduled run longer than 5.5 hours is split into shards that hand their state on as artifacts, and the line that needs one says so; the scheduled workflows are staggered so that together they leave room under the 20 for a push's jobs, and DESIGN §8.6 records each one's schedule and peak job count and its share of the 10 scheduled slots; workflows that can run at the same time hold shares summing to at most 10, a multi-day workflow (§24.2's rebuilds) holds only its share, and a job that finds its share full waits in request order, since GitHub caps no job count across workflows
 - [ ] CI wall time cut inside each job: host packages from a cache or a prebuilt image rather than `apt-get` on every run (about 20 s of every job at `88370e5`), and independent QEMU runs in parallel inside a tier once the timing tests and the §10.2 retried failures are fixed, since concurrent QEMU under TCG makes both more likely. Push-to-green wall time is recorded in DESIGN §8.6 before and after; the aim is under two minutes for x86_64, and the box does not wait for it (3m40s at `88370e5` with no retry; a retried hang adds 60 to 90 s)
 - [ ] `make debug`: QEMU `-s -S` plus a `gdb` script that loads the kernel ELF and the user ELFs, documented in DESIGN §8.4
 - [ ] every Linux CI job runs on GitHub's free `ubuntu-26.04` image (`ubuntu-26.04-arm` for arm64 jobs), whose apt QEMU 10.2.1 meets every QEMU minimum this file names (9.0 for the Phase 11 gate's EL2 boot and §20.1's boot with more than 255 vCPUs, 10.2 for §18.1's amd-iommu `dma-remap` and Phase 25's GHES injection) except a line that names QEMU 11.1 or later, whose jobs build that release from its tarball, checked by SHA-256 and cached by version; when `CI` is set on a Linux runner, the harness's shared QEMU launcher (§10.2) compares `qemu-system-* --version` with the version its job pins (Ubuntu's 10.2.1, or the built release) before its first boot and fails on a mismatch, so an image update that moves QEMU fails loudly; `make check`, the macOS job, and the dev host's Homebrew QEMU are left alone
+- [ ] no workflow expands a `${{ }}` expression inside a `run:` script: `release.yml`'s changelog step takes the tag from `env: TAG: ${{ github.ref_name }}` and passes `"$TAG"`, and `scripts/check_workflows.py` in `make check` fails on `${{` inside any `run:` block (F144)
+- [ ] `release.yml` publishes `vibeos.iso` alone, and publishes nothing unless the `ci` workflow concluded `success` at `github.sha`; today it runs only `make test-e2e` and also publishes `vibeos-ktest.iso`, whose block tests write fixed LBAs on any attached virtio-blk disk (F145)
 
 ### 10.2 Build and harness
 - [x] built-in `x86_64-unknown-none` target; the custom JSON, `-Zbuild-std`, and `-Zjson-target-spec` deleted (B2)
@@ -977,18 +1023,53 @@ Phase 11 runs them on a weakly ordered CPU.
 - [x] one QEMU launcher and one `VIBEOS_*` reader shared by every driver (T2, C2)
 - [ ] one `target/` for every feature build: each variant's ELF is copied to a named output under `build/`, and every ISO recipe reads only its own named ELF, so a test build still cannot be packaged as production; DESIGN §8.2 and the pitfall that says "separate target directory" rewritten to that guard; `target/` is the only kernel target directory cached in CI (P1)
 - [x] one initrd generator; the trampoline assembled by `global_asm!` so the kernel build no longer needs `nasm` (B4); the assembly user programs still do until §10.5
-- [ ] a deterministic kernel, initrd, and ISO build (moved from §17.5): `SOURCE_DATE_EPOCH` from the commit, honored by `mkinitrd` and the ISO writer, fixed volume and GPT GUIDs, staged file times pinned, `--remap-path-prefix` for rustc, sorted inputs; a scheduled job builds every ISO variant twice from one commit in two checkout paths and fails unless they are byte-identical; §17.5's second-generation comparison and §22.1's release artifacts build on it
+- [ ] a deterministic kernel, initrd, and ISO build (moved from §17.5): a scheduled job builds every ISO variant twice from one commit, with a different checkout path, `CARGO_HOME`, and `RUSTUP_HOME` each time, and fails unless the two builds are byte-identical; §17.5's second-generation comparison and §22.1's release artifacts build on it (F151, F152)
+- [ ] no build time or builder identity in the initrd or the ISO: `SOURCE_DATE_EPOCH` from the commit, honored by `mkinitrd` and the ISO writer; `mkiso.sh` pins staged file times and passes `-r` and `--set_all_file_dates` from `SOURCE_DATE_EPOCH`, so Rock Ridge records no builder uid or gid; every input list sorted (F152)
+- [ ] no random identifier in the ISO: fixed volume and GPT GUIDs; after `limine bios-install`, `mkiso.sh` overwrites the MBR disk signature at `0x1B8`, which Limine seeds from `time(NULL)`, with a value derived from the image; release builds record the xorriso version, which lands in the volume descriptor (F152)
+- [ ] no host path in any artifact: Cargo's `trim-paths = "all"` in the dev and release profiles passes rustc a `--remap-path-prefix` for the checkout, the sysroot, and `$CARGO_HOME`, so panic `Location` strings, DWARF, and the ThinLTO `.llvm.<hash>` names `gen_ksyms.py` copies into `KSYMS` carry none (F151)
 - [ ] the in-guest registry split per subsystem; a test's name printed before it runs; a per-test deadline (T1)
+- [ ] the in-guest registry runs in production's interrupt context. `ktest::run` runs it on a spawned kernel thread with IF=1 and `irq_nest` 0, on a guarded 64 KiB KVA stack (the size Limine guarantees the boot stack it uses today; `spawn` gives 16 KiB), instead of on the bootstrap thread under an `InterruptGuard`, so `spawn_here` workers, which copy `irq_nest`, also run with IF=1. A test that needs interrupts off takes its own guard. `with_timer`, which runs `sti` under the registry's guard, is deleted, as is the `yield_now` in `sys_fork` with its comment about ktest's IF-off registry. T1's per-test deadline needs IF=1. This box lands after §10.6's one ring-3 entry model box, since until then `run_user` must run on the bootstrap thread and enters ring 3 with IF=0 (F075)
 - [ ] `kernel_tests` hooks isolated in per-subsystem `ktest.rs` files; no blanket `allow(dead_code)` in production modules (Q2)
+- [ ] the `catch` module and every `catch::intercept` call in `arch/idt.rs` compile only with `kernel_tests`, and Q2's `nm` check fails on any `arch::catch` symbol in the production ELF; today `intercept` runs first in every exception handler of every build (F146)
+- [ ] `catch::intercept` and `catch::on_panic` act only on a CPL 0 frame on the CPU that armed the catch, so a fault on another CPU during a catch window takes its normal path (F146)
+- [ ] `block_vblk_deep` waits for every request it submitted before it returns a failure, so no completion reaches an `IoWaiter` in its dead frame (F146)
 - [ ] a kernel command line: `cmdline:` in the `limine.conf` entry, captured in `BootInfo` through Limine's executable command line request, then an `opt/vibeos/cmdline` fw_cfg file appended when QEMU's fw_cfg is present (probed on x86_64 only when CPUID reports a hypervisor, so bare metal never sees a write to port `0x510`), so the harness sets options on the unmodified ISO; parsed in the portable half with host tests; DESIGN §3.2 lists every option, and later phases add theirs to the same parser
 - [ ] `ktest=<glob>` runs only the matching in-guest tests and `ktest_repeat=<n>` runs them `n` times in one boot (a test that cannot run twice says so in the registry and runs once), set by `VIBEOS_KTEST` and `VIBEOS_KTEST_REPEAT`, with the harness reporting passes out of runs and multiplying its boot timeout by the repeat count; `loglevel=` sets the §5.5 runtime level at boot
 - [ ] `cargo-fuzz` targets for every byte-slice parser, the ELF header parser included, on the weekly job; each crash becomes a replayed regression (T4)
-- [ ] a scheduled macOS CI job running `make check`; OVMF and the aarch64 edk2 firmware located by one probe mechanism with one variable per architecture, and a skip made visible (I1)
-- [ ] the harness retries nothing. Each failure it retries today is root-caused and fixed, with a regression test in the cheapest tier that catches it: the `/bin/tests` stall after `user: dup ok` (sometimes after `user: pid 3 killed SIGSEGV`) that leaves the e2e boot short of `shell ready` and the in-guest boot hanging under the periodic LAPIC (retried since PR #75); the `ipi: ack timeout` panic on the `-smp 4` persist reboot; the `-smp 4` `msix_cpu: ap counter` assertion; and the `-smp 2` `per_cpu_bsp: ready_head should be empty` assertion. Then `_retry_hang`, `retryable_ktest_failure`, `silent_user_syscalls_hang`, and the retry loop in `_ktest_boot` are deleted. A failure that proves to be a QEMU bug is not retried either: it is reported upstream, the report is linked from DESIGN §8.6, and the kernel or the harness's QEMU command line works around it
+- [ ] a crafted FAT BPB fails the mount with `Corrupt`: `fat::parse_bpb` computes `data_lba` (`rsvd + num_fats * fatsz`) with `checked_mul` and `checked_add` and returns `Corrupt` on overflow, and returns `Corrupt` for a cluster count above `0x0FFF_FFF5`, which also bounds `fat_loc`'s `clu * 4`; today the sum panics the kernel under the dev profile's overflow checks and wraps in a release build. Host tests mount a BPB with FATSz32 `0x8000_0000` and two FATs and one with `0xFFFF_FFFF` and one FAT, and each mount returns `Corrupt` (F064)
+- [ ] a scheduled macOS CI job running `make check`, and `make test` with Homebrew's QEMU and firmware (I1, F079)
+- [ ] OVMF and the aarch64 edk2 firmware located by one probe mechanism with one variable per architecture; the probe also finds the variable-store template beside each code image (I1)
+- [ ] UEFI e2e boots the firmware as read-only code on pflash unit 0 (`-drive if=pflash,format=raw,unit=0,readonly=on`) with a per-run copy of its variable-store template on unit 1, never through `-bios`, so Homebrew's code-only `edk2-x86_64-code.fd` (0x37C000 bytes, which `-bios` refuses because the size is not a multiple of 64 KiB) boots (F079)
+- [ ] `test-e2e-uefi` checks for the firmware and starts the harness in one shell line: a missing image prints the skip and exits 0 outside CI and fails when `CI` is set; today the check's `exit 0` ends only its own recipe line, and the harness runs anyway (I1, F079)
+- [ ] when QEMU exits before the first marker, the harness prints QEMU's exit status and stderr instead of only `missing marker 'serial_online'` (F079)
+- [ ] the `/bin/tests` stall after `user: dup ok` (sometimes after `user: pid 3 killed SIGSEGV`) root-caused and fixed, with a regression test in the cheapest tier that catches it; it leaves the e2e boot short of `shell ready` and hangs the in-guest boot under the periodic LAPIC, and has been retried since PR #75 (F021)
+- [ ] the `-smp 4` `ipi: ack timeout` panic root-caused and fixed, with a regression test in the cheapest tier that catches it; it is retried on the first boot and on the persist reboot, `wait_acks` raises it after about 1 s without an ack, and the one CI run the review traced hit it while the registry held IF off on the BSP (F011, F075)
+- [ ] the `-smp 4` `msix_cpu: ap counter` assertion failure root-caused and fixed, with a regression test in the cheapest tier that catches it (F021)
+- [ ] the `-smp 2` `per_cpu_bsp: ready_head should be empty` assertion deleted with its harness retry: `ready_head` is a snapshot from the BSP's last relink, not an invariant (F074)
+- [ ] the harness retries nothing: after the four boxes above, `_retry_hang`, `retryable_ktest_failure`, `silent_user_syscalls_hang`, and the retry loop in `_ktest_boot` are deleted, and none of those names appears in `tests/harness/`. Today `_ktest_boot` retries any `timed out`, `_retry_hang` any e2e `timed out` or `no shell ready`, and `retryable_ktest_failure` any `-smp 4` panic whose tail holds `ipi: ack timeout`, the `wait_acks` frame, or a banner on a `ktest: ok` line; a retry it grants after a `FAIL` line cannot pass, because each attempt reuses the disk the failed attempt wrote (F021, F076)
+- [ ] DESIGN §8.6 states that a failure traced to a QEMU bug is not retried either: it is reported upstream, the report is linked from DESIGN §8.6, and the kernel or the harness's QEMU command line works around it
 - [ ] until those retries are gone, every retry the harness takes is written to the job summary with its failure line, so a green run that retried is visible
+- [ ] `reap_many_via_idle` compares frame counts against a quiescent baseline: a shared setup warms KVA past one coalesce and fills the Dead TCB slots before the first frame-accounting test, and it passes with `VIBEOS_KTEST=reap_many_via_idle VIBEOS_KTEST_REPEAT=20` at `-smp 2`; today fresh KVA page-table pages and new `Tcb` boxes move the global `free_frames()` count, and it fails `make test` at random with no retry (F074)
+- [ ] e2e asserts `/bin/tests`' result on the production path: `user: tests ok` is a contract marker before `shell ready` in every e2e variant that reaches the shell, and `user: tests fail` is a failure signature (F073)
+- [ ] `/sbin/init` passes a status pointer to `wait4` and, when `/bin/tests` exits nonzero or on a signal, prints `init: /bin/tests exited <status>` on fd 2, a registered failure signature, as §10.5's Rust `/sbin/init` does; today `/sbin/init` passes a NULL status to `wait4` and forks `/bin/sh` regardless (F073)
+- [ ] the vibefs QEMU-kill test can fail. The guest prints `wr N` before each commit; on any `sync_fs` error it prints a registered failure line and halts. Each round kills QEMU at a random commit count between 1 and 200 and fails unless the harness killed QEMU itself. After `fsck-vibefs` reports `errors 0 warnings 0`, the harness reads `/crash/w` from the image with a hostlib tool over `vibeos-core`'s vibefs and requires the content of iteration N or N-1 for the last `wr N` it saw. This box lands with §10.11's commit-leak fixes (F080)
+- [ ] the second ksyms link leaves `.text` where the first put it: each `KERNEL_VARIANT` recipe reruns `gen_ksyms.py` on the final ELF, in the dev and `CARGO_PROFILE=release` profiles, and fails when the table differs from the one it linked (F084)
+- [ ] the panic e2e requires the symbolized `panic_fmt` frame, which the panic ISO names `core::str::count::do_count_chars+0xc` today (F084)
+- [ ] the in-guest clock tests can fail: `now_us_monotonic` and `now_us_under_yields` read the clock through a `kernel_tests` hook that skips `monotonic_max`'s `LAST_NS` clamp, compare each read with an independently published timestamp within a tolerance the test states, and run a reader thread on every CPU that calls `yield_now` while the timer fires; a planted tear (a hook that skips the seqlock retry) fails them (F100)
+- [ ] assertions that cannot fail replaced: `dma::publish_uses_release_not_only_compiler_fence` is deleted, since a single-threaded test cannot see a missing fence (§11.7's virtio litmus test covers publication); `split_wrap_and_sim_device` drives `should_kick` with explicit `avail_event` values and asserts both outcomes; `block_vblk_rw` drops its `barrier()` assertion and its empty `!has_flush()` branch (F120)
+- [ ] the expect-panic e2e matches markers only against lines before the first panic signature, counts dump banners rather than signature lines, and waits for the guest's panic exit instead of killing QEMU at `panic: halted`: `isa-debug-exit` status 35, or QEMU's `GUEST_PANICKED` event once §10.7's `pvpanic` box replaces `isa-debug-exit` (F141)
+- [ ] the harness's SMP check counts exactly `N-1` `smp: ap online` lines at `-smp N` and fails on an extra one (F141)
+- [ ] the marker-order unit tests drive `run_qemu_and_check` through a fake line source, and `check_markers_in_order`, which no runner calls, is deleted (F141)
+- [ ] in-guest tests check what their names claim: `lock_spins` prints its counters without counting as a pass, `int3_roundtrip` asserts a flag its `#BP` handler set, `rtc_offset` asserts a plausible RTC year and checks `deadline_after`'s result, `mmio_uc_flags` restores the physmap leaf it made UC, and `preempt_two_threads` pins both workers to one AP with `spawn_on` (F142)
+- [ ] the host test `switch_context_roundtrip` runs the kernel's switch asm on x86_64 hosts, with `cli` and `sti` supplied by a macro, in place of the `#[cfg(test)]` copy in `thread.rs`, which has neither and which aarch64 hosts compile out (F142)
+- [ ] the `mkfs-vibefs`/`fsck-vibefs` and `$(INITRD)` rules depend on `$(KERNEL_SRCS)` and `Cargo.lock`, so an edit to `src/fs/`, `src/part.rs`, or `src/lib.rs` rebuilds the host tools and the initrd; today the first lists only `src/vibefs.rs` and the second only `src/fat.rs` (F143)
+- [ ] `CARGO_PROFILE=release` is built and booted: the nightly job runs `make CARGO_PROFILE=release test-e2e test-kernel`; no workflow builds that profile today (F137)
+- [ ] invariants that must hold in release builds are `assert!`, as DESIGN §9.4 requires: `BootCell::set`'s set-twice check (`cell.rs`), `pop_head` on an empty order (`pmm.rs`), and the `carve` bounds (`heap.rs`) are `debug_assert!` today (F041, F137)
+- [ ] a contract line or log record reaches serial whole: `Serial::write_fmt` formats the line, newline included, into a stack buffer and writes it under one TX hold, and `log_fmt` appends its newline to its `StackBuf` and sends one `try_write_bytes`; an in-guest test at `-smp 4` has every AP print formatted lines in a loop while the BSP prints 1,000 numbered markers, and `run_ktest.py` finds all 1,000 whole (F138)
 
 ### 10.3 Portable core and the architecture seam
 - [ ] `switch_context` and the DMA fences out of the portable half; hostlib as a workspace member; host tests on any OS (A2 landed the crate and host tests; `thread.rs` still carries `cfg(target_arch)` and `global_asm!`)
+- [ ] `dma::dma_mb`, a full barrier (`mfence` on x86_64) beside `dma_wmb` and `dma_rmb`, runs in `SplitQueue::should_kick` before its `avail_event` or `used.flags` load, which follows `publish`'s `avail.idx` store, and in `SplitQueue::get_used` after its `used_event` store, before the next `used.idx` load, as virtio 1.2 §2.7.13.4.1 requires and Linux's `virtio_mb` and `virtio_store_mb` provide. Today only `dma_wmb` (`fence(Release)` + `sfence`), which orders no later load, separates the `avail.idx` store from that load, and `get_used` issues no barrier after its `used_event` store, so under `VIRTIO_F_EVENT_IDX` one lost kick or interrupt stops a queue for good. A host test through the stub `arch` records ring stores, ring loads, and barriers and finds `dma_mb` between each such store and load; §11.7's litmus set covers both pairs on a weakly ordered CPU; DESIGN §4.7, §9.3, and §10.4 state the barrier as built in the same commit (F016)
 - [ ] an `arch` module boundary with one trait per concern: page table format and flags, context switch, interrupt controller and vector map, timer and cycle counter, atomics and barriers, MMIO accessors, per-CPU base register, syscall entry and user context, user-memory access, cache maintenance, the boot handshake
 - [ ] every x86 assumption outside `arch/` found by grep for `asm!`, `x86`, and CR and MSR names, then moved or fenced; the audit checked in as `docs/ARCH.md`, which maps each seam trait to its implementing module
 - [ ] the seam proven by a host build of the portable core against a stub `arch`, which is the cheapest second architecture there is
@@ -996,27 +1077,73 @@ Phase 11 runs them on a weakly ordered CPU.
 - [ ] `fs/mod.rs`, `vibefs.rs`, `fat.rs`, and `ktest.rs` split by responsibility; a file-size guard in `make check` (Q5)
 - [ ] the nine two-way module dependencies broken; `serial` has a raw layer with no upward calls (A4)
 - [x] one `BootCell` and one `IrqCell`; no `static mut`; no `&'static mut` accessors (Q3; the asm-owned setjmp buffer in `arch/catch.rs` is the documented exception)
+- [ ] `BootCell<T>` is `Sync` only when `T: Send + Sync` and `Send` only when `T: Send`, and `IrqCell<T>` is `Send` and `Sync` only when `T: Send`, as `OnceLock` and `Mutex` are; the three statics that then fail to build (`per_cpu_init::CPUS`, `proc_init::TABLE`, `smp_init::STARTING`) get an `unsafe impl` on the contained type whose `// SAFETY:` line names the invariant (F017)
+- [ ] `IrqCell::force_unlock` and `log_init::with_logger_unlocked` become `unsafe fn` (F017)
+- [ ] `scripts/check_cells.py` fails on an `unsafe impl` of `Send` or `Sync` for a generic type with no bound on its parameter (F017)
+- [ ] the lock guards have `std::sync::MutexGuard`'s auto traits: `InterruptGuard` and `BlockingMutexGuard` each hold a `PhantomData<*const ()>`, which makes them and `SpinMutexGuard`, which holds an `InterruptGuard`, `!Send`, and `SpinMutexGuard` and `BlockingMutexGuard` are `Sync` only when `T: Sync`; a compile-time assertion in the kernel binary fails the build if a guard becomes `Send` or a guard over a `!Sync` `T` becomes `Sync` (F038)
+- [ ] `PerCpu` split into owner-only state and a remote view: the fields other CPUs read (`ticks`, `switches`, the run-queue length, `ready`, `wake_inbox`, `apic_id`) are atomics or set once before `ready`, `per_cpu_init::cpu(id)` returns a view with only those fields, `with_current_switch` ends its `&mut PerCpu` before `switch_context`, and `with_cpu` becomes an `unsafe fn` whose contract is that the target CPU is not running; DESIGN §7.5 states which accessor may alias which (F039)
+- [ ] the kernel writes the TSS and an AP's `CpuTables` only through pointers with write provenance: `gdt::bsp_tss_ptr` derives from `addr_of_mut!((*BSP.as_ptr()).tables.tss)`, `smp_init` keeps an AP's `CpuTables` as the pointer `Box::into_raw` returns and frees it with `Box::from_raw`, and the wait-queue pointer that `thread_init`'s unlink writes through derives from a `*mut WaitQueue`, not from `WaitQueue::cookie(&self)` (F089)
+- [ ] `DmaBuffer` and `GuardedStack` are move-only handles with private fields that only their allocators build (`DmaBuffer::from_phys` is deleted), so `free_to_buddy`, `dma_init::free`, and `kva_init::free_stack` free only what their caller owns; `compile_fail` doc tests in `vibeos-core` show that a `DmaBuffer` can be neither copied nor built from an address (F018)
+- [ ] `make test-unit` runs doc tests, which its `cargo test --lib` skips today (F018)
+- [ ] `addr_space_init::load_cr3_u64` and `syscall_init::switch_cr3_for` become `unsafe fn` with `# Safety` sections (F018)
+- [ ] a `Buddy::new` argument replaces `Buddy::set_hhdm_offset` (F018)
+- [ ] `paging_init::current_mapper` returns a guard that holds the PT lock (F018)
+- [ ] `addr_space_init::teardown` asserts that no CPU's CR3 and no TCB's `as_cr3` holds the root it frees (F018)
+- [ ] `kva_init::vmap` returns a move-only handle that records its base and frame count, and `vunmap` takes that handle, so the span unmapped always equals the span returned to the KVA free list; an in-guest test vmaps 32 frames, vunmaps the handle, and finds all 32 pages unmapped (F018, F107)
+- [ ] `unmap_shootdown` asserts `n <= MAX_UNMAP` (32) where it clamps silently today (F107)
+- [ ] enabling and disabling interrupts and opening and closing the SMAP window are compiler barriers: `x86::sti`, `x86::cli`, `x86::stac`, `x86::clac`, `InterruptGuard`'s exit `sti`, and the raw `cli` and `sti` in `console_init::wait_key` and `thread_init::halt_if_idle` drop `options(nomem)`, while `sti; hlt` keeps it; `syscall_init::flags_if_on`, whose `pushfq` is declared `nostack`, is replaced by `x86::interrupts_enabled()` (F091)
+- [ ] the lock-rank checker catches a spinlock held across a context switch: `thread_init::switch_now` asserts that this CPU's `HELD` rank mask is empty once the `SCHED` guard has dropped; an in-guest test that yields while holding a ranked `SpinMutex` hits that assertion under `arch::catch::catch_panic` (F108)
+- [ ] every `IrqCell` static that more than one CPU takes after `smp: done` becomes a `SpinMutex` with a DESIGN §2.1 rank, so the rank checker sees it and its spin services incoming IPIs: `proc_init::TABLE`, `kva_init::KVA`, `work_init::ST`, and `irq_init::IRQ` among them; `log_init::LOG` keeps its unranked TAS (DESIGN §2.5); DESIGN §2.3 lists each `IrqCell` left and why it is CPU-local or boot-only (F108)
+- [ ] a blocking call from a device top half fails at the call: `park`, `wait_on`, `begin_wait`, and the `from_irq = false` path of `thread_init::schedule_inner` assert `!irq_init::in_hard_irq()`, while `schedule_preempt` from the timer and reschedule IPIs stays legal; an in-guest test finds `in_hard_irq()` true inside a device top half and false in its threaded bottom half (F110)
+- [ ] the IDT error-code split has one source: a `const` assertion in `arch/idt.rs` fails the build unless `install_defaults`'s error-code and no-error lists partition 0..=255 as `vectors::pushes_error_code` does, `idt::set_handler` asserts `!pushes_error_code(vec)`, and `vectors::NAMED` includes `MC` (0x12) (F093)
+- [ ] `now_ns` is derived from the TSC alone when CPUID reports an invariant TSC and the §10.7 warp test saw no backward step: `(rdtsc - tsc0) * 1_000_000 / tsc_per_ms` in `u128` (DESIGN §6.4 option 2), still clamped by `monotonic_max`, so an IF-off window longer than 1 ms or a late TSC-deadline rearm no longer loses time and the tick drives scheduling only; otherwise the tick-counted clock stays; an in-guest test that skips without an invariant TSC, and so runs on the §10.1 KVM leg, holds IF off for 50 ms of HPET main-counter time and finds `now_ns` advanced by 50 ms within 1% (F027)
 - [x] `BootInfo` captured once at entry, the only consumer of Limine responses (D3)
 - [ ] DESIGN.md split per its own §1.4 rule: invariants and pitfalls as their own files, the boot order as a table not prose (DOC2); its `scripts/doc_refs.py` resolves `DESIGN §x.y` and `ROADMAP §x.y` citations in docs, source comments, and scripts, and every bare `§x.y` in ROADMAP.md, against the headings, and runs in `make check`
 
 ### 10.4 Tables, VFS, errors
 - [ ] threads, processes, descriptors, inodes, dentries, files, mounts, and regions allocated at init from a `limits` module; a cap is a constant, not a type (D1)
 - [ ] the cross-CPU wake inbox holds any `ThreadId` up to the `limits` thread count (a bitmap sized from the limits, or an MPSC list), and the KVA free-list node pool no longer caps freed thread stacks at 128 ranges; today's `u64` inbox caps ids at 64 and drops the rest silently (D1)
+- [ ] a full thread table is an error, not a panic: `sys_fork` returns `EAGAIN` when §10.10's fallible `spawn_inner` finds no free slot, AP bring-up leaves a CPU offline and logs it when its idle thread or per-CPU workers find none, and `adopt_ap_idle` drops an unplaced `Box<Tcb>` only after `SCHED` is released; an in-guest test fills the thread table with parked kernel threads, then `fork` from a user program returns `-EAGAIN` (F037)
 - [ ] `MAX_ELF` removed: the loader maps segments from the file instead of reading the whole binary into a bounded buffer
 - [ ] FAT and vibefs behind `InodeOps`; `Vfs` owns inodes, dentries, mounts, and files and nothing backend-specific (A3)
+- [ ] every path syscall resolves through `Vfs`: `file_init::walk_abs`, `file_init::vol_parent`, and the `route` and `routed_rest` functions of `fat_init` and `vibefs_init` are deleted, so a process reaches kernfs; a user test opens `/dev/null`, `/dev/zero`, and `/dev/random` and reads or writes each, and an in-guest test then finds no `null` entry in the FAT initrd's `/dev` directory; it lands after §10.12's `/dev/random` box (A3, F086)
+- [ ] a relative path resolves against the calling process's `Proc::cwd`; `file_init::CWD`, which the kernel shell's `cd` writes and every process reads, is deleted, and the kernel shell keeps its own directory; an in-guest test sets the kernel shell's directory to `/vibe`, then runs a user program whose relative `open` resolves from `/` (F057, F086)
+- [ ] a syscall path is canonicalized before lookup: `//` and `.` collapse, `..` resolves and stops at `/`, and a case-insensitive FAT lookup returns the dentry that carries a mount, so `/./vibe/f`, `//vibe/f`, `/dev/../vibe/f`, and `/VIBE/f` all open the vibefs file `/vibe/f`; an in-guest test opens each (F056)
+- [ ] one refcounted in-core FAT inode per file, keyed by its dirent location, owns the first cluster, the size, and the dirent slot, and an open file holds only a reference, its offset, and its flags; FAT read, write, and truncate update the inode under the volume lock, rename re-keys it, and `free_chain` runs at the last close of an unlinked file; FAT and vibefs `O_APPEND` and `SEEK_END` read the inode's size; a host test writes through two descriptors on one empty file, truncates through one and extends through the other, and the host-test `fsck` helper (`fsck.fat -n`) passes (F013)
+- [ ] the dentry cache never resolves through a reused slot: a directory dentry stays pinned while a child dentry names it as parent, `dcache_find` matches the mount as well as the parent and name, `Vfs::mount` pins the mountpoint before `dentry_force_alloc`, and `Vfs::umount` makes every busy check before it changes state; host tests put `/a` under eviction pressure and still find the mount on `/a/m`, and find that `stat("/c/x")` never returns `/a/x` (F065)
+- [ ] tmpfs keeps written data when a file's extent moves: `tmp_ensure` writes the old run's dirty `tmp_cache` pages back to `tmp_back` before it copies the run, and `Cache::invalidate`, which drops pages without writeback, runs only for runs that unlink or shrink frees, as its contract comment then says; a host test writes file A, creates B beside it, grows A by write and by truncate, and reads A's first bytes back (F066)
+- [ ] `open` reserves the descriptor and the open-file slot before it creates or truncates anything; an in-guest test calls `open(O_TRUNC)` with the open-file table full and gets `ENFILE`, and the file's size is unchanged (F057)
+- [ ] `rm -r` in the `kernel_shell` build walks with a bounded explicit stack, builds child paths with a length check that returns `NameTooLong`, and removes every entry, not the first 16; an in-guest test runs it on a 20-entry, 8-deep tree (F126)
+- [ ] `ls` in the `kernel_shell` build lists a FAT or vibefs subdirectory: `vfs_ls_snap` treats `NotSupp` as not kernfs; an in-guest test runs `ls /etc` (F126)
+- [ ] `mount` in the `kernel_shell` build reuses the pinned dentry of an already-mounted path in `vfs_attach`; an in-guest test runs 64 `mount`s of one path (F126)
+- [ ] `unlink_path` drops the name from the resolved parent, not `/` (F126)
+- [ ] FAT timestamps: `fat_datetime` counts years from 1980 with the Gregorian leap rule, `fat_to_unix` is its inverse, and a host test round-trips every day from 1980 through 2107; `FatVol::now` and `Vfs::now` follow `time_init::unix_time_s()` instead of staying 0 (F123)
 - [ ] driver and volume state as instances referenced from the device registry, so a second disk is a second instance (D2)
+- [ ] one registry of `&'static dyn BlockDevice` keyed by name, partitions included: the block cache, `part_init`, FAT, vibefs, and devfs block nodes take a registry handle instead of matching `DEV_RAM0` and `DEV_VDA`, and vibefs no longer treats an unknown device id as `vda`; an in-guest test mounts a FAT32 partition of `vda` by its partition name and reads `/dev/vdap1` through `Vfs` (D2, F081)
 - [ ] one `KError` with `From` for every module error and the Linux errno mapping in one table; syscall dispatch returns `Result<usize, KError>`; the table emits the errno table in `docs/SYSCALL.md` §2 through the §10.5 generator, and `make check` fails if the checked-in copy differs (E2)
+- [ ] the E2 table gives each condition Linux's errno: `FsError::NoSpace` splits into a full volume (`ENOSPC`, 28), a full system-wide open-file table (`ENFILE`, 23), and FAT's 4 GiB file limit (`EFBIG`, 27); `Corrupt` from FAT and vibefs maps to `EIO`; `lseek` on the console returns `ESPIPE` (29); `Loop`, `NotEmpty`, and `NotSupp` map to `ELOOP`, `ENOTEMPTY`, and `EOPNOTSUPP`; a host test per variant replaces `fat.rs`'s `error_strings` test, which pins `Corrupt` to `Inval` (E2, F052, F057, F083)
+- [ ] the syscall layer's own checks return Linux's errno: `read` on an `O_WRONLY` descriptor and `write` on an `O_RDONLY` one return `EBADF`, `dup` with a full descriptor table returns `EMFILE`, and `open` and `execve` pass a path's bytes to the filesystem and accept an argument of any bytes but NUL instead of returning `EINVAL` for one that is not UTF-8; an in-guest test checks each case (E2)
+- [ ] `fat::FatError` and `vibefs::Error`, two copies of one 11-variant enum, merge into one filesystem error type with one `From` into `KError` (E2, F083)
 
 ### 10.5 User runtime
 - [ ] a `no_std` Rust crate under `user/` as a workspace member, statically linked, with `_start`, argument and environment parsing, and a panic reported on fd 2 and turned into a non-zero exit
 - [ ] built for the bare target as a non-PIE `ET_EXEC` linked below 2 GiB, through the static relocation model the `[target.x86_64-unknown-none]` rustflags already set (the built-in spec defaults to static-PIE, which the loader refuses until §13.10), plus `-C code-model=small` for the user crate alone, since the built-in spec's model is `kernel` and those rustflags are shared with the kernel; the prebuilt `core` keeps the `kernel` model, which also resolves below 2 GiB, so `-Zbuild-std` stays deleted (B2); the triple for Rust code with `std` (`*-unknown-linux-musl` or a `*-unknown-vibeos` one) is §24.3's decision
 - [ ] syscall stubs generated from one table shared with the kernel, with a number column per architecture (§11.6) and an argument order where Linux's differs by architecture (raw `clone`: arm64 swaps `tls` and `ctid`), so numbers, arities, and argument positions cannot drift; the same generator emits `docs/SYSCALL.md` §3
+- [ ] syscall dispatch indexes the generated syscall table by number, and before the handler runs, the dispatcher range-checks every pointer argument the row declares (a buffer with its length argument, a fixed-size value, a C string, or a string vector); the rows for `open` (path), `execve` (path, argv, envp), and `wait4` (status) declare theirs, where `syscall.rs` gives all three a `ptr_mask` of 0 today; an in-guest test passes an unmapped and a kernel-half pointer in each declared pointer argument and gets `-EFAULT` (F150)
+- [ ] `execve` copies the caller's `envp` strings onto the new image's initial stack after `argv`, so the crate's environment parsing sees them; today `sys_execve` discards `envp` and `user_init::fill_stack` passes an empty one; a `/bin/tests` case execs a program with the environment `K=v`, and the program exits 0 only when its environment holds `K=v`
+- [ ] `elf::parse` host tests also cover checked-in static binaries linked by `ld.lld` and by GNU `ld`; today every host-test image comes from the test helper `build_elf`
 - [ ] `brk` and anonymous `mmap`/`munmap`, eagerly backed for now; Phase 12 makes them lazy without changing the interface
 - [ ] `getdents64`, `fstat`, and `nanosleep`, which `ls` and `sleep` below need; the rest of the floor stays in §13.9
 - [ ] `reboot` (power off and restart), so the user `/bin/sh` keeps the `poweroff` and `reboot` the Phase 5 kernel shell had; x86_64 uses the ACPI and reset paths, and §11.4 puts PSCI behind the same call
 - [ ] an allocator over `brk`, so `alloc` works in userspace
-- [ ] `utest_ok` / `utest_fail` / `utest_skip` on serial, asserted by `tests/harness` like the `ktest_*` protocol; a failing user test fails `make test`
+- [ ] `utest_ok` / `utest_fail` / `utest_skip` on serial, asserted by `tests/harness` like the `ktest_*` protocol in `make test-e2e`, `make test-e2e-uefi`, `make test-e2e-pit`, and `make test-e2e-highmem`, where `/bin/tests` runs as a forked child of `/sbin/init`; a failing user test fails `make test` (F073)
 - [ ] `/sbin/init`, `/bin/sh`, `/bin/tests`, and `/hello` rewritten in the crate; the assembly sources and `mkuserelf.py` deleted
+- [ ] a signal cannot kill or stop pid 1: `sys_kill` to pid 1 delivers only signals init has a handler for, as Linux does, so none until §13.8's `rt_sigaction`; `/bin/tests` sends `SIGKILL` to pid 1, and the boot still reaches `shell ready` (F068)
+- [ ] pid 1's exit panics the kernel with a line naming its status (F068)
+- [ ] a host-tested `vibeos-core` helper picks an orphan's reaper: pid 1 while its slot is live or stopped, and otherwise none, in which case the orphan's zombie is freed when it exits (F068)
+- [ ] the Rust `/sbin/init` checks every `fork`, `execve`, and `wait4` result: a nonzero `/bin/tests` status prints `init: /bin/tests exited <status>` on fd 2, which the harness fails the run on; on `ECHILD` or a failed `/bin/sh` start it writes a diagnostic to fd 2, yields, and starts `/bin/sh` again, and after three failed starts it exits non-zero, which the kernel turns into the pid 1 panic above; a harness case boots an initrd without `/bin/sh` and expects the diagnostic and that panic (F073, F128)
+- [ ] `/bin/tests` provokes every errno SYSCALL.md lists for each syscall and asserts it; each pointer argument of `read`, `write`, `open`, `execve` (path, argv, envp), `wait4` (status), `psinfo` (syscall 500), and the §10.5 additions gets a kernel-half address, an unmapped page, a range crossing `USER_MAP_END` and one crossing `USER_END`, a read-only page as a destination, a huge length, and NULL where SYSCALL.md does not allow it, and each returns `-EFAULT`; the `USER_MAP_END` and read-only cases need §10.6's `USER_MAP_END` and accessor boxes, so this box lands after them (F077)
+- [ ] `/bin/tests` covers the process lifecycle: the fork bomb fails unless `fork` returns `-EAGAIN` at the `limits` process count; a grandchild reads `getppid() == 1` after its parent exits; a three-step exec chain ends with the parent's `wait4` returning the last program's exit status; `wait4` on one pid blocks until that child exits although a sibling exited first, and `wait4` on that zombie sibling then returns its status at once; `SIGKILL` ends a child, and `SIGSTOP` then `SIGCONT` stops and resumes one (F077)
 - [ ] `/bin/sh` runs programs from `PATH` with `fork`, `execve`, and `wait4`, reports their exit status, and has `poweroff`, `reboot`, and the assembly shell's `ps` built-in, over syscall 500 until §13.9 moves `ps` to `procfs`; pipes and job control are §13.7
 - [ ] `ls`, `cat`, `echo`, `grep`, `wc`, `true`, `false`, `sleep`, `yes`, and `cmp`, each a few dozen lines, because the Phase 13 gate is a pipeline of them
 - [ ] the initrd is sized by `mkinitrd` from its contents plus fixed free space for the write tests, and loaded as a Limine module on x86_64 instead of a 64 KiB image embedded by `build.rs`; `INITRD_BYTES` and its size check are deleted, and DESIGN's boot order and `build.rs` pitfall are updated to match
@@ -1026,12 +1153,25 @@ Phase 11 runs them on a weakly ordered CPU.
 The kernel's entry paths and its user-memory copies predate copy-on-write, demand paging, and signal
 return. Each item here is a live bug or a trap for Phase 12 and 13.
 
-- [ ] user-VA accessors replace the HHDM copy for syscalls. `copy_from_user` and `copy_to_user` keep the range check (canonical, inside the user half, no overflow), because inside `stac`/`clac` the MMU still allows supervisor access to kernel pages. They then dereference the user address inside `stac`/`clac`, so `CR0.WP` faults a write to a read-only page and a not-present page faults. A fault inside an accessor becomes `EFAULT` through an exception-table fixup, which replaces the page-table pre-walk. Today `write_bytes` writes through the physmap and ignores `WRITABLE`, which Phase 12's COW would turn into cross-process corruption. DESIGN §5.1 and SYSCALL.md §5 describe it as built
+- [ ] user-VA accessors replace the physmap copy for syscalls. `copy_from_user` and `copy_to_user` keep the range check (canonical, above the null guard, inside the user half, no overflow), because inside `stac`/`clac` the MMU still allows supervisor access to kernel pages. They then dereference the user address inside `stac`/`clac`, so `CR0.WP` faults a write to a read-only page and a not-present page faults. A fault inside an accessor becomes `EFAULT` through an exception-table fixup, which replaces the page-table pre-walk. Today `write_bytes` writes through the physmap and ignores `WRITABLE`, so `read`, the `wait4` status pointer, and `psinfo` can write into the caller's read-only and executable pages, which Phase 12's COW would turn into cross-process corruption. DESIGN §5.1 and SYSCALL.md §5 are rewritten in the same commit to describe the accessors as built (F023)
 - [ ] one named fill API for writing an address space that is not running: ELF segments, zero fill, TLS, the exec stack, and `fork`'s copy until §12.3. It writes frames through the physmap and syscall code cannot reach it. §12.2 teaches it to fault pages in with write intent
-- [ ] every interrupt and exception entry clears `RFLAGS.AC` (`clac` when SMAP is live) before anything else. Interrupt gates do not clear AC, ring 3 can set it with `popf`, and an IRQ or `#PF` inside an accessor would otherwise run its handler with SMAP off; `iretq` restores the interrupted value. An in-guest test opens the accessor window, takes an exception, and has a test hook in the handler make a stray access to a user page, which must fault; an x86_64-only variant does the same after a user program sets AC with `popf`
-- [ ] the top user page is never mappable: one `USER_MAP_END` (`0x0000_7FFF_FFFF_F000`) used by the ELF loader and the address-space range checks, so a `syscall` in the last page cannot return to a non-canonical RIP. The exit path sends a non-canonical saved RIP to `SIGSEGV` before `swapgs`, never to `iretq`. A `#GP` on any `iretq` to a user frame is recognized, handled on the kernel GS, and turned into `SIGSEGV` for the process instead of `exception_halt`. DESIGN §4.1 and SYSCALL.md §1 updated in the same commit; the in-guest test runs on the KVM leg too, since TCG may not model `iretq`'s canonical check
-- [ ] the IST vectors (NMI, `#MC`, `#DB`, `#DF`) decide whether to `swapgs` from the sign of `GS_BASE`, not from CS.RPL. The syscall entry before its `swapgs` and the exit's `swapgs; sysretq` and `swapgs; iretq` run at CPL 0 with the user GS base loaded. An in-guest test puts hardware execute breakpoints on those instructions, and the `#DB` handler finds its `PerCpu`. The sign check holds until §18.3 lets userspace write a kernel-half GS base
-- [ ] the 512 MiB low identity window torn down after `smp: done`, so VA 0 faults in kernel mode as it does in user mode. Only the `0x8000` trampoline page stays: 4 KiB, read-only, executable, not global, with the trampoline GDT's accessed bits preset so the AP never writes it. The BSP writes the blob and parameter block through the physmap. The teardown flushes global TLB entries on every CPU. An in-guest test finds that a kernel read of VA 0 faults. DESIGN §4.1 and §4.3 updated in the same commit
+- [ ] exec returns `ENOMEM` for an image whose page-rounded `PT_LOAD` and `PT_TLS` sizes together exceed a cap in the §10.4 `limits` module that is larger than the default guest's 128 MiB, so the under-cap case below exists. Today `elf::parse` checks `p_memsz` only against the user half, so one `execve` drains the buddy allocator under the PT lock with IF off. `AddressSpace::map_anon` frees what it mapped when a frame allocation fails, as the `map_page` error path does, and the loader releases the PT lock between bounded chunks. In-guest, in the default 128 MiB guest: an ELF with a 64 GiB `p_memsz` and one under the cap but larger than free memory each get `ENOMEM`, and a `fork` after them succeeds (F009)
+- [ ] the ELF loader maps `PT_LOAD` segments that share a page, which a §10.5 user-crate binary has when it is linked with no page alignment between `.text` and `.data`: it merges their page-rounded intervals, maps each page once with the union of the segments' write and execute flags, zero-fills it once, then copies each segment's file bytes. Today `map_loads` takes `AsError::Overlap` as success and zeroes the earlier segment's bytes. Host tests cover an RX and an RW segment in one page and a pair whose second segment runs past the shared page; an in-guest test execs such a pair (F031)
+- [ ] every interrupt and exception entry clears `RFLAGS.AC` (`clac` when SMAP is live) before anything else. Interrupt gates do not clear AC, ring 3 can set it with `popf`, and an IRQ or `#PF` inside an accessor would otherwise run its handler with SMAP off; `iretq` restores the interrupted value. An in-guest test opens the accessor window, takes an exception, and has a test hook in the handler make a stray access to a user page, which must fault; an x86_64-only variant does the same after a user program sets AC with `popf`; the test hook compiles only under `kernel_tests` (F088, F146)
+- [ ] the top user page is never mappable: one `USER_MAP_END` (`0x0000_7FFF_FFFF_F000`) used by the ELF loader and the address-space range checks, so a `syscall` in the last page cannot return to a non-canonical RIP. The exit path sends a non-canonical saved RIP to `SIGSEGV` before `swapgs`, never to `iretq`. A `#GP`, `#NP`, or `#SS` whose RIP is a labeled user-return `iretq` (the syscall slow path, `vibeos_iret_user`, `vibeos_iret_user_full`, and the interrupt exit) is recognized, handled on the kernel GS, and turned into `SIGSEGV` for the process instead of `exception_halt`. DESIGN §4.1 and SYSCALL.md §1 updated in the same commit. An in-guest test execs an ELF whose last `PT_LOAD` page is the one below `USER_END` and ends in a `syscall`, and gets `ENOEXEC`; a `kernel_tests` hook that writes a non-canonical RIP into a syscall's saved frame finds the process killed by `SIGSEGV` and the kernel running. Both run on the KVM leg too, since TCG's `helper_ret_protected` skips `iretq`'s canonical check (F007)
+- [ ] the IST vectors (NMI, `#MC`, `#DB`, `#DF`) decide whether to `swapgs` from the sign of `GS_BASE`, not from CS.RPL. The syscall entry before its `swapgs` and the exit's `swapgs; sysretq` and `swapgs; iretq` run at CPL 0 with the user GS base loaded. An in-guest test puts hardware execute breakpoints on those instructions, and the `#DB` handler finds its `PerCpu`. The sign check holds until §18.3 lets userspace write a kernel-half GS base (F007)
+- [ ] the 512 MiB low identity window torn down after `smp: done`, so VA 0 faults in kernel mode as it does in user mode. Only the `0x8000` trampoline page stays: 4 KiB, read-only, executable, not global, with the trampoline GDT's accessed bits preset so the AP never writes it. The BSP writes the blob and parameter block through the physmap. Before the teardown, `smp_init` asserts that the bootstrap thread's stack lies outside the window. The teardown flushes global TLB entries on every CPU. An in-guest test finds that a kernel read of VA 0 faults. DESIGN §4.1 and §4.3 updated in the same commit (F085)
+- [ ] the syscall exit path runs with IF=0 from the dispatcher's return to `sysretq` or `iretq`: `cli` directly after `call vibeos_syscall_stub`, before the `gs:[retval]` store. Today a console `read` returns with IF=1 from `wait_key`'s `sti; hlt`, so a preemption before `sysretq` lets another process's syscall overwrite `gs:[retval]`, and an interrupt after `mov rsp, [rsp]` pushes its frame at the user's RSP at CPL 0. `console_init::wait_key` returns with the IF state it was entered with, a debug-build check before each exit `swapgs` faults if IF is set, and SYSCALL.md §1 states the rule. An in-guest test blocks a user `read` on fd 0 in `wait_key` until another thread queues a key, with the check live (F001)
+- [ ] `enter_user` and `enter_user_full` execute `cli` before they load the user data selector into GS and write `GS_BASE` and `FS_BASE`, and `iretq` restores the user IF from the saved RFLAGS. Today a spawned or forked process reaches `enter_user_full` with IF=1, so an interrupt after `mov gs` reads `gs:[0]` at VA 0 at CPL 0 and halts the kernel. The selector loads, MSR writes, and `iretq` run as one asm block after the `cli`. An in-guest test forks and exits 1,000 children on CPU 0 while CPU 1 sends CPU 0 reschedule IPIs, and the kernel stays up (F006)
+- [ ] every IDT vector enters through a stub that `arch/idt.rs` generates from one vector table, and the stub makes the `swapgs` decision, so the AC clear and the IST sign check above each live in one place. `idt::set_handler` takes a body function, not an `extern "x86-interrupt"` handler. Today the pool stubs `irq_init::device_irq::<N>` (vectors 0x31 to 0x7F) and `kbd_init`'s `kbd_ioapic` and `kbd_pic` skip `gs_enter`, so an interrupt through any of them at CPL 3 reads `gs:[0]` at VA 0 and halts the kernel. `scripts/check_entry.py` in `make check` fails on an `extern "x86-interrupt"` function outside `src/arch/`. The in-guest test `user_device_irq` runs ring 3 with IF=1 on CPU 0 while CPU 1 sends it a pool vector and the keyboard vector, and `user_ipi` does the same with reschedule IPIs; in both the process and the kernel keep running (F004)
+- [ ] a pending signal whose default action terminates or stops the process takes effect on every return to ring 3: the entry stub's exit path checks the current process's pending set before its `iretq` to CPL 3; handler delivery stays in §13.8. Today signals apply only at syscall entry and after the `wait4` sleep, so `SIGKILL` cannot end, and `SIGSTOP` cannot stop, a process that makes no syscalls. An in-guest test kills one child looping in ring 3, stops and continues another, and reaps both (F033)
+- [ ] no fault or trap that ring-3 code raises reaches `exception_halt`: one table in the portable half, which `sig_for_vec` reads, gives each of vectors 0 to 31 its CPL-3 action, and a host test fails on a vector without one. `debug_ex` calls `try_user_fault` for a CPL-3 frame after it moves from the IST stack to the thread's kernel stack, as Linux's `idtentry_mce_db` does, since the kill path can block. `sig_for_vec` maps `#DB` to `SIGTRAP` and `#AC` to `SIGBUS`, and CPU init clears `CR0.AM` on every CPU. Today a user `popf` that sets TF, or an `int1` (`0xF1`), halts every CPU. In-guest, a child that sets TF with `popf` and a child that executes `int1` each end with `SIGTRAP` in their `wait4` status; DESIGN §2.5 and §5.2 drop their F005 not-yet-enforced notes in the same commit (F005)
+- [ ] the `#BP` gate is DPL 3 and `sig_for_vec` maps `#BP` to `SIGTRAP`, so a user `int3` gets `SIGTRAP`, as on Linux. Today `desc.rs` builds every gate at DPL 0, so a user `int3` raises `#GP` and gets `SIGSEGV`, as DESIGN §5.2's `#BP` row records. An in-guest child that executes `int3` ends with `SIGTRAP` in its `wait4` status (F148)
+- [ ] one per-CPU control-register routine, run on the BSP and on every AP, sets `CR0.NE` and `CR0.MP`, clears `CR0.EM`, `CR0.TS`, and `CR0.AM`, and sets `CR4.MCE`, `CR4.OSFXSR`, `CR4.OSXMMEXCPT`, and `CR4.PGE`. Today no CPU sets NE, MCE, or OSXMMEXCPT, so a user x87 error raises the masked IRQ13 and a machine check shuts the CPU down, and only the AP trampoline sets PGE, so the BSP runs with PGE clear, as Limine's CR4 of `0x20` leaves it. The per-CPU CR in-guest test asserts each bit on every CPU. A user x87 divide by zero with the zero-divide exception unmasked ends with `SIGFPE`; on the §10.1 KVM leg, so does an SSE divide by zero with `MXCSR.ZM` clear. DESIGN §5.2's `#MF`, `#XF`, and `#MC` rows then hold (F026, F085)
+- [ ] x86_64 user FP state follows the psABI across `fork` and `execve`: `sys_fork` copies the parent's `Tcb.fpu`, which the syscall entry's `fxsave64` filled, into the child before `make_ready`, instead of the boot template `spawn_user` installs; `sys_execve`, after its point of no return and with IF=0, writes an image with FCW `0x037F`, MXCSR `0x1F80`, and ST0-7 and XMM0-15 zero into `Tcb.fpu` and loads it with `fxrstor64`, so a context switch before the syscall exit saves the new image, not the old one. SYSCALL.md §1 and DESIGN §2.7's I25 row and §7.5 drop their F069 notes in the same commit. `/bin/tests` sets MXCSR's rounding bits and `xmm0` before a `fork` and the child reads both back, and an image that `execve` starts reads MXCSR `0x1F80`, FCW `0x037F`, and `xmm0` zero (F069)
+- [ ] console `write` holds IF=0 only for bounded work: `sys_write` opens an IF-on window between its 256-byte chunks and closes it before the syscall body returns, and the framebuffer console scrolls at most once per chunk, by min(newlines, rows) rows, from a RAM copy of the text grid, never reading VRAM back. Today each newline on the last row is a full-framebuffer `memmove` with IF=0, so one `write` stalls CPU 0 without bound. An in-guest test writes 4096 newlines from ring 3 while CPU 1 sees CPU 0's tick count advance (F044)
+- [ ] one ring-3 entry model: `/hello` and every in-guest test that enters ring 3 or binds a process run as spawned processes the kernel waits on, and the bound model is deleted: `run_path`, `run_user`, `boot_hello`, `bind_current`, `bind_probe`, `with_user_as`, `unbind_current`, `longjmp_user`, `vibeos_user_setjmp`, `vibeos_user_longjmp`, `Proc.borrowed`, the globals `USER_JMP`, `IN_USER`, `EXIT_STATUS`, and `STDOUT`, and the `p.bound` and `in_user()` branches in `finish_exit` and `SYS_EXIT` dispatch. That removes a `setjmp` called from Rust, a bound `execve` whose address space nothing tears down, and a bound exit that skips `reparent_children`. The one setjmp left is `arch/catch.rs`'s, behind its asm trampoline, and SYSCALL.md §3 drops "bound `run_user`". In-guest, a spawned program that forks and exits without waiting leaves an orphan that §10.5's reaper rule frees when it exits, since a `kernel_tests` build starts no `/sbin/init` (F082, F040, F087, F127)
+- [ ] boot runs on a guarded stack: the kernel includes Limine's stack size request (256 KiB), and once KVA is up the bootstrap thread moves to a KVA stack with a guard page. Today `_start` and all of boot run on Limine's stack, which is guaranteed only 64 KiB, has no guard page, and lies in bootloader-reclaimable memory, so an overflow writes that memory silently. An in-guest test finds the bootstrap thread's `Tcb.stack` set, and DESIGN §2.4 and §9.2's guard-page rule then holds for every kernel stack (F072)
 
 ### 10.7 Forensics and tracing
 A hang or a panic under QEMU explains itself from the host, without a rerun. It lands early: the §10.2
@@ -1044,6 +1184,14 @@ retry root-causing and Phases 11 to 13 debug their hangs with it.
 - [ ] tracepoints at the boundaries that exist now: syscall entry and exit, scheduler switch and wake, IRQ entry and exit, IPI send and acknowledge, page fault, and block request submit and complete; §19.1 adds the later subsystems and per-tracepoint runtime enable
 - [ ] timestamps from the §10.3 cycle counter (the invariant TSC on x86_64, §2.6); each AP measures its TSC against the BSP's at bring-up with a warp test over a shared cache line, and a registered marker reports the largest skew, which DESIGN §6.4 requires before timestamps order a trace; when the TSC is not invariant or the warp test saw any backward step (Linux's `check_tsc_warp` rule), the export orders records within each CPU only and says so, and DESIGN §6.4 gains that rule in the same commit; the core tool converts them to nanoseconds with the calibration and the warp result it reads from the core and exports every CPU's ring as one Chrome trace-event JSON timeline, which Perfetto opens; a host test checks the export's required fields
 - [ ] a `hang_test` feature build in which, after `smp: done`, one CPU prints a registered `hang_test: armed` marker, takes a spinlock the others then wait on, and spins with interrupts off; `make test-forensics`, in `make test`, boots it at `-smp 4`, gives up 5 s after the marker rather than at the harness timeout, so its tier stays inside the §10.1 budget, and asserts the report and the export, so the forensics are tested the way the panic path is
+- [ ] the panic dump owns COM1: `halt_others` waits up to 100 ms of TSC time for every other online CPU to acknowledge the `0xFE` IPI, then sends NMI to each CPU that has not, and the NMI handler halts without writing once `HALTING` is set, so a CPU spinning with IF=0 in `SpinMutex::lock` or `wait_acks` also stops; only the first CPU into `begin_dump` runs `Serial::init`, after that wait, and a later one halts without writing; once `HALTING` is set, `write_bytes_plain` and `try_write_bytes` write only on the `DUMPING` owner. Today `halt_others` returns without waiting, a CPU spinning with IF=0 never takes the IPI and writes COM1 without the TX lock, and a second CPU into `begin_dump` re-runs `Serial::init` mid-dump. DESIGN §2.5 and §7.6 describe it as built in the same commit. A `panic_test` variant at `-smp 4` panics CPUs 0 and 1 at once while CPU 2 prints a numbered line in a loop with IF=0; the harness finds one panic message, its backtrace, and one `vibeOS: panic: halted` line, no numbered line after the first `vibeOS: panic:` line, and the panic exit that §10.2's expect-panic e2e requires (F135)
+- [ ] an exception dump's backtrace starts at the interrupted frame: the §10.6 entry stub passes the interrupted `rbp` to `dump_backtrace`. Today `exception_halt` and `exception_vec` pass their own `rbp`, so for an error-code vector (`#GP`, `#PF`, `#DF`, and the `default_err` handlers) the walk reads the interrupted RAX, which LLVM's x86-interrupt prologue pushes at `[rbp+8]`, as a return address, and the `regs: rbp=` line shows the handler's value. The `gp_test` e2e boot faults in a function that `gp_test_trip` calls, and the harness requires the backtrace to list `gp_test_trip` and then `normal_boot_tail` (F070)
+- [ ] after `begin_dump`, every panic-path write to COM1, the `reentered` line included, goes through A4's raw serial layer (§10.3) with IF already off and no `InterruptGuard`. Today those writes take an `InterruptGuard`, so after an `irq nest underflow` panic every write fails the guard's assertion again and the dump prints `reentered` without end. A `panic_test` variant underflows `irq_nest`, and the harness finds the original panic message and the panic exit that §10.2's expect-panic e2e requires (F071)
+- [ ] the panic backtrace follows `rbp` only into a known stack: the current thread's KVA stack, the recorded boot-stack bounds, or this CPU's IST and RSP0 stacks. Today `stackish()` also accepts the `ioremap` window and every address below `0x2000_0000`, so a walk can read an MMIO register that clears on read. `vibeos_syscall_entry` zeroes `rbp` before `call vibeos_syscall_stub`, so the chain ends at the syscall boundary instead of following the user's `rbp`. Host tests cover the range check; an in-guest test walks the chain from inside a syscall made with a nonzero user `rbp` and stops at the entry (F139)
+- [ ] the blocked-thread sweep reports a timeout that fired at least `OVERDUE_NS` late: `schedule_inner` checks lateness as `pop_expired_into` pops each entry, through a portable pop-and-report function with a host test. Today `overdue(now)` runs after that pop has drained every entry it could return, so the sweep never reports. The harness registers the `sched: overdue tid` marker (F111)
+- [ ] dead scheduler and bring-up state deleted: `relink`, which runs under `SCHED` on every schedule, with `Tcb.prev` and `Tcb.next`, which nothing reads, and `PerCpu.ready_head`, which only the `per_cpu_bsp` in-guest test reads; `PerCpu.tsc_per_ms`, which only the `per_cpu_identity` in-guest test reads; and the trampoline's `PARAM_IDT` with `smp::pack_idtr`, which `smp_init` writes and the trampoline never reads. §10.2 deletes `per_cpu_bsp`'s `ready_head` assertion and its harness retry, since `ready_head` is a stale snapshot, not an invariant (F074, F111)
+- [ ] syscall tracing can be switched on: `strace=1` on the §10.2 command line calls `syscall_init::set_trace(true)`, which nothing calls today, and SYSCALL.md §6 names the option. An e2e boot with `strace=1` finds a `user: syscall write` line for the first user `write` (F150)
+- [ ] a syscall count per process: the per-TCB `syscall_count`, summed over a process's threads, is reported through syscall 500 and the `/bin/sh` `ps` built-in, which §13.9 moves to `procfs`. Today nothing reads the per-TCB count. The global `SYSCALLS` counter, bumped on every entry and never read, is deleted. An in-guest test finds a process's count grown by the number of syscalls it made (F150)
 
 ### 10.8 Models and proofs
 Tests sample interleavings and inputs. These cover all of them up to a stated bound, on the code the
@@ -1053,7 +1201,9 @@ kernel on a weakly ordered CPU.
 - [ ] portable code reaches atomics, fences, and the spin-loop hint only through the §10.3 atomics seam, which is `loom`'s under `cfg(loom)`. Because `loom`'s atomics have no `const fn new`, the seam also re-exports `core`'s atomics for `static`s (`entropy`'s and `paging`'s today), which stay `core`'s under `cfg(loom)` and out of every model, and a constructor built from seam atomics (`TickClock`, `IrqCell`, `BootCell`) is `const fn` only outside `cfg(loom)`. `scripts/check_atomics.py` in `make check` fails on `core::sync::atomic` or `core::hint::spin_loop` anywhere else in the portable crate outside tests; `loom` enters as a `cfg(loom)` dev-dependency listed in the §10.9 policy
 - [ ] the §10.4 wake inbox's push and drain (in `ipi_init.rs` today) and `IrqCell`, the log ring's lock (in `cell.rs`, which the portable crate compiles only for tests), move into the portable half beside the §2.7 seqlock (`TickClock`), taking the interrupt guard and the CPU id through the §10.3 seam, so each model runs the kernel's code; the host owner token becomes per thread (loom's `thread_local!` under `cfg(loom)`), since today every host caller is owner 1 and a contended lock reads as re-entry
 - [ ] loom models: the seqlock against a writer that publishes an independent timestamp, so a torn read fails; the wake inbox with pushes from three CPUs against a drain, so no `ThreadId` is lost or delivered twice; the log ring's writers against a `dmesg` reader. Each model has a variant with one ordering weakened or one step moved, run as a test that passes only when loom finds the failure
+- [ ] `TickClock::write` bumps `seq` to odd with `fetch_add(1, Relaxed)` followed by `fence(Release)` before the payload stores, since the CPU 0 tick is its only writer, and its comment names the reader's `fence(Acquire)` that the fence pairs with. Today's `fetch_add(1, AcqRel)` orders only earlier accesses, so the C11 model lets a reader accept a new tick with an old TSC; that sequence is the seqlock model's weakened variant (F098)
 - [ ] Kani proofs, each harness stating its bound: the buddy allocator on a 16-frame arena with orders 0 to 4, where every sequence of up to six allocate and free calls keeps allocations disjoint and aligned, the free count exact, and freed buddies merged; the §10.6 user-range check, as a pure function of `(addr, len)`, accepts exactly the non-empty ranges that do not overflow and lie wholly between the null guard and `USER_MAP_END`, and an empty range at any address below `USER_MAP_END`, the null page included, as Linux's `read(fd, NULL, 0)` needs, for every pair of 64-bit values
+- [ ] `Buddy::order_for` returns `None` for a size above `PAGE_SIZE << MAX_ORDER` before it rounds. Today `next_power_of_two` overflows above 2^63: a release build returns `Some(0)` for `(1 << 63) + 1`, and a dev build panics. Host tests cover `u64::MAX` and `(1 << 63) + 1`, and a Kani harness proves that for every 64-bit `(bytes, align)` it returns `None` or an order whose block is at least `bytes` long and `align`-aligned (F103)
 - [ ] Miri runs the portable crate's host tests; a test Miri cannot run is skipped under `cfg(miri)` with its reason, and each finding becomes a regression test; `miri` joins the `rust-toolchain.toml` components, so a C1 bump picks a nightly that ships it
 - [ ] `make models` runs the loom models and the Kani proofs on Linux and on the Apple Silicon dev host, with `kani-verifier` at a pinned version, since Kani brings its own compiler; the nightly job runs it and Miri, and the scheduled macOS job (I1) runs `make models`
 - [ ] DESIGN §8 gains a models-and-proofs tier and its routing rule: a protocol whose correctness depends on an interleaving gets a loom model, not only a stress test
@@ -1066,6 +1216,56 @@ Gate lines, CI timings, and dependencies as data a script reads.
 - [ ] CI history: when a `ci` run completes, a `workflow_run` job reads its jobs and steps from the Actions API and commits one JSON record (commit, event, conclusion, per-job and per-step wall time) to an orphan `ci-history` branch, which outlives the 90-day limit on Actions logs and artifacts; the job has `contents: write` only, checks out only `ci-history`, runs no code from the triggering commit, never puts run fields (which a fork's pull request sets) into a shell line, writes one file per run id, and retries its push after a rebase, so concurrent runs lose no record; later lines add workflows and fields to the record; `scripts/ci_history.py` prints any step's series and fails when a `ci` run on `main` since the history landed has no record, and gains modes that gate-map entries run as local commands, such as §21.1's `--nested`, which needs a passing leg of each vendor's path within the nightly job's last 7 runs; §10.1's push-to-green numbers are read from it
 - [ ] dev-host records, for a gate line or the part of one that runs under HVF, since no hosted CI runner can run an HVF guest: on the Apple Silicon dev host, `make gate PHASE=N RECORD=1` runs each record entry's command in a clean checkout of the gated commit and writes one JSON file per commit and entry (commit, host, macOS and QEMU versions, command, the numbers the line measures, pass or fail) to `ci-history`, retrying its push after a rebase; everywhere else, `release.yml` included, `make gate` runs no record entry's command and passes the entry only when `ci-history` holds a passing record for it at the gated commit. A job entry passes on a green run of its workflow at the gated commit from any trigger; when there is none, the maintainer starts one before tagging with `gh workflow run` on a branch at that commit, so every workflow a gate entry names has a `workflow_dispatch` trigger; `release.yml` reads runs and starts none
 - [ ] `deny.toml`, and `cargo deny check licenses bans sources` in `make check` (skipped with a hint when `cargo-deny` is not installed, and installed at a pinned version in the `check` job): licenses from an allowlist compatible with the tree's MIT license, crates.io as the only source, and a `[bans]` allow list naming every crate in the graph, so a pull request that adds a dependency fails until it names the crate there, which turns AGENTS.md's dependency note into a check; `cargo deny check advisories` on the nightly job, since it fetches the RustSec database
+- [x] `scripts/check_review_refs.py`, which `make check` runs, fails when a finding id in [reviews/KERNEL_REVIEW.md](reviews/KERNEL_REVIEW.md) is cited by no line in this file or a cited id names no finding; its `--closed` mode also fails while a CRITICAL or HIGH finding without a LATENT tag is cited by an open box in Phases 0 to 10; `tests/harness/test_review_refs.py` tests it
+
+### 10.10 Lifetimes and liveness
+A completion's publishing store is its last access to the waiter. Deferred reclaim frees an object only
+after the CPU that owns it has switched away from it. A TLB shootdown waits for every CPU's ack and never panics.
+
+- [ ] `IoWaiter::finish` makes its `done` store its last access to the waiter: under `SCHED` it runs `wake_all` on the waiter's queue, then stores `done`. Storing `done` under `SCHED` before `wake_all` is not enough, because `wait()` returns through the lock-free `poll()` and the waiter lives on the submitter's stack. DESIGN §10.1 and a DESIGN §9.4 pitfall state the rule. An in-guest test stalls the completer at a `kernel_tests` hook just before it takes `SCHED`, and 10,000 ramdisk requests whose submitters return at once complete with no fault and no hung submitter (F002)
+- [ ] a dead thread's kernel stack is freed only by the CPU that ran it, after `switch_context` has moved that CPU off it: `thread_exit` parks the stack in a per-CPU slot that the next switch tail on that CPU frees, as Linux's `finish_task_switch` does, and no other CPU's `reap_zombies` touches it; DESIGN §4.5 and §9.2 say so. An in-guest test in `make test-kernel-smp4` exits 10,000 threads on CPU 0 while CPUs 1 to 3 loop through schedule tails, with no fault and the free frame count back at its baseline (F012)
+- [ ] every switch tail frees the per-CPU dead-stack slot, the preempt (`from_irq`) tail included, so the slot holds at most one stack, and the global 8-entry `DEFERRED` list and its `kva: deferred free list full` panic are deleted. The in-guest test `exit_burst` exits 16 user processes back to back on one CPU, each switching to a sibling resumed from timer preemption, and the kernel stays up (F010)
+- [ ] `spawn_inner` reuses a `Dead` TCB slot only when that thread's `on_cpu` flag, which its CPU clears after `switch_context`, is clear, and `thread_exit` stores `Dead` under `SCHED`. Today the scan skips only the local CPU's current and idle threads, so a spawn on another CPU can rewrite a TCB that is still switching out. An in-guest test in `make test-kernel-smp4` spawns threads on CPUs 1 to 3 while threads exit on CPU 0, and every spawned thread runs its entry exactly once (F012)
+- [ ] `spawn_inner` returns `Result` instead of calling `expect("thread stack")`; when the stack allocation fails, `sys_fork` and `spawn_elf` release the pid slot and the cloned address space and return `ENOMEM`. An in-guest test drains the buddy allocator below the 4 frames of one kernel stack, then a kernel-thread spawn returns `Err`; `fork_oom` has a `kernel_tests` hook fail the kernel-stack allocation of a `fork`, whose `clone_full` runs first, and gets `ENOMEM` with the free-frame count back at its baseline; the kernel stays up (F010)
+- [ ] `wait_acks` never panics: after 1 s without every ack it keeps waiting and logs, at most once a second, a line naming the CPUs that have not acked, because `shootdown_va` and `call_mask` callers free frames as soon as it returns; a CPU that never acks becomes a hang that the §10.7 forensics report. An in-guest test in `make test-kernel-smp4` holds IF off on one CPU for 3 s of TSC time while another CPU unmaps a KVA range, and both finish (F011)
+- [ ] a console `write` of any length acks shootdowns while it runs, through §10.6's IF-on window between `sys_write`'s 256-byte chunks. An in-guest test in `make test-kernel-smp4` writes 1 MiB to the console on one CPU while another CPU unmaps a KVA range, and the unmap returns before the write does (F011)
+
+### 10.11 Storage integrity
+A filesystem or block operation that fails or is refused leaves the free count, the directory entries,
+and the data checksums as it found them. The kernel writes to a disk only for a mounted filesystem or a write to its device node, and a block fence
+completes only after every request submitted before it.
+
+- [ ] the production kernel writes to a disk only for a mounted filesystem or a write to its device node: `stamp_vda_gpt` and its call in `part_init::init` build only with `kernel_tests`, and that build stamps only when LBA 0 to 33 and the last 33 sectors read back as zeros, never after a read error. `make test-e2e` boots the production ISO once with a 1 MiB `mkfs-vibefs` image on `vda` and once with a 1 MiB image whose only non-zero bytes are `0x55AA` at offset 510 (the entry-less MBR that `part` also finds on a whole-disk FAT32 volume), and compares each image's SHA-256 before and after. DESIGN §3.3 and §10.5 say in the same commit that only a `kernel_tests` build stamps a GPT, and only on an all-zero `vda` (F003)
+- [ ] a virtio-blk `Barrier` completes only after every request submitted before it has completed, and a `Flush` goes to the device only after every earlier write has completed (virtio 1.2 section 5.2.6.2); requests submitted after a fence wait until it completes, and `cache_init::flush` waits for the writes the writeback thread already has in flight. A host test on the block `Queue` holds one write in flight and finds a `Flush` submitted after it undispatched until that write completes (F043)
+- [ ] the block queue never merges or reorders across a fence: `try_merge` refuses a merge across any queued fence, not only the lowest, `first_fence_seq` returns an `Option` instead of the `u32::MAX` sentinel, sequence numbers are `u64`, and `pick()` never dispatches a write ahead of or together with an older overlapping write. A host test on the `Queue` submits a flush, a write to LBA 100, a flush, and a write to LBA 101, and sees four requests dispatched in that order (F043)
+- [ ] virtio-blk negotiates `F_RO`: a write to a read-only device fails at once with a new `BlockError::ReadOnly`, with no retry, and the device keeps serving reads. The `version1_required_and_no_ro` host test is inverted to expect `F_RO`, and `make test-kernel` gains a boot, limited by `ktest=` to one test, whose `vda` is an unpartitioned `readonly=on` image: one write gets `ReadOnly` and a read after it succeeds (F046)
+- [ ] a virtio-blk request that exhausts its 3 retries fails alone: `finish` calls `fail_rest` only when the device sets `DEVICE_NEEDS_RESET`, and DESIGN §10.3 states the per-request policy in the same commit. `make test-kernel` gains a boot, limited by `ktest=` to one test, whose `vda` has a QEMU `blkdebug` read error on one sector: that sector's read fails and a read of any other sector succeeds (F046)
+- [ ] the virtio-blk probe fails on a device queue size below 3, the descriptor count of one read or write chain, instead of binding a queue on which every request stays `Full`; a host test covers queue sizes 1 and 2 (F046)
+- [ ] a vibefs file ends at or below byte `2^44 - 4096`, so its last block index is at most `u32::MAX - 1`: `Vol::write` refuses a write past it with a new `FileTooBig` error that maps to `EFBIG` (27) in `src/syscall.rs` and SYSCALL.md §2, and `file_init::seek` refuses a vibefs offset past it with `EINVAL`; VIBEFS.md §3 states the limit. Host tests write at `2^44 - 4096` and at `2^44` and get `FileTooBig` with the file unchanged; on `/vibe`, an in-guest test gets `EFBIG` from a `write` after `lseek` to `2^44 - 4096` and `EINVAL` from `lseek` to `2^44` (F008)
+- [ ] vibefs block arithmetic cannot overflow or truncate: `map_block`, `split_replace_extent`, and `truncate` use checked `u64` arithmetic, and vibefs `Node.size` and the in-core inode size that §10.4's `SEEK_END` and `O_APPEND` read are `u64`, so both hold above 4 GiB. An in-guest test writes one byte at offset 5 GiB of a `/vibe` file, and `lseek(fd, 0, SEEK_END)` returns 5 GiB + 1 (F008)
+- [ ] vibefs `commit` calls `mark_meta` on every `DIR_LEAF` and `DIR_INT` block it writes, so the next commit drops them. It counts those blocks against `MAX_META` (48) before the super write and fails with the old super still live, so `mark_meta` cannot fail after the new super is on disk. A host test keeps the free count constant across 200 commits of one file on a 64-block volume and across a remount (F014)
+- [ ] vibefs `commit` writes an alloc-map block that already carries this commit's decrements for `old_meta` and the drop list, and applies the same decrements in memory after the super flush; the old super still names the old alloc block, so a crash before the super write loses nothing. A host test runs 64 sessions of mount, 300-byte overwrite, sync, and unmount on a 64-block image, and free space and `fsck-vibefs` warnings stay constant. The F049 note in VIBEFS.md §6 is removed in the same commit (F049)
+- [ ] a vibefs write that cannot add an extent leaks nothing: `Vol::write` checks extent-slot capacity, a split included, before `alloc_block`, releases the new block through `pending_drop` on any later error, and returns a short count with `size` updated for the chunks already written; `truncate` propagates `free_inode_data` errors instead of discarding them. A host test retries a write at offset 16 KiB 100 times, and free space is unchanged (F051)
+- [ ] vibefs never rewrites corrupt data under a fresh checksum: the overwrite path in `Vol::write` propagates `check_extent`'s error and re-reads the target block after the check, a split or partial truncate recomputes the CRC of each extent it changes, and `Vol::read` verifies an extent before it copies. One host test flips one data byte, then overwrites one byte of that block and gets `Corrupt` from the write and from every later read; another writes block 0 of a 2-block extent and finds block 1 unchanged and every CRC valid (F063)
+- [ ] `vibefs::fsck`, which `fsck-vibefs` runs, adds the VIBEFS.md §11 checks it skips: kind and mode sanity, the inline flag against a size of at most 128, no duplicate names in a directory, regular-file nlink against its dirent count, and the bitmap as well as the refcounts against reachability; it also reports an inode not reachable from the root. A host test plants each defect, a directory moved into its own subtree included, and fsck reports each one; another fills one directory with 57 entries, so the `DIR_INT` path is walked (F059, F067)
+- [ ] a FAT extend that runs out of clusters leaks nothing: `ensure_size` compares `self.free` with the clusters it needs before it allocates any, and on a later error frees the clusters this call linked and restores the old end-of-chain and `*first`. A host test writes far past EOF on an empty file of a nearly full volume, and the free count and the dirent are unchanged after sync and remount (F052)
+- [ ] FAT `dir_reserve` counts the free run that reaches the first `0x00` entry, plus every entry after it to the end of the chain, as free, extends a directory only when that total is shorter than the name needs, and checks the size bound before `alloc_clu`, not after. A host test keeps `free_bytes()` constant across six lowercase creates and a rename in one directory (F053)
+- [ ] FAT long names round-trip UTF-8: `fill_lfn` encodes UTF-8 as UTF-16 with `utf16_len` counting code units, `take_lfn` decodes UTF-16 back to UTF-8, and `check_name` rejects `"`, `*`, `:`, `<`, `>`, `?`, `\`, and `|`. Host tests create `café`, look it up, and find exactly one `café` entry in the listing, and `caf??` does not open it (F054)
+- [ ] FAT and vibefs `rename` lose nothing for any argument pair: when the destination resolves to the source dirent (same `dir_clu` and `dir_off`, as a case-only FAT rename does), FAT skips the unlink and writes the new name before it deletes the old one; moving a directory into its own subtree returns `EINVAL` on both; and a moved FAT directory's `..` names its new parent (cluster 0 for the root). Host tests rename `a` to `A`, `hello.txt` to `Hello.txt`, and `p` to `p/c/q` (F059)
+
+### 10.12 Drivers and devices
+A driver maps only BARs it holds in the device registry's claims table, and none inside usable RAM. A
+partition table yields a child device for each entry it lists, read from the sector that holds it.
+`/dev/random` returns only bytes a hardware source produced, each byte to one reader.
+
+- [ ] every bound driver's BARs are in the claims table: `claim_bars` in `virtio_init.rs` and `virtio_blk_init.rs` calls `Registry::claim` under `REG` and fails the probe on any `ClaimError`, instead of setting `claimed` on the probe copy that `dev_init::bind_all` writes back. The `src/dev.rs` module doc names `dev_init::bind_all` as the kernel's binder. An in-guest test finds each bound device's memory BARs in the claims table, and a second `Registry::claim` of one returns `Already` (F115)
+- [ ] `pci_init::map_mmio` refuses a memory BAR that overlaps a usable-RAM range of the boot memory map before any UC patch or `ioremap`, and returns `None` on a `patch_physmap_uc` error instead of discarding it. An in-guest test passes `map_mmio` a range inside usable RAM and gets `None`, with that physmap leaf still write-back (F115)
+- [ ] `parse_mbr` copies the four primary entries into a local array before `parse_logical` reuses `sector_buf`, so a primary listed after an extended entry is read from the MBR, not from the last EBR. A host test parses an MBR with an extended entry in slot 1 and a primary in slot 2 and gets the primary's start and length (F117)
+- [ ] `part_init` registers a child for every parsed entry up to `MAX_PARTS` (16), not only the 4 names in `NAMES_VDA` and the 5 in `NAMES_RAM`, and `register_table` logs each entry it drops. An in-guest test that registers a table with 6 entries gets 6 child devices (F117)
+- [ ] each virtio-rng pool byte reaches one reader: `rng_take` claims and reads pool bytes under the queue lock that `publish_pool` holds, so a refill cannot reset `POOL_POS` between a claim and its read. An in-guest test in `make test-kernel-smp4` has a `kernel_tests` hook fill each refill with a distinct counter pattern, reads while refills land on another CPU, and sees no pattern byte twice (F121, F140)
+- [ ] `hw_fill` calls `rng_request` whenever the virtio-rng pool is empty and no request is in flight, not only after a non-empty take, so a zero-length completion cannot stop refills (F121)
+- [ ] `RngDriver::probe` refuses a second virtio-rng device once `BOUND` is set, so the second device cannot overwrite `Q` and `ISR_VA` and orphan the first device's queue and vector (F121)
+- [ ] `/dev/random` and `/dev/urandom` return only hardware bytes until the §14.7 CSPRNG: a read returns a short count when virtio-rng and `RDRAND` supply less than it asks for and `EAGAIN` when they supply none. The kernfs xorshift fallback `mix_rng`, seeded from `Vfs.now`, which no kernel code sets, is deleted. It lands before the §10.4 `Vfs` routing makes kernfs `/dev` reachable from userspace. A host test with an `entropy::set_hw_fill` hook that supplies 5 of 64 bytes reads 5, and with a hook that supplies none gets `EAGAIN` (F134)
 
 ---
 
@@ -1104,10 +1304,11 @@ phase. x86_64 came first and stays the reference when the two disagree.
 ### 11.1 Boot
 - [ ] Limine on aarch64 over UEFI, so the boot protocol, memory map, HHDM, and framebuffer handshake are shared with x86 rather than reimplemented
 - [ ] Limine 12.9 or later, pinned by commit in `setup.sh` and the CI cache keys (12.6 deletes the device-tree `memory@` nodes that contradicted the memory map; 12.9 enters at EL1 on CPUs without VHE). aarch64 requests base revision 6, the only aarch64 revision Limine 11 and later accept; x86_64 may stay at revision 3, with `BootInfo` normalizing the difference. The full x86 ladder stays green across the bump
+- [ ] x86_64, before the Limine bump above lands: every CPU clears `CR4.OSXSAVE`, `CR4.PKE`, and `EFER.FFXSR` in `init_cpu` and asserts them clear, and the per-CPU control-register in-guest test checks all three beside SMEP, SMAP, and UMIP. Per-thread FP state is the 512-byte FXSAVE image, and Limine clears other CR4 and EFER bits only from base revision 5 (F130)
 - [ ] the kernel builds for `aarch64-unknown-none-softfloat`, the counterpart of the soft-float x86 target, so kernel code never touches FP or SIMD registers and lazy user FP saving stays sound (Limine enters with `CPACR_EL1` zero, so the first SIMD instruction would trap anyway); user code builds for `aarch64-unknown-none`; `rust-toolchain.toml` and the CI `targets:` inputs gain both
 - [ ] exception level: Limine chooses it, and a registered marker records whether entry was at EL1 or at EL2 with VHE (`HCR_EL2.{E2H,TGE}` set). The kernel never changes exception level itself. KVM without nested virtualization, and TCG and HVF without `virtualization=on`, enter at EL1; HVF gives a guest EL2 from QEMU 11.1 on an M3 or later, which Phase 21's HVF record uses. At EL2 the same kernel runs as a VHE host (§11.3, §11.4). Only an EL2 entry keeps the Phase 21 hypervisor possible on that machine; at EL1 the VM layer reports that EL2 is unavailable
 - [ ] MMU enable: 4 KiB granule, 48-bit VA, TTBR0 for user and TTBR1 for kernel, which maps onto the existing address map split
-- [ ] MAIR and the memory attribute policy: Normal write-back for RAM, Device-nGnRE for MMIO. aarch64 has no MTRRs to override a cacheable alias, so the aarch64 physmap maps only the RAM entries of the Limine memory map and never the holes where the GIC, PL011, virtio-mmio, and PCIe windows sit; it splits to 4 KiB where a 2 MiB block would reach into one. MMIO is reached only through `ioremap` as Device, and a framebuffer outside RAM as Normal non-cacheable. There is no equivalent of the in-place x86 UC patch
+- [ ] MAIR and the memory attribute policy: Normal write-back for RAM, Device-nGnRE for MMIO. aarch64 has no MTRRs to override a cacheable alias, so the aarch64 physmap maps only the RAM entries of the Limine memory map and never the holes where the GIC, PL011, virtio-mmio, and PCIe windows sit; it splits to 4 KiB where a 2 MiB block would reach into one. MMIO is reached only through `ioremap` as Device. A framebuffer inside a PCIe window the device tree names is mapped Normal non-cacheable. Any other framebuffer, such as QEMU's `ramfb` in guest RAM, is mapped Normal write-back, as §16.1 maps virtio-gpu buffers, since the host reads it through a cacheable mapping and a non-cacheable alias can go stale under KVM or HVF. There is no equivalent of the in-place x86 UC patch
 - [ ] the `_start` order table in DESIGN §3.3 gains an aarch64 column
 - [ ] the initrd, built by the same `mkinitrd` from the aarch64 user programs (§11.6), loaded as a Limine module, as §10.5 does on x86_64
 - [ ] early serial on PL011; the same `serial online` first line
@@ -1119,6 +1320,7 @@ phase. x86_64 came first and stays the reference when the two disagree.
 - [ ] break-before-make for any change to a live descriptor's memory type, cacheability, shareability, output address, block size, or Contiguous bit, and for making a non-global (nG) entry global: write an invalid entry, `dsb ishst`, `tlbi ...is`, `dsb ish`, write the new entry, `dsb ishst`, `isb`; permission-only changes, and making a global entry non-global, need only the TLB maintenance above. The portable page-table code is the only writer of live entries and enforces the rule: a store that makes one of those changes to a valid entry is refused unless the entry was made invalid and its TLB maintenance completed first, and host tests cover each refused change. A live block that the change path itself reads or runs from (the physmap holding the page tables, the kernel image) cannot be broken, so such a mapping is built at the granularity it will need rather than split live
 - [ ] ASIDs, so a context switch does not flush the TLB
 - [ ] cache maintenance for DMA, and for code: whenever a user page becomes executable, `dc cvau` over it (omitted when `CTR_EL0.IDC` is set), `dsb ish`, `ic ivau` (omitted when `CTR_EL0.DIC` is set), `dsb ish`, `isb`, which x86 got for free; ELF load is the first caller, and §12.2 adds the fault path
+- [ ] `dma_wmb`, `dma_rmb`, and the §10.3 `dma_mb` are `dmb oshst`, `dmb oshld`, and `dmb osh` on aarch64, as Linux's arm64 DMA barriers are, since a DMA master observes memory in the outer-shareable domain; each helper cites that Arm ARM rule under §11.7's barrier-helper check (F098)
 - [ ] the buddy, heap, and KVA allocators unchanged; that is the point of the split
 
 ### 11.3 Interrupts and time
@@ -1130,16 +1332,24 @@ phase. x86_64 came first and stays the reference when the two disagree.
 - [ ] SGIs as the IPI mechanism: reschedule, call-function, panic halt; no shootdown SGI, because §11.2's broadcast TLB maintenance replaces it
 
 ### 11.4 SMP and per-CPU
-- [ ] PSCI `CPU_ON` for secondary cores, through the conduit the device tree's `/psci` `method` names (`hvc` under a hypervisor at EL1, as with KVM, HVF, and TCG, each without `virtualization=on`; `smc` at EL2 and wherever EL3 firmware provides PSCI, bare metal entered at EL1 included). The core enters at a physical address with the MMU and D-cache off, so before the call the boot CPU cleans to the Point of Coherency (`dc cvac`, `dsb sy`) everything the entry stub reads with its MMU off. When §11.1 recorded EL2 entry, the core arrives at EL2 with its EL2 controls in reset or firmware state, not the VHE state Limine gave the boot CPU (`HCR_EL2.E2H` is clear wherever it is not RES1, as under QEMU's `CPU_ON`), so the stub first writes `HCR_EL2` with the boot CPU's value (`E2H`, `TGE`, `RW`, and `SWIO` set) and an `isb`, then `CPTR_EL2`, `CNTHCTL_EL2`, and `HSTR_EL2` with the boot CPU's values and zero to `CNTVOFF_EL2`, and an `isb`, before any `*_EL1` access or the MMU enable. DESIGN §7.3 gains an aarch64 paragraph listing every step of the stub, and each core prints the §11.1 exception-level marker as it comes online. The stub enables the MMU through a temporary identity map in TTBR0, jumps to the TTBR1 kernel address, then points TTBR0 at the empty user root and invalidates the local TLB, so no identity entry survives. The online mask and the §4.5 rendezvous barrier are shared with x86. The kernel brings cores up itself rather than through Limine's MP feature, since §19.6 offlining needs it
+- [ ] secondary cores start through PSCI `CPU_ON` on the conduit the device tree's `/psci` `method` names: `hvc` under a hypervisor at EL1 (KVM, HVF, and TCG, each without `virtualization=on`), and `smc` at EL2 and wherever EL3 firmware provides PSCI, bare metal entered at EL1 included. The kernel brings cores up itself rather than through Limine's MP feature, since §19.6 offlining needs it
+- [ ] before each `CPU_ON`, the boot CPU cleans to the Point of Coherency (`dc cvac`, then `dsb sy`) everything the entry stub reads, since the core enters at a physical address with the MMU and D-cache off
+- [ ] when §11.1 recorded EL2 entry, the stub writes `HCR_EL2` with the boot CPU's value (`E2H`, `TGE`, `RW`, and `SWIO` set) and an `isb`, then `CPTR_EL2`, `CNTHCTL_EL2`, and `HSTR_EL2` with the boot CPU's values and zero to `CNTVOFF_EL2`, and an `isb`, before any `*_EL1` access or the MMU enable; the core arrives at EL2 with its EL2 controls in reset or firmware state, not the VHE state Limine gave the boot CPU (`HCR_EL2.E2H` is clear wherever it is not RES1, as under QEMU's `CPU_ON`)
+- [ ] the stub enables the MMU through a temporary identity map in TTBR0, jumps to the TTBR1 kernel address, then points TTBR0 at the empty user root and invalidates the local TLB, so no identity entry survives
+- [ ] each core prints the §11.1 exception-level marker as it comes online; the online mask and the §4.5 rendezvous barrier are shared with x86_64
+- [ ] DESIGN §7.3 gains an aarch64 paragraph listing every step of the stub
 - [ ] the per-CPU base, chosen once at boot: `TPIDR_EL1` at EL1, `TPIDR_EL2` at EL2, so that Phase 21 guests own `TPIDR_EL1`; the `per_cpu!` accessors unchanged above the seam
 - [ ] per-CPU GIC redistributor and timer setup on each core
-- [ ] the bring-up failure path: a core that never arrives frees what it was given, as on x86, and a `CPU_ON` that returns `ALREADY_ON` is logged as a bring-up failure for that core
+- [ ] the bring-up failure path: a core that has not arrived by the bring-up timeout stays out of the online mask, and its stack, per-CPU area, and idle TCB are freed only when PSCI `AFFINITY_INFO` reports it `OFF`, and leaked otherwise, since a late core may still start on them; a `CPU_ON` that returns `ALREADY_ON` is logged as a bring-up failure for that core (F032)
+- [ ] each core reads its own parameter block, so a core that arrives late never takes the next core's stack (F032)
+- [ ] the §4.9 call-function slot is safe to reuse on a weakly ordered CPU: the sender stores `func` and `arg`, then publishes the round with `acked.store(0, Release)`, responders load `acked` with `Acquire` before they read the payload, and the redundant `compiler_fence` goes; the slot gets a loom model with a weakened variant (§10.8) and a `tests/litmus/` test (§11.7) (F109)
 - [ ] PSCI `SYSTEM_OFF` and `SYSTEM_RESET` behind the §10.5 `reboot` syscall, through the same conduit
 
 ### 11.5 Devices
 - [ ] the device tree from Limine's DTB response, parsed in the portable half and host-tested like the ACPI parser: CPUs, GIC and ITS, timer, PL011, PL031, PCIe ECAM with its `interrupt-map`, virtio-mmio, `/psci`, and QEMU's `fw-cfg` node, so the §10.2 command line and the `vmcoreinfo` note use the same fw_cfg interface as on x86_64. RAM comes from the Limine memory map, never from `memory@` nodes, which Limine removes. `/chosen` is ignored as the protocol requires, so the console is the PL011 that `/aliases` names `serial0`, or, where the tree has no `/aliases` (QEMU before 9.1), the first node compatible with `arm,pl011` whose status is okay or absent, in tree order; host tests parse checked-in trees dumped with `-machine dumpdtb=` from QEMU 8.2, with and without `secure=on` (whose disabled secure UART comes first), and from a current QEMU, and each picks the UART at `0x9000000`
 - [ ] PCIe through the ECAM the device tree names, so virtio-pci, MSI-X, and the block driver are shared with x86
 - [ ] virtio-mmio transport as well, which QEMU's `virt` offers and Firecracker uses by default
+- [ ] every virtio queue notification writes that virtqueue's index, as virtio 1.2 sections 4.1.5.2 (PCI) and 4.2.2 (MMIO `QueueNotify`) require. Today virtio-blk's `kick()` writes 0 for every queue, and QEMU's virtio-mmio takes the queue from the written value. An in-guest test at `-smp 4` over `virtio-blk-device,num-queues=4` completes I/O submitted from every CPU (F047)
 - [ ] virtio-input for keyboard and pointer, since `virt` has no PS/2 controller; x86 can use it too, and §16.4 builds on it
 - [ ] PL031 for the §2.7 wall clock; `RNDR` where the CPU has it, then virtio-rng, behind `/dev/random`
 - [ ] the framebuffer console over the Limine framebuffer, which on `virt` needs `-device ramfb`: edk2's virtio-gpu-pci driver is Blt-only and leaves no linear framebuffer after `ExitBootServices`; virtio-gpu gets a native driver in §16.2
@@ -1151,7 +1361,7 @@ ship. ACPI on aarch64 comes in §20.7, on QEMU's `virt` with ACPI and on `sbsa-r
 parser and the §20.2 interpreter.
 
 ### 11.6 User mode
-- [ ] `svc` entry and `eret` exit, the user context saved in the same shape the x86 path produces
+- [ ] `svc` entry and `eret` exit, the user context saved in the same shape the x86 path produces; the return to EL0 masks IRQs (`DAIF.I`) before it loads `ELR_EL1` and `SPSR_EL1` and keeps them masked until `eret`, as §10.6 requires of the x86_64 syscall exit
 - [ ] `TTBR0` switch on context switch, skipped when the address space is shared
 - [ ] PAN enabled, with `SCTLR_EL1.SPAN` clear so every exception entry to EL1 sets PAN again, and cleared only inside the §10.6 accessors (SMAP's equivalent); PXN on every user page (SMEP's); the §10.6 user-memory tests pass unchanged, except the x86-only `popf` variant, which has no counterpart because EL0 cannot write PAN; that variant and §10.6's `swapgs` `#DB` and `iretq` `#GP` tests are on the `docs/ARCH.md` skip list
 - [ ] `TPIDR_EL0` for user TLS; the ELF loader's TLS layout handles variant I on aarch64 and variant II on x86_64
@@ -1160,6 +1370,8 @@ parser and the §20.2 interpreter.
 - [ ] `struct stat` for `fstat` in each architecture's Linux layout: x86_64's 144-byte layout with a 64-bit `st_nlink` before `st_mode`, and the 128-byte asm-generic layout on aarch64; a host test pins sizes and field offsets to values copied from the Linux uapi headers, because the dev host may be a Mac
 - [ ] `/sbin/init`, `/bin/sh`, `/bin/tests` from the user crate, built for `aarch64-unknown-none`
 - [ ] user FP and SIMD state saved lazily on first use, since every aarch64 user compiler emits NEON; the kernel itself never touches those registers (§11.1)
+- [ ] aarch64 user FP state across `fork` and `execve` follows the §10.6 x86_64 rule: `fork` saves the parent's live V0-V31, FPCR, and FPSR before it copies them to the child, and `execve` starts the new image with V0-V31 zero and FPCR and FPSR 0; `/bin/tests` checks a NEON register and FPCR across both (F069)
+- [ ] SVE and SME trap at EL0 and EL1: every CPU clears `CPACR_EL1.ZEN` and `CPACR_EL1.SMEN` (which reach `CPTR_EL2` under VHE), since per-thread FP state holds only V0-V31, FPCR, and FPSR; in-guest under `-cpu max`, an SVE instruction at EL0 gets `SIGILL` (F130)
 
 ### 11.7 Build, harness, CI
 - [ ] `ARCH=` in the Makefile and `--arch` in the harness; one code path, two QEMU command lines; the aarch64 line carries `-machine virt,acpi=off,gic-version=3` (without `gic-version` QEMU picks GICv2 for 8 or fewer CPUs, under TCG and HVF alike), `-device ramfb`, `virtio-keyboard-pci`, `virtio-tablet-pci`, `pvpanic-pci`, and `vmcoreinfo`
@@ -1171,6 +1383,7 @@ parser and the §20.2 interpreter.
 - [ ] the timing tests pass under HVF on the dev host, the same fix as the §10.1 KVM leg
 - [ ] the weekly smp-stress job on both architectures
 - [ ] a litmus test under `tests/litmus/` for each barrier idiom the aarch64 port uses: the §2.7 seqlock publish and read, the log ring publish, `SpinMutex` release and acquire, the §10.4 wake inbox hand-off, and the virtio descriptor write before the avail index update. herd7 with Arm's `aarch64.cat` shows the bad outcome forbidden, a twin with the barrier removed shows it allowed, and the x86_64 versions run under `x86tso.cat` to record which barriers x86 elides
+- [ ] the litmus set also covers the idioms the kernel review found unsound on a weakly ordered CPU: the seqlock writer's release fence after the odd bump, written from the instructions the kernel build emits (an `ldaxr`/`stlxr` loop for `fetch_add` without FEAT_LSE); call-function slot reuse across two rounds; and the store-then-load pairs that need the full `dma_mb` (the avail index store before the `avail_event` or `used.flags` load, and the `used_event` store before the `used.idx` reload) (F016, F098, F109)
 - [ ] each barrier helper in the aarch64 port names its litmus test in a doc comment, and `scripts/check_litmus.py` in `make check` fails when a helper names none or names a missing test; an idiom herd7 cannot express (TLB maintenance, the `dsb` before an SGI system-register write) cites the Arm ARM rule instead. `make litmus` runs herd7, pinned and installed from opam on Linux and macOS, on the nightly job beside `make models` (§10.8)
 - [ ] `scripts/check_orderings.py` in `make check`: every `Relaxed`, `Acquire`, `Release`, and `AcqRel` ordering outside test code, fences included, has a one-line comment naming the access it pairs with or saying it pairs with none; the existing sites (376 in `src/` outside ktest files at `2daed69`) are annotated in the same PR
 - [ ] the §10.1 `make debug` script and the §10.7 forensics on aarch64 `virt`. QEMU's `dump-guest-memory -p` walks guest page tables only on x86, so an aarch64 core is addressed physically. The kernel publishes the physical address of its TTBR1 root table in a `VMCOREINFO` note through QEMU's `vmcoreinfo` device (a fw_cfg file). The hostlib core tool walks those tables to read kernel addresses, since heap and KVA stacks are not linear in the physmap, and writes the virtually addressed core `gdb` opens. The tool reads the aarch64 thread, log-ring, and trace layouts, and converts the flight recorder's raw `CNTVCT` timestamps (§11.3) with the `CNTFRQ_EL0` value the kernel records. `make test-forensics` passes under `--arch aarch64`, so a hung aarch64 guest yields the same symbolized per-CPU PCs, log tail, and trace as x86_64
@@ -1199,13 +1412,13 @@ so do TLB maintenance and the §11.2 I-cache maintenance aarch64 needs whenever 
 
 **Exit gate**
 - [ ] `fork` of a process with 100 MB resident completes in under 10 ms, measured by the §12.3 ktest in a 512 MiB, 2-CPU guest under KVM on both architectures
-- [ ] page faults are counted per fault kind (demand-zero, COW, file, stack) and shown by `meminfo`; an in-guest test in which one process first-writes N untouched pages of a fresh anonymous mapping sees its demand-zero count rise by exactly N, on both architectures
-- [ ] `brk` and anonymous `mmap` regions from §10.5 are demand-faulted: touching one page maps one page, verified by the frame count
+- [ ] page faults are counted per fault kind (demand-zero, COW, file, stack), globally and per process; an in-guest test in which one process touches its stack and output buffer, then first-writes N untouched pages of a fresh anonymous mapping, reads its own demand-zero count from the §12.2 per-process counters before and after and finds it risen by exactly N, on both architectures
+- [ ] `brk` and anonymous `mmap` regions from §10.5 are demand-faulted: touching one page maps one page, verified by the §12.1 user-anonymous count rising by exactly one per page touched, not by the global free-frame count (F074)
 - [ ] `read()` into a COW page of a forked child leaves the parent's page unchanged; `read()` into an untouched `brk` page faults it in rather than returning `EFAULT`
 - [ ] the same fault tests pass on x86_64 and aarch64, with the error code and `ESR_EL1` decoded into one fault kind
 - [ ] `mmap` of a file, modify, `msync`, and the change is on disk
 - [ ] the OOM path kills a chosen process with a logged reason rather than panicking or hanging
-- [ ] no frame leaks: after 1000 fork, exec, `mmap`, `munmap`, and exit cycles and the §12.6 exhaustion test, the §12.1 user-anonymous and page-table counts return to baseline, and free plus page-cache frames return to baseline, on both architectures
+- [ ] no frame leaks: after 1000 fork, exec, `mmap`, `munmap`, and exit cycles and the §12.6 exhaustion test, the §12.1 user-anonymous and page-table counts return to baseline, and free plus page-cache frames return to the §10.2 quiescent baseline, on both architectures (F074)
 - [ ] the `debug_mm` build catches a deliberate use after free and a double free of a frame, and the KASAN build a use after free of a heap block, each as an in-guest test that expects the report; both builds pass `make test-kernel` on both architectures on the nightly job
 - [ ] vibefs crash-state enumeration passes every §12.5 workload on the nightly job, over traces recorded from the guest through the page-cache writeback path on both architectures: every flush-epoch subset up to eight writes and every torn superblock recovers to a committed generation at or after the last acknowledged `fsync`
 - [ ] tag `phase-12` and release `v0.12.0`
@@ -1214,11 +1427,15 @@ so do TLB maintenance and the §11.2 I-cache maintenance aarch64 needs whenever 
 - [ ] a `Frame` array indexed by physical frame number, allocated at boot from a known-size region
 - [ ] per-frame: refcount, flags, owner, and a list link for LRU; §19.8 adds a pin count
 - [ ] `get_frame` / `put_frame` with the last reference freeing to the buddy allocator
+- [ ] `Buddy::deallocate` runs in O(`MAX_ORDER`): its double-free check and buddy-merge test read a free bit and order kept per frame in the `Frame` array instead of walking the free lists (`covered_by_free_block`, `in_free_list`), and teardown frees its frames after `PT` drops (§12.3); a host test counts free-list nodes visited per `deallocate` and finds the same count for 128 MiB and 8 GiB pools (F029)
+- [ ] teardown, `munmap`, and COW release each user leaf's frame by its region's backing: anonymous and COW frames through `put_frame`, page-cache frames through the cache's reference, and a frame a kernel object owns (the shared zero page, and later the vDSO pages, packet rings, and dumb buffers) by dropping only the mapping. Today `teardown_pool` and `unmap_free` free every leaf to the buddy. A host test tears down an address space holding an anonymous, a COW-shared, a page-cache, and a zero-page leaf and checks each frame's final refcount
 - [ ] reverse mapping from a frame to the PTEs referencing it, which reclaiming a mapped page-cache page requires (§12.6) and swap reuses
 - [ ] accounting by category: kernel heap, page tables, user anonymous, page cache, free; §19.9 adds slab
 - [ ] a `debug_mm` build: freed frames and heap blocks filled with a poison pattern checked on reallocation; freed frames unmapped from the physmap, so a use after free of a frame faults at the access instead of corrupting the next owner; a second free of a frame or heap block panics, naming the earlier free's caller. The buddy keeps its free-list links inside free frames (DESIGN §2.4), so in this build they move into the `Frame` array above. Frames are unmapped and remapped outside the buddy lock, since the page-table lock is never taken under it (DESIGN §2.1). This build maps the physmap at 4 KiB from boot, since splitting a live block is §11.2 break-before-make on the mapping the page-table code reads through
+- [ ] in the `debug_mm` build, frames freed during a page walk are unmapped from the physmap only after `PT` drops and the §12.3 invalidation completes, with one batched physmap shootdown per collection, since the physmap unmap takes `PT`, which `addr_space_init::unmap` and `teardown` hold while they free frames today
 - [ ] a KASAN build (moved from §18.4): `-Zsanitizer=kernel-address`, which both kernel targets support, with a shadow map over the heap, KVA, and kernel stacks, red zones, and a free quarantine; memory-intrinsic calls are range-checked against the shadow, since `core` and `compiler_builtins` come prebuilt and uninstrumented. The pinned nightly refuses to link a `-Zsanitizer` crate against that prebuilt `core` (an ABI-mismatch error), so this build passes `-Cunsafe-allow-abi-mismatch=sanitizer`; `-Zbuild-std` stays deleted (B2)
 - [ ] both builds are named §10.2 variants and run `make test-kernel` on both architectures on the nightly job from this phase on, because frame refcounts, COW (§12.3), and reclaim through the reverse map (§12.6) are where use after free enters
+- [ ] the `Frame` array and the KASAN shadow are mapped in kernel-half PML4 slots that exist before the first `AddressSpace`, since `AddressSpace::new` copies PML4 entries 256-511 once and a slot added later is missing from every existing user address space (F101)
 
 ### 12.2 Demand paging
 - [ ] a real page-fault handler decoding the fault: present, write, user, reserved, instruction fetch (the x86 error code, `ESR_EL1` on aarch64)
@@ -1227,20 +1444,24 @@ so do TLB maintenance and the §11.2 I-cache maintenance aarch64 needs whenever 
 - [ ] anonymous regions faulting in a zero page; a shared read-only zero page until first write
 - [ ] file-backed regions faulting in from the page cache
 - [ ] ELF `PT_LOAD` segments become file-backed private regions, so the §10.6 fill API no longer copies segment bytes or zero-fills whole bss pages at exec
+- [ ] `PT_LOAD` layouts that a page-cache mapping cannot express are loaded by copy: the page holding the end of `p_filesz` is a private copy zeroed past it, and a segment whose `p_offset` and `p_vaddr` differ modulo 4096, or a page two `PT_LOAD`s share, becomes an anonymous private page with the union of the segments' permissions; an in-guest test execs an ELF whose RX and RW `PT_LOAD`s share a page (F031)
 - [ ] stack regions growing down on fault, up to a limit
 - [ ] a fault that resolves to no region is `SIGSEGV` for user, panic for kernel
 - [ ] a fault inside a §10.6 accessor runs the region fault handler before the exception-table fixup, so a copy into an untouched page demand-faults, and a copy into a COW page breaks COW, as a user store would; only an unresolvable fault becomes `EFAULT`
-- [ ] the §10.6 fill API resolves each page through the region fault handler with write intent before writing, so exec's stack, TLS, and bss-tail writes never land in a page-cache or COW-shared frame
+- [ ] the §10.6 fill API resolves each page through the region fault handler with write intent before writing, so exec's stack, TLS, and bss-tail writes never land in a page-cache or COW-shared frame; it holds a `get_frame` reference on each page from the resolve until its write completes, so §12.6 reclaim cannot free the frame in between
 - [ ] installing an executable user PTE (a file-backed or anonymous fault, a §12.3 COW copy, `mprotect` adding `PROT_EXEC` in §12.4) runs the §11.2 I-cache maintenance first on aarch64, and nothing on x86_64
-- [ ] per-process and global fault counters by fault kind, shown by `meminfo`
-- [ ] the fault path must be reentrant-safe: it can block on I/O, so it cannot hold the page table lock across a read
+- [ ] per-process and global fault counters by fault kind, both reported through syscall 500 until §13.9's procfs, where each process's is in `/proc/<pid>/stat`
+- [ ] the fault path may block on I/O but holds no spinlock and keeps interrupts on across it: it looks the region up, drops every spinlock before the read, then retakes them, looks the region up again, and installs the page only if the region still covers the address with the same backing and the PTE is still empty, otherwise it drops the page and retries; a kernel-mode fault outside a §10.6 accessor or the fill API still panics
 
 ### 12.3 Copy on write
 - [ ] `fork` marks every writable private mapping read-only in both address spaces and increments frame refcounts; it no longer calls the §10.6 fill API
 - [ ] a write fault on a COW frame with refcount 1 just makes it writable again; with refcount above 1 it copies; §19.8 refines this for pinned pages
-- [ ] shared mappings excluded correctly, since getting this wrong silently breaks shared memory
-- [ ] a TLB shootdown on the write-protect step, which is the expensive part and worth measuring
-- [ ] in-guest: fork, write in the child, assert the parent's memory is unchanged; the same with the child's write done by a `read()` syscall into the page; assert the frame count matches expectations at each step
+- [ ] `fork` leaves `MAP_SHARED` mappings writable in both address spaces and shares their frames without COW; in-guest, a write through a shared mapping in the child is visible to the parent
+- [ ] each `AddressSpace` records the CPUs whose CR3 (TTBR0 on aarch64) holds its root: every root load sets the CPU's bit in the space it loads and clears it in the space it leaves, in `switch_cr3_for` and in the `addr_space_init::load_cr3_u64` and `load_kernel_cr3` calls that `execve` and `finish_exit` make. Today `addr_space_init::shootdown_user` invalidates only on the CPU that runs the call, and only when that CPU has the space loaded
+- [ ] every CPU in that set has invalidated and acked a user-mapping change before any frame it dropped is freed: an unmap, a permission reduction, the COW write-protect, a `MAP_FIXED` replacement, and a §12.6 reverse-map unmap each collect their dropped frames, invalidate locally, send the §4.10 shootdown (broadcast `tlbi ...is` on aarch64, §11.2), wait for the acks, and then call `put_frame`; `unmap_free` and `teardown_pool` stop freeing frames inside the page walk
+- [ ] in-guest at `-smp 2`: a user process on CPU 0 reads one page in a loop while a kernel thread on CPU 1 unmaps that page through the reverse map, allocates the frame again, and fills it with a pattern; the reader faults and never reads the pattern
+- [ ] the write-protect step's shootdown cost recorded in DESIGN §8.6 beside the `fork` numbers below
+- [ ] in-guest: fork, write in the child, assert the parent's memory is unchanged; the same with the child's write done by a `read()` syscall into the page; each write by the child raises the §12.1 user-anonymous count by exactly one (F074)
 - [ ] a ktest that times `fork` of a process with 100 MB resident against the kernel's monotonic clock and fails at 10 ms or more; it skips with a reason unless the guest has at least 512 MiB and the §10.2 command line carries `accel=kvm` or `accel=hvf`, which the harness sets from the accelerator it launched (DESIGN §3.2), so the per-push TCG tiers skip it. The §10.1 KVM leg runs it on x86_64 as its own step with `VIBEOS_MEM=512M` and `VIBEOS_KTEST` naming it, and the harness fails a run in which a test that `VIBEOS_KTEST` names without a glob skips or does not run, so a skip turns the nightly job red; the aarch64 number is taken the same way under HVF on the dev host as a §10.9 record and recorded in DESIGN §8.6
 - [ ] the COW break decision (read the refcount, copy or reuse, swap the PTE, drop the old reference) in the portable half with a loom model (§10.8): parent and child write-faulting the same frame on two CPUs, and a fault racing §12.6 reclaim unmapping the frame through the reverse map; a mutant that reads the refcount outside the page-table lock must fail the model
 - [ ] the eager-copy `fork` of the 100 MB process measured before this subsection replaces it, and demand-zero, COW-break, and file-fault latency after, in the same guests as the ktest above, recorded in DESIGN §8.6 per architecture; §19.3's page-fault microbenchmark starts from these numbers
@@ -1250,6 +1471,7 @@ so do TLB maintenance and the §11.2 I-cache maintenance aarch64 needs whenever 
 - [ ] anonymous private, anonymous shared, file private, file shared
 - [ ] `MAP_FIXED` handling, including replacing existing mappings
 - [ ] region splitting and merging on partial unmap and protect
+- [ ] on x86_64 a non-present user PTE that keeps a frame number, such as a `PROT_NONE` page, stores it inverted, as Linux does against L1TF (CVE-2018-3620), so no non-present PTE names cacheable RAM; a host test decodes each non-present encoding (F133)
 - [ ] a VA space allocator for the user half with a bottom-up hint and a gap search, below the §10.6 `USER_MAP_END`
 - [ ] dirty page writeback for shared file mappings
 - [ ] `mlock` for pages that must not be evicted
@@ -1257,6 +1479,9 @@ so do TLB maintenance and the §11.2 I-cache maintenance aarch64 needs whenever 
 ### 12.5 Unified page cache
 - [ ] one cache serving file reads, `mmap`, and the block layer, rather than a block cache and a page cache disagreeing
 - [ ] radix tree or B-tree per inode mapping offset to frame
+- [ ] block-cache slots carry a FILLING state (key visible, readers wait on a per-slot wait queue that replaces the yield spin) and a WRITEBACK state (readable, no second write to that LBA until the first completes); a dirty victim keeps its old key until its writeback completes, and §10.11's `flush` wait for in-flight writeback becomes a wait on that device's WRITEBACK slots; a host test interleaves `plan`, `install`, and writeback from two callers and finds no duplicate key, no stale read, and no device flush ahead of an in-flight write (F015)
+- [ ] each block `Queue` carries its device's transfer limits (`max_bytes` and `max_discard_sectors`; `BOUNCE` and `MAX_DISCARD` for vda), `merge_into` refuses a merge past either, and `submit` returns `Inval` for a single request past them; a host test queues three adjacent 4 KiB writes against an 8 KiB limit and gets two requests that both succeed (F119)
+- [ ] async block submission owns what it borrows: `block_init::submit` and `virtio_blk_init::submit` take an owned buffer (a page-cache frame reference held until completion) and a pinned, reference-counted `IoWaiter` instead of `ptr: usize` and `&IoWaiter`, and `Seg.ptr` and `Request.waiters` are private, so a submitter that returns early cannot leave a completion aimed at its stack frame; a `compile_fail` doctest in `block.rs` shows a borrowed stack buffer refused (F042)
 - [ ] writeback threads with a dirty limit and per-inode ordering
 - [ ] one LRU with second-chance aging, which §12.6 reclaims from; §19.10 splits it into an active and an inactive list
 - [ ] readahead driven by detected access patterns
@@ -1264,15 +1489,19 @@ so do TLB maintenance and the §11.2 I-cache maintenance aarch64 needs whenever 
 - [ ] a volatile-cache block device: an NBD server in hostlib, advertising flush so QEMU forwards every guest flush, serves the guest's virtio-blk disk with `write-cache=on`, so every flush is the guest's own, and records every write and flush the page cache and writeback threads issue. Killing QEMU, as the §8.5 test does, loses no write the host already received, so only this device can catch a missing flush. It lands before the writeback threads replace today's write path
 - [ ] a crash-state enumerator on the host rebuilds the disk from a trace: after each flush epoch, the durable prefix plus every subset of that epoch's writes up to eight, a seeded sample of larger subsets, and every superblock write torn at a 512-byte sector boundary, so each state costs a host mount, not a boot; the host tests of the portable volume run the same enumeration beside `CrashDisk`'s suffix drop
 - [ ] the oracle checks content, not only `fsck`: the mounted tree equals the tree of a committed generation, and that generation is at or after the last `fsync` or `sync` that returned before the crash point
+- [ ] vibefs `commit` keeps the new generation and roots in locals until the super flush succeeds, writes the slot opposite the live on-disk super, and on error releases the blocks the transaction allocated; a host test with a `Disk` that fails one write or flush at each commit step retries the commit, tears the retry's super write, and mounts a committed generation every time (F050)
+- [ ] vibefs snapshot delete, which the workloads below use and v1 lacks (`Vol::snapshot` only creates): it walks the snapshot's inode and directory trees, drops one reference per reachable block, and frees the snapshot slot; a host test overwrites blocks under a snapshot, deletes it, and finds free space back at its value before the snapshot (F067)
 - [ ] workloads: `crash_at_each_write_is_consistent`'s script; a temporary file written, `fsync`ed, and `rename`d over the original, as editors and compilers save; `fsync` of a file and then of its directory; a snapshot created and deleted mid-workload. In this phase they run as in-guest tests through `Vfs`, whose `rename` exists and which gains a per-inode `fsync` with the writeback threads above, since the `fsync`, `renameat`, and `sync` syscalls are §13.9's
 - [ ] FAT enumerated against its weaker oracle: `fsck.fat -n` finds no directory entry pointing at a free cluster and no cross-linked chain
 
 ### 12.6 Reclaim and OOM
 - [ ] direct reclaim when an allocation fails: drop clean page-cache pages, write dirty ones back and then drop them, and unmap mapped pages through §12.1's reverse map; §19.10 adds watermarks and a background thread
 - [ ] a reserve pool for allocations that must succeed to make progress, since reclaim itself needs memory
+- [ ] direct reclaim runs only from an allocation that may sleep: its entry asserts that the §4.7 per-CPU `HELD` mask is empty and interrupts are on, and an allocation made with a spinlock held or interrupts off draws on the reserve pool and fails instead of reclaiming
 - [ ] an OOM killer scoring by resident size, logging the score table before killing; §19.10 adds nice and a per-process adjustment
 - [ ] a kernel allocation failure that cannot be resolved panics with the full memory state, rather than returning an error nobody checks
-- [ ] in-guest: allocate to exhaustion and assert the system survives, with the expected process killed
+- [ ] a pending `SIGKILL` ends a process that only touches memory: §10.6's check on every return to ring 3 also runs on every return to EL0; the page-fault handler checks for it before it allocates; and a kill aimed at a thread running on another CPU sends that CPU the §4.9 reschedule IPI (an SGI on aarch64); §13.8 extends this path to handled signals
+- [ ] in-guest: allocate to exhaustion and assert the system survives, with the expected process killed; the victim makes no syscall after its first `mmap` and only touches memory
 
 ### 12.7 Stretch: swap
 Nothing before Phase 19 needs swap; a self-hosting build is given RAM, not swap. Not gating.
@@ -1280,6 +1509,7 @@ Nothing before Phase 19 needs swap; a self-hosting build is given RAM, not swap.
 - [ ] allocate well past physical memory with swap enabled and the workload completes
 - [ ] a swap device or file with a slot allocator
 - [ ] page-out: pick a victim via reclaim, write it, replace the PTE with a swap entry, free the frame
+- [ ] on x86_64 a swap-entry PTE keeps its present bit clear and stores the slot offset inverted in its address bits, as Linux does, so no non-present PTE names cacheable RAM (L1TF, CVE-2018-3620) (F133)
 - [ ] page-in on fault from the swap entry
 - [ ] reverse mapping used to find every PTE referencing a shared frame being swapped
 - [ ] readahead on swap-in, since thrashing one page at a time is unusable
@@ -1303,11 +1533,12 @@ its asm-generic name, which both architectures have; the legacy x86_64 names are
 **Exit gate**
 - [ ] `ls | grep foo | wc -l`, typed into the §13.7 `/bin/sh` with the §10.5 utilities, works with correct exit statuses and no deadlock on a full pipe
 - [ ] ctrl+C kills the foreground job and leaves the shell alive; ctrl+Z stops it and `fg` resumes it
+- [ ] ctrl+C kills, within 1 s, a foreground job that makes no syscalls (a user-crate program spinning in a loop), on both architectures
 - [ ] a user signal handler runs on a proper user stack and returns correctly through `sigreturn`, a crafted frame cannot leave user mode or crash the kernel, and a process killed by `SIGSEGV` leaves a core that host `gdb` backtraces to the faulting function (§13.8)
-- [ ] `ppoll` on 100 descriptors wakes only for the ready ones, verified by a syscall counter
+- [ ] `ppoll` on the read ends of 100 pipes, one of which another thread writes after 100 ms, returns 1 with `revents` set on that descriptor only, and `getrusage(RUSAGE_THREAD)` shows `ru_nvcsw` risen by exactly one across the call (F150)
 - [ ] four processes sharing one `memfd_create` mapping each take the user crate's process-shared futex mutex in it (§13.1) and increment a counter in the mapping 10,000 times; the final count is 40,000, and a process blocked on the mutex for 1 s while another holds it accrues under 10 ms of CPU time across the lock call, by `clock_gettime(CLOCK_THREAD_CPUTIME_ID)`
 - [ ] a Unix domain socket carries a passed file descriptor between processes
-- [ ] sixteen user threads in one process contend a futex mutex from the user crate: the count is right, `exit_group` tears all of them down while some are blocked in `read`, and the frame count returns to baseline
+- [ ] sixteen user threads in one process contend a futex mutex from the user crate: the count is right, `exit_group` tears all of them down while some are blocked in `read`, and the §12.1 user-anonymous and page-table counts return to baseline (F074)
 - [ ] `ps` and `/proc/<pid>/*` come from the process table; syscall 500 is gone
 - [ ] unmodified static `busybox` and `toybox` from the §13.11 corpus pass the differential runner on both architectures, busybox's own test suite passes minus its checked-in expected-failure list, and the pipeline and job-control lines above pass again with that `busybox` as `/bin/sh` and the utilities
 - [ ] on the nightly job, on both architectures: 10,000 generated syscall sequences agree with Linux on every return value, errno, and resulting file tree, on vibefs and on tmpfs, and the §13.11 LTP subset passes except its checked-in expected-failure list; every accepted difference is in `docs/LINUX.md`
@@ -1318,11 +1549,20 @@ its asm-generic name, which both architectures have; the legacy x86_64 names are
 ### 13.1 Threads
 - [ ] `clone` with `CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID`; a plain fork is `clone(SIGCHLD)` on both architectures (§11.6), and x86_64 keeps the `fork` number as an entry point onto it. `CLONE_SYSVSEM` is accepted as a no-op and `CLONE_DETACHED` ignored, since musl's `pthread_create` passes both; `CLONE_VM | CLONE_VFORK` gets vfork semantics, since musl's `posix_spawn`, `system`, and `popen` use it
 - [ ] `exit` ends a thread and `exit_group` ends the process; the last thread out releases the address space
-- [ ] TLS through `clone`'s `tls` argument (the fifth argument on x86_64, the fourth on aarch64): `FS_BASE` on x86_64 and `TPIDR_EL0` on aarch64, plus `arch_prctl(ARCH_SET_FS)` for musl on x86_64
+- [ ] a process holds the list of its threads instead of the one `tid` in `Proc` today, and `getpid` returns the thread-group id in every thread (F077)
+- [ ] each `clone` flag shares the object Linux shares, and without the flag the child gets a copy: `CLONE_VM` the address space, `CLONE_FS` the working directory, root, and umask, `CLONE_FILES` the descriptor table, and `CLONE_SIGHAND` the handler table; in-guest, a `chdir` in a `CLONE_FS` thread changes its sibling's relative lookups, and one in a `fork` child does not
+- [ ] an address space is reached through a scoped guard over a reference-counted handle (`with_current_space(|as| ..)`), never a `&'static AddressSpace`: `current_space`, `space_of`, `current_as`, `peek_user_as`, `set_user_as`, `CURRENT_AS`, and the pid-0 fallback are gone (§10.6 already deleted `bind_current` and `Proc.borrowed`), and the last thread out drops the last reference; in-guest, one thread calls `munmap` and then `exit_group` while a sibling is inside a `read()` copy, and the copy completes or fails with `EFAULT` with no kernel fault (F019)
+- [ ] a per-address-space reader-writer lock guards the region table and page tables: `mmap`, `munmap`, and `mprotect` take it for writing and the fault path for reading. Today the region table is a fixed array with no lock of its own, reached only under the global `PT` spinlock
+- [ ] `execve` in a multithreaded process ends the other threads before it releases the old address space, as Linux's `de_thread` does; in-guest, one thread of a four-thread process calls `execve` while the other three loop in `read()`, and the kernel stays up
+- [ ] `finish_exit` zeroes the exiting thread's `as_cr3` (`thread_init::set_pid_cr3(tid, 0, 0)`) before it frees the PML4, as `execve` already sets it to the new root before it frees the old one, so `switch_cr3_for` never loads a freed root once exit paths are preemptible or threads share an address space; the `debug_mm` build asserts in `switch_cr3_for` that the root belongs to a live `AddressSpace` (F106)
+- [ ] TLS through `clone`'s `tls` argument (the fifth argument on x86_64, the fourth on aarch64): `FS_BASE` on x86_64 and `TPIDR_EL0` on aarch64, plus `arch_prctl(ARCH_SET_FS)` for musl on x86_64; `arch_prctl(ARCH_SET_FS)` and `clone` refuse a base at or above `USER_MAP_END` with `EPERM`, as Linux refuses one at or above `TASK_SIZE_MAX`, so `wrmsr IA32_FS_BASE` never takes a non-canonical value
+- [ ] the user TLS base is per-thread state: `on_switch` saves `FS_BASE` (`TPIDR_EL0` on aarch64) for an outgoing user thread and loads it for an incoming one, `fork` and a `clone` without `CLONE_SETTLS` copy the caller's saved value rather than the live register, `execve` sets the new image's value, and `force_kernel()`'s selector load no longer leaves the next user thread at base 0; in-guest on both architectures, a `PT_TLS` process forks a child that exits, then reads back a TLS variable (F022)
 - [ ] `set_tid_address` and the clear-child-tid wake, which is what `pthread_join` stands on
 - [ ] a per-thread kernel stack, signal mask, and pending set; process-directed signals delivered to one eligible thread
 - [ ] `gettid`, `tgkill`
-- [ ] thread-group exit while other threads are in a blocking syscall, which is the case everyone gets wrong
+- [ ] `exit_group` while other threads of the group are blocked in a syscall: each blocked thread is woken, does not return to user mode, and exits, and the last one out releases the address space; in-guest, with threads blocked in `read` and in a §13.5 futex wait
+- [ ] an open file description shared through threads, `fork`, and `dup` loses no update: each `read`, `write`, and `lseek` holds the description's sleeping lock across its I/O and its offset and size update, `refs` is never written back from a snapshot, each slot carries a generation that write-back checks, and a non-`O_EXCL` create that finds the name opens it; in-guest, four threads each write 10,000 fixed-size records through one descriptor, and the file holds 40,000 intact records (F055)
+- [ ] `spawn_user` gives a fork child or cloned thread `CpuAffinity::Any`, so §4.8's placement puts it on an online CPU instead of pinning it to its creator's CPU, which today keeps all user work on CPU 0. §13.10's affinity mask later narrows the choice. The gate's sixteen-thread test reads `getcpu` in each thread and finds at least two CPUs
 - [ ] the user crate gains `thread::spawn`, `join`, and a futex-backed mutex, private by default, with a process-shared mode that uses non-private futex operations (§13.5's shared keys); the gate's two counter tests use it
 - [ ] in-guest: the counter test from the gate; create and join a thousand threads, no more than 64 alive at once, within the Phase 10 thread limit; `exit_group` from a non-main thread
 
@@ -1331,7 +1571,7 @@ its asm-generic name, which both architectures have; the legacy x86_64 names are
 - [ ] read end closed produces `SIGPIPE` and `EPIPE`; write end closed produces EOF
 - [ ] `pipe2` with `O_CLOEXEC` and `O_NONBLOCK`, and `pipe` as its x86_64 entry point
 - [ ] named pipes through the VFS, created with §13.9's `mknodat`
-- [ ] `PIPE_BUF` atomicity guarantee actually honored
+- [ ] a pipe write of at most `PIPE_BUF` (4096) bytes is never interleaved with another writer's; in-guest, several writers of 4096-byte records, and the reader checks every record whole
 - [ ] in-guest: fill the pipe, assert the writer blocks, drain, assert it proceeds
 
 ### 13.3 Unix domain sockets
@@ -1348,6 +1588,8 @@ its asm-generic name, which both architectures have; the legacy x86_64 names are
 - [ ] correct refcounting so a region survives until the last mapper unmaps
 
 ### 13.5 futex
+The §13.12 loom model and the in-guest tests below gate futex correctness; no futex benchmark gates this phase.
+
 - [ ] `FUTEX_WAIT` and `FUTEX_WAKE` on a user address, with a hash table of wait queues
 - [ ] private futexes keyed by (address space, virtual address); shared futexes by (backing object, offset), which is the inode for `shm_open` and `memfd_create`. Never by physical frame: COW, page migration, and swap all move a frame under a sleeping waiter, and after `fork` unrelated processes share frames
 - [ ] requeue and `WAKE_OP` for condition variables
@@ -1355,7 +1597,6 @@ its asm-generic name, which both architectures have; the legacy x86_64 names are
 - [ ] the wait queue can record a lock owner, so §19.4 adds priority inheritance without changing this interface
 - [ ] a timeout on every wait
 - [ ] in-guest: a forked parent and child wait and wake on the same private address without seeing each other's wakes; two processes mapping one `shm_open` object do see them; a waiter survives a COW break on its page; the gate's cross-process mutex test
-- [ ] this is the primitive userspace threading stands on; correctness matters more than speed here
 
 ### 13.6 Event notification
 - [ ] `ppoll`, and `poll` as its x86_64 entry point
@@ -1376,6 +1617,7 @@ its asm-generic name, which both architectures have; the legacy x86_64 names are
 - [ ] control character handling generating signals: ctrl+C, ctrl+Z, ctrl+\
 - [ ] sessions, process groups, controlling terminal, foreground group: `setsid`, `setpgid`, `getpgid`, `getsid`, `TIOCSPGRP` and `TIOCGPGRP`
 - [ ] `wait4` with `WUNTRACED` and `WCONTINUED`, and `waitid`
+- [ ] `kill` and `wait4` take Linux's process-group arguments: both read `pid` as a sign-extended 32-bit `pid_t`; `kill(pid, 0)` checks existence and permission; `kill(0, s)`, `kill(-pgid, s)`, and `kill(-1, s)` signal the caller's group, that group, and every process the caller may signal except pid 1 and the caller; `wait4(0)` and `wait4(-pgid)` wait on a group; `wait4` returns `EINVAL` for an option bit outside `WNOHANG`, `WUNTRACED`, `WCONTINUED`, `__WALL`, `__WCLONE`, and `__WNOTHREAD`, and fills `*rusage` when the pointer is not null (F149)
 - [ ] `SIGTTIN` and `SIGTTOU` for background access
 - [ ] pseudo-terminals (`/dev/ptmx` and `/dev/pts`), which the terminal emulator in phase 16 and `sshd` in phase 15 require
 - [ ] window size and `SIGWINCH`
@@ -1383,10 +1625,13 @@ its asm-generic name, which both architectures have; the legacy x86_64 names are
 
 ### 13.8 Full signals
 - [ ] the full signal set with correct default actions
+- [ ] stop and continue cannot lose a wakeup: `apply_pending` checks `state == Stopped` and calls `begin_wait` on `stop_wq` inside one `with_sched(|s| TABLE.with(..))` section, then schedules and loops until the process is continued or killed, as `sys_wait4` does, and the unlocked `TABLE.as_ptr()` read goes; an in-guest test sends `SIGSTOP` then `SIGCONT` 10,000 times to a process running on another CPU, and after each pair the target runs again (F033)
 - [ ] `rt_sigaction` with `SA_RESTART`, `SA_SIGINFO`, and an alternate stack (`sigaltstack`); the kernel `struct sigaction` per architecture as Linux defines it
 - [ ] `rt_sigaction` honors `SA_RESTORER`. On x86_64 it is the only return path: a handler installed without it is not run, and the process gets `SIGSEGV`, as on Linux; nothing is ever written to the NX stack as code. On aarch64, a handler without a restorer returns through a read-only, user-executable trampoline page the kernel maps into every process at `exec`, so glibc-static binaries work; the page holds Linux's `mov x8, #139` and `svc #0`, the pair libgcc's and LLVM's unwinders match to step through a signal frame, and §13.10's vDSO exports it as `__kernel_rt_sigreturn`. The user crate gains `sigaction`, `sigprocmask`, and a restorer stub per architecture, which the gate's handler test uses
 - [ ] `rt_sigprocmask`, `rt_sigpending`, `rt_sigsuspend`, `rt_sigtimedwait`
-- [ ] delivery on the return to userspace: build a Linux `rt_sigframe` on the user stack (`siginfo`, `ucontext` with `uc_mcontext`, and the FP state), run the handler, return through `rt_sigreturn`; the `ucontext` layout per architecture is pinned by a host test, since musl reads it
+- [ ] handled signals take the §12.6 `SIGKILL` path: a signal is acted on at syscall exit and at interrupt and exception exit to ring 3 or EL0, a signal sent to a thread running on another CPU sends that CPU a reschedule IPI (an SGI on aarch64), and a thread in an interruptible wait is woken
+- [ ] delivery builds a Linux `rt_sigframe` on the user stack (`siginfo`, `ucontext` with `uc_mcontext`, and the FP state), runs the handler, and returns through `rt_sigreturn`; the `ucontext` layout per architecture is pinned by a host test, since musl reads it
+- [ ] SYSCALL.md §1 records the x86_64 user FP format this phase uses: the 512-byte FXSAVE image with `CR4.OSXSAVE` clear (§11.1), or XSAVE with XCR0 limited to x87, SSE, and AVX and the per-thread area sized from CPUID leaf 0Dh; the `XSTATE_BV` and `XCOMP_BV` checks below and §17.4's `NT_X86_XSTATE` apply only under XSAVE, and under FXSAVE `NT_X86_XSTATE` returns `ENODEV`, as Linux does on a CPU without XSAVE (F130)
 - [ ] x86_64 frame: on the current stack it begins at least 128 bytes below the interrupted RSP (the red zone), on the alternate stack at that stack's top, and RSP+8 is 16-byte aligned at handler entry. The frame carries the FPU image, with lazily held live state saved first. aarch64 frame: the FPSIMD record, SP 16-byte aligned
 - [ ] signal delivery (the `sa_handler` and `sa_restorer` addresses) and `rt_sigreturn` (the whole restored frame) validate the user context before the return to userspace. On x86_64: RIP canonical and below `USER_MAP_END`, CS and SS forced to the user selectors, RFLAGS masked to user-settable bits (never IOPL, NT, VM, or RF from the frame), MXCSR masked to `MXCSR_MASK`, and in the XSAVE header `XSTATE_BV` a subset of the user features in XCR0, `XCOMP_BV` zero, and the reserved bytes zero, as Linux's `validate_user_xstate_header` requires, before the image reaches `fxrstor`/`xrstor`; a fault on that restore, wherever the kernel performs it, goes through an exception-table fixup that loads the initial FP state and delivers `SIGSEGV`. On aarch64: SPSR forced to EL0t, with only NZCV and the other user-settable bits taken from the frame
 - [ ] in-guest, per architecture: `rt_sigreturn` with a non-canonical PC, kernel selectors or EL1 mode, IOPL set, reserved MXCSR bits, or an XSAVE image with an `XSTATE_BV` bit outside XCR0, a nonzero `XCOMP_BV`, or a nonzero reserved header byte gets `SIGSEGV` and the kernel stays up; a handler that interrupts a leaf function holding live data in its red zone leaves that data intact
@@ -1394,15 +1639,24 @@ its asm-generic name, which both architectures have; the legacy x86_64 names are
 - [ ] interaction with blocking syscalls: interrupt with `EINTR` or restart, per `SA_RESTART`
 - [ ] per-thread signal masks with process-directed signals delivered to an eligible thread
 - [ ] the `core` default action writes an ELF core in Linux's per-architecture note layouts: one `NT_PRSTATUS` per thread, `NT_PRFPREG`, `NT_PRPSINFO`, `NT_SIGINFO`, `NT_AUXV`, and `NT_FILE`, plus the writable and anonymous mappings, to the path a `core_pattern=` option on the §10.2 kernel command line names (`%p` and `%e` expanded; `core` in the working directory when absent, as on Linux), under `RLIMIT_CORE`. A process §13.9 marks not dumpable leaves none. Host `gdb` and `lldb` open it against the binary
-- [ ] utest runs attach a scratch FAT disk and set `core_pattern=` to a path on it; after QEMU exits the harness copies each core off it and prints a host backtrace beside the failing utest (`gdb-multiarch` in CI, `lldb` on the macOS dev host)
+- [ ] utest runs attach a scratch FAT32 image as a second virtio-blk disk, which `/sbin/init` mounts at `/core` with §13.9's `mount`, and set `core_pattern=/core/%e.%p`; after QEMU exits the harness copies each core off it and prints a host backtrace beside the failing utest (`gdb-multiarch` in CI, `lldb` on the macOS dev host). This box lands after §13.9's FAT stack-frame box (F058)
 
 ### 13.9 POSIX floor
 - [ ] a tracked list of the syscalls needed to build and run the target software set: every number in a pinned copy of musl's `arch/<arch>/bits/syscall.h.in` for each architecture has a row in the §10.5 table with the same number, marked implemented, partial, or `ENOSYS` by design with the fallback its known callers take, and `make check` fails on a missing row or a differing number; `docs/SYSCALL.md` §3 renders the status, and the §13.11 runner lists in its job summary every `ENOSYS` the corpus hits
 - [ ] every call in this phase lands under its asm-generic name, which x86_64 also has; the legacy names are x86_64-only entry points onto it, as §11.6 does for `openat`, `dup3`, and `clone`: `faccessat` for `access`, `fchmodat` for `chmod`, `fchownat` for `chown`, `newfstatat` for `stat` and `lstat`, `readlinkat` for `readlink`, and the §13.2 and §13.6 pairs
 - [ ] `getcwd`, `chdir`, `fchdir`, `faccessat`, `fchmodat`, `fchownat`, `umask`, `utimensat`
+- [ ] `openat` with `O_CREAT` creates the file with `mode & ~umask` on vibefs and tmpfs, where `open` ignores `mode` today (F149)
 - [ ] `newfstatat`, `readlinkat`, `openat` with any `dirfd`, `pread64`, `pwrite64`, `readv`, `writev`, which every coreutil calls before anything else; `getdents64`, `fstat`, and `nanosleep` came with §10.5
 - [ ] `fcntl` beyond `F_GETFD` and `F_SETFD`: `F_DUPFD`, `F_DUPFD_CLOEXEC`, `F_GETFL`, and `F_SETFL`; POSIX record locks (`F_SETLK`, `F_SETLKW`, `F_GETLK`), OFD locks, and `flock`, with `EDEADLK` when an `F_SETLKW` would close a wait cycle, since parallel `make`, `cargo`, and package managers rely on them for correctness
 - [ ] `mkdirat`, `unlinkat`, `renameat`, `renameat2`, `linkat`, `symlinkat`, `mknodat`, `truncate`, `ftruncate`, `fsync`, `fdatasync`, `sync`, `statfs`, `fstatfs`, `mount`, `umount2`, `sethostname`, `settimeofday`, and `clock_settime`, with the x86_64 legacy names (`mkdir`, `rmdir`, `unlink`, `rename`, `link`, `symlink`, `mknod`) as entry points onto them; §13.2's named pipes, §13.4's `shm_open`, §14.3's init, §14.4's coreutils, §14.6's installs, and §15.8's SNTP client need them; the calls that change system state, and `mknodat` of a device node, are root-only under the enforcement below
+- [ ] a disk-backed FAT mount fits a 16 KiB kernel stack: `fat_init::mount_dev` builds `FatVol` in its slot instead of moving it by value, and per-call cluster buffers move into per-volume storage under the slot lock; an in-guest test mounts a FAT image on `vda` from a kernel thread (F058)
+- [ ] a `make check` script reads the kernel's `-Z emit-stack-sizes` section and fails when a function reachable from a syscall or a shell command has a frame over the bound DESIGN §3.5 records in the same commit (F058)
+- [ ] `umount` keeps volume state consistent: it dispatches on the mount's filesystem type, returns `EBUSY` before it changes any state while an open file is on the volume, syncs a vibefs volume, and unregisters the route and slot only after the VFS unmount succeeds; each volume slot is a `BlockingMutex` that owns the volume and is never force-cleared; in-guest, a failed unmount leaves the mount usable, and a remount after a clean one succeeds (F060)
+- [ ] partition tables are validated before `mount` can reach a partition: the GPT header's `MyLBA` equals the LBA it was read from, every GPT entry lies within `FirstUsableLBA..=LastUsableLBA`, and no GPT or MBR entry overlaps another entry, the MBR, the GPT headers, or the entry arrays; a refused entry is logged and gets no child device; host tests cover each case (F117)
+- [ ] vibefs `truncate` past the 128-byte inline limit spills the inline data to an extent while `size` still holds the old value; `read` and `spill_inline` bound inline copies by `inline_len` and return `Corrupt` on a mismatch, and `unpack_inode` and fsck reject `F_INLINE` with a size over 128; a host test truncates a 3-byte inline file to 256 bytes and reads 253 zero bytes after the data (F062)
+- [ ] `truncate` and `ftruncate` zero what a later extension exposes: a FAT shrink zeroes the last kept cluster from `new % cluster_bytes` to its end, a vibefs inline shrink zeroes `inline_data[new..]`, and a vibefs extent shrink rewrites the last kept block (CoW) with a zeroed tail; host tests write 400 bytes, truncate to 10, extend to 300, and read zeros from byte 10 on FAT, do the same with 3000, 200, and 2000 bytes on a vibefs extent file, and with 100, 10, and 120 bytes on a vibefs inline file (F125)
+- [ ] FAT directory walks fail on errors: `read_dirent` returns `Io` and `Corrupt` instead of end-of-directory, so `lookup`, `readdir`, and `dir_empty` report the error, `unlinkat(AT_REMOVEDIR)` never frees a non-empty directory, and `O_CREAT` never adds a duplicate name; a host test injects an I/O error mid-directory (F124)
+- [ ] `FatVol::walk` resolves `..` from the directory's own `..` entry (cluster 0 is `root_clus`) instead of a 16-entry ancestor stack that drops deeper pushes; a host test walks `..` in a 20-deep tree (F124)
 - [ ] the §12.5 crash-state workloads run again from a user program through `fsync`, `renameat`, and `sync`, on the volatile-cache disk, on both architectures on the nightly job
 - [ ] `/dev/kmsg` in devfs, so a user `dmesg` reads the kernel log
 - [ ] credentials in userspace: the §9.5 uid and gid gain saved set-IDs and a supplementary group list, inherited across `fork` and `execve`; `getuid`, `geteuid`, `getgid`, `getegid`, `getresuid`, `getresgid`, `getgroups`, `setuid`, `setgid`, `setreuid`, `setregid`, `setresuid`, `setresgid`, `setgroups` over them. Each checks privilege as Linux does: effective uid 0 sets any id, any other caller only switches among its own real, effective, and saved ids, and `setgroups` is root-only
@@ -1413,7 +1667,7 @@ its asm-generic name, which both architectures have; the legacy x86_64 names are
 - [ ] `uname`, `sysinfo`, `gettimeofday`, `clock_gettime`, `clock_getres`, and `clock_nanosleep` over Linux's clock ids: `REALTIME`, `MONOTONIC`, `MONOTONIC_RAW`, `BOOTTIME`, the `_COARSE` variants, and the process and thread CPU-time clocks, including the ids that encode a pid or tid, as `clock_getcpuclockid` and `pthread_getcpuclockid` build them
 - [ ] `timer_create`, `timer_settime`, `timer_gettime`, and `timer_delete` with `SIGEV_SIGNAL` and `SIGEV_THREAD_ID` (musl builds `SIGEV_THREAD` on it), and `setitimer` and `getitimer`, with `alarm` as an x86_64 entry point onto `setitimer`, on one timer queue shared with §13.6's `timerfd`
 - [ ] `ioctl` with a registry rather than a growing match arm
-- [ ] `prctl` for the few things that need it
+- [ ] `prctl` through an option table: an option not in it returns `EINVAL`, as Linux does for an unknown option, and each entry names the §13.11 corpus program or the line that needs it; §18.6 and §23.1 add their options to the same table
 - [ ] `ENOSYS` for the unimplemented, logged once per syscall number, so a port's failure is immediately legible
 
 ### 13.10 Linux ABI fidelity
@@ -1421,9 +1675,11 @@ its asm-generic name, which both architectures have; the legacy x86_64 names are
 
 - [ ] static-PIE executables (moved from §14.2): `execve` maps an `ET_DYN` image with no `PT_INTERP` at a page-aligned bias it chooses, `AT_PHDR` and `AT_ENTRY` carry the bias, and the image relocates itself, as on Linux. `src/elf.rs` stops refusing `ET_DYN` without an interpreter, and SYSCALL.md §7 says so. Host tests cover the bias arithmetic; an in-guest test runs a static-PIE user-crate program, whose `_start` applies its own relative relocations, on both architectures. Alpine's static `busybox` and Rust's `x86_64-unknown-linux-musl` output are static-PIE; Rust's `aarch64-unknown-linux-musl` output on the pinned nightly is a static `ET_EXEC`
 - [ ] `execve` of a file that begins with `#!` runs the named interpreter as Linux's `binfmt_script` does: from a first line within 256 bytes (`BINPRM_BUF_SIZE`), the interpreter path and the rest of the line, trimmed, as at most one argument; the new argv is the interpreter, that argument if present, the path passed to `execve`, then the original `argv[1..]`. The script's set-user-ID and set-group-ID bits are ignored and the interpreter's own apply under §13.9, as on Linux. A file that is neither ELF nor `#!` returns `ENOEXEC`, and a chain of more than five rewrites, Linux's `exec_binprm` limit, returns `ELOOP`; SYSCALL.md §2 and §7 say so. The parser is host-tested; an in-guest test on both architectures execs a script whose interpreter is a user-crate program that prints its argv, a chain of five scripts, each the interpreter of the one before, that runs, a chain of six that returns `ELOOP`, and a set-user-ID-root script run as uid 1000 that still sees euid 1000. musl's `execvp` has no `ENOEXEC` fallback to `sh`, and `apk` runs package scripts and triggers through `execve`
-- [ ] the auxiliary vector Linux passes: `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_PAGESZ`, `AT_BASE`, `AT_FLAGS`, `AT_ENTRY`, `AT_UID`, `AT_EUID`, `AT_GID`, `AT_EGID`, `AT_SECURE` (§13.9), `AT_RANDOM` (16 bytes from the `/dev/random` source, not the TSC), `AT_HWCAP`, `AT_HWCAP2`, `AT_PLATFORM`, `AT_EXECFN`, `AT_CLKTCK`, `AT_MINSIGSTKSZ`, and `AT_SYSINFO_EHDR`. `AT_HWCAP` on aarch64, and XCR0 on x86_64, advertise only register state the kernel saves and restores. A user-crate program that prints its auxv runs in the §13.11 differential runner
-- [ ] a vDSO on both architectures, mapped at `exec` with a read-only data page the §2.7 seqlock publishes, and built from the same portable time code: the calls and symbol names Linux's vDSO exports (`__vdso_clock_gettime` and relatives at version `LINUX_2.6` on x86_64; `__kernel_clock_gettime` and relatives, and `__kernel_rt_sigreturn`, at `LINUX_2.6.39` on aarch64), since musl and Go look them up by name and version. It falls back to the syscall when user mode cannot read the counter
-- [ ] in-guest: 10,000 `clock_gettime(CLOCK_MONOTONIC)` calls through the vDSO add nothing to the §9.3 syscall counter, and interleaved with syscall reads they never run backwards, on both architectures
+- [ ] the auxiliary vector Linux passes: `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_PAGESZ`, `AT_BASE`, `AT_FLAGS`, `AT_ENTRY`, `AT_UID`, `AT_EUID`, `AT_GID`, `AT_EGID`, `AT_SECURE` (§13.9), `AT_RANDOM` (16 bytes from `RDRAND`, `RNDR`, or virtio-rng through the `/dev/random` source, never the TSC or a fixed-seed generator), `AT_HWCAP`, `AT_HWCAP2`, `AT_PLATFORM`, `AT_EXECFN`, `AT_CLKTCK`, `AT_MINSIGSTKSZ`, and `AT_SYSINFO_EHDR`. `AT_HWCAP` on aarch64, and XCR0 on x86_64, advertise only register state the kernel saves and restores. A user-crate program that prints its auxv runs in the §13.11 differential runner (F140)
+- [ ] every thread the kernel creates starts from the §11.6 `execve` FP image, held as a constant, instead of `FPU_TEMPLATE`, the `fxsave64` taken after `fninit` at boot, which keeps the loader's MXCSR and ST and XMM contents; the `Fxsave::empty()` fallback (FCW 0, MXCSR 0) that `init_bootstrap` gets before `init_fpu` runs is gone; a host test pins the image bytes, and a user-crate program that prints its initial MXCSR and FCW runs in the §13.11 differential runner (F129)
+- [ ] a vDSO on both architectures, mapped at `exec` with a read-only data page the §2.7 seqlock publishes, and built from the same portable time code: the calls and symbol names Linux's vDSO exports (`__vdso_clock_gettime` and relatives at version `LINUX_2.6` on x86_64; `__kernel_clock_gettime` and relatives, and `__kernel_rt_sigreturn`, at `LINUX_2.6.39` on aarch64), since musl and Go look them up by name and version. It computes the time with the same function as `now_ns`, from one published record, and falls back to the syscall when user mode cannot read the counter or the §10.7 warp test saw a backward step (F027)
+- [ ] in-guest: 10,000 `clock_gettime(CLOCK_MONOTONIC)` calls through the vDSO leave the calling process's §10.7 syscall count unchanged, and interleaved with syscall reads they never run backwards, on both architectures (F150)
+- [ ] `AddressSpace::map_anon`'s rollback removes only leaves it installed: on `AlreadyMapped` it frees its own frame and leaves the existing leaf in place, and `user_frames` drops only for pages it counted. This lands before the vDSO pages and §13.8's aarch64 trampoline page add user leaves outside `map_anon`. A host test maps over a leaf that no `Region` covers and finds the leaf, its frame, and the frame count unchanged (F102)
 - [ ] `sched_getaffinity` and `sched_setaffinity` over a per-thread CPU mask sized from the boot CPU count, which replaces §4.8's `CpuAffinity::{Any, Pinned(cpu)}` (it cannot hold a set) and which placement honors, and `getcpu`, since musl's `sysconf(_SC_NPROCESSORS_ONLN)`, `nproc`, Rust's `available_parallelism`, and Go's `GOMAXPROCS` count CPUs through it, and a build that sees one CPU runs serially
 - [ ] extending §13.9's procfs: `/proc/self` and `/proc/thread-self`; per pid `exe`, `cwd`, and `root` symlinks, `fd/<n>` links that open the descriptor's own file rather than re-walking a path, `auxv`, `environ`, and `task/<tid>/comm`, which Rust's `current_exe`, the sysroot discovery in `rustc` and `clang`, and musl's `ttyname`, `fexecve`, and `pthread_setname_np` use
 - [ ] one host-tested table of Linux struct sizes and field offsets per architecture, whose values cite the uapi header they came from, covering every struct the kernel reads or writes: the §11.6, §13.6, and §13.8 pins move into it, and it adds `termios` (the kernel's 36-byte layout, not libc's larger one), `winsize`, `timespec`, `timeval`, `rlimit`, `rusage`, `utsname`, `sysinfo`, `pollfd`, `iovec`, `linux_dirent64`, `sockaddr_un`, `msghdr`, `cmsghdr`, `ucred`, `siginfo_t`, `signalfd_siginfo`, `itimerspec`, `itimerval`, `sigevent`, `flock` (the `fcntl` lock record), `robust_list_head`, `stack_t`, and `statfs`; a struct a new syscall reads or writes enters the table in the same commit
@@ -1451,8 +1707,10 @@ The §4.7 rank check has six global ranks, allows a rank to be retaken, and skip
 - [ ] a `lockdep` build records each held-class to acquired-class edge and reports the first cycle with both acquisition backtraces, the first time both orders occur in any run rather than when they collide in time
 - [ ] the same build reports a class taken in IRQ context that is elsewhere held with interrupts enabled, and a sleep on a wait queue with a spinlock held
 - [ ] the nightly job runs the in-guest ladder in this build on both architectures and dumps the edge graph, so a report names the path that closed the cycle
-- [ ] an in-guest test takes two device-rank locks in both orders, one after the other on one CPU, and passes only when the checker reports it
+- [ ] an in-guest test takes two device-rank locks in both orders, one after the other on one CPU, and passes only when the checker reports it (F108)
 - [ ] the §13.5 futex table, wait, wake, and requeue in the portable half with a loom model (§10.8): a wake racing a timeout, a requeue racing a wake, and a waiter whose page breaks COW; a mutant that checks the futex word outside the bucket lock must fail the model
+- [ ] `thread_init::with_sched` holds an `InterruptGuard` from before it takes `SCHED` through its `place_ready` loop, so a caller that blocked itself in the closure cannot be preempted before the wakes it recorded are placed, and `Condvar::wait_until` no longer strands the mutex waiter it woke. This lands before the first non-test `Condvar` caller. An in-guest test has the notifier queued on the mutex when the waiter calls `Condvar::wait`, and both finish. DESIGN §9.4's Condvar pitfall drops its `with_sched` sentence (F034)
+- [ ] an `RwLock` writer that gives up after a wait wakes the readers parked behind it on every return path: the `after_writer_wait_timeout` wake runs before any `Err` return that follows a wait, including the `past(d)` return after `drop_read` woke the writer and a reader barged in; a host-model test runs that woken, barged, past-deadline sequence and finds no reader left parked (F036)
 
 ### 13.13 Syscall fuzzing
 Moved from §18.5: Phases 12 and 13 build the syscall surface and rewrite user-pointer handling, and a fuzzer finds those bugs while the phase that wrote them is open. §18.5 moves on to syzkaller with kernel coverage.
@@ -1460,7 +1718,7 @@ Moved from §18.5: Phases 12 and 13 build the syscall surface and rewrite user-p
 - [ ] the §10.5 table gains an argument kind per parameter: descriptor, user pointer with the index of its length argument, path, flag set with its valid mask, pid, signal, or plain integer; the fuzzer generates from it and the §9.3 syscall trace decodes with it
 - [ ] a fuzzer in the user crate generates calls from those kinds: live, closed, and wrong-type descriptors; pointers into unmapped, read-only, kernel, COW-shared, and not-yet-faulted pages; lengths across page boundaries; every flag bit; several threads at once
 - [ ] every sequence derives from one seed, printed on serial before it runs, so a crash replays from its seed as a utest, and each replay is checked in
-- [ ] after each run the frame count and the process, thread, and descriptor tables return to baseline, so a leak fails the way a panic does
+- [ ] after each run the §12.1 per-category frame counts, measured from the §10.2 quiescent baseline, and the process, thread, and descriptor tables return to baseline, so a leak fails the way a panic does (F074)
 - [ ] the nightly job runs it one hour per architecture in a build with the §12.1 KASAN and §13.12 lock-dependency checks on
 
 ---
@@ -1499,7 +1757,8 @@ dynamic linker's relocation types and TLS are per architecture. Alpine publishes
 - [ ] a shell script with pipes, redirection, variables, conditionals, and loops runs
 - [ ] `/bin/tests` (§10.5) and `libc-test` (§14.1), minus the cases on §14.1's checked-in expected-failure list, pass inside the VM on both architectures, run automatically in CI
 - [ ] a package installs, upgrades, and removes cleanly with file conflict detection, and a package with a bad signature is refused
-- [ ] `getrandom` returns seeded output on both architectures, and the §14.7 primitives pass their published test vectors in-guest
+- [ ] two boots of one image with one QEMU command line get different first 32 bytes from `getrandom`, on both architectures
+- [ ] the §14.7 primitives pass their published test vectors in-guest on both architectures
 - [ ] the system boots with root on a vibefs v2 disk image built from the §14.6 packages, on both architectures, and this gate runs from it
 - [ ] on both architectures, in a 1 GiB, 2-CPU guest under TCG, inside a `chroot` of Alpine's pinned `minirootfs` on vibefs v2: `apk add python3 git build-base clang lld` from the §14.9 mirror succeeds with signatures verified, `make test-harness` passes on a copy of the tree, `git` commits to a local repository, and `clang` compiles and links a C program that then runs
 - [ ] every third-party source the tree builds, other than Rust crates and Limine, has a `ports/` manifest with an allowed license, enforced by `make check`, and the scheduled job verifies every archive hash and patch series (§14.10)
@@ -1572,6 +1831,7 @@ encryption and boot integrity stay in §18.7.
 
 - [ ] one crypto crate, built for the user runtime, the kernel, and hostlib's tools, so login, packaging, the release manifest, TLS, `sshd`, the CSPRNG, and §18.7's disk encryption share one implementation
 - [ ] an entropy pool: `RDRAND` and `RNDR`, virtio-rng, timer jitter, interrupt timing, with health checks (`/dev/random` already prefers virtio-rng then `RDRAND`; S1)
+- [ ] `RDRAND` is self-tested once at init: it takes 8 samples and is disabled unless at least 5 differ from the sample before, as Linux's `arch/x86/kernel/cpu/rdrand.c` does, and its CPUID bit is cached instead of read on every call; no source's output reaches a reader without passing through the pool (F140)
 - [ ] a CSPRNG behind `/dev/random`, `/dev/urandom`, and `getrandom`; `getrandom` and `/dev/urandom` never block after the pool is seeded, and `/dev/random` blocks only until then
 - [ ] hashes and ciphers: SHA-2, SHA-3, AES-GCM, ChaCha20-Poly1305
 - [ ] public key: Ed25519, X25519, RSA verification
@@ -1583,7 +1843,8 @@ encryption and boot integrity stay in §18.7.
 vibefs v1 holds at most 4 MiB, 64 inodes, and 96 directory entries per volume ([VIBEFS.md](VIBEFS.md)
 §3). The base system and the Phase 17 toolchains need a real one.
 
-- [ ] vibefs format version 2, designed for the §12.5 page cache: multi-GiB volumes, at least a million inodes, B-tree directories without a volume-wide entry cap, and extent trees rather than four extents per inode; VIBEFS.md gains the v2 format before any code, as §8.5 did for v1
+- [ ] vibefs format version 2, designed for the §12.5 page cache: multi-GiB volumes, at least a million inodes, B-tree directories without a volume-wide entry cap, and extent trees rather than four extents per inode, which `write` fills with multi-block extents; VIBEFS.md gains the v2 format before any code, as §8.5 did for v1 (F051)
+- [ ] a v2 directory lookup descends the on-disk B-tree, reading at most one block per tree level, instead of scanning the volume's flat 96-entry table as v1's `find_dent` does; a host test counts block reads for a lookup in a 10,000-entry directory (F067)
 - [ ] the kernel, `mkfs-vibefs`, and `fsck-vibefs` share the v2 code, as they do for v1; `fsck` upgrades a v1 volume in place, and a v1 volume still mounts
 - [ ] extended attributes in the v2 format and in tmpfs: the `getxattr`, `setxattr`, `listxattr`, and `removexattr` families with their `l` and `f` forms, in the `user.` and `trusted.` namespaces, and `EOPNOTSUPP` for `security.` and `system.`
 - [ ] the §8.5 crash-consistency test runs on a v2 volume larger than any v1 limit, and §12.5's crash-state enumerator and volatile-cache block device run over v2's commit protocol
@@ -1661,6 +1922,7 @@ runners have no KVM.
 ### 15.2 Drivers
 - [ ] virtio-net: receive and transmit virtqueues, mergeable receive buffers, checksum offload, multi-queue
 - [ ] e1000, because QEMU's `e1000` models a real Intel 82540EM and the chip is well documented
+- [ ] a threaded handler on a level-triggered route (I/O APIC INTx, or a GIC SPI from the device tree's `interrupt-map`) has its line masked in `irq_init::dispatch` before the EOI and unmasked after the bottom half returns, and `set_threaded` refuses `top: None` on a level route without that masking; in-guest, e1000, whose QEMU model has no MSI, takes a receive flood at `-smp 2` through that path while the other CPU keeps scheduling (F099)
 - [ ] in-guest driver tests against a loopback QEMU network configuration
 
 ### 15.3 Link layer
@@ -1768,10 +2030,10 @@ aarch64 and works on x86_64 too. virtio-gpu is shared. The frame-rate gate line 
 **Exit gate**
 - [ ] multiple windows, movable and resizable: a scripted scene of overlapping windows raised, moved, and resized matches its §16.1 reference image after each step, which checks overlap and damage handling
 - [ ] the terminal emulator runs the shell through a pty, and a scripted session exercising each group of §16.7's escape sequences matches its §16.1 reference images
-- [ ] mouse and keyboard events routed to the focused window, on both architectures
+- [ ] the harness injects key and pointer events with QMP `input-send-event` into two overlapping test clients that log the events they receive on serial; only the focused client logs the keys, and only the client under the pointer logs the motion, on both architectures
 - [ ] unmodified `modetest` (libdrm) and `evtest` from the §14.9 mirror list connectors and set a mode with a dumb buffer on virtio-gpu, and read key and pointer events from virtio-input, on both architectures
 - [ ] a screenshot captured programmatically and compared against a reference in CI (§16.1)
-- [ ] a resolution change, and a second output added and removed, at runtime with clients reacting correctly (§16.1)
+- [ ] a resolution change, and a second output added and removed, at runtime (§16.1): after each change a test client receives the new mode or the removal through §16.5 and commits its next buffer at the output's new size, and the §16.1 screenshot of each remaining output matches its reference
 - [ ] the compositor holds 60 frames per second at 1920×1080 with ten windows moving, fewer than 1% of frames dropped over ten seconds, measured under KVM in a 4-vCPU, 2 GiB guest with virtio-gpu 2D
 - [ ] the compositor killed with `SIGKILL` leaves the text console visible and taking keyboard input, on both architectures
 - [ ] tag `phase-16` and cut the next release
@@ -1868,7 +2130,7 @@ address below DESIGN §4.1's 8 GiB physmap cap, which stays until §27.3.
 - [ ] that ISO boots and rebuilds itself for two generations, and the loop script's comparison reports the first- and second-generation ISOs byte-identical (§10.2, §17.5)
 - [ ] `make check` and `make test` pass on vibeOS, itself a guest under QEMU with KVM: the harness on §17.6's CPython drives §17.6's QEMU under TCG and reports results the same way CI does. A test that needs something vibeOS does not yet offer as a harness host skips with a reason naming the line that adds it (§15.10's tap-device tests name §21.7's `/dev/net/tun`), and the harness fails if the skipped set differs from the on-device skip list this line writes into DESIGN §8.6, one entry per skipped test naming the line that adds what it needs
 - [ ] the loop runs on aarch64 as well as x86_64, and each architecture can cross-build the other
-- [ ] the whole loop is scripted, not a sequence of manual steps someone remembers
+- [ ] the loop script runs the whole loop from a clean checkout through the second-generation comparison with no manual step, and the job that checks the byte-identical line above runs only that script
 - [ ] unmodified `gdb` and `strace` from the §17.7 image debug and trace a multithreaded C program on both architectures: a breakpoint, a backtrace, a single step, a hardware watchpoint, and `strace -f` across `clone`
 - [ ] tag `phase-17` and cut the next release
 
@@ -1895,6 +2157,9 @@ address below DESIGN §4.1's 8 GiB physmap cap, which stays until §27.3.
 - [ ] `vim` from the §17.7 image, unmodified, on the serial console and over §15.8's `sshd`
 - [ ] the debugger interface is Linux's `ptrace`, so `gdb` from the §17.7 image runs unmodified: `TRACEME`, `ATTACH`, `SEIZE`, `INTERRUPT`, `LISTEN`, `SETOPTIONS`, `PEEKDATA` and `POKEDATA`, `GETREGSET` and `SETREGSET` with `NT_PRSTATUS` and `NT_PRFPREG` (plus `NT_X86_XSTATE` on x86_64 and `NT_ARM_TLS` on aarch64), `GETREGS`, `SETREGS`, `GETFPREGS`, and `SETFPREGS` on x86_64, where gdb uses them, `CONT`, `SYSCALL`, `SINGLESTEP`, `GETEVENTMSG`, `GETSIGINFO`, `KILL`, and `DETACH`, and the `TRACESYSGOOD`, `TRACECLONE`, `TRACEFORK`, `TRACEVFORK`, `TRACEVFORKDONE`, `TRACEEXEC`, `TRACEEXIT`, and `EXITKILL` options, since `SEIZE` refuses an option it does not know and `strace -f` sets `TRACEVFORK`; `ATTACH` and `SEIZE` pass Linux's credential and dumpable checks (§13.9), and register writes go through the §13.8 context validation, and a `SETREGSET` of `NT_X86_XSTATE` whose XSAVE header fails it returns `EINVAL`, as on Linux
 - [ ] hardware breakpoints and watchpoints for the tracer: the debug registers through `PEEKUSER` and `POKEUSER` on x86_64, `NT_ARM_HW_BREAK` and `NT_ARM_HW_WATCH` on aarch64; the tracee's memory read and written through `/proc/<pid>/mem` and `/proc/<pid>/task/<tid>/mem`, where gdb writes its breakpoints, and read through `process_vm_readv`
+- [ ] `POKEDATA` and `/proc/<pid>/mem` writes resolve a read-only tracee page through the §12.2 fault path with write intent and force, which breaks COW into a private anonymous copy, and never write a page-cache or COW-shared frame through the physmap; a test sets a breakpoint in a running binary's text through each interface, and the file's bytes and a second process running the same binary are unchanged (F023)
+- [ ] user debug registers are per-thread state: the context switch loads DR0-DR3 and DR7 for a thread with a breakpoint armed and clears DR7 for one without, and on aarch64 loads the `DBGBVR`/`DBGBCR` and `DBGWVR`/`DBGWCR` pairs and sets `MDSCR_EL1.MDE` only for such a thread; a test arms a watchpoint in one process, and a second process writing the same address on the same CPU does not stop
+- [ ] tracer writes stay in user space: `POKEUSER` of a debug-register address, and `SETREGSET` of `NT_ARM_HW_BREAK` or `NT_ARM_HW_WATCH`, refuse an address at or above `USER_MAP_END` with `EINVAL`, and `SETREGS` or `POKEUSER` of an `fs_base` or `gs_base` at or above it returns `EIO`, as Linux does at `TASK_SIZE_MAX`
 - [ ] virtio-fs or 9p to mount the host checkout, so the build loop does not start by copying the tree into an image
 - [ ] `strace` from the §17.7 image, unmodified, over the same `ptrace` with `PTRACE_GET_SYSCALL_INFO`, following threads and children with `-f`
 
@@ -1958,7 +2223,9 @@ Phase 21's containers and Phase 22's users both are.
 
 **Architectures.** Both, except the `FSGSBASE` gate line and its §18.3 box, which are x86_64 only:
 aarch64 keeps the kernel's per-CPU base in a register EL0 cannot write (§11.4), so it has no `swapgs`
-hazard. The `LDTR`/`STTR` box in §18.3 is aarch64 only, and so are the MTE box in §18.4 and its gate
+hazard, and the §18.3 `lfence` box is x86_64 only for the same reason. The §18.3 KPTI,
+branch-target-injection, IBPB, and `verw` boxes are x86_64 only, and so is the vulnerabilities-report gate line,
+since it runs on the §10.1 KVM leg, which is x86_64 only. The §18.2 PML4-slot box is x86_64 only, since aarch64 maps the kernel half through TTBR1, which no address space copies. The §18.3 aarch64 speculation box is aarch64 only, the counterpart of those x86_64 boxes. The §18.3 `LDTR`/`STTR` box is aarch64 only, and so are the MTE box in §18.4 and its gate
 line: x86_64 has no shipping equivalent. Interrupt remapping in §18.1 is x86_64 only, since the GICv3
 ITS already binds each MSI to its device ID, and so is the RMRR/IVMD box, whose regions come from x86
 ACPI tables; IORT's RMR nodes, their aarch64 counterpart, arrive with §20.7. SMEP, SMAP, and UMIP
@@ -1967,10 +2234,12 @@ tests with §10.6, and PAN and PXN in §11.6. Control-flow integrity (CET, point
 the per-architecture stretch in §18.9.
 
 **Exit gate**
-- [ ] kernel `.text` read-only and executable, `.rodata` read-only and NX, `.data` NX, verified at runtime
-- [ ] KASLR active on both architectures, and a deliberate panic's backtrace and the §10.7 core tool's report from a `hang_test` core both still symbolize correctly
+- [ ] kernel `.text` read-only and executable, `.rodata` read-only and NX, and `.data` NX at the image VA; every other mapping of their frames, the physmap included, NX, and read-only for `.text` and `.rodata`; the §18.1 page table walker checks each of these mappings in an in-guest test (F105)
+- [ ] KASLR active on both architectures: the harness boots one ISO three times and reads at least two distinct `KERNELOFFSET=` values from the VMCOREINFO notes of their `dump-guest-memory` cores
+- [ ] with KASLR on, every frame of a deliberate panic's backtrace, and of the §10.7 core tool's report from a `hang_test` core, names the symbol and offset that the kernel ELF's own symbol table gives for its unslid address; the harness checks each frame, not only the first (F084)
 - [ ] `FSGSBASE` enabled; an in-guest test sets the user GS base to a kernel-half value and enters the NMI, `#DB`, and `#MC` handlers from kernel mode with that base live, and on a 2-CPU guest runs a syscall loop while the other CPU sends NMI IPIs; in every case the handlers find this CPU's `PerCpu` and the user's value survives
 - [ ] every speculation mitigation the kernel reports enabled at boot has a measured-cost entry in `docs/` for each CPU model it was reported on, measured in a 2-vCPU, 512 MiB guest under KVM on the hosted x86_64 runners, which draw their CPU model at random per job (§10.1), and under HVF on the aarch64 dev host; a harness test compares the boot log's list against the document's list for the model it booted on, and fails on a model with no list until one is measured
+- [ ] on each CPU model the §10.1 KVM leg draws, the files under `/sys/devices/system/cpu/vulnerabilities/` in a 2-vCPU, 512 MiB vibeOS guest read the same as in Alpine's `linux-virt`, booted in the same shape in the same job, except for differences `docs/` lists with a reason; `linux-virt` comes from the §14.9 mirror, added to its pin list (F024, F131, F132)
 - [ ] syzkaller with KCOV coverage (§18.5) accumulates at least 24 hours of fuzzing per architecture each week on the weekly schedule, in shards of at most 5.5 hours (§10.1) that carry one corpus, each guest 2 CPUs and 512 MiB under TCG, with no open crash; the job summary records the total and the corpus coverage per subsystem, and every crash becomes a replayed regression test (§18.5)
 - [ ] the §12.1 KASAN build passes the full test suite, userspace included, on both architectures
 - [ ] with the §18.1 IOMMU on, QEMU's `edu` device programmed to DMA outside its mapped buffer is stopped and reported with the device and address, under `intel-iommu` and `amd-iommu` on `q35` and `iommu=smmuv3` on aarch64 `virt`; the virtio-blk and virtio-net in-guest tests pass through each
@@ -1984,14 +2253,18 @@ the per-architecture stretch in §18.9.
 ### 18.1 Kernel memory protection
 - [ ] per-section permissions applied after boot, with the init sections freed or made NX
 - [ ] no writable-and-executable kernel mapping anywhere, including the trampoline page §10.6 left read-only and executable, asserted by a page table audit at boot
-- [ ] the physmap NX, which is easy to get wrong and a straightforward escalation primitive
-- [ ] guard pages on every kernel stack including the IST stacks
+- [ ] every physmap PTE has NX set, checked by the boot audit in the box above; an executable physmap would make every user page executable in ring 0 through its physmap alias
+- [ ] no writable alias of kernel code or read-only data: the physmap maps the image's physical span NX, with the image's per-section write permissions (`.text`, `.rodata`, and `.limine_requests` read-only; `.data` and `.bss` writable), split to 4 KiB at the image's unaligned edges, and the boot audit checks every VA that maps an image frame, not only the image VA; DESIGN §4.3's flag table gains the physmap image rows (F105)
+- [ ] guard pages on every kernel stack, including the IST stacks and the KVA stack §10.6 moves boot onto from Limine's unguarded stack; the page table walker in the next box finds the page below each stack it reaches from the TCB table, each TSS, and each IST slot unmapped (F072)
 - [ ] a page table walker that verifies the whole address space against a policy, run as an in-guest test
 - [ ] an IOMMU behind the §6.4 translation interface: VT-d and AMD-Vi on x86_64 (a q35 harness configuration, alongside the `pc` default, with `-device intel-iommu,intremap=on` or `-device amd-iommu,intremap=on,pt=off`, plus `dma-remap=on`, which needs QEMU 10.2 or later, since without it QEMU's amd-iommu passes DMA through untranslated; `kernel-irqchip=split` under KVM) and SMMUv3 on aarch64 (`-machine virt,acpi=off,iommu=smmuv3`). Each device gets its own DMA domain, and virtio devices, started with `iommu_platform=on` so QEMU offers `VIRTIO_F_ACCESS_PLATFORM`, negotiate it; without it their DMA bypasses the IOMMU
+- [ ] a DMA address mask per device in the §6.4 translation interface (`edu`: 28 bits, QEMU's default `dma_mask`), with IOVAs allocated inside it when the IOMMU is on; a mapping that cannot fit fails with an error, never a truncated address, and `test_dma_edu` passes with the IOMMU on and its IOVAs inside 28 bits (F030)
 - [ ] the DMAR and IVRS tables and the device tree's `iommu-map` parsed in the portable half, host-tested and fuzzed like the other firmware tables, against QEMU's tables and the DMAR and IVRS tables of the real machines in the linuxhw/ACPI corpus (CC-BY-4.0; pinned by commit, fetched at test time, recompiled with `iasl`, never committed), whose RMRR and IVMD entries also test the reserved-region mapping below; IORT, which describes SMMUv3 on ACPI machines, arrives with §20.7
 - [ ] devices that cannot be isolated from each other (behind a bridge without ACS, or sharing a requester ID) share a domain, and the grouping is recorded, since device assignment works by group
 - [ ] the reserved regions named by DMAR's RMRRs and IVRS's IVMD blocks mapped into their devices' domains, since integrated graphics and USB legacy emulation DMA into them
 - [ ] a translation fault reported with the device, address, and access kind, counted per device, and passed to the driver, which resets its device rather than hanging
+- [ ] the virtio transport checks each used-ring id: an id at or above the queue size, or one that is not the head of a chain the driver posted (checked against a driver-private shadow of each head), marks the device broken instead of freeing a chain, and each harvest pass handles at most queue-size entries; host tests drive the §6.5 simulated device with duplicate, non-head, and out-of-range ids (F048)
+- [ ] the virtio transport checks each capability: its offset plus length lies inside its BAR, and the notify capability has a length of at least 2 with each queue's notify offset plus 2 inside it; a host test drives the §6.5 simulated device with a short notify capability (F048)
 - [ ] IOTLB invalidation in strict and batched modes, each measured on virtio-blk and virtio-net throughput with the IOMMU on and off, on the §10.1 KVM leg and under HVF on the dev host; the default is chosen from the numbers, which are recorded in `docs/`
 - [ ] interrupt remapping on VT-d and AMD-Vi, so a device cannot forge an MSI to an arbitrary vector: an in-guest test has the `edu` device write an MSI whose remapping entry was never programmed, and no interrupt arrives. §20.1 routes to APIC IDs above 254 through it
 
@@ -2000,7 +2273,9 @@ the per-architecture stretch in §18.9.
 - [ ] `kaslr: yes` in `limine.conf`, written explicitly because Limine's default changed across major versions, so Limine picks the slide and applies the relocations before `_start`; the kernel takes its virtual base from Limine's executable address response, which `BootInfo` captures again for this (it was dropped in #91 while nothing read it), and never computes one
 - [ ] the slide's entropy described in the threat model: Limine, at §11.1's pin, draws the slide, and the HHDM offset `kaslr: yes` also randomizes, from `RDSEED`/`RDRAND` on x86_64 and `RNDR` on aarch64, then from the firmware's `EFI_RNG_PROTOCOL`, and falls back to a PRNG seeded from the TSC or the generic counter only when neither answers. `RNDR` is optional and absent on Apple M-series, Cortex-A76, and Neoverse N1, so the aarch64 harness attaches `virtio-rng-pci`, over which edk2 offers `EFI_RNG_PROTOCOL` under HVF on the dev host; the documented gap is a machine with neither source. Limine does not report which source it used, so a boot line records only whether the CPU has `RDSEED`/`RDRAND` or `RNDR`
 - [ ] randomized physmap and KVA region bases: the physmap is Limine's HHDM, whose offset Limine slides from the same sources (`randomise_hhdm_base: yes` written beside `kaslr: yes`), and the heap, KVA allocator, and `ioremap` bases are drawn from Limine's Entropy response, captured in `BootInfo`; DESIGN §4.1's region table and its "fixed, not discovered" rule are updated in the same commit
+- [ ] every kernel-half PML4 slot a region can use exists before the first user address space, since `AddressSpace::new` copies PML4[256..512) once: `paging_init::install` allocates the PDPTs of the physmap, heap, KVA, and `ioremap` slots at their randomized bases, each slot a region can grow into included, and the kernel mapper panics if it would allocate a PML4-level table once an `AddressSpace` exists; DESIGN §4.1 states the rule (F101)
 - [ ] the slide (`BootInfo`'s kernel base minus the link base) recorded; ksyms and the backtrace subtract it, so a crash dump symbolizes, and it is not otherwise exposed inside the guest; when QEMU's `vmcoreinfo` device is present the kernel writes it in a VMCOREINFO note (`KERNELOFFSET=`), which `dump-guest-memory` puts in the harness's cores, so the §10.7 core tool finds it
+- [ ] the §18.8 threat model's known escalation paths list how user mode recovers the slide: prefetch and TLB timing reveal it while the kernel half is mapped in every user CR3, and with §18.3's KPTI on, the entry area that stays mapped still reveals it (EntryBleed, CVE-2022-4543) (F133)
 - [ ] user address space randomization: stack, heap, mmap, and vDSO bases, and the `ET_DYN` load biases of §13.10 and §14.2, drawn from the §14.7 pool
 
 ### 18.3 CPU features
@@ -2008,9 +2283,19 @@ the per-architecture stretch in §18.9.
 S1 turned SMEP, SMAP, UMIP, and `CR0.WP` on at boot (`arch::cpu::harden`). §10.6 put user access behind
 `stac`/`clac` accessors, with the in-guest fault tests, and §11.6 did PAN and PXN. What is left:
 
-- [ ] `CR4.FSGSBASE` enabled. Once a user can `wrgsbase` a kernel-half value, the §10.6 sign check is unsound, so NMI, `#MC`, `#DB`, and `#DF` entry saves `GS_BASE` with `rdgsbase`, loads this CPU's `PerCpu` pointer (kept at the top of each per-CPU IST stack), and restores the saved value on exit. Every switch away from a user thread reads back the live user FS base and user GS base (the latter from `KERNEL_GS_BASE` while in the kernel), since `wrfsbase` and `wrgsbase` change them without a syscall. The `lfence` after a conditional `swapgs` lands with the speculation mitigations below
+- [ ] an `lfence` on both paths after every test that decides `swapgs`: the CS.RPL test in `arch::gs::enter` and in every entry stub, and §10.6's `GS_BASE` sign test on the IST vectors, so a mispredicted test cannot run kernel loads on the wrong GS base (CVE-2019-1125); the kernel build runs `scripts/check_entry.py`, which disassembles the kernel ELF with the pinned toolchain's `llvm-objdump` and fails on a conditional `swapgs` without an `lfence` on either path (F132, F133)
+- [ ] `CR4.FSGSBASE` enabled. Once a user can `wrgsbase` a kernel-half value, the §10.6 sign check is unsound, so NMI, `#MC`, `#DB`, and `#DF` entry saves `GS_BASE` with `rdgsbase`, loads this CPU's `PerCpu` pointer (kept at the top of each per-CPU IST stack), and restores the saved value on exit. Every switch away from a user thread reads back the live user FS base and user GS base (the latter from `KERNEL_GS_BASE` while in the kernel), since `wrfsbase` and `wrgsbase` change them without a syscall. `CR4.FSGSBASE` is set only once the `lfence` box above has landed (F133)
 - [ ] aarch64: user copies through the unprivileged `LDTR`/`STTR` instructions, so PAN is never cleared, even inside the accessors; an in-guest test asserts `PSTATE.PAN` is set inside every accessor
-- [ ] speculation mitigations, measured before enabling, since some cost more than the risk
+- [ ] CPU vulnerability enumeration on every CPU: CPUID.01H:EAX family and model, CPUID.(EAX=7,ECX=0):EDX, which `x86::cpuid_leaf7` discards today, CPUID.(EAX=7,ECX=2):EDX (`BHI_CTRL`, which enumerates `BHI_DIS_S`), `IA32_ARCH_CAPABILITIES` (MSR `0x10A`, read only when EDX bit 29 is set), and CPUID `0x80000008`:EBX on AMD; `MIDR_EL1` and `ID_AA64PFR0_EL1.CSV2` and `CSV3` on aarch64. The mapping from these bits to the mitigations below is in `vibeos-core`, host-tested against values recorded from each CPU model the §10.1 KVM leg has drawn and, for the aarch64 bits, from the dev host under HVF and the `-cpu` models the aarch64 harness runs under TCG; its result is logged at boot and exposed as Linux's `/sys/devices/system/cpu/vulnerabilities/` files (F131, F133)
+- [ ] KPTI on x86_64, on by default on an Intel CPU whose `IA32_ARCH_CAPABILITIES` is absent or has `RDCL_NO` clear, and forced by `pti=on` on the §10.2 command line: a process's user CR3 maps from the kernel half only a non-global entry area (the IDT, GDT, and TSS pages, each CPU's entry stack, and the entry stubs), and every entry from ring 3 goes through an asm stub that switches CR3 before its first kernel-data access; PCID tags both CR3s where CPUID reports PCID and INVPCID; DESIGN §4.1 lists what a user CR3 maps (F024)
+- [ ] with `pti=on`, an in-guest test's user load from a kernel-half address takes a `#PF` whose error code has P clear, and `make test-kernel` passes with `pti=on` under TCG and on the KVM leg (F024)
+- [ ] syscall-derived indices masked after their bounds check: `nospec_index(i, len)` in `vibeos-core` (`cmp`/`sbb`/`and` on x86_64, `csel` then `csdb` on aarch64), host-tested, applied to the syscall number before dispatch and to each fd, pid, and open-file index before it indexes a table (`proc.rs`, `proc_init.rs`, `file_init.rs`); DESIGN §2 states the rule (F025)
+- [ ] each syscall entry zeroes the user general-purpose registers it saved before it calls into Rust, as Linux's `PUSH_AND_CLEAR_REGS` does, so no user value stays live in a register across dispatch (F025)
+- [ ] branch target injection on x86_64: `IA32_SPEC_CTRL.IBRS` set on every CPU that enumerates `IBRS_ALL`, plus `BHI_DIS_S` where enumerated; the kernel is built with the pinned nightly's `-Zretpoline-external-thunk` and `-Zfunction-return=thunk-extern`, and its thunks in `arch/` are chosen once at boot, before §18.1's permissions apply: a retpoline without `IBRS_ALL`, a plain indirect branch with it, and on AMD Zen 1 and Zen 2 the untrained-return thunk Linux uses for Retbleed (F131)
+- [ ] an IBPB through `IA32_PRED_CMD` and an RSB fill when `switch_cr3_for` moves a CPU between two user address spaces, on a CPU that enumerates IBPB (F131)
+- [ ] `verw` of a kernel data selector before every return to ring 3 (`sysretq` and each `iretq` to a user frame) on a CPU that reports `MD_CLEAR` (CPUID.(7,0):EDX[10]) and either lacks `MDS_NO` or has TSX and lacks `TAA_NO` (F132)
+- [ ] aarch64: on a CPU the enumeration marks affected by Spectre-v2 or Spectre-BHB, exception entry from EL0 runs the SMCCC `ARCH_WORKAROUND_1` or `ARCH_WORKAROUND_3` call that firmware reports; on a CPU whose `CSV3` is 0, EL0 runs with a TTBR1 that maps only the exception vectors and their trampoline, as Linux's `kpti` does (F133)
+- [ ] `mitigations=off` on the §10.2 command line turns off every mitigation in this subsection, so the exit gate's cost entries compare one image with and without them (F133)
 
 ### 18.4 Stack and memory safety
 - [ ] stack canaries in both kernel and userspace
@@ -2031,10 +2316,11 @@ S1 turned SMEP, SMAP, UMIP, and `CR0.WP` on at boot (`arch::cpu::harden`). §10.
 - [ ] syzkaller's QEMU backend boots a build with KCOV and the §12.1 KASAN on both architectures and reaches the guest through that `sshd`, including its reverse-forwarded port and its file copy with legacy-protocol `scp -O`; the C reproducer syzkaller writes for every crash is checked in and replayed by the user test runner
 - [ ] a hostlib tool maps the corpus's KCOV program counters to source files through the kernel ELF's line table and reports coverage per subsystem on every run, so a subsystem the fuzzer never reaches is visible
 - [ ] syzkaller is the weekly campaign, in the shards the exit gate describes, with one corpus artifact carried from shard to shard; the §13.13 fuzzer stays on the nightly job, and the parser-level fuzzers run from §10.2 (every byte-slice parser, ELF included) and §15.10 (network)
-- [ ] fuzzed FAT and vibefs images mounted in-guest under the §12.1 KASAN build, on the weekly job
+- [ ] fuzzed FAT and vibefs images, and fuzzed MBR, EBR, and GPT partition tables, attached as virtio-blk disks, scanned and mounted in-guest under the §12.1 KASAN build, on the weekly job (F117)
+- [ ] vibefs mount validates an image before use: each leaf's count within `INODE_PER_LEAF` or `DENT_PER_LEAF`, every root, child, and extent pointer in `[2, nblocks)`, extent length at least 1 with `phys + len <= nblocks` computed without overflow, `F_INLINE` only with size at most 128, inode numbers unique and below `next_ino`, each metadata block referenced once, and a refcount above 0 on every reachable block; any failure is `Error::Corrupt`; host tests mount the five panicking images, the zero-refcount image, and the `next_ino` alias image the kernel review describes (F061)
 - [ ] the §15.10 in-guest packet fuzzer also runs in a §12.1 KASAN build, on the weekly job
 - [ ] malformed ELF files exec'd in-guest under KASAN, each refused with an error and none panicking the kernel
-- [ ] every crash found becomes a regression test, without exception
+- [ ] every crash the fuzzers find becomes a replayed regression test in the cheapest tier that catches it
 
 ### 18.6 Access control
 - [ ] the §13.9 permission checks audited: a generated in-guest test calls every syscall that takes a path, a descriptor, or a pid as an unprivileged user against an object that user may not use, and expects `EACCES` or `EPERM`
@@ -2043,7 +2329,7 @@ S1 turned SMEP, SMAP, UMIP, and `CR0.WP` on at boot (`arch::cpu::harden`). §10.
 - [ ] the rest of the interface libseccomp probes for and the kselftest `seccomp_bpf` program covers: `prctl(PR_SET_SECCOMP)` and `PR_GET_SECCOMP` beside the `seccomp()` call; `SECCOMP_FILTER_FLAG_TSYNC`, `FLAG_LOG`, and `FLAG_NEW_LISTENER` with `SECCOMP_RET_USER_NOTIF` and the `SECCOMP_IOCTL_NOTIF_RECV`, `SEND`, `ID_VALID`, and `ADDFD` ioctls; `SECCOMP_GET_ACTION_AVAIL` and `SECCOMP_GET_NOTIF_SIZES`
 - [ ] mount namespaces through `unshare(CLONE_NEWNS)` and `clone(CLONE_NEWNS)`, and `pivot_root`, as Linux defines them; `setns`, `/proc/<pid>/ns/*`, and the other namespaces are §21.5
 - [ ] resource limits enforced through §13.9's `prlimit64`: `RLIMIT_AS`, `RLIMIT_DATA`, `RLIMIT_STACK`, `RLIMIT_NPROC`, `RLIMIT_FSIZE` with `SIGXFSZ`, `RLIMIT_CPU` with `SIGXCPU`, and `RLIMIT_MEMLOCK` over §12.4's `mlock`; `RLIMIT_NOFILE` is §13.9's and `RLIMIT_CORE` §13.8's
-- [ ] an audit log for privileged operations
+- [ ] audit records through Linux's `NETLINK_AUDIT` for privileged operations: each capability check of this subsection that grants or denies, `setuid`, `setgid`, `setreuid`, `setregid`, `setresuid`, `setresgid`, `capset`, `mount`, `umount2`, `pivot_root`, and each `seccomp` filter install; an in-guest test runs each operation once as root and once as uid 1000, where it is denied, and reads exactly one record for each run
 
 ### 18.7 Crypto and boot integrity
 The primitives and the CSPRNG are §14.7, package signatures §14.6, and TLS §15.11. This is what needs a
@@ -2054,9 +2340,8 @@ boot chain.
 - [ ] full disk encryption with AES-XTS, added to the §14.7 crate with the IEEE 1619 vectors as host tests, and the key derived from a passphrase with §14.7's Argon2id; the transform is an encrypting block device stacked on any §7.1 `BlockDevice`, built here, which §29.1's mapping interface later drives
 
 ### 18.8 Threat model
-- [ ] `docs/THREAT_MODEL.md`: what is trusted, what is not, what is deliberately out of scope and why
-- [ ] the escalation paths that are known to exist and why they are still open
-- [ ] a security response process, however informal, so the answer is not improvised
+- [ ] `docs/THREAT_MODEL.md` with the headings `Trusted`, `Untrusted`, `Out of scope`, and `Known escalation paths`; each out-of-scope entry gives its reason, and each escalation path says why it is open and links to an open box, a [Beyond](#beyond) entry, or a [funded goal](#funded-goals); `scripts/check_threat_model.py` checks the headings and the links
+- [ ] `SECURITY.md` names the reporting channel and who triages a report; §22.5 adds private vulnerability reporting, the embargo procedure, response times, and a drill
 
 ### 18.9 Stretch: control-flow integrity
 - [ ] CET shadow stacks and indirect branch tracking on x86_64
@@ -2081,7 +2366,7 @@ PMUv3 counts cycles, `SW_INCR`, and (under `-icount`) retired instructions and r
 interrupt, and on x86_64 from a timer-driven sampler. Hardware events (cache and branch misses, branch
 records, precise sampling) need a physical machine and are in [Funded goals](#funded-goals). The
 benchmark-threshold gate line is x86_64 only, since the §10.1 KVM leg is x86_64 and GitHub's arm64
-runners have no KVM; the wakeup-latency, idle, lock-contention, and slab lines take their aarch64 numbers
+runners have no KVM; the wakeup-latency, idle, idle-clock, lock-contention, and slab lines take their aarch64 numbers
 under HVF on the dev host, running the §19.3 workloads they name there, as §10.9 dev-host records.
 
 **Exit gate**
@@ -2090,6 +2375,7 @@ under HVF on the dev host, running the §19.3 workloads they name there, as §10
 - [ ] benchmarks with thresholds on the §10.1 KVM leg in a 4-vCPU, 1 GiB guest, and a regression fails that job and so blocks the phase tag
 - [ ] scheduler wakeup latency at the 99th percentile under 1 ms with a CPU-bound load of four times the core count, measured under KVM in a 4-vCPU, 1 GiB guest
 - [ ] an idle CPU takes fewer than 5 timer interrupts per second over one minute, measured under KVM in a 2-vCPU, 512 MiB guest
+- [ ] over that idle minute, `CLOCK_MONOTONIC`, printed by an in-guest program at its start and end, advances within 0.5% of the host time between the two serial lines (F027)
 - [ ] lock contention profiled; the most contended lock's spin time on the §19.3 mixed interactive workload cut by at least half, under KVM in a 4-vCPU, 1 GiB guest, with before and after numbers recorded
 - [ ] slab statistics show per-cache object counts, and buddy-lock spin time on the §19.3 allocation microbenchmark, run on every CPU of a 4-vCPU, 512 MiB guest under KVM, is at least halved by §19.9, with before and after numbers recorded
 - [ ] in a 2-CPU, 512 MiB guest under TCG on both architectures, a 128 MiB file read three times, then a sequential read of a 1 GiB file, then the 128 MiB file again, refaults fewer than 10% of the 128 MiB file's pages, by the §19.10 refault counter
@@ -2116,18 +2402,21 @@ under HVF on the dev host, running the §19.3 workloads they name there, as §10
 - [ ] subsystem: file read and write throughput, network throughput and latency, process creation rate
 - [ ] macro: kernel build time, boot time, a mixed interactive workload
 - [ ] all of it on the §10.1 KVM leg, with history recorded per runner CPU model and a threshold per model that fails
-- [ ] variance controlled well enough that the numbers mean something, which is most of the work
+- [ ] each benchmark records its median and coefficient of variation over at least 5 runs per job in the §10.9 history; a benchmark whose coefficient of variation exceeds 5% on a runner CPU model gets no threshold on that model
 
 ### 19.4 Scheduler
-- [ ] replace round-robin with something latency-aware: weighted fair queueing or a virtual-deadline scheme
+- [ ] DESIGN §7.8 records the choice between weighted fair queueing and a virtual-deadline scheduler, with the §19.3 numbers that decided it
+- [ ] the chosen scheduler replaces round-robin
 - [ ] priorities and nice values with real effect
 - [ ] a real-time class with `FIFO` and `RR` policies
 - [ ] priority inheritance for the real-time class: `FUTEX_LOCK_PI`, `FUTEX_LOCK_PI2`, `FUTEX_TRYLOCK_PI`, `FUTEX_UNLOCK_PI`, `FUTEX_WAIT_REQUEUE_PI`, and `FUTEX_CMP_REQUEUE_PI` over §13.5's owner field for user mutexes, and the kernel `BlockingMutex`; an in-guest inversion test (low priority holds the lock, medium priority spins, high priority waits) completes within a bound
 - [ ] load balancing: periodic first, then work stealing, measured against the periodic baseline before keeping it
 - [ ] topology awareness from CPUID on x86_64 and MPIDR plus the device tree on aarch64: prefer a sibling core, keep a thread near its cache
 - [ ] group scheduling with CPU shares and quotas: the scheduler half of §21.5's cgroup v2 `cpu.weight` and `cpu.max`
-- [ ] latency measured under load, since the whole point is the tail and not the average
-- [ ] per-CPU TCB ownership or a sharded TCB table; timeouts per CPU (timing wheel, `TimeoutQueue` replacement already anticipated in `src/sched.rs`)
+- [ ] wakeup latency under load reported at the 50th, 99th, and 99.9th percentiles, never as a mean; the exit gate bounds the 99th
+- [ ] DESIGN §7.8 records the choice between per-CPU TCB ownership and a sharded TCB table, with the §19.5 contention numbers that decided it
+- [ ] the chosen TCB layout replaces the global TCB table
+- [ ] timeouts kept per CPU in a timing wheel that replaces `sched::TimeoutQueue`
 - [ ] a lock-free structure the scheduler adds, such as a work-stealing deque or a cross-CPU wake list, lands with a loom model (§10.8) and a weakened variant the model rejects, as §19.5's queues do
 
 ### 19.5 Scalability
@@ -2139,14 +2428,17 @@ under HVF on the dev host, running the §19.3 workloads they name there, as §10
 - [ ] the global locks split by hash or by CPU where profiling says it matters
 - [ ] interrupt affinity rebalancing on the §6.3 table: move MSI-X and I/O APIC destinations (GIC SPIs and LPIs on aarch64) off a saturated core, measured before keeping it
 - [ ] contention measured before and after each change, with the numbers recorded
-- [ ] block cache: per-device or hashed locks; VFS: RCU-style dentry lookup or per-mount locks; log ring: per-CPU staging with a printer thread (ROADMAP §5.5 item already open)
+- [ ] log records staged in a per-CPU buffer that a printer thread drains to serial, in place of the global IRQ-safe log ring, its TAS lock, and the serial try-lock sink, so an emitting CPU does not wait on the UART; contention measured before and after; this closes §5.5's deferred box
+- [ ] the block cache's single `SpinMutex` split per device or by LBA hash, as the contention measurement above picks; DESIGN §10.6 records the choice
+- [ ] VFS lookup off the global VFS lock: path walk reads the dentry cache and the mount table under the RCU read side from this subsection's first box, with the contention numbers before and after recorded
 
 ### 19.6 Power and idle
-- [ ] tickless idle: arm the next real deadline instead of a periodic tick
+- [ ] tickless idle: an idle CPU arms its next timer deadline instead of taking a periodic tick; monotonic time comes from the TSC or the generic counter, never from a count of timer interrupts, since that count stops while the tick is off (F027)
 - [ ] idle through `mwait` on x86_64 where CPUID reports MONITOR, falling back to `hlt`, and `wfi` on aarch64, all at the shallowest state, which needs no firmware tables; deeper C-states and frequency scaling from ACPI are §20.2's, and measured power needs a physical machine ([Funded goals](#funded-goals))
 - [ ] interrupt coalescing on the network and storage paths
 - [ ] timer slack, per thread as on Linux (50 µs by default, inherited by a child), so unrelated wakeups can batch; the per-thread value §23.1's `PR_SET_TIMERSLACK` sets is built by whichever of §19.6 and §23.1 lands first
 - [ ] CPU offlining for power management: migrate threads, redirect interrupts, park the core (PSCI `CPU_OFF` on aarch64); the reverse of bring-up, and not hotplug
+- [ ] x86_64: `apic_init::send_ipi` and `send_ipi_all_ex_self` hold an `InterruptGuard` across the delivery-pending poll and the `ICR_HIGH`/`ICR_LOW` write pair, not across `busy_wait_ms`, so an IPI sent from an interrupt handler between the two writes cannot retarget the INIT or SIPI that onlining a parked core sends with the scheduler live; an in-guest test offlines and onlines a CPU while every other CPU sends IPIs (F112)
 
 ### 19.7 NUMA
 - [ ] node topology and distances from SRAT and SLIT, tested under QEMU `-numa` on x86_64; aarch64 takes the same code path from ACPI in §20.7
@@ -2215,10 +2507,21 @@ under TCG on the hosted arm64 runner, which has no KVM, and under HVF only as §
 
 **Exit gate**
 - [ ] a disk image holding the ISO, attached as QEMU's `usb-storage` behind `qemu-xhci` with no other boot disk, boots under SeaBIOS and OVMF on `q35` and under the aarch64 edk2 build on `virt`, and a second `usb-storage` disk passes Phase 7's pattern and concurrent read-write tests through §20.3's mass-storage driver (TCG, 2 vCPUs, 1 GiB)
-- [ ] on `q35` and on aarch64 `virt` (TCG, 2 vCPUs, 1 GiB): Phase 7's pattern and concurrent read-write tests pass on NVMe, on an SD card and an eMMC behind `sdhci-pci`, and on `q35`'s built-in AHCI; root mounts from NVMe on both and from AHCI on `q35`; a TCP client fetches 1 GiB from the host with no corruption through vibeOS's e1000e driver, and again through its igb driver; and `evtest` from the §14.9 mirror reads, from its `/dev/input/event<N>` node, a key the harness sends with QMP `input-send-event` to a `usb-kbd` behind `qemu-xhci`
-- [ ] aarch64 reaches `shell ready` through ACPI with no device tree, on `virt` with `acpi=on` under the aarch64 edk2 build and on `sbsa-ref` under its pinned firmware (TCG, 4 vCPUs, 2 GiB), taking CPUs, the GIC, and the ITS from the MADT, the timer from GTDT, the console from SPCR, PCIe from MCFG, and the PSCI conduit from the FADT (HVC on `virt`, SMC on `sbsa-ref`), and `make test-kernel` passes on both; `sbsa-ref` mounts root from its built-in AHCI, fetches the 1 GiB above through its e1000e, and reads the harness's key through its built-in xHCI; on `virt` with `iommu=smmuv3`, the virtio-blk and virtio-net in-guest tests pass through the SMMUv3 that IORT names, and a `-numa` variant reports SRAT's nodes and SLIT's distances (§20.7)
-- [ ] in host tests, the AML interpreter loads the DSDT and SSDTs of every machine variant in QEMU's `tests/data/acpi` at the pinned QEMU release, and of at least 95% of the machines in the pinned linuxhw/ACPI snapshot whose tables the pinned `iasl` recompiles, and evaluates every `_PRT` it finds; at least 95% of the tests in ACPICA's aslts functional, complex, and exceptions collections pass under it; every MADT, FADT, HPET, MCFG, DMAR, IVRS, SRAT, SLIT, GTDT, IORT, and SPCR in both corpora goes through its §2.4, §18.1, §19.7, or §20.7 parser without a panic, and each one refused is logged with its reason; each failure is on a checked-in list naming the machine or test and a reason, and the runner fails on a listed case that passes, so the lists only shrink (§20.2)
-- [ ] clean shutdown and reboot through ACPI S5 and the FADT reset register on `q35` and `pc`, and through PSCI on `virt` and `sbsa-ref`, each seen as QEMU's exit or its QMP `SHUTDOWN` or `RESET` event; QMP `system_powerdown` shuts the guest down cleanly through the ACPI power button on `q35` and on `virt` booted with ACPI
+- [ ] storage, on `q35` and on aarch64 `virt` (TCG, 2 vCPUs, 1 GiB): Phase 7's pattern and concurrent read-write tests pass on NVMe, on an SD card and an eMMC behind `sdhci-pci`, and on `q35`'s built-in AHCI
+- [ ] root, in the same guests: root mounts from NVMe on both machines and from AHCI on `q35`
+- [ ] network, in the same guests: a TCP client fetches 1 GiB from the host with no corruption through vibeOS's e1000e driver, and again through its igb driver
+- [ ] input, in the same guests: `evtest` from the §14.9 mirror reads, from its `/dev/input/event<N>` node, a key the harness sends with QMP `input-send-event` to a `usb-kbd` behind `qemu-xhci`
+- [ ] aarch64 reaches `shell ready` through ACPI with no device tree, on `virt` with `acpi=on` under the aarch64 edk2 build and on `sbsa-ref` under its pinned firmware (TCG, 4 vCPUs, 2 GiB), taking CPUs, the GIC, and the ITS from the MADT, the timer from GTDT, the console from SPCR, PCIe from MCFG, and the PSCI conduit from the FADT (HVC on `virt`, SMC on `sbsa-ref`) (§20.7)
+- [ ] `make test-kernel` passes on both of those ACPI boots
+- [ ] `sbsa-ref`, in that ACPI boot, mounts root from its built-in AHCI, fetches the 1 GiB above through its e1000e, and reads the harness's key through its built-in xHCI
+- [ ] on ACPI `virt` with `iommu=smmuv3`, the virtio-blk and virtio-net in-guest tests pass through the SMMUv3 that IORT names
+- [ ] a `-numa` variant of ACPI `virt` reports SRAT's nodes and SLIT's distances
+- [ ] in host tests, the AML interpreter loads the DSDT and SSDTs of every machine variant in QEMU's `tests/data/acpi` at the pinned QEMU release, and of at least 95% of the machines in the pinned linuxhw/ACPI snapshot whose tables the pinned `iasl` recompiles, and evaluates every `_PRT` it finds (§20.2)
+- [ ] at least 95% of the tests in ACPICA's aslts functional, complex, and exceptions collections pass under the interpreter
+- [ ] every MADT, FADT, HPET, MCFG, DMAR, IVRS, SRAT, SLIT, GTDT, IORT, and SPCR in both corpora goes through its §2.4, §18.1, §19.7, or §20.7 parser without a panic, and each one refused is logged with its reason
+- [ ] each failure in the three lines above is on a checked-in list naming the machine or test and a reason, and the runner fails on a listed case that passes, so the lists only shrink
+- [ ] clean shutdown through ACPI S5 on `q35` and `pc`; reboot through the FADT reset register on `q35` and through the 8042 on `pc`, whose revision-1 FADT has no reset register; both through PSCI on `virt` and `sbsa-ref`. Each is seen as QEMU's exit or its QMP `SHUTDOWN` or `RESET` event, after a registered marker naming the path taken: the PM1 control block written with `_S5`'s `SLP_TYPa`, the FADT reset register's address space, the 8042, or the PSCI function (F097)
+- [ ] QMP `system_powerdown` shuts the guest down cleanly through the ACPI power button on `q35` and on `virt` booted with ACPI
 - [ ] 100 S3 suspend and resume cycles on `q35` under OVMF, on the nightly job (TCG, 2 vCPUs, 1 GiB): each cycle enters S3 through `_S3`, with QMP reporting `SUSPEND`, and resumes through the FACS waking vector, woken alternately by QMP `system_wakeup` and by an RTC alarm; the NVMe disk, the e1000e NIC, and the `usb-kbd` work after the last cycle
 - [ ] OVMF on `q35` with 288 vCPUs (TCG, `-cpu max`, 4 GiB) hands off in x2APIC mode, and every CPU reaches `smp: done`; with `intel-iommu,intremap=on,eim=on`, a virtio device's MSI-X interrupt is delivered to the CPU with the highest APIC ID, and without an IOMMU no device interrupt targets an APIC ID above 254 (§20.1)
 - [ ] every §20.6 driver passes its in-guest test on each §20.8 profile that carries its device
@@ -2229,25 +2532,43 @@ under TCG on the hosted arm64 runner, which has no KVM, and under HVF only as §
 
 ### 20.1 x86_64 platform models
 - [ ] both boot paths on each model firmware: OVMF (UEFI) and SeaBIOS (BIOS) on `q35` and `pc`, each booting the ISO from CD, NVMe, and `usb-storage`, chosen by `bootindex`
+- [ ] NX checked before use: `paging_init::install` reads CPUID.80000001H:EDX[20] before it sets `EFER.NXE`; on a CPU without NX, boot halts before `mov cr3` with a registered marker naming the missing feature, instead of triple-faulting on a `wrmsr` that runs before `arch::idt::init` loads the kernel's IDT; an e2e boot with `-cpu qemu64,-nx` expects that marker (F090)
 - [ ] CPU microcode updates for Intel and AMD from the vendors' published files, pinned by hash with their licenses under the §14.10 policy and loaded from the initrd: applied on the BSP before the §18.3 speculation mitigations read CPUID, and on each AP in its bring-up path; the container parsing and CPU-signature matching in the portable half, host-tested against the published files. In-guest, `-cpu Skylake-Server` and `-cpu EPYC-Milan` under TCG, each with its `ucode-rev` property set below the published update's revision, present signatures the published files cover; the loader selects the matching update, performs the load, and logs each CPU's revision before and after. QEMU accepts the load and leaves the revision unchanged, so a revision that changes is a Funded goals line
 - [ ] x2APIC: read `IA32_APIC_BASE.EXTD` at LAPIC enable. When firmware hands off in x2APIC mode, which may be locked, drive the LAPIC and ICR through MSRs, never clear EXTD, and never map the xAPIC MMIO page. Parse MADT types 9 and 10 alongside 0 and 4. QEMU exercises the handoff by booting OVMF on the §18.1 `q35` configuration (`pc` caps at 255 vCPUs) with more than 255 vCPUs, which hands off in x2APIC mode, under KVM or under TCG from QEMU 9.0, the first release whose TCG models x2APIC
+- [ ] `apic::apic_base_msr` keeps EXTD set when the value it reads has EXTD set, since writing EN=1 with EXTD=0 while EXTD is set is the x2APIC-to-xAPIC transition, which raises `#GP`; its host test covers an input with EXTD=1 (F028)
 - [ ] no CPU cap below the x2APIC range: `MAX_CPUS` and the `u8` APIC IDs in `src/acpi.rs`, and the 64-bit online, waiter, and shootdown masks behind `MAX_IPI_CPUS` in `src/ipi.rs`, replaced by tables sized from the MADT with 32-bit APIC IDs and CPU masks sized from the CPU count, so the boot above with more than 255 vCPUs brings every CPU online; today a CPU past the 64th is dropped from the MADT table without a log line
+- [ ] an AP that misses the 3 s ready timeout is sent INIT, its online bit is cleared, and its stack, GDT and TSS, IST stacks, `PerCpu` slot, and idle TCB are leaked, not freed by `smp_init::free_ap_resources`, since an AP that accepted a SIPI may still run on them. An in-guest test stalls one AP past the timeout through a test hook in `ap_entry` before it stores `ready`; the next AP comes up, and the frame count shows only the stalled AP's resources missing; DESIGN §7.4 step 6 and §9.5 updated in the same commit (F032)
+- [ ] `apic_init::disarm_timer` writes `IA32_TSC_DEADLINE` only in `TimerMode::TscDeadline`, since MSR `0x6E0` exists only when CPUID.01H:ECX[24] is set and `prove()`'s periodic-mode failure path would otherwise take `#GP` instead of falling back to the PIT; the per-mode disarm sequence is in `vibeos-core` with a host test per `TimerMode` (F092)
 - [ ] PCI enumeration and the §6.1 device registry sized from what the scan finds: `MAX_SCAN` in `src/pci.rs` and `MAX_DEVICES` in `src/dev.rs` gone, since server boards and §20.9's hotplug root ports pass 64 functions; today the 65th is dropped without a log line. A `q35` line with 72 `pcie-root-port` functions, eight per slot, enumerates every one
+- [ ] an ECAM configuration-page miss after `pci_init`'s 64-entry cache is full reuses or unmaps its `ioremap` VA instead of leaking one page of the window per miss; the 72-function `q35` boot above, run with `-vga none` so the MCFG window lies above `map_end`, ends its scan with at most 64 ECAM pages in the window (F115)
+- [ ] ECAM addressed from bus 0: `pci::ecam_phys` returns `base + (bus << 20 | dev << 15 | fn << 12 | off)` and keeps the `[start_bus, end_bus]` check, since the MCFG base corresponds to bus 0 (PCI Firmware Spec 3.2 §4.1.2); `acpi::parse_mcfg` returns every allocation keyed by segment and bus range; host tests cover a nonzero `start_bus` and the multi-entry MCFGs in the linuxhw/ACPI snapshot, and the `pci.rs` unit test that asserts the relative formula is changed to assert the absolute one (F045)
+- [ ] configuration mechanism #1 on every bus: where ECAM does not cover a bus, `HwCfg::read32` and `write32` use `0xCF8`/`0xCFC` for offsets below `0x100` on any bus number, instead of returning `0xFFFF_FFFF` and dropping writes past bus 0; on `pc`, which has no MCFG, a virtio-blk behind a `pci-bridge` enumerates, binds, and passes Phase 7's pattern test (F114)
+- [ ] BAR sizing as PCI Local Bus Spec 3.0 §6.2.5.1 gives it: `pci::probe_bar` saves `COMMAND` and clears its IO and MEM decode bits, sizes every BAR of the function under one `CFG_LOCK` hold, and then restores the BARs and `COMMAND`; `size_from_mask` ORs `0xFFFF_0000` into an I/O mask whose bits 31:16 read zero, host-tested with `decode_bar(0xC001, 0, 0x0000_FFE1, 0)` returning 32 bytes (F113)
+- [ ] PCI capability walks mask every capability pointer with `0xFC`, refuse a capability whose fields would reach past `0x100` (`0x1000` for an extended capability under ECAM), and read dwords only at 4-byte-aligned offsets, composing others from `read8` and `read16`, so no ECAM access is an unaligned `read_volatile`; `pci::walk_caps`, `virtio::read_modern_caps`, and `pci::read_msix_cap` are host-tested over a fake configuration space with a pointer whose low bits are set and a vendor capability at `0xF0` (F118)
 - [ ] BARs above 32 MiB mapped, with the `ioremap` window sized at boot from the BAR total instead of fixed at 256 MiB (DESIGN §4.1), since real GPUs and 100GbE NICs expose larger BARs; tested with an NVMe model whose 512 MiB controller memory buffer (`cmb_size_mb=512`) needs a BAR larger than today's window
 - [ ] I/O APIC and MSI routes to APIC IDs above 254 through §18.1's interrupt remapping, with its entries in x2APIC format (VT-d's extended interrupt mode, AMD-Vi's `XTEn`), tested on the §18.1 `q35` configuration with `eim=on` or `xtsup=on`; on a machine without a usable IOMMU, the §6.3 affinity API keeps device interrupts on CPUs whose APIC ID is 254 or lower
 - [ ] the memory map as each firmware builds it, never assumed to be QEMU's default layout: OVMF and SeaBIOS on `q35` and `pc` with 3, 4, and 5 GiB and with a size that is not a multiple of 2 MiB, and `q35` with `-numa` nodes whose ranges leave holes, each boot to `shell ready` and pass the Phase 1 memory tests
+- [ ] the kernel PML4 allocated below 4 GiB, since the AP trampoline loads a 32-bit CR3 and `smp_init::start_one` skips every AP, printing `smp: cr3 above 4GiB`, when it lies above; the 5 GiB boots of the box above run with `-smp 4` and print `smp: ap online` for every AP (kernel review invariant I16)
+- [ ] each Limine framebuffer mapped at `HHDM_BASE + phys` by its own range, independent of `PHYSMAP_CAP` and left out of `paging_init::physmap_extent`, so a GOP framebuffer in a 64-bit BAR above 8 GiB is drawn through a mapped address and no longer raises `map_end`; `Fb::new` refuses a framebuffer it cannot reach, and the console falls back to serial with a registered marker; host tests cover a framebuffer at `0x40_0000_0000` and one across the cap, since QEMU's display BARs are 32-bit, and an in-guest test translates every framebuffer page after `paging_init::install` (F020)
 - [ ] no physmap large page spans two MTRR memory types, which the SDM leaves undefined outside the fixed-range first MiB: at boot, when CPUID reports MTRRs, the kernel reads `IA32_MTRRCAP`, `IA32_MTRR_DEF_TYPE`, and the variable MTRR pairs, and before `mov cr3` maps with 4 KiB pages any 2 MiB physmap block whose ranges differ in type. The decision is in the portable half, host-tested against synthetic layouts that put a type boundary inside a 2 MiB block, and the boot log counts the blocks split under OVMF and SeaBIOS; DESIGN §4.3 and §9.2 updated in the same commit
+- [ ] `patch_physmap_uc` covers every leaf from `align_down(phys, leaf)` to `align_up(phys + len, leaf)`, and splits a 2 MiB physmap leaf to 4 KiB before patching when the leaf also holds usable RAM, so no RAM frame gets a UC alias beside its WB mappings; host tests cover an unaligned range that crosses 2 MiB and a BAR that shares a 2 MiB block with RAM; DESIGN §4.3 and §9.2 updated in the same commit (F104)
 - [ ] firmware tables beyond QEMU's: the §2.4 parsers (MADT, FADT, HPET, MCFG) and §18.1's DMAR and IVRS parser host-tested against every data table in the linuxhw/ACPI snapshot, whose `iasl` dumps end each data table with its raw bytes, and against QEMU's `tests/data/acpi`; each vendor quirk found is handled or rejected with a logged reason, and listed in `docs/HARDWARE.md` with the machines it came from
-- [ ] 8259 presence decided once, from the MADT `PCAT_COMPAT` flag, with a mask-register read-back probe when the flag is clear, as Linux does; it replaces both the FADT `LEGACY_DEVICES` skip before `lidt` and the unconditional second ICW sequence (§2.3). On a machine with no 8259, the PIT fallback through LINT0 ExtINT halts with a named reason. The decision is in the portable half, host-tested with `PCAT_COMPAT=1, LEGACY_DEVICES=0` and `PCAT_COMPAT=0` tables and against the snapshot's MADTs; DESIGN §5.5 and §7.1 updated in the same commit
+- [ ] `acpi::parse_madt` drops a repeated enabled LAPIC or x2APIC ID with one logged warning, and `smp_init` never sends INIT to an APIC ID already assigned a `PerCpu`, so a duplicate cannot reset a running AP or leave a CPU in the online mask that no core answers for; host tests feed a MADT that lists one ID twice (F035)
+- [ ] an I/O APIC whose VER register reads `0xFFFF_FFFF` is logged and skipped as absent instead of registered with `max_index` 255, and `apic::ioapic_max_index` clamps to 119, so a phantom listed first cannot shadow a present I/O APIC's GSIs in `find_ioapic`; host tests cover `0xFFFF_FFFF` and a valid VER value (F095)
+- [ ] exceptions before `arch::idt::init` report themselves: right after the Limine handshake the BSP loads an early IDT with no IST whose handlers print the vector, error code, RIP, and CR2 on raw COM1 and halt; a test build that faults before `arch::idt::init` shows the harness the early handler's line (F136)
+- [ ] `HhdmPhys` and `acpi_init::map_gap` refuse a physical address at or above the lower of MAXPHYADDR and `PHYSMAP_CAP`, and a table whose header length exceeds 1 MiB is refused before `checksum_range` maps it; the bounds are in `vibeos-core` with host tests (F136)
+- [ ] 8259 presence decided once, from the MADT `PCAT_COMPAT` flag, with a mask-register read-back probe when the flag is clear, as Linux does; it replaces both the FADT `LEGACY_DEVICES` skip before `lidt` and the unconditional second ICW sequence (§2.3). On a machine with no 8259, the PIT fallback through LINT0 ExtINT halts with a named reason. `FadtInfo::legacy_8259` is deleted, and so is the `legacy_8259` assertion in `acpi.rs`'s `fadt_iapc_and_reset` test, which keeps its reset and sleep-control assertions. The decision is in `vibeos-core`, host-tested with `PCAT_COMPAT=1, LEGACY_DEVICES=0` and `PCAT_COMPAT=0` tables and against the snapshot's MADTs; DESIGN §3.3, §5.5, and §7.1 updated in the same commit (F094)
+- [ ] external NMIs delivered: the BSP programs LINT1 in NMI delivery mode with the pin, polarity, and trigger from the MADT's Local APIC NMI entries (types 4 and `0x0A`), APs keep LINT1 masked as Linux's `setup_local_APIC` does, and MADT NMI Source entries (type 3) are routed at the I/O APIC; under TCG on `pc` and `q35`, the harness sends QMP `inject-nmi` and finds the NMI handler's registered marker from CPU 0; host tests cover the MADT NMI entries; DESIGN §2.5 updated in the same commit (F096)
 - [ ] a console without a 16550: QEMU's `usb-serial`, an FTDI FT232BM model, behind xHCI as Linux's `/dev/ttyUSB<N>`, which replays the §5.5 log ring when it registers, so a boot with `-serial none` gives the harness every marker from the `usb-serial` chardev; the framebuffer console carries output from the first line
 - [ ] a panic record, the §5.6 dump and the last log records, kept with a header and checksum in a RAM region at a physical address fixed by a §10.2 command-line option, which the frame allocator never hands out; at boot the region is checked against the Limine memory map and module placement, a conflict is logged rather than trusted, and a region whose header or checksum fails reads as empty. It is read back and logged on the next boot after a warm reset, since there is no host to catch it; tested under QEMU with a deliberate panic and the monitor's `system_reset` on both architectures. Firmware-backed stores and full memory dumps are Phase 25
 - [ ] the model list: `docs/HARDWARE.md` names each §20.8 profile with its machine type, the accelerators it runs under, its device models, firmware builds and their hashes, and QEMU version, generated from the harness profiles, with the §20.2 corpus results per machine, the linuxhw/ACPI attribution its CC-BY-4.0 license requires, and a physical section that stays empty until a Funded goal fills it; `scripts/check_hardware.py` in `make check` fails when the generated part differs from the profiles
 
 ### 20.2 ACPI runtime
-- [ ] an AML interpreter, which is a large and genuinely unpleasant subproject and unavoidable
+- [ ] an AML interpreter that loads a DSDT and its SSDTs into one namespace and evaluates control methods, done when it passes the exit gate's corpus lines
 - [ ] the interpreter in the portable half, fuzzed like every parser, and host-tested against three free corpora, none vendored: QEMU's `tests/data/acpi` (GPL-2.0, fetched at the pinned QEMU release), ACPICA's aslts compiled by the pinned `iasl`, and the linuxhw/ACPI snapshot of 815 machines at the commit §18.1 pins (CC-BY-4.0), whose DSDTs and SSDTs are `iasl`-decoded text that the pinned `iasl` recompiles, so the AML is equivalent to the machine's but not byte-identical
 - [ ] the device tree from the DSDT and SSDTs, resource assignment, `_CRS` parsing, `_PRT` interrupt routing
 - [ ] power management: S5 shutdown, and S3 suspend with resume through the FACS waking vector; S4 hibernation, which needs §12.7's swap, is §31.8's stretch
+- [ ] shutdown and reset from the FADT, not QEMU constants: `acpi::parse_fadt` reads Flags (offset 112) with `RESET_REG_SUP` and `HW_REDUCED_ACPI`, `PM1a_CNT_BLK`, `PM1b_CNT_BLK`, and their `X_` forms; `SLP_TYPx` comes from the interpreter's `_S5` package; `RESET_REG` is written, 8 bits wide, only when `RESET_REG_SUP` is set, in the I/O, memory (mapped UC through `ioremap` at boot), or PCI configuration space its address space ID names; the writes to ports `0x604` and `0xB004` and the fixed `SLP_TYP` of 5 in `shell_init.rs` are deleted; host tests parse the corpus FADTs (F097)
 - [ ] `suspend` and `resume` on the `Driver` trait (§6.1), called in dependency order, which S3 needs
 - [ ] deeper C-states from `_CST` (`_LPI` on aarch64), with a governor choosing depth by predicted idle duration; P-states and frequency scaling from `_PSS` or CPPC (`_CPC`); the §19.6 idle path gains both. QEMU generates none of these objects, so they are host-tested against the corpus's, evaluated through the interpreter over simulated fixed hardware, and in-guest the governor finds no deeper state and keeps §19.6's shallowest one with a logged reason
 - [ ] thermal zones and fan control, host-tested against the corpus's `_TZ` objects with a simulated embedded-controller address space, since QEMU models no thermal zone
@@ -2290,7 +2611,8 @@ not model are Funded goals.
 - [ ] Intel NICs beside §15.2's e1000: e1000e (82574L) and igb (82576), tested on QEMU's `e1000e` and `igb`; the Realtek 8168 family, which QEMU does not model, and NIC firmware loading are Funded goals
 - [ ] USB Ethernet: the CDC-ECM class driver, tested on QEMU's `usb-net` in its CDC Ethernet configuration; CDC-NCM and the ASIX AX88179 family, which docks and adapters carry and QEMU does not model, are Funded goals
 - [ ] Intel HDA: controller, codec discovery, and output streams, tested on `intel-hda` and `ich9-intel-hda` with `hda-output`: an in-guest test plays a 1 kHz tone into QEMU's `wav` audiodev, and a host check finds that frequency in the file; the rest of the audio stack is Phase 34
-- [ ] SD and eMMC: an SDHCI driver with SD and eMMC card support, tested on `sdhci-pci` with `sd-card` and with `emmc` (QEMU 9.1 or later), each card as Linux's `/dev/mmcblk<N>`, and root on either
+- [ ] `DmaAlloc::dma32` allocates from a buddy zone below 4 GiB, so the whole buffer lies below 4 GiB rather than only off a 4 GiB crossing, since the LIFO free lists pop high memory first; a host test allocates from a pool that spans 4 GiB, and an in-guest test in a 6 GiB guest (OVMF on `q35`, and `virt`) allocates 64 `dma32` buffers and finds each below 4 GiB; DESIGN §4.7 updated in the same commit (F030)
+- [ ] SD and eMMC: an SDHCI driver with SD and eMMC card support, tested on `sdhci-pci` with `sd-card` and with `emmc` (QEMU 9.1 or later), each card as Linux's `/dev/mmcblk<N>`, and root on either; `sdhci-pci` reports no 64-bit system bus support, so the driver takes its SDMA and ADMA2 buffers from `dma32`, and the SD and eMMC tests also pass in the 6 GiB guest above (F030)
 - [ ] i2c and SMBus, x86_64 only: the ICH9 SMBus controller on `q35` behind Linux's i2c-dev interface (`/dev/i2c-<N>` with `I2C_SLAVE` and `I2C_SMBUS`), so `i2cdetect` and `i2cget` from the §14.9 mirror find and read the eight EEPROMs QEMU puts at 0x50 to 0x57; sensors and embedded controllers are Funded goals
 - [ ] watchdog timers: `i6300esb` on both architectures, the ICH9 TCO timer built into `q35`, and the SBSA generic watchdog built into `sbsa-ref`, found through GTDT, each armed, fed, and stopped by a kernel driver; an in-guest test stops feeding each, and the harness sees QEMU's `WATCHDOG` event and the reset; §22.2 arms one at boot and §25.5 puts Linux's `/dev/watchdog` over them
 
@@ -2314,6 +2636,7 @@ account runs 20 jobs at once. Hardware performance events and physical machines 
 
 - [ ] a `hardware-models` workflow on the nightly schedule, with the `workflow_dispatch` trigger §10.9 requires: one job per harness profile and accelerator, the profiles named in `docs/HARDWARE.md` (`q35`, `pc`, `virt` with a device tree, `virt` with ACPI, and `sbsa-ref`), each a command line for the §10.1 pinned QEMU that attaches every device model this phase drives that the machine can take: NVMe with several namespaces, AHCI, xHCI with `usb-kbd`, `usb-mouse`, `usb-tablet`, `usb-storage`, `usb-net`, and `usb-serial`, e1000e, igb, HDA, `sdhci-pci` with SD and eMMC, the machine's watchdogs, and `pcie-root-port`s, plus §18.1's IOMMU on every machine but `pc`, which takes none (`intel-iommu` or `amd-iommu` on `q35` as §18.1 runs them, `iommu=smmuv3` on both `virt` profiles, and `sbsa-ref`'s built-in SMMUv3), and §18.7's swtpm TPM on every machine but `sbsa-ref`, which takes none; the x86_64 profiles run under KVM and under TCG, the aarch64 ones under TCG
 - [ ] each job runs the in-guest tiers and this phase's model tests on its profile and commits a record (profile, accelerator, runner CPU, QEMU version, firmware hashes, result, and on an x86_64 KVM job the nesting its runner offers a guest: `vmx`, `svm`, or `none`) to §10.9's `ci-history`; the nesting is read on the host before the boot, with `kvm_intel` or `kvm_amd` loaded with `nested=1`, from the `vmx` and `svm` properties of a `-cpu host` vCPU (QMP `qom-get` on a QEMU started with `-S`), so it does not rest on vibeOS's own VMX or SVM code; `scripts/ci_history.py` fails when a night lacks a profile's record, since GitHub delays scheduled runs under load and disables a public repository's schedules after 60 days without activity
+- [ ] each x86_64 record names the LAPIC timer mode the boot chose (`tsc-deadline`, `periodic`, or `pit`), and a KVM job fails when CPUID reports TSC-deadline and the boot chose another mode (F078)
 - [ ] a corpus job runs the §20.2 host tests over the linuxhw/ACPI snapshot, QEMU's `tests/data/acpi`, and aslts, and the §20.7 device-tree tests, with every input fetched by hash and cached between runs
 - [ ] a hung guest ends at the harness timeout with its §10.7 core uploaded, which is the power control a hosted runner needs
 - [ ] the Phase 17 on-device `make test`, nightly, on vibeOS as a 4-vCPU, 4 GiB guest under KVM on the x86_64 runner; on aarch64 it would be TCG inside TCG on the arm64 runner, so its run is a §10.9 dev-host record under HVF
@@ -2327,6 +2650,7 @@ from a running machine needs hotplug.
 - [ ] native PCIe hotplug: slot capabilities, presence-detect and link-state interrupts, the attention button, slot power, and resource assignment for a new device from bridge windows sized with headroom at boot; the kernel asks for native control through `_OSC` and uses ACPI hotplug when firmware keeps it
 - [ ] ACPI hotplug through bus-check and eject notifications and `_EJ0` (§20.2), which `q35` uses by default
 - [ ] removal: in-flight I/O completes with an error, the driver's `remove` runs, its DMA mappings and interrupt vectors are released, and nothing panics; a surprise removal takes the same path, host-tested against a simulated slot whose presence detect drops without an attention-button press
+- [ ] a driver turns on bus mastering itself after it resets its device, and `dev_init::bind_all` no longer turns it on before `probe`; a probe that fails after the device holds queue addresses writes device status 0, polls until it reads 0, and clears `COMMAND.MASTER` before it frees its queue and data memory, and `remove` keeps that order; an in-guest test fails the virtio-blk and virtio-rng probes after `QENABLE` through a test hook and reads status 0 and bus mastering off before the frames return to the buddy allocator (F116)
 - [ ] persistent block device names from the serial number and NVMe namespace under `/dev/disk/by-id`, never from probe order
 - [ ] the §18.1 `q35` harness configuration gains PCIe root ports, with a native-hotplug variant (`-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off`), and the §11.7 aarch64 `virt` command line gains `pcie-root-port` devices, which hotplug natively. On both architectures a UEFI run loads the firmware as read-only code in pflash unit 0 and a writable per-run copy of its variable-store template in unit 1, the §10.2 probe locating the template beside each firmware image, so a variable survives a reboot into a new QEMU process on the same copy
 
@@ -2405,6 +2729,7 @@ emulator and, on aarch64, the loads and stores that exit without a valid syndrom
 - [ ] VMX and SVM detection and enablement, with the feature MSR checks
 - [ ] a VMCS or VMCB per vCPU, with guest and host state areas
 - [ ] the VM entry and exit path, and exit reason decoding
+- [ ] x86_64: the §18.3 speculation posture at VM entry and exit, each part chosen from the §18.3 enumeration and reported as Linux reports `l1tf` and `mds` for a host: an IBPB when a CPU switches between two guests' vCPUs, an RSB fill after VM exit, `IA32_FLUSH_CMD.L1D_FLUSH` before VM entry on a CPU that enumerates it and lacks `SKIP_L1DFL_VMENTRY`, and `verw` before VM entry where MDS applies; each is measured in the nested job (F131, F132)
 - [ ] EPT or nested paging for guest physical to host physical translation
 - [ ] guest interrupt injection, virtual APIC, and posted interrupts where available
 - [ ] MSR and I/O bitmaps, and instruction emulation for the exits that need it
@@ -2434,7 +2759,8 @@ means QEMU with `-accel kvm` on vibeOS.
 ### 21.4 Guest support
 - [ ] x86_64: detect running under a hypervisor through CPUID leaf `0x40000000`
 - [ ] x86_64: KVM paravirtual clock, so timekeeping is not calibrated against a lying TSC
-- [ ] x86_64: paravirtual spinlocks, since spinning in a preempted vCPU is a disaster
+- [ ] x86_64: paravirtual spinlocks through `KVM_FEATURE_PV_UNHALT` and the `KVM_HC_KICK_CPU` hypercall, so a waiter whose lock holder's vCPU is preempted halts instead of spinning
+- [ ] a guest whose vCPUs the host deschedules does not panic; §10.10's `wait_acks` logs a late CPU and keeps waiting. On the §10.1 KVM leg, a 4-vCPU guest with every vCPU thread pinned to one host CPU runs the §4.10 shootdown test and brings every AP online, with no panic, no `wait_acks` late-CPU line, and no `smp: apic <id> timed out` (F032)
 - [ ] aarch64: hypervisor detection through the SMCCC vendor-hypervisor UID call, and stolen time through SMCCC `PV_TIME`; the virtualized generic timer needs no paravirtual clock
 - [ ] balloon driver for memory reclaim by the host
 - [ ] Hyper-V detection on both architectures: the `Microsoft Hv` signature at CPUID `0x40000000` and its feature leaf `0x40000003` on x86_64; on aarch64, the FADT hypervisor vendor identity `MsHyperV` (§20.7's ACPI) or Hyper-V's UID from the SMCCC vendor-hypervisor call above; the detected hypervisor is logged. An in-guest test on the §10.1 KVM leg with `hv-time` and `hv-frequencies` on the `-cpu` line finds Hyper-V, and a host test covers the aarch64 path against a recorded FADT. Hyper-V's hypercalls, SynIC, and reference TSC page are §26.5's
@@ -2496,7 +2822,7 @@ the §22.3 tested-platforms list, are [Funded goals](#funded-goals).
 **Exit gate**
 - [ ] a live image for each architecture boots to a graphical desktop that matches its §16.1 reference image, attached as a `usb-storage` disk on `qemu-xhci`, as a user writes it to a USB stick, with a `usb-kbd` and a `usb-tablet` as its only input devices; the x86_64 image also boots as an AHCI CD-ROM
 - [ ] the installer, run from the live image, partitions a blank NVMe disk, installs, and produces a system that boots to its desktop with the live image detached: once unattended from a configuration file, and once interactively, driven through QMP `input-send-event` and checked against a §16.1 reference image at each screen
-- [ ] a release is built reproducibly: the same source produces byte-identical artifacts
+- [ ] a release is built reproducibly: before signing, the artifacts the §22.4 build on vibeOS produces are byte-identical to those a hosted Linux job builds from the same commit with a different checkout path, `CARGO_HOME`, rustup home, user id, and clock (F151, F152)
 - [ ] artifacts are signed and verified on install
 - [ ] the CI that gates releases runs on vibeOS: in the nightly job, the §22.4 agent on an installed vibeOS, a 4-vCPU, 4 GiB guest under KVM on the hosted x86_64 runner, builds both architectures, runs `make test` for both, and posts the result as a commit status; `release.yml` refuses a candidate without a passing one
 - [ ] a fresh install builds and releases vibeOS: in the release workflow, a fresh unattended install from the candidate's installer image, a 4-vCPU, 4 GiB guest under KVM on the hosted x86_64 runner, builds the release's artifacts for both architectures and signs them there, and those are the ones published (§22.4); a fresh aarch64 install does the same build under HVF on the dev host as a §10.9 record, unsigned, since the keys stay with the workflow
@@ -2528,7 +2854,7 @@ the §22.3 tested-platforms list, are [Funded goals](#funded-goals).
 - [ ] recovery: a rescue shell and `fsck` on boot, and the other slot's boot entry kept in `BootOrder` after a commit, so the previous release stays bootable from the firmware menu
 - [ ] two slots, A and B, created by the installer: each a root partition plus an ESP directory holding its own kernel, initrd, Limine binary, and Limine configuration, since Limine reads only FAT and ISO 9660 and cannot load a kernel from the root; each slot has its own UEFI boot entry for its Limine binary, which reads the configuration beside it (Limine 10.3 and later); the installer writes each entry itself as a `Boot####` load option through §20.9's efivarfs, an `HD()` node (the ESP's partition number, start LBA, size, and unique partition GUID) and a `File()` node for that Limine binary, and adds it to `BootOrder`, since `efibootmgr -c -d` reads Linux's `/sys/class/block`, which is Phase 23. An update writes the inactive slot from the §14.6 packages its signed release manifest names, fetched over §15.8 HTTP and verified against that manifest before anything is written
 - [ ] a trial boot: the updated slot boots once through UEFI `BootNext` (§20.9), and is committed by rewriting `BootOrder` only when a declarative health check passes (services up under §14.3's init, the network reachable, and a probe each service defines); a failed check reboots
-- [ ] `panic=<seconds>` on the §10.2 command line, set in each slot's Limine configuration: the panic handler prints its dump, waits, and resets through the ACPI or PSCI path the §10.5 `reboot` call uses; halting stays the default, so the harness and the Phase 0 panic gate are unchanged
+- [ ] `panic=<seconds>` on the §10.2 command line, set in each slot's Limine configuration: the panic handler prints its dump, waits, and resets through the ACPI or PSCI path the §10.5 `reboot` call uses; halting stays the default, so the harness and the Phase 0 panic gate are unchanged. The reset register is the one §20.2 maps at boot, so the panic path maps nothing and takes no lock; on x86_64, if the machine still runs 1 s later, it pulses the 8042 reset line and then resets through port `0xCF9` (F097)
 - [ ] §20.6's `i6300esb` driver armed at boot and fed by init for as long as the system runs, so a hang during a trial boot, or after one, resets the machine
 - [ ] a trial boot that panics, hangs, or fails its health check comes back on the old root at the next reset with no human action, since `BootNext` lasts one boot; Phase 25 extends the panic policy and the watchdogs
 
@@ -2547,7 +2873,7 @@ the §22.3 tested-platforms list, are [Funded goals](#funded-goals).
 - [ ] the whole thing scripted and documented so it is a procedure rather than a story
 
 ### 22.5 Security process
-§18.8 wrote down an informal process. With users, it has to run without improvising.
+§18.8's `SECURITY.md` names a reporting channel and a triager. With users, reports follow the procedure below.
 
 - [ ] private vulnerability reporting enabled on the repository, a setting only the maintainer can change, and `SECURITY.md` naming how to report, what is in scope, the supported releases, and the response times
 - [ ] an embargo procedure in `SECURITY.md`: the fix developed in the advisory's temporary private fork and tested with `make test` before merge, released to `main` and every supported release branch at once, with the GitHub security advisory published and a CVE identifier requested through GitHub
@@ -2627,9 +2953,9 @@ provide. Each lands with the semantics its LTP and kselftest cases check.
 ### 23.2 glibc and Debian
 - [ ] glibc's dynamic linkers, `ld-linux-x86-64.so.2` through `/lib64` and `ld-linux-aarch64.so.1` in `/lib`, load through §14.2's `PT_INTERP` path unmodified
 - [ ] the pinned Debian root (the `debuerreotype` build behind the official `debian` image) for each architecture, entered the way §14.9 enters Alpine's, with `bash`, coreutils, and `python3` running under glibc; `dpkg` and `apt`, like §14.9's `apk`, own files only inside a Linux root (a `vibeos-linux` chroot or a root booted whole, §23.5), never in the vibeOS base system
-- [ ] glibc's startup, `pthread_create`, `posix_spawn`, multithreaded `setuid`, and thread cancellation paths traced once with §9.3's syscall tracing, and every call they make implemented, none left to a fallback
+- [ ] glibc's startup, `pthread_create`, `posix_spawn`, multithreaded `setuid`, and thread cancellation paths traced once with `strace -f` over §17.4's `ptrace`, and every call they make implemented, none left to a fallback (F150)
 - [ ] a pinned local Debian mirror snapshot on a disk image for each architecture, holding the closure of the packages this phase installs, read by `apt-get` through a `file:` source with `Release` signatures verified against Debian's archive keys by the verifier the pinned release's apt uses (`sqv`, or `gpgv`), so nothing here needs a route to the internet
-- [ ] `dpkg` survives a guest killed mid-unpack: after the reboot, `dpkg --configure -a` completes and `dpkg --audit` reports nothing, which holds only if vibefs honors the `fsync` and `rename` ordering `dpkg` relies on
+- [ ] `dpkg` survives a power cut mid-unpack on §12.5's volatile-cache device, where a cut loses the writes the guest has not flushed: after the reboot, `dpkg --configure -a` completes and `dpkg --audit` reports nothing, which holds only if vibefs honors the `fsync` and `rename` ordering `dpkg` relies on; the cut falls at a seeded random point in each of 100 unpacks of one package set, under TCG with 2 vCPUs and 2 GiB, on both architectures; a killed QEMU loses no write the host received (§12.5), so killing QEMU cannot show a missing flush (F080)
 
 ### 23.3 Devices in Linux's layout
 This replaces §8.4's `sysfs`-equivalent layout. libudev, `mdev`, libinput, libdrm, `lsblk`, and `ip` find
@@ -2668,7 +2994,7 @@ entries to what procps, util-linux, glibc, and the runtimes parse.
 - [ ] the calls init and getty make: `reboot` with Linux's magic numbers and commands, including the ctrl-alt-del ones every init sends; `vhangup`; and `syslog(2)` for `klogd` and busybox `dmesg`
 - [ ] Alpine: a root that `apk` installs from the §14.9 mirror into an empty directory, as `setup-disk` does (`alpine-base`, OpenRC, busybox `mdev`, `openssh`), written to a vibefs v2 disk; the build writes configuration files (`fstab`, `inittab`, `interfaces`) and changes no binary
 - [ ] Debian: the §23.2 root after `apt-get install sysvinit-core udev ifupdown openssh-server` from the mirror, written to a vibefs v2 disk, with configuration written the same way
-- [ ] the harness boots each root, waits for its serial login prompt, logs in over `ssh` through QEMU's user networking, runs a command, and ends with the root's own `poweroff`, so the shutdown path is tested as well
+- [ ] the harness boots each root, waits for its serial login prompt, logs in over `ssh` through QEMU's user networking, writes a file and runs a command, and ends with the root's own `poweroff`; the run passes only when QEMU exits on the guest's power-off request, host `fsck-vibefs` then finds the root disk clean, and the file is on the disk with its contents, so the shutdown path's sync and unmount are tested as well (F060)
 
 ### 23.6 Suites
 - [ ] the reference kernel: Debian's `linux-image` from the §23.2 mirror with its own initramfs, booted on the same QEMU machine, CPU model, accelerator, CPU count, and memory as the vibeOS guest, on the same hosted runner label, over the same root contents on ext4, with each suite's scratch directory on tmpfs in both; a case counts as passing on the reference when it passes in each of three runs, and the passing sets are checked in and retaken when a pin changes
@@ -2735,10 +3061,12 @@ Moved from §17.2 and §17.3, which close Phase 17 on upstream binaries (§17.7)
 - [ ] `tcc` first: small, self-hosting, and a fast way to prove the from-source path; built by §17.7's clang, then by itself until two generations match
 - [ ] GNU binutils from source, for the ports that call `as` and `ld` by name
 - [ ] then LLVM with clang, lld, compiler-rt, libunwind, and libc++, built first by §17.7's clang and then by itself until two generations of clang and lld match byte for byte, each a Release build without debug info; mostly a test of the C++ standard library and of filesystem behavior at scale
-- [ ] `rustc` and `cargo` through `x.py` at the pinned nightly, since the kernel uses nightly features: natively, as a local rebuild with §17.7's `rustc` and `cargo` as stage 0, and with rustc's own `src/llvm-project`, so its code generation matches the upstream build's, with debug info off for the compiler, the tools, and that LLVM, while `core` and `std` keep upstream's dist debug settings, since the kernel, built with `debug = true`, carries their debug info into the ELFs the §17.5 loop script compares; then again, as a local rebuild with that build's `rustc` and `cargo` as stage 0, until two generations of `rustc` match byte for byte
+- [ ] `rustc` and `cargo` through `x.py` at the pinned nightly, since the kernel uses nightly features: natively, as a local rebuild with §17.7's `rustc` and `cargo` as stage 0, and with rustc's own `src/llvm-project`, so its code generation matches the upstream build's; then again, as a local rebuild with that build's `rustc` and `cargo` as stage 0, until two generations of `rustc` match byte for byte
+- [ ] the `x.py` build's targets are the host triple, both kernel targets, and every target the ISO's user programs build for, so the `core`, `alloc`, and `compiler_builtins` the kernel links come from this build and not from upstream's `rust-std`, which the kernel links today (no `build-std`)
+- [ ] the `x.py` build's debug info is off for the compiler, the tools, and the `src/llvm-project` LLVM, while the target libraries keep upstream's dist settings, `rust.remap-debuginfo` included, so their source paths read `/rustc/<commit>` as upstream's do; the kernel, built with `debug = true`, carries their debug info and panic locations into the ELFs the §17.5 loop script compares (F151)
 - [ ] CPython, QEMU, and `xorriso` (§17.6), `git` (§17.4), `make`, `cmake`, and `ninja` (§17.2), and `nasm`, which Limine's x86 build needs, rebuilt the same way
 - [ ] Limine from its pinned source release, built with the rebuilt clang and `nasm`, in place of the binary branch `setup.sh` fetches, in the ISO the §24.1 toolchains build
-- [ ] the §17.5 loop script builds the ISO once with §17.7's upstream toolchains in the `vibeos-build` image and once with the §24.1 toolchains in the §24.5 build image, and fails when the kernel ELFs or initrds differ, or when another file differs without its cause in `docs/BOOTSTRAP.md`, on both architectures
+- [ ] the §17.5 loop script builds the ISO once with §17.7's upstream toolchains in the `vibeos-build` image and once with the §24.1 toolchains in the §24.5 build image, and fails when the kernel ELFs or initrds differ, or when another file differs without its cause in `docs/BOOTSTRAP.md`, on both architectures; the two toolchains sit at different install paths, which §10.2's path remapping keeps out of the kernel image (F151)
 - [ ] build times recorded next to §17.5's, per architecture with its accelerator (x86_64 under KVM, aarch64 under TCG), as each shard chain's summed job time and wall time, with the §24.2 full rebuild's beside them
 
 ### 24.2 Ports
@@ -2865,17 +3193,18 @@ continuous soak on real machines are [Funded goals](#funded-goals).
 - [ ] §25.2's host tests parse the HEST, BERT, ERST, and EINJ tables of every server report in the linuxhw/ACPI corpus that carries them, each rebuilt from its raw table bytes
 - [ ] a panic under QEMU with a capture kernel loaded boots the capture kernel through kexec without firmware; it writes a filtered ELF vmcore, and host `gdb` opens it with the kernel ELF and prints the panicking CPU's backtrace and the registers of a second CPU that was spinning with interrupts off at the panic; both architectures under TCG, 4 CPUs, 2 GiB, aarch64 on `virt,gic-version=3`
 - [ ] `kexec` from a running system reaches `shell ready` in the new kernel without firmware in under 2 s, in a 2-vCPU, 1 GiB guest under KVM on the KVM runner, and on aarch64 under HVF on the dev host as a §10.9 record
-- [ ] a CPU spinning with interrupts off for 10 s is reported with its backtrace by the hard lockup detector: through GICv3 pseudo-NMIs raised by the emulated PMUv3's overflow interrupt on aarch64 under TCG, and through the buddy check on x86_64 under TCG and under KVM on the KVM runner; a thread that never yields for 20 s is reported by the soft lockup detector, on both architectures under TCG
+- [ ] a CPU spinning with interrupts off for 10 s is reported by the hard lockup detector with a backtrace whose first two frames the harness matches, through the kernel ELF's symbol table, to the test's spin function and its caller: through GICv3 pseudo-NMIs raised by the emulated PMUv3's overflow interrupt on aarch64 under TCG, and through the buddy check on x86_64 under TCG and under KVM on the KVM runner; on x86_64, a kernel thread on another CPU exits during the spin, and the shootdown its stack free sends waits in `wait_acks` until the spinning CPU acknowledges it after the spin, with no CPU panicking, as §10.10's `wait_acks` box requires (F070, F084)
+- [ ] with a test hook in the `kernel_tests` build stopping one CPU's scheduler from switching threads for 30 s with interrupts on, the soft lockup detector reports that CPU and its backtrace, on both architectures under TCG
 - [ ] after §20.6's `i6300esb` watchdog, armed by §22.2, resets a guest whose CPUs all spin with interrupts off (lockup detectors off), the next boot reports the reset reason as watchdog, and `WDIOC_GETBOOTSTATUS` returns `WDIOF_CARDRESET`, under QEMU on both architectures
 - [ ] after a panic and a cold restart (under QEMU, a new QEMU process on the same variable store), the next boot logs the panic record: from an EFI variable under OVMF and the aarch64 edk2 build, and from ERST on x86_64 `q35` through QEMU's `acpi-erst` device, backed by a file the new QEMU process reopens
 - [ ] a guest with no serial port (`-serial none`) reports its panic through netconsole to the harness's listener, on both architectures
 - [ ] the §25.7 SQLite test, in WAL mode with `synchronous=FULL` on §12.5's volatile-cache device, loses no acknowledged transaction across 1000 simulated power cuts, on both architectures, on the weekly job in shards of at most 5.5 hours
 - [ ] the in-guest suite passes with every registered counter narrower than 64 bits started one minute before its wrap (§25.7), on both architectures
-- [ ] 72 hours of guest uptime on each architecture, in a 4-vCPU, 2 GiB guest under TCG running fork and exec, file I/O with `fsync`, and TCP to a peer on the runner, carried across shards by the §25.7 soak job, end with no panic, and §25.7's slope check projects under 1% growth over 30 days for frame, heap, slab, and descriptor counts; the same job runs one 5.5-hour shard of the workload under KVM on the KVM runner (4 vCPUs, 4 GiB) with the same checks; from this phase on the soak runs weekly on `main`, and a red soak blocks the next release like any scheduled job
+- [ ] 72 hours of guest uptime on each architecture, in a 4-vCPU, 2 GiB guest under TCG running fork and exec, file I/O with `fsync`, and TCP to a peer on the runner, carried across shards by the §25.7 soak job, end with no panic, and §25.7's slope check projects under 1% growth over 30 days for frame, heap, slab, and descriptor counts and each vibefs volume's used blocks and used inodes; the same job runs one 5.5-hour shard of the workload under KVM on the KVM runner (4 vCPUs, 4 GiB) with the same checks; from this phase on the soak runs weekly on `main`, and a red soak blocks the next release like any scheduled job (F049)
 - [ ] tag `phase-25` and cut the next release
 
 ### 25.1 Machine checks
-- [ ] MCA on every CPU: `CR4.MCE`, the bank count from `MCG_CAP`, every bank enabled, and any status found at boot logged as an error from the previous boot before it is cleared
+- [ ] MCA on every CPU, where §10.6 already sets `CR4.MCE`: the bank count from `MCG_CAP`, every bank enabled, and any status found at boot logged as an error from the previous boot before it is cleared (F026)
 - [ ] the `#MC` handler on its §2.1 IST stack reads `MCi_STATUS`, `MCi_ADDR`, and `MCi_MISC`, grades severity (corrected, UCNA, SRAO, SRAR, fatal) by Intel's encoding, and by AMD's `Deferred` and `Poison` bits on AMD CPUs, and takes no lock that normal code holds
 - [ ] broadcast machine checks rendezvous every CPU and elect one to decide; local machine checks (`LMCE`) stay on one CPU; only fatal severity panics; QEMU's `mce -b` broadcasts on an Intel CPU model, and the CPU's `lmce=on` offers `LMCE`
 - [ ] corrected errors found by a poll timer with a per-bank threshold, the path QEMU exercises, since it models no CMCI
@@ -2902,7 +3231,9 @@ continuous soak on real machines are [Funded goals](#funded-goals).
 ### 25.4 kexec and crash capture
 - [ ] Linux's `kexec_file_load`, with `KEXEC_FILE_ON_CRASH` for the capture kernel, and `reboot` with `LINUX_REBOOT_CMD_KEXEC` for the jump, so unmodified `kexec` from kexec-tools drives both: load a kernel and initrd, verify the kernel's signature against the §18.7 keys, and stage the jump
 - [ ] a direct entry that takes a serialized `BootInfo` (§10.3), so a kernel started by kexec needs neither Limine nor firmware, and `BootInfo` stays the only boot input it reads
+- [ ] `kexec_file_load` does for the new image what Limine does for a firmware boot: it draws the slide from §14.7's CSPRNG, applies the image's §18.2 relocations, builds the initial page tables the entry runs on (the image at the slid base, the HHDM at an offset it also draws), and writes both offsets and a fresh seed for §18.2's region bases into the serialized `BootInfo`, so §18.2's rule that the kernel never computes its own base holds; DESIGN §4.1 names the loader as a second source of the base
 - [ ] `shutdown` on the §6.1 `Driver` trait quiescing DMA on every device before the jump, since a NIC still writing into the old kernel's buffers corrupts the new one
+- [ ] after every driver's `shutdown`, the PCI core clears Bus Master Enable on every function, bound or not, as Linux does before a kexec, and the new kernel's drivers set it only after resetting their devices (§20.9); an in-guest test kexecs with a virtio-blk request in flight and a PCI function no driver binds, and the new kernel reads Bus Master Enable clear on every function before its first probe (F116)
 - [ ] before a non-crash jump, every CPU but the one making it leaves the old kernel: on aarch64 it goes offline through §19.6 with PSCI `CPU_OFF`, so the new kernel's `CPU_ON` (§11.4) does not return `ALREADY_ON`; on x86_64 it leaves VMX or SVM operation (§21.1), since VMX root operation blocks INIT, and halts with interrupts off until the new kernel's INIT-SIPI
 - [ ] x86_64 entry through a purgatory that checks the loaded image's digest; aarch64 entry with the MMU and caches off at the entry exception level, after cleaning to the point of coherency
 - [ ] a capture region reserved at boot by a `crashkernel=` option on the §10.2 command line; with a capture kernel loaded, the panic path stops every other CPU with the §25.5 NMI IPI instead of the §4.9 halt broadcast, which a CPU with interrupts off never takes, then jumps into the capture kernel; on aarch64 the IPI is a GICv3 pseudo-NMI, and on GICv2 the §11.3 panic-halt SGI; DESIGN §2.5 records this path beside the Fixed `0xFE` halt
@@ -2913,17 +3244,21 @@ continuous soak on real machines are [Funded goals](#funded-goals).
 - [ ] the KASLR offset (§18.2) and the build id in the vmcore notes; the §10.7 core tool reads the capture kernel's ELF vmcores as well as the harness's QEMU dumps
 
 ### 25.5 Watchdogs and lockups
-- [ ] a soft lockup detector: a per-CPU timer checks that the scheduler has run within a threshold, and reports the CPU's current thread and backtrace
-- [ ] a hard lockup detector on NMIs: GICv3 pseudo-NMIs through priority masking on aarch64, raised by the PMU overflow interrupt, which changes how `InterruptGuard` masks there; on x86_64, whose hosted guests have no PMU (Phase 19), a buddy check in which each CPU watches another's timer count
-- [ ] an all-CPU backtrace on demand through the NMI IPI, from the shell and from a serial break sequence, which works when the scheduler does not
-- [ ] the §3.4 blocked-thread sweep reports the thread's stack and the lock or wait queue it is on, not only its id
+- [ ] a soft lockup detector reports a CPU that stays on one thread longer than a threshold with interrupts on; a thread that never yields is preempted by the §3.3 timer tick, and a spin with interrupts off is the hard lockup detector's. A per-CPU watchdog thread above every §19.4 real-time priority records when it last ran, and a per-CPU timer that fires every 4 s, in §19.6's tickless idle too, reports the CPU's current thread and backtrace when that record is older than the threshold
+- [ ] a hard lockup detector on NMIs: GICv3 pseudo-NMIs through priority masking on aarch64, raised by the PMU overflow interrupt, which changes how `InterruptGuard` masks there; on x86_64, whose hosted guests have no PMU (Phase 19), a buddy check: each CPU checks that the next online CPU's count of the soft lockup detector's 4 s timer has advanced since its own previous check, and sends that CPU the NMI IPI for its backtrace when it has not; that timer fires in §19.6's tickless idle too, so an idle CPU is not reported
+- [ ] the NMI handler acts on a per-CPU request word (panic stop, backtrace, lockup check) and treats an NMI with no request pending as external: the CPU that takes it prints every online CPU's backtrace through the NMI IPI and returns, where today every NMI halts the kernel (`arch::idt`'s `nmi` handler)
+- [ ] an all-CPU backtrace on demand through the NMI IPI, from the shell, from a serial break sequence, and from QMP `inject-nmi`, which works when the scheduler does not; `inject-nmi` reaches the BSP through the LINT1 routing §20.1 programs from the MADT, and the harness sends it under TCG and under KVM on the KVM runner and finds a backtrace for every online CPU (F096)
+- [ ] each NMI backtrace walk reads only the stacks §10.7's walker accepts, so the NMI handler takes no fault; a fault's `iretq` would unblock NMIs, and the next NMI would land on the same IST stack (F139)
+- [ ] the §3.4 blocked-thread sweep covers every blocked thread, with a deadline or without one, and reports a thread blocked longer than a threshold with its stack and the lock or wait queue it is on, not only its id; an in-guest test blocks a thread with no deadline on a wait queue nothing wakes and finds the report naming that queue; today the sweep, which §10.7 made fire, sees only waiters with a deadline (F111)
 - [ ] `/dev/watchdog` with Linux's ioctls (`WDIOC_KEEPALIVE`, `WDIOC_SETTIMEOUT`, `WDIOC_GETBOOTSTATUS`) over §20.6's watchdog drivers (`i6300esb`, the ICH9 TCO timer on `q35`, and the SBSA generic watchdog on `sbsa-ref`); init (§14.3) keeps feeding it after §22.2's health check commits, and stops when a critical service misses its own heartbeat
 - [ ] §22.2's panic-reboot policy records the reason in the §25.6 persistent record and, when a capture kernel is loaded, takes the §25.4 vmcore before the reboot
 - [ ] the reset reason (watchdog, panic, machine check, power) reported at boot from the persistent record or the watchdog's status
 
 ### 25.6 Persistent records and remote console
 - [ ] an EFI-variable backend for the panic record over §20.9's runtime services and an ERST backend over §25.2's table, beside §20.1's reserved-RAM record, for machines where RAM does not survive a reset; under QEMU the ERST store is `-device acpi-erst` on a shared `memory-backend-file`, so it outlives the QEMU process
+- [ ] the panic path takes §20.9's runtime-services lock only with a trylock; when that fails, or the panic arose inside a runtime call, it skips the EFI variable and writes the ERST or reserved-RAM record, since UEFI runtime services are not reentrant
 - [ ] netconsole: log lines sent as UDP from a NIC driver in polled mode, usable from the panic path with interrupts off; virtio-net and e1000 first
+- [ ] netconsole's panic path sends on a transmit queue reserved for it where the device has more than one; elsewhere it takes the transmit lock with a trylock and, when a stopped CPU holds it, resets the transmit ring before sending; an in-guest test panics while another CPU is inside the driver's transmit function, and the harness's listener receives the whole dump (F135)
 - [ ] the harness gains a netconsole listener and asserts markers from it as it does from serial
 
 ### 25.7 Counter wraps, durability, and long runs
@@ -2931,9 +3266,11 @@ continuous soak on real machines are [Funded goals](#funded-goals).
 - [ ] a `make check` script that fails on a 32-bit or 16-bit field named as a counter (`*_count`, `*_ticks`, `*_seq`, `*_gen`) outside that type
 - [ ] a boot option on the §10.2 command line that starts every registered counter one minute before its wrap, run as a scheduled test variant
 - [ ] a test program over SQLite from the §14.9 mirror runs WAL-mode transactions against §12.5's volatile-cache device, cuts power at a random point in each iteration, and checks that every acknowledged transaction survived
-- [ ] the soak job: a weekly workflow per architecture of consecutive shards under the Era VI long-run rule, each restoring the guest, its disk images, and its counter series from the previous shard's artifacts and saving them when its time is up; a shard the runner loses, rather than the guest, is rerun from the artifacts it started from; QEMU is the §10.1 pin, so every shard restores into the same version and machine type, and the guest has no device that blocks migration, such as §17.4's host mount
+- [ ] the soak job: a weekly workflow per architecture of consecutive shards under the Era VI long-run rule, each restoring the guest, its disk images, and its counter series from the previous shard's artifacts and saving them when its time is up; QEMU is the §10.1 pin, so every shard restores into the same version and machine type, and the guest has no device that blocks migration, such as §17.4's host mount
+- [ ] a soak shard whose job ends without a harness verdict (GitHub reports the runner lost or the job cancelled, and the shard's artifacts hold no harness result) is rerun once from the artifacts it started from, with the rerun and its cause in the job summary; a second loss of the same shard is red; a shard in which the harness saw a guest timeout, a panic, a watchdog reset, or a failed check is red and never rerun (F021)
 - [ ] the soak's TCP peer runs on the runner and restarts with each shard; a connection cut at a shard boundary is counted and reopened, not failed
 - [ ] the soak workload and its counter sampling scripted in `tests/`, with a leak check that fits a slope to each counter rather than comparing two points, run at the end of every shard after the first over the series carried so far, so a leak fails the shard it shows in
+- [ ] the soak workload keeps its live file set constant, and the sampled counters include each mounted vibefs volume's used blocks and used inodes, so an on-disk leak shows as a slope; vibefs v1 leaked blocks on every mount session that committed and on every write that failed in `add_extent` after allocating its block, and `fsck` reported no errors (F049, F051)
 
 ### 25.8 Stretch: BMC
 - [ ] IPMI over KCS and SSIF against QEMU's simulated BMC (`ipmi-bmc-sim` with `isa-ipmi-kcs`, and `smbus-ipmi`) on x86_64: panics and machine checks written to the BMC's system event log, the BMC watchdog as a second watchdog, and Linux's `/dev/ipmi0` interface, so unmodified `ipmitool` from the §14.9 mirror reads the log
@@ -2996,7 +3333,9 @@ aarch64 microVMs, which need an aarch64 KVM host, are [Funded goals](#funded-goa
 
 ### 26.4 MicroVMs
 - [ ] a PVH entry, the `XEN_ELFNOTE_PHYS32_ENTRY` note in the kernel ELF, that builds `BootInfo` (§10.3) from the PVH start info's memory map, command line, and modules, as §25.4's kexec entry builds it from a serialized one, so Firecracker, cloud-hypervisor, and QEMU's `microvm` start the kernel directly with no firmware and no Limine
+- [ ] the PVH entry, which the VMM starts in 32-bit protected mode with paging off, does what Limine does for a firmware boot, in 32-bit code in a section of its own: it applies the image's §18.2 relocations for a slide drawn from `RDSEED` or `RDRAND` (zero, and logged, on a CPU with neither), enters long mode on page tables that map the image at the slid base and the HHDM at a drawn offset, and passes both offsets and a seed for §18.2's region bases in `BootInfo`; DESIGN §4.1 names it, beside §25.4's `kexec_file_load`, as a place a base is computed outside Limine
 - [ ] virtio over MMIO on x86_64 through §11.5's virtio-mmio transport: devices found from the ACPI tables Firecracker and `microvm` generate, or from Linux's `virtio_mmio.device=` option on the command line where a VMM gives no ACPI
+- [ ] the virtio drivers meet the virtio 1.2 driver requirements that QEMU's devices do not exercise, since Firecracker's and cloud-hypervisor's devices are the first non-QEMU devices they meet: on PCI, each `queue_msix_vector` is read back after it is written and `NO_VECTOR` fails the probe, and an MSI-X interrupt reads no ISR; on both transports, a multi-dword configuration field such as `capacity` is read inside a `config_generation` loop, and `F_SIZE_MAX` and `F_SEG_MAX` are negotiated only when requests honor `size_max` and `seg_max`; host tests against the §6.5 simulated device refuse a vector and change the generation mid-read (F122)
 - [ ] reboot and the §22.2 panic reset through the i8042 reset line where a VMM offers no other (Firecracker)
 - [ ] Firecracker's MMDS V2 served to the §26.1 AWS backend with its session token, as IMDSv2 is
 - [ ] the time from VMM start to `shell ready` recorded per release for each microVM, in the gate's guest shape under KVM on the KVM runner
@@ -3073,6 +3412,7 @@ host commits only the pages the guest touches. Speedups on real cores are a
 - [ ] the x86_64 physmap maps every usable RAM range and nothing else, as §11.1's does on aarch64; both use 1 GiB pages where the CPU has them (`pdpe1gb`, aarch64 level-1 blocks) and 2 MiB pages otherwise; the 8 GiB cap in DESIGN §4.1 and the firmware MMIO problem it worked around are both gone
 - [ ] the heap and KVA regions in DESIGN §4.1 sized at boot from installed memory, instead of fixed at 64 MiB and 64 GiB; §20.1 already sized the `ioremap` window
 - [ ] frame metadata (§12.1) allocated per memory section so holes cost nothing, placed on its own node (§19.7), and initialized a section at a time when the allocator first reaches it, so boot touches only the metadata it uses
+- [ ] a memory section joins its node's buddy allocator when the allocator first reaches it, with its metadata, and `meminfo` counts the sections not yet joined as free, so boot writes no free-list link into memory it has not used; today `insert_region` writes a 16-byte link into the first frame of every free 4 MiB block at boot, and `pmm_init::init` clips the buddy at the 8 GiB `PHYSMAP_CAP`; once the physmap line above removes that cap, those links touch 262144 pages, 1 GiB, of a 1 TiB guest
 - [ ] per-CPU free-frame lists in front of each node's buddy, since the buddy lock is the first thing many CPUs contend; §19.9 did the same for objects
 - [ ] memory layouts with holes, ranges above 1 TiB, and eight NUMA nodes tested under QEMU `-numa`
 
@@ -3085,9 +3425,9 @@ host commits only the pages the guest touches. Speedups on real cores are a
 - [ ] per-process and system counts of huge mappings, which the gate reads
 
 ### 27.5 Many CPUs
-- [ ] a host test parses a MADT with 4096 processors, QEMU `q35`'s limit (types 9 and 10), through §20.1's tables; aarch64's CPU tables, from the device tree and from the MADT's GICC entries, are sized from the firmware CPU count the same way
+- [ ] a host test parses a MADT with 4096 processors, QEMU `q35`'s limit (types 9 and 10), through §20.1's tables; aarch64's CPU tables, from the device tree and from the MADT's GICC entries, are sized from the firmware CPU count the same way; an MPIDR listed twice yields one CPU and one logged warning, as a repeated APIC ID does in §20.1's `acpi::parse_madt` (F035)
 - [ ] the thread table and every structure §10.4 sizes from the `limits` thread count, the wake inbox and the KVA free-list pool among them, sized at boot for the Phase 10 value (1024) plus each CPU's §4.8 idle thread and other per-CPU kernel threads, counted from the firmware CPU count, so a 1024-vCPU guest keeps the 1024 threads Phase 12 was tested against; once §23.4 has landed, its `kernel/threads-max` governs instead; a host test computes the limits for 4096 CPUs
-- [ ] AP bring-up in parallel: batched INIT-SIPI on x86_64 and concurrent PSCI `CPU_ON` on aarch64, with the timer calibrated once and shared when the counter is invariant, instead of the §4.5 one-at-a-time sequence with its 10 ms per AP
+- [ ] AP bring-up in parallel: batched INIT-SIPI on x86_64 and concurrent PSCI `CPU_ON` on aarch64, with the timer calibrated once and shared when the counter is invariant, instead of the §4.5 one-at-a-time sequence with its 10 ms per AP; the ready deadline scales with the number of APs started at once, since 1023 APs under TCG share the runner's 4 vCPUs, and an AP that misses it takes §20.1's INIT-and-leak path (F032)
 - [ ] per-CPU areas, stacks, and run queues allocated on the CPU's own node
 - [ ] queued (MCS-style) spinlocks replacing the CAS `SpinMutex` (§3.5) on contended locks, since a test-and-set lock collapses under hundreds of waiters and grants the lock in no order; a loom model beside §10.8's
 - [ ] TLB shootdown sent only to CPUs that have run the address space, batched per unmapped range, and skipped for lazy kernel threads, with the IPIs of each shootdown counted; aarch64 keeps broadcast `tlbi ...is` and sends no IPI
@@ -3196,7 +3536,8 @@ on aarch64 under HVF on the dev host as a §10.9 record. IOPS on data-center dri
 - [ ] 1000 simulated power cuts during RAID 5 and RAID 6 writes on §12.5's volatile-cache device, each followed by reassembly and the bitmap-bounded resync, leave no stripe whose parity disagrees with its data; 1000 more during degraded writes with the §29.2 journal leave every block the interrupted writes did not touch intact; on the weekly job in shards of at most 5.5 hours
 - [ ] a logical volume and the vibefs v2 filesystem on it grow online by adding a disk to the group while a write workload runs, and host `fsck` is clean afterward, under TCG with 2 vCPUs and 1 GiB, on both architectures
 - [ ] the §29.4 vibefs v2 scrub finds a block the host corrupted underneath either member of a RAID 1 array, rewrites it from the copy whose checksum verifies, and counts and logs the repair, under TCG with 2 vCPUs and 1 GiB, on both architectures
-- [ ] vibefs v2 on §18.7's encryption on a logical volume on RAID 1 passes the §8.5 crash test on §12.5's volatile-cache device, on both architectures
+- [ ] a 1-byte write through vibefs v2 into a file block the host corrupted underneath one member of a RAID 1 array leaves the file's block holding the good copy's data with the byte written, under TCG with 2 vCPUs and 1 GiB, on both architectures (F063)
+- [ ] vibefs v2 on §18.7's encryption on a logical volume on RAID 1, each member its own §12.5 volatile-cache export, passes §12.5's crash-state enumeration and content oracle, each state assembled by §29.3's host stack reader: every state mounts a committed generation at or after the last acknowledged `fsync`, under TCG with 2 vCPUs and 1 GiB, on both architectures; the §8.5 kill test cannot show a missing flush (F080)
 - [ ] a namespace shared by two controllers of one `nvme-subsys` is one block device with a path through each; with a write workload running, one controller removed with `device_del` fails its path over to the other with no error reaching the filesystem, and added back with `device_add` rejoins; data checksums match afterward; under TCG with 2 vCPUs and 1 GiB, on both architectures
 - [ ] on a zoned namespace (`zoned=on`), `fio` from the §14.9 mirror with `zonemode=zbd` and `verify=crc32c` passes, and `blkzone report` from the same mirror lists every zone with the write pointer the device reports, under TCG with 2 vCPUs and 1 GiB, on both architectures
 - [ ] a guest with 32 virtio-blk disks on PCIe root ports and an NVMe controller with 128 namespaces boots with every disk and namespace under its §20.9 persistent name, and a RAID 10 array across the 32 disks returns what was written to it, under TCG with 2 vCPUs and 2 GiB, on both architectures
@@ -3232,12 +3573,14 @@ on aarch64 under HVF on the dev host as a §10.9 record. IOPS on data-center dri
 ### 29.4 Integrity and health
 - [ ] scrub on a schedule and on demand: md's `check` and `repair` through `sync_action`, with mismatches counted in `mismatch_cnt` and logged; `repair` rewrites parity from data and mirrors from the first member, as Linux's does, since a mismatch alone does not say which copy is right
 - [ ] a vibefs v2 checksum failure retries the read from another mirror through a per-request hint and rewrites the bad copy; a vibefs v2 scrub reads every mirror copy of every block that way, so a corrupted copy is found and rewritten from one whose checksum verifies, whichever member holds it
+- [ ] a vibefs v2 partial overwrite reads its block through that verified path, so new bytes are never merged into a copy whose checksum fails and then written under a fresh checksum, as vibefs v1 did (F063)
 - [ ] NVMe health logs and SMART (§20.6) polled, thresholds turned into events for the system log and a notification hook, and a failing member marked for replacement before it fails
 - [ ] batched discard for SSDs through Linux's `FITRIM` ioctl, so unmodified `fstrim` trims through filesystem, volume, and RAID
 
 ### 29.5 Filesystem at scale
 - [ ] vibefs v2 grown online into new space at the end of its device, without unmounting
 - [ ] vibefs v2 at 16 TiB on a sparse image and at 100 million inodes, on aarch64 under HVF on the dev host as a §10.9 record, since 100 million inodes outgrow a hosted runner's 14 GB of disk: mount time, `fsck` time and memory, and lookup in a million-entry directory recorded in `docs/`; a v2 limit below either is raised with a new format version that `fsck` upgrades in place
+- [ ] an in-guest test on a sparse 16 TiB vibefs v2 image writes the volume's last block and the largest file offset the format allows, and a write one byte past that offset returns `EFBIG`; 16 TiB is 2^32 blocks of 4 KiB, so its last block number is the largest 32-bit value and its block count does not fit in 32 bits
 - [ ] per-user, per-group, and per-project quotas enforced and managed through Linux's `quotactl`, with project ids set through `FS_IOC_FSSETXATTR`
 - [ ] writeback in parallel per filesystem and per device, measured on the gate's `null-co` NVMe namespaces under KVM on the KVM runner
 
@@ -3304,7 +3647,7 @@ real machines is a [Funded goal](#funded-goals).
 Moved from Beyond: a server needs a disciplined clock, not a stepped one. §15.8's SNTP client still sets
 the clock at boot.
 
-- [ ] the kernel clock adjustable in rate and slewed in offset through `adjtimex` and `clock_adjtime` with Linux's `struct timex` (`ADJ_TICK` and `ADJ_FREQUENCY`, both changing the rate, `ADJ_OFFSET`, `ADJ_OFFSET_SINGLESHOT`, `ADJ_SETOFFSET` with `ADJ_NANO`, `ADJ_STATUS`, `ADJ_MAXERROR`, `ADJ_ESTERROR`, and `ADJ_TAI`, every mode chrony issues), published through the §2.7 seqlock
+- [ ] the kernel clock adjustable in rate and slewed in offset through `adjtimex` and `clock_adjtime` with Linux's `struct timex` (`ADJ_TICK` and `ADJ_FREQUENCY`, both changing the rate, `ADJ_OFFSET`, `ADJ_OFFSET_SINGLESHOT`, `ADJ_SETOFFSET` with `ADJ_NANO`, `ADJ_STATUS`, `ADJ_MAXERROR`, `ADJ_ESTERROR`, and `ADJ_TAI`, every mode chrony issues), applied to a cycle-counter-to-nanosecond multiplier and offset published through the §2.7 seqlock, which today publishes a tick count and a TSC snapshot, so a rate change takes effect from the next read without a step; the clock is computed from the cycle counter as §19.6 left it, never from a count of timer interrupts, which loses every period an interrupts-off window coalesces (F027)
 - [ ] chrony from the §14.9 mirror disciplines the clock unmodified: slewing after the first sync, its drift file kept across reboots, and several servers with outlier rejection
 - [ ] leap seconds handled by a documented policy (smear, or step at the boundary through `STA_INS` and `STA_DEL`), tested with a simulated leap from a host NTP server
 
@@ -3422,7 +3765,7 @@ part is evdev and HID as libinput and the kselftest `hid` tests expect them.
 - [ ] Linux's interface: `/sys/power/state`, and `/sys/power/mem_sleep` reporting `s2idle [deep]` on `q35` and `[s2idle]` on `virt`, so suspend callers from Alpine work unmodified
 - [ ] wake by timer: `/dev/rtc0`'s `RTC_WKALM_SET` over the CMOS RTC's alarm and the PL031's match interrupt, and the `CLOCK_BOOTTIME_ALARM` and `CLOCK_REALTIME_ALARM` timers, which is how the gate's cycles run unattended
 - [ ] wake by input: keyboard and pointer interrupts armed as wake sources, and QMP `system_wakeup` on `q35`
-- [ ] clocks across suspend: `CLOCK_MONOTONIC` excludes suspended time, `CLOCK_BOOTTIME` includes it, and the wall clock is re-read from the RTC
+- [ ] clocks across suspend: `CLOCK_MONOTONIC` excludes suspended time, `CLOCK_BOOTTIME` includes it, and the wall clock is re-read from the RTC; the cycle counter the clocks are computed from (§19.6) is re-based at resume, so no clock steps backward: QEMU resets the vCPU on a `q35` wakeup and does not preserve the TSC, and physical machines do not preserve it across S3 either; an in-guest test reads each clock before and after each of the gate's S3 cycles (F027)
 - [ ] per-device suspend and resume times recorded every cycle, so a slow driver is visible
 
 ### 31.4 Runtime power management
@@ -3855,8 +4198,9 @@ guests under TCG on the hosted runners.
 **Exit gate**
 - [ ] `make verify` checks every Verus proof and every TLA+ specification, and passes in full on the nightly job and the scheduled macOS job; its §38.1 ladder tier runs it on every push that changes `vibeos-core` or a specification; a proof over its recorded resource limit fails like a test
 - [ ] Verus checks the `vibeos-core` crate itself, in the configuration the kernel builds (no `std` feature), so every proved module is source the kernel compiles for both kernel targets with specifications and proofs erased; no transcribed or generated copy of a proved module exists, and `scripts/check_verified.py` in `make check` fails when a module `docs/VERIFIED.md` lists is not a `vibeos-core` module
-- [ ] the buddy allocator (§1.1), including §19.7's per-node instances, is proved for every arena size: allocated blocks never overlap each other or a free block, a freed block merges with a free buddy, the free count equals the free lists' contents, and allocation fails only when no free block of the requested order or larger exists
-- [ ] the page-table code refines an abstract map from virtual page to frame and permissions for both formats: `map`, `unmap`, `protect`, and `translate` agree with the map; the mapping API cannot create a kernel mapping that is writable and executable (§18.1); every aarch64 descriptor change that §11.2 says needs break-before-make follows it
+- [ ] the buddy allocator (§1.1), including §19.7's per-node instances, is proved for every arena size: allocated blocks never overlap each other or a free block, a freed block merges with a free buddy, the free count equals the free lists' contents, and allocation fails only when no free block of the requested order or larger exists; for every 64-bit size and alignment, `Buddy::order_for` returns no order, or an order whose block is at least that size and at least that alignment (F103)
+- [ ] the page-table code refines an abstract map from virtual page to frame, permissions, and memory type for both formats: `map`, `unmap`, `protect`, and `translate` agree with the map; no two mappings of one frame have different memory types; no frame that a kernel mapping makes executable is writable through any kernel mapping, the physmap included (§18.1); every aarch64 descriptor change that §11.2 says needs break-before-make follows it (F104, F105)
+- [ ] on x86_64, the page-table proof also shows that every address space's kernel-mode root holds the kernel root's kernel-half entries, which §18.2's mapper keeps true by allocating no kernel-half PML4 slot once an address space exists, and that with §18.3's KPTI on, each user-mode root maps only the entry area from the kernel half (F101)
 - [ ] frame reference counts and copy on write (§12.1, §12.3) are proved: `put_frame` releases a frame exactly once each time its reference count drops to zero, and never while a reference to it remains; the reverse map matches the PTEs, and no write through a COW mapping reaches a frame whose count is above one
 - [ ] TLC checks the §38.3 specifications of the vibefs commit, TLB shootdown with deferred KVA free, and RCU grace periods, each to a state bound recorded in the specification
 - [ ] traces from the in-guest shootdown and RCU tests at `-smp 4` under TCG on both architectures, and from every crash state the §12.5 enumerator produces on a vibefs v2 volume, validate against those specifications on the nightly job
@@ -3879,13 +4223,13 @@ guests under TCG on the hosted runners.
 - [ ] the buddy allocator inside `verus!`, with each free block's list node owned by a ghost points-to permission; the §10.8 Kani harness kept as a cross-check
 - [ ] §19.7's per-node buddies are instances of the proved allocator, not a second implementation
 - [ ] the abstract page-table map and the refinement proof for the x86_64 format, then for the aarch64 format behind the same §10.3 trait
-- [ ] the physmap changes (`patch_physmap_uc` on x86_64; on both architectures, the §12.1 `debug_mm` unmap of a freed frame and its remap on reallocation, which need no break-before-make because that build maps the physmap at 4 KiB) proved to leave every other physmap entry unchanged
+- [ ] the physmap changes (`patch_physmap_uc` on x86_64; on both architectures, the §12.1 `debug_mm` unmap of a freed frame and its remap on reallocation, which need no break-before-make because that build maps the physmap at 4 KiB) proved to change only the physmap leaves that overlap their range, with no usable-RAM page among the pages they change: every other physmap page keeps its frame, permissions, and memory type, and `patch_physmap_uc` reaches the last leaf of a range that is not leaf-aligned (F104)
 - [ ] frame metadata (§12.1): refcount transitions, the reverse map against the PTEs that reference each frame, the COW break (§12.3), and §19.8's rule that a pinned anonymous page is never COW-shared
 - [ ] where proved code calls an `arch` trait, the trait's contract is an assumption listed in `docs/VERIFIED.md`
 
 ### 38.3 Protocols
-- [ ] the vibefs v2 commit (§14.8), against a disk that reorders writes between flushes, tears a superblock write, and loses power at any step: the mounted tree is a committed generation at or after the last acknowledged `fsync`, and no block reachable from a committed generation is overwritten after it commits
-- [ ] TLB shootdown with deferred KVA free (§4.10, DESIGN §7.9), with per-CPU TLBs modelled, over x86_64's IPI protocol and aarch64's broadcast TLB maintenance (§11.2): no CPU translates a reallocated address through a stale entry, and two initiators running at once both finish
+- [ ] the vibefs v2 commit (§14.8), against a disk that reorders writes between flushes, tears a superblock write, completes a write or flush with an error, and loses power at any step: the mounted tree is a committed generation at or after the last acknowledged `fsync`; no block reachable from a committed generation is overwritten after it commits; a failed commit leaves the in-memory and on-disk generation where they were, so its retry never writes the slot of the newest durable superblock; and after any sequence of commits, failures, and remounts, every block the allocation map marks used is reachable from the newest committed generation or a snapshot (F049, F050)
+- [ ] TLB shootdown with deferred KVA free (§4.10, DESIGN §7.9), with per-CPU TLBs modelled, over x86_64's IPI protocol and aarch64's broadcast TLB maintenance (§11.2): no CPU translates a reallocated address through a stale entry; no kernel stack is unmapped while a CPU still runs on it, including the exiting thread's own CPU before its switch completes; and two initiators running at once, each waiting with interrupts off and serving the other's request while it waits, both finish, with no timeout in the protocol
 - [ ] RCU (§19.5): no grace period ends while a reader that began before it is still inside, including readers on CPUs that entered tickless idle or went offline mid-grace-period (§19.6)
 - [ ] each specification under `docs/specs/`, naming the DESIGN or VIBEFS section it formalizes, and that section linking back
 
@@ -3923,11 +4267,11 @@ physical machines are [Funded goals](#funded-goals).
 
 **Exit gate**
 - [ ] `docs/STABILITY.md` names the §39.1 stable set with a version for each interface, and lists every other user-visible interface as unstable with the phase expected to settle it; `scripts/check_stability.py` in `make check` fails when a part §39.1 names is missing
-- [ ] `make check` compares the generated syscall table (§10.5) with the copy frozen at the `v1.0.0` release candidate, and fails on a removed entry or a changed argument layout
+- [ ] `make check` compares the generated syscall table (§10.5) with the copy frozen at the `v1.0.0` release candidate, and fails on a removed entry or a changed argument layout; a host test fails when a number the table marks implemented reaches the dispatch's `ENOSYS` arm, or a number it does not mark implemented reaches a handler, so the frozen copy is the ABI the kernel serves (F150)
 - [ ] the §39.2 ABI corpus runs unchanged on every push to `main`, on both architectures
 - [ ] vibefs and FAT images and §14.6 packages written by the release candidate pass the §39.2 checks on `main` in CI
 - [ ] an unattended A/B update (§22.2) from each supported release to `main` boots and passes `make test-e2e`, nightly, on both architectures under QEMU with OVMF and the aarch64 edk2 build (TCG, 2 vCPUs, 2 GiB)
-- [ ] the release candidate accumulates 168 hours of guest uptime on each architecture running §30.7's long-run workload, in a 4-vCPU, 4 GiB guest under TCG carried across shards by the §25.7 soak job (a shard the runner loses, rather than the guest, is rerun from the state it started from), and passes the checks of the Phase 30 gate's 7-day line, with §25.7's slope check projecting under 1% growth over 30 days for frame, heap, slab, and descriptor counts
+- [ ] the release candidate accumulates 168 hours of guest uptime on each architecture running §30.7's long-run workload, in a 4-vCPU, 4 GiB guest under TCG carried across shards by the §25.7 soak job (a shard is rerun only under §25.7's rule for a job that ended without a harness verdict), and passes the checks of the Phase 30 gate's 7-day line, with §25.7's slope check projecting under 1% growth over 30 days for frame, heap, slab, and descriptor counts and each vibefs volume's used blocks and used inodes (F021, F049)
 - [ ] `v1.0.0` is built on vibeOS by the toolchains Phase 24 bootstrapped from source, and a second vibeOS build reproduces every artifact byte for byte
 - [ ] the release candidate completes Phase 22's release-candidate fuzz campaigns with no crash, and no `fuzz-crash` issue (§39.3) has been open more than 14 days
 - [ ] the newest §22.5 drill record is dated within 12 months before the tag and names every supported branch, and the §22.5 `make check` script passes
@@ -4093,16 +4437,20 @@ ERST, GHES, and a BMC, it can also be the x86_64 long-run server; it can be the 
 - Phase 19 Architectures: hardware events "need a physical machine and are in [Funded goals](#funded-goals)" becomes "are validated on the x86_64 test PC in §20.8"
 - §19.2, the PMU setup box: "which no free host offers a guest ([Funded goals](#funded-goals))" becomes "counted on the x86_64 test PC booted bare metal (§20.8)"
 - §19.6, the idle box: "measured power needs a physical machine ([Funded goals](#funded-goals))" becomes "measured power is §20.2's, on the x86_64 test PC"
-- §22.3, the tested-platforms box: "its entries are virtual machine configurations, and it claims no physical machine" becomes "its QEMU entries are virtual machine configurations, and physical machines are in its physical section" becomes ", and a physical section for the machines the project owns or borrows"
+- §22.3, the tested-platforms box: "its entries are virtual machine configurations, and it claims no physical machine" becomes "its QEMU entries are virtual machine configurations, and physical machines are in its physical section"
 
 §10.9:
 - [ ] `scripts/check_gates.py` accepts a job entry whose workflow runs on a self-hosted runner only when that workflow's only triggers are `schedule` and `workflow_dispatch`, and `make gate PHASE=N RECORD=1` records a hand reading on a physical machine, each with a host test
+
+§18.3:
+- [ ] the Phase 18 exit gate's measured-cost entries include the x86_64 test PC's CPU model booted bare metal, and the harness test that compares the boot log's mitigation list with the document's list runs there (F024, F131)
 
 Phase 20 exit gate, before the tag line:
 - [ ] boots from USB on the x86_64 test PC, and on a second, physically different x86_64 machine once one exists, with output on a serial adapter or the screen
 - [ ] on each of those machines: Phase 7's pattern and concurrent read-write tests pass on a scratch partition of its internal disk; a TCP client fetches 1 GiB from a peer through vibeOS's driver for its NIC with no corruption, as the Phase 15 gate does over virtio-net; and `evtest` reads a key typed on a USB keyboard from its `/dev/input/event<N>` node
 - [ ] the AML interpreter loads the DSDT and SSDTs of each of those machines, host-tested against their `acpidump` output, which joins the §20.2 corpus, and `_PRT` resolves PCI interrupt routing on each
 - [ ] S3 suspend and resume on the machine whose firmware offers S3, with its disk, NIC, and USB keyboard working afterward
+- [ ] on each of those machines, `poweroff` enters S5 through its FADT's PM1 control blocks and `_S5`, read on the plug-in power meter as the machine's soft-off draw, and `reboot` restarts it through the FADT reset register, each after the log line naming the path it takes (F097)
 - [ ] idle power measured with the plug-in power meter on each machine at the shallowest and deepest C-state §20.2 enables, with tickless idle on and off, the numbers in `docs/HARDWARE.md`'s physical section
 - [ ] NVMe and AHCI drives detected and used as root on those machines
 - [ ] `make test` passes nightly on vibeOS booted bare metal on the x86_64 test PC, on the terms of the Phase 17 gate, reported by its §20.8 self-hosted nightly job like any other CI job
@@ -4111,6 +4459,9 @@ Phase 20 exit gate, before the tag line:
 - [ ] the UEFI and BIOS boot paths, the firmware memory map, and the MTRR decision checked on each physical machine, its MTRR values added to the host tests
 - [ ] microcode applied on the BSP and every AP of each machine, each CPU's revision before and after recorded in `docs/HARDWARE.md`
 - [ ] the panic record read back after a warm reset on each machine
+- [ ] a `panic_test` build that panics two CPUs at once prints one complete dump on the x86_64 test PC's own 16550 serial port at 115200 baud (F135)
+- [ ] each machine's boot log names its GOP framebuffer's physical address, and the framebuffer console draws there wherever the firmware placed it (F020)
+- [ ] each machine's boot log names the APIC mode its firmware handed off in (xAPIC, x2APIC, or x2APIC locked), and the machine reaches `shell ready` from that mode (F028)
 - [ ] with §18.1's IOMMU on, the devices on the x86_64 test PC that DMA into its RMRR regions (integrated graphics, USB legacy emulation) keep working, and the boot log lists each RMRR with its devices
 
 §20.2:
@@ -4145,7 +4496,7 @@ Phase 21 exit gate, before the tag line:
 If GitHub withdraws nested virtualization from its hosted runners, Phase 21's x86_64 nested lines,
 Phase 22's x86_64 hostile-guest campaign, and the x86_64 parts of Phase 28's VF-assignment line and
 Phase 30's live-update line move to this machine by the same kind of edit, with this machine's Linux KVM
-as the nested host. If a Phase 24 build outgrows the hosted x86_64 runner's disk after cleanup (Phase 24 Architectures), the x86_64 half of the Phase 24 gate lines that need it moves to this machine by the same kind of edit, together with §39.2's and Phase 37's lines that rest on it for that architecture.
+as the nested host. If a Phase 24 build outgrows the hosted x86_64 runner's disk after cleanup (Phase 24 Architectures), the x86_64 half of the Phase 24 gate lines that need it moves to this machine by the same kind of edit, together with the x86_64 half of Phase 37's gate line on packages built by the Phase 24 ports tree and of Phase 39's gate line on building `v1.0.0` with the Phase 24 toolchains.
 
 Phase 22 exit gate, before the tag line:
 - [ ] the x86_64 live image, written to a USB stick, boots to its graphical desktop on the x86_64 test PC's own display through the UEFI GOP framebuffer, with a USB keyboard and mouse
@@ -4257,6 +4608,8 @@ Phase 22 exit gate, before the tag line:
 Phase 24 exit gate, before the tag line:
 - [ ] a full rebuild on the aarch64 server, booted bare metal, gives packages byte-identical to the hosted TCG rebuild's at the same commit, except the ports listed as not reproducing
 
+If a Phase 24 build outgrows the hosted arm64 runner's disk after cleanup (Phase 24 Architectures), the aarch64 half of the Phase 24 gate lines that need it moves to this machine by the same kind of edit, together with the aarch64 half of Phase 37's gate line on packages built by the Phase 24 ports tree and of Phase 39's gate line on building `v1.0.0` with the Phase 24 toolchains.
+
 Phase 25 exit gate, before the tag line:
 - [ ] `kexec` from a running system reaches `shell ready` in the new kernel without firmware in under 2 s, in a 2-vCPU, 1 GiB guest under KVM on the aarch64 server
 
@@ -4264,7 +4617,7 @@ Phase 26 exit gate, before the tag line:
 - [ ] under KVM on the aarch64 server (2 vCPUs, 512 MiB), the kernel boots through a Linux arm64 `Image` header with the device tree the VMM generates, with no firmware and no Limine, to `shell ready` on Firecracker and on cloud-hypervisor, with root on virtio-blk and network on virtio-net, and on Firecracker the AWS path provisions the guest from MMDS V2
 
 §26.4:
-- [ ] a Linux arm64 `Image` header and a boot path from the device tree passed in `x0`, building `BootInfo` (§10.3) as the PVH entry does, so Firecracker and cloud-hypervisor start the kernel on aarch64 KVM hosts
+- [ ] a Linux arm64 `Image` header and a boot path from the device tree passed in `x0`, building `BootInfo` (§10.3) as the PVH entry does, so Firecracker and cloud-hypervisor start the kernel on aarch64 KVM hosts; entered with the MMU off, it applies the image's §18.2 relocations and builds its page tables as the PVH entry does
 
 §26.7, Stretch:
 - [ ] the aarch64 VMBus box, here or in §26.5 once the paid cloud goal has moved it, also runs under OpenVMM on KVM on the aarch64 server, as a CI job beside its dev-host record
@@ -4378,7 +4731,7 @@ gVNIC**:
 - [ ] a KVM-based OpenStack cloud in the weekly job
 
 Beyond:
-- **Confidential guests** (after 26 and 27): vibeOS as an AMD SEV-SNP, Intel TDX, and Arm CCA guest on the clouds that offer them, with private memory, Phase 27's bounce pool for shared I/O, and a remote attestation report checked by a host tool.
+- **Confidential guests** (after 26 and 27): vibeOS as an AMD SEV-SNP, Intel TDX, and Arm CCA guest on the clouds that offer them, with private memory, Phase 27's bounce pool for shared I/O, and a remote attestation report checked by a host tool; the host is untrusted there, so the virtio transport relies on §18.1's checks of the used-ring ids, its queue-size cap on each harvest pass, and the capability offsets and lengths a device supplies (F048).
 
 ### Scale-up on rented bare-metal hosts
 
@@ -4424,12 +4777,12 @@ the wall time of aarch64's TCG full rebuild. Pro covers only a personal account,
 the repository moves into an organization (see **GitHub GPU runner**).
 
 **Lines.**
-- §24.2, the full-rebuild box: "sum to at most 5, their share of §10.1's 10 scheduled slots, so a rebuild that runs for days leaves the other 5" becomes "sum to at most 10, their share of §10.1's 20 scheduled slots (GitHub Pro), so a rebuild that runs for days leaves the other 10"
-- §10.1, the CI-budget box: "20 concurrent jobs on the Free plan (at most 5 macOS; scheduled campaigns together hold at most 10, so pushes keep the other 10)" becomes "40 concurrent jobs with GitHub Pro (at most 5 macOS; scheduled campaigns together hold at most 20, so pushes keep the other 20)"
+- How to read this, the list of free resources: "at most 20 jobs run at once, 5 of them macOS" becomes "at most 40 jobs run at once with GitHub Pro, 5 of them macOS"
+- §24.2, the full-rebuild box: "sum to at most 5, their share of §10.1's 10 scheduled slots, so a rebuild that runs for days leaves the other 5 to the nightly and weekly workflows and per-push CI its own 10" becomes "sum to at most 10, their share of §10.1's 20 scheduled slots (GitHub Pro), so a rebuild that runs for days leaves the other 10 to the nightly and weekly workflows and per-push CI its own 20"
+- §10.1, the CI-budget box: "20 concurrent jobs on the Free plan (at most 5 macOS; scheduled campaigns together hold at most 10, so pushes keep the other 10)" becomes "40 concurrent jobs with GitHub Pro (at most 5 macOS; scheduled campaigns together hold at most 20, so pushes keep the other 20)"; "leave room under the 20" becomes "leave room under the 40"; "its share of the 10 scheduled slots" becomes "its share of the 20 scheduled slots"; and "shares summing to at most 10" becomes "shares summing to at most 20"
 - §24.2's "monthly on aarch64" and Phase 24 Architectures' "aarch64's full rebuild runs monthly": "monthly" becomes "every two weeks, once a measured aarch64 full rebuild at 10 jobs finishes in under ten days", unless the aarch64 server goal has already moved aarch64's full rebuild to that server
-- §10.1, the CI-budget box: "20 concurrent jobs on the Free plan (at most 5 macOS; scheduled campaigns together hold at most 10, so pushes keep the other 10)" becomes "40 concurrent jobs on GitHub Pro (at most 5 macOS; scheduled campaigns together hold at most 30, the §24.2 rebuilds 20 of them, so pushes keep the other 10)", and "leave room under the 20" becomes "leave room under the 40"
 - §20.8's preamble: "an account runs 20 jobs at once" becomes "the account runs 40 jobs at once (GitHub Pro)"
-- §39.3, the supported-branches box: "the 20 concurrent hosted jobs (5 of them macOS) the account allows" becomes "§10.1's scheduled share of the 40 concurrent hosted jobs (5 of them macOS) the account's GitHub Pro plan allows"
+- §39.3, the supported-branches box: "§10.1's scheduled share of 10 concurrent jobs (at most 5 of them macOS)" becomes "§10.1's scheduled share of 20 concurrent jobs (at most 5 of them macOS)", and "so pushes keep the other 10" becomes "so pushes keep the other 20"
 
 ### GitHub GPU runner
 
@@ -4445,7 +4798,7 @@ hosted jobs, 5 of them macOS.
 
 **Lines.** Elsewhere in this file:
 - the arc, row 33: Unlocks gains ", virgl and Venus on a GPU host"
-- the **GitHub Pro** goal, if still open, is deleted, since Pro covers only a personal account; its Lines are made, or where already made are changed, with GitHub Team's numbers: 60 concurrent jobs for 40, the §24.2 rebuilds and the aarch64 cadence at 30 jobs for 20, and §10.1's scheduled share 40 for 30, so pushes keep 20; "GitHub Pro" becomes "GitHub Team"
+- the **GitHub Pro** goal, if still open, is deleted, since Pro covers only a personal account; its Lines are made, or where already made are changed, with GitHub Team's numbers: 60 concurrent jobs for 40; §10.1's scheduled share 40 for 20, so pushes keep 20; the §24.2 rebuilds' share, the rest of the scheduled share that §24.2 leaves to the other workflows, and the job count in the aarch64 cadence, 20 for 10; "GitHub Pro" becomes "GitHub Team"
 
 §33.4, Stretch:
 - [ ] the virtio-gpu 3D tier also runs nightly on a GitHub GPU runner with the host rendering on its GPU, its frame rates recorded
