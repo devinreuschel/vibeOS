@@ -39,6 +39,13 @@ number vibeOS took would change meaning under a binary built for a later Linux (
 state. A deferral is an open box with a trailing note naming the phase that lands it, and that phase's
 gate cannot close while the box is open.
 
+A box is ticked only by the commit that makes the test proving it pass. That commit names the test in a
+`Proves:` trailer, one per box it ticks: a host, in-guest, or user test by name, an e2e marker, a
+`make` target, or a `scripts/check_*.py` script. For a document, name the script that checks the
+document; for a deletion, name the check that finds nothing left. A box whose proof cannot be named is
+not done. The kernel review found that ticking a box for work that had not landed was the most common
+failure in this tree (KERNEL_REVIEW.md §5 and §8.3).
+
 **Slices.** A phase lands as two to four PRs named A, B, C, D, each with its own in-guest tests and each
 leaving `main` green. The last slice closes the gate, and its commit gets the `phase-<N>` tag and the
 next release (see the standing gates). Phase 10 is the exception. It lands as one PR per review-issue
@@ -107,6 +114,7 @@ in the same job where it fits, so runner noise cancels.
 - from Phase 8 on, the commit that closes a phase's gate gets an annotated `phase-<N>` tag and the next release, `v0.<m>.0`, where *m* is one more than the last release's. Phases 8 to 14 close in order, so their releases are `v0.8.0` to `v0.14.0`; a phase in that range is tagged only after the phase before it, so Phases 8 and 9, whose gate lines the kernel review reopened into Phase 10's sections, are tagged in order when those lines close, possibly on the commit that closes Phase 10. From Phase 15 on, phases close side by side, *m* follows closing order, and the release notes name the phase. Phase 39's release is `v1.0.0`; a phase that closes after it cuts the next `v1.<m>.0` (§39.3)
 - design docs updated in the same commit as any change to an invariant or a constant
 - no `TODO` describing a correctness gap. Those become lines in this file.
+- every box ticked names its proof in a `Proves:` trailer (see above); from §10.9's `check_ticks.py` on, CI enforces it on every pull request
 - every `unsafe fn` has a `# Safety` section and every `unsafe` block a one-line `// SAFETY:` reason; clippy's `missing_safety_doc` (with `check-private-items`) and `undocumented_unsafe_blocks` are denied from §10.1 on
 - from Phase 10 on, a phase is tagged only when `make gate PHASE=N` passes; that command fails for any gate line but the tag line that has no §10.9 gate-map entry naming what proves it: a command, a CI job on GitHub-hosted runners, or, for a line or the part of one that runs under HVF, a record of its run on the Apple Silicon dev host, since no hosted CI runner can run an HVF guest
 - from §11.7's ordering check on, every atomic ordering other than `SeqCst` outside test code, fences included, carries a one-line comment naming the access it pairs with, or saying it pairs with none; `scripts/check_orderings.py` in `make check` fails on one without
@@ -1246,6 +1254,7 @@ Gate lines, CI timings, and dependencies as data a script reads.
 - [ ] dev-host records, for a gate line or the part of one that runs under HVF, since no hosted CI runner can run an HVF guest: on the Apple Silicon dev host, `make gate PHASE=N RECORD=1` runs each record entry's command in a clean checkout of the gated commit and writes one JSON file per commit and entry (commit, the fixed host label `dev-host` and the Mac model, macOS and QEMU versions, command, the numbers the line measures, pass or fail) to `ci-history`, and never the machine's hostname, a user name, or a path under the home directory, since `ci-history` is public, retrying its push after a rebase; everywhere else, `release.yml` included, `make gate` runs no record entry's command and passes the entry only when `ci-history` holds a passing record for it at the gated commit. A job entry passes on a green run of its workflow at the gated commit from any trigger; when there is none, the maintainer starts one before tagging with `gh workflow run` on a branch at that commit, so every workflow a gate entry names has a `workflow_dispatch` trigger; `release.yml` reads runs and starts none
 - [ ] `deny.toml`, and `cargo deny check licenses bans sources` in `make check` (skipped with a hint when `cargo-deny` is not installed, and installed at a pinned version in the `check` job): licenses from an allowlist compatible with the tree's MIT license, crates.io as the only source, and a `[bans]` allow list naming every crate in the graph, so a pull request that adds a dependency fails until it names the crate there, which turns AGENTS.md's dependency note into a check; `cargo deny check advisories` on the nightly job, since it fetches the RustSec database
 - [x] `scripts/check_review_refs.py`, which `make check` runs, fails when a finding id in [reviews/KERNEL_REVIEW.md](reviews/KERNEL_REVIEW.md) is cited by no line in this file or a cited id names no finding; its `--closed` mode also fails while a CRITICAL or HIGH finding without a LATENT tag is cited by an open box in Phases 0 to 10; `tests/harness/test_review_refs.py` tests it
+- [ ] `scripts/check_ticks.py`: on every pull request, CI lists each line of this file that the pull request changes from `- [ ]` to `- [x]` and fails unless the commit that ticks it carries a `Proves:` trailer for it that names a test, `make` target, marker, or script existing in the tree at the pull request's head; `make check` runs it against `origin/main` when that ref exists; `tests/harness/test_ticks.py` covers the diff parsing and the trailer matching
 
 ### 10.10 Lifetimes and liveness
 A completion's publishing store is its last access to the waiter. Deferred reclaim frees an object only
