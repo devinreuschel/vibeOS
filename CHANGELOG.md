@@ -47,6 +47,8 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Fixed
 
+- Boot with more than 8 GiB of RAM no longer triple-faults after `heap ok`. RAM above the
+  8 GiB physmap cap is left unused; `make test-e2e-highmem` boots with 9 GiB.
 - UEFI e2e no longer hangs on OVMF PXE after a green marker boot; silent boots retry once
   and print a serial tail on timeout.
 - In-guest ktests retry known TCG timing flakes (wait4 stall, a second try if still

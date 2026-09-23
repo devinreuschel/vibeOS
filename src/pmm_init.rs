@@ -9,16 +9,17 @@
 //!   - the framebuffer
 //!   - anything not marked `USABLE`, including bootloader- and
 //!     ACPI-reclaimable
+//!   - anything above the 8 GiB physmap cap
 //!
-//! Frame 0 is dropped inside `Buddy::insert_region`. The other three are
-//! sorted into an "excludes" list and subtracted from every USABLE range
-//! before it is inserted.
+//! Frame 0 is dropped inside `Buddy::insert_region`. Kernel, trampoline,
+//! and framebuffer are sorted into an "excludes" list and subtracted from
+//! every USABLE range before it is inserted.
 
 use vibeos::lock::RANK_BUDDY;
 use vibeos::pmm::{Buddy, PAGE_SIZE, PmmStats};
 
 use crate::boot::BootInfo;
-use crate::paging_init::HHDM_BASE;
+use crate::paging_init::{HHDM_BASE, PHYSMAP_CAP};
 use crate::sync_init::SpinMutex;
 
 /// AP trampoline page. DESIGN §7.3 fixes the SIPI vector at 0x08, which
@@ -113,8 +114,13 @@ pub unsafe fn init(info: &BootInfo) -> PmmStats {
     }
     excl.sort();
 
+    // Free-list nodes, page tables, and heap pages are all reached through
+    // our physmap once cr3 switches, so RAM above its cap stays out.
     for r in info.usable() {
-        unsafe { insert_clipped(&mut buddy, r.start, r.end, excl.as_slice()) };
+        let end = r.end.min(PHYSMAP_CAP);
+        if r.start < end {
+            unsafe { insert_clipped(&mut buddy, r.start, end, excl.as_slice()) };
+        }
     }
 
     buddy.stats()

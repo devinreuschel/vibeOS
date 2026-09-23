@@ -48,8 +48,8 @@ const LOW_ID_SIZE: u64 = 512 * 1024 * 1024;
 
 /// Hard cap on physmap extent (DESIGN §4.1, §9.2). Firmware sometimes
 /// reports multi-terabyte MMIO BARs as memmap entries; walking that at
-/// boot never finishes.
-const PHYSMAP_CAP: u64 = 8 * 1024 * 1024 * 1024;
+/// boot never finishes. The PMM ingests nothing above it.
+pub const PHYSMAP_CAP: u64 = 8 * 1024 * 1024 * 1024;
 
 // Linker-provided section boundaries. Names match `linker.ld`.
 unsafe extern "C" {
