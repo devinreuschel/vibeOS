@@ -262,7 +262,7 @@ Blocking and allocation are a class of bug, not an instance. Context rules:
 |---------|------------|------------|
 | Hard IRQ / MSI handler | No | No |
 | Softirq equivalent (high-prio workqueue) | No | Fallible only, without direct reclaim ([§4.4](#44-kernel-heap)); the hard IRQ only enqueues |
-| Threaded IRQ bottom half | Yes | Fallible only, without direct reclaim ([§4.4](#44-kernel-heap)) |
+| Threaded IRQ bottom half | Yes, on its own device's state only ([§5.4](#54-irq-registration)) | Fallible only, without direct reclaim ([§4.4](#44-kernel-heap)) |
 | Workqueue worker | Yes | Yes |
 | Driver `probe` | Yes | Yes |
 | Syscall body, fault handler for a CPL-3 fault | Yes ([§2.9](#29-preemption-and-interrupt-state)) | Yes, fallible only ([§4.4](#44-kernel-heap)) |
@@ -1253,9 +1253,23 @@ does not wait for a handler already running on another CPU (ROADMAP §20.9).
 EOI is the dispatcher's job, not the driver's. The dispatch layer knows whether a
 vector arrived via PIC or LAPIC and signals the right controller.
 
-A threaded handler's top half runs in `dispatch` (ack / mask / wake only). The
-bottom half is a kernel thread pinned to the last online CPU; it may allocate and
-block. `set_threaded` is refused inside a hard-IRQ. The top half is optional:
+A threaded handler's top half runs in `dispatch` (ack / mask / wake only). Today one
+kernel thread, pinned to the last online CPU, runs every threaded vector's bottom half.
+Planned (ROADMAP §12.5): each threaded vector gets its own bottom-half thread, pinned to the
+CPU the vector is routed to and moved by `set_affinity`, so a device with one queue per CPU
+gets one thread per queue. A bottom half may block only on its own device's state. It takes
+no lock of §2.1's sleeping tier and never waits for another device's I/O, and it allocates
+without direct reclaim (§4.4). `free_vector` ends the vector's thread before it returns.
+
+Why: one shared thread puts every device's completions on one CPU, although multi-queue
+devices (virtio-blk today, NVMe in ROADMAP §20.4, RSS in Phase 28) spread them across CPUs
+on purpose. One bottom half that blocks also stalls every other device, including the one
+whose completion it waits for. One thread per threaded interrupt is Linux's model.
+Rejected: one shared thread whose handlers promise never to block, which nothing checks;
+and one bottom-half thread per CPU, in which one device's blocked handler still stalls
+another device's on that CPU.
+
+`set_threaded` is refused inside a hard-IRQ. The top half is optional:
 `set_threaded(vec, None, work)` is accepted, and `dispatch` EOIs before the bottom half runs, so on a
 level-triggered INTx route a device that nothing quiets raises the line again at once (ROADMAP §15.2,
 F099). The softirq stand-in is the
@@ -1844,7 +1858,9 @@ The global lock order is in [section 2.1](#21-lock-order) and the one-spinlock r
   Per-CPU serial capture assembles serial output into lines for the ring. Per-CPU buffers with a
   printer thread are planned (ROADMAP §19.5).
 - The global SCHED lock, one `SpinMutex` on the block cache, one VFS lock, the log-ring TAS, and
-  virtio-blk bounce copies are known scale limits; see ROADMAP §19.4, §19.5, and §19.8.
+  virtio-blk bounce copies are known scale limits; see ROADMAP §19.4, §19.5, and §19.8. So is the
+  one bottom-half thread for every threaded vector, until ROADMAP §12.5 gives each vector its own
+  ([§5.4](#54-irq-registration)).
 
 ## 7.8 Per-CPU scheduling
 
