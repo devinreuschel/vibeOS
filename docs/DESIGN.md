@@ -142,6 +142,33 @@ Serial is last so any lock holder can still log. Page tables are first because u
 allocate and free through everything below it. Blocking `WaitQueue`s are serialized by the scheduler
 lock: the predicate check and the enqueue happen under that same lock (DESIGN [§9.4](#94-concurrency)).
 
+The six ranks order spinlocks: `SpinMutex`, and the cross-CPU `IrqCell`s that ROADMAP §10.3 turns
+into ranked `SpinMutex`es. Sleeping locks form a tier outside all six: `BlockingMutex`, `RwLock`,
+`Semaphore`, and waiting for a page or buffer to finish I/O. A thread takes a sleeping lock only with
+IF=1 and no spinlock held ([§2.9](#29-preemption-and-interrupt-state) rule 4), so every sleeping lock
+ranks before page tables, and no spinlock is ever held across a sleep. Within the sleeping tier,
+outermost first:
+
+1. filesystem namespace and inode locks, the ones a call may hold across a copy to or from user
+   memory: the mount table, then a directory, then an inode in it; a parent directory before its
+   child; the two directories of one `rename` in address order, after the volume's rename lock
+2. the address-space lock (ROADMAP §13.1: `mmap`, `munmap`, and `mprotect` take it for writing, the
+   fault path for reading)
+3. waits on a page-cache page or a block buffer (ROADMAP §12.5)
+4. a filesystem's block-mapping and volume I/O locks, which its page-fill and writeback paths take
+   and which are never held across a user copy
+
+A user copy may fault, and the fault path takes the address-space lock for reading, then page waits,
+then, to fill a file page, the filesystem's level-4 locks. So a copy to or from user memory is
+allowed while level-1 locks are held, as `write` needs. The reverse is forbidden: code that holds the
+address-space lock takes no level-1 lock. `mmap` of a file takes a counted reference to the file's
+page-cache object before it takes the address-space lock, never the inode lock inside it. A
+filesystem with a single volume lock ranks it at level 4, so it must drop it before any user copy.
+This is Linux's order (`i_rwsem`, then `mmap_lock`, then the page lock, then the filesystem's own
+block-mapping locks), chosen for the same reason: a `write` that faults on its user buffer while
+holding the inode lock must not meet an `mmap` that holds the address-space lock and wants that
+inode lock. ROADMAP §13.12's lock-dependency build checks both tiers.
+
 A heap allocation can grow the heap, and growth takes PT and then BUDDY after dropping HEAP
 (`heap_init::grow_for`). Under SCHED, DEVICE, or SERIAL, taking HEAP fails the rank check on every
 allocation. Under PT or BUDDY, an allocation fails only when it grows the heap (PT's recursive-lock
@@ -153,7 +180,9 @@ heap allocation under them and allows logging. The VFS tables are static, so bri
 nothing under them. Filesystems get no rank of their own; adding one changes this list and
 `src/lock.rs` in the same commit. Drop the VFS lock before blocking block I/O: the FAT File API never
 holds it across a FAT or block wait, and the FAT volume lives in BSS behind a busy flag, not an
-IRQ-off mutex. Do not nest the VFS lock with the FAT volume.
+IRQ-off mutex. Do not nest the VFS lock with the FAT volume. When ROADMAP §10.4's A3 work makes the
+VFS lock a `BlockingMutex`, it leaves the spin ranks for the sleeping tier's first level above, and
+backends may block under it.
 
 ## 2.2 Interrupt handler rules
 
@@ -415,7 +444,7 @@ every IF=0 stretch has a reason from the list below and a bound.
    CPL 0 inside a user-memory accessor once ROADMAP §12.2 lets it sleep, since the code it
    interrupted ran with IF=1; a hardware interrupt's top half keeps IF=0. Rule; not yet enforced: FMASK clears IF at `syscall` and nothing sets it
    again, so a syscall body runs with IF=0 until it blocks (ROADMAP §10.6).
-4. Code that may sleep (waits on a wait queue, takes a `BlockingMutex` or `RwLock`, allocates with
+4. Code that may sleep (waits on a wait queue, takes a sleeping lock (§2.1), allocates with
    reclaim (ROADMAP §12.6), or copies to or from user memory once ROADMAP §12.2 lets a user-copy
    fault sleep) runs with IF=1 and no spinlock held, and asserts both in debug builds (ROADMAP
    §10.3).
