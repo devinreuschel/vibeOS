@@ -1,6 +1,7 @@
-# P2 · Record the known single-lock hotspots as Phase 17 items
+# P2 · Record the known single-lock hotspots as Phase 19 items
 
-**Status:** implemented. ROADMAP §17.4/§17.5/§17.8 and DESIGN §7.7 note the hotspots.
+**Status:** implemented. ROADMAP §19.4/§19.5/§19.8 and DESIGN §7.7 note the hotspots. The plan below
+keeps the pre-restructure numbers: Phase 17 is now Phase 19 (§17.x → §19.x), and §10.6 is now §12.5.
 `kernel_tests` spin counters dump per lock rank from ktest `lock_spins`.
 
 | | |

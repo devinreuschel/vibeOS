@@ -336,7 +336,7 @@ pub fn assert_unmapped(start: VirtAddr, end: VirtAddr) {
     );
 }
 
-/// Range dump of the live tables. Coalesces adjacent leaves (DESIGN §1.7).
+/// Range dump of the live tables. Coalesces adjacent leaves (ROADMAP §1.7).
 pub fn dump_ranges_to(w: &mut impl Write) {
     with_pt(|| {
         let mapper = current_mapper();
@@ -499,7 +499,7 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
 
     // ---- 5. EFER.NXE ----
     // Set NXE before installing so the NX bits in our leaves are honored
-    // rather than treated as reserved-bit violations. DESIGN §7.5's AP
+    // rather than treated as reserved-bit violations. DESIGN §7.3's AP
     // pitfall (missed NXE -> fault on first kernel page) applies here
     // too: our own kernel .rodata / .data / .bss all carry NX.
     let efer = x86::rdmsr(x86::IA32_EFER);

@@ -5,7 +5,7 @@ fast on panic / exception signatures, and quits QEMU the moment the last
 expected marker is seen so a green run takes ~2s rather than the full timeout.
 
 Standard library only. `subprocess` with its own timeout, not shell `timeout`,
-because macOS coreutils lacks it (DESIGN §0.6).
+because macOS coreutils lacks it (ROADMAP §0.6).
 
 One QEMU launcher (`qemu_argv`) and one `VIBEOS_*` reader (`env_config`).
 Drivers live in `run_*.py` and must not parse the environment or build argv.

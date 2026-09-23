@@ -5,7 +5,7 @@
 | **Area** | 4.4 Error handling, logging & observability |
 | **Impact / Effort / Phase** | Medium / M / III |
 | **Depends on** | A3 (file ops through `Vfs`) |
-| **Blocks** | Phase 9.3 syscall ABI |
+| **Blocks** | ROADMAP §10.4 syscall dispatch on KError; the Phase 10 gate line generating docs/SYSCALL.md §2 |
 | **Review** | [ARCHITECTURE_REVIEW.md §4.4](../ARCHITECTURE_REVIEW.md#44-error-handling-logging--observability) |
 
 ## Problem
@@ -31,7 +31,7 @@ A small `KError` in the portable crate with errno values, `From` impls from the 
    ```
 2. **Host test** `every_fs_error_maps`: iterate all `FsError` variants (add a `const ALL: [FsError; 13]`) and assert each maps to a distinct, non-zero errno; same for `BlockError`.
 3. **File API** returns `Result<_, KError>` once A3 has made it thin; the shell's `err_line` prints `KError::as_str`.
-4. **Syscall dispatch** (Phase 9.3) returns `Result<usize, KError>`; the entry stub converts to `-errno`. Add `KError` to the ROADMAP §9.3 task list.
+4. **Syscall dispatch** (built in Phase 9.3) returns `Result<usize, KError>`; the entry stub converts to `-errno`. Already tracked as ROADMAP §10.4 and a Phase 10 gate line.
 5. **Docs:** a short table in DESIGN (new §11 "Errors") listing which module enums cross the user boundary.
 
 ## Acceptance criteria
@@ -49,4 +49,4 @@ Purely additive until the File API signature changes; that change is mechanical.
 
 ## Out of scope
 
-Signal-related errors (`EINTR`) until Phase 9.7.
+Signal-related errors (`EINTR`) until ROADMAP §13.8.

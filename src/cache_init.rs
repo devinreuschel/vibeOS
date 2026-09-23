@@ -1,4 +1,4 @@
-//! Write-back block cache. ROADMAP §7.6.
+//! Write-back block cache. ROADMAP §7.4.
 //!
 //! Sits above [`BlockDevice`] miss paths. Lock dropped before device
 //! I/O (RANK_DEVICE + blocking wait). Flush/barrier write dirty pages

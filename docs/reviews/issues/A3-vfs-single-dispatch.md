@@ -5,7 +5,7 @@
 | **Area** | 4.1 Architecture & module boundaries |
 | **Impact / Effort / Phase** | High / L / III |
 | **Depends on** | Q3 (`BootCell` for late VFS init); A1 helpful, not required |
-| **Blocks** | D1 (fd tables), E2, A4 (fs cluster), Phase 9.3 syscalls |
+| **Blocks** | D1 (fd tables), E2, A4 (fs cluster) |
 | **Review** | [ARCHITECTURE_REVIEW.md §4.1](../ARCHITECTURE_REVIEW.md#41-architecture--module-boundaries) |
 
 ## Problem
@@ -47,4 +47,4 @@ The lock-kind change is the risky step. Land steps 1–4 first (backends still c
 
 ## Out of scope
 
-Per-process fd tables (D1, Phase 9); page-cache unification (ROADMAP §12.5).
+Per-process fd tables (D1, ROADMAP §10.4); page-cache unification (ROADMAP §12.5).

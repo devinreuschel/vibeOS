@@ -63,7 +63,7 @@ pub const SYS_KILL: u64 = 62;
 pub const SYS_FCNTL: u64 = 72;
 pub const SYS_GETPPID: u64 = 110;
 pub const SYS_SCHED_YIELD: u64 = 24;
-/// vibeOS-specific until Phase 13 getdents/procfs. `rdi` buf, `rsi` len.
+/// vibeOS-specific until ROADMAP §13.9 procfs replaces it. `rdi` buf, `rsi` len.
 pub const SYS_PSINFO: u64 = 500;
 
 pub const F_GETFD: u64 = 1;

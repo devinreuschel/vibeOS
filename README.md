@@ -17,7 +17,7 @@ If you learn something about hardware or Rust from reading this, good, but that'
 
 Phases 0–9 landed: boot, memory, traps/ACPI/time, threads, SMP, console/log/shell, PCI/virtio, block
 storage, filesystems including vibefs, and user mode (ring 3, syscalls, processes, userspace shell).
-Phase 10 (consolidation) is in progress; Phase 12 (demand paging / COW) is not started. See [The arc](docs/ROADMAP.md#the-arc).
+Phase 10 (consolidation) is in progress; Phase 11 (portability: the aarch64 port) and Phase 12 (demand paging / COW) are not started. See [The arc](docs/ROADMAP.md#the-arc).
 Releases: [GitHub Releases](https://github.com/devinreuschel/vibeOS/releases) (`v0.<phase>.0` from Phase 8; first cut is `v0.8.0`).
 
 Quickstart:

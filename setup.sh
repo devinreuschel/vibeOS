@@ -3,7 +3,7 @@
 #
 # Clones the Limine binary branch to ./limine, builds the `limine` host tool,
 # and verifies the other host tools that make(1) needs. Never rewrites any
-# project files (DESIGN §0.5).
+# project files (ROADMAP §0.5).
 
 set -euo pipefail
 

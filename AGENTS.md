@@ -13,7 +13,7 @@ This file is the contract. Cursor rules and `CLAUDE.md` point here. Longer mater
 
 ## Standing gates
 
-From ROADMAP "How to read this". Not optional.
+The code-facing subset of the ROADMAP "How to read this" standing gates (tagging is the maintainer's action). Not optional.
 
 - `make check` green (fast local gate: host clippy, host units, harness, ruff/mypy when installed). Run it before every commit. `make test` green, all tiers, before every PR.
 - new serial markers registered in the harness in the same commit ([DESIGN §8.3](docs/DESIGN.md#83-end-to-end))
@@ -22,6 +22,8 @@ From ROADMAP "How to read this". Not optional.
 - `CHANGELOG.md` entry for anything visible to someone running the kernel (≤ 2 lines, user-facing)
 - design docs updated in the same commit as any change to an invariant or a constant
 - no `TODO` describing a correctness gap — those become lines in the ROADMAP
+- every `unsafe fn` has a `# Safety` section and every `unsafe` block a `// SAFETY:` line (clippy-enforced once ROADMAP §10.1 lands)
+- CI green: the per-push jobs, and the scheduled jobs before a phase tag
 
 ## Conventions
 

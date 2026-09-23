@@ -29,7 +29,7 @@ ISO_VIBEFS_CRASH := vibeos-vibefs-crash.iso
 LIMINE_DIR := ./limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
 
-# QEMU config. `-smp 2` from day one, DESIGN §0.5. VIBEOS_SMP / VIBEOS_QEMU_CPU
+# QEMU config. `-smp 2` from day one, ROADMAP §0.5. VIBEOS_SMP / VIBEOS_QEMU_CPU
 # override so a single Makefile covers the SMP and LAPIC fallback variants.
 VIBEOS_SMP      ?= 2
 VIBEOS_QEMU_CPU ?= max

@@ -1,4 +1,4 @@
-//! MBR/GPT partition tables. ROADMAP §7.5.
+//! MBR/GPT partition tables. ROADMAP §7.3.
 //!
 //! Children are offset-limited ranges on a parent. Protective MBR (0xEE)
 //! is not a data partition. GPT validates header + entry CRC and falls

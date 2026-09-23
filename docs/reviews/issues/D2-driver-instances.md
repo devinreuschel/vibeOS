@@ -5,7 +5,7 @@
 | **Area** | 4.3 Data model & state management |
 | **Impact / Effort / Phase** | Medium / L / III |
 | **Depends on** | A1 (directory layout), Q3 |
-| **Blocks** | ROADMAP §7.3 NVMe, §7.4 AHCI, second virtio-blk disk |
+| **Blocks** | ROADMAP §20.4 NVMe, §20.5 AHCI, second virtio-blk disk |
 | **Review** | [ARCHITECTURE_REVIEW.md §4.3](../ARCHITECTURE_REVIEW.md#43-data-model--state-management) |
 
 ## Problem

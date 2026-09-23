@@ -662,10 +662,11 @@ selectors out of `IA32_STAR` with a fixed layout: `STAR.SYSCALL_CS = 0x08` so ke
 `STAR.SYSRET_CS = 0x10` so user SS is +8 (`0x18`) and user CS is +16 (`0x20`). User *data* therefore
 sits before user *code*. Getting the order right up front avoids a rebuild of the GDT later.
 
-All user-memory access goes through `copy_from_user`/`copy_to_user` which bracket with `stac`/`clac`
-and validate ranges (ROADMAP §9.3). Today that is `AddressSpace::read_bytes`/`write_bytes` after
-`check_user_range`, copying through the HHDM physmap (a supervisor mapping, so SMAP does not apply
-until a user-VA accessor exists). `arch::cpu::harden()` sets `CR4.SMEP|SMAP|UMIP` where CPUID allows
+User-memory access will go through `copy_from_user`/`copy_to_user`, which dereference the user VA
+inside `stac`/`clac` (ROADMAP §10.6); pointer ranges are validated before use (ROADMAP §9.3). Today it
+is `AddressSpace::read_bytes`/`write_bytes` after `check_user_range`, copying through the HHDM physmap
+(a supervisor mapping, so SMAP does not apply until a user-VA accessor exists), and `write_bytes` does
+not check the PTE's `WRITABLE` bit. `arch::cpu::harden()` sets `CR4.SMEP|SMAP|UMIP` where CPUID allows
 and asserts `CR0.WP` on every CPU; `stac`/`clac` are no-ops when SMAP is missing.
 
 Each CPU gets its own GDT and TSS. The TSS holds `RSP0` (the kernel stack that `syscall` and ring
@@ -747,7 +748,7 @@ false-refuse every allocate from `ktest`.
 
 The allocator records the dest CPU. `set_affinity` updates that binding. I/O APIC
 routes are rewritten immediately; MSI/MSI-X callers reprogram the message from
-`cpu_of`. Phase 19 rebalance uses this table rather than a second map.
+`cpu_of`. The ROADMAP §19.5 rebalance uses this table rather than a second map.
 
 MSI message address is `0xFEE0_0000 | (apic_id << 12)` (physical dest, RH=0). Data is
 the vector (fixed, edge). MSI-X table entries live in a BAR (BIR + offset from the
@@ -852,7 +853,7 @@ not "fix" this by inheriting the outgoing nest onto the incoming thread.
 ## 5.9 Later
 
 - x2APIC, for more than 255 CPUs and MSR-based register access instead of MMIO.
-- Interrupt affinity *rebalancing* (Phase 19). The dest-CPU table and `set_affinity`
+- Interrupt affinity *rebalancing* (ROADMAP §19.5). The dest-CPU table and `set_affinity`
   already exist; what is left is a policy that moves MSI-X messages and IOAPIC
   dests when a queue saturates one core.
 
@@ -1158,8 +1159,14 @@ inbox + IPI `0xFD`.
 Allocate the array on the heap once the CPU count is known from the MADT rather than sizing a static
 array by a `MAX_CPUS` guess.
 
-`PerCpu::current()` is safe from an ISR because the GS base never changes on a given CPU. Do not use
-`swapgs` in kernel-entry ISRs until user mode exists, and when it does, do it in exactly one place.
+`PerCpu::current()` is safe from an ISR once entry has put the kernel base in `GS_BASE`. Since Phase 9
+the GS base changes on every ring transition. `swapgs` lives in the syscall entry and exit and in
+`arch::gs::do_swapgs` (the ISR path, taken when the interrupted CS.RPL is 3), and nowhere else. The
+CS.RPL rule is wrong for NMI, `#MC`, and `#DB`: they can arrive in the one-instruction windows between
+`syscall` and the entry `swapgs`, or between the exit `swapgs` and `sysretq`/`iretq`, with a kernel CS
+and the user base loaded. ROADMAP §10.6 closes that for the current kernel (IST vectors decide from the
+sign of `GS_BASE`) and §18.3 for FSGSBASE, where a user can load a kernel-half base. See
+[section 9.3](#93-interrupts).
 
 Exclusive `&mut PerCpu` is `with_current` (IRQs off, panics on re-entry). `switch_now` uses
 `with_current_switch`: the `InterruptGuard` spans `switch_context` (it lives on the outgoing stack)
@@ -1196,7 +1203,7 @@ The global lock order is in [section 2.1](#21-lock-order) and the one-spinlock r
   Slice A ships a global IRQ-safe log ring plus a serial try-lock sink; the printer thread is parked
   (Design ACK). Per-CPU serial capture still assembles lines into the ring. The global SCHED lock,
   one `SpinMutex` on the block cache, one VFS lock, the log-ring TAS, and virtio-blk bounce copies
-  are known scale limits; see ROADMAP §17.
+  are known scale limits; see ROADMAP §19.4, §19.5, and §19.8.
 
 ## 7.8 Per-CPU scheduling
 
@@ -1493,8 +1500,10 @@ does not boot it twice.
 ## 8.6 CI and coverage
 
 Two jobs on every push and pull request, Linux. `concurrency` cancels superseded runs for the same
-branch (push and PR share one slot). Do not fan the QEMU ladder into a matrix: the ladder is a few
-minutes and GitHub runner queues are sometimes full.
+branch (push and PR share one slot). The earlier one-ladder-job rule (runner queues) was lifted on
+2026-09-22: the repo is public, so Actions minutes are free, and agents own the CI design. ROADMAP
+§10.1 plans a build-once job plus a tier matrix per architecture; until that lands the ladder is one
+job.
 
 | Job | When | What |
 |---|---|---|
@@ -1504,9 +1513,11 @@ minutes and GitHub runner queues are sometimes full.
 | `nightly-canary` | same workflow, non-blocking | undated latest nightly, `make iso && make test-unit` |
 | `release` | `v*` tags | production + ktest ISO, changelog section, GitHub Release |
 
-GitHub Actions records per-step duration. Measured on `main` at `b40c69f` (warm cache, 2026-09-22):
-one-job ladder wall **4m32s**. Cheap host checks (fmt, hostlib clippy, units, harness) were ~7s of
-that; kernel clippy ~22s; QEMU the rest. After T3, wall time is `check` plus the ladder. A fmt or
+GitHub Actions records per-step duration. Measured on `main` at `88370e5` (run 35796216463): `check`
+53 s, then the ladder 160 s, serialized by `needs: check`. The ladder spends 58 s on setup, toolchain,
+kernel clippy, and ISO build before the first QEMU step, then 98 s across nine QEMU steps (longest:
+vibefs crash, 22 s); about **3m40s** end to end. Across ten green runs up to `90ce475` the ladder took
+156-307 s (median about 206 s), because the harness retried a hung boot (ROADMAP §10.2). A fmt or
 hostlib lint failure should go red in about a minute without starting QEMU.
 
 Hostlib line-coverage floor is **87%** (`--fail-under-lines 87` in `.github/workflows/ci.yml`).
@@ -1647,6 +1658,14 @@ a failed kick, not a store into some other register.
 **Allocate or block in a hard-IRQ / MSI handler.**
 The top half ran `Box` / `sleep` / `WaitQueue` wait. Rule: ack, set pending, wake the IRQ thread or
 enqueue work. The thread may alloc and block ([section 2.2](#22-interrupt-handler-rules)).
+
+**An NMI, `#MC`, or `#DB` next to a syscall reads a user value as its `PerCpu`.**
+The handler decided `swapgs` from CS.RPL. Between `syscall` and the entry `swapgs`, and between the
+exit `swapgs` and `sysretq`/`iretq`, CS is the kernel's but `GS_BASE` holds the user base, so the
+handler skips the swap and `gs:[0]` is whatever userspace set. Rule: ordinary vectors may trust
+CS.RPL; the IST vectors decide from the sign of `GS_BASE` (ROADMAP §10.6), and once FSGSBASE lets a
+user load a kernel-half base they save `GS_BASE` and load the per-CPU base unconditionally (ROADMAP
+§18.3). Until §10.6 lands every vector still uses CS.RPL ([section 7.5](#75-per-cpu-data)).
 
 ## 9.4 Concurrency
 

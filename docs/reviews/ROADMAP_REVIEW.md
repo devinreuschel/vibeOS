@@ -292,4 +292,11 @@ Decisions taken in the edit that the maintainer may want to revisit: the placeme
 Phase 11 rather than after Phase 13; the table limits in the Phase 10 gate; the throughput, frame-rate,
 and latency numbers in the Phase 15, 16, and 19 gates; and the musl-for-C decision recorded in §14.1.
 
-*Review written read-only; the edits in §7 were applied afterwards. Nothing is committed.*
+A second pass the same day checked the result against this review and folded the remaining gaps
+straight into the roadmap. Among them: the crypto primitives moved on to §14.7, and §15.11 is TLS only.
+Watermarks, background reclaim, and the active/inactive LRU went to §19.10. The SMAP fault tests joined
+the Phase 10 gate through a new §10.6 on entry paths and user memory. Phase 20 gained an AML gate line.
+Two decisions were recorded in place: `sshd` stays a gating item in Phase 15, and aarch64 uses a device
+tree until §20.7. `docs/ROADMAP.md` is the record from here; this review is not updated further.
+
+*Review written read-only; the edits in §7 were applied afterwards.*

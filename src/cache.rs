@@ -1,4 +1,4 @@
-//! Page-granular block cache. ROADMAP §7.6.
+//! Page-granular block cache. ROADMAP §7.4.
 //!
 //! Keyed by `(dev, page-aligned byte offset)`. Read-through, write-back,
 //! clock (second-chance) eviction, sequential readahead, dirty-ratio cap.

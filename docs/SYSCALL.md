@@ -114,6 +114,9 @@ has an fd table (`MAX_FDS=16`) with stdio 0/1/2 as the console mux
 
 ## 5. User pointers
 
+Current behaviour; ROADMAP §10.6 replaces the pre-walk and the HHDM copy
+with user-VA accessors and an exception-table fixup.
+
 Every pointer arg is checked against the caller's `AddressSpace` **before**
 use: canonical, user half, not the VA-0 guard, not overflowing `len`,
 every leaf present and `USER`. Failure is `-EFAULT`. The kernel does not
@@ -124,10 +127,11 @@ byte of `[ptr, ptr+len)` fails the range check, no bytes are copied and
 the syscall returns `-EFAULT`. `len == 0` is success (`write` returns 0)
 and does not touch the pointer.
 
-Copy goes through the page tables + HHDM (`AddressSpace::read_bytes` /
-`write_bytes`), not a raw user-VA load that could `#PF` into a kernel
-halt. A user `#PF`/`#GP`/`#UD` from the program itself is a process kill
-(DESIGN §5.2 CPL split), not `EFAULT`.
+Until then, copies go through the page tables + HHDM
+(`AddressSpace::read_bytes` / `write_bytes`) rather than a raw user-VA
+load, because there is no fault fixup yet. A user `#PF`/`#GP`/`#UD` from
+the program itself is a process kill (DESIGN §5.2 CPL split), not
+`EFAULT`.
 
 ---
 

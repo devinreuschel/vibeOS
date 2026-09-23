@@ -15,7 +15,7 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 | [Q3](Q3-boot-cell-primitive.md) | One boot-cell primitive; retire `static mut` and `&'static mut` accessors | Medium | S+M | II | — |
 | [Q4](Q4-naming-consistency.md) | Naming and feature-flag consistency | Low | S | II | — |
 | [Q5](Q5-split-monolithic-files.md) | Split monolithic files; add a size guard | Medium | M | III | A1, T1 |
-| [D1](D1-heap-backed-tables.md) | Heap-allocate the growable fixed-capacity tables before Phase 9 | High | L | III | Q3, A3 |
+| [D1](D1-heap-backed-tables.md) | Heap-allocate the growable fixed-capacity tables (Phase 10) | High | L | III | Q3, A3 |
 | [D2](D2-driver-instances.md) | Driver and volume instances instead of module singletons | Medium | L | III | A1, Q3 |
 | [D3](D3-bootinfo.md) | Capture boot information once (`BootInfo`) | Low | S | I | Q3 |
 | [E1](E1-parser-robustness-lints.md) | Lock in parser robustness with restriction lints | Low | S | II | Q1 |
@@ -28,7 +28,7 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 | [T3](T3-fast-check-ci-job.md) | A fast `check` CI job ahead of the QEMU ladder; coverage floor | Medium | S | II | Q1, T2 |
 | [T4](T4-fuzz-parsers.md) | Fuzz the pure parsers now | Medium | S | II | A2 |
 | [P1](P1-build-multiplicity.md) | Cut the build multiplicity | Low | M | II | B1, B2 |
-| [P2](P2-lock-hotspots-note.md) | Record the known single-lock hotspots as Phase 17 items | Low | S | II | — |
+| [P2](P2-lock-hotspots-note.md) | Record the known single-lock hotspots as Phase 19 items | Low | S | II | — |
 | [S1](S1-pre-ring3-hardening.md) | Finish the pre-ring-3 hardening checklist | Medium | S | II | — |
 | [B1](B1-parametrize-makefile.md) | Parametrize the Makefile's ISO recipes; add `make check` | Medium | S | I | — |
 | [B2](B2-builtin-target-spike.md) | Replace the custom target JSON with built-in `x86_64-unknown-none` | Medium | M | II | C1 |
@@ -45,4 +45,4 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 
 Suggested order for Phase I (all independent unless noted): DOC1, DOC3, C1, Q1, B1, T2 → C2, DX1, B3 → DOC4, D3, R1.
 
-**Status (2026-09-22).** C1 landed (#77). DOC1+DOC3+R1 landed (#78). Harness CI flakes (#75), **B1+DX1** (#76), **Q1** (#80), **T2+C2** (#79), and **B3+DOC4** (#81) on main. **Q4+E3+P2** landed (#83). **E1** landed (#86; portable-crate unwrap/expect/panic deny; `indexing_slicing` stays warn). **B2** landed (#84; built-in `x86_64-unknown-none`). **S1** landed (#85; SMEP/SMAP/UMIP/WP + virtio-rng/RDRAND `/dev/random`). **T3** landed (#82; fast `check` CI job + llvm-cov floor). **A2** landed (#88): `vibeos-core` workspace member, host tests on the host triple, no Linux pin. **Q3** landed (#87): BootCell/IrqCell. **B4** landed (#89): hostlib `mkinitrd`, `VIBEOS_INITRD`, `global_asm!` trampoline. **O1 superseded** — Phase 9 exit closed 2026-09-22; do not add a "Phase 9 resumed" note. **D3** `BootInfo` landed (this PR). Everything else still proposed.
+**Status (2026-09-22).** C1 landed (#77). DOC1+DOC3+R1 landed (#78). Harness CI flakes (#75), **B1+DX1** (#76), **Q1** (#80), **T2+C2** (#79), and **B3+DOC4** (#81) on main. **Q4+E3+P2** landed (#83). **E1** landed (#86; portable-crate unwrap/expect/panic deny; `indexing_slicing` stays warn). **B2** landed (#84; built-in `x86_64-unknown-none`). **S1** landed (#85; SMEP/SMAP/UMIP/WP + virtio-rng/RDRAND `/dev/random`). **T3** landed (#82; fast `check` CI job + llvm-cov floor). **A2** landed (#88): `vibeos-core` workspace member, host tests on the host triple, no Linux pin. **Q3** landed (#87): BootCell/IrqCell. **B4** landed (#89): hostlib `mkinitrd`, `VIBEOS_INITRD`, `global_asm!` trampoline. **O1 superseded** — Phase 9 exit closed 2026-09-22; do not add a "Phase 9 resumed" note. **D3** `BootInfo` landed (#90). Everything else still proposed.
