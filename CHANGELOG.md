@@ -54,9 +54,11 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 - UEFI e2e no longer hangs on OVMF PXE after a green marker boot; a timed-out boot prints
   its serial tail.
 
-## [0.8.0] - 2026-09-19
+## [0.8.0]
 
 Phase 8 exit: filesystems. Phases 0–8 in one cut. See [the arc](docs/ROADMAP.md#the-arc).
+Not yet tagged: the 2026-09-23 kernel review reopened Phase 8's gate lines, so `v0.8.0` is cut, with this
+section as its notes, when they close (ROADMAP, How to read this).
 
 ### Added
 

@@ -32,6 +32,7 @@ it is 512 KiB or more and its partition table is missing, empty, or unreadable (
 Releases: [GitHub Releases](https://github.com/devinreuschel/vibeOS/releases). From Phase 8 on, the commit that closes a phase
 gets a `phase-<N>` tag and the next `v0.<m>.0` release, numbered in closing order: `v0.8.0` to `v0.14.0` are Phases 8 to 14,
 later release notes name their phase, and Phase 39 is `v1.0.0` ([How to read this](docs/ROADMAP.md#how-to-read-this)).
+No release exists yet: Phases 8 and 9 are tagged when Phase 10 closes the gate lines the kernel review reopened.
 
 Quickstart:
 

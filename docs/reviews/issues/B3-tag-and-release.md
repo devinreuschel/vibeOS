@@ -5,6 +5,8 @@ Maintainer tags `v0.8.0` later — this change does not push tags.
 **Superseded in part 2026-09-22.** ROADMAP's tag rule adds an annotated `phase-<N>` tag to each phase
 exit from Phase 8 on and numbers releases in closing order, since phases run side by side from Phase 15
 on; `v0.8.0` to `v0.14.0` still match Phases 8 to 14, and Phase 39 is `v1.0.0`.
+**Superseded in part 2026-09-23:** step 1's backfill tag at `dd04ac9` is not cut. The kernel review
+reopened Phase 8's gate lines, so `v0.8.0` goes on the commit that closes them (ROADMAP, How to read this).
 
 | | |
 |---|---|

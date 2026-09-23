@@ -52,7 +52,7 @@ class TestChangelogSection(unittest.TestCase):
     def test_extracts_0_8_0_from_repo(self) -> None:
         proc = run_script("0.8.0")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("## [0.8.0] - 2026-09-19", proc.stdout)
+        self.assertIn("## [0.8.0]\n", proc.stdout)
         self.assertIn("Phase 8", proc.stdout)
         self.assertNotIn("## [Unreleased]", proc.stdout)
         self.assertNotIn("paused", proc.stdout.lower())

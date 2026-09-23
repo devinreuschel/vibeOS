@@ -60,7 +60,9 @@ threshold is per model (§10.1).
 A line in phase *N* never depends on work in a later phase. When it would, the work moves earlier or the
 line moves later. A pointer to a later phase is only a cross-reference, such as "USB HID arrives through
 §20.3". A deferral box is the one exception: it stays open in its own phase and blocks only the gate of
-the phase it names.
+the phase it names. An exit-gate line is never deferred past its own phase's tag, though: a phase's gate
+closes only when every one of its gate lines is checked, reopened lines included, so a gate line the
+kernel review reopened blocks both its own phase's tag and the gate of the phase its note names.
 
 **Free by default.** The project has no budget: the maintainer spends nothing on vibeOS beyond their own
 agent tokens. Every phase, box, gate, and [Beyond](#beyond) entry is provable on these free resources:
@@ -97,7 +99,7 @@ in the same job where it fits, so runner noise cancels.
 - new portable logic has host unit tests; new hardware behavior has an in-guest test
 - every fixed bug gets a regression test in the cheapest tier that catches it
 - `CHANGELOG.md` entry for anything visible to someone running the kernel (≤ 2 lines, user-facing)
-- from Phase 8 on, the commit that closes a phase's gate gets an annotated `phase-<N>` tag and the next release, `v0.<m>.0`, where *m* is one more than the last release's. Phases 8 to 14 close in order, so their releases are `v0.8.0` to `v0.14.0`. From Phase 15 on, phases close side by side, *m* follows closing order, and the release notes name the phase. Phase 39's release is `v1.0.0`; a phase that closes after it cuts the next `v1.<m>.0` (§39.3)
+- from Phase 8 on, the commit that closes a phase's gate gets an annotated `phase-<N>` tag and the next release, `v0.<m>.0`, where *m* is one more than the last release's. Phases 8 to 14 close in order, so their releases are `v0.8.0` to `v0.14.0`; a phase in that range is tagged only after the phase before it, so Phases 8 and 9, whose gate lines the kernel review reopened into Phase 10's sections, are tagged in order when those lines close, possibly on the commit that closes Phase 10. From Phase 15 on, phases close side by side, *m* follows closing order, and the release notes name the phase. Phase 39's release is `v1.0.0`; a phase that closes after it cuts the next `v1.<m>.0` (§39.3)
 - design docs updated in the same commit as any change to an invariant or a constant
 - no `TODO` describing a correctness gap. Those become lines in this file.
 - every `unsafe fn` has a `# Safety` section and every `unsafe` block a one-line `// SAFETY:` reason; clippy's `missing_safety_doc` (with `check-private-items`) and `undocumented_unsafe_blocks` are denied from §10.1 on
