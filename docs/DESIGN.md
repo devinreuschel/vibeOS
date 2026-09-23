@@ -21,7 +21,7 @@ halfway through.
 | | Section | Covers |
 |---|---------|--------|
 | 1 | [Overview](#1-overview) | Constraints, layers, module map |
-| 2 | [Invariants](#2-invariants) | Lock order, handler rules, panic policy, markers, invariant register, publish last |
+| 2 | [Invariants](#2-invariants) | Lock order, handler rules, panic policy, markers, invariant register, publish last, preemption |
 | 3 | [Boot](#3-boot) | Toolchain, Limine, `_start` order, linker |
 | 4 | [Memory](#4-memory) | Address map, buddy allocator, paging, heap |
 | 5 | [Interrupts](#5-interrupts) | GDT/IDT, exception policy, vector map, PIC and APIC, privilege transitions |
@@ -182,6 +182,7 @@ Blocking and allocation are a class of bug, not an instance. Context rules:
 | Softirq equivalent (high-prio workqueue) | No | No (enqueue only from IRQ) |
 | Threaded IRQ / workqueue worker | Yes | Yes |
 | Driver `probe` | Yes | Yes |
+| Syscall body, fault handler for a CPL-3 fault | Yes ([§2.9](#29-preemption-and-interrupt-state)) | Yes |
 
 The hard-IRQ top half acknowledges and wakes. Work that allocates or blocks runs on a kernel thread
 ([section 5.4](#54-irq-registration), ROADMAP §6.6).
@@ -358,7 +359,7 @@ own file.
 | I28 | Contract markers are kernel-emitted (§2.6) | `marker!` | documented | No: `shell ready` comes from ring-3 `/bin/sh` (ROADMAP §10.5, F073) |
 | I29 | A catch hook intercepts only a CPL-0 fault on the CPU that armed it, inside an in-guest test's catch window | `arch::catch` | assumed | Partly: production never arms it, but `intercept` runs first in every exception handler of every build, and its armed state is global, so in a `kernel_tests` build a fault with the armed vector on any CPU, at any CPL, is caught (ROADMAP §10.2, F146) |
 | I30 | Interrupt and exception handlers run with RFLAGS.AC=0 (§5.10 rule 5) | none | documented | No: the gates keep ring 3's AC (ROADMAP §10.6, F088) |
-| I31 | IF-off sections stay far below the 1 s `wait_acks` timeout | none | assumed | No: the in-guest test runner and syscall bodies hold IF off with no time bound (ROADMAP §10.10, F011; ROADMAP §10.6, F044) |
+| I31 | Every IF=0 stretch is bounded by a constant amount of work, far below the 1 s `wait_acks` timeout ([§2.9](#29-preemption-and-interrupt-state) rule 2) | §2.9 | documented | No: syscall bodies run with IF=0 until they block, the in-guest test runner holds IF off for the whole run, and a console `write` scrolls the framebuffer once per newline with IF=0 (ROADMAP §10.6, F044; ROADMAP §10.2, F075); ROADMAP §10.10 makes a shootdown survive a violation (F011) |
 | I32 | A handler on an IST stack never blocks or switches threads (§5.10 rule 6) | IST handlers | documented | Yes: every IST handler halts, except that under `kernel_tests` an armed `catch` steps RIP and returns or longjmps off the IST stack |
 
 ## 2.8 Publish last
@@ -387,6 +388,48 @@ Rule; not yet enforced. The violations, and the ROADMAP lines that fix them:
 - On the bring-up timeout, `smp_init::start_one` frees an AP's kernel stack, GDT/TSS, and IST and
   RSP0 stacks without an INIT, so an AP that is still running uses freed memory (ROADMAP §20.1,
   F032).
+
+## 2.9 Preemption and interrupt state
+
+The kernel is preemptible wherever IF=1. The timer tick and the reschedule IPI call
+`schedule_preempt`, which may switch away from any thread whose `irq_nest` is 0: kernel threads,
+syscall bodies, and fault handlers alike. Turning interrupts off is how code says "not now", so
+every IF=0 stretch has a reason from the list below and a bound.
+
+1. IF=0 only in: an interrupt or exception entry or exit stub; a hard-IRQ top half (§2.2); a
+   spinlock or `IrqCell` critical section (§2.3); an `InterruptGuard` section that must not be
+   preempted or moved to another CPU: a per-CPU access (rule 5), a change to this CPU's registers
+   that must match the running thread (FP state, `FS_BASE`), or the [§7.9](#79-tlb-shootdown)
+   shootdown wait; the scheduler's switch path; the return-to-user sequences of
+   [§5.10](#510-privilege-transitions) rule 4; the panic and halt paths (§2.5); and a CPU's
+   bring-up before its first `sti` (boot before `irq: enabled`, an AP before it enters idle).
+2. An IF=0 stretch does a bounded amount of work. No loop whose trip count a user, a device, or a
+   disk image controls runs with IF=0, and nothing waits for another CPU with IF=0 without servicing
+   incoming IPIs ([§7.9](#79-tlb-shootdown)). A long job holds its lock for one bounded chunk at a
+   time and turns IF back on between chunks.
+3. A syscall body runs with IF=1. After `swapgs`, the entry stub copies the user RSP from
+   `PerCpu.syscall_scratch` into its frame on the thread's kernel stack, then runs `sti`; from
+   there on the scratch belongs to whichever thread next enters on this CPU. The exit stub runs
+   `cli` before it writes the scratch again (§5.10 rule 4). A fault or trap taken at CPL 3 runs
+   its body with IF=1 once its frame is on the thread's kernel stack, and so does a `#PF` taken at
+   CPL 0 inside a user-memory accessor once ROADMAP §12.2 lets it sleep, since the code it
+   interrupted ran with IF=1; a hardware interrupt's top half keeps IF=0. Rule; not yet enforced: FMASK clears IF at `syscall` and nothing sets it
+   again, so a syscall body runs with IF=0 until it blocks (ROADMAP §10.6).
+4. Code that may sleep (waits on a wait queue, takes a `BlockingMutex` or `RwLock`, allocates with
+   reclaim (ROADMAP §12.6), or copies to or from user memory once ROADMAP §12.2 lets a user-copy
+   fault sleep) runs with IF=1 and no spinlock held, and asserts both in debug builds (ROADMAP
+   §10.3).
+5. A per-CPU field other than `current` is read or written only with IF=0 (`with_current`,
+   `IrqCell`), because a preemption with IF=1 can move the thread to another CPU between the
+   lookup and the use. `current` names the same thread on every CPU it runs on.
+
+Why this model: a syscall body that runs with IF=0 cannot acknowledge a TLB shootdown (F011) or
+take the tick (F044), so every long syscall (`fork`'s copy, `execve`'s load, a large `read`)
+would need its own IF-on window, and ROADMAP §12.2's fault path must sleep. Linux runs syscalls
+with interrupts on and preempts wherever no lock is held, so its behaviour settles edge cases.
+Rejected: keeping syscall bodies at IF=0 and adding a polling window to each long call, which is
+how ROADMAP §10.6 first fixed console `write`; it has to be repeated in every call that loops and
+it still starves the tick.
 
 ---
 
@@ -1060,10 +1103,10 @@ describes the current code.
 | Point | CPL, stack | GS | IF | AC |
 |-------|------------|----|----|----|
 | `vibeos_syscall_entry`, before its `swapgs` | 0, user RSP | user | 0 (FMASK) | 0 (FMASK) |
-| syscall entry after its `swapgs`, and the syscall body | 0, `PerCpu.kernel_rsp0` | kernel | 0 on entry; the body leaves IF as it found it | 0 |
+| syscall entry after its `swapgs`, and the syscall body | 0, `PerCpu.kernel_rsp0` | kernel | 0 until the stub has moved the user RSP out of the scratch and runs `sti`; 1 in the body ([§2.9](#29-preemption-and-interrupt-state) rule 3) | 0 |
 | syscall exit, from the return of `vibeos_syscall_stub` to `sysretq` or `iretq` | 0, kernel stack, then the user RSP | kernel; user after `swapgs` | 0 (rule 4) | 0 |
 | `enter_user` and `enter_user_full`, from `mov gs` to `iretq` | 0, kernel stack | user | 0 (rule 4) | 0 |
-| non-IST vector taken at CPL 3 | 0, TSS.RSP0 | user until the stub's `swapgs` | 0 (interrupt gate) | ring 3's until the stub's `clac` (rule 5) |
+| non-IST vector taken at CPL 3 | 0, TSS.RSP0 | user until the stub's `swapgs` | 0 (interrupt gate); a fault or trap body then runs with IF=1, an interrupt's top half with IF=0 (§2.9 rule 3) | ring 3's until the stub's `clac` (rule 5) |
 | non-IST vector taken at CPL 0 | 0, interrupted stack | kernel, except rule 2's case | 0 (interrupt gate) | the interrupted value until the stub's `clac` (rule 5) |
 | IST vector: `#DF`, NMI, `#MC`, `#DB` | 0, its IST stack | whatever the interrupted point held (rule 3) | 0 | the interrupted value until the stub's `clac` (rule 5) |
 | vector exit to CPL 3 | 0, then 3 at `iretq` | user after `swapgs` | 0 until `iretq` restores ring 3's | `iretq` restores ring 3's |

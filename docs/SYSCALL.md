@@ -50,6 +50,10 @@ entry. The fast path is `sysretq`. The exit takes `iretq` when the saved
 RIP is non-canonical or `RF` or `VM` is set in RFLAGS; a spawned or forked process's
 first entry also uses `iretq` (`enter_user_full`).
 
+The body runs with IF=1 (DESIGN §2.9 rule 3): the entry stub moves the user
+RSP out of the per-CPU scratch into its frame and then runs `sti`. Today it
+does not, and FMASK's IF=0 lasts until the body blocks (ROADMAP §10.6).
+
 From the return of `vibeos_syscall_stub` to `sysretq` or `iretq`, the exit
 path needs IF=0: it stores the return value in `gs:[retval]`, stages the
 `iretq` frame in `gs:[iret_*]`, and loads the user RSP before `swapgs`. A
