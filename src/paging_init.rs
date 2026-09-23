@@ -22,6 +22,7 @@ use vibeos::paging::{
     PageFlags, PageSize, PhysAddr, VirtAddr,
 };
 
+use crate::boot::BootInfo;
 use crate::pmm_init;
 use crate::sync_init::SpinMutex;
 use crate::x86;
@@ -34,22 +35,9 @@ use crate::x86;
 /// free-list nodes, which live inside the free pages and are reached via
 /// `phys + hhdm_offset`. If Limine ever drifts to a different offset,
 /// the first `Buddy::allocate` after `mov cr3` walks an unmapped VA and
-/// faults with no useful backtrace. `assert_limine_hhdm` fails loud
-/// against that drift at boot.
+/// faults with no useful backtrace. `boot::capture` fails loud against
+/// that drift at boot.
 pub const HHDM_BASE: u64 = 0xFFFF_8000_0000_0000;
-
-/// Panic if Limine handed us an HHDM offset different from
-/// [`HHDM_BASE`]. Kept out of `install` so `boot::capture` can call it
-/// right after reading the HHDM response, before any code has committed
-/// to the constant.
-pub fn assert_limine_hhdm(offset: u64) {
-    assert!(
-        offset == HHDM_BASE,
-        "paging: limine hhdm offset {:#x} != expected {:#x}; buddy nodes would fault after cr3",
-        offset,
-        HHDM_BASE,
-    );
-}
 
 /// Low identity window base and size (DESIGN §4.1). 512 MiB is enough
 /// to keep the AP trampoline reachable and to give phase 2's early
@@ -66,7 +54,6 @@ const PHYSMAP_CAP: u64 = 8 * 1024 * 1024 * 1024;
 // Linker-provided section boundaries. Names match `linker.ld`.
 unsafe extern "C" {
     static __kernel_vma_start: u8;
-    static __kernel_vma_end: u8;
     static __limine_requests_start: u8;
     static __limine_requests_end: u8;
     static __text_start: u8;
@@ -394,18 +381,11 @@ pub struct PagingReport {
 /// suitable for logging.
 ///
 /// # Safety
-/// - `kernel_phys_base` must be the physical base Limine loaded us at.
 /// - The buddy allocator must be initialized (via `pmm_init::init`).
 /// - Must run single-CPU with interrupts off (matches slice A's
 ///   invariant on `pmm_init`).
-/// - `map_end` must be at most `PHYSMAP_CAP` after the caller's own
-///   ceiling: we recompute internally, so the value passed here is
-///   just the RAM high-water hint.
-pub unsafe fn install(
-    kernel_phys_base: u64,
-    ram_high_water: u64,
-    fb_phys_end: u64,
-) -> PagingReport {
+pub unsafe fn install(info: &BootInfo) -> PagingReport {
+    let kernel_phys_base = info.kernel_phys.start;
     let mut alloc = BuddyFrames;
 
     // Allocate + zero the fresh PML4.
@@ -461,7 +441,7 @@ pub unsafe fn install(
     );
 
     // ---- 2. Physmap [0, map_end) with 2 MiB pages ----
-    let map_end = physmap_extent(kernel_phys_base, ram_high_water, fb_phys_end);
+    let map_end = physmap_extent(info);
     unsafe {
         mapper
             .map_range(
@@ -599,13 +579,15 @@ fn map_kernel_section(
     len
 }
 
-fn physmap_extent(kernel_phys_base: u64, ram_high_water: u64, fb_phys_end: u64) -> u64 {
-    let vma_end = sym_addr(unsafe { &__kernel_vma_end });
-    let vma_start = sym_addr(unsafe { &__kernel_vma_start });
-    let kernel_phys_end = kernel_phys_base + (vma_end - vma_start);
-    let mut hi = ram_high_water.max(kernel_phys_end).max(fb_phys_end);
-    hi = paging_align_up(hi, PAGE_SIZE_2M);
-    hi.min(PHYSMAP_CAP)
+/// Covers usable RAM, the kernel image, and every framebuffer, capped at
+/// [`PHYSMAP_CAP`]. Never raw memmap entries (DESIGN §4.1).
+fn physmap_extent(info: &BootInfo) -> u64 {
+    let hi = info
+        .usable()
+        .map(|r| r.end)
+        .chain(info.framebuffers().map(|fb| fb.phys + fb.size))
+        .fold(info.kernel_phys.end, u64::max);
+    paging_align_up(hi, PAGE_SIZE_2M).min(PHYSMAP_CAP)
 }
 
 /// Walk Limine's active PML4 (via current CR3) and copy the entry

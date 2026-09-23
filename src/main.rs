@@ -134,7 +134,7 @@ fn normal_boot_tail() {
     // ---- Phase 1 slice A: physical memory manager. ----
     // Capture Limine once. Nothing else reads the request statics.
     let info = boot::capture();
-    let stats = unsafe { pmm_init::init(&info) };
+    let stats = unsafe { pmm_init::init(info) };
 
     // Exit-gate marker for phase 1 slice A. DESIGN §2.6 marker shape.
     crate::marker!("vibeOS: pmm: {} free 4KiB frames", stats.free_frames);
@@ -153,17 +153,7 @@ fn normal_boot_tail() {
     );
 
     // ---- Phase 1 slice B: page tables + MMIO attributes. ----
-    // Feed the physmap extent computation from what we already have:
-    // usable-RAM high water from the memmap, plus each framebuffer's
-    // `base + size` so scanout lands inside the physmap. DESIGN §4.1
-    // caps at 8 GiB regardless.
-    let paging_report = unsafe {
-        paging_init::install(
-            info.kernel_phys_base,
-            info.usable_high_water,
-            info.framebuffer_phys_end(),
-        )
-    };
+    let paging_report = unsafe { paging_init::install(info) };
     paging_init::report(&paging_report);
 
     // ---- Phase 2 slice B: ACPI discovery + MMIO UC. ----

@@ -13,6 +13,7 @@ use vibeos::fb::{
 use vibeos::font::{self, FONT_H, FONT_W};
 use vibeos::lock::RANK_DEVICE;
 
+use crate::boot::FbInfo;
 use crate::sync_init::SpinMutex;
 
 const BANNER_ROWS: u32 = 1;
@@ -52,42 +53,16 @@ pub fn overlaps_phys(phys: u64, len: u64) -> bool {
     phys < base.saturating_add(span) && base < phys.saturating_add(len)
 }
 
-/// Attach the first captured 32bpp framebuffer.
+/// Attach the first framebuffer [`Fb::new`] accepts.
 pub fn init() -> bool {
-    let info = crate::boot::info();
-    let mut chosen: Option<Fb> = None;
-    for fb in info.framebuffers.iter().flatten() {
-        if fb.bpp != 32 {
-            continue;
-        }
-        let width = fb.width;
-        let height = fb.height;
-        let pitch = fb.pitch as u64;
-        let base = fb.virt;
-        if width < FONT_W || height < FONT_H * (BANNER_ROWS + 1) || base == 0 || pitch < 4 {
-            continue;
-        }
-        let Some(grid) = TextGrid::new(width, height, BANNER_ROWS) else {
-            continue;
-        };
-        let size = fb.size;
-        if base >= crate::paging_init::HHDM_BASE {
-            FB_PHYS.store(fb.phys, Ordering::Release);
-            FB_LEN.store(size, Ordering::Release);
-        }
-        chosen = Some(Fb {
-            base,
-            width,
-            height,
-            pitch,
-            size,
-            grid,
-        });
-        break;
-    }
-    let Some(fb) = chosen else {
+    let Some((info, fb)) = crate::boot::info()
+        .framebuffers()
+        .find_map(|i| Some((i, Fb::new(&i)?)))
+    else {
         return false;
     };
+    FB_PHYS.store(info.phys, Ordering::Release);
+    FB_LEN.store(info.size, Ordering::Release);
     fb.fill(BG);
     fb.fill_banner();
     fb.paint_string(0, 0, BANNER, BANNER_FG, BANNER_BG);
@@ -97,6 +72,21 @@ pub fn init() -> bool {
 }
 
 impl Fb {
+    /// 32bpp and room for the banner plus one text row.
+    fn new(i: &FbInfo) -> Option<Self> {
+        if i.bpp != 32 || i.width < FONT_W || i.height < FONT_H * (BANNER_ROWS + 1) || i.pitch < 4 {
+            return None;
+        }
+        Some(Self {
+            base: i.virt,
+            width: i.width,
+            height: i.height,
+            pitch: i.pitch,
+            size: i.size,
+            grid: TextGrid::new(i.width, i.height, BANNER_ROWS)?,
+        })
+    }
+
     fn pixel_ptr(&self, x: u32, y: u32) -> Option<*mut u32> {
         let off = pixel_offset(x, y, self.width, self.height, self.pitch)?;
         if off.checked_add(4)? > self.size {

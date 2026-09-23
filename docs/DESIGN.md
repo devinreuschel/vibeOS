@@ -321,7 +321,8 @@ Every request is a `#[used]` `static` placed in `.limine_requests`. Miss the sec
 loader never sees the request, so the response pointer is null and the kernel dies on the first unwrap
 with no explanation. Check the base revision before trusting any other response. After that handshake,
 `boot::capture` reads every response once into a write-once `BootInfo` (`BootCell`). Nothing else
-touches the Limine request statics.
+touches the Limine request statics, and no Limine type leaves `boot`: consumers get the kernel's
+physical span, the RSDP, and `usable()` / `framebuffers()` iterators, and derive the rest themselves.
 
 | Request | What we need from it |
 |---------|---------------------|
