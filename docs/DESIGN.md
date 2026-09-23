@@ -321,7 +321,8 @@ Every request is a `#[used]` `static` placed in `.limine_requests`. Miss the sec
 loader never sees the request, so the response pointer is null and the kernel dies on the first unwrap
 with no explanation. Check the base revision before trusting any other response. After that handshake,
 `boot::capture` reads every response once into a write-once `BootInfo` (`BootCell`). Nothing else
-touches the Limine request statics.
+touches the Limine request statics, and no Limine type leaves `boot`: consumers get the kernel's
+physical span, the RSDP, and `usable()` / `framebuffers()` iterators, and derive the rest themselves.
 
 | Request | What we need from it |
 |---------|---------------------|
@@ -498,7 +499,9 @@ writable executable identity map of the low 512 MiB is not something to keep aro
 The physmap is capped at 8 GiB regardless of what the memory map says. Some firmware describes MMIO
 BARs as multi-terabyte regions, and walking that to build page tables at boot does not finish. The cap
 is computed from usable RAM high water mark, kernel image end, and framebuffer extent
-(`base + height * pitch`), not from raw memory map entries.
+(`base + height * pitch`), not from raw memory map entries. RAM above the cap never enters the buddy:
+free-list nodes, page tables, and heap pages are all reached through the physmap after `mov cr3`, so a
+frame past it triple-faults on first touch.
 
 ## 4.2 Physical memory: buddy allocator
 
@@ -526,6 +529,7 @@ blocks, excluding:
 - the AP trampoline page at `0x8000`
 - the framebuffer
 - anything not marked `USABLE`, including bootloader and ACPI reclaimable
+- anything above the 8 GiB physmap cap (§4.1)
 
 `free_frame_count()` must be O(1). Maintaining a running counter is trivial; walking the free lists to
 answer `meminfo` is not, and it gets called from a shell command that people hammer.

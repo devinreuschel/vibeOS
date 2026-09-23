@@ -94,7 +94,7 @@ KERNEL_VIBEFS_CRASH_DIR := $(CURDIR)/target-vibefs-crash
 
 .PHONY: help check all kernel iso run run-panic clean distclean setup layout \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-gp test \
-        test-e2e-pit test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
+        test-e2e-pit test-e2e-highmem test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
         test-smp-stress test-vibefs-crash test-e2e-uefi
 
 help:
@@ -113,6 +113,7 @@ help:
 	  '  test-e2e-panic        panic-test dump contract' \
 	  '  test-e2e-gp           #GP dump+halt contract' \
 	  '  test-e2e-pit          PIT calibration fallback' \
+	  '  test-e2e-highmem      boot contract with 9 GiB, past the physmap cap' \
 	  '  test-ps2              QEMU sendkey echo (also part of test-e2e)' \
 	  '  test-kernel           in-guest tests, -smp 2' \
 	  '  test-kernel-smp4      in-guest tests, -smp 4' \
@@ -234,6 +235,10 @@ test-e2e-gp: $(ISO_GP)
 test-e2e-pit: $(ISO)
 	VIBEOS_ISO=$(ISO) VIBEOS_EXPECT_PIT=1 python3 tests/harness/run_e2e.py
 
+# RAM past the 8 GiB physmap cap (DESIGN §4.1) must stay out of the buddy.
+test-e2e-highmem: $(ISO)
+	VIBEOS_ISO=$(ISO) VIBEOS_MEM=9G python3 tests/harness/run_e2e.py
+
 test-kernel: $(ISO_KTEST)
 	VIBEOS_ISO=$(ISO_KTEST) python3 tests/harness/run_ktest.py
 
@@ -255,7 +260,7 @@ $(MKFS_VIBEFS) $(FSCK_VIBEFS): src/vibefs.rs tests/hostlib/src/bin/mkfs_vibefs.r
 test-vibefs-crash: $(ISO_VIBEFS_CRASH) $(MKFS_VIBEFS) $(FSCK_VIBEFS)
 	VIBEOS_ISO=$(ISO_VIBEFS_CRASH) VIBEOS_MKFS=$(MKFS_VIBEFS) VIBEOS_FSCK=$(FSCK_VIBEFS) python3 tests/harness/run_vibefs_crash.py
 
-test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-pit test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
+test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-pit test-e2e-highmem test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
 
 # Longer high-CPU stress. Scheduled CI, not every push. ROADMAP §4.11.
 test-smp-stress: $(ISO_KTEST)

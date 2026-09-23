@@ -7,7 +7,7 @@
 | **Depends on** | Q3 (`BootCell`) |
 | **Blocks** | A1 (`boot/` directory has content) |
 | **Review** | [ARCHITECTURE_REVIEW.md §4.3](../ARCHITECTURE_REVIEW.md#43-data-model--state-management) |
-| **Status** | Implemented (this PR). `src/boot.rs` captures Limine once into `BootInfo` (`BootCell`). `pmm_init` / paging / ACPI / FB consume `boot::info()`. |
+| **Status** | Implemented (#90). `src/boot.rs` captures Limine once into `BootInfo` (`BootCell`). Follow-up: `BootInfo` holds facts only (kernel physical span, RSDP, `usable()` and `framebuffers()` over every Limine entry); PMM and paging derive excludes and physmap extent themselves, and no Limine type leaves `boot`. |
 
 ## Problem
 

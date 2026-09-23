@@ -144,6 +144,9 @@ jobs:
       - name: e2e (PIT calibration fallback)
         run: make test-e2e-pit
 
+      - name: e2e (9 GiB, past the physmap cap)
+        run: make test-e2e-highmem
+
       - name: in-guest kernel tests
         run: make test-kernel
 
