@@ -189,7 +189,8 @@ outermost first:
 
 1. filesystem namespace and inode locks, the ones a call may hold across a copy to or from user
    memory: the mount table, then a directory, then an inode in it; a parent directory before its
-   child; the two directories of one `rename` in address order, after the volume's rename lock
+   child. A `rename` takes the volume's rename lock, then its two directories: an ancestor before its
+   descendant, and two directories neither of which contains the other in address order
 2. the address-space lock (ROADMAP §13.1: `mmap`, `munmap`, and `mprotect` take it for writing, the
    fault path for reading). It guards the region tree only. A page-table entry changes under the
    page-table spinlock (rank 1 above), so the reverse-map unmap that direct reclaim does
@@ -200,8 +201,20 @@ outermost first:
 
 A user copy may fault, and the fault path takes the address-space lock for reading, then page waits,
 then, to fill a file page, the filesystem's level-4 locks. So a copy to or from user memory is
-allowed while level-1 locks are held, as `write` needs. The reverse is forbidden: code that holds the
-address-space lock takes no level-1 lock. `mmap` of a file takes a counted reference to the file's
+allowed while level-1 locks are held, as `write` needs, and under no lock of levels 2 to 4. The
+reverse is forbidden: code that holds the address-space lock takes no level-1 lock.
+
+A buffered `write` whose user buffer maps the very page it writes would fault on that page while it
+holds the page busy (level 3) and wait on itself. So the write path copies into a busy page only
+through a non-faulting accessor, which returns a short count instead of taking the fault. On a
+short count it releases the page, faults the rest of the source in with no page held, and retries.
+This is Linux's `fault_in_iov_iter_readable` loop. A `read` into a buffer that maps the page it
+reads needs no such loop, because it copies from a page that is up to date and not busy.
+
+The rename order is Linux's too: `rmdir` holds a parent and then the child it removes, so a
+`rename` whose directories were an ancestor and its descendant, taken in address order, could hold
+the child and wait for the parent. The rename lock serializes cross-directory renames, which is why
+unrelated directories may go in any fixed order. `mmap` of a file takes a counted reference to the file's
 page-cache object before it takes the address-space lock, never the inode lock inside it. A
 filesystem with a single volume lock ranks it at level 4, so it must drop it before any user copy.
 This is Linux's order (`i_rwsem`, then `mmap_lock`, then the page lock, then the filesystem's own
