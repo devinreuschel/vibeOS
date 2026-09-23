@@ -2374,8 +2374,10 @@ one nested-job leg or one HVF record session, and hold on whichever CPU model a 
 records its numbers without a threshold, since TCG's costs are not a CPU's. TCG's `-cpu max` on x86_64
 has SVM with nested paging, so early SVM work runs on any host, but TCG has no VMX and incomplete SVM
 event injection, and no gate line rests on it. If §20.8's records show no hosted runner offering a guest
-VMX or SVM for 7 nights running, GitHub has withdrawn nesting, and the x86_64 hypervisor lines here and
-Phase 22's x86_64 hostile-guest campaign move to [Funded goals](#funded-goals) by an edit to this file.
+VMX or SVM for 7 nights running, GitHub has withdrawn nesting, and the x86_64 hypervisor lines here,
+Phase 22's x86_64 hostile-guest campaign, and the x86_64 parts of Phase 28's VF-assignment line and
+Phase 30's live-update line move to [Funded goals](#funded-goals) by an edit to this file; those two
+lines then close on their aarch64 parts.
 
 **Architectures.** Both: VMX and SVM on x86_64, EL2 on aarch64, behind one VM abstraction. The x86_64
 hypervisor lines run in the nested job, and the aarch64 ones in the EL2 job and the HVF record, with
@@ -4140,8 +4142,10 @@ Phase 21 exit gate, before the tag line:
 §21.8:
 - [ ] the hostile guest fuzzes 24 hours a week on the x86_64 test PC booted bare metal, with no host panic and no KASAN report, and a second guest's §19.3 microbenchmarks stay within 10% there while the first misbehaves, each guest 2 vCPUs and 2 GiB
 
-If GitHub withdraws nested virtualization from its hosted runners, Phase 21's x86_64 nested lines and
-Phase 22's x86_64 hostile-guest campaign move to this machine by the same kind of edit. If a Phase 24 build outgrows the hosted x86_64 runner's disk after cleanup (Phase 24 Architectures), the x86_64 half of the Phase 24 gate lines that need it moves to this machine by the same kind of edit, together with §39.2's and Phase 37's lines that rest on it for that architecture.
+If GitHub withdraws nested virtualization from its hosted runners, Phase 21's x86_64 nested lines,
+Phase 22's x86_64 hostile-guest campaign, and the x86_64 parts of Phase 28's VF-assignment line and
+Phase 30's live-update line move to this machine by the same kind of edit, with this machine's Linux KVM
+as the nested host. If a Phase 24 build outgrows the hosted x86_64 runner's disk after cleanup (Phase 24 Architectures), the x86_64 half of the Phase 24 gate lines that need it moves to this machine by the same kind of edit, together with §39.2's and Phase 37's lines that rest on it for that architecture.
 
 Phase 22 exit gate, before the tag line:
 - [ ] the x86_64 live image, written to a USB stick, boots to its graphical desktop on the x86_64 test PC's own display through the UEFI GOP framebuffer, with a USB keyboard and mouse
