@@ -211,7 +211,7 @@ Blocking and allocation are a class of bug, not an instance. Context rules:
 | Softirq equivalent (high-prio workqueue) | No | No (enqueue only from IRQ) |
 | Threaded IRQ / workqueue worker | Yes | Yes |
 | Driver `probe` | Yes | Yes |
-| Syscall body, fault handler for a CPL-3 fault | Yes ([§2.9](#29-preemption-and-interrupt-state)) | Yes |
+| Syscall body, fault handler for a CPL-3 fault | Yes ([§2.9](#29-preemption-and-interrupt-state)) | Yes, fallible only ([§4.4](#44-kernel-heap)) |
 
 The hard-IRQ top half acknowledges and wakes. Work that allocates or blocks runs on a kernel thread
 ([section 5.4](#54-irq-registration), ROADMAP §6.6).
@@ -803,7 +803,26 @@ A free-list heap at `HEAP_START`, backed by buddy frames mapped writable + NX. I
 disables interrupts around `alloc` and `dealloc` because allocation happens under locks that ISRs must
 never contend.
 
-`#[alloc_error_handler]` panics with the requested layout. Silent OOM is worse than a halt.
+Allocation failure has two policies, chosen by who can cause it:
+
+- On a path that untrusted input reaches (a syscall, device data, a disk image, a network packet),
+  allocation is fallible: `Vec::try_reserve` and the kernel's `try_*` constructors, whose failure
+  becomes `ENOMEM` (or the errno Linux returns there, such as `EAGAIN` from `fork`). Where the
+  context may sleep ([§2.9](#29-preemption-and-interrupt-state) rule 4), ROADMAP §12.6's direct
+  reclaim and OOM killer run before the allocation reports failure. A user who exhausts memory
+  gets an errno or the OOM killer's verdict, never a kernel halt.
+- The infallible `alloc` API (`Box::new`, `Vec::push`, `vec!`, `format!`, `String` growth,
+  `Arc::new`) is allowed only during boot, before `irq: enabled`, and for an allocation whose size
+  and count a kernel invariant bounds. Its failure reaches `#[alloc_error_handler]`, which panics
+  with the requested layout: there, a failure means a kernel invariant is false, and silent OOM is
+  worse than a halt.
+
+Rule; not yet enforced: syscall paths use the infallible API today, and a `fork` near exhaustion
+panics in `spawn_inner` (F010). ROADMAP §10.4 makes the infallible constructors a lint error outside
+the allowed sites. Rejected: making small allocations never fail by having the allocator wait
+until the OOM killer frees memory (Linux's "too small to fail"), because an allocation made with a
+spinlock held, or on a path the OOM victim needs in order to exit, cannot wait, and a failed
+`Box::new` cannot be handled by its caller; AGENTS.md rule 4 forbids a user-triggerable panic.
 
 The heap is deliberately simple and deliberately temporary. A slab allocator for hot object types
 (TCBs, file descriptors, inodes, network buffers) lands in the advanced memory phase; general
