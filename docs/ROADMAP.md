@@ -1516,6 +1516,7 @@ so do TLB maintenance and the §11.2 I-cache maintenance aarch64 needs whenever 
 - [ ] each block `Queue` carries its device's transfer limits (`max_bytes` and `max_discard_sectors`; `BOUNCE` and `MAX_DISCARD` for vda), `merge_into` refuses a merge past either, and `submit` returns `Inval` for a single request past them; a host test queues three adjacent 4 KiB writes against an 8 KiB limit and gets two requests that both succeed (F119)
 - [ ] async block submission owns what it borrows: `block_init::submit` and `virtio_blk_init::submit` take an owned buffer (a page-cache frame reference held until completion) and a pinned, reference-counted `IoWaiter` instead of `ptr: usize` and `&IoWaiter`, and `Seg.ptr` and `Request.waiters` are private, so a submitter that returns early cannot leave a completion aimed at its stack frame; a `compile_fail` doctest in `block.rs` shows a borrowed stack buffer refused (F042)
 - [ ] one bottom-half thread per threaded vector, pinned to the CPU the vector is routed to and moved by §6.3's `set_affinity`, replacing the one `irqth` thread on the last online CPU (DESIGN §5.4); a bottom half takes no sleeping-tier lock, waits for no other device's I/O, and allocates without direct reclaim (DESIGN §4.4). In-guest at `-smp 4`: virtio-blk with 4 queues completes I/O submitted from every CPU, each queue's bottom half running on its vector's CPU by per-thread CPU counters; and a virtio-blk bottom half held at a `kernel_tests` hook delays neither virtio-rng's bottom half nor the keyboard's
+- [ ] block requests time out (DESIGN §10.3): each carries a deadline, 30 s by default and settable per device, after which the driver's timeout handler gets it back before its buffer is touched; virtio-blk resets the device (status 0, read back as 0), fails or resubmits every request it held, and brings the queues back, and a device the reset does not recover goes `Failed`; `IoWaiter::wait` parks on the request's deadline instead of `FAR_DEADLINE`. In-guest: a `kernel_tests` hook discards one used-ring entry, and that request completes with `Io` after the deadline, which the test sets to 1 s, while the next request on the same queue succeeds; the frame count shows no buffer freed before the reset
 - [ ] writeback threads with per-inode ordering and a dirty limit that throttles writers before direct reclaim finds only dirty pages; they are no-reclaim threads whose allocations use the §12.6 reserve pool (DESIGN §4.4)
 - [ ] one LRU with second-chance aging, which §12.6 reclaims from; §19.10 splits it into an active and an inactive list
 - [ ] readahead driven by detected access patterns
@@ -2636,6 +2637,7 @@ Moved from Phase 7: nothing before this phase needs either driver. Both are test
 
 - [ ] controller identify, admin queue setup, I/O queue creation per CPU
 - [ ] submission and completion queue handling with doorbells and phase tags
+- [ ] the §12.5 request timeout: a timed-out command is aborted with the admin Abort command, then the controller is reset (`CC.EN` cleared, `CSTS.RDY` read back as 0) when the abort does not complete, and I/O resumes on the reset controller; tested with a `kernel_tests` hook that withholds one completion
 - [ ] namespace enumeration, tested with several `nvme-ns` namespaces on one controller, each as Linux's `/dev/nvme<N>n<M>`
 - [ ] read and write commands, flush, dataset management for discard
 - [ ] MSI-X per queue
@@ -2645,6 +2647,7 @@ Moved from Phase 7: nothing before this phase needs either driver. Both are test
 ### 20.5 AHCI
 - [ ] HBA and port initialization, command list and FIS structures
 - [ ] identify device, LBA48 read and write
+- [ ] the §12.5 request timeout: a timed-out command is recovered by a port reset (COMRESET), after which the port's other commands are reissued; tested with a `kernel_tests` hook that withholds one completion
 - [ ] ATAPI detection so a CD-ROM does not look like a broken disk, tested with `ide-cd` on the controller
 - [ ] tested on `q35`'s built-in ICH9 AHCI at 00:1f.2, on an added `ich9-ahci` on aarch64 `virt`, and on `sbsa-ref`'s built-in controller, which has no PCI function and binds from its ACPI description (`_HID` `LNRO001E` with the AHCI class code in `_CLS`)
 
@@ -3601,7 +3604,7 @@ on aarch64 under HVF on the dev host as a §10.9 record. IOPS on data-center dri
 - [ ] arrays and logical volumes listed in §23.4's `/proc/diskstats` and under `/sys/block` with `slaves/` and `holders/` links, as Linux lists `md` and `dm` devices, so `iostat` and `lsblk` see the stack; per-device latency histograms, which Linux exposes only through eBPF, in debugfs under `block/<dev>/`
 - [ ] native NVMe multipath: a namespace that a subsystem shares between controllers is one block device named as Linux names it, with a path per controller, I/O retried on another path when one fails, and the subsystem and its controllers under `/sys/class/nvme-subsystem`, as Linux lists them
 - [ ] zoned namespaces through Linux's zoned block interface: `BLKREPORTZONE`, `BLKRESETZONE`, `BLKOPENZONE`, `BLKCLOSEZONE`, `BLKFINISHZONE`, `BLKGETZONESZ`, and `BLKGETNRZONES`, and `queue/zoned`, `queue/chunk_sectors`, and `queue/nr_zones` under `/sys/block`; writes to a sequential zone kept in order by the §7.1 request queue, and zone append where the device offers it
-- [ ] I/O timeouts escalating from abort to controller reset (NVMe) to device failure, never an indefinite hang
+- [ ] §12.5's request timeouts through stacked devices: a member request that times out fails over to another path (NVMe multipath below) or fails that member of the array (§29.2), never the array, and never waits past its deadline
 - [ ] arrays and volumes found by §20.9's persistent names and by filesystem UUID, never by probe order
 
 ### 29.2 Software RAID

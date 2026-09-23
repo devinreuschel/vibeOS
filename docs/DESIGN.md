@@ -2682,10 +2682,24 @@ cache's `flush` does not wait for writeback in flight either
 
 I/O errors retry up to `DEFAULT_RETRY_BUDGET` extra attempts, then the device
 goes `Failed`. Further submits return `Failed`. `Inval` (range, size) is not
-retried and does not fail the device. No infinite retry loop. A request that never
-completes is not an error this layer sees: `IoWaiter::wait` parks with
-`FAR_DEADLINE`, so a lost completion, such as one after a missed kick
-([section 10.4](#104-virtio-blk)), blocks the submitter for good.
+retried and does not fail the device. No infinite retry loop.
+
+Rule: every request has a deadline, 30 s by default, as Linux's block layer has. When it
+passes, the driver's timeout handler gets the request back from the device before anything
+touches its buffer. Where the device can abort one command, it aborts it (NVMe's Abort). Where
+it cannot, the handler resets the device (virtio's status 0, read back as 0; AHCI's port
+reset). A device the reset does not bring back goes `Failed`. Only after the device can no
+longer write the buffer does the request complete, with `Io` or by resubmission, and does its
+submitter get the buffer back (§2.11 rule 3: stop the device, then release). Rule; not yet
+enforced: `IoWaiter::wait` parks with `FAR_DEADLINE`, so a lost completion, such as one after a
+missed kick ([section 10.4](#104-virtio-blk)), blocks its submitter for good, and so does
+every thread that then waits for a lock the submitter holds (ROADMAP §12.5).
+
+Why: a lost completion is a device or driver bug the kernel must survive and report (§1.1
+constraints 4 and 5, which already bound every poll). Freeing a timed-out request's buffer while
+the device may still write it would turn a hang into memory corruption, so the reset comes
+first. Rejected: a timeout that only reports and keeps waiting, which leaves every waiter
+behind the request stuck. It is safe but not live.
 
 Logical block size is per device. Do not assume 512. Capacity is in those
 blocks. Discard on ramdisk validates the range and otherwise no-ops.
