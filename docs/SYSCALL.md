@@ -343,3 +343,20 @@ old one only after a successful load.
 `fork` copies the live MSR into the child. No context switch saves or
 restores it, so a process that uses TLS can resume with the base another
 process left, or with 0 (F022). The FP-state differences are in §1 (F069).
+
+---
+
+## 8. Native interfaces
+
+vibeOS allocates no syscall numbers. Linux allocates numbers as it goes,
+on both architectures from one shared range since 5.1, so a number free
+today is taken by some later Linux, and a binary built for that Linux would
+then call vibeOS's meaning of it. A vibeOS-only interface is a file under
+`/proc` or `/sys`, an `ioctl` on a vibeOS device node, or a generic-netlink
+family, and `docs/LINUX.md` lists it with its reason (ROADMAP, How to read
+this).
+
+The one exception is `psinfo` (500), which predates this rule. Linux has
+not reached 500, and ROADMAP §13.9 deletes the call when `ps` moves to
+`procfs`; its syscall-table check fails on any row whose number musl's
+pinned header does not name.

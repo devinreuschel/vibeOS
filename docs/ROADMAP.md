@@ -28,7 +28,9 @@ when they disagree.
 Linux's, in each architecture's layout, so unmodified Linux software runs; §13.11 and
 [Phase 23](#phase-23-linux-compatibility) test it against Linux. A native interface or a deliberate
 divergence is listed with its reason in `docs/LINUX.md` (§13.11), or has a line in this file naming the
-phase that replaces it.
+phase that replaces it. A native interface is a `/proc` or `/sys` file, an `ioctl` on a vibeOS device
+node, or a generic-netlink family, never a new syscall number: Linux allocates numbers as it goes, so a
+number vibeOS took would change meaning under a binary built for a later Linux (SYSCALL.md §8).
 
 `- [ ]` and `- [x]` are the live status. Edit them in the commit that lands the work. There is no third
 state. A deferral is an open box with a trailing note naming the phase that lands it, and that phase's
@@ -1667,7 +1669,7 @@ The §13.12 loom model and the in-guest tests below gate futex correctness; no f
 - [ ] utest runs attach a scratch FAT32 image as a second virtio-blk disk, which `/sbin/init` mounts at `/core` with §13.9's `mount`, and set `core_pattern=/core/%e.%p`; after QEMU exits the harness copies each core off it and prints a host backtrace beside the failing utest (`gdb-multiarch` in CI, `lldb` on the macOS dev host). This box lands after §13.9's FAT stack-frame box (F058)
 
 ### 13.9 POSIX floor
-- [ ] a tracked list of the syscalls needed to build and run the target software set: every number in a pinned copy of musl's `arch/<arch>/bits/syscall.h.in` for each architecture has a row in the §10.5 table with the same number, marked implemented, partial, or `ENOSYS` by design with the fallback its known callers take, and `make check` fails on a missing row or a differing number; `docs/SYSCALL.md` §3 renders the status, and the §13.11 runner lists in its job summary every `ENOSYS` the corpus hits
+- [ ] a tracked list of the syscalls needed to build and run the target software set: every number in a pinned copy of musl's `arch/<arch>/bits/syscall.h.in` for each architecture has a row in the §10.5 table with the same number, marked implemented, partial, or `ENOSYS` by design with the fallback its known callers take, and `make check` fails on a missing row, a differing number, or a row whose number musl does not name (SYSCALL.md §8); `docs/SYSCALL.md` §3 renders the status, and the §13.11 runner lists in its job summary every `ENOSYS` the corpus hits
 - [ ] every call in this phase lands under its asm-generic name, which x86_64 also has; the legacy names are x86_64-only entry points onto it, as §11.6 does for `openat`, `dup3`, and `clone`: `faccessat` for `access`, `fchmodat` for `chmod`, `fchownat` for `chown`, `newfstatat` for `stat` and `lstat`, `readlinkat` for `readlink`, and the §13.2 and §13.6 pairs
 - [ ] `getcwd`, `chdir`, `fchdir`, `faccessat`, `fchmodat`, `fchownat`, `umask`, `utimensat`
 - [ ] the VFS takes names of up to 255 bytes and paths of up to 4096 bytes including the terminating NUL, Linux's `NAME_MAX` and `PATH_MAX`, so every path call returns `ENAMETOOLONG` exactly where Linux does, and a filesystem with a shorter limit (vibefs v1's 64 bytes, FAT's 255 UTF-16 code units) returns it from its own `create` and `lookup` only; the path buffer is allocated per call, fallibly (DESIGN §4.4), not on the 16 KiB kernel stack. Today `fs::MAX_NAME` is 64 and a path of 256 bytes or more fails, so a Linux program that creates a 100-byte name or passes a 300-byte path fails where it succeeds on Linux (SYSCALL.md §2). Host tests create and look up a 255-byte name on tmpfs and resolve a 4095-byte path; a 256-byte name and a 4097-byte path return `ENAMETOOLONG`
