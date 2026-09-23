@@ -1155,7 +1155,7 @@ force every fix branch to rebase across it.
 
 ### 10.5 User runtime
 - [ ] a `no_std` Rust crate under `user/` as a workspace member, statically linked, with `_start`, argument and environment parsing, and a panic reported on fd 2 and turned into a non-zero exit
-- [ ] built for the bare target as a non-PIE `ET_EXEC` linked below 2 GiB, through the static relocation model the `[target.x86_64-unknown-none]` rustflags already set (the built-in spec defaults to static-PIE, which the loader refuses until §13.10), plus `-C code-model=small` for the user crate alone, since the built-in spec's model is `kernel` and those rustflags are shared with the kernel; the prebuilt `core` keeps the `kernel` model, which also resolves below 2 GiB, so `-Zbuild-std` stays deleted (B2); the triple for Rust code with `std` (`*-unknown-linux-musl` or a `*-unknown-vibeos` one) is §24.3's decision
+- [ ] built for the bare target as a non-PIE `ET_EXEC` linked below 2 GiB, through the static relocation model the `[target.x86_64-unknown-none]` rustflags already set (the built-in spec defaults to static-PIE, which the loader refuses until §13.10), plus `-C code-model=small` for the user crate alone, since the built-in spec's model is `kernel` and those rustflags are shared with the kernel; the prebuilt `core` keeps the `kernel` model, which also resolves below 2 GiB, so `-Zbuild-std` stays deleted (B2); Rust code with `std` targets `*-unknown-linux-musl` (§24.3)
 - [ ] syscall stubs generated from one table shared with the kernel, with a number column per architecture (§11.6) and an argument order where Linux's differs by architecture (raw `clone`: arm64 swaps `tls` and `ctid`), so numbers, arities, and argument positions cannot drift; the same generator emits `docs/SYSCALL.md` §3
 - [ ] syscall dispatch indexes the generated syscall table by number, and before the handler runs, the dispatcher range-checks every pointer argument the row declares (a buffer with its length argument, a fixed-size value, a C string, or a string vector); the rows for `open` (path), `execve` (path, argv, envp), and `wait4` (status) declare theirs, where `syscall.rs` gives all three a `ptr_mask` of 0 today; an in-guest test passes an unmapped and a kernel-half pointer in each declared pointer argument and gets `-EFAULT` (F150)
 - [ ] `execve` copies the caller's `envp` strings onto the new image's initial stack after `argv`, so the crate's environment parsing sees them; today `sys_execve` discards `envp` and `user_init::fill_stack` passes an empty one; a `/bin/tests` case execs a program with the environment `K=v`, and the program exits 0 only when its environment holds `K=v`
@@ -2225,7 +2225,7 @@ through §13.10 and §14.9. All of them are musl-hosted, so glibc (Phase 23) sta
 them from source on vibeOS is Phase 24, and this phase does not wait for it. Every compiler, linker, and
 test tool in the loop still runs on vibeOS.
 
-- [ ] the pinned nightly's `rustc` and `cargo`, the `rustfmt`, `clippy`, `llvm-tools`, and `rust-src` components that `make check` and the build use, and `rust-std` for the host and for `x86_64-unknown-none`, `aarch64-unknown-none-softfloat`, and `aarch64-unknown-none`, as rust-lang publishes them for the `<arch>-unknown-linux-musl` host (Tier 2 with host tools on both architectures), run on vibeOS under §14.9's musl. The pin stays a nightly because the kernel uses nightly features (`abi_x86_interrupt`, `alloc_error_handler`); whether a `*-unknown-vibeos` target exists is Phase 24's decision
+- [ ] the pinned nightly's `rustc` and `cargo`, the `rustfmt`, `clippy`, `llvm-tools`, and `rust-src` components that `make check` and the build use, and `rust-std` for the host and for `x86_64-unknown-none`, `aarch64-unknown-none-softfloat`, and `aarch64-unknown-none`, as rust-lang publishes them for the `<arch>-unknown-linux-musl` host (Tier 2 with host tools on both architectures), run on vibeOS under §14.9's musl. The pin stays a nightly because the kernel uses nightly features (`abi_x86_interrupt`, `alloc_error_handler`); Rust code with `std` targets `*-unknown-linux-musl`, not a vibeOS triple (§24.3)
 - [ ] a `vibeos-build` disk image holding that toolchain; the pinned §14.9 `minirootfs` and the whole package snapshot, so the packages §17.2, §17.4, and §17.6 name and those `make test`'s tiers build images from are local; a clone of the Limine binary branch at `setup.sh`'s pinned `LIMINE_TAG` and `LIMINE_COMMIT`, which the loop script passes to `setup.sh` as `LIMINE_REPO`; a `cargo vendor` tree for the workspace; and the §14.10 source archives the build reads (musl and compiler-rt for `make sysroot`), pinned by hash, built once by the host and stored by content hash as §13.11 stores its corpus, since the Actions cache holds 10 GB per repository. A release file must be under 2 GiB, so the image is kept zstd-compressed in parts below that, which a run streams through `zstd -d` into the image and checks against that hash; the on-device loop begins with neither a package install nor a download. The image's compressed and uncompressed sizes are recorded in DESIGN §8.6, and the image, the checkout, and the guest's disks fit the 14 GB disk GitHub documents for a hosted runner
 - [ ] `cargo build --offline` from that image, with `flock` and `fcntl` locks (§13.9) held across parallel builds, and `-j` equal to the guest's CPU count, 4 in the Phase 17 guest
 - [ ] no upstream binary is patched, wrapped, or `LD_PRELOAD`ed to run; each workaround is a kernel fix with a regression test in the cheapest tier that catches it
@@ -3057,8 +3057,8 @@ diverse double-compiling; the seeds that remain are listed and confined to stage
 same machinery into a package collection with a size target.
 
 **Unlocks.** A self-hosting claim with no borrowed binaries past a short, listed seed set. Packages vibeOS
-builds instead of downloading, which Era VII's desktop stack and Phase 39's supported releases build on. A
-decided answer to whether a `*-unknown-vibeos` target is worth having.
+builds instead of downloading, which Era VII's desktop stack and Phase 39's supported releases build on. Rust's
+`std` built from source for the Linux triples vibeOS runs (§24.3).
 
 **Architectures.** Both. Each architecture rebuilds its own toolchains and ports natively on vibeOS, in a
 build guest on a GitHub-hosted runner where the §22.4 CI agent runs the builds (on aarch64 through
@@ -3125,11 +3125,14 @@ and everything a release ships.
 - [ ] the full rebuild: a scheduled workflow rebuilds the whole tree from §24.5's stage 0 through the §22.4 CI agent in §24.1 shard chains, weekly on x86_64 and monthly on aarch64, whose TCG builds run several times slower; a nightly job, one run at a time per architecture, rebuilds the ports whose recipe or dependencies changed since its last complete run; the rebuild workflows' peak job counts, recorded in DESIGN §8.6, sum to at most 5, their share of §10.1's 10 scheduled slots, so a rebuild that runs for days leaves the other 5 to the nightly and weekly workflows and per-push CI its own 10; when §24.1's recorded chain times show a full rebuild would not finish within its period at that share, the period lengthens and the share stays, and a rebuild that would outlast GitHub's 35-day limit on a workflow run continues in a run it dispatches; per-architecture counts (ports, built, test suites passing, reproducible, carried patches) go to the job summary and to §10.9's CI history, which records these workflows' runs beside `ci`'s, with the counts as added fields
 
 ### 24.3 Rust target
-Moved from §17.3: the `std` port and the vibeOS host triples it planned, now a decision rather than an
-assumption, since `*-unknown-linux-musl` `std` already runs on vibeOS through §13.10 and §14.9.
+Moved from §17.3. Decided: vibeOS's Rust host and user triple is `<arch>-unknown-linux-musl`, and
+`<arch>-unknown-linux-gnu` inside Phase 23's glibc roots; no `*-unknown-vibeos` triple exists. `std`'s
+Linux layer is correct on vibeOS by the Linux-interfaces rule, and SYSCALL.md §8 keeps vibeOS-only
+interfaces out of the syscall table, so a separate triple would buy only a distinct `target_os`, for a
+patch set rebased at every toolchain bump and a port of the `libc` crate. `docs/LINUX.md` records the
+decision; it is revisited only if `std` itself must call a vibeOS-only interface.
 
-- [ ] decided and written in `docs/LINUX.md`: whether `x86_64-unknown-vibeos` and `aarch64-unknown-vibeos` exist, or vibeOS's Rust host and user triple stays `*-unknown-linux-musl`, weighing what a separate triple buys (a `std` over vibeOS-only interfaces, a distinct `target_os`) against what it costs (a patch set rebased at every toolchain bump, a `libc` crate port)
-- [ ] the chosen triple's `std`, with thread, file, socket, process, and time support, built natively by §24.1's `x.py` build; a vibeOS triple brings its `sys` layer over vibeOS's syscalls and its `libc` crate support, carried under `ports/`
+- [ ] `library/std` for `<arch>-unknown-linux-musl`, with thread, file, socket, process, and time support, built natively by §24.1's `x.py` build with no vibeOS patch
 - [ ] `x.py test library/std` for that triple passes natively on both architectures, except the cases on its expected-failure list, each with a reason
 
 ### 24.4 Upstream
@@ -3148,7 +3151,6 @@ Bootstrappable builds: every binary the chain starts from is named, confined to 
 
 ### 24.6 Stretch: Rust without a binary seed
 - [ ] `rustc` from mrustc on vibeOS: mrustc builds the newest `rustc` release it supports, each release builds the next up to the pinned nightly, and the result is byte-identical to the §24.1 `rustc`, which removes the Rust seed and double-compiles `rustc` diversely
-- [ ] a vibeOS triple, if §24.3 kept one, proposed to rust-lang/rust at Tier 3; Tier 3 names a person as target maintainer, so this waits for the maintainer to agree to be named
 
 ---
 
@@ -4365,7 +4367,7 @@ hardware, a paid service, or a new account, that version is in [Funded goals](#f
 - **riscv64 as a third architecture** (after §11.8 and 20): the §11.8 port carried through the Phase 20 lines that QEMU's riscv64 `virt` machine can run (its PCIe, NVMe, xHCI, and virtio models), under TCG on the hosted runners, since no free host runs riscv64 natively. A board is a funded goal.
 - **Whole-kernel deterministic simulation** (after 15): the portable kernel run on the host against a simulated `arch` (§10.3), one simulated CPU at a time chosen by a seed at every lock, atomic, and interrupt point, in virtual time, with §12.5's disk faults and §15.10's faulty link under §15.1's simulated clock, every failure replayable from its seed. §15.1 and §15.10 already do this for the network stack alone, and §12.5 enumerates vibefs crash states.
 - **Live kernel patching** (after 18): a fix applied to a running kernel without a reboot, with the KASLR and W^X story intact.
-- **A `std`-native Rust userspace** (after 24): coreutils, shell, and init moved from the §10.5 `no_std` runtime to Rust's `std` for the user triple §24.3 chose.
+- **A `std`-native Rust userspace** (after 24): coreutils, shell, and init moved from the §10.5 `no_std` runtime to Rust's `std` for the `*-unknown-linux-musl` triple (§24.3).
 - **Real-time latency bounds** (after 19): a scheduling class that documents its bound on interrupt and scheduling latency, with the bound measured in a KVM guest on the hosted x86_64 runner beside Linux built with `PREEMPT_RT` in the same VM shape and job, and under HVF on the dev host as a record. The bound on bare metal is a funded goal.
 - **A network filesystem client** (after 15): NFS or 9p over TCP, so several vibeOS guests on one hosted runner share one tree served from the runner host.
 - **A WASM runtime** (after 14): a sandbox that is not a process.
