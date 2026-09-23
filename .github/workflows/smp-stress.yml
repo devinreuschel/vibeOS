@@ -5,6 +5,11 @@ on:
     - cron: "0 6 * * 1"
   workflow_dispatch:
 
+# Least privilege: the jobs read the tree and write only artifacts and caches,
+# which use the runner's own token. ROADMAP §10.1.
+permissions:
+  contents: read
+
 jobs:
   stress:
     name: high-CPU SMP stress

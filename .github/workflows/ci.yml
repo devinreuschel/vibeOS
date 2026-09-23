@@ -5,6 +5,11 @@ on:
     branches: ["**"]
   pull_request:
 
+# Least privilege: the jobs read the tree and write only artifacts and caches,
+# which use the runner's own token. ROADMAP §10.1.
+permissions:
+  contents: read
+
 # Push + PR share one slot per branch; older SHAs get cancelled.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
