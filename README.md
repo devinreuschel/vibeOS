@@ -18,7 +18,9 @@ If you learn something about hardware or Rust from reading this, good, but that'
 Phases 0–9 landed: boot, memory, traps/ACPI/time, threads, SMP, console/log/shell, PCI/virtio, block
 storage, filesystems including vibefs, and user mode (ring 3, syscalls, processes, userspace shell).
 Phase 10 (consolidation) is in progress; Phase 11 (portability: the aarch64 port) and Phase 12 (demand paging / COW) are not started. See [The arc](docs/ROADMAP.md#the-arc).
-Releases: [GitHub Releases](https://github.com/devinreuschel/vibeOS/releases) (`v0.<phase>.0` from Phase 8; first cut is `v0.8.0`).
+Releases: [GitHub Releases](https://github.com/devinreuschel/vibeOS/releases). From Phase 8 on, the commit that closes a phase
+gets a `phase-<N>` tag and the next `v0.<m>.0` release, numbered in closing order: `v0.8.0` to `v0.14.0` are Phases 8 to 14,
+later release notes name their phase, and Phase 40 is `v1.0.0` ([How to read this](docs/ROADMAP.md#how-to-read-this)).
 
 Quickstart:
 
@@ -43,8 +45,8 @@ Docs live in [`docs/`](docs/). Root stays at a readme and a changelog.
 
 - [DESIGN.md](docs/DESIGN.md): invariants, boot order, address map, interrupts, time, SMP, testing, and
   a list of bugs already paid for once. Decisions, not narration.
-- [ROADMAP.md](docs/ROADMAP.md): 23 phases from boot to self-hosting, each with a goal, an exit gate,
-  and per-part task lists.
+- [ROADMAP.md](docs/ROADMAP.md): 41 phases in eight eras, from boot through self-hosting to a stable 1.0,
+  each with a goal, an exit gate, and per-part task lists.
 - [VIBEFS.md](docs/VIBEFS.md): vibefs on-disk format (version field in that file). Not DESIGN.
 - [SYSCALL.md](docs/SYSCALL.md): syscall ABI. Not DESIGN.
 

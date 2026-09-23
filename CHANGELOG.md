@@ -25,7 +25,7 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 
 ### Changed
 
-- Roadmap restructured to 23 phases: [Phase 10 Consolidation](docs/ROADMAP.md#phase-10-consolidation)
+- Roadmap restructured to 41 phases in eight eras: [Phase 10 Consolidation](docs/ROADMAP.md#phase-10-consolidation)
   and [Phase 11 Portability](docs/ROADMAP.md#phase-11-portability) added; old phases 10–20 are now 12–22.
 - CI: `check` job (`make check` + hostlib llvm-cov floor 87%) runs before the QEMU ladder.
   rustflags deny warnings; kernel clippy still warms `target/` for `make iso`.

@@ -10,7 +10,7 @@
 
 ## Problem
 
-The byte-slice-in, `Result`-out parsers already have test doubles: `acpi::walk<P: PhysMem>` and `parse_rsdp/parse_madt/parse_hpet/parse_fadt/parse_mcfg`, `part::parse_image(disk, sector_size)`, `fat::FatVol::mount(&mut MemDisk)`, `vibefs::{probe, mount, fsck}(&mut MemDisk)`, `pci::read_function<C: CfgIo>` and `walk_caps`, `virtio::read_modern_caps`, `shell::tokenize`, `kbd` scan-code decoding, `elf::parse`. ROADMAP §10.2 schedules the parser fuzzers now (ELF included) and §18.5 the syscall fuzzer and the in-guest image, packet, and exec fuzzing under KASAN; nothing blocks doing it today with `cargo-fuzz` (nightly is already required).
+The byte-slice-in, `Result`-out parsers already have test doubles: `acpi::walk<P: PhysMem>` and `parse_rsdp/parse_madt/parse_hpet/parse_fadt/parse_mcfg`, `part::parse_image(disk, sector_size)`, `fat::FatVol::mount(&mut MemDisk)`, `vibefs::{probe, mount, fsck}(&mut MemDisk)`, `pci::read_function<C: CfgIo>` and `walk_caps`, `virtio::read_modern_caps`, `shell::tokenize`, `kbd` scan-code decoding, `elf::parse`. ROADMAP §10.2 schedules the parser fuzzers now (ELF included), §13.13 the syscall fuzzer, and §18.5 syzkaller and the in-guest image, packet, and exec fuzzing under KASAN; nothing blocks doing it today with `cargo-fuzz` (nightly is already required).
 
 ## Recommended fix
 

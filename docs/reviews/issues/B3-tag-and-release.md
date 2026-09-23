@@ -2,6 +2,9 @@
 
 **Status:** implemented. Version `0.8.0`, changelog cut, `release.yml`, CI ISO artifact.
 Maintainer tags `v0.8.0` later — this change does not push tags.
+**Superseded in part 2026-09-22.** ROADMAP's tag rule adds an annotated `phase-<N>` tag to each phase
+exit from Phase 8 on and numbers releases in closing order, since phases run side by side from Phase 15
+on; `v0.8.0` to `v0.14.0` still match Phases 8 to 14, and Phase 40 is `v1.0.0`.
 
 | | |
 |---|---|

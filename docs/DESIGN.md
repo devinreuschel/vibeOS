@@ -791,12 +791,11 @@ The PIC is a bootstrap artifact and a fallback, nothing more.
 - Keep the PIT driver code. It is still the calibration fallback and still provides the delays that AP
   bring-up needs.
 
-FADT `iapc_boot_arch` bit 0 says whether the legacy 8259 exists at all. Modern hardware may not have
-one, and assuming it does means an early write to a port nobody answers. The PIC step reads that bit
-from the FADT already parsed after CR3 and skips the ICW sequence when the legacy controller is
-absent. Missing FADT still remaps and masks. `pic: remapped` means this step finished: the ICW
-sequence ran, or FADT skip declined the ports. Unlike `paging: mmio uc`, it is not a claim that
-ports were programmed.
+FADT `iapc_boot_arch` bit 0 is `LEGACY_DEVICES`, not 8259 presence: QEMU clears it and still has an
+8259. The PIC step before `lidt` skips its ICW sequence when the bit is clear, but a second remap and
+mask after TSC calibration always runs, so the PIC is remapped and masked before the first `sti` on
+every boot. `pic: remapped` means this step finished. Deciding presence properly, from the MADT
+`PCAT_COMPAT` flag with a mask read-back probe, is ROADMAP §20.1.
 
 ## 5.6 I/O APIC
 
@@ -1021,7 +1020,7 @@ Limine hands over the RSDP physical address. From there:
 |-------|-----------|----------|
 | MADT | `APIC` | LAPIC MMIO base, I/O APIC bases and GSI bases, interrupt source overrides, per-CPU APIC IDs |
 | HPET | `HPET` | Main counter MMIO base, used for TSC calibration |
-| FADT | `FACP` | `iapc_boot_arch` at offset 109, bit 0 says whether a legacy 8259 exists |
+| FADT | `FACP` | `iapc_boot_arch` at offset 109; bit 0 is `LEGACY_DEVICES` (not 8259 presence, §5.5) |
 | MCFG | `MCFG` | PCIe ECAM base, needed for configuration space access |
 
 MADT entry types in use:
