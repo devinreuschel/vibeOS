@@ -24,6 +24,8 @@ docs, and CI, 3 of them critical and 17 high. Among them are three ways a user p
 and the ROADMAP line that fixes each finding cites its id.
 Phase 10 (consolidation) is in progress; Phase 11 (portability: the aarch64 port) and Phase 12 (demand
 paging / COW) are not started. See [The arc](docs/ROADMAP.md#the-arc).
+Do not run code you do not trust on vibeOS, and keep no secrets on it: until Phase 18 it stops a process
+from crashing the kernel, not from reading other processes' memory ([DESIGN §2.10](docs/DESIGN.md#210-trust-boundaries)).
 Do not attach a virtio-blk disk you want to keep: every boot writes a GPT over the first one (`vda`) when
 it is 512 KiB or more and its partition table is missing, empty, or unreadable (F003), and
 `vibeos-ktest.iso` writes fixed sectors of any attached one (F145).

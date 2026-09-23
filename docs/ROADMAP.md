@@ -2344,7 +2344,7 @@ boot chain.
 - [ ] full disk encryption with AES-XTS, added to the §14.7 crate with the IEEE 1619 vectors as host tests, and the key derived from a passphrase with §14.7's Argon2id; the transform is an encrypting block device stacked on any §7.1 `BlockDevice`, built here, which §29.1's mapping interface later drives
 
 ### 18.8 Threat model
-- [ ] `docs/THREAT_MODEL.md` with the headings `Trusted`, `Untrusted`, `Out of scope`, and `Known escalation paths`; each out-of-scope entry gives its reason, and each escalation path says why it is open and links to an open box, a [Beyond](#beyond) entry, or a [funded goal](#funded-goals); `scripts/check_threat_model.py` checks the headings and the links
+- [ ] `docs/THREAT_MODEL.md`, grown from DESIGN §2.10's trust-boundary table, which it then replaces as the threat model, with the headings `Trusted`, `Untrusted`, `Out of scope`, and `Known escalation paths`; each out-of-scope entry gives its reason, and each escalation path says why it is open and links to an open box, a [Beyond](#beyond) entry, or a [funded goal](#funded-goals); `scripts/check_threat_model.py` checks the headings and the links
 - [ ] `SECURITY.md` names the reporting channel and who triages a report; §22.5 adds private vulnerability reporting, the embargo procedure, response times, and a drill
 
 ### 18.9 Stretch: control-flow integrity

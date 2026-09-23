@@ -22,7 +22,7 @@ halfway through.
 | | Section | Covers |
 |---|---------|--------|
 | 1 | [Overview](#1-overview) | Constraints, layers, module map |
-| 2 | [Invariants](#2-invariants) | Lock order, handler rules, panic policy, markers, invariant register, publish last, preemption |
+| 2 | [Invariants](#2-invariants) | Lock order, handler rules, panic policy, markers, invariant register, publish last, preemption, trust boundaries |
 | 3 | [Boot](#3-boot) | Toolchain, Limine, `_start` order, linker |
 | 4 | [Memory](#4-memory) | Address map, buddy allocator, paging, heap |
 | 5 | [Interrupts](#5-interrupts) | GDT/IDT, exception policy, vector map, PIC and APIC, privilege transitions |
@@ -461,6 +461,47 @@ with interrupts on and preempts wherever no lock is held, so its behaviour settl
 Rejected: keeping syscall bodies at IF=0 and adding a polling window to each long call, which is
 how ROADMAP §10.6 first fixed console `write`; it has to be repeated in every call that loops and
 it still starves the tick.
+
+## 2.10 Trust boundaries
+
+Whom the kernel trusts, and the ROADMAP line where each boundary hardens. Until ROADMAP §18.8's
+`docs/THREAT_MODEL.md` exists, this table is the threat model, and that document grows from it.
+"Untrusted" means the source may send any bytes, at any time, as often as it likes, and the kernel
+must neither halt nor corrupt memory it has not given to that source (AGENTS.md rule 4).
+
+| Principal | Trusted for | Can do today what a hardened kernel stops | Hardens in |
+|---|---|---|---|
+| Ring-3 code | Nothing: it must not halt or corrupt the kernel (I6) | Halt the kernel (F004 to F010); every process is root, so it can read any file and signal any process | ROADMAP §10.6 and §10.10 (halts), §13.9 (uids), §18.6 (capabilities, `seccomp`) |
+| Disk images and partition tables | Nothing: a parse returns `Corrupt` | Panic the kernel with a crafted image or table that root mounts or attaches (F061, F064, F117) | ROADMAP §10.2 (FAT BPB), §13.9 (partition tables), §18.5 (vibefs mount validation) |
+| Devices: config space, rings, registers, interrupts | Nothing for halts (rule 4); everything for DMA | Read or write any physical memory by DMA, and forge an MSI | ROADMAP §18.1 (IOMMU, interrupt remapping, used-ring checks, F048) |
+| Firmware tables: ACPI, device tree, SMBIOS, the memory map | What they describe, but not their bounds: a malformed table is refused, never followed out of range | Halt boot with a malformed table before the IDT exists (F136) | ROADMAP §20.1 |
+| The network | Nothing, from the first packet | Not reachable yet | ROADMAP §15.10 fuzzes every parser from the start |
+| Speculation and timing side channels | Out of scope: no KPTI and no Spectre or MDS mitigations; the kernel half is mapped in every user address space (F024, F025, F131, F132) | Read kernel and other processes' memory on an affected CPU | ROADMAP §18.3 |
+| Limine, the firmware, and the CPU | Everything | Not applicable | ROADMAP §18.7 measures and verifies the boot chain |
+| The host running QEMU, the harness, and CI | Everything; they are the test oracle | Not applicable | Never |
+
+Consequence: until Phase 18 closes, vibeOS stops a process from crashing the kernel, not from reading
+another process's data. README says not to run untrusted code on it or keep secrets on it.
+
+> **OWNER DECISION NEEDED (design review G006): the interim security posture.** The roadmap accepts
+> four known gaps until Phase 18: speculation side channels (with no KPTI, a user process on a
+> Meltdown-affected Intel CPU, bare metal or under KVM, can read all RAM through the physmap), DMA
+> that no IOMMU confines (§18.1), every process running as root (§13.9), and root-mounted crafted
+> images that panic the kernel (the rows above).
+> - **(a) Accept until Phase 18**, as the roadmap does today, with the README warning.
+>   Consequence: no confidentiality between processes on affected hardware before Phase 18. QEMU's
+>   TCG, the harness default, does not model the speculation Meltdown needs; under KVM the exposure
+>   depends on the host CPU model.
+> - **(b) Move KPTI and syscall-index masking** (§18.3's F024 and F025 boxes) into Phase 13, before
+>   threads and multiple uids. Costs one slice of entry-path work, a CR3 switch on every entry, and a
+>   measurable syscall slowdown on affected CPUs.
+> - **(c) Move all of §18.3** before Phase 14's `login`. Costs most of a phase, ahead of the
+>   self-hosting work.
+>
+> **Recommendation: (a).** The kernel has no users and no secrets, and its default configuration
+> does not model Meltdown. §10.6 rewrites the entry path as one generated stub per vector, which
+> keeps a later KPTI CR3 switch local. Revisit at Phase 14, whose gate adds `login` and more than
+> one uid. The rest of the design works either way: §18.3's boxes move unchanged under (b) or (c).
 
 ---
 
