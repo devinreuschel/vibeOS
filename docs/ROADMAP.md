@@ -960,6 +960,23 @@ security hole. Block completions and thread-stack reclaim that Phase 13 can run 
 that writes no disk it did not format. Hangs that explain themselves from the host. The seqlock, the
 wake inbox, and the log ring model-checked before Phase 11 runs them on a weakly ordered CPU.
 
+**Order.** Phase 10's parts are not all independent, so it lands in three waves:
+
+1. First, before any other Phase 10 PR merges: every box in Phases 0 to 10 that cites a CRITICAL
+   or HIGH finding without a LATENT tag (the set `scripts/check_review_refs.py --closed` checks:
+   data destruction, the syscall exit and entry-path halts, the completion and stack-reclaim
+   use-after-frees, the exhaustion panics, the vibefs and FAT leaks, and the cell soundness bounds),
+   and §10.2's box that writes every harness retry to the job summary, so no fix is judged by a run
+   that retried. The wave ends when `check_review_refs.py --closed` passes.
+2. Then the refactors that move files: A1's directory move, Q5's splits, A4's cycle breaks, and Q2
+   and T1's per-subsystem test modules, merged back to back as pure moves while no other Phase 10
+   PR is open, so the path churn conflicts once instead of with every open branch.
+3. Everything else, in any order and in parallel.
+
+A wave-1 fix lands in today's file layout and wave 2 moves it with the rest. Why this order: the
+wave-1 bugs are live in `main` today (README), and a file move merged in the middle of them would
+force every fix branch to rebase across it.
+
 **Exit gate**
 - [x] `make check` (fmt, clippy with warnings denied, host units, harness units) gates CI ahead of the QEMU ladder
 - [ ] `make check` passes on macOS and Linux, and a scheduled macOS CI job proves it
