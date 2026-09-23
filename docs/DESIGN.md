@@ -61,6 +61,18 @@ These are not style preferences. They shape every subsystem.
    links, and code with no unstable feature builds on all of them. Nightly features stay in the
    kernel binary. `scripts/check_core_stable.py` in `make check` enforces it.
 
+When two goals or constraints pull apart, decide in this order:
+
+1. No halt, no memory corruption, and no lost data, whatever untrusted input does (§2.10).
+2. Behaviour matches its contract, which is Linux's wherever Linux defines one (ROADMAP, How to
+   read this).
+3. A failure explains itself from the host, without a rerun.
+4. One simple mechanism rather than two.
+5. Speed, as measured.
+
+A faster or more general path that weakens an earlier item is rejected unless that item is kept by
+other means, and the measurement that justifies the path is recorded beside it.
+
 ## 1.2 Layers
 
 ```
