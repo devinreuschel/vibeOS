@@ -5,8 +5,8 @@
 This review follows [ARCHITECTURE_REVIEW.md](ARCHITECTURE_REVIEW.md), which covered structure, build and process. This one covers whether the kernel is correct and safe at the privilege boundary, under SMP, against devices, and on disk. Where the two overlap, this document is the more recent reading of the code.
 
 **Tracking.** This file is a snapshot of `e929a7c` and is not edited as work lands.
-- **Where each finding lives.** Every finding id (`Fnnn`) is cited by at least one line of [ROADMAP.md](../ROADMAP.md): a Phase 10 box for live defects, or a box in the phase a LATENT finding's milestone names.
-- **Enforcement.** `scripts/check_review_refs.py` in `make check` fails on an uncited id. Its `--closed` mode fails while a CRITICAL or HIGH finding without a LATENT tag is cited by an open box in Phases 0 to 10.
+- **Where each finding lives.** Every finding id (`Fnnn`) is cited by at least one line of [ROADMAP.md](../ROADMAP.md): a box in Phase 10, or in the later phase that first needs the fix, for live defects, or a box in the phase a LATENT finding's milestone names.
+- **Enforcement.** `scripts/check_review_refs.py` in `make check` fails on an id no ROADMAP box cites, and on one whose boxes sit later than ROADMAP's placement allows (§10.9): a CRITICAL or HIGH finding without a LATENT tag in Phase 10, a LATENT one no later than its milestone's phase. Its `--closed` mode fails while a CRITICAL or HIGH finding without a LATENT tag is cited by an open box in Phases 0 to 10.
 - **Corrections.** A finding's `####` heading and `**Severity:**` line are never edited. A correction (a severity, a LATENT tag, a location) is a dated entry under a `## Errata` heading at the end of this file, naming the finding and what changed, with a `Gate-change:` trailer on its commit; ROADMAP §10.9 has `scripts/check_review_refs.py` read an erratum before the finding's own line.
 - **Where the rules now live.** The guardrails in §8 are in [AGENTS.md](../../AGENTS.md). The invariants in §3.9 are in DESIGN §2.
 

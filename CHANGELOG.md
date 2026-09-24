@@ -15,7 +15,7 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 - SMEP/SMAP/UMIP and `CR0.WP` on every CPU (`arch::cpu::harden`). `/dev/random` prefers
   virtio-rng, then RDRAND, then xorshift.
 - [Phase 9](docs/ROADMAP.md#phase-9-user-mode-and-processes): ring 3, syscalls, ELF `/hello`,
-  `fork`/`execve`/`wait4`, userspace `/sbin/init` and `/bin/sh`. Phase 9 exit; COW is Phase 12.
+  `fork`/`execve`/`wait4`, `/sbin/init`, `/bin/sh`. Gate reopened into Phase 10; COW is Phase 12.
 - MIT license (`LICENSE`). Both crate manifests declare `license = "MIT"`.
 - Tracked `AGENTS.md` (DOC3). Cursor rules and `CLAUDE.md` point at it.
 - `make check` as the fast local gate (host clippy, host units, harness, ruff/mypy).
