@@ -1,5 +1,7 @@
 # I1 · macOS CI job; find OVMF wherever it lives
 
+**ROADMAP:** the §10.2 boxes that cite I1. Where this plan and those boxes differ, the boxes decide. Superseded here: step 1's `make check`-only job, which the Risks line repeats; the scheduled macOS job runs `make test` too. Step 2's `VIBEOS_STRICT`; a missing firmware image fails the run when `CI` is set. Step 3's `-bios`; UEFI e2e boots the firmware from pflash.
+
 | | |
 |---|---|
 | **Area** | 4.11 Infrastructure |

@@ -1,5 +1,7 @@
 # E1 · Lock in parser robustness with restriction lints
 
+**ROADMAP:** the open §10.1 box that cites E1. Where this plan and that box differ, the box decides. Superseded here: none.
+
 **Status:** in the [index](README.md). #86: nine production `unwrap`/`expect` sites return errors or
 cannot-fail rewrites. Clippy `unwrap_used` / `expect_used` / `panic` deny on the
 portable crate. Step 2's `indexing_slicing` and `arithmetic_side_effects` levels were never set;

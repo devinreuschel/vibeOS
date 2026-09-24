@@ -1,5 +1,7 @@
 # A2 · Make the portable half portable; host tests on any host
 
+**ROADMAP:** the §10.3 box that cites A2. Where this plan and that box differ, the box decides. Superseded here: the last acceptance line; `vibeos-core` holds no assembly and no `cfg(target_arch)` at all (ROADMAP Phase 10 exit gate), not only none that is unconditional.
+
 | | |
 |---|---|
 | **Area** | 4.1 Architecture & module boundaries |

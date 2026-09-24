@@ -1,5 +1,7 @@
 # A4 · Break the mutual dependencies between kernel modules
 
+**ROADMAP:** the §10.3 and §10.7 boxes that cite A4. Where this plan and those boxes differ, the boxes decide. Superseded here: the Problem's table, which is the review's count of nine; the §10.3 box breaks every two-way dependency `scripts/check_cycles.py` reports.
+
 | | |
 |---|---|
 | **Area** | 4.1 Architecture & module boundaries |

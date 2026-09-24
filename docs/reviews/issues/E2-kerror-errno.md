@@ -1,5 +1,7 @@
 # E2 · One `KError` (errno-shaped) ahead of the syscall boundary
 
+**ROADMAP:** the §10.4 boxes that cite E2. Where this plan and those boxes differ, the boxes decide. Superseded here: step 2's distinct errno for every variant; each variant maps to Linux's errno for its condition, several to one (the box that splits `FsError::NoSpace`).
+
 | | |
 |---|---|
 | **Area** | 4.4 Error handling, logging & observability |

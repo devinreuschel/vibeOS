@@ -1,5 +1,7 @@
 # DOC4 · Keep `CHANGELOG.md` short and user-facing
 
+**ROADMAP:** the §10.1 box that cites DOC4. Where this plan and that box differ, the box decides. Superseded here: the acceptance's three lines; an entry is at most two, as the Recommended fix and the standing gates say.
+
 **Status:** in the [index](README.md). #81.
 
 | | |

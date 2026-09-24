@@ -22,11 +22,11 @@ This file records decisions. [ROADMAP.md](ROADMAP.md) records what has landed. P
 describes the code at the commit that last changed the sentence. A rule the code does not meet yet
 says "Rule; not yet enforced" or "Planned" and names the ROADMAP line that lands it. An `Fnnn` id
 names a finding in the kernel review ([reviews/KERNEL_REVIEW.md](reviews/KERNEL_REVIEW.md)); the ROADMAP
-section cited with it lands the fix. When code and
-this file disagree, one of them is a bug ([§1.4](#14-documentation-rules)). The numbers are
-load-bearing. Change them deliberately and update this doc in the same commit. An agent implementing
-a subsystem does not get to re-litigate the address map, the vector numbers, or the lock order
-halfway through.
+section cited with it lands the fix. When code and this file disagree, one of them is a bug
+([§1.4](#14-documentation-rules)). §2's invariants bind every ROADMAP box, and a box that changes other
+text here changes it in the same commit (ROADMAP, How to read this). The numbers are load-bearing.
+Change them deliberately and update this doc in the same commit. An agent implementing a subsystem
+does not get to re-litigate the address map, the vector numbers, or the lock order halfway through.
 
 ## Contents
 

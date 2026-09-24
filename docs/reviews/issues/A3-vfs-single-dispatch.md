@@ -1,5 +1,7 @@
 # A3 · Make the VFS the only file-operation dispatch point
 
+**ROADMAP:** the §10.4 boxes that cite A3. Where this plan and those boxes differ, the boxes decide. Superseded here: none.
+
 | | |
 |---|---|
 | **Area** | 4.1 Architecture & module boundaries |

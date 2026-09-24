@@ -1,5 +1,7 @@
 # T1 · Split the in-guest registry; make failures self-diagnosing
 
+**ROADMAP:** the §10.2 box that cites T1. Where this plan and that box differ, the box decides. Superseded here: step 1's lists in `src/ktest/<subsystem>.rs`; each subsystem's list lives in its `ktest.rs` (§10.2's Q2 box), and `src/ktest/mod.rs` holds the runner. Step 2's timing with IRQs off; the registry runs with IF=1 (§10.2's F075 box) and times with the §10.3 cycle counter. Step 3's `alloc::format!`; a failure message formats into a fixed `StackBuf`, since §10.4 denies `format!`. Step 5; the deadline is in the guest, as the T1 box says. The acceptance's count of 103 tests; the PR leaves the count unchanged.
+
 | | |
 |---|---|
 | **Area** | 4.6 Testing |

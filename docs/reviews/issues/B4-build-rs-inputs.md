@@ -1,5 +1,7 @@
 # B4 · Simplify `build.rs` inputs and the initrd path
 
+**Superseded in part 2026-09-24:** the acceptance's `nasm` grep; `nasm` stays for the assembly user programs until ROADMAP §10.5 deletes them.
+
 | | |
 |---|---|
 | **Area** | 4.10 Build |

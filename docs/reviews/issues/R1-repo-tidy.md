@@ -1,5 +1,7 @@
 # R1 · Tidy the root, `tests/`, and remote branches
 
+**ROADMAP:** the §10.2 box that cites R1 and P1. Where this plan and that box differ, the box decides. Superseded here: step 2's move of `tests/hostlib` to `crates/`; hostlib stays a workspace member under `tests/`.
+
 **Status:** in the [index](README.md). #78 pruned the leftover `feature/*` remotes; #76 (B1+DX1)
 parametrized the ISO recipes and added `make check`; #79 (T2) moved `tests/kernel_boot.py` and
 `tests/vibefs_crash.py` to `tests/harness/run_*.py`. Step 3's "Automatically delete head branches" is a

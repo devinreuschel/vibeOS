@@ -1,5 +1,7 @@
 # D2 · Driver and volume instances instead of module singletons
 
+**ROADMAP:** the §10.4 boxes that cite D2. Where this plan and those boxes differ, the boxes decide. Superseded here: none.
+
 | | |
 |---|---|
 | **Area** | 4.3 Data model & state management |

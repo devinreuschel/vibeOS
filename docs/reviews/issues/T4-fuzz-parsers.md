@@ -1,5 +1,7 @@
 # T4 · Fuzz the pure parsers now
 
+**ROADMAP:** the §10.2 box that cites T4. Where this plan and that box differ, the box decides. Superseded here: none.
+
 | | |
 |---|---|
 | **Area** | 4.6 Testing / 4.8 Security |

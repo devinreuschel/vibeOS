@@ -1,5 +1,7 @@
 # P1 · Cut the build multiplicity (5 target dirs × 2 passes × build-std)
 
+**ROADMAP:** the §10.2 box that cites P1. Where this plan and that box differ, the box decides. Superseded here: step 3's reason; the second link fills the symbol table and today moves `.text`, which §10.2's F084 box fixes and checks.
+
 | | |
 |---|---|
 | **Area** | 4.7 Performance (build) |

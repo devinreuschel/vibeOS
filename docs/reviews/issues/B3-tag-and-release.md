@@ -9,6 +9,7 @@ on; `v0.8.0` to `v0.14.0` still match Phases 8 to 14, and Phase 39 is `v1.0.0`.
 reopened Phase 8's gate lines, so `v0.8.0` goes on the commit that closes them (ROADMAP, How to read this).
 **Superseded in part 2026-09-24:** step 4's tag trigger. `release.yml` is dispatched from `main` with the
 release tag as input, so the workflow that will hold keys is always `main`'s (ROADMAP §10.1).
+**Superseded in part 2026-09-24:** step 4's `vibeos-ktest.iso`; `release.yml` publishes `vibeos.iso` alone (ROADMAP §10.1, F145).
 
 | | |
 |---|---|

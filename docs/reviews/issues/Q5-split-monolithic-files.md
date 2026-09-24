@@ -1,5 +1,7 @@
 # Q5 · Split monolithic files; add a size guard
 
+**ROADMAP:** the §10.3 box that cites Q5. Where this plan and that box differ, the box decides. Superseded here: step 6's guard; it fails on a source file over 1,500 lines unless its list names the file with the open box that splits it, so "Exempt nothing" and the 3,000-line limit go. The split of `ktest.rs` follows T1 and §10.2's per-subsystem `ktest.rs` files. The acceptance's test counts; each split leaves the host and in-guest counts unchanged.
+
 | | |
 |---|---|
 | **Area** | 4.2 Code quality & consistency |

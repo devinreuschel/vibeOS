@@ -1,5 +1,7 @@
 # A1 · Directory per subsystem, matching a corrected module map
 
+**ROADMAP:** the §10.3 box that cites A1. Where this plan and that box differ, the box decides. Superseded here: the test counts in the last acceptance line; each PR leaves the host and in-guest test counts unchanged.
+
 | | |
 |---|---|
 | **Area** | 4.1 Architecture & module boundaries |

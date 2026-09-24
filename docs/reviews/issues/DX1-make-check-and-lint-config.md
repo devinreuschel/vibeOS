@@ -1,5 +1,7 @@
 # DX1 · A fast local gate (`make check`) and formatter/linter configuration
 
+**ROADMAP:** the open §10.1 box that cites DX1. Where this plan and that box differ, the box decides. Superseded here: step 1's hint when `ruff` or `mypy` is missing; with `CI` set, `make check` fails instead.
+
 **Status:** in the [index](README.md). #76, with B1. rustfmt `--check` as a hard fail is Q1.
 
 | | |

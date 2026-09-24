@@ -1,5 +1,7 @@
 # D1 · Fixed-capacity tables: heap-allocate the growable ones (ROADMAP Phase 10)
 
+**ROADMAP:** the §10.4 boxes that cite D1. Where this plan and those boxes differ, the boxes decide. Superseded here: the acceptance's `NoSpace` one past each limit; `limits_heap_backed` expects the error Linux returns at each limit, as the D1 box that allocates the tables at init says, and `scripts/check_limits.py` replaces the acceptance grep.
+
 | | |
 |---|---|
 | **Area** | 4.3 Data model & state management |

@@ -4,6 +4,8 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 
 **Phase numbers (2026-09-22).** The roadmap was restructured after this review: phases from 10 up were renumbered (old 10 → 12, 11 → 13, 12 → 14, 13 → 15, 14 → 16, 15 → 17, 16 → 18, 17 → 19, 18 → 20, 19 → 21, 20 → 22), and these items are tracked as [ROADMAP Phase 10: Consolidation](../../ROADMAP.md#phase-10-consolidation). Section numbers quoted in the issue documents were updated where an item is still open; the review itself keeps the old numbers.
 
+**Precedence.** A plan is advice on how to do the work its ROADMAP boxes state; where they differ, the boxes decide (ROADMAP, How to read this). Each plan whose code is `proposed` or `in progress` opens with a `ROADMAP:` line that names its boxes and the steps they supersede.
+
 | ID | Title | Impact | Effort | Phase | Depends on | Status |
 |---|---|---|---|---|---|---|
 | [A1](A1-directory-per-subsystem.md) | Directory per subsystem, matching a corrected module map | High | L | III | Q1, A2 | `proposed` |
