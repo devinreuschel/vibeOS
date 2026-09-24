@@ -434,6 +434,11 @@ per-CPU inbox plus a reschedule IPI. More SMP-specific rules in [section 7.7](#7
 - Every mapping is `NO_EXECUTE` unless it holds code that is fetched. Exception: the low identity
   window's first 2 MiB is executable, though only the `0x8000` trampoline page is fetched, and only
   during AP bring-up (ROADMAP §10.6, F085).
+- A value copied to user memory has no padding and no uninitialized bytes. Reading a padding byte is
+  undefined behaviour in Rust, and copying one out leaks kernel stack or heap. A typed copy-out takes
+  only a type whose bytes are all initialized, proved at compile time (ROADMAP §10.6); a byte slice
+  passes as it is. Holds today only because every copy-out takes a byte slice built by hand; nothing
+  checks it until that box lands.
 
 ## 2.5 Panic policy
 
