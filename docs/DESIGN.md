@@ -683,7 +683,7 @@ Binding order (do not invert):
    region when one is configured. Memory stores only: no lock, no firmware call, nothing that waits.
    Planned (ROADMAP §20.1); today there is no record.
 6. If a capture kernel is loaded (ROADMAP §25.4), jump to it. Before the jump the panicking CPU does
-   only this: it takes §20.9's runtime-services lock and the ERST backend's lock (ROADMAP §25.6) each
+   only this: it takes ROADMAP §20.9's runtime-services lock and the ERST backend's lock (ROADMAP §25.6) each
    with a trylock and never releases either; it sets an armed watchdog (ROADMAP §20.6) to its longest
    timeout and feeds it once; and it writes pvpanic's crash-loaded event (bit 1), which a host
    records without stopping the guest, where the kernel found a pvpanic device (ROADMAP §10.7,
@@ -1070,7 +1070,7 @@ with interrupts on and preempts wherever no lock is held, so its behaviour settl
 Rejected: keeping syscall bodies at IF=0 and adding a polling window to each long call, which is
 how ROADMAP §10.6 first fixed console `write`; it has to be repeated in every call that loops and
 it still starves the tick. The bound counts instructions, not time, so its check gives the same
-answer on every run. Rejected: a time bound checked on the §10.1 KVM leg, whose hosted runner is
+answer on every run. Rejected: a time bound checked on the ROADMAP §10.1 KVM leg, whose hosted runner is
 itself a VM that can deschedule a vCPU mid-stretch.
 
 ## 2.10 Trust boundaries
@@ -1112,9 +1112,9 @@ every process running as root (§13.9), and root-mounted crafted images that pan
 kernel has no users and no secrets; QEMU's TCG, the harness default, does not model the speculation
 Meltdown needs, and under KVM the exposure depends on the host CPU; and ROADMAP §10.6 rewrites the
 entry path as one generated stub per vector, which keeps a later KPTI CR3 switch local. Rejected:
-moving KPTI and syscall-index masking (§18.3's F024 and F025 boxes) into Phase 13, which costs a slice
+moving KPTI and syscall-index masking (ROADMAP §18.3's F024 and F025 boxes) into Phase 13, which costs a slice
 of entry-path work, a CR3 switch on every entry, and a measurable syscall slowdown on affected CPUs;
-and moving all of §18.3 before Phase 14's `login`, which costs most of a phase ahead of the
+and moving all of ROADMAP §18.3 before Phase 14's `login`, which costs most of a phase ahead of the
 self-hosting work.
 
 The acceptance assumes one user. It goes back to the owner before `login` lands (ROADMAP §14.3), when
@@ -1980,7 +1980,7 @@ that `kalloc`'s types allocate through and the frame entry that the fault path, 
 stacks, and DMA use. It is a module of its own, not `heap_init` or `pmm_init`: it calls down into
 the heap and the buddy, which report failure and never reclaim, wait for memory, or call up beyond
 the heap's §4.3 shootdown when it grows, and it reaches reclaim, the writeback wait, and the OOM
-killer through the hooks §1.2 lists. Where §27.3's joining applies, it joins a memory section before
+killer through the hooks §1.2 lists. Where ROADMAP §27.3's joining applies, it joins a memory section before
 it goes below the reserve (§4.2). Today the `#[global_allocator]` is `heap_init::KernelAlloc`, and
 `kva_init`, `dma_init`, and `addr_space_init` take frames from `pmm_init::with_buddy` directly.
 
@@ -2564,7 +2564,7 @@ fault, downstream of it.
 | Vector | Name | Ring 0 | Ring 3 | Ring 3, as built |
 |--------|------|--------|--------|------------------|
 | `0x00` | `#DE` | dump, halt | `SIGFPE` | as the rule |
-| `0x01` | `#DB` | dump on IST, halt. Planned (ROADMAP §17.4, §18.4): three cases continue instead. A hit whose saved DR6 names only slots the current thread's tracer armed is dropped, as Linux drops a kernel-mode hit of a ptrace breakpoint; DR6.BS clears TF in the saved frame and logs once, as Linux does; in the §18.4 detector build a hit on a detector slot is reported | `SIGTRAP` (RFLAGS.TF, `int1`, a breakpoint or watchpoint the tracer armed); in the §18.4 detector build a hit on detector slots alone resumes with no signal and is counted | halts the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
+| `0x01` | `#DB` | dump on IST, halt. Planned (ROADMAP §17.4, §18.4): three cases continue instead. A hit whose saved DR6 names only slots the current thread's tracer armed is dropped, as Linux drops a kernel-mode hit of a ptrace breakpoint; DR6.BS clears TF in the saved frame and logs once, as Linux does; in the ROADMAP §18.4 detector build a hit on a detector slot is reported | `SIGTRAP` (RFLAGS.TF, `int1`, a breakpoint or watchpoint the tracer armed); in the ROADMAP §18.4 detector build a hit on detector slots alone resumes with no signal and is counted | halts the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
 | `0x02` | NMI | dump on IST, halt. Planned (ROADMAP §10.7, F135): the handler first reads and clears its CPU's stop request word (§2.5 step 1): STOP stops the CPU, a CPU already stopped halts again at once, and an NMI with no request on the dump owner returns at once. Planned (ROADMAP §25.5): a backtrace or lockup request, and an external NMI on a CPU that is neither stopped nor the dump owner, are handled and return | not a ring-3 fault: the Ring 0 column applies | as the rule |
 | `0x03` | `#BP` | log, continue | `SIGTRAP` (`int3`) | `int3` hits the DPL-0 gate, raises `#GP`, and gets `SIGSEGV`. Rule; not yet enforced: ROADMAP §10.6 (F148) |
 | `0x04`, `0x05`, `0x07`, `0x0A` | `#OF`, `#BR`, `#NM`, `#TS` | dump, halt | `SIGSEGV` | `sig_for_vec` has no row, so one would halt the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
@@ -2685,10 +2685,10 @@ clear once it is set. ROADMAP §25.4's handover carries the tables' ranges, and 
 EnableLPIs set reuses them, as Linux does.
 
 `IrqChip` is an object-safe trait in the portable half. Each controller kind a port finds at boot is
-one chip object in a static `BootCell`, reached as `&'static dyn IrqChip`, as §6.1's registry
-reaches drivers; the indirect call is a branch beside an interrupt entry. A controller a driver
-brings, such as a cascaded one, would be a counted device (§12.1), and the line that adds one
-extends this. The seam's zero-sized port ([§11.1](#111-the-seam)) keeps only the vector entry,
+one chip object in a static `BootCell`, reached as `&'static dyn IrqChip`, as a driver's static
+operations object is (§12.1); the indirect call is a branch beside an interrupt entry. A controller
+a driver brings, such as a cascaded one, would be a counted device (§12.1), and the line that adds
+one extends this. The seam's zero-sized port ([§11.1](#111-the-seam)) keeps only the vector entry,
 finding the root controller, and the IPI send. The MSI paragraph below becomes the x86 chip's
 `compose_msi`. Until the ROADMAP §11.3 box lands, the rest of this section describes the x86 vector
 API as built. Each of its rules then holds for an `IrqId`: `set_affinity`, `set_threaded`, and
@@ -2707,7 +2707,7 @@ GIC driver (79 device interrupts on both architectures, a lookup on every interr
 composition left in drivers); widening the vector to a `u32` hardware number (not unique once x86
 vectors are per CPU, or where GICv2m's SPIs sit beside the distributor's); a seam trait on the
 zero-sized port (one implementation per port, where each port runs several controllers at once); a
-closed enum of each port's chips (no controller a driver brings could join); and waiting for §27.1
+closed enum of each port's chips (no controller a driver brings could join); and waiting for ROADMAP §27.1
 (every driver of Phases 12 to 20 written twice).
 
 The allocator records the dest CPU. `set_affinity` updates that binding. I/O APIC
@@ -3540,7 +3540,7 @@ at the trampoline page (§7.3) and saves its context. On wakeup the firmware ent
 real mode on the BSP, which reaches long mode on the kernel CR3 and returns into that context, reruns
 the routine, clearing the TSS descriptor's busy bit before `ltr` because the descriptor in memory is
 still marked busy, re-bases the clocks (§6.6), reprograms the platform state the wakeup reset, and
-brings each AP back through §19.6's online path, which is steps 2 to 5 above on the AP's existing
+brings each AP back through ROADMAP §19.6's online path, which is steps 2 to 5 above on the AP's existing
 per-CPU area. Why: a wakeup loses every register the kernel set (QEMU resets the machine on a `q35`
 wakeup, and firmware restores only what its own S3 script saved), and with one routine a register
 added to bring-up, such as ROADMAP §18.3's mitigation MSRs or §20.1's x2APIC mode, is restored at
@@ -5694,7 +5694,7 @@ Planned (ROADMAP §11.3, §11.6).
 | FIQ slot | | dump, halt: nothing routes a FIQ to the kernel | not a ring-3 fault: the Ring 0 column applies |
 | SError slot | | dump with `ESR_EL1`, halt, until ROADMAP §25 classifies RAS errors | not a ring-3 fault: the Ring 0 column applies, as for `#MC` |
 
-A ROADMAP line that maps device memory into EL0 or into a guest, such as §28.4's VFIO, states how an
+A ROADMAP line that maps device memory into EL0 or into a guest, such as ROADMAP §28.4's VFIO, states how an
 SError that such an access raises is charged, since the SError row would otherwise let that access
 halt the kernel.
 
