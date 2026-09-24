@@ -378,6 +378,15 @@ Pick one spinlock implementation and use it everywhere. The old tree ended up wi
 in one design doc, an IRQ-guarded spin mutex in the code) and the mismatch was a source of confusion
 for weeks.
 
+`SpinMutex` is that implementation: a compare-and-swap lock until ROADMAP §27.5 makes it a queued
+(MCS) lock, for every lock in one change. A waiter spins with IF=0, and nothing that can run inside
+another holder's IF=0 section takes a lock (the serviced-spin row below, and
+[§2.2](#22-interrupt-handler-rules)'s last row), so a CPU waits for at most one `SpinMutex` at a
+time, and the queued lock needs one queue node per CPU. From ROADMAP §21.4, a waiter under KVM on
+x86_64 that has spun a bound halts with IF=0 until it is kicked. It still services incoming work, as
+§2.9 rule 2 requires: every publisher of work that `service_incoming` serves kicks a target it finds
+halted, after its Release store and a full fence.
+
 The lock, the serviced spins, and the two cells:
 
 | Primitive | Use |
