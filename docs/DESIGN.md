@@ -463,6 +463,22 @@ per-CPU inbox plus a reschedule IPI. More SMP-specific rules in [section 7.7](#7
   only a type whose bytes are all initialized, proved at compile time (ROADMAP §10.6); a byte slice
   passes as it is. Holds today only because every copy-out takes a byte slice built by hand; nothing
   checks it until that box lands.
+- A second-level translation of guest memory (an EPT or NPT entry on x86_64, a stage-2 entry on
+  aarch64) is a mapping of the host frame behind it, since ROADMAP §21.2 backs guest RAM with the
+  VMM's address space. Every change or removal of a user PTE (`munmap`, a COW write-protect or
+  break, a permission reduction, a reverse-map unmap, a migration, `MADV_DONTNEED`) invalidates the
+  second-level translations of that range on every CPU that may hold them before the frame's count
+  drops. On x86_64 every vCPU of the VM flushes the VM's translations before it next enters the
+  guest (`INVEPT` on VMX, a flush of the guest's ASID through the VMCB on SVM), a vCPU running in
+  guest mode is kicked out first, and a vCPU that enters on a CPU other than the one it last ran on
+  flushes there too. On aarch64 the host issues `TLBI IPAS2E1IS` for the range, `DSB ISH`,
+  `TLBI VMALLE1IS`, and `DSB ISH` under the VM's VMID. A second-level fault reads the address
+  space's invalidation sequence before it looks up the host PTE, and retries if an invalidation ran
+  in between. A vhost worker reaches guest memory as a thread of the VMM's address space does: it
+  holds a `users` reference ([§2.11](#211-object-lifetimes)) from the VMM's `VHOST_SET_OWNER` until
+  its device is released, and it copies only through the ROADMAP §10.6 accessors, never through a
+  frame or a kernel mapping it caches. This is Linux's `mmu_notifier` with KVM's invalidation
+  sequence. Planned (ROADMAP §21.2): no hypervisor exists yet.
 
 ## 2.5 Panic policy
 
@@ -617,6 +633,7 @@ separate namespace.
 | I32 | A handler on an IST stack never blocks or switches threads (§5.10 rule 6) | IST handlers | documented | Yes: every IST handler halts, except that under `kernel_tests` an armed `catch` steps RIP and returns or longjmps off the IST stack |
 | I33 | A fault body reads CR2, DR6, ESR, and FAR from its frame, where the entry stub saved them before IF could turn on (§5.10 rule 9) | the `arch/idt.rs` stubs; the aarch64 vectors (ROADMAP §11.3) | documented | Yes, only because every fault body runs with IF=0 and reads CR2 before anything else can fault (`arch::idt::page_fault`); ROADMAP §10.6's IF=1 bodies need the stub save (its syscall-body and generated-stub boxes) |
 | I34 | A PTE change that removes or narrows a translation takes effect only after every CPU that could hold the old one has invalidated and acknowledged; until then no frame, table page, or VA is reused and no page counts as clean (§2.4) | `kva_init::unmap_shootdown` (kernel); `addr_space_init::shootdown_user` (user) | documented | Partly: kernel unmaps free frames and VA only after `wait_acks`; a user change invalidates only on the calling CPU, enough only while I8 holds, and nothing yet clears a dirty bit (ROADMAP §12.3) |
+| I35 | A user PTE change invalidates the second-level translations (EPT, NPT, stage-2) of its range on every CPU that may hold them before the frame's count drops (§2.4) | none yet | documented | Not relied on yet: no hypervisor exists until ROADMAP §21.2, which lands it |
 
 ## 2.8 Publish last
 
