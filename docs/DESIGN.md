@@ -741,7 +741,8 @@ Planned (ROADMAP §19.5), the log contract:
   finds its slot still being written drops its record and counts it. A reader copies a slot and
   checks its state word before and after, as a seqlock reader does. So any context may append, NMI
   and `#MC` included, and the ring is readable after a panic with no lock. A record carries its
-  sequence number, CPU id, level, and timestamp.
+  sequence number, CPU id, level, and timestamp. Its timestamp is `now_ns`, which any context may
+  read (§6.4).
 - One printer thread per console prints records in sequence order, so an emitter never waits for
   the UART. Where records were overwritten or dropped before it reached them, it prints
   `vibeOS: log: N records dropped`, and `/dev/kmsg` returns `EPIPE` there (ROADMAP §13.9). Until a
@@ -927,7 +928,11 @@ The rule for every completion, hand-off, and deferred reclaim:
    is the publisher's last access to that object; after it the publisher touches only its own stack
    and statics. The other side can see the store on a lock-free path (`IoWaiter::poll`, any Acquire
    load of a done flag) and return before the publisher's next instruction, so a lock taken after
-   the store does not make a later access safe.
+   the store does not make a later access safe. The store is a Release store, a Release
+   read-modify-write, or the unlock of a lock that the other side takes before it frees or reuses
+   the object, and the other side reads it with Acquire. Program order alone does not make a store
+   the last access: on a weakly ordered CPU, a load or store the publisher made to the object
+   earlier can still be performed after a Relaxed store is visible.
 2. An object that its owning CPU may still use (the kernel stack it runs on, a TCB that is switching
    out, an AP's stacks and tables during bring-up) is freed only after that CPU has passed a point
    the reclaimer can observe: its `switch_context` away from the object has returned, or INIT has
@@ -3032,12 +3037,19 @@ nanosecond deadline.
 that tick. Read them unprotected and you eventually get one from before an interrupt and one from
 after, producing a timestamp that goes backwards. That is not hypothetical; it happened.
 
-Publish them as a seqlock. The writer bumps the sequence to odd, issues `fence(Release)`, stores both
-fields, and bumps the sequence to even with Release. The reader loads the sequence with Acquire, loads
-both fields, issues `fence(Acquire)`, reloads the sequence, and retries on an odd or changed value.
-`TickClock::write` has no release fence after the odd bump, and the release half of its
-`fetch_add(AcqRel)` orders only earlier accesses. x86's locked `fetch_add` is a full barrier and hides
-that; aarch64 with LL/SC atomics does not (ROADMAP §10.8, F098).
+Publish them as a latched seqlock, which keeps two copies of the fields so that no reader waits for
+the writer. The writer bumps the sequence and issues `fence(Release)`, stores copy 0, bumps the
+sequence and issues `fence(Release)` again, and stores copy 1. The reader loads the sequence with
+Acquire, loads the copy its low bit names (copy 1 while it is odd, when the writer is storing copy
+0), issues `fence(Acquire)`, reloads the sequence, and retries only when it changed. A plain seqlock
+reader retries while the sequence is odd, so one that interrupted the writer on its own CPU, in an
+NMI, `#MC`, or `#DB` handler, a pseudo-NMI (ROADMAP §25.5), or the panic path, would spin forever;
+the latched reader reads the copy the writer is not storing and returns. So `now_ns` may be read
+from any context, a log record's timestamp included (§2.5). Linux's NMI-safe clock,
+`ktime_get_mono_fast_ns`, is built the same way. Rule; not yet enforced: `TickClock` keeps one copy,
+and `TickClock::write` has no release fence after the odd bump, and the release half of its
+`fetch_add(AcqRel)` orders only earlier accesses. x86's locked `fetch_add` is a full barrier and
+hides that; aarch64 with LL/SC atomics does not (ROADMAP §10.8, F098).
 
 Two warnings about testing this. A test that computes the expected "now" from the same tick value it
 just read is monotonic by construction and passes even with torn reads, so the test needs an
@@ -3379,7 +3391,7 @@ Contents (`src/per_cpu.rs`):
 - `current`, `idle`, and `idle_id`
 - `runq`, this CPU's ready FIFO (owner only, IRQs off), and `ready_head`, a copy of its head that
   only an in-guest test reads (ROADMAP §10.7 deletes it, F111)
-- `wake_inbox`, a `u64` `ThreadId` bitset: a remote CPU ORs in a thread's bit and sends IPI `0xFD`
+- `wake_inbox`, a `u64` `ThreadId` bitset: a remote CPU ORs in a thread's bit and sends IPI `0xFD` (planned: a bitmap sized from the limits, §7.6)
 - `irq_nest`, tick and switch counts, `slice_tsc`, `idle_tsc`, and `switch_scratch`, a `CpuContext` that no code reads or writes
 - `tsc_per_ms` (a copy of the BSP's value, [section 6.2](#62-calibrating-the-tsc)) and `timer_mode`
 - `ready`, the flag an AP sets last in bring-up ([section 7.4](#74-ap-bring-up-sequence))
@@ -3549,16 +3561,28 @@ initiator holds IF off from publish through reclaim, polling inbound work while 
 The IPI send is the publication point. `send_ipi`, the seam's IPI send ([§11.1](#111-the-seam)),
 orders every store its CPU made before the call ahead of the interrupt's arrival, so a handler that
 takes the IPI and then reads a slot, an inbox, or a parameter block sees what the sender wrote. With
-xAPIC the ICR write is an uncached store, which x86 does not reorder with earlier stores, so the send
-needs only a compiler barrier before it. With x2APIC the ICR is MSR `0x830`, and a `WRMSR` to an
-x2APIC register is not serializing (Intel SDM Vol. 3A, MSR access in x2APIC mode), so the send runs
-`mfence` then `lfence` before it, as Linux's `weak_wrmsr_fence` does. It does so on every vendor,
-though Linux skips it on AMD. With GICv3 the send runs `dsb ishst` before the `ICC_SGI1R_EL1` write
-and `isb` after it (ROADMAP §11.7 cites the Arm ARM rule). INIT and SIPI go through the same send.
-Callers publish with a Release store or a locked read-modify-write and add no fence of their own.
-Rule; not yet enforced: `apic_init::send_ipi` has no barrier of its own, and the callers that fence
-(`smp_init::start_one`, `ipi_init::shootdown_va`) do so before their publishing store, which is not
-enough under x2APIC (ROADMAP §20.1).
+xAPIC the ICR write is an uncached store, which x86 does not reorder with earlier stores, so the
+send needs only a compiler barrier before it. With x2APIC the ICR is MSR `0x830`, and a `WRMSR` to
+an x2APIC register is not serializing (Intel SDM Vol. 3A, MSR access in x2APIC mode), so the send
+runs `mfence` then `lfence` before it, as Linux's `weak_wrmsr_fence` does. It does so on every
+vendor, though Linux skips it on AMD. With GICv3 the send runs `dsb ishst` before the
+`ICC_SGI1R_EL1` write and `isb` after it (ROADMAP §11.7 cites the Arm ARM rule). With GICv2 the SGI
+is an MMIO store to `GICD_SGIR`, which goes through the ordered `mmio_write` ([§4.7](#47-dma)),
+whose `dmb oshst` puts the CPU's earlier stores ahead of it, as the `dmb ishst` before Linux's GICv2
+SGI write does. INIT and SIPI go through the same send. Callers publish with a Release store or a
+locked read-modify-write and add no fence of their own. Rule; not yet enforced:
+`apic_init::send_ipi` has no barrier of its own, and the callers that fence (`smp_init::start_one`,
+`ipi_init::shootdown_va`) do so before their publishing store, which is not enough under x2APIC
+(ROADMAP §20.1).
+
+Planned (ROADMAP §10.4): the wake inbox (§7.5) is a per-CPU bitmap of `AtomicU64` words sized from
+the `limits` thread count, with one summary bit per word. A push is a Release `fetch_or` of the
+thread's bit and then of its word's summary bit, and sends `0xFD`; a drain swaps the summary to zero
+with Acquire and then swaps each flagged word to zero with Acquire. A push allocates nothing and is
+idempotent, so a thread woken from two CPUs at once is queued once. Push and drain live in
+`vibeos-core` with ROADMAP §10.8's model, and the `0xFD` handler calls the drain. Rejected: an
+intrusive MPSC list, which needs a queued flag in each TCB against double insertion and a larger
+model.
 
 ## 7.7 Locking with more than one CPU
 
@@ -4500,8 +4524,9 @@ still blocked is a use-after-free on the next timeout or wake.
 `IoWaiter` lives on the submitter's stack. `IoWaiter::finish` stores `done` with Release, then takes
 SCHED and runs `wake_all` on the `WaitQueue` inside the waiter; `wait()` returns as soon as its
 lock-free `poll()` sees `done`, so the wake can land in whatever frame reused that stack (ROADMAP
-§10.10, F002). Rule: publish last ([section 2.8](#28-publish-last)). For `IoWaiter`: take SCHED, wake, then store
-`done` inside that section ([section 10.1](#101-completions)).
+§10.10, F002). Rule: publish last ([section 2.8](#28-publish-last)). For `IoWaiter`: take SCHED,
+wake, then store `done` with Release inside that section, which `poll()` loads with Acquire
+([section 10.1](#101-completions)).
 
 **Condvar waiter never sees the predicate.**
 Wake does not carry the condition. Mesa: `wait` re-acquires the mutex and returns; the caller loops
@@ -4710,24 +4735,26 @@ the driver is `src/virtio_blk_init.rs`. Partition children are
 
 ## 10.1 Completions
 
-A request carries waiter cookies, not a locked queue. Submit takes the per-device
-queue lock (RANK_DEVICE), merges or enqueues, and drops the lock before any copy.
-The ramdisk pump runs after that drop; virtio-blk submits to a virtqueue after
-the same drop and completes from a threaded IRQ. Rule: completion begins with the claim
-([§10.3](#103-failure) step 2), and only the party that claimed a request touches it. It wakes the
-waiters under SCHED and then stores the status inside that section, as its last access to each
-waiter ([section 2.8](#28-publish-last)). `IoWaiter::finish` breaks this: it stores
-`done` with Release before it takes SCHED, then wakes (ROADMAP §10.10, F002). Never hold
-the queue lock across I/O or across that wake
-(DEVICE then SCHED is the wrong order). Hard IRQ must not run this path: enqueue
-work only (DESIGN [§2.2](#22-interrupt-handler-rules)). Ramdisk backing is BSS, not
-a heap `Vec`: allocating under RANK_DEVICE would take RANK_HEAP (lock order).
+A request carries waiter cookies, not a locked queue. Submit takes the per-device queue lock
+(RANK_DEVICE), merges or enqueues, and drops the lock before any copy. The ramdisk pump runs after
+that drop; virtio-blk submits to a virtqueue after the same drop and completes from a threaded IRQ.
+Rule: completion begins with the claim ([§10.3](#103-failure) step 2), and only the party that
+claimed a request touches it. It wakes the waiters under SCHED and then stores the status with
+Release inside that section, as its last access to each waiter ([section 2.8](#28-publish-last));
+`poll()` loads it with Acquire. `IoWaiter::finish` breaks this: it stores `done` with Release before
+it takes SCHED, then wakes (ROADMAP §10.10, F002). Never hold the queue lock across I/O or across
+that wake (DEVICE then SCHED is the wrong order). Hard IRQ must not run this path: enqueue work only
+(DESIGN [§2.2](#22-interrupt-handler-rules)). Ramdisk backing is BSS, not a heap `Vec`: allocating
+under RANK_DEVICE would take RANK_HEAP (lock order).
 
-Blocking wait and async submit share the same cookie. The buffer and waiter must
-outlive the completer's last access to them, which under the rule above is the
-status store. Once the waiter and the buffer are counted (ROADMAP §12.5, F042), the
-completer drops its references to them after it leaves SCHED, never inside it
-(§2.11 rules 5 and 6).
+Blocking wait and async submit share the same cookie. The buffer and waiter must outlive the
+completer's last access to them, which under the rule above is the status store. Once the waiter and
+the buffer are counted (ROADMAP §12.5, F042), the completer drops its references to them after it
+leaves SCHED, never inside it (§2.11 rules 5 and 6). The lock held across the wake and the status
+store, SCHED today, lives outside the waiter, so its unlock after the store touches no waiter
+memory. When wait queues get their own locks (ROADMAP §19.4 splits SCHED), a waiter that lives on a
+stack, such as `IoWaiter`, is still woken under a lock outside it, or its `wait` takes that lock
+before it returns and has no lock-free return.
 
 Planned (ROADMAP §12.5): completion runs in two stages. Stage 1 runs in the party that claimed the
 request ([section 10.3](#103-failure)), usually the bottom half. It records the status and does only
