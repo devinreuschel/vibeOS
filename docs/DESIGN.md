@@ -939,16 +939,20 @@ covers the last store of a hand-off; these rules cover the rest.
    inode, a mount, a device instance, a pipe) is reference-counted, and its last put ends it
    (rule 3). A mount and the filesystem instance it shows, its superblock, are separate counted
    objects: several mounts (another namespace's copy, a bind mount, a second mount of the same
-   device) can show one superblock, which lives while any mount, inode, or open file holds it. The
-   count is `kalloc`'s `TryArc` (increment `Relaxed`, decrement `Release`, and an `Acquire` fence
-   before the release, as `alloc::sync::Arc` does), a table slot's own count (rule 2), or a frame's
-   count in ROADMAP §12.1's frame array. A count with other rules, such as a get-unless-zero count
-   whose last put runs a teardown before the memory goes, rule 3's operation gate, or a per-CPU
-   count, is written once as a shared type, beside `TryArc` in `kalloc` or beside `BlockingMutex` in
-   `sync`, with host tests and a loom model (ROADMAP §10.8), and then reused; no subsystem writes
-   its own (AGENTS.md rule 10). `&'static` refers only to what lives for the whole run: a static
-   item, a string literal, the contents of a `BootCell`, or memory allocated at boot and never
-   freed. It never refers to heap memory a table owns, and it is never built from a raw pointer
+   device) can show one superblock, which lives while any mount, inode, or open file holds it. A
+   process's working directory and root are counted references to a directory (a mount and a
+   dentry), never path strings: a relative walk starts from the working directory and an absolute
+   one from the root, `fork` copies both references, rename moves the dentry a reference holds, and
+   `chroot` (ROADMAP §14.9) and `pivot_root` (ROADMAP §18.6) replace them. The count is `kalloc`'s
+   `TryArc` (increment `Relaxed`, decrement `Release`, and an `Acquire` fence before the release, as
+   `alloc::sync::Arc` does), a table slot's own count (rule 2), or a frame's count in
+   ROADMAP §12.1's frame array. A count with other rules, such as a get-unless-zero count whose last
+   put runs a teardown before the memory goes, rule 3's operation gate, or a per-CPU count, is
+   written once as a shared type, beside `TryArc` in `kalloc` or beside `BlockingMutex` in `sync`,
+   with host tests and a loom model (ROADMAP §10.8), and then reused; no subsystem writes its own
+   (AGENTS.md rule 10). `&'static` refers only to what lives for the whole run: a static item, a
+   string literal, the contents of a `BootCell`, or memory allocated at boot and never freed. It
+   never refers to heap memory a table owns, and it is never built from a raw pointer
    (AGENTS.md rule 6).
 2. Tables hold references or quiescent slots. A lookup structure (the process table, the TCB table,
    the dentry cache, the device registry) holds a counted reference, or a slot it reuses only once
@@ -1045,7 +1049,9 @@ place (I9; ROADMAP §10.10, F012), address spaces are reached through `&'static`
 from table-owned boxes (ROADMAP §10.6, F019), block completions point into stack frames (ROADMAP
 §10.10, F002; §12.5, F042), a pid is the index of its process-table slot, handed out lowest first
 (ROADMAP §10.4, F127), and a tid is its TCB slot index, in a space of its own. Nothing implements
-rule 3's operation gate or rule 6's deferred release yet (ROADMAP §10.4).
+rule 3's operation gate or rule 6's deferred release yet (ROADMAP §10.4). A process's working
+directory is a path string: one kernel-global `file_init::CWD` serves every process, and `Proc::cwd`
+is a buffer nothing reads (ROADMAP §10.4, F057).
 
 ## 2.12 RCU
 
