@@ -1,5 +1,5 @@
 # Shared clippy settings. `clippy -D warnings` is Q1; this file exists so
 # `make check` and ad hoc `cargo clippy` share one config.
 #
-# E1 restriction lint *levels* live in `src/lib.rs` (deny unwrap/expect/panic).
-# `indexing_slicing` stays warn, not deny, until the parser modules are clean.
+# E1 restriction lint *levels* live in `src/lib.rs` (deny unwrap/expect/panic)
+# and, for indexing and arithmetic, in each byte parser (ROADMAP §10.1).

@@ -5,9 +5,9 @@
 //! Hardware pokes live in the binary crate. See DESIGN §1.1.
 //!
 //! Restriction lints (E1 / DESIGN §2.5): the portable half returns the
-//! module error instead of panicking on data. `indexing_slicing` stays
-//! warn (not deny) until the parser modules are clean; Q1 `-D warnings`
-//! would promote a crate-level warn.
+//! module error instead of panicking on data. `indexing_slicing` and
+//! `arithmetic_side_effects` are denied per byte parser, not here (ROADMAP
+//! §10.1): most of the crate's indexing is bounded by construction.
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

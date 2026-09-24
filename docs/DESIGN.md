@@ -618,9 +618,13 @@ that ISO's table mis-names frames (ROADMAP §10.2, F084). Frame pointers come fr
 
 Rule: `vibeos-core` (`src/lib.rs`) does not panic on data; its parsers and table walks return the
 module error. Enforced only for `unwrap`, `expect`, and `panic!`: clippy denies `unwrap_used`,
-`expect_used`, and `panic` on that crate (allowed in `#[cfg(test)]`). `indexing_slicing` is not
-enabled, and `make` ships the dev profile, whose `overflow-checks = true` turns an arithmetic
-overflow into a panic. Crafted input panics portable code: a FAT BPB whose
+`expect_used`, and `panic` on that crate (allowed in `#[cfg(test)]`). Neither `indexing_slicing` nor
+`arithmetic_side_effects` is enabled, and `make` ships the dev profile, whose `overflow-checks = true`
+turns an arithmetic overflow into a panic. Planned (ROADMAP §10.1): both lints are denied in every
+byte parser ROADMAP §10.2's fuzzers cover, vibefs v1 excepted until ROADMAP §14.8 retires it, and
+the kernel binary denies `unwrap_used`, `expect_used`, `panic`, `unreachable`, `todo`, and
+`unimplemented` crate-wide, where a site a kernel invariant bounds keeps an `#[allow]` that names the
+invariant (§9.4). Crafted input panics portable code: a FAT BPB whose
 `rsvd + num_fats * FATSz32` overflows in `parse_bpb` (ROADMAP §10.2, F064); a vibefs write near file
 offset 2^44, which overflows `map_block` (ROADMAP §10.11, F008); a CRC-valid vibefs leaf whose count
 exceeds the per-leaf maximum (F061; ROADMAP §14.8 retires v1 for a v2 that validates every block it reads); a vibefs truncate-grow that keeps `F_INLINE`

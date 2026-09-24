@@ -129,6 +129,11 @@ needs = [
 why = "text: lands after the kalloc box and the kernel clippy box"
 
 [[box]]
+key = "the kernel binary denies the panicking calls"
+needs = ["CI runs `cargo clippy --bin vibeos -- -D warnings`"]
+why = "text: lands after the kernel clippy box"
+
+[[box]]
 key = "every path syscall resolves through `Vfs`"
 needs = [
   "`/dev/random` and `/dev/urandom` return only hardware bytes",
