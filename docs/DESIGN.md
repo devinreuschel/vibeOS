@@ -656,7 +656,8 @@ every IF=0 stretch has a reason from the list below and a bound.
    call-function waits, and the time a spinlock acquire spends spinning, which the holders' own
    bounds limit, are exempt. No loop whose trip count a user, a device, or a disk image controls
    runs with IF=0, and nothing waits for another CPU with IF=0 without servicing incoming IPIs
-   ([§7.9](#79-tlb-shootdown)). A long job holds its lock for one bounded chunk at a time and turns
+   ([§7.9](#79-tlb-shootdown)). A TLB invalidation is such a wait on x86_64, so on both
+   architectures it is called only where §7.9's calling contract allows. A long job holds its lock for one bounded chunk at a time and turns
    IF back on between chunks; a walk over a user address space's page tables holds the space's
    page-table lock for at most one leaf table (512 entries) at a time. ROADMAP §10.3's IF-off tracer
    measures every stretch, and the bound is checked under TCG with `-icount shift=0` on one CPU,
@@ -2231,7 +2232,7 @@ for every thread, such as `CR4.TSD` or `SCTLR_EL1.UCT`, is a row of §11.4's tab
 | user GPRs, RIP, RSP, RFLAGS | the thread's kernel stack: the 128-byte syscall frame or the interrupt frame | the RSP0 switch, which gives each thread its own entry stack | switched |
 | x87, SSE, MXCSR | `Tcb.fpu`, a 512-byte FXSAVE image | `switch_fpu` in `on_switch` (`fxsave64` the old thread, `fxrstor64` the new) on every switch; the syscall entry and exit also save and restore it | switched. `fork` gives the child `fpu_template()`, not the parent's image, and `execve` keeps the old image's registers (ROADMAP §10.6, F069). The template is captured after `fninit`, which resets only the x87 control, status, and tag words, so MXCSR and the XMM and ST registers hold whatever the loader left (ROADMAP §13.10, F129). FXSAVE covers no XSAVE state; `CR4.OSXSAVE`, `CR4.PKE`, and `EFER.FFXSR` are assumed clear and never asserted (ROADMAP §11.1, F130). |
 | RSP0 | TSS.RSP0 and `PerCpu.kernel_rsp0`: the top of `Tcb.stack`, or `fallback_rsp0` for the bootstrap thread | `set_rsp0_for` in `on_switch` | switched |
-| CR3 | `Tcb.as_cr3` (0 means the kernel PML4) | `switch_cr3_for` in `on_switch`, skipped when unchanged | switched; no PCID |
+| CR3 | `Tcb.as_cr3` (0 means the kernel PML4) | `switch_cr3_for` in `on_switch`, skipped when unchanged | switched; no PCID (ROADMAP §18.3 adds it with §7.9's flush generation) |
 | FS_BASE (user TLS) | not saved | nothing | not switched. `enter_user`, `enter_user_full`, and `execve` write it; `force_kernel`'s `mov fs` zeroes it on every exit or kill; `fork` copies the live MSR, so a child can inherit another process's base (ROADMAP §13.1, F022). |
 | user GS base | not saved; always 0 | nothing | holds while no `ARCH_SET_GS` or FSGSBASE exists (ROADMAP §18.3) |
 | DR0-DR3, DR7 | the thread's decoded debug slots, and the tracer's masked DR7 for `PEEKUSER` | the switch, by the Debug state paragraph below | not built: nothing arms them before ROADMAP §17.4 |
@@ -2338,6 +2339,45 @@ to invalidate before the virtual address or the frame behind it is reused
 Protocol: update the PTE, then broadcast `0xFC` with the target address, then wait for acknowledgement
 from every online CPU.
 
+Planned (ROADMAP §12.3): user address spaces are targeted. Each address space records the set of
+CPUs that may hold its translations. A CPU sets its bit in the address space it switches to before
+it loads the root, with a full barrier between that store and the first walk through the new root;
+x86's CR3 write serializes, and aarch64 uses `dsb ish` and `isb`. The initiator of a round stores the
+PTE, runs a full barrier, and then reads the set, so either it sees the bit or the switching CPU's
+walk sees the new PTE. A CPU clears its bit in the address space it leaves once the new root is
+loaded: without PCID that load flushes the old space's entries, and with PCID the flush generation
+below catches them. A round carries its target (an address space, or the kernel), a start address, a
+page count or "all", and a freed-tables flag, and above 32 pages the handler flushes the whole
+target. A user round goes to the CPUs in the target's set, a kernel round to every online CPU. On
+aarch64 a round is one broadcast `tlbi ...is` batch and its `dsb ish`, and the set only counts.
+
+Planned (ROADMAP §18.3): with PCID, entries tagged for an address space survive a switch away from
+it. Each address space carries a flush generation, which every round increments before it reads the
+set, and each CPU records, for each PCID slot, the generation it last synced. A switch into an
+address space whose generation is newer flushes that PCID before any user code runs, and a round's
+handler brings the CPU's current address space up to its generation. IPIs still go only to the CPUs
+in the set.
+
+Planned (ROADMAP §27.5, kept only if its measurement there shows a saving): lazy TLB. A kernel
+thread may keep the previous address space's root loaded. Its CPU stays in the set, marked lazy, and
+holds a core reference to the address space ([§2.11](#211-object-lifetimes)) until it loads another
+root; the switch that ends the hold releases it through the deferred put, since the switch path
+frees nothing. A round that changes only leaf PTEs skips lazy CPUs, which catch up through the flush
+generation on their next switch to a user address space, the same one included. A round that frees
+page-table pages also sends lazy CPUs an IPI on x86_64, because a lazy CPU's paging-structure caches
+and speculative walks can still read a freed table. aarch64 sends no IPI: its broadcast TLBI
+(`vae1is` for a freed table) reaches every CPU, and the core reference keeps the root page and its
+ASID until the lazy CPU loads another root. Until then, a switch to a kernel thread loads the kernel
+root, and on aarch64 points TTBR0 at the empty user root.
+
+Calling contract, on both architectures. On x86_64 an invalidation may wait for every online CPU
+with IF=0, so the TLB-maintenance operation of the §11.1 seam is called only where
+[§2.9](#29-preemption-and-interrupt-state) rule 2 allows a cross-CPU wait: never in NMI, `#MC`, or
+`#DB` context, never from a serviced shootdown or call-function handler, and never under the log-ring
+TAS, whose waiters service no IPIs. The aarch64 implementation asserts the same contexts in debug
+builds, although its broadcast waits for no peer, so work run first on aarch64 cannot add a deadlock
+that only x86_64 hits.
+
 The initiator waits with interrupts disabled (`InterruptGuard` around publish → IPI → ack → clear
 waiters). A waiter with IF off cannot take an incoming shootdown as an IRQ, which would deadlock two
 CPUs shooting down at once. The wait loop therefore calls `service_incoming` and processes pending
@@ -2348,8 +2388,8 @@ The wait is bounded: `ipi_init::wait_acks` panics after 1000 × `tsc_per_ms` TSC
 every acknowledgement. A target CPU that holds IF=0 that long without polling `service_incoming`
 makes a shootdown panic the kernel. The in-guest test runner holds IF=0 for the whole run,
 and a syscall body runs with the IF=0 that FMASK set until it blocks (ROADMAP §10.10, F011); a console
-`write` with many newlines is the long case (ROADMAP §10.6, F044). One round invalidates one VA
-(`shootdown_va`). `kva_init::unmap_shootdown` unmaps at most 32 pages (`MAX_UNMAP`) and leaves the
+`write` with many newlines is the long case (ROADMAP §10.6, F044). As built, one round invalidates one VA
+(`shootdown_va`) on every online CPU; ROADMAP §12.3 replaces it with the rounds above. `kva_init::unmap_shootdown` unmaps at most 32 pages (`MAX_UNMAP`) and leaves the
 rest mapped with no error, while `vunmap` frees the whole VA span it was given (ROADMAP §10.3, F107).
 
 The shootdown handler allocates nothing and takes no lock ([§2.2](#22-interrupt-handler-rules)). It
