@@ -249,7 +249,17 @@ The rename order is Linux's too: `rmdir` holds a parent and then the child it re
 `rename` whose directories were an ancestor and its descendant, taken in address order, could hold
 the child and wait for the parent. The rename lock serializes cross-directory renames, which is why
 unrelated directories may go in any fixed order. `mmap` of a file takes a counted reference to the file's
-page-cache object before it takes the address-space lock, never the inode lock inside it. A
+page-cache object before it takes the address-space lock, never the inode lock inside it. A region's
+references go the other way: they are dropped after the address-space lock is released. `munmap`, a
+`MAP_FIXED` replacement, `mremap`, `mprotect`'s merge, `execve`'s release of the old image, and
+exit's teardown move each removed region onto a local list under the lock and drop the list after
+unlocking, since a last reference can release an unlinked inode, which takes that inode's lock and
+the filesystem's block-mapping locks (Linux defers `fput` for the same reason). `msync` and an
+`fsync` of a mapped range take counted references to the files of the regions they cover under the
+lock for reading, release it, and then write back and wait (Linux releases `mmap_lock` before
+`vfs_fsync_range`). Holding the lock across that writeback deadlocks three threads: an `msync`
+holding it for reading waits for the inode lock of a `write` whose user buffer faults, the fault's
+read request parks behind an `mmap` queued for writing, and the `mmap` waits for the `msync`. A
 filesystem with a single volume lock ranks it at level 4, so it must drop it before any user copy.
 This is Linux's order (`i_rwsem`, then `mmap_lock`, then the page lock, then the filesystem's own
 block-mapping locks), chosen for the same reason: a `write` that faults on its user buffer while
@@ -1120,7 +1130,12 @@ lock, its own address-space lock, or a busy page-cache page (§2.1's sleeping ti
 3. It writes no page. The ROADMAP §12.5 writeback threads write dirty file pages, and ROADMAP
    §12.7's swap-out thread writes anonymous pages. Direct reclaim wakes those threads and then waits, with a
    deadline, only for writes already submitted to a device. When that frees too little, the OOM
-   killer runs.
+   killer runs. That wait stands outside §2.1's order, though the reclaiming thread may hold a
+   block-mapping or volume lock: the completion that ends it takes no sleeping-tier lock, in the
+   device's bottom half ([§5.4](#54-irq-registration)) or in any later completion stage, and a
+   filesystem's end-of-write work that needs its own locks runs in its writeback thread after the
+   completion, never in it. Any wait for further writeback progress is bounded by the deadline.
+   ROADMAP §13.12's lock-dependency build gives the wait a class of its own.
 4. It never recurses. These are no-reclaim threads, whose allocations use the reserve pool and
    then fail: the writeback threads, the swap-out thread, threaded interrupt bottom halves (§5.4), a
    workqueue worker while it runs a softirq-equivalent item (§2.2), and a thread already in reclaim.
