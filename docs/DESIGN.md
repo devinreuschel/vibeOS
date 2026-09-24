@@ -2386,9 +2386,10 @@ irq::set_handler(vec, my_handler);
 The kernel binary exposes this as `irq_init::allocate_vector`. Allocate is refused
 inside a device hard-IRQ: `irq_init::dispatch` sets a per-CPU `IN_ISR` flag around the handler. The
 timer, IPI, and keyboard ISRs do not set it, and no blocking primitive checks it (ROADMAP §10.3,
-F110). That flag is not
-`InterruptGuard` nest: in-guest tests hold a guard on the BSP, so a nest check would
-false-refuse every allocate from `ktest`.
+F110). That flag is not the `InterruptGuard` nest: `allocate_vector` takes only spinlocks, so a
+caller with IF off may allocate, and only a device hard-IRQ is refused. The in-guest registry also
+holds a guard on the BSP until ROADMAP §10.2 moves it to a thread (F075), so a nest check would
+refuse every allocate from `ktest`.
 
 Planned (ROADMAP §11.3, on x86_64 before the GIC): drivers name an interrupt by an `IrqId`, a `u32`
 the IRQ layer allocates, never a hardware number. It indexes the handler table, the interrupt's
@@ -3775,6 +3776,11 @@ accept that the real coverage is in-guest.
 A second kernel build with `--features kernel_tests` that boots normally, runs a registry of test
 functions after init, reports over serial, and exits QEMU through the `isa-debug-exit` device.
 
+The registry runs on the bootstrap thread under an `InterruptGuard`, so each test starts with IF
+off, and `with_timer` turns interrupts on inside it. Planned (ROADMAP §10.2, F075): the registry
+runs on a spawned kernel thread with IF on and `irq_nest` 0, on a guarded 64 KiB stack, and a test
+that needs interrupts off takes its own guard.
+
 Built into a separate Cargo target directory (`target-kernel-tests`) with its own ISO. This is not
 fussiness: sharing a target directory means a feature-enabled ELF can end up packaged into the
 production ISO, and the difference is not visible from the outside. The panic-dump and `#GP` ISOs
@@ -3803,7 +3809,9 @@ after any timeout, after the `-smp 2` TCG `FAIL per_cpu_bsp: ready_head should b
 `-smp 4` `FAIL msix_cpu: ap counter`, and after a `-smp 4` panic whose tail holds `ipi: ack timeout`,
 the `ipi_init::wait_acks` frame, or a banner glued to a `ktest: ok` line. A second timeout whose tail
 ends at `user: dup ok` gets a third boot. `make test-smp-stress` uses the same rules, so a green run
-can hide an intermittent hang or panic.
+can hide an intermittent hang or panic. Until then each retry goes to the job summary and to the
+tier's results file, and a pull request that ticks a ROADMAP box on a run that retried fails
+(ROADMAP §10.2, §10.9).
 
 Planned (ROADMAP §10.2): `begin` carries the number of runs the boot will make, after the command
 line's filter and repeat count, and `vibeOS: ktest: run <name> <deadline_ms>` precedes each run,
@@ -4431,18 +4439,22 @@ under a seqlock, release on write, acquire on read, retry on an odd or changed s
 QEMU TCG does not set the invariant-TSC CPUID bit. Interpolation can overshoot a late tick, then the
 counter moves and `now_us` drops, even with a stable seqlock pair. A wrapping TSC-behind-snapshot
 delta looks like ~2^64 cycles. Rule: treat a high-bit wrapping delta as extra 0, and never publish a
-`now_ns` below the last reading. Do not cap extra at one tick — ktest holds IF off and timeouts must
-still advance on TSC alone.
+`now_ns` below the last reading. Do not cap extra at one tick: across a stretch with IF off, which a
+test may hold on purpose, timeouts must still advance on TSC alone.
 
 **`sleep_ms(50)` and PIT-vs-HPET calib flake on TCG SMP.**
 TCG has no invariant TSC. Boot HPET calibration runs before APs; a later PIT channel 2 window sees a
 different apparent TSC rate, and LAPIC periodic ticks coalesce so `uptime_ms` during a sleep is not
-50–100. Rule: in-guest checks key off the invariant-TSC CPUID bit. Without it, retry PIT against a
-fresh HPET sample with a 50–200% band, and accept `now_us` (~50 ms) when ticks coalesce. Do not loosen
-the invariant-TSC path. Under KVM too, QEMU leaves the invariant-TSC bit out of `-cpu max` and
-`-cpu host` while the vCPU is migratable, its default, so the KVM leg asks for `+invtsc` and fails if
-the guest still reports none (ROADMAP §10.1). Planned (ROADMAP §10.3): `now_ns` stops counting ticks,
-and the coalescing allowance goes with it.
+50–100. Rule: a timing check measures once and holds one band; it is never retried against a fresh
+sample, and it gets no wider band where it flakes (§9.8). The PIT-vs-HPET cross-check holds its
+75–125% band only where the TSC is invariant, so without the CPUID bit it skips with the reason
+`no invariant tsc`, and the ROADMAP §10.1 KVM leg, whose guest has the bit, runs it. Not yet
+enforced: `tsc_calib_source` measures PIT three times in a 50–200% band without the bit (ROADMAP
+§10.2), and `sleep_ms_50` accepts 40–400 ms of `now_us` when ticks coalesce (ROADMAP §10.3). Do not
+loosen the invariant-TSC path. Under KVM too, QEMU leaves the invariant-TSC bit out of `-cpu max`
+and `-cpu host` while the vCPU is migratable, its default, so the KVM leg asks for `+invtsc` and
+fails if the guest still reports none (ROADMAP §10.1). Planned (ROADMAP §10.3): `now_ns` stops
+counting ticks, and the coalescing allowance goes with it.
 
 **Serial output from multiple CPUs is unreadable.**
 No lock on TX. Rule: lock serial TX, and write each line whole: format it, newline included, into one
@@ -4557,6 +4569,15 @@ place, this file, and a change updates it in the same commit.
 The old tree carried four issues marked critical, with named regression tests planned for each, for the
 rest of its life. Rule: a bug that is understood well enough to write down is fixed or explicitly
 deferred with a roadmap line. "Documented" is not a state a critical bug gets to rest in.
+
+**A flaky test made green by a retry.**
+The harness retried timed-out boots and three known failures, and the calibration check retried
+against a fresh sample in a wider band, so runs that hit a real hang or panic came back green
+(ROADMAP §10.2, F021). Rule: a flaky test is a bug. It gets a ROADMAP line that names its failure
+line, and it is fixed there. No retry, skip, wider band, or longer timeout lands to make it pass,
+and a test that repeats a measurement until one sample passes has a wider band. A test skips only
+when its tier cannot run what it checks: its skip line names what the configuration lacks, and a
+tier CI runs has it. Not yet enforced: the harness retries until ROADMAP §10.2 deletes the retries.
 
 ---
 
