@@ -350,7 +350,9 @@ An interrupt handler must:
 - keep its stack frame small: only `#DF`, NMI, `#MC`, and `#DB` enter on dedicated IST stacks
   (§5.1), and NMI, `#MC`, and `#DB` move to the thread's kernel stack when they interrupt ring 3
   (§5.10 rule 3); every other vector runs on the interrupted kernel stack, or on TSS.RSP0 when it
-  interrupts ring 3
+  interrupts ring 3; on aarch64 every vector runs on the interrupted kernel stack, or on the thread's
+  kernel stack when it interrupts EL0, after an entry test that moves it to this CPU's overflow stack
+  when that stack has overflowed (§11.5 rule 6)
 
 Both of the "must" rules are expanded in [section 5.8](#58-handler-ordering-rules), because both are
 easy to violate and expensive to debug.
@@ -1460,7 +1462,7 @@ memory, and this patch and `map_gap`'s UC leaves are deleted (§4.1).
 | Kernel `.data` / `.bss` | present, global, writable, NX |
 | Physmap | present, global, writable, NX |
 | Heap | present, global, writable, NX |
-| Kernel stacks | present, global, writable, NX, guard page unmapped below |
+| Kernel stacks | present, global, writable, NX, guard unmapped below (§4.5) |
 | MMIO | present, global, writable, NX, PCD + PWT |
 | Low identity, first 2 MiB | present, global, writable, executable (trampoline) |
 | Low identity, rest | present, global, writable, NX |
@@ -1692,11 +1694,20 @@ allocator, and slab does not replace it.
 ## 4.5 Kernel virtual address allocator
 
 The heap answers "give me 40 bytes". The KVA allocator answers "give me 16 KiB of contiguous virtual
-address space with a guard page below it". Guarded kernel stacks are the motivating case, `vmap` of
+address space with an unmapped guard below it". Guarded kernel stacks are the motivating case, `vmap` of
 non-contiguous frames is the second.
 
-- A guarded stack of *n* pages reserves *n+1* pages of VA and maps only the upper *n*. The bottom page
-  stays unmapped so overflow takes a page fault instead of quietly eating whatever is below.
+- A guarded stack is a power-of-two size *S* and starts at an address aligned to *2S*, and the *S*
+  bytes of VA below it stay unmapped, so overflow takes a page fault instead of quietly eating
+  whatever is below. Every address in the stack then has bit log2(*S*) clear and every address in its
+  guard has it set. aarch64 relies on that: an exception taken at the kernel's level runs on the stack
+  that overflowed, so each vector entry tests the bit and moves to a per-CPU overflow stack when it is
+  set ([§11.5](#115-aarch64-exceptions-and-privilege-transitions) rule 6), which needs every stack the
+  aarch64 kernel runs on (thread, idle, and overflow stacks) to have one size, 16 KiB. x86_64 needs no
+  test, since `#DF` switches to its IST stack (§5.1), and its `#DF` handler reports stack overflow
+  when CR2 lies in the guard of the stack the interrupted code ran on; it uses the same layout, so
+  stack allocation has one path. Rule; not yet enforced: ROADMAP §11.3. Today a guarded stack of *n*
+  pages reserves *n+1* pages of VA, maps the upper *n*, and has no alignment.
 - Stack frames are allocated as *n* separate order-0 frames, not one order-*k* block. Stacks do not
   need physical contiguity and requesting it fragments the buddy allocator for nothing. Planned
   (ROADMAP §10.3): the `GuardedStack` holds each frame's `Frames` (§4.2).
@@ -1710,8 +1721,9 @@ non-contiguous frames is the second.
   while the exiting CPU is still between `defer_free` and `switch_context` on that stack
   (ROADMAP §10.10, F012); `defer_free` panics when all 8 slots are full (ROADMAP §10.10, F010).
 
-Default kernel stack is 4 pages (16 KiB) plus guard. If that turns out to be tight, raise it rather
-than debugging mysterious corruption.
+Default kernel stack is 4 pages (16 KiB) plus its 16 KiB guard. If that turns out to be tight, raise
+it rather than debugging mysterious corruption; on aarch64 the size is one constant for every stack,
+and the entry test's bit follows it.
 
 ## 4.6 What comes later
 
@@ -2214,7 +2226,7 @@ architectures. Planned (ROADMAP §11.3, §11.6): the aarch64 port does not exist
 | `svc` or exception taken from EL0, until the stub has saved the user frame | EL1 (EL2 with VHE), `SP_ELx` at the top of the thread's kernel stack, where the last return to EL0 left it | all set by the exception; the stub clears `MDSCR_EL1.SS` for a thread being stepped before any DAIF bit is cleared (§7.5, Debug state) | set by the exception (`SCTLR_EL1.SPAN` clear) | the user SP, until the stub saves it and loads `current` ([§2.9](#29-preemption-and-interrupt-state) rule 5) |
 | the syscall body, and the body of a fault or trap taken from EL0 | the kernel's level, the thread's kernel stack | all clear once the frame is saved (§2.9 rule 3) | set; clear only inside the user-memory accessors | `current` |
 | IRQ taken from EL0, its top half | the kernel's level, the thread's kernel stack | D and A clear; I and F set | set | `current` |
-| exception or IRQ taken at the kernel's level | the kernel's level, the interrupted stack | all set by the exception; D and A clear once the frame is saved | set by the exception; the interrupted value returns with `SPSR_EL1` | `current`, untouched |
+| exception or IRQ taken at the kernel's level | the kernel's level, the interrupted stack, or this CPU's overflow stack when the entry's stack test finds it overflowed ([§11.5](#115-aarch64-exceptions-and-privilege-transitions) rule 6) | all set by the exception; D and A clear once the frame is saved | set by the exception; the interrupted value returns with `SPSR_EL1` | `current`, untouched |
 | return to EL0, from the first write of `ELR_EL1`, `SPSR_EL1`, or `SP_EL0` to `eret` | the kernel's level, then EL0 at `eret` | all set, until `eret` loads EL0's from `SPSR_EL1`; `MDSCR_EL1.SS` set after the last exit-work check, for a thread being stepped only (§7.5) | EL0 does not use it | the user SP, restored from the frame |
 
 1. One entry stub per vector, owned by `arch/idt.rs` and generated from one table. The stub runs
@@ -2801,8 +2813,8 @@ as `CR4.TSD` or `SCTLR_EL1.UCT`, is a row of §11.4's table instead.
 | aarch64 | user `x0`-`x30`, SP, PC, PSTATE, `orig_x0`, and the syscall number | the thread's user frame at the top of `Tcb.stack` ([section 5.10](#510-privilege-transitions)) | every entry from EL0 saves it, and each return to EL0 leaves `SP_ELx` at the top of the thread's stack for the next entry | not built: ROADMAP §11.6 |
 | aarch64 | `SP_EL0` | at EL0 the user stack pointer, saved in the user frame by every EL0 entry; at EL1 or EL2 the running thread's TCB pointer ([§2.9](#29-preemption-and-interrupt-state) rule 5) | the EL0 entry stub, the return to EL0, and the switch (ROADMAP §11.6) | not built |
 | aarch64 | V0-V31, FPCR, FPSR | `Tcb.fpu` | the FP binding below | not built: ROADMAP §11.6 |
-| aarch64 | `TPIDR_EL0` (user TLS) | the thread's saved TLS base, as for `FS_BASE` | `on_switch` saves it for an outgoing user thread and loads the incoming one's; EL0 writes it with `msr` at any time, so only the live register is current | not built: ROADMAP §11.6, which switches x86_64's `FS_BASE` in the same commit (F022) |
-| aarch64 | `TPIDRRO_EL0` | not saved; 0 | nothing: every CPU writes 0 at bring-up and nothing else writes it | EL0 can read it, so it never holds a kernel value |
+| aarch64 | `TPIDR_EL0` (user TLS) | the thread's saved TLS base, as for `FS_BASE` | `on_switch` saves it for an outgoing user thread and loads the incoming one's; EL0 writes it with `msr` at any time, so only the live register is current | not built: ROADMAP §11.6, which switches x86_64's `FS_BASE` in the same commit (F022); the fatal stack-overflow path uses it as scratch before it halts (§11.5 rule 6) |
+| aarch64 | `TPIDRRO_EL0` | not saved; 0 | every CPU writes 0 at bring-up, and only the fatal stack-overflow path, which halts, writes it again (§11.5 rule 6) | EL0 can read it, so it never holds a kernel value |
 | aarch64 | `TTBR0_EL1` and its ASID | the address space | the `TTBR0` switch in `on_switch`, skipped when the address space is shared (ROADMAP §11.6) | not built; ASIDs from ROADMAP §11.2 |
 | aarch64 | `DBGBVR`/`DBGBCR`, `DBGWVR`/`DBGWCR`, `MDSCR_EL1.MDE` | the thread's decoded debug slots | the switch, by the Debug state paragraph below | not built: ROADMAP §17.4 |
 | aarch64 | `MDSCR_EL1.SS` | the thread's step flag, with `SPSR.SS` in its frame | set at the return to EL0 and cleared at entry from EL0, by the Debug state paragraph below | not built: ROADMAP §17.4 |
@@ -3477,11 +3489,13 @@ only one of them noticed. Rule: the address map in [section 4.1](#41-virtual-add
 source of truth, and every region asserts its range is unmapped before claiming it.
 
 **Allocator corruption with a crash in an unrelated subsystem.**
-Buddy free list nodes live inside free pages, and a kernel stack overflow wrote into one. Rule: every
-kernel stack gets an unmapped guard page below it, and stack overflow is a page fault rather than
-silent corruption. The bootstrap thread breaks the rule (`stack: None`): `_start`, all of boot, and
-the `kernel_tests` registry run on Limine's stack (at least 64 KiB, no guard page, in
-bootloader-reclaimable memory). The kernel sends no stack size request (ROADMAP §10.6, F072).
+Buddy free list nodes live inside free pages, and a kernel stack overflow wrote into one. Rule:
+every kernel stack gets an unmapped guard below it, and stack overflow is a page fault, reported
+from a stack known to be good, rather than silent corruption: x86_64's `#DF` runs on IST 1 (§5.1),
+and aarch64's vector entries test the stack bit of §4.5's layout and move to a per-CPU overflow
+stack (§11.5 rule 6; ROADMAP §11.3). The bootstrap thread breaks the rule (`stack: None`): `_start`,
+all of boot, and the `kernel_tests` registry run on Limine's stack (at least 64 KiB, no guard page,
+in bootloader-reclaimable memory). The kernel sends no stack size request (ROADMAP §10.6, F072).
 
 **A PTE edit appears to have no effect.**
 No `invlpg` after the edit. Rule: `invlpg` after any single-PTE modification, including MMIO attribute
@@ -4237,7 +4251,7 @@ per-architecture uapi (ROADMAP §13.10).
 | Early console | port module | 16550 on COM1 | PL011 | §11.1 |
 | Exception entry and exit | port module: generated entry code | one stub per IDT vector ([§5.10](#510-privilege-transitions) rule 1) | one 16-entry vector table ([§11.5](#115-aarch64-exceptions-and-privilege-transitions)) | §10.6, §11.3 |
 | Trap decode | pure half: a trap to a `TrapKind` (§5.2) | vector and error code | vector slot and `ESR_EL1` (§11.5) | §10.6, §11.3 |
-| Kernel stack-overflow report | port module | `#DF` on IST 1 (§5.1) | no IST: an exception at the kernel's level runs on the stack that overflowed | §11.3 |
+| Kernel stack-overflow report | port module | `#DF` on IST 1 (§5.1) | a stack test at every vector entry and a per-CPU overflow stack (§4.5, §11.5) | §11.3 |
 | Interrupt mask | trait | RFLAGS.IF (`cli`, `sti`) | PSTATE.I and F (`msr daifset`, `msr daifclr`); priority masking from ROADMAP §25.5 | §10.3 |
 | Interrupt controller and IRQ identity | trait | 8259, I/O APIC, and LAPIC; vector numbers (§5.3) | GICv2, or GICv3 with its ITS; INTIDs | §10.3, §11.3 |
 | IPI send and its ordering | trait | LAPIC ICR write (§7.6) | SGI register write | §10.3, §11.3 |
@@ -4419,9 +4433,9 @@ names below reach their `_EL2` registers through VHE's redirection, and `VBAR_EL
    Of its 16 entries (synchronous, IRQ, FIQ, and SError, each taken at the current level on
    `SP_EL0`, at the current level on `SP_ELx`, from EL0 in AArch64, and from EL0 in AArch32), the
    kernel expects only the `SP_ELx` and AArch64-EL0 ones, since it always runs on `SP_ELx` and EL0
-   has no AArch32; each of the other eight dumps and halts. An entry from EL0 saves the user frame
-   (§5.10), `ELR_EL1` and `SPSR_EL1` included, and every entry saves the syndrome (§5.10 rule 9),
-   before it clears any DAIF bit.
+   has no AArch32; each of the other eight dumps and halts. Every entry runs rule 6's stack test
+   before its first store. An entry from EL0 saves the user frame (§5.10), `ELR_EL1` and `SPSR_EL1`
+   included, and every entry saves the syndrome (§5.10 rule 9), before it clears any DAIF bit.
 2. DAIF. Every exception sets all four bits. Once its frame is saved, an entry clears D and A; a
    syscall or a fault or trap body then clears I and F too (§2.9 rule 3), and an IRQ's top half
    keeps them set. The kernel masks and unmasks I and F together, since nothing routes a FIQ to it.
@@ -4443,6 +4457,21 @@ names below reach their `_EL2` registers through VHE's redirection, and `VBAR_EL
    the running thread's TCB pointer ([§2.9](#29-preemption-and-interrupt-state) rule 5): every entry
    from EL0 saves the user's `SP_EL0` into the frame and loads `current`, and the return to EL0
    restores the user's after it sets DAIF (rule 3).
+6. Stack overflow. aarch64 has no IST: an exception taken at the kernel's level runs on the stack it
+   interrupted, so on an overflowed stack the entry's first store faults again, and each nested entry
+   moves SP further down, past the guard and into whatever mapping lies below. Every vector entry
+   therefore tests, before its first store, bit log2(*S*) of SP less its frame, which §4.5's layout
+   sets exactly when that address is in a guard. It exchanges SP and `x0` by adding and subtracting,
+   so the test touches no memory and needs no scratch register. When the bit is set, the entry
+   stashes `x0` and the faulting SP in `TPIDR_EL0` and `TPIDRRO_EL0`, switches to this CPU's overflow
+   stack (16 KiB, allocated at bring-up in §4.5's layout, so an exception taken on it passes the
+   test), and prints `vibeOS: panic: stack overflow` with `FAR_EL1`, `ESR_EL1`, `ELR_EL1`, the
+   stashed SP, and the current thread, then halts through §2.5. It keeps DAIF set until it halts, so
+   it reads the syndrome from the registers rather than from a frame (§5.10 rule 9). The two EL0
+   registers are free there because the path never returns to EL0 (§7.5). The full vector table goes
+   live only once the bootstrap thread runs on a stack in §4.5's layout (ROADMAP §10.6), so Limine's
+   stack meets only ROADMAP §11.1's early vector table. This is the check Linux arm64 makes for its
+   virtually mapped stacks.
 
 Exception classes. Each port decodes a trap into a portable `TrapKind` in its `vibeos-core` half, and
 one table there gives each `TrapKind` its ring-3 action, the signal and the `si_code` Linux sends, or
