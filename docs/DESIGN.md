@@ -824,7 +824,7 @@ must neither halt nor corrupt memory it has not given to that source (AGENTS.md 
 |---|---|---|---|
 | Ring-3 code | Nothing: it must not halt or corrupt the kernel (I6) | Halt the kernel (F004 to F010); every process is root, so it can read any file and signal any process | ROADMAP §10.6 and §10.10 (halts), §13.9 (uids), §18.6 (capabilities, `seccomp`) |
 | Disk images and partition tables | Nothing: a parse returns `Corrupt` | Panic the kernel with a crafted image or table that root mounts or attaches (F061, F064, F117) | ROADMAP §10.2 (FAT BPB), §13.9 (partition tables), §14.8 (vibefs v2 validates every block it reads; v1 is retired) |
-| Devices: config space, rings, registers, interrupts | Nothing for halts (rule 4); everything for DMA | Read or write any physical memory by DMA, and forge an MSI | ROADMAP §18.1 (IOMMU, interrupt remapping, used-ring checks, F048) |
+| Devices: config space, rings, registers, interrupts | Nothing for halts (rule 4); everything for DMA | Read or write any physical memory by DMA; forge an MSI, and so halt the kernel with an interrupt on a vector no handler owns (ROADMAP §10.6) | ROADMAP §10.6 (stray interrupts), §18.1 (IOMMU, interrupt remapping, used-ring checks, F048) |
 | Firmware tables: ACPI, device tree, SMBIOS, the memory map | What they describe, but not their bounds: a malformed table is refused, never followed out of range | Halt boot with a malformed table before the IDT exists (F136) | ROADMAP §11.1 (early exceptions report themselves), §20.1 (table bounds) |
 | The network | Nothing, from the first packet | Not reachable yet | ROADMAP §15.10 fuzzes every parser from the start |
 | Speculation and timing side channels | Out of scope: no KPTI and no Spectre or MDS mitigations; the kernel half is mapped in every user address space (F024, F025, F131, F132) | Read kernel and other processes' memory on an affected CPU | ROADMAP §18.3 |
@@ -1176,7 +1176,8 @@ Ordering rules worth stating separately because they were learned the hard way:
 - The bootstrap tick is the LAPIC timer after step 13b, or PIC IRQ0 only on the
   PIT fallback (LINT0 ExtINT). Other PIC lines stay masked; step 15 is
   `irq: enabled` (IF on, preemption live), not the first unmask. An unexpected
-  line before its driver is a halt, not a useful backtrace.
+  line before its driver halts, with no useful backtrace; ROADMAP §10.6 masks,
+  counts, and logs it instead (§5.5).
 - `smp: done` precedes `console ok`, `pci: N devices`, and `shell ready`. The e2e harness enforces
   it. If SMP moves after the shell, AP failures become invisible in CI.
 - ACPI discovery for the step-8 UC patch may run immediately after CR3 (alongside `paging: mmio uc`).
@@ -1203,7 +1204,7 @@ Step 17 is the framebuffer console, PS/2, and mux (`console ok`) after SMP.
 IRQ1 stays masked until the keyboard handler is installed, then the 8042 is
 initialized, then the keyboard GSI is unmasked. After LAPIC owns the tick the
 8259 is masked: IRQ1 is IOAPIC-only. Do not unmask PIC IRQ1 as a fallback. The
-default PIC handler still halts on an unexpected line. The timer path re-runs the
+default PIC handler still halts on an unexpected line (§5.5 gives ROADMAP §10.6's change). The timer path re-runs the
 8259 ICW sequence even when FADT bit 0 skipped the boot remap (QEMU clears
 that bit but still has a PIC on 0x08).
 Step 17b enumerates PCI (ECAM where the first MCFG allocation covers the bus, else CF8 on bus 0 only), maps
@@ -1834,7 +1835,7 @@ the table lives in code, and a host test checks that each vector `0x00`–`0x1F`
 | `0x12` | `#MC` | dump on IST, halt; `CR4.MCE` is clear, so a machine check shuts the CPU down with no dump (ROADMAP §10.6, F026) | not a ring-3 fault: the Ring 0 column applies | as the rule |
 | `0x13` | `#XF` | dump, halt | `SIGFPE` | arrives as `#UD` and gets `SIGILL`: `CR4.OSXMMEXCPT` is clear. Rule; not yet enforced: ROADMAP §10.6 (F026) |
 | `0x09`, `0x0F`, `0x14`–`0x1F` | reserved, `#VE`, `#CP`, `#HV`, `#VC`, `#SX` | dump, halt | `SIGSEGV` | `sig_for_vec` has no row, so one would halt the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
-| `0x20`–`0xFF` | IRQs and IPIs | handle, return; an unused vector or an unexpected PIC line halts (§5.5) | handle, return to ring 3 | `0x21`, `0x30`, and `0x31`–`0x7F` run on the user GS base and halt the kernel. Rule; not yet enforced: ROADMAP §10.6 (F004) |
+| `0x20`–`0xFF` | IRQs and IPIs | handle, return. An interrupt no handler owns is counted per vector and per CPU, EOIed at the controller that delivered it (the LAPIC when its in-service bit for the vector is set, else the 8259), logged at most once a second per vector, and ignored; §5.5 gives the 8259 lines. Rule; not yet enforced: a pool vector (`0x31`–`0x7F`) with no handler is EOIed and ignored with no count, a vector in `0x80`–`0xEF` or `0xF3`–`0xFA` dumps and halts, and an 8259 line with no handler other than IRQ7 and IRQ15 prints `irq: unexpected` and halts the CPU that took it (ROADMAP §10.6) | handle, return to ring 3 | `0x21`, `0x30`, and `0x31`–`0x7F` run on the user GS base and halt the kernel. Rule; not yet enforced: ROADMAP §10.6 (F004) |
 
 A halting handler prints the interrupt frame (RIP, CS, RFLAGS, RSP, SS), the error code where the
 vector pushes one, and, for `#PF`, the CR2 the stub saved (§5.10 rule 9), then the common dump
@@ -1916,7 +1917,8 @@ until the interrupt entry cache invalidation completes, so a device that still
 writes its old message reaches no vector that a later `allocate_vector` hands out.
 
 EOI is the dispatcher's job, not the driver's. The dispatch layer knows whether a
-vector arrived via PIC or LAPIC and signals the right controller.
+vector arrived via PIC or LAPIC and signals the right controller. A vector with no handler still
+gets its EOI; ROADMAP §10.6 also counts and logs it (§5.2's `0x20`–`0xFF` row).
 
 A threaded handler's top half runs in `dispatch` (ack / mask / wake only). Today one
 kernel thread, pinned to the last online CPU, runs every threaded vector's bottom half.
@@ -1955,7 +1957,12 @@ The PIC is a bootstrap artifact and a fallback, nothing more.
   PIC IRQ0. `on_timer_tick` does nothing until the idle thread exists. The `irq: enabled` marker
   (step 15) follows `sched: cpu0 ready`. The keyboard (step 17) takes vector `0x30` through the
   I/O APIC whenever `kbd_init` can route ISA IRQ1; PIC IRQ1 is unmasked only when there is no route
-  and the PIT owns the tick. The default PIC handler halts on an unexpected line.
+  and the PIT owns the tick. The default PIC handler reads the ISR for IRQ7 and IRQ15: a clear bit
+  means a spurious IRQ, which gets no EOI on that PIC (a spurious IRQ15 still EOIs the master's
+  cascade line), and a real IRQ7 or IRQ15 with no driver is EOIed and ignored. Any other line with
+  no handler prints `irq: unexpected N` and halts the CPU that took it. Planned (ROADMAP §10.6): a
+  spurious IRQ is counted, and any other line no driver claims is masked at the PIC, EOIed,
+  counted, and logged at most once a second, and the kernel goes on.
 - Once the I/O APIC routes devices and the LAPIC timer is verified ticking, mask the PIC completely.
   Leaving it live means every interrupt is delivered twice.
 - Keep the PIT driver code. It is still the calibration fallback and still provides the delays that AP
