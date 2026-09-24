@@ -173,6 +173,12 @@ and measured behaviour, or from sources whose license lets it into an MIT tree:
   formats, and glue.
 - Third-party sources the tree builds rather than copies follow ROADMAP §14.10's port policy, and test
   inputs fetched at test time (Linux's device trees, QEMU's ACPI tables) are never committed.
+- A binary the project publishes (an image, a package, a release asset, or a workflow artifact
+  anyone can download) carries the copyright and license notices its third-party code's licenses
+  require: `/LICENSES/` on an image, and the same file as an asset beside it in a release, generated
+  by ROADMAP §10.9's notices script. A copyleft binary also carries its source offer (ROADMAP
+  §14.10). Rule; not yet enforced: today's ISO carries Limine's binaries, the `limine` crate, and
+  Rust's `core` and `alloc` with no notice (ROADMAP §10.9).
 
 Why: one function derived from GPL code would put the kernel under the GPL, against the project's
 license. The kernel review's spot check found no such copy, but no rule said so. Crypto written
