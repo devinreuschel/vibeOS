@@ -161,24 +161,43 @@ gs, cpu, AP trampoline). Nested also: `src/fs/` (VFS + kernfs). `user/` is frees
 vibeOS is MIT ([LICENSE](../LICENSE)). What goes into the tree comes from specifications, manuals,
 and measured behaviour, or from sources whose license lets it into an MIT tree:
 
-- Nothing is copied or translated from GPL or LGPL sources: Linux, glibc, GNU tools, or QEMU's GPL
-  parts. The Linux-interfaces rule asks for Linux's behaviour, which vibeOS learns from man pages,
+- Nothing is copied or translated from a file whose only licenses are the GPL or LGPL: most of
+  Linux, glibc, GNU tools, and QEMU's GPL parts. The unit is the file, since the Linux tree mixes
+  licenses: a Linux file whose SPDX line or notice text offers a notice-only license (next bullet),
+  alone or as one option of a dual license such as `GPL-2.0 OR MIT`, falls under the next bullet.
+  The Linux-interfaces rule asks for Linux's behaviour, which vibeOS learns from man pages,
   specifications, and running Linux, the oracle kernel of ROADMAP §12.4, never by porting Linux's
   code. Numeric constants, struct layouts, and `ioctl` numbers that an interface defines are facts;
   each is written down with a citation of where it is defined. The facts clause covers layouts and
   constants, not the algorithm that keeps a format consistent. A format that is valid only when such
   an algorithm maintains it (a B-tree, a space map, a commit order) and that only GPL code defines is
   written up in `docs/` from what Linux writes and what Linux's own tools accept or reject, before
-  any code, and its GPL sources are not read for it (ROADMAP §29.6).
-- MIT, BSD, ISC, zlib, or Apache-2.0 code may be adapted, with its copyright and license notice kept
-  beside it (and, for Apache-2.0, its NOTICE text).
+  any code, and its GPL sources are not read for it (ROADMAP §29.6). A ROADMAP line may name a Linux
+  function or file to identify a behaviour, but a GPL-only implementation is never read while
+  writing the vibeOS code that matches it: code written with its source open is a translation
+  however its text differs. The facts clause reads a header or a format's definition (a uapi header,
+  `md_p.h`, `md-bitmap.h`) for its constants and layouts only.
+- Code under a notice-only license, one whose only condition is keeping its copyright and permission
+  notice or that has none (MIT, X11 and HPND, BSD-2-Clause and BSD-3-Clause, ISC, zlib, 0BSD, or
+  that option of a dual license), may be adapted into a vibeOS file. The file keeps the notice and
+  carries a provenance header naming the upstream project, the file's path, the pinned tag or
+  commit, and the upstream license as an SPDX identifier; ROADMAP §10.9 checks the header and ships
+  the notice. Code under Apache-2.0 alone, or under any license with a further condition, is never
+  adapted into a vibeOS file: it enters as a crate under ROADMAP §10.9's `cargo deny` policy or as a
+  port under §14.10, keeping its own license and NOTICE.
 - Cryptographic primitives and the TLS state machine are depended on, never written in-tree: pinned,
   widely reviewed crates behind one facade, `vibeos-crypto`, under ROADMAP §10.9's `cargo deny`
   policy, with RustCrypto and dalek for the primitives and rustls for TLS (ROADMAP §13.10, §14.7,
   §15.11). In-tree crypto code is the entropy pool, the CSPRNG's construction, the signature
   formats, and glue.
-- Third-party sources the tree builds rather than copies follow ROADMAP §14.10's port policy, and test
-  inputs fetched at test time (Linux's device trees, QEMU's ACPI tables) are never committed.
+- Third-party sources the tree builds rather than copies follow ROADMAP §14.10's port policy. A test
+  input taken from a GPL-only file, such as a GPL-2.0-only Linux device tree or QEMU's ACPI test
+  tables, is fetched at test time and never committed; one that offers a notice-only license is
+  committed under it with its header (ROADMAP §20.7). Output a program generates that holds none of
+  the program's own code, such as a device tree QEMU dumps with `-machine dumpdtb=`, is data and may
+  be committed (ROADMAP §11.5); AML that QEMU generates carries methods QEMU's authors wrote, so
+  QEMU's ACPI tables stay fetched. Test media and web pages are generated at test time by pinned
+  tools or are free-licensed and fetched by SHA-256; copyrighted media is never committed.
 - A binary the project publishes (an image, a package, a release asset, or a workflow artifact
   anyone can download) carries the copyright and license notices its third-party code's licenses
   require: `/LICENSES/` on an image, and the same file as an asset beside it in a release, generated
@@ -187,7 +206,11 @@ and measured behaviour, or from sources whose license lets it into an MIT tree:
   Rust's `core` and `alloc` with no notice (ROADMAP §10.9).
 
 Why: one function derived from GPL code would put the kernel under the GPL, against the project's
-license. The kernel review's spot check found no such copy, but no rule said so. Crypto written
+license. The kernel review's spot check found no such copy, but no rule said so. Adapted code is
+notice-only so that every vibeOS file stays MIT, as `Cargo.toml` and the notices file (ROADMAP
+§10.9) say: an Apache-2.0 file would add its §4(b) notice of changes and its §4(d) NOTICE to every
+binary, and would keep vibeOS code out of GPLv2 projects, whose license Apache-2.0 is incompatible
+with. Crypto written
 in-tree fails where test vectors do not look (timing, nonce reuse, signature malleability), and one
 such bug forges a package; the crates have had the review this project cannot give them.
 
