@@ -784,8 +784,11 @@ Symbols come from a two-pass link (Makefile `KERNEL_VARIANT`): `nm` output from 
 an in-image `.rodata` table (`KSYMS`) that the second link builds in. Rule: every function has the same address
 in both links. Not yet enforced: nothing compares them, and in the panic-test build the
 reference to the filled table compiles larger than the empty one and shifts every later function, so
-that ISO's table mis-names frames (ROADMAP §10.2, F084). Frame pointers come from
-`-C force-frame-pointers=yes` in `.cargo/config.toml` (§3.1); there is no target JSON.
+that ISO's table mis-names frames (ROADMAP §10.2, F084). Planned (ROADMAP §10.2, F084): `KSYMS`
+moves to its own `.ksyms` section, which the kernel finds only through the linker-defined
+`__ksyms_start` and `__ksyms_end`, so the code that reads it is the same size empty and filled.
+Frame pointers come from `-C force-frame-pointers=yes` in `.cargo/config.toml` (§3.1); there is no
+target JSON.
 
 Rule: `vibeos-core` (`src/lib.rs`) does not panic on data; its parsers and table walks return the
 module error. Enforced only for `unwrap`, `expect`, and `panic!`: clippy denies `unwrap_used`,
@@ -4517,8 +4520,9 @@ grows it from 0x2a2 to 0x2b2 bytes, and every later function shifts. The panic I
 every function from `panic::finish` on (36 entries), and a `CARGO_PROFILE=release` table is wrong in 499 of 1106 entries.
 Rule: first link with an empty `.rodata` table, `nm --demangle` the ELF, second link with the filled
 table (Makefile `KERNEL_VARIANT`). `.text` must not move, so the reference to the table compiles to
-the same size empty and filled. Planned (ROADMAP §10.2, F084): the build regenerates the table from
-the final ELF and fails on any difference.
+the same size empty and filled. Planned (ROADMAP §10.2, F084): the table moves to its own `.ksyms`
+section reached only through linker-defined bounds, and the build regenerates it from the final ELF
+and fails on any difference.
 
 **QEMU framebuffer reprints the prompt on every key; serial looks fine.**
 The FB write path skipped `\r` before the text grid saw it, so the line editor's in-place paint
