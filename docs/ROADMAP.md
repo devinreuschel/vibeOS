@@ -2774,8 +2774,37 @@ boot chain.
 > under each option.
 
 ### 18.8 Threat model
-- [ ] `docs/THREAT_MODEL.md`, grown from DESIGN §2.10's trust-boundary table, which it then replaces as the threat model, with the headings `Trusted`, `Untrusted`, `Out of scope`, and `Known escalation paths`; each out-of-scope entry gives its reason, and each escalation path says why it is open, names the owner decision that accepted it (DESIGN §2.10's records move here with the table), and links to an open box, a [Beyond](#beyond) entry, or a [funded goal](#funded-goals); `scripts/check_threat_model.py` checks the headings and the links. It also has a `Security-relevant defaults` table: each sysctl, mount mode, and device-node mode that decides what an unprivileged process reaches, with vibeOS's default, the default of Linux's baseline release, and the line that set it. Earlier lines give its first rows (§13.9's `/dev/kmsg` rule, which is Linux's `kernel.dmesg_restrict` at 1, §13.9's dumpable rule, which is `fs.suid_dumpable` at 0, and §18.5's debugfs mode), and each later line that adds such a default adds its row, among them `kernel.perf_event_paranoid` and tracefs's mode (§19.1, §19.2), the real-time throttle (§19.4), `kernel.io_uring_disabled` (§19.8), `/dev/kvm` (§21.2), `user.max_user_namespaces` (§21.5), `/dev/uinput`, `/dev/uhid`, and `/dev/hidraw*` (§31.2), and `/dev/fuse` (§36.2). Each default is Linux's or stricter. A weaker one is the owner's decision (DESIGN §2.10), and its row links to it; one that differs from Linux's in either direction is also a `docs/LINUX.md` entry. `scripts/check_threat_model.py` checks the table's columns and fails on a weaker row with no link
+- [ ] `docs/THREAT_MODEL.md`, grown from DESIGN §2.10's trust-boundary table, which it then replaces as the threat model, with the headings `Trusted`, `Untrusted`, `Out of scope`, and `Known escalation paths`; each out-of-scope entry gives its reason, and each escalation path says why it is open, names the owner decision that accepted it (DESIGN §2.10's records move here with the table), and links to an open box, a [Beyond](#beyond) entry, or a [funded goal](#funded-goals); `scripts/check_threat_model.py` checks the headings and the links. It also has a `Security-relevant defaults` table: each sysctl, mount mode, and device-node mode that decides what an unprivileged process reaches, with vibeOS's default, the default of Linux's baseline release, and the line that set it. Earlier lines give its first rows (§13.9's `/dev/kmsg` rule, which is Linux's `kernel.dmesg_restrict` at 1, §13.9's dumpable rule, which is `fs.suid_dumpable` at 0, and §18.5's debugfs mode), and each later line that adds such a default adds its row, among them `kernel.perf_event_paranoid` and tracefs's mode (§19.1, §19.2), the real-time throttle (§19.4), `kernel.io_uring_disabled` (§19.8), `/dev/kvm` (§21.2), `user.max_user_namespaces` (§21.5), `/dev/uinput`, `/dev/uhid`, and `/dev/hidraw*` (§31.2), and `/dev/fuse` (§36.2). Each default is Linux's or stricter. A weaker one is the owner's decision (DESIGN §2.10), and its row links to it; one that differs from Linux's in either direction is also a `docs/LINUX.md` entry. `scripts/check_threat_model.py` checks the table's columns and fails on a weaker row with no link. Its `Known escalation paths` include what §18.7's disk encryption leaves open, with the owner decision below as its decision: AES-XTS hides a volume's contents from someone who reads the disk but does not authenticate them, so a changed ciphertext block decrypts to random bytes that only vibefs v2's per-block CRC-32C catches, with probability 1 - 2^-32, and nothing catches in data no checksum covers, such as swap and §31.8's hibernation image; and a volume put back to an older copy of itself is not detected at all
 - [ ] `SECURITY.md` names the reporting channel and who triages a report; §22.5 adds private vulnerability reporting, the embargo procedure, response times, and a drill
+
+> **OWNER DECISION NEEDED (review J160)**: whether full-disk encryption may be on by default without
+> integrity. §18.7 encrypts a volume with AES-XTS in LUKS2, and §37.2 turns it on by default for desktop
+> installs. XTS keeps the contents secret from someone who reads the disk, but someone who can write it
+> while the machine is off, at an unattended laptop or on a host that stores a VM's disk, can change it
+> without the encryption noticing. A changed block decrypts to random bytes: vibefs v2's CRC-32C catches
+> that with probability 1 - 2^-32, and nothing catches it in swap or §31.8's hibernation image. A volume
+> put back to an older copy of itself passes every check, so an `/etc/shadow` whose old password was
+> phished can come back.
+> - **(a) Accept this for 1.0**, as LUKS2's default, BitLocker, and FileVault do. THREAT_MODEL lists it
+>   under Known escalation paths with this block as its decision and links the Beyond entry
+>   "Authenticated disk encryption". Nothing else changes.
+> - **(b) Authenticated encryption before encryption is on by default**: each sector carries a tag,
+>   through a device-mapper `integrity` target beneath `crypt`, in the layout cryptsetup's `--integrity`
+>   option formats, so a changed sector fails its read with `EIO`. The Beyond entry moves into §29.1 as
+>   a box, and §37.2's line waits for it. Cost: every write also writes its tag, and in the journal mode
+>   that keeps data and tag consistent across a crash, writes the data twice, on the `fsync` path; the
+>   tags take space from the volume; and a second target is built and later frozen.
+>
+> Neither option detects a volume put back to an older copy: the tags roll back with the data, and
+> detecting it needs a counter in the TPM advanced on every commit, which no mainstream disk encryption
+> keeps. §18.7's encryption lands under either answer, since it adds secrecy and takes nothing away, and
+> nothing before §37.2 depends on the answer. The owner-decision block after §18.7's encryption box
+> (review J026) asks, in its question 2, about the parts of an install that encryption does not cover;
+> answer the two together.
+>
+> **Recommendation: (a).** It costs nothing, matches what every mainstream disk encryption ships, and
+> (b)'s cost buys detection of random tampering that vibefs v2's checksums already catch in most data,
+> not of rollback.
 
 ### 18.9 Stretch: control-flow integrity
 - [ ] CET shadow stacks and indirect branch tracking on x86_64
@@ -4991,6 +5020,7 @@ hardware, a paid service, or a new account, that version is in [Funded goals](#f
 - **CXL memory tiering** (after 27): CXL Type 3 memory as a far §19.7 NUMA node, with pages promoted and demoted by measured access, against QEMU's CXL emulation under TCG. CXL hardware is a funded goal.
 - **Software RDMA** (after 28): RoCEv2 through Linux's verbs ABI as a software device over virtio-net, as Linux's `rxe` does, exchanging traffic with `rxe` in a §23.6 reference-kernel guest on the same runner, so unmodified `rdma-core` runs; then NVMe over RDMA on it. RoCE on a hardware NIC is a funded goal.
 - **Replicated block storage** (after 29): a volume mirrored synchronously over TCP to a second vibeOS guest on the same runner, with failover and resync time measured.
+- **Authenticated disk encryption** (after 29): LUKS2 volumes whose sectors each carry an authentication tag, through a device-mapper `integrity` target beneath §29.1's `crypt` target, in the layout cryptsetup's `--integrity` option formats, so a changed sector fails its read with `EIO` instead of decrypting to random bytes; host-tested against volumes cryptsetup formats, and measured against plain AES-XTS on §19.3's file benchmarks. The tags roll back with the data, so it does not detect a volume put back to an older copy (§18.8).
 - **Fleet rollouts** (after 30): a control plane that enrolls vibeOS guests (eight at 1 GiB each on one hosted runner) and rolls an update across them in waves, each wave gated on the §22.2 update health check and Phase 30's metrics, halting on a regression.
 - **Media-controller cameras** (after 34): Linux's media controller API with a virtual camera pipeline shaped like Linux's `vimc`, run by unmodified `libcamera` through its `vimc` pipeline handler and checked by `v4l2-compliance`. MIPI cameras behind Intel's IPU6 are a funded goal.
 - **Printing** (after 36): IPP Everywhere, which most network printers sold in the last decade speak, through CUPS from Alpine, printing to CUPS's `ippeveprinter` on the runner host. Scanning and a physical printer are a funded goal.
