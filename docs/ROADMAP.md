@@ -3034,6 +3034,23 @@ the §22.3 tested-platforms list, are [Funded goals](#funded-goals).
 - [ ] `panic=<seconds>` on the §10.2 command line, set in each slot's Limine configuration at one value per release, so the enrolled configuration holds no per-install value: the panic handler prints its dump, waits, and resets through the ACPI or PSCI path the §10.5 `reboot` call uses; halting stays the default, so the harness and the Phase 0 panic gate are unchanged. The reset register is the one §20.2 maps at boot, so the panic path maps nothing and takes no lock; on x86_64, if the machine still runs 1 s later, it pulses the 8042 reset line and then resets through port `0xCF9` (F097)
 - [ ] §20.6's `i6300esb` driver armed at boot and fed by init for as long as the system runs, so a hang during a trial boot, or after one, resets the machine
 - [ ] a trial boot that panics, hangs, or fails its health check comes back on the old root at the next reset with no human action, since `BootNext` lasts one boot; Phase 25 extends the panic policy and the watchdogs
+- [ ] `docs/NETWORK.md` lists every connection an image a release ships makes without a user action: its destination, what it sends, why, its default, and the switch that turns it off; each defaults as the record below sets it, and until that record exists every one is off; the installer's summary names each connection that is on, with its switch. The first entries are the §22.2 update check and §15.8's time sync, and later phases add theirs (§37.2's desktop services, a cloud image's metadata service). `scripts/check_network_doc.py` in `make check` fails on an entry without those parts, with host tests. In the nightly job, each image a release ships boots on a QEMU user network with `restrict=on`, which reaches nothing, while a `filter-dump` capture records every DNS query and connection attempt for 10 minutes after boot, idle and through one login; a host script lists the destinations, the job fails on one `docs/NETWORK.md` does not name, and the release workflow refuses a candidate without a passing run
+
+> **OWNER DECISION NEEDED (review J028)**: which connections a shipped image makes on its own. Each
+> tells the host it contacts at least the machine's IP address. `docs/NETWORK.md` lists them, and until
+> your answer is recorded here every one is off in every image a release ships; the harness turns on
+> what its tests need. Recommended: (1) On, each named by the installer and in `docs/NETWORK.md` with
+> one switch that turns it off: the §22.2 update check against this repository's GitHub Releases, since
+> a system that never checks misses security fixes; and time sync from the NTP servers DHCP offers, or
+> else one default server `docs/NETWORK.md` names, since TLS and signed update metadata need a correct
+> clock. (2) Off: NetworkManager's connectivity check (no project server exists at $0, and a third
+> party's would learn of every network change); GeoClue's location service; the browser's telemetry,
+> studies, and own updater (the browser updates as a §14.6 package); the software center's ODRS reviews;
+> a Flathub remote; debuginfod. (3) Your call, with no recommendation: the browser's safe browsing,
+> which sends hash prefixes of visited addresses to the browser vendor's service and in return warns
+> about known phishing and malware sites. The other options: everything off, which leaves each user to
+> turn on updates and time sync; or upstream defaults, disclosed in `docs/NETWORK.md`. Nothing before
+> Phase 22's first installable release depends on the answer.
 
 ### 22.3 Documentation
 - [ ] an installation guide and a user handbook
@@ -3836,7 +3853,7 @@ Moved from Beyond: a server needs a disciplined clock, not a stepped one. §15.8
 the clock at boot.
 
 - [ ] the kernel clock adjustable in rate and slewed in offset through `adjtimex` and `clock_adjtime` with Linux's `struct timex` (`ADJ_TICK` and `ADJ_FREQUENCY`, both changing the rate, `ADJ_OFFSET`, `ADJ_OFFSET_SINGLESHOT`, `ADJ_SETOFFSET` with `ADJ_NANO`, `ADJ_STATUS`, `ADJ_MAXERROR`, `ADJ_ESTERROR`, and `ADJ_TAI`, every mode chrony issues), applied to a cycle-counter-to-nanosecond multiplier and offset published through the §2.7 seqlock, which today publishes a tick count and a TSC snapshot, so a rate change takes effect from the next read without a step; the clock is computed from the cycle counter as §19.6 left it, never from a count of timer interrupts, which loses every period an interrupts-off window coalesces (F027)
-- [ ] chrony from the §14.9 mirror disciplines the clock unmodified: slewing after the first sync, its drift file kept across reboots, and several servers with outlier rejection
+- [ ] chrony from the §14.9 mirror disciplines the clock unmodified: slewing after the first sync, its drift file kept across reboots, and several servers with outlier rejection; a shipped image's chrony uses the servers `docs/NETWORK.md` (§22.2) names, and the gates point it at the runner's server
 - [ ] leap seconds handled by a documented policy (smear, or step at the boundary through `STA_INS` and `STA_DEL`), tested with a simulated leap from a host NTP server
 
 ### 30.6 Live update
@@ -4204,7 +4221,7 @@ measure time and the arm64 runner has no KVM.
 ### 35.3 Supplicant and network management
 - [ ] wpa_supplicant from Alpine as the supplicant; not iwd, which would also need the kernel's keyrings (`keyctl`) and more `AF_ALG` algorithms than §35.5 lands for BlueZ
 - [ ] NetworkManager from Alpine: saved networks with priority, autoconnect, and wired, Wi-Fi, and USB Ethernet (§20.6's CDC-ECM on QEMU's `usb-net`) connections, with DNS following the active connection; `nmcli` as the tool
-- [ ] captive portal detection through NetworkManager's connectivity check against a URL the §35.4 peer serves
+- [ ] captive portal detection through NetworkManager's connectivity check against a URL the §35.4 peer serves; a shipped image sets the check as `docs/NETWORK.md` (§22.2) says, and only the gate points it at the peer
 
 ### 35.4 Linux peers
 - [ ] the Linux peer: the Linux baseline with Linux's `mac80211_hwsim` over virtio and `hci_uart`, running hostapd with two APs on one SSID, dnsmasq, BlueZ, and PipeWire with its Bluetooth sink, in 1 vCPU and 1 GiB on the same host as the desktop guest
@@ -4333,6 +4350,7 @@ records under HVF, as the era preamble says. On the dev host, which has no vhost
 ### 37.2 Shipping
 - [ ] the Phase 24 ports tree builds the §36.2 desktop, the browser included, with the recipe options §36.4 recorded, as §14.6 packages for both architectures; Alpine's binaries stay the test oracle, not what ships
 - [ ] a PackageKit backend for the §14.6 package manager, so the desktop's software center searches, installs, updates, and removes vibeOS packages with their signatures shown, and lists §22.2's updates as pending, applied, or rolled back with the reason
+- [ ] the desktop's own connections in `docs/NETWORK.md` (§22.2), each set by a recipe option or a shipped configuration file to the default §22.2's record gives it: NetworkManager's connectivity check, GeoClue's location service, the browser's telemetry, studies, safe browsing, and updater (through the browser's policy file; §36.4's test CA stays in the harness's copy), the software center's ODRS reviews and any Flathub remote, and debuginfod URLs; §22.2's isolated-network run boots the desktop image through the §37.1 workload's first hour
 - [ ] the Alpine install the gate installs beside, built by a harness step: the Linux baseline, booted in the desktop guest, partitions the guest's blank virtio disk into an ESP, an ext4 root, and free space, installs an Alpine root with `linux-lts` on the ext4 partition from the §14.9 mirror as §23.5 builds its root, and installs GRUB to the ESP's `\EFI\alpine` directory with a `Boot####` entry in `BootOrder` in the writable variable store the guest keeps for the §22.2 install; `grub-efi`, `efibootmgr`, and the partitioning and `mkfs` tools the step runs join the mirror's pin list
 - [ ] the §22.2 installer installs into a disk's free space beside an existing GPT system: it puts its slot directories in that system's ESP, leaves every file there it did not write as it was, the `\EFI\BOOT` fallback loader included, and keeps every `Boot####` entry it did not write in `BootOrder`, when it installs and when a §22.2 trial boot commits
 - [ ] full-disk encryption (§18.7) on by default when the §22.2 installer installs the §36.2 desktop
