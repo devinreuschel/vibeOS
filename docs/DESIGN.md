@@ -37,7 +37,7 @@ does not get to re-litigate the address map, the vector numbers, or the lock ord
 | 3 | [Boot](#3-boot) | Toolchain, Limine, `_start` order, linker |
 | 4 | [Memory](#4-memory) | Address map, buddy allocator, paging, heap |
 | 5 | [Interrupts](#5-interrupts) | GDT/IDT, exception policy, vector map, PIC and APIC, privilege transitions |
-| 6 | [Time](#6-time) | Clock sources, calibration, timekeeping |
+| 6 | [Time](#6-time) | Clock sources, calibration, timekeeping, timers |
 | 7 | [SMP](#7-smp) | ACPI, AP bring-up, per-CPU, IPIs, shootdown |
 | 8 | [Testing](#8-testing) | Tiers, marker contract, QEMU flags, CI |
 | 9 | [Pitfalls](#9-pitfalls) | Bugs already paid for once |
@@ -239,7 +239,10 @@ the buddy because mapping a page allocates its table frames. Blocking `WaitQueue
 the scheduler lock: the predicate check and the enqueue happen under that same lock (DESIGN
 [§9.4](#94-concurrency)).
 
-Planned (ROADMAP §13.3): a seventh rank, SOCK, ahead of all six, for socket state (below).
+Planned (ROADMAP §13.3): a seventh rank, SOCK, ahead of all six, for socket state (below). Planned
+(ROADMAP §19.4): a TIMER rank just before SERIAL, for the per-CPU timer bases
+([§6.5](#65-timers-and-timeouts)), so code under any other spinlock may arm, re-arm, or cancel a
+timer.
 
 The six ranks order spinlocks: `SpinMutex`, and the cross-CPU `IrqCell`s that ROADMAP §10.3 turns
 into ranked `SpinMutex`es. Sleeping locks form a tier outside all six: `BlockingMutex`, `RwLock`,
@@ -409,7 +412,7 @@ Blocking and allocation are a class of bug, not an instance. Context rules:
 | Driver `probe` | Yes | Yes, fallible only ([§4.4](#44-kernel-heap)); a failed probe leaves its device unbound and logs why |
 | Syscall body, fault handler for a CPL-3 fault | Yes ([§2.9](#29-preemption-and-interrupt-state)) | Yes, fallible only ([§4.4](#44-kernel-heap)) |
 | Network receive: a queue's threaded bottom half ([§5.4](#54-irq-registration)) | No: it takes no sleeping lock and never waits for a socket's owner; a packet for an owned socket goes on its backlog (§2.1) | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) |
-| Timer callback: a softirq-equivalent item on the CPU whose timer fired | No | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) |
+| Timer callback: a timeout-wheel callback ([§6.5](#65-timers-and-timeouts)), run as a softirq-equivalent item on the CPU whose wheel fired it | No | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) |
 | NMI and `#MC` at any CPL, `#DB` at CPL 0; shootdown and call-function work run from a spin | No | No |
 
 Code in the last row runs inside whatever IF=0 section its CPU was in, locks included: an NMI,
@@ -422,16 +425,20 @@ instead. The panic path (§2.5) is the one exception: it reads the log ring and 
 taking their locks.
 
 The hard-IRQ top half acknowledges and wakes. Work that allocates or blocks runs on a kernel thread
-([section 5.4](#54-irq-registration), ROADMAP §6.6). A last put of a counted object runs the
-object's release in place only where [§2.11](#211-object-lifetimes) rule 6 allows it; anywhere else
-the release is deferred to a workqueue worker.
+([section 5.4](#54-irq-registration), ROADMAP §6.6). The timer interrupt's top half also expires
+deadline timers whose action is a wake or a signal, at most 32 wakes per interrupt
+([§6.5](#65-timers-and-timeouts)). A last put of a counted object runs the object's release in place
+only where [§2.11](#211-object-lifetimes) rule 6 allows it; anywhere else the release is deferred to
+a workqueue worker.
 
 Network receive polls its queue for at most a budget of packets per wake, so one flooded queue
 cannot hold its CPU. Loopback has no interrupt: its transmit queues the packet, and receive runs as
-a softirq-equivalent item on the sending CPU. A timer callback (a POSIX timer's expiry, TCP's
-retransmit and delayed-ACK timers) runs on the CPU whose timer queue fired it. `cancel_sync` returns
-only once the callback runs on no CPU, as `free_vector` does for a handler (§5.4), and a pending
-timer holds counted references to what its callback touches ([§2.11](#211-object-lifetimes) rule 5).
+a softirq-equivalent item on the sending CPU. A timer callback (TCP's retransmit and delayed-ACK
+timers) runs on the CPU whose timeout wheel fired it; a POSIX timer's or a `timerfd`'s expiry is a
+deadline timer and runs in the timer interrupt's top half instead ([§6.5](#65-timers-and-timeouts)).
+`cancel_sync` returns only once the callback runs on no CPU, as `free_vector` does for a handler
+(§5.4), and a pending timer holds counted references to what its callback touches
+([§2.11](#211-object-lifetimes) rule 5).
 
 ## 2.3 Locking with interrupts
 
@@ -2754,6 +2761,10 @@ busy_wait_ms(ms: u64)   // TSC spin, hlt when interrupts are on. Boot and IPI de
 sleep_ms(ms: u64)       // parks the calling thread. Everything after the scheduler exists uses this.
 ```
 
+Planned (ROADMAP §19.4): `sleep_ms` becomes a wrapper over a sleep to a nanosecond deadline on
+[§6.5](#65-timers-and-timeouts)'s deadline timers, since every blocking primitive already takes a
+nanosecond deadline.
+
 `now_us` reads two values that an interrupt handler writes: the tick counter and the TSC snapshot at
 that tick. Read them unprotected and you eventually get one from before an interrupt and one from
 after, producing a timestamp that goes backwards. That is not hypothetical; it happened.
@@ -2819,13 +2830,48 @@ saw no backward step.
 
 ## 6.5 Timers and timeouts
 
-The `sleep_ms` path needs a data structure, not a linear scan of every thread on every tick:
+Sleeps and timeouts need a data structure, not a linear scan of every thread on every tick:
 
-- Start with a single sorted list of pending timeouts guarded by one lock. Fine for tens of threads.
-- Move to a hierarchical timing wheel when the count grows. Planned: ROADMAP §19.4 keeps timeouts
-  per CPU in a timing wheel.
-- A timer whose expiry runs a callback rather than waking a thread (a POSIX timer, TCP's timers)
-  runs it in §2.2's timer-callback context, and `cancel_sync` waits for a callback that is running.
+- Today one sorted list of pending timeouts, `sched::TimeoutQueue`, under one lock holds every
+  timeout, and the timer path wakes the threads whose deadlines have passed. Fine for tens of
+  threads.
+- Planned (ROADMAP §19.4): each CPU has two timer structures, as Linux has. Deadline timers sit in a
+  queue ordered by nanosecond deadline. They serve sleeps (`nanosleep`, `clock_nanosleep`),
+  `timerfd`, POSIX timers and itimers, the timeouts of `futex`, `poll`, `epoll`, and every blocking
+  primitive, and ROADMAP §25.5's per-CPU watchdog timer. Timeout timers sit in a hierarchical wheel
+  with 1 ms first-level buckets and no cascading, Linux's design since 4.8: a timer goes into the
+  level whose bucket is at most an eighth of its interval wide and never moves, so it fires at most
+  an eighth of its interval late. They serve timeouts that are usually cancelled before they fire:
+  TCP's retransmit, delayed-ACK, zero-window-probe, keepalive, and `TIME_WAIT` timers, ARP and
+  reassembly timeouts, and block request deadlines ([§10.3](#103-failure)). Both structures are
+  intrusive: a timer's links live in the object that owns it, so arming, re-arming, and cancelling
+  allocate nothing.
+- A deadline timer whose action is a wake or a signal expires in the timer interrupt's top half
+  ([§2.2](#22-interrupt-handler-rules)). The expiry takes the timer off its base under the base's
+  lock, and wakes or signals after dropping it. It allocates nothing and takes only spinlocks: a
+  POSIX timer's signal uses a queue entry allocated at `timer_create`, as Linux's does, and a
+  `timerfd` marks itself ready through ROADMAP §13.6's readiness mechanism, which allocates nothing
+  and takes only spinlocks there, as Linux's `ep_poll_callback` does. One interrupt does at most 32
+  wakes, counting each thread woken and each descriptor marked ready. Due timers past that wait for
+  the next interrupt, which is armed to come at once, and a `timerfd` whose waiters pass the limit
+  finishes its wakes as a softirq-equivalent item. A timeout timer's callback runs in §2.2's
+  timer-callback context, a softirq-equivalent item on the CPU whose wheel fired it, since TCP's
+  callbacks allocate and take socket locks. `cancel_sync` returns only once the timer's expiry or
+  callback runs on no CPU.
+- Each CPU's timer base, its two structures, has its own `SpinMutex` at the TIMER rank (§2.1). Any
+  CPU may take it to arm, re-arm, or cancel a timer there, the one exception to
+  [§7.7](#77-locking-with-more-than-one-cpu)'s owner-only rule, because TCP re-arms a connection's
+  timer on every ACK from whichever CPU received it. A timer re-armed from another CPU moves to that
+  CPU's base unless its callback is running, as Linux's `mod_timer` does. A move never holds two base
+  locks: it marks the timer migrating, drops the old base's lock, and takes the new one's, and an arm
+  or cancel that finds the timer migrating waits for the move to finish. A timer pinned to its CPU,
+  such as the watchdog's, never moves.
+- Where the local timer has a one-shot mode (TSC-deadline on x86_64, the generic timer's compare
+  value on aarch64), a CPU arms it for the earliest of its next tick and both structures' next
+  expiries. On the periodic fallbacks ([§6.3](#63-the-tick)) a deadline timer expires at the first
+  tick after its deadline.
+- Timer slack (ROADMAP §19.6) widens only a fair-class thread's deadline timers. A real-time thread's
+  slack is 0, as on Linux.
 - Every blocking operation takes an optional deadline. A blocked thread with no timeout and no waker
   is a permanent leak, and the only way to find one is to have made timeouts mandatory from the start.
 - The blocked-thread sweep in `schedule_inner` (every `SWEEP_TICKS` ticks, for timeouts at least
@@ -2836,7 +2882,8 @@ The `sleep_ms` path needs a data structure, not a linear scan of every thread on
 
 A fixed 1 kHz tick on an idle CPU is wasted interrupts and, on real hardware, wasted power. TSC-
 deadline mode makes tickless operation possible: when a CPU goes idle, arm the deadline for the next
-pending timer instead of the next millisecond, and skip the timer entirely if there is nothing pending.
+pending timer, the earliest of [§6.5](#65-timers-and-timeouts)'s two structures, instead of the next
+millisecond, and skip the timer entirely if there is nothing pending.
 Not day-one work, but the timer abstraction should be "next deadline" rather than "periodic tick" so
 this does not require rewriting the scheduler. Planned: ROADMAP §19.6 lands tickless idle. An idle
 CPU's next deadline is then no later than half the clocksource's wrap time (§6.4), and the CPU that
@@ -3243,7 +3290,9 @@ The global lock order is in [section 2.1](#21-lock-order) and the one-spinlock r
 
 - Never lock a remote CPU's per-CPU state. Per-CPU locks are taken only by the owning CPU, with
   interrupts off. `per_cpu_init::with_cpu` can reach any CPU's slot ([section 7.5](#75-per-cpu-data),
-  F039).
+  F039). Planned (ROADMAP §19.4): the one exception is a CPU's timer base
+  ([§6.5](#65-timers-and-timeouts)), whose lock any CPU takes to arm, re-arm, or cancel a timer on
+  it.
 - If two CPU-local structures must be locked at once, for instance during load balancing, lock the
   lower `cpu_id` first.
 - A lock taken from an ISR is taken with interrupts disabled in every other context too. The scheduler
@@ -3275,8 +3324,10 @@ Global TCB table, per-CPU ready queues.
 - Each CPU has its own idle thread with its own stack. An idle CPU sits in `sti; hlt` and is woken by
   the reschedule IPI.
 
-The sleep queue starts global with one lock. Per-CPU timer queues are the right answer eventually but
-they interact with thread migration in ways that are not worth solving early.
+The timeout queue starts global with one lock. ROADMAP §19.4 makes it per CPU, as
+[§6.5](#65-timers-and-timeouts)'s two structures. A timer stays on the base it was armed on when its
+thread migrates: its expiry only wakes the thread, and the wake goes through the inbox like any
+other.
 
 ## 7.9 TLB shootdown
 
