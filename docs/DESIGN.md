@@ -541,15 +541,16 @@ memory, since the panicking CPU or a stopped one may hold the heap lock. The log
 after the halt IPI without taking its TAS (force-unlock if the panicking CPU held it).
 
 The panic record outlives the reset that follows a panic (ROADMAP §20.1, §25.6). Planned: every
-store uses one format, a header, a sequence number, and a checksum. Reserved RAM holds one record;
-from ROADMAP §25.6 an EFI variable store or ERST holds at most two, the newest and the one before,
-and an EFI record is at most 1 KiB. The kernel writes an EFI variable only when `QueryVariableInfo`
-reports room for it with 5 KiB to spare, as Linux's x86 EFI code requires, since some firmware stops
-booting with a full variable store; otherwise it writes the next store in line. The next boot logs
-each record it finds into the kernel log and then deletes it, so a panic loop cannot fill the store
-and ROADMAP §22.2's `BootNext` write keeps working. The retired-frame list (ROADMAP §25.3) follows
-the same rules: one variable of at most 64 entries, applied only on the machine and memory map it
-was written for.
+store uses one format, a header holding a magic and a format version, a sequence number, and a
+checksum, which every release of a major version reads (ROADMAP §22.1). Reserved RAM holds one
+record; from ROADMAP §25.6 an EFI variable store or ERST holds at most two, the newest and the one
+before, and an EFI record is at most 1 KiB. The kernel writes an EFI variable only when
+`QueryVariableInfo` reports room for it with 5 KiB to spare, as Linux's x86 EFI code requires, since
+some firmware stops booting with a full variable store; otherwise it writes the next store in line.
+The next boot logs each record it finds into the kernel log and then deletes it, so a panic loop
+cannot fill the store and ROADMAP §22.2's `BootNext` write keeps working. The retired-frame list
+(ROADMAP §25.3) follows the same rules: one variable of at most 64 entries, applied only on the
+machine and memory map it was written for.
 
 Log ring (ROADMAP §5.5):
 

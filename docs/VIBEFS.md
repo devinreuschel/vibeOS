@@ -594,8 +594,9 @@ v1 is experimental and carries no compatibility promise. The kernel stops
 mounting it when v2 becomes the root filesystem (ROADMAP §14.8), v2 readers
 do not read it, and no tool converts it: no v1 volume holds data anyone
 kept, since every v1 image is a CI artifact or the RAM-backed `/vibe`. From
-v2 on, §15's feature-flag sets carry additive changes, and the v2 format is
-the one ROADMAP §39.1 freezes.
+v2 on, §15's feature-flag sets carry additive changes. From the first release
+the ROADMAP §22.2 installer ships, v2 changes only that way within a major
+version (ROADMAP §22.1), and ROADMAP §39.1 keeps it in its stable set for 1.0.
 
 From the first installed release (ROADMAP §22.2), a volume outlives the
 release that made it, and the release in the other A/B slot must still
@@ -612,8 +613,9 @@ reads (ROADMAP §22.1).
 ## 15. Version 2 requirements
 
 ROADMAP §14.8 writes the v2 format into this file before any v2 code, as
-§8.5 did for v1. v2 is the format ROADMAP §39.1 freezes for 1.0, and every
-volume written after it carries these choices for as long as it exists, so
+§8.5 did for v1. v2 is the format installed systems keep from ROADMAP Phase
+22's release on (§22.1), which §39.1 freezes for 1.0, and every volume
+written after it carries these choices for as long as it exists, so
 they are decided here, before a line of v2 is written:
 
 | Property | v2 requires | Why |
