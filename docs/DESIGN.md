@@ -3862,12 +3862,21 @@ something two subsystems away breaks.
 
 This is the full contract once the kernel is complete through the console phase. It grows one phase at
 a time: a phase adds its markers to the harness in the same commit that emits them, and nothing is ever
-removed silently. The executable contract is `boot_contract_markers()` in `tests/harness/harness.py`; the list
-below mirrors it, and the `_start` table in [section 3.3](#33-_start-order) says why each step sits where it does.
-Every line in it is the kernel's except `shell ready`, which `/bin/sh` prints in the production ISO.
-ROADMAP §10.2 makes the harness match the kernel's lines only when framed (§2.6), and a line a user
-program prints (`shell ready`, the ROADMAP §10.5 `utest_*` lines, `user: tests ok`) only when
-unframed; today it matches every line.
+removed silently. The executable contract is `boot_contract_markers()` in `tests/harness/harness.py`;
+the list below gives its order, the paragraphs after it add the lines that depend on the machine (the
+calibration source, the LAPIC timer mode, the per-AP pairs, and the partition children), and the
+`_start` table in [section 3.3](#33-_start-order) says why each step sits where it does. Every line in
+it is the kernel's except `shell ready`, which `/bin/sh` prints in the production ISO. ROADMAP §10.2
+makes the harness match the kernel's lines only when framed (§2.6), and a line a user program prints
+(`shell ready`, the ROADMAP §10.5 `utest_*` lines, `user: tests ok`) only when unframed; today it
+matches every line.
+
+Planned (ROADMAP §10.2): one registry, `tests/contract/markers.toml`, holds every line the harness
+knows (contract markers, diagnostics, failure lines and halt reasons, and the ktest and utest
+protocol), each with its architecture, the program that prints it, and the configurations it holds in.
+The harness builds this contract and the failing-fast list from it, `scripts/check_markers.py` fails on
+a `marker!` line with no row, and this section then keeps the rules and links the file instead of
+listing lines.
 
 ```
 vibeOS: serial online
