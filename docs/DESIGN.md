@@ -3594,8 +3594,13 @@ The global lock order is in [section 2.1](#21-lock-order) and the one-spinlock r
   F039). Planned (ROADMAP §19.4): the one exception is a CPU's timer base
   ([§6.5](#65-timers-and-timeouts)), whose lock any CPU takes to arm, re-arm, or cancel a timer on
   it.
-- If two CPU-local structures must be locked at once, for instance during load balancing, lock the
-  lower `cpu_id` first.
+- A thread moves between CPUs only through the target's inbox, pushed by the CPU that owns the
+  thread. Load balancing, a `sched_setaffinity` whose new mask excludes the CPU a queued thread waits
+  on (ROADMAP §13.10; that CPU moves it on a reschedule IPI), and CPU offlining (ROADMAP §19.6) all
+  move threads this way. Work stealing, if ROADMAP §19.4's numbers keep it, takes threads from a
+  lock-free deque with a loom model, never from a locked remote run queue. No code locks two CPUs'
+  run queues. Planned (ROADMAP §10.7): `lock::cpu_lock_order`, which only its own test calls, is
+  deleted.
 - A lock taken from an ISR is taken with interrupts disabled in every other context too. The scheduler
   lock is the canonical case: the timer ISR calls into the scheduler, so any holder with interrupts
   enabled deadlocks the moment its own timer fires.
@@ -3607,9 +3612,9 @@ The global lock order is in [section 2.1](#21-lock-order) and the one-spinlock r
 - klog records go to one global IRQ-safe log ring and to a serial sink that only try-locks TX.
   Per-CPU serial capture assembles serial output into lines for the ring. Planned (ROADMAP §19.5):
   one lockless ring any context may append to, and a printer thread per console (§2.5).
-- The global SCHED lock, one `SpinMutex` on the block cache, one VFS lock over lookups and
-  namespace changes (§2.1), the log-ring TAS, and virtio-blk bounce copies are known scale limits;
-  see ROADMAP §19.4, §19.5, and §19.8. So is the one bottom-half thread for every threaded vector,
+- The global SCHED lock (ROADMAP §19.4 splits it), one `SpinMutex` on the block cache, one VFS
+  lock over lookups and namespace changes (§2.1), the log-ring TAS, and virtio-blk bounce copies are
+  known scale limits; see ROADMAP §19.4, §19.5, and §19.8. So is the one bottom-half thread for every threaded vector,
   until ROADMAP §12.5 gives each vector its own ([§5.4](#54-irq-registration)).
 
 ## 7.8 Per-CPU scheduling
@@ -4538,7 +4543,7 @@ window switched the waiter off-CPU still owning it; the notifier blocked on the 
 enqueue on the CV and unlock the mutex under the same SCHED, keep IF off from that section through the
 delivery of the wakes it recorded, then schedule. `with_sched` breaks the second half: it runs
 `place_ready` for the recorded wakes after dropping SCHED, with IF back on, so a preemption there
-switches the waiter out before the woken mutex waiter is on any queue (ROADMAP §13.12, F034).
+switches the waiter out before the woken mutex waiter is on any queue (ROADMAP §10.10, F034).
 
 **First-run thread `#PF`s in `schedule_inner` at `rsp = stack_top-8`.**
 `popfq` restored IF before `jmp` to the trampoline. A tick landed in that window, `schedule_preempt`
