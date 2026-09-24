@@ -636,6 +636,7 @@ separate namespace.
 | I33 | A fault body reads CR2, DR6, ESR, and FAR from its frame, where the entry stub saved them before IF could turn on (§5.10 rule 9) | the `arch/idt.rs` stubs; the aarch64 vectors (ROADMAP §11.3) | documented | Yes, only because every fault body runs with IF=0 and reads CR2 before anything else can fault (`arch::idt::page_fault`); ROADMAP §10.6's IF=1 bodies need the stub save (its syscall-body and generated-stub boxes) |
 | I34 | A PTE change that removes or narrows a translation takes effect only after every CPU that could hold the old one has invalidated and acknowledged; until then no frame, table page, or VA is reused and no page counts as clean (§2.4) | `kva_init::unmap_shootdown` (kernel); `addr_space_init::shootdown_user` (user) | documented | Partly: kernel unmaps free frames and VA only after `wait_acks`; a user change invalidates only on the calling CPU, enough only while I8 holds, and nothing yet clears a dirty bit (ROADMAP §12.3) |
 | I35 | A user PTE change invalidates the second-level translations (EPT, NPT, stage-2) of its range on every CPU that may hold them before the frame's count drops (§2.4) | none yet | documented | Not relied on yet: no hypervisor exists until ROADMAP §21.2, which lands it |
+| I36 | `current` is read in one instruction, and every other per-CPU access but the CPU-id hint runs with IF=0 ([§2.9](#29-preemption-and-interrupt-state) rule 5) | `per_cpu_init`; the syscall stub's `gs:[current]` load | documented | Partly: the syscall stub reads `current` in one load, but `current_thread`, `current_id`, `current_pid`, and `per_cpu!` load `gs:[0]` and then the field, and `current()` hands out `&'static PerCpu` at any IF; no preempted thread changes CPU yet (ROADMAP §10.3, F039) |
 
 ## 2.8 Publish last
 
@@ -712,9 +713,23 @@ every IF=0 stretch has a reason from the list below and a bound.
    fault sleep) runs with IF=1, no spinlock held, and outside any RCU read-side section
    ([§2.12](#212-rcu)), and asserts each in debug builds (ROADMAP §10.3; the read-side check from
    §19.5).
-5. A per-CPU field other than `current` is read or written only with IF=0 (`with_current`,
-   `IrqCell`), because a preemption with IF=1 can move the thread to another CPU between the
-   lookup and the use. `current` names the same thread on every CPU it runs on.
+5. `current`, the running thread's TCB pointer, is read only through `arch::current_tcb()`: one
+   instruction that preemption cannot split, whose answer the switch keeps right on every CPU. On
+   x86_64 it is one `gs`-relative load of `PerCpu.current` (`mov reg, gs:[offset]`), never `gs:[0]`
+   followed by a field load; on aarch64 it reads `SP_EL0`, which holds the running thread's TCB
+   pointer whenever the CPU runs at EL1 (EL2 under VHE), as on Linux arm64 (ROADMAP §11.6).
+   `arch::cpu_id_hint()` is the one other per-CPU read allowed with IF=1, for callers that tolerate
+   an answer that is already stale, such as the log prefix and a queue choice: it loads the
+   immutable `PerCpu.cpu_id` through this CPU's per-CPU base and returns the value, never a
+   reference. Every other per-CPU access, taking a `&PerCpu` and indexing a per-CPU table by CPU id
+   included, happens with IF=0 (`with_current`, `IrqCell`), and the reference does not outlive that
+   stretch, because a preemption with IF=1 can move the thread to another CPU between the lookup and
+   the use. Rule; not yet enforced: ROADMAP §10.3 (F039). `per_cpu_init::current_thread`,
+   `thread_init::current_id` and `current_pid`, and the `per_cpu!` macro load `gs:[0]` and then the
+   field, and `per_cpu_init::current()` and `try_current()` return a `&'static PerCpu` at any IF.
+   The split read is latent while syscall bodies run with IF=0 (rule 3) and no preempted thread
+   changes CPU; ROADMAP §10.6 makes syscall bodies preemptible, and §13.10's `sched_setaffinity`,
+   §19.4's balancing, and §19.6's offlining move preempted threads.
 
 Why this model: a syscall body that runs with IF=0 cannot acknowledge a TLB shootdown (F011) or
 take the tick (F044), so every long syscall (`fork`'s copy, `execve`'s load, a large `read`)
@@ -2433,7 +2448,11 @@ One `PerCpu` struct per CPU. In ring 0, `GS_BASE` holds its address. While the C
 `per_cpu_init::install_gs`, and `arch::gs::force_kernel` set both MSRs to the `PerCpu` address.
 
 `self_ptr` sits at offset 0 so `gs:[0]` yields the struct address, which is how a `&PerCpu` is obtained
-without knowing which CPU you are on.
+without knowing which CPU you are on. Taking that reference is legal only with IF=0, and the
+reference dies with the IF=0 stretch ([§2.9](#29-preemption-and-interrupt-state) rule 5). `current`
+is never read through it: `arch::current_tcb()` loads `current` with one `gs`-relative instruction,
+and `arch::cpu_id_hint()` loads `cpu_id` the same way for callers that tolerate a stale id. Rule;
+not yet enforced: ROADMAP §10.3 (F039).
 
 Contents (`src/per_cpu.rs`):
 
@@ -3681,9 +3700,9 @@ two disagree (ROADMAP, How to read this). This section is the contract for the s
 What is architecture-specific: exception entry and exit, the context switch, the page-table format
 and its flags, TLB and cache maintenance, the interrupt controller and vector map, the timer and cycle
 counter, the barrier helpers (`dma_wmb`, `dma_rmb`, `dma_mb`), MMIO accessors, the per-CPU base
-register, the syscall instruction and the user frame's layout ([§5.10](#510-privilege-transitions)),
-the user-memory access primitives, FP and SIMD state, the user TLS register, AP bring-up, and the
-machine state the boot handshake hands over. Everything else is shared. The syscall table's semantics are shared too; only numbers and
+and current-thread registers, the syscall instruction and the user frame's layout
+([§5.10](#510-privilege-transitions)), the user-memory access primitives, FP and SIMD state, the
+user TLS register, AP bring-up, and the machine state the boot handshake hands over. Everything else is shared. The syscall table's semantics are shared too; only numbers and
 argument order differ per architecture (ROADMAP §10.5), and user-visible structures keep their
 meaning while their layouts follow Linux's per-architecture uapi (ROADMAP §13.10).
 
