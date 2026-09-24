@@ -742,6 +742,7 @@ separate namespace.
 | I35 | A user PTE change invalidates the second-level translations (EPT, NPT, stage-2) of its range on every CPU that may hold them before the frame's count drops (§2.4) | none yet | documented | Not relied on yet: no hypervisor exists until ROADMAP §21.2, which lands it |
 | I36 | `current` is read in one instruction, and every other per-CPU access but the CPU-id hint runs with IF=0 ([§2.9](#29-preemption-and-interrupt-state) rule 5) | `per_cpu_init`; the syscall stub's `gs:[current]` load | documented | Partly: the syscall stub reads `current` in one load, but `current_thread`, `current_id`, `current_pid`, and `per_cpu!` load `gs:[0]` and then the field, and `current()` hands out `&'static PerCpu` at any IF; no preempted thread changes CPU yet (ROADMAP §10.3, F039) |
 | I37 | Nothing is silently swallowed: an error is returned to its caller, or handled where it arises by a counter and a rate-limited line, a recorded error state, or a bounded retry (§2.5) | every module; ROADMAP §10.1's lints | documented | No: nothing checks a discard, and the kernel review's dropped errors remain (ROADMAP §10.1 audit; §10.2, F080; §10.11, F051, F063; §10.12, F115; §13.9, F124) |
+| I38 | A return to user mode restores only what the §5.10 rule 10 validator accepted from any writer of the saved frame, and its last check for pending work runs with IF=0 (§5.10 rule 11) | the validators in each port's pure half; the exit paths | documented | Rule 10 holds vacuously: no writer of a saved user context exists before ROADMAP §13.8 and §17.4. Rule 11 does not: pending signals are acted on only at syscall entry and after the `wait4` sleep (ROADMAP §10.6, F033) |
 
 ## 2.8 Publish last
 
@@ -786,7 +787,8 @@ every IF=0 stretch has a reason from the list below and a bound.
    preempted or moved to another CPU: a per-CPU access (rule 5), a change to this CPU's registers
    that must match the running thread (FP state, `FS_BASE`), the [§7.9](#79-tlb-shootdown)
    shootdown wait, or the [§7.6](#76-ipis) call-function wait; the scheduler's switch path; the
-   return-to-user sequences of [§5.10](#510-privilege-transitions) rule 4; the panic and halt paths
+   return-to-user sequences of [§5.10](#510-privilege-transitions) rule 4, which begin at rule 11's
+   last exit-work check; the panic and halt paths
    (§2.5); and a CPU's bring-up before its first `sti` (boot before `irq: enabled`, an AP before it
    enters idle).
 2. An IF=0 stretch does a bounded amount of work: at most 100,000 instructions from the instruction
@@ -2275,7 +2277,48 @@ clobbers; and `enter_user_full` takes a second format, `UserRegs`.
    at entry). Rule; not yet enforced: ROADMAP §10.6 (the generated stubs) and §11.3 (the aarch64
    vectors). Today `arch::idt::page_fault` reads CR2 in its body, which is correct only because
    every fault body runs with IF=0.
-10. Signal-handler entry, on both architectures. Delivery saves the interrupted context (the user
+10. Return state, on both architectures. A saved user frame that anything other than an entry from
+    user mode wrote (`rt_sigreturn`, ptrace's `SETREGS`, `SETREGSET` of `NT_PRSTATUS` or
+    `NT_PRFPREG`, `POKEUSER`, and any later writer of a saved context) passes one validator per
+    architecture before the thread next returns to user mode, so no writer can return a thread to
+    ring 0, EL1, or EL2, or to user mode with interrupts masked. The validators are pure code in each
+    port's `vibeos-core` half ([§11.1](#111-the-seam)), host-tested field by field, and each writer
+    gets Linux's outcome for a value it refuses.
+    - x86_64: CS and SS reach `iretq` only with RPL 3. Ptrace returns `EIO` for a CS or SS that is
+      zero or whose RPL is not 3, as Linux does; ROADMAP §13.8 says what `rt_sigreturn` does with a
+      frame's CS and SS. A selector with RPL 3 whose descriptor `iretq` refuses raises `#GP` on the
+      return-to-user `iretq`, which rule 2 turns into `SIGSEGV`, and `sysretq` runs only when CS and
+      SS are the user selectors (the user frame, above). RFLAGS takes only the user-settable bits
+      from a writer, so IF stays set and IOPL, NT, and VM stay clear. RIP may hold anything: the
+      exit sends a non-canonical RIP, or one at or above `USER_MAP_END`, to `SIGSEGV` (rule 2).
+      `fs_base` and `gs_base` stay below `USER_MAP_END` (ROADMAP §17.4), and the FP image passes
+      ROADMAP §13.8's checks.
+    - aarch64: SPSR keeps from a writer only N, Z, C, and V, the feature bits DIT, SSBS, TCO, and
+      BTYPE, and the mode and D, A, I, and F fields, which it then checks; every other bit is
+      cleared, so SS and IL never come from a writer, and only the kernel sets SS, for a thread it
+      single-steps. A mode other than AArch64 EL0t, or any of D, A, I, or F set, is refused:
+      `rt_sigreturn` delivers `SIGSEGV` and `SETREGSET` of `NT_PRSTATUS` returns `EINVAL`, as on
+      Linux arm64. The reserved bits of FPCR and FPSR are cleared. PC and SP may hold anything: an
+      EL0 fetch outside the user half, or from a kernel page, takes an instruction abort that
+      becomes `SIGSEGV`, which rests on every kernel mapping carrying UXN
+      ([§11.2](#112-address-space-on-aarch64)).
+
+    Rule; not yet enforced: ROADMAP §13.8 and §17.4 build the writers and run the validators; no
+    writer exists today.
+11. Exit work, on both architectures. The last check for work pending on a return to user mode (a
+    signal to act on, a reschedule, and any work a later ROADMAP line queues for that return) runs
+    with IF=0, and IF stays 0 from it to the `sysretq`, `iretq`, or `eret`. When the check finds
+    work, the exit turns IF on, does the work, turns IF off, and checks again; rule 4's IF=0 stretch
+    starts at the check that finds none. The §7.5 FP load runs after that check, still with IF=0.
+    Whatever makes work pending for a thread that may be running on another CPU publishes the work
+    first and then sends that CPU the reschedule IPI (an SGI on aarch64): the IPI either arrives
+    before the target's last check, which then sees the work, or stays pending across the IF=0 exit
+    and is taken in user mode at once, where its own exit runs the check. A debug build asserts IF=0
+    at the check. A check made with IF=1 and followed by the `cli` lets the IPI be taken between the
+    two, and the thread returns to user mode with the work undone until the next tick. Rule; not yet
+    enforced: ROADMAP §10.6 (F033). Today pending signals are acted on only at syscall entry and
+    after the `wait4` sleep.
+12. Signal-handler entry, on both architectures. Delivery saves the interrupted context (the user
     frame above, after any syscall-restart rewind) and its FP state into Linux's signal frame on the
     user stack (ROADMAP §13.8), then rewrites the user frame so the return to user mode enters the
     handler. On x86_64: `rip` is `sa_handler`; `rsp` points at the frame, whose first word is
@@ -4255,6 +4298,8 @@ offset, as on x86_64 (§4.1).
 The low identity window and the AP trampoline page have no aarch64 counterpart: cores start through
 PSCI on a temporary TTBR0 identity map that is dropped once they run in the kernel half (ROADMAP
 §11.4). Memory attributes come from MAIR, and MMIO is Device-nGnRE through `ioremap` (ROADMAP §11.1).
+Every kernel-half descriptor sets UXN, so EL0 can execute nothing in the kernel half whatever its
+access permissions say; §5.10 rule 10 lets a writer set any PC because of it (ROADMAP §11.2).
 
 ## 11.3 Adding an architecture
 
