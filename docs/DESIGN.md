@@ -1934,9 +1934,10 @@ lock, its own address-space lock, or a busy page-cache page (§2.1's sleeping ti
    section ([§2.12](#212-rcu)). The allocation entry reads all four at entry, before it takes the heap
    lock. Any other allocation draws on the reserve below, as deep as its class allows, and then
    fails.
-2. It frees clean pages only. It drops clean page-cache pages that nothing maps. It unmaps a mapped
-   one through the reverse map, taking only each address space's page-table spinlock and try-locks
-   of the page and of its reverse-map lock (§4.6), and no count on the space
+2. It frees clean pages, and from ROADMAP §19.9 on the unused slab objects that a shrinker meeting
+   this rule gives up, and nothing else. It drops clean page-cache pages that nothing maps. It
+   unmaps a mapped one through the reverse map, taking only each address space's page-table spinlock
+   and try-locks of the page and of its reverse-map lock (§4.6), and no count on the space
    ([§2.11](#211-object-lifetimes)): it exchanges each PTE to empty, folds each old dirty bit into
    the page, and completes the invalidation (§2.4) before it decides. A page found dirty stays in
    the cache, unmapped and dirty, for the writeback threads; a clean page's count drops. It skips
@@ -2119,7 +2120,11 @@ stays offline (ROADMAP §10.4, F037).
 
 A slab allocator for hot object types (TCBs, file descriptors, inodes, network buffers) lands in
 ROADMAP §19.9; general allocation stays on the heap, which ROADMAP §12.6 makes a constant-time TLSF
-allocator, and slab does not replace it.
+allocator, and slab does not replace it. A typed cache has no constructor: an object is initialized
+on allocation and dropped on free. It is an allocator for `kalloc`'s owning types, which gain an
+allocator parameter defaulting to the heap, not a second family of owning types. Direct reclaim
+runs only the shrinkers that take no sleeping lock except by try-lock (rule 2); one that must wait
+for a lock runs from ROADMAP §19.10's background reclaim thread.
 
 Planned (ROADMAP §12.1): one set of allocation hooks for the sanitizer builds. Every kernel allocator
 (the buddy, the heap, the KVA allocator, and ROADMAP §19.9's slab) calls the same hooks when it hands
@@ -2195,7 +2200,8 @@ mind:
   becomes a recoverable exception with a real fault handler rather than a halt.
 - Copy on write (ROADMAP §12.3). `fork` clones an address space by sharing frames read-only with a
   refcount; the write fault does the copy. Needs the frame metadata below (ROADMAP §12.1).
-- Slab caches, per-CPU magazines to avoid the global buddy lock on hot paths (ROADMAP §19.9).
+- Slab caches with per-CPU magazines, so hot object types avoid the global heap lock (ROADMAP §19.9);
+  per-CPU free-frame lists do the same for the buddy lock (ROADMAP §27.3).
 - One page cache of mappings (§10.6), which serves `mmap`, file I/O, and the block layer, and whose
   pages share one LRU with anonymous pages (ROADMAP §12.5).
 - Swap, which finds every PTE mapping an anonymous page through the reverse map below (ROADMAP
