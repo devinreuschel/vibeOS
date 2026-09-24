@@ -3114,6 +3114,12 @@ panicked at   vibeOS: panic:   #PF   #GP   #UD   #DF   double fault   stack over
 Match the exception mnemonics, not the phrase "page fault". Shell help text and log messages contain
 English words, and a substring match on prose produces false failures that erode trust in the suite.
 
+Planned (ROADMAP §12.5): a registered failure line reports a failure the kernel recovered from, so
+a run that shows one would otherwise pass. `vibeOS: block: <dev> timeout` and
+`vibeOS: block: <dev> reset` are the first. A test that provokes one on purpose declares it; in any
+other run it fails the run, since a recovery no test expected is a bug a timeout hides, such as a
+lost kick ([section 10.4](#104-virtio-blk)) that shows only as a 30 s pause.
+
 User programs print these strings too: the ROADMAP §10.5 runtime reports a panic as `panicked at` on
 fd 2, and a fuzzer writes random bytes. ROADMAP §10.2 makes the harness scan framed lines only
 (§2.6). Before the kernel's first framed line it fails fast on Limine's panic line, the one failure
@@ -3822,6 +3828,19 @@ device, then release). Error handling:
    removed device's see (below and §12.4): its filesystem never commits again, its dirty pages are
    dropped and their error is reported once to each open file description's next `fsync`, and
    `mount -o remount,rw` returns `EIO`.
+
+Planned (ROADMAP §22.2, §25.5): every hang detector waits longer than the stall bound of what it
+may be waiting on, so a storage failure the kernel is handling is not taken for a hang. The
+blocked-thread report waits at least the largest S among registered block devices, since a thread
+waiting for a lock may wait behind another thread's I/O. The watchdog core keeps its timeout at or
+above twice that S. Init's trial-boot health check and each critical service's heartbeat allowance
+wait at least half the watchdog timeout, so at least that S. The kernel logs each block device's S
+when it registers the device. Why: Linux's `i6300esb` driver defaults to a 30 s timeout, the block
+deadline itself, so a watchdog left at such a value resets a machine whose RAID was about to absorb
+a wedged disk, and a trial boot rolls back a good update because a disk stalled. Rejected: a
+shorter block deadline, which times out slow but healthy devices and loaded TCG runners; relying
+only on init locking its memory, which a distribution's init does not do; and leaving each timeout
+to whoever implements it.
 
 Not yet enforced: no request has a deadline, and `IoWaiter::wait` parks with `FAR_DEADLINE`, so a
 lost completion, such as one after a missed kick ([section 10.4](#104-virtio-blk)), blocks its
