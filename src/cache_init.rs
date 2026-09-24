@@ -2,7 +2,8 @@
 //!
 //! Sits above [`BlockDevice`] miss paths. Lock dropped before device
 //! I/O (RANK_DEVICE + blocking wait). Flush/barrier write dirty pages
-//! then call down into the device. Phase 12 reuses these pages.
+//! then call down into the device. Phase 12 makes this cache each block
+//! device's mapping in one page cache of mappings (DESIGN §10.6).
 
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 

@@ -219,7 +219,8 @@ outermost first:
    fault path for reading). It guards the region tree only. A page-table entry changes under its
    space's page-table spinlock (the PT rank above), so the reverse-map unmap that direct reclaim
    does ([§4.4](#44-kernel-heap)) takes no address-space lock
-3. waits on a page-cache page or a block buffer (ROADMAP §12.5)
+3. waits on a page-cache page, in a file's mapping or a block device's
+   ([§10.6](#106-block-cache); ROADMAP §12.5)
 4. a filesystem's block-mapping and volume I/O locks, which its page-fill and writeback paths take
    and which are never held across a user copy
 
@@ -1426,8 +1427,8 @@ mind:
 - Copy on write (ROADMAP §12.3). `fork` clones an address space by sharing frames read-only with a
   refcount; the write fault does the copy. Needs the frame metadata below (ROADMAP §12.1).
 - Slab caches, per-CPU magazines to avoid the global buddy lock on hot paths (ROADMAP §19.9).
-- Page cache unified with `mmap`, so file-backed pages and anonymous pages share eviction (ROADMAP
-  §12.5).
+- One page cache of mappings (§10.6), which serves `mmap`, file I/O, and the block layer, and whose
+  pages share one LRU with anonymous pages (ROADMAP §12.5).
 - Swap, which needs reverse mappings from a frame back to every PTE referencing it (ROADMAP §12.7).
 
 The per-frame metadata array is the pivot. Refcounting, reverse mapping, and page cache all need it,
@@ -3291,11 +3292,41 @@ The cache reaches the drivers by raw device id: `cache_init::raw_read`,
 to `virtio_blk_init`, and only in-guest tests call the `BlockDevice` trait
 objects. Planned (ROADMAP §10.4, D2): the cache takes a handle from one
 registry of `BlockDevice`s, partitions included, instead of matching device
-ids (F081). Phase 12 page cache reuses
-these pages (same clock, same writeback);
-do not grow a second private cache. Hit/miss/device-request counters are
-in the `blk` shell command. The cache lock is RANK_DEVICE and is dropped
-before blocking device I/O.
+ids (F081). Hit/miss/device-request counters are in the `blk` shell
+command. The cache lock is RANK_DEVICE and is dropped before blocking
+device I/O.
+
+Planned (ROADMAP §12.5): one page cache made of mappings, of which this cache becomes one kind.
+Every cached page belongs to exactly one mapping at one page index, and the index is its key. A
+mapping is a file's (file data, tmpfs files, and the ELF pages ROADMAP §12.2 maps) or a block
+device's (filesystem metadata, and reads and writes of the device node). A page's device location is
+filesystem block-mapping state and is never a cache key. One frame pool, one LRU, and one set of
+writeback threads serve both kinds; do not grow a second private cache. Today's
+`(dev_id, page offset)` cache becomes each block device's mapping and keeps the FILLING and
+WRITEBACK states and the flush wait above (F015, F043).
+
+- A mounted filesystem reads and writes its file data only through the file's mapping, and caches
+  its metadata in the device mapping by LBA. Direct I/O (ROADMAP §19.8) bypasses the cache only
+  after it writes back and drops the file mapping's pages over its range, as Linux's does. Reads of
+  the device node while it is mounted see the device, not dirty file pages, as on Linux.
+- Copy-on-write moves a file's block map, not its cache entry: vibefs writes a dirty file page back
+  to a fresh block ([VIBEFS.md](VIBEFS.md) §10) and submits the page's own frame, so the page keeps
+  its mapping, index, and frame while the block it lives in changes at every commit.
+- A block the filesystem allocates loses any page the device mapping holds for its LBA before its
+  first write through any path: the page is dropped with its dirty state discarded, and an in-flight
+  writeback of the old contents completes before the new write is submitted. A reused LBA never
+  returns an old block and is never overwritten by one, as Linux's `clean_bdev_aliases` ensures.
+- Index: one radix tree per mapping, keyed by page index, with 64-way nodes (Linux's XArray shape).
+  Nodes are allocated before the mapping's lock is taken and freed after it is dropped. The lock is
+  a RANK_DEVICE spinlock, as today's cache lock is, and is never held across I/O.
+- A page's owner and index in §4.6's frame metadata name its mapping and its index there.
+
+Why: a vibefs file page's device location changes at every commit, and a hole or a page not yet
+written back has none, so a key by location moves under readers and mapped PTEs. Linux keys the same
+way, with an `address_space` per file and per block device. Rejected: keying file pages by
+`(device, LBA)`; a per-file index and a device index over one frame, which gives a frame two owners with no
+coherent eviction; a B-tree index, whose splits allocate on insert and remove, for dense keys that
+gain nothing from it.
 
 ---
 

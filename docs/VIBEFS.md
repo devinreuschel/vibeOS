@@ -235,7 +235,8 @@ A block is reusable only when its refcount hits 0 **and** no live super
 
 **Commit rule:** never overwrite a block the currently mounted super still
 reaches. Allocate fresh blocks for new metadata and for replacement file
-data. Drop the in-memory refs on the replaced blocks only **after** the new super is
+data; from ROADMAP §12.5 a file page's block is allocated when a commit
+writes the page back (§10). Drop the in-memory refs on the replaced blocks only **after** the new super is
 `Flush`ed.
 
 **Space accounting:** the alloc map a commit writes already has that
@@ -392,9 +393,15 @@ One transaction = one generation bump.
 1. In memory: apply creates, writes, unlinks, snapshot records.
 2. Allocate new blocks for the alloc map, the inode tree, and each dirty
    directory tree. Do not reuse blocks reachable from the current super or
-   any snapshot. `write` has already allocated and written the replacement
-   data blocks. v1 rewrites the whole inode tree and the tree of every
-   non-empty directory, changed or not.
+   any snapshot. From ROADMAP §12.5, `write` only dirties page-cache pages,
+   and the commit writes them back here: each dirty file page gets a fresh
+   block, never one the current super or a snapshot reaches, the page's own
+   frame is written there with step 3's blocks, and the file's in-memory
+   block map records the move; the page keeps its place in the file's cache
+   (DESIGN §10.6). The writeback threads write vibefs file data by starting
+   a commit. Before §12.5, `write` has already allocated and written the
+   replacement data blocks. v1 rewrites the whole inode tree and the tree
+   of every non-empty directory, changed or not.
 3. Write those blocks. The alloc map carries this commit's drops (§6).
 4. `Flush`.
 5. Write the inactive super slot (`generation + 1`, new roots, checksum):
