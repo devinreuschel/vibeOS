@@ -362,6 +362,7 @@ Blocking and allocation are a class of bug, not an instance. Context rules:
 | Softirq equivalent (high-prio workqueue) | No | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)); the hard IRQ only enqueues |
 | RCU read-side section ([§2.12](#212-rcu)) | No; it may be preempted | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) |
 | Threaded IRQ bottom half | Yes, on its own device's state only ([§5.4](#54-irq-registration)) | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) |
+| Block error handler ([§10.3](#103-failure)) | Yes, with IF=1 and no spinlock held | Fallible only, without direct reclaim ([§4.4](#44-kernel-heap)) |
 | Workqueue worker | Yes | Yes, fallible only ([§4.4](#44-kernel-heap)); without direct reclaim while it runs a softirq-equivalent item (row above) |
 | Driver `probe` | Yes | Yes, fallible only ([§4.4](#44-kernel-heap)); a failed probe leaves its device unbound and logs why |
 | Syscall body, fault handler for a CPL-3 fault | Yes ([§2.9](#29-preemption-and-interrupt-state)) | Yes, fallible only ([§4.4](#44-kernel-heap)) |
@@ -1570,8 +1571,8 @@ lock, its own address-space lock, or a busy page-cache page (§2.1's sleeping ti
    run (§2.12).
 4. It never recurses. These are no-reclaim threads, whose allocations draw on the reserve below,
    as deep as their class allows, and then fail: the writeback threads, the swap-out thread,
-   threaded interrupt bottom halves (§5.4), a workqueue worker while it runs a softirq-equivalent
-   item (§2.2), and a thread already in reclaim.
+   threaded interrupt bottom halves (§5.4), the block error handlers (§10.3), a workqueue worker
+   while it runs a softirq-equivalent item (§2.2), and a thread already in reclaim.
 
 Why: writeback or an unmap that needed a lock the allocating thread holds would deadlock that thread
 on itself. A try-lock never waits, so reclaim may try a page and its reverse-map lock and skip what
@@ -1962,9 +1963,11 @@ and MSI-X are message-based and do not need an I/O APIC mask on free. Clearing
 first would let a still-asserted level line storm empty `dispatch` calls, and a
 later `allocate_vector` could take IRQs from the old device.
 
-Rule: `free_vector` returns only after no CPU is running that vector's top half
-and its threaded bottom half has finished or been cancelled, so a driver may free
-the state its handlers touch as soon as it returns. Teardown order for a device
+Rule: `free_vector` masks the vector, sets its quiesce flag ([section 10.3](#103-failure)), wakes
+its bottom-half thread, and returns only after no CPU is running the vector's top half and that
+thread has exited, so a driver may free the state its handlers touch as soon as it returns. A
+bottom half that wakes to its quiesce flag returns without touching the device, so a remove that
+has already stopped its device never waits on it. Teardown order for a device
 is: stop the device (status 0, bus mastering off), free its vectors, detach its
 IOMMU domain and complete the invalidation, then free its DMA memory and handler
 state (§2.11 rule 3, §12.4). Not yet enforced: `free_vector` does not wait for a
@@ -1972,6 +1975,14 @@ handler already running on another CPU (ROADMAP §20.9). With interrupt remappin
 (ROADMAP §18.1), `free_vector` also frees the vector's remapping entry and waits
 until the interrupt entry cache invalidation completes, so a device that still
 writes its old message reaches no vector that a later `allocate_vector` hands out.
+
+On the GICv3 ITS, freeing a device's LPIs, at `free_vector` or at removal, sends `DISCARD` for each
+of its events and `MAPD` with V=0 for its DeviceID, then `SYNC`, and waits up to 1 s, as Linux
+waits for its ITS command queue, until the ITS has consumed the commands. Only then are the
+device's ITT freed and its LPIs returned to the allocator. If the wait expires, both stay reserved
+and the event is logged. The ITS reads each device's ITT from memory, so an ITT freed earlier would
+let a late MSI translate through reused memory into another device's interrupt. This is the
+aarch64 form of §12.4's interrupt-remapping rule.
 
 EOI is the dispatcher's job, not the driver's. The dispatch layer knows whether a
 vector arrived via PIC or LAPIC and signals the right controller. A vector with no handler still
@@ -1981,7 +1992,8 @@ A threaded handler's top half runs in `dispatch` (ack / mask / wake only). Today
 kernel thread, pinned to the last online CPU, runs every threaded vector's bottom half.
 Planned (ROADMAP §12.5): each threaded vector gets its own bottom-half thread, pinned to the
 CPU the vector is routed to and moved by `set_affinity`, so a device with one queue per CPU
-gets one thread per queue. A bottom half may block only on its own device's state. It takes
+gets one thread per queue. A bottom half may block only on its own device's state. Each such
+wait has a deadline and also ends when the vector's quiesce flag is set. It takes
 no lock of §2.1's sleeping tier and never waits for another device's I/O, and it allocates
 without direct reclaim, in §4.4's atomic class. `free_vector` ends the vector's thread before
 it returns.
@@ -3645,9 +3657,10 @@ the driver is `src/virtio_blk_init.rs`. Partition children are
 A request carries waiter cookies, not a locked queue. Submit takes the per-device
 queue lock (RANK_DEVICE), merges or enqueues, and drops the lock before any copy.
 The ramdisk pump runs after that drop; virtio-blk submits to a virtqueue after
-the same drop and completes from a threaded IRQ. Rule: completion wakes the waiters under SCHED
-and then stores the status inside that section, as its last access to each waiter
-([section 2.8](#28-publish-last)). `IoWaiter::finish` breaks this: it stores
+the same drop and completes from a threaded IRQ. Rule: completion begins with the claim
+([§10.3](#103-failure) step 2), and only the party that claimed a request touches it. It wakes the
+waiters under SCHED and then stores the status inside that section, as its last access to each
+waiter ([section 2.8](#28-publish-last)). `IoWaiter::finish` breaks this: it stores
 `done` with Release before it takes SCHED, then wakes (ROADMAP §10.10, F002). Never hold
 the queue lock across I/O or across that wake
 (DEVICE then SCHED is the wrong order). Hard IRQ must not run this path: enqueue
@@ -3687,26 +3700,119 @@ cache's `flush` does not wait for writeback in flight either
 
 ## 10.3 Failure
 
-I/O errors retry up to `DEFAULT_RETRY_BUDGET` extra attempts, then the device
-goes `Failed`. Further submits return `Failed`. `Inval` (range, size) is not
-retried and does not fail the device. No infinite retry loop.
+Rule: an I/O error is retried within the request's retry budget, `DEFAULT_RETRY_BUDGET` (3) extra
+attempts, which step 5 below shares with resets. A request that exhausts it completes with its
+error, and the device stays `Bound`. `Inval` (range, size) is not retried and uses no budget. No
+infinite retry loop. Submits to a `Failed` device return `Failed`. Not yet enforced: a virtio-blk
+request that exhausts its budget makes the device `Failed` and fails every queued request with it
+(ROADMAP §10.11, F046).
 
-Rule: every request has a deadline, 30 s by default, as Linux's block layer has. When it
-passes, the driver's timeout handler gets the request back from the device before anything
-touches its buffer. Where the device can abort one command, it aborts it (NVMe's Abort). Where
-it cannot, the handler resets the device (virtio's status 0, read back as 0; AHCI's port
-reset). A device the reset does not bring back goes `Failed`. Only after the device can no
-longer write the buffer does the request complete, with `Io` or by resubmission, and does its
-submitter get the buffer back (§2.11 rule 3: stop the device, then release). Rule; not yet
-enforced: `IoWaiter::wait` parks with `FAR_DEADLINE`, so a lost completion, such as one after a
-missed kick ([section 10.4](#104-virtio-blk)), blocks its submitter for good, and so does
-every thread that then waits for a lock the submitter holds (ROADMAP §12.5).
+Rule: every request has a deadline, 30 s by default and settable per device, as Linux's block layer
+has, and the device gives a request back before anything touches its buffer (§2.11 rule 3: stop the
+device, then release). Error handling:
+
+1. Deadline. The deadline starts when the driver dispatches the request to the device, as Linux's
+   `blk_mq_start_request` starts it, and each dispatch gets a new one. A stacked device (md, dm,
+   multipath, the ROADMAP §18.7 transform) has no deadline of its own. It acts on its members'
+   completions, which their error handling bounds.
+2. One claim. Exactly one party completes a dispatched request: the bottom half that harvests it,
+   the error handler, or removal. That party claims the request before it touches the request's
+   buffer or waiter, by a compare-and-swap on the request's state or by taking the request out of
+   the driver's table under the queue lock. A harvest that finds its request already claimed leaves
+   it alone. Completion ([section 10.1](#101-completions)) begins with the claim.
+3. One error handler per resettable unit (a virtio function, an NVMe controller, an AHCI port): a
+   kernel thread that sleeps until the unit's earliest deadline or a trigger. A trigger is a
+   deadline passing, the device's needs-reset status (virtio's `DEVICE_NEEDS_RESET`), a used-ring
+   entry that fails the transport's checks, an IOMMU translation fault, or a surprise-removal
+   event. Hard IRQs, bottom halves, and waiters only wake the handler. It is a no-reclaim thread
+   (§4.4 rule 4), and it never takes the device-model lock (§12.1), so removal may wait for it
+   while holding that lock. `IoWaiter::wait` parks with its device's stall bound S (step 6) as its
+   deadline. If S passes, the waiter logs a report naming the request and waits on. It never takes
+   the buffer back itself.
+4. Recovery. Where the device can abort one command (NVMe's Abort), the handler first aborts each
+   timed-out command and waits for the abort. The command's own completion, with whatever status,
+   is claimed as usual. Otherwise, or when an abort does not complete in its wait, the handler
+   resets the unit:
+   1. It marks the unit `Resetting`, so new requests stay in the software queue.
+   2. It quiesces each queue: it masks the queue's interrupt through its interrupt controller
+      ([section 5.4](#54-irq-registration)), sets the queue's quiesce flag, which ends any
+      bottom-half wait on the device's resources, and waits until the queue's bottom half is idle.
+      If every request whose deadline passed has now been claimed, it unquiesces and resets
+      nothing.
+   3. It resets the device (virtio's status 0, read back as 0; NVMe's `CC.EN` cleared and
+      `CSTS.RDY` read back as 0; AHCI's port reset) with IF=1 and no spinlock held, sleeping
+      between reads, for at most the unit's reset bound R (step 6).
+   4. It claims every dispatched request not yet claimed.
+   5. If the reset brought the unit back, it reinitializes the rings and the last-seen used index,
+      resubmits the claimed requests in each queue's submission order, Flushes included, and
+      unquiesces. Under [section 10.2](#102-barrier-vs-flush)'s ordering no request in
+      flight depends on another, so the order carries no durability meaning.
+   6. If it did not, it clears Bus Master Enable in the function's command register and reads it
+      back, detaches the device's IOMMU domain when ROADMAP §18.1's IOMMU is on, completes every
+      claimed request with `Io`, and marks the unit `Failed`. Where bus mastering cannot be
+      cleared and read back (a transport without it, such as virtio-mmio or a platform device, or
+      a function that is gone, whose config reads return all ones) and no IOMMU that translates
+      the device blocks it, each request still completes with `Io`, but its buffer is quarantined:
+      the driver keeps its frame references and counts them in `blk` and meminfo. A quarantined
+      buffer is freed once the device provably cannot DMA: its downstream port reports the link
+      down or its presence lost, the kernel has powered its slot off, or an IOMMU that translates
+      it has its domain set to blocking and that invalidation has completed. Otherwise it is held
+      for good.
+
+   A trigger that arrives during a recovery joins it.
+5. Budget. Every resubmission, after an I/O error or after a reset took the request back, uses one
+   attempt of the request's retry budget. With none left, the request completes with its error,
+   or with `Io` after a reset. A request whose own deadline passes a second time completes with
+   `Io` at that recovery, whatever budget it has left, so a command the device never completes
+   cannot hold the unit in a reset loop. A reset that brought the unit back leaves it `Bound`.
+6. Stall bound. Each driver declares its reset bound R, the longest a recovery takes from the
+   handler's first step to the unquiesce, the abort's wait included: virtio-blk's reset poll
+   ([section 10.4](#104-virtio-blk)), NVMe's abort wait plus `CAP.TO`, AHCI's port reset. A
+   request waits behind at most one recovery before its first dispatch, is dispatched at most
+   1 + `DEFAULT_RETRY_BUDGET` times, and each dispatch ends within deadline + R: it completes, or
+   its own deadline passes and its recovery ends, or a recovery that began before its deadline
+   takes it back. So the device's stall bound S = R + (1 + `DEFAULT_RETRY_BUDGET`) × (deadline + R)
+   bounds how long a request of a failing device stays incomplete and how long a thread waits for
+   one: 125 s for virtio-blk at the defaults. A stacked device's S is the largest sum of member
+   bounds over the members one request can try in turn: every copy of a mirror, every path of a
+   multipath device, one member of a stripe. Time a request waits for a free descriptor behind
+   requests the device is still completing is load, which S does not bound.
+7. One quiesce. Removal, suspend (ROADMAP §20.2), and shutdown (ROADMAP §25.4) begin with step
+   4.2's queue quiesce (AGENTS.md rule 10), and `free_vector` sets the same quiesce flag (§5.4).
+   Removal marks the device `Removing` (§12.1), wakes the handler, and waits for the handler to
+   exit before it frees the device's state. A handler that finds the device `Removing` finishes
+   its current step and then does not reset: it quiesces, runs the driver's stop step (§12.2),
+   claims every dispatched request, completes it with `Gone`, under step 4.6's quarantine rule
+   when the stop step cannot clear bus mastering, and exits.
+8. Terminal states. `Failed` and `Dead` (§12.1) are terminal for a registration: the device
+   returns only as a new registration with a new id. A `Failed` device's consumers see what a
+   removed device's see (below and §12.4): its filesystem never commits again, its dirty pages are
+   dropped and their error is reported once to each open file description's next `fsync`, and
+   `mount -o remount,rw` returns `EIO`.
+
+Not yet enforced: no request has a deadline, and `IoWaiter::wait` parks with `FAR_DEADLINE`, so a
+lost completion, such as one after a missed kick ([section 10.4](#104-virtio-blk)), blocks its
+submitter for good, and so does every thread that then waits for a lock the submitter holds
+(ROADMAP §12.5).
 
 Why: a lost completion is a device or driver bug the kernel must survive and report (§1.1
 constraints 4 and 5, which already bound every poll). Freeing a timed-out request's buffer while
-the device may still write it would turn a hang into memory corruption, so the reset comes
-first. Rejected: a timeout that only reports and keeps waiting, which leaves every waiter
-behind the request stuck. It is safe but not live.
+the device may still write it would turn a hang into memory corruption, so the device stops first.
+A request has one claimant because several parties can see it end (the harvest, a timeout, a
+needs-reset status, a ring violation, an IOMMU fault, and removal), and the status store of §10.1
+is safe only as the last access of one of them. The handler is a thread of the unit's own because
+the waiter cannot run it (writeback and readahead have none, and many waiters would race to reset
+one device), a bottom half cannot (it may be the blocked party, and a device-wide reset stops every
+queue's bottom half, its own included), a softirq-equivalent item may not block while an NVMe reset
+poll may last `CAP.TO`'s 127.5 s, and a general workqueue item would stall unrelated items behind
+that poll. Quiescing before the claim means a harvest never runs during a reset. Every
+resubmission uses the one retry budget so that S exists. Adopted from Linux: the timer started at
+dispatch, blk-mq's claim before completion, NVMe's reset work and its retry count for commands a
+reset cancelled, and SCSI's error-handler thread per host. Rejected: a timeout that only reports
+and keeps waiting, which leaves every waiter behind the request stuck, safe but not live; a
+deadline on a stacked device, which would release pages a member may still write; separate stop
+mechanisms for reset and for removal, two implementations of one primitive that a removal during a
+reset needs both of; and freeing a removed device's buffers with no proof it cannot DMA.
 
 A removed device is `Gone` (§12.4), and every request to it fails with `Gone`. Its consumers
 see what Linux shows for a removed device. A filesystem maps `Gone` to `EIO`; it stops
@@ -3731,8 +3837,10 @@ if `F_BLK_SIZE` is absent), and topology when offered. Each request is a
 descriptor chain: header + data (or discard range) + status. The status
 byte is device-writable DMA, never a stack slot. Completions harvest the
 used ring on the threaded IRQ and wake the same `IoWaiter` cookies as the
-ramdisk. The hard IRQ only acks ISR, reading it on every interrupt. The driver always runs on
-MSI-X, where virtio 1.2 §4.1.4.5.2 says a driver should not read ISR (ROADMAP §26.4, F122).
+ramdisk. Its reset polls the status for at most 1 s, sleeping between reads, which is virtio-blk's
+reset bound R ([section 10.3](#103-failure)); today `reset` spins for up to a million reads
+(ROADMAP §12.5). The hard IRQ only acks ISR, reading it on every interrupt. The driver always
+runs on MSI-X, where virtio 1.2 §4.1.4.5.2 says a driver should not read ISR (ROADMAP §26.4, F122).
 
 `F_MQ`: one virtqueue per online CPU, capped by the device `num_queues` and by
 `MAX_VQ` (8). Without `F_MQ`, a single request queue. Data goes through 16
@@ -3972,9 +4080,11 @@ does not own it.
    hub, a partition its disk. A device may also name suppliers outside the tree: the IOMMU that
    translates it, the ITS its MSIs go through, and the members of a dm or md device, which list that
    device as a holder.
-3. A device is `Present`, `Probing`, `Bound`, `Suspended`, `Removing`, or `Dead`. One sleeping lock
-   per device serializes `probe`, `remove`, `suspend`, `resume`, and `shutdown` on it, and the
-   registry's own lock is never held across a driver callback.
+3. A device is `Present`, `Probing`, `Bound`, `Resetting`, `Failed`, `Suspended`, `Removing`, or
+   `Dead`. `Resetting` and `Failed` are [§10.3](#103-failure)'s error-handling states. `Failed` and
+   `Dead` are terminal for a registration. One sleeping lock per device serializes `probe`,
+   `remove`, `suspend`, `resume`, and `shutdown` on it, and the registry's own lock is never held
+   across a driver callback.
 4. A block device's id is a 64-bit sequence number never reused within a boot, as Linux's `diskseq`
    is, so the block cache ([§10.6](#106-block-cache)) and any other table keyed by it cannot alias a
    later device. A device's name is owned by its registry entry.
@@ -3991,7 +4101,8 @@ does not own it.
    before its first probe: when it is added if the IOMMU is registered, and otherwise when the IOMMU
    registers.
 7. A driver's `shutdown` and the stop step of its `remove` are one quiesce function
-   (AGENTS.md rule 10).
+   (AGENTS.md rule 10). Both begin with §10.3's queue quiesce, which suspend and a reset begin with
+   too.
 
 ## 12.3 Resources
 
@@ -4030,10 +4141,15 @@ devices, §11.5 and §20.7 apply rule 8 to device-tree and ACPI devices, §18.1 
    still held fails with `Gone`, and threads sleeping on the device wake and fail. It waits for the
    operations already inside, whose requests complete, fail at their deadline
    ([§10.3](#103-failure)), or fail at once on a disconnected function. It stops the device and
-   fails what the device still holds, in §10.3's order, and frees its vectors
-   ([§5.4](#54-irq-registration)). It then detaches the device's IOMMU domain and completes the
-   IOTLB and device-TLB invalidation, and only then frees the device's DMA buffers. Its memory goes
-   at the last put. A device's subtree is removed first (rule 5).
+   fails what the device still holds through the error handler (§10.3 step 7), and frees its
+   vectors ([§5.4](#54-irq-registration)). It then detaches the device's IOMMU domain and completes
+   the IOTLB and device-TLB invalidation, and only then frees the device's DMA buffers. A
+   device-TLB invalidation is skipped for a function marked disconnected, as Linux's VT-d driver
+   skips it, since a gone function never answers. Every IOMMU invalidation wait (VT-d's wait
+   descriptor, SMMUv3's `CMD_SYNC`) has a bound, 1 s as Linux's SMMUv3 driver uses. When it
+   expires, the device's domain is set to blocking, its IOVAs and the frames behind them stay
+   reserved, and the event is logged. Its memory goes at the last put. A device's subtree is
+   removed first (rule 5).
 10. A surprise removal, which the slot reports through its presence-detect or link-down interrupt,
     first marks the function disconnected: its driver fails I/O at once without resetting it, and a
     register read that returns all ones ends any poll.

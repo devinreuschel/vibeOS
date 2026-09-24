@@ -448,9 +448,9 @@ it as authoritative.
 
 `fsync` / `sync` is this protocol. `Barrier` is not a commit.
 
-A volume whose device is removed never commits again: its last committed
-generation is the volume, and the transaction in memory is dropped, with
-its error reported to `fsync` (DESIGN §10.3).
+A volume whose device is removed or `Failed` (DESIGN §10.3, §12) never
+commits again: its last committed generation stays the on-disk state, and
+the transaction in memory is dropped, with its error reported to `fsync`.
 
 ---
 
