@@ -47,4 +47,4 @@ The e2e UEFI run itself.
 
 ## Risks and rollback
 
-macOS runners are slower and rate-limited; keep the macOS job to `make check` only.
+macOS runners are slower and rate-limited; keep the macOS job to `make check` only. Answered by ROADMAP §10.2, which runs `make test` there too: the job is scheduled, not per push, so runner speed costs no pull request any time; a macOS arm64 runner (3 vCPUs, 7 GB) is a legitimate host for an oversubscribed `-smp 4` guest, so a failure there is a kernel timing bug, not a reason to drop a tier; and the 9 GiB highmem guest under TCG commits only the memory it touches.

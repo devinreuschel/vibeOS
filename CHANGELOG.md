@@ -34,7 +34,7 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
   runner image are not. Weekly smp-stress runs a non-blocking latest-nightly canary.
 - Kernel builds with built-in `x86_64-unknown-none` (no custom target JSON, no `build-std`).
 - Host tests (`make test-unit`) run `vibeos-core` on the host triple; `mkfs`/`fsck-vibefs` follow.
-  Context-switch asm stays `x86_64`. I1 (macOS CI job) is still parked.
+  Context-switch asm stays `x86_64`. I1 (macOS CI job) is scheduled in [ROADMAP §10.2](docs/ROADMAP.md#102-build-and-harness).
 - Initrd is `build/initrd.fat` from hostlib `mkinitrd`. Bare `cargo build` embeds an empty image;
   run `make`. The AP trampoline is `global_asm!`, not nasm.
 - ISO and ksyms recipes are one `KERNEL_VARIANT` template plus `scripts/mkiso.sh`.

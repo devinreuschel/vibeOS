@@ -4336,9 +4336,10 @@ checks the images rebuilt from its trace, since a kill loses no write QEMU recei
 |---------|-------|
 | `make run` | `-cdrom vibeos.iso -m 128M -smp 2 -cpu max -accel tcg -no-reboot -serial stdio` (Makefile `QEMU_BASE`, plus `-serial stdio` from the `run` recipe) |
 | e2e | as above plus `-display none -monitor unix:...,server=on,wait=off` (`harness.qemu_argv`) |
-| ktest | as e2e plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04`, `-device e1000e`, `-device edu`, `-device virtio-rng-pci,disable-legacy=on`, virtio-blk (`-drive file=…,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>`). Extra NICs/edu/virtio are ktest-only; e2e stays the default `pc` set (`pci: 6 devices`). After a green first boot the harness reboots the same disk and requires `vibeOS: persist: intact`. |
+| ktest | as e2e plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04`, `-device e1000e`, `-device edu` (planned, ROADMAP §11.7: `-device edu,dma_mask=0xFFFFFFFF` on both architectures), `-device virtio-rng-pci,disable-legacy=on`, virtio-blk (`-drive file=…,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>`). Extra NICs/edu/virtio are ktest-only; e2e stays the default `pc` set (`pci: 6 devices`). After a green first boot the harness reboots the same disk and requires `vibeOS: persist: intact`. |
 | LAPIC fallback | `-cpu qemu64,-tsc-deadline` |
 | SMP stress | `-smp 4` |
+| aarch64 (`ARCH=aarch64`) | Planned (ROADMAP §11.7): `qemu-system-aarch64 -machine virt,acpi=off,gic-version=3`, with `-cpu max` under TCG or `-cpu host` under HVF (`virt` defaults to the 32-bit `cortex-a15`); the §10.2 probe's firmware code read-only on pflash unit 0 and a per-run copy of its variable-store template on unit 1; the ISO on a CD-ROM, `-device virtio-scsi-pci -device scsi-cd,drive=cd0 -drive if=none,id=cd0,media=cdrom,readonly=on,file=<iso>`, so the ktest disk is the only virtio-blk device; and `-device ramfb`, `virtio-keyboard-pci`, `virtio-tablet-pci`, `pvpanic-pci`, and `vmcoreinfo` |
 | Interrupt debugging | `-d int,cpu_reset`, plus `-machine q35` when chipset behavior matters |
 
 Harness and `make test` default to `-accel tcg` so KVM does not introduce timing flakes.
