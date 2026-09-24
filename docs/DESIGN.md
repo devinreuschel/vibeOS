@@ -1446,6 +1446,8 @@ Ordering rules worth stating separately because they were learned the hard way:
 - ACPI discovery for the step-8 UC patch may run immediately after CR3 (alongside `paging: mmio uc`).
   The `acpi: xsdt N tables` marker stays at step 12. Do not "fix" that by moving the walk after the
   heap: first touch of LAPIC/IOAPIC/HPET would then be cacheable.
+- In the ROADMAP §12.1 KASAN build, `_start` maps the early shadow (§4.1) before step 1, since every
+  instrumented function reads the shadow, the buddy at step 6 included.
 
 Live boot through Phase 3 slice B runs steps 6–10 (PMM, paging, heap, KVA) before
 steps 3–5 (GDT/TSS/IST, PIC remap, IDT). IST stacks are allocated from the KVA
@@ -1564,12 +1566,29 @@ adopting it re-plans this table. Kernel regions are fixed, not discovered, excep
 | Limine's HHDM offset +, inside the slot `0xFFFF_8000_0000_0000` – `0xFFFF_C000_0000_0000` | 64 TiB slot; today `map_end` ≤ 8 GiB, plus leaves added above it | Physmap, `virt = phys + ` the HHDM offset, discovered at boot (below the table); today the constant `HHDM_BASE`, which `boot::capture` asserts Limine's offset equals. 2 MiB pages up to `map_end`. Above it: 4 KiB leaves from `acpi_init::map_gap` (no cap), and write-back leaves for a display BAR0 from `paging_init::ensure_physmap_wb` (below `PHYSMAP_CAP`). The physmap never leaves its slot (below the table). |
 | `0xFFFF_C000_0000_0000` – `0xFFFF_C000_0400_0000` | 64 MiB | Kernel heap. Starts at 1 MiB mapped and grows. Planned (ROADMAP §12.6): the region's size is set at boot from installed memory, up to the 16 TiB below the KVA region, so the heap can grow as far as RAM does ([§4.4](#44-kernel-heap)). |
 | `0xFFFF_D000_0000_0000` – `0xFFFF_D010_0000_0000` | 64 GiB | Kernel VA allocator: guarded stacks, `vmap`, large transient mappings. |
-| `0xFFFF_E000_0000_0000` – `0xFFFF_E000_1000_0000` | 256 MiB | `ioremap` window for device MMIO that should not be reached through the physmap. Today a bump allocator that never frees; planned (ROADMAP §20.1): §4.5's range allocator over its slot, with `iounmap`. |
+| `0xFFFF_E000_0000_0000` – `0xFFFF_E000_1000_0000` | 256 MiB | `ioremap` window for device MMIO that should not be reached through the physmap. Today a bump allocator that never frees; planned (ROADMAP §20.1): §4.5's range allocator over its slot, with `iounmap`. Its slot ends at `0xFFFF_EA00_0000_0000` (10 TiB); ROADMAP §20.1 sizes the window inside it. |
+| `0xFFFF_EA00_0000_0000` – `0xFFFF_EB00_0000_0000` | 1 TiB | Frame metadata (ROADMAP §12.1): one `Frame` per 4 KiB of physical memory up to 64 TiB, indexed by physical frame number, virtually contiguous, and populated one memory section at a time, so a hole costs page tables only. A const assertion holds `size_of::<Frame>()` to 64 bytes. |
+| `0xFFFF_EC00_0000_0000` – `0xFFFF_FC00_0000_0000` | 16 TiB | KASAN shadow, in the ROADMAP §12.1 KASAN build only: one shadow byte per 8 bytes of the kernel half, at LLVM's x86_64 kernel-address offset `0xDFFF_FC00_0000_0000` (aarch64: §11.2). |
 | `0xFFFF_FFFF_8000_0000` – `0xFFFF_FFFF_FFFF_FFFF` | 2 GiB | Kernel image. Matches the `kernel` code model so `.text` relocations fit in 32-bit displacements. |
 
 Regions must not overlap and every one asserts that its range is unmapped before claiming it. This is
 a real failure mode: two subsystems in the old tree were both designed at `0xFFFF_C000_*` and only one
 noticed.
+
+The KASAN build passes each architecture's shadow offset to LLVM explicitly
+(`-Cllvm-args=-asan-mapping-offset=`), never LLVM's default: LLVM picks its Linux kernel offset only
+for a Linux x86_64 triple, and for both kernel targets its default is a user-space offset whose
+shadow of the kernel half is non-canonical. In that build every kernel address's shadow reads as
+accessible from the first instruction: before any Rust runs, `_start` points the whole shadow range
+at one read-only zero page through three shared table pages, in uninstrumented `arch` asm, as
+Linux's early shadow does, and each direct entry (ROADMAP §25.4) does the same.
+`paging_init::install` carries these entries into the kernel's tables, and since it gives every
+kernel-half PML4 slot its own PDPT (the next paragraph), each PML4 slot of the heap's and the KVA
+region's shadow has a PDPT of its own, so real shadow later changes no PML4 entry (I12). From
+`kva: ready`, heap growth and every KVA map allocate and map their own shadow in the same operation,
+under the locks that operation already takes, and fail with `ENOMEM` when they cannot; a KVA free
+poisons its shadow and unmaps it after the range's shootdown. The heap region's shadow grows with
+the heap. The physmap and the image keep the zero page, so their accesses are not checked.
 
 Every kernel-half PML4 slot exists before the first user address space (I12): `AddressSpace::new`
 copies PML4[256..512) once, so a slot added later is missing from every address space made before
@@ -5325,6 +5344,10 @@ PSCI on a temporary TTBR0 identity map that is dropped once they run in the kern
 §11.4). Memory attributes come from MAIR, and MMIO is Device-nGnRE through `ioremap` (ROADMAP §11.1).
 Every kernel-half descriptor sets UXN, so EL0 can execute nothing in the kernel half whatever its
 access permissions say; §5.10 rule 10 lets a writer set any PC because of it (ROADMAP §11.2).
+In the KASAN build (§4.1) the shadow offset is `0xDFFF_8000_0000_0000`, Linux arm64's generic-KASAN
+offset for 48-bit VAs, so the TTBR1 range's shadow is `0xFFFF_6000_0000_0000` –
+`0xFFFF_8000_0000_0000`, below §4.1's fixed regions and just above the physmap's slot, so
+`boot::capture`'s slot check and the physmap builder's bound (§4.1) keep the physmap out of it.
 
 Planned (ROADMAP §11.2): ASIDs, so a context switch changes TTBR0 without flushing the TLB. The
 allocator is Linux arm64's generation scheme. An address space holds one 64-bit value, a generation
