@@ -561,8 +561,13 @@ per-CPU inbox plus a reschedule IPI. More SMP-specific rules in [section 7.7](#7
 
 ## 2.4 Memory invariants
 
-- Physical page 0, the loaded kernel image, the AP trampoline page, and firmware-reserved regions are
-  never in the buddy free lists.
+- The buddy takes only memory the boot memory map marks usable, less physical page 0, the AP
+  trampoline page (§7.3), and the kernel image, framebuffers, and boot modules wherever they overlap
+  usable memory. Limine keeps usable entries clear of every other entry, so the last three are
+  defensive; `pmm_init` clips each usable range against all of them as it reads `BootInfo`, with no
+  fixed-size list, so no exclusion is ever dropped. Rule; not yet enforced: `pmm_init` keeps an
+  8-entry `Excludes` list, admits a range past the eighth with a `pmm: excludes overflow` line, and
+  excludes the fixed page `0x8000` (ROADMAP §10.6).
 - Buddy free list nodes live inside the free pages themselves. A stray write into freed memory
   corrupts the allocator, so guard pages on stacks are not optional. One stack has none: Limine's
   boot stack (at least 64 KiB, no guard page, in bootloader-reclaimable memory), which all of boot
@@ -584,7 +589,7 @@ per-CPU inbox plus a reschedule IPI. More SMP-specific rules in [section 7.7](#7
   aarch64 they are Device-nGnRE (ROADMAP §11.1), and a device access is ordered against Normal
   memory only by [§4.7](#47-dma)'s accessors.
 - Every mapping is `NO_EXECUTE` unless it holds code that is fetched. Exception: the low identity
-  window's first 2 MiB is executable, though only the `0x8000` trampoline page is fetched, and only
+  window's first 2 MiB is executable, though only the trampoline page (§7.3) is fetched, and only
   during AP bring-up (ROADMAP §10.6, F085).
 - A value copied to user memory has no padding and no uninitialized bytes. Reading a padding byte is
   undefined behaviour in Rust, and copying one out leaks kernel stack or heap. A typed copy-out takes
@@ -888,7 +893,7 @@ separate namespace.
 | I12 | Every kernel PML4 slot exists before the first user address space | `AddressSpace::new` copies PML4[256..512) once | assumed | Yes, by boot order only: `paging_init::install` creates none of the heap, KVA, and `ioremap` PML4 slots; each appears on its region's first mapping, and no current path makes a first mapping after `/hello` (ROADMAP §12.1, F101) |
 | I13 | The low identity window is removed after `smp: done` (§4.1) | none yet | documented | No: it stays mapped and GLOBAL, VA 0 included (ROADMAP §10.6, F085) |
 | I14 | Every buddy frame and page table lies inside the physmap (§4.1) | `pmm_init::init`, `paging_init::physmap_extent` | enforced | Yes; a framebuffer above the 8 GiB cap is not covered (ROADMAP §11.2, F020) |
-| I15 | Frame 0, the kernel image, `0x8000`, and the framebuffers never enter the buddy (§2.4) | `pmm_init::init`; `Buddy::insert_region` skips frame 0 | enforced | Yes with at most 6 framebuffers: `Excludes` holds 8 ranges (the trampoline page, the kernel image, one per framebuffer), and a range past the 8th stays in the buddy, with a `pmm: excludes overflow` line |
+| I15 | Frame 0, the trampoline page, and the kernel image, framebuffers, and boot modules never enter the buddy (§2.4) | `pmm_init::init`; `Buddy::insert_region` skips frame 0 | enforced | Partly: the trampoline page is the fixed `0x8000`, which boot uses whatever the memory map says there (bootloader-reclaimable under SeaBIOS); `Excludes` holds 8 ranges, and a range past the 8th stays in the buddy with a `pmm: excludes overflow` line, which Limine's rule that usable entries overlap no other entry leaves unreachable (ROADMAP §10.6) |
 | I16 | The kernel PML4 lies below 4 GiB, because the trampoline loads a 32-bit CR3 | `smp_init::start_one` | enforced by skipping every AP | Not guaranteed: the PML4 frame has no address limit, and above 4 GiB every AP is skipped with a `smp: cr3 above 4GiB` line (ROADMAP §20.1) |
 | I17 | MMIO is UC, RAM is WB, and no frame has both (§2.4) | `acpi_init`, `Mapper::patch_physmap_uc` | documented | Partly: a whole 2 MiB leaf goes UC with no RAM check, and a trailing leaf can be skipped (ROADMAP §11.2, F104) |
 | I18 | EOI before any switch; a one-shot timer is rearmed before yielding (§5.8) | timer ISRs | documented | Yes; no test tier runs the TSC-deadline timer, the only one-shot source, so nothing exercises the rearm (ROADMAP §10.1, F078) |
@@ -1588,11 +1593,12 @@ drops RAM past `MAXMEM`, and hot-added RAM past it is refused the same way (ROAD
 `HhdmPhys` translation use it (ROADMAP §20.1, F136).
 
 The low identity window exists for one reason: an AP starting from SIPI runs in real mode and then
-32-bit protected mode at `0x8000`, so that page must be identity mapped and executable. All 512 MiB
-stay mapped and GLOBAL for the life of the kernel CR3, so a NULL-plus-offset access from a kernel
-thread reads low RAM instead of faulting, and buddy frames below 2 MiB have a supervisor writable,
-executable alias. Planned (ROADMAP §10.6, F085): the window is torn down after `smp: done`, keeping
-only the trampoline page (4 KiB, read-only, executable, not global).
+32-bit protected mode in the trampoline page below 1 MiB (§7.3), so that page must be identity
+mapped and executable. All 512 MiB stay mapped and GLOBAL for the life of the kernel CR3, so a
+NULL-plus-offset access from a kernel thread reads low RAM instead of faulting, and buddy frames
+below 2 MiB have a supervisor writable, executable alias. Planned (ROADMAP §10.6, F085): the window
+is torn down after `smp: done`, keeping only the trampoline page (4 KiB, read-only, executable, not
+global).
 
 The physmap is capped at 8 GiB (`PHYSMAP_CAP`) regardless of what the memory map says. Some firmware
 describes MMIO BARs as multi-terabyte regions, and walking that to build page tables at boot does not
@@ -1653,10 +1659,13 @@ blocks, excluding:
 
 - physical frame 0
 - the loaded kernel image span
-- the AP trampoline page at `0x8000`
+- the AP trampoline page, `0x8000` today (§7.3)
 - the framebuffer
 - anything not marked `USABLE`, including bootloader and ACPI reclaimable
 - anything above the 8 GiB physmap cap (§4.1)
+
+Planned (ROADMAP §10.6): the exclusions are §2.4's, clipped from each usable range as `BootInfo` is
+read, with no fixed-size list.
 
 `stats().free_frames` is a running counter, so `meminfo` costs O(1). `deallocate` does not: its
 double-free check and its buddy lookup walk the free lists, O(`MAX_ORDER` × list length) per call, so
@@ -3254,14 +3263,28 @@ Relevant MSRs across this section:
 ## 7.3 AP trampoline
 
 An AP comes out of SIPI in real mode at `CS:IP = vector<<8 : 0`, so the entry point must be a 4 KiB
-aligned physical page below 1 MiB. We use `0x8000`, SIPI vector `0x08`.
+aligned physical page below 1 MiB. `boot::capture` chooses the page from the memory map it already
+reads: the lowest 4 KiB page above frame 0 and below 1 MiB that the map marks usable, recorded in
+`BootInfo`, so `pmm_init` excludes it and `smp_init` starts APs on that one value. The SIPI vector
+is its page number; vectors `0xA0` to `0xBF` are reserved, and no usable page lies there on a PC.
+With no such page every AP is skipped with `vibeOS: smp: no trampoline page`, as the CR3 check below
+skips them. Under SeaBIOS the pinned Limine types `0x1000`–`0x52000` bootloader-reclaimable and the
+page is `0x52000`; under OVMF `0x0`–`0x87000` is usable and it is `0x1000`. Linux likewise reserves
+its real-mode trampoline from memory below 1 MiB at boot. Rule; not yet enforced: `pmm_init` and
+`smp` each define `0x8000`, and `smp_init` copies the blob there without reading the memory map,
+which types that page bootloader-reclaimable under SeaBIOS (ROADMAP §10.6).
 
-The trampoline is `src/arch/trampoline.S`, assembled with `global_asm!` into `.trampoline`
-(inside `__rodata_start..__rodata_end` so the kernel map covers the copy source) and copied
-to `0x8000`. It goes: real mode, set up a GDT, enable protected mode, load CR3 from the param block,
-set `EFER.LME` and `EFER.NXE`, enable paging, long jump to 64-bit, load the stack, call the Rust
-entry point. Addresses in the blob are physical (`0x8000`), not the kernel VMA. On the way it clears
-`CR0.CD` and `CR0.NW` (then `wbinvd`), sets `CR4.PAE` and `CR4.PGE`, and sets `CR0.PG` and `CR0.WP`.
+The trampoline is `src/arch/trampoline.S`, assembled with `global_asm!` into `.trampoline` (inside
+`__rodata_start..__rodata_end` so the kernel map covers the copy source) and copied to the chosen
+page. It goes: real mode, set up a GDT, enable protected mode, load CR3 from the param block, set
+`EFER.LME` and `EFER.NXE`, enable paging, long jump to 64-bit, load the stack, call the Rust entry
+point. On the way it clears `CR0.CD` and `CR0.NW` (then `wbinvd`), sets `CR4.PAE` and `CR4.PGE`, and
+sets `CR0.PG` and `CR0.WP`. The blob runs at whichever page boot chose, from `0x1000` to `0x9F000`:
+its real-mode code addresses itself through CS (DS = CS, offsets from the blob's start), and
+`smp_init` patches its absolute operands (the protected-mode and long-mode entry addresses, the GDT
+base, and the parameter block's address) from the page's base when it copies it. Rule; not yet
+enforced: the blob sets DS to 0 and takes absolute addresses from `.set BASE, 0x8000`, which hold
+only below 64 KiB (ROADMAP §10.6).
 
 The blob loads CR3 with a 32-bit `mov`, so the kernel PML4 must lie below 4 GiB.
 `smp_init::start_one` checks it and, when the PML4 is higher, skips the AP with
@@ -3287,8 +3310,8 @@ Two correctness requirements:
   compiler move the copy past the write that starts the AP, and the AP then reads uninitialized
   parameters. This one is invisible in debug builds.
 - The trampoline page must be identity mapped and executable. The AP starts in real mode and touches
-  physical `0x8000` directly, so this cannot go through the physmap. Reserve the frame in the PMM
-  forever, even after all APs are up.
+  the page's physical address directly, so this cannot go through the physmap. Reserve the frame in
+  the PMM forever, even after all APs are up.
 
 ## 7.4 AP bring-up sequence
 
@@ -4304,9 +4327,9 @@ Host: `cr_homes_column_same_row`, `cr_paint_overwrites_in_place`. In-guest: `fb_
 ## 9.2 Memory
 
 **AP bring-up hangs with no output, or faults at a low address.**
-The low identity window was mapped with NX on 2 MiB pages, and the AP fetched the trampoline at
-`0x8000` after enabling paging. Rule: the first 2 MiB of the identity window is executable. Everything
-else stays NX.
+The low identity window was mapped with NX on 2 MiB pages, and the AP fetched the trampoline from
+its low page after enabling paging. Rule: the first 2 MiB of the identity window is executable.
+Everything else stays NX.
 
 **Building page tables at boot never finishes.**
 `map_end` was computed from raw memory map entries, and firmware described an MMIO BAR as a
@@ -5145,7 +5168,7 @@ per-architecture uapi (ROADMAP §13.10).
 | FP and SIMD state | port module, under §7.5's per-thread rules | FXSAVE image | V0-V31, FPCR, FPSR | §10.6, §11.6 |
 | User TLS register | port module | `FS_BASE` | `TPIDR_EL0` | §11.6 |
 | Context switch | trait | `switch_context`: callee-saved registers, RSP, RIP | `switch_context`: x19-x29, SP, LR | §10.3, §11.4 |
-| Secondary-CPU bring-up | port module | INIT-SIPI and the `0x8000` trampoline (§7.3) | PSCI `CPU_ON` | §11.4 |
+| Secondary-CPU bring-up | port module | INIT-SIPI and the trampoline page (§7.3) | PSCI `CPU_ON` | §11.4 |
 | CPU identity, topology, and features | port module | APIC ID, CPUID | MPIDR, ID registers | §11.4 |
 | Idle | port module | `sti; hlt` | `wfi` with IRQs masked (below) | §11.3, §19.6 |
 | Power-off and reset | port module | ACPI, the 8042, `isa-debug-exit` | PSCI `SYSTEM_OFF` and `SYSTEM_RESET` | §11.4, §20.2 |
