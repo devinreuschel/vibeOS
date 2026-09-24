@@ -1681,7 +1681,13 @@ scanout is a later polish pass; double buffering is also parked (ROADMAP §5.1).
   has been read by atomic exchange through the ROADMAP §10.3 page-table seam and folded into the
   page, and the invalidation has completed (§2.4). Writeback then writes it, and a later store either
   faults on the write-protected PTE or sets the dirty bit again. Reclaim harvests dirty bits the same
-  way before it decides (§4.4). Planned (ROADMAP §12.2, §12.4, §12.6).
+  way before it decides (§4.4). The MMU sets accessed and dirty bits in live entries: always on
+  x86_64, and on aarch64 when ROADMAP §12.2 sets `TCR_EL1.HA` and `HD`, where a write through a leaf
+  with `DBM` set clears its AP[2]. So every software store to a live PTE is an atomic exchange or
+  compare-and-swap, and an operation that removes write permission or the mapping (`mprotect`,
+  `munmap`, reclaim) folds the old dirty bit into the page as cleaning does. `DBM` is set only on a
+  user leaf its process may write and that is not COW-shared, never on a kernel leaf. Planned (ROADMAP
+  §12.2, §12.4, §12.6).
 - Write-notify. A writable `MAP_SHARED` mapping of a file whose pages are written back to a device
   (a vibefs or FAT file, or a block device) maps a clean page read-only on both architectures,
   whatever the hardware's dirty management. The first store faults. The fault takes the page busy,
