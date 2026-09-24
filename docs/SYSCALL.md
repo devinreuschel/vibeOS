@@ -242,10 +242,14 @@ that `dup` or `fork` copied share one offset. While the table is full, every
   reach the FAT `vibe` directory that the vibefs mount hides, and
   `/vibe/./f` returns `EINVAL` (F056, F086; ROADMAP §10.4)
 - `read`, `write`, and `lseek` copy the slot out, drop the table lock for
-  the I/O, and write the whole slot back, so two calls on one open file
-  that overlap lose one call's update; they cannot overlap while every user
-  thread runs on one CPU and no file syscall blocks (F055; ROADMAP
-  §13.1)
+  the I/O, and write the whole slot back, `refs` included, so two calls on
+  one open file that overlap lose one call's update, and a stale `refs` can
+  free a slot another descriptor still holds. They cannot overlap while
+  syscall bodies run with IF=0, every user thread runs on one CPU, and no
+  file syscall blocks. ROADMAP §10.4 keeps `refs` out of the write-back
+  before §10.6 makes syscall bodies preemptible; after that a process and
+  its `fork` child can overlap on one inherited descriptor and lose an
+  offset update until §13.1's description lock (F055)
 - a kernel-side `dispatch()` probe with no process still sees `getpid=0`
   and `EBADF` for a closed fd; `with_user_as` binds a temporary process
   so pointer-validation tests use a process fd table
