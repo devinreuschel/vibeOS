@@ -47,8 +47,8 @@ reports exactly the part implemented, as Linux reports a part it lacks, and `doc
 part with the Linux document that defines it.
 
 `- [ ]` and `- [x]` are the live status. Edit them in the commit that lands the work. There is no third
-state. A deferral is an open box with a trailing note naming the phase that lands it, and that phase's
-gate cannot close while the box is open.
+state. A deferral is an open box with a trailing note, `lands in §M.x`, naming the later section that
+lands it, and that section's phase cannot close while the box is open.
 
 A box is ticked only by the commit that makes the test proving it pass. That commit names the test in a
 `Proves:` trailer, one per box it ticks: a host, in-guest, or user test by name, an e2e marker, a
@@ -68,12 +68,16 @@ example `B1+DX1`), and a code may take a series of PRs as a slice does; its line
 as PRs named after their subsection, in the three waves its preamble orders.
 
 **Stretch** subsections, the [Beyond](#beyond) list, and [Funded goals](#funded-goals) are excluded from
-exit gates. They are where the hard, optional, or paid things go, so that a phase is either done or not.
+exit gates and from the boxes a phase must close. They are where the hard, optional, or paid things go,
+so that a phase is either done or not.
 
-**Exit gate** is the definition of done. Gates are verifiable from outside the code: a marker appears
-in serial output, a test target passes, a command produces the right result. "The code is written" is
-not a gate. If a gate cannot be checked by running something, it is written wrong. A document counts as a
-gate only when a script in `make check` verifies its required parts.
+**Exit gate** is the definition of done, with the phase's boxes: a phase is done when every line of its
+exit gate passes and every box in its sections outside Stretch is ticked or deferred to a later phase,
+and `make gate PHASE=N` (§10.9) checks both. A box that no gate line names is not optional; the phase
+ticks it or defers it by a note. Gates are verifiable from outside the code: a marker appears in serial
+output, a test target passes, a command produces the right result. "The code is written" is not a gate.
+If a gate cannot be checked by running something, it is written wrong. A document counts as a gate only
+when a script in `make check` verifies its required parts.
 
 A gate that measures time, a rate, or throughput, or sizes its test against memory, names the
 conditions it holds under: the accelerator, guest memory, and CPU count, and the VMM when it is not QEMU.
@@ -132,7 +136,7 @@ on the same runner, in the same job where it fits, so runner noise cancels.
 - no `TODO` describing a correctness gap. Those become lines in this file, and from §10.9's `scripts/check_todos.py` on, `make check` fails on a `TODO`, `FIXME`, or `XXX` that cites no section of this file.
 - every box ticked names its proof in a `Proves:` trailer (see above); from §10.9's `check_ticks.py` on, CI enforces it on every pull request
 - every `unsafe fn` has a `# Safety` section and every `unsafe` block a one-line `// SAFETY:` reason; clippy's `missing_safety_doc` (with `check-private-items`) and `undocumented_unsafe_blocks` are denied from §10.1 on
-- from Phase 10 on, a phase is tagged only when `make gate PHASE=N` passes; that command fails for any gate line but the tag line that has no §10.9 gate-map entry naming what proves it: a command, a CI job on GitHub-hosted runners, or, for a line or the part of one that runs under HVF, a record of its run on the Apple Silicon dev host, since no hosted CI runner can run an HVF guest; from Phase 11 on it also requires every entry of `tests/gates/common.toml` (§11.7)
+- from Phase 10 on, a phase is tagged only when `make gate PHASE=N` passes; that command fails for any gate line but the tag line that has no §10.9 gate-map entry naming what proves it: a command, a CI job on GitHub-hosted runners, or, for a line or the part of one that runs under HVF, a record of its run on the Apple Silicon dev host, since no hosted CI runner can run an HVF guest; from Phase 11 on it also requires every entry of `tests/gates/common.toml` (§11.7); it also fails on an open box in the phase's sections outside Stretch that no `lands in §M.x` note defers to a later phase, and on an open box anywhere whose note names one of the phase's sections
 - from §11.7's ordering check on, every atomic ordering other than `SeqCst` outside test code, fences included, carries a one-line comment naming the access it pairs with, or saying it pairs with none; `scripts/check_orderings.py` in `make check` fails on one without
 
 Review holds the standing gates no script can decide: host tests for new portable logic, which §10.1's
@@ -907,9 +911,9 @@ limitations.
 - [ ] a dispatch table indexed by number, with an arity and a validation policy per entry, that syscall dispatch reads, each declared pointer argument checked by its handler where it first copies through it, after Linux's earlier checks (SYSCALL.md §3); today `proc_init::dispatch_frame` is a `match nr`, the `SyscallInfo` fields `arity`, `ptr_mask`, and `len_arg` and `validate_args` in `src/syscall.rs` are read only by host tests, and `open`, `execve`, and `wait4` have `ptr_mask: 0`. Reopened by the kernel review (F150); lands in §10.5.
 - [x] first set wired for proof: `write`, `exit`, `getpid`, `sched_yield`
 - [x] remainder: `read`, `open`, `close`, `lseek`, `fork`, `execve`, `wait4`, `getppid`, `dup`, `dup2`, `kill`, `fcntl`
-- [ ] `brk`, anonymous `mmap`/`munmap`, `getdents64`, `fstat`, and `nanosleep`: land in §10.5
-- [ ] `openat`, `dup3`, and fork-shaped `clone`: land in §11.6
-- [ ] `stat` and the rest of the POSIX floor: land in §13.9
+- [ ] `brk`, anonymous `mmap`/`munmap`, `getdents64`, `fstat`, and `nanosleep`; lands in §10.5
+- [ ] `openat`, `dup3`, and fork-shaped `clone`; lands in §11.6
+- [ ] `stat` and the rest of the POSIX floor; lands in §13.9
 - [x] errno numbers equal Linux's for every name `src/syscall.rs` defines (F083)
 - [ ] each error condition returns the errno Linux returns for it; today a full filesystem, a full global open-file table, and FAT's 4 GiB file limit return `EMFILE` instead of `ENOSPC`, `ENFILE`, and `EFBIG`, on-disk corruption returns `EINVAL` instead of `EIO`, and `lseek` on the console returns `EINVAL` instead of `ESPIPE`. Reopened by the kernel review (F083); lands in §10.4.
 - [x] every pointer argument range-checked against the caller's address space before use: canonical, in the user half, above the null guard, no overflow, and a present `USER` leaf on every page; the `WRITABLE` bit of a destination is not checked, which §9.2's open accessor box fixes (F023)
@@ -965,7 +969,7 @@ limitations.
 - [x] `SIGCHLD` on child exit
 - [x] default actions: terminate, ignore, stop
 - [ ] a signal whose default action terminates or stops is dropped when sent to pid 1, as Linux drops a signal init has no handler for; today any ring-3 process can kill or stop init; lands in §10.5 (F068)
-- [ ] user-installed handlers, masking, and queueing: land in §13.8
+- [ ] user-installed handlers, masking, and queueing; lands in §13.8
 
 ### 9.8 First userspace
 - [x] a minimal freestanding user program with hand-written syscall stubs and no libc, to prove the path
@@ -1331,7 +1335,7 @@ model covers.
 Gate lines, CI timings, and dependencies as data a script reads.
 
 - [ ] a gate map from Phase 10 on: `tests/gates/phase-<N>.toml` gives each exit-gate line of phase N, keyed by its text, the entries that prove it, each a local command, a scheduled CI job on GitHub-hosted runners that must be green on the gated commit, read through `gh`, or a dev-host record; a line with several entries, such as one per architecture or accelerator, passes only when all of them pass; the entries of a line that names a `scripts/check_*.py` include one that runs it, and `scripts/check_gates.py` (below) fails when none does; each later phase adds its map in the slice that closes its gate, and Phases 0 to 9 get none
-- [ ] `make gate PHASE=N` checks every entry, prints pass or fail per gate line, and fails when a gate line other than the tag has no entry; no entry runs `make gate` itself, so the entry for a line that names it runs that line's other checks; the maintainer runs it before tagging, and `release.yml`'s `build` job runs it at the release tag's commit for the phase that tag closes, and nothing is signed or published when it fails; `scripts/check_gates.py` in `make check` fails when an entry's text matches no gate line in this file, or a job entry names a workflow whose `runs-on` has a `self-hosted` label
+- [ ] `make gate PHASE=N` checks every entry, prints pass or fail per gate line, and fails when a gate line other than the tag has no entry, when an open box in Phase N's sections, outside a subsection headed `Stretch:`, carries no `lands in §M.x` note with M greater than N, and when an open box anywhere in this file carries a `lands in` note naming a section of Phase N, printing each such box, with harness tests of both rules; no entry runs `make gate` itself, so the entry for a line that names it runs that line's other checks; the maintainer runs it before tagging, and `release.yml`'s `build` job runs it at the release tag's commit for the phase that tag closes, and nothing is signed or published when it fails; `scripts/check_gates.py` in `make check` fails when an entry's text matches no gate line in this file, or a job entry names a workflow whose `runs-on` has a `self-hosted` label
 - [ ] CI history: when a `ci` run completes, a `workflow_run` job reads its jobs and steps from the Actions API and commits one JSON record (commit, event, conclusion, per-job and per-step wall time) to an orphan `ci-history` branch, which outlives the 90-day limit on Actions logs and artifacts; the job has `contents: write` only, checks out only `ci-history`, runs no code from the triggering commit, never puts run fields (which a fork's pull request sets) into a shell line, writes one file per run id, and retries its push after a rebase, so concurrent runs lose no record; later lines add workflows and fields to the record; `scripts/ci_history.py` prints any step's series and fails when a `ci` run on `main` since the history landed has no record, and gains modes that gate-map entries run as local commands, such as §21.1's `--nested`, which needs a passing leg of each vendor's path within the nightly job's last 7 runs; §10.1's push-to-green numbers are read from it
 - [ ] dev-host records, for a gate line or the part of one that runs under HVF, since no hosted CI runner can run an HVF guest: on the Apple Silicon dev host, `make gate PHASE=N RECORD=1` runs each record entry's command in a clean checkout of the gated commit and writes one JSON file per commit and entry (commit, the fixed host label `dev-host` and the Mac model, macOS and QEMU versions, command, the numbers the line measures, pass or fail) to `ci-history`, and never the machine's hostname, a user name, or a path under the home directory, since `ci-history` is public, retrying its push after a rebase; everywhere else, `release.yml` included, `make gate` runs no record entry's command and passes the entry only when `ci-history` holds a passing record for it at the gated commit. A job entry passes on a green run of its workflow at the gated commit from any trigger; when there is none, the maintainer starts one before tagging with `gh workflow run` on a branch at that commit, so every workflow a gate entry names has a `workflow_dispatch` trigger; `release.yml` reads runs and starts none
 - [ ] `deny.toml`, and `cargo deny check licenses bans sources` in `make check` (skipped with a hint when `cargo-deny` is not installed, and installed at a pinned version in the `check` job): licenses from an allowlist compatible with the tree's MIT license, crates.io as the only source, and a `[bans]` allow list naming every crate in the graph, so a pull request that adds a dependency fails until it names the crate there, which turns AGENTS.md's dependency note into a check; `cargo deny check advisories` on the nightly job, since it fetches the RustSec database
@@ -3224,7 +3228,7 @@ the §22.3 tested-platforms list, are [Funded goals](#funded-goals).
 - [ ] a developer guide covering the build, the test tiers, and the subsystem docs in this directory
 - [ ] the tested-platforms list, generated into `docs/HARDWARE.md` beside §20.1's model list from the release's §10.9 gate records: an entry for each QEMU machine type, accelerator, firmware build, and device-model set the gate ran on, and the dev host's macOS and QEMU versions for its records; its entries are virtual machine configurations, and it claims no physical machine
 - [ ] man pages for everything shipped
-- [ ] a known-issues list that includes every open box in every shipped phase, generated from this file, and the hang §22.2's watchdog box says it cannot cover, for each architecture
+- [ ] a known-issues list, generated from this file, of every box a shipped phase deferred, with the section that lands it, and the hang §22.2's watchdog box says it cannot cover, for each architecture
 
 ### 22.4 The loop
 - [ ] a CI agent on vibeOS: a workflow job boots an image the §22.2 unattended installer produced, under KVM on the hosted x86_64 runner (§24.1 adds the arm64 runner's job, under TCG), and passes in the commit and the commands to run, and no token or secret, since the guest runs candidate code; the agent checks the commit out over HTTPS with no credential, since the repository is public, runs the commands, such as the ladder with test kernels booted under the §21.2 VMM (TCG where the guest has no VMX, SVM, or EL2), and hands each command's exit status, log, and artifacts back to the job, which uploads them to the workflow run and concludes with their result
