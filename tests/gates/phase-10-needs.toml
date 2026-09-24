@@ -205,9 +205,12 @@ needs = ["the nine two-way module dependencies broken"]
 why = "claim: it writes through A4's raw serial layer"
 
 [[box]]
-key = "`now_ns` is derived from the TSC alone"
-needs = ["timestamps from the §10.3 cycle counter"]
-why = "claim: the TSC path needs the §10.7 warp test"
+key = "`now_ns` is computed from one free-running counter"
+needs = [
+  "timestamps from the §10.3 cycle counter",
+  "`vibeos.ktest=<glob>` runs only the matching in-guest tests",
+]
+why = "claim: the TSC candidate needs the warp test, and the hpet=off boot needs ktest="
 
 [[box]]
 key = "`vibeos.ktest=<glob>` runs only the matching in-guest tests"

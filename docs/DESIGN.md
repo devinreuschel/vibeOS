@@ -2633,8 +2633,9 @@ hold on both architectures.
 |--------|----------|
 | PIT channel 0 | Bootstrap tick at ~1 kHz. Last-resort scheduler tick if the LAPIC timer cannot be used. |
 | PIT channel 2 | TSC calibration when there is no HPET. One-shot, gated through port `0x61`. |
-| HPET main counter | Preferred TSC calibration reference. Monotonic, known frequency from the ACPI table. |
-| TSC | Sub-millisecond timestamps, `busy_wait_ms`, deadline arithmetic. |
+| HPET main counter | Preferred TSC calibration reference. Monotonic, known frequency from the ACPI table. Planned (ROADMAP §10.3): the clocksource when the TSC is not invariant (§6.4). |
+| ACPI PM timer | Planned (ROADMAP §10.3): the clocksource with neither an invariant TSC nor an HPET (§6.4). 3.579545 MHz, 24 or 32 bits, at the FADT's `X_PM_TMR_BLK`. |
+| TSC | Sub-millisecond timestamps, `busy_wait_ms`, deadline arithmetic. Planned (ROADMAP §10.3): the clocksource when invariant (§6.4). |
 | LAPIC timer | Per-CPU preemption tick. TSC-deadline mode preferred. |
 | RTC / CMOS | Wall clock date and time, read once at boot. |
 
@@ -2747,12 +2748,31 @@ IF-off window longer than 1 ms loses ticks, and `now_ns` stays behind the TSC fr
 TSC-deadline mode each rearm starts from a TSC read inside the ISR, so a period is 1 ms plus interrupt
 latency but counts as 1 ms (ROADMAP §10.3, F027).
 
-Option 2 is the destination: with an invariant, synchronized TSC and a single calibration constant,
-`now_ns` is a `rdtsc` and a multiply with no shared state at all. Planned: ROADMAP §10.3 (F027)
-derives `now_ns` from the TSC alone when the TSC is invariant, and §10.7's warp test decides when it
-is synchronized enough to order a trace. Get there before relying on
-timestamps for tracing, because option 1 will silently produce non-monotonic values the moment the BSP
-goes idle in a deep C-state.
+Option 2 is the destination, generalized: one clocksource, a free-running counter chosen at boot
+that every CPU reads, and `now_ns = base_ns + ((read() - base_cycles) mod 2^width) × mult >> shift`.
+The tick drives scheduling and timer expiry, and no count of timer interrupts enters the clock.
+Candidates, best first:
+
+| Clocksource | Architecture and condition | Width | A read |
+|---|---|---|---|
+| TSC | x86_64, when CPUID reports it invariant and ROADMAP §10.7's warp test saw no backward step | 64 | an instruction |
+| KVM clock, Hyper-V reference page | x86_64 under that hypervisor (ROADMAP §21.4, §26.5) | 64 | a shared page and an instruction |
+| HPET main counter | x86_64 with an ACPI HPET table | 32 or 64 | an MMIO load: an exit under KVM, QEMU's global lock under TCG |
+| ACPI PM timer | x86_64 with the FADT's timer block | 24 or 32 | a port read: an exit under KVM |
+| `CNTVCT_EL0` | aarch64, always | at least 56 | an instruction after `isb` |
+
+A counter narrower than 64 bits is read at least once per half wrap. CPU 0's tick does it; once idle
+stops the tick (§6.6), the CPU that holds that duty hands it on before it stops its own tick, and no
+idle CPU sleeps past half the wrap, the bound Linux calls `max_idle_ns`. The boot marker
+`time: clocksource <name>` names the choice. The HPET and the PM timer cost an exit per read on KVM
+without an invariant TSC until the paravirtual clock lands; ROADMAP §19.3 measures the cost, and if
+it shows, those two read once per tick and interpolate from the TSC, which still loses no time when
+ticks coalesce. Planned: ROADMAP §10.3 (F027) moves x86_64 `now_ns` to this model, and §11.3 gives
+aarch64 the same function. Until then option 1 stalls and lags: after a CPU 0 IF-off stretch or deep
+idle, the `LAST_NS` clamp repeats one value until the interpolation catches up, and time then stays
+behind the TSC by the lost ticks. Trace timestamps are separate: ROADMAP §10.7's records carry raw
+cycle-counter reads, which order records across CPUs only when the TSC is invariant and the warp test
+saw no backward step.
 
 ## 6.5 Timers and timeouts
 
@@ -2775,7 +2795,10 @@ A fixed 1 kHz tick on an idle CPU is wasted interrupts and, on real hardware, wa
 deadline mode makes tickless operation possible: when a CPU goes idle, arm the deadline for the next
 pending timer instead of the next millisecond, and skip the timer entirely if there is nothing pending.
 Not day-one work, but the timer abstraction should be "next deadline" rather than "periodic tick" so
-this does not require rewriting the scheduler. Planned: ROADMAP §19.6 lands tickless idle.
+this does not require rewriting the scheduler. Planned: ROADMAP §19.6 lands tickless idle. An idle
+CPU's next deadline is then no later than half the clocksource's wrap time (§6.4), and the CPU that
+reads a narrow clocksource for its wrap hands that duty to one that stays awake before it stops its
+own tick.
 
 The RTC gives date and time to one-second resolution over ports `0x70`/`0x71`, with the usual
 century-register and BCD-versus-binary quirks to detect. Read it once at boot, then track time with the
@@ -3939,7 +3962,10 @@ TCG has no invariant TSC. Boot HPET calibration runs before APs; a later PIT cha
 different apparent TSC rate, and LAPIC periodic ticks coalesce so `uptime_ms` during a sleep is not
 50–100. Rule: in-guest checks key off the invariant-TSC CPUID bit. Without it, retry PIT against a
 fresh HPET sample with a 50–200% band, and accept `now_us` (~50 ms) when ticks coalesce. Do not loosen
-the invariant-TSC path.
+the invariant-TSC path. Under KVM too, QEMU leaves the invariant-TSC bit out of `-cpu max` and
+`-cpu host` while the vCPU is migratable, its default, so the KVM leg asks for `+invtsc` and fails if
+the guest still reports none (ROADMAP §10.1). Planned (ROADMAP §10.3): `now_ns` stops counting ticks,
+and the coalescing allowance goes with it.
 
 **Serial output from multiple CPUs is unreadable.**
 No lock on TX. Rule: lock serial TX, and write each line whole: format it, newline included, into one
@@ -4515,7 +4541,7 @@ per-architecture uapi (ROADMAP §13.10).
 | Interrupt mask | trait | RFLAGS.IF (`cli`, `sti`) | PSTATE.I and F (`msr daifset`, `msr daifclr`); priority masking from ROADMAP §25.5 | §10.3 |
 | Interrupt controller and IRQ identity | port module: finding the root controller, with the vector entry and the IPI send in their own rows; each controller is an `IrqChip` object (§5.4), not a seam trait | 8259, I/O APIC, and LAPIC MSI chips; a hwirq is an IDT vector (§5.3) | GICv2 or GICv3 distributor and redistributor chips, ITS or GICv2m; a hwirq is an INTID | §11.3 |
 | IPI send and its ordering | trait | LAPIC ICR write (§7.6) | SGI register write | §10.3, §11.3 |
-| Timer and cycle counter | trait (`CycleCounter`) | TSC; LAPIC timer | `CNTVCT_EL0`; generic timer | §10.3, §11.3 |
+| Timer and cycle counter | trait (`CycleCounter`) | TSC, or the HPET or ACPI PM timer as the clocksource (§6.4); LAPIC timer | `CNTVCT_EL0`; generic timer | §10.3, §11.3 |
 | Page-table format and attributes | trait (`PageTable`); encodings in the pure half | 4-level tables, PAT bits | 4 KiB granule, 48-bit VA, MAIR, break-before-make | §10.3, §11.2 |
 | TLB maintenance and address-space ids | trait (`PageTable`) | `invlpg` and the shootdown IPI (§7.9); no PCID | broadcast `tlbi ...is`; ASIDs from §11.2's generation allocator | §10.3, §11.2 |
 | Cache maintenance and DMA coherence | trait (`Barriers`) | none: coherent | per-device coherence from `dma-coherent` or `_CCA`; `dc cvac` and `dc ivac` to the Point of Coherency for non-coherent devices (§4.7); `dc` and `ic` for code | §10.3, §11.2 |
