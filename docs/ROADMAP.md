@@ -1872,7 +1872,7 @@ dynamic linker's relocation types and TLS are per architecture. Alpine publishes
 - [ ] a control tool for start, stop, restart, status, and logs
 - [ ] before `login` lands, DESIGN §2.10's interim security posture goes back to the owner, since its acceptance (design review G006) assumed one user: an agent writes an OWNER DECISION block in §2.10 that states what this phase adds (logins, password hashes, a second user sharing the machine) and the options, and `login` merges only after §2.10 records the answer, together with any §18.3 box the answer moves ahead of it
 - [ ] `login` and a getty on `/dev/tty1` and on the serial TTY (`/dev/ttyS0` or `/dev/ttyAMA0`, §13.7); `passwd` and `su`, installed set-user-ID root; a shadow file hashed with §14.7's password hash, readable only by root. `login` and `su` switch identity with §13.9's calls, which §13.9 checks, and `passwd` changes only the invoking user's entry unless run by root
-- [ ] the DESIGN §8.3 e2e contract survives login. `make rootfs` with a test overlay builds a harness root image, which no release image or §14.6 release manifest contains. The overlay adds a test user and runs the getty on `/dev/tty1` and on the serial TTY with `--autologin <user>`, as agetty does, and that user's profile prints the registered `shell ready` marker when its TTY is the serial one. The marker order, the §13.7 serial and `sendkey` echo checks, and every later line that waits for `shell ready` run unchanged in that image. The Phase 14 `login` gate line boots the overlay with autologin off and types the test user's credentials over serial. DESIGN §8.3 updated in the same commit
+- [ ] the DESIGN §8.3 e2e contract survives login. `make rootfs` with a test overlay builds a harness root image, which no release image or §14.6 release manifest contains. The overlay is also the only way a test trust anchor reaches a guest. Test CAs, test signing keys and key sets, a test update channel's key, and the keys the harness logs in with are generated per run where the test allows, as §18.7's Secure Boot test generates its keys, and otherwise live in `tests/keys/`, whose README lists each one's fingerprint and the lines that use it; the private keys there are public, so an image that trusts one trusts anyone. An anchor enters only the image this overlay builds, files the harness adds to an installed system before the test that needs them, or a service the harness runs on the host, never a §14.6 recipe or a release artifact, and §14.6's test-anchor check refuses a release that carries one. The overlay adds a test user and runs the getty on `/dev/tty1` and on the serial TTY with `--autologin <user>`, as agetty does, and that user's profile prints the registered `shell ready` marker when its TTY is the serial one. The marker order, the §13.7 serial and `sendkey` echo checks, and every later line that waits for `shell ready` run unchanged in that image. The Phase 14 `login` gate line boots the overlay with autologin off and types the test user's credentials over serial. DESIGN §8.3 updated in the same commit
 
 ### 14.4 Coreutils
 - [ ] file and directory: `ls`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `ln`, `touch`, `stat`, `find`, `du`, `df`
@@ -1929,6 +1929,7 @@ host. Signing in the guest would have left the key in the memory of an unrelease
 candidate's whole build, where §10.7 publishes a failed run's core.
 
 - [ ] the harness verifies a downloaded release ISO against the manifest before booting it, and refuses a tampered one; the check runs a hostlib `release-manifest` tool built from the §14.7 crate, as the harness runs `mkfs-vibefs`, so the harness stays standard library only (§0.6); the tool builds manifests and verifies them but never signs, since `release.yml`'s `sign` job uses stock `ssh-keygen` (the custody box)
+- [ ] the release workflow refuses to publish a release that carries a test trust anchor (§14.3). In a job that holds no signing key and no write token, a check built on the hostlib tools that read vibefs images and §14.6 packages unpacks every image and package payload of the release and fails, naming the file, on: a public key, fingerprint, or certificate from `tests/keys/`, in any encoding, anywhere in the bytes; a trust store holding what the release did not put there: a key-set record other than the release's own, any `authorized_keys` file, and each store a later line adds to this check; and a package whose signature names a key id outside the release's key-set record. A host test plants each kind in a copy of a small release and expects a refusal that names it
 
 ### 14.7 Crypto primitives
 Moved here from Networking, which had them from Hardening: login (§14.3) and signed packages (§14.6)
@@ -2145,9 +2146,9 @@ The primitives, the entropy pool, and the CSPRNG are §14.7. This is the part th
 fetching over HTTPS (§15.8) needs it before Hardening; the upstream `cargo` and `git` that §17.7 runs bring their own. `sshd` does not, since SSH
 brings its own key exchange.
 
-- [ ] X.509 parsing and chain validation through `rustls-webpki` (ISC), with a bundled root store, host-tested against real certificates and fuzzed like every parser
+- [ ] X.509 parsing and chain validation through `rustls-webpki` (ISC), with a bundled root store, host-tested against real certificates and fuzzed like every parser; the root store joins §14.6's test-anchor check, which refuses a root its pinned source does not list
 - [ ] TLS 1.3 client and server in userspace through rustls (Apache-2.0, ISC, or MIT), with default features off and a `CryptoProvider` over the §14.7 facade, not a TLS state machine written in-tree; 1.2 only if a peer that matters demands it. The provider is security glue, so the nightly job runs rustls's BoGo shim with it against BoringSSL's test runner, with rustls's checked-in list of expected differences and a vibeOS list beside it that only shrinks. If rustls cannot build for the user runtime, this box records why and what replaces it
-- [ ] an HTTPS fetch is the integration test, run in CI against a host peer with a test CA; a fetch from a public host is a manual check, not a gate
+- [ ] an HTTPS fetch is the integration test, run in CI against a host peer with a test CA, which the guest trusts only through §14.3's harness overlay; a fetch from a public host is a manual check, not a gate
 
 ---
 
@@ -2457,7 +2458,7 @@ S1 turned SMEP, SMAP, UMIP, and `CR0.WP` on at boot (`arch::cpu::harden`). §10.
 ### 18.5 Fuzzing
 - [ ] Linux's KCOV ABI: the kernel built with SanitizerCoverage `trace-pc` instrumentation (`-C passes=sancov-module` with `-sanitizer-coverage-level=3` and `-sanitizer-coverage-trace-pc` through `-C llvm-args`), `kcov` in a `debugfs` mounted at `/sys/kernel/debug`, mode 0700 and owned by root, as Linux mounts it, with `KCOV_INIT_TRACE`, `KCOV_ENABLE`, and `KCOV_DISABLE`, and a per-thread buffer the fuzzer maps; the §13.13 fuzzer reads the same buffer as its coverage signal. PCs are recorded with the §18.2 slide subtracted, as Linux's are. The `__sanitizer_cov_trace_pc` callback is written in `global_asm!`, so it is not itself instrumented, and records only in thread context for a thread that enabled KCOV, doing nothing before per-CPU data exists
 - [ ] syzkaller's `linux` target runs against vibeOS with `sandbox: none`, an `enable_syscalls` list generated from the §10.5 table, and its Linux-only features off; its executor is built static on the Linux host and runs unmodified. A `vibeos` target is written only if that fails, and this line records which
-- [ ] the §15.8 `sshd` gains what syzkaller's QEMU backend uses: public-key user authentication from `~/.ssh/authorized_keys`, since its `ssh` runs with `BatchMode=yes`; root login with a key; `exec` requests without a pty; remote port forwarding (the `tcpip-forward` request and `forwarded-tcpip` channels behind `ssh -R`), since the backend runs QEMU's user network with `restrict=on` and the executor reaches the manager only through that tunnel; and a native `scp` in the base system whose `-t` sink mode is what `scp -O` runs; each tested from a host client on both architectures
+- [ ] the §15.8 `sshd` gains what syzkaller's QEMU backend uses: public-key user authentication from `~/.ssh/authorized_keys`, since its `ssh` runs with `BatchMode=yes`; root login with a key; `exec` requests without a pty; remote port forwarding (the `tcpip-forward` request and `forwarded-tcpip` channels behind `ssh -R`), since the backend runs QEMU's user network with `restrict=on` and the executor reaches the manager only through that tunnel; and a native `scp` in the base system whose `-t` sink mode is what `scp -O` runs; each tested from a host client on both architectures; the key syzkaller logs in with is generated per run and reaches root's `authorized_keys` only through §14.3's harness overlay
 - [ ] syzkaller's QEMU backend boots a build with KCOV and the §12.1 KASAN on both architectures and reaches the guest through that `sshd`, including its reverse-forwarded port and its file copy with legacy-protocol `scp -O`; the C reproducer syzkaller writes for every crash is checked in and replayed by the user test runner
 - [ ] a hostlib tool maps the corpus's KCOV program counters to source files through the kernel ELF's line table and reports coverage per subsystem on every run, so a subsystem the fuzzer never reaches is visible
 - [ ] syzkaller is the weekly campaign, in the shards the exit gate describes, with one corpus artifact carried from shard to shard; the §13.13 fuzzer stays on the nightly job, and the parser-level fuzzers run from §10.2 (every byte-slice parser, ELF included) and §15.10 (network)
@@ -2978,7 +2979,7 @@ means QEMU with `-accel kvm` on vibeOS.
 and tools run on them.
 
 - [ ] an OCI image and distribution client: pull by digest over §15.11 HTTPS, verify every layer's digest, and unpack each layer with its whiteouts onto §21.5's overlayfs
-- [ ] an OCI registry on the CI host serving the pinned test images over TLS with the §15.11 test CA, so no CI job pulls from the public internet
+- [ ] an OCI registry on the CI host serving the pinned test images over TLS with the §15.11 test CA, which the guest trusts only through §14.3's harness overlay, so no CI job pulls from the public internet
 - [ ] a container runtime with the OCI runtime command line (`create`, `start`, `state`, `kill`, `delete`) that runs runtime-spec bundles (`config.json`): namespaces, mounts and `pivot_root`, rlimits, the §18.6 capabilities and `seccomp` profile, cgroup placement, and process launch
 - [ ] the opencontainers `runtime-tools` validation suite, pinned, passes in-guest against the runtime on both architectures, with a checked-in skip list whose entries each name a reason
 - [ ] a runtime tool with `pull`, `run`, `exec`, `ps`, `stop`, and `rm` over the client and the runtime
@@ -3265,7 +3266,7 @@ as an artifact, since Go 1.4 has no arm64 port; nothing else crosses architectur
 - [ ] the ISO that the §24.1 toolchains build and the ISO that §17.7's upstream toolchains build have byte-identical kernel ELFs and initrds, and every other differing file is listed with its cause in `docs/BOOTSTRAP.md`, which the §17.5 loop script checks, on both architectures (§24.1)
 - [ ] diverse double-compiling: stage-1 clang and lld built from one source by Alpine's clang and by Debian's gcc (Phase 23) build byte-identical stage-2 toolchains, on both architectures (§24.5)
 - [ ] the chain from stage 0 to the build image runs in roots holding only the seeds `docs/BOOTSTRAP.md` lists or the previous stage's output, and `scripts/check_bootstrap.py`, run by the §24.2 full rebuild over the stage manifests, finds no seed and no unlisted binary in the final build image, on both architectures (§24.5)
-- [ ] at least 500 ports build natively into §14.6 packages signed with §24.2's test key on both architectures in one §24.2 full rebuild per architecture, each with its own test suite passing except the cases on its reasoned expected-failure list
+- [ ] at least 500 ports build natively into §14.6 packages signed with §24.2's rebuild key on both architectures in one §24.2 full rebuild per architecture, each with its own test suite passing except the cases on its reasoned expected-failure list
 - [ ] at least 95% of the ports reproduce: built twice from the same commit, their packages are byte-identical
 - [ ] CPython, Go, Node.js, and OpenJDK built as ports pass their §23.6 suites at Phase 23's thresholds, measured against the passing sets of the same port builds run under the §23.6 reference kernel as §24.2 runs them, on both architectures
 - [ ] no port carries a vibeOS-specific source patch that names no `docs/LINUX.md` divergence, and none carries a patch against musl, Limine, or QEMU
@@ -3291,10 +3292,11 @@ Moved from §17.2 and §17.3, which close Phase 17 on upstream binaries (§17.7)
 
 ### 24.2 Ports
 Ports are §14.6 packages, built by §14.6's recipe tool like the base system and everything a release
-ships. Scheduled rebuilds sign them with a test key whose public half only the §14.3 test overlay
-trusts, since only `release.yml`'s `sign` job may hold the release key (§14.6); for each port a release
-ships, the release's `build` job takes it from the rebuild's runs and refuses one whose two builds
-(below) disagree, and the `sign` job re-signs it into the release repository with the release key.
+ships. Scheduled rebuilds sign them with the rebuild key in `tests/keys/`, whose public half only the
+§14.3 test overlay trusts, since only `release.yml`'s `sign` job may hold the release key (§14.6); for
+each port a release ships, the release's `build` job takes it from the rebuild's runs and refuses one
+whose two builds (below) disagree, and the `sign` job re-signs it into the release repository with the
+release key, and §14.6's test-anchor check refuses a shipped package still signed by the rebuild key.
 
 - [ ] the recipe source decided on measured yield and written in `docs/PORTS.md`: an importer that turns Alpine's APKBUILDs (musl, both architectures) into §14.6 recipes, pkgsrc (built for new platforms), or recipes written by hand; each tried on the same 50 packages, with the counts recorded
 - [ ] the ports tree grows in §14.10's `ports/` layout, and `make check` fails on a port with no §14.6 recipe
@@ -4012,7 +4014,7 @@ part is evdev and HID as libinput and the kselftest `hid` tests expect them.
 ### 31.6 Firmware
 - [ ] one loader: a driver requests a blob by name; blobs for devices needed before root come from the initrd, the rest from `/lib/firmware` in Linux's layout
 - [ ] firmware as its own §14.6 package, each blob's license recorded; its blobs come from `linux-firmware` and Intel's microcode repository, pinned by commit and fetched at test time, and the package is built for tests only, since §14.10's policy publishes no proprietary binary; publishing it once a funded goal brings hardware is the owner's call
-- [ ] each blob's SHA-256 in the firmware package's signed file list (§14.6), checked at load; in-guest tests use a package signed with a test key
+- [ ] each blob's SHA-256 in the firmware package's signed file list (§14.6), checked at load; in-guest tests use a package signed with a test key that only §14.3's harness overlay trusts
 - [ ] §20.1's microcode files served through it
 
 ### 31.7 Harness and the Linux baseline
@@ -4324,7 +4326,7 @@ with `llvmpipe` (§33.3). The call line runs a second vibeOS guest on the same h
 - [ ] Firefox or Chromium from Alpine, chosen by a spike that weighs sandbox requirements, upstream patch count, and each candidate's build from its Alpine recipe, and written down. Each is built in an Alpine guest with no swap and the Phase 24 build guest's 4 vCPUs and 6 GiB, under HVF on the dev host, recording its peak memory and disk; a candidate that cannot build within that memory and a hosted runner's free disk, even with recipe options such as dropping PGO or LTO, is out, and the chosen one's options are written down with it
 - [ ] its sandbox enabled, on §18.6's seccomp filters and §21.5's namespaces
 - [ ] compositing and WebGL through Phase 33's `llvmpipe` or the browser's own software path, video decoded in software, audio through PipeWire, and the camera through the XDG camera portal
-- [ ] the harness's test CA added through the browser's policy file, since the gates serve every page from the host
+- [ ] the harness's test CA added through a browser policy file that only §14.3's harness overlay installs, never the browser's package, since the gates serve every page from the host; the browser's policy directory joins §14.6's test-anchor check, which refuses a policy that adds a certificate
 
 ### 36.5 Accessibility and input methods
 - [ ] AT-SPI2 over D-Bus from Alpine, with the GTK and Qt accessibility bridges
@@ -4364,7 +4366,7 @@ records under HVF, as the era preamble says. On the dev host, which has no vhost
 - [ ] the §37.1 nightly run on the hosted x86_64 runner has passed on 30 consecutive nights, and the weekly run on the hosted arm64 runner in its last 4 weeks, from §10.9's run history
 - [ ] 1000 consecutive suspend cycles of the desktop guest under KVM on the hosted x86_64 runner, with Wi-Fi, Bluetooth, audio, and every head working after the last
 - [ ] boot to the display manager, resume to the lock screen, and a build of the vibeOS tree each take at most 1.5 times the Linux baseline's time
-- [ ] three consecutive release candidates from the §22.1 release job, served from a test update channel on the host, update the desktop guest unattended through §22.2, and an injected bad candidate rolls back
+- [ ] three consecutive release candidates from the §22.1 release job, served from a test update channel on the host, whose key the guest trusts only through §14.3's harness overlay, update the desktop guest unattended through §22.2, and an injected bad candidate rolls back
 - [ ] the §22.3 tested-platforms list gains a daily-driver tier for the desktop guest's configurations (`q35` under KVM, `virt` under TCG and under HVF), generated from the §10.9 records of the §37.1 runs and the dev-host runs, with their numbers
 - [ ] tag `phase-37` and cut the next release
 
