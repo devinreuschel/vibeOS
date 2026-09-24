@@ -978,10 +978,13 @@ make `InterruptGuard` mask by priority instead. The rules below hold on both arc
 
 The kernel is preemptible wherever IF=1. The timer tick and the reschedule IPI call
 `schedule_preempt`, which may switch away from any thread whose `irq_nest` is 0: kernel threads,
-syscall bodies, and fault handlers alike. Planned (ROADMAP §20.9): one exception, `efi_rt` inside a
-firmware call, which runs with IF=1 and is not switched away from until the call returns
-([§4.8](#48-firmware-runtime-services)). Turning interrupts off is how code says "not now", so every
-IF=0 stretch has a reason from the list below and a bound.
+syscall bodies, and fault handlers alike. One IF=1 stretch is not preemptible: from
+[§3.3](#33-_start-order)'s step 13b to step 15 (`irq: enabled`), the BSP takes the tick with IF=1,
+but `on_timer_tick` switches nothing until the idle thread exists. Boot bounds it. Planned (ROADMAP
+§20.9): another exception, `efi_rt` inside a firmware call, which runs with IF=1 and is not
+switched away from until the call returns ([§4.8](#48-firmware-runtime-services)). Turning
+interrupts off is how code says "not now", so every IF=0 stretch has a reason from the list below
+and a bound.
 
 1. IF=0 only in: an interrupt or exception entry or exit stub; a hard-IRQ top half (§2.2); a
    spinlock or `IrqCell` critical section (§2.3); an `InterruptGuard` section that must not be
@@ -991,8 +994,8 @@ IF=0 stretch has a reason from the list below and a bound.
    [§7.11](#711-cpu-offline-and-online) offline rendezvous; the scheduler's switch path; the
    return-to-user sequences of [§5.10](#510-privilege-transitions) rule 4, which begin at rule 11's
    last exit-work check; the panic and halt paths
-   (§2.5); and a CPU's bring-up before its first `sti` (boot before `irq: enabled`, an AP before it
-   enters idle).
+   (§2.5); and a CPU's bring-up before its first `sti` (the BSP before §3.3's step 13b, an AP
+   before it enters idle).
 2. An IF=0 stretch does a bounded amount of work: at most 100,000 instructions from the instruction
    that turns IF off to the one that turns it back on, tens of microseconds on a current core. The
    panic, halt, and bring-up paths of rule 1, the [§7.9](#79-tlb-shootdown) shootdown and
@@ -1388,7 +1391,7 @@ physical span, the RSDP, and `usable()` / `framebuffers()` iterators, and derive
 
 | Request | What we need from it |
 |---------|---------------------|
-| Base revision | Protocol version handshake. Halt with a serial line if unsupported. |
+| Base revision | Protocol version handshake: revision 3 today; ROADMAP §11.1 moves both architectures to the one revision the pinned Limine accepts on aarch64. Halt with a serial line if unsupported. |
 | Framebuffer | Linear BGRX8888, 32 bits per pixel. Row stride is `pitch` bytes, which may exceed `width * 4`. |
 | Memory map | Physical regions and types. Only `USABLE` feeds the buddy allocator. |
 | HHDM | Higher-half direct map offset. `virt = phys + offset` for any physical access before our own tables exist. |
@@ -5325,7 +5328,7 @@ per-architecture uapi (ROADMAP §13.10).
 
 | Concern | Seam | x86_64 | aarch64 | ROADMAP |
 |---|---|---|---|---|
-| Boot handover: the machine state the boot handshake hands over, normalized into `BootInfo` | trait | Limine base revision 3, long mode; without Limine, the direct entry (§4.1): a PVH door and a 64-bit door into one body | Limine base revision 6, EL1, or EL2 with VHE; without Limine, the direct entry (§4.1) behind an arm64 `Image` header, entered with the MMU off | §10.3, §11.1, §25.4, §26.4 |
+| Boot handover: the machine state the boot handshake hands over, normalized into `BootInfo` | trait | Limine base revision 3, until ROADMAP §11.1's bump moves it to aarch64's; long mode; without Limine, the direct entry (§4.1): a PVH door and a 64-bit door into one body | Limine base revision 6, EL1, or EL2 with VHE; without Limine, the direct entry (§4.1) behind an arm64 `Image` header, entered with the MMU off | §10.3, §11.1, §25.4, §26.4 |
 | Early console | port module | 16550 on COM1 | PL011 | §11.1 |
 | Exception entry and exit | port module: generated entry code | one stub per IDT vector ([§5.10](#510-privilege-transitions) rule 1) | one 16-entry vector table ([§11.5](#115-aarch64-exceptions-and-privilege-transitions)) | §10.6, §11.3 |
 | Trap decode | pure half: a trap to a `TrapKind` (§5.2) | vector and error code | vector slot and `ESR_EL1` (§11.5) | §10.6, §11.3 |
