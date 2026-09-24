@@ -243,14 +243,33 @@ PT and BUDDY, so an allocation under either fails only when it grows the heap, t
 recursive-lock check or the rank check on PT, and passes every test that does not grow the heap
 (ROADMAP §10.3).
 
-Filesystem locks (dentry, inode, super, mount) take `RANK_DEVICE`. The rank order therefore forbids
-heap allocation under them and allows logging. The VFS tables are static, so bring-up allocates
-nothing under them. Filesystems get no rank of their own; adding one changes this list and
-`src/lock.rs` in the same commit. Drop the VFS lock before blocking block I/O: the FAT File API never
-holds it across a FAT or block wait, and the FAT volume lives in BSS behind a busy flag, not an
-IRQ-off mutex. Do not nest the VFS lock with the FAT volume. When ROADMAP §10.4's A3 work makes the
-VFS lock a `BlockingMutex`, it leaves the spin ranks for the sleeping tier's first level above, and
-backends may block under it.
+Filesystem spinlocks take `RANK_DEVICE`: today the VFS lock, the open-file table, and each backend's
+mount and slot-allocation locks. The rank order therefore forbids heap allocation under them and
+allows logging. The VFS tables are static, so bring-up allocates nothing under them. Filesystems get
+no spin rank of their own; adding one changes this list and `src/lock.rs` in the same commit.
+
+After ROADMAP §10.4's A3 work, the VFS lock is a `BlockingMutex` at level 1's mount-table position.
+It guards the namespace tables (mounts, dentries, and the inode and open-file tables) and is held
+for a lookup, an insert, or a removal. It is never held across a backend's data I/O, a wait on a
+pipe, TTY, socket, or page, or a user copy. A lookup returns counted inode and file references
+(§2.11 rules 1 and 2). `read`, `write`, `truncate`, `fsync`, and `getdents64` then run on those
+references with the VFS lock dropped, under the backend's own locks (an inode's at level 1, a
+volume's at level 4), and a backend operation receives its superblock and inode through them, never
+`&Vfs`. A namespace change (create, unlink, rename, mkdir, mount) and the directory read of a
+dentry-cache miss may hold the VFS lock across the backend's directory I/O. Lookups leave the lock
+with ROADMAP §19.5's RCU walk; namespace changes stay serialized by it. The fault path and the
+writeback threads reach a file's backend through the counted page-cache reference that the region or
+the page holds, and never take the VFS lock. Each FAT and vibefs volume is a level-4 `BlockingMutex`
+that owns the volume and that nothing force-clears. It is taken with a plain `lock()`, as Linux
+takes FAT's `fat_lock`, and contention never fails an operation.
+
+Why: a lock that every file operation takes and that backends block under serializes all file I/O
+behind one block wait, deadlocks a named-pipe read against its writer, and leaves the fault path,
+which holds the level-2 address-space lock, no legal way to fill a file page. Rule; not yet
+enforced: the VFS lock is a `RANK_DEVICE` spinlock that the File API drops before any FAT or block
+wait, and each FAT and vibefs volume sits behind a busy flag whose waiter yields and fails the
+operation with `EIO` after 1,000,000 yields, and which `drop_slot` force-clears (ROADMAP §10.4,
+F060).
 
 ## 2.2 Interrupt handler rules
 
@@ -1902,10 +1921,10 @@ The global lock order is in [section 2.1](#21-lock-order) and the one-spinlock r
 - klog records go to one global IRQ-safe log ring and to a serial sink that only try-locks TX.
   Per-CPU serial capture assembles serial output into lines for the ring. Per-CPU buffers with a
   printer thread are planned (ROADMAP §19.5).
-- The global SCHED lock, one `SpinMutex` on the block cache, one VFS lock, the log-ring TAS, and
-  virtio-blk bounce copies are known scale limits; see ROADMAP §19.4, §19.5, and §19.8. So is the
-  one bottom-half thread for every threaded vector, until ROADMAP §12.5 gives each vector its own
-  ([§5.4](#54-irq-registration)).
+- The global SCHED lock, one `SpinMutex` on the block cache, one VFS lock over lookups and
+  namespace changes (§2.1), the log-ring TAS, and virtio-blk bounce copies are known scale limits;
+  see ROADMAP §19.4, §19.5, and §19.8. So is the one bottom-half thread for every threaded vector,
+  until ROADMAP §12.5 gives each vector its own ([§5.4](#54-irq-registration)).
 
 ## 7.8 Per-CPU scheduling
 

@@ -17,18 +17,18 @@
 
 ## Recommended fix
 
-(The maintainer deferred the `InodeOps`-vs-separate-trait question; this plan uses `InodeOps`.) Every backend implements `InodeOps`; `Vfs` dispatches through a per-superblock ops pointer; the VFS lock becomes a blocking mutex so backends may do block I/O under it (Design ACK in DESIGN §2.1); `file_init` shrinks to a thin File API over `Vfs`; ramfs/kernfs storage moves out of `Vfs`.
+(The maintainer deferred the `InodeOps`-vs-separate-trait question; this plan uses `InodeOps`.) Every backend implements `InodeOps`; `Vfs` dispatches through a per-superblock ops pointer; the VFS lock becomes a blocking mutex that guards the namespace tables only, and file data I/O runs on counted references with it dropped (DESIGN §2.1); `file_init` shrinks to a thin File API over `Vfs`; ramfs/kernfs storage moves out of `Vfs`.
 
 ## Implementation plan
 
 1. **Ops pointer.** Add `ops: Option<&'static dyn InodeOps>` to `Super`; `FileSystem::fill_super` sets it. Replace every `match … fstype` in `ops_lookup / ops_create / ops_unlink / ops_read / ops_write / ops_truncate / ops_readdir / ops_stat` with `self.supers[sb].ops.ok_or(FsError::NotSupp)?.method(...)`. Keep `FsType` for `df` and display.
 2. **Generic backend words on `Inode`.** Replace `data0: u32` with `key: [u32; 3]` (FAT: cluster, dir cluster, dir offset; vibefs: ino; ramfs/kernfs: node index). Delete `fat_vol_of`, `fat_iget`, `fat_dcache` once FAT uses `key`.
 3. **Trait completeness.** Add `readlink`, `rename`, and `sync` to `InodeOps` (vibefs already has `readlink`/`rename`; FAT has `rename`); default `readlink` returns `NotSupp`.
-4. **Kernel-side impls.** In `src/fat_init.rs`: `struct FatOps; impl InodeOps for FatOps` wrapping the existing `lookup / readdir / read / write / create / unlink / truncate / rename / sync` with `vol = vfs.supers[sb].vol` and the inode key. Same in `src/vibefs_init.rs` (`VibeOps`). Register from `fs_init::init` via `mount_root_fs(&FatFs { …, ops: &FatOps })`. Per-volume busy-flag serialization stays.
-5. **Lock kind.** Change `static VFS: SpinMutex<Vfs>` to a `BlockingMutex<Vfs>` (exists in `src/sync_init.rs`) in DESIGN §2.1's sleeping tier, with no spin rank; DESIGN §2.1 already says a sleeping lock is taken only with IF=1 and no spinlock held, so backends may block under it and IRQ context never takes it. Because `Vfs::new` is `const` and a blocking mutex needs the scheduler, build the VFS in `fs_init::init` (after `sched: cpu0 ready`) inside a `BootCell` (Q3).
-6. **Shrink `file_init`.** Rewrite `open / close / read / write / seek / stat_path / mkdir_one / mkdir_p / unlink_path / rename_path / symlink_path / link_path / truncate_path / sync_fs` as `fs_init::with(|v| v.open(cwd, path, flags))` etc. Delete `Back`, `Walked`, `vol_walk`, `vol_parent`, `walk_abs`, `is_kernfs`, `vfs_ls_snap`, and `route` / `routed_rest` in both backends. `OpenFile` / `FILES` become `Vfs::files` + `FdTable`.
+4. **Kernel-side impls.** In `src/fat_init.rs`: `struct FatOps; impl InodeOps for FatOps` wrapping the existing `lookup / readdir / read / write / create / unlink / truncate / rename / sync`; each op receives its superblock and inode through the counted references the VFS lookup returned, never `&Vfs`, and finds its volume from the superblock. Same in `src/vibefs_init.rs` (`VibeOps`). Register from `fs_init::init` via `mount_root_fs(&FatFs { …, ops: &FatOps })`. The per-volume busy flag becomes the volume's `BlockingMutex` at DESIGN §2.1 level 4, taken with a plain `lock()`, which nothing force-clears and whose contention never returns `EIO` (F060, ROADMAP §10.4).
+5. **Lock kind.** Change `static VFS: SpinMutex<Vfs>` to a `BlockingMutex<Vfs>` (exists in `src/sync_init.rs`) at DESIGN §2.1 level 1's mount-table position, with no spin rank. It guards the namespace tables only: it is held for a lookup, an insert, or a removal, and for a namespace change's or a dentry-cache miss's directory I/O, never across data I/O, a pipe, TTY, socket, or page wait, or a user copy. IRQ context never takes it. Because `Vfs::new` is `const` and a blocking mutex needs the scheduler, build the VFS in `fs_init::init` (after `sched: cpu0 ready`) inside a `BootCell` (Q3).
+6. **Shrink `file_init`.** Rewrite `open / close / read / write / seek / stat_path / mkdir_one / mkdir_p / unlink_path / rename_path / symlink_path / link_path / truncate_path / sync_fs` as a lookup under the VFS lock that returns a counted inode or file reference, then the operation on that reference with the lock dropped (`let f = fs_init::with(|v| v.file(fid))?; f.read(buf)`); `mkdir_one`, `mkdir_p`, `unlink_path`, `rename_path`, `symlink_path`, and `link_path` run their namespace change under the lock. Delete `Back`, `Walked`, `vol_walk`, `vol_parent`, `walk_abs`, `is_kernfs`, `vfs_ls_snap`, and `route` / `routed_rest` in both backends. `OpenFile` / `FILES` become `Vfs::files` + `FdTable`.
 7. **Move storage out of `Vfs`** (second PR): `ram: [RamNode]` into `ramfs.rs`, `kern: KernState` into `kernfs.rs`, each behind the same clock eviction. `Vfs` then holds inodes, dentries, supers, mounts, files only.
-8. **Docs:** DESIGN §2.1 ACK, ROADMAP §8.1 note, module headers.
+8. **Docs:** DESIGN §2.1 drops its not-yet-enforced note, ROADMAP §8.1 note, module headers.
 
 ## Acceptance criteria
 
@@ -36,14 +36,15 @@
 - `cat /hello.txt`, `ls /vibe`, `cp /hello.txt /vibe/h`, `cat /vibe/h` succeed through `Vfs::open` only (new ktest `vfs_backends_via_ops`).
 - In-guest `fat_initrd`, `vibefs`, `vfs_walk`, `pseudo_fs`, `shell_dispatch` green; host `fs` tests green plus a new `FakeBlockFs` host test exercising the ops pointer.
 - `make test-vibefs-crash` green (the crash loop now goes through the File API and `Vfs`).
+- In-guest `vfs_io_off_lock`: a read of a `vda` file held at a `kernel_tests` hook inside the backend delays neither an `open` of a tmpfs path nor a tmpfs `read` on another CPU.
 
 ## Tests
 
-Host: `FakeBlockFs` implementing `InodeOps` mounted at `/blk`; walk, open, read, readdir through `Vfs`. In-guest: the acceptance test plus a mount/umount cycle of a vibefs on `vda`.
+Host: `FakeBlockFs` implementing `InodeOps` mounted at `/blk`; walk, open, read, readdir through `Vfs`. In-guest: the acceptance test; a mount/umount cycle of a vibefs on `vda` on a thread started with `spawn`'s 16 KiB stack; and two kernel threads reading and writing FAT files on `vda` through `Vfs` while a `kernel_tests` hook delays each block request by 2 s, neither getting `EIO`.
 
 ## Risks and rollback
 
-The lock-kind change is the risky step. Land steps 1–4 first (backends still called with the lock dropped, through the ops pointer), then step 5 as its own PR with a ktest that has two threads take the VFS lock and block on ramdisk I/O.
+The lock-kind change is the risky step. Land steps 1–4 first (backends still called with the lock dropped, through the ops pointer), then step 5 as its own PR with `vfs_io_off_lock`.
 
 ## Out of scope
 

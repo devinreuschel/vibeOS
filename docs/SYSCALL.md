@@ -115,6 +115,8 @@ F083) replaces them with one `KError` table that generates §2.
   (F083, F052, F057; ROADMAP §10.4)
 - FAT and vibefs map `Corrupt` to `FsError::Inval`, so a failed checksum or
   bad magic returns `EINVAL` (Linux `EIO`) (F083; ROADMAP §10.4)
+- a FAT or vibefs operation that waits 1,000,000 yields for its busy volume
+  fails with `EIO`; Linux waits (F060; ROADMAP §10.4)
 - `lseek` on the console returns `EINVAL` (Linux `ESPIPE`, 29) (F083;
   ROADMAP §10.4)
 - `read` on an `O_WRONLY` fd and `write` on an `O_RDONLY` fd return `EINVAL`
