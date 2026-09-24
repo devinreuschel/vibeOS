@@ -670,7 +670,7 @@ must neither halt nor corrupt memory it has not given to that source (AGENTS.md 
 | Firmware tables: ACPI, device tree, SMBIOS, the memory map | What they describe, but not their bounds: a malformed table is refused, never followed out of range | Halt boot with a malformed table before the IDT exists (F136) | ROADMAP §11.1 (early exceptions report themselves), §20.1 (table bounds) |
 | The network | Nothing, from the first packet | Not reachable yet | ROADMAP §15.10 fuzzes every parser from the start |
 | Speculation and timing side channels | Out of scope: no KPTI and no Spectre or MDS mitigations; the kernel half is mapped in every user address space (F024, F025, F131, F132) | Read kernel and other processes' memory on an affected CPU | ROADMAP §18.3 |
-| Limine, the firmware, and the CPU | Everything | Not applicable | ROADMAP §18.7 measures and verifies the boot chain |
+| Limine, the firmware, the CPU, and, under a VM, the VMM that provides them | Everything | Not applicable | ROADMAP §18.7 measures and verifies the boot chain: the signed Limine binary, its enrolled configuration and command line, the kernel, the initrd, and a kernel `kexec_file_load` starts (§25.4). Each slot's root, the state partition, and the key-set root record on them are outside it (§18.7's owner decision) |
 | The host running QEMU, the harness, and CI | Everything; they are the test oracle | Not applicable | Never |
 | Agent sessions, and the accounts they act through | Writing code, and opening and merging pull requests through the repository's rulesets; nothing else: no release or phase tag, deployment approval, repository setting, ruleset, environment, or secret | Act as the owner on GitHub: agents run with the owner's account and token, so every owner-only control in the release chain (the `release` environment's approval, the tag rules, ROADMAP §22.5's setting) is one prompt injection away | The agent-boundary decision below, before ROADMAP §14.6's first key |
 | Code under test: candidate commits, agent-written code and tools, guests, third-party build systems, as seen by the machines that run them | Nothing: on a CI runner or a rig VM it reaches no secret, credential, or host service beyond its job; on the dev host, no credential beyond the agent account's own | On the dev host, read every credential of the owner's account: the `gh` token, git's credentials, SSH keys, a signed-in browser | The agent-boundary decision below (dev host); ROADMAP §10.1 and §14.6 (release jobs); ROADMAP Funded goals, Self-hosted runners (rig) |
@@ -916,6 +916,15 @@ physical span, the RSDP, and `usable()` / `framebuffers()` iterators, and derive
 
 Firmware reclaimable regions stay out of the free lists. Reclaiming them is a few megabytes for a
 nonzero chance of stomping something ACPI still points at.
+
+Planned (ROADMAP §18.7, §22.2): under Secure Boot the kernel command line is the `cmdline:` of the
+Limine configuration enrolled into the signed Limine binary, which sets `editor_enabled: no`, so
+neither the boot menu nor a file on the disk can change it. An installed slot names its root with
+Linux's `root=PARTLABEL=vibeos-root-a` (or `-b`), which the kernel matches only on the disk Limine's
+executable file response names and only on a partition of the vibeOS root type, refusing the boot
+with a named reason when two match, so the configuration holds no per-install value. Under a VM, the
+VMM can append options through fw_cfg (ROADMAP §10.2); the VMM is trusted for everything (§2.10),
+and measured boot records the appended text in PCR 12.
 
 ## 3.3 `_start` order
 
