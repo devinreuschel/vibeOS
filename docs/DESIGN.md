@@ -73,10 +73,13 @@ These are not style preferences. They shape every subsystem.
    buddy and the heap never call up, directly or by hook, but for the TLB shootdown a kernel-half
    mapping change makes (§4.3): an allocation reaches reclaim, the writeback wait, and the OOM
    killer only through the allocation entry's hooks (§4.4).
-7. **The portable crate is stable Rust.** `vibeos-core` enables no `#![feature]`. Kani (ROADMAP
-   §10.8) and Verus (Phase 38) each pin their own toolchain and must build the code the kernel
-   links, and code with no unstable feature builds on all of them. Nightly features stay in the
-   kernel binary. `scripts/check_core_stable.py` in `make check` enforces it.
+7. **The portable crate is stable Rust.** `vibeos-core` enables no `#![feature]` and builds with its
+   MSRV (§3.1), the oldest Rust that Kani (ROADMAP §10.8) and Verus (Phase 38) use: each pins its
+   own toolchain, older than the kernel's nightly, and must build the code the kernel links. Nightly
+   features stay in the kernel binary. `scripts/check_core_stable.py` in `make check` finds no
+   feature attribute in `src/lib.rs`. Rule; not yet enforced: nothing builds the crate with its
+   MSRV, which would reject a feature attribute however it is formatted and any API or syntax newer
+   than the MSRV (ROADMAP §10.1).
 
 When two goals or constraints pull apart, decide in this order:
 
@@ -1325,6 +1328,7 @@ Power-on to `sti`. Limine does the ugly part (real mode, A20, long mode, ELF loa
 | Piece | Value |
 |-------|-------|
 | Channel | dated nightly in `rust-toolchain.toml` (bump with CI in one PR) |
+| MSRV | `rust-version` in `crates/core/Cargo.toml`, for `vibeos-core` only (§1.1 constraint 7): the older of the last stable release before the nightly Kani pins (ROADMAP §10.8) and the Rust release Verus requires (the latest Verus release's, until ROADMAP §38.1 pins one). Before §10.8 lands, the stable release current on the pinned nightly's date. A bump of the nightly, Kani, or Verus re-derives it. Set by ROADMAP §10.1 |
 | Components | `llvm-tools` (objdump/nm/size), `rustfmt`, `clippy`; `rust-src` for rust-analyzer |
 | Target | built-in `x86_64-unknown-none` (`rust-toolchain.toml` `targets`) |
 | Build | `cargo build` (default target in `.cargo/config.toml`) |
@@ -1921,15 +1925,22 @@ Fallibility is carried by type, not by a list of methods. The infallible surface
 large: `BTreeMap::insert`, `extend`, `collect`, `clone`, `to_vec`, `String::from`, and every other
 growing call. On stable Rust, which `vibeos-core` uses (§1.1), `Box`, `Arc`, and `BTreeMap` have no
 fallible constructor at all. So `vibeos-core` has a `kalloc` module of owning types (`TryBox`,
-`TryVec`, `TryString`, `TryArc`, and an ordered map) whose every growing operation returns
-`Result`. They are built on stable Rust: `alloc::alloc::alloc` with a null check for boxes, and
-`try_reserve` for vectors. Clippy's `disallowed-types` denies `alloc`'s owning types (`Box`, `Vec`,
-`String`, `Arc`, `Rc`, and the `alloc::collections` types) in both crates outside `kalloc`, and
-`disallowed-macros` denies `vec!` and `format!`. A boot-time site that keeps an `alloc` type carries
-an `#[allow]` whose comment names the boot step that runs it, and what it builds does not grow after
-`irq: enabled`. This is the shape Rust-for-Linux settled on (`KBox`, `KVec`) after starting from
-`alloc`'s collections. Rejected: a `disallowed-methods` list of infallible constructors, which
-misses the calls it does not name and leaves `Box` and `Arc` with no fallible path on stable Rust.
+`TryVec`, `TryString`, `TryArc`, and an ordered map) whose every growing operation returns `Result`.
+They are built on stable Rust: `alloc::alloc::alloc` with a null check for boxes, and `try_reserve`
+for vectors. `TryBox<T: ?Sized>` wraps `alloc`'s `Box`, and a trait object is made through a closure
+the caller writes: `TryBox::try_new_unsize(value, |b| b)` allocates a `Box` of the value's own type,
+and the closure coerces it to `Box<dyn Trait>`, a coercion stable Rust performs. `TryArc<T: ?Sized>`
+builds its counted cell as such a `Box`, lets the same kind of closure coerce it, and only then
+takes its raw pointer. Neither needs `CoerceUnsized`, `Unsize`, or pointer metadata, which are
+unstable, and neither constructor is `unsafe`. Clippy's `disallowed-types` denies `alloc`'s owning
+types (`Box`, `Vec`, `String`, `Arc`, `Rc`, and the `alloc::collections` types) in `vibeos-core` and
+the kernel binary outside `kalloc`; hostlib's tools, the user runtime, and test-only code allow them
+at their root with a comment that says why, and `disallowed-macros` denies `vec!` and `format!`. A
+boot-time site that keeps an `alloc` type carries an `#[allow]` whose comment names the boot step
+that runs it, and what it builds does not grow after `irq: enabled`. This is the shape
+Rust-for-Linux settled on (`KBox`, `KVec`) after starting from `alloc`'s collections. Rejected: a
+`disallowed-methods` list of infallible constructors, which misses the calls it does not name and
+leaves `Box` and `Arc` with no fallible path on stable Rust.
 
 Rule; not yet enforced: syscall paths, driver probes (`virtio_blk_init`'s `Box::new`), and
 kernel-thread creation use the infallible API today, and a `fork` near exhaustion panics in
