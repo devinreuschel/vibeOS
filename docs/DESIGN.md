@@ -1408,16 +1408,28 @@ does, never from a flag:
 
 Where two classes apply, as for a progress thread holding a spinlock, the deeper depth does.
 Softirq-equivalent items and bottom halves run on their own threads (§2.2, §5.4), so none of them is
-ever a progress thread. So a flood of network receive, which allocates in the atomic class, can take
-at most half of R, and the rest stays for the threads that clean and free pages. This is Linux's
-split: `GFP_ATOMIC` allocations may dip part of the way below the min watermark, and `PF_MEMALLOC`
-reclaimers all the way. `meminfo` shows R and, for each class, the lowest free count one of its
-allocations has left since boot. Two rules keep ordinary work out of the atomic class. A block
-completion allocates nothing, because what it needs was allocated at submission (ROADMAP §12.5's
-owned submission). A fault or `mmap` allocates the page-table pages it may need before it takes the
-page-table spinlock, with reclaim allowed, and frees those it did not use, as Linux's `pte_alloc`
-does. Rejected: two pools with a refill order between them, which adds machinery and leaves open
-which pool a progress thread holding a spinlock uses.
+ever a progress thread. An OOM victim's threads, while they exit, may also go down to R/2, as
+Linux's `ALLOC_OOM` gives a victim half of the min reserve and keeps the rest for reclaim. The OOM
+reaper below is in the progress class. So a flood of network receive, which allocates in the atomic
+class, can take at most half of R, and the rest stays for the threads that clean and free pages.
+This is Linux's split: `GFP_ATOMIC` allocations may dip part of the way below the min watermark, and
+`PF_MEMALLOC` reclaimers all the way. `meminfo` shows R and, for each class, the lowest free count
+one of its allocations has left since boot. Two rules keep ordinary work out of the atomic class. A
+block completion allocates nothing, because what it needs was allocated at submission (ROADMAP
+§12.5's owned submission). A fault or `mmap` allocates the page-table pages it may need before it
+takes the page-table spinlock, with reclaim allowed, and frees those it did not use, as Linux's
+`pte_alloc` does. Rejected: two pools with a refill order between them, which adds machinery and
+leaves open which pool a progress thread holding a spinlock uses.
+
+The OOM killer (ROADMAP §12.6) chooses among the user processes of one scope, the machine and later
+a cgroup, and never chooses pid 1, whose exit panics the kernel (ROADMAP §10.5), or a kernel thread.
+A scope has at most one victim at a time: while that victim's memory is still to be released, the
+killer chooses no other, and the allocation that ran it waits, with a deadline, then tries once
+more. An OOM reaper thread unmaps the victim's private memory without waiting for it to exit, taking
+the lock on the victim's region table only by try-lock, so a victim stuck in an uninterruptible wait
+still gives its memory back. With no eligible process the allocation fails with `ENOMEM`, and a user
+fault is retried. Linux panics when nothing is killable; here nothing on this path panics (AGENTS.md
+rule 4).
 
 An operation past its point of no return cannot unwind what it built, so it makes every allocation it
 needs before that point and only releases after it:
