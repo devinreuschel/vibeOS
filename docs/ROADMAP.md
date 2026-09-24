@@ -66,8 +66,11 @@ pull request, or named in the box's text; an older proof carries `(existing: <wh
 after its name, for review. An in-guest, user, or e2e proof passes, not skips, in a tier the pull
 request ran. A proof that every per-push tier skips names in brackets the scheduled workflow or dev-host
 record that runs it (`Proves: <test> [nightly] -- <box prefix>`), and its box is ticked once that run
-has passed (§10.9). The kernel review found that ticking a box for work that had not landed was the most
-common failure in this tree (KERNEL_REVIEW.md §5 and §8.3).
+has passed (§10.9). A box that records a measurement is proved by the `make` target or CI job that takes
+it, which from §10.9's CI history on writes the numbers there, and the document that carries a number
+cites beside it the commit it was measured at and the CPU model or machine it ran on. The kernel review
+found that ticking a box for work that had not landed was the most common failure in this tree
+(KERNEL_REVIEW.md §5 and §8.3).
 
 A ticked box's proof fails when its claim is false, in a tier CI runs. A box whose test cannot fail,
 runs a path other than the one it claims, has run in no tier, or passes only after a retry is open,
@@ -131,9 +134,18 @@ conditions it holds under: the accelerator, guest memory, and CPU count, and the
 A gate that names none holds in the default harness guest (the `VIBEOS_*` defaults: TCG, 128 MiB, 2
 CPUs), unless its era preamble names a default guest and hosts of its own, as Era VII's does. "Under
 KVM" means KVM on a hosted x86_64 runner, where the §10.1 KVM leg runs, and HVF on the arm64 dev host,
-as a §10.9 record, since hosted arm64 runners have no KVM. The hosted runner's CPU model changes from job
-to job, so a fixed threshold under KVM holds on every model the runner draws, unless the gate says its
-threshold is per model (§10.1).
+as a §10.9 record, since hosted arm64 runners have no KVM. A fixed threshold on how fast the guest does
+work under KVM or HVF (a latency, a duration, a throughput, or a rate of operations) is stated against
+Linux, as a ratio to Linux's result or a margin over it. Linux runs the same workload, as the same
+binary where the workload is a program, in the same guest shape, over the same devices and host
+backends, in the same job or record session; a line that compares vibeOS with itself, before and after a
+change, runs both builds in one job instead. The run records both absolute numbers beside the threshold,
+and a network line names its host backend. Absolute bounds stay for four kinds of line: a count of
+kernel events, such as timer interrupts at idle; a deadline a functional result must meet, such as a
+race reported within 10 seconds or a frame flushed before the next tick of a 60 Hz clock; a sanity bound
+set well above what the work costs, such as the Phase 12 `fork` line's 10 ms; and a line on a machine a
+funded goal names. The hosted runner's CPU model changes from job to job, so a fixed threshold under KVM
+holds on every model the runner draws, unless the gate says its threshold is per model (§10.1).
 
 A line in phase *N* never depends on work in a later phase. When it would, the work moves earlier or the
 line moves later. A pointer to a later phase is only a cross-reference, such as "USB HID arrives through
@@ -1624,7 +1636,7 @@ so do TLB maintenance and the §11.2 I-cache maintenance aarch64 needs whenever 
 `mprotect` installs an executable PTE, and so does access-flag and dirty tracking, which aarch64 does in software where hardware management (FEAT_HAFDBS) is absent (§12.2). Everything from the portable `TrapKind` (DESIGN §5.2) upward is shared, including the fault kinds below.
 
 **Exit gate**
-- [ ] `fork` of a process with 100 MB resident completes in under 10 ms, measured by the §12.3 ktest in a 512 MiB, 2-CPU guest under KVM on both architectures
+- [ ] `fork` of a process with 100 MB resident completes in under 10 ms, measured by the §12.3 ktest in a 512 MiB, 2-CPU guest under KVM on both architectures; a sanity bound (How to read this), and §19.3 records Linux's time for the same `fork` beside vibeOS's
 - [ ] page faults are counted per fault kind (demand-zero, COW, file, stack), globally and per process; an in-guest test in which one process touches its stack and output buffer, then first-writes N untouched pages of a fresh anonymous mapping, reads its own demand-zero count from the §12.2 per-process counters before and after and finds it risen by exactly N, on both architectures
 - [ ] `brk` and anonymous `mmap` regions from §10.5 are demand-faulted: a first write to an untouched page maps one page, verified by the §12.1 user-anonymous count rising by exactly one per page first written, not by the global free-frame count; a read of an untouched page maps the shared zero page and leaves that count unchanged, and a later write to it raises the count by one (F074)
 - [ ] `read()` into a COW page of a forked child leaves the parent's page unchanged; `read()` into an untouched `brk` page faults it in rather than returning `EFAULT`
@@ -2238,13 +2250,14 @@ protocol work for an agent to get wrong in interesting ways.
 builds for both, and its in-guest tests run under QEMU (`-device e1000`) on both; Phase 20 runs the
 drivers for other real NICs on QEMU's models of them. Strict packetdrill timing is x86_64 only: the arm64 runners have no KVM and the macOS dev host no tap device for its wire server, so aarch64 runs it under TCG with a looser tolerance (§15.10). The §10.1 KVM leg measures the throughput
 numbers on x86_64. The aarch64 numbers are measured under HVF on the dev host, since GitHub's arm64
-runners have no KVM.
+runners have no KVM. In a throughput line, both kernels' guests reach the host over a tap with
+`vhost-net` on the KVM leg, and over `-netdev user` on the dev host, which has no tap device.
 
 **Exit gate**
 - [ ] `ping` from the host to the guest and back
 - [ ] DHCP acquires an address, and DNS resolves a name
 - [ ] a TCP server in the guest serves a file to `curl` on the host, and the bytes match
-- [ ] a TCP client fetches 1 GiB from the host with no corruption, at 1 Gbit/s or better over virtio-net and 4 Gbit/s or better over loopback, both under KVM in a 2-vCPU, 512 MiB guest
+- [ ] a TCP client fetches 1 GiB from the host with no corruption, at no less than 20% of Linux's throughput over virtio-net and 20% of Linux's over loopback in the same 2-vCPU, 512 MiB guest shape and job, under KVM over the host backends **Architectures** names; if 20% of Linux's first median on the KVM leg is below 1 Gbit/s over virtio-net or 4 Gbit/s over loopback, the commit that records it raises that ratio to the lowest whole percentage that is not
 - [ ] the §15.10 packet fuzzer, injecting malformed headers, bad checksums, and overlapping fragments through the injection interface, runs one hour per architecture on the nightly job in a 2-CPU, 512 MiB guest (KVM on x86_64, TCG on aarch64) with no panic or hang
 - [ ] a ten-minute flood from a hostlib peer on the §15.10 tap device, per architecture on the nightly job in a 2-CPU, 512 MiB guest (KVM on x86_64, TCG on aarch64), of out-of-order TCP segments over many connections to a listening service and of SYNs from unresolvable addresses on the guest's subnet, holds socket memory at or below §15.1's global limit with the drop counters rising, kills no process, and leaves `meminfo`'s progress-class low-water mark above zero, while a file a guest process writes on `vda` is `fsync`ed and reads back intact (§15.10)
 - [ ] `netstat`-equivalent shows sockets in correct states through a full connection lifecycle
@@ -2387,7 +2400,7 @@ aarch64 and works on x86_64 too. virtio-gpu is shared. The frame-rate gate line 
 - [ ] unmodified `modetest` (libdrm) and `evtest` from the §14.9 mirror list connectors and set a mode with a dumb buffer on virtio-gpu, and read key and pointer events from virtio-input, on both architectures
 - [ ] a screenshot captured programmatically and compared against a reference in CI (§16.1)
 - [ ] a resolution change, and a second output added and removed, at runtime (§16.1): after each change a test client receives the new mode or the removal through §16.5 and commits its next buffer at the output's new size, and the §16.1 screenshot of each remaining output matches its reference
-- [ ] the compositor holds 60 frames per second at 1920×1080 with ten windows moving, fewer than 1% of frames dropped over ten seconds, measured under KVM in a 4-vCPU, 2 GiB guest with virtio-gpu 2D
+- [ ] with ten windows moving at 1920×1080, the compositor drops fewer than 1% of the 600 frames of ten seconds, a frame being dropped when the virtio-gpu `RESOURCE_FLUSH` of the frame begun at one §16.1 vblank tick completes after the next tick; measured under KVM in a 4-vCPU, 2 GiB guest with virtio-gpu 2D, with the frames completed per second and the compositor's guest CPU time per frame recorded beside it
 - [ ] the compositor killed with `SIGKILL` leaves the text console visible and taking keyboard input, on both architectures
 - [ ] tag `phase-16` and cut the next release
 
@@ -2398,7 +2411,7 @@ aarch64 and works on x86_64 too. virtio-gpu is shared. The frame-rate gate line 
 - [ ] multiple outputs with positions, because a second monitor should not be a rewrite
 - [ ] outputs added and removed at runtime: a new output gets a mode and a position, and surfaces on a removed output move to one that remains; exercised under QEMU with a two-head virtio-gpu (`max_outputs=2`): the harness sets the second head's size to zero and back through a VNC server on that head (`-vnc unix:<path>,display=<id>,head=1`), to which a hostlib client sends `SetDesktopSize`, since no QMP command resizes a head; it needs no D-Bus daemon, unlike QEMU's D-Bus display (`org.qemu.Display1.Console.SetUIInfo`), which carries the same request where a build has it. virtio-gpu raises its display-config event, and §31.7 gives every head a VNC server
 - [ ] an output change reported as Linux reports it, a `change` uevent with `HOTPLUG=1` on a `NETLINK_KOBJECT_UEVENT` socket, after which clients re-read the connectors; the socket is in the `AF_NETLINK` family §15.7 also uses, built by whichever lands first
-- [ ] vsync and page flipping, so tearing is fixable rather than inherent
+- [ ] vsync and page flipping, so tearing is fixable rather than inherent; on virtio-gpu, which raises no vblank interrupt, each output's vblank is a 60 Hz kernel timer, the frame clock the Phase 16 gate counts dropped frames against
 - [ ] the text console double-buffered through the display abstraction, which closes §5.1's parked box
 - [ ] a pixel format abstraction that is not hardcoded to BGRX
 - [ ] the `Display` exposed to userspace as `/dev/dri/card<N>`, character device 226:<N>, which libdrm checks, with Linux's DRM uapi for the KMS subset it supports, through the §13.9 `ioctl` registry: `DRM_IOCTL_VERSION`, `GET_CAP`, `SET_CLIENT_CAP`, and the `DRM_IOCTL_MODE_*` calls for resources, connectors, encoders, CRTCs, planes, and properties; atomic commit (`MODE_ATOMIC`, with `TEST_ONLY`) with the property blobs its `MODE_ID` takes (`MODE_CREATEPROPBLOB`, `MODE_DESTROYPROPBLOB`), and legacy `SETCRTC` and `PAGE_FLIP` implemented over it, as Linux's helpers do. Ioctl numbers and struct layouts are host-tested against Linux's uapi headers on both architectures, and the subset, with the reason for each omission, is recorded in `docs/`
@@ -2782,8 +2795,8 @@ under HVF on the dev host, running the §19.3 workloads they name there, as §10
 **Exit gate**
 - [ ] a flamegraph produced from a counter-overflow sampling profile on aarch64 under TCG, and from a timer-driven sampling profile on x86_64 under KVM, both in a 2-vCPU, 1 GiB guest
 - [ ] a live §19.1 trace of a `read` that misses the page cache shows its syscall entry, the virtio-blk submission, the completion IRQ, the reader's wakeup, and the syscall exit in order on one timeline, in an in-guest test on both architectures
-- [ ] benchmarks with thresholds on the §10.1 KVM leg in a 4-vCPU, 1 GiB guest, and a regression fails that job and so blocks the phase tag
-- [ ] scheduler wakeup latency at the 99th percentile under 1 ms with a CPU-bound load of four times the core count, measured under KVM in a 4-vCPU, 1 GiB guest
+- [ ] benchmarks with thresholds on the §10.1 KVM leg in a 4-vCPU, 1 GiB guest, and a regression fails that job and so blocks the phase tag; it fails while a §19.3 benchmark has no threshold on one of the most drawn CPU models that together make up at least two thirds of the leg's last 14 nightly runs
+- [ ] scheduler wakeup latency at the 99th percentile, with a CPU-bound load of four times the core count, at most 1.5 times Linux's for the same static benchmark (§19.3) in the same 4-vCPU, 1 GiB guest shape and job, measured under KVM
 - [ ] an idle CPU takes fewer than 5 timer interrupts per second over one minute, measured under KVM in a 2-vCPU, 512 MiB guest
 - [ ] over that idle minute, `CLOCK_MONOTONIC`, printed by an in-guest program at its start and end, advances within 0.5% of the host time between the two serial lines (F027)
 - [ ] lock contention profiled; the most contended lock's spin time on the §19.3 mixed interactive workload cut by at least half, under KVM in a 4-vCPU, 1 GiB guest, with before and after numbers recorded
@@ -2815,9 +2828,11 @@ under HVF on the dev host, running the §19.3 workloads they name there, as §10
 - [ ] subsystem: file read and write throughput, network throughput and latency, process creation rate
 - [ ] macro: kernel build time, boot time, a mixed interactive workload
 - [ ] all of it on the §10.1 KVM leg, with history recorded per runner CPU model and a threshold per model that fails; a commit that changes which §18.3 mitigations are on by default resets, in that commit, each threshold the change moves, citing the mitigation's measured-cost entry (Phase 18 gate), so whichever of Phases 18 and 19 closes first, neither fails on a cost the other measured
-- [ ] each benchmark records its median and coefficient of variation over at least 5 runs per job in the §10.9 history; a benchmark whose coefficient of variation exceeds 5% on a runner CPU model gets no threshold on that model
+- [ ] the Linux side: the wakeup-latency benchmark whose percentiles §19.4 reports, §19.4's timer-lateness programs, and the process-creation benchmarks, among them a `fork` of a process with 100 MB resident, are static programs both kernels run; each job that runs them also boots the §12.4 oracle kernel in the same guest shape and runs them there, and the §10.9 history records Linux's median and coefficient of variation per CPU model beside vibeOS's. The Phase 19 wakeup-latency line and §19.4's timer-lateness box read their ratios from these runs, and DESIGN §8.6 records the two `fork` times beside §12.3's
+- [ ] each benchmark records its median and coefficient of variation over at least 5 runs per job in the §10.9 history, and runs up to 20 times in a job while its coefficient of variation on that job's CPU model stays above 5%. Its threshold on a model is the median of that model's last 10 recorded medians, or of all of them from the third until there are 10; a regression is a median worse than the threshold by more than the larger of 5% and 3 times the model's coefficient of variation, or of 10% and 3 times it while the model has fewer than 10 medians, the model's coefficient of variation being the median of those its recorded jobs report. No benchmark goes without a threshold for being noisy
 - [ ] each workload also runs in §10.3's `irqoff` build once per nightly run on the KVM leg, and the §10.9 history records per site its longest IF-off stretch and the 99th percentile, with no threshold
 - [ ] each §10.3 clocksource candidate's read cost, and `now_ns` calls per second in each workload above, recorded in the §10.9 history: the HPET in `make test-kernel` under TCG at `-smp 2` and `-smp 4`, where each MMIO read takes QEMU's global lock, the HPET and the PM timer on the KVM leg with `-cpu max` and no invariant TSC, and the TSC on the KVM leg with one. Where clocksource reads take more than 2% of guest CPU time in a workload, the HPET and PM timer candidates switch to one read per tick with TSC interpolation between reads, which a coalesced tick cannot make lose time, and DESIGN §6.4 records the switch. A read cost on KVM without an invariant TSC that breaks a Phase 19 gate reopens the HPET's rank in DESIGN §6.4's table
+- [ ] once the Phase 15 throughput lines and the Phase 19 wakeup-latency line have each run on 14 nights of the KVM leg, DESIGN §8.6 records per line and CPU model both kernels' medians and coefficients of variation; where Linux's own coefficient of variation passes 10% on a model that makes up at least a sixth of those nights, the ratio does not cancel that runner's noise, and the commit that records it opens a line in this section that replaces the ratio with a steadier measure, such as guest CPU time per gigabyte for a throughput
 
 ### 19.4 Scheduler
 - [ ] DESIGN §7.8 records the choice between weighted fair queueing and a virtual-deadline scheduler, with the §19.3 numbers that decided it
@@ -2830,7 +2845,7 @@ under HVF on the dev host, running the §19.3 workloads they name there, as §10
 - [ ] topology awareness from CPUID on x86_64 and MPIDR plus the device tree on aarch64: prefer a sibling core, keep a thread near its cache
 - [ ] group scheduling with CPU shares and quotas: the scheduler half of §21.5's cgroup v2 `cpu.weight` and `cpu.max`
 - [ ] wakeup latency under load reported at the 50th, 99th, and 99.9th percentiles, never as a mean; the exit gate bounds the 99th
-- [ ] timer lateness measured under KVM in a 4-vCPU, 1 GiB guest: with the exit gate's CPU-bound load of four times the core count, a `SCHED_FIFO` thread, run by root, reading a 1 ms periodic `timerfd` wakes less than 100 µs after each expiry at the 99th percentile; and with no load, a fair-class thread's 100 µs `nanosleep` returns within 200 µs at the 99th percentile. Both are recorded at the 50th, 99th, and 99.9th percentiles, beside the longest stretch one timer interrupt spent expiring deadline timers; a stretch past DESIGN §2.9 rule 2's bound moves deadline-timer expiry out of the top half to a `SCHED_FIFO` timer thread, as `PREEMPT_RT`'s `ktimers` threads run, and DESIGN §6.5 changes with it
+- [ ] timer lateness measured under KVM in a 4-vCPU, 1 GiB guest: with the exit gate's CPU-bound load of four times the core count, a `SCHED_FIFO` thread, run by root, reading a 1 ms periodic `timerfd` wakes after each expiry no later, at the 99th percentile, than 1.5 times Linux's for the same static program (§19.3); and with no load, a fair-class thread's 100 µs `nanosleep` returns no later, at the 99th percentile, than 1.5 times Linux's. Both are recorded at the 50th, 99th, and 99.9th percentiles, beside the longest stretch one timer interrupt spent expiring deadline timers; a stretch past DESIGN §2.9 rule 2's bound moves deadline-timer expiry out of the top half to a `SCHED_FIFO` timer thread, as `PREEMPT_RT`'s `ktimers` threads run, and DESIGN §6.5 changes with it
 - [ ] DESIGN §7.8 records the choice between per-CPU TCB ownership and a sharded TCB table, with the §19.5 contention numbers that decided it
 - [ ] the chosen TCB layout replaces the global TCB table
 - [ ] DESIGN §6.5's two timer structures per CPU replace `sched::TimeoutQueue`: deadline timers in a queue ordered by nanosecond deadline, and timeout timers in a wheel of 1 ms first-level buckets without cascading, both intrusive and in the portable half; each CPU's base has its own `SpinMutex` at a new `RANK_TIMER` just before `RANK_SERIAL`, which DESIGN §2.1's rank list and §2.7's I1 row name in the same commit; the local timer is armed for the earliest of the next tick and both structures' next expiries where it has a one-shot mode; `sleep_ms` becomes a wrapper over a nanosecond-deadline sleep. Host tests check that the wheel fires no timer before its deadline and none more than an eighth of its interval after it, and that one interrupt does at most 32 wakes; a loom model (§10.8) of `cancel_sync` racing an expiry on another CPU, and of a re-arm moving a timer between bases while it expires, rejects a weakened variant whose `cancel_sync` returns while the expiry runs; each structure's DESIGN §7.11 offline step moves an offline CPU's unpinned timers to an active CPU with their deadlines kept and cancels its pinned ones
@@ -3702,7 +3717,7 @@ continuous soak on real machines are [Funded goals](#funded-goals).
 - [ ] §25.2's host tests parse the HEST, BERT, ERST, and EINJ tables of every server report in the linuxhw/ACPI corpus that carries them, each rebuilt from its raw table bytes
 - [ ] a panic raised on CPU 2, not the boot CPU, under QEMU with a capture kernel loaded boots the capture kernel through kexec without firmware; it writes a filtered ELF vmcore, and host `gdb` opens it with the kernel ELF and prints the panicking CPU's backtrace, the registers of a second CPU that was spinning with interrupts off at the panic in a loop that neither polls nor writes, and those of a third that was waiting on a `SpinMutex` the panicking CPU held; both architectures under TCG, 4 CPUs, 2 GiB, aarch64 on `virt,gic-version=3`; and aarch64 on `virt,gic-version=2`, where the vmcore holds the waiter's registers and its notes name the spinning CPU as not stopped
 - [ ] with a capture kernel loaded, a panic raised on CPU 2 while a `kernel_tests` hook on CPU 1 holds §20.9's runtime-services lock, under OVMF on x86_64 `q35` and under the edk2 build on aarch64 `virt,gic-version=3` (TCG, 4 CPUs, 2 GiB): QEMU reports `GUEST_CRASHLOADED` and never `GUEST_PANICKED`, and the capture kernel prints `vibeOS: efi: runtime services withheld`, writes a vmcore that host `gdb` opens with the panicking CPU's backtrace, and resets through §22.2's ACPI or PSCI path (DESIGN §2.5 step 6). A QEMU that pauses on the crash-loaded event, an old kernel that enters firmware before the jump, or a capture kernel that cannot finish its vmcore and reset without runtime services overturns step 6, and DESIGN §2.5 is revised
-- [ ] `kexec` from a running system reaches `shell ready` in the new kernel without firmware in under 2 s, in a 2-vCPU, 1 GiB guest under KVM on the KVM runner, and on aarch64 under HVF on the dev host as a §10.9 record
+- [ ] `kexec` from a running system reaches `shell ready` in the new kernel without firmware in at most twice the time Linux's `kexec -e` into the same Linux kernel takes to reach its initramfs shell, each timed by the harness from the serial line printed before the jump, in the same 2-vCPU, 1 GiB guest shape and job, with `kexec` built into the Linux kernel's configuration; under KVM on the KVM runner, and on aarch64 under HVF on the dev host as a §10.9 record
 - [ ] a CPU spinning with interrupts off for 10 s is reported by the hard lockup detector with a backtrace whose first two frames the harness matches, through the kernel ELF's symbol table, to the test's spin function and its caller: through GICv3 pseudo-NMIs raised by the emulated PMUv3's overflow interrupt on aarch64 under TCG, and through the buddy check on x86_64 under TCG and under KVM on the KVM runner; on x86_64, a kernel thread on another CPU exits during the spin, and the shootdown its stack free sends waits in `wait_acks` until the spinning CPU acknowledges it after the spin, with no CPU panicking, as §10.10's `wait_acks` box requires (F070, F084)
 - [ ] with a test hook in the `kernel_tests` build stopping one CPU's scheduler from switching threads for 30 s with interrupts on, the soft lockup detector reports that CPU and its backtrace, on both architectures under TCG
 - [ ] after the watchdog §22.2 arms at boot (the ICH9 TCO timer on `q35`, the `i6300esb` on `virt`) resets a guest whose CPUs all spin with interrupts off (lockup detectors off), with every disk's `queue/io_timeout` set to 2000 ms so the §22.2 floor keeps the timeout under a minute on virtio-blk, the next boot reports the reset reason as watchdog, and `WDIOC_GETBOOTSTATUS` returns `WDIOF_CARDRESET`, under QEMU on both architectures

@@ -4149,7 +4149,9 @@ GitHub Actions records per-step duration. Measured on `main` at `88370e5` (run 3
 kernel clippy, and ISO build before the first QEMU step, then 98 s across nine QEMU steps (longest:
 vibefs crash, 22 s); about **3m40s** end to end. Across ten green runs up to `90ce475` the ladder took
 156-307 s (median about 206 s), because the harness retried a hung boot (ROADMAP §10.2). A fmt or
-hostlib lint failure should go red in about a minute without starting QEMU.
+hostlib lint failure should go red in about a minute without starting QEMU. From ROADMAP §10.9's CI
+history on, a measured number recorded in this document cites the commit it was measured at and the CPU
+model or machine it ran on (ROADMAP, How to read this).
 
 Hostlib line-coverage floor is **87%** (`--fail-under-lines 87` in `.github/workflows/ci.yml`).
 Measured 87.60% on `nightly-2026-09-22` (`cargo llvm-cov --lib` in `tests/hostlib`; A2 runs the
