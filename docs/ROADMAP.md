@@ -3364,11 +3364,16 @@ those records already show a build's peak, plus its guest image's own system, be
 space, the move below is made then, not at the gate. If a build's recorded peak exceeds that space on
 its architecture's runner, an edit to this file moves the gate lines that need it, for that
 architecture, to the [funded goal](#funded-goals) buying that architecture's test machine, which
-rebuilds bare metal without shards, as Phase 21 moves its nested lines. TCG runs aarch64's
-builds several times slower, by the factor §17.7 records, so aarch64's full rebuild runs monthly and
-x86_64's weekly (§24.2). Go's
-bootstrap on aarch64 starts from a toolchain cross-built from source on x86_64 vibeOS and carried over
-as an artifact, since Go 1.4 has no arm64 port; nothing else crosses architectures.
+rebuilds bare metal without shards, as Phase 21 moves its nested lines. For a port, never a §24.1
+toolchain, that edit may instead cross-build the port on x86_64 vibeOS with the §24.1 toolchains, when
+its peak exceeds the arm64 runner's recorded space, the x86_64 runner's holds it, and the recipe source
+§24.2 picks supports cross builds; such a port is listed in `docs/BOOTSTRAP.md` with its reason, its
+test binaries run natively on aarch64, and it does not count toward the gate's 500 native ports. TCG
+runs aarch64's builds several times slower, by the factor §17.7 records, so aarch64's full rebuild runs
+monthly and x86_64's weekly (§24.2). That speed never calls for the move or a cross-build, since §24.2
+lengthens a rebuild's period instead. Go's bootstrap on aarch64 starts from a toolchain cross-built
+from source on x86_64 vibeOS and carried over as an artifact, since Go 1.4 has no arm64 port; no other
+toolchain crosses architectures.
 
 **Exit gate**
 - [ ] `tcc`, LLVM with clang and lld, `rustc` and `cargo` at the pinned nightly, CPython, QEMU, `git`, `make`, `cmake`, `ninja`, `xorriso`, `nasm`, and Limine are rebuilt from source natively on vibeOS, starting from §17.7's upstream toolchains, on both architectures (§24.1)
@@ -4021,9 +4026,9 @@ the clock at boot.
 A person uses vibeOS as their desktop every day, in a virtual machine, on both architectures. Era IV
 proves the kernel on QEMU's models of real devices; this era proves the desktop above them. Every time,
 rate, or benchmark number is compared with Linux in the same virtual machine, on the same host and in
-the same job, so the host's noise cancels. Laptops, desktop machines, native display and render
-drivers, and real radios, cameras, and peripherals are [Funded goals](#funded-goals); nothing here waits
-for them.
+the same job, so the host's noise cancels. Phase 37's numbers on its release image are the one
+exception (§37.1, §37.3). Laptops, desktop machines, native display and render drivers, and real
+radios, cameras, and peripherals are [Funded goals](#funded-goals); nothing here waits for them.
 
 **The desktop guest.** 4 vCPUs and 6 GiB: x86_64 on `q35` with OVMF and a writable variable store
 (§20.9), aarch64 on `virt` with the edk2 build; a two-head `virtio-gpu-pci` with EDID, `virtio-sound-pci`,
@@ -4045,6 +4050,10 @@ The kernel speaks Linux's interface for each device class it adds here (DRM, evd
 nl80211, Bluetooth sockets, and their sysfs classes), so the userspace above it is upstream's,
 unmodified. "From Alpine" below means a binary from the pinned Alpine release that §14.9 runs. The gates
 run those binaries; Phase 37 ships the same software built from source by the Phase 24 ports tree.
+Phase 37's workload, 30-night, and suspend lines run that release image instead, so the daily-driver
+tier they feed describes what ships. The Linux comparison guest runs no such build, so a number taken
+on the release image is held to an absolute threshold or to the image's own history, and Phase 37's
+comparisons with Linux run Alpine's binaries on both kernels, which measures the kernel alone.
 
 Each phase lands every syscall, `ioctl`, and `/proc` or `/sys` file its gates' software uses that
 Phase 23 did not, found by tracing its gates with `strace` from Alpine, each with a §13.11 differential
@@ -4441,7 +4450,7 @@ with `llvmpipe` (§33.3). The call line runs a second vibeOS guest on the same h
 - [ ] an image viewer, a PDF viewer, a text editor, a terminal emulator, a calculator, and an archive tool from Alpine
 
 ### 36.4 Browser
-- [ ] Firefox or Chromium from Alpine, chosen by a spike that weighs sandbox requirements, upstream patch count, and each candidate's build from its Alpine recipe, and written down. Each is built in an Alpine guest with no swap and the Phase 24 build guest's 4 vCPUs and 6 GiB, under HVF on the dev host, recording its peak memory and disk; a candidate that cannot build within that memory and a hosted runner's free disk, even with recipe options such as dropping PGO or LTO, is out, and the chosen one's options are written down with it
+- [ ] Firefox or Chromium from Alpine, chosen by a spike that weighs sandbox requirements, upstream patch count, and each candidate's build from its Alpine recipe, and written down. Each is built in an Alpine guest with no swap and the Phase 24 build guest's 4 vCPUs and 6 GiB, under HVF on the dev host, recording its peak memory, disk, and time, and its aarch64 build's time under TCG on the hosted arm64 runner, estimated from its HVF time with the factor §17.7 recorded between the dev host's HVF and the arm64 runner's TCG, as a count of §24.1 shards; a candidate that cannot build within that memory and the free disk DESIGN §8.6 records for the x86_64 runner after cleanup (§17.7), even with recipe options such as dropping PGO or LTO, is out, and one whose peak also fits the arm64 runner's recorded free disk is chosen over one whose peak does not. If the chosen one's peak does not fit the arm64 runner, its aarch64 build follows what Phase 24 Architectures decides for a port the arm64 runner cannot hold. The chosen one's options, peak, time, and aarch64 shard estimate are written down with it
 - [ ] its sandbox enabled, on §18.6's seccomp filters and §21.5's namespaces
 - [ ] compositing and WebGL through Phase 33's `llvmpipe` or the browser's own software path, video decoded in software, audio through PipeWire, and the camera through the XDG camera portal
 - [ ] the harness's test CA added through a browser policy file that only §14.3's harness overlay installs, never the browser's package, since the gates serve every page from the host; the browser's policy directory joins §14.6's test-anchor check, which refuses a policy that adds a certificate
@@ -4476,14 +4485,17 @@ the §22.3 tested-platforms list.
 **Architectures.** Both. The §37.1 run is nightly under KVM on the hosted x86_64 runner and weekly under
 TCG on the hosted arm64 runner, with timeouts scaled for TCG; aarch64's measured lines are dev-host
 records under HVF, as the era preamble says. On the dev host, which has no vhost-user devices or
-`btvirt`, the workload uses §35.2's in-kernel radios and `/dev/vhci` in place of the §35.4 peer.
+`btvirt`, the workload uses §35.2's in-kernel radios and `/dev/vhci` in place of the §35.4 peer. If an
+architecture's half of the first gate line has moved to [Funded goals](#funded-goals) (Phase 24
+Architectures), that architecture's runs of the lines on the release image use Alpine's binaries
+instead, and the daily-driver tier marks its configurations as Alpine's build.
 
 **Exit gate**
 - [ ] the release image carries the §36.2 desktop as §14.6 packages built by the Phase 24 ports tree, and the §22.2 installer puts it on the desktop guest's virtio disk beside the §37.2 Alpine install; both boot afterwards through their firmware boot entries
-- [ ] the §37.1 workload accumulates 24 hours under KVM on the hosted x86_64 runner and 24 hours under TCG on the hosted arm64 runner, in shards of at most 5.5 hours that each boot from the previous shard's disk image, with no kernel panic, no hang, no data loss (`fsck` clean and file checksums matching), and no crash outside the injected ones
+- [ ] the §37.1 workload, on the release image the line above installs, accumulates 24 hours under KVM on the hosted x86_64 runner and 24 hours under TCG on the hosted arm64 runner, in shards of at most 5.5 hours that each boot from the previous shard's disk image, with no kernel panic, no hang, no data loss (`fsck` clean and file checksums matching), and no crash outside the injected ones
 - [ ] the §37.1 nightly run on the hosted x86_64 runner has passed on 30 consecutive nights, and the weekly run on the hosted arm64 runner in its last 4 weeks, from §10.9's run history
-- [ ] 1000 consecutive suspend cycles of the desktop guest under KVM on the hosted x86_64 runner, with Wi-Fi, Bluetooth, audio, and every head working after the last
-- [ ] boot to the display manager, resume to the lock screen, and a build of the vibeOS tree each take at most 1.5 times the Linux comparison guest's time
+- [ ] 1000 consecutive suspend cycles of the release image in the desktop guest under KVM on the hosted x86_64 runner, with Wi-Fi, Bluetooth, audio, and every head working after the last
+- [ ] boot to the display manager, resume to the lock screen, and a build of the vibeOS tree each take at most 1.5 times the Linux comparison guest's time, with the same binaries on both kernels (Alpine's, and the §17.7 `vibeos-build` image's toolchains for the build), so the ratio measures the kernel alone; §37.3 records the release image's times beside them
 - [ ] three consecutive release candidates from the §22.1 release job, served from a test update channel on the host, whose key the guest trusts only through §14.3's harness overlay, update the desktop guest unattended through §22.2, the harness typing the §18.7 passphrase at each boot, and an injected bad candidate rolls back; one candidate's trial left at its prompt for twice the watchdog timeout commits once the harness unlocks it, and one the harness resets at its prompt is armed again and commits at the next boot, with no failed update recorded
 - [ ] the §22.3 tested-platforms list gains a daily-driver tier for the desktop guest's configurations (`q35` under KVM, `virt` under TCG and under HVF), generated from the §10.9 records of the §37.1 runs and the dev-host runs, with their numbers
 - [ ] tag `phase-37` and cut the next release
@@ -4492,10 +4504,10 @@ records under HVF, as the era preamble says. On the dev host, which has no vhost
 - [ ] a scripted day driven through AT-SPI (§36.5) and QMP input injection: log in, browse sites mirrored on the host, edit and save documents, play local video, hold a WebRTC call with a second vibeOS guest, copy files to and from a `usb-storage` stick attached with `device_add`, suspend and resume, roam between the §35.4 peer's access points, and add and remove a display head through its VNC server
 - [ ] fault injection: random application and service kills; init restarts the services and the session survives
 - [ ] per-run measurements: dropped frames, audio xruns, per-device resume time, per-process memory growth, and wakeups per second at idle
-- [ ] a run of at most 5 hours, nightly on the hosted x86_64 runner and weekly on the hosted arm64 runner, with thresholds that fail the job; each run commits one record, with its result and the measurements above, to §10.9's `ci-history` branch
+- [ ] a run of at most 5 hours on the release image, installed as the Phase 37 gate's first line installs it, nightly on the hosted x86_64 runner and weekly on the hosted arm64 runner, with thresholds that fail the job, each absolute or a regression against the release image's own history, since the Linux comparison guest runs no ports build; each run commits one record, with its result and the measurements above, to §10.9's `ci-history` branch
 
 ### 37.2 Shipping
-- [ ] the Phase 24 ports tree builds the §36.2 desktop, the browser included, with the recipe options §36.4 recorded, as §14.6 packages for both architectures; Alpine's binaries stay the test oracle, not what ships
+- [ ] the Phase 24 ports tree builds the §36.2 desktop, the browser included, with the recipe options §36.4 recorded, as §14.6 packages for both architectures; Alpine's binaries stay the oracle every comparison with Linux runs, and the release image built from these packages is what ships and what the §37.1 runs use
 - [ ] a PackageKit backend for the §14.6 package manager, so the desktop's software center searches, installs, updates, and removes vibeOS packages with their signatures shown, and lists §22.2's updates as pending, applied, or rolled back with the reason; a package it installs or removes is staged into the inactive slot and takes effect with §22.2's trial boot, shown as pending until the trial commits, as PackageKit's offline updates are
 - [ ] the desktop's own connections in `docs/NETWORK.md` (§22.2), each set by a recipe option or a shipped configuration file to the default §22.2's record gives it: NetworkManager's connectivity check, GeoClue's location service, the browser's telemetry, studies, safe browsing, and updater (through the browser's policy file; §36.4's test CA stays in the harness's copy), the software center's ODRS reviews and any Flathub remote, and debuginfod URLs; §22.2's isolated-network run boots the desktop image through the §37.1 workload's first hour
 - [ ] the Alpine install the gate installs beside, built by a harness step: the Linux comparison guest, booted in the desktop guest, partitions the guest's blank virtio disk into an ESP, an ext4 root, and free space, installs an Alpine root with `linux-lts` on the ext4 partition from the §14.9 mirror as §23.5 builds its root, and installs GRUB to the ESP's `\EFI\alpine` directory with a `Boot####` entry in `BootOrder` in the writable variable store the guest keeps for the §22.2 install; `grub-efi`, `efibootmgr`, and the partitioning and `mkfs` tools the step runs join the mirror's pin list
@@ -4503,7 +4515,7 @@ records under HVF, as the era preamble says. On the dev host, which has no vhost
 - [ ] full-disk encryption (§18.7's LUKS2) on by default when the §22.2 installer installs the §36.2 desktop; every boot then asks for the passphrase, §22.2's trial boots included, and the harness answers the prompt through QMP `input-send-event` at each boot of an encrypted guest. Unattended unlock, a TPM-sealed key or network unlock, is not offered, since it weakens the encryption against theft of the whole machine; a line that proposes one carries an OWNER DECISION block
 
 ### 37.3 Records
-- [ ] `llvmpipe` and browser scores, simulated Wi-Fi throughput, suspend reliability, and resume and boot times for each architecture, with the Linux comparison guest's and the runner's CPU model beside them, written by the jobs into a results file in the repository at each release, with history, and summarized in the release notes
+- [ ] `llvmpipe` and browser scores, simulated Wi-Fi throughput, suspend reliability, and resume and boot times for each architecture, measured with Alpine's binaries on vibeOS with the Linux comparison guest's and the runner's CPU model beside them, and on the release image beside those, held only to §37.1's thresholds, written by the jobs into a results file in the repository at each release, with history, and summarized in the release notes
 - [ ] a regression past its recorded threshold fails the nightly job; a number measured under KVM is compared only with history from the same runner CPU model (§10.1)
 
 ### 37.4 Crashes and reports
