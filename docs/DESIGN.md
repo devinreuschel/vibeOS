@@ -2787,6 +2787,10 @@ such timer is re-armed at the monotonic time that now matches its wall time, as 
 clock is set, so it fires when the wall clock reaches it; a relative timer, and a timer on any other
 clock, does not move.
 
+Planned (ROADMAP §20.2): across S3 the counters restart, so at resume the RTC is read again, the
+counter the clocks are computed from is re-based so that no clock steps backward, and
+`CLOCK_BOOTTIME` gains the time asleep while `CLOCK_MONOTONIC` does not.
+
 ---
 
 # 7. SMP
@@ -2950,6 +2954,20 @@ LAPIC timer with the BSP's calibration (`apic_init::arm_ap`); mark the CPU onlin
 `GS_BASE` must be set before any `lidt` and before `sti`. NMI and timer IRQs both
 read per-CPU state through `gs:[0]`. Setting it after `lidt` is a null dereference
 waiting for a non-maskable interrupt, even with IF off.
+
+Planned (ROADMAP §20.2): S3 resume reuses this sequence instead of keeping its own. The AP-side
+setup above, from loading the per-CPU GDT and TSS through arming the LAPIC timer, is one routine.
+Before S3, ROADMAP §19.6's offlining parks every CPU but the BSP, which points the FACS waking vector
+at the trampoline page (§7.3) and saves its context. On wakeup the firmware enters the trampoline in
+real mode on the BSP, which reaches long mode on the kernel CR3 and returns into that context, reruns
+the routine, clearing the TSS descriptor's busy bit before `ltr` because the descriptor in memory is
+still marked busy, re-bases the clocks (§6.6), reprograms the platform state the wakeup reset, and
+brings each AP back through §19.6's online path, which is steps 2 to 5 above on the AP's existing
+per-CPU area. Why: a wakeup loses every register the kernel set (QEMU resets the machine on a `q35`
+wakeup, and firmware restores only what its own S3 script saved), and with one routine a register
+added to bring-up, such as ROADMAP §18.3's mitigation MSRs or §20.1's x2APIC mode, is restored at
+resume with no second edit. Rejected: a resume path with its own register list, which drifts from
+bring-up.
 
 ## 7.5 Per-CPU data
 
