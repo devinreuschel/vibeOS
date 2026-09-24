@@ -1942,35 +1942,31 @@ tests and never shipped (packetdrill, the §14.9 mirror) are pinned by hash but 
 §13.11's corpus is published with its source archives beside it.
 
 - [ ] `ports/<name>/port.toml` for every third-party source: upstream URL, version, SHA-256 of the archive, SPDX license identifier, and a numbered patch series beside it; the §14.6 recipe builds from it
-- [ ] source archives mirrored as release assets, so a build does not depend on an upstream host staying up
-- [ ] a license policy in `docs/`, recorded before §14.9 and before any copyleft binary ships in an image, with the owner's answer to the decision below: vibeOS code is MIT, ports keep their licenses, and a copyleft port ships as its own package with its corresponding source beside it
+- [ ] source archives mirrored as release assets, so a build does not depend on an upstream host staying up, and so every release carries the corresponding source of each copyleft package it ships, as assets of the same GitHub Release: the archive its `port.toml` pins by SHA-256, its patch series, and its recipe; the release job refuses to publish a release that ships a copyleft package without them
+- [ ] a license policy in `docs/` that states the owner's decision recorded below, before §14.9 and before any copyleft binary ships in an image: vibeOS code is MIT, ports keep their licenses, a copyleft port ships as its own package with its corresponding source beside it, and no proprietary binary ships
 
-> **OWNER DECISION NEEDED (design review H015): which licenses a release image may carry.** Release
-> images and published assets will carry third-party code: musl (MIT) from Phase 14; the Phase 24 ports
-> tree, from which Phase 37 ships a GNOME or KDE desktop under GPL and LGPL; Linux's redistributable
-> firmware blobs (§31.6); and Intel and AMD microcode (§20.1). The firmware and microcode are
-> proprietary, redistributable under their own terms. §13.11's corpus and §17.7's build image already
-> republish GPL binaries as release assets, with their sources. Each class binds the project
-> differently. The kernel stays MIT in every option, since DESIGN §1.5 keeps GPL code out of it, and
-> shipping a GPL program beside an MIT kernel is aggregation, not a combined work.
-> - **(a) Permissive licenses only** (MIT, BSD, ISC, zlib, Apache-2.0, and the like) in images and
->   assets. Consequence: Phase 37's desktop and every GPL tool stay test inputs from Alpine and never
->   ship; Era VII's shipping lines, §13.11's corpus assets, and §17.7's build image change.
-> - **(b) Permissive and copyleft** (GPL, LGPL, MPL), each copyleft package published with its
->   corresponding source as a release asset beside it, as the box above plans, and no proprietary
->   binary. Firmware and microcode are fetched only by tests. Consequence: every release's source
->   archives stay published as long as its binaries do, and users get microcode and device firmware
->   only from elsewhere.
-> - **(c) As (b), plus proprietary redistributable firmware and microcode** as separate packages, left
->   out of the default image, each with its license text, as Debian's `non-free-firmware` does.
->   Consequence: the project redistributes binaries under licenses it did not write and must meet each
->   one's conditions (no modification, license text shipped, Intel's microcode terms).
->
-> **Recommendation: (b) now, and (c) when a funded goal brings physical hardware.** Nothing in QEMU
-> needs a firmware blob, and every gate line that touches firmware or microcode uses a test blob or
-> fetches its input at test time and ships nothing. So (b) closes every phase and does not commit the
-> project to proprietary redistribution before it has a machine that benefits. Nothing before §14.9
-> waits on the answer, and the policy file records it.
+**License policy (owner decision, 2026-09-23, design review H015): option (b).** Release images,
+packages, and every published asset may carry permissive software (MIT, BSD, ISC, zlib, Apache-2.0,
+and the like) and copyleft software (GPL, LGPL, MPL), and no proprietary binary. Device firmware
+(§31.6) and CPU microcode (§20.1) are fetched by tests only and never published. The kernel stays MIT
+(DESIGN §1.5), and a GPL program shipped beside it is aggregation, not a combined work.
+
+How the copyleft source is provided: each release, and each other published asset that holds copyleft
+binaries (§13.11's corpus, §17.7's build image), carries their corresponding source as assets of the
+same GitHub Release. That is the exact upstream archive whose SHA-256 the port pins, the patch series,
+and the build recipe, which the build already fetches and the release job uploads with no human step.
+Offering the source from the same place as the binary satisfies GPLv2 §3, GPLv3 §6(d), the LGPL, and
+MPL-2.0 §3.2 together, and costs nothing on a public repository.
+
+Rejected: linking to each upstream project's download instead. GPLv3 allows a link only while the
+distributor itself keeps it working, and GPLv2 does not clearly allow one at all. Alpine and many
+upstreams delete superseded versions, so a link would quietly stop meeting the license. Rejected:
+copying the source into the tree or into comments. DESIGN §1.5 forbids copying GPL code into the MIT
+tree, and a copy there proves nothing that the archive beside the binary does not.
+
+Publishing proprietary firmware or microcode, when a funded goal brings physical hardware, goes back
+to the owner.
+
 - [ ] `make check` fails when a port lacks a manifest or has a license the policy does not allow; a scheduled job verifies each archive hash and that each patch series applies
 - [ ] the §14.9 mirror's pin list records each package's license from its own metadata, and the scheduled job checks it against the same policy
 - [ ] a scheduled job looks up each port and each §14.9 mirror package in the OSV database and opens an issue for a known vulnerability
@@ -2290,7 +2286,7 @@ them from source on vibeOS is Phase 24, and this phase does not wait for it. Eve
 test tool in the loop still runs on vibeOS.
 
 - [ ] the pinned nightly's `rustc` and `cargo`, the `rustfmt`, `clippy`, `llvm-tools`, and `rust-src` components that `make check` and the build use, and `rust-std` for the host and for `x86_64-unknown-none`, `aarch64-unknown-none-softfloat`, and `aarch64-unknown-none`, as rust-lang publishes them for the `<arch>-unknown-linux-musl` host (Tier 2 with host tools on both architectures), run on vibeOS under §14.9's musl. The pin stays a nightly because the kernel uses nightly features (`abi_x86_interrupt`, `alloc_error_handler`); Rust code with `std` targets `*-unknown-linux-musl`, not a vibeOS triple (§24.3)
-- [ ] a `vibeos-build` disk image holding that toolchain; the pinned §14.9 `minirootfs` and the whole package snapshot, so the packages §17.2, §17.4, and §17.6 name and those `make test`'s tiers build images from are local; a clone of the Limine binary branch at `setup.sh`'s pinned `LIMINE_TAG` and `LIMINE_COMMIT`, which the loop script passes to `setup.sh` as `LIMINE_REPO`; a `cargo vendor` tree for the workspace; and the §14.10 source archives the build reads (musl and compiler-rt for `make sysroot`), pinned by hash, built once by the host and stored by content hash as §13.11 stores its corpus, since the Actions cache holds 10 GB per repository. A release file must be under 2 GiB, so the image is kept zstd-compressed in parts below that, which a run streams through `zstd -d` into the image and checks against that hash; the on-device loop begins with neither a package install nor a download. The image's compressed and uncompressed sizes are recorded in DESIGN §8.6, and the image, the checkout, and the guest's disks fit the 14 GB disk GitHub documents for a hosted runner
+- [ ] a `vibeos-build` disk image holding that toolchain; the pinned §14.9 `minirootfs` and the whole package snapshot, so the packages §17.2, §17.4, and §17.6 name and those `make test`'s tiers build images from are local; a clone of the Limine binary branch at `setup.sh`'s pinned `LIMINE_TAG` and `LIMINE_COMMIT`, which the loop script passes to `setup.sh` as `LIMINE_REPO`; a `cargo vendor` tree for the workspace; and the §14.10 source archives the build reads (musl and compiler-rt for `make sysroot`), pinned by hash, built once by the host and stored by content hash as §13.11 stores its corpus, with the corresponding source of every copyleft binary the image holds published beside it as §14.10's policy requires, since the Actions cache holds 10 GB per repository. A release file must be under 2 GiB, so the image is kept zstd-compressed in parts below that, which a run streams through `zstd -d` into the image and checks against that hash; the on-device loop begins with neither a package install nor a download. The image's compressed and uncompressed sizes are recorded in DESIGN §8.6, and the image, the checkout, and the guest's disks fit the 14 GB disk GitHub documents for a hosted runner
 - [ ] `cargo build --offline` from that image, with `flock` and `fcntl` locks (§13.9) held across parallel builds, and `-j` equal to the guest's CPU count, 4 in the Phase 17 guest
 - [ ] no upstream binary is patched, wrapped, or `LD_PRELOAD`ed to run; each workaround is a kernel fix with a regression test in the cheapest tier that catches it
 - [ ] `docs/UPSTREAM.md` lists every upstream bug hit (Limine, QEMU, edk2, musl, Alpine, rustc, LLVM), each with a link to the upstream issue or patch
@@ -2639,7 +2635,7 @@ under TCG on the hosted arm64 runner, which has no KVM, and under HVF only as §
 ### 20.1 x86_64 platform models
 - [ ] both boot paths on each model firmware: OVMF (UEFI) and SeaBIOS (BIOS) on `q35` and `pc`, each booting the ISO from CD, NVMe, and `usb-storage`, chosen by `bootindex`
 - [ ] NX checked before use: `paging_init::install` reads CPUID.80000001H:EDX[20] before it sets `EFER.NXE`; on a CPU without NX, boot halts before `mov cr3` with a registered marker naming the missing feature, instead of triple-faulting on a `wrmsr` that runs before `arch::idt::init` loads the kernel's IDT; an e2e boot with `-cpu qemu64,-nx` expects that marker (F090)
-- [ ] CPU microcode updates for Intel and AMD from the vendors' published files, pinned by hash with their licenses under the §14.10 policy and loaded from the initrd: applied on the BSP before the §18.3 speculation mitigations read CPUID, and on each AP in its bring-up path; the container parsing and CPU-signature matching in the portable half, host-tested against the published files. In-guest, `-cpu Skylake-Server` and `-cpu EPYC-Milan` under TCG, each with its `ucode-rev` property set below the published update's revision, present signatures the published files cover; the loader selects the matching update, performs the load, and logs each CPU's revision before and after. QEMU accepts the load and leaves the revision unchanged, so a revision that changes is a Funded goals line
+- [ ] CPU microcode updates for Intel and AMD from the vendors' published files, pinned by hash with their licenses recorded, fetched at test time, and loaded from a test image's initrd, since §14.10's policy publishes no proprietary binary: applied on the BSP before the §18.3 speculation mitigations read CPUID, and on each AP in its bring-up path; the container parsing and CPU-signature matching in the portable half, host-tested against the published files. In-guest, `-cpu Skylake-Server` and `-cpu EPYC-Milan` under TCG, each with its `ucode-rev` property set below the published update's revision, present signatures the published files cover; the loader selects the matching update, performs the load, and logs each CPU's revision before and after. QEMU accepts the load and leaves the revision unchanged, so a revision that changes is a Funded goals line
 - [ ] x2APIC: read `IA32_APIC_BASE.EXTD` at LAPIC enable. When firmware hands off in x2APIC mode, which may be locked, drive the LAPIC and ICR through MSRs, never clear EXTD, and never map the xAPIC MMIO page. Parse MADT types 9 and 10 alongside 0 and 4. QEMU exercises the handoff by booting OVMF on the §18.1 `q35` configuration (`pc` caps at 255 vCPUs) with more than 255 vCPUs, which hands off in x2APIC mode, under KVM or under TCG from QEMU 9.0, the first release whose TCG models x2APIC
 - [ ] `apic::apic_base_msr` keeps EXTD set when the value it reads has EXTD set, since writing EN=1 with EXTD=0 while EXTD is set is the x2APIC-to-xAPIC transition, which raises `#GP`; its host test covers an input with EXTD=1 (F028)
 - [ ] no CPU cap below the x2APIC range: `MAX_CPUS` and the `u8` APIC IDs in `src/acpi.rs`, and the 64-bit online, waiter, and shootdown masks behind `MAX_IPI_CPUS` in `src/ipi.rs`, replaced by tables sized from the MADT with 32-bit APIC IDs and CPU masks sized from the CPU count, so the boot above with more than 255 vCPUs brings every CPU online; today a CPU past the 64th is dropped from the MADT table without a log line
@@ -3889,7 +3885,7 @@ part is evdev and HID as libinput and the kselftest `hid` tests expect them.
 
 ### 31.6 Firmware
 - [ ] one loader: a driver requests a blob by name; blobs for devices needed before root come from the initrd, the rest from `/lib/firmware` in Linux's layout
-- [ ] firmware as its own §14.6 package, each blob's license recorded under the §14.10 policy; redistributable blobs come from `linux-firmware` and Intel's microcode repository, pinned by commit
+- [ ] firmware as its own §14.6 package, each blob's license recorded; its blobs come from `linux-firmware` and Intel's microcode repository, pinned by commit and fetched at test time, and the package is built for tests only, since §14.10's policy publishes no proprietary binary; publishing it once a funded goal brings hardware is the owner's call
 - [ ] each blob's SHA-256 in the firmware package's signed file list (§14.6), checked at load; in-guest tests use a package signed with a test key
 - [ ] §20.1's microcode files served through it
 
