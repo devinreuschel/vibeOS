@@ -5220,14 +5220,15 @@ ROADMAP §19.8's zero-copy.
 
 # 11. Portability
 
-x86_64 and aarch64 are peers from ROADMAP Phase 11; x86_64 came first and is the reference when the
-two disagree (ROADMAP, How to read this). This section is the contract for the seam between them.
-`docs/ARCH.md` (ROADMAP §10.3) maps each row of the §11.1 table to the modules that implement it in
-each port. Planned: ROADMAP §10.3 builds the seam and Phase 11 the aarch64 port. Today no seam trait,
-stub port, or `docs/ARCH.md` exists; `thread.rs` and `dma.rs` in `vibeos-core` carry
-`cfg(target_arch)` and assembly (ROADMAP §10.3); and the one port is x86_64's, in the kernel crate's
-`src/arch/` and in `vibeos-core`'s `desc.rs`, `pic.rs`, and `vectors.rs`. The rest of this section is
-the design those lines build.
+x86_64 and aarch64 are peers from ROADMAP Phase 11; x86_64 came first and is the reference where the two
+ports disagree about the kernel's own behaviour; for anything a user program can observe, each
+architecture's reference is Linux on that architecture (ROADMAP, How to read this). This section is the
+contract for the seam between them. `docs/ARCH.md` (ROADMAP §10.3) maps each row of the §11.1 table to
+the modules that implement it in each port. Planned: ROADMAP §10.3 builds the seam and Phase 11 the
+aarch64 port. Today no seam trait, stub port, or `docs/ARCH.md` exists; `thread.rs` and `dma.rs` in
+`vibeos-core` carry `cfg(target_arch)` and assembly (ROADMAP §10.3); and the one port is x86_64's, in
+the kernel crate's `src/arch/` and in `vibeos-core`'s `desc.rs`, `pic.rs`, and `vectors.rs`. The rest of
+this section is the design those lines build.
 
 ## 11.1 The seam
 
@@ -5366,6 +5367,15 @@ offset for 48-bit VAs, so the TTBR1 range's shadow is `0xFFFF_6000_0000_0000` �
 `0xFFFF_8000_0000_0000`, below §4.1's fixed regions and just above the physmap's slot, so
 `boot::capture`'s slot check and the physmap builder's bound (§4.1) keep the physmap out of it.
 
+Planned (ROADMAP §11.1, §11.6): `TCR_EL1.TBI0` is 1 and `TBI1` is 0, as Linux arm64 sets them, so EL0
+loads and stores ignore bits 63:56 of a user address and user code may keep a tag there, while a kernel
+address is never tagged, except in ROADMAP §18.4's tag-based KASAN build. The syscall boundary follows
+Linux's default untagged ABI: the ROADMAP §10.6 range check refuses a user pointer whose bits 63:56 are
+not zero with `EFAULT`, as Linux does for a process that has not opted in, and the fault path clears
+those bits from `FAR_EL1` before it uses the address, so neither the lookup nor a signal's `si_addr`
+sees the tag. The opt-in, `PR_SET_TAGGED_ADDR_CTRL`, is ROADMAP §18.4's; until it lands that `prctl`
+returns `EINVAL`, and `docs/LINUX.md` lists the difference.
+
 Planned (ROADMAP §11.2): ASIDs, so a context switch changes TTBR0 without flushing the TLB. The
 allocator is Linux arm64's generation scheme. An address space holds one 64-bit value, a generation
 counter above its ASID bits, and each CPU holds an atomic `active_asid`. A switch into an address
@@ -5432,6 +5442,7 @@ they read, and the aarch64 port does not exist.
 | aarch64 | `SCTLR_EL1.E0E` | 0 | EL0 is little-endian |
 | aarch64 | `SCTLR_EL1.SPAN` | 0 (FEAT_PAN is in the §3.1 floor) | nothing directly; every exception entry to EL1 sets PAN (ROADMAP §11.6) |
 | aarch64 | pointer authentication (`EnIA`, `EnIB`, `EnDA`, `EnDB`), BTI (`BT0`), and MTE (`ATA0`, `TCF0`) in `SCTLR_EL1` | 0 | off until ROADMAP §18.9 (pointer authentication, BTI) and §18.4 (MTE) turn them on and change this row |
+| aarch64 | `TCR_EL1.TBI0` (`TBI1` 0) | 1 | EL0 loads and stores ignore bits 63:56 of the address, so a program may keep a tag there; a system call refuses a tagged pointer ([§11.2](#112-address-space-on-aarch64)) |
 | aarch64 | every other `SCTLR_EL1` field | the port's constant, with each field's reason beside it | no EL0-visible effect |
 | aarch64 | `CNTKCTL_EL1.EL0VCTEN` | 1 | EL0 reads `CNTVCT_EL0` and `CNTFRQ_EL0`, which the ROADMAP §13.10 vDSO clock reads |
 | aarch64 | `CNTKCTL_EL1.EL0PCTEN` | 0 | an EL0 read of `CNTPCT_EL0` traps and gets `SIGILL`; Linux arm64 also leaves this bit clear |
