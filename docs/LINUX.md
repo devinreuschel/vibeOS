@@ -62,8 +62,9 @@ One row per interface only vibeOS offers, with its format and reason. Each lives
 (SYSCALL.md §8): `/proc/vibeos/`, `/proc/<pid>/vibeos/`, `/sys/kernel/vibeos/`, a `vibeos/` directory
 inside a sysfs or debugfs directory Linux owns, a generic-netlink family `vibeos_<name>`, a node under
 `/dev/vibeos/`, or a `vibeos.<name>=` command-line option; `psinfo` is the one exception, until
-ROADMAP §13.9. A row lands in the commit that adds the interface.
+ROADMAP §13.9. A row lands in the commit that adds the interface. Class is the interface's stability
+class (ROADMAP §39.1), recorded when the row lands.
 
-| Id | Interface | Format | Reason | Until |
-|----|-----------|--------|--------|-------|
-| `psinfo` | syscall 500 | one `<pid> <ppid> <state> <name>` line per process, whole lines only, at most 512 bytes (SYSCALL.md §3.1) | the `/bin/sh` `ps` built-in, before `procfs` exists | ROADMAP §13.9, which deletes it |
+| Id | Interface | Format | Reason | Until | Class |
+|----|-----------|--------|--------|-------|-------|
+| `psinfo` | syscall 500 | one `<pid> <ppid> <state> <name>` line per process, whole lines only, at most 512 bytes (SYSCALL.md §3.1) | the `/bin/sh` `ps` built-in, before `procfs` exists | ROADMAP §13.9, which deletes it | `internal` |

@@ -747,6 +747,10 @@ Every boot line is `vibeOS: <subsystem>: <state>`, lowercase, no punctuation at 
 markers are asserted by the e2e harness in order. Adding a marker means updating the contract in
 [section 8.3](#83-end-to-end) in the same commit.
 
+The markers are a contract with the harness, not an interface for software outside the tree: ROADMAP
+§39.1 classes them `internal`, so a release may change one, with section 8.3's contract in the same
+commit.
+
 `marker!` for contract lines (never filtered, always captured); `klog!` for everything else;
 `PlainSerial` only for `dmesg` and panic dumps. `marker!` writes serial before it returns; from
 ROADMAP §19.5 a `klog!` line reaches serial when a printer thread gets to it
@@ -1285,7 +1289,9 @@ module's options, so no later Linux option can take its name. `sysctl.<path>=` s
 implements, and an unknown path is logged and ignored, as on Linux. A word the kernel does not
 recognize reaches init as Linux passes it: an undotted `name=value` into init's environment, any other
 undotted word, and every word after `--`, as an argument; an unrecognized dotted word is dropped.
-ROADMAP §10.2's parser lists each option here as it lands.
+ROADMAP §10.2's parser lists each option here as it lands, with its ROADMAP §39.1 class: `internal`
+for an option only the harness or a test sets, such as `vibeos.ktest=`, and `stable` or `unstable`
+for the rest.
 
 Planned (ROADMAP §18.7, §22.2): under Secure Boot the kernel command line is the `cmdline:` of the
 Limine configuration enrolled into the signed Limine binary, which sets `editor_enabled: no`, so
