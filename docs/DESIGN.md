@@ -69,7 +69,10 @@ These are not style preferences. They shape every subsystem.
    produces a diagnosable hang instead of a silent one.
 5. **No unbounded loops against hardware.** Every poll gets an iteration cap and a failure path.
 6. **Layering is enforced by dependency direction**, not by wishful thinking. Lower layers do not
-   call up. No callback into the scheduler from the physical allocator.
+   call up, except through a hook an upper layer installs at init, and §1.2 lists each one. The
+   buddy and the heap never call up, directly or by hook, but for the TLB shootdown a kernel-half
+   mapping change makes (§4.3): an allocation reaches reclaim, the writeback wait, and the OOM
+   killer only through the allocation entry's hooks (§4.4).
 7. **The portable crate is stable Rust.** `vibeos-core` enables no `#![feature]`. Kani (ROADMAP
    §10.8) and Verus (Phase 38) each pin their own toolchain and must build the code the kernel
    links, and code with no unstable feature builds on all of them. Nightly features stay in the
@@ -105,7 +108,20 @@ other means, and the measurement that justifies the path is recorded beside it.
     boot (limine, gdt, serial, panic)
 ```
 
-Cross-cutting and allowed from anywhere: `serial`, `panic`, `sync`, `log`.
+Cross-cutting and allowed from anywhere: `serial`, `panic`, `sync`, `log`, and the allocation entry
+(§4.4), which calls down into the heap and the buddy.
+
+Upward calls go only through hooks an upper layer installs at init, each listed here with the layer
+that sets it:
+
+- `paging::tlb_shootdown_others`, set by `ipi_init::init` before the first AP starts (§4.3).
+- Planned (ROADMAP §10.3, A4): the spin-poll hook in `sync_init`, set by `ipi_init::init`, and the
+  scheduler hooks in `ipi_init`, set by `sched_init::init`.
+- Planned (ROADMAP §12.6): the allocation entry's hooks, set by the page cache (clean-page reclaim),
+  the writeback threads (their wake and bounded wait), and the process layer (the OOM killer).
+
+A hook not yet set is skipped, so host tests and early boot run a lower layer alone: before the
+reclaim hooks are set, an allocation goes from the reserve straight to failure.
 
 ## 1.3 Module map
 
@@ -1857,13 +1873,22 @@ until the OOM killer frees memory (Linux's "too small to fail"), because an allo
 spinlock held, or on a path the OOM victim needs in order to exit, cannot wait, and a failed
 `Box::new` cannot be handled by its caller; AGENTS.md rule 4 forbids a user-triggerable panic.
 
+Planned (ROADMAP §12.6): one allocation entry applies the rules below. It is the `#[global_allocator]`
+that `kalloc`'s types allocate through and the frame entry that the fault path, page tables, kernel
+stacks, and DMA use. It is a module of its own, not `heap_init` or `pmm_init`: it calls down into
+the heap and the buddy, which report failure and never reclaim, wait for memory, or call up beyond
+the heap's §4.3 shootdown when it grows, and it reaches reclaim, the writeback wait, and the OOM
+killer through the hooks §1.2 lists. Where §27.3's joining applies, it joins a memory section before
+it goes below the reserve (§4.2). Today the `#[global_allocator]` is `heap_init::KernelAlloc`, and
+`kva_init`, `dma_init`, and `addr_space_init` take frames from `pmm_init::with_buddy` directly.
+
 Direct reclaim (ROADMAP §12.6) runs inside an allocation that failed, on the allocating thread, so it
 must need nothing that thread might hold. The thread may hold a filesystem's inode or block-mapping
 lock, its own address-space lock, or a busy page-cache page (§2.1's sleeping tier). Rules:
 
 1. Direct reclaim runs only for an allocation that began with IF=1, this CPU's `HELD` rank mask
    empty, and a calling thread that is not a no-reclaim thread and is outside any RCU read-side
-   section ([§2.12](#212-rcu)). The allocator reads all four at entry, before it takes the heap
+   section ([§2.12](#212-rcu)). The allocation entry reads all four at entry, before it takes the heap
    lock. Any other allocation draws on the reserve below, as deep as its class allows, and then
    fails.
 2. It frees clean pages only. It drops clean page-cache pages that nothing maps. It unmaps a mapped
@@ -1885,7 +1910,7 @@ lock, its own address-space lock, or a busy page-cache page (§2.1's sleeping ti
    need, a level-4 lock or a reverse-map lock (§2.1), runs the same passes, but each waits only
    until a write already submitted to a device completes or 100 ms pass, and after 16 its
    allocation fails with `ENOMEM` instead of running the OOM killer, since the writeback it would
-   wait for may need that lock. The allocator reads the thread's count of such locks at entry, with
+   wait for may need that lock. The allocation entry reads the thread's count of such locks at entry, with
    rule 1's conditions; each of those locks raises the count when it is taken and lowers it when it
    is released. That wait stands outside §2.1's order, though the reclaiming thread may hold a
    block-mapping or volume lock: the completion that ends it takes no sleeping-tier lock, in the
