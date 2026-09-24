@@ -33,7 +33,7 @@ halfway through.
 | | Section | Covers |
 |---|---------|--------|
 | 1 | [Overview](#1-overview) | Constraints, layers, module map, sources and licenses |
-| 2 | [Invariants](#2-invariants) | Lock order, handler rules, panic policy, markers, invariant register, publish last, preemption, trust boundaries, object lifetimes |
+| 2 | [Invariants](#2-invariants) | Lock order, handler rules, panic policy, markers, invariant register, publish last, preemption, trust boundaries, object lifetimes, RCU |
 | 3 | [Boot](#3-boot) | Toolchain, Limine, `_start` order, linker |
 | 4 | [Memory](#4-memory) | Address map, buddy allocator, paging, heap |
 | 5 | [Interrupts](#5-interrupts) | GDT/IDT, exception policy, vector map, PIC and APIC, privilege transitions |
@@ -340,6 +340,7 @@ Blocking and allocation are a class of bug, not an instance. Context rules:
 |---------|------------|------------|
 | Hard IRQ / MSI handler | No | No |
 | Softirq equivalent (high-prio workqueue) | No | Fallible only, without direct reclaim ([§4.4](#44-kernel-heap)); the hard IRQ only enqueues |
+| RCU read-side section ([§2.12](#212-rcu)) | No; it may be preempted | Fallible only, without direct reclaim ([§4.4](#44-kernel-heap)) |
 | Threaded IRQ bottom half | Yes, on its own device's state only ([§5.4](#54-irq-registration)) | Fallible only, without direct reclaim ([§4.4](#44-kernel-heap)) |
 | Workqueue worker | Yes | Yes |
 | Driver `probe` | Yes | Yes |
@@ -628,8 +629,9 @@ every IF=0 stretch has a reason from the list below and a bound.
    syscall body runs with IF=0 until it blocks (ROADMAP §10.6).
 4. Code that may sleep (waits on a wait queue, takes a sleeping lock (§2.1), allocates with
    reclaim (ROADMAP §12.6), or copies to or from user memory once ROADMAP §12.2 lets a user-copy
-   fault sleep) runs with IF=1 and no spinlock held, and asserts both in debug builds (ROADMAP
-   §10.3).
+   fault sleep) runs with IF=1, no spinlock held, and outside any RCU read-side section
+   ([§2.12](#212-rcu)), and asserts each in debug builds (ROADMAP §10.3; the read-side check from
+   §19.5).
 5. A per-CPU field other than `current` is read or written only with IF=0 (`with_current`,
    `IrqCell`), because a preemption with IF=1 can move the thread to another CPU between the
    lookup and the use. `current` names the same thread on every CPU it runs on.
@@ -695,10 +697,11 @@ covers the last store of a hand-off; these rules cover the rest.
    the object's count is zero and no CPU still runs on it or through it (a TCB's `on_cpu` flag,
    ROADMAP §10.10).
 3. Teardown runs in one order: unpublish the object from every lookup structure, so no new
-   reference can be taken; wait until in-flight users drop theirs (the count reaching zero, or,
-   for lockless readers from ROADMAP §19.5 on, an RCU grace period); release what the object holds
-   (frames, vectors, DMA buffers, stopping the device first, [§5.4](#54-irq-registration)); then
-   free it. No step waits for a lock that an in-flight user needs in order to finish.
+   reference can be taken; wait until in-flight users drop theirs (the count reaching zero; for an
+   object that RCU readers can also find, the count reaching zero and then a grace period,
+   [§2.12](#212-rcu)); release what the object holds (frames, vectors, DMA buffers, stopping the
+   device first, [§5.4](#54-irq-registration)); then free it. No step waits for a lock that an
+   in-flight user needs in order to finish.
 4. Ids are not pointers. A pid, tid, descriptor, or device id that crosses the syscall boundary or
    sits in a table is looked up on each use, never cached as a pointer. Pids and tids are allocated
    in increasing order up to `pid_max` and then wrap, skipping ids in use, as Linux does, so a freed
@@ -733,14 +736,66 @@ every space until ROADMAP §12.1.
 Why: the kernel review's CRITICAL and HIGH lifetime findings (F002, F012, F019) each came from an
 object that one subsystem freed or reused while another could still reach it, under a scheme that
 subsystem invented. Rejected: keeping one scheme per subsystem, which is how those bugs arose; and
-never freeing (today's TCBs), which aliases a dying object as soon as its slot is reused. Epoch or
-RCU reclamation is kept for lockless readers only (ROADMAP §19.5); everything else uses counts.
+never freeing (today's TCBs), which aliases a dying object as soon as its slot is reused. RCU
+(§2.12) is kept for lockless readers only, and it adds a grace period to their objects' counts rather
+than replacing them; everything else uses counts alone.
 
 Today the code breaks rules 1, 2, 4, and 5: TCBs are never freed and their slots are rewritten in
 place (I9; ROADMAP §10.10, F012), address spaces are reached through `&'static` references built
 from table-owned boxes (ROADMAP §10.6, F019), block completions point into stack frames (ROADMAP
 §10.10, F002; §12.5, F042), and a pid is the index of its process-table slot, handed out lowest
 first (ROADMAP §10.4, F127).
+
+## 2.12 RCU
+
+Lockless readers (ROADMAP §19.5: the dentry cache, the mount table, the routing table) find objects
+without a lock or a count, so an object they can reach is freed only after every reader that might
+hold it has finished. RCU is how the kernel knows. vibeOS's RCU is preemptible, as Linux's is in a
+fully preemptible kernel.
+
+1. A read-side section increments a nesting count in the TCB on entry and decrements it on exit. A
+   reader runs with IF=1 and may be preempted, but it never sleeps: it takes no sleeping lock
+   (§2.1), waits on no queue, copies no user memory, and allocates only without reclaim
+   ([§4.4](#44-kernel-heap) rule 1). Code running with IF=0 is a reader too, because a CPU with IF=0
+   passes no quiescent state except at the switch point of a context switch.
+2. A CPU passes a quiescent state at a context switch whose outgoing thread's count is zero, in its
+   idle loop, on a return to user mode, and at a tick that interrupts a thread whose count is zero.
+   A CPU in tickless idle or offline (ROADMAP §19.6) is quiescent throughout.
+3. A thread switched out with a nonzero count joins the blocked-reader list and leaves it at its
+   outermost exit, on whatever CPU it then runs. The list has its own spinlock, ranked after SCHED
+   because the switch path takes it inside SCHED; the rank enters §2.1 with the code. It is one list
+   until ROADMAP §27.5's tree gives each leaf its own. A grace period ends when every CPU has passed
+   a quiescent state since it began and no reader that entered its section before it began is still
+   on the list.
+4. A preempted reader holds every grace period open until it runs again. A reader that has held the
+   current grace period open past a bound is boosted through ROADMAP §19.4's priority inheritance to
+   the priority of RCU's grace-period thread until its outermost exit, as Linux's RCU priority
+   boosting does. Real-time threads above that priority can still hold a grace period open for as
+   long as they run, as on Linux.
+5. An object that RCU readers can find and that is counted (§2.11 rule 1) is freed only after it is
+   unpublished and its count has reached zero, and then a grace period has passed. A reader takes a
+   count only with get-unless-zero, an increment that fails when the count is already zero, so it
+   never revives an object whose last reference is gone.
+6. An RCU path walk never waits on I/O or a sleeping lock. On a dentry-cache miss, a mount it cannot
+   pin, or a sequence count that changed under it, it takes counted references with get-unless-zero
+   to the last dentry and mount it validated, leaves the read side, and continues as a reference
+   walk under the sleeping locks, as Linux's `LOOKUP_RCU` walk falls back. When get-unless-zero
+   fails, the walk restarts from its starting point as a reference walk.
+
+Why: §2.9 has one way to say "not now", IF=0, and its rule 2 forbids an IF=0 path walk whose length
+a user sets, so readers run with IF=1 and can be preempted. The nesting count does not disable
+preemption; it only tells the grace-period machinery whom to wait for, so it is not a second "not
+now". Linux's preemptible RCU has this shape, and its behaviour settles edge cases. Rejected:
+classic RCU with IF=0 readers (rule 2); a preempt-disable count beside IF, which every per-CPU rule
+would then have to account for; epoch-based reclamation, which scans every thread's epoch for each
+grace period and stalls on a preempted reader the same way; and sleepable RCU alone, which has no
+fast read side for the dentry cache.
+
+Cost: the blocked-reader list and boosting make RCU larger than a classic implementation, and a
+preempted reader lengthens grace periods, so memory waiting on them grows under load
+([§4.4](#44-kernel-heap) rule 3 counts it as freeable).
+
+Planned (ROADMAP §19.5): nothing uses RCU yet.
 
 ---
 
@@ -1160,9 +1215,9 @@ must need nothing that thread might hold. The thread may hold a filesystem's ino
 lock, its own address-space lock, or a busy page-cache page (§2.1's sleeping tier). Rules:
 
 1. Direct reclaim runs only for an allocation that began with IF=1, this CPU's `HELD` rank mask
-   empty, and a calling thread that is not a no-reclaim thread. The allocator reads all three at
-   entry, before it takes the heap lock. Any other allocation draws on ROADMAP §12.6's reserve pool
-   and then fails.
+   empty, and a calling thread that is not a no-reclaim thread and is outside any RCU read-side
+   section ([§2.12](#212-rcu)). The allocator reads all four at entry, before it takes the heap
+   lock. Any other allocation draws on ROADMAP §12.6's reserve pool and then fails.
 2. It frees clean pages only. It drops clean page-cache pages. It unmaps clean mapped ones through
    the reverse map, taking only each address space's page-table spinlock and a try-lock of the page,
    and no count on the space ([§2.11](#211-object-lifetimes)), and it skips any page it cannot take
@@ -1175,7 +1230,10 @@ lock, its own address-space lock, or a busy page-cache page (§2.1's sleeping ti
    device's bottom half ([§5.4](#54-irq-registration)) or in any later completion stage, and a
    filesystem's end-of-write work that needs its own locks runs in its writeback thread after the
    completion, never in it. Any wait for further writeback progress is bounded by the deadline.
-   ROADMAP §13.12's lock-dependency build gives the wait a class of its own.
+   ROADMAP §13.12's lock-dependency build gives the wait a class of its own. Memory that waits only
+   for an RCU grace period counts as freeable: before the OOM killer runs, reclaim waits, with the
+   same deadline, for the grace period in progress to end and for the RCU callbacks it made ready to
+   run (§2.12).
 4. It never recurses. These are no-reclaim threads, whose allocations use the reserve pool and
    then fail: the writeback threads, the swap-out thread, threaded interrupt bottom halves (§5.4), a
    workqueue worker while it runs a softirq-equivalent item (§2.2), and a thread already in reclaim.
@@ -1183,7 +1241,8 @@ lock, its own address-space lock, or a busy page-cache page (§2.1's sleeping ti
 Why: writeback or an unmap that needed a lock the allocating thread holds would deadlock that thread
 on itself. For example, a filesystem that allocates while holding its volume lock would reach
 writeback of its own dirty pages. A bottom half that waited on reclaim could wait for an I/O
-completion that only it can deliver.
+completion that only it can deliver. A thread inside an RCU read-side section may not sleep (§2.12),
+and reclaim's wait for a grace period (rule 3) would wait on that thread itself.
 
 Linux guards the same recursion with per-call `GFP_NOFS` and `GFP_NOIO` flags and has moved page
 writeback out of direct reclaim. These rules take the second route everywhere, so no call site
