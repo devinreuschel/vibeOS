@@ -745,6 +745,7 @@ separate namespace.
 | I36 | `current` is read in one instruction, and every other per-CPU access but the CPU-id hint runs with IF=0 ([§2.9](#29-preemption-and-interrupt-state) rule 5) | `per_cpu_init`; the syscall stub's `gs:[current]` load | documented | Partly: the syscall stub reads `current` in one load, but `current_thread`, `current_id`, `current_pid`, and `per_cpu!` load `gs:[0]` and then the field, and `current()` hands out `&'static PerCpu` at any IF; no preempted thread changes CPU yet (ROADMAP §10.3, F039) |
 | I37 | Nothing is silently swallowed: an error is returned to its caller, or handled where it arises by a counter and a rate-limited line, a recorded error state, or a bounded retry (§2.5) | every module; ROADMAP §10.1's lints | documented | No: nothing checks a discard, and the kernel review's dropped errors remain (ROADMAP §10.1 audit; §10.2, F080; §10.11, F051, F063; §10.12, F115; §13.9, F124) |
 | I38 | A return to user mode restores only what the §5.10 rule 10 validator accepted from any writer of the saved frame, and its last check for pending work runs with IF=0 (§5.10 rule 11) | the validators in each port's pure half; the exit paths | documented | Rule 10 holds vacuously: no writer of a saved user context exists before ROADMAP §13.8 and §17.4. Rule 11 does not: pending signals are acted on only at syscall entry and after the `wait4` sleep (ROADMAP §10.6, F033) |
+| I39 | On aarch64, an ASID a CPU has used since its last local TLB flush names one address space on that CPU ([§11.2](#112-address-space-on-aarch64)) | the ASID allocator (ROADMAP §11.2) | documented | Not relied on yet: the aarch64 port does not exist; ROADMAP §11.2's host tests and loom model enforce it when it lands |
 
 ## 2.8 Publish last
 
@@ -2815,7 +2816,7 @@ as `CR4.TSD` or `SCTLR_EL1.UCT`, is a row of §11.4's table instead.
 | aarch64 | V0-V31, FPCR, FPSR | `Tcb.fpu` | the FP binding below | not built: ROADMAP §11.6 |
 | aarch64 | `TPIDR_EL0` (user TLS) | the thread's saved TLS base, as for `FS_BASE` | `on_switch` saves it for an outgoing user thread and loads the incoming one's; EL0 writes it with `msr` at any time, so only the live register is current | not built: ROADMAP §11.6, which switches x86_64's `FS_BASE` in the same commit (F022); the fatal stack-overflow path uses it as scratch before it halts (§11.5 rule 6) |
 | aarch64 | `TPIDRRO_EL0` | not saved; 0 | every CPU writes 0 at bring-up, and only the fatal stack-overflow path, which halts, writes it again (§11.5 rule 6) | EL0 can read it, so it never holds a kernel value |
-| aarch64 | `TTBR0_EL1` and its ASID | the address space | the `TTBR0` switch in `on_switch`, skipped when the address space is shared (ROADMAP §11.6) | not built; ASIDs from ROADMAP §11.2 |
+| aarch64 | `TTBR0_EL1` and its ASID | the address space | the `TTBR0` switch in `on_switch`, skipped when the address space is shared (ROADMAP §11.6) | not built; ASIDs from ROADMAP §11.2; the ASID rides in the same TTBR0 write (§11.2) |
 | aarch64 | `DBGBVR`/`DBGBCR`, `DBGWVR`/`DBGWCR`, `MDSCR_EL1.MDE` | the thread's decoded debug slots | the switch, by the Debug state paragraph below | not built: ROADMAP §17.4 |
 | aarch64 | `MDSCR_EL1.SS` | the thread's step flag, with `SPSR.SS` in its frame | set at the return to EL0 and cleared at entry from EL0, by the Debug state paragraph below | not built: ROADMAP §17.4 |
 | aarch64 | SVE and SME state | not saved | nothing | not per-thread: every CPU clears `CPACR_EL1.ZEN` and `SMEN`, so EL0 use gets `SIGILL` (ROADMAP §11.6); §23.1 adds their rows |
@@ -4257,7 +4258,7 @@ per-architecture uapi (ROADMAP §13.10).
 | IPI send and its ordering | trait | LAPIC ICR write (§7.6) | SGI register write | §10.3, §11.3 |
 | Timer and cycle counter | trait (`CycleCounter`) | TSC; LAPIC timer | `CNTVCT_EL0`; generic timer | §10.3, §11.3 |
 | Page-table format and attributes | trait (`PageTable`); encodings in the pure half | 4-level tables, PAT bits | 4 KiB granule, 48-bit VA, MAIR, break-before-make | §10.3, §11.2 |
-| TLB maintenance and address-space ids | trait (`PageTable`) | `invlpg` and the shootdown IPI (§7.9); no PCID | broadcast `tlbi ...is`; ASIDs | §10.3, §11.2 |
+| TLB maintenance and address-space ids | trait (`PageTable`) | `invlpg` and the shootdown IPI (§7.9); no PCID | broadcast `tlbi ...is`; ASIDs from §11.2's generation allocator | §10.3, §11.2 |
 | Cache maintenance and DMA coherence | trait (`Barriers`) | none: coherent | `dc` and `ic`; coherence per device | §10.3, §11.2 |
 | Barriers (`dma_wmb`, `dma_rmb`, `dma_mb`) and MMIO accessors | trait (`Barriers`) | `mfence`, `sfence`, `lfence`; plain loads and stores | `dmb osh*`; ordered accessors | §10.3, §11.2 |
 | Atomics | module selected by `cfg(loom)` (below) | `core::sync::atomic` | `core::sync::atomic`, with LL/SC or LSE | §10.8 |
@@ -4355,6 +4356,36 @@ PSCI on a temporary TTBR0 identity map that is dropped once they run in the kern
 §11.4). Memory attributes come from MAIR, and MMIO is Device-nGnRE through `ioremap` (ROADMAP §11.1).
 Every kernel-half descriptor sets UXN, so EL0 can execute nothing in the kernel half whatever its
 access permissions say; §5.10 rule 10 lets a writer set any PC because of it (ROADMAP §11.2).
+
+Planned (ROADMAP §11.2): ASIDs, so a context switch changes TTBR0 without flushing the TLB. The
+allocator is Linux arm64's generation scheme. An address space holds one 64-bit value, a generation
+counter above its ASID bits, and each CPU holds an atomic `active_asid`. A switch into an address
+space whose generation is current publishes that value with a compare-exchange against the CPU's
+`active_asid` and loads TTBR0. Any other switch takes the allocator lock, keeps the space's old ASID
+if it is free or reserved in the current generation, and otherwise takes a free one. When none is
+free, the allocator rolls over under the same lock: it starts a new generation, exchanges each CPU's
+`active_asid` for 0 and reserves the ASID it held (a CPU whose slot already reads 0 keeps the ASID
+it had reserved), so an address space running at rollover keeps its number, and it marks every CPU
+flush-pending. A compare-exchange that races a rollover finds 0, fails, and takes the lock. A
+flush-pending CPU runs `tlbi vmalle1`, `dsb nsh`, and `isb` on itself before it loads any ASID of
+the new generation, and no rollover broadcasts a flush: until a CPU has flushed, every ASID its TLB
+may hold still names the one address space it named there. `TCR_EL1.A1` is clear, so one TTBR0 write
+changes the root and the ASID together. ASIDs are 16 bits where `ID_AA64MMFR0_EL1.ASIDBits` reports
+them, with `TCR_EL1.AS` set to match, and 8 bits otherwise. ASID 0 is reserved for the empty user
+root and ROADMAP §11.4's bring-up identity map. Reservation needs more usable ASIDs than CPUs, so
+where 2^bits − 1 does not exceed the possible-CPU count the port uses no ASIDs, runs `tlbi aside1`
+for ASID 0 on every TTBR0 switch, and says so at boot. The allocator is portable code in
+`vibeos-core`, which host tests and a loom model run (ROADMAP §10.8). x86_64's PCID (ROADMAP §18.3)
+is a separate scheme, §7.9's flush generations.
+
+Why: a rollover that only broadcasts a flush is not safe. A CPU still running an address space from
+the old generation refills its TLB under that ASID after the flush, and the address space that
+receives the ASID next reads and writes through those entries. Reserving the running ASIDs, and
+flushing each CPU before it uses the new generation, closes that with no IPI. Rejected: no ASIDs (a
+full refill on every switch; kept only as the fallback above); per-CPU ASID spaces (an address space
+would carry a different ASID on each CPU, so a broadcast `tlbi aside1is` could not name it, and user
+unmaps would need IPIs again); and one allocator shared with x86_64, whose PCIDs are per-CPU slots
+because x86 has no broadcast invalidation.
 
 ## 11.3 Adding an architecture
 
