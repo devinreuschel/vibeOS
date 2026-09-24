@@ -3066,6 +3066,15 @@ candidate commit, restores no cache, checks out nothing, and receives only artif
 SHA-256 list (ROADMAP §10.1, §14.6). Today `release` builds, tests, and publishes in one job with
 `contents: write`, a persisted checkout token, and restored caches.
 
+**Runners.** Planned (ROADMAP §11.7): every job that boots an aarch64 guest runs on an arm64 runner
+(`ubuntu-26.04-arm`, or the scheduled macOS job's arm64 image), never on an x86_64 one. TCG adds no
+ordering to an aarch64 guest's loads and stores, so only an arm64 host lets a weak reordering reach
+guest code; an x86_64 host runs them in its TSO order. `scripts/check_workflows.py` checks it. From
+ROADMAP Phase 11 on, `make gate` also needs two dev-host records that loop the -smp 4 in-guest tier
+and smp-stress under HVF for 30 minutes each (`tests/gates/common.toml`), the only gate that runs
+those tests on a weakly ordered CPU directly. The weekly aarch64 smp-stress leg records whether TCG
+there showed any weak outcome (`weak_order_probe`).
+
 `-D warnings` reaches host builds through `[build] rustflags` and the kernel clippy steps through their own `-- -D warnings`. Kernel builds (`make iso` and
 every ISO variant) run without it, because `[target.x86_64-unknown-none] rustflags` in
 `.cargo/config.toml` replaces `[build] rustflags` (ROADMAP §10.1, F147).
