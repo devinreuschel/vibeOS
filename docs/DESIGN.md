@@ -38,7 +38,7 @@ does not get to re-litigate the address map, the vector numbers, or the lock ord
 | 4 | [Memory](#4-memory) | Address map, buddy allocator, paging, heap |
 | 5 | [Interrupts](#5-interrupts) | GDT/IDT, exception policy, vector map, PIC and APIC, privilege transitions |
 | 6 | [Time](#6-time) | Clock sources, calibration, timekeeping, timers |
-| 7 | [SMP](#7-smp) | ACPI, AP bring-up, per-CPU, IPIs, shootdown |
+| 7 | [SMP](#7-smp) | ACPI, AP bring-up, per-CPU, IPIs, shootdown, offline and online |
 | 8 | [Testing](#8-testing) | Tiers, marker contract, QEMU flags, CI |
 | 9 | [Pitfalls](#9-pitfalls) | Bugs already paid for once |
 | 10 | [Block I/O](#10-block-io) | Requests, ordering and flush, ramdisk, virtio-blk, partitions, cache |
@@ -843,7 +843,8 @@ every IF=0 stretch has a reason from the list below and a bound.
    spinlock or `IrqCell` critical section (§2.3); an `InterruptGuard` section that must not be
    preempted or moved to another CPU: a per-CPU access (rule 5), a change to this CPU's registers
    that must match the running thread (FP state, `FS_BASE`), the [§7.9](#79-tlb-shootdown)
-   shootdown wait, or the [§7.6](#76-ipis) call-function wait; the scheduler's switch path; the
+   shootdown wait, the [§7.6](#76-ipis) call-function wait, or the
+   [§7.11](#711-cpu-offline-and-online) offline rendezvous; the scheduler's switch path; the
    return-to-user sequences of [§5.10](#510-privilege-transitions) rule 4, which begin at rule 11's
    last exit-work check; the panic and halt paths
    (§2.5); and a CPU's bring-up before its first `sti` (boot before `irq: enabled`, an AP before it
@@ -2919,7 +2920,7 @@ owning it is required for CPU offlining and for a future non-Limine boot path.
 
 Not a goal: CPU hotplug. CPUs are enumerated once at boot. §7.1 to §7.4 are x86_64's discovery and
 bring-up; aarch64 reads the device tree (ROADMAP §11.5) and starts cores through PSCI (ROADMAP §11.4),
-and §7.3 gains its aarch64 paragraph there. §7.5 to §7.10 hold on both architectures, and §7.5's
+and §7.3 gains its aarch64 paragraph there. §7.5 to §7.11 hold on both architectures, and §7.5's
 per-thread table lists each one's state.
 
 ## 7.1 ACPI
@@ -3331,7 +3332,7 @@ Kernel threads get their scheduling class when they are created, from this table
 
 | Kernel thread | Class | Linux's counterpart |
 |---|---|---|
-| The per-CPU stopper (CPU offlining, ROADMAP §19.6) and ROADMAP §25.5's per-CPU watchdog thread | Stop class, above every real-time priority | the stop class's `migration/N` threads |
+| The per-CPU stopper ([§7.11](#711-cpu-offline-and-online)) and ROADMAP §25.5's per-CPU watchdog thread | Stop class, above every real-time priority | the stop class's `migration/N` threads |
 | Threaded interrupt bottom halves ([§5.4](#54-irq-registration)), network receive included, and block error handlers ([§10.3](#103-failure)) | `SCHED_FIFO` 50 | threaded interrupt handlers |
 | RCU's grace-period and boost thread ([§2.12](#212-rcu)) | `SCHED_FIFO` 1 | RCU's kthreads with boosting on (`rcutree.kthread_prio` 1) |
 | The softirq-equivalent workers, one per CPU, which also run timeout-wheel callbacks ([§6.5](#65-timers-and-timeouts)) | Fair, nice -20 | `WQ_HIGHPRI` workqueue workers |
@@ -3369,7 +3370,7 @@ timeout-wheel callbacks starting late under load, they move to `SCHED_FIFO` 1, a
 The timeout queue starts global with one lock. ROADMAP §19.4 makes it per CPU, as
 [§6.5](#65-timers-and-timeouts)'s two structures. A timer stays on the base it was armed on when its
 thread migrates: its expiry only wakes the thread, and the wake goes through the inbox like any
-other.
+other. A CPU going offline hands its timers to an active CPU ([§7.11](#711-cpu-offline-and-online)).
 
 ## 7.9 TLB shootdown
 
@@ -3378,7 +3379,8 @@ to invalidate before the virtual address or the frame behind it is reused
 ([§2.4](#24-memory-invariants)).
 
 Protocol: update the PTE, then broadcast `0xFC` with the target address, then wait for acknowledgement
-from every online CPU.
+from every online CPU. The initiator reads the online mask inside the IF=0 section it sends and
+waits in, which [§7.11](#711-cpu-offline-and-online)'s offline rendezvous relies on.
 
 Planned (ROADMAP §12.3): user address spaces are targeted. Each address space records the set of
 CPUs that may hold its translations. A CPU sets its bit in the address space it switches to before
@@ -3459,8 +3461,86 @@ Later:
   0x1F, so the scheduler can prefer a sibling core over a remote package.
 - NUMA (ROADMAP §19.7). SRAT and SLIT parsing, per-node buddy allocators, node-local allocation
   policy.
-- CPU offlining for power management (ROADMAP §19.6), which needs the reverse of bring-up: migrate
-  threads, redirect interrupts, park the core.
+- CPU offline and online for power management (ROADMAP §19.6):
+  [section 7.11](#711-cpu-offline-and-online).
+
+## 7.11 CPU offline and online
+
+Planned (ROADMAP §19.6). Offlining parks a core for power management, and S3 and kexec use it too
+(ROADMAP §20.2, §25.4). It is the reverse of bring-up, not hotplug: the set of CPUs is still fixed
+at boot.
+
+- One offline or online runs at a time, under the hotplug lock, an `RwLock` that offline and online
+  hold for writing. Code that walks the online CPUs and may sleep between them holds it for reading.
+  A thread takes it with no other lock held, so it ranks ahead of everything in §2.1.
+- CPU 0 never goes offline, on either architecture, and a request to offline it is refused. The boot
+  CPU runs S3's resume and kexec's jump, and Linux has not let x86 offline CPU 0 since 6.5.
+- A CPU is active while new work may be placed on it. An active mask sits beside the online mask,
+  and placement, wake targets, affinity changes, vector routes, and timer moves pick only active
+  CPUs.
+- Offline and online run the steps of an ordered registry, a small version of Linux's `cpuhp`
+  states. A subsystem that adds per-CPU state registers an offline step and an online step in the
+  commit that adds the state. Each step runs either on the dying CPU before it parks, or on the
+  control CPU after the dying CPU reports that it has parked. ROADMAP §19.6's test runs every
+  registered step.
+
+Offline, in order:
+
+1. The control thread clears the CPU's active bit.
+2. The dying CPU's stopper thread, in [§7.8](#78-per-cpu-scheduling)'s stop class, pushes each
+   thread on its run queue to an active CPU's inbox ([§7.7](#77-locking-with-more-than-one-cpu)),
+   with IF on between pushes. A user thread whose affinity names only this CPU gets every active CPU
+   and a log line, as on Linux. The CPU's own kernel threads, such as its workers, park.
+3. Every vector routed to the CPU moves to an active CPU through `set_affinity`
+   ([§5.4](#54-irq-registration)), and each bottom-half thread moves with its vector. The steps that
+   run on the dying CPU run now: for example, it leaves VMX or SVM operation (ROADMAP §21.1) and
+   disarms its local timer.
+4. A stop-machine rendezvous. Every online CPU's stopper reports in and waits with IF=1 until all
+   have. Then each turns IF off and waits, servicing incoming IPIs ([§7.9](#79-tlb-shootdown)),
+   while the dying CPU clears its online bit, pushes any thread its wake inbox holds to an active
+   CPU, and raises again on its new CPU each moved vector still pending for the dying CPU (latched
+   in its IRR on x86_64, pending for it in the GIC on aarch64), as Linux does when a CPU goes
+   offline. Then every stopper turns IF back on and returns.
+5. The dying CPU reports that it has parked, as its last store to shared state
+   ([§2.8](#28-publish-last)), and parks.
+6. The control CPU runs the steps that follow the park. They move the CPU's unpinned timers of both
+   [§6.5](#65-timers-and-timeouts) structures to an active CPU with their deadlines kept, and cancel
+   its pinned ones; requeue its queued softirq-equivalent and work items; drain its per-CPU log
+   buffer; return its slab magazines, the kernel stacks it holds for reuse (ROADMAP §10.10), and its
+   per-CPU free-frame lists; fold its per-CPU counters into a global offset; move its RCU callbacks
+   ([§2.12](#212-rcu)); splice its per-CPU accept queues and receive-steering backlogs onto an
+   active CPU's (ROADMAP §28.1, §28.5); and free what [§2.8](#28-publish-last) deferred until this
+   CPU had switched away.
+
+Why the rendezvous is enough: a broadcast initiator (a shootdown, a call-function, an NMI backtrace)
+reads the online mask, sends, and waits inside one IF=0 section, and so does any code that picks a
+CPU from a mask and then signals it, such as a waker or ROADMAP §25.5's buddy check. A stopper runs
+only when its CPU is outside every such section, and while every CPU has IF=0 in step 4, no maskable
+interrupt handler runs anywhere. So when the dying CPU clears its bit, no CPU holds a choice that
+names it, and every later choice reads a mask without it. Step 6 waits for the park report because
+it frees stacks the dying CPU deferred and moves timers it could arm until then, as Linux runs its
+`DEAD` steps only after `cpu_wait_death`.
+
+The parked state keeps what an interrupt can still reach. On x86_64 the CPU runs `cli; hlt` in a
+loop with its `PerCpu`, GDT, TSS, IST stacks, and the IDT live, since an NMI or a broadcast `#MC`
+still arrives. It returns to the loop from either without acting on it, clearing `MCG_STATUS` after
+a machine check, as Linux does for an offline CPU. It comes back through INIT and SIPI on the
+reserved trampoline ([§7.4](#74-ap-bring-up-sequence)), and INIT flushes its TLB. On aarch64 it
+calls PSCI `CPU_OFF` and comes back through `CPU_ON` (ROADMAP §11.4), whose entry runs
+`tlbi vmalle1` before it enables the MMU. Its `PerCpu`, stacks, and idle thread stay allocated for
+the next online.
+
+Online runs the online steps in the reverse order: the control CPU's steps, then the CPU's bring-up
+([§7.4](#74-ap-bring-up-sequence)) up to its online bit, then the steps that run on the CPU itself.
+ROADMAP §10.7's TSC skew check runs again, and the active bit is set last.
+
+Rejected: evacuating per subsystem as each lands, which left a dozen per-CPU structures with no
+step; clearing the online bit with no rendezvous and having every broadcast re-check the mask, where
+one missed re-check is a hang; refusing to offline a CPU that owns pinned threads, timers, or accept
+queues, which rules out kexec on aarch64, since it needs every CPU but one offline; Linux's full
+state machine of some two hundred states, for the dozen subsystems here; and offlining CPU 0, which
+S3 and kexec would first have to move off. Cost: every CPU pauses for the rendezvous once per
+offline, which power management does rarely.
 
 ---
 
