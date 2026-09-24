@@ -614,9 +614,42 @@ Binding order (do not invert):
    leaves the writer running.
 2. Re-initialize serial from scratch (the panic may be *in* the serial path).
 3. Print location and message; dump registers, the current thread, and the last N log records.
-   From ROADMAP §19.5, every record serial has not printed goes out first (the log contract below).
+   From ROADMAP §19.5, every record serial has not printed goes out first (the log contract below),
+   unless a capture kernel is loaded (step 6), whose vmcore holds the ring.
 4. Symbolized backtrace when frame pointers exist (in-image sorted table, binary search, no alloc).
-5. `cli; hlt` loop, or QEMU `isa-debug-exit` under the `panic_exit` test feature.
+5. Encode the panic record (ROADMAP §20.1) in a fixed buffer, and copy it to §20.1's reserved RAM
+   region when one is configured. Memory stores only: no lock, no firmware call, nothing that waits.
+   Planned (ROADMAP §20.1); today there is no record.
+6. If a capture kernel is loaded (ROADMAP §25.4), jump to it. Before the jump the panicking CPU does
+   only this: it takes §20.9's runtime-services lock and the ERST backend's lock (ROADMAP §25.6) each
+   with a trylock and never releases either; it sets an armed watchdog (ROADMAP §20.6) to its longest
+   timeout and feeds it once; and it writes pvpanic's crash-loaded event (bit 1), which a host
+   records without stopping the guest, where the kernel found a pvpanic device (ROADMAP §10.7,
+   §11.7) that lists that event. It flushes no log backlog, sends nothing over netconsole, and calls
+   no firmware. The crash handover passes runtime services, and ERST, on to the capture kernel only
+   where that lock's trylock succeeded, and names the CPU the capture kernel starts on and the
+   physical address of step 5's record. The capture kernel writes the vmcore, then writes that
+   record through each store its handover passed on (ROADMAP §25.6), and then resets through step
+   7's ACPI or PSCI path; where no store was passed, the copy in reserved RAM is the record. It never
+   calls firmware its handover withheld, which a stopped CPU, or on GICv2 a CPU still running, may
+   have been inside. Planned (ROADMAP §25.4, §25.6).
+7. Otherwise, halt or reset. Today: a `cli; hlt` loop, or QEMU `isa-debug-exit` under the
+   `panic_exit` test feature. Planned, in this order: send the dump over netconsole where one is
+   configured (ROADMAP §25.6); write the record to an EFI variable or to ERST under that store's
+   trylock (ROADMAP §25.6), last among the writes, since a firmware call has no time bound; write
+   pvpanic's panicked event (bit 0) where the kernel found the device, after which the host may
+   pause or end the guest; then, with `panic=<seconds>` (ROADMAP §22.2), wait and reset through the
+   ACPI or PSCI path of the `reboot` call, and otherwise `cli; hlt`.
+
+   Why two branches: a capture kernel exists to take the one complete dump, so nothing that can
+   wait, or that lets a host stop the guest, runs before the jump. pvpanic's panicked event pauses
+   the harness's QEMU (`-action panic=pause`) and lets a host's crash policy end the guest; its
+   crash-loaded event does neither. Linux likewise runs no panic notifier before its crash jump
+   unless `crash_kexec_post_notifiers` is set. Rejected: one linear order (record, pvpanic, jump,
+   reset, halt), which pauses the guest and calls firmware before the capture kernel runs; an EFI
+   write before the jump whenever the trylock succeeds, which puts an unbounded call ahead of the
+   vmcore when the capture kernel can write the same record after it; and a switch like Linux's,
+   which is two orders to specify and test.
 
 No unwinding: `panic = "abort"`. Serial TX in this path is a bounded THRE poll; drop the byte on
 timeout (see [§9.6](#96-hardware-polling)). Do not take SCHED. Allocate nothing, the panic record
@@ -674,7 +707,8 @@ Planned (ROADMAP §19.5), the log contract:
   the serial printer has not reached yet can print after a later marker.
 - An emitter in NMI or `#MC` context only appends and takes no console lock (§2.2); its records
   print when a printer reaches them.
-- The panic dump first prints, through the owner write, every record serial has not printed.
+- The panic dump first prints, through the owner write, every record serial has not printed, unless
+  a capture kernel is loaded (step 6).
 
 Why: per-CPU buffers have no total order without a timestamp merge, `/dev/kmsg` exposes one
 sequence number per record, and ROADMAP §25.5 logs from NMI context, where the `IrqCell` ring panics
@@ -704,16 +738,19 @@ invariant (§9.4). Crafted input panics portable code: a FAT BPB whose
 `rsvd + num_fats * FATSz32` overflows in `parse_bpb` (ROADMAP §10.2, F064); a vibefs write near file
 offset 2^44, which overflows `map_block` (ROADMAP §10.11, F008); a CRC-valid vibefs leaf whose count
 exceeds the per-leaf maximum (F061; ROADMAP §14.8 retires v1 for a v2 that validates every block it reads); a vibefs truncate-grow that keeps `F_INLINE`
-past 128 bytes (ROADMAP §13.9, F062). Panics in the kernel binary halt in the binding order above.
+past 128 bytes (ROADMAP §13.9, F062). Panics in the kernel binary end in the binding order above.
 
-Exceptions follow the per-vector table in [section 5.2](#52-idt-and-exceptions). A kernel `#BP`
+Exceptions follow the per-vector table in [section 5.2](#52-idt-and-exceptions), whose Ring 0 column
+names each ring-0 case that continues instead of halting. A kernel `#BP`
 logs and continues. Planned (ROADMAP §17.4, §18.4): so do three ring-0 `#DB` cases, which §5.2's row
 lists: a hit on a debug slot the current thread's tracer armed, a stray single step, and, in the
 data-race detector's build, a hit on its own slots. Every other exception taken in ring 0 dumps and
-halts in the same order as `#[panic_handler]`. Rule: ring 3 never halts the kernel. An exception raised by ring-3 code, or by a
-return to ring 3, kills
-that process with the signal §5.2 gives the vector (§11.5 the exception class, on aarch64), prints `user: pid N killed SIG<name>`, and the
-kernel keeps running. Not yet enforced: ring-3 `#DB`, and `#AC` when `CR0.AM` is set, halt the kernel (ROADMAP §10.6,
+halts in the same order as `#[panic_handler]`. Rule: ring 3 never halts the kernel. An exception
+raised by ring-3 code, or by a return to ring 3, sends that process the signal §5.2 gives the vector
+(§11.5 the exception class, on aarch64), and the kernel keeps running. The signal's action then
+applies, as on Linux: from ROADMAP §13.8 a handler may catch it, from §17.4 a tracer sees it first,
+and a fault signal the process blocks or ignores still takes its default action. The default action,
+the only one today, ends the process and prints `user: pid N killed SIG<name>`. Not yet enforced: ring-3 `#DB`, and `#AC` when `CR0.AM` is set, halt the kernel (ROADMAP §10.6,
 F005), and so do the entry-path windows of §5.10 (ROADMAP §10.6, F004, F006, F007); §5.2's last
 column lists every vector whose ring-3 action differs from the rule. An NMI dumps and halts on its
 IST stack; from ROADMAP §10.7 the NMI handler first reads its CPU's stop request word (step 1).
@@ -2270,7 +2307,7 @@ fault, downstream of it.
 |--------|------|--------|--------|------------------|
 | `0x00` | `#DE` | dump, halt | `SIGFPE` | as the rule |
 | `0x01` | `#DB` | dump on IST, halt. Planned (ROADMAP §17.4, §18.4): three cases continue instead. A hit whose saved DR6 names only slots the current thread's tracer armed is dropped, as Linux drops a kernel-mode hit of a ptrace breakpoint; DR6.BS clears TF in the saved frame and logs once, as Linux does; in the §18.4 detector build a hit on a detector slot is reported | `SIGTRAP` (RFLAGS.TF, `int1`, a breakpoint or watchpoint the tracer armed); in the §18.4 detector build a hit on detector slots alone resumes with no signal and is counted | halts the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
-| `0x02` | NMI | dump on IST, halt. Planned (ROADMAP §10.7, F135): the handler first reads and clears its CPU's stop request word (§2.5 step 1): STOP stops the CPU, a CPU already stopped halts again at once, and an NMI with no request on the dump owner returns at once | not a ring-3 fault: the Ring 0 column applies | as the rule |
+| `0x02` | NMI | dump on IST, halt. Planned (ROADMAP §10.7, F135): the handler first reads and clears its CPU's stop request word (§2.5 step 1): STOP stops the CPU, a CPU already stopped halts again at once, and an NMI with no request on the dump owner returns at once. Planned (ROADMAP §25.5): a backtrace or lockup request, and an external NMI on a CPU that is neither stopped nor the dump owner, are handled and return | not a ring-3 fault: the Ring 0 column applies | as the rule |
 | `0x03` | `#BP` | log, continue | `SIGTRAP` (`int3`) | `int3` hits the DPL-0 gate, raises `#GP`, and gets `SIGSEGV`. Rule; not yet enforced: ROADMAP §10.6 (F148) |
 | `0x04`, `0x05`, `0x07`, `0x0A` | `#OF`, `#BR`, `#NM`, `#TS` | dump, halt | `SIGSEGV` | `sig_for_vec` has no row, so one would halt the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
 | `0x06` | `#UD` | dump, halt | `SIGILL` | as the rule; an SSE floating-point error also arrives here (row `0x13`) |
@@ -2280,14 +2317,15 @@ fault, downstream of it.
 | `0x0E` | `#PF` | dump with CR2, halt. Planned (ROADMAP §10.6): a fault inside a user-memory accessor returns `EFAULT` | `SIGSEGV`. Planned (ROADMAP §12.2): a fault on a page that a region reserves is resolved first, and one through a file mapping on a page wholly past EOF, or on a page whose fill fails, gets `SIGBUS`, and so does a store through a shared file mapping whose space reservation fails (§4.3) | as the rule |
 | `0x10` | `#MF` | dump, halt | `SIGFPE` | cannot fire: `CR0.NE` is clear, so an x87 error raises the masked IRQ13 and is lost. Rule; not yet enforced: ROADMAP §10.6 (F026) |
 | `0x11` | `#AC` | dump, halt | `SIGBUS`, for a misaligned access while ring 3 has set RFLAGS.AC; `CR0.AM` is set on every CPU, as Linux sets it | halts the kernel if `CR0.AM` is set (INIT clears it on each AP and no kernel code sets it; the BSP keeps Limine's value), and while it is clear ring 3's AC raises nothing. Rule; not yet enforced: ROADMAP §10.6 (F005) |
-| `0x12` | `#MC` | dump on IST, halt; `CR4.MCE` is clear, so a machine check shuts the CPU down with no dump (ROADMAP §10.6, F026) | not a ring-3 fault: the Ring 0 column applies | as the rule |
+| `0x12` | `#MC` | dump on IST, halt; `CR4.MCE` is clear, so a machine check shuts the CPU down with no dump (ROADMAP §10.6, F026). Planned (ROADMAP §25.1, §25.3): only a fatal machine check, or an action-required error in kernel memory, halts; a lower severity is recorded and the CPU continues | not a ring-3 fault: the Ring 0 column applies | as the rule |
 | `0x13` | `#XF` | dump, halt | `SIGFPE` | arrives as `#UD` and gets `SIGILL`: `CR4.OSXMMEXCPT` is clear. Rule; not yet enforced: ROADMAP §10.6 (F026) |
 | `0x09`, `0x0F`, `0x14`–`0x1F` | reserved, `#VE`, `#CP`, `#HV`, `#VC`, `#SX` | dump, halt | `SIGSEGV` | `sig_for_vec` has no row, so one would halt the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
 | `0x20`–`0xFF` | IRQs and IPIs | handle, return. An interrupt no handler owns is counted per vector and per CPU, EOIed at the controller that delivered it (the LAPIC when its in-service bit for the vector is set, else the 8259), logged at most once a second per vector, and ignored; §5.5 gives the 8259 lines. Rule; not yet enforced: a pool vector (`0x31`–`0x7F`) with no handler is EOIed and ignored with no count, a vector in `0x80`–`0xEF` or `0xF3`–`0xFA` dumps and halts, and an 8259 line with no handler other than IRQ7 and IRQ15 prints `irq: unexpected` and halts the CPU that took it (ROADMAP §10.6) | handle, return to ring 3 | `0x21`, `0x30`, and `0x31`–`0x7F` run on the user GS base and halt the kernel. Rule; not yet enforced: ROADMAP §10.6 (F004) |
 
 A halting handler prints the interrupt frame (RIP, CS, RFLAGS, RSP, SS), the error code where the
 vector pushes one, and, for `#PF`, the CR2 the stub saved (§5.10 rule 9), then the common dump
-(§2.5). A halt with no register dump is a wasted crash. A ring-3 kill prints
+(§2.5). A halt with no register dump is a wasted crash. A ring-3 fault whose signal takes its default
+action (§2.5), the only action before ROADMAP §13.8, prints
 `user: pid N killed SIG<name> rip=0x<rip> err=0x<err>`, plus
 ` cr2=0x<addr>` for `#PF` (a `user:` line, not a `vibeOS:` marker), and ends the process through
 `finish_exit`. A ring-3 fault with no bound process (the in-guest test that calls `enter_user`
