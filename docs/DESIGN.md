@@ -460,7 +460,9 @@ per-CPU inbox plus a reschedule IPI. More SMP-specific rules in [section 7.7](#7
   Kernel mappings are `GLOBAL`, so every online CPU could hold them ([§7.9](#79-tlb-shootdown)).
   Rule; not yet enforced for user mappings: `addr_space_init::shootdown_user` invalidates only on the
   calling CPU, which is enough only while one thread owns each address space (I8; ROADMAP §12.3).
-- MMIO pages are mapped uncacheable. QEMU tolerates write-back MMIO; real hardware does not.
+- MMIO pages are mapped uncacheable. QEMU tolerates write-back MMIO; real hardware does not. On
+  aarch64 they are Device-nGnRE (ROADMAP §11.1), and a device access is ordered against Normal
+  memory only by [§4.7](#47-dma)'s accessors.
 - Every mapping is `NO_EXECUTE` unless it holds code that is fetched. Exception: the low identity
   window's first 2 MiB is executable, though only the `0x8000` trampoline page is fetched, and only
   during AP bring-up (ROADMAP §10.6, F085).
@@ -1835,6 +1837,46 @@ Neither barrier orders a store before a later load from another address. After t
 after its `used_event` store. Without them the driver and the device can each miss the other's
 update and the queue stops. `SplitQueue::should_kick` and `get_used` have neither (ROADMAP §10.3,
 F016).
+
+Device ordering, on both architectures. An MMIO write through the §11.1 accessors is ordered after
+every earlier store to memory, so a driver that stores descriptors and an index and then writes a
+doorbell adds no barrier, as Linux's `writel` promises. An MMIO read completes before any later load
+from memory, so a status read and then a buffer read see the buffer the status describes, as `readl`
+promises. On x86_64 each accessor is a volatile access with a compiler barrier, since an uncached
+access is not reordered with earlier stores or later loads. On aarch64, where a Device-nGnRE store
+can be observed before an earlier Normal store, `mmio_write` runs `dmb oshst` before its store and
+`mmio_read` runs `dmb oshld` after its load, as Linux's arm64 `writel` and `readl` do. Neither
+orders an earlier load before a device write: a driver that reads a buffer and then writes a
+doorbell that hands the buffer back runs `dma_mb` first. A `_relaxed` accessor carries no barrier
+and is used only where a comment says why no ordering is needed. Rule; not yet enforced: drivers
+write MMIO with `write_volatile` directly, and the accessors arrive with ROADMAP §10.3's seam and
+§11.2.
+
+Planned (ROADMAP §11.2): DMA coherence is a property of each device, from firmware: the device-tree
+`dma-coherent` property on the device or a parent bus (ROADMAP §11.5), or ACPI `_CCA` and the IORT
+node's coherency attribute (ROADMAP §20.7). A device with neither is non-coherent, as Linux treats
+it. The device's registry entry records it ([§12.1](#121-devices)). For a coherent device,
+`sync_for_device` and `sync_for_cpu` are `dma_wmb` and `dma_rmb`. For a non-coherent device,
+`sync_for_device` cleans the buffer to the Point of Coherency (`dc cvac` for each line, then
+`dsb sy`) whatever the transfer's direction, so no dirty line is written back later over what the
+device writes, and `sync_for_cpu` invalidates it (`dc ivac` for each line, then `dsb sy`) before the
+CPU reads what the device wrote, as Linux's arm64 DMA sync does. Maintenance works on whole cache
+lines, so a non-coherent device's DMA region shares no cache writeback granule (`CTR_EL0.CWG`; 2
+KiB, the architectural maximum, when it reads 0) with other data: a `DmaBuffer` is whole pages, a
+region smaller than a page is aligned to and sized in granules, and boot asserts that the granule is
+no larger than a page. Every device x86_64 drives is coherent, so its sync calls stay the barriers
+above.
+
+Why: on a weakly ordered CPU a doorbell can overtake the index it announces, and a completion read
+can overtake the status read that announced it; ordering in the accessors means no driver works it
+out again, the class of bug F016 was. Coherence is per device because QEMU's `virt` and servers
+snoop the CPU caches while boards mark devices one by one, and a board tree that omits
+`dma-coherent` needs the maintenance. Rejected: relaxed accessors with barriers at each call site;
+`dmb osh` in every `mmio_write`, which orders earlier loads too, at the cost of a full barrier on
+every device write for the few hand-back paths that need it; treating every aarch64 device as
+non-coherent (maintenance on every transfer where the hardware snoops); and mapping non-coherent
+buffers non-cacheable (slower CPU access, and an attribute that disagrees with the physmap's
+cacheable alias, which ROADMAP §11.1 forbids for MMIO for the same reason).
 
 ---
 
@@ -3642,6 +3684,8 @@ queue, which QEMU ignores and a device that shares one doorbell does not (ROADMA
 `avail.idx` store, and the harvest reads `used.idx` again after its `used_event` store, so each needs
 a full barrier (`mfence`) between the store and the load (virtio 1.2 §2.7.13.4.1). No `dma_mb`
 exists, and under `VIRTIO_F_EVENT_IDX` one lost kick stops a queue for good (ROADMAP §10.3, F016).
+On aarch64 the notify is a Device store, which can reach the device before the `avail.idx` store is
+visible; `mmio_write`'s `dmb oshst` orders them ([§4.7](#47-dma)).
 
 **Allocate or block in a hard-IRQ / MSI handler.**
 The top half ran `Box` / `sleep` / `WaitQueue` wait. Rule: ack, set pending, wake the IRQ thread or
@@ -4338,8 +4382,8 @@ per-architecture uapi (ROADMAP §13.10).
 | Timer and cycle counter | trait (`CycleCounter`) | TSC; LAPIC timer | `CNTVCT_EL0`; generic timer | §10.3, §11.3 |
 | Page-table format and attributes | trait (`PageTable`); encodings in the pure half | 4-level tables, PAT bits | 4 KiB granule, 48-bit VA, MAIR, break-before-make | §10.3, §11.2 |
 | TLB maintenance and address-space ids | trait (`PageTable`) | `invlpg` and the shootdown IPI (§7.9); no PCID | broadcast `tlbi ...is`; ASIDs from §11.2's generation allocator | §10.3, §11.2 |
-| Cache maintenance and DMA coherence | trait (`Barriers`) | none: coherent | `dc` and `ic`; coherence per device | §10.3, §11.2 |
-| Barriers (`dma_wmb`, `dma_rmb`, `dma_mb`) and MMIO accessors | trait (`Barriers`) | `mfence`, `sfence`, `lfence`; plain loads and stores | `dmb osh*`; ordered accessors | §10.3, §11.2 |
+| Cache maintenance and DMA coherence | trait (`Barriers`) | none: coherent | per-device coherence from `dma-coherent` or `_CCA`; `dc cvac` and `dc ivac` to the Point of Coherency for non-coherent devices (§4.7); `dc` and `ic` for code | §10.3, §11.2 |
+| Barriers (`dma_wmb`, `dma_rmb`, `dma_mb`) and MMIO accessors | trait (`Barriers`) | `mfence`, `sfence`, `lfence`; plain loads and stores; accessors carry a compiler barrier (§4.7) | `dmb oshst`, `dmb oshld`, `dmb osh`; `dmb oshst` before an `mmio_write` and `dmb oshld` after an `mmio_read` (§4.7) | §10.3, §11.2 |
 | Atomics | module selected by `cfg(loom)` (below) | `core::sync::atomic` | `core::sync::atomic`, with LL/SC or LSE | §10.8 |
 | Per-CPU base and current-thread registers | trait | `GS_BASE` and `swapgs`; `current` by one `gs`-relative load (§2.9 rule 5) | `TPIDR_EL1`, or `TPIDR_EL2` at EL2; `current` in `SP_EL0` (§2.9 rule 5) | §10.3, §11.4, §11.6 |
 | Syscall instruction, user frame's layout ([§5.10](#510-privilege-transitions)), numbers and argument order | trait | `syscall` and `sysretq`; the x86_64 table | `svc #0`; the asm-generic table | §10.3, §10.5, §10.6, §11.6 |
