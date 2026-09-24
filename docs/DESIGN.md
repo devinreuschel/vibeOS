@@ -261,7 +261,7 @@ outermost first:
    fault path for reading). It guards the region tree only. A page-table entry changes under its
    space's page-table spinlock (the PT rank above), so the reverse-map unmap that direct reclaim
    does ([§4.4](#44-kernel-heap)) takes no address-space lock; it takes the reverse-map lock
-   (level 3b) only by try-lock
+   (level 3b) only by try-lock. The fault path never waits while it holds it (below)
 3. waits on a page-cache page, in a file's mapping or a block device's
    ([§10.6](#106-block-cache); ROADMAP §12.5)
 
@@ -305,6 +305,32 @@ through a non-faulting accessor, which returns a short count instead of taking t
 short count it releases the page, faults the rest of the source in with no page held, and retries.
 This is Linux's `fault_in_iov_iter_readable` loop. A `read` into a buffer that maps the page it
 reads needs no such loop, because it copies from a page that is up to date and not busy.
+
+The fault path meets these levels in that order, but from ROADMAP §13.1 it never waits while it
+holds the address-space lock. It holds the lock for reading only to find the region and to install
+the PTE, and takes a page busy only by try-lock. When the page is busy, not yet up to date, or under
+a writeback that a store must wait for, the fault takes a counted reference to the page, drops the
+address-space lock, and then waits for the page or fills it, taking the filesystem's level-4 locks
+with no level-2 lock held. It then drops the reference and restarts from the region lookup, since
+the region may have been split, moved, or unmapped meanwhile. This is Linux's `VM_FAULT_RETRY`.
+Within one attempt the fault still installs only against the PTE it read (ROADMAP §12.2). An
+allocation with reclaim may run under the lock, because reclaim takes a sleeping lock only by
+try-lock and bounds each of its waits ([§4.4](#44-kernel-heap) rule 3). So a fault that waits for a
+disk holds up no `mmap`, `munmap`, `mprotect`, or `fork` in its process, no fault queued behind
+them, and no OOM reaper's try-lock.
+
+Every wait on the fault path ends early when the thread's process has a fatal signal pending: the
+address-space lock's acquire, a page wait, the fill's acquire of level-4 locks and its wait for the
+page's read, direct reclaim's wait for writeback, and the OOM killer's wait for its victim.
+`BlockingMutex` and `RwLock` gain killable acquires for this; they are not new lock types (AGENTS.md
+rule 10). A read whose waiter leaves keeps running, and its completion finishes the fill and
+releases the page. A user fault then returns to the signal, and a fault inside a user-memory
+accessor takes the exception-table fixup. The buffered `write` loop above checks for a fatal signal
+on each pass and returns the bytes written so far, or `EINTR` if there are none, and `fork` checks
+between the regions it copies and again before it makes the child runnable, and fails if one is
+pending, as Linux's `dup_mmap` and `copy_process` do, so an OOM victim cannot finish cloning itself.
+Other sleeping locks and waits stay uninterruptible, as most of Linux's are. Planned (ROADMAP §12.6,
+§13.1).
 
 The rename order is Linux's too: `rmdir` holds a parent and then the child it removes, so a
 `rename` whose directories were an ancestor and its descendant, taken in address order, could hold
@@ -353,11 +379,12 @@ with ROADMAP §19.5's RCU walk; namespace changes stay serialized by it. The fau
 writeback threads reach a file's backend through the counted page-cache reference that the region or
 the page holds, and never take the VFS lock. Each FAT and vibefs volume is a level-4 `BlockingMutex`
 that owns the volume and that nothing force-clears. It is taken with a plain `lock()`, as Linux
-takes FAT's `fat_lock`, and contention never fails an operation.
+takes FAT's `fat_lock`, and contention never fails an operation; from ROADMAP §12.6 only a page
+fill's acquire of it is killable, and ends early on a fatal signal (above).
 
 Why: a lock that every file operation takes and that backends block under serializes all file I/O
 behind one block wait, deadlocks a named-pipe read against its writer, and leaves the fault path,
-which holds the level-2 address-space lock, no legal way to fill a file page. Rule; not yet
+which holds the page it fills busy (level 3), no legal way to fill a file page. Rule; not yet
 enforced: the VFS lock is a `RANK_DEVICE` spinlock that the File API drops before any FAT or block
 wait, and each FAT and vibefs volume sits behind a busy flag whose waiter yields and fails the
 operation with `EIO` after 1,000,000 yields, and which `drop_slot` force-clears (ROADMAP §10.4,
