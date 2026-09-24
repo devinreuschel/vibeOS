@@ -24,7 +24,7 @@ Split each big file by responsibility into a directory, with no logic changes, o
 2. **`src/vibefs/`** → `mod.rs` (constants, `Error`, `Disk` trait), `disk.rs` (`MemDisk`, `CrashDisk`), `layout.rs` (`Extent`, `Inode`, `Dent`, `Snap`, `Node`, record encoders), `vol.rs` (the first `impl Vol`: state and allocator), `ops.rs` (second `impl Vol`: lookup/create/read/write), `commit.rs` (third `impl Vol`: CoW commit protocol, snapshots), `mkfs.rs`, `fsck.rs`, `tests.rs`. Keep `VERSION` in `mod.rs` so `docs/VIBEFS.md §14` still points at one place.
 3. **`src/fat/`** → `mod.rs` (`FatError`, `Disk`, `MemDisk`, `FatInfo`), `chain.rs` (FAT chain cache, alloc), `dirent.rs` (8.3 + LFN, checksum), `vol.rs` (`FatVol` mount/lookup/readdir), `rw.rs` (read/write/truncate/create/unlink/rename), `mkfs.rs` (`mkfs`, `mkinitrd`), `tests.rs`.
 4. **`src/fs/kernfs.rs`** → `kernfs/{mod,node,devfs,tmpfs,procfs,sysfs}.rs`.
-5. **`src/virtio_blk_init.rs`** → `drivers/virtio_blk/{mod,vq,issue,irq}.rs` after D2 (instances) since D2 rewrites much of it anyway.
+5. **`src/virtio_blk_init.rs`** → `drivers/virtio_blk/{mod,vq,issue,irq}.rs` inside D2's PR, which rewrites most of it: the split first, as a commit that only moves code, then D2's rewrite (ROADMAP Phase 10 Order, wave 3).
 6. **Size guard.** `scripts/check_file_size.py` warns above 1,500 lines and fails above 3,000; run from `make check`. Exempt nothing; the point is visibility.
 
 ## Acceptance criteria

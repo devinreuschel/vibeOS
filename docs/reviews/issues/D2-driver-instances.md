@@ -41,7 +41,7 @@ The two-disk ktest; e2e unchanged (`pc` set has no virtio-blk).
 
 ## Risks and rollback
 
-Largest driver rewrite in the plan; do it after Q5 has split the file so the diff is readable. Rollback is the previous singleton module (keep it compiling behind a feature for one release if needed).
+Largest driver rewrite in the plan; its PR first splits the file as Q5 step 5 describes, in a commit that only moves code, so the rewrite's diff stays readable. Rollback is the previous singleton module (keep it compiling behind a feature for one release if needed).
 
 ## Out of scope
 

@@ -1,0 +1,337 @@
+# Box dependencies for Phase 10 (docs/ROADMAP.md, Phase 10 Order).
+# Each [[box]] names a box by `key`, a substring of exactly one line of
+# docs/ROADMAP.md, and lists in `needs` the keys of the boxes it cannot be
+# ticked before. `why` says where the edge comes from: the box's own text
+# ("lands after", "lands with", "lands before") or the claim it makes.
+# scripts/check_review_refs.py reads this file (ROADMAP §10.9).
+
+[wave1]
+# Wave-1 boxes that cite no CRITICAL or HIGH finding; `--closed` finds the rest.
+roots = [
+  "until those retries are gone, every retry the harness takes",
+  "`scripts/check_review_refs.py` reads `tests/gates/phase-10-needs.toml`",
+  "`scripts/check_ticks.py`: on every pull request",
+]
+
+# Reopened lines of Phases 4 to 8 and the boxes that close them.
+
+[[box]]
+key = "a dead thread's kernel stack is freed only after its own CPU has switched off it"
+needs = ["a dead thread's kernel stack is freed only by the CPU that ran it"]
+why = "claim: reopened (F012); lands in §10.10"
+
+[[box]]
+key = "`per_cpu!` accessors safe from interrupt context"
+needs = ["every IDT vector enters through a stub that `arch/idt.rs` generates"]
+why = "claim: reopened (F004); the generated stubs make the swapgs decision"
+
+[[box]]
+key = "the scheduler is SMP-safe; today another CPU can unmap"
+needs = [
+  "a dead thread's kernel stack is freed only by the CPU that ran it",
+  "`PerCpu` split into owner-only state and a remote view",
+]
+why = "claim: reopened (F012, F039); both halves of its sentence"
+
+[[box]]
+key = "concurrent reads and writes from multiple threads with no corruption, verified in-guest"
+needs = ["`IoWaiter::finish` makes its `done` store its last access"]
+why = "claim: reopened (F002)"
+
+[[box]]
+key = "vibefs survives injected power loss during a write"
+needs = ["the vibefs crash test can fail"]
+why = "claim: reopened (F014, F080); the crash test must be able to fail"
+
+[[box]]
+key = "crash consistency testing by killing QEMU at randomized points"
+needs = ["the vibefs crash test can fail"]
+why = "claim: reopened (F014, F080)"
+
+[[box]]
+key = "flush ordering that does not leave a directory entry pointing at unallocated clusters"
+needs = [
+  "one refcounted in-core FAT inode per file",
+  "`vibefs::fsck`, which `fsck-vibefs` runs, adds",
+  "FAT and vibefs `rename` lose nothing for any argument pair",
+]
+why = "claim: reopened (F013, F059)"
+
+[[box]]
+key = "copy-on-write metadata updates with atomic superblock switching"
+needs = [
+  "vibefs `commit` calls `mark_meta` on every",
+  "vibefs `commit` writes an alloc-map block",
+]
+why = "claim: reopened (F014, F049)"
+
+# Phase 10 boxes.
+
+[[box]]
+key = "the `-smp 4` `ipi: ack timeout` panic root-caused and fixed"
+needs = [
+  "the in-guest registry runs in production's interrupt context",
+  "`wait_acks` never panics",
+]
+why = """claim: the traced hang ran with the registry holding IF off (F075). \
+Drop the registry edge if 20 -smp 4 in-guest boots after the wait_acks box alone, \
+with the registry still IF-off, show no ack wait over 1 s."""
+
+[[box]]
+key = "the in-guest registry runs in production's interrupt context"
+needs = ["one ring-3 entry model:"]
+why = "text: lands after the one ring-3 entry model box"
+
+[[box]]
+key = "one ring-3 entry model:"
+needs = ["helper picks an orphan's reaper"]
+why = "claim: its test's orphan is freed by §10.5's reaper rule"
+
+[[box]]
+key = "the in-guest registry split per subsystem"
+needs = ["the in-guest registry runs in production's interrupt context"]
+why = "text of the registry box: T1's per-test deadline needs IF=1"
+
+[[box]]
+key = "every call that may sleep checks that it may"
+needs = ["the in-guest registry runs in production's interrupt context"]
+why = "text: lands after the registry box"
+
+[[box]]
+key = "the vibefs crash test can fail"
+needs = [
+  "vibefs `commit` calls `mark_meta` on every",
+  "vibefs `commit` writes an alloc-map block",
+]
+why = "text: lands with §10.11's commit-leak fixes"
+
+[[box]]
+key = "`BootCell<T>` is `Sync` only when"
+needs = ["`PerCpu` split into owner-only state and a remote view"]
+why = "claim: the PerCpu impl's SAFETY line names the rule the F039 split establishes"
+
+[[box]]
+key = "allocated at init from a `limits` module; a cap is a constant"
+needs = ["one `limits` module in `vibeos-core` names every"]
+why = "claim: the tables take their sizes from the limits constants"
+
+[[box]]
+key = "exec returns `ENOMEM` for an image whose page-rounded"
+needs = ["one `limits` module in `vibeos-core` names every"]
+why = "claim: its cap lives in the limits module"
+
+[[box]]
+key = "`disallowed-types` denies `alloc`'s"
+needs = [
+  "`vibeos-core` gains `kalloc`",
+  "CI runs `cargo clippy --bin vibeos -- -D warnings`",
+]
+why = "text: lands after the kalloc box and the kernel clippy box"
+
+[[box]]
+key = "every path syscall resolves through `Vfs`"
+needs = [
+  "`/dev/random` and `/dev/urandom` return only hardware bytes",
+  "the dentry cache never resolves through a reused slot",
+  "tmpfs keeps written data when a file's extent moves",
+]
+why = "text: lands after the /dev/random, dentry-cache (F065) and tmpfs (F066) boxes"
+
+[[box]]
+key = "one `KError` with `From` for every module error"
+needs = ["syscall stubs generated from one table shared with the kernel"]
+why = "claim: the errno table is emitted through the §10.5 generator"
+
+[[box]]
+key = "`/bin/tests` provokes every errno SYSCALL.md lists"
+needs = [
+  "user-VA accessors replace the physmap copy for syscalls",
+  "the top user page is never mappable",
+]
+why = "text: lands after the USER_MAP_END and accessor boxes"
+
+[[box]]
+key = "every IDT vector enters through a stub that `arch/idt.rs` generates"
+needs = [
+  "every interrupt and exception entry clears `RFLAGS.AC`",
+  "the top user page is never mappable",
+  "from the sign of `GS_BASE`, not from CS.RPL",
+]
+why = "claim: the one stub holds the AC clear, the IST GS decision and the user-return fault handling"
+
+[[box]]
+key = "syscall bodies run with IF=1"
+needs = [
+  "`addr_space_init::teardown` asserts that no CPU's CR3",
+  "the open-file table never writes `refs` or `used` back from a snapshot",
+  "stop and continue cannot lose a wakeup",
+]
+why = "text: lands after the teardown (F106), open-file table (F055) and stop-wait (F033) boxes"
+
+[[box]]
+key = "every exit to ring 3, the syscall exit included, checks the current process's pending set"
+needs = ["stop and continue cannot lose a wakeup"]
+why = "text: lands after the stop-wait box"
+
+[[box]]
+key = "console `write` holds IF=0 only for bounded work"
+needs = ["syscall bodies run with IF=1"]
+why = "claim: IF is on between chunks because the syscall body runs with IF=1"
+
+[[box]]
+key = "a console `write` of any length acks shootdowns"
+needs = [
+  "console `write` holds IF=0 only for bounded work",
+  "syscall bodies run with IF=1",
+]
+why = "claim: its body runs with IF=1 and holds the console lock one chunk at a time"
+
+[[box]]
+key = "the nine two-way module dependencies broken"
+needs = [
+  "FAT and vibefs behind `InodeOps`",
+  "one directory per subsystem, portable and hardware halves adjacent",
+]
+why = "claim: A4 depends on A3's fs cluster and A1's shell-command move"
+
+[[box]]
+key = "an exception dump's backtrace starts at the interrupted frame"
+needs = ["every IDT vector enters through a stub that `arch/idt.rs` generates"]
+why = "claim: the §10.6 entry stub passes the interrupted rbp"
+
+[[box]]
+key = "after `begin_dump`, every panic-path write to COM1"
+needs = ["the nine two-way module dependencies broken"]
+why = "claim: it writes through A4's raw serial layer"
+
+[[box]]
+key = "`now_ns` is derived from the TSC alone"
+needs = ["timestamps from the §10.3 cycle counter"]
+why = "claim: the TSC path needs the §10.7 warp test"
+
+[[box]]
+key = "`vibeos.ktest=<glob>` runs only the matching in-guest tests"
+needs = ["a kernel command line: `cmdline:`"]
+why = "claim: vibeos.ktest= is a command-line option"
+
+[[box]]
+key = "syscall tracing can be switched on"
+needs = ["a kernel command line: `cmdline:`"]
+why = "claim: vibeos.strace=1 is a command-line option"
+
+# Lands-after, lands-with and lands-before clauses in box text.
+
+[[box]]
+key = "kernel stack depth is measured against DESIGN §4.5's budget"
+needs = ["`vibeos.ktest=<glob>` runs only the matching in-guest tests"]
+why = "text: lands after the `ktest=<glob>` box below"
+
+[[box]]
+key = "kernel lines are framed (DESIGN §2.6)"
+needs = ["a contract line or log record reaches serial whole"]
+why = "text: lands after the box above, which writes each line whole"
+
+[[box]]
+key = "a `no_std` Rust crate under `user/` as a workspace member"
+needs = ["kernel lines are framed (DESIGN §2.6)"]
+why = "text of the framed-lines box: it lands before §10.5's runtime box"
+
+[[box]]
+key = "`current` is read in one instruction that preemption cannot split"
+needs = ["`PerCpu` split into owner-only state and a remote view"]
+why = "text: lands after the F039 box above"
+
+[[box]]
+key = "the buddy hands out an owner token"
+needs = ["`DmaBuffer` and `GuardedStack` are move-only handles"]
+why = "text: lands with or after the box above"
+
+[[box]]
+key = "an IF-off tracer in an `irqoff` build variant"
+needs = ["the in-guest registry runs in production's interrupt context"]
+why = "text: lands after §10.2's box that moves the in-guest registry to IF=1"
+
+[[box]]
+key = "the vector table's registration rules hold"
+needs = ["every IDT vector enters through a stub that `arch/idt.rs` generates"]
+why = "text: lands after §10.6's generated-stub box"
+
+[[box]]
+key = "counted objects follow DESIGN §2.11 rules 3 and 6"
+needs = [
+  "`vibeos-core` gains `kalloc`",
+  "portable code reaches atomics, fences, and the spin-loop hint only through the §10.3 atomics seam",
+]
+why = "text: lands after the `kalloc` box above and §10.8's atomics-seam box"
+
+[[box]]
+key = "the VFS lock guards the namespace tables only"
+needs = [
+  "FAT and vibefs behind `InodeOps`",
+  "a disk-backed FAT mount fits a 16 KiB kernel stack",
+]
+why = "text: lands with A3's lock-kind step, after the FAT stack-frame box below"
+
+[[box]]
+key = "a process's working directory is a counted reference to a directory"
+needs = ["the dentry cache never resolves through a reused slot"]
+why = "text: lands after the dentry-cache box"
+
+[[box]]
+key = "a disk-backed FAT mount fits a 16 KiB kernel stack"
+needs = ["kernel stack depth is measured against DESIGN §4.5's budget"]
+why = "text: lands after §10.2's stack-measurement box"
+
+[[box]]
+key = "one registry of counted block-device handles"
+needs = [
+  "a disk-backed FAT mount fits a 16 KiB kernel stack",
+  "counted objects follow DESIGN §2.11 rules 3 and 6",
+]
+why = "text: lands with or after the FAT stack-frame box above; lands after the counted-object box above"
+
+[[box]]
+key = "no padding reaches user memory"
+needs = ["user-VA accessors replace the physmap copy for syscalls"]
+why = "text: lands with the accessor box or after it"
+
+[[box]]
+key = "an interrupt no handler owns does not halt the kernel"
+needs = ["every IDT vector enters through a stub that `arch/idt.rs` generates"]
+why = "text: lands after the box above"
+
+[[box]]
+key = "one user frame (DESIGN §5.10)"
+needs = [
+  "every IDT vector enters through a stub that `arch/idt.rs` generates",
+  "the syscall exit path runs with IF=0 from the dispatcher's return",
+  "syscall bodies run with IF=1",
+]
+why = "text: lands after the generated-stub box above and the syscall-exit and IF=1 boxes"
+
+[[box]]
+key = "one FP binding on x86_64"
+needs = [
+  "the syscall exit path runs with IF=0 from the dispatcher's return",
+  "`enter_user` and `enter_user_full` execute `cli`",
+]
+why = "text: lands after the syscall-exit box (F001) and the `enter_user` box (F006)"
+
+[[box]]
+key = "x86_64 user FP state follows the psABI across `fork` and `execve`"
+needs = ["one FP binding on x86_64"]
+why = "text of the FP binding box: the F069 box below lands after it"
+
+[[box]]
+key = "an address space is a two-count object"
+needs = [
+  "user-VA accessors replace the physmap copy for syscalls",
+  "one ring-3 entry model:",
+  "`vibeos-core` gains `kalloc`",
+]
+why = "text: lands after the user-VA accessor box, the box above, and §10.4's `kalloc` box"
+
+[[box]]
+key = "a driver turns on its own device (DESIGN §12.3)"
+needs = ["driver and volume state as instances owned by their device's registry entry"]
+why = "text: lands with §10.4's D2 rewrite of virtio-blk"
