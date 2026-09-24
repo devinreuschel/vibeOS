@@ -352,7 +352,9 @@ An interrupt handler must:
   (§5.10 rule 3); every other vector runs on the interrupted kernel stack, or on TSS.RSP0 when it
   interrupts ring 3; on aarch64 every vector runs on the interrupted kernel stack, or on the thread's
   kernel stack when it interrupts EL0, after an entry test that moves it to this CPU's overflow stack
-  when that stack has overflowed (§11.5 rule 6)
+  when that stack has overflowed (§11.5 rule 6); on either architecture, a handler on the
+  interrupted kernel stack runs inside the 4 KiB that §4.5's stack budget leaves above the deepest
+  path
 
 Both of the "must" rules are expanded in [section 5.8](#58-handler-ordering-rules), because both are
 easy to violate and expensive to debug.
@@ -1315,7 +1317,9 @@ Export at minimum: `__kernel_vma_start`, `__kernel_vma_end`, and per-section sta
 `opt-level = 1` for the dev profile. At `opt-level = 0` the page table setup function's stack frame is
 large enough to overflow the boot stack Limine provides, and it faults on entry before printing
 anything. If a boot function needs a big frame, box it or move it to a thread with a real stack; do
-not rely on the optimizer.
+not rely on the optimizer. Planned (ROADMAP §10.2): a `make check` script bounds each function's
+frame at a value recorded here. The bound is a screen for one oversized frame; §4.5's measured
+budget is what bounds a whole path.
 
 ## 3.6 ISO and QEMU
 
@@ -1805,9 +1809,23 @@ non-contiguous frames is the second.
   while the exiting CPU is still between `defer_free` and `switch_context` on that stack
   (ROADMAP §10.10, F012); `defer_free` panics when all 8 slots are full (ROADMAP §10.10, F010).
 
-Default kernel stack is 4 pages (16 KiB) plus its 16 KiB guard. If that turns out to be tight, raise
-it rather than debugging mysterious corruption; on aarch64 the size is one constant for every stack,
-and the entry test's bit follows it.
+Default kernel stack is 4 pages (16 KiB) plus its 16 KiB guard. Budget: the deepest use observed on
+a kernel stack, interrupts that landed on it included, stays at or below the stack's size minus
+4 KiB, which is 12 KiB of a 16 KiB thread stack and 60 KiB of a 64 KiB one. The 4 KiB is the margin
+for a hard-IRQ entry frame and top half (§2.2) that no run happened to land at the deepest point.
+The size goes up only when a measurement names the path that needs more, and that path and its depth
+are recorded here in the same commit; on aarch64 the size is one constant for every stack, and the
+entry test's bit follows it. If the measurement shows a top half with its entry frame above 4 KiB,
+per-CPU interrupt stacks, as Linux has, come before a larger thread stack.
+
+Why: an overflow hits the guard page and halts the kernel (on x86_64 `#PF` has no IST stack, so the
+fault becomes `#DF`; on aarch64 the entry test reports it from the overflow stack), so an overflow
+on a path ring 3 drives breaks AGENTS.md rule 3. A path's depth is a sum of frames, a top half's
+included, which no per-function bound sees. Rejected: raising the size when a path turns out to be
+tight, which nobody learns until the overflow halts the kernel; a static whole-call-graph bound,
+which loses the path at every indirect call (`dyn InodeOps`, IRQ handler tables, function pointers);
+and 8-page stacks everywhere, 16 MiB at the 1024-thread Phase 10 limit, which hide the regressions a
+measurement shows. Rule; not yet enforced: nothing measures stack depth (ROADMAP §10.2).
 
 ## 4.6 What comes later
 
