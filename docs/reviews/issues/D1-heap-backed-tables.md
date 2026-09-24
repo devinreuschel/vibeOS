@@ -33,7 +33,7 @@ Keep static tables where bounded by hardware. For threads, processes, per-proces
 7. **`shell::Registry.cmds`** → `Box<[Option<Command>]>` built in `shell_init::init`; `MAX_COMMANDS` becomes `limits.commands`.
 8. **Per-process tables:** the `FdTable` in `src/proc.rs` (`slots`, line 111) becomes `Box<[Fd]>` sized `limits.fds`; `procs` in `src/proc_init.rs` is sized `limits.procs` and `AddressSpace.regions` (`src/addr_space.rs:108`) `limits.regions`. Fold the `src/fs/mod.rs` `FdTable` into the `src/proc.rs` one, or delete it under A3.
 9. **Diagnostics:** `meminfo` prints table sizes and occupancy so the caps are visible at runtime.
-10. **ROADMAP:** the Phase 10 exit gate states the limits Phase 12 is tested against (landed: 256 processes, 256 descriptors per process, 1024 threads, 256 regions per address space).
+10. **ROADMAP:** the Phase 10 exit gate states the limits Phase 12 is tested against (landed: 256 processes, 256 descriptors per process, 1024 threads, 256 regions per address space; the gate now also names 1024 open files, inodes, and dentries and 16 mounts from step 1, and ROADMAP §12.4 replaces the region table with a growable tree).
 11. **vibefs limits:** leave for a format v2; add a line to `docs/VIBEFS.md §13` stating the v1 caps and that they are format limits, not kernel limits.
 
 ## Acceptance criteria
