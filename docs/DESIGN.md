@@ -201,10 +201,12 @@ IF=1 and no spinlock held ([§2.9](#29-preemption-and-interrupt-state) rule 4), 
 ranks before every spin rank, and no spinlock is ever held across a sleep. Within the sleeping tier,
 outermost first:
 
-1. filesystem namespace and inode locks, the ones a call may hold across a copy to or from user
-   memory: the mount table, then a directory, then an inode in it; a parent directory before its
-   child. A `rename` takes the volume's rename lock, then its two directories: an ancestor before its
-   descendant, and two directories neither of which contains the other in address order
+1. the locks a call may hold across a copy to or from user memory, outermost first: an open file
+   description's position lock; then a stream's lock (a pipe's lock, a socket's owner lock, a TTY's
+   read lock or write lock); then the filesystem namespace and inode locks: the mount table, then a
+   directory, then an inode in it; a parent directory before its child. A `rename` takes the
+   volume's rename lock, then its two directories: an ancestor before its descendant, and two
+   directories neither of which contains the other in address order
 2. the address-space lock (ROADMAP §13.1: `mmap`, `munmap`, and `mprotect` take it for writing, the
    fault path for reading). It guards the region tree only. A page-table entry changes under its
    space's page-table spinlock (the PT rank above), so the reverse-map unmap that direct reclaim
@@ -217,6 +219,24 @@ A user copy may fault, and the fault path takes the address-space lock for readi
 then, to fill a file page, the filesystem's level-4 locks. So a copy to or from user memory is
 allowed while level-1 locks are held, as `write` needs, and under no lock of levels 2 to 4. The
 reverse is forbidden: code that holds the address-space lock takes no level-1 lock.
+
+The position lock serializes `read`, `readv`, `write`, `writev`, `lseek`, and `getdents64` on one
+open file description of a regular file or directory, so threads and processes that share the
+description through `CLONE_FILES`, `fork`, or `dup` each see a whole offset update (Linux's
+`f_pos_lock`). Every such call takes it. `pread64` and `pwrite64` take none, and neither does a
+description of a pipe, socket, TTY, or character device, whose I/O does not use the offset. The
+file's size belongs to its inode and changes under the inode lock. A stream's lock guards the
+stream's buffer and is held across its user copy, never across a wait for a party that needs it: a
+pipe's lock and a socket's owner lock, which readers and writers both take, are dropped before the
+caller sleeps on the stream's wait queue, while a TTY's read lock, which only readers take, may be
+held while a reader waits for input (Linux's `atomic_read_lock`). So a `read` blocked on a shared
+pipe, socket, or TTY never holds off a `write` through the same description. Two stream locks nest
+only in address order, under a ROADMAP §13.12 subclass, as a pipe-to-pipe `splice` needs. A TTY's
+input queue, its line and echo state, and the termios settings its input side reads are under a
+spinlock, because the line discipline runs in the input device's bottom half
+([§5.4](#54-irq-registration)), which takes no sleeping-tier lock. Session, process-group, and
+process-table state is under spinlocks (ROADMAP §10.3 makes the process table a ranked `SpinMutex`),
+which a holder of any level-1 lock may take.
 
 A buffered `write` whose user buffer maps the very page it writes would fault on that page while it
 holds the page busy (level 3) and wait on itself. So the write path copies into a busy page only
