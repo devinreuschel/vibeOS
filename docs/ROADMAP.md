@@ -68,8 +68,10 @@ request ran. A proof that every per-push tier skips names in brackets the schedu
 record that runs it (`Proves: <test> [nightly] -- <box prefix>`), and its box is ticked once that run
 has passed (§10.9). A box that records a measurement is proved by the `make` target or CI job that takes
 it, which from §10.9's CI history on writes the numbers there, and the document that carries a number
-cites beside it the commit it was measured at and the CPU model or machine it ran on. The kernel review
-found that ticking a box for work that had not landed was the most common failure in this tree
+cites beside it the commit it was measured at and the CPU model or machine it ran on. A ticked box keeps
+its text: a commit that changes what one says either reopens it or names its proof again in a `Proves:`
+trailer, and from §10.9's `check_ticks.py` on, CI fails a pull request that does neither. The kernel
+review found that ticking a box for work that had not landed was the most common failure in this tree
 (KERNEL_REVIEW.md §5 and §8.3).
 
 A ticked box's proof fails when its claim is false, in a tier CI runs. A box whose test cannot fail,
@@ -168,7 +170,8 @@ A gate never needs a physical machine, a rented one, a paid service, or a new ac
 need the maintainer's card and account, so they count as paid. What money or a spare machine would add
 is in [Funded goals](#funded-goals), each entry with a rough cost and the lines it would add, and nothing
 in a phase depends on one. A funded goal moves into a phase by an edit to this file once the machine or
-the money exists.
+the money exists, and back out by another if the machine or account goes
+([Funded goals](#funded-goals)).
 
 Long runs, nested virtualization, and comparisons with Linux follow from those limits. A hosted job
 lasts at most 6 hours, so a longer run is sharded into jobs of at most 5.5 hours that carry their state
@@ -1415,12 +1418,13 @@ Gate lines, CI timings, and dependencies as data a script reads.
 - [x] `scripts/check_review_refs.py`, which `make check` runs, fails when a finding id in [reviews/KERNEL_REVIEW.md](reviews/KERNEL_REVIEW.md) is cited by no line in this file or a cited id names no finding; its `--closed` mode also fails while a CRITICAL or HIGH finding without a LATENT tag is cited by an open box in Phases 0 to 10; `tests/harness/test_review_refs.py` tests it
 - [ ] `scripts/check_review_refs.py` reads `tests/gates/phase-10-needs.toml`: each row names a box by a key, a substring of exactly one line of this file, and lists the keys of the boxes it cannot be ticked before, and `[wave1]` lists the wave-1 boxes that cite no CRITICAL or HIGH finding. A row may also list in `closes` the keys of earlier boxes whose whole work its box lands, and a later phase keeps its rows in a `tests/gates/phase-<N>-needs.toml` of the same form. `make check` fails when a key or a `closes` key matches no line or several, when a row needs a box in a phase after Phase 10, or when a box in Phases 0 to 10 has a lands-after, lands-with, or lands-before clause and neither has a row nor appears in one. `--wave 1` fails while any wave-1 box is open, the boxes `--closed` checks and the listed ones with every box they need through the rows, and `--print-wave 1` prints them; `tests/harness/test_review_refs.py` covers each case
 - [ ] `scripts/check_review_refs.py` also fails when an id that follows the words `design review` in `docs/`, `AGENTS.md`, or `README.md` has no row in [reviews/DESIGN_REVIEWS.md](reviews/DESIGN_REVIEWS.md), and when a row's Sections cell names a `DESIGN`, `ROADMAP`, `SYSCALL`, or `VIBEFS` section that has no heading; `tests/harness/test_review_refs.py` covers both
-- [ ] `scripts/check_ticks.py`, which a `ticks` CI job runs on every pull request after the jobs that run the tiers (the ladder today, §10.1's tier jobs once they land): it lists each line of this file that a commit of the pull request changes from `- [ ]` to `- [x]` and pairs it with one `Proves: <proof> -- <prefix>` line of that commit's message whose prefix, at least five words, begins that ticked line and no other line the commit ticks. It reads `Proves:` lines anywhere in the message, since a squash merge keeps each commit's message as body text and `git interpret-trailers` reads only the last block, and an audit of `main` reads them the same way. It fails on a ticked line with no pair, and on a `Proves:` line that pairs with no ticked line or with more than one. The proof exists at the pull request's head, and its definition (the test function the registry names, the host `#[test]` function, the `make` recipe, the script, or the line that emits the marker) is added or changed in the pull request's diff, or its name appears in the box's text; otherwise the line carries `(existing: <reason>)` after the proof, which the job prints in its summary. Each harness run writes `build/results/<arch>-<tier>.json`, the tier being the `make` target that started it (`VIBEOS_TIER`): the commit, the QEMU configuration, and the ktest, utest, and marker names that passed, skipped, and failed; each job that runs a tier uploads its files. A proof that names one of those must have passed in some tier at the head, and a host-test proof must not be `#[ignore]`d. A proof that every per-push tier skipped names in brackets the scheduled workflow or dev-host record that runs it, and passes only on a run of that workflow, read through `gh` with its results artifact, or a `ci-history` record, whose results show it passed, at the head or at a commit of the pull request whose tree differs from the head's only under `docs/` and in `CHANGELOG.md`; until one exists the box stays open. It also fails when a line the pull request ticks is a box that a row of a `tests/gates/phase-<N>-needs.toml` file says needs a box still open at the pull request's head. It also fails a pull request that ticks a box when any tier's `build/results/<arch>-<tier>.json`, which the tier's job uploads, lists a harness retry (§10.2), and a commit that ticks a box whose text says its test fails before the fix unless the commit carries a `Fails-before:` line for that box (How to read this); once the CI history above holds pull-request runs, it also fails when that history holds no failed run of the named tier at the named commit. It also reads the `closes` rows of every `tests/gates/phase-<N>-needs.toml` and fails a commit that ticks one box of a pair a row names and leaves the other open. `make check` runs the pairing and the diff rule against `origin/main` when that ref exists. `tests/harness/test_ticks.py` covers the pairing, a squash-merge message, the diff rule, the results rule, and a bracketed proof against a stubbed `gh` and `ci-history`
+- [ ] `scripts/check_ticks.py`, which a `ticks` CI job runs on every pull request after the jobs that run the tiers (the ladder today, §10.1's tier jobs once they land): it lists each line of this file that a commit of the pull request changes from `- [ ]` to `- [x]` and pairs it with one `Proves: <proof> -- <prefix>` line of that commit's message whose prefix, at least five words, begins that ticked line and no other line the commit ticks. It reads `Proves:` lines anywhere in the message, since a squash merge keeps each commit's message as body text and `git interpret-trailers` reads only the last block, and an audit of `main` reads them the same way. It fails on a ticked line with no pair, and on a `Proves:` line that pairs with no ticked line or with more than one. A `- [x]` line that a commit adds counts as a line that commit ticks unless the pull request removes a `- [x]` line with the same text, so a commit that changes a ticked box's text names its proof again or reopens the box as `- [ ]`; a ticked box the pull request deletes outright needs no pair. The proof exists at the pull request's head, and its definition (the test function the registry names, the host `#[test]` function, the `make` recipe, the script, or the line that emits the marker) is added or changed in the pull request's diff, or its name appears in the box's text; otherwise the line carries `(existing: <reason>)` after the proof, which the job prints in its summary. Each harness run writes `build/results/<arch>-<tier>.json`, the tier being the `make` target that started it (`VIBEOS_TIER`): the commit, the QEMU configuration, and the ktest, utest, and marker names that passed, skipped, and failed; each job that runs a tier uploads its files. A proof that names one of those must have passed in some tier at the head, and a host-test proof must not be `#[ignore]`d. A proof that every per-push tier skipped names in brackets the scheduled workflow or dev-host record that runs it, and passes only on a run of that workflow, read through `gh` with its results artifact, or a `ci-history` record, whose results show it passed, at the head or at a commit of the pull request whose tree differs from the head's only under `docs/` and in `CHANGELOG.md`; until one exists the box stays open. It also fails when a line the pull request ticks is a box that a row of a `tests/gates/phase-<N>-needs.toml` file says needs a box still open at the pull request's head. It also fails a pull request that ticks a box when any tier's `build/results/<arch>-<tier>.json`, which the tier's job uploads, lists a harness retry (§10.2), and a commit that ticks a box whose text says its test fails before the fix unless the commit carries a `Fails-before:` line for that box (How to read this); once the CI history above holds pull-request runs, it also fails when that history holds no failed run of the named tier at the named commit. It also reads the `closes` rows of every `tests/gates/phase-<N>-needs.toml` and fails a commit that ticks one box of a pair a row names and leaves the other open. `make check` runs the pairing and the diff rule against `origin/main` when that ref exists. `tests/harness/test_ticks.py` covers the pairing, a ticked box whose text changes, a squash-merge message, the diff rule, the results rule, and a bracketed proof against a stubbed `gh` and `ci-history`
 - [ ] `scripts/check_status.py`, which `make check` runs, fails on a ticked box that holds a deferral or reopen note (`lands in §`, `deferred to §`, `Reopened by`), and on an open box whose `lands in` note names sections of two phases; `tests/harness/test_status.py` covers each case
 - [ ] `scripts/check_gone.py`, which `make check` runs, holds a table of the identifiers and paths that boxes removed, each row naming its box, and fails when one appears in `src/`, `crates/`, `user/`, `tests/`, `scripts/`, `.github/`, the `Makefile`, `build.rs`, or `setup.sh`, outside its own table and test; a deletion's commit adds its rows and names the script in its `Proves:` trailer (How to read this); `tests/harness/test_gone.py` tests it
 - [ ] `scripts/check_todos.py`, which `make check` runs, fails on `TODO`, `FIXME`, or `XXX` as a word in `src/`, `crates/`, `user/`, `tests/`, or `scripts/` unless the same line cites a section of this file (`ROADMAP §N.M`), so a known gap is a line here, as the standing gates require; the tree holds none today; `tests/harness/test_todos.py` tests it
 - [ ] gate inputs: `tests/gates/inputs.toml` lists every file a gate reads to reach its verdict (each `scripts/check_*.py` and its `tests/harness/test_*.py`, `scripts/ci_history.py`, the gate maps, every expected-failure and skip list, `deny.toml`, `.github/workflows/`, the Makefile's `check` and `gate` recipes, `docs/reviews/KERNEL_REVIEW.md`, and itself) and holds the `vibeos-core` coverage floor, which moves there from `ci.yml`. `scripts/check_gate_inputs.py`, which the `check` job runs on every pull request against its merge base, and `make check` runs against `origin/main` when that ref exists, fails when a pull request lowers the floor; adds an entry to an expected-failure or skip list with no `Gate-change:` trailer naming the entry, its class, and its reason; edits or removes any other listed input with no `Gate-change:` trailer naming the path, the rule or gate line it serves, and why; or changes a `#### Fnnn` heading or `**Severity:**` line of KERNEL_REVIEW.md, which takes a correction only as a dated erratum appended at its end, with a trailer, and which `check_review_refs.py` then reads before the finding's own line. Adding an input, raising the floor, and removing an expected-failure entry need no trailer, so a fix lands with the list entry it retires, and a phase's gate map and a new check land with the code they check. `release.yml`'s `build` job writes to its summary, before any key job asks for the owner's approval (§14.6), every gate input changed since the previous release tag and every `Gate-change:` line in the commits that changed them. `tests/harness/test_gate_inputs.py` plants a lowered floor, an unexplained expected-failure entry, an edited check script, a removed gate-map entry, and an edited severity line, each failing, and the same changes with trailers, passing where the rule allows
 - [ ] repository rulesets, which the owner applies and `docs/RELEASING.md` lists among the owner's steps: `main`, and each release branch from the first one §22.1 cuts, requires a pull request and the `check` and `ci-pass` checks, and blocks force pushes and deletion, with no bypass actor. `ci-pass` is one job in `ci.yml` that `needs:` every per-push job and fails unless each succeeded, so regrouping §10.1's tiers never changes a ruleset. `scripts/check_gate_inputs.py --rulesets` reads the rules active on each such branch through the GitHub API and fails unless they are these
+- [ ] `scripts/check_funded.py`, which `make check` runs, reads the Funded goals section and fails when a goal lacks a **Buy.**, **Rent.**, or **Open.** part, or its **Cost.**, **Unlocks.**, or **Lines.** part, wherever in the goal each starts; when a double-quoted phrase that a bullet of a goal's Lines, or the section's preamble, says becomes or gains something does not occur, with whitespace collapsed, exactly once in this file outside the goals' Lines and the preamble's quotations, unless the bullet names an earlier goal whose Lines hold the phrase; when that occurrence is on a checkbox line; and when a `(needs: ...)` names neither a goal's heading nor a machine the **Names.** paragraph lists. The commit that lands it lengthens any quotation the check finds ambiguous, and `tests/harness/test_funded.py` covers each case
 
 ### 10.10 Lifetimes and liveness
 A completion's publishing store is its last access to the waiter. Deferred reclaim frees an object only
@@ -2570,6 +2574,7 @@ test tool in the loop still runs on vibeOS.
 - [ ] no upstream binary is patched, wrapped, or `LD_PRELOAD`ed to run; each workaround is a kernel fix with a regression test in the cheapest tier that catches it
 - [ ] `docs/UPSTREAM.md` lists every upstream bug hit (Limine, QEMU, edk2, musl, Alpine, rustc, LLVM), each with its draft report (a reproducer, the versions, and the workaround in the tree) and, once the maintainer has filed it from their own account, a link to the upstream issue or patch; the draft and the workaround prove the box
 - [ ] before this phase's tag, a one-time measurement of the toolchain builds Phase 24 runs, recorded in DESIGN §8.6. A `workflow_dispatch` workflow runs on each hosted runner label, `ubuntu-26.04` and `ubuntu-26.04-arm`. Each job first frees space as rust-lang's CI does, deleting the runner image's preinstalled SDKs and tool caches and building on `/mnt` where the runner mounts one with more room, and records the free space left. One job builds the LLVM release the §17.7 image's clang comes from, with clang and lld, and another builds `rustc` and `cargo` at the pinned nightly through stage 2 with rustc's own `src/llvm-project`; each is a Release build without debug info, run natively on the runner with no guest, with `-j4` in a 6 GiB memory cgroup, the Phase 24 build guest's CPU count and memory. Each job records the build tree's peak size, the cgroup's peak memory, and the wall time; a build that the memory limit or the job's 5.5-hour mark stops records the step it reached and the share of steps done, as a lower bound. For the accelerators' cost, one fixed short build, `llvm-tblgen` from that LLVM source, runs natively and in an Alpine guest with 4 vCPUs and 6 GiB on each runner (under KVM on x86_64, under TCG on arm64), and in the same guest under HVF on the dev host as a §10.9 record. DESIGN §8.6 records the numbers, the shards each build implies for a Phase 24 chain on each architecture, and that a build guest's disk image also holds its own system and returns freed blocks only with discard. The browser's build is §36.4's spike, not this one
+- [ ] from this phase on, the nightly job's §10.9 CI-history record carries, for each hosted runner label it runs on, the disk space Phase 24's shard cleanup would leave: the free space plus the size of what that cleanup deletes, measured without deleting it. A runner-image change that moves Phase 24's disk trigger (Phase 24 **Architectures**) then shows in the history before Phase 24, and DESIGN §8.6 gives the latest value per label beside the one-time measurement above
 
 ---
 
@@ -3145,8 +3150,8 @@ has SVM with nested paging, so early SVM work runs on any host, but TCG has no V
 event injection, and no gate line rests on it. If §11.7's records show no hosted runner offering a guest
 VMX or SVM for 7 nights running, GitHub has withdrawn nesting, and the x86_64 hypervisor lines here,
 Phase 22's x86_64 hostile-guest campaign, and the x86_64 parts of Phase 28's VF-assignment line and
-Phase 30's live-update line move to [Funded goals](#funded-goals) by an edit to this file; those two
-lines then close on their aarch64 parts.
+Phase 30's live-update line move to [Funded goals](#funded-goals) by an edit to this file, which
+discloses the move as that section's preamble says; those two lines then close on their aarch64 parts.
 
 **Architectures.** Both: VMX and SVM on x86_64, EL2 on aarch64, behind one VM abstraction. The x86_64
 hypervisor lines run in the nested job, and the aarch64 ones in the EL2 job and the HVF record, with
@@ -3184,6 +3189,7 @@ emulator and, on aarch64, the loads and stores that exit without a valid syndrom
 - [ ] aarch64: run as a VHE host when §11.1 recorded EL2 entry, with stage-2 translation and the virtual GIC and timer behind the same VM abstraction; when entry was at EL1, the VM layer reports that EL2 is unavailable instead of failing
 - [ ] x86_64: the VM layer enables VMX or SVM only when `vm::GATED_PATHS`, a constant in the portable half, names that path; on a CPU whose path it does not name, it reports hardware virtualization unavailable, as it does on aarch64 when entry was at EL1, so §21.2's `/dev/kvm` is absent. A path joins the constant in a commit whose `Proves:` trailer names a passing nested-job leg of that path, and the release notes name the paths it enables. `kernel_tests` builds, and the `vm.all_paths` option on the §10.2 command line (DESIGN §3.2), enable every path, so the nested job gathers a path's evidence before the constant names it; a host test covers the choice for each vendor with the option on and off
 - [ ] every hypervisor test runs on whichever of VMX and SVM the CPU offers and prints a registered marker naming the path; the nested job writes the runner's CPU model and that path to its §10.9 CI-history record, and `scripts/ci_history.py --nested`, which the gate-map entries of the nested-job lines run, fails unless the nightly job's last 7 runs include a passing leg of each path that §11.7's records of those nights show a runner offering, and a failing leg on an offered path still fails; it also fails when `vm::GATED_PATHS` names a path with no passing leg in that window; when one is missing, it reports from the nesting field of the same nights' §11.7 records whether any runner drawn offered a guest that path, so a vendor the fleet did not offer is told apart from a leg that failed
+- [ ] a record that proves no gate line: the weekly job runs this section's hypervisor tests on the SVM path under TCG with `-cpu max` on the hosted x86_64 runner, booting an L2 vibeOS, and DESIGN §8.6 lists which pass and which fail, with the TCG gap behind each failure, so the x86_64 move in **Architectures** starts from known coverage; TCG's SVM stands in for no line, since its event injection is incomplete
 
 ### 21.2 Virtual machines
 The VM interface is Linux's: `/dev/kvm`. The VMM is unmodified QEMU from the §17.6 image, so guests
@@ -3311,7 +3317,7 @@ the §22.3 tested-platforms list, are [Funded goals](#funded-goals).
 - [ ] the §14.6 signed release manifest extended to the installer images and the package repository of both architectures, with §18.7's boot-chain digests in it, and §14.6's version and expiry in it
 - [ ] the release channel and each architecture's package repository are this repository's GitHub releases, fetched over HTTPS. Packages are the assets of `repo-<arch>-<n>` releases, a numbered series under §14.10's rule (at most 900 assets each, never deleted or edited, never marked latest), each package uploaded once and kept for every later index that names it; the index's relative paths (§14.6) name the release and the file, resolved against a base URL whose default is this repository's `releases/download/`, so a new release in the series is not a format change. Each architecture's index and its signed channel record, which carries §14.6's `version` and `expires` and names that release's manifest and index by path and SHA-256, are assets of the release GitHub marks latest, so the §22.2 updater's default is one URL, `releases/latest/download/channel-<arch>`. The release workflow marks only the newest release of the newest supported branch latest and creates every other release it publishes with `make_latest` false; a host test over the workflow's release calls checks both. After each release, a job boots a fresh guest from its installer image on a hosted runner and installs one package over HTTPS from the published URLs with the default base; a failure opens an issue for the next release and is not a gate
 - [ ] a release branch and backport process; the release build interface, `make release-artifacts OUT=<dir>`, stays the same on every supported branch, since `main`'s `release.yml` runs it at each branch's tag (§10.1)
-- [ ] release notes generated from the changelog, which is what the changelog discipline was for; the notes repeat the key-set root fingerprints that `docs/RELEASING.md` on `main` lists, which a user checks a downloaded image against (§22.3)
+- [ ] release notes generated from the changelog, which is what the changelog discipline was for; the notes repeat the key-set root fingerprints that `docs/RELEASING.md` on `main` lists, which a user checks a downloaded image against (§22.3); each release's notes also list the gate lines §22.3's known-issues list shows moved from a phase into a funded goal, with the architecture each closed without
 - [ ] an SPDX SBOM for each release artifact, generated from `Cargo.lock`, the §14.6 package metadata, and the §14.10 provenance records: every component with its version, license, and source hash, checked by a pinned SPDX validator in the release job; the SBOM and §10.9's notices script read one component list, so a component in either is in both
 - [ ] the release job refuses a shipped component with no SBOM entry or with a license outside the §14.10 policy, and a shipped package without its license texts under `/usr/share/licenses/<package>`
 - [ ] a release candidate is the head of a `release/v<x>.<m>` branch, cut from `main` when a release is due (a phase closing its gate, or §39.3's eight-week rule); `main` moves on meanwhile. Its campaigns, and from §39.3 its soaks, are `workflow_dispatch` runs on `main` that take the candidate commit as input and name it in their §10.9 CI-history record, since GitHub runs scheduled workflows only on the default branch. From the branch's first candidate to the tag is the release window: its runs take the lanes DESIGN §8.6's map names for it (once §24.2's rebuilds exist, theirs, and each rebuild pauses at its next shard boundary until the window ends), and they replace that week's weekly syzkaller, hostile-guest, and soak runs on `main` for the same architectures. A fix found in the window lands on `main` with its regression test and is cherry-picked with `-x` to the branch, whose new head is the next candidate. The release tag goes on the last candidate, and the branch stays as that release's branch, which its patch releases are cut from (§22.5, §39.3)
@@ -3360,9 +3366,9 @@ the §22.3 tested-platforms list, are [Funded goals](#funded-goals).
 ### 22.3 Documentation
 - [ ] an installation guide and a user handbook; the guide's first step checks the downloaded image before it is written, with stock `ssh-keygen -Y verify` and `sha256sum` or the hostlib `release-manifest` tool, against the key-set root fingerprints `docs/RELEASING.md` on `main` lists, since the installer's own check trusts the key set the image carries
 - [ ] a developer guide covering the build, the test tiers, and the subsystem docs in this directory
-- [ ] the tested-platforms list, generated into `docs/HARDWARE.md` beside §20.1's model list from the release's §10.9 gate records: an entry for each QEMU machine type, accelerator, firmware build, and device-model set the gate ran on, and the dev host's macOS and QEMU versions for its records; its entries are virtual machine configurations, and it claims no physical machine
+- [ ] the tested-platforms list, generated into `docs/HARDWARE.md` beside §20.1's model list from the release's §10.9 gate records: an entry for each QEMU machine type, accelerator, firmware build, and device-model set the gate ran on, and the dev host's macOS and QEMU versions for its records; its entries are virtual machine configurations, and it claims no physical machine; for each architecture, it names the gate lines that closed without it because an edit moved them into a funded goal
 - [ ] man pages for everything shipped
-- [ ] a known-issues list, generated from this file, of every box a shipped phase deferred, with the section that lands it, and the hang §22.2's watchdog box says it cannot cover, for each architecture
+- [ ] a known-issues list, generated from this file, of every box a shipped phase deferred, with the section that lands it, and the hang §22.2's watchdog box says it cannot cover, for each architecture; it also lists every line under a Funded goals heading that ends `(moved on <date>)`, with that date
 
 ### 22.4 The loop
 - [ ] a CI agent on vibeOS: a workflow job boots an image the §22.2 unattended installer produced, under KVM on the hosted x86_64 runner (§24.1 adds the arm64 runner's job, under TCG), and passes in the commit and the commands to run, and no token or secret, since the guest runs candidate code; the agent checks the commit out over HTTPS with no credential, since the repository is public, runs the commands, such as the ladder with test kernels booted under the §21.2 VMM (TCG where the guest has no VMX, SVM, or EL2), and hands each command's exit status, log, and artifacts back to the job, which uploads them to the workflow run and concludes with their result
@@ -4926,7 +4932,7 @@ physical machines are [Funded goals](#funded-goals).
 - [ ] a Phase 25 crash record from a supported branch's nightly or soak, other than a fuzz job's (§22.5), is filed through the §14.10 filer with that branch's label: its §10.7 report and, for a guest, a link to the run's artifacts, never the dump itself, as a new issue for a new signature and a comment on the open issue otherwise; a physical machine's dump stays on the rig host (DESIGN §1.5)
 - [ ] the release workflow refuses to cut a release while a `fuzz-crash` issue (§22.5) has been open more than 14 days
 - [ ] the release workflow refuses to cut a release when the newest §22.5 drill record is more than 12 months old or does not name every supported branch
-- [ ] a patch release whose notes name the advisory it fixes, cut under §22.5's embargo procedure, is exempt from the `fuzz-crash` and drill-age refusals above, from the two-day age limit of §39.4's nightly-configuration refusal and of the physical-machine refusal Funded goals add to §39.4, and from the pre-release soaks of this section and of Funded goals, since each would hold a published fix back or need it public days early; it keeps the backport test and the `ci` run at its commit, and its 72-hour soaks run after it is published, a red one fixed in the next patch release
+- [ ] a patch release whose notes name the advisory it fixes, cut under §22.5's embargo procedure, is exempt from the `fuzz-crash` and drill-age refusals above, from the two-day age limit of §39.4's nightly-configuration refusal, and from the pre-release soaks of this section and of Funded goals, since each would hold a published fix back or need it public days early; it keeps the backport test and the `ci` run at its commit, and its 72-hour soaks run after it is published, a red one fixed in the next patch release
 - [ ] the end of a release's support announced one release ahead in the release notes
 
 ### 39.4 Tested configurations
@@ -4990,15 +4996,49 @@ phase depends on anything here, and no gate waits for it.
 Each goal names what to buy, rent, or open, a rough cost with the year it was estimated (or, where no
 price is published, that fact and the year), what it unlocks, and the lines it adds back. Costs are
 estimates to confirm before buying. When a goal is met, one edit to this file moves its `- [ ]` lines
-unchanged into the places named above them, makes its other edits, drops it from the sentences that list
-funded goals, and deletes the goal. A line for a phase already tagged lands as an open box; the tag
-stands. With the first goal met, that edit also changes the Free by default paragraph in How to read
-this: "beyond their own agent tokens" gains "and the funded goals already met", and after "A gate never
-needs a physical machine, a rented one, a paid service, or a new account" it adds "Lines moved in from a
-met funded goal are the exception: each names the machine, account, or service it needs, and every
-statement in this file that a phase, era, section, gate, or Beyond entry runs on the free resources,
-runs only on hosted runners or QEMU, assumes no physical machine, or buys nothing excludes them". This
-section's "vibeOS has no budget" becomes "vibeOS has no budget beyond the goals already met".
+whose needs exist (below) unchanged into the places named above them, makes its other edits, and, once
+no line is left in it, drops it from the sentences that list funded goals and deletes it. A line for a
+phase already tagged lands as an open box; the tag stands. With the first goal met, that edit also
+changes the Free by default paragraph in How to read this: "beyond their own agent tokens" gains "and
+the funded goals already met", and after "A gate never needs a physical machine, a rented one, a paid
+service, or a new account" it adds "Lines moved in from a met funded goal are the exception: each names
+the machine, account, or service it needs, and every statement in this file that a phase, era, section,
+gate, or Beyond entry runs on the free resources, runs only on hosted runners or QEMU, assumes no
+physical machine, or buys nothing excludes them". This section's "vibeOS has no budget" becomes "vibeOS
+has no budget beyond the goals already met".
+
+A goal never edits the text of a checkbox line, ticked or open. Where it extends what a line requires,
+its Lines hold a new `- [ ]` line under a heading that places it directly after that line, and the new
+line names the line it extends, so a ticked line keeps the claim its proof proved (How to read this).
+Its other edits change prose (How to read this, the arc, era and phase preambles, **Architectures** and
+**Decided** paragraphs, and the standing gates) by quoting a phrase and saying what it becomes or gains.
+A quoted phrase occurs once in this file outside the goals' Lines, or in the Lines of the earlier goal
+the edit names; §10.9's `check_funded.py` checks both rules.
+
+A line that needs more than its own goal buys, such as a second machine or another goal's, says so: it
+ends with `(needs: <goal or machine>)`, or the sentence or heading above its group names what the group
+needs, as the reference laptop's Phase 35 to 37 lines do. The edit that meets a goal moves only the
+lines whose needs exist, and a clause that needs a second machine, such as the test PC goal's, becomes a
+line of its own ending `(needs: <machine>)` that stays behind. Until its last line moves, the goal
+stays, with `Met in part (<date>): <what exists>` under its heading, and the sentences that list funded
+goals keep it. The edit that meets a machine goal also gives that machine's hours per week by role in
+DESIGN §8.6, the nightly hardware job first; a role that does not fit waits for a goal that buys a
+machine for it, as the long-run servers take the soaks.
+
+A met goal lapses when a commit records its machine retired or its account or service closed, or when
+its machine or runner has written no §10.9 `ci-history` record for 30 days; a long run that holds a
+machine writes a reservation record naming the machine and the run's planned end, which counts as a
+record until that end. On a lapse, one edit moves the goal's lines back. Open lines return to the goal
+unchanged. Ticked lines stay where they are, ticked and unchanged, and the goal lists each with the date
+and commit of its last record. The goal's prose edits revert as far as no goal still met relies on them,
+and the goal records the dates it was met and lapsed. A replacement machine or a reopened account is a
+new purchase, which goes to the owner as any goal does.
+
+Moving phase lines into a funded goal, by Phase 21's or Phase 24's contingency or by a lapse, is
+disclosed. The moved lines sit under a heading that names the place they left and ends
+`(moved on <date>)`; §22.3's known-issues list reads those headings, `docs/HARDWARE.md`'s
+tested-platforms list names for each architecture the gate lines that closed without it, and each later
+release's notes list them (§22.1).
 
 A machine the maintainer owns for other reasons can take a goal's lines without buying anything, by the
 same edit, when it meets the goal's specification. The maintainer's own Mac is not such a machine: it
@@ -5070,18 +5110,17 @@ ERST, GHES, and a BMC, it can also be the x86_64 long-run server; it can be the 
 - How to read this, the conditions paragraph: "and the VMM when it is not QEMU" gains "; on real hardware, the machine"
 - the standing gates' gate-map line: "a CI job on GitHub-hosted runners" becomes "a CI job on GitHub-hosted runners or on a self-hosted runner on the rig host whose workflow's only triggers are `schedule` and `workflow_dispatch`", and the record clause also covers "a reading taken by hand on a physical machine, such as a power meter's"
 - the arc, row 20: Unlocks gains ", bare metal on x86_64, hardware CI"
-- §10.9, the gate-map box: "a scheduled CI job on GitHub-hosted runners" becomes "a scheduled CI job on GitHub-hosted runners or on a self-hosted runner on the rig host"
-- §10.9, the `make gate` box: "or a job entry names a workflow whose `runs-on` has a `self-hosted` label" becomes "or a job entry names a workflow whose `runs-on` has a `self-hosted` label and whose `on:` has a trigger other than `schedule` and `workflow_dispatch`"
-- §10.9, the dev-host records box: "with `gh workflow run` on a branch at that commit" gains "(for a workflow on a self-hosted runner, on `main` while `main` is at that commit)", and the box gains "A reading taken by hand on a physical machine, such as a power meter's, is a record too: `make gate PHASE=N RECORD=1` writes it to `ci-history` with the machine and the instrument in place of the host and the command"
 - the Era IV preamble: "deeper C-states and frequency scaling from ACPI extend the §19.6 idle path" becomes "deeper C-states, frequency scaling from ACPI, and measured power extend the §19.6 idle path", and "three sections of 19" becomes "four sections of 19", with "§20.8's hardware-event profiles use §19.2's sampling" added to its list
-- Phase 17 exit gate, the line on `make check` and `make test` passing on vibeOS, gains "; the run on bare metal is Phase 20's"
+- Phase 17 Architectures: "unless it names another shape." gains " The `make check` and `make test` line's run on bare metal is Phase 20's, on the x86_64 test PC."
 - Phase 19 Architectures: hardware events "need a physical machine and are in [Funded goals](#funded-goals)" becomes "are validated on the x86_64 test PC in §20.8"
-- §19.2, the PMU setup box: "which no free host offers a guest ([Funded goals](#funded-goals))" becomes "counted on the x86_64 test PC booted bare metal (§20.8)"
-- §19.6, the idle box: "measured power needs a physical machine ([Funded goals](#funded-goals))" becomes "measured power is §20.2's, on the x86_64 test PC"
-- §22.3, the tested-platforms box: "its entries are virtual machine configurations, and it claims no physical machine" becomes "its QEMU entries are virtual machine configurations, and physical machines are in its physical section"
+- Phase 22 Architectures: "unless it names another setup." gains " The x86_64 half of the §21.8 hostile guest's 72-hour campaign on a release candidate may run on the x86_64 test PC booted bare metal in place of the hosted shards."
+
+§10.9, each line directly after the box it names:
+- [ ] the gate map's job entries may also name a scheduled CI job on a self-hosted runner on the rig host (it extends the gate-map box)
+- [ ] `scripts/check_gates.py` accepts a job entry whose workflow runs on a self-hosted runner only when that workflow's only triggers are `schedule` and `workflow_dispatch`, and `make gate PHASE=N RECORD=1` records a hand reading on a physical machine, each with a host test (it extends the `make gate` box)
+- [ ] when the dev-host records box has the maintainer start a run at the gated commit, a workflow on a self-hosted runner is dispatched on `main` while `main` is at that commit, since the runners take jobs only from `main`; and a reading taken by hand on a physical machine, such as a power meter's, is a record too: `make gate PHASE=N RECORD=1` writes it to `ci-history` with the machine and the instrument in place of the host and the command (it extends the dev-host records box)
 
 §10.9:
-- [ ] `scripts/check_gates.py` accepts a job entry whose workflow runs on a self-hosted runner only when that workflow's only triggers are `schedule` and `workflow_dispatch`, and `make gate PHASE=N RECORD=1` records a hand reading on a physical machine, each with a host test
 - [ ] the rig host's published-data step (DESIGN §1.5): `scripts/scrub_record.py` replaces serial numbers (SMBIOS, PCIe device serial numbers, NVMe, SATA, USB, EDID), MAC addresses, UUIDs, and hostnames in a text record with fixed placeholders, with host tests over records that plant each; every record, log, or report a rig-host job uploads or commits passes through it; and a job that reads a physical machine's dump or firmware tables keeps them in a store on the rig host that no workflow uploads, and uploads only its text report
 
 §18.3:
@@ -5144,11 +5183,8 @@ Phase 22 exit gate, before the tag line:
 - [ ] the x86_64 live image, written to a USB stick, boots to its graphical desktop on the x86_64 test PC's own display through the UEFI GOP framebuffer, with a USB keyboard and mouse
 - [ ] the installer installs onto the x86_64 test PC's internal NVMe or SATA disk, and the installed system boots from the firmware's boot menu and passes the §22.2 health check
 
-Phase 22's exit gate, the line on the candidate's two 72-hour campaigns, gains: the hostile guest's
-x86_64 half may run on the x86_64 test PC booted bare metal in place of the hosted shards.
-
-§22.3:
-- [ ] the tested-platforms list's physical section: one row per machine the project owns or borrows, generated from its gate records
+§22.3, directly after the tested-platforms box:
+- [ ] the tested-platforms list's physical section: one row per machine the project owns or borrows, generated from its gate records, beside the QEMU entries (it extends the tested-platforms box, which claims no physical machine)
 
 §22.4:
 - [ ] CI on vibeOS hardware: the x86_64 test PC netboots the installed vibeOS nightly and runs the §22.4 agent as the job's host; the self-hosted runner that schedules it runs on the rig host under the **Self-hosted runners** rules
@@ -5176,8 +5212,8 @@ Phase 39 exit gate, beside the nightly-configuration line:
 
 §39.4:
 - [ ] `docs/HARDWARE.md`'s physical section (§20.1) marks each physical machine as tested nightly on its self-hosted runner, tested weekly on the long-run servers, or tested by hand, with the release it was last tested at; a machine not tested at either of the last two releases leaves the list
-- [ ] the release workflow refuses to cut a release while a physical nightly machine's last run is red or more than two days old
-- [ ] per-machine results committed as records to §10.9's `ci-history` branch beside the QEMU runs
+- [ ] the release workflow refuses to cut a release while a physical nightly machine's last run is red; a machine whose last run is more than two days old, or that a long run holds under a reservation record (Funded goals), does not hold a release back, and its row shows the earlier release it was last tested at
+- [ ] per-machine results committed as records to §10.9's `ci-history` branch beside the QEMU runs; a long run that holds a machine writes a reservation record naming the machine and the run's planned end when it starts
 
 Beyond, two entries:
 - **`rr` on vibeOS** (after 18, 19, 20, and 23): unmodified `rr` records and replays a user process on the x86_64 test PC booted bare metal, which needs Linux's `ptrace`, `perf_event_open` with the retired-conditional-branch counter over §19.2's PMU code, and seccomp-BPF; a miscompile in the self-hosted toolchain is then debugged by replay.
@@ -5206,15 +5242,16 @@ nightly hardware-CI run first.
 **Lines.** Elsewhere in this file:
 - the destination paragraph: the test PC goal's "and on a real x86_64 machine" becomes "and on real machines of both architectures"
 - How to read this: "and HVF on the arm64 dev host, as a §10.9 record, since hosted arm64 runners have no KVM" becomes "and, on aarch64, KVM on the aarch64 server's self-hosted runner, with HVF on the arm64 dev host as a §10.9 record"
-- the arc, row 20: "bare metal on x86_64" becomes "bare metal on both architectures"
-- Phase 11 exit gate, first line: "(GitHub's arm64 runners have no `/dev/kvm`, so the project has no arm64 KVM host)" becomes "and `-accel kvm` on the aarch64 server (GitHub's arm64 runners have no `/dev/kvm`)"
+- the arc, row 20: the test PC goal's "bare metal on x86_64" becomes "bare metal on both architectures"
 - §11.5, the Decided paragraph: "ACPI on aarch64 comes in §20.7, on QEMU's `virt` with ACPI and on `sbsa-ref`" gains "and on the aarch64 server's firmware"
-- §11.7, the box on TCG aarch64 CI jobs, gains "; native aarch64 runs also run under KVM on the aarch64 server, beside the HVF records"
 - Phase 19 Architectures: the test PC goal's "validated on the x86_64 test PC in §20.8" gains "and the aarch64 server", and the paragraph gains "aarch64 NUMA is also checked against the aarch64 server's SRAT (§20.7)"
-- Phase 24 Architectures: "so aarch64's full rebuild runs monthly and x86_64's weekly (§24.2)" becomes "so x86_64's full rebuild runs weekly in hosted shards and aarch64's weekly on the aarch64 server, booted bare metal, with the hosted TCG rebuild kept monthly as a cross-check (§24.2)"
+- Phase 24 Architectures: "so aarch64's full rebuild runs monthly and x86_64's weekly (§24.2)", or the GitHub Pro goal's form of it, becomes "so x86_64's full rebuild runs weekly in hosted shards and aarch64's weekly on the aarch64 server, booted bare metal, with the hosted TCG rebuild kept monthly as a cross-check (§24.2)"
 
-§11.7:
-- [ ] a nightly aarch64 KVM leg on the aarch64 server booted into Linux, driven by a self-hosted runner on the rig host under the **Self-hosted runners** rules, that runs `make test-kernel ARCH=aarch64` under KVM and takes over, as each phase lands, the aarch64 numbers §12.3, Phase 15, Phase 16, Phase 17, §18, and Phase 19 keep as HVF dev-host records
+Phase 11 exit gate, directly after its first line:
+- [ ] `make ARCH=aarch64 run` also boots with `-accel kvm` on the aarch64 server (it extends the first line, which names no arm64 KVM host)
+
+§11.7, directly after the box on TCG aarch64 CI jobs:
+- [ ] a nightly aarch64 KVM leg on the aarch64 server booted into Linux, driven by a self-hosted runner on the rig host under the **Self-hosted runners** rules, that runs `make test-kernel ARCH=aarch64` under KVM and takes over, as each phase lands, the aarch64 numbers §12.3, Phase 15, Phase 16, Phase 17, §18, and Phase 19 keep as HVF dev-host records (it extends that box)
 
 Phase 20 exit gate, before the tag line:
 - [ ] the aarch64 server boots to the shell with its root on its own NVMe, and the disk, 1 GiB fetch, and USB keyboard checks of the x86_64 test PC pass on it through its Intel NIC and xHCI
@@ -5417,11 +5454,17 @@ the repository moves into an organization (see **GitHub GPU runner**).
 
 **Lines.**
 - How to read this, the list of free resources: "at most 20 jobs run at once, 5 of them macOS" becomes "at most 40 jobs run at once with GitHub Pro, 5 of them macOS"
-- §24.2, the full-rebuild box: "at most 5 of the 10, so a rebuild that runs for days leaves the other 5 to the nightly and weekly workflows and per-push CI its own 10" becomes "at most 10 of the 20 (GitHub Pro), so a rebuild that runs for days leaves the other 10 to the nightly and weekly workflows and per-push CI its own 20"
-- §10.1, the CI-budget box: "20 concurrent jobs on the Free plan (at most 5 macOS; scheduled campaigns together hold at most 10, so pushes keep the other 10)" becomes "40 concurrent jobs with GitHub Pro (at most 5 macOS; scheduled campaigns together hold at most 20, so pushes keep the other 20)", and "scheduled work runs in the 10 lanes of the next box" becomes "scheduled work runs in the 20 lanes of the next box"; the lanes box: "Ten concurrency groups, `sched-lane-0` to `sched-lane-9`, are the scheduled share" becomes "Twenty concurrency groups, `sched-lane-0` to `sched-lane-19`, are the scheduled share (GitHub Pro)", and "no more than ten scheduled jobs run at once" becomes "no more than twenty scheduled jobs run at once"
-- §24.2's "monthly on aarch64" and Phase 24 Architectures' "aarch64's full rebuild runs monthly": "monthly" becomes "every two weeks, once a measured aarch64 full rebuild at 10 jobs finishes in under ten days", unless the aarch64 server goal has already moved aarch64's full rebuild to that server
+- Phase 24 Architectures: "aarch64's full rebuild runs monthly" becomes "aarch64's full rebuild runs every two weeks (monthly until a measured aarch64 full rebuild at 10 jobs finishes in under ten days)", unless the aarch64 server goal has already moved aarch64's full rebuild to that server
 - §20.8's preamble: "an account runs 20 jobs at once" becomes "the account runs 40 jobs at once (GitHub Pro)"
-- §39.3, the supported-branches box: "§10.1's scheduled share of 10 concurrent jobs (at most 5 of them macOS)" becomes "§10.1's scheduled share of 20 concurrent jobs (at most 5 of them macOS)", and "so pushes keep the other 10" becomes "so pushes keep the other 20"
+
+§10.1, directly after the scheduled-lanes box:
+- [ ] GitHub Pro's numbers for the CI budget (it extends the CI-budget and scheduled-lanes boxes): 40 concurrent jobs (at most 5 macOS; scheduled campaigns together hold at most 20, so pushes keep the other 20), and twenty lanes, `sched-lane-0` to `sched-lane-19`, so no more than twenty scheduled jobs run at once; DESIGN §8.6's lane map and ledger change in the same commit
+
+§24.2, directly after the full-rebuild box:
+- [ ] GitHub Pro's share for the rebuilds (it extends the full-rebuild box): the rebuild workflows run in at most 10 of §10.1's 20 lanes, so a rebuild that runs for days leaves the other 10 to the nightly and weekly workflows and per-push CI its own 20; aarch64's full rebuild runs every two weeks once a measured aarch64 full rebuild at 10 jobs finishes in under ten days, unless the aarch64 server goal has already moved it to that server
+
+§39.3, directly after the supported-branches box:
+- [ ] GitHub Pro's share for the supported branches (it extends the supported-branches box): their runs are staggered inside §10.1's scheduled share of 20 concurrent jobs (at most 5 of them macOS), so pushes keep the other 20
 
 ### GitHub GPU runner
 
@@ -5437,7 +5480,7 @@ hosted jobs, 5 of them macOS.
 
 **Lines.** Elsewhere in this file:
 - the arc, row 33: Unlocks gains ", virgl and Venus on a GPU host"
-- the **GitHub Pro** goal, if still open, is deleted, since Pro covers only a personal account; its Lines are made, or where already made are changed, with GitHub Team's numbers: 60 concurrent jobs for 40; §10.1's scheduled share 40 for 20, so pushes keep 20; the §24.2 rebuilds' share, the rest of the scheduled share that §24.2 leaves to the other workflows, and the job count in the aarch64 cadence, 20 for 10; "GitHub Pro" becomes "GitHub Team"
+- the **GitHub Pro** goal, if still open, is deleted, since Pro covers only a personal account; its lines are added and its prose edits made with GitHub Team's numbers, and where Pro's lines are already in place this goal adds, directly after each, a line with Team's numbers and changes Pro's prose edits to them: 60 concurrent jobs for 40; §10.1's scheduled share 40 for 20, so pushes keep 20; the §24.2 rebuilds' share, the rest of the scheduled share that §24.2 leaves to the other workflows, and the job count in the aarch64 cadence, 20 for 10; in prose, "GitHub Pro" becomes "GitHub Team"
 
 §33.4, Stretch:
 - [ ] the virtio-gpu 3D tier also runs nightly on a GitHub GPU runner with the host rendering on its GPU, its frame rates recorded
@@ -5515,8 +5558,11 @@ Phase 30 exit gate, before the tag line:
 Phase 39 exit gate, beside the hosted 168-hour line:
 - [ ] the release candidate runs §30.7's long-run workload for 7 days without a reboot on the long-run server of each architecture, starting after any 30-day run in progress ends, and records no panic, no Phase 25 watchdog reset, and no uncorrected machine check
 
-§39.3, beside the hosted 72-hour line, and in its crash-record line "nightly or soak" becomes "nightly, soak, or long run":
+§39.3, beside the hosted 72-hour line:
 - [ ] each later release candidate, and each patch release on a supported branch, also passes a 72-hour soak of §30.7's workload on the long-run servers on the commit being released, before it is cut. A release candidate due while a 30-day run holds those servers waits for the run to end; a patch release stops the run, which is recorded as neither green nor red, soaks each supported branch's commit in turn, and restarts the 30-day run from day one. Each soak is a `workflow_dispatch` run on `main` that takes the commit as input and names it in its §10.9 CI-history record, which the release workflow checks
+
+§39.3, directly after the crash-record box:
+- [ ] a Phase 25 crash record from a long run on the long-run servers is filed as the crash-record box files one from a supported branch's nightly or soak (it extends that box)
 
 Beyond:
 - **Live migration between machines** (after 21, 28, and the live migration entry): a running §21.2 guest moved over TCP from the x86_64 test PC to the x86_64 long-run server, with a CPU feature set both machines offer, dirty pages tracked through EPT or NPT dirty logging and pre-copied, and the downtime of a 4-vCPU, 4 GiB guest running §19.3's mixed interactive workload measured and held under 300 ms; the same between two aarch64 machines with stage-2 dirty logging once both exist.
