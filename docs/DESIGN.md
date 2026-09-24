@@ -178,7 +178,8 @@ Break these and the failure shows up somewhere else, hours later.
 
 ## 2.1 Lock order
 
-Acquire in this order, release in reverse. Never take a lower number while holding a higher one.
+Acquire in this order, release in reverse. Never take a lower number while holding a higher one, and
+take a second lock of a number already held only through §2.3's nested acquire.
 
 1. heap
 2. page tables
@@ -300,6 +301,16 @@ Blocking and allocation are a class of bug, not an instance. Context rules:
 | Workqueue worker | Yes | Yes |
 | Driver `probe` | Yes | Yes |
 | Syscall body, fault handler for a CPL-3 fault | Yes ([§2.9](#29-preemption-and-interrupt-state)) | Yes, fallible only ([§4.4](#44-kernel-heap)) |
+| NMI and `#MC` at any CPL, `#DB` at CPL 0; shootdown and call-function work run from a spin | No | No |
+
+Code in the last row runs inside whatever IF=0 section its CPU was in, locks included: an NMI,
+`#MC`, or `#DB` interrupts it, and a CPU in a serviced spin (§2.3) runs incoming shootdown and
+call-function work there. So that code takes no lock of any kind (a `SpinMutex`, an `IrqCell`, or a
+TAS, the log ring's TAS and the serial TX lock included), since the section it interrupted may hold
+that very lock. It allocates nothing, does a bounded amount of work, and writes only per-CPU state
+and lock-free rings. A call-function closure that needs a lock queues a work item on its CPU
+instead. The panic path (§2.5) is the one exception: it reads the log ring and writes COM1 without
+taking their locks.
 
 The hard-IRQ top half acknowledges and wakes. Work that allocates or blocks runs on a kernel thread
 ([section 5.4](#54-irq-registration), ROADMAP §6.6).
@@ -314,13 +325,25 @@ Pick one spinlock implementation and use it everywhere. The old tree ended up wi
 in one design doc, an IRQ-guarded spin mutex in the code) and the mismatch was a source of confusion
 for weeks.
 
-Two cells, and the lock beside them:
+The lock, the serviced spins, and the two cells:
 
 | Primitive | Use |
 |------|-----|
-| `SpinMutex` | Shared across CPUs. IRQ-aware. Ranked. |
-| `IrqCell` | IRQ-off exclusive access: `with` takes IRQs off, panics on same-CPU re-entry, and spins while another CPU holds it. Used for CPU-local and boot-only state and as an unranked cross-CPU lock (among them `proc_init::TABLE`, `kva_init::KVA` and `DEFERRED`, `work_init::ST`, `irq_init::IRQ`, `file_init::CWD`, and `log_init::LOG`). Its `Sync` impl has no `T: Send` bound, and `force_unlock` is a safe fn (ROADMAP §10.3, F017). Planned (ROADMAP §10.3, F108): every cross-CPU `IrqCell` but the log ring becomes a ranked `SpinMutex`. |
+| `SpinMutex` | Shared across CPUs. IRQ-aware. Ranked (§2.1): `lock` refuses a lock whose rank, or a later one, this CPU already holds, and `lock_nested` takes a second lock of a held rank (below). Its spin is a serviced spin. |
+| Serviced spin | `SpinMutex::lock`, `ipi_init::wait_acks`, and the call-function slot wait each call `ipi_init::service_incoming` on every iteration, so a CPU that waits on another with IF=0 still acknowledges shootdowns and runs call-function work ([§2.9](#29-preemption-and-interrupt-state) rule 2). That work runs inside whatever the spinning CPU holds, so, like an NMI, `#MC`, or CPL-0 `#DB` handler, it takes no lock ([§2.2](#22-interrupt-handler-rules)'s last row). |
+| `IrqCell` | IRQ-off exclusive access: `with` takes IRQs off, panics on same-CPU re-entry, and spins while another CPU holds it. Used for CPU-local and boot-only state and as an unranked cross-CPU lock (among them `proc_init::TABLE`, `kva_init::KVA` and `DEFERRED`, `work_init::ST`, `irq_init::IRQ`, `file_init::CWD`, and `log_init::LOG`). Its `Sync` impl has no `T: Send` bound, and `force_unlock` is a safe fn (ROADMAP §10.3, F017). Its spin does not service IPIs, so a cross-CPU cell held across a wait on another CPU can stall a shootdown. Planned (ROADMAP §10.3, F108): every cross-CPU `IrqCell` but the log ring becomes a ranked `SpinMutex`; the log ring's holders never wait on another CPU (§2.5), and ROADMAP §19.5 replaces it. |
 | `BootCell` | Write once before `smp: done`, then shared `&T`. The set-once check is a `debug_assert!` (ROADMAP §10.2, F137), and the `Sync` impl has no `T: Send + Sync` bound, so `per_cpu_init::CPUS` shares the non-`Sync` `PerCpu` (ROADMAP §10.3, F017, F039). |
+
+Two locks of one rank nest only through `lock_nested`, in a pair order the call site's comment
+names, and a per-rank count keeps the outer rank held when the inner lock drops. ROADMAP §13.12's
+lock classes add address order for a socket pair and check every pair order. Rule; not yet enforced:
+`lock` lets a lock of a held rank nest, the inner release clears the rank bit the outer lock still
+holds, and nothing stops the code in §2.2's last row from taking a lock (I1; ROADMAP §10.3, F108).
+
+A wake takes the scheduler lock, which ranks before device and serial locks. So code holding one of
+those records the wake and performs it after dropping the lock, as §10.1's completion does, and a
+top half wakes its bottom half with no device lock held; the rank check fails the other order on
+every call.
 
 They live in `src/cell.rs` (`BootCell`, `IrqCell`) and `src/sync_init.rs` (`SpinMutex`). Do not add another `UnsafeCell` + `unsafe impl<T> Sync` wrapper. `static mut` is only the asm-owned `vibeos_jmpbuf` in `arch/catch.rs`. Accessors do not return `&'static mut`.
 
@@ -448,7 +471,7 @@ separate namespace.
 
 | # | Invariant | Established at | Status | Holds today |
 |---|-----------|----------------|--------|-------------|
-| I1 | Lock rank HEAP < PT < BUDDY < SCHED < DEVICE < SERIAL (§2.1) | `lock.rs`, `sync_init::lock_enter` | enforced at runtime, per CPU | Partly: `lock.rs` still ranks the heap after PT and BUDDY, so an allocation under either fails only when it grows the heap; a nested lock of the same rank passes the check and its release clears the rank bit the outer lock still holds, `IrqCell` has no rank, and a lock held across a switch goes unseen (ROADMAP §10.3, §13.12, F108) |
+| I1 | Lock rank HEAP < PT < BUDDY < SCHED < DEVICE < SERIAL (§2.1); a second lock of a held rank only through `lock_nested` (§2.3) | `lock.rs`, `sync_init::lock_enter` | enforced at runtime, per CPU | Partly: `lock.rs` still ranks the heap after PT and BUDDY, so an allocation under either fails only when it grows the heap; a nested lock of the same rank passes the check and its release clears the rank bit the outer lock still holds, `IrqCell` has no rank, and a lock held across a switch goes unseen (ROADMAP §10.3, §13.12, F108) |
 | I2 | Hard-IRQ context never blocks or allocates (§2.2) | convention | documented | Yes, unchecked: only `irq_init::dispatch` sets `IN_ISR`, and no blocking primitive asserts it (ROADMAP §10.3, F110) |
 | I3 | IF=0 through every return-to-user sequence (§5.10 rule 4) | FMASK `0x47700`; `cli` in `run_user` | documented | No: the syscall exit has no `cli` and `console_init::wait_key` returns with IF=1 (F001); `enter_user_full` runs with IF=1 (F006) (ROADMAP §10.6) |
 | I4 | Kernel code outside the §5.10 entry and exit sequences runs with `GS_BASE` = this CPU's `PerCpu` (§5.10) | `arch::gs`, `per_cpu_init` | documented | No: the raw gates of §5.10 rule 1 (F004), the IF=1 window in `enter_user_full` (F006), an NMI, `#MC`, or `#DB` taken in the syscall entry or exit window, and a fault on the return-to-user `iretq` (both F007) run on the user base (ROADMAP §10.6) |
@@ -522,10 +545,11 @@ every IF=0 stretch has a reason from the list below and a bound.
 1. IF=0 only in: an interrupt or exception entry or exit stub; a hard-IRQ top half (§2.2); a
    spinlock or `IrqCell` critical section (§2.3); an `InterruptGuard` section that must not be
    preempted or moved to another CPU: a per-CPU access (rule 5), a change to this CPU's registers
-   that must match the running thread (FP state, `FS_BASE`), or the [§7.9](#79-tlb-shootdown)
-   shootdown wait; the scheduler's switch path; the return-to-user sequences of
-   [§5.10](#510-privilege-transitions) rule 4; the panic and halt paths (§2.5); and a CPU's
-   bring-up before its first `sti` (boot before `irq: enabled`, an AP before it enters idle).
+   that must match the running thread (FP state, `FS_BASE`), the [§7.9](#79-tlb-shootdown)
+   shootdown wait, or the [§7.6](#76-ipis) call-function wait; the scheduler's switch path; the
+   return-to-user sequences of [§5.10](#510-privilege-transitions) rule 4; the panic and halt paths
+   (§2.5); and a CPU's bring-up before its first `sti` (boot before `irq: enabled`, an AP before it
+   enters idle).
 2. An IF=0 stretch does a bounded amount of work. No loop whose trip count a user, a device, or a
    disk image controls runs with IF=0, and nothing waits for another CPU with IF=0 without servicing
    incoming IPIs ([§7.9](#79-tlb-shootdown)). A long job holds its lock for one bounded chunk at a
@@ -1480,8 +1504,9 @@ describes the current code.
    entry runs `clac`. Planned (ROADMAP §10.6):
    `stac` appears only inside the user-memory accessors.
 6. A handler on an IST stack does not block and does not switch threads: a nested entry of the same
-   vector restarts at the top of that IST stack and overwrites the first frame. Holds, because every
-   IST handler halts, except that under `kernel_tests` an armed `catch` longjmps off the IST stack.
+   vector restarts at the top of that IST stack and overwrites the first frame. It also takes no lock
+   ([§2.2](#22-interrupt-handler-rules)'s last row). Holds, because every IST handler halts, except
+   that under `kernel_tests` an armed `catch` longjmps off the IST stack.
    Planned (ROADMAP §10.6, F005): for a CPL-3 frame, `debug_ex` moves from the IST stack to the
    thread's kernel stack and then calls `try_user_fault` (the ring-3 `#DB` kill §5.2 requires),
    because `try_user_fault` ends in `finish_exit`, which can switch threads.
@@ -1897,8 +1922,9 @@ user-visible CPU state; the commit that adds it also adds its row here.
 
 The reschedule IPI is what makes cross-CPU wakeups work without ever locking a remote run queue: push
 onto the target's inbox, send `0xFD`, done. `0xFD` then takes SCHED IRQ-off via `schedule_preempt`.
-Shootdown and call-function take neither the page-table lock nor SCHED. Call-function uses one global
-slot; the initiator holds IF off from publish through reclaim, polling inbound work while it waits.
+Shootdown and call-function work take no lock at all, since a CPU in a serviced spin runs them inside
+whatever it holds ([§2.2](#22-interrupt-handler-rules)). Call-function uses one global slot; the
+initiator holds IF off from publish through reclaim, polling inbound work while it waits.
 
 ## 7.7 Locking with more than one CPU
 
@@ -1964,8 +1990,8 @@ and a syscall body runs with the IF=0 that FMASK set until it blocks (ROADMAP §
 (`shootdown_va`). `kva_init::unmap_shootdown` unmaps at most 32 pages (`MAX_UNMAP`) and leaves the
 rest mapped with no error, while `vunmap` frees the whole VA span it was given (ROADMAP §10.3, F107).
 
-The shootdown handler must not allocate and must not take the page table or scheduler lock. It reads a
-request slot and executes `invlpg`.
+The shootdown handler allocates nothing and takes no lock ([§2.2](#22-interrupt-handler-rules)). It
+reads a request slot and executes `invlpg`.
 
 ## 7.10 Verification and later work
 
@@ -2495,7 +2521,8 @@ test that runs it with IF=1.
 **Deadlock the moment the timer starts firing.**
 The scheduler lock was taken without disabling interrupts, and the timer ISR calls into the scheduler.
 Rule: any lock reachable from an ISR is taken with interrupts disabled in every context. There is one
-spinlock type and it is IRQ-aware.
+spinlock type, `SpinMutex`, and it is IRQ-aware; §2.3 lists the other spinning primitives and the
+ROADMAP lines that remove them.
 
 **A thread blocks forever despite a wakeup being sent.**
 The wakeup arrived in the window between deciding to block and actually blocking. Rule: enqueue onto
