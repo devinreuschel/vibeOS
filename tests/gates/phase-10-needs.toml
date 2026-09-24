@@ -10,7 +10,7 @@
 roots = [
   "until those retries are gone, every retry the harness takes",
   "`scripts/check_review_refs.py` reads `tests/gates/phase-10-needs.toml`",
-  "`scripts/check_ticks.py`: on every pull request",
+  "`scripts/check_ticks.py`, which a `ticks` CI job runs on every pull request",
 ]
 
 # Reopened lines of Phases 4 to 8 and the boxes that close them.

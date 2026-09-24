@@ -3933,6 +3933,7 @@ harness defaults match them.
 | `VIBEOS_QEMU_ACCEL` | `tcg` (empty omits `-accel`) | all; `make run` |
 | `VIBEOS_TIMEOUT` | `60` e2e/ps2, `90` ktest/crash | all drivers |
 | `VIBEOS_QEMU_EXTRA` | empty | all drivers |
+| `VIBEOS_TIER` | `adhoc`; each `make test-*` recipe sets its target name (planned, ROADMAP §10.9) | all drivers, which write `build/results/<arch>-<tier>.json` |
 | `VIBEOS_EXPECT_PANIC` | off (`""` / `0`) | `run_e2e` |
 | `VIBEOS_GP_TEST` | off | `run_e2e` |
 | `VIBEOS_EXPECT_PIT` | off | `run_e2e` |
@@ -3974,6 +3975,9 @@ job.
 | `smp-stress` | weekly Monday 06:00 UTC + dispatch | `-smp 4`, longer timeout |
 | `nightly-canary` | same workflow, non-blocking | undated latest nightly, `make iso && make test-unit` |
 | `release` | `v*` tags | `make test-e2e` (BIOS) only, then production + ktest ISO, changelog section, GitHub Release. It does not wait for `ci` at the tagged commit, and the ktest ISO writes fixed LBAs of any virtio-blk disk attached at boot (ROADMAP §10.1, F145). Planned (ROADMAP §10.1): dispatched from `main` with the release tag as input; a `build` job with `contents: read` and `actions: read`, no cache, and no persisted token, then a `publish` job that runs no repository script; from ROADMAP §14.6 a `sign` job in the `release` environment between them, and from §22.4 a keyless `verify` job on vibeOS. |
+
+Planned (ROADMAP §10.9): a `ticks` job on pull requests, after the jobs that run the tiers, runs
+`scripts/check_ticks.py` against the `build/results/` files they upload.
 
 Rule; not yet enforced: a job that holds a signing key or a write token runs no code from the
 candidate commit, restores no cache, checks out nothing, and receives only artifacts and their
