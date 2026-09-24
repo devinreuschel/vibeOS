@@ -197,7 +197,9 @@ a person's data or a secret:
   job that holds a secret uploads no core (ROADMAP §10.7), so a guest's core, log, and report are
   published as they are. An issue a workflow files carries the ROADMAP §10.7 core tool's text report
   and a link to the run's artifact, never an attached dump. A dump needed after its artifact expires
-  is regenerated from its commit and seed.
+  is regenerated from its commit and seed. From ROADMAP §22.5 a fuzz job's crash record is the
+  exception: it is sealed to the triage key, and its issue names only a crash id until the fix is
+  published (§8.6).
 - A physical machine's memory dump and firmware tables (`acpidump`, SMBIOS) are never committed or
   published: the AML in them is the vendor's proprietary code (ROADMAP §14.10), and an OEM's MSDM
   table holds a Windows product key. Host tests read them on the rig host from a store no workflow
@@ -3713,6 +3715,13 @@ keeps the account from running its share full around the clock, which GitHub's A
 against it when the burden is disproportionate to the benefits. The section also records each
 per-push tier's median QEMU time, which `ci_history.py --tiers` keeps under 60 s, and the
 `ci-history` branch's packed size (ROADMAP §10.9).
+
+**Issues and crash records.** Planned (ROADMAP §14.10, §22.5): one `workflow_run` filer is the only
+job with `issues: write`; it checks out nothing, runs no repository code, and opens or comments on
+issues by kind, branch, and signature. From ROADMAP §22.5, fuzz jobs run in `fuzz.yml` under a
+`fuzz-state` environment, encrypt the state their shards carry, seal each crash record to the triage
+key, and publish only the target, the run, and a keyed crash id, so a crash's reproducer stays
+private until its fix is published.
 
 `-D warnings` reaches host builds through `[build] rustflags` and the kernel clippy steps through their own `-- -D warnings`. Kernel builds (`make iso` and
 every ISO variant) run without it, because `[target.x86_64-unknown-none] rustflags` in
