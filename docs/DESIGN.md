@@ -41,7 +41,7 @@ halfway through.
 | 7 | [SMP](#7-smp) | ACPI, AP bring-up, per-CPU, IPIs, shootdown |
 | 8 | [Testing](#8-testing) | Tiers, marker contract, QEMU flags, CI |
 | 9 | [Pitfalls](#9-pitfalls) | Bugs already paid for once |
-| 10 | [Block I/O](#10-block-io) | Requests, barrier vs flush, ramdisk, virtio-blk, partitions, cache |
+| 10 | [Block I/O](#10-block-io) | Requests, ordering and flush, ramdisk, virtio-blk, partitions, cache |
 | 11 | [Portability](#11-portability) | The architecture seam, the aarch64 address space, adding a port, the EL0 and ring-3 environment |
 | 12 | [Device model](#12-device-model) | Devices, parents and suppliers, states, probe order, resources, removal |
 
@@ -725,7 +725,7 @@ separate namespace.
 | I20 | `now_ns` is monotonic | seqlock plus `time::monotonic_max` over `time_init::LAST_NS` | enforced | Yes, by construction, so the monotonicity tests cannot fail (ROADMAP §10.2, F100) |
 | I21 | A run queue is touched only by its owner CPU with IF=0 (§2.3) | `per_cpu_init::with_current` | enforced (busy flag) | Partly: only the owner writes it, but `diag::cpus_to` (the shell `cpus` command) and in-guest tests read another CPU's `runq` length with no lock, and `&'static PerCpu` aliases the `&mut` (ROADMAP §10.3, F039) |
 | I22 | A `BootCell` is set once, before SMP, and holds `Sync` data (§2.3) | `cell.rs` | documented | No: `per_cpu_init::CPUS` holds the non-`Sync` `PerCpu`, which the unbounded `Sync` impl allows (ROADMAP §10.3, F017, F039); the set-once check is a `debug_assert!` (ROADMAP §10.2, F137) |
-| I23 | Barrier: every request before it completes before any after it starts. Flush: completed writes are durable (§10.2) | `block.rs` | documented | No: the block queue merges a request across any queued fence but the lowest and can reorder overlapping writes, virtio-blk completes a `Barrier` before earlier requests and sends a `Flush` before earlier writes complete, and a cache flush misses in-flight writeback (ROADMAP §10.11, F043) |
+| I23 | The block layer orders only overlapping writes and a sequential zone's writes; a `Flush` makes durable every write completed before it was submitted, and a `Fua` write is durable when it completes (§10.2) | `block.rs` | documented | No: C-LOOK can reorder overlapping writes, a block-cache flush misses writeback already in flight, and `Fua` does not exist (ROADMAP §10.11, F043) |
 | I24 | vibefs never overwrites a live block before the newer superblock is durable ([VIBEFS.md](VIBEFS.md)) | vibefs commit | documented | No after a failed commit: the in-memory generation advances before the superblock write, so the retry writes the slot that holds the only valid superblock (ROADMAP §12.5, F050). Otherwise it rests on v1's on-disk refcounts, which its mount does not check (F061); v2 keeps no per-block count and checks its pointers and allocation map as it reads each block (VIBEFS.md §15; ROADMAP §14.8) |
 | I25 | Per-thread CPU state is saved and restored in full (§7.5) | `syscall_init::on_switch`, `thread::switch_context` | documented | No: `FS_BASE` is not switched (ROADMAP §13.1, F022); `fork` and `execve` get the FPU state wrong (ROADMAP §10.6, F069); no entry from ring 3 saves a complete user frame, so the user GPRs of a thread preempted in ring 3 are at no known place, and a context whose RCX and R11 differ from its RIP and RFLAGS cannot be returned to (ROADMAP §10.6) |
 | I26 | Every kernel stack has a guard page (§2.4) | `kva_init::alloc_guarded_stack` | documented | No: boot runs on Limine's unguarded stack (ROADMAP §10.6, F072) |
@@ -3712,30 +3712,57 @@ a completion thread per queue that may block, which moves the blocked-handler pr
 and Linux's concurrency-managed workqueues with rescuer threads, more machinery than a rule that
 stage 2 never waits.
 
-## 10.2 Barrier vs flush
+## 10.2 Ordering, flush, and FUA
 
-`Barrier` is an order fence: every request submitted before it finishes before any
-request submitted after it starts. It does not make writes durable.
+Rule: the block layer does not order requests. Requests in flight complete in
+any order, on any queue. A caller that needs one write durable, or visible to a
+later read, before another starts waits for its completion before it submits the
+other. The block layer keeps two orders of its own: it never dispatches a write
+while an older write to an overlapping range is queued or in flight (ROADMAP
+§10.11), and a zoned device has at most one write in flight per sequential zone
+(ROADMAP §29.1).
 
-`Flush` is a barrier plus a device durable-write. Ramdisk flush is a successful
-no-op (the backing is already memory). A journaling filesystem must issue flush,
-not only barrier, before treating a commit as persistent. vibefs is not journaled:
-CoW metadata plus atomic superblock switch ([VIBEFS.md](VIBEFS.md) §2 / §10). The
-same flush rule applies: a generation is not durable until `Flush` after the new
-super slot is written.
+`Flush` makes durable every write whose completion was reported before the
+`Flush` was submitted, as virtio 1.2 §5.2.6.2's FLUSH, NVMe's Flush, SCSI's
+SYNCHRONIZE CACHE, and Linux's `REQ_PREFLUSH` do. It neither waits for nor
+covers a write still in flight, and it holds up no later request. Ramdisk flush
+is a successful no-op (the backing is already memory).
 
-The elevator will not dispatch seq numbers past an in-queue fence. Adjacent
-read/write/discard requests merge; fences do not. `try_merge` checks only the
-lowest queued fence, so a request can merge into one queued before a second
-fence, and a fence whose seq is `u32::MAX` reads as no fence; C-LOOK can also
-reorder overlapping writes whatever their seq (ROADMAP §10.11, F043).
+A write may carry `Fua`: its completion means it is durable. A device that
+offers FUA gets the flag with the write. For any other device the block layer,
+not the driver, completes a `Fua` write: it waits for the write, sends a
+`Flush`, and reports the write complete when that `Flush` completes, as Linux's
+flush machinery does. A driver only says whether its device offers FUA
+(AGENTS.md rule 10).
 
-virtio-blk does not implement the contract above. `issue()` completes a `Barrier`
-locally while earlier requests are in flight, and a `Flush` goes to the device
-once earlier writes are dispatched, not completed; virtio 1.2 §5.2.6.2 makes a
-write stable only after a FLUSH sent after that write completed. The block
-cache's `flush` does not wait for writeback in flight either
-([section 10.6](#106-block-cache)). ROADMAP §10.11 lands all of it (F043).
+A filesystem commit is built from these: write the new blocks, wait for every
+completion, `Flush`, then write the block that makes the commit visible with
+`Fua`. A journaling filesystem does this with its commit record. vibefs is not
+journaled: it uses CoW metadata plus an atomic superblock switch
+([VIBEFS.md](VIBEFS.md) §2, §10), and a generation is durable when its
+superblock write, carrying `Fua`, completes.
+
+Adjacent read, write, and discard requests merge; a `Flush` merges with nothing.
+
+Why: a fence that holds every later request until the earlier ones complete
+serializes the device. With a queue per CPU ([section 10.4](#104-virtio-blk)),
+partitions that share a device ([section 10.5](#105-partitions)), and stacked
+devices over several members (ROADMAP §29.1), one `fsync` would drain every
+queue, partition, and member, reads included. A filesystem needs only the
+completions of its own writes, which it can wait for. Linux replaced its ordered
+barriers with completion waits, `REQ_PREFLUSH`, and `REQ_FUA` in 2.6.37 for this
+reason, and virtio keeps its barrier feature only in the legacy interface.
+Rejected: a device-wide `Barrier` that every later request waits behind; and a
+fence per queue, since one filesystem writes from every CPU's queue and would
+wait for completions anyway.
+
+Not yet: `src/block.rs` still defines `Barrier` and holds later requests behind
+a queued `Barrier` or `Flush`, `try_merge` checks only the lowest queued fence,
+a fence whose seq is `u32::MAX` reads as no fence, C-LOOK can reorder
+overlapping writes whatever their seq, `Fua` does not exist, and the block
+cache's `flush` does not wait for writeback already in flight
+([section 10.6](#106-block-cache)). Only two in-guest tests call `barrier()`.
+ROADMAP §10.11 lands all of it (F043).
 
 ## 10.3 Failure
 
@@ -3784,7 +3811,7 @@ device, then release). Error handling:
    4. It claims every dispatched request not yet claimed.
    5. If the reset brought the unit back, it reinitializes the rings and the last-seen used index,
       resubmits the claimed requests in each queue's submission order, Flushes included, and
-      unquiesces. Under [section 10.2](#102-barrier-vs-flush)'s ordering no request in
+      unquiesces. Under [section 10.2](#102-ordering-flush-and-fua)'s ordering no request in
       flight depends on another, so the order carries no durability meaning.
    6. If it did not, it clears Bus Master Enable in the function's command register and reads it
       back, detaches the device's IOMMU domain when ROADMAP §18.1's IOMMU is on, completes every
@@ -3828,6 +3855,9 @@ device, then release). Error handling:
    removed device's see (below and §12.4): its filesystem never commits again, its dirty pages are
    dropped and their error is reported once to each open file description's next `fsync`, and
    `mount -o remount,rw` returns `EIO`.
+
+A reset is not a power loss. Writes completed before it are assumed to stay in the device's volatile
+cache until a later `Flush` makes them durable, as Linux's NVMe and virtio-blk drivers assume.
 
 Planned (ROADMAP §22.2, §25.5): every hang detector waits longer than the stall bound of what it
 may be waiting on, so a storage failure the kernel is handling is not taken for a hang. The
@@ -3895,11 +3925,16 @@ reset bound R ([section 10.3](#103-failure)); today `reset` spins for up to a mi
 runs on MSI-X, where virtio 1.2 §4.1.4.5.2 says a driver should not read ISR (ROADMAP §26.4, F122).
 
 `F_MQ`: one virtqueue per online CPU, capped by the device `num_queues` and by
-`MAX_VQ` (8). Without `F_MQ`, a single request queue. Data goes through 16
-bounce slots of 8 KiB shared by the device's queues; a request over 8 KiB is
+`MAX_VQ` (8). Requests on different queues are not ordered against each other
+([section 10.2](#102-ordering-flush-and-fua)). Without `F_MQ`, a single
+request queue. Data goes through 16 bounce slots of 8 KiB shared by the
+device's queues; a request over 8 KiB is
 `Inval`, including one the block queue merged past that size (ROADMAP §12.5,
 F119). Flush and discard go to the device when those features are negotiated;
 flush without `F_FLUSH` is a successful no-op (nothing to make durable).
+virtio-blk has no FUA, so the block layer completes a `Fua` write with a
+`Flush` after it (§10.2); without `F_FLUSH` that `Flush` is the same no-op,
+since every completed write is already durable.
 
 `issue()` publishes `avail.idx` after `dma_wmb`, then `should_kick` loads
 `avail_event` or `used.flags` to decide whether to kick, with no full barrier
@@ -3955,8 +3990,9 @@ changes a copy's filesystem id offline (VIBEFS.md §15).
 Page-granular (4 KiB), 16 pages (`cache::DEFAULT_PAGES`), keyed by
 `(dev_id, page offset)`. Read-through, write-back, clock eviction,
 sequential readahead, dirty-ratio writeback thread (`blk-wb`). `flush`
-writes the pages marked dirty, then calls the device `flush`.
-`barrier` writes dirty pages and does not device-flush.
+writes the pages marked dirty, waits for each write to complete, then sends
+the device `Flush` (§10.2). `barrier` writes dirty pages without a device
+flush and goes with `Barrier` (ROADMAP §10.11).
 
 A slot has no filling or writeback state. `take_dirty` clears a page's dirty
 bit before `blk-wb` writes it with the lock dropped, so while that write is in

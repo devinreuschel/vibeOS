@@ -16,10 +16,10 @@ names a finding in the kernel review
 ([reviews/KERNEL_REVIEW.md](reviews/KERNEL_REVIEW.md)) and the ROADMAP
 section whose line cites the same id and fixes the code.
 
-Index: [DESIGN.md](DESIGN.md) §1.4. Block durability: DESIGN §10.2 (`Flush`, not
-`Barrier`). Task list: [ROADMAP.md](ROADMAP.md) §8.5. Open v1 work: ROADMAP
-§10.2, §10.11, §12.5, §13.9, and §18.5. v2: the requirements in §15, and
-ROADMAP §14.8.
+Index: [DESIGN.md](DESIGN.md) §1.4. Block durability: DESIGN §10.2 (completion
+waits, `Flush`, and `Fua`). Task list: [ROADMAP.md](ROADMAP.md) §8.5. Open v1
+work: ROADMAP §10.2, §10.11, §12.5, §13.9, and §18.5. v2: the requirements in
+§15, and ROADMAP §14.8.
 
 ---
 
@@ -52,20 +52,21 @@ Why CoW, not WAL:
 
 - Recovery is "read both supers, take the highest generation whose checksum
   matches." No journal replay in the kernel, no torn-journal special cases.
-- A commit is one ordered sequence: write new metadata blocks → `Flush` →
-  write the inactive super slot → `Flush`. The live tree is never overwritten.
+- A commit is one ordered sequence, each step starting after the one before
+  it completes: write new metadata blocks → `Flush` → write the inactive
+  super slot → `Flush`. The live tree is never overwritten.
 - Snapshots are a pinned generation (root block pointers). WAL would make
   snapshots a second mechanism; ROADMAP §8.5 lists snapshots as falling out of
   CoW.
-- DESIGN §10.2: a commit is not durable until `Flush`. Barrier is not enough.
-  The same rule a journal would need, without the journal. A commit is durable
-  after `Flush` only if
-  `Flush` covers every write submitted before it. The virtio-blk path
-  does not meet that yet: it sends `Flush` once earlier writes are
-  dispatched, not completed (F043; ROADMAP §10.11), and the block cache's
-  flush skips pages `blk-wb` is still writing (F015; ROADMAP §12.5, after
-  §10.11 adds the wait under F043). The RAM-backed `/vibe` volume uses
-  neither.
+- DESIGN §10.2: a commit is not durable until a `Flush` covers its superblock
+  write, or that write carries `Fua`. The same rule a journal would need,
+  without the journal. The block layer orders nothing, and a `Flush` covers
+  only writes whose completion was reported before it was submitted, so a
+  commit waits for its block writes before it sends one. v1 writes through the
+  block cache, whose flush writes each dirty page and waits for it, but skips
+  pages `blk-wb` is still writing (F015; ROADMAP §12.5, after §10.11 adds the
+  wait under F043). The RAM-backed `/vibe` volume has no device or cache to
+  wait for.
 
 WAL was the alternative if we wanted in-place file data and a small log. We
 do not: file data that replaces existing bytes is also CoW, so a crash during
@@ -410,8 +411,9 @@ One transaction = one generation bump.
    a commit. Before §12.5, `write` has already allocated and written the
    replacement data blocks. v1 rewrites the whole inode tree and the tree
    of every non-empty directory, changed or not.
-3. Write those blocks. The alloc map carries this commit's drops (§6).
-4. `Flush`.
+3. Write those blocks, and wait until every write has completed. The alloc
+   map carries this commit's drops (§6).
+4. `Flush`, which covers the writes step 3 waited for (DESIGN §10.2).
 5. Write the inactive super slot (`generation + 1`, new roots, checksum):
    the slot opposite the super this mount last mounted or committed. The
    generation and roots change in memory only after step 6 succeeds.
@@ -419,6 +421,12 @@ One transaction = one generation bump.
 7. In memory, drop refcounts on the replaced metadata and data. Optionally
    mirror the super into the other slot (same generation) and `Flush`
    again; v1 does not mirror.
+
+Each step starts only after the one before it has completed, since the
+block layer orders nothing (DESIGN §10.2). Steps 5 and 6 together are a
+`Fua` write of the superblock: on a device that offers FUA, the
+superblock write carries the flag and step 6 sends nothing; on any other
+device the block layer runs them as written.
 
 Steps 1 to 4 make every allocation the commit needs, blocks and kernel
 memory alike, including the memory step 7 uses; steps 5 to 7 allocate
@@ -454,7 +462,7 @@ Crash:
 `fsck` must not take a checksum-failing super or metadata block and treat
 it as authoritative.
 
-`fsync` / `sync` is this protocol. `Barrier` is not a commit.
+`fsync` / `sync` is this protocol.
 
 A volume whose device is removed or `Failed` (DESIGN §10.3, §12) never
 commits again: its last committed generation stays the on-disk state, and
