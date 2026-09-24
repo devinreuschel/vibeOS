@@ -3682,7 +3682,7 @@ job.
 | `phase 0 ladder` | push / PR, `needs: check` | Limine, QEMU/nasm/xorriso/OVMF, kernel clippy `-D warnings` with `--all-features`, `kernel_tests`, and `vibefs_crash` (never the default feature set that ships), ISO, e2e (BIOS/UEFI/panic/#GP/PIT/9 GiB), in-guest at `-smp 2` and `-smp 4`, LAPIC fallback, vibefs crash. Green `main` uploads `vibeos.iso` (7 days). |
 | `smp-stress` | weekly Monday 06:00 UTC + dispatch | `-smp 4`, longer timeout |
 | `nightly-canary` | same workflow, non-blocking | undated latest nightly, `make iso && make test-unit` |
-| `release` | `v*` tags | `make test-e2e` (BIOS) only, then production + ktest ISO, changelog section, GitHub Release. It does not wait for `ci` at the tagged commit, and the ktest ISO writes fixed LBAs of any virtio-blk disk attached at boot (ROADMAP §10.1, F145). Planned (ROADMAP §10.1): dispatched from `main` with the release tag as input; a `build` job with `contents: read`, no cache, and no persisted token, then a `publish` job that runs no repository script; from ROADMAP §14.6 a `sign` job in the `release` environment between them, and from §22.4 a keyless `verify` job on vibeOS. |
+| `release` | `v*` tags | `make test-e2e` (BIOS) only, then production + ktest ISO, changelog section, GitHub Release. It does not wait for `ci` at the tagged commit, and the ktest ISO writes fixed LBAs of any virtio-blk disk attached at boot (ROADMAP §10.1, F145). Planned (ROADMAP §10.1): dispatched from `main` with the release tag as input; a `build` job with `contents: read` and `actions: read`, no cache, and no persisted token, then a `publish` job that runs no repository script; from ROADMAP §14.6 a `sign` job in the `release` environment between them, and from §22.4 a keyless `verify` job on vibeOS. |
 
 Rule; not yet enforced: a job that holds a signing key or a write token runs no code from the
 candidate commit, restores no cache, checks out nothing, and receives only artifacts and their
@@ -3697,6 +3697,22 @@ ROADMAP Phase 11 on, `make gate` also needs two dev-host records that loop the -
 and smp-stress under HVF for 30 minutes each (`tests/gates/common.toml`), the only gate that runs
 those tests on a weakly ordered CPU directly. The weekly aarch64 smp-stress leg records whether TCG
 there showed any weak outcome (`weak_order_probe`).
+
+**Scheduled capacity.** Planned (ROADMAP §10.1): the Free plan's 20 concurrent jobs are the owner's
+account's, shared with its other repositories, and scheduled and dispatched workflows hold 10 of
+them as lanes. A lane is a job-level concurrency group, `sched-lane-<n>`, with `queue: max`: it runs
+one job at a time and holds up to 100 waiting, first in first out. Without `queue: max` a group
+keeps one waiting job and cancels it when another arrives, and GitHub runs no queue across
+workflows, so lanes are how the split holds. This section will hold the lane map, which reserves for
+jobs that end within 5.5 hours the lanes their cadence needs and names the lanes a release window
+takes (ROADMAP §22.1), and a ledger row per workflow: cadence, jobs per run, job-hours per run
+(estimated, then measured from `ci-history`), peak concurrent jobs, and lanes.
+`ci_history.py --budget` holds every lane but the rebuilds' under 60% busy and every reserved-lane
+wait under 12 hours. The 40% left absorbs GitHub's delays to scheduled runs and new workflows, and
+keeps the account from running its share full around the clock, which GitHub's Actions terms count
+against it when the burden is disproportionate to the benefits. The section also records each
+per-push tier's median QEMU time, which `ci_history.py --tiers` keeps under 60 s, and the
+`ci-history` branch's packed size (ROADMAP §10.9).
 
 `-D warnings` reaches host builds through `[build] rustflags` and the kernel clippy steps through their own `-- -D warnings`. Kernel builds (`make iso` and
 every ISO variant) run without it, because `[target.x86_64-unknown-none] rustflags` in
