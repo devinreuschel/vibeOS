@@ -322,10 +322,12 @@ outermost first:
    vibefs v2 transaction, which a commit waits for, holds it as a level-4 lock
    ([VIBEFS.md](VIBEFS.md) §15; ROADMAP §14.8)
 
-A user copy may fault, and the fault path takes the address-space lock for reading, then page waits,
-then, to fill a file page, the filesystem's level-4 locks. So a copy to or from user memory is
-allowed while level-1 locks are held, as `write` needs, and under no lock of levels 2 to 4, level 3b
-included. The reverse is forbidden: code that holds the address-space lock takes no level-1 lock.
+A copy through a faulting accessor (§5.1) may fault, and the fault path takes the address-space lock
+for reading, then page waits, then, to fill a file page, the filesystem's level-4 locks. So such a
+copy is allowed while level-1 locks are held, as `write` needs, and under no lock of levels 2 to 4,
+level 3b included. The reverse is forbidden: code that holds the address-space lock takes no level-1
+lock. A non-faulting accessor (§5.1) takes no fault path and no lock, so it may run under any of
+them.
 
 The position lock serializes `read`, `readv`, `write`, `writev`, `lseek`, and `getdents64` on one
 open file description of a regular file or directory, so threads and processes that share the
@@ -347,8 +349,8 @@ which a holder of any level-1 lock may take.
 
 A buffered `write` whose user buffer maps the very page it writes would fault on that page while it
 holds the page busy (level 3) and wait on itself. So the write path copies into a busy page only
-through a non-faulting accessor, which returns a short count instead of taking the fault. On a
-short count it releases the page, faults the rest of the source in with no page held, and retries.
+through a non-faulting accessor (§5.1), which returns a short count instead of taking the fault. On
+a short count it releases the page, faults the rest of the source in with no page held, and retries.
 This is Linux's `fault_in_iov_iter_readable` loop. A `read` into a buffer that maps the page it
 reads needs no such loop, because it copies from a page that is up to date and not busy.
 
@@ -484,6 +486,8 @@ Blocking and allocation are a class of bug, not an instance. Context rules:
 | Workqueue worker | Yes | Yes, fallible only ([§4.4](#44-kernel-heap)); without direct reclaim while it runs a softirq-equivalent item (row above) | Fair, nice 0 |
 | Driver `probe` | Yes | Yes, fallible only ([§4.4](#44-kernel-heap)); a failed probe leaves its device unbound and logs why | Fair, nice 0 |
 | Syscall body, fault handler for a CPL-3 fault | Yes ([§2.9](#29-preemption-and-interrupt-state)) | Yes, fallible only ([§4.4](#44-kernel-heap)) | The calling thread's |
+| CPL-0 fault in a faulting user accessor (§5.1; may sleep from ROADMAP §12.2) | Yes ([§2.9](#29-preemption-and-interrupt-state) rule 3); may take the address-space lock (§2.1) | Yes, fallible only ([§4.4](#44-kernel-heap)) | The calling thread's |
+| CPL-0 fault in a non-faulting user accessor (§5.1) | No: it goes straight to the fixup | No | The calling thread's |
 | Network receive: a queue's threaded bottom half ([§5.4](#54-irq-registration)) | No: it takes no sleeping lock and never waits for a socket's owner; a packet for an owned socket goes on its backlog (§2.1) | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) | `SCHED_FIFO` 50; fair, nice 0 past its budget |
 | Timer callback: a timeout-wheel callback ([§6.5](#65-timers-and-timeouts)), run as a softirq-equivalent item on the CPU whose wheel fired it | No | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) | Its CPU's worker: fair, nice -20 |
 | NMI and `#MC` at any CPL, `#DB` at CPL 0; shootdown and call-function work run from a spin | No | No | None: it runs inside whatever it interrupted |
@@ -792,15 +796,19 @@ names each ring-0 case that continues instead of halting. A kernel `#BP`
 logs and continues. Planned (ROADMAP §17.4, §18.4): so do three ring-0 `#DB` cases, which §5.2's row
 lists: a hit on a debug slot the current thread's tracer armed, a stray single step, and, in the
 data-race detector's build, a hit on its own slots. Every other exception taken in ring 0 dumps and
-halts in the same order as `#[panic_handler]`. Rule: ring 3 never halts the kernel. An exception
-raised by ring-3 code, or by a return to ring 3, sends that process the signal §5.2 gives the vector
-(§11.5 the exception class, on aarch64), and the kernel keeps running. The signal's action then
-applies, as on Linux: from ROADMAP §13.8 a handler may catch it, from §17.4 a tracer sees it first,
-and a fault signal the process blocks or ignores still takes its default action. The default action,
-the only one today, ends the process and prints `user: pid N killed SIG<name>`. Not yet enforced: ring-3 `#DB`, and `#AC` when `CR0.AM` is set, halt the kernel (ROADMAP §10.6,
-F005), and so do the entry-path windows of §5.10 (ROADMAP §10.6, F004, F006, F007); §5.2's last
-column lists every vector whose ring-3 action differs from the rule. An NMI dumps and halts on its
-IST stack; from ROADMAP §10.7 the NMI handler first reads its CPU's stop request word (step 1).
+halts in the same order as `#[panic_handler]`. Planned (ROADMAP §10.6): a `#PF` (on aarch64, a data
+abort) at CPL 0 whose faulting instruction has an exception-table entry is not a kernel fault; only
+the §5.1 user-memory accessors have entries, and §5.1 says how each kind ends. Rule: ring 3 never
+halts the kernel. An exception raised by ring-3 code, or by a return to ring 3, sends that process
+the signal §5.2 gives the vector (§11.5 the exception class, on aarch64), and the kernel keeps
+running. The signal's action then applies, as on Linux: from ROADMAP §13.8 a handler may catch it,
+from §17.4 a tracer sees it first, and a fault signal the process blocks or ignores still takes its
+default action. The default action, the only one today, ends the process and prints
+`user: pid N killed SIG<name>`. Not yet enforced: ring-3 `#DB`, and `#AC` when `CR0.AM` is set, halt
+the kernel (ROADMAP §10.6, F005), and so do the entry-path windows of §5.10 (ROADMAP §10.6, F004,
+F006, F007); §5.2's last column lists every vector whose ring-3 action differs from the rule. An NMI
+dumps and halts on its IST stack; from ROADMAP §10.7 the NMI handler first reads its CPU's stop
+request word (step 1).
 
 Rule: nothing is silently swallowed. An error is returned to its caller, or handled where it arises
 in one of three ways: a counter plus a log line at most once a second; an error state recorded on
@@ -886,7 +894,7 @@ separate namespace.
 | I4 | Kernel code outside the §5.10 entry and exit sequences runs with `GS_BASE` = this CPU's `PerCpu` (§5.10) | `arch::gs`, `per_cpu_init` | documented | No: the raw gates of §5.10 rule 1 (F004), the IF=1 window in `enter_user_full` (F006), an NMI, `#MC`, or `#DB` taken in the syscall entry or exit window, and a fault on the return-to-user `iretq` (both F007) run on the user base (ROADMAP §10.6) |
 | I5 | One entry stub per vector makes the `swapgs` decision (§5.10 rule 1) | `arch/idt.rs` | documented | No: the `irq_init` pool gates `0x31`–`0x7F` and the `kbd_init` gates `0x30` and `0x21` skip it (ROADMAP §10.6, F004) |
 | I6 | Ring 3 never halts the kernel (§2.5, §5.2, §11.5) | `proc_init::try_user_fault` | documented | No: ring-3 `#DB`, and `#AC` when `CR0.AM` is set, halt (F005), and so do the I4 windows (ROADMAP §10.6) |
-| I7 | The kernel never dereferences a user VA; copies go through the physmap after `check_user_range` (§5.1) | `addr_space.rs` | enforced | Yes, but `write_bytes` ignores the PTE's `WRITABLE` bit (ROADMAP §10.6, F023) |
+| I7 | The kernel reads or writes user memory only through the §5.1 user-memory accessors, and writes an address space that is not running only through the fill API (ROADMAP §10.6) | `addr_space.rs`; the arch accessors from ROADMAP §10.6 | enforced by SMAP where the CPU has it (PAN on aarch64, ROADMAP §11.6); the fill-API rule is documented | Partly: today's accessors copy through the physmap after `check_user_range`, and `write_bytes` ignores the PTE's `WRITABLE` bit (ROADMAP §10.6, F023) |
 | I8 | One thread per address space changes its regions, and another CPU changes its page tables only under its page-table lock (§2.11) | process model | assumed | Yes: only the owning thread touches a space. Lock-free user copies, local-only `invlpg`, and `&'static AddressSpace` depend on it. ROADMAP §10.6 replaces `&'static` with a counted object, §12.1's reverse map changes page tables from other CPUs under the space's page-table lock, §12.3 shoots down every CPU in the space's set, and §13.1's threads bring the address-space lock |
 | I9 | TCBs are never freed, so a `*mut Tcb` stays valid | 64-slot table, `thread_init` | assumed | Yes, but `spawn_inner` can reuse a Dead slot whose thread is still switching out (ROADMAP §10.10, F012) |
 | I10 | A dead thread's stack is freed only after its CPU has switched off it (§2.8, §4.5) | `kva_init::DEFERRED` | documented | No: any CPU drains the global list (F012), and the 8-slot list panics when full (F010) (ROADMAP §10.10) |
@@ -993,13 +1001,15 @@ every IF=0 stretch has a reason from the list below and a bound.
    before it loads the user RSP (§5.10 rule 4), and keeps its state in the thread's user frame
    (§5.10), not in the scratch. A fault or trap taken at CPL 3 runs its body with IF=1 once its
    frame is on the thread's kernel stack with the fault's syndrome saved in it (§5.10 rule 9), and
-   so does a `#PF` taken at CPL 0 inside a user-memory accessor once ROADMAP §12.2 lets it sleep,
-   since the code it interrupted ran with IF=1; a hardware interrupt's top half keeps IF=0. Rule;
-   not yet enforced: FMASK clears IF at `syscall` and nothing sets it again, so a syscall body runs
-   with IF=0 until it blocks (ROADMAP §10.6).
+   so does a `#PF` taken at CPL 0 inside a faulting user-memory accessor (§5.1) once ROADMAP §12.2
+   lets it sleep, since the code it interrupted ran with IF=1; a fault inside a non-faulting
+   accessor runs no body: the handler finds its exception-table entry before it touches IF and goes
+   to the fixup; a hardware interrupt's top half keeps IF=0. Rule; not yet enforced: FMASK clears
+   IF at `syscall` and nothing sets it again, so a syscall body runs with IF=0 until it blocks
+   (ROADMAP §10.6).
 4. Code that may sleep (waits on a wait queue, takes a sleeping lock (§2.1), allocates with
-   reclaim (ROADMAP §12.6), or copies to or from user memory once ROADMAP §12.2 lets a user-copy
-   fault sleep) runs with IF=1, no spinlock held, and outside any RCU read-side section
+   reclaim (ROADMAP §12.6), or copies through a faulting user-memory accessor (§5.1) once ROADMAP
+   §12.2 lets its fault sleep) runs with IF=1, no spinlock held, and outside any RCU read-side section
    ([§2.12](#212-rcu)), and asserts each in debug builds (ROADMAP §10.3; the read-side check from
    §19.5).
 5. `current`, the running thread's TCB pointer, is read only through `arch::current_tcb()`: one
@@ -2353,6 +2363,19 @@ is `AddressSpace::read_bytes`/`write_bytes` after `check_user_range`, copying th
 not check the PTE's `WRITABLE` bit. `arch::cpu::harden()` sets `CR4.SMEP|SMAP|UMIP` where CPUID allows
 and asserts `CR0.WP` on every CPU; `stac`/`clac` are no-ops when SMAP is missing.
 
+Planned (ROADMAP §10.6, §12.2, §12.5): two kinds of accessor, told apart by a kind bit in each
+exception-table entry. A faulting accessor (`copy_from_user`, `copy_to_user`, and their string and
+vector forms) handles a fault through the region fault handler from ROADMAP §12.2 on, which may
+sleep, and returns `EFAULT` only when that handler cannot resolve the fault. It runs with IF=1, no
+spinlock held, and no sleeping lock of §2.1 levels 2 to 4 held (§2.9 rule 4). A non-faulting
+accessor's fault goes straight to the fixup and returns a short count: no region lookup, no lock, no
+sleep, and IF left as it was. It may run anywhere, under a busy page, a spinlock, or IF=0. The
+buffered `write` path (§2.1) and the futex word read (ROADMAP §13.5) use it; after a short count they
+release what they hold, fault the page in, and retry. The exception table lists accessor
+instructions only, and aarch64's table carries the same kind bit. Rejected: a per-thread no-fault
+count (Linux's `pagefault_disable`), which adds per-thread state to the fault path and puts the
+choice away from the instruction that faults.
+
 Each CPU gets its own GDT and TSS (`gdt::CpuTables`): the BSP's lives in a `BootCell`, and
 `gdt::alloc_ap_tables` allocates each AP's. TSS.RSP0 is the stack an interrupt or exception from
 ring 3 lands on. `syscall` does not read the TSS; its entry loads `PerCpu.kernel_rsp0`.
@@ -2412,7 +2435,7 @@ fault, downstream of it.
 | `0x08` | `#DF` | dump on IST, halt | not a ring-3 fault: the Ring 0 column applies | as the rule |
 | `0x0B`, `0x0C` | `#NP`, `#SS` | dump, halt | `SIGBUS`; `SIGSEGV` for a fault on the return-to-user `iretq` (§5.10 rule 2) | the `iretq` case halts. Rule; not yet enforced: ROADMAP §10.6 (F007) |
 | `0x0D` | `#GP` | dump with error code, halt | `SIGSEGV`, including a fault on the return-to-user `iretq` (§5.10 rule 2) | the `iretq` case halts. Rule; not yet enforced: ROADMAP §10.6 (F007) |
-| `0x0E` | `#PF` | dump with CR2, halt. Planned (ROADMAP §10.6): a fault inside a user-memory accessor returns `EFAULT` | `SIGSEGV`. Planned (ROADMAP §12.2): a fault on a page that a region reserves is resolved first, and one through a file mapping on a page wholly past EOF, or on a page whose fill fails, gets `SIGBUS`, and so does a store through a shared file mapping whose space reservation fails (§4.3) | as the rule |
+| `0x0E` | `#PF` | dump with CR2, halt. Planned (ROADMAP §10.6, §12.2): a fault inside a user-memory accessor is handled by that accessor's kind (§5.1) and ends in `EFAULT` or a short count | `SIGSEGV`. Planned (ROADMAP §12.2): a fault on a page that a region reserves is resolved first, and one through a file mapping on a page wholly past EOF, or on a page whose fill fails, gets `SIGBUS`, and so does a store through a shared file mapping whose space reservation fails (§4.3) | as the rule |
 | `0x10` | `#MF` | dump, halt | `SIGFPE` | cannot fire: `CR0.NE` is clear, so an x87 error raises the masked IRQ13 and is lost. Rule; not yet enforced: ROADMAP §10.6 (F026) |
 | `0x11` | `#AC` | dump, halt | `SIGBUS`, for a misaligned access while ring 3 has set RFLAGS.AC; `CR0.AM` is set on every CPU, as Linux sets it | halts the kernel if `CR0.AM` is set (INIT clears it on each AP and no kernel code sets it; the BSP keeps Limine's value), and while it is clear ring 3's AC raises nothing. Rule; not yet enforced: ROADMAP §10.6 (F005) |
 | `0x12` | `#MC` | dump on IST, halt; `CR4.MCE` is clear, so a machine check shuts the CPU down with no dump (ROADMAP §10.6, F026). Planned (ROADMAP §25.1, §25.3): only a fatal machine check, or an action-required error in kernel memory, halts; a lower severity is recorded and the CPU continues | not a ring-3 fault: the Ring 0 column applies | as the rule |
@@ -5471,7 +5494,7 @@ Planned (ROADMAP §11.3, §11.6).
 | `0x19`, `0x1D` | SVE, SME access | dump, halt | `SIGILL`, `ILL_ILLOPC` (ROADMAP §11.6), until §23.1 gives their state a first-use setup |
 | `0x1C` | pointer-authentication failure | dump, halt | `SIGILL`, `ILL_ILLOPN`; pointer authentication is off until ROADMAP §18.9 |
 | `0x20`, `0x21` | instruction abort (`0x20` from EL0, `0x21` at the kernel's level) | dump with `FAR_EL1`, halt | the fault path (ROADMAP §12.2): an unresolved translation, access-flag, or permission fault gets `SIGSEGV`, `SEGV_MAPERR` or `SEGV_ACCERR`; an alignment fault `SIGBUS`, `BUS_ADRALN`; a synchronous external abort `SIGBUS`, `BUS_OBJERR`, until ROADMAP §25 classifies it |
-| `0x24`, `0x25` | data abort (`0x24` from EL0, `0x25` at the kernel's level) | dump with `FAR_EL1`, halt; a fault inside a user-memory accessor returns `EFAULT` (ROADMAP §11.6) | as `0x20` |
+| `0x24`, `0x25` | data abort (`0x24` from EL0, `0x25` at the kernel's level) | dump with `FAR_EL1`, halt; a fault inside a user-memory accessor is handled by that accessor's kind (§5.1) and ends in `EFAULT` or a short count (ROADMAP §11.6) | as `0x20` |
 | `0x22` | PC alignment | dump, halt | `SIGBUS`, `BUS_ADRALN` |
 | `0x26` | SP alignment | dump, halt | `SIGBUS`, `BUS_ADRALN` |
 | `0x2C` | trapped floating-point exception | dump, halt | `SIGFPE`, with the `si_code` of the exception `FPSR` reports |
