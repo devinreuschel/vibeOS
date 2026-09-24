@@ -31,7 +31,7 @@ filesystem we want to keep:
 | Gap | FAT32 | Why it becomes a wall |
 |-----|-------|------------------------|
 | Permissions | no POSIX mode/uid | everything is world-writable; cannot express `0755` vs `0644` |
-| Symlinks | none (`EOPNOTSUPP`) | cannot have `/bin` → target, or a loop we can *detect* on disk |
+| Symlinks | none (`symlink` returns `EPERM`, as on Linux's vfat) | cannot have `/bin` → target, or a loop we can *detect* on disk |
 | Crash consistency | flush-order only | power loss during write can orphan clusters or point a dirent at free space |
 | Checksums | none | bit rot is returned as file data |
 | Directories | linear | large dirs are a scan |
