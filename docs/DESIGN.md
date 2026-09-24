@@ -2467,7 +2467,11 @@ The RTC gives date and time to one-second resolution over ports `0x70`/`0x71`, w
 century-register and BCD-versus-binary quirks to detect. Read it once at boot, then track time with the
 monotonic clock and an offset. Poll the RTC for updates and the boot log timestamps drift relative to
 each other in a way that is genuinely annoying to debug. NTP over the network eventually replaces the
-offset with something correct.
+offset with something correct. Planned (ROADMAP §13.9): a timer set for an absolute `CLOCK_REALTIME`
+time stays tied to the wall clock. When `clock_settime` or `settimeofday` changes the offset, every
+such timer is re-armed at the monotonic time that now matches its wall time, as Linux does when the
+clock is set, so it fires when the wall clock reaches it; a relative timer, and a timer on any other
+clock, does not move.
 
 ---
 
