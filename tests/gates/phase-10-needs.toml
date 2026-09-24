@@ -215,6 +215,7 @@ needs = [
   "timestamps from the §10.3 cycle counter",
   "`vibeos.ktest=<glob>` runs only the matching in-guest tests",
 ]
+closes = ["`sleep_ms(50)` returns within 50 to 100 ms"]
 why = "claim: the TSC candidate needs the warp test, and the hpet=off boot needs ktest="
 
 [[box]]
@@ -369,3 +370,55 @@ why = "text: lands after the user-VA accessor box, the box above, and §10.4's `
 key = "a driver turns on its own device (DESIGN §12.3)"
 needs = ["driver and volume state as instances owned by their device's registry entry"]
 why = "text: lands with §10.4's D2 rewrite of virtio-blk"
+
+# Closes rows (How to read this): the box named by `key` lands all the work
+# of each box in `closes`, and the commit that ticks it ticks them.
+
+[[box]]
+key = "`run_e2e.py` fails when a kernel line comes before `vibeOS: serial online`"
+closes = ["serial shows `vibeOS: serial online` as the kernel's first serial line"]
+why = "reopened by design review J136"
+
+[[box]]
+key = "e2e checks the boot log's `vibeOS: meminfo:` lines"
+closes = ["a shell-less `meminfo` dump on the boot log"]
+why = "reopened by design review J136"
+
+[[box]]
+key = "`pit_tick_rate` counts timer interrupts, not `uptime_ms`"
+needs = ["`vibeos.ktest=<glob>` runs only the matching in-guest tests"]
+closes = ["the PIT tick runs at 1 kHz"]
+why = "reopened by design review J136; the hpet=off boot needs ktest="
+
+[[box]]
+key = "the in-guest clock tests can fail"
+closes = ["`now_us` monotonic across 10k reads"]
+why = "reopened by design review J136"
+
+[[box]]
+key = "the harness retries nothing"
+closes = [
+  "`make test-kernel` at `-smp 2` and `-smp 4` both pass with no harness retry",
+  "the `-smp 4` in-guest tier re-run weekly by `smp-stress.yml`",
+]
+why = "reopened by design review J136"
+
+[[box]]
+key = "an in-guest test finds every CPU's `PerCpu.ticks` advancing"
+closes = ["detect TSC-deadline via `CPUID.01H:ECX[24]`"]
+why = "reopened by design review J136"
+
+[[box]]
+key = "pid 1's exit panics the kernel"
+closes = ["init's own exit panics the kernel"]
+why = "the §9.5 deferral box"
+
+[[box]]
+key = "`execve` copies the caller's `envp` strings"
+closes = ["`execve` copies the caller's `envp` onto the new image's initial stack"]
+why = "the §9.4 deferral box"
+
+[[box]]
+key = "`elf::parse` host tests also cover checked-in static binaries"
+closes = ["host tests that parse checked-in static binaries"]
+why = "the §9.4 deferral box"

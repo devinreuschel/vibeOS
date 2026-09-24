@@ -22,11 +22,13 @@ This file records decisions. [ROADMAP.md](ROADMAP.md) records what has landed. P
 describes the code at the commit that last changed the sentence. A rule the code does not meet yet
 says "Rule; not yet enforced" or "Planned" and names the ROADMAP line that lands it. An `Fnnn` id
 names a finding in the kernel review ([reviews/KERNEL_REVIEW.md](reviews/KERNEL_REVIEW.md)); the ROADMAP
-section cited with it lands the fix. When code and this file disagree, one of them is a bug
-([§1.4](#14-documentation-rules)). §2's invariants bind every ROADMAP box, and a box that changes other
-text here changes it in the same commit (ROADMAP, How to read this). The numbers are load-bearing.
-Change them deliberately and update this doc in the same commit. An agent implementing a subsystem
-does not get to re-litigate the address map, the vector numbers, or the lock order halfway through.
+section cited with it lands the fix. A design-review id (`Gnnn`, `Hnnn`, `Jnnn`) names a row of
+[reviews/DESIGN_REVIEWS.md](reviews/DESIGN_REVIEWS.md). When code and this file disagree, one of them
+is a bug ([§1.4](#14-documentation-rules)). §2's invariants bind every ROADMAP box, and a box that
+changes other text here changes it in the same commit (ROADMAP, How to read this). The numbers are
+load-bearing. Change them deliberately and update this doc in the same commit. An agent implementing a
+subsystem does not get to re-litigate the address map, the vector numbers, or the lock order halfway
+through.
 
 ## Contents
 
@@ -1002,17 +1004,18 @@ must neither halt nor corrupt memory it has not given to that source (AGENTS.md 
 Consequence: until Phase 18 closes, vibeOS stops a process from crashing the kernel, not from reading
 another process's data. README says not to run untrusted code on it or keep secrets on it.
 
-**Interim posture (owner decision, 2026-09-23, design review G006).** The owner accepted the open
-gaps in the table above until the ROADMAP lines that close them, the last in Phase 18: speculation
-side channels (with no KPTI, a user process on a Meltdown-affected Intel CPU, bare metal or under KVM,
-can read all RAM through the physmap), DMA that no IOMMU confines (§18.1), every process running as
-root (§13.9), and root-mounted crafted images that panic the kernel. Why: the kernel has no users and
-no secrets; QEMU's TCG, the harness default, does not model the speculation Meltdown needs, and under
-KVM the exposure depends on the host CPU; and ROADMAP §10.6 rewrites the entry path as one generated
-stub per vector, which keeps a later KPTI CR3 switch local. Rejected: moving KPTI and syscall-index
-masking (§18.3's F024 and F025 boxes) into Phase 13, which costs a slice of entry-path work, a CR3
-switch on every entry, and a measurable syscall slowdown on affected CPUs; and moving all of §18.3
-before Phase 14's `login`, which costs most of a phase ahead of the self-hosting work.
+**Interim posture (owner decision, 2026-09-23, [design review G006](reviews/DESIGN_REVIEWS.md)).** The
+owner accepted the open gaps in the table above until the ROADMAP lines that close them, the last in
+Phase 18: speculation side channels (with no KPTI, a user process on a Meltdown-affected Intel CPU,
+bare metal or under KVM, can read all RAM through the physmap), DMA that no IOMMU confines (§18.1),
+every process running as root (§13.9), and root-mounted crafted images that panic the kernel. Why: the
+kernel has no users and no secrets; QEMU's TCG, the harness default, does not model the speculation
+Meltdown needs, and under KVM the exposure depends on the host CPU; and ROADMAP §10.6 rewrites the
+entry path as one generated stub per vector, which keeps a later KPTI CR3 switch local. Rejected:
+moving KPTI and syscall-index masking (§18.3's F024 and F025 boxes) into Phase 13, which costs a slice
+of entry-path work, a CR3 switch on every entry, and a measurable syscall slowdown on affected CPUs;
+and moving all of §18.3 before Phase 14's `login`, which costs most of a phase ahead of the
+self-hosting work.
 
 The acceptance assumes one user. It goes back to the owner before `login` lands (ROADMAP §14.3), when
 a second user can share the machine. Keeping any gap past the line that closes it, or adding a gap,

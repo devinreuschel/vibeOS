@@ -32,7 +32,7 @@ it is 512 KiB or more and its partition table is missing, empty, or unreadable (
 Releases: [GitHub Releases](https://github.com/devinreuschel/vibeOS/releases). From Phase 8 on, the commit that closes a phase
 gets a `phase-<N>` tag and the next `v0.<m>.0` release, numbered in closing order: `v0.8.0` to `v0.14.0` are Phases 8 to 14,
 later release notes name their phase, and Phase 39 is `v1.0.0` ([How to read this](docs/ROADMAP.md#how-to-read-this)).
-No release exists yet: Phases 8 and 9 are tagged when Phase 10 closes the gate lines the kernel review reopened.
+No release exists yet: Phases 8 and 9 are tagged when Phase 10 closes the gate lines of Phases 0 to 9 that the kernel review and a later design review reopened.
 
 Quickstart:
 
@@ -64,8 +64,8 @@ Docs live in [`docs/`](docs/). The other docs in the root are the changelog, [AG
 - [SYSCALL.md](docs/SYSCALL.md): syscall ABI. Not DESIGN.
 - [LINUX.md](docs/LINUX.md): which Linux release "Linux's" means, deliberate differences from it, and
   native interfaces. Not DESIGN.
-- [reviews/](docs/reviews/): the architecture, roadmap, and kernel reviews Phase 10 comes from, and
-  per-item plans in `reviews/issues/`.
+- [reviews/](docs/reviews/): the architecture, roadmap, and kernel reviews Phase 10 comes from,
+  per-item plans in `reviews/issues/`, and the design reviews' decisions in `DESIGN_REVIEWS.md`.
 
 Read [section 9](docs/DESIGN.md#9-pitfalls) before touching boot, paging, interrupts, syscall entry and exit, or AP bring-up.
 

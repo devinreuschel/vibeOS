@@ -57,8 +57,9 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
 ## [0.8.0]
 
 Phase 8 exit: filesystems. Phases 0–8 in one cut. See [the arc](docs/ROADMAP.md#the-arc).
-Not yet tagged: the 2026-09-23 kernel review reopened Phase 8's gate lines, so `v0.8.0` is cut, with this
-section as its notes, when they close (ROADMAP, How to read this).
+Not yet tagged: the 2026-09-23 kernel review and a later design review reopened gate lines of Phases 0
+to 8, so `v0.8.0` is cut, with this section as its notes, when every gate line of Phases 0 to 8 is
+checked (ROADMAP, standing gates).
 
 ### Added
 
