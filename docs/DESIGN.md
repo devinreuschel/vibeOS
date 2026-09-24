@@ -623,7 +623,7 @@ separate namespace.
 | I22 | A `BootCell` is set once, before SMP, and holds `Sync` data (§2.3) | `cell.rs` | documented | No: `per_cpu_init::CPUS` holds the non-`Sync` `PerCpu`, which the unbounded `Sync` impl allows (ROADMAP §10.3, F017, F039); the set-once check is a `debug_assert!` (ROADMAP §10.2, F137) |
 | I23 | Barrier: every request before it completes before any after it starts. Flush: completed writes are durable (§10.2) | `block.rs` | documented | No: the block queue merges a request across any queued fence but the lowest and can reorder overlapping writes, virtio-blk completes a `Barrier` before earlier requests and sends a `Flush` before earlier writes complete, and a cache flush misses in-flight writeback (ROADMAP §10.11, F043) |
 | I24 | vibefs never overwrites a live block before the newer superblock is durable ([VIBEFS.md](VIBEFS.md)) | vibefs commit | documented | No after a failed commit: the in-memory generation advances before the superblock write, so the retry writes the slot that holds the only valid superblock (ROADMAP §12.5, F050). Otherwise it rests on on-disk refcounts that v1's mount does not check (F061), which v2 checks as it reads each block (VIBEFS.md §15; ROADMAP §14.8) |
-| I25 | Per-thread CPU state is saved and restored in full (§7.5) | `syscall_init::on_switch`, `thread::switch_context` | documented | No: `FS_BASE` is not switched (ROADMAP §13.1, F022); `fork` and `execve` get the FPU state wrong (ROADMAP §10.6, F069) |
+| I25 | Per-thread CPU state is saved and restored in full (§7.5) | `syscall_init::on_switch`, `thread::switch_context` | documented | No: `FS_BASE` is not switched (ROADMAP §13.1, F022); `fork` and `execve` get the FPU state wrong (ROADMAP §10.6, F069); no entry from ring 3 saves a complete user frame, so the user GPRs of a thread preempted in ring 3 are at no known place, and a context whose RCX and R11 differ from its RIP and RFLAGS cannot be returned to (ROADMAP §10.6) |
 | I26 | Every kernel stack has a guard page (§2.4) | `kva_init::alloc_guarded_stack` | documented | No: boot runs on Limine's unguarded stack (ROADMAP §10.6, F072) |
 | I27 | `vibeos-core` does not panic on data (§2.5) | clippy deny on `unwrap`, `expect`, `panic` | enforced in part | No: indexing and overflow checks panic on crafted input; §2.5 lists the cases and their ROADMAP lines |
 | I28 | A line the harness takes as the kernel's is framed, and no user byte can produce the frame (§2.6) | `serial::Serial`, `console_init::write` | documented | No: nothing is framed, and the harness matches every line, so ring 3 can print a contract line (`/bin/sh` prints `shell ready`) or fail a run with `panicked at` (ROADMAP §10.2) |
@@ -696,14 +696,15 @@ every IF=0 stretch has a reason from the list below and a bound.
    bound whatever the host's load. Rule; not yet enforced: ROADMAP §12.6 turns the check on, and I31
    lists the violations.
 3. A syscall body runs with IF=1. After `swapgs`, the entry stub copies the user RSP from
-   `PerCpu.syscall_scratch` into its frame on the thread's kernel stack, then runs `sti`; from
-   there on the scratch belongs to whichever thread next enters on this CPU. The exit stub runs
-   `cli` before it writes the scratch again (§5.10 rule 4). A fault or trap taken at CPL 3 runs its
-   body with IF=1 once its frame is on the thread's kernel stack with the fault's syndrome saved in
-   it (§5.10 rule 9), and so does a `#PF` taken at CPL 0 inside a user-memory accessor once ROADMAP
-   §12.2 lets it sleep, since the code it interrupted ran with IF=1; a hardware interrupt's top half
-   keeps IF=0. Rule; not yet enforced: FMASK clears IF at `syscall` and nothing sets it again, so a
-   syscall body runs with IF=0 until it blocks (ROADMAP §10.6).
+   `PerCpu.syscall_scratch` into its frame on the thread's kernel stack, then runs `sti`; from there
+   on the scratch belongs to whichever thread next enters on this CPU. The exit stub runs `cli`
+   before it loads the user RSP (§5.10 rule 4), and keeps its state in the thread's user frame
+   (§5.10), not in the scratch. A fault or trap taken at CPL 3 runs its body with IF=1 once its
+   frame is on the thread's kernel stack with the fault's syndrome saved in it (§5.10 rule 9), and
+   so does a `#PF` taken at CPL 0 inside a user-memory accessor once ROADMAP §12.2 lets it sleep,
+   since the code it interrupted ran with IF=1; a hardware interrupt's top half keeps IF=0. Rule;
+   not yet enforced: FMASK clears IF at `syscall` and nothing sets it again, so a syscall body runs
+   with IF=0 until it blocks (ROADMAP §10.6).
 4. Code that may sleep (waits on a wait queue, takes a sleeping lock (§2.1), allocates with
    reclaim (ROADMAP §12.6), or copies to or from user memory once ROADMAP §12.2 lets a user-copy
    fault sleep) runs with IF=1, no spinlock held, and outside any RCU read-side section
@@ -1945,6 +1946,36 @@ then holds the user base after a `swapgs`, or the `PerCpu` address after `per_cp
 code does not meet yet says "Rule; not yet enforced", names the ROADMAP line that lands it, and then
 describes the current code.
 
+Every entry from user mode saves the thread's user frame at the top of its kernel stack before it
+calls a body: the syscall entry, every generated stub for a CPL-3 frame (rule 1), and on aarch64
+`svc` and every exception taken from EL0 (ROADMAP §11.6). On x86_64 the frame is the first 21 words
+of Linux's `struct user_regs_struct` (`arch/x86/include/asm/user_64.h`), the register set
+`NT_PRSTATUS` and `PTRACE_GETREGS` use: `r15`, `r14`, `r13`, `r12`, `rbp`, `rbx`, `r11`, `r10`,
+`r9`, `r8`, `rax`, `rcx`, `rdx`, `rsi`, `rdi`, `orig_rax`, then `rip`, `cs`, `rflags`, `rsp`, and
+`ss`, which is the frame `iretq` pops. The syscall entry stores RCX in both the `rcx` and `rip`
+slots, R11 in both `r11` and `rflags`, the user selectors in `cs` and `ss`, and the syscall number
+in `orig_rax`; every other entry leaves -1 in `orig_rax`, after it has passed the body any error
+code the CPU pushed into that slot, as Linux does. On aarch64 the frame is Linux's
+`struct user_pt_regs` (`arch/arm64/include/uapi/asm/ptrace.h`: `x0`-`x30`, then `sp` from SP_EL0,
+`pc` from ELR_EL1, and `pstate` from SPSR_EL1), followed by `orig_x0` and the syscall number, -1 on
+an entry that is not a syscall. Everything that reads or writes a user context uses this frame,
+through the seam's user-context trait ([§11.1](#111-the-seam)): signal delivery and `rt_sigreturn`,
+`ptrace`, core dumps, `fork`, `execve`, syscall restart, and the ROADMAP §10.7 forensics; a spawned
+or forked thread's first return to user mode is the ordinary exit over a frame its creator wrote.
+The x86_64 syscall exit stores the return value in the `rax` slot and uses `sysretq` only when
+`rip` equals `rcx`, `rflags` equals `r11`, `cs` and `ss` are the user selectors, `rip` is below
+`USER_MAP_END`, and RF, TF, and VM are clear in `rflags`, which is Linux's test; otherwise it
+restores every register from the frame and runs `iretq` on the frame's tail. A non-canonical `rip`
+reaches neither instruction: it becomes `SIGSEGV` (AGENTS.md rule 1; ROADMAP §10.6). SYSRET loads
+RIP from RCX and RFLAGS from R11, so only a context that `syscall` created can take it, and with TF
+set it traps before the next user instruction runs, where `iretq` lets that instruction run first.
+A syscall that must restart sets `rax` from `orig_rax` and moves `rip` back 2 bytes, or on aarch64
+sets `x0` from `orig_x0` and moves `pc` back 4, as Linux does. Rule; not yet enforced: ROADMAP
+§10.6. The syscall entry saves 16 words with no RIP, RFLAGS, CS, SS, or syscall-number slot, and
+its exit reads RIP and RFLAGS from the RCX and R11 slots, so a context whose RCX and R11 differ from
+its RIP and RFLAGS cannot be returned to; an `x86-interrupt` handler saves only the registers it
+clobbers; and `enter_user_full` takes a second format, `UserRegs`.
+
 | Point | CPL, stack | GS | IF | AC |
 |-------|------------|----|----|----|
 | `vibeos_syscall_entry`, before its `swapgs` | 0, user RSP | user | 0 (FMASK) | 0 (FMASK) |
@@ -1979,14 +2010,17 @@ describes the current code.
    (F007); the IST handlers decide from CS.RPL. The sign test fails once FSGSBASE lets userspace
    write a kernel-half GS base. Planned (ROADMAP §18.3, F133): with FSGSBASE on, IST entry saves `GS_BASE` with `rdgsbase`, loads this CPU's
    `PerCpu` pointer, and restores the saved value on exit.
-4. IF=0 from the first instruction of a return-to-user sequence to its `sysretq` or `iretq`:
-   `PerCpu.syscall_scratch` holds the return value and the `iretq` frame per CPU, not per thread,
-   and the GS base is the user's for part of each sequence. Required: the syscall exit runs `cli` right after
-   `call vibeos_syscall_stub`; `enter_user` and `enter_user_full` run `cli` before `mov gs`; each
-   checks IF=0 in debug builds; `iretq` restores ring 3's IF from the frame. Rule; not yet enforced:
-   ROADMAP §10.6 (F001, F006). The syscall exit has no `cli`, and `console_init::wait_key`
-   returns with IF=1 from its `sti; hlt` (F001); `enter_user_full` runs with IF=1 (F006);
-   `syscall_init::run_user` runs `cli` before `enter_user`.
+4. IF=0 from the first instruction of a return-to-user sequence to its `sysretq` or `iretq`: the
+   sequence loads the user RSP before its last instruction, and the GS base is the user's for part
+   of it. The exit keeps its own state in the thread's user frame (above), never in per-CPU scratch:
+   `PerCpu.syscall_scratch` holds only the user RSP between `syscall` and the entry's stack switch,
+   as in Linux. Required: the syscall exit runs `cli` right after `call vibeos_syscall_stub`;
+   `enter_user` and `enter_user_full` run `cli` before `mov gs`; each checks IF=0 in debug builds;
+   `iretq` restores ring 3's IF from the frame. Rule; not yet enforced: ROADMAP §10.6 (F001, F006).
+   The syscall exit has no `cli`, and `console_init::wait_key` returns with IF=1 from its `sti; hlt`
+   (F001); `enter_user_full` runs with IF=1 (F006); `syscall_init::run_user` runs `cli` before
+   `enter_user`. The syscall exit also stages the return value and the `iretq` frame in
+   `PerCpu.syscall_scratch`, per CPU, not per thread (ROADMAP §10.6, the user-frame box).
 5. Every interrupt and exception entry clears RFLAGS.AC before any other code: an interrupt gate
    clears IF and TF but not AC, and ring 3 can set AC with `popf`. The syscall entry clears AC
    through FMASK (bit 18). Rule; not yet enforced: ROADMAP §10.6 (F088); no interrupt or exception
@@ -2360,8 +2394,11 @@ Contents (`src/per_cpu.rs`):
 - `ready`, the flag an AP sets last in bring-up ([section 7.4](#74-ap-bring-up-sequence))
 - `kernel_rsp0` and `as_cr3`, which the context switch updates; `tss`, through which it writes TSS.RSP0; and `fallback_rsp0`, the RSP0 it uses for a thread without `Tcb.stack` (below)
 - `syscall_scratch`: the user RSP, the syscall return value, and the `iretq` RIP, RFLAGS, and RSP.
-  It is per CPU, not per thread, so it is valid only while IF=0. The syscall exit breaks this: it runs without a
-  `cli`, and a console `read` that waited in `sti; hlt` returns to it with IF=1 (ROADMAP §10.6, F001).
+  It is per CPU, not per thread, so it is valid only while IF=0. The syscall exit breaks this: it
+  runs without a `cli`, and a console `read` that waited in `sti; hlt` returns to it with IF=1
+  (ROADMAP §10.6, F001). Planned (ROADMAP §10.6): it shrinks to one word, the user RSP between
+  `syscall` and the entry's stack switch; the exit keeps the return value and its `iretq` frame in
+  the thread's user frame ([section 5.10](#510-privilege-transitions)).
 
 `per_cpu_init::init_bsp` allocates one `PerCpu` per MADT CPU in a heap array, not a static array
 sized by a `MAX_CPUS` guess, and installs the BSP at slot 0; each AP installs its own slot with
@@ -2409,7 +2446,7 @@ for every thread, such as `CR4.TSD` or `SCTLR_EL1.UCT`, is a row of §11.4's tab
 | `rbx`, `rbp`, `r12`–`r15`, RSP, RIP | `Tcb.context` (`CpuContext`) | `switch_context` | switched |
 | RFLAGS | `CpuContext.rflags`; IF comes from `irq_nest` (`apply_if_on_resume`) | `switch_context` | switched |
 | `irq_nest` | `Tcb.irq_nest`, swapped with `PerCpu.irq_nest` | `switch_now` | switched |
-| user GPRs, RIP, RSP, RFLAGS | the thread's kernel stack: the 128-byte syscall frame or the interrupt frame | the RSP0 switch, which gives each thread its own entry stack | switched |
+| user GPRs, RIP, RSP, RFLAGS, CS, SS, and the original syscall number | the thread's user frame at the top of `Tcb.stack` ([section 5.10](#510-privilege-transitions)), saved by every entry from ring 3 | the RSP0 switch, which gives each thread its own entry stack | switched. Rule; not yet enforced: ROADMAP §10.6. The syscall entry saves a 16-word frame whose `rcx` and `r11` slots double as RIP and RFLAGS, and an interrupt or exception entry saves only what its `x86-interrupt` handler clobbers, so a thread preempted in ring 3 has `rbx`, `rbp`, and `r12`-`r15` in spill slots the compiler chose |
 | x87, SSE, MXCSR | `Tcb.fpu`, a 512-byte FXSAVE image | `switch_fpu` in `on_switch` (`fxsave64` the old thread, `fxrstor64` the new) on every switch; the syscall entry and exit also save and restore it | switched. `fork` gives the child `fpu_template()`, not the parent's image, and `execve` keeps the old image's registers (ROADMAP §10.6, F069). The template is captured after `fninit`, which resets only the x87 control, status, and tag words, so MXCSR and the XMM and ST registers hold whatever the loader left (ROADMAP §13.10, F129). FXSAVE covers no XSAVE state; `CR4.OSXSAVE`, `CR4.PKE`, and `EFER.FFXSR` are assumed clear and never asserted (ROADMAP §11.1, F130). |
 | RSP0 | TSS.RSP0 and `PerCpu.kernel_rsp0`: the top of `Tcb.stack`, or `fallback_rsp0` for the bootstrap thread | `set_rsp0_for` in `on_switch` | switched |
 | CR3 | `Tcb.as_cr3` (0 means the kernel PML4) | `switch_cr3_for` in `on_switch`, skipped when unchanged | switched; no PCID (ROADMAP §18.3 adds it with §7.9's flush generation) |
@@ -2419,7 +2456,7 @@ for every thread, such as `CR4.TSD` or `SCTLR_EL1.UCT`, is a row of §11.4's tab
 | DR6 | the thread's virtual DR6 | not switched: the `#DB` body writes the thread's copy from the DR6 its entry saved (§5.10) | not built: ROADMAP §17.4 |
 | aarch64: `DBGBVR`/`DBGBCR`, `DBGWVR`/`DBGWCR`, `MDSCR_EL1.MDE` | the thread's decoded debug slots | the switch, by the Debug state paragraph below | not built: ROADMAP §17.4 |
 | aarch64: `MDSCR_EL1.SS` | the thread's step flag, with `SPSR.SS` in its frame | set at the return to EL0 and cleared at entry from EL0, by the Debug state paragraph below | not built: ROADMAP §17.4 |
-| `PerCpu.syscall_scratch` | per CPU | not switched | valid only while IF=0 (above; F001) |
+| `PerCpu.syscall_scratch` | per CPU | not switched | valid only while IF=0 (above; F001); one word, the user RSP at entry, once ROADMAP §10.6 keeps the exit's state in the user frame |
 
 **Debug state.** One owner per build holds the hardware breakpoint and watchpoint slots and their
 enables: DR0-DR3 and DR7 on x86_64, and on aarch64 the `DBGBVR`/`DBGBCR` and `DBGWVR`/`DBGWCR` pairs
@@ -3535,9 +3572,9 @@ two disagree (ROADMAP, How to read this). This section is the contract for the s
 What is architecture-specific: exception entry and exit, the context switch, the page-table format
 and its flags, TLB and cache maintenance, the interrupt controller and vector map, the timer and cycle
 counter, the barrier helpers (`dma_wmb`, `dma_rmb`, `dma_mb`), MMIO accessors, the per-CPU base
-register, the syscall instruction and the user register frame, the user-memory access primitives, FP
-and SIMD state, the user TLS register, AP bring-up, and the machine state the boot handshake hands
-over. Everything else is shared. The syscall table's semantics are shared too; only numbers and
+register, the syscall instruction and the user frame's layout ([§5.10](#510-privilege-transitions)),
+the user-memory access primitives, FP and SIMD state, the user TLS register, AP bring-up, and the
+machine state the boot handshake hands over. Everything else is shared. The syscall table's semantics are shared too; only numbers and
 argument order differ per architecture (ROADMAP §10.5), and user-visible structures keep their
 meaning while their layouts follow Linux's per-architecture uapi (ROADMAP §13.10).
 

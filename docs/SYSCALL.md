@@ -51,16 +51,29 @@ entry. The fast path is `sysretq`. The exit takes `iretq` when the saved
 RIP is non-canonical or `RF` or `VM` is set in RFLAGS; a spawned or forked process's
 first entry also uses `iretq` (`enter_user_full`).
 
+The rule ROADMAP §10.6 implements (DESIGN §5.10): every entry from ring 3
+saves a complete user frame, in the order of Linux's `user_regs_struct`, and
+the syscall exit uses `sysretq` only when the saved RIP equals the saved
+RCX, the saved RFLAGS equals the saved R11, CS and SS are the user
+selectors, RIP is below `USER_MAP_END`, and RF, TF, and VM are clear;
+otherwise it restores every register from the frame and uses `iretq`, as
+Linux does. A restartable syscall resumes by reloading `rax` from `orig_rax`
+and moving RIP back 2 bytes. Today the frame keeps RIP and RFLAGS only in
+the RCX and R11 slots, so a context whose RCX and R11 differ from them
+cannot be returned to.
+
 The body runs with IF=1 (DESIGN §2.9 rule 3): the entry stub moves the user
 RSP out of the per-CPU scratch into its frame and then runs `sti`. Today it
 does not, and FMASK's IF=0 lasts until the body blocks (ROADMAP §10.6).
 
 From the return of `vibeos_syscall_stub` to `sysretq` or `iretq`, the exit
 path needs IF=0: it stores the return value in `gs:[retval]`, stages the
-`iretq` frame in `gs:[iret_*]`, and loads the user RSP before `swapgs`. A
-console `read` breaks this: it returns through `console_init::wait_key`,
-which leaves IF=1, and nothing clears IF before the exit (F001; ROADMAP
-§10.6).
+`iretq` frame in `gs:[iret_*]`, and loads the user RSP before `swapgs`.
+ROADMAP §10.6 moves the return value and the `iretq` frame into the thread's
+user frame, which leaves the per-CPU scratch holding only the user RSP
+between `syscall` and the stack switch. A console `read` breaks this: it
+returns through `console_init::wait_key`, which leaves IF=1, and nothing
+clears IF before the exit (F001; ROADMAP §10.6).
 
 A non-canonical saved RIP reaches `iretq`, which raises `#GP` at CPL 0
 after `swapgs` has loaded the user GS base; on KVM and hardware the kernel
