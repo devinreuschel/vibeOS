@@ -415,7 +415,7 @@ The lock, the serviced spins, and the two cells:
 |------|-----|
 | `SpinMutex` | Shared across CPUs. IRQ-aware. Ranked (§2.1): `lock` refuses a lock whose rank, or a later one, this CPU already holds, and `lock_nested` takes a second lock of a held rank (below). Its spin is a serviced spin. |
 | Serviced spin | `SpinMutex::lock`, `ipi_init::wait_acks`, and the call-function slot wait each call `ipi_init::service_incoming` on every iteration, so a CPU that waits on another with IF=0 still acknowledges shootdowns and runs call-function work ([§2.9](#29-preemption-and-interrupt-state) rule 2). That work runs inside whatever the spinning CPU holds, so, like an NMI, `#MC`, or CPL-0 `#DB` handler, it takes no lock ([§2.2](#22-interrupt-handler-rules)'s last row). Planned (ROADMAP §10.7, F135): `service_incoming` first reads this CPU's stop request word, and STOP runs §2.5's stop routine before any slot is served, so a serviced spin stops for a panic with no interrupt, on either architecture and GIC version. On aarch64 a serviced spin never executes WFE and waits with `core::hint::spin_loop`: a masked interrupt is a wake-up event for WFI but not for WFE (Arm ARM DDI 0487, the WFE and WFI wake-up events), so a WFE spinner with IRQs masked neither takes an SGI nor wakes to poll. A line that puts WFE in a serviced spin also makes every publisher of serviced work, the stop word included, issue `sev` after its Release store, and says so. |
-| `IrqCell` | IRQ-off exclusive access: `with` takes IRQs off, panics on same-CPU re-entry, and spins while another CPU holds it. Used for CPU-local and boot-only state and as an unranked cross-CPU lock (among them `proc_init::TABLE`, `kva_init::KVA` and `DEFERRED`, `work_init::ST`, `irq_init::IRQ`, `file_init::CWD`, and `log_init::LOG`). Its `Sync` impl has no `T: Send` bound, and `force_unlock` is a safe fn (ROADMAP §10.3, F017). Its spin does not service IPIs, so a cross-CPU cell held across a wait on another CPU can stall a shootdown. Planned (ROADMAP §10.3, F108): every cross-CPU `IrqCell` but the log ring becomes a ranked `SpinMutex`; the log ring's holders never wait on another CPU (§2.5), and ROADMAP §19.5 replaces it. |
+| `IrqCell` | IRQ-off exclusive access: `with` takes IRQs off, panics on same-CPU re-entry, and spins while another CPU holds it. Used for CPU-local and boot-only state and as an unranked cross-CPU lock (among them `proc_init::TABLE`, `kva_init::KVA` and `DEFERRED`, `work_init::ST`, `irq_init::IRQ`, `file_init::CWD`, and `log_init::LOG`). Its `Sync` impl has no `T: Send` bound, and `force_unlock` is a safe fn (ROADMAP §10.3, F017). Its spin does not service IPIs, so a cross-CPU cell held across a wait on another CPU can stall a shootdown. Planned (ROADMAP §10.3, F108): every cross-CPU `IrqCell` but the log ring becomes a ranked `SpinMutex`; the log ring's holders never wait on another CPU (§2.5), and ROADMAP §19.5 replaces it with §2.5's lockless ring. |
 | `BootCell` | Write once before `smp: done`, then shared `&T`. The set-once check is a `debug_assert!` (ROADMAP §10.2, F137), and the `Sync` impl has no `T: Send + Sync` bound, so `per_cpu_init::CPUS` shares the non-`Sync` `PerCpu` (ROADMAP §10.3, F017, F039). |
 
 Two locks of one rank nest only through `lock_nested`, in a pair order the call site's comment
@@ -529,6 +529,7 @@ Binding order (do not invert):
    leaves the writer running.
 2. Re-initialize serial from scratch (the panic may be *in* the serial path).
 3. Print location and message; dump registers, the current thread, and the last N log records.
+   From ROADMAP §19.5, every record serial has not printed goes out first (the log contract below).
 4. Symbolized backtrace when frame pointers exist (in-image sorted table, binary search, no alloc).
 5. `cli; hlt` loop, or QEMU `isa-debug-exit` under the `panic_exit` test feature.
 
@@ -538,7 +539,8 @@ halt IPI without taking its TAS (force-unlock if the panicking CPU held it).
 
 Log ring (ROADMAP §5.5):
 
-- 256 records of up to 96 message bytes; a wrap drops the oldest record.
+- 256 records of up to 96 message bytes; a wrap drops the oldest record and counts it, and the panic
+  dump prints the count (`last N (M dropped)`).
 - Compile-time maximum level: `trace` in debug builds, `debug` in release. Runtime filter: an
   `AtomicU8`, default `info`.
 - The panic dump prints the last 24 records.
@@ -548,8 +550,41 @@ Log ring (ROADMAP §5.5):
   cannot interleave with a preempting thread.
 - `dmesg` prints through a plain serial path that does not re-capture.
 - Host tests cover overflow, filtering, and symbol lookup.
-- One global IRQ-safe ring and a serial try-lock sink. Planned: a log record reaches serial whole
-  (ROADMAP §10.2, F138); per-CPU buffers drained by a printer thread (ROADMAP §19.5).
+- One global IRQ-safe ring and a serial try-lock sink. The sink drops its copy of a record when
+  another CPU holds the TX lock, and `log_fmt` drops a record its CPU emits while already inside
+  `log_fmt`; neither drop is counted. Planned: a log record reaches serial whole (ROADMAP §10.2,
+  F138); the log contract below (ROADMAP §19.5).
+
+Planned (ROADMAP §19.5), the log contract:
+
+- One store: a lockless ring of fixed-size slots, each with a state word. A writer takes the
+  record's sequence number from one 64-bit counter with a `fetch_add`, claims slot `seq mod N` with
+  a compare-and-swap on its state word, fills it, and commits it with a Release store; a writer that
+  finds its slot still being written drops its record and counts it. A reader copies a slot and
+  checks its state word before and after, as a seqlock reader does. So any context may append, NMI
+  and `#MC` included, and the ring is readable after a panic with no lock. A record carries its
+  sequence number, CPU id, level, and timestamp.
+- One printer thread per console prints records in sequence order, so an emitter never waits for
+  the UART. Where records were overwritten or dropped before it reached them, it prints
+  `vibeOS: log: N records dropped`, and `/dev/kmsg` returns `EPIPE` there (ROADMAP §13.9). Until a
+  console's printer thread runs, records print synchronously as they are appended; after `HALTING`
+  only the dump owner prints, synchronously, through the owner write (step 1).
+- `marker!` writes its line to serial under one TX hold before it returns, then appends its record
+  marked printed on serial. The mark is per console, so the framebuffer printer still prints it.
+  Markers therefore keep program order among themselves whatever the printer does; a `klog!` record
+  the serial printer has not reached yet can print after a later marker.
+- An emitter in NMI or `#MC` context only appends and takes no console lock (§2.2); its records
+  print when a printer reaches them.
+- The panic dump first prints, through the owner write, every record serial has not printed.
+
+Why: per-CPU buffers have no total order without a timestamp merge, `/dev/kmsg` exposes one
+sequence number per record, and ROADMAP §25.5 logs from NMI context, where the `IrqCell` ring panics
+on re-entry. Linux's printk ended in the same shape: a lockless ring from 5.10, with its per-CPU
+safe and NMI buffers removed in 5.15. Rejected: per-CPU staging drained by a printer, which has no
+total order; printing every record synchronously, which at 115,200 baud (about 11.5 KB/s) stalls
+every emitter; markers through the printer, which lose a marker whose CPU then hangs and make the
+harness's order depend on scheduling; and Linux's variable-length descriptor and data rings, which
+96-byte records do not need and which loom models less easily.
 
 Symbols come from a two-pass link (Makefile `KERNEL_VARIANT`): `nm` output from the first link fills
 an in-image `.rodata` table (`KSYMS`) that the second link builds in. Rule: every function has the same address
@@ -594,7 +629,9 @@ markers are asserted by the e2e harness in order. Adding a marker means updating
 [section 8.3](#83-end-to-end) in the same commit.
 
 `marker!` for contract lines (never filtered, always captured); `klog!` for everything else;
-`PlainSerial` only for `dmesg` and panic dumps.
+`PlainSerial` only for `dmesg` and panic dumps. `marker!` writes serial before it returns; from
+ROADMAP §19.5 a `klog!` line reaches serial when a printer thread gets to it
+([§2.5](#25-panic-policy)).
 
 ```
 vibeOS: serial online
@@ -2682,8 +2719,8 @@ The global lock order is in [section 2.1](#21-lock-order) and the one-spinlock r
   writes. The harness then misses a contract line split that way. Planned (ROADMAP §10.2, F138):
   each line is formatted, newline included, into one buffer and written under one TX hold.
 - klog records go to one global IRQ-safe log ring and to a serial sink that only try-locks TX.
-  Per-CPU serial capture assembles serial output into lines for the ring. Per-CPU buffers with a
-  printer thread are planned (ROADMAP §19.5).
+  Per-CPU serial capture assembles serial output into lines for the ring. Planned (ROADMAP §19.5):
+  one lockless ring any context may append to, and a printer thread per console (§2.5).
 - The global SCHED lock, one `SpinMutex` on the block cache, one VFS lock over lookups and
   namespace changes (§2.1), the log-ring TAS, and virtio-blk bounce copies are known scale limits;
   see ROADMAP §19.4, §19.5, and §19.8. So is the one bottom-half thread for every threaded vector,
