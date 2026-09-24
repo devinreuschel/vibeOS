@@ -1795,6 +1795,36 @@ still gives its memory back. With no eligible process the allocation fails with 
 fault is retried. Linux panics when nothing is killable; here nothing on this path panics (AGENTS.md
 rule 4).
 
+Where reclaim is not allowed, a failed allocation must not lose an obligation. An allocation that
+may not reclaim (rule 1) can fail at any time, driven by input alone, and its caller keeps what it
+owes without it:
+
+- Received data that cannot be buffered is dropped and counted, never half-processed. A TCP segment
+  dropped this way is answered with an acknowledgement that advertises a zero window, as Linux does,
+  so the sender probes instead of backing off its retransmission timer, and the window update after
+  the reader drains restarts it at once.
+- A driver that cannot refill a receive ring from its bottom half queues a refill item on an
+  ordinary workqueue worker, which allocates with reclaim and retries with backoff until the ring is
+  back above its low mark. A ring below that mark always has a refill pending, since an empty ring
+  raises no interrupt that would retry. This is Linux virtio-net's `refill_work`.
+- A timer callback that cannot allocate what a pending obligation needs re-arms itself instead of
+  returning with nothing armed: after 500 ms for a retransmission, a zero-window probe, or a
+  keepalive (Linux's `TCP_RESOURCE_PROBE_INTERVAL`), and after 200 ms for an acknowledgement
+  (`TCP_DELACK_MAX`).
+- Received data that a protocol has acknowledged cumulatively, and sent data not yet acknowledged,
+  are never freed to relieve memory. Under pressure a receive queue is collapsed into fewer, fuller
+  buffers, and the out-of-order queue, which no cumulative acknowledgement covers, may be pruned,
+  reneging any block it had selectively acknowledged, as RFC 2018 §8 allows. These are Linux's
+  `tcp_collapse` and `tcp_prune_ofo_queue`.
+
+Why: each obligation has one owner, and nothing else retries it. An empty receive ring raises no
+interrupt, so a refill left for the next interrupt never runs, and the queue, with every flow its
+hash sends there, is dead until reboot. A retransmit timer is its connection's only liveness once
+the peer's acknowledgement is lost. Freeing acknowledged data hands the reader a stream with a hole
+and no error. Rejected: a reserve large enough that these allocations never fail, since untrusted
+input sets the demand; a refill only at the next interrupt; and reclaim in bottom halves, which
+rule 4 forbids.
+
 An operation past its point of no return cannot unwind what it built, so it makes every allocation it
 needs before that point and only releases after it:
 
