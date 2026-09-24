@@ -1650,8 +1650,13 @@ scanout is a later polish pass; double buffering is also parked (ROADMAP §5.1).
   there.
 - Frames and page-table pages that a PTE change drops go into a per-operation gather, Linux's
   `mmu_gather` shape. The gather owns them (`Frames` or `FrameRef`, §4.2, §4.6) and releases them
-  only after the invalidation round that covers the change completes. Planned (ROADMAP §12.3): user
-  unmaps use it; `kva_init::unmap_shootdown` already frees its frames after `wait_acks`.
+  only after the invalidation round that covers the change completes. It holds at most 64 units, in
+  storage on the operation's kernel stack, and never allocates. When it is full, the walk records
+  its position as a virtual address, drops the page-table lock, completes a round for the units it
+  holds (with §7.9's freed-tables flag when a page-table page is among them), releases them, and goes
+  on from its position, rereading each PTE there. So an operation sends one round for every 64 units
+  it drops, and freeing memory never needs memory (§4.4). Planned (ROADMAP §12.3): user unmaps use
+  it; `kva_init::unmap_shootdown` already frees its frames after `wait_acks`.
 - A page's dirty state lives in its PTEs as well as in the page. A page counts as clean only after
   every PTE that maps it has been write-protected or had its dirty bit cleared, each old dirty bit
   has been read by atomic exchange through the ROADMAP §10.3 page-table seam and folded into the
@@ -1874,6 +1879,17 @@ needs before that point and only releases after it:
   unlinked file's blocks at its last close, runs on a workqueue worker. Rejected: a reserve set
   aside at boot for each teardown path, in the shape of Linux's mempool, whose bound would scale
   with the process table.
+
+A path that frees memory does not need memory to finish. `munmap` and a `MAP_FIXED` replacement
+make the allocations they may need, for a region split and the new region, before they change their
+first PTE; such an allocation may fail with `ENOMEM`, as on Linux, and leaves the mappings as they
+were. From its first PTE change on, a freeing path completes even if every allocation fails, because
+it collects what it drops in §4.3's gather, which never allocates. Exit and `execve` teardown,
+truncate's unmap, the OOM reaper, and reclaim's reverse-map unmap allocate nothing at all. Rejected:
+sizing the collection before the walk, since only the walk finds how much it drops, and for exit
+that is the resident memory that has run short; and letting the gather grow by allocations that
+may fail, as Linux's `mmu_gather` does, since under the page-table spinlock such an allocation is in
+the atomic class above and would draw on the reserve that the threads freeing memory need.
 
 A kernel thread or work item has no caller either, a release deferred to one included. When one of
 its allocations fails, it records the error where a later call reports it, retries with a named
