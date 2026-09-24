@@ -17,9 +17,9 @@ Index: [DESIGN.md](DESIGN.md) §1.4. Landed: [ROADMAP.md](ROADMAP.md) §9.3–§
 except the boxes the kernel review reopened there. Open: ROADMAP §10.4
 (errno table, file tables, VFS dispatch), §10.5 (generated syscall table),
 §10.6 (entry paths and user memory), §10.7 (tracing), §10.10 (kernel stack
-reclaim and IPI acks), §10.11 (vibefs file size), §12.3 (copy-on-write
-`fork`), §13.1 (shared open files, `FS_BASE`), §13.7 (process-group `kill`
-and `wait4`), §13.8 (real-time signals), §13.9 (POSIX floor), §13.10
+reclaim and IPI acks), §10.11 (vibefs file size), §11.6 (`FS_BASE`), §12.3
+(copy-on-write `fork`), §13.1 (shared open files), §13.7 (process-group
+`kill` and `wait4`), §13.8 (real-time signals), §13.9 (POSIX floor), §13.10
 (`AT_RANDOM`).
 
 ---

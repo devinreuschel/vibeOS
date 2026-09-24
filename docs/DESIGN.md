@@ -42,7 +42,7 @@ halfway through.
 | 8 | [Testing](#8-testing) | Tiers, marker contract, QEMU flags, CI |
 | 9 | [Pitfalls](#9-pitfalls) | Bugs already paid for once |
 | 10 | [Block I/O](#10-block-io) | Requests, ordering and flush, ramdisk, virtio-blk, partitions, cache |
-| 11 | [Portability](#11-portability) | The architecture seam and its inventory, the aarch64 address space, adding a port, the EL0 and ring-3 environment |
+| 11 | [Portability](#11-portability) | The architecture seam and its inventory, the aarch64 address space, adding a port, the EL0 and ring-3 environment, aarch64 exceptions and privilege transitions |
 | 12 | [Device model](#12-device-model) | Devices, parents and suppliers, states, probe order, resources, removal |
 
 On-disk filesystem formats live in their own docs, not here ([§1.4](#14-documentation-rules)): [VIBEFS.md](VIBEFS.md) (vibefs **version 1**, CoW metadata + atomic superblock switch). Syscall ABI: [SYSCALL.md](SYSCALL.md). The Linux baseline, deliberate differences from it, and native interfaces: [LINUX.md](LINUX.md).
@@ -729,7 +729,7 @@ separate namespace.
 | I22 | A `BootCell` is set once, before SMP, and holds `Sync` data (§2.3) | `cell.rs` | documented | No: `per_cpu_init::CPUS` holds the non-`Sync` `PerCpu`, which the unbounded `Sync` impl allows (ROADMAP §10.3, F017, F039); the set-once check is a `debug_assert!` (ROADMAP §10.2, F137) |
 | I23 | The block layer orders only overlapping writes and a sequential zone's writes; a `Flush` makes durable every write completed before it was submitted, and a `Fua` write is durable when it completes (§10.2) | `block.rs` | documented | No: C-LOOK can reorder overlapping writes, a block-cache flush misses writeback already in flight, and `Fua` does not exist (ROADMAP §10.11, F043) |
 | I24 | vibefs never overwrites a live block before the newer superblock is durable, and from v2 reuses a block a commit freed only after the next commit's superblock is durable, so the older slot's tree stays whole; a v2 NOCOW file's data blocks are the one exception, overwritten in place ([VIBEFS.md](VIBEFS.md) §15) | vibefs commit | documented | No after a failed commit: the in-memory generation advances before the superblock write, so the retry writes the slot that holds the only valid superblock (ROADMAP §12.5, F050). Otherwise it rests on v1's on-disk refcounts, which its mount does not check (F061); v2 keeps no per-block count and checks its pointers and allocation map as it reads each block (VIBEFS.md §15; ROADMAP §14.8) |
-| I25 | Per-thread CPU state is saved and restored in full (§7.5) | `syscall_init::on_switch`, `thread::switch_context` | documented | No: `FS_BASE` is not switched (ROADMAP §13.1, F022); `fork` and `execve` get the FPU state wrong (ROADMAP §10.6, F069); no entry from ring 3 saves a complete user frame, so the user GPRs of a thread preempted in ring 3 are at no known place, and a context whose RCX and R11 differ from its RIP and RFLAGS cannot be returned to (ROADMAP §10.6) |
+| I25 | Per-thread CPU state is saved and restored in full (§7.5) | `syscall_init::on_switch`, `thread::switch_context` | documented | No: `FS_BASE` is not switched (ROADMAP §11.6, F022); `fork` and `execve` get the FPU state wrong (ROADMAP §10.6, F069); no entry from ring 3 saves a complete user frame, so the user GPRs of a thread preempted in ring 3 are at no known place, and a context whose RCX and R11 differ from its RIP and RFLAGS cannot be returned to (ROADMAP §10.6) |
 | I26 | Every kernel stack has a guard page (§2.4) | `kva_init::alloc_guarded_stack` | documented | No: boot runs on Limine's unguarded stack (ROADMAP §10.6, F072) |
 | I27 | `vibeos-core` does not panic on data (§2.5) | clippy deny on `unwrap`, `expect`, `panic` | enforced in part | No: indexing and overflow checks panic on crafted input; §2.5 lists the cases and their ROADMAP lines |
 | I28 | A line the harness takes as the kernel's is framed, and no user byte can produce the frame (§2.6) | `serial::Serial`, `console_init::write` | documented | No: nothing is framed, and the harness matches every line, so ring 3 can print a contract line (`/bin/sh` prints `shell ready`) or fail a run with `panicked at` (ROADMAP §10.2) |
@@ -774,8 +774,9 @@ Rule; not yet enforced. The violations, and the ROADMAP lines that fix them:
 ## 2.9 Preemption and interrupt state
 
 IF here means this CPU's maskable-interrupt enable: RFLAGS.IF on x86_64, and PSTATE.I clear on
-aarch64, where ROADMAP §25.5's pseudo-NMIs later make `InterruptGuard` mask by priority instead. The
-rules below hold on both architectures.
+aarch64, where the kernel masks and unmasks F with I
+([§11.5](#115-aarch64-exceptions-and-privilege-transitions)) and ROADMAP §25.5's pseudo-NMIs later
+make `InterruptGuard` mask by priority instead. The rules below hold on both architectures.
 
 The kernel is preemptible wherever IF=1. The timer tick and the reschedule IPI call
 `schedule_preempt`, which may switch away from any thread whose `irq_nest` is 0: kernel threads,
@@ -1827,7 +1828,9 @@ F016).
 # 5. Interrupts
 
 Descriptor tables, the vector map, and the migration from the legacy 8259 to the APIC. Handler rules
-are in [section 2.2](#22-interrupt-handler-rules); this is the mechanism.
+are in [section 2.2](#22-interrupt-handler-rules); this is the mechanism. §5.1 to §5.7 are x86_64's
+mechanism; aarch64's vector table, exception entry, and interrupt controller are
+[§11.5](#115-aarch64-exceptions-and-privilege-transitions)'s. §5.8 and §5.10 hold on both architectures.
 
 ## 5.1 GDT and TSS
 
@@ -2194,6 +2197,20 @@ clobbers; and `enter_user_full` takes a second format, `UserRegs`.
 | IST vector taken at CPL 3 (`#DB`, NMI, `#MC`) | 0, its IST stack, then the thread's kernel stack once the stub has copied its frame into the user frame (rule 3) | user until the stub's `swapgs` | 0; a `#DB` body then runs with IF=1 as any trap taken at CPL 3 does (§2.9 rule 3), an NMI's with IF=0 | ring 3's until the stub's `clac` (rule 5) |
 | vector exit to CPL 3 | 0, then 3 at `iretq` | user after `swapgs` | 0 until `iretq` restores ring 3's | `iretq` restores ring 3's |
 
+On aarch64 the boundary is between EL0 and the kernel's level, EL1 or EL2 with VHE. The table below
+is the required state; [§11.5](#115-aarch64-exceptions-and-privilege-transitions) gives the mechanism and the
+aarch64 counterparts of rules 1, 4, and 5. Rules 2 and 3 have none, because EL0 cannot reach the
+per-CPU base register, so nothing is swapped at the boundary. Rules 9 onward hold on both
+architectures. Planned (ROADMAP §11.3, §11.6): the aarch64 port does not exist.
+
+| Point | Level, stack | DAIF | PAN | `SP_EL0` |
+|-------|--------------|------|-----|----------|
+| `svc` or exception taken from EL0, until the stub has saved the user frame | EL1 (EL2 with VHE), `SP_ELx` at the top of the thread's kernel stack, where the last return to EL0 left it | all set by the exception; the stub clears `MDSCR_EL1.SS` for a thread being stepped before any DAIF bit is cleared (§7.5, Debug state) | set by the exception (`SCTLR_EL1.SPAN` clear) | the user SP, until the stub saves it and loads `current` ([§2.9](#29-preemption-and-interrupt-state) rule 5) |
+| the syscall body, and the body of a fault or trap taken from EL0 | the kernel's level, the thread's kernel stack | all clear once the frame is saved (§2.9 rule 3) | set; clear only inside the user-memory accessors | `current` |
+| IRQ taken from EL0, its top half | the kernel's level, the thread's kernel stack | D and A clear; I and F set | set | `current` |
+| exception or IRQ taken at the kernel's level | the kernel's level, the interrupted stack | all set by the exception; D and A clear once the frame is saved | set by the exception; the interrupted value returns with `SPSR_EL1` | `current`, untouched |
+| return to EL0, from the first write of `ELR_EL1`, `SPSR_EL1`, or `SP_EL0` to `eret` | the kernel's level, then EL0 at `eret` | all set, until `eret` loads EL0's from `SPSR_EL1`; `MDSCR_EL1.SS` set after the last exit-work check, for a thread being stepped only (§7.5) | EL0 does not use it | the user SP, restored from the frame |
+
 1. One entry stub per vector, owned by `arch/idt.rs` and generated from one table. The stub runs
    `cld`, `clac` when SMAP is live, the GS decision, and rule 9's syndrome save, calls a body
    function, and mirrors the GS decision on exit. `idt::set_handler` takes a body function, never a
@@ -2354,7 +2371,9 @@ clobbers; and `enter_user_full` takes a second format, `UserRegs`.
 
 Four hardware clocks, none of them good at everything. The PIT is slow and legacy but always there.
 The HPET is a reliable counter with no interrupts we want. The TSC is fast and fine-grained but needs
-calibration. The LAPIC timer is per-CPU and is what actually drives preemption.
+calibration. The LAPIC timer is per-CPU and is what actually drives preemption. Those four are
+x86_64's (§6.1 to §6.3); aarch64 has one clock, the generic timer (ROADMAP §11.3), and §6.4 to §6.6
+hold on both architectures.
 
 ## 6.1 Roles and constants
 
@@ -2527,7 +2546,10 @@ We bring up APs ourselves rather than using Limine's SMP request. Limine's versi
 trampoline, the INIT/SIPI dance, and the per-CPU handoff are the interesting part of the problem, and
 owning it is required for CPU offlining and for a future non-Limine boot path.
 
-Not a goal: CPU hotplug. CPUs are enumerated once at boot.
+Not a goal: CPU hotplug. CPUs are enumerated once at boot. §7.1 to §7.4 are x86_64's discovery and
+bring-up; aarch64 reads the device tree (ROADMAP §11.5) and starts cores through PSCI (ROADMAP §11.4),
+and §7.3 gains its aarch64 paragraph there. §7.5 to §7.10 hold on both architectures, and §7.5's
+per-thread table lists each one's state.
 
 ## 7.1 ACPI
 
@@ -2748,26 +2770,38 @@ but the re-entry flag does not, so the incoming thread can take IRQs and `with_c
 `thread_init::switch_now` switches a thread's CPU state inside `with_current_switch`: it swaps
 `irq_nest` between the TCB and `PerCpu`, calls `syscall_init::on_switch` (FPU, RSP0, CR3), then
 `thread::switch_context` (callee-saved GPRs, RSP, RIP, RFLAGS). AGENTS.md rule 8 governs adding
-user-visible CPU state; the commit that adds it also adds its row here. A control that holds one value
-for every thread, such as `CR4.TSD` or `SCTLR_EL1.UCT`, is a row of §11.4's table instead.
+user-visible CPU state; the commit that adds it also adds its row here. The Arch column names the
+port a row belongs to; the aarch64 rows are planned (ROADMAP Phase 11), and there `switch_now` calls
+that port's `on_switch` and `switch_context`. A control that holds one value for every thread, such
+as `CR4.TSD` or `SCTLR_EL1.UCT`, is a row of §11.4's table instead.
 
-| State | Saved in | Switched by | Status |
-|---|---|---|---|
-| `rbx`, `rbp`, `r12`–`r15`, RSP, RIP | `Tcb.context` (`CpuContext`) | `switch_context` | switched |
-| RFLAGS | `CpuContext.rflags`; IF comes from `irq_nest` (`apply_if_on_resume`) | `switch_context` | switched |
-| `irq_nest` | `Tcb.irq_nest`, swapped with `PerCpu.irq_nest` | `switch_now` | switched |
-| user GPRs, RIP, RSP, RFLAGS, CS, SS, and the original syscall number | the thread's user frame at the top of `Tcb.stack` ([section 5.10](#510-privilege-transitions)), saved by every entry from ring 3 | the RSP0 switch, which gives each thread its own entry stack | switched. Rule; not yet enforced: ROADMAP §10.6. The syscall entry saves a 16-word frame whose `rcx` and `r11` slots double as RIP and RFLAGS, and an interrupt or exception entry saves only what its `x86-interrupt` handler clobbers, so a thread preempted in ring 3 has `rbx`, `rbp`, and `r12`-`r15` in spill slots the compiler chose |
-| x87, SSE, MXCSR | `Tcb.fpu`, a 512-byte FXSAVE image | the FP binding below: `fxsave64` at the switch away from a thread whose state is live, `fxrstor64` in the return to ring 3 when the registers hold another thread's state | switched. Rule; not yet enforced: the binding lands in ROADMAP §10.6. Today `switch_fpu` in `on_switch` runs `fxsave64` for the old thread and `fxrstor64` for the new on every switch, and the syscall entry and exit also save and restore it. `fork` gives the child `fpu_template()`, not the parent's image, and `execve` keeps the old image's registers (ROADMAP §10.6, F069). The template is captured after `fninit`, which resets only the x87 control, status, and tag words, so MXCSR and the XMM and ST registers hold whatever the loader left (ROADMAP §10.6, F129). FXSAVE covers no XSAVE state; `CR4.OSXSAVE`, `CR4.PKE`, and `EFER.FFXSR` are assumed clear and never asserted (ROADMAP §11.1, F130). |
-| RSP0 | TSS.RSP0 and `PerCpu.kernel_rsp0`: the top of `Tcb.stack`, or `fallback_rsp0` for the bootstrap thread | `set_rsp0_for` in `on_switch` | switched |
-| CR3 | `Tcb.as_cr3` (0 means the kernel PML4) | `switch_cr3_for` in `on_switch`, skipped when unchanged | switched; no PCID (ROADMAP §18.3 adds it with §7.9's flush generation) |
-| FS_BASE (user TLS) | not saved | nothing | not switched. `enter_user`, `enter_user_full`, and `execve` write it; `force_kernel`'s `mov fs` zeroes it on every exit or kill; `fork` copies the live MSR, so a child can inherit another process's base (ROADMAP §13.1, F022). |
-| user GS base | not saved; always 0 | nothing | holds while no `ARCH_SET_GS` or FSGSBASE exists (ROADMAP §18.3); from then on it is per thread, and while the thread is in the kernel it is in `KERNEL_GS_BASE` whichever vector it entered by, IST vectors included ([section 5.10](#510-privilege-transitions) rule 3), where the switch away reads it |
-| DR0-DR3, DR7 | the thread's decoded debug slots, and the tracer's masked DR7 for `PEEKUSER` | the switch, by the Debug state paragraph below | not built: nothing arms them before ROADMAP §17.4 |
-| DR6 | the thread's virtual DR6 | not switched: the `#DB` body writes the thread's copy from the DR6 its entry saved (§5.10) | not built: ROADMAP §17.4 |
-| aarch64: `DBGBVR`/`DBGBCR`, `DBGWVR`/`DBGWCR`, `MDSCR_EL1.MDE` | the thread's decoded debug slots | the switch, by the Debug state paragraph below | not built: ROADMAP §17.4 |
-| aarch64: `MDSCR_EL1.SS` | the thread's step flag, with `SPSR.SS` in its frame | set at the return to EL0 and cleared at entry from EL0, by the Debug state paragraph below | not built: ROADMAP §17.4 |
-| DS, ES, FS, and GS selectors | the thread's own four, saved at the switch away | `on_switch`, which loads the incoming thread's four before it writes `FS_BASE` and `GS_BASE`, since a selector load can clear the matching base | Rule; not yet enforced: ROADMAP §10.6 ([section 5.1](#51-gdt-and-tss)). `enter_user` and `enter_user_full` load `0x1B` into all four and nothing saves them, so a selector ring 3 loads with `mov` is lost at the next switch |
-| `PerCpu.syscall_scratch` | per CPU | not switched | valid only while IF=0 (above; F001); one word, the user RSP at entry, once ROADMAP §10.6 keeps the exit's state in the user frame |
+| Arch | State | Saved in | Switched by | Status |
+|---|---|---|---|---|
+| x86_64 | `rbx`, `rbp`, `r12`–`r15`, RSP, RIP | `Tcb.context` (`CpuContext`) | `switch_context` | switched |
+| x86_64 | RFLAGS | `CpuContext.rflags`; IF comes from `irq_nest` (`apply_if_on_resume`) | `switch_context` | switched |
+| both | `irq_nest` | `Tcb.irq_nest`, swapped with `PerCpu.irq_nest` | `switch_now` | switched |
+| x86_64 | user GPRs, RIP, RSP, RFLAGS, CS, SS, and the original syscall number | the thread's user frame at the top of `Tcb.stack` ([section 5.10](#510-privilege-transitions)), saved by every entry from ring 3 | the RSP0 switch, which gives each thread its own entry stack | switched. Rule; not yet enforced: ROADMAP §10.6. The syscall entry saves a 16-word frame whose `rcx` and `r11` slots double as RIP and RFLAGS, and an interrupt or exception entry saves only what its `x86-interrupt` handler clobbers, so a thread preempted in ring 3 has `rbx`, `rbp`, and `r12`-`r15` in spill slots the compiler chose |
+| x86_64 | x87, SSE, MXCSR | `Tcb.fpu`, a 512-byte FXSAVE image | the FP binding below: `fxsave64` at the switch away from a thread whose state is live, `fxrstor64` in the return to ring 3 when the registers hold another thread's state | switched. Rule; not yet enforced: the binding lands in ROADMAP §10.6. Today `switch_fpu` in `on_switch` runs `fxsave64` for the old thread and `fxrstor64` for the new on every switch, and the syscall entry and exit also save and restore it. `fork` gives the child `fpu_template()`, not the parent's image, and `execve` keeps the old image's registers (ROADMAP §10.6, F069). The template is captured after `fninit`, which resets only the x87 control, status, and tag words, so MXCSR and the XMM and ST registers hold whatever the loader left (ROADMAP §10.6, F129). FXSAVE covers no XSAVE state; `CR4.OSXSAVE`, `CR4.PKE`, and `EFER.FFXSR` are assumed clear and never asserted (ROADMAP §11.1, F130). |
+| x86_64 | RSP0 | TSS.RSP0 and `PerCpu.kernel_rsp0`: the top of `Tcb.stack`, or `fallback_rsp0` for the bootstrap thread | `set_rsp0_for` in `on_switch` | switched |
+| x86_64 | CR3 | `Tcb.as_cr3` (0 means the kernel PML4) | `switch_cr3_for` in `on_switch`, skipped when unchanged | switched; no PCID (ROADMAP §18.3 adds it with §7.9's flush generation) |
+| x86_64 | FS_BASE (user TLS) | not saved | nothing | not switched. `enter_user`, `enter_user_full`, and `execve` write it; `force_kernel`'s `mov fs` zeroes it on every exit or kill; `fork` copies the live MSR, so a child can inherit another process's base (ROADMAP §11.6, F022). |
+| x86_64 | user GS base | not saved; always 0 | nothing | holds while no `ARCH_SET_GS` or FSGSBASE exists (ROADMAP §18.3); from then on it is per thread, and while the thread is in the kernel it is in `KERNEL_GS_BASE` whichever vector it entered by, IST vectors included ([section 5.10](#510-privilege-transitions) rule 3), where the switch away reads it |
+| x86_64 | DR0-DR3, DR7 | the thread's decoded debug slots, and the tracer's masked DR7 for `PEEKUSER` | the switch, by the Debug state paragraph below | not built: nothing arms them before ROADMAP §17.4 |
+| x86_64 | DR6 | the thread's virtual DR6 | not switched: the `#DB` body writes the thread's copy from the DR6 its entry saved (§5.10) | not built: ROADMAP §17.4 |
+| x86_64 | DS, ES, FS, and GS selectors | the thread's own four, saved at the switch away | `on_switch`, which loads the incoming thread's four before it writes `FS_BASE` and `GS_BASE`, since a selector load can clear the matching base | Rule; not yet enforced: ROADMAP §10.6 ([section 5.1](#51-gdt-and-tss)). `enter_user` and `enter_user_full` load `0x1B` into all four and nothing saves them, so a selector ring 3 loads with `mov` is lost at the next switch |
+| x86_64 | `PerCpu.syscall_scratch` | per CPU | not switched | valid only while IF=0 (above; F001); one word, the user RSP at entry, once ROADMAP §10.6 keeps the exit's state in the user frame |
+| aarch64 | `x19`-`x29`, SP, LR | `Tcb.context` | `switch_context` (ROADMAP §11.4) | not built |
+| aarch64 | DAIF.I and F | come from `irq_nest`, as on x86_64 | `switch_context` | not built |
+| aarch64 | user `x0`-`x30`, SP, PC, PSTATE, `orig_x0`, and the syscall number | the thread's user frame at the top of `Tcb.stack` ([section 5.10](#510-privilege-transitions)) | every entry from EL0 saves it, and each return to EL0 leaves `SP_ELx` at the top of the thread's stack for the next entry | not built: ROADMAP §11.6 |
+| aarch64 | `SP_EL0` | at EL0 the user stack pointer, saved in the user frame by every EL0 entry; at EL1 or EL2 the running thread's TCB pointer ([§2.9](#29-preemption-and-interrupt-state) rule 5) | the EL0 entry stub, the return to EL0, and the switch (ROADMAP §11.6) | not built |
+| aarch64 | V0-V31, FPCR, FPSR | `Tcb.fpu` | the FP binding below | not built: ROADMAP §11.6 |
+| aarch64 | `TPIDR_EL0` (user TLS) | the thread's saved TLS base, as for `FS_BASE` | `on_switch` saves it for an outgoing user thread and loads the incoming one's; EL0 writes it with `msr` at any time, so only the live register is current | not built: ROADMAP §11.6, which switches x86_64's `FS_BASE` in the same commit (F022) |
+| aarch64 | `TPIDRRO_EL0` | not saved; 0 | nothing: every CPU writes 0 at bring-up and nothing else writes it | EL0 can read it, so it never holds a kernel value |
+| aarch64 | `TTBR0_EL1` and its ASID | the address space | the `TTBR0` switch in `on_switch`, skipped when the address space is shared (ROADMAP §11.6) | not built; ASIDs from ROADMAP §11.2 |
+| aarch64 | `DBGBVR`/`DBGBCR`, `DBGWVR`/`DBGWCR`, `MDSCR_EL1.MDE` | the thread's decoded debug slots | the switch, by the Debug state paragraph below | not built: ROADMAP §17.4 |
+| aarch64 | `MDSCR_EL1.SS` | the thread's step flag, with `SPSR.SS` in its frame | set at the return to EL0 and cleared at entry from EL0, by the Debug state paragraph below | not built: ROADMAP §17.4 |
+| aarch64 | SVE and SME state | not saved | nothing | not per-thread: every CPU clears `CPACR_EL1.ZEN` and `SMEN`, so EL0 use gets `SIGILL` (ROADMAP §11.6); §23.1 adds their rows |
+| aarch64 | pointer-authentication keys, BTI, and MTE tag-check state | not saved | nothing | off in `SCTLR_EL1` until ROADMAP §18.9 (pointer authentication, BTI) and §18.4 (MTE), which add their rows |
 
 The FP binding is one rule on both architectures. A user thread owns FP state from creation:
 `Tcb.fpu` starts as the constant initial image (the psABI's FCW `0x037F` and MXCSR `0x1F80` with
@@ -4194,7 +4228,7 @@ per-architecture uapi (ROADMAP §13.10).
 |---|---|---|---|---|
 | Boot handover: the machine state the boot handshake hands over, normalized into `BootInfo` | trait | Limine base revision 3, long mode | Limine base revision 6, EL1, or EL2 with VHE | §10.3, §11.1 |
 | Early console | port module | 16550 on COM1 | PL011 | §11.1 |
-| Exception entry and exit | port module: generated entry code | one stub per IDT vector ([§5.10](#510-privilege-transitions) rule 1) | one 16-entry vector table | §10.6, §11.3 |
+| Exception entry and exit | port module: generated entry code | one stub per IDT vector ([§5.10](#510-privilege-transitions) rule 1) | one 16-entry vector table ([§11.5](#115-aarch64-exceptions-and-privilege-transitions)) | §10.6, §11.3 |
 | Trap decode | pure half: a trap to a portable trap kind | vector and error code | vector slot and `ESR_EL1` | §10.6, §11.3 |
 | Kernel stack-overflow report | port module | `#DF` on IST 1 (§5.1) | no IST: an exception at the kernel's level runs on the stack that overflowed | §11.3 |
 | Interrupt mask | trait | RFLAGS.IF (`cli`, `sti`) | PSTATE.I and F (`msr daifset`, `msr daifclr`); priority masking from ROADMAP §25.5 | §10.3 |
@@ -4364,6 +4398,50 @@ hide a missing write from every TCG test. Rejected: keeping what firmware or Lim
 in the value read at boot, which keeps any bit this table does not name; and giving EL0 the physical
 counter or a timer, which Linux does not, and which at EL1 entry would let user code reprogram the
 kernel's tick.
+
+## 11.5 aarch64 exceptions and privilege transitions
+
+aarch64's counterpart of §5.1 to §5.3 and of the x86_64 mechanism behind §5.10; §5.10's aarch64 table
+gives the required state at each boundary, and its rules 9 onward hold on both architectures. The
+kernel runs at EL1, or at EL2 with VHE when Limine entered there (ROADMAP §11.1); at EL2 the `_EL1`
+names below reach their `_EL2` registers through VHE's redirection, and `VBAR_EL2`, `ESR_EL2`,
+`FAR_EL2`, `ELR_EL2`, and `SPSR_EL2` take the roles given here to the `_EL1` ones. Planned (ROADMAP
+§11.3, §11.6): the aarch64 port does not exist.
+
+1. One vector table, generated by the port from one list, as §5.10 rule 1 generates x86_64's stubs.
+   Of its 16 entries (synchronous, IRQ, FIQ, and SError, each taken at the current level on
+   `SP_EL0`, at the current level on `SP_ELx`, from EL0 in AArch64, and from EL0 in AArch32), the
+   kernel expects only the `SP_ELx` and AArch64-EL0 ones, since it always runs on `SP_ELx` and EL0
+   has no AArch32; each of the other eight dumps and halts. An entry from EL0 saves the user frame
+   (§5.10), `ELR_EL1` and `SPSR_EL1` included, and every entry saves the syndrome (§5.10 rule 9),
+   before it clears any DAIF bit.
+2. DAIF. Every exception sets all four bits. Once its frame is saved, an entry clears D and A; a
+   syscall or a fault or trap body then clears I and F too (§2.9 rule 3), and an IRQ's top half
+   keeps them set. The kernel masks and unmasks I and F together, since nothing routes a FIQ to it.
+   Outside the entry and exit sequences D and A are clear, so a debug exception or an SError is
+   taken where it is raised.
+3. The return to EL0 sets all of DAIF before it writes `ELR_EL1`, `SPSR_EL1`, or `SP_EL0`, and keeps
+   it set until `eret` loads EL0's DAIF from `SPSR_EL1`; §5.10 rule 11's last exit-work check comes
+   before those writes. A debug exception or an SError taken between the writes and the `eret` would
+   overwrite `ELR_EL1` and `SPSR_EL1`, and the `eret` would then return to the kernel PC that
+   exception saved, at the kernel's level. Masking only I, as x86_64's IF alone suggests, leaves
+   that window open once rule 2 unmasks A or ROADMAP §18.4 arms a kernel watchpoint. A debug build
+   checks DAIF before each `eret` to EL0.
+4. PAN. `SCTLR_EL1.SPAN` is clear, so every exception entry sets PSTATE.PAN, and only the
+   user-memory accessors clear it (ROADMAP §11.6), as §5.10 rule 5 opens SMAP only inside the
+   accessors.
+5. No GS swap. EL0 cannot access `TPIDR_EL1` or `TPIDR_EL2`, so the per-CPU base never changes at
+   the boundary, and §5.10 rules 2 and 3 have no counterpart. At the kernel's level `SP_EL0` holds
+   the running thread's TCB pointer ([§2.9](#29-preemption-and-interrupt-state) rule 5): every entry
+   from EL0 saves the user's `SP_EL0` into the frame and loads `current`, and the return to EL0
+   restores the user's after it sets DAIF (rule 3).
+
+Why: these are the rules §5.10's x86_64 rows exist for, restated for a machine with no IST, no GS
+swap, and four interrupt masks instead of one. Linux arm64 enters and leaves EL0 the same way: all of
+DAIF set on the way out, D and A cleared once the frame is saved, and `current` in `SP_EL0`.
+Rejected: interleaving aarch64 paragraphs through §5.1 to §5.7, which would double each section and
+mix two machines' registers; a separate `docs/ARCH_AARCH64.md`, which would split the invariant
+tables that AGENTS.md rules 1, 2, and 8 point at; and masking only I on the way out (rule 3).
 
 ---
 
