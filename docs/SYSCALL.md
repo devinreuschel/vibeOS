@@ -393,7 +393,10 @@ argument), and `auxv`: `AT_PAGESZ`, `AT_ENTRY`, `AT_PHENT`, `AT_PHNUM`,
 `AT_UID`, `AT_EUID`, `AT_GID`, and `AT_EGID` (all 0), `AT_CLKTCK` 100,
 `AT_SECURE` 0, `AT_RANDOM`, `AT_NULL`. `AT_RANDOM` is one TSC read and a
 multiply, not random (F140; ROADMAP §13.10 fills it from the kernel CSPRNG).
-Only `ET_EXEC` loads: `ET_DYN` and `PT_INTERP` return `ENOEXEC`. `PT_PHDR`
+Only `ET_EXEC` loads: `ET_DYN` and `PT_INTERP` return `ENOEXEC`. Two
+`PT_LOAD`s that share a page break the load today: the second is not
+mapped and the first's bytes in that page are zeroed (F031; ROADMAP §10.6
+gives the page the later segment's permissions, as Linux does). `PT_PHDR`
 VAs are `check_user_va`'d. Exit status is the kernel-reported low 8 bits
 (`user: exit N` diagnostic for the bootstrap hello).
 
