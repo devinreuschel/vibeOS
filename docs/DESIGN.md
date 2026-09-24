@@ -2531,8 +2531,8 @@ does not boot it twice.
 
 ## 8.6 CI and coverage
 
-Two jobs run on every push and pull request, on Linux; the other rows below are scheduled or run on
-a tag. `concurrency` cancels superseded runs for the same
+Two jobs run on every push and pull request, on Linux; the other rows below are scheduled,
+dispatched, or run on a tag. `concurrency` cancels superseded runs for the same
 branch (push and PR share one slot). The earlier one-ladder-job rule (runner queues) was lifted on
 2026-09-22: the repo is public, so Actions minutes are free, and agents own the CI design. ROADMAP
 §10.1 plans a build-once job plus a tier matrix per architecture; until that lands the ladder is one
@@ -2544,7 +2544,12 @@ job.
 | `phase 0 ladder` | push / PR, `needs: check` | Limine, QEMU/nasm/xorriso/OVMF, kernel clippy `-D warnings` with `--all-features`, `kernel_tests`, and `vibefs_crash` (never the default feature set that ships), ISO, e2e (BIOS/UEFI/panic/#GP/PIT/9 GiB), in-guest at `-smp 2` and `-smp 4`, LAPIC fallback, vibefs crash. Green `main` uploads `vibeos.iso` (7 days). |
 | `smp-stress` | weekly Monday 06:00 UTC + dispatch | `-smp 4`, longer timeout |
 | `nightly-canary` | same workflow, non-blocking | undated latest nightly, `make iso && make test-unit` |
-| `release` | `v*` tags | `make test-e2e` (BIOS) only, then production + ktest ISO, changelog section, GitHub Release. It does not wait for `ci` at the tagged commit, and the ktest ISO writes fixed LBAs of any virtio-blk disk attached at boot (ROADMAP §10.1, F145). |
+| `release` | `v*` tags | `make test-e2e` (BIOS) only, then production + ktest ISO, changelog section, GitHub Release. It does not wait for `ci` at the tagged commit, and the ktest ISO writes fixed LBAs of any virtio-blk disk attached at boot (ROADMAP §10.1, F145). Planned (ROADMAP §10.1): dispatched from `main` with the release tag as input; a `build` job with `contents: read`, no cache, and no persisted token, then a `publish` job that runs no repository script; from ROADMAP §14.6 a `sign` job in the `release` environment between them, and from §22.4 a keyless `verify` job on vibeOS. |
+
+Rule; not yet enforced: a job that holds a signing key or a write token runs no code from the
+candidate commit, restores no cache, checks out nothing, and receives only artifacts and their
+SHA-256 list (ROADMAP §10.1, §14.6). Today `release` builds, tests, and publishes in one job with
+`contents: write`, a persisted checkout token, and restored caches.
 
 `-D warnings` reaches host builds through `[build] rustflags` and the kernel clippy steps through their own `-- -D warnings`. Kernel builds (`make iso` and
 every ISO variant) run without it, because `[target.x86_64-unknown-none] rustflags` in
