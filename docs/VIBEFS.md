@@ -546,10 +546,15 @@ Not a clean unmount.
    super, and `Flush`). Then `fsck`. Repeat. A clean `fsck` plus `mount`
    must yield a tree that is some committed prefix of the workload, never
    a mix that fails a checksum while `fsck` said ok.
-2. **QEMU:** `mkfs` a file-backed virtio-blk image, boot a write loop that
-   `fsync`s, `kill -9` QEMU at a randomized point after the loop has
-   started (including mid-`write`/`Flush`), then host `fsck-vibefs`. Same
-   pass criterion.
+2. **QEMU:** `mkfs` an image that ROADMAP §10.2's volatile-cache device
+   serves as the guest's virtio-blk disk with a volatile write cache, boot a
+   write loop that `fsync`s, `kill -9` QEMU at a randomized point after the
+   loop has started (including mid-`write`/`Flush`), rebuild images from the
+   device's trace (for each superblock write, the writes durable when it
+   arrived plus that write; at the kill, the durable writes plus a seeded
+   subset of the later ones), then host `fsck-vibefs` on each. Same pass
+   criterion. A kill alone loses no write QEMU received, whatever its cache
+   mode, so it cannot show a missing flush.
 
 Killing only between syscalls is not enough; the host wrapper injects the
 drop on device write calls, which is inside `write`/`fsync`.
@@ -566,8 +571,9 @@ v1's tests do not check this pass criterion yet:
   `fsck-vibefs` prints `errors 0`. It does not read `/crash/w` from the
   image or compare it with a committed prefix. The guest ignores `sync_fs`
   errors, and the 64-block image fills near generation 57 (§6, F014),
-  after which rounds kill a volume that no longer changes (F080; ROADMAP
-  §10.2)
+  after which rounds kill a volume that no longer changes; and it kills
+  QEMU over a plain file image, which loses no write QEMU received (F080;
+  ROADMAP §10.2)
 
 ---
 

@@ -3152,7 +3152,10 @@ the `vibefs_crash` build on it, kills QEMU up to 0.18 s after the first `vibeOS:
 and passes a round when `fsck-vibefs` exits 0 and prints `errors 0`. It does not mount the image or
 check `/crash/w` for a committed prefix, which [VIBEFS.md](VIBEFS.md) §12 requires, and the guest
 discards `sync_fs` errors, so a round passes after the volume has filled and commits have stopped
-(ROADMAP §10.2, F080).
+(ROADMAP §10.2, F080). Planned (ROADMAP §10.2): the disk is served by the volatile-cache device,
+an NBD server in hostlib that records every write and flush, and each round checks the images
+rebuilt from its trace, since a kill loses no write QEMU received, under `cache=writeback` or
+`cache=none` alike.
 
 ## 8.4 QEMU flags
 
@@ -4000,8 +4003,9 @@ bit before `blk-wb` writes it with the lock dropped, so while that write is in
 flight `flush` skips the page and can send the device flush first, a page
 dirtied again can have two writes to one LBA in flight, and the slot can be
 evicted and later read back stale. `find()` matches only valid slots, so a
-second reader of a page being filled does not wait for it (ROADMAP §12.5,
-F015; the `flush` wait lands with ROADMAP §10.11, F043).
+second reader of a page being filled does not wait for it (the writeback
+state and the `flush` wait land with ROADMAP §10.11, F015 and F043; the
+filling state with ROADMAP §12.5, F015).
 
 The cache reaches the drivers by raw device id: `cache_init::raw_read`,
 `raw_write`, and `raw_flush` match `DEV_RAM0` to `block_init` and `DEV_VDA`
