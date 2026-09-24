@@ -4220,7 +4220,7 @@ part is evdev and HID as libinput and the kselftest `hid` tests expect them.
 ### 31.6 Firmware
 - [ ] one loader: a driver requests a blob by name; blobs for devices needed before root come from the initrd, the rest from `/lib/firmware` in Linux's layout
 - [ ] firmware as its own §14.6 package, each blob's license recorded; its blobs come from `linux-firmware` and Intel's microcode repository, pinned by commit and fetched at test time, and the package is built for tests only, since §14.10's policy publishes no proprietary binary; publishing it once a funded goal brings hardware is the owner's call
-- [ ] each blob's SHA-256 in the firmware package's signed file list (§14.6), checked at load; in-guest tests use a package signed with a test key that only §14.3's harness overlay trusts
+- [ ] each blob's SHA-256 in the firmware package's signed file list (§14.6), checked at load; in-guest tests use a package signed with a test key that no release image's key set lists; only a test image trusts it, through §14.3's harness overlay
 - [ ] §20.1's microcode files served through it
 
 ### 31.7 Harness and the Linux comparison guest
@@ -5435,6 +5435,17 @@ against a pinned Fedora Workstation on the same machine. Each needs the x86_64 t
 runs the rig. The first adds what the rest share: the rig and the reference-machines paragraph. The
 reference laptop's Phase 35 to 37 lines also need the wireless rig's access points, and wait for them.
 
+**Firmware.** The display, GPU, audio, Wi-Fi, and Bluetooth of these machines run only with proprietary
+blobs from `linux-firmware` (§31.6), and §14.10's license record publishes no proprietary binary; it
+leaves publishing firmware and microcode, once a funded goal brings hardware, to the owner. That
+question is asked with the first purchase in this group: before it, an agent writes the OWNER DECISION
+block the record reserves, directly after the record, so the owner answers it with the purchase, and if
+a goal here is met without one, the edit that moves its lines in writes the block. Until the answer is
+recorded there, a line these goals add runs on a test image: the release image with §31.6's test
+firmware package and its test key added by the rig, on the live image and on the system the §22.2
+installer puts on the disk. No release image's key set lists that key (§31.6), and the reference
+laptop's destination and arc edits wait for the answer.
+
 ### Reference laptop
 
 **Buy.** A Framework Laptop 13 with the newest Intel Core Ultra that Linux's `xe` driver supports by
@@ -5453,8 +5464,8 @@ the goals after this one.
 
 **Lines.** Elsewhere in this file:
 - the destination paragraph: "becomes a desktop someone could use every day in a VM" gains "and the laptop someone uses every day"
-- the arc, rows 31 to 37: Unlocks gain the reference laptop's part: 31 ", a laptop's battery, lid, and touchpad"; 32 ", native Intel display"; 33 ", `xe` and hardware video decode"; 34 ", laptop audio and a webcam"; 35 ", the AX210's Wi-Fi and Bluetooth"; 37 ", on the reference laptop against Fedora"
-- the Era VII preamble, after **Hosts.**, a **Reference machines** paragraph: a line that names the reference laptop, the desktop, or the aarch64 server holds on that machine in the rig, and compares with a pinned Fedora Workstation image the rig boots on the same machine: the component built with Fedora's packaging from the upstream release vibeOS runs, both version strings recorded, and a version mismatch reported as a failed comparison. The reference laptop proves Intel display, GPU, Wi-Fi, and Bluetooth, an I2C-HID touchpad, a UVC camera, Intel audio, and s2idle with no S3
+- the arc, rows 31 to 37: Unlocks gain the reference laptop's part: 31 ", a laptop's battery, lid, and touchpad"; 32 ", native Intel display"; 33 ", `xe` and hardware video decode"; 34 ", laptop audio and a webcam"; 35 ", the AX210's Wi-Fi and Bluetooth"; 37 ", on the reference laptop against Fedora"; this edit and the destination edit above wait for the owner's firmware answer in §14.10, and are made only if it lets a user install the laptop's firmware from a release
+- the Era VII preamble, after **Hosts.**, a **Reference machines** paragraph: a line that names the reference laptop, the desktop, or the aarch64 server holds on that machine in the rig, and compares with a pinned Fedora Workstation image the rig boots on the same machine: the component built with Fedora's packaging from the upstream release vibeOS runs, both version strings recorded, and a version mismatch reported as a failed comparison. Until §14.10 records the owner's answer on publishing firmware and microcode, these machines run a test image: the release image with §31.6's test firmware package and its test key added by the rig, on the live image and on the system a line's §22.2 installer puts on the disk. The reference laptop proves Intel display, GPU, Wi-Fi, and Bluetooth, an I2C-HID touchpad, a UVC camera, Intel audio, and s2idle with no S3
 
 Phase 31 exit gate, before the tag line:
 - [ ] 500 consecutive s2idle cycles on the reference laptop, woken alternately by the RTC alarm and by a keypress from the rig's HID injector, with no hang, the same device list after every resume, and a 1 GiB fetch from the rig host over a USB Ethernet adapter (§20.6) with no corruption after the last cycle
