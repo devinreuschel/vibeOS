@@ -1642,13 +1642,15 @@ slot (below) and halts with a named reason if it does not. Rule; not yet enforce
 
 Planned (ROADMAP §25.4, §26.4): the kernel base and the HHDM offset have two sources, Limine's
 responses and the image's own direct entry, which every boot without Limine takes. The direct entry,
-one per architecture, draws both inside this table's slots, applies the image's relocations, builds
-the tables the kernel starts on, and records the base, the offset, and a seed for the other bases in
-`BootInfo`, where `boot::capture` reads them on every path. A loader that starts another kernel,
-kexec's included, places bytes and writes a serialized `BootInfo`, and draws no layout: it runs the
-release before, which does not know the next release's table. So this table may change between
-releases without breaking an update reboot (ROADMAP §30.4). Rejected: the loader drawing the layout,
-which freezes the old release's table into every later kernel.
+one per architecture, calls one portable, host-tested module in `vibeos-core`, the one place outside
+Limine that computes a base: it draws both inside this table's slots, applies the image's
+relocations, and plans the tables the kernel starts on. The entry builds those tables and records
+the base, the offset, and a seed for the other bases in `BootInfo`, where `boot::capture` reads them
+on every path. A loader that starts another kernel, kexec's included, places bytes and writes a
+serialized `BootInfo`, and draws no layout: it runs the release before, which does not know the next
+release's table. So this table may change between releases without breaking an update reboot
+(ROADMAP §30.4). Rejected: the loader drawing the layout, which freezes the old release's table into
+every later kernel.
 
 The physmap's slot is `0xFFFF_8000_0000_0000` – `0xFFFF_C000_0000_0000` on x86_64 (aarch64: §11.2).
 Limine's `randomise_hhdm_base` (ROADMAP §18.2) raises the offset above the slot's base by a draw in
@@ -5381,7 +5383,7 @@ per-architecture uapi (ROADMAP §13.10).
 | Debug and single-step state | port module | DR0-DR7, RFLAGS.TF | `MDSCR_EL1`, breakpoint and watchpoint registers, `brk` | §17.4 |
 | Panic stop | port module | IPI `0xFE`, then NMI (§7.6) | SGI; pseudo-NMI from ROADMAP §25.5 | §10.7, §25.5 |
 | Unwinder | port module | `rbp` chain | `x29` chain | §10.7, §11.7 |
-| Signal frame, sigreturn trampoline, vDSO counter read, ELF machine, TLS variant, and HWCAP | pure half: layouts | `rt_sigframe`, `EM_X86_64`, TLS variant II | `rt_sigframe` and the trampoline page, `EM_AARCH64`, TLS variant I, `AT_HWCAP` | §11.6, §13.8, §13.10 |
+| Signal frame, sigreturn trampoline, vDSO counter read, ELF machine, TLS variant, and HWCAP | pure half: layouts | `rt_sigframe`, `EM_X86_64`, TLS variant II | `rt_sigframe` and the vDSO's `__kernel_rt_sigreturn`, `EM_AARCH64`, TLS variant I, `AT_HWCAP` | §11.6, §13.8, §13.10 |
 | Crash-dump page-table publication | port module | none: QEMU walks x86_64 page tables | the TTBR1 root in a `VMCOREINFO` note | §11.7 |
 | Hypervisor | port module | VMX or SVM | EL2 with VHE | Phase 21 |
 
