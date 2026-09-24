@@ -1428,7 +1428,8 @@ Planned (ROADMAP §25.4, §26.4): a boot without Limine starts in the image's di
 ([§4.1](#41-virtual-address-map)), which runs before step 1 and enters the kernel in the state Limine
 would leave it, with a `BootInfo` in place of Limine's responses. Step 2's base-revision check runs
 only on a Limine boot; a kernel started by kexec checks the handover format's version there instead
-(ROADMAP §25.4).
+(ROADMAP §25.4). It prints `vibeOS: boot: <path> entry ok` in place of `limine: rev <n> ok`
+([section 8.3](#83-end-to-end)).
 
 ## 3.4 Linker script
 
@@ -3924,10 +3925,16 @@ With `-smp N`, additionally:
 - `vibeOS: time: lapic_timer ok (<mode>)` naming the selected timer path
   (`tsc-deadline`, `periodic`, or `pit`) rather than inferring it
 
+The list above is the contract of a boot through Limine. Planned (ROADMAP §25.4, §26.4): a boot
+through the image's direct entry prints `vibeOS: boot: <path> entry ok`, where `<path>` is `kexec`,
+`crash`, or `pvh`, in place of `limine: rev <n> ok`. A crash entry, ROADMAP §25.4's capture kernel,
+boots with `maxcpus=1` and so prints no `smp: ap online` line, and its list ends at
+`vibeOS: vmcore: written <n> bytes` in place of `shell ready`, after which it resets.
+
 ### Failing fast
 
-Scan for these (`PANIC_SIGNATURES` in `tests/harness/harness.py`) and fail immediately with the
-captured line rather than waiting out the timeout:
+Scan for these (`PANIC_SIGNATURES` in `tests/harness/harness.py`) and, in a run that expects no
+panic, fail immediately with the captured line rather than waiting out the timeout:
 
 ```
 panicked at   vibeOS: panic:   #PF   #GP   #UD   #DF   double fault   stack overflow
@@ -3956,6 +3963,24 @@ variant checks them. `panic_exit` writes isa-debug-exit
 waiting for that exit, so it never checks status 35. It also matches boot markers on every line,
 including the dump's `vibeOS: logrec:` replay of earlier records, so a marker printed out of order
 before the panic can match again in the dump (ROADMAP §10.2, F141).
+
+Planned (ROADMAP §10.7, §11.7), the event rule. The panic path signals pvpanic
+([§2.5](#25-panic-policy) steps 6 and 7), QEMU runs with `-action panic=pause`, and the harness
+reads QEMU's QMP events. Each run declares the end it expects: none, the default; a panic, for the
+expected-panic e2e; `expect=reset`, for a line whose guest resets and boots again; or
+`expect=capture`, for a line whose panic reaches a capture kernel. `GUEST_PANICKED` pauses the
+guest: a run that expects no panic takes a guest core, quits, and fails; the expected-panic e2e
+checks its dump needles and quits; an `expect=reset` run sends `cont`. QEMU reports
+`GUEST_CRASHLOADED` without pausing: a run not declared `expect=capture` stops the guest, takes a
+core, and fails, and an `expect=capture` run waits for the capture kernel's
+`vibeOS: vmcore: written <n> bytes` line and its reset, which ends QEMU under `-no-reboot`. A panic
+signature with no event, from a panic before the kernel has found its pvpanic device, fails a run
+that expects no panic at once, and the harness takes the core after `vibeOS: panic: halted` or
+10 s, whichever comes first. An `expect=reset` run boots without `-no-reboot`, fails on more QMP
+`RESET` events than its line expects, and is judged by the markers its line names. `expect=reset`
+and `expect=capture` runs take a core only when they fail: a core taken after a crash jump still
+describes the crashed kernel, because a kernel entered through the crash path never writes QEMU's
+`vmcoreinfo` device (ROADMAP §10.7).
 
 On success, exit through the QEMU monitor's `quit` rather than waiting for the timeout. Two seconds
 versus forty five, on every CI run and every local invocation.
@@ -3992,7 +4017,9 @@ rebuilt from its trace, since a kill loses no write QEMU received, under `cache=
 Harness and `make test` default to `-accel tcg` so KVM does not introduce timing flakes.
 
 `-no-reboot` matters: a triple fault otherwise reboots and loops, and the serial log fills with
-repeated boot attempts instead of stopping at the interesting one.
+repeated boot attempts instead of stopping at the interesting one. Planned (ROADMAP §10.7): a run
+declared `expect=reset` (§8.3) boots without it and counts QMP `RESET` events instead, so a reset
+its line does not expect still fails the run.
 
 All `VIBEOS_*` overrides are read in `tests/harness/harness.py` (`env_config` / `env_flag` /
 `env_int`). Drivers do not parse the environment. Makefile `?=` values are the `make run` source;
