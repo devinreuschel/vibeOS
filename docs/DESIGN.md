@@ -481,8 +481,10 @@ exceeds the per-leaf maximum (F061; ROADMAP §14.8 retires v1 for a v2 that vali
 past 128 bytes (ROADMAP §13.9, F062). Panics in the kernel binary halt in the binding order above.
 
 Exceptions follow the per-vector table in [section 5.2](#52-idt-and-exceptions). A kernel `#BP`
-logs and continues. Every other exception taken in ring 0 dumps and halts in the same order as
-`#[panic_handler]`. Rule: ring 3 never halts the kernel. An exception raised by ring-3 code, or by a
+logs and continues. Planned (ROADMAP §17.4, §18.4): so do three ring-0 `#DB` cases, which §5.2's row
+lists: a hit on a debug slot the current thread's tracer armed, a stray single step, and, in the
+data-race detector's build, a hit on its own slots. Every other exception taken in ring 0 dumps and
+halts in the same order as `#[panic_handler]`. Rule: ring 3 never halts the kernel. An exception raised by ring-3 code, or by a
 return to ring 3, kills
 that process with the signal §5.2 gives the vector, prints `user: pid N killed SIG<name>`, and the
 kernel keeps running. Not yet enforced: ring-3 `#DB`, and `#AC` when `CR0.AM` is set, halt the kernel (ROADMAP §10.6,
@@ -1460,7 +1462,7 @@ the table lives in code, and a host test checks that each vector `0x00`–`0x1F`
 | Vector | Name | Ring 0 | Ring 3 | Ring 3, as built |
 |--------|------|--------|--------|------------------|
 | `0x00` | `#DE` | dump, halt | `SIGFPE` | as the rule |
-| `0x01` | `#DB` | dump on IST, halt | `SIGTRAP` (RFLAGS.TF, `int1`) | halts the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
+| `0x01` | `#DB` | dump on IST, halt. Planned (ROADMAP §17.4, §18.4): three cases continue instead. A hit whose saved DR6 names only slots the current thread's tracer armed is dropped, as Linux drops a kernel-mode hit of a ptrace breakpoint; DR6.BS clears TF in the saved frame and logs once, as Linux does; in the §18.4 detector build a hit on a detector slot is reported | `SIGTRAP` (RFLAGS.TF, `int1`, a breakpoint or watchpoint the tracer armed); in the §18.4 detector build a hit on detector slots alone resumes with no signal and is counted | halts the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
 | `0x02` | NMI | dump on IST, halt; the panic stop is IPI `0xFE`, not NMI | not a ring-3 fault: the Ring 0 column applies | as the rule |
 | `0x03` | `#BP` | log, continue | `SIGTRAP` (`int3`) | `int3` hits the DPL-0 gate, raises `#GP`, and gets `SIGSEGV`. Rule; not yet enforced: ROADMAP §10.6 (F148) |
 | `0x04`, `0x05`, `0x07`, `0x0A` | `#OF`, `#BR`, `#NM`, `#TS` | dump, halt | `SIGSEGV` | `sig_for_vec` has no row, so one would halt the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
@@ -2140,7 +2142,29 @@ user-visible CPU state; the commit that adds it also adds its row here.
 | CR3 | `Tcb.as_cr3` (0 means the kernel PML4) | `switch_cr3_for` in `on_switch`, skipped when unchanged | switched; no PCID |
 | FS_BASE (user TLS) | not saved | nothing | not switched. `enter_user`, `enter_user_full`, and `execve` write it; `force_kernel`'s `mov fs` zeroes it on every exit or kill; `fork` copies the live MSR, so a child can inherit another process's base (ROADMAP §13.1, F022). |
 | user GS base | not saved; always 0 | nothing | holds while no `ARCH_SET_GS` or FSGSBASE exists (ROADMAP §18.3) |
+| DR0-DR3, DR7 | the thread's decoded debug slots, and the tracer's masked DR7 for `PEEKUSER` | the switch, by the Debug state paragraph below | not built: nothing arms them before ROADMAP §17.4 |
+| DR6 | the thread's virtual DR6 | not switched: the `#DB` body writes the thread's copy from the DR6 its entry saved (§5.10) | not built: ROADMAP §17.4 |
+| aarch64: `DBGBVR`/`DBGBCR`, `DBGWVR`/`DBGWCR`, `MDSCR_EL1.MDE` | the thread's decoded debug slots | the switch, by the Debug state paragraph below | not built: ROADMAP §17.4 |
+| aarch64: `MDSCR_EL1.SS` | the thread's step flag, with `SPSR.SS` in its frame | set at the return to EL0 and cleared at entry from EL0, by the Debug state paragraph below | not built: ROADMAP §17.4 |
 | `PerCpu.syscall_scratch` | per CPU | not switched | valid only while IF=0 (above; F001) |
+
+**Debug state.** One owner per build holds the hardware breakpoint and watchpoint slots and their
+enables: DR0-DR3 and DR7 on x86_64, and on aarch64 the `DBGBVR`/`DBGBCR` and `DBGWVR`/`DBGWCR` pairs
+with `MDSCR_EL1.MDE` and `KDE`. In every build but ROADMAP §18.4's data-race detector build, user
+threads own them: the switch loads a thread's slots, with the DR7 the kernel built from its tracer's
+decoded writes or with `MDE` set, only for a thread with one armed, and clears DR7 or `MDE`
+otherwise; `KDE` stays 0, so on aarch64 the kernel takes no hardware debug exception from its own
+code (a `brk` always traps); a tracer's values are decoded, never loaded (ROADMAP §17.4). In the
+detector build the detector owns them on every CPU: the switch never writes DR7, `MDE`, or `KDE`,
+ptrace's debug-register writes return `ENOSPC`, and `PSTATE.D` is clear in the kernel except in the
+debug-exception and SError handlers and the entry and exit sequences. Single step belongs to the
+thread in every build: on x86_64, TF lives in the thread's saved RFLAGS, and FMASK and the interrupt
+gates clear it in the kernel; on aarch64, the return to EL0 sets `MDSCR_EL1.SS` after the last
+exit-work check, only for a thread with `PTRACE_SINGLESTEP` armed, and every entry from EL0 clears
+it before it clears `PSTATE.D`, so `SS` is never 1 in EL1 while D is clear, nor at an `eret` to a
+thread that is not being stepped. DR6 is per thread and virtual: ptrace reads and writes the
+thread's copy, which the `#DB` body fills from the DR6 its entry stub saved (§5.10). ROADMAP §11.4
+releases the OS Lock on every aarch64 core. Planned: nothing arms a debug slot before ROADMAP §17.4.
 
 ## 7.6 IPIs
 
