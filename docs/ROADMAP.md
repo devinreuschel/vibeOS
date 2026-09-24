@@ -163,10 +163,12 @@ lasts at most 6 hours, so a longer run is sharded into jobs of at most 5.5 hours
 forward as workflow artifacts, and its gate says so; unsharded uptime counted in weeks is a funded goal.
 Nested virtualization on the hosted x86_64 runners works, but GitHub calls it experimental, and each job
 gets AMD SVM or Intel VMX at random: a gate on it tests the path its job's CPU offers and needs a green
-run of each vendor's path that §11.7's records show a runner offering within the last 7 nightly runs. aarch64 hypervisor gates run under TCG with
-`virtualization=on`, with FEAT_NV2 when a guest hypervisor nests, and add a dev-host record under HVF
-with QEMU 11.1 or later. A comparison with Linux boots the §12.4 oracle kernel in the same guest shape
-on the same runner, in the same job where it fits, so runner noise cancels.
+run of each vendor's path that §11.7's records show a runner offering within the last 7 nightly runs. A
+path with no such run stays disabled in the release (§21.1), so such a gate covers every path the
+release enables. aarch64 hypervisor gates run under TCG with `virtualization=on`, with FEAT_NV2 when a
+guest hypervisor nests, and add a dev-host record under HVF with QEMU 11.1 or later. A comparison with
+Linux boots the §12.4 oracle kernel in the same guest shape on the same runner, in the same job where
+it fits, so runner noise cancels.
 
 **Standing gates** apply to every phase and are not repeated:
 
@@ -3103,7 +3105,9 @@ on its runners experimental and does not support it, and it draws the CPU vendor
 or Intel with VMX), so a leg tests the path its CPU offers, and when §11.7's host-side probe finds
 neither on its runner it skips, naming the CPU model in the job summary. A gate line in the nested job passes when a leg passed,
 not skipped, at the gated commit, and the nightly job's last 7 runs include a passing leg of each path
-that §11.7's records of those nights show a runner offering (§21.1).
+that §11.7's records of those nights show a runner offering (§21.1). A release enables only the paths
+`vm::GATED_PATHS` names (§21.1), and a path joins it only with a passing leg, so a path the fleet never
+offered ships disabled, not untested.
 
 **The EL2 job** runs with the nightly job on the hosted arm64 runner, which has no KVM. It boots
 vibeOS under TCG with `-machine virt,gic-version=3,virtualization=on -cpu max` on the §10.1 pinned
@@ -3150,7 +3154,7 @@ emulator and, on aarch64, the loads and stores that exit without a valid syndrom
 - [ ] the harness boots a test kernel under the §21.2 VMM with `-accel kvm` through the §21.2 harness backend, and `make test-kernel` passes that way on vibeOS, in the nested job, the EL2 job, and the HVF record
 - [ ] `alpine` and `busybox` OCI images, pinned by digest and pulled from the §21.6 registry on the CI host, run a shell under the §21.6 runtime, and the Alpine one installs a package with `apk` from a local mirror, on both architectures
 - [ ] a container and an L2 guest on one §21.7 bridge each fetch a file from a server on the CI host through NAT, and a filter rule blocks a named port for the container only, in the nested job and the EL2 job
-- [ ] a hostile L2 guest with 2 vCPUs and 1 GiB fuzzes the exit handlers and virtio backends for 24 hours a week per architecture on the weekly job, in shards of at most 5.5 hours (§10.1) that carry one seed log and coverage corpus as artifacts, set up as the nested job on x86_64, with each path §11.7's records show offered among the last two weeks' shards, and as the EL2 job on aarch64, with no L1 panic and no KASAN report; the instruction emulator agrees with the CPU on 1,000,000 generated instruction streams on each hosted runner architecture; and 10,000 of the fuzzing guest's seeded exit sequences end in the same guest-visible state under the Linux L1's KVM as under the §21.2 VMM, each pair replayed in one nested-job leg or one EL2-job run, except the differences `docs/` lists (§21.8)
+- [ ] a hostile L2 guest with 2 vCPUs and 1 GiB fuzzes the exit handlers and virtio backends for 24 hours a week per architecture on the weekly job, in shards of at most 5.5 hours (§10.1) that carry one seed log and coverage corpus as artifacts, set up as the nested job on x86_64, with each path `vm::GATED_PATHS` enables (§21.1) among the last two weeks' shards, and as the EL2 job on aarch64, with no L1 panic and no KASAN report; the instruction emulator agrees with the CPU on 1,000,000 generated instruction streams on each hosted runner architecture; and 10,000 of the fuzzing guest's seeded exit sequences end in the same guest-visible state under the Linux L1's KVM as under the §21.2 VMM, each pair replayed in one nested-job leg or one EL2-job run, except the differences `docs/` lists (§21.8)
 - [ ] tag `phase-21` and cut the next release
 
 ### 21.1 Hypervisor
@@ -3163,7 +3167,8 @@ emulator and, on aarch64, the loads and stores that exit without a valid syndrom
 - [ ] MSR and I/O bitmaps, and instruction emulation for the exits that need it
 - [ ] a vCPU as a schedulable entity, so the existing scheduler runs guests
 - [ ] aarch64: run as a VHE host when §11.1 recorded EL2 entry, with stage-2 translation and the virtual GIC and timer behind the same VM abstraction; when entry was at EL1, the VM layer reports that EL2 is unavailable instead of failing
-- [ ] every hypervisor test runs on whichever of VMX and SVM the CPU offers and prints a registered marker naming the path; the nested job writes the runner's CPU model and that path to its §10.9 CI-history record, and `scripts/ci_history.py --nested`, which the gate-map entries of the nested-job lines run, fails unless the nightly job's last 7 runs include a passing leg of each path that §11.7's records of those nights show a runner offering, and a failing leg on an offered path still fails; when one is missing, it reports from the nesting field of the same nights' §11.7 records whether any runner drawn offered a guest that path, so a vendor the fleet did not offer is told apart from a leg that failed
+- [ ] x86_64: the VM layer enables VMX or SVM only when `vm::GATED_PATHS`, a constant in the portable half, names that path; on a CPU whose path it does not name, it reports hardware virtualization unavailable, as it does on aarch64 when entry was at EL1, so §21.2's `/dev/kvm` is absent. A path joins the constant in a commit whose `Proves:` trailer names a passing nested-job leg of that path, and the release notes name the paths it enables. `kernel_tests` builds, and the `vm.all_paths` option on the §10.2 command line (DESIGN §3.2), enable every path, so the nested job gathers a path's evidence before the constant names it; a host test covers the choice for each vendor with the option on and off
+- [ ] every hypervisor test runs on whichever of VMX and SVM the CPU offers and prints a registered marker naming the path; the nested job writes the runner's CPU model and that path to its §10.9 CI-history record, and `scripts/ci_history.py --nested`, which the gate-map entries of the nested-job lines run, fails unless the nightly job's last 7 runs include a passing leg of each path that §11.7's records of those nights show a runner offering, and a failing leg on an offered path still fails; it also fails when `vm::GATED_PATHS` names a path with no passing leg in that window; when one is missing, it reports from the nesting field of the same nights' §11.7 records whether any runner drawn offered a guest that path, so a vendor the fleet did not offer is told apart from a leg that failed
 
 ### 21.2 Virtual machines
 The VM interface is Linux's: `/dev/kvm`. The VMM is unmodified QEMU from the §17.6 image, so guests
@@ -3275,7 +3280,7 @@ the §22.3 tested-platforms list, are [Funded goals](#funded-goals).
 - [ ] the CI that gates releases runs on vibeOS: in the nightly job, the §22.4 agent on an installed vibeOS, a 4-vCPU, 4 GiB guest under KVM on the hosted x86_64 runner, builds both architectures and runs `make test` for both, and the job's conclusion is the result; `release.yml`'s `build` job reads that conclusion through the Actions API for the nightly workflow's path, a `schedule` or `workflow_dispatch` event, and the candidate's commit, never from a commit status, which any job with `statuses: write` can post, and refuses a candidate without a passing one
 - [ ] a fresh install builds and releases vibeOS: in the release workflow's `build` and `assemble` jobs, a fresh unattended install from the candidate's installer image, a 4-vCPU, 4 GiB guest under KVM on the hosted x86_64 runner, builds the release's artifacts for both architectures and assembles its images; the key jobs sign them in §22.1's order, each only after the reproducibility line above holds for what it signs, a keyless `verify` job checks the signed artifacts on vibeOS, and those are the ones published (§22.4); a fresh aarch64 install does the same build under HVF on the dev host as a §10.9 record, unsigned, since the keys stay with the workflow; that record lists, and does not fail on, each file that differs from the aarch64 artifacts the nightly §22.4 job built at the same commit, since the comparison of cross and native builds is in [Beyond](#beyond)
 - [ ] every release artifact ships an SPDX SBOM that passes the validator, and the release job refuses a component without an entry or with a license outside the §14.10 policy
-- [ ] no release is tagged with an open crash from its candidate's two 72-hour campaigns, both in hosted shards of at most 5.5 hours (§10.1) that carry one seed log and coverage corpus as artifacts, encrypted as §22.5's sealed records require: syzkaller (§18.5) accumulating 72 hours per architecture, each guest 2 CPUs and 512 MiB under TCG, and the §21.8 hostile guest, 2 vCPUs and 1 GiB, accumulating 72 hours per architecture, set up as Phase 21's nested job on x86_64, with each path §11.7's records show offered among its shards, and as its EL2 job on aarch64
+- [ ] no release is tagged with an open crash from its candidate's two 72-hour campaigns, both in hosted shards of at most 5.5 hours (§10.1) that carry one seed log and coverage corpus as artifacts, encrypted as §22.5's sealed records require: syzkaller (§18.5) accumulating 72 hours per architecture, each guest 2 CPUs and 512 MiB under TCG, and the §21.8 hostile guest, 2 vCPUs and 1 GiB, accumulating 72 hours per architecture, set up as Phase 21's nested job on x86_64, with each path `vm::GATED_PATHS` enables (§21.1) among its shards, and as its EL2 job on aarch64
 - [ ] an update installs unattended, fetched over HTTPS from a host server laid out as §22.1's channel and repository releases are, with a test CA the guest trusts only through §14.3's harness overlay, and takes effect on the next boot; four bad updates each come back on the old root with no human action: one that panics; one whose kernel, a `kernel_tests` build, stops every CPU with interrupts off after the watchdog arms and before any userspace process starts; one whose kernel does the same after init has opened `/dev/watchdog`; and one that fails its health check; a good update whose first trial the harness resets before the trial's root is mounted is armed again and commits at the next boot, and a bad update that hangs before its root is mounted is armed again at the next two boots and then recorded as a hang before the root; a user and their password, a file in `/home`, a changed `/etc` file, and a package the user installed survive each good update and each rollback, and an `/etc` file the user never changed holds the running release's default after each; and a power cut at each of 20 seeded writes of an update, on §10.2's volatile-cache device, leaves the old slot booting with an `fsck`-clean ESP; a good update whose trial boots with its NIC's link down (QMP `set_link`) commits; a service that already fails on the old slot does not fail a good update; a trial whose probe never answers fails at the deadline, set to its floor, and comes back on the old root; and the next update run after a failed trial does not arm that release again, while a newer release is tried; on both architectures under QEMU with OVMF or edk2, a writable variable store, and on `virt` an `i6300esb` (TCG, 2 vCPUs, 2 GiB)
 - [ ] the GitHub API reports private vulnerability reporting enabled on the repository, the §22.5 `make check` script passes, and the §22.5 drill has run end to end
 - [ ] tag `phase-22` and cut the next release
@@ -3648,12 +3653,12 @@ Real servers, clouds, 100GbE NICs, data-center drives, and month-long uptime are
 environments [Phase 21](#phase-21-virtualization) defines and passes on its terms: on x86_64 the nested
 job, which GitHub calls experimental and whose runners draw AMD's SVM or Intel's VMX at random, so the
 line needs, within the nightly job's last 7 runs, a passing leg of each path that §11.7's records of
-those nights show a runner offering; on aarch64 the EL2 job, under TCG with `virtualization=on`, which
-records its numbers without a threshold, and the HVF record, on QEMU 11.1 or later. If those records
-show no runner offering either path for 7 nights running, GitHub has withdrawn nesting, and the edit
-Phase 21 then makes also moves the x86_64 parts of Phase 28's VF-assignment line and Phase 30's
-live-update line to the x86_64 test PC in [Funded goals](#funded-goals); each then closes on its
-aarch64 parts.
+those nights show a runner offering and of each path `vm::GATED_PATHS` enables (§21.1); on aarch64 the
+EL2 job, under TCG with `virtualization=on`, which records its numbers without a threshold, and the HVF
+record, on QEMU 11.1 or later. If those records show no runner offering either path for 7 nights
+running, GitHub has withdrawn nesting, and the edit Phase 21 then makes also moves the x86_64 parts of
+Phase 28's VF-assignment line and Phase 30's live-update line to the x86_64 test PC in
+[Funded goals](#funded-goals); each then closes on its aarch64 parts.
 
 **Long runs.** A run longer than one hosted job is a chain of shards of at most 5.5 hours that carry
 their state as artifacts, by the rule in [How to read this](#how-to-read-this) and §10.1's CI budget.
@@ -5018,16 +5023,18 @@ serial capture, and switched power, bought with the x86_64 test PC, and it runs 
 
 ### Used x86_64 test PC
 
-**Buy.** A used x86_64 PC with a serial port, then a second, physically different one. Both: VT-x or
-AMD-V, and VT-d or AMD-Vi with SR-IOV, enabled in firmware; UEFI with a GOP framebuffer; USB ports and an
-internal NVMe or SATA disk. At least one with S3 in its firmware. The first also has at least 8 cores, a
-free CPU-attached PCIe 3.0 or newer x16 slot, and a second NVMe slot, so it can carry the NVMe-drive and
-100GbE goals; an Intel CPU is the simpler choice for `rr`, which needs a workaround on AMD Zen. With them:
-real NVMe and SATA drives, a Realtek 8168 NIC, a USB-C dock or adapter with CDC-NCM and an ASIX AX88179,
-USB serial adapters (CDC-ACM, Prolific PL2303, Silicon Labs CP210x), a switched outlet per machine, and a
-plug-in power meter. For the rig, the rig host: an always-on x86_64 mini PC running Linux, with VT-x or
-AMD-V so it can run a vibeOS guest under KVM, gigabit Ethernet, and a powered USB hub for its own serial
-adapters and the rig's injectors; it serves netboot, captures serial, switches the outlets, and runs the
+**Buy.** A used x86_64 PC with a serial port, then a second of the other CPU vendor, so one is Intel
+(VT-x, VT-d, PEBS) and one AMD (AMD-V, AMD-Vi, IBS), and each vendor's hypervisor path, IOMMU, and
+precise sampling run on silicon. Both: VT-x or AMD-V, and VT-d or AMD-Vi with SR-IOV, enabled in
+firmware; UEFI with a GOP framebuffer; USB ports and an internal NVMe or SATA disk. At least one with
+S3 in its firmware. The first also has at least 8 cores, a free CPU-attached PCIe 3.0 or newer x16
+slot, and a second NVMe slot, so it can carry the NVMe-drive and 100GbE goals; an Intel CPU is the
+simpler choice for `rr`, which needs a workaround on AMD Zen. With them: real NVMe and SATA drives, a
+Realtek 8168 NIC, a USB-C dock or adapter with CDC-NCM and an ASIX AX88179, USB serial adapters
+(CDC-ACM, Prolific PL2303, Silicon Labs CP210x), a switched outlet per machine, and a plug-in power
+meter. For the rig, the rig host: an always-on x86_64 mini PC running Linux, with VT-x or AMD-V so it
+can run a vibeOS guest under KVM, gigabit Ethernet, and a powered USB hub for its own serial adapters
+and the rig's injectors; it serves netboot, captures serial, switches the outlets, and runs the
 self-hosted runners.
 
 **Cost.** About $1,500 for both test PCs and the parts above, and about $300 for the rig host (2026
@@ -5066,7 +5073,7 @@ ERST, GHES, and a BMC, it can also be the x86_64 long-run server; it can be the 
 - [ ] the Phase 18 exit gate's measured-cost entries include the x86_64 test PC's CPU model booted bare metal, and the harness test that compares the boot log's mitigation list with the document's list runs there (F024, F131)
 
 Phase 20 exit gate, before the tag line:
-- [ ] boots from USB on the x86_64 test PC, and on a second, physically different x86_64 machine once one exists, with output on a serial adapter or the screen
+- [ ] boots from USB on the x86_64 test PC, and on the second test PC, of the other vendor, once it exists, with output on a serial adapter or the screen
 - [ ] on each of those machines: Phase 7's pattern and concurrent read-write tests pass on a scratch partition of its internal disk; a TCP client fetches 1 GiB from a peer through vibeOS's driver for its NIC with no corruption, as the Phase 15 gate does over virtio-net; and `evtest` reads a key typed on a USB keyboard from its `/dev/input/event<N>` node
 - [ ] the AML interpreter loads the DSDT and SSDTs of each of those machines, host-tested against their `acpidump` output in a rig-host job that reads it from the rig host's unpublished store, with the results derived from it checked in (DESIGN §1.5), and `_PRT` resolves PCI interrupt routing on each
 - [ ] S3 suspend and resume on the machine whose firmware offers S3, with its disk, NIC, and USB keyboard working afterward
@@ -5103,7 +5110,7 @@ Phase 20 exit gate, before the tag line:
 - [ ] a flamegraph from a §19.2 counter-overflow sampling profile with hardware cache-miss and branch-miss events on the x86_64 test PC, and branch-record and precise sampling through `perf_event_open` (LBR and PEBS on Intel, LBR and IBS on AMD) where its CPU reports them, its support recorded in `docs/HARDWARE.md`
 
 Phase 21 exit gate, before the tag line:
-- [ ] on the x86_64 test PC booted bare metal, with VMX or SVM enabled in firmware, a Linux kernel and vibeOS each boot to userspace as guests under vibeOS, and that vibeOS guest boots a third under its own §21.2 VMM
+- [ ] on each x86_64 test PC booted bare metal, the second once it exists, with its vendor's VMX or SVM enabled in firmware, a Linux kernel and vibeOS each boot to userspace as guests under vibeOS, and that vibeOS guest boots a third under its own §21.2 VMM; a pass here counts for `vm::GATED_PATHS` and `ci_history.py --nested` as a nested-job leg's does
 - [ ] on the x86_64 test PC, guests get virtio block and network devices whose sequential throughput is at least half of what the same 4-vCPU, 4 GiB guest gets under Linux KVM booted bare metal on the same machine
 - [ ] vibeOS as a 2-vCPU, 2 GiB guest under Linux KVM on the x86_64 test PC, using §21.4's paravirtual clock and spinlocks, runs the §19.3 microbenchmarks within 20% of the same machine booted bare metal with 2 CPUs online (§19.6 offlining)
 
@@ -5111,7 +5118,7 @@ Phase 21 exit gate, before the tag line:
 - [ ] §21.3's Linux L1 image also netboots on the x86_64 test PC as its bare-metal host when a job selects it, so each bare-metal comparison runs the same VMM on the same machine
 
 §21.8:
-- [ ] the hostile guest fuzzes 24 hours a week on the x86_64 test PC booted bare metal, with no host panic and no KASAN report, and a second guest's §19.3 microbenchmarks stay within 10% there while the first misbehaves, each guest 2 vCPUs and 2 GiB
+- [ ] the hostile guest fuzzes 24 hours a week on each x86_64 test PC booted bare metal, with no host panic and no KASAN report, and a second guest's §19.3 microbenchmarks stay within 10% there while the first misbehaves, each guest 2 vCPUs and 2 GiB
 
 If GitHub withdraws nested virtualization from its hosted runners, Phase 21's x86_64 nested lines,
 Phase 22's x86_64 hostile-guest campaign, and the x86_64 parts of Phase 28's VF-assignment line and
