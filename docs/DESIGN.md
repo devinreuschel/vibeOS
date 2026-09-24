@@ -4292,12 +4292,12 @@ matcher every e2e run uses, has no unit test (ROADMAP §10.2, F141).
 `make test-vibefs-crash` (`run_vibefs_crash.py`) formats a 256 KiB image with `mkfs-vibefs`, boots
 the `vibefs_crash` build on it, kills QEMU up to 0.18 s after the first `vibeOS: vibefs: wr` line,
 and passes a round when `fsck-vibefs` exits 0 and prints `errors 0`. It does not mount the image or
-check `/crash/w` for a committed prefix, which [VIBEFS.md](VIBEFS.md) §12 requires, and the guest
-discards `sync_fs` errors, so a round passes after the volume has filled and commits have stopped
-(ROADMAP §10.2, F080). Planned (ROADMAP §10.2): the disk is served by the volatile-cache device,
-an NBD server in hostlib that records every write and flush, and each round checks the images
-rebuilt from its trace, since a kill loses no write QEMU received, under `cache=writeback` or
-`cache=none` alike.
+check `/crash/w` against the committed-generation criterion that [VIBEFS.md](VIBEFS.md) §12
+requires, and the guest discards `sync_fs` errors, so a round passes after the volume has filled
+and commits have stopped (ROADMAP §10.2, F080). Planned (ROADMAP §10.2): the disk is served by the
+volatile-cache device, an NBD server in hostlib that records every write and flush, and each round
+checks the images rebuilt from its trace, since a kill loses no write QEMU received, under
+`cache=writeback` or `cache=none` alike.
 
 ## 8.4 QEMU flags
 

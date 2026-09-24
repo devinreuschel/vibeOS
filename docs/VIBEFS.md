@@ -251,6 +251,15 @@ data; from ROADMAP §12.5 a file page's block is allocated when a commit
 writes the page back (§10). Drop the in-memory refs on the replaced blocks only **after** the new super is
 `Flush`ed.
 
+A v1 generation has at most 73 metadata blocks. v1 writes each tree
+densely: a leaf holds up to 15 inode records or 56 directory entries, and
+an internal node exists only when one leaf does not fit. The 64 inode
+records fill at most 5 leaves under one internal node; each non-empty
+directory, at most 64, needs one leaf; and the volume's 96 entries let
+only one directory pass 56 entries, adding a second leaf and an internal
+node. With the `ALLOC` block, that is 1 + 6 + 66 = 73. Mount and commit
+track a generation's metadata blocks in a table of that size (`MAX_META`).
+
 **Space accounting:** the alloc map a commit writes already has that
 commit's drops applied. It takes effect only with the new super, so the
 commit rule still holds. After any sequence of commits and remounts, every
@@ -264,9 +273,10 @@ snapshot. v1 code does not meet this yet:
   metadata, so the next commit never drops the directory blocks it wrote; a
   64-block volume stops committing after about 57 syncs (F014; ROADMAP
   §10.11)
-- mount holds at most 48 metadata blocks (`MAX_META`) and fails past that,
-  and commit does not check the cap, so it can write a volume that mount
-  rejects (F014; ROADMAP §10.11)
+- mount's table holds 48 metadata blocks (`MAX_META`), fewer than the 73
+  above, and fails past that, and commit does not check the cap, so a
+  volume within v1's caps can fail to commit and commit can write a volume
+  that mount rejects (F014; ROADMAP §10.11)
 - a `write` that needs a fifth extent fails and leaks a block (§13, F051;
   ROADMAP §10.11)
 
@@ -425,9 +435,9 @@ One transaction = one generation bump.
    the slot opposite the super this mount last mounted or committed. The
    generation and roots change in memory only after step 6 succeeds.
 6. `Flush`.
-7. In memory, drop refcounts on the replaced metadata and data. Optionally
-   mirror the super into the other slot (same generation) and `Flush`
-   again; v1 does not mirror.
+7. In memory, drop refcounts on the replaced metadata and data. The other
+   slot keeps the previous generation, which mount falls back to when the
+   new super is torn; never copy the new super into it.
 
 Each step starts only after the one before it has completed, since the
 block layer orders nothing (DESIGN §10.2). Steps 5 and 6 together are a
@@ -549,8 +559,9 @@ Not a clean unmount.
 1. **Host:** a disk wrapper that drops writes after a randomized budget,
    including in the middle of a commit (`write` of a metadata block or the
    super, and `Flush`). Then `fsck`. Repeat. A clean `fsck` plus `mount`
-   must yield a tree that is some committed prefix of the workload, never
-   a mix that fails a checksum while `fsck` said ok.
+   must yield the tree of a committed generation at or after the last
+   `fsync` or `sync` that returned before the crash point, never a mix that
+   fails a checksum while `fsck` said ok.
 2. **QEMU:** `mkfs` an image that ROADMAP §10.2's volatile-cache device
    serves as the guest's virtio-blk disk with a volatile write cache, boot a
    write loop that `fsync`s, `kill -9` QEMU at a randomized point after the
@@ -570,11 +581,11 @@ v1's tests do not check this pass criterion yet:
   replays one workload once per device operation N (a write or a flush),
   applies ops 1 to N in order, drops every later op, and checks only that
   `fsck` reports 0 errors
-  and `mount` succeeds; the committed-prefix oracle and reordering since
-  the last flush arrive with ROADMAP §12.5
+  and `mount` succeeds; the committed-generation oracle and reordering
+  since the last flush arrive with ROADMAP §12.5
 - the QEMU test (`tests/harness/run_vibefs_crash.py`) passes when
   `fsck-vibefs` prints `errors 0`. It does not read `/crash/w` from the
-  image or compare it with a committed prefix. The guest ignores `sync_fs`
+  image or check it against that criterion. The guest ignores `sync_fs`
   errors, and the 64-block image fills near generation 57 (§6, F014),
   after which rounds kill a volume that no longer changes; and it kills
   QEMU over a plain file image, which loses no write QEMU received (F080;
