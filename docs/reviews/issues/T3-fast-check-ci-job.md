@@ -7,7 +7,7 @@
 | **Depends on** | Q1 (`make check`), T2 |
 | **Blocks** | — |
 | **Review** | [ARCHITECTURE_REVIEW.md §4.6](../ARCHITECTURE_REVIEW.md#46-testing-strategy--coverage) |
-| **Status** | Implemented |
+| **Status** | In the [index](README.md). #82. |
 
 ## Problem
 

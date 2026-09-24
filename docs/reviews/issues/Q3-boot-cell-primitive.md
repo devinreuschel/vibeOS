@@ -7,7 +7,7 @@
 | **Depends on** | — |
 | **Blocks** | A3 step 5, D1, D3 |
 | **Review** | [ARCHITECTURE_REVIEW.md §4.2](../ARCHITECTURE_REVIEW.md#42-code-quality--consistency) |
-| **Status** | Implemented (this PR). `BootCell`/`IrqCell` in `src/cell.rs`; wrappers migrated. Host tests via `#[cfg(test)]` in `vibeos-core`. |
+| **Status** | In the [index](README.md). #87: `BootCell`/`IrqCell` in `src/cell.rs`; wrappers migrated. Host tests via `#[cfg(test)]` in `vibeos-core`. |
 
 ## Problem
 

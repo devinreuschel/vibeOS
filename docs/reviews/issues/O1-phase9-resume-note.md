@@ -1,6 +1,6 @@
 # O1 · Note the Phase 9 pause and resume; research notes deferred
 
-**Superseded 2026-09-22.** Phase 9 exit closed the same day (9C, CHANGELOG
+**Status:** in the [index](README.md). 2026-09-22: Phase 9 exit closed the same day (9C, CHANGELOG
 `[Unreleased]`). Do not implement this issue as written — there is nothing
 to "resume". Research notes stay deferred (maintainer: "not there yet").
 

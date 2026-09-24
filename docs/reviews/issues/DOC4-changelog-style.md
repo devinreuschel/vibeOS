@@ -1,6 +1,6 @@
 # DOC4 · Keep `CHANGELOG.md` short and user-facing
 
-**Status:** implemented.
+**Status:** in the [index](README.md). #81.
 
 | | |
 |---|---|

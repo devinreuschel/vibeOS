@@ -1,6 +1,6 @@
 # E3 · Make the marker-vs-log rule explicit; one macro per intent
 
-**Status:** implemented. `marker!` in `src/serial.rs`; DESIGN §2.6 and AGENTS carry the rule.
+**Status:** in the [index](README.md). #83: `marker!` in `src/serial.rs`; DESIGN §2.6 and AGENTS carry the rule.
 Unused `print!`/`println!` deleted with Q4.
 
 | | |

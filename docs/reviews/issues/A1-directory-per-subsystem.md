@@ -7,7 +7,7 @@
 | **Depends on** | Q1 (format first so the move is a pure move), A2 (two crates give each half its own tree) |
 | **Blocks** | Q5, D2, DOC2 (final module map) |
 | **Review** | [ARCHITECTURE_REVIEW.md §4.1](../ARCHITECTURE_REVIEW.md#41-architecture--module-boundaries) |
-| **Status** | Not started. A2 landed `crates/core` (`vibeos-core`, sources still `src/*.rs`). Kernel package stays at the repo root (`build.rs` / `linker.ld`); this issue nests both trees. |
+| **Status** | In the [index](README.md). A2 (#88) landed `crates/core` (`vibeos-core`, sources still `src/*.rs`). Kernel package stays at the repo root (`build.rs` / `linker.ld`); this issue nests both trees. |
 
 ## Problem
 

@@ -1,6 +1,6 @@
 # DX1 · A fast local gate (`make check`) and formatter/linter configuration
 
-**Status:** implemented (with B1). rustfmt `--check` as a hard fail is Q1.
+**Status:** in the [index](README.md). #76, with B1. rustfmt `--check` as a hard fail is Q1.
 
 | | |
 |---|---|

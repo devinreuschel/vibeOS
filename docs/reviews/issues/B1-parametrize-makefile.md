@@ -1,6 +1,6 @@
 # B1 · Parametrize the Makefile's ISO recipes; add `make check`
 
-**Status:** implemented (with DX1).
+**Status:** in the [index](README.md). #76, with DX1.
 
 | | |
 |---|---|

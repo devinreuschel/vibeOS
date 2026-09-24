@@ -1,6 +1,6 @@
 # S1 · Finish the pre-ring-3 hardening checklist
 
-**Landed** (#85). SMEP/SMAP/UMIP/`CR0.WP` via `arch::cpu::harden` on BSP and APs;
+**Status:** in the [index](README.md). #85: SMEP/SMAP/UMIP/`CR0.WP` via `arch::cpu::harden` on BSP and APs;
 ktest `cpu_hardening` (skip on `qemu64`); `/dev/random` via virtio-rng then RDRAND then
 xorshift (`dev_random_source`). Parked at the time: the SMAP fault test and the user-VA
 `copy_from_user` rewrite, now ROADMAP §10.6 and a Phase 10 gate line (the HHDM copy ignores

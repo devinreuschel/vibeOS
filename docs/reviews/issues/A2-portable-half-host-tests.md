@@ -7,7 +7,7 @@
 | **Depends on** | C1 (a pinned nightly the tree builds with); B2 (workspace) |
 | **Blocks** | I1, DX1 (macOS `make check`), T4, A1 |
 | **Review** | [ARCHITECTURE_REVIEW.md §4.1](../ARCHITECTURE_REVIEW.md#41-architecture--module-boundaries) |
-| **Status** | Implemented (this PR). Portable crate is workspace member `vibeos-core`; host tests use the host triple. Nested hostlib cargo config and Linux pin deleted. I1 (macOS CI job) stays parked. |
+| **Status** | In the [index](README.md). #88: portable crate is workspace member `vibeos-core`; host tests use the host triple. Nested hostlib cargo config and Linux pin deleted. I1 (macOS CI job) stays parked. |
 
 ## Problem
 

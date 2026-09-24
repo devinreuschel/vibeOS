@@ -7,7 +7,7 @@
 | **Depends on** | C1 (pinned nightly) |
 | **Blocks** | A2 step 5 (workspace), P1 |
 | **Review** | [ARCHITECTURE_REVIEW.md §4.10](../ARCHITECTURE_REVIEW.md#410-build-cicd--release-process) |
-| **Status** | Implemented (#84). Builtin target + rustflags; custom JSON deleted. Hostlib nested cargo config removed in A2. |
+| **Status** | In the [index](README.md). #84: builtin target + rustflags; custom JSON deleted. Hostlib nested cargo config removed in A2. |
 
 ## Problem
 
