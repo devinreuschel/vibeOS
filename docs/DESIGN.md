@@ -1908,10 +1908,11 @@ The BSP patches parameters into the tail of the blob:
 
 Two correctness requirements:
 
-- Write each field with `write_volatile`, and put a `compiler_fence(SeqCst)` between the last write and
-  the SIPI. A plain `copy_nonoverlapping` gives the compiler license to reorder the copy past the MMIO
-  write that starts the AP, and the AP then reads uninitialized parameters. This one is invisible in
-  debug builds.
+- Write each field with `write_volatile`, so the compiler neither merges nor drops a write, and start
+  the AP only through the IPI send, which orders the writes before the SIPI in either APIC mode
+  ([section 7.6](#76-ipis)). A plain `copy_nonoverlapping` followed by a send with no barrier lets the
+  compiler move the copy past the write that starts the AP, and the AP then reads uninitialized
+  parameters. This one is invisible in debug builds.
 - The trampoline page must be identity mapped and executable. The AP starts in real mode and touches
   physical `0x8000` directly, so this cannot go through the physmap. Reserve the frame in the PMM
   forever, even after all APs are up.
@@ -1923,9 +1924,10 @@ else, so two concurrent SIPIs corrupt each other's stack pointer.
 
 For each enabled APIC ID that is not the BSP:
 
-1. Allocate the AP's per-CPU area and its guarded stack. Publish the per-CPU table entry and
-   `compiler_fence(SeqCst)` before sending anything, so the AP can find itself.
-2. Patch the trampoline parameters. Fence.
+1. Allocate the AP's per-CPU area and its guarded stack. Publish the per-CPU table entry with a
+   Release store before sending anything, so the AP can find itself; the INIT and SIPI sends order it
+   ([section 7.6](#76-ipis)).
+2. Patch the trampoline parameters ([section 7.3](#73-ap-trampoline)).
 3. Send INIT. Wait 10 ms, the Intel-specified minimum.
 4. Send SIPI. Wait ~1 ms. Send SIPI again. Some hardware needs the second one; sending two is harmless.
 5. Wait for the AP to set its ready flag, with a 3 second timeout.
@@ -2040,6 +2042,20 @@ Shootdown and call-function work take no lock at all, since a CPU in a serviced 
 whatever it holds ([§2.2](#22-interrupt-handler-rules)). Call-function uses one global slot; the
 initiator holds IF off from publish through reclaim, polling inbound work while it waits.
 
+The IPI send is the publication point. `send_ipi`, the seam's IPI send ([§11.1](#111-the-seam)),
+orders every store its CPU made before the call ahead of the interrupt's arrival, so a handler that
+takes the IPI and then reads a slot, an inbox, or a parameter block sees what the sender wrote. With
+xAPIC the ICR write is an uncached store, which x86 does not reorder with earlier stores, so the send
+needs only a compiler barrier before it. With x2APIC the ICR is MSR `0x830`, and a `WRMSR` to an
+x2APIC register is not serializing (Intel SDM Vol. 3A, MSR access in x2APIC mode), so the send runs
+`mfence` then `lfence` before it, as Linux's `weak_wrmsr_fence` does. It does so on every vendor,
+though Linux skips it on AMD. With GICv3 the send runs `dsb ishst` before the `ICC_SGI1R_EL1` write
+and `isb` after it (ROADMAP §11.7 cites the Arm ARM rule). INIT and SIPI go through the same send.
+Callers publish with a Release store or a locked read-modify-write and add no fence of their own.
+Rule; not yet enforced: `apic_init::send_ipi` has no barrier of its own, and the callers that fence
+(`smp_init::start_one`, `ipi_init::shootdown_va`) do so before their publishing store, which is not
+enough under x2APIC (ROADMAP §20.1).
+
 ## 7.7 Locking with more than one CPU
 
 The global lock order is in [section 2.1](#21-lock-order) and the one-spinlock rule in
@@ -2124,7 +2140,8 @@ SMP bugs are timing dependent, so the tests matter more than usual:
 
 Later:
 
-- x2APIC (ROADMAP §20.1). MSR-based register access, no MMIO, and APIC IDs beyond 255.
+- x2APIC (ROADMAP §20.1). MSR-based register access, no MMIO, and APIC IDs beyond 255. Its ICR
+  `WRMSR` orders nothing before it, so the IPI send fences first ([section 7.6](#76-ipis)).
 - Topology awareness (ROADMAP §19.4): cores, threads, packages, and cache sharing from CPUID leaf
   0x1F, so the scheduler can prefer a sibling core over a remote package.
 - NUMA (ROADMAP §19.7). SRAT and SLIT parsing, per-node buddy allocators, node-local allocation
@@ -2735,8 +2752,9 @@ also services incoming shootdown requests.
 
 **An AP reads garbage parameters and dies.**
 The trampoline parameter block was written with a non-volatile copy, and the compiler was free to
-reorder it past the MMIO write that sent the SIPI. Rule: `write_volatile` per field, plus
-`compiler_fence(SeqCst)` before the SIPI.
+reorder it past the MMIO write that sent the SIPI. Rule: `write_volatile` per field, and start the AP
+through the IPI send, which orders earlier stores for the APIC mode in use ([section 7.6](#76-ipis)).
+A compiler fence alone does not order an x2APIC `WRMSR`.
 
 **Two APs corrupt each other.**
 They shared the trampoline page and its parameter block. Rule: start APs one at a time and wait for
@@ -2768,7 +2786,8 @@ the GDT. CPL=0 IRQs keep the current RSP so boot looked fine; the first CPL=3 IR
 `TSS.RSP0`. Rule: init descriptor bases after the cell owns the tables (`BootCell::as_ptr`).
 
 **A CPU never sees itself in the per-CPU table.**
-The table entry was published without a fence before the SIPI. Rule: publish, fence, then start.
+The table entry was published without a fence before the SIPI. Rule: publish with a Release store,
+then start the AP through the IPI send, which orders the store ([section 7.6](#76-ipis)).
 
 ## 9.6 Hardware polling
 
