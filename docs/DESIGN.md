@@ -274,7 +274,12 @@ outermost first:
    into two objects the file mapping's is taken before the anonymous object's; spinlocks may follow
    it, as after any sleeping lock. It is numbered 3b so that level 4 keeps its number.
 4. a filesystem's block-mapping and volume I/O locks, which its page-fill and writeback paths take
-   and which are never held across a user copy
+   and which are never held across a user copy. Writeback and a filesystem commit take no lock of
+   levels 1 and 2 and take a page busy only by try-lock, coming back later for a page they find
+   busy, so a thread that holds an inode lock, its address-space lock, or a busy page can always
+   wait for writeback progress ([§4.4](#44-kernel-heap) rule 3). A thread that has joined an open
+   vibefs v2 transaction, which a commit waits for, holds it as a level-4 lock
+   ([VIBEFS.md](VIBEFS.md) §15; ROADMAP §14.8)
 
 A user copy may fault, and the fault path takes the address-space lock for reading, then page waits,
 then, to fill a file page, the filesystem's level-4 locks. So a copy to or from user memory is
@@ -1739,9 +1744,19 @@ lock, its own address-space lock, or a busy page-cache page (§2.1's sleeping ti
    any page it cannot take at once. It takes a sleeping lock only by try-lock, which never waits,
    and never takes the address-space lock.
 3. It writes no page. The ROADMAP §12.5 writeback threads write dirty file pages, and ROADMAP
-   §12.7's swap-out thread writes anonymous pages. Direct reclaim wakes those threads and then waits, with a
-   deadline, only for writes already submitted to a device. When that frees too little, the OOM
-   killer runs. That wait stands outside §2.1's order, though the reclaiming thread may hold a
+   §12.7's swap-out thread writes anonymous pages. When a pass frees too little, direct reclaim
+   wakes those threads, waits up to 100 ms for writeback progress (any page cleaned or freed), and
+   reclaims again. A pass that frees nothing counts toward a limit of 16 in a row, and one that
+   frees anything resets the count. After 16 the OOM killer runs, whatever writeback is still
+   pending or in flight, so an allocation waits at most about 1.6 s for that decision, and a device
+   that has stopped completing delays it no longer than a slow one. These are Linux's figures
+   (`MAX_RECLAIM_RETRIES` and its 100 ms reclaim throttle). A thread that holds a lock writeback may
+   need, a level-4 lock or a reverse-map lock (§2.1), runs the same passes, but each waits only
+   until a write already submitted to a device completes or 100 ms pass, and after 16 its
+   allocation fails with `ENOMEM` instead of running the OOM killer, since the writeback it would
+   wait for may need that lock. The allocator reads the thread's count of such locks at entry, with
+   rule 1's conditions; each of those locks raises the count when it is taken and lowers it when it
+   is released. That wait stands outside §2.1's order, though the reclaiming thread may hold a
    block-mapping or volume lock: the completion that ends it takes no sleeping-tier lock, in the
    device's bottom half ([§5.4](#54-irq-registration)) or in any later completion stage, and a
    filesystem's end-of-write work that needs its own locks runs in its writeback thread after the
@@ -1764,13 +1779,17 @@ and reclaim's wait for a grace period (rule 3) would wait on that thread itself.
 
 Linux guards the same recursion with per-call `GFP_NOFS` and `GFP_NOIO` flags and has moved page
 writeback out of direct reclaim. These rules take the second route everywhere, so no call site
-carries a flag. Rejected:
+carries a flag. Where a thread must not wait for writeback, rule 3 decides from the locks it holds,
+as Linux's scoped `memalloc_nofs_save` does, not from a flag at the call. Rejected:
 - per-call reclaim flags, the shape of Rust-for-Linux's `KBox::new(x, flags)`, which add one more
   decision to every allocation;
 - writeback from direct reclaim, which needs those flags.
 
-Cost: when most reclaimable memory is dirty, an allocation waits for the writeback threads rather
-than writing itself. ROADMAP §12.5's dirty limit throttles writers before it comes to that.
+Cost: when most reclaimable memory is dirty, an allocation waits for writeback progress rather than
+writing itself, up to 16 passes of 100 ms before the OOM killer runs, and a thread that holds a
+level-4 or reverse-map lock gets `ENOMEM` after its 16 passes, where Linux retries a small
+`GFP_NOFS` allocation without end. ROADMAP §12.5's dirty limit throttles writers before it comes to
+that.
 
 The reserve (ROADMAP §12.6) is R frames of the buddy's free count: a level of that count, not a
 separate pool. R is sized at boot as Linux sizes `min_free_kbytes`: the square root of 16 times the
