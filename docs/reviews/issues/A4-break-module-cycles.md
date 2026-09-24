@@ -32,7 +32,7 @@ Split "raw" from "policy" at the bottom (serial), replace upward calls with hook
 
 ## Implementation plan
 
-1. **`serial` raw layer.** Split `src/serial.rs` into `serial/raw.rs` (port I/O, the `TX` lock, `write_bytes_raw`, `try_write_bytes`, `HALTING: AtomicBool` + `set_halting()`) and `serial/mod.rs` (`Serial`, `PlainSerial`, `line`, which call `log_init::capture_serial`). `ipi_init::halt_others` calls `serial::raw::set_halting()` (downward). `log_init` and `panic` import only `serial::raw`.
+1. **`serial` raw layer.** Split `src/serial.rs` into `serial/raw.rs` (port I/O, the `TX` lock, `write_bytes_raw`, `try_write_bytes`, `HALTING: AtomicBool` + `set_halting()`, the dump owner's CPU id, which replaces `panic.rs`'s `DUMPING`, and `write_owner()`, which takes no lock and no `InterruptGuard` and writes only on the owner; once `HALTING` is set, a write on any other CPU calls a stop hook that `ipi_init::init` installs, as step 2 installs `SPIN_POLL` (DESIGN §2.5 step 1)) and `serial/mod.rs` (`Serial`, `PlainSerial`, `line`, which call `log_init::capture_serial`). `ipi_init::halt_others` calls `serial::raw::set_halting()` (downward). `log_init` and `panic` import only `serial::raw`.
 2. **Spin hook.** In `sync_init`: a `static SPIN_POLL: AtomicPtr<()>` holding an `fn()`; `SpinMutex::lock` calls it in the spin loop if set. `ipi_init::init` installs `service_incoming`. `sync_init` no longer imports `ipi_init`. Note the hook in DESIGN §7.9.
 3. **Split sync.** `sync/spin.rs` (`SpinMutex`, `InterruptGuard`, rank accounting; no thread dependency) and `sync/blocking.rs` (`BlockingMutex`, `Condvar`, `RwLock`, `Semaphore`, `Channel`; depends on thread). `thread_init` imports `sync::spin` only.
 4. **IPI ↔ thread.** Move `drain_inbox` into `thread_init` (the inbox is scheduler state; `ipi_init` only raises the vector). `ipi_init` reaches the scheduler through a small `SchedHooks { wake_inbox: fn(u32), reschedule: fn() }` installed by `sched_init::init`. `thread_init → ipi_init::send_reschedule(cpu)` remains (downward).
@@ -43,7 +43,7 @@ Split "raw" from "policy" at the bottom (serial), replace upward calls with hook
 ## Acceptance criteria
 
 - `scripts/check_cycles.py` reports zero two-cycles.
-- `src/serial/raw.rs` imports nothing from `crate::` except `x86` and `sync::spin`.
+- `src/serial/raw.rs` imports nothing from `crate::` except `x86` and `sync::spin`; `write_owner` takes no lock and no `InterruptGuard`.
 - All tiers green; panic e2e still shows `rust_begin_unwind` and `logrec` lines (the serial split must not lose capture).
 
 ## Tests
