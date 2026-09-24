@@ -1305,7 +1305,7 @@ return. Each item here is a live bug or a trap for Phase 12 and 13.
 A hang or a panic under QEMU explains itself from the host, without a rerun. It lands early: the §10.2
 retry root-causing and Phases 11 to 13 debug their hangs with it.
 
-- [ ] on a timeout, or on a panic once the kernel's dump has ended, the harness takes a guest core over the QEMU monitor before it stops QEMU: `dump-guest-memory -p`, an ELF core with the kernel's virtual mappings and one register note per CPU, which `gdb` and the §10.1 `make debug` script open (not `-z`, whose kdump format `gdb` cannot read); an x86_64 panic signals the ISA `pvpanic` device with `-action panic=pause`, as aarch64 does (§11.7), instead of `isa-debug-exit`, so QEMU stays up for the dump and the harness then fails the run; CI uploads a failed run's core (compressed with zstd on the host), kernel ELF, and QEMU command line as one artifact; a job in a workflow that names an environment or a secret uploads no core, memory dump, or QEMU command line, and `scripts/check_workflows.py` fails on one that does
+- [ ] on a timeout, or on a panic once the kernel's dump has ended, the harness takes a guest core over the QEMU monitor before it stops QEMU: `dump-guest-memory -p`, an ELF core with the kernel's virtual mappings and one register note per CPU, which `gdb` and the §10.1 `make debug` script open (not `-z`, whose kdump format `gdb` cannot read); an x86_64 panic signals the ISA `pvpanic` device with `-action panic=pause`, as aarch64 does (§11.7), instead of `isa-debug-exit`, so QEMU stays up for the dump and the harness then fails the run; CI uploads a failed run's core (compressed with zstd on the host), kernel ELF, and QEMU command line as one artifact, which is public (DESIGN §1.5); a job in a workflow that names an environment or a secret uploads no core, memory dump, or QEMU command line, and `scripts/check_workflows.py` fails on one that does
 - [ ] a hostlib core tool reads a core with the kernel ELF and prints a symbolized frame-pointer backtrace for every CPU, every thread's state and saved context from the TCB table, each CPU's current thread and run queue, and the last 64 records of the §5.5 log ring; the harness prints its report after the serial tail
 - [ ] the log ring, TCB, and per-CPU types the tool reads are the portable crate's and `#[repr(C)]` (`IrqCell`, `log::Record`, `Ring`, and `Logger` are not today), with `const` assertions on their sizes and field offsets, outside `cfg(loom)`, that compile into both the kernel and the host tool, so the kernel and the host tool, built on Linux or macOS, cannot disagree, as `mkfs-vibefs` and `fsck-vibefs` share vibefs's format
 - [ ] a flight recorder (moved from §19.1): a per-CPU ring of fixed-size records (timestamp, CPU, event, two arguments); each CPU writes only its own ring, with interrupts off for the few stores a record takes, so no lock is taken; the NMI, `#MC`, and `#DB` handlers do not record, since `cli` does not mask them, and each record carries a sequence number so the tool drops a torn last record; it is on in every build, so a hang of the production ISO carries a trace too
@@ -1345,7 +1345,7 @@ Gate lines, CI timings, and dependencies as data a script reads.
 - [ ] a gate map from Phase 10 on: `tests/gates/phase-<N>.toml` gives each exit-gate line of phase N, keyed by its text, the entries that prove it, each a local command, a scheduled CI job on GitHub-hosted runners that must be green on the gated commit, read through `gh`, or a dev-host record; a line with several entries, such as one per architecture or accelerator, passes only when all of them pass; the entries of a line that names a `scripts/check_*.py` include one that runs it, and `scripts/check_gates.py` (below) fails when none does; each later phase adds its map in the slice that closes its gate, and Phases 0 to 9 get none
 - [ ] `make gate PHASE=N` checks every entry, prints pass or fail per gate line, and fails when a gate line other than the tag has no entry, when an open box in Phase N's sections, outside a subsection headed `Stretch:`, carries no `lands in §M.x` note with M greater than N, and when an open box anywhere in this file carries a `lands in` note naming a section of Phase N, printing each such box, with harness tests of both rules; no entry runs `make gate` itself, so the entry for a line that names it runs that line's other checks; the maintainer runs it before tagging, and `release.yml`'s `build` job runs it at the release tag's commit for the phase that tag closes, and nothing is signed or published when it fails; `scripts/check_gates.py` in `make check` fails when an entry's text matches no gate line in this file, or a job entry names a workflow whose `runs-on` has a `self-hosted` label
 - [ ] CI history: when a `ci` run completes, a `workflow_run` job reads its jobs and steps from the Actions API and commits one JSON record (commit, event, conclusion, per-job and per-step wall time) to an orphan `ci-history` branch, which outlives the 90-day limit on Actions logs and artifacts; the job has `contents: write` only, checks out only `ci-history`, runs no code from the triggering commit, never puts run fields (which a fork's pull request sets) into a shell line, writes one file per run id, and retries its push after a rebase, so concurrent runs lose no record; later lines add workflows and fields to the record; `scripts/ci_history.py` prints any step's series and fails when a `ci` run on `main` since the history landed has no record, and gains modes that gate-map entries run as local commands, such as §21.1's `--nested`, which needs a passing leg of each vendor's path within the nightly job's last 7 runs; §10.1's push-to-green numbers are read from it
-- [ ] dev-host records, for a gate line or the part of one that runs under HVF, since no hosted CI runner can run an HVF guest: on the Apple Silicon dev host, `make gate PHASE=N RECORD=1` runs each record entry's command in a clean checkout of the gated commit and writes one JSON file per commit and entry (commit, the fixed host label `dev-host` and the Mac model, macOS and QEMU versions, command, the numbers the line measures, pass or fail) to `ci-history`, and never the machine's hostname, a user name, or a path under the home directory, since `ci-history` is public, retrying its push after a rebase; everywhere else, `release.yml` included, `make gate` runs no record entry's command and passes the entry only when `ci-history` holds a passing record for it at the gated commit. A job entry passes on a green run of its workflow at the gated commit from any trigger; when there is none, the maintainer starts one before tagging with `gh workflow run` on a branch at that commit, so every workflow a gate entry names has a `workflow_dispatch` trigger; `release.yml` reads runs and starts none
+- [ ] dev-host records, for a gate line or the part of one that runs under HVF, since no hosted CI runner can run an HVF guest: on the Apple Silicon dev host, `make gate PHASE=N RECORD=1` runs each record entry's command in a clean checkout of the gated commit and writes one JSON file per commit and entry (commit, the fixed host label `dev-host` and the Mac model, macOS and QEMU versions, command, the numbers the line measures, pass or fail) to `ci-history`, and never the machine's hostname, a user name, a path under the home directory, or a serial number, since `ci-history` is public (DESIGN §1.5), retrying its push after a rebase; everywhere else, `release.yml` included, `make gate` runs no record entry's command and passes the entry only when `ci-history` holds a passing record for it at the gated commit. A job entry passes on a green run of its workflow at the gated commit from any trigger; when there is none, the maintainer starts one before tagging with `gh workflow run` on a branch at that commit, so every workflow a gate entry names has a `workflow_dispatch` trigger; `release.yml` reads runs and starts none
 - [ ] `deny.toml`, and `cargo deny check licenses bans sources` in `make check` (skipped with a hint when `cargo-deny` is not installed, and installed at a pinned version in the `check` job): licenses from an allowlist compatible with the tree's MIT license, crates.io as the only source, and a `[bans]` allow list naming every crate in the graph, so a pull request that adds a dependency fails until it names the crate there, which turns AGENTS.md's dependency note into a check; `cargo deny check advisories` on the nightly job, since it fetches the RustSec database
 - [x] `scripts/check_review_refs.py`, which `make check` runs, fails when a finding id in [reviews/KERNEL_REVIEW.md](reviews/KERNEL_REVIEW.md) is cited by no line in this file or a cited id names no finding; its `--closed` mode also fails while a CRITICAL or HIGH finding without a LATENT tag is cited by an open box in Phases 0 to 10; `tests/harness/test_review_refs.py` tests it
 - [ ] `scripts/check_review_refs.py` reads `tests/gates/phase-10-needs.toml`: each row names a box by a key, a substring of exactly one line of this file, and lists the keys of the boxes it cannot be ticked before, and `[wave1]` lists the wave-1 boxes that cite no CRITICAL or HIGH finding. `make check` fails when a key matches no line or several, when a row needs a box in a phase after Phase 10, or when a box in Phases 0 to 10 has a lands-after, lands-with, or lands-before clause and neither has a row nor appears in one. `--wave 1` fails while any wave-1 box is open, the boxes `--closed` checks and the listed ones with every box they need through the rows, and `--print-wave 1` prints them; `tests/harness/test_review_refs.py` covers each case
@@ -4607,6 +4607,23 @@ owner when this section is reached, through the box above. Nothing before Phase 
 > answer, release images refuse a remote collector and `netconsole=` (§25.4, §25.6), which is (b) in
 > effect, so nothing ships that either answer forbids.
 
+> **OWNER DECISION NEEDED (review J029)**: whether the crash-report record above reaches the project's
+> own machines. The record says crash data is not posted publicly. The project's CI guests crash too,
+> and so will the test machines a funded goal buys. §10.7 uploads a failed run's guest core as a
+> workflow artifact, which anyone signed in to GitHub can download for up to 90 days, and §39.3 files a
+> supported branch's crash as a public issue with the core tool's text report. A CI guest holds no
+> person's data and no secret but the public test keys (DESIGN §1.5). Options: (a) Recommended: the
+> record governs users' machines, and the project's own follow DESIGN §1.5's published-data rule: CI
+> guests' cores stay public artifacts and their reports public issues, and a physical test machine
+> publishes a scrubbed text report, never a dump. Any agent or contributor can then debug a CI failure
+> from its artifact. (b) The record reaches the project's machines too: every core and report from CI
+> and the rig is sealed to a triage key the maintainer holds, with X25519 on the §14.7 crate, so until
+> Phase 14 CI uploads no core; an issue names only the job and a crash id, and a CI failure is triaged
+> only in the maintainer's session on the dev host. DESIGN §1.5's first bullet then says so. Until you
+> answer, CI does (a): §10.7 lands in Phase 10, before the crate that sealing needs, and a CI guest's
+> core holds nothing the record protects. The block above asks what the record covers on users'
+> machines; answer both together, and the record is edited once.
+
 ### 37.5 Stretch: dogfood
 - [ ] a person uses vibeOS in the desktop guest under HVF on the dev host as their only desktop for 14 consecutive days; its session log shows the days, and every problem filed has a regression test or an open box in this file
 
@@ -4749,7 +4766,7 @@ physical machines are [Funded goals](#funded-goals).
 - [ ] the latest two minor releases supported: security and data-loss fixes backported and shipped as `v1.<m>.<p>`, and each supported branch running the full ladder and `make verify` nightly, and the §23.6 suites on the weekly schedule `main` uses, on both architectures; GitHub runs scheduled workflows only on the default branch, so `main`'s scheduled workflows start the supported branches' runs through `workflow_dispatch`, staggered inside §10.1's scheduled share of 10 concurrent jobs (at most 5 of them macOS), which they share with `main`'s own scheduled workflows, the release soaks below, and Phase 22's release-candidate fuzz campaigns, so pushes keep the other 10; a job that finds the share full waits for a slot in the order it was requested, and DESIGN §8.6 records the schedule and each run's peak job count
 - [ ] backports by `scripts/backport.py`: `git cherry-pick -x`, and the fix's regression test must fail on the branch without the fix and pass with it, or the backport is refused; a change to the release build interface (`make release-artifacts` and the files it runs, §22.1) proves itself instead by a key-free dry run on the branch after the backport: `release.yml` dispatched with its `dry_run` input, which stops before any key job, whose `build` job and reproducibility comparison pass
 - [ ] each later release candidate, and each patch release on a supported branch, passes a 72-hour soak of §30.7's workload on the commit being released before it is cut, run and checked as the exit gate's 168-hour run is; each commit's soak is its own chain of §25.7 shards, so soaks of different commits run side by side, each shard waiting its turn for a slot in §10.1's scheduled share
-- [ ] a Phase 25 crash record from a supported branch's nightly or soak is filed as an issue against that branch, with the dump attached
+- [ ] a Phase 25 crash record from a supported branch's nightly or soak is filed as an issue against that branch, carrying the §10.7 core tool's text report and, for a guest, a link to the run's artifact; a physical machine's dump stays on the rig host (DESIGN §1.5)
 - [ ] every scheduled fuzz job (§10.2, §13.13, §15.10, §18.5, §21.8, and each later one) files a new crash as a `fuzz-crash` issue with its seed or reproducer, and the release workflow refuses to cut a release while one has been open more than 14 days
 - [ ] the release workflow refuses to cut a release when the newest §22.5 drill record is more than 12 months old or does not name every supported branch
 - [ ] the end of a release's support announced one release ahead in the release notes
@@ -4905,6 +4922,7 @@ ERST, GHES, and a BMC, it can also be the x86_64 long-run server; it can be the 
 
 §10.9:
 - [ ] `scripts/check_gates.py` accepts a job entry whose workflow runs on a self-hosted runner only when that workflow's only triggers are `schedule` and `workflow_dispatch`, and `make gate PHASE=N RECORD=1` records a hand reading on a physical machine, each with a host test
+- [ ] the rig host's published-data step (DESIGN §1.5): `scripts/scrub_record.py` replaces serial numbers (SMBIOS, PCIe device serial numbers, NVMe, SATA, USB, EDID), MAC addresses, UUIDs, and hostnames in a text record with fixed placeholders, with host tests over records that plant each; every record, log, or report a rig-host job uploads or commits passes through it; and a job that reads a physical machine's dump or firmware tables keeps them in a store on the rig host that no workflow uploads, and uploads only its text report
 
 §18.3:
 - [ ] the Phase 18 exit gate's measured-cost entries include the x86_64 test PC's CPU model booted bare metal, and the harness test that compares the boot log's mitigation list with the document's list runs there (F024, F131)
@@ -4912,7 +4930,7 @@ ERST, GHES, and a BMC, it can also be the x86_64 long-run server; it can be the 
 Phase 20 exit gate, before the tag line:
 - [ ] boots from USB on the x86_64 test PC, and on a second, physically different x86_64 machine once one exists, with output on a serial adapter or the screen
 - [ ] on each of those machines: Phase 7's pattern and concurrent read-write tests pass on a scratch partition of its internal disk; a TCP client fetches 1 GiB from a peer through vibeOS's driver for its NIC with no corruption, as the Phase 15 gate does over virtio-net; and `evtest` reads a key typed on a USB keyboard from its `/dev/input/event<N>` node
-- [ ] the AML interpreter loads the DSDT and SSDTs of each of those machines, host-tested against their `acpidump` output, which joins the §20.2 corpus, and `_PRT` resolves PCI interrupt routing on each
+- [ ] the AML interpreter loads the DSDT and SSDTs of each of those machines, host-tested against their `acpidump` output in a rig-host job that reads it from the rig host's unpublished store, with the results derived from it checked in (DESIGN §1.5), and `_PRT` resolves PCI interrupt routing on each
 - [ ] S3 suspend and resume on the machine whose firmware offers S3, with its disk, NIC, and USB keyboard working afterward
 - [ ] on each of those machines, `poweroff` enters S5 through its FADT's PM1 control blocks and `_S5`, read on the plug-in power meter as the machine's soft-off draw, and `reboot` restarts it through the FADT reset register, each after the log line naming the path it takes (F097)
 - [ ] idle power measured with the plug-in power meter on each machine at the shallowest and deepest C-state §20.2 enables, with tickless idle on and off, the numbers in `docs/HARDWARE.md`'s physical section
@@ -5043,7 +5061,7 @@ Phase 20 exit gate, before the tag line:
 - [ ] it netboots a built image nightly under its §20.8 self-hosted nightly job, and `make test` passes on vibeOS booted on it, on the terms of the Phase 17 gate
 
 §20.7:
-- [ ] its firmware's ACPI as that firmware writes it: the FADT boot flags, MADT, GTDT, SPCR, MCFG, IORT with its RMR nodes, and SRAT, and the GIC and ITS where the firmware puts them; its `acpidump` added to the §20.2 corpus
+- [ ] its firmware's ACPI as that firmware writes it: the FADT boot flags, MADT, GTDT, SPCR, MCFG, IORT with its RMR nodes, and SRAT, and the GIC and ITS where the firmware puts them; its `acpidump` read, as the x86_64 test PC's are, from the rig host's unpublished store (DESIGN §1.5)
 - [ ] §20.6's igb or e1000e built and exercised on it, and serial over its own UART
 
 §20.8:
@@ -5416,8 +5434,8 @@ Phase 31 exit gate, before the tag line:
 - [ ] on the reference laptop, the rig's lid magnet suspends it and releasing the lid resumes it; the power-button actuator starts an orderly shutdown through init; switching the charger's outlet off and on is reported within 2 s by the kernel and by UPower from Alpine
 - [ ] `libinput list-devices` from Alpine reports the reference laptop's touchpad, keyboard, and lid switch with the capabilities Fedora reports on the same machine
 - [ ] the rig's HID injector, presenting as a USB precision touchpad, drives tap, two-finger scroll, pinch, and two-finger right click through libinput on the reference laptop, checked from `libinput debug-events`
-- [ ] every hotkey in a list captured with `evtest` under Fedora on the reference laptop and checked in produces the same evdev key in a host test: scan codes through the §5.2 decoder, and ACPI and WMI events through the §20.2 interpreter on the machine's `acpidump` tables
-- [ ] on the reference laptop, PCIe links reach their L1 substates and idle devices D3cold wherever Fedora reaches them on the same machine (from `lspci -vv` and `power/runtime_status` captured under Fedora and checked in), each resumes on use, and the §31.4 counters show it
+- [ ] every hotkey in a list captured with `evtest` under Fedora on the reference laptop and checked in produces the same evdev key in a host test: scan codes through the §5.2 decoder, and ACPI and WMI events through the §20.2 interpreter on the machine's `acpidump` tables, which a rig-host job reads from the rig host's unpublished store (DESIGN §1.5)
+- [ ] on the reference laptop, PCIe links reach their L1 substates and idle devices D3cold wherever Fedora reaches them on the same machine (from `lspci -vv` and `power/runtime_status` captured under Fedora, passed through the rig host's scrub step, and checked in), each resumes on use, and the §31.4 counters show it
 - [ ] the loader serves §20.1's microcode on the reference laptop
 
 §31.1, host-tested against the linuxhw/ACPI corpus's notebook tables before the laptop arrives:
@@ -5585,9 +5603,9 @@ Phase 36 exit gate, before the tag line:
 
 ### Wireless rig
 
-**Buy.** Two Wi-Fi 6E access points with WPA3 that the rig controls, AX210 cards for the desktop and for
-the aarch64 server on a PCIe adapter, and microcontrollers for a BLE keyboard and mouse and a Classic
-Bluetooth A2DP sink. An Intel BE200 for the Wi-Fi 7 stretch.
+**Buy.** Two Wi-Fi 6E access points with WPA3 that the rig controls, their BSSIDs included, AX210 cards
+for the desktop and for the aarch64 server on a PCIe adapter, and microcontrollers for a BLE keyboard
+and mouse and a Classic Bluetooth A2DP sink. An Intel BE200 for the Wi-Fi 7 stretch.
 
 **Cost.** About $450, and about $30 for the BE200 (2026 estimates). Needs the reference laptop.
 
@@ -5605,10 +5623,10 @@ suspend and power save with Wi-Fi up, and BLE and A2DP pairing with real periphe
 - [ ] the HID injector's BLE keyboard and mouse mode
 
 §35.2:
-- [ ] captures from the rig's access points, taken in monitor mode on Fedora, replayed as host tests
+- [ ] captures from the rig's access points, taken in monitor mode on Fedora with the rig's locally administered BSSIDs and randomized station addresses, keeping only frames to or from them as they are taken (DESIGN §1.5), replayed unmodified as host tests
 
 §35.5:
-- [ ] host tests that replay btsnoop captures of real pairings through the kernel's HCI and SMP code
+- [ ] host tests that replay btsnoop captures of real pairings with the rig's own peripherals through the kernel's HCI and SMP code
 
 §35.6, Stretch:
 - [ ] Wi-Fi 7 and multi-link operation on an Intel BE200

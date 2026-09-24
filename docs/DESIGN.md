@@ -179,6 +179,30 @@ license. The kernel review's spot check found no such copy, but no rule said so.
 in-tree fails where test vectors do not look (timing, nonce reuse, signature malleability), and one
 such bug forges a package; the crates have had the review this project cannot give them.
 
+**Published data.** The repository is public, and so is everything its workflows log, upload,
+commit, or file: artifacts, issues, the `ci-history` branch, and release assets. None of it carries
+a person's data or a secret:
+
+- A CI guest holds no personal data and no secret but the public test keys (ROADMAP §14.3), and a
+  job that holds a secret uploads no core (ROADMAP §10.7), so a guest's core, log, and report are
+  published as they are. An issue a workflow files carries the ROADMAP §10.7 core tool's text report
+  and a link to the run's artifact, never an attached dump. A dump needed after its artifact expires
+  is regenerated from its commit and seed.
+- A physical machine's memory dump and firmware tables (`acpidump`, SMBIOS) are never committed or
+  published: the AML in them is the vendor's proprietary code (ROADMAP §14.10), and an OEM's MSDM
+  table holds a Windows product key. Host tests read them on the rig host from a store no workflow
+  uploads, the tree commits only results derived from them (method results, `_PRT` routes, hotkey
+  lists), and a crash leaves the rig host only as its text report.
+- Captures are clean where they are taken, so they replay unmodified: the rig's access points use
+  locally administered BSSIDs, its test stations randomized addresses, and its Bluetooth pairings
+  its own peripherals, and a monitor-mode capture keeps only frames to or from those addresses as it
+  is taken. A text record from a physical machine (`lspci -vv`, a kernel log, a test result) leaves
+  the rig host only through a host-tested scrub step that replaces serial numbers, MAC addresses,
+  UUIDs, and hostnames with fixed placeholders, as ROADMAP §10.9 keeps hostnames and home paths out
+  of dev-host records.
+
+ROADMAP §37.4's crash-report record decides what may leave a user's machine.
+
 ---
 
 # 2. Invariants
