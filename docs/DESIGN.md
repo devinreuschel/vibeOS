@@ -1836,14 +1836,31 @@ Flat segmentation. Segments exist because the CPU requires them, not because we 
 | `0x00` | null |
 | `0x08` | kernel code, 64-bit, ring 0 |
 | `0x10` | kernel data, ring 0 |
-| `0x18` | user data, ring 3 |
-| `0x20` | user code, 64-bit, ring 3 |
-| `0x28` | TSS (16 bytes, two GDT entries) |
+| `0x18` | null |
+| `0x20` | null: Linux's compat user code (`__USER32_CS`); 32-bit user code is a non-goal |
+| `0x28` | user data, ring 3 (selector `0x2b`) |
+| `0x30` | user code, 64-bit, ring 3 (selector `0x33`) |
+| `0x38` | TSS (16 bytes, two GDT entries) |
 
 User selectors go in from the start even before ring 3 exists. `syscall`/`sysret` reads segment
-selectors out of `IA32_STAR` with a fixed layout: `STAR.SYSCALL_CS = 0x08` so kernel SS is CS+8, and
-`STAR.SYSRET_CS = 0x10` so user SS is +8 (`0x18`) and user CS is +16 (`0x20`). User *data* therefore
-sits before user *code*. Getting the order right up front avoids a rebuild of the GDT later.
+selectors out of `IA32_STAR` with a fixed layout: `STAR.SYSCALL_CS = 0x08`, so kernel SS is CS+8
+(`0x10`), and `STAR.SYSRET_CS = 0x23`, so a 64-bit `sysret` loads SS from +8 (`0x2b`) and CS from +16
+(`0x33`), as Linux programs STAR. User *data* therefore sits before user *code*. Getting the order
+right up front avoids a rebuild of the GDT later.
+
+The user selectors are ABI, so they take Linux's values: `mov %cs`, the signal `ucontext`, `ptrace`'s
+`user_regs_struct`, and a core's `NT_PRSTATUS` expose them, and gdb's native Linux target treats a
+process as 64-bit only when CS is `0x33`, and as x32 when DS is `0x2b`. Ring 3 runs with CS `0x33`, SS
+`0x2b`, and the null selector in DS, ES, FS, and GS, whose bases come from the MSRs, as a 64-bit Linux
+process does. `execve` and a new process's first entry load the null selector into those four, `fork`
+and `clone` copy the parent's, and the context switch keeps each thread's
+([section 7.5](#75-per-cpu-data)), since ring 3 can load `0x2b` or 0 itself. Slot `0x20` stays null
+because it is Linux's compat code segment, and a far transfer or `rt_sigreturn` to `0x23` gets
+`SIGSEGV` (`docs/LINUX.md`, `no-compat-cs`). The kernel selectors are invisible to user code and keep
+their places. Rule; not yet enforced: ROADMAP §10.6. Today user data is `0x18`, user code `0x20`, and
+the TSS `0x28`, and `STAR.SYSRET_CS` is `0x10`, so ring 3 runs with CS `0x23`, which is Linux's compat
+code selector, and SS `0x1B`, and `enter_user` and `enter_user_full` load `0x1B` into DS, ES, FS, and
+GS.
 
 User-memory access will go through `copy_from_user`/`copy_to_user`, which dereference the user VA
 inside `stac`/`clac` (ROADMAP §10.6); pointer ranges are validated before use (ROADMAP §9.3). Today it
@@ -2531,7 +2548,7 @@ Relevant MSRs across this section:
 | `0x1B` | `IA32_APIC_BASE`. Bit 11 global enable, bits 12–35 base, bit 8 BSP flag. |
 | `0x6E0` | `IA32_TSC_DEADLINE`. Write 0 to disarm. After an LVT timer write into TSC-deadline mode, `MFENCE` before this MSR. |
 | `0xC000_0080` | `IA32_EFER`. Bit 0 SCE, bit 8 LME, bit 11 NXE. |
-| `0xC000_0081` | `IA32_STAR`. `SYSCALL` loads CS `0x08`; `SYSRET` base `0x10` gives user SS `0x1B` and CS `0x23`. |
+| `0xC000_0081` | `IA32_STAR`. `SYSCALL` loads CS `0x08`; `SYSRET` base `0x10` gives user SS `0x1B` and CS `0x23`. Planned (ROADMAP §10.6): base `0x23`, giving SS `0x2b` and CS `0x33`, as on Linux ([section 5.1](#51-gdt-and-tss)). |
 | `0xC000_0082` | `IA32_LSTAR`. `vibeos_syscall_entry`. |
 | `0xC000_0084` | `IA32_FMASK`. `0x47700`: `SYSCALL` clears TF, IF, DF, IOPL, NT, and AC. |
 | `0xC000_0100` | `IA32_FS_BASE`. User TLS base, written by `enter_user`, `enter_user_full`, and `execve`; not switched per thread ([section 7.5](#75-per-cpu-data)). |
@@ -2698,6 +2715,7 @@ for every thread, such as `CR4.TSD` or `SCTLR_EL1.UCT`, is a row of §11.4's tab
 | DR6 | the thread's virtual DR6 | not switched: the `#DB` body writes the thread's copy from the DR6 its entry saved (§5.10) | not built: ROADMAP §17.4 |
 | aarch64: `DBGBVR`/`DBGBCR`, `DBGWVR`/`DBGWCR`, `MDSCR_EL1.MDE` | the thread's decoded debug slots | the switch, by the Debug state paragraph below | not built: ROADMAP §17.4 |
 | aarch64: `MDSCR_EL1.SS` | the thread's step flag, with `SPSR.SS` in its frame | set at the return to EL0 and cleared at entry from EL0, by the Debug state paragraph below | not built: ROADMAP §17.4 |
+| DS, ES, FS, and GS selectors | the thread's own four, saved at the switch away | `on_switch`, which loads the incoming thread's four before it writes `FS_BASE` and `GS_BASE`, since a selector load can clear the matching base | Rule; not yet enforced: ROADMAP §10.6 ([section 5.1](#51-gdt-and-tss)). `enter_user` and `enter_user_full` load `0x1B` into all four and nothing saves them, so a selector ring 3 loads with `mov` is lost at the next switch |
 | `PerCpu.syscall_scratch` | per CPU | not switched | valid only while IF=0 (above; F001); one word, the user RSP at entry, once ROADMAP §10.6 keeps the exit's state in the user frame |
 
 The FP binding is one rule on both architectures. A user thread owns FP state from creation:

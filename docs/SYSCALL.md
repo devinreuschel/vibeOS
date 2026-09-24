@@ -37,6 +37,12 @@ and `wait4`), §13.8 (real-time signals), §13.9 (POSIX floor), §13.10
 | return | `rax` | see §2 |
 | clobber | `rcx`, `r11` | RIP and RFLAGS |
 
+Segment selectors are ABI (DESIGN §5.1). The rule ROADMAP §10.6
+implements: a process runs with CS `0x33`, SS `0x2b`, and DS, ES, FS, and GS
+0, as on Linux; `execve` loads them, and `fork` copies the parent's DS, ES,
+FS, and GS. Today ring 3 runs with CS `0x23` and SS, DS, ES, FS, and GS
+`0x1B`.
+
 The entry saves the x87 and SSE state (`fxsave64`) and the exit restores it
 (`fxrstor64`), so a syscall preserves it. Two calls differ from Linux
 (F069; ROADMAP §10.6): a `fork` child starts from the boot FXSAVE
