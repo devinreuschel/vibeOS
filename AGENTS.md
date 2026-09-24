@@ -86,6 +86,6 @@ weekly canary job in `smp-stress.yml`. Not a drive-by.
 - commit build products (`vibeos*.iso`, `iso_root*`, `build/initrd.fat`, `target*/`, `limine/`)
 - edit `limine/` (cloned by `setup.sh`)
 - add dependencies without a note in the PR
-- copy or translate code, comments, or tables from GPL or LGPL sources (Linux, glibc, GNU tools): match Linux's behaviour from its documentation and from running it, and cite where an interface's constants and layouts are defined (DESIGN §1.5)
+- copy or translate code, comments, or tables from GPL or LGPL sources (Linux, glibc, GNU tools): match Linux's behaviour from its documentation and from running it, and cite where an interface's constants and layouts are defined; a format that only GPL code defines, with the algorithm that maintains it, is learned from what Linux writes, never from that code (DESIGN §1.5)
 - disable, skip, or retry a test, or widen its timeout, to make CI green; record a flaky test as a ROADMAP line instead (DESIGN §9.8)
 - read, print, copy, or move a credential, key file, token, or secret store (a keychain, `~/.ssh`, `gh`'s or git's credential store, a browser profile, a workflow secret)

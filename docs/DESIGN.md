@@ -163,7 +163,11 @@ and measured behaviour, or from sources whose license lets it into an MIT tree:
   parts. The Linux-interfaces rule asks for Linux's behaviour, which vibeOS learns from man pages,
   specifications, and running Linux, the oracle kernel of ROADMAP §12.4, never by porting Linux's
   code. Numeric constants, struct layouts, and `ioctl` numbers that an interface defines are facts;
-  each is written down with a citation of where it is defined.
+  each is written down with a citation of where it is defined. The facts clause covers layouts and
+  constants, not the algorithm that keeps a format consistent. A format that is valid only when such
+  an algorithm maintains it (a B-tree, a space map, a commit order) and that only GPL code defines is
+  written up in `docs/` from what Linux writes and what Linux's own tools accept or reject, before
+  any code, and its GPL sources are not read for it (ROADMAP §29.6).
 - MIT, BSD, ISC, zlib, or Apache-2.0 code may be adapted, with its copyright and license notice kept
   beside it (and, for Apache-2.0, its NOTICE text).
 - Cryptographic primitives and the TLS state machine are depended on, never written in-tree: pinned,
