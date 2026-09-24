@@ -3261,11 +3261,25 @@ Sleeps and timeouts need a data structure, not a linear scan of every thread on 
   tick after its deadline.
 - Timer slack (ROADMAP §19.6) widens only a fair-class thread's deadline timers. A real-time thread's
   slack is 0, as on Linux.
-- Every blocking operation takes an optional deadline. A blocked thread with no timeout and no waker
-  is a permanent leak, and the only way to find one is to have made timeouts mandatory from the start.
-- The blocked-thread sweep in `schedule_inner` (every `SWEEP_TICKS` ticks, for timeouts at least
-  `OVERDUE_NS`, 5 s, late) never reports: `pop_expired_into` has already drained every expired
-  timeout when `overdue(now)` runs (ROADMAP §10.7, F111).
+- Every blocking primitive takes an optional deadline. A wait for a device parks with its device's
+  stall bound S as its deadline, and the request's own deadline starts recovery
+  ([§10.3](#103-failure)), so a lost completion ends in an error, not a hang. A wait on behalf of a
+  user request (`read` or `accept` on a socket, pipe, or tty; `futex`; `poll` and `epoll`; `wait4`;
+  `sigsuspend`; `nanosleep`) has the deadline its caller gave, or none, as Linux allows, and is
+  interruptible: any signal ends it, with `EINTR` or a restart under `SA_RESTART` (ROADMAP §13.8).
+  A wait that no signal can end, or only `SIGKILL` (Linux's killable wait), is uninterruptible. An
+  uninterruptible wait with no deadline, such as one for a sleeping lock ([§2.1](#21-lock-order)), is
+  where a lost wake hangs a thread for good.
+- The blocked-thread sweep: every `SWEEP_TICKS` ticks CPU 0 reports each `Blocked` or `Sleeping`
+  thread whose recorded deadline is at least `OVERDUE_NS` (5 s) past. The timeout path would have
+  woken it, so its timeout entry was lost (ROADMAP §10.7). ROADMAP §25.5 extends the sweep to
+  uninterruptible waits with no deadline, each reported once it has lasted 120 s, Linux's
+  `hung_task_timeout_secs` default, or the largest stall bound S among registered block devices
+  where that is larger ([§10.3](#103-failure)). An interruptible wait is never reported, however
+  long: an idle server's `epoll_wait` is one. A stall of the timer itself is for ROADMAP §25.5's
+  lockup detectors. Not yet built: `ThreadState::Blocked` records no deadline, and today's sweep
+  scans the timeout queue after `pop_expired_into` has drained every expired entry, so it never
+  reports (F111).
 
 ## 6.6 Tickless and wall clock
 
@@ -4211,9 +4225,11 @@ panicked at   vibeOS: panic:   #PF   #GP   #UD   #DF   double fault   stack over
 Match the exception mnemonics, not the phrase "page fault". Shell help text and log messages contain
 English words, and a substring match on prose produces false failures that erode trust in the suite.
 
-Planned (ROADMAP §12.5): a registered failure line reports a failure the kernel recovered from, so
-a run that shows one would otherwise pass. `vibeOS: block: <dev> timeout` and
-`vibeOS: block: <dev> reset` are the first. A test that provokes one on purpose declares it; in any
+Planned (ROADMAP §10.7, §12.5, §25.5): a registered failure line reports a failure the kernel
+survived, so a run that shows one would otherwise pass. The blocked-thread sweep's
+`vibeOS: sched: overdue tid <id>` (ROADMAP §10.7) is the first; `vibeOS: block: <dev> timeout` and
+`vibeOS: block: <dev> reset` (ROADMAP §12.5) and ROADMAP §25.5's soft lockup, hard lockup, and
+hung-thread reports follow. A test that provokes one on purpose declares it; in any
 other run it fails the run, since a recovery no test expected is a bug a timeout hides, such as a
 lost kick ([section 10.4](#104-virtio-blk)) that shows only as a 30 s pause.
 
