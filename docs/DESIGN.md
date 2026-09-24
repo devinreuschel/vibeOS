@@ -1229,6 +1229,14 @@ Target notes:
   `syscall_init::switch_fpu` saves and restores each thread's 512-byte FXSAVE image (`Tcb.fpu`) on
   every switch. `CR0.NE` and `CR4.OSXMMEXCPT` are not set, so x87 and SSE floating-point errors do
   not reach `#MF` and `#XF` (§5.2; ROADMAP §10.6, F026).
+- User code never builds for a bare target. `x86_64-unknown-none` has the soft-float Rust ABI: an
+  `f64` multiply compiles to a call to `__muldf3`, `f64` arguments pass in integer registers, and
+  rustc warns that enabling SSE there breaks the target's ABI. A user program built for it would use
+  no SSE and could not call C built by ROADMAP §14.1's clang, which passes `f64` in XMM registers,
+  and `aarch64-unknown-none` differs again (hard-float, strict alignment). Planned (ROADMAP §10.5,
+  §11.1): the `no_std` user runtime builds for `<arch>-unknown-linux-musl`, the triple `std` user
+  code uses (ROADMAP §24.3), and links with `rust-lld` as a static `ET_EXEC` with no crt objects, so
+  no host needs a C compiler for it.
 - `build.rs` passes the linker script as an absolute `-T` so the link does not depend on cwd.
 - Each kernel target has an ISA floor, and a CPU feature above it is used only where CPUID or an ID
   register reports it. x86_64 builds for x86-64-v1, the target's default CPU, and also needs NX,
@@ -5060,6 +5068,7 @@ they read, and the aarch64 port does not exist.
 | aarch64 | `SCTLR_EL1.nTWE` | 1 | `wfe` runs at EL0 |
 | aarch64 | `SCTLR_EL1.nTWI` | 0 | an EL0 `wfi` traps, and the exception handler steps over it, so it returns at once with no signal, as on Linux arm64 |
 | aarch64 | `SCTLR_EL1.SA0` | 1 | an EL0 load or store through a misaligned SP raises an SP alignment fault and gets `SIGBUS` |
+| aarch64 | `SCTLR_EL1.A` | 0 (ROADMAP §11.1) | an EL0 load or store to Normal memory may be unaligned, as on Linux arm64; the user crate's `aarch64-unknown-linux-musl` code is not built for strict alignment and relies on it |
 | aarch64 | `SCTLR_EL1.E0E` | 0 | EL0 is little-endian |
 | aarch64 | `SCTLR_EL1.SPAN` | 0 (FEAT_PAN is in the §3.1 floor) | nothing directly; every exception entry to EL1 sets PAN (ROADMAP §11.6) |
 | aarch64 | pointer authentication (`EnIA`, `EnIB`, `EnDA`, `EnDB`), BTI (`BT0`), and MTE (`ATA0`, `TCF0`) in `SCTLR_EL1` | 0 | off until ROADMAP §18.9 (pointer authentication, BTI) and §18.4 (MTE) turn them on and change this row |
