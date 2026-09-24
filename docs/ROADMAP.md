@@ -5100,14 +5100,18 @@ price is published, that fact and the year), what it unlocks, and the lines it a
 estimates to confirm before buying. When a goal is met, one edit to this file moves its `- [ ]` lines
 whose needs exist (below) unchanged into the places named above them, makes its other edits, and, once
 no line is left in it, drops it from the sentences that list funded goals and deletes it. A line for a
-phase already tagged lands as an open box; the tag stands. With the first goal met, that edit also
-changes the Free by default paragraph in How to read this: "beyond their own agent tokens" gains "and
-the funded goals already met", and after "A gate never needs a physical machine, a rented one, a paid
-service, or a new account" it adds "Lines moved in from a met funded goal are the exception: each names
-the machine, account, or service it needs, and every statement in this file that a phase, era, section,
-gate, or Beyond entry runs on the free resources, runs only on hosted runners or QEMU, assumes no
-physical machine, or buys nothing excludes them". This section's "vibeOS has no budget" becomes "vibeOS
-has no budget beyond the goals already met".
+phase already tagged lands as an open box; the tag stands. A line proved once on a machine or account
+that later goes away, such as a no-cost cloud tier or a borrowed machine, is ticked by a commit whose
+`Proves:` trailer names the §10.9 `ci-history` record of that run, with the machine or instance type
+and the date, and the tests on the free resources that keep guarding the same behaviour; a bug that run
+finds gets its regression test on the free resources. With the first goal met, the edit that meets it
+also changes the Free by default paragraph in How to read this: "beyond their own agent tokens" gains
+"and the funded goals already met", and after "A gate never needs a physical machine, a rented one, a
+paid service, or a new account" it adds "Lines moved in from a met funded goal are the exception: each
+names the machine, account, or service it needs, and every statement in this file that a phase, era,
+section, gate, or Beyond entry runs on the free resources, runs only on hosted runners or QEMU, assumes
+no physical machine, or buys nothing excludes them". This section's "vibeOS has no budget" becomes
+"vibeOS has no budget beyond the goals already met".
 
 A goal never edits the text of a checkbox line, ticked or open. Where it extends what a line requires,
 its Lines hold a new `- [ ]` line under a heading that places it directly after that line, and the new
@@ -5207,11 +5211,14 @@ S3 in its firmware. The first also has at least 8 cores, a free CPU-attached PCI
 slot, and a second NVMe slot, so it can carry the NVMe-drive and 100GbE goals; an Intel CPU is the
 simpler choice for `rr`, which needs a workaround on AMD Zen. With them: real NVMe and SATA drives, a
 Realtek 8168 NIC, a USB-C dock or adapter with CDC-NCM and an ASIX AX88179, USB serial adapters
-(CDC-ACM, Prolific PL2303, Silicon Labs CP210x), a switched outlet per machine, and a plug-in power
-meter. For the rig, the rig host: an always-on x86_64 mini PC running Linux, with VT-x or AMD-V so it
-can run a vibeOS guest under KVM, gigabit Ethernet, and a powered USB hub for its own serial adapters
-and the rig's injectors; it serves netboot, captures serial, switches the outlets, and runs the
-self-hosted runners.
+(CDC-ACM, Prolific PL2303, Silicon Labs CP210x), and a switched outlet per machine that also meters the
+machine's power draw and states its accuracy, switched and read by the rig host over the rig's own
+network with no vendor cloud account. Each test PC reports its CPU temperature through ACPI `_TMP` or a
+Super I/O hardware monitor whose datasheet is public, and a fan speed through ACPI `_FST` or that
+monitor, checked from the board's documentation before buying. For the rig, the rig host: an always-on
+x86_64 mini PC running Linux, with VT-x or AMD-V so it can run a vibeOS guest under KVM, gigabit
+Ethernet, and a powered USB hub for its own serial adapters and the rig's injectors; it serves netboot,
+captures serial, switches the outlets and reads their meters, and runs the self-hosted runners.
 
 **Cost.** About $1,500 for both test PCs and the parts above, and about $300 for the rig host (2026
 estimates). One test PC alone is roughly half the $1,500 and, with the rig host, closes every line below
@@ -5229,7 +5236,7 @@ ERST, GHES, and a BMC, it can also be the x86_64 long-run server; it can be the 
 **Lines.** Elsewhere in this file:
 - the destination paragraph: "boots on QEMU's models of real machines on both architectures" gains "and on a real x86_64 machine"
 - How to read this, the conditions paragraph: "and the VMM when it is not QEMU" gains "; on real hardware, the machine"
-- the standing gates' gate-map line: "a CI job on GitHub-hosted runners" becomes "a CI job on GitHub-hosted runners or on a self-hosted runner on the rig host whose workflow's only triggers are `schedule` and `workflow_dispatch`", and the record clause also covers "a reading taken by hand on a physical machine, such as a power meter's"
+- the standing gates' gate-map line: "a CI job on GitHub-hosted runners" becomes "a CI job on GitHub-hosted runners or on a self-hosted runner on the rig host whose workflow's only triggers are `schedule` and `workflow_dispatch`"
 - the arc, row 20: Unlocks gains ", bare metal on x86_64, hardware CI"
 - the Era IV preamble: "deeper C-states and frequency scaling from ACPI extend the §19.6 idle path" becomes "deeper C-states, frequency scaling from ACPI, and measured power extend the §19.6 idle path", and "three sections of 19" becomes "four sections of 19", with "§20.8's hardware-event profiles use §19.2's sampling" added to its list
 - Phase 17 Architectures: "unless it names another shape." gains " The `make check` and `make test` line's run on bare metal is Phase 20's, on the x86_64 test PC."
@@ -5238,8 +5245,8 @@ ERST, GHES, and a BMC, it can also be the x86_64 long-run server; it can be the 
 
 §10.9, each line directly after the box it names:
 - [ ] the gate map's job entries may also name a scheduled CI job on a self-hosted runner on the rig host (it extends the gate-map box)
-- [ ] `scripts/check_gates.py` accepts a job entry whose workflow runs on a self-hosted runner only when that workflow's only triggers are `schedule` and `workflow_dispatch`, and `make gate PHASE=N RECORD=1` records a hand reading on a physical machine, each with a host test (it extends the `make gate` box)
-- [ ] when the dev-host records box has the maintainer start a run at the gated commit, a workflow on a self-hosted runner takes the form that box gives a workflow that takes a commit as input, dispatched on `main` with the gated commit as input, since the runners take jobs only from `main`; and a reading taken by hand on a physical machine, such as a power meter's, is a record too: `make gate PHASE=N RECORD=1` writes it to `ci-history` with the machine and the instrument in place of the host and the command (it extends the dev-host records box)
+- [ ] `scripts/check_gates.py` accepts a job entry whose workflow runs on a self-hosted runner only when that workflow's only triggers are `schedule` and `workflow_dispatch`, with a host test (it extends the `make gate` box)
+- [ ] when the dev-host records box has the maintainer start a run at the gated commit, a workflow on a self-hosted runner takes the form that box gives a workflow that takes a commit as input, dispatched on `main` with the gated commit as input, since the runners take jobs only from `main` (it extends the dev-host records box)
 
 §10.9:
 - [ ] the rig host's published-data step (DESIGN §1.5): `scripts/scrub_record.py` replaces serial numbers (SMBIOS, PCIe device serial numbers, NVMe, SATA, USB, EDID), MAC addresses, UUIDs, and hostnames in a text record with fixed placeholders, with host tests over records that plant each; every record, log, or report a rig-host job uploads or commits passes through it; and a job that reads a physical machine's dump or firmware tables keeps them in a store on the rig host that no workflow uploads, and uploads only its text report
@@ -5252,8 +5259,8 @@ Phase 20 exit gate, before the tag line:
 - [ ] on each of those machines: Phase 7's pattern and concurrent read-write tests pass on a scratch partition of its internal disk; a TCP client fetches 1 GiB from a peer through vibeOS's driver for its NIC with no corruption, as the Phase 15 gate does over virtio-net; and `evtest` reads a key typed on a USB keyboard from its `/dev/input/event<N>` node
 - [ ] the AML interpreter loads the DSDT and SSDTs of each of those machines, host-tested against their `acpidump` output in a rig-host job that reads it from the rig host's unpublished store, with the results derived from it checked in (DESIGN §1.5), and `_PRT` resolves PCI interrupt routing on each
 - [ ] S3 suspend and resume on the machine whose firmware offers S3, with its disk, NIC, and USB keyboard working afterward
-- [ ] on each of those machines, `poweroff` enters S5 through its FADT's PM1 control blocks and `_S5`, read on the plug-in power meter as the machine's soft-off draw, and `reboot` restarts it through the FADT reset register, each after the log line naming the path it takes (F097)
-- [ ] idle power measured with the plug-in power meter on each machine at the shallowest and deepest C-state §20.2 enables, with tickless idle on and off, the numbers in `docs/HARDWARE.md`'s physical section
+- [ ] on each of those machines, `poweroff` enters S5 through its FADT's PM1 control blocks and `_S5`, which the rig host confirms from the outlet's meter as a draw below a quarter of the machine's idle draw at the shell, and `reboot` restarts it through the FADT reset register, each after the log line naming the path it takes (F097)
+- [ ] idle power read by the rig host from each machine's outlet meter in its §20.8 nightly job, averaged over 60 s at the shell, at the shallowest and deepest C-state §20.2 enables, with tickless idle on and off: the deepest state draws less than the shallowest by more than the meter's stated accuracy, and tickless idle on draws no more than tickless idle off plus that accuracy; the numbers go in `docs/HARDWARE.md`'s physical section
 - [ ] NVMe and AHCI drives detected and used as root on those machines
 - [ ] `make test` passes nightly on vibeOS booted bare metal on the x86_64 test PC, on the terms of the Phase 17 gate, reported by its §20.8 self-hosted nightly job like any other CI job
 
@@ -5267,14 +5274,14 @@ Phase 20 exit gate, before the tag line:
 - [ ] with §18.1's IOMMU on, the devices on the x86_64 test PC that DMA into its RMRR regions (integrated graphics, USB legacy emulation) keep working, and the boot log lists each RMRR with its devices
 
 §20.2:
-- [ ] idle power on real hardware at each `_CST` depth, with the governor's choices compared against measured residency
-- [ ] thermal zones and fan control read through each machine's embedded controller
+- [ ] on each machine, over 60 s of idle at the shell, the share of time the governor requests each `_CST` state is within 10 percentage points of the residency the CPU's counters report for it (Intel's C-state residency MSRs; on a CPU without per-state counters, the governor's total idle share against the idle share that `MPERF` and the TSC give), the deepest state holds more than half the time, and the outlet meter's draw at each depth is recorded in `docs/HARDWARE.md`
+- [ ] each machine's CPU temperature read through ACPI `_TMP`, or through the board's Super I/O hardware monitor where no thermal zone reports one, and a fan speed through `_FST` or that monitor's tachometer: under 60 s of load on every CPU the temperature rises by at least 5 °C, and the fan speed read after the load is higher than the one read before it
 
 §20.3:
 - [ ] USB serial adapters QEMU does not model: CDC-ACM as `/dev/ttyACM<N>`, and Prolific PL2303 and Silicon Labs CP210x as `/dev/ttyUSB<N>`, as Linux names them
 
 §20.6:
-- [ ] AHCI and NVMe validated on physical drives, with their error paths and SMART
+- [ ] AHCI and NVMe validated on physical drives: a `kernel_tests` hook below the block layer's range check submits a read past the last LBA and an unsupported opcode, and resets the controller with commands outstanding; each fails its request with an error, and the drive then passes Phase 7's pattern test; SMART is read through the NVMe SMART / Health Information log page and ATA SMART READ DATA, and, booted after `smartctl -x` from the §14.9 mirror has read the same drive under Alpine's `linux-lts` netbooted by the rig host, its identity and threshold fields equal that output and each counter is no lower
 - [ ] a Realtek 8168-family driver, validated on a machine that has one, and the firmware loading it and other NICs require
 - [ ] CDC-NCM and the ASIX AX88179 family on a USB-C dock or adapter
 - [ ] i2c sensors on each machine's own SMBus
@@ -5329,10 +5336,10 @@ Phase 25 exit gate, before the tag line:
 - [ ] an assigned device's MSI-X delivered to the guest as posted interrupts where the CPU and IOMMU have them (§21.1), on the x86_64 test PC
 
 Phase 39 exit gate, beside the nightly-configuration line:
-- [ ] every physical machine that `docs/HARDWARE.md` marks as tested nightly or weekly (§39.4) passed its last run
+- [ ] every physical machine that `docs/HARDWARE.md` marks as tested nightly or by the long runs (§39.4) passed its last run
 
 §39.4:
-- [ ] `docs/HARDWARE.md`'s physical section (§20.1) marks each physical machine as tested nightly on its self-hosted runner, tested weekly on the long-run servers, or tested by hand, with the release it was last tested at; a machine not tested at either of the last two releases leaves the list
+- [ ] `docs/HARDWARE.md`'s physical section (§20.1) marks each physical machine as tested nightly on its self-hosted runner, tested by the long runs of §30.7 and §39.3 on the long-run servers, or tested by hand, with the release it was last tested at; a machine not tested at either of the last two releases leaves the list
 - [ ] the release workflow refuses to cut a release while a physical nightly machine's last run is red; a machine whose last run is more than two days old, or that a long run holds under a reservation record (Funded goals), does not hold a release back, and its row shows the earlier release it was last tested at
 - [ ] per-machine results committed as records to §10.9's `ci-history` branch beside the QEMU runs; a long run that holds a machine writes a reservation record naming the machine and the run's planned end when it starts
 
@@ -5459,7 +5466,7 @@ billing.
 a new **AWS: ENA** subsection before the Stretch and tests them weekly):
 - [ ] admin queue, asynchronous event queue, and per-CPU submission and completion queue pairs with an MSI-X vector each
 - [ ] low-latency queue mode: descriptors written into device memory through a write-combining mapping (a PAT entry on x86_64, Normal non-cacheable on aarch64), which newer Nitro shapes expect
-- [ ] device reset and recovery after a missed keep-alive or a device-requested reset, without a reboot
+- [ ] device reset and recovery after a missed keep-alive or a device-requested reset, without a reboot: host-tested against a simulated ENA admin queue and asynchronous event queue in the portable half that withholds the keep-alive and raises the reset event, as §6.5's rings were; on the instance, a `kernel_tests` hook that drops keep-alive events forces the missed-keep-alive path on the real device
 - [ ] checksum offload through the §15.1 flags, and RSS across the per-CPU queue pairs: the driver sets a Toeplitz key and an even indirection table where the device accepts them, and keeps the device's defaults where it does not
 - [ ] EBS through §20.4's NVMe driver, recognized by its PCI vendor ID and the device name in its vendor-specific Identify bytes
 
