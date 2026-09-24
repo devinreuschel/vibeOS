@@ -5,8 +5,9 @@
  * reserved and the first kernel stack/data touch #PFs.
  *
  * Linked into `.trampoline` and copied to 0x8000. Addresses in the blob
- * are physical (BASE), not the kernel VMA. `.org` pins the nasm layout
- * so far jumps and the GDT pointer stay byte-stable.
+ * are physical (BASE), not the kernel VMA. `.org` pins the layout, which
+ * `global_asm!` assembles (arch/trampoline.rs), so far jumps and the
+ * GDT pointer stay byte-stable.
  *
  * Param block (BSP write_volatile, not in this blob):
  *   0xD0 CR3, 0xD8 stack top, 0xE0 entry, 0xE8 IDTR (10 bytes).

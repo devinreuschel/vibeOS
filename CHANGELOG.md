@@ -16,7 +16,7 @@ marker, new device, fixed hang). Link to the ROADMAP section instead of describi
   virtio-rng, then RDRAND, then xorshift.
 - [Phase 9](docs/ROADMAP.md#phase-9-user-mode-and-processes): ring 3, syscalls, ELF `/hello`,
   `fork`/`execve`/`wait4`, `/sbin/init`, `/bin/sh`. Gate reopened into Phase 10; COW is Phase 12.
-- MIT license (`LICENSE`). Both crate manifests declare `license = "MIT"`.
+- MIT license (`LICENSE`). Every crate manifest declares `license = "MIT"`.
 - Tracked `AGENTS.md` (DOC3). Cursor rules and `CLAUDE.md` point at it.
 - `make check` as the fast local gate (host clippy, host units, harness, ruff/mypy).
   `make help` lists targets.

@@ -2,10 +2,10 @@
 //! Kernel wiring for the log ring. ROADMAP §5.5.
 //!
 //! Global IRQ-safe ring + serial sink. Per-CPU printer thread is a
-//! parked stub (Design ACK): line atomicity on serial is still only
-//! as good as the TX lock. The ring itself is line-atomic because
-//! serial capture assembles per-CPU until `\n`, and `klog!` pushes
-//! a whole record.
+//! parked stub (ROADMAP §5.5; lands in §19.5): line atomicity on serial
+//! is still only as good as the TX lock. The ring itself is line-atomic
+//! because serial capture assembles per-CPU until `\n`, and `klog!`
+//! pushes a whole record.
 
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};

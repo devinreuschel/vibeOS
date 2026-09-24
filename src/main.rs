@@ -2,16 +2,18 @@
 //!
 //! Boot order: serial, Limine, PMM, paging, ACPI parse + MMIO UC, heap,
 //! KVA, then GDT/TSS/IST, PIC remap, IDT, BSP per_cpu, ACPI marker, time,
-//! LAPIC+IOAPIC, timer prove, scheduler+idle, irq enabled, SMP, meminfo,
+//! LAPIC+IOAPIC, timer prove, meminfo, scheduler+idle, irq enabled, SMP,
 //! console, PCI scan + registry, workqueue + virtio bind, ramdisk, then
-//! the shell thread. GDT after KVA because IST
-//! stacks are guarded KVA stacks. per_cpu after GDT because `mov gs`
-//! zeros the hidden base. Scheduler after time so the tick can preempt.
-//! SMP after irq-enabled so APs enter as idle. Console after `smp: done`.
-//! PCI after console. Workqueue + virtio (rng, blk) register, then bind.
-//! Ramdisk after bind. Partition scan + cache next. FAT initrd is VFS
-//! root, then `/dev` `/proc` `/tmp` `/sys` (no marker). Shell last. The `kernel_tests` build
-//! runs the in-guest registry after that and exits through isa-debug-exit.
+//! `/hello`, the builtins, and `/sbin/init` (DESIGN §3.3 row 18). GDT after
+//! KVA because IST stacks are guarded KVA stacks. per_cpu after GDT because
+//! `mov gs` zeros the hidden base. Scheduler after time so the tick can
+//! preempt. SMP after irq-enabled so APs enter as idle. Console after
+//! `smp: done`. PCI after console. Workqueue + virtio (rng, blk) register,
+//! then bind. Ramdisk after bind. Partition scan + cache next. FAT initrd
+//! is VFS root, then `/dev` `/proc` `/tmp` `/sys` (no marker). `/sbin/init`
+//! last; a `kernel_shell` build spawns the kernel shell thread instead.
+//! The `kernel_tests` build runs the in-guest registry after that and
+//! exits through isa-debug-exit.
 
 #![no_std]
 #![no_main]

@@ -199,7 +199,7 @@ pub enum MapMode {
     /// Fail with `MapError::AlreadyMapped` if the target PTE is present.
     /// The default; matches DESIGN §4.3's "assert on overlap" rule.
     Fresh,
-    /// Overwrite. Used by `patch_physmap_uc` and by the Phase 12 remap paths.
+    /// Overwrite. Used by host tests and by the Phase 12 remap paths.
     Remap,
 }
 
@@ -379,9 +379,8 @@ impl Mapper {
     /// belongs in phase 12.
     ///
     /// # Safety
-    /// Caller is responsible for TLB invalidation via
-    /// `tlb_invalidate_page` (single CPU) or the shootdown protocol
-    /// (SMP, DESIGN §7.9).
+    /// Caller is responsible for TLB invalidation: `invlpg` on this CPU and,
+    /// for a kernel-half VA, `tlb_shootdown_others` (DESIGN §4.3, §7.9).
     pub unsafe fn unmap_page(&mut self, va: VirtAddr) -> Option<(PhysAddr, PageSize)> {
         let mut table_phys = self.root;
         let mut level = 4;

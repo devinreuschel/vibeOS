@@ -8,9 +8,10 @@
 //!
 //! DESIGN §3.3 step 7 orders us: PMM first, then a fresh PML4 with the
 //! contents §4.3 lists, then EFER.NXE, then `mov cr3`. Steps §4.3 also
-//! makes explicit: `invlpg` after every single-PTE edit (baked into
-//! `Mapper` via the shootdown hook), and no splitting of 2 MiB pages
-//! when patching MMIO attributes.
+//! makes explicit: the caller runs `invlpg` after every single-PTE edit
+//! and, for a kernel-half edit, drops PT and calls
+//! `paging::tlb_shootdown_others` (`Mapper` does neither), and no
+//! splitting of 2 MiB pages when patching MMIO attributes.
 
 use core::fmt::Write;
 use core::sync::atomic::{AtomicU64, Ordering};
