@@ -1648,7 +1648,7 @@ its asm-generic name, which both architectures have; the legacy x86_64 names are
 - [ ] filesystem-bound and abstract namespaces
 - [ ] `SCM_RIGHTS` file descriptor passing and `SCM_CREDENTIALS` as `sendmsg`/`recvmsg` control messages, with `setsockopt(SO_PASSCRED)` on the receiving socket
 - [ ] a socket's owner lock is dropped before a sender or receiver sleeps (DESIGN §2.1): in-guest, with one thread blocked in `recvmsg` on one end of a stream `socketpair`, another thread's `sendmsg` through the same descriptor completes, and the peer reads its bytes
-- [ ] the same buffering machinery reused for network sockets in phase 15, decided now rather than duplicated later
+- [ ] the same buffering machinery, and DESIGN §2.1's socket lock pair, reused for network sockets in phase 15, decided now rather than duplicated later: a syscall holds a socket's owner lock across its user copies and releases it before it sleeps; a sender appends to its peer's receive queue under the peer's SOCK spinlock; releasing the owner lock runs the socket's backlog step, which has nothing to drain until §15.5. `src/lock.rs` gains `RANK_SOCK` ahead of `RANK_HEAP`, and DESIGN §2.1's rank list and §2.7's I1 row name it, in the commit that adds the first socket
 
 ### 13.4 Shared memory
 - [ ] POSIX `shm_open` backed by `tmpfs`, sized with §13.9's `ftruncate`
@@ -1736,7 +1736,7 @@ The §13.12 loom model and the in-guest tests below gate futex correctness; no f
 - [ ] `procfs` backed by the process table: `cmdline`, `status`, `maps`, `fd`, `stat` per pid; the §10.5 `/bin/sh` `ps` built-in reads it and syscall 500 is deleted; a file that reads another process's address space (`maps`) pins it with a get-unless-zero `users` reference (DESIGN §2.11) for the read only
 - [ ] `getrlimit` / `setrlimit` (`prlimit64`), `getrusage`; `RLIMIT_NOFILE` lifts a process from the default of 256 descriptors (Phase 10) to a hard cap in the `limits` module, since toolchains open more than 256 files
 - [ ] `uname`, `sysinfo`, `gettimeofday`, `clock_gettime`, `clock_getres`, and `clock_nanosleep` over Linux's clock ids: `REALTIME`, `MONOTONIC`, `MONOTONIC_RAW`, `BOOTTIME`, the `_COARSE` variants, and the process and thread CPU-time clocks, including the ids that encode a pid or tid, as `clock_getcpuclockid` and `pthread_getcpuclockid` build them
-- [ ] `timer_create`, `timer_settime`, `timer_gettime`, and `timer_delete` with `SIGEV_SIGNAL` and `SIGEV_THREAD_ID` (musl builds `SIGEV_THREAD` on it), and `setitimer` and `getitimer`, with `alarm` as an x86_64 entry point onto `setitimer`, on one timer queue shared with §13.6's `timerfd`
+- [ ] `timer_create`, `timer_settime`, `timer_gettime`, and `timer_delete` with `SIGEV_SIGNAL` and `SIGEV_THREAD_ID` (musl builds `SIGEV_THREAD` on it), and `setitimer` and `getitimer`, with `alarm` as an x86_64 entry point onto `setitimer`, on one timer queue shared with §13.6's `timerfd`, whose expiries run as DESIGN §2.2 timer callbacks
 - [ ] `ioctl` with a registry rather than a growing match arm
 - [ ] `prctl` through an option table: an option not in it returns `EINVAL`, as Linux does for an unknown option, and each entry names the §13.11 corpus program or the line that needs it; §18.6 and §23.1 add their options to the same table
 - [ ] `ENOSYS` for the unimplemented, logged once per syscall number, so a port's failure is immediately legible
@@ -1774,7 +1774,7 @@ The syscall numbers are Linux's on x86_64 (§9.3) and asm-generic on aarch64 (§
 ### 13.12 Lock-dependency validation and the futex model
 The §4.7 rank check has six global ranks and skips rank 0, and from §10.3 it lets a rank be retaken only through `lock_nested`, whose pair order it cannot check, so it cannot see an AB-BA order between two locks of one rank. This phase adds many, each at the place DESIGN §2.1 gives it: the file description's position lock, pipe ends, socket pairs, and the TTY, session, and process-group locks.
 
-- [ ] every `SpinMutex`, `BlockingMutex`, and `RwLock` gets a lock class keyed by its initialization site, beside its DESIGN §2.1 rank, so every pipe's lock is one class; nesting two locks of one class takes an explicit subclass and a fixed order, such as address order for a socket pair, and for a two-directory `rename` ancestor before descendant, then address order (DESIGN §2.1); the classes carry DESIGN §2.1's two tiers and level 1's order (position lock, then stream lock, then namespace and inode locks), so a sleeping lock taken with a spinlock held, a level-1 lock taken with the address-space lock held, a stream lock taken with a namespace or inode lock held, a position lock taken with a stream, namespace, or inode lock held, and a user copy made while a level-2, 3, or 4 lock is held are reported the first time they happen. The same build reports a region's file or page-cache reference dropped with the address-space lock held, and gives direct reclaim's wait for submitted writes a class of its own outside the tier order (DESIGN §4.4 rule 3)
+- [ ] every `SpinMutex`, `BlockingMutex`, and `RwLock`, and each socket's owner lock, gets a lock class keyed by its initialization site, beside its DESIGN §2.1 rank, so every pipe's lock is one class; nesting two locks of one class takes an explicit subclass and a fixed order, such as address order for a socket pair, and for a two-directory `rename` ancestor before descendant, then address order (DESIGN §2.1); the classes carry DESIGN §2.1's two tiers and level 1's order (position lock, then stream lock, then namespace and inode locks), so a sleeping lock taken with a spinlock held, a level-1 lock taken with the address-space lock held, a stream lock taken with a namespace or inode lock held, a position lock taken with a stream, namespace, or inode lock held, and a user copy made while a level-2, 3, or 4 lock is held are reported the first time they happen. The same build reports a region's file or page-cache reference dropped with the address-space lock held, and gives direct reclaim's wait for submitted writes a class of its own outside the tier order (DESIGN §4.4 rule 3)
 - [ ] a `lockdep` build records each held-class to acquired-class edge and reports the first cycle with both acquisition backtraces, the first time both orders occur in any run rather than when they collide in time
 - [ ] the same build reports a class taken in IRQ context that is elsewhere held with interrupts enabled, and a sleep on a wait queue with a spinlock held
 - [ ] the nightly job runs the in-guest ladder in this build on both architectures and dumps the edge graph, so a report names the path that closed the cycle
@@ -2026,7 +2026,7 @@ runners have no KVM.
 
 ### 15.1 netdev layer
 - [ ] a `NetDevice` trait: transmit, MTU, MAC, link state, and statistics
-- [ ] receive queues delivering into the stack from a softirq or a dedicated thread, never from the hard IRQ
+- [ ] receive queues delivering into the stack from each queue's threaded bottom half, polled up to a budget per wake, and loopback from a softirq-equivalent item on the sending CPU (DESIGN §2.2), never from the hard IRQ
 - [ ] a packet buffer type with headroom and tailroom so headers can be prepended without copying
 - [ ] checksum and segmentation offload flags, used when the device supports them
 - [ ] a loopback device, which is also the easiest way to test everything above it
@@ -2057,6 +2057,7 @@ runners have no KVM.
 - [ ] datagram send and receive with port binding and demultiplexing
 - [ ] checksum computation and validation, including the optional-zero case
 - [ ] receive queue per socket with a bound and a drop counter
+- [ ] the socket backlog of DESIGN §2.1, which lands here because UDP is the first receive path that cannot sleep: a datagram for a socket that a syscall owns goes on its bounded backlog, the owner drains it as it releases the owner lock, and a full backlog drops the datagram and counts it; TCP and §15.7's ICMP and packet sockets reuse it
 - [ ] connected UDP sockets
 - [ ] enough to run DNS and DHCP, which is what unblocks everything else
 
@@ -2066,6 +2067,7 @@ runners have no KVM.
 - [ ] sequence and acknowledgement arithmetic with wraparound handled, host-tested
 - [ ] send and receive buffers with a sliding window and zero-window handling
 - [ ] retransmission with an RTO from an RTT estimator, exponential backoff
+- [ ] TCP's retransmit, delayed-ACK, zero-window-probe, keepalive, and `TIME_WAIT` timers are DESIGN §2.2 timer callbacks: each takes the socket's spinlock and defers to the owner through the backlog when a syscall owns the socket, holds a counted reference to the socket while pending, and is cancelled with `cancel_sync` before the socket is freed; TCP input runs under the socket's spinlock and allocates fallibly there
 - [ ] fast retransmit and fast recovery
 - [ ] congestion control: slow start, congestion avoidance, and a modern algorithm afterward
 - [ ] delayed ACK, Nagle, and a `TCP_NODELAY` option, since interactive traffic and bulk traffic want opposite things
@@ -2110,12 +2112,13 @@ runners have no KVM.
 - [ ] replay of captured traffic as host tests
 - [ ] `cargo-fuzz` targets for every parser this phase adds, from packet headers and options to netlink, DHCP, DNS, BPF programs, and X.509, on the weekly job as §10.2's are; each crash becomes a replayed regression
 - [ ] an in-guest packet fuzzer: from one seed printed on serial it injects malformed headers, bad checksums, and overlapping fragments through the injection interface into the running stack, so a crash replays from its seed; the nightly job runs it one hour per architecture in a 2-CPU, 512 MiB guest (KVM on x86_64, TCG on aarch64), and each crash's seed is checked in as a replay
-- [ ] throughput and latency benchmarks with regression thresholds, on the §10.1 KVM leg
+- [ ] throughput and latency benchmarks with regression thresholds, on the §10.1 KVM leg, recording also the share of received segments processed from a socket's backlog on its owner's release
 - [ ] host-to-guest integration tests in CI over QEMU user networking and a tap device
 - [ ] an SNTP responder on the host that the guest reaches from CI (QEMU user networking has no NTP service of its own), serving the host clock the Phase 15 SNTP gate measures against
 - [ ] a deliberately hostile peer: reordering, duplication, loss, tiny windows
 - [ ] deterministic simulation: instances of the portable stack on the host, over a simulated link that drops, duplicates, reorders, delays, and corrupts, under the §15.1 simulated clock, all driven from one seed
 - [ ] a nightly sweep of seeds; a failing seed is printed, replays bit for bit as a host test, and is checked in
+- [ ] the socket owner hand-off in the portable half with a loom model (§10.8): a receive appending to the backlog while the owner releases the owner lock, and a timer callback racing `close`'s `cancel_sync`; a weakened variant that clears the owned flag before it drains the backlog, and one whose `cancel_sync` returns while the callback runs, must each fail the model
 - [ ] packetdrill, built statically in §13.11's digest-pinned Alpine container with `linux-headers` and pinned under §14.10, run in wire mode inside a §14.9 `vibeos-linux` root, since its client configures the interface by running iproute2's `ip`: the client executes each script's syscalls on vibeOS while its server on the host injects and checks packets on the tap device; the runner replaces upstream's `defaults.sh`, which writes Linux sysctls, with one for vibeOS
 - [ ] the upstream packetdrill TCP scripts that do not assert Linux-only socket options, `TCP_INFO` fields, or sysctl settings run on the nightly job in a 2-CPU, 512 MiB guest, on x86_64 under KVM on the §10.1 KVM leg with packetdrill's default tolerance, and on aarch64 under TCG with `--tolerance_usecs=14000`, which Linux's kselftest runner passes on a slow machine; each passes or is on a checked-in list with the RFC section that allows the difference, and the list only shrinks. On the TCG run alone, a script that fails only with packetdrill's `timing error` is an expected failure written to the job summary, never a list entry
 - [ ] sequence-space comparison and window arithmetic from §15.6 proved by Kani (§10.8) for every pair of 32-bit values

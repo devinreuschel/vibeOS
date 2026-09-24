@@ -194,6 +194,8 @@ the buddy because mapping a page allocates its table frames. Blocking `WaitQueue
 the scheduler lock: the predicate check and the enqueue happen under that same lock (DESIGN
 [§9.4](#94-concurrency)).
 
+Planned (ROADMAP §13.3): a seventh rank, SOCK, ahead of all six, for socket state (below).
+
 The six ranks order spinlocks: `SpinMutex`, and the cross-CPU `IrqCell`s that ROADMAP §10.3 turns
 into ranked `SpinMutex`es. Sleeping locks form a tier outside all six: `BlockingMutex`, `RwLock`,
 `Semaphore`, and waiting for a page or buffer to finish I/O. A thread takes a sleeping lock only with
@@ -302,6 +304,17 @@ wait, and each FAT and vibefs volume sits behind a busy flag whose waiter yields
 operation with `EIO` after 1,000,000 yields, and which `drop_slot` force-clears (ROADMAP §10.4,
 F060).
 
+A socket has two locks, as Linux's `lock_sock` and `bh_lock_sock` do. Its spinlock, at the SOCK
+rank, guards the protocol state and the socket's queues; network receive and timer callbacks
+([§2.2](#22-interrupt-handler-rules)) take it, and code under it may allocate fallibly and wake. Its
+owner lock is a flag that changes only under that spinlock, with waiters on the socket's wait queue:
+a syscall holds it across its user copies, as a level-1 stream lock, and releases it before it
+sleeps for data or buffer space. A receive or timer callback that finds the socket owned appends its
+packet or event to the socket's bounded backlog, dropping and counting it when the backlog is full;
+the owner drains the backlog as it releases the owner lock and clears the flag only once the backlog
+is empty. Two sockets' spinlocks nest only through `lock_nested` (§2.3), in address order, as a
+socket pair needs. ROADMAP §13.3 adds the lock pair and the rank, §15.5 the backlog.
+
 ## 2.2 Interrupt handler rules
 
 An interrupt handler must not:
@@ -331,6 +344,8 @@ Blocking and allocation are a class of bug, not an instance. Context rules:
 | Workqueue worker | Yes | Yes |
 | Driver `probe` | Yes | Yes |
 | Syscall body, fault handler for a CPL-3 fault | Yes ([§2.9](#29-preemption-and-interrupt-state)) | Yes, fallible only ([§4.4](#44-kernel-heap)) |
+| Network receive: a queue's threaded bottom half ([§5.4](#54-irq-registration)) | No: it takes no sleeping lock and never waits for a socket's owner; a packet for an owned socket goes on its backlog (§2.1) | Fallible only, without direct reclaim ([§4.4](#44-kernel-heap)) |
+| Timer callback: a softirq-equivalent item on the CPU whose timer fired | No | Fallible only, without direct reclaim ([§4.4](#44-kernel-heap)) |
 | NMI and `#MC` at any CPL, `#DB` at CPL 0; shootdown and call-function work run from a spin | No | No |
 
 Code in the last row runs inside whatever IF=0 section its CPU was in, locks included: an NMI,
@@ -344,6 +359,13 @@ taking their locks.
 
 The hard-IRQ top half acknowledges and wakes. Work that allocates or blocks runs on a kernel thread
 ([section 5.4](#54-irq-registration), ROADMAP §6.6).
+
+Network receive polls its queue for at most a budget of packets per wake, so one flooded queue
+cannot hold its CPU. Loopback has no interrupt: its transmit queues the packet, and receive runs as
+a softirq-equivalent item on the sending CPU. A timer callback (a POSIX timer's expiry, TCP's
+retransmit and delayed-ACK timers) runs on the CPU whose timer queue fired it. `cancel_sync` returns
+only once the callback runs on no CPU, as `free_vector` does for a handler (§5.4), and a pending
+timer holds counted references to what its callback touches ([§2.11](#211-object-lifetimes) rule 5).
 
 ## 2.3 Locking with interrupts
 
@@ -1717,6 +1739,8 @@ The `sleep_ms` path needs a data structure, not a linear scan of every thread on
 - Start with a single sorted list of pending timeouts guarded by one lock. Fine for tens of threads.
 - Move to a hierarchical timing wheel when the count grows. Planned: ROADMAP §19.4 keeps timeouts
   per CPU in a timing wheel.
+- A timer whose expiry runs a callback rather than waking a thread (a POSIX timer, TCP's timers)
+  runs it in §2.2's timer-callback context, and `cancel_sync` waits for a callback that is running.
 - Every blocking operation takes an optional deadline. A blocked thread with no timeout and no waker
   is a permanent leak, and the only way to find one is to have made timeouts mandatory from the start.
 - The blocked-thread sweep in `schedule_inner` (every `SWEEP_TICKS` ticks, for timeouts at least
