@@ -4511,6 +4511,14 @@ per-architecture uapi (ROADMAP §13.10).
 | Crash-dump page-table publication | port module | none: QEMU walks x86_64 page tables | the TTBR1 root in a `VMCOREINFO` note | §11.7 |
 | Hypervisor | port module | VMX or SVM | EL2 with VHE | Phase 21 |
 
+The page-table format is the largest pure half. Descriptor encoding and decoding, the walk, `map`,
+`unmap`, `protect`, and `translate`, and on aarch64 the break-before-make check, are `vibeos-core`
+code, in each port's pure half and the portable `Mapper` over it; the hardware half keeps only the
+root-register writes (CR3; TTBR0 and TTBR1) and the TLB and cache instructions. Why: ROADMAP Phase
+11's gate host-tests the page-table code's break-before-make refusals on every host, and Phase 38
+proves only `vibeos-core` source (ROADMAP §38.2), so page-table code in the kernel crate would have
+to move before it could be proved.
+
 Idle is the row most easily ported wrong. x86_64's idle checks for work with IF=0 and runs `sti; hlt`:
 `sti` takes effect only after the next instruction, so an interrupt that arrives after the check wakes
 the `hlt`. aarch64 has no such shadow. Its idle checks for work with IRQs masked, runs `wfi` with them
