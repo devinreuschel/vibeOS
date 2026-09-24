@@ -4071,6 +4071,12 @@ fixed gets a test that would have caught it, in the cheapest tier that can catch
 [section 9](#9-pitfalls) names the rule that guards it, and where that rule is only an invariant in
 code with no test, that is a weaker guarantee and should be visible as such.
 
+Planned (ROADMAP §38.1): `make verify` checks the Verus proofs and TLA+ specifications on every push
+that changes `vibeos-core` or `docs/specs/`. From the `phase-38` tag, a change that adds an operation
+or a layer to a proved structure, or reorders a modelled protocol, extends its proof or specification
+in the same commit, or lists the property it leaves unproved in `docs/VERIFIED.md`'s `Not proved`
+section with an open ROADMAP §38.6 box (ROADMAP Phase 38, Changing proved code).
+
 ---
 
 # 9. Pitfalls
