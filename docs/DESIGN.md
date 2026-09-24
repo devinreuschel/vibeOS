@@ -4380,6 +4380,12 @@ WRITEBACK states and the flush wait above (F015, F043).
 - Copy-on-write moves a file's block map, not its cache entry: vibefs writes a dirty file page back
   to a fresh block ([VIBEFS.md](VIBEFS.md) §10) and submits the page's own frame, so the page keeps
   its mapping, index, and frame while the block it lives in changes at every commit.
+- A page filled from a filesystem that checksums its data becomes up to date only after the checksum
+  that covers it verifies, and a write that changes part of a checksummed block fills and verifies
+  the whole block first. A failed fill leaves the page not up to date and never written back: `read`
+  and such a write return `EIO` and dirty nothing, and a fault on the page raises `SIGBUS`
+  ([VIBEFS.md](VIBEFS.md) §15, Corrupt data). Writeback checksums whatever a page holds, so a merge
+  into an unverified page would store the corruption under a valid checksum.
 - A block the filesystem allocates loses any page the device mapping holds for its LBA before its
   first write through any path: the page is dropped with its dirty state discarded, and an in-flight
   writeback of the old contents completes before the new write is submitted. A reused LBA never
