@@ -556,6 +556,7 @@ separate namespace.
 | I30 | Interrupt and exception handlers run with RFLAGS.AC=0 (§5.10 rule 5) | none | documented | No: the gates keep ring 3's AC (ROADMAP §10.6, F088) |
 | I31 | Every IF=0 stretch outside §2.9 rule 2's exemptions retires at most 100,000 instructions ([§2.9](#29-preemption-and-interrupt-state) rule 2) | §2.9; ROADMAP §10.3's IF-off tracer | documented | No: syscall bodies run with IF=0 until they block, the in-guest test runner holds IF off for the whole run, and a console `write` scrolls the framebuffer once per newline with IF=0 (ROADMAP §10.6, F044; ROADMAP §10.2, F075); the heap's first-fit `alloc`, its address-ordered insertion on `dealloc`, and a moving `realloc`'s copy run under the IRQ-off HEAP lock over a free list whose length user churn sets (ROADMAP §12.6); the buddy's double-free check walks the free lists (ROADMAP §12.1, F029); a `klog!` emit waits on the UART with IF off, about 8 ms per 96-byte line on a 115200-baud 16550, which no QEMU tier paces (ROADMAP §19.5); ROADMAP §10.10 makes a shootdown survive a violation (F011) |
 | I32 | A handler on an IST stack never blocks or switches threads (§5.10 rule 6) | IST handlers | documented | Yes: every IST handler halts, except that under `kernel_tests` an armed `catch` steps RIP and returns or longjmps off the IST stack |
+| I33 | A fault body reads CR2, DR6, ESR, and FAR from its frame, where the entry stub saved them before IF could turn on (§5.10 rule 9) | the `arch/idt.rs` stubs; the aarch64 vectors (ROADMAP §11.3) | documented | Yes, only because every fault body runs with IF=0 and reads CR2 before anything else can fault (`arch::idt::page_fault`); ROADMAP §10.6's IF=1 bodies need the stub save (its syscall-body and generated-stub boxes) |
 
 ## 2.8 Publish last
 
@@ -619,11 +620,12 @@ every IF=0 stretch has a reason from the list below and a bound.
 3. A syscall body runs with IF=1. After `swapgs`, the entry stub copies the user RSP from
    `PerCpu.syscall_scratch` into its frame on the thread's kernel stack, then runs `sti`; from
    there on the scratch belongs to whichever thread next enters on this CPU. The exit stub runs
-   `cli` before it writes the scratch again (§5.10 rule 4). A fault or trap taken at CPL 3 runs
-   its body with IF=1 once its frame is on the thread's kernel stack, and so does a `#PF` taken at
-   CPL 0 inside a user-memory accessor once ROADMAP §12.2 lets it sleep, since the code it
-   interrupted ran with IF=1; a hardware interrupt's top half keeps IF=0. Rule; not yet enforced: FMASK clears IF at `syscall` and nothing sets it
-   again, so a syscall body runs with IF=0 until it blocks (ROADMAP §10.6).
+   `cli` before it writes the scratch again (§5.10 rule 4). A fault or trap taken at CPL 3 runs its
+   body with IF=1 once its frame is on the thread's kernel stack with the fault's syndrome saved in
+   it (§5.10 rule 9), and so does a `#PF` taken at CPL 0 inside a user-memory accessor once ROADMAP
+   §12.2 lets it sleep, since the code it interrupted ran with IF=1; a hardware interrupt's top half
+   keeps IF=0. Rule; not yet enforced: FMASK clears IF at `syscall` and nothing sets it again, so a
+   syscall body runs with IF=0 until it blocks (ROADMAP §10.6).
 4. Code that may sleep (waits on a wait queue, takes a sleeping lock (§2.1), allocates with
    reclaim (ROADMAP §12.6), or copies to or from user memory once ROADMAP §12.2 lets a user-copy
    fault sleep) runs with IF=1 and no spinlock held, and asserts both in debug builds (ROADMAP
@@ -1360,8 +1362,9 @@ the table lives in code, and a host test checks that each vector `0x00`–`0x1F`
 | `0x20`–`0xFF` | IRQs and IPIs | handle, return; an unused vector or an unexpected PIC line halts (§5.5) | handle, return to ring 3 | `0x21`, `0x30`, and `0x31`–`0x7F` run on the user GS base and halt the kernel. Rule; not yet enforced: ROADMAP §10.6 (F004) |
 
 A halting handler prints the interrupt frame (RIP, CS, RFLAGS, RSP, SS), the error code where the
-vector pushes one, and CR2 for `#PF`, then the common dump (§2.5). A halt with no register dump is a
-wasted crash. A ring-3 kill prints `user: pid N killed SIG<name> rip=0x<rip> err=0x<err>`, plus
+vector pushes one, and, for `#PF`, the CR2 the stub saved (§5.10 rule 9), then the common dump
+(§2.5). A halt with no register dump is a wasted crash. A ring-3 kill prints
+`user: pid N killed SIG<name> rip=0x<rip> err=0x<err>`, plus
 ` cr2=0x<addr>` for `#PF` (a `user:` line, not a `vibeOS:` marker), and ends the process through
 `finish_exit`. A ring-3 fault with no bound process (the in-guest test that calls `enter_user`
 directly) falls through to the halt; that test's own `#UD` is taken first by the `catch` it armed.
@@ -1559,17 +1562,17 @@ describes the current code.
 | syscall entry after its `swapgs`, and the syscall body | 0, `PerCpu.kernel_rsp0` | kernel | 0 until the stub has moved the user RSP out of the scratch and runs `sti`; 1 in the body ([§2.9](#29-preemption-and-interrupt-state) rule 3) | 0 |
 | syscall exit, from the return of `vibeos_syscall_stub` to `sysretq` or `iretq` | 0, kernel stack, then the user RSP | kernel; user after `swapgs` | 0 (rule 4) | 0 |
 | `enter_user` and `enter_user_full`, from `mov gs` to `iretq` | 0, kernel stack | user | 0 (rule 4) | 0 |
-| non-IST vector taken at CPL 3 | 0, TSS.RSP0 | user until the stub's `swapgs` | 0 (interrupt gate); a fault or trap body then runs with IF=1, an interrupt's top half with IF=0 (§2.9 rule 3) | ring 3's until the stub's `clac` (rule 5) |
+| non-IST vector taken at CPL 3 | 0, TSS.RSP0 | user until the stub's `swapgs` | 0 (interrupt gate); a fault or trap body then runs with IF=1, after the stub has saved the syndrome (rule 9), an interrupt's top half with IF=0 (§2.9 rule 3) | ring 3's until the stub's `clac` (rule 5) |
 | non-IST vector taken at CPL 0 | 0, interrupted stack | kernel, except rule 2's case | 0 (interrupt gate) | the interrupted value until the stub's `clac` (rule 5) |
 | IST vector: `#DF`, NMI, `#MC`, `#DB` | 0, its IST stack | whatever the interrupted point held (rule 3) | 0 | the interrupted value until the stub's `clac` (rule 5) |
 | vector exit to CPL 3 | 0, then 3 at `iretq` | user after `swapgs` | 0 until `iretq` restores ring 3's | `iretq` restores ring 3's |
 
 1. One entry stub per vector, owned by `arch/idt.rs` and generated from one table. The stub runs
-   `cld`, `clac` when SMAP is live, and the GS decision, calls a body function, and mirrors the GS
-   decision on exit. `idt::set_handler` takes a body function, never a gate, and no
-   `extern "x86-interrupt"` function exists outside `src/arch/`. Rule; not yet enforced: ROADMAP
-   §10.6 (F004). Each `arch/idt.rs` handler calls `gs_enter` and `gs_leave` itself, and
-   `irq_init::device_irq::<N>` (`0x31`–`0x7F`), `kbd_init::kbd_ioapic` (`0x30`), and
+   `cld`, `clac` when SMAP is live, the GS decision, and rule 9's syndrome save, calls a body
+   function, and mirrors the GS decision on exit. `idt::set_handler` takes a body function, never a
+   gate, and no `extern "x86-interrupt"` function exists outside `src/arch/`. Rule; not yet
+   enforced: ROADMAP §10.6 (F004). Each `arch/idt.rs` handler calls `gs_enter` and `gs_leave`
+   itself, and `irq_init::device_irq::<N>` (`0x31`–`0x7F`), `kbd_init::kbd_ioapic` (`0x30`), and
    `kbd_init::kbd_pic` (`0x21`, replacing the `arch/idt.rs` IRQ1 gate) are installed through
    `idt::set_handler` with no GS step. One of them taken at CPL 3 reads `gs:[0]` at VA 0 and halts
    the kernel.
@@ -1612,6 +1615,18 @@ describes the current code.
    enforced: ROADMAP §10.6 (F148). Every gate is DPL 0 today (`IdtEntry::interrupt`, type `0x8E`).
 8. Ring 3 never halts the kernel: §2.5 states the rule, and the §5.2 table gives each vector's ring-3
    action. Rule; not yet enforced for each §5.2 row whose last column names a ROADMAP line.
+9. An entry stub saves the exception's syndrome into its frame before anything can turn IF on or
+   raise another fault on that CPU, on both architectures: CR2 for `#PF`, and DR6 for `#DB`, which
+   it then clears, as Linux does, before a CPL-3 `#DB` frame leaves the IST stack; ESR_EL1 and
+   FAR_EL1 (ESR_EL2 and FAR_EL2 at EL2 with VHE, through the same encodings) for every synchronous
+   exception on aarch64, before the vector unmasks any DAIF bit. A body reads them from the frame,
+   never from the register: once IF is on, a switch to a thread that faults overwrites them
+   ([§2.9](#29-preemption-and-interrupt-state) rule 3). On x86_64 only an NMI, `#MC`, or `#DB` can
+   run between the delivery and the save, and none of their handlers takes a page fault (ROADMAP
+   §25.5 for the NMI handler, which a debug build checks by comparing CR2 at its exit with its value
+   at entry). Rule; not yet enforced: ROADMAP §10.6 (the generated stubs) and §11.3 (the aarch64
+   vectors). Today `arch::idt::page_fault` reads CR2 in its body, which is correct only because
+   every fault body runs with IF=0.
 
 ---
 
