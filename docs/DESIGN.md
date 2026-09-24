@@ -218,16 +218,26 @@ outermost first:
 2. the address-space lock (ROADMAP §13.1: `mmap`, `munmap`, and `mprotect` take it for writing, the
    fault path for reading). It guards the region tree only. A page-table entry changes under its
    space's page-table spinlock (the PT rank above), so the reverse-map unmap that direct reclaim
-   does ([§4.4](#44-kernel-heap)) takes no address-space lock
+   does ([§4.4](#44-kernel-heap)) takes no address-space lock; it takes the reverse-map lock
+   (level 3b) only by try-lock
 3. waits on a page-cache page, in a file's mapping or a block device's
    ([§10.6](#106-block-cache); ROADMAP §12.5)
+
+   3b. the reverse-map lock of a file mapping or an anonymous object ([§4.6](#46-what-comes-later)),
+   a sleeping `RwLock`. A walk that finds every PTE mapping a page takes it for reading, possibly
+   with that page held busy; linking or unlinking a region, or changing a linked region's range,
+   takes it for writing, possibly under the address-space lock. No level-4 lock is held when it is
+   taken: writeback's clean step walks before writeback takes the filesystem's locks. Code holding
+   it takes no lock of levels 1 to 4 and no second reverse-map lock, except that for a region linked
+   into two objects the file mapping's is taken before the anonymous object's; spinlocks may follow
+   it, as after any sleeping lock. It is numbered 3b so that level 4 keeps its number.
 4. a filesystem's block-mapping and volume I/O locks, which its page-fill and writeback paths take
    and which are never held across a user copy
 
 A user copy may fault, and the fault path takes the address-space lock for reading, then page waits,
 then, to fill a file page, the filesystem's level-4 locks. So a copy to or from user memory is
-allowed while level-1 locks are held, as `write` needs, and under no lock of levels 2 to 4. The
-reverse is forbidden: code that holds the address-space lock takes no level-1 lock.
+allowed while level-1 locks are held, as `write` needs, and under no lock of levels 2 to 4, level 3b
+included. The reverse is forbidden: code that holds the address-space lock takes no level-1 lock.
 
 The position lock serializes `read`, `readv`, `write`, `writev`, `lseek`, and `getdents64` on one
 open file description of a regular file or directory, so threads and processes that share the
@@ -1338,12 +1348,13 @@ lock, its own address-space lock, or a busy page-cache page (§2.1's sleeping ti
    section ([§2.12](#212-rcu)). The allocator reads all four at entry, before it takes the heap
    lock. Any other allocation draws on ROADMAP §12.6's reserve pool and then fails.
 2. It frees clean pages only. It drops clean page-cache pages that nothing maps. It unmaps a mapped
-   one through the reverse map, taking only each address space's page-table spinlock and a try-lock
-   of the page, and no count on the space ([§2.11](#211-object-lifetimes)): it exchanges each PTE to
-   empty, folds each old dirty bit into the page, and completes the invalidation (§2.4) before it
-   decides. A page found dirty stays in the cache, unmapped and dirty, for the writeback threads; a
-   clean page's count drops. It skips any page it cannot take at once. It takes no sleeping lock,
-   the address-space lock included.
+   one through the reverse map, taking only each address space's page-table spinlock and try-locks
+   of the page and of its reverse-map lock (§4.6), and no count on the space
+   ([§2.11](#211-object-lifetimes)): it exchanges each PTE to empty, folds each old dirty bit into
+   the page, and completes the invalidation (§2.4) before it decides. A page found dirty stays in
+   the cache, unmapped and dirty, for the writeback threads; a clean page's count drops. It skips
+   any page it cannot take at once. It takes a sleeping lock only by try-lock, which never waits,
+   and never takes the address-space lock.
 3. It writes no page. The ROADMAP §12.5 writeback threads write dirty file pages, and ROADMAP
    §12.7's swap-out thread writes anonymous pages. Direct reclaim wakes those threads and then waits, with a
    deadline, only for writes already submitted to a device. When that frees too little, the OOM
@@ -1361,7 +1372,8 @@ lock, its own address-space lock, or a busy page-cache page (§2.1's sleeping ti
    workqueue worker while it runs a softirq-equivalent item (§2.2), and a thread already in reclaim.
 
 Why: writeback or an unmap that needed a lock the allocating thread holds would deadlock that thread
-on itself. For example, a filesystem that allocates while holding its volume lock would reach
+on itself. A try-lock never waits, so reclaim may try a page and its reverse-map lock and skip what
+it cannot take. For example, a filesystem that allocates while holding its volume lock would reach
 writeback of its own dirty pages. A bottom half that waited on reclaim could wait for an I/O
 completion that only it can deliver. A thread inside an RCU read-side section may not sleep (§2.12),
 and reclaim's wait for a grace period (rule 3) would wait on that thread itself.
@@ -1429,7 +1441,8 @@ mind:
 - Slab caches, per-CPU magazines to avoid the global buddy lock on hot paths (ROADMAP §19.9).
 - One page cache of mappings (§10.6), which serves `mmap`, file I/O, and the block layer, and whose
   pages share one LRU with anonymous pages (ROADMAP §12.5).
-- Swap, which needs reverse mappings from a frame back to every PTE referencing it (ROADMAP §12.7).
+- Swap, which finds every PTE mapping an anonymous page through the reverse map below (ROADMAP
+  §12.7).
 
 The per-frame metadata array is the pivot. Refcounting, reverse mapping, and page cache all need it,
 so the PMM should be built expecting it to appear.
@@ -1459,6 +1472,51 @@ saturates, as Linux's `refcount_t` does, and never wraps; the last `put` hands t
   the caller's. A higher count means another holder, so the split remaps the unit and fails, and the
   caller falls back to 4 KiB handling. The unit keeps no map count; ROADMAP §23.4 adds one for
   `smaps`.
+
+Reverse map (ROADMAP §12.1). The map is by object, not by PTE. Each unit's owner and index (the
+frame model above) name where its page lives: a file page's owner is its file's mapping (§10.6) and
+its index the file page index; an anonymous page's owner is the anonymous object of the region it
+was first faulted in, and its index its page index in that object. A file mapping keeps an interval
+tree of the regions that map it, and an anonymous object keeps a list of the regions that may map
+its pages. A region records its page offset in its object, kept across `mremap` and a split, so a
+page's address in a region is the region's start plus (index − offset) × 4 KiB. A region's list and
+tree nodes live in the region, so linking allocates nothing; a region's first anonymous fault
+allocates its anonymous object, fallibly, before it takes the page-table lock.
+
+- A shared anonymous region (`MAP_SHARED | MAP_ANONYMOUS`) is backed by an unlinked tmpfs file, as
+  Linux's shmem is. Its pages are file pages to the reverse map and to the fault path.
+- A walk read-locks the object's reverse-map lock and visits its regions in the object's order. For
+  each, it takes that address space's page-table spinlock, finds the PTE by address, acts, and drops
+  the lock, so a walk holds at most one page-table lock. A walker takes no count. It holds the
+  object's reverse-map lock for reading while it borrows each region's core and takes that core's
+  page-table lock. Unlinking needs the lock for writing, so a region the walker can see has live
+  page tables and a live core.
+- The reverse-map lock is a sleeping `RwLock`, one per file mapping and one per anonymous object, at
+  §2.1's level 3b. A walk visits as many regions as programs create, so a spinlock would hold IF=0
+  for a time nothing bounds (§2.9 rule 2). Direct reclaim takes it only by try-lock and skips the
+  page when that fails (§4.4 rule 2).
+- A region made from another (`fork`'s copy, an `mremap` destination, a split) is placed after its
+  source in the object's order, so a walk that has passed the source also reaches the copy after the
+  PTE is copied or moved. When `mremap` cannot keep that order, the PTE move holds each object's
+  reverse-map lock for writing, as Linux's `move_ptes` does under `need_rmap_locks`.
+- A linked region's start, end, and offset change only while the write lock of every object it is
+  linked into is held, since a walker reads them without the address-space lock. A private file
+  region with anonymous pages is linked into two objects; the file mapping's lock is taken before
+  the anonymous object's, as Linux takes `i_mmap_rwsem` before the `anon_vma` lock.
+- `fork` links each child region into its objects, right after its parent region, before it copies
+  any PTE, then copies holding the parent's page-table lock and then the child's. It is the one path
+  that holds two page-table locks, which is safe because a walk holds one. It copies no PTE of a
+  shared file region, a shared anonymous region, or a private file region with no anonymous page;
+  the child faults those pages in from their mapping, as on Linux, so `fork`'s time goes to
+  anonymous memory.
+- `munmap` and exit zap a region's PTEs through the gather (§4.3), then unlink the region under each
+  object's write lock.
+
+Known limit: a region `fork` copies from a parent region joins the parent's anonymous object, so a
+long-lived parent with many children makes that object's list long, and a walk of any page in it, a
+child's private copy included, visits every child. That is Linux's `anon_vma` before 2.6.34, which
+then added `anon_vma_chain` to bound walks. ROADMAP §19.10 records the regions each walk visits and
+adopts the chained design when the 99th percentile passes 64.
 
 ## 4.7 DMA
 
