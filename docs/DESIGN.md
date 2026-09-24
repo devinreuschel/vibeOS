@@ -943,7 +943,7 @@ Rule; not yet enforced. The violations, and the ROADMAP lines that fix them:
 - `spawn_inner` can reuse a Dead TCB slot while its thread is still switching out on another CPU
   (ROADMAP §10.10, F012).
 - On the bring-up timeout, `smp_init::start_one` frees an AP's kernel stack, GDT/TSS, and IST and
-  RSP0 stacks without an INIT, so an AP that is still running uses freed memory (ROADMAP §20.1,
+  RSP0 stacks without an INIT, so an AP that is still running uses freed memory (ROADMAP §11.4,
   F032).
 
 ## 2.9 Preemption and interrupt state
@@ -3332,7 +3332,7 @@ For each enabled APIC ID that is not the BSP:
    SIPI and then stalled past 3 s can keep running on them, or read the next AP's parameter block, and
    the BSP cannot tell it from an AP that never started. `smp_init::start_one` breaks this rule: it
    frees the stacks and GDT/TSS and marks the idle TCB Dead, with no INIT, and does not clear the
-   online bit (ROADMAP §20.1, F032).
+   online bit (ROADMAP §11.4, F032).
 
 On the AP side (`smp_init::ap_entry`), in order: `cli`; load the per-CPU GDT and TSS; set `GS_BASE`
 and `KERNEL_GS_BASE` (`per_cpu_init::install_gs`); program the syscall MSRs and the FPU bits and set
@@ -3806,6 +3806,8 @@ the next online.
 
 Online runs the online steps in the reverse order: the control CPU's steps, then the CPU's bring-up
 ([§7.4](#74-ap-bring-up-sequence)) up to its online bit, then the steps that run on the CPU itself.
+A CPU that misses the bring-up timeout takes step 6 of §7.4 (on aarch64, ROADMAP §11.4's
+`AFFINITY_INFO` path) and stays offline, and its `PerCpu`, stacks, and idle thread stay with it.
 ROADMAP §10.7's TSC skew check runs again, and the active bit is set last.
 
 Rejected: evacuating per subsystem as each lands, which left a dozen per-CPU structures with no
@@ -4605,7 +4607,7 @@ The timeout path frees the AP's kernel, RSP0, and IST stacks and its GDT/TSS and
 stalled past 3 s can keep running on them, or read the next AP's parameter block. Rule: the timeout path
 sends INIT, clears the AP's online bit, and leaks what it gave the AP; a failed AP costs its stack and
 tables, not a second CPU on the same memory ([section 7.4](#74-ap-bring-up-sequence)).
-`smp_init::start_one` frees without INIT (ROADMAP §20.1, F032).
+`smp_init::start_one` frees without INIT (ROADMAP §11.4, F032).
 
 **A null dereference in an ISR shortly after an AP comes up.**
 `sti` happened before `GS_BASE` was set, and a timer interrupt landed in code that reads per-CPU state.
