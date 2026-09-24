@@ -2118,13 +2118,19 @@ numbers in its own `syscall.h.in`, which are that table's numbers, and §13.9's 
 - [ ] the DESIGN §8.3 e2e contract survives login. `make rootfs` with a test overlay builds a harness root image, which no release image or §14.6 release manifest contains. The overlay is also the only way a test trust anchor reaches a guest. Test CAs, test signing keys and key sets, a test update channel's key, and the keys the harness logs in with are generated per run where the test allows, as §18.7's Secure Boot test generates its keys, and otherwise live in `tests/keys/`, whose README lists each one's fingerprint and the lines that use it; the private keys there are public, so an image that trusts one trusts anyone. An anchor enters only the image this overlay builds, files the harness adds to an installed system before the test that needs them, or a service the harness runs on the host, never a §14.6 recipe or a release artifact, and §14.6's test-anchor check refuses a release that carries one. The overlay adds a test user and runs the getty on `/dev/tty1` and on the serial TTY with `--autologin <user>`, as agetty does, and that user's profile prints the registered `shell ready` marker when its TTY is the serial one. The marker order, the §13.7 serial and `sendkey` echo checks, and every later line that waits for `shell ready` run unchanged in that image. The Phase 14 `login` gate line boots the overlay with autologin off and types the test user's credentials over serial. DESIGN §8.3 updated in the same commit
 
 ### 14.4 Coreutils
+The utilities and the shell (§14.5) are vibeOS's own, on the §10.5 runtime like everything the base
+system ships (§14.1), and busybox, which §13.11 already builds, is their oracle. Rejected: porting
+toybox (0BSD), which §14.10 allows at no license cost but which would make the base system's tools C
+beside a Rust runtime written for them. It stays the fallback, taken by an edit to this file, if the
+native tools cannot pass their case lists.
+
 - [ ] file and directory: `ls`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `ln`, `touch`, `stat`, `find`, `du`, `df`
 - [ ] text: `cat`, `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `tr`, `grep`, `sed`, `diff`
 - [ ] process: `ps`, `kill`, `top`, `time`, `nice`
 - [ ] system: `uname`, `date`, `uptime`, `free`, `mount`, `umount`, `dmesg`, `env`, `id`, `hostname`
 - [ ] archive: `tar`, `gzip`
 - [ ] editor: something small, `vi`-flavored. Editing on the machine matters more than it sounds like.
-- [ ] each with real argument parsing and correct exit statuses, because scripts depend on both
+- [ ] each with real argument parsing and correct exit statuses, because scripts depend on both: every utility but the editor and `top` passes §13.11's differential runner on a checked-in case list, each case run by the native utility in the guest and by busybox's applet of the same name on Linux, or by GNU coreutils' where busybox lacks the applet or an option POSIX names, with a checked-in list of deliberate differences, each with its reason
 
 ### 14.5 Shell
 - [ ] a POSIX-shaped shell: word splitting, quoting, expansion, globbing
@@ -2135,6 +2141,7 @@ numbers in its own `syscall.h.in`, which are that table's numbers, and §13.9's 
 - [ ] job control: background, `fg`, `bg`, `jobs`, `wait`
 - [ ] interactive: history, completion, line editing, prompt expansion
 - [ ] runs as a `#!` interpreter and as `sh <file>`, with enough correctness to run a build script (§13.10 execs `#!` files)
+- [ ] the shell passes busybox's `ash` tests (`shell/ash_test` in the busybox source §13.11 already fetches), run in the guest, minus a checked-in expected-failure list whose entries each name a reason, such as an extension the shell does not implement; a listed case that passes fails the run
 
 ### 14.6 Packaging
 - [ ] a package format: metadata, dependencies, file list, checksums, install scripts
@@ -3045,7 +3052,7 @@ under TCG on the hosted arm64 runner, which has no KVM, and under HVF only as §
 - [ ] `sbsa-ref`, in that ACPI boot, mounts root from its built-in AHCI, fetches the 1 GiB above through its e1000e, and reads the harness's key through its built-in xHCI
 - [ ] on ACPI `virt` with `iommu=smmuv3`, the virtio-blk and virtio-net in-guest tests pass through the SMMUv3 that IORT names
 - [ ] a `-numa` variant of ACPI `virt` reports SRAT's nodes and SLIT's distances
-- [ ] in host tests, the AML interpreter loads the DSDT and SSDTs of every machine variant in QEMU's `tests/data/acpi` at the pinned QEMU release, and of at least 95% of the machines in the pinned linuxhw/ACPI snapshot whose tables the pinned `iasl` recompiles, and evaluates every `_PRT` it finds (§20.2)
+- [ ] in host tests, the AML interpreter loads the DSDT and SSDTs of every machine variant in QEMU's `tests/data/acpi` at the pinned QEMU release, and of at least 95% of the machines in the pinned linuxhw/ACPI snapshot whose tables the pinned `iasl` recompiles, evaluates every `_PRT` it finds, and on each machine it loads returns the `_PRT`, `_CRS`, `_STA`, and `_S5` results that ACPICA's `acpiexec` returns there (§20.2, §20.8)
 - [ ] at least 95% of the tests in ACPICA's aslts functional, complex, and exceptions collections pass under the interpreter
 - [ ] every MADT, FADT, HPET, MCFG, DMAR, IVRS, SRAT, SLIT, GTDT, IORT, and SPCR in both corpora goes through its §2.4, §18.1, §19.7, or §20.7 parser without a panic, and each one refused is logged with its reason
 - [ ] each failure in the three lines above is on a checked-in list naming the machine or test and a reason, and the runner fails on a listed case that passes, so the lists only shrink
@@ -3088,8 +3095,16 @@ under TCG on the hosted arm64 runner, which has no KVM, and under HVF only as §
 - [ ] the model list: `docs/HARDWARE.md` names each §20.8 profile with its machine type, the accelerators it runs under, its device models, firmware builds and their hashes, and QEMU version, generated from the harness profiles, with the §20.2 corpus results per machine, the linuxhw/ACPI attribution its CC-BY-4.0 license requires, and a physical section that stays empty until a Funded goal fills it; `scripts/check_hardware.py` in `make check` fails when the generated part differs from the profiles
 
 ### 20.2 ACPI runtime
+The interpreter is vibeOS's own, in the portable half. ACPICA (BSD-3-Clause or GPL-2.0) would bring a C
+toolchain and an FFI boundary into the kernel on a firmware-input path, and the rust-osdev `acpi` crate
+(MIT or Apache-2.0) allocates through `alloc`'s infallible types and panics on malformed AML, which
+AGENTS.md rule 4 bars there (DESIGN §4.4), so adopting it means a fork that rewrites it. ACPICA's
+`acpiexec` is the interpreter's oracle instead: built on the host from the ACPICA release that provides
+the pinned `iasl`, run at test time, and never shipped.
+
 - [ ] an AML interpreter that loads a DSDT and its SSDTs into one namespace and evaluates control methods, done when it passes the exit gate's corpus lines
 - [ ] the interpreter in the portable half, fuzzed like every parser, and host-tested against three free corpora, none vendored: QEMU's `tests/data/acpi` (GPL-2.0, fetched at the pinned QEMU release), ACPICA's aslts compiled by the pinned `iasl`, and the linuxhw/ACPI snapshot of 815 machines at the commit §18.1 pins (CC-BY-4.0), whose DSDTs and SSDTs are `iasl`-decoded text that the pinned `iasl` recompiles, so the AML is equivalent to the machine's but not byte-identical
+- [ ] the interpreter is bounded, since firmware AML can poll hardware that never answers (DESIGN §1.1 constraint 5, §2.10): a `While` loop that runs 30 s by the interpreter's clock ends its method with an error, ACPICA's default (`ACPI_MAX_LOOP_TIMEOUT`); method calls nest on a frame stack the interpreter allocates, never on the Rust call stack, to a fixed depth; `Sleep` and `Stall` wait on the interpreter's clock, which host tests simulate and advance on each `Sleep`, `Stall`, and simulated register access; every allocation is fallible (DESIGN §4.4) and counted against a per-namespace cap; a limit that is hit fails that evaluation only, logs the method's path, and has a host test
 - [ ] the device tree from the DSDT and SSDTs, resource assignment, `_CRS` parsing, `_PRT` interrupt routing
 - [ ] power management: S5 shutdown, and S3 suspend with resume through the FACS waking vector, every CPU but CPU 0 going offline through §19.6 (DESIGN §7.11) before `_S3` and coming back online after resume, as Linux's suspend does; S4 hibernation, which needs §12.7's swap, is §31.8's stretch
 - [ ] shutdown and reset from the FADT, not QEMU constants: `acpi::parse_fadt` reads Flags (offset 112) with `RESET_REG_SUP` and `HW_REDUCED_ACPI`, `PM1a_CNT_BLK`, `PM1b_CNT_BLK`, and their `X_` forms; `SLP_TYPx` comes from the interpreter's `_S5` package; `RESET_REG` is written, 8 bits wide, only when `RESET_REG_SUP` is set, in the I/O, memory (mapped UC through `ioremap` at boot), or PCI configuration space its address space ID names; the writes to ports `0x604` and `0xB004` and the fixed `SLP_TYP` of 5 in `shell_init.rs` are deleted; host tests parse the corpus FADTs (F097)
@@ -3166,7 +3181,7 @@ account runs 20 jobs at once. Hardware performance events and physical machines 
 - [ ] a `hardware-models` workflow on the nightly schedule, with the `workflow_dispatch` trigger §10.9 requires: one job per harness profile and accelerator, the profiles named in `docs/HARDWARE.md` (`q35`, `pc`, `virt` with a device tree, `virt` with ACPI, and `sbsa-ref`), each a command line for the §10.1 pinned QEMU that attaches every device model this phase drives that the machine can take: NVMe with several namespaces, AHCI, xHCI with `usb-kbd`, `usb-mouse`, `usb-tablet`, `usb-storage`, `usb-net`, and `usb-serial`, e1000e, igb, HDA, `sdhci-pci` with SD and eMMC, the machine's watchdogs, and `pcie-root-port`s, plus §18.1's IOMMU on every machine but `pc`, which takes none (`intel-iommu` or `amd-iommu` on `q35` as §18.1 runs them, `iommu=smmuv3` on both `virt` profiles, and `sbsa-ref`'s built-in SMMUv3), and §18.7's swtpm TPM on every machine but `sbsa-ref`, which takes none; the x86_64 profiles run under KVM and under TCG, the aarch64 ones under TCG
 - [ ] each job runs the in-guest tiers and this phase's model tests on its profile and commits a record (profile, accelerator, runner CPU, QEMU version, firmware hashes, result, and on an x86_64 KVM job the nesting its runner offers a guest: `vmx`, `svm`, or `none`) to §10.9's `ci-history`; the nesting is read by §11.7's host-side probe; `scripts/ci_history.py` fails when a night lacks a profile's record, since GitHub delays scheduled runs under load and disables a public repository's schedules after 60 days without activity
 - [ ] each x86_64 record names the LAPIC timer mode the boot chose (`tsc-deadline`, `periodic`, or `pit`), and a KVM job fails when CPUID reports TSC-deadline and the boot chose another mode (F078)
-- [ ] a corpus job runs the §20.2 host tests over the linuxhw/ACPI snapshot, QEMU's `tests/data/acpi`, and aslts, and the §20.7 device-tree tests, with every input fetched by hash and cached between runs
+- [ ] a corpus job runs the §20.2 host tests over the linuxhw/ACPI snapshot, QEMU's `tests/data/acpi`, and aslts, and the §20.7 device-tree tests, with every input fetched by hash and cached between runs; the same job builds ACPICA's `acpiexec` from the release that provides the pinned `iasl` and evaluates each loaded machine's `_PRT`, `_CRS`, `_STA`, and `_S5` with it, with the host tests' operation regions set to behave as `acpiexec`'s default region handler does, so both evaluate over the same simulated hardware
 - [ ] a hung guest ends at the harness timeout with its §10.7 core uploaded, which is the power control a hosted runner needs
 - [ ] the Phase 17 on-device `make test`, nightly, on vibeOS as a 4-vCPU, 4 GiB guest under KVM on the x86_64 runner; on aarch64 it would be TCG inside TCG on the arm64 runner, so its run is a §10.9 dev-host record under HVF
 
@@ -3196,8 +3211,7 @@ from a running machine needs hotplug.
 
 **Unlocks.** A hypervisor that Phase 22's CI boots test kernels in once it lands (§22.4), and the
 containers and virtual networking (§21.5 to §21.7) that Phase 22 needs. A conformance test for every
-paravirtual interface the kernel consumes as a guest. Unmodified OCI images, run by `crun` or the native
-runtime.
+paravirtual interface the kernel consumes as a guest. Unmodified OCI images, run by unmodified `crun`.
 
 The hypervisor gate needs hardware virtualization inside the guest vibeOS runs in. Three free
 environments give it, and the gate lines name them.
@@ -3256,7 +3270,7 @@ emulator and, on aarch64, the loads and stores that exit without a valid syndrom
 - [ ] an unmodified static `crun` release runs an OCI bundle with pid, mount, uts, ipc, network, and user namespaces and a cgroup v2 `memory.max` that the OOM path enforces, on both architectures
 - [ ] vibeOS as a guest of Linux KVM uses the §21.4 paravirtual interfaces for its architecture. On the §10.1 KVM leg, a 4-vCPU, 2 GiB vibeOS guest with its vCPU threads pinned to 2 host CPUs runs the §19.3 lock-acquire microbenchmark on every vCPU at 1.5 times or more the throughput it reaches with paravirtual spinlocks off, best of three runs each, in one job. In the EL2 job, vibeOS as an L2 guest of the Linux L1 reads stolen time through SMCCC `PV_TIME` that grows while a CPU-bound task in L1 shares its vCPU's CPU
 - [ ] the harness boots a test kernel under the §21.2 VMM with `-accel kvm` through the §21.2 harness backend, and `make test-kernel` passes that way on vibeOS, in the nested job, the EL2 job, and the HVF record
-- [ ] `alpine` and `busybox` OCI images, pinned by digest and pulled from the §21.6 registry on the CI host, run a shell under the §21.6 runtime, and the Alpine one installs a package with `apk` from a local mirror, on both architectures
+- [ ] `alpine` and `busybox` OCI images, pinned by digest and pulled from the §21.6 registry on the CI host, run a shell under the static `crun` release of the gate's `crun` line above, from bundles the §21.6 client writes, and the Alpine one installs a package with `apk` from a local mirror, on both architectures
 - [ ] a container and an L2 guest on one §21.7 bridge each fetch a file from a server on the CI host through NAT, and a filter rule blocks a named port for the container only, in the nested job and the EL2 job
 - [ ] a hostile L2 guest with 2 vCPUs and 1 GiB fuzzes the exit handlers and virtio backends for 24 hours a week per architecture on the weekly job, in shards of at most 5.5 hours (§10.1) that carry one seed log and coverage corpus as artifacts, set up as the nested job on x86_64, with each path `vm::GATED_PATHS` enables (§21.1) among the last two weeks' shards, and as the EL2 job on aarch64, with no L1 panic and no KASAN report; the instruction emulator agrees with the CPU on 1,000,000 generated instruction streams on each hosted runner architecture, outside the results the §21.8 table marks undefined; and 10,000 of the fuzzing guest's seeded exit sequences, replayed by the §21.8 runner, end in the same guest-visible state on the Linux L1's `/dev/kvm` as on vibeOS's, each pair in one nested-job leg or one EL2-job run, except the differences `docs/` lists (§21.8)
 - [ ] tag `phase-21` and cut the next release
@@ -3334,13 +3348,13 @@ means QEMU with `-accel kvm` on vibeOS.
 
 ### 21.6 OCI images and the Linux container ABI
 §21.5 builds namespaces, cgroup v2, and overlayfs to Linux's interfaces. This makes unmodified OCI images
-and tools run on them.
+and tools run on them. The runtime is `crun`, unmodified: what vibeOS provides is the Linux container
+ABI it runs on, and a second runtime would be a second implementation of one job (DESIGN §1.1, goal 4).
+A native runtime is in [Beyond](#beyond).
 
-- [ ] an OCI image and distribution client: pull by digest over §15.11 HTTPS, verify every layer's digest, and unpack each layer with its whiteouts onto §21.5's overlayfs
+- [ ] an OCI image and distribution client: pull by digest over §15.11 HTTPS, verify every layer's digest, unpack each layer with its whiteouts onto §21.5's overlayfs, and write a runtime-spec bundle for `crun`: the unpacked root and a `config.json` from the image's configuration (entrypoint, command, environment, working directory, and user)
 - [ ] an OCI registry on the CI host serving the pinned test images over TLS with the §15.11 test CA, which the guest trusts only through §14.3's harness overlay, so no CI job pulls from the public internet
-- [ ] a container runtime with the OCI runtime command line (`create`, `start`, `state`, `kill`, `delete`) that runs runtime-spec bundles (`config.json`): namespaces, mounts and `pivot_root`, rlimits, the §18.6 capabilities and `seccomp` profile, cgroup placement, and process launch
-- [ ] the opencontainers `runtime-tools` validation suite, pinned, passes in-guest against the runtime on both architectures, with a checked-in skip list whose entries each name a reason
-- [ ] a runtime tool with `pull`, `run`, `exec`, `ps`, `stop`, and `rm` over the client and the runtime
+- [ ] the opencontainers `runtime-tools` validation suite, pinned, passes in-guest against the static `crun` release on both architectures, with a checked-in skip list whose entries each name a reason
 
 ### 21.7 Virtual networking
 - [ ] Linux's TUN/TAP device: `/dev/net/tun` with `TUNSETIFF`, `IFF_TAP`, and `IFF_NO_PI`, which the §21.2 virtio-net backend and unmodified userspace attach to the same way; closing the last descriptor of a TAP interface that is not persistent unregisters it as §15.1 unregisters an interface
@@ -3957,8 +3971,9 @@ here under QEMU's `virt` with `-kernel`, which starts an arm64 `Image` the same 
 - [ ] the console on each platform: COM1 on x86_64, which each VMM here provides, and the SPCR-described UART on aarch64 (§20.7)
 
 ### 26.2 Provisioning
-- [ ] a `cloud-init`-shaped service under §14.3's init, run once per instance id: users and authorized keys, hostname, network from metadata with DHCP as the default, and user data as a script or a declarative file of users, packages, files, and commands
+- [ ] a `cloud-init`-shaped service under §14.3's init, run once per instance id: users and authorized keys, hostname, network from metadata with DHCP as the default, and user data in cloud-init's formats: `#cloud-config` with the `users`, `ssh_authorized_keys`, `hostname`, `write_files`, `packages` (as §14.6 packages), and `runcmd` modules, `#!` scripts, MIME multipart, and gzip; any other module or format is logged and skipped, and there is no vibeOS-only format
 - [ ] cloud-init's NoCloud datasource: a vfat or ISO 9660 seed labelled `CIDATA`, or `ds=nocloud;s=<url>` from the §10.2 command line or the SMBIOS system serial, with the seed's `meta-data`, whose `instance-id` it requires, `user-data`, `vendor-data`, and `network-config`
+- [ ] on a NoCloud seed that uses each module above, the service's result equals what Alpine's `cloud-init` writes from the same seed in a §14.9 root: users and groups, authorized keys, hostname, and written files with their modes and owners; a difference not on a checked-in list with its reason fails
 - [ ] the root partition, or in §22.2's layout the state partition, grown in place (GPT backup header moved, partition extended), and its vibefs v2 filesystem grown by the initrd before root is mounted, through a grow in the shared format code that host tests cover (a commit that raises `nblocks`, as VIBEFS.md §15's Superblocks and geometry row allows); on an image's first boot, which the `template` flag on its vibefs volumes marks (VIBEFS.md §15), the GPT rewrite the grow does, or one of its own when the disk was not enlarged, gives the disk a fresh disk GUID and each partition a fresh unique partition GUID, and the initrd gives each templated vibefs volume a fresh `uuid` and clears the flag, all before root is mounted read-write; an image names its root by partition label, which this keeps (DESIGN §10.5)
 - [ ] per-instance SSH host keys, with their fingerprints printed on the console so a first login can be checked
 - [ ] Azure: provisioning data from IMDS, and a ready report to the WireServer, which a deployment waits on; the UDF provisioning disc is not read
@@ -5073,6 +5088,7 @@ hardware, a paid service, or a new account, that version is in [Funded goals](#f
 - **Hypervisor record and replay** (after 21): the §21.1 hypervisor logs a guest's exit results, interrupt injection points, and device completions, and replays the guest deterministically under gdb's reverse execution at the hypervisor's speed rather than TCG's, one vCPU first, on the hosts Phase 21's gate runs on.
 - **Live migration** (after 21 and 30): a running §21.2 guest moved over TCP by QEMU's migration, on §30.6's `/dev/kvm` state ioctls, between two vibeOS hosts that are KVM guests on one hosted x86_64 runner, nested (which GitHub calls experimental; each run uses the VMX or SVM path its CPU offers), with dirty pages tracked through EPT or NPT dirty logging and pre-copied, and the downtime of a 1-vCPU, 1 GiB guest running §19.3's mixed interactive workload measured beside two Linux KVM hosts in the same VM shape in the same job; on aarch64 the same under TCG with `virtualization=on` and stage-2 dirty logging. Migration between physical machines is a funded goal.
 - **A Kubernetes worker node** (after 21 and 30): the upstream kubelet with a CRI runtime over §21.6's OCI images and a CNI plugin over §21.7's virtual networking, in a vibeOS guest joined to a k3s control plane on the hosted runner; the upstream node conformance suite becomes the gate when it moves into a phase.
+- **A native OCI runtime** (after 21): a runtime with the OCI runtime command line (`create`, `start`, `state`, `kill`, `delete`) that runs runtime-spec bundles, and a tool with `pull`, `run`, `exec`, `ps`, `stop`, and `rm` over the §21.6 client, both on the §10.5 runtime, passing the pinned `runtime-tools` suite that `crun` passes.
 - **Agent performance ledger** (after 22): which agent and model did what, from commit trailers, and per phase the slices, pull requests, days from first slice to tag, red CI runs, reverts, reopened boxes, and escaped bugs by the tier that should have caught them, computed from git and GitHub history into the release notes. The maintainer deferred this ([ARCHITECTURE_REVIEW](reviews/ARCHITECTURE_REVIEW.md) O1), so it starts only when the maintainer asks for it.
 - **Agents on vibeOS** (after 23): the coding agent that develops vibeOS runs in a vibeOS guest under HVF on the dev host through the Linux ABI (Node.js passes Phase 23's suite), reaches the model API over HTTPS through Phase 15's stack, and lands one slice from there. It runs on the maintainer's own agent account and spends their tokens, so it starts only when the maintainer asks for it.
 - **Foreign-architecture binaries** (after 23): `binfmt_misc` and an unmodified static `qemu-user`, so aarch64 vibeOS runs x86_64 Linux binaries and the reverse, tested by running LTP that way.
