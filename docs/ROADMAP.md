@@ -3639,7 +3639,7 @@ continuous soak on real machines are [Funded goals](#funded-goals).
 - [ ] `/proc/iomem` in Linux's format: the `System RAM` and `Reserved` ranges from `BootInfo`'s memory map, with the `crashkernel=` region nested under its RAM range as `Crash kernel`, since `kexec -p` from kexec-tools refuses to load a capture kernel without that range; the addresses read as zero to a reader without `CAP_SYS_ADMIN` (§18.6), as on Linux; the format host-tested against output captured from a Linux guest booted with `crashkernel=`, as §14.9's formats are
 - [ ] when a capture jump follows, §10.7's stop routine also leaves VMX or SVM operation on x86_64 and calls PSCI `CPU_OFF` on aarch64 after it saves its registers, as Linux's crash stop does; the jump turns every CPU's crash-register slot into an ELF note, the panicking CPU's own included, and names in the notes each CPU the stop reported `not stopped`; the capture kernel boots with Linux's `maxcpus=1` on the §10.2 command line, since such a CPU is still on, and the harness expects no `smp: ap online` line from it
 - [ ] the capture kernel presents the old memory as an ELF core at `/proc/vmcore`, as Linux's does, and writes it filtered, reading §12.1's frame metadata from the dump to drop free, zero, page-cache, and user pages
-- [ ] the vmcore written to a local disk, or over TCP to a host collector when there is none
+- [ ] the vmcore written to a local disk, or, when the capture configuration names a remote collector, sent to it over §15.11's TLS 1.3 with the collector's public key pinned in that configuration, never in clear, since the dump holds kernel memory and with it §18.7's disk-encryption keys; the configuration names no collector by default and never one of the project's. An in-guest test sends a vmcore to the harness's collector, whose key is generated per run and reaches the capture configuration only through §14.3's harness overlay, and finds a collector presenting another key refused. Until §37.4's crash-report record states whether it covers a transport the administrator configures (the owner block there), a release image's capture writer refuses a remote collector with a logged reason, and only `kernel_tests` images accept one
 - [ ] the KASLR offset (§18.2) and the build id in the vmcore notes; the §10.7 core tool reads the capture kernel's ELF vmcores as well as the harness's QEMU dumps
 
 ### 25.5 Watchdogs and lockups
@@ -3656,7 +3656,7 @@ continuous soak on real machines are [Funded goals](#funded-goals).
 ### 25.6 Persistent records and remote console
 - [ ] an EFI-variable backend for the panic record over §20.9's runtime services and an ERST backend over §25.2's table, beside §20.1's reserved-RAM record, for machines where RAM does not survive a reset; under QEMU the ERST store is `-device acpi-erst` on a shared `memory-backend-file`, so it outlives the QEMU process. Both keep DESIGN §2.5's bounds: §20.1's record format, capped at 1 KiB for an EFI variable, the size Linux's `efi-pstore` writes, and holding the panic line, the backtrace, and as many of the newest log records as fit; at most two variables under vibeOS's vendor GUID, the newest overwriting the older, written only when `QueryVariableInfo`, called under the same trylock as the write, reports the record's size plus 5 KiB free, and otherwise the ERST or reserved-RAM record, marked so the next boot logs that the EFI store was full; ERST keeps at most two records. The next boot logs every record it finds into the kernel log and then deletes the variable or clears the ERST record, as systemd-pstore does; host tests cover the encoder at the 1 KiB cap and the choice of store
 - [ ] the panic path takes §20.9's runtime-services lock only with a trylock; when that fails, or the panic arose inside a runtime call, it skips the EFI variable and writes the ERST or reserved-RAM record, since UEFI runtime services are not reentrant
-- [ ] netconsole: log lines sent as UDP from a NIC driver in polled mode, usable from the panic path with interrupts off; virtio-net and e1000 first
+- [ ] netconsole: log lines sent as UDP from a NIC driver in polled mode, usable from the panic path with interrupts off; virtio-net and e1000 first; it stays off unless `netconsole=` on the §10.2 command line names a destination, has no default destination, and sends in clear, as Linux's does, so `docs/LINUX.md` and §22.3's handbook say it belongs on a network the administrator trusts. Until §37.4's crash-report record states whether it covers a transport the administrator configures, a release kernel ignores `netconsole=` with a logged reason, and only `kernel_tests` builds, which the exit gate's netconsole line runs, send
 - [ ] netconsole's panic path sends on a transmit queue reserved for it where the device has more than one; elsewhere it takes the transmit lock with a trylock and, when a stopped CPU holds it, resets the transmit ring before sending; an in-guest test panics while another CPU is inside the driver's transmit function, and the harness's listener receives the whole dump (F135)
 - [ ] the harness gains a netconsole listener and asserts markers from it as it does from serial
 
@@ -4042,7 +4042,7 @@ real machines is a [Funded goal](#funded-goals).
 ### 30.3 Logs
 - [ ] kernel log records carry their subsystem and device as `/dev/kmsg`'s `SUBSYSTEM=` and `DEVICE=` continuation lines (§13.9), as Linux's device messages do, so rsyslog keeps them as fields rather than flattening them into text
 - [ ] `/dev/log` as a syslog datagram socket feeding §14.3's system log, so ported daemons log into it unmodified
-- [ ] rsyslog from the §14.9 mirror ships kernel and service logs to a host collector as RFC 5424 records over TLS, with a disk-assisted queue while the collector is away
+- [ ] rsyslog from the §14.9 mirror ships kernel and service logs to a host collector as RFC 5424 records over TLS, with a disk-assisted queue while the collector is away; the shipped configuration names no collector, so logs leave the machine only for one the administrator names, never the project's
 - [ ] rotation and a disk quota for the system log, so a noisy service cannot fill the root filesystem
 
 ### 30.4 Update reboots
@@ -4570,6 +4570,7 @@ instead, and the daily-driver tier marks its configurations as Alpine's build.
 
 ### 37.4 Crashes and reports
 - [ ] a crash reporter: a user crash leaves a §13.8 core and a symbolized backtrace, and a kernel panic in §20.1's persistent record is shown after the next boot; every report stays on the machine (the record below)
+- [ ] the reporter receives cores through Linux's `core_pattern` pipe form (core(5)): a pattern that begins with `|` makes the kernel run the program it names as root, with the core on its standard input and `%p`, `%u`, `%s`, and `%e` expanded in its arguments, and a process §13.9 marks not dumpable reaches no program; the base system sets `kernel.core_pattern` (§23.4) to the reporter. The reporter writes each core with `O_EXCL` and `O_NOFOLLOW` into a root-owned directory per user under `/var/crash`, mode 0600 and owned by the crashing uid; keeps every user's cores together within 1 GiB or 5% of the filesystem, whichever is smaller, deleting the oldest first; keeps no core larger than that, and still writes its backtrace; and symbolizes from debug information installed on the machine only, since a lookup such as debuginfod sends a build id drawn from the crash off the machine, which the owner box below governs. An in-guest test crashes a process as each of two users and finds each core readable only by its owner, and fills the cap and finds the oldest core gone
 - [ ] a one-command bug report that gathers the crash data, the kernel log, and the device list into a local file the user can read, and sends nothing
 - [ ] before any box sends a crash or bug report, or anything drawn from one, off the machine, an agent writes an OWNER DECISION block here stating what would leave, where it would go, and how it is redacted, and that box merges only after the owner's answer is recorded here
 - [ ] each report becomes a regression test in the cheapest tier or an open box in this file, per the standing gates
@@ -4583,6 +4584,28 @@ The owner's position is that crash data is not posted publicly, and that anythin
 redacted first. The owner has chosen no way to send reports, so the reporter and the bug-report
 command keep everything local. How a report could leave the machine, if ever, is reopened with the
 owner when this section is reached, through the box above. Nothing before Phase 37 depends on it.
+
+> **OWNER DECISION NEEDED (review J027)**: what the crash-report record above covers. Linux gives a
+> machine's administrator three ways to send crash data off it, and this file builds them: §25.4's
+> capture kernel can send the vmcore to a remote collector, §25.6's netconsole sends kernel log lines,
+> the panic included, as UDP, and §30.3's rsyslog forwards logs. None has a default destination; each
+> sends only where the administrator points it. Read literally, the box above ("before any box sends a
+> crash or bug report, or anything drawn from one, off the machine") and the record's "anything ever
+> sent is heavily redacted first" cover them. Options: (a) Recommended: the record governs what the
+> system sends on its own and anything sent to the project. A transport the administrator configures
+> with an explicit destination is the administrator's choice, as Linux's kdump and netconsole are: off
+> until configured, with no default destination, never to the project, and the vmcore only over TLS 1.3
+> to a collector whose key the configuration pins (§25.4). Release images carry them from Phase 25, so a
+> server or cloud image whose console nobody captures still reports its panic to its administrator. Your
+> answer then adds "on its own or to the project" after "off the machine" in the box above, turns the
+> record's "Nothing before Phase 37 depends on it" into "Nothing before Phase 37 sends a report on its
+> own", and deletes the "Until" sentences in §25.4 and §25.6. (b) The record covers every transport that
+> carries crash data off a machine: §25.4's remote collector and §25.6's netconsole stay in
+> `kernel_tests` builds, where the gates test them against the harness, until the box above records how
+> a report may leave the machine, and a machine whose console nobody captures loses its panic output, as
+> it does today. rsyslog's shipped configuration names no collector under either answer. Until you
+> answer, release images refuse a remote collector and `netconsole=` (§25.4, §25.6), which is (b) in
+> effect, so nothing ships that either answer forbids.
 
 ### 37.5 Stretch: dogfood
 - [ ] a person uses vibeOS in the desktop guest under HVF on the dev host as their only desktop for 14 consecutive days; its session log shows the days, and every problem filed has a regression test or an open box in this file
