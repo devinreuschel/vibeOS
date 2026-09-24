@@ -239,6 +239,19 @@ needs = [
 ]
 why = "claim: `user_exceptions`' `int3`, x87 `#MF` and SIMD `#XM` cases are the next two boxes'"
 
+[[box]]
+key = "`spawn_inner` returns `Result` instead of calling"
+needs = ["`vibeos-core` gains `kalloc`"]
+why = "claim: its Tcb allocation on the fork path is fallible (AGENTS.md rule 4)"
+
+[[box]]
+key = "a full thread table is an error, not a panic"
+needs = [
+  "`spawn_inner` returns `Result` instead of calling",
+  "`vibeos-core` gains `kalloc`",
+]
+why = "text: needs §10.10's fallible spawn_inner; claim: its Tcb allocation is fallible"
+
 # Lands-after, lands-with and lands-before clauses in box text.
 
 [[box]]

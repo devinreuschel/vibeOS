@@ -1067,7 +1067,7 @@ must neither halt nor corrupt memory it has not given to that source (AGENTS.md 
 
 | Principal | Trusted for | Can do today what a hardened kernel stops | Hardens in |
 |---|---|---|---|
-| Ring-3 code | Nothing: it must not halt or corrupt the kernel (I6) | Halt the kernel (F004 to F010); every process is root, so it can read any file and signal any process | ROADMAP §10.6 and §10.10 (halts), §13.9 (uids), §18.6 (capabilities, `seccomp`) |
+| Ring-3 code | Nothing: it must not halt or corrupt the kernel (I6) | Halt the kernel (F004 to F010); every process is root, so it can read any file and signal any process | ROADMAP §10.4, §10.6, §10.10, and §10.11 (halts), §13.9 (uids), §18.6 (capabilities, `seccomp`) |
 | Disk images and partition tables | Nothing: a parse returns `Corrupt` | Panic the kernel with a crafted image or table that root mounts or attaches (F061, F064, F117) | ROADMAP §10.2 (FAT BPB), §13.9 (partition tables), §14.8 (vibefs v2 validates every block it reads; v1 is retired); §18.7 (a LUKS2 header is parsed by the initrd's unlock tool, never by the kernel) |
 | Devices: config space, rings, registers, interrupts | Nothing for halts (rule 4); everything for DMA | Read or write any physical memory by DMA; forge an MSI, and so halt the kernel with an interrupt on a vector no handler owns (ROADMAP §10.6) | ROADMAP §10.6 (stray interrupts), §18.1 (IOMMU, interrupt remapping, used-ring checks, F048) |
 | Firmware tables: ACPI, device tree, SMBIOS, the memory map | What they describe, but not their bounds: a malformed table is refused, never followed out of range | Halt boot with a malformed table before the IDT exists (F136) | ROADMAP §11.1 (early exceptions report themselves), §20.1 (table bounds) |
@@ -1085,8 +1085,9 @@ reclaim dropped, and the pid-1 panic ([§2.5](#25-panic-policy)) follows, which 
 trust boundary. The remedy is a redundant root (ROADMAP §29.2), not an exemption for init, which
 would fault again at once.
 
-Consequence: until Phase 18 closes, vibeOS stops a process from crashing the kernel, not from reading
-another process's data. README says not to run untrusted code on it or keep secrets on it.
+Consequence: until Phase 10 closes, a process can crash the kernel (the ring-3 row), and until
+Phase 18 closes, nothing stops one from reading another process's data. README says not to run
+untrusted code on it or keep secrets on it.
 
 **Interim posture (owner decision, 2026-09-23, [design review G006](reviews/DESIGN_REVIEWS.md)).** The
 owner accepted the open gaps in the table above until the ROADMAP lines that close them, the last in
@@ -1916,14 +1917,13 @@ memory already had.
 Allocation failure has two policies, chosen by when it happens:
 
 - After `irq: enabled`, allocation is fallible on every path, not only on those that untrusted input
-  reaches (a syscall, device data, a disk image, a network packet): through `vibeos::kalloc`'s
-  owning types, whose failure becomes `ENOMEM` (or the errno Linux returns there, such as `EAGAIN`
-  from `fork`). Where the context may sleep ([§2.9](#29-preemption-and-interrupt-state) rule 4),
-  ROADMAP §12.6's direct reclaim and OOM killer run before the allocation reports failure. A user
-  who exhausts memory gets an errno or the OOM killer's verdict, never a kernel halt. A bound on an
-  allocation's size and count does not make its failure a broken invariant: any process can exhaust
-  memory first, and the heap fails when frames do (ROADMAP §12.6), so after boot a failure means
-  memory is short.
+  reaches ([§2.10](#210-trust-boundaries)): through `vibeos::kalloc`'s owning types, whose failure
+  becomes `ENOMEM` (or the errno Linux returns there, such as `EAGAIN` from `fork`). Where the
+  context may sleep ([§2.9](#29-preemption-and-interrupt-state) rule 4), ROADMAP §12.6's direct
+  reclaim and OOM killer run before the allocation reports failure. A user who exhausts memory gets
+  an errno or the OOM killer's verdict, never a kernel halt. A bound on an allocation's size and
+  count does not make its failure a broken invariant: any process can exhaust memory first, and the
+  heap fails when frames do (ROADMAP §12.6), so after boot a failure means memory is short.
 - Before `irq: enabled`, while no process exists and no device is bound, the infallible `alloc` API
   (`Box::new`, `Vec::push`, `vec!`, `format!`, `String` growth, `Arc::new`) is allowed for a size
   that no device or disk image supplies. Its failure reaches `#[alloc_error_handler]`, which panics
@@ -1954,7 +1954,7 @@ leaves `Box` and `Arc` with no fallible path on stable Rust.
 
 Rule; not yet enforced: syscall paths, driver probes (`virtio_blk_init`'s `Box::new`), and
 kernel-thread creation use the infallible API today, and a `fork` near exhaustion panics in
-`spawn_inner` (F010). ROADMAP §10.4 lands `kalloc` and the lints. Rejected: making small allocations never fail by having the allocator wait
+`spawn_inner` (F010). ROADMAP §10.4 lands `kalloc` in Phase 10's first wave and the lints after it. Rejected: making small allocations never fail by having the allocator wait
 until the OOM killer frees memory (Linux's "too small to fail"), because an allocation made with a
 spinlock held, or on a path the OOM victim needs in order to exit, cannot wait, and a failed
 `Box::new` cannot be handled by its caller; AGENTS.md rule 4 forbids a user-triggerable panic.
@@ -4056,8 +4056,9 @@ Things that belong here and are easy to get wrong, so should have tests from the
   invalidate-on-create, mount-point crossing.
 - kernfs: one directory implementation shared by devfs/tmpfs/procfs/sysfs; tmpfs
   writes evict through the Phase 7 block cache rather than pinning a grow-only
-  buffer; `/dev/null` `/dev/zero` `/dev/random` (virtio-rng, then RDRAND, then xorshift);
-  procfs stubs do not panic.
+  buffer; `/dev/null` `/dev/zero` `/dev/random` (virtio-rng, then RDRAND, then a
+  xorshift fallback that ROADMAP §10.12 deletes, F134); procfs stubs do not
+  panic.
 
 Two lessons about writing these:
 

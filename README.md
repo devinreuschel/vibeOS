@@ -19,13 +19,14 @@ If you learn something about hardware or Rust from reading this, good, but that'
 Phases 0–9 are built: boot, memory, traps/ACPI/time, threads, SMP, console/log/shell, PCI/virtio, block
 storage, filesystems including vibefs, and user mode (ring 3, syscalls, processes, userspace shell).
 The 2026-09-23 [kernel review](docs/reviews/KERNEL_REVIEW.md) lists 152 findings in that code and its tests,
-docs, and CI, 3 of them critical and 17 high. Among them are three ways a user process can halt the kernel
-(F005, F008, F010). ROADMAP boxes the review showed false are open again or reworded to match the code,
-and the ROADMAP line that fixes each finding cites its id.
+docs, and CI, 3 of them critical and 17 high. Among them are seven ways a user process can halt the kernel
+(F004 to F010), which Phase 10 fixes. ROADMAP boxes the review showed false are open again or reworded
+to match the code, and the ROADMAP line that fixes each finding cites its id.
 Phase 10 (consolidation) is in progress; Phase 11 (portability: the aarch64 port) and Phase 12 (demand
 paging / COW) are not started. See [The arc](docs/ROADMAP.md#the-arc).
-Do not run code you do not trust on vibeOS, and keep no secrets on it: until Phase 18 it stops a process
-from crashing the kernel, not from reading other processes' memory ([DESIGN §2.10](docs/DESIGN.md#210-trust-boundaries)).
+Do not run code you do not trust on vibeOS, and keep no secrets on it: until Phase 10 closes a process
+can crash the kernel, and until Phase 18 nothing stops one from reading other processes' memory
+([DESIGN §2.10](docs/DESIGN.md#210-trust-boundaries)).
 Do not attach a virtio-blk disk you want to keep: every boot writes a GPT over the first one (`vda`) when
 it is 512 KiB or more and its partition table is missing, empty, or unreadable (F003), and
 `vibeos-ktest.iso` writes fixed sectors of any attached one (F145).
