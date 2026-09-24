@@ -2497,14 +2497,14 @@ aarch64 and works on x86_64 too. virtio-gpu is shared. The frame-rate gate line 
 - [ ] repeat rate and delay
 
 ### 16.5 Display protocol
-Decided: the protocol is Wayland: its wire format, with the core, `xdg-shell`, `linux-dmabuf`,
-`presentation-time`, `viewporter`, and `fractional-scale` protocols, served by the §16.3 compositor
-and spoken by a client library in the user crate. A need no upstream protocol covers becomes an
-extension in Wayland's XML format, documented in `docs/`. Why: Phase 36 runs unmodified Wayland
-compositors and toolkits, so a native protocol would be retired there or kept as a second one beside
-Wayland, and every client written in Phases 16 to 35 (the §16.7 terminal, the §16.6 toolkit) would
-be rewritten. The work with no canonical answer, the compositor's surface tree, damage tracking, and
-frame scheduling, and the toolkit, is unchanged. Rejected: a native protocol mapped onto Wayland
+Decided: the protocol is Wayland: its wire format, with the core, `xdg-shell`, `xdg-decoration`,
+`linux-dmabuf`, `presentation-time`, `viewporter`, and `fractional-scale` protocols, served by the
+§16.3 compositor and spoken by a client library in the user crate. A need no upstream protocol covers
+becomes an extension in Wayland's XML format, documented in `docs/`. Why: Phase 36 runs unmodified
+Wayland compositors and toolkits, so a native protocol would be retired there or kept as a second one
+beside Wayland, and every client written in Phases 16 to 35 (the §16.7 terminal, the §16.6 toolkit)
+would be rewritten. The work with no canonical answer, the compositor's surface tree, damage tracking,
+and frame scheduling, and the toolkit, is unchanged. Rejected: a native protocol mapped onto Wayland
 later, which this subsection planned before, and X11.
 
 - [ ] protocol bindings generated from the pinned upstream XML (`wayland.xml` and `wayland-protocols`, both MIT-licensed, under §14.10), one generator for the compositor and the client library, so the two cannot disagree; `docs/` lists each protocol and version implemented
@@ -2517,7 +2517,7 @@ later, which this subsection planned before, and X11.
 - [ ] unmodified `wayland-info` from the §14.9 mirror lists every global the compositor advertises, with the versions `docs/` records, on both architectures
 
 ### 16.6 Window management and toolkit
-- [ ] window decorations, or a client-side decoration protocol
+- [ ] window decorations: the §16.3 compositor offers `xdg-decoration-unstable-v1` and draws a title bar with close, maximize, and minimize buttons, and resize borders, for each toplevel whose client asks for server-side mode; a client that does not ask decorates itself, as that protocol leaves it (GTK does). The toolkit below asks for server-side mode where a compositor offers the protocol and draws its own title bar and borders where it does not, as Weston and GNOME's mutter do not (§36.2)
 - [ ] move, resize, minimize, maximize, close
 - [ ] tiling and floating layouts, workspaces
 - [ ] a keyboard-driven window switcher
@@ -2591,7 +2591,7 @@ KVM leg on x86_64, HVF on the arm64 dev host) unless it names another shape.
 - [ ] `GETREGS`, `GETREGSET` of `NT_PRSTATUS`, and `PEEKUSER` read the tracee's user frame (DESIGN §5.10), and `SETREGS`, `SETREGSET`, and `POKEUSER` write it after §13.8's context validation; `orig_rax` (`orig_x0` and the syscall number on aarch64) is the syscall that `SYSCALL` stops and `GET_SYSCALL_INFO` report. In-guest on both architectures: a tracer that attached with `SEIZE` stops with `INTERRUPT` a thread looping in ring 3 with a canary in every general-purpose register, and `GETREGS` (`GETREGSET` on aarch64) returns all of them
 - [ ] a `ptrace` request touches the tracee's saved state only as DESIGN §7.5 allows another thread to: the tracee is in a ptrace stop, the tracer has seen its `on_cpu` flag clear with an Acquire load, and the tracer holds the stop until the request returns, so a `SIGKILL` sent meanwhile takes effect afterwards and the tracee's kernel stack, which holds its user frame, stays allocated; a write to FP state empties the tracee's `fp_cpu` (DESIGN §7.5's FP binding). In-guest on both architectures, under TCG and on the §10.1 KVM leg: a tracer pinned to CPU 1 single-steps a tracee pinned to CPU 0 (§13.10's `sched_setaffinity`) 10,000 times through a loop that moves a counter through `xmm0` (`v0` on aarch64); after each stop, `GETFPREGS` (`GETREGSET` of `NT_PRFPREG` on aarch64) returns the value the stepped instruction left, and the value the tracer then writes with `SETFPREGS` (`SETREGSET`) is the one the next instruction reads. In the §12.1 `debug_mm` build, where a late use of a dead thread's kernel stack faults (§10.10), a third process sends the tracee `SIGKILL` during a loop of 10,000 `GETREGS` and `SETREGS` calls (`GETREGSET` and `SETREGSET` on aarch64), each call returns the registers or `ESRCH`, and the kernel stays up
 - [ ] `PTRACE_SINGLESTEP` stops the tracee once per instruction, as on Linux: a `syscall` or `svc` is one instruction, whose step is reported at syscall exit with the PC after it, and a signal delivered to a stepping thread reports a step stop at the handler's first instruction (DESIGN §5.10 rule 12); the per-thread debug-state box above gives the mechanism. In-guest on both architectures: a tracer steps 1,000 times through a loop that contains `getpid` and sees one stop per instruction at the expected addresses, and a step taken while a `SIGUSR1` is pending stops at the handler's first instruction
-- [ ] virtio-fs or 9p to mount the host checkout, so the build loop does not start by copying the tree into an image
+- [ ] 9P2000.L over QEMU's `virtio-9p-pci` to mount the host checkout, through Linux's v9fs mount interface (`mount -t 9p -o trans=virtio,version=9p2000.L`), so the build loop does not start by copying the tree into an image; QEMU serves it on Linux and macOS hosts alike, while virtio-fs needs `virtiofsd`, which runs only on Linux ([Beyond](#beyond))
 - [ ] `strace` from the §17.7 image, unmodified, over the same `ptrace` with `PTRACE_GET_SYSCALL_INFO`, following threads and children with `-f`
 
 ### 17.5 The loop
@@ -3174,7 +3174,7 @@ from a running machine needs hotplug.
 - [ ] a virtio-net removed with `device_del` while a TCP connection and a route use it unregisters as §15.1 unregisters an interface: the route is deleted, a UDP socket bound to the interface gets `ENODEV` on its next send, closing the TCP socket succeeds, the interface is freed at its last reference, and the §12.1 KASAN build reports nothing (DESIGN §12.4)
 - [ ] `irq_init::free_vector` masks the vector, sets its quiesce flag (DESIGN §10.3), wakes its §12.5 bottom-half thread, and returns only after no CPU is running the vector's top half and that thread has exited (DESIGN §5.4), and `remove` stops the device, frees its vectors, and only then frees the state their handlers touch; an in-guest test frees a vector while another CPU's top half for it is held at a `kernel_tests` hook, and the free returns only after the hook releases it; a second test parks the vector's bottom half on a wait for its device's resources, has `remove` stop the device, and finds `free_vector` return once that thread has exited
 - [ ] `remove` keeps §10.12's order: it writes device status 0, polls until it reads 0, and clears `COMMAND.MASTER` before it frees queue and data memory; an in-guest test removes a virtio-blk with `device_del` and reads status 0 and bus mastering off before its frames return to the buddy allocator (F116)
-- [ ] persistent block device names from the serial number and NVMe namespace under `/dev/disk/by-id`, never from probe order
+- [ ] persistent block device names under `/dev/disk/by-id`, never from probe order: vibeOS's devfs creates the links from the serial number, model, WWID, and NVMe namespace identifiers each disk driver reports, with the names Linux's udev gives the same device; a host test compares them, for each disk model the harness attaches, with names captured from udev running under Linux and checked in, never derived from udev's rules files (DESIGN §1.5). §23.3 exposes the same identifiers in sysfs, and §23.5's `devtmpfs`, like Linux's, creates no `/dev/disk` links
 - [ ] the §18.1 `q35` harness configuration gains PCIe root ports, with a native-hotplug variant (`-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off`), and the §11.7 aarch64 `virt` command line gains `pcie-root-port` devices, which hotplug natively. On both architectures a UEFI run loads the firmware as read-only code in pflash unit 0 and a writable per-run copy of its variable-store template in unit 1, the §10.2 probe locating the template beside each firmware image, so a variable survives a reboot into a new QEMU process on the same copy
 
 ### 20.10 Stretch: legacy USB hosts
@@ -3511,7 +3511,7 @@ own architecture's entry and signal paths.
 - [ ] OpenJDK (Debian's default JDK) completes every benchmark of the pinned DaCapo release, at its `default` size, that completes on the reference kernel, each passing DaCapo's own output validation, on both architectures
 - [ ] an unmodified Alpine root boots as the whole userspace on both architectures (§23.5): busybox `init` as pid 1, starting OpenRC's `sysinit`, `boot`, and `default` runlevels from `/etc/inittab`, `mdev` populating `/dev`, networking through `udhcpc`, an `ssh` login from the host, and a clean `poweroff`
 - [ ] an unmodified Debian root boots as the whole userspace on both architectures (§23.5): `sysvinit-core` as pid 1, `udev` populating `/dev`, networking through `ifupdown`, an `ssh` login from the host, and a clean `poweroff`; in it, `apt-get install build-essential` from the §23.2 mirror succeeds with `Release` signatures verified, and `dpkg --audit` reports nothing
-- [ ] on the §23.3 test machine, `udevadm info --export-db` agrees with the reference kernel's on every device the machine's `-device` options add and on their children (subsystem, `DEVNAME`, `ID_PATH`, and the numbers of fixed-major devices); `libinput list-devices` finds the virtio keyboard and tablet; attaching a loop device and QEMU's `block_resize` each produce the kernel uevents the reference kernel produces; on both architectures
+- [ ] on the §23.3 test machine, `udevadm info --export-db` agrees with the reference kernel's on every device the machine's `-device` options add and on their children (subsystem, `DEVNAME`, `ID_PATH`, `DEVLINKS`, and the numbers of fixed-major devices); `libinput list-devices` finds the virtio keyboard and tablet; attaching a loop device and QEMU's `block_resize` each produce the kernel uevents the reference kernel produces; on both architectures
 - [ ] the §23.4 shape check passes on both architectures
 - [ ] tag `phase-23` and cut the next release
 
@@ -3575,7 +3575,7 @@ entries to what procps, util-linux, glibc, and the runtimes parse.
 
 ### 23.5 Distributions booted whole
 - [ ] a distribution root boots without an initrd: the kernel mounts the vibefs v2 disk that §14.8's `root=` names, read-only or read-write as `ro` or `rw` says, mounts `devtmpfs` on its `/dev` as Linux's `CONFIG_DEVTMPFS_MOUNT` does, and runs its `/sbin/init`, or the program `init=` names, as pid 1 with its standard descriptors on `/dev/console`; `ro`, `rw`, and `init=` join the §10.2 parser here; vibeOS loads no modules, so no distribution initramfs is used, and `modprobe`'s failures are a deliberate gap in `docs/LINUX.md`
-- [ ] the pseudo filesystems mount under Linux's type names and options, as init scripts mount them: `devtmpfs` (writable, so `udev` and `mdev` create nodes and links in it), `sysfs`, `proc`, `devpts` with `gid`, `mode`, and `ptmxmode`, `tmpfs` with `mode`, `size`, and `nr_inodes`, and `mqueue`
+- [ ] the pseudo filesystems mount under Linux's type names and options, as init scripts mount them: `devtmpfs` (writable, so `udev` and `mdev` create nodes and links in it; like Linux's, it creates no `/dev/disk` links, which they create from §23.3's attributes, while vibeOS's own devfs keeps creating §20.9's), `sysfs`, `proc`, `devpts` with `gid`, `mode`, and `ptmxmode`, `tmpfs` with `mode`, `size`, and `nr_inodes`, and `mqueue`
 - [ ] `mount` honors `MS_REMOUNT` (root from read-only to read-write), `MS_RDONLY`, `MS_NOSUID`, `MS_NODEV`, and `MS_NOEXEC`; `MS_BIND` came with §18.6
 - [ ] the calls init and getty make: `reboot` with Linux's magic numbers and commands, including the ctrl-alt-del ones every init sends; `vhangup`; and `syslog(2)` for `klogd` and busybox `dmesg`, whose reads follow §13.9's `dmesg_restrict` rule
 - [ ] Alpine: a root that `apk` installs from the §14.9 mirror into an empty directory, as `setup-disk` does (`alpine-base`, OpenRC, busybox `mdev`, `openssh`), written to a vibefs v2 disk; the build writes configuration files (`fstab`, `inittab`, `interfaces`) and changes no binary
@@ -4242,7 +4242,7 @@ real machines is a [Funded goal](#funded-goals).
 - [ ] pgbench, a load generator on the runner against nginx serving static files, and `redis-benchmark` each reach at least 70% of Linux's throughput in the same guest shape (4 vCPUs, 4 GiB, virtio-blk, and virtio-net with 4 queue pairs on a multiqueue tap with `vhost-net`) in the same job, under KVM on the KVM runner; and on aarch64 under HVF on the dev host as a §10.9 record, with one queue pair, since QEMU's `stream` netdev to the Era VI peer guest has only one; the numbers are recorded per release
 - [ ] a host client commits numbered rows to PostgreSQL through 100 simulated power cuts on §10.2's volatile-cache device; after each, PostgreSQL recovers and every commit acknowledged to the client is present; under TCG with 2 vCPUs and 2 GiB, on both architectures
 - [ ] a Prometheus server on the runner scrapes `node_exporter` on vibeOS, and every query in the checked-in dashboard returns data: CPU, memory, pressure stall, disk, network, and per-service series, on both architectures
-- [ ] kernel and service logs reach a collector on the runner over TLS as RFC 5424 records with structured fields, and a sequence-number check finds none lost across a 10-minute collector outage, on both architectures
+- [ ] kernel and service logs reach a collector on the runner over TLS as RFC 5424 records with structured fields, through §30.3's path, and a sequence-number check finds none lost across a 10-minute collector outage, on both architectures
 - [ ] with the trial boot taken through kexec (§30.4), three bad updates that keep the slot's kernel and initrd each come back on the old root: one whose trial panics and one whose trial stops every CPU with interrupts off after init opens `/dev/watchdog`, each through a `kernel_tests` hook that a program in the update's root triggers, since the kernel is the one the slot booted before, and one that fails its health check; a good update commits through kexec, and a cold reset afterwards boots the committed slot through its firmware entry and passes `make test-e2e`; an update that changes the kernel takes the firmware path, and the updater's log says why; on both architectures under QEMU (TCG, 2 vCPUs, 2 GiB)
 - [ ] with the clock's rate set 200 ppm fast through `adjtimex` before chrony starts, chrony brings its offset from an NTP server on the runner under 1 ms within 30 minutes and holds it there for an hour, in a 2-vCPU, 1 GiB guest under KVM on the KVM runner, and on aarch64 under HVF on the dev host as a §10.9 record
 - [ ] a vibeOS host kernel is replaced through kexec while a 2-vCPU, 2 GiB §21.2 guest keeps its memory in place: a program in the guest finds the 1 GiB it filled before the jump unchanged after it, and a ping loop from the guest to a peer on the runner misses at most 5 s, in Phase 21's nested job on x86_64 and its HVF record on aarch64; its EL2 job runs the same on aarch64 and records the pause without a threshold
@@ -4264,8 +4264,8 @@ real machines is a [Funded goal](#funded-goals).
 
 ### 30.3 Logs
 - [ ] kernel log records carry their subsystem and device as `/dev/kmsg`'s `SUBSYSTEM=` and `DEVICE=` continuation lines (§13.9), as Linux's device messages do, so rsyslog keeps them as fields rather than flattening them into text
-- [ ] `/dev/log` as a syslog datagram socket feeding §14.3's system log, so ported daemons log into it unmodified
-- [ ] rsyslog from the §14.9 mirror ships kernel and service logs to a host collector as RFC 5424 records over TLS, with a disk-assisted queue while the collector is away; the shipped configuration names no collector, so logs leave the machine only for one the administrator names, never the project's
+- [ ] `/dev/log` as a syslog datagram socket owned by §14.3's system log, so ported daemons log into it unmodified; the system log forwards each record it receives there, and each service record it collects, to a second datagram socket, `/run/vibeos/syslog`, when something has bound it, and forwards no kernel record, as systemd-journald's `ForwardToSyslog` feeds rsyslog on Linux
+- [ ] rsyslog from the §14.9 mirror, configured to read service records through `imuxsock` bound to `/run/vibeos/syslog` (`SysSock.Name`) and kernel records from `/dev/kmsg` through `imkmsg`, ships kernel and service logs to a host collector as RFC 5424 records over TLS, with a disk-assisted queue while the collector is away; the shipped configuration names no collector, so logs leave the machine only for one the administrator names, never the project's
 - [ ] rotation and a disk quota for the system log, so a noisy service cannot fill the root filesystem
 
 ### 30.4 Update reboots
@@ -5042,6 +5042,7 @@ hardware, a paid service, or a new account, that version is in [Funded goals](#f
 - **A `std`-native Rust userspace** (after 24): coreutils, shell, and init moved from the §10.5 `no_std` runtime to Rust's `std` for the `*-unknown-linux-musl` triple (§24.3).
 - **Real-time latency bounds** (after 19): a scheduling class that documents its bound on interrupt and scheduling latency, with the bound measured in a KVM guest on the hosted x86_64 runner beside Linux built with `PREEMPT_RT` in the same VM shape and job, and under HVF on the dev host as a record. The bound on bare metal is a funded goal.
 - **A network filesystem client** (after 15): NFS or 9p over TCP, so several vibeOS guests on one hosted runner share one tree served from the runner host.
+- **virtio-fs** (after 17): the host checkout mounted over `vhost-user-fs` with `virtiofsd`, beside §17.4's 9p, for its shared-memory window and speed on Linux hosts; `virtiofsd` does not run on the macOS dev host, so §17.4 keeps 9p.
 - **A WASM runtime** (after 14): a sandbox that is not a process.
 - **Cross self-hosting** (after 11 and 17): aarch64 vibeOS builds x86_64 vibeOS and the reverse, byte-identical to the native build.
 - **vibefs v3** (after 19): a log-structured or journaled design measured against v2's copy-on-write metadata on the §19.3 file benchmarks, with an upgrade path from v2.
