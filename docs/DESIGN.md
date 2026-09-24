@@ -428,8 +428,18 @@ per-CPU inbox plus a reschedule IPI. More SMP-specific rules in [section 7.7](#7
   boot stack (at least 64 KiB, no guard page, in bootloader-reclaimable memory), which all of boot
   and, in `kernel_tests` builds, the in-guest test registry run on, so an overflow there corrupts
   memory silently (ROADMAP §10.6, F072).
-- Kernel mappings are `GLOBAL`. Unmapping one requires a TLB shootdown on every online CPU before the
-  virtual address may be reused.
+- A PTE change that removes or narrows a translation takes effect only when every CPU that could hold
+  the old translation has invalidated it and acknowledged. Such changes are unmapping, making a PTE
+  not-present, read-only, or NX, and clearing its dirty bit. The rule covers kernel and user
+  mappings, CPU TLBs and paging-structure caches, and, from ROADMAP §18.1, the IOTLB. On aarch64 the
+  acknowledgement is the completion of the broadcast TLBI's `dsb ish`. Until then nothing relies on
+  the change: no frame or page-table page is freed or reused, no virtual address is reused,
+  `mprotect`, `munmap`, `mremap`, and `madvise(MADV_DONTNEED)` do not return, `fork` does not make
+  the child runnable, and no page counts as clean. Clearing only the accessed bit, as LRU aging does,
+  needs no completed invalidation: a stale accessed bit only misjudges how recently a page was used.
+  Kernel mappings are `GLOBAL`, so every online CPU could hold them ([§7.9](#79-tlb-shootdown)).
+  Rule; not yet enforced for user mappings: `addr_space_init::shootdown_user` invalidates only on the
+  calling CPU, which is enough only while one thread owns each address space (I8; ROADMAP §12.3).
 - MMIO pages are mapped uncacheable. QEMU tolerates write-back MMIO; real hardware does not.
 - Every mapping is `NO_EXECUTE` unless it holds code that is fetched. Exception: the low identity
   window's first 2 MiB is executable, though only the `0x8000` trampoline page is fetched, and only
@@ -592,6 +602,7 @@ separate namespace.
 | I31 | Every IF=0 stretch outside §2.9 rule 2's exemptions retires at most 100,000 instructions ([§2.9](#29-preemption-and-interrupt-state) rule 2) | §2.9; ROADMAP §10.3's IF-off tracer | documented | No: syscall bodies run with IF=0 until they block, the in-guest test runner holds IF off for the whole run, and a console `write` scrolls the framebuffer once per newline with IF=0 (ROADMAP §10.6, F044; ROADMAP §10.2, F075); the heap's first-fit `alloc`, its address-ordered insertion on `dealloc`, and a moving `realloc`'s copy run under the IRQ-off HEAP lock over a free list whose length user churn sets (ROADMAP §12.6); the buddy's double-free check walks the free lists (ROADMAP §12.1, F029); a `klog!` emit waits on the UART with IF off, about 8 ms per 96-byte line on a 115200-baud 16550, which no QEMU tier paces (ROADMAP §19.5); ROADMAP §10.10 makes a shootdown survive a violation (F011) |
 | I32 | A handler on an IST stack never blocks or switches threads (§5.10 rule 6) | IST handlers | documented | Yes: every IST handler halts, except that under `kernel_tests` an armed `catch` steps RIP and returns or longjmps off the IST stack |
 | I33 | A fault body reads CR2, DR6, ESR, and FAR from its frame, where the entry stub saved them before IF could turn on (§5.10 rule 9) | the `arch/idt.rs` stubs; the aarch64 vectors (ROADMAP §11.3) | documented | Yes, only because every fault body runs with IF=0 and reads CR2 before anything else can fault (`arch::idt::page_fault`); ROADMAP §10.6's IF=1 bodies need the stub save (its syscall-body and generated-stub boxes) |
+| I34 | A PTE change that removes or narrows a translation takes effect only after every CPU that could hold the old one has invalidated and acknowledged; until then no frame, table page, or VA is reused and no page counts as clean (§2.4) | `kva_init::unmap_shootdown` (kernel); `addr_space_init::shootdown_user` (user) | documented | Partly: kernel unmaps free frames and VA only after `wait_acks`; a user change invalidates only on the calling CPU, enough only while I8 holds, and nothing yet clears a dirty bit (ROADMAP §12.3) |
 
 ## 2.8 Publish last
 
@@ -1248,11 +1259,21 @@ scanout is a later polish pass; double buffering is also parked (ROADMAP §5.1).
 - Kernel mappings are `GLOBAL`. They survive a CR3 reload only where `CR4.PGE` is set: the
   trampoline sets it on each AP, and the BSP keeps the CR4 Limine left, with PGE clear under the
   pinned Limine (ROADMAP §10.6, F026, F085). Unmapping one requires a shootdown on every online CPU
-  before the VA can be reused. See [section 7.9](#79-tlb-shootdown).
+  before the VA or the frame behind it can be reused (§2.4). See [section 7.9](#79-tlb-shootdown).
 - A kernel-half edit runs a local `invlpg`, drops PT, then calls `paging::tlb_shootdown_others(va)`,
   a hook that `ipi_init::init` points at `ipi_init::shootdown_va` before the first AP starts (§7.9).
   Host tests, and boot before `ipi_init::init`, leave the hook unset; the local `invlpg` is enough
   there.
+- Frames and page-table pages that a PTE change drops go into a per-operation gather, Linux's
+  `mmu_gather` shape. The gather owns them (`Frames` or `FrameRef`, §4.2, §4.6) and releases them
+  only after the invalidation round that covers the change completes. Planned (ROADMAP §12.3): user
+  unmaps use it; `kva_init::unmap_shootdown` already frees its frames after `wait_acks`.
+- A page's dirty state lives in its PTEs as well as in the page. A page counts as clean only after
+  every PTE that maps it has been write-protected or had its dirty bit cleared, each old dirty bit
+  has been read by atomic exchange through the ROADMAP §10.3 page-table seam and folded into the
+  page, and the invalidation has completed (§2.4). Writeback then writes it, and a later store either
+  faults on the write-protected PTE or sets the dirty bit again. Reclaim harvests dirty bits the same
+  way before it decides (§4.4). Planned (ROADMAP §12.2, §12.4, §12.6).
 
 ## 4.4 Kernel heap
 
@@ -1314,10 +1335,13 @@ lock, its own address-space lock, or a busy page-cache page (§2.1's sleeping ti
    empty, and a calling thread that is not a no-reclaim thread and is outside any RCU read-side
    section ([§2.12](#212-rcu)). The allocator reads all four at entry, before it takes the heap
    lock. Any other allocation draws on ROADMAP §12.6's reserve pool and then fails.
-2. It frees clean pages only. It drops clean page-cache pages. It unmaps clean mapped ones through
-   the reverse map, taking only each address space's page-table spinlock and a try-lock of the page,
-   and no count on the space ([§2.11](#211-object-lifetimes)), and it skips any page it cannot take
-   at once. It takes no sleeping lock, the address-space lock included.
+2. It frees clean pages only. It drops clean page-cache pages that nothing maps. It unmaps a mapped
+   one through the reverse map, taking only each address space's page-table spinlock and a try-lock
+   of the page, and no count on the space ([§2.11](#211-object-lifetimes)): it exchanges each PTE to
+   empty, folds each old dirty bit into the page, and completes the invalidation (§2.4) before it
+   decides. A page found dirty stays in the cache, unmapped and dirty, for the writeback threads; a
+   clean page's count drops. It skips any page it cannot take at once. It takes no sleeping lock,
+   the address-space lock included.
 3. It writes no page. The ROADMAP §12.5 writeback threads write dirty file pages, and ROADMAP
    §12.7's swap-out thread writes anonymous pages. Direct reclaim wakes those threads and then waits, with a
    deadline, only for writes already submitted to a device. When that frees too little, the OOM
@@ -1378,8 +1402,10 @@ non-contiguous frames is the second.
 - Stack frames are allocated as *n* separate order-0 frames, not one order-*k* block. Stacks do not
   need physical contiguity and requesting it fragments the buddy allocator for nothing. Planned
   (ROADMAP §10.3): the `GuardedStack` holds each frame's `Frames` (§4.2).
-- Freeing a VA range requires a TLB shootdown before reuse. Recently freed ranges go to the tail of
-  the free list so the window between free and shootdown is not immediately reused.
+- A freed VA range returns to the free list only after its shootdown completes (§2.4;
+  `kva_init::unmap_shootdown`). Freed ranges go to the tail of the free list, so a stale pointer into
+  one keeps faulting for as long as possible instead of reaching the range's next owner; that is a
+  debugging aid, not the ordering.
 - Freeing the stack you are running on does not work. Rule: a dead thread's stack is freed only
   after the CPU that ran it has switched off it (§2.8). Not yet enforced: `thread_exit` puts the
   stack on the global 8-slot `kva_init::DEFERRED` list, and any CPU's `reap_zombies` can drain it
@@ -2306,7 +2332,8 @@ they interact with thread migration in ways that are not worth solving early.
 ## 7.9 TLB shootdown
 
 Kernel mappings are `GLOBAL` and therefore live in every CPU's TLB. Unmapping one requires every CPU
-to invalidate before the virtual address is reused.
+to invalidate before the virtual address or the frame behind it is reused
+([§2.4](#24-memory-invariants)).
 
 Protocol: update the PTE, then broadcast `0xFC` with the target address, then wait for acknowledgement
 from every online CPU.
