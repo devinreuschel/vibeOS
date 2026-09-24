@@ -1182,6 +1182,21 @@ blocks, excluding:
 double-free check and its buddy lookup walk the free lists, O(`MAX_ORDER` × list length) per call, so
 tearing down a large address space holds PT with IRQs off for that long (ROADMAP §12.1, F029).
 
+Ownership. `PhysAddr` is an address: `Copy`, and it owns nothing. It carries PTE contents, DMA
+addresses, and arithmetic. What owns free-list memory is `Frames`, a base and an order with private
+fields, neither `Copy` nor `Clone`, and `#[must_use]`. Only `Buddy::alloc(order)` and
+`Buddy::alloc_constrained` build one, and §4.6's frame metadata does when a unit's last count drops.
+`Buddy::free(Frames)` is a safe fn, and `deallocate(PhysAddr, order)` is private to the `pmm` module.
+Dropping a `Frames` never frees it: a free on drop would take BUDDY at whatever rank the drop site
+holds, which §2.1 forbids under HEAP, SCHED, or DEVICE, and could free a frame before its TLB
+invalidation. A dropped `Frames` leaks, `meminfo` counts it as leaked, and a debug build panics
+naming the allocation site. `GuardedStack`, `DmaBuffer`, the `vmap` handle, and heap growth hold the
+`Frames` they were built from. A frame that a page-table entry maps, a user leaf or a table page, is
+consumed into that entry, which is its owner record until §4.6's frame metadata exists, and only the
+page-table code that removes the entry takes it back, through an `unsafe fn` whose safety comment
+names the entry. Rule; not yet enforced: the API above hands out and takes back `PhysAddr`, so safe
+code can free a frame it does not own (ROADMAP §10.3, F018).
+
 ## 4.3 Page tables
 
 The kernel builds its own PML4 from buddy frames rather than editing Limine's. Contents at install
@@ -1361,7 +1376,8 @@ non-contiguous frames is the second.
 - A guarded stack of *n* pages reserves *n+1* pages of VA and maps only the upper *n*. The bottom page
   stays unmapped so overflow takes a page fault instead of quietly eating whatever is below.
 - Stack frames are allocated as *n* separate order-0 frames, not one order-*k* block. Stacks do not
-  need physical contiguity and requesting it fragments the buddy allocator for nothing.
+  need physical contiguity and requesting it fragments the buddy allocator for nothing. Planned
+  (ROADMAP §10.3): the `GuardedStack` holds each frame's `Frames` (§4.2).
 - Freeing a VA range requires a TLB shootdown before reuse. Recently freed ranges go to the tail of
   the free list so the window between free and shootdown is not immediately reused.
 - Freeing the stack you are running on does not work. Rule: a dead thread's stack is freed only
@@ -1381,8 +1397,7 @@ mind:
 - Demand paging (ROADMAP §12.2). `map_page` gains a "reserve VA, populate on fault" mode, and `#PF`
   becomes a recoverable exception with a real fault handler rather than a halt.
 - Copy on write (ROADMAP §12.3). `fork` clones an address space by sharing frames read-only with a
-  refcount; the write fault does the copy. Needs per-frame metadata, which means the PMM grows a
-  `struct Frame` array (ROADMAP §12.1).
+  refcount; the write fault does the copy. Needs the frame metadata below (ROADMAP §12.1).
 - Slab caches, per-CPU magazines to avoid the global buddy lock on hot paths (ROADMAP §19.9).
 - Page cache unified with `mmap`, so file-backed pages and anonymous pages share eviction (ROADMAP
   §12.5).
@@ -1391,10 +1406,37 @@ mind:
 The per-frame metadata array is the pivot. Refcounting, reverse mapping, and page cache all need it,
 so the PMM should be built expecting it to appear.
 
+Frame model (ROADMAP §12.1). The metadata is kept per allocation unit: a naturally aligned block of
+2^k frames from one buddy allocation, which Linux calls a folio. The unit's head `Frame` holds its
+count, pin count, flags, owner, index, and LRU link; each tail `Frame` names its head and keeps only
+per-frame flags, such as ROADMAP §25.3's poison bit; every `Frame` fits 64 bytes. Units are order 0
+until ROADMAP §27.4 adds huge pages, so that phase changes no counting, reverse-map, page-cache, or
+pin rule. `FrameRef` is one counted reference to a unit. It is not `Copy`; its `try_clone`
+saturates, as Linux's `refcount_t` does, and never wraps; the last `put` hands the unit back as a
+`Frames` (§4.2) to be freed after its TLB invalidation, and nothing frees implicitly.
+
+- Every present user PTE holds one count on its unit, whatever the backing: anonymous, COW-shared,
+  or page cache. The page cache holds one count of its own, and a pin (ROADMAP §19.8) holds one. A
+  unit returns to the buddy only when its count reaches zero.
+- A kernel-owned unit (the shared zero page, and later the vDSO pages, packet rings, and dumb
+  buffers) carries a kernel-owned flag and takes no PTE count. Teardown recognizes the flag and
+  drops only the mapping, as Linux's special zero-page PTEs do; counting them would put every CPU's
+  demand-zero read fault on one contended atomic.
+- A write fault reuses a private page in place only when the page is anonymous and its count is 1,
+  so this PTE is its only holder. A file page mapped privately is always copied, since the cache's
+  own count keeps it above 1. ROADMAP §19.8 adds that a pinned anonymous page, which is always
+  exclusive to one address space, is reused although its pins raise its count.
+- A unit splits (ROADMAP §27.4) only after it is unmapped everywhere through the reverse map, with
+  migration entries in place of its PTEs, and its count then freezes at the cache's reference plus
+  the caller's. A higher count means another holder, so the split remaps the unit and fails, and the
+  caller falls back to 4 KiB handling. The unit keeps no map count; ROADMAP §23.4 adds one for
+  `smaps`.
+
 ## 4.7 DMA
 
 `DmaBuffer` is physically contiguous (buddy `allocate_constrained`: size, alignment, and an optional
-power-of-two boundary the buffer must not cross). A boundary is not an address limit:
+power-of-two boundary the buffer must not cross). Planned (ROADMAP §10.3): it holds the `Frames`
+that `alloc_constrained` returns (§4.2). A boundary is not an address limit:
 `DmaAlloc::dma32` sets a 4 GiB boundary, so its buffer never crosses a 4 GiB line, but the buffer can
 lie above 4 GiB once RAM extends there, and no allocator keeps a 32-bit device's buffer below 4 GiB
 (ROADMAP §20.6, F030). The device-visible address is `dma_to_device(phys)` (identity until an IOMMU
