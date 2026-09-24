@@ -625,7 +625,7 @@ lists: a hit on a debug slot the current thread's tracer armed, a stray single s
 data-race detector's build, a hit on its own slots. Every other exception taken in ring 0 dumps and
 halts in the same order as `#[panic_handler]`. Rule: ring 3 never halts the kernel. An exception raised by ring-3 code, or by a
 return to ring 3, kills
-that process with the signal §5.2 gives the vector, prints `user: pid N killed SIG<name>`, and the
+that process with the signal §5.2 gives the vector (§11.5 the exception class, on aarch64), prints `user: pid N killed SIG<name>`, and the
 kernel keeps running. Not yet enforced: ring-3 `#DB`, and `#AC` when `CR0.AM` is set, halt the kernel (ROADMAP §10.6,
 F005), and so do the entry-path windows of §5.10 (ROADMAP §10.6, F004, F006, F007); §5.2's last
 column lists every vector whose ring-3 action differs from the rule. An NMI dumps and halts on its
@@ -710,7 +710,7 @@ separate namespace.
 | I3 | IF=0 through every return-to-user sequence (§5.10 rule 4) | FMASK `0x47700`; `cli` in `run_user` | documented | No: the syscall exit has no `cli` and `console_init::wait_key` returns with IF=1 (F001); `enter_user_full` runs with IF=1 (F006) (ROADMAP §10.6) |
 | I4 | Kernel code outside the §5.10 entry and exit sequences runs with `GS_BASE` = this CPU's `PerCpu` (§5.10) | `arch::gs`, `per_cpu_init` | documented | No: the raw gates of §5.10 rule 1 (F004), the IF=1 window in `enter_user_full` (F006), an NMI, `#MC`, or `#DB` taken in the syscall entry or exit window, and a fault on the return-to-user `iretq` (both F007) run on the user base (ROADMAP §10.6) |
 | I5 | One entry stub per vector makes the `swapgs` decision (§5.10 rule 1) | `arch/idt.rs` | documented | No: the `irq_init` pool gates `0x31`–`0x7F` and the `kbd_init` gates `0x30` and `0x21` skip it (ROADMAP §10.6, F004) |
-| I6 | Ring 3 never halts the kernel (§2.5, §5.2) | `proc_init::try_user_fault` | documented | No: ring-3 `#DB`, and `#AC` when `CR0.AM` is set, halt (F005), and so do the I4 windows (ROADMAP §10.6) |
+| I6 | Ring 3 never halts the kernel (§2.5, §5.2, §11.5) | `proc_init::try_user_fault` | documented | No: ring-3 `#DB`, and `#AC` when `CR0.AM` is set, halt (F005), and so do the I4 windows (ROADMAP §10.6) |
 | I7 | The kernel never dereferences a user VA; copies go through the physmap after `check_user_range` (§5.1) | `addr_space.rs` | enforced | Yes, but `write_bytes` ignores the PTE's `WRITABLE` bit (ROADMAP §10.6, F023) |
 | I8 | One thread per address space changes its regions, and another CPU changes its page tables only under its page-table lock (§2.11) | process model | assumed | Yes: only the owning thread touches a space. Lock-free user copies, local-only `invlpg`, and `&'static AddressSpace` depend on it. ROADMAP §10.6 replaces `&'static` with a counted object, §12.1's reverse map changes page tables from other CPUs under the space's page-table lock, §12.3 shoots down every CPU in the space's set, and §13.1's threads bring the address-space lock |
 | I9 | TCBs are never freed, so a `*mut Tcb` stays valid | 64-slot table, `thread_init` | assumed | Yes, but `spawn_inner` can reuse a Dead slot whose thread is still switching out (ROADMAP §10.10, F012) |
@@ -1911,7 +1911,13 @@ registry (`kernel_tests`) arms it. Planned (ROADMAP §10.2, F146): it compiles o
 
 Rule: ring 3 never halts the kernel. Each exception vector has one row below. The Ring 3 column is
 the rule; the last column says what the code does where it differs. Planned (ROADMAP §10.6, F005):
-the table lives in code, and a host test checks that each vector `0x00`–`0x1F` has a ring-3 row.
+the table lives in `vibeos-core`. The x86_64 port decodes each vector and error code into a portable
+`TrapKind`, as the aarch64 port decodes its exception classes
+([§11.5](#115-aarch64-exceptions-and-privilege-transitions)), and one table gives each `TrapKind` its ring-3
+action, the signal and the `si_code` Linux sends; a host test runs each vector `0x00`–`0x1F` through
+decode and table and fails on any without a ring-3 row. `TrapKind` names what the CPU reported;
+ROADMAP Phase 12's fault kinds (demand-zero, COW, file, stack) name how the fault path resolves a page
+fault, downstream of it.
 
 | Vector | Name | Ring 0 | Ring 3 | Ring 3, as built |
 |--------|------|--------|--------|------------------|
@@ -2281,7 +2287,7 @@ architectures. Planned (ROADMAP §11.3, §11.6): the aarch64 port does not exist
    `int3` delivers `SIGTRAP`. RFLAGS.TF and `int1` (`0xF1`) reach `#DB` at any DPL. Rule; not yet
    enforced: ROADMAP §10.6 (F148). Every gate is DPL 0 today (`IdtEntry::interrupt`, type `0x8E`).
 8. Ring 3 never halts the kernel: §2.5 states the rule, and the §5.2 table gives each vector's ring-3
-   action. Rule; not yet enforced for each §5.2 row whose last column names a ROADMAP line.
+   action, §11.5's each aarch64 exception class's. Rule; not yet enforced for each §5.2 row whose last column names a ROADMAP line.
 9. An entry stub saves the exception's syndrome into its frame before anything can turn IF on or
    raise another fault on that CPU, on both architectures: CR2 for `#PF`, and DR6 for `#DB`, which
    it then clears, as Linux does, before a CPL-3 `#DB` frame leaves the IST stack; ESR_EL1 and
@@ -3572,9 +3578,10 @@ interrupt between its `mov gs` and its `iretq` reads `gs:[0]` at VA 0 (F006). A 
 of the top user page leaves RIP at the non-canonical `0x0000_8000_0000_0000`, and the `#GP` on the user-return `iretq` runs on the user GS
 base; TCG skips that canonical check, and KVM and hardware do not (F007). ROADMAP §10.6 closes all
 four. Rule: an exception raised by ring-3 code, or by a return to ring 3, ends in a signal to that
-process; `exception_halt` is for faults in kernel code. Every vector has a ring-3 row in the
-[section 5.2](#52-idt-and-exceptions) table, and a new ring-3 entry or exit path gets an in-guest
-test that runs it with IF=1.
+process; `exception_halt` is for faults in kernel code. Every x86_64 vector and every aarch64
+exception class has a ring-3 row, in the [section 5.2](#52-idt-and-exceptions) and
+[section 11.5](#115-aarch64-exceptions-and-privilege-transitions) tables, and a new ring-3 entry or
+exit path gets an in-guest test that runs it with IF=1.
 
 ## 9.4 Concurrency
 
@@ -4229,7 +4236,7 @@ per-architecture uapi (ROADMAP §13.10).
 | Boot handover: the machine state the boot handshake hands over, normalized into `BootInfo` | trait | Limine base revision 3, long mode | Limine base revision 6, EL1, or EL2 with VHE | §10.3, §11.1 |
 | Early console | port module | 16550 on COM1 | PL011 | §11.1 |
 | Exception entry and exit | port module: generated entry code | one stub per IDT vector ([§5.10](#510-privilege-transitions) rule 1) | one 16-entry vector table ([§11.5](#115-aarch64-exceptions-and-privilege-transitions)) | §10.6, §11.3 |
-| Trap decode | pure half: a trap to a portable trap kind | vector and error code | vector slot and `ESR_EL1` | §10.6, §11.3 |
+| Trap decode | pure half: a trap to a `TrapKind` (§5.2) | vector and error code | vector slot and `ESR_EL1` (§11.5) | §10.6, §11.3 |
 | Kernel stack-overflow report | port module | `#DF` on IST 1 (§5.1) | no IST: an exception at the kernel's level runs on the stack that overflowed | §11.3 |
 | Interrupt mask | trait | RFLAGS.IF (`cli`, `sti`) | PSTATE.I and F (`msr daifset`, `msr daifclr`); priority masking from ROADMAP §25.5 | §10.3 |
 | Interrupt controller and IRQ identity | trait | 8259, I/O APIC, and LAPIC; vector numbers (§5.3) | GICv2, or GICv3 with its ITS; INTIDs | §10.3, §11.3 |
@@ -4419,7 +4426,8 @@ names below reach their `_EL2` registers through VHE's redirection, and `VBAR_EL
    syscall or a fault or trap body then clears I and F too (§2.9 rule 3), and an IRQ's top half
    keeps them set. The kernel masks and unmasks I and F together, since nothing routes a FIQ to it.
    Outside the entry and exit sequences D and A are clear, so a debug exception or an SError is
-   taken where it is raised.
+   taken where it is raised. With A set in the kernel, a pending SError would be taken right after
+   the next `eret` to EL0 and charged to whichever process was returning.
 3. The return to EL0 sets all of DAIF before it writes `ELR_EL1`, `SPSR_EL1`, or `SP_EL0`, and keeps
    it set until `eret` loads EL0's DAIF from `SPSR_EL1`; §5.10 rule 11's last exit-work check comes
    before those writes. A debug exception or an SError taken between the writes and the `eret` would
@@ -4435,6 +4443,43 @@ names below reach their `_EL2` registers through VHE's redirection, and `VBAR_EL
    the running thread's TCB pointer ([§2.9](#29-preemption-and-interrupt-state) rule 5): every entry
    from EL0 saves the user's `SP_EL0` into the frame and loads `current`, and the return to EL0
    restores the user's after it sets DAIF (rule 3).
+
+Exception classes. Each port decodes a trap into a portable `TrapKind` in its `vibeos-core` half, and
+one table there gives each `TrapKind` its ring-3 action, the signal and the `si_code` Linux sends, or
+says it is not a ring-3 fault (§5.2 for x86_64's vectors). On aarch64 the decode reads the vector
+slot and, for a synchronous exception, the exception class (EC) and ISS of `ESR_EL1` and an abort's
+fault status code. The Ring 3 column is Linux arm64's. A host test runs every EC from `0x00` to
+`0x3F`, and the IRQ, FIQ, and SError slots, through decode and table, and pins each row below.
+Planned (ROADMAP §11.3, §11.6).
+
+| EC | Class | Ring 0 (at the kernel's level) | Ring 3 (from EL0) |
+|----|-------|--------------------------------|-------------------|
+| `0x00` | unknown, such as `udf` | dump, halt | `SIGILL`, `ILL_ILLOPC` |
+| `0x01` | trapped `wfi` or `wfe` | dump, halt | no signal: the handler steps over the instruction |
+| `0x07` | FP or SIMD access | dump, halt | cannot occur while `CPACR_EL1.FPEN` stays on (§7.5); `SIGILL`, `ILL_ILLOPC`, with an `fp: unexpected trap` log line |
+| `0x0D` | branch target (BTI) | dump, halt | `SIGILL`, `ILL_ILLOPC`; BTI is off until ROADMAP §18.9 |
+| `0x0E` | illegal execution state | dump, halt | `SIGILL`, `ILL_ILLOPC` |
+| `0x15` | `svc` | not taken: the kernel makes no `svc` | the syscall path |
+| `0x18` | trapped `mrs`, `msr`, or system instruction | dump, halt | `SIGILL`, `ILL_ILLOPC`, unless a ROADMAP line emulates the register (§23.1) |
+| `0x19`, `0x1D` | SVE, SME access | dump, halt | `SIGILL`, `ILL_ILLOPC` (ROADMAP §11.6), until §23.1 gives their state a first-use setup |
+| `0x1C` | pointer-authentication failure | dump, halt | `SIGILL`, `ILL_ILLOPN`; pointer authentication is off until ROADMAP §18.9 |
+| `0x20`, `0x21` | instruction abort (`0x20` from EL0, `0x21` at the kernel's level) | dump with `FAR_EL1`, halt | the fault path (ROADMAP §12.2): an unresolved translation, access-flag, or permission fault gets `SIGSEGV`, `SEGV_MAPERR` or `SEGV_ACCERR`; an alignment fault `SIGBUS`, `BUS_ADRALN`; a synchronous external abort `SIGBUS`, `BUS_OBJERR`, until ROADMAP §25 classifies it |
+| `0x24`, `0x25` | data abort (`0x24` from EL0, `0x25` at the kernel's level) | dump with `FAR_EL1`, halt; a fault inside a user-memory accessor returns `EFAULT` (ROADMAP §11.6) | as `0x20` |
+| `0x22` | PC alignment | dump, halt | `SIGBUS`, `BUS_ADRALN` |
+| `0x26` | SP alignment | dump, halt | `SIGBUS`, `BUS_ADRALN` |
+| `0x2C` | trapped floating-point exception | dump, halt | `SIGFPE`, with the `si_code` of the exception `FPSR` reports |
+| `0x30`, `0x31` | breakpoint | as §5.2's `#DB` row | `SIGTRAP`, `TRAP_HWBKPT` |
+| `0x32`, `0x33` | software step | as §5.2's `#DB` row | `SIGTRAP`, `TRAP_TRACE` |
+| `0x34`, `0x35` | watchpoint | as §5.2's `#DB` row | `SIGTRAP`, `TRAP_HWBKPT` |
+| `0x3C` | `brk` | dump, halt | `SIGTRAP`, `TRAP_BRKPT` |
+| every other class | AArch32, reserved, or a feature the kernel leaves off | dump, halt | `SIGILL`, `ILL_ILLOPC`, as Linux sends for a class it does not handle |
+| IRQ slot | | handle, return | handle, return to EL0 |
+| FIQ slot | | dump, halt: nothing routes a FIQ to the kernel | not a ring-3 fault: the Ring 0 column applies |
+| SError slot | | dump with `ESR_EL1`, halt, until ROADMAP §25 classifies RAS errors | not a ring-3 fault: the Ring 0 column applies, as for `#MC` |
+
+A ROADMAP line that maps device memory into EL0 or into a guest, such as §28.4's VFIO, states how an
+SError that such an access raises is charged, since the SError row would otherwise let that access
+halt the kernel.
 
 Why: these are the rules §5.10's x86_64 rows exist for, restated for a machine with no IST, no GS
 swap, and four interrupt masks instead of one. Linux arm64 enters and leaves EL0 the same way: all of
