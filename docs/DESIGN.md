@@ -1283,6 +1283,12 @@ live) and mounts devfs / procfs / tmpfs / sysfs on `/dev` `/proc` `/tmp` `/sys` 
 contract line is `shell ready`, from `/bin/sh` (row 18).
 The harness's `boot_contract_markers()` asserts the live order ([section 8.3](#83-end-to-end)).
 
+Planned (ROADMAP §25.4, §26.4): a boot without Limine starts in the image's direct entry
+([§4.1](#41-virtual-address-map)), which runs before step 1 and enters the kernel in the state Limine
+would leave it, with a `BootInfo` in place of Limine's responses. Step 2's base-revision check runs
+only on a Limine boot; a kernel started by kexec checks the handover format's version there instead
+(ROADMAP §25.4).
+
 ## 3.4 Linker script
 
 `linker.ld` places the kernel at the higher-half base and defines the symbols the kernel maps itself
@@ -1367,6 +1373,16 @@ translation uses that one value. `boot::capture` checks that the physmap's range
 fixed regions in the table and halts with a named reason if it does. Rule; not yet enforced:
 `paging_init::HHDM_BASE` is a constant, and `boot::capture` asserts that Limine's offset equals it
 (ROADMAP §11.1). ROADMAP §18.2 later draws the other bases from entropy too.
+
+Planned (ROADMAP §25.4, §26.4): the kernel base and the HHDM offset have two sources, Limine's
+responses and the image's own direct entry, which every boot without Limine takes. The direct entry,
+one per architecture, draws both inside this table's slots, applies the image's relocations, builds
+the tables the kernel starts on, and records the base, the offset, and a seed for the other bases in
+`BootInfo`, where `boot::capture` reads them on every path. A loader that starts another kernel,
+kexec's included, places bytes and writes a serialized `BootInfo`, and draws no layout: it runs the
+release before, which does not know the next release's table. So this table may change between
+releases without breaking an update reboot (ROADMAP §30.4). Rejected: the loader drawing the layout,
+which freezes the old release's table into every later kernel.
 
 The low identity window exists for one reason: an AP starting from SIPI runs in real mode and then
 32-bit protected mode at `0x8000`, so that page must be identity mapped and executable. All 512 MiB
@@ -4379,7 +4395,7 @@ per-architecture uapi (ROADMAP §13.10).
 
 | Concern | Seam | x86_64 | aarch64 | ROADMAP |
 |---|---|---|---|---|
-| Boot handover: the machine state the boot handshake hands over, normalized into `BootInfo` | trait | Limine base revision 3, long mode | Limine base revision 6, EL1, or EL2 with VHE | §10.3, §11.1 |
+| Boot handover: the machine state the boot handshake hands over, normalized into `BootInfo` | trait | Limine base revision 3, long mode; without Limine, the direct entry (§4.1): a PVH door and a 64-bit door into one body | Limine base revision 6, EL1, or EL2 with VHE; without Limine, the direct entry (§4.1) behind an arm64 `Image` header, entered with the MMU off | §10.3, §11.1, §25.4, §26.4 |
 | Early console | port module | 16550 on COM1 | PL011 | §11.1 |
 | Exception entry and exit | port module: generated entry code | one stub per IDT vector ([§5.10](#510-privilege-transitions) rule 1) | one 16-entry vector table ([§11.5](#115-aarch64-exceptions-and-privilege-transitions)) | §10.6, §11.3 |
 | Trap decode | pure half: a trap to a `TrapKind` (§5.2) | vector and error code | vector slot and `ESR_EL1` (§11.5) | §10.6, §11.3 |
