@@ -1446,6 +1446,50 @@ blocks, excluding:
 double-free check and its buddy lookup walk the free lists, O(`MAX_ORDER` × list length) per call, so
 tearing down a large address space holds PT with IRQs off for that long (ROADMAP §12.1, F029).
 
+Planned (ROADMAP §12.1): physical memory is counted in sections of 128 MiB (2^27 bytes, 32,768
+frames) on both architectures, as on Linux x86_64 and arm64 with 4 KiB pages. At 64 bytes per frame
+([§4.6](#46-what-comes-later)'s frame model), one section's metadata is exactly one 2 MiB leaf, and no
+buddy block (at most 4 MiB, `MAX_ORDER` 10) or its buddy crosses a section boundary.
+
+Planned (ROADMAP §27.3): a section joins its node's buddy on demand rather than at boot, so the
+initialization above runs a section at a time and boot touches only the memory it uses.
+
+- Metadata. Before the buddy is built, boot reserves each node's frame metadata from that node's own
+  RAM, one 2 MiB-aligned run per section that holds RAM, packed from the top of the node's RAM
+  downward, and maps all of it then, with 2 MiB leaves, in a frame-metadata region §4.1 reserves.
+  Nothing writes it until its section joins, so the reservation touches no memory, a join writes no
+  page table, and low memory and long free runs stay for DMA ([§4.7](#47-dma)) and huge pages. The
+  runs are recorded per node, and a read of a frame's metadata (ROADMAP §12.1) reports a frame in
+  them as kernel memory whatever its section's state. Hot-added memory (ROADMAP §27.6) takes its
+  metadata from its own first 2 MiB and maps it under PT from a context that may sleep.
+- Who joins. Before `irq: enabled`, boot joins the sections its allocations reach, as bring-up
+  ([§2.9](#29-preemption-and-interrupt-state) rule 1). After it, an allocation outside §4.4's atomic
+  class that would take free memory below the reserve joins the next section of a node it may use
+  and retries (§4.4). An atomic-class allocation never joins: the background reclaim thread
+  (ROADMAP §19.10), one per node, joins a section of its node before it reclaims anything once free
+  memory falls below the low watermark. A join takes no sleeping lock and allocates nothing, so a
+  no-reclaim thread may join without recursing into reclaim.
+- How. One compare-and-swap of the section's state, from not joined to joining, gives one caller
+  the join; a caller that finds only sections being joined waits for one of those joins to finish.
+  The joiner writes the section's `Frame` entries with IF=1 and no lock held, every frame marked in
+  use, and marks the section joined, after which reads of the section's metadata use its entries.
+  Then it frees the section's RAM into the buddy a bounded chunk per buddy-lock hold
+  ([§2.9](#29-preemption-and-interrupt-state) rule 2), skipping the metadata runs and the frames
+  ROADMAP §25.3 has retired, and wakes any waiter. No free bit is set before its block is on a free
+  list, so a merge never meets a half-joined buddy, and a join takes no lock but BUDDY and writes no
+  page-table entry.
+- Counting. The reserve and the watermarks (§4.4) count joined free frames, and R is sized from all
+  RAM, joined or not. `meminfo` counts the frames of sections not yet joined as free, except those
+  in metadata runs.
+
+Rejected: joining inside the buddy under its lock, which takes PT under BUDDY against §2.1, calls up
+from the buddy against §1.1 constraint 6, and writes 2 MiB of metadata with IF=0; carving each
+section's metadata from the section itself, which leaves a metadata block inside every section,
+needs a boot pool for sections with holes, and writes a kernel-half leaf outside PT at run time;
+Linux's deferred-init threads, which join everything during boot and so write 16 GiB of metadata in
+a 1 TiB guest; a joiner thread per node beside the background reclaim thread, which is a second
+thread and a second threshold for one job.
+
 Ownership. `PhysAddr` is an address: `Copy`, and it owns nothing. It carries PTE contents, DMA
 addresses, and arithmetic. What owns free-list memory is `Frames`, a base and an order with private
 fields, neither `Copy` nor `Clone`, and `#[must_use]`. Only `Buddy::alloc(order)` and
@@ -1673,6 +1717,13 @@ its new request, fallibly ([§10.1](#101-completions)). A fault or `mmap` alloca
 pages it may need before it takes the page-table spinlock, with reclaim allowed, and frees those it
 did not use, as Linux's `pte_alloc` does. Rejected: two pools with a refill order between them,
 which adds machinery and leaves open which pool a progress thread holding a spinlock uses.
+
+Planned (ROADMAP §27.3): while a node has sections not yet joined
+([§4.2](#42-physical-memory-buddy-allocator)), joining one comes before the reserve. An allocation
+outside the atomic class that would take free memory below R joins a section of a node it may use
+and retries, so it goes below R, and direct reclaim and the OOM killer run, only once no section on
+those nodes is left to join. The atomic class never joins; the background reclaim thread joins for
+it.
 
 The OOM killer (ROADMAP §12.6) chooses among the user processes of one scope, the machine and later
 a cgroup, and never chooses pid 1, whose exit panics the kernel (ROADMAP §10.5), or a kernel thread.

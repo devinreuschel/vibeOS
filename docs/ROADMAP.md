@@ -1528,7 +1528,7 @@ so do TLB maintenance and the §11.2 I-cache maintenance aarch64 needs whenever 
 - [ ] tag `phase-12` and release `v0.12.0`
 
 ### 12.1 Frame metadata
-- [ ] a `Frame` array indexed by physical frame number, allocated at boot from a known-size region
+- [ ] a `Frame` array indexed by physical frame number, allocated at boot from a known-size region; memory is counted in 128 MiB sections (DESIGN §4.2)
 - [ ] metadata per allocation unit (DESIGN §4.6): the unit's head `Frame` holds its count, flags, owner, index, and LRU link, and each tail `Frame` names its head; units are order 0 until §27.4; a const assertion holds `size_of::<Frame>()` to 64 bytes; §19.8 adds a pin count
 - [ ] `FrameRef`, one counted reference to a unit: not `Copy`, `try_clone` saturating as Linux's `refcount_t` does and never wrapping, and the last `put` handing the unit back as a `Frames` to be freed once its TLB invalidation completes, never implicitly; a host test saturates a count and finds the unit never freed
 - [ ] `Buddy::deallocate` runs in O(`MAX_ORDER`): its double-free check and buddy-merge test read a free bit and order kept per frame in the `Frame` array instead of walking the free lists (`covered_by_free_block`, `in_free_list`), and teardown frees its frames after `PT` drops (§12.3); a host test counts free-list nodes visited per `deallocate` and finds the same count for 128 MiB and 8 GiB pools (F029)
@@ -3739,8 +3739,9 @@ host commits only the pages the guest touches. Speedups on real cores are a
 
 ### 27.3 Large memory
 - [ ] the KVA region in DESIGN §4.1 sized at boot from installed memory, instead of fixed at 64 GiB; §12.6 already sized the heap region and §20.1 the `ioremap` window
-- [ ] frame metadata (§12.1) allocated per memory section so holes cost nothing, placed on its own node (§19.7), and initialized a section at a time when the allocator first reaches it, so boot touches only the metadata it uses
-- [ ] a memory section joins its node's buddy allocator when the allocator first reaches it, with its metadata, and `meminfo` counts the sections not yet joined as free, so boot writes no free-list link into memory it has not used; today `insert_region` writes a 16-byte link into the first frame of every free 4 MiB block at boot, and since §11.2 the buddy takes all RAM, so in a 1 TiB guest those links touch 262144 pages, 1 GiB
+- [ ] frame metadata (§12.1) reserved from its own node's RAM (§19.7) and mapped at boot for every section that holds RAM, but written only when the section joins (the box below), so boot touches only the metadata it uses
+- [ ] a memory section joins its node's buddy allocator on demand, as DESIGN §4.2 lays out, so boot writes no free-list link into memory it has not used: boot joins the sections its allocations reach before `irq: enabled`; after it, an allocation outside DESIGN §4.4's atomic class that would take free memory below the §12.6 reserve joins the next section of a node it may use and retries, so the reserve, direct reclaim, and the OOM killer are reached only once no section on those nodes is left to join; an atomic-class allocation never joins, and §19.10's background reclaim thread, one per node from here, joins a section of its node before it reclaims anything; one compare-and-swap of the section's state from not joined to joining gives one caller the join, which writes the section's metadata with IF=1 and no lock held and then frees its RAM into the buddy a bounded chunk per buddy-lock hold; `meminfo` counts the frames of sections not yet joined as free, except those that hold metadata. Today `insert_region` writes a 16-byte link into the first frame of every free 4 MiB block at boot, and since §11.2 the buddy takes all RAM, so in a 1 TiB guest those links touch 262144 pages, 1 GiB
+- [ ] the join tested: a `vibeos-core` host test drives the section states and the allocation failure order, and finds that two callers racing for one section join it once, that an atomic-class allocation never joins, and that the reserve below R, reclaim, and the OOM killer are not reached while a section on an allowed node is not joined. In-guest, on both architectures under TCG, a `kernel_tests` boot option has a 4 GiB guest join one section at boot; a kernel thread then allocates 3 GiB and gets every frame with no OOM line, and a burst of IF=0 allocations joins no section itself and fails only once the atomic class's share of the reserve is spent, while the node's background reclaim thread joins a section within 1 s of the burst crossing the low watermark. §10.3's IF-off tracer reports each join's longest buddy-lock hold, which the job summary prints per architecture; a hold over DESIGN §2.9 rule 2's bound makes the join free one block per hold. The Phase 27 gate's 1 TiB boot is the other evidence: resident memory near the metadata's 16 GiB would show the reservation being touched, and reopens where DESIGN §4.2 places metadata
 - [ ] per-CPU free-frame lists in front of each node's buddy, since the buddy lock is the first thing many CPUs contend; §19.9 did the same for objects
 - [ ] memory layouts with holes, ranges above 1 TiB, and eight NUMA nodes tested under QEMU `-numa`
 
@@ -3767,7 +3768,7 @@ host commits only the pages the guest touches. Speedups on real cores are a
 
 ### 27.6 Stretch: larger address spaces and hot-add
 - [ ] 5-level paging (LA57) on x86_64 and 52-bit addresses (LPA2) on aarch64, for machines past 64 TiB, under TCG
-- [ ] memory hot-add through ACPI or virtio-mem under QEMU, so a VM can grow without a reboot
+- [ ] memory hot-add through ACPI or virtio-mem under QEMU, so a VM can grow without a reboot; a hot-added section takes its metadata from its own first 2 MiB, as Linux's `memmap_on_memory` does, mapped under the page-table lock from a context that may sleep before the section joins as DESIGN §4.2 describes
 
 ---
 
