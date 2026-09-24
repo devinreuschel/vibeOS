@@ -361,7 +361,7 @@ Blocking and allocation are a class of bug, not an instance. Context rules:
 | Hard IRQ / MSI handler | No | No |
 | Softirq equivalent (high-prio workqueue) | No | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)); the hard IRQ only enqueues |
 | RCU read-side section ([§2.12](#212-rcu)) | No; it may be preempted | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) |
-| Threaded IRQ bottom half | Yes, on its own device's state only ([§5.4](#54-irq-registration)) | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) |
+| Threaded IRQ bottom half | Only for its own device's resources, with a deadline; never for an I/O completion ([§5.4](#54-irq-registration)) | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) |
 | Block error handler ([§10.3](#103-failure)) | Yes, with IF=1 and no spinlock held | Fallible only, without direct reclaim ([§4.4](#44-kernel-heap)) |
 | Workqueue worker | Yes | Yes, fallible only ([§4.4](#44-kernel-heap)); without direct reclaim while it runs a softirq-equivalent item (row above) |
 | Driver `probe` | Yes | Yes, fallible only ([§4.4](#44-kernel-heap)); a failed probe leaves its device unbound and logs why |
@@ -1623,10 +1623,11 @@ thread. R is recomputed when one starts or stops. A thread in direct reclaim is 
 because any number of threads may reclaim at once. `meminfo` shows R and, for each class, the lowest
 free count one of its allocations has left since boot. Two rules keep ordinary work out of the
 atomic class. A block completion allocates nothing, because what it needs was allocated at
-submission (ROADMAP §12.5's owned submission). A fault or `mmap` allocates the page-table pages it may need before it
-takes the page-table spinlock, with reclaim allowed, and frees those it did not use, as Linux's
-`pte_alloc` does. Rejected: two pools with a refill order between them, which adds machinery and
-leaves open which pool a progress thread holding a spinlock uses.
+submission (ROADMAP §12.5's owned submission); only a stage-2 item that submits more I/O allocates,
+its new request, fallibly ([§10.1](#101-completions)). A fault or `mmap` allocates the page-table
+pages it may need before it takes the page-table spinlock, with reclaim allowed, and frees those it
+did not use, as Linux's `pte_alloc` does. Rejected: two pools with a refill order between them,
+which adds machinery and leaves open which pool a progress thread holding a spinlock uses.
 
 The OOM killer (ROADMAP §12.6) chooses among the user processes of one scope, the machine and later
 a cgroup, and never chooses pid 1, whose exit panics the kernel (ROADMAP §10.5), or a kernel thread.
@@ -1992,16 +1993,22 @@ A threaded handler's top half runs in `dispatch` (ack / mask / wake only). Today
 kernel thread, pinned to the last online CPU, runs every threaded vector's bottom half.
 Planned (ROADMAP §12.5): each threaded vector gets its own bottom-half thread, pinned to the
 CPU the vector is routed to and moved by `set_affinity`, so a device with one queue per CPU
-gets one thread per queue. A bottom half may block only on its own device's state. Each such
-wait has a deadline and also ends when the vector's quiesce flag is set. It takes
-no lock of §2.1's sleeping tier and never waits for another device's I/O, and it allocates
-without direct reclaim, in §4.4's atomic class. `free_vector` ends the vector's thread before
-it returns.
+gets one thread per queue. A bottom half never waits for an I/O completion, its own device's
+included, since it may be the thread that delivers it. It waits only for a resource of its own
+device, such as a free descriptor. Each such wait has a deadline and also ends when the vector's
+quiesce flag is set ([section 10.3](#103-failure)). It takes no lock of §2.1's sleeping tier,
+allocates without direct reclaim, in §4.4's atomic class, and leaves completion work beyond waking
+waiters and settling page state to stage 2 ([section 10.1](#101-completions)). In debug builds,
+`IoWaiter::wait` and every page or buffer wait assert that the caller is neither a bottom half nor
+a softirq-equivalent item. `free_vector` ends the vector's thread before it returns.
 
 Why: one shared thread puts every device's completions on one CPU, although multi-queue
 devices (virtio-blk today, NVMe in ROADMAP §20.4, RSS in Phase 28) spread them across CPUs
 on purpose. One bottom half that blocks also stalls every other device, including the one
 whose completion it waits for. One thread per threaded interrupt is Linux's model.
+Per-vector threads end the stall across devices, not within one vector: a bottom half that waits
+for its own device's completion waits for itself. So it may wait for resources only, and the debug
+assertion checks the promise that the rejected shared thread could only make.
 Rejected: one shared thread whose handlers promise never to block, which nothing checks;
 and one bottom-half thread per CPU, in which one device's blocked handler still stalls
 another device's on that CPU.
@@ -3672,6 +3679,32 @@ outlive the completer's last access to them, which under the rule above is the
 status store. Once the waiter and the buffer are counted (ROADMAP §12.5, F042), the
 completer drops its references to them after it leaves SCHED, never inside it
 (§2.11 rules 5 and 6).
+
+Planned (ROADMAP §12.5): completion runs in two stages. Stage 1 runs in the party that claimed the
+request ([section 10.3](#103-failure)), usually the bottom half. It records the status and does only
+work that neither waits nor submits I/O: it wakes the waiters, clears a page's FILLING or WRITEBACK
+state with its result (a failed fill leaves the page not up to date and wakes its waiters with the
+error), records a writeback error on the mapping, and drops references through `put_deferred`
+(§2.11). Everything else is stage 2: data-checksum verification, decryption, a stacked parent's
+completion, and a failover or mirror retry. Stage 2 runs as a softirq-equivalent item (§2.2)
+queued from the CPU that ran stage 1. The item is part of the request, so queuing it allocates
+nothing and cannot fail. A stage-2 item takes no sleeping lock and never waits. Work that needs
+more I/O (a read from another mirror, the rewrite of a bad copy, a stacked device's child request)
+allocates its request fallibly and only enqueues it on the target's software queue, never waiting
+for a descriptor, bounce slot, or tag, and that request has its own stage-2 item. If the allocation
+fails, the original request completes with its own error. A page whose fill needs stage 2 stays
+FILLING until stage 2 finishes. A stacked parent's completion runs in the item that completed its
+member. A read loads the checksums of the blocks it reads before it submits them, in the
+submitting thread, so verification at completion reads nothing.
+
+Why: a bottom half that reads a checksum-tree block to verify a fill either waits for its own
+device, whose completion only it delivers, or does not wait and leaves the page FILLING with no one
+to finish it. Linux runs this work after completion in workqueues (btrfs's end-io workers,
+dm-crypt's kcryptd) and looks checksums up at submission, as btrfs does. Rejected: a second,
+block-only completion workqueue, which duplicates the softirq-equivalent queue (AGENTS.md rule 10);
+a completion thread per queue that may block, which moves the blocked-handler problem up one level;
+and Linux's concurrency-managed workqueues with rescuer threads, more machinery than a rule that
+stage 2 never waits.
 
 ## 10.2 Barrier vs flush
 
