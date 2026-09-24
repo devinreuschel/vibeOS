@@ -1780,6 +1780,18 @@ A slab allocator for hot object types (TCBs, file descriptors, inodes, network b
 ROADMAP §19.9; general allocation stays on the heap, which ROADMAP §12.6 makes a constant-time TLSF
 allocator, and slab does not replace it.
 
+Planned (ROADMAP §12.1): one set of allocation hooks for the sanitizer builds. Every kernel allocator
+(the buddy, the heap, the KVA allocator, and ROADMAP §19.9's slab) calls the same hooks when it hands
+memory out, with the span the caller may use, and when it takes memory back, and it holds freed
+memory back from reuse for as long as the hooks' quarantine asks. The KASAN build marks red zones
+and freed memory in its shadow, the `debug_mm` build fills freed memory with poison and checks it on
+reuse, and the MTE build (ROADMAP §18.4) tags each allocation and retags it on free; in the default
+build the hooks are empty. A new allocator calls them in the commit that adds it. Why: a sanitizer
+sees only what an allocator reports to it, and with one set of hooks an allocator that lands after a
+sanitizer build, or a build that lands after an allocator, needs no change to the other, whatever
+order ROADMAP Phases 18 and 19 close in. Rejected: each sanitizer build patching each allocator,
+which leaves an allocator that lands later, such as the slab after the KASAN build, invisible to it.
+
 ## 4.5 Kernel virtual address allocator
 
 The heap answers "give me 40 bytes". The KVA allocator answers "give me 16 KiB of contiguous virtual
