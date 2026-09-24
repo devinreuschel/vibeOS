@@ -1163,6 +1163,16 @@ physical span, the RSDP, and `usable()` / `framebuffers()` iterators, and derive
 Firmware reclaimable regions stay out of the free lists. Reclaiming them is a few megabytes for a
 nonzero chance of stomping something ACPI still points at.
 
+Kernel command line. Planned (ROADMAP §10.2): the kernel reads a Linux-style command line, and its
+option names follow the Linux-interfaces rule. An option Linux defines keeps Linux's name and meaning
+(`root=`, `init=`, `ro`, `rw`, `console=`, `loglevel=`, `panic=`, `mitigations=`, `crashkernel=`). An
+option only vibeOS defines is `vibeos.<name>=`, the `module.parameter` form Linux's parser gives a
+module's options, so no later Linux option can take its name. `sysctl.<path>=` sets a sysctl vibeOS
+implements, and an unknown path is logged and ignored, as on Linux. A word the kernel does not
+recognize reaches init as Linux passes it: an undotted `name=value` into init's environment, any other
+undotted word, and every word after `--`, as an argument; an unrecognized dotted word is dropped.
+ROADMAP §10.2's parser lists each option here as it lands.
+
 Planned (ROADMAP §18.7, §22.2): under Secure Boot the kernel command line is the `cmdline:` of the
 Limine configuration enrolled into the signed Limine binary, which sets `editor_enabled: no`, so
 neither the boot menu nor a file on the disk can change it. An installed slot names its root with

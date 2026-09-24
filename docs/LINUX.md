@@ -40,8 +40,11 @@ and each case that reaches the difference is on an expected-failure list citing 
 
 ## Native interfaces
 
-One row per interface only vibeOS offers, with its format and reason (SYSCALL.md §8). A row lands in
-the commit that adds the interface.
+One row per interface only vibeOS offers, with its format and reason. Each lives under a vibeOS name
+(SYSCALL.md §8): `/proc/vibeos/`, `/proc/<pid>/vibeos/`, `/sys/kernel/vibeos/`, a `vibeos/` directory
+inside a sysfs or debugfs directory Linux owns, a generic-netlink family `vibeos_<name>`, a node under
+`/dev/vibeos/`, or a `vibeos.<name>=` command-line option; `psinfo` is the one exception, until
+ROADMAP §13.9. A row lands in the commit that adds the interface.
 
 | Id | Interface | Format | Reason | Until |
 |----|-----------|--------|--------|-------|

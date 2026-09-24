@@ -371,15 +371,26 @@ process left, or with 0 (F022). The FP-state differences are in §1 (F069).
 
 ## 8. Native interfaces
 
-vibeOS allocates no syscall numbers. Linux allocates numbers as it goes,
-on both architectures from one shared range since 5.1, so a number free
-today is taken by some later Linux, and a binary built for that Linux would
-then call vibeOS's meaning of it. A vibeOS-only interface is a file under
-`/proc` or `/sys`, an `ioctl` on a vibeOS device node, or a generic-netlink
-family, and `docs/LINUX.md` lists it with its reason (ROADMAP, How to read
-this).
+vibeOS takes nothing in a space Linux allocates as it goes: syscall numbers, `prctl` and `arch_prctl`
+options, auxv types, flag bits, signal and errno numbers, `ioctl` numbers on a node Linux defines,
+fixed device numbers, netlink protocol numbers, and the names of `/proc`, `/sys`, and debugfs files,
+generic-netlink families, and kernel command-line options. Linux fills each space over time, on both
+architectures from one shared syscall range since 5.1, so a value or name free today is taken by some
+later Linux, and a binary or a system built for that Linux would then get vibeOS's meaning of it.
 
-The one exception is `psinfo` (500), which predates this rule. Linux has
-not reached 500, and ROADMAP §13.9 deletes the call when `ps` moves to
-`procfs`; its syscall-table check fails on any row whose number musl's
-pinned header does not name.
+A vibeOS-only interface lives under a vibeOS name: a file under `/proc/vibeos/`, `/proc/<pid>/vibeos/`,
+or `/sys/kernel/vibeos/`, or in a `vibeos/` directory inside a sysfs or debugfs directory Linux owns
+(such as debugfs `block/<dev>/vibeos/`); a generic-netlink family named `vibeos_<name>`; a device node
+under `/dev/vibeos/` on a dynamic major or a dynamic misc minor, with its own `ioctl`s; or a kernel
+command-line option `vibeos.<name>=` (DESIGN §3.2). `docs/LINUX.md` lists each with its format and
+reason (ROADMAP, How to read this). The per-process counters show why: Linux already has
+`/proc/<pid>/syscall`, the name a syscall count would otherwise take, and appends fields to
+`/proc/<pid>/stat`, which tools read by position, so vibeOS's counts are `/proc/<pid>/vibeos/syscalls`
+and `/proc/<pid>/vibeos/faults` (ROADMAP §13.9), and `/proc/<pid>/stat` carries only Linux's fields.
+
+The one exception is `psinfo` (500), which predates this rule. Linux has not reached 500. It carries
+the per-process syscall count (ROADMAP §10.7) and fault counts (§12.2) until ROADMAP §13.9 deletes it
+with the move of `ps` to `procfs`, and it gains no other field. §13.9's syscall-table check fails on a
+row whose number the baseline does not define: the numbers are a fact table generated from the
+baseline release's kernel.org headers (DESIGN §1.5), and musl's pinned header must agree with it on
+every name musl defines.

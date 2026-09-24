@@ -100,6 +100,19 @@ class TestLinux(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("Decided in names no document section", errors[0])
 
+    def test_native_interface_under_a_vibeos_name_passes(self) -> None:
+        row = "| `faults` | `/proc/<pid>/vibeos/faults` | counts | fault kinds | — |\n"
+        errors, _ = check_linux(LINUX + row)
+        self.assertEqual(errors, [])
+
+    def test_native_interface_outside_the_vibeos_names_fails(self) -> None:
+        row = "| `syscalls` | `/proc/<pid>/syscalls` | a count | tracing | — |\n"
+        errors, _ = check_linux(LINUX + row)
+        self.assertEqual(
+            errors,
+            ["docs/LINUX.md:21: native interface outside the vibeOS names (SYSCALL.md §8)"],
+        )
+
 
 class TestSyscall(unittest.TestCase):
     ids = {"no-modules", "no-vsyscall", "psinfo"}

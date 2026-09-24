@@ -10,6 +10,7 @@ its required parts, so this one checks:
 - every table row there has as many cells as its header and no empty cell (`—` is a value);
 - every Id is one backticked lowercase name, used once in the file;
 - every Decided-in cell names a document section, a ROADMAP non-goal, or `here`;
+- every native interface but `psinfo` lives under a vibeOS name (SYSCALL.md §8);
 - in docs/SYSCALL.md, each bullet under a "differences from Linux" heading, and each row of
   the §2 errno table that names Linux, cites a kernel-review finding, a ROADMAP section, §2.1
   or §3.1, or a docs/LINUX.md row by its id.
@@ -37,6 +38,18 @@ SEPARATOR_CELL = re.compile(r":?-+:?")
 CITE = re.compile(r"\bF\d{3}\b|ROADMAP §|§2\.1\b|§3\.1\b")
 BACKTICKED = re.compile(r"`([^`]+)`")
 DIFFERENCES = re.compile(r"differences from linux", re.IGNORECASE)
+# SYSCALL.md §8: where a native interface may live. `psinfo` predates the rule (ROADMAP §13.9).
+NATIVE_NAMES = (
+    "/proc/vibeos/",
+    "/proc/<pid>/vibeos/",
+    "/sys/kernel/vibeos/",
+    "/vibeos/",
+    "vibeos_",
+    "/dev/vibeos/",
+    "vibeos.",
+)
+NATIVE_EXCEPTIONS = ("psinfo",)
+OUTSIDE_NAMES = "native interface outside the vibeOS names (SYSCALL.md §8)"
 
 
 @dataclass
@@ -122,6 +135,11 @@ def check_linux(text: str, path: str = "docs/LINUX.md") -> tuple[list[str], set[
             width = len(table.header)
             id_col = table.header.index("Id") if "Id" in table.header else None
             decided_col = table.header.index("Decided in") if "Decided in" in table.header else None
+            iface_col = (
+                table.header.index("Interface")
+                if name == "Native interfaces" and "Interface" in table.header
+                else None
+            )
             for n, cells in table.rows:
                 if len(cells) < width:
                     errors.append(f"{path}:{n}: row has {len(cells)} cells, its header {width}")
@@ -144,6 +162,12 @@ def check_linux(text: str, path: str = "docs/LINUX.md") -> tuple[list[str], set[
                 if decided_col is not None and decided_col < len(cells) and cells[decided_col]:
                     if not DECIDED_IN.search(cells[decided_col]):
                         errors.append(f"{path}:{n}: Decided in names no document section")
+                if iface_col is not None and iface_col < len(cells) and cells[iface_col]:
+                    has_id = id_col is not None and id_col < len(cells)
+                    own = cells[id_col].strip("`") if has_id and id_col is not None else ""
+                    iface = cells[iface_col]
+                    if own not in NATIVE_EXCEPTIONS and not any(m in iface for m in NATIVE_NAMES):
+                        errors.append(f"{path}:{n}: {OUTSIDE_NAMES}")
     return errors, set(ids)
 
 
