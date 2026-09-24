@@ -96,7 +96,7 @@ Error: `rax = -errno`. Linux names, Linux values:
 | `ENOENT` | 2 | `open`/`execve` missing path |
 | `ESRCH` | 3 | `kill`: no such process, a zombie, `pid` 0, or a negative 32-bit `pid` (§3.1) |
 | `EIO` | 5 | device I/O error; a FAT or vibefs volume still busy after 1,000,000 yields |
-| `E2BIG` | 7 | `execve` argv with 16 or more entries |
+| `E2BIG` | 7 | `execve` argv with 16 or more entries. ROADMAP §10.5 moves to Linux's limits: a string over 131,072 bytes with its NUL, or argv and envp together over a quarter of `RLIMIT_STACK` |
 | `ENOEXEC` | 8 | malformed ELF, `ET_DYN`, or `PT_INTERP` |
 | `EBADF` | 9 | closed / out-of-range fd |
 | `ECHILD` | 10 | `wait4` with no matching child |
@@ -110,7 +110,7 @@ Error: `rax = -errno`. Linux names, Linux values:
 | `EISDIR` | 21 | |
 | `EINVAL` | 22 | `lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the non-Linux cases in §2.1 |
 | `EMFILE` | 24 | per-process fd table full (`open`); the non-Linux cases in §2.1 |
-| `ENAMETOOLONG` | 36 | path of 256 bytes or more; name above 64 bytes; an `execve` argv string of 256 bytes or more, which Linux accepts. ROADMAP §13.9 moves the path and name limits to Linux's 4096 and 255 |
+| `ENAMETOOLONG` | 36 | path of 256 bytes or more; name above 64 bytes; an `execve` argv string of 256 bytes or more, which Linux accepts (ROADMAP §10.5). ROADMAP §13.9 moves the path and name limits to Linux's 4096 and 255 |
 | `ENOSYS` | 38 | unknown number |
 
 Unknown numbers return `-ENOSYS`.
@@ -185,8 +185,10 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
 ### 3.1 Behavior and differences from Linux
 
 - `read`: a file read copies through a 256-byte kernel buffer and returns
-  at most 256 bytes per call (a short read, which POSIX allows); a console read
-  returns after a newline or `rdx` bytes
+  at most 256 bytes per call (a short read in the middle of a regular file,
+  which Linux never gives: it stops early only at end of file, at a fault, or
+  on a fatal signal; ROADMAP §12.5); a console read returns after a newline
+  or `rdx` bytes
 - `open`: `mode` is ignored, and a vibefs file is created 0644 (F149;
   ROADMAP §13.9). Unknown flag bits are ignored, as in Linux. `O_CREAT` and
   `O_TRUNC` take effect before the open-file slot and the fd are allocated, so with
@@ -202,7 +204,8 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   until ROADMAP §10.4 removes `MAX_ELF`. `p_memsz` is bounded only by
   `USER_END`, so a small ELF can map pages until physical memory runs out,
   with IF=0 and the page-table lock held (F009; ROADMAP §10.6). An empty
-  argv becomes `[path]`. `envp` is not read, and the new stack gets an
+  argv becomes `[path]`; Linux starts the image with `argc` 1 and an empty
+  `argv[0]` (ROADMAP §10.5). `envp` is not read, and the new stack gets an
   empty environment (§7; ROADMAP §9.4 defers the copy to §10.5)
 - `wait4`: `pid > 0` waits for that child, any `pid < 0` for any child, and
   `pid == 0` returns `ECHILD`; Linux reads 0 and `pid < -1` as process
@@ -215,8 +218,8 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   signals, for 0, the caller's process group, for -1, every process the
   caller may signal except pid 1 and the caller, and for any other negative
   `pid`, process group `-pid` (F149; ROADMAP §13.7). A `pid` that names a
-  zombie returns `ESRCH`; Linux returns 0. A default-terminate or
-  default-stop signal to pid 1 kills or stops init,
+  zombie returns `ESRCH`; Linux returns 0 (ROADMAP §13.7). A
+  default-terminate or default-stop signal to pid 1 kills or stops init,
   after which orphans stay zombies; Linux delivers to init only the signals
   it handles (F068; ROADMAP §10.5)
 - `psinfo`: writes one `<pid> <ppid> <state> <name>` line per process
@@ -225,7 +228,7 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   range Linux allocates next (F149); ROADMAP §13.9 deletes the call when
   `ps` moves to `procfs`
 - `read`, the `wait4` status, and `psinfo` write user memory without
-  checking the page's W bit (§5)
+  checking the page's W bit (§5; F023, ROADMAP §10.6)
 
 ---
 

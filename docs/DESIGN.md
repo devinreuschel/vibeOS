@@ -45,7 +45,7 @@ halfway through.
 | 11 | [Portability](#11-portability) | The architecture seam, the aarch64 address space, adding a port, the EL0 and ring-3 environment |
 | 12 | [Device model](#12-device-model) | Devices, parents and suppliers, states, probe order, resources, removal |
 
-On-disk filesystem formats live in their own docs, not here ([§1.4](#14-documentation-rules)): [VIBEFS.md](VIBEFS.md) (vibefs **version 1**, CoW metadata + atomic superblock switch). Syscall ABI: [SYSCALL.md](SYSCALL.md).
+On-disk filesystem formats live in their own docs, not here ([§1.4](#14-documentation-rules)): [VIBEFS.md](VIBEFS.md) (vibefs **version 1**, CoW metadata + atomic superblock switch). Syscall ABI: [SYSCALL.md](SYSCALL.md). The Linux baseline, deliberate differences from it, and native interfaces: [LINUX.md](LINUX.md).
 
 ---
 
@@ -151,7 +151,8 @@ gs, cpu, AP trampoline). Nested also: `src/fs/` (VFS + kernfs). `user/` is frees
   [section 4.1](#41-virtual-address-map), vector numbers in [section 5.3](#53-vector-map).
 - When this file outgrows one page per subsystem, split it into `docs/<topic>.md` and leave an index
   behind. Not before. On-disk formats are that split: [VIBEFS.md](VIBEFS.md), not a novel in this
-  file. Syscall ABI: [SYSCALL.md](SYSCALL.md).
+  file. Syscall ABI: [SYSCALL.md](SYSCALL.md). The Linux baseline, deliberate differences from it,
+  and native interfaces: [LINUX.md](LINUX.md).
 
 ## 1.5 Sources and licenses
 
@@ -967,9 +968,10 @@ covers the last store of a hand-off; these rules cover the rest.
 4. Ids are not pointers. A pid, tid, descriptor, or device id that crosses the syscall boundary or
    sits in a table is looked up on each use, never cached as a pointer. Pids and tids share one id
    space and one allocator, and a process's pid is the tid of its first thread. They are allocated
-   in increasing order up to `pid_max` (ROADMAP §10.4 gives its value) and then wrap, skipping every
-   id in use, as Linux does, so a freed id is not handed out again at once. An id is in use while a
-   process or thread, a process group, or a session carries it, as Linux keeps its `struct pid`. A
+   in increasing order up to `pid_max` (ROADMAP §10.4 gives its value) and then wrap to 300, skipping
+   every id in use, as Linux does with its `RESERVED_PIDS`, so a freed id is not handed out again at
+   once. An id is in use while a process or thread, a process group, or a session carries it, as
+   Linux keeps its `struct pid`. A
    pidfd (ROADMAP §23.1) refers to that id object, not to the number, so once the process is reaped
    it answers `ESRCH` and never reaches a later holder of the number.
 5. Asynchronous work owns what it touches. A request, timer, work item, or completion that outlives
@@ -1651,7 +1653,8 @@ needs before that point and only releases after it:
   after the swap only releases: close-on-exec descriptors and the old address space. After the swap
   there is no old image to return an errno to. Rejected: Linux's order, which allocates past its
   point of no return and kills the process with `SIGSEGV` when that fails; building first costs
-  holding both images' page tables until the swap.
+  holding both images' page tables until the swap. `docs/LINUX.md` lists the difference
+  (`execve-late-errno`).
 - Exit has no caller to return an errno to, so its point of no return is its first release. Thread
   and process exit, an OOM victim's included, and the reap of a zombie by `wait4` allocate nothing
   from there on. What they need, such as a zombie's exit status and the `SIGCHLD` its parent gets,
@@ -1891,7 +1894,7 @@ the table lives in code, and a host test checks that each vector `0x00`–`0x1F`
 | `0x0D` | `#GP` | dump with error code, halt | `SIGSEGV`, including a fault on the return-to-user `iretq` (§5.10 rule 2) | the `iretq` case halts. Rule; not yet enforced: ROADMAP §10.6 (F007) |
 | `0x0E` | `#PF` | dump with CR2, halt. Planned (ROADMAP §10.6): a fault inside a user-memory accessor returns `EFAULT` | `SIGSEGV`. Planned (ROADMAP §12.2): a fault on a page that a region reserves is resolved first, and one through a file mapping on a page wholly past EOF, or on a page whose fill fails, gets `SIGBUS` | as the rule |
 | `0x10` | `#MF` | dump, halt | `SIGFPE` | cannot fire: `CR0.NE` is clear, so an x87 error raises the masked IRQ13 and is lost. Rule; not yet enforced: ROADMAP §10.6 (F026) |
-| `0x11` | `#AC` | dump, halt | `SIGBUS` | halts the kernel if `CR0.AM` is set (INIT clears it on each AP and no kernel code sets it; the BSP keeps Limine's value). Rule; not yet enforced: ROADMAP §10.6 (F005) |
+| `0x11` | `#AC` | dump, halt | `SIGBUS`, for a misaligned access while ring 3 has set RFLAGS.AC; `CR0.AM` is set on every CPU, as Linux sets it | halts the kernel if `CR0.AM` is set (INIT clears it on each AP and no kernel code sets it; the BSP keeps Limine's value), and while it is clear ring 3's AC raises nothing. Rule; not yet enforced: ROADMAP §10.6 (F005) |
 | `0x12` | `#MC` | dump on IST, halt; `CR4.MCE` is clear, so a machine check shuts the CPU down with no dump (ROADMAP §10.6, F026) | not a ring-3 fault: the Ring 0 column applies | as the rule |
 | `0x13` | `#XF` | dump, halt | `SIGFPE` | arrives as `#UD` and gets `SIGILL`: `CR4.OSXMMEXCPT` is clear. Rule; not yet enforced: ROADMAP §10.6 (F026) |
 | `0x09`, `0x0F`, `0x14`–`0x1F` | reserved, `#VE`, `#CP`, `#HV`, `#VC`, `#SX` | dump, halt | `SIGSEGV` | `sig_for_vec` has no row, so one would halt the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
@@ -4179,7 +4182,7 @@ they read, and the aarch64 port does not exist.
 | x86_64 | `CR4.UMIP` | 1 where CPUID enumerates it (§5.1) | `sgdt`, `sidt`, `sldt`, `smsw`, and `str` at CPL 3 raise `#GP` (§5.2) |
 | x86_64 | `CR4.OSXSAVE`, `CR4.PKE` | 0 (ROADMAP §11.1, F130) | `xgetbv`, `rdpkru`, and `wrpkru` raise `#UD` and get `SIGILL`; ROADMAP §13.8 changes the `OSXSAVE` row if it chooses XSAVE |
 | x86_64 | `CR4.FSGSBASE` | 0 until ROADMAP §18.3 | `rdfsbase`, `wrfsbase`, `rdgsbase`, and `wrgsbase` raise `#UD` |
-| x86_64 | `CR0.AM` | 0 (ROADMAP §10.6) | ring 3 may set `RFLAGS.AC`, and no `#AC` follows |
+| x86_64 | `CR0.AM` | 1 (ROADMAP §10.6) | a misaligned access while ring 3 has set `RFLAGS.AC` raises `#AC` and gets `SIGBUS` (§5.2), as on Linux |
 
 At EL2 with VHE, `CNTKCTL_EL1` names `CNTHCTL_EL2`, whose EL0 fields sit at the same bits. The boot
 CPU computes that register's whole value with the EL0 fields above, which clears the `EL0PCTEN` bit

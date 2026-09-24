@@ -62,6 +62,8 @@ Docs live in [`docs/`](docs/). The other docs in the root are the changelog, [AG
   add is a separate list of funded goals.
 - [VIBEFS.md](docs/VIBEFS.md): vibefs on-disk format (version field in that file). Not DESIGN.
 - [SYSCALL.md](docs/SYSCALL.md): syscall ABI. Not DESIGN.
+- [LINUX.md](docs/LINUX.md): which Linux release "Linux's" means, deliberate differences from it, and
+  native interfaces. Not DESIGN.
 - [reviews/](docs/reviews/): the architecture, roadmap, and kernel reviews Phase 10 comes from, and
   per-item plans in `reviews/issues/`.
 
