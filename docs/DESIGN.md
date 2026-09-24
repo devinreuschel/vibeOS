@@ -401,19 +401,19 @@ easy to violate and expensive to debug.
 
 Blocking and allocation are a class of bug, not an instance. Context rules:
 
-| Context | May block? | May alloc? |
-|---------|------------|------------|
-| Hard IRQ / MSI handler | No | No |
-| Softirq equivalent (high-prio workqueue) | No | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)); the hard IRQ only enqueues |
-| RCU read-side section ([§2.12](#212-rcu)) | No; it may be preempted | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) |
-| Threaded IRQ bottom half | Only for its own device's resources, with a deadline; never for an I/O completion ([§5.4](#54-irq-registration)) | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) |
-| Block error handler ([§10.3](#103-failure)) | Yes, with IF=1 and no spinlock held | Fallible only, without direct reclaim ([§4.4](#44-kernel-heap)) |
-| Workqueue worker | Yes | Yes, fallible only ([§4.4](#44-kernel-heap)); without direct reclaim while it runs a softirq-equivalent item (row above) |
-| Driver `probe` | Yes | Yes, fallible only ([§4.4](#44-kernel-heap)); a failed probe leaves its device unbound and logs why |
-| Syscall body, fault handler for a CPL-3 fault | Yes ([§2.9](#29-preemption-and-interrupt-state)) | Yes, fallible only ([§4.4](#44-kernel-heap)) |
-| Network receive: a queue's threaded bottom half ([§5.4](#54-irq-registration)) | No: it takes no sleeping lock and never waits for a socket's owner; a packet for an owned socket goes on its backlog (§2.1) | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) |
-| Timer callback: a timeout-wheel callback ([§6.5](#65-timers-and-timeouts)), run as a softirq-equivalent item on the CPU whose wheel fired it | No | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) |
-| NMI and `#MC` at any CPL, `#DB` at CPL 0; shootdown and call-function work run from a spin | No | No |
+| Context | May block? | May alloc? | Scheduling class ([§7.8](#78-per-cpu-scheduling)) |
+|---------|------------|------------|---|
+| Hard IRQ / MSI handler | No | No | None: it runs on the thread it interrupted |
+| Softirq equivalent (high-prio workqueue) | No | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)); the hard IRQ only enqueues | Its CPU's worker: fair, nice -20 |
+| RCU read-side section ([§2.12](#212-rcu)) | No; it may be preempted | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) | Its thread's |
+| Threaded IRQ bottom half | Only for its own device's resources, with a deadline; never for an I/O completion ([§5.4](#54-irq-registration)) | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) | `SCHED_FIFO` 50 |
+| Block error handler ([§10.3](#103-failure)) | Yes, with IF=1 and no spinlock held | Fallible only, without direct reclaim ([§4.4](#44-kernel-heap)) | As a threaded bottom half ([§7.8](#78-per-cpu-scheduling)) |
+| Workqueue worker | Yes | Yes, fallible only ([§4.4](#44-kernel-heap)); without direct reclaim while it runs a softirq-equivalent item (row above) | Fair, nice 0 |
+| Driver `probe` | Yes | Yes, fallible only ([§4.4](#44-kernel-heap)); a failed probe leaves its device unbound and logs why | Fair, nice 0 |
+| Syscall body, fault handler for a CPL-3 fault | Yes ([§2.9](#29-preemption-and-interrupt-state)) | Yes, fallible only ([§4.4](#44-kernel-heap)) | The calling thread's |
+| Network receive: a queue's threaded bottom half ([§5.4](#54-irq-registration)) | No: it takes no sleeping lock and never waits for a socket's owner; a packet for an owned socket goes on its backlog (§2.1) | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) | `SCHED_FIFO` 50; fair, nice 0 past its budget |
+| Timer callback: a timeout-wheel callback ([§6.5](#65-timers-and-timeouts)), run as a softirq-equivalent item on the CPU whose wheel fired it | No | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) | Its CPU's worker: fair, nice -20 |
+| NMI and `#MC` at any CPL, `#DB` at CPL 0; shootdown and call-function work run from a spin | No | No | None: it runs inside whatever it interrupted |
 
 Code in the last row runs inside whatever IF=0 section its CPU was in, locks included: an NMI,
 `#MC`, or `#DB` interrupts it, and a CPU in a serviced spin (§2.3) runs incoming shootdown and
@@ -432,10 +432,11 @@ only where [§2.11](#211-object-lifetimes) rule 6 allows it; anywhere else the r
 a workqueue worker.
 
 Network receive polls its queue for at most a budget of packets per wake, so one flooded queue
-cannot hold its CPU. Loopback has no interrupt: its transmit queues the packet, and receive runs as
-a softirq-equivalent item on the sending CPU. A timer callback (TCP's retransmit and delayed-ACK
-timers) runs on the CPU whose timeout wheel fired it; a POSIX timer's or a `timerfd`'s expiry is a
-deadline timer and runs in the timer interrupt's top half instead ([§6.5](#65-timers-and-timeouts)).
+cannot hold its CPU; [§7.8](#78-per-cpu-scheduling) gives the budget and what runs past it. Loopback
+has no interrupt: its transmit queues the packet, and receive runs as a softirq-equivalent item on
+the sending CPU. A timer callback (TCP's retransmit and delayed-ACK timers) runs on the CPU whose
+timeout wheel fired it; a POSIX timer's or a `timerfd`'s expiry is a deadline timer and runs in the
+timer interrupt's top half instead ([§6.5](#65-timers-and-timeouts)).
 `cancel_sync` returns only once the callback runs on no CPU, as `free_vector` does for a handler
 (§5.4), and a pending timer holds counted references to what its callback touches
 ([§2.11](#211-object-lifetimes) rule 5).
@@ -2354,8 +2355,9 @@ another device's on that CPU.
 `set_threaded` is refused inside a hard-IRQ. The top half is optional:
 `set_threaded(vec, None, work)` is accepted, and `dispatch` EOIs before the bottom half runs, so on a
 level-triggered INTx route a device that nothing quiets raises the line again at once (ROADMAP §15.2,
-F099). The softirq stand-in is the
-high-prio workqueue: IRQ context enqueues a `fn(usize)` and wakes workers.
+F099). The softirq stand-in is the high-prio workqueue: IRQ context enqueues a `fn(usize)` and
+wakes workers. Planned (ROADMAP §19.4): its workers, one per CPU, run in the fair class at nice -20,
+and bottom-half threads at `SCHED_FIFO` 50 ([§7.8](#78-per-cpu-scheduling)).
 
 ## 5.5 8259 PIC
 
@@ -3323,6 +3325,46 @@ Global TCB table, per-CPU ready queues.
   reason about, then a proper lock-free deque if the numbers justify it.
 - Each CPU has its own idle thread with its own stack. An idle CPU sits in `sti; hlt` and is woken by
   the reschedule IPI.
+
+Kernel threads get their scheduling class when they are created, from this table. Planned (ROADMAP
+§19.4): the classes exist from §19.4; until then every thread is scheduled round-robin.
+
+| Kernel thread | Class | Linux's counterpart |
+|---|---|---|
+| The per-CPU stopper (CPU offlining, ROADMAP §19.6) and ROADMAP §25.5's per-CPU watchdog thread | Stop class, above every real-time priority | the stop class's `migration/N` threads |
+| Threaded interrupt bottom halves ([§5.4](#54-irq-registration)), network receive included, and block error handlers ([§10.3](#103-failure)) | `SCHED_FIFO` 50 | threaded interrupt handlers |
+| RCU's grace-period and boost thread ([§2.12](#212-rcu)) | `SCHED_FIFO` 1 | RCU's kthreads with boosting on (`rcutree.kthread_prio` 1) |
+| The softirq-equivalent workers, one per CPU, which also run timeout-wheel callbacks ([§6.5](#65-timers-and-timeouts)) | Fair, nice -20 | `WQ_HIGHPRI` workqueue workers |
+| Every other kernel thread: writeback, swap-out, ROADMAP §19.10's reclaim thread, §19.5's log printer, ordinary workqueue workers, driver probes | Fair, nice 0 | the same |
+| Idle, one per CPU | Runs only when nothing else can | the idle task |
+
+vibeOS defers all interrupt work to threads, as Linux does under `PREEMPT_RT`, so these classes
+decide device and audio latency and what a flood of untrusted input can take. A user real-time
+thread above 50 preempts bottom halves, as on Linux. Two rules keep the table from starving anyone:
+
+- Network receive is budgeted. A queue's bottom half processes at most 300 packets or 2 ms per wake,
+  whichever comes first, in batches of 64 (Linux's `netdev_budget`, its `netdev_budget_usecs` at a
+  1 kHz tick, and the NAPI weight). Past the budget it keeps its queue's interrupt masked and
+  continues in the fair class at nice 0 until its ring is empty, then returns to `SCHED_FIFO` 50 and
+  unmasks the interrupt. This is Linux's hand-off to `ksoftirqd` without a second thread, so a
+  receive flood shares its CPU instead of owning it.
+- Real-time throttling (ROADMAP §19.4) applies to user real-time threads only. A kernel thread in the
+  real-time class is never throttled, and in the share that throttling keeps from user real-time
+  threads it runs ahead of fair threads. Linux throttles its interrupt threads with everything else,
+  but its block and network completions run in hard-IRQ and softirq context, which no real-time
+  thread can starve. vibeOS's run in threads, so without this rule a user `SCHED_FIFO` 99 loop on
+  every CPU stalls every device completion. `docs/LINUX.md` records the difference; no interface
+  changes.
+
+Why: a bottom half in the fair class waits a slice behind CPU-bound work, and any user real-time
+thread preempts it outright, so completions and audio position updates lag with load. At the top
+real-time priority, one flooded receive queue owns its CPU. Rejected: running softirq work at
+hard-IRQ exit with IF=1, as Linux without `PREEMPT_RT` does, which needs a bottom-half-disable
+count, a second "not now" beside IF ([§2.9](#29-preemption-and-interrupt-state)); a separate per-CPU
+receive worker for work past the budget, which adds a hand-off and a context for nothing the
+demotion does not do; and leaving each subsystem to choose. If ROADMAP §19.4's measurement shows
+timeout-wheel callbacks starting late under load, they move to `SCHED_FIFO` 1, as `PREEMPT_RT`'s
+`ktimers` threads run.
 
 The timeout queue starts global with one lock. ROADMAP §19.4 makes it per CPU, as
 [§6.5](#65-timers-and-timeouts)'s two structures. A timer stays on the base it was armed on when its
