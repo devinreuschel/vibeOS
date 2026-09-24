@@ -67,7 +67,7 @@ The rule the fix implements: `fork` copies the caller's FP state, and
 `execve` loads FCW `0x037F` and MXCSR `0x1F80` with the x87 and XMM
 registers zeroed.
 
-`FMASK` (`0x47700`) clears `TF`, `IF`, `DF`, `IOPL`, `NT`, and `AC` on
+`FMASK` (DESIGN §7.2) clears `TF`, `IF`, `DF`, `IOPL`, `NT`, and `AC` on
 entry. The fast path is `sysretq`. The exit takes `iretq` when the saved
 RIP is non-canonical or `RF` or `VM` is set in RFLAGS; a spawned or forked process's
 first entry also uses `iretq` (`enter_user_full`).

@@ -57,14 +57,16 @@ On-disk filesystem formats live in their own docs, not here ([§1.4](#14-documen
 
 These are not style preferences. They shape every subsystem.
 
-1. **Concrete over generic.** One PMM, one scheduler, one page table layout. No trait soup to support
-   the second implementation nobody is writing. Traits appear where there are genuinely N backends
-   (console output, block devices, filesystems).
+1. **Concrete over generic.** One PMM, one scheduler, one page-table layout per architecture. No
+   trait soup to support the second implementation nobody is writing. Traits appear where there are
+   genuinely N backends: console output, block devices, filesystems, and the §11.1 architecture
+   ports.
 2. **Test the algorithm on the host.** Anything that is pure logic (parsers, allocators, state
    machines, encodings) lives in `vibeos-core` so `make test-unit` covers it. Hardware pokes stay
    in the kernel half. This split is the single biggest lever on iteration speed.
-3. **Serial is the ground truth.** Every subsystem prints one line when it comes up. Those lines are
-   a contract enforced by the e2e harness, not debug noise.
+3. **Serial is the ground truth.** Each step of the §3.3 boot order prints the marker its row lists,
+   and a row with none says why. Those lines are a contract enforced by the e2e harness, not debug
+   noise.
 4. **Fail loud, fail early.** Assert invariants at boot. Bounded spins everywhere so a wedged device
    produces a diagnosable hang instead of a silent one.
 5. **No unbounded loops against hardware.** Every poll gets an iteration cap and a failure path.
@@ -168,8 +170,10 @@ gs, cpu, AP trampoline). Nested also: `src/fs/` (VFS + kernfs). `user/` is frees
   comment on the line. Nothing goes in a comment that describes a past state of the code.
 - If this doc describes behavior the code contradicts, one of them is a bug. Say which in the commit
   that fixes it.
-- Constants appear once, here, and are cross-referenced rather than restated. Address map in
-  [section 4.1](#41-virtual-address-map), vector numbers in [section 5.3](#53-vector-map).
+- Constants appear once, here, and are cross-referenced rather than restated: the address map in
+  [section 4.1](#41-virtual-address-map), vector numbers in [section 5.3](#53-vector-map), and MSR
+  numbers and values in [section 7.2](#72-lapic). A number used as a name beside its name, such as a
+  vector or an MSR number, may repeat; a size, mask, or value is cited, not copied.
 - When this file outgrows one page per subsystem, split it into `docs/<topic>.md` and leave an index
   behind. Not before. On-disk formats are that split: [VIBEFS.md](VIBEFS.md), not a novel in this
   file. Syscall ABI: [SYSCALL.md](SYSCALL.md). The Linux baseline, deliberate differences from it,
@@ -850,9 +854,11 @@ interrupt on a pool vector no handler owns is EOIed and ignored with no count (R
 
 ## 2.6 Serial markers
 
-Every boot line is `vibeOS: <subsystem>: <state>`, lowercase, no punctuation at the end. Success
-markers are asserted by the e2e harness in order. Adding a marker means updating the contract in
-[section 8.3](#83-end-to-end) in the same commit.
+Every boot line is `vibeOS: ` followed by lowercase text: `<subsystem>: <state>`, or
+`<subsystem> <state>` for the one-word lines (`serial online`, `heap ok`, `gdt ok`, `idt ok`,
+`console ok`, `shell ready`); units keep their case (`4KiB`), and no line ends in a period or an
+exclamation mark. Success markers are asserted by the e2e harness in order. Adding a marker means
+updating the contract in [section 8.3](#83-end-to-end) in the same commit.
 
 The markers are a contract with the harness, not an interface for software outside the tree: ROADMAP
 §39.1 classes them `internal`, so a release may change one, with section 8.3's contract in the same
@@ -908,7 +914,7 @@ that review cites means the review's text.
 |---|-----------|----------------|--------|-------------|
 | I1 | Lock rank HEAP < PT < BUDDY < SCHED < DEVICE < SERIAL (§2.1); a second lock of a held rank only through `lock_nested` (§2.3) | `lock.rs`, `sync_init::lock_enter` | enforced at runtime, per CPU | Partly: `lock.rs` still ranks the heap after PT and BUDDY, so an allocation under either fails only when it grows the heap; a nested lock of the same rank passes the check and its release clears the rank bit the outer lock still holds, `IrqCell` has no rank, and a lock held across a switch goes unseen (ROADMAP §10.3, §13.12, F108) |
 | I2 | Hard-IRQ context never blocks or allocates (§2.2) | convention | documented | Yes, unchecked: only `irq_init::dispatch` sets `IN_ISR`, and no blocking primitive asserts it (ROADMAP §10.3, F110) |
-| I3 | IF=0 through every return-to-user sequence (§5.10 rule 4) | FMASK `0x47700`; `cli` in `run_user` | documented | No: the syscall exit has no `cli` and `console_init::wait_key` returns with IF=1 (F001); `enter_user_full` runs with IF=1 (F006) (ROADMAP §10.6) |
+| I3 | IF=0 through every return-to-user sequence (§5.10 rule 4) | FMASK (§7.2); `cli` in `run_user` | documented | No: the syscall exit has no `cli` and `console_init::wait_key` returns with IF=1 (F001); `enter_user_full` runs with IF=1 (F006) (ROADMAP §10.6) |
 | I4 | Kernel code outside the §5.10 entry and exit sequences runs with `GS_BASE` = this CPU's `PerCpu` (§5.10) | `arch::gs`, `per_cpu_init` | documented | No: the raw gates of §5.10 rule 1 (F004), the IF=1 window in `enter_user_full` (F006), an NMI, `#MC`, or `#DB` taken in the syscall entry or exit window, and a fault on the return-to-user `iretq` (both F007) run on the user base (ROADMAP §10.6) |
 | I5 | One entry stub per vector makes the `swapgs` decision (§5.10 rule 1) | `arch/idt.rs` | documented | No: the `irq_init` pool gates `0x31`–`0x7F` and the `kbd_init` gates `0x30` and `0x21` skip it (ROADMAP §10.6, F004) |
 | I6 | Ring 3 never halts the kernel, pid 1's exit excepted (§2.5, §5.2, §11.5) | `proc_init::try_user_fault` | documented | No: ring-3 `#DB`, and `#AC` when `CR0.AM` is set, halt (F005), and so do the I4 windows (ROADMAP §10.6) |
@@ -1338,6 +1344,7 @@ Power-on to `sti`. Limine does the ugly part (real mode, A20, long mode, ELF loa
 | Piece | Value |
 |-------|-------|
 | Channel | dated nightly in `rust-toolchain.toml` (bump with CI in one PR) |
+| Why nightly | The kernel binary's `alloc_error_handler`, and `abi_x86_interrupt` until ROADMAP §10.6 removes it; the flags `-Zsanitizer` (ROADMAP §12.1), `-Zretpoline-external-thunk` and `-Zfunction-return` (§18.3), and `-Zub-checks` (§18.4). `vibeos-core` uses none (§1.1 constraint 7). |
 | MSRV | `rust-version` in `crates/core/Cargo.toml`, for `vibeos-core` only (§1.1 constraint 7): the older of the last stable release before the nightly Kani pins (ROADMAP §10.8) and the Rust release Verus requires (the latest Verus release's, until ROADMAP §38.1 pins one). Before §10.8 lands, the stable release current on the pinned nightly's date. A bump of the nightly, Kani, or Verus re-derives it. Set by ROADMAP §10.1 |
 | Components | `llvm-tools` (objdump/nm/size), `rustfmt`, `clippy`; `rust-src` for rust-analyzer |
 | Target | built-in `x86_64-unknown-none` (`rust-toolchain.toml` `targets`) |
@@ -1457,7 +1464,7 @@ where the paragraphs below the table say so. The executable contract for the mar
 | 8 | MMIO PTE attribute patch | `paging: mmio uc` | LAPIC/IOAPIC/HPET pages must be uncacheable before first touch. |
 | 9 | Kernel heap | `heap ok` | `alloc` becomes legal. Until `irq: enabled` (step 15) boot may use its infallible API; from then on every allocation is fallible ([§4.4](#44-kernel-heap)). |
 | 10 | Kernel VA allocator | `kva: ready` | Guarded stacks need it, so threads need it. |
-| 11 | Per-CPU area for the BSP, bootstrap TCB, syscall MSRs | `per_cpu: bsp ready` | `GS_BASE` must be valid before any `per_cpu!` access, including from ISRs. Then `thread_init::init_bootstrap` makes `_start`'s context the bootstrap thread, and `syscall_init::init_bsp` programs STAR, LSTAR, FMASK (`0x47700`), and `EFER.SCE`, enables SSE for user code (§3.1), and wires TSS.RSP0. `arch::cpu::harden` (SMEP, SMAP, UMIP, `CR0.WP`) runs just before this step, after `idt ok`. |
+| 11 | Per-CPU area for the BSP, bootstrap TCB, syscall MSRs | `per_cpu: bsp ready` | `GS_BASE` must be valid before any `per_cpu!` access, including from ISRs. Then `thread_init::init_bootstrap` makes `_start`'s context the bootstrap thread, and `syscall_init::init_bsp` programs STAR, LSTAR, FMASK (§7.2), and `EFER.SCE`, enables SSE for user code (§3.1), and wires TSS.RSP0. `arch::cpu::harden` (SMEP, SMAP, UMIP, `CR0.WP`) runs just before this step, after `idt ok`. |
 | 12 | ACPI tables | `acpi: xsdt N tables` | MADT drives APIC and SMP, HPET drives calibration. |
 | 13 | Time: HPET or PIT, TSC calibration | `time: tsc N/ms` | The scheduler needs a tick, and AP bring-up needs `busy_wait_ms`. |
 | 13b | BSP LAPIC, I/O APIC, LAPIC timer | `time: lapic_timer ok (<mode>)` | After TSC calib. Prove a tick (TSC-deadline → periodic → PIT), then mask PIC + PIT GSI if LAPIC owns it. |
@@ -1465,9 +1472,9 @@ where the paragraphs below the table say so. The executable contract for the mar
 | 15 | Arm scheduler; emit `irq: enabled` | `irq: enabled` | Scheduler is live. The timer already ticks from steps 13/13b; this marker is post-sched arming (IF on, preemption live), not the first STI. IRQ1 stays masked until the keyboard driver (step 17). |
 | 16 | APIC + SMP bring-up | `smp: done` | Needs time (delays), heap (per-CPU allocation), scheduler (AP entry point). Live Phase 4 order: SMP before console. |
 | 17 | Framebuffer console, PS/2, mux | `console ok` | After `smp: done`. Install the IRQ1 / keyboard GSI handler, init the 8042, then unmask. Replay the pre-FB log ring onto the framebuffer. |
-| 17b | PCI enum + device registry | `pci: N devices` | After `console ok`. ECAM for the buses the first MCFG allocation covers (`acpi::parse_mcfg` reads no other entry; F045); otherwise `0xCF8`/`0xCFC`, which the kernel uses only for bus 0 (a kernel limit: configuration mechanism #1 addresses any bus; ROADMAP §20.1, F114). Scan builds a device list. Workqueue + threaded IRQ start, then drivers bind by id. Memory BARs are mapped through ioremap or the capped physmap; sizes above 32 MiB are recorded and skipped (DESIGN §4.1). |
+| 17b | PCI enum + device registry | `pci: N devices` | After `console ok`. ECAM for the buses the first MCFG allocation covers (`acpi::parse_mcfg` reads no other entry; F045); otherwise `0xCF8`/`0xCFC`, which the kernel uses only for bus 0 (a kernel limit: configuration mechanism #1 addresses any bus; ROADMAP §20.1, F114). Scan builds a device list. Workqueue + threaded IRQ start, then drivers bind by id. Memory BARs are mapped through ioremap or the capped physmap; sizes above 32 MiB are recorded and skipped (§9.2). |
 | 17c | Block layer + ramdisk + virtio-blk + partitions | `block: <name> <n> sectors` | After bind. One line per device. virtio-blk (`vda`) emits during probe; ramdisk (`ram0`) follows in `block_init`; partition children (`<parent>p<N>`) after that. |
-| 17d | VFS + FAT initrd root + pseudo mounts + vibefs | (none) | After block. Makefile FAT32 initrd at `/` when live, else dummy ramfs. Then devfs/procfs/tmpfs/sysfs on `/dev` `/proc` `/tmp` `/sys`. BSS vibefs at `/vibe` (Phase 8D). No serial marker. Syscalls do not reach the VFS or kernfs: `file_init` resolves paths through its own FAT and vibefs route tables (ROADMAP §10.4, F086). |
+| 17d | VFS + FAT initrd root + pseudo mounts + vibefs | (none) | After block. Makefile FAT32 initrd at `/` when live, else dummy ramfs. Then devfs/procfs/tmpfs/sysfs on `/dev` `/proc` `/tmp` `/sys`. BSS vibefs at `/vibe` (Phase 8D). No serial marker: a root without `/sbin/init` shows as `user: init failed` and no `shell ready`. Syscalls do not reach the VFS or kernfs: `file_init` resolves paths through its own FAT and vibefs route tables (ROADMAP §10.4, F086). |
 | 18 | `/hello`, builtins, `/sbin/init` as pid 1 | `shell ready` | Last marker. `user_init::boot_hello` runs `/hello` bound to the bootstrap thread, `shell_init::init` registers the builtins, and `proc_init::start_init` spawns `/sbin/init` pinned to the BSP. `/sbin/init` forks `/bin/tests` and waits for it without reading its exit status, then forks `/bin/sh`, which writes `shell ready` from ring 3 (`user/sh.asm`); the marker is not kernel-emitted and does not show that `/bin/tests` passed (ROADMAP §10.5, F073). A `kernel_shell` build instead spawns the kernel `shell` thread, which prints `shell ready`; a `kernel_tests` build runs the in-guest registry. |
 
 Ordering rules worth stating separately because they were learned the hard way:
@@ -1565,9 +1572,9 @@ budget is what bounds a whole path.
 
 ## 3.6 ISO and QEMU
 
-`make` stages `iso_root/` with the kernel ELF, `limine.conf`, and the Limine BIOS and UEFI artifacts,
-then builds a hybrid ISO with `xorriso` and runs `limine bios-install`. Hybrid means the same image
-boots BIOS and UEFI, which matters for real hardware later.
+`make` stages `build/iso_root_<variant>/` with the kernel ELF, `limine.conf`, and the Limine BIOS
+and UEFI artifacts, then builds a hybrid ISO with `xorriso` and runs `limine bios-install`. Hybrid
+means the same image boots BIOS and UEFI, which matters for real hardware later.
 
 The Makefile lists every `.rs` and `.asm` under `src/` as a prerequisite. A hand-maintained short list
 produced stale ISOs when new subsystem directories appeared.
@@ -2628,7 +2635,7 @@ No SGI does TLB shootdown: aarch64 broadcasts its TLB maintenance (ROADMAP §11.
 Drivers do not write to the IDT. They ask for a vector:
 
 ```rust
-let vec = irq::allocate_vector(cpu)?;     // from the 0x30..=0x7F pool
+let vec = irq::allocate_vector(cpu)?;     // from the §5.3 device pool
 irq::set_handler(vec, my_handler);
 // or: irq::set_threaded(vec, Some(top_half), thread_fn);
 ```
@@ -3121,8 +3128,7 @@ hold on both architectures.
 | `10` | Local timer ticks per scheduling slice, so ~10 ms |
 | `0x40` / `0x42` / `0x43` | PIT channel 0 data / channel 2 data / command |
 | `0x61` | Speaker gate. Bit 0 enables channel 2, bit 5 reads its output. |
-| `0x6E0` | `IA32_TSC_DEADLINE`. Writing 0 disarms. |
-| `CPUID.01H:ECX[24]` | TSC-deadline feature bit |
+| `CPUID.01H:ECX[24]` | TSC-deadline feature bit; the `IA32_TSC_DEADLINE` MSR is in §7.2 |
 
 ## 6.2 Calibrating the TSC
 
@@ -4406,7 +4412,7 @@ architecture; until that lands the ladder is one job.
 
 | Job | When | What |
 |---|---|---|
-| `check` | push / PR | `make check` (fmt, `vibeos-core` clippy `-D warnings`, host units, harness, ruff/mypy, `scripts/check_*.py`) then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines 87`. No QEMU, no `setup.sh`. HTML report is a 7-day `hostlib-coverage` artifact. |
+| `check` | push / PR | `make check` (fmt, `vibeos-core` clippy `-D warnings`, host units, harness, ruff/mypy, `scripts/check_*.py`) then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines 87`. No QEMU, no `setup.sh`. HTML report is a 7-day `core-coverage` artifact. |
 | `phase 0 ladder` | push / PR, `needs: check` | Limine, QEMU/nasm/xorriso/OVMF, kernel clippy `-D warnings` with `--all-features`, `kernel_tests`, and `vibefs_crash` (never the default feature set that ships); ROADMAP §10.1 lints each feature set an image is built with, and `kernel_shell`, in place of `--all-features`; ISO, e2e (BIOS/UEFI/panic/#GP/PIT/9 GiB), in-guest at `-smp 2` and `-smp 4`, LAPIC fallback, vibefs crash. Green `main` uploads `vibeos.iso` (7 days). |
 | `smp-stress` | weekly Monday 06:00 UTC + dispatch | `-smp 4`, longer timeout (`VIBEOS_TIMEOUT=180`); planned (ROADMAP §10.2): the §8.2 per-run deadlines, with no longer timeout |
 | `nightly-canary` | same workflow, non-blocking | undated latest nightly, `make iso && make test-unit` |
@@ -4465,10 +4471,11 @@ hostlib lint failure should go red in about a minute without starting QEMU. From
 history on, a measured number recorded in this document cites the commit it was measured at and the CPU
 model or machine it ran on (ROADMAP, How to read this).
 
-Hostlib line-coverage floor is **87%** (`--fail-under-lines 87` in `.github/workflows/ci.yml`).
-Measured 87.60% on `nightly-2026-09-22` (`cargo llvm-cov --lib` in `tests/hostlib`; A2 runs the
-same portable sources as `vibeos-core`). Ratchet the integer only upward. Coverage is still not a percentage target for the kernel: every bug that gets
-fixed gets a test that would have caught it, in the cheapest tier that can catch it. Every entry in
+Line-coverage floor for `vibeos-core` is **87%** (`--fail-under-lines 87` in
+`.github/workflows/ci.yml`). Measured 87.53% at `6cbe4fe` with `cargo llvm-cov -p vibeos-core --lib
+--features std --target $HOST`, the command the `check` job runs. Ratchet the integer only upward.
+Coverage is still not a percentage target for the kernel: every bug that gets fixed gets a test that
+would have caught it, in the cheapest tier that can catch it. Every entry in
 [section 9](#9-pitfalls) names the rule that guards it, and where that rule is only an invariant in
 code with no test, that is a weaker guarantee and should be visible as such.
 

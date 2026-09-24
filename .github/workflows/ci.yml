@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # Hostlib FAT tests spawn fsck.fat. No QEMU / Limine / setup.sh (T3).
+      # vibeos-core FAT tests spawn fsck.fat. No QEMU / Limine / setup.sh (T3).
       - name: install host tools
         run: |
           sudo apt-get update
@@ -62,20 +62,18 @@ jobs:
             cargo install cargo-llvm-cov --locked --version 0.9.1
           fi
 
-      # Floor measured 2026-09-22 on nightly-2026-09-22: 87.60% lines
-      # (`cargo llvm-cov --lib` on tests/hostlib). After A2 the portable
-      # tests live in vibeos-core; ratchet only upward.
+      # Floor 87% (DESIGN §8.6, which records the measured figure). Ratchet only upward.
       - name: vibeos-core llvm-cov floor
         run: |
           HOST=$(rustc -vV | sed -n 's/^host: //p')
           time cargo llvm-cov -p vibeos-core --lib --features std --target "$HOST" \
             --html --output-dir coverage --fail-under-lines 87
 
-      - name: upload hostlib coverage HTML
+      - name: upload vibeos-core coverage HTML
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: hostlib-coverage
+          name: core-coverage
           path: coverage
           if-no-files-found: ignore
           retention-days: 7

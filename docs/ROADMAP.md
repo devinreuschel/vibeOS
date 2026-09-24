@@ -303,8 +303,11 @@ From Phase 15 on the numbers are a reading order: Phases 15 to 17 start from 14 
 are independent of each other, Phase 23 runs beside Phases 18 to 22, Phase 21 runs beside 20, Phase 22
 needs only Phase 21's container and network sections, Phase 27 can start beside 21 and 22, and Phase 38
 beside everything from Phase 20 on. 1.0 (Phase 39) needs Phases 22 to 25, 30, and 38, and none of 26 to
-29 or 31 to 37, which continue beside it and after it (§39.3). Otherwise a phase assumes the gate of the
-one before it; era preambles name the exceptions, and Eras I and II have none.
+29 or 31 to 37, which continue beside it and after it (§39.1, §39.3). Otherwise a phase assumes the
+gate of the one before it, and era preambles name the exceptions. In Eras I and II the exceptions are
+the lines the kernel review reopened in Phases 3 to 9: each names the later section that lands it,
+most of them in Phase 10, so Phase 10 closes Phases 8 and 9's gates rather than assuming them
+(standing gates).
 
 ---
 
@@ -1077,12 +1080,12 @@ limitations.
 Phase 14 a userspace with a C library. The work has three sources. The 2026-09-22
 [architecture review](reviews/ARCHITECTURE_REVIEW.md) has its per-item plans under
 [reviews/issues/](reviews/issues/README.md), and the letter codes below name them. The
-[roadmap review](reviews/ROADMAP_REVIEW.md) is the source of the entry paths and user memory, the user
-runtime, and the CI budget. The 2026-09-23 [kernel review](reviews/KERNEL_REVIEW.md) adds a line for
+[roadmap review](reviews/ROADMAP_REVIEW.md) is the source of the entry paths and user memory, and of
+the user runtime. The 2026-09-23 [kernel review](reviews/KERNEL_REVIEW.md) adds a line for
 each bug it found in the code, in Phase 10 or in the later phase that first needs the fix. A finding id (Fnnn) names the plan for each line that cites it, as the letter codes do for the
-issue files, and How to read this says which decides where they differ (Precedence). §10.7 to
-§10.9 (forensics, models and proofs, and the engineering system), the §10.2 command line, and the §10.2
-deterministic build have no issue files; their boxes are the plan. All of it makes the next
+issue files, and How to read this says which decides where they differ (Precedence). §10.1's CI budget,
+§10.7 to §10.9 (forensics, models and proofs, and the engineering system), the §10.2 command line, and
+the §10.2 deterministic build have no issue files; their boxes are the plan. All of it makes the next
 three phases checkable.
 
 **Unlocks.** A `vibeos-core` crate that a second architecture can share. A user runtime that can
@@ -1306,7 +1309,7 @@ the work its claim rests on has landed is the failure KERNEL_REVIEW.md §5 found
 - [ ] the vector table's registration rules hold: `vectors::NAMED` includes `MC` (0x12); `idt::set_handler` asserts at registration that its vector is 32 or above and not one the table gives a fixed owner (the LAPIC and IPI vectors), a kernel invariant no input reaches (AGENTS.md rule 4); and a `const` assertion fails the build unless the table has exactly one row for each of 0 to 255. It lands after §10.6's generated-stub box (F093)
 - [ ] `now_ns` is computed from one free-running counter, the clocksource, chosen at boot and never from a count of timer interrupts: `base_ns + (((read() - base_cycles) mod 2^width) * mult >> shift)` in `u128`, in the portable half with host tests, published with the clocksource's id through the §2.7 seqlock and still clamped by `monotonic_max`, so an IF-off window or a late TSC-deadline rearm loses no time and the tick drives scheduling and timer expiry only (DESIGN §6.4). x86_64 ranks its candidates: the TSC when CPUID reports it invariant and the §10.7 warp test saw no backward step, then the HPET main counter, then the ACPI PM timer (the FADT's `X_PM_TMR_BLK`, 24 or 32 bits). A counter narrower than 64 bits is read at least once per half wrap, which CPU 0's tick does; a host test drives a 24-bit counter through ten wraps read at that interval and loses none. A registered `time: clocksource <name>` marker names the choice, and a boot with no candidate halts with a registered reason. `TickClock`'s tick-count interpolation is deleted, and `uptime_ms` and `now_us` derive from `now_ns`. An in-guest test holds IF off for 50 ms, measured on a counter that is not the clocksource (the TSC when the clocksource is the HPET or the PM timer, the HPET when it is the TSC), and finds `now_ns` advanced by 50 ms within 1%. It runs in `make test-kernel` (the HPET under TCG), in a `-machine pc,hpet=off` boot that `ktest=` limits to it (the PM timer), and on the §10.1 KVM leg, where `run_ktest.py` requires `time: clocksource tsc`, so a guest without an invariant TSC fails instead of testing the HPET again; it skips nowhere; `sleep_ms_50`'s 40–400 ms fallback for a guest without an invariant TSC is deleted, so the test holds 50 to 100 ms of `uptime_ms` in every tier, and DESIGN §9.4's calibration pitfall drops its not-yet-enforced note for it in the same commit (F027)
 - [x] `BootInfo` captured once at entry, the only consumer of Limine responses (D3)
-- [ ] DESIGN.md split per its own §1.4 rule: invariants and pitfalls as their own files, the boot order as a table not prose (DOC2); its `scripts/doc_refs.py` resolves `DESIGN §x.y` and `ROADMAP §x.y` citations in docs, source comments, and scripts, and every bare `§x.y` in ROADMAP.md, against the headings, and runs in `make check`; `docs/INVARIANTS.md` adds two columns, as KERNEL_REVIEW §8.3 asks: Relied on (the sections and modules whose correctness depends on the row) and Enforced by (the test, lint, type, or script that fails when the row breaks, or `none`), and `doc_refs.py` fails on an Enforced by cell that names a test, lint, or script not in the tree, and on a row whose Status is *enforced* and whose Enforced by is `none`
+- [ ] DESIGN.md split per its own §1.4 rule: invariants and pitfalls as their own files, the boot order as a table not prose (DOC2); its `scripts/doc_refs.py` resolves `DESIGN §x.y` and `ROADMAP §x.y` citations in docs, source comments, and scripts, and every bare `§x.y` in ROADMAP.md and in DESIGN.md, each against its own file's headings, and runs in `make check`; `docs/INVARIANTS.md` adds two columns, as KERNEL_REVIEW §8.3 asks: Relied on (the sections and modules whose correctness depends on the row) and Enforced by (the test, lint, type, or script that fails when the row breaks, or `none`), and `doc_refs.py` fails on an Enforced by cell that names a test, lint, or script not in the tree, and on a row whose Status is *enforced* and whose Enforced by is `none`
 
 ### 10.4 Tables, VFS, errors
 - [ ] one `limits` module in `vibeos-core` names every table and resource cap the kernel enforces as a constant, and today's fixed tables and the §10.6 exec cap take their sizes from it; the box below makes the tables heap-sized. A host test finds each fixed table's length equal to its constant (D1)
@@ -1667,8 +1670,8 @@ parser and the §20.2 interpreter.
 **Goal.** Stop pretending memory is eagerly mapped. Make `fork` cheap, `mmap` real, and a page fault a
 routine event on both architectures. Slab, background reclaim, and swap used to live here. Slab and
 background reclaim are §19.9 and §19.10, because their gates are measurements. Swap is a stretch at the
-end of this phase, because nothing before Phase 19 needs it. What stays is reclaim on demand, which the
-unified page cache cannot do without.
+end of this phase, because no gated phase needs it; §31.8's hibernation uses it where it has landed.
+What stays is reclaim on demand, which the unified page cache cannot do without.
 
 **Unlocks.** Real program startup costs. Large sparse allocations. File-backed memory, which the dynamic
 linker in §14.2 needs. A `fork` cheap enough that Phase 13's pipelines and Phase 14's shell are not
@@ -1803,7 +1806,8 @@ so do TLB maintenance and the §11.2 I-cache maintenance aarch64 needs whenever 
 - [ ] in-guest at `-smp 2` on both architectures: a process on CPU 1 stores an increasing counter into a `MAP_SHARED` page of a file on `vda` in a loop while a `kernel_tests` hook on CPU 0 repeatedly cleans that page for writeback and unmaps it through the reverse map for reclaim; after the writer's last store and an `msync`, the file holds the writer's last value (DESIGN §2.4, §4.3)
 
 ### 12.7 Stretch: swap
-Nothing before Phase 19 needs swap; a self-hosting build is given RAM, not swap. Not gating.
+No gated phase needs swap; a self-hosting build is given RAM, not swap, and §31.8's hibernation
+stretch uses it where it has landed. Not gating.
 
 - [ ] allocate well past physical memory with swap enabled and the workload completes
 - [ ] a swap device or file with a slot allocator
@@ -2113,7 +2117,7 @@ numbers in its own `syscall.h.in`, which are that table's numbers, and §13.9's 
 - [ ] socket activation, which is genuinely elegant and not much work once sockets exist
 - [ ] shutdown: signal services, wait with a timeout, unmount, and power off through `reboot` (ACPI on x86_64, PSCI on aarch64)
 - [ ] a control tool for start, stop, restart, status, and logs
-- [ ] before `login` lands, DESIGN §2.10's interim security posture goes back to the owner, since its acceptance ([design review G006](reviews/DESIGN_REVIEWS.md)) assumed one user: an agent writes an OWNER DECISION block in §2.10 that states what this phase adds (logins, password hashes, a second user sharing the machine) and the options, and `login` merges only after §2.10 records the answer, together with any §18.3 box the answer moves ahead of it; `scripts/check_owner_decisions.py` proves this box
+- [ ] before `login` lands, DESIGN §2.10's interim security posture goes back to the owner, since its acceptance ([design review G006](reviews/DESIGN_REVIEWS.md)) assumed one user: an agent writes an OWNER DECISION block in DESIGN §2.10 that states what this phase adds (logins, password hashes, a second user sharing the machine) and the options, and `login` merges only after DESIGN §2.10 records the answer, together with any §18.3 box the answer moves ahead of it; `scripts/check_owner_decisions.py` proves this box
 - [ ] `login` and a getty on `/dev/tty1` and on the serial TTY (`/dev/ttyS0` or `/dev/ttyAMA0`, §13.7); `passwd` and `su`, installed set-user-ID root; a shadow file hashed with §14.7's password hash, readable only by root. `login` and `su` switch identity with §13.9's calls, which §13.9 checks, and `passwd` changes only the invoking user's entry unless run by root
 - [ ] the DESIGN §8.3 e2e contract survives login. `make rootfs` with a test overlay builds a harness root image, which no release image or §14.6 release manifest contains. The overlay is also the only way a test trust anchor reaches a guest. Test CAs, test signing keys and key sets, a test update channel's key, and the keys the harness logs in with are generated per run where the test allows, as §18.7's Secure Boot test generates its keys, and otherwise live in `tests/keys/`, whose README lists each one's fingerprint and the lines that use it; the private keys there are public, so an image that trusts one trusts anyone. An anchor enters only the image this overlay builds, files the harness adds to an installed system before the test that needs them, or a service the harness runs on the host, never a §14.6 recipe or a release artifact, and §14.6's test-anchor check refuses a release that carries one. The overlay adds a test user and runs the getty on `/dev/tty1` and on the serial TTY with `--autologin <user>`, as agetty does, and that user's profile prints the registered `shell ready` marker when its TTY is the serial one. The marker order, the §13.7 serial and `sendkey` echo checks, and every later line that waits for `shell ready` run unchanged in that image. The Phase 14 `login` gate line boots the overlay with autologin off and types the test user's credentials over serial. DESIGN §8.3 updated in the same commit
 
@@ -2626,7 +2630,7 @@ through §13.10 and §14.9. All of them are musl-hosted, so glibc (Phase 23) sta
 them from source on vibeOS is Phase 24, and this phase does not wait for it. Every compiler, linker, and
 test tool in the loop still runs on vibeOS.
 
-- [ ] the pinned nightly's `rustc` and `cargo`, the `rustfmt`, `clippy`, `llvm-tools`, and `rust-src` components that `make check` and the build use, and `rust-std` for both `<arch>-unknown-linux-musl` triples (the host's, and the other architecture's for the user crate) and for `x86_64-unknown-none` and `aarch64-unknown-none-softfloat`, as rust-lang publishes them for the `<arch>-unknown-linux-musl` host (Tier 2 with host tools on both architectures), run on vibeOS under §14.9's musl. The pin stays a nightly because the kernel uses nightly features (`abi_x86_interrupt`, `alloc_error_handler`); Rust user code, with `std` or without it, targets `*-unknown-linux-musl`, not a vibeOS triple (§24.3)
+- [ ] the pinned nightly's `rustc` and `cargo`, the `rustfmt`, `clippy`, `llvm-tools`, and `rust-src` components that `make check` and the build use, and `rust-std` for both `<arch>-unknown-linux-musl` triples (the host's, and the other architecture's for the user crate) and for `x86_64-unknown-none` and `aarch64-unknown-none-softfloat`, as rust-lang publishes them for the `<arch>-unknown-linux-musl` host (Tier 2 with host tools on both architectures), run on vibeOS under §14.9's musl. The pin stays a nightly for the reasons DESIGN §3.1 lists; Rust user code, with `std` or without it, targets `*-unknown-linux-musl`, not a vibeOS triple (§24.3)
 - [ ] a `vibeos-build` disk image holding that toolchain; the pinned §14.9 `minirootfs` and the whole package snapshot, so the packages §17.2, §17.4, and §17.6 name and those `make test`'s tiers build images from are local; a clone of the Limine binary branch at `setup.sh`'s pinned `LIMINE_TAG` and `LIMINE_COMMIT`, which the loop script passes to `setup.sh` as `LIMINE_REPO`; a `cargo vendor` tree for the workspace; and the §14.10 source archives the build reads (musl and compiler-rt for `make sysroot`), pinned by hash, built once by the host and stored by content hash as §13.11 stores its corpus, with the corresponding source of every copyleft binary the image holds published beside it as §14.10's policy requires, since the Actions cache holds 10 GB per repository. A release file must be under 2 GiB, so the image is kept zstd-compressed in parts below that, which a run streams through `zstd -d` into the image and checks against that hash; the on-device loop begins with neither a package install nor a download. The image's compressed and uncompressed sizes are recorded in DESIGN §8.6, and the image, the checkout, and the guest's disks fit the 14 GB disk GitHub documents for a hosted runner
 - [ ] `cargo build --offline` from that image, with `flock` and `fcntl` locks (§13.9) held across parallel builds, and `-j` equal to the guest's CPU count, 4 in the Phase 17 guest
 - [ ] no upstream binary is patched, wrapped, or `LD_PRELOAD`ed to run; each workaround is a kernel fix with a regression test in the cheapest tier that catches it
@@ -3009,7 +3013,7 @@ The general heap, §12.6's TLSF allocator, stays for odd-sized allocations; slab
 ### 19.10 Memory reclaim
 Moved from the memory phase. §12.6 reclaims on demand, which is correct. This makes it fast and fair.
 
-- [ ] watermarks (min, low, high), with min at §12.6's reserve R and low and high above it, derived as Linux derives them from `min_free_kbytes` and `watermark_scale_factor`, and a background reclaim thread, so allocations rarely stall in direct reclaim; the thread follows DESIGN §4.4's reclaim rules (it frees clean pages and leaves writing to the writeback and swap-out threads) and is a no-reclaim, progress-class thread itself (DESIGN §4.4); it runs every §19.9 shrinker, including those direct reclaim may not run
+- [ ] watermarks (min, low, high), with min at §12.6's reserve R and low and high above it, derived as Linux derives them from `min_free_kbytes` and `watermark_scale_factor`, and a background reclaim thread, so allocations rarely stall in direct reclaim; the thread follows DESIGN §4.4's reclaim rules (it frees clean pages and leaves writing to the writeback thread, and to §12.7's swap-out thread where that stretch has landed) and is a no-reclaim, progress-class thread itself (DESIGN §4.4); it runs every §19.9 shrinker, including those direct reclaim may not run
 - [ ] each device gets a share of §12.5's dirty limit that follows its recent writeback completions, as Linux's per-device thresholds do: a device that stops completing is held to a shrinking share while writers to other devices keep theirs, and a device that goes `Failed` or `Gone` has its dirty pages dropped (DESIGN §10.3) and its share released. A host test of the portable share calculation finds a device with no completions converging to a small share. In-guest with two virtio-blk disks, while a `kernel_tests` hook stops one from completing, a writer to the other is never put to sleep by the dirty throttle while its own device is under its share, by §12.5's throttle counter. If proportional shares cost too much here, a fixed per-device cap replaces them, with DESIGN §4.4 saying so
 - [ ] the §12.5 LRU split into an active and an inactive list, so a single sequential scan does not evict the working set; counters for promotions, demotions, and refaults
 - [ ] a histogram of regions visited per §12.1 reverse-map walk, from §19.7's migration, swap when enabled, and a `kernel_tests` walk hook, recorded on the §17.5 build loop and on a fork fan-out test in which one parent keeps 1,000 live children that each write to their copy of one page and the hook walks those copies; if the 99th percentile passes 64 regions on either, anonymous objects become Linux's chained design (`anon_vma_chain`), with DESIGN §4.6 changed in the same commit
@@ -3562,7 +3566,7 @@ provide. Each lands with the semantics its LTP and kselftest cases check.
 ### 23.2 glibc and Debian
 - [ ] glibc's dynamic linkers, `ld-linux-x86-64.so.2` through `/lib64` and `ld-linux-aarch64.so.1` in `/lib`, load through §14.2's `PT_INTERP` path unmodified
 - [ ] the pinned Debian root (the `debuerreotype` build behind the official `debian` image) for each architecture, entered the way §14.9 enters Alpine's, with `bash`, coreutils, and `python3` running under glibc; `dpkg` and `apt`, like §14.9's `apk`, own files only inside a Linux root (a `vibeos-linux` chroot or a root booted whole, §23.5), never in the vibeOS base system
-- [ ] glibc's startup, `pthread_create`, `posix_spawn`, multithreaded `setuid`, and thread cancellation paths traced once with `strace -f` over §17.4's `ptrace`, and every call they make implemented, none left to a fallback (F150)
+- [ ] glibc's startup, `pthread_create`, `posix_spawn`, multithreaded `setuid`, and thread cancellation paths traced once with `strace -f` over §17.4's `ptrace`, and every call they make implemented, none left to a fallback
 - [ ] a pinned local Debian mirror snapshot on a disk image for each architecture, holding the closure of the packages this phase installs, read by `apt-get` through a `file:` source with `Release` signatures verified against Debian's archive keys by the verifier the pinned release's apt uses (`sqv`, or `gpgv`), so nothing here needs a route to the internet
 - [ ] `dpkg` survives a power cut mid-unpack on §10.2's volatile-cache device, where a cut loses the writes the guest has not flushed: after the reboot, `dpkg --configure -a` completes and `dpkg --audit` reports nothing, which holds only if vibefs honors the `fsync` and `rename` ordering `dpkg` relies on; the cut falls at a seeded random point in each of 100 unpacks of one package set, under TCG with 2 vCPUs and 2 GiB, on both architectures; a killed QEMU loses no write the host received (§10.2), so killing QEMU cannot show a missing flush (F080)
 
@@ -4900,7 +4904,7 @@ dev-host record.
 Phase 38 needs 12, 14, 18, and 19, and nothing after them but §25.7's intent log when §14.8's
 recorded verdict calls for one, which §38.3's vibefs line then covers, so it runs beside everything
 from Phase 20 on. Phase 39 needs 22, 23, 24, 25, 30, and 38. It does not need 26 to 29 or 31 to
-37, which continue beside it and after it (§39.1).
+37, which continue beside it and after it (§39.1, §39.3).
 
 ## Phase 38: Verification
 
