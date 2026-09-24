@@ -1941,8 +1941,9 @@ lock, its own address-space lock, or a busy page-cache page (§2.1's sleeping ti
    ([§2.11](#211-object-lifetimes)): it exchanges each PTE to empty, folds each old dirty bit into
    the page, and completes the invalidation (§2.4) before it decides. A page found dirty stays in
    the cache, unmapped and dirty, for the writeback threads; a clean page's count drops. It skips
-   any page it cannot take at once. It takes a sleeping lock only by try-lock, which never waits,
-   and never takes the address-space lock.
+   any page it cannot take at once. It skips a page that `mlock` holds, which is off the LRU
+   (ROADMAP §12.4), and a page that a device has pinned (ROADMAP §19.8). It takes a sleeping lock
+   only by try-lock, which never waits, and never takes the address-space lock.
 3. It writes no page. The ROADMAP §12.5 writeback threads write dirty file pages, and ROADMAP
    §12.7's swap-out thread writes anonymous pages. When a pass frees too little, direct reclaim
    wakes those threads, waits up to 100 ms for writeback progress (any page cleaned or freed), and
