@@ -5101,6 +5101,23 @@ stays a VM host, since an installer or boot-policy bug there costs the dev host.
 Free cloud tiers are here, not in phases. They cost nothing while use stays inside them, but each needs
 an account and a card the maintainer opens, and some can start billing.
 
+> **OWNER DECISION NEEDED (review J161)**: three funded goals change what they would cost you; nothing
+> is bought until you fund a goal. (1) GitHub GPU runner: GitHub bills GPU minutes even for a public
+> repository, and the goal's §33.4 line runs nightly, about $95 a month at an hour a night. The goal now
+> stops GPU-runner use with a GitHub budget at a monthly cap you set when you fund it. Recommended:
+> $100. With no cap that spending is unbounded; a lower cap stops the nightly run for the rest of a
+> month once it is reached. (2) Khronos conformance: the X.Org Foundation holds Khronos Adopter status
+> pro bono for community open-source drivers such as Mesa's `lavapipe` and `llvmpipe`, so a submission
+> can cost $0 instead of $210,000. It needs your membership of the X.Org Foundation and the X.Org
+> board's approval before any results are sent. Recommended: that route first; the fee route applies
+> only if the board declines. (3) Hardware: the aarch64 desktop gains a VGA-to-HDMI converter (about
+> $20), because an Ampere server's only display output is its BMC's VGA port, and the wireless rig gains
+> a USB header cable (about $10), because the AX210's Bluetooth needs a USB header the server may lack.
+> Recommended: accept both; without them the aarch64 display line and the aarch64 Bluetooth pairing fail
+> when the hardware arrives, and those goals drop the two lines. Each goal's text works either way: you
+> record the cap and the Khronos route in the goal when you fund it, and your dated answer replaces this
+> block.
+
 **Self-hosted runners.** Several goals register a self-hosted GitHub Actions runner to this repository.
 GitHub recommends self-hosted runners only for private repositories: a runner takes any job that names
 its labels, and a pull request from a fork can add a workflow that does, which GitHub runs from the pull
@@ -5432,7 +5449,7 @@ Phase 26 exit gate, before the tag line:
 - [ ] Azure: x86_64 and aarch64 Gen2 VMs boot with root on storvsc and network on netvsc over VMBus, report ready so the deployment succeeds, and accept an SSH login
 - [ ] a volume attached to a running instance on each cloud appears under a persistent name, carrying the volume id on AWS, and detaches cleanly
 - [ ] a deliberate panic on each cloud reboots the instance under §22.2's panic policy, and the panic text is in the console output the CI job fetches
-- [ ] a weekly job launches the current image on each cloud and architecture, asserts the DESIGN §8.3 markers from the console output, runs the SSH smoke test, terminates every instance, and records the cost of the run
+- [ ] a weekly job launches the current image on each cloud and architecture, asserts the DESIGN §8.3 markers from the console output, runs the SSH smoke test, terminates every instance, and records the run's cost, estimated from its instance-hours and storage at each cloud's list price, since billing data lags by hours
 
 Phase 26, a new subsection before the Stretch, **AWS: ENA**, holding the no-cost goal's ENA lines, taken
 out of §26.7 if that goal put them there; and a new subsection before the Stretch, **Google Cloud:
@@ -5523,10 +5540,14 @@ the repository moves into an organization (see **GitHub GPU runner**).
 ### GitHub GPU runner
 
 **Open.** A GitHub Team organization, with the repository transferred into it from the maintainer's
-account, and a GPU larger runner: Linux, 4 vCPUs, one Tesla T4, 28 GB of RAM, 16 GB of VRAM.
+account, and a GPU larger runner: Linux, 4 vCPUs, one Tesla T4, 28 GB of RAM, 16 GB of VRAM. A first run
+of at most an hour, about $3, checks that the runner exposes a DRM render node, which virgl and Venus on
+the host need, and records whether it exposes `/dev/kvm`; the nightly line below is added only after it.
 
-**Cost.** $0.052 a minute, about $3.12 an hour of GPU run, billed even for public repositories, plus
-GitHub Team at about $4 a member a month (2026 prices), to confirm before buying.
+**Cost.** $0.052 a minute, about $3.12 an hour of GPU run, billed even for public repositories: about
+$95 a month for the §33.4 line's run of at most an hour a night, plus GitHub Team at about $4 a member a
+month (2026 prices), to confirm before buying. A GitHub budget on the organization stops GPU-runner use
+at a monthly cap the owner sets when funding the goal.
 
 **Unlocks.** virgl and Venus in CI with the host rendering on a GPU instead of `llvmpipe`, so frame rates
 reflect a GPU-backed host. The organization's plan replaces the maintainer's account's: 60 concurrent
@@ -5535,9 +5556,10 @@ hosted jobs, 5 of them macOS.
 **Lines.** Elsewhere in this file:
 - the arc, row 33: Unlocks gains ", virgl and Venus on a GPU host"
 - the **GitHub Pro** goal, if still open, is deleted, since Pro covers only a personal account; its lines are added and its prose edits made with GitHub Team's numbers, and where Pro's lines are already in place this goal adds, directly after each, a line with Team's numbers and changes Pro's prose edits to them: 60 concurrent jobs for 40; §10.1's scheduled share 40 for 20, so pushes keep 20; the §24.2 rebuilds' share, the rest of the scheduled share that §24.2 leaves to the other workflows, and the job count in the aarch64 cadence, 20 for 10; in prose, "GitHub Pro" becomes "GitHub Team"
+- the transfer into the organization, in the same edit: if the paid cloud goal has made §26.6's OIDC trust policies, each is re-pinned to the new owner's subject; every self-hosted runner registration, ruleset, and environment this file names (the `release` and `cloud` environments and the rig's runners among them) is checked on the moved repository and re-created where the transfer dropped it; and the owner-namespaced URLs in `CHANGELOG.md`'s link references and in `scripts/check_changelog.py` move to the new owner
 
 §33.4, Stretch:
-- [ ] the virtio-gpu 3D tier also runs nightly on a GitHub GPU runner with the host rendering on its GPU, its frame rates recorded
+- [ ] the virtio-gpu 3D tier also runs nightly, for at most an hour, on a GitHub GPU runner with the host rendering on its GPU, its frame rates recorded with the accelerator the guest ran under: KVM where the runner exposes `/dev/kvm`, and TCG otherwise
 
 ## Long runs and scale
 
@@ -5680,7 +5702,8 @@ laptop's destination and arc edits wait for the answer.
 ### Reference laptop
 
 **Buy.** A Framework Laptop 13 with the newest Intel Core Ultra that Linux's `xe` driver supports by
-default and an Intel AX210 in its M.2 slot. For the rig: a microcontroller HID injector each for the
+default and whose display volumes Intel's published graphics documentation covers, checked before
+buying, and an Intel AX210 in its M.2 slot. For the rig: a microcontroller HID injector each for the
 laptop and the aarch64 server (USB keyboard, mouse, and precision touchpad), a lid magnet and a
 power-button actuator, a switched outlet for the charger, and a USB 3 debug cable.
 
@@ -5875,10 +5898,12 @@ Phase 36 exit gate, before the tag line:
 ### Wireless rig
 
 **Buy.** Two Wi-Fi 6E access points with WPA3 that the rig controls, their BSSIDs included, AX210 cards
-for the desktop and for the aarch64 server on a PCIe adapter, and microcontrollers for a BLE keyboard
-and mouse and a Classic Bluetooth A2DP sink. An Intel BE200 for the Wi-Fi 7 stretch.
+for the desktop and for the aarch64 server on a PCIe adapter that brings out the card's Bluetooth USB
+lines, with an internal USB 2.0 header on the server to take them, or a header-to-USB-A cable (about
+$10) to a rear port, and microcontrollers for a BLE keyboard and mouse and a Classic Bluetooth A2DP
+sink. An Intel BE200 for the Wi-Fi 7 stretch.
 
-**Cost.** About $450, and about $30 for the BE200 (2026 estimates). Needs the reference laptop.
+**Cost.** About $460, and about $30 for the BE200 (2026 estimates). Needs the reference laptop.
 
 **Unlocks.** Real radios on real air: association on every band, throughput at distance against Fedora,
 suspend and power save with Wi-Fi up, and BLE and A2DP pairing with real peripherals.
@@ -5983,11 +6008,12 @@ Phase 37 exit gate, before the tag line:
 
 ### aarch64 desktop
 
-**Buy.** Nothing beyond the aarch64 server, its HID injector (in the reference laptop's rig parts), the
-display peripherals' capture device, and the wireless and audio goals' AX210 on a PCIe adapter, USB
-headset, and USB camera.
+**Buy.** A VGA-to-HDMI converter, since the aarch64 server's only display output is its BMC's VGA port
+and the display peripherals' capture device takes HDMI; nothing else beyond the aarch64 server, its HID
+injector (in the reference laptop's rig parts), the display peripherals' capture device, and the
+wireless and audio goals' AX210 on a PCIe adapter, USB headset, and USB camera.
 
-**Cost.** None of its own.
+**Cost.** About $20 for the converter (2026 estimate).
 
 **Unlocks.** The Era VII stack on aarch64 hardware used as a desktop: a native driver for its display
 controller, input, audio, camera, and Wi-Fi, rendering with `llvmpipe`.
@@ -6002,7 +6028,7 @@ Phase 32, a new subsection before the Stretch, **aarch64 display**:
 - [ ] the aarch64 server's display controller as a native driver on §32.1: the ASPEED BMC's on the Ampere server, adapted under DESIGN §1.5 from the notice-only files of Linux's `ast` driver (not its GPL-2.0-only DisplayPort files) and of X.org's `xf86-video-ast`, each file's license checked before it is read
 
 Phase 32 exit gate, before the tag line:
-- [ ] the aarch64 server's monitor at the best mode its controller offers, with the reference-image comparison through the rig's capture device
+- [ ] the aarch64 server's monitor at the best mode its controller offers, with the §16.1 reference-image comparison through the converter and the rig's capture device, at a per-pixel tolerance its test states for the analog VGA path
 
 Phase 33 exit gate, before the tag line:
 - [ ] `llvmpipe` from Alpine renders `kmscube` on the aarch64 server's native display
@@ -6263,11 +6289,15 @@ agent on a vibeOS machine with a key of its own.
 
 ### Khronos conformance submission
 
-**Open.** Khronos Adopter status for Vulkan, OpenGL, and OpenGL ES.
+**Open.** A submission through the X.Org Foundation, which Khronos accepted as an Adopter pro bono so
+that community open-source drivers under its umbrella, Mesa's `lavapipe` and `llvmpipe` among them, can
+submit conformance results: the maintainer becomes an X.Org Foundation member and, before submitting,
+asks the X.Org board to agree that `lavapipe` and `llvmpipe` on vibeOS fall under that agreement. If the
+board declines, Khronos Adopter status for Vulkan, OpenGL, and OpenGL ES.
 
-**Cost.** $120,000 for Vulkan, $60,000 for OpenGL 3.2 to 4.6, and $30,000 for OpenGL ES 1.1 to 3.2 for
-non-members, $210,000 in all, from Khronos's adopters page (2026), which prices each API on its own and
-lists no open-source waiver.
+**Cost.** $0 through the X.Org Foundation (its Khronos page, 2026). If the board declines, $120,000 for
+Vulkan, $60,000 for OpenGL 3.2 to 4.6, and $30,000 for OpenGL ES 1.1 to 3.2 for non-members, $210,000 in
+all, from Khronos's adopters page (2026), which prices each API on its own.
 
 **Unlocks.** An official conformance claim for the render stack. The free Phase 33 lines already run the
 same tests without the claim.
