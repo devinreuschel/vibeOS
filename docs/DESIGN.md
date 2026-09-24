@@ -825,7 +825,8 @@ covers the last store of a hand-off; these rules cover the rest.
 2. Tables hold references or quiescent slots. A lookup structure (the process table, the TCB table,
    the dentry cache, the device registry) holds a counted reference, or a slot it reuses only once
    the object's count is zero and no CPU still runs on it or through it (a TCB's `on_cpu` flag,
-   ROADMAP §10.10).
+   ROADMAP §10.10, which a tracer and the core-dump writer also wait on before they touch the
+   thread's saved state, [§7.5](#75-per-cpu-data)).
 3. Two teardowns. An object whose life ends when its users are done (an address space, a pipe, an
    unlinked inode, a mount after a lazy unmount) is released by the last put; when RCU readers can
    also find it, it is unpublished first, and its memory is freed a grace period after that put
@@ -2499,6 +2500,20 @@ it before it clears `PSTATE.D`, so `SS` is never 1 in EL1 while D is clear, nor 
 thread that is not being stepped. DR6 is per thread and virtual: ptrace reads and writes the
 thread's copy, which the `#DB` body fills from the DR6 its entry stub saved (§5.10). ROADMAP §11.4
 releases the OS Lock on every aarch64 core. Planned: nothing arms a debug slot before ROADMAP §17.4.
+
+Another thread reads or writes a thread's saved per-thread state (any row of this table, the user
+frame of [section 5.10](#510-privilege-transitions) included) only while that thread is held
+stopped, in a ptrace stop (ROADMAP §17.4) or parked for a core dump (ROADMAP §13.8), and only after
+an Acquire load has seen the thread's `on_cpu` flag (ROADMAP §10.10) clear. Stopping is not enough:
+a stopped thread wakes its tracer before its CPU has switched away from it, and until then some rows
+exist only in that CPU's registers (the FP state under the binding above, and the user FS and GS
+bases under FSGSBASE, ROADMAP §18.3). The switch away finishes every save in this table before it
+clears `on_cpu` with a Release store, its last access to the outgoing thread
+([§2.8](#28-publish-last)). The reader holds the stop for the whole access, as Linux's ptrace does:
+nothing resumes the thread meanwhile, and a `SIGKILL` that arrives takes effect when the access
+ends, so the thread cannot exit and free the kernel stack that holds its user frame under the
+reader. A write follows the binding's rule above, so the thread's next return to user mode loads
+what was written. Planned (ROADMAP §13.8, §17.4): nothing reads another thread's saved state today.
 
 ## 7.6 IPIs
 
