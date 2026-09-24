@@ -211,6 +211,12 @@ overwrite a live block (F061). v1 is not fixed for this: its mount is
 reachable only by root, and v2 validates every block as it reads it (§15;
 ROADMAP §14.8, §18.5).
 
+A v1 header names neither its volume nor its own block number, and a v1
+pointer holds only the child's block number, so v1 cannot tell a block
+written to the wrong place, or one an older generation left at a reused
+address, from the block its parent expects. v2 checks both (§15's
+Self-describing blocks and Verified pointers rows).
+
 ---
 
 ## 6. Allocator
@@ -467,7 +473,10 @@ allocated), root directory inode 1, generation 1 in **both** super slots,
 
 1. Pick the valid super as mount would.
 2. Walk alloc-map; verify its header checksum.
-3. Walk inode B-tree; verify every metadata checksum.
+3. Walk inode B-tree; verify every metadata checksum. From v2, also check
+   each block's header and the pointer that reached it (§15), and report a
+   mismatch with the block, the generation the pointer expects, and the one
+   the block holds.
 4. For each inode: kind/mode sanity, extent ranges in-volume and allocated,
    inline vs size, directory B-tree walk, no name duplicates, nlink matches
    dirent count (root nlink is 1 in v1; subdirs do not store `..`).
@@ -576,7 +585,8 @@ they are decided here, before a line of v2 is written:
 | Names | 1 to 255 bytes of any value but `/` and NUL, not normalized | Linux's `NAME_MAX`; v1's 64-byte cap follows the VFS limit that ROADMAP §13.9 raises |
 | Timestamps | signed 64-bit seconds and 32-bit nanoseconds for atime, mtime, ctime, and a birth time | Linux's `statx`; v1 stores whole seconds |
 | Checksums | CRC-32C (Castagnoli) over every metadata block, and over every data block on its own: one checksum per block of file data, never one per extent. Data checksums live in a checksum tree keyed by physical block number. A read loads the checksums of the blocks it reads before it submits them, so verification at completion reads nothing (DESIGN §10.1) | a hardware instruction on both architectures (SSE4.2 `crc32`, the Armv8 CRC32C instructions), and what ext4, XFS, and btrfs use; v1's CRC-32/ISO-HDLC has no instruction on x86_64. Per block, a read verifies only the blocks it reads, a write or truncate that splits an extent keeps its neighbours' checksums, and §29.4's scrub repairs one block at a time. A checksum over a whole extent would make a 4 KiB read of a 1 GiB extent read the whole extent, and every split recompute checksums over data it did not touch (F063 is v1's instance). Keyed by physical block, as btrfs keys its checksum tree, a block that snapshots and clones share has one checksum, and extent records stay fixed-size |
-| Self-describing blocks | every metadata block header carries the volume UUID, its own block number, and the generation that wrote it | a checksum accepts a correct block written to the wrong place or left over from an older generation; these fields do not |
+| Self-describing blocks | every metadata block header carries the volume UUID, its own block number, and the generation that wrote it | a checksum accepts a correct block written to the wrong place, and a block an earlier filesystem left in a reused partition; the block number and the UUID reject them, and the generation tells `fsck` when a stray block was written. A header cannot reject a block that an older generation of this volume left at the right address, since that block describes itself correctly; its parent's pointer does (next row) |
+| Verified pointers | every pointer to a metadata block of a tree (the superblock's tree roots, each internal node's children, and each snapshot root) holds the child's block number, the generation that wrote it, and its CRC-32C. A read checks all three, and the child's header, before it uses the block; a mismatch is `Corrupt`, which §29.4's mirror read retries from another copy. `fsck` reports the generation the pointer expects and the one the block holds. A data block needs no pointer check: its checksum lives in the checksum tree, which verified pointers reach, so a lost data write fails its checksum | a device can acknowledge a write and the flush after it and keep the old bytes (a firmware or virtual-disk bug, a stacked target that drops a write, a mirror member that returns a stale copy). Under copy-on-write that address held an older node of this volume, whose header and checksum are valid. The generation gives the diagnosis and the block's birth time. The checksum is needed as well because generations repeat: a commit whose superblock never became durable is followed, after a remount, by another commit of the same number, which may reuse the same addresses, and a generation-only check (btrfs's) accepts that commit's lost write. ZFS keeps a checksum in every block pointer. The two fields cost 12 bytes per pointer, about 43% of an internal node's fanout with 64-bit keys, and no write, since a copy-on-write parent is rewritten whenever its child changes |
 | Reference counts | at least 32 bits per block, or a reference-count tree | v1's `u8` counts overflow once 255 snapshots share a block |
 | Block size | a superblock field: `mkfs` writes 4096, and readers accept every power of two from 4096 to 65536 | a later default needs no format change |
 | Extension | three feature-flag sets: compat (an older reader ignores the feature), ro_compat (an older reader mounts read-only), and incompat (an older reader refuses to mount); `VERSION` changes only for a change the flags cannot express | additive changes land without a version bump, as in ext4 and XFS; v1 has one flag byte |
@@ -595,3 +605,11 @@ the read and split costs above; and a checksum array inside each extent
 record, which makes records variable-sized and stores a shared block's
 checksum once per file that references it. Cost of the checksum tree: one
 more tree lookup per data read, cached like the other metadata.
+
+Rejected for pointers: a generation alone, which misses a lost write under
+a repeated generation; a checksum alone, which detects the loss but gives
+neither a diagnosis nor the birth time snapshots use; a rule that a child's
+generation is at most its parent's, which a stale block passes; and a
+cryptographic hash, which costs 32 bytes per pointer and a hash on every
+metadata read to resist tampering, which is ROADMAP §18.7's encryption's
+job, not the checksum's.
