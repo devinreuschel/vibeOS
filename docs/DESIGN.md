@@ -1621,7 +1621,7 @@ the table lives in code, and a host test checks that each vector `0x00`–`0x1F`
 | `0x08` | `#DF` | dump on IST, halt | not a ring-3 fault: the Ring 0 column applies | as the rule |
 | `0x0B`, `0x0C` | `#NP`, `#SS` | dump, halt | `SIGBUS`; `SIGSEGV` for a fault on the return-to-user `iretq` (§5.10 rule 2) | the `iretq` case halts. Rule; not yet enforced: ROADMAP §10.6 (F007) |
 | `0x0D` | `#GP` | dump with error code, halt | `SIGSEGV`, including a fault on the return-to-user `iretq` (§5.10 rule 2) | the `iretq` case halts. Rule; not yet enforced: ROADMAP §10.6 (F007) |
-| `0x0E` | `#PF` | dump with CR2, halt. Planned (ROADMAP §10.6): a fault inside a user-memory accessor returns `EFAULT` | `SIGSEGV`. Planned (ROADMAP §12.2): a fault on a page that a region reserves is resolved first | as the rule |
+| `0x0E` | `#PF` | dump with CR2, halt. Planned (ROADMAP §10.6): a fault inside a user-memory accessor returns `EFAULT` | `SIGSEGV`. Planned (ROADMAP §12.2): a fault on a page that a region reserves is resolved first, and one through a file mapping on a page wholly past EOF, or on a page whose fill fails, gets `SIGBUS` | as the rule |
 | `0x10` | `#MF` | dump, halt | `SIGFPE` | cannot fire: `CR0.NE` is clear, so an x87 error raises the masked IRQ13 and is lost. Rule; not yet enforced: ROADMAP §10.6 (F026) |
 | `0x11` | `#AC` | dump, halt | `SIGBUS` | halts the kernel if `CR0.AM` is set (INIT clears it on each AP and no kernel code sets it; the BSP keeps Limine's value). Rule; not yet enforced: ROADMAP §10.6 (F005) |
 | `0x12` | `#MC` | dump on IST, halt; `CR4.MCE` is clear, so a machine check shuts the CPU down with no dump (ROADMAP §10.6, F026) | not a ring-3 fault: the Ring 0 column applies | as the rule |
