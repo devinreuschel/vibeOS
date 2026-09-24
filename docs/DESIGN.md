@@ -806,16 +806,19 @@ covers the last store of a hand-off; these rules cover the rest.
 1. One owner, or a count. An object one thread uses is owned by it (a stack value, a `Box`). An
    object that more than one thread or CPU can reach (an address space, an open file description, an
    inode, a mount, a device instance, a pipe) is reference-counted, and its last put ends it
-   (rule 3). The count is `kalloc`'s `TryArc` (increment `Relaxed`, decrement `Release`, and an
-   `Acquire` fence before the release, as `alloc::sync::Arc` does), a table slot's own count
-   (rule 2), or a frame's count in ROADMAP §12.1's frame array. A count with other rules, such as a
-   get-unless-zero count whose last put runs a teardown before the memory goes, rule 3's operation
-   gate, or a per-CPU count, is written once as a shared type, beside `TryArc` in `kalloc` or beside
-   `BlockingMutex` in `sync`, with host tests and a loom model (ROADMAP §10.8), and then reused; no
-   subsystem writes its own (AGENTS.md rule 10). `&'static` refers only to what lives for the whole
-   run: a static item, a string literal, the contents of a `BootCell`, or memory allocated at boot
-   and never freed. It never refers to heap memory a table owns, and it is never built from a raw
-   pointer (AGENTS.md rule 6).
+   (rule 3). A mount and the filesystem instance it shows, its superblock, are separate counted
+   objects: several mounts (another namespace's copy, a bind mount, a second mount of the same
+   device) can show one superblock, which lives while any mount, inode, or open file holds it. The
+   count is `kalloc`'s `TryArc` (increment `Relaxed`, decrement `Release`, and an `Acquire` fence
+   before the release, as `alloc::sync::Arc` does), a table slot's own count (rule 2), or a frame's
+   count in ROADMAP §12.1's frame array. A count with other rules, such as a get-unless-zero count
+   whose last put runs a teardown before the memory goes, rule 3's operation gate, or a per-CPU
+   count, is written once as a shared type, beside `TryArc` in `kalloc` or beside `BlockingMutex` in
+   `sync`, with host tests and a loom model (ROADMAP §10.8), and then reused; no subsystem writes
+   its own (AGENTS.md rule 10). `&'static` refers only to what lives for the whole run: a static
+   item, a string literal, the contents of a `BootCell`, or memory allocated at boot and never
+   freed. It never refers to heap memory a table owns, and it is never built from a raw pointer
+   (AGENTS.md rule 6).
 2. Tables hold references or quiescent slots. A lookup structure (the process table, the TCB table,
    the dentry cache, the device registry) holds a counted reference, or a slot it reuses only once
    the object's count is zero and no CPU still runs on it or through it (a TCB's `on_cpu` flag,
