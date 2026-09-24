@@ -530,6 +530,18 @@ vibeOS: acpi: xsdt 9 tables
 vibeOS: time: tsc 2500000/ms
 ```
 
+Every line the kernel writes to its console UART starts with the byte 0x1E (ASCII RS), which
+terminals ignore: `marker!` and `klog!` lines, ktest verdicts, and the panic dump alike. The harness
+takes only framed lines as the kernel's (§8.3), so no user byte may produce the frame. The kernel
+writes one line per call, and a `\r`, `\n`, or 0x1E inside a line prints as `?`, so a string a user
+chose (a path, a thread name) cannot start a line of its own. The console UART's user write path (the
+console `write` today, the ROADMAP §13.7 serial TTY and its echo later) prints a 0x1E in user bytes
+as `?`, and a record a user writes through `/dev/kmsg` prints unframed. Before a framed line, the
+kernel writes a newline when the last byte on that UART was user output that did not end one. The
+framebuffer console never draws the frame, and a UART that is not the console carries neither frame
+nor escape. Rule; not yet enforced: nothing is framed, and the harness matches every line (ROADMAP
+§10.2).
+
 ## 2.7 Invariant register
 
 Every invariant the code relies on, and how it is kept. Status: *enforced* means code, a type, or a
@@ -569,7 +581,7 @@ separate namespace.
 | I25 | Per-thread CPU state is saved and restored in full (§7.5) | `syscall_init::on_switch`, `thread::switch_context` | documented | No: `FS_BASE` is not switched (ROADMAP §13.1, F022); `fork` and `execve` get the FPU state wrong (ROADMAP §10.6, F069) |
 | I26 | Every kernel stack has a guard page (§2.4) | `kva_init::alloc_guarded_stack` | documented | No: boot runs on Limine's unguarded stack (ROADMAP §10.6, F072) |
 | I27 | `vibeos-core` does not panic on data (§2.5) | clippy deny on `unwrap`, `expect`, `panic` | enforced in part | No: indexing and overflow checks panic on crafted input; §2.5 lists the cases and their ROADMAP lines |
-| I28 | Contract markers are kernel-emitted (§2.6) | `marker!` | documented | No: `shell ready` comes from ring-3 `/bin/sh` (ROADMAP §10.5, F073) |
+| I28 | A line the harness takes as the kernel's is framed, and no user byte can produce the frame (§2.6) | `serial::Serial`, `console_init::write` | documented | No: nothing is framed, and the harness matches every line, so ring 3 can print a contract line (`/bin/sh` prints `shell ready`) or fail a run with `panicked at` (ROADMAP §10.2) |
 | I29 | A catch hook intercepts only a CPL-0 fault on the CPU that armed it, inside an in-guest test's catch window | `arch::catch` | assumed | Partly: production never arms it, but `intercept` runs first in every exception handler of every build, and its armed state is global, so in a `kernel_tests` build a fault with the armed vector on any CPU, at any CPL, is caught (ROADMAP §10.2, F146) |
 | I30 | Interrupt and exception handlers run with RFLAGS.AC=0 (§5.10 rule 5) | none | documented | No: the gates keep ring 3's AC (ROADMAP §10.6, F088) |
 | I31 | Every IF=0 stretch outside §2.9 rule 2's exemptions retires at most 100,000 instructions ([§2.9](#29-preemption-and-interrupt-state) rule 2) | §2.9; ROADMAP §10.3's IF-off tracer | documented | No: syscall bodies run with IF=0 until they block, the in-guest test runner holds IF off for the whole run, and a console `write` scrolls the framebuffer once per newline with IF=0 (ROADMAP §10.6, F044; ROADMAP §10.2, F075); the heap's first-fit `alloc`, its address-ordered insertion on `dealloc`, and a moving `realloc`'s copy run under the IRQ-off HEAP lock over a free list whose length user churn sets (ROADMAP §12.6); the buddy's double-free check walks the free lists (ROADMAP §12.1, F029); a `klog!` emit waits on the UART with IF off, about 8 ms per 96-byte line on a 115200-baud 16550, which no QEMU tier paces (ROADMAP §19.5); ROADMAP §10.10 makes a shootdown survive a violation (F011) |
@@ -2371,7 +2383,7 @@ vibeOS: ktest: end
 ```
 
 The harness requires `begin` and `end`, rejects any `FAIL` line and any panic signature, and checks
-the exit status.
+the exit status. ROADMAP §10.2 makes it read each of these lines only when framed (§2.6).
 `isa-debug-exit` at I/O port `0xf4` maps a written value to host exit status `(value << 1) | 1`:
 
 | Write | Host exit | Meaning |
@@ -2413,6 +2425,10 @@ This is the full contract once the kernel is complete through the console phase.
 a time: a phase adds its markers to the harness in the same commit that emits them, and nothing is ever
 removed silently. The executable contract is `boot_contract_markers()` in `tests/harness/harness.py`; the list
 below mirrors it, and the `_start` table in [section 3.3](#33-_start-order) says why each step sits where it does.
+Every line in it is the kernel's except `shell ready`, which `/bin/sh` prints in the production ISO.
+ROADMAP §10.2 makes the harness match the kernel's lines only when framed (§2.6), and a line a user
+program prints (`shell ready`, the ROADMAP §10.5 `utest_*` lines, `user: tests ok`) only when
+unframed; today it matches every line.
 
 ```
 vibeOS: serial online
@@ -2488,6 +2504,11 @@ panicked at   vibeOS: panic:   #PF   #GP   #UD   #DF   double fault   stack over
 
 Match the exception mnemonics, not the phrase "page fault". Shell help text and log messages contain
 English words, and a substring match on prose produces false failures that erode trust in the suite.
+
+User programs print these strings too: the ROADMAP §10.5 runtime reports a panic as `panicked at` on
+fd 2, and a fuzzer writes random bytes. ROADMAP §10.2 makes the harness scan framed lines only
+(§2.6). Before the kernel's first framed line it fails fast on Limine's panic line, the one failure
+that cannot be framed.
 
 Expected-panic e2e waits for `vibeOS: panic: halted` so the dump (regs, thread, last log records,
 backtrace) is in the captured log, then checks dump needles. `panic_exit` writes isa-debug-exit
@@ -2976,7 +2997,8 @@ stated reason.
 
 **E2E false failures from prose.**
 The panic scanner matched the phrase "page fault", which appears in normal log and help text. Rule:
-match exception mnemonics (`#PF`, `#GP`, `#DF`, `#UD`) and `panicked at`.
+match exception mnemonics (`#PF`, `#GP`, `#DF`, `#UD`) and `panicked at`, on lines the kernel framed
+(§2.6), since user programs print both.
 
 **A test-only build gets shipped in the production ISO.**
 The `kernel_tests` feature build shared a Cargo target directory with the normal build. Rule: separate
