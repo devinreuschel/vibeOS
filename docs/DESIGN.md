@@ -376,7 +376,9 @@ instead. The panic path (§2.5) is the one exception: it reads the log ring and 
 taking their locks.
 
 The hard-IRQ top half acknowledges and wakes. Work that allocates or blocks runs on a kernel thread
-([section 5.4](#54-irq-registration), ROADMAP §6.6).
+([section 5.4](#54-irq-registration), ROADMAP §6.6). A last put of a counted object runs the
+object's release in place only where [§2.11](#211-object-lifetimes) rule 6 allows it; anywhere else
+the release is deferred to a workqueue worker.
 
 Network receive polls its queue for at most a budget of packets per wake, so one flooded queue
 cannot hold its CPU. Loopback has no interrupt: its transmit queues the packet, and receive runs as
@@ -785,25 +787,67 @@ covers the last store of a hand-off; these rules cover the rest.
 
 1. One owner, or a count. An object one thread uses is owned by it (a stack value, a `Box`). An
    object that more than one thread or CPU can reach (an address space, an open file description, an
-   inode, a mount, a device instance, a pipe) is reference-counted, and dropping the last reference
-   tears it down. `&'static` is only for boot-lifetime objects in a `BootCell` (AGENTS.md rule 6).
+   inode, a mount, a device instance, a pipe) is reference-counted, and its last put ends it
+   (rule 3). The count is `kalloc`'s `TryArc` (increment `Relaxed`, decrement `Release`, and an
+   `Acquire` fence before the release, as `alloc::sync::Arc` does), a table slot's own count
+   (rule 2), or a frame's count in ROADMAP §12.1's frame array. A count with other rules, such as a
+   get-unless-zero count whose last put runs a teardown before the memory goes, rule 3's operation
+   gate, or a per-CPU count, is written once as a shared type, beside `TryArc` in `kalloc` or beside
+   `BlockingMutex` in `sync`, with host tests and a loom model (ROADMAP §10.8), and then reused; no
+   subsystem writes its own (AGENTS.md rule 10). `&'static` refers only to what lives for the whole
+   run: a static item, a string literal, the contents of a `BootCell`, or memory allocated at boot
+   and never freed. It never refers to heap memory a table owns, and it is never built from a raw
+   pointer (AGENTS.md rule 6).
 2. Tables hold references or quiescent slots. A lookup structure (the process table, the TCB table,
    the dentry cache, the device registry) holds a counted reference, or a slot it reuses only once
    the object's count is zero and no CPU still runs on it or through it (a TCB's `on_cpu` flag,
    ROADMAP §10.10).
-3. Teardown runs in one order: unpublish the object from every lookup structure, so no new
-   reference can be taken; wait until in-flight users drop theirs (the count reaching zero; for an
-   object that RCU readers can also find, the count reaching zero and then a grace period,
-   [§2.12](#212-rcu)); release what the object holds (frames, vectors, DMA buffers, stopping the
-   device first, [§5.4](#54-irq-registration)); then free it. No step waits for a lock that an
-   in-flight user needs in order to finish.
+3. Two teardowns. An object whose life ends when its users are done (an address space, a pipe, an
+   unlinked inode, a mount after a lazy unmount) is released by the last put; when RCU readers can
+   also find it, it is unpublished first, and its memory is freed a grace period after that put
+   ([§2.12](#212-rcu)). A lookup structure that can still find it without holding a count loses it
+   first: the release unpublishes it and waits for the lookups in progress, under that structure's
+   lock or by rule 2's quiescent slot, before it frees anything. Until the last put, a reference
+   still held keeps working. An object removed while references remain, because what backs it is
+   gone or has been told to go (a device, a network interface), is killed in this order: unpublish
+   it from every lookup structure, so no new reference can be taken; close its gate, the count of
+   operations in progress that every operation through a reference enters and leaves, so that every
+   new operation fails at once with the object's error, and wake every thread sleeping on the
+   object, so that each one rechecks the gate and fails; wait only for the operations already inside
+   (an active-operation count, or, for lockless readers, an RCU grace period, §2.12), each of which
+   ends within the object's own bound, such as a request's deadline ([§10.3](#103-failure)); release
+   what it holds (frames, vectors, DMA buffers, stopping the device first,
+   [§5.4](#54-irq-registration)); and free its memory at the last put, whenever that comes, and a
+   grace period later when RCU readers could find it (§2.12). No step waits for a reference to drop,
+   or for a lock that an operation in progress needs in order to finish.
 4. Ids are not pointers. A pid, tid, descriptor, or device id that crosses the syscall boundary or
-   sits in a table is looked up on each use, never cached as a pointer. Pids and tids are allocated
-   in increasing order up to `pid_max` and then wrap, skipping ids in use, as Linux does, so a freed
-   id is not handed out again at once; an id becomes free only when its object is reaped.
+   sits in a table is looked up on each use, never cached as a pointer. Pids and tids share one id
+   space and one allocator, and a process's pid is the tid of its first thread. They are allocated
+   in increasing order up to `pid_max` (ROADMAP §10.4 gives its value) and then wrap, skipping every
+   id in use, as Linux does, so a freed id is not handed out again at once. An id is in use while a
+   process or thread, a process group, or a session carries it, as Linux keeps its `struct pid`. A
+   pidfd (ROADMAP §23.1) refers to that id object, not to the number, so once the process is reaped
+   it answers `ESRCH` and never reaches a later holder of the number.
 5. Asynchronous work owns what it touches. A request, timer, work item, or completion that outlives
    the call that started it holds counted references to every object it will touch (ROADMAP §12.5's
-   owned block submission).
+   owned block submission). It drops each one after its last access to the object
+   ([§2.8](#28-publish-last)) and outside any spinlock section: [§10.1](#101-completions)'s
+   completer drops its waiter and buffer references after it leaves SCHED.
+6. Release runs only where it may free and sleep. A last put runs the object's release, which frees
+   memory and may sleep or take a sleeping lock. It runs in place only where direct reclaim may run:
+   IF=1, this CPU's `HELD` rank mask empty, and a thread that is not a no-reclaim thread and is
+   outside any RCU read-side section ([§4.4](#44-kernel-heap) rule 1). Anywhere else (a hard-IRQ top
+   half, a timer or IPI callback, a spinlock section, a threaded bottom half or softirq-equivalent
+   item, a writeback thread, a thread already in reclaim, an RCU read-side section), the put defers:
+   it links the object onto this CPU's deferred-release list through a node the object's allocation
+   carries, so it allocates nothing, and queues a work item that runs the release with IF=1.
+   `TryArc`'s drop makes this check and defers by itself, because a completion or a timer cannot
+   know that its put is the last and Rust drops values implicitly; `put_deferred` is the explicit
+   form, for code that knows its put may be the last. A count whose release only returns memory to
+   an allocator (a frame's, ROADMAP §12.1) follows that allocator's lock rank instead (§2.1). Any
+   other count type says which rule it follows, and in debug builds its last put asserts that it may
+   release where it is. Linux defers the same way (`fput` through `delayed_fput`, and
+   `mmput_async`).
 
 An address space has two counts, as Linux's `mm_users` and `mm_count`. `users` counts the threads
 that run in it and a remote accessor's temporary pin (ptrace, `/proc/<pid>/mem`, `process_vm_readv`,
@@ -830,16 +874,24 @@ every space until ROADMAP §12.1.
 
 Why: the kernel review's CRITICAL and HIGH lifetime findings (F002, F012, F019) each came from an
 object that one subsystem freed or reused while another could still reach it, under a scheme that
-subsystem invented. Rejected: keeping one scheme per subsystem, which is how those bugs arose; and
-never freeing (today's TCBs), which aliases a dying object as soon as its slot is reused. RCU
-(§2.12) is kept for lockless readers only, and it adds a grace period to their objects' counts rather
-than replacing them; everything else uses counts alone.
+subsystem invented. A removal waits for the operations in progress and not for every reference,
+because a mount or an open descriptor keeps its reference for as long as it likes; Linux kills a
+block queue or a network device the same way. A release in atomic context is deferred, not
+forbidden, because a completion or a timer cannot know that its put is the last. The check sits in
+`TryArc`'s drop because Rust drops values implicitly, and it is §4.4 rule 1's test, so one predicate
+decides where reclaim and release may run. Rejected: keeping one scheme per subsystem, which is how
+those bugs arose; never freeing (today's TCBs), which aliases a dying object as soon as its slot is
+reused; a removal that waits for the count to reach zero, which hangs behind any holder; and
+deferral only at call sites marked by hand, which misses an implicit drop. RCU (§2.12) is kept for
+lockless readers only, and it adds a grace period to their objects' counts rather than replacing
+them; everything else uses counts alone.
 
 Today the code breaks rules 1, 2, 4, and 5: TCBs are never freed and their slots are rewritten in
 place (I9; ROADMAP §10.10, F012), address spaces are reached through `&'static` references built
 from table-owned boxes (ROADMAP §10.6, F019), block completions point into stack frames (ROADMAP
-§10.10, F002; §12.5, F042), and a pid is the index of its process-table slot, handed out lowest
-first (ROADMAP §10.4, F127).
+§10.10, F002; §12.5, F042), a pid is the index of its process-table slot, handed out lowest first
+(ROADMAP §10.4, F127), and a tid is its TCB slot index, in a space of its own. Nothing implements
+rule 3's operation gate or rule 6's deferred release yet (ROADMAP §10.4).
 
 ## 2.12 RCU
 
@@ -3266,7 +3318,9 @@ a heap `Vec`: allocating under RANK_DEVICE would take RANK_HEAP (lock order).
 
 Blocking wait and async submit share the same cookie. The buffer and waiter must
 outlive the completer's last access to them, which under the rule above is the
-status store.
+status store. Once the waiter and the buffer are counted (ROADMAP §12.5, F042), the
+completer drops its references to them after it leaves SCHED, never inside it
+(§2.11 rules 5 and 6).
 
 ## 10.2 Barrier vs flush
 
