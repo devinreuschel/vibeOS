@@ -1140,6 +1140,14 @@ Target notes:
   every switch. `CR0.NE` and `CR4.OSXMMEXCPT` are not set, so x87 and SSE floating-point errors do
   not reach `#MF` and `#XF` (§5.2; ROADMAP §10.6, F026).
 - `build.rs` passes the linker script as an absolute `-T` so the link does not depend on cwd.
+- Each kernel target has an ISA floor, and a CPU feature above it is used only where CPUID or an ID
+  register reports it. x86_64 builds for x86-64-v1, the target's default CPU, and also needs NX,
+  which `paging_init` sets in EFER without a CPUID check; SMEP, SMAP, UMIP, RDRAND, RDTSCP, and the
+  TSC-deadline timer are each used only where CPUID reports them. Planned (ROADMAP §11.1): aarch64
+  builds with `+lse` and needs FEAT_LSE and FEAT_PAN, both mandatory from Armv8.1, and a CPU without
+  them is refused at boot with a named line before any code that needs them runs. User programs
+  build for each architecture's Linux baseline (x86-64-v1, Armv8.0) and find anything newer through
+  CPUID or `AT_HWCAP`.
 
 ## 3.2 Limine protocol
 
@@ -4384,7 +4392,7 @@ per-architecture uapi (ROADMAP §13.10).
 | TLB maintenance and address-space ids | trait (`PageTable`) | `invlpg` and the shootdown IPI (§7.9); no PCID | broadcast `tlbi ...is`; ASIDs from §11.2's generation allocator | §10.3, §11.2 |
 | Cache maintenance and DMA coherence | trait (`Barriers`) | none: coherent | per-device coherence from `dma-coherent` or `_CCA`; `dc cvac` and `dc ivac` to the Point of Coherency for non-coherent devices (§4.7); `dc` and `ic` for code | §10.3, §11.2 |
 | Barriers (`dma_wmb`, `dma_rmb`, `dma_mb`) and MMIO accessors | trait (`Barriers`) | `mfence`, `sfence`, `lfence`; plain loads and stores; accessors carry a compiler barrier (§4.7) | `dmb oshst`, `dmb oshld`, `dmb osh`; `dmb oshst` before an `mmio_write` and `dmb oshld` after an `mmio_read` (§4.7) | §10.3, §11.2 |
-| Atomics | module selected by `cfg(loom)` (below) | `core::sync::atomic` | `core::sync::atomic`, with LL/SC or LSE | §10.8 |
+| Atomics | module selected by `cfg(loom)` (below) | `core::sync::atomic` | `core::sync::atomic`, with LSE instructions (`+lse`, §3.1's floor) | §10.8 |
 | Per-CPU base and current-thread registers | trait | `GS_BASE` and `swapgs`; `current` by one `gs`-relative load (§2.9 rule 5) | `TPIDR_EL1`, or `TPIDR_EL2` at EL2; `current` in `SP_EL0` (§2.9 rule 5) | §10.3, §11.4, §11.6 |
 | Syscall instruction, user frame's layout ([§5.10](#510-privilege-transitions)), numbers and argument order | trait | `syscall` and `sysretq`; the x86_64 table | `svc #0`; the asm-generic table | §10.3, §10.5, §10.6, §11.6 |
 | User-memory accessors | trait | `stac` and `clac` (SMAP) | PAN | §10.3, §10.6, §11.6 |
@@ -4543,7 +4551,7 @@ they read, and the aarch64 port does not exist.
 | aarch64 | `SCTLR_EL1.nTWI` | 0 | an EL0 `wfi` traps, and the exception handler steps over it, so it returns at once with no signal, as on Linux arm64 |
 | aarch64 | `SCTLR_EL1.SA0` | 1 | an EL0 load or store through a misaligned SP raises an SP alignment fault and gets `SIGBUS` |
 | aarch64 | `SCTLR_EL1.E0E` | 0 | EL0 is little-endian |
-| aarch64 | `SCTLR_EL1.SPAN` | 0 where FEAT_PAN exists | nothing directly; every exception entry to EL1 sets PAN (ROADMAP §11.6) |
+| aarch64 | `SCTLR_EL1.SPAN` | 0 (FEAT_PAN is in the §3.1 floor) | nothing directly; every exception entry to EL1 sets PAN (ROADMAP §11.6) |
 | aarch64 | pointer authentication (`EnIA`, `EnIB`, `EnDA`, `EnDB`), BTI (`BT0`), and MTE (`ATA0`, `TCF0`) in `SCTLR_EL1` | 0 | off until ROADMAP §18.9 (pointer authentication, BTI) and §18.4 (MTE) turn them on and change this row |
 | aarch64 | every other `SCTLR_EL1` field | the port's constant, with each field's reason beside it | no EL0-visible effect |
 | aarch64 | `CNTKCTL_EL1.EL0VCTEN` | 1 | EL0 reads `CNTVCT_EL0` and `CNTFRQ_EL0`, which the ROADMAP §13.10 vDSO clock reads |
