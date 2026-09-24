@@ -43,6 +43,7 @@ halfway through.
 | 9 | [Pitfalls](#9-pitfalls) | Bugs already paid for once |
 | 10 | [Block I/O](#10-block-io) | Requests, barrier vs flush, ramdisk, virtio-blk, partitions, cache |
 | 11 | [Portability](#11-portability) | The architecture seam, the aarch64 address space, adding a port, the EL0 and ring-3 environment |
+| 12 | [Device model](#12-device-model) | Devices, parents and suppliers, states, probe order, resources |
 
 On-disk filesystem formats live in their own docs, not here ([§1.4](#14-documentation-rules)): [VIBEFS.md](VIBEFS.md) (vibefs **version 1**, CoW metadata + atomic superblock switch). Syscall ABI: [SYSCALL.md](SYSCALL.md).
 
@@ -3446,9 +3447,10 @@ F015; the `flush` wait lands with ROADMAP §10.11, F043).
 The cache reaches the drivers by raw device id: `cache_init::raw_read`,
 `raw_write`, and `raw_flush` match `DEV_RAM0` to `block_init` and `DEV_VDA`
 to `virtio_blk_init`, and only in-guest tests call the `BlockDevice` trait
-objects. Planned (ROADMAP §10.4, D2): the cache takes a handle from one
-registry of `BlockDevice`s, partitions included, instead of matching device
-ids (F081). Hit/miss/device-request counters are in the `blk` shell
+objects. Planned (ROADMAP §10.4, D2): the cache holds a counted `BlockRef`
+from one registry of block devices, partitions included, and keys its pages
+by the device's never-reused id ([§12.1](#121-devices)), instead of matching
+device ids (F081). Hit/miss/device-request counters are in the `blk` shell
 command. The cache lock is RANK_DEVICE and is dropped before blocking
 device I/O.
 
@@ -3598,3 +3600,75 @@ hide a missing write from every TCG test. Rejected: keeping what firmware or Lim
 in the value read at boot, which keeps any bit this table does not name; and giving EL0 the physical
 counter or a timer, which Linux does not, and which at EL1 entry would let user code reprogram the
 kernel's tick.
+
+---
+
+# 12. Device model
+
+A device is what a driver binds to: a PCI function, a device the device tree or ACPI describes, a
+USB device, a partition, a stacked block device. [§2.11](#211-object-lifetimes) gives every device
+its lifetime rules. This section adds the tree the devices form, the order their callbacks run in,
+and who owns a device's resources. It is Linux's driver model (a device tree with supplier links,
+deferred probe, one lock per device) without kobjects: ROADMAP §23.3's sysfs renders this tree and
+does not own it.
+
+## 12.1 Devices
+
+1. A device is a counted object (§2.11 rule 1) in one registry. A lookup by bus address, name, or
+   device number returns a `DevRef`, a counted reference, and a block device's handle is a
+   `BlockRef`. Nothing hands out `&'static` to a device or to a driver's per-device state, and no
+   device record is `Copy`. A driver's static operations object may be `&'static`; the state for
+   each device it binds is owned by that device's registry entry.
+2. Every device but a root has a parent: a PCI function its bridge or root port, a USB device its
+   hub, a partition its disk. A device may also name suppliers outside the tree: the IOMMU that
+   translates it, the ITS its MSIs go through, and the members of a dm or md device, which list that
+   device as a holder.
+3. A device is `Present`, `Probing`, `Bound`, `Suspended`, `Removing`, or `Dead`. One sleeping lock
+   per device serializes `probe`, `remove`, `suspend`, `resume`, and `shutdown` on it, and the
+   registry's own lock is never held across a driver callback.
+4. A block device's id is a 64-bit sequence number never reused within a boot, as Linux's `diskseq`
+   is, so the block cache ([§10.6](#106-block-cache)) and any other table keyed by it cannot alias a
+   later device. A device's name is owned by its registry entry.
+
+## 12.2 Order
+
+5. Probe and resume run a device's parent and suppliers before it; remove, suspend, and shutdown run
+   its children and consumers before it. Removing a device removes its subtree, deepest device
+   first. The order is per device, not per driver, because one driver sits at several depths: nested
+   USB hubs, a chain of PCI bridges, dm on dm.
+6. A probe whose supplier is not bound returns `Defer`. The binder retries deferred devices after
+   each successful bind, and at the end of boot it logs each device still deferred with the supplier
+   it waits for, as Linux's deferred probe does. A device that an IOMMU translates gets its domain
+   before its first probe: when it is added if the IOMMU is registered, and otherwise when the IOMMU
+   registers.
+7. A driver's `shutdown` and the stop step of its `remove` are one quiesce function
+   (AGENTS.md rule 10).
+
+## 12.3 Resources
+
+8. A probe owns its device's resources. It maps only the MMIO and I/O ranges it holds a claim for: a
+   PCI BAR, a device-tree `reg` entry, or an ACPI `_CRS` range. A claim is not `Copy`, and it is the
+   only way to map a range. The registry refuses a claim that overlaps another claim or a RAM-typed
+   range of the boot memory map. The driver enables its device's memory decode before it touches the
+   device and bus mastering after it resets it; the binder enables neither. A failed probe, and
+   `remove`, reset the device and clear bus mastering before they free memory the device was given
+   ([§5.4](#54-irq-registration)).
+
+Why: a device is freed at its last put and never before, so a hot removal, a partition-table reread,
+or a USB unplug cannot leave a handle to freed memory, and an id that is never reused cannot hand an
+old device's cached pages to a new one. S3 (ROADMAP §20.2), subtree removal (§20.9), USB hubs
+(§20.3), and stacked block devices (§29.1) each need an order between devices, which a flat list
+cannot give. A driver that can map a range only through a claim cannot forget to check the range for
+an overlap or a RAM alias. Rejected: `&'static` devices that are never freed, which leak a device
+per hotplug or reread and which §2.11 rejects for every object; a flat registry ordered by a
+per-driver number, which cannot express a hub tree, subtree removal, or an IOMMU before the devices
+it translates; and Linux's kobject core, which is more than this needs.
+
+Rule; not yet enforced: the registry is a fixed array of `Copy` PCI records with no parent or state,
+bound in a per-driver `order()` (ROADMAP §6.1). `dev_init::bind_all` probes a copy of each record
+and writes it back, and it turns on memory decode and bus mastering before `probe`, as `irq_init`'s
+MSI and MSI-X setup does again. `pci_init` maps every memory BAR of every function at enumeration,
+before any claim ([§3.3](#33-_start-order)). Block devices are named by `&'static str` and reached
+by fixed ids (§10.6). ROADMAP §10.4 (D2) and §10.12 land rules 1 to 4 and 8 for PCI and block
+devices, §11.5 and §20.7 apply rule 8 to device-tree and ACPI devices, §18.1 lands rule 6, and
+§20.2, §20.3, §20.9, and §25.4 land rules 5 and 7 for suspend, hubs, removal, and shutdown.
