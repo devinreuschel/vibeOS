@@ -192,7 +192,7 @@ needs = [
 why = "claim: its body runs with IF=1 and holds the console lock one chunk at a time"
 
 [[box]]
-key = "the nine two-way module dependencies broken"
+key = "every two-way dependency between kernel modules that `scripts/check_cycles.py` reports"
 needs = [
   "FAT and vibefs behind `InodeOps`",
   "one directory per subsystem, portable and hardware halves adjacent",
@@ -206,7 +206,7 @@ why = "claim: the §10.6 entry stub passes the interrupted rbp"
 
 [[box]]
 key = "after `begin_dump`, every panic-path write to COM1"
-needs = ["the nine two-way module dependencies broken"]
+needs = ["every two-way dependency between kernel modules that `scripts/check_cycles.py` reports"]
 why = "claim: it writes through A4's raw serial layer"
 
 [[box]]
@@ -227,12 +227,33 @@ key = "syscall tracing can be switched on"
 needs = ["a kernel command line: `cmdline:`"]
 why = "claim: vibeos.strace=1 is a command-line option"
 
+[[box]]
+key = "no fault or trap that ring-3 code raises reaches `exception_halt`"
+needs = [
+  "the `#BP` gate is DPL 3",
+  "one per-CPU control-register routine",
+]
+why = "claim: `user_exceptions`' `int3`, x87 `#MF` and SIMD `#XM` cases are the next two boxes'"
+
 # Lands-after, lands-with and lands-before clauses in box text.
 
 [[box]]
 key = "kernel stack depth is measured against DESIGN §4.5's budget"
 needs = ["`vibeos.ktest=<glob>` runs only the matching in-guest tests"]
 why = "text: lands after the `ktest=<glob>` box below"
+
+[[box]]
+key = "for the Phase 10 exit gate's §10.10 line, the KVM leg also runs"
+needs = ["`vibeos.ktest=<glob>` runs only the matching in-guest tests"]
+why = "text: lands after §10.2's `ktest=` box"
+
+[[box]]
+key = "the crash test's planted defects"
+needs = [
+  "a kernel command line: `cmdline:`",
+  "the vibefs crash test can fail",
+]
+why = "text: lands after the command-line box and with the crash-test box above"
 
 [[box]]
 key = "kernel lines are framed (DESIGN §2.6)"

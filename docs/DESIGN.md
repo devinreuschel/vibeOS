@@ -4624,7 +4624,8 @@ The mechanism:
   `type AddressSpace = vibeos::AddressSpace<Arch>`), so kernel code never spells the parameter.
 - The kernel binary names its port once, `type Arch = arch::current::Arch;`, chosen by
   `cfg(target_arch)` in the kernel crate. `vibeos-core` contains no `cfg(target_arch)` and no
-  assembly (ROADMAP Phase 10 gate).
+  assembly, test modules included (ROADMAP Phase 10 gate); `scripts/check_core_stable.py` enforces
+  it from ROADMAP §10.3's A2 box.
 - The atomics seam is the one exception: a module selected by `cfg(loom)` (ROADMAP §10.8), because
   loom replaces types, not functions.
 
