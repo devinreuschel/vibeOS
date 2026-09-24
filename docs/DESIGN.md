@@ -3901,8 +3901,10 @@ slots so a spinning initiator still helps its peers. This is not optional; it is
 between working and a hang that only appears under load.
 
 The wait is bounded: `ipi_init::wait_acks` panics after 1000 × `tsc_per_ms` TSC cycles (1 s) without
-every acknowledgement. A target CPU that holds IF=0 that long without polling `service_incoming`
-makes a shootdown panic the kernel. The in-guest test runner holds IF=0 for the whole run,
+every acknowledgement. Planned (ROADMAP §10.10): the wait never panics; after 1 s it keeps waiting and
+logs, at most once a second, the CPUs that have not acknowledged. A target CPU that holds IF=0 that
+long without polling `service_incoming` makes a shootdown panic the kernel. The in-guest test runner
+holds IF=0 for the whole run,
 and a syscall body runs with the IF=0 that FMASK set until it blocks (ROADMAP §10.10, F011); a console
 `write` with many newlines is the long case (ROADMAP §10.6, F044). As built, one round invalidates one VA
 (`shootdown_va`) on every online CPU; ROADMAP §12.3 replaces it with the rounds above. `kva_init::unmap_shootdown` unmaps at most 32 pages (`MAX_UNMAP`) and leaves the
