@@ -2074,6 +2074,35 @@ clobbers; and `enter_user_full` takes a second format, `UserRegs`.
    at entry). Rule; not yet enforced: ROADMAP §10.6 (the generated stubs) and §11.3 (the aarch64
    vectors). Today `arch::idt::page_fault` reads CR2 in its body, which is correct only because
    every fault body runs with IF=0.
+10. Signal-handler entry, on both architectures. Delivery saves the interrupted context (the user
+    frame above, after any syscall-restart rewind) and its FP state into Linux's signal frame on the
+    user stack (ROADMAP §13.8), then rewrites the user frame so the return to user mode enters the
+    handler. On x86_64: `rip` is `sa_handler`; `rsp` points at the frame, whose first word is
+    `sa_restorer`, the handler's return address; `rdi` holds the signal number, `rsi` the frame's
+    `siginfo`, `rdx` its `ucontext`, and `rax` 0; `cs` and `ss` are the user selectors; DF, TF, and
+    RF are clear in `rflags`. The thread's FP state becomes the constant initial image
+    ([§7.5](#75-per-cpu-data)), a write under the FP binding, so a handler that interrupts code
+    running under `std` or with a changed MXCSR starts from the psABI's state. On aarch64: `x0`
+    holds the signal number and, under `SA_SIGINFO` only, `x1` and `x2` the `siginfo` and
+    `ucontext`; `sp` points at the frame and `x29` at its frame record; `x30` is `sa_restorer` under
+    `SA_RESTORER` and otherwise the vDSO's `__kernel_rt_sigreturn` (ROADMAP §13.8, §13.10); `pc` is
+    `sa_handler`; `PSTATE.BTYPE` is 0 (`BTYPE_C` once ROADMAP §18.9 turns BTI on) and `PSTATE.TCO`
+    is 0; V0-V31, FPCR, and FPSR keep their interrupted values. `rt_sigreturn` restores the saved
+    context, TF included, after ROADMAP §13.8's validation. A thread that a tracer is
+    single-stepping reports a step stop at the handler's first instruction (ROADMAP §17.4). The
+    frame write may fault and sleep, so it runs where [§2.9](#29-preemption-and-interrupt-state)
+    rule 4 allows, and the exit's last check stays at IF=0 (rule 4). A signal that cannot be
+    delivered, because its frame cannot be written or an x86_64 handler lacks `SA_RESTORER`, is
+    dropped and replaced by a forced `SIGSEGV`, as Linux's `force_sigsegv` does: if the dropped
+    signal is `SIGSEGV`, `SIGSEGV` is reset to its default action, unblocked, and delivered, so the
+    process dies; otherwise `SIGSEGV` is unblocked, reset to its default action only if it was
+    blocked or ignored, and sent, so a `SIGSEGV` handler on an alternate stack still runs. The exit
+    work never retries a failed delivery. A synchronous fault signal (`SIGSEGV`, `SIGBUS`, `SIGILL`,
+    `SIGFPE`, or `SIGTRAP` raised by the thread's own instruction) carries its `siginfo` in a
+    per-thread slot filled at the fault, never in an allocated queue entry, so running out of memory
+    cannot drop or delay it (AGENTS.md rule 4); Linux allocates one and can lose the `siginfo`, so
+    the slot is stricter than Linux and the same while memory lasts. Planned (ROADMAP §13.8, §17.4):
+    no handler is delivered today.
 
 ---
 
