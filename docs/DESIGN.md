@@ -1748,12 +1748,14 @@ scanout is a later polish pass; double buffering is also parked (ROADMAP §5.1).
 ## 4.4 Kernel heap
 
 A free-list heap at `HEAP_START`, backed by buddy frames mapped writable + NX. Initial mapping is
-1 MiB; the allocator grows in page-sized increments up to the 64 MiB region limit. `GlobalAlloc`
-takes the heap lock, a `SpinMutex`, so interrupts are off for each `alloc` and `dealloc`, and the rank
-check refuses an allocation or a free made while a spinlock ranked after the heap is held (§2.1).
-Planned (ROADMAP §12.6): the free list becomes a two-level segregated-fit allocator (TLSF), whose
-`alloc` and `free` take constant time with boundary-tag coalescing, and a moving `realloc` copies
-with the heap lock dropped, so every HEAP hold is bounded however fragmented the heap is
+1 MiB; the allocator grows in page-sized increments up to the 64 MiB region limit. It never returns
+a page to the buddy, so it reports the pages it holds and its bytes in use apart, and a leak check
+reads the bytes in use (ROADMAP §12.1). `GlobalAlloc` takes the heap lock, a `SpinMutex`, so
+interrupts are off for each `alloc` and `dealloc`, and the rank check refuses an allocation or a
+free made while a spinlock ranked after the heap is held (§2.1). Planned (ROADMAP §12.6): the free
+list becomes a two-level segregated-fit allocator (TLSF), whose `alloc` and `free` take constant
+time with boundary-tag coalescing, and a moving `realloc` copies with the heap lock dropped, so
+every HEAP hold is bounded however fragmented the heap is
 ([§2.9](#29-preemption-and-interrupt-state) rule 2). Today `alloc` walks the address-ordered free
 list first-fit, `dealloc` walks it to insert, and `realloc` copies under the lock.
 
