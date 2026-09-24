@@ -672,6 +672,8 @@ must neither halt nor corrupt memory it has not given to that source (AGENTS.md 
 | Speculation and timing side channels | Out of scope: no KPTI and no Spectre or MDS mitigations; the kernel half is mapped in every user address space (F024, F025, F131, F132) | Read kernel and other processes' memory on an affected CPU | ROADMAP §18.3 |
 | Limine, the firmware, and the CPU | Everything | Not applicable | ROADMAP §18.7 measures and verifies the boot chain |
 | The host running QEMU, the harness, and CI | Everything; they are the test oracle | Not applicable | Never |
+| Agent sessions, and the accounts they act through | Writing code, and opening and merging pull requests through the repository's rulesets; nothing else: no release or phase tag, deployment approval, repository setting, ruleset, environment, or secret | Act as the owner on GitHub: agents run with the owner's account and token, so every owner-only control in the release chain (the `release` environment's approval, the tag rules, ROADMAP §22.5's setting) is one prompt injection away | The agent-boundary decision below, before ROADMAP §14.6's first key |
+| Code under test: candidate commits, agent-written code and tools, guests, third-party build systems, as seen by the machines that run them | Nothing: on a CI runner or a rig VM it reaches no secret, credential, or host service beyond its job; on the dev host, no credential beyond the agent account's own | On the dev host, read every credential of the owner's account: the `gh` token, git's credentials, SSH keys, a signed-in browser | The agent-boundary decision below (dev host); ROADMAP §10.1 and §14.6 (release jobs); ROADMAP Funded goals, Self-hosted runners (rig) |
 
 Consequence: until Phase 18 closes, vibeOS stops a process from crashing the kernel, not from reading
 another process's data. README says not to run untrusted code on it or keep secrets on it.
@@ -691,6 +693,42 @@ before Phase 14's `login`, which costs most of a phase ahead of the self-hosting
 The acceptance assumes one user. It goes back to the owner before `login` lands (ROADMAP §14.3), when
 a second user can share the machine. Keeping any gap past the line that closes it, or adding a gap,
 is likewise the owner's decision, not an agent's.
+
+**Agent boundary.** Rule: agents never act with the owner's credentials, and nothing agents write
+runs where the root key is made or used (ROADMAP §14.6). Rule; not yet enforced: agents run under the
+owner's macOS account and GitHub identity, as the two rows above say. How the boundary is set up is
+the owner's decision, in the block below; ROADMAP §14.6's custody box waits for the answer, so no key
+exists before it.
+
+> **OWNER DECISION NEEDED (review J002)**: agents act as you. They run shell commands under your
+> macOS account and push, open, and merge pull requests with your GitHub token, and GitHub checks
+> every owner-only step by account: the `release` environment's approval (H007), who may create
+> release and phase tags, rulesets, and the private-reporting setting (ROADMAP §22.5). A prompt
+> injection in an issue, a pull request comment, or a web page an agent reads could push a release
+> tag and approve its own release run in your name. The root key, as ROADMAP §14.6 wrote the
+> procedure, would be made on that same account with a tool agents wrote, so anything an agent runs
+> could read it, and it is the one key an installed system cannot recover from.
+>
+> Recommended, at $0: (1) Agents get a GitHub machine account (GitHub's terms allow one beside your
+> personal account) with this repository's Write role only: no Maintain or Admin role, no
+> environment reviewer, no ruleset bypass. It uses a fine-grained token if GitHub issues one to a
+> collaborator on a personal-account repository, and otherwise a classic token with the `repo` and
+> `workflow` scopes, whose reach is that Write role; moving the repository to a free organization is
+> the other way. None of your own GitHub credentials stays on the macOS account agents run under: not
+> the `gh` token, git's keychain entries, SSH keys registered to your account, or a github.com
+> session in a browser an agent tool can drive. You push tags and approve release runs from a second
+> macOS account or GitHub Mobile. A GitHub App in place of the machine account gives the same
+> boundary, with its private key where agents mint tokens. (2) The root key is made and used only in
+> that second macOS account, which holds no agent tooling, with macOS's own `/usr/bin/ssh-keygen`,
+> which System Integrity Protection keeps agents from changing; it is written passphrase-encrypted
+> to removable media and used only while no agent session runs. Cost: two accounts, moving your
+> credentials once, and commits and pull requests that show the agent account as their author.
+>
+> If you decline (1), the H007 record says that anyone holding your token, agent sessions included,
+> can approve a release run, and AGENTS.md's maintainer-only steps stay policy that nothing
+> enforces. If you decline (2), the root key is made where you choose, and THREAT_MODEL (ROADMAP
+> §18.8) lists a root key on a machine agents use as a known escalation path. No key exists before
+> `v0.14.0`, and ROADMAP §14.6's custody box waits for this answer.
 
 ## 2.11 Object lifetimes
 

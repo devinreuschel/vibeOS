@@ -83,7 +83,7 @@ agent tokens. Every phase, box, gate, and [Beyond](#beyond) entry is provable on
 - QEMU under TCG everywhere, KVM on the x86_64 runners, and HVF on the dev host, with its models of real devices: NVMe with subsystems, SR-IOV, and ZNS; AHCI; xHCI with USB HID, storage, network, and audio devices; e1000, e1000e, rtl8139, and igb with 8 SR-IOV VFs; HDA and virtio-sound, playing back to a WAV file; SD and eMMC; `intel-iommu`, `virtio-iommu`, and SMMUv3; a TPM through `swtpm`; the i6300esb and ICH9 TCO watchdogs, `pvpanic`, and ERST; virtio-gpu with up to 16 heads and EDID; PCIe hotplug; S3 on `q35`; machine-check injection on x86_64 and GHES error injection on aarch64. Under TCG it also runs guests larger than any runner, up to 4096 vCPUs in x2APIC mode on `q35` and 512 with GICv3 on `virt`, with memory the host commits only as the guest touches it, and gives aarch64 guests on `virt` EL2, FEAT_NV2, and an emulated PMUv3
 - free VMMs and mocks on the x86_64 KVM runner: Firecracker with MMDS, cloud-hypervisor, QEMU's `microvm`, Microsoft's OpenVMM with its VMBus devices and MANA, EC2 and GCE metadata mocks, and cloud-init's NoCloud. No free, licensed model of AWS's ENA or Google's gVNIC exists
 - free corpora and suites: the ACPI tables of 815 real machines from linuxhw/ACPI, recompiled with `iasl`; ACPICA's `aslts`; `fwts`; Linux's device-tree sources; LTP and kselftest; BlueZ's testers with its `btdev` controller; `v4l2-compliance`; Mesa's `llvmpipe` and `lavapipe` with dEQP and piglit; and `hostapd` and `wpa_supplicant` over the `mac80211_hwsim` virtio protocol with `wmediumd`
-- the maintainer's Apple Silicon Mac (M4 Pro, 48 GB) as a VM host, never as a bare-metal test machine: aarch64 guests under HVF, with EL2 for guests from QEMU 11.1, and x86_64 guests under TCG only. Its runs are §10.9 dev-host records
+- the maintainer's Apple Silicon Mac (M4 Pro, 48 GB) as a VM host, never as a bare-metal test machine: aarch64 guests under HVF, with EL2 for guests from QEMU 11.1, and x86_64 guests under TCG only. Its runs are §10.9 dev-host records. No line installs a system service, or anything that runs as root, on it: a change to the owner's machine is the owner's decision (DESIGN §2.10)
 
 A gate never needs a physical machine, a rented one, a paid service, or a new account. Free cloud tiers
 need the maintainer's card and account, so they count as paid. What money or a spare machine would add
@@ -1897,10 +1897,10 @@ dynamic linker's relocation types and TLS are per architecture. Alpine publishes
 - [ ] a repository format signed with §14.7's Ed25519, read from a local directory or a mounted image; §15.8 fetches it over HTTP
 - [ ] signature verification on every install and upgrade, with an unsigned or tampered package refused
 - [ ] the base system itself shipped as packages, which is the test that the format is real
-- [ ] a signed release manifest: every artifact of a tagged release with its SHA-256, signed with a §14.7 Ed25519 release key and published by the release workflow from `v0.14.0` on. Where the private key lives is the key-custody record below; its public key reaches the tree and every image only through the key-set record of the next box. §18.7's boot-chain manifest and §22.1 extend this format rather than adding another
-- [ ] signing keys that can be replaced: every signature (package, repository index, release manifest) names its key by a key id; an image trusts a key set, not a single key; each release and each repository publishes a signed key-set record listing the keys to trust, the keys revoked, and a version that only increases, so an installed system moves to a new key, or drops a leaked one, through an ordinary update, and refuses a record whose version is older than the one it holds. A signature by a revoked key is refused. The record is signed by a root key that signs nothing else, so a leaked release key is revoked by a record the thief cannot sign. Host tests rotate the release key twice and revoke it once, and refuse a rolled-back record; an in-guest update across a rotation installs, and a package signed by the revoked key is refused. Without this, the first leaked key stays trusted by every image already installed, and the §39.1 freeze would make that permanent
+- [ ] a signed release manifest: every artifact of a tagged release with its SHA-256, signed with an Ed25519 release key in the next box's signature format and published by the release workflow from `v0.14.0` on. Where the private key lives is the key-custody record below; its public key reaches the tree and every image only through the key-set record of the next box. §18.7's boot-chain manifest and §22.1 extend this format rather than adding another
+- [ ] signing keys that can be replaced: every signature (package, repository index, release manifest) names its key by a key id; every signature the release and root keys make is an SSHSIG, the format OpenSSH's `PROTOCOL.sshsig` documents, over Ed25519, with one namespace per kind of signed object (`vibeos-package`, `vibeos-repo`, `vibeos-manifest`, `vibeos-keyset`), so stock `ssh-keygen -Y sign` makes it and `ssh-keygen -Y verify` checks it; a key id is the SHA-256 fingerprint of the key's OpenSSH public key; the §14.7 crate verifies the format, with host tests against `ssh-keygen` output; an image trusts a key set, not a single key; each release and each repository publishes a signed key-set record listing the keys to trust, the keys revoked, and a version that only increases, so an installed system moves to a new key, or drops a leaked one, through an ordinary update, and refuses a record whose version is older than the one it holds. A signature by a revoked key is refused. The record is signed by a root key that signs nothing else, so a leaked release key is revoked by a record the thief cannot sign. Host tests rotate the release key twice and revoke it once, and refuse a rolled-back record; an in-guest update across a rotation installs, and a package signed by the revoked key is refused. Without this, the first leaked key stays trusted by every image already installed, and the §39.1 freeze would make that permanent
 
-- [ ] key custody as the record below sets it: a `release` GitHub environment whose protection rule requires the owner's approval holds the release key as its only secret, and only `release.yml`'s signing job names that environment; the owner generates the root key on the dev host with the hostlib `release-manifest` tool, keeps it offline, and uses it only to sign key-set records; `docs/RELEASING.md` lists the owner's steps (create the root key, create the environment and its secret, approve a release run, rotate or revoke a key), and a `make check` script fails when a workflow other than `release.yml` names the `release` environment
+- [ ] key custody as the record below sets it: a `release` GitHub environment whose only required reviewer is the owner's own account holds the release key as its only secret, and only `release.yml`'s signing job names that environment; the root key is made and used where DESIGN §2.10's agent-boundary answer says (recommended there: macOS's SIP-protected `/usr/bin/ssh-keygen`, `-t ed25519` and then `-Y sign -n vibeos-keyset`, run in a second macOS account that holds no agent tooling or credentials, with the key written passphrase-encrypted to removable media and used only while no agent session runs), kept offline, and used only to sign key-set records; the hostlib `release-manifest` tool builds and verifies key-set records and never signs; a repository ruleset lets only the owner's own account create `v*` and `phase-*` tags, with no bypass actor; `docs/RELEASING.md` lists the owner's steps (set up the account agents use and move the owner's own GitHub credentials off the account agents run under, as the agent-boundary answer sets it; create the root key; create the environment, its secret, and the tag ruleset; approve a release run; rotate or revoke a key), and a `make check` script fails when a workflow other than `release.yml` names the `release` environment. This box waits for the owner's answer to DESIGN §2.10's agent-boundary block: no key is created before it is recorded, and a procedure the owner chooses instead replaces the recommended one here
 
 **Key custody (owner decision, 2026-09-23, design review H007): option (b).** The root key, which signs
 only key-set records, stays offline with the owner and never enters CI. The release key signs each
@@ -3269,12 +3269,13 @@ threshold under KVM holds on every CPU model the runner draws, by that leg's rul
 Linux compares the two kernels in one job, on one CPU model. GitHub's arm64 runners have no KVM, so
 aarch64 guests there run under TCG, and an aarch64 number that needs an accelerator is taken under HVF
 on the dev host as a §10.9 record, where the peers, servers, and load generators a line puts on the
-runner run on the dev host. There both kernels' guests reach them over `socket_vmnet` (Apache-2.0), a
-daemon Homebrew installs once as a root service, which QEMU joins unprivileged through a socket netdev,
-since macOS has no tap device and QEMU's `vmnet-*` netdevs need root. A guest larger than a runner,
-with hundreds of vCPUs or a terabyte of memory, runs under TCG on sparse host memory and checks
-correctness and counts, not speed. Real servers, clouds, 100GbE NICs, data-center drives, and
-month-long uptime are [Funded goals](#funded-goals); no line here waits for one.
+runner run in a Linux baseline guest on the dev host. Both kernels' guests reach that guest through
+QEMU's `stream` netdev, a socket between the two QEMU processes that needs no root: macOS has no tap
+device, and QEMU's `vmnet-*` netdevs and `socket_vmnet` need a root service, which no line installs on
+the owner's Mac (How to read this). A guest larger than a runner, with hundreds of vCPUs or a
+terabyte of memory, runs under TCG on sparse host memory and checks correctness and counts, not speed.
+Real servers, clouds, 100GbE NICs, data-center drives, and month-long uptime are
+[Funded goals](#funded-goals); no line here waits for one.
 
 **Nested virtualization.** A line that runs vibeOS as a hypervisor inside the runner's guest runs in the
 environments [Phase 21](#phase-21-virtualization) defines and passes on its terms: on x86_64 the nested
@@ -3750,7 +3751,7 @@ real machines is a [Funded goal](#funded-goals).
 
 **Exit gate**
 - [ ] PostgreSQL's regression suite (§30.1) passes, minus its checked-in expected-failure list, under TCG with 2 vCPUs and 2 GiB on both architectures, on the weekly job
-- [ ] pgbench, a load generator on the runner against nginx serving static files, and `redis-benchmark` each reach at least 70% of Linux's throughput in the same guest shape (4 vCPUs, 4 GiB, virtio-blk, and virtio-net with 4 queue pairs on a multiqueue tap with `vhost-net`) in the same job, under KVM on the KVM runner; and on aarch64 under HVF on the dev host as a §10.9 record, with one queue pair, since QEMU's socket netdev to `socket_vmnet` has only one; the numbers are recorded per release
+- [ ] pgbench, a load generator on the runner against nginx serving static files, and `redis-benchmark` each reach at least 70% of Linux's throughput in the same guest shape (4 vCPUs, 4 GiB, virtio-blk, and virtio-net with 4 queue pairs on a multiqueue tap with `vhost-net`) in the same job, under KVM on the KVM runner; and on aarch64 under HVF on the dev host as a §10.9 record, with one queue pair, since QEMU's `stream` netdev to the Era VI peer guest has only one; the numbers are recorded per release
 - [ ] a host client commits numbered rows to PostgreSQL through 100 simulated power cuts on §12.5's volatile-cache device; after each, PostgreSQL recovers and every commit acknowledged to the client is present; under TCG with 2 vCPUs and 2 GiB, on both architectures
 - [ ] a Prometheus server on the runner scrapes `node_exporter` on vibeOS, and every query in the checked-in dashboard returns data: CPU, memory, pressure stall, disk, network, and per-service series, on both architectures
 - [ ] kernel and service logs reach a collector on the runner over TLS as RFC 5424 records with structured fields, and a sequence-number check finds none lost across a 10-minute collector outage, on both architectures
@@ -4541,7 +4542,12 @@ request's own files. A runner here therefore enforces its rules itself: its job-
 `workflow_dispatch`, or whose `GITHUB_REF` is not `refs/heads/main`, before any of its steps runs, and
 vibeOS's own workflows that name its labels have no other trigger. A `workflow_dispatch` run builds a
 commit it takes as input only when that commit is on `main` or on a §39.3 supported branch. The runners
-run nothing but vibeOS's hardware jobs.
+run nothing but vibeOS's hardware jobs. Each job runs in a fresh VM on the rig host, registered as an
+ephemeral just-in-time runner and deleted after its job; the VM's network reaches GitHub and the rig's
+management network, never the owner's LAN; the rig host holds no secret but that registration, and a job
+switches outlets or netboots a machine only through a service on the rig host with an allow list of
+outlets and a rate limit. The maintainer signs these rules off when funding the rig (DESIGN §2.10, code
+under test).
 
 **Names.** In the lines below, *the x86_64 test PC*, *the aarch64 server*, *the long-run servers*, *the
 reference laptop*, *the desktop*, and *the rig* are the machines the goals buy. *The test machines* are
@@ -5648,8 +5654,11 @@ Render offload to a discrete GPU, powered off when idle.
 
 ### Model API credits
 
-**Open.** A model API key issued by the maintainer's account, kept in the repository's secrets, with
-pay-as-you-go billing.
+**Open.** A model API key issued by the maintainer's account for one project on the provider's side,
+with pay-as-you-go billing under a spend cap, kept as the only secret of a `model-api` GitHub
+environment that admits deployments from `main` alone and that only the replay workflow names, so a
+workflow a branch adds cannot read it. The agent on vibeOS gets a separate key, which never enters a CI
+guest.
 
 **Cost.** The provider's list price per token (2026) for roughly the tokens each replayed phase took to
 build, held under a monthly spend limit the maintainer sets.
@@ -5658,7 +5667,7 @@ build, held under a monthly spend limit the maintainer sets.
 agent on a vibeOS machine with a key of its own.
 
 **Lines.**
-- Beyond, **Gate replay**: its last sentence becomes "It is rerun by a scheduled workflow on each new model release, with an API key in the repository's secrets."
+- Beyond, **Gate replay**: its last sentence becomes "It is rerun by a scheduled workflow on `main` on each new model release, with the API key of the `model-api` environment."
 - Beyond, **Agents on vibeOS**: its last sentence becomes "It uses an API key of its own rather than the maintainer's agent account."
 
 ### Khronos conformance submission
