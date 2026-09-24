@@ -12,7 +12,7 @@
 
 ## Problem
 
-A `use crate::` graph over the hardware half (212 edges) has nine two-cycles:
+A `use crate::` graph over the kernel half (212 edges) has nine two-cycles:
 
 | Cycle | Evidence |
 |---|---|

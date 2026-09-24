@@ -1,12 +1,12 @@
 # Review issues (2026-09-22)
 
-One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVIEW.md). Each has the observation with evidence, the recommended fix, a step-by-step implementation plan, acceptance criteria, tests, and risks. Phases: **I** quick wins, **II** near term, **III** strategic (alongside Phase 9–10). Effort: S ≤ 1 day, M a few days, L 1–2 weeks.
+One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVIEW.md). Each has the observation with evidence, the recommended fix, a step-by-step implementation plan, acceptance criteria, tests, and risks. Tiers: **I** quick wins, **II** near term, **III** strategic. They are the review's priority buckets, which ARCHITECTURE_REVIEW §6 and each plan's header call Phase I to III; they are not ROADMAP phases, and ROADMAP Phase 10's waves set the order. Effort: S ≤ 1 day, M a few days, L 1–2 weeks.
 
 **Phase numbers (2026-09-22).** The roadmap was restructured after this review: phases from 10 up were renumbered (old 10 → 12, 11 → 13, 12 → 14, 13 → 15, 14 → 16, 15 → 17, 16 → 18, 17 → 19, 18 → 20, 19 → 21, 20 → 22), and these items are tracked as [ROADMAP Phase 10: Consolidation](../../ROADMAP.md#phase-10-consolidation). Section numbers quoted in the issue documents were updated where an item is still open; the review itself keeps the old numbers.
 
 **Precedence.** A plan is advice on how to do the work its ROADMAP boxes state; where they differ, the boxes decide (ROADMAP, How to read this). Each plan whose code is `proposed` or `in progress` opens with a `ROADMAP:` line that names its boxes and the steps they supersede.
 
-| ID | Title | Impact | Effort | Phase | Depends on | Status |
+| ID | Title | Impact | Effort | Tier | Depends on | Status |
 |---|---|---|---|---|---|---|
 | [A1](A1-directory-per-subsystem.md) | Directory per subsystem, matching a corrected module map | High | L | III | Q1, A2 | `proposed` |
 | [A2](A2-portable-half-host-tests.md) | Make the portable half portable; host tests on any host | High | M | II | C1 | `in progress (#88)` |
@@ -45,6 +45,6 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 | [R1](R1-repo-tidy.md) | Tidy the root, `tests/`, and remote branches | Low | S | I | B1, T2 | `in progress (#78, #79)` |
 | [O1](O1-phase9-resume-note.md) | Note the Phase 9 pause and resume; research notes deferred | Low | S | II | — | `superseded: Phase 9 did not pause, so there is no resume to note; research notes stay deferred` |
 
-Suggested order for Phase I (all independent unless noted): DOC1, DOC3, C1, Q1, B1, T2 → C2, DX1, B3 → DOC4, D3, R1.
+Suggested order for tier I (all independent unless noted): DOC1, DOC3, C1, Q1, B1, T2 → C2, DX1, B3 → DOC4, D3, R1.
 
 **Status** in the table is the only status of a code; each plan's own status line points here. `proposed`: none of its work has landed. `in progress (#PR, …)`: some has, in those PRs, and an open ROADMAP box in Phases 0 to 10 still cites the code. `implemented (#PR, …)`: its work has landed and no open box there cites it. `declined: <reason>` and `superseded: <what replaced it>` close a code without its work. A box cites a code that opens an item of a parenthesized list on its line, as in `(Q1, F147)`. The status notes in ARCHITECTURE_REVIEW.md §6 are dated history. `scripts/check_issues.py` (ROADMAP Phase 10 exit gate) checks each cell against the boxes.

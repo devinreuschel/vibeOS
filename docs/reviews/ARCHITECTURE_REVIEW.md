@@ -6,7 +6,7 @@
 
 **Revision 2 (2026-09-22):** maintainer answers to §8 folded in (macOS is a supported dev host, MIT license, Phase 9 resumed, custom target was not a deliberate choice, CI takes a few minutes). E1 corrected after a non-test-only recount; see §9.3.
 
-**Revision 3 (2026-09-22):** the roadmap was restructured after this review ([ROADMAP_REVIEW.md](ROADMAP_REVIEW.md)). Phase numbers from 10 up quoted below are the pre-restructure ones (old 10 → 12 … 20 → 22); the items are tracked as ROADMAP Phase 10: Consolidation.
+**Revision 3 (2026-09-22):** the roadmap was restructured after this review ([ROADMAP_REVIEW.md](ROADMAP_REVIEW.md)). Phase numbers from 10 up quoted below are the pre-restructure ones (old 10 → 12 … 20 → 22); the items are tracked as ROADMAP Phase 10: Consolidation. Section numbers quoted below are pre-restructure too. Most follow the phase mapping (§16.5 is today's §18.5, §17.4 and §17.5 are §19.4 and §19.5), but four moved further: slab is now ROADMAP §19.9, the unified page cache §12.5, NVMe §20.4, and AHCI §20.5.
 
 Effort scale used below: **S** ≤ 1 day, **M** a few days, **L** 1–2 weeks, **XL** longer. Impact is relative to the project's stated goal (a testable, agent-written kernel that keeps advancing through the roadmap).
 
@@ -228,7 +228,7 @@ There are no secrets in this project and none should exist; `.gitignore` already
 **C2 · Centralize `VIBEOS_*` handling**
 - **Observation:** `VIBEOS_ISO`, `VIBEOS_SMP`, `VIBEOS_QEMU_CPU`, `VIBEOS_MEM`, `VIBEOS_BIOS`, `VIBEOS_QEMU_ACCEL`, `VIBEOS_TIMEOUT`, `VIBEOS_QEMU_EXTRA` are each parsed with their own defaults in `Makefile`, `tests/harness/run_e2e.py`, `tests/kernel_boot.py`, and `tests/vibefs_crash.py` (which also carries its own copy of the panic-signature list and QEMU argv).
 - **Recommendation:** One `harness.env_config()` returning an `EnvConfig` (drivers call `.qemu()`), used by all drivers (see T2). Document the variables in one table in DESIGN §8.4.
-- **Status:** Implemented.
+- **Status:** Implemented (#79).
 - **Impact:** Low · **Effort:** S · **Risk if ignored:** Drivers drift (defaults already differ: e2e timeout 60 s, ktest 90 s, crash 90 s).
 
 ### 4.6 Testing strategy & coverage
@@ -243,13 +243,13 @@ The three-tier strategy is right and well executed. Findings are about infrastru
 **T2 · One QEMU launcher for all drivers**
 - **Observation:** QEMU argument construction exists three times: `harness._qemu_argv` (monitor socket, accel, HPET), `kernel_boot._blk_extra` (virtio-blk drive, boot order), and `vibefs_crash._qemu_argv` (its own accel/bios handling, no monitor). `vibefs_crash.py` also redefines `PANIC` signatures and a line-reader loop instead of using `DeadlineReader`. `tests/e2e/` is an empty directory holding only an untracked `__pycache__` (a moved file).
 - **Recommendation:** Put device presets (`ktest_devices(disk, smp)`, `virtio_blk_args(disk, smp)`) and the launcher in `harness.py`, have all drivers use `DeadlineReader`, delete `tests/e2e/`, and move `kernel_boot.py`/`vibefs_crash.py` into `tests/harness/` as `run_ktest.py` / `run_vibefs_crash.py`.
-- **Status:** Implemented.
+- **Status:** Implemented (#79).
 - **Impact:** Medium · **Effort:** S · **Risk if ignored:** A fix to the reader or panic list lands in one driver and not the others (this has already happened with the panic list).
 
 **T3 · Parallelize the CI ladder and add a fast `check` job**
 - **Observation:** `.github/workflows/ci.yml` is one job running 12 sequential QEMU steps after five separate kernel builds; nothing runs fmt, clippy, or coverage; `DESIGN §8.6` lists clippy, `rustfmt --check`, and `cargo-llvm-cov` on the lib half as "additions as they become relevant". There is no macOS job. The maintainer reports the ladder takes "a few minutes" and that GitHub runner queues are sometimes full.
 - **Recommendation:** Add a `check` job (fmt + clippy + host unit + harness unit) that fails in about a minute and runs before the QEMU ladder, so a formatting or lint failure never costs a full ladder. Do **not** fan the ladder out into a nine-way matrix: with a few-minute ladder and contended runners, extra jobs would wait longer than they save. Add `cargo llvm-cov` on hostlib with a floor that only ratchets up.
-- **Status:** Implemented.
+- **Status:** Implemented (#82).
 - **Impact:** Medium · **Effort:** S · **Risk if ignored:** A fmt or lint failure costs a full QEMU ladder to discover.
 
 **T4 · Fuzz the pure parsers now**
@@ -425,18 +425,18 @@ Nothing in this sketch requires changing an algorithm. Locks, ranks, markers, th
 
 | ID | Item | Note |
 |---|---|---|
-| DOC1 | README/DESIGN header/module map/LICENSE | Agents read these first. **Landed** (docs/meta PR). |
-| DOC3 | Tracked `AGENTS.md`; fix stale rule references | Same reason. **Landed** (docs/meta PR). |
+| DOC1 | README/DESIGN header/module map/LICENSE | Agents read these first. **Landed** (#78). |
+| DOC3 | Tracked `AGENTS.md`; fix stale rule references | Same reason. **Landed** (#78). |
 | Q1 | `cargo fmt` commit, `rustfmt.toml`, clippy + `-Dwarnings` gate | Do the fmt commit before any file moves |
 | C1 | Pin nightly date, action SHAs, Limine commit; cache on `Cargo.lock` | Prevents "red CI, no diff" |
 | DX1 | `make check`; ruff/mypy for `tests/` | Fast local gate |
 | B1 | Parametrize ISO recipes / two-pass build | Enables T3 and P1 |
-| T2 | One QEMU launcher; delete `tests/e2e/`; move loose drivers | Enables T3 · **done** |
-| C2 | One `VIBEOS_*` reader | Falls out of T2 · **done** |
+| T2 | One QEMU launcher; delete `tests/e2e/`; move loose drivers | Enables T3 · **done** (#79) |
+| C2 | One `VIBEOS_*` reader | Falls out of T2 · **done** (#79) |
 | B3 | Tag `v0.8.0`, cut changelog, publish ISO artifact | |
 | DOC4 | Shorter changelog entries | With B3 |
-| D3 | `BootInfo` captured once | **Landed** (this PR) |
-| R1 | Root/tests tidy; prune merged branches | Branch prune in docs/meta PR. ISO→`build/` waits on B1; Python driver moves wait on T2. |
+| D3 | `BootInfo` captured once | **Landed** (#90) |
+| R1 | Root/tests tidy; prune merged branches | Branch prune in #78. ISO→`build/` waits on B1; Python driver moves wait on T2. |
 
 ### Phase II — Near term (2–4 weeks; Phase 9 is resuming, so interleave with it)
 
@@ -446,7 +446,7 @@ Nothing in this sketch requires changing an algorithm. Locks, ranks, markers, th
 | A2 | Move asm out of the portable half; hostlib as workspace member; host tests on any OS | B2 (for the workspace part) |
 | I1 | macOS `check` job; OVMF probing | A2 |
 | P1 | Share/cut std builds across variants; cache all target dirs | B1, B2 |
-| T3 | Fast `check` CI job ahead of the QEMU ladder; llvm-cov floor | T2 · **done** |
+| T3 | Fast `check` CI job ahead of the QEMU ladder; llvm-cov floor | T2 · **done** (#82) |
 | Q3 | One `BootCell`/`IrqCell`; remove `static mut` and `&'static mut` accessors | — |
 | Q2 | Test hooks into per-subsystem `ktest.rs`; drop blanket `allow(dead_code)` | Q1 |
 | T1 | Split the in-guest registry; name-before-run; per-test timeout | Q2 |
