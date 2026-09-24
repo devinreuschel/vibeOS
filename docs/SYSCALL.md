@@ -1,9 +1,12 @@
 # Syscall ABI
 
-x86_64 SysV, with Linux's syscall numbers, errno values, and register
-convention. The ROADMAP rule "Linux interfaces" makes a call with a Linux
-number implement Linux's interface, as of the baseline Linux release that
-`docs/LINUX.md` names (ROADMAP §12.4). This file describes the code as built.
+The Linux kernel calling convention of each architecture, with Linux's
+syscall numbers, errno values, and argument rules: on x86_64 the one in the
+x86-64 psABI's appendix A.2, not the SysV function-call convention; on
+aarch64 `svc #0` with the number in `x8` (ROADMAP §11.6). The ROADMAP rule
+"Linux interfaces" makes a call with a Linux number implement Linux's
+interface, as of the baseline Linux release that `docs/LINUX.md` names
+(ROADMAP §12.4). This file describes the code as built.
 Where the code differs from Linux or from a rule stated here, the section
 says how. A note such as (F083; ROADMAP §10.4) names a finding in the
 kernel review ([reviews/KERNEL_REVIEW.md](reviews/KERNEL_REVIEW.md)) and the
@@ -42,6 +45,18 @@ implements: a process runs with CS `0x33`, SS `0x2b`, and DS, ES, FS, and GS
 0, as on Linux; `execve` loads them, and `fork` copies the parent's DS, ES,
 FS, and GS. Today ring 3 runs with CS `0x23` and SS, DS, ES, FS, and GS
 `0x1B`.
+
+The rule ROADMAP §10.5 implements for numbers and arguments, as Linux's
+entry code reads them: the number is `eax` sign-extended, so the high half
+of `rax` is ignored, and on aarch64 it is the low 32 bits of `x8`, read as
+unsigned (ROADMAP §11.6); a number that names no call after that step
+returns `-ENOSYS`. Each argument reaches its handler converted to the width
+and signedness of its C type in Linux's prototype, on both architectures,
+so `read` with `rdi` `0xFFFF_FFFF_0000_0003` reads descriptor 3 and `kill`
+with `rdi` `0x1_0000_0005` signals pid 5, as on Linux. An unknown flag bit
+is ignored where Linux's call ignores it (`open`) and returns `EINVAL` where
+Linux's call rejects it (`openat2`, `clone3`, `renameat2`). Today dispatch
+matches all 64 bits of `rax`, and only `kill`'s `pid` is truncated (§3.1).
 
 The entry saves the x87 and SSE state (`fxsave64`) and the exit restores it
 (`fxrstor64`), so a syscall preserves it. Two calls differ from Linux
@@ -92,9 +107,14 @@ non-canonical RIP to `SIGSEGV`).
 
 ## 2. Return and errno
 
-Success: non-negative `rax` (byte count, pid, `0`, …).
+Success: any value outside the error range (a byte count, a pid, an
+address, `0`, …).
 
-Error: `rax = -errno`. Linux names, Linux values:
+Error: `rax = -errno`, from -4095 to -1, which userspace tests as an
+unsigned compare (`rax` above `-4096`). A success value falls in that range
+only where Linux's does, as Linux's `F_GETOWN` returns a process group as a
+negative number, which is why glibc reads it through `F_GETOWN_EX`. Linux
+names, Linux values:
 
 | Name | Value | Used |
 |------|------:|------|
@@ -163,6 +183,13 @@ only the name, for the §6 trace line, and only host tests run
 `syscall::validate_args`. The rows have drifted: `OPEN`, `EXECVE`, and
 `WAIT4` have `ptr_mask` 0 although each takes user pointers (F150; ROADMAP
 §10.5 dispatches through the generated syscall table).
+
+The rule ROADMAP §10.5 keeps: dispatch checks no pointer itself, and a
+handler checks each pointer where it first copies through it, after the
+checks Linux's handler makes before that copy (the descriptor, the flags,
+whether a path or a child exists), so a call with two bad arguments returns
+the errno the baseline returns: `read(-1, <unmapped>, 1)` is `EBADF`, and
+`wait4` with no child and an unmapped status pointer is `ECHILD`.
 
 | nr | name | arity | pointers |
 |---:|------|------:|----------|
@@ -300,6 +327,15 @@ failure copies nothing and returns `-EFAULT`. `len == 0` is success
 (`write` returns 0) and does not touch the pointer. `open` and `execve`
 check and copy each C string into a kernel buffer one byte at a time, and
 each 8-byte argv pointer in one piece.
+
+The rule ROADMAP §10.6 implements, as Linux does: a range that does not lie
+wholly in the user half returns `-EFAULT` before any byte moves, as Linux's
+`access_ok` check does; within it, a user-memory accessor reports how many
+bytes it copied before a fault it cannot resolve, and `read`, `write`, and
+the other calls that return a byte count return that count when it is above
+0 and `-EFAULT` when it is 0. A call that changes state before its copy-out
+keeps the change and returns `-EFAULT`: `wait4` has already reaped the child
+whose status it could not store.
 
 Copies go through the page tables and the physmap
 (`AddressSpace::read_bytes` / `write_bytes`) rather than a user-VA access,
