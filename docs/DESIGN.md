@@ -2162,6 +2162,11 @@ non-contiguous frames is the second.
   stack on the global 8-slot `kva_init::DEFERRED` list, and any CPU's `reap_zombies` can drain it
   while the exiting CPU is still between `defer_free` and `switch_context` on that stack
   (ROADMAP §10.10, F012); `defer_free` panics when all 8 slots are full (ROADMAP §10.10, F010).
+  Planned (ROADMAP §10.10): the switch tail never unmaps. It moves the dead stack into a per-CPU
+  cache of at most two stacks, which the next spawn on that CPU reuses zeroed and still mapped; a
+  stack the cache cannot take goes on a per-CPU list that a workqueue worker on that CPU unmaps and
+  frees with IF=1, so no shootdown runs on the scheduler path. A CPU going offline (ROADMAP §19.6)
+  frees its cache.
 
 Default kernel stack is 4 pages (16 KiB) plus its 16 KiB guard. Budget: the deepest use observed on
 a kernel stack, interrupts that landed on it included, stays at or below the stack's size minus
