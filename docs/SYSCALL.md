@@ -3,7 +3,7 @@
 x86_64 SysV, with Linux's syscall numbers, errno values, and register
 convention. The ROADMAP rule "Linux interfaces" makes a call with a Linux
 number implement Linux's interface, as of the baseline Linux release that
-`docs/LINUX.md` names (ROADMAP §13.11). This file describes the code as built.
+`docs/LINUX.md` names (ROADMAP §12.4). This file describes the code as built.
 Where the code differs from Linux or from a rule stated here, the section
 says how. A note such as (F083; ROADMAP §10.4) names a finding in the
 kernel review ([reviews/KERNEL_REVIEW.md](reviews/KERNEL_REVIEW.md)) and the

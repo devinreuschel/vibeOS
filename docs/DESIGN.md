@@ -161,9 +161,9 @@ and measured behaviour, or from sources whose license lets it into an MIT tree:
 
 - Nothing is copied or translated from GPL or LGPL sources: Linux, glibc, GNU tools, or QEMU's GPL
   parts. The Linux-interfaces rule asks for Linux's behaviour, which vibeOS learns from man pages,
-  specifications, and running Linux (ROADMAP §13.11), never by porting Linux's code. Numeric
-  constants, struct layouts, and `ioctl` numbers that an interface defines are facts; each is written
-  down with a citation of where it is defined.
+  specifications, and running Linux, the oracle kernel of ROADMAP §12.4, never by porting Linux's
+  code. Numeric constants, struct layouts, and `ioctl` numbers that an interface defines are facts;
+  each is written down with a citation of where it is defined.
 - MIT, BSD, ISC, zlib, or Apache-2.0 code may be adapted, with its copyright and license notice kept
   beside it (and, for Apache-2.0, its NOTICE text).
 - Cryptographic primitives and the TLS state machine are depended on, never written in-tree: pinned,
