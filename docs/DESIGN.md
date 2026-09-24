@@ -356,14 +356,14 @@ Blocking and allocation are a class of bug, not an instance. Context rules:
 | Context | May block? | May alloc? |
 |---------|------------|------------|
 | Hard IRQ / MSI handler | No | No |
-| Softirq equivalent (high-prio workqueue) | No | Fallible only, without direct reclaim ([§4.4](#44-kernel-heap)); the hard IRQ only enqueues |
-| RCU read-side section ([§2.12](#212-rcu)) | No; it may be preempted | Fallible only, without direct reclaim ([§4.4](#44-kernel-heap)) |
-| Threaded IRQ bottom half | Yes, on its own device's state only ([§5.4](#54-irq-registration)) | Fallible only, without direct reclaim ([§4.4](#44-kernel-heap)) |
+| Softirq equivalent (high-prio workqueue) | No | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)); the hard IRQ only enqueues |
+| RCU read-side section ([§2.12](#212-rcu)) | No; it may be preempted | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) |
+| Threaded IRQ bottom half | Yes, on its own device's state only ([§5.4](#54-irq-registration)) | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) |
 | Workqueue worker | Yes | Yes |
 | Driver `probe` | Yes | Yes |
 | Syscall body, fault handler for a CPL-3 fault | Yes ([§2.9](#29-preemption-and-interrupt-state)) | Yes, fallible only ([§4.4](#44-kernel-heap)) |
-| Network receive: a queue's threaded bottom half ([§5.4](#54-irq-registration)) | No: it takes no sleeping lock and never waits for a socket's owner; a packet for an owned socket goes on its backlog (§2.1) | Fallible only, without direct reclaim ([§4.4](#44-kernel-heap)) |
-| Timer callback: a softirq-equivalent item on the CPU whose timer fired | No | Fallible only, without direct reclaim ([§4.4](#44-kernel-heap)) |
+| Network receive: a queue's threaded bottom half ([§5.4](#54-irq-registration)) | No: it takes no sleeping lock and never waits for a socket's owner; a packet for an owned socket goes on its backlog (§2.1) | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) |
+| Timer callback: a softirq-equivalent item on the CPU whose timer fired | No | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) |
 | NMI and `#MC` at any CPL, `#DB` at CPL 0; shootdown and call-function work run from a spin | No | No |
 
 Code in the last row runs inside whatever IF=0 section its CPU was in, locks included: an NMI,
@@ -1346,7 +1346,8 @@ lock, its own address-space lock, or a busy page-cache page (§2.1's sleeping ti
 1. Direct reclaim runs only for an allocation that began with IF=1, this CPU's `HELD` rank mask
    empty, and a calling thread that is not a no-reclaim thread and is outside any RCU read-side
    section ([§2.12](#212-rcu)). The allocator reads all four at entry, before it takes the heap
-   lock. Any other allocation draws on ROADMAP §12.6's reserve pool and then fails.
+   lock. Any other allocation draws on the reserve below, as deep as its class allows, and then
+   fails.
 2. It frees clean pages only. It drops clean page-cache pages that nothing maps. It unmaps a mapped
    one through the reverse map, taking only each address space's page-table spinlock and try-locks
    of the page and of its reverse-map lock (§4.6), and no count on the space
@@ -1367,9 +1368,10 @@ lock, its own address-space lock, or a busy page-cache page (§2.1's sleeping ti
    for an RCU grace period counts as freeable: before the OOM killer runs, reclaim waits, with the
    same deadline, for the grace period in progress to end and for the RCU callbacks it made ready to
    run (§2.12).
-4. It never recurses. These are no-reclaim threads, whose allocations use the reserve pool and
-   then fail: the writeback threads, the swap-out thread, threaded interrupt bottom halves (§5.4), a
-   workqueue worker while it runs a softirq-equivalent item (§2.2), and a thread already in reclaim.
+4. It never recurses. These are no-reclaim threads, whose allocations draw on the reserve below,
+   as deep as their class allows, and then fail: the writeback threads, the swap-out thread,
+   threaded interrupt bottom halves (§5.4), a workqueue worker while it runs a softirq-equivalent
+   item (§2.2), and a thread already in reclaim.
 
 Why: writeback or an unmap that needed a lock the allocating thread holds would deadlock that thread
 on itself. A try-lock never waits, so reclaim may try a page and its reverse-map lock and skip what
@@ -1387,6 +1389,35 @@ carries a flag. Rejected:
 
 Cost: when most reclaimable memory is dirty, an allocation waits for the writeback threads rather
 than writing itself. ROADMAP §12.5's dirty limit throttles writers before it comes to that.
+
+The reserve (ROADMAP §12.6) is R frames of the buddy's free count: a level of that count, not a
+separate pool. R is sized at boot as Linux sizes `min_free_kbytes`: the square root of 16 times the
+memory the buddy manages, both in KiB, clamped to Linux's 128 KiB to 256 MiB, which gives 4 MiB in
+a 1 GiB guest. An allocation that takes frames from the buddy, directly or by growing the heap, goes
+below R only as far as its class allows. The class comes from context, as rule 1's reclaim decision
+does, never from a flag:
+
+- General: every allocation not named below. It stops at R. One that may sleep then runs direct
+  reclaim and the OOM killer (rules 1 to 3); any other fails.
+- Atomic: an allocation made with IF=0, with a spinlock held, or inside an RCU read-side section
+  ([§2.12](#212-rcu)), and any allocation by a softirq-equivalent item or a threaded bottom half.
+  It may go down to R/2, then fails.
+- Progress: the writeback threads, the swap-out thread, a thread while it runs direct reclaim, and
+  ROADMAP §19.10's background reclaim thread, whose running frees memory. It may use all of R, then
+  fails.
+
+Where two classes apply, as for a progress thread holding a spinlock, the deeper depth does.
+Softirq-equivalent items and bottom halves run on their own threads (§2.2, §5.4), so none of them is
+ever a progress thread. So a flood of network receive, which allocates in the atomic class, can take
+at most half of R, and the rest stays for the threads that clean and free pages. This is Linux's
+split: `GFP_ATOMIC` allocations may dip part of the way below the min watermark, and `PF_MEMALLOC`
+reclaimers all the way. `meminfo` shows R and, for each class, the lowest free count one of its
+allocations has left since boot. Two rules keep ordinary work out of the atomic class. A block
+completion allocates nothing, because what it needs was allocated at submission (ROADMAP §12.5's
+owned submission). A fault or `mmap` allocates the page-table pages it may need before it takes the
+page-table spinlock, with reclaim allowed, and frees those it did not use, as Linux's `pte_alloc`
+does. Rejected: two pools with a refill order between them, which adds machinery and leaves open
+which pool a progress thread holding a spinlock uses.
 
 An operation past its point of no return cannot unwind what it built, so it makes every allocation it
 needs before that point and only releases after it:
@@ -1713,7 +1744,8 @@ Planned (ROADMAP §12.5): each threaded vector gets its own bottom-half thread, 
 CPU the vector is routed to and moved by `set_affinity`, so a device with one queue per CPU
 gets one thread per queue. A bottom half may block only on its own device's state. It takes
 no lock of §2.1's sleeping tier and never waits for another device's I/O, and it allocates
-without direct reclaim (§4.4). `free_vector` ends the vector's thread before it returns.
+without direct reclaim, in §4.4's atomic class. `free_vector` ends the vector's thread before
+it returns.
 
 Why: one shared thread puts every device's completions on one CPU, although multi-queue
 devices (virtio-blk today, NVMe in ROADMAP §20.4, RSS in Phase 28) spread them across CPUs
