@@ -42,7 +42,7 @@ halfway through.
 | 8 | [Testing](#8-testing) | Tiers, marker contract, QEMU flags, CI |
 | 9 | [Pitfalls](#9-pitfalls) | Bugs already paid for once |
 | 10 | [Block I/O](#10-block-io) | Requests, barrier vs flush, ramdisk, virtio-blk, partitions, cache |
-| 11 | [Portability](#11-portability) | The architecture seam, the aarch64 address space, adding a port |
+| 11 | [Portability](#11-portability) | The architecture seam, the aarch64 address space, adding a port, the EL0 and ring-3 environment |
 
 On-disk filesystem formats live in their own docs, not here ([§1.4](#14-documentation-rules)): [VIBEFS.md](VIBEFS.md) (vibefs **version 1**, CoW metadata + atomic superblock switch). Syscall ABI: [SYSCALL.md](SYSCALL.md).
 
@@ -2129,7 +2129,8 @@ but the re-entry flag does not, so the incoming thread can take IRQs and `with_c
 `thread_init::switch_now` switches a thread's CPU state inside `with_current_switch`: it swaps
 `irq_nest` between the TCB and `PerCpu`, calls `syscall_init::on_switch` (FPU, RSP0, CR3), then
 `thread::switch_context` (callee-saved GPRs, RSP, RIP, RFLAGS). AGENTS.md rule 8 governs adding
-user-visible CPU state; the commit that adds it also adds its row here.
+user-visible CPU state; the commit that adds it also adds its row here. A control that holds one value
+for every thread, such as `CR4.TSD` or `SCTLR_EL1.UCT`, is a row of §11.4's table instead.
 
 | State | Saved in | Switched by | Status |
 |---|---|---|---|
@@ -3213,3 +3214,58 @@ A port adds `arch/<name>/` implementing every §11.1 trait, its rows in `docs/AR
 profile, and its marker list (ROADMAP §11.7). It changes no portable module. ROADMAP §11.8's riscv64
 stretch measures that: a port that needs a change outside `arch/` has found a seam defect, and the
 fix lands in the seam, not as a special case in portable code.
+
+## 11.4 EL0 and ring-3 environment
+
+The CPU controls that change what an instruction does at EL0 or at CPL 3, with the value every CPU
+holds and what user code sees. Every CPU writes `SCTLR_EL1`, `CNTKCTL_EL1`, `PMUSERENR_EL0`, and CR4
+whole at bring-up, each from one value the port computes, never read-modify-write, so nothing firmware
+or Limine left reaches user code. An MSR carries model-specific bits the kernel does not own, so of an
+MSR only the bits this table names are written. The values are Linux's on each architecture, so
+software that runs on Linux sees the same machine (ROADMAP, How to read this). A control here holds one
+value for every thread. A line that makes one per-thread (Linux's `PR_SET_TSC` for `CR4.TSD`,
+`ARCH_SET_CPUID`, `perf_user_access` for `PMUSERENR_EL0`) moves it to §7.5's per-thread table under
+AGENTS.md rule 8, and a line that changes a value changes its row in the same commit. Rule; not yet
+enforced: ROADMAP §11.6. Today `arch::cpu::harden` and `syscall_init::init_fpu` set bits in the CR4
+they read, and the aarch64 port does not exist.
+
+| Architecture | Control | Value | What user code sees |
+|---|---|---|---|
+| aarch64 | `SCTLR_EL1.UCT` | 1 | EL0 reads `CTR_EL0`, as a JIT's `__clear_cache` does to size its cache maintenance |
+| aarch64 | `SCTLR_EL1.UCI` | 1 | `dc cvau`, `dc cvac`, `dc civac`, and `ic ivau` run at EL0, so a JIT makes its own code coherent |
+| aarch64 | `SCTLR_EL1.DZE` | 1 | `dc zva` runs at EL0 and `DCZID_EL0.DZP` reads 0; glibc's `memset` uses it |
+| aarch64 | `SCTLR_EL1.UMA` | 0 | an EL0 access to `DAIF` (`msr daifset`, `msr daifclr`, `mrs`) traps and gets `SIGILL`, so user code never masks an interrupt (§2.5) |
+| aarch64 | `SCTLR_EL1.nTWE` | 1 | `wfe` runs at EL0 |
+| aarch64 | `SCTLR_EL1.nTWI` | 0 | an EL0 `wfi` traps, and the exception handler steps over it, so it returns at once with no signal, as on Linux arm64 |
+| aarch64 | `SCTLR_EL1.SA0` | 1 | an EL0 load or store through a misaligned SP raises an SP alignment fault and gets `SIGBUS` |
+| aarch64 | `SCTLR_EL1.E0E` | 0 | EL0 is little-endian |
+| aarch64 | `SCTLR_EL1.SPAN` | 0 where FEAT_PAN exists | nothing directly; every exception entry to EL1 sets PAN (ROADMAP §11.6) |
+| aarch64 | pointer authentication (`EnIA`, `EnIB`, `EnDA`, `EnDB`), BTI (`BT0`), and MTE (`ATA0`, `TCF0`) in `SCTLR_EL1` | 0 | off until ROADMAP §18.9 (pointer authentication, BTI) and §18.4 (MTE) turn them on and change this row |
+| aarch64 | every other `SCTLR_EL1` field | the port's constant, with each field's reason beside it | no EL0-visible effect |
+| aarch64 | `CNTKCTL_EL1.EL0VCTEN` | 1 | EL0 reads `CNTVCT_EL0` and `CNTFRQ_EL0`, which the ROADMAP §13.10 vDSO clock reads |
+| aarch64 | `CNTKCTL_EL1.EL0PCTEN` | 0 | an EL0 read of `CNTPCT_EL0` traps and gets `SIGILL`; Linux arm64 also leaves this bit clear |
+| aarch64 | `CNTKCTL_EL1.EL0VTEN`, `EL0PTEN` | 0 | an EL0 access to the virtual or physical timer registers gets `SIGILL`; at EL1 entry the virtual timer is the kernel's tick (ROADMAP §11.3), so a user write to it would stop preemption |
+| aarch64 | `CNTKCTL_EL1.EVNTEN`, `EVNTI` | 1, about 10 kHz from `CNTFRQ_EL0` | an EL0 `wfe` wakes at least that often, and `AT_HWCAP` carries `HWCAP_EVTSTRM`, as on Linux arm64 |
+| aarch64 | `PMUSERENR_EL0` | 0 | every EL0 PMU register access gets `SIGILL`, as under Linux's default `perf_user_access` of 0 |
+| aarch64 | EL0 `mrs` of an ID register | traps | `SIGILL`, and `AT_HWCAP` carries no `HWCAP_CPUID`, until ROADMAP §23.1 emulates the sanitized fields |
+| x86_64 | `CR4.TSD` | 0 | `rdtsc` and `rdtscp` run at CPL 3, as the ROADMAP §13.10 vDSO clock needs |
+| x86_64 | `CR4.PCE` | 0 | `rdpmc` at CPL 3 raises `#GP` and gets `SIGSEGV` |
+| x86_64 | CPUID faulting (`MSR_MISC_FEATURES_ENABLES` bit 0, where `MSR_PLATFORM_INFO` bit 31 enumerates it) | 0 | `cpuid` runs at CPL 3 |
+| x86_64 | `CR4.UMIP` | 1 where CPUID enumerates it (§5.1) | `sgdt`, `sidt`, `sldt`, `smsw`, and `str` at CPL 3 raise `#GP` (§5.2) |
+| x86_64 | `CR4.OSXSAVE`, `CR4.PKE` | 0 (ROADMAP §11.1, F130) | `xgetbv`, `rdpkru`, and `wrpkru` raise `#UD` and get `SIGILL`; ROADMAP §13.8 changes the `OSXSAVE` row if it chooses XSAVE |
+| x86_64 | `CR4.FSGSBASE` | 0 until ROADMAP §18.3 | `rdfsbase`, `wrfsbase`, `rdgsbase`, and `wrgsbase` raise `#UD` |
+| x86_64 | `CR0.AM` | 0 (ROADMAP §10.6) | ring 3 may set `RFLAGS.AC`, and no `#AC` follows |
+
+At EL2 with VHE, `CNTKCTL_EL1` names `CNTHCTL_EL2`, whose EL0 fields sit at the same bits. The boot
+CPU computes that register's whole value with the EL0 fields above, which clears the `EL0PCTEN` bit
+Limine sets at EL2 entry, and ROADMAP §11.4's stub writes the same value on every core, as it writes
+the boot CPU's `SCTLR_EL1`.
+
+Why: user code depends on these values (a JIT's cache maintenance, glibc's `memset`, the vDSO's clock),
+and the kernel's own safety depends on others (`UMA`, `EL0VTEN`). Their reset values are UNKNOWN.
+Limine's base revision 6 enters with `UCT`, `UCI`, and `DZE` clear and `SPAN` set, gives no value for
+`CNTKCTL_EL1` or `PMUSERENR_EL0`, and at EL2 sets `CNTHCTL_EL2.EL0PCTEN`; QEMU's zero reset values would
+hide a missing write from every TCG test. Rejected: keeping what firmware or Limine left; setting bits
+in the value read at boot, which keeps any bit this table does not name; and giving EL0 the physical
+counter or a timer, which Linux does not, and which at EL1 entry would let user code reprogram the
+kernel's tick.
