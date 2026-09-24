@@ -615,12 +615,28 @@ F005), and so do the entry-path windows of §5.10 (ROADMAP §10.6, F004, F006, F
 column lists every vector whose ring-3 action differs from the rule. An NMI dumps and halts on its
 IST stack; from ROADMAP §10.7 the NMI handler first reads its CPU's stop request word (step 1).
 
-Rule: nothing is silently swallowed. Not yet enforced in three cases. An exception before `idt::init` (PMM, the CR3 switch,
+Rule: nothing is silently swallowed. An error is returned to its caller, or handled where it arises
+in one of three ways: a counter plus a log line at most once a second; an error state recorded on
+the device, volume, or file, which a later call reports, as Linux's `errseq_t` does for writeback
+errors; or a retry whose bound and give-up path its comment names. A result may be dropped only when
+it carries no failure anyone could act on, such as cleanup after an earlier error that was already
+returned, or the `fmt::Result` of a write to `Serial`, which cannot fail. Clippy's
+`let_underscore_must_use` and `unused_result_ok` catch a dropped `#[must_use]` value, and a kept drop
+carries `#[expect(clippy::let_underscore_must_use, reason = "...")]` naming the case above, so an
+exemption whose drop goes away fails the build; `#[cfg(test)]` code and the `kernel_tests`-only
+`ktest` module are exempt. An `if let Ok` with no `else`, and `let _ = f().ok()`, are review items,
+since no lint sees them. Not yet enforced: neither lint runs, `let _ =` drops a `Result` in more than
+40 files, and the kernel review found dropped errors that ROADMAP §10.2 (F080), §10.11 (F051, F063,
+and the tmpfs readahead eviction), §10.12 (F115), and §13.9 (F124) fix; ROADMAP §10.1 lands the
+lints and audits every site.
+
+Hardware events are also lost in four cases. An exception before `idt::init` (PMM, the CR3 switch,
 ACPI discovery, heap, KVA, GDT, PIC) goes to whatever IDT Limine left and resets or hangs with no
 output (ROADMAP §11.1, F136). LINT1 is masked on every CPU and MADT NMI entries (types 3 and 4) are
 not parsed, so a chipset or external NMI never reaches the NMI handler (ROADMAP §20.1, F096).
 `CR4.MCE` and `CR0.NE` are clear on every CPU, so a machine check shuts the CPU down with no dump,
-and an x87 floating-point error raises the masked IRQ13 and is lost (ROADMAP §10.6, F026).
+and an x87 floating-point error raises the masked IRQ13 and is lost (ROADMAP §10.6, F026). An
+interrupt on a pool vector no handler owns is EOIed and ignored with no count (ROADMAP §10.6).
 
 ## 2.6 Serial markers
 
@@ -709,6 +725,7 @@ separate namespace.
 | I34 | A PTE change that removes or narrows a translation takes effect only after every CPU that could hold the old one has invalidated and acknowledged; until then no frame, table page, or VA is reused and no page counts as clean (§2.4) | `kva_init::unmap_shootdown` (kernel); `addr_space_init::shootdown_user` (user) | documented | Partly: kernel unmaps free frames and VA only after `wait_acks`; a user change invalidates only on the calling CPU, enough only while I8 holds, and nothing yet clears a dirty bit (ROADMAP §12.3) |
 | I35 | A user PTE change invalidates the second-level translations (EPT, NPT, stage-2) of its range on every CPU that may hold them before the frame's count drops (§2.4) | none yet | documented | Not relied on yet: no hypervisor exists until ROADMAP §21.2, which lands it |
 | I36 | `current` is read in one instruction, and every other per-CPU access but the CPU-id hint runs with IF=0 ([§2.9](#29-preemption-and-interrupt-state) rule 5) | `per_cpu_init`; the syscall stub's `gs:[current]` load | documented | Partly: the syscall stub reads `current` in one load, but `current_thread`, `current_id`, `current_pid`, and `per_cpu!` load `gs:[0]` and then the field, and `current()` hands out `&'static PerCpu` at any IF; no preempted thread changes CPU yet (ROADMAP §10.3, F039) |
+| I37 | Nothing is silently swallowed: an error is returned to its caller, or handled where it arises by a counter and a rate-limited line, a recorded error state, or a bounded retry (§2.5) | every module; ROADMAP §10.1's lints | documented | No: nothing checks a discard, and the kernel review's dropped errors remain (ROADMAP §10.1 audit; §10.2, F080; §10.11, F051, F063; §10.12, F115; §13.9, F124) |
 
 ## 2.8 Publish last
 

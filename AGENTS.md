@@ -24,6 +24,7 @@ Agents act on GitHub through their own account, with the repository's Write role
 - **lib/bin pairing:** `src/foo.rs` is portable (`vibeos-core` / `src/lib.rs`, host-tested). `src/foo_init.rs` is the kernel half (`src/main.rs`). Nested today: `src/arch/`, `src/fs/`. Do not invent `src/mm/` until A1. Map: [DESIGN §1.3](docs/DESIGN.md#13-module-map).
 - **Emit:** `marker!` for contract lines (never filtered, always captured); `klog!` for everything else; `PlainSerial` only for `dmesg` and panic dumps.
 - **Cells:** `BootCell` (write once before `smp: done`, then shared `&T`) and `IrqCell` (IRQ-off exclusive) in `src/cell.rs`. Put new data that more than one CPU locks in a `SpinMutex` built with `with_rank` (`src/sync_init.rs`), not an `IrqCell`, which has no lock rank; the existing `IrqCell` statics that more than one CPU locks are F108. Do not add another cell type. Rule 6 below sets the `Send`/`Sync` bounds both cells lack (F017).
+- **Errors:** return an error, or handle it where it arises as [DESIGN §2.5](docs/DESIGN.md#25-panic-policy) lists (a counter and a rate-limited line, a recorded error state, or a bounded retry); never drop one. From ROADMAP §10.1 clippy's `let_underscore_must_use` and `unused_result_ok` enforce it, and a kept discard carries `#[expect(clippy::let_underscore_must_use, reason = "...")]` naming DESIGN §2.5's case.
 - No ephemeral "fixed X" comments ([DESIGN §1.4](docs/DESIGN.md#14-documentation-rules)).
 
 ## Rules from the kernel review
