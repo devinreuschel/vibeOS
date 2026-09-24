@@ -3937,6 +3937,19 @@ size and at least 1024 sectors. A whole-disk vibefs or FAT32 image on `vda`
 loses LBA 0 to 33 and its last 33 sectors on the first boot (ROADMAP §10.11,
 F003).
 
+Rule: a lookup of a block device by an identity it carries (a filesystem
+UUID or label, a GPT disk GUID, or a partition's unique GUID or label) that
+matches more than one device is refused with a log line naming every device
+it matched. It is never settled by probe order. Naming a device by its path
+always works. The rule binds every such lookup the kernel or the initrd
+makes, from `root=` (ROADMAP §14.8, §22.2) to the assembly of stacked
+volumes (ROADMAP §29.1). Why: a byte copy of a disk, such as a second
+instance of a cloud image or a snapshot attached for rescue, carries its
+source's ids, and probe order could mount the copy read-write as root. An
+image's first boot replaces the ids it was built with (ROADMAP §26.2), so
+only a copy of a disk that has booted can still collide, and `tune-vibefs`
+changes a copy's filesystem id offline (VIBEFS.md §15).
+
 ## 10.6 Block cache
 
 Page-granular (4 KiB), 16 pages (`cache::DEFAULT_PAGES`), keyed by
