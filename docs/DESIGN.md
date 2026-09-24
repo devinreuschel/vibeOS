@@ -1668,6 +1668,21 @@ scanout is a later polish pass; double buffering is also parked (ROADMAP §5.1).
   page, and the invalidation has completed (§2.4). Writeback then writes it, and a later store either
   faults on the write-protected PTE or sets the dirty bit again. Reclaim harvests dirty bits the same
   way before it decides (§4.4). Planned (ROADMAP §12.2, §12.4, §12.6).
+- Write-notify. A writable `MAP_SHARED` mapping of a file whose pages are written back to a device
+  (a vibefs or FAT file, or a block device) maps a clean page read-only on both architectures,
+  whatever the hardware's dirty management. The first store faults. The fault takes the page busy,
+  waits for any writeback of the page when the file's data is checksummed, reserves the page's
+  space with its filesystem, marks the page dirty and counts it against ROADMAP §12.5's dirty limit,
+  updates the file's mtime and ctime, and only then makes the PTE writable. This is Linux's
+  `page_mkwrite` path. None of these steps waits while the fault holds the address-space lock
+  (§2.1): one that must wait, such as a reservation that waits for a commit to free space, runs
+  after the lock is dropped, and the fault restarts. A failed reservation ends a user store with
+  `SIGBUS` (§5.2) and a store inside a user-memory accessor with `EFAULT`. Cleaning such a page
+  write-protects each PTE that maps it, never only clears its dirty bit, so the next store faults
+  again. A shared mapping of tmpfs, which backs anonymous shared memory (§4.6), keeps dirty bits
+  instead, charges tmpfs's size limit when the fault allocates a page, and never counts against the
+  dirty limit, since nothing writes it back before swap; Linux leaves shmem out of write-notify for
+  the same reason. Planned (ROADMAP §12.2, §12.4).
 
 ## 4.4 Kernel heap
 
@@ -1789,7 +1804,8 @@ Cost: when most reclaimable memory is dirty, an allocation waits for writeback p
 writing itself, up to 16 passes of 100 ms before the OOM killer runs, and a thread that holds a
 level-4 or reverse-map lock gets `ENOMEM` after its 16 passes, where Linux retries a small
 `GFP_NOFS` allocation without end. ROADMAP §12.5's dirty limit throttles writers before it comes to
-that.
+that. The limit counts pages dirtied through shared file mappings as well as by `write`, since the
+first store to a clean page faults (§4.3).
 
 The reserve (ROADMAP §12.6) is R frames of the buddy's free count: a level of that count, not a
 separate pool. R is sized at boot as Linux sizes `min_free_kbytes`: the square root of 16 times the
@@ -2241,7 +2257,7 @@ fault, downstream of it.
 | `0x08` | `#DF` | dump on IST, halt | not a ring-3 fault: the Ring 0 column applies | as the rule |
 | `0x0B`, `0x0C` | `#NP`, `#SS` | dump, halt | `SIGBUS`; `SIGSEGV` for a fault on the return-to-user `iretq` (§5.10 rule 2) | the `iretq` case halts. Rule; not yet enforced: ROADMAP §10.6 (F007) |
 | `0x0D` | `#GP` | dump with error code, halt | `SIGSEGV`, including a fault on the return-to-user `iretq` (§5.10 rule 2) | the `iretq` case halts. Rule; not yet enforced: ROADMAP §10.6 (F007) |
-| `0x0E` | `#PF` | dump with CR2, halt. Planned (ROADMAP §10.6): a fault inside a user-memory accessor returns `EFAULT` | `SIGSEGV`. Planned (ROADMAP §12.2): a fault on a page that a region reserves is resolved first, and one through a file mapping on a page wholly past EOF, or on a page whose fill fails, gets `SIGBUS` | as the rule |
+| `0x0E` | `#PF` | dump with CR2, halt. Planned (ROADMAP §10.6): a fault inside a user-memory accessor returns `EFAULT` | `SIGSEGV`. Planned (ROADMAP §12.2): a fault on a page that a region reserves is resolved first, and one through a file mapping on a page wholly past EOF, or on a page whose fill fails, gets `SIGBUS`, and so does a store through a shared file mapping whose space reservation fails (§4.3) | as the rule |
 | `0x10` | `#MF` | dump, halt | `SIGFPE` | cannot fire: `CR0.NE` is clear, so an x87 error raises the masked IRQ13 and is lost. Rule; not yet enforced: ROADMAP §10.6 (F026) |
 | `0x11` | `#AC` | dump, halt | `SIGBUS`, for a misaligned access while ring 3 has set RFLAGS.AC; `CR0.AM` is set on every CPU, as Linux sets it | halts the kernel if `CR0.AM` is set (INIT clears it on each AP and no kernel code sets it; the BSP keeps Limine's value), and while it is clear ring 3's AC raises nothing. Rule; not yet enforced: ROADMAP §10.6 (F005) |
 | `0x12` | `#MC` | dump on IST, halt; `CR4.MCE` is clear, so a machine check shuts the CPU down with no dump (ROADMAP §10.6, F026) | not a ring-3 fault: the Ring 0 column applies | as the rule |

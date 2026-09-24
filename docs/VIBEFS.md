@@ -412,10 +412,12 @@ One transaction = one generation bump.
    block, never one the current super or a snapshot reaches, the page's own
    frame is written there with step 3's blocks, and the file's in-memory
    block map records the move; the page keeps its place in the file's cache
-   (DESIGN §10.6). The writeback threads write vibefs file data by starting
-   a commit. Before §12.5, `write` has already allocated and written the
-   replacement data blocks. v1 rewrites the whole inode tree and the tree
-   of every non-empty directory, changed or not.
+   (DESIGN §10.6). Each page reserved its block when it became dirty (§15's
+   Space reservation row), so writing it back does not fail for want of
+   space. The writeback threads write vibefs file data by starting a commit.
+   Before §12.5, `write` has already allocated and written the replacement
+   data blocks. v1 rewrites the whole inode tree and the tree of every
+   non-empty directory, changed or not.
 3. Write those blocks, and wait until every write has completed. The alloc
    map carries this commit's drops (§6).
 4. `Flush`, which covers the writes step 3 waited for (DESIGN §10.2).
@@ -590,6 +592,12 @@ v1's tests do not check this pass criterion yet:
   extents and never merges them, so a file it writes holds at most 4 data
   blocks (16 KiB) until v2 (ROADMAP §14.8). The `write` that needs a fifth
   extent fails and leaks the block it allocated first (F051; ROADMAP §10.11)
+- Reserve metadata space. From ROADMAP §12.5 a v1 page reserves its data
+  block when it becomes dirty (§15's Space reservation row), but nothing
+  reserves the metadata blocks a commit rewrites, and no blocks are held
+  back for deletes, so a nearly full v1 volume can fail a commit with
+  `NoSpace` after the calls it covers returned (§10), and a full one may
+  be unable to commit an unlink
 - POSIX ACLs, xattrs
 
 ---
@@ -655,6 +663,7 @@ they are decided here, before a line of v2 is written:
 | NOCOW files | a file with the NOCOW flag, set on an empty file or inherited from its directory as on btrfs, overwrites its data blocks in place and keeps no data checksums; a block of it that a snapshot shares is copied once, at its first write after the snapshot. The shared format code accepts a file for swap (ROADMAP §12.7) or a hibernation image (§31.8) only when it is NOCOW, every block of it has an extent, written or unwritten, and no snapshot shares one; while it is in use nothing moves its blocks, and writes and truncation through the filesystem are refused as Linux refuses them for an active swap file | swap writes a file's blocks directly, below the filesystem, so they must never move and no checksum could stay current; btrfs sets the same rules for its swap files, and Linux's swap-file checks accept unwritten extents, which is how `fallocate` makes swap files. A NOCOW file gives up §2's guarantee for its own data: a crash, or a mount that falls back to the older slot (Superblocks and geometry), can leave its blocks holding newer bytes than the mounted generation, or old and new bytes mixed, as on ext4, and a scrub cannot tell a good copy of such a block from a bad one |
 | Extended attributes | stored per inode for any name, up to Linux's `XATTR_NAME_MAX` (255 bytes) and `XATTR_SIZE_MAX` (64 KiB) per value; the VFS, not the format, decides which namespaces a mount accepts | ROADMAP §14.8 adds `user.` and `trusted.`, §18.6 `security.capability`, and §21.5's overlayfs keeps its whiteouts in `trusted.`; a format that stored only some namespaces would need a version for each one added |
 | Commit | §2's copy-on-write with an atomic superblock switch, where a commit writes only the blocks it changed and their ancestors, and makes every allocation before the superblock write (§10). An `fsync` is a commit. If ROADMAP §14.8's recorded verdict calls for one (ROADMAP §25.7), a per-volume intent log arrives as the compat feature `intent_log`, as btrfs's tree log and ZFS's intent log did. The format reserves its place from the start: the log lives only in the extents of one reserved inode, which no directory names and whose extents every v2 reader and `fsck` counts as allocated. Each log block carries the log's identity, a sequence number that the block before it or the superblock names, the generation its records extend, and its own CRC-32C; replay applies only records that extend the mounted generation, and stops at the first block whose sequence or checksum fails. An incompat bit, `log_replay`, is set while the log may hold records: the first commit after a read-write mount that uses the log sets it, before any `fsync` is acknowledged through the log, and the last commit of a clean unmount, a freeze, or a remount read-only clears it. A transaction's kernel memory is bounded: from the tree heights and the items it changes, a transaction knows the most its commit can allocate, it closes once that reaches a per-volume bound, and a thread that would change more waits for the commit. A commit takes no inode lock and takes a page busy only by try-lock, and a thread that has joined the open transaction holds it as a level-4 lock (DESIGN §2.1), so none of its allocations waits for writeback that needs the commit (DESIGN §4.4 rule 3). | v1 rewrites every inode and directory tree on every commit (§7, §8). Databases and package managers call `fsync` once per transaction, and Phase 30's gate measures PostgreSQL against Linux. A compat log with an incompat replay bit, like ext4's journal with its `needs_recovery` bit, lets a release without the log, an older rescue image, or an older `fsck-vibefs` mount and check a volume that was shut down cleanly, where an incompat feature would lock them out for the volume's life. The reserved inode keeps such a release from reusing the log's blocks, and the generation in each log block makes replay ignore records a later commit has overtaken. A log appended between commits cannot carry its blocks' checksums in a pointer written before them (Verified pointers row), so its blocks chain their own. Dirty file data becomes clean only through a commit, so a commit whose memory grew with its transaction could outgrow the reserve that writeback allocates from (DESIGN §4.4), and then no page could be cleaned. |
+| Space reservation | a file page reserves the block it will be written to when it becomes dirty, by `write` or by the first store through a shared mapping (DESIGN §4.3), and gives it back if it is dropped while dirty; each transaction reserves the metadata blocks its commit may write, from the bound the Commit row sets. Blocks are allocated at commit (§10). A failed reservation returns `ENOSPC` from `write` and ends a store with `SIGBUS`. The volume holds back blocks that only a transaction that frees space may use: unlink, truncate, `rmdir`, and snapshot delete | copy-on-write with snapshots writes every overwritten block to a new place, so a volume can be full for an overwrite of an existing file. An error found only at commit, after `write` returned or the store landed, reaches no caller but `fsync`, while the dirty pages stay pinned and the commit retries (§10). A full copy-on-write volume that cannot commit a delete can never free space again, which btrfs's global block reserve exists to prevent |
 
 Rejected: carrying v1's field widths into v2 and raising limits later with
 new versions that `fsck` upgrades in place. Each raise after 1.0 would be a
