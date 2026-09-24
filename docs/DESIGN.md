@@ -678,11 +678,13 @@ Binding order (do not invert):
    §11.7) that lists that event. It flushes no log backlog, sends nothing over netconsole, and calls
    no firmware. The crash handover passes runtime services, and ERST, on to the capture kernel only
    where that lock's trylock succeeded, and names the CPU the capture kernel starts on and the
-   physical address of step 5's record. The capture kernel writes the vmcore, then writes that
-   record through each store its handover passed on (ROADMAP §25.6), and then resets through step
-   7's ACPI or PSCI path; where no store was passed, the copy in reserved RAM is the record. It never
-   calls firmware its handover withheld, which a stopped CPU, or on GICv2 a CPU still running, may
-   have been inside. Planned (ROADMAP §25.4, §25.6).
+   physical address of step 5's record. The capture kernel writes the vmcore, feeding that watchdog
+   after each chunk, so a dump that takes longer than the timeout survives and a capture that stops
+   making progress is still reset; then it writes that record through each store its handover passed
+   on (ROADMAP §25.6), and then resets through step 7's ACPI or PSCI path; where no store was
+   passed, the copy in reserved RAM is the record. It never calls firmware its handover withheld,
+   which a stopped CPU, or on GICv2 a CPU still running, may have been inside. Planned (ROADMAP
+   §25.4, §25.6).
 7. Otherwise, halt or reset. Today: a `cli; hlt` loop, or QEMU `isa-debug-exit` under the
    `panic_exit` test feature. Planned, in this order: send the dump over netconsole where one is
    configured (ROADMAP §25.6); write the record to an EFI variable or to ERST under that store's
@@ -2474,7 +2476,7 @@ fault, downstream of it.
 | `0x0E` | `#PF` | dump with CR2, halt. Planned (ROADMAP §10.6, §12.2): a fault inside a user-memory accessor is handled by that accessor's kind (§5.1) and ends in `EFAULT` or a short count | `SIGSEGV`. Planned (ROADMAP §12.2): a fault on a page that a region reserves is resolved first, and one through a file mapping on a page wholly past EOF, or on a page whose fill fails, gets `SIGBUS`, and so does a store through a shared file mapping whose space reservation fails (§4.3) | as the rule |
 | `0x10` | `#MF` | dump, halt | `SIGFPE` | cannot fire: `CR0.NE` is clear, so an x87 error raises the masked IRQ13 and is lost. Rule; not yet enforced: ROADMAP §10.6 (F026) |
 | `0x11` | `#AC` | dump, halt | `SIGBUS`, for a misaligned access while ring 3 has set RFLAGS.AC; `CR0.AM` is set on every CPU, as Linux sets it | halts the kernel if `CR0.AM` is set (INIT clears it on each AP and no kernel code sets it; the BSP keeps Limine's value), and while it is clear ring 3's AC raises nothing. Rule; not yet enforced: ROADMAP §10.6 (F005) |
-| `0x12` | `#MC` | dump on IST, halt; `CR4.MCE` is clear, so a machine check shuts the CPU down with no dump (ROADMAP §10.6, F026). Planned (ROADMAP §25.1, §25.3): only a fatal machine check, or an action-required error in kernel memory, halts; a lower severity is recorded and the CPU continues | not a ring-3 fault: the Ring 0 column applies | as the rule |
+| `0x12` | `#MC` | dump on IST, halt; `CR4.MCE` is clear, so a machine check shuts the CPU down with no dump (ROADMAP §10.6, F026). Planned (ROADMAP §25.1, §25.3): only a fatal machine check, or an action-required error in kernel memory, halts; a lower severity is recorded and the CPU continues | not a ring-3 fault: the Ring 0 column applies. Planned (ROADMAP §25.3): an action-required error that ring-3 code consumed is recorded by the handler and recovered in exit work (§5.10 rule 11), which sends `SIGBUS` with `BUS_MCEERR_AR` | as the rule |
 | `0x13` | `#XF` | dump, halt | `SIGFPE` | arrives as `#UD` and gets `SIGILL`: `CR4.OSXMMEXCPT` is clear. Rule; not yet enforced: ROADMAP §10.6 (F026) |
 | `0x09`, `0x0F`, `0x14`–`0x1F` | reserved, `#VE`, `#CP`, `#HV`, `#VC`, `#SX` | dump, halt | `SIGSEGV` | `sig_for_vec` has no row, so one would halt the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
 | `0x20`–`0xFF` | IRQs and IPIs | handle, return. An interrupt no handler owns is counted per vector and per CPU, EOIed at the controller that delivered it (the LAPIC when its in-service bit for the vector is set, else the 8259), logged at most once a second per vector, and ignored; §5.5 gives the 8259 lines. Rule; not yet enforced: a pool vector (`0x31`–`0x7F`) with no handler is EOIed and ignored with no count, a vector in `0x80`–`0xEF` or `0xF3`–`0xFA` dumps and halts, and an 8259 line with no handler other than IRQ7 and IRQ15 prints `irq: unexpected` and halts the CPU that took it (ROADMAP §10.6) | handle, return to ring 3 | `0x21`, `0x30`, and `0x31`–`0x7F` run on the user GS base and halt the kernel. Rule; not yet enforced: ROADMAP §10.6 (F004) |
@@ -2823,7 +2825,7 @@ clobbers; and `enter_user_full` takes a second format, `UserRegs`.
 | non-IST vector taken at CPL 3 | 0, TSS.RSP0 | user until the stub's `swapgs` | 0 (interrupt gate); a fault or trap body then runs with IF=1, after the stub has saved the syndrome (rule 9), an interrupt's top half with IF=0 (§2.9 rule 3) | ring 3's until the stub's `clac` (rule 5) |
 | non-IST vector taken at CPL 0 | 0, interrupted stack | kernel, except rule 2's case | 0 (interrupt gate) | the interrupted value until the stub's `clac` (rule 5) |
 | IST vector taken at CPL 0 (`#DB`, NMI, `#MC`), and `#DF` | 0, its IST stack | whatever the interrupted point held (rule 3) | 0 | the interrupted value until the stub's `clac` (rule 5) |
-| IST vector taken at CPL 3 (`#DB`, NMI, `#MC`) | 0, its IST stack, then the thread's kernel stack once the stub has copied its frame into the user frame (rule 3) | user until the stub's `swapgs` | 0; a `#DB` body then runs with IF=1 as any trap taken at CPL 3 does (§2.9 rule 3), an NMI's with IF=0 | ring 3's until the stub's `clac` (rule 5) |
+| IST vector taken at CPL 3 (`#DB`, NMI, `#MC`) | 0, its IST stack, then the thread's kernel stack once the stub has copied its frame into the user frame (rule 3) | user until the stub's `swapgs` | 0; a `#DB` body then runs with IF=1 as any trap taken at CPL 3 does (§2.9 rule 3), an NMI's and a `#MC`'s with IF=0 | ring 3's until the stub's `clac` (rule 5) |
 | vector exit to CPL 3 | 0, then 3 at `iretq` | user after `swapgs` | 0 until `iretq` restores ring 3's | `iretq` restores ring 3's |
 
 On aarch64 the boundary is between EL0 and the kernel's level, EL1 or EL2 with VHE. The table below
@@ -2867,12 +2869,15 @@ architectures. Planned (ROADMAP §11.3, §11.6): the aarch64 port does not exist
    the thread's user frame (above), completes the frame, and continues on the thread's kernel stack.
    From there it is an ordinary entry from user mode: its body may block where §2.9 allows, and it
    returns through the common return to user mode, exit work included, except that an NMI keeps IF=0
-   and skips the exit work. The IST exit (restore the GS state found, then `iretq` on the IST stack)
-   serves only CPL-0 frames and `#DF`. So while a user thread is in the kernel its user GS base is
-   in `KERNEL_GS_BASE`, however it entered, and the context switch reads it there (ROADMAP §18.3).
-   Linux's x86_64 entry splits the IST vectors the same way. Rule; not yet enforced: ROADMAP §10.6
-   (F005, F007); the IST handlers decide from CS.RPL at every CPL and run their bodies on the IST
-   stack. The sign test fails once FSGSBASE lets userspace write a kernel-half GS base. Planned
+   and skips the exit work. A `#MC` body keeps IF=0, takes no lock, and never blocks, from ring 3
+   too, since a broadcast machine check holds every CPU in its rendezvous (ROADMAP §25.1); it
+   records what it found in the thread and leaves the rest to the exit work of rule 11, where
+   ROADMAP §25.3's recovery runs. The IST exit (restore the GS state found, then `iretq` on the IST
+   stack) serves only CPL-0 frames and `#DF`. So while a user thread is in the kernel its user GS
+   base is in `KERNEL_GS_BASE`, however it entered, and the context switch reads it there (ROADMAP
+   §18.3). Linux's x86_64 entry splits the IST vectors the same way. Rule; not yet enforced: ROADMAP
+   §10.6 (F005, F007); the IST handlers decide from CS.RPL at every CPL and run their bodies on the
+   IST stack. The sign test fails once FSGSBASE lets userspace write a kernel-half GS base. Planned
    (ROADMAP §18.3, F133): with FSGSBASE on, a CPL-0 IST entry and `#DF` save `GS_BASE` with
    `rdgsbase`, load this CPU's `PerCpu` pointer, and restore the saved value on exit. A CPL-3 entry
    keeps its `swapgs`: the save-and-load protocol would leave `KERNEL_GS_BASE` holding the `PerCpu`
@@ -2952,18 +2957,18 @@ architectures. Planned (ROADMAP §11.3, §11.6): the aarch64 port does not exist
     Rule; not yet enforced: ROADMAP §13.8 and §17.4 build the writers and run the validators; no
     writer exists today.
 11. Exit work, on both architectures. The last check for work pending on a return to user mode (a
-    signal to act on, a reschedule, and any work a later ROADMAP line queues for that return) runs
-    with IF=0, and IF stays 0 from it to the `sysretq`, `iretq`, or `eret`. When the check finds
-    work, the exit turns IF on, does the work, turns IF off, and checks again; rule 4's IF=0 stretch
-    starts at the check that finds none. The §7.5 FP load runs after that check, still with IF=0.
-    Whatever makes work pending for a thread that may be running on another CPU publishes the work
-    first and then sends that CPU the reschedule IPI (an SGI on aarch64): the IPI either arrives
-    before the target's last check, which then sees the work, or stays pending across the IF=0 exit
-    and is taken in user mode at once, where its own exit runs the check. A debug build asserts IF=0
-    at the check. A check made with IF=1 and followed by the `cli` lets the IPI be taken between the
-    two, and the thread returns to user mode with the work undone until the next tick. Rule; not yet
-    enforced: ROADMAP §10.6 (F033). Today pending signals are acted on only at syscall entry and
-    after the `wait4` sleep.
+    signal to act on, a reschedule, and any work a later ROADMAP line queues for that return, such
+    as ROADMAP §25.3's machine-check recovery) runs with IF=0, and IF stays 0 from it to the
+    `sysretq`, `iretq`, or `eret`. When the check finds work, the exit turns IF on, does the work,
+    turns IF off, and checks again; rule 4's IF=0 stretch starts at the check that finds none. The
+    §7.5 FP load runs after that check, still with IF=0. Whatever makes work pending for a thread
+    that may be running on another CPU publishes the work first and then sends that CPU the
+    reschedule IPI (an SGI on aarch64): the IPI either arrives before the target's last check, which
+    then sees the work, or stays pending across the IF=0 exit and is taken in user mode at once,
+    where its own exit runs the check. A debug build asserts IF=0 at the check. A check made with
+    IF=1 and followed by the `cli` lets the IPI be taken between the two, and the thread returns to
+    user mode with the work undone until the next tick. Rule; not yet enforced: ROADMAP §10.6
+    (F033). Today pending signals are acted on only at syscall entry and after the `wait4` sleep.
 12. Signal-handler entry, on both architectures. Delivery saves the interrupted context (the user
     frame above, after any syscall-restart rewind) and its FP state into Linux's signal frame on the
     user stack (ROADMAP §13.8), then rewrites the user frame so the return to user mode enters the
