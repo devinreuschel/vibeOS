@@ -37,7 +37,7 @@ through.
 | 1 | [Overview](#1-overview) | Constraints, layers, module map, sources and licenses |
 | 2 | [Invariants](#2-invariants) | Lock order, handler rules, panic policy, markers, invariant register, publish last, preemption, trust boundaries, object lifetimes, RCU |
 | 3 | [Boot](#3-boot) | Toolchain, Limine, `_start` order, linker |
-| 4 | [Memory](#4-memory) | Address map, buddy allocator, paging, heap |
+| 4 | [Memory](#4-memory) | Address map, buddy allocator, paging, heap, firmware runtime services |
 | 5 | [Interrupts](#5-interrupts) | GDT/IDT, exception policy, vector map, PIC and APIC, privilege transitions |
 | 6 | [Time](#6-time) | Clock sources, calibration, timekeeping, timers |
 | 7 | [SMP](#7-smp) | ACPI, AP bring-up, per-CPU, IPIs, shootdown, offline and online |
@@ -641,7 +641,12 @@ Binding order (do not invert):
      waits 10 ms more. For each other online CPU it prints
      `vibeOS: panic: cpu N stopped (ipi|poll|nmi|panic)`, where `panic` names a CPU that stopped in
      its own `begin_dump`, or `vibeOS: panic: cpu N not stopped`. A CPU left `not stopped` loops
-     without polling, which §2.9 rule 2 already makes a bug.
+     without polling, which §2.9 rule 2 already makes a bug. Planned (ROADMAP §20.9): a CPU inside a
+     firmware call is the exception, since SMM holds off even an NMI; while its firmware record
+     ([§4.8](#48-firmware-runtime-services)) is set it is printed
+     `vibeOS: panic: cpu N not stopped (in firmware)`, and every CPU found in firmware also gets a
+     `vibeOS: panic: cpu N in firmware: <service>` line and a backtrace from the record's saved
+     frame.
    - The stop routine saves its CPU's interrupted registers and frame pointer in a per-CPU
      crash-register slot, sets the CPU's `stopped` flag, acknowledges, and halts with every interrupt
      masked (on aarch64, a `wfi` loop with DAIF set). The dump prints each saved slot.
@@ -971,8 +976,10 @@ make `InterruptGuard` mask by priority instead. The rules below hold on both arc
 
 The kernel is preemptible wherever IF=1. The timer tick and the reschedule IPI call
 `schedule_preempt`, which may switch away from any thread whose `irq_nest` is 0: kernel threads,
-syscall bodies, and fault handlers alike. Turning interrupts off is how code says "not now", so
-every IF=0 stretch has a reason from the list below and a bound.
+syscall bodies, and fault handlers alike. Planned (ROADMAP §20.9): one exception, `efi_rt` inside a
+firmware call, which runs with IF=1 and is not switched away from until the call returns
+([§4.8](#48-firmware-runtime-services)). Turning interrupts off is how code says "not now", so every
+IF=0 stretch has a reason from the list below and a bound.
 
 1. IF=0 only in: an interrupt or exception entry or exit stub; a hard-IRQ top half (§2.2); a
    spinlock or `IrqCell` critical section (§2.3); an `InterruptGuard` section that must not be
@@ -2349,6 +2356,49 @@ every device write for the few hand-back paths that need it; treating every aarc
 non-coherent (maintenance on every transfer where the hardware snoops); and mapping non-coherent
 buffers non-cacheable (slower CPU access, and an attribute that disagrees with the physmap's
 cacheable alias, which ROADMAP §11.1 forbids for MMIO for the same reason).
+
+## 4.8 Firmware runtime services
+
+Planned (ROADMAP §20.9). UEFI's runtime services (variables, time, reset) are firmware code the
+kernel calls after boot.
+
+- One kernel thread, `efi_rt`, makes every call, one at a time, holding the runtime-services lock
+  for each. A caller queues a request and sleeps on its completion, so no call runs in a caller's
+  context or address space.
+- `efi_rt`'s address space maps the runtime code, data, and MMIO regions of `BootInfo`'s EFI memory
+  map at their physical addresses, beside the kernel half. The kernel never calls
+  `SetVirtualAddressMap`: every call is a physical-mode call through that 1:1 map, so a kernel
+  started by kexec (ROADMAP §25.4, §30.6) calls firmware as the first did, and no firmware virtual
+  layout crosses a handover. A runtime region the lower half cannot hold leaves runtime services
+  off, with a line that says so.
+- A call runs with IF=1, so the tick, IPIs, and shootdown acknowledgements are taken while firmware
+  runs, and §2.9 needs no new reason for IF=0. The scheduler does not switch away from `efi_rt`
+  until the call returns, so firmware sees only the pauses an interrupt makes, and its FP and SIMD
+  use needs no per-thread state: before the call the live user state is saved and this CPU's FP
+  owner emptied ([§7.5](#75-per-cpu-data)).
+- While a call runs, the wrapper keeps a per-CPU firmware record: the service, the requesting
+  thread, and its own frame pointer, stack pointer, and return address, saved before entry and
+  cleared after return. The panic stop (§2.5 step 1), the NMI backtrace, and the core tool (ROADMAP
+  §10.7, §25.5) read it: a CPU whose record is set, or whose interrupted PC lies in a runtime
+  region, is reported `in firmware: <service>` and walked from the saved frame, never from
+  firmware's frame pointer, and one the stop does not reach while its record is set is
+  `not stopped (in firmware)`, which tells a wait in SMM from a kernel spin.
+- Only the panic path calls firmware outside `efi_rt`: on the panicking CPU, with IF=0, through the
+  same map, and only if its trylock of the runtime-services lock succeeds (§2.5; ROADMAP §25.6). It
+  sets the record too.
+
+Why: a runtime call has no time bound (a `SetVariable` may erase flash, through SMM in `q35`'s
+Secure Boot OVMF), so a call with IF=0 would break §2.9 rule 2, hold off the tick and shootdown
+acknowledgements, and trip ROADMAP §25.5's lockup detector. UEFI allows an interrupt during a
+runtime call, and Linux makes its calls with interrupts on from one worker thread and does not
+preempt a call. `SetVirtualAddressMap` can be called once per boot, so using it would tie every
+kexec and live update to carrying the firmware's virtual layout across kernel versions; FreeBSD's
+`efirt` likewise calls through a 1:1 map of the runtime regions. Rejected: calls with IF=0; a
+preemptible call, which would make firmware's FP state and address space per-thread state and give
+firmware pauses no interrupt makes; calls from the caller's own context, which would switch the
+caller's page table and FP state in place; `SetVirtualAddressMap` with a fixed layout passed across
+kexec, as Linux does on x86_64; and unwinding firmware frames, which carry no unwind data the kernel
+reads.
 
 ---
 
