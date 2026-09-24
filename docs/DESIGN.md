@@ -554,7 +554,7 @@ separate namespace.
 | I28 | Contract markers are kernel-emitted (§2.6) | `marker!` | documented | No: `shell ready` comes from ring-3 `/bin/sh` (ROADMAP §10.5, F073) |
 | I29 | A catch hook intercepts only a CPL-0 fault on the CPU that armed it, inside an in-guest test's catch window | `arch::catch` | assumed | Partly: production never arms it, but `intercept` runs first in every exception handler of every build, and its armed state is global, so in a `kernel_tests` build a fault with the armed vector on any CPU, at any CPL, is caught (ROADMAP §10.2, F146) |
 | I30 | Interrupt and exception handlers run with RFLAGS.AC=0 (§5.10 rule 5) | none | documented | No: the gates keep ring 3's AC (ROADMAP §10.6, F088) |
-| I31 | Every IF=0 stretch is bounded by a constant amount of work, far below the 1 s `wait_acks` timeout ([§2.9](#29-preemption-and-interrupt-state) rule 2) | §2.9 | documented | No: syscall bodies run with IF=0 until they block, the in-guest test runner holds IF off for the whole run, and a console `write` scrolls the framebuffer once per newline with IF=0 (ROADMAP §10.6, F044; ROADMAP §10.2, F075); ROADMAP §10.10 makes a shootdown survive a violation (F011) |
+| I31 | Every IF=0 stretch outside §2.9 rule 2's exemptions retires at most 100,000 instructions ([§2.9](#29-preemption-and-interrupt-state) rule 2) | §2.9; ROADMAP §10.3's IF-off tracer | documented | No: syscall bodies run with IF=0 until they block, the in-guest test runner holds IF off for the whole run, and a console `write` scrolls the framebuffer once per newline with IF=0 (ROADMAP §10.6, F044; ROADMAP §10.2, F075); the heap's first-fit `alloc`, its address-ordered insertion on `dealloc`, and a moving `realloc`'s copy run under the IRQ-off HEAP lock over a free list whose length user churn sets (ROADMAP §12.6); the buddy's double-free check walks the free lists (ROADMAP §12.1, F029); a `klog!` emit waits on the UART with IF off, about 8 ms per 96-byte line on a 115200-baud 16550, which no QEMU tier paces (ROADMAP §19.5); ROADMAP §10.10 makes a shootdown survive a violation (F011) |
 | I32 | A handler on an IST stack never blocks or switches threads (§5.10 rule 6) | IST handlers | documented | Yes: every IST handler halts, except that under `kernel_tests` an armed `catch` steps RIP and returns or longjmps off the IST stack |
 
 ## 2.8 Publish last
@@ -603,10 +603,19 @@ every IF=0 stretch has a reason from the list below and a bound.
    return-to-user sequences of [§5.10](#510-privilege-transitions) rule 4; the panic and halt paths
    (§2.5); and a CPU's bring-up before its first `sti` (boot before `irq: enabled`, an AP before it
    enters idle).
-2. An IF=0 stretch does a bounded amount of work. No loop whose trip count a user, a device, or a
-   disk image controls runs with IF=0, and nothing waits for another CPU with IF=0 without servicing
-   incoming IPIs ([§7.9](#79-tlb-shootdown)). A long job holds its lock for one bounded chunk at a
-   time and turns IF back on between chunks.
+2. An IF=0 stretch does a bounded amount of work: at most 100,000 instructions from the instruction
+   that turns IF off to the one that turns it back on, tens of microseconds on a current core. The
+   panic, halt, and bring-up paths of rule 1, the [§7.9](#79-tlb-shootdown) shootdown and
+   call-function waits, and the time a spinlock acquire spends spinning, which the holders' own
+   bounds limit, are exempt. No loop whose trip count a user, a device, or a disk image controls
+   runs with IF=0, and nothing waits for another CPU with IF=0 without servicing incoming IPIs
+   ([§7.9](#79-tlb-shootdown)). A long job holds its lock for one bounded chunk at a time and turns
+   IF back on between chunks; a walk over a user address space's page tables holds the space's
+   page-table lock for at most one leaf table (512 entries) at a time. ROADMAP §10.3's IF-off tracer
+   measures every stretch, and the bound is checked under TCG with `-icount shift=0` on one CPU,
+   where guest time advances 1 ns per instruction retired, so 100 µs of guest time is exactly the
+   bound whatever the host's load. Rule; not yet enforced: ROADMAP §12.6 turns the check on, and I31
+   lists the violations.
 3. A syscall body runs with IF=1. After `swapgs`, the entry stub copies the user RSP from
    `PerCpu.syscall_scratch` into its frame on the thread's kernel stack, then runs `sti`; from
    there on the scratch belongs to whichever thread next enters on this CPU. The exit stub runs
@@ -629,7 +638,9 @@ would need its own IF-on window, and ROADMAP §12.2's fault path must sleep. Lin
 with interrupts on and preempts wherever no lock is held, so its behaviour settles edge cases.
 Rejected: keeping syscall bodies at IF=0 and adding a polling window to each long call, which is
 how ROADMAP §10.6 first fixed console `write`; it has to be repeated in every call that loops and
-it still starves the tick.
+it still starves the tick. The bound counts instructions, not time, so its check gives the same
+answer on every run. Rejected: a time bound checked on the §10.1 KVM leg, whose hosted runner is
+itself a VM that can deschedule a vCPU mid-stretch.
 
 ## 2.10 Trust boundaries
 
@@ -1096,6 +1107,11 @@ A free-list heap at `HEAP_START`, backed by buddy frames mapped writable + NX. I
 1 MiB; the allocator grows in page-sized increments up to the 64 MiB region limit. `GlobalAlloc`
 takes the heap lock, a `SpinMutex`, so interrupts are off for each `alloc` and `dealloc`, and the rank
 check refuses an allocation or a free made while a spinlock ranked after the heap is held (§2.1).
+Planned (ROADMAP §12.6): the free list becomes a two-level segregated-fit allocator (TLSF), whose
+`alloc` and `free` take constant time with boundary-tag coalescing, and a moving `realloc` copies
+with the heap lock dropped, so every HEAP hold is bounded however fragmented the heap is
+([§2.9](#29-preemption-and-interrupt-state) rule 2). Today `alloc` walks the address-ordered free
+list first-fit, `dealloc` walks it to insert, and `realloc` copies under the lock.
 
 Planned (ROADMAP §12.6): the heap region is sized at boot from installed memory, so a heap allocation
 fails only when frames run out. The two limits must be one because the failure policy below treats
@@ -1190,9 +1206,9 @@ needs before that point and only releases after it:
   point of no return and kills the process with `SIGSEGV` when that fails; building first costs
   holding both images' page tables until the swap.
 
-The heap is deliberately simple and deliberately temporary. A slab allocator for hot object types
-(TCBs, file descriptors, inodes, network buffers) lands in ROADMAP §19.9; general
-allocation stays on the free-list heap.
+A slab allocator for hot object types (TCBs, file descriptors, inodes, network buffers) lands in
+ROADMAP §19.9; general allocation stays on the heap, which ROADMAP §12.6 makes a constant-time TLSF
+allocator, and slab does not replace it.
 
 ## 4.5 Kernel virtual address allocator
 
