@@ -57,11 +57,14 @@ document; for a deletion, name the check that finds nothing left. A box whose pr
 not done. The kernel review found that ticking a box for work that had not landed was the most common
 failure in this tree (KERNEL_REVIEW.md §5 and §8.3).
 
-**Slices.** A phase lands as two to four PRs named A, B, C, D, each with its own in-guest tests and each
-leaving `main` green. The last slice closes the gate, and its commit gets the `phase-<N>` tag and the
-next release (see the standing gates). Phase 10 is the exception. It lands as one PR per review-issue
-code or small group of codes, named by those codes (for example `B1+DX1`), and its lines without a code
-land as PRs named after their subsection, in the three waves its preamble orders.
+**Slices.** A phase lands in two to four slices, A to D, named in dependency order. A slice is a
+series of PRs. Each PR carries the tests of the boxes it ticks, leaves `main` green, and prefixes its
+title with the phase and slice, for example `Phase 13B: futex wake`. A PR from a later slice may merge
+before an earlier slice finishes when it does not depend on it. The PR that closes the gate gets the
+`phase-<N>` tag and the next release on its commit (see the standing gates). Phase 10 is the
+exception. Its PRs are named by the review-issue codes they carry, one code or a small group (for
+example `B1+DX1`), and a code may take a series of PRs as a slice does; its lines without a code land
+as PRs named after their subsection, in the three waves its preamble orders.
 
 **Stretch** subsections, the [Beyond](#beyond) list, and [Funded goals](#funded-goals) are excluded from
 exit gates. They are where the hard, optional, or paid things go, so that a phase is either done or not.
