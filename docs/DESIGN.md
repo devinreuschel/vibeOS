@@ -4525,13 +4525,17 @@ Do not UC-patch the console framebuffer when it aliases VGA BAR0; leave that phy
 The kernel sends only bus 0 through `0xCF8`/`0xCFC`: for any other bus ECAM does not cover, `HwCfg::read32`
 returns `0xFFFF_FFFF` and `write32` drops the write, so a device behind a PCI-PCI bridge is never
 found (ROADMAP §20.1, F114). Configuration mechanism #1 addresses every bus (CONFIG_ADDRESS bits
-23:16); its limit is the 256-byte config space. Rule: ECAM where MCFG covers the bus, at
-`base + (bus<<20)|(dev<<15)|(fn<<12)|off`, where `base` is the MCFG entry's base address and
-corresponds to bus 0 even when the entry's start bus is not 0; mechanism #1 for offsets below `0x100`
-elsewhere.
-`pci::ecam_phys` offsets from the start bus instead, and its unit test pins that (ROADMAP §20.1,
-F045). Type-1 headers reuse BAR slots as bus-number registers; size-probe only the BAR count for that
-header type.
+23:16); its limit is the 256-byte config space. Rule: ECAM where MCFG or the device tree covers
+the bus; mechanism #1 for offsets below `0x100` elsewhere. The two firmware sources give an ECAM
+base differently: an MCFG entry's base corresponds to bus 0 even when its start bus is not 0 (PCI
+Firmware Spec 3.2 §4.1.2), and a device-tree `pci-host-ecam-generic` node's `reg` corresponds to
+the first bus of its `bus-range`. The kernel stores every window by its first bus's address, as the
+device tree gives it and as Linux does for both, so an MCFG base becomes `base + (start_bus << 20)`
+when it is parsed, and `pci::ecam_phys` returns
+`base + ((bus - start_bus) << 20 | dev << 15 | fn << 12 | off)`. Rule; not yet enforced:
+`acpi::parse_mcfg` passes the MCFG base through unchanged, so an entry whose start bus is not 0
+reads bus `b` at bus `b - start_bus`'s configuration space (ROADMAP §20.1, F045). Type-1 headers
+reuse BAR slots as bus-number registers; size-probe only the BAR count for that header type.
 
 **Two subsystems designed for the same virtual address range.**
 The heap and the kernel VA allocator were both specified at `0xFFFF_C000_*` in different documents, and
