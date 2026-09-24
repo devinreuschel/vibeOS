@@ -78,8 +78,12 @@ visible skip, and F079 attaches a code-only image as pflash. Until then, pass a 
 Bump the date in `rust-toolchain.toml` and the matching `toolchain:` inputs in
 `.github/workflows/ci.yml`, `.github/workflows/smp-stress.yml`, and
 `.github/workflows/release.yml` in one PR.
-`make test` must be green. Do not re-introduce an undated nightly except the
-weekly canary job in `smp-stress.yml`. Not a drive-by.
+`make test` must be green. From Phase 24 a bump also changes the build key of
+every port built with that toolchain, and the next release waits until both
+architectures' rebuilds have built those ports twice
+([ROADMAP §24.2](docs/ROADMAP.md#242-ports)), so land it just after a release.
+Do not re-introduce an undated nightly except the weekly canary job in
+`smp-stress.yml`. Not a drive-by.
 
 ## Do not
 
