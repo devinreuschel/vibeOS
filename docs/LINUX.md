@@ -1,11 +1,12 @@
 # Linux contract
 
 vibeOS implements Linux's interfaces ([ROADMAP](ROADMAP.md), How to read this). This file holds what
-that rule leaves to a register: which Linux release "Linux's" means, each place vibeOS differs from it
-on purpose, and each interface only vibeOS offers. A difference that is a bug has no row here:
-[SYSCALL.md](SYSCALL.md) describes it with the kernel-review finding and the ROADMAP line that fixes
-it. `scripts/check_linux_md.py`, which `make check` runs, checks that every row below has each field
-and a unique id, and that each difference SYSCALL.md describes cites its fixing line or its row here.
+that rule leaves to a register: which Linux release "Linux's" means and what each move of it changed,
+each place vibeOS differs from it on purpose, and each interface only vibeOS offers. A difference that
+is a bug has no row here: [SYSCALL.md](SYSCALL.md) describes it with the kernel-review finding and the
+ROADMAP line that fixes it. `scripts/check_linux_md.py`, which `make check` runs, checks that every row
+below has each field and a unique id, and that each difference SYSCALL.md describes cites its fixing
+line or its row here.
 
 ## Baseline
 
@@ -22,6 +23,21 @@ later series, or the oracle to a later point release, is an edit here that lists
 | Configuration | `tests/linux/`, not written yet |
 | Oracle key | not built yet |
 | Assets | the `linux-<key>` pre-release, not published yet |
+
+## Baseline log
+
+One row per change to the Linux surface that is not a plain fix, oldest first: each move of the
+baseline (the series moved from and to, the vibeOS release that ships it, and every interface the move
+changes, with the Linux release notes or commit that changed it); from the `v1.0.0` release candidate
+on, each correction of a frozen syscall-table row to the baseline's uapi definition (the row, the uapi
+header that defines it, and the conformance case that showed the old layout wrong); each ROADMAP §39.2
+corpus case whose result a move changes, with its new result; and each interface a major version
+removes after a move left it behind. ROADMAP §39.1's table comparison and §39.2's corpus tier read it,
+and a release's notes list the rows added since the last release. No rows yet;
+`scripts/check_linux_md.py` extends its field check to this table in the commit that adds the first.
+
+| Date | vibeOS release | Kind (move, layout fix, corpus result, removal) | Interface or series | What changed | Source (Linux release notes, commit, or uapi header) | Conformance case |
+|------|----------------|--------------------------------------------------|---------------------|--------------|------------------------------------------------------|------------------|
 
 ## Deliberate differences
 
