@@ -168,8 +168,9 @@ and measured behaviour, or from sources whose license lets it into an MIT tree:
   beside it (and, for Apache-2.0, its NOTICE text).
 - Cryptographic primitives and the TLS state machine are depended on, never written in-tree: pinned,
   widely reviewed crates behind one facade, `vibeos-crypto`, under ROADMAP §10.9's `cargo deny`
-  policy, with RustCrypto and dalek for the primitives and rustls for TLS (ROADMAP §14.7, §15.11).
-  In-tree crypto code is the entropy pool, the CSPRNG's construction, the signature formats, and glue.
+  policy, with RustCrypto and dalek for the primitives and rustls for TLS (ROADMAP §13.10, §14.7,
+  §15.11). In-tree crypto code is the entropy pool, the CSPRNG's construction, the signature
+  formats, and glue.
 - Third-party sources the tree builds rather than copies follow ROADMAP §14.10's port policy, and test
   inputs fetched at test time (Linux's device trees, QEMU's ACPI tables) are never committed.
 

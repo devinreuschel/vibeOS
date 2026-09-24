@@ -4,7 +4,7 @@
 ktest `cpu_hardening` (skip on `qemu64`); `/dev/random` via virtio-rng then RDRAND then
 xorshift (`dev_random_source`). Parked at the time: the SMAP fault test and the user-VA
 `copy_from_user` rewrite, now ROADMAP §10.6 and a Phase 10 gate line (the HHDM copy ignores
-PTE write permission, which COW in Phase 12 cannot tolerate); the entropy pool, now §14.7;
+PTE write permission, which COW in Phase 12 cannot tolerate); the entropy pool, now §13.10;
 `VIBEOS_NO_HARDEN`.
 
 | | |

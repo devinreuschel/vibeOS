@@ -392,10 +392,10 @@ argument), and `auxv`: `AT_PAGESZ`, `AT_ENTRY`, `AT_PHENT`, `AT_PHNUM`,
 `AT_PHDR` (0 when no header table is mapped), `AT_BASE` 0, `AT_FLAGS` 0,
 `AT_UID`, `AT_EUID`, `AT_GID`, and `AT_EGID` (all 0), `AT_CLKTCK` 100,
 `AT_SECURE` 0, `AT_RANDOM`, `AT_NULL`. `AT_RANDOM` is one TSC read and a
-multiply, not random (F140; ROADMAP §13.10 fills it from the `/dev/random`
-source). Only `ET_EXEC` loads: `ET_DYN` and `PT_INTERP` return `ENOEXEC`.
-`PT_PHDR` VAs are `check_user_va`'d. Exit status is the kernel-reported
-low 8 bits (`user: exit N` diagnostic for the bootstrap hello).
+multiply, not random (F140; ROADMAP §13.10 fills it from the kernel CSPRNG).
+Only `ET_EXEC` loads: `ET_DYN` and `PT_INTERP` return `ENOEXEC`. `PT_PHDR`
+VAs are `check_user_va`'d. Exit status is the kernel-reported low 8 bits
+(`user: exit N` diagnostic for the bootstrap hello).
 
 The kernel REPL is debug-only (`--features kernel_shell`). Production
 starts `/sbin/init` and parks.
