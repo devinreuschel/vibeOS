@@ -362,8 +362,8 @@ Blocking and allocation are a class of bug, not an instance. Context rules:
 | Softirq equivalent (high-prio workqueue) | No | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)); the hard IRQ only enqueues |
 | RCU read-side section ([§2.12](#212-rcu)) | No; it may be preempted | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) |
 | Threaded IRQ bottom half | Yes, on its own device's state only ([§5.4](#54-irq-registration)) | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) |
-| Workqueue worker | Yes | Yes |
-| Driver `probe` | Yes | Yes |
+| Workqueue worker | Yes | Yes, fallible only ([§4.4](#44-kernel-heap)); without direct reclaim while it runs a softirq-equivalent item (row above) |
+| Driver `probe` | Yes | Yes, fallible only ([§4.4](#44-kernel-heap)); a failed probe leaves its device unbound and logs why |
 | Syscall body, fault handler for a CPL-3 fault | Yes ([§2.9](#29-preemption-and-interrupt-state)) | Yes, fallible only ([§4.4](#44-kernel-heap)) |
 | Network receive: a queue's threaded bottom half ([§5.4](#54-irq-registration)) | No: it takes no sleeping lock and never waits for a socket's owner; a packet for an owned socket goes on its backlog (§2.1) | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) |
 | Timer callback: a softirq-equivalent item on the CPU whose timer fired | No | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](#44-kernel-heap)) |
@@ -534,8 +534,10 @@ Binding order (do not invert):
 5. `cli; hlt` loop, or QEMU `isa-debug-exit` under the `panic_exit` test feature.
 
 No unwinding: `panic = "abort"`. Serial TX in this path is a bounded THRE poll; drop the byte on
-timeout (see [§9.6](#96-hardware-polling)). Do not take SCHED. The log ring is readable after the
-halt IPI without taking its TAS (force-unlock if the panicking CPU held it).
+timeout (see [§9.6](#96-hardware-polling)). Do not take SCHED. Allocate nothing, the panic record
+(ROADMAP §20.1) included: the dump, the backtrace, and the record use fixed buffers and reserved
+memory, since the panicking CPU or a stopped one may hold the heap lock. The log ring is readable
+after the halt IPI without taking its TAS (force-unlock if the panicking CPU held it).
 
 The panic record outlives the reset that follows a panic (ROADMAP §20.1, §25.6). Planned: every
 store uses one format, a header, a sequence number, and a checksum. Reserved RAM holds one record;
@@ -1184,7 +1186,7 @@ where the paragraphs below the table say so. The executable contract for the mar
 | 6 | Buddy PMM from memory map | `pmm: N free 4KiB frames` | Page tables and heap both need frames. |
 | 7 | Page tables, install CR3 | `paging: cr3 ok` | Own the address space before mapping anything device-specific. |
 | 8 | MMIO PTE attribute patch | `paging: mmio uc` | LAPIC/IOAPIC/HPET pages must be uncacheable before first touch. |
-| 9 | Kernel heap | `heap ok` | `alloc` becomes legal. Everything after this can use `Vec` and `Box`. |
+| 9 | Kernel heap | `heap ok` | `alloc` becomes legal. Until `irq: enabled` (step 15) boot may use its infallible API; from then on every allocation is fallible ([§4.4](#44-kernel-heap)). |
 | 10 | Kernel VA allocator | `kva: ready` | Guarded stacks need it, so threads need it. |
 | 11 | Per-CPU area for the BSP, bootstrap TCB, syscall MSRs | `per_cpu: bsp ready` | `GS_BASE` must be valid before any `per_cpu!` access, including from ISRs. Then `thread_init::init_bootstrap` makes `_start`'s context the bootstrap thread, and `syscall_init::init_bsp` programs STAR, LSTAR, FMASK (`0x47700`), and `EFER.SCE`, enables SSE for user code (§3.1), and wires TSS.RSP0. `arch::cpu::harden` (SMEP, SMAP, UMIP, `CR0.WP`) runs just before this step, after `idt ok`. |
 | 12 | ACPI tables | `acpi: xsdt N tables` | MADT drives APIC and SMP, HPET drives calibration. |
@@ -1498,19 +1500,23 @@ every failure as a shortage of memory. A fixed region smaller than RAM would fai
 frames are free, and reclaim and the OOM killer would then kill processes to make room that
 memory already had.
 
-Allocation failure has two policies, chosen by who can cause it:
+Allocation failure has two policies, chosen by when it happens:
 
-- On a path that untrusted input reaches (a syscall, device data, a disk image, a network packet),
-  allocation is fallible: through `vibeos::kalloc`'s owning types, whose failure becomes `ENOMEM`
-  (or the errno Linux returns there, such as `EAGAIN` from `fork`). Where the
-  context may sleep ([§2.9](#29-preemption-and-interrupt-state) rule 4), ROADMAP §12.6's direct
-  reclaim and OOM killer run before the allocation reports failure. A user who exhausts memory
-  gets an errno or the OOM killer's verdict, never a kernel halt.
-- The infallible `alloc` API (`Box::new`, `Vec::push`, `vec!`, `format!`, `String` growth,
-  `Arc::new`) is allowed only during boot, before `irq: enabled`, and for an allocation whose size
-  and count a kernel invariant bounds. Its failure reaches `#[alloc_error_handler]`, which panics
-  with the requested layout: there, a failure means a kernel invariant is false, and silent OOM is
-  worse than a halt.
+- After `irq: enabled`, allocation is fallible on every path, not only on those that untrusted input
+  reaches (a syscall, device data, a disk image, a network packet): through `vibeos::kalloc`'s
+  owning types, whose failure becomes `ENOMEM` (or the errno Linux returns there, such as `EAGAIN`
+  from `fork`). Where the context may sleep ([§2.9](#29-preemption-and-interrupt-state) rule 4),
+  ROADMAP §12.6's direct reclaim and OOM killer run before the allocation reports failure. A user
+  who exhausts memory gets an errno or the OOM killer's verdict, never a kernel halt. A bound on an
+  allocation's size and count does not make its failure a broken invariant: any process can exhaust
+  memory first, and the heap fails when frames do (ROADMAP §12.6), so after boot a failure means
+  memory is short.
+- Before `irq: enabled`, while no process exists and no device is bound, the infallible `alloc` API
+  (`Box::new`, `Vec::push`, `vec!`, `format!`, `String` growth, `Arc::new`) is allowed for a size
+  that no device or disk image supplies. Its failure reaches `#[alloc_error_handler]`, which panics
+  with the requested layout: there, a failure means the machine has too little memory to boot or a
+  kernel invariant is false, and a halt that names the layout says which. Reaching the handler after
+  `irq: enabled` means an infallible call escaped the lints below.
 
 Fallibility is carried by type, not by a list of methods. The infallible surface of `alloc` is
 large: `BTreeMap::insert`, `extend`, `collect`, `clone`, `to_vec`, `String::from`, and every other
@@ -1520,14 +1526,15 @@ fallible constructor at all. So `vibeos-core` has a `kalloc` module of owning ty
 `Result`. They are built on stable Rust: `alloc::alloc::alloc` with a null check for boxes, and
 `try_reserve` for vectors. Clippy's `disallowed-types` denies `alloc`'s owning types (`Box`, `Vec`,
 `String`, `Arc`, `Rc`, and the `alloc::collections` types) in both crates outside `kalloc`, and
-`disallowed-macros` denies `vec!` and `format!`. A boot-time or invariant-bounded site that keeps
-an `alloc` type carries an `#[allow]` whose comment names its bound. This is the shape Rust-for-Linux
-settled on (`KBox`, `KVec`) after starting from `alloc`'s collections. Rejected: a
-`disallowed-methods` list of infallible constructors, which misses the calls it does not name and
-leaves `Box` and `Arc` with no fallible path on stable Rust.
+`disallowed-macros` denies `vec!` and `format!`. A boot-time site that keeps an `alloc` type carries
+an `#[allow]` whose comment names the boot step that runs it, and what it builds does not grow after
+`irq: enabled`. This is the shape Rust-for-Linux settled on (`KBox`, `KVec`) after starting from
+`alloc`'s collections. Rejected: a `disallowed-methods` list of infallible constructors, which
+misses the calls it does not name and leaves `Box` and `Arc` with no fallible path on stable Rust.
 
-Rule; not yet enforced: syscall paths use the infallible API today, and a `fork` near exhaustion
-panics in `spawn_inner` (F010). ROADMAP §10.4 lands `kalloc` and the lints. Rejected: making small allocations never fail by having the allocator wait
+Rule; not yet enforced: syscall paths, driver probes (`virtio_blk_init`'s `Box::new`), and
+kernel-thread creation use the infallible API today, and a `fork` near exhaustion panics in
+`spawn_inner` (F010). ROADMAP §10.4 lands `kalloc` and the lints. Rejected: making small allocations never fail by having the allocator wait
 until the OOM killer frees memory (Linux's "too small to fail"), because an allocation made with a
 spinlock held, or on a path the OOM victim needs in order to exit, cannot wait, and a failed
 `Box::new` cannot be handled by its caller; AGENTS.md rule 4 forbids a user-triggerable panic.
@@ -1606,10 +1613,16 @@ Linux's `ALLOC_OOM` gives a victim half of the min reserve and keeps the rest fo
 reaper below is in the progress class. So a flood of network receive, which allocates in the atomic
 class, can take at most half of R, and the rest stays for the threads that clean and free pages.
 This is Linux's split: `GFP_ATOMIC` allocations may dip part of the way below the min watermark, and
-`PF_MEMALLOC` reclaimers all the way. `meminfo` shows R and, for each class, the lowest free count
-one of its allocations has left since boot. Two rules keep ordinary work out of the atomic class. A
-block completion allocates nothing, because what it needs was allocated at submission (ROADMAP
-§12.5's owned submission). A fault or `mmap` allocates the page-table pages it may need before it
+`PF_MEMALLOC` reclaimers all the way. Each dedicated progress-class thread (the writeback threads,
+the swap-out thread, the background reclaim thread, and the OOM reaper) names the most it allocates
+for one unit of its work, such as one writeback pass or one reap step, or zero where it allocates
+nothing, and ROADMAP §12.6 lists these bounds. R is the larger of the size above and twice the sum
+of those bounds, so the half of R that no other class reaches holds one unit of work for each such
+thread. R is recomputed when one starts or stops. A thread in direct reclaim is not in the sum,
+because any number of threads may reclaim at once. `meminfo` shows R and, for each class, the lowest
+free count one of its allocations has left since boot. Two rules keep ordinary work out of the
+atomic class. A block completion allocates nothing, because what it needs was allocated at
+submission (ROADMAP §12.5's owned submission). A fault or `mmap` allocates the page-table pages it may need before it
 takes the page-table spinlock, with reclaim allowed, and frees those it did not use, as Linux's
 `pte_alloc` does. Rejected: two pools with a refill order between them, which adds machinery and
 leaves open which pool a progress thread holding a spinlock uses.
@@ -1636,6 +1649,22 @@ needs before that point and only releases after it:
   there is no old image to return an errno to. Rejected: Linux's order, which allocates past its
   point of no return and kills the process with `SIGSEGV` when that fails; building first costs
   holding both images' page tables until the swap.
+- Exit has no caller to return an errno to, so its point of no return is its first release. Thread
+  and process exit, an OOM victim's included, and the reap of a zombie by `wait4` allocate nothing
+  from there on. What they need, such as a zombie's exit status and the `SIGCHLD` its parent gets,
+  lives in memory allocated when the process or thread was created, where a failure made `fork` or
+  `clone` return an errno. An exiting thread's puts go through `put_deferred`
+  ([§2.11](#211-object-lifetimes) rule 6), so a release that needs memory, such as freeing an
+  unlinked file's blocks at its last close, runs on a workqueue worker. Rejected: a reserve set
+  aside at boot for each teardown path, in the shape of Linux's mempool, whose bound would scale
+  with the process table.
+
+A kernel thread or work item has no caller either, a release deferred to one included. When one of
+its allocations fails, it records the error where a later call reports it, retries with a named
+bound, or drops that work with a counter and a log line at most once a second, as
+[§2.5](#25-panic-policy)'s rule that nothing is silently swallowed requires. A driver probe that
+fails leaves its device unbound and logs why. A CPU whose idle thread or workers cannot be allocated
+stays offline (ROADMAP §10.4, F037).
 
 A slab allocator for hot object types (TCBs, file descriptors, inodes, network buffers) lands in
 ROADMAP §19.9; general allocation stays on the heap, which ROADMAP §12.6 makes a constant-time TLSF
