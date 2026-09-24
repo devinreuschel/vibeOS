@@ -20,7 +20,7 @@ roots = [
 
 [[box]]
 key = "a dead thread's kernel stack is freed only after its own CPU has switched off it"
-needs = ["a dead thread's kernel stack is freed only by the CPU that ran it"]
+needs = ["a dead thread's kernel stack is reused or freed only by the CPU that ran it"]
 why = "claim: reopened (F012); lands in §10.10"
 
 [[box]]
@@ -31,7 +31,7 @@ why = "claim: reopened (F004); the generated stubs make the swapgs decision"
 [[box]]
 key = "the scheduler is SMP-safe; today another CPU can unmap"
 needs = [
-  "a dead thread's kernel stack is freed only by the CPU that ran it",
+  "a dead thread's kernel stack is reused or freed only by the CPU that ran it",
   "`PerCpu` split into owner-only state and a remote view",
 ]
 why = "claim: reopened (F012, F039); both halves of its sentence"
@@ -219,7 +219,7 @@ needs = [
   "`vibeos.ktest=<glob>` runs only the matching in-guest tests",
 ]
 closes = ["`sleep_ms(50)` returns within 50 to 100 ms"]
-why = "claim: the TSC candidate needs the warp test, and the hpet=off boot needs ktest="
+why = "claim: the TSC candidate needs the warp test, and the hpet=off boot needs vibeos.ktest="
 
 [[box]]
 key = "`vibeos.ktest=<glob>` runs only the matching in-guest tests"
@@ -257,7 +257,7 @@ why = "text: needs §10.10's fallible spawn_inner; claim: its Tcb allocation is 
 [[box]]
 key = "kernel stack depth is measured against DESIGN §4.5's budget"
 needs = ["`vibeos.ktest=<glob>` runs only the matching in-guest tests"]
-why = "text: lands after the `ktest=<glob>` box below"
+why = "text: lands after the `vibeos.ktest=<glob>` box below"
 
 [[box]]
 key = "the ktest verdict counts runs and has no whole-run deadline"
@@ -267,7 +267,7 @@ why = "text: lands after the T1 box"
 [[box]]
 key = "for the Phase 10 exit gate's §10.10 line, the KVM leg also runs"
 needs = ["`vibeos.ktest=<glob>` runs only the matching in-guest tests"]
-why = "text: lands after §10.2's `ktest=` box"
+why = "text: lands after §10.2's `vibeos.ktest=` box"
 
 [[box]]
 key = "the crash test's planted defects"
@@ -414,7 +414,7 @@ why = "reopened by design review J136"
 key = "`pit_tick_rate` counts timer interrupts, not `uptime_ms`"
 needs = ["`vibeos.ktest=<glob>` runs only the matching in-guest tests"]
 closes = ["the PIT tick runs at 1 kHz"]
-why = "reopened by design review J136; the hpet=off boot needs ktest="
+why = "reopened by design review J136; the hpet=off boot needs vibeos.ktest="
 
 [[box]]
 key = "the in-guest clock tests can fail"
