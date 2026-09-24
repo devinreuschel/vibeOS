@@ -811,11 +811,13 @@ the signal §5.2 gives the vector (§11.5 the exception class, on aarch64), and 
 running. The signal's action then applies, as on Linux: from ROADMAP §13.8 a handler may catch it,
 from §17.4 a tracer sees it first, and a fault signal the process blocks or ignores still takes its
 default action. The default action, the only one today, ends the process and prints
-`user: pid N killed SIG<name>`. Not yet enforced: ring-3 `#DB`, and `#AC` when `CR0.AM` is set, halt
-the kernel (ROADMAP §10.6, F005), and so do the entry-path windows of §5.10 (ROADMAP §10.6, F004,
-F006, F007); §5.2's last column lists every vector whose ring-3 action differs from the rule. An NMI
-dumps and halts on its IST stack; from ROADMAP §10.7 the NMI handler first reads its CPU's stop
-request word (step 1).
+`user: pid N killed SIG<name>`. Pid 1 is the exception. When init exits, by `exit` or by a signal,
+the kernel panics with a line naming the exit status, or the signal and, for a fault, the faulting
+address, as Linux panics when init dies. Planned: ROADMAP §10.5 (F068). Not yet enforced: ring-3
+`#DB`, and `#AC` when `CR0.AM` is set, halt the kernel (ROADMAP §10.6, F005), and so do the
+entry-path windows of §5.10 (ROADMAP §10.6, F004, F006, F007); §5.2's last column lists every
+vector whose ring-3 action differs from the rule. An NMI dumps and halts on its IST stack; from
+ROADMAP §10.7 the NMI handler first reads its CPU's stop request word (step 1).
 
 Rule: nothing is silently swallowed. An error is returned to its caller, or handled where it arises
 in one of three ways: a counter plus a log line at most once a second; an error state recorded on
@@ -900,7 +902,7 @@ separate namespace.
 | I3 | IF=0 through every return-to-user sequence (§5.10 rule 4) | FMASK `0x47700`; `cli` in `run_user` | documented | No: the syscall exit has no `cli` and `console_init::wait_key` returns with IF=1 (F001); `enter_user_full` runs with IF=1 (F006) (ROADMAP §10.6) |
 | I4 | Kernel code outside the §5.10 entry and exit sequences runs with `GS_BASE` = this CPU's `PerCpu` (§5.10) | `arch::gs`, `per_cpu_init` | documented | No: the raw gates of §5.10 rule 1 (F004), the IF=1 window in `enter_user_full` (F006), an NMI, `#MC`, or `#DB` taken in the syscall entry or exit window, and a fault on the return-to-user `iretq` (both F007) run on the user base (ROADMAP §10.6) |
 | I5 | One entry stub per vector makes the `swapgs` decision (§5.10 rule 1) | `arch/idt.rs` | documented | No: the `irq_init` pool gates `0x31`–`0x7F` and the `kbd_init` gates `0x30` and `0x21` skip it (ROADMAP §10.6, F004) |
-| I6 | Ring 3 never halts the kernel (§2.5, §5.2, §11.5) | `proc_init::try_user_fault` | documented | No: ring-3 `#DB`, and `#AC` when `CR0.AM` is set, halt (F005), and so do the I4 windows (ROADMAP §10.6) |
+| I6 | Ring 3 never halts the kernel, pid 1's exit excepted (§2.5, §5.2, §11.5) | `proc_init::try_user_fault` | documented | No: ring-3 `#DB`, and `#AC` when `CR0.AM` is set, halt (F005), and so do the I4 windows (ROADMAP §10.6) |
 | I7 | The kernel reads or writes user memory only through the §5.1 user-memory accessors, and writes an address space that is not running only through the fill API (ROADMAP §10.6) | `addr_space.rs`; the arch accessors from ROADMAP §10.6 | enforced by SMAP where the CPU has it (PAN on aarch64, ROADMAP §11.6); the fill-API rule is documented | Partly: today's accessors copy through the physmap after `check_user_range`, and `write_bytes` ignores the PTE's `WRITABLE` bit (ROADMAP §10.6, F023) |
 | I8 | One thread per address space changes its regions, and another CPU changes its page tables only under its page-table lock (§2.11) | process model | assumed | Yes: only the owning thread touches a space. Lock-free user copies, local-only `invlpg`, and `&'static AddressSpace` depend on it. ROADMAP §10.6 replaces `&'static` with a counted object, §12.1's reverse map changes page tables from other CPUs under the space's page-table lock, §12.3 shoots down every CPU in the space's set, and §13.1's threads bring the address-space lock |
 | I9 | TCBs are never freed, so a `*mut Tcb` stays valid | 64-slot table, `thread_init` | assumed | Yes, but `spawn_inner` can reuse a Dead slot whose thread is still switching out (ROADMAP §10.10, F012) |
@@ -1069,6 +1071,13 @@ must neither halt nor corrupt memory it has not given to that source (AGENTS.md 
 | The host running QEMU, the harness, and CI | Everything; they are the test oracle | Not applicable | Never |
 | Agent sessions, and the accounts they act through | Writing code, and opening and merging pull requests through the repository's rulesets; nothing else: no release or phase tag, deployment approval, repository setting, ruleset, environment, or secret | Act as the owner on GitHub: agents run with the owner's account and token, so every owner-only control in the release chain (the `release` environment's approval, the tag rules, ROADMAP §22.5's setting) is one prompt injection away | The agent-boundary decision below, before ROADMAP §14.6's first key |
 | Code under test: candidate commits, agent-written code and tools, guests, third-party build systems, as seen by the machines that run them | Nothing: on a CI runner or a rig VM it reaches no secret, credential, or host service beyond its job; on the dev host, no credential beyond the agent account's own | On the dev host, read every credential of the owner's account: the `gh` token, git's credentials, SSH keys, a signed-in browser | The agent-boundary decision below (dev host); ROADMAP §10.1 and §14.6 (release jobs); ROADMAP Funded goals, Self-hosted runners (rig) |
+
+One device can end the system: the one that holds the root filesystem. Once it is `Failed` or
+`Gone`, an init that has not locked its memory dies of `SIGBUS` at its next page-in of a page
+reclaim dropped, and the pid-1 panic ([§2.5](#25-panic-policy)) follows, which ROADMAP §22.2's
+`panic=` turns into a reset. The root device supplies the code init runs, so its loss crosses no
+trust boundary. The remedy is a redundant root (ROADMAP §29.2), not an exemption for init, which
+would fault again at once.
 
 Consequence: until Phase 18 closes, vibeOS stops a process from crashing the kernel, not from reading
 another process's data. README says not to run untrusted code on it or keep secrets on it.
@@ -5105,13 +5114,16 @@ A removed device is `Gone` (§12.4), and every request to it fails with `Gone`. 
 see what Linux shows for a removed device. A filesystem maps `Gone` to `EIO`; it stops
 committing and writing back, so its last committed generation stays the on-disk state
 ([VIBEFS.md](VIBEFS.md) §10), and later writes fail with `EIO`. A read of a page not in the
-cache returns `EIO`, and a fault on an unpopulated page of a file mapping raises `SIGBUS`.
-Dirty pages are dropped, and the error is reported once to each open file description's next
-`fsync`, `fdatasync`, or `msync`. `umount` does not fail on the device's errors, and its busy
-rules are unchanged: `umount2` with `MNT_DETACH` succeeds while files are open, and a plain
-`umount` succeeds once they are closed. A device node's open descriptor fails as Linux's does
-for a removed device of its class (`ENODEV` from an input node, for one), and it never reaches
-a later device. Planned (ROADMAP §20.9): nothing is removed today.
+cache returns `EIO`, and a fault on an unpopulated page of a file mapping raises `SIGBUS`, and
+logs one line naming the device, its state, the pid, and the faulting address, at most once a
+second per device, so a panic that follows, such as pid 1's, shows the cause in its log tail; a
+page-in from a `Failed` device logs the same line. Dirty pages are dropped, and the error is
+reported once to each open file description's next `fsync`, `fdatasync`, or `msync`. `umount`
+does not fail on the device's errors, and its busy rules are unchanged: `umount2` with
+`MNT_DETACH` succeeds while files are open, and a plain `umount` succeeds once they are closed. A
+device node's open descriptor fails as Linux's does for a removed device of its class (`ENODEV`
+from an input node, for one), and it never reaches a later device. Planned (ROADMAP §20.9):
+nothing is removed today.
 
 Logical block size is per device. Do not assume 512. Capacity is in those
 blocks. Discard on ramdisk validates the range and otherwise no-ops.
