@@ -4391,11 +4391,15 @@ does not boot it twice.
 ## 8.6 CI and coverage
 
 Two jobs run on every push and pull request, on Linux; the other rows below are scheduled,
-dispatched, or run on a tag. `concurrency` cancels superseded runs for the same
-branch (push and PR share one slot). The earlier one-ladder-job rule (runner queues) was lifted on
-2026-09-22: the repo is public, so Actions minutes are free, and agents own the CI design. ROADMAP
-§10.1 plans a build-once job plus a tier matrix per architecture; until that lands the ladder is one
-job.
+dispatched, or run on a tag. `concurrency` cancels superseded runs for the same branch (push and PR
+share one slot), so a merge to `main` cancels the run of the merge before it, and a fork's pull
+request from its own `main` shares `main`'s slot. Planned (ROADMAP §10.1): `ci` runs on pushes to
+`main`, pull requests, and `workflow_dispatch`; a pull request's runs share one group per pull
+request number and cancel superseded ones, and every other run has its own group, so no `main` run
+is cancelled. A `pull_request` run never counts as proof of a commit (ROADMAP §10.9). The earlier
+one-ladder-job rule (runner queues) was lifted on 2026-09-22: the repo is public, so Actions minutes
+are free, and agents own the CI design. ROADMAP §10.1 plans a build-once job plus a tier matrix per
+architecture; until that lands the ladder is one job.
 
 | Job | When | What |
 |---|---|---|
