@@ -180,22 +180,24 @@ Break these and the failure shows up somewhere else, hours later.
 
 Acquire in this order, release in reverse. Never take a lower number while holding a higher one.
 
-1. page tables
-2. physical allocator (buddy)
-3. heap
+1. heap
+2. page tables
+3. physical allocator (buddy)
 4. scheduler (also: wait-queue lists and blocking-primitive predicates)
 5. device / driver locks
 6. serial
 
-Serial is last so any lock holder can still log. Page tables are first because unmapping needs to
-allocate and free through everything below it. Blocking `WaitQueue`s are serialized by the scheduler
-lock: the predicate check and the enqueue happen under that same lock (DESIGN [§9.4](#94-concurrency)).
+Serial is last so any lock holder can still log. Heap is first because growing it takes PT and then
+BUDDY, and nothing allocates from or frees to the heap while holding either. Page tables come before
+the buddy because mapping a page allocates its table frames. Blocking `WaitQueue`s are serialized by
+the scheduler lock: the predicate check and the enqueue happen under that same lock (DESIGN
+[§9.4](#94-concurrency)).
 
 The six ranks order spinlocks: `SpinMutex`, and the cross-CPU `IrqCell`s that ROADMAP §10.3 turns
 into ranked `SpinMutex`es. Sleeping locks form a tier outside all six: `BlockingMutex`, `RwLock`,
 `Semaphore`, and waiting for a page or buffer to finish I/O. A thread takes a sleeping lock only with
 IF=1 and no spinlock held ([§2.9](#29-preemption-and-interrupt-state) rule 4), so every sleeping lock
-ranks before page tables, and no spinlock is ever held across a sleep. Within the sleeping tier,
+ranks before every spin rank, and no spinlock is ever held across a sleep. Within the sleeping tier,
 outermost first:
 
 1. filesystem namespace and inode locks, the ones a call may hold across a copy to or from user
@@ -204,7 +206,7 @@ outermost first:
    descendant, and two directories neither of which contains the other in address order
 2. the address-space lock (ROADMAP §13.1: `mmap`, `munmap`, and `mprotect` take it for writing, the
    fault path for reading). It guards the region tree only. A page-table entry changes under the
-   page-table spinlock (rank 1 above), so the reverse-map unmap that direct reclaim does
+   page-table spinlock (the PT rank above), so the reverse-map unmap that direct reclaim does
    ([§4.4](#44-kernel-heap)) takes no address-space lock
 3. waits on a page-cache page or a block buffer (ROADMAP §12.5)
 4. a filesystem's block-mapping and volume I/O locks, which its page-fill and writeback paths take
@@ -233,11 +235,13 @@ block-mapping locks), chosen for the same reason: a `write` that faults on its u
 holding the inode lock must not meet an `mmap` that holds the address-space lock and wants that
 inode lock. ROADMAP §13.12's lock-dependency build checks both tiers.
 
-A heap allocation can grow the heap, and growth takes PT and then BUDDY after dropping HEAP
-(`heap_init::grow_for`). Under SCHED, DEVICE, or SERIAL, taking HEAP fails the rank check on every
-allocation. Under PT or BUDDY, an allocation fails only when it grows the heap (PT's recursive-lock
-check, or the rank check on PT), so the mistake passes every test that does not grow the heap. Rule:
-allocate from the heap before taking PT or BUDDY.
+The rank check fails an allocation or a free made while PT, BUDDY, SCHED, DEVICE, or SERIAL is held,
+on every call, whether or not the heap grows. Growth takes PT and then BUDDY after dropping HEAP
+(`heap_init::grow_for`), so the frame allocation it makes can enter direct reclaim with nothing held
+([§4.4](#44-kernel-heap) rule 1). Rule; not yet enforced: `src/lock.rs` ranks the heap third, after
+PT and BUDDY, so an allocation under either fails only when it grows the heap, through PT's
+recursive-lock check or the rank check on PT, and passes every test that does not grow the heap
+(ROADMAP §10.3).
 
 Filesystem locks (dentry, inode, super, mount) take `RANK_DEVICE`. The rank order therefore forbids
 heap allocation under them and allows logging. The VFS tables are static, so bring-up allocates
@@ -425,7 +429,7 @@ separate namespace.
 
 | # | Invariant | Established at | Status | Holds today |
 |---|-----------|----------------|--------|-------------|
-| I1 | Lock rank PT < BUDDY < HEAP < SCHED < DEVICE < SERIAL (§2.1) | `lock.rs`, `sync_init::lock_enter` | enforced at runtime, per CPU | Partly: a nested lock of the same rank passes the check and its release clears the rank bit the outer lock still holds, `IrqCell` has no rank, and a lock held across a switch goes unseen (ROADMAP §10.3, §13.12, F108) |
+| I1 | Lock rank HEAP < PT < BUDDY < SCHED < DEVICE < SERIAL (§2.1) | `lock.rs`, `sync_init::lock_enter` | enforced at runtime, per CPU | Partly: `lock.rs` still ranks the heap after PT and BUDDY, so an allocation under either fails only when it grows the heap; a nested lock of the same rank passes the check and its release clears the rank bit the outer lock still holds, `IrqCell` has no rank, and a lock held across a switch goes unseen (ROADMAP §10.3, §13.12, F108) |
 | I2 | Hard-IRQ context never blocks or allocates (§2.2) | convention | documented | Yes, unchecked: only `irq_init::dispatch` sets `IN_ISR`, and no blocking primitive asserts it (ROADMAP §10.3, F110) |
 | I3 | IF=0 through every return-to-user sequence (§5.10 rule 4) | FMASK `0x47700`; `cli` in `run_user` | documented | No: the syscall exit has no `cli` and `console_init::wait_key` returns with IF=1 (F001); `enter_user_full` runs with IF=1 (F006) (ROADMAP §10.6) |
 | I4 | Kernel code outside the §5.10 entry and exit sequences runs with `GS_BASE` = this CPU's `PerCpu` (§5.10) | `arch::gs`, `per_cpu_init` | documented | No: the raw gates of §5.10 rule 1 (F004), the IF=1 window in `enter_user_full` (F006), an NMI, `#MC`, or `#DB` taken in the syscall entry or exit window, and a fault on the return-to-user `iretq` (both F007) run on the user base (ROADMAP §10.6) |
@@ -971,8 +975,8 @@ scanout is a later polish pass; double buffering is also parked (ROADMAP §5.1).
 
 A free-list heap at `HEAP_START`, backed by buddy frames mapped writable + NX. Initial mapping is
 1 MiB; the allocator grows in page-sized increments up to the 64 MiB region limit. `GlobalAlloc`
-disables interrupts around `alloc` and `dealloc` because allocation happens under locks that ISRs must
-never contend.
+takes the heap lock, a `SpinMutex`, so interrupts are off for each `alloc` and `dealloc`, and the rank
+check refuses an allocation or a free made while a spinlock ranked after the heap is held (§2.1).
 
 Planned (ROADMAP §12.6): the heap region is sized at boot from installed memory, so a heap allocation
 fails only when frames run out. The two limits must be one because the failure policy below treats
