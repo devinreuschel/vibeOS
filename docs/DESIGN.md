@@ -1983,6 +1983,23 @@ reschedule or shootdown is not starved by a busy NIC.
 Vector numbers live in one module as named constants, with a host unit test asserting that no two are
 equal. That test costs nothing and catches the copy-paste that assigns two subsystems the same vector.
 
+Planned (ROADMAP §11.3): the device vectors above (the keyboard's and the pool's) are the x86_64
+chip's hardware numbers ([§5.4](#54-irq-registration)), and the device pool is that chip's to
+allocate. On aarch64 the GIC sets priority per interrupt, by class: the top class is reserved for
+ROADMAP §25.5's pseudo-NMI, then come IPIs and the tick (the generic timer's PPI), then devices, so
+a busy device does not starve a reschedule there either. IPIs are SGIs 0 to 7 only, as Linux uses
+them, since Arm recommends leaving SGIs 8 to 15 to the Secure world. The kernel therefore has at
+most eight IPI kinds on both architectures, and a line that adds one takes a free SGI here.
+
+| SGI | Purpose | x86_64 vector |
+|-----|---------|---------------|
+| 0 | Reschedule | `0xFD` |
+| 1 | Call function | `0xFB` |
+| 2 | Panic stop ([§2.5](#25-panic-policy)) | `0xFE` |
+| 3–7 | Free | |
+
+No SGI does TLB shootdown: aarch64 broadcasts its TLB maintenance (ROADMAP §11.2).
+
 ## 5.4 IRQ registration
 
 Drivers do not write to the IDT. They ask for a vector:
@@ -1999,6 +2016,68 @@ timer, IPI, and keyboard ISRs do not set it, and no blocking primitive checks it
 F110). That flag is not
 `InterruptGuard` nest: in-guest tests hold a guard on the BSP, so a nest check would
 false-refuse every allocate from `ktest`.
+
+Planned (ROADMAP §11.3, on x86_64 before the GIC): drivers name an interrupt by an `IrqId`, a `u32`
+the IRQ layer allocates, never a hardware number. It indexes the handler table, the interrupt's
+bottom-half thread, and `free_vector`'s wait. Each interrupt controller is an `IrqChip` object, and
+an `IrqId` records its chip and its hardware number on that chip (its hwirq):
+
+```rust
+let irq = irq::map_wired(&spec)?;      // a device-tree `interrupts` specifier or an ACPI GSI
+let irqs = irq::alloc_msi(&dev, n)?;   // MSI or MSI-X, through the device's MSI parent
+let tick = irq::map_percpu(&spec)?;    // a LAPIC LVT or a GIC PPI: one IrqId on every CPU
+irq::set_threaded(irq, Some(top_half), thread_fn);
+irq::set_affinity(irq, cpu)?;
+```
+
+A chip translates a firmware specifier (a device-tree `interrupts` specifier, an ACPI GSI with its
+trigger and polarity) to a hwirq; masks, unmasks, and ends an interrupt (EOI); sets its affinity;
+allocates MSI hwirqs for a device; composes the MSI address and data for one; and frees them. IPIs
+are not `IrqId`s: the port sends them on §5.3's fixed vectors or SGIs.
+
+On x86_64 the chips are the 8259, the I/O APICs, and the LAPIC's MSI domain. A hwirq there is an IDT
+vector from §5.3's pool, allocated inside the chip, so ROADMAP §27.1's per-CPU vectors change the
+chip and no driver. On GICv3 a hwirq is an SPI or a PPI of the distributor and redistributors, or an
+LPI from the ITS chip's allocator. The ITS maps a device by its DeviceID, from the device tree's
+`msi-map` or `msi-parent` (ROADMAP §11.5) and later ACPI IORT (ROADMAP §20.7). GICv2m turns an MSI
+into an SPI.
+
+No driver composes or rewrites an MSI message. The PCI layer writes MSI and MSI-X entries from the
+chip's `compose_msi`, in the order below. `set_affinity` asks the chip: the x86 chip rewrites the
+I/O APIC route, or recomposes the message and has the PCI layer rewrite the entry; the ITS sends
+`MOVI` to the target CPU's collection, then `SYNC`, and the entry stays as it was; GICv2m changes
+the SPI's target. Priority is the chip's as well (§5.3).
+
+The ITS tables and the redistributors' LPI property and pending tables are allocated once at boot
+and never freed or moved, and the kernel never clears `GICR_CTLR.EnableLPIs`, which some GICs cannot
+clear once it is set. ROADMAP §25.4's handover carries the tables' ranges, and a kernel that finds
+EnableLPIs set reuses them, as Linux does.
+
+`IrqChip` is an object-safe trait in the portable half. Each controller kind a port finds at boot is
+one chip object in a static `BootCell`, reached as `&'static dyn IrqChip`, as §6.1's registry
+reaches drivers; the indirect call is a branch beside an interrupt entry. A controller a driver
+brings, such as a cascaded one, would be a counted device (§12.1), and the line that adds one
+extends this. The seam's zero-sized port ([§11.1](#111-the-seam)) keeps only the vector entry,
+finding the root controller, and the IPI send. The MSI paragraph below becomes the x86 chip's
+`compose_msi`. Until the ROADMAP §11.3 box lands, the rest of this section describes the x86 vector
+API as built. Each of its rules then holds for an `IrqId`: `set_affinity`, `set_threaded`, and
+`free_vector` keep their names and take an `IrqId`, and a vector in ROADMAP §12.5 and §20.9 means an
+`IrqId`.
+
+Why: a GIC names a wired interrupt by an SPI the firmware fixes, delivers the timer as a per-CPU
+PPI, and moves an ITS interrupt with `MOVI` while the device's message stays the same, so an API of
+pool vectors and messages built from APIC IDs fits x86 alone. Kept, it would have every driver of
+ROADMAP Phases 12 to 20 written against one architecture, and `set_affinity` on the ITS would
+rewrite an entry the ITS ignores, so the interrupt would never move. An `IrqId` also keeps its
+identity when ROADMAP §27.1 makes x86 vectors per CPU. Controllers are runtime objects because a
+port runs several at once and firmware decides which exist (§1.1's N backends), as Linux's
+`irq_chip` and irq domains are. Rejected: keeping `u8` vectors and mapping them to INTIDs inside the
+GIC driver (79 device interrupts on both architectures, a lookup on every interrupt, and MSI
+composition left in drivers); widening the vector to a `u32` hardware number (not unique once x86
+vectors are per CPU, or where GICv2m's SPIs sit beside the distributor's); a seam trait on the
+zero-sized port (one implementation per port, where each port runs several controllers at once); a
+closed enum of each port's chips (no controller a driver brings could join); and waiting for §27.1
+(every driver of Phases 12 to 20 written twice).
 
 The allocator records the dest CPU. `set_affinity` updates that binding. I/O APIC
 routes are rewritten immediately; MSI/MSI-X callers reprogram the message from
@@ -2038,7 +2117,7 @@ waits for its ITS command queue, until the ITS has consumed the commands. Only t
 device's ITT freed and its LPIs returned to the allocator. If the wait expires, both stay reserved
 and the event is logged. The ITS reads each device's ITT from memory, so an ITT freed earlier would
 let a late MSI translate through reused memory into another device's interrupt. This is the
-aarch64 form of §12.4's interrupt-remapping rule.
+aarch64 form of §12.4's interrupt-remapping rule. This is the ITS chip's free operation.
 
 EOI is the dispatcher's job, not the driver's. The dispatch layer knows whether a
 vector arrived via PIC or LAPIC and signals the right controller. A vector with no handler still
@@ -2161,8 +2240,8 @@ not "fix" this by inheriting the outgoing nest onto the incoming thread.
 
 - x2APIC, for more than 255 CPUs and MSR-based register access instead of MMIO.
 - Interrupt affinity *rebalancing* (ROADMAP §19.5). The dest-CPU table and `set_affinity`
-  already exist; what is left is a policy that moves MSI-X messages and IOAPIC
-  dests when a queue saturates one core.
+  already exist; what is left is a policy that calls `set_affinity` when a queue saturates one
+  core, which each chip carries out its own way (§5.4).
 
 ## 5.10 Privilege transitions
 
@@ -4254,7 +4333,7 @@ per-architecture uapi (ROADMAP §13.10).
 | Trap decode | pure half: a trap to a `TrapKind` (§5.2) | vector and error code | vector slot and `ESR_EL1` (§11.5) | §10.6, §11.3 |
 | Kernel stack-overflow report | port module | `#DF` on IST 1 (§5.1) | a stack test at every vector entry and a per-CPU overflow stack (§4.5, §11.5) | §11.3 |
 | Interrupt mask | trait | RFLAGS.IF (`cli`, `sti`) | PSTATE.I and F (`msr daifset`, `msr daifclr`); priority masking from ROADMAP §25.5 | §10.3 |
-| Interrupt controller and IRQ identity | trait | 8259, I/O APIC, and LAPIC; vector numbers (§5.3) | GICv2, or GICv3 with its ITS; INTIDs | §10.3, §11.3 |
+| Interrupt controller and IRQ identity | port module: finding the root controller, with the vector entry and the IPI send in their own rows; each controller is an `IrqChip` object (§5.4), not a seam trait | 8259, I/O APIC, and LAPIC MSI chips; a hwirq is an IDT vector (§5.3) | GICv2 or GICv3 distributor and redistributor chips, ITS or GICv2m; a hwirq is an INTID | §11.3 |
 | IPI send and its ordering | trait | LAPIC ICR write (§7.6) | SGI register write | §10.3, §11.3 |
 | Timer and cycle counter | trait (`CycleCounter`) | TSC; LAPIC timer | `CNTVCT_EL0`; generic timer | §10.3, §11.3 |
 | Page-table format and attributes | trait (`PageTable`); encodings in the pure half | 4-level tables, PAT bits | 4 KiB granule, 48-bit VA, MAIR, break-before-make | §10.3, §11.2 |
