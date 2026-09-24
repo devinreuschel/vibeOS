@@ -229,10 +229,10 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   fails with `EMFILE` (F057;
   ROADMAP §10.4)
 - `lseek`: any offset from 0 to `i64::MAX` is accepted, and `SEEK_END`
-  uses the 32-bit `OpenFile.size`. A vibefs `write` just below file offset
-  2^44 makes the next access to that block panic the kernel in the default
-  dev profile, and a write at 2^44 or above overwrites the file's low
-  blocks (F008; ROADMAP §10.11)
+  uses the 32-bit `OpenFile.size`. A vibefs `write` just below file
+  offset 2^44 makes the next access to that block panic the kernel,
+  since both Cargo profiles check overflow (DESIGN §3.5), and a write at
+  2^44 or above overwrites the file's low blocks (F008; ROADMAP §10.11)
 - `execve`: the image is read whole and must be at most 64 KiB (`ENOMEM`)
   until ROADMAP §10.4 removes `MAX_ELF`. `p_memsz` is bounded only by
   `USER_END`, so a small ELF can map pages until physical memory runs out,

@@ -790,8 +790,8 @@ that ISO's table mis-names frames (ROADMAP §10.2, F084). Frame pointers come fr
 Rule: `vibeos-core` (`src/lib.rs`) does not panic on data; its parsers and table walks return the
 module error. Enforced only for `unwrap`, `expect`, and `panic!`: clippy denies `unwrap_used`,
 `expect_used`, and `panic` on that crate (allowed in `#[cfg(test)]`). Neither `indexing_slicing` nor
-`arithmetic_side_effects` is enabled, and `make` ships the dev profile, whose `overflow-checks = true`
-turns an arithmetic overflow into a panic. Planned (ROADMAP §10.1): both lints are denied in every
+`arithmetic_side_effects` is enabled, and both Cargo profiles set `overflow-checks = true` (§3.5),
+which turns an arithmetic overflow into a panic. Planned (ROADMAP §10.1): both lints are denied in every
 byte parser ROADMAP §10.2's fuzzers cover, vibefs v1 excepted until ROADMAP §14.8 retires it, and
 the kernel binary denies `unwrap_used`, `expect_used`, `panic`, `unreachable`, `todo`, and
 `unimplemented` crate-wide, where a site a kernel invariant bounds keeps an `#[allow]` that names the
@@ -1536,7 +1536,15 @@ with. Two requirements that are easy to get wrong:
 Export at minimum: `__kernel_vma_start`, `__kernel_vma_end`, and per-section start/end pairs for
 `.text`, `.rodata`, `.data`, `.bss`.
 
-## 3.5 Dev profile
+## 3.5 Profiles
+
+Two Cargo profiles, one shipped. `dev` (`opt-level = 1`, debug assertions on) is what `make` builds
+by default and what every per-push tier runs. `release` (`opt-level = 3`, debug assertions off) is
+what v* releases and 1.0 ship, and a gate that compares with Linux or states a rate or throughput is
+measured on it (ROADMAP, How to read this). Both set `overflow-checks = true`, so an arithmetic
+overflow panics in shipped images as it does in tests, and AGENTS.md rule 4's `checked_*` rule holds
+in both. What must hold in release is an `assert!` (§9.4). Rule; not yet enforced: nothing builds or
+boots the release profile, and releases ship the dev profile (ROADMAP §10.2, F137).
 
 `opt-level = 1` for the dev profile. At `opt-level = 0` the page table setup function's stack frame is
 large enough to overflow the boot stack Limine provides, and it faults on entry before printing

@@ -46,6 +46,8 @@ debug = true
 
 [profile.release]
 opt-level = 3
+# Overflow panics in shipped images as in dev (DESIGN §3.5, AGENTS.md rule 4).
+overflow-checks = true
 panic = "abort"
 lto = false
 debug = true

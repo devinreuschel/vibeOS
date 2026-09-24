@@ -7,10 +7,13 @@
 
 [wave1]
 # Wave-1 boxes that cite no CRITICAL or HIGH finding; `--closed` finds the rest.
+# The kernel -D warnings and clippy boxes open wave 1: the standing gate binds every fix.
 roots = [
   "until those retries are gone, every retry the harness takes",
   "`scripts/check_review_refs.py` reads `tests/gates/phase-10-needs.toml`",
   "`scripts/check_ticks.py`, which a `ticks` CI job runs on every pull request",
+  "`-D warnings` reaches every kernel build",
+  "CI runs `cargo clippy --bin vibeos -- -D warnings`",
 ]
 
 # Reopened lines of Phases 4 to 8 and the boxes that close them.
@@ -370,6 +373,16 @@ why = "text: lands after the user-VA accessor box, the box above, and §10.4's `
 key = "a driver turns on its own device (DESIGN §12.3)"
 needs = ["driver and volume state as instances owned by their device's registry entry"]
 why = "text: lands with §10.4's D2 rewrite of virtio-blk"
+
+[[box]]
+key = "v* releases ship the release profile"
+needs = [
+  "the second ksyms link leaves `.text` where the first put it",
+  "`CARGO_PROFILE=release` is built and booted",
+  "invariants that must hold in release builds are `assert!`",
+  "`release.yml` runs only from `main`",
+]
+why = "text: lands after the ksyms, release-boot and assert! boxes and the release.yml box"
 
 # Closes rows (How to read this): the box named by `key` lands all the work
 # of each box in `closes`, and the commit that ticks it ticks them.
