@@ -346,8 +346,10 @@ An interrupt handler must:
 
 - EOI before it can possibly context switch, so the controller is not held across a switch
 - rearm its own one-shot timer source before doing anything else that can yield
-- keep its stack frame small: only `#DF`, NMI, `#MC`, and `#DB` run on dedicated IST stacks (§5.1);
-  every other vector runs on the interrupted kernel stack, or on TSS.RSP0 when it interrupts ring 3
+- keep its stack frame small: only `#DF`, NMI, `#MC`, and `#DB` enter on dedicated IST stacks
+  (§5.1), and NMI, `#MC`, and `#DB` move to the thread's kernel stack when they interrupt ring 3
+  (§5.10 rule 3); every other vector runs on the interrupted kernel stack, or on TSS.RSP0 when it
+  interrupts ring 3
 
 Both of the "must" rules are expanded in [section 5.8](#58-handler-ordering-rules), because both are
 easy to violate and expensive to debug.
@@ -630,7 +632,7 @@ separate namespace.
 | I29 | A catch hook intercepts only a CPL-0 fault on the CPU that armed it, inside an in-guest test's catch window | `arch::catch` | assumed | Partly: production never arms it, but `intercept` runs first in every exception handler of every build, and its armed state is global, so in a `kernel_tests` build a fault with the armed vector on any CPU, at any CPL, is caught (ROADMAP §10.2, F146) |
 | I30 | Interrupt and exception handlers run with RFLAGS.AC=0 (§5.10 rule 5) | none | documented | No: the gates keep ring 3's AC (ROADMAP §10.6, F088) |
 | I31 | Every IF=0 stretch outside §2.9 rule 2's exemptions retires at most 100,000 instructions ([§2.9](#29-preemption-and-interrupt-state) rule 2) | §2.9; ROADMAP §10.3's IF-off tracer | documented | No: syscall bodies run with IF=0 until they block, the in-guest test runner holds IF off for the whole run, and a console `write` scrolls the framebuffer once per newline with IF=0 (ROADMAP §10.6, F044; ROADMAP §10.2, F075); the heap's first-fit `alloc`, its address-ordered insertion on `dealloc`, and a moving `realloc`'s copy run under the IRQ-off HEAP lock over a free list whose length user churn sets (ROADMAP §12.6); the buddy's double-free check walks the free lists (ROADMAP §12.1, F029); a `klog!` emit waits on the UART with IF off, about 8 ms per 96-byte line on a 115200-baud 16550, which no QEMU tier paces (ROADMAP §19.5); ROADMAP §10.10 makes a shootdown survive a violation (F011) |
-| I32 | A handler on an IST stack never blocks or switches threads (§5.10 rule 6) | IST handlers | documented | Yes: every IST handler halts, except that under `kernel_tests` an armed `catch` steps RIP and returns or longjmps off the IST stack |
+| I32 | A handler on an IST stack never blocks, switches threads, or takes a lock, and an IST vector taken at CPL 3 leaves the IST stack before its body runs (§5.10 rules 3 and 6) | the IST entry stubs and handlers | documented | Partly: every IST handler halts, so none blocks or switches, except that under `kernel_tests` an armed `catch` steps RIP and returns or longjmps off the IST stack; no IST entry leaves the IST stack yet (ROADMAP §10.6, F005, F007) |
 | I33 | A fault body reads CR2, DR6, ESR, and FAR from its frame, where the entry stub saved them before IF could turn on (§5.10 rule 9) | the `arch/idt.rs` stubs; the aarch64 vectors (ROADMAP §11.3) | documented | Yes, only because every fault body runs with IF=0 and reads CR2 before anything else can fault (`arch::idt::page_fault`); ROADMAP §10.6's IF=1 bodies need the stub save (its syscall-body and generated-stub boxes) |
 | I34 | A PTE change that removes or narrows a translation takes effect only after every CPU that could hold the old one has invalidated and acknowledged; until then no frame, table page, or VA is reused and no page counts as clean (§2.4) | `kva_init::unmap_shootdown` (kernel); `addr_space_init::shootdown_user` (user) | documented | Partly: kernel unmaps free frames and VA only after `wait_acks`; a user change invalidates only on the calling CPU, enough only while I8 holds, and nothing yet clears a dirty bit (ROADMAP §12.3) |
 | I35 | A user PTE change invalidates the second-level translations (EPT, NPT, stage-2) of its range on every CPU that may hold them before the frame's count drops (§2.4) | none yet | documented | Not relied on yet: no hypervisor exists until ROADMAP §21.2, which lands it |
@@ -1984,7 +1986,8 @@ clobbers; and `enter_user_full` takes a second format, `UserRegs`.
 | `enter_user` and `enter_user_full`, from `mov gs` to `iretq` | 0, kernel stack | user | 0 (rule 4) | 0 |
 | non-IST vector taken at CPL 3 | 0, TSS.RSP0 | user until the stub's `swapgs` | 0 (interrupt gate); a fault or trap body then runs with IF=1, after the stub has saved the syndrome (rule 9), an interrupt's top half with IF=0 (§2.9 rule 3) | ring 3's until the stub's `clac` (rule 5) |
 | non-IST vector taken at CPL 0 | 0, interrupted stack | kernel, except rule 2's case | 0 (interrupt gate) | the interrupted value until the stub's `clac` (rule 5) |
-| IST vector: `#DF`, NMI, `#MC`, `#DB` | 0, its IST stack | whatever the interrupted point held (rule 3) | 0 | the interrupted value until the stub's `clac` (rule 5) |
+| IST vector taken at CPL 0 (`#DB`, NMI, `#MC`), and `#DF` | 0, its IST stack | whatever the interrupted point held (rule 3) | 0 | the interrupted value until the stub's `clac` (rule 5) |
+| IST vector taken at CPL 3 (`#DB`, NMI, `#MC`) | 0, its IST stack, then the thread's kernel stack once the stub has copied its frame into the user frame (rule 3) | user until the stub's `swapgs` | 0; a `#DB` body then runs with IF=1 as any trap taken at CPL 3 does (§2.9 rule 3), an NMI's with IF=0 | ring 3's until the stub's `clac` (rule 5) |
 | vector exit to CPL 3 | 0, then 3 at `iretq` | user after `swapgs` | 0 until `iretq` restores ring 3's | `iretq` restores ring 3's |
 
 1. One entry stub per vector, owned by `arch/idt.rs` and generated from one table. The stub runs
@@ -2004,12 +2007,27 @@ clobbers; and `enter_user_full` takes a second format, `UserRegs`.
    syscall exit sends a non-canonical return RIP to `swapgs; iretq`, and on KVM or hardware the
    `#GP` that `iretq` raises runs on the user GS base and ends in a silent hang or triple fault;
    TCG skips the canonical check.
-3. An IST vector decides `swapgs` from the sign of `GS_BASE` (`rdmsr`; a kernel base is negative),
-   because it can interrupt CPL-0 code that has the user GS loaded (the rows above whose GS column
-   says user), and on exit it restores the GS state it found. Rule; not yet enforced: ROADMAP §10.6
-   (F007); the IST handlers decide from CS.RPL. The sign test fails once FSGSBASE lets userspace
-   write a kernel-half GS base. Planned (ROADMAP §18.3, F133): with FSGSBASE on, IST entry saves `GS_BASE` with `rdgsbase`, loads this CPU's
-   `PerCpu` pointer, and restores the saved value on exit.
+3. An IST vector taken at CPL 0 decides `swapgs` from the sign of `GS_BASE` (`rdmsr`; a kernel base
+   is negative), because it can interrupt CPL-0 code that has the user GS loaded (the rows above
+   whose GS column says user), and on exit it restores the GS state it found. `#DF` does the same at
+   any CPL, since the CS it saves is undefined (Intel SDM Vol. 3A, interrupt 8). An IST vector taken
+   at CPL 3 (`#DB`, NMI, `#MC`) decides from CS.RPL like any other vector: CS.RPL 3 proves that
+   `GS_BASE` holds the user base and `KERNEL_GS_BASE` this CPU's `PerCpu`, and user code cannot
+   write `KERNEL_GS_BASE`. Its stub runs `swapgs`, copies the hardware frame from the IST stack into
+   the thread's user frame (above), completes the frame, and continues on the thread's kernel stack.
+   From there it is an ordinary entry from user mode: its body may block where §2.9 allows, and it
+   returns through the common return to user mode, exit work included, except that an NMI keeps IF=0
+   and skips the exit work. The IST exit (restore the GS state found, then `iretq` on the IST stack)
+   serves only CPL-0 frames and `#DF`. So while a user thread is in the kernel its user GS base is
+   in `KERNEL_GS_BASE`, however it entered, and the context switch reads it there (ROADMAP §18.3).
+   Linux's x86_64 entry splits the IST vectors the same way. Rule; not yet enforced: ROADMAP §10.6
+   (F005, F007); the IST handlers decide from CS.RPL at every CPL and run their bodies on the IST
+   stack. The sign test fails once FSGSBASE lets userspace write a kernel-half GS base. Planned
+   (ROADMAP §18.3, F133): with FSGSBASE on, a CPL-0 IST entry and `#DF` save `GS_BASE` with
+   `rdgsbase`, load this CPU's `PerCpu` pointer, and restore the saved value on exit. A CPL-3 entry
+   keeps its `swapgs`: the save-and-load protocol would leave `KERNEL_GS_BASE` holding the `PerCpu`
+   address while the thread is in the kernel, and a switch from the moved body would save that
+   address as the thread's GS base.
 4. IF=0 from the first instruction of a return-to-user sequence to its `sysretq` or `iretq`: the
    sequence loads the user RSP before its last instruction, and the GS base is the user's for part
    of it. The exit keeps its own state in the thread's user frame (above), never in per-CPU scratch:
@@ -2027,12 +2045,17 @@ clobbers; and `enter_user_full` takes a second format, `UserRegs`.
    entry runs `clac`. Planned (ROADMAP §10.6):
    `stac` appears only inside the user-memory accessors.
 6. A handler on an IST stack does not block and does not switch threads: a nested entry of the same
-   vector restarts at the top of that IST stack and overwrites the first frame. It also takes no lock
-   ([§2.2](#22-interrupt-handler-rules)'s last row). Holds, because every IST handler halts, except
-   that under `kernel_tests` an armed `catch` longjmps off the IST stack.
-   Planned (ROADMAP §10.6, F005): for a CPL-3 frame, `debug_ex` moves from the IST stack to the
-   thread's kernel stack and then calls `try_user_fault` (the ring-3 `#DB` kill §5.2 requires),
-   because `try_user_fault` ends in `finish_exit`, which can switch threads.
+   vector restarts at the top of that IST stack and overwrites the first frame. It also takes no
+   lock ([§2.2](#22-interrupt-handler-rules)'s last row). An IST vector taken at CPL 3 leaves the
+   IST stack before its body runs (rule 3), so this rule binds CPL-0 frames and `#DF`. Once IST
+   handlers return (ROADMAP §10.6's CPL-3 `#DB`, §25.3's machine-check recovery, §25.5's NMI
+   requests), three more things hold: an NMI handler takes no fault and runs no `iretq` before its
+   own, since either unblocks NMIs while its IST frame is live (ROADMAP §25.5, F139); NMI, `#MC`,
+   and `#DB` entries save DR7 and clear it before anything else (ROADMAP §18.4); and `#DF` never
+   returns. Holds today because every IST handler halts, except that under `kernel_tests` an armed
+   `catch` steps RIP and returns or longjmps off the IST stack. Planned (ROADMAP §10.6, F005): a
+   CPL-3 `#DB` calls `try_user_fault` (the ring-3 `#DB` kill §5.2 requires) only after rule 3's
+   move, because `try_user_fault` ends in `finish_exit`, which can switch threads.
 7. Every gate but `#BP` is DPL 0, so `int n` from ring 3 raises `#GP`; the `#BP` gate is DPL 3, so
    `int3` delivers `SIGTRAP`. RFLAGS.TF and `int1` (`0xF1`) reach `#DB` at any DPL. Rule; not yet
    enforced: ROADMAP §10.6 (F148). Every gate is DPL 0 today (`IdtEntry::interrupt`, type `0x8E`).
@@ -2419,10 +2442,11 @@ The CS.RPL rule is also wrong wherever CS is the kernel's while `GS_BASE` holds 
 `#MC`, and `#DB` in the one-instruction windows between `syscall` and the entry `swapgs` or between
 the exit `swapgs` and `sysretq`/`iretq`; a `#GP` raised by the user-return `iretq` (F007); and an
 interrupt taken inside `enter_user_full`, which runs with IF=1 from its `mov gs` to its `iretq`
-(F006). ROADMAP §10.6 closes these for the current kernel (the IST vectors decide from the sign of
-`GS_BASE`, a `#GP`, `#NP`, or `#SS` on a labeled user-return `iretq` becomes `SIGSEGV`, and
-`enter_user_full` runs `cli` before its `mov gs`) and §18.3 for FSGSBASE, where a user can load a kernel-half base. See
-[section 9.3](#93-interrupts).
+(F006). ROADMAP §10.6 closes these for the current kernel (an IST vector taken at CPL 0, and `#DF`,
+decides from the sign of `GS_BASE`, one taken at CPL 3 swaps by CS.RPL and moves to the thread's
+kernel stack, a `#GP`, `#NP`, or `#SS` on a labeled user-return `iretq` becomes `SIGSEGV`, and
+`enter_user_full` runs `cli` before its `mov gs`) and §18.3 for FSGSBASE, where a user can load a
+kernel-half base. See [section 9.3](#93-interrupts).
 
 `with_current` gives `&mut PerCpu` with IRQs off and panics on same-CPU re-entry. `switch_now` uses
 `with_current_switch`: the `InterruptGuard` spans `switch_context` (it lives on the outgoing stack)
@@ -2451,7 +2475,7 @@ for every thread, such as `CR4.TSD` or `SCTLR_EL1.UCT`, is a row of §11.4's tab
 | RSP0 | TSS.RSP0 and `PerCpu.kernel_rsp0`: the top of `Tcb.stack`, or `fallback_rsp0` for the bootstrap thread | `set_rsp0_for` in `on_switch` | switched |
 | CR3 | `Tcb.as_cr3` (0 means the kernel PML4) | `switch_cr3_for` in `on_switch`, skipped when unchanged | switched; no PCID (ROADMAP §18.3 adds it with §7.9's flush generation) |
 | FS_BASE (user TLS) | not saved | nothing | not switched. `enter_user`, `enter_user_full`, and `execve` write it; `force_kernel`'s `mov fs` zeroes it on every exit or kill; `fork` copies the live MSR, so a child can inherit another process's base (ROADMAP §13.1, F022). |
-| user GS base | not saved; always 0 | nothing | holds while no `ARCH_SET_GS` or FSGSBASE exists (ROADMAP §18.3) |
+| user GS base | not saved; always 0 | nothing | holds while no `ARCH_SET_GS` or FSGSBASE exists (ROADMAP §18.3); from then on it is per thread, and while the thread is in the kernel it is in `KERNEL_GS_BASE` whichever vector it entered by, IST vectors included ([section 5.10](#510-privilege-transitions) rule 3), where the switch away reads it |
 | DR0-DR3, DR7 | the thread's decoded debug slots, and the tracer's masked DR7 for `PEEKUSER` | the switch, by the Debug state paragraph below | not built: nothing arms them before ROADMAP §17.4 |
 | DR6 | the thread's virtual DR6 | not switched: the `#DB` body writes the thread's copy from the DR6 its entry saved (§5.10) | not built: ROADMAP §17.4 |
 | aarch64: `DBGBVR`/`DBGBCR`, `DBGWVR`/`DBGWCR`, `MDSCR_EL1.MDE` | the thread's decoded debug slots | the switch, by the Debug state paragraph below | not built: ROADMAP §17.4 |
@@ -3130,11 +3154,16 @@ enqueue work. The thread may alloc and block ([section 2.2](#22-interrupt-handle
 The handler decided `swapgs` from CS.RPL. Between `syscall` and the entry `swapgs`, and between the
 exit `swapgs` and `sysretq`/`iretq`, CS is the kernel's but `GS_BASE` holds the user base, so the
 handler skips the swap and `gs:[0]` is whatever userspace set. Rule: ordinary vectors may trust
-CS.RPL, except a `#GP`, `#NP`, or `#SS` raised by a user-return `iretq`, which arrives with the kernel
-CS and the user GS base (ROADMAP §10.6, F007); the IST vectors decide from the sign of `GS_BASE`
-(ROADMAP §10.6), and once FSGSBASE lets a user load a kernel-half base they save `GS_BASE` and load
-the per-CPU base unconditionally (ROADMAP §18.3). Not yet enforced: the `arch/idt.rs` handlers, IST vectors included,
-decide from CS.RPL, and the device pool stubs and keyboard ISRs make no GS decision at all
+CS.RPL, except a `#GP`, `#NP`, or `#SS` raised by a user-return `iretq`, which arrives with the
+kernel CS and the user GS base (ROADMAP §10.6, F007); the IST vectors may trust CS.RPL 3, since user
+code cannot write `KERNEL_GS_BASE`, and move such a frame to the thread's kernel stack; a CPL-0
+frame, and every `#DF`, decides from the sign of `GS_BASE` (ROADMAP §10.6), and once FSGSBASE lets a
+user load a kernel-half base, saves `GS_BASE` and loads the per-CPU base unconditionally (ROADMAP
+§18.3). Applying that save-and-load protocol to a CPL-3 frame as well leaves the `PerCpu` address in
+`KERNEL_GS_BASE` while the thread is in the kernel, so a switch from the moved body saves it as the
+thread's GS base, and the thread resumes on another CPU with a kernel address as its GS base, or
+with two CPUs sharing one `PerCpu`. Not yet enforced: the `arch/idt.rs` handlers, IST vectors
+included, decide from CS.RPL, and the device pool stubs and keyboard ISRs make no GS decision at all
 ([section 7.5](#75-per-cpu-data), F004).
 
 **A user program halts every CPU.**
