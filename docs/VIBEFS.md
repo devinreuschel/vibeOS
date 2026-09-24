@@ -448,6 +448,14 @@ An error before step 5 frees them at once, since no super on disk reaches
 them. Freeing them at once after a step 5 or 6 error would let the retry
 overwrite the tree of a super that a crash then mounts.
 
+From ROADMAP §12.5, a failed commit also keeps the file pages it was
+writing dirty, and a later commit writes them again. Of the blocks an
+error frees, those whose own write failed are not allocated again while
+the volume stays mounted, so the retry goes to other blocks. After
+`DEFAULT_RETRY_BUDGET` failed commits in a row the volume goes read-only
+and drops its dirty pages. Each failure is recorded for `fsync` on the
+files it touched (DESIGN §10.6).
+
 v1 code does not meet step 5 after a failed commit: it advances the
 generation and roots in memory before the alloc write, and picks the slot
 by generation parity, so the retry after a failed alloc write, first flush,
@@ -655,3 +663,11 @@ snapshot ioctls on a directory descriptor, as btrfs issues them, which are
 not a native interface (ROADMAP, How to read this). Cost of the birth
 scheme: one generation per extent record, and deadlist blocks sized by what
 dies under snapshots.
+
+Stable bytes: a data checksum, like v1's extent CRC, covers exactly the
+bytes the device writes. A page does not change while it is written back,
+and a direct-I/O write to a checksummed file goes through a kernel copy
+(DESIGN §10.6). A checksum over bytes that changed while the device wrote
+them would make the block read as `Corrupt` for good, with no disk fault
+behind it. NOCOW files and unwritten ranges have no data checksum and need
+none of this.

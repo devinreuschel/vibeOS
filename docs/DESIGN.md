@@ -4044,6 +4044,37 @@ way, with an `address_space` per file and per block device. Rejected: keying fil
 coherent eviction; a B-tree index, whose splits allocate on insert and remove, for dense keys that
 gain nothing from it.
 
+Planned (ROADMAP §12.5): the writeback contract.
+
+- Errors follow Linux's `errseq_t` at the [LINUX.md](LINUX.md) baseline. An error in writeback, or
+  in the commit that would make a file's data durable, is recorded on the file's mapping and on its
+  volume. Each open file description's next `fsync`, `fdatasync`, `msync` with `MS_SYNC`, or
+  `sync_file_range` with a wait flag returns it once; a description opened later returns an error
+  that no description has seen yet; `syncfs` returns the volume's errors the same way.
+- vibefs keeps a failed commit's file pages dirty and writes them again, to other blocks, at its
+  next commit ([VIBEFS.md](VIBEFS.md) §10), where Linux marks them clean; `docs/LINUX.md` lists the
+  difference. A volume whose commits fail `DEFAULT_RETRY_BUDGET` times in a row, or whose device is
+  `Failed` or `Gone` (§10.3), goes read-only, drops its dirty pages with the error recorded on each
+  mapping, and logs it.
+- Stable pages. A page of a file whose data is checksummed (vibefs v1's extent CRCs, v2's block
+  checksums) does not change while it is written back. Writeback write-protects every user mapping
+  of the page through the reverse map and completes the TLB shootdown (ROADMAP §12.1, §12.3) before
+  it checksums the page. A `write()`, a write fault, or a kernel write into the page, such as
+  truncate zeroing a tail, waits until that writeback completes, a level-3 wait (§2.1), as Linux's
+  stable pages do. A page a device holds pinned (ROADMAP §19.8) is written back from a copy,
+  checksummed over the copy, and a direct-I/O write to a file whose data is checksummed copies the
+  user buffer into a kernel buffer and checksums the copy. The checksum then covers exactly the
+  bytes the device writes, with or without §10.4's bounce copy. NOCOW files and unwritten ranges
+  ([VIBEFS.md](VIBEFS.md) §15) have no data checksum and need none of this.
+
+Why: an error nobody reports is data a program believes durable, which is why PostgreSQL treats an
+`fsync` error as fatal; and a checksum over bytes that changed while the device wrote them makes a
+block read as `Corrupt` for good with no disk fault behind it. Rejected: marking failed pages clean,
+which loses data a copy-on-write retry to fresh blocks can still save; retrying without a bound,
+which pins dirty memory for good behind a device whose writes all fail; skipping checksums for pages
+mapped writable, a gap in exactly the files that change most; and bouncing every write, which undoes
+ROADMAP §19.8's zero-copy.
+
 ---
 
 # 11. Portability
