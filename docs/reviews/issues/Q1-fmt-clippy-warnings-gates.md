@@ -1,6 +1,6 @@
 # Q1 · Land the promised gates: rustfmt, clippy, `-D warnings`
 
-**ROADMAP:** the open §10.1 boxes that cite Q1. Where this plan and those boxes differ, the boxes decide. Superseded here: step 3's one rustflags table; `-D warnings` also goes in `[target.x86_64-unknown-none].rustflags`, which shadows `[build].rustflags` for the kernel. Step 2's clippy over `--all-features` alone; CI also lints the default features that ship.
+**ROADMAP:** the open §10.1 boxes that cite Q1. Where this plan and those boxes differ, the boxes decide. Superseded here: step 3's one rustflags table; `-D warnings` also goes in `[target.x86_64-unknown-none].rustflags`, which shadows `[build].rustflags` for the kernel. Step 2's clippy over `--all-features`; CI lints each feature set an image is built with, and `kernel_shell`, instead (ROADMAP §10.1).
 
 | | |
 |---|---|

@@ -1,5 +1,7 @@
 # C2 · Centralize `VIBEOS_*` environment handling in the harness
 
+**Superseded in part 2026-09-24:** step 3's Makefile `?=` defaults as the source for `make run`; `make run` starts QEMU through the harness launcher with `env_config`'s defaults (ROADMAP §10.2).
+
 | | |
 |---|---|
 | **Area** | 4.5 Configuration |

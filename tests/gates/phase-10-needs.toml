@@ -243,6 +243,11 @@ needs = ["`vibeos.ktest=<glob>` runs only the matching in-guest tests"]
 why = "text: lands after the `ktest=<glob>` box below"
 
 [[box]]
+key = "the ktest verdict counts runs and has no whole-run deadline"
+needs = ["the in-guest registry split per subsystem"]
+why = "text: lands after the T1 box"
+
+[[box]]
 key = "for the Phase 10 exit gate's §10.10 line, the KVM leg also runs"
 needs = ["`vibeos.ktest=<glob>` runs only the matching in-guest tests"]
 why = "text: lands after §10.2's `ktest=` box"

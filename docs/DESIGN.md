@@ -3754,11 +3754,32 @@ the `ipi_init::wait_acks` frame, or a banner glued to a `ktest: ok` line. A seco
 ends at `user: dup ok` gets a third boot. `make test-smp-stress` uses the same rules, so a green run
 can hide an intermittent hang or panic.
 
+Planned (ROADMAP §10.2): `begin` carries the number of runs the boot will make, after the command
+line's filter and repeat count, and `vibeOS: ktest: run <name> <deadline_ms>` precedes each run,
+with the deadline the kernel enforces in the guest (10 s unless the registry sets another). The
+harness requires one result line per run line and exactly that many results. It has no whole-run
+deadline. `VIBEOS_TIMEOUT` bounds each stretch in which no test runs: from QEMU's start to `begin`,
+and from `end` to QEMU's exit. From `begin` to `end`, each run gets its printed deadline plus 5 s,
+and each gap between lines 5 s, all multiplied by `env_config`'s one timeout scale. That backstops
+the in-guest deadline, which a CPU wedged with IF=0 never checks; a timeout names the test of the
+last run line and prints the partial line the guest was writing. Adding tests changes no timeout,
+and a test that needs longer carries a registry override, reviewed as code. A per-subsystem list
+left out of the aggregate registry is unreferenced code, which the `kernel_tests` clippy run with
+`-D warnings` rejects as dead; the rule against a blanket `allow(dead_code)` in production modules
+(ROADMAP §10.2, Q2) keeps that true. The `utest_*` lines of ROADMAP §10.5 follow the same protocol.
+
 Skips are first class and carry their reason on the `ktest: skip <name>: <reason>` line. Every skip
 names what the configuration lacks: `no AP`, `no virtio-blk`, `no virtio-rng`, `no e1000e`, `no edu`,
 `no smep/smap/umip`, `pit owns tick`, `pic fallback`, and `rtc unread` (the `Outcome::Skip` reasons
 in `src/ktest.rs`). Destructive exception tests run inside `arch::catch` scopes, which longjmp out or
 step RIP past the faulting instruction, instead of skipping.
+
+Planned (ROADMAP §10.2): `tests/harness/skips.toml` lists each test allowed to skip, with its reason
+and the configurations it skips in (architecture, accelerator, CPU model, CPU count, memory, machine
+options, and the harness host). A run fails when its skipped set differs from the rows that match
+its configuration, in either direction, so a lost `-device` or a regressed detection that turns
+tests into skips fails the tier. Tests a run does not select print no run line and need no row, and
+a test that `VIBEOS_KTEST` names without a glob must run whatever the file says (ROADMAP §12.3).
 
 When a test fails, print enough to diagnose it without a rerun. A failing test that only prints its
 name costs a full debug cycle to learn anything.
@@ -3838,7 +3859,11 @@ failure becomes invisible, because the harness sees its last marker and passes. 
 sits between `console ok` and `shell ready` so `lspci` is registered before the prompt. The ramdisk
 `block: <name> <n> sectors` line sits after PCI and still before the shell. Partition children emit
 `block: <parent>p<N> <n> sectors` after the parent (e2e: `ram0p1`, `ram0p2`). virtio-blk adds
-`block: vda <n> sectors` and `vdapN` when the ktest disk is present (not on the production e2e `pc` set).
+`block: vda <n> sectors` and `vdapN` when the ktest disk is present (not on the production e2e `pc`
+set). The same blind spot follows the last marker: writeback, deferred reclaim, and vibefs commits
+keep running after `shell ready`, and a panic there is invisible to a harness that stops reading at
+it. Planned (ROADMAP §10.2): the console-input boot keeps reading serial for 3 s after its last
+reply and fails on a panic signature in that window.
 
 With `-smp N`, additionally:
 
@@ -3931,7 +3956,7 @@ harness defaults match them.
 | `VIBEOS_MEM` | `128M` | all; `make run` |
 | `VIBEOS_BIOS` | unset (SeaBIOS) | all |
 | `VIBEOS_QEMU_ACCEL` | `tcg` (empty omits `-accel`) | all; `make run` |
-| `VIBEOS_TIMEOUT` | `60` e2e/ps2, `90` ktest/crash | all drivers |
+| `VIBEOS_TIMEOUT` | `60` e2e/ps2, `90` ktest/crash; planned (ROADMAP §10.2): the §8.2 boot allowance, which bounds only the stretches of a boot in which no test runs | all drivers |
 | `VIBEOS_QEMU_EXTRA` | empty | all drivers |
 | `VIBEOS_TIER` | `adhoc`; each `make test-*` recipe sets its target name (planned, ROADMAP §10.9) | all drivers, which write `build/results/<arch>-<tier>.json` |
 | `VIBEOS_EXPECT_PANIC` | off (`""` / `0`) | `run_e2e` |
@@ -3971,8 +3996,8 @@ job.
 | Job | When | What |
 |---|---|---|
 | `check` | push / PR | `make check` (fmt, `vibeos-core` clippy `-D warnings`, host units, harness, ruff/mypy, `scripts/check_*.py`) then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines 87`. No QEMU, no `setup.sh`. HTML report is a 7-day `hostlib-coverage` artifact. |
-| `phase 0 ladder` | push / PR, `needs: check` | Limine, QEMU/nasm/xorriso/OVMF, kernel clippy `-D warnings` with `--all-features`, `kernel_tests`, and `vibefs_crash` (never the default feature set that ships), ISO, e2e (BIOS/UEFI/panic/#GP/PIT/9 GiB), in-guest at `-smp 2` and `-smp 4`, LAPIC fallback, vibefs crash. Green `main` uploads `vibeos.iso` (7 days). |
-| `smp-stress` | weekly Monday 06:00 UTC + dispatch | `-smp 4`, longer timeout |
+| `phase 0 ladder` | push / PR, `needs: check` | Limine, QEMU/nasm/xorriso/OVMF, kernel clippy `-D warnings` with `--all-features`, `kernel_tests`, and `vibefs_crash` (never the default feature set that ships); ROADMAP §10.1 lints each feature set an image is built with, and `kernel_shell`, in place of `--all-features`; ISO, e2e (BIOS/UEFI/panic/#GP/PIT/9 GiB), in-guest at `-smp 2` and `-smp 4`, LAPIC fallback, vibefs crash. Green `main` uploads `vibeos.iso` (7 days). |
+| `smp-stress` | weekly Monday 06:00 UTC + dispatch | `-smp 4`, longer timeout (`VIBEOS_TIMEOUT=180`); planned (ROADMAP §10.2): the §8.2 per-run deadlines, with no longer timeout |
 | `nightly-canary` | same workflow, non-blocking | undated latest nightly, `make iso && make test-unit` |
 | `release` | `v*` tags | `make test-e2e` (BIOS) only, then production + ktest ISO, changelog section, GitHub Release. It does not wait for `ci` at the tagged commit, and the ktest ISO writes fixed LBAs of any virtio-blk disk attached at boot (ROADMAP §10.1, F145). Planned (ROADMAP §10.1): dispatched from `main` with the release tag as input; a `build` job with `contents: read` and `actions: read`, no cache, and no persisted token, then a `publish` job that runs no repository script; from ROADMAP §14.6 a `sign` job in the `release` environment between them, and from §22.4 a keyless `verify` job on vibeOS. |
 
