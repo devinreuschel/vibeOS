@@ -182,7 +182,7 @@ Acquire in this order, release in reverse. Never take a lower number while holdi
 take a second lock of a number already held only through §2.3's nested acquire.
 
 1. heap
-2. page tables
+2. page tables: the kernel's lock, and from ROADMAP §12.1 one lock per address space
 3. physical allocator (buddy)
 4. scheduler (also: wait-queue lists and blocking-primitive predicates)
 5. device / driver locks
@@ -206,9 +206,9 @@ outermost first:
    child. A `rename` takes the volume's rename lock, then its two directories: an ancestor before its
    descendant, and two directories neither of which contains the other in address order
 2. the address-space lock (ROADMAP §13.1: `mmap`, `munmap`, and `mprotect` take it for writing, the
-   fault path for reading). It guards the region tree only. A page-table entry changes under the
-   page-table spinlock (the PT rank above), so the reverse-map unmap that direct reclaim does
-   ([§4.4](#44-kernel-heap)) takes no address-space lock
+   fault path for reading). It guards the region tree only. A page-table entry changes under its
+   space's page-table spinlock (the PT rank above), so the reverse-map unmap that direct reclaim
+   does ([§4.4](#44-kernel-heap)) takes no address-space lock
 3. waits on a page-cache page or a block buffer (ROADMAP §12.5)
 4. a filesystem's block-mapping and volume I/O locks, which its page-fill and writeback paths take
    and which are never held across a user copy
@@ -335,10 +335,11 @@ The lock, the serviced spins, and the two cells:
 | `BootCell` | Write once before `smp: done`, then shared `&T`. The set-once check is a `debug_assert!` (ROADMAP §10.2, F137), and the `Sync` impl has no `T: Send + Sync` bound, so `per_cpu_init::CPUS` shares the non-`Sync` `PerCpu` (ROADMAP §10.3, F017, F039). |
 
 Two locks of one rank nest only through `lock_nested`, in a pair order the call site's comment
-names, and a per-rank count keeps the outer rank held when the inner lock drops. ROADMAP §13.12's
-lock classes add address order for a socket pair and check every pair order. Rule; not yet enforced:
-`lock` lets a lock of a held rank nest, the inner release clears the rank bit the outer lock still
-holds, and nothing stops the code in §2.2's last row from taking a lock (I1; ROADMAP §10.3, F108).
+names, and a per-rank count keeps the outer rank held when the inner lock drops. ROADMAP §12.1 adds
+`fork`'s pair, the parent's page-table lock before the child's. ROADMAP §13.12's lock classes add
+address order for a socket pair and check every pair order. Rule; not yet enforced: `lock` lets a
+lock of a held rank nest, the inner release clears the rank bit the outer lock still holds, and
+nothing stops the code in §2.2's last row from taking a lock (I1; ROADMAP §10.3, F108).
 
 A wake takes the scheduler lock, which ranks before device and serial locks. So code holding one of
 those records the wake and performs it after dropping the lock, as §10.1's completion does, and a
@@ -478,7 +479,7 @@ separate namespace.
 | I5 | One entry stub per vector makes the `swapgs` decision (§5.10 rule 1) | `arch/idt.rs` | documented | No: the `irq_init` pool gates `0x31`–`0x7F` and the `kbd_init` gates `0x30` and `0x21` skip it (ROADMAP §10.6, F004) |
 | I6 | Ring 3 never halts the kernel (§2.5, §5.2) | `proc_init::try_user_fault` | documented | No: ring-3 `#DB`, and `#AC` when `CR0.AM` is set, halt (F005), and so do the I4 windows (ROADMAP §10.6) |
 | I7 | The kernel never dereferences a user VA; copies go through the physmap after `check_user_range` (§5.1) | `addr_space.rs` | enforced | Yes, but `write_bytes` ignores the PTE's `WRITABLE` bit (ROADMAP §10.6, F023) |
-| I8 | One thread per address space; nothing mutates an address space concurrently | process model | assumed | Yes. Lock-free user copies, local-only `invlpg`, and `&'static AddressSpace` depend on it. ROADMAP §13.1's threads end it, and bring the address-space lock and a counted handle in place of those three |
+| I8 | One thread per address space changes its regions, and another CPU changes its page tables only under its page-table lock (§2.11) | process model | assumed | Yes: only the owning thread touches a space. Lock-free user copies, local-only `invlpg`, and `&'static AddressSpace` depend on it. ROADMAP §10.6 replaces `&'static` with a counted object, §12.1's reverse map changes page tables from other CPUs under the space's page-table lock, §12.3 shoots down every CPU in the space's set, and §13.1's threads bring the address-space lock |
 | I9 | TCBs are never freed, so a `*mut Tcb` stays valid | 64-slot table, `thread_init` | assumed | Yes, but `spawn_inner` can reuse a Dead slot whose thread is still switching out (ROADMAP §10.10, F012) |
 | I10 | A dead thread's stack is freed only after its CPU has switched off it (§2.8, §4.5) | `kva_init::DEFERRED` | documented | No: any CPU drains the global list (F012), and the 8-slot list panics when full (F010) (ROADMAP §10.10) |
 | I11 | A completer's publishing store is its last access to the waiter (§2.8) | `block_init::IoWaiter` | documented | No: `IoWaiter::finish` runs `wake_all` after it stores `done` (ROADMAP §10.10, F002) |
@@ -641,6 +642,29 @@ covers the last store of a hand-off; these rules cover the rest.
    the call that started it holds counted references to every object it will touch (ROADMAP §12.5's
    owned block submission).
 
+An address space has two counts, as Linux's `mm_users` and `mm_count`. `users` counts the threads
+that run in it and a remote accessor's temporary pin (ptrace, `/proc/<pid>/mem`, `process_vm_readv`,
+procfs `maps` and `smaps`). A pin is taken only by get-unless-zero, so it fails once the last thread
+has left, and it lasts one access, so no remote reader keeps a dead process's memory. The last
+`users` put runs the teardown. The core is a `TryArc` that each region and each `users` holder
+references, and so does a CPU that keeps the root loaded after its thread leaves; it holds the root
+table, the page-table lock, and the CPU set. Freeing the core frees the root and the struct and runs
+no teardown. Teardown runs in one order over the whole space: zap every region's PTEs, keeping the
+frames they drop until the shootdown completes (ROADMAP §12.3); unlink every region from its
+reverse-map object, taking that object's lock for writing; free the page-table pages below the root,
+clearing each parent entry under the space's page-table lock; then drop the regions and their core
+references. `munmap` follows the same order for its range and frees only the table pages that no
+remaining region covers. The reverse map is a lookup structure in rule 3's sense, and unlinking
+under its write lock is rule 3's unpublish together with its wait for operations in progress. So a
+reverse-map walker takes no count: it holds the object's reverse-map lock for reading while it
+borrows each region's core and takes that core's page-table lock, and a region it can see still has
+its core and its page tables. A walker that took `users` could drop the last one and run the
+teardown inside direct reclaim ([§4.4](#44-kernel-heap) rule 2). Code running inside direct reclaim
+or the OOM killer releases nothing: a put there that may be the last hands the release to a
+workqueue worker. Rule; not yet enforced: an address space has one owner, its process-table slot,
+and is reached through `&'static` references (ROADMAP §10.6, F019), and one global `PT` lock serves
+every space until ROADMAP §12.1.
+
 Why: the kernel review's CRITICAL and HIGH lifetime findings (F002, F012, F019) each came from an
 object that one subsystem freed or reused while another could still reach it, under a scheme that
 subsystem invented. Rejected: keeping one scheme per subsystem, which is how those bugs arose; and
@@ -649,7 +673,7 @@ RCU reclamation is kept for lockless readers only (ROADMAP §19.5); everything e
 
 Today the code breaks rules 1, 2, 4, and 5: TCBs are never freed and their slots are rewritten in
 place (I9; ROADMAP §10.10, F012), address spaces are reached through `&'static` references built
-from table-owned boxes (ROADMAP §13.1, F019), block completions point into stack frames (ROADMAP
+from table-owned boxes (ROADMAP §10.6, F019), block completions point into stack frames (ROADMAP
 §10.10, F002; §12.5, F042), and a pid is the index of its process-table slot, handed out lowest
 first (ROADMAP §10.4, F127).
 
@@ -1071,8 +1095,8 @@ lock, its own address-space lock, or a busy page-cache page (§2.1's sleeping ti
    and then fails.
 2. It frees clean pages only. It drops clean page-cache pages. It unmaps clean mapped ones through
    the reverse map, taking only each address space's page-table spinlock and a try-lock of the page,
-   and it skips any page it cannot take at once. It takes no sleeping lock, the address-space lock
-   included.
+   and no count on the space ([§2.11](#211-object-lifetimes)), and it skips any page it cannot take
+   at once. It takes no sleeping lock, the address-space lock included.
 3. It writes no page. The ROADMAP §12.5 writeback threads write dirty file pages, and ROADMAP
    §12.7's swap-out thread writes anonymous pages. Direct reclaim wakes those threads and then waits, with a
    deadline, only for writes already submitted to a device. When that frees too little, the OOM
