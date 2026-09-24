@@ -942,9 +942,10 @@ The rule for every completion, hand-off, and deferred reclaim:
    the last access: on a weakly ordered CPU, a load or store the publisher made to the object
    earlier can still be performed after a Relaxed store is visible.
 2. An object that its owning CPU may still use (the kernel stack it runs on, a TCB that is switching
-   out, an AP's stacks and tables during bring-up) is freed only after that CPU has passed a point
-   the reclaimer can observe: its `switch_context` away from the object has returned, or INIT has
-   stopped the AP. A global list that any CPU drains does not meet this rule.
+   out, an AP's stacks and tables during bring-up, and the old kernel's code, tables, and stacks
+   when a planned kexec hands its memory to the new kernel, ROADMAP §25.4) is freed only after that
+   CPU has passed a point the reclaimer can observe: its `switch_context` away from the object has
+   returned, or INIT has stopped the AP. A global list that any CPU drains does not meet this rule.
 
 Rule; not yet enforced. The violations, and the ROADMAP lines that fix them:
 
@@ -2290,7 +2291,11 @@ that `alloc_constrained` returns (§4.2). A boundary is not an address limit:
 `DmaAlloc::dma32` sets a 4 GiB boundary, so its buffer never crosses a 4 GiB line, but the buffer can
 lie above 4 GiB once RAM extends there, and no allocator keeps a 32-bit device's buffer below 4 GiB
 (ROADMAP §20.6, F030). The device-visible address is `dma_to_device(phys)` (identity until an IOMMU
-exists), never a physmap virtual address.
+exists), never a physmap virtual address. A kernel never assumes that DMA is stopped when it
+starts. After a planned kexec, Bus Master Enable is clear on every PCI function (ROADMAP §25.4); a
+capture kernel entered from a crash clears it on every function, and aborts SMMUv3 streams, before
+it touches a device, routes an interrupt, or turns off an IOMMU translation it found enabled.
+Clearing Bus Master Enable also stops a device's MSIs, which are memory writes.
 
 `sync_for_device` / `sync_for_cpu` always run at the API boundary. On x86 they are `fence(Release)` +
 `sfence` and `fence(Acquire)` + `lfence`. Descriptor publish stores the index after that store-side
