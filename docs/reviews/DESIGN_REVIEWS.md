@@ -216,6 +216,62 @@ Ids G029 to G041 are unused: G042 and G043 were numbered apart as the legal and 
 | J140 | Major | A phase closes only when its section boxes are ticked or deferred | ROADMAP How to read this, standing gates, §9.3, §9.7, §10.9, §22.3; AGENTS | #92 |
 | J141 | Minor | The issue index's Status column is the one status of a letter code | ROADMAP Phase 10, §10.1, §10.2, §10.5, §10.8; issue plans A1, A2, B1, B2, B3, B4, C2, D3, DOC1, DOC3, DOC4, DX1, E1, E3, O1, P2, Q3, Q4, R1, index, S1, T2, T3 | #92 |
 | J142 | Major | One precedence rule, and each open plan names what its boxes supersede | ROADMAP How to read this, Phase 10, §10.2, §10.3; DESIGN header; AGENTS; issue plans A1, A2, A3, A4, B3, B4, D1, D2, DOC2, DOC4, DX1, E1, E2, I1, P1, Q1, Q2, Q5, R1, index, S1, T1, T4 | #92 |
+| J143 | Major | One marker registry replaces four copies of the boot contract | ROADMAP How to read this, standing gates, §10.2, §11.1, §11.2, §11.7; DESIGN §8.3 | #92 |
+| J144 | Major | Memory gates count what they claim: crash epochs, zero-page faults, exhaustive accounting, heap bytes | ROADMAP Phase 12, §12.1, §12.2, §12.5, §12.6, §13.13, Phase 25, §25.7, Phase 27, Phase 30, Phase 39, Long runs and scale; DESIGN §4.4 | #92 |
 | J145 | Minor | aarch64 guests run on arm64 runners, and HVF records loop the -smp 4 tier | ROADMAP standing gates, §10.1, §10.8, Phase 11, §11.7; DESIGN §8.6 | #92 |
+| J146 | Major | Enable only the hypervisor paths a gated run covers, cover each in the kvm-unit-tests line, and fund one Intel and one AMD test PC | ROADMAP How to read this, Phase 21, §21.1, Phase 22, Era VI. Production, Bare metal and hardware CI | #92 |
+| J147 | Major | Speed thresholds under KVM are stated against Linux in the same job | ROADMAP How to read this, Phase 12, Phase 15, Phase 16, §16.1, Phase 19, §19.3, §19.4, Phase 25; DESIGN §8.6 | #92 |
+| J148 | Major | A ticked box keeps its text, and funded goals add lines, lapse, and disclose moves | ROADMAP How to read this, §10.9, §17.7, Phase 21, §21.1, §22.1, §22.3, §39.3, Funded goals, Bare metal and hardware CI, Hosted CI capacity, Long runs and scale; AGENTS; PR template | #92 |
 | J149 | Major | Scheduled CI runs in FIFO lanes, and a release candidate heads a release branch | ROADMAP How to read this, standing gates, §10.1, §10.2, §10.9, §14.9, §17.7, §22.1, §24.2, §29.5, Phase 39, §39.2, §39.3, Hosted CI capacity; DESIGN §8.6 | #92 |
 | J150 | Major | Fuzz crashes stay sealed until fixed, and the embargo gets a release path | ROADMAP §10.1, §10.7, §14.10, Phase 22, §22.5, Phase 39, §39.3; DESIGN §1.5, §8.6 | #92 |
+| J151 | Minor | The file is the license unit, adapted code is notice-only, and patented formats wait for the owner | ROADMAP §10.9, §11.6, §12.2, §14.10, §29.2, Phase 36, §36.6, §37.1, §37.2, Daily-driver hardware; DESIGN §1.5; AGENTS | #92 |
+| J152 | Minor | The physmap gets a slot, every kernel PDPT exists at install, and memremap maps what the kernel does not own | ROADMAP §11.1, §11.2, Phase 12, §12.1, Phase 18, §18.1, §18.2, §20.1, §25.4, §27.6, Phase 38, §38.2; DESIGN §2.7, §4.1, §4.3, §11.2 | #92 |
+| J153 | Minor | Lower layers call up only through listed init hooks, and one allocation entry reaches reclaim | ROADMAP §10.3, §12.6; DESIGN §1.1, §1.2, §4.4 | #92 |
+| J154 | Minor | The AP trampoline page comes from the memory map, and the buddy's exclusions are stated once | ROADMAP §10.6, §20.2; DESIGN §2.4, §2.7, §4.1, §4.2, §7.3, §9.2, §11.1 | #92 |
+| J155 | Minor | x86 AP bring-up failure lands in §11.4 beside aarch64's, and gate 508 says what it proves | ROADMAP Phase 4, §4.5, §11.4, §20.1, §27.5; DESIGN §2.8, §7.4, §7.11, §9.5 | #92 |
+| J156 | Minor | An unsupported operation returns Linux's errno for it, and FAT zeroes the slack an extension exposes | ROADMAP §10.4, §12.5, §13.9, §26.4; VIBEFS §1; issue plans A3 | #92 |
+| J157 | Minor | `vibeos-core` gets an MSRV that `make check` builds, and Phase 10's Cargo mechanisms work | ROADMAP §10.1, §10.2, §10.4, §12.1, §38.1; DESIGN §1.1, §3.1, §4.4 | #92 |
+| J158 | Minor | The kernel is built and linted with warnings denied from wave 1, and releases ship the release profile | ROADMAP How to read this, Phase 10, §10.1, §10.2, §10.8, §10.9, §18.4; DESIGN §2.5, §3.5; SYSCALL §3.1; VIBEFS §3; AGENTS; `Cargo.toml`, `tests/gates/phase-10-needs.toml`; issue plans DX1 | #92 |
+| J160 | Minor | Record that disk encryption gives secrecy, not integrity, and ask the owner before it is on by default | ROADMAP §18.8, Beyond | #92 |
+| J161 | Minor | Paid goals state their recurring costs, the $0 Khronos route and buy lists that work on arrival | ROADMAP Funded goals, Public clouds, Hosted CI capacity, Daily-driver hardware, Paid services | #92 |
+| J162 | Minor | Publish-last is Release and Acquire, its hand-offs get models, and the clock latch is safe in NMI | ROADMAP §10.3, §10.4, §10.8, §10.10, §11.3, §11.4, §11.7; DESIGN §2.5, §2.8, §6.4, §7.5, §7.6, §9.4, §10.1; AGENTS; issue plans A4, D1 | #92 |
+| J163 | Minor | Move threads between CPUs only through inboxes, and plan the SCHED split | ROADMAP §10.7, §10.10, §13.12, §19.4; DESIGN §7.7, §9.4 | #92 |
+| J164 | Minor | Faulting and non-faulting user-memory accessors, each with its fault contract | ROADMAP §10.6, §12.2, §12.5, §13.12; DESIGN §2.1, §2.2, §2.5, §2.7, §2.9, §5.1, §5.2, §11.5 | #92 |
+| J165 | Minor | Reserve the frame-metadata and KASAN-shadow regions, and map the shadow from _start | ROADMAP §12.1, §18.2, §20.1, §25.4, §27.3; DESIGN §3.3, §4.1, §11.2 | #92 |
+| J166 | Minor | User address-space limits follow Linux from Phase 12 | ROADMAP Phase 10, §10.4, §10.6, §12.2, §12.4, §23.4; issue plans D1 | #92 |
+| J167 | Minor | The switch tail caches dead stacks and never unmaps | ROADMAP §10.10, §12.1, Phase 25; DESIGN §4.5 | #92 |
+| J168 | Minor | The hypervisor and pseudo-NMI boxes name the CPU state and entry paths they change | ROADMAP §21.1, §25.5 | #92 |
+| J169 | Minor | §19.9's slab drops constructors, hands out kalloc types, and gates on the lock it relieves | ROADMAP Phase 19, §19.9, §19.10; DESIGN §4.4, §4.6 | #92 |
+| J170 | Minor | Reclaim skips mlocked pages, and §19.4 names Linux's scheduling interface for rtkit | ROADMAP §12.4, §19.4, §34.4; DESIGN §4.4 | #92 |
+| J171 | Minor | A page two PT_LOADs share gets the later segment's permissions, as on Linux, and user binaries never share one | ROADMAP §10.5, §10.6, §12.2; SYSCALL §7 | #92 |
+| J172 | Minor | User-visible behaviour follows Linux on each architecture, and aarch64 keeps TBI0 with Linux's untagged syscall ABI | ROADMAP How to read this, Phase 11, §11.1, §11.6, §18.4, Phase 23; DESIGN §11, §11.2, §11.4; SYSCALL header | #92 |
+| J173 | Minor | §15.6 names Linux's TCP defaults and off-path defenses, and caps packetdrill's list | ROADMAP Phase 15, §15.4, §15.6, §15.8, §15.10; DESIGN §2.10 | #92 |
+| J174 | Minor | Kexec parks x86 APs in INIT, and a capture kernel stops inherited DMA first | ROADMAP §18.1, §25.4; DESIGN §2.8, §4.7 | #92 |
+| J175 | Minor | Machine-check recovery runs in exit work, the SRAR gate injects at CPL 3, and the capture kernel feeds the watchdog | ROADMAP §20.6, Phase 25, §25.1, §25.3, §25.4; DESIGN §2.5, §5.2, §5.10 | #92 |
+| J176 | Minor | EFI runtime calls run on one efi_rt thread with interrupts on and a 1:1 map, and a firmware record marks CPUs in firmware | ROADMAP §20.9, §25.4, §25.5, §25.6, Phase 26; DESIGN Contents, §2.5, §2.9, §4.8 | #92 |
+| J177 | Minor | The blocked-thread sweep reads recorded deadlines, and the lockup detectors take Linux's thresholds | ROADMAP §10.7, §13.5, Phase 25, §25.5, §27.5, Bare metal and hardware CI; DESIGN §6.5, §8.3 | #92 |
+| J178 | Minor | Pid 1's death is the one way ring 3 ends the system, and its panic names the cause | ROADMAP §10.5, Phase 20; DESIGN §2.5, §2.7, §2.10, §10.3; AGENTS | #92 |
+| J179 | Minor | One Limine base revision, stated boot options, and whole EL2 state on aarch64 secondaries | ROADMAP §11.1, §11.4, §18.2; DESIGN §2.9, §3.2, §11.1; `limine.conf` | #92 |
+| J180 | Minor | Every ECAM window is stored by its first bus, and MCFG bases are moved there when parsed | ROADMAP §11.5, §20.1; DESIGN §9.2 | #92 |
+| J181 | Minor | Size MAX_META to v1's worst case, tie the crash criterion to fsync, and drop the mirror | ROADMAP §10.11, §38.3; DESIGN §8.3; VIBEFS §6, §10, §12 | #92 |
+| J182 | Minor | Leap seconds follow Linux's STA_INS and STA_DEL stepping, never a kernel smear | ROADMAP §30.5 | #92 |
+| J183 | Minor | DMA limits, the direct entry's layout logic, and aarch64 sigreturn code each have one home | ROADMAP §13.8, §13.10, §25.4, §27.2; DESIGN §4.1, §11.1 | #92 |
+| J184 | Minor | Rules mark what is not built yet, rule 4 lists the untrusted sources once, and README stops overstating safety | DESIGN §2.10, §4.4, §8.1; AGENTS; README; `tests/gates/phase-10-needs.toml`; issue plans S1 | #92 |
+| J185 | Minor | Every stated rule gets a register row, and SAFETY comments cite it | ROADMAP standing gates, §10.1, §10.3, §18.4; DESIGN §2.7; AGENTS | #92 |
+| J186 | Minor | Fix boxes name proofs that fail on the unfixed code | ROADMAP How to read this, §9.4, §10.1, §10.2, §10.3, §10.6, §10.10, §10.11, §11.6, §13.1, §18.3, §19.6, §20.1; DESIGN §2.5, §9.1 | #92 |
+| J187 | Minor | A checkbox is work with a proof; intent and decisions become prose | ROADMAP How to read this, §10.9, Phase 11, §12.1, Era III. Platform, Phase 14, §14.1, §14.3, §15.6, §15.9, §16.3, §16.7, §19.9, Phase 20, §37.4 | #92 |
+| J188 | Minor | A pull-request run proves no commit, and no main run is cancelled | ROADMAP How to read this, §10.1, §10.9, Bare metal and hardware CI; DESIGN §8.6 | #92 |
+| J189 | Minor | `make gate` covers Phases 8 and 9; check where findings' boxes sit | ROADMAP Phase 10, §10.9; CHANGELOG; `KERNEL_REVIEW.md` | #92 |
+| J190 | Minor | Fix the QEMU setup: aarch64 argv, edu mask, firmware pairs, cores | ROADMAP §10.2, §10.7, Phase 11, §11.5, §11.7, §18.1, §25.7; DESIGN §8.4; CHANGELOG; issue plans A2, I1 | #92 |
+| J191 | Minor | A nightly mm_compose test runs Phase 12 and 13's memory paths together under lockdep and KASAN | ROADMAP Phase 13, §13.12, §13.13 | #92 |
+| J192 | Minor | Five later gate lines fail on the bug and run as written | ROADMAP How to read this, §13.9, §18.5, Phase 21, §21.8, Phase 22, §22.2, Phase 25, §25.2, Bare metal and hardware CI | #92 |
+| J193 | Minor | Name each specification's trace events and order traces by causality | ROADMAP §10.10, §38.4, §38.5; DESIGN §7.9 | #92 |
+| J194 | Minor | Decide `/dev/log`'s owner, who makes by-id links, window decorations, and the host mount | ROADMAP §16.5, §16.6, §17.4, §20.9, Phase 23, §23.5, Phase 30, §30.3, Beyond | #92 |
+| J195 | Minor | Define the terms later gates depend on | ROADMAP How to read this, §20.1, §22.1, §22.4, Phase 24, §24.5, Phase 25, §25.5, §25.6, Phase 27, §27.4, Phase 29, §29.4, Phase 33, §33.3, §37.4, Funded goals | #92 |
+| J196 | Minor | Run Phase 21 beside Phase 20 and let Phase 22 need only its container sections | ROADMAP The arc, Era IV. Frontier, Phase 21, Phase 22, §22.1, §22.4, Era VI. Production, §25.4 | #92 |
+| J197 | Minor | Gate the aarch64 direct entry's VMM boot under QEMU -kernel, and make the Oracle Cloud backend a stretch | ROADMAP Phase 26, §26.4, §26.6, §26.7, Public clouds | #92 |
+| J198 | Minor | Funded hardware lines read metered outlets and name their pass criteria | ROADMAP Funded goals, Bare metal and hardware CI, Public clouds | #92 |
+| J199 | Minor | Native builds say why and check against acpiexec, busybox, crun and cloud-init | ROADMAP §14.4, §14.5, Phase 20, §20.2, §20.8, Phase 21, §21.6, §26.2, Beyond | #92 |
+| J200 | Editorial | Match DESIGN to its own constraints, marker grammar and single-home constants, and fix wrong citations | ROADMAP The arc, Phase 10, §10.3, Phase 12, §12.7, §14.3, §17.7, §19.10, §23.2, Era VIII. Assurance; DESIGN §1.1, §1.4, §2.6, §2.7, §3.1, §3.3, §3.6, §5.4, §6.1, §8.6; SYSCALL §1; `.github/workflows/ci.yml` | #92 |
+| J201 | Editorial | Review documents name their PRs and the issue index's tiers stop reading as phases | `ARCHITECTURE_REVIEW.md`; issue plans A4, index | #92 |
+| J202 | Editorial | Correct stale scaffolding comments, gate FAIL_NEXT with the test hooks, and drop wrong cites | ROADMAP §10.2, Phase 13, Public clouds, Hosted CI capacity; CONTRIBUTING; CHANGELOG; `.gitignore`, `Makefile`, `src/arch/gdt.rs`, `src/arch/trampoline.S`, `src/fb_init.rs`, `src/log_init.rs`, `src/main.rs`, `src/paging.rs`, `src/paging_init.rs`, `src/per_cpu.rs` | #92 |
