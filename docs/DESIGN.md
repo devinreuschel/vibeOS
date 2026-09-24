@@ -4136,6 +4136,16 @@ fixed gets a test that would have caught it, in the cheapest tier that can catch
 [section 9](#9-pitfalls) names the rule that guards it, and where that rule is only an invariant in
 code with no test, that is a weaker guarantee and should be visible as such.
 
+Rule; not yet enforced: a pull request does not quietly change the gates that judge it. From ROADMAP
+§10.9, `tests/gates/inputs.toml` lists the gate inputs (the check scripts and their tests, the gate
+maps, every expected-failure and skip list, `deny.toml`, the workflows, the Makefile's `check` and
+`gate` recipes, and KERNEL_REVIEW.md) and holds the floor above; `scripts/check_gate_inputs.py`
+compares each pull request with its merge base and fails when it lowers the floor, adds an
+expected-failure or skip entry or edits or removes another input without a `Gate-change:` trailer, or
+edits a finding's heading or severity line; and rulesets require `check` and `ci-pass`, one job that
+needs every per-push job, on `main`. Today the floor is a literal in the workflow a pull request can
+edit, the check scripts judge the pull request that edits them, and `main` requires no check.
+
 Planned (ROADMAP §38.1): `make verify` checks the Verus proofs and TLA+ specifications on every push
 that changes `vibeos-core` or `docs/specs/`. From the `phase-38` tag, a change that adds an operation
 or a layer to a proved structure, or reorders a modelled protocol, extends its proof or specification
