@@ -164,11 +164,17 @@ and measured behaviour, or from sources whose license lets it into an MIT tree:
   down with a citation of where it is defined.
 - MIT, BSD, ISC, zlib, or Apache-2.0 code may be adapted, with its copyright and license notice kept
   beside it (and, for Apache-2.0, its NOTICE text).
+- Cryptographic primitives and the TLS state machine are depended on, never written in-tree: pinned,
+  widely reviewed crates behind one facade, `vibeos-crypto`, under ROADMAP §10.9's `cargo deny`
+  policy, with RustCrypto and dalek for the primitives and rustls for TLS (ROADMAP §14.7, §15.11).
+  In-tree crypto code is the entropy pool, the CSPRNG's construction, the signature formats, and glue.
 - Third-party sources the tree builds rather than copies follow ROADMAP §14.10's port policy, and test
   inputs fetched at test time (Linux's device trees, QEMU's ACPI tables) are never committed.
 
 Why: one function derived from GPL code would put the kernel under the GPL, against the project's
-license. The kernel review's spot check found no such copy, but no rule said so.
+license. The kernel review's spot check found no such copy, but no rule said so. Crypto written
+in-tree fails where test vectors do not look (timing, nonce reuse, signature malleability), and one
+such bug forges a package; the crates have had the review this project cannot give them.
 
 ---
 
