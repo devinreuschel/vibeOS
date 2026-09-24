@@ -2501,7 +2501,7 @@ for every thread, such as `CR4.TSD` or `SCTLR_EL1.UCT`, is a row of §11.4's tab
 | RFLAGS | `CpuContext.rflags`; IF comes from `irq_nest` (`apply_if_on_resume`) | `switch_context` | switched |
 | `irq_nest` | `Tcb.irq_nest`, swapped with `PerCpu.irq_nest` | `switch_now` | switched |
 | user GPRs, RIP, RSP, RFLAGS, CS, SS, and the original syscall number | the thread's user frame at the top of `Tcb.stack` ([section 5.10](#510-privilege-transitions)), saved by every entry from ring 3 | the RSP0 switch, which gives each thread its own entry stack | switched. Rule; not yet enforced: ROADMAP §10.6. The syscall entry saves a 16-word frame whose `rcx` and `r11` slots double as RIP and RFLAGS, and an interrupt or exception entry saves only what its `x86-interrupt` handler clobbers, so a thread preempted in ring 3 has `rbx`, `rbp`, and `r12`-`r15` in spill slots the compiler chose |
-| x87, SSE, MXCSR | `Tcb.fpu`, a 512-byte FXSAVE image | `switch_fpu` in `on_switch` (`fxsave64` the old thread, `fxrstor64` the new) on every switch; the syscall entry and exit also save and restore it | switched. `fork` gives the child `fpu_template()`, not the parent's image, and `execve` keeps the old image's registers (ROADMAP §10.6, F069). The template is captured after `fninit`, which resets only the x87 control, status, and tag words, so MXCSR and the XMM and ST registers hold whatever the loader left (ROADMAP §13.10, F129). FXSAVE covers no XSAVE state; `CR4.OSXSAVE`, `CR4.PKE`, and `EFER.FFXSR` are assumed clear and never asserted (ROADMAP §11.1, F130). |
+| x87, SSE, MXCSR | `Tcb.fpu`, a 512-byte FXSAVE image | the FP binding below: `fxsave64` at the switch away from a thread whose state is live, `fxrstor64` in the return to ring 3 when the registers hold another thread's state | switched. Rule; not yet enforced: the binding lands in ROADMAP §10.6. Today `switch_fpu` in `on_switch` runs `fxsave64` for the old thread and `fxrstor64` for the new on every switch, and the syscall entry and exit also save and restore it. `fork` gives the child `fpu_template()`, not the parent's image, and `execve` keeps the old image's registers (ROADMAP §10.6, F069). The template is captured after `fninit`, which resets only the x87 control, status, and tag words, so MXCSR and the XMM and ST registers hold whatever the loader left (ROADMAP §10.6, F129). FXSAVE covers no XSAVE state; `CR4.OSXSAVE`, `CR4.PKE`, and `EFER.FFXSR` are assumed clear and never asserted (ROADMAP §11.1, F130). |
 | RSP0 | TSS.RSP0 and `PerCpu.kernel_rsp0`: the top of `Tcb.stack`, or `fallback_rsp0` for the bootstrap thread | `set_rsp0_for` in `on_switch` | switched |
 | CR3 | `Tcb.as_cr3` (0 means the kernel PML4) | `switch_cr3_for` in `on_switch`, skipped when unchanged | switched; no PCID (ROADMAP §18.3 adds it with §7.9's flush generation) |
 | FS_BASE (user TLS) | not saved | nothing | not switched. `enter_user`, `enter_user_full`, and `execve` write it; `force_kernel`'s `mov fs` zeroes it on every exit or kill; `fork` copies the live MSR, so a child can inherit another process's base (ROADMAP §13.1, F022). |
@@ -2511,6 +2511,42 @@ for every thread, such as `CR4.TSD` or `SCTLR_EL1.UCT`, is a row of §11.4's tab
 | aarch64: `DBGBVR`/`DBGBCR`, `DBGWVR`/`DBGWCR`, `MDSCR_EL1.MDE` | the thread's decoded debug slots | the switch, by the Debug state paragraph below | not built: ROADMAP §17.4 |
 | aarch64: `MDSCR_EL1.SS` | the thread's step flag, with `SPSR.SS` in its frame | set at the return to EL0 and cleared at entry from EL0, by the Debug state paragraph below | not built: ROADMAP §17.4 |
 | `PerCpu.syscall_scratch` | per CPU | not switched | valid only while IF=0 (above; F001); one word, the user RSP at entry, once ROADMAP §10.6 keeps the exit's state in the user frame |
+
+The FP binding is one rule on both architectures. A user thread owns FP state from creation:
+`Tcb.fpu` starts as the constant initial image (the psABI's FCW `0x037F` and MXCSR `0x1F80` with
+every register zero on x86_64; V0-V31, FPCR, and FPSR zero on aarch64), `fork` copies the parent's,
+and `execve` rewrites it. `PerCpu.fp_owner` names the thread whose state this CPU's FP registers
+hold, and `Tcb.fp_cpu` names the CPU that last loaded or held the thread's state. The registers hold
+thread T's live state only when this CPU's `fp_owner` is T and T's `fp_cpu` is this CPU. The switch
+away from a thread whose state is live saves it into `Tcb.fpu` and loads nothing. The return to user
+mode checks the binding with IF=0 ([§5.10](#510-privilege-transitions) rule 4) and, when the
+registers hold another thread's state, loads `Tcb.fpu` and sets both fields. A new thread starts
+with `fp_cpu` empty, so a TCB that reuses a freed one's address never matches a stale `fp_owner`.
+Code that writes a thread's `Tcb.fpu` (`execve`, `rt_sigreturn`, ptrace) empties its `fp_cpu`, so
+the next return to user mode loads what was written; code that reads the running thread's (`fork`,
+signal delivery, a core dump) first saves the live registers inside an `InterruptGuard`. The kernel
+is soft-float and never makes FP state live; a firmware call that may use the registers (ROADMAP
+§20.9) saves the live state and empties this CPU's `fp_owner` first. No FP or SIMD access traps:
+`CR0.TS` stays clear, and on aarch64 every CPU sets `CPACR_EL1.FPEN` (`CPTR_EL2`'s field under VHE)
+to `0b11` at bring-up and never changes it, so FPEN is not per-thread state. SVE and SME are the
+exception: they trap at a thread's first use to size and set up their state, as on Linux, and their
+enable bits are per-thread rows (ROADMAP §23.1). Rule; not yet enforced: ROADMAP §10.6 for x86_64
+and §11.6 for aarch64; the row above gives the code as built.
+
+Why: every user thread uses FP (x86_64 user code passes floats and copies memory in XMM registers,
+and every aarch64 compiler emits NEON), so a first-use trap sets up nothing that creation could not,
+and trap-driven switching saves nothing and is the scheme LazyFP (CVE-2018-3665) retired. Deferring
+the load to the return to user mode skips it when a thread blocks and resumes on the same CPU with
+only kernel threads in between. Linux runs this model on both architectures: x86's
+`fpregs_state_valid` compares the per-CPU owner and the context's `last_cpu`, and arm64 keeps
+`fpsimd_last_state` per CPU and `fpsimd_cpu` per thread, with FP access enabled once per CPU.
+Rejected: saving at every syscall entry and restoring at every exit, as x86_64 does today (a
+512-byte save and restore per syscall that a soft-float kernel does not need, and a second mechanism
+beside the switch); loading at switch-in (it loads for threads that switch away again before
+reaching user mode, and makes `execve` load mid-syscall); a first-use FP trap on aarch64 (FPEN
+becomes per-thread state, and the trap path saves nothing); a binding on `fp_owner` alone (a thread
+that ran on another CPU and returns to one whose owner still names it would run with stale
+registers).
 
 **Debug state.** One owner per build holds the hardware breakpoint and watchpoint slots and their
 enables: DR0-DR3 and DR7 on x86_64, and on aarch64 the `DBGBVR`/`DBGBCR` and `DBGWVR`/`DBGWCR` pairs
