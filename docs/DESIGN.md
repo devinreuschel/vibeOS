@@ -43,7 +43,7 @@ halfway through.
 | 9 | [Pitfalls](#9-pitfalls) | Bugs already paid for once |
 | 10 | [Block I/O](#10-block-io) | Requests, barrier vs flush, ramdisk, virtio-blk, partitions, cache |
 | 11 | [Portability](#11-portability) | The architecture seam, the aarch64 address space, adding a port, the EL0 and ring-3 environment |
-| 12 | [Device model](#12-device-model) | Devices, parents and suppliers, states, probe order, resources |
+| 12 | [Device model](#12-device-model) | Devices, parents and suppliers, states, probe order, resources, removal |
 
 On-disk filesystem formats live in their own docs, not here ([§1.4](#14-documentation-rules)): [VIBEFS.md](VIBEFS.md) (vibefs **version 1**, CoW metadata + atomic superblock switch). Syscall ABI: [SYSCALL.md](SYSCALL.md).
 
@@ -1816,9 +1816,13 @@ later `allocate_vector` could take IRQs from the old device.
 Rule: `free_vector` returns only after no CPU is running that vector's top half
 and its threaded bottom half has finished or been cancelled, so a driver may free
 the state its handlers touch as soon as it returns. Teardown order for a device
-is: stop the device (status 0, bus mastering off), free its vectors, then free
-its DMA memory and handler state (§2.11 rule 3). Not yet enforced: `free_vector`
-does not wait for a handler already running on another CPU (ROADMAP §20.9).
+is: stop the device (status 0, bus mastering off), free its vectors, detach its
+IOMMU domain and complete the invalidation, then free its DMA memory and handler
+state (§2.11 rule 3, §12.4). Not yet enforced: `free_vector` does not wait for a
+handler already running on another CPU (ROADMAP §20.9). With interrupt remapping
+(ROADMAP §18.1), `free_vector` also frees the vector's remapping entry and waits
+until the interrupt entry cache invalidation completes, so a device that still
+writes its old message reaches no vector that a later `allocate_vector` hands out.
 
 EOI is the dispatcher's job, not the driver's. The dispatch layer knows whether a
 vector arrived via PIC or LAPIC and signals the right controller.
@@ -3391,6 +3395,18 @@ the device may still write it would turn a hang into memory corruption, so the r
 first. Rejected: a timeout that only reports and keeps waiting, which leaves every waiter
 behind the request stuck. It is safe but not live.
 
+A removed device is `Gone` (§12.4), and every request to it fails with `Gone`. Its consumers
+see what Linux shows for a removed device. A filesystem maps `Gone` to `EIO`; it stops
+committing and writing back, so its last committed generation stays the on-disk state
+([VIBEFS.md](VIBEFS.md) §10), and later writes fail with `EIO`. A read of a page not in the
+cache returns `EIO`, and a fault on an unpopulated page of a file mapping raises `SIGBUS`.
+Dirty pages are dropped, and the error is reported once to each open file description's next
+`fsync`, `fdatasync`, or `msync`. `umount` does not fail on the device's errors, and its busy
+rules are unchanged: `umount2` with `MNT_DETACH` succeeds while files are open, and a plain
+`umount` succeeds once they are closed. A device node's open descriptor fails as Linux's does
+for a removed device of its class (`ENODEV` from an input node, for one), and it never reaches
+a later device. Planned (ROADMAP §20.9): nothing is removed today.
+
 Logical block size is per device. Do not assume 512. Capacity is in those
 blocks. Discard on ramdisk validates the range and otherwise no-ops.
 
@@ -3692,3 +3708,32 @@ before any claim ([§3.3](#33-_start-order)). Block devices are named by `&'stat
 by fixed ids (§10.6). ROADMAP §10.4 (D2) and §10.12 land rules 1 to 4 and 8 for PCI and block
 devices, §11.5 and §20.7 apply rule 8 to device-tree and ACPI devices, §18.1 lands rule 6, and
 §20.2, §20.3, §20.9, and §25.4 land rules 5 and 7 for suspend, hubs, removal, and shutdown.
+
+## 12.4 Removal
+
+9. Removal kills a device in §2.11 rule 3's order. It unpublishes the device from the registry, its
+   `/dev` node, and its `/dev/disk/by-id` link, and from ROADMAP §23.3 on it sends a `remove`
+   uevent. It closes the device's gate, so every later operation through a `DevRef` or `BlockRef`
+   still held fails with `Gone`, and threads sleeping on the device wake and fail. It waits for the
+   operations already inside, whose requests complete, fail at their deadline
+   ([§10.3](#103-failure)), or fail at once on a disconnected function. It stops the device and
+   fails what the device still holds, in §10.3's order, and frees its vectors
+   ([§5.4](#54-irq-registration)). It then detaches the device's IOMMU domain and completes the
+   IOTLB and device-TLB invalidation, and only then frees the device's DMA buffers. Its memory goes
+   at the last put. A device's subtree is removed first (rule 5).
+10. A surprise removal, which the slot reports through its presence-detect or link-down interrupt,
+    first marks the function disconnected: its driver fails I/O at once without resetting it, and a
+    register read that returns all ones ends any poll.
+11. A network interface being removed also deletes its routes and neighbour entries, leaves any
+    bridge, and fails sends on sockets bound to it with `ENODEV`. Its ifindex is allocated in
+    increasing order and not reused at once, as a pid is (§2.11 rule 4).
+
+Why: a surprise removal cannot be refused, and a removal that waited for every holder to close would
+hang behind a shell's open descriptor, so removal fails the holders' operations and lets them close
+when they will, as Linux does. The IOMMU and interrupt-remapping steps come before memory and
+vectors are reused, because a device that is stopped but still translated can write a freed buffer,
+and a remapping entry left behind lets it raise the next owner's vector. Rejected: refusing removal
+while a filesystem is mounted, which a surprise removal cannot honor; forcing an unmount at removal,
+which races open descriptors and hides the error from the programs that hold them.
+
+Planned (ROADMAP §15.1, §20.3, §20.9): nothing is removed today.
