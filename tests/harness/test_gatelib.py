@@ -204,6 +204,11 @@ class TestGit(unittest.TestCase):
                                                   merge_base=mb, repo=r.path))
         self.assertFalse(gatelib.run_counts_for_pr(run(mb), [docs, head], head,
                                                    repo=r.path))
+        # C-GATELIB's keyword names.
+        self.assertTrue(gatelib.run_counts_for_pr(run(docs), pr_commits=pr, head=head,
+                                                  merge_base=None, repo=r.path))
+        self.assertTrue(gatelib.commit_counts_for_pr(docs, pr_commits=pr, head=head,
+                                                     repo=r.path))
 
 
 class TestResultsAndBrackets(unittest.TestCase):
