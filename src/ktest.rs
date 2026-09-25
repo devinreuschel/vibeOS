@@ -367,6 +367,7 @@ pub fn run() -> ! {
     // stray spurious line.
     let _cli = x86::InterruptGuard::enter();
     crate::marker!("vibeOS: ktest: begin");
+    quiesce_frames();
     let mut failed = false;
     for suite in SUITES {
         for t in suite.iter() {
@@ -400,6 +401,122 @@ pub fn run() -> ! {
 fn qemu_exit(code: u32) -> ! {
     unsafe { x86::outl(ISA_DEBUG_EXIT, code) };
     x86::halt();
+}
+
+/// Pages per stack in [`quiesce_frames`]' KVA walk: 17 pages of VA a round,
+/// so one walk between two coalesces covers about 8 MiB.
+const WARM_STACK_PAGES: usize = 16;
+/// Ceiling on walk rounds: two coalesces take at most two free lists' worth.
+const WARM_ROUNDS: usize = 3 * vibeos::limits::MAX_KVA_RANGES;
+/// Ceiling on [`settle_threads`]' wait.
+const SETTLE_MS: u64 = 2_000;
+/// Thread slots [`quiesce_frames`] leaves empty: `thread_init::adopt_ap_idle`
+/// takes only an empty slot, and `failed_ap_cleanup` calls it twice.
+const EMPTY_SLOT_RESERVE: usize = 2;
+
+/// Shared setup before the first frame-accounting test (ROADMAP §10.2,
+/// F074): after it, `free_frames()` moves only for what a test itself
+/// allocates and frees, so the tests compare against a quiescent baseline
+/// and a leak in their window still shows.
+///
+/// Three things move the count outside a test's window. A thread spawned
+/// before the registry (the boot `/hello`, whose `wait_kernel` returns at
+/// the reap, before the thread defers its stack) can still be running or
+/// have its stack on `kva_init`'s deferred list. A spawn into an empty
+/// thread slot boxes a new `Tcb`, which can grow the heap. A stack or vmap
+/// carved from KVA that no mapping has reached before takes a page-table
+/// page that `unmap` never frees. So: let every pending thread finish and
+/// drain the deferred list; fill the empty thread slots, all but
+/// [`EMPTY_SLOT_RESERVE`], with threads that exit at once, so later spawns
+/// reuse Dead boxes; and walk KVA through two coalesces with the timer on,
+/// so the free list starts again at VA the walk mapped.
+fn quiesce_frames() {
+    if !settle_threads() {
+        crate::marker!("vibeOS: ktest:   warm-up: threads did not settle");
+    }
+    let mut buf = [thread_init::ThreadInfo {
+        id: ThreadId::NONE,
+        name: "",
+        state: ThreadState::Dead,
+        cpu: 0,
+    }; vibeos::thread::MAX_THREADS];
+    let empty = (vibeos::thread::MAX_THREADS - thread_init::snapshot(&mut buf))
+        .saturating_sub(EMPTY_SLOT_RESERVE);
+    // IF is off here, so none of these runs, dies, and frees its slot for
+    // the next spawn before every empty slot has a Tcb.
+    let mut i = 0;
+    while i < empty {
+        thread_init::spawn_here("warm", dying_entry);
+        i += 1;
+    }
+    if !settle_threads() {
+        crate::marker!("vibeOS: ktest:   warm-up: warm threads did not exit");
+    }
+    // The first coalesce can come after a round or two, when the free list
+    // is nearly full already; the second comes after a full list of rounds,
+    // so the VA it merges back to the list's head is mapped past that.
+    let (coalesces, rounds) = warm_kva();
+    if coalesces < 2 {
+        crate::marker!("vibeOS: ktest:   warm-up: kva coalesces {coalesces} in {rounds} rounds");
+    }
+    kva_init::drain_deferred();
+}
+
+/// Allocate and free guarded stacks until `Kva::free` has coalesced twice.
+/// The timer stays on: at `-smp 4` each round's shootdowns take long enough
+/// that an IF-off walk loses PIT ticks. Returns (coalesces, rounds).
+fn warm_kva() -> (usize, usize) {
+    let mut coalesces = 0;
+    let mut rounds = 0;
+    with_timer(|| {
+        while coalesces < 2 && rounds < WARM_ROUNDS {
+            let Some(stack) = kva_init::alloc_guarded_stack(WARM_STACK_PAGES) else {
+                break;
+            };
+            let n = kva_init::stats().free_ranges;
+            kva_init::free_stack(stack);
+            // A free adds one range unless `Kva::free` ran its coalesce.
+            if kva_init::stats().free_ranges <= n {
+                coalesces += 1;
+            }
+            rounds += 1;
+        }
+        Outcome::Ok
+    });
+    (coalesces, rounds)
+}
+
+/// With the timer on, sleep until no thread but this one and the idle
+/// threads is Ready or Running, then drain the deferred stacks. False if
+/// that takes longer than [`SETTLE_MS`].
+fn settle_threads() -> bool {
+    let me = thread_init::current_id();
+    let settled = with_timer(|| {
+        let t0 = time_init::uptime_ms();
+        loop {
+            let mut buf = [thread_init::ThreadInfo {
+                id: ThreadId::NONE,
+                name: "",
+                state: ThreadState::Dead,
+                cpu: 0,
+            }; vibeos::thread::MAX_THREADS];
+            let n = thread_init::snapshot(&mut buf);
+            let busy = buf[..n].iter().any(|t| {
+                t.id != me
+                    && t.name != "idle"
+                    && matches!(t.state, ThreadState::Ready | ThreadState::Running)
+            });
+            if !busy {
+                return Outcome::Ok;
+            }
+            if time_init::uptime_ms().saturating_sub(t0) > SETTLE_MS {
+                return Outcome::Fail("threads did not settle");
+            }
+            thread_init::sleep_ms(1);
+        }
+    });
+    kva_init::drain_deferred();
+    matches!(settled, Outcome::Ok)
 }
 
 pub(crate) fn free_frames() -> usize {
