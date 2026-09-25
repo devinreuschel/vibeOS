@@ -30,10 +30,14 @@ Errors go to stderr as `<sha7> L<line>: <message>`; the exit code is then 1.
 from __future__ import annotations
 
 import argparse
+import json
 import re
+import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -46,6 +50,10 @@ HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 TICKED = re.compile(r"^\s*- \[x\] (.*)$")
 EXISTING = re.compile(r"^(.*?)\s+\(existing:\s*(.*)\)$")
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+JOB = re.compile(r"^([A-Za-z0-9_.-]+\.ya?ml):([A-Za-z0-9_-]+)$")
+FAILS_BEFORE = re.compile(r"\bthe tests? fails? before the fix\b", re.I)
+FAILS_BEFORE_LINE = re.compile(r'^(\S+)\s+([0-9a-f]{7,40})\s+"(.*)"$')
+RESULT_KINDS = ("ktest", "utest", "marker")
 RUST_FN = r"^(\s*)(?:pub(?:\([^)]*\))?\s+)?(?:(?:const|async|unsafe|extern\s+\"[^\"]*\")\s+)*fn\s+"
 PY_DEF = r"^(\s*)(?:async\s+)?(?:def|class)\s+"
 REGISTRY_ROW = r"(?:\btest\(|\()\s*\"{}\"\s*,\s*([A-Za-z_][A-Za-z0-9_:]*)"
@@ -124,6 +132,17 @@ def parse_proves(raw: str, tag: str = "Proves") -> ProvesLine | str:
     if not proof:
         return f"{tag}: line names no proof: {raw!r}"
     return ProvesLine(raw, proof, prefix, bracket, existing)
+
+
+def parse_fails_before(raw: str) -> ProvesLine | str:
+    """`<tier> <sha> "<failure line>" -- <prefix>`: `proof` holds the part
+    before the separator, which `FAILS_BEFORE_LINE` splits."""
+    m = re.match(r'^(\S+\s+[0-9a-f]{7,40}\s+"(.*)")\s+--\s+(.*)$', raw.strip())
+    if m is None:
+        return f"Fails-before: not `<tier> <sha> \"<line>\" -- <prefix>`: {raw!r}"
+    if not m.group(2).strip():
+        return f"Fails-before: the failure line is empty: {raw!r}"
+    return ProvesLine(raw, m.group(1), m.group(3).strip())
 
 
 def parse_roadmap_diff(diff: str) -> dict[str, tuple[list[tuple[int, str]], list[str]]]:
@@ -317,9 +336,29 @@ def resolve(proof: str, tree: Tree) -> tuple[list[Definition], str]:
                            any("ignore" in a for a in attrs))
                 for s, e, attrs in find_fn(text, name, rust)]
         return defs, name
+    j = JOB.match(proof)
+    if j:
+        return _resolve_job(j.group(1), j.group(2), tree), proof
     if IDENT.match(proof):
         return _resolve_ident(proof, tree), proof
     return [], proof
+
+
+def _resolve_job(workflow: str, job: str, tree: Tree) -> list[Definition]:
+    path = f".github/workflows/{workflow}"
+    text = tree.read(path)
+    if text is None:
+        return []
+    lines = text.splitlines()
+    for i, raw in enumerate(lines):
+        if raw == f"  {job}:":
+            end = i
+            for k in range(i + 1, len(lines)):
+                if lines[k].strip() and not lines[k].startswith("   "):
+                    break
+                end = k
+            return [Definition("job", path, i + 1, end + 1, job)]
+    return []
 
 
 def _resolve_marker(text: str, tree: Tree) -> list[Definition]:
@@ -400,12 +439,115 @@ def touched(d: Definition, changed: dict[str, list[tuple[int, int]]]) -> bool:
     return False
 
 
+Run = dict[str, Any]
+
+
+class Gh:
+    """Workflow runs and their results artifacts, read through `gh`."""
+
+    def __init__(self, repo: Path = gatelib.ROOT) -> None:
+        self.repo = repo
+
+    def _gh(self, *args: str) -> str:
+        try:
+            r = subprocess.run(["gh", *args], cwd=self.repo, capture_output=True, text=True,
+                               check=False)
+        except OSError as e:
+            raise gatelib.GateError(f"gh {args[0]}: {e}") from e
+        if r.returncode != 0:
+            raise gatelib.GateError(f"gh {' '.join(args)}: {r.stderr.strip()}")
+        return r.stdout
+
+    def runs(self, workflow_file: str) -> list[Run]:
+        out = self._gh("run", "list", "--workflow", workflow_file, "--limit", "200", "--json",
+                       "databaseId,headSha,event,conclusion")
+        return [{"id": r.get("databaseId"), "head_sha": r.get("headSha"),
+                 "event": r.get("event"), "conclusion": r.get("conclusion"),
+                 "workflow": workflow_file} for r in json.loads(out or "[]")]
+
+    def jobs(self, run_id: object) -> list[dict[str, Any]]:
+        out = self._gh("run", "view", str(run_id), "--json", "jobs")
+        jobs = json.loads(out or "{}").get("jobs", [])
+        return [{"name": j.get("name"), "conclusion": j.get("conclusion")} for j in jobs]
+
+    def download_results(self, run_id: object, dest: Path) -> list[dict[str, Any]]:
+        self._gh("run", "download", str(run_id), "--pattern", "results-*", "--dir", str(dest))
+        return gatelib.load_results(dest)
+
+
+class History:
+    """C-HISTORY run and dev-host records on the `ci-history` branch. No
+    branch, no records."""
+
+    REF = "refs/remotes/origin/ci-history"
+
+    def __init__(self, repo: Path = gatelib.ROOT) -> None:
+        self.repo = repo
+        self._records: list[Run] | None = None
+
+    def records(self) -> list[Run]:
+        if self._records is None:
+            self._records = self._read()
+        return self._records
+
+    def _read(self) -> list[Run]:
+        gatelib.git(self.repo, "fetch", "-q", "--no-tags", "origin",
+                    f"+refs/heads/ci-history:{self.REF}", check=False)
+        if not gatelib.git(self.repo, "rev-parse", "--verify", "-q", self.REF,
+                           check=False).strip():
+            return []
+        names = [n for n in gatelib.git(self.repo, "ls-tree", "-r", "-z", "--name-only",
+                                        self.REF).split("\0") if n.endswith(".json")]
+        batch = "".join(f"{self.REF}:{n}\n" for n in names)
+        r = subprocess.run(["git", "-C", str(self.repo), "cat-file", "--batch"], input=batch,
+                           capture_output=True, text=True, check=False)
+        out: list[Run] = []
+        data = r.stdout
+        pos = 0
+        while pos < len(data):
+            nl = data.index("\n", pos)
+            header = data[pos:nl].split()
+            pos = nl + 1
+            if len(header) < 3:
+                continue
+            size = int(header[2])
+            blob, pos = data[pos:pos + size], pos + size + 1
+            try:
+                rec = json.loads(blob)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(rec, dict):
+                rec.setdefault("id", rec.get("run_id"))
+                out.append(rec)
+        return out
+
+
+def record_results(run: Run) -> list[dict[str, Any]]:
+    """The results objects a history record carries, per job or at its top."""
+    out = [r for r in run.get("results", []) if isinstance(r, dict)]
+    for j in run.get("jobs", []) or []:
+        if isinstance(j, dict):
+            out.extend(r for r in j.get("results", []) or [] if isinstance(r, dict))
+    return out
+
+
+def passed_in(results: list[dict[str, Any]], kind: str, name: str) -> bool:
+    for r in results:
+        sect = r.get(kind)
+        if isinstance(sect, dict) and name in (sect.get("passed") or []):
+            return True
+    return False
+
+
 class Checker:
     """The rules of one run over `base..head`."""
 
-    def __init__(self, base: str, head: str, repo: Path) -> None:
+    def __init__(self, base: str, head: str, repo: Path, *, full: bool = True,
+                 results_dir: Path | None = None, run_commit: str | None = None,
+                 gh: Gh | None = None, history: History | None = None) -> None:
         self.repo = repo
         self.base = base
+        self.full = full
         self.head = gatelib.git(repo, "rev-parse", "--verify", f"{head}^{{commit}}").strip()
         self.merge_base = gatelib.git(repo, "merge-base", base, self.head).strip()
         self.pr = gatelib.pr_commits(base, self.head, repo)
@@ -413,6 +555,18 @@ class Checker:
         self.report = Report()
         self.commits = self._read_commits()
         self._changed: dict[str, list[tuple[int, int]]] | None = None
+        self.gh = gh if gh is not None else Gh(repo)
+        self.history = history if history is not None else History(repo)
+        self.results: list[dict[str, Any]] | None = None
+        if results_dir is not None:
+            commits = {self.head}
+            if run_commit:
+                commits.add(gatelib.git(repo, "rev-parse", "--verify", "-q", run_commit,
+                                        check=False).strip() or run_commit)
+            self.results = [r for r in gatelib.load_results(results_dir)
+                            if r.get("commit") in commits and r.get("dirty") is False]
+            if not self.results:
+                self.report.notes.append(f"no results file at the head in {results_dir}")
 
     def _read_commits(self) -> list[Commit]:
         commits = {sha: Commit(sha) for sha in self.pr}
@@ -450,7 +604,7 @@ class Checker:
         """Pair each `<tag>:` line of `c` with the one tick its prefix begins."""
         out: list[tuple[ProvesLine, Tick]] = []
         for raw in gatelib.parse_message_lines(c.message, tag):
-            p = parse_proves(raw, tag)
+            p = parse_proves(raw) if tag == "Proves" else parse_fails_before(raw)
             if isinstance(p, str):
                 self.report.error(c.sha, None, p)
                 continue
@@ -480,6 +634,9 @@ class Checker:
                                   + " ".join(t.text.split()[:8]))
         for p, t in pairs:
             self.check_proof(c, p, t)
+        if self.full:
+            self.check_fails_before(c)
+            self.check_closes(c)
 
     def check_proof(self, c: Commit, p: ProvesLine, t: Tick) -> list[Definition]:
         defs, name = resolve(p.proof, self.tree)
@@ -492,17 +649,249 @@ class Checker:
         elif not (_named_in(name, t.text) or any(touched(d, self.changed()) for d in defs)):
             self.report.error(c.sha, t.line, f"proof {p.proof!r} is not changed by the pull "
                               "request and not named in the box; mark it `(existing: <reason>)`")
+        hosts = [d for d in defs if d.kind == "host"]
+        if hosts and all(d.ignored for d in hosts):
+            self.report.error(c.sha, t.line, f"host test {p.proof!r} is #[ignore]d")
+        if p.bracket is not None:
+            if self.results is not None:
+                self.check_bracket(c, p, t, defs)
+        elif self.results is not None:
+            kind = defs[0].kind
+            if kind in RESULT_KINDS and not passed_in(self.results, kind, defs[0].name):
+                self.report.error(c.sha, t.line, f"{kind} {defs[0].name!r} passed in no "
+                                  "results file at the head")
         return defs
+
+    # Bracketed proofs (C-TICK).
+
+    def _runs(self, bracket: str) -> list[tuple[Run, bool]]:
+        """Candidate runs for a bracket, each with whether it is a history
+        record (whose results it carries) rather than a `gh` run."""
+        out: list[tuple[Run, bool]] = []
+        recs = self.history.records()
+        if bracket == "dev-host":
+            return [(r, True) for r in recs if r.get("event") == "dev-host"]
+        if bracket == "ci-history":
+            return [(r, True) for r in recs if _workflow_is(r, "ci.yml", self.tree)
+                    and r.get("branch") == "main"]
+        wf = gatelib.BRACKETS[bracket] or ""
+        out.extend((r, True) for r in recs if _workflow_is(r, wf, self.tree))
+        if bracket != "release":
+            out.extend((r, False) for r in self.gh.runs(wf))
+        return out
+
+    def _counts(self, run: Run, dev_host: bool) -> bool:
+        if dev_host:
+            return gatelib.commit_counts_for_pr(gatelib.run_commit(run), self.pr, self.head,
+                                                merge_base=self.merge_base, repo=self.repo)
+        return gatelib.run_counts_for_pr(run, self.pr, self.head, merge_base=self.merge_base,
+                                         repo=self.repo)
+
+    def check_bracket(self, c: Commit, p: ProvesLine, t: Tick, defs: list[Definition]) -> None:
+        bracket = p.bracket or ""
+        d = defs[0]
+        try:
+            runs = self._runs(bracket)
+            for run, is_record in runs:
+                if not self._counts(run, bracket == "dev-host"):
+                    continue
+                if self._run_passes(run, is_record, d):
+                    self.report.notes.append(f"{c.sha[:7]} L{t.line}: {p.proof} [{bracket}] "
+                                             f"passed in run {run.get('id')}")
+                    return
+        except gatelib.GateError as e:
+            self.report.error(c.sha, t.line, f"[{bracket}] runs unreadable: {e}")
+            return
+        self.report.error(c.sha, t.line, f"{p.proof} [{bracket}]: no run at the head, a "
+                          "docs-only commit of the pull request, or a docs-only merge base "
+                          "shows it passed; the box stays open until one does (Tick-post)")
+
+    def _run_passes(self, run: Run, is_record: bool, d: Definition) -> bool:
+        if d.kind in RESULT_KINDS:
+            if is_record:
+                results = record_results(run)
+            else:
+                with tempfile.TemporaryDirectory() as tmp:
+                    results = self.gh.download_results(run.get("id"), Path(tmp))
+            return passed_in(results, d.kind, d.name)
+        if d.kind == "job":
+            jobs = run.get("jobs") if is_record else self.gh.jobs(run.get("id"))
+            return any(isinstance(j, dict) and j.get("name") == d.name
+                       and j.get("conclusion") == "success" for j in jobs or [])
+        return run.get("conclusion") == "success"
+
+    # Needs, closes, and Fails-before.
+
+    def _needs_at(self, rev: str) -> tuple[list[gatelib.Box], list[str], list[gatelib.NeedsFile]]:
+        text = gatelib.git(self.repo, "show", f"{rev}:{ROADMAP_PATH}", check=False)
+        files = gatelib.git(self.repo, "ls-tree", "-z", "--name-only", rev, "tests/gates/",
+                            check=False)
+        needs: list[gatelib.NeedsFile] = []
+        for path in sorted(p for p in files.split("\0") if p):
+            m = gatelib.NEEDS_FILE.match(path.rsplit("/", 1)[-1])
+            if m is None:
+                continue
+            body = gatelib.git(self.repo, "show", f"{rev}:{path}")
+            rows, roots = gatelib.parse_needs(body, path)
+            needs.append((int(m.group(1)), rows, roots))
+        return gatelib.parse_boxes(text), text.splitlines(), needs
+
+    def check_needs(self) -> None:
+        boxes, lines, needs = self._needs_at(self.head)
+        by_text = {b.text: b for b in boxes if b.ticked}
+        last: dict[str, str] = {}
+        for c in self.commits:
+            for t in c.ticks:
+                last[t.text] = c.sha
+        for text, sha in last.items():
+            b = by_text.get(text)
+            if b is None:
+                continue
+            for _, rows, _ in needs:
+                for r in rows:
+                    try:
+                        if gatelib.match_key(r.key, boxes, lines).line != b.line:
+                            continue
+                    except gatelib.GateError:
+                        continue
+                    for n in r.needs:
+                        try:
+                            nb = gatelib.match_key(n, boxes, lines)
+                        except gatelib.GateError as e:
+                            self.report.error(sha, b.line, f"needs row: {e}")
+                            continue
+                        if not nb.ticked:
+                            self.report.error(sha, b.line, f"needs L{nb.line}, open at the "
+                                              f"head: {' '.join(nb.text.split()[:8])}")
+
+    def check_closes(self, c: Commit) -> None:
+        if not c.ticks:
+            return
+        boxes, lines, needs = self._needs_at(c.sha)
+        ticked = {t.line for t in c.ticks}
+        for _, rows, _ in needs:
+            for r in rows:
+                for entry in r.closes:
+                    try:
+                        pair = (gatelib.match_key(r.key, boxes, lines),
+                                gatelib.match_key(entry, boxes, lines))
+                    except gatelib.GateError:
+                        continue
+                    if not ({pair[0].line, pair[1].line} & ticked):
+                        continue
+                    for b in pair:
+                        if not b.ticked:
+                            self.report.error(c.sha, b.line, "a closes pair ticks together; "
+                                              f"L{b.line} stays open: "
+                                              + " ".join(b.text.split()[:8]))
+
+    def check_fails_before(self, c: Commit) -> None:
+        pairs = self.pair(c, "Fails-before")
+        have = {id(t) for _, t in pairs}
+        for t in c.ticks:
+            if FAILS_BEFORE.search(t.text) and id(t) not in have:
+                self.report.error(c.sha, t.line, "the box's test fails before the fix, and the "
+                                  "commit carries no `Fails-before:` line for it")
+        pr = set(self.pr)
+        for p, t in pairs:
+            m = FAILS_BEFORE_LINE.match(p.proof)
+            if m is None:
+                continue
+            tier, short, _ = m.groups()
+            if _make_rule(self.tree.read("Makefile") or "", tier) is None:
+                self.report.error(c.sha, t.line, f"Fails-before: no Makefile rule {tier!r}")
+            full = gatelib.git(self.repo, "rev-parse", "--verify", "-q", f"{short}^{{commit}}",
+                               check=False).strip()
+            if full not in pr or full == c.sha:
+                self.report.error(c.sha, t.line, f"Fails-before: {short} is not an earlier "
+                                  "commit of the pull request")
+            elif subprocess.run(["git", "-C", str(self.repo), "merge-base", "--is-ancestor",
+                                 full, c.sha], check=False).returncode != 0:
+                self.report.error(c.sha, t.line, f"Fails-before: {short} is not an ancestor "
+                                  "of the commit")
+            self.check_fails_history(c, t, tier, full or short)
+
+    def check_fails_history(self, c: Commit, t: Tick, tier: str, sha: str) -> None:
+        prs = [r for r in self.history.records() if r.get("event") == "pull_request"]
+        if not prs:
+            note = ("Fails-before history clause inert: ci-history holds no pull_request "
+                    "record (#93 §9.2 D-01)")
+            if note not in self.report.notes:
+                self.report.notes.append(note)
+            return
+        for r in prs:
+            if r.get("head_sha") != sha:
+                continue
+            for res in record_results(r):
+                if res.get("tier") != tier:
+                    continue
+                if any((res.get(k) or {}).get("failed") for k in RESULT_KINDS):
+                    return
+        self.report.error(c.sha, t.line, f"Fails-before: ci-history holds no failed "
+                          f"{tier} run at {sha[:7]}")
+
+    def check_retries(self) -> None:
+        if self.results is None or not self.report.ticks:
+            return
+        for r in self.results:
+            for x in r.get("retries") or []:
+                label = x.get("label", "?") if isinstance(x, dict) else "?"
+                line = x.get("failure_line", "") if isinstance(x, dict) else str(x)
+                self.report.errors.append(f"{self.head[:7]}: {r.get('tier')} retried "
+                                          f"{label}: {line}")
 
     def run(self) -> Report:
         for c in self.commits:
             self.report.ticks += len(c.ticks)
             self.check_commit(c)
+        if self.full:
+            self.check_needs()
+            if not any(r.get("event") == "pull_request" for r in self.history.records()):
+                note = ("Fails-before history clause inert: ci-history holds no pull_request "
+                        "record (#93 §9.2 D-01)")
+                if note not in self.report.notes:
+                    self.report.notes.append(note)
+        self.check_retries()
         return self.report
 
 
-def check(base: str, head: str, *, repo: Path = gatelib.ROOT) -> Report:
-    return Checker(base, head, repo).run()
+def _workflow_is(run: Run, workflow_file: str, tree: Tree) -> bool:
+    """A run or record names `workflow_file` by its file, stem, or `name:`."""
+    w = str(run.get("workflow") or "")
+    stem = workflow_file.rsplit(".", 1)[0]
+    names = {workflow_file, stem, f".github/workflows/{workflow_file}"}
+    text = tree.read(f".github/workflows/{workflow_file}") or ""
+    m = re.search(r"^name:\s*(.+?)\s*$", text, re.M)
+    if m:
+        names.add(m.group(1).strip("'\""))
+    return w in names
+
+
+def check(
+    base: str,
+    head: str,
+    *,
+    results_dir: Path | None = None,
+    run_commit: str | None = None,
+    gh: Gh | None = None,
+    history: History | None = None,
+    repo: Path = gatelib.ROOT,
+    full: bool = True,
+) -> Report:
+    """Every rule over `base..head`; `full=False` keeps pairing and the diff
+    rule (and, with `results_dir`, the results rules) only."""
+    return Checker(base, head, repo, full=full, results_dir=results_dir, run_commit=run_commit,
+                   gh=gh, history=history).run()
+
+
+def summary(r: Report, base: str, head: str) -> str:
+    out = [f"## check_ticks: {base[:12]}..{head[:12]}", "",
+           f"{r.ticks} ticked lines; {'ok' if not r.errors else f'{len(r.errors)} errors'}."]
+    for title, items in (("Errors", r.errors), ("Existing proofs", r.existing),
+                         ("Notes", r.notes)):
+        if items:
+            out += ["", f"### {title}", ""] + [f"- {x}" for x in items]
+    return "\n".join(out) + "\n"
 
 
 def print_report(r: Report) -> None:
@@ -518,8 +907,12 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--base", help="the pull request's base (default: origin/main, bare mode)")
     ap.add_argument("--head", default="HEAD", help="the pull request's head (default: HEAD)")
+    ap.add_argument("--results", type=Path, help="results files (C-RESULTS) to read")
+    ap.add_argument("--run-commit", help="the commit a pull_request run tested (GITHUB_SHA)")
+    ap.add_argument("--summary", type=Path, help="append a Markdown report to this file")
     args = ap.parse_args(argv)
     base = args.base
+    full = base is not None
     if base is None:
         if gatelib.git(ROOT, "rev-parse", "--verify", "-q", "origin/main",
                        check=False).strip() == "":
@@ -527,11 +920,15 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         base = "origin/main"
     try:
-        r = check(base, args.head, repo=ROOT)
+        r = check(base, args.head, results_dir=args.results, run_commit=args.run_commit,
+                  repo=ROOT, full=full)
     except gatelib.GateError as e:
         print(f"check_ticks: {e}", file=sys.stderr)
         return 1
     print_report(r)
+    if args.summary is not None:
+        with args.summary.open("a", encoding="utf-8") as f:
+            f.write(summary(r, base, args.head))
     if r.errors:
         return 1
     print(f"check_ticks: ok ({r.ticks} ticks in {base}..{args.head})")
