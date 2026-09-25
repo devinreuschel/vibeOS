@@ -61,6 +61,7 @@ use crate::virtio_blk_init;
 use crate::virtio_init;
 use crate::work_init;
 use crate::x86;
+mod user;
 
 const ISA_DEBUG_EXIT: u16 = 0xF4;
 const EXIT_PASS: u32 = 0x10;

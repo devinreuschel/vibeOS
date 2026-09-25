@@ -38,7 +38,7 @@ use crate::file_init;
 use crate::serial::Serial;
 use crate::syscall_init;
 use crate::thread_init;
-use crate::user_init::{self, LoadError};
+use crate::user_init::{self, LoadError, Loaded};
 
 struct Proc {
     state: ProcState,
@@ -83,6 +83,8 @@ impl Proc {
     }
 }
 
+/// The process table. `procs[0]` is never a process: its `wait_wq` is the
+/// kernel's, on which [`wait_kernel`] sleeps for ppid-0 processes.
 struct Table {
     procs: [Proc; MAX_PROCS],
 }
@@ -367,8 +369,33 @@ pub fn start_init() {
     }
 }
 
-fn spawn_elf(path: &str, prefer: u32, ppid: u32) -> Result<u32, LoadError> {
-    let loaded = user_init::load_path(path, &[path])?;
+/// Start the ELF at `path` as a new process with parent `ppid` (0: the
+/// kernel, which reaps it with [`wait_kernel`]).
+pub(crate) fn spawn_elf(path: &str, prefer: u32, ppid: u32) -> Result<u32, LoadError> {
+    start_loaded(
+        user_init::load_path(path, &[path])?,
+        prefer,
+        ppid,
+        intern_name(path),
+    )
+}
+
+/// Start the in-memory ELF image `elf` with `argv` as a new process with
+/// parent `ppid` (0: the kernel, which reaps it with [`wait_kernel`]).
+pub(crate) fn spawn_image(elf: &[u8], argv: &[&[u8]], ppid: u32) -> Result<u32, LoadError> {
+    let name = match argv.first().map(|a| core::str::from_utf8(a)) {
+        Some(Ok(a)) => intern_name(a),
+        _ => "user",
+    };
+    start_loaded(user_init::load_image(elf, argv)?, 0, ppid, name)
+}
+
+fn start_loaded(
+    loaded: Loaded,
+    prefer: u32,
+    ppid: u32,
+    name: &'static str,
+) -> Result<u32, LoadError> {
     let pid = match alloc_pid(prefer) {
         Some(p) => p,
         None => {
@@ -377,7 +404,6 @@ fn spawn_elf(path: &str, prefer: u32, ppid: u32) -> Result<u32, LoadError> {
         }
     };
     let cr3 = loaded.space.root().as_u64();
-    let name = intern_name(path);
     let mut entry = UserRegs::empty();
     entry.rip = loaded.entry;
     entry.rsp = loaded.rsp;
@@ -397,6 +423,53 @@ fn spawn_elf(path: &str, prefer: u32, ppid: u32) -> Result<u32, LoadError> {
     });
     thread_init::make_ready(h.id());
     Ok(pid)
+}
+
+enum KernelWait {
+    Done(u32),
+    Sleep,
+    NotKernelChild,
+}
+
+/// Block until `pid`, a process whose parent is the kernel (ppid 0),
+/// exits; reap it and return its `wait4` status word. Returns once the
+/// zombie is reaped, before its address space and kernel stack are freed.
+pub(crate) fn wait_kernel(pid: u32) -> u32 {
+    debug_assert_eq!(current_pid(), 0);
+    loop {
+        let r = thread_init::with_sched(|s| {
+            TABLE.with(|t| {
+                let Some(p) = t.get(pid) else {
+                    return KernelWait::NotKernelChild;
+                };
+                if p.ppid != 0 {
+                    return KernelWait::NotKernelChild;
+                }
+                match p.state {
+                    ProcState::Zombie => {
+                        let st = p.wait_status;
+                        reap_zombie(t, pid);
+                        KernelWait::Done(st)
+                    }
+                    ProcState::Live | ProcState::Stopped => {
+                        s.begin_wait(&mut t.procs[0].wait_wq, FAR_DEADLINE);
+                        KernelWait::Sleep
+                    }
+                    ProcState::Unused => KernelWait::NotKernelChild,
+                }
+            })
+        });
+        assert!(
+            !matches!(r, KernelWait::NotKernelChild),
+            "wait_kernel({pid}): not a live kernel-parented process; only kernel code calls \
+             wait_kernel, once per ppid-0 pid that spawn_elf or spawn_image returned, and only \
+             wait_kernel reaps a ppid-0 process"
+        );
+        match r {
+            KernelWait::Done(st) => return st,
+            KernelWait::Sleep | KernelWait::NotKernelChild => thread_init::schedule(),
+        }
+    }
 }
 
 pub fn syscall(frame: *mut SyscallFrame) -> i64 {
@@ -1008,12 +1081,11 @@ fn finish_exit(wait_status: u32, from_fault: bool) -> ! {
                 }
                 None => (None, 0, FdTable::empty(), ThreadId::NONE),
             };
-            if ppid != 0 {
-                if let Some(par) = t.get_mut(ppid) {
-                    par.pending |= bit(SIGCHLD);
-                }
-                s.wake_all(&mut t.procs[ppid as usize].wait_wq);
+            if let Some(par) = t.get_mut(ppid) {
+                par.pending |= bit(SIGCHLD);
             }
+            // ppid 0 wakes the kernel's queue (`wait_kernel`).
+            s.wake_all(&mut t.procs[ppid as usize].wait_wq);
             (space, ppid, fds, tid)
         })
     });

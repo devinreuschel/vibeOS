@@ -164,15 +164,9 @@ fn at_random() -> [u8; 16] {
     b
 }
 
-fn fill_stack(space: &AddressSpace, img: &Image<'_>, argv: &[&str]) -> Result<u64, LoadError> {
+fn fill_stack(space: &AddressSpace, img: &Image<'_>, argv: &[&[u8]]) -> Result<u64, LoadError> {
     let len = (STACK_PAGES * PAGE_SIZE_4K) as usize;
     let mut mem = vec![0u8; len];
-    let mut argv_b: Vec<&[u8]> = Vec::new();
-    let mut i = 0usize;
-    while i < argv.len() {
-        argv_b.push(argv[i].as_bytes());
-        i += 1;
-    }
     let mut aux = [
         Auxv {
             tag: AT_PAGESZ,
@@ -230,7 +224,7 @@ fn fill_stack(space: &AddressSpace, img: &Image<'_>, argv: &[&str]) -> Result<u6
     if img.phdr_va.is_none() {
         aux[4].val = 0;
     }
-    let rsp = elf::build_initial_stack(STACK_TOP, &mut mem, &argv_b, &[], &aux, &at_random())
+    let rsp = elf::build_initial_stack(STACK_TOP, &mut mem, argv, &[], &aux, &at_random())
         .map_err(LoadError::Elf)?;
     let base = STACK_TOP - len as u64;
     space.write_bytes(base, &mem).map_err(LoadError::Mem)?;
@@ -240,7 +234,18 @@ fn fill_stack(space: &AddressSpace, img: &Image<'_>, argv: &[&str]) -> Result<u6
 /// Build a new address space. Caller installs it only after this returns.
 pub fn load_path(path: &str, argv: &[&str]) -> Result<Loaded, LoadError> {
     let bytes = read_path(path)?;
-    let img = elf::parse(&bytes).map_err(LoadError::Elf)?;
+    let argv_b: Vec<&[u8]> = if argv.is_empty() {
+        vec![path.as_bytes()]
+    } else {
+        argv.iter().map(|a| a.as_bytes()).collect()
+    };
+    load_image(&bytes, &argv_b)
+}
+
+/// Build a new address space from the ELF image `elf`, with `argv` on its
+/// initial stack as given. Caller installs it only after this returns.
+pub fn load_image(elf: &[u8], argv: &[&[u8]]) -> Result<Loaded, LoadError> {
+    let img = elf::parse(elf).map_err(LoadError::Elf)?;
     let Some(mut space) = addr_space_init::create() else {
         return Err(LoadError::As(AsError::OutOfFrames));
     };
@@ -248,7 +253,6 @@ pub fn load_path(path: &str, argv: &[&str]) -> Result<Loaded, LoadError> {
         map_loads(&mut space, &img)?;
         let (stack_base, _) = map_stack(&mut space, img.stack_exec)?;
         let fs = setup_tls(&mut space, &img, stack_base)?;
-        let argv = if argv.is_empty() { &[path][..] } else { argv };
         let rsp = fill_stack(&space, &img, argv)?;
         Ok((img.entry, rsp, fs))
     })();
