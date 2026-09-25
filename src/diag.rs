@@ -1,4 +1,4 @@
-//! Boot-time memory diagnostics. DESIGN §1.7 / ROADMAP §1.7 / §2.8 / §4.11.
+//! Boot-time memory diagnostics. ROADMAP §1.7 / §2.8 / §4.11.
 //!
 //! `meminfo` / `uptime` / `cpus` write to any `fmt::Write` so the boot
 //! log and the shell share one implementation.

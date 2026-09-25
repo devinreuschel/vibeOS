@@ -7,7 +7,7 @@
 | **Depends on** | — |
 | **Blocks** | A3 step 5, D1, D3 |
 | **Review** | [ARCHITECTURE_REVIEW.md §4.2](../ARCHITECTURE_REVIEW.md#42-code-quality--consistency) |
-| **Status** | Implemented (this PR). `BootCell`/`IrqCell` in `src/cell.rs`; wrappers migrated. Host tests via `#[cfg(test)]` in `vibeos-core`. |
+| **Status** | In the [index](README.md). #87: `BootCell`/`IrqCell` in `src/cell.rs`; wrappers migrated. Host tests via `#[cfg(test)]` in `vibeos-core`. |
 
 ## Problem
 
@@ -32,7 +32,7 @@ One `BootCell<T>` (write once before SMP and IRQs, then shared) and one `IrqCell
 
 ## Acceptance criteria
 
-- `grep -rn 'unsafe impl<T> Sync' src` matches only `src/cell.rs`.
+- A generic `unsafe impl` of `Send` or `Sync` appears only in `src/cell.rs` and `src/sync_init.rs`, with AGENTS.md rule 6's bounds; ROADMAP §10.3's `check_cells.py` box checks it, in place of the grep this line first named.
 - `grep -rn 'static mut' src` matches only `arch/catch.rs`.
 - No function signature returns `&'static mut`.
 - All tiers green, including `alloc_stress_smp`, `spawn_exit_thousands`, `cross_cpu_spawn`.

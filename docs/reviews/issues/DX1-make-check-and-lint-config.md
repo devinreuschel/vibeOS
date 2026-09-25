@@ -1,6 +1,8 @@
 # DX1 · A fast local gate (`make check`) and formatter/linter configuration
 
-**Status:** implemented (with B1). rustfmt `--check` as a hard fail is Q1.
+**ROADMAP:** the open §10.1 box that cites DX1. Where this plan and that box differ, the box decides. Superseded here: step 1's hint when `ruff` or `mypy` is missing; `make check` fails instead unless `VIBEOS_ALLOW_MISSING_TOOLS=1` is set.
+
+**Status:** in the [index](README.md). #76, with B1. rustfmt `--check` as a hard fail is Q1.
 
 | | |
 |---|---|

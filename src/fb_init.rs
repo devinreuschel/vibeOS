@@ -1,7 +1,7 @@
 //! Framebuffer text console. ROADMAP §5.1.
 //!
 //! BGRX, Limine pitch, release bounds checks. Drawing stays off the
-//! IRQ path. Double buffering is parked (Design ACK).
+//! IRQ path. Double buffering is deferred (ROADMAP §5.1; lands in §16.1).
 
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};

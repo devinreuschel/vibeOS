@@ -1,11 +1,12 @@
-//! Page-granular block cache. ROADMAP §7.6.
+//! Page-granular block cache. ROADMAP §7.4.
 //!
 //! Keyed by `(dev, page-aligned byte offset)`. Read-through, write-back,
 //! clock (second-chance) eviction, sequential readahead, dirty-ratio cap.
 //!
-//! Phase 12 will unify this with the file page cache: same frames, same
-//! clock, same writeback. The key grows an inode id; do not add a second
-//! private cache beside this one.
+//! Phase 12 makes this each block device's mapping in one page cache of
+//! mappings (DESIGN §10.6): the same frames, clock, and writeback as the
+//! file mappings, which key file pages by page index, never by device
+//! location. Do not add a second private cache beside it.
 
 use crate::block::BlockError;
 

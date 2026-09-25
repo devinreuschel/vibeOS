@@ -7,7 +7,7 @@
 | **Depends on** | Q1 (`make check`), T2 |
 | **Blocks** | — |
 | **Review** | [ARCHITECTURE_REVIEW.md §4.6](../ARCHITECTURE_REVIEW.md#46-testing-strategy--coverage) |
-| **Status** | Implemented |
+| **Status** | In the [index](README.md). #82. |
 
 ## Problem
 
@@ -15,7 +15,7 @@
 
 ## Recommended fix
 
-Two jobs: `check` (about a minute) and the existing ladder gated on it. Coverage measured on hostlib with a floor that only ratchets up. No matrix.
+Two jobs: `check` (about a minute) and the existing ladder gated on it. Coverage measured on hostlib with a floor that only ratchets up. No matrix. Superseded 2026-09-22: ROADMAP §10.1 plans a build-once job and a tier matrix per architecture.
 
 ## Implementation plan
 

@@ -1,5 +1,7 @@
 # Q2 · Isolate `kernel_tests` scaffolding from production modules
 
+**ROADMAP:** the §10.2 box that cites Q2. Where this plan and that box differ, the box decides. Superseded here: the acceptance's count of 103 tests; the PR leaves the in-guest test count unchanged.
+
 | | |
 |---|---|
 | **Area** | 4.2 Code quality & consistency |

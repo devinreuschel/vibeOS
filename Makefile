@@ -29,7 +29,7 @@ ISO_VIBEFS_CRASH := vibeos-vibefs-crash.iso
 LIMINE_DIR := ./limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
 
-# QEMU config. `-smp 2` from day one, DESIGN §0.5. VIBEOS_SMP / VIBEOS_QEMU_CPU
+# QEMU config. `-smp 2` from day one, ROADMAP §0.5. VIBEOS_SMP / VIBEOS_QEMU_CPU
 # override so a single Makefile covers the SMP and LAPIC fallback variants.
 VIBEOS_SMP      ?= 2
 VIBEOS_QEMU_CPU ?= max
@@ -64,7 +64,8 @@ OBJDUMP := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-objdump),$(LLVM_TOOL_DIR)/llvm-
 NM      := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-nm),$(LLVM_TOOL_DIR)/llvm-nm,llvm-nm)
 
 # Two-pass ksyms: first link has an empty table in .rodata, nm fills it,
-# second link does not move .text (DESIGN §5.6).
+# and the second link must not move .text (DESIGN §2.5; not yet enforced,
+# ROADMAP §10.2, F084).
 # $(1)=variant name  $(2)=target dir  $(3)=feature flags  $(4)=iso file
 # Feature flags use repeated --features, never commas (those split $(call)).
 # $$ so $(CARGO) is expanded when the recipe runs, not at $(eval) time.
@@ -109,7 +110,7 @@ help:
 	  '  test-unit             vibeos-core host tests (any host triple)' \
 	  '  test-harness          python unit tests for the harness' \
 	  '  test-e2e              boot contract on the production ISO' \
-	  '  test-e2e-uefi         same, OVMF (skipped if missing)' \
+	  '  test-e2e-uefi         same, OVMF (prints a skip, then fails, if missing)' \
 	  '  test-e2e-panic        panic-test dump contract' \
 	  '  test-e2e-gp           #GP dump+halt contract' \
 	  '  test-e2e-pit          PIT calibration fallback' \

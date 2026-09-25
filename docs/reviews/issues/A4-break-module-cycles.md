@@ -1,5 +1,7 @@
 # A4 · Break the mutual dependencies between kernel modules
 
+**ROADMAP:** the §10.3 and §10.7 boxes that cite A4. Where this plan and those boxes differ, the boxes decide. Superseded here: the Problem's table, which is the review's count of nine; the §10.3 box breaks every two-way dependency `scripts/check_cycles.py` reports.
+
 | | |
 |---|---|
 | **Area** | 4.1 Architecture & module boundaries |
@@ -10,7 +12,7 @@
 
 ## Problem
 
-A `use crate::` graph over the hardware half (212 edges) has nine two-cycles:
+A `use crate::` graph over the kernel half (212 edges) has nine two-cycles:
 
 | Cycle | Evidence |
 |---|---|
@@ -32,10 +34,10 @@ Split "raw" from "policy" at the bottom (serial), replace upward calls with hook
 
 ## Implementation plan
 
-1. **`serial` raw layer.** Split `src/serial.rs` into `serial/raw.rs` (port I/O, the `TX` lock, `write_bytes_raw`, `try_write_bytes`, `HALTING: AtomicBool` + `set_halting()`) and `serial/mod.rs` (`Serial`, `PlainSerial`, `line`, which call `log_init::capture_serial`). `ipi_init::halt_others` calls `serial::raw::set_halting()` (downward). `log_init` and `panic` import only `serial::raw`.
+1. **`serial` raw layer.** Split `src/serial.rs` into `serial/raw.rs` (port I/O, the `TX` lock, `write_bytes_raw`, `try_write_bytes`, `HALTING: AtomicBool` + `set_halting()`, the dump owner's CPU id, which replaces `panic.rs`'s `DUMPING`, and `write_owner()`, which takes no lock and no `InterruptGuard` and writes only on the owner; once `HALTING` is set, a write on any other CPU calls a stop hook that `ipi_init::init` installs, as step 2 installs `SPIN_POLL` (DESIGN §2.5 step 1)) and `serial/mod.rs` (`Serial`, `PlainSerial`, `line`, which call `log_init::capture_serial`). `ipi_init::halt_others` calls `serial::raw::set_halting()` (downward). `log_init` and `panic` import only `serial::raw`.
 2. **Spin hook.** In `sync_init`: a `static SPIN_POLL: AtomicPtr<()>` holding an `fn()`; `SpinMutex::lock` calls it in the spin loop if set. `ipi_init::init` installs `service_incoming`. `sync_init` no longer imports `ipi_init`. Note the hook in DESIGN §7.9.
 3. **Split sync.** `sync/spin.rs` (`SpinMutex`, `InterruptGuard`, rank accounting; no thread dependency) and `sync/blocking.rs` (`BlockingMutex`, `Condvar`, `RwLock`, `Semaphore`, `Channel`; depends on thread). `thread_init` imports `sync::spin` only.
-4. **IPI ↔ thread.** Move `drain_inbox` into `thread_init` (the inbox is scheduler state; `ipi_init` only raises the vector). `ipi_init` reaches the scheduler through a small `SchedHooks { wake_inbox: fn(u32), reschedule: fn() }` installed by `sched_init::init`. `thread_init → ipi_init::send_reschedule(cpu)` remains (downward).
+4. **IPI ↔ thread.** The inbox's push and drain live in `vibeos-core` (ROADMAP §10.8); the `0xFD` handler's call to the drain moves into `thread_init` (the inbox is scheduler state; `ipi_init` only raises the vector). `ipi_init` reaches the scheduler through a small `SchedHooks { wake_inbox: fn(u32), reschedule: fn() }` installed by `sched_init::init`. `thread_init → ipi_init::send_reschedule(cpu)` remains (downward).
 5. **PCI → dev.** `pci_init::scan() -> impl Iterator<Item = Device>`; `dev_init::init` consumes it and fills the registry. Remove `use crate::dev_init` from `pci_init`.
 6. **fs cluster.** After A3, backends implement `InodeOps` and need only lib types; remove `use crate::fs_init` from `fat_init` / `vibefs_init`. Move `file_init::init()` command registration and `complete_line` to `shell/cmds` and `shell/complete` (A1 step 4). Move `vibefs_init::crash_loop` to `src/vibefs_crash.rs` (feature-gated top-layer module).
 7. **Guard.** `scripts/check_cycles.py`: parse `use crate::x` and `crate::x::` per file, build the graph, fail on any two-cycle, print longer cycles as warnings. Run from `make check` (DX1).
@@ -43,7 +45,7 @@ Split "raw" from "policy" at the bottom (serial), replace upward calls with hook
 ## Acceptance criteria
 
 - `scripts/check_cycles.py` reports zero two-cycles.
-- `src/serial/raw.rs` imports nothing from `crate::` except `x86` and `sync::spin`.
+- `src/serial/raw.rs` imports nothing from `crate::` except `x86` and `sync::spin`; `write_owner` takes no lock and no `InterruptGuard`.
 - All tiers green; panic e2e still shows `rust_begin_unwind` and `logrec` lines (the serial split must not lose capture).
 
 ## Tests

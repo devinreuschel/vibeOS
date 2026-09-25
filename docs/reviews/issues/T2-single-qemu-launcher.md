@@ -7,7 +7,7 @@
 | **Depends on** | — |
 | **Blocks** | C2, T3, D2 (device presets) |
 | **Review** | [ARCHITECTURE_REVIEW.md §4.6](../ARCHITECTURE_REVIEW.md#46-testing-strategy--coverage) |
-| **Status** | Implemented |
+| **Status** | In the [index](README.md). #79. |
 
 ## Problem
 

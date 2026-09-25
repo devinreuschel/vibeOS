@@ -1,8 +1,9 @@
 //! Kernel virtual address range allocator, portable half. DESIGN §4.5.
 //!
-//! First-fit over the 64 GiB window at `KVA_START`. Freed ranges go to
-//! the tail of the free list so the window between unmap and TLB
-//! shootdown is not immediately reused (DESIGN §4.5, §7.9).
+//! First-fit over the 64 GiB window at `KVA_START`. `kva_init` returns
+//! a range only after its shootdown (DESIGN §2.4, §4.5); freed ranges
+//! go to the tail of the free list so a stale pointer keeps faulting as
+//! long as possible.
 //!
 //! This type only hands out VA. Mapping, guard pages, vmap, and the
 //! deferred-free list live in the binary crate — they need the buddy

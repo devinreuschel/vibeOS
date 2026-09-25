@@ -8,9 +8,10 @@
 //!
 //! DESIGN §3.3 step 7 orders us: PMM first, then a fresh PML4 with the
 //! contents §4.3 lists, then EFER.NXE, then `mov cr3`. Steps §4.3 also
-//! makes explicit: `invlpg` after every single-PTE edit (baked into
-//! `Mapper` via the shootdown hook), and no splitting of 2 MiB pages
-//! when patching MMIO attributes.
+//! makes explicit: the caller runs `invlpg` after every single-PTE edit
+//! and, for a kernel-half edit, drops PT and calls
+//! `paging::tlb_shootdown_others` (`Mapper` does neither), and no
+//! splitting of 2 MiB pages when patching MMIO attributes.
 
 use core::fmt::Write;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -336,7 +337,7 @@ pub fn assert_unmapped(start: VirtAddr, end: VirtAddr) {
     );
 }
 
-/// Range dump of the live tables. Coalesces adjacent leaves (DESIGN §1.7).
+/// Range dump of the live tables. Coalesces adjacent leaves (ROADMAP §1.7).
 pub fn dump_ranges_to(w: &mut impl Write) {
     with_pt(|| {
         let mapper = current_mapper();
@@ -499,7 +500,7 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
 
     // ---- 5. EFER.NXE ----
     // Set NXE before installing so the NX bits in our leaves are honored
-    // rather than treated as reserved-bit violations. DESIGN §7.5's AP
+    // rather than treated as reserved-bit violations. DESIGN §7.3's AP
     // pitfall (missed NXE -> fault on first kernel page) applies here
     // too: our own kernel .rodata / .data / .bss all carry NX.
     let efer = x86::rdmsr(x86::IA32_EFER);

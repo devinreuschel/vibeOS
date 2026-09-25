@@ -1,5 +1,7 @@
 # DOC2 · Split `DESIGN.md` per its own rule; as-built goes in tables, not prose
 
+**ROADMAP:** the §10.3 box that cites DOC2. Where this plan and that box differ, the box decides. Superseded here: the acceptance's 600-line bar, which leaves out `docs/reviews/`, whose reviews are dated records, as well as `ROADMAP.md`; the Problem's line counts are the review's.
+
 | | |
 |---|---|
 | **Area** | 4.12 Documentation |

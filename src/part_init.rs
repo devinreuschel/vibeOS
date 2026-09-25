@@ -1,4 +1,4 @@
-//! Partition children. ROADMAP §7.5.
+//! Partition children. ROADMAP §7.3.
 //!
 //! Offset-limited windows on ram0 / vda. Marker
 //! `vibeOS: block: <parent>p<N> <n> sectors`.

@@ -1,5 +1,7 @@
 # A1 · Directory per subsystem, matching a corrected module map
 
+**ROADMAP:** the §10.3 box that cites A1. Where this plan and that box differ, the box decides. Superseded here: the test counts in the last acceptance line; each PR leaves the host and in-guest test counts unchanged.
+
 | | |
 |---|---|
 | **Area** | 4.1 Architecture & module boundaries |
@@ -7,7 +9,7 @@
 | **Depends on** | Q1 (format first so the move is a pure move), A2 (two crates give each half its own tree) |
 | **Blocks** | Q5, D2, DOC2 (final module map) |
 | **Review** | [ARCHITECTURE_REVIEW.md §4.1](../ARCHITECTURE_REVIEW.md#41-architecture--module-boundaries) |
-| **Status** | Not started. A2 landed `crates/core` (`vibeos-core`, sources still `src/*.rs`). Kernel package stays at the repo root (`build.rs` / `linker.ld`); this issue nests both trees. |
+| **Status** | In the [index](README.md). A2 (#88) landed `crates/core` (`vibeos-core`, sources still `src/*.rs`). Kernel package stays at the repo root (`build.rs` / `linker.ld`); this issue nests both trees. |
 
 ## Problem
 
@@ -28,15 +30,15 @@ After A2 has produced `crates/core` and `crates/kernel`. (The same directories c
 crates/core/src/                         crates/kernel/src/
   lib.rs  marker.rs  symtab.rs  fmt_util.rs   main.rs                (_start only)
   mm/{pmm,paging,heap,kva}.rs                 boot/mod.rs            (BootInfo, Limine requests; D3)
-  platform/{acpi,apic,pci,virtio,virtio_blk,  arch/x86_64/{cpu,gdt,idt,pic,catch,switch}.rs + trampoline.asm
-    dma,irq,vectors,desc,uart,pic,smp,        mm/{pmm,paging,heap,kva}.rs
-    per_cpu,ipi}.rs                           interrupts/{irq,apic,ipi}.rs
-  sched/{thread,sched,wait,sync,lock,work}.rs time/mod.rs
-  time.rs  log.rs                             smp/{smp,per_cpu}.rs
-  block/{block,part,cache}.rs                 sched/{thread,sched,sync,work}.rs
-  fs/{mod,kernfs,fat,vibefs}.rs               log/{log,serial,panic,diag}.rs
-  ui/{shell,console,kbd,fb,font}.rs           dev/{pci,dev,dma,virtio}.rs
-                                              drivers/{virtio_blk,ramdisk,kbd,fb}.rs
+  platform/{acpi,pci,virtio,virtio_blk,      arch/x86_64/{cpu,gdt,idt,pic,catch,switch}.rs + trampoline.asm
+    dma,irq,uart,smp,per_cpu,ipi}.rs          mm/{pmm,paging,heap,kva}.rs
+  arch/{mod,stub}.rs                          interrupts/{irq,apic,ipi}.rs
+  arch/x86_64/{apic,desc,pic,vectors}.rs      time/mod.rs
+  sched/{thread,sched,wait,sync,lock,work}.rs smp/{smp,per_cpu}.rs
+  time.rs  log.rs                             sched/{thread,sched,sync,work}.rs
+  block/{block,part,cache}.rs                 log/{log,serial,panic,diag}.rs
+  fs/{mod,kernfs,fat,vibefs}.rs               dev/{pci,dev,dma,virtio}.rs
+  ui/{shell,console,kbd,fb,font}.rs           drivers/{virtio_blk,ramdisk,kbd,fb}.rs
                                               block/{block,part,cache}.rs
                                               fs/{fs,fat,vibefs,file}.rs
                                               shell/{mod,complete}.rs  shell/cmds/{fs,blk,dev,sys}.rs
@@ -44,13 +46,15 @@ crates/core/src/                         crates/kernel/src/
                                               ktest/{mod,mm,traps,...}.rs   (T1)
 ```
 
+In `core/src/`, `arch/<name>/` is each port's pure half (DESIGN §11.1): encodings and layouts that touch no hardware, compiled on every host.
+
 ## Implementation plan
 
 1. **Freeze the map.** Put the table above (adjusted after review) into DESIGN §1.3, marked "as of <date>", in the same PR as step 2. Every later step keeps it true.
 2. **Root re-exports so paths keep working during the move.** In `core/src/lib.rs`: `pub mod mm; pub use mm::{pmm, paging, heap, kva};` and so on. Callers keep writing `vibeos::pmm::…` until the last step, so each PR stays small.
 3. **Move one subsystem per PR with `git mv`** (history follows). Order: `mm` → `arch` → `interrupts`/`time`/`smp` → `sched`/`log` → `dev`/`drivers`/`block` → `fs` → `ui`/`shell`/`console`. In each PR: `git mv`, update `mod` declarations, `cargo fmt`, `make test`. No logic changes; the diff is paths only.
 4. **Pull shell commands out of subsystem modules.** Move `cmd_*` functions from `file_init.rs` to `shell/cmds/fs.rs`, `block_init::cmd_blk` to `shell/cmds/blk.rs`, the `dev_init` commands to `shell/cmds/dev.rs`, and the builtins in `shell_init.rs` to `shell/cmds/sys.rs`. Add `shell::cmds::register_all()` called once from `shell::init()`. Tab completion (`file_init::{complete_line, vfs_complete_names, complete_cmd, common_prefix, apply_word}`) moves to `shell/complete.rs`. This also removes the `file_init ↔ shell_init` cycle (A4).
-5. **Rename `x86.rs`** to `arch/x86_64/cpu.rs`; `arch/pic.rs` stays the driver and `core::platform::pic` the constants (Q4).
+5. **Rename `x86.rs`** to `arch/x86_64/cpu.rs`; `arch/pic.rs` stays the driver and `core::arch::x86_64::pic` the constants (Q4; DESIGN §11.1's pure half).
 6. **Drop the root re-exports** in one final PR and fix the `use vibeos::…` lines with a sed map (put the map in the PR description).
 7. **Update** `tests/hostlib` (if still `#[path]`-based), the `//!` headers that cite DESIGN sections, and `.cursor`/`AGENTS.md` paths.
 

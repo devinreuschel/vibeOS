@@ -1,11 +1,11 @@
 #![allow(dead_code)] // printer thread stays parked
 //! Kernel wiring for the log ring. ROADMAP §5.5.
 //!
-//! Global IRQ-safe ring + serial sink. Per-CPU printer thread is a
-//! parked stub (Design ACK): line atomicity on serial is still only
-//! as good as the TX lock. The ring itself is line-atomic because
-//! serial capture assembles per-CPU until `\n`, and `klog!` pushes
-//! a whole record.
+//! Global IRQ-safe ring + serial sink. The printer thread is a parked
+//! stub until DESIGN §2.5's log contract (ROADMAP §19.5) gives each
+//! console one, so line atomicity on serial is still only as good as the
+//! TX lock. The ring itself is line-atomic because serial capture
+//! assembles per-CPU until `\n`, and `klog!` pushes a whole record.
 
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -304,8 +304,9 @@ pub fn dump_tail(n: usize) {
     });
 }
 
-/// Parked. DESIGN §7.7 line atomicity wants per-CPU staging + a printer
-/// thread. Slice A keeps the global ring + serial try-lock sink.
+/// Parked. DESIGN §2.5's log contract wants a lockless ring and one
+/// printer thread per console (ROADMAP §19.5). Until then the global
+/// ring + serial try-lock sink print synchronously.
 pub fn start_printer_thread() {}
 
 /// `fmt::Write` that emits one Info record per newline, plus serial.

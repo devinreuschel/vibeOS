@@ -1,9 +1,12 @@
 # S1 · Finish the pre-ring-3 hardening checklist
 
-**Landed** (this PR). SMEP/SMAP/UMIP/`CR0.WP` via `arch::cpu::harden` on BSP and APs;
+**Status:** in the [index](README.md). #85: SMEP/SMAP/UMIP/`CR0.WP` via `arch::cpu::harden` on BSP and APs;
 ktest `cpu_hardening` (skip on `qemu64`); `/dev/random` via virtio-rng then RDRAND then
-xorshift (`dev_random_source`). Soft parks as PR comments: SMAP fault test (Phase 18),
-user-VA `copy_from_user` rewrite, `VIBEOS_NO_HARDEN`, entropy pool.
+xorshift (`dev_random_source`). Parked at the time: the SMAP fault test and the user-VA
+`copy_from_user` rewrite, now ROADMAP §10.6 and a Phase 10 gate line (the HHDM copy ignores
+PTE write permission, which COW in Phase 12 cannot tolerate); the entropy pool, now §13.10.
+`VIBEOS_NO_HARDEN` is declined: the bits follow CPUID, and the `qemu64` variant already runs without them.
+**Superseded in part 2026-09-24:** step 5's xorshift fallback; `/dev/random` returns only hardware bytes until the CSPRNG, and ROADMAP §10.12 deletes `mix_rng` (F134).
 
 | | |
 |---|---|

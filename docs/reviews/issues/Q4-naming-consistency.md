@@ -1,6 +1,6 @@
 # Q4 · Naming and feature-flag consistency
 
-**Status:** implemented. Feature names are `panic_test` / `gp_test`. Unused `print!`/`println!`
+**Status:** in the [index](README.md). #83: feature names are `panic_test` / `gp_test`. Unused `print!`/`println!`
 removed with E3. `pic` pairing waits for A1.
 
 | | |
@@ -27,7 +27,7 @@ Underscore feature names everywhere; one pairing convention (settled by A1); del
 1. **Feature rename.** `Cargo.toml`: `panic_test`, `gp_test`. Update `src/main.rs` `cfg`s, `Makefile` (`--features panic-test` → `panic_test`, `gp-test` → `gp_test`), `.github/workflows/ci.yml` step names, `README.md`, `docs/DESIGN.md` §8, `.cursor` rules. One sed, one commit.
 2. **Delete `print!` / `println!`** from `src/serial.rs` (no call sites).
 3. **Module naming** waits for A1; in the meantime add a "Naming" paragraph to DESIGN §1.3: "`<name>.rs` is the portable half, `<name>_init.rs` the kernel half; `arch/` holds only what touches privileged CPU state."
-4. **`pic` pair:** rename `src/arch/pic.rs` to `src/pic_init.rs` now (matches the convention) or leave until A1 moves it to `arch/x86_64/pic.rs` with the constants in `core::platform::pic`. Recommend waiting for A1 to avoid a double rename.
+4. **`pic` pair:** rename `src/arch/pic.rs` to `src/pic_init.rs` now (matches the convention) or leave until A1 moves it to `arch/x86_64/pic.rs` with the constants in `core::arch::x86_64::pic` (DESIGN §11.1's pure half). Recommend waiting for A1 to avoid a double rename.
 
 ## Acceptance criteria
 

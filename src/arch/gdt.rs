@@ -15,9 +15,9 @@ use crate::cell::BootCell;
 use crate::kva_init::{self, GuardedStack};
 use crate::x86::{self, DtPtr};
 
-/// Mapped pages on each IST stack. DESIGN mentions a single page; we
-/// take the KVA default so a dump/`x86-interrupt` prologue cannot eat
-/// the IST. Guard page is still unmapped below.
+/// Mapped pages on each IST stack: four, as DESIGN §5.1 gives, so a dump
+/// or a handler prologue cannot eat the IST. Guard page is still
+/// unmapped below.
 const IST_PAGES: usize = 4;
 const RSP0_PAGES: usize = 4;
 

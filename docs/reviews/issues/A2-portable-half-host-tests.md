@@ -1,5 +1,7 @@
 # A2 · Make the portable half portable; host tests on any host
 
+**ROADMAP:** the §10.3 box that cites A2. Where this plan and that box differ, the box decides. Superseded here: the last acceptance line; `vibeos-core` holds no assembly and no `cfg(target_arch)` at all (ROADMAP Phase 10 exit gate), not only none that is unconditional.
+
 | | |
 |---|---|
 | **Area** | 4.1 Architecture & module boundaries |
@@ -7,7 +9,7 @@
 | **Depends on** | C1 (a pinned nightly the tree builds with); B2 (workspace) |
 | **Blocks** | I1, DX1 (macOS `make check`), T4, A1 |
 | **Review** | [ARCHITECTURE_REVIEW.md §4.1](../ARCHITECTURE_REVIEW.md#41-architecture--module-boundaries) |
-| **Status** | Implemented (this PR). Portable crate is workspace member `vibeos-core`; host tests use the host triple. Nested hostlib cargo config and Linux pin deleted. I1 (macOS CI job) stays parked. |
+| **Status** | In the [index](README.md). #88: portable crate is workspace member `vibeos-core`; host tests use the host triple. Nested hostlib cargo config and Linux pin deleted. I1 (macOS CI job) is open: ROADMAP §10.2 schedules it. |
 
 ## Problem
 

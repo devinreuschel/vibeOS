@@ -40,8 +40,9 @@ pub struct PerCpu {
     pub timer_mode: TimerMode,
     /// Set by the AP after GS/IDT/LAPIC/timer; BSP waits on this.
     pub ready: AtomicBool,
-    /// Future `syscall` entry scratch. `[0]` is user RSP while switching
-    /// stacks. `KERNEL_GS_BASE` holds `PerCpu` while CPL=3; see
+    /// Syscall entry and exit scratch, per CPU and valid only while IF=0:
+    /// the user RSP, the syscall return value, and the `iretq` frame
+    /// (DESIGN §7.5). `KERNEL_GS_BASE` holds `PerCpu` while CPL=3; see
     /// `arch::gs`.
     pub syscall_scratch: [u64; 6],
     /// Local ready FIFO. Owner CPU only, IRQs off. DESIGN §7.8.

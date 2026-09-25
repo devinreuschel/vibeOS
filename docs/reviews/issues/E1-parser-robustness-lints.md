@@ -1,8 +1,11 @@
 # E1 · Lock in parser robustness with restriction lints
 
-**Status:** implemented (#86). Nine production `unwrap`/`expect` sites return errors or
+**ROADMAP:** the open §10.1 box that cites E1. Where this plan and that box differ, the box decides. Superseded here: none.
+
+**Status:** in the [index](README.md). #86: nine production `unwrap`/`expect` sites return errors or
 cannot-fail rewrites. Clippy `unwrap_used` / `expect_used` / `panic` deny on the
-portable crate. `indexing_slicing` stays warn (not deny) until parsers are clean.
+portable crate. Step 2's `indexing_slicing` and `arithmetic_side_effects` levels were never set;
+ROADMAP §10.1 denies both in the byte parsers, one module per PR.
 
 | | |
 |---|---|

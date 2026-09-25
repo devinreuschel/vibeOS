@@ -1,4 +1,4 @@
-//! 16550 UART register offsets and the DLAB init recipe, DESIGN §0.4.
+//! 16550 UART register offsets and the DLAB init recipe, ROADMAP §0.4.
 //!
 //! Pure constants and small helpers. Actual port I/O lives in the binary
 //! crate so this module is host-testable.

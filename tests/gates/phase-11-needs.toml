@@ -1,0 +1,7 @@
+# Box dependencies and closes rows for Phase 11, in the form of
+# tests/gates/phase-10-needs.toml (docs/ROADMAP.md, How to read this).
+
+[[box]]
+key = "`openat` (with `AT_FDCWD`), `dup3`, and `clone` with fork semantics"
+closes = ["`openat`, `dup3`, and fork-shaped `clone`"]
+why = "the §9.3 deferral box"

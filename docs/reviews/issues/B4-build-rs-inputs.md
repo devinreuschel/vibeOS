@@ -1,5 +1,7 @@
 # B4 · Simplify `build.rs` inputs and the initrd path
 
+**Superseded in part 2026-09-24:** the acceptance's `nasm` grep; `nasm` stays for the assembly user programs until ROADMAP §10.5 deletes them.
+
 | | |
 |---|---|
 | **Area** | 4.10 Build |
@@ -7,7 +9,7 @@
 | **Depends on** | B1 |
 | **Blocks** | R1 (no build product in the root) |
 | **Review** | [ARCHITECTURE_REVIEW.md §4.10](../ARCHITECTURE_REVIEW.md#410-build-cicd--release-process) |
-| **Status** | Implemented (this PR). Hostlib `mkinitrd` → `build/initrd.fat`; `build.rs` copies `VIBEOS_INITRD`. Trampoline is `global_asm!` (`src/arch/trampoline.S`), byte-identical to the old nasm blob. `nasm` remains for `user/*.asm`. |
+| **Status** | In the [index](README.md). #89: hostlib `mkinitrd` → `build/initrd.fat`; `build.rs` copies `VIBEOS_INITRD`. Trampoline is `global_asm!` (`src/arch/trampoline.S`), byte-identical to the old nasm blob. `nasm` remains for `user/*.asm`. |
 
 ## Problem
 

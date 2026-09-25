@@ -21,7 +21,6 @@
 *.dll
 *.elf
 *.bin
-!src/font_95x8.bin
 *.img
 *.iso
 *.rom
