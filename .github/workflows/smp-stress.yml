@@ -52,6 +52,21 @@ jobs:
       - name: SMP stress (-smp 4, longer timeout)
         run: make test-smp-stress
 
+      # Per-tier table and every harness retry, even after a failed step
+      # (ROADMAP §10.2); check_ticks.py reads the uploaded files (§10.9).
+      - name: harness results summary
+        if: always()
+        run: python3 -m tests.harness.results summary build/results >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload harness results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results-x86_64-stress
+          path: build/results/
+          if-no-files-found: warn
+          retention-days: 30
+
   nightly-canary:
     name: latest nightly canary
     runs-on: ubuntu-latest

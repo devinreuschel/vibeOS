@@ -4126,8 +4126,9 @@ after any timeout, after the `-smp 2` TCG `FAIL per_cpu_bsp: ready_head should b
 the `ipi_init::wait_acks` frame, or a banner glued to a `ktest: ok` line. A second timeout whose tail
 ends at `user: dup ok` gets a third boot. `make test-smp-stress` uses the same rules, so a green run
 can hide an intermittent hang or panic. Until then each retry goes to the job summary and to the
-tier's results file, and a pull request that ticks a ROADMAP box on a run that retried fails
-(ROADMAP §10.2, §10.9).
+`retries` list of the tier's results file, which `tests/harness/results.py` writes and the ladder
+uploads, and a pull request that ticks a ROADMAP box on a run that retried fails (`check_ticks.py`,
+ROADMAP §10.2, §10.9).
 
 Planned (ROADMAP §10.2): `begin` carries the number of runs the boot will make, after the command
 line's filter and repeat count, and `vibeOS: ktest: run <name> <deadline_ms>` precedes each run,
@@ -4371,7 +4372,7 @@ harness defaults match them.
 | `VIBEOS_QEMU_ACCEL` | `tcg` (empty omits `-accel`) | all; `make run` |
 | `VIBEOS_TIMEOUT` | `60` e2e/ps2, `90` ktest/crash; planned (ROADMAP §10.2): the §8.2 boot allowance, which bounds only the stretches of a boot in which no test runs | all drivers |
 | `VIBEOS_QEMU_EXTRA` | empty | all drivers |
-| `VIBEOS_TIER` | `adhoc`; each `make test-*` recipe sets its target name (planned, ROADMAP §10.9) | all drivers, which write `build/results/<arch>-<tier>.json` |
+| `VIBEOS_TIER` | `adhoc`; each `make test-*` recipe sets its target name | all drivers, which write `build/results/<arch>-<tier>.json` (schema 1, `tests/harness/results.py`) |
 | `VIBEOS_EXPECT_PANIC` | off (`""` / `0`) | `run_e2e` |
 | `VIBEOS_GP_TEST` | off | `run_e2e` |
 | `VIBEOS_EXPECT_PIT` | off | `run_e2e` |
@@ -4414,7 +4415,7 @@ architecture; until that lands the ladder is one job.
 | Job | When | What |
 |---|---|---|
 | `check` | push / PR | Installs `x86_64-unknown-none`. `make check` (fmt; clippy `-D warnings` on `vibeos-core` and hostlib for the host, `vibeos-core` for `x86_64-unknown-none`, and the kernel with default features; host units, harness, ruff/mypy, `scripts/check_*.py`) then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines 87`. No QEMU, no `setup.sh`. HTML report is a 7-day `core-coverage` artifact. |
-| `phase 0 ladder` | push / PR, `needs: check` | Limine, QEMU/nasm/xorriso/OVMF, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, `panic_test` with `panic_exit`, `gp_test` with `panic_exit`) and once with `kernel_shell` (the default set runs in `check`); ISO, e2e (BIOS/UEFI/panic/#GP/PIT/9 GiB), in-guest at `-smp 2` and `-smp 4`, LAPIC fallback, vibefs crash. Green `main` uploads `vibeos.iso` (7 days). |
+| `phase 0 ladder` | push / PR, `needs: check` | Limine, QEMU/nasm/xorriso/OVMF, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, `panic_test` with `panic_exit`, `gp_test` with `panic_exit`) and once with `kernel_shell` (the default set runs in `check`); ISO, e2e (BIOS/UEFI/panic/#GP/PIT/9 GiB), in-guest at `-smp 2` and `-smp 4`, LAPIC fallback, vibefs crash. Even after a failed step it writes a per-tier table and every harness retry to the job summary and uploads `build/results/` as `results-x86_64-phase0`. Green `main` uploads `vibeos.iso` (7 days). |
 | `smp-stress` | weekly Monday 06:00 UTC + dispatch | `-smp 4`, longer timeout (`VIBEOS_TIMEOUT=180`); planned (ROADMAP §10.2): the §8.2 per-run deadlines, with no longer timeout |
 | `nightly-canary` | same workflow, non-blocking | undated latest nightly, `make iso && make test-unit` |
 | `release` | `v*` tags | `make test-e2e` (BIOS) only, then production + ktest ISO, changelog section, GitHub Release. It does not wait for `ci` at the tagged commit, and the ktest ISO writes fixed LBAs of any virtio-blk disk attached at boot (ROADMAP §10.1, F145). Planned (ROADMAP §10.1): dispatched from `main` with the release tag as input; a `build` job with `contents: read` and `actions: read`, no cache, and no persisted token, then a `publish` job that runs no repository script; from ROADMAP §14.6 a `sign` job in the `release` environment between them, and from §22.4 a keyless `verify` job on vibeOS. From ROADMAP §18.7 the `sign` job is two key jobs, `sign-files` and `sign-manifest`, with an unprivileged `assemble` job between them, since images hold the signed kernels and Limine binaries and the manifest lists the images (ROADMAP §22.1). |

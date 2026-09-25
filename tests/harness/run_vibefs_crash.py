@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 
+from tests.harness import results
 from tests.harness.harness import (
     EnvConfig,
     HarnessError,
@@ -24,6 +25,7 @@ from tests.harness.harness import (
     env_str,
     kill_delay,
     make_disk,
+    qemu_argv,
     run_qemu_until_exit,
     virtio_blk_args,
 )
@@ -75,6 +77,7 @@ def _one_round(
             timeout_s=env.timeout,
             kill_after=lambda line: _wr_line(line, rng),
         )
+        results.current().add_boot(qemu_argv(cfg, None), cfg, raw.exit_code)
         if not any(ln == READY for ln in raw.lines):
             tail = raw.lines[-8:] if raw.lines else []
             raise HarnessError(
@@ -110,6 +113,7 @@ def _one_round(
 
 def main() -> int:
     env = env_config(default_iso="vibeos-vibefs-crash.iso", default_timeout=90)
+    results.Results(env.tier)
     mkfs = env_str("VIBEOS_MKFS", "mkfs-vibefs")
     fsck = env_str("VIBEOS_FSCK", "fsck-vibefs")
     rounds = env_int("VIBEOS_CRASH_ROUNDS", 8)
@@ -128,4 +132,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(results.run_main(main))
