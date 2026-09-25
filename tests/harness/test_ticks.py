@@ -609,6 +609,29 @@ class TestSummary(RepoCase):
         self.assertIn("### Notes", text)
 
 
+class TestHistory(unittest.TestCase):
+    def test_reads_records_from_origin(self) -> None:
+        origin = TempRepo()
+        self.addCleanup(origin.cleanup)
+        origin.commit("main")
+        origin.git("checkout", "-q", "--orphan", "ci-history")
+        origin.commit("records", {
+            "runs/ci/1.json": json.dumps({"run_id": 1, "event": "push", "head_sha": "a"}),
+            "records/2026-01-01-dev-host-a-b.json": json.dumps(
+                {"run_id": 2, "event": "dev-host", "runner": {"cpu_model": "Café M4"}}),
+            "README.md": "not a record\n",
+        })
+        origin.git("checkout", "-q", "main")
+        repo = TempRepo()
+        self.addCleanup(repo.cleanup)
+        repo.commit("x")
+        self.assertEqual(History(repo.path).records(), [])  # no remote, no records
+        repo.git("remote", "add", "origin", str(origin.path))
+        got = sorted(History(repo.path).records(), key=lambda r: r["run_id"])
+        self.assertEqual([(r["id"], r["event"]) for r in got], [(1, "push"), (2, "dev-host")])
+        self.assertEqual(got[1]["runner"]["cpu_model"], "Café M4")
+
+
 class TestRealTree(unittest.TestCase):
     def test_parse_proves_splits_at_the_first_separator(self) -> None:
         p = check_ticks.parse_proves("make check -- CI runs `cargo clippy --bin vibeos -- -D")

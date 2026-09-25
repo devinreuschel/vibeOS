@@ -498,14 +498,14 @@ class History:
             return []
         names = [n for n in gatelib.git(self.repo, "ls-tree", "-r", "-z", "--name-only",
                                         self.REF).split("\0") if n.endswith(".json")]
-        batch = "".join(f"{self.REF}:{n}\n" for n in names)
+        batch = "".join(f"{self.REF}:{n}\n" for n in names).encode()
         r = subprocess.run(["git", "-C", str(self.repo), "cat-file", "--batch"], input=batch,
-                           capture_output=True, text=True, check=False)
+                           capture_output=True, check=False)
         out: list[Run] = []
-        data = r.stdout
+        data = r.stdout  # `<sha> blob <size>\n<size bytes>\n` per name
         pos = 0
         while pos < len(data):
-            nl = data.index("\n", pos)
+            nl = data.index(b"\n", pos)
             header = data[pos:nl].split()
             pos = nl + 1
             if len(header) < 3:
@@ -513,8 +513,8 @@ class History:
             size = int(header[2])
             blob, pos = data[pos:pos + size], pos + size + 1
             try:
-                rec = json.loads(blob)
-            except json.JSONDecodeError:
+                rec = json.loads(blob.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
                 continue
             if isinstance(rec, dict):
                 rec.setdefault("id", rec.get("run_id"))
