@@ -259,7 +259,27 @@ fn normal_boot_tail() {
     crate::part_init::init();
     crate::fs_init::init();
 
-    crate::user_init::boot_hello();
+    // ROADMAP §10.6: `/hello` runs as a process the kernel spawns and
+    // waits for. Diagnostic only, not a `vibeOS:` marker.
+    #[cfg(not(feature = "vibefs_crash"))]
+    {
+        use crate::serial::Serial;
+        use core::fmt::Write;
+        match crate::proc_init::spawn_elf("/hello", 0, 0) {
+            Ok(pid) => {
+                let st = crate::proc_init::wait_kernel(pid);
+                let code = if vibeos::proc::wifsignaled(st) {
+                    128 + vibeos::proc::wtermsig(st)
+                } else {
+                    vibeos::proc::wexitstatus(st)
+                };
+                let _ = writeln!(Serial, "user: exit {code}");
+            }
+            Err(e) => {
+                let _ = writeln!(Serial, "user: hello failed: {}", e.as_str());
+            }
+        }
+    }
 
     #[cfg(feature = "gp_test")]
     gp_test_trip();

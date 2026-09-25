@@ -212,7 +212,7 @@ the errno the baseline returns: `read(-1, <unmapped>, 1)` is `EBADF`, and
 | 500 | `psinfo` | 2 | `rdi` buf, `rsi` len; vibeOS-specific |
 
 `sched_yield` calls the kernel `yield_now` when the caller has a pid
-(bound `run_user` or a spawned process). A kernel-side `dispatch()`
+(any spawned process). A kernel-side `dispatch()`
 probe with no process (ktest, IF off) returns `0` without scheduling.
 
 ### 3.1 Behavior and differences from Linux
@@ -253,8 +253,16 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   `pid`, process group `-pid` (F149; ROADMAP §13.7). A `pid` that names a
   zombie returns `ESRCH`; Linux returns 0 (ROADMAP §13.7). A
   default-terminate or default-stop signal to pid 1 kills or stops init,
-  after which orphans stay zombies; Linux delivers to init only the signals
-  it handles (F068; ROADMAP §10.5)
+  after which an orphan has no reaper and is freed when it exits (`exit`
+  below); Linux delivers to init only the signals it handles (F068; ROADMAP
+  §10.5)
+- `exit`: the caller's children go to the reaper `proc::reaper_for` picks:
+  pid 1 while init is live or stopped; otherwise none, so a child reads
+  `getppid()` 0 and is freed when it exits (a zombie child at once), as in
+  the `kernel_tests` and `kernel_shell` builds. A process the kernel starts
+  has parent 0: `/sbin/init`, and the boot `/hello` and the in-guest test
+  programs, which `proc_init::wait_kernel` reaps. Linux reparents to a subreaper or
+  init and panics when init exits (ROADMAP §10.5, F068)
 - `psinfo`: writes one `<pid> <ppid> <state> <name>` line per process
   (state `run`, `stop`, or `zombie`). It formats the whole lines that fit in
   512 bytes and copies at most `rsi` of those bytes. Number 500 is in the
@@ -300,8 +308,8 @@ that `dup` or `fork` copied share one offset. While the table is full, every
   its `fork` child can overlap on one inherited descriptor and lose an
   offset update until §13.1's position lock (F055)
 - a kernel-side `dispatch()` probe with no process still sees `getpid=0`
-  and `EBADF` for a closed fd; `with_user_as` binds a temporary process
-  so pointer-validation tests use a process fd table
+  and `EBADF` for a closed fd; pointer-validation tests run as spawned
+  ring-3 programs
 
 ---
 

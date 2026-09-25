@@ -918,7 +918,7 @@ that review cites means the review's text.
 |---|-----------|----------------|--------|-------------|
 | I1 | Lock rank HEAP < PT < BUDDY < SCHED < DEVICE < SERIAL (§2.1); a second lock of a held rank only through `lock_nested` (§2.3) | `lock.rs`, `sync_init::lock_enter` | enforced at runtime, per CPU | Partly: `lock.rs` still ranks the heap after PT and BUDDY, so an allocation under either fails only when it grows the heap; a nested lock of the same rank passes the check and its release clears the rank bit the outer lock still holds, `IrqCell` has no rank, and a lock held across a switch goes unseen (ROADMAP §10.3, §13.12, F108) |
 | I2 | Hard-IRQ context never blocks or allocates (§2.2) | convention | documented | Yes, unchecked: only `irq_init::dispatch` sets `IN_ISR`, and no blocking primitive asserts it (ROADMAP §10.3, F110) |
-| I3 | IF=0 through every return-to-user sequence (§5.10 rule 4) | FMASK (§7.2); `cli` in `run_user` | documented | No: the syscall exit has no `cli` and `console_init::wait_key` returns with IF=1 (F001); `enter_user_full` runs with IF=1 (F006) (ROADMAP §10.6) |
+| I3 | IF=0 through every return-to-user sequence (§5.10 rule 4) | FMASK (§7.2) | documented | No: the syscall exit has no `cli` and `console_init::wait_key` returns with IF=1 (F001); `enter_user_full` runs with IF=1 (F006) (ROADMAP §10.6) |
 | I4 | Kernel code outside the §5.10 entry and exit sequences runs with `GS_BASE` = this CPU's `PerCpu` (§5.10) | `arch::gs`, `per_cpu_init` | documented | No: the raw gates of §5.10 rule 1 (F004), the IF=1 window in `enter_user_full` (F006), an NMI, `#MC`, or `#DB` taken in the syscall entry or exit window, and a fault on the return-to-user `iretq` (both F007) run on the user base (ROADMAP §10.6) |
 | I5 | One entry stub per vector makes the `swapgs` decision (§5.10 rule 1) | `arch/idt.rs` | documented | No: the `irq_init` pool gates `0x31`–`0x7F` and the `kbd_init` gates `0x30` and `0x21` skip it (ROADMAP §10.6, F004) |
 | I6 | Ring 3 never halts the kernel, pid 1's exit excepted (§2.5, §5.2, §11.5) | `proc_init::try_user_fault` | documented | No: ring-3 `#DB`, and `#AC` when `CR0.AM` is set, halt (F005), and so do the I4 windows (ROADMAP §10.6) |
@@ -1479,7 +1479,7 @@ where the paragraphs below the table say so. The executable contract for the mar
 | 17b | PCI enum + device registry | `pci: N devices` | After `console ok`. ECAM for the buses the first MCFG allocation covers (`acpi::parse_mcfg` reads no other entry; F045); otherwise `0xCF8`/`0xCFC`, which the kernel uses only for bus 0 (a kernel limit: configuration mechanism #1 addresses any bus; ROADMAP §20.1, F114). Scan builds a device list. Workqueue + threaded IRQ start, then drivers bind by id. Memory BARs are mapped through ioremap or the capped physmap; sizes above 32 MiB are recorded and skipped (§9.2). |
 | 17c | Block layer + ramdisk + virtio-blk + partitions | `block: <name> <n> sectors` | After bind. One line per device. virtio-blk (`vda`) emits during probe; ramdisk (`ram0`) follows in `block_init`; partition children (`<parent>p<N>`) after that. |
 | 17d | VFS + FAT initrd root + pseudo mounts + vibefs | (none) | After block. Makefile FAT32 initrd at `/` when live, else dummy ramfs. Then devfs/procfs/tmpfs/sysfs on `/dev` `/proc` `/tmp` `/sys`. BSS vibefs at `/vibe` (Phase 8D). No serial marker: a root without `/sbin/init` shows as `user: init failed` and no `shell ready`. Syscalls do not reach the VFS or kernfs: `file_init` resolves paths through its own FAT and vibefs route tables (ROADMAP §10.4, F086). |
-| 18 | `/hello`, builtins, `/sbin/init` as pid 1 | `shell ready` | Last marker. `user_init::boot_hello` runs `/hello` bound to the bootstrap thread, `shell_init::init` registers the builtins, and `proc_init::start_init` spawns `/sbin/init` pinned to the BSP. `/sbin/init` forks `/bin/tests` and waits for it without reading its exit status, then forks `/bin/sh`, which writes `shell ready` from ring 3 (`user/sh.asm`); the marker is not kernel-emitted and does not show that `/bin/tests` passed (ROADMAP §10.5, F073). A `kernel_shell` build instead spawns the kernel `shell` thread, which prints `shell ready`; a `kernel_tests` build runs the in-guest registry. |
+| 18 | `/hello`, builtins, `/sbin/init` as pid 1 | `shell ready` | Last marker. The bootstrap thread spawns `/hello` and waits for it (`proc_init::spawn_elf`, `proc_init::wait_kernel`), `shell_init::init` registers the builtins, and `proc_init::start_init` spawns `/sbin/init` pinned to the BSP. `/sbin/init` forks `/bin/tests` and waits for it without reading its exit status, then forks `/bin/sh`, which writes `shell ready` from ring 3 (`user/sh.asm`); the marker is not kernel-emitted and does not show that `/bin/tests` passed (ROADMAP §10.5, F073). A `kernel_shell` build instead spawns the kernel `shell` thread, which prints `shell ready`; a `kernel_tests` build runs the in-guest registry. |
 
 Ordering rules worth stating separately because they were learned the hard way:
 
@@ -2590,8 +2590,8 @@ vector pushes one, and, for `#PF`, the CR2 the stub saved (§5.10 rule 9), then 
 action (§2.5), the only action before ROADMAP §13.8, prints
 `user: pid N killed SIG<name> rip=0x<rip> err=0x<err>`, plus
 ` cr2=0x<addr>` for `#PF` (a `user:` line, not a `vibeOS:` marker), and ends the process through
-`finish_exit`. A ring-3 fault with no bound process (the in-guest test that calls `enter_user`
-directly) falls through to the halt; that test's own `#UD` is taken first by the `catch` it armed.
+`finish_exit`. Every entry to ring 3 belongs to a spawned process, the in-guest tests' included
+(ROADMAP §10.6), so a ring-3 fault always has a process to end.
 
 ## 5.3 Vector map
 
@@ -2994,9 +2994,9 @@ architectures. Planned (ROADMAP §11.3, §11.6): the aarch64 port does not exist
    `enter_user` and `enter_user_full` run `cli` before `mov gs`; each checks IF=0 in debug builds;
    `iretq` restores ring 3's IF from the frame. Rule; not yet enforced: ROADMAP §10.6 (F001, F006).
    The syscall exit has no `cli`, and `console_init::wait_key` returns with IF=1 from its `sti; hlt`
-   (F001); `enter_user_full` runs with IF=1 (F006); `syscall_init::run_user` runs `cli` before
-   `enter_user`. The syscall exit also stages the return value and the `iretq` frame in
-   `PerCpu.syscall_scratch`, per CPU, not per thread (ROADMAP §10.6, the user-frame box).
+   (F001); `enter_user_full` runs with IF=1 (F006). The syscall exit also stages the return value
+   and the `iretq` frame in `PerCpu.syscall_scratch`, per CPU, not per thread (ROADMAP §10.6, the
+   user-frame box).
 5. Every interrupt and exception entry clears RFLAGS.AC before any other code: an interrupt gate
    clears IF and TF but not AC, and ring 3 can set AC with `popf`. The syscall entry clears AC
    through FMASK (bit 18). Rule; not yet enforced: ROADMAP §10.6 (F088); no interrupt or exception

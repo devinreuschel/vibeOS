@@ -68,6 +68,22 @@ needs = [
 ]
 why = "claim: reopened (F014, F049)"
 
+# L1037
+[[box]]
+key = "a bound (`"
+needs = [
+  "one ring-3 entry model: `/hello`",  # L1402
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1038
+[[box]]
+key = "an orphan goes to pid"
+needs = [
+  "a host-tested `vibeos-core` helper picks",  # L1364
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
 # Phase 10 boxes.
 
 [[box]]

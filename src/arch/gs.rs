@@ -52,9 +52,9 @@ pub unsafe fn leave(to_user: bool) {
 
 /// Reload kernel data segs and both GS bases to `PerCpu`.
 ///
-/// After a user exception `longjmp`s into `catch`, or `exit` longjmps
-/// out of `run_user`, GS_BASE is already kernel (swapped on entry) but
-/// KERNEL_GS_BASE still holds the user base and DS/ES may be user.
+/// After a user exception `longjmp`s into `catch`, GS_BASE is already
+/// kernel (swapped on entry) but KERNEL_GS_BASE still holds the user base
+/// and DS/ES may be user.
 pub fn force_kernel() {
     let Some(cpu) = per_cpu_init::try_current() else {
         return;

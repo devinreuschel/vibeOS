@@ -15,9 +15,10 @@ use vibeos::desc::InterruptFrame;
 use vibeos::fs::FsError;
 use vibeos::kbd::{DecodedKey, NamedKey};
 use vibeos::proc::{
-    Creds, Cwd, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, MAX_FDS, MAX_PROCS, ProcState, SIGBUS,
-    SIGCHLD, SIGCONT, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGSTOP, SigAct, WNOHANG, default_action,
-    fd_flags_from_open, sig_name, wait_exited, wait_signaled, wait_stopped,
+    Creds, Cwd, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, InitState, MAX_FDS, MAX_PROCS,
+    ProcState, SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGSTOP, SigAct,
+    WNOHANG, default_action, fd_flags_from_open, reaper_for, sig_name, wait_exited, wait_signaled,
+    wait_stopped,
 };
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::syscall::{
@@ -38,7 +39,7 @@ use crate::file_init;
 use crate::serial::Serial;
 use crate::syscall_init;
 use crate::thread_init;
-use crate::user_init::{self, LoadError};
+use crate::user_init::{self, LoadError, Loaded};
 
 struct Proc {
     state: ProcState,
@@ -51,10 +52,9 @@ struct Proc {
     fds: FdTable,
     wait_status: u32,
     pending: u32,
-    bound: bool,
+    /// No reaper: freed at exit, ROADMAP §10.5.
+    autoreap: bool,
     space: Option<Box<AddressSpace>>,
-    /// Bound `run_user` / probe: caller owns the AS. Spawned uses `space`.
-    borrowed: *const AddressSpace,
     entry: UserRegs,
     wait_wq: WaitQueue,
     stop_wq: WaitQueue,
@@ -73,9 +73,8 @@ impl Proc {
             fds: FdTable::empty(),
             wait_status: 0,
             pending: 0,
-            bound: false,
+            autoreap: false,
             space: None,
-            borrowed: core::ptr::null(),
             entry: UserRegs::empty(),
             wait_wq: WaitQueue::new(),
             stop_wq: WaitQueue::new(),
@@ -83,6 +82,8 @@ impl Proc {
     }
 }
 
+/// The process table. `procs[0]` is never a process: its `wait_wq` is the
+/// kernel's, on which [`wait_kernel`] sleeps for ppid-0 processes.
 struct Table {
     procs: [Proc; MAX_PROCS],
 }
@@ -177,9 +178,8 @@ fn current_pid() -> u32 {
     thread_init::current_pid()
 }
 
-/// Address space for the current syscall / `run_user`.
-/// Spawned processes own a Box; bound `run_user` stores a borrowed pointer
-/// so a child's `clear_as` cannot steal the parent's.
+/// Address space for the current syscall: the process's own, or the
+/// global `CURRENT_AS` when the caller has no pid.
 pub fn current_space() -> Option<&'static AddressSpace> {
     let pid = current_pid();
     if pid != 0
@@ -193,13 +193,7 @@ pub fn current_space() -> Option<&'static AddressSpace> {
 fn space_of(pid: u32) -> Option<&'static AddressSpace> {
     with_table(|t| {
         let p = t.get(pid)?;
-        if let Some(ref s) = p.space {
-            Some(&**s as *const AddressSpace)
-        } else if !p.borrowed.is_null() {
-            Some(p.borrowed)
-        } else {
-            None
-        }
+        p.space.as_ref().map(|s| &**s as *const AddressSpace)
     })
     .map(|p| unsafe { &*p })
 }
@@ -248,7 +242,7 @@ fn alloc_pid(prefer: u32) -> Option<u32> {
     })
 }
 
-fn init_slot(t: &mut Table, pid: u32, ppid: u32, name: &'static str, bound: bool) {
+fn init_slot(t: &mut Table, pid: u32, ppid: u32, name: &'static str) {
     let p = &mut t.procs[pid as usize];
     *p = Proc::empty();
     p.state = ProcState::Live;
@@ -256,7 +250,6 @@ fn init_slot(t: &mut Table, pid: u32, ppid: u32, name: &'static str, bound: bool
     p.ppid = ppid;
     p.name = name;
     p.fds = FdTable::stdio();
-    p.bound = bound;
 }
 
 fn close_fd_slot(fd: Fd) {
@@ -314,49 +307,6 @@ fn user_thread_entry() {
     unsafe { syscall_init::enter_user_full(&regs) };
 }
 
-/// Bind `run_user` on the current kernel thread. Caller owns `space`.
-pub fn bind_current(space: &mut AddressSpace, name: &'static str) -> u32 {
-    let pid = alloc_pid(0).expect("proc table");
-    let tid = thread_init::current_id();
-    with_table(|t| {
-        init_slot(t, pid, 0, name, true);
-        t.procs[pid as usize].tid = tid;
-        t.procs[pid as usize].borrowed = space as *const AddressSpace;
-    });
-    thread_init::set_pid_cr3(tid, pid, space.root().as_u64());
-    set_as(space);
-    pid
-}
-
-pub fn unbind_current() {
-    let pid = current_pid();
-    if pid == 0 {
-        clear_as();
-        return;
-    }
-    let fds = with_table(|t| {
-        let fds = t.get(pid).map(|p| p.fds).unwrap_or_else(FdTable::empty);
-        if let Some(p) = t.get_mut(pid) {
-            *p = Proc::empty();
-        }
-        fds
-    });
-    let mut fds = fds;
-    close_all_fds(&mut fds);
-    let tid = thread_init::current_id();
-    thread_init::set_pid_cr3(tid, 0, 0);
-    clear_as();
-}
-
-/// Kernel-side `dispatch()` probe: stdio + borrowed AS.
-pub fn bind_probe(space: &mut AddressSpace) -> u32 {
-    bind_current(space, "probe")
-}
-
-pub fn unbind_probe() {
-    unbind_current();
-}
-
 #[cfg_attr(feature = "kernel_tests", allow(dead_code))]
 pub fn start_init() {
     match spawn_elf("/sbin/init", INIT_PID, 0) {
@@ -367,8 +317,33 @@ pub fn start_init() {
     }
 }
 
-fn spawn_elf(path: &str, prefer: u32, ppid: u32) -> Result<u32, LoadError> {
-    let loaded = user_init::load_path(path, &[path])?;
+/// Start the ELF at `path` as a new process with parent `ppid` (0: the
+/// kernel, which reaps it with [`wait_kernel`]).
+pub(crate) fn spawn_elf(path: &str, prefer: u32, ppid: u32) -> Result<u32, LoadError> {
+    start_loaded(
+        user_init::load_path(path, &[path])?,
+        prefer,
+        ppid,
+        intern_name(path),
+    )
+}
+
+/// Start the in-memory ELF image `elf` with `argv` as a new process with
+/// parent `ppid` (0: the kernel, which reaps it with [`wait_kernel`]).
+pub(crate) fn spawn_image(elf: &[u8], argv: &[&[u8]], ppid: u32) -> Result<u32, LoadError> {
+    let name = match argv.first().map(|a| core::str::from_utf8(a)) {
+        Some(Ok(a)) => intern_name(a),
+        _ => "user",
+    };
+    start_loaded(user_init::load_image(elf, argv)?, 0, ppid, name)
+}
+
+fn start_loaded(
+    loaded: Loaded,
+    prefer: u32,
+    ppid: u32,
+    name: &'static str,
+) -> Result<u32, LoadError> {
     let pid = match alloc_pid(prefer) {
         Some(p) => p,
         None => {
@@ -377,7 +352,6 @@ fn spawn_elf(path: &str, prefer: u32, ppid: u32) -> Result<u32, LoadError> {
         }
     };
     let cr3 = loaded.space.root().as_u64();
-    let name = intern_name(path);
     let mut entry = UserRegs::empty();
     entry.rip = loaded.entry;
     entry.rsp = loaded.rsp;
@@ -385,7 +359,7 @@ fn spawn_elf(path: &str, prefer: u32, ppid: u32) -> Result<u32, LoadError> {
     entry.fs_base = loaded.fs;
     let boxed = Box::new(loaded.space);
     with_table(|t| {
-        init_slot(t, pid, ppid, name, false);
+        init_slot(t, pid, ppid, name);
         t.procs[pid as usize].space = Some(boxed);
         t.procs[pid as usize].entry = entry;
     });
@@ -397,6 +371,53 @@ fn spawn_elf(path: &str, prefer: u32, ppid: u32) -> Result<u32, LoadError> {
     });
     thread_init::make_ready(h.id());
     Ok(pid)
+}
+
+enum KernelWait {
+    Done(u32),
+    Sleep,
+    NotKernelChild,
+}
+
+/// Block until `pid`, a process whose parent is the kernel (ppid 0),
+/// exits; reap it and return its `wait4` status word. Returns once the
+/// zombie is reaped, before its address space and kernel stack are freed.
+pub(crate) fn wait_kernel(pid: u32) -> u32 {
+    debug_assert_eq!(current_pid(), 0);
+    loop {
+        let r = thread_init::with_sched(|s| {
+            TABLE.with(|t| {
+                let Some(p) = t.get(pid) else {
+                    return KernelWait::NotKernelChild;
+                };
+                if p.ppid != 0 {
+                    return KernelWait::NotKernelChild;
+                }
+                match p.state {
+                    ProcState::Zombie => {
+                        let st = p.wait_status;
+                        reap_zombie(t, pid);
+                        KernelWait::Done(st)
+                    }
+                    ProcState::Live | ProcState::Stopped => {
+                        s.begin_wait(&mut t.procs[0].wait_wq, FAR_DEADLINE);
+                        KernelWait::Sleep
+                    }
+                    ProcState::Unused => KernelWait::NotKernelChild,
+                }
+            })
+        });
+        assert!(
+            !matches!(r, KernelWait::NotKernelChild),
+            "wait_kernel({pid}): not a live kernel-parented process; only kernel code calls \
+             wait_kernel, once per ppid-0 pid that spawn_elf or spawn_image returned, and only \
+             wait_kernel reaps a ppid-0 process"
+        );
+        match r {
+            KernelWait::Done(st) => return st,
+            KernelWait::Sleep | KernelWait::NotKernelChild => thread_init::schedule(),
+        }
+    }
 }
 
 pub fn syscall(frame: *mut SyscallFrame) -> i64 {
@@ -436,7 +457,7 @@ fn dispatch_frame(nr: u64, args: [u64; 6], frame: *mut SyscallFrame) -> i64 {
         SYS_FORK => sys_fork(frame),
         SYS_EXECVE => sys_execve(args[0], args[1], args[2], frame),
         SYS_EXIT => {
-            if !syscall_init::in_user() && current_pid() == 0 {
+            if current_pid() == 0 {
                 0
             } else {
                 sys_exit(args[0], false)
@@ -547,10 +568,7 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> i64 {
                     return syscall::neg(EFAULT);
                 }
                 match slot.kind {
-                    FdKind::Console => {
-                        syscall_init::capture_stdout(&scratch[..n]);
-                        console_init::write(&scratch[..n]);
-                    }
+                    FdKind::Console => console_init::write(&scratch[..n]),
                     FdKind::File(fid) => match file_init::write(fid, &scratch[..n]) {
                         Ok(k) => {
                             if k < n {
@@ -856,7 +874,7 @@ fn sys_fork(frame: *mut SyscallFrame) -> i64 {
     let boxed = Box::new(cloned);
     let h = thread_init::spawn_user("user", user_thread_entry, pid, cr3);
     with_table(|t| {
-        init_slot(t, pid, ppid, "user", false);
+        init_slot(t, pid, ppid, "user");
         let p = &mut t.procs[pid as usize];
         p.fds = fds;
         p.cwd = cwd;
@@ -864,7 +882,6 @@ fn sys_fork(frame: *mut SyscallFrame) -> i64 {
         p.space = Some(boxed);
         p.entry = child_regs;
         p.tid = h.id();
-        p.bound = false;
     });
     thread_init::make_ready(h.id());
     // Child may run (and exit) before we return. POSIX allows either order.
@@ -969,34 +986,18 @@ fn sys_exit(status: u64, _from_signal: bool) -> i64 {
     finish_exit(wait_exited(status as u32), false);
 }
 
-fn finish_exit(wait_status: u32, from_fault: bool) -> ! {
+fn finish_exit(wait_status: u32, _from_fault: bool) -> ! {
     let pid = current_pid();
     if pid == 0 {
-        if syscall_init::in_user() {
-            syscall_init::longjmp_user((wait_status >> 8) as i32);
-        }
         thread_init::exit_current();
-    }
-    let bound = with_table(|t| t.get(pid).map(|p| p.bound).unwrap_or(false));
-    if bound {
-        syscall_init::set_exit_status(if from_fault {
-            128 + (wait_status & 0x7f) as i32
-        } else {
-            ((wait_status >> 8) & 0xff) as i32
-        });
-        if syscall_init::in_user() {
-            syscall_init::longjmp_user(syscall_init::exit_status());
-        }
-        return_status_or_die(wait_status);
     }
     let (old, ppid, fds, tid) = thread_init::with_sched(|s| {
         TABLE.with(|t| {
-            reparent_children(t, pid);
-            if t.procs[INIT_PID as usize].state != ProcState::Unused {
+            if reparent_children(t, pid) {
                 s.wake_all(&mut t.procs[INIT_PID as usize].wait_wq);
             }
             let p = t.get_mut(pid);
-            let (space, ppid, fds, tid) = match p {
+            let (space, ppid, fds, tid, autoreap) = match p {
                 Some(p) => {
                     p.state = ProcState::Zombie;
                     p.wait_status = wait_status;
@@ -1004,14 +1005,18 @@ fn finish_exit(wait_status: u32, from_fault: bool) -> ! {
                     let space = p.space.take();
                     let fds = p.fds;
                     p.fds = FdTable::empty();
-                    (space, p.ppid, fds, p.tid)
+                    (space, p.ppid, fds, p.tid, p.autoreap)
                 }
-                None => (None, 0, FdTable::empty(), ThreadId::NONE),
+                None => (None, 0, FdTable::empty(), ThreadId::NONE, false),
             };
-            if ppid != 0 {
+            if autoreap {
+                // No reaper (ROADMAP §10.5): nobody waits, so free the slot now.
+                reap_zombie(t, pid);
+            } else {
                 if let Some(par) = t.get_mut(ppid) {
                     par.pending |= bit(SIGCHLD);
                 }
+                // ppid 0 wakes the kernel's queue (`wait_kernel`).
                 s.wake_all(&mut t.procs[ppid as usize].wait_wq);
             }
             (space, ppid, fds, tid)
@@ -1031,23 +1036,38 @@ fn finish_exit(wait_status: u32, from_fault: bool) -> ! {
     thread_init::exit_current();
 }
 
-fn return_status_or_die(_st: u32) -> ! {
-    thread_init::exit_current();
-}
-
-fn reparent_children(t: &mut Table, dead: u32) {
+/// Give `dead`'s children to the reaper `reaper_for` picks (ROADMAP §10.5,
+/// F068). With none, a zombie child is freed now and a live one gets
+/// ppid 0 and `autoreap`, so `finish_exit` frees it. True when init
+/// adopted a child and its wait queue needs a wake.
+fn reparent_children(t: &mut Table, dead: u32) -> bool {
+    // An exiting init is still `Live` here; it must not adopt its own children.
+    let init = if dead == INIT_PID {
+        InitState::Zombie
+    } else {
+        InitState::of(t.procs[INIT_PID as usize].state)
+    };
+    let reaper = reaper_for(init);
+    let mut adopted = false;
     let mut i = 1usize;
     while i < MAX_PROCS {
-        if t.procs[i].state != ProcState::Unused && t.procs[i].ppid == dead {
-            t.procs[i].ppid = INIT_PID;
-            if t.procs[INIT_PID as usize].state != ProcState::Unused {
-                let wq = &mut t.procs[INIT_PID as usize].wait_wq as *mut WaitQueue;
-                // Wake after SCHED section via cookie: same lock, do it now.
-                let _ = wq;
+        let p = &mut t.procs[i];
+        if p.state != ProcState::Unused && p.ppid == dead && p.pid != dead {
+            match reaper {
+                Some(r) => {
+                    p.ppid = r;
+                    adopted = true;
+                }
+                None if p.state == ProcState::Zombie => reap_zombie(t, i as u32),
+                None => {
+                    p.ppid = 0;
+                    p.autoreap = true;
+                }
             }
         }
         i += 1;
     }
+    adopted
 }
 
 fn sys_wait4(pid: u64, status: u64, options: u64) -> i64 {

@@ -54,6 +54,37 @@ impl ProcState {
     }
 }
 
+/// Pid 1's slot as the orphan reaper rule reads it (ROADMAP §10.5, F068).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InitState {
+    Live,
+    Stopped,
+    Zombie,
+    Absent,
+}
+
+impl InitState {
+    /// The state of pid 1's slot; an unused slot is `Absent`.
+    pub const fn of(s: ProcState) -> Self {
+        match s {
+            ProcState::Unused => Self::Absent,
+            ProcState::Live => Self::Live,
+            ProcState::Stopped => Self::Stopped,
+            ProcState::Zombie => Self::Zombie,
+        }
+    }
+}
+
+/// The pid that adopts an orphan: pid 1 while init is live or stopped,
+/// otherwise none, and the orphan's zombie is freed when it exits
+/// (ROADMAP §10.5, F068).
+pub const fn reaper_for(init: InitState) -> Option<u32> {
+    match init {
+        InitState::Live | InitState::Stopped => Some(INIT_PID),
+        InitState::Zombie | InitState::Absent => None,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Creds {
     pub uid: u32,
@@ -353,6 +384,18 @@ mod tests {
         assert!(wifstopped(stop));
         assert!(!wifexited(stop));
         assert!(!wifsignaled(stop));
+    }
+
+    #[test]
+    fn reaper_for_init_state() {
+        assert_eq!(InitState::of(ProcState::Unused), InitState::Absent);
+        assert_eq!(InitState::of(ProcState::Live), InitState::Live);
+        assert_eq!(InitState::of(ProcState::Stopped), InitState::Stopped);
+        assert_eq!(InitState::of(ProcState::Zombie), InitState::Zombie);
+        assert_eq!(reaper_for(InitState::Live), Some(INIT_PID));
+        assert_eq!(reaper_for(InitState::Stopped), Some(INIT_PID));
+        assert_eq!(reaper_for(InitState::Zombie), None);
+        assert_eq!(reaper_for(InitState::Absent), None);
     }
 
     #[test]
