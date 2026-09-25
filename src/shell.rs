@@ -8,8 +8,8 @@ use crate::kbd::{DecodedKey, NamedKey};
 
 pub const LINE_CAP: usize = 128;
 pub const HIST_CAP: usize = 16;
-pub const MAX_TOKENS: usize = 16;
-pub const MAX_COMMANDS: usize = 48;
+pub use crate::limits::MAX_COMMANDS;
+pub use crate::limits::MAX_TOKENS;
 pub const PROMPT: &str = "vibeos> ";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -716,5 +716,10 @@ mod tests {
         for k in all {
             let _ = ed.feed(DecodedKey::Named(k));
         }
+    }
+
+    #[test]
+    fn fixed_tables_match_limits() {
+        assert_eq!(Registry::new().cmds.len(), crate::limits::MAX_COMMANDS);
     }
 }

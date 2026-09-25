@@ -11,7 +11,7 @@ use crate::paging::{
     user_leaf_flags,
 };
 
-pub const MAX_REGIONS: usize = 32;
+pub use crate::limits::MAX_REGIONS;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UserPerms {
@@ -775,5 +775,13 @@ mod tests {
                 | UserMemError::NullGuard => assert_eq!(e.errno(), 14),
             }
         }
+    }
+
+    #[test]
+    fn fixed_tables_match_limits() {
+        let mut pool = TestPool::new(64);
+        let kernel = kernel_mapper(&mut pool);
+        let aspace = unsafe { AddressSpace::new(&kernel, &mut pool) }.unwrap();
+        assert_eq!(aspace.regions.len(), crate::limits::MAX_REGIONS);
     }
 }

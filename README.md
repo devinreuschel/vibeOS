@@ -38,7 +38,7 @@ No release exists yet: Phases 8 and 9 are tagged when Phase 10 closes the gate l
 Quickstart:
 
     ./setup.sh          # fetches Limine binaries, verifies host tools
-    make check          # fast local gate (fmt, host clippy, host units, harness, ruff/mypy, check scripts)
+    make check          # fast local gate (fmt, host and kernel clippy, host units, harness, ruff/mypy, check scripts)
     make                # kernel + vibeos.iso (hybrid BIOS/UEFI)
     make run            # QEMU window = PS/2; the terminal is COM1 (`-serial stdio`)
     make test           # host + harness units, e2e (BIOS, UEFI, panic, #GP, PIT, 9 GiB), in-guest, vibefs crash

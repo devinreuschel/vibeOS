@@ -22,7 +22,7 @@ pub const DEFAULT_BLOCK_SIZE: u32 = 512;
 pub const DEFAULT_RETRY_BUDGET: u8 = 3;
 pub const MAX_QUEUE: usize = 32;
 pub const MAX_SEGS: usize = 8;
-pub const MAX_BLOCKDEVS: usize = 8;
+pub use crate::limits::MAX_BLOCKDEVS;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockError {

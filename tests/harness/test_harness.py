@@ -933,6 +933,18 @@ class TestEnvConfig(unittest.TestCase):
         with overlay_env({"VIBEOS_SMP": ""}):
             self.assertEqual(env_int("VIBEOS_SMP", 2), 2)
 
+    def test_env_config_tier(self) -> None:
+        from tests.harness.harness import env_config, overlay_env
+
+        with overlay_env({}, clear=True):
+            self.assertEqual(env_config(default_iso="x.iso", default_timeout=1).tier, "adhoc")
+        with overlay_env({"VIBEOS_TIER": ""}):
+            self.assertEqual(env_config(default_iso="x.iso", default_timeout=1).tier, "adhoc")
+        with overlay_env({"VIBEOS_TIER": "test-kernel"}):
+            self.assertEqual(
+                env_config(default_iso="x.iso", default_timeout=1).tier, "test-kernel"
+            )
+
     def test_env_config_defaults_match_makefile(self) -> None:
         # Keep in sync with Makefile VIBEOS_* ?= (make run). C2.
         import pathlib

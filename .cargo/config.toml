@@ -5,8 +5,12 @@ rustflags = ["-D", "warnings"]
 # Kernel-only flags. Keep them off [build] rustflags so host `cargo test
 # --target $HOST` does not inherit linker/code-gen overrides. Host recipes
 # pass `--target $(HOST_TRIPLE)` (A2); do not pin a GNU triple.
+# Cargo reads one rustflags source: this table replaces [build]'s for the
+# kernel target, so it repeats -D warnings (ROADMAP §10.1, F147). A job that
+# sets RUSTFLAGS drops both tables.
 [target.x86_64-unknown-none]
 rustflags = [
+    "-D", "warnings",
     "-C", "force-frame-pointers=yes",
     "-C", "relocation-model=static",
     # Builtin spec defaults to PIE + full RELRO; we want a static ET_EXEC.

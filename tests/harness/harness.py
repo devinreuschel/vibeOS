@@ -20,6 +20,7 @@ Drivers live in `run_*.py` and must not parse the environment or build argv.
 | `VIBEOS_QEMU_ACCEL` | `tcg` (empty omits `-accel`) | all |
 | `VIBEOS_TIMEOUT` | `60` e2e/ps2, `90` ktest/crash | all |
 | `VIBEOS_QEMU_EXTRA` | empty | all |
+| `VIBEOS_TIER` | `adhoc`; each `make test-*` recipe sets its target name | all (`results.py`) |
 | `VIBEOS_EXPECT_PANIC` | off (`""` / `0`) | `run_e2e` |
 | `VIBEOS_GP_TEST` | off | `run_e2e` |
 | `VIBEOS_EXPECT_PIT` | off | `run_e2e` |
@@ -358,6 +359,7 @@ class EnvConfig:
     accel: str | None
     timeout: float
     extra: tuple[str, ...]
+    tier: str = "adhoc"
 
     def qemu(
         self,
@@ -421,6 +423,7 @@ def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
         accel=DEFAULT_ACCEL if accel_raw is None else accel_raw,
         timeout=timeout,
         extra=extra,
+        tier=os.environ.get("VIBEOS_TIER") or "adhoc",
     )
 
 

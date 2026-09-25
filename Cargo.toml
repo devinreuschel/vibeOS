@@ -17,18 +17,25 @@ path = "src/main.rs"
 [features]
 default = []
 # Force a panic early in boot so the panic path can be exercised end to end.
+# Test-only (AGENTS.md rule 9): no published ISO enables it.
 panic_test = []
 # Second kernel build: run the in-guest test registry after init (DESIGN §8.2).
 # Packaged into its own Cargo target dir / ISO; never the production image.
+# Test-only (AGENTS.md rule 9): no published ISO enables it.
+# release.yml still uploads vibeos-ktest.iso until ROADMAP §10.1's release box (F145).
 kernel_tests = []
 # Debug: keep the kernel interactive REPL instead of `/sbin/init`.
+# Test-only (AGENTS.md rule 9): no published ISO enables it.
 kernel_shell = []
 # After a full boot, trigger a #GP so the dump+halt path is e2e-tested.
+# Test-only (AGENTS.md rule 9): no published ISO enables it.
 gp_test = []
 # Panic dump ends with QEMU isa-debug-exit (nonzero) instead of an infinite hlt.
+# Test-only (AGENTS.md rule 9): no published ISO enables it.
 panic_exit = []
 # Write-loop kernel for QEMU-kill crash consistency (docs/VIBEFS.md §12).
 # Separate ISO / target dir; never the production image.
+# Test-only (AGENTS.md rule 9): no published ISO enables it.
 vibefs_crash = []
 
 [dependencies]

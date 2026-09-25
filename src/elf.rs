@@ -23,7 +23,7 @@ pub const EI_NIDENT: usize = 16;
 pub const EHDR_SIZE: usize = 64;
 pub const PHDR_SIZE: usize = 56;
 
-pub const MAX_LOADS: usize = 8;
+pub use crate::limits::MAX_ELF_LOADS as MAX_LOADS;
 
 pub const AT_NULL: u64 = 0;
 pub const AT_PHDR: u64 = 3;
@@ -726,5 +726,12 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn fixed_tables_match_limits() {
+        let elf = build_elf(0x4000_0000, &[0x90, 0xC3], &[]);
+        let img = parse(&elf).unwrap();
+        assert_eq!(img.loads.len(), crate::limits::MAX_ELF_LOADS);
     }
 }

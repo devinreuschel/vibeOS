@@ -23,7 +23,7 @@ use crate::vibefs_init;
 
 use core::fmt::Write;
 
-const MAX_OPEN: usize = 16;
+use vibeos::limits::MAX_OPEN_FILES as MAX_OPEN;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Back {

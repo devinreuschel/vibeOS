@@ -9,7 +9,7 @@ use crate::paging::PAGE_SIZE_4K;
 use crate::time::Instant;
 
 /// Global TCB table size. UP today; phase 4 still addresses by id.
-pub const MAX_THREADS: usize = 64;
+pub use crate::limits::MAX_THREADS;
 
 /// x86 reserved-1 bit. `prepare_thread` seeds this and leaves IF clear.
 pub const RFLAGS_RESERVED1: u64 = 0x2;

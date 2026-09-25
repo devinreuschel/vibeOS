@@ -13,7 +13,7 @@ use crate::fs::{FsError, InodeKind};
 pub const SEC: usize = 512;
 pub const INITRD_BYTES: usize = 64 * 1024;
 pub const MAX_CLUS_BYTES: usize = 4096;
-pub const MAX_NAME: usize = 64;
+pub use crate::limits::MAX_NAME;
 pub const FAT_CACHE: usize = 8;
 pub const EOC_MIN: u32 = 0x0FFFFFF8;
 pub const BAD_CLUS: u32 = 0x0FFFFFF7;
@@ -257,7 +257,7 @@ pub struct FatVol {
     next_ino: u32,
 }
 
-const MAX_INOS: usize = 96;
+use crate::limits::MAX_FAT_INODES as MAX_INOS;
 
 #[derive(Clone, Copy)]
 struct InoEnt {
@@ -2426,5 +2426,13 @@ mod tests {
         assert_eq!(FatError::NotSupp.as_str(), "not supp");
         assert_eq!(FatError::NotSupp.to_fs(), FsError::NotSupp);
         assert_eq!(FatError::Corrupt.to_fs(), FsError::Inval);
+    }
+
+    #[test]
+    fn fixed_tables_match_limits() {
+        let mut b = fresh(INITRD_BYTES);
+        let inos = with_vol(&mut b, |vol, _| vol.inos.len());
+        assert_eq!(inos, crate::limits::MAX_FAT_INODES);
+        assert_eq!(Node::EMPTY.name.len(), crate::limits::MAX_NAME);
     }
 }

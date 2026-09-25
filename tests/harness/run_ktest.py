@@ -7,6 +7,7 @@ import os
 import sys
 from collections.abc import Callable
 
+from tests.harness import results
 from tests.harness.harness import (
     HarnessError,
     QemuConfig,
@@ -17,6 +18,7 @@ from tests.harness.harness import (
     env_flag,
     ktest_devices,
     make_disk,
+    qemu_argv,
     retryable_ktest_failure,
     run_qemu_until_exit,
     silent_user_syscalls_hang,
@@ -56,6 +58,8 @@ def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool) -> Run
         raw = None
         try:
             raw = run_qemu_until_exit(cfg, timeout_s=timeout)
+            results.current().add_boot(qemu_argv(cfg, None), cfg, raw.exit_code)
+            results.current().record_ktest_lines(raw.lines)
             check_ktest_output(raw.lines, raw.exit_code)
             _require_line(raw.lines, _block_name("vda"), "missing virtio-blk marker")
             _require_line(raw.lines, _block_name("vdap1"), "missing vdap1 marker")
@@ -98,6 +102,10 @@ def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool) -> Run
             ):
                 reason = "timeout" if timed_out else "known ktest timing flake"
                 print(f"[{tag}] retry after {reason}: {e}", file=sys.stderr)
+                results.current().retry(
+                    f"{tag} attempt {attempt + 1}",
+                    results.failure_line(str(e), raw.lines if raw is not None else []),
+                )
                 continue
             raise
     assert last is not None
@@ -106,6 +114,7 @@ def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool) -> Run
 
 def main() -> int:
     env = env_config(default_iso="vibeos-ktest.iso", default_timeout=90)
+    results.Results(env.tier)
     skip_persist = env_flag("VIBEOS_SKIP_PERSIST")
     disk = make_disk(DISK_BYTES, "vibeos-vblk-")
     try:
@@ -144,4 +153,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(results.run_main(main))

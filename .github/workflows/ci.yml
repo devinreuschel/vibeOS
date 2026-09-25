@@ -33,6 +33,8 @@ jobs:
         with:
           toolchain: nightly-2026-09-22
           components: rust-src, llvm-tools, rustfmt, clippy
+          # `make check` lints the kernel and vibeos-core's no_std build.
+          targets: x86_64-unknown-none
 
       # Distinct from the ladder's cargo cache so a host-only `target/`
       # cannot evict kernel artifacts (DESIGN §8.6).
@@ -117,16 +119,17 @@ jobs:
       - name: setup
         run: ./setup.sh
 
-      # Kernel clippy stays here so `target/` stays warm for `make iso`.
-      # Host fmt/clippy/units/harness live in the `check` job (`make check`).
-      # Do not set RUSTFLAGS here: it replaces target rustflags (frame pointers,
-      # static relocation, linker flags).
+      # One kernel clippy run per feature set an ISO is built with, and one
+      # with kernel_shell (ROADMAP §10.1). The default set runs in the `check`
+      # job's `make check`. Do not set RUSTFLAGS here: it replaces target
+      # rustflags (-D warnings, frame pointers, static relocation, linker flags).
       - name: cargo clippy -D warnings (kernel)
         run: |
-          cargo clippy -p vibeos-core -- -D warnings
-          cargo clippy --bin vibeos --all-features -- -D warnings
           cargo clippy --bin vibeos --features kernel_tests -- -D warnings
           cargo clippy --bin vibeos --features vibefs_crash -- -D warnings
+          cargo clippy --bin vibeos --features panic_test --features panic_exit -- -D warnings
+          cargo clippy --bin vibeos --features gp_test --features panic_exit -- -D warnings
+          cargo clippy --bin vibeos --features kernel_shell -- -D warnings
       - name: build kernel + hybrid ISO
         run: make iso
 
@@ -161,6 +164,21 @@ jobs:
 
       - name: vibefs QEMU-kill crash consistency
         run: make test-vibefs-crash
+
+      # Per-tier table and every harness retry, even after a failed step
+      # (ROADMAP §10.2); check_ticks.py reads the uploaded files (§10.9).
+      - name: harness results summary
+        if: always()
+        run: python3 -m tests.harness.results summary build/results >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload harness results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results-x86_64-phase0
+          path: build/results/
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: upload production ISO
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

@@ -7,6 +7,7 @@ import sys
 from collections.abc import Callable
 from typing import TypeVar
 
+from tests.harness import results
 from tests.harness.harness import (
     HarnessError,
     boot_contract_markers,
@@ -14,6 +15,7 @@ from tests.harness.harness import (
     env_expect_panic,
     env_flag,
     halt_test_markers,
+    qemu_argv,
     run_qemu_and_check,
     run_qemu_console_input,
 )
@@ -64,11 +66,20 @@ def _retry_hang(label: str, fn: Callable[[], _T]) -> _T:
         if "timed out" not in msg and "no shell ready" not in msg:
             raise
         print(f"[e2e] retry {label}: {e}", file=sys.stderr)
+        results.current().retry(label, results.failure_line(msg))
+        _record_missing(msg)
         return fn()
+
+
+def _record_missing(message: str) -> None:
+    name = results.missing_marker(message)
+    if name is not None:
+        results.current().record("marker", name, "failed")
 
 
 def main() -> int:
     env = env_config(default_iso="vibeos.iso", default_timeout=60)
+    res = results.Results(env.tier)
     expect_panic = env_expect_panic()
     gp_test = env_flag("VIBEOS_GP_TEST")
     expect_pit = env_flag("VIBEOS_EXPECT_PIT")
@@ -125,8 +136,13 @@ def main() -> int:
                 ),
             )
     except HarnessError as e:
+        _record_missing(str(e))
+        res.add_boot(qemu_argv(cfg, None), cfg, None)
         print(f"[e2e] FAIL: {e}", file=sys.stderr)
         return 1
+    for name in result.matched:
+        res.record("marker", name, "passed")
+    res.add_boot(qemu_argv(cfg, None), cfg, result.exit_code)
 
     print(f"[e2e] ok: {len(result.matched)} markers matched", file=sys.stderr)
     for name in result.matched:
@@ -146,8 +162,13 @@ def main() -> int:
                 lambda: run_qemu_console_input(cfg, timeout_s=env.timeout),
             )
         except HarnessError as e:
+            _record_missing(str(e))
+            res.add_boot(qemu_argv(cfg, None), cfg, None)
             print(f"[e2e] FAIL: {e}", file=sys.stderr)
             return 1
+        for name in inp.matched:
+            res.record("marker", name, "passed")
+        res.add_boot(qemu_argv(cfg, None), cfg, inp.exit_code)
         print("[e2e]   . console input serial+ps2 ok", file=sys.stderr)
         for name in inp.matched:
             print(f"[e2e]     . {name}", file=sys.stderr)
@@ -155,4 +176,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(results.run_main(main))

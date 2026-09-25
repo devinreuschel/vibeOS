@@ -6,7 +6,7 @@
 
 use crate::block::BlockError;
 
-pub const MAX_PARTS: usize = 16;
+pub use crate::limits::MAX_PARTS;
 pub const MAX_EBR_DEPTH: u32 = 128;
 pub const MBR_SIG_OFF: usize = 510;
 pub const MBR_PART_OFF: usize = 446;
@@ -1043,5 +1043,13 @@ mod tests {
     fn error_strings() {
         assert_eq!(PartError::BadCrc.as_str(), "bad crc");
         assert_eq!(PartError::Truncated.as_str(), "truncated");
+    }
+
+    #[test]
+    fn fixed_tables_match_limits() {
+        assert_eq!(
+            Table::empty(TableOrigin::Mbr).parts.len(),
+            crate::limits::MAX_PARTS
+        );
     }
 }

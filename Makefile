@@ -57,7 +57,8 @@ USER_TESTS  := user/tests
 INITRD := $(CURDIR)/build/initrd.fat
 KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml crates/core/Cargo.toml build.rs linker.ld Makefile rust-toolchain.toml \
 	scripts/gen_ksyms.py scripts/mkuserelf.py scripts/mkiso.sh \
-	user/hello.asm user/init.asm user/sh.asm user/tests.asm user/sys.inc $(INITRD)
+	user/hello.asm user/init.asm user/sh.asm user/tests.asm user/sys.inc $(INITRD) \
+	.cargo/config.toml Cargo.lock
 
 LLVM_TOOL_DIR := $(shell rustc --print sysroot)/lib/rustlib/$(shell rustc -vV | sed -n 's/^host: //p')/bin
 OBJDUMP := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-objdump),$(LLVM_TOOL_DIR)/llvm-objdump,llvm-objdump)
@@ -124,13 +125,17 @@ help:
 	  '  test                  all of the above except test-smp-stress and test-ps2' \
 	  '  clean / distclean     build products; distclean also drops limine/'
 
-# Fast local / CI `check` job gate (T3). Kernel clippy is a full kernel
-# compile; CI runs it in the QEMU ladder so `target/` stays warm for `make iso`.
+# Fast local / CI `check` job gate (T3). It lints the kernel with its default
+# features and vibeos-core's no_std build for the kernel target, so kernel-target
+# code compiles before every commit; CI's ladder lints each other ISO feature
+# set and kernel_shell (ROADMAP §10.1, F147).
 # Guard scripts (scripts/check_*.py) run when present (A4, Q5, A1).
 check:
 	cargo fmt --check --all
 	cargo clippy -p vibeos-core --all-targets --features std --target $(HOST_TRIPLE) -- -D warnings
 	cargo clippy -p vibeos-hostlib-tests --all-targets --target $(HOST_TRIPLE) -- -D warnings
+	cargo clippy -p vibeos-core --target $(TARGET) -- -D warnings
+	cargo clippy --bin vibeos -- -D warnings
 	$(MAKE) test-unit
 	$(MAKE) test-harness
 	@if command -v ruff >/dev/null 2>&1; then \
@@ -203,18 +208,18 @@ layout: $(KERNEL_ELF)
 	@$(NM) $(KERNEL_ELF) | grep __kernel_
 
 test-unit:
-	cargo test -p vibeos-core --lib --features std --target $(HOST_TRIPLE)
+	VIBEOS_TIER=$@ cargo test -p vibeos-core --lib --features std --target $(HOST_TRIPLE)
 
 test-harness:
-	python3 -m unittest discover -s tests/harness -t . -v
+	VIBEOS_TIER=$@ GITHUB_STEP_SUMMARY= python3 -m unittest discover -s tests/harness -t . -v
 
 test-e2e: $(ISO)
-	VIBEOS_ISO=$(ISO) python3 tests/harness/run_e2e.py
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) python3 tests/harness/run_e2e.py
 
 # Focused #66 check: COM1 echo then QEMU `sendkey` (same i8042 as the
 # window). Already part of `test-e2e`; not a second boot in `make test`.
 test-ps2: $(ISO)
-	VIBEOS_ISO=$(ISO) python3 tests/harness/run_ps2.py
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) python3 tests/harness/run_ps2.py
 
 # UEFI path via OVMF. Skipped if OVMF is not installed.
 OVMF ?= /usr/share/ovmf/OVMF.fd
@@ -223,31 +228,31 @@ test-e2e-uefi: $(ISO)
 	    echo "test-e2e-uefi: OVMF not found at $(OVMF); skipping"; \
 	    exit 0; \
 	fi
-	VIBEOS_ISO=$(ISO) VIBEOS_BIOS=$(OVMF) python3 tests/harness/run_e2e.py
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) VIBEOS_BIOS=$(OVMF) python3 tests/harness/run_e2e.py
 
 test-e2e-panic: $(ISO_PANIC)
-	VIBEOS_ISO=$(ISO_PANIC) VIBEOS_EXPECT_PANIC=1 python3 tests/harness/run_e2e.py
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_PANIC) VIBEOS_EXPECT_PANIC=1 python3 tests/harness/run_e2e.py
 
 test-e2e-gp: $(ISO_GP)
-	VIBEOS_ISO=$(ISO_GP) VIBEOS_GP_TEST=1 python3 tests/harness/run_e2e.py
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_GP) VIBEOS_GP_TEST=1 python3 tests/harness/run_e2e.py
 
 # PIT channel 2 calibration: HPET emulation off (`-machine pc,hpet=off`).
 # Same ISO, same markers except the diagnostic names `pit` instead of `hpet`.
 test-e2e-pit: $(ISO)
-	VIBEOS_ISO=$(ISO) VIBEOS_EXPECT_PIT=1 python3 tests/harness/run_e2e.py
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) VIBEOS_EXPECT_PIT=1 python3 tests/harness/run_e2e.py
 
 # RAM past the 8 GiB physmap cap (DESIGN §4.1) must stay out of the buddy.
 test-e2e-highmem: $(ISO)
-	VIBEOS_ISO=$(ISO) VIBEOS_MEM=9G python3 tests/harness/run_e2e.py
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) VIBEOS_MEM=9G python3 tests/harness/run_e2e.py
 
 test-kernel: $(ISO_KTEST)
-	VIBEOS_ISO=$(ISO_KTEST) python3 tests/harness/run_ktest.py
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) python3 tests/harness/run_ktest.py
 
 test-kernel-smp4: $(ISO_KTEST)
-	VIBEOS_ISO=$(ISO_KTEST) VIBEOS_SMP=4 python3 tests/harness/run_ktest.py
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) VIBEOS_SMP=4 python3 tests/harness/run_ktest.py
 
 test-lapic-fallback: $(ISO_KTEST)
-	VIBEOS_ISO=$(ISO_KTEST) VIBEOS_QEMU_CPU=qemu64,-tsc-deadline python3 tests/harness/run_ktest.py
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) VIBEOS_QEMU_CPU=qemu64,-tsc-deadline python3 tests/harness/run_ktest.py
 
 # Host mkfs/fsck share src/vibefs.rs. Artifacts land under
 # $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/ (A2).
@@ -259,13 +264,13 @@ $(MKFS_VIBEFS) $(FSCK_VIBEFS): src/vibefs.rs tests/hostlib/src/bin/mkfs_vibefs.r
 	cargo build -p vibeos-hostlib-tests --bins --target $(HOST_TRIPLE)
 
 test-vibefs-crash: $(ISO_VIBEFS_CRASH) $(MKFS_VIBEFS) $(FSCK_VIBEFS)
-	VIBEOS_ISO=$(ISO_VIBEFS_CRASH) VIBEOS_MKFS=$(MKFS_VIBEFS) VIBEOS_FSCK=$(FSCK_VIBEFS) python3 tests/harness/run_vibefs_crash.py
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_VIBEFS_CRASH) VIBEOS_MKFS=$(MKFS_VIBEFS) VIBEOS_FSCK=$(FSCK_VIBEFS) python3 tests/harness/run_vibefs_crash.py
 
 test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-pit test-e2e-highmem test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
 
 # Longer high-CPU stress. Scheduled CI, not every push. ROADMAP §4.11.
 test-smp-stress: $(ISO_KTEST)
-	VIBEOS_ISO=$(ISO_KTEST) VIBEOS_SMP=4 VIBEOS_TIMEOUT=180 python3 tests/harness/run_ktest.py
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) VIBEOS_SMP=4 VIBEOS_TIMEOUT=180 python3 tests/harness/run_ktest.py
 
 clean:
 	rm -rf build/iso_root_* iso_root iso_root_panic iso_root_gp iso_root_ktest iso_root_vibefs_crash \
