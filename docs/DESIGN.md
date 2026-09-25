@@ -157,6 +157,9 @@ gs, cpu, AP trampoline). Nested also: `src/fs/` (VFS + kernfs). `user/` is frees
 | fs | `fs/mod.rs`, `fs/kernfs.rs`, `fat.rs`, `vibefs.rs` | `fs_init.rs`, `fat_init.rs`, `vibefs_init.rs`, `file_init.rs` |
 | entropy | `entropy.rs` | `entropy_init.rs` |
 | proc | `addr_space.rs`, `elf.rs`, `proc.rs`, `syscall.rs` | `addr_space_init.rs`, `user_init.rs`, `proc_init.rs`, `syscall_init.rs` |
+| kalloc | `kalloc.rs` (fallible heap types; stub until ROADMAP §10.4) | — |
+| fpu | `fpu.rs` (FP register binding; stub until ROADMAP §10.6) | — |
+| trap | `trap.rs` (portable trap kinds and ring-3 actions; stub until ROADMAP §10.6) | — |
 | ktest | — | `ktest.rs` (`kernel_tests` only) |
 
 ## 1.4 Documentation rules
