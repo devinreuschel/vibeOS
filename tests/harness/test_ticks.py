@@ -44,6 +44,8 @@ FILES = {
     "src/boot.rs": ("fn boot() {\n    marker!(\"vibeOS: boot: {} cpus up\", n);\n"
                     "    marker!(marker::READY);\n}\n"),
     "src/marker.rs": "pub const READY: &str = \"vibeOS: ready\";\n",
+    "src/proc.rs": ("pub fn reaper() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n"
+                    "    fn reaper_for_init_state() {\n        assert!(true);\n    }\n}\n"),
     "user/tests/src/main.rs": "fn user_dup() {\n    dup();\n}\n",
     "crates/core/src/a.rs": ("#[cfg(test)]\nmod tests {\n    #[test]\n    fn host_one() {\n"
                              "        assert!(true);\n    }\n\n    #[test]\n    #[ignore]\n"
@@ -349,6 +351,13 @@ class TestDiffRule(RepoCase):
         self.assertEqual([(d.kind, d.path) for d in defs], [("host", "crates/core/src/a.rs")])
         self.assertEqual([d.kind for d in check_ticks.resolve("legacy_row", tree)[0]],
                          ["ktest", "ktest"])
+
+    def test_host_test_in_src_resolves(self) -> None:
+        """vibeos-core's sources are src/*.rs, so a #[test] there is a host test."""
+        tree = check_ticks.Tree("HEAD", self.repo.path)
+        defs = check_ticks.resolve("reaper_for_init_state", tree)[0]
+        self.assertEqual([(d.kind, d.path) for d in defs], [("host", "src/proc.rs")])
+        self.assertEqual(check_ticks.resolve("reaper", tree)[0], [])
 
     def test_proof_deleted_by_a_later_commit_is_not_found(self) -> None:
         self.commit(f"t\n\nProves: check_x -- {self.PREFIX}", "delta box",

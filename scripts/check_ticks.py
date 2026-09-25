@@ -69,7 +69,8 @@ IGNORE_ATTR = re.compile(r"^\s*#\[ignore\b")
 MARKER_CALL = re.compile(r"marker!\(\s*\"((?:[^\"\\]|\\.)*)\"", re.S)
 MARKER_CONST = re.compile(r"^\s*pub\s+const\s+([A-Z0-9_]+):\s*&str\s*=\s*\"((?:[^\"\\]|\\.)*)\";",
                           re.M)
-HOST_TEST_DIRS = ("crates/", "tests/hostlib/")
+# vibeos-core is built from src/lib.rs (crates/core/Cargo.toml), so its #[test]s live in src/.
+HOST_TEST_DIRS = ("src/", "crates/", "tests/hostlib/")
 PY_DIRS = ("tests/harness/", "scripts/")
 HARNESS_DIR = "tests/harness/"
 # Workflow file whose jobs a bracket's `make <target>` proof is looked up in.
