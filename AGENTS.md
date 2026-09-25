@@ -46,7 +46,7 @@ These rules come from [KERNEL_REVIEW.md §8.1](docs/reviews/KERNEL_REVIEW.md#81-
 ## How to run
 
     ./setup.sh          # Limine clone + host-tool check (verifies pinned Limine commit)
-    make check          # fast local gate (fmt, host clippy, host units, harness, ruff/mypy, check scripts)
+    make check          # fast local gate (fmt, host and kernel clippy, host units, harness, ruff/mypy, check scripts)
     make                # kernel + vibeos.iso
     make run            # QEMU window = PS/2; the terminal is COM1
     make test-unit      # vibeos-core unit tests on the host triple
@@ -55,7 +55,7 @@ These rules come from [KERNEL_REVIEW.md §8.1](docs/reviews/KERNEL_REVIEW.md#81-
     make test-kernel    # in-guest registry (tests/harness/run_ktest.py)
     make test           # full ladder
 
-`make help` lists targets. Optional: `pre-commit install` (rustfmt, ruff, and `scripts/check_*.py`). `make check` runs `cargo fmt --check` and, for the host triple only, clippy `-D warnings` on `vibeos-core` and hostlib. Kernel builds do not deny warnings yet, because `[target.x86_64-unknown-none].rustflags` replaces `[build].rustflags`, and CI never clippies the kernel binary (`--bin vibeos`) with its default features (F147). ROADMAP §10.1 fixes both at the start of Phase 10's first wave. The standing gates still require a warning-free kernel build.
+`make help` lists targets. Optional: `pre-commit install` (rustfmt, ruff, and `scripts/check_*.py`). `make check` runs `cargo fmt --check` and clippy `-D warnings` on `vibeos-core` and hostlib for the host triple, on `vibeos-core` for `x86_64-unknown-none`, and on the kernel binary (`--bin vibeos`) with its default features; CI's ladder clippies the kernel once for each other ISO feature set and once with `kernel_shell`. Every kernel build denies warnings through `[target.x86_64-unknown-none].rustflags`, which replaces `[build].rustflags` for the kernel target (F147).
 
 Kernel target is built-in `x86_64-unknown-none` (B2). `./setup.sh` runs `rustup target add`.
 

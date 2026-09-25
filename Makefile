@@ -57,7 +57,8 @@ USER_TESTS  := user/tests
 INITRD := $(CURDIR)/build/initrd.fat
 KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml crates/core/Cargo.toml build.rs linker.ld Makefile rust-toolchain.toml \
 	scripts/gen_ksyms.py scripts/mkuserelf.py scripts/mkiso.sh \
-	user/hello.asm user/init.asm user/sh.asm user/tests.asm user/sys.inc $(INITRD)
+	user/hello.asm user/init.asm user/sh.asm user/tests.asm user/sys.inc $(INITRD) \
+	.cargo/config.toml Cargo.lock
 
 LLVM_TOOL_DIR := $(shell rustc --print sysroot)/lib/rustlib/$(shell rustc -vV | sed -n 's/^host: //p')/bin
 OBJDUMP := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-objdump),$(LLVM_TOOL_DIR)/llvm-objdump,llvm-objdump)
@@ -124,13 +125,17 @@ help:
 	  '  test                  all of the above except test-smp-stress and test-ps2' \
 	  '  clean / distclean     build products; distclean also drops limine/'
 
-# Fast local / CI `check` job gate (T3). Kernel clippy is a full kernel
-# compile; CI runs it in the QEMU ladder so `target/` stays warm for `make iso`.
+# Fast local / CI `check` job gate (T3). It lints the kernel with its default
+# features and vibeos-core's no_std build for the kernel target, so kernel-target
+# code compiles before every commit; CI's ladder lints each other ISO feature
+# set and kernel_shell (ROADMAP §10.1, F147).
 # Guard scripts (scripts/check_*.py) run when present (A4, Q5, A1).
 check:
 	cargo fmt --check --all
 	cargo clippy -p vibeos-core --all-targets --features std --target $(HOST_TRIPLE) -- -D warnings
 	cargo clippy -p vibeos-hostlib-tests --all-targets --target $(HOST_TRIPLE) -- -D warnings
+	cargo clippy -p vibeos-core --target $(TARGET) -- -D warnings
+	cargo clippy --bin vibeos -- -D warnings
 	$(MAKE) test-unit
 	$(MAKE) test-harness
 	@if command -v ruff >/dev/null 2>&1; then \

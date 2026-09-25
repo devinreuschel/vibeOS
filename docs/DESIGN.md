@@ -4391,8 +4391,9 @@ anyway, because the check and the run are separate recipe lines (ROADMAP §10.2,
 
 `make help` prints the live inventory. Do not hand-maintain a second list here.
 
-`make check` is the fast local gate (rustfmt `--check`, `vibeos-core` clippy `-D warnings`, host unit tests,
-harness unit tests, ruff/mypy when installed). CI runs it as the `check` job before QEMU (DESIGN §8.6).
+`make check` is the fast local gate (rustfmt `--check`; clippy `-D warnings` on `vibeos-core` and hostlib
+for the host, on `vibeos-core` for `x86_64-unknown-none`, and on the kernel with its default features; host
+unit tests, harness unit tests, ruff/mypy when installed). CI runs it as the `check` job before QEMU (DESIGN §8.6).
 `make test-e2e` is enough when only boot output or QEMU wiring changed. `make test` is the gate before
 a PR. `make test-ps2` is the focused #66 sendkey boot; `make test-e2e` already runs it, so `make test`
 does not boot it twice.
@@ -4412,8 +4413,8 @@ architecture; until that lands the ladder is one job.
 
 | Job | When | What |
 |---|---|---|
-| `check` | push / PR | `make check` (fmt, `vibeos-core` clippy `-D warnings`, host units, harness, ruff/mypy, `scripts/check_*.py`) then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines 87`. No QEMU, no `setup.sh`. HTML report is a 7-day `core-coverage` artifact. |
-| `phase 0 ladder` | push / PR, `needs: check` | Limine, QEMU/nasm/xorriso/OVMF, kernel clippy `-D warnings` with `--all-features`, `kernel_tests`, and `vibefs_crash` (never the default feature set that ships); ROADMAP §10.1 lints each feature set an image is built with, and `kernel_shell`, in place of `--all-features`; ISO, e2e (BIOS/UEFI/panic/#GP/PIT/9 GiB), in-guest at `-smp 2` and `-smp 4`, LAPIC fallback, vibefs crash. Green `main` uploads `vibeos.iso` (7 days). |
+| `check` | push / PR | Installs `x86_64-unknown-none`. `make check` (fmt; clippy `-D warnings` on `vibeos-core` and hostlib for the host, `vibeos-core` for `x86_64-unknown-none`, and the kernel with default features; host units, harness, ruff/mypy, `scripts/check_*.py`) then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines 87`. No QEMU, no `setup.sh`. HTML report is a 7-day `core-coverage` artifact. |
+| `phase 0 ladder` | push / PR, `needs: check` | Limine, QEMU/nasm/xorriso/OVMF, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, `panic_test` with `panic_exit`, `gp_test` with `panic_exit`) and once with `kernel_shell` (the default set runs in `check`); ISO, e2e (BIOS/UEFI/panic/#GP/PIT/9 GiB), in-guest at `-smp 2` and `-smp 4`, LAPIC fallback, vibefs crash. Green `main` uploads `vibeos.iso` (7 days). |
 | `smp-stress` | weekly Monday 06:00 UTC + dispatch | `-smp 4`, longer timeout (`VIBEOS_TIMEOUT=180`); planned (ROADMAP §10.2): the §8.2 per-run deadlines, with no longer timeout |
 | `nightly-canary` | same workflow, non-blocking | undated latest nightly, `make iso && make test-unit` |
 | `release` | `v*` tags | `make test-e2e` (BIOS) only, then production + ktest ISO, changelog section, GitHub Release. It does not wait for `ci` at the tagged commit, and the ktest ISO writes fixed LBAs of any virtio-blk disk attached at boot (ROADMAP §10.1, F145). Planned (ROADMAP §10.1): dispatched from `main` with the release tag as input; a `build` job with `contents: read` and `actions: read`, no cache, and no persisted token, then a `publish` job that runs no repository script; from ROADMAP §14.6 a `sign` job in the `release` environment between them, and from §22.4 a keyless `verify` job on vibeOS. From ROADMAP §18.7 the `sign` job is two key jobs, `sign-files` and `sign-manifest`, with an unprivileged `assemble` job between them, since images hold the signed kernels and Limine binaries and the manifest lists the images (ROADMAP §22.1). |
@@ -4458,9 +4459,10 @@ issues by kind, branch, and signature. From ROADMAP §22.5, fuzz jobs run in `fu
 key, and publish only the target, the run, and a keyed crash id, so a crash's reproducer stays
 private until its fix is published.
 
-`-D warnings` reaches host builds through `[build] rustflags` and the kernel clippy steps through their own `-- -D warnings`. Kernel builds (`make iso` and
-every ISO variant) run without it, because `[target.x86_64-unknown-none] rustflags` in
-`.cargo/config.toml` replaces `[build] rustflags` (ROADMAP §10.1, F147).
+`-D warnings` reaches host builds through `[build] rustflags`, and every kernel build and clippy run
+(`make iso`, every ISO variant, `make check`) through `[target.x86_64-unknown-none] rustflags` in
+`.cargo/config.toml`, which replaces `[build] rustflags` for the kernel target, since Cargo reads one
+rustflags source. A job that sets `RUSTFLAGS` drops both (ROADMAP §10.1, F147).
 
 GitHub Actions records per-step duration. Measured on `main` at `88370e5` (run 35796216463): `check`
 53 s, then the ladder 160 s, serialized by `needs: check`. The ladder spends 58 s on setup, toolchain,

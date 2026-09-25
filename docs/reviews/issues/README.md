@@ -12,7 +12,7 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 | [A2](A2-portable-half-host-tests.md) | Make the portable half portable; host tests on any host | High | M | II | C1 | `in progress (#88)` |
 | [A3](A3-vfs-single-dispatch.md) | Make the VFS the only file-operation dispatch point | High | L | III | Q3 | `proposed` |
 | [A4](A4-break-module-cycles.md) | Break the mutual dependencies between kernel modules | Medium | M | III | A3, A1 | `proposed` |
-| [Q1](Q1-fmt-clippy-warnings-gates.md) | Land the promised gates: rustfmt, clippy, `-D warnings` | High | S | I | — | `in progress (#80)` |
+| [Q1](Q1-fmt-clippy-warnings-gates.md) | Land the promised gates: rustfmt, clippy, `-D warnings` | High | S | I | — | `implemented (#80, #194)` |
 | [Q2](Q2-isolate-test-hooks.md) | Isolate `kernel_tests` scaffolding from production modules | Medium | M | II | Q1 | `proposed` |
 | [Q3](Q3-boot-cell-primitive.md) | One boot-cell primitive; retire `static mut` and `&'static mut` accessors | Medium | S+M | II | — | `implemented (#87)` |
 | [Q4](Q4-naming-consistency.md) | Naming and feature-flag consistency | Low | S | II | — | `implemented (#83)` |
