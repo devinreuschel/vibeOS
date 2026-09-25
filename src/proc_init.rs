@@ -354,15 +354,6 @@ pub fn unbind_current() {
     clear_as();
 }
 
-/// Kernel-side `dispatch()` probe: stdio + borrowed AS.
-pub fn bind_probe(space: &mut AddressSpace) -> u32 {
-    bind_current(space, "probe")
-}
-
-pub fn unbind_probe() {
-    unbind_current();
-}
-
 #[cfg_attr(feature = "kernel_tests", allow(dead_code))]
 pub fn start_init() {
     match spawn_elf("/sbin/init", INIT_PID, 0) {

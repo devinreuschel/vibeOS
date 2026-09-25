@@ -14,7 +14,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use vibeos::addr_space::{UserMemError, UserPerms};
 use vibeos::apic::{Polarity, TimerMode, Trigger};
 use vibeos::block::{BlockError, DeviceState, Op};
-use vibeos::desc::{IstSlot, KERNEL_CS, TSS_SEL, USER_CS_RPL};
+use vibeos::desc::{IstSlot, KERNEL_CS, TSS_SEL};
 use vibeos::dev::{ClaimError, Device, Driver, IdMatch, ProbeError};
 use vibeos::dma::{self, DMA32_BOUNDARY, DmaAlloc};
 use vibeos::fs::{FsError, InodeKind, O_CREAT, O_RDWR};
@@ -24,8 +24,8 @@ use vibeos::kva::PAGE_SIZE;
 use vibeos::paging::{PAGE_SIZE_4K, PageFlags, PhysAddr, USER_END, VirtAddr, heap_flags};
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
 use vibeos::per_cpu::PerCpu;
-use vibeos::syscall;
-use vibeos::thread::{RFLAGS_RESERVED1, ThreadId, ThreadState};
+use vibeos::proc::{SIGILL, wait_exited, wait_signaled, wexitstatus, wifexited};
+use vibeos::thread::{ThreadId, ThreadState};
 use vibeos::time::{CalibSource, Instant, calib_band, calib_in_band};
 use vibeos::vectors;
 use vibeos::virtio::F_VERSION_1;
@@ -49,19 +49,20 @@ use crate::part_init;
 use crate::pci_init;
 use crate::per_cpu_init;
 use crate::pmm_init;
+use crate::proc_init;
 use crate::sched_init;
 use crate::smp_init;
 use crate::sync_init::{BlockingMutex, Channel, Condvar, RwLock, Semaphore, SpinMutex};
 use crate::syscall_init;
 use crate::thread_init::{self, ThreadHandle};
 use crate::time_init;
-use crate::user_init;
 use crate::vibefs_init;
 use crate::virtio_blk_init;
 use crate::virtio_init;
 use crate::work_init;
 use crate::x86;
 mod user;
+use user::user_code;
 
 const ISA_DEBUG_EXIT: u16 = 0xF4;
 const EXIT_PASS: u32 = 0x10;
@@ -835,31 +836,6 @@ fn test_star_sysret_layout() -> Outcome {
     Outcome::Ok
 }
 
-fn hhdm_mut(pa: PhysAddr) -> *mut u8 {
-    (paging_init::HHDM_BASE.wrapping_add(pa.as_u64())) as *mut u8
-}
-
-fn write_user_va(space: &vibeos::addr_space::AddressSpace, va: u64, bytes: &[u8]) -> bool {
-    let Some((pa, _, _)) = space.mapper().translate(VirtAddr(va)) else {
-        return false;
-    };
-    let dst = hhdm_mut(PhysAddr(pa.as_u64() & !0xFFF));
-    let off = (va & 0xFFF) as usize;
-    let mut i = 0;
-    while i < bytes.len() {
-        unsafe { dst.add(off + i).write_volatile(bytes[i]) };
-        i += 1;
-    }
-    true
-}
-
-fn read_user_u64(space: &vibeos::addr_space::AddressSpace, va: u64) -> Option<u64> {
-    let (pa, _, _) = space.mapper().translate(VirtAddr(va))?;
-    let src = hhdm_mut(PhysAddr(pa.as_u64() & !0xFFF)) as *const u64;
-    let off = ((va & 0xFFF) / 8) as usize;
-    Some(unsafe { src.add(off).read_volatile() })
-}
-
 fn test_addrspace_map_unmap_teardown() -> Outcome {
     let before = free_frames();
     let Some(mut space) = addr_space_init::create() else {
@@ -976,101 +952,52 @@ fn test_cr3_switch_skip() -> Outcome {
     Outcome::Ok
 }
 
-fn trampoline_bytes(result_va: u64) -> [u8; 19] {
-    let mut b = [0u8; 19];
-    b[0] = 0xB8;
-    b[1..5].copy_from_slice(&0x00C0_FFEEu32.to_le_bytes());
-    b[5] = 0x0F;
-    b[6] = 0x05;
-    b[7] = 0x48;
-    b[8] = 0xA3;
-    b[9..17].copy_from_slice(&result_va.to_le_bytes());
-    b[17] = 0x0F;
-    b[18] = 0x0B;
-    b
-}
+// syscall 0xC0FFEE, then `ud2` if rax is -ENOSYS, else exit(1).
+user_code!(
+    ENOSYS_PROBE,
+    "
+    mov eax, 0xC0FFEE
+    syscall
+    cmp rax, -38
+    jne 1f
+    ud2
+1:
+    mov edi, 1
+    mov eax, 60
+    syscall
+    ud2
+    "
+);
 
 fn test_ring3_syscall_enosys() -> Outcome {
-    // 1 GiB: past the 512 MiB GLOBAL identity window so a stale TLB
-    // entry cannot alias the trampoline as NX kernel pages.
-    const CODE: u64 = 0x0000_0000_4000_0000;
-    const STACK: u64 = 0x0000_0000_4000_1000;
-    const DATA: u64 = 0x0000_0000_4000_2000;
     let before = free_frames();
-    let Some(mut space) = addr_space_init::create() else {
-        return Outcome::Fail("create");
+    let st = match user::run(&user::Image::Code(ENOSYS_PROBE, user::DEFAULT), &["enosys"]) {
+        Ok(st) => st,
+        Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
     };
-    let map_ok = unsafe {
-        addr_space_init::map_anon(&mut space, CODE, PAGE_SIZE_4K, UserPerms::RX).is_ok()
-            && addr_space_init::map_anon(&mut space, STACK, PAGE_SIZE_4K, UserPerms::RW).is_ok()
-            && addr_space_init::map_anon(&mut space, DATA, PAGE_SIZE_4K, UserPerms::RW).is_ok()
-    };
-    if !map_ok {
-        addr_space_init::teardown(space);
-        return Outcome::Fail("map trampoline");
-    }
-    let bytes = trampoline_bytes(DATA);
-    if !write_user_va(&space, CODE, &bytes) {
-        addr_space_init::teardown(space);
-        return Outcome::Fail("write trampoline");
-    }
-    if !write_user_va(&space, DATA, &[0u8; 8]) {
-        addr_space_init::teardown(space);
-        return Outcome::Fail("zero result");
-    }
-    addr_space_init::load_cr3(&space);
-    x86::invlpg(CODE);
-    x86::invlpg(STACK);
-    x86::invlpg(DATA);
-    let caught = arch::catch::catch(vectors::UD, || unsafe {
-        syscall_init::enter_user(CODE, STACK + PAGE_SIZE_4K, RFLAGS_RESERVED1, 0);
-    });
-    arch::gs::force_kernel();
-    addr_space_init::load_kernel_cr3();
-    let got = read_user_u64(&space, DATA);
-    addr_space_init::teardown(space);
-    let Some(c) = caught else {
-        return Outcome::Fail("no #UD after trampoline");
-    };
-    if c.frame.cs != USER_CS_RPL as u64 {
-        return Outcome::Fail("ud cs not user");
-    }
-    let Some(val) = got else {
-        return Outcome::Fail("result unmapped");
-    };
-    if val != (-(syscall::ENOSYS as i64)) as u64 {
-        crate::marker!("vibeOS: ktest:   enosys rax={val:#x}");
+    if st == wait_exited(1) {
         return Outcome::Fail("rax not -ENOSYS");
     }
-    if free_frames() != before {
-        return Outcome::Fail("trampoline frame leak");
+    if st != wait_signaled(SIGILL) {
+        return crate::fail_fmt!("status {st:#x}, want SIGILL");
+    }
+    if !user::frames_settle(before) {
+        return Outcome::Fail("enosys frame leak");
     }
     Outcome::Ok
 }
 
 fn test_ring3_hello_exit() -> Outcome {
     let before = free_frames();
-    match user_init::run_path("/hello") {
-        Ok(42) => {}
-        Ok(st) => {
-            crate::marker!("vibeOS: ktest:   hello status={st}");
-            return Outcome::Fail("status not 42");
-        }
-        Err(e) => {
-            crate::marker!("vibeOS: ktest:   hello err={}", e.as_str());
-            return Outcome::Fail("load/run");
-        }
+    let pid = match proc_init::spawn_elf("/hello", 0, 0) {
+        Ok(pid) => pid,
+        Err(e) => return crate::fail_fmt!("spawn /hello: {}", e.as_str()),
+    };
+    let st = proc_init::wait_kernel(pid);
+    if st != wait_exited(42) {
+        return crate::fail_fmt!("hello status {st:#x}, want exited 42");
     }
-    let (buf, n) = syscall_init::stdout_bytes();
-    let out = &buf[..n];
-    if !out
-        .windows(b"hello from ring3".len())
-        .any(|w| w == b"hello from ring3")
-    {
-        return Outcome::Fail("stdout missing hello");
-    }
-    arch::gs::force_kernel();
-    if free_frames() != before {
+    if !user::frames_settle(before) {
         return Outcome::Fail("hello frame leak");
     }
     Outcome::Ok
@@ -1094,81 +1021,98 @@ fn test_syscall_dispatch() -> Outcome {
     Outcome::Ok
 }
 
+// write(1, "hi\n" in its page, 3) must return 3; then NULL/8, a kernel
+// pointer/8, the unmapped page after its own/8, and -1/2 must each return
+// -EFAULT. Exits 11 to 15 at the first mismatch, else 0.
+user_code!(
+    PTR_VALIDATE,
+    "
+    lea rbx, [rip]
+    and rbx, -4096
+    mov edi, 1
+    lea rsi, [rip + 9f]
+    mov edx, 3
+    mov eax, 1
+    syscall
+    mov r12d, 11
+    cmp rax, 3
+    jne 8f
+    mov edi, 1
+    xor esi, esi
+    mov edx, 8
+    mov eax, 1
+    syscall
+    mov r12d, 12
+    cmp rax, -14
+    jne 8f
+    mov edi, 1
+    mov rsi, 0xFFFF800000001000
+    mov edx, 8
+    mov eax, 1
+    syscall
+    mov r12d, 13
+    cmp rax, -14
+    jne 8f
+    mov edi, 1
+    lea rsi, [rbx + 0x1000]
+    mov edx, 8
+    mov eax, 1
+    syscall
+    mov r12d, 14
+    cmp rax, -14
+    jne 8f
+    mov edi, 1
+    mov rsi, -1
+    mov edx, 2
+    mov eax, 1
+    syscall
+    mov r12d, 15
+    cmp rax, -14
+    jne 8f
+    xor r12d, r12d
+8:
+    mov edi, r12d
+    mov eax, 60
+    syscall
+    ud2
+9:
+    .byte 0x68, 0x69, 0x0a
+    "
+);
+
 fn test_syscall_ptr_validate() -> Outcome {
-    let Some(mut space) = addr_space_init::create() else {
-        return Outcome::Fail("create");
+    let st = match user::run(&user::Image::Code(PTR_VALIDATE, user::DEFAULT), &["ptrs"]) {
+        Ok(st) => st,
+        Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
     };
-    let va = 0x0000_0000_4000_0000u64;
-    if unsafe { addr_space_init::map_anon(&mut space, va, PAGE_SIZE_4K, UserPerms::RW) }.is_err() {
-        addr_space_init::teardown(space);
-        return Outcome::Fail("map");
+    if !wifexited(st) {
+        return crate::fail_fmt!("status {st:#x}, want exited");
     }
-    if space.write_bytes(va, b"hi\n").is_err() {
-        addr_space_init::teardown(space);
-        return Outcome::Fail("poke");
+    match wexitstatus(st) {
+        0 => Outcome::Ok,
+        11 => Outcome::Fail("good write"),
+        12 => Outcome::Fail("null"),
+        13 => Outcome::Fail("kernel ptr"),
+        14 => Outcome::Fail("unmapped"),
+        15 => Outcome::Fail("overflow"),
+        code => crate::fail_fmt!("exit {code}"),
     }
-    syscall_init::reset_stdout();
-    let rc = syscall_init::with_user_as(&mut space, || {
-        let ok = syscall_init::dispatch(vibeos::syscall::SYS_WRITE, [1, va, 3, 0, 0, 0]);
-        let n = syscall_init::dispatch(vibeos::syscall::SYS_WRITE, [1, 0, 8, 0, 0, 0]);
-        let k = syscall_init::dispatch(
-            vibeos::syscall::SYS_WRITE,
-            [1, 0xFFFF_8000_0000_1000, 8, 0, 0, 0],
-        );
-        let u = syscall_init::dispatch(
-            vibeos::syscall::SYS_WRITE,
-            [1, va + PAGE_SIZE_4K, 8, 0, 0, 0],
-        );
-        let o = syscall_init::dispatch(vibeos::syscall::SYS_WRITE, [1, u64::MAX, 2, 0, 0, 0]);
-        (ok, n, k, u, o)
-    });
-    addr_space_init::teardown(space);
-    if rc.0 != 3 {
-        return Outcome::Fail("good write");
-    }
-    let ef = vibeos::syscall::neg(vibeos::syscall::EFAULT);
-    if rc.1 != ef {
-        return Outcome::Fail("null");
-    }
-    if rc.2 != ef {
-        return Outcome::Fail("kernel ptr");
-    }
-    if rc.3 != ef {
-        return Outcome::Fail("unmapped");
-    }
-    if rc.4 != ef {
-        return Outcome::Fail("overflow");
-    }
-    Outcome::Ok
 }
 
 fn test_user_syscalls() -> Outcome {
-    // Spawned fork children enter with IF on. The ktest registry holds
-    // IF off; enable the tick so wait4/yield can run them, same as the
-    // later block tests. Bound `run_user` still cli's around setjmp.
+    // `/bin/tests` forks children that enter with IF on. The registry holds
+    // IF off; enable the tick so wait4 and yield can run them.
     with_timer(|| {
         let before = free_frames();
-        match user_init::run_path("/bin/tests") {
-            Ok(0) => {}
-            Ok(st) => {
-                crate::marker!("vibeOS: ktest:   tests status={st}");
-                return Outcome::Fail("status not 0");
-            }
-            Err(e) => {
-                crate::marker!("vibeOS: ktest:   tests err={}", e.as_str());
-                return Outcome::Fail("load/run");
-            }
+        let pid = match proc_init::spawn_elf("/bin/tests", 0, 0) {
+            Ok(pid) => pid,
+            Err(e) => return crate::fail_fmt!("spawn /bin/tests: {}", e.as_str()),
+        };
+        let st = proc_init::wait_kernel(pid);
+        if st != wait_exited(0) {
+            return crate::fail_fmt!("tests status {st:#x}, want exited 0");
         }
-        let (buf, n) = syscall_init::stdout_bytes();
-        let out = &buf[..n];
-        if !out
-            .windows(b"user: tests ok".len())
-            .any(|w| w == b"user: tests ok")
-        {
-            return Outcome::Fail("stdout missing ok");
-        }
-        arch::gs::force_kernel();
-        if free_frames() != before {
+        if !user::frames_settle(before) {
             return Outcome::Fail("tests frame leak");
         }
         Outcome::Ok

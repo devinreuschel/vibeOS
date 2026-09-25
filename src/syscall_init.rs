@@ -362,6 +362,13 @@ pub fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
 /// `rip`/`rsp` are mapped executable/writable in the loaded CR3 with
 /// user pages. IF in `rflags` should stay clear unless IRQs in ring 3
 /// are intended.
+#[cfg_attr(
+    feature = "kernel_tests",
+    allow(
+        dead_code,
+        reason = "no caller since the bound model went; P10-S17 deletes it"
+    )
+)]
 pub unsafe fn enter_user(rip: u64, rsp: u64, rflags: u64, fs_base: u64) -> ! {
     let cpu = per_cpu_init::current();
     let ptr = cpu.self_ptr as u64;
@@ -513,15 +520,6 @@ pub fn reset_stdout() {
     STDOUT_LEN.store(0, Ordering::Release);
 }
 
-pub fn stdout_bytes() -> ([u8; 256], usize) {
-    STDOUT.with(|buf| {
-        let n = STDOUT_LEN.load(Ordering::Acquire).min(256);
-        let mut out = [0u8; 256];
-        out[..n].copy_from_slice(&buf[..n]);
-        (out, n)
-    })
-}
-
 fn current_as() -> Option<&'static AddressSpace> {
     let p = CURRENT_AS.load(Ordering::Acquire);
     if p.is_null() {
@@ -529,13 +527,6 @@ fn current_as() -> Option<&'static AddressSpace> {
     } else {
         Some(unsafe { &*p })
     }
-}
-
-pub fn with_user_as<R>(space: &mut AddressSpace, f: impl FnOnce() -> R) -> R {
-    crate::proc_init::bind_probe(space);
-    let r = f();
-    crate::proc_init::unbind_probe();
-    r
 }
 
 pub fn peek_user_as() -> Option<&'static AddressSpace> {

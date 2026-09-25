@@ -308,8 +308,8 @@ that `dup` or `fork` copied share one offset. While the table is full, every
   its `fork` child can overlap on one inherited descriptor and lose an
   offset update until §13.1's position lock (F055)
 - a kernel-side `dispatch()` probe with no process still sees `getpid=0`
-  and `EBADF` for a closed fd; `with_user_as` binds a temporary process
-  so pointer-validation tests use a process fd table
+  and `EBADF` for a closed fd; pointer-validation tests run as spawned
+  ring-3 programs
 
 ---
 
