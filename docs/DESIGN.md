@@ -4405,10 +4405,12 @@ does not boot it twice.
 
 ## 8.6 CI and coverage
 
-Two jobs run on every push and pull request, on Linux; the other rows below are scheduled,
-dispatched, or run on a tag. `concurrency` cancels superseded runs for the same branch (push and PR
-share one slot), so a merge to `main` cancels the run of the merge before it, and a fork's pull
-request from its own `main` shares `main`'s slot. Planned (ROADMAP §10.1): `ci` runs on pushes to
+Two jobs run on every push and pull request, on Linux, and `ticks` on pull requests; the other
+rows below are scheduled, dispatched, or run on a tag. `concurrency` cancels superseded runs that
+share a group, one per branch and event (`github.event_name` is in the key): a push run never
+cancels a pull request's run or its `ticks` job, a merge to `main` still cancels the push run of
+the merge before it, and a fork's pull request from its own `main` shares a slot only with other
+pull requests from a branch named `main`, never with `main`'s push runs. Planned (ROADMAP §10.1): `ci` runs on pushes to
 `main`, pull requests, and `workflow_dispatch`; a pull request's runs share one group per pull
 request number and cancel superseded ones, and every other run has its own group, so no `main` run
 is cancelled. A `pull_request` run never counts as proof of a commit (ROADMAP §10.9). The earlier
@@ -4420,12 +4422,15 @@ architecture; until that lands the ladder is one job.
 |---|---|---|
 | `check` | push / PR | Installs `x86_64-unknown-none`. `make check` (fmt; clippy `-D warnings` on `vibeos-core` and hostlib for the host, `vibeos-core` for `x86_64-unknown-none`, and the kernel with default features; host units, harness, ruff/mypy, `scripts/check_*.py`) then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines 87`. No QEMU, no `setup.sh`. HTML report is a 7-day `core-coverage` artifact. |
 | `phase 0 ladder` | push / PR, `needs: check` | Limine, QEMU/nasm/xorriso/OVMF, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, `panic_test` with `panic_exit`, `gp_test` with `panic_exit`) and once with `kernel_shell` (the default set runs in `check`); ISO, e2e (BIOS/UEFI/panic/#GP/PIT/9 GiB), in-guest at `-smp 2` and `-smp 4`, LAPIC fallback, vibefs crash. Even after a failed step it writes a per-tier table and every harness retry to the job summary and uploads `build/results/` as `results-x86_64-phase0`. Green `main` uploads `vibeos.iso` (7 days). |
+| `ticks` | PR, `needs: phase0`, even after it fails | `scripts/check_ticks.py --base <PR base> --head <PR head> --run-commit $GITHUB_SHA --results <downloaded results-*> --summary $GITHUB_STEP_SUMMARY`: every box a commit of the pull request ticks pairs with a `Proves:` line, its proof exists at the head and is changed by the pull request or marked `(existing: ...)`, a ktest, utest, or marker proof passed in a results file of the head or the tested merge commit, no results file lists a retry, needs and closes rows hold, `Fails-before:` lines are present, and a bracketed proof passed on a scheduled run or `ci-history` record (read through `gh`, with `contents: read` and `actions: read`). The summary lists errors, `(existing: ...)` proofs, and notes. `make check` runs the pairing and diff rules bare against `origin/main` and skips them when that ref is missing, as in the `check` job's shallow checkout. |
 | `smp-stress` | weekly Monday 06:00 UTC + dispatch | `-smp 4`, longer timeout (`VIBEOS_TIMEOUT=180`); planned (ROADMAP §10.2): the §8.2 per-run deadlines, with no longer timeout |
 | `nightly-canary` | same workflow, non-blocking | undated latest nightly, `make iso && make test-unit` |
 | `release` | `v*` tags | `make test-e2e` (BIOS) only, then production + ktest ISO, changelog section, GitHub Release. It does not wait for `ci` at the tagged commit, and the ktest ISO writes fixed LBAs of any virtio-blk disk attached at boot (ROADMAP §10.1, F145). Planned (ROADMAP §10.1): dispatched from `main` with the release tag as input; a `build` job with `contents: read` and `actions: read`, no cache, and no persisted token, then a `publish` job that runs no repository script; from ROADMAP §14.6 a `sign` job in the `release` environment between them, and from §22.4 a keyless `verify` job on vibeOS. From ROADMAP §18.7 the `sign` job is two key jobs, `sign-files` and `sign-manifest`, with an unprivileged `assemble` job between them, since images hold the signed kernels and Limine binaries and the manifest lists the images (ROADMAP §22.1). |
 
-Planned (ROADMAP §10.9): a `ticks` job on pull requests, after the jobs that run the tiers, runs
-`scripts/check_ticks.py` against the `build/results/` files they upload.
+The `ticks` job (ROADMAP §10.9) runs after the jobs that run the tiers, today the ladder, and reads
+the `build/results/` files they upload. A pull request run tests the merge of its head with its
+base, so the results files carry the merge commit, which `--run-commit` names; `check_ticks.py`
+reads commits and their messages from the pull request's head.
 
 Rule; not yet enforced: a job that holds a signing key or a write token runs no code from the
 candidate commit, restores no cache, checks out nothing, and receives only artifacts and their
