@@ -326,7 +326,7 @@ def parse_message_lines(message: str, tag: str) -> list[str]:
     for raw in message.splitlines():
         s = raw.strip()
         if s.startswith(lead):
-            out.append(s[len(lead):].strip())
+            out.append(s[len(lead):])
     return out
 
 
