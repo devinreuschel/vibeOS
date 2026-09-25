@@ -260,6 +260,14 @@ needs = [
 ]
 why = "text: needs §10.10's fallible spawn_inner; claim: its Tcb allocation is fallible"
 
+[[box]]
+key = "`scripts/check_ticks.py`, which a `ticks` CI"
+needs = [
+  "until those retries are gone,",
+  "`scripts/check_review_refs.py` reads `tests/gates/phase-10-needs.toml`: each row",
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
 # Lands-after, lands-with and lands-before clauses in box text.
 
 [[box]]
