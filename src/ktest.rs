@@ -8,6 +8,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::arch::global_asm;
+use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::addr_space::{UserMemError, UserPerms};
@@ -22,6 +23,7 @@ use vibeos::irq::{self, IrqError};
 use vibeos::kva::PAGE_SIZE;
 use vibeos::paging::{PAGE_SIZE_4K, PageFlags, PhysAddr, USER_END, VirtAddr, heap_flags};
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
+use vibeos::per_cpu::PerCpu;
 use vibeos::syscall;
 use vibeos::thread::{RFLAGS_RESERVED1, ThreadId, ThreadState};
 use vibeos::time::{CalibSource, Instant, calib_band, calib_in_band};
@@ -51,7 +53,7 @@ use crate::sched_init;
 use crate::smp_init;
 use crate::sync_init::{BlockingMutex, Channel, Condvar, RwLock, Semaphore, SpinMutex};
 use crate::syscall_init;
-use crate::thread_init;
+use crate::thread_init::{self, ThreadHandle};
 use crate::time_init;
 use crate::user_init;
 use crate::vibefs_init;
@@ -65,138 +67,297 @@ const EXIT_PASS: u32 = 0x10;
 const EXIT_FAIL: u32 = 0x11;
 
 #[derive(Clone, Copy)]
-enum Outcome {
+pub(crate) enum Outcome {
     Ok,
     Fail(&'static str),
+    FailFmt(FailMsg),
     Skip(&'static str),
 }
 
-type TestFn = fn() -> Outcome;
+const FAIL_MSG_BYTES: usize = 120;
 
-const TESTS: &[(&str, TestFn)] = &[
-    ("map_unmap", test_map_unmap),
-    ("nx_enforcement", test_nx_enforcement),
-    ("heap_box", test_heap_box),
-    ("heap_reuse", test_heap_reuse),
-    ("heap_align", test_heap_align),
-    ("heap_growth", test_heap_growth),
-    ("heap_oom", test_heap_oom),
-    ("stack_guard", test_stack_guard),
-    ("kva_roundtrip", test_kva_roundtrip),
-    ("kva_deferred", test_kva_deferred),
-    ("vmap", test_vmap),
-    ("mmio_uc_flags", test_mmio_uc_flags),
-    ("acpi_discovery", test_acpi_discovery),
-    ("gdt_selectors", test_gdt_selectors),
-    ("star_sysret_layout", test_star_sysret_layout),
-    (
+/// A formatted failure reason, cut at [`FAIL_MSG_BYTES`] on a character
+/// boundary. Build one with [`crate::fail_fmt!`].
+#[derive(Clone, Copy)]
+pub(crate) struct FailMsg {
+    buf: [u8; FAIL_MSG_BYTES],
+    len: u8,
+    full: bool,
+}
+
+impl FailMsg {
+    pub(crate) fn from_args(args: fmt::Arguments<'_>) -> FailMsg {
+        let mut m = FailMsg {
+            buf: [0; FAIL_MSG_BYTES],
+            len: 0,
+            full: false,
+        };
+        if fmt::write(&mut m, args).is_err() {
+            // A `Display` impl failed: say so rather than drop the error
+            // (DESIGN §2.5). Appended only if it fits whole.
+            const MARK: &str = " <fmt error>";
+            if m.full || (m.len as usize) + MARK.len() > FAIL_MSG_BYTES {
+                return m;
+            }
+            m.push_whole(MARK);
+        }
+        m
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.len as usize]).unwrap_or("<invalid utf-8>")
+    }
+
+    fn push_whole(&mut self, s: &str) {
+        for ch in s.chars() {
+            let at = self.len as usize;
+            let n = ch.len_utf8();
+            if self.full || at + n > FAIL_MSG_BYTES {
+                self.full = true;
+                return;
+            }
+            ch.encode_utf8(&mut self.buf[at..at + n]);
+            self.len += n as u8;
+        }
+    }
+}
+
+impl fmt::Write for FailMsg {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.push_whole(s);
+        Ok(())
+    }
+}
+
+/// `Outcome::FailFmt` with a `format_args!` reason, cut at 120 bytes.
+#[macro_export]
+macro_rules! fail_fmt {
+    ($($arg:tt)*) => {
+        $crate::ktest::Outcome::FailFmt($crate::ktest::FailMsg::from_args(format_args!($($arg)*)))
+    };
+}
+
+pub(crate) type TestFn = fn() -> Outcome;
+
+/// One registry row. `deadline_ms`, `once` and `opt_in` are data until the
+/// runner enforces them (ROADMAP §10.2).
+#[derive(Clone, Copy)]
+pub(crate) struct Test {
+    pub name: &'static str,
+    pub run: TestFn,
+    pub deadline_ms: u32,
+    pub once: bool,
+    pub opt_in: bool,
+}
+
+/// A row with the default deadline (10 s), run on every repeat, not opt-in.
+pub(crate) const fn test(name: &'static str, run: TestFn) -> Test {
+    Test {
+        name,
+        run,
+        deadline_ms: 10_000,
+        once: false,
+        opt_in: false,
+    }
+}
+
+impl Test {
+    pub const fn deadline(self, ms: u32) -> Test {
+        Test {
+            deadline_ms: ms,
+            ..self
+        }
+    }
+
+    pub const fn once(self) -> Test {
+        Test { once: true, ..self }
+    }
+
+    pub const fn opt_in(self) -> Test {
+        Test {
+            opt_in: true,
+            ..self
+        }
+    }
+}
+
+pub(crate) type Suite = &'static [Test];
+
+mod p10_s01;
+mod p10_s02;
+mod p10_s04;
+mod p10_s05;
+mod p10_s06;
+mod p10_s07;
+mod p10_s08;
+mod p10_s09;
+mod p10_s11;
+mod p10_s12;
+mod p10_s13;
+mod p10_s14;
+mod p10_s15;
+mod p10_s16;
+mod p10_s17;
+mod p10_s18;
+mod p10_s19;
+mod p10_s20;
+mod p10_s21;
+mod p10_s22;
+mod p10_s23;
+
+const TESTS: &[Test] = &[
+    test("map_unmap", test_map_unmap),
+    test("nx_enforcement", test_nx_enforcement),
+    test("heap_box", test_heap_box),
+    test("heap_reuse", test_heap_reuse),
+    test("heap_align", test_heap_align),
+    test("heap_growth", test_heap_growth),
+    test("heap_oom", test_heap_oom),
+    test("stack_guard", test_stack_guard),
+    test("kva_roundtrip", test_kva_roundtrip),
+    test("kva_deferred", test_kva_deferred),
+    test("vmap", test_vmap),
+    test("mmio_uc_flags", test_mmio_uc_flags),
+    test("acpi_discovery", test_acpi_discovery),
+    test("gdt_selectors", test_gdt_selectors),
+    test("star_sysret_layout", test_star_sysret_layout),
+    test(
         "addrspace_map_unmap_teardown",
         test_addrspace_map_unmap_teardown,
     ),
-    ("user_ptr_helpers", test_user_ptr_helpers),
-    ("cr3_switch_skip", test_cr3_switch_skip),
-    ("ring3_syscall_enosys", test_ring3_syscall_enosys),
-    ("ring3_hello_exit", test_ring3_hello_exit),
-    ("syscall_dispatch", test_syscall_dispatch),
-    ("syscall_ptr_validate", test_syscall_ptr_validate),
-    ("user_syscalls", test_user_syscalls),
-    ("int3_roundtrip", test_int3_roundtrip),
-    ("scoped_pf", test_scoped_pf),
-    ("gp_catch", test_gp_catch),
-    ("irqcell_reentry_panics", test_irqcell_reentry_panics),
-    ("bootcell_set_once", test_bootcell_set_once),
-    ("bootinfo_consistent", test_bootinfo_consistent),
-    ("df_on_ist", test_df_on_ist),
-    ("pit_tick_rate", test_pit_tick_rate),
-    ("now_us_monotonic", test_now_us_monotonic),
-    ("now_us_under_yields", test_now_us_under_yields),
-    ("tsc_calib_source", test_tsc_calib_source),
-    ("uptime_sides", test_uptime_sides),
-    ("rtc_offset", test_rtc_offset),
-    ("lapic_timer_mode", test_lapic_timer_mode),
-    ("lapic_timer_rearm", test_lapic_timer_rearm),
-    ("ioapic_pit_gsi_masked", test_ioapic_pit_gsi_masked),
-    ("per_cpu_bsp", test_per_cpu_bsp),
-    ("per_cpu_identity", test_per_cpu_identity),
-    ("trampoline_page", test_trampoline_page),
-    ("failed_ap_cleanup", test_failed_ap_cleanup),
-    ("spawn_sentinel", test_spawn_sentinel),
-    ("switch_two_threads", test_switch_two_threads),
-    ("irq_guard_nest", test_irq_guard_nest),
-    ("spin_mutex", test_spin_mutex),
-    ("lock_spins", test_lock_spins),
-    ("yield_now_switches", test_yield_now_switches),
-    ("sleep_ms_50", test_sleep_ms_50),
-    ("preempt_two_threads", test_preempt_two_threads),
-    ("idle_runs", test_idle_runs),
-    ("reap_returns_frames", test_reap_returns_frames),
-    ("reap_many_via_idle", test_reap_many_via_idle),
-    ("blocking_mutex_counter", test_blocking_mutex_counter),
-    ("rwlock_exclusion", test_rwlock_exclusion),
-    ("rwlock_writer_timeout", test_rwlock_writer_timeout),
-    ("semaphore_wake", test_semaphore_wake),
-    ("condvar_signal", test_condvar_signal),
-    ("condvar_wait_releases", test_condvar_wait_releases),
-    ("channel_mpsc", test_channel_mpsc),
-    ("mutex_deadline", test_mutex_deadline),
-    ("sync_try_paths", test_sync_try_paths),
-    ("sched_lock_timer_irq", test_sched_lock_timer_irq),
-    ("spawn_exit_thousands", test_spawn_exit_thousands),
-    ("cross_cpu_spawn", test_cross_cpu_spawn),
-    ("reschedule_ipi_wake_ap", test_reschedule_ipi_wake_ap),
-    ("call_function_ipi", test_call_function_ipi),
-    ("cpu_hardening", test_cpu_hardening),
-    ("tlb_shootdown_remote", test_tlb_shootdown_remote),
-    ("alloc_stress_smp", test_alloc_stress_smp),
-    ("log_boot_captured", test_log_boot_captured),
-    ("log_runtime_filter", test_log_runtime_filter),
-    ("log_emit_roundtrip", test_log_emit_roundtrip),
-    ("log_dmesg_no_recapture", test_log_dmesg_no_recapture),
-    ("fb_bgrx_roundtrip", test_fb_bgrx_roundtrip),
-    ("fb_pitch", test_fb_pitch),
-    ("fb_cr_home", test_fb_cr_home),
-    ("kbd_gsi_unmasked", test_kbd_gsi_unmasked),
-    ("kbd_8042_clock", test_kbd_8042_clock),
-    ("kbd_ps2_irq", test_kbd_ps2_irq),
-    ("console_mux", test_console_mux),
-    ("kbd_ring_drain", test_kbd_ring_drain),
-    ("shell_registry", test_shell_registry),
-    ("shell_dispatch", test_shell_dispatch),
-    ("shell_dmesg_level", test_shell_dmesg_level),
-    ("pci_qemu_set", test_pci_qemu_set),
-    ("pci_bar_map", test_pci_bar_map),
-    ("pci_cfg_rw", test_pci_cfg_rw),
-    ("pci_claim_exclusive", test_pci_claim_exclusive),
-    ("pci_bind_order", test_pci_bind_order),
-    ("lspci_cmd", test_lspci_cmd),
-    ("irq_pool", test_irq_pool),
-    ("irq_free_threaded", test_irq_free_threaded),
-    ("msix_cpu", test_msix_cpu),
-    ("intx_fallback", test_intx_fallback),
-    ("intx_free_masks", test_intx_free_masks),
-    ("dma_alloc", test_dma_alloc),
-    ("dma_edu", test_dma_edu),
-    ("workqueue", test_workqueue),
-    ("virtio_bind", test_virtio_bind),
-    ("virtio_vq", test_virtio_vq),
-    ("dev_random_source", test_dev_random_source),
-    ("block_ramdisk_rw", test_block_ramdisk_rw),
-    ("block_concurrent", test_block_concurrent),
-    ("block_retry", test_block_retry),
-    ("block_vblk_rw", test_block_vblk_rw),
-    ("block_vblk_irq", test_block_vblk_irq),
-    ("block_vblk_deep", test_block_vblk_deep),
-    ("block_vblk_concurrent", test_block_vblk_concurrent),
-    ("block_vblk_mq", test_block_vblk_mq),
-    ("block_persist", test_block_persist),
-    ("block_part_mbr", test_block_part_mbr),
-    ("block_part_gpt", test_block_part_gpt),
-    ("block_cache_hit", test_block_cache_hit),
-    ("block_cache_evict", test_block_cache_evict),
-    ("vfs_walk", test_vfs_walk),
-    ("pseudo_fs", test_pseudo_fs),
-    ("fat_initrd", test_fat_initrd),
-    ("vibefs", test_vibefs),
+    test("user_ptr_helpers", test_user_ptr_helpers),
+    test("cr3_switch_skip", test_cr3_switch_skip),
+    test("ring3_syscall_enosys", test_ring3_syscall_enosys),
+    test("ring3_hello_exit", test_ring3_hello_exit),
+    test("syscall_dispatch", test_syscall_dispatch),
+    test("syscall_ptr_validate", test_syscall_ptr_validate),
+    test("user_syscalls", test_user_syscalls),
+    test("int3_roundtrip", test_int3_roundtrip),
+    test("scoped_pf", test_scoped_pf),
+    test("gp_catch", test_gp_catch),
+    test("irqcell_reentry_panics", test_irqcell_reentry_panics),
+    test("bootcell_set_once", test_bootcell_set_once),
+    test("bootinfo_consistent", test_bootinfo_consistent),
+    test("df_on_ist", test_df_on_ist),
+    test("pit_tick_rate", test_pit_tick_rate),
+    test("now_us_monotonic", test_now_us_monotonic),
+    test("now_us_under_yields", test_now_us_under_yields),
+    test("tsc_calib_source", test_tsc_calib_source),
+    test("uptime_sides", test_uptime_sides),
+    test("rtc_offset", test_rtc_offset),
+    test("lapic_timer_mode", test_lapic_timer_mode),
+    test("lapic_timer_rearm", test_lapic_timer_rearm),
+    test("ioapic_pit_gsi_masked", test_ioapic_pit_gsi_masked),
+    test("per_cpu_bsp", test_per_cpu_bsp),
+    test("per_cpu_identity", test_per_cpu_identity),
+    test("trampoline_page", test_trampoline_page),
+    test("failed_ap_cleanup", test_failed_ap_cleanup),
+    test("spawn_sentinel", test_spawn_sentinel),
+    test("switch_two_threads", test_switch_two_threads),
+    test("irq_guard_nest", test_irq_guard_nest),
+    test("spin_mutex", test_spin_mutex),
+    test("lock_spins", test_lock_spins),
+    test("yield_now_switches", test_yield_now_switches),
+    test("sleep_ms_50", test_sleep_ms_50),
+    test("preempt_two_threads", test_preempt_two_threads),
+    test("idle_runs", test_idle_runs),
+    test("reap_returns_frames", test_reap_returns_frames),
+    test("reap_many_via_idle", test_reap_many_via_idle),
+    test("blocking_mutex_counter", test_blocking_mutex_counter),
+    test("rwlock_exclusion", test_rwlock_exclusion),
+    test("rwlock_writer_timeout", test_rwlock_writer_timeout),
+    test("semaphore_wake", test_semaphore_wake),
+    test("condvar_signal", test_condvar_signal),
+    test("condvar_wait_releases", test_condvar_wait_releases),
+    test("channel_mpsc", test_channel_mpsc),
+    test("mutex_deadline", test_mutex_deadline),
+    test("sync_try_paths", test_sync_try_paths),
+    test("sched_lock_timer_irq", test_sched_lock_timer_irq),
+    test("spawn_exit_thousands", test_spawn_exit_thousands),
+    test("cross_cpu_spawn", test_cross_cpu_spawn),
+    test("reschedule_ipi_wake_ap", test_reschedule_ipi_wake_ap),
+    test("call_function_ipi", test_call_function_ipi),
+    test("cpu_hardening", test_cpu_hardening),
+    test("tlb_shootdown_remote", test_tlb_shootdown_remote),
+    test("alloc_stress_smp", test_alloc_stress_smp),
+    test("log_boot_captured", test_log_boot_captured),
+    test("log_runtime_filter", test_log_runtime_filter),
+    test("log_emit_roundtrip", test_log_emit_roundtrip),
+    test("log_dmesg_no_recapture", test_log_dmesg_no_recapture),
+    test("fb_bgrx_roundtrip", test_fb_bgrx_roundtrip),
+    test("fb_pitch", test_fb_pitch),
+    test("fb_cr_home", test_fb_cr_home),
+    test("kbd_gsi_unmasked", test_kbd_gsi_unmasked),
+    test("kbd_8042_clock", test_kbd_8042_clock),
+    test("kbd_ps2_irq", test_kbd_ps2_irq),
+    test("console_mux", test_console_mux),
+    test("kbd_ring_drain", test_kbd_ring_drain),
+    test("shell_registry", test_shell_registry),
+    test("shell_dispatch", test_shell_dispatch),
+    test("shell_dmesg_level", test_shell_dmesg_level),
+    test("pci_qemu_set", test_pci_qemu_set),
+    test("pci_bar_map", test_pci_bar_map),
+    test("pci_cfg_rw", test_pci_cfg_rw),
+    test("pci_claim_exclusive", test_pci_claim_exclusive),
+    test("pci_bind_order", test_pci_bind_order),
+    test("lspci_cmd", test_lspci_cmd),
+    test("irq_pool", test_irq_pool),
+    test("irq_free_threaded", test_irq_free_threaded),
+    test("msix_cpu", test_msix_cpu),
+    test("intx_fallback", test_intx_fallback),
+    test("intx_free_masks", test_intx_free_masks),
+    test("dma_alloc", test_dma_alloc),
+    test("dma_edu", test_dma_edu),
+    test("workqueue", test_workqueue),
+    test("virtio_bind", test_virtio_bind),
+    test("virtio_vq", test_virtio_vq),
+    test("dev_random_source", test_dev_random_source),
+    test("block_ramdisk_rw", test_block_ramdisk_rw),
+    test("block_concurrent", test_block_concurrent),
+    test("block_retry", test_block_retry),
+    test("block_vblk_rw", test_block_vblk_rw),
+    test("block_vblk_irq", test_block_vblk_irq),
+    test("block_vblk_deep", test_block_vblk_deep),
+    test("block_vblk_concurrent", test_block_vblk_concurrent),
+    test("block_vblk_mq", test_block_vblk_mq),
+    test("block_persist", test_block_persist),
+    test("block_part_mbr", test_block_part_mbr),
+    test("block_part_gpt", test_block_part_gpt),
+    test("block_cache_hit", test_block_cache_hit),
+    test("block_cache_evict", test_block_cache_evict),
+    test("vfs_walk", test_vfs_walk),
+    test("pseudo_fs", test_pseudo_fs),
+    test("fat_initrd", test_fat_initrd),
+    test("vibefs", test_vibefs),
+    test("ktest_rows", test_ktest_rows),
+    test("ktest_fail_fmt", test_ktest_fail_fmt),
+    test("ktest_helpers", test_ktest_helpers),
+];
+
+/// The legacy list first, then each slice's suite in ID order (DESIGN §8.2).
+const SUITES: &[Suite] = &[
+    TESTS,
+    p10_s01::TESTS,
+    p10_s02::TESTS,
+    p10_s04::TESTS,
+    p10_s05::TESTS,
+    p10_s06::TESTS,
+    p10_s07::TESTS,
+    p10_s08::TESTS,
+    p10_s09::TESTS,
+    p10_s11::TESTS,
+    p10_s12::TESTS,
+    p10_s13::TESTS,
+    p10_s14::TESTS,
+    p10_s15::TESTS,
+    p10_s16::TESTS,
+    p10_s17::TESTS,
+    p10_s18::TESTS,
+    p10_s19::TESTS,
+    p10_s20::TESTS,
+    p10_s21::TESTS,
+    p10_s22::TESTS,
+    p10_s23::TESTS,
 ];
 
 pub fn run() -> ! {
@@ -205,20 +366,28 @@ pub fn run() -> ! {
     let _cli = x86::InterruptGuard::enter();
     crate::marker!("vibeOS: ktest: begin");
     let mut failed = false;
-    for &(name, f) in TESTS {
-        match f() {
-            Outcome::Ok => {
-                crate::marker!("vibeOS: ktest: ok {name}");
-            }
-            Outcome::Fail(why) => {
-                // Same shape as skip: reason on the protocol line so
-                // check_ktest_output (which raises on that line alone)
-                // is enough to diagnose (DESIGN §8.2).
-                crate::marker!("vibeOS: ktest: FAIL {name}: {why}");
-                failed = true;
-            }
-            Outcome::Skip(reason) => {
-                crate::marker!("vibeOS: ktest: skip {name}: {reason}");
+    for suite in SUITES {
+        for t in suite.iter() {
+            let name = t.name;
+            match (t.run)() {
+                Outcome::Ok => {
+                    crate::marker!("vibeOS: ktest: ok {name}");
+                }
+                Outcome::Fail(why) => {
+                    // Same shape as skip: reason on the protocol line so
+                    // check_ktest_output (which raises on that line alone)
+                    // is enough to diagnose (DESIGN §8.2).
+                    crate::marker!("vibeOS: ktest: FAIL {name}: {why}");
+                    failed = true;
+                }
+                Outcome::FailFmt(msg) => {
+                    let why = msg.as_str();
+                    crate::marker!("vibeOS: ktest: FAIL {name}: {why}");
+                    failed = true;
+                }
+                Outcome::Skip(reason) => {
+                    crate::marker!("vibeOS: ktest: skip {name}: {reason}");
+                }
             }
         }
     }
@@ -231,32 +400,63 @@ fn qemu_exit(code: u32) -> ! {
     x86::halt();
 }
 
-fn free_frames() -> usize {
+pub(crate) fn free_frames() -> usize {
     pmm_init::with_buddy(|b| b.stats().free_frames)
 }
 
-fn alloc_frame() -> Option<PhysAddr> {
+pub(crate) fn alloc_frame() -> Option<PhysAddr> {
     pmm_init::with_buddy(|b| b.allocate_frame()).map(PhysAddr)
 }
 
-fn free_frame(pa: PhysAddr) {
+pub(crate) fn free_frame(pa: PhysAddr) {
     pmm_init::with_buddy(|b| unsafe { b.deallocate_frame(pa.as_u64()) });
 }
 
-struct Fault {
-    cr2: u64,
-    error: u64,
+pub(crate) struct Fault {
+    pub(crate) cr2: u64,
+    pub(crate) error: u64,
 }
 
-fn catch_fault<F: FnOnce()>(f: F) -> Option<Fault> {
+pub(crate) fn catch_fault<F: FnOnce()>(f: F) -> Option<Fault> {
     arch::catch::catch(vectors::PF, f).map(|c| Fault {
         cr2: c.cr2,
         error: c.error,
     })
 }
 
-fn catch_alloc_error<F: FnOnce()>(f: F) -> bool {
+pub(crate) fn catch_alloc_error<F: FnOnce()>(f: F) -> bool {
     arch::catch::catch_alloc(f)
+}
+
+// Helpers for APIs that concurrent Phase 10 slices change. A new test
+// reaches those APIs only through these; the slice that changes one
+// updates its helper here (DESIGN §8.2).
+
+pub(crate) fn spawn_thread(name: &'static str, entry: fn()) -> ThreadHandle {
+    thread_init::spawn(name, entry)
+}
+
+pub(crate) fn spawn_thread_on(name: &'static str, entry: fn(), cpu: u32) -> ThreadHandle {
+    thread_init::spawn_on(name, entry, cpu)
+}
+
+/// A naturally aligned block of `1 << order` frames.
+pub(crate) fn alloc_frames(order: u8) -> Option<PhysAddr> {
+    pmm_init::with_buddy(|b| b.allocate(order)).map(PhysAddr)
+}
+
+/// # Safety
+/// `pa` is a block that [`alloc_frames`] returned for this same `order`, and
+/// it is freed once.
+pub(crate) unsafe fn dealloc_frames(pa: PhysAddr, order: u8) {
+    // SAFETY: `pa` is a live order-`order` block from `pmm::Buddy::allocate`,
+    // freed once; established by `ktest::alloc_frames` and this fn's
+    // `# Safety` contract.
+    pmm_init::with_buddy(|b| unsafe { b.deallocate(pa.as_u64(), order) });
+}
+
+pub(crate) fn cpu_remote(id: u32) -> Option<&'static PerCpu> {
+    per_cpu_init::cpu(id)
 }
 
 unsafe extern "C" {
@@ -2255,7 +2455,7 @@ fn test_spawn_exit_thousands() -> Outcome {
     Outcome::Ok
 }
 
-fn second_cpu() -> Option<u32> {
+pub(crate) fn second_cpu() -> Option<u32> {
     let mask = per_cpu_init::online_mask();
     let mut i = 1u32;
     while i < 64 {
@@ -2267,7 +2467,7 @@ fn second_cpu() -> Option<u32> {
     None
 }
 
-fn spin_until_ns(pred: impl Fn() -> bool, ns: u64) -> bool {
+pub(crate) fn spin_until_ns(pred: impl Fn() -> bool, ns: u64) -> bool {
     let t0 = time_init::now_ns();
     while !pred() {
         if time_init::now_ns().saturating_sub(t0) > ns {
@@ -4646,6 +4846,124 @@ fn test_vibefs() -> Outcome {
     }
     if file_init::sync_fs().is_err() {
         return Outcome::Fail("sync");
+    }
+    Outcome::Ok
+}
+
+fn test_ktest_rows() -> Outcome {
+    let mut seen = 0usize;
+    for (si, suite) in SUITES.iter().enumerate() {
+        for (ri, t) in suite.iter().enumerate() {
+            seen += 1;
+            if t.deadline_ms == 0 {
+                return crate::fail_fmt!("zero deadline on {}", t.name);
+            }
+            for (sj, other) in SUITES.iter().enumerate().skip(si) {
+                let from = if sj == si { ri + 1 } else { 0 };
+                if other[from..].iter().any(|o| o.name == t.name) {
+                    return crate::fail_fmt!("duplicate test name {}", t.name);
+                }
+            }
+        }
+    }
+    if seen < TESTS.len() {
+        return Outcome::Fail("SUITES does not hold the legacy list");
+    }
+    let d = test("d", test_ktest_rows);
+    if d.deadline_ms != 10_000 || d.once || d.opt_in {
+        return Outcome::Fail("test() defaults");
+    }
+    let b = d.deadline(20_000).once().opt_in();
+    if b.deadline_ms != 20_000 || !b.once || !b.opt_in {
+        return Outcome::Fail("builder did not set deadline/once/opt_in");
+    }
+    Outcome::Ok
+}
+
+struct FailingDisplay;
+
+impl fmt::Display for FailingDisplay {
+    fn fmt(&self, _: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Err(fmt::Error)
+    }
+}
+
+fn test_ktest_fail_fmt() -> Outcome {
+    let m = FailMsg::from_args(format_args!("n={}", 7));
+    if m.as_str() != "n=7" {
+        return Outcome::Fail("n={} did not round-trip");
+    }
+    // 199 spaces then `x`: 200 formatted bytes.
+    let m = FailMsg::from_args(format_args!("{:>200}", "x"));
+    if m.as_str().len() != FAIL_MSG_BYTES || m.as_str().bytes().any(|c| c != b' ') {
+        return Outcome::Fail("200 bytes did not cut to 120");
+    }
+    // 119 `x` then a 2-byte `é`: the character goes whole.
+    let m = FailMsg::from_args(format_args!("{:x>119}{}", "", 'é'));
+    if m.as_str().len() != 119 || m.as_str().bytes().any(|c| c != b'x') {
+        return Outcome::Fail("split a character at the cut");
+    }
+    let m = FailMsg::from_args(format_args!("a{}", FailingDisplay));
+    if m.as_str() != "a <fmt error>" {
+        return Outcome::Fail("Display error not marked");
+    }
+    match crate::fail_fmt!("id {}", 3) {
+        Outcome::FailFmt(m) if m.as_str() == "id 3" => Outcome::Ok,
+        _ => Outcome::Fail("fail_fmt! did not build FailFmt"),
+    }
+}
+
+static HELPER_RAN: AtomicBool = AtomicBool::new(false);
+
+fn helper_entry() {
+    HELPER_RAN.store(true, Ordering::SeqCst);
+}
+
+/// Wait up to 1 s for `helper_entry` to run in `h` and `h` to die. The
+/// thread may land on this CPU, so yield as well as serve IPIs.
+fn helper_ran_and_died(h: ThreadHandle) -> bool {
+    let t0 = time_init::now_ns();
+    loop {
+        let dead = matches!(
+            thread_init::try_state(h.id()),
+            Some(ThreadState::Dead) | None
+        );
+        if HELPER_RAN.load(Ordering::SeqCst) && dead {
+            return true;
+        }
+        if time_init::now_ns().saturating_sub(t0) > 1_000_000_000 {
+            return false;
+        }
+        thread_init::yield_now();
+        ipi_init::service_incoming();
+        core::hint::spin_loop();
+    }
+}
+
+fn test_ktest_helpers() -> Outcome {
+    let Some(pa) = alloc_frames(2) else {
+        return Outcome::Fail("alloc_frames(2)");
+    };
+    let aligned = pa.as_u64() % (4 * PAGE_SIZE_4K) == 0;
+    // SAFETY: `pa` is the order-2 block `alloc_frames(2)` returned above,
+    // freed once; established here.
+    unsafe { dealloc_frames(pa, 2) };
+    if !aligned {
+        return Outcome::Fail("order-2 block not 16 KiB aligned");
+    }
+    if cpu_remote(0).is_none() {
+        return Outcome::Fail("cpu_remote(0) is None");
+    }
+    if cpu_remote(per_cpu_init::cpu_count() as u32).is_some() {
+        return Outcome::Fail("cpu_remote(cpu_count) is Some");
+    }
+    HELPER_RAN.store(false, Ordering::SeqCst);
+    if !helper_ran_and_died(spawn_thread("ktest-helper", helper_entry)) {
+        return Outcome::Fail("spawn_thread entry did not run and exit");
+    }
+    HELPER_RAN.store(false, Ordering::SeqCst);
+    if !helper_ran_and_died(spawn_thread_on("ktest-helper0", helper_entry, 0)) {
+        return Outcome::Fail("spawn_thread_on(0) entry did not run and exit");
     }
     Outcome::Ok
 }
