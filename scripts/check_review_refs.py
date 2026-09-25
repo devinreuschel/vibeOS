@@ -11,27 +11,24 @@ map runs that mode.
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-REVIEW = ROOT / "docs" / "reviews" / "KERNEL_REVIEW.md"
-ROADMAP = ROOT / "docs" / "ROADMAP.md"
+sys.path.insert(0, str(ROOT))
 
-HEADING = re.compile(r"^#### (F\d{3}) · ")
-SEVERITY = re.compile(r"^\*\*Severity:\*\* (CRITICAL|HIGH|MEDIUM|LOW)\b(.*)$")
-FID = re.compile(r"\bF\d{3}\b")
-BOX = re.compile(r"^\s*- \[( |x)\] ")
-CLOSED_SCOPE_END = re.compile(r"^## Phase 11:")
+from scripts.gatelib import (  # noqa: E402
+    BOX,
+    CLOSED_SCOPE_END,
+    FID,
+    REVIEW,
+    ROADMAP,
+    Finding,
+    parse_review,
+)
 
-
-@dataclass(frozen=True)
-class Finding:
-    fid: str
-    severity: str
-    latent: bool
+__all__ = ["Citation", "Finding", "check", "parse_review", "parse_roadmap"]
 
 
 @dataclass(frozen=True)
@@ -40,24 +37,6 @@ class Citation:
     fid: str
     box: str | None  # "open", "closed", or None when the line is not a box
     phase10: bool  # the line is before "## Phase 11:"
-
-
-def parse_review(text: str) -> dict[str, Finding]:
-    """Findings keyed by id. The severity line follows its heading."""
-    found: dict[str, Finding] = {}
-    current: str | None = None
-    for raw in text.splitlines():
-        m = HEADING.match(raw)
-        if m:
-            current = m.group(1)
-            continue
-        if current is None:
-            continue
-        s = SEVERITY.match(raw)
-        if s:
-            found[current] = Finding(current, s.group(1), "LATENT" in s.group(2))
-            current = None
-    return found
 
 
 def parse_roadmap(text: str) -> list[Citation]:
