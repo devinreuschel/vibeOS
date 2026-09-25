@@ -276,6 +276,14 @@ needs = [
 ]
 why = "text: needs §10.10's fallible spawn_inner; claim: its Tcb allocation is fallible"
 
+[[box]]
+key = "`scripts/check_ticks.py`, which a `ticks` CI"
+needs = [
+  "until those retries are gone,",
+  "`scripts/check_review_refs.py` reads `tests/gates/phase-10-needs.toml`: each row",
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
 # Lands-after, lands-with and lands-before clauses in box text.
 
 [[box]]
@@ -420,6 +428,13 @@ needs = [
   "`release.yml` runs only from `main`",
 ]
 why = "text: lands after the ksyms, release-boot and assert! boxes and the release.yml box"
+
+[[box]]
+key = "gate inputs: `tests/gates/inputs.toml` lists every file a gate reads"
+needs = []
+why = """no edge: its lands-with clauses ("a fix lands with the list entry it retires", \
+"a new check land with the code they check") are about a fix and a check, not a box; \
+the box's owner extends this row"""
 
 # Closes rows (How to read this): the box named by `key` lands all the work
 # of each box in `closes`, and the commit that ticks it ticks them.
