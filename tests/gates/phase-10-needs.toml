@@ -123,6 +123,14 @@ key = "exec returns `ENOMEM` for an image whose page-rounded"
 needs = ["one `limits` module in `vibeos-core` names every"]
 why = "claim: its cap lives in the limits module"
 
+# L1315
+[[box]]
+key = "one `limits` module in `vibeos-core`"
+needs = [
+  "exec returns `ENOMEM` for an",  # L1380
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
 [[box]]
 key = "`disallowed-types` denies `alloc`'s"
 needs = [
