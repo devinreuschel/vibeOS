@@ -10,9 +10,11 @@ on:
 permissions:
   contents: read
 
-# Push + PR share one slot per branch; older SHAs get cancelled.
+# One slot per branch and event; older SHAs get cancelled. A push run and a
+# pull-request run of one branch do not share a slot, so a push cannot cancel
+# the pull request's `ticks` job.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -188,3 +190,36 @@ jobs:
           path: vibeos.iso
           if-no-files-found: error
           retention-days: 7
+
+  # Every ROADMAP box a pull request ticks names its proof, and the proof
+  # passed in the results files the tier jobs upload (ROADMAP §10.9).
+  ticks:
+    name: ticks
+    if: ${{ github.event_name == 'pull_request' && !cancelled() }}
+    needs: [phase0] # the ladder; the tier jobs once ROADMAP §10.1 lands
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # C-RESULTS: each tier job uploads `results-<arch>-<job>`.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: results-*
+          path: build/ci-results
+
+      - name: check_ticks
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 scripts/check_ticks.py --base "$BASE_SHA" --head "$HEAD_SHA"
+          --run-commit "$RUN_SHA" --results build/ci-results --summary "$GITHUB_STEP_SUMMARY"
