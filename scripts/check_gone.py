@@ -36,7 +36,30 @@ from scripts import gatelib  # noqa: E402
 # (identifier, path, glob, or definition row; box key). One row per line,
 # sorted. A key stops before any gone name, since tests/gates/ and this
 # file's own keys would otherwise have to name it.
-GONE: list[tuple[str, str]] = []
+GONE: list[tuple[str, str]] = [
+    ("EXIT_STATUS", "one ring-3 entry model:"),
+    ("IN_USER", "one ring-3 entry model:"),
+    ("STDOUT_LEN", "one ring-3 entry model:"),
+    ("USER_JMP", "one ring-3 entry model:"),
+    ("bind_current", "one ring-3 entry model:"),
+    ("bind_probe", "one ring-3 entry model:"),
+    ("boot_hello", "one ring-3 entry model:"),
+    ("capture_stdout", "one ring-3 entry model:"),
+    ("flags_if_on", "one ring-3 entry model:"),
+    ("longjmp_user", "one ring-3 entry model:"),
+    ("reset_stdout", "one ring-3 entry model:"),
+    ("return_status_or_die", "one ring-3 entry model:"),
+    ("run_path", "one ring-3 entry model:"),
+    ("run_user", "one ring-3 entry model:"),
+    ("set_exit_status", "one ring-3 entry model:"),
+    ("src/syscall_init.rs: static STDOUT", "one ring-3 entry model:"),
+    ("stdout_bytes", "one ring-3 entry model:"),
+    ("unbind_current", "one ring-3 entry model:"),
+    ("unbind_probe", "one ring-3 entry model:"),
+    ("vibeos_user_longjmp", "one ring-3 entry model:"),
+    ("vibeos_user_setjmp", "one ring-3 entry model:"),
+    ("with_user_as", "one ring-3 entry model:"),
+]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",
          "setup.sh"]

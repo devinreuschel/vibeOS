@@ -70,7 +70,7 @@ why = "claim: reopened (F014, F049)"
 
 # L1037
 [[box]]
-key = "a bound (`run_path`) process that"
+key = "a bound (`"
 needs = [
   "one ring-3 entry model: `/hello`",  # L1402
 ]
