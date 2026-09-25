@@ -1121,11 +1121,11 @@ The acceptance assumes one user. It goes back to the owner before `login` lands 
 a second user can share the machine. Keeping any gap past the line that closes it, or adding a gap,
 is likewise the owner's decision, not an agent's.
 
-**Agent boundary.** Rule: agents never act with the owner's credentials, and nothing agents write
-runs where the root key is made or used (ROADMAP §14.6). Rule; not yet enforced: agents run under the
-owner's macOS account and GitHub identity, as the two rows above say. How the boundary is set up is
-the owner's decision, in the block below; ROADMAP §14.6's custody box waits for the answer, so no key
-exists before it.
+**Agent boundary.** What separates agent sessions, and the code they write, from the owner's
+credentials and from wherever the root key is made or used (ROADMAP §14.6) is the owner's decision, in
+the block below. Until it is recorded, agents run under the owner's macOS account and GitHub identity,
+as the two rows above say, AGENTS.md's Identity rules hold as policy that nothing enforces, and
+ROADMAP §14.6's custody box waits for the answer, so no key exists before it.
 
 > **OWNER DECISION NEEDED (review J002)**: agents act as you. They run shell commands under your
 > macOS account and push, open, and merge pull requests with your GitHub token, and GitHub checks

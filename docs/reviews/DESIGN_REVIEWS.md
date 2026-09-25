@@ -77,7 +77,7 @@ Ids G029 to G041 are unused: G042 and G043 were numbered apart as the legal and 
 | Id | Severity | Decision | Sections | PR |
 |----|----------|----------|----------|----|
 | J001 | Major | Land each LATENT fix before the Phase 10 box that makes it reachable | ROADMAP Phase 10, §10.3, §10.4, §10.6, §13.1, §13.8; SYSCALL §4 | #92 |
-| J002 | Major | Put the agent boundary to the owner: own GitHub identity, root key away from agents | ROADMAP How to read this, §14.6, Era VI. Production, Phase 30, Funded goals, Paid services; DESIGN §2.10; AGENTS | #92 |
+| J002 | Major | Put the agent boundary to the owner, open (recommended: agents get their own GitHub identity, and the root key stays away from agents) | ROADMAP How to read this, §14.6, Era VI. Production, Phase 30, Funded goals, Paid services; DESIGN §2.10; AGENTS | #92 |
 | J003 | Major | Make the address space a two-count object in §10.6 and fix its teardown order | ROADMAP Phase 10, §10.6, §12.1, §12.3, §12.6, §13.1, §13.9, §17.4, §23.4; DESIGN §2.1, §2.3, §2.7, §2.11, §4.4 | #92 |
 | J004 | Major | An object reverse map with its own sleeping lock and a walk order fork and mremap keep | ROADMAP §12.1, §12.3, §12.4, §12.6, §12.7, §13.5, §13.12, §19.10, Phase 38; DESIGN §2.1, §4.4, §4.6 | #92 |
 | J005 | Major | Name §2.11's count types, split teardown into last put and kill, and defer releases from atomic context | ROADMAP §10.4, §12.5, §13.7, §20.9, §23.1; DESIGN §2.2, §2.11, §10.1 | #92 |
