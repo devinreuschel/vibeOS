@@ -208,14 +208,22 @@ def load_needs(path: Path) -> tuple[list[NeedRow], list[str]]:
     return parse_needs(path.read_text(encoding="utf-8"), path.name)
 
 
-def load_all_needs(directory: Path = GATES) -> list[NeedsFile]:
-    """(phase from the file name, rows, roots) of every needs file, by phase."""
+def load_all_needs(directory: Path = GATES, errors: list[str] | None = None) -> list[NeedsFile]:
+    """(phase from the file name, rows, roots) of every needs file, by phase.
+    A malformed file raises `GateError`, or with `errors` is appended there
+    and left out."""
     out: list[NeedsFile] = []
     for p in sorted(directory.glob("phase-*-needs.toml")):
         m = NEEDS_FILE.match(p.name)
         if m is None:
             continue
-        rows, roots = load_needs(p)
+        try:
+            rows, roots = load_needs(p)
+        except GateError as e:
+            if errors is None:
+                raise
+            errors.append(str(e))
+            continue
         out.append((int(m.group(1)), rows, roots))
     out.sort(key=lambda t: t[0])
     return out
