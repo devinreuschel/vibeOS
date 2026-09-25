@@ -54,10 +54,7 @@ struct Proc {
     pending: u32,
     /// No reaper: freed at exit, ROADMAP §10.5.
     autoreap: bool,
-    bound: bool,
     space: Option<Box<AddressSpace>>,
-    /// Bound `run_user` / probe: caller owns the AS. Spawned uses `space`.
-    borrowed: *const AddressSpace,
     entry: UserRegs,
     wait_wq: WaitQueue,
     stop_wq: WaitQueue,
@@ -77,9 +74,7 @@ impl Proc {
             wait_status: 0,
             pending: 0,
             autoreap: false,
-            bound: false,
             space: None,
-            borrowed: core::ptr::null(),
             entry: UserRegs::empty(),
             wait_wq: WaitQueue::new(),
             stop_wq: WaitQueue::new(),
@@ -183,9 +178,8 @@ fn current_pid() -> u32 {
     thread_init::current_pid()
 }
 
-/// Address space for the current syscall / `run_user`.
-/// Spawned processes own a Box; bound `run_user` stores a borrowed pointer
-/// so a child's `clear_as` cannot steal the parent's.
+/// Address space for the current syscall: the process's own, or the
+/// global `CURRENT_AS` when the caller has no pid.
 pub fn current_space() -> Option<&'static AddressSpace> {
     let pid = current_pid();
     if pid != 0
@@ -199,13 +193,7 @@ pub fn current_space() -> Option<&'static AddressSpace> {
 fn space_of(pid: u32) -> Option<&'static AddressSpace> {
     with_table(|t| {
         let p = t.get(pid)?;
-        if let Some(ref s) = p.space {
-            Some(&**s as *const AddressSpace)
-        } else if !p.borrowed.is_null() {
-            Some(p.borrowed)
-        } else {
-            None
-        }
+        p.space.as_ref().map(|s| &**s as *const AddressSpace)
     })
     .map(|p| unsafe { &*p })
 }
@@ -254,7 +242,7 @@ fn alloc_pid(prefer: u32) -> Option<u32> {
     })
 }
 
-fn init_slot(t: &mut Table, pid: u32, ppid: u32, name: &'static str, bound: bool) {
+fn init_slot(t: &mut Table, pid: u32, ppid: u32, name: &'static str) {
     let p = &mut t.procs[pid as usize];
     *p = Proc::empty();
     p.state = ProcState::Live;
@@ -262,7 +250,6 @@ fn init_slot(t: &mut Table, pid: u32, ppid: u32, name: &'static str, bound: bool
     p.ppid = ppid;
     p.name = name;
     p.fds = FdTable::stdio();
-    p.bound = bound;
 }
 
 fn close_fd_slot(fd: Fd) {
@@ -320,40 +307,6 @@ fn user_thread_entry() {
     unsafe { syscall_init::enter_user_full(&regs) };
 }
 
-/// Bind `run_user` on the current kernel thread. Caller owns `space`.
-pub fn bind_current(space: &mut AddressSpace, name: &'static str) -> u32 {
-    let pid = alloc_pid(0).expect("proc table");
-    let tid = thread_init::current_id();
-    with_table(|t| {
-        init_slot(t, pid, 0, name, true);
-        t.procs[pid as usize].tid = tid;
-        t.procs[pid as usize].borrowed = space as *const AddressSpace;
-    });
-    thread_init::set_pid_cr3(tid, pid, space.root().as_u64());
-    set_as(space);
-    pid
-}
-
-pub fn unbind_current() {
-    let pid = current_pid();
-    if pid == 0 {
-        clear_as();
-        return;
-    }
-    let fds = with_table(|t| {
-        let fds = t.get(pid).map(|p| p.fds).unwrap_or_else(FdTable::empty);
-        if let Some(p) = t.get_mut(pid) {
-            *p = Proc::empty();
-        }
-        fds
-    });
-    let mut fds = fds;
-    close_all_fds(&mut fds);
-    let tid = thread_init::current_id();
-    thread_init::set_pid_cr3(tid, 0, 0);
-    clear_as();
-}
-
 #[cfg_attr(feature = "kernel_tests", allow(dead_code))]
 pub fn start_init() {
     match spawn_elf("/sbin/init", INIT_PID, 0) {
@@ -406,7 +359,7 @@ fn start_loaded(
     entry.fs_base = loaded.fs;
     let boxed = Box::new(loaded.space);
     with_table(|t| {
-        init_slot(t, pid, ppid, name, false);
+        init_slot(t, pid, ppid, name);
         t.procs[pid as usize].space = Some(boxed);
         t.procs[pid as usize].entry = entry;
     });
@@ -504,7 +457,7 @@ fn dispatch_frame(nr: u64, args: [u64; 6], frame: *mut SyscallFrame) -> i64 {
         SYS_FORK => sys_fork(frame),
         SYS_EXECVE => sys_execve(args[0], args[1], args[2], frame),
         SYS_EXIT => {
-            if !syscall_init::in_user() && current_pid() == 0 {
+            if current_pid() == 0 {
                 0
             } else {
                 sys_exit(args[0], false)
@@ -615,10 +568,7 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> i64 {
                     return syscall::neg(EFAULT);
                 }
                 match slot.kind {
-                    FdKind::Console => {
-                        syscall_init::capture_stdout(&scratch[..n]);
-                        console_init::write(&scratch[..n]);
-                    }
+                    FdKind::Console => console_init::write(&scratch[..n]),
                     FdKind::File(fid) => match file_init::write(fid, &scratch[..n]) {
                         Ok(k) => {
                             if k < n {
@@ -924,7 +874,7 @@ fn sys_fork(frame: *mut SyscallFrame) -> i64 {
     let boxed = Box::new(cloned);
     let h = thread_init::spawn_user("user", user_thread_entry, pid, cr3);
     with_table(|t| {
-        init_slot(t, pid, ppid, "user", false);
+        init_slot(t, pid, ppid, "user");
         let p = &mut t.procs[pid as usize];
         p.fds = fds;
         p.cwd = cwd;
@@ -932,7 +882,6 @@ fn sys_fork(frame: *mut SyscallFrame) -> i64 {
         p.space = Some(boxed);
         p.entry = child_regs;
         p.tid = h.id();
-        p.bound = false;
     });
     thread_init::make_ready(h.id());
     // Child may run (and exit) before we return. POSIX allows either order.
@@ -1037,25 +986,10 @@ fn sys_exit(status: u64, _from_signal: bool) -> i64 {
     finish_exit(wait_exited(status as u32), false);
 }
 
-fn finish_exit(wait_status: u32, from_fault: bool) -> ! {
+fn finish_exit(wait_status: u32, _from_fault: bool) -> ! {
     let pid = current_pid();
     if pid == 0 {
-        if syscall_init::in_user() {
-            syscall_init::longjmp_user((wait_status >> 8) as i32);
-        }
         thread_init::exit_current();
-    }
-    let bound = with_table(|t| t.get(pid).map(|p| p.bound).unwrap_or(false));
-    if bound {
-        syscall_init::set_exit_status(if from_fault {
-            128 + (wait_status & 0x7f) as i32
-        } else {
-            ((wait_status >> 8) & 0xff) as i32
-        });
-        if syscall_init::in_user() {
-            syscall_init::longjmp_user(syscall_init::exit_status());
-        }
-        return_status_or_die(wait_status);
     }
     let (old, ppid, fds, tid) = thread_init::with_sched(|s| {
         TABLE.with(|t| {
@@ -1099,10 +1033,6 @@ fn finish_exit(wait_status: u32, from_fault: bool) -> ! {
         addr_space_init::teardown(*space);
     }
     crate::arch::gs::force_kernel();
-    thread_init::exit_current();
-}
-
-fn return_status_or_die(_st: u32) -> ! {
     thread_init::exit_current();
 }
 

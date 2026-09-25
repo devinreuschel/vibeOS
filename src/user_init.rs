@@ -1,8 +1,8 @@
-//! Load a static ELF from the filesystem and run it in ring 3. ROADMAP §9.4 / §9.8.
+//! Load a static ELF, from the filesystem or from memory, into a new
+//! address space. ROADMAP §9.4 / §9.8.
 
 use alloc::vec;
 use alloc::vec::Vec;
-use core::fmt::Write;
 
 use vibeos::addr_space::{AddressSpace, AsError, UserMemError, UserPerms};
 use vibeos::elf::{
@@ -14,15 +14,11 @@ use vibeos::paging::PAGE_SIZE_4K;
 
 use crate::addr_space_init;
 use crate::file_init;
-use crate::proc_init;
-use crate::serial::Serial;
-use crate::syscall_init;
 use crate::x86;
 
 use vibeos::limits::MAX_ELF;
 const STACK_PAGES: u64 = 32;
 const STACK_TOP: u64 = 0x0000_0000_8000_0000;
-const HELLO_PATH: &str = "/hello";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoadError {
@@ -266,43 +262,6 @@ pub fn load_image(elf: &[u8], argv: &[&[u8]]) -> Result<Loaded, LoadError> {
         Err(e) => {
             addr_space_init::teardown(space);
             Err(e)
-        }
-    }
-}
-
-/// Load `path`, run it on the current thread, teardown the AS.
-pub fn run_path(path: &str) -> Result<i32, LoadError> {
-    let mut loaded = load_path(path, &[path])?;
-    let _pid = proc_init::bind_current(&mut loaded.space, intern(path));
-    let status =
-        unsafe { syscall_init::run_user(&mut loaded.space, loaded.entry, loaded.rsp, loaded.fs) };
-    proc_init::unbind_current();
-    crate::addr_space_init::load_kernel_cr3();
-    addr_space_init::teardown(loaded.space);
-    Ok(status)
-}
-
-fn intern(path: &str) -> &'static str {
-    if path.ends_with("hello") {
-        "hello"
-    } else if path.ends_with("tests") {
-        "tests"
-    } else {
-        "user"
-    }
-}
-
-/// Bootstrap `/hello`. Diagnostic only — not a `vibeOS:` marker.
-pub fn boot_hello() {
-    if cfg!(feature = "vibefs_crash") {
-        return;
-    }
-    match run_path(HELLO_PATH) {
-        Ok(st) => {
-            let _ = writeln!(Serial, "user: exit {st}");
-        }
-        Err(e) => {
-            let _ = writeln!(Serial, "user: hello failed: {}", e.as_str());
         }
     }
 }

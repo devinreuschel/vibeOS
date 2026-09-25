@@ -127,8 +127,8 @@ impl<T> IrqCell<T> {
         f(unsafe { &mut *self.data.get() })
     }
 
-    /// Address of the payload. `lidt` / setjmp / longjmp, and AP `ap_entry`
-    /// before `GS_BASE` (InterruptGuard would `gs:[0]`).
+    /// Address of the payload. `lidt`, and AP `ap_entry` before `GS_BASE`
+    /// (InterruptGuard would `gs:[0]`).
     #[inline]
     pub fn as_ptr(&self) -> *mut T {
         self.data.get()

@@ -212,7 +212,7 @@ the errno the baseline returns: `read(-1, <unmapped>, 1)` is `EBADF`, and
 | 500 | `psinfo` | 2 | `rdi` buf, `rsi` len; vibeOS-specific |
 
 `sched_yield` calls the kernel `yield_now` when the caller has a pid
-(bound `run_user` or a spawned process). A kernel-side `dispatch()`
+(any spawned process). A kernel-side `dispatch()`
 probe with no process (ktest, IF off) returns `0` without scheduling.
 
 ### 3.1 Behavior and differences from Linux
