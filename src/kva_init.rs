@@ -32,10 +32,10 @@ impl GuardedStack {
     }
 }
 
-const MAX_DEFERRED: usize = 8;
+use vibeos::limits::MAX_DEFERRED_STACKS as MAX_DEFERRED;
 static DEFERRED: IrqCell<[Option<GuardedStack>; MAX_DEFERRED]> = IrqCell::new([None; MAX_DEFERRED]);
 
-const MAX_UNMAP: usize = 32;
+use vibeos::limits::MAX_UNMAP_PAGES as MAX_UNMAP;
 
 /// Claim the 64 GiB window. Must run after paging + heap.
 ///

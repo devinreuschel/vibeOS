@@ -5,8 +5,8 @@
 
 use crate::fs::{MAX_PATH, O_CLOEXEC};
 
-pub const MAX_PROCS: usize = 16;
-pub const MAX_FDS: usize = 16;
+pub use crate::limits::MAX_FDS;
+pub use crate::limits::MAX_PROCS;
 pub const INIT_PID: u32 = 1;
 pub const NAME_MAX: usize = 16;
 
@@ -436,5 +436,10 @@ mod tests {
             .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn fixed_tables_match_limits() {
+        assert_eq!(FdTable::empty().slots.len(), crate::limits::MAX_FDS);
     }
 }

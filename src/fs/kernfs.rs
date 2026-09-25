@@ -1709,4 +1709,10 @@ mod tests {
         assert_eq!(v.cons_captured(), b"hi");
         v.close(fid).unwrap();
     }
+
+    #[test]
+    fn fixed_tables_match_limits() {
+        let k = std::boxed::Box::new(KernState::new());
+        assert_eq!(k.nodes.len(), crate::limits::MAX_KERN_NODES);
+    }
 }

@@ -20,7 +20,7 @@ use crate::sync_init::SpinMutex;
 use crate::thread_init;
 use crate::virtio_blk_init;
 
-const MAX_VOLS: usize = 2;
+use vibeos::limits::MAX_FAT_VOLS as MAX_VOLS;
 pub const VOL_INITRD: u8 = 0;
 const MNT_MAX: usize = 2;
 const MNT_PATH: usize = 64;

@@ -18,7 +18,7 @@ pub const PAGE_SIZE: u64 = 4096;
 /// Default kernel stack: 4 pages (16 KiB) plus the unmapped guard.
 pub const DEFAULT_STACK_PAGES: usize = 4;
 
-const MAX_RANGES: usize = 128;
+use crate::limits::MAX_KVA_RANGES as MAX_RANGES;
 
 /// Free-list node pool exhausted after coalesce. Not a VA OOM (`alloc`
 /// still returns `None` for that).
@@ -353,5 +353,14 @@ mod tests {
         assert_eq!(k.stats().capacity, PAGE_SIZE);
         assert_eq!(k.stats().used, 0);
         assert_eq!(k.stats().free_ranges, 1);
+    }
+
+    #[test]
+    fn fixed_tables_match_limits() {
+        use crate::limits::MAX_KVA_RANGES;
+        let k = Kva::empty();
+        assert_eq!(k.nodes.len(), MAX_KVA_RANGES);
+        assert_eq!(k.next.len(), MAX_KVA_RANGES);
+        assert_eq!(k.slots.len(), MAX_KVA_RANGES);
     }
 }

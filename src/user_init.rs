@@ -19,7 +19,7 @@ use crate::serial::Serial;
 use crate::syscall_init;
 use crate::x86;
 
-const MAX_ELF: u64 = 64 * 1024;
+use vibeos::limits::MAX_ELF;
 const STACK_PAGES: u64 = 32;
 const STACK_TOP: u64 = 0x0000_0000_8000_0000;
 const HELLO_PATH: &str = "/hello";

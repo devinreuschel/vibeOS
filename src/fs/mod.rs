@@ -13,19 +13,19 @@ mod kernfs;
 
 pub use kernfs::{DevFs, ProcFs, SysFs, TmpFs};
 
-pub const MAX_NAME: usize = 64;
-pub const MAX_PATH: usize = 256;
-pub const MAX_FILE_BYTES: usize = 256;
-pub const MAX_DIR_ENTS: usize = 32;
-pub const MAX_INODES: usize = 48;
-pub const MAX_RAM_NODES: usize = 64;
-pub const MAX_DENTRIES: usize = 48;
-pub const MAX_MOUNTS: usize = 8;
-pub const MAX_KERN_NODES: usize = 128;
-pub const MAX_FILES: usize = 16;
-pub const MAX_FDS: usize = 16;
-pub const MAX_SYMLINK: u32 = 8;
-pub const MAX_WALK: u32 = 80;
+pub use crate::limits::MAX_DENTRIES;
+pub use crate::limits::MAX_FDS;
+pub use crate::limits::MAX_INODES;
+pub use crate::limits::MAX_KERN_NODES;
+pub use crate::limits::MAX_MOUNTS;
+pub use crate::limits::MAX_NAME;
+pub use crate::limits::MAX_OPEN_FILES as MAX_FILES;
+pub use crate::limits::MAX_PATH;
+pub use crate::limits::MAX_RAM_NODES;
+pub use crate::limits::MAX_SYMLINK;
+pub use crate::limits::MAX_TMPFS_DIR_ENTS as MAX_DIR_ENTS;
+pub use crate::limits::MAX_TMPFS_FILE_BYTES as MAX_FILE_BYTES;
+pub use crate::limits::MAX_WALK;
 
 pub const S_IFMT: u16 = 0o170000;
 pub const S_IFREG: u16 = 0o100000;
@@ -2902,5 +2902,20 @@ mod tests {
         v.link(None, "/d/b", "/c").unwrap();
         assert_eq!(v.stat(None, "/c").unwrap().nlink, 2);
         assert_eq!(v.stat(None, "/d/b").unwrap().nlink, 2);
+    }
+
+    #[test]
+    fn fixed_tables_match_limits() {
+        use crate::limits;
+        let v = Vfs::new();
+        assert_eq!(v.inodes.len(), limits::MAX_INODES);
+        assert_eq!(v.dentries.len(), limits::MAX_DENTRIES);
+        assert_eq!(v.supers.len(), limits::MAX_MOUNTS);
+        assert_eq!(v.mounts.len(), limits::MAX_MOUNTS);
+        assert_eq!(v.files.len(), limits::MAX_OPEN_FILES);
+        assert_eq!(v.ram.len(), limits::MAX_RAM_NODES);
+        assert_eq!(FdTable::new().fds.len(), limits::MAX_FDS);
+        assert_eq!(RamNode::EMPTY.data.len(), limits::MAX_TMPFS_FILE_BYTES);
+        assert_eq!(RamNode::EMPTY.dents.len(), limits::MAX_TMPFS_DIR_ENTS);
     }
 }

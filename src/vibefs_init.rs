@@ -19,7 +19,7 @@ use crate::thread_init;
 use crate::virtio_blk_init;
 
 pub const VOL_MEM: u8 = 0;
-const MAX_VOLS: usize = 2;
+use vibeos::limits::MAX_VIBEFS_VOLS as MAX_VOLS;
 const MNT_MAX: usize = 2;
 const MNT_PATH: usize = 64;
 pub const IMAGE_BYTES: usize = 256 * 1024;

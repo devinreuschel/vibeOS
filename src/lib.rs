@@ -40,6 +40,7 @@ pub mod irq;
 pub mod kalloc;
 pub mod kbd;
 pub mod kva;
+pub mod limits;
 pub mod lock;
 pub mod log;
 pub mod marker;
