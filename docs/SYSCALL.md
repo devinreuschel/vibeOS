@@ -253,8 +253,16 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   `pid`, process group `-pid` (F149; ROADMAP §13.7). A `pid` that names a
   zombie returns `ESRCH`; Linux returns 0 (ROADMAP §13.7). A
   default-terminate or default-stop signal to pid 1 kills or stops init,
-  after which orphans stay zombies; Linux delivers to init only the signals
-  it handles (F068; ROADMAP §10.5)
+  after which an orphan has no reaper and is freed when it exits (`exit`
+  below); Linux delivers to init only the signals it handles (F068; ROADMAP
+  §10.5)
+- `exit`: the caller's children go to the reaper `proc::reaper_for` picks:
+  pid 1 while init is live or stopped; otherwise none, so a child reads
+  `getppid()` 0 and is freed when it exits (a zombie child at once), as in
+  the `kernel_tests` and `kernel_shell` builds. A process the kernel starts
+  has parent 0: `/sbin/init`, and the boot `/hello` and the in-guest test
+  programs, which `proc_init::wait_kernel` reaps. Linux reparents to a subreaper or
+  init and panics when init exits (ROADMAP §10.5, F068)
 - `psinfo`: writes one `<pid> <ppid> <state> <name>` line per process
   (state `run`, `stop`, or `zombie`). It formats the whole lines that fit in
   512 bytes and copies at most `rsi` of those bytes. Number 500 is in the

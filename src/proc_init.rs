@@ -15,9 +15,10 @@ use vibeos::desc::InterruptFrame;
 use vibeos::fs::FsError;
 use vibeos::kbd::{DecodedKey, NamedKey};
 use vibeos::proc::{
-    Creds, Cwd, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, MAX_FDS, MAX_PROCS, ProcState, SIGBUS,
-    SIGCHLD, SIGCONT, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGSTOP, SigAct, WNOHANG, default_action,
-    fd_flags_from_open, sig_name, wait_exited, wait_signaled, wait_stopped,
+    Creds, Cwd, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, InitState, MAX_FDS, MAX_PROCS,
+    ProcState, SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGSTOP, SigAct,
+    WNOHANG, default_action, fd_flags_from_open, reaper_for, sig_name, wait_exited, wait_signaled,
+    wait_stopped,
 };
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::syscall::{
@@ -51,6 +52,8 @@ struct Proc {
     fds: FdTable,
     wait_status: u32,
     pending: u32,
+    /// No reaper: freed at exit, ROADMAP §10.5.
+    autoreap: bool,
     bound: bool,
     space: Option<Box<AddressSpace>>,
     /// Bound `run_user` / probe: caller owns the AS. Spawned uses `space`.
@@ -73,6 +76,7 @@ impl Proc {
             fds: FdTable::empty(),
             wait_status: 0,
             pending: 0,
+            autoreap: false,
             bound: false,
             space: None,
             borrowed: core::ptr::null(),
@@ -1064,12 +1068,11 @@ fn finish_exit(wait_status: u32, from_fault: bool) -> ! {
     }
     let (old, ppid, fds, tid) = thread_init::with_sched(|s| {
         TABLE.with(|t| {
-            reparent_children(t, pid);
-            if t.procs[INIT_PID as usize].state != ProcState::Unused {
+            if reparent_children(t, pid) {
                 s.wake_all(&mut t.procs[INIT_PID as usize].wait_wq);
             }
             let p = t.get_mut(pid);
-            let (space, ppid, fds, tid) = match p {
+            let (space, ppid, fds, tid, autoreap) = match p {
                 Some(p) => {
                     p.state = ProcState::Zombie;
                     p.wait_status = wait_status;
@@ -1077,15 +1080,20 @@ fn finish_exit(wait_status: u32, from_fault: bool) -> ! {
                     let space = p.space.take();
                     let fds = p.fds;
                     p.fds = FdTable::empty();
-                    (space, p.ppid, fds, p.tid)
+                    (space, p.ppid, fds, p.tid, p.autoreap)
                 }
-                None => (None, 0, FdTable::empty(), ThreadId::NONE),
+                None => (None, 0, FdTable::empty(), ThreadId::NONE, false),
             };
-            if let Some(par) = t.get_mut(ppid) {
-                par.pending |= bit(SIGCHLD);
+            if autoreap {
+                // No reaper (ROADMAP §10.5): nobody waits, so free the slot now.
+                reap_zombie(t, pid);
+            } else {
+                if let Some(par) = t.get_mut(ppid) {
+                    par.pending |= bit(SIGCHLD);
+                }
+                // ppid 0 wakes the kernel's queue (`wait_kernel`).
+                s.wake_all(&mut t.procs[ppid as usize].wait_wq);
             }
-            // ppid 0 wakes the kernel's queue (`wait_kernel`).
-            s.wake_all(&mut t.procs[ppid as usize].wait_wq);
             (space, ppid, fds, tid)
         })
     });
@@ -1107,19 +1115,38 @@ fn return_status_or_die(_st: u32) -> ! {
     thread_init::exit_current();
 }
 
-fn reparent_children(t: &mut Table, dead: u32) {
+/// Give `dead`'s children to the reaper `reaper_for` picks (ROADMAP §10.5,
+/// F068). With none, a zombie child is freed now and a live one gets
+/// ppid 0 and `autoreap`, so `finish_exit` frees it. True when init
+/// adopted a child and its wait queue needs a wake.
+fn reparent_children(t: &mut Table, dead: u32) -> bool {
+    // An exiting init is still `Live` here; it must not adopt its own children.
+    let init = if dead == INIT_PID {
+        InitState::Zombie
+    } else {
+        InitState::of(t.procs[INIT_PID as usize].state)
+    };
+    let reaper = reaper_for(init);
+    let mut adopted = false;
     let mut i = 1usize;
     while i < MAX_PROCS {
-        if t.procs[i].state != ProcState::Unused && t.procs[i].ppid == dead {
-            t.procs[i].ppid = INIT_PID;
-            if t.procs[INIT_PID as usize].state != ProcState::Unused {
-                let wq = &mut t.procs[INIT_PID as usize].wait_wq as *mut WaitQueue;
-                // Wake after SCHED section via cookie: same lock, do it now.
-                let _ = wq;
+        let p = &mut t.procs[i];
+        if p.state != ProcState::Unused && p.ppid == dead && p.pid != dead {
+            match reaper {
+                Some(r) => {
+                    p.ppid = r;
+                    adopted = true;
+                }
+                None if p.state == ProcState::Zombie => reap_zombie(t, i as u32),
+                None => {
+                    p.ppid = 0;
+                    p.autoreap = true;
+                }
             }
         }
         i += 1;
     }
+    adopted
 }
 
 fn sys_wait4(pid: u64, status: u64, options: u64) -> i64 {
