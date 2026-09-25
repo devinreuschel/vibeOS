@@ -22,7 +22,11 @@ report lists.
 Modes:
 - bare (`make check`): pairing and the diff rule on `origin/main..HEAD`, or
   `check_ticks: skipped (no origin/main)` when that ref is missing;
-- `--base B [--head H]`: the same on `B..H`.
+- `--base B [--head H]`: pairing and the diff rule on `B..H`, plus the needs,
+  closes and Fails-before rules;
+- `--results DIR [--run-commit SHA]`: adds the results, retry and bracket
+  rules, reading C-RESULTS files under DIR at the head or at SHA;
+- `--summary FILE`: appends a Markdown report to FILE.
 
 Errors go to stderr as `<sha7> L<line>: <message>`; the exit code is then 1.
 """
@@ -30,6 +34,7 @@ Errors go to stderr as `<sha7> L<line>: <message>`; the exit code is then 1.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import subprocess
@@ -56,12 +61,22 @@ FAILS_BEFORE_LINE = re.compile(r'^(\S+)\s+([0-9a-f]{7,40})\s+"(.*)"$')
 RESULT_KINDS = ("ktest", "utest", "marker")
 RUST_FN = r"^(\s*)(?:pub(?:\([^)]*\))?\s+)?(?:(?:const|async|unsafe|extern\s+\"[^\"]*\")\s+)*fn\s+"
 PY_DEF = r"^(\s*)(?:async\s+)?(?:def|class)\s+"
-REGISTRY_ROW = r"(?:\btest\(|\()\s*\"{}\"\s*,\s*([A-Za-z_][A-Za-z0-9_:]*)"
+# A ktest registry row: C-SUITES's `test("<name>", f)`, or the legacy tuple
+# `("<name>", f),` that starts its own line. A bare `(` would match any call.
+REGISTRY_ROW = (r"\btest\(\s*\"{0}\"\s*,\s*([A-Za-z_][A-Za-z0-9_:]*)"
+                r"|^[ \t]*\(\s*\"{0}\"\s*,\s*([A-Za-z_][A-Za-z0-9_:]*)\s*\)\s*,")
+IGNORE_ATTR = re.compile(r"^\s*#\[ignore\b")
 MARKER_CALL = re.compile(r"marker!\(\s*\"((?:[^\"\\]|\\.)*)\"", re.S)
 MARKER_CONST = re.compile(r"^\s*pub\s+const\s+([A-Z0-9_]+):\s*&str\s*=\s*\"((?:[^\"\\]|\\.)*)\";",
                           re.M)
-HOST_TEST_DIRS = ("crates/", "tests/hostlib/")
+# vibeos-core is built from src/lib.rs (crates/core/Cargo.toml), so its #[test]s live in src/.
+HOST_TEST_DIRS = ("src/", "crates/", "tests/hostlib/")
 PY_DIRS = ("tests/harness/", "scripts/")
+HARNESS_DIR = "tests/harness/"
+# Workflow file whose jobs a bracket's `make <target>` proof is looked up in.
+BRACKET_WORKFLOW = {**gatelib.BRACKETS, "ci-history": "ci.yml"}
+WORKFLOW_JOB = re.compile(r"^  ([A-Za-z0-9_-]+):\s*(?:#.*)?$")
+WORKFLOW_JOB_NAME = re.compile(r"^    name:\s*(.+?)\s*$")
 
 
 def collapse(s: str) -> str:
@@ -247,13 +262,35 @@ def _rust_fn_range(lines: list[str], i: int) -> tuple[int, int]:
     return start + 1, end + 1
 
 
+def _is_ignored(attrs: list[str]) -> bool:
+    """An `#[ignore]` or `#[ignore = "..."]` attribute line; a doc comment or
+    another attribute that mentions the word does not count."""
+    return any(IGNORE_ATTR.match(a) for a in attrs)
+
+
+def _py_header_end(lines: list[str], i: int) -> int:
+    """0-based index of the line that ends the `def`/`class` header at `i`:
+    the first line after which its brackets are closed again, so a
+    multi-line signature's `) -> T:` line belongs to the header."""
+    depth = 0
+    for j in range(i, len(lines)):
+        code = re.sub(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"", "", lines[j])
+        code = code.split("#", 1)[0]
+        depth += sum(code.count(c) for c in "([{") - sum(code.count(c) for c in ")]}")
+        if depth <= 0:
+            return j
+    return len(lines) - 1
+
+
 def _py_def_range(lines: list[str], i: int) -> tuple[int, int]:
+    """0-based index `i` of a `def` line -> 1-based (start, end), from its
+    decorators past its header to the next line at its indent or less."""
     indent = len(lines[i]) - len(lines[i].lstrip())
     start = i
     while start > 0 and lines[start - 1].strip().startswith("@"):
         start -= 1
-    end = i
-    for j in range(i + 1, len(lines)):
+    end = _py_header_end(lines, i)
+    for j in range(end + 1, len(lines)):
         s = lines[j]
         if not s.strip():
             continue
@@ -332,8 +369,7 @@ def resolve(proof: str, tree: Tree) -> tuple[list[Definition], str]:
         if not name:
             return [Definition("path", path, 0, 0, path)], path
         rust = path.endswith(".rs")
-        defs = [Definition("host" if rust else "py", path, s, e, name,
-                           any("ignore" in a for a in attrs))
+        defs = [Definition("host" if rust else "py", path, s, e, name, _is_ignored(attrs))
                 for s, e, attrs in find_fn(text, name, rust)]
         return defs, name
     j = JOB.match(proof)
@@ -379,9 +415,59 @@ def _resolve_marker(text: str, tree: Tree) -> list[Definition]:
     return out
 
 
+def _fstring_regex(node: ast.expr, hole: str) -> str | None:
+    """A str constant or f-string as a regex, each `{...}` read as `hole`."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return re.escape(node.value)
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for v in node.values:
+            if isinstance(v, ast.Constant) and isinstance(v.value, str):
+                parts.append(re.escape(v.value))
+            else:
+                parts.append(hole)
+        return "".join(parts)
+    return None
+
+
+def marker_labels(text: str, tree: Tree) -> list[re.Pattern[str]]:
+    """The C-RESULTS names of a marker proof: the labels of the harness's
+    `Marker("<needle>", "<label>", and_contains=(...))` entries under
+    tests/harness/ (test files left out) whose needle and fragments all occur
+    in `text`. The harness records a marker's label, never its text."""
+    out: list[re.Pattern[str]] = []
+    for path in tree.grep("Marker", (HARNESS_DIR,)):
+        if not path.endswith(".py") or path.rsplit("/", 1)[-1].startswith("test_"):
+            continue
+        try:
+            mod = ast.parse(tree.read(path) or "")
+        except SyntaxError:
+            continue
+        for node in ast.walk(mod):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            if (f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)) != "Marker":
+                continue
+            kw = {k.arg: k.value for k in node.keywords if k.arg}
+            args = list(node.args) + [kw[k] for k in ("substring", "name") if k in kw]
+            if len(args) < 2:
+                continue
+            needle, label = _fstring_regex(args[0], ".*"), _fstring_regex(args[1], ".+")
+            if needle is None or label is None or not re.search(needle, text, re.S):
+                continue
+            frags = kw.get("and_contains")
+            if isinstance(frags, ast.Tuple | ast.List) and not all(
+                    isinstance(e, ast.Constant) and isinstance(e.value, str)
+                    and e.value in text for e in frags.elts):
+                continue
+            out.append(re.compile(label))
+    return out
+
+
 def _resolve_ident(name: str, tree: Tree) -> list[Definition]:
     # A ktest registry row: legacy `("<name>", f)` or C-SUITES's `test("<name>", f)`.
-    row = re.compile(REGISTRY_ROW.format(re.escape(name)), re.S)
+    row = re.compile(REGISTRY_ROW.format(re.escape(name)), re.M)
     out: list[Definition] = []
     for path in [p for p in tree.files() if p.startswith("src/") and p.endswith(".rs")]:
         if "ktest" not in path:
@@ -391,7 +477,7 @@ def _resolve_ident(name: str, tree: Tree) -> list[Definition]:
             a = src.count("\n", 0, m.start()) + 1
             b = src.count("\n", 0, m.end()) + 1
             out.append(Definition("ktest", path, a, b, name))
-            fn = m.group(1).rsplit("::", 1)[-1]
+            fn = (m.group(1) or m.group(2)).rsplit("::", 1)[-1]
             for s, e, _ in find_fn(src, fn, True):
                 out.append(Definition("ktest", path, s, e, name))
     if out:
@@ -404,8 +490,7 @@ def _resolve_ident(name: str, tree: Tree) -> list[Definition]:
             for s, e, attrs in find_fn(tree.read(path) or "", name, rust):
                 if kind == "host" and not any(a.strip().startswith("#[test]") for a in attrs):
                     continue
-                ignored = any("ignore" in a for a in attrs)
-                out.append(Definition(kind, path, s, e, name, ignored))
+                out.append(Definition(kind, path, s, e, name, _is_ignored(attrs)))
         if out:
             return out
     for d in PY_DIRS:
@@ -531,12 +616,54 @@ def record_results(run: Run) -> list[dict[str, Any]]:
     return out
 
 
-def passed_in(results: list[dict[str, Any]], kind: str, name: str) -> bool:
+def passed_in(results: list[dict[str, Any]], kind: str, name: str,
+              labels: list[re.Pattern[str]] | None = None) -> bool:
+    """`name`, or a name one of `labels` fully matches, is in a `passed` list."""
     for r in results:
         sect = r.get(kind)
-        if isinstance(sect, dict) and name in (sect.get("passed") or []):
+        if not isinstance(sect, dict):
+            continue
+        passed = [p for p in sect.get("passed") or [] if isinstance(p, str)]
+        if name in passed or any(lb.fullmatch(p) for lb in labels or [] for p in passed):
             return True
     return False
+
+
+def workflow_jobs(text: str) -> list[tuple[str, str, list[str]]]:
+    """The jobs of a workflow file: (id, `name:` or the id, body lines)."""
+    out: list[tuple[str, str, list[str]]] = []
+    in_jobs = False
+    for raw in text.splitlines():
+        if raw and not raw[0].isspace() and not raw.startswith("#"):
+            in_jobs = raw.rstrip() == "jobs:"
+            continue
+        if not in_jobs:
+            continue
+        m = WORKFLOW_JOB.match(raw)
+        if m:
+            out.append((m.group(1), m.group(1), []))
+            continue
+        if out:
+            out[-1][2].append(raw)
+            n = WORKFLOW_JOB_NAME.match(raw)
+            if n and out[-1][1] == out[-1][0]:
+                out[-1] = (out[-1][0], n.group(1).strip("'\""), out[-1][2])
+    return out
+
+
+def jobs_running(text: str, target: str) -> list[tuple[str, str]]:
+    """(id, name) of each job of a workflow whose steps run `make <target>`;
+    the name is what a run's job list shows for it."""
+    pat = re.compile(r"(?<![\w-])make\s+(?:[^\n;&|#]*?\s)?" + re.escape(target) + r"(?![\w-])")
+    return [(jid, name) for jid, name, body in workflow_jobs(text)
+            if any(pat.search(line.split("#", 1)[0]) for line in body)]
+
+
+def _job_name_regex(key: str) -> re.Pattern[str]:
+    """A run's name for a job: `key`, `${{ ... }}` rendered as any text, and a
+    matrix job's ` (<values>)` suffix."""
+    parts = re.split(r"\$\{\{.*?\}\}", key)
+    return re.compile(".+".join(re.escape(x) for x in parts) + r"(?: \(.*\))?")
 
 
 class Checker:
@@ -657,7 +784,8 @@ class Checker:
                 self.check_bracket(c, p, t, defs)
         elif self.results is not None:
             kind = defs[0].kind
-            if kind in RESULT_KINDS and not passed_in(self.results, kind, defs[0].name):
+            if kind in RESULT_KINDS and not passed_in(self.results, kind, defs[0].name,
+                                                      self.labels(defs[0])):
                 self.report.error(c.sha, t.line, f"{kind} {defs[0].name!r} passed in no "
                                   "results file at the head")
         return defs
@@ -695,7 +823,7 @@ class Checker:
             for run, is_record in runs:
                 if not self._counts(run, bracket == "dev-host"):
                     continue
-                if self._run_passes(run, is_record, d):
+                if self._run_passes(run, is_record, d, bracket):
                     self.report.notes.append(f"{c.sha[:7]} L{t.line}: {p.proof} [{bracket}] "
                                              f"passed in run {run.get('id')}")
                     return
@@ -706,19 +834,32 @@ class Checker:
                           "docs-only commit of the pull request, or a docs-only merge base "
                           "shows it passed; the box stays open until one does (Tick-post)")
 
-    def _run_passes(self, run: Run, is_record: bool, d: Definition) -> bool:
+    def labels(self, d: Definition) -> list[re.Pattern[str]]:
+        """The results names a marker proof passes under (its harness labels)."""
+        return marker_labels(d.name, self.tree) if d.kind == "marker" else []
+
+    def _run_passes(self, run: Run, is_record: bool, d: Definition, bracket: str) -> bool:
         if d.kind in RESULT_KINDS:
             if is_record:
                 results = record_results(run)
             else:
                 with tempfile.TemporaryDirectory() as tmp:
                     results = self.gh.download_results(run.get("id"), Path(tmp))
-            return passed_in(results, d.kind, d.name)
+            return passed_in(results, d.kind, d.name, self.labels(d))
+        wf = BRACKET_WORKFLOW.get(bracket)
+        if d.kind not in ("job", "make") or (d.kind == "make" and wf is None):
+            return run.get("conclusion") == "success"
+        jobs = run.get("jobs") if is_record else self.gh.jobs(run.get("id"))
+        concl = [(str(j.get("name") or ""), j.get("conclusion")) for j in jobs or []
+                 if isinstance(j, dict)]
         if d.kind == "job":
-            jobs = run.get("jobs") if is_record else self.gh.jobs(run.get("id"))
-            return any(isinstance(j, dict) and j.get("name") == d.name
-                       and j.get("conclusion") == "success" for j in jobs or [])
-        return run.get("conclusion") == "success"
+            return any(n == d.name and c == "success" for n, c in concl)
+        # A bracketed `make` target passes when the jobs of the run that run it
+        # concluded `success`, whatever the run's own conclusion (#97, D-23).
+        keys = [_job_name_regex(name) for _, name in
+                jobs_running(self.tree.read(f".github/workflows/{wf}") or "", d.name)]
+        hits = [c for n, c in concl if any(k.fullmatch(n) for k in keys)]
+        return bool(hits) and all(c == "success" for c in hits)
 
     # Needs, closes, and Fails-before.
 

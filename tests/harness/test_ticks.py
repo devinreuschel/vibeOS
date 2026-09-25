@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -31,21 +32,44 @@ ROADMAP = """# Roadmap
 
 FILES = {
     "docs/ROADMAP.md": ROADMAP,
-    "Makefile": "lint:\n\techo lint\n\ntest-kernel: iso\n\techo kernel\n",
+    "Makefile": ("lint:\n\techo lint\n\ntest-kernel: iso\n\techo kernel\n\n"
+                 "test-unit:\n\techo unit\n"),
     "src/ktest.rs": ("const TESTS: &[Test] = &[\n    (\"legacy_row\", test_legacy),\n"
                      "    test(\n        \"suite_row\",\n        test_suite,\n    ),\n];\n\n"
                      "fn test_legacy() -> Outcome {\n    Outcome::Ok\n}\n\n"
-                     "fn test_suite() -> Outcome {\n    Outcome::Ok\n}\n"),
+                     "fn test_suite() -> Outcome {\n    Outcome::Ok\n}\n\n"
+                     "fn test_calls() -> Outcome {\n"
+                     "    asm!(\"int3\", options(nomem));\n"
+                     "    fail(\"handler\", Some(vec));\n    Outcome::Ok\n}\n"),
     "src/boot.rs": ("fn boot() {\n    marker!(\"vibeOS: boot: {} cpus up\", n);\n"
                     "    marker!(marker::READY);\n}\n"),
     "src/marker.rs": "pub const READY: &str = \"vibeOS: ready\";\n",
+    "src/proc.rs": ("pub fn reaper() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n"
+                    "    fn reaper_for_init_state() {\n        assert!(true);\n    }\n}\n"),
     "user/tests/src/main.rs": "fn user_dup() {\n    dup();\n}\n",
     "crates/core/src/a.rs": ("#[cfg(test)]\nmod tests {\n    #[test]\n    fn host_one() {\n"
                              "        assert!(true);\n    }\n\n    #[test]\n    #[ignore]\n"
-                             "    fn host_ignored() {\n    }\n\n    fn not_a_test() {\n    }\n}\n"),
+                             "    fn host_ignored() {\n    }\n\n    fn not_a_test() {\n    }\n\n"
+                             "    /// Checks we ignore stale entries.\n    #[test]\n"
+                             "    #[cfg_attr(miri, ignore)]\n    fn stale() {\n"
+                             "        assert!(true);\n    }\n\n"
+                             "    #[test]\n    #[ignore = \"slow\"]\n"
+                             "    fn host_slow() {\n    }\n\n"
+                             "    #[test]\n    fn handler() {\n        assert!(true);\n    }\n}\n"),
     "tests/harness/test_x.py": ("class T:\n    def test_py(self) -> None:\n        x = 1\n\n"
-                                "    def other(self) -> None:\n        pass\n"),
-    "scripts/check_x.py": "def main() -> int:\n    return 0\n",
+                                "    def other(self) -> None:\n        pass\n\n\n"
+                                "M = Marker(\"vibeOS: ready\", \"fixture_label\")\n"),
+    # The harness records a marker under its label (C-RESULTS), not its text.
+    "tests/harness/harness.py": ("MARKERS = [\n    Marker(\"vibeOS: ready\", \"ready_ok\"),\n"
+                                 "    Marker(\n        \"vibeOS: boot: \",\n"
+                                 "        \"boot_cpus\",\n"
+                                 "        and_contains=(\" cpus up\",),\n    ),\n"
+                                 "    Marker(\"vibeOS: boot: \", \"boot_other\", "
+                                 "and_contains=(\" other\",)),\n"
+                                 "    Marker(f\"vibeOS: cpu{i} up\", f\"cpu{i}_up\"),\n]\n"),
+    "scripts/check_x.py": ("def main() -> int:\n    return 0\n\n\n"
+                           "def wave(\n    a: int,\n    b: int,\n) -> int:\n"
+                           "    x = a + b\n    return x\n"),
 }
 
 
@@ -269,6 +293,9 @@ class TestDiffRule(RepoCase):
         ("host_one", "crates/core/src/a.rs", "assert!(true);", "assert!(!false);"),
         ("test_py", "tests/harness/test_x.py", "x = 1", "x = 2"),
         ("check_x", "scripts/check_x.py", "return 0", "return 0  # z"),
+        # A multi-line signature: the body past `) -> int:` is the def's.
+        ("scripts/check_x.py::wave", "scripts/check_x.py", "x = a + b", "x = b + a"),
+        ("wave", "scripts/check_x.py", "    return x", "    return x + 0"),
     ]
     PREFIX = "delta box names nothing at"
 
@@ -315,6 +342,23 @@ class TestDiffRule(RepoCase):
                 self.commit(f"t\n\nProves: {proof} (existing: x) -- {self.PREFIX}", "delta box")
                 self.assertErrors(self.run_check(), "proof not found at the head")
 
+    def test_registry_row_is_not_any_call(self) -> None:
+        """`asm!("int3", ...)` and `fail("handler", ...)` in src/ktest.rs are
+        not registry rows, so `handler` resolves to the host test."""
+        tree = check_ticks.Tree("HEAD", self.repo.path)
+        self.assertEqual(check_ticks.resolve("int3", tree)[0], [])
+        defs = check_ticks.resolve("handler", tree)[0]
+        self.assertEqual([(d.kind, d.path) for d in defs], [("host", "crates/core/src/a.rs")])
+        self.assertEqual([d.kind for d in check_ticks.resolve("legacy_row", tree)[0]],
+                         ["ktest", "ktest"])
+
+    def test_host_test_in_src_resolves(self) -> None:
+        """vibeos-core's sources are src/*.rs, so a #[test] there is a host test."""
+        tree = check_ticks.Tree("HEAD", self.repo.path)
+        defs = check_ticks.resolve("reaper_for_init_state", tree)[0]
+        self.assertEqual([(d.kind, d.path) for d in defs], [("host", "src/proc.rs")])
+        self.assertEqual(check_ticks.resolve("reaper", tree)[0], [])
+
     def test_proof_deleted_by_a_later_commit_is_not_found(self) -> None:
         self.commit(f"t\n\nProves: check_x -- {self.PREFIX}", "delta box",
                     self.change("scripts/check_x.py", "return 0", "return 1"))
@@ -353,17 +397,44 @@ class TestResultsRule(RepoCase):
     def test_marker_proof(self) -> None:
         self.commit(f't\n\nProves: "vibeOS: ready" (existing: x) -- {PREFIX}', "delta box")
         head = self.head()
-        self.assertEqual(self.run_check([results_file(head, marker=["vibeOS: ready"])]).errors,
-                         [])
-        self.assertErrors(self.run_check([results_file(head)]), "marker 'vibeOS: ready'")
+        self.assertEqual(self.run_check([results_file(head, marker=["ready_ok"])]).errors, [])
+        # A test file's Marker is not the harness's table.
+        for marker in ([], ["fixture_label"], ["boot_cpus"]):
+            with self.subTest(marker=marker):
+                self.assertErrors(self.run_check([results_file(head, marker=marker)]),
+                                  "marker 'vibeOS: ready'")
+
+    def test_marker_proof_with_runtime_parts(self) -> None:
+        self.commit(f't\n\nProves: "vibeOS: boot: 4 cpus up" (existing: x) -- {PREFIX}',
+                    "delta box")
+        head = self.head()
+        self.assertEqual(self.run_check([results_file(head, marker=["boot_cpus"])]).errors, [])
+        self.assertErrors(self.run_check([results_file(head, marker=["boot_other"])]),
+                          "marker 'vibeOS: boot: 4 cpus up'")
+
+    def test_marker_labels(self) -> None:
+        tree = check_ticks.Tree("HEAD", self.repo.path)
+        got = [p.pattern for p in check_ticks.marker_labels("vibeOS: cpu3 up", tree)]
+        self.assertEqual(len(got), 1)
+        self.assertTrue(re.fullmatch(got[0], "cpu3_up"))
 
     def test_no_results_dir_skips_the_rule(self) -> None:
         self.tick_suite()
         self.assertEqual(self.run_check().errors, [])
 
     def test_ignored_host_test(self) -> None:
-        self.commit(f"t\n\nProves: host_ignored (existing: x) -- {PREFIX}", "delta box")
-        self.assertErrors(self.run_check(), "host test 'host_ignored' is #[ignore]d")
+        for name in ("host_ignored", "host_slow", "crates/core/src/a.rs::host_ignored"):
+            with self.subTest(name=name):
+                self.setUp()
+                self.commit(f"t\n\nProves: {name} (existing: x) -- {PREFIX}", "delta box")
+                self.assertErrors(self.run_check(), f"host test '{name}' is #[ignore]d")
+
+    def test_ignore_in_a_doc_comment_or_cfg_attr_is_not_ignored(self) -> None:
+        for name in ("stale", "crates/core/src/a.rs::stale"):
+            with self.subTest(name=name):
+                self.setUp()
+                self.commit(f"t\n\nProves: {name} (existing: x) -- {PREFIX}", "delta box")
+                self.assertEqual(self.run_check().errors, [])
 
     def test_retry_fails_a_pull_request_that_ticks(self) -> None:
         head = self.tick_suite()
@@ -374,6 +445,40 @@ class TestResultsRule(RepoCase):
         self.commit("no tick", files={"src/boot.rs": "fn boot() {}\n"})
         self.assertEqual(self.run_check([results_file(self.head(), retries=[retry])]).errors,
                          [])
+
+
+CI_YML = """name: ci
+on: [push]
+jobs:
+  check:
+    runs-on: x
+    steps:
+      - run: make lint  # the fast gate
+  e2e:
+    runs-on: x
+    steps:
+      - run: make test-kernel
+"""
+STRESS_YML = """name: smp-stress
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+jobs:
+  stress:
+    name: high-CPU SMP stress
+    runs-on: x
+    steps:
+      - name: stress
+        run: make test-kernel
+
+  nightly-canary:
+    name: latest nightly canary
+    runs-on: x
+    continue-on-error: true
+    steps:
+      - name: iso + host units
+        run: make iso && make test-unit
+"""
 
 
 class TestBrackets(RepoCase):
@@ -435,19 +540,63 @@ class TestBrackets(RepoCase):
         self.assertErrors(self.run_check([], gh=self.nightly(head)), "[dev-host]: no run")
         self.assertErrors(self.run_check([], history=[{**rec, "event": "push"}]), "no run")
 
+    def test_marker_on_a_nightly_run(self) -> None:
+        head = self.tick_bracket('"vibeOS: ready"', "nightly")
+        run = {"id": 5, "head_sha": head, "event": "schedule", "conclusion": "success"}
+        gh = StubGh({"nightly.yml": [run]}, {5: [results_file(head, marker=["ready_ok"])]})
+        self.assertEqual(self.run_check([], gh=gh).errors, [])
+
     def test_ci_history_record(self) -> None:
-        head = self.tick_bracket("make lint", "ci-history")
+        wf: dict[str, str | None] = {".github/workflows/ci.yml": CI_YML}
+        head = self.tick_bracket("make lint", "ci-history", wf)
         rec = {"event": "push", "head_sha": head, "workflow": "ci", "branch": "main",
-               "conclusion": "success", "jobs": []}
+               "conclusion": "failure", "jobs": [{"name": "check", "conclusion": "success"},
+                                                 {"name": "e2e", "conclusion": "failure"}]}
         self.assertEqual(self.run_check([], history=[rec]).errors, [])
         self.assertErrors(self.run_check([], history=[{**rec, "branch": "x"}]), "no run")
-        self.assertErrors(self.run_check([], history=[{**rec, "conclusion": "failure"}]),
-                          "no run")
+        bad = {**rec, "conclusion": "success",
+               "jobs": [{"name": "check", "conclusion": "failure"}]}
+        self.assertErrors(self.run_check([], history=[bad]), "no run")
+
+    def weekly(self, head: str, conclusion: str,
+               jobs: list[dict[str, Any]]) -> StubGh:
+        run = {"id": 3, "head_sha": head, "event": "schedule", "conclusion": conclusion}
+        return StubGh({"smp-stress.yml": [run]}, jobs={3: jobs})
 
     def test_make_target_on_a_weekly_run(self) -> None:
-        head = self.tick_bracket("make test-kernel", "weekly")
-        run = {"id": 3, "head_sha": head, "event": "schedule", "conclusion": "success"}
-        self.assertEqual(self.run_check([], gh=StubGh({"smp-stress.yml": [run]})).errors, [])
+        """A bracketed `make` target is judged by the job that runs it, not by
+        the run's conclusion."""
+        wf: dict[str, str | None] = {".github/workflows/smp-stress.yml": STRESS_YML}
+        head = self.tick_bracket("make test-kernel", "weekly", wf)
+        stress_ok = {"name": "high-CPU SMP stress", "conclusion": "success"}
+        canary_bad = {"name": "latest nightly canary", "conclusion": "failure"}
+        self.assertEqual(self.run_check([], gh=self.weekly(head, "failure",
+                                                           [stress_ok, canary_bad])).errors, [])
+        self.assertEqual(self.run_check([], gh=self.weekly(
+            head, "success", [{**stress_ok, "name": "high-CPU SMP stress (4)"}])).errors, [])
+        for jobs in ([], [canary_bad], [{**stress_ok, "conclusion": "failure"}]):
+            with self.subTest(jobs=jobs):
+                self.assertErrors(self.run_check([], gh=self.weekly(head, "success", jobs)),
+                                  "make test-kernel [weekly]: no run")
+
+    def test_make_target_in_a_continue_on_error_job(self) -> None:
+        wf: dict[str, str | None] = {".github/workflows/smp-stress.yml": STRESS_YML}
+        head = self.tick_bracket("make test-unit", "weekly", wf)
+        stress_ok = {"name": "high-CPU SMP stress", "conclusion": "success"}
+        canary = {"name": "latest nightly canary", "conclusion": "failure"}
+        self.assertErrors(self.run_check([], gh=self.weekly(head, "success",
+                                                            [stress_ok, canary])),
+                          "make test-unit [weekly]: no run")
+        canary["conclusion"] = "success"
+        self.assertEqual(self.run_check([], gh=self.weekly(head, "success",
+                                                           [stress_ok, canary])).errors, [])
+
+    def test_make_target_no_job_runs(self) -> None:
+        wf: dict[str, str | None] = {".github/workflows/smp-stress.yml": STRESS_YML}
+        head = self.tick_bracket("make lint", "weekly", wf)
+        jobs = [{"name": "high-CPU SMP stress", "conclusion": "success"}]
+        self.assertErrors(self.run_check([], gh=self.weekly(head, "success", jobs)),
+                          "make lint [weekly]: no run")
 
     def test_release_job(self) -> None:
         body = "name: release\njobs:\n  build:\n    runs-on: x\n  publish:\n    runs-on: y\n"
@@ -633,6 +782,21 @@ class TestHistory(unittest.TestCase):
 
 
 class TestRealTree(unittest.TestCase):
+    def test_docstring_lists_every_mode(self) -> None:
+        doc = check_ticks.__doc__ or ""
+        for needle in ("needs,\n  closes and Fails-before", "--results DIR [--run-commit SHA]",
+                       "results, retry and bracket", "--summary FILE"):
+            self.assertIn(needle, doc)
+
+    def test_marker_labels_of_the_harness(self) -> None:
+        tree = check_ticks.Tree("HEAD", gatelib.ROOT)
+        for text, label in (("vibeOS: heap ok", "heap_ok"), ("vibeOS: shell ready", "shell_ready"),
+                            ("vibeOS: pmm: 1024 free 4KiB frames", "pmm_free_frames"),
+                            ("vibeOS: sched: cpu2 ready", "sched_cpu2")):
+            with self.subTest(text=text):
+                labels = check_ticks.marker_labels(text, tree)
+                self.assertTrue(any(p.fullmatch(label) for p in labels), labels)
+
     def test_parse_proves_splits_at_the_first_separator(self) -> None:
         p = check_ticks.parse_proves("make check -- CI runs `cargo clippy --bin vibeos -- -D")
         assert isinstance(p, check_ticks.ProvesLine)

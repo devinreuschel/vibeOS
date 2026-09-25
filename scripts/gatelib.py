@@ -362,7 +362,7 @@ def run_proves_commit(run: dict[str, Any], commit: str) -> bool:
 
 def commit_counts_for_pr(
     sha: str,
-    pr: list[str],
+    pr_commits: list[str],
     head: str,
     *,
     merge_base: str | None = None,
@@ -375,14 +375,14 @@ def commit_counts_for_pr(
         return False
     if sha == head:
         return True
-    if sha in pr and docs_only(sha, head, repo):
+    if sha in pr_commits and docs_only(sha, head, repo):
         return True
     return merge_base is not None and sha == merge_base and docs_only(sha, head, repo)
 
 
 def run_counts_for_pr(
     run: dict[str, Any],
-    pr: list[str],
+    pr_commits: list[str],
     head: str,
     *,
     merge_base: str | None = None,
@@ -390,10 +390,13 @@ def run_counts_for_pr(
 ) -> bool:
     """A scheduled or dispatched run counts as a bracketed proof's run for a
     pull request (the `check_ticks.py` box): it proves the head, a docs-only
-    commit of the pull request, or a docs-only merge base."""
+    commit of the pull request, or a docs-only merge base. `pr_commits` is
+    C-GATELIB's parameter name; it shadows the module's `pr_commits()`, which
+    this function and `commit_counts_for_pr` do not call."""
     if run.get("event") not in PROVING_EVENTS:
         return False
-    return commit_counts_for_pr(run_commit(run), pr, head, merge_base=merge_base, repo=repo)
+    return commit_counts_for_pr(run_commit(run), pr_commits, head, merge_base=merge_base,
+                                repo=repo)
 
 
 def load_results(directory: Path) -> list[dict[str, Any]]:
