@@ -1008,6 +1008,10 @@ fn test_addrspace_map_unmap_teardown() -> Outcome {
     {
         return Outcome::Fail("map_anon");
     }
+    // IF stays off while this thread runs on `space`'s CR3: the registry
+    // thread has IF=1 and `as_cr3 == 0`, so a switch away and back in this
+    // window would reload the kernel CR3 under the user VA below.
+    let irqs_off = x86::InterruptGuard::enter();
     addr_space_init::load_cr3(&space);
     x86::invlpg(va);
     // User PTE: SMAP would #PF a kernel store/load via this VA.
@@ -1019,15 +1023,18 @@ fn test_addrspace_map_unmap_teardown() -> Outcome {
     x86::clac();
     if got != 0x1111_2222_3333_4444 {
         addr_space_init::load_kernel_cr3();
+        drop(irqs_off);
         addr_space_init::teardown(space);
         return Outcome::Fail("readback");
     }
     if unsafe { addr_space_init::unmap(&mut space, va, PAGE_SIZE_4K * 2) }.is_err() {
         addr_space_init::load_kernel_cr3();
+        drop(irqs_off);
         addr_space_init::teardown(space);
         return Outcome::Fail("unmap");
     }
     addr_space_init::load_kernel_cr3();
+    drop(irqs_off);
     let st = addr_space_init::teardown(space);
     if st.pt_frames == 0 {
         return Outcome::Fail("teardown pt");
@@ -1083,10 +1090,15 @@ fn test_cr3_switch_skip() -> Outcome {
         addr_space_init::teardown(a);
         return Outcome::Fail("create b");
     };
+    // IF stays off while this thread runs on a user CR3 (see
+    // test_addrspace_map_unmap_teardown): a switch away and back would reload
+    // the kernel CR3 between the load and the read.
+    let irqs_off = x86::InterruptGuard::enter();
     addr_space_init::load_cr3(&a);
     let cr3_a = x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK;
     if !addr_space_init::cr3_was_skipped(&a) {
         addr_space_init::load_kernel_cr3();
+        drop(irqs_off);
         addr_space_init::teardown(a);
         addr_space_init::teardown(b);
         return Outcome::Fail("a not recorded");
@@ -1094,6 +1106,7 @@ fn test_cr3_switch_skip() -> Outcome {
     addr_space_init::load_cr3(&a);
     if (x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK) != cr3_a {
         addr_space_init::load_kernel_cr3();
+        drop(irqs_off);
         addr_space_init::teardown(a);
         addr_space_init::teardown(b);
         return Outcome::Fail("skip mutated cr3");
@@ -1102,11 +1115,13 @@ fn test_cr3_switch_skip() -> Outcome {
     let cr3_b = x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK;
     if cr3_b == cr3_a {
         addr_space_init::load_kernel_cr3();
+        drop(irqs_off);
         addr_space_init::teardown(a);
         addr_space_init::teardown(b);
         return Outcome::Fail("b shares a cr3");
     }
     addr_space_init::load_kernel_cr3();
+    drop(irqs_off);
     addr_space_init::teardown(a);
     addr_space_init::teardown(b);
     Outcome::Ok
