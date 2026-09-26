@@ -15,7 +15,64 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering
 use crate::apic::TimerMode;
 use crate::desc::Tss;
 use crate::sched::ReadyQueue;
-use crate::thread::{CpuContext, Tcb, ThreadId};
+use crate::thread::{CpuContext, GuardedStack, Tcb, ThreadId};
+
+/// Dead threads' stacks one CPU keeps mapped for its next spawns, as
+/// Linux's `NR_CACHED_STACKS`.
+pub const STACK_CACHE_LEN: usize = 2;
+
+/// A CPU's cache of dead threads' default-size kernel stacks, still mapped
+/// (ROADMAP §10.10). Owner CPU only: the switch tail puts a stack its CPU
+/// has switched off, and `spawn_inner` on that CPU takes one.
+pub struct StackCache {
+    slots: [Option<GuardedStack>; STACK_CACHE_LEN],
+}
+
+impl StackCache {
+    pub const fn new() -> Self {
+        Self {
+            slots: [const { None }; STACK_CACHE_LEN],
+        }
+    }
+
+    /// Keep `stack`, or hand it back when the cache is full.
+    #[allow(
+        clippy::result_large_err,
+        reason = "a refused stack comes back by value so its owner frees it once"
+    )]
+    pub fn put(&mut self, stack: GuardedStack) -> Result<(), GuardedStack> {
+        match self.slots.iter_mut().find(|s| s.is_none()) {
+            Some(slot) => {
+                *slot = Some(stack);
+                Ok(())
+            }
+            None => Err(stack),
+        }
+    }
+
+    /// The stack put last, if any.
+    pub fn take(&mut self) -> Option<GuardedStack> {
+        self.slots.iter_mut().rev().find_map(Option::take)
+    }
+
+    pub fn len(&self) -> usize {
+        self.slots.iter().filter(|s| s.is_some()).count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.len() == STACK_CACHE_LEN
+    }
+}
+
+impl Default for StackCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// The part of one CPU's state that other CPUs read. One cache line per
 /// CPU. Every field is atomic, so `&PerCpuRemote` may alias anything and
@@ -97,6 +154,20 @@ pub struct PerCpu {
     /// Dedicated TSS stack from GDT init. Used when the TCB has no stack
     /// (bootstrap).
     pub fallback_rsp0: u64,
+    /// The thread `switch_now` switched away from, for the switch tail
+    /// (`thread_init::finish_switch`) that runs next on this CPU. Null
+    /// outside that window.
+    pub tail_prev: *mut Tcb,
+    /// The stack of the thread that exited on this CPU and has not yet been
+    /// switched off. `thread_exit` parks it; the next switch tail empties
+    /// it, so it holds at most one.
+    pub dead_stack: Option<GuardedStack>,
+    /// Dead default-size stacks kept mapped for this CPU's next spawns.
+    pub stack_cache: StackCache,
+    /// Head of this CPU's list of dead stacks awaiting unmap, linked through
+    /// the stacks themselves (`kva_init::park_on_list`); 0 when empty. This
+    /// CPU's workqueue worker frees them with IF=1.
+    pub dead_list: u64,
     /// This CPU's view in `per_cpu_init`'s separate array, the only
     /// per-CPU state another CPU reads.
     pub remote: &'static PerCpuRemote,
@@ -135,6 +206,10 @@ impl PerCpu {
             kernel_rsp0: 0,
             tss: core::ptr::null_mut(),
             fallback_rsp0: 0,
+            tail_prev: core::ptr::null_mut(),
+            dead_stack: None,
+            stack_cache: StackCache::new(),
+            dead_list: 0,
             remote,
         }
     }
@@ -183,6 +258,53 @@ mod tests {
         assert!(p.tss.is_null());
         assert_eq!(p.kernel_rsp0, 0);
         assert_eq!(p.remote.as_cr3.load(Ordering::Relaxed), 0);
+        assert!(p.tail_prev.is_null());
+        assert!(p.dead_stack.is_none());
+        assert!(p.stack_cache.is_empty());
+        assert_eq!(p.dead_list, 0);
+        // The new owner-only fields sit after the pinned ones, before the
+        // remote view (C-PERCPU layout).
+        assert!(offset_of!(PerCpu, tail_prev) > offset_of!(PerCpu, fallback_rsp0));
+        assert!(offset_of!(PerCpu, dead_list) < offset_of!(PerCpu, remote));
+    }
+
+    /// A stack handle over a range nothing maps, with no frames, so the
+    /// test can drop it.
+    fn fake_stack(guard: u64) -> GuardedStack {
+        // SAFETY: no frames, and the handle is never unmapped or freed: the
+        // test only moves it (the contract `GuardedStack::from_raw_parts`
+        // states, met here).
+        unsafe {
+            GuardedStack::from_raw_parts(
+                crate::paging::VirtAddr(guard),
+                0,
+                [const { None }; crate::thread::MAX_STACK_PAGES],
+            )
+        }
+    }
+
+    #[test]
+    fn stack_cache_holds_two() {
+        let mut c = StackCache::new();
+        assert!(c.is_empty());
+        assert!(c.take().is_none());
+        assert!(c.put(fake_stack(0x1000)).is_ok());
+        assert_eq!(c.len(), 1);
+        assert!(!c.is_full());
+        assert!(c.put(fake_stack(0x2000)).is_ok());
+        assert!(c.is_full());
+        match c.put(fake_stack(0x3000)) {
+            Err(s) => assert_eq!(s.guard().as_u64(), 0x3000),
+            Ok(()) => panic!("third stack kept"),
+        }
+        assert_eq!(c.len(), STACK_CACHE_LEN);
+        assert_eq!(c.take().map(|s| s.guard().as_u64()), Some(0x2000));
+        assert_eq!(c.take().map(|s| s.guard().as_u64()), Some(0x1000));
+        assert!(c.take().is_none());
+        assert!(c.is_empty());
+        assert!(c.put(fake_stack(0x4000)).is_ok());
+        assert_eq!(c.len(), 1);
+        assert_eq!(StackCache::default().len(), 0);
     }
 
     #[test]

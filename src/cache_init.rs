@@ -455,7 +455,13 @@ pub fn shell_line(f: &mut impl core::fmt::Write) -> core::fmt::Result {
 
 pub fn init() {
     LIVE.store(true, Ordering::Release);
-    let _ = thread_init::spawn("blk-wb", writeback_main);
+    if let Err(e) = thread_init::spawn("blk-wb", writeback_main) {
+        crate::klog!(
+            vibeos::log::Level::Error,
+            "cache: blk-wb spawn failed: {}",
+            e.as_str()
+        );
+    }
 }
 
 /// A one-shot hold of `blk-wb`'s write of one page, so a test can find

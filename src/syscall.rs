@@ -106,6 +106,37 @@ impl SyscallFrame {
     }
 }
 
+/// A ring-3 register frame: the 21 words of Linux's x86_64
+/// `user_regs_struct` (`<sys/user.h>`), in its order, low address first.
+/// The last five are the hardware `iretq` frame. `arch::idt::TrapFrame`
+/// ends with these words, so a CPL-3 entry leaves one at the top of the
+/// thread's kernel stack (ROADMAP §10.6).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UserFrame {
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub rbp: u64,
+    pub rbx: u64,
+    pub r11: u64,
+    pub r10: u64,
+    pub r9: u64,
+    pub r8: u64,
+    pub rax: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub orig_rax: u64,
+    pub rip: u64,
+    pub cs: u64,
+    pub rflags: u64,
+    pub rsp: u64,
+    pub ss: u64,
+}
+
 /// Full user GPR set for fork child / exec / iret-into-user.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -394,6 +425,18 @@ mod tests {
     use super::*;
     use crate::addr_space::UserMemError;
     use core::mem::{offset_of, size_of};
+
+    #[test]
+    fn user_frame_is_user_regs_struct() {
+        assert_eq!(size_of::<UserFrame>(), 21 * 8);
+        assert_eq!(offset_of!(UserFrame, r15), 0);
+        assert_eq!(offset_of!(UserFrame, rbx), 5 * 8);
+        assert_eq!(offset_of!(UserFrame, rax), 10 * 8);
+        assert_eq!(offset_of!(UserFrame, rdi), 14 * 8);
+        assert_eq!(offset_of!(UserFrame, orig_rax), 15 * 8);
+        assert_eq!(offset_of!(UserFrame, rip), 16 * 8);
+        assert_eq!(offset_of!(UserFrame, ss), 20 * 8);
+    }
 
     #[test]
     fn errno_linux_values() {

@@ -203,6 +203,8 @@ impl core::fmt::Display for CpuList {
 /// run through `service_incoming` (IF off cannot take the IPI).
 pub fn shootdown_va(va: VirtAddr) {
     let _irq = x86::InterruptGuard::enter();
+    #[cfg(feature = "kernel_tests")]
+    testing::note_shootdown();
     let me = my_index() as u32;
     let waiters = waiter_mask(per_cpu_init::online_mask(), me);
     if waiters == 0 {
@@ -359,4 +361,42 @@ pub fn shootdown_count() -> u64 {
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn call_count() -> u64 {
     CALL_COUNT.load(Ordering::Relaxed)
+}
+
+/// Counts of what switch tails do, for the in-guest tests (DESIGN §8.2).
+/// `kernel_tests` builds only.
+#[cfg(feature = "kernel_tests")]
+pub mod testing {
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    use vibeos::ipi::MAX_IPI_CPUS;
+
+    use super::my_index;
+
+    /// Per CPU: inside a switch tail. Owner CPU only, IF=0.
+    static IN_TAIL: [AtomicBool; MAX_IPI_CPUS] = [const { AtomicBool::new(false) }; MAX_IPI_CPUS];
+    /// Shootdowns started while their CPU's `IN_TAIL` was set.
+    static FROM_TAIL: AtomicU64 = AtomicU64::new(0);
+
+    /// This CPU enters a switch tail. IF=0.
+    pub fn tail_enter() {
+        IN_TAIL[my_index()].store(true, Ordering::Relaxed);
+    }
+
+    /// This CPU leaves its switch tail. IF=0.
+    pub fn tail_leave() {
+        IN_TAIL[my_index()].store(false, Ordering::Relaxed);
+    }
+
+    /// Shootdowns sent from a switch tail since boot.
+    pub fn shootdowns_from_tail() -> u64 {
+        FROM_TAIL.load(Ordering::Acquire)
+    }
+
+    /// `shootdown_va`'s count, IF=0.
+    pub(super) fn note_shootdown() {
+        if IN_TAIL[my_index()].load(Ordering::Relaxed) {
+            FROM_TAIL.fetch_add(1, Ordering::AcqRel);
+        }
+    }
 }

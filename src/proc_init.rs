@@ -16,9 +16,9 @@ use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, SeekFrom};
 use vibeos::kbd::{DecodedKey, NamedKey};
 use vibeos::proc::{
     Creds, Cwd, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, InitState, MAX_FDS, MAX_PROCS,
-    ProcState, SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGSTOP, SigAct,
-    WNOHANG, default_action, fd_flags_from_open, reaper_for, sig_name, wait_exited, wait_signaled,
-    wait_stopped,
+    ProcState, SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGSTOP, SIGTRAP,
+    SigAct, WNOHANG, default_action, fd_flags_from_open, reaper_for, sig_name, wait_exited,
+    wait_signaled, wait_stopped,
 };
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::syscall::{
@@ -38,7 +38,7 @@ use crate::console_init;
 use crate::file_init;
 use crate::serial::Serial;
 use crate::syscall_init;
-use crate::thread_init;
+use crate::thread_init::{self, SpawnError};
 use crate::user_init::{self, LoadError, Loaded};
 
 struct Proc {
@@ -168,6 +168,16 @@ fn load_errno(e: LoadError) -> i32 {
         LoadError::Mem(_) => EFAULT,
         LoadError::Empty => ENOEXEC,
         LoadError::NoProc => EAGAIN,
+        LoadError::Spawn(e) => spawn_errno(e),
+    }
+}
+
+/// Linux's errno for a thread `fork` or a new process could not get:
+/// `EAGAIN` for a full thread table, `ENOMEM` for a kernel stack.
+fn spawn_errno(e: SpawnError) -> i32 {
+    match e {
+        SpawnError::NoSlot => EAGAIN,
+        SpawnError::NoMemory => ENOMEM,
     }
 }
 
@@ -385,12 +395,19 @@ fn start_loaded(
     entry.rflags = RFLAGS_RESERVED1 | RFLAGS_IF;
     entry.fs_base = loaded.fs;
     let boxed = Box::new(loaded.space);
+    let h = match thread_init::spawn_user(name, user_thread_entry, pid, cr3) {
+        Ok(h) => h,
+        Err(e) => {
+            with_table(|t| t.procs[pid as usize] = Proc::empty());
+            addr_space_init::teardown(*boxed);
+            return Err(LoadError::Spawn(e));
+        }
+    };
     with_table(|t| {
         init_slot(t, pid, ppid, name);
         t.procs[pid as usize].space = Some(boxed);
         t.procs[pid as usize].entry = entry;
     });
-    let h = thread_init::spawn_user(name, user_thread_entry, pid, cr3);
     with_table(|t| {
         if let Some(p) = t.get_mut(pid) {
             p.tid = h.id();
@@ -912,7 +929,18 @@ fn sys_fork(frame: *mut SyscallFrame) -> i64 {
     let mut child_regs = child_regs;
     child_regs.fs_base = fs;
     let boxed = Box::new(cloned);
-    let h = thread_init::spawn_user("user", user_thread_entry, pid, cr3);
+    let h = match thread_init::spawn_user("user", user_thread_entry, pid, cr3) {
+        Ok(h) => h,
+        Err(e) => {
+            // Nothing names the clone's root yet: no thread was made.
+            addr_space_init::teardown(*boxed);
+            close_all_fds(&mut { fds });
+            with_table(|t| {
+                t.procs[pid as usize] = Proc::empty();
+            });
+            return syscall::neg(spawn_errno(e));
+        }
+    };
     with_table(|t| {
         init_slot(t, pid, ppid, "user");
         let p = &mut t.procs[pid as usize];
@@ -1326,6 +1354,7 @@ fn sig_for_vec(vec: u8) -> Option<u32> {
         vectors::UD => Some(SIGILL),
         vectors::NP | vectors::SS => Some(SIGBUS),
         vectors::GP | vectors::PF => Some(SIGSEGV),
+        vectors::BP => Some(SIGTRAP),
         _ => None,
     }
 }

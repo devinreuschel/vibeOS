@@ -11,6 +11,8 @@ use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 
 use vibeos::desc::InterruptFrame;
 
+use crate::arch::idt::TrapFrame;
+
 use crate::cell::IrqCell;
 use crate::x86;
 
@@ -156,32 +158,34 @@ extern "C" fn vibeos_catch_thunk() {
     }
 }
 
-fn record(vector: u8, frame: &InterruptFrame, err: u64) {
+fn record(frame: &TrapFrame) {
     let caught = Caught {
-        vector,
-        error: err,
-        cr2: x86::read_cr2(),
-        frame: *frame,
+        vector: frame.vector as u8,
+        error: frame.error_code,
+        cr2: frame.cr2,
+        frame: frame.iret,
         handler_rsp: x86::read_rsp(),
     };
     LAST.with(|last| *last = caught);
 }
 
-/// Called from every IDT handler. `true` means the handler should iret
-/// (RIP already adjusted). Longjmp never returns.
-pub fn intercept(vector: u8, frame: &mut InterruptFrame, err: u64) -> bool {
+/// Called by `arch::idt`'s dispatcher for vectors 0 to 31. `true` means
+/// skip the body and iret (RIP already adjusted). Longjmp never returns.
+pub fn intercept(frame: &mut TrapFrame) -> bool {
+    let vector = frame.vector as u8;
     let kind = KIND.load(Ordering::Acquire);
     let want = WANT.load(Ordering::Relaxed);
     match kind {
         ST_OFF | ST_ALLOC | ST_PANIC => false,
         ST_VECTOR if want == vector => {
-            record(vector, frame, err);
+            record(frame);
             KIND.store(ST_OFF, Ordering::Release);
             unsafe { vibeos_longjmp(core::ptr::addr_of_mut!(vibeos_jmpbuf), 1) };
         }
         ST_SKIP if want == vector => {
-            record(vector, frame, err);
-            frame.rip = frame
+            record(frame);
+            frame.iret.rip = frame
+                .iret
                 .rip
                 .wrapping_add(SKIP_LEN.load(Ordering::Relaxed) as u64);
             KIND.store(ST_OFF, Ordering::Release);

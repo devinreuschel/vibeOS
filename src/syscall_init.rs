@@ -40,7 +40,7 @@ global_asm!(
     .global vibeos_syscall_entry
     .type vibeos_syscall_entry, @function
     vibeos_syscall_entry:
-        // Only swapgs besides arch::gs::do_swapgs. User RSP is live.
+        // The syscall's GS switch (arch::gs). User RSP is live.
         swapgs
         mov qword ptr gs:[{user_rsp}], rsp
         mov rsp, qword ptr gs:[{ksp}]
@@ -105,6 +105,8 @@ global_asm!(
         mov r15, [rsp + 120]
         mov rcx, [rsp + 16]
         mov rsp, [rsp]
+    .global vibeos_syscall_exit_swapgs
+    vibeos_syscall_exit_swapgs:
         swapgs
         sysretq
 
@@ -137,6 +139,8 @@ global_asm!(
         mov r11, qword ptr gs:[{iret_rip}]
         push r11
         mov rax, qword ptr gs:[{retval}]
+    .global vibeos_syscall_iret_swapgs
+    vibeos_syscall_iret_swapgs:
         swapgs
         iretq
 

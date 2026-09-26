@@ -9,7 +9,7 @@
 use core::mem::offset_of;
 use core::mem::size_of;
 
-/// CPU-pushed iret frame. First argument of `extern "x86-interrupt"`.
+/// CPU-pushed iret frame: the hardware tail of `arch::idt::TrapFrame`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct InterruptFrame {
@@ -134,7 +134,8 @@ impl Tss {
     }
 }
 
-/// 16-byte interrupt gate. `ist` is the hardware 1-based field, 0 = none.
+/// 16-byte interrupt gate. `ist` is the hardware 1-based field, 0 = none;
+/// `dpl` is the lowest CPL that may raise the vector with `int n`.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct IdtEntry {
@@ -156,11 +157,11 @@ impl IdtEntry {
         zero: 0,
     };
 
-    pub const fn interrupt(handler: u64, cs: u16, ist: u8) -> Self {
+    pub const fn interrupt(handler: u64, cs: u16, ist: u8, dpl: u8) -> Self {
         Self {
             off_lo: handler as u16,
             selector: cs,
-            ist_type: 0x8E00 | (ist as u16 & 7),
+            ist_type: 0x8E00 | ((dpl as u16 & 3) << 13) | (ist as u16 & 7),
             off_mid: (handler >> 16) as u16,
             off_hi: (handler >> 32) as u32,
             zero: 0,
@@ -175,8 +176,13 @@ impl IdtEntry {
         (self.ist_type & 7) as u8
     }
 
+    pub const fn dpl(self) -> u8 {
+        ((self.ist_type >> 13) & 3) as u8
+    }
+
+    /// Present 64-bit interrupt gate at any DPL (type byte 0x8E or 0xEE).
     pub const fn present_interrupt(self) -> bool {
-        (self.ist_type >> 8) & 0xFF == 0x8E
+        (self.ist_type >> 8) & 0x9F == 0x8E
     }
 }
 
@@ -301,13 +307,26 @@ mod tests {
 
     #[test]
     fn idt_gate_packs_offset_and_ist() {
-        let e = IdtEntry::interrupt(0xFFFF_8000_1234_5678, KERNEL_CS, 1);
+        let e = IdtEntry::interrupt(0xFFFF_8000_1234_5678, KERNEL_CS, 1, 0);
         assert_eq!(e.handler(), 0xFFFF_8000_1234_5678);
         assert_eq!(e.ist(), 1);
+        assert_eq!(e.dpl(), 0);
         assert!(e.present_interrupt());
         let raw = e.ist_type;
         assert_eq!(raw, 0x8E01);
-        let none = IdtEntry::interrupt(0x1000, KERNEL_CS, 0);
+        let none = IdtEntry::interrupt(0x1000, KERNEL_CS, 0, 0);
         assert_eq!(none.ist(), 0);
+        assert!(!IdtEntry::EMPTY.present_interrupt());
+    }
+
+    #[test]
+    fn idt_gate_dpl3_is_type_ee() {
+        let e = IdtEntry::interrupt(0xFFFF_8000_0000_1000, KERNEL_CS, 0, 3);
+        let raw = e.ist_type;
+        assert_eq!(raw >> 8, 0xEE);
+        assert_eq!(e.dpl(), 3);
+        assert_eq!(e.ist(), 0);
+        assert!(e.present_interrupt());
+        assert_eq!(e.handler(), 0xFFFF_8000_0000_1000);
     }
 }

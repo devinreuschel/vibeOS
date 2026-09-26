@@ -1,15 +1,17 @@
 //! Single `swapgs` policy. DESIGN §7.5.
 //!
 //! After ring 3 exists, `GS_BASE` is the user base at CPL=3 and
-//! `KERNEL_GS_BASE` holds `PerCpu`. The `swapgs` instruction lives in
-//! two sites that implement one policy:
+//! `KERNEL_GS_BASE` holds `PerCpu`. The `swapgs` instructions live in two
+//! places that implement one policy:
 //!
-//! 1. `vibeos_syscall_entry` — first insn. Cannot `call` (user RSP).
-//! 2. [`do_swapgs`] — IRQ/exception entry that can fire at CPL=3, after
-//!    the CPU has already switched to TSS.RSP0.
+//! 1. `syscall_init`: `vibeos_syscall_entry`'s first instruction (it
+//!    cannot `call`; the user RSP is live), and the exits' `swapgs` before
+//!    `sysretq` and before `iretq`.
+//! 2. `arch::idt`'s generated entry paths: the entry `swapgs` when the
+//!    interrupted CS.RPL is 3, and the exit's matching one.
 //!
-//! Kernel ISRs do not `swapgs` when CS.RPL=0. Do not add a third site.
-//! [`force_kernel`] writes GS MSRs; it is not a `swapgs` site.
+//! Do not add another. [`force_kernel`] writes GS MSRs; it is not a
+//! `swapgs` site.
 
 use vibeos::desc::KERNEL_DS;
 
@@ -19,35 +21,6 @@ use crate::x86::{self, IA32_GS_BASE, IA32_KERNEL_GS_BASE};
 #[inline]
 pub fn from_user(cs: u64) -> bool {
     cs & 3 == 3
-}
-
-/// The ISR `swapgs`. Syscall inlines the same insn as its first byte.
-///
-/// # Safety
-/// Must pair with the matching `swapgs` on the opposite CPL transition.
-#[inline(always)]
-pub unsafe fn do_swapgs() {
-    unsafe {
-        core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
-    }
-}
-
-/// # Safety
-/// `from_user` is the interrupted CS.RPL==3; GS must not already be swapped.
-#[inline(always)]
-pub unsafe fn enter(from_user: bool) {
-    if from_user {
-        unsafe { do_swapgs() };
-    }
-}
-
-/// # Safety
-/// `to_user` matches the `enter`/`swapgs` already done for this frame.
-#[inline(always)]
-pub unsafe fn leave(to_user: bool) {
-    if to_user {
-        unsafe { do_swapgs() };
-    }
 }
 
 /// Reload kernel data segs and both GS bases to `PerCpu`.

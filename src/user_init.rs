@@ -14,6 +14,7 @@ use vibeos::paging::PAGE_SIZE_4K;
 
 use crate::addr_space_init;
 use crate::file_init;
+use crate::thread_init::SpawnError;
 use crate::x86;
 
 use vibeos::limits::MAX_ELF;
@@ -29,6 +30,8 @@ pub enum LoadError {
     TooBig,
     Empty,
     NoProc,
+    /// The process's thread could not be made.
+    Spawn(SpawnError),
 }
 
 impl LoadError {
@@ -41,6 +44,7 @@ impl LoadError {
             Self::TooBig => "too big",
             Self::Empty => "empty",
             Self::NoProc => "eagain",
+            Self::Spawn(e) => e.as_str(),
         }
     }
 }
