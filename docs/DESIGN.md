@@ -4375,15 +4375,44 @@ which `run_vibefs_crash.py` knows:
 | `vibeOS: vibefs: mount fail <err>` | failure line: `/crash` could not be made or `vda` not mounted; the guest halts |
 | `vibeOS: vibefs: sync fail <err>` | failure line: an open, write, close or `sync_fs` of an iteration failed (`short write` for a short write); the guest halts |
 
-`make test-vibefs-crash` (`run_vibefs_crash.py`) formats a 256 KiB image with `mkfs-vibefs`, boots
-the `vibefs_crash` build on it, kills QEMU up to 0.18 s after the first `vibeOS: vibefs: wr` line,
-and passes a round when `fsck-vibefs` exits 0 and prints `errors 0`. It does not mount the image or
-check `/crash/w` against the committed-generation criterion that [VIBEFS.md](VIBEFS.md) §12
-requires, and the guest discards `sync_fs` errors, so a round passes after the volume has filled
-and commits have stopped (ROADMAP §10.2, F080). Planned (ROADMAP §10.2): the disk is served by the
-volatile-cache device, an NBD server in hostlib that records every write and flush, and each round
-checks the images rebuilt from its trace, since a kill loses no write QEMU received, under
-`cache=writeback` or `cache=none` alike.
+`make test-vibefs-crash` first runs the hostlib tests (`nbd-cache`, `vibefs-cat`), then
+`run_vibefs_crash.py` over the volatile-cache device (F080; ROADMAP §10.2). Each of 8 rounds
+(`VIBEOS_CRASH_ROUNDS`; the run seed is `VIBEOS_CRASH_SEED` and every failure prints it with the
+round) works in a short `mkdtemp` directory, since macOS allows 104 bytes of unix socket path:
+
+1. `mkfs-vibefs` a 256 KiB image, the size `vibefs::tests::crash_workload_seeded_points` proves
+   200 commits fit, require `fsck-vibefs` to print `errors 0 warnings 0`, read its generation `G`,
+   and copy it to the served image.
+2. Start `nbd-cache` on it with a seed from the run's RNG. It is an NBD server in hostlib that
+   advertises only `HAS_FLAGS|SEND_FLUSH`, replies to a write when it arrives and to a flush
+   `1 + xorshift(seed) % 20` ms later, and keeps reading, tracing and replying to the requests that
+   arrive meanwhile, so a write sent before a flush completes is not covered by it. Its JSONL trace
+   records each write and flush on arrival and each reply once sent, and `<trace>.data` holds the
+   write payloads in trace order.
+3. Boot the `vibefs_crash` build with the disk served over NBD (§8.4), `cache=` rotating through
+   `writeback`, `none` and `writethrough`, and SIGKILL QEMU up to `CRASH_KILL_MAX_S` (0.05 s)
+   after `vibeOS: vibefs: wr K`, K uniform in [1, 200]. After the kill the harness reads serial to
+   EOF, so a `wr` line already in the pipe is not lost. The round fails unless QEMU died of that
+   SIGKILL with the last `wr N` at least K, and unless `nbd-cache` then exits 0 (it exits 1 after
+   a FUA, TRIM, unknown or out-of-range request).
+4. Require that a replay of every traced write equals the served image: a kill loses no write the
+   device received, under any of the three cache modes, so only images rebuilt from the trace can
+   show a lost unflushed write. A write is durable once the device has replied to a flush it
+   received after replying to that write. The harness rebuilds one image per write that changes a
+   superblock slot (the writes durable when it arrived, plus that write; a write that changes part
+   of a slot fails the round, and one that rewrites a slot unchanged, as Limine's BIOS stage does
+   to LBA 0 before the kernel runs, is skipped) and one at the kill (the durable writes plus a
+   seeded subset, each kept with probability 1/2, of the later ones).
+5. On every image `fsck-vibefs` must print `errors 0 warnings 0`, and `vibefs-cat <img> /w` must
+   return one iteration's content, iteration `i`, with `i` no older than the last iteration whose
+   final flush the device replied before that image's crash point. A super write's iteration is its
+   generation − `G` − 1, and its commit's final flush is the first flush that arrived after its
+   reply. The kill image must also hold `N` or `N` − 1, and the trace must show `N` − 1's final
+   flush replied, since `wr N` follows that commit's `sync_fs`.
+
+A failed round keeps its directory (base and served images, trace, and the failing image named
+`super@<index>.img` or `kill.img`) and prints its path. Each round logs K, N, the cache mode, the
+number of images checked, and the trace's write and flush counts.
 
 ## 8.4 QEMU flags
 
@@ -4392,6 +4421,7 @@ checks the images rebuilt from its trace, since a kill loses no write QEMU recei
 | `make run` | `-cdrom vibeos.iso -m 128M -smp 2 -cpu max -accel tcg -no-reboot -serial stdio` (Makefile `QEMU_BASE`, plus `-serial stdio` from the `run` recipe) |
 | e2e | as above plus `-display none -monitor unix:...,server=on,wait=off` (`harness.qemu_argv`) |
 | ktest | as e2e plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04`, `-device e1000e`, `-device edu` (planned, ROADMAP §11.7: `-device edu,dma_mask=0xFFFFFFFF` on both architectures), `-device virtio-rng-pci,disable-legacy=on`, virtio-blk (`-drive file=…,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>`). Extra NICs/edu/virtio are ktest-only; e2e stays the default `pc` set (`pci: 6 devices`). After a green first boot the harness reboots the same disk and requires `vibeOS: persist: intact`. |
+| vibefs crash | as e2e plus `-boot order=d` and the volatile-cache device: `-drive file.driver=nbd,file.server.type=unix,file.server.path=<sock>,format=raw,if=none,id=vibehd,cache=<writeback\|none\|writethrough>` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>,write-cache=on` (`harness.virtio_blk_args(..., nbd=True)`). QEMU 8.2 accepts the `file.driver=nbd` form; `cache=unsafe` is refused, since it drops flushes |
 | LAPIC fallback | `-cpu qemu64,-tsc-deadline` |
 | SMP stress | `-smp 4` |
 | aarch64 (`ARCH=aarch64`) | Planned (ROADMAP §11.7): `qemu-system-aarch64 -machine virt,acpi=off,gic-version=3`, with `-cpu max` under TCG or `-cpu host` under HVF (`virt` defaults to the 32-bit `cortex-a15`); the §10.2 probe's firmware code read-only on pflash unit 0 and a per-run copy of its variable-store template on unit 1; the ISO on a CD-ROM, `-device virtio-scsi-pci -device scsi-cd,drive=cd0 -drive if=none,id=cd0,media=cdrom,readonly=on,file=<iso>`, so the ktest disk is the only virtio-blk device; and `-device ramfb`, `virtio-keyboard-pci`, `virtio-tablet-pci`, `pvpanic-pci`, and `vmcoreinfo` |
@@ -4425,8 +4455,10 @@ harness defaults match them.
 | `VIBEOS_SKIP_PERSIST` | off | `run_ktest` |
 | `VIBEOS_CRASH_ROUNDS` | `8` | `run_vibefs_crash` |
 | `VIBEOS_CRASH_SEED` | time-based | `run_vibefs_crash` |
-| `VIBEOS_MKFS` | `mkfs-vibefs` | `run_vibefs_crash` |
+| `VIBEOS_MKFS` | `mkfs-vibefs` | `run_vibefs_crash`, `run_e2e` (the `test-e2e` tier's vda images) |
 | `VIBEOS_FSCK` | `fsck-vibefs` | `run_vibefs_crash` |
+| `VIBEOS_NBD_CACHE` | `nbd-cache` | `run_vibefs_crash` |
+| `VIBEOS_VIBEFS_CAT` | `vibefs-cat` | `run_vibefs_crash` |
 
 `VIBEOS_BIOS` reaches QEMU as `-bios`, which accepts only an image whose size is a multiple of
 64 KiB. apt's combined `/usr/share/ovmf/OVMF.fd`, the Makefile's `OVMF` default and the one CI uses,

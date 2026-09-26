@@ -159,25 +159,42 @@ def replay(base: bytes, trace: Trace, writes: list[int]) -> bytes:
     return bytes(img)
 
 
-def _super_slots(w: Write) -> list[int]:
-    """The superblock slots `w` covers. A partial overlap raises."""
-    out = []
-    for slot in SUPER_SLOTS:
-        if w.off < slot + BLOCK and slot < w.off + w.len:
-            if not (w.off <= slot and slot + BLOCK <= w.off + w.len):
-                raise HarnessError(
-                    f"write {w.id} [{w.off}, {w.off + w.len}) partly overlaps super slot {slot}"
-                )
-            out.append(slot)
-    return out
+def _overlaps(w: Write) -> list[tuple[int, bool]]:
+    """`(slot, whole)` for each superblock slot `w` touches."""
+    return [
+        (slot, w.off <= slot and slot + BLOCK <= w.off + w.len)
+        for slot in SUPER_SLOTS
+        if w.off < slot + BLOCK and slot < w.off + w.len
+    ]
+
+
+def _slot_writes(base: bytes, trace: Trace) -> Iterator[Write]:
+    """The writes that change a superblock slot, in arrival order.
+
+    A write whose bytes equal what the device already holds there changes
+    nothing and is skipped: Limine's BIOS stage rewrites LBA 0 of the disk
+    unchanged before the kernel runs. A write that changes part of a slot
+    raises."""
+    img = bytearray(base)
+    for w in trace.writes:
+        payload = trace.payload(w)
+        over = _overlaps(w)
+        if over and img[w.off : w.off + w.len] != payload:
+            for slot, whole in over:
+                if not whole:
+                    raise HarnessError(
+                        f"write {w.id} [{w.off}, {w.off + w.len}) partly overlaps super slot {slot}"
+                    )
+            yield w
+        img[w.off : w.off + w.len] = payload
 
 
 def superblock_images(base: bytes, trace: Trace) -> Iterator[tuple[int, bytes]]:
-    """One image per write that covers a superblock slot: the writes durable
-    when it arrived, plus that write. Yields `(index of the write, image)`."""
-    for w in trace.writes:
-        if _super_slots(w):
-            yield w.index, replay(base, trace, [*durable_writes(trace, w.index), w.id])
+    """One image per write that changes a superblock slot: the writes durable
+    when it arrived, plus that write. Yields `(index of the write, image)`.
+    A write that changes part of a slot raises."""
+    for w in _slot_writes(base, trace):
+        yield w.index, replay(base, trace, [*durable_writes(trace, w.index), w.id])
 
 
 def kill_image(base: bytes, trace: Trace, rng: random.Random) -> bytes:
@@ -194,17 +211,20 @@ def final_flushes(trace: Trace, fresh_gen: int) -> dict[int, int]:
 
     A superblock write's iteration is its generation - `fresh_gen` - 1. Its
     final flush is the first flush that arrived after the write's reply.
-    Iterations whose final flush was never replied are left out.
+    Iterations whose final flush was never replied, and writes that cover
+    no whole slot or carry a generation no newer than `fresh_gen`, are left
+    out.
     """
     out: dict[int, int] = {}
     for w in trace.writes:
-        slots = _super_slots(w)
+        slots = [slot for slot, whole in _overlaps(w) if whole]
         if not slots or w.reply is None:
             continue
         p = trace.payload(w)
         rel = slots[0] - w.off + SUPER_GEN_OFF
-        gen = int.from_bytes(p[rel : rel + 8], "little")
-        it = gen - fresh_gen - 1
+        it = int.from_bytes(p[rel : rel + 8], "little") - fresh_gen - 1
+        if it < 0:
+            continue
         after = [fl for fl in trace.flushes if fl.index > w.reply]
         if not after or after[0].reply is None:
             continue

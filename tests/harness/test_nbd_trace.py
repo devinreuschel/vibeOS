@@ -179,6 +179,19 @@ class NbdTraceTest(unittest.TestCase):
         with self.assertRaises(HarnessError):
             list(superblock_images(bytes(IMG), t))
 
+    def test_superblock_unchanged_rewrite_is_skipped(self) -> None:
+        base = bytearray(IMG)
+        base[:BLOCK] = superblock(1)
+        b = Builder()
+        b.wr(0, bytes(base[:512]))  # Limine's BIOS stage rewrites LBA 0 unchanged
+        b.fl()
+        s = b.wr(0, superblock(2))
+        t = self.load(b)
+        imgs = list(superblock_images(bytes(base), t))
+        self.assertEqual([i for i, _ in imgs], [t.writes[1].index])
+        self.assertEqual(t.writes[1].id, s)
+        self.assertEqual(final_flushes(t, 1), {})
+
     def test_superblock_merged_with_neighbour(self) -> None:
         b = Builder()
         b.wr(BLOCK, superblock(5) + b"N" * BLOCK)
