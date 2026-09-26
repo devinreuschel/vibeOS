@@ -46,7 +46,7 @@ struct Slot {
     back: UnsafeCell<Back>,
     used: AtomicBool,
     busy: AtomicBool,
-    /// The `Vfs` superblock the volume is mounted as.
+    /// The `Vfs` superblock the volume is mounted as, [`NO_SB`] until then.
     sb: AtomicU8,
 }
 
@@ -59,7 +59,7 @@ impl Slot {
             back: UnsafeCell::new(Back::Initrd),
             used: AtomicBool::new(false),
             busy: AtomicBool::new(false),
-            sb: AtomicU8::new(0),
+            sb: AtomicU8::new(NO_SB),
         }
     }
 }
@@ -254,11 +254,13 @@ fn with_slot_now<R>(
     })
 }
 
-/// The superblock volume `id` is mounted as.
-fn sb_of(id: u8) -> u8 {
-    SLOTS
-        .get(id as usize)
-        .map_or(0, |s| s.sb.load(Ordering::Acquire))
+/// A volume not mounted in `Vfs`.
+const NO_SB: u8 = u8::MAX;
+
+/// The superblock volume `id` is mounted as; `None` before its mount.
+fn sb_of(id: u8) -> Option<u8> {
+    let sb = SLOTS.get(id as usize)?.sb.load(Ordering::Acquire);
+    (sb != NO_SB).then_some(sb)
 }
 
 /// The one conversion from a FAT file's dirent fields to its `Vfs`
@@ -509,7 +511,7 @@ pub fn readdir(id: u8, dir_clu: u32, cookie: u64, out: &mut Node) -> Result<Opti
 /// the volume held: busy flag first, then the VFS lock, never the
 /// reverse.
 pub fn walk_iget(id: u8, path: &[u8]) -> Result<(Node, InodeRef), FsError> {
-    let sb = sb_of(id);
+    let sb = sb_of(id).ok_or(FsError::Io)?;
     with_slot(id, |v, d| {
         let n = v.walk(d, path)?;
         let r = fs_init::with(|vfs| vfs.iget_key(sb, &node_info(&n)))?;
@@ -571,15 +573,23 @@ pub fn create(id: u8, dir_clu: u32, name: &[u8], dir: bool) -> Result<Node, FsEr
     let sb = sb_of(id);
     with_slot(id, |v, d| {
         let n = v.create(d, dir_clu, name, dir)?;
-        fs_init::with(|vfs| vfs.drop_negatives(sb));
+        if let Some(sb) = sb {
+            fs_init::with(|vfs| vfs.drop_negatives(sb));
+        }
         Ok(n)
     })
 }
 
 /// Free a removed entry's clusters now unless a `Vfs` inode still holds
 /// it; its last put frees them then.
-fn release_removed(vol: &mut FatVol, d: &mut Io, sb: u8, gone: &FatInode) -> Result<(), FsError> {
-    let held = fs_init::with(|vfs| vfs.forget(sb, [gone.dir_clu, gone.dir_off, 0]));
+fn release_removed(
+    vol: &mut FatVol,
+    d: &mut Io,
+    sb: Option<u8>,
+    gone: &FatInode,
+) -> Result<(), FsError> {
+    let key = [gone.dir_clu, gone.dir_off, 0];
+    let held = sb.is_some_and(|sb| fs_init::with(|vfs| vfs.forget(sb, key)));
     if !held {
         vol.free_chain(d, gone.first_clu)?;
     }
@@ -611,7 +621,12 @@ pub fn rename(
         if let Some(gone) = m.replaced {
             release_removed(v, d, sb, &gone)?;
         }
-        fs_init::with(|vfs| vfs.rekey(sb, [m.from.0, m.from.1, 0], [m.to.0, m.to.1, 0]))
+        match sb {
+            Some(sb) => {
+                fs_init::with(|vfs| vfs.rekey(sb, [m.from.0, m.from.1, 0], [m.to.0, m.to.1, 0]))
+            }
+            None => Ok(()),
+        }
     })
 }
 
@@ -726,6 +741,7 @@ fn drop_slot(id: u8) {
         *SLOTS[i].vol.get() = None;
     }
     SLOTS[i].used.store(false, Ordering::Release);
+    SLOTS[i].sb.store(NO_SB, Ordering::Release);
     drop_busy(id);
     let mut n = 0u8;
     let mut k = 0usize;
