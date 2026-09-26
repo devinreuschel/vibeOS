@@ -3280,15 +3280,17 @@ static IRQ_ALLOC: AtomicU32 = AtomicU32::new(0);
 static IRQ_MMIO: AtomicU64 = AtomicU64::new(0);
 static CPU_HITS: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
 
+/// Zero the observer. `IRQ_HITS` goes last, as `record_irq_cpu` publishes
+/// it last (AGENTS rule 5).
 fn reset_irq_obs() {
     IRQ_CPU.store(0xFFFF, Ordering::SeqCst);
-    IRQ_HITS.store(0, Ordering::SeqCst);
     IRQ_ALLOC.store(0, Ordering::SeqCst);
     let mut i = 0usize;
     while i < CPU_HITS.len() {
         CPU_HITS[i].store(0, Ordering::SeqCst);
         i += 1;
     }
+    IRQ_HITS.store(0, Ordering::SeqCst);
 }
 
 /// `time_init::now_ns` value [`obs_stall`] spins until; 0 is disarmed.
@@ -3306,14 +3308,17 @@ fn obs_stall() {
     }
 }
 
+/// Count a hit on this CPU. `IRQ_HITS`, which tests wait on, is published
+/// last, so a waiter that sees it also sees `CPU_HITS` and `IRQ_CPU`
+/// (AGENTS rule 5, F021).
 fn record_irq_cpu() {
     let cpu = per_cpu_init::current().cpu_id;
-    IRQ_CPU.store(cpu, Ordering::SeqCst);
-    IRQ_HITS.fetch_add(1, Ordering::SeqCst);
-    obs_stall();
     if (cpu as usize) < CPU_HITS.len() {
         CPU_HITS[cpu as usize].fetch_add(1, Ordering::SeqCst);
     }
+    IRQ_CPU.store(cpu, Ordering::SeqCst);
+    obs_stall();
+    IRQ_HITS.fetch_add(1, Ordering::SeqCst);
 }
 
 fn on_msix() {
