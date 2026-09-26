@@ -94,25 +94,65 @@ impl DmaAlloc {
     }
 }
 
-/// Physically contiguous. `device` is the translated phys, never a HHDM VA.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Physically contiguous DMA memory: a move-only handle with private
+/// fields. Only [`alloc_from_buddy`] builds one (the kernel reaches it
+/// through `dma_init::alloc`), and [`free_to_buddy`] (`dma_init::free`)
+/// takes it by value, so a buffer is freed at most once and only by its
+/// owner. [`DmaBuffer::device`] is the translated phys, never a HHDM VA.
+///
+/// It cannot be copied:
+///
+/// ```compile_fail,E0382
+/// fn twice(b: vibeos::dma::DmaBuffer) -> (vibeos::dma::DmaBuffer, vibeos::dma::DmaBuffer) {
+///     (b, b)
+/// }
+/// ```
+///
+/// or cloned:
+///
+/// ```compile_fail,E0277
+/// fn need<T: Clone>() {}
+/// need::<vibeos::dma::DmaBuffer>();
+/// ```
+///
+/// and safe code cannot build one from an address:
+///
+/// ```compile_fail,E0451
+/// fn forge(b: vibeos::dma::DmaBuffer) -> vibeos::dma::DmaBuffer {
+///     vibeos::dma::DmaBuffer { virt: 0x1000, len: 0x1000, ..b }
+/// }
+/// ```
 pub struct DmaBuffer {
-    pub virt: u64,
-    pub phys: u64,
-    pub device: DeviceAddr,
-    pub len: u64,
-    pub order: u8,
+    virt: u64,
+    phys: u64,
+    len: u64,
+    order: u8,
 }
 
 impl DmaBuffer {
-    pub fn from_phys(phys: u64, virt: u64, len: u64, order: u8) -> Self {
-        Self {
-            virt,
-            phys,
-            device: dma_to_device(phys),
-            len,
-            order,
-        }
+    /// Physical base of the block.
+    pub fn phys(&self) -> u64 {
+        self.phys
+    }
+
+    /// Kernel VA of the block.
+    pub fn virt(&self) -> u64 {
+        self.virt
+    }
+
+    /// Bytes requested; the block may be larger.
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// Never true: a buffer covers at least the bytes asked for.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Address a device programs into a descriptor.
+    pub fn device(&self) -> DeviceAddr {
+        dma_to_device(self.phys)
     }
 
     pub fn sync_for_device(&self) {
@@ -123,7 +163,7 @@ impl DmaBuffer {
         dma_rmb();
     }
 
-    pub fn as_ptr(self) -> *mut u8 {
+    pub fn as_ptr(&self) -> *mut u8 {
         self.virt as *mut u8
     }
 }
@@ -167,8 +207,8 @@ impl SgList {
 
     pub fn from_buffer(buf: &DmaBuffer) -> Result<Self, DmaError> {
         let mut s = Self::new();
-        let len = buf.len.min(u32::MAX as u64) as u32;
-        s.push(buf.device, len)?;
+        let len = buf.len().min(u32::MAX as u64) as u32;
+        s.push(buf.device(), len)?;
         Ok(s)
     }
 }
@@ -210,13 +250,20 @@ pub fn publish_index(slot: &core::sync::atomic::AtomicU16, idx: u16) {
     slot.store(idx, Ordering::Release);
 }
 
+/// The one constructor of [`DmaBuffer`]. `virt_of` maps the block's
+/// physical base to the kernel VA the CPU uses.
 pub fn alloc_from_buddy(
     buddy: &mut Buddy,
     spec: DmaAlloc,
     virt_of: impl Fn(u64) -> u64,
 ) -> Option<DmaBuffer> {
     let (phys, order) = buddy.allocate_constrained(spec.size, spec.align, spec.boundary)?;
-    let buf = DmaBuffer::from_phys(phys, virt_of(phys), spec.size, order);
+    let buf = DmaBuffer {
+        virt: virt_of(phys),
+        phys,
+        len: spec.size,
+        order,
+    };
     buf.sync_for_device();
     Some(buf)
 }
@@ -243,11 +290,14 @@ mod tests {
         let da = dma_to_device(pa);
         assert_eq!(da.0, pa);
         assert_eq!(dma_from_device(da), pa);
-        let virt = 0xFFFF_8000_1234_0000u64;
-        let buf = DmaBuffer::from_phys(pa, virt, 4096, 0);
-        assert_eq!(buf.device.0, pa);
-        assert_ne!(buf.device.0, buf.virt);
         assert_eq!(IdentityDma.dma_to_device(pa).0, pa);
+        let mut p = Pool::new(16);
+        let virt_of = |phys: u64| phys.wrapping_add(0xFFFF_8000_0000_0000);
+        let buf = alloc_from_buddy(&mut p.buddy, DmaAlloc::new(4096), virt_of).unwrap();
+        assert_eq!(buf.device().0, buf.phys());
+        assert_ne!(buf.device().0, buf.virt());
+        assert_eq!(buf.virt(), virt_of(buf.phys()));
+        free_to_buddy(&mut p.buddy, buf);
     }
 
     #[test]
@@ -259,11 +309,14 @@ mod tests {
             boundary: DMA32_BOUNDARY,
         };
         let buf = alloc_from_buddy(&mut p.buddy, spec, |phys| phys + 0x1000).unwrap();
-        assert_eq!(buf.phys & 0x1FFF, 0);
-        assert!(buf.len <= 1u64 << (12 + buf.order));
-        assert!(!crosses_boundary(buf.phys, spec.size, DMA32_BOUNDARY));
-        assert_eq!(buf.device.0, buf.phys);
-        assert_eq!(buf.virt, buf.phys + 0x1000);
+        assert_eq!(buf.phys() & 0x1FFF, 0);
+        assert_eq!(buf.len(), 0x1800);
+        assert!(!buf.is_empty());
+        assert!(!crosses_boundary(buf.phys(), spec.size, DMA32_BOUNDARY));
+        assert_eq!(buf.device().0, buf.phys());
+        assert_eq!(buf.virt(), buf.phys() + 0x1000);
+        assert_eq!(buf.as_ptr() as u64, buf.virt());
+        assert_eq!(p.buddy.stats().free_frames, 256 - 2);
         buf.sync_for_device();
         buf.sync_for_cpu();
         free_to_buddy(&mut p.buddy, buf);
@@ -274,11 +327,13 @@ mod tests {
 
     #[test]
     fn sg_builds_from_buffer_and_caps() {
-        let buf = DmaBuffer::from_phys(0x2000, 0x2000, 0x1000, 0);
+        let mut p = Pool::new(16);
+        let buf = alloc_from_buddy(&mut p.buddy, DmaAlloc::new(0x1000), |phys| phys).unwrap();
         let sg = SgList::from_buffer(&buf).unwrap();
         assert_eq!(sg.n, 1);
-        assert_eq!(sg.entries[0].addr.0, 0x2000);
+        assert_eq!(sg.entries[0].addr, buf.device());
         assert_eq!(sg.entries[0].len, 0x1000);
+        free_to_buddy(&mut p.buddy, buf);
         let mut s = SgList::new();
         let mut i = 0u32;
         while i < MAX_SG as u32 {

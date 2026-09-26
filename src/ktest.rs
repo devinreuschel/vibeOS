@@ -3725,19 +3725,20 @@ fn test_dma_alloc() -> Outcome {
     let Some(buf) = dma_init::alloc(DmaAlloc::dma32(0x1000)) else {
         return Outcome::Fail("alloc");
     };
-    if buf.device.as_u64() != buf.phys {
+    if buf.device().as_u64() != buf.phys() {
         dma_init::free(buf);
         return Outcome::Fail("device != phys");
     }
-    if buf.virt != paging_init::HHDM_BASE.wrapping_add(buf.phys) {
+    if buf.virt() != paging_init::HHDM_BASE.wrapping_add(buf.phys()) {
         dma_init::free(buf);
         return Outcome::Fail("virt not hhdm");
     }
-    if buf.device.as_u64() == buf.virt {
+    if buf.device().as_u64() == buf.virt() {
         dma_init::free(buf);
         return Outcome::Fail("device is va");
     }
-    if buf.phys >= DMA32_BOUNDARY || dma::crosses_boundary(buf.phys, buf.len, DMA32_BOUNDARY) {
+    if buf.phys() >= DMA32_BOUNDARY || dma::crosses_boundary(buf.phys(), buf.len(), DMA32_BOUNDARY)
+    {
         dma_init::free(buf);
         return Outcome::Fail("dma32");
     }
@@ -3753,7 +3754,7 @@ fn test_dma_alloc() -> Outcome {
             return Outcome::Fail("sg");
         }
     };
-    if sg.n != 1 || sg.entries[0].addr != buf.device {
+    if sg.n != 1 || sg.entries[0].addr != buf.device() {
         dma_init::free(buf);
         return Outcome::Fail("sg entry");
     }
@@ -3811,7 +3812,7 @@ fn test_dma_edu() -> Outcome {
     }
     src.sync_for_device();
     dst.sync_for_device();
-    mmio_w32(mmio, EDU_DMA_SRC, src.device.as_u64() as u32);
+    mmio_w32(mmio, EDU_DMA_SRC, src.device().as_u64() as u32);
     mmio_w32(mmio, EDU_DMA_DST, EDU_DMA_BUF);
     mmio_w32(mmio, EDU_DMA_CNT, 64);
     dma::dma_wmb();
@@ -3825,7 +3826,7 @@ fn test_dma_edu() -> Outcome {
         return Outcome::Fail("dma to edu");
     }
     mmio_w32(mmio, EDU_DMA_SRC, EDU_DMA_BUF);
-    mmio_w32(mmio, EDU_DMA_DST, dst.device.as_u64() as u32);
+    mmio_w32(mmio, EDU_DMA_DST, dst.device().as_u64() as u32);
     mmio_w32(mmio, EDU_DMA_CNT, 64);
     dma::dma_wmb();
     mmio_w32(mmio, EDU_DMA_CMD, EDU_DMA_RUN | EDU_DMA_TO_PCI);

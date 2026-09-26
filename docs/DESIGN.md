@@ -2347,7 +2347,9 @@ adopts the chained design when the 99th percentile passes 64.
 ## 4.7 DMA
 
 `DmaBuffer` is physically contiguous (buddy `allocate_constrained`: size, alignment, and an optional
-power-of-two boundary the buffer must not cross). Planned (ROADMAP §10.3): it holds the `Frames`
+power-of-two boundary the buffer must not cross). `DmaBuffer` is a move-only handle with private
+fields; only `dma::alloc_from_buddy`, which `dma_init::alloc` calls, builds one, and `dma_init::free`
+takes it by value. Planned (ROADMAP §10.3): it holds the `Frames`
 that `alloc_constrained` returns (§4.2). A boundary is not an address limit:
 `DmaAlloc::dma32` sets a 4 GiB boundary, so its buffer never crosses a 4 GiB line, but the buffer can
 lie above 4 GiB once RAM extends there, and no allocator keeps a 32-bit device's buffer below 4 GiB
