@@ -937,7 +937,7 @@ that review cites means the review's text.
 | I20 | `now_ns` is monotonic | seqlock plus `time::monotonic_max` over `time_init::LAST_NS` | enforced | Yes, by construction, so the monotonicity tests cannot fail (ROADMAP §10.2, F100) |
 | I21 | A run queue is touched only by its owner CPU with IF=0 (§2.3) | `per_cpu_init::with_current` | enforced (busy flag) | Partly: only the owner writes it, but `diag::cpus_to` (the shell `cpus` command) and in-guest tests read another CPU's `runq` length with no lock, and `&'static PerCpu` aliases the `&mut` (ROADMAP §10.3, F039) |
 | I22 | A `BootCell` is set once, before SMP, and holds `Sync` data (§2.3) | `cell.rs` | documented | No: `per_cpu_init::CPUS` holds the non-`Sync` `PerCpu`, which the unbounded `Sync` impl allows (ROADMAP §10.3, F017, F039); the set-once check is a `debug_assert!` (ROADMAP §10.2, F137); every switch writes the BSP's TSS after publication through a pointer cast from `&Bsp` (ROADMAP §10.3, F089) |
-| I23 | The block layer orders only overlapping writes and a sequential zone's writes; a `Flush` makes durable every write completed before it was submitted, and a `Fua` write is durable when it completes (§10.2) | `block.rs` | documented | No: C-LOOK can reorder overlapping writes, and a block-cache flush misses writeback already in flight (ROADMAP §10.11, F043) |
+| I23 | The block layer orders only overlapping writes and a sequential zone's writes; a `Flush` makes durable every write completed before it was submitted, and a `Fua` write is durable when it completes (§10.2) | `block.rs` | documented | No: C-LOOK can reorder overlapping writes (ROADMAP §10.11, F043) |
 | I24 | vibefs never overwrites a live block before the newer superblock is durable, and from v2 reuses a block a commit freed only after the next commit's superblock is durable, so the older slot's tree stays whole; a v2 NOCOW file's data blocks are the one exception, overwritten in place ([VIBEFS.md](VIBEFS.md) §15) | vibefs commit | documented | No after a failed commit: the in-memory generation advances before the superblock write, so the retry writes the slot that holds the only valid superblock (ROADMAP §12.5, F050). Otherwise it rests on v1's on-disk refcounts, which its mount does not check (F061); v2 keeps no per-block count and checks its pointers and allocation map as it reads each block (VIBEFS.md §15; ROADMAP §14.8) |
 | I25 | Per-thread CPU state is saved and restored in full (§7.5) | `syscall_init::on_switch`, `thread::switch_context` | documented | No: `FS_BASE` is not switched (ROADMAP §11.6, F022); `fork` and `execve` get the FPU state wrong (ROADMAP §10.6, F069); no entry from ring 3 saves a complete user frame, so the user GPRs of a thread preempted in ring 3 are at no known place, and a context whose RCX and R11 differ from its RIP and RFLAGS cannot be returned to (ROADMAP §10.6) |
 | I26 | Every kernel stack has a guard page (§2.4) | `kva_init::alloc_guarded_stack` | documented | No: boot runs on Limine's unguarded stack (ROADMAP §10.6, F072) |
@@ -5044,9 +5044,8 @@ Rejected: a device-wide `Barrier` that every later request waits behind; and a
 fence per queue, since one filesystem writes from every CPU's queue and would
 wait for completions anyway.
 
-Not yet: C-LOOK can reorder overlapping writes whatever their seq, and the
-block cache's `flush` does not wait for writeback already in flight
-([section 10.6](#106-block-cache)). ROADMAP §10.11 lands all of it (F043).
+Not yet: C-LOOK can reorder overlapping writes whatever their seq, and sequence
+numbers are `u32` (ROADMAP §10.11, F043).
 
 ## 10.3 Failure
 
@@ -5276,18 +5275,21 @@ changes a copy's filesystem id offline (VIBEFS.md §15).
 
 Page-granular (4 KiB), 16 pages (`cache::DEFAULT_PAGES`), keyed by
 `(dev_id, page offset)`. Read-through, write-back, clock eviction,
-sequential readahead, dirty-ratio writeback thread (`blk-wb`). `flush`
-writes the pages marked dirty, waits for each write to complete, then sends
-the device `Flush` (§10.2).
+sequential readahead, dirty-ratio writeback thread (`blk-wb`). `flush(dev)`
+writes each dirty page of `dev` not already in writeback and waits for it,
+waits for every page of `dev` in writeback, writes pages dirtied meanwhile,
+and sends the device `Flush` (§10.2) only when `dev` has no dirty and no
+writeback page.
 
-A slot has no filling or writeback state. `take_dirty` clears a page's dirty
-bit before `blk-wb` writes it with the lock dropped, so while that write is in
-flight `flush` skips the page and can send the device flush first, a page
-dirtied again can have two writes to one LBA in flight, and the slot can be
-evicted and later read back stale. `find()` matches only valid slots, so a
-second reader of a page being filled does not wait for it (the writeback
-state and the `flush` wait land with ROADMAP §10.11, F015 and F043; the
-filling state with ROADMAP §12.5, F015).
+A slot whose device write is in flight is in WRITEBACK (`F_WB`): it keeps its
+key, stays readable and writable (a write dirties it again), is never picked by
+the clock or re-keyed, and gets no second write until the first completes.
+Every cache write sets it: `blk-wb`'s, `flush`'s, and an eviction's, so a dirty
+victim is written back in place before it is re-keyed, and the clock prefers a
+clean victim. A thread that needs the slot sleeps on the slot's wait queue
+until the write ends (ROADMAP §10.11, F015, F043). A slot has no filling
+state: `find()` matches only valid slots, so a second reader of a page being
+filled does not wait for it (ROADMAP §12.5, F015).
 
 The cache reaches the drivers by raw device id: `cache_init::raw_read`,
 `raw_write`, and `raw_flush` match `DEV_RAM0` to `block_init` and `DEV_VDA`

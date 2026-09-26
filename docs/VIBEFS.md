@@ -65,10 +65,10 @@ Why CoW, not WAL:
   without the journal. The block layer orders nothing, and a `Flush` covers
   only writes whose completion was reported before it was submitted, so a
   commit waits for its block writes before it sends one. v1 writes through the
-  block cache, whose flush writes each dirty page and waits for it, but skips
-  pages `blk-wb` is still writing (F015; ROADMAP §12.5, after §10.11 adds the
-  wait under F043). The RAM-backed `/vibe` volume has no device or cache to
-  wait for.
+  block cache, whose flush writes each dirty page, waits for it and for every
+  page `blk-wb` or an eviction is still writing, and only then sends the
+  `Flush` (DESIGN §10.6). The RAM-backed `/vibe` volume has no device or cache
+  to wait for.
 
 WAL was the alternative if we wanted in-place file data and a small log. We
 do not: file data that replaces existing bytes is also CoW, so a crash during

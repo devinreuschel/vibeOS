@@ -78,6 +78,12 @@ GONE: list[tuple[str, str]] = [
     ("src/cache_init.rs: fn barrier", "the block layer keeps only the orders DESIGN §10.2 names"),
     ("src/virtio_blk_init.rs: fn barrier",
      "the block layer keeps only the orders DESIGN §10.2 names"),
+    ("WritebackThenRead", "the block layer keeps only the orders DESIGN §10.2 names"),
+    ("mark_clean", "the block layer keeps only the orders DESIGN §10.2 names"),
+    ("mark_dirty", "the block layer keeps only the orders DESIGN §10.2 names"),
+    ("restore_evict", "the block layer keeps only the orders DESIGN §10.2 names"),
+    ("stash_evict", "the block layer keeps only the orders DESIGN §10.2 names"),
+    ("writeback_all", "the block layer keeps only the orders DESIGN §10.2 names"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",
