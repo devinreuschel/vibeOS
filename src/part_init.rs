@@ -10,9 +10,13 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use vibeos::block::{self, BlockError, DeviceState, write_marker};
 use vibeos::lock::RANK_DEVICE;
 use vibeos::part::{
-    self, GPT_ENTRY_SIZE, GUID_EFI, GUID_LINUX, GptHeaderInfo, MAX_PARTS, MBR_EXTENDED, MBR_LINUX,
-    PartKind, Table, entries_crc, gpt_type_name, map_child_lba, mbr_type_name, pack_ebr,
-    pack_gpt_entry, pack_gpt_header, pack_mbr, pack_protective_mbr,
+    self, MAX_PARTS, MBR_EXTENDED, MBR_LINUX, PartKind, Table, gpt_type_name, map_child_lba,
+    mbr_type_name, pack_ebr, pack_mbr,
+};
+#[cfg(feature = "kernel_tests")]
+use vibeos::part::{
+    GPT_ENTRY_SIZE, GUID_EFI, GUID_LINUX, GptHeaderInfo, entries_crc, pack_gpt_entry,
+    pack_gpt_header, pack_protective_mbr,
 };
 
 use crate::block_init;
@@ -27,8 +31,11 @@ const RAM0_EXT: u32 = 120;
 const RAM0_EXT_N: u32 = 80;
 const RAM0_EBR2: u32 = 160;
 
+#[cfg(feature = "kernel_tests")]
 const VDA_P1: u64 = 256;
+#[cfg(feature = "kernel_tests")]
 const VDA_P1_N: u64 = 128;
+#[cfg(feature = "kernel_tests")]
 const VDA_P2: u64 = 512;
 
 const NAMES_RAM: [&str; 5] = ["ram0p1", "ram0p2", "ram0p3", "ram0p4", "ram0p5"];
@@ -170,10 +177,38 @@ fn stamp_ram0_mbr() -> Result<(), BlockError> {
     Ok(())
 }
 
+/// True when LBA 0 to 33 and the last 33 sectors of `vda` all read back as
+/// zeros: the only disk the `kernel_tests` build stamps (F003, DESIGN §10.5).
+/// A read error is returned, never read as blank.
+#[cfg(feature = "kernel_tests")]
+fn vda_blank(cap: u64) -> Result<bool, BlockError> {
+    let mut sec = [0u8; 512];
+    let tail = cap.checked_sub(33).ok_or(BlockError::Inval)?;
+    let mut lba = 0u64;
+    while lba < cap {
+        virtio_blk_init::read(lba, &mut sec)?;
+        if sec.iter().any(|&b| b != 0) {
+            return Ok(false);
+        }
+        lba = if lba == 33 && tail > 34 {
+            tail
+        } else {
+            lba + 1
+        };
+    }
+    Ok(true)
+}
+
+/// Test builds only: stamps the fixed two-entry GPT the vdap1/vdap2 tests
+/// read, and only on an all-zero `vda` (F003).
+#[cfg(feature = "kernel_tests")]
 fn stamp_vda_gpt() -> Result<(), BlockError> {
     let cap = virtio_blk_init::capacity_sectors();
     let bs = virtio_blk_init::logical_block_size();
     if bs != 512 || cap < 1024 {
+        return Err(BlockError::Inval);
+    }
+    if !vda_blank(cap)? {
         return Err(BlockError::Inval);
     }
     let nent = 128u32;
@@ -434,19 +469,20 @@ pub fn init() {
         let _ = register_table(DEV_RAM0, &t);
     }
     if virtio_blk_init::live() {
-        let have = parse_dev(DEV_VDA);
-        let ok = match have {
+        match parse_dev(DEV_VDA) {
             Ok(t) if t.n > 0 => {
                 let _ = register_table(DEV_VDA, &t);
-                true
             }
-            _ => false,
-        };
-        if !ok
-            && stamp_vda_gpt().is_ok()
-            && let Ok(t) = parse_dev(DEV_VDA)
-        {
-            let _ = register_table(DEV_VDA, &t);
+            #[cfg(feature = "kernel_tests")]
+            _ => {
+                if stamp_vda_gpt().is_ok()
+                    && let Ok(t) = parse_dev(DEV_VDA)
+                {
+                    let _ = register_table(DEV_VDA, &t);
+                }
+            }
+            #[cfg(not(feature = "kernel_tests"))]
+            _ => {}
         }
     }
     LIVE.store(true, Ordering::Release);

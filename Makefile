@@ -214,8 +214,18 @@ test-unit:
 test-harness:
 	VIBEOS_TIER=$@ GITHUB_STEP_SUMMARY= python3 -m unittest discover -s tests/harness -t . -v
 
-test-e2e: $(ISO)
-	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) python3 tests/harness/run_e2e.py
+# Host mkfs/fsck share src/vibefs.rs. Artifacts land under
+# $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/ (A2). Defined above the tiers that
+# name them: make expands a prerequisite list when it reads the rule.
+MKFS_VIBEFS := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/mkfs-vibefs
+FSCK_VIBEFS := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/fsck-vibefs
+
+$(MKFS_VIBEFS) $(FSCK_VIBEFS): src/vibefs.rs tests/hostlib/src/bin/mkfs_vibefs.rs \
+		tests/hostlib/src/bin/fsck_vibefs.rs tests/hostlib/Cargo.toml crates/core/Cargo.toml
+	cargo build -p vibeos-hostlib-tests --bins --target $(HOST_TRIPLE)
+
+test-e2e: $(ISO) $(MKFS_VIBEFS)
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) VIBEOS_MKFS=$(MKFS_VIBEFS) python3 tests/harness/run_e2e.py
 
 # Focused #66 check: COM1 echo then QEMU `sendkey` (same i8042 as the
 # window). Already part of `test-e2e`; not a second boot in `make test`.
@@ -254,15 +264,6 @@ test-kernel-smp4: $(ISO_KTEST)
 
 test-lapic-fallback: $(ISO_KTEST)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) VIBEOS_QEMU_CPU=qemu64,-tsc-deadline python3 tests/harness/run_ktest.py
-
-# Host mkfs/fsck share src/vibefs.rs. Artifacts land under
-# $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/ (A2).
-MKFS_VIBEFS := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/mkfs-vibefs
-FSCK_VIBEFS := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/fsck-vibefs
-
-$(MKFS_VIBEFS) $(FSCK_VIBEFS): src/vibefs.rs tests/hostlib/src/bin/mkfs_vibefs.rs \
-		tests/hostlib/src/bin/fsck_vibefs.rs tests/hostlib/Cargo.toml crates/core/Cargo.toml
-	cargo build -p vibeos-hostlib-tests --bins --target $(HOST_TRIPLE)
 
 test-vibefs-crash: $(ISO_VIBEFS_CRASH) $(MKFS_VIBEFS) $(FSCK_VIBEFS)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_VIBEFS_CRASH) VIBEOS_MKFS=$(MKFS_VIBEFS) VIBEOS_FSCK=$(FSCK_VIBEFS) python3 tests/harness/run_vibefs_crash.py

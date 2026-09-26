@@ -1518,9 +1518,10 @@ memory BARs under the 32 MiB cap, fills the device registry, and emits
 next. Drivers register, then bind after the scan, not inline. Virtio-rng
 matches by id when a modern virtio device is present (ktest adds one; e2e
 does not). Ramdisk init follows bind and emits `block: <name> <n> sectors`.
-Partition scan stamps an MBR on `ram0` and, on a `vda` of at least 1024 sectors whose table fails to
-parse or has no entries, a GPT that overwrites LBA 0–33 and the last 33 sectors of a whole-disk image
-on first boot ([section 10.5](#105-partitions); ROADMAP §10.11, F003). It emits
+Partition scan stamps an MBR on `ram0`. Only a `kernel_tests` build stamps a GPT, and only on a `vda`
+whose table fails to parse or has no entries and whose LBA 0–33 and last 33 sectors all read back as
+zeros; the production kernel never writes `vda` here ([section 10.5](#105-partitions); ROADMAP
+§10.11, F003). It emits
 `block: <parent>p<N> <n> sectors` per child. A writeback cache thread starts
 before the scan. `fs_init` then makes the FAT initrd `/` (a ramfs root only when the initrd is not
 live) and mounts devfs / procfs / tmpfs / sysfs on `/dev` `/proc` `/tmp` `/sys` and vibefs at
@@ -5282,11 +5283,16 @@ them (ROADMAP §10.12, F117). Only in-guest tests use the child devices:
 `mount_dev` accepts only `ram0` and `vda`, and devfs block nodes return
 `NotSupp` (ROADMAP §10.4, F081).
 
-`part_init::init` runs in every build. It stamps an MBR on `ram0`, and it
-stamps a GPT on `vda` whenever `vda`'s table fails to parse or has no
-entries, including after a read error; the only guard is a 512-byte block
-size and at least 1024 sectors. A whole-disk vibefs or FAT32 image on `vda`
-loses LBA 0 to 33 and its last 33 sectors on the first boot (ROADMAP §10.11,
+`part_init::init` stamps an MBR on `ram0` (RAM) in every build. Only a
+`kernel_tests` build stamps a GPT, through `stamp_vda_gpt`, and only on an
+all-zero `vda`: a table that fails to parse or has no entries, a 512-byte
+block size, at least 1024 sectors, and LBA 0 to 33 and the last 33 sectors
+all reading back as zeros. A read error returns the error and stamps
+nothing. The production build compiles neither `stamp_vda_gpt` nor its call,
+so it writes a disk only for a mounted filesystem or a write to its device
+node. `make test-e2e` boots the production ISO with a 1 MiB `mkfs-vibefs`
+image on `vda` and with a 1 MiB image whose only non-zero bytes are `0x55AA`
+at offset 510, and requires each image's SHA-256 unchanged (ROADMAP §10.11,
 F003).
 
 Rule: a lookup of a block device by an identity it carries (a filesystem
