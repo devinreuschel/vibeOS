@@ -3411,7 +3411,6 @@ fn record_irq_cpu() {
 }
 
 fn on_msix() {
-    record_irq_cpu();
     match irq_init::allocate_vector(0) {
         Err(IrqError::InIrq) => IRQ_ALLOC.store(1, Ordering::SeqCst),
         Ok(_) => IRQ_ALLOC.store(2, Ordering::SeqCst),
@@ -3421,6 +3420,9 @@ fn on_msix() {
     if va != 0 {
         mmio_w32(va, E1000_ICR, 0xFFFF_FFFF);
     }
+    // Last: `IRQ_HITS` is what `test_msix_cpu` waits on, so every store it
+    // then reads (IRQ_ALLOC) comes before it (publish last, F021).
+    record_irq_cpu();
 }
 
 fn on_intx() {
