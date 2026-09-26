@@ -11,9 +11,11 @@
 //! - Two page sizes: 4 KiB leaf at level 1 and 2 MiB leaf at level 2.
 //!   Bigger pages (1 GiB / L3) are not used; DESIGN §4.3 only names the
 //!   two we implement.
-//! - Table frames come from a caller-supplied `FrameAlloc` so host tests
-//!   can back the allocator with a `Vec`. In the kernel the callback
-//!   pulls from the buddy PMM.
+//! - Table frames come from a caller-supplied `FrameAlloc` as `pmm::Frames`
+//!   tokens, so host tests can back the allocator with a `Vec`-backed
+//!   buddy (`pmm::testing::Pool`). In the kernel it pulls from the buddy
+//!   PMM. A table's token is consumed into the entry that points at it
+//!   and rebuilt only by the code that clears that entry.
 //! - Physical to writable-virtual translation uses a caller-supplied
 //!   `hhdm_offset`. Same trick as `pmm::Buddy`: `virt = phys + offset`.
 //!   In the kernel this is Limine's HHDM offset (valid until we install
@@ -31,6 +33,8 @@
 //! kernel installs (DESIGN §4.3 / §7.9). Host tests leave it unset.
 
 #![allow(clippy::identity_op)] // PTE masks read as `x << n` even when n is 0
+
+use crate::pmm::Frames;
 
 pub const PAGE_SHIFT: u32 = 12;
 pub const PAGE_SIZE_4K: u64 = 1 << PAGE_SHIFT;
@@ -161,16 +165,15 @@ pub const fn pte_flags(entry: u64) -> PageFlags {
     PageFlags(entry & !PTE_ADDR_MASK)
 }
 
-/// Frame allocator abstraction. Returns page-aligned frames of exactly
-/// `PAGE_SIZE_4K`. Trait rather than a closure so the mapper can call it
-/// from multiple methods without lifetime gymnastics.
+/// Frame allocator abstraction. Hands out order-0 [`Frames`], one
+/// `PAGE_SIZE_4K` frame each. Trait rather than a closure so the mapper
+/// can call it from multiple methods without lifetime gymnastics.
 ///
 /// # Safety
-/// Implementations must return non-overlapping, currently-unused frames.
-/// The returned frame's virtual mapping through `Mapper::hhdm_offset`
-/// must be writable.
+/// Implementations return order-0 tokens whose frame's virtual mapping
+/// through `Mapper::hhdm_offset` is writable.
 pub unsafe trait FrameAlloc {
-    fn alloc_frame(&mut self) -> Option<PhysAddr>;
+    fn alloc_frame(&mut self) -> Option<Frames>;
 }
 
 /// Errors from map / unmap / translate.
@@ -284,7 +287,11 @@ impl Mapper {
             let entry = unsafe { entry_ptr.read_volatile() };
 
             if entry & PageFlags::PRESENT == 0 {
-                let new = alloc.alloc_frame().ok_or(MapError::OutOfFrames)?;
+                let f = alloc.alloc_frame().ok_or(MapError::OutOfFrames)?;
+                debug_assert_eq!(f.order(), 0, "paging: FrameAlloc gave order {}", f.order());
+                // The table's token moves into the entry written below;
+                // `free_level` takes it back when it clears that entry.
+                let new = PhysAddr(f.into_entry());
                 unsafe { self.zero_frame(new) };
                 // Interior tables always writable, always non-NX.
                 // Setting USER here is fine — permission is masked by
@@ -613,16 +620,19 @@ impl Mapper {
         unsafe { self.table_ptr(self.root).add(idx).read_volatile() }
     }
 
-    /// Walk the user half (`PML4[0..KERNEL_PML4_FIRST)`), free every
-    /// present leaf and interior table, leave kernel-half entries
-    /// untouched. Does not free `self.root`.
+    /// Walk the user half (`PML4[0..KERNEL_PML4_FIRST)`), clear every
+    /// present entry and hand `free` the frame each one held, leaves and
+    /// interior tables alike; leave kernel-half entries untouched. Does
+    /// not free `self.root`.
     ///
     /// # Safety
-    /// `free` must return each frame to the allocator that produced it.
-    /// User leaves are 4 KiB; a 2 MiB leaf is a kernel bug.
+    /// Every present user-half entry holds an order-0 frame whose
+    /// [`Frames`] was consumed into it with `into_entry` (interior tables
+    /// by `map_page`, leaves by their owner), and no other token names
+    /// it. User leaves are 4 KiB; a 2 MiB leaf is a kernel bug.
     pub unsafe fn free_user_half<F>(&mut self, free: &mut F) -> UserFreeStats
     where
-        F: FnMut(PhysAddr),
+        F: FnMut(Frames),
     {
         let mut stats = UserFreeStats {
             leaves: 0,
@@ -632,7 +642,7 @@ impl Mapper {
         stats
     }
 
-    unsafe fn free_level<F: FnMut(PhysAddr)>(
+    unsafe fn free_level<F: FnMut(Frames)>(
         &mut self,
         table: PhysAddr,
         level: u8,
@@ -658,14 +668,18 @@ impl Mapper {
             let leaf = level == 1 || huge;
             if leaf {
                 assert!(level == 1 && !huge, "addrspace: unexpected huge user leaf");
-                free(child);
                 stats.leaves += 1;
             } else {
                 unsafe { self.free_level(child, level - 1, false, free, stats) };
-                free(child);
                 stats.tables += 1;
             }
+            // Clear the entry before its frame is rebuilt and freed.
             unsafe { ptr.add(i).write_volatile(0) };
+            // SAFETY: entry `i` of this table held `child`, an order-0 frame
+            // consumed with `into_entry` (this fn's `# Safety`, from
+            // `free_user_half`'s caller), and the store above just cleared
+            // it; the contract `pmm::Frames::from_entry` states.
+            free(unsafe { Frames::from_entry(child.as_u64(), 0) });
             i += 1;
         }
     }
@@ -839,61 +853,31 @@ pub fn tlb_shootdown_others(va: VirtAddr) {
     f(va);
 }
 
+// Host tests take their table frames from the shared buddy pool.
+#[cfg(test)]
+unsafe impl FrameAlloc for crate::pmm::testing::Pool {
+    fn alloc_frame(&mut self) -> Option<Frames> {
+        self.buddy.alloc(0)
+    }
+}
+
 // ------------------ host tests ------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pmm::testing::Pool;
 
-    use std::vec;
-    use std::vec::Vec;
-
-    /// Vec-backed physical memory + a bump `FrameAlloc` for host tests.
-    /// Handing out frames sequentially from a big slab of zeros is enough
-    /// coverage for the walk logic — the buddy allocator has its own
-    /// dedicated tests.
-    struct TestPool {
-        _mem: Vec<u64>,
-        hhdm_offset: u64,
-        next_frame: u64,
-        end: u64,
-    }
-
-    impl TestPool {
-        fn new(frames: usize) -> Self {
-            let words = (frames * PAGE_SIZE_4K as usize) / 8;
-            let mem: Vec<u64> = vec![0u64; words];
-            let ptr = mem.as_ptr() as u64;
-            let phys_base = 0x0100_0000; // 16 MiB, arbitrary
-            let hhdm_offset = ptr.wrapping_sub(phys_base);
-            Self {
-                _mem: mem,
-                hhdm_offset,
-                next_frame: phys_base,
-                end: phys_base + (frames as u64) * PAGE_SIZE_4K,
-            }
-        }
-    }
-
-    unsafe impl FrameAlloc for TestPool {
-        fn alloc_frame(&mut self) -> Option<PhysAddr> {
-            if self.next_frame >= self.end {
-                return None;
-            }
-            let p = self.next_frame;
-            self.next_frame += PAGE_SIZE_4K;
-            Some(PhysAddr(p))
-        }
-    }
-
-    fn fresh_mapper(pool: &mut TestPool) -> Mapper {
-        let root = <TestPool as FrameAlloc>::alloc_frame(pool).unwrap();
+    /// A mapper over a fresh root from `pool`. The root's token moves
+    /// into the mapper, which the test never tears down.
+    fn fresh_mapper(pool: &mut Pool) -> Mapper {
+        let root = PhysAddr(pool.alloc_frame().unwrap().into_entry());
         // Zero via the HHDM physmap.
-        let ptr = root.0.wrapping_add(pool.hhdm_offset) as *mut u64;
+        let ptr = root.0.wrapping_add(pool.hhdm()) as *mut u64;
         for i in 0..PTES_PER_TABLE {
             unsafe { ptr.add(i).write_volatile(0) };
         }
-        unsafe { Mapper::new(root, pool.hhdm_offset) }
+        unsafe { Mapper::new(root, pool.hhdm()) }
     }
 
     #[test]
@@ -942,7 +926,7 @@ mod tests {
 
     #[test]
     fn map_translate_unmap_4k() {
-        let mut pool = TestPool::new(64);
+        let mut pool = Pool::new(64);
         let mut m = fresh_mapper(&mut pool);
         let va = VirtAddr(0xFFFF_C000_0010_0000);
         let pa = PhysAddr(0x0080_0000);
@@ -973,7 +957,7 @@ mod tests {
 
     #[test]
     fn map_translate_2m() {
-        let mut pool = TestPool::new(64);
+        let mut pool = Pool::new(64);
         let mut m = fresh_mapper(&mut pool);
         let va = VirtAddr(0xFFFF_8000_0020_0000);
         let pa = PhysAddr(0x0040_0000);
@@ -999,7 +983,7 @@ mod tests {
 
     #[test]
     fn misaligned_2m_rejected() {
-        let mut pool = TestPool::new(64);
+        let mut pool = Pool::new(64);
         let mut m = fresh_mapper(&mut pool);
         let va = VirtAddr(0xFFFF_8000_0020_1000); // not 2M-aligned
         let pa = PhysAddr(0x0040_0000);
@@ -1019,7 +1003,7 @@ mod tests {
 
     #[test]
     fn map_range_selects_2m_when_aligned() {
-        let mut pool = TestPool::new(256);
+        let mut pool = Pool::new(256);
         let mut m = fresh_mapper(&mut pool);
         let va = VirtAddr(0xFFFF_8000_0000_0000);
         let pa = PhysAddr(0);
@@ -1044,7 +1028,7 @@ mod tests {
 
     #[test]
     fn map_range_splits_head_tail_to_4k() {
-        let mut pool = TestPool::new(1024);
+        let mut pool = Pool::new(1024);
         let mut m = fresh_mapper(&mut pool);
         // Start at a 4K boundary that isn't 2M aligned, so the first
         // stretch has to be 4K until we roll into a 2M boundary; then
@@ -1067,7 +1051,7 @@ mod tests {
 
     #[test]
     fn overlap_without_remap_errors() {
-        let mut pool = TestPool::new(64);
+        let mut pool = Pool::new(64);
         let mut m = fresh_mapper(&mut pool);
         let va = VirtAddr(0xFFFF_C000_0000_0000);
         let pa = PhysAddr(0x0080_0000);
@@ -1111,7 +1095,7 @@ mod tests {
 
     #[test]
     fn page_size_mismatch_rejected() {
-        let mut pool = TestPool::new(64);
+        let mut pool = Pool::new(64);
         let mut m = fresh_mapper(&mut pool);
         let va = VirtAddr(0xFFFF_8000_0040_0000);
         // Place a 2M leaf.
@@ -1145,7 +1129,7 @@ mod tests {
 
     #[test]
     fn patch_uc_preserves_2m_and_sets_bits() {
-        let mut pool = TestPool::new(1024);
+        let mut pool = Pool::new(1024);
         let mut m = fresh_mapper(&mut pool);
         // Fake up a physmap at HHDM_START mapping [0, 4 MiB) with 2M pages.
         let hhdm = VirtAddr(0xFFFF_8000_0000_0000);
@@ -1183,7 +1167,7 @@ mod tests {
         // patch_physmap_uc walks the physmap PTEs, so a phys address the
         // physmap doesn't cover must surface as `NotMapped` — not the
         // easily-misread `AlreadyMapped`.
-        let mut pool = TestPool::new(1024);
+        let mut pool = Pool::new(1024);
         let mut m = fresh_mapper(&mut pool);
         let hhdm = VirtAddr(0xFFFF_8000_0000_0000);
         // Deliberately do NOT map anything into hhdm before patching.
@@ -1211,7 +1195,7 @@ mod tests {
 
     #[test]
     fn walk_ranges_coalesces_and_skips_holes() {
-        let mut pool = TestPool::new(256);
+        let mut pool = Pool::new(256);
         let mut m = fresh_mapper(&mut pool);
         let a = VirtAddr(0xFFFF_C000_0000_0000);
         let b = VirtAddr(0xFFFF_C000_0020_0000); // 2 MiB later

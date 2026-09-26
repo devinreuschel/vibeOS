@@ -12,12 +12,11 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use vibeos::ipi::{home_cpu, pick_cpu};
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::lock::RANK_SCHED;
-use vibeos::paging::VirtAddr;
 use vibeos::sched::{
     FAR_DEADLINE, SWEEP_TICKS, TimeoutQueue, effective_deadline, enqueue_runnable, take_next,
 };
 use vibeos::thread::{
-    CpuAffinity, CpuContext, KernelStack, MAX_THREADS, Tcb, ThreadId, ThreadState, WaitOutcome,
+    CpuAffinity, CpuContext, MAX_THREADS, Tcb, ThreadId, ThreadState, WaitOutcome,
     apply_if_on_resume, prepare_thread, switch_context,
 };
 use vibeos::time::Instant;
@@ -155,11 +154,8 @@ fn thread_exit() -> ! {
     unsafe {
         let p = per_cpu_init::current_thread();
         (*p).state = ThreadState::Dead;
-        if let Some(ks) = (*p).stack.take() {
-            kva_init::defer_free(GuardedStack {
-                guard: VirtAddr(ks.guard),
-                pages: ks.pages,
-            });
+        if let Some(stack) = (*p).stack.take() {
+            kva_init::defer_free(stack)
         }
     }
     schedule();
@@ -217,7 +213,7 @@ fn schedule_inner(from_irq: bool) {
         }
 
         if !from_irq {
-            let ticks = per_cpu_init::current().ticks;
+            let ticks = per_cpu_init::current().remote.ticks.load(Ordering::Relaxed);
             if ticks.is_multiple_of(SWEEP_TICKS) {
                 for t in s.timeouts.overdue(now) {
                     if n_overdue < overdue.len() {
@@ -282,7 +278,11 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
     per_cpu_init::with_current_switch(|cpu| {
         let delta = now.wrapping_sub(cpu.slice_tsc);
         cpu.slice_tsc = now;
-        cpu.switches = cpu.switches.wrapping_add(1);
+        // Single writer: only this CPU stores its `switches`.
+        let switches = cpu.remote.switches.load(Ordering::Relaxed);
+        cpu.remote
+            .switches
+            .store(switches.wrapping_add(1), Ordering::Relaxed);
         unsafe {
             (*old_ptr).run_tsc = (*old_ptr).run_tsc.wrapping_add(delta);
             (*old_ptr).switches = (*old_ptr).switches.wrapping_add(1);
@@ -297,9 +297,14 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
             );
             per_cpu_init::set_current_thread(cpu, new_ptr);
             crate::syscall_init::on_switch(cpu, old_ptr, new_ptr);
-            switch_context(&mut (*old_ptr).context, &(*new_ptr).context);
         }
     });
+    // SAFETY: both TCBs are live entries of `SCHED` that this CPU runs
+    // or was given, established at `thread_init::schedule_inner` and
+    // `thread_init::switch_to`, and IF=0 under their `InterruptGuard`,
+    // which spans the switch; the `&mut PerCpu` above has ended (DESIGN
+    // §7.5).
+    unsafe { switch_context(&mut (*old_ptr).context, &(*new_ptr).context) };
 }
 
 fn relink(s: &mut Sched) {
@@ -508,16 +513,17 @@ pub fn make_ready(id: ThreadId) {
 }
 
 /// AP idle: running on `stack` already. No synthetic frame, not on the FIFO.
-pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Option<ThreadId> {
-    let ks = KernelStack {
-        guard: stack.guard.as_u64(),
-        pages: stack.pages,
-    };
+/// `Err(stack)` hands the stack back when no TCB slot is free.
+#[allow(
+    clippy::result_large_err,
+    reason = "the stack comes back by value so the caller frees it once; a Box would allocate on the failure path"
+)]
+pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, GuardedStack> {
     let mut tcb = Box::new(Tcb {
         id: ThreadId(0),
         name: "idle",
         state: ThreadState::Running,
-        stack: Some(ks),
+        stack: Some(stack),
         context: CpuContext::empty(),
         entry: ap_idle_entry,
         next: None,
@@ -533,14 +539,15 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Option<ThreadId> {
         syscall_count: 0,
         pid: 0,
     });
-    let id = with_sched(|s| {
-        let slot = s.slots.iter().position(|x| x.is_none())?;
+    with_sched(|s| {
+        let Some(slot) = s.slots.iter().position(|x| x.is_none()) else {
+            return Err(tcb.stack.take().expect("adopt_ap_idle: stack set above"));
+        };
         let id = ThreadId(slot as u32);
         tcb.id = id;
         s.slots[slot] = Some(tcb);
-        Some(id)
-    })?;
-    Some(id)
+        Ok(id)
+    })
 }
 
 /// Timeout path: TCB never ran. Return the stack so the caller can free it.
@@ -549,11 +556,7 @@ pub fn abandon_ap_idle(id: ThreadId) -> Option<GuardedStack> {
         s.timeouts.remove(id);
         let t = s.get_mut(id)?;
         t.state = ThreadState::Dead;
-        let ks = t.stack.take()?;
-        Some(GuardedStack {
-            guard: VirtAddr(ks.guard),
-            pages: ks.pages,
-        })
+        t.stack.take()
     })
 }
 
@@ -583,10 +586,8 @@ fn spawn_inner(
     let stack = kva_init::alloc_guarded_stack(stack_pages).expect("thread stack");
     let top = stack.top().as_u64();
     assert!(top.is_multiple_of(16), "kva stack top not 16-aligned");
-    let ks = KernelStack {
-        guard: stack.guard.as_u64(),
-        pages: stack.pages,
-    };
+    // Taken by whichever path below installs it in a TCB.
+    let mut stack = Some(stack);
     let tramp = trampoline as *const () as u64;
     let cur = current_id();
     let idle = per_cpu_init::current().idle_id;
@@ -603,6 +604,7 @@ fn spawn_inner(
         s.timeouts.remove(id);
         let tcb = s.slots[slot].as_mut().expect("dead slot");
         assert!(tcb.stack.is_none(), "dead tcb still owns stack");
+        let ks = stack.take().expect("spawn_inner: stack taken once");
         fill_tcb(
             tcb, name, entry, affinity, cpu, ks, top, tramp, irq_nest, pid, as_cr3,
         );
@@ -618,7 +620,7 @@ fn spawn_inner(
         id: ThreadId(0),
         name,
         state: ThreadState::Ready,
-        stack: Some(ks),
+        stack,
         context: CpuContext::empty(),
         entry,
         next: None,
@@ -662,7 +664,7 @@ fn fill_tcb(
     entry: fn(),
     affinity: CpuAffinity,
     cpu: u32,
-    ks: KernelStack,
+    ks: GuardedStack,
     top: u64,
     tramp: u64,
     irq_nest: u32,

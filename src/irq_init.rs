@@ -266,7 +266,7 @@ pub fn set_affinity(vec: u8, cpu: u32) -> Result<(), IrqError> {
 }
 
 fn apic_id(cpu: u32) -> Option<u8> {
-    per_cpu_init::cpu(cpu).map(|c| c.apic_id as u8)
+    per_cpu_init::cpu(cpu).map(|c| c.apic_id.load(Ordering::Relaxed) as u8)
 }
 
 pub fn route_intx(

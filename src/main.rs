@@ -177,7 +177,7 @@ fn normal_boot_tail() {
     unsafe { kva_init::init() };
     {
         let stack = kva_init::alloc_guarded_stack(4).expect("kva stack probe");
-        unsafe { (stack.mapped_base().as_u64() as *mut u64).write_volatile(0x5A5A_5A5A_5A5A_5A5A) };
+        unsafe { (stack.base().as_u64() as *mut u64).write_volatile(0x5A5A_5A5A_5A5A_5A5A) };
         kva_init::free_stack(stack);
     }
     crate::marker!(marker::KVA_READY);

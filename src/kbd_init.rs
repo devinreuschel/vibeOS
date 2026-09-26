@@ -125,7 +125,9 @@ fn route_keyboard() -> Option<u32> {
     let isos = &madt.isos[..madt.iso_count];
     let gsi = apic::gsi_for_isa_irq(1, isos);
     let (trig, pol) = iso_irq1(isos, gsi);
-    let dest = per_cpu_init::cpu(0).map(|c| c.apic_id as u8).unwrap_or(0);
+    let dest = per_cpu_init::cpu(0)
+        .map(|c| c.apic_id.load(Ordering::Relaxed) as u8)
+        .unwrap_or(0);
     if apic_init::route_gsi(gsi, vectors::KBD, dest, trig, pol).is_err() {
         return None;
     }

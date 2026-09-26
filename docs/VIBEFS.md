@@ -65,10 +65,10 @@ Why CoW, not WAL:
   without the journal. The block layer orders nothing, and a `Flush` covers
   only writes whose completion was reported before it was submitted, so a
   commit waits for its block writes before it sends one. v1 writes through the
-  block cache, whose flush writes each dirty page and waits for it, but skips
-  pages `blk-wb` is still writing (F015; ROADMAP §12.5, after §10.11 adds the
-  wait under F043). The RAM-backed `/vibe` volume has no device or cache to
-  wait for.
+  block cache, whose flush writes each dirty page, waits for it and for every
+  page `blk-wb` or an eviction is still writing, and only then sends the
+  `Flush` (DESIGN §10.6). The RAM-backed `/vibe` volume has no device or cache
+  to wait for.
 
 WAL was the alternative if we wanted in-place file data and a small log. We
 do not: file data that replaces existing bytes is also CoW, so a crash during
@@ -119,11 +119,14 @@ Larger volumes, more inodes, or a bigger block size are a version bump.
 
 A volume smaller than 16 blocks is invalid (`mkfs` refuses).
 
-v1 code does not enforce the file size limit yet: a `write` just below
-file offset 2^44 makes the next access to that block overflow
-`map_block`'s `u32` arithmetic, which panics the kernel, since both
-Cargo profiles check overflow (DESIGN §3.5), and an offset of 2^44 or
-more wraps onto the file's low blocks (F008; ROADMAP §10.11).
+The file size limit is enforced (`vibefs::MAX_FILE_SIZE`): a file ends
+at or below byte 2^44 − 4096, so its last block index is at most
+2^32 − 2. `Vol::write` refuses a write that starts at or past the limit
+with `FileTooBig` (`EFBIG`), leaving the file unchanged, and shortens one
+that would cross it to end at the limit. `truncate` refuses a larger
+size with `FileTooBig`, and `lseek` refuses a larger offset with
+`EINVAL`. Block arithmetic is checked `u64`, converted to a `u32` block
+index only after the check (F008; ROADMAP §10.11).
 
 ---
 
@@ -266,17 +269,6 @@ commit rule still holds. After any sequence of commits and remounts, every
 block from 2 on with a refcount above 0 is reachable from the live tree or a
 snapshot. v1 code does not meet this yet:
 
-- the alloc map it writes omits the commit's own drops, which happen only
-  in memory, so the blocks the last commit of a mount session replaced stay
-  allocated on disk (F049; ROADMAP §10.11)
-- after the super flush, commit re-marks only the alloc and inode blocks as
-  metadata, so the next commit never drops the directory blocks it wrote; a
-  64-block volume stops committing after about 57 syncs (F014; ROADMAP
-  §10.11)
-- mount's table holds 48 metadata blocks (`MAX_META`), fewer than the 73
-  above, and fails past that, and commit does not check the cap, so a
-  volume within v1's caps can fail to commit and commit can write a volume
-  that mount rejects (F014; ROADMAP §10.11)
 - a `write` that needs a fifth extent fails and leaks a block (§13, F051;
   ROADMAP §10.11)
 
@@ -435,9 +427,10 @@ One transaction = one generation bump.
    the slot opposite the super this mount last mounted or committed. The
    generation and roots change in memory only after step 6 succeeds.
 6. `Flush`.
-7. In memory, drop refcounts on the replaced metadata and data. The other
-   slot keeps the previous generation, which mount falls back to when the
-   new super is torn; never copy the new super into it.
+7. In memory, apply the drops that step 3's alloc map already carries: the
+   refcounts of the replaced metadata and data. The other slot keeps the
+   previous generation, which mount falls back to when the new super is
+   torn; never copy the new super into it.
 
 Each step starts only after the one before it has completed, since the
 block layer orders nothing (DESIGN §10.2). Steps 5 and 6 together are a
@@ -448,9 +441,10 @@ device the block layer runs them as written.
 Steps 1 to 4 make every allocation the commit needs, blocks and kernel
 memory alike, including the memory step 7 uses; steps 5 to 7 allocate
 nothing, so a commit whose super is durable always finishes its switch
-in memory (DESIGN §4.4). v1's commit allocates no kernel memory,
-and ROADMAP §10.11's F014 box moves its one table-slot check, `MAX_META`,
-before step 5.
+in memory (DESIGN §4.4). v1's commit allocates no kernel memory, and
+it counts the metadata blocks it will write against `MAX_META` before
+step 2, failing with `NoSpace` while the old super is live, so recording
+them as the new generation's metadata after step 6 cannot fail.
 
 An error at step 5 or 6 leaves the new super's state unknown: the write
 may have reached the media before the error was reported, and a later
@@ -533,17 +527,31 @@ that snapshot and not from its successor, and sits in the sub-list for its
 birth range. Within one tree, a metadata block that two pointers reach is an
 error.
 
-v1 `fsck-vibefs` does not run every step yet (F067; ROADMAP §10.11). It
-mounts the volume as the kernel does, which covers steps 1 to 3 and counts a
-mount failure as one error. Then it checks each extent (`len ≥ 1`,
-`phys ≥ 2`, `phys + len ≤ nblocks`, data CRC), the `nlink` of each directory
-except root against the entries naming it, and, for blocks 2 to `nblocks` − 1,
-reachability against the refcounts. Beyond the inode kind that mount checks
-(§5), it does not check mode, a dirent's kind against its inode's,
-inline against size, duplicate names, regular-file `nlink`, or the bitmap.
-It does not walk snapshot trees, so a block only a snapshot reaches is a leak
-warning. It prints `fsck-vibefs: gen G errors E warnings W` and exits 1 on
-any error.
+v1 `fsck-vibefs` mounts the volume as the kernel does, which covers steps 1
+to 3; a mount failure, an out-of-range inode kind (§5) included, is one
+`mount` error. It then reports each defect in a class:
+
+| Class | Check |
+|---|---|
+| `extent` | each extent has `len ≥ 1`, `phys ≥ 2` and `phys + len ≤ nblocks` |
+| `data-crc` | each extent's data matches its CRC |
+| `mode` | a mode whose `S_IFMT` bits are non-zero names the inode's kind |
+| `kind` | a dirent's kind equals its inode's |
+| `dangling` | a dirent names an inode that exists |
+| `inline` | the inline flag is set only with `size ≤ 128` |
+| `dup-name` | no two entries of one directory share a name |
+| `dir-nlink` | each directory's `nlink`, root aside, equals the dirents naming it |
+| `nlink` | each other inode's `nlink` equals the dirents naming it |
+| `unreachable` | every inode is reachable from the root through dirents |
+| `ref-free` | a block from 2 on that the tree reaches has a refcount above 0 |
+| `bit-free` | such a block has its bitmap bit set |
+| `leak` | an unreachable block has a refcount of 0 and its bit clear (a warning) |
+
+Every class but `leak` is an error. It prints one
+`fsck-vibefs: <class> <count>` line per class it found, then
+`fsck-vibefs: gen G errors E warnings W`, and exits 1 on any error. It does
+not walk snapshot trees, so a block that only a snapshot reaches is a leak
+warning.
 
 v1 has no repair mode: `fsck-vibefs` takes no options and never writes, so
 leaked blocks stay allocated. The rule for a repair mode, when one is
@@ -586,10 +594,8 @@ v1's tests do not check this pass criterion yet:
 - the QEMU test (`tests/harness/run_vibefs_crash.py`) passes when
   `fsck-vibefs` prints `errors 0`. It does not read `/crash/w` from the
   image or check it against that criterion. The guest ignores `sync_fs`
-  errors, and the 64-block image fills near generation 57 (§6, F014),
-  after which rounds kill a volume that no longer changes; and it kills
-  QEMU over a plain file image, which loses no write QEMU received (F080;
-  ROADMAP §10.2)
+  errors, and the harness kills QEMU over a plain file image, which loses
+  no write QEMU received (F080; ROADMAP §10.2)
 
 ---
 

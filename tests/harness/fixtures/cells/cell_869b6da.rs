@@ -2,13 +2,8 @@
 //!
 //! Three cells in the kernel:
 //! - [`crate::sync_init::SpinMutex`]: shared across CPUs
-//! - [`IrqCell`]: IRQ-off exclusive `&mut T` for CPU-local and boot-only state, and as an
-//!   unranked cross-CPU lock (DESIGN §2.3); same-CPU re-entry panics
+//! - [`IrqCell`]: CPU-local or boot-only mutable; IRQ-off + same-CPU re-entry panic
 //! - [`BootCell`]: write once before `smp: done`, then shared `&T`
-//!
-//! Both carry std's bounds, as `OnceLock` and `Mutex` do: `BootCell<T>` is `Sync` only when
-//! `T: Send + Sync`, `IrqCell<T>` only when `T: Send`, and each is `Send` when `T: Send`. The
-//! assertions below, built by the kernel and by `make test-unit`, fail the build otherwise.
 //!
 //! Kernel `mod cell` in `main.rs`. Host tests: `#[cfg(test)]` in `vibeos-core`.
 
@@ -38,13 +33,9 @@ pub struct BootCell<T> {
     state: AtomicU8,
 }
 
-// SAFETY: invariant I22, established at `cell::BootCell::set`: the one
-// write happens before the Release store of `state` that every reader
-// Acquires, and afterwards only `&T` is handed out, so sharing the cell
-// shares `&T` (needs `T: Sync`) and lets any holder's thread see the value
-// the setter's thread moved in (needs `T: Send`). `Send` is the auto trait:
-// `UnsafeCell<MaybeUninit<T>>` is `Send` exactly when `T: Send`.
-unsafe impl<T: Send + Sync> Sync for BootCell<T> {}
+// After `set`, `&T` is shared. Caller puts a `Sync` `T` in the cell.
+unsafe impl<T> Sync for BootCell<T> {}
+unsafe impl<T> Send for BootCell<T> {}
 
 // Write-once; Default would look like a normal cell.
 #[allow(clippy::new_without_default)]
@@ -100,12 +91,8 @@ pub struct IrqCell<T> {
     owner: AtomicU32,
 }
 
-// SAFETY: `IrqCell::with` gives `&mut T` to one holder at a time (the
-// `owner` compare-exchange, Acquire, and its Release unlock); established
-// here. Handing `&mut T` to whichever CPU holds the cell moves `T` between
-// threads, so it needs `T: Send`, as `Mutex` does. `Send` is the auto
-// trait: `UnsafeCell<T>` is `Send` exactly when `T: Send`.
-unsafe impl<T: Send> Sync for IrqCell<T> {}
+unsafe impl<T> Sync for IrqCell<T> {}
+unsafe impl<T> Send for IrqCell<T> {}
 
 impl<T> IrqCell<T> {
     pub const fn new(v: T) -> Self {
@@ -140,69 +127,19 @@ impl<T> IrqCell<T> {
         f(unsafe { &mut *self.data.get() })
     }
 
-    /// Address of the payload. `lidt`, and AP `ap_entry` before `GS_BASE`
-    /// (InterruptGuard would `gs:[0]`).
+    /// Address of the payload. `lidt` / setjmp / longjmp, and AP `ap_entry`
+    /// before `GS_BASE` (InterruptGuard would `gs:[0]`).
     #[inline]
     pub fn as_ptr(&self) -> *mut T {
         self.data.get()
     }
 
-    /// Clear the owner so the next `with` takes the cell. For the panic
-    /// dump and the in-guest catch of a re-entry panic.
-    ///
-    /// # Safety
-    /// The recorded holder never touches the payload again: its CPU is
-    /// stopped on the panic path (DESIGN §2.5), or an `arch::catch`
-    /// longjmp skipped its `Unlock` and its closure will not resume.
-    pub unsafe fn force_unlock(&self) {
+    /// Panic dump and in-guest catch of a re-entry panic: other CPUs are
+    /// halted or the Drop path was skipped by longjmp.
+    pub fn force_unlock(&self) {
         self.owner.store(0, Ordering::Release);
     }
 }
-
-/// Fail the build unless `$ty` implements `$tr`.
-macro_rules! assert_impl {
-    ($ty:ty: $tr:path) => {
-        const _: () = {
-            const fn implements<T: ?Sized + $tr>() {}
-            implements::<$ty>();
-        };
-    };
-}
-pub(crate) use assert_impl;
-
-/// Fail the build if `$ty` implements `$tr`.
-///
-/// `Probe<M>` has a blanket impl for every type at `M = ()` and a second
-/// impl at `M = Implements` for the types that implement `$tr`. Naming
-/// `<$ty as Probe<_>>` leaves `M` to inference, which succeeds only when
-/// exactly one impl applies, so the build fails exactly when `$ty: $tr`.
-macro_rules! assert_not_impl {
-    ($ty:ty: $tr:path) => {
-        const _: fn() = || {
-            trait Probe<M> {
-                fn probe() {}
-            }
-            impl<T: ?Sized> Probe<()> for T {}
-            struct Implements;
-            impl<T: ?Sized + $tr> Probe<Implements> for T {}
-            <$ty as Probe<_>>::probe();
-        };
-    };
-}
-pub(crate) use assert_not_impl;
-
-#[cfg(target_os = "none")]
-use alloc::rc::Rc;
-use core::cell::Cell;
-#[cfg(not(target_os = "none"))]
-use std::rc::Rc;
-
-// The bounds above, checked: `Rc` is neither `Send` nor `Sync`, `Cell` is
-// `Send` but not `Sync`.
-self::assert_not_impl!(IrqCell<Rc<()>>: Sync);
-self::assert_not_impl!(BootCell<Cell<u8>>: Sync);
-self::assert_not_impl!(BootCell<Rc<()>>: Send);
-self::assert_impl!(IrqCell<Cell<u8>>: Sync);
 
 fn owner_token() -> u32 {
     #[cfg(target_os = "none")]
@@ -254,9 +191,7 @@ mod tests {
             });
         }));
         assert!(hit.is_err());
-        // SAFETY: the unwind ended both `with` closures, so the recorded
-        // holder never touches the payload again; established here.
-        unsafe { c.force_unlock() };
+        c.force_unlock();
         c.with(|v| *v = 1);
         assert_eq!(c.with(|v| *v), 1);
     }

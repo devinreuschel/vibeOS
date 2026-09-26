@@ -87,6 +87,13 @@ why = "claim: missing edge found by the Phase 10 planning survey and review (sur
 # Phase 10 boxes.
 
 [[box]]
+key = "vibefs `commit` calls `mark_meta` on"
+needs = [
+  "vibefs `commit` writes an alloc-map",  # L1494
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
 key = "the `-smp 4` `ipi: ack timeout` panic root-caused and fixed"
 needs = [
   "the in-guest registry runs in production's interrupt context",
@@ -325,9 +332,20 @@ needs = ["`PerCpu` split into owner-only state and a remote view"]
 why = "text: lands after the F039 box above"
 
 [[box]]
+key = "`DmaBuffer` and `GuardedStack` are move-only"
+needs = [
+  "`make test-unit` runs doc tests,",  # L1293
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
 key = "the buddy hands out an owner token"
-needs = ["`DmaBuffer` and `GuardedStack` are move-only handles"]
-why = "text: lands with or after the box above"
+needs = [
+  "`DmaBuffer` and `GuardedStack` are move-only handles",
+  "`make test-unit` runs doc tests,",  # L1293
+  "`kva_init::vmap` returns a move-only handle",  # L1299
+]
+why = "text: lands with or after the box above; claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
 
 [[box]]
 key = "an IF-off tracer in an `irqoff` build variant"
@@ -487,3 +505,11 @@ why = "the §9.4 deferral box"
 key = "`elf::parse` host tests also cover checked-in static binaries"
 closes = ["host tests that parse checked-in static binaries"]
 why = "the §9.4 deferral box"
+
+# L1286
+[[box]]
+key = "`scripts/check_cells.py` reads each `unsafe impl`"
+needs = [
+  "`BootCell<T>` is `Sync` only when",  # L1284
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"

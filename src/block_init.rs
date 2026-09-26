@@ -10,7 +10,7 @@ use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::block::{
-    self, BlockError, DeviceState, MAX_QUEUE, Op, Queue, Ramdisk, Request, write_marker,
+    self, BlockError, Completion, DeviceState, MAX_QUEUE, Op, Queue, Ramdisk, Request, write_marker,
 };
 use vibeos::lock::RANK_DEVICE;
 use vibeos::sched::FAR_DEADLINE;
@@ -42,6 +42,7 @@ static STATE: AtomicU8 = AtomicU8::new(0);
 static FAIL_NEXT: AtomicU32 = AtomicU32::new(0);
 static LIVE: AtomicBool = AtomicBool::new(false);
 static IO_REQS: AtomicU64 = AtomicU64::new(0);
+static FLUSHES: AtomicU64 = AtomicU64::new(0);
 
 fn ram() -> Ramdisk {
     Ramdisk::new(RAM0_NAME, RAM0_BLOCK_SIZE, RAM0_SECTORS).expect("ram0 geom")
@@ -113,11 +114,94 @@ impl IoWaiter {
         }
     }
 
-    fn finish(&self, res: Result<(), BlockError>) {
-        self.done.store(pack(res), Ordering::Release);
+    /// Complete the waiter: under SCHED, wake its queue, then store `done`
+    /// with Release as the last access to it (DESIGN §2.8, §10.1). `wait`
+    /// can return through the lock-free `poll` the moment that store is
+    /// visible, so nothing after it may touch `*this`. A raw pointer, not
+    /// `&self`: a reference argument counts as dereferenceable for the
+    /// whole call, so the compiler could read `*self` after the store.
+    ///
+    /// # Safety
+    ///
+    /// `this` points to a live waiter whose `done` is `ST_PEND`, and it
+    /// stays live until this call's `done` store and no longer.
+    unsafe fn finish(this: *const IoWaiter, res: Result<(), BlockError>) {
+        let st = pack(res);
+        #[cfg(feature = "kernel_tests")]
+        testing::finish_stall();
         thread_init::with_sched(|s| {
-            s.wake_all(unsafe { &mut *self.wq.get() });
+            // SAFETY: invariant I11 (DESIGN §2.7), established at
+            // `block_init::IoWaiter::wait`: `wait` cannot return before the
+            // `done` store below, so the waiter is live here, and its `wq`
+            // is touched only under SCHED, which this closure holds.
+            s.wake_all(unsafe { &mut *(*this).wq.get() });
+            // SAFETY: invariant I11, as above (`block_init::IoWaiter::wait`):
+            // the waiter is live until this store, which is the last access.
+            unsafe { (*this).done.store(st, Ordering::Release) };
         });
+    }
+}
+
+/// Test hooks for the completion path (`lifetime_iowaiter_publish_last`,
+/// ROADMAP §10.10). `kernel_tests` only (AGENTS.md rule 9).
+#[cfg(feature = "kernel_tests")]
+pub mod testing {
+    use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+    use crate::time_init;
+
+    static STALLS_LEFT: AtomicU32 = AtomicU32::new(0);
+    static STALL_MAX_US: AtomicU32 = AtomicU32::new(0);
+    static STALLS_RUN: AtomicU32 = AtomicU32::new(0);
+    static RETURNS: AtomicU64 = AtomicU64::new(0);
+
+    /// Hold the next `count` completers just before they take SCHED, each
+    /// until a submitter calls [`note_return`] or `max_us` passes.
+    pub fn arm_finish_stall(count: u32, max_us: u32) {
+        STALLS_RUN.store(0, Ordering::Relaxed);
+        STALL_MAX_US.store(max_us, Ordering::Relaxed);
+        STALLS_LEFT.store(count, Ordering::Release);
+    }
+
+    pub fn disarm_finish_stall() {
+        STALLS_LEFT.store(0, Ordering::Release);
+    }
+
+    /// A submitter's request returned to it; ends a running stall.
+    pub fn note_return() {
+        RETURNS.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn finish_stalls_run() -> u32 {
+        STALLS_RUN.load(Ordering::Acquire)
+    }
+
+    /// Take one armed stall, if any is left, and spin until a submitter
+    /// returns or the bound passes. IF is left as found.
+    pub(super) fn finish_stall() {
+        let mut left = STALLS_LEFT.load(Ordering::Acquire);
+        loop {
+            let Some(next) = left.checked_sub(1) else {
+                return;
+            };
+            match STALLS_LEFT.compare_exchange_weak(left, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => break,
+                Err(now) => left = now,
+            }
+        }
+        STALLS_RUN.fetch_add(1, Ordering::AcqRel);
+        let k = time_init::tsc_per_ms();
+        if k == 0 {
+            return;
+        }
+        let max = k.saturating_mul(u64::from(STALL_MAX_US.load(Ordering::Relaxed))) / 1000;
+        let r0 = RETURNS.load(Ordering::Acquire);
+        let t0 = time_init::read_tsc();
+        while RETURNS.load(Ordering::Acquire) == r0 && time_init::read_tsc().wrapping_sub(t0) < max
+        {
+            core::hint::spin_loop();
+        }
     }
 }
 
@@ -126,7 +210,10 @@ fn complete_req(req: &Request, res: Result<(), BlockError>) {
     while i < req.nwait {
         let p = req.waiters[i as usize];
         if p != 0 {
-            unsafe { &*(p as *const IoWaiter) }.finish(res);
+            // SAFETY: invariant I11 (DESIGN §10.1): the cookie is a live
+            // waiter registered by `block_init::submit` or
+            // `virtio_blk_init::submit`, and this completer claimed the request.
+            unsafe { IoWaiter::finish(p as *const IoWaiter, res) }
         }
         i += 1;
     }
@@ -158,43 +245,77 @@ fn execute(req: &Request) -> Result<(), BlockError> {
     ram().apply(&mut data[..], req)
 }
 
-fn fail_rest() {
-    STATE.store(DeviceState::Failed.as_u8(), Ordering::Release);
-    let mut dump = [None; MAX_QUEUE];
-    let n = {
-        let mut q = Q.lock();
-        q.fail();
-        q.drain(&mut dump)
-    };
-    let mut i = 0usize;
-    while i < n {
-        if let Some(r) = dump[i] {
-            complete_req(&r, Err(BlockError::Failed));
+/// Take every queued request and every pending emulated-`Fua` `Flush`
+/// off `Q` and fail their waiters, after dropping the lock each round.
+fn drain_failed(q_prep: fn(&mut Queue)) {
+    let mut first = true;
+    loop {
+        let mut dump = [None; MAX_QUEUE];
+        let n = {
+            let mut q = Q.lock();
+            if first {
+                q_prep(&mut q);
+                first = false;
+            }
+            q.drain(&mut dump)
+        };
+        if n == 0 {
+            return;
         }
-        i += 1;
+        let mut i = 0usize;
+        while i < n {
+            if let Some(r) = dump[i] {
+                complete_req(&r, Err(BlockError::Failed));
+            }
+            i += 1;
+        }
     }
 }
 
+fn fail_rest() {
+    STATE.store(DeviceState::Failed.as_u8(), Ordering::Release);
+    drain_failed(Queue::fail);
+}
+
+/// Retire `req`'s dispatch in `Q`, then wake its waiters after the lock
+/// drops, unless the queue defers the report to an emulated-`Fua` `Flush`.
 fn finish(mut req: Request, res: Result<(), BlockError>) {
+    let seq = u64::from(req.seq);
+    let mut q = Q.lock();
     match res {
-        Ok(()) => complete_req(&req, Ok(())),
+        Ok(()) => {
+            let c = q.complete(seq);
+            drop(q);
+            if c == Completion::Report {
+                complete_req(&req, Ok(()));
+            }
+        }
         Err(e) if e.retryable() && req.retries_left > 0 => {
             req.retries_left -= 1;
-            let mut q = Q.lock();
-            if q.requeue(req).is_err() {
-                drop(q);
+            let requeued = q.requeue(req);
+            drop(q);
+            if requeued.is_err() {
                 complete_req(&req, Err(BlockError::Failed));
                 fail_rest();
             }
         }
         Err(e) if e.retryable() => {
+            q.abort(seq);
+            drop(q);
             complete_req(&req, Err(BlockError::Failed));
             fail_rest();
         }
-        Err(e) => complete_req(&req, Err(e)),
+        Err(e) => {
+            q.abort(seq);
+            drop(q);
+            complete_req(&req, Err(e));
+        }
     }
 }
 
+/// Runs inline in the submitter. It loops while `pick` has work, so an
+/// emulated-`Fua` write's `Flush` runs in the same pass: nothing else
+/// pumps ram0.
 fn pump() {
     loop {
         let req = {
@@ -207,6 +328,9 @@ fn pump() {
                 }
             }
         };
+        if req.bio.op == Op::Flush {
+            FLUSHES.fetch_add(1, Ordering::Relaxed);
+        }
         let res = execute(&req);
         finish(req, res);
     }
@@ -229,16 +353,16 @@ fn submit_req(req: Request) -> Result<bool, BlockError> {
     }
 }
 
-/// Async submit. `buf` must stay live until `w` completes. Flush/barrier
-/// / discard pass `ptr = 0`, `len = 0`.
-pub fn submit(
+/// Check a request and tie it to `w`. Flush and discard pass `ptr = 0`,
+/// `len = 0`.
+fn build(
     op: Op,
     lba: u64,
     nsect: u32,
     ptr: usize,
     len: usize,
     w: &IoWaiter,
-) -> Result<(), BlockError> {
+) -> Result<Request, BlockError> {
     if !LIVE.load(Ordering::Acquire) {
         return Err(BlockError::Failed);
     }
@@ -254,7 +378,7 @@ pub fn submit(
             }
             req = req.with_seg(ptr, len);
         }
-        Op::Flush | Op::Barrier => {
+        Op::Flush => {
             if nsect != 0 || len != 0 {
                 return Err(BlockError::Inval);
             }
@@ -265,9 +389,26 @@ pub fn submit(
             }
         }
     }
+    Ok(req)
+}
+
+fn start(req: Request) -> Result<(), BlockError> {
     let start = submit_req(req)?;
     kick_if(start);
     Ok(())
+}
+
+/// Async submit. `buf` must stay live until `w` completes. Flush and
+/// discard pass `ptr = 0`, `len = 0`.
+pub fn submit(
+    op: Op,
+    lba: u64,
+    nsect: u32,
+    ptr: usize,
+    len: usize,
+    w: &IoWaiter,
+) -> Result<(), BlockError> {
+    start(build(op, lba, nsect, ptr, len, w)?)
 }
 
 fn blocking(op: Op, lba: u64, nsect: u32, ptr: usize, len: usize) -> Result<(), BlockError> {
@@ -298,15 +439,29 @@ pub fn flush() -> Result<(), BlockError> {
     blocking(Op::Flush, 0, 0, 0, 0)
 }
 
+/// Write `buf` at `lba` with `Fua`: durable when this returns `Ok`.
+pub fn write_fua(lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+    let bs = RAM0_BLOCK_SIZE as usize;
+    if bs == 0 || !buf.len().is_multiple_of(bs) {
+        return Err(BlockError::Inval);
+    }
+    let nsect = (buf.len() / bs) as u32;
+    let w = IoWaiter::new();
+    let req = build(Op::Write, lba, nsect, buf.as_ptr() as usize, buf.len(), &w)?.with_fua();
+    start(req)?;
+    w.wait()
+}
+
+/// `Flush` requests dispatched to ram0, emulated-`Fua` ones included.
+pub fn flushes() -> u64 {
+    FLUSHES.load(Ordering::Relaxed)
+}
+
 pub fn discard(lba: u64, nsectors: u64) -> Result<(), BlockError> {
     if nsectors > u32::MAX as u64 {
         return Err(BlockError::Inval);
     }
     blocking(Op::Discard, lba, nsectors as u32, 0, 0)
-}
-
-pub fn barrier() -> Result<(), BlockError> {
-    blocking(Op::Barrier, 0, 0, 0, 0)
 }
 
 pub fn live() -> bool {
@@ -342,20 +497,10 @@ pub fn inject_io_fails(n: u32) {
 pub fn reset() {
     FAIL_NEXT.store(0, Ordering::SeqCst);
     STATE.store(DeviceState::Ready.as_u8(), Ordering::Release);
-    let mut dump = [None; MAX_QUEUE];
-    let n = {
-        let mut q = Q.lock();
+    drain_failed(|q| {
         q.failed = false;
         q.running = false;
-        q.drain(&mut dump)
-    };
-    let mut i = 0usize;
-    while i < n {
-        if let Some(r) = dump[i] {
-            complete_req(&r, Err(BlockError::Failed));
-        }
-        i += 1;
-    }
+    });
 }
 
 struct Ram0;

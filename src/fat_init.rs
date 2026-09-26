@@ -3,12 +3,12 @@
 //! The volume lives in BSS. A busy flag (not the IRQ-off mutex) is held
 //! across I/O so RANK_DEVICE is not nested with the cache and VFS is
 //! never held at the same time (DESIGN §2.1 / #62 ACK). `sync` uses
-//! cache/device Flush, not Barrier (DESIGN §10.2).
+//! cache/device Flush (DESIGN §10.2).
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use vibeos::fat::{self, Disk, FatError, FatVol, INITRD_BYTES, Node, SEC};
+use vibeos::fat::{self, Disk, FatError, FatVol, INITRD_BYTES, InoKey, InoRef, Node, SEC};
 use vibeos::fs::{FatFs, FsError, FsType, MAX_PATH};
 use vibeos::lock::RANK_DEVICE;
 
@@ -255,32 +255,41 @@ pub fn readdir(id: u8, dir_clu: u32, cookie: u64, out: &mut Node) -> Result<Opti
     with_slot(id, |v, d| v.readdir(d, dir_clu, cookie, out)).map_err(FatError::to_fs)
 }
 
-pub fn read(id: u8, clu: u32, size: u32, off: u64, buf: &mut [u8]) -> Result<usize, FsError> {
-    with_slot(id, |v, d| v.read(d, clu, size, off, buf)).map_err(FatError::to_fs)
+/// Walk `path` and count a reference to the inode it names, in one
+/// volume-lock section.
+pub fn walk_iget(id: u8, path: &[u8]) -> Result<(Node, InoRef), FsError> {
+    with_slot(id, |v, d| {
+        let n = v.walk(d, path)?;
+        let r = v.iget(n.dir_clu, n.dir_off)?;
+        Ok((n, r))
+    })
+    .map_err(FatError::to_fs)
 }
 
-#[allow(clippy::too_many_arguments)] // FAT dirent + cluster + size update
+/// Drop a reference; the last one on an unlinked file frees its clusters.
+pub fn iput(id: u8, r: InoRef) -> Result<(), FsError> {
+    with_slot(id, |v, d| v.iput(d, r)).map_err(FatError::to_fs)
+}
+
+/// The size of the referenced inode `k`.
+pub fn size(id: u8, k: InoKey) -> Result<u64, FsError> {
+    with_slot(id, |v, _| Ok(v.inode_at(k)?.size)).map_err(FatError::to_fs)
+}
+
+pub fn read(id: u8, k: InoKey, off: u64, buf: &mut [u8]) -> Result<usize, FsError> {
+    with_slot(id, |v, d| v.read_ino(d, k, off, buf)).map_err(FatError::to_fs)
+}
+
+/// Write `buf` at `off`, or at the inode's size when `append` is set;
+/// the count written and the position written at.
 pub fn write(
     id: u8,
-    dir_clu: u32,
-    dir_off: u32,
-    ino: u32,
-    first: &mut u32,
-    size: &mut u32,
+    k: InoKey,
     off: u64,
+    append: bool,
     buf: &[u8],
-) -> Result<usize, FsError> {
-    let (n, clu, sz) = with_slot(id, |v, d| {
-        let mut c = *first;
-        let mut s = *size;
-        let n = v.write(d, dir_clu, dir_off, &mut c, &mut s, off, buf)?;
-        v.put_size(ino, c, s);
-        Ok((n, c, s))
-    })
-    .map_err(FatError::to_fs)?;
-    *first = clu;
-    *size = sz;
-    Ok(n)
+) -> Result<(usize, u64), FsError> {
+    with_slot(id, |v, d| v.write_ino(d, k, off, append, buf)).map_err(FatError::to_fs)
 }
 
 pub fn create(id: u8, dir_clu: u32, name: &[u8], dir: bool) -> Result<Node, FsError> {
@@ -291,26 +300,8 @@ pub fn unlink(id: u8, dir_clu: u32, name: &[u8], rmdir: bool) -> Result<(), FsEr
     with_slot(id, |v, d| v.unlink(d, dir_clu, name, rmdir)).map_err(FatError::to_fs)
 }
 
-pub fn truncate(
-    id: u8,
-    dir_clu: u32,
-    dir_off: u32,
-    ino: u32,
-    first: &mut u32,
-    size: &mut u32,
-    new: u32,
-) -> Result<(), FsError> {
-    let (c, s) = with_slot(id, |v, d| {
-        let mut c = *first;
-        let mut s = *size;
-        v.truncate(d, dir_clu, dir_off, &mut c, &mut s, new)?;
-        v.put_size(ino, c, s);
-        Ok((c, s))
-    })
-    .map_err(FatError::to_fs)?;
-    *first = c;
-    *size = s;
-    Ok(())
+pub fn truncate(id: u8, k: InoKey, new: u64) -> Result<(), FsError> {
+    with_slot(id, |v, d| v.truncate_ino(d, k, new)).map_err(FatError::to_fs)
 }
 
 pub fn rename(

@@ -306,8 +306,8 @@ pub fn fpu_template() -> Fxsave {
 /// Update TSS.RSP0 + `kernel_rsp0` for `tcb`. Every context switch.
 /// Caller already holds `&mut PerCpu` (IRQ-off).
 pub fn set_rsp0_for(cpu: &mut PerCpu, tcb: &Tcb) {
-    let top = match tcb.stack {
-        Some(ks) => ks.top(),
+    let top = match &tcb.stack {
+        Some(s) => s.top().as_u64(),
         None => cpu.fallback_rsp0,
     };
     cpu.kernel_rsp0 = top;

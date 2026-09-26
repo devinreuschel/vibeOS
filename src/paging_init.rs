@@ -22,6 +22,7 @@ use vibeos::paging::{
     self, FrameAlloc, IoremapWindow, MapError, MapMode, Mapper, PAGE_SIZE_2M, PAGE_SIZE_4K,
     PageFlags, PageSize, PhysAddr, VirtAddr,
 };
+use vibeos::pmm::Frames;
 
 use crate::boot::BootInfo;
 use crate::pmm_init;
@@ -78,9 +79,8 @@ fn sym_addr(sym: &u8) -> u64 {
 struct BuddyFrames;
 
 unsafe impl FrameAlloc for BuddyFrames {
-    fn alloc_frame(&mut self) -> Option<PhysAddr> {
-        let raw = pmm_init::with_buddy(|b| b.allocate_frame())?;
-        Some(PhysAddr(raw))
+    fn alloc_frame(&mut self) -> Option<Frames> {
+        pmm_init::with_buddy(|b| b.alloc(0))
     }
 }
 
@@ -389,10 +389,14 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
     let kernel_phys_base = info.kernel_phys.start;
     let mut alloc = BuddyFrames;
 
-    // Allocate + zero the fresh PML4.
-    let root = alloc
-        .alloc_frame()
-        .expect("pmm out of frames while allocating PML4");
+    // Allocate + zero the fresh PML4. Its token moves into the kernel
+    // mapper for good: the kernel PML4 is never freed.
+    let root = PhysAddr(
+        alloc
+            .alloc_frame()
+            .expect("pmm out of frames while allocating PML4")
+            .into_entry(),
+    );
     let hhdm_ptr = root.as_u64().wrapping_add(HHDM_BASE) as *mut u64;
     for i in 0..paging::PTES_PER_TABLE {
         unsafe { hhdm_ptr.add(i).write_volatile(0) };

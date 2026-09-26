@@ -36,6 +36,8 @@ pub const EISDIR: i32 = 21;
 pub const EINVAL: i32 = 22;
 /// Linux `EMFILE`.
 pub const EMFILE: i32 = 24;
+/// Linux `EFBIG`.
+pub const EFBIG: i32 = 27;
 /// Linux `ENOSYS`.
 pub const ENOSYS: i32 = 38;
 /// Linux `ENAMETOOLONG`.
@@ -452,6 +454,7 @@ mod tests {
         assert_eq!(EFAULT, 14);
         assert_eq!(EINVAL, 22);
         assert_eq!(EMFILE, 24);
+        assert_eq!(EFBIG, 27);
         assert_eq!(ENAMETOOLONG, 36);
         assert_eq!(ENOSYS, 38);
         assert_eq!(neg(ENOSYS), -38);
