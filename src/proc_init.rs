@@ -1033,11 +1033,13 @@ fn finish_exit(wait_status: u32, _from_fault: bool) -> ! {
             (space, ppid, fds, tid)
         })
     });
-    let _ = tid;
     let mut fds = fds;
     close_all_fds(&mut fds);
     let _ = ppid;
     if let Some(space) = old {
+        // The TCB stops naming the root before the kernel root is loaded,
+        // so a switch back in between cannot reload it (invariant I128).
+        thread_init::set_pid_cr3(tid, 0, 0);
         crate::arch::gs::force_kernel();
         addr_space_init::load_kernel_cr3();
         clear_as();
