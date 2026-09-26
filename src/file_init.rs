@@ -591,6 +591,8 @@ pub fn write(fid: u16, buf: &[u8]) -> Result<usize, FsError> {
             n
         }
     };
+    #[cfg(feature = "kernel_tests")]
+    testing::write_window();
     f.offset = f.offset.saturating_add(n as u64);
     put_file(fid, f)?;
     Ok(n)
@@ -612,6 +614,42 @@ pub fn seek(fid: u16, off: i64, whence: u32) -> Result<u64, FsError> {
     f.offset = n as u64;
     put_file(fid, f)?;
     Ok(n as u64)
+}
+
+/// Hooks for the in-guest tests (AGENTS.md rule 9): atomics only, and no
+/// wait here is longer than 10,000 `yield_now` calls.
+#[cfg(feature = "kernel_tests")]
+pub mod testing {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use super::{FILES, MAX_OPEN};
+    use crate::thread_init;
+
+    static WRITE_YIELD: AtomicBool = AtomicBool::new(false);
+
+    /// Each [`super::write`] yields once between its backend I/O and its
+    /// write-back to the open-file table.
+    pub fn set_write_yield(on: bool) {
+        WRITE_YIELD.store(on, Ordering::Release);
+    }
+
+    pub(super) fn write_window() {
+        if WRITE_YIELD.load(Ordering::Acquire) {
+            thread_init::yield_now();
+        }
+    }
+
+    /// Each open-file slot's `(used, refs)`.
+    pub fn table() -> [(bool, u16); MAX_OPEN] {
+        let g = FILES.lock();
+        let mut out = [(false, 0u16); MAX_OPEN];
+        let mut i = 0usize;
+        while i < MAX_OPEN {
+            out[i] = (g[i].used, g[i].refs);
+            i += 1;
+        }
+        out
+    }
 }
 
 pub fn stat_path(path: &str) -> Result<Stat, FsError> {
