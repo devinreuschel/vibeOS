@@ -1841,6 +1841,13 @@ shares the leaf becomes UC too, and its walk can skip a trailing leaf of an unal
 §11.2, F104). Planned (ROADMAP §11.2): these devices move to `ioremap`, the physmap maps no device
 memory, and this patch and `map_gap` are deleted (§4.1).
 
+The kernel tables are reached only through `paging_init::current_mapper()`, which takes the PT lock
+and returns a `MapperGuard` that holds it for as long as the guard lives and derefs to the `Mapper`
+over the kernel root. No code builds an unlocked kernel `Mapper`. `with_pt` hands its closure that
+guard, and the `_locked` map and unmap helpers take `&mut MapperGuard`, so a caller that holds PT
+proves it by the argument it passes rather than by a comment. A shootdown waits for other CPUs, so it
+runs after the guard drops (§7.9).
+
 ### PTE flag policy
 
 | Mapping | Flags |

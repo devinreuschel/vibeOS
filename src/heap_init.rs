@@ -52,10 +52,10 @@ pub fn stats() -> HeapStats {
 /// the frame's owner record for good.
 fn map_one(va: u64) -> Result<(), ()> {
     let va = VirtAddr(va);
-    let r = paging_init::with_pt(|| {
+    let r = paging_init::with_pt(|pt| {
         let pa = pmm_init::with_buddy(|b| b.alloc(0)).ok_or(())?.into_entry();
         unsafe {
-            paging_init::map_4k_locked(va, PhysAddr(pa), heap_flags()).map_err(|_| {
+            paging_init::map_4k_locked(pt, va, PhysAddr(pa), heap_flags()).map_err(|_| {
                 // SAFETY: `pa` is the order-0 `into_entry` above, and the
                 // failed map wrote no entry, so nothing else names it
                 // (the contract `pmm::Frames::from_entry` states, met here).

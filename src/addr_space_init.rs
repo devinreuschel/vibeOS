@@ -26,11 +26,9 @@ unsafe impl FrameFree for BuddyPool {
 
 /// New user address space. Kernel half shared from the boot PML4.
 pub fn create() -> Option<AddressSpace> {
-    paging_init::with_pt(|| {
-        let kernel = paging_init::current_mapper();
-        let mut pool = BuddyPool;
-        unsafe { AddressSpace::new(&kernel, &mut pool) }
-    })
+    let kernel = paging_init::current_mapper();
+    let mut pool = BuddyPool;
+    unsafe { AddressSpace::new(&kernel, &mut pool) }
 }
 
 /// # Safety
@@ -41,7 +39,7 @@ pub unsafe fn map_anon(
     len: u64,
     perms: UserPerms,
 ) -> Result<(), AsError> {
-    paging_init::with_pt(|| {
+    paging_init::with_pt(|_pt| {
         let mut pool = BuddyPool;
         unsafe { space.map_anon(va, len, perms, &mut pool) }
     })?;
@@ -52,7 +50,7 @@ pub unsafe fn map_anon(
 /// # Safety
 /// Same contract as `AddressSpace::unmap_free`.
 pub unsafe fn unmap(space: &mut AddressSpace, va: u64, len: u64) -> Result<(), AsError> {
-    paging_init::with_pt(|| {
+    paging_init::with_pt(|_pt| {
         let mut pool = BuddyPool;
         unsafe { space.unmap_free(va, len, &mut pool) }
     })?;
@@ -61,7 +59,7 @@ pub unsafe fn unmap(space: &mut AddressSpace, va: u64, len: u64) -> Result<(), A
 }
 
 pub fn teardown(mut space: AddressSpace) -> TeardownStats {
-    paging_init::with_pt(|| {
+    paging_init::with_pt(|_pt| {
         let mut pool = BuddyPool;
         unsafe { space.teardown_pool(&mut pool) }
     })
@@ -107,11 +105,9 @@ pub fn load_kernel_cr3() {
 /// Full AS copy for fork. Caller must not be running on `src`'s CR3
 /// teardown path; clone allocates a new PML4.
 pub fn clone_full(src: &vibeos::addr_space::AddressSpace) -> Option<AddressSpace> {
-    paging_init::with_pt(|| {
-        let kernel = paging_init::current_mapper();
-        let mut pool = BuddyPool;
-        unsafe { src.clone_anon(&kernel, &mut pool) }.ok()
-    })
+    let kernel = paging_init::current_mapper();
+    let mut pool = BuddyPool;
+    unsafe { src.clone_anon(&kernel, &mut pool) }.ok()
 }
 
 pub fn cr3_was_skipped(space: &AddressSpace) -> bool {
