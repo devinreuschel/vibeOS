@@ -385,7 +385,7 @@ impl FileSystem for VibeFs {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Inode {
     used: bool,
     clock: bool,
@@ -420,32 +420,41 @@ impl Inode {
     };
 }
 
-#[derive(Clone, Copy)]
+/// A dentry cache slot. `refs` counts its holders (DESIGN §2.11 rule 2):
+/// each child dentry, positive or negative, each mount whose `mp_dslot`
+/// it is, the superblock for its root dentry, and explicit holds. Only a
+/// `refs == 0` dentry is evicted, so a slot a child names as `parent` is
+/// never reused. A superblock's root dentry is its own `parent`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Dentry {
     used: bool,
-    pinned: bool,
     clock: bool,
     negative: bool,
+    refs: u16,
     parent: u16,
+    sb: u8,
     name: Name,
     islot: u16,
-    mount: u8,
 }
 
 impl Dentry {
     const EMPTY: Self = Self {
         used: false,
-        pinned: false,
         clock: false,
         negative: true,
+        refs: 0,
         parent: 0,
+        sb: 0,
         name: Name::EMPTY,
         islot: 0,
-        mount: 0,
     };
+
+    fn is_root(&self, slot: u16) -> bool {
+        self.parent == slot
+    }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Super {
     used: bool,
     fstype: FsType,
@@ -468,7 +477,7 @@ impl Super {
     };
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Mount {
     used: bool,
     parent: Option<u8>,
@@ -658,23 +667,9 @@ impl Vfs {
         if self.mounts[0].used {
             return Err(FsError::Busy);
         }
-        let sb = self.alloc_super()?;
-        self.supers[sb as usize].fstype = fs.fstype();
-        let ino = fs.fill_super(self, sb)?;
-        let islot = self.iget(sb, ino)?;
-        let dslot = self.dentry_force_alloc()?;
-        self.dentries[dslot as usize] = Dentry {
-            used: true,
-            pinned: true,
-            clock: true,
-            negative: false,
-            parent: dslot,
-            name: Name::EMPTY,
-            islot,
-            mount: 0,
-        };
         let m = self.alloc_mount()?;
         debug_assert_eq!(m, 0);
+        let (sb, dslot) = self.new_super(fs)?;
         self.mounts[0] = Mount {
             used: true,
             parent: None,
@@ -682,15 +677,12 @@ impl Vfs {
             root_dslot: dslot,
             sb,
         };
-        self.supers[sb as usize].used = true;
-        self.supers[sb as usize].root_ino = ino;
-        self.supers[sb as usize].root_islot = islot;
-        self.supers[sb as usize].root_dslot = dslot;
         Ok(PathRef { mount: 0, dslot })
     }
 
     /// Mount `fs` on an existing directory. `..` from the new root
-    /// walks to the parent of the covered dentry.
+    /// walks to the parent of the covered dentry. The mountpoint is held
+    /// before anything is allocated, so no allocation can evict it.
     pub fn mount(
         &mut self,
         cwd: Option<PathRef>,
@@ -705,23 +697,17 @@ impl Vfs {
         if self.child_mount(dir.mount, dir.dslot).is_some() {
             return Err(FsError::Busy);
         }
-        let sb = self.alloc_super()?;
-        self.supers[sb as usize].fstype = fs.fstype();
-        let ino = fs.fill_super(self, sb)?;
-        let r_islot = self.iget(sb, ino)?;
-        let r_dslot = self.dentry_force_alloc()?;
+        self.dget(dir.dslot)?;
+        let r = self.mount_on(dir, fs);
+        if r.is_err() {
+            self.dput(dir.dslot);
+        }
+        r
+    }
+
+    fn mount_on(&mut self, dir: PathRef, fs: &dyn FileSystem) -> Result<u8, FsError> {
         let m = self.alloc_mount()?;
-        self.dentries[r_dslot as usize] = Dentry {
-            used: true,
-            pinned: true,
-            clock: true,
-            negative: false,
-            parent: r_dslot,
-            name: Name::EMPTY,
-            islot: r_islot,
-            mount: m,
-        };
-        self.dentries[dir.dslot as usize].pinned = true;
+        let (sb, r_dslot) = self.new_super(fs)?;
         self.mounts[m as usize] = Mount {
             used: true,
             parent: Some(dir.mount),
@@ -729,13 +715,12 @@ impl Vfs {
             root_dslot: r_dslot,
             sb,
         };
-        self.supers[sb as usize].used = true;
-        self.supers[sb as usize].root_ino = ino;
-        self.supers[sb as usize].root_islot = r_islot;
-        self.supers[sb as usize].root_dslot = r_dslot;
         Ok(m)
     }
 
+    /// Unmount the filesystem whose root `at` names. Every busy check
+    /// runs before the first write, so a `Busy` leaves the dentries,
+    /// inodes and mounts as they were.
     pub fn umount(&mut self, cwd: Option<PathRef>, at: &str) -> Result<(), FsError> {
         let p = self.resolve(cwd, at, true)?;
         let m = p.mount;
@@ -745,49 +730,43 @@ impl Vfs {
         if self.mounts[m as usize].root_dslot != p.dslot {
             return Err(FsError::Inval);
         }
-        let mut i = 0u8;
-        while i < MAX_MOUNTS as u8 {
-            if self.mounts[i as usize].used && self.mounts[i as usize].parent == Some(m) {
-                return Err(FsError::Busy);
-            }
-            i += 1;
+        if self.mounts.iter().any(|x| x.used && x.parent == Some(m)) {
+            return Err(FsError::Busy);
         }
         let sb = self.mounts[m as usize].sb;
-        let mut f = 0usize;
-        while f < MAX_FILES {
-            if self.files[f].used && self.mounts[self.files[f].mount as usize].sb == sb {
+        if self
+            .files
+            .iter()
+            .any(|f| f.used && self.mounts[f.mount as usize].sb == sb)
+        {
+            return Err(FsError::Busy);
+        }
+        let mut k = 0usize;
+        while k < MAX_MOUNTS {
+            if k != m as usize && self.mounts[k].used && self.mounts[k].sb == sb {
                 return Err(FsError::Busy);
             }
-            f += 1;
+            k += 1;
         }
-        let mp = self.mounts[m as usize].mp_dslot;
-        self.dentries[mp as usize].pinned = false;
         let mut d = 0usize;
         while d < MAX_DENTRIES {
-            if self.dentries[d].used && self.dentries[d].mount == m {
-                self.dentries[d].pinned = false;
-                self.dentry_evict(d as u16);
+            let e = &self.dentries[d];
+            if e.used && e.sb == sb && e.refs > self.expected_holds(d as u16) {
+                return Err(FsError::Busy);
             }
             d += 1;
         }
         let mut n = 0usize;
         while n < MAX_INODES {
-            if self.inodes[n].used && self.inodes[n].sb == sb {
-                if self.inodes[n].refs != 0 {
-                    return Err(FsError::Busy);
-                }
-                self.inodes[n] = Inode::EMPTY;
+            let ino = &self.inodes[n];
+            if ino.used && ino.sb == sb && ino.refs > self.naming_dentries(n as u16) {
+                return Err(FsError::Busy);
             }
             n += 1;
         }
-        match self.fstype(sb) {
-            FsType::Ram => ram_drop_sb(self, sb),
-            FsType::Fat | FsType::Vibe => {}
-            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
-                kernfs::kern_drop_sb(self, sb)
-            }
-        }
-        self.supers[sb as usize] = Super::EMPTY;
+        let mp = self.mounts[m as usize].mp_dslot;
+        self.dput(mp);
+        self.sb_teardown(sb);
         self.mounts[m as usize] = Mount::EMPTY;
         Ok(())
     }
@@ -859,12 +838,19 @@ impl Vfs {
             return Err(FsError::Inval);
         }
         let dir = self.walk(cwd, parent, true)?;
+        self.held(dir.dslot, |v| v.unlink_in(dir, name))
+    }
+
+    fn unlink_in(&mut self, dir: PathRef, name: &[u8]) -> Result<(), FsError> {
         let islot = self.d_islot(dir.dslot)?;
         if self.inodes[islot as usize].kind != InodeKind::Dir {
             return Err(FsError::NotDir);
         }
-        self.dcache_drop_name(dir.dslot, name);
+        if self.is_mountpoint(dir, name) {
+            return Err(FsError::Busy);
+        }
         let sb = self.sb_of(dir.mount);
+        self.dcache_drop_name(sb, dir.dslot, name);
         self.ops_unlink(sb, islot, name)?;
         self.inodes[islot as usize].mtime = self.now;
         self.inodes[islot as usize].ctime = self.now;
@@ -877,13 +863,26 @@ impl Vfs {
             return Err(FsError::Inval);
         }
         let dir = self.walk(cwd, parent, true)?;
+        self.held(dir.dslot, |v| v.rmdir_in(cwd, path, dir, name))
+    }
+
+    fn rmdir_in(
+        &mut self,
+        cwd: Option<PathRef>,
+        path: &str,
+        dir: PathRef,
+        name: &[u8],
+    ) -> Result<(), FsError> {
+        if self.is_mountpoint(dir, name) {
+            return Err(FsError::Busy);
+        }
         let child = self.walk(cwd, path.as_bytes(), false)?;
         let cslot = self.d_islot(child.dslot)?;
         if self.inodes[cslot as usize].kind != InodeKind::Dir {
             return Err(FsError::NotDir);
         }
-        self.dcache_drop_name(dir.dslot, name);
         let sb = self.sb_of(dir.mount);
+        self.dcache_drop_name(sb, dir.dslot, name);
         match self.fstype(sb) {
             FsType::Ram | FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
                 let islot = self.d_islot(dir.dslot)?;
@@ -912,15 +911,19 @@ impl Vfs {
         if name_is_dot(name) || name_is_dotdot(name) {
             return Err(FsError::Inval);
         }
-        let dir = self.walk(cwd, parent, true)?;
-        if self.sb_of(dir.mount) != sb {
-            return Err(FsError::Inval);
-        }
-        let dislot = self.d_islot(dir.dslot)?;
-        ram_link(self, dislot, name, self.inodes[sslot as usize].ino)?;
-        self.dcache_drop_neg_in_dir(dir.dslot);
-        self.dcache_drop_name(dir.dslot, name);
-        Ok(())
+        self.held(src.dslot, |v| {
+            let dir = v.walk(cwd, parent, true)?;
+            v.held(dir.dslot, |v| {
+                if v.sb_of(dir.mount) != sb {
+                    return Err(FsError::Inval);
+                }
+                let dislot = v.d_islot(dir.dslot)?;
+                ram_link(v, dislot, name, v.inodes[sslot as usize].ino)?;
+                v.dcache_drop_neg_in_dir(sb, dir.dslot);
+                v.dcache_drop_name(sb, dir.dslot, name);
+                Ok(())
+            })
+        })
     }
 
     pub fn rename(&mut self, cwd: Option<PathRef>, old: &str, new: &str) -> Result<(), FsError> {
@@ -934,11 +937,26 @@ impl Vfs {
             return Err(FsError::Inval);
         }
         let od = self.walk(cwd, op, true)?;
-        let nd = self.walk(cwd, np, true)?;
+        self.held(od.dslot, |v| {
+            let nd = v.walk(cwd, np, true)?;
+            v.held(nd.dslot, |v| v.rename_in(od, oname, nd, nname))
+        })
+    }
+
+    fn rename_in(
+        &mut self,
+        od: PathRef,
+        oname: &[u8],
+        nd: PathRef,
+        nname: &[u8],
+    ) -> Result<(), FsError> {
         let osb = self.sb_of(od.mount);
         let nsb = self.sb_of(nd.mount);
         if osb != nsb {
             return Err(FsError::Inval);
+        }
+        if self.is_mountpoint(od, oname) || self.is_mountpoint(nd, nname) {
+            return Err(FsError::Busy);
         }
         match self.fstype(osb) {
             FsType::Fat | FsType::Vibe | FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
@@ -950,9 +968,9 @@ impl Vfs {
                 ram_rename(self, oslot, oname, nslot, nname)?;
             }
         }
-        self.dcache_drop_name(od.dslot, oname);
-        self.dcache_drop_name(nd.dslot, nname);
-        self.dcache_drop_neg_in_dir(nd.dslot);
+        self.dcache_drop_name(osb, od.dslot, oname);
+        self.dcache_drop_name(nsb, nd.dslot, nname);
+        self.dcache_drop_neg_in_dir(nsb, nd.dslot);
         Ok(())
     }
 
@@ -1257,10 +1275,10 @@ impl Vfs {
         name: &[u8],
         islot: u16,
     ) -> Result<PathRef, FsError> {
-        self.dcache_drop_name(parent.dslot, name);
-        self.dcache_drop_neg_in_dir(parent.dslot);
-        let ds = self.dcache_insert(parent.dslot, name, parent.mount, Some(islot))?;
-        self.dentries[ds as usize].pinned = true;
+        let sb = self.sb_of(parent.mount);
+        self.dcache_drop_name(sb, parent.dslot, name);
+        self.dcache_drop_neg_in_dir(sb, parent.dslot);
+        let ds = self.dcache_insert(sb, parent.dslot, name, Some(islot))?;
         Ok(PathRef {
             mount: parent.mount,
             dslot: ds,
@@ -1268,7 +1286,8 @@ impl Vfs {
     }
 
     pub fn drop_name(&mut self, parent: PathRef, name: &[u8]) {
-        self.dcache_drop_name(parent.dslot, name);
+        let sb = self.sb_of(parent.mount);
+        self.dcache_drop_name(sb, parent.dslot, name);
     }
 
     pub fn release_inode(&mut self, islot: u16) {
@@ -1475,10 +1494,17 @@ impl Vfs {
         *dslot = self.dentries[*dslot as usize].parent;
     }
 
+    /// A counted reference to inode `ino` of `sb`. An unlinked inode
+    /// (`nlink == 0`) is out of the hash: a new file that reuses its
+    /// number gets a slot of its own.
     fn iget(&mut self, sb: u8, ino: u32) -> Result<u16, FsError> {
         let mut i = 0usize;
         while i < MAX_INODES {
-            if self.inodes[i].used && self.inodes[i].sb == sb && self.inodes[i].ino == ino {
+            if self.inodes[i].used
+                && self.inodes[i].sb == sb
+                && self.inodes[i].ino == ino
+                && self.inodes[i].nlink != 0
+            {
                 self.inodes[i].refs = self.inodes[i].refs.saturating_add(1);
                 self.inodes[i].clock = true;
                 return Ok(i as u16);
@@ -1633,7 +1659,7 @@ impl Vfs {
             if !self.dentries[s].used {
                 return Ok(s as u16);
             }
-            if self.dentries[s].pinned {
+            if self.dentries[s].refs != 0 {
                 n += 1;
                 continue;
             }
@@ -1647,7 +1673,7 @@ impl Vfs {
         }
         let mut s = 0usize;
         while s < MAX_DENTRIES {
-            if self.dentries[s].used && !self.dentries[s].pinned {
+            if self.dentries[s].used && self.dentries[s].refs == 0 {
                 self.dentry_evict(s as u16);
                 return Ok(s as u16);
             }
@@ -1656,27 +1682,230 @@ impl Vfs {
         Err(FsError::NoSpace)
     }
 
+    /// Free an unheld dentry: drop its inode reference and, for a
+    /// non-root dentry, its hold on its parent.
     fn dentry_evict(&mut self, slot: u16) {
-        let i = slot as usize;
-        if !self.dentries[i].used || self.dentries[i].pinned {
+        let d = self.dentries[slot as usize];
+        if !d.used || d.refs != 0 {
             return;
         }
         self.stats.d_evicts = self.stats.d_evicts.saturating_add(1);
-        if !self.dentries[i].negative {
-            let islot = self.dentries[i].islot;
-            self.dentries[i] = Dentry::EMPTY;
-            self.iput(islot);
-            return;
+        self.dentries[slot as usize] = Dentry::EMPTY;
+        if !d.is_root(slot) {
+            self.dput(d.parent);
         }
-        self.dentries[i] = Dentry::EMPTY;
+        if !d.negative {
+            self.iput(d.islot);
+        }
     }
 
-    fn dcache_find(&mut self, parent: u16, name: &[u8]) -> Option<u16> {
+    /// Evict the unheld dentries below `top`, leaves first. What a mount
+    /// or an explicit hold keeps stays, and so do its ancestors.
+    fn dentry_prune(&mut self, top: u16) {
+        loop {
+            let mut hit = false;
+            let mut i = 0usize;
+            while i < MAX_DENTRIES {
+                let d = &self.dentries[i];
+                if d.used && d.refs == 0 && i as u16 != top && self.below(i as u16, top) {
+                    self.dentry_evict(i as u16);
+                    hit = true;
+                }
+                i += 1;
+            }
+            if !hit {
+                return;
+            }
+        }
+    }
+
+    /// Whether dentry `slot` lies strictly below `top`.
+    fn below(&self, slot: u16, top: u16) -> bool {
+        let mut cur = slot;
+        let mut n = 0usize;
+        while n < MAX_DENTRIES {
+            let d = &self.dentries[cur as usize];
+            if !d.used || d.is_root(cur) {
+                return false;
+            }
+            cur = d.parent;
+            if cur == top {
+                return true;
+            }
+            n += 1;
+        }
+        false
+    }
+
+    /// Count one holder of dentry `slot`.
+    fn dget(&mut self, slot: u16) -> Result<(), FsError> {
+        let d = &mut self.dentries[slot as usize];
+        d.refs = d.refs.checked_add(1).ok_or(FsError::NoSpace)?;
+        Ok(())
+    }
+
+    /// Drop one holder of dentry `slot`. It frees nothing: clock eviction
+    /// reclaims an unheld dentry later.
+    fn dput(&mut self, slot: u16) {
+        let d = &mut self.dentries[slot as usize];
+        debug_assert!(d.refs != 0, "dput of an unheld dentry");
+        d.refs = d.refs.saturating_sub(1);
+    }
+
+    /// Run `f` with dentry `slot` held, so nothing `f` allocates evicts it.
+    fn held<R>(
+        &mut self,
+        slot: u16,
+        f: impl FnOnce(&mut Self) -> Result<R, FsError>,
+    ) -> Result<R, FsError> {
+        self.dget(slot)?;
+        let r = f(self);
+        self.dput(slot);
+        r
+    }
+
+    /// Used dentries whose parent is `slot`.
+    fn child_count(&self, slot: u16) -> u16 {
+        let mut n = 0u16;
         let mut i = 0usize;
         while i < MAX_DENTRIES {
             let d = &self.dentries[i];
-            if d.used && d.parent == parent && d.name.eq_bytes(name) {
-                self.dentries[i].clock = true;
+            if d.used && d.parent == slot && !d.is_root(i as u16) {
+                n = n.saturating_add(1);
+            }
+            i += 1;
+        }
+        n
+    }
+
+    /// Mounts whose mountpoint is dentry `slot`.
+    fn mount_pins(&self, slot: u16) -> u16 {
+        let mut n = 0u16;
+        for m in self.mounts.iter() {
+            if m.used && m.parent.is_some() && m.mp_dslot == slot {
+                n = n.saturating_add(1);
+            }
+        }
+        n
+    }
+
+    /// The holds dentry `slot` has with no explicit hold: its children,
+    /// the mounts on it, and the superblock's hold on a root dentry.
+    fn expected_holds(&self, slot: u16) -> u16 {
+        let root = u16::from(self.dentries[slot as usize].is_root(slot));
+        self.child_count(slot)
+            .saturating_add(self.mount_pins(slot))
+            .saturating_add(root)
+    }
+
+    /// Positive dentries that name inode `islot`.
+    fn naming_dentries(&self, islot: u16) -> u16 {
+        let mut n = 0u16;
+        for d in self.dentries.iter() {
+            if d.used && !d.negative && d.islot == islot {
+                n = n.saturating_add(1);
+            }
+        }
+        n
+    }
+
+    /// Whether `name` in `dir` is covered by a mount.
+    fn is_mountpoint(&self, dir: PathRef, name: &[u8]) -> bool {
+        let sb = self.sb_of(dir.mount);
+        match self.dcache_peek(sb, dir.dslot, name) {
+            Some(ds) => self.mount_pins(ds) != 0,
+            None => false,
+        }
+    }
+
+    /// Allocate and fill a superblock with its root inode and its root
+    /// dentry, which the superblock holds once. An error undoes every
+    /// step taken, last first.
+    fn new_super(&mut self, fs: &dyn FileSystem) -> Result<(u8, u16), FsError> {
+        let sb = self.alloc_super()?;
+        self.supers[sb as usize].fstype = fs.fstype();
+        let ino = match fs.fill_super(self, sb) {
+            Ok(i) => i,
+            Err(e) => {
+                self.sb_teardown(sb);
+                return Err(e);
+            }
+        };
+        let islot = match self.iget(sb, ino) {
+            Ok(i) => i,
+            Err(e) => {
+                self.sb_teardown(sb);
+                return Err(e);
+            }
+        };
+        let dslot = match self.dentry_force_alloc() {
+            Ok(d) => d,
+            Err(e) => {
+                self.iput(islot);
+                self.sb_teardown(sb);
+                return Err(e);
+            }
+        };
+        self.dentries[dslot as usize] = Dentry {
+            used: true,
+            clock: true,
+            negative: false,
+            refs: 1,
+            parent: dslot,
+            sb,
+            name: Name::EMPTY,
+            islot,
+        };
+        let s = &mut self.supers[sb as usize];
+        s.used = true;
+        s.root_ino = ino;
+        s.root_islot = islot;
+        s.root_dslot = dslot;
+        Ok((sb, dslot))
+    }
+
+    /// Drop superblock `sb` and all that is cached for it: its dentries
+    /// and their inode references, its inodes, and the backend's state.
+    fn sb_teardown(&mut self, sb: u8) {
+        let mut d = 0usize;
+        while d < MAX_DENTRIES {
+            let e = self.dentries[d];
+            if e.used && e.sb == sb {
+                if !e.negative {
+                    let r = &mut self.inodes[e.islot as usize].refs;
+                    *r = r.saturating_sub(1);
+                }
+                self.dentries[d] = Dentry::EMPTY;
+            }
+            d += 1;
+        }
+        let mut n = 0usize;
+        while n < MAX_INODES {
+            if self.inodes[n].used && self.inodes[n].sb == sb {
+                self.inodes[n] = Inode::EMPTY;
+            }
+            n += 1;
+        }
+        match self.fstype(sb) {
+            FsType::Ram => ram_drop_sb(self, sb),
+            FsType::Fat | FsType::Vibe => {}
+            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
+                kernfs::kern_drop_sb(self, sb)
+            }
+        }
+        self.supers[sb as usize] = Super::EMPTY;
+    }
+
+    fn dcache_peek(&self, sb: u8, parent: u16, name: &[u8]) -> Option<u16> {
+        let mut i = 0usize;
+        while i < MAX_DENTRIES {
+            let d = &self.dentries[i];
+            if d.used
+                && d.sb == sb
+                && d.parent == parent
+                && !d.is_root(i as u16)
+                && d.name.eq_bytes(name)
+            {
                 return Some(i as u16);
             }
             i += 1;
@@ -1684,53 +1913,63 @@ impl Vfs {
         None
     }
 
+    fn dcache_find(&mut self, sb: u8, parent: u16, name: &[u8]) -> Option<u16> {
+        let ds = self.dcache_peek(sb, parent, name)?;
+        self.dentries[ds as usize].clock = true;
+        Some(ds)
+    }
+
+    /// Cache `name` in `parent`, positive when `islot` is given. The
+    /// parent is held before the allocation, so it cannot be the slot the
+    /// allocation evicts.
     fn dcache_insert(
         &mut self,
+        sb: u8,
         parent: u16,
         name: &[u8],
-        mount: u8,
         islot: Option<u16>,
     ) -> Result<u16, FsError> {
         let nm = Name::from_bytes(name)?;
-        let slot = self.dentry_force_alloc()?;
-        let neg = islot.is_none();
+        self.dget(parent)?;
+        let slot = match self.dentry_force_alloc() {
+            Ok(s) => s,
+            Err(e) => {
+                self.dput(parent);
+                return Err(e);
+            }
+        };
         self.dentries[slot as usize] = Dentry {
             used: true,
-            pinned: false,
             clock: true,
-            negative: neg,
+            negative: islot.is_none(),
+            refs: 0,
             parent,
+            sb,
             name: nm,
             islot: islot.unwrap_or(0),
-            mount,
         };
         Ok(slot)
     }
 
-    fn dcache_drop_name(&mut self, parent: u16, name: &[u8]) {
-        let mut i = 0usize;
-        while i < MAX_DENTRIES {
-            if self.dentries[i].used
-                && self.dentries[i].parent == parent
-                && self.dentries[i].name.eq_bytes(name)
-            {
-                if self.dentries[i].pinned {
-                    i += 1;
-                    continue;
-                }
-                self.dentry_evict(i as u16);
-            }
-            i += 1;
+    /// Forget `name` in `parent`. An unheld dentry is evicted; one held
+    /// only by its descendants is pruned with its subtree; one a mount or
+    /// an explicit hold keeps stays.
+    fn dcache_drop_name(&mut self, sb: u8, parent: u16, name: &[u8]) {
+        let Some(ds) = self.dcache_peek(sb, parent, name) else {
+            return;
+        };
+        let d = &self.dentries[ds as usize];
+        if d.refs != 0 && d.refs == self.child_count(ds) {
+            self.dentry_prune(ds);
         }
+        self.dentry_evict(ds);
     }
 
-    fn dcache_drop_neg_in_dir(&mut self, parent: u16) {
+    fn dcache_drop_neg_in_dir(&mut self, sb: u8, parent: u16) {
         let mut i = 0usize;
         while i < MAX_DENTRIES {
-            if self.dentries[i].used
-                && self.dentries[i].parent == parent
-                && self.dentries[i].negative
-            {
+            let d = &self.dentries[i];
+            if d.used && d.sb == sb && d.parent == parent && d.negative && !d.is_root(i as u16) {
                 self.dentry_evict(i as u16);
             }
             i += 1;
@@ -1738,18 +1977,18 @@ impl Vfs {
     }
 
     fn lookup_step(&mut self, mount: u8, dir: u16, name: &[u8]) -> Result<u16, FsError> {
-        if let Some(ds) = self.dcache_find(dir, name) {
+        let sb = self.sb_of(mount);
+        if let Some(ds) = self.dcache_find(sb, dir, name) {
             if self.dentries[ds as usize].negative {
                 return Err(FsError::NotFound);
             }
             return Ok(ds);
         }
         let dir_islot = self.d_islot(dir)?;
-        let sb = self.sb_of(mount);
         match self.ops_lookup(sb, dir_islot, name) {
             Ok(ino) => {
                 let islot = self.iget(sb, ino)?;
-                match self.dcache_insert(dir, name, mount, Some(islot)) {
+                match self.dcache_insert(sb, dir, name, Some(islot)) {
                     Ok(ds) => Ok(ds),
                     Err(e) => {
                         self.iput(islot);
@@ -1758,7 +1997,7 @@ impl Vfs {
                 }
             }
             Err(FsError::NotFound) => {
-                let _ = self.dcache_insert(dir, name, mount, None);
+                let _ = self.dcache_insert(sb, dir, name, None);
                 Err(FsError::NotFound)
             }
             Err(e) => Err(e),
@@ -1842,7 +2081,7 @@ impl Vfs {
                     return Err(FsError::Loop);
                 }
                 depth += 1;
-                let sb = self.sb_of(self.dentries[child as usize].mount);
+                let sb = self.dentries[child as usize].sb;
                 let mut tgt = [0u8; MAX_FILE_BYTES];
                 let n = self.ops_readlink(sb, islot, &mut tgt)?;
                 let mut restb = [0u8; MAX_PATH];
@@ -1874,17 +2113,28 @@ impl Vfs {
             return Err(FsError::Inval);
         }
         let dir = self.walk(cwd, parent, true)?;
+        self.held(dir.dslot, |v| v.create_in(dir, name, kind, mode, target))
+    }
+
+    fn create_in(
+        &mut self,
+        dir: PathRef,
+        name: &[u8],
+        kind: InodeKind,
+        mode: u16,
+        target: Option<&[u8]>,
+    ) -> Result<PathRef, FsError> {
         let dir_islot = self.d_islot(dir.dslot)?;
         if self.inodes[dir_islot as usize].kind != InodeKind::Dir {
             return Err(FsError::NotDir);
         }
-        self.dcache_drop_neg_in_dir(dir.dslot);
-        self.dcache_drop_name(dir.dslot, name);
         let sb = self.sb_of(dir.mount);
+        self.dcache_drop_neg_in_dir(sb, dir.dslot);
+        self.dcache_drop_name(sb, dir.dslot, name);
         let ino = self.ops_create(sb, dir_islot, name, kind, mode, target)?;
         self.sync_inode_from_ram(dir_islot);
         let islot = self.iget(sb, ino)?;
-        let ds = match self.dcache_insert(dir.dslot, name, dir.mount, Some(islot)) {
+        let ds = match self.dcache_insert(sb, dir.dslot, name, Some(islot)) {
             Ok(d) => d,
             Err(e) => {
                 self.iput(islot);
@@ -2920,5 +3170,189 @@ mod tests {
         assert_eq!(FdTable::new().fds.len(), limits::MAX_FDS);
         assert_eq!(RamNode::EMPTY.data.len(), limits::MAX_TMPFS_FILE_BYTES);
         assert_eq!(RamNode::EMPTY.dents.len(), limits::MAX_TMPFS_DIR_ENTS);
+    }
+
+    /// Negative lookups of fresh names under `dir` until the dentry cache
+    /// has evicted `n` more dentries.
+    fn press(v: &mut Vfs, dir: &str, n: u32, seq: &mut u32) {
+        let goal = v.stats.d_evicts.saturating_add(n);
+        while v.stats.d_evicts < goal {
+            let p = format!("{dir}/n{}", *seq);
+            *seq += 1;
+            assert_eq!(v.stat(None, &p).unwrap_err(), FsError::NotFound);
+        }
+    }
+
+    #[test]
+    fn dcache_f065_evicted_parent_keeps_mount() {
+        let mut v = ram();
+        v.mkdir(None, "/a", 0o755).unwrap();
+        v.mkdir(None, "/a/m", 0o755).unwrap();
+        v.mount(None, "/a/m", &RamFs).unwrap();
+        v.creat(None, "/a/m/marker", 0o644).unwrap();
+        let marker = v.stat(None, "/a/m/marker").unwrap().ino;
+        assert_dcache_sound(&v);
+        let mut seq = 0u32;
+        while v.stats.d_evicts < 2 * MAX_DENTRIES as u32 {
+            press(&mut v, "", 8, &mut seq);
+            assert_eq!(v.stat(None, "/a/m/marker").unwrap().ino, marker);
+            assert_dcache_sound(&v);
+        }
+        v.umount(None, "/a/m").unwrap();
+        assert_dcache_sound(&v);
+        assert_eq!(v.stat(None, "/a/m/marker").unwrap_err(), FsError::NotFound);
+    }
+
+    #[test]
+    fn dcache_f065_reused_slot_never_aliases() {
+        let mut v = ram();
+        let mut seq = 0u32;
+        let mut round = 0u32;
+        while round < 24 {
+            let a = format!("/a{round}");
+            let ax = format!("/a{round}/x");
+            let c = format!("/c{round}");
+            let cx = format!("/c{round}/x");
+            v.mkdir(None, &a, 0o755).unwrap();
+            v.creat(None, &ax, 0o644).unwrap();
+            let ino = v.stat(None, &ax).unwrap().ino;
+            press(&mut v, "", round % 7 + 1, &mut seq);
+            v.mkdir(None, &c, 0o755).unwrap();
+            assert_eq!(v.stat(None, &cx).unwrap_err(), FsError::NotFound);
+            assert_eq!(v.stat(None, &ax).unwrap().ino, ino);
+            assert_dcache_sound(&v);
+            v.unlink(None, &ax).unwrap();
+            v.rmdir(None, &a).unwrap();
+            v.rmdir(None, &c).unwrap();
+            assert_dcache_sound(&v);
+            round += 1;
+        }
+    }
+
+    /// Every used dentry is held exactly by its children, the mounts on
+    /// it and, for a root, its superblock; a non-root dentry's parent is
+    /// used, positive and in the same superblock.
+    fn assert_dcache_sound(v: &Vfs) {
+        let mut i = 0usize;
+        while i < MAX_DENTRIES {
+            let d = &v.dentries[i];
+            if d.used {
+                assert_eq!(d.refs, v.expected_holds(i as u16), "dentry {i}'s holders");
+                if !d.is_root(i as u16) {
+                    let p = &v.dentries[d.parent as usize];
+                    assert!(p.used && !p.negative && p.sb == d.sb, "dentry {i}'s parent");
+                }
+            }
+            i += 1;
+        }
+    }
+
+    /// Show the superblock the mount on `from` shows again on `at`, by
+    /// hand: the shape P10-S12's shared `Super` gives two mounts.
+    fn mount_again(v: &mut Vfs, from: &str, at: &str) -> u8 {
+        let src = v.resolve(None, from, true).unwrap();
+        let dir = v.resolve(None, at, true).unwrap();
+        v.dget(dir.dslot).unwrap();
+        let m = v.alloc_mount().unwrap();
+        v.mounts[m as usize] = Mount {
+            used: true,
+            parent: Some(dir.mount),
+            mp_dslot: dir.dslot,
+            root_dslot: src.dslot,
+            sb: v.mounts[src.mount as usize].sb,
+        };
+        m
+    }
+
+    #[test]
+    fn dcache_f065_two_mounts_one_dentry() {
+        let mut v = ram();
+        v.mkdir(None, "/p", 0o755).unwrap();
+        v.mkdir(None, "/q", 0o755).unwrap();
+        v.mount(None, "/p", &RamFs).unwrap();
+        mount_again(&mut v, "/p", "/q");
+        assert_dcache_sound(&v);
+        v.creat(None, "/p/f", 0o644).unwrap();
+        let pf = v.resolve(None, "/p/f", true).unwrap();
+        let qf = v.resolve(None, "/q/f", true).unwrap();
+        assert_ne!(pf.mount, qf.mount);
+        assert_eq!(pf.dslot, qf.dslot, "one dentry for the name");
+        v.creat(None, "/q/g", 0o644).unwrap();
+        let pg = v.resolve(None, "/p/g", true).unwrap();
+        let qg = v.resolve(None, "/q/g", true).unwrap();
+        assert_eq!(pg.dslot, qg.dslot);
+        let named = |v: &Vfs, n: &[u8]| {
+            v.dentries
+                .iter()
+                .filter(|d| d.used && d.name.eq_bytes(n))
+                .count()
+        };
+        assert_eq!(named(&v, b"f"), 1);
+        assert_eq!(named(&v, b"g"), 1);
+        assert_eq!(
+            v.stat(None, "/p/g").unwrap().ino,
+            v.stat(None, "/q/g").unwrap().ino
+        );
+        assert_dcache_sound(&v);
+    }
+
+    #[test]
+    fn dcache_f065_mount_pins_mountpoint_first() {
+        let mut v = ram();
+        v.mkdir(None, "/a", 0o755).unwrap();
+        v.mkdir(None, "/a/m", 0o755).unwrap();
+        let a_ino = v.stat(None, "/a").unwrap().ino;
+        let mp = v.resolve(None, "/a/m", true).unwrap().dslot;
+        // Fill every slot, clear every clock bit and aim the hand at the
+        // mountpoint, so the mount's root dentry must evict and the
+        // mountpoint is the first candidate.
+        let mut seq = 0u32;
+        while v.dentries.iter().any(|d| !d.used) {
+            let _ = v.stat(None, &format!("/n{seq}"));
+            seq += 1;
+        }
+        for d in v.dentries.iter_mut() {
+            d.clock = false;
+        }
+        v.dhand = mp;
+        let m = v.mount(None, "/a/m", &RamFs).unwrap();
+        let mt = v.mounts[m as usize];
+        assert_eq!(mt.mp_dslot, mp);
+        assert_ne!(mt.mp_dslot, mt.root_dslot);
+        assert_eq!(v.stat(None, "/a/m/..").unwrap().ino, a_ino);
+        assert_dcache_sound(&v);
+        v.umount(None, "/a/m").unwrap();
+        assert_dcache_sound(&v);
+    }
+
+    #[test]
+    fn dcache_f065_umount_checks_before_state() {
+        let mut v = ram();
+        v.mkdir(None, "/m", 0o755).unwrap();
+        v.mount(None, "/m", &RamFs).unwrap();
+        v.creat(None, "/m/f", 0o644).unwrap();
+        let f = v.resolve(None, "/m/f", true).unwrap();
+        let fi = v.islot(f).unwrap();
+        let held = v.iget(v.sb_of(f.mount), v.inodes[fi as usize].ino).unwrap();
+        v.resolve(None, "/m", true).unwrap();
+        let before = (v.dentries, v.inodes, v.mounts, v.supers);
+        assert_eq!(v.umount(None, "/m").unwrap_err(), FsError::Busy);
+        assert_eq!((v.dentries, v.inodes, v.mounts, v.supers), before);
+        v.iput(held);
+        assert_eq!(v.stat(None, "/m/f").unwrap().kind, InodeKind::Reg);
+        v.creat(None, "/m/g", 0o644).unwrap();
+        let g = v.resolve(None, "/m/g", true).unwrap();
+        v.dget(g.dslot).unwrap();
+        v.resolve(None, "/m", true).unwrap();
+        let before = (v.dentries, v.inodes, v.mounts, v.supers);
+        assert_eq!(v.umount(None, "/m").unwrap_err(), FsError::Busy);
+        assert_eq!((v.dentries, v.inodes, v.mounts, v.supers), before);
+        assert_eq!(v.stat(None, "/m/g").unwrap().kind, InodeKind::Reg);
+        v.dput(g.dslot);
+        assert_dcache_sound(&v);
+        v.umount(None, "/m").unwrap();
+        assert_dcache_sound(&v);
+        assert_eq!(v.stat(None, "/m/f").unwrap_err(), FsError::NotFound);
+        assert!(v.inodes.iter().all(|i| !i.used || i.sb == 0));
     }
 }

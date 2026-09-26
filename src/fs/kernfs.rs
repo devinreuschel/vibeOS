@@ -352,10 +352,7 @@ impl Vfs {
         }
         let islot = self.fat_iget(sb, ino, InodeKind::Dir, 0, 0)?;
         match self.fat_dcache(dir, name, islot) {
-            Ok(p) => {
-                self.dentries[p.dslot as usize].pinned = true;
-                Ok(())
-            }
+            Ok(_) => Ok(()),
             Err(e) => {
                 self.release_inode(islot);
                 Err(e)
