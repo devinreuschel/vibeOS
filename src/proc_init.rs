@@ -35,7 +35,7 @@ use vibeos::wait::WaitQueue;
 use crate::addr_space_init;
 use crate::cell::IrqCell;
 use crate::console_init;
-use crate::file_init;
+use crate::file_init::{self, FileId};
 use crate::serial::Serial;
 use crate::syscall_init;
 use crate::thread_init;
@@ -252,9 +252,18 @@ fn init_slot(t: &mut Table, pid: u32, ppid: u32, name: &'static str) {
     p.fds = FdTable::stdio();
 }
 
-fn close_fd_slot(fd: Fd) {
-    if let FdKind::File(fid) = fd.kind {
-        let _ = file_init::close(fid);
+/// The open-file table handle an fd names, if it names a file.
+fn file_id(fd: Fd) -> Option<FileId> {
+    match fd.kind {
+        FdKind::File { fid, r#gen } => Some(FileId { fid, r#gen }),
+        FdKind::None | FdKind::Console => None,
+    }
+}
+
+fn close_fd_slot(fd: Fd) -> Result<(), FsError> {
+    match file_id(fd) {
+        Some(id) => file_init::close(id),
+        None => Ok(()),
     }
 }
 
@@ -262,7 +271,7 @@ fn close_all_fds(fds: &mut FdTable) {
     let mut i = 0u32;
     while i < MAX_FDS as u32 {
         if let Some(old) = fds.close(i) {
-            close_fd_slot(old);
+            let _ = close_fd_slot(old);
         }
         i += 1;
     }
@@ -271,16 +280,13 @@ fn close_all_fds(fds: &mut FdTable) {
 fn dup_table(src: FdTable) -> Option<FdTable> {
     let mut i = 0u32;
     while i < MAX_FDS as u32 {
-        if let Some(fd) = src.get(i)
-            && let FdKind::File(fid) = fd.kind
-            && file_init::addref(fid).is_err()
+        if let Some(id) = src.get(i).and_then(file_id)
+            && file_init::addref(id).is_err()
         {
             let mut j = 0u32;
             while j < i {
-                if let Some(fd) = src.get(j)
-                    && let FdKind::File(fid) = fd.kind
-                {
-                    let _ = file_init::close(fid);
+                if let Some(id) = src.get(j).and_then(file_id) {
+                    let _ = file_init::close(id);
                 }
                 j += 1;
             }
@@ -550,7 +556,7 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> i64 {
     };
     match slot.kind {
         FdKind::None => syscall::neg(EBADF),
-        FdKind::Console | FdKind::File(_) => {
+        FdKind::Console | FdKind::File { .. } => {
             if let Err(e) = validate_buf(buf, len) {
                 return syscall::neg(e);
             }
@@ -569,20 +575,22 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> i64 {
                 }
                 match slot.kind {
                     FdKind::Console => console_init::write(&scratch[..n]),
-                    FdKind::File(fid) => match file_init::write(fid, &scratch[..n]) {
-                        Ok(k) => {
-                            if k < n {
-                                return (done + k as u64) as i64;
+                    FdKind::File { fid, r#gen } => {
+                        match file_init::write(FileId { fid, r#gen }, &scratch[..n]) {
+                            Ok(k) => {
+                                if k < n {
+                                    return (done + k as u64) as i64;
+                                }
+                            }
+                            Err(e) => {
+                                return if done == 0 {
+                                    syscall::neg(fs_errno(e))
+                                } else {
+                                    done as i64
+                                };
                             }
                         }
-                        Err(e) => {
-                            return if done == 0 {
-                                syscall::neg(fs_errno(e))
-                            } else {
-                                done as i64
-                            };
-                        }
-                    },
+                    }
                     FdKind::None => return syscall::neg(EBADF),
                 }
                 done += n as u64;
@@ -637,10 +645,10 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> i64 {
             }
             n as i64
         }
-        FdKind::File(fid) => {
+        FdKind::File { fid, r#gen } => {
             let mut scratch = [0u8; 256];
             let n = (len as usize).min(scratch.len());
-            match file_init::read(fid, &mut scratch[..n]) {
+            match file_init::read(FileId { fid, r#gen }, &mut scratch[..n]) {
                 Ok(k) => {
                     if k > 0 && space.write_bytes(buf, &scratch[..k]).is_err() {
                         return syscall::neg(EFAULT);
@@ -712,9 +720,12 @@ fn sys_open(path: u64, flags: u64, _mode: u64) -> i64 {
         return syscall::neg(EINVAL);
     };
     match file_init::open(path, flags as u32, 0) {
-        Ok(fid) => {
+        Ok(id) => {
             let slot = Fd {
-                kind: FdKind::File(fid),
+                kind: FdKind::File {
+                    fid: id.fid,
+                    r#gen: id.r#gen,
+                },
                 flags: fd_flags_from_open(flags as u32),
             };
             let pid = current_pid();
@@ -722,7 +733,7 @@ fn sys_open(path: u64, flags: u64, _mode: u64) -> i64 {
             match r {
                 Some(fd) => fd as i64,
                 None => {
-                    let _ = file_init::close(fid);
+                    let _ = file_init::close(id);
                     syscall::neg(EMFILE)
                 }
             }
@@ -735,10 +746,10 @@ fn sys_close(fd: u64) -> i64 {
     let pid = current_pid();
     let old = with_table(|t| t.get_mut(pid).and_then(|p| p.fds.close(fd as u32)));
     match old {
-        Some(s) => {
-            close_fd_slot(s);
-            0
-        }
+        Some(s) => match close_fd_slot(s) {
+            Ok(()) => 0,
+            Err(e) => syscall::neg(fs_errno(e)),
+        },
         None => syscall::neg(EBADF),
     }
 }
@@ -748,10 +759,12 @@ fn sys_lseek(fd: u64, off: u64, whence: u64) -> i64 {
         return syscall::neg(EBADF);
     };
     match slot.kind {
-        FdKind::File(fid) => match file_init::seek(fid, off as i64, whence as u32) {
-            Ok(n) => n as i64,
-            Err(e) => syscall::neg(fs_errno(e)),
-        },
+        FdKind::File { fid, r#gen } => {
+            match file_init::seek(FileId { fid, r#gen }, off as i64, whence as u32) {
+                Ok(n) => n as i64,
+                Err(e) => syscall::neg(fs_errno(e)),
+            }
+        }
         FdKind::Console => syscall::neg(EINVAL),
         FdKind::None => syscall::neg(EBADF),
     }
@@ -762,14 +775,14 @@ fn sys_dup(old: u64) -> i64 {
     let r = with_table(|t| {
         let p = t.get_mut(pid)?;
         let s = p.fds.get(old as u32)?;
-        if let FdKind::File(fid) = s.kind {
-            file_init::addref(fid).ok()?;
+        if let Some(id) = file_id(s) {
+            file_init::addref(id).ok()?;
         }
         match p.fds.dup(old as u32) {
             Ok(n) => Some(n),
             Err(_) => {
-                if let FdKind::File(fid) = s.kind {
-                    let _ = file_init::close(fid);
+                if let Some(id) = file_id(s) {
+                    let _ = file_init::close(id);
                 }
                 None
             }
@@ -790,16 +803,16 @@ fn sys_dup2(old: u64, new: u64) -> i64 {
             return Some((new as u32, None));
         }
         let s = p.fds.get(old as u32)?;
-        if let FdKind::File(fid) = s.kind
-            && file_init::addref(fid).is_err()
+        if let Some(id) = file_id(s)
+            && file_init::addref(id).is_err()
         {
             return None;
         }
         match p.fds.dup2(old as u32, new as u32) {
             Ok(displaced) => Some((new as u32, displaced)),
             Err(_) => {
-                if let FdKind::File(fid) = s.kind {
-                    let _ = file_init::close(fid);
+                if let Some(id) = file_id(s) {
+                    let _ = file_init::close(id);
                 }
                 None
             }
@@ -808,7 +821,7 @@ fn sys_dup2(old: u64, new: u64) -> i64 {
     match r {
         Some((n, disp)) => {
             if let Some(d) = disp {
-                close_fd_slot(d);
+                let _ = close_fd_slot(d);
             }
             n as i64
         }
@@ -951,8 +964,8 @@ fn sys_execve(path: u64, argv: u64, envp: u64, frame: *mut SyscallFrame) -> i64 
     };
     let mut i = 0usize;
     while i < MAX_FDS {
-        if let Some(fid) = gone[i] {
-            let _ = file_init::close(fid);
+        if let Some(fd) = gone[i] {
+            let _ = close_fd_slot(fd);
         }
         i += 1;
     }

@@ -1,13 +1,30 @@
 //! In-guest tests of P10-S09, FAT inode, open-file table generations, vibefs size limits (DESIGN §8.2).
 
-use vibeos::fs::{FsError, O_RDONLY};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+use vibeos::fs::{FsError, O_CREAT, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, SEEK_CUR, SEEK_SET};
+use vibeos::limits::MAX_OPEN_FILES;
 use vibeos::proc::wait_exited;
 
 use super::user::{self, DEFAULT, Image, user_code};
 use super::{Outcome, Test, test};
-use crate::file_init;
+use crate::file_init::{self, FileId};
+use crate::thread_init;
+use crate::time_init;
 
-pub(super) const TESTS: &[Test] = &[test("file_table_fork_churn", test_file_table_fork_churn)];
+pub(super) const TESTS: &[Test] = &[
+    test("file_table_fork_churn", test_file_table_fork_churn),
+    test(
+        "file_table_stale_writeback_ebadf",
+        test_file_table_stale_writeback_ebadf,
+    ),
+    test("open_creat_exists_opens", test_open_creat_exists_opens),
+];
+
+/// Each open-file slot's `(used, refs)`.
+fn holders() -> [(bool, u16); MAX_OPEN_FILES] {
+    file_init::testing::table().map(|(used, refs, _)| (used, refs))
+}
 
 /// Read up to `out.len()` bytes of `path` from offset 0; the count read.
 fn read_all(path: &str, out: &mut [u8]) -> Result<usize, FsError> {
@@ -163,7 +180,7 @@ fn test_file_table_fork_churn() -> Outcome {
     if unlink_quiet("/f55a.txt").is_err() || unlink_quiet("/f55b.txt").is_err() {
         return Outcome::Fail("unlink before");
     }
-    let base = file_init::testing::table();
+    let base = holders();
     file_init::testing::set_write_yield(true);
     let st = user::run(&Image::Code(F55_CHURN, DEFAULT), &["f55churn"]);
     file_init::testing::set_write_yield(false);
@@ -181,7 +198,7 @@ fn test_file_table_fork_churn() -> Outcome {
 
 fn check_churn(
     st: Result<u32, crate::user_init::LoadError>,
-    base: &[(bool, u16); vibeos::limits::MAX_OPEN_FILES],
+    base: &[(bool, u16); MAX_OPEN_FILES],
 ) -> Outcome {
     let st = match st {
         Ok(st) => st,
@@ -207,7 +224,7 @@ fn check_churn(
         }
         Err(e) => return crate::fail_fmt!("f55b: {}", e.as_str()),
     }
-    let now = file_init::testing::table();
+    let now = holders();
     let mut i = 0usize;
     while i < now.len() {
         if now[i] != base[i] {
@@ -220,4 +237,166 @@ fn check_churn(
         i += 1;
     }
     Outcome::Ok
+}
+
+fn pack(id: FileId) -> u32 {
+    (u32::from(id.fid) << 16) | u32::from(id.r#gen)
+}
+
+fn unpack(v: u32) -> FileId {
+    FileId {
+        fid: (v >> 16) as u16,
+        r#gen: v as u16,
+    }
+}
+
+/// The handle the held write uses; the helper closes it.
+static STALE_A: AtomicU32 = AtomicU32::new(0);
+/// The handle the helper opened into the freed slot.
+static STALE_B: AtomicU32 = AtomicU32::new(0);
+static STALE_B_OK: AtomicBool = AtomicBool::new(false);
+static STALE_DONE: AtomicBool = AtomicBool::new(false);
+
+/// Waits (at most 10,000 yields) for the held write, closes its file,
+/// opens `/f55t.txt` into the freed slot, then releases the write.
+fn stale_helper() {
+    let mut n = 0u32;
+    while !file_init::testing::write_held() && n < 10_000 {
+        thread_init::yield_now();
+        n += 1;
+    }
+    if file_init::testing::write_held()
+        && file_init::close(unpack(STALE_A.load(Ordering::Acquire))).is_ok()
+        && let Ok(b) = file_init::open("/f55t.txt", O_RDWR | O_CREAT | O_TRUNC, 0)
+    {
+        STALE_B.store(pack(b), Ordering::Release);
+        STALE_B_OK.store(true, Ordering::Release);
+    }
+    file_init::testing::release_write();
+    STALE_DONE.store(true, Ordering::Release);
+}
+
+fn test_file_table_stale_writeback_ebadf() -> Outcome {
+    let out = stale_writeback();
+    let us = unlink_quiet("/f55s.txt");
+    let ut = unlink_quiet("/f55t.txt");
+    if !matches!(out, Outcome::Ok) {
+        return out;
+    }
+    if us.is_err() || ut.is_err() {
+        return Outcome::Fail("unlink after");
+    }
+    Outcome::Ok
+}
+
+fn stale_writeback() -> Outcome {
+    const FL: u32 = O_RDWR | O_CREAT | O_TRUNC;
+    // A handle whose slot was closed and reused.
+    let a = match file_init::open("/f55s.txt", FL, 0) {
+        Ok(a) => a,
+        Err(e) => return crate::fail_fmt!("open s: {}", e.as_str()),
+    };
+    if let Err(e) = file_init::close(a) {
+        return crate::fail_fmt!("close s: {}", e.as_str());
+    }
+    let b = match file_init::open("/f55t.txt", FL, 0) {
+        Ok(b) => b,
+        Err(e) => return crate::fail_fmt!("open t: {}", e.as_str()),
+    };
+    let stale = [
+        ("write", file_init::write(a, b"x").err()),
+        ("seek", file_init::seek(a, 5, SEEK_SET).err()),
+        ("addref", file_init::addref(a).err()),
+        ("close", file_init::close(a).err()),
+    ];
+    let pos = file_init::seek(b, 0, SEEK_CUR);
+    let cb = file_init::close(b);
+    if b.fid != a.fid || b.r#gen == a.r#gen {
+        return crate::fail_fmt!("slot not reused: {a:?} then {b:?}");
+    }
+    for (op, e) in stale {
+        if e != Some(FsError::Badf) {
+            return crate::fail_fmt!("stale {op}: {e:?}, want Badf");
+        }
+    }
+    if pos != Ok(0) {
+        return crate::fail_fmt!("reused slot offset {pos:?}, want 0");
+    }
+    if let Err(e) = cb {
+        return crate::fail_fmt!("close t: {}", e.as_str());
+    }
+    // A write held between its I/O and its write-back while another
+    // thread closes its file and opens another into the slot.
+    let a = match file_init::open("/f55s.txt", FL, 0) {
+        Ok(a) => a,
+        Err(e) => return crate::fail_fmt!("open s: {}", e.as_str()),
+    };
+    STALE_A.store(pack(a), Ordering::Release);
+    STALE_B_OK.store(false, Ordering::Release);
+    STALE_DONE.store(false, Ordering::Release);
+    file_init::testing::hold_next_write();
+    super::spawn_thread("f55-stale", stale_helper);
+    let w = file_init::write(a, b"x");
+    let deadline = time_init::now_ns().saturating_add(1_000_000_000);
+    while !STALE_DONE.load(Ordering::Acquire) && time_init::now_ns() < deadline {
+        thread_init::yield_now();
+    }
+    if !STALE_DONE.load(Ordering::Acquire) {
+        return Outcome::Fail("helper did not finish");
+    }
+    if !STALE_B_OK.load(Ordering::Acquire) {
+        let _ = file_init::close(a);
+        return Outcome::Fail("helper: no held write, or close/open failed");
+    }
+    let b = unpack(STALE_B.load(Ordering::Acquire));
+    let pos = file_init::seek(b, 0, SEEK_CUR);
+    let cb = file_init::close(b);
+    if b.fid != a.fid {
+        return crate::fail_fmt!("slot not reused: {a:?} then {b:?}");
+    }
+    if w != Err(FsError::Badf) {
+        return crate::fail_fmt!("held write {w:?}, want Badf");
+    }
+    if pos != Ok(0) {
+        return crate::fail_fmt!("other file's offset {pos:?}, want 0");
+    }
+    if let Err(e) = cb {
+        return crate::fail_fmt!("close t: {}", e.as_str());
+    }
+    Outcome::Ok
+}
+
+fn test_open_creat_exists_opens() -> Outcome {
+    if unlink_quiet("/f55r.txt").is_err() {
+        return Outcome::Fail("unlink before");
+    }
+    file_init::testing::set_open_race(true);
+    let r = file_init::open("/f55r.txt", O_RDWR | O_CREAT, 0);
+    file_init::testing::set_open_race(false);
+    match r {
+        Ok(id) => {
+            if let Err(e) = file_init::close(id) {
+                return crate::fail_fmt!("close: {}", e.as_str());
+            }
+        }
+        Err(e) => return crate::fail_fmt!("O_CREAT: {}, want open", e.as_str()),
+    }
+    if unlink_quiet("/f55r.txt").is_err() {
+        return Outcome::Fail("unlink");
+    }
+    file_init::testing::set_open_race(true);
+    let r = file_init::open("/f55r.txt", O_RDWR | O_CREAT | O_EXCL, 0);
+    file_init::testing::set_open_race(false);
+    let excl = match r {
+        Err(FsError::Exists) => Outcome::Ok,
+        Ok(id) => {
+            let _ = file_init::close(id);
+            Outcome::Fail("O_CREAT|O_EXCL opened, want Exists")
+        }
+        Err(e) => crate::fail_fmt!("O_CREAT|O_EXCL: {}, want Exists", e.as_str()),
+    };
+    if unlink_quiet("/f55r.txt").is_err() {
+        return Outcome::Fail("unlink after");
+    }
+    excl
 }

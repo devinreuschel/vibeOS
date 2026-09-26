@@ -92,10 +92,23 @@ impl Walked {
     }
 }
 
+/// An open-file table slot and the generation it had when opened. Every
+/// lookup and write-back checks the generation, so a handle to a slot
+/// that was closed and reused fails with `Badf` (C-FDGEN).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FileId {
+    pub fid: u16,
+    pub r#gen: u16,
+}
+
+/// An open-file table slot. `used` and `refs` are set by `alloc_fid` and
+/// changed after that only by `addref` and `close`, under `FILES`; `gen`
+/// is bumped by the `close` that frees the slot.
 #[derive(Clone, Copy)]
 struct OpenFile {
     used: bool,
     refs: u16,
+    r#gen: u16,
     back: Back,
     vol: u8,
     flags: u32,
@@ -112,6 +125,7 @@ impl OpenFile {
     const EMPTY: Self = Self {
         used: false,
         refs: 0,
+        r#gen: 0,
         back: Back::Fat,
         vol: 0,
         flags: 0,
@@ -323,40 +337,63 @@ fn vol_parent(path: &str) -> Result<(Walked, [u8; MAX_NAME], u8), FsError> {
     Ok((dir, nb, name.len() as u8))
 }
 
-fn alloc_fid(f: OpenFile) -> Result<u16, FsError> {
+/// Put `f` in a free slot with one reference, keeping the slot's
+/// generation.
+fn alloc_fid(f: OpenFile) -> Result<FileId, FsError> {
     let mut g = FILES.lock();
     let mut i = 0usize;
     while i < MAX_OPEN {
         if !g[i].used {
+            let slot_gen = g[i].r#gen;
             g[i] = f;
             g[i].used = true;
-            if g[i].refs == 0 {
-                g[i].refs = 1;
-            }
-            return Ok(i as u16);
+            g[i].refs = 1;
+            g[i].r#gen = slot_gen;
+            return Ok(FileId {
+                fid: i as u16,
+                r#gen: slot_gen,
+            });
         }
         i += 1;
     }
     Err(FsError::NoSpace)
 }
 
-fn get_file(fid: u16) -> Result<OpenFile, FsError> {
-    let g = FILES.lock();
-    let i = fid as usize;
-    if i >= MAX_OPEN || !g[i].used {
-        return Err(FsError::Badf);
+/// The live slot `id` names: `Badf` when it is out of range, unused, or
+/// of another generation.
+fn slot_of(g: &[OpenFile; MAX_OPEN], id: FileId) -> Result<usize, FsError> {
+    let i = id.fid as usize;
+    match g.get(i) {
+        Some(f) if f.used && f.r#gen == id.r#gen => Ok(i),
+        _ => Err(FsError::Badf),
     }
+}
+
+fn get_file(id: FileId) -> Result<OpenFile, FsError> {
+    let g = FILES.lock();
+    let i = slot_of(&g, id)?;
     Ok(g[i])
 }
 
-fn put_file(fid: u16, f: OpenFile) -> Result<(), FsError> {
+/// The fields an operation changed, written back by [`put_file`].
+enum Put {
+    Offset(u64),
+    Wrote { offset: u64, clu: u32, size: u32 },
+}
+
+/// Write back only what `p` names; `refs` and `used` are never written
+/// from a snapshot.
+fn put_file(id: FileId, p: Put) -> Result<(), FsError> {
     let mut g = FILES.lock();
-    let i = fid as usize;
-    if i >= MAX_OPEN || !g[i].used {
-        return Err(FsError::Badf);
+    let i = slot_of(&g, id)?;
+    match p {
+        Put::Offset(offset) => g[i].offset = offset,
+        Put::Wrote { offset, clu, size } => {
+            g[i].offset = offset;
+            g[i].clu = clu;
+            g[i].size = size;
+        }
     }
-    g[i] = f;
-    g[i].used = true;
     Ok(())
 }
 
@@ -444,7 +481,17 @@ pub fn init() {
     let _ = MAX_COMMANDS;
 }
 
-pub fn open(path: &str, flags: u32, _mode: u16) -> Result<u16, FsError> {
+/// Create the regular file `name` in `dir`.
+fn create_reg(dir: &Walked, name: &[u8]) -> Result<(), FsError> {
+    match dir.back {
+        Back::Fat => fat_init::create(dir.vol, dir.clu, name, false).map(|_| ()),
+        Back::Vibe => {
+            vibefs_init::create(dir.vol, dir.ino, name, InodeKind::Reg, 0o644, None).map(|_| ())
+        }
+    }
+}
+
+pub fn open(path: &str, flags: u32, _mode: u16) -> Result<FileId, FsError> {
     if flags & O_CREAT != 0 {
         match vol_walk(path) {
             Ok(_) => {
@@ -454,20 +501,16 @@ pub fn open(path: &str, flags: u32, _mode: u16) -> Result<u16, FsError> {
             }
             Err(FsError::NotFound) => {
                 let (dir, name, nlen) = vol_parent(path)?;
-                match dir.back {
-                    Back::Fat => {
-                        fat_init::create(dir.vol, dir.clu, &name[..nlen as usize], false)?;
-                    }
-                    Back::Vibe => {
-                        vibefs_init::create(
-                            dir.vol,
-                            dir.ino,
-                            &name[..nlen as usize],
-                            InodeKind::Reg,
-                            0o644,
-                            None,
-                        )?;
-                    }
+                let name = &name[..nlen as usize];
+                #[cfg(feature = "kernel_tests")]
+                if testing::open_race() {
+                    create_reg(&dir, name)?;
+                }
+                match create_reg(&dir, name) {
+                    Ok(()) => {}
+                    // Created since the walk: without O_EXCL, open it.
+                    Err(FsError::Exists) if flags & O_EXCL == 0 => {}
+                    Err(e) => return Err(e),
                 }
             }
             Err(e) => return Err(e),
@@ -508,6 +551,7 @@ pub fn open(path: &str, flags: u32, _mode: u16) -> Result<u16, FsError> {
     alloc_fid(OpenFile {
         used: true,
         refs: 1,
+        r#gen: 0,
         back: node.back,
         vol: node.vol,
         flags,
@@ -521,33 +565,30 @@ pub fn open(path: &str, flags: u32, _mode: u16) -> Result<u16, FsError> {
     })
 }
 
-pub fn close(fid: u16) -> Result<(), FsError> {
+/// Drop one reference; the last frees the slot and bumps its generation.
+pub fn close(id: FileId) -> Result<(), FsError> {
     let mut g = FILES.lock();
-    let i = fid as usize;
-    if i >= MAX_OPEN || !g[i].used {
-        return Err(FsError::Badf);
-    }
+    let i = slot_of(&g, id)?;
     if g[i].refs > 1 {
         g[i].refs -= 1;
         return Ok(());
     }
+    let next_gen = g[i].r#gen.wrapping_add(1);
     g[i] = OpenFile::EMPTY;
+    g[i].r#gen = next_gen;
     Ok(())
 }
 
 /// Extra process fd pointing at the same kernel file.
-pub fn addref(fid: u16) -> Result<(), FsError> {
+pub fn addref(id: FileId) -> Result<(), FsError> {
     let mut g = FILES.lock();
-    let i = fid as usize;
-    if i >= MAX_OPEN || !g[i].used {
-        return Err(FsError::Badf);
-    }
-    g[i].refs = g[i].refs.saturating_add(1);
+    let i = slot_of(&g, id)?;
+    g[i].refs = g[i].refs.checked_add(1).ok_or(FsError::NoSpace)?;
     Ok(())
 }
 
-pub fn read(fid: u16, buf: &mut [u8]) -> Result<usize, FsError> {
-    let mut f = get_file(fid)?;
+pub fn read(id: FileId, buf: &mut [u8]) -> Result<usize, FsError> {
+    let f = get_file(id)?;
     if f.flags & O_ACCMODE == O_WRONLY {
         return Err(FsError::Inval);
     }
@@ -558,13 +599,12 @@ pub fn read(fid: u16, buf: &mut [u8]) -> Result<usize, FsError> {
         Back::Fat => fat_init::read(f.vol, f.clu, f.size, f.offset, buf)?,
         Back::Vibe => vibefs_init::read(f.vol, f.ino, f.offset, buf)?,
     };
-    f.offset = f.offset.saturating_add(n as u64);
-    put_file(fid, f)?;
+    put_file(id, Put::Offset(f.offset.saturating_add(n as u64)))?;
     Ok(n)
 }
 
-pub fn write(fid: u16, buf: &[u8]) -> Result<usize, FsError> {
-    let mut f = get_file(fid)?;
+pub fn write(id: FileId, buf: &[u8]) -> Result<usize, FsError> {
+    let mut f = get_file(id)?;
     if f.flags & O_ACCMODE == O_RDONLY {
         return Err(FsError::Inval);
     }
@@ -593,27 +633,30 @@ pub fn write(fid: u16, buf: &[u8]) -> Result<usize, FsError> {
     };
     #[cfg(feature = "kernel_tests")]
     testing::write_window();
-    f.offset = f.offset.saturating_add(n as u64);
-    put_file(fid, f)?;
+    put_file(
+        id,
+        Put::Wrote {
+            offset: f.offset.saturating_add(n as u64),
+            clu: f.clu,
+            size: f.size,
+        },
+    )?;
     Ok(n)
 }
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn seek(fid: u16, off: i64, whence: u32) -> Result<u64, FsError> {
-    let mut f = get_file(fid)?;
+pub fn seek(id: FileId, off: i64, whence: u32) -> Result<u64, FsError> {
+    let f = get_file(id)?;
     let base = match whence {
         SEEK_SET => 0i64,
-        SEEK_CUR => f.offset as i64,
-        SEEK_END => f.size as i64,
+        SEEK_CUR => i64::try_from(f.offset).map_err(|_| FsError::Inval)?,
+        SEEK_END => i64::from(f.size),
         _ => return Err(FsError::Inval),
     };
-    let n = base.saturating_add(off);
-    if n < 0 {
-        return Err(FsError::Inval);
-    }
-    f.offset = n as u64;
-    put_file(fid, f)?;
-    Ok(n as u64)
+    let n = base.checked_add(off).ok_or(FsError::Inval)?;
+    let n = u64::try_from(n).map_err(|_| FsError::Inval)?;
+    put_file(id, Put::Offset(n))?;
+    Ok(n)
 }
 
 /// Hooks for the in-guest tests (AGENTS.md rule 9): atomics only, and no
@@ -626,6 +669,13 @@ pub mod testing {
     use crate::thread_init;
 
     static WRITE_YIELD: AtomicBool = AtomicBool::new(false);
+    static HOLD: AtomicBool = AtomicBool::new(false);
+    static HELD: AtomicBool = AtomicBool::new(false);
+    static RELEASE: AtomicBool = AtomicBool::new(false);
+    static OPEN_RACE: AtomicBool = AtomicBool::new(false);
+
+    /// The most `yield_now` calls any wait here makes.
+    const MAX_YIELDS: u32 = 10_000;
 
     /// Each [`super::write`] yields once between its backend I/O and its
     /// write-back to the open-file table.
@@ -633,19 +683,56 @@ pub mod testing {
         WRITE_YIELD.store(on, Ordering::Release);
     }
 
+    /// The next [`super::write`] waits between its backend I/O and its
+    /// write-back until [`release_write`].
+    pub fn hold_next_write() {
+        RELEASE.store(false, Ordering::Release);
+        HELD.store(false, Ordering::Release);
+        HOLD.store(true, Ordering::Release);
+    }
+
+    /// Whether the held write has reached its wait.
+    pub fn write_held() -> bool {
+        HELD.load(Ordering::Acquire)
+    }
+
+    /// Let the held write go on.
+    pub fn release_write() {
+        RELEASE.store(true, Ordering::Release);
+    }
+
+    /// [`super::open`] with `O_CREAT` creates the file itself between its
+    /// walk and its create, as another opener would.
+    pub fn set_open_race(on: bool) {
+        OPEN_RACE.store(on, Ordering::Release);
+    }
+
+    pub(super) fn open_race() -> bool {
+        OPEN_RACE.load(Ordering::Acquire)
+    }
+
     pub(super) fn write_window() {
+        if HOLD.swap(false, Ordering::AcqRel) {
+            HELD.store(true, Ordering::Release);
+            let mut n = 0u32;
+            while !RELEASE.load(Ordering::Acquire) && n < MAX_YIELDS {
+                thread_init::yield_now();
+                n += 1;
+            }
+            HELD.store(false, Ordering::Release);
+        }
         if WRITE_YIELD.load(Ordering::Acquire) {
             thread_init::yield_now();
         }
     }
 
-    /// Each open-file slot's `(used, refs)`.
-    pub fn table() -> [(bool, u16); MAX_OPEN] {
+    /// Each open-file slot's `(used, refs, gen)`.
+    pub fn table() -> [(bool, u16, u16); MAX_OPEN] {
         let g = FILES.lock();
-        let mut out = [(false, 0u16); MAX_OPEN];
+        let mut out = [(false, 0u16, 0u16); MAX_OPEN];
         let mut i = 0usize;
         while i < MAX_OPEN {
-            out[i] = (g[i].used, g[i].refs);
+            out[i] = (g[i].used, g[i].refs, g[i].r#gen);
             i += 1;
         }
         out
