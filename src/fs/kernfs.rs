@@ -1555,7 +1555,7 @@ mod tests {
 
     fn boot() -> (Vfs, Kfs) {
         let mut v = Vfs::new();
-        v.mount_root_fs(crate::fs::tests::ramfs()).unwrap();
+        v.mount_root_fs(crate::fs::testfs::ramfs()).unwrap();
         let k = kernfs();
         pseudo(&mut v, &k);
         (v, k)
@@ -1564,7 +1564,7 @@ mod tests {
     #[test]
     fn mount_pseudo_on_keyed_root() {
         let mut v = Vfs::new();
-        v.mount_root_fs(crate::fs::tests::keyfs_new()).unwrap();
+        v.mount_root_fs(crate::fs::testfs::keyfs_new()).unwrap();
         pseudo(&mut v, &kernfs());
         assert_eq!(v.stat(None, "/dev").unwrap().kind, InodeKind::Dir);
         assert_eq!(v.stat(None, "/proc").unwrap().kind, InodeKind::Dir);

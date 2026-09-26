@@ -434,7 +434,6 @@ pub mod testing {
     }
 
     /// `(Vfs::open` opens, routed opens) so far.
-    #[allow(dead_code)]
     pub fn open_counts() -> (u32, u32) {
         let v = fs_init::with(|v| v.stats.opens);
         (v, ROUTED.load(Ordering::Acquire))
