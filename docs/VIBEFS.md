@@ -527,17 +527,31 @@ that snapshot and not from its successor, and sits in the sub-list for its
 birth range. Within one tree, a metadata block that two pointers reach is an
 error.
 
-v1 `fsck-vibefs` does not run every step yet (F067; ROADMAP §10.11). It
-mounts the volume as the kernel does, which covers steps 1 to 3 and counts a
-mount failure as one error. Then it checks each extent (`len ≥ 1`,
-`phys ≥ 2`, `phys + len ≤ nblocks`, data CRC), the `nlink` of each directory
-except root against the entries naming it, and, for blocks 2 to `nblocks` − 1,
-reachability against the refcounts. Beyond the inode kind that mount checks
-(§5), it does not check mode, a dirent's kind against its inode's,
-inline against size, duplicate names, regular-file `nlink`, or the bitmap.
-It does not walk snapshot trees, so a block only a snapshot reaches is a leak
-warning. It prints `fsck-vibefs: gen G errors E warnings W` and exits 1 on
-any error.
+v1 `fsck-vibefs` mounts the volume as the kernel does, which covers steps 1
+to 3; a mount failure, an out-of-range inode kind (§5) included, is one
+`mount` error. It then reports each defect in a class:
+
+| Class | Check |
+|---|---|
+| `extent` | each extent has `len ≥ 1`, `phys ≥ 2` and `phys + len ≤ nblocks` |
+| `data-crc` | each extent's data matches its CRC |
+| `mode` | a mode whose `S_IFMT` bits are non-zero names the inode's kind |
+| `kind` | a dirent's kind equals its inode's |
+| `dangling` | a dirent names an inode that exists |
+| `inline` | the inline flag is set only with `size ≤ 128` |
+| `dup-name` | no two entries of one directory share a name |
+| `dir-nlink` | each directory's `nlink`, root aside, equals the dirents naming it |
+| `nlink` | each other inode's `nlink` equals the dirents naming it |
+| `unreachable` | every inode is reachable from the root through dirents |
+| `ref-free` | a block from 2 on that the tree reaches has a refcount above 0 |
+| `bit-free` | such a block has its bitmap bit set |
+| `leak` | an unreachable block has a refcount of 0 and its bit clear (a warning) |
+
+Every class but `leak` is an error. It prints one
+`fsck-vibefs: <class> <count>` line per class it found, then
+`fsck-vibefs: gen G errors E warnings W`, and exits 1 on any error. It does
+not walk snapshot trees, so a block that only a snapshot reaches is a leak
+warning.
 
 v1 has no repair mode: `fsck-vibefs` takes no options and never writes, so
 leaked blocks stay allocated. The rule for a repair mode, when one is
