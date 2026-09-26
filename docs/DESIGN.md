@@ -826,7 +826,7 @@ default action. The default action, the only one today, ends the process and pri
 `user: pid N killed SIG<name>`. Pid 1 is the exception. When init exits, by `exit` or by a signal,
 the kernel panics with a line naming the exit status, or the signal and, for a fault, the faulting
 address, as Linux panics when init dies. Planned: ROADMAP §10.5 (F068). Not yet enforced: ring-3
-`#DB`, and `#AC` when `CR0.AM` is set, halt the kernel (ROADMAP §10.6, F005), and so do the
+`#DB` halts the kernel (ROADMAP §10.6, F005), and so do the
 entry-path windows of §5.10 (ROADMAP §10.6, F006, F007); §5.2's last column lists every
 vector whose ring-3 action differs from the rule. An NMI dumps and halts on its IST stack; from
 ROADMAP §10.7 the NMI handler first reads its CPU's stop request word (step 1).
@@ -846,12 +846,10 @@ since no lint sees them. Not yet enforced: neither lint runs, `let _ =` drops a 
 and the tmpfs readahead eviction), §10.12 (F115), and §13.9 (F124) fix; ROADMAP §10.1 lands the
 lints and audits every site.
 
-Hardware events are also lost in four cases. An exception before `idt::init` (PMM, the CR3 switch,
+Hardware events are also lost in three cases. An exception before `idt::init` (PMM, the CR3 switch,
 ACPI discovery, heap, KVA, GDT, PIC) goes to whatever IDT Limine left and resets or hangs with no
 output (ROADMAP §11.1, F136). LINT1 is masked on every CPU and MADT NMI entries (types 3 and 4) are
-not parsed, so a chipset or external NMI never reaches the NMI handler (ROADMAP §20.1, F096).
-`CR4.MCE` and `CR0.NE` are clear on every CPU, so a machine check shuts the CPU down with no dump,
-and an x87 floating-point error raises the masked IRQ13 and is lost (ROADMAP §10.6, F026). An
+not parsed, so a chipset or external NMI never reaches the NMI handler (ROADMAP §20.1, F096). An
 interrupt on a pool vector no handler owns is EOIed and ignored with no count (ROADMAP §10.6).
 
 ## 2.6 Serial markers
@@ -919,7 +917,7 @@ that review cites means the review's text.
 | I3 | IF=0 through every return-to-user sequence (§5.10 rule 4) | FMASK (§7.2) | documented | No: the syscall exit has no `cli` and `console_init::wait_key` returns with IF=1 (F001); `enter_user_full` runs with IF=1 (F006) (ROADMAP §10.6) |
 | I4 | Kernel code outside the §5.10 entry and exit sequences runs with `GS_BASE` = this CPU's `PerCpu` (§5.10) | `arch::gs`, `per_cpu_init` | documented | No: the IF=1 window in `enter_user_full` (F006) and a fault on the return-to-user `iretq` (F007) run on the user base (ROADMAP §10.6) |
 | I5 | One entry stub per vector makes the `swapgs` decision (§5.10 rule 1) | `arch/idt.rs` | enforced by construction: `idt::init` points every gate at a stub it generates, and `scripts/check_entry.py` fails on an `x86-interrupt` handler outside `src/arch/` | Yes |
-| I6 | Ring 3 never halts the kernel, pid 1's exit excepted (§2.5, §5.2, §11.5) | `proc_init::try_user_fault` | documented | No: ring-3 `#DB`, and `#AC` when `CR0.AM` is set, halt (F005), and so do the I4 windows (ROADMAP §10.6) |
+| I6 | Ring 3 never halts the kernel, pid 1's exit excepted (§2.5, §5.2, §11.5) | `proc_init::try_user_fault` | documented | No: ring-3 `#DB` halts (F005), and so do the I4 windows (ROADMAP §10.6) |
 | I7 | The kernel reads or writes user memory only through the §5.1 user-memory accessors, and writes an address space that is not running only through the fill API (ROADMAP §10.6) | `addr_space.rs`; the arch accessors from ROADMAP §10.6 | enforced by SMAP where the CPU has it (PAN on aarch64, ROADMAP §11.6); the fill-API rule is documented | Partly: today's accessors copy through the physmap after `check_user_range`, and `write_bytes` ignores the PTE's `WRITABLE` bit (ROADMAP §10.6, F023) |
 | I8 | One thread per address space changes its regions, and another CPU changes its page tables only under its page-table lock (§2.11) | process model | assumed | Yes: only the owning thread touches a space. Lock-free user copies, local-only `invlpg`, and `&'static AddressSpace` depend on it. ROADMAP §10.6 replaces `&'static` with a counted object, §12.1's reverse map changes page tables from other CPUs under the space's page-table lock, §12.3 shoots down every CPU in the space's set, and §13.1's threads bring the address-space lock |
 | I9 | TCBs are never freed, so a `*mut Tcb` stays valid | 64-slot table, `thread_init` | assumed; slot reuse enforced by the in-guest `lifetime_dead_slot_on_cpu` | Yes: `spawn_inner` reuses a Dead slot only after an Acquire load finds its `Tcb.on_cpu` clear, which its CPU's `thread_init::finish_switch` clears with Release once `switch_context` has returned, and `thread_exit` stores `Dead` under SCHED (ROADMAP §10.10, F012) |
@@ -1367,11 +1365,11 @@ Target notes:
 - `disable-redzone: true`. Interrupt handlers clobber the red zone.
 - Frame pointers are forced (`-C force-frame-pointers=yes`) so panic dumps can symbolize.
 - The kernel is built soft-float, so compiled kernel code uses no SSE or x87 registers; kernel SSE
-  would need a save around each use, and none exists. User code gets SSE: `syscall_init::init_fpu`
-  clears `CR0.EM` and `CR0.TS` and sets `CR0.MP` and `CR4.OSFXSR` on every CPU, and
+  would need a save around each use, and none exists. User code gets SSE: `arch::cpu::init_control_regs`
+  clears `CR0.EM` and `CR0.TS` and sets `CR0.MP`, `CR0.NE`, `CR4.OSFXSR` and `CR4.OSXMMEXCPT` on
+  every CPU, so x87 and SSE floating-point errors reach `#MF` and `#XF` (§5.2), and
   `syscall_init::switch_fpu` saves and restores each thread's 512-byte FXSAVE image (`Tcb.fpu`) on
-  every switch. `CR0.NE` and `CR4.OSXMMEXCPT` are not set, so x87 and SSE floating-point errors do
-  not reach `#MF` and `#XF` (§5.2; ROADMAP §10.6, F026).
+  every switch.
 - User code never builds for a bare target. `x86_64-unknown-none` has the soft-float Rust ABI: an
   `f64` multiply compiles to a call to `__muldf3`, `f64` arguments pass in integer registers, and
   rustc warns that enabling SSE there breaks the target's ABI. A user program built for it would use
@@ -1461,7 +1459,7 @@ where the paragraphs below the table say so. The executable contract for the mar
 | 8 | MMIO PTE attribute patch | `paging: mmio uc` | LAPIC/IOAPIC/HPET pages must be uncacheable before first touch. |
 | 9 | Kernel heap | `heap ok` | `alloc` becomes legal. Until `irq: enabled` (step 15) boot may use its infallible API; from then on every allocation is fallible ([§4.4](#44-kernel-heap)). |
 | 10 | Kernel VA allocator | `kva: ready` | Guarded stacks need it, so threads need it. |
-| 11 | Per-CPU area for the BSP, bootstrap TCB, syscall MSRs | `per_cpu: bsp ready` | `GS_BASE` must be valid before any `per_cpu!` access, including from ISRs. Then `thread_init::init_bootstrap` makes `_start`'s context the bootstrap thread, and `syscall_init::init_bsp` programs STAR, LSTAR, FMASK (§7.2), and `EFER.SCE`, enables SSE for user code (§3.1), and wires TSS.RSP0. `arch::cpu::harden` (SMEP, SMAP, UMIP, `CR0.WP`) runs just before this step, after `idt ok`. |
+| 11 | Per-CPU area for the BSP, bootstrap TCB, syscall MSRs | `per_cpu: bsp ready` | `GS_BASE` must be valid before any `per_cpu!` access, including from ISRs. Then `thread_init::init_bootstrap` makes `_start`'s context the bootstrap thread, and `syscall_init::init_bsp` programs STAR, LSTAR, FMASK (§7.2), and `EFER.SCE`, enables SSE for user code (§3.1), and wires TSS.RSP0. `syscall_init::init_bsp` first runs `arch::cpu::init_control_regs`, which writes CR0 and CR4 whole (§11.4). |
 | 12 | ACPI tables | `acpi: xsdt N tables` | MADT drives APIC and SMP, HPET drives calibration. |
 | 13 | Time: HPET or PIT, TSC calibration | `time: tsc N/ms` | The scheduler needs a tick, and AP bring-up needs `busy_wait_ms`. |
 | 13b | BSP LAPIC, I/O APIC, LAPIC timer | `time: lapic_timer ok (<mode>)` | After TSC calib. Prove a tick (TSC-deadline → periodic → PIT), then mask PIC + PIT GSI if LAPIC owns it. |
@@ -1872,9 +1870,8 @@ scanout is a later polish pass; double buffering is also parked (ROADMAP §5.1).
 ### TLB
 
 - `invlpg` after any single-PTE edit, including MMIO attribute patches.
-- Kernel mappings are `GLOBAL`. They survive a CR3 reload only where `CR4.PGE` is set: the
-  trampoline sets it on each AP, and the BSP keeps the CR4 Limine left, with PGE clear under the
-  pinned Limine (ROADMAP §10.6, F026, F085). Unmapping one requires a shootdown on every online CPU
+- Kernel mappings are `GLOBAL`, and every CPU sets `CR4.PGE` (`arch::cpu::init_control_regs`,
+  §11.4), so they survive a CR3 reload. Unmapping one requires a shootdown on every online CPU
   before the VA or the frame behind it can be reused (§2.4). See [section 7.9](#79-tlb-shootdown).
 - A kernel-half edit runs a local `invlpg`, drops PT, then calls `paging::tlb_shootdown_others(va)`,
   a hook that `ipi_init::init` points at `ipi_init::shootdown_va` before the first AP starts (§7.9).
@@ -2522,8 +2519,8 @@ User-memory access will go through `copy_from_user`/`copy_to_user`, which derefe
 inside `stac`/`clac` (ROADMAP §10.6); pointer ranges are validated before use (ROADMAP §9.3). Today it
 is `AddressSpace::read_bytes`/`write_bytes` after `check_user_range`, copying through the HHDM physmap
 (a supervisor mapping, so SMAP does not apply until a user-VA accessor exists), and `write_bytes` does
-not check the PTE's `WRITABLE` bit. `arch::cpu::harden()` sets `CR4.SMEP|SMAP|UMIP` where CPUID allows
-and asserts `CR0.WP` on every CPU; `stac`/`clac` are no-ops when SMAP is missing.
+not check the PTE's `WRITABLE` bit. `arch::cpu::init_control_regs` sets `CR0.WP`, and `CR4.SMEP`, `SMAP` and
+`UMIP` where CPUID reports them, on every CPU; `stac`/`clac` are no-ops when SMAP is missing.
 
 Planned (ROADMAP §10.6, §12.2, §12.5): two kinds of accessor, told apart by a kind bit in each
 exception-table entry. A faulting accessor (`copy_from_user`, `copy_to_user`, and their string and
@@ -2601,15 +2598,15 @@ fault, downstream of it.
 | `0x02` | NMI | dump on IST, halt. Planned (ROADMAP §10.7, F135): the handler first reads and clears its CPU's stop request word (§2.5 step 1): STOP stops the CPU, a CPU already stopped halts again at once, and an NMI with no request on the dump owner returns at once. Planned (ROADMAP §25.5): a backtrace or lockup request, and an external NMI on a CPU that is neither stopped nor the dump owner, are handled and return | not a ring-3 fault: the Ring 0 column applies | as the rule |
 | `0x03` | `#BP` | log, continue | `SIGTRAP` (`int3`) | as the rule |
 | `0x04`, `0x05`, `0x07`, `0x0A` | `#OF`, `#BR`, `#NM`, `#TS` | dump, halt | `SIGSEGV` | `sig_for_vec` has no row, so one would halt the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
-| `0x06` | `#UD` | dump, halt | `SIGILL` | as the rule; an SSE floating-point error also arrives here (row `0x13`) |
+| `0x06` | `#UD` | dump, halt | `SIGILL` | as the rule |
 | `0x08` | `#DF` | dump on IST, halt | not a ring-3 fault: the Ring 0 column applies | as the rule |
 | `0x0B`, `0x0C` | `#NP`, `#SS` | dump, halt | `SIGBUS`; `SIGSEGV` for a fault on the return-to-user `iretq` (§5.10 rule 2) | the `iretq` case halts. Rule; not yet enforced: ROADMAP §10.6 (F007) |
 | `0x0D` | `#GP` | dump with error code, halt | `SIGSEGV`, including a fault on the return-to-user `iretq` (§5.10 rule 2) | the `iretq` case halts. Rule; not yet enforced: ROADMAP §10.6 (F007) |
 | `0x0E` | `#PF` | dump with CR2, halt. Planned (ROADMAP §10.6, §12.2): a fault inside a user-memory accessor is handled by that accessor's kind (§5.1) and ends in `EFAULT` or a short count | `SIGSEGV`. Planned (ROADMAP §12.2): a fault on a page that a region reserves is resolved first, and one through a file mapping on a page wholly past EOF, or on a page whose fill fails, gets `SIGBUS`, and so does a store through a shared file mapping whose space reservation fails (§4.3) | as the rule |
-| `0x10` | `#MF` | dump, halt | `SIGFPE` | cannot fire: `CR0.NE` is clear, so an x87 error raises the masked IRQ13 and is lost. Rule; not yet enforced: ROADMAP §10.6 (F026) |
-| `0x11` | `#AC` | dump, halt | `SIGBUS`, for a misaligned access while ring 3 has set RFLAGS.AC; `CR0.AM` is set on every CPU, as Linux sets it | halts the kernel if `CR0.AM` is set (INIT clears it on each AP and no kernel code sets it; the BSP keeps Limine's value), and while it is clear ring 3's AC raises nothing. Rule; not yet enforced: ROADMAP §10.6 (F005) |
-| `0x12` | `#MC` | dump on IST, halt; `CR4.MCE` is clear, so a machine check shuts the CPU down with no dump (ROADMAP §10.6, F026). Planned (ROADMAP §25.1, §25.3): only a fatal machine check, or an action-required error in kernel memory, halts; a lower severity is recorded and the CPU continues | not a ring-3 fault: the Ring 0 column applies. Planned (ROADMAP §25.3): an action-required error that ring-3 code consumed is recorded by the handler and recovered in exit work (§5.10 rule 11), which sends `SIGBUS` with `BUS_MCEERR_AR` | as the rule |
-| `0x13` | `#XF` | dump, halt | `SIGFPE` | arrives as `#UD` and gets `SIGILL`: `CR4.OSXMMEXCPT` is clear. Rule; not yet enforced: ROADMAP §10.6 (F026) |
+| `0x10` | `#MF` | dump, halt | `SIGFPE` | as the rule |
+| `0x11` | `#AC` | dump, halt | `SIGBUS`, for a misaligned access while ring 3 has set RFLAGS.AC; `CR0.AM` is set on every CPU, as Linux sets it | as the rule |
+| `0x12` | `#MC` | dump on IST, halt. Planned (ROADMAP §25.1, §25.3): only a fatal machine check, or an action-required error in kernel memory, halts; a lower severity is recorded and the CPU continues | not a ring-3 fault: the Ring 0 column applies. Planned (ROADMAP §25.3): an action-required error that ring-3 code consumed is recorded by the handler and recovered in exit work (§5.10 rule 11), which sends `SIGBUS` with `BUS_MCEERR_AR` | as the rule |
+| `0x13` | `#XF` | dump, halt | `SIGFPE` | as the rule |
 | `0x09`, `0x0F`, `0x14`–`0x1F` | reserved, `#VE`, `#CP`, `#HV`, `#VC`, `#SX` | dump, halt | `SIGSEGV` | `sig_for_vec` has no row, so one would halt the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
 | `0x20`–`0xFF` | IRQs and IPIs | handle, return. An interrupt no handler owns is counted per vector and per CPU, EOIed at the controller that delivered it (the LAPIC when its in-service bit for the vector is set, else the 8259), logged at most once a second per vector, and ignored; §5.5 gives the 8259 lines. Rule; not yet enforced: a pool vector (`0x31`–`0x7F`) with no handler is EOIed and ignored with no count, a vector in `0x80`–`0xEF` or `0xF3`–`0xFA` dumps and halts, and an 8259 line with no handler other than IRQ7 and IRQ15 prints `irq: unexpected` and halts the CPU that took it (ROADMAP §10.6) | handle, return to ring 3 | as the rule |
 
@@ -3549,9 +3546,8 @@ For each enabled APIC ID that is not the BSP:
    online bit (ROADMAP §11.4, F032).
 
 On the AP side (`smp_init::ap_entry`), in order: `cli`; load the per-CPU GDT and TSS; set `GS_BASE`
-and `KERNEL_GS_BASE` (`per_cpu_init::install_gs`); program the syscall MSRs and the FPU bits and set
-RSP0 (`syscall_init::init_ap`); load the shared IDT; `arch::cpu::harden` (SMEP, SMAP, and UMIP where
-CPUID allows); enable the LAPIC; copy the BSP's `tsc_per_ms` and timer mode into `PerCpu`; arm the
+and `KERNEL_GS_BASE` (`per_cpu_init::install_gs`); write CR0 and CR4 whole (`arch::cpu::init_control_regs`), program the
+syscall MSRs and the FPU, and set RSP0 (`syscall_init::init_ap`); load the shared IDT; enable the LAPIC; copy the BSP's `tsc_per_ms` and timer mode into `PerCpu`; arm the
 LAPIC timer with the BSP's calibration (`apic_init::arm_ap`); mark the CPU online and print
 `vibeOS: sched: cpu<i> ready`; publish the ready flag; `sti`; enter the idle loop.
 
@@ -4411,6 +4407,7 @@ harness defaults match them.
 | `VIBEOS_EXPECT_PANIC` | off (`""` / `0`) | `run_e2e` |
 | `VIBEOS_GP_TEST` | off | `run_e2e` |
 | `VIBEOS_EXPECT_PIT` | off | `run_e2e` |
+| `VIBEOS_MCE_TEST` | off | `run_e2e` |
 | `VIBEOS_SKIP_PERSIST` | off | `run_ktest` |
 | `VIBEOS_CRASH_ROUNDS` | `8` | `run_vibefs_crash` |
 | `VIBEOS_CRASH_SEED` | time-based | `run_vibefs_crash` |
@@ -4452,7 +4449,7 @@ architecture; until that lands the ladder is one job.
 | Job | When | What |
 |---|---|---|
 | `check` | push / PR | Installs `x86_64-unknown-none`. `make check` (fmt; clippy `-D warnings` on `vibeos-core` and hostlib for the host, `vibeos-core` for `x86_64-unknown-none`, and the kernel with default features; host units, harness, ruff/mypy, `scripts/check_*.py`) then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines 87`. No QEMU, no `setup.sh`. HTML report is a 7-day `core-coverage` artifact. |
-| `phase 0 ladder` | push / PR, `needs: check` | Limine, QEMU/nasm/xorriso/OVMF, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, `panic_test` with `panic_exit`, `gp_test` with `panic_exit`) and once with `kernel_shell` (the default set runs in `check`); ISO, e2e (BIOS/UEFI/panic/#GP/PIT/9 GiB), in-guest at `-smp 2` and `-smp 4`, LAPIC fallback, vibefs crash. Even after a failed step it writes a per-tier table and every harness retry to the job summary and uploads `build/results/` as `results-x86_64-phase0`. Green `main` uploads `vibeos.iso` (7 days). |
+| `phase 0 ladder` | push / PR, `needs: check` | Limine, QEMU/nasm/xorriso/OVMF, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, `panic_test` with `panic_exit`, `gp_test` with `panic_exit`) and once with `kernel_shell` (the default set runs in `check`); ISO, e2e (BIOS/UEFI/panic/#GP/#MC/PIT/9 GiB), in-guest at `-smp 2` and `-smp 4`, LAPIC fallback, vibefs crash. Even after a failed step it writes a per-tier table and every harness retry to the job summary and uploads `build/results/` as `results-x86_64-phase0`. Green `main` uploads `vibeos.iso` (7 days). |
 | `ticks` | PR, `needs: phase0`, even after it fails | `scripts/check_ticks.py --base <PR base> --head <PR head> --run-commit $GITHUB_SHA --results <downloaded results-*> --summary $GITHUB_STEP_SUMMARY`: every box a commit of the pull request ticks pairs with a `Proves:` line, its proof exists at the head and is changed by the pull request or marked `(existing: ...)`, a ktest, utest, or marker proof passed in a results file of the head or the tested merge commit, no results file lists a retry, needs and closes rows hold, `Fails-before:` lines are present, and a bracketed proof passed on a scheduled run or `ci-history` record (read through `gh`, with `contents: read` and `actions: read`). The summary lists errors, `(existing: ...)` proofs, and notes. `make check` runs the pairing and diff rules bare against `origin/main` and skips them when that ref is missing, as in the `check` job's shallow checkout. |
 | `smp-stress` | weekly Monday 06:00 UTC + dispatch | `-smp 4`, longer timeout (`VIBEOS_TIMEOUT=180`); planned (ROADMAP §10.2): the §8.2 per-run deadlines, with no longer timeout |
 | `nightly-canary` | same workflow, non-blocking | undated latest nightly, `make iso && make test-unit` |
@@ -4642,9 +4639,8 @@ memory). The kernel sends no stack size request (ROADMAP §10.6, F072).
 
 **A PTE edit appears to have no effect.**
 No `invlpg` after the edit. Rule: `invlpg` after any single-PTE modification, including MMIO attribute
-patches. Kernel mappings are `GLOBAL`, and on a CPU with `CR4.PGE` set they do not fall out of the
-TLB on a CR3 reload. The trampoline sets PGE on the APs only; the BSP runs with Limine's CR4, PGE
-clear (ROADMAP §10.6, F026).
+patches. Kernel mappings are `GLOBAL`, and every CPU sets `CR4.PGE`, so they do not fall out of the
+TLB on a CR3 reload.
 
 **`meminfo` is slow.**
 `free_page_count()` walked the free lists. Rule: maintain a running counter.
@@ -5611,8 +5607,8 @@ software that runs on Linux sees the same machine (ROADMAP, How to read this). A
 value for every thread. A line that makes one per-thread (Linux's `PR_SET_TSC` for `CR4.TSD`,
 `ARCH_SET_CPUID`, `perf_user_access` for `PMUSERENR_EL0`) moves it to §7.5's per-thread table under
 AGENTS.md rule 8, and a line that changes a value changes its row in the same commit. Rule; not yet
-enforced: ROADMAP §11.6. Today `arch::cpu::harden` and `syscall_init::init_fpu` set bits in the CR4
-they read, and the aarch64 port does not exist.
+enforced: ROADMAP §11.6. On x86_64 `arch::cpu::init_control_regs` writes CR0 and CR4 whole on every
+CPU, and the aarch64 port does not exist.
 
 | Architecture | Control | Value | What user code sees |
 |---|---|---|---|
@@ -5641,7 +5637,12 @@ they read, and the aarch64 port does not exist.
 | x86_64 | `CR4.UMIP` | 1 where CPUID enumerates it (§5.1) | `sgdt`, `sidt`, `sldt`, `smsw`, and `str` at CPL 3 raise `#GP` (§5.2) |
 | x86_64 | `CR4.OSXSAVE`, `CR4.PKE` | 0 (ROADMAP §11.1, F130) | `xgetbv`, `rdpkru`, and `wrpkru` raise `#UD` and get `SIGILL`; ROADMAP §13.8 changes the `OSXSAVE` row if it chooses XSAVE |
 | x86_64 | `CR4.FSGSBASE` | 0 until ROADMAP §18.3 | `rdfsbase`, `wrfsbase`, `rdgsbase`, and `wrgsbase` raise `#UD` |
-| x86_64 | `CR0.AM` | 1 (ROADMAP §10.6) | a misaligned access while ring 3 has set `RFLAGS.AC` raises `#AC` and gets `SIGBUS` (§5.2), as on Linux |
+| x86_64 | `CR0.AM` | 1 | a misaligned access while ring 3 has set `RFLAGS.AC` raises `#AC` and gets `SIGBUS` (§5.2), as on Linux |
+| x86_64 | `CR0.EM`, `CR0.TS` | 0 | x87, MMX and SSE instructions run at CPL 3 with no `#NM` |
+| x86_64 | `CR0.MP` | 1 | with `TS` clear, no visible effect; set as Linux sets it |
+| x86_64 | `CR0.NE` | 1 | an unmasked x87 exception raises `#MF` at the next waiting x87 instruction and gets `SIGFPE` (§5.2), as on Linux |
+| x86_64 | `CR4.OSFXSR` | 1 | SSE runs at CPL 3, and `fxsave`/`fxrstor` include the XMM registers |
+| x86_64 | `CR4.OSXMMEXCPT` | 1 | an unmasked SIMD floating-point exception raises `#XM` and gets `SIGFPE` rather than `#UD` and `SIGILL` |
 
 At EL2 with VHE, `CNTKCTL_EL1` names `CNTHCTL_EL2`, whose EL0 fields sit at the same bits. The boot
 CPU computes that register's whole value with the EL0 fields above, which clears the `EL0PCTEN` bit

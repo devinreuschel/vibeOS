@@ -108,6 +108,7 @@ GONE: list[tuple[str, str]] = [
     ("overlay_named", "every IDT vector enters through a stub"),
     ("set_err", "every IDT vector enters through a stub"),
     ("set_noerr", "every IDT vector enters through a stub"),
+    ("harden", "one per-CPU control-register routine, run"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

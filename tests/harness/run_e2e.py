@@ -107,6 +107,9 @@ def _mce_main(env: EnvConfig) -> int:
     results.current().add_boot(qemu_argv(cfg, None), cfg, result.exit_code)
     print(f"[e2e] ok: {len(result.matched)} markers matched", file=sys.stderr)
     print(f"[e2e]   . {cmd}: #MC dump and halt", file=sys.stderr)
+    for line in result.lines:
+        if "vibeOS: #MC " in line or "vibeOS: panic:" in line:
+            print(f"[e2e]     {line}", file=sys.stderr)
     return 0
 
 

@@ -253,9 +253,9 @@ extern "C" fn ap_entry() -> ! {
     // cannot gs:[0] a null PerCpu (DESIGN §7.4 / ROADMAP).
     unsafe { tables.load() };
     unsafe { per_cpu_init::install_gs(cpu) };
+    // `init_ap` writes this CPU's CR0 and CR4 (`arch::cpu::init_control_regs`).
     unsafe { crate::syscall_init::init_ap(tables.tss_ptr(), tables.rsp0()) };
     unsafe { arch::idt::load() };
-    arch::cpu::harden();
     unsafe { apic_init::enable_ap() };
     cpu.tsc_per_ms = time_init::tsc_per_ms();
     cpu.timer_mode = apic_init::timer_mode();

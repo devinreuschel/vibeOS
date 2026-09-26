@@ -1329,6 +1329,7 @@ fn sig_for_vec(vec: u8) -> Option<u32> {
         vectors::NP | vectors::SS => Some(SIGBUS),
         vectors::GP | vectors::PF => Some(SIGSEGV),
         vectors::BP => Some(SIGTRAP),
+        vectors::AC => Some(SIGBUS),
         _ => None,
     }
 }
