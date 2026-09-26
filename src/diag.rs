@@ -4,7 +4,9 @@
 //! log and the shell share one implementation.
 
 use core::fmt::Write;
+use core::sync::atomic::Ordering;
 
+use crate::apic_init;
 use crate::heap_init;
 use crate::kva_init;
 use crate::paging_init;
@@ -61,6 +63,8 @@ pub fn cpus_to(w: &mut impl Write) {
     let mask = per_cpu_init::online_mask();
     let n = per_cpu_init::cpu_count();
     let _ = writeln!(w, "vibeOS: cpus: n={n} online={mask:#x}");
+    // Every CPU copies the BSP's timer mode at bring-up.
+    let timer = apic_init::timer_mode();
     let mut i = 0u32;
     while (i as usize) < n {
         let Some(c) = per_cpu_init::cpu(i) else {
@@ -70,12 +74,12 @@ pub fn cpus_to(w: &mut impl Write) {
         let _ = writeln!(
             w,
             "vibeOS: cpus: cpu{} apic={} ticks={} switches={} ready={} timer={}",
-            c.cpu_id,
-            c.apic_id,
-            c.ticks,
-            c.switches,
-            c.runq.len(),
-            c.timer_mode.as_str()
+            i,
+            c.apic_id.load(Ordering::Relaxed),
+            c.ticks.load(Ordering::Relaxed),
+            c.switches.load(Ordering::Relaxed),
+            c.runq_len.load(Ordering::Relaxed),
+            timer.as_str()
         );
         i += 1;
     }

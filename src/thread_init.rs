@@ -217,7 +217,7 @@ fn schedule_inner(from_irq: bool) {
         }
 
         if !from_irq {
-            let ticks = per_cpu_init::current().ticks;
+            let ticks = per_cpu_init::current().remote.ticks.load(Ordering::Relaxed);
             if ticks.is_multiple_of(SWEEP_TICKS) {
                 for t in s.timeouts.overdue(now) {
                     if n_overdue < overdue.len() {
@@ -282,7 +282,11 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
     per_cpu_init::with_current_switch(|cpu| {
         let delta = now.wrapping_sub(cpu.slice_tsc);
         cpu.slice_tsc = now;
-        cpu.switches = cpu.switches.wrapping_add(1);
+        // Single writer: only this CPU stores its `switches`.
+        let switches = cpu.remote.switches.load(Ordering::Relaxed);
+        cpu.remote
+            .switches
+            .store(switches.wrapping_add(1), Ordering::Relaxed);
         unsafe {
             (*old_ptr).run_tsc = (*old_ptr).run_tsc.wrapping_add(delta);
             (*old_ptr).switches = (*old_ptr).switches.wrapping_add(1);
@@ -297,9 +301,14 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
             );
             per_cpu_init::set_current_thread(cpu, new_ptr);
             crate::syscall_init::on_switch(cpu, old_ptr, new_ptr);
-            switch_context(&mut (*old_ptr).context, &(*new_ptr).context);
         }
     });
+    // SAFETY: both TCBs are live entries of `SCHED` that this CPU runs
+    // or was given, established at `thread_init::schedule_inner` and
+    // `thread_init::switch_to`, and IF=0 under their `InterruptGuard`,
+    // which spans the switch; the `&mut PerCpu` above has ended (DESIGN
+    // §7.5).
+    unsafe { switch_context(&mut (*old_ptr).context, &(*new_ptr).context) };
 }
 
 fn relink(s: &mut Sched) {

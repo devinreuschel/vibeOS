@@ -1,17 +1,24 @@
 //! Write-back block cache. ROADMAP §7.4.
 //!
 //! Sits above [`BlockDevice`] miss paths. Lock dropped before device
-//! I/O (RANK_DEVICE + blocking wait). Flush/barrier write dirty pages
-//! then call down into the device. Phase 12 makes this cache each block
-//! device's mapping in one page cache of mappings (DESIGN §10.6).
+//! I/O (RANK_DEVICE + blocking wait). A slot whose write is in flight is
+//! in WRITEBACK (`vibeos::cache`), and a thread that needs it sleeps on
+//! the slot's wait queue. [`flush`] writes each dirty page of its device
+//! and waits for it, waits for every write already in flight on the
+//! device (`blk-wb`'s and eviction writes), and only then sends the device
+//! `Flush` (DESIGN §10.6). Phase 12 makes this cache each block device's
+//! mapping in one page cache of mappings (DESIGN §10.6).
 
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use vibeos::block::BlockError;
-use vibeos::cache::{self, Cache, CacheKey, CacheStats, DEFAULT_PAGES, FillNeed, PAGE};
+use vibeos::cache::{self, Cache, CacheKey, CacheStats, DEFAULT_PAGES, FillNeed, FlushStep, PAGE};
 use vibeos::lock::RANK_DEVICE;
+use vibeos::sched::FAR_DEADLINE;
+use vibeos::wait::WaitQueue;
 
 use crate::block_init;
 use crate::sync_init::SpinMutex;
@@ -23,6 +30,16 @@ pub const DEV_VDA: u32 = 1;
 
 static CACHE: SpinMutex<Cache<DEFAULT_PAGES>> = SpinMutex::with_rank(Cache::new(), RANK_DEVICE);
 static LIVE: AtomicBool = AtomicBool::new(false);
+
+/// One wait queue per cache slot, for threads waiting out its writeback.
+struct SlotWaits([UnsafeCell<WaitQueue>; DEFAULT_PAGES]);
+
+// SAFETY: each queue is touched only inside `thread_init::with_sched`,
+// which serializes every access to it; established here, by
+// `wait_writeback` and `end_writeback_and_wake`, the only users.
+unsafe impl Sync for SlotWaits {}
+
+static SLOT_WQ: SlotWaits = SlotWaits([const { UnsafeCell::new(WaitQueue::new()) }; DEFAULT_PAGES]);
 
 fn geom(dev: u32) -> Result<(u32, u64), BlockError> {
     match dev {
@@ -123,29 +140,83 @@ fn page_vec() -> alloc::vec::Vec<u8> {
     alloc::vec![0u8; PAGE]
 }
 
-fn do_fill_io(fill: &cache::Fill, evict: &[u8], page: &mut [u8]) -> Result<(), BlockError> {
-    match fill.need {
-        FillNeed::None => Ok(()),
-        FillNeed::Writeback | FillNeed::WritebackThenRead => {
-            backend_write(fill.evict_key.dev, fill.evict_key.offset, evict)?;
-            {
-                let mut c = CACHE.lock();
-                c.stats.device_writes = c.stats.device_writes.saturating_add(1);
+/// Sleep until `slot`'s writeback ends. Returns at once if it is not in
+/// writeback. SCHED then the cache lock (RANK_DEVICE) is a legal order.
+fn wait_writeback(slot: usize) {
+    let Some(wq) = SLOT_WQ.0.get(slot) else {
+        return;
+    };
+    loop {
+        let park = thread_init::with_sched(|s| {
+            if !CACHE.lock().in_writeback(slot) {
+                return false;
             }
-            if matches!(fill.need, FillNeed::WritebackThenRead) {
-                backend_read(fill.key.dev, fill.key.offset, page)?;
-                let mut c = CACHE.lock();
-                c.stats.device_reads = c.stats.device_reads.saturating_add(1);
-            }
-            Ok(())
+            // SAFETY: the slot's queue is touched only under
+            // `thread_init::with_sched`, held here (see `SlotWaits`).
+            s.begin_wait(unsafe { &mut *wq.get() }, FAR_DEADLINE);
+            true
+        });
+        if !park {
+            return;
         }
-        FillNeed::Read => {
-            backend_read(fill.key.dev, fill.key.offset, page)?;
+        thread_init::schedule();
+    }
+}
+
+/// End `slot`'s writeback under the cache lock, drop it, then wake the
+/// slot's waiters under SCHED (never SCHED under the cache lock).
+fn end_writeback_and_wake(slot: usize, key: CacheKey, res: Result<(), BlockError>) {
+    {
+        let mut c = CACHE.lock();
+        if res.is_ok() {
+            c.stats.device_writes = c.stats.device_writes.saturating_add(1);
+        }
+        c.end_writeback(slot, key, res);
+    }
+    if let Some(wq) = SLOT_WQ.0.get(slot) {
+        thread_init::with_sched(|s| {
+            // SAFETY: the slot's queue is touched only under
+            // `thread_init::with_sched`, held here (see `SlotWaits`).
+            s.wake_all(unsafe { &mut *wq.get() });
+        });
+    }
+}
+
+/// Write a `Writeback` fill's victim from `evict` and end its writeback.
+fn write_victim(fill: &cache::Fill, evict: &[u8]) -> Result<(), BlockError> {
+    let res = backend_write(fill.evict_key.dev, fill.evict_key.offset, evict);
+    end_writeback_and_wake(fill.slot, fill.evict_key, res);
+    res
+}
+
+/// Read a `Read` fill's page, or abort the fill.
+fn fill_read(fill: &cache::Fill, page: &mut [u8]) -> Result<(), BlockError> {
+    match backend_read(fill.key.dev, fill.key.offset, page) {
+        Ok(()) => {
             let mut c = CACHE.lock();
             c.stats.device_reads = c.stats.device_reads.saturating_add(1);
             Ok(())
         }
+        Err(e) => {
+            CACHE.lock().abort_fill(fill.slot);
+            Err(e)
+        }
     }
+}
+
+/// A `None` fill: sleep out a slot in writeback, or yield to a fill in
+/// progress (the FILLING state is ROADMAP §12.5's).
+fn wait_busy(fill: &cache::Fill, spins: &mut u32) -> Result<(), BlockError> {
+    if CACHE.lock().in_writeback(fill.slot) {
+        wait_writeback(fill.slot);
+        return Ok(());
+    }
+    *spins = spins.saturating_add(1);
+    if *spins > 1_000_000 {
+        return Err(BlockError::Io);
+    }
+    thread_init::yield_now();
+    Ok(())
 }
 
 fn byte_off(dev: u32, lba: u64) -> Result<u64, BlockError> {
@@ -172,30 +243,20 @@ fn bump_readahead(evict: &mut [u8], page: &mut [u8]) {
         }
     };
     match fill.need {
-        FillNeed::None => {
-            CACHE.lock().abort_fill(fill.slot);
-        }
+        FillNeed::None => {}
+        // A readahead skips its page after a victim's writeback. A failed
+        // write stays recorded: `end_writeback` leaves the page dirty for
+        // the next flush to retry and report.
         FillNeed::Writeback => {
-            if backend_write(fill.evict_key.dev, fill.evict_key.offset, evict).is_err() {
-                CACHE.lock().restore_evict(fill.slot, fill.evict_key, evict);
-                return;
-            }
-            CACHE.lock().abort_fill(fill.slot);
+            let _kept_dirty = write_victim(&fill, evict).is_err();
         }
-        FillNeed::Read | FillNeed::WritebackThenRead => {
-            if matches!(fill.need, FillNeed::WritebackThenRead)
-                && backend_write(fill.evict_key.dev, fill.evict_key.offset, evict).is_err()
-            {
-                CACHE.lock().restore_evict(fill.slot, fill.evict_key, evict);
-                return;
-            }
-            if backend_read(rk.dev, rk.offset, page).is_ok() {
+        FillNeed::Read => {
+            if fill_read(&fill, page).is_ok() {
                 let mut one = [0u8; 1];
                 let mut c = CACHE.lock();
-                c.stats.device_reads = c.stats.device_reads.saturating_add(1);
-                let _ = c.install_read(&fill, page, 0, &mut one);
-            } else {
-                CACHE.lock().abort_fill(fill.slot);
+                if c.install_read(&fill, page, 0, &mut one).is_err() {
+                    c.abort_fill(fill.slot);
+                }
             }
         }
     }
@@ -227,32 +288,21 @@ pub fn read(dev: u32, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
             let mut c = CACHE.lock();
             c.plan_read(key, pin, &mut buf[done..done + n], &mut evict)?
         };
-        match plan {
-            None => {}
-            Some(fill) => {
-                if matches!(fill.need, FillNeed::None) {
-                    spins = spins.saturating_add(1);
-                    if spins > 1_000_000 {
-                        return Err(BlockError::Io);
-                    }
-                    thread_init::yield_now();
+        if let Some(fill) = plan {
+            match fill.need {
+                FillNeed::None => {
+                    wait_busy(&fill, &mut spins)?;
                     continue;
                 }
-                match do_fill_io(&fill, &evict, &mut page) {
-                    Ok(()) => {
-                        CACHE
-                            .lock()
-                            .install_read(&fill, &page, pin, &mut buf[done..done + n])?;
-                    }
-                    Err(e) => {
-                        let mut c = CACHE.lock();
-                        if matches!(fill.need, FillNeed::Writeback | FillNeed::WritebackThenRead) {
-                            c.restore_evict(fill.slot, fill.evict_key, &evict);
-                        } else {
-                            c.abort_fill(fill.slot);
-                        }
-                        return Err(e);
-                    }
+                FillNeed::Writeback => {
+                    write_victim(&fill, &evict)?;
+                    continue;
+                }
+                FillNeed::Read => {
+                    fill_read(&fill, &mut page)?;
+                    CACHE
+                        .lock()
+                        .install_read(&fill, &page, pin, &mut buf[done..done + n])?;
                 }
             }
         }
@@ -289,47 +339,23 @@ pub fn write(dev: u32, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
             let mut c = CACHE.lock();
             c.plan_write(key, pin, &buf[done..done + n], &mut evict)?
         };
-        match plan {
-            None => {}
-            Some(fill) => match fill.need {
+        if let Some(fill) = plan {
+            match fill.need {
                 FillNeed::None => {
-                    spins = spins.saturating_add(1);
-                    if spins > 1_000_000 {
-                        return Err(BlockError::Io);
-                    }
-                    thread_init::yield_now();
+                    wait_busy(&fill, &mut spins)?;
                     continue;
                 }
                 FillNeed::Writeback => {
-                    if let Err(e) = backend_write(fill.evict_key.dev, fill.evict_key.offset, &evict)
-                    {
-                        CACHE
-                            .lock()
-                            .restore_evict(fill.slot, fill.evict_key, &evict);
-                        return Err(e);
-                    }
-                    let mut c = CACHE.lock();
-                    c.stats.device_writes = c.stats.device_writes.saturating_add(1);
+                    write_victim(&fill, &evict)?;
+                    continue;
                 }
-                FillNeed::Read | FillNeed::WritebackThenRead => {
-                    match do_fill_io(&fill, &evict, &mut page) {
-                        Ok(()) => {
-                            CACHE
-                                .lock()
-                                .install_write(&fill, &page, pin, &buf[done..done + n])?;
-                        }
-                        Err(e) => {
-                            let mut c = CACHE.lock();
-                            if matches!(fill.need, FillNeed::WritebackThenRead) {
-                                c.restore_evict(fill.slot, fill.evict_key, &evict);
-                            } else {
-                                c.abort_fill(fill.slot);
-                            }
-                            return Err(e);
-                        }
-                    }
+                FillNeed::Read => {
+                    fill_read(&fill, &mut page)?;
+                    CACHE
+                        .lock()
+                        .install_write(&fill, &page, pin, &buf[done..done + n])?;
                 }
-            },
+            }
         }
         done += n;
         spins = 0;
@@ -337,6 +363,7 @@ pub fn write(dev: u32, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
     Ok(())
 }
 
+/// `blk-wb`'s pass: write back each dirty page not already in writeback.
 fn writeback_dev(dev: Option<u32>) -> Result<(), BlockError> {
     let mut data = page_vec();
     let mut start = 0usize;
@@ -348,32 +375,39 @@ fn writeback_dev(dev: Option<u32>) -> Result<(), BlockError> {
         let Some((slot, key)) = next else {
             break;
         };
-        if let Err(e) = backend_write(key.dev, key.offset, &data) {
-            CACHE.lock().mark_dirty(slot, key);
-            return Err(e);
-        }
-        {
-            let mut c = CACHE.lock();
-            c.stats.device_writes = c.stats.device_writes.saturating_add(1);
-        }
+        #[cfg(feature = "kernel_tests")]
+        testing::hold_point(key);
+        let res = backend_write(key.dev, key.offset, &data);
+        end_writeback_and_wake(slot, key, res);
+        res?;
         start = slot + 1;
     }
     Ok(())
 }
 
+/// Make every write to `dev` through the cache durable: write each dirty
+/// page and wait for it, wait for each write already in flight (`blk-wb`'s
+/// and eviction writes), write pages dirtied meanwhile, and send the
+/// device `Flush` only when `dev` has no dirty and no writeback slot.
 pub fn flush(dev: u32) -> Result<(), BlockError> {
-    writeback_dev(Some(dev))?;
-    raw_flush(dev)?;
-    {
-        let mut c = CACHE.lock();
-        c.stats.device_flushes = c.stats.device_flushes.saturating_add(1);
+    let mut data = page_vec();
+    loop {
+        let step = { CACHE.lock().flush_step(Some(dev), &mut data) };
+        match step {
+            FlushStep::Write(slot, key) => {
+                let res = backend_write(key.dev, key.offset, &data);
+                end_writeback_and_wake(slot, key, res);
+                res?;
+            }
+            FlushStep::Wait(slot, _) => wait_writeback(slot),
+            FlushStep::Flush => {
+                raw_flush(dev)?;
+                let mut c = CACHE.lock();
+                c.stats.device_flushes = c.stats.device_flushes.saturating_add(1);
+                return Ok(());
+            }
+        }
     }
-    Ok(())
-}
-
-#[allow(dead_code)]
-pub fn barrier(dev: u32) -> Result<(), BlockError> {
-    writeback_dev(Some(dev))
 }
 
 pub fn stats() -> CacheStats {
@@ -422,4 +456,64 @@ pub fn shell_line(f: &mut impl core::fmt::Write) -> core::fmt::Result {
 pub fn init() {
     LIVE.store(true, Ordering::Release);
     let _ = thread_init::spawn("blk-wb", writeback_main);
+}
+
+/// A one-shot hold of `blk-wb`'s write of one page, so a test can find
+/// [`flush`] waiting for it (ROADMAP §10.11).
+#[cfg(feature = "kernel_tests")]
+pub mod testing {
+    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+
+    use vibeos::cache::CacheKey;
+
+    use crate::thread_init;
+    use crate::time_init;
+
+    const UNARMED: u64 = u64::MAX;
+    /// The hold point lets go by itself after this long.
+    const SELF_RELEASE_NS: u64 = 5_000_000_000;
+
+    static DEV: AtomicU32 = AtomicU32::new(0);
+    static OFF: AtomicU64 = AtomicU64::new(UNARMED);
+    static HELD: AtomicBool = AtomicBool::new(false);
+    static RELEASE: AtomicBool = AtomicBool::new(false);
+
+    /// Hold `blk-wb`'s next write of the page holding `byte_off` of `dev`.
+    pub fn hold_wb(dev: u32, byte_off: u64) {
+        RELEASE.store(false, Ordering::Release);
+        HELD.store(false, Ordering::Release);
+        DEV.store(dev, Ordering::Release);
+        OFF.store(CacheKey::page(dev, byte_off).offset, Ordering::Release);
+    }
+
+    /// `blk-wb` is stopped at the hold point.
+    pub fn held() -> bool {
+        HELD.load(Ordering::Acquire)
+    }
+
+    /// Let a held write go, and disarm a hold not yet reached.
+    pub fn release() {
+        OFF.store(UNARMED, Ordering::Release);
+        RELEASE.store(true, Ordering::Release);
+    }
+
+    /// `writeback_dev`'s hold point, reached with no lock held. It sleeps
+    /// until [`release`], or [`SELF_RELEASE_NS`] at most.
+    pub(super) fn hold_point(key: CacheKey) {
+        if DEV.load(Ordering::Acquire) != key.dev
+            || OFF
+                .compare_exchange(key.offset, UNARMED, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return;
+        }
+        HELD.store(true, Ordering::Release);
+        let t0 = time_init::now_ns();
+        while !RELEASE.load(Ordering::Acquire)
+            && time_init::now_ns().saturating_sub(t0) < SELF_RELEASE_NS
+        {
+            thread_init::sleep_ms(1);
+        }
+        HELD.store(false, Ordering::Release);
+    }
 }

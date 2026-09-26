@@ -23,7 +23,7 @@ use vibeos::irq::{self, IrqError};
 use vibeos::kva::PAGE_SIZE;
 use vibeos::paging::{PAGE_SIZE_4K, PageFlags, PhysAddr, USER_END, VirtAddr, heap_flags};
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
-use vibeos::per_cpu::PerCpu;
+use vibeos::per_cpu::PerCpuRemote;
 use vibeos::proc::{SIGILL, wait_exited, wait_signaled, wexitstatus, wifexited};
 use vibeos::thread::{ThreadId, ThreadState};
 use vibeos::time::{CalibSource, Instant, calib_band, calib_in_band};
@@ -617,7 +617,7 @@ pub(crate) unsafe fn dealloc_frames(pa: PhysAddr, order: u8) {
     pmm_init::with_buddy(|b| unsafe { b.deallocate(pa.as_u64(), order) });
 }
 
-pub(crate) fn cpu_remote(id: u32) -> Option<&'static PerCpu> {
+pub(crate) fn cpu_remote(id: u32) -> Option<&'static PerCpuRemote> {
     per_cpu_init::cpu(id)
 }
 
@@ -1008,6 +1008,10 @@ fn test_addrspace_map_unmap_teardown() -> Outcome {
     {
         return Outcome::Fail("map_anon");
     }
+    // IF stays off while this thread runs on `space`'s CR3: the registry
+    // thread has IF=1 and `as_cr3 == 0`, so a switch away and back in this
+    // window would reload the kernel CR3 under the user VA below.
+    let irqs_off = x86::InterruptGuard::enter();
     addr_space_init::load_cr3(&space);
     x86::invlpg(va);
     // User PTE: SMAP would #PF a kernel store/load via this VA.
@@ -1019,15 +1023,18 @@ fn test_addrspace_map_unmap_teardown() -> Outcome {
     x86::clac();
     if got != 0x1111_2222_3333_4444 {
         addr_space_init::load_kernel_cr3();
+        drop(irqs_off);
         addr_space_init::teardown(space);
         return Outcome::Fail("readback");
     }
     if unsafe { addr_space_init::unmap(&mut space, va, PAGE_SIZE_4K * 2) }.is_err() {
         addr_space_init::load_kernel_cr3();
+        drop(irqs_off);
         addr_space_init::teardown(space);
         return Outcome::Fail("unmap");
     }
     addr_space_init::load_kernel_cr3();
+    drop(irqs_off);
     let st = addr_space_init::teardown(space);
     if st.pt_frames == 0 {
         return Outcome::Fail("teardown pt");
@@ -1083,10 +1090,15 @@ fn test_cr3_switch_skip() -> Outcome {
         addr_space_init::teardown(a);
         return Outcome::Fail("create b");
     };
+    // IF stays off while this thread runs on a user CR3 (see
+    // test_addrspace_map_unmap_teardown): a switch away and back would reload
+    // the kernel CR3 between the load and the read.
+    let irqs_off = x86::InterruptGuard::enter();
     addr_space_init::load_cr3(&a);
     let cr3_a = x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK;
     if !addr_space_init::cr3_was_skipped(&a) {
         addr_space_init::load_kernel_cr3();
+        drop(irqs_off);
         addr_space_init::teardown(a);
         addr_space_init::teardown(b);
         return Outcome::Fail("a not recorded");
@@ -1094,6 +1106,7 @@ fn test_cr3_switch_skip() -> Outcome {
     addr_space_init::load_cr3(&a);
     if (x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK) != cr3_a {
         addr_space_init::load_kernel_cr3();
+        drop(irqs_off);
         addr_space_init::teardown(a);
         addr_space_init::teardown(b);
         return Outcome::Fail("skip mutated cr3");
@@ -1102,11 +1115,13 @@ fn test_cr3_switch_skip() -> Outcome {
     let cr3_b = x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK;
     if cr3_b == cr3_a {
         addr_space_init::load_kernel_cr3();
+        drop(irqs_off);
         addr_space_init::teardown(a);
         addr_space_init::teardown(b);
         return Outcome::Fail("b shares a cr3");
     }
     addr_space_init::load_kernel_cr3();
+    drop(irqs_off);
     addr_space_init::teardown(a);
     addr_space_init::teardown(b);
     Outcome::Ok
@@ -1331,7 +1346,10 @@ fn test_irqcell_reentry_panics() -> Outcome {
             C.with(|_| {});
         });
     });
-    C.force_unlock();
+    // SAFETY: the `arch::catch` longjmp skipped both `Unlock`s and neither
+    // closure resumes, so the holder never touches `C` again; established
+    // here.
+    unsafe { C.force_unlock() };
     per_cpu_init::current()
         .irq_nest
         .store(nest0, Ordering::Relaxed);
@@ -1681,35 +1699,61 @@ fn test_per_cpu_identity() -> Outcome {
     if n < 2 {
         return Outcome::Skip("no AP");
     }
+    let bsp_apic = bsp.remote.apic_id.load(Ordering::Relaxed);
+    let mut aps = 0u64;
     let mut i = 1u32;
     while i < n as u32 {
-        let Some(c) = per_cpu_init::cpu(i) else {
+        let Some(c) = cpu_remote(i) else {
             return Outcome::Fail("missing slot");
         };
         if !c.ready.load(Ordering::Acquire) {
             return Outcome::Fail("ap not ready");
         }
-        if c.cpu_id != i {
-            return Outcome::Fail("ap cpu_id");
-        }
-        if c.self_ptr as u64 != c as *const _ as u64 {
-            return Outcome::Fail("ap self_ptr");
-        }
-        if c.idle.is_null() || c.current.is_null() {
-            return Outcome::Fail("ap idle/current");
-        }
-        if c.apic_id == bsp.apic_id {
+        if c.apic_id.load(Ordering::Relaxed) == bsp_apic {
             return Outcome::Fail("ap apic_id");
         }
         if !per_cpu_init::is_online(i) {
             return Outcome::Fail("ap online mask");
         }
-        if c.tsc_per_ms == 0 {
-            return Outcome::Fail("ap tsc_per_ms");
+        if i < 64 {
+            aps |= 1u64 << i;
         }
         i += 1;
     }
+    // The owner-only checks run on each AP, which alone may read its
+    // `PerCpu` (DESIGN §7.5).
+    IDENTITY_BAD.store(0, Ordering::SeqCst);
+    IDENTITY_SEEN.store(0, Ordering::SeqCst);
+    ipi_init::call_mask(aps, identity_on_ap, core::ptr::null_mut(), true);
+    if IDENTITY_SEEN.load(Ordering::Acquire) != aps {
+        return Outcome::Fail("ap did not run the owner check");
+    }
+    if IDENTITY_BAD.load(Ordering::Acquire) != 0 {
+        return Outcome::Fail("ap owner-only state");
+    }
     Outcome::Ok
+}
+
+/// Bit `cpu_id` of each AP whose owner-only check failed or ran.
+static IDENTITY_BAD: AtomicU64 = AtomicU64::new(0);
+static IDENTITY_SEEN: AtomicU64 = AtomicU64::new(0);
+
+fn identity_on_ap(_: *mut ()) {
+    let c = per_cpu_init::current();
+    let id = c.cpu_id;
+    if id >= 64 {
+        return;
+    }
+    let ok = core::ptr::eq(c.self_ptr, per_cpu_init::gs_self())
+        && per_cpu_init::slot_ptr(id) == Some(c.self_ptr)
+        && !c.idle.is_null()
+        && !c.current.is_null()
+        && c.tsc_per_ms != 0
+        && per_cpu_init::cpu(id).is_some_and(|r| core::ptr::eq(r, c.remote));
+    if !ok {
+        IDENTITY_BAD.fetch_or(1u64 << id, Ordering::Release);
+    }
+    IDENTITY_SEEN.fetch_or(1u64 << id, Ordering::Release);
 }
 
 fn test_trampoline_page() -> Outcome {
@@ -2411,10 +2455,10 @@ fn test_sync_try_paths() -> Outcome {
 
 fn test_sched_lock_timer_irq() -> Outcome {
     let nest0 = per_cpu_init::irq_nest();
-    let t0 = per_cpu_init::current().ticks;
+    let t0 = per_cpu_init::current().remote.ticks.load(Ordering::Relaxed);
     let wall0 = time_init::uptime_ms();
     loop {
-        if per_cpu_init::current().ticks != t0 {
+        if per_cpu_init::current().remote.ticks.load(Ordering::Relaxed) != t0 {
             break;
         }
         if time_init::uptime_ms().saturating_sub(wall0) > 200 {
@@ -2422,7 +2466,7 @@ fn test_sched_lock_timer_irq() -> Outcome {
         }
         core::hint::spin_loop();
     }
-    let held = per_cpu_init::current().ticks;
+    let held = per_cpu_init::current().remote.ticks.load(Ordering::Relaxed);
     let inner = thread_init::with_sched_lock(|| {
         if x86::interrupts_enabled() {
             return Outcome::Fail("SCHED left IF on");
@@ -2431,7 +2475,7 @@ fn test_sched_lock_timer_irq() -> Outcome {
         if x86::interrupts_enabled() {
             return Outcome::Fail("IF on during hold");
         }
-        if per_cpu_init::current().ticks != held {
+        if per_cpu_init::current().remote.ticks.load(Ordering::Relaxed) != held {
             return Outcome::Fail("timer ran under SCHED");
         }
         Outcome::Ok
@@ -2448,7 +2492,7 @@ fn test_sched_lock_timer_irq() -> Outcome {
             core::arch::asm!("int $0xF0");
         },
     }
-    if per_cpu_init::current().ticks <= held {
+    if per_cpu_init::current().remote.ticks.load(Ordering::Relaxed) <= held {
         return Outcome::Fail("forced timer IRQ did not run");
     }
     if per_cpu_init::irq_nest() != nest0 {
@@ -3454,7 +3498,7 @@ fn test_msix_cpu() -> Outcome {
     let Some(mmio) = bar0_va(&dev) else {
         return Outcome::Fail("e1000e bar0");
     };
-    let Some(cpu) = per_cpu_init::cpu(ap) else {
+    let Some(cpu) = cpu_remote(ap) else {
         return Outcome::Fail("no apic id");
     };
     let vec = match irq_init::allocate_vector(0) {
@@ -3475,7 +3519,7 @@ fn test_msix_cpu() -> Outcome {
     }
     reset_irq_obs();
     IRQ_MMIO.store(mmio, Ordering::SeqCst);
-    if let Err(e) = irq_init::enable_msix(&dev, 0, vec, cpu.apic_id as u8) {
+    if let Err(e) = irq_init::enable_msix(&dev, 0, vec, cpu.apic_id.load(Ordering::Relaxed) as u8) {
         let _ = irq_init::free_vector(vec);
         return Outcome::Fail(e.as_str());
     }
@@ -3965,9 +4009,6 @@ fn test_block_ramdisk_rw() -> Outcome {
     if d.flush().is_err() {
         return Outcome::Fail("flush");
     }
-    if block_init::barrier().is_err() {
-        return Outcome::Fail("barrier");
-    }
     if d.discard(1, 1).is_err() {
         return Outcome::Fail("discard");
     }
@@ -4205,9 +4246,6 @@ fn test_block_vblk_rw() -> Outcome {
     }
     if !virtio_blk_init::has_flush() {
         // device did not offer F_FLUSH; flush is a successful no-op
-    }
-    if virtio_blk_init::barrier().is_err() {
-        return Outcome::Fail("barrier");
     }
     if virtio_blk_init::has_discard() && d.discard(5, 1).is_err() {
         return Outcome::Fail("discard");

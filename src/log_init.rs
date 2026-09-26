@@ -74,12 +74,25 @@ fn with_logger<R>(f: impl FnOnce(&mut Logger<RING_CAP, MSG_CAP>) -> R) -> R {
     LOG.with(f)
 }
 
-/// Panic path: other CPUs are halted. Drop a held TAS and read.
-pub fn force_unlock() {
-    LOG.force_unlock();
+/// Panic path: drop a held `LOG` owner so the dump can read the ring.
+///
+/// # Safety
+/// Panic path only, after `panic::begin_dump` has stopped the other CPUs:
+/// whichever CPU held `LOG` never touches it again (DESIGN §2.5).
+pub unsafe fn force_unlock() {
+    // SAFETY: the holder never touches `LOG` again, the precondition of
+    // `IrqCell::force_unlock`; established by this fn's contract.
+    unsafe { LOG.force_unlock() };
 }
 
-pub fn with_logger_unlocked<R>(f: impl FnOnce(&Logger<RING_CAP, MSG_CAP>) -> R) -> R {
+/// Read the log ring without taking `LOG`.
+///
+/// # Safety
+/// Nothing writes `LOG` while `f` runs: no `with_logger` on any CPU, and
+/// no holder resumes after [`force_unlock`].
+pub unsafe fn with_logger_unlocked<R>(f: impl FnOnce(&Logger<RING_CAP, MSG_CAP>) -> R) -> R {
+    // SAFETY: no writer runs during `f`, so a shared borrow of the payload
+    // does not alias a `&mut`; established by this fn's contract.
     f(unsafe { &*LOG.as_ptr() })
 }
 
@@ -275,33 +288,43 @@ pub fn write_record(w: &mut impl Write, r: &vibeos::log::Record<MSG_CAP>) {
 }
 
 /// Last N records for the panic dump. Caller holds no log lock.
-pub fn dump_tail(n: usize) {
-    force_unlock();
+///
+/// # Safety
+/// The contracts of [`force_unlock`] and [`with_logger_unlocked`]: panic
+/// path only, after `panic::begin_dump`, with no other writer of `LOG`.
+pub unsafe fn dump_tail(n: usize) {
+    // SAFETY: the holder never touches `LOG` again (panic path, after
+    // `begin_dump`); established by this fn's contract.
+    unsafe { force_unlock() };
     let n = if n == 0 { DUMP_LAST } else { n };
-    with_logger_unlocked(|l| {
-        let _ = writeln!(
-            Serial,
-            "vibeOS: log: last {} ({} dropped)",
-            n.min(l.ring.len()),
-            l.ring.dropped()
-        );
-        let unit = if time_init::tsc_per_ms() != 0 {
-            "ms"
-        } else {
-            "tsc"
-        };
-        for r in l.ring.last_n(n) {
+    // SAFETY: nothing writes `LOG` during the dump; established by this
+    // fn's contract.
+    unsafe {
+        with_logger_unlocked(|l| {
             let _ = writeln!(
                 Serial,
-                "vibeOS: logrec: {}{} cpu{} {} {}",
-                r.timestamp,
-                unit,
-                r.cpu_id,
-                r.level.as_str(),
-                r.msg_str()
+                "vibeOS: log: last {} ({} dropped)",
+                n.min(l.ring.len()),
+                l.ring.dropped()
             );
-        }
-    });
+            let unit = if time_init::tsc_per_ms() != 0 {
+                "ms"
+            } else {
+                "tsc"
+            };
+            for r in l.ring.last_n(n) {
+                let _ = writeln!(
+                    Serial,
+                    "vibeOS: logrec: {}{} cpu{} {} {}",
+                    r.timestamp,
+                    unit,
+                    r.cpu_id,
+                    r.level.as_str(),
+                    r.msg_str()
+                );
+            }
+        });
+    }
 }
 
 /// Parked. DESIGN §2.5's log contract wants a lockless ring and one
