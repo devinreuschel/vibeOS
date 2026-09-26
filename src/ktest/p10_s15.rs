@@ -296,7 +296,7 @@ fn percpu_ok() -> bool {
         return false;
     }
     let apic = x86::cpuid(1, 0).1 >> 24;
-    super::cpu_remote(cpu.cpu_id).is_some_and(|c| c.apic_id == apic)
+    super::cpu_remote(cpu.cpu_id).is_some_and(|c| c.apic_id.load(Ordering::Relaxed) == apic)
 }
 
 fn db_hook(frame: &mut TrapFrame) -> bool {
