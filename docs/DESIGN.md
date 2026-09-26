@@ -3564,14 +3564,12 @@ not yet enforced: ROADMAP §10.3 (F039).
 
 Contents (`src/per_cpu.rs`):
 
-- `self_ptr`, logical CPU id, APIC id
+- `self_ptr` and logical CPU id
 - `current`, `idle`, and `idle_id`
 - `runq`, this CPU's ready FIFO (owner only, IRQs off), and `ready_head`, a copy of its head that
   only an in-guest test reads (ROADMAP §10.7 deletes it, F111)
-- `wake_inbox`, a `u64` `ThreadId` bitset: a remote CPU ORs in a thread's bit and sends IPI `0xFD` (planned: a bitmap sized from the limits, §7.6)
-- `irq_nest`, tick and switch counts, `slice_tsc`, `idle_tsc`, and `switch_scratch`, a `CpuContext` that no code reads or writes
+- `irq_nest`, `slice_tsc`, `idle_tsc`, and `switch_scratch`, a `CpuContext` that no code reads or writes
 - `tsc_per_ms` (a copy of the BSP's value, [section 6.2](#62-calibrating-the-tsc)) and `timer_mode`
-- `ready`, the flag an AP sets last in bring-up ([section 7.4](#74-ap-bring-up-sequence))
 - `kernel_rsp0` and `as_cr3`, which the context switch updates; `tss`, through which it writes TSS.RSP0; and `fallback_rsp0`, the RSP0 it uses for a thread without `Tcb.stack` (below)
 - `syscall_scratch`: the user RSP, the syscall return value, and the `iretq` RIP, RFLAGS, and RSP.
   It is per CPU, not per thread, so it is valid only while IF=0. The syscall exit breaks this: it
@@ -3579,6 +3577,11 @@ Contents (`src/per_cpu.rs`):
   (ROADMAP §10.6, F001). Planned (ROADMAP §10.6): it shrinks to one word, the user RSP between
   `syscall` and the entry's stack switch; the exit keeps the return value and its `iretq` frame in
   the thread's user frame ([section 5.10](#510-privilege-transitions)).
+- `remote`, this CPU's `PerCpuRemote` in a separate per-CPU array: `ticks`, `switches`, `runq_len`,
+  `ready`, `wake_inbox` and `apic_id`, all atomics; it is the only per-CPU state another CPU reads.
+  `wake_inbox` is a `u64` `ThreadId` bitset: a remote CPU ORs in a thread's bit and sends IPI `0xFD`
+  (planned: a bitmap sized from the limits, §7.6). `ready` is the flag an AP sets last in bring-up
+  ([section 7.4](#74-ap-bring-up-sequence)).
 
 `per_cpu_init::init_bsp` allocates one `PerCpu` per MADT CPU in a heap array, not a static array
 sized by a `MAX_CPUS` guess, and installs the BSP at slot 0; each AP installs its own slot with

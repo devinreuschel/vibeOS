@@ -109,13 +109,13 @@ fn alloc_ap_resources(cpu_id: u32, apic_id: u8, publish: bool) -> Option<ApAlloc
     let idle_ptr = thread_init::tcb_ptr(idle_id);
     if publish {
         let _ = per_cpu_init::with_cpu(cpu_id, |cpu| {
-            cpu.apic_id = apic_id as u32;
+            cpu.remote.apic_id.store(apic_id as u32, Ordering::Relaxed);
             cpu.idle_id = idle_id;
             cpu.idle = idle_ptr;
             per_cpu_init::set_current_thread(cpu, idle_ptr);
             cpu.tsc_per_ms = time_init::tsc_per_ms();
             cpu.timer_mode = apic_init::timer_mode();
-            cpu.ready.store(false, Ordering::Relaxed);
+            cpu.remote.ready.store(false, Ordering::Relaxed);
             core::sync::atomic::compiler_fence(Ordering::SeqCst);
         });
     }
@@ -135,8 +135,8 @@ fn free_ap_resources(a: ApAlloc) {
             cpu.idle = core::ptr::null_mut();
             per_cpu_init::set_current_thread(cpu, core::ptr::null_mut());
             cpu.idle_id = ThreadId::NONE;
-            cpu.ready.store(false, Ordering::Relaxed);
-            cpu.apic_id = 0;
+            cpu.remote.ready.store(false, Ordering::Relaxed);
+            cpu.remote.apic_id.store(0, Ordering::Relaxed);
         });
     }
     if let Some(stack) = thread_init::abandon_ap_idle(a.idle_id) {
@@ -172,8 +172,8 @@ fn start_one(a: ApAlloc) -> bool {
     let entry = ap_entry as *const () as usize as u64;
     let (idt_limit, idt_base) = arch::idt::pointer();
 
-    let cpu_ptr = match per_cpu_init::cpu(cpu_id) {
-        Some(c) => c.self_ptr,
+    let cpu_ptr = match per_cpu_init::slot_ptr(cpu_id) {
+        Some(p) => p,
         None => {
             free_ap_resources(a);
             return false;
@@ -240,7 +240,7 @@ extern "C" fn ap_entry() -> ! {
         cpu.cpu_id,
         marker::SCHED_CPU_SUFFIX
     );
-    cpu.ready.store(true, Ordering::Release);
+    cpu.remote.ready.store(true, Ordering::Release);
     x86::sti();
     crate::sched_init::idle_loop();
 }
@@ -254,7 +254,10 @@ pub unsafe fn init() {
     install_blob();
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
 
-    let bsp_apic = per_cpu_init::current().apic_id as u8;
+    let bsp_apic = per_cpu_init::current()
+        .remote
+        .apic_id
+        .load(Ordering::Relaxed) as u8;
     let Some(info) = acpi_init::info() else {
         crate::marker!(marker::SMP_DONE);
         return;

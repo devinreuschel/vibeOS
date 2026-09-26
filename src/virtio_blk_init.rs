@@ -757,7 +757,8 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
             fail_status(common);
             return Err(VirtioError::Failed);
         }
-        if let Err(e) = irq_init::enable_msix(dev, 0, vec, pc.apic_id as u8) {
+        if let Err(e) = irq_init::enable_msix(dev, 0, vec, pc.apic_id.load(Ordering::Relaxed) as u8)
+        {
             let _ = irq_init::free_vector(vec);
             fail_status(common);
             return match e {
@@ -829,7 +830,14 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
                 fail_armed(dev, common, &vecs, nvec);
                 return Err(VirtioError::Failed);
             }
-            if irq_init::enable_msix(dev, qi as u16, vec, pc.apic_id as u8).is_err() {
+            if irq_init::enable_msix(
+                dev,
+                qi as u16,
+                vec,
+                pc.apic_id.load(Ordering::Relaxed) as u8,
+            )
+            .is_err()
+            {
                 let _ = irq_init::free_vector(vec);
                 dma_init::free(slots);
                 let mut j = 0usize;

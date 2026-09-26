@@ -342,7 +342,11 @@ pub fn send_ipi_cpu(cpu: u32, vector: u8) -> Result<(), IpiError> {
     let Some(c) = crate::per_cpu_init::cpu(cpu) else {
         return Err(IpiError::NotReady);
     };
-    send_ipi(c.apic_id as u8, vector, IpiMode::Fixed)
+    send_ipi(
+        c.apic_id.load(Ordering::Relaxed) as u8,
+        vector,
+        IpiMode::Fixed,
+    )
 }
 
 /// All-excluding-self shorthand. No-op with one online CPU.

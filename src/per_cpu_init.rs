@@ -9,7 +9,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use vibeos::per_cpu::PerCpu;
+use vibeos::per_cpu::{PerCpu, PerCpuRemote};
 use vibeos::thread::Tcb;
 
 use crate::acpi_init;
@@ -21,6 +21,9 @@ pub const IA32_GS_BASE: u32 = 0xC000_0101;
 pub const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
 
 static CPUS: BootCell<Box<[PerCpu]>> = BootCell::new();
+/// Each CPU's remote view, apart from `CPUS` so that no `&mut PerCpu`
+/// covers memory another CPU holds `&` to (DESIGN §7.5).
+static REMOTE: BootCell<Box<[PerCpuRemote]>> = BootCell::new();
 static LIVE: AtomicBool = AtomicBool::new(false);
 /// Bit `cpu_id`. MADTs with >64 CPUs need a wider mask later.
 static ONLINE: AtomicU64 = AtomicU64::new(0);
@@ -44,10 +47,20 @@ fn madt_cpu_count() -> usize {
 /// still masked at the controller, or at least no ISR uses `per_cpu`.
 pub unsafe fn init_bsp() {
     let n = madt_cpu_count();
-    let mut v = Vec::with_capacity(n);
+    let mut r = Vec::with_capacity(n);
     let mut i = 0;
     while i < n {
-        v.push(PerCpu::empty());
+        r.push(PerCpuRemote::new());
+        i += 1;
+    }
+    // SAFETY: single writer before `smp: done`, no reader yet (BootCell's
+    // set contract); established here: `init_bsp` runs once on the BSP.
+    unsafe { REMOTE.set(r.into_boxed_slice()) };
+    let remote: &'static [PerCpuRemote] = REMOTE.get();
+    let mut v = Vec::with_capacity(n);
+    i = 0;
+    while i < n {
+        v.push(PerCpu::new(&remote[i]));
         i += 1;
     }
     let mut boxed = v.into_boxed_slice();
@@ -58,8 +71,8 @@ pub unsafe fn init_bsp() {
         boxed[i].cpu_id = i as u32;
         i += 1;
     }
-    boxed[0].apic_id = apic_id();
-    boxed[0].ready.store(true, Ordering::Relaxed);
+    remote[0].apic_id.store(apic_id(), Ordering::Relaxed);
+    remote[0].ready.store(true, Ordering::Release);
     let ptr = boxed[0].self_ptr as u64;
     unsafe {
         x86::wrmsr(IA32_GS_BASE, ptr);
@@ -79,8 +92,16 @@ pub fn cpu_count() -> usize {
     CPUS.try_get().map(|c| c.len()).unwrap_or(0)
 }
 
-pub fn cpu(id: u32) -> Option<&'static PerCpu> {
-    CPUS.try_get()?.get(id as usize)
+/// CPU `id`'s remote view: the only per-CPU state another CPU reads. It
+/// is never taken `&mut`, so it may alias anything (DESIGN §7.5).
+pub fn cpu(id: u32) -> Option<&'static PerCpuRemote> {
+    REMOTE.try_get()?.get(id as usize)
+}
+
+/// CPU `id`'s `PerCpu` address, set once in [`init_bsp`]. For
+/// `smp_init::start_one`, which hands it to the AP it starts.
+pub fn slot_ptr(id: u32) -> Option<*mut PerCpu> {
+    CPUS.try_get()?.get(id as usize).map(|c| c.self_ptr)
 }
 
 /// `gs:[0]` == `self_ptr`. Only after [`init_bsp`] (and AP `install_gs`).
@@ -152,7 +173,12 @@ fn with_ptr<R>(p: *mut PerCpu, f: impl FnOnce(&mut PerCpu) -> R) -> R {
         }
     }
     let _u = Unlock(&WITH_BUSY[id]);
-    f(unsafe { &mut *p })
+    // SAFETY: invariant I21, established here by the `WITH_BUSY` swap
+    // above: no other `with_current`/`with_cpu` scope on this slot is live.
+    let pc = unsafe { &mut *p };
+    let r = f(pc);
+    pc.publish_runq_len();
+    r
 }
 
 /// Write `GS_BASE` and `KERNEL_GS_BASE` to this CPU's slot.

@@ -203,7 +203,7 @@ pub fn place_ready(cpu: u32, id: ThreadId) {
 
 pub fn drain_inbox() -> bool {
     per_cpu_init::with_current(|pc| {
-        let bits = pc.wake_inbox.swap(0, Ordering::Acquire);
+        let bits = pc.remote.wake_inbox.swap(0, Ordering::Acquire);
         if bits == 0 {
             return false;
         }

@@ -276,7 +276,7 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
         fail_status(common);
         return Err(VirtioError::Failed);
     }
-    if let Err(e) = irq_init::enable_msix(dev, 0, vec, pc.apic_id as u8) {
+    if let Err(e) = irq_init::enable_msix(dev, 0, vec, pc.apic_id.load(Ordering::Relaxed) as u8) {
         let _ = irq_init::free_vector(vec);
         fail_status(common);
         return match e {
