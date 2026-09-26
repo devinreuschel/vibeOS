@@ -11,9 +11,13 @@
 //! makes explicit: the caller runs `invlpg` after every single-PTE edit
 //! and, for a kernel-half edit, drops PT and calls
 //! `paging::tlb_shootdown_others` (`Mapper` does neither), and no
-//! splitting of 2 MiB pages when patching MMIO attributes.
+//! splitting of 2 MiB pages when patching MMIO attributes. The kernel
+//! tables are reached only through [`current_mapper`], whose
+//! [`MapperGuard`] holds PT for as long as it lives, so holding the guard
+//! is the proof that PT is held.
 
 use core::fmt::Write;
+use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use vibeos::lock::RANK_PT;
@@ -26,7 +30,7 @@ use vibeos::pmm::Frames;
 
 use crate::boot::BootInfo;
 use crate::pmm_init;
-use crate::sync_init::SpinMutex;
+use crate::sync_init::{SpinMutex, SpinMutexGuard};
 use crate::x86;
 
 // ------------------ constants matching DESIGN §4.1 ------------------
@@ -86,13 +90,49 @@ unsafe impl FrameAlloc for BuddyFrames {
 
 // ------------------ MMIO window (ioremap) ------------------
 
-/// Page-table + ioremap lock. Rank PT. Callers that already hold it use
-/// the `_locked` map/unmap helpers and drop before a shootdown wait.
+/// Page-table + ioremap lock. Rank PT. Taken only by [`current_mapper`];
+/// callers that already hold its guard pass it to the `_locked`
+/// map/unmap helpers and drop it before a shootdown wait.
 static PT: SpinMutex<IoremapWindow> = SpinMutex::with_rank(IoremapWindow::new(), RANK_PT);
 
-pub fn with_pt<R>(f: impl FnOnce() -> R) -> R {
-    let _g = PT.lock();
-    f()
+/// A `Mapper` over the kernel PML4 together with the PT lock that guards
+/// it. Built only by [`current_mapper`]; PT is held for the guard's life
+/// and released when it drops. Derefs to `Mapper`.
+pub struct MapperGuard {
+    mapper: Mapper,
+    pt: SpinMutexGuard<'static, IoremapWindow>,
+}
+
+impl MapperGuard {
+    /// The ioremap window, which PT also guards.
+    pub fn window(&mut self) -> &mut IoremapWindow {
+        &mut self.pt
+    }
+}
+
+impl Deref for MapperGuard {
+    type Target = Mapper;
+    fn deref(&self) -> &Mapper {
+        &self.mapper
+    }
+}
+
+impl DerefMut for MapperGuard {
+    fn deref_mut(&mut self) -> &mut Mapper {
+        &mut self.mapper
+    }
+}
+
+/// Run `f` with PT held, handing it the kernel mapper guard.
+pub fn with_pt<R>(f: impl FnOnce(&mut MapperGuard) -> R) -> R {
+    let mut g = current_mapper();
+    f(&mut g)
+}
+
+/// Whether PT is free right now (and not held by this CPU).
+#[cfg(feature = "kernel_tests")]
+pub(crate) fn pt_lock_free() -> bool {
+    PT.try_lock().is_some()
 }
 
 static MAP_END: AtomicU64 = AtomicU64::new(0);
@@ -120,25 +160,23 @@ pub fn kernel_cr3() -> u64 {
 /// same registers with cacheable attributes.
 pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
     let (va_offset, base_va, round_len) = {
-        let mut win = PT.lock();
-        let va_offset = win.reserve(phys, len)?;
+        let mut pt = current_mapper();
+        let va_offset = pt.window().reserve(phys, len)?;
         let base_va = VirtAddr(va_offset.as_u64() & !(PAGE_SIZE_4K - 1));
         let base_pa = PhysAddr(phys.as_u64() & !(PAGE_SIZE_4K - 1));
         let head = phys.as_u64() & (PAGE_SIZE_4K - 1);
         let round_len = paging_align_up(head + len, PAGE_SIZE_4K);
         let mut alloc = BuddyFrames;
-        let mut mapper = current_mapper();
         unsafe {
-            mapper
-                .map_range(
-                    base_va,
-                    base_pa,
-                    round_len,
-                    paging::mmio_flags(),
-                    MapMode::Fresh,
-                    &mut alloc,
-                )
-                .ok()?;
+            pt.map_range(
+                base_va,
+                base_pa,
+                round_len,
+                paging::mmio_flags(),
+                MapMode::Fresh,
+                &mut alloc,
+            )
+            .ok()?;
         }
         Some((va_offset, base_va, round_len))
     }?;
@@ -158,10 +196,7 @@ pub unsafe fn ioremap(phys: PhysAddr, len: u64) -> Option<VirtAddr> {
 /// # Safety
 /// Only sound after `install`; the physmap must cover `[phys, phys+len)`.
 pub unsafe fn patch_physmap_uc(phys: PhysAddr, len: u64) -> Result<usize, MapError> {
-    let n = with_pt(|| {
-        let mut mapper = current_mapper();
-        unsafe { mapper.patch_physmap_uc(VirtAddr(HHDM_BASE), phys, len) }
-    })?;
+    let n = unsafe { current_mapper().patch_physmap_uc(VirtAddr(HHDM_BASE), phys, len) }?;
     let mut off: u64 = 0;
     let hhdm_end = HHDM_BASE.wrapping_add(phys.as_u64()).wrapping_add(len);
     let mut va = HHDM_BASE.wrapping_add(phys.as_u64());
@@ -174,10 +209,12 @@ pub unsafe fn patch_physmap_uc(phys: PhysAddr, len: u64) -> Result<usize, MapErr
     Ok(n)
 }
 
-/// Fabricate a `Mapper` pointing at the kernel PML4. Only safe after
-/// [`install`] has installed our own tables. Does not follow the current
-/// CR3 (a user thread may have switched it).
-pub(crate) fn current_mapper() -> Mapper {
+/// Take PT and build a `Mapper` over the kernel PML4 inside the returned
+/// guard. Before [`install`] it walks the tables CR3 holds; after, it
+/// walks the kernel root and does not follow the current CR3 (a user
+/// thread may have switched it).
+pub(crate) fn current_mapper() -> MapperGuard {
+    let pt = PT.lock();
     let cr3 = {
         let k = kernel_cr3();
         if k != 0 {
@@ -186,19 +223,28 @@ pub(crate) fn current_mapper() -> Mapper {
             x86::read_cr3() & paging::PTE_ADDR_MASK
         }
     };
-    unsafe { Mapper::new(PhysAddr(cr3), HHDM_BASE) }
+    // SAFETY: the kernel PML4 that `paging_init::install` built (or, before
+    // it, the boot tables CR3 holds) is never freed, and PT is held for the
+    // guard's life, so this is the only live `Mapper` over it; established
+    // here.
+    let mapper = unsafe { Mapper::new(PhysAddr(cr3), HHDM_BASE) };
+    MapperGuard { mapper, pt }
 }
 
-/// Map one 4 KiB leaf. Caller holds [`with_pt`]. Local `invlpg` only;
-/// the caller broadcasts shootdown after dropping PT.
+/// Map one 4 KiB leaf through `pt`. Local `invlpg` only; the caller
+/// broadcasts shootdown after dropping `pt`.
 ///
 /// # Safety
-/// Same contract as `Mapper::map_page`. Caller holds the PT lock.
-pub unsafe fn map_4k_locked(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(), MapError> {
+/// Same contract as `Mapper::map_page`.
+pub unsafe fn map_4k_locked(
+    pt: &mut MapperGuard,
+    va: VirtAddr,
+    pa: PhysAddr,
+    flags: PageFlags,
+) -> Result<(), MapError> {
     let mut alloc = BuddyFrames;
-    let mut mapper = current_mapper();
     unsafe {
-        mapper.map_page(va, pa, flags, PageSize::Size4K, MapMode::Fresh, &mut alloc)?;
+        pt.map_page(va, pa, flags, PageSize::Size4K, MapMode::Fresh, &mut alloc)?;
     }
     x86::invlpg(va.as_u64());
     Ok(())
@@ -209,20 +255,24 @@ pub unsafe fn map_4k_locked(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Res
 /// # Safety
 /// Same contract as `Mapper::map_page`. Must run after [`install`].
 pub unsafe fn map_4k(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(), MapError> {
-    with_pt(|| unsafe { map_4k_locked(va, pa, flags) })?;
+    with_pt(|pt| unsafe { map_4k_locked(pt, va, pa, flags) })?;
     paging::tlb_shootdown_others(va);
     Ok(())
 }
 
-/// Map one 2 MiB leaf. Caller holds PT. Local `invlpg` only.
+/// Map one 2 MiB leaf through `pt`. Local `invlpg` only.
 ///
 /// # Safety
-/// Same contract as `Mapper::map_page`. Caller holds the PT lock.
-pub unsafe fn map_2m_locked(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(), MapError> {
+/// Same contract as `Mapper::map_page`.
+pub unsafe fn map_2m_locked(
+    pt: &mut MapperGuard,
+    va: VirtAddr,
+    pa: PhysAddr,
+    flags: PageFlags,
+) -> Result<(), MapError> {
     let mut alloc = BuddyFrames;
-    let mut mapper = current_mapper();
     unsafe {
-        mapper.map_page(va, pa, flags, PageSize::Size2M, MapMode::Fresh, &mut alloc)?;
+        pt.map_page(va, pa, flags, PageSize::Size2M, MapMode::Fresh, &mut alloc)?;
     }
     x86::invlpg(va.as_u64());
     Ok(())
@@ -233,7 +283,7 @@ pub unsafe fn map_2m_locked(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Res
 /// # Safety
 /// Same contract as `Mapper::map_page`. Must run after [`install`].
 pub unsafe fn map_2m(va: VirtAddr, pa: PhysAddr, flags: PageFlags) -> Result<(), MapError> {
-    with_pt(|| unsafe { map_2m_locked(va, pa, flags) })?;
+    with_pt(|pt| unsafe { map_2m_locked(pt, va, pa, flags) })?;
     paging::tlb_shootdown_others(va);
     Ok(())
 }
@@ -296,13 +346,12 @@ pub fn ensure_physmap_wb(phys: PhysAddr, len: u64) -> bool {
     translate(VirtAddr(HHDM_BASE.wrapping_add(phys.as_u64()))).is_some()
 }
 
-/// Unmap one leaf. Caller holds PT. Local `invlpg` only.
+/// Unmap one leaf through `pt`. Local `invlpg` only.
 ///
 /// # Safety
-/// Caller holds PT and will not use `va` until shootdown.
-pub unsafe fn unmap_4k_locked(va: VirtAddr) -> Option<(PhysAddr, PageSize)> {
-    let mut mapper = current_mapper();
-    let r = unsafe { mapper.unmap_page(va) }?;
+/// Caller will not use `va` until shootdown.
+pub unsafe fn unmap_4k_locked(pt: &mut MapperGuard, va: VirtAddr) -> Option<(PhysAddr, PageSize)> {
+    let r = unsafe { pt.unmap_page(va) }?;
     x86::invlpg(va.as_u64());
     Some(r)
 }
@@ -314,7 +363,7 @@ pub unsafe fn unmap_4k_locked(va: VirtAddr) -> Option<(PhysAddr, PageSize)> {
 /// (stack, code, the heap it is currently allocating from, …).
 #[allow(dead_code)]
 pub unsafe fn unmap_4k(va: VirtAddr) -> Option<(PhysAddr, PageSize)> {
-    let r = with_pt(|| unsafe { unmap_4k_locked(va) });
+    let r = with_pt(|pt| unsafe { unmap_4k_locked(pt, va) });
     if r.is_some() {
         paging::tlb_shootdown_others(va);
     }
@@ -323,12 +372,13 @@ pub unsafe fn unmap_4k(va: VirtAddr) -> Option<(PhysAddr, PageSize)> {
 
 #[allow(dead_code)]
 pub fn translate(va: VirtAddr) -> Option<(PhysAddr, PageSize, PageFlags)> {
-    with_pt(|| current_mapper().translate(va))
+    current_mapper().translate(va)
 }
 
 /// DESIGN §4.1: every region asserts it is unmapped before claiming it.
 pub fn assert_unmapped(start: VirtAddr, end: VirtAddr) {
-    let ok = with_pt(|| current_mapper().range_unmapped(start, end));
+    // The guard drops at the end of this statement, before any panic.
+    let ok = current_mapper().range_unmapped(start, end);
     assert!(
         ok,
         "paging: region {:#x}..{:#x} already mapped",
@@ -339,7 +389,7 @@ pub fn assert_unmapped(start: VirtAddr, end: VirtAddr) {
 
 /// Range dump of the live tables. Coalesces adjacent leaves (ROADMAP §1.7).
 pub fn dump_ranges_to(w: &mut impl Write) {
-    with_pt(|| {
+    {
         let mapper = current_mapper();
         let mut n = 0usize;
         let mut visit = |va: u64, len: u64, flags: PageFlags, size: PageSize| {
@@ -362,7 +412,7 @@ pub fn dump_ranges_to(w: &mut impl Write) {
             &mut visit,
         );
         let _ = writeln!(w, "vibeOS: pt: {n} ranges");
-    });
+    }
 }
 
 // ------------------ install ------------------

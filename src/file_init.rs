@@ -4,11 +4,12 @@
 //! Flush (DESIGN §10.2). FAT rejects symlink/link with `NotSupp`; vibefs
 //! stores POSIX mode and symlinks (docs/VIBEFS.md).
 
-use vibeos::fat::{InoKey, InoRef, Node};
+use vibeos::fat::Node;
 use vibeos::fs::{
-    self, Dirent, FsError, FsType, InodeKind, MAX_NAME, MAX_PATH, Name, O_ACCMODE, O_APPEND,
-    O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, PathRef, S_IFDIR_MODE,
-    S_IFLNK_MODE, S_IFREG_MODE, SEEK_CUR, SEEK_END, SEEK_SET, Stat, split_basename,
+    self, Dirent, FsError, FsType, InodeHandle, InodeInfo, InodeKind, InodeRef, MAX_NAME, MAX_PATH,
+    Name, O_ACCMODE, O_APPEND, O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY,
+    PathRef, S_IFDIR_MODE, S_IFLNK_MODE, S_IFREG_MODE, SEEK_CUR, SEEK_END, SEEK_SET, Stat,
+    split_basename,
 };
 use vibeos::lock::RANK_DEVICE;
 use vibeos::shell::{Command, LineEditor, MAX_COMMANDS};
@@ -39,6 +40,9 @@ struct Walked {
     kind: InodeKind,
     size: u64,
     clu: u32,
+    /// A FAT file's dirent location; 0 for vibefs.
+    dir_clu: u32,
+    dir_off: u32,
     mode: u16,
     nlink: u32,
     mtime: u64,
@@ -53,6 +57,8 @@ impl Walked {
             kind: n.kind,
             size: u64::from(n.size),
             clu: n.clu,
+            dir_clu: n.dir_clu,
+            dir_off: n.dir_off,
             mode: if n.kind == InodeKind::Dir {
                 S_IFDIR_MODE
             } else {
@@ -71,9 +77,29 @@ impl Walked {
             kind: n.kind,
             size: n.size,
             clu: n.ino,
+            dir_clu: 0,
+            dir_off: 0,
             mode: n.mode,
             nlink: n.nlink,
             mtime: n.mtime,
+        }
+    }
+
+    /// The `Vfs` inode this walk names, through its backend's one
+    /// conversion.
+    fn inode_info(self) -> InodeInfo {
+        match self.back {
+            Back::Fat => fat_init::inode_info(
+                self.dir_clu,
+                self.dir_off,
+                self.clu,
+                self.size,
+                self.kind,
+                self.mtime,
+            ),
+            Back::Vibe => vibefs_init::inode_info(
+                self.ino, self.kind, self.mode, self.nlink, self.size, self.mtime,
+            ),
         }
     }
 
@@ -95,18 +121,18 @@ pub struct FileId {
     pub r#gen: u16,
 }
 
-/// What an open file refers to: a counted reference to FAT's in-core
-/// inode, or a vibefs inode number.
+/// What an open file refers to: a counted reference to a FAT file's
+/// `Vfs` inode, or a vibefs inode number.
 enum FileNode {
     None,
-    Fat(InoRef),
+    Fat(InodeRef),
     Vibe(u32),
 }
 
 /// A copy of a [`FileNode`] that names the inode without counting it.
 #[derive(Clone, Copy)]
 enum NodeKey {
-    Fat(InoKey),
+    Fat(InodeHandle),
     Vibe(u32),
 }
 
@@ -379,7 +405,7 @@ fn get_file(id: FileId) -> Result<View, FsError> {
     let g = FILES.lock();
     let f = &g[slot_of(&g, id)?];
     let node = match &f.node {
-        FileNode::Fat(r) => NodeKey::Fat(r.key()),
+        FileNode::Fat(r) => NodeKey::Fat(r.handle()),
         FileNode::Vibe(ino) => NodeKey::Vibe(*ino),
         FileNode::None => return Err(FsError::Badf),
     };
@@ -553,7 +579,7 @@ pub fn open(path: &str, flags: u32, _mode: u16) -> Result<FileId, FsError> {
     }
     if flags & O_TRUNC != 0 && w.kind == InodeKind::Reg {
         let r = match &node {
-            FileNode::Fat(r) => fat_init::truncate(w.vol, r.key(), 0),
+            FileNode::Fat(r) => fat_init::truncate(w.vol, r.handle(), 0),
             FileNode::Vibe(ino) => vibefs_init::truncate(w.vol, *ino, 0),
             FileNode::None => Ok(()),
         };
@@ -816,11 +842,14 @@ pub fn mkdir_p(path: &str) -> Result<(), FsError> {
     Ok(())
 }
 
+/// Cache `path`, which the File API walked outside the VFS lock, in the
+/// `Vfs` dentry cache. A name `Vfs` already holds keeps its dentry.
 pub fn vfs_attach(path: &str) -> Result<PathRef, FsError> {
     let node = vol_walk(path)?;
     let abs = join_cwd(path)?;
     let pb = path_used(&abs);
     let (parent, name) = split_basename(pb)?;
+    let info = node.inode_info();
     fs_init::with(|v| {
         let pdir = if parent.is_empty() || parent == b"/" {
             v.root()?
@@ -828,20 +857,7 @@ pub fn vfs_attach(path: &str) -> Result<PathRef, FsError> {
             let s = core::str::from_utf8(parent).map_err(|_| FsError::Inval)?;
             v.resolve(None, s, true)?
         };
-        let islot = v.fat_iget(
-            v.sb_of_path(pdir)?,
-            node.ino,
-            node.kind,
-            node.size,
-            node.clu,
-        )?;
-        match v.fat_dcache(pdir, name, islot) {
-            Ok(p) => Ok(p),
-            Err(e) => {
-                v.release_inode(islot);
-                Err(e)
-            }
-        }
+        v.attach(pdir, name, &info)
     })
 }
 
@@ -970,7 +986,7 @@ pub fn truncate_path(path: &str, size: u64) -> Result<(), FsError> {
     let (w, node) = walk_node(path)?;
     let r = match &node {
         _ if w.kind != InodeKind::Reg => Err(FsError::IsDir),
-        FileNode::Fat(r) => fat_init::truncate(w.vol, r.key(), size),
+        FileNode::Fat(r) => fat_init::truncate(w.vol, r.handle(), size),
         FileNode::Vibe(ino) => vibefs_init::truncate(w.vol, *ino, size),
         FileNode::None => Ok(()),
     };
