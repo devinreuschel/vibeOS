@@ -974,7 +974,11 @@ fn sys_execve(path: u64, argv: u64, envp: u64, frame: *mut SyscallFrame) -> i64 
         set_as(s);
     }
     thread_init::set_pid_cr3(tid, pid, cr3);
-    addr_space_init::load_cr3_u64(cr3);
+    // SAFETY: invariant I128, established at `addr_space_init::teardown`:
+    // `cr3` is the root of the space `create` built and `p.space` now owns,
+    // and `set_pid_cr3` recorded it in this thread's TCB on the line above,
+    // here.
+    unsafe { addr_space_init::load_cr3_u64(cr3) };
     if let Some(old) = old {
         addr_space_init::teardown(*old);
     }
@@ -1033,11 +1037,13 @@ fn finish_exit(wait_status: u32, _from_fault: bool) -> ! {
             (space, ppid, fds, tid)
         })
     });
-    let _ = tid;
     let mut fds = fds;
     close_all_fds(&mut fds);
     let _ = ppid;
     if let Some(space) = old {
+        // The TCB stops naming the root before the kernel root is loaded,
+        // so a switch back in between cannot reload it (invariant I128).
+        thread_init::set_pid_cr3(tid, 0, 0);
         crate::arch::gs::force_kernel();
         addr_space_init::load_kernel_cr3();
         clear_as();

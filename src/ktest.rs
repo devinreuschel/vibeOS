@@ -659,6 +659,18 @@ pub(crate) unsafe fn dealloc_frames(pa: PhysAddr, order: u8) {
     }
 }
 
+/// A naturally aligned block of `1 << order` frames as its owning
+/// `Frames`, for an API that takes the token (`kva_init::vmap`). The
+/// caller gives it back with [`free_frames_owned`].
+pub(crate) fn alloc_frames_owned(order: u8) -> Option<Frames> {
+    pmm_init::with_buddy(|b| b.alloc(order))
+}
+
+/// Free a block [`alloc_frames_owned`] returned, once nothing maps it.
+pub(crate) fn free_frames_owned(f: Frames) {
+    pmm_init::with_buddy(|b| b.free(f));
+}
+
 pub(crate) fn cpu_remote(id: u32) -> Option<&'static PerCpuRemote> {
     per_cpu_init::cpu(id)
 }
@@ -924,25 +936,19 @@ fn test_kva_deferred() -> Outcome {
 }
 
 fn test_vmap() -> Outcome {
-    let Some(a) = alloc_frame() else {
-        return Outcome::Fail("frame a");
+    let Some(f) = alloc_frames_owned(1) else {
+        return Outcome::Fail("frames");
     };
-    let Some(b) = alloc_frame() else {
-        free_frame(a);
-        return Outcome::Fail("frame b");
-    };
-    let Some(va) = kva_init::vmap(&[a, b]) else {
-        free_frame(a);
-        free_frame(b);
+    // `vmap` frees the frames itself when it fails.
+    let Ok(v) = kva_init::vmap(f) else {
         return Outcome::Fail("vmap");
     };
+    let va = v.base();
     unsafe { (va.as_u64() as *mut u64).write_volatile(0x100) };
     unsafe { ((va.as_u64() + PAGE_SIZE) as *mut u64).write_volatile(0x200) };
     let ga = unsafe { (va.as_u64() as *const u64).read_volatile() };
     let gb = unsafe { ((va.as_u64() + PAGE_SIZE) as *const u64).read_volatile() };
-    kva_init::vunmap(va, 2);
-    free_frame(a);
-    free_frame(b);
+    free_frames_owned(kva_init::vunmap(v));
     if ga != 0x100 || gb != 0x200 {
         return Outcome::Fail("vmap readback");
     }

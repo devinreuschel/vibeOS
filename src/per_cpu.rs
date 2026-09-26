@@ -37,6 +37,10 @@ pub struct PerCpuRemote {
     pub wake_inbox: AtomicU64,
     /// Local APIC id. Written before the CPU is started, then read-only.
     pub apic_id: AtomicU32,
+    /// Root this CPU last loaded. Owner stores after each CR3 write
+    /// (Release); `addr_space_init::teardown` reads it. 0 until paging
+    /// publishes the kernel root.
+    pub as_cr3: AtomicU64,
 }
 
 impl PerCpuRemote {
@@ -48,6 +52,7 @@ impl PerCpuRemote {
             ready: AtomicBool::new(false),
             wake_inbox: AtomicU64::new(0),
             apic_id: AtomicU32::new(0),
+            as_cr3: AtomicU64::new(0),
         }
     }
 }
@@ -89,8 +94,6 @@ pub struct PerCpu {
     pub kernel_rsp0: u64,
     /// Current CPU TSS. RSP0 updates go through here.
     pub tss: *mut Tss,
-    /// CR3 this CPU last loaded. 0 until paging publishes the kernel root.
-    pub as_cr3: u64,
     /// Dedicated TSS stack from GDT init. Used when the TCB has no stack
     /// (bootstrap).
     pub fallback_rsp0: u64,
@@ -131,7 +134,6 @@ impl PerCpu {
             runq: ReadyQueue::empty(),
             kernel_rsp0: 0,
             tss: core::ptr::null_mut(),
-            as_cr3: 0,
             fallback_rsp0: 0,
             remote,
         }
@@ -180,7 +182,7 @@ mod tests {
         assert_eq!(p.syscall_scratch, [0; 6]);
         assert!(p.tss.is_null());
         assert_eq!(p.kernel_rsp0, 0);
-        assert_eq!(p.as_cr3, 0);
+        assert_eq!(p.remote.as_cr3.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -193,6 +195,7 @@ mod tests {
         assert!(!R.ready.load(Ordering::Relaxed));
         assert_eq!(R.wake_inbox.load(Ordering::Relaxed), 0);
         assert_eq!(R.apic_id.load(Ordering::Relaxed), 0);
+        assert_eq!(R.as_cr3.load(Ordering::Relaxed), 0);
         let d = PerCpuRemote::default();
         assert_eq!(d.ticks.load(Ordering::Relaxed), 0);
         assert!(!d.ready.load(Ordering::Relaxed));
