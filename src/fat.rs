@@ -259,27 +259,88 @@ pub struct FatVol {
 
 use crate::limits::MAX_FAT_INODES as MAX_INOS;
 
+/// A FAT file's in-core inode. Its identity is its dirent location,
+/// `(dir_clu, dir_off)` (the root directory is `(0, 0)`), never the first
+/// cluster, which changes on an empty file's first write and on truncate
+/// to 0. While it is referenced it, not the dirent, holds the first
+/// cluster and the size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FatInode {
+    pub dir_clu: u32,
+    pub dir_off: u32,
+    pub first_clu: u32,
+    pub size: u64,
+    pub kind: InodeKind,
+    pub ino: u32,
+}
+
+impl FatInode {
+    const EMPTY: Self = Self {
+        dir_clu: 0,
+        dir_off: 0,
+        first_clu: 0,
+        size: 0,
+        kind: InodeKind::Reg,
+        ino: 0,
+    };
+}
+
+/// A counted reference to an in-core inode, from [`FatVol::iget`]. Hand
+/// it back to [`FatVol::iput`]: dropping it leaks the count.
+#[must_use]
+#[derive(Debug)]
+pub struct InoRef {
+    slot: u16,
+    generation: u32,
+}
+
+impl InoRef {
+    /// A copyable name for this reference's inode, checked against the
+    /// entry's generation on every use.
+    pub fn key(&self) -> InoKey {
+        InoKey {
+            slot: self.slot,
+            generation: self.generation,
+        }
+    }
+}
+
+/// A copyable, generation-checked name for a referenced in-core inode.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct InoKey {
+    slot: u16,
+    generation: u32,
+}
+
+/// One entry of [`FatVol`]'s inode table. `refs` counts [`InoRef`]s; an
+/// unreferenced entry is a cache that a lookup refreshes from the dirent
+/// and that a new key may take. `unlinked` entries are out of the hash:
+/// their dirent is gone and their chain is freed at the last `iput`.
+/// `generation` is bumped whenever the entry takes a new key.
 #[derive(Clone, Copy)]
 struct InoEnt {
     used: bool,
-    dir_clu: u32,
-    dir_off: u32,
-    ino: u32,
-    clu: u32,
-    size: u32,
-    kind: InodeKind,
+    refs: u16,
+    generation: u32,
+    unlinked: bool,
+    inode: FatInode,
 }
 
 impl InoEnt {
     const EMPTY: Self = Self {
         used: false,
-        dir_clu: 0,
-        dir_off: 0,
-        ino: 0,
-        clu: 0,
-        size: 0,
-        kind: InodeKind::Reg,
+        refs: 0,
+        generation: 0,
+        unlinked: false,
+        inode: FatInode::EMPTY,
     };
+
+    fn is_key(&self, dir_clu: u32, dir_off: u32) -> bool {
+        self.used
+            && !self.unlinked
+            && self.inode.dir_clu == dir_clu
+            && self.inode.dir_off == dir_off
+    }
 }
 
 impl FatVol {
@@ -447,6 +508,21 @@ impl FatVol {
         off: u64,
         buf: &[u8],
     ) -> Result<usize, FatError> {
+        self.write_chain(d, Some((dir_clu, dir_off)), first, size, off, buf)
+    }
+
+    /// Write `buf` at `off` into the chain at `*first`, growing it and
+    /// `*size` as needed. `dirent` is the short entry to keep in step, or
+    /// `None` for an unlinked file whose old slot may belong to another.
+    fn write_chain<D: Disk>(
+        &mut self,
+        d: &mut D,
+        dirent: Option<(u32, u32)>,
+        first: &mut u32,
+        size: &mut u32,
+        off: u64,
+        buf: &[u8],
+    ) -> Result<usize, FatError> {
         if buf.is_empty() {
             return Ok(0);
         }
@@ -455,11 +531,14 @@ impl FatVol {
             return Err(FatError::NoSpace);
         }
         let need = end as u32;
+        let old_first = *first;
         self.ensure_size(d, first, *size, need)?;
         self.write_at(d, *first, off, buf)?;
-        if need > *size {
-            *size = need;
-            self.update_short(d, dir_clu, dir_off, *first, *size)?;
+        if need > *size || *first != old_first {
+            *size = (*size).max(need);
+            if let Some((dir_clu, dir_off)) = dirent {
+                self.update_short(d, dir_clu, dir_off, *first, *size)?;
+            }
             d.flush()?;
         }
         Ok(buf.len())
@@ -474,27 +553,46 @@ impl FatVol {
         size: &mut u32,
         new: u32,
     ) -> Result<(), FatError> {
+        self.truncate_chain(d, Some((dir_clu, dir_off)), first, size, new)
+    }
+
+    /// Set the chain at `*first` to `new` bytes. `dirent` as for
+    /// [`Self::write_chain`].
+    fn truncate_chain<D: Disk>(
+        &mut self,
+        d: &mut D,
+        dirent: Option<(u32, u32)>,
+        first: &mut u32,
+        size: &mut u32,
+        new: u32,
+    ) -> Result<(), FatError> {
         if new == *size {
             return Ok(());
         }
         if new > *size {
             self.ensure_size(d, first, *size, new)?;
             *size = new;
-            self.update_short(d, dir_clu, dir_off, *first, *size)?;
+            if let Some((dir_clu, dir_off)) = dirent {
+                self.update_short(d, dir_clu, dir_off, *first, *size)?;
+            }
             return d.flush();
         }
         // Size first while clusters stay allocated. Then drop the cluster
         // pointer (still allocated) so the dirent never names a free cluster.
-        self.update_short(d, dir_clu, dir_off, *first, new)?;
-        d.flush()?;
+        if let Some((dir_clu, dir_off)) = dirent {
+            self.update_short(d, dir_clu, dir_off, *first, new)?;
+            d.flush()?;
+        }
         let cb = self.info.clus_bytes() as u32;
         let keep = if new == 0 { 0 } else { new.div_ceil(cb) };
         if keep == 0 {
             let old = *first;
             *first = 0;
             *size = new;
-            self.update_short(d, dir_clu, dir_off, 0, new)?;
-            d.flush()?;
+            if let Some((dir_clu, dir_off)) = dirent {
+                self.update_short(d, dir_clu, dir_off, 0, new)?;
+                d.flush()?;
+            }
             if old >= 2 {
                 self.free_chain(d, old)?;
                 self.commit_fat(d)?;
@@ -603,9 +701,23 @@ impl FatVol {
         } else if node.kind == InodeKind::Dir {
             return Err(FatError::IsDir);
         }
+        // A referenced inode leaves the hash, so a file created later in
+        // this dirent slot gets a new inode, and keeps its chain until its
+        // last `iput`. An unreferenced one is dropped.
+        let held = match self.slot_of_key(node.dir_clu, node.dir_off) {
+            Some(i) if self.inos[i].refs > 0 => {
+                self.inos[i].unlinked = true;
+                true
+            }
+            Some(i) => {
+                self.inos[i] = InoEnt::EMPTY;
+                false
+            }
+            None => false,
+        };
         self.mark_deleted(d, dir_clu, node.dir_off)?;
         d.flush()?;
-        if node.clu >= 2 {
+        if !held && node.clu >= 2 {
             self.free_chain(d, node.clu)?;
             self.commit_fat(d)?;
             d.flush()?;
@@ -625,6 +737,22 @@ impl FatVol {
             return Ok(());
         }
         let src = self.lookup(d, src_dir, src_name)?;
+        let r = self.iget(src.dir_clu, src.dir_off)?;
+        let res = self.rename_to(d, src, &r, src_dir, dst_dir, dst_name);
+        let put = self.iput(d, r);
+        res?;
+        put
+    }
+
+    fn rename_to<D: Disk>(
+        &mut self,
+        d: &mut D,
+        src: Node,
+        r: &InoRef,
+        src_dir: u32,
+        dst_dir: u32,
+        dst_name: &[u8],
+    ) -> Result<(), FatError> {
         match self.lookup(d, dst_dir, dst_name) {
             Ok(dst) => {
                 if dst.kind == InodeKind::Dir {
@@ -659,6 +787,7 @@ impl FatVol {
         let short_off = ent_off + (n_lfn * ENT) as u32;
         self.write_dir_raw(d, dst_dir, short_off, &ent)?;
         d.flush()?;
+        self.rekey(r, dst_dir, short_off);
         self.mark_deleted(d, src_dir, src.dir_off)?;
         d.flush()
     }
@@ -738,75 +867,247 @@ impl FatVol {
         Ok(n)
     }
 
+    /// The inode number for the dirent at `(dir_clu, dir_off)`, entering it
+    /// in the table: an unreferenced entry is refreshed from the dirent, a
+    /// referenced one is left alone (it, not the dirent, is current). A
+    /// new key takes a free entry, else an unreferenced one; only when
+    /// every entry is referenced is the number a hash with no entry.
     fn ino_of(&mut self, dir_clu: u32, dir_off: u32, clu: u32, size: u32, kind: InodeKind) -> u32 {
         if dir_clu == 0 && dir_off == 0 {
             return ROOT_INO;
         }
+        if let Some(i) = self.slot_of_key(dir_clu, dir_off) {
+            let e = &mut self.inos[i];
+            if e.refs == 0 {
+                e.inode.first_clu = clu;
+                e.inode.size = u64::from(size);
+                e.inode.kind = kind;
+            }
+            return e.inode.ino;
+        }
+        let ino = self.next_ino;
+        let inode = FatInode {
+            dir_clu,
+            dir_off,
+            first_clu: clu,
+            size: u64::from(size),
+            kind,
+            ino,
+        };
+        match self.take_entry(inode) {
+            Some(_) => {
+                self.next_ino = self.next_ino.saturating_add(1);
+                ino
+            }
+            None => dir_clu.wrapping_mul(0x9E37) ^ dir_off ^ (clu << 1),
+        }
+    }
+
+    /// The hashed (not unlinked) entry keyed `(dir_clu, dir_off)`.
+    fn slot_of_key(&self, dir_clu: u32, dir_off: u32) -> Option<usize> {
+        self.inos.iter().position(|e| e.is_key(dir_clu, dir_off))
+    }
+
+    /// Put `inode` in a free entry, else in an unreferenced one, with a new
+    /// generation; `None` when every entry is referenced.
+    fn take_entry(&mut self, inode: FatInode) -> Option<usize> {
+        let i = self
+            .inos
+            .iter()
+            .position(|e| !e.used)
+            .or_else(|| self.inos.iter().position(|e| e.refs == 0))?;
+        let e = &mut self.inos[i];
+        *e = InoEnt {
+            used: true,
+            refs: 0,
+            generation: e.generation.wrapping_add(1),
+            unlinked: false,
+            inode,
+        };
+        Some(i)
+    }
+
+    /// The referenced entry `k` names: `Inval` when it was put or re-used.
+    fn ent_of(&self, k: InoKey) -> Result<usize, FatError> {
+        let i = k.slot as usize;
+        match self.inos.get(i) {
+            Some(e) if e.used && e.refs > 0 && e.generation == k.generation => Ok(i),
+            _ => Err(FatError::Inval),
+        }
+    }
+
+    /// Count a reference to the inode at `(dir_clu, dir_off)`, which a
+    /// lookup made in the same volume-lock section; `(0, 0)` is the root.
+    /// `NoSpace` when the lookup found every entry referenced and hashed.
+    pub fn iget(&mut self, dir_clu: u32, dir_off: u32) -> Result<InoRef, FatError> {
+        let found = self.slot_of_key(dir_clu, dir_off);
+        let i = match found {
+            Some(i) => i,
+            None if dir_clu == 0 && dir_off == 0 => self
+                .take_entry(FatInode {
+                    dir_clu: 0,
+                    dir_off: 0,
+                    first_clu: self.info.root_clus,
+                    size: 0,
+                    kind: InodeKind::Dir,
+                    ino: ROOT_INO,
+                })
+                .ok_or(FatError::NoSpace)?,
+            None if self.inos.iter().all(|e| e.used && e.refs > 0) => {
+                return Err(FatError::NoSpace);
+            }
+            None => return Err(FatError::NotFound),
+        };
+        let e = &mut self.inos[i];
+        e.refs = e.refs.checked_add(1).ok_or(FatError::NoSpace)?;
+        Ok(InoRef {
+            slot: i as u16,
+            generation: e.generation,
+        })
+    }
+
+    /// Drop a reference. The last one on an unlinked inode frees its chain.
+    pub fn iput<D: Disk>(&mut self, d: &mut D, r: InoRef) -> Result<(), FatError> {
+        let i = self.ent_of(r.key())?;
+        let e = &mut self.inos[i];
+        e.refs -= 1;
+        if e.refs > 0 || !e.unlinked {
+            return Ok(());
+        }
+        let first = e.inode.first_clu;
+        *e = InoEnt {
+            generation: e.generation,
+            ..InoEnt::EMPTY
+        };
+        if first >= 2 {
+            self.free_chain(d, first)?;
+            self.commit_fat(d)?;
+            d.flush()?;
+        }
+        Ok(())
+    }
+
+    pub fn inode(&self, r: &InoRef) -> &FatInode {
+        // An `InoRef` keeps its entry referenced, so its slot is in range
+        // and live until `iput` takes it.
+        &self.inos[r.slot as usize].inode
+    }
+
+    /// The inode `k` names; `Inval` for a key whose reference was put.
+    pub fn inode_at(&self, k: InoKey) -> Result<&FatInode, FatError> {
+        let i = self.ent_of(k)?;
+        Ok(&self.inos[i].inode)
+    }
+
+    /// Move `r`'s inode to the dirent at `(dir_clu, dir_off)`, as rename
+    /// does. An unreferenced cache entry for that key is dropped.
+    pub fn rekey(&mut self, r: &InoRef, dir_clu: u32, dir_off: u32) {
+        let me = r.slot as usize;
         let mut i = 0usize;
         while i < MAX_INOS {
-            if self.inos[i].used
-                && self.inos[i].dir_clu == dir_clu
-                && self.inos[i].dir_off == dir_off
-            {
-                self.inos[i].clu = clu;
-                self.inos[i].size = size;
-                self.inos[i].kind = kind;
-                return self.inos[i].ino;
-            }
-            i += 1;
-        }
-        i = 0;
-        while i < MAX_INOS {
-            if !self.inos[i].used {
-                let ino = self.next_ino;
-                self.next_ino = self.next_ino.saturating_add(1);
+            if i != me && self.inos[i].is_key(dir_clu, dir_off) && self.inos[i].refs == 0 {
                 self.inos[i] = InoEnt {
-                    used: true,
-                    dir_clu,
-                    dir_off,
-                    ino,
-                    clu,
-                    size,
-                    kind,
+                    generation: self.inos[i].generation,
+                    ..InoEnt::EMPTY
                 };
-                return ino;
             }
             i += 1;
         }
-        dir_clu.wrapping_mul(0x9E37) ^ dir_off ^ (clu << 1)
+        let e = &mut self.inos[me].inode;
+        e.dir_clu = dir_clu;
+        e.dir_off = dir_off;
+    }
+
+    /// The dirent to keep in step with the inode at `i`, or `None` for an
+    /// unlinked one.
+    fn dirent_of(&self, i: usize) -> Option<(u32, u32)> {
+        let e = &self.inos[i];
+        if e.unlinked {
+            None
+        } else {
+            Some((e.inode.dir_clu, e.inode.dir_off))
+        }
+    }
+
+    pub fn read_ino<D: Disk>(
+        &mut self,
+        d: &mut D,
+        k: InoKey,
+        off: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, FatError> {
+        let i = self.ent_of(k)?;
+        let n = self.inos[i].inode;
+        let size = u32::try_from(n.size).map_err(|_| FatError::Corrupt)?;
+        self.read(d, n.first_clu, size, off, buf)
+    }
+
+    /// Write `buf` at `off`, or at the end of the file when `append` is
+    /// set; returns the count written and the position it wrote at.
+    pub fn write_ino<D: Disk>(
+        &mut self,
+        d: &mut D,
+        k: InoKey,
+        off: u64,
+        append: bool,
+        buf: &[u8],
+    ) -> Result<(usize, u64), FatError> {
+        let i = self.ent_of(k)?;
+        let n = self.inos[i].inode;
+        let pos = if append { n.size } else { off };
+        let mut first = n.first_clu;
+        let mut size = u32::try_from(n.size).map_err(|_| FatError::Corrupt)?;
+        let dirent = self.dirent_of(i);
+        let r = self.write_chain(d, dirent, &mut first, &mut size, pos, buf);
+        // The chain may have grown even if a later step failed.
+        let e = &mut self.inos[i].inode;
+        e.first_clu = first;
+        e.size = u64::from(size);
+        Ok((r?, pos))
+    }
+
+    pub fn truncate_ino<D: Disk>(
+        &mut self,
+        d: &mut D,
+        k: InoKey,
+        new: u64,
+    ) -> Result<(), FatError> {
+        let new = u32::try_from(new).map_err(|_| FatError::Inval)?;
+        let i = self.ent_of(k)?;
+        let n = self.inos[i].inode;
+        let mut first = n.first_clu;
+        let mut size = u32::try_from(n.size).map_err(|_| FatError::Corrupt)?;
+        let dirent = self.dirent_of(i);
+        let r = self.truncate_chain(d, dirent, &mut first, &mut size, new);
+        let e = &mut self.inos[i].inode;
+        e.first_clu = first;
+        e.size = u64::from(size);
+        r
     }
 
     pub fn by_ino(&self, ino: u32) -> Result<Node, FatError> {
         if ino == ROOT_INO {
             return Ok(self.root());
         }
-        let mut i = 0usize;
-        while i < MAX_INOS {
-            if self.inos[i].used && self.inos[i].ino == ino {
-                let e = self.inos[i];
-                let mut n = Node::EMPTY;
-                n.ino = e.ino;
-                n.kind = e.kind;
-                n.clu = e.clu;
-                n.size = e.size;
-                n.dir_clu = e.dir_clu;
-                n.dir_off = e.dir_off;
-                return Ok(n);
-            }
-            i += 1;
-        }
-        Err(FatError::NotFound)
+        let e = self
+            .inos
+            .iter()
+            .find(|e| e.used && e.inode.ino == ino)
+            .ok_or(FatError::NotFound)?;
+        let mut n = Node::EMPTY;
+        n.ino = e.inode.ino;
+        n.kind = e.inode.kind;
+        n.clu = e.inode.first_clu;
+        n.size = u32::try_from(e.inode.size).map_err(|_| FatError::Corrupt)?;
+        n.dir_clu = e.inode.dir_clu;
+        n.dir_off = e.inode.dir_off;
+        Ok(n)
     }
 
     pub fn put_size(&mut self, ino: u32, clu: u32, size: u32) {
-        let mut i = 0usize;
-        while i < MAX_INOS {
-            if self.inos[i].used && self.inos[i].ino == ino {
-                self.inos[i].clu = clu;
-                self.inos[i].size = size;
-                return;
-            }
-            i += 1;
+        if let Some(e) = self.inos.iter_mut().find(|e| e.used && e.inode.ino == ino) {
+            e.inode.first_clu = clu;
+            e.inode.size = u64::from(size);
         }
     }
 
@@ -2434,5 +2735,130 @@ mod tests {
         let inos = with_vol(&mut b, |vol, _| vol.inos.len());
         assert_eq!(inos, crate::limits::MAX_FAT_INODES);
         assert_eq!(Node::EMPTY.name.len(), crate::limits::MAX_NAME);
+    }
+
+    /// Create `name` in `dir` and count a reference to it.
+    fn create_iget(v: &mut FatVol, d: &mut MemDisk, dir: u32, name: &[u8]) -> InoRef {
+        let n = v.create(d, dir, name, false).unwrap();
+        v.iget(n.dir_clu, n.dir_off).unwrap()
+    }
+
+    fn read_back(v: &mut FatVol, d: &mut MemDisk, r: &InoRef) -> Vec<u8> {
+        let size = v.inode(r).size as usize;
+        let mut out = vec![0u8; size];
+        let got = v.read_ino(d, r.key(), 0, &mut out).unwrap();
+        assert_eq!(got, size);
+        out
+    }
+
+    #[test]
+    fn fat_unlinked_open_frees_at_last_iput() {
+        let mut b = fresh(INITRD_BYTES);
+        with_vol(&mut b, |v, d| {
+            let root = v.info.root_clus;
+            let before = v.free;
+            let r = create_iget(v, d, root, b"GONE.BIN");
+            assert_eq!(
+                v.write_ino(d, r.key(), 0, false, &[5u8; 1500]).unwrap(),
+                (1500, 0)
+            );
+            let held = v.free;
+            assert!(held < before);
+            v.unlink(d, root, b"GONE.BIN", false).unwrap();
+            assert_eq!(
+                v.lookup(d, root, b"GONE.BIN").unwrap_err(),
+                FatError::NotFound
+            );
+            assert_eq!(v.free, held, "an open unlinked file keeps its clusters");
+            assert_eq!(read_back(v, d, &r), vec![5u8; 1500]);
+            assert_eq!(v.write_ino(d, r.key(), 0, true, b"xy").unwrap(), (2, 1500));
+            v.iput(d, r).unwrap();
+            assert_eq!(v.free, before, "the last iput frees the chain");
+            let counted = v.count_free(d).unwrap();
+            assert_eq!(v.free, counted);
+            v.sync(d).unwrap();
+        });
+        fsck(&b);
+    }
+
+    #[test]
+    fn fat_create_in_freed_slot_new_inode() {
+        let mut b = fresh(INITRD_BYTES);
+        with_vol(&mut b, |v, d| {
+            let root = v.info.root_clus;
+            let old = create_iget(v, d, root, b"A.BIN");
+            v.write_ino(d, old.key(), 0, false, b"old").unwrap();
+            let old_ino = v.inode(&old).ino;
+            let old_off = v.inode(&old).dir_off;
+            v.unlink(d, root, b"A.BIN", false).unwrap();
+            let n = v.create(d, root, b"B.BIN", false).unwrap();
+            assert_eq!(n.dir_off, old_off, "the new file takes the freed slot");
+            assert_ne!(n.ino, old_ino);
+            let new = v.iget(n.dir_clu, n.dir_off).unwrap();
+            assert_ne!(new.key(), old.key());
+            v.write_ino(d, new.key(), 0, false, b"new!").unwrap();
+            // Growing the unlinked file never writes its old dirent slot.
+            v.write_ino(d, old.key(), 0, true, &[1u8; 700]).unwrap();
+            let got = v.lookup(d, root, b"B.BIN").unwrap();
+            assert_eq!((got.size, got.clu), (4, v.inode(&new).first_clu));
+            assert_eq!(&read_back(v, d, &old)[..3], b"old");
+            assert_eq!(read_back(v, d, &new), b"new!");
+            v.iput(d, old).unwrap();
+            v.iput(d, new).unwrap();
+            let counted = v.count_free(d).unwrap();
+            assert_eq!(v.free, counted);
+            v.sync(d).unwrap();
+        });
+        fsck(&b);
+    }
+
+    #[test]
+    fn fat_rename_rekeys_open_inode() {
+        let mut b = fresh(INITRD_BYTES);
+        with_vol(&mut b, |v, d| {
+            let root = v.info.root_clus;
+            let a = v.create(d, root, b"a", true).unwrap();
+            let bb = v.create(d, root, b"b", true).unwrap();
+            let r = create_iget(v, d, a.clu, b"X.TXT");
+            v.write_ino(d, r.key(), 0, false, b"hi").unwrap();
+            v.rename(d, a.clu, b"X.TXT", bb.clu, b"Y.TXT").unwrap();
+            let y = v.lookup(d, bb.clu, b"Y.TXT").unwrap();
+            let n = *v.inode(&r);
+            assert_eq!((n.dir_clu, n.dir_off), (bb.clu, y.dir_off));
+            assert_eq!(y.ino, n.ino);
+            v.write_ino(d, r.key(), 0, true, b" there").unwrap();
+            let y = v.lookup(d, bb.clu, b"Y.TXT").unwrap();
+            assert_eq!(y.size, 8);
+            assert_eq!(read_back(v, d, &r), b"hi there");
+            v.iput(d, r).unwrap();
+            v.sync(d).unwrap();
+        });
+        fsck(&b);
+    }
+
+    #[test]
+    fn fat_iget_full_table_nospace() {
+        let mut b = fresh(4 * INITRD_BYTES);
+        with_vol(&mut b, |v, d| {
+            let root = v.info.root_clus;
+            let mut held = Vec::new();
+            let mut i = 0usize;
+            while i < MAX_INOS {
+                let name = format!("F{i}.BIN");
+                held.push(create_iget(v, d, root, name.as_bytes()));
+                i += 1;
+            }
+            let n = v.create(d, root, b"LAST.BIN", false).unwrap();
+            assert_eq!(v.iget(n.dir_clu, n.dir_off).unwrap_err(), FatError::NoSpace);
+            let first = held.remove(0);
+            v.iput(d, first).unwrap();
+            let n = v.lookup(d, root, b"LAST.BIN").unwrap();
+            held.push(v.iget(n.dir_clu, n.dir_off).unwrap());
+            for r in held {
+                v.iput(d, r).unwrap();
+            }
+            v.sync(d).unwrap();
+        });
+        fsck(&b);
     }
 }
