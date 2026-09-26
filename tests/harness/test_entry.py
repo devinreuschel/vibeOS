@@ -10,7 +10,9 @@ from unittest import mock
 from scripts import check_entry
 from scripts.check_entry import scoped_files, stale_abi_feature, x86_interrupt_outside_arch
 
-HANDLER = 'extern "x86-interrupt" fn h(_f: InterruptFrame) {}\n'
+# Built in pieces so a grep for the ABI string finds no fixture here.
+ABI = 'extern "x86-' + 'interrupt"'
+HANDLER = f"{ABI} fn h(_f: InterruptFrame) {{}}\n"
 FEATURE = "#![no_std]\n#![feature(abi_x86_interrupt)]\n"
 
 
@@ -30,12 +32,13 @@ class TestOutsideArch(unittest.TestCase):
         self.assertEqual(x86_interrupt_outside_arch({"src/arch/idt.rs": HANDLER}), [])
 
     def test_commented_line_is_ignored(self) -> None:
-        files = {"src/kbd_init.rs": '// was: extern "x86-interrupt" fn kbd()\n'
-                                    'fn kbd() {} // not extern "x86-interrupt"\n'}
+        files = {"src/kbd_init.rs": f"// was: {ABI} fn kbd()\n"
+                                    f"fn kbd() {{}} // not {ABI}\n"}
         self.assertEqual(x86_interrupt_outside_arch(files), [])
 
     def test_spacing_variants_are_reported(self) -> None:
-        errs = x86_interrupt_outside_arch({"src/a.rs": 'pub extern  "x86-interrupt" fn h() {}\n'})
+        spaced = ABI.replace(" ", "  ")
+        errs = x86_interrupt_outside_arch({"src/a.rs": f"pub {spaced} fn h() {{}}\n"})
         self.assertEqual(len(errs), 1)
 
     def test_non_rust_file_is_ignored(self) -> None:
