@@ -136,6 +136,7 @@ names, Linux values:
 | `EISDIR` | 21 | |
 | `EINVAL` | 22 | `lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the non-Linux cases in §2.1 |
 | `EMFILE` | 24 | per-process fd table full (`open`); the non-Linux cases in §2.1 |
+| `EFBIG` | 27 | a vibefs `write` that starts at or past the file-size limit, byte 2^44 − 4096 (VIBEFS.md §3) |
 | `ENAMETOOLONG` | 36 | path of 256 bytes or more; name above 64 bytes; an `execve` argv string of 256 bytes or more, which Linux accepts (ROADMAP §10.5). ROADMAP §13.9 moves the path and name limits to Linux's 4096 and 255 |
 | `ENOSYS` | 38 | unknown number |
 
@@ -164,7 +165,7 @@ F083) replaces them with one `KError` table that generates §2.
   UTF-8; Linux hands a path's bytes to the filesystem and accepts any
   argument byte but NUL (ROADMAP §10.4)
 - `dup` with a full fd table returns `EBADF` (Linux `EMFILE`) (ROADMAP §10.4)
-- `ENFILE`, `EFBIG`, `ENOSPC`, `ESPIPE`, `ENOTEMPTY`, and `ELOOP` are not
+- `ENFILE`, `ENOSPC`, `ESPIPE`, `ENOTEMPTY`, and `ELOOP` are not
   defined in `src/syscall.rs` (F083; ROADMAP §10.4)
 - `fork` near memory exhaustion panics instead of returning `ENOMEM`:
   `thread_init::spawn_inner` calls `expect` on its stack allocation. More
@@ -228,11 +229,14 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   a full open-file or fd table `open(O_TRUNC)` truncates the file and then
   fails with `EMFILE` (F057;
   ROADMAP §10.4)
-- `lseek`: any offset from 0 to `i64::MAX` is accepted, and `SEEK_END`
-  uses the 32-bit `OpenFile.size`. A vibefs `write` just below file
-  offset 2^44 makes the next access to that block panic the kernel,
-  since both Cargo profiles check overflow (DESIGN §3.5), and a write at
-  2^44 or above overwrites the file's low blocks (F008; ROADMAP §10.11)
+- `lseek`: `SEEK_END` reads the size from the file's inode (FAT's
+  counted in-core inode or the vibefs inode), so it sees writes through
+  any descriptor. On a vibefs file a resulting offset above 2^44 − 4096
+  (VIBEFS.md §3) returns `EINVAL`, as Linux's does past a filesystem's
+  maximum file size; a `write` that starts at or past the limit returns
+  `EFBIG`, and one that would cross it is cut short at the limit, as
+  Linux's is. On a FAT file any offset from 0 to `i64::MAX` is accepted
+  (F008; ROADMAP §10.11)
 - `execve`: the image is read whole and must be at most 64 KiB (`ENOMEM`)
   until ROADMAP §10.4 removes `MAX_ELF`. `p_memsz` is bounded only by
   `USER_END`, so a small ELF can map pages until physical memory runs out,
@@ -280,10 +284,14 @@ are the console mux (serial and framebuffer).
 
 A file fd names a slot in one system-wide open-file table,
 `file_init::FILES` (16 entries), shared by every process with no
-per-process quota. The slot holds the offset, size, and open flags, so fds
-that `dup` or `fork` copied share one offset. While the table is full, every
-`open` and every `execve` (which needs a slot to read the image) fails with
-`EMFILE` in every process (F057; ROADMAP §10.4).
+per-process quota, and the generation the slot had when the file was
+opened. The slot holds a reference to the file's inode (a counted
+reference to FAT's in-core inode, or a vibefs inode number), the offset,
+and the open flags, so fds that `dup` or `fork` copied share one offset,
+and separate opens of one FAT file share its size and first cluster.
+While the table is full, every `open` and every `execve` (which needs a
+slot to read the image) fails with `EMFILE` in every process (F057;
+ROADMAP §10.4).
 
 - `dup` / `dup2` copy the slot and clear `FD_CLOEXEC` on the new fd
 - `open` `O_CLOEXEC` becomes per-fd `FD_CLOEXEC`; `execve` drops those
@@ -299,14 +307,16 @@ that `dup` or `fork` copied share one offset. While the table is full, every
   reach the FAT `vibe` directory that the vibefs mount hides, and
   `/vibe/./f` returns `EINVAL` (F056, F086; ROADMAP §10.4)
 - `read`, `write`, and `lseek` copy the slot out, drop the table lock for
-  the I/O, and write the whole slot back, `refs` included, so two calls on
-  one open file that overlap lose one call's update, and a stale `refs` can
-  free a slot another descriptor still holds. They cannot overlap while
-  syscall bodies run with IF=0, every user thread runs on one CPU, and no
-  file syscall blocks. ROADMAP §10.4 keeps `refs` out of the write-back
-  before §10.6 makes syscall bodies preemptible; after that a process and
-  its `fork` child can overlap on one inherited descriptor and lose an
-  offset update until §13.1's position lock (F055)
+  the I/O, and write back only the offset. `refs` and `used` change only
+  in `addref` and `close`, under the table lock, and the `close` that
+  frees a slot bumps its generation, so a lookup or write-back through a
+  descriptor whose slot was closed and reused fails with `EBADF`. Two
+  calls on one open file that overlap still lose one call's offset update.
+  They cannot overlap while syscall bodies run with IF=0, every user
+  thread runs on one CPU, and no file syscall blocks; after §10.6 makes
+  syscall bodies preemptible a process and its `fork` child can overlap on
+  one inherited descriptor and lose an offset update until §13.1's
+  position lock (F055)
 - a kernel-side `dispatch()` probe with no process still sees `getpid=0`
   and `EBADF` for a closed fd; pointer-validation tests run as spawned
   ring-3 programs
@@ -366,7 +376,6 @@ does not meet this yet:
   TLB shootdown that another CPU sends during a write waits in
   `wait_acks`, which logs the late CPU once a second, until the write ends
   (F011; ROADMAP §10.10)
-- a vibefs `write` just below file offset 2^44 (§3.1; F008, ROADMAP §10.11)
 - an ELF with a huge `p_memsz` (§3.1; F009, ROADMAP §10.6)
 - a `fork` near memory exhaustion, or a burst of exits (§2.1; F010,
   ROADMAP §10.10)
