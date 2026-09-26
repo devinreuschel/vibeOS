@@ -43,13 +43,20 @@ why = "claim: reopened (F002)"
 
 [[box]]
 key = "vibefs survives injected power loss during a write"
-needs = ["the vibefs crash test can fail"]
-why = "claim: reopened (F014, F080); the crash test must be able to fail"
+needs = [
+  "the vibefs crash test can fail",
+  "vibefs `commit` calls `mark_meta` on",  # L1493
+]
+why = "claim: reopened (F014, F080); the crash test must be able to fail; claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 [[box]]
 key = "crash consistency testing by killing QEMU at randomized points"
-needs = ["the vibefs crash test can fail"]
-why = "claim: reopened (F014, F080)"
+needs = [
+  "the vibefs crash test can fail",
+  "a volatile-cache device, the backend",  # L1250
+  "the block layer keeps only",  # L1485
+]
+why = "claim: reopened (F014, F080); claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 [[box]]
 key = "flush ordering that does not leave a directory entry pointing at unallocated clusters"
@@ -128,8 +135,10 @@ key = "the vibefs crash test can fail"
 needs = [
   "vibefs `commit` calls `mark_meta` on every",
   "vibefs `commit` writes an alloc-map block",
+  "a volatile-cache device, the backend",  # L1250
+  "the block layer keeps only",  # L1485
 ]
-why = "text: lands with §10.11's commit-leak fixes"
+why = "text: lands with §10.11's commit-leak fixes; claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
 [[box]]
 key = "`BootCell<T>` is `Sync` only when"
