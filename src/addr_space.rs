@@ -10,6 +10,7 @@ use crate::paging::{
     PTES_PER_TABLE, PageFlags, PageSize, PhysAddr, Probe, USER_END, VirtAddr, is_canonical,
     user_leaf_flags,
 };
+use crate::pmm::Frames;
 
 pub use crate::limits::MAX_REGIONS;
 
@@ -116,22 +117,25 @@ struct Counting<'a, A: FrameAlloc> {
 }
 
 unsafe impl<A: FrameAlloc> FrameAlloc for Counting<'_, A> {
-    fn alloc_frame(&mut self) -> Option<PhysAddr> {
-        let p = self.inner.alloc_frame()?;
+    fn alloc_frame(&mut self) -> Option<Frames> {
+        let f = self.inner.alloc_frame()?;
         *self.n += 1;
-        Some(p)
+        Some(f)
     }
 }
 
 impl AddressSpace {
     /// New PML4, kernel half shared from `kernel`. `alloc` supplies the
-    /// PML4 frame. `pt_frames` starts at 1 (the root).
+    /// PML4 frame, whose token the mapper holds until [`teardown`] frees
+    /// it last. `pt_frames` starts at 1 (the root).
+    ///
+    /// [`teardown`]: AddressSpace::teardown
     ///
     /// # Safety
     /// `kernel` is the live kernel mapper. `alloc` returns owned frames
     /// reachable through `kernel.hhdm_offset()`.
     pub unsafe fn new<A: FrameAlloc>(kernel: &Mapper, alloc: &mut A) -> Option<Self> {
-        let root = alloc.alloc_frame()?;
+        let root = PhysAddr(alloc.alloc_frame()?.into_entry());
         let mapper = unsafe { Mapper::new(root, kernel.hhdm_offset()) };
         unsafe { mapper.zero_frame(root) };
         let mut space = Self {
@@ -195,7 +199,9 @@ impl AddressSpace {
                     inner: &mut *alloc,
                     n: &mut n,
                 };
-                c.alloc_frame().ok_or(AsError::OutOfFrames)?
+                // The leaf's token moves into the entry `map_page` writes;
+                // `unmap_free` and `teardown` take it back.
+                PhysAddr(c.alloc_frame().ok_or(AsError::OutOfFrames)?.into_entry())
             };
             extra += n;
             let mut n_pt = 0usize;
@@ -217,8 +223,10 @@ impl AddressSpace {
             };
             extra += n_pt;
             if let Err(e) = map_rc {
-                let _ = unsafe { self.mapper.unmap_page(page_va) };
-                unsafe { alloc.free_frame(pa) };
+                // SAFETY: `pa` is the order-0 `into_entry` above, and a
+                // failed `map_page` writes no leaf, so no entry holds it (the
+                // contract `pmm::Frames::from_entry` states, met here).
+                alloc.free_frame(unsafe { Frames::from_entry(pa.as_u64(), 0) });
                 let _ = unsafe { self.unmap_free(va, mapped, alloc) };
                 return Err(match e {
                     MapError::OutOfFrames => AsError::OutOfFrames,
@@ -240,18 +248,27 @@ impl AddressSpace {
         Ok(())
     }
 
-    /// Free every user leaf + user PT page + the PML4. Kernel-half
-    /// PDPTs are not touched. `free` must return frames to `alloc`.
+    /// Free every user leaf + user PT page + the PML4, the root last.
+    /// Kernel-half PDPTs are not touched. `free` must return frames to
+    /// `alloc`.
     ///
     /// # Safety
-    /// `free` may only be called with frames this space still owns.
+    /// The root is not loaded in any CR3, and nothing uses this space
+    /// again after it returns.
     pub unsafe fn teardown<F>(&mut self, free: &mut F) -> TeardownStats
     where
-        F: FnMut(PhysAddr),
+        F: FnMut(Frames),
     {
+        // SAFETY: every user-half entry holds a token `map_page` (tables)
+        // or `map_anon` (leaves) consumed with `into_entry`, as
+        // `paging::Mapper::free_user_half` requires; established by
+        // `addr_space::AddressSpace::map_anon`.
         let walked = unsafe { self.mapper.free_user_half(free) };
-        let pml4 = self.mapper.root();
-        free(pml4);
+        // SAFETY: `AddressSpace::new` consumed the root's order-0 token
+        // into this mapper, and this space is not used again (this fn's
+        // `# Safety`), so the mapper's reference is the entry being
+        // cleared (the contract `pmm::Frames::from_entry` states).
+        free(unsafe { Frames::from_entry(self.mapper.root().as_u64(), 0) });
         let stats = TeardownStats {
             user_frames: walked.leaves,
             pt_frames: walked.tables + 1,
@@ -416,14 +433,12 @@ fn check_map_range(va: u64, len: u64) -> Result<(), AsError> {
     Ok(())
 }
 
-/// Allocator that can return frames. Kernel buddy and host tests.
+/// Allocator that can take frames back. Kernel buddy and host tests.
 ///
 /// # Safety
-/// `free_frame` may only be called with a frame the caller still owns.
+/// `free_frame` returns the token to the allocator that handed it out.
 pub unsafe trait FrameFree {
-    /// # Safety
-    /// `pa` is an owned frame this allocator may recycle.
-    unsafe fn free_frame(&mut self, pa: PhysAddr);
+    fn free_frame(&mut self, f: Frames);
 }
 
 impl AddressSpace {
@@ -442,7 +457,10 @@ impl AddressSpace {
             let page = VirtAddr(va + off);
             match unsafe { self.mapper.unmap_page(page) } {
                 Some((pa, PageSize::Size4K)) => {
-                    unsafe { pool.free_frame(pa) };
+                    // SAFETY: `unmap_page` just cleared this user leaf, which
+                    // held an order-0 token `map_anon` consumed into it
+                    // (the contract `pmm::Frames::from_entry` states).
+                    pool.free_frame(unsafe { Frames::from_entry(pa.as_u64(), 0) });
                     self.user_frames = self.user_frames.saturating_sub(1);
                 }
                 Some((_, PageSize::Size2M)) => {
@@ -459,7 +477,7 @@ impl AddressSpace {
     /// # Safety
     /// `pool` may recycle every user/PT/PML4 frame this space still owns.
     pub unsafe fn teardown_pool<A: FrameFree>(&mut self, pool: &mut A) -> TeardownStats {
-        let mut free = |pa: PhysAddr| unsafe { pool.free_frame(pa) };
+        let mut free = |f: Frames| pool.free_frame(f);
         unsafe { self.teardown(&mut free) }
     }
 
@@ -502,6 +520,14 @@ impl AddressSpace {
     }
 }
 
+// Host tests give frames back to the shared buddy pool.
+#[cfg(test)]
+unsafe impl FrameFree for crate::pmm::testing::Pool {
+    fn free_frame(&mut self, f: Frames) {
+        self.buddy.free(f);
+    }
+}
+
 const _: () = {
     assert!(KERNEL_PML4_FIRST == 256);
     assert!(PTES_PER_TABLE == 512);
@@ -511,83 +537,27 @@ const _: () = {
 mod tests {
     use super::*;
     use crate::paging::{PTE_ADDR_MASK, UserFreeStats, physmap_flags};
-    use std::vec;
-    use std::vec::Vec;
+    use crate::pmm::testing::Pool;
 
-    struct TestPool {
-        _mem: Vec<u64>,
-        hhdm_offset: u64,
-        next_frame: u64,
-        end: u64,
-        live: Vec<u64>,
-        recycled: Vec<u64>,
+    /// Frames the pool has handed out and not had back.
+    fn used(pool: &Pool) -> usize {
+        let s = pool.buddy.stats();
+        s.total_frames - s.free_frames
     }
 
-    impl TestPool {
-        fn new(frames: usize) -> Self {
-            let words = (frames * PAGE_SIZE_4K as usize) / 8;
-            let mem: Vec<u64> = vec![0u64; words];
-            let ptr = mem.as_ptr() as u64;
-            let phys_base = 0x0200_0000;
-            let hhdm_offset = ptr.wrapping_sub(phys_base);
-            Self {
-                _mem: mem,
-                hhdm_offset,
-                next_frame: phys_base,
-                end: phys_base + (frames as u64) * PAGE_SIZE_4K,
-                live: Vec::new(),
-                recycled: Vec::new(),
-            }
-        }
-
-        fn live_count(&self) -> usize {
-            self.live.len()
-        }
-    }
-
-    unsafe impl FrameAlloc for TestPool {
-        fn alloc_frame(&mut self) -> Option<PhysAddr> {
-            let p = if let Some(p) = self.recycled.pop() {
-                p
-            } else {
-                if self.next_frame >= self.end {
-                    return None;
-                }
-                let p = self.next_frame;
-                self.next_frame += PAGE_SIZE_4K;
-                p
-            };
-            self.live.push(p);
-            Some(PhysAddr(p))
-        }
-    }
-
-    unsafe impl FrameFree for TestPool {
-        /// # Safety
-        /// `pa` is a frame this pool handed out and has not freed.
-        unsafe fn free_frame(&mut self, pa: PhysAddr) {
-            let p = pa.as_u64();
-            let i = self
-                .live
-                .iter()
-                .position(|x| *x == p)
-                .expect("double free or wild free");
-            self.live.swap_remove(i);
-            self.recycled.push(p);
-        }
-    }
-
-    fn kernel_mapper(pool: &mut TestPool) -> Mapper {
-        let root = pool.alloc_frame().unwrap();
-        let mapper = unsafe { Mapper::new(root, pool.hhdm_offset) };
+    /// The root's token moves into the mapper, which is never torn down.
+    fn kernel_mapper(pool: &mut Pool) -> Mapper {
+        let root = PhysAddr(pool.alloc_frame().unwrap().into_entry());
+        let mapper = unsafe { Mapper::new(root, pool.hhdm()) };
         unsafe { mapper.zero_frame(root) };
         mapper
     }
 
     #[test]
     fn null_guard_and_kernel_rejected() {
-        let mut pool = TestPool::new(64);
+        let mut pool = Pool::new(64);
         let kernel = kernel_mapper(&mut pool);
+        let before = used(&pool);
         let mut aspace = unsafe { AddressSpace::new(&kernel, &mut pool) }.unwrap();
         assert_eq!(
             unsafe { aspace.map_anon(0, PAGE_SIZE_4K, UserPerms::RW, &mut pool) },
@@ -609,11 +579,12 @@ mod tests {
             Err(AsError::KernelRange)
         );
         unsafe { aspace.teardown_pool(&mut pool) };
+        assert_eq!(used(&pool), before);
     }
 
     #[test]
     fn map_unmap_teardown_balances_frames() {
-        let mut pool = TestPool::new(128);
+        let mut pool = Pool::new(128);
         let mut kernel = kernel_mapper(&mut pool);
         let kva = VirtAddr(0xFFFF_C000_0010_0000);
         unsafe {
@@ -628,7 +599,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let before = pool.live_count();
+        let before = used(&pool);
         let mut aspace = unsafe { AddressSpace::new(&kernel, &mut pool) }.unwrap();
         assert_eq!(
             aspace.mapper().pml4_entry(KERNEL_PML4_FIRST),
@@ -656,14 +627,15 @@ mod tests {
         let st = unsafe { aspace.teardown_pool(&mut pool) };
         assert_eq!(st.user_frames, 0);
         assert!(st.pt_frames >= 1);
-        assert_eq!(pool.live_count(), before);
+        assert_eq!(used(&pool), before);
         assert!(kernel.translate(kva).is_some());
     }
 
     #[test]
     fn user_ptr_helpers() {
-        let mut pool = TestPool::new(64);
+        let mut pool = Pool::new(64);
         let kernel = kernel_mapper(&mut pool);
+        let before = used(&pool);
         let mut aspace = unsafe { AddressSpace::new(&kernel, &mut pool) }.unwrap();
         let va = 0x0000_0000_0040_0000u64;
         unsafe {
@@ -700,6 +672,7 @@ mod tests {
         assert_eq!(aspace.write_bytes(0, b"x"), Err(UserMemError::NullGuard));
         let _ = UserMemError::Kernel.errno();
         unsafe { aspace.teardown_pool(&mut pool) };
+        assert_eq!(used(&pool), before);
         let _ = PTE_ADDR_MASK;
         let _ = UserFreeStats {
             leaves: 0,
@@ -709,8 +682,9 @@ mod tests {
 
     #[test]
     fn clone_anon_copies_bytes_not_frames() {
-        let mut pool = TestPool::new(128);
+        let mut pool = Pool::new(128);
         let kernel = kernel_mapper(&mut pool);
+        let before = used(&pool);
         let mut src = unsafe { AddressSpace::new(&kernel, &mut pool) }.unwrap();
         let va = 0x0000_0000_0040_0000u64;
         unsafe {
@@ -731,11 +705,12 @@ mod tests {
             let mut dst = dst;
             dst.teardown_pool(&mut pool);
         }
+        assert_eq!(used(&pool), before);
     }
 
     #[test]
     fn kernel_half_not_owned() {
-        let mut pool = TestPool::new(64);
+        let mut pool = Pool::new(64);
         let mut kernel = kernel_mapper(&mut pool);
         unsafe {
             kernel
@@ -749,12 +724,15 @@ mod tests {
                 )
                 .unwrap();
         }
+        let before = used(&pool);
         let mut aspace = unsafe { AddressSpace::new(&kernel, &mut pool) }.unwrap();
         assert_eq!(
             aspace.mapper().pml4_entry(256) & PTE_ADDR_MASK,
             kernel.pml4_entry(256) & PTE_ADDR_MASK
         );
         unsafe { aspace.teardown_pool(&mut pool) };
+        // The shared kernel-half tables stay allocated; only the root went.
+        assert_eq!(used(&pool), before);
         assert!(kernel.translate(VirtAddr(0xFFFF_8000_0020_0000)).is_some());
     }
 
@@ -779,7 +757,7 @@ mod tests {
 
     #[test]
     fn fixed_tables_match_limits() {
-        let mut pool = TestPool::new(64);
+        let mut pool = Pool::new(64);
         let kernel = kernel_mapper(&mut pool);
         let aspace = unsafe { AddressSpace::new(&kernel, &mut pool) }.unwrap();
         assert_eq!(aspace.regions.len(), crate::limits::MAX_REGIONS);

@@ -1734,14 +1734,17 @@ lists, and the resulting crash happens later, somewhere unrelated. This is exact
 get guard pages.
 
 ```rust
-pmm_init::with_buddy(|b| ..)                       // the global `Buddy`, RANK_BUDDY, IRQ-off
-const Buddy::new(hhdm: u64) -> Buddy               // free-list nodes at phys + hhdm
-Buddy::allocate_frame() -> Option<PhysAddr>        // order 0
-Buddy::allocate(order: u8) -> Option<PhysAddr>     // order <= MAX_ORDER (10)
-Buddy::allocate_constrained(bytes, align, boundary) -> Option<(PhysAddr, u8)>  // DMA, §4.7
-unsafe Buddy::deallocate_frame(pa: PhysAddr)
-unsafe Buddy::deallocate(pa: PhysAddr, order: u8)  // asserts alignment and no double free
-Buddy::stats() -> PmmStats                         // total, free, largest free order
+pmm_init::with_buddy(|b| ..)                   // the global `Buddy`, RANK_BUDDY, IRQ-off
+const Buddy::new(hhdm: u64) -> Buddy           // free-list nodes at phys + hhdm
+Buddy::alloc(order: u8) -> Option<Frames>      // order <= MAX_ORDER (10)
+Buddy::alloc_constrained(order, max_phys) -> Option<Frames>  // ends at or below max_phys
+Buddy::free(f: Frames)                         // safe
+Buddy::order_for(bytes, align) -> Option<u8>   // DMA sizing, §4.7
+Buddy::stats() -> PmmStats                     // total, free, largest free order
+Frames::base() -> PhysAddr, order() -> u8, count() -> usize
+Frames::into_entry(self) -> PhysAddr           // ownership moves into a page-table entry
+unsafe Frames::from_entry(pa, order) -> Frames // only after clearing that entry
+pmm::leaked_frames() -> usize                  // dropped tokens; `meminfo` prints it
 ```
 
 Initialization walks the Limine memory map and ingests every `USABLE` region as power-of-two aligned
@@ -1817,8 +1820,8 @@ naming the allocation site. `GuardedStack`, `DmaBuffer`, the `vmap` handle, and 
 `Frames` they were built from. A frame that a page-table entry maps, a user leaf or a table page, is
 consumed into that entry, which is its owner record until §4.6's frame metadata exists, and only the
 page-table code that removes the entry takes it back, through an `unsafe fn` whose safety comment
-names the entry. Rule; not yet enforced: the API above hands out and takes back `PhysAddr`, so safe
-code can free a frame it does not own (ROADMAP §10.3, F018).
+names the entry. Not yet built: the `vmap` handle (ROADMAP §10.3); until it lands, `kva_init::vmap`
+takes `&[PhysAddr]` and its caller keeps the frames' tokens.
 
 ## 4.3 Page tables
 

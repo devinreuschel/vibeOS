@@ -292,8 +292,8 @@ impl Buddy {
     #[track_caller]
     #[must_use]
     pub fn alloc(&mut self, order: u8) -> Option<Frames> {
-        let base = self.allocate(order)?;
-        // SAFETY: `allocate` returned a block of `order <= MAX_ORDER`
+        let base = self.take_block(order)?;
+        // SAFETY: `take_block` returned a block of `order <= MAX_ORDER`
         // aligned to its size, and frame 0 never enters the buddy
         // (invariant I15, established at `pmm::Buddy::insert_region`).
         Some(unsafe { Frames::new(base, order) })
@@ -364,10 +364,10 @@ impl Buddy {
         unsafe { self.deallocate(base, order) };
     }
 
-    /// Allocate a block of `order`. Splits down from a larger order if
-    /// none is available at `order` directly. Returns `None` on
-    /// exhaustion.
-    pub fn allocate(&mut self, order: u8) -> Option<PhysAddr> {
+    /// Take a block of `order` off the free lists, splitting down from a
+    /// larger order if none is free at `order` directly. `None` on
+    /// exhaustion. [`Buddy::alloc`] wraps the block in its token.
+    fn take_block(&mut self, order: u8) -> Option<PhysAddr> {
         let target = order as usize;
         if target > MAX_ORDER {
             return None;
@@ -390,13 +390,13 @@ impl Buddy {
     }
 
     /// Free a previously-allocated block at `order`. Coalesces with its
-    /// buddy up to `MAX_ORDER`.
+    /// buddy up to `MAX_ORDER`. [`Buddy::free`] is the only caller.
     ///
     /// # Safety
-    /// Caller must have previously received `phys` from `allocate(order)`
-    /// and not yet freed it. Panics on double-free at the same order or on
+    /// `phys` is a block of `order` this buddy handed out and has not yet
+    /// taken back. Panics on double-free at the same order or on
     /// misalignment.
-    pub unsafe fn deallocate(&mut self, mut phys: PhysAddr, mut order: u8) {
+    unsafe fn deallocate(&mut self, mut phys: PhysAddr, mut order: u8) {
         assert!(
             (order as usize) <= MAX_ORDER,
             "pmm: order {order} > MAX_ORDER"
@@ -428,19 +428,6 @@ impl Buddy {
         unsafe { self.push_free(phys, order) };
     }
 
-    /// Convenience: order-0 allocation.
-    pub fn allocate_frame(&mut self) -> Option<PhysAddr> {
-        self.allocate(0)
-    }
-
-    /// Convenience: order-0 free.
-    ///
-    /// # Safety
-    /// Same contract as [`Buddy::deallocate`].
-    pub unsafe fn deallocate_frame(&mut self, phys: PhysAddr) {
-        unsafe { self.deallocate(phys, 0) }
-    }
-
     /// Order whose block covers `bytes` and is aligned to `align`.
     pub fn order_for(bytes: u64, align: u64) -> Option<u8> {
         if bytes == 0 {
@@ -463,41 +450,6 @@ impl Buddy {
         } else {
             Some(order)
         }
-    }
-
-    /// Allocate a block that does not straddle `boundary` (0 = none).
-    pub fn allocate_constrained(
-        &mut self,
-        bytes: u64,
-        align: u64,
-        boundary: u64,
-    ) -> Option<(PhysAddr, u8)> {
-        let order = Self::order_for(bytes, align)?;
-        if boundary != 0 && !boundary.is_power_of_two() {
-            return None;
-        }
-        const MAX_TRY: usize = 16;
-        let mut stash = [0u64; MAX_TRY];
-        let mut n = 0usize;
-        let mut found = None;
-        while n < MAX_TRY {
-            let Some(phys) = self.allocate(order) else {
-                break;
-            };
-            let ok_align = align <= 1 || phys & (align - 1) == 0;
-            if ok_align && !crosses_boundary(phys, bytes, boundary) {
-                found = Some((phys, order));
-                break;
-            }
-            stash[n] = phys;
-            n += 1;
-        }
-        let mut i = 0usize;
-        while i < n {
-            unsafe { self.deallocate(stash[i], order) };
-            i += 1;
-        }
-        found
     }
 
     // ------------------ private helpers ------------------
@@ -661,6 +613,11 @@ pub(crate) mod testing {
                 phys_end,
                 buddy,
             }
+        }
+
+        /// The offset the pool's `Buddy` was built with.
+        pub(crate) fn hhdm(&self) -> u64 {
+            self.buddy.hhdm_offset()
         }
 
         pub(crate) fn contains(&self, phys: PhysAddr) -> bool {
@@ -988,20 +945,15 @@ mod tests {
         assert!(Buddy::order_for(0, PAGE_SIZE).is_none());
         assert!(crosses_boundary(0xFFFF_F800, 0x1000, 1u64 << 32));
         assert!(!crosses_boundary(0x1000, 0x1000, 1u64 << 32));
-        let mut p = Pool::new(64);
-        let (phys, order) = p
-            .buddy
-            .allocate_constrained(0x1000, 0x2000, 1u64 << 32)
-            .unwrap();
+        // A 4 KiB request aligned to 8 KiB is an order-1 block; the
+        // boundary rule lives in `dma::DmaAlloc::order`.
+        let order = Buddy::order_for(0x1000, 0x2000).unwrap();
         assert_eq!(order, 1);
-        assert_eq!(phys & 0x1FFF, 0);
-        unsafe { p.buddy.deallocate(phys, order) };
-        // 4K request with a 2K boundary always straddles: refuse.
-        assert!(
-            p.buddy
-                .allocate_constrained(0x1000, PAGE_SIZE, 0x800)
-                .is_none()
-        );
+        let mut p = Pool::new(64);
+        let f = p.buddy.alloc_constrained(order, 1u64 << 32).unwrap();
+        assert_eq!(f.base() & 0x1FFF, 0);
+        assert!(!crosses_boundary(f.base(), 0x1000, 1u64 << 32));
+        p.buddy.free(f);
         assert_eq!(p.buddy.stats().free_frames, 64);
     }
 }
