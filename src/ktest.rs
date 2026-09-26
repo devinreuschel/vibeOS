@@ -381,14 +381,16 @@ fn registry_tid() -> ThreadId {
 /// Start the registry on its own kernel thread, pinned to CPU 0, and park
 /// the bootstrap thread for good (DESIGN §8.2).
 pub fn run() -> ! {
-    thread_init::spawn_opts(
+    if let Err(e) = thread_init::spawn_opts(
         REGISTRY_NAME,
         registry_main,
         thread_init::SpawnOpts {
             stack_pages: REGISTRY_STACK_PAGES,
             cpu: Some(0),
         },
-    );
+    ) {
+        panic!("ktest: registry thread: {}", e.as_str());
+    }
     loop {
         thread_init::park(None);
     }
@@ -458,6 +460,9 @@ const SETTLE_MS: u64 = 2_000;
 /// takes only an empty slot, and `failed_ap_cleanup` calls it twice.
 const EMPTY_SLOT_RESERVE: usize = 2;
 
+/// Set once [`quiesce_frames`] has run; it runs once per boot.
+static WARMED: AtomicBool = AtomicBool::new(false);
+
 /// Shared setup before the first frame-accounting test (ROADMAP §10.2,
 /// F074): after it, `free_frames()` moves only for what a test itself
 /// allocates and frees, so the tests compare against a quiescent baseline
@@ -474,7 +479,10 @@ const EMPTY_SLOT_RESERVE: usize = 2;
 /// [`EMPTY_SLOT_RESERVE`], with threads that exit at once, so later spawns
 /// reuse Dead boxes; and walk KVA through two coalesces with the timer on,
 /// so the free list starts again at VA the walk mapped.
-fn quiesce_frames() {
+pub(crate) fn quiesce_frames() {
+    if WARMED.swap(true, Ordering::AcqRel) {
+        return;
+    }
     if !settle_threads() {
         crate::marker!("vibeOS: ktest:   warm-up: threads did not settle");
     }
@@ -492,7 +500,9 @@ fn quiesce_frames() {
         let _g = x86::InterruptGuard::enter();
         let mut i = 0;
         while i < empty {
-            thread_init::spawn_here("warm", dying_entry);
+            if thread_init::spawn_here("warm", dying_entry).is_err() {
+                break;
+            }
             i += 1;
         }
     }
@@ -533,7 +543,7 @@ fn warm_kva() -> (usize, usize) {
 /// With the timer on, sleep until no thread but this one and the idle
 /// threads is Ready or Running, then drain the deferred stacks. False if
 /// that takes longer than [`SETTLE_MS`].
-fn settle_threads() -> bool {
+pub(crate) fn settle_threads() -> bool {
     let me = thread_init::current_id();
     let t0 = time_init::uptime_ms();
     let settled = loop {
@@ -600,11 +610,17 @@ pub(crate) fn catch_alloc_error<F: FnOnce()>(f: F) -> bool {
 // updates its helper here (DESIGN §8.2).
 
 pub(crate) fn spawn_thread(name: &'static str, entry: fn()) -> ThreadHandle {
-    thread_init::spawn(name, entry)
+    match thread_init::spawn(name, entry) {
+        Ok(h) => h,
+        Err(e) => panic!("ktest: spawn {name}: {}", e.as_str()),
+    }
 }
 
 pub(crate) fn spawn_thread_on(name: &'static str, entry: fn(), cpu: u32) -> ThreadHandle {
-    thread_init::spawn_on(name, entry, cpu)
+    match thread_init::spawn_on(name, entry, cpu) {
+        Ok(h) => h,
+        Err(e) => panic!("ktest: spawn {name} on cpu{cpu}: {}", e.as_str()),
+    }
 }
 
 /// Blocks the frame helpers handed out, as the `Frames` that own them.
@@ -1859,7 +1875,9 @@ fn test_spawn_sentinel() -> Outcome {
     let _g = x86::InterruptGuard::enter();
     SENTINEL.store(0, Ordering::SeqCst);
     let nest0 = per_cpu_init::irq_nest();
-    let h = thread_init::spawn_here("sentinel", sentinel_entry);
+    let Ok(h) = thread_init::spawn_here("sentinel", sentinel_entry) else {
+        return Outcome::Fail("spawn");
+    };
     if h.id() == ThreadId::BOOTSTRAP {
         return Outcome::Fail("spawned bootstrap id");
     }
@@ -1901,8 +1919,12 @@ fn test_switch_two_threads() -> Outcome {
     let _g = x86::InterruptGuard::enter();
     STEPS.store(0, Ordering::SeqCst);
     let nest0 = per_cpu_init::irq_nest();
-    let a = thread_init::spawn_here("a", thread_a);
-    let b = thread_init::spawn_here("b", thread_b);
+    let Ok(a) = thread_init::spawn_here("a", thread_a) else {
+        return Outcome::Fail("spawn");
+    };
+    let Ok(b) = thread_init::spawn_here("b", thread_b) else {
+        return Outcome::Fail("spawn");
+    };
     A_ID.store(a.id().raw(), Ordering::SeqCst);
     B_ID.store(b.id().raw(), Ordering::SeqCst);
     thread_init::switch_to(a.id());
@@ -2005,7 +2027,9 @@ fn yielder_entry() {
 fn test_yield_now_switches() -> Outcome {
     let _g = x86::InterruptGuard::enter();
     YIELD_FLAG.store(0, Ordering::SeqCst);
-    let _h = thread_init::spawn_here("yielder", yielder_entry);
+    let Ok(_h) = thread_init::spawn_here("yielder", yielder_entry) else {
+        return Outcome::Fail("spawn");
+    };
     thread_init::yield_now();
     if YIELD_FLAG.load(Ordering::SeqCst) != 1 {
         return Outcome::Fail("yielder did not run");
@@ -2057,8 +2081,12 @@ fn test_preempt_two_threads() -> Outcome {
     PREEMPT_A.store(0, Ordering::SeqCst);
     PREEMPT_B.store(0, Ordering::SeqCst);
     PREEMPT_STOP.store(false, Ordering::SeqCst);
-    let _a = thread_init::spawn("preempt-a", preempt_a);
-    let _b = thread_init::spawn("preempt-b", preempt_b);
+    let Ok(_a) = thread_init::spawn("preempt-a", preempt_a) else {
+        return Outcome::Fail("spawn");
+    };
+    let Ok(_b) = thread_init::spawn("preempt-b", preempt_b) else {
+        return Outcome::Fail("spawn");
+    };
     let t0 = time_init::uptime_ms();
     loop {
         let a = PREEMPT_A.load(Ordering::Relaxed);
@@ -2098,7 +2126,9 @@ fn dying_entry() {}
 fn test_reap_returns_frames() -> Outcome {
     let _g = x86::InterruptGuard::enter();
     let before = free_frames();
-    let h = thread_init::spawn_here("dying", dying_entry);
+    let Ok(h) = thread_init::spawn_here("dying", dying_entry) else {
+        return Outcome::Fail("spawn");
+    };
     thread_init::yield_now();
     if thread_init::current_id() != registry_tid() {
         return Outcome::Fail("did not return to the registry");
@@ -2124,7 +2154,10 @@ fn test_reap_many_via_idle() -> Outcome {
     // from_irq resume skips reap; the idle loop must drain.
     let mut i = 0;
     while i < REAP_MANY {
-        ids[i] = thread_init::spawn_here("dying", dying_entry).id();
+        let Ok(h) = thread_init::spawn_here("dying", dying_entry) else {
+            return Outcome::Fail("spawn");
+        };
+        ids[i] = h.id();
         i += 1;
     }
     thread_init::sleep_ms(30);
@@ -2140,7 +2173,10 @@ fn test_reap_many_via_idle() -> Outcome {
     // yield_now no-switch must drain.
     i = 0;
     while i < REAP_MANY {
-        ids[i] = thread_init::spawn_here("dying", dying_entry).id();
+        let Ok(h) = thread_init::spawn_here("dying", dying_entry) else {
+            return Outcome::Fail("spawn");
+        };
+        ids[i] = h.id();
         i += 1;
     }
     let t0 = time_init::uptime_ms();
@@ -2188,8 +2224,12 @@ fn mutex_worker() {
 fn test_blocking_mutex_counter() -> Outcome {
     MUTEX_DONE.store(0, Ordering::SeqCst);
     *COUNTER.lock() = 0;
-    let _a = thread_init::spawn("mu-a", mutex_worker);
-    let _b = thread_init::spawn("mu-b", mutex_worker);
+    let Ok(_a) = thread_init::spawn("mu-a", mutex_worker) else {
+        return Outcome::Fail("spawn");
+    };
+    let Ok(_b) = thread_init::spawn("mu-b", mutex_worker) else {
+        return Outcome::Fail("spawn");
+    };
     let t0 = time_init::uptime_ms();
     loop {
         if MUTEX_DONE.load(Ordering::SeqCst) == 2 {
@@ -2225,8 +2265,12 @@ fn test_rwlock_exclusion() -> Outcome {
     *RW.write() = 0;
     {
         let r = RW.read();
-        let _a = thread_init::spawn("rw-a", rw_writer);
-        let _b = thread_init::spawn("rw-b", rw_writer);
+        let Ok(_a) = thread_init::spawn("rw-a", rw_writer) else {
+            return Outcome::Fail("spawn");
+        };
+        let Ok(_b) = thread_init::spawn("rw-b", rw_writer) else {
+            return Outcome::Fail("spawn");
+        };
         thread_init::yield_now();
         thread_init::sleep_ms(5);
         if RW_DONE.load(Ordering::SeqCst) != 0 {
@@ -2275,10 +2319,14 @@ fn test_rwlock_writer_timeout() -> Outcome {
     RW_RD_GOT.store(0, Ordering::SeqCst);
     *RW_TO.write() = 0;
     let r = RW_TO.read();
-    let _w = thread_init::spawn("rw-to-w", rw_timeout_writer);
+    let Ok(_w) = thread_init::spawn("rw-to-w", rw_timeout_writer) else {
+        return Outcome::Fail("spawn");
+    };
     thread_init::yield_now();
     thread_init::sleep_ms(5);
-    let _rd = thread_init::spawn("rw-to-r", rw_pref_reader);
+    let Ok(_rd) = thread_init::spawn("rw-to-r", rw_pref_reader) else {
+        return Outcome::Fail("spawn");
+    };
     thread_init::yield_now();
     thread_init::sleep_ms(40);
     if RW_WR_OUT.load(Ordering::SeqCst) != 1 {
@@ -2309,8 +2357,12 @@ fn sem_waiter() {
 
 fn test_semaphore_wake() -> Outcome {
     SEM_N.store(0, Ordering::SeqCst);
-    let _a = thread_init::spawn("sem-a", sem_waiter);
-    let _b = thread_init::spawn("sem-b", sem_waiter);
+    let Ok(_a) = thread_init::spawn("sem-a", sem_waiter) else {
+        return Outcome::Fail("spawn");
+    };
+    let Ok(_b) = thread_init::spawn("sem-b", sem_waiter) else {
+        return Outcome::Fail("spawn");
+    };
     thread_init::yield_now();
     thread_init::sleep_ms(5);
     if SEM_N.load(Ordering::SeqCst) != 0 {
@@ -2345,7 +2397,9 @@ fn cv_waiter() {
 fn test_condvar_signal() -> Outcome {
     CV_DONE.store(false, Ordering::SeqCst);
     *CM.lock() = false;
-    let _h = thread_init::spawn("cv", cv_waiter);
+    let Ok(_h) = thread_init::spawn("cv", cv_waiter) else {
+        return Outcome::Fail("spawn");
+    };
     thread_init::sleep_ms(10);
     {
         let mut g = CM.lock();
@@ -2380,7 +2434,9 @@ fn test_condvar_wait_releases() -> Outcome {
     CVREL_WAITING.store(false, Ordering::SeqCst);
     CVREL_DONE.store(false, Ordering::SeqCst);
     *CVREL_M.lock() = 0;
-    let _h = thread_init::spawn("cvrel", cvrel_waiter);
+    let Ok(_h) = thread_init::spawn("cvrel", cvrel_waiter) else {
+        return Outcome::Fail("spawn");
+    };
     let t0 = time_init::uptime_ms();
     loop {
         if CVREL_WAITING.load(Ordering::SeqCst) {
@@ -2423,7 +2479,9 @@ fn ch_consumer() {
 
 fn test_channel_mpsc() -> Outcome {
     CH_SUM.store(0, Ordering::SeqCst);
-    let _c = thread_init::spawn("ch-rx", ch_consumer);
+    let Ok(_c) = thread_init::spawn("ch-rx", ch_consumer) else {
+        return Outcome::Fail("spawn");
+    };
     let mut i = 1u64;
     while i <= 32 {
         CH.send(i);
@@ -2460,7 +2518,9 @@ fn timeout_waiter() {
 fn test_mutex_deadline() -> Outcome {
     TM_OUT.store(0, Ordering::SeqCst);
     let g = TM.lock();
-    let _h = thread_init::spawn("tm", timeout_waiter);
+    let Ok(_h) = thread_init::spawn("tm", timeout_waiter) else {
+        return Outcome::Fail("spawn");
+    };
     thread_init::sleep_ms(40);
     if TM_OUT.load(Ordering::SeqCst) != 1 {
         drop(g);
@@ -2548,7 +2608,9 @@ const SPAWN_EXIT_WARMUP: usize = 256;
 
 fn spawn_until_dead(name: &'static str) -> Outcome {
     let _g = x86::InterruptGuard::enter();
-    let h = thread_init::spawn_here(name, dying_entry);
+    let Ok(h) = thread_init::spawn_here(name, dying_entry) else {
+        return Outcome::Fail("spawn");
+    };
     thread_init::yield_now();
     if thread_init::try_state(h.id()) != Some(ThreadState::Dead) {
         thread_init::yield_now();
@@ -2645,7 +2707,9 @@ fn test_cross_cpu_spawn() -> Outcome {
     };
     XCPU_FLAG.store(0, Ordering::SeqCst);
     XCPU_CPU.store(0xFFFF, Ordering::SeqCst);
-    let h = thread_init::spawn_on("xcpu", xcpu_entry, ap);
+    let Ok(h) = thread_init::spawn_on("xcpu", xcpu_entry, ap) else {
+        return Outcome::Fail("spawn");
+    };
     if !spin_until_ns(|| XCPU_FLAG.load(Ordering::SeqCst) != 0, 500_000_000) {
         return Outcome::Fail("AP thread did not run");
     }
@@ -2676,7 +2740,9 @@ fn test_reschedule_ipi_wake_ap() -> Outcome {
     };
     WAKE_FLAG.store(0, Ordering::SeqCst);
     let before = ipi_init::reschedule_count();
-    let _h = thread_init::spawn_on("wake-ap", wake_ap_entry, ap);
+    let Ok(_h) = thread_init::spawn_on("wake-ap", wake_ap_entry, ap) else {
+        return Outcome::Fail("spawn");
+    };
     if !spin_until_ns(|| WAKE_FLAG.load(Ordering::SeqCst) != 0, 500_000_000) {
         return Outcome::Fail("idle AP not woken");
     }
@@ -2871,7 +2937,9 @@ fn test_alloc_stress_smp() -> Outcome {
     let mut c = 1u32;
     while c < 64 {
         if mask & (1u64 << c) != 0 {
-            let _ = thread_init::spawn_on("hammer", alloc_hammer, c);
+            let Ok(_) = thread_init::spawn_on("hammer", alloc_hammer, c) else {
+                return Outcome::Fail("spawn");
+            };
         }
         c += 1;
     }
@@ -3317,7 +3385,9 @@ fn test_lspci_cmd() -> Outcome {
     // Shell stacks are 16 KiB. lspci on _start would miss a full
     // [Device; 64] snapshot overflowing the guard.
     LSPCI_STACK.store(0, Ordering::SeqCst);
-    let h = thread_init::spawn_here("lspci-stk", lspci_stack_entry);
+    let Ok(h) = thread_init::spawn_here("lspci-stk", lspci_stack_entry) else {
+        return Outcome::Fail("spawn");
+    };
     thread_init::switch_to(h.id());
     // The worker runs with IF on, so a tick can hand the CPU back first.
     let t0 = time_init::now_ns();
@@ -4134,8 +4204,12 @@ fn test_block_concurrent() -> Outcome {
     BLK_WID.store(0, Ordering::SeqCst);
     BLK_DONE.store(0, Ordering::SeqCst);
     BLK_FAIL.store(0, Ordering::SeqCst);
-    let _a = thread_init::spawn("blk-a", blk_worker);
-    let _b = thread_init::spawn("blk-b", blk_worker);
+    let Ok(_a) = thread_init::spawn("blk-a", blk_worker) else {
+        return Outcome::Fail("spawn");
+    };
+    let Ok(_b) = thread_init::spawn("blk-b", blk_worker) else {
+        return Outcome::Fail("spawn");
+    };
     let t0 = time_init::uptime_ms();
     loop {
         if BLK_DONE.load(Ordering::SeqCst) == 2 {
@@ -4151,8 +4225,12 @@ fn test_block_concurrent() -> Outcome {
     }
     TEAR_ID.store(0, Ordering::SeqCst);
     TEAR_DONE.store(0, Ordering::SeqCst);
-    let _c = thread_init::spawn("tear-a", tear_worker);
-    let _d = thread_init::spawn("tear-b", tear_worker);
+    let Ok(_c) = thread_init::spawn("tear-a", tear_worker) else {
+        return Outcome::Fail("spawn");
+    };
+    let Ok(_d) = thread_init::spawn("tear-b", tear_worker) else {
+        return Outcome::Fail("spawn");
+    };
     let t1 = time_init::uptime_ms();
     loop {
         if TEAR_DONE.load(Ordering::SeqCst) == 2 {
@@ -4432,8 +4510,12 @@ fn test_block_vblk_concurrent() -> Outcome {
     VBLK_WID.store(0, Ordering::SeqCst);
     VBLK_DONE.store(0, Ordering::SeqCst);
     VBLK_FAIL.store(0, Ordering::SeqCst);
-    let _a = thread_init::spawn("vblk-a", vblk_worker);
-    let _b = thread_init::spawn("vblk-b", vblk_worker);
+    let Ok(_a) = thread_init::spawn("vblk-a", vblk_worker) else {
+        return Outcome::Fail("spawn");
+    };
+    let Ok(_b) = thread_init::spawn("vblk-b", vblk_worker) else {
+        return Outcome::Fail("spawn");
+    };
     let t0 = time_init::uptime_ms();
     loop {
         if VBLK_DONE.load(Ordering::SeqCst) == 2 {

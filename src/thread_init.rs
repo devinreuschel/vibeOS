@@ -28,6 +28,24 @@ use crate::sync_init::SpinMutex;
 use crate::time_init;
 use crate::x86::InterruptGuard;
 
+/// Why a `spawn*` call made no thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpawnError {
+    /// Every TCB slot holds a live thread.
+    NoSlot,
+    /// The kernel stack could not be allocated.
+    NoMemory,
+}
+
+impl SpawnError {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoSlot => "no thread slot",
+            Self::NoMemory => "no memory for a kernel stack",
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct ThreadHandle {
     id: ThreadId,
@@ -136,8 +154,16 @@ impl Sched {
 static SCHED: SpinMutex<Sched> = SpinMutex::with_rank(Sched::empty(), RANK_SCHED);
 static SPAWN_RR: AtomicU32 = AtomicU32::new(0);
 
+/// A new thread's first code. It starts at `irq_nest` + 1, IF=0 (the
+/// first-run level `spawn_inner` adds), so a tick cannot switch away before
+/// the switch tail has run; it drops that level, and turns IF on when the
+/// nest reaches 0, before `entry`.
 extern "C" fn trampoline() {
     reap_zombies();
+    per_cpu_init::irq_nest_leave();
+    if per_cpu_init::irq_nest() == 0 {
+        crate::x86::sti();
+    }
     let entry = unsafe { (*per_cpu_init::current_thread()).entry };
     entry();
     thread_exit();
@@ -404,7 +430,7 @@ fn bootstrap_entry() {
     panic!("bootstrap entry called");
 }
 
-pub fn spawn(name: &'static str, entry: fn()) -> ThreadHandle {
+pub fn spawn(name: &'static str, entry: fn()) -> Result<ThreadHandle, SpawnError> {
     spawn_inner(
         name,
         entry,
@@ -424,7 +450,7 @@ pub fn spawn(name: &'static str, entry: fn()) -> ThreadHandle {
 /// registry runs with IF on; one started under a test's own guard runs with
 /// IF off, so `switch_to` does not `sti` it and a tick cannot preempt a
 /// cooperative `switch_to` chain.
-pub fn spawn_here(name: &'static str, entry: fn()) -> ThreadHandle {
+pub fn spawn_here(name: &'static str, entry: fn()) -> Result<ThreadHandle, SpawnError> {
     spawn_inner(
         name,
         entry,
@@ -437,7 +463,7 @@ pub fn spawn_here(name: &'static str, entry: fn()) -> ThreadHandle {
     )
 }
 
-pub fn spawn_on(name: &'static str, entry: fn(), cpu: u32) -> ThreadHandle {
+pub fn spawn_on(name: &'static str, entry: fn(), cpu: u32) -> Result<ThreadHandle, SpawnError> {
     spawn_inner(
         name,
         entry,
@@ -465,7 +491,11 @@ pub struct SpawnOpts {
 /// with `irq_nest` 0, so it runs with IF on, as [`spawn`]'s threads do.
 /// `opts.stack_pages` must be at most 32 (`kva_init`'s limit) and
 /// `opts.cpu`, when set, an online CPU.
-pub fn spawn_opts(name: &'static str, entry: fn(), opts: SpawnOpts) -> ThreadHandle {
+pub fn spawn_opts(
+    name: &'static str,
+    entry: fn(),
+    opts: SpawnOpts,
+) -> Result<ThreadHandle, SpawnError> {
     let affinity = match opts.cpu {
         Some(c) => CpuAffinity::Pinned(c),
         None => CpuAffinity::Any,
@@ -473,7 +503,7 @@ pub fn spawn_opts(name: &'static str, entry: fn(), opts: SpawnOpts) -> ThreadHan
     spawn_inner(name, entry, affinity, true, 0, 0, 0, opts.stack_pages)
 }
 
-pub(crate) fn spawn_idle(entry: fn()) -> ThreadHandle {
+pub(crate) fn spawn_idle(entry: fn()) -> Result<ThreadHandle, SpawnError> {
     spawn_inner(
         "idle",
         entry,
@@ -487,7 +517,12 @@ pub(crate) fn spawn_idle(entry: fn()) -> ThreadHandle {
 }
 
 /// User process thread. Not runnable until [`make_ready`].
-pub fn spawn_user(name: &'static str, entry: fn(), pid: u32, cr3: u64) -> ThreadHandle {
+pub fn spawn_user(
+    name: &'static str,
+    entry: fn(),
+    pid: u32,
+    cr3: u64,
+) -> Result<ThreadHandle, SpawnError> {
     spawn_inner(
         name,
         entry,
@@ -572,6 +607,10 @@ fn choose_cpu(affinity: CpuAffinity) -> u32 {
     cpu
 }
 
+/// Build a Ready (or, `enqueue` false, parked) thread. The stack comes
+/// first, then a TCB slot: a `Dead` one is rewritten under SCHED, else a new
+/// `Tcb` box goes into an empty one. Neither the box nor the stack is
+/// allocated or freed under SCHED, which ranks above HEAP, PT and BUDDY.
 #[allow(clippy::too_many_arguments)] // TCB fields and stack size chosen at spawn
 fn spawn_inner(
     name: &'static str,
@@ -582,8 +621,12 @@ fn spawn_inner(
     pid: u32,
     as_cr3: u64,
     stack_pages: usize,
-) -> ThreadHandle {
-    let stack = kva_init::alloc_guarded_stack(stack_pages).expect("thread stack");
+) -> Result<ThreadHandle, SpawnError> {
+    #[cfg(feature = "kernel_tests")]
+    if current_pid() != 0 && testing::FAIL_FORK_STACK.swap(false, Ordering::AcqRel) {
+        return Err(SpawnError::NoMemory);
+    }
+    let stack = kva_init::alloc_guarded_stack(stack_pages).map_err(|_| SpawnError::NoMemory)?;
     let top = stack.top().as_u64();
     assert!(top.is_multiple_of(16), "kva stack top not 16-aligned");
     // Taken by whichever path below installs it in a TCB.
@@ -592,6 +635,9 @@ fn spawn_inner(
     let cur = current_id();
     let idle = per_cpu_init::current().idle_id;
     let cpu = choose_cpu(affinity);
+    // The first-run level: `trampoline` runs the switch tail with IF=0 and
+    // then drops it.
+    let first_nest = irq_nest + 1;
 
     // Dead slot: rewrite the Box. 2000 spawn/exit must not churn the
     // heap (one extra mapped page shows up as a leaked frame).
@@ -602,20 +648,22 @@ fn spawn_inner(
         })?;
         let id = ThreadId(slot as u32);
         s.timeouts.remove(id);
-        let tcb = s.slots[slot].as_mut().expect("dead slot");
+        let tcb = s.slots[slot].as_deref_mut()?;
         assert!(tcb.stack.is_none(), "dead tcb still owns stack");
-        let ks = stack.take().expect("spawn_inner: stack taken once");
+        let ks = stack.take()?;
         fill_tcb(
-            tcb, name, entry, affinity, cpu, ks, top, tramp, irq_nest, pid, as_cr3,
+            tcb, name, entry, affinity, cpu, ks, top, tramp, first_nest, pid, as_cr3,
         );
         if enqueue {
             s.place(cpu, id);
         }
         Some(id)
     }) {
-        return ThreadHandle { id };
+        return Ok(ThreadHandle { id });
     }
 
+    // Until ROADMAP §10.4's `TryBox`, the one infallible allocation left
+    // on this path: the heap grows or the kernel panics (DESIGN §4.4).
     let mut tcb = Box::new(Tcb {
         id: ThreadId(0),
         name,
@@ -627,7 +675,7 @@ fn spawn_inner(
         prev: None,
         affinity,
         cpu,
-        irq_nest,
+        irq_nest: first_nest,
         switches: 0,
         run_tsc: 0,
         wait_outcome: WaitOutcome::Woken,
@@ -639,12 +687,11 @@ fn spawn_inner(
     prepare_thread(&mut tcb.context, top, tramp);
     unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
 
-    let id = with_sched(|s| {
-        let slot = s
-            .slots
-            .iter()
-            .position(|x| x.is_none())
-            .expect("thread table full");
+    let placed = with_sched(|s| {
+        let Some(slot) = s.slots.iter().position(|x| x.is_none()) else {
+            // Dropped after SCHED is released: no heap free under it.
+            return Err(tcb);
+        };
         let id = ThreadId(slot as u32);
         s.timeouts.remove(id);
         tcb.id = id;
@@ -652,9 +699,18 @@ fn spawn_inner(
         if enqueue {
             s.place(cpu, id);
         }
-        id
+        Ok(id)
     });
-    ThreadHandle { id }
+    match placed {
+        Ok(id) => Ok(ThreadHandle { id }),
+        Err(mut tcb) => {
+            if let Some(ks) = tcb.stack.take() {
+                kva_init::free_stack(ks);
+            }
+            drop(tcb);
+            Err(SpawnError::NoSlot)
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)] // TCB fields filled at spawn
@@ -877,4 +933,20 @@ pub fn snapshot(out: &mut [ThreadInfo]) -> usize {
         }
         n
     })
+}
+
+/// Hooks the in-guest tests arm (DESIGN §8.2). `kernel_tests` builds only.
+#[cfg(feature = "kernel_tests")]
+pub mod testing {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    /// One-shot: the next spawn from a process context fails as if its
+    /// kernel stack could not be allocated.
+    pub(super) static FAIL_FORK_STACK: AtomicBool = AtomicBool::new(false);
+
+    /// Make the next `spawn*` made on behalf of a process (a `fork`) return
+    /// `SpawnError::NoMemory` before it allocates anything. One-shot.
+    pub fn fail_next_fork_stack() {
+        FAIL_FORK_STACK.store(true, Ordering::Release);
+    }
 }

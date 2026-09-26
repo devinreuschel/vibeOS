@@ -80,8 +80,14 @@ pub fn init() {
     let n = per_cpu_init::cpu_count().max(1);
     let mut cpu = 0u32;
     while cpu < n as u32 {
-        if per_cpu_init::is_online(cpu) {
-            let _ = thread_init::spawn_on("wq", worker, cpu);
+        if per_cpu_init::is_online(cpu)
+            && let Err(e) = thread_init::spawn_on("wq", worker, cpu)
+        {
+            crate::klog!(
+                vibeos::log::Level::Error,
+                "work: cpu{cpu} worker not started: {}",
+                e.as_str()
+            );
         }
         cpu += 1;
     }

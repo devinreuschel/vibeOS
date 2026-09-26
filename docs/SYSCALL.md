@@ -167,8 +167,10 @@ F083) replaces them with one `KError` table that generates §2.
 - `dup` with a full fd table returns `EBADF` (Linux `EMFILE`) (ROADMAP §10.4)
 - `ENFILE`, `ENOSPC`, `ESPIPE`, `ENOTEMPTY`, and `ELOOP` are not
   defined in `src/syscall.rs` (F083; ROADMAP §10.4)
-- `fork` near memory exhaustion panics instead of returning `ENOMEM`:
-  `thread_init::spawn_inner` calls `expect` on its stack allocation. More
+- `fork` near memory exhaustion: a kernel stack that cannot be allocated
+  returns `ENOMEM` and frees the clone, but the child's TCB box and the
+  boxed address space panic when the heap cannot grow, until ROADMAP
+  §10.4's fallible allocation. More
   than 8 exits in a row, each switching to a thread resumed from timer
   preemption, overflow the 8-entry deferred-stack list, and `defer_free`
   panics on a full list (F010; ROADMAP §10.10)

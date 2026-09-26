@@ -1974,8 +1974,9 @@ Rust-for-Linux settled on (`KBox`, `KVec`) after starting from `alloc`'s collect
 leaves `Box` and `Arc` with no fallible path on stable Rust.
 
 Rule; not yet enforced: syscall paths, driver probes (`virtio_blk_init`'s `Box::new`), and
-kernel-thread creation use the infallible API today, and a `fork` near exhaustion panics in
-`spawn_inner` (F010). ROADMAP §10.4 lands `kalloc` in Phase 10's first wave and the lints after it. Rejected: making small allocations never fail by having the allocator wait
+`spawn_inner`'s TCB box use the infallible API today; a kernel stack that cannot be allocated is
+`SpawnError::NoMemory`, but `spawn_inner`'s TCB box, which a `fork` reaches when no Dead slot is
+free, panics when the heap cannot grow (F010). ROADMAP §10.4 lands `kalloc` in Phase 10's first wave and the lints after it. Rejected: making small allocations never fail by having the allocator wait
 until the OOM killer frees memory (Linux's "too small to fail"), because an allocation made with a
 spinlock held, or on a path the OOM victim needs in order to exit, cannot wait, and a failed
 `Box::new` cannot be handled by its caller; AGENTS.md rule 4 forbids a user-triggerable panic.

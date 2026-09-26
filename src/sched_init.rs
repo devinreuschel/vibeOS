@@ -16,7 +16,11 @@ static LIVE: AtomicBool = AtomicBool::new(false);
 /// Bootstrap thread is current. IRQ0 may already be live; `on_timer_tick`
 /// is a no-op until `LIVE`.
 pub unsafe fn init() {
-    let h = thread_init::spawn_idle(idle_main);
+    // Before `irq: enabled`: DESIGN §4.4's boot policy panics here.
+    let h = match thread_init::spawn_idle(idle_main) {
+        Ok(h) => h,
+        Err(e) => panic!("sched: idle thread: {}", e.as_str()),
+    };
     let ptr = thread_init::tcb_ptr(h.id());
     assert!(!ptr.is_null(), "idle tcb");
     per_cpu_init::with_current(|cpu| {
