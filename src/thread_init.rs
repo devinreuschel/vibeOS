@@ -4,10 +4,16 @@
 //! (owner CPU only, IRQs off). Cross-CPU wake is inbox + IPI 0xFD, never
 //! a remote runq lock. Never held across `switch_context`, heap free, or
 //! KVA/stack reclaim.
+//!
+//! A dead thread's kernel stack stays with the CPU that ran it: `thread_exit`
+//! parks it in that CPU's `PerCpu.dead_stack`, and [`finish_switch`], the
+//! switch tail that runs on that CPU once `switch_context` has moved it off
+//! the stack, puts it in the CPU's stack cache or on its dead list, which
+//! the CPU's workqueue worker unmaps and frees with IF=1 (DESIGN §4.5).
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use vibeos::ipi::{home_cpu, pick_cpu};
 use vibeos::kva::DEFAULT_STACK_PAGES;
@@ -153,13 +159,19 @@ impl Sched {
 
 static SCHED: SpinMutex<Sched> = SpinMutex::with_rank(Sched::empty(), RANK_SCHED);
 static SPAWN_RR: AtomicU32 = AtomicU32::new(0);
+/// Frames of the stacks every CPU's stack cache holds. A global atomic, not
+/// a `PerCpu` field, so no CPU reads another's `PerCpu`.
+static CACHED_STACK_FRAMES: AtomicUsize = AtomicUsize::new(0);
+/// Dead threads' stacks parked in a `PerCpu.dead_stack` slot or on a dead
+/// list: taken from their thread and not yet cached or freed.
+static STACKS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 /// A new thread's first code. It starts at `irq_nest` + 1, IF=0 (the
 /// first-run level `spawn_inner` adds), so a tick cannot switch away before
 /// the switch tail has run; it drops that level, and turns IF on when the
 /// nest reaches 0, before `entry`.
 extern "C" fn trampoline() {
-    tail_reap();
+    finish_switch();
     per_cpu_init::irq_nest_leave();
     if per_cpu_init::irq_nest() == 0 {
         crate::x86::sti();
@@ -174,16 +186,31 @@ pub fn exit_current() -> ! {
 }
 
 fn thread_exit() -> ! {
-    // IF-on-resume leaves IF set. Hold it off across Dead → defer_free →
-    // schedule so a tick cannot preempt a Dead thread still on-CPU.
+    // IF-on-resume leaves IF set. Hold it off from the park to the switch:
+    // a tick cannot preempt a thread whose stack is parked, and the switch
+    // tail that takes the stack runs on this CPU after the switch.
     let _irq = InterruptGuard::enter();
-    unsafe {
-        let p = per_cpu_init::current_thread();
-        (*p).state = ThreadState::Dead;
-        if let Some(stack) = (*p).stack.take() {
-            kva_init::defer_free(stack)
-        }
+    let p = per_cpu_init::current_thread();
+    // SAFETY: `p` is this CPU's running thread (`per_cpu_init::set_current_thread`
+    // in `thread_init::switch_now`), whose `Tcb` stays in `SCHED` (invariant
+    // I9) and whose `stack` only this thread and `thread_init::spawn_inner`
+    // write, and a spawn reuses the slot only once the state below is Dead.
+    let stack = unsafe { (*p).stack.take() };
+    if let Some(stack) = stack {
+        // The store that makes the stack reclaimable. Only this CPU's
+        // `finish_switch` takes it, after `switch_context` has moved this
+        // CPU off it (invariant I10).
+        per_cpu_init::with_current(|cpu| {
+            assert!(
+                cpu.dead_stack.is_none(),
+                "thread_exit: dead-stack slot full"
+            );
+            cpu.dead_stack = Some(stack);
+        });
+        STACKS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
     }
+    // SAFETY: as above.
+    unsafe { (*p).state = ThreadState::Dead };
     #[cfg(feature = "kernel_tests")]
     testing::exit_stall();
     schedule();
@@ -289,21 +316,18 @@ fn schedule_inner(from_irq: bool) {
     });
 
     if old_id == new_id || old_ptr.is_null() || new_ptr.is_null() {
-        if !from_irq {
-            reap_zombies();
-        }
         return;
     }
     assert!(!new_ptr.is_null(), "schedule: next vanished");
     switch_now(old_ptr, new_ptr);
-    if !from_irq {
-        tail_reap();
-    }
+    finish_switch();
 }
 
 fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
     let now = time_init::read_tsc();
     per_cpu_init::with_current_switch(|cpu| {
+        // For the switch tail that runs next on this CPU.
+        cpu.tail_prev = old_ptr;
         let delta = now.wrapping_sub(cpu.slice_tsc);
         cpu.slice_tsc = now;
         // Single writer: only this CPU stores its `switches`.
@@ -363,20 +387,97 @@ fn relink(s: &mut Sched) {
     });
 }
 
-/// A switch tail's reap, marked for `ipi_init::testing`'s count of
-/// shootdowns sent from a switch tail.
-fn tail_reap() {
+/// The switch tail: runs on this CPU after every `switch_context` returns,
+/// on both `schedule_inner` paths (the preempt one included), in
+/// `switch_to`, and first thing in `trampoline`, with IF=0. It empties
+/// this CPU's dead-stack slot: the stack goes into this CPU's stack cache,
+/// or onto its dead list, whose worker it wakes. It never unmaps,
+/// allocates, or sends a shootdown.
+pub(crate) fn finish_switch() {
+    debug_assert!(
+        !crate::x86::interrupts_enabled(),
+        "finish_switch with IF on"
+    );
     #[cfg(feature = "kernel_tests")]
     crate::ipi_init::testing::tail_enter();
-    reap_zombies();
+    let kick = per_cpu_init::with_current(|cpu| {
+        cpu.tail_prev = core::ptr::null_mut();
+        let Some(stack) = cpu.dead_stack.take() else {
+            return false;
+        };
+        let pages = stack.pages();
+        let refused = if pages == DEFAULT_STACK_PAGES {
+            cpu.stack_cache.put(stack).err()
+        } else {
+            Some(stack)
+        };
+        match refused {
+            None => {
+                CACHED_STACK_FRAMES.fetch_add(pages, Ordering::AcqRel);
+                STACKS_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+                false
+            }
+            Some(stack) => {
+                kva_init::park_on_list(&mut cpu.dead_list, stack);
+                true
+            }
+        }
+    });
+    if kick {
+        crate::work_init::kick_dead_stacks();
+    }
     #[cfg(feature = "kernel_tests")]
     crate::ipi_init::testing::tail_leave();
 }
 
-pub(crate) fn reap_zombies() {
-    // Stacks only. Dead TCBs stay queryable (`state == Dead`) until spawn
-    // reuses the slot. Never unmap a stack we are running on.
-    kva_init::drain_deferred();
+/// Take this CPU's whole dead list, for its worker. Owner CPU, IF=0.
+/// Returns the list head, 0 when empty.
+pub(crate) fn take_dead_stacks() -> u64 {
+    per_cpu_init::with_current(|cpu| core::mem::replace(&mut cpu.dead_list, 0))
+}
+
+/// The worker has freed `n` stacks it took with [`take_dead_stacks`].
+pub(crate) fn stacks_reclaimed(n: usize) {
+    STACKS_IN_FLIGHT.fetch_sub(n, Ordering::AcqRel);
+}
+
+/// Frames the stack caches of every CPU hold.
+pub fn cached_stack_frames() -> usize {
+    CACHED_STACK_FRAMES.load(Ordering::Acquire)
+}
+
+/// Dead threads' stacks not yet cached or freed.
+pub fn stacks_in_flight() -> usize {
+    STACKS_IN_FLIGHT.load(Ordering::Acquire)
+}
+
+/// A default-size stack from this CPU's cache, zeroed, or `None`.
+fn cached_stack() -> Option<GuardedStack> {
+    let stack = per_cpu_init::with_current(|cpu| cpu.stack_cache.take())?;
+    CACHED_STACK_FRAMES.fetch_sub(stack.pages(), Ordering::AcqRel);
+    let len = stack.pages() * vibeos::paging::PAGE_SIZE_4K as usize;
+    // SAFETY: the stack's `pages` pages above `base` are mapped writable
+    // and owned by this handle alone: no thread runs on a cached stack
+    // (invariant I10, established at `thread_init::finish_switch`).
+    unsafe { core::ptr::write_bytes(stack.base().as_u64() as *mut u8, 0, len) };
+    Some(stack)
+}
+
+/// Keep a stack a failed spawn did not use: this CPU's cache if it has
+/// room and the stack is default-size, else free it.
+fn return_stack(stack: GuardedStack) {
+    let pages = stack.pages();
+    let refused = if pages == DEFAULT_STACK_PAGES {
+        per_cpu_init::with_current(|cpu| cpu.stack_cache.put(stack).err())
+    } else {
+        Some(stack)
+    };
+    match refused {
+        None => {
+            CACHED_STACK_FRAMES.fetch_add(pages, Ordering::AcqRel);
+        }
+        Some(stack) => kva_init::free_stack(stack),
+    }
 }
 
 /// `sti; hlt` with a closed lost-wakeup window: cli, drain inbox, recheck
@@ -638,7 +739,15 @@ fn spawn_inner(
     if current_pid() != 0 && testing::FAIL_FORK_STACK.swap(false, Ordering::AcqRel) {
         return Err(SpawnError::NoMemory);
     }
-    let stack = kva_init::alloc_guarded_stack(stack_pages).map_err(|_| SpawnError::NoMemory)?;
+    let cached = if stack_pages == DEFAULT_STACK_PAGES {
+        cached_stack()
+    } else {
+        None
+    };
+    let stack = match cached {
+        Some(s) => s,
+        None => kva_init::alloc_guarded_stack(stack_pages).map_err(|_| SpawnError::NoMemory)?,
+    };
     let top = stack.top().as_u64();
     assert!(top.is_multiple_of(16), "kva stack top not 16-aligned");
     // Taken by whichever path below installs it in a TCB.
@@ -717,7 +826,7 @@ fn spawn_inner(
         Ok(id) => Ok(ThreadHandle { id }),
         Err(mut tcb) => {
             if let Some(ks) = tcb.stack.take() {
-                kva_init::free_stack(ks);
+                return_stack(ks);
             }
             drop(tcb);
             Err(SpawnError::NoSlot)
@@ -846,7 +955,7 @@ pub fn switch_to(id: ThreadId) {
         (s.ptr(old_id), s.ptr(id))
     });
     switch_now(old_ptr, new_ptr);
-    tail_reap();
+    finish_switch();
 }
 
 pub fn current_id() -> ThreadId {
@@ -999,6 +1108,34 @@ pub mod testing {
     /// One-shot: the next spawn from a process context fails as if its
     /// kernel stack could not be allocated.
     pub(super) static FAIL_FORK_STACK: AtomicBool = AtomicBool::new(false);
+
+    /// Move this CPU's cached stacks onto its dead list and wake its worker,
+    /// which unmaps and frees them.
+    pub fn drain_local_stack_cache() {
+        let kick = crate::per_cpu_init::with_current(|cpu| {
+            let mut any = false;
+            while let Some(stack) = cpu.stack_cache.take() {
+                super::CACHED_STACK_FRAMES.fetch_sub(stack.pages(), Ordering::AcqRel);
+                super::STACKS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
+                crate::kva_init::park_on_list(&mut cpu.dead_list, stack);
+                any = true;
+            }
+            any
+        });
+        if kick {
+            crate::work_init::kick_dead_stacks();
+        }
+    }
+
+    /// Put `stack`, which nothing runs on, on this CPU's dead list and wake
+    /// its worker, as the switch tail does with a stack the cache refuses.
+    pub fn park_on_local_list(stack: crate::kva_init::GuardedStack) {
+        super::STACKS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
+        crate::per_cpu_init::with_current(|cpu| {
+            crate::kva_init::park_on_list(&mut cpu.dead_list, stack);
+        });
+        crate::work_init::kick_dead_stacks();
+    }
 
     /// Make the next `spawn*` made on behalf of a process (a `fork`) return
     /// `SpawnError::NoMemory` before it allocates anything. One-shot.

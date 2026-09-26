@@ -470,12 +470,12 @@ static WARMED: AtomicBool = AtomicBool::new(false);
 ///
 /// Three things move the count outside a test's window. A thread spawned
 /// before the registry (the boot `/hello`, whose `wait_kernel` returns at
-/// the reap, before the thread defers its stack) can still be running or
-/// have its stack on `kva_init`'s deferred list. A spawn into an empty
+/// the reap, before the thread parks its stack) can still be running or
+/// have its stack on its CPU's dead list. A spawn into an empty
 /// thread slot boxes a new `Tcb`, which can grow the heap. A stack or vmap
 /// carved from KVA that no mapping has reached before takes a page-table
 /// page that `unmap` never frees. So: let every pending thread finish and
-/// drain the deferred list; fill the empty thread slots, all but
+/// its stack come back; fill the empty thread slots, all but
 /// [`EMPTY_SLOT_RESERVE`], with threads that exit at once, so later spawns
 /// reuse Dead boxes; and walk KVA through two coalesces with the timer on,
 /// so the free list starts again at VA the walk mapped.
@@ -516,7 +516,6 @@ pub(crate) fn quiesce_frames() {
     if coalesces < 2 {
         crate::marker!("vibeOS: ktest:   warm-up: kva coalesces {coalesces} in {rounds} rounds");
     }
-    kva_init::drain_deferred();
 }
 
 /// Allocate and free guarded stacks until `Kva::free` has coalesced twice.
@@ -541,12 +540,13 @@ fn warm_kva() -> (usize, usize) {
 }
 
 /// With the timer on, sleep until no thread but this one and the idle
-/// threads is Ready or Running, then drain the deferred stacks. False if
-/// that takes longer than [`SETTLE_MS`].
+/// threads is Ready or Running and no dead thread's stack is still on its
+/// way to a stack cache or back to the buddy. False if that takes longer
+/// than [`SETTLE_MS`].
 pub(crate) fn settle_threads() -> bool {
     let me = thread_init::current_id();
     let t0 = time_init::uptime_ms();
-    let settled = loop {
+    loop {
         let mut buf = [thread_init::ThreadInfo {
             id: ThreadId::NONE,
             name: "",
@@ -554,11 +554,12 @@ pub(crate) fn settle_threads() -> bool {
             cpu: 0,
         }; vibeos::thread::MAX_THREADS];
         let n = thread_init::snapshot(&mut buf);
-        let busy = buf[..n].iter().any(|t| {
-            t.id != me
-                && t.name != "idle"
-                && matches!(t.state, ThreadState::Ready | ThreadState::Running)
-        });
+        let busy = thread_init::stacks_in_flight() != 0
+            || buf[..n].iter().any(|t| {
+                t.id != me
+                    && t.name != "idle"
+                    && matches!(t.state, ThreadState::Ready | ThreadState::Running)
+            });
         if !busy {
             break true;
         }
@@ -566,13 +567,13 @@ pub(crate) fn settle_threads() -> bool {
             break false;
         }
         thread_init::sleep_ms(1);
-    };
-    kva_init::drain_deferred();
-    settled
+    }
 }
 
+/// Free frames: the buddy's, and those of the stacks the CPUs' stack caches
+/// hold, which a spawn reuses (ROADMAP §10.10).
 pub(crate) fn free_frames() -> usize {
-    pmm_init::with_buddy(|b| b.stats().free_frames)
+    pmm_init::with_buddy(|b| b.stats().free_frames) + thread_init::cached_stack_frames()
 }
 
 pub(crate) fn alloc_frame() -> Option<PhysAddr> {
@@ -919,22 +920,22 @@ fn test_kva_roundtrip() -> Outcome {
     Outcome::Ok
 }
 
+/// A stack parked on this CPU's dead list comes back through its worker
+/// (ROADMAP §10.10).
 fn test_kva_deferred() -> Outcome {
-    let before = free_frames();
+    let before = p10_s08::quiescent_free_frames();
     let Ok(stack) = kva_init::alloc_guarded_stack(4) else {
         return Outcome::Fail("alloc_guarded_stack");
     };
-    let mid = free_frames();
-    kva_init::defer_free(stack);
-    if free_frames() != mid {
-        kva_init::drain_deferred();
-        return Outcome::Fail("defer freed too early");
+    if free_frames() + 4 != before {
+        kva_init::free_stack(stack);
+        return Outcome::Fail("stack did not take 4 frames");
     }
-    kva_init::drain_deferred();
-    let after = free_frames();
+    thread_init::testing::park_on_local_list(stack);
+    let after = p10_s08::quiescent_free_frames();
     if after != before {
         crate::marker!("vibeOS: ktest:   before={before} after={after}");
-        return Outcome::Fail("drain did not free");
+        return Outcome::Fail("worker did not free the parked stack");
     }
     Outcome::Ok
 }
@@ -2146,12 +2147,14 @@ fn test_reap_returns_frames() -> Outcome {
 
 const REAP_MANY: usize = 16;
 
+/// Two waves of dying threads, the first while the registry sleeps (the
+/// last death switches to idle), the second while it runs (the last death
+/// resumes it or idle from the preempt path); every stack comes back
+/// whichever switch tail took it (ROADMAP §10.2, F074; §10.10).
 fn test_reap_many_via_idle() -> Outcome {
-    let before = free_frames();
+    let before = p10_s08::quiescent_free_frames();
     let mut ids = [ThreadId::NONE; REAP_MANY];
 
-    // Park the registry so the last death switches to idle. Idle's
-    // from_irq resume skips reap; the idle loop must drain.
     let mut i = 0;
     while i < REAP_MANY {
         let Ok(h) = thread_init::spawn_here("dying", dying_entry) else {
@@ -2169,8 +2172,6 @@ fn test_reap_many_via_idle() -> Outcome {
         i += 1;
     }
 
-    // Stay Running. Last death resumes us on the IRQ path (no reap).
-    // yield_now no-switch must drain.
     i = 0;
     while i < REAP_MANY {
         let Ok(h) = thread_init::spawn_here("dying", dying_entry) else {
@@ -2197,9 +2198,8 @@ fn test_reap_many_via_idle() -> Outcome {
         }
         core::hint::spin_loop();
     }
-    thread_init::yield_now();
 
-    let after = free_frames();
+    let after = p10_s08::quiescent_free_frames();
     if after != before {
         crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
         return Outcome::Fail("reap did not restore frames");
@@ -2604,7 +2604,6 @@ fn test_sched_lock_timer_irq() -> Outcome {
 }
 
 const SPAWN_EXIT_N: usize = 2000;
-const SPAWN_EXIT_WARMUP: usize = 256;
 
 fn spawn_until_dead(name: &'static str) -> Outcome {
     let _g = x86::InterruptGuard::enter();
@@ -2623,21 +2622,8 @@ fn spawn_until_dead(name: &'static str) -> Outcome {
 }
 
 fn test_spawn_exit_thousands() -> Outcome {
-    // First-fit KVA walks new VA until coalesce. Mapping a fresh 2MiB
-    // window allocates a PT page that unmap_4k does not free. Warm up
-    // past one free-list overflow so the 2000 recycle already-mapped VA.
+    let before = p10_s08::quiescent_free_frames();
     let mut i = 0usize;
-    while i < SPAWN_EXIT_WARMUP {
-        match spawn_until_dead("die") {
-            Outcome::Ok => {}
-            other => return other,
-        }
-        i += 1;
-    }
-    thread_init::reap_zombies();
-
-    let before = free_frames();
-    i = 0;
     while i < SPAWN_EXIT_N {
         match spawn_until_dead("die") {
             Outcome::Ok => {}
@@ -2645,8 +2631,7 @@ fn test_spawn_exit_thousands() -> Outcome {
         }
         i += 1;
     }
-    thread_init::reap_zombies();
-    let after = free_frames();
+    let after = p10_s08::quiescent_free_frames();
     if after != before {
         let h = crate::heap_init::stats();
         let k = kva_init::stats();

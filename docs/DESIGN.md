@@ -554,7 +554,7 @@ The lock, the serviced spins, and the two cells:
 |------|-----|
 | `SpinMutex` | Shared across CPUs. IRQ-aware. Ranked (§2.1): `lock` refuses a lock whose rank, or a later one, this CPU already holds, and `lock_nested` takes a second lock of a held rank (below). Its spin is a serviced spin. |
 | Serviced spin | `SpinMutex::lock`, `ipi_init::wait_acks`, and the call-function slot wait each call `ipi_init::service_incoming` on every iteration, so a CPU that waits on another with IF=0 still acknowledges shootdowns and runs call-function work ([§2.9](#29-preemption-and-interrupt-state) rule 2). That work runs inside whatever the spinning CPU holds, so, like an NMI, `#MC`, or CPL-0 `#DB` handler, it takes no lock ([§2.2](#22-interrupt-handler-rules)'s last row). Planned (ROADMAP §10.7, F135): `service_incoming` first reads this CPU's stop request word, and STOP runs §2.5's stop routine before any slot is served, so a serviced spin stops for a panic with no interrupt, on either architecture and GIC version. On aarch64 a serviced spin never executes WFE and waits with `core::hint::spin_loop`: a masked interrupt is a wake-up event for WFI but not for WFE (Arm ARM DDI 0487, the WFE and WFI wake-up events), so a WFE spinner with IRQs masked neither takes an SGI nor wakes to poll. A line that puts WFE in a serviced spin also makes every publisher of serviced work, the stop word included, issue `sev` after its Release store, and says so. |
-| `IrqCell` | IRQ-off exclusive access: `with` takes IRQs off, panics on same-CPU re-entry, and spins while another CPU holds it. Used for CPU-local and boot-only state and as an unranked cross-CPU lock (among them `proc_init::TABLE`, `kva_init::KVA` and `DEFERRED`, `work_init::ST`, `irq_init::IRQ`, `file_init::CWD`, and `log_init::LOG`). It is `Send` and `Sync` only when `T: Send`, as `Mutex` is; const assertions in `src/cell.rs` fail the build otherwise. Its spin does not service IPIs, so a cross-CPU cell held across a wait on another CPU can stall a shootdown. Planned (ROADMAP §10.3, F108): every cross-CPU `IrqCell` but the log ring becomes a ranked `SpinMutex`; the log ring's holders never wait on another CPU (§2.5), and ROADMAP §19.5 replaces it with §2.5's lockless ring. |
+| `IrqCell` | IRQ-off exclusive access: `with` takes IRQs off, panics on same-CPU re-entry, and spins while another CPU holds it. Used for CPU-local and boot-only state and as an unranked cross-CPU lock (among them `proc_init::TABLE`, `kva_init::KVA`, `work_init::ST`, `irq_init::IRQ`, `file_init::CWD`, and `log_init::LOG`). It is `Send` and `Sync` only when `T: Send`, as `Mutex` is; const assertions in `src/cell.rs` fail the build otherwise. Its spin does not service IPIs, so a cross-CPU cell held across a wait on another CPU can stall a shootdown. Planned (ROADMAP §10.3, F108): every cross-CPU `IrqCell` but the log ring becomes a ranked `SpinMutex`; the log ring's holders never wait on another CPU (§2.5), and ROADMAP §19.5 replaces it with §2.5's lockless ring. |
 | `BootCell` | Write once before `smp: done`, then shared `&T`. State written after publication sits behind its own `UnsafeCell` inside `T`. Not yet enforced: every switch writes the BSP's TSS through a pointer cast from `&Bsp` (ROADMAP §10.3, F089). The set-once check is a `debug_assert!` (ROADMAP §10.2, F137). It is `Sync` only when `T: Send + Sync` and `Send` only when `T: Send`, as `OnceLock` is, and const assertions in `src/cell.rs` fail the build otherwise; `PerCpu`, whose raw pointers make it neither, carries its own `unsafe impl` naming invariants I120 and I21 (§7.5). |
 
 Two locks of one rank nest only through `lock_nested`, in a pair order the call site's comment
@@ -923,7 +923,7 @@ that review cites means the review's text.
 | I7 | The kernel reads or writes user memory only through the §5.1 user-memory accessors, and writes an address space that is not running only through the fill API (ROADMAP §10.6) | `addr_space.rs`; the arch accessors from ROADMAP §10.6 | enforced by SMAP where the CPU has it (PAN on aarch64, ROADMAP §11.6); the fill-API rule is documented | Partly: today's accessors copy through the physmap after `check_user_range`, and `write_bytes` ignores the PTE's `WRITABLE` bit (ROADMAP §10.6, F023) |
 | I8 | One thread per address space changes its regions, and another CPU changes its page tables only under its page-table lock (§2.11) | process model | assumed | Yes: only the owning thread touches a space. Lock-free user copies, local-only `invlpg`, and `&'static AddressSpace` depend on it. ROADMAP §10.6 replaces `&'static` with a counted object, §12.1's reverse map changes page tables from other CPUs under the space's page-table lock, §12.3 shoots down every CPU in the space's set, and §13.1's threads bring the address-space lock |
 | I9 | TCBs are never freed, so a `*mut Tcb` stays valid | 64-slot table, `thread_init` | assumed | Yes, but `spawn_inner` can reuse a Dead slot whose thread is still switching out (ROADMAP §10.10, F012) |
-| I10 | A dead thread's stack is freed only after its CPU has switched off it (§2.8, §4.5) | `kva_init::DEFERRED` | documented | No: any CPU drains the global list (F012), and the 8-slot list panics when full (F010) (ROADMAP §10.10) |
+| I10 | A dead thread's stack is freed only after its CPU has switched off it (§2.8, §4.5) | `thread_init::finish_switch` | enforced by the in-guest `lifetime_stack_reclaim` | Yes: `thread_exit` parks the stack in its CPU's `PerCpu.dead_stack`, and only that CPU's switch tail, after `switch_context` has returned, moves it into the CPU's stack cache or onto its dead list, which that CPU's worker frees (ROADMAP §10.10, F012) |
 | I11 | A completer's publishing store is its last access to the waiter (§2.8) | `block_init::IoWaiter::finish` | enforced by the in-guest `lifetime_iowaiter_publish_last` | Yes: `finish` runs `wake_all` under SCHED, then stores `done` with Release as its last access (ROADMAP §10.10, F002); ROADMAP §10.8 adds its loom model |
 | I12 | Every kernel PML4 slot exists before the first user address space | `AddressSpace::new` copies PML4[256..512) once | assumed | Yes, by boot order only: `paging_init::install` creates none of the heap, KVA, and `ioremap` PML4 slots; each appears on its region's first mapping, and no current path makes a first mapping after `/hello` (ROADMAP §12.1, F101) |
 | I13 | The low identity window is removed after `smp: done` (§4.1) | none yet | documented | No: it stays mapped and GLOBAL, VA 0 included (ROADMAP §10.6, F085) |
@@ -955,7 +955,7 @@ that review cites means the review's text.
 | I39 | On aarch64, an ASID a CPU has used since its last local TLB flush names one address space on that CPU ([§11.2](#112-address-space-on-aarch64)) | the ASID allocator (ROADMAP §11.2) | documented | Not relied on yet: the aarch64 port does not exist; ROADMAP §11.2's host tests and loom model enforce it when it lands |
 | I40 | A thread sleeps, or takes a sleeping lock, only with IF=1 and no spinlock held (§2.1, [§2.9](#29-preemption-and-interrupt-state) rule 4) | none yet | documented | No: syscall bodies run with IF=0 until they block (§2.9 rule 3; ROADMAP §10.6); nothing asserts either condition until ROADMAP §10.3's may-sleep box (F108) |
 | I41 | No sleeping lock of levels 2 to 4 is held across a copy to or from user memory, and code that holds the address-space lock takes no level-1 lock (§2.1) | none yet | documented | Yes, vacuously: the address-space lock, page waits, and the filesystems' block-mapping locks arrive with ROADMAP §12.5 and §13.1, and ROADMAP §13.12's lock-dependency build reports a violation the first time one happens |
-| I42 | Kernel-binary code that a syscall, a device, or a disk image reaches does not panic on that input, running out of memory or table slots included (AGENTS rule 4, [§4.4](#44-kernel-heap)) | convention; `vibeos::kalloc` from ROADMAP §10.4 | documented | No: a full thread table and a full deferred-stack list panic (ROADMAP §10.4, F037; ROADMAP §10.10, F010), and `alloc`'s growing calls panic on a failed allocation until ROADMAP §10.4's `kalloc` |
+| I42 | Kernel-binary code that a syscall, a device, or a disk image reaches does not panic on that input, running out of memory or table slots included (AGENTS rule 4, [§4.4](#44-kernel-heap)) | convention; `vibeos::kalloc` from ROADMAP §10.4 | documented | No: a full thread table panics (ROADMAP §10.4, F037), and `alloc`'s growing calls panic on a failed allocation until ROADMAP §10.4's `kalloc` |
 | I120 | Another CPU reads a CPU's per-CPU state only through its `PerCpuRemote`, whose fields are atomics, and takes `&mut` to another CPU's `PerCpu` only through `with_cpu` while that CPU is not running (§7.5) | `per_cpu_init::cpu`, `per_cpu_init::with_cpu` | enforced (the view type, its const assertion, and `check_cells.py`'s type and must-be-unsafe lists) | Yes, except an AP that accepted a SIPI and stalled past the ready timeout (ROADMAP §11.4, F032) |
 
 ## 2.8 Publish last
@@ -979,9 +979,6 @@ The rule for every completion, hand-off, and deferred reclaim:
 
 Rule; not yet enforced. The violations, and the ROADMAP lines that fix them:
 
-- `thread_exit` puts its own stack on the global `kva_init::DEFERRED` list, and any CPU's
-  `reap_zombies` can unmap it before the exiting CPU has finished `switch_context` (ROADMAP §10.10,
-  F012).
 - `spawn_inner` can reuse a Dead TCB slot while its thread is still switching out on another CPU
   (ROADMAP §10.10, F012).
 - On the bring-up timeout, `smp_init::start_one` frees an AP's kernel stack, GDT/TSS, and IST and
@@ -2233,15 +2230,18 @@ non-contiguous frames is the second.
   one keeps faulting for as long as possible instead of reaching the range's next owner; that is a
   debugging aid, not the ordering.
 - Freeing the stack you are running on does not work. Rule: a dead thread's stack is freed only
-  after the CPU that ran it has switched off it (§2.8). Not yet enforced: `thread_exit` puts the
-  stack on the global 8-slot `kva_init::DEFERRED` list, and any CPU's `reap_zombies` can drain it
-  while the exiting CPU is still between `defer_free` and `switch_context` on that stack
-  (ROADMAP §10.10, F012); `defer_free` panics when all 8 slots are full (ROADMAP §10.10, F010).
-  Planned (ROADMAP §10.10): the switch tail never unmaps. It moves the dead stack into a per-CPU
-  cache of at most two stacks, which the next spawn on that CPU reuses zeroed and still mapped; a
-  stack the cache cannot take goes on a per-CPU list that a workqueue worker on that CPU unmaps and
-  frees with IF=1, so no shootdown runs on the scheduler path. A CPU going offline (ROADMAP §19.6)
-  frees its cache.
+  after the CPU that ran it has switched off it (§2.8, invariant I10). `thread_exit` parks the
+  stack in its CPU's `PerCpu.dead_stack` slot with IF=0, and `thread_init::finish_switch`, the
+  switch tail that runs on that CPU after every `switch_context` (both `schedule_inner` paths, the
+  preempt one included, `switch_to`, and a new thread's `trampoline`), empties the slot, so it
+  holds at most one stack. The tail never unmaps, allocates, or sends a shootdown: a default-size
+  stack goes into the CPU's stack cache of at most two (`per_cpu::StackCache`, Linux's
+  `NR_CACHED_STACKS`), which the next spawn on that CPU reuses zeroed and still mapped; any other
+  stack goes on the CPU's dead list, linked through the dead stacks themselves
+  (`kva_init::park_on_list`), and that CPU's workqueue worker unmaps and frees it with IF=1
+  (`kva_init::free_parked`). No other CPU reaches the slot, the cache, or the list. Frame counts
+  (`ktest::free_frames`) count cached stacks as free until ROADMAP §12.1's categories. A CPU going
+  offline (ROADMAP §19.6) frees its cache.
 
 Default kernel stack is 4 pages (16 KiB) plus its 16 KiB guard. Budget: the deepest use observed on
 a kernel stack, interrupts that landed on it included, stays at or below the stack's size minus
@@ -4638,10 +4638,12 @@ clear (ROADMAP §10.6, F026).
 **Freeing a stack while running on it.**
 An AP's stack was unmapped while it was still executing on it. Rule: a dead thread's stack is freed
 only after the CPU that ran it has switched off it, and the reclaimer observes that; a reaper thread
-that is not on the stack is not enough on SMP ([section 2.8](#28-publish-last) rule 2). `thread_exit` breaks this: it puts its own stack on the
-global `kva_init::DEFERRED` list and keeps running `schedule()` on it, and any CPU's `reap_zombies`
-can unmap it before the exiting CPU reaches `switch_context` (ROADMAP §10.10, F012). The list has 8
-slots, and `defer_free` panics when an exit burst fills it (ROADMAP §10.10, F010).
+that is not on the stack is not enough on SMP ([section 2.8](#28-publish-last) rule 2). A global
+list that any CPU drains broke this: another CPU could unmap the stack while the exiting CPU was
+still running `schedule()` on it (F012), and an exit burst filled its 8 slots (F010). Now
+`thread_exit` parks the stack in its own CPU's slot, and only that CPU's switch tail
+(`thread_init::finish_switch`), after `switch_context` has returned, moves it to the CPU's stack
+cache or dead list; that CPU's worker unmaps what the cache cannot take, with IF=1 ([§4.5](#45-kernel-virtual-address-allocator)).
 
 ## 9.3 Interrupts
 

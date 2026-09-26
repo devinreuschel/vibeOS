@@ -170,10 +170,7 @@ F083) replaces them with one `KError` table that generates §2.
 - `fork` near memory exhaustion: a kernel stack that cannot be allocated
   returns `ENOMEM` and frees the clone, but the child's TCB box and the
   boxed address space panic when the heap cannot grow, until ROADMAP
-  §10.4's fallible allocation. More
-  than 8 exits in a row, each switching to a thread resumed from timer
-  preemption, overflow the 8-entry deferred-stack list, and `defer_free`
-  panics on a full list (F010; ROADMAP §10.10)
+  §10.4's fallible allocation (F010; ROADMAP §10.4)
 
 ---
 
@@ -379,8 +376,7 @@ does not meet this yet:
   `wait_acks`, which logs the late CPU once a second, until the write ends
   (F011; ROADMAP §10.10)
 - an ELF with a huge `p_memsz` (§3.1; F009, ROADMAP §10.6)
-- a `fork` near memory exhaustion, or a burst of exits (§2.1; F010,
-  ROADMAP §10.10)
+- a `fork` near memory exhaustion (§2.1; F010, ROADMAP §10.10)
 
 ---
 

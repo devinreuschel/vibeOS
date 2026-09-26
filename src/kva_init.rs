@@ -1,8 +1,9 @@
 //! Kernel-side KVA: range allocator plus mapping. DESIGN §4.5 / §7.9.
 //!
 //! `vibeos::kva::Kva` hands out VA. This module maps order-0 frames into
-//! the reserved ranges, leaves the guard page unmapped, and keeps a
-//! deferred-free list for stacks that cannot be unmapped from themselves.
+//! the reserved ranges and leaves the guard page unmapped. A dead thread's
+//! stack waits on its CPU's dead list, linked through the stacks themselves
+//! ([`park_on_list`]), until that CPU's worker frees it ([`free_parked`]).
 //! The KVA free-list lives under the page-table lock. Unmap, drop PT,
 //! shootdown, then free VA to the tail.
 #![allow(dead_code)]
@@ -18,10 +19,6 @@ use crate::paging_init;
 use crate::pmm_init;
 
 static KVA: IrqCell<Kva> = IrqCell::new(Kva::empty());
-
-use vibeos::limits::MAX_DEFERRED_STACKS as MAX_DEFERRED;
-static DEFERRED: IrqCell<[Option<GuardedStack>; MAX_DEFERRED]> =
-    IrqCell::new([const { None }; MAX_DEFERRED]);
 
 use vibeos::limits::MAX_UNMAP_PAGES as MAX_UNMAP;
 
@@ -113,40 +110,49 @@ pub fn free_stack(stack: GuardedStack) {
     unsafe { free_stack_shootdown(stack) };
 }
 
-/// Park a stack on the deferred list. Drain from a context that is not
-/// running on it.
-pub fn defer_free(stack: GuardedStack) {
-    paging_init::with_pt(|| {
-        DEFERRED.with(|slots| {
-            for slot in slots.iter_mut() {
-                if slot.is_none() {
-                    *slot = Some(stack);
-                    return;
-                }
-            }
-            panic!("kva: deferred free list full");
-        });
-    });
+/// A dead stack on a dead list: the link and the stack's own handle,
+/// written into the stack's lowest mapped bytes.
+#[repr(C)]
+struct Parked {
+    next: u64,
+    stack: GuardedStack,
 }
 
-pub fn drain_deferred() {
-    let mut pending: [Option<GuardedStack>; MAX_DEFERRED] = [const { None }; MAX_DEFERRED];
-    paging_init::with_pt(|| {
-        DEFERRED.with(|slots| {
-            let mut i = 0;
-            while i < MAX_DEFERRED {
-                pending[i] = slots[i].take();
-                i += 1;
-            }
-        });
-    });
-    let mut i = 0;
-    while i < MAX_DEFERRED {
-        if let Some(s) = pending[i].take() {
-            unsafe { free_stack_shootdown(s) };
-        }
-        i += 1;
+// A node fits in one page, and a stack maps at least one.
+const _: () = assert!(core::mem::size_of::<Parked>() <= PAGE_SIZE as usize);
+const _: () = assert!(core::mem::align_of::<Parked>() <= PAGE_SIZE as usize);
+
+/// Push `stack` onto the dead list at `head`, linked through the stack
+/// itself: the node is written into its lowest mapped page. No thread runs
+/// on `stack` any more, and nothing but the list holds it until
+/// [`free_parked`] takes it back.
+pub(crate) fn park_on_list(head: &mut u64, stack: GuardedStack) {
+    let node = stack.base().as_u64();
+    // SAFETY: invariant I10, established at `thread_init::finish_switch`
+    // (and for the test hook `thread_init::testing::park_on_local_list`, a
+    // stack no thread was given): no CPU runs on `stack`, its lowest page is
+    // mapped writable (`kva_init::alloc_guarded_stack`), page-aligned and
+    // one page holds a node (the const assertions above), and this handle
+    // alone names the range, so nothing else reads or writes the node.
+    unsafe { core::ptr::write(node as *mut Parked, Parked { next: *head, stack }) };
+    *head = node;
+}
+
+/// Free every stack on the dead list `head`, which the caller took whole
+/// off its owner (`thread_init::take_dead_stacks`). IF=1. Returns how many.
+pub(crate) fn free_parked(mut head: u64) -> usize {
+    let mut n = 0usize;
+    while head != 0 {
+        // SAFETY: invariant I10, established at `thread_init::finish_switch`:
+        // `head` is a node `park_on_list` wrote into a stack no CPU runs on,
+        // and the list was taken whole, so this is the one read of it; the
+        // link and the handle are moved out before the stack is freed.
+        let Parked { next, stack } = unsafe { core::ptr::read(head as *const Parked) };
+        free_stack(stack);
+        head = next;
+        n += 1;
     }
+    n
 }
 
 /// Present `frames` contiguously. Caller keeps the frames; `vunmap`
@@ -190,7 +196,9 @@ pub fn vunmap(va: VirtAddr, nframes: usize) {
 }
 
 /// # Safety
-/// `stack` was allocated by this KVA; not the running stack.
+/// `stack` was allocated by this KVA, and no CPU runs on it: invariant
+/// I10, a dead thread's stack is freed only after its CPU has switched off
+/// it (`thread_init::finish_switch`).
 unsafe fn free_stack_shootdown(stack: GuardedStack) {
     // SAFETY: `unmap_shootdown` below unmaps the range and shoots it down
     // before the frames and the VA are freed (the contract

@@ -60,8 +60,6 @@ pub const MAX_WALK: u32 = 80;
 /// Kernel virtual-address free-list nodes (`kva::Kva`). A `u8` holds the
 /// count (`kva::Kva`'s `nslots`), hence the assert below.
 pub const MAX_KVA_RANGES: usize = 128;
-/// Kernel stacks awaiting deferred reclaim (`kva_init`).
-pub const MAX_DEFERRED_STACKS: usize = 8;
 /// Pages one deferred unmap batch holds (`kva_init`).
 pub const MAX_UNMAP_PAGES: usize = 32;
 /// Mounted FAT volumes (`fat_init`).

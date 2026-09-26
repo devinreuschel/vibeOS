@@ -87,6 +87,11 @@ GONE: list[tuple[str, str]] = [
     ("writeback_all", "the block layer keeps only the orders DESIGN §10.2 names"),
     ("set_hhdm_offset", "a `Buddy::new` argument replaces"),
     ("from_phys", "`DmaBuffer` and `GuardedStack` are move-only"),
+    ("DEFERRED", "every switch tail empties the"),
+    ("MAX_DEFERRED", "every switch tail empties the"),
+    ("MAX_DEFERRED_STACKS", "every switch tail empties the"),
+    ("defer_free", "every switch tail empties the"),
+    ("reap_zombies", "a dead thread's kernel stack is reused"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

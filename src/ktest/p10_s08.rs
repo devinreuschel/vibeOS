@@ -35,12 +35,10 @@ pub(crate) fn quiescent_free_frames() -> usize {
 }
 
 /// Wait, bounded, until no thread but this one and the idle threads is
-/// Ready or Running, then reclaim the stacks dead threads left. False if
-/// the threads did not settle in time.
+/// Ready or Running and no dead thread's stack sits in a CPU's dead-stack
+/// slot or on its dead list. False if that did not happen in time.
 fn quiesce() -> bool {
-    let settled = super::settle_threads();
-    thread_init::reap_zombies();
-    settled
+    super::settle_threads()
 }
 
 fn dying_entry() {}
@@ -92,6 +90,8 @@ fn release_buddy(held: &mut [Option<Frames>; OOM_HOLD]) {
 /// returns `SpawnError::NoMemory` and the kernel stays up (ROADMAP §10.10,
 /// F010).
 fn spawn_stack_oom() -> Outcome {
+    // A cached stack would let the spawn succeed with the buddy empty.
+    thread_init::testing::drain_local_stack_cache();
     let base = quiescent_free_frames();
     let mut held: [Option<Frames>; OOM_HOLD] = [const { None }; OOM_HOLD];
     // IF off on this CPU keeps the drained window short.

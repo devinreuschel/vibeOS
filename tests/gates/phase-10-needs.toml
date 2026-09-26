@@ -29,7 +29,7 @@ needs = ["every IDT vector enters through a stub that `arch/idt.rs` generates"]
 why = "claim: reopened (F004); the generated stubs make the swapgs decision"
 
 [[box]]
-key = "the scheduler is SMP-safe; today another CPU can unmap"
+key = "the scheduler is SMP-safe"
 needs = [
   "a dead thread's kernel stack is reused or freed only by the CPU that ran it",
   "`PerCpu` split into owner-only state and a remote view",

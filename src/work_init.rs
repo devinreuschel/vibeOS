@@ -12,6 +12,7 @@ use vibeos::work::{WorkItem, WorkQueues};
 
 use crate::cell::IrqCell;
 use crate::irq_init;
+use crate::kva_init;
 use crate::per_cpu_init;
 use crate::thread_init;
 
@@ -62,11 +63,8 @@ fn my_queue() -> usize {
     (thread_init::current_cpu() as usize).min(MAX_IPI_CPUS - 1)
 }
 
-/// Wake this CPU's worker. IF=0 or IF=1; takes SCHED.
-#[allow(
-    dead_code,
-    reason = "the switch tail's dead-stack list calls it from ROADMAP §10.10"
-)]
+/// Wake this CPU's worker to free its dead stacks. IF=0 or IF=1; takes
+/// SCHED, so never under it.
 pub(crate) fn kick_dead_stacks() {
     let me = my_queue();
     thread_init::with_sched(|s| {
@@ -76,21 +74,40 @@ pub(crate) fn kick_dead_stacks() {
     });
 }
 
+enum Next {
+    /// This CPU's dead list, taken whole.
+    DeadStacks(u64),
+    Item(WorkItem),
+    Wait,
+}
+
+/// One per CPU, pinned. First this CPU's dead stacks, freed with IF=1,
+/// then the shared ring. The switch tail that parks a stack runs on this
+/// CPU with IF=0 and wakes this queue, so the check under SCHED loses no
+/// wake-up.
 fn worker() {
     let me = my_queue();
     loop {
-        let item = thread_init::with_sched(|s| {
+        let next = thread_init::with_sched(|s| {
+            let head = thread_init::take_dead_stacks();
+            if head != 0 {
+                return Next::DeadStacks(head);
+            }
             ST.with(|st| {
                 if let Some(w) = st.q.pop() {
-                    return Some(w);
+                    return Next::Item(w);
                 }
                 s.begin_wait(&mut st.wq[me], FAR_DEADLINE);
-                None
+                Next::Wait
             })
         });
-        match item {
-            Some(w) => w.run(),
-            None => thread_init::schedule(),
+        match next {
+            Next::DeadStacks(head) => {
+                let n = kva_init::free_parked(head);
+                thread_init::stacks_reclaimed(n);
+            }
+            Next::Item(w) => w.run(),
+            Next::Wait => thread_init::schedule(),
         }
     }
 }

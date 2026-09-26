@@ -57,9 +57,6 @@ pub fn on_timer_tick() {
 /// Shared idle body for BSP and APs. DESIGN §7.8.
 pub fn idle_loop() -> ! {
     loop {
-        // Timer preempt resumes idle with from_irq, so schedule skips
-        // reap. Drain here: not on a dying stack, not on the IRQ path.
-        thread_init::reap_zombies();
         thread_init::yield_now();
         thread_init::halt_if_idle();
     }
