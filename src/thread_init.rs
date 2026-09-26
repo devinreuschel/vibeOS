@@ -514,6 +514,10 @@ pub fn make_ready(id: ThreadId) {
 
 /// AP idle: running on `stack` already. No synthetic frame, not on the FIFO.
 /// `Err(stack)` hands the stack back when no TCB slot is free.
+#[allow(
+    clippy::result_large_err,
+    reason = "the stack comes back by value so the caller frees it once; a Box would allocate on the failure path"
+)]
 pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, GuardedStack> {
     let mut tcb = Box::new(Tcb {
         id: ThreadId(0),

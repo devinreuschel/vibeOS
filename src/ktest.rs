@@ -21,9 +21,11 @@ use vibeos::fs::{FsError, InodeKind, O_CREAT, O_RDWR};
 use vibeos::heap::HEAP_SIZE;
 use vibeos::irq::{self, IrqError};
 use vibeos::kva::PAGE_SIZE;
+use vibeos::lock::RANK_DEVICE;
 use vibeos::paging::{PAGE_SIZE_4K, PageFlags, PhysAddr, USER_END, VirtAddr, heap_flags};
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
 use vibeos::per_cpu::PerCpuRemote;
+use vibeos::pmm::Frames;
 use vibeos::proc::{SIGILL, wait_exited, wait_signaled, wexitstatus, wifexited};
 use vibeos::thread::{ThreadId, ThreadState};
 use vibeos::time::{CalibSource, Instant, calib_band, calib_in_band};
@@ -564,11 +566,14 @@ pub(crate) fn free_frames() -> usize {
 }
 
 pub(crate) fn alloc_frame() -> Option<PhysAddr> {
-    pmm_init::with_buddy(|b| b.allocate_frame()).map(PhysAddr)
+    alloc_frames(0)
 }
 
 pub(crate) fn free_frame(pa: PhysAddr) {
-    pmm_init::with_buddy(|b| unsafe { b.deallocate_frame(pa.as_u64()) });
+    // SAFETY: an unknown base frees nothing, and a held one is freed once
+    // (`ktest::take_held` removes it), so the contract of
+    // `ktest::dealloc_frames` holds for any `pa`.
+    unsafe { dealloc_frames(pa, 0) };
 }
 
 pub(crate) struct Fault {
@@ -602,19 +607,56 @@ pub(crate) fn spawn_thread_on(name: &'static str, entry: fn(), cpu: u32) -> Thre
     thread_init::spawn_on(name, entry, cpu)
 }
 
-/// A naturally aligned block of `1 << order` frames.
-pub(crate) fn alloc_frames(order: u8) -> Option<PhysAddr> {
-    pmm_init::with_buddy(|b| b.allocate(order)).map(PhysAddr)
+/// Blocks the frame helpers handed out, as the `Frames` that own them.
+/// The helpers trade bare addresses (C-SUITES), so the tokens wait here.
+/// Never held together with BUDDY.
+static HELD: SpinMutex<[Option<Frames>; 16]> =
+    SpinMutex::with_rank([const { None }; 16], RANK_DEVICE);
+
+/// Remove and return the held token whose base is `pa`.
+fn take_held(pa: PhysAddr) -> Option<Frames> {
+    let mut held = HELD.lock();
+    let slot = held
+        .iter_mut()
+        .find(|s| s.as_ref().is_some_and(|f| f.base() == pa.as_u64()))?;
+    slot.take()
 }
 
+/// A naturally aligned block of `1 << order` frames. `None` when the
+/// buddy is out, or when 16 blocks are already out through these helpers.
+pub(crate) fn alloc_frames(order: u8) -> Option<PhysAddr> {
+    let f = pmm_init::with_buddy(|b| b.alloc(order))?;
+    let pa = PhysAddr(f.base());
+    let spare = {
+        let mut held = HELD.lock();
+        match held.iter_mut().find(|s| s.is_none()) {
+            Some(slot) => {
+                *slot = Some(f);
+                None
+            }
+            None => Some(f),
+        }
+    };
+    match spare {
+        None => Some(pa),
+        Some(f) => {
+            pmm_init::with_buddy(|b| b.free(f));
+            None
+        }
+    }
+}
+
+/// Free a block [`alloc_frames`] returned. A base it did not hand out, or
+/// already freed, is ignored.
+///
 /// # Safety
 /// `pa` is a block that [`alloc_frames`] returned for this same `order`, and
-/// it is freed once.
+/// nothing still maps or uses it.
 pub(crate) unsafe fn dealloc_frames(pa: PhysAddr, order: u8) {
-    // SAFETY: `pa` is a live order-`order` block from `pmm::Buddy::allocate`,
-    // freed once; established by `ktest::alloc_frames` and this fn's
-    // `# Safety` contract.
-    pmm_init::with_buddy(|b| unsafe { b.deallocate(pa.as_u64(), order) });
+    if let Some(f) = take_held(pa) {
+        debug_assert_eq!(f.order(), order, "ktest: dealloc_frames order");
+        pmm_init::with_buddy(|b| b.free(f));
+    }
 }
 
 pub(crate) fn cpu_remote(id: u32) -> Option<&'static PerCpuRemote> {

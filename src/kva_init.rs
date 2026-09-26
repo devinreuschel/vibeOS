@@ -9,6 +9,7 @@
 
 use vibeos::kva::{KVA_END, KVA_SIZE, KVA_START, Kva, KvaError, KvaStats, PAGE_SIZE};
 use vibeos::paging::{PhysAddr, VirtAddr, heap_flags, stack_flags};
+use vibeos::pmm::Frames;
 pub use vibeos::thread::GuardedStack;
 use vibeos::thread::MAX_STACK_PAGES;
 
@@ -55,61 +56,56 @@ pub fn alloc_guarded_stack(pages: usize) -> Result<GuardedStack, KvaError> {
     if pages == 0 || pages > MAX_STACK_PAGES {
         return Err(KvaError::Size);
     }
-    let mut vas = [VirtAddr(0); MAX_STACK_PAGES];
-    let mut failed_pas = [0u64; MAX_UNMAP];
-    let mut failed_n = 0usize;
-    let mut failed_mapped = 0usize;
-    let guard = paging_init::with_pt(|| {
-        let guard_u = KVA.with(|k| k.alloc_guarded(pages)).ok_or(KvaError::NoVa)?;
-        let guard = VirtAddr(guard_u);
-        for (i, slot) in vas.iter_mut().take(pages).enumerate() {
-            let va = VirtAddr(guard_u + PAGE_SIZE * (i as u64 + 1));
-            let Some(pa) = pmm_init::with_buddy(|b| b.allocate_frame()) else {
-                failed_mapped = i;
-                failed_n = unsafe { unwind_stack_locked(guard, i, pages, &mut failed_pas) };
-                return Err(KvaError::NoFrames);
-            };
-            if unsafe { paging_init::map_4k_locked(va, PhysAddr(pa), stack_flags()) }.is_err() {
-                pmm_init::with_buddy(|b| unsafe { b.deallocate_frame(pa) });
-                failed_mapped = i;
-                failed_n = unsafe { unwind_stack_locked(guard, i, pages, &mut failed_pas) };
+    let guard = paging_init::with_pt(|| KVA.with(|k| k.alloc_guarded(pages)))
+        .map(VirtAddr)
+        .ok_or(KvaError::NoVa)?;
+    let base = VirtAddr(guard.as_u64() + PAGE_SIZE);
+    let mut frames: [Option<Frames>; MAX_STACK_PAGES] = [const { None }; MAX_STACK_PAGES];
+    let mut mapped = 0usize;
+    let r = paging_init::with_pt(|| {
+        while mapped < pages {
+            let va = VirtAddr(base.as_u64() + PAGE_SIZE * mapped as u64);
+            let f = pmm_init::with_buddy(|b| b.alloc(0)).ok_or(KvaError::NoFrames)?;
+            let pa = PhysAddr(f.base());
+            frames[mapped] = Some(f);
+            if unsafe { paging_init::map_4k_locked(va, pa, stack_flags()) }.is_err() {
                 return Err(KvaError::Map);
             }
-            *slot = va;
+            mapped += 1;
         }
-        Ok(guard)
+        Ok(())
     });
-    let guard = match guard {
-        Ok(g) => g,
-        Err(e) => {
-            let mut j = 0;
-            while j < failed_mapped {
-                vibeos::paging::tlb_shootdown_others(vas[j]);
-                j += 1;
-            }
-            if failed_n != 0 {
-                pmm_init::with_buddy(|b| {
-                    let mut j = 0;
-                    while j < failed_n {
-                        unsafe { b.deallocate_frame(failed_pas[j]) };
-                        j += 1;
-                    }
-                });
-            }
-            return Err(e);
-        }
-    };
+    if let Err(e) = r {
+        // Unmap and shoot down what was mapped, and only then free the
+        // frames and the VA.
+        unmap_shootdown(base, mapped);
+        free_frames(&mut frames);
+        free_va(guard, (pages as u64 + 1) * PAGE_SIZE);
+        return Err(e);
+    }
     let mut i = 0;
     while i < pages {
-        vibeos::paging::tlb_shootdown_others(vas[i]);
+        vibeos::paging::tlb_shootdown_others(VirtAddr(base.as_u64() + PAGE_SIZE * i as u64));
         i += 1;
     }
     // SAFETY: `[guard, guard + (pages + 1) pages)` came from
-    // `Kva::alloc_guarded(pages)` above, every upper page was mapped and
-    // shot down, and the guard page was never mapped; this is the only
-    // handle built for the range (the stack-range invariant `GuardedStack`
-    // states, established here).
-    Ok(unsafe { GuardedStack::from_raw_parts(guard, pages) })
+    // `Kva::alloc_guarded(pages)` above, upper page `i` maps `frames[i]`
+    // (the loop above), the other slots are `None`, the guard page was
+    // never mapped, and this is the only handle built for the range (the
+    // contract `GuardedStack::from_raw_parts` states, established here).
+    Ok(unsafe { GuardedStack::from_raw_parts(guard, pages, frames) })
+}
+
+/// Return each held frame to the buddy. Only after the pages that mapped
+/// them are unmapped and shot down.
+fn free_frames(frames: &mut [Option<Frames>]) {
+    pmm_init::with_buddy(|b| {
+        for slot in frames.iter_mut() {
+            if let Some(f) = slot.take() {
+                b.free(f);
+            }
+        }
+    });
 }
 
 /// Unmap `stack`, shoot it down, then free its frames and its VA.
@@ -184,7 +180,7 @@ pub fn vmap(frames: &[PhysAddr]) -> Option<VirtAddr> {
 }
 
 pub fn vunmap(va: VirtAddr, nframes: usize) {
-    unmap_shootdown(va, nframes, false);
+    unmap_shootdown(va, nframes);
     paging_init::with_pt(|| {
         KVA.with(|k| {
             k.free(va.as_u64(), nframes as u64 * PAGE_SIZE)
@@ -199,46 +195,21 @@ unsafe fn free_stack_shootdown(stack: GuardedStack) {
     // SAFETY: `unmap_shootdown` below unmaps the range and shoots it down
     // before the frames and the VA are freed (the contract
     // `GuardedStack::into_raw_parts` states, met here).
-    let (guard, pages) = unsafe { stack.into_raw_parts() };
-    unmap_shootdown(VirtAddr(guard.as_u64() + PAGE_SIZE), pages, true);
-    paging_init::with_pt(|| {
-        KVA.with(|k| {
-            k.free(guard.as_u64(), (pages as u64 + 1) * PAGE_SIZE)
-                .expect("kva: free-list");
-        });
-    });
+    let (guard, pages, mut frames) = unsafe { stack.into_raw_parts() };
+    unmap_shootdown(VirtAddr(guard.as_u64() + PAGE_SIZE), pages);
+    free_frames(&mut frames);
+    free_va(guard, (pages as u64 + 1) * PAGE_SIZE);
 }
 
-/// Unmap `n` pages, drop PT, shootdown. If `free_frames`, return them to
-/// the buddy after the shootdown.
-fn unmap_shootdown(va: VirtAddr, n: usize, free_frames: bool) {
-    let mut pas = [0u64; MAX_UNMAP];
-    let mut np = 0usize;
+/// Unmap `n` pages, drop PT, shootdown. Frees nothing: the caller owns
+/// the frames and frees them after this returns.
+fn unmap_shootdown(va: VirtAddr, n: usize) {
     let n = n.min(MAX_UNMAP);
-    paging_init::with_pt(|| {
-        let mut i = 0;
-        while i < n {
-            let page = VirtAddr(va.as_u64() + i as u64 * PAGE_SIZE);
-            if let Some((pa, _)) = unsafe { paging_init::unmap_4k_locked(page) } {
-                pas[np] = pa.as_u64();
-                np += 1;
-            }
-            i += 1;
-        }
-    });
+    paging_init::with_pt(|| unsafe { unmap_only_locked(va, n) });
     let mut i = 0;
     while i < n {
         vibeos::paging::tlb_shootdown_others(VirtAddr(va.as_u64() + i as u64 * PAGE_SIZE));
         i += 1;
-    }
-    if free_frames {
-        pmm_init::with_buddy(|b| {
-            let mut j = 0;
-            while j < np {
-                unsafe { b.deallocate_frame(pas[j]) };
-                j += 1;
-            }
-        });
     }
 }
 
@@ -251,41 +222,4 @@ unsafe fn unmap_only_locked(va: VirtAddr, n: usize) {
         let _ = unsafe { paging_init::unmap_4k_locked(page) };
         i += 1;
     }
-}
-
-/// Unmap `n` pages under PT. Caller shootdowns, then frees frames.
-///
-/// # Safety
-/// Caller holds the PT lock; `out` is large enough.
-unsafe fn unmap_collect_locked(va: VirtAddr, n: usize, out: &mut [u64; MAX_UNMAP]) -> usize {
-    let mut np = 0usize;
-    let mut i = 0;
-    while i < n {
-        let page = VirtAddr(va.as_u64() + i as u64 * PAGE_SIZE);
-        if let Some((pa, _)) = unsafe { paging_init::unmap_4k_locked(page) } {
-            out[np] = pa.as_u64();
-            np += 1;
-        }
-        i += 1;
-    }
-    np
-}
-
-/// Partial guarded-stack construction failed after `mapped` upper pages.
-/// Caller holds PT. Unmap + free VA; frames are returned after shootdown.
-///
-/// # Safety
-/// Caller holds the PT lock; `guard` is the failed allocation.
-unsafe fn unwind_stack_locked(
-    guard: VirtAddr,
-    mapped: usize,
-    pages: usize,
-    out_pas: &mut [u64; MAX_UNMAP],
-) -> usize {
-    let np = unsafe { unmap_collect_locked(VirtAddr(guard.as_u64() + PAGE_SIZE), mapped, out_pas) };
-    KVA.with(|k| {
-        k.free(guard.as_u64(), (pages as u64 + 1) * PAGE_SIZE)
-            .expect("kva: free-list")
-    });
-    np
 }

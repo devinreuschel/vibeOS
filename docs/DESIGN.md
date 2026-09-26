@@ -2222,8 +2222,9 @@ non-contiguous frames is the second.
   move-only handle with private fields; only `kva_init::alloc_guarded_stack` builds one, and
   `free_stack` takes it by value.
 - Stack frames are allocated as *n* separate order-0 frames, not one order-*k* block. Stacks do not
-  need physical contiguity and requesting it fragments the buddy allocator for nothing. Planned
-  (ROADMAP §10.3): the `GuardedStack` holds each frame's `Frames` (§4.2).
+  need physical contiguity and requesting it fragments the buddy allocator for nothing. The
+  `GuardedStack` holds each frame's `Frames` (§4.2), and `free_stack` frees those tokens after the
+  shootdown, never whatever the page-table entries name.
 - A freed VA range returns to the free list only after its shootdown completes (§2.4;
   `kva_init::unmap_shootdown`). Freed ranges go to the tail of the free list, so a stale pointer into
   one keeps faulting for as long as possible instead of reaching the range's next owner; that is a
@@ -2349,11 +2350,12 @@ adopts the chained design when the 99th percentile passes 64.
 
 ## 4.7 DMA
 
-`DmaBuffer` is physically contiguous (buddy `allocate_constrained`: size, alignment, and an optional
-power-of-two boundary the buffer must not cross). `DmaBuffer` is a move-only handle with private
-fields; only `dma::alloc_from_buddy`, which `dma_init::alloc` calls, builds one, and `dma_init::free`
-takes it by value. Planned (ROADMAP §10.3): it holds the `Frames`
-that `alloc_constrained` returns (§4.2). A boundary is not an address limit:
+`DmaBuffer` is physically contiguous: one buddy block whose order `DmaAlloc::order` picks from the
+size, the alignment, and an optional power-of-two boundary the buffer must not cross, refusing a size
+above the boundary. `DmaBuffer` is a move-only handle with private fields; only
+`dma::alloc_from_buddy`, which `dma_init::alloc` calls, builds one, and `dma_init::free` takes it by
+value. It holds the `Frames` that `alloc_constrained` returns (§4.2), with `max_phys = u64::MAX`,
+since no address limit applies until ROADMAP §20.6. A boundary is not an address limit:
 `DmaAlloc::dma32` sets a 4 GiB boundary, so its buffer never crosses a 4 GiB line, but the buffer can
 lie above 4 GiB once RAM extends there, and no allocator keeps a 32-bit device's buffer below 4 GiB
 (ROADMAP §20.6, F030). The device-visible address is `dma_to_device(phys)` (identity until an IOMMU

@@ -7,7 +7,7 @@
 
 use core::sync::atomic::{Ordering, compiler_fence, fence};
 
-use crate::pmm::{self, Buddy, PAGE_SIZE};
+use crate::pmm::{self, Buddy, Frames, PAGE_SIZE};
 
 /// Address a device programs into a descriptor. Not a CPU VA.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,6 +92,19 @@ impl DmaAlloc {
             boundary: DMA32_BOUNDARY,
         }
     }
+
+    /// Buddy order of the block that holds this request: `size` bytes at
+    /// `align`, not crossing `boundary`. A naturally aligned block never
+    /// lets `[base, base + size)` cross a power-of-two boundary that
+    /// `size` does not exceed, so the only refusals the boundary adds are
+    /// a boundary that is not a power of two and a `size` above it.
+    pub fn order(&self) -> Option<u8> {
+        let order = Buddy::order_for(self.size, self.align)?;
+        if self.boundary != 0 && (!self.boundary.is_power_of_two() || self.size > self.boundary) {
+            return None;
+        }
+        Some(order)
+    }
 }
 
 /// Physically contiguous DMA memory: a move-only handle with private
@@ -124,15 +137,14 @@ impl DmaAlloc {
 /// ```
 pub struct DmaBuffer {
     virt: u64,
-    phys: u64,
     len: u64,
-    order: u8,
+    frames: Frames,
 }
 
 impl DmaBuffer {
     /// Physical base of the block.
     pub fn phys(&self) -> u64 {
-        self.phys
+        self.frames.base()
     }
 
     /// Kernel VA of the block.
@@ -152,7 +164,7 @@ impl DmaBuffer {
 
     /// Address a device programs into a descriptor.
     pub fn device(&self) -> DeviceAddr {
-        dma_to_device(self.phys)
+        dma_to_device(self.phys())
     }
 
     pub fn sync_for_device(&self) {
@@ -252,25 +264,28 @@ pub fn publish_index(slot: &core::sync::atomic::AtomicU16, idx: u16) {
 
 /// The one constructor of [`DmaBuffer`]. `virt_of` maps the block's
 /// physical base to the kernel VA the CPU uses.
+///
+/// No address limit applies: `max_phys` is `u64::MAX` until ROADMAP §20.6
+/// (F030) keeps a 32-bit device's buffer below 4 GiB.
 pub fn alloc_from_buddy(
     buddy: &mut Buddy,
     spec: DmaAlloc,
     virt_of: impl Fn(u64) -> u64,
 ) -> Option<DmaBuffer> {
-    let (phys, order) = buddy.allocate_constrained(spec.size, spec.align, spec.boundary)?;
+    let frames = buddy.alloc_constrained(spec.order()?, u64::MAX)?;
     let buf = DmaBuffer {
-        virt: virt_of(phys),
-        phys,
+        virt: virt_of(frames.base()),
         len: spec.size,
-        order,
+        frames,
     };
     buf.sync_for_device();
     Some(buf)
 }
 
+/// Takes the buffer by value and frees its block once.
 pub fn free_to_buddy(buddy: &mut Buddy, buf: DmaBuffer) {
     buf.sync_for_cpu();
-    unsafe { buddy.deallocate(buf.phys, buf.order) };
+    buddy.free(buf.frames);
 }
 
 pub fn crosses_boundary(phys: u64, size: u64, boundary: u64) -> bool {
@@ -342,6 +357,33 @@ mod tests {
         }
         assert_eq!(s.push(DeviceAddr(1), 8), Err(DmaError::SgFull));
         assert_eq!(DmaError::Boundary.as_str(), "boundary");
+    }
+
+    #[test]
+    fn dma_order_refuses_oversize_boundary() {
+        let fits = DmaAlloc {
+            size: 0x800,
+            align: PAGE_SIZE,
+            boundary: 0x800,
+        };
+        assert_eq!(fits.order(), Some(0));
+        let over = DmaAlloc {
+            size: 0x1000,
+            ..fits
+        };
+        assert_eq!(over.order(), None);
+        let odd = DmaAlloc {
+            size: 0x800,
+            align: PAGE_SIZE,
+            boundary: 0x3000,
+        };
+        assert_eq!(odd.order(), None);
+        assert_eq!(DmaAlloc::new(0x3000).order(), Some(2));
+        assert_eq!(DmaAlloc::dma32(0x1000).order(), Some(0));
+        assert_eq!(DmaAlloc::new(0).order(), None);
+        let mut p = Pool::new(16);
+        assert!(alloc_from_buddy(&mut p.buddy, over, |phys| phys).is_none());
+        assert_eq!(p.buddy.stats().free_frames, 16);
     }
 
     #[test]

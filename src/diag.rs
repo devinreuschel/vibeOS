@@ -35,6 +35,11 @@ pub fn meminfo_to(w: &mut impl Write) {
     );
     let _ = writeln!(
         w,
+        "vibeOS: meminfo: leaked {} frames",
+        vibeos::pmm::leaked_frames()
+    );
+    let _ = writeln!(
+        w,
         "vibeOS: meminfo: heap used {} B / capacity {} B",
         heap.used, heap.capacity
     );
