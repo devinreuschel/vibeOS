@@ -126,7 +126,7 @@ names, Linux values:
 | `ENOEXEC` | 8 | malformed ELF, `ET_DYN`, or `PT_INTERP` |
 | `EBADF` | 9 | closed / out-of-range fd |
 | `ECHILD` | 10 | `wait4` with no matching child |
-| `EAGAIN` | 11 | `fork` with pids 2 to 15 all in use, zombies included (`MAX_PROCS` is 16; pid 0 is unused and pid 1 is reserved for `/sbin/init`) |
+| `EAGAIN` | 11 | `fork` with pids 2 to 17 all in use, zombies included (`MAX_PROCS` is 18; pid 0 is unused and pid 1 is reserved for `/sbin/init`) |
 | `ENOMEM` | 12 | AS clone / load; an ELF file above 64 KiB |
 | `EACCES` | 13 | defined; no syscall returns it |
 | `EFAULT` | 14 | bad user pointer / length |
@@ -167,11 +167,10 @@ F083) replaces them with one `KError` table that generates §2.
 - `dup` with a full fd table returns `EBADF` (Linux `EMFILE`) (ROADMAP §10.4)
 - `ENFILE`, `ENOSPC`, `ESPIPE`, `ENOTEMPTY`, and `ELOOP` are not
   defined in `src/syscall.rs` (F083; ROADMAP §10.4)
-- `fork` near memory exhaustion panics instead of returning `ENOMEM`:
-  `thread_init::spawn_inner` calls `expect` on its stack allocation. More
-  than 8 exits in a row, each switching to a thread resumed from timer
-  preemption, overflow the 8-entry deferred-stack list, and `defer_free`
-  panics on a full list (F010; ROADMAP §10.10)
+- `fork` near memory exhaustion: a kernel stack that cannot be allocated
+  returns `ENOMEM` and frees the clone, but the child's TCB box and the
+  boxed address space panic when the heap cannot grow, until ROADMAP
+  §10.4's fallible allocation (F010; ROADMAP §10.4)
 
 ---
 
@@ -377,8 +376,7 @@ does not meet this yet:
   `wait_acks`, which logs the late CPU once a second, until the write ends
   (F011; ROADMAP §10.10)
 - an ELF with a huge `p_memsz` (§3.1; F009, ROADMAP §10.6)
-- a `fork` near memory exhaustion, or a burst of exits (§2.1; F010,
-  ROADMAP §10.10)
+- a `fork` near memory exhaustion (§2.1; F010, ROADMAP §10.10)
 
 ---
 

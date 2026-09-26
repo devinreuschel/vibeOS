@@ -95,7 +95,9 @@ fn ktest_context() -> Outcome {
 
     CTX_RESULT.store(0, Ordering::Relaxed);
     CTX_DONE.store(false, Ordering::Relaxed);
-    thread_init::spawn_here("ktest-ctx-w", ctx_worker);
+    if thread_init::spawn_here("ktest-ctx-w", ctx_worker).is_err() {
+        return Outcome::Fail("spawn");
+    }
     let t0 = time_init::now_ns();
     while !CTX_DONE.load(Ordering::Acquire) {
         if time_init::now_ns().saturating_sub(t0) > WORKER_WAIT_NS {
@@ -144,14 +146,19 @@ fn msix_cpu_publish_last() -> Outcome {
     );
     super::reset_irq_obs();
     OBS_DONE.store(false, Ordering::Relaxed);
-    thread_init::spawn_opts(
+    if thread_init::spawn_opts(
         "obs-pub",
         obs_publisher,
         thread_init::SpawnOpts {
             stack_pages: DEFAULT_STACK_PAGES,
             cpu: Some(ap),
         },
-    );
+    )
+    .is_err()
+    {
+        OBS_STALL_NS.store(0, Ordering::Release);
+        return Outcome::Fail("spawn");
+    }
     let hit = super::spin_until_ns(|| IRQ_HITS.load(Ordering::SeqCst) != 0, OBS_WAIT_NS);
     let ap_hits = CPU_HITS[ap as usize].load(Ordering::SeqCst);
     let cpu = IRQ_CPU.load(Ordering::SeqCst);

@@ -228,7 +228,14 @@ fn irq_thread() {
 pub fn start_threaded() {
     let cpu = last_online_cpu();
     THREAD_CPU.store(cpu, Ordering::Release);
-    let _ = thread_init::spawn_on("irqth", irq_thread, cpu);
+    if let Err(e) = thread_init::spawn_on("irqth", irq_thread, cpu) {
+        crate::klog!(
+            vibeos::log::Level::Error,
+            "irq: threaded bottom half on cpu{cpu} not started: {}",
+            e.as_str()
+        );
+        return;
+    }
     thread_init::with_sched(|_| {
         IRQ.with(|s| s.th.started = true);
     });

@@ -29,7 +29,7 @@ needs = ["every IDT vector enters through a stub that `arch/idt.rs` generates"]
 why = "claim: reopened (F004); the generated stubs make the swapgs decision"
 
 [[box]]
-key = "the scheduler is SMP-safe; today another CPU can unmap"
+key = "the scheduler is SMP-safe"
 needs = [
   "a dead thread's kernel stack is reused or freed only by the CPU that ran it",
   "`PerCpu` split into owner-only state and a remote view",
@@ -513,6 +513,22 @@ needs = [
   "`BootCell<T>` is `Sync` only when",  # L1284
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1473
+[[box]]
+key = "every switch tail empties the"
+needs = [
+  "a dead thread's kernel stack is reused",  # L1472
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1247
+[[box]]
+key = "`reap_many_via_idle` compares frame counts against"
+needs = [
+  "`vibeos.ktest=<glob>` runs only the matching",  # L1228
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
 # L1294
 [[box]]
