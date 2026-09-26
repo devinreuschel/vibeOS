@@ -1,8 +1,8 @@
 //! Write-back block cache. ROADMAP §7.4.
 //!
 //! Sits above [`BlockDevice`] miss paths. Lock dropped before device
-//! I/O (RANK_DEVICE + blocking wait). Flush/barrier write dirty pages
-//! then call down into the device. Phase 12 makes this cache each block
+//! I/O (RANK_DEVICE + blocking wait). Flush writes dirty pages, then
+//! calls down into the device. Phase 12 makes this cache each block
 //! device's mapping in one page cache of mappings (DESIGN §10.6).
 
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
@@ -369,11 +369,6 @@ pub fn flush(dev: u32) -> Result<(), BlockError> {
         c.stats.device_flushes = c.stats.device_flushes.saturating_add(1);
     }
     Ok(())
-}
-
-#[allow(dead_code)]
-pub fn barrier(dev: u32) -> Result<(), BlockError> {
-    writeback_dev(Some(dev))
 }
 
 pub fn stats() -> CacheStats {

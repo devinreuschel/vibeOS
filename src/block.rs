@@ -3,19 +3,22 @@
 //! Portable. Kernel `block_init` owns ramdisk memory, completions, and
 //! the workqueue pump. Host tests drive [`Queue`] and [`Ramdisk`] over
 //! plain buffers.
+//!
+//! Ordering (DESIGN §10.2; a filesystem commit depends on it):
+//!
+//! - The queue orders nothing on its own. A caller that needs one write
+//!   durable or visible before another starts waits for its completion
+//!   first. There is no fence op.
+//! - [`Op::Flush`] makes durable every write whose completion was reported
+//!   before the `Flush` was submitted. [`Queue::pick`] returns a queued
+//!   `Flush` before any read, write, or discard, whatever is in flight, and
+//!   nothing waits behind it. Ramdisk flush is a successful no-op (memory
+//!   is the media).
+//!
+//! Completions: the queue lock is never held across `BlockDevice` I/O
+//! or a waiter wake. A later virtio-blk threaded IRQ (DESIGN §2.2 / §5.4)
+//! can call the same complete path. Hard IRQ only enqueues work.
 
-/// Barrier vs flush (journaled FS depends on this):
-///
-/// - [`Op::Barrier`] is an order fence in the request stream. Every
-///   request submitted before it completes before any request submitted
-///   after it starts. It does **not** push volatile cache to media.
-/// - [`Op::Flush`] is a barrier plus a device durable-write. Completes
-///   only after prior writes are as durable as the device can make them.
-///   Ramdisk flush is a successful no-op (memory is the media).
-///
-/// Completions: the queue lock is never held across `BlockDevice` I/O
-/// or a waiter wake. A later virtio-blk threaded IRQ (DESIGN §2.2 / §5.4)
-/// can call the same complete path. Hard IRQ only enqueues work.
 use crate::fmt_util;
 
 pub const DEFAULT_BLOCK_SIZE: u32 = 512;
@@ -76,14 +79,13 @@ impl DeviceState {
     }
 }
 
-/// See the module docs for barrier vs flush.
+/// See the module docs for what [`Op::Flush`] covers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
     Read,
     Write,
     Flush,
     Discard,
-    Barrier,
 }
 
 impl Op {
@@ -93,16 +95,11 @@ impl Op {
             Op::Write => "write",
             Op::Flush => "flush",
             Op::Discard => "discard",
-            Op::Barrier => "barrier",
         }
     }
 
     pub fn can_merge(self) -> bool {
         matches!(self, Op::Read | Op::Write | Op::Discard)
-    }
-
-    pub fn is_fence(self) -> bool {
-        matches!(self, Op::Flush | Op::Barrier)
     }
 
     pub fn needs_buf(self) -> bool {
@@ -303,7 +300,7 @@ fn merge_into(dst: &mut Request, src: Request, kind: MergeKind) -> bool {
 }
 
 /// Per-device pending list. C-LOOK elevator (one-way, wrap to lowest LBA).
-/// Fences ([`Op::Barrier`] / [`Op::Flush`]) hold back later seq numbers.
+/// A queued [`Op::Flush`] goes first and holds back nothing.
 pub struct Queue {
     slots: [Option<Request>; MAX_QUEUE],
     n: usize,
@@ -333,42 +330,15 @@ impl Queue {
         self.n == 0
     }
 
-    fn first_fence_seq(&self) -> u32 {
-        let mut fence = u32::MAX;
-        let mut i = 0usize;
-        while i < MAX_QUEUE {
-            if let Some(r) = self.slots[i]
-                && r.bio.op.is_fence()
-                && r.seq < fence
-            {
-                fence = r.seq;
-            }
-            i += 1;
-        }
-        fence
-    }
-
     fn try_merge(&mut self, req: &Request) -> bool {
         if !req.bio.op.can_merge() {
             return false;
         }
-        let fence = self.first_fence_seq();
         let mut i = 0usize;
         while i < MAX_QUEUE {
-            let slot = match self.slots[i] {
-                Some(s) => s,
-                None => {
-                    i += 1;
-                    continue;
-                }
-            };
-            let after_fence = fence == u32::MAX || slot.seq > fence;
-            if after_fence {
-                let kind = merge_kind(&slot, req);
-                if !matches!(kind, MergeKind::None)
-                    && let Some(dst) = self.slots[i].as_mut()
-                    && merge_into(dst, *req, kind)
-                {
+            if let Some(dst) = self.slots[i].as_mut() {
+                let kind = merge_kind(dst, req);
+                if !matches!(kind, MergeKind::None) && merge_into(dst, *req, kind) {
                     return true;
                 }
             }
@@ -406,7 +376,7 @@ impl Queue {
         self.insert_slot(req)
     }
 
-    /// Put a failed I/O back without a new seq (stay on this side of a fence).
+    /// Put a failed I/O back without a new seq.
     pub fn requeue(&mut self, req: Request) -> Result<(), BlockError> {
         if self.failed {
             return Err(BlockError::Failed);
@@ -423,23 +393,22 @@ impl Queue {
         Some(r)
     }
 
-    /// Next dispatchable request. None if idle.
+    /// Next dispatchable request. None if idle. The lowest-seq queued
+    /// [`Op::Flush`] first, then C-LOOK over the rest.
     pub fn pick(&mut self) -> Option<Request> {
         if self.n == 0 {
             return None;
         }
-        let fence = self.first_fence_seq();
+        let mut flush: Option<(u32, usize)> = None;
         let mut best_fwd: Option<(u64, usize)> = None;
         let mut best_wrap: Option<(u64, usize)> = None;
-        let mut fence_i: Option<usize> = None;
         let mut i = 0usize;
         while i < MAX_QUEUE {
-            if let Some(r) = self.slots[i]
-                && r.seq <= fence
-            {
-                if r.bio.op.is_fence() {
-                    if r.seq == fence {
-                        fence_i = Some(i);
+            if let Some(r) = self.slots[i] {
+                if r.bio.op == Op::Flush {
+                    match flush {
+                        Some((s, _)) if r.seq >= s => {}
+                        _ => flush = Some((r.seq, i)),
                     }
                 } else {
                     let lba = r.bio.lba;
@@ -458,12 +427,12 @@ impl Queue {
             }
             i += 1;
         }
-        let idx = if let Some((_, i)) = best_fwd {
-            i
-        } else if let Some((_, i)) = best_wrap {
-            i
-        } else {
-            fence_i?
+        if let Some((_, i)) = flush {
+            return self.take(i);
+        }
+        let idx = match (best_fwd, best_wrap) {
+            (Some((_, i)), _) | (None, Some((_, i))) => i,
+            (None, None) => return None,
         };
         let r = self.take(idx)?;
         self.last_lba = r.end_lba();
@@ -590,7 +559,6 @@ impl Ramdisk {
     pub fn apply(self, data: &mut [u8], req: &Request) -> Result<(), BlockError> {
         match req.bio.op {
             Op::Flush => self.flush(),
-            Op::Barrier => Ok(()),
             Op::Discard => self.discard(req.bio.lba, req.bio.nsect as u64),
             Op::Read | Op::Write => {
                 let bs = self.block_size as usize;
@@ -690,14 +658,11 @@ mod tests {
     }
 
     #[test]
-    fn no_merge_flush_or_barrier() {
+    fn no_merge_flush() {
         let mut q = Queue::new();
-        q.submit(wr(0, 1, 1)).unwrap();
         q.submit(Request::new(Op::Flush, 0, 0)).unwrap();
-        q.submit(wr(1, 1, 2)).unwrap();
-        assert_eq!(q.len(), 3);
-        q.submit(Request::new(Op::Barrier, 0, 0)).unwrap();
-        assert_eq!(q.len(), 4);
+        q.submit(Request::new(Op::Flush, 0, 0)).unwrap();
+        assert_eq!(q.len(), 2);
     }
 
     #[test]
@@ -736,36 +701,30 @@ mod tests {
     }
 
     #[test]
-    fn barrier_holds_later_requests() {
-        let mut q = Queue::new();
-        q.submit(wr(10, 1, 1)).unwrap();
-        q.submit(wr(0, 1, 2)).unwrap();
-        q.submit(Request::new(Op::Barrier, 0, 0)).unwrap();
-        q.submit(wr(5, 1, 3)).unwrap();
-        assert_eq!(q.pick().unwrap().bio.lba, 0);
-        assert_eq!(q.pick().unwrap().bio.lba, 10);
-        assert_eq!(q.pick().unwrap().bio.op, Op::Barrier);
-        assert_eq!(q.pick().unwrap().bio.lba, 5);
-    }
-
-    #[test]
-    fn flush_is_fence_then_device_op() {
+    fn flush_holds_up_no_later_request() {
         let mut q = Queue::new();
         q.submit(wr(3, 1, 1)).unwrap();
+        let w = q.pick().unwrap();
+        assert_eq!(w.bio.op, Op::Write);
+        // The write stays in flight: the Flush neither waits for it nor
+        // holds up the read submitted after it.
         q.submit(Request::new(Op::Flush, 0, 0)).unwrap();
-        q.submit(wr(1, 1, 2)).unwrap();
-        assert_eq!(q.pick().unwrap().bio.lba, 3);
+        q.submit(rd(1, 1, 2)).unwrap();
         assert_eq!(q.pick().unwrap().bio.op, Op::Flush);
-        assert_eq!(q.pick().unwrap().bio.lba, 1);
+        assert_eq!(q.pick().unwrap().bio.op, Op::Read);
+        assert!(q.pick().is_none());
     }
 
     #[test]
-    fn no_merge_across_barrier() {
+    fn writes_merge_across_a_flush() {
         let mut q = Queue::new();
         q.submit(wr(0, 1, 1)).unwrap();
-        q.submit(Request::new(Op::Barrier, 0, 0)).unwrap();
+        q.submit(Request::new(Op::Flush, 0, 0)).unwrap();
         q.submit(wr(1, 1, 2)).unwrap();
-        assert_eq!(q.len(), 3);
+        assert_eq!(q.len(), 2);
+        assert_eq!(q.pick().unwrap().bio.op, Op::Flush);
+        let r = q.pick().unwrap();
+        assert_eq!((r.bio.lba, r.bio.nsect), (0, 2));
     }
 
     #[test]

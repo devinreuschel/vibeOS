@@ -5036,13 +5036,10 @@ Rejected: a device-wide `Barrier` that every later request waits behind; and a
 fence per queue, since one filesystem writes from every CPU's queue and would
 wait for completions anyway.
 
-Not yet: `src/block.rs` still defines `Barrier` and holds later requests behind
-a queued `Barrier` or `Flush`, `try_merge` checks only the lowest queued fence,
-a fence whose seq is `u32::MAX` reads as no fence, C-LOOK can reorder
-overlapping writes whatever their seq, `Fua` does not exist, and the block
-cache's `flush` does not wait for writeback already in flight
-([section 10.6](#106-block-cache)). Only two in-guest tests call `barrier()`.
-ROADMAP §10.11 lands all of it (F043).
+Not yet: C-LOOK can reorder overlapping writes whatever their seq, `Fua` does
+not exist, and the block cache's `flush` does not wait for writeback already in
+flight ([section 10.6](#106-block-cache)). ROADMAP §10.11 lands all of it
+(F043).
 
 ## 10.3 Failure
 
@@ -5274,8 +5271,7 @@ Page-granular (4 KiB), 16 pages (`cache::DEFAULT_PAGES`), keyed by
 `(dev_id, page offset)`. Read-through, write-back, clock eviction,
 sequential readahead, dirty-ratio writeback thread (`blk-wb`). `flush`
 writes the pages marked dirty, waits for each write to complete, then sends
-the device `Flush` (§10.2). `barrier` writes dirty pages without a device
-flush and goes with `Barrier` (ROADMAP §10.11).
+the device `Flush` (§10.2).
 
 A slot has no filling or writeback state. `take_dirty` clears a page's dirty
 bit before `blk-wb` writes it with the lock dropped, so while that write is in

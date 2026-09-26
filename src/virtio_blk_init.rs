@@ -279,7 +279,6 @@ fn descs_for(op: Op) -> u16 {
     match op {
         Op::Read | Op::Write | Op::Discard => 3,
         Op::Flush => 2,
-        Op::Barrier => 0,
     }
 }
 
@@ -298,7 +297,6 @@ enum Issued {
 
 fn issue(blk: &mut Blk, req: Request) -> Issued {
     match req.bio.op {
-        Op::Barrier => return Issued::Local(req, Ok(())),
         Op::Flush if blk.features & F_FLUSH == 0 => return Issued::Local(req, Ok(())),
         Op::Discard if blk.features & F_DISCARD == 0 => {
             return Issued::Local(req, Err(BlockError::Inval));
@@ -329,10 +327,6 @@ fn issue(blk: &mut Blk, req: Request) -> Issued {
         Op::Write => T_OUT,
         Op::Flush => T_FLUSH,
         Op::Discard => T_DISCARD,
-        Op::Barrier => {
-            blk.slot_used[si] = false;
-            return Issued::Local(req, Ok(()));
-        }
     };
 
     let base = slot_base(&blk.slots, si);
@@ -454,10 +448,6 @@ fn issue(blk: &mut Blk, req: Request) -> Issued {
                 },
             ];
             nchain = 3;
-        }
-        Op::Barrier => {
-            blk.slot_used[si] = false;
-            return Issued::Local(req, Ok(()));
         }
     }
 
@@ -1165,7 +1155,7 @@ pub fn submit(
             }
             req = req.with_seg(ptr, len);
         }
-        Op::Flush | Op::Barrier => {
+        Op::Flush => {
             if nsect != 0 || len != 0 {
                 return Err(BlockError::Inval);
             }
@@ -1235,10 +1225,6 @@ pub fn discard(lba: u64, nsectors: u64) -> Result<(), BlockError> {
         return Err(BlockError::Inval);
     }
     blocking(Op::Discard, lba, nsectors as u32, 0, 0)
-}
-
-pub fn barrier() -> Result<(), BlockError> {
-    blocking(Op::Barrier, 0, 0, 0, 0)
 }
 
 struct Vda;

@@ -623,14 +623,6 @@ pub fn cached_flush<B: Backend, const N: usize>(
     Ok(())
 }
 
-pub fn cached_barrier<B: Backend, const N: usize>(
-    c: &mut Cache<N>,
-    b: &B,
-    dev: u32,
-) -> Result<(), BlockError> {
-    writeback_all(c, b, Some(dev))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -754,19 +746,6 @@ mod tests {
         assert!(c.over_dirty_ratio());
         cached_flush(&mut c, &mem, None).unwrap();
         assert!(!c.over_dirty_ratio());
-    }
-
-    #[test]
-    fn barrier_writes_dirty_no_device_flush() {
-        let mem = Mem::new(PAGE * 4);
-        let mut c = Cache::<4>::new();
-        let buf = [9u8; 512];
-        cached_write(&mut c, &mem, 0, 0, &buf).unwrap();
-        cached_barrier(&mut c, &mem, 0).unwrap();
-        assert!(*mem.writes.lock().unwrap() >= 1);
-        assert_eq!(*mem.flushes.lock().unwrap(), 0);
-        cached_flush(&mut c, &mem, Some(0)).unwrap();
-        assert_eq!(*mem.flushes.lock().unwrap(), 1);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! The volume lives in BSS. A busy flag (not the IRQ-off mutex) is held
 //! across I/O so RANK_DEVICE is not nested with the cache and VFS is
 //! never held at the same time (DESIGN §2.1 / #62 ACK). `sync` uses
-//! cache/device Flush, not Barrier (DESIGN §10.2).
+//! cache/device Flush (DESIGN §10.2).
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};

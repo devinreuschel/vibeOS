@@ -229,8 +229,8 @@ fn submit_req(req: Request) -> Result<bool, BlockError> {
     }
 }
 
-/// Async submit. `buf` must stay live until `w` completes. Flush/barrier
-/// / discard pass `ptr = 0`, `len = 0`.
+/// Async submit. `buf` must stay live until `w` completes. Flush and
+/// discard pass `ptr = 0`, `len = 0`.
 pub fn submit(
     op: Op,
     lba: u64,
@@ -254,7 +254,7 @@ pub fn submit(
             }
             req = req.with_seg(ptr, len);
         }
-        Op::Flush | Op::Barrier => {
+        Op::Flush => {
             if nsect != 0 || len != 0 {
                 return Err(BlockError::Inval);
             }
@@ -303,10 +303,6 @@ pub fn discard(lba: u64, nsectors: u64) -> Result<(), BlockError> {
         return Err(BlockError::Inval);
     }
     blocking(Op::Discard, lba, nsectors as u32, 0, 0)
-}
-
-pub fn barrier() -> Result<(), BlockError> {
-    blocking(Op::Barrier, 0, 0, 0, 0)
 }
 
 pub fn live() -> bool {
