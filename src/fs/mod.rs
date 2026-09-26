@@ -396,6 +396,12 @@ pub trait FileSystem: Sync {
     fn fstype(&self) -> FsType;
     fn ops(&'static self) -> Option<&'static dyn InodeOps>;
     fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError>;
+    /// After each mount of the superblock on `at`, a new one or a second
+    /// mount of a shared one.
+    fn on_mount(&self, _cx: &mut OpCx<'_>, _at: &[u8]) {}
+    /// After the mount on `at` is gone; `last` when it was the
+    /// superblock's last mount, before `kill_sb`.
+    fn on_umount(&self, _cx: &mut OpCx<'_>, _at: &[u8], _last: bool) {}
 }
 
 /// A counted reference to a [`Vfs`] inode, from [`Vfs::iget_key`] or
@@ -527,14 +533,21 @@ impl Dentry {
     }
 }
 
-/// A mounted filesystem instance. `ops` is the only dispatch to its
-/// backend; `private` holds two words only the backend reads or writes.
+/// A filesystem instance (DESIGN §2.11). `ops` is the only dispatch to
+/// its backend; `private` holds two words only the backend reads or
+/// writes. `refs` counts its mounts and its used inode slots; it lives
+/// until its last mount goes. A block device's superblock records the
+/// device and its read-only flag, and a second mount of the device
+/// shares it.
 #[derive(Clone, Copy)]
 struct Super {
     used: bool,
-    fstype: FsType,
+    refs: u16,
+    fs: Option<&'static dyn FileSystem>,
     ops: Option<&'static dyn InodeOps>,
     private: [u64; 2],
+    dev: Option<u64>,
+    ro: bool,
     root_islot: u16,
     root_dslot: u16,
 }
@@ -542,14 +555,20 @@ struct Super {
 impl Super {
     const EMPTY: Self = Self {
         used: false,
-        fstype: FsType::Ram,
+        refs: 0,
+        fs: None,
         ops: None,
         private: [0; 2],
+        dev: None,
+        ro: false,
         root_islot: 0,
         root_dslot: 0,
     };
 }
 
+/// A mount of a superblock on a directory (DESIGN §2.11). It holds one
+/// count on its superblock; `refs` counts the open files and the child
+/// mounts that reach the filesystem through this mount.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Mount {
     used: bool,
@@ -557,6 +576,7 @@ struct Mount {
     mp_dslot: u16,
     root_dslot: u16,
     sb: u8,
+    refs: u16,
 }
 
 impl Mount {
@@ -566,7 +586,17 @@ impl Mount {
         mp_dslot: 0,
         root_dslot: 0,
         sb: 0,
+        refs: 0,
     };
+}
+
+/// What [`Vfs::mount_fs`] made: the mount, its superblock, and whether
+/// the superblock was already mounted from the same device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mounted {
+    pub mount: u8,
+    pub sb: u8,
+    pub shared: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -688,20 +718,21 @@ impl Vfs {
         }
         let m = self.alloc_mount()?;
         debug_assert_eq!(m, 0);
-        let (sb, dslot) = self.new_super(fs)?;
+        let (sb, dslot) = self.new_super(fs, None, false)?;
         self.mounts[0] = Mount {
             used: true,
             parent: None,
             mp_dslot: dslot,
             root_dslot: dslot,
             sb,
+            refs: 0,
         };
+        self.sb_on_mount(sb, b"/");
         Ok(PathRef { mount: 0, dslot })
     }
 
-    /// Mount `fs` on an existing directory. `..` from the new root
-    /// walks to the parent of the covered dentry. The mountpoint is held
-    /// before anything is allocated, so no allocation can evict it.
+    /// Mount `fs` on the directory `at` names. `..` from the new root
+    /// walks to the parent of the covered dentry.
     pub fn mount(
         &mut self,
         cwd: Option<PathRef>,
@@ -709,37 +740,98 @@ impl Vfs {
         fs: &'static dyn FileSystem,
     ) -> Result<u8, FsError> {
         let dir = self.resolve(cwd, at, true)?;
-        let islot = self.d_islot(dir.dslot)?;
+        self.mount_fs(dir, at.as_bytes(), fs, None, false)
+            .map(|m| m.mount)
+    }
+
+    /// The live superblock of block device `dev`.
+    pub fn super_of_dev(&self, dev: u64) -> Option<u8> {
+        self.supers
+            .iter()
+            .position(|s| s.used && s.dev == Some(dev))
+            .map(|i| i as u8)
+    }
+
+    /// Mount `fs` on directory `at`, whose path is `path`. A block device
+    /// `dev` that is already mounted shares its superblock, as Linux's
+    /// does, and one mounted with the other read-only flag, or as another
+    /// filesystem type, is `Busy`. The mountpoint is held before anything
+    /// is allocated, so no allocation can evict it.
+    pub fn mount_fs(
+        &mut self,
+        at: PathRef,
+        path: &[u8],
+        fs: &'static dyn FileSystem,
+        dev: Option<u64>,
+        ro: bool,
+    ) -> Result<Mounted, FsError> {
+        let islot = self.d_islot(at.dslot)?;
         if self.inodes[islot as usize].kind != InodeKind::Dir {
             return Err(FsError::NotDir);
         }
-        if self.child_mount(dir.mount, dir.dslot).is_some() {
+        if self.child_mount(at.mount, at.dslot).is_some() {
             return Err(FsError::Busy);
         }
-        self.dget(dir.dslot)?;
-        let r = self.mount_on(dir, fs);
-        if r.is_err() {
-            self.dput(dir.dslot);
-        }
-        r
-    }
-
-    fn mount_on(&mut self, dir: PathRef, fs: &'static dyn FileSystem) -> Result<u8, FsError> {
+        let shared = match dev.and_then(|d| self.super_of_dev(d)) {
+            Some(sb) => {
+                let s = &self.supers[sb as usize];
+                if s.ro != ro || s.fs.map(|f| f.fstype()) != Some(fs.fstype()) {
+                    return Err(FsError::Busy);
+                }
+                Some(sb)
+            }
+            None => None,
+        };
         let m = self.alloc_mount()?;
-        let (sb, r_dslot) = self.new_super(fs)?;
+        self.dget(at.dslot)?;
+        let parent_refs = self.mounts[at.mount as usize].refs.checked_add(1);
+        let Some(parent_refs) = parent_refs else {
+            self.dput(at.dslot);
+            return Err(FsError::NoSpace);
+        };
+        let (sb, root) = match shared {
+            Some(sb) => {
+                let s = &mut self.supers[sb as usize];
+                match s.refs.checked_add(1) {
+                    Some(r) => s.refs = r,
+                    None => {
+                        self.dput(at.dslot);
+                        return Err(FsError::NoSpace);
+                    }
+                }
+                (sb, s.root_dslot)
+            }
+            None => match self.new_super(fs, dev, ro) {
+                Ok(x) => x,
+                Err(e) => {
+                    self.dput(at.dslot);
+                    return Err(e);
+                }
+            },
+        };
+        self.mounts[at.mount as usize].refs = parent_refs;
         self.mounts[m as usize] = Mount {
             used: true,
-            parent: Some(dir.mount),
-            mp_dslot: dir.dslot,
-            root_dslot: r_dslot,
+            parent: Some(at.mount),
+            mp_dslot: at.dslot,
+            root_dslot: root,
             sb,
+            refs: 0,
         };
-        Ok(m)
+        self.sb_on_mount(sb, path);
+        Ok(Mounted {
+            mount: m,
+            sb,
+            shared: shared.is_some(),
+        })
     }
 
-    /// Unmount the filesystem whose root `at` names. Every busy check
-    /// runs before the first write, so a `Busy` leaves the dentries,
-    /// inodes and mounts as they were.
+    /// Unmount the mount whose root `at` names. A mount something still
+    /// reaches the filesystem through (an open file, a child mount) is
+    /// `Busy`; so is the superblock's last mount while any of its dentries
+    /// or inodes is held. Every busy check runs before the first write, so
+    /// a `Busy` leaves the dentries, inodes and mounts as they were. The
+    /// superblock's last mount releases it.
     pub fn umount(&mut self, cwd: Option<PathRef>, at: &str) -> Result<(), FsError> {
         let p = self.resolve(cwd, at, true)?;
         let m = p.mount;
@@ -749,24 +841,40 @@ impl Vfs {
         if self.mounts[m as usize].root_dslot != p.dslot {
             return Err(FsError::Inval);
         }
-        if self.mounts.iter().any(|x| x.used && x.parent == Some(m)) {
+        if self.mounts[m as usize].refs != 0 {
             return Err(FsError::Busy);
         }
         let sb = self.mounts[m as usize].sb;
-        if self
-            .files
-            .iter()
-            .any(|f| f.used && self.mounts[f.mount as usize].sb == sb)
-        {
-            return Err(FsError::Busy);
+        let last = self.mount_count(sb) == 1;
+        if last {
+            self.sb_busy(sb)?;
         }
-        let mut k = 0usize;
-        while k < MAX_MOUNTS {
-            if k != m as usize && self.mounts[k].used && self.mounts[k].sb == sb {
-                return Err(FsError::Busy);
-            }
-            k += 1;
+        let mp = self.mounts[m as usize].mp_dslot;
+        if let Some(pm) = self.mounts[m as usize].parent {
+            let r = &mut self.mounts[pm as usize].refs;
+            *r = r.saturating_sub(1);
         }
+        self.dput(mp);
+        self.mounts[m as usize] = Mount::EMPTY;
+        let s = &mut self.supers[sb as usize];
+        s.refs = s.refs.saturating_sub(1);
+        self.sb_on_umount(sb, at.as_bytes(), last);
+        if last {
+            self.sb_teardown(sb);
+        }
+        Ok(())
+    }
+
+    /// Mounts of superblock `sb`.
+    fn mount_count(&self, sb: u8) -> usize {
+        self.mounts.iter().filter(|x| x.used && x.sb == sb).count()
+    }
+
+    /// `Busy` while a dentry or inode of `sb` is held beyond the cache's
+    /// own holds; unlinked inodes whose release failed at their last put
+    /// are released here, since the backend must take them back before
+    /// the superblock goes.
+    fn sb_busy(&mut self, sb: u8) -> Result<(), FsError> {
         let mut d = 0usize;
         while d < MAX_DENTRIES {
             let e = &self.dentries[d];
@@ -783,8 +891,6 @@ impl Vfs {
             }
             n += 1;
         }
-        // Unlinked inodes whose release failed at their last put: the
-        // backend must take them back before the superblock goes.
         let mut n = 0usize;
         while n < MAX_INODES {
             let ino = &self.inodes[n];
@@ -796,10 +902,6 @@ impl Vfs {
             }
             n += 1;
         }
-        let mp = self.mounts[m as usize].mp_dslot;
-        self.dput(mp);
-        self.sb_teardown(sb);
-        self.mounts[m as usize] = Mount::EMPTY;
         Ok(())
     }
 
@@ -1096,8 +1198,10 @@ impl Vfs {
         }
         self.files[i].refs -= 1;
         if self.files[i].refs == 0 {
-            let islot = self.files[i].islot;
+            let (islot, m) = (self.files[i].islot, self.files[i].mount);
             self.files[i] = File::EMPTY;
+            let r = &mut self.mounts[m as usize].refs;
+            *r = r.saturating_sub(1);
             self.iput(islot);
         }
         Ok(())
@@ -1421,8 +1525,12 @@ impl Vfs {
         self.mounts[mount as usize].sb
     }
 
+    /// The type of superblock `sb`, for an [`OpCx`].
     fn fstype(&self, sb: u8) -> FsType {
-        self.supers[sb as usize].fstype
+        match self.supers[sb as usize].fs {
+            Some(f) => f.fstype(),
+            None => FsType::Ram,
+        }
     }
 
     fn d_islot(&self, dslot: u16) -> Result<u16, FsError> {
@@ -1452,11 +1560,12 @@ impl Vfs {
     ) -> Result<R, FsError> {
         let ops = self.supers[sb as usize].ops.ok_or(FsError::NotSupp)?;
         let now = self.now;
+        let fstype = self.fstype(sb);
         let Vfs { supers, inodes, .. } = self;
         let s = &mut supers[sb as usize];
         let mut cx = OpCx {
             sb,
-            fstype: s.fstype,
+            fstype,
             private: &mut s.private,
             now,
         };
@@ -1547,25 +1656,59 @@ impl Vfs {
             return;
         };
         let now = self.now;
+        let fstype = self.fstype(sb);
         let Vfs { supers, .. } = self;
         let s = &mut supers[sb as usize];
         let mut cx = OpCx {
             sb,
-            fstype: s.fstype,
+            fstype,
             private: &mut s.private,
             now,
         };
         ops.kill_sb(&mut cx);
     }
 
+    /// Run superblock `sb`'s `on_mount` hook for a mount on `at`.
+    fn sb_on_mount(&mut self, sb: u8, at: &[u8]) {
+        let Some(fs) = self.supers[sb as usize].fs else {
+            return;
+        };
+        let (now, fstype) = (self.now, fs.fstype());
+        let s = &mut self.supers[sb as usize];
+        let mut cx = OpCx {
+            sb,
+            fstype,
+            private: &mut s.private,
+            now,
+        };
+        fs.on_mount(&mut cx, at);
+    }
+
+    /// Run superblock `sb`'s `on_umount` hook for the mount on `at`.
+    fn sb_on_umount(&mut self, sb: u8, at: &[u8], last: bool) {
+        let Some(fs) = self.supers[sb as usize].fs else {
+            return;
+        };
+        let (now, fstype) = (self.now, fs.fstype());
+        let s = &mut self.supers[sb as usize];
+        let mut cx = OpCx {
+            sb,
+            fstype,
+            private: &mut s.private,
+            now,
+        };
+        fs.on_umount(&mut cx, at, last);
+    }
+
     /// Fill a new superblock through `fs`, which sets its private words.
     fn fill_super(&mut self, sb: u8, fs: &dyn FileSystem) -> Result<InodeInfo, FsError> {
         let now = self.now;
+        let fstype = fs.fstype();
         let Vfs { supers, .. } = self;
         let s = &mut supers[sb as usize];
         let mut cx = OpCx {
             sb,
-            fstype: s.fstype,
+            fstype,
             private: &mut s.private,
             now,
         };
@@ -1647,6 +1790,8 @@ impl Vfs {
             return Ok(i);
         }
         let slot = self.inode_alloc()?;
+        let s = &mut self.supers[sb as usize];
+        s.refs = s.refs.checked_add(1).ok_or(FsError::NoSpace)?;
         let g = self.inodes[slot as usize].r#gen.wrapping_add(1);
         self.inodes[slot as usize] = Inode {
             used: true,
@@ -1690,6 +1835,10 @@ impl Vfs {
 
     /// Empty inode slot `i`, keeping its generation.
     fn inode_clear(&mut self, i: usize) {
+        if self.inodes[i].used {
+            let s = &mut self.supers[self.inodes[i].sb as usize];
+            s.refs = s.refs.saturating_sub(1);
+        }
         let g = self.inodes[i].r#gen;
         self.inodes[i] = Inode {
             r#gen: g,
@@ -1999,10 +2148,19 @@ impl Vfs {
     /// Allocate and fill a superblock with its root inode and its root
     /// dentry, which the superblock holds once. An error undoes every
     /// step taken, last first.
-    fn new_super(&mut self, fs: &'static dyn FileSystem) -> Result<(u8, u16), FsError> {
+    fn new_super(
+        &mut self,
+        fs: &'static dyn FileSystem,
+        dev: Option<u64>,
+        ro: bool,
+    ) -> Result<(u8, u16), FsError> {
         let sb = self.alloc_super()?;
-        self.supers[sb as usize].fstype = fs.fstype();
-        self.supers[sb as usize].ops = fs.ops();
+        let s = &mut self.supers[sb as usize];
+        s.fs = Some(fs);
+        s.ops = fs.ops();
+        s.dev = dev;
+        s.ro = ro;
+        s.refs = 1;
         let info = match self.fill_super(sb, fs) {
             Ok(i) => i,
             Err(e) => {
@@ -2065,6 +2223,10 @@ impl Vfs {
             n += 1;
         }
         self.ops_kill_sb(sb);
+        debug_assert!(
+            self.supers[sb as usize].refs <= 1,
+            "superblock torn down while held"
+        );
         self.supers[sb as usize] = Super::EMPTY;
     }
 
@@ -2319,12 +2481,18 @@ impl Vfs {
         })
     }
 
+    /// An open file on inode `islot` through `mount`: it counts one
+    /// reference to each.
     fn file_alloc(&mut self, islot: u16, mount: u8, flags: u32) -> Result<u16, FsError> {
         let mut i = 0usize;
         while i < MAX_FILES {
             if !self.files[i].used {
-                self.inodes[islot as usize].refs =
-                    self.inodes[islot as usize].refs.saturating_add(1);
+                let mrefs = self.mounts[mount as usize]
+                    .refs
+                    .checked_add(1)
+                    .ok_or(FsError::NoSpace)?;
+                self.ihold(islot)?;
+                self.mounts[mount as usize].refs = mrefs;
                 self.files[i] = File {
                     used: true,
                     refs: 1,
@@ -2829,21 +2997,16 @@ mod tests {
         }
     }
 
-    /// Show the superblock the mount on `from` shows again on `at`, by
-    /// hand: the shape P10-S12's shared `Super` gives two mounts.
-    fn mount_again(v: &mut Vfs, from: &str, at: &str) -> u8 {
-        let src = v.resolve(None, from, true).unwrap();
-        let dir = v.resolve(None, at, true).unwrap();
-        v.dget(dir.dslot).unwrap();
-        let m = v.alloc_mount().unwrap();
-        v.mounts[m as usize] = Mount {
-            used: true,
-            parent: Some(dir.mount),
-            mp_dslot: dir.dslot,
-            root_dslot: src.dslot,
-            sb: v.mounts[src.mount as usize].sb,
-        };
-        m
+    /// Mount `fs` on `at` from block device `dev`.
+    fn mount_dev(
+        v: &mut Vfs,
+        at: &str,
+        fs: &'static dyn FileSystem,
+        dev: u64,
+        ro: bool,
+    ) -> Result<Mounted, FsError> {
+        let p = v.resolve(None, at, true)?;
+        v.mount_fs(p, at.as_bytes(), fs, Some(dev), ro)
     }
 
     #[test]
@@ -2851,8 +3014,9 @@ mod tests {
         let mut v = ram();
         v.mkdir(None, "/p", 0o755).unwrap();
         v.mkdir(None, "/q", 0o755).unwrap();
-        v.mount(None, "/p", ramfs()).unwrap();
-        mount_again(&mut v, "/p", "/q");
+        let fs = ramfs();
+        mount_dev(&mut v, "/p", fs, 9, false).unwrap();
+        assert!(mount_dev(&mut v, "/q", fs, 9, false).unwrap().shared);
         assert_dcache_sound(&v);
         v.creat(None, "/p/f", 0o644).unwrap();
         let pf = v.resolve(None, "/p/f", true).unwrap();
@@ -2960,6 +3124,9 @@ mod tests {
         nodes: Vec<KNode>,
         names: Vec<(u32, Vec<u8>, u32)>,
         evicts: u32,
+        fills: u32,
+        mounts: Vec<Vec<u8>>,
+        umounts: Vec<(Vec<u8>, bool)>,
     }
 
     static KEYFS: std::sync::Mutex<Vec<Store>> = std::sync::Mutex::new(Vec::new());
@@ -3005,14 +3172,23 @@ mod tests {
         fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
             *cx.private = [self.id, 0];
             with_store(self.id, |s| {
-                s.nodes.push(KNode {
-                    kind: InodeKind::Dir,
-                    nlink: 2,
-                    data: Vec::new(),
-                    alive: true,
-                });
+                s.fills += 1;
+                if s.nodes.is_empty() {
+                    s.nodes.push(KNode {
+                        kind: InodeKind::Dir,
+                        nlink: 2,
+                        data: Vec::new(),
+                        alive: true,
+                    });
+                }
                 Ok(knode_info(s, 0))
             })
+        }
+        fn on_mount(&self, _cx: &mut OpCx<'_>, at: &[u8]) {
+            with_store(self.id, |s| s.mounts.push(at.to_vec()));
+        }
+        fn on_umount(&self, _cx: &mut OpCx<'_>, at: &[u8], last: bool) {
+            with_store(self.id, |s| s.umounts.push((at.to_vec(), last)));
         }
     }
 
@@ -3328,6 +3504,129 @@ mod tests {
             !v.dentries
                 .iter()
                 .any(|d| d.used && d.sb == sb && d.negative)
+        );
+        assert_dcache_sound(&v);
+    }
+
+    /// `ram()` with directories `/a` and `/b` and a `KeyFs` on block
+    /// device 7 mounted on `/a`.
+    fn dev_on_a() -> (Vfs, &'static KeyFs) {
+        let mut v = ram();
+        v.mkdir(None, "/a", 0o755).unwrap();
+        v.mkdir(None, "/b", 0o755).unwrap();
+        let fs = keyfs_new();
+        let m = mount_dev(&mut v, "/a", fs, 7, false).unwrap();
+        assert!(!m.shared);
+        (v, fs)
+    }
+
+    #[test]
+    fn second_mount_of_device_shares_super() {
+        let (mut v, fs) = dev_on_a();
+        let a = v.resolve(None, "/a", true).unwrap();
+        let m = mount_dev(&mut v, "/b", keyfs_new(), 7, false).unwrap();
+        assert!(m.shared, "a mounted device's superblock is shared");
+        assert_eq!(m.sb, v.sb_of_mount(a.mount).unwrap());
+        assert_ne!(m.mount, a.mount, "two mounts");
+        assert_eq!(with_store(fs.id, |s| s.fills), 1, "filled once");
+        v.creat(None, "/a/f", 0o644).unwrap();
+        assert_eq!(
+            v.stat(None, "/b/f").unwrap().ino,
+            v.stat(None, "/a/f").unwrap().ino
+        );
+        assert_eq!(
+            v.stat(None, "/b/f/..").unwrap().ino,
+            v.stat(None, "/a").unwrap().ino
+        );
+        let mut again = ram();
+        again.mkdir(None, "/c", 0o755).unwrap();
+        let other = mount_dev(&mut again, "/c", keyfs_new(), 8, false).unwrap();
+        assert!(!other.shared, "another device gets its own superblock");
+        assert_dcache_sound(&v);
+    }
+
+    #[test]
+    fn ro_mismatch_on_mounted_device_is_busy() {
+        let (mut v, _) = dev_on_a();
+        let before = v.mounts;
+        assert_eq!(
+            mount_dev(&mut v, "/b", keyfs_new(), 7, true).unwrap_err(),
+            FsError::Busy,
+            "the other read-only flag"
+        );
+        assert_eq!(
+            mount_dev(&mut v, "/b", &NoOpsFs, 7, false).unwrap_err(),
+            FsError::Busy,
+            "another filesystem type"
+        );
+        assert_eq!(v.mounts, before, "no mount made");
+        let b = v.resolve(None, "/b", true).unwrap();
+        assert_eq!(b.mount, 0, "/b stays uncovered");
+        assert!(
+            mount_dev(&mut v, "/b", keyfs_new(), 7, false)
+                .unwrap()
+                .shared
+        );
+        assert_dcache_sound(&v);
+    }
+
+    #[test]
+    fn super_released_after_last_mount() {
+        let (mut v, fs) = dev_on_a();
+        mount_dev(&mut v, "/b", fs, 7, false).unwrap();
+        v.creat(None, "/a/f", 0o644).unwrap();
+        let sb = v.super_of_dev(7).unwrap();
+        v.umount(None, "/a").unwrap();
+        assert_eq!(v.super_of_dev(7), Some(sb), "a mount still holds it");
+        assert_eq!(v.stat(None, "/b/f").unwrap().kind, InodeKind::Reg);
+        assert_eq!(v.stat(None, "/a/f").unwrap_err(), FsError::NotFound);
+        assert_eq!(
+            with_store(fs.id, |s| s.umounts.clone()),
+            vec![(b"/a".to_vec(), false)]
+        );
+        v.umount(None, "/b").unwrap();
+        assert_eq!(v.super_of_dev(7), None, "the last mount releases it");
+        assert!(v.inodes.iter().all(|i| !i.used || i.sb != sb));
+        assert!(v.dentries.iter().all(|d| !d.used || d.sb != sb));
+        assert_eq!(
+            with_store(fs.id, |s| s.umounts.clone()),
+            vec![(b"/a".to_vec(), false), (b"/b".to_vec(), true)]
+        );
+        assert_eq!(
+            with_store(fs.id, |s| s.mounts.clone()),
+            vec![b"/a".to_vec(), b"/b".to_vec()]
+        );
+        let m = mount_dev(&mut v, "/a", fs, 7, false).unwrap();
+        assert!(!m.shared, "a released device mounts afresh");
+        assert_eq!(with_store(fs.id, |s| s.fills), 2);
+        assert_dcache_sound(&v);
+    }
+
+    #[test]
+    fn two_mounts_one_dentry_per_name() {
+        let (mut v, _) = dev_on_a();
+        mount_dev(&mut v, "/b", keyfs_new(), 7, false).unwrap();
+        v.mkdir(None, "/a/d", 0o755).unwrap();
+        v.creat(None, "/b/d/x", 0o644).unwrap();
+        let ax = v.resolve(None, "/a/d/x", true).unwrap();
+        let bx = v.resolve(None, "/b/d/x", true).unwrap();
+        assert_ne!(ax.mount, bx.mount);
+        assert_eq!(ax.dslot, bx.dslot, "a dentry belongs to its superblock");
+        let named = |v: &Vfs, n: &[u8]| {
+            v.dentries
+                .iter()
+                .filter(|d| d.used && d.name.eq_bytes(n))
+                .count()
+        };
+        assert_eq!(named(&v, b"x"), 1);
+        assert_eq!(named(&v, b"d"), 1);
+        assert_dcache_sound(&v);
+        assert_eq!(v.umount(None, "/b/d").unwrap_err(), FsError::Inval);
+        v.umount(None, "/a").unwrap();
+        assert_eq!(v.resolve(None, "/b/d/x", true).unwrap().dslot, bx.dslot);
+        assert_eq!(
+            v.stat(None, "/b/d/x/../../..").unwrap().ino,
+            v.stat(None, "/").unwrap().ino
         );
         assert_dcache_sound(&v);
     }
