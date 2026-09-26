@@ -31,6 +31,7 @@ pub(super) const TESTS: &[Test] = &[
         "fat_unlinked_open_frees_at_close",
         test_fat_unlinked_open_frees_at_close,
     ),
+    test("vibefs_efbig", test_vibefs_efbig),
 ];
 
 /// Each open-file slot's `(used, refs)`.
@@ -605,5 +606,82 @@ fn unlinked_open(path: &str, a: FileId, before: u64) -> Outcome {
     match fat_free() {
         Ok(f) if f == held => Outcome::Ok,
         r => crate::fail_fmt!("free {r:?} while the unlinked file is open, want {held}"),
+    }
+}
+
+// On /vibe/efbig (O_RDWR|O_CREAT|O_TRUNC): lseek to 2^44 - 4096 returns
+// it (exit 2 if not), write 1 byte there returns -EFBIG (3), lseek to
+// 2^44 returns -EINVAL (4), and SEEK_END returns 0 (5). Exit 1 if the
+// open fails, 0 when every step passes.
+user_code!(
+    VIBEFS_EFBIG,
+    "
+    lea rdi, [rip + 90f]
+    mov esi, 0x242
+    xor edx, edx
+    mov eax, 2
+    syscall
+    mov edi, 1
+    test rax, rax
+    js 80f
+    mov r12, rax
+    mov rdi, r12
+    mov rsi, 0xFFFFFFFF000
+    xor edx, edx
+    mov eax, 8
+    syscall
+    mov edi, 2
+    mov rcx, 0xFFFFFFFF000
+    cmp rax, rcx
+    jne 80f
+    mov rdi, r12
+    lea rsi, [rip + 91f]
+    mov edx, 1
+    mov eax, 1
+    syscall
+    mov edi, 3
+    cmp rax, -27
+    jne 80f
+    mov rdi, r12
+    mov rsi, 0x100000000000
+    xor edx, edx
+    mov eax, 8
+    syscall
+    mov edi, 4
+    cmp rax, -22
+    jne 80f
+    mov rdi, r12
+    xor esi, esi
+    mov edx, 2
+    mov eax, 8
+    syscall
+    mov edi, 5
+    test rax, rax
+    jnz 80f
+    xor edi, edi
+80:
+    mov eax, 60
+    syscall
+    ud2
+90:
+    .asciz \"/vibe/efbig\"
+91:
+    .ascii \"x\"
+    "
+);
+
+fn test_vibefs_efbig() -> Outcome {
+    let st = user::run(&Image::Code(VIBEFS_EFBIG, DEFAULT), &["efbig"]);
+    let u = unlink_quiet("/vibe/efbig");
+    let st = match st {
+        Ok(st) => st,
+        Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
+    };
+    if st != wait_exited(0) {
+        return crate::fail_fmt!("status {st:#x}, want exited 0 (step {})", st >> 8);
+    }
+    match u {
+        Ok(()) => Outcome::Ok,
+        Err(e) => crate::fail_fmt!("unlink: {}", e.as_str()),
     }
 }

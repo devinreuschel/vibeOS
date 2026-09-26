@@ -22,7 +22,7 @@ use vibeos::proc::{
 };
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::syscall::{
-    self, E2BIG, EAGAIN, EBADF, EBUSY, ECHILD, EEXIST, EFAULT, EINVAL, EIO, EISDIR, EMFILE,
+    self, E2BIG, EAGAIN, EBADF, EBUSY, ECHILD, EEXIST, EFAULT, EFBIG, EINVAL, EIO, EISDIR, EMFILE,
     ENAMETOOLONG, ENOENT, ENOEXEC, ENOMEM, ENOSYS, ENOTDIR, ESRCH, F_GETFD, F_SETFD, SYS_CLOSE,
     SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_EXIT, SYS_FCNTL, SYS_FORK, SYS_GETPID, SYS_GETPPID,
     SYS_KILL, SYS_LSEEK, SYS_OPEN, SYS_PSINFO, SYS_READ, SYS_SCHED_YIELD, SYS_WAIT4, SYS_WRITE,
@@ -155,6 +155,7 @@ fn fs_errno(e: FsError) -> i32 {
         FsError::Busy => EBUSY,
         FsError::Badf => EBADF,
         FsError::Io => EIO,
+        FsError::FileTooBig => EFBIG,
         FsError::Loop | FsError::NotEmpty | FsError::NotSupp => EINVAL,
     }
 }

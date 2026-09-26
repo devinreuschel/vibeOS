@@ -662,6 +662,9 @@ pub fn seek(id: FileId, off: i64, whence: u32) -> Result<u64, FsError> {
     let base = i64::try_from(base).map_err(|_| FsError::Inval)?;
     let n = base.checked_add(off).ok_or(FsError::Inval)?;
     let n = u64::try_from(n).map_err(|_| FsError::Inval)?;
+    if matches!(f.node, NodeKey::Vibe(_)) && n > vibeos::vibefs::MAX_FILE_SIZE {
+        return Err(FsError::Inval);
+    }
     put_file(id, n)?;
     Ok(n)
 }

@@ -39,6 +39,9 @@ pub const INODE_INT_PER: usize = (BLOCK - HDR) / 8;
 pub const MAX_META: usize = 48;
 pub const MAX_DROP: usize = 96;
 pub const SB_CRC_OFF: usize = 4092;
+/// A file ends at or below this byte, so its last block index is at most
+/// `u32::MAX - 1` (docs/VIBEFS.md §3).
+pub const MAX_FILE_SIZE: u64 = u32::MAX as u64 * BLOCK as u64;
 
 const KIND_REG_U: u8 = KIND_REG;
 const KIND_DIR_U: u8 = KIND_DIR;
@@ -57,6 +60,7 @@ pub enum Error {
     NotEmpty,
     NameTooLong,
     NotSupp,
+    FileTooBig,
 }
 
 impl Error {
@@ -73,6 +77,7 @@ impl Error {
             Error::NotEmpty => "not empty",
             Error::NameTooLong => "name too long",
             Error::NotSupp => "not supp",
+            Error::FileTooBig => "file too big",
         }
     }
 
@@ -88,6 +93,7 @@ impl Error {
             Error::NotEmpty => FsError::NotEmpty,
             Error::NameTooLong => FsError::NameTooLong,
             Error::NotSupp => FsError::NotSupp,
+            Error::FileTooBig => FsError::FileTooBig,
         }
     }
 }
@@ -1390,6 +1396,17 @@ impl Vol {
         if self.inodes[is].kind == KIND_LNK {
             return Err(Error::Inval);
         }
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        // Refuse a write that starts at or past the limit, and cut one
+        // that would cross it short at the limit, as Linux does.
+        if off >= MAX_FILE_SIZE {
+            return Err(Error::FileTooBig);
+        }
+        let room = MAX_FILE_SIZE - off;
+        let keep = usize::try_from(room).map_or(buf.len(), |r| r.min(buf.len()));
+        let buf = &buf[..keep];
         let end = off.saturating_add(buf.len() as u64);
         if end <= INLINE as u64
             && (self.inodes[is].flags & F_INLINE != 0)
@@ -1499,6 +1516,9 @@ impl Vol {
         let is = self.inode_slot(ino)?;
         if self.inodes[is].kind == KIND_DIR {
             return Err(Error::IsDir);
+        }
+        if new > MAX_FILE_SIZE {
+            return Err(Error::FileTooBig);
         }
         let old = self.inodes[is].size;
         if new >= old {
@@ -2549,8 +2569,69 @@ mod tests {
             Error::NotEmpty,
             Error::NameTooLong,
             Error::NotSupp,
+            Error::FileTooBig,
         ] {
             assert!(!e.as_str().is_empty());
         }
+    }
+
+    /// A regular file `name` in the root; its inode number.
+    fn new_file(v: &mut Vol, d: &mut MemDisk, name: &[u8]) -> u32 {
+        v.create(d, ROOT_INO, name, InodeKind::Reg, 0o644, None)
+            .unwrap();
+        v.lookup(d, ROOT_INO, name).unwrap().ino
+    }
+
+    fn n_ext(v: &Vol, ino: u32) -> u8 {
+        v.inodes[v.inode_slot(ino).unwrap()].n_ext
+    }
+
+    #[test]
+    fn write_past_size_limit() {
+        assert_eq!(MAX_FILE_SIZE, (1u64 << 44) - 4096);
+        let mut b = fresh(256 * 1024);
+        with_vol(&mut b, |v, d| {
+            let ino = new_file(v, d, b"big");
+            assert_eq!(v.write(d, ino, 0, b"abc").unwrap(), 3);
+            let df = v.df();
+            let ext = n_ext(v, ino);
+            for off in [MAX_FILE_SIZE, 1u64 << 44] {
+                assert_eq!(v.write(d, ino, off, b"x").unwrap_err(), Error::FileTooBig);
+            }
+            assert_eq!(v.write(d, ino, MAX_FILE_SIZE, b"").unwrap(), 0);
+            assert_eq!(v.file_size(ino).unwrap(), 3);
+            let mut out = [0u8; 8];
+            assert_eq!(v.read(d, ino, 0, &mut out).unwrap(), 3);
+            assert_eq!(&out[..3], b"abc");
+            assert_eq!(v.df(), df);
+            assert_eq!(n_ext(v, ino), ext);
+        });
+    }
+
+    #[test]
+    fn write_crossing_size_limit_is_short() {
+        let mut b = fresh(256 * 1024);
+        with_vol(&mut b, |v, d| {
+            let ino = new_file(v, d, b"edge");
+            assert_eq!(v.write(d, ino, MAX_FILE_SIZE - 1, b"xy").unwrap(), 1);
+            assert_eq!(v.file_size(ino).unwrap(), MAX_FILE_SIZE);
+            let mut out = [0u8; 4];
+            assert_eq!(v.read(d, ino, MAX_FILE_SIZE - 1, &mut out).unwrap(), 1);
+            assert_eq!(out[0], b'x');
+        });
+    }
+
+    #[test]
+    fn truncate_past_size_limit() {
+        let mut b = fresh(256 * 1024);
+        with_vol(&mut b, |v, d| {
+            let ino = new_file(v, d, b"t");
+            assert_eq!(
+                v.truncate(d, ino, MAX_FILE_SIZE + 1).unwrap_err(),
+                Error::FileTooBig
+            );
+            v.truncate(d, ino, MAX_FILE_SIZE).unwrap();
+            assert_eq!(v.file_size(ino).unwrap(), MAX_FILE_SIZE);
+        });
     }
 }

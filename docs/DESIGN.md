@@ -806,8 +806,7 @@ byte parser ROADMAP §10.2's fuzzers cover, vibefs v1 excepted until ROADMAP §1
 the kernel binary denies `unwrap_used`, `expect_used`, `panic`, `unreachable`, `todo`, and
 `unimplemented` crate-wide, where a site a kernel invariant bounds keeps an `#[allow]` that names the
 invariant (§9.4). Crafted input panics portable code: a FAT BPB whose
-`rsvd + num_fats * FATSz32` overflows in `parse_bpb` (ROADMAP §10.2, F064); a vibefs write near file
-offset 2^44, which overflows `map_block` (ROADMAP §10.11, F008); a CRC-valid vibefs leaf whose count
+`rsvd + num_fats * FATSz32` overflows in `parse_bpb` (ROADMAP §10.2, F064); a CRC-valid vibefs leaf whose count
 exceeds the per-leaf maximum (F061; ROADMAP §14.8 retires v1 for a v2 that validates every block it reads); a vibefs truncate-grow that keeps `F_INLINE`
 past 128 bytes (ROADMAP §13.9, F062). Panics in the kernel binary end in the binding order above.
 
