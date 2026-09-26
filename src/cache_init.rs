@@ -375,6 +375,8 @@ fn writeback_dev(dev: Option<u32>) -> Result<(), BlockError> {
         let Some((slot, key)) = next else {
             break;
         };
+        #[cfg(feature = "kernel_tests")]
+        testing::hold_point(key);
         let res = backend_write(key.dev, key.offset, &data);
         end_writeback_and_wake(slot, key, res);
         res?;
@@ -454,4 +456,64 @@ pub fn shell_line(f: &mut impl core::fmt::Write) -> core::fmt::Result {
 pub fn init() {
     LIVE.store(true, Ordering::Release);
     let _ = thread_init::spawn("blk-wb", writeback_main);
+}
+
+/// A one-shot hold of `blk-wb`'s write of one page, so a test can find
+/// [`flush`] waiting for it (ROADMAP §10.11).
+#[cfg(feature = "kernel_tests")]
+pub mod testing {
+    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+
+    use vibeos::cache::CacheKey;
+
+    use crate::thread_init;
+    use crate::time_init;
+
+    const UNARMED: u64 = u64::MAX;
+    /// The hold point lets go by itself after this long.
+    const SELF_RELEASE_NS: u64 = 5_000_000_000;
+
+    static DEV: AtomicU32 = AtomicU32::new(0);
+    static OFF: AtomicU64 = AtomicU64::new(UNARMED);
+    static HELD: AtomicBool = AtomicBool::new(false);
+    static RELEASE: AtomicBool = AtomicBool::new(false);
+
+    /// Hold `blk-wb`'s next write of the page holding `byte_off` of `dev`.
+    pub fn hold_wb(dev: u32, byte_off: u64) {
+        RELEASE.store(false, Ordering::Release);
+        HELD.store(false, Ordering::Release);
+        DEV.store(dev, Ordering::Release);
+        OFF.store(CacheKey::page(dev, byte_off).offset, Ordering::Release);
+    }
+
+    /// `blk-wb` is stopped at the hold point.
+    pub fn held() -> bool {
+        HELD.load(Ordering::Acquire)
+    }
+
+    /// Let a held write go, and disarm a hold not yet reached.
+    pub fn release() {
+        OFF.store(UNARMED, Ordering::Release);
+        RELEASE.store(true, Ordering::Release);
+    }
+
+    /// `writeback_dev`'s hold point, reached with no lock held. It sleeps
+    /// until [`release`], or [`SELF_RELEASE_NS`] at most.
+    pub(super) fn hold_point(key: CacheKey) {
+        if DEV.load(Ordering::Acquire) != key.dev
+            || OFF
+                .compare_exchange(key.offset, UNARMED, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return;
+        }
+        HELD.store(true, Ordering::Release);
+        let t0 = time_init::now_ns();
+        while !RELEASE.load(Ordering::Acquire)
+            && time_init::now_ns().saturating_sub(t0) < SELF_RELEASE_NS
+        {
+            thread_init::sleep_ms(1);
+        }
+        HELD.store(false, Ordering::Release);
+    }
 }
