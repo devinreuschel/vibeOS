@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::Read;
 use std::process::ExitCode;
 
-use vibeos::vibefs::{self, MemDisk};
+use vibeos::vibefs::{self, Defect, MemDisk};
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -34,6 +34,12 @@ fn main() -> ExitCode {
     };
     match vibefs::fsck(&mut disk) {
         Ok(r) => {
+            for d in Defect::ALL {
+                let n = r.count(d);
+                if n != 0 {
+                    println!("fsck-vibefs: {} {n}", d.as_str());
+                }
+            }
             println!(
                 "fsck-vibefs: gen {} errors {} warnings {}",
                 r.generation, r.errors, r.warnings
