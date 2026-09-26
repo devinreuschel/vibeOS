@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 
 from scripts import check_cells
-from scripts.check_cells import must_be_unsafe_errors
+from scripts.check_cells import impl_errors, must_be_unsafe_errors, unsafe_impls
 
 ENTRY = [("src/a.rs", "force_unlock")]
 
@@ -72,11 +72,50 @@ class TestMustBeUnsafe(unittest.TestCase):
         for entry in [("src/cell.rs", "IrqCell::force_unlock"),
                       ("src/log_init.rs", "force_unlock"),
                       ("src/log_init.rs", "with_logger_unlocked"),
-                      ("src/log_init.rs", "dump_tail")]:
+                      ("src/log_init.rs", "dump_tail"),
+                      ("src/per_cpu_init.rs", "with_cpu")]:
             self.assertIn(entry, check_cells.MUST_BE_UNSAFE)
 
     def test_tree_passes(self) -> None:
         self.assertEqual(must_be_unsafe_errors(check_cells.read_tree()), [])
+
+
+class TestRemoteView(unittest.TestCase):
+    def test_view_is_listed(self) -> None:
+        self.assertIn("PerCpuRemote", check_cells.NO_UNSAFE_IMPL)
+
+    def test_unsafe_impl_for_view_fails_anywhere(self) -> None:
+        for trait in ("Send", "Sync"):
+            text = f"// SAFETY: no.\nunsafe impl {trait} for PerCpuRemote {{}}\n"
+            for path in ("src/per_cpu.rs", "src/cell.rs", "src/x.rs"):
+                with self.subTest(trait=trait, path=path):
+                    self.assertEqual(impl_errors(path, text), [
+                        f"{path}:2: unsafe impl {trait} for PerCpuRemote: "
+                        f"PerCpuRemote must be {trait} from its fields alone",
+                    ])
+
+    def test_split_and_qualified_header_fails(self) -> None:
+        text = "unsafe impl\n    core::marker::Sync\n    for vibeos::per_cpu::PerCpuRemote\n{\n}\n"
+        self.assertEqual(len(impl_errors("src/a.rs", text)), 1)
+
+    def test_other_impls_of_the_view_pass(self) -> None:
+        text = ("impl Default for PerCpuRemote {}\n"
+                "unsafe impl Send for PerCpu {}\n"
+                "// unsafe impl Sync for PerCpuRemote {}\n")
+        self.assertEqual(impl_errors("src/per_cpu.rs", text), [])
+
+    def test_with_cpu_must_be_unsafe(self) -> None:
+        entry = [("src/per_cpu_init.rs", "with_cpu")]
+        safe = "pub fn with_cpu<R>(id: u32, f: impl FnOnce(&mut PerCpu) -> R) -> Option<R> {}\n"
+        self.assertEqual(must_be_unsafe_errors({"src/per_cpu_init.rs": safe}, entry),
+                         ["src/per_cpu_init.rs:1: with_cpu must be declared `unsafe fn`"])
+        text = safe.replace("pub fn", "pub unsafe fn")
+        self.assertEqual(must_be_unsafe_errors({"src/per_cpu_init.rs": text}, entry), [])
+
+    def test_tree_has_no_view_impl(self) -> None:
+        for path, text in check_cells.read_tree().items():
+            self.assertEqual(
+                [i for i in unsafe_impls(text) if i.self_ty == "PerCpuRemote"], [], path)
 
 
 if __name__ == "__main__":

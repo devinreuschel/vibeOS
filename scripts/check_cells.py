@@ -2,6 +2,7 @@
 """Cells and their soundness rules (DESIGN §2.3, AGENTS.md rule 6).
 
 - Every function in MUST_BE_UNSAFE exists and is declared `unsafe fn`.
+- No `unsafe impl` of `Send` or `Sync` for a type in NO_UNSAFE_IMPL.
 - Generic `Sync` impls live in src/cell.rs; `static mut` only in catch.
 """
 
@@ -10,6 +11,7 @@ from __future__ import annotations
 import re
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,7 +25,32 @@ MUST_BE_UNSAFE: list[tuple[str, str]] = [
     ("src/log_init.rs", "force_unlock"),
     ("src/log_init.rs", "with_logger_unlocked"),
     ("src/log_init.rs", "dump_tail"),
+    ("src/per_cpu_init.rs", "with_cpu"),
 ]
+
+# Types that must stay `Sync` from their fields alone: an `unsafe impl` of
+# `Send` or `Sync` for one fails anywhere, so each field stays atomic or
+# set once before it is published (DESIGN §7.5).
+NO_UNSAFE_IMPL: tuple[str, ...] = ("PerCpuRemote",)
+
+_UNSAFE_IMPL = re.compile(r"\bunsafe\s+impl\b")
+_AUTO_TRAITS = ("Send", "Sync")
+
+
+@dataclass(frozen=True)
+class Impl:
+    """One `unsafe impl` header, joined from `unsafe impl` to its `{`.
+
+    `params` holds the type parameters, lifetimes and const parameters
+    dropped, each with its inline bounds; `where` holds the `where`
+    predicates as (bounded type, bounds).
+    """
+
+    line: int
+    trait: str
+    self_ty: str
+    params: tuple[tuple[str, str], ...]
+    where: tuple[tuple[str, str], ...]
 
 _FN_PREFIX = r"(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:unsafe\s+)?(?:extern\s+\"[^\"]*\"\s+)?"
 _IMPL_HEAD = re.compile(r"\bimpl\b")
@@ -152,6 +179,89 @@ def _generics_end(head: str) -> int:
     return len(head)
 
 
+def split_top(text: str, sep: str = ",") -> list[str]:
+    """Split at `sep` outside `<...>`, `(...)` and `[...]`; drop empty parts."""
+    parts: list[str] = []
+    depth, cur = 0, list[str]()
+    for j, c in enumerate(text):
+        if c in "<([":
+            depth += 1
+        elif c in ")]" or (c == ">" and (j == 0 or text[j - 1] != "-")):
+            depth = max(depth - 1, 0)
+        if c == sep and depth == 0:
+            parts.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(c)
+    parts.append("".join(cur).strip())
+    return [p for p in parts if p]
+
+
+def _param(p: str) -> tuple[str, str] | None:
+    """`T: Send + ?Sized = X` -> ("T", "Send + ?Sized"); None for a lifetime
+    or a const parameter."""
+    p = " ".join(p.split())
+    if p.startswith("'") or p.startswith("const "):
+        return None
+    head, _, bounds = p.partition(":")
+    name = head.split("=")[0].strip()
+    bounds = split_top(bounds, "=")[0] if bounds.strip() else ""
+    return name, bounds.strip()
+
+
+def unsafe_impls(text: str) -> list[Impl]:
+    """Every `unsafe impl` in `text`, comments ignored."""
+    code = strip_comments(text)
+    impls: list[Impl] = []
+    for m in _UNSAFE_IMPL.finditer(code):
+        brace = _header_end(code, m.end())
+        if brace < 0:
+            continue
+        head = " ".join(code[m.end() : brace].split())
+        params: list[tuple[str, str]] = []
+        if head.startswith("<"):
+            end = _generics_end(head)
+            for p in split_top(head[1 : end - 1]):
+                param = _param(p)
+                if param is not None:
+                    params.append(param)
+            head = head[end:].strip()
+        head, _, where_text = head.partition(" where ")
+        if head.endswith(" where"):
+            head = head[: -len(" where")]
+        parts = re.split(r"\s+for\s+", head, maxsplit=1)
+        trait = parts[0].strip().lstrip("!")
+        self_ty = parts[1].strip() if len(parts) > 1 else ""
+        where: list[tuple[str, str]] = []
+        for pred in split_top(where_text):
+            lhs, _, bounds = pred.partition(":")
+            where.append((lhs.strip(), bounds.strip()))
+        impls.append(
+            Impl(
+                line=line_of(code, m.start()),
+                trait=_last_segment(trait),
+                self_ty=_last_segment(self_ty),
+                params=tuple(params),
+                where=tuple(where),
+            )
+        )
+    return impls
+
+
+def impl_errors(path: str, text: str) -> list[str]:
+    """The `unsafe impl` rules for one file (DESIGN §2.3, AGENTS.md rule 6)."""
+    errors: list[str] = []
+    for imp in unsafe_impls(text):
+        if imp.trait not in _AUTO_TRAITS:
+            continue
+        if imp.self_ty in NO_UNSAFE_IMPL:
+            errors.append(
+                f"{path}:{imp.line}: unsafe impl {imp.trait} for {imp.self_ty}: "
+                f"{imp.self_ty} must be {imp.trait} from its fields alone"
+            )
+    return errors
+
+
 def must_be_unsafe_errors(
     files: Mapping[str, str], entries: Sequence[tuple[str, str]] = MUST_BE_UNSAFE
 ) -> list[str]:
@@ -205,6 +315,7 @@ def main() -> int:
     errors: list[str] = []
     for path, text in files.items():
         errors += legacy_errors(path, text)
+        errors += impl_errors(path, text)
     errors += must_be_unsafe_errors(files)
     if errors:
         print("\n".join(errors), file=sys.stderr)
