@@ -5,16 +5,25 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::block::{BlockError, Op};
 
-use super::{Outcome, Test, spawn_thread, test};
+use vibeos::thread::ThreadState;
+
+use super::{Outcome, Test, spawn_thread, spawn_thread_on, test};
 use crate::block_init::{self, IoWaiter, testing as blk_testing};
+use crate::ipi_init;
+use crate::kva_init;
+use crate::per_cpu_init;
 use crate::thread_init;
 use crate::time_init;
+use crate::x86;
 
-pub(super) const TESTS: &[Test] = &[test(
-    "lifetime_iowaiter_publish_last",
-    lifetime_iowaiter_publish_last,
-)
-.deadline(60_000)];
+pub(super) const TESTS: &[Test] = &[
+    test(
+        "lifetime_iowaiter_publish_last",
+        lifetime_iowaiter_publish_last,
+    )
+    .deadline(60_000),
+    test("lifetime_shootdown_ack_late", lifetime_shootdown_ack_late).deadline(15_000),
+];
 
 // ---------------------------------------------------------------------------
 // lifetime_iowaiter_publish_last (ROADMAP §10.10, F002; Phase 7 exit gate)
@@ -237,6 +246,100 @@ fn lifetime_iowaiter_publish_last() -> Outcome {
     let stalls = blk_testing::finish_stalls_run();
     if stalls != IOW_STALLS {
         return crate::fail_fmt!("{} of {} completer stalls ran", stalls, IOW_STALLS);
+    }
+    Outcome::Ok
+}
+
+// ---------------------------------------------------------------------------
+// lifetime_shootdown_ack_late (ROADMAP §10.10, F011)
+
+/// How long the holder keeps IF off, in ms of TSC time.
+const HOLD_MS: u64 = 3_000;
+/// 0: not started; 1: IF off and spinning; 2: IF back on.
+static HOLD: AtomicU32 = AtomicU32::new(0);
+
+/// Hold IF off for [`HOLD_MS`] without polling `service_incoming`, so this
+/// CPU acks no shootdown until it lets the pending `0xFC` in.
+fn ack_hold() {
+    let k = time_init::tsc_per_ms();
+    let g = x86::InterruptGuard::enter();
+    HOLD.store(1, Ordering::Release);
+    let t0 = time_init::read_tsc();
+    let span = k.saturating_mul(HOLD_MS);
+    while time_init::read_tsc().wrapping_sub(t0) < span {
+        spin_loop();
+    }
+    drop(g);
+    HOLD.store(2, Ordering::Release);
+}
+
+fn wait_ms(pred: impl Fn() -> bool, ms: u64) -> bool {
+    let t0 = time_init::now_ns();
+    while !pred() {
+        if time_init::now_ns().saturating_sub(t0) > ms.saturating_mul(1_000_000) {
+            return false;
+        }
+        thread_init::yield_now();
+    }
+    true
+}
+
+/// ROADMAP §10.10 (F011): one CPU holds IF off for 3 s while another
+/// unmaps a KVA range; `wait_acks` waits for it without panicking, logs it
+/// late once a second, and both finish.
+fn lifetime_shootdown_ack_late() -> Outcome {
+    let k = time_init::tsc_per_ms();
+    if k == 0 {
+        return Outcome::Skip("no TSC");
+    }
+    let mask = per_cpu_init::online_mask();
+    if mask.count_ones() < 2 {
+        return Outcome::Skip("one CPU");
+    }
+    let me = per_cpu_init::current().cpu_id;
+    let others = mask & !(1u64 << me);
+    // Prefer an AP, so the BSP's tick keeps running.
+    let pick = if others & !1 != 0 {
+        others & !1
+    } else {
+        others
+    };
+    let h = pick.trailing_zeros();
+    let Some(stack) = kva_init::alloc_guarded_stack(4) else {
+        return Outcome::Fail("alloc_guarded_stack");
+    };
+    let late0 = ipi_init::ack_late_count();
+    HOLD.store(0, Ordering::Release);
+    let th = spawn_thread_on("ack-hold", ack_hold, h);
+    if !wait_ms(|| HOLD.load(Ordering::Acquire) != 0, 2_000) {
+        kva_init::free_stack(stack);
+        return Outcome::Fail("holder did not start");
+    }
+    let t0 = time_init::read_tsc();
+    kva_init::free_stack(stack);
+    let waited_ms = time_init::read_tsc().wrapping_sub(t0) / k;
+    let late = ipi_init::ack_late_count().wrapping_sub(late0);
+    if !wait_ms(
+        || {
+            HOLD.load(Ordering::Acquire) == 2
+                && matches!(
+                    thread_init::try_state(th.id()),
+                    None | Some(ThreadState::Dead)
+                )
+        },
+        5_000,
+    ) {
+        return Outcome::Fail("holder did not finish");
+    }
+    if waited_ms < 2_000 {
+        return crate::fail_fmt!(
+            "unmap did not wait for the IF-off CPU: {} ms on cpu{}",
+            waited_ms,
+            h
+        );
+    }
+    if !(1..=3).contains(&late) {
+        return crate::fail_fmt!("{} late lines in {} ms, want 1..=3", late, waited_ms);
     }
     Outcome::Ok
 }

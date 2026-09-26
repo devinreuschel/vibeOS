@@ -945,7 +945,7 @@ that review cites means the review's text.
 | I28 | A line the harness takes as the kernel's is framed, and no user byte can produce the frame (§2.6) | `serial::Serial`, `console_init::write` | documented | No: nothing is framed, and the harness matches every line, so ring 3 can print a contract line (`/bin/sh` prints `shell ready`) or fail a run with `panicked at` (ROADMAP §10.2) |
 | I29 | A catch hook intercepts only a CPL-0 fault on the CPU that armed it, inside an in-guest test's catch window | `arch::catch` | assumed | Partly: production never arms it, but `intercept` runs first in every exception handler of every build, and its armed state is global, so in a `kernel_tests` build a fault with the armed vector on any CPU, at any CPL, is caught (ROADMAP §10.2, F146) |
 | I30 | Interrupt and exception handlers run with RFLAGS.AC=0 (§5.10 rule 5) | none | documented | No: the gates keep ring 3's AC (ROADMAP §10.6, F088) |
-| I31 | Every IF=0 stretch outside §2.9 rule 2's exemptions retires at most 100,000 instructions ([§2.9](#29-preemption-and-interrupt-state) rule 2) | §2.9; ROADMAP §10.3's IF-off tracer | documented | No: syscall bodies run with IF=0 until they block, and a console `write` scrolls the framebuffer once per newline with IF=0 (ROADMAP §10.6, F044); the heap's first-fit `alloc`, its address-ordered insertion on `dealloc`, and a moving `realloc`'s copy run under the IRQ-off HEAP lock over a free list whose length user churn sets (ROADMAP §12.6); the buddy's double-free check walks the free lists (ROADMAP §12.1, F029); a `klog!` emit waits on the UART with IF off, about 8 ms per 96-byte line on a 115200-baud 16550, which no QEMU tier paces (ROADMAP §19.5); ROADMAP §10.10 makes a shootdown survive a violation (F011) |
+| I31 | Every IF=0 stretch outside §2.9 rule 2's exemptions retires at most 100,000 instructions ([§2.9](#29-preemption-and-interrupt-state) rule 2) | §2.9; ROADMAP §10.3's IF-off tracer | documented | No: syscall bodies run with IF=0 until they block, and a console `write` scrolls the framebuffer once per newline with IF=0 (ROADMAP §10.6, F044); the heap's first-fit `alloc`, its address-ordered insertion on `dealloc`, and a moving `realloc`'s copy run under the IRQ-off HEAP lock over a free list whose length user churn sets (ROADMAP §12.6); the buddy's double-free check walks the free lists (ROADMAP §12.1, F029); a `klog!` emit waits on the UART with IF off, about 8 ms per 96-byte line on a 115200-baud 16550, which no QEMU tier paces (ROADMAP §19.5); a shootdown survives a violation: `wait_acks` keeps waiting and logs the CPUs that have not acknowledged once a second (§7.9, F011) |
 | I32 | A handler on an IST stack never blocks, switches threads, or takes a lock, and an IST vector taken at CPL 3 leaves the IST stack before its body runs (§5.10 rules 3 and 6) | the IST entry stubs and handlers | documented | Partly: every IST handler halts, so none blocks or switches, except that under `kernel_tests` an armed `catch` steps RIP and returns or longjmps off the IST stack; no IST entry leaves the IST stack yet (ROADMAP §10.6, F005, F007) |
 | I33 | A fault body reads CR2, DR6, ESR, and FAR from its frame, where the entry stub saved them before IF could turn on (§5.10 rule 9) | the `arch/idt.rs` stubs; the aarch64 vectors (ROADMAP §11.3) | documented | Yes, only because every fault body runs with IF=0 and reads CR2 before anything else can fault (`arch::idt::page_fault`); ROADMAP §10.6's IF=1 bodies need the stub save (its syscall-body and generated-stub boxes) |
 | I34 | A PTE change that removes or narrows a translation takes effect only after every CPU that could hold the old one has invalidated and acknowledged; until then no frame, table page, or VA is reused and no page counts as clean (§2.4) | `kva_init::unmap_shootdown` (kernel); `addr_space_init::shootdown_user` (user) | documented | Partly: kernel unmaps free frames and VA only after `wait_acks`; a user change invalidates only on the calling CPU, enough only while I8 holds, and nothing yet clears a dirty bit (ROADMAP §12.3) |
@@ -3905,13 +3905,14 @@ CPUs shooting down at once. The wait loop therefore calls `service_incoming` and
 slots so a spinning initiator still helps its peers. This is not optional; it is the difference
 between working and a hang that only appears under load.
 
-The wait is bounded: `ipi_init::wait_acks` panics after 1000 × `tsc_per_ms` TSC cycles (1 s) without
-every acknowledgement. Planned (ROADMAP §10.10): the wait never panics; after 1 s it keeps waiting and
-logs, at most once a second, the CPUs that have not acknowledged. A target CPU that holds IF=0 that
-long without polling `service_incoming` makes a shootdown panic the kernel. The in-guest test runner
-holds IF=0 for the whole run,
-and a syscall body runs with the IF=0 that FMASK set until it blocks (ROADMAP §10.10, F011); a console
-`write` with many newlines is the long case (ROADMAP §10.6, F044). As built, one round invalidates one VA
+The wait never panics, because `shootdown_va` and `call_mask` free frames and reuse their slot as
+soon as `ipi_init::wait_acks` returns. After each second (1000 × `tsc_per_ms` cycles) without every
+acknowledgement, it logs `vibeOS: ipi: wait_acks late <n> s: cpu<i> …` and counts it in
+`ipi_init::ack_late_count`. Without a TSC it logs every 50,000,000 polls. A CPU at IF=0 that does not
+poll `service_incoming` delays every shootdown until it does. One that never does leaves a hang for
+ROADMAP §10.7's forensics to report. `lifetime_shootdown_ack_late` holds IF off for 3 s on one CPU
+while another unmaps. What holds IF=0 that long today: syscall bodies until they block (ROADMAP
+§10.6, F011), and a console `write` with many newlines (ROADMAP §10.6, F044). As built, one round invalidates one VA
 (`shootdown_va`) on every online CPU; ROADMAP §12.3 replaces it with the rounds above. `kva_init::unmap_shootdown` unmaps at most 32 pages (`MAX_UNMAP`) and leaves the
 rest mapped with no error, while `vunmap` frees the whole VA span it was given (ROADMAP §10.3, F107).
 
