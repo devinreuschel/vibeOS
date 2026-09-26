@@ -41,12 +41,12 @@ static LIVE: AtomicBool = AtomicBool::new(false);
 static GSI: AtomicU32 = AtomicU32::new(GSI_NONE);
 static PIC_FALLBACK: AtomicBool = AtomicBool::new(false);
 
-extern "x86-interrupt" fn kbd_ioapic(_frame: vibeos::desc::InterruptFrame) {
+fn kbd_ioapic(_frame: &mut arch::idt::TrapFrame) {
     on_irq();
     apic_init::eoi();
 }
 
-extern "x86-interrupt" fn kbd_pic(_frame: vibeos::desc::InterruptFrame) {
+fn kbd_pic(_frame: &mut arch::idt::TrapFrame) {
     on_irq();
     unsafe { x86::outb(PIC1_CMD, PIC_EOI) };
 }
