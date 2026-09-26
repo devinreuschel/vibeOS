@@ -109,16 +109,9 @@ fn add_file(vol: &mut FatVol, disk: &mut MemDisk, dest: &str, data: &[u8]) -> Re
     if data.is_empty() {
         return Ok(());
     }
-    let mut clu = node.clu;
-    let mut size = node.size;
-    vol.write(
-        disk,
-        node.dir_clu,
-        node.dir_off,
-        &mut clu,
-        &mut size,
-        0,
-        data,
-    )?;
-    Ok(())
+    let r = vol.iget(node.dir_clu, node.dir_off)?;
+    let wrote = vol.write_ino(disk, r.key(), 0, false, data);
+    let put = vol.iput(disk, r);
+    wrote?;
+    put
 }

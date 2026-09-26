@@ -119,11 +119,14 @@ Larger volumes, more inodes, or a bigger block size are a version bump.
 
 A volume smaller than 16 blocks is invalid (`mkfs` refuses).
 
-v1 code does not enforce the file size limit yet: a `write` just below
-file offset 2^44 makes the next access to that block overflow
-`map_block`'s `u32` arithmetic, which panics the kernel, since both
-Cargo profiles check overflow (DESIGN §3.5), and an offset of 2^44 or
-more wraps onto the file's low blocks (F008; ROADMAP §10.11).
+The file size limit is enforced (`vibefs::MAX_FILE_SIZE`): a file ends
+at or below byte 2^44 − 4096, so its last block index is at most
+2^32 − 2. `Vol::write` refuses a write that starts at or past the limit
+with `FileTooBig` (`EFBIG`), leaving the file unchanged, and shortens one
+that would cross it to end at the limit. `truncate` refuses a larger
+size with `FileTooBig`, and `lseek` refuses a larger offset with
+`EINVAL`. Block arithmetic is checked `u64`, converted to a `u32` block
+index only after the check (F008; ROADMAP §10.11).
 
 ---
 

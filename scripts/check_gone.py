@@ -47,6 +47,7 @@ GONE: list[tuple[str, str]] = [
     ("capture_stdout", "one ring-3 entry model:"),
     ("flags_if_on", "one ring-3 entry model:"),
     ("longjmp_user", "one ring-3 entry model:"),
+    ("put_size", "one refcounted in-core FAT inode per file"),
     ("reset_stdout", "one ring-3 entry model:"),
     ("return_status_or_die", "one ring-3 entry model:"),
     ("run_path", "one ring-3 entry model:"),

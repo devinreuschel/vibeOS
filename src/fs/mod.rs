@@ -72,6 +72,8 @@ pub enum FsError {
     Badf,
     NotSupp,
     Io,
+    /// Past a filesystem's maximum file size.
+    FileTooBig,
 }
 
 impl FsError {
@@ -90,6 +92,7 @@ impl FsError {
             FsError::Badf => "badf",
             FsError::NotSupp => "not supp",
             FsError::Io => "io",
+            FsError::FileTooBig => "file too big",
         }
     }
 }

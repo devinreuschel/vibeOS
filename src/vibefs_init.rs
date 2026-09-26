@@ -266,8 +266,25 @@ pub fn read(id: u8, ino: u32, off: u64, buf: &mut [u8]) -> Result<usize, FsError
     with_slot(id, |v, d| v.read(d, ino, off, buf)).map_err(Error::to_fs)
 }
 
-pub fn write(id: u8, ino: u32, off: u64, buf: &[u8]) -> Result<usize, FsError> {
-    with_slot(id, |v, d| v.write(d, ino, off, buf)).map_err(Error::to_fs)
+/// Write `buf` at `off`, or at the inode's size when `append` is set;
+/// the count written and the position written at.
+pub fn write(
+    id: u8,
+    ino: u32,
+    off: u64,
+    append: bool,
+    buf: &[u8],
+) -> Result<(usize, u64), FsError> {
+    with_slot(id, |v, d| {
+        let pos = if append { v.file_size(ino)? } else { off };
+        Ok((v.write(d, ino, pos, buf)?, pos))
+    })
+    .map_err(Error::to_fs)
+}
+
+/// The size of inode `ino`.
+pub fn size(id: u8, ino: u32) -> Result<u64, FsError> {
+    with_slot(id, |v, _| v.file_size(ino)).map_err(Error::to_fs)
 }
 
 pub fn create(

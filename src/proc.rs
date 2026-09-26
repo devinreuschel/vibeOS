@@ -106,7 +106,12 @@ impl Creds {
 pub enum FdKind {
     None,
     Console,
-    File(u16),
+    /// An open-file table slot and the generation it had when this fd was
+    /// made (C-FDGEN).
+    File {
+        fid: u16,
+        r#gen: u16,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,7 +129,7 @@ impl Fd {
     pub const fn is_open(self) -> bool {
         match self.kind {
             FdKind::None => false,
-            FdKind::Console | FdKind::File(_) => true,
+            FdKind::Console | FdKind::File { .. } => true,
         }
     }
 
@@ -235,16 +240,14 @@ impl FdTable {
         Ok(displaced)
     }
 
-    /// Drop CLOEXEC fds on exec. Returns closed file fids for the caller
-    /// to `close` in the file table.
-    pub fn apply_cloexec(&mut self) -> [Option<u16>; MAX_FDS] {
+    /// Drop CLOEXEC fds on exec. Returns the dropped fds for the caller
+    /// to close in the file table.
+    pub fn apply_cloexec(&mut self) -> [Option<Fd>; MAX_FDS] {
         let mut gone = [None; MAX_FDS];
         let mut i = 0usize;
         while i < MAX_FDS {
             if self.slots[i].is_open() && self.slots[i].cloexec() {
-                if let FdKind::File(fid) = self.slots[i].kind {
-                    gone[i] = Some(fid);
-                }
+                gone[i] = Some(self.slots[i]);
                 self.slots[i] = Fd::EMPTY;
             }
             i += 1;
@@ -411,13 +414,16 @@ mod tests {
         t.set(
             4,
             Fd {
-                kind: FdKind::File(7),
+                kind: FdKind::File { fid: 7, r#gen: 2 },
                 flags: FD_CLOEXEC,
             },
         )
         .unwrap();
         let gone = t.apply_cloexec();
-        assert_eq!(gone[4], Some(7));
+        assert_eq!(
+            gone[4].map(|f| f.kind),
+            Some(FdKind::File { fid: 7, r#gen: 2 })
+        );
         assert!(t.get(4).is_none());
         assert!(t.get(1).is_some());
         let old = t.dup2(1, 2).unwrap();
@@ -473,7 +479,7 @@ mod tests {
         t.close(0);
         assert_eq!(
             t.alloc(Fd {
-                kind: FdKind::File(1),
+                kind: FdKind::File { fid: 1, r#gen: 0 },
                 flags: 0,
             })
             .unwrap(),
