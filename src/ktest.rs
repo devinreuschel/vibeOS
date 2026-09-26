@@ -3994,9 +3994,6 @@ fn test_block_ramdisk_rw() -> Outcome {
     if d.flush().is_err() {
         return Outcome::Fail("flush");
     }
-    if block_init::barrier().is_err() {
-        return Outcome::Fail("barrier");
-    }
     if d.discard(1, 1).is_err() {
         return Outcome::Fail("discard");
     }
@@ -4234,9 +4231,6 @@ fn test_block_vblk_rw() -> Outcome {
     }
     if !virtio_blk_init::has_flush() {
         // device did not offer F_FLUSH; flush is a successful no-op
-    }
-    if virtio_blk_init::barrier().is_err() {
-        return Outcome::Fail("barrier");
     }
     if virtio_blk_init::has_discard() && d.discard(5, 1).is_err() {
         return Outcome::Fail("discard");

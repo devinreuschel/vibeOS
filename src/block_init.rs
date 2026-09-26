@@ -10,7 +10,7 @@ use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::block::{
-    self, BlockError, DeviceState, MAX_QUEUE, Op, Queue, Ramdisk, Request, write_marker,
+    self, BlockError, Completion, DeviceState, MAX_QUEUE, Op, Queue, Ramdisk, Request, write_marker,
 };
 use vibeos::lock::RANK_DEVICE;
 use vibeos::sched::FAR_DEADLINE;
@@ -42,6 +42,7 @@ static STATE: AtomicU8 = AtomicU8::new(0);
 static FAIL_NEXT: AtomicU32 = AtomicU32::new(0);
 static LIVE: AtomicBool = AtomicBool::new(false);
 static IO_REQS: AtomicU64 = AtomicU64::new(0);
+static FLUSHES: AtomicU64 = AtomicU64::new(0);
 
 fn ram() -> Ramdisk {
     Ramdisk::new(RAM0_NAME, RAM0_BLOCK_SIZE, RAM0_SECTORS).expect("ram0 geom")
@@ -244,43 +245,77 @@ fn execute(req: &Request) -> Result<(), BlockError> {
     ram().apply(&mut data[..], req)
 }
 
-fn fail_rest() {
-    STATE.store(DeviceState::Failed.as_u8(), Ordering::Release);
-    let mut dump = [None; MAX_QUEUE];
-    let n = {
-        let mut q = Q.lock();
-        q.fail();
-        q.drain(&mut dump)
-    };
-    let mut i = 0usize;
-    while i < n {
-        if let Some(r) = dump[i] {
-            complete_req(&r, Err(BlockError::Failed));
+/// Take every queued request and every pending emulated-`Fua` `Flush`
+/// off `Q` and fail their waiters, after dropping the lock each round.
+fn drain_failed(q_prep: fn(&mut Queue)) {
+    let mut first = true;
+    loop {
+        let mut dump = [None; MAX_QUEUE];
+        let n = {
+            let mut q = Q.lock();
+            if first {
+                q_prep(&mut q);
+                first = false;
+            }
+            q.drain(&mut dump)
+        };
+        if n == 0 {
+            return;
         }
-        i += 1;
+        let mut i = 0usize;
+        while i < n {
+            if let Some(r) = dump[i] {
+                complete_req(&r, Err(BlockError::Failed));
+            }
+            i += 1;
+        }
     }
 }
 
+fn fail_rest() {
+    STATE.store(DeviceState::Failed.as_u8(), Ordering::Release);
+    drain_failed(Queue::fail);
+}
+
+/// Retire `req`'s dispatch in `Q`, then wake its waiters after the lock
+/// drops, unless the queue defers the report to an emulated-`Fua` `Flush`.
 fn finish(mut req: Request, res: Result<(), BlockError>) {
+    let seq = u64::from(req.seq);
+    let mut q = Q.lock();
     match res {
-        Ok(()) => complete_req(&req, Ok(())),
+        Ok(()) => {
+            let c = q.complete(seq);
+            drop(q);
+            if c == Completion::Report {
+                complete_req(&req, Ok(()));
+            }
+        }
         Err(e) if e.retryable() && req.retries_left > 0 => {
             req.retries_left -= 1;
-            let mut q = Q.lock();
-            if q.requeue(req).is_err() {
-                drop(q);
+            let requeued = q.requeue(req);
+            drop(q);
+            if requeued.is_err() {
                 complete_req(&req, Err(BlockError::Failed));
                 fail_rest();
             }
         }
         Err(e) if e.retryable() => {
+            q.abort(seq);
+            drop(q);
             complete_req(&req, Err(BlockError::Failed));
             fail_rest();
         }
-        Err(e) => complete_req(&req, Err(e)),
+        Err(e) => {
+            q.abort(seq);
+            drop(q);
+            complete_req(&req, Err(e));
+        }
     }
 }
 
+/// Runs inline in the submitter. It loops while `pick` has work, so an
+/// emulated-`Fua` write's `Flush` runs in the same pass: nothing else
+/// pumps ram0.
 fn pump() {
     loop {
         let req = {
@@ -293,6 +328,9 @@ fn pump() {
                 }
             }
         };
+        if req.bio.op == Op::Flush {
+            FLUSHES.fetch_add(1, Ordering::Relaxed);
+        }
         let res = execute(&req);
         finish(req, res);
     }
@@ -315,16 +353,16 @@ fn submit_req(req: Request) -> Result<bool, BlockError> {
     }
 }
 
-/// Async submit. `buf` must stay live until `w` completes. Flush/barrier
-/// / discard pass `ptr = 0`, `len = 0`.
-pub fn submit(
+/// Check a request and tie it to `w`. Flush and discard pass `ptr = 0`,
+/// `len = 0`.
+fn build(
     op: Op,
     lba: u64,
     nsect: u32,
     ptr: usize,
     len: usize,
     w: &IoWaiter,
-) -> Result<(), BlockError> {
+) -> Result<Request, BlockError> {
     if !LIVE.load(Ordering::Acquire) {
         return Err(BlockError::Failed);
     }
@@ -340,7 +378,7 @@ pub fn submit(
             }
             req = req.with_seg(ptr, len);
         }
-        Op::Flush | Op::Barrier => {
+        Op::Flush => {
             if nsect != 0 || len != 0 {
                 return Err(BlockError::Inval);
             }
@@ -351,9 +389,26 @@ pub fn submit(
             }
         }
     }
+    Ok(req)
+}
+
+fn start(req: Request) -> Result<(), BlockError> {
     let start = submit_req(req)?;
     kick_if(start);
     Ok(())
+}
+
+/// Async submit. `buf` must stay live until `w` completes. Flush and
+/// discard pass `ptr = 0`, `len = 0`.
+pub fn submit(
+    op: Op,
+    lba: u64,
+    nsect: u32,
+    ptr: usize,
+    len: usize,
+    w: &IoWaiter,
+) -> Result<(), BlockError> {
+    start(build(op, lba, nsect, ptr, len, w)?)
 }
 
 fn blocking(op: Op, lba: u64, nsect: u32, ptr: usize, len: usize) -> Result<(), BlockError> {
@@ -384,15 +439,29 @@ pub fn flush() -> Result<(), BlockError> {
     blocking(Op::Flush, 0, 0, 0, 0)
 }
 
+/// Write `buf` at `lba` with `Fua`: durable when this returns `Ok`.
+pub fn write_fua(lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+    let bs = RAM0_BLOCK_SIZE as usize;
+    if bs == 0 || !buf.len().is_multiple_of(bs) {
+        return Err(BlockError::Inval);
+    }
+    let nsect = (buf.len() / bs) as u32;
+    let w = IoWaiter::new();
+    let req = build(Op::Write, lba, nsect, buf.as_ptr() as usize, buf.len(), &w)?.with_fua();
+    start(req)?;
+    w.wait()
+}
+
+/// `Flush` requests dispatched to ram0, emulated-`Fua` ones included.
+pub fn flushes() -> u64 {
+    FLUSHES.load(Ordering::Relaxed)
+}
+
 pub fn discard(lba: u64, nsectors: u64) -> Result<(), BlockError> {
     if nsectors > u32::MAX as u64 {
         return Err(BlockError::Inval);
     }
     blocking(Op::Discard, lba, nsectors as u32, 0, 0)
-}
-
-pub fn barrier() -> Result<(), BlockError> {
-    blocking(Op::Barrier, 0, 0, 0, 0)
 }
 
 pub fn live() -> bool {
@@ -428,20 +497,10 @@ pub fn inject_io_fails(n: u32) {
 pub fn reset() {
     FAIL_NEXT.store(0, Ordering::SeqCst);
     STATE.store(DeviceState::Ready.as_u8(), Ordering::Release);
-    let mut dump = [None; MAX_QUEUE];
-    let n = {
-        let mut q = Q.lock();
+    drain_failed(|q| {
         q.failed = false;
         q.running = false;
-        q.drain(&mut dump)
-    };
-    let mut i = 0usize;
-    while i < n {
-        if let Some(r) = dump[i] {
-            complete_req(&r, Err(BlockError::Failed));
-        }
-        i += 1;
-    }
+    });
 }
 
 struct Ram0;

@@ -865,7 +865,7 @@ enumeration and DMA.
 - [x] `BlockDevice` trait: logical block size, capacity, read, write, flush, discard
 - [x] a request structure with a completion, supporting both blocking and async submission
 - [x] per-device request queue with a C-LOOK elevator and adjacent-request merging, capped at 8 segments and 8 waiters per merged request (F043, F119)
-- [x] barrier and flush semantics written down in `src/block.rs` and DESIGN §10.2, which a journaling filesystem depends on; the host tests `barrier_holds_later_requests` and `flush_is_fence_then_device_op` check `block::Queue`'s dispatch order around one fence; DESIGN §10.2's contract has no fence, and §10.11 deletes `Barrier` and replaces both tests (F043)
+- [x] flush semantics written down in `src/block.rs` and DESIGN §10.2, which a journaling filesystem depends on; the host test `flush_holds_up_no_later_request` checks `block::Queue`'s dispatch order around a `Flush` (F043)
 - [x] a ramdisk implementation first, so the layer is testable before any real driver
 - [x] error propagation with retry, and a device marked failed rather than retried forever
 

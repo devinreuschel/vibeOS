@@ -11,7 +11,9 @@ use alloc::boxed::Box;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
-use vibeos::block::{self, BlockError, DeviceState, MAX_QUEUE, Op, Queue, Request, write_marker};
+use vibeos::block::{
+    self, BlockError, Completion, DeviceState, MAX_QUEUE, Op, Queue, Request, write_marker,
+};
 use vibeos::dev::{Device, Driver, IdMatch, ProbeError};
 use vibeos::dma::{self, DmaAlloc, DmaBuffer};
 use vibeos::irq::IrqError;
@@ -88,6 +90,7 @@ static MIN_IO: AtomicU16 = AtomicU16::new(0);
 static OPT_IO: AtomicU32 = AtomicU32::new(0);
 static MAX_DISCARD: AtomicU32 = AtomicU32::new(0);
 static IO_REQS: AtomicU64 = AtomicU64::new(0);
+static FLUSHES: AtomicU64 = AtomicU64::new(0);
 
 fn r8(va: u64, off: u16) -> u8 {
     unsafe { core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u8) }
@@ -279,7 +282,6 @@ fn descs_for(op: Op) -> u16 {
     match op {
         Op::Read | Op::Write | Op::Discard => 3,
         Op::Flush => 2,
-        Op::Barrier => 0,
     }
 }
 
@@ -298,7 +300,6 @@ enum Issued {
 
 fn issue(blk: &mut Blk, req: Request) -> Issued {
     match req.bio.op {
-        Op::Barrier => return Issued::Local(req, Ok(())),
         Op::Flush if blk.features & F_FLUSH == 0 => return Issued::Local(req, Ok(())),
         Op::Discard if blk.features & F_DISCARD == 0 => {
             return Issued::Local(req, Err(BlockError::Inval));
@@ -329,10 +330,6 @@ fn issue(blk: &mut Blk, req: Request) -> Issued {
         Op::Write => T_OUT,
         Op::Flush => T_FLUSH,
         Op::Discard => T_DISCARD,
-        Op::Barrier => {
-            blk.slot_used[si] = false;
-            return Issued::Local(req, Ok(()));
-        }
     };
 
     let base = slot_base(&blk.slots, si);
@@ -455,10 +452,6 @@ fn issue(blk: &mut Blk, req: Request) -> Issued {
             ];
             nchain = 3;
         }
-        Op::Barrier => {
-            blk.slot_used[si] = false;
-            return Issued::Local(req, Ok(()));
-        }
     }
 
     let v = match blk.vqs[qi].as_mut() {
@@ -486,107 +479,154 @@ fn issue(blk: &mut Blk, req: Request) -> Issued {
     Issued::Device { qi, kick }
 }
 
+/// Dispatch what `blk.q` picks until it is idle or a virtqueue is full.
+/// A request finished here (`Local`) is completed or aborted under `BLK`,
+/// and its waiters wake after the lock drops.
 fn pump() {
-    let mut kicks = [0u64; MAX_VQ];
-    let mut want = [false; MAX_VQ];
-    let mut local: [Option<(Request, Result<(), BlockError>)>; MAX_QUEUE] = [None; MAX_QUEUE];
-    let mut nlocal = 0usize;
-    {
-        let mut g = BLK.lock();
-        let Some(blk) = g.as_mut() else {
-            return;
-        };
-        loop {
-            let req = match blk.q.pick() {
-                Some(r) => r,
-                None => {
-                    blk.running = false;
-                    break;
-                }
+    loop {
+        let mut kicks = [0u64; MAX_VQ];
+        let mut want = [false; MAX_VQ];
+        let mut local: [Option<(Request, Result<(), BlockError>)>; MAX_QUEUE] = [None; MAX_QUEUE];
+        let mut nlocal = 0usize;
+        let mut again = false;
+        {
+            let mut g = BLK.lock();
+            let Some(blk) = g.as_mut() else {
+                return;
             };
-            match issue(blk, req) {
-                Issued::Device { qi, kick } => {
-                    IO_REQS.fetch_add(1, Ordering::Relaxed);
-                    if kick && let Some(v) = blk.vqs[qi].as_ref() {
-                        kicks[qi] = v.doorbell;
-                        want[qi] = true;
-                    }
-                }
-                Issued::Local(req, res) => {
-                    if nlocal < MAX_QUEUE {
-                        local[nlocal] = Some((req, res));
-                        nlocal += 1;
-                    }
-                }
-                Issued::Full(req) => {
-                    let _ = blk.q.requeue(req);
+            loop {
+                if nlocal == MAX_QUEUE {
+                    again = true;
                     break;
+                }
+                let req = match blk.q.pick() {
+                    Some(r) => r,
+                    None => {
+                        blk.running = false;
+                        break;
+                    }
+                };
+                let seq = u64::from(req.seq);
+                match issue(blk, req) {
+                    Issued::Device { qi, kick } => {
+                        IO_REQS.fetch_add(1, Ordering::Relaxed);
+                        if req.bio.op == Op::Flush {
+                            FLUSHES.fetch_add(1, Ordering::Relaxed);
+                        }
+                        if kick && let Some(v) = blk.vqs[qi].as_ref() {
+                            kicks[qi] = v.doorbell;
+                            want[qi] = true;
+                        }
+                    }
+                    Issued::Local(req, res) => {
+                        if req.bio.op == Op::Flush && res.is_ok() {
+                            FLUSHES.fetch_add(1, Ordering::Relaxed);
+                        }
+                        let report = match res {
+                            Ok(()) => blk.q.complete(seq) == Completion::Report,
+                            Err(_) => {
+                                blk.q.abort(seq);
+                                true
+                            }
+                        };
+                        if report {
+                            local[nlocal] = Some((req, res));
+                            nlocal += 1;
+                        }
+                    }
+                    Issued::Full(req) => {
+                        if blk.q.requeue(req).is_err() {
+                            local[nlocal] = Some((req, Err(BlockError::Failed)));
+                            nlocal += 1;
+                        }
+                        break;
+                    }
                 }
             }
         }
-    }
-    let mut i = 0usize;
-    while i < nlocal {
-        if let Some((req, res)) = local[i].take() {
-            block_init::complete_waiters(&req, res);
+        let mut i = 0usize;
+        while i < nlocal {
+            if let Some((req, res)) = local[i].take() {
+                block_init::complete_waiters(&req, res);
+            }
+            i += 1;
         }
-        i += 1;
-    }
-    i = 0;
-    while i < MAX_VQ {
-        if want[i] {
-            kick(kicks[i]);
+        i = 0;
+        while i < MAX_VQ {
+            if want[i] {
+                kick(kicks[i]);
+            }
+            i += 1;
         }
-        i += 1;
+        if !again {
+            return;
+        }
     }
 }
 
 fn fail_rest() {
     STATE.store(DeviceState::Failed.as_u8(), Ordering::Release);
-    let mut dump = [None; MAX_QUEUE];
-    let n = {
-        let mut g = BLK.lock();
-        let Some(blk) = g.as_mut() else {
-            return;
+    loop {
+        let mut dump = [None; MAX_QUEUE];
+        let n = {
+            let mut g = BLK.lock();
+            let Some(blk) = g.as_mut() else {
+                return;
+            };
+            blk.q.fail();
+            blk.q.drain(&mut dump)
         };
-        blk.q.fail();
-        blk.q.drain(&mut dump)
-    };
-    let mut i = 0usize;
-    while i < n {
-        if let Some(r) = dump[i] {
-            block_init::complete_waiters(&r, Err(BlockError::Failed));
+        if n == 0 {
+            return;
         }
-        i += 1;
+        let mut i = 0usize;
+        while i < n {
+            if let Some(r) = dump[i] {
+                block_init::complete_waiters(&r, Err(BlockError::Failed));
+            }
+            i += 1;
+        }
     }
 }
 
+/// Retire `req`'s dispatch under `BLK`, drop it, then wake. A retry goes
+/// back on the queue for [`harvest`]'s closing [`pump`].
 fn finish(mut req: Request, res: Result<(), BlockError>) {
+    let seq = u64::from(req.seq);
+    let mut g = BLK.lock();
+    let Some(blk) = g.as_mut() else {
+        drop(g);
+        block_init::complete_waiters(&req, Err(BlockError::Failed));
+        return;
+    };
     match res {
-        Ok(()) => block_init::complete_waiters(&req, Ok(())),
+        Ok(()) => {
+            let c = blk.q.complete(seq);
+            drop(g);
+            if c == Completion::Report {
+                block_init::complete_waiters(&req, Ok(()));
+            }
+        }
         Err(e) if e.retryable() && req.retries_left > 0 => {
             req.retries_left -= 1;
-            let mut g = BLK.lock();
-            if let Some(blk) = g.as_mut() {
-                if blk.q.requeue(req).is_err() {
-                    drop(g);
-                    block_init::complete_waiters(&req, Err(BlockError::Failed));
-                    fail_rest();
-                } else if !blk.q.running {
-                    blk.q.running = true;
-                    drop(g);
-                    pump();
-                }
-            } else {
-                drop(g);
+            let requeued = blk.q.requeue(req);
+            drop(g);
+            if requeued.is_err() {
                 block_init::complete_waiters(&req, Err(BlockError::Failed));
+                fail_rest();
             }
         }
         Err(e) if e.retryable() => {
+            blk.q.abort(seq);
+            drop(g);
             block_init::complete_waiters(&req, Err(BlockError::Failed));
             fail_rest();
         }
-        Err(e) => block_init::complete_waiters(&req, Err(e)),
+        Err(e) => {
+            blk.q.abort(seq);
+            drop(g);
+            block_init::complete_waiters(&req, Err(e));
+        }
     }
 }
 
@@ -1138,15 +1178,15 @@ fn submit_req(req: Request) -> Result<bool, BlockError> {
     }
 }
 
-/// Async submit. `buf` lives until `w` completes. Hard IRQ must not call this.
-pub fn submit(
+/// Check a request and tie it to `w`. Hard IRQ must not call this.
+fn build(
     op: Op,
     lba: u64,
     nsect: u32,
     ptr: usize,
     len: usize,
     w: &IoWaiter,
-) -> Result<(), BlockError> {
+) -> Result<Request, BlockError> {
     if irq_init::in_hard_irq() {
         return Err(BlockError::Failed);
     }
@@ -1173,7 +1213,7 @@ pub fn submit(
             }
             req = req.with_seg(ptr, len);
         }
-        Op::Flush | Op::Barrier => {
+        Op::Flush => {
             if nsect != 0 || len != 0 {
                 return Err(BlockError::Inval);
             }
@@ -1191,18 +1231,49 @@ pub fn submit(
             }
         }
     }
-    let start = submit_req(req)?;
-    if start {
+    Ok(req)
+}
+
+fn start(req: Request) -> Result<(), BlockError> {
+    if submit_req(req)? {
         pump();
     }
     Ok(())
 }
 
+/// Async submit. `buf` lives until `w` completes. Hard IRQ must not call this.
+pub fn submit(
+    op: Op,
+    lba: u64,
+    nsect: u32,
+    ptr: usize,
+    len: usize,
+    w: &IoWaiter,
+) -> Result<(), BlockError> {
+    start(build(op, lba, nsect, ptr, len, w)?)
+}
+
 fn blocking(op: Op, lba: u64, nsect: u32, ptr: usize, len: usize) -> Result<(), BlockError> {
+    blocking_req(op, lba, nsect, ptr, len, false)
+}
+
+/// Submit and wait, yielding while the queue is full. `fua` marks a write.
+fn blocking_req(
+    op: Op,
+    lba: u64,
+    nsect: u32,
+    ptr: usize,
+    len: usize,
+    fua: bool,
+) -> Result<(), BlockError> {
     let mut spins = 0u32;
     loop {
         let w = IoWaiter::new();
-        match submit(op, lba, nsect, ptr, len, &w) {
+        let mut req = build(op, lba, nsect, ptr, len, &w)?;
+        if fua {
+            req = req.with_fua();
+        }
+        match start(req) {
             Ok(()) => return w.wait(),
             Err(BlockError::QueueFull) => {
                 spins = spins.saturating_add(1);
@@ -1238,15 +1309,35 @@ pub fn flush() -> Result<(), BlockError> {
     blocking(Op::Flush, 0, 0, 0, 0)
 }
 
+/// Write `buf` at `lba` with `Fua`: durable when this returns `Ok`.
+/// virtio-blk has no FUA (DESIGN §10.4), so the queue sends a `Flush`.
+pub fn write_fua(lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+    let bs = logical_block_size() as usize;
+    if bs == 0 || !buf.len().is_multiple_of(bs) {
+        return Err(BlockError::Inval);
+    }
+    let nsect = (buf.len() / bs) as u32;
+    blocking_req(
+        Op::Write,
+        lba,
+        nsect,
+        buf.as_ptr() as usize,
+        buf.len(),
+        true,
+    )
+}
+
+/// `Flush` requests dispatched to vda, emulated-`Fua` ones and those
+/// finished locally without `F_FLUSH` included.
+pub fn flushes() -> u64 {
+    FLUSHES.load(Ordering::Relaxed)
+}
+
 pub fn discard(lba: u64, nsectors: u64) -> Result<(), BlockError> {
     if nsectors == 0 || nsectors > u32::MAX as u64 {
         return Err(BlockError::Inval);
     }
     blocking(Op::Discard, lba, nsectors as u32, 0, 0)
-}
-
-pub fn barrier() -> Result<(), BlockError> {
-    blocking(Op::Barrier, 0, 0, 0, 0)
 }
 
 struct Vda;
