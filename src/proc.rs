@@ -451,7 +451,7 @@ mod tests {
         assert_eq!(ProcState::Zombie.name(), "zombie");
         assert_eq!(Creds::ROOT.uid, 0);
         assert_eq!(INIT_PID, 1);
-        assert_eq!(MAX_PROCS, 16);
+        assert_eq!(MAX_PROCS, 18);
         let c = Cwd::root();
         assert_eq!(c.as_bytes(), b"/");
         assert_eq!(default_action(SIGCONT), SigAct::Cont);

@@ -308,6 +308,13 @@ fn lifetime_shootdown_ack_late() -> Outcome {
     let Ok(stack) = kva_init::alloc_guarded_stack(4) else {
         return Outcome::Fail("alloc_guarded_stack");
     };
+    // A dead stack this CPU's worker frees would wait out the hold in
+    // `wait_acks` too, and the registry would resume after it; start with
+    // none on its way back (ROADMAP §10.10's owner-CPU reclaim).
+    if !super::settle_threads() {
+        kva_init::free_stack(stack);
+        return Outcome::Fail("threads did not settle");
+    }
     let late0 = ipi_init::ack_late_count();
     HOLD.store(0, Ordering::Release);
     let th = spawn_thread_on("ack-hold", ack_hold, h);

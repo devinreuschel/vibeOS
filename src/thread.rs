@@ -4,6 +4,7 @@
 //! The TCB table, KVA mapping, and `spawn` live in the binary crate.
 
 use core::mem::{offset_of, size_of};
+use core::sync::atomic::AtomicBool;
 
 use crate::paging::{PAGE_SIZE_4K, VirtAddr};
 use crate::pmm::Frames;
@@ -182,6 +183,15 @@ pub struct Tcb {
     pub id: ThreadId,
     pub name: &'static str,
     pub state: ThreadState,
+    /// Set while a CPU runs this thread or is still switching off it: the
+    /// incoming side of `thread_init::switch_now` sets it (Relaxed), and
+    /// `thread_init::finish_switch` on that CPU clears it with Release as
+    /// its last access to the TCB, after `switch_context` has saved every
+    /// piece of DESIGN §7.5's per-thread state. `thread_init::spawn_inner`
+    /// reuses a Dead slot only after an Acquire load finds it clear, and
+    /// ROADMAP §13.8's core dump and §17.4's `ptrace` requests wait on it
+    /// too. A running bootstrap or AP idle TCB starts set.
+    pub on_cpu: AtomicBool,
     pub stack: Option<GuardedStack>,
     pub context: CpuContext,
     pub entry: fn(),

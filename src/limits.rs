@@ -20,8 +20,9 @@
 
 /// Thread table slots (`thread_init`'s scheduler, `sched` run and timeout queues).
 pub const MAX_THREADS: usize = 64;
-/// Process table slots (`proc_init`).
-pub const MAX_PROCS: usize = 16;
+/// Process table slots (`proc_init`). Pids 2 to 17 leave room for 16 live
+/// processes besides init, as ROADMAP §10.10's `exit_burst` runs.
+pub const MAX_PROCS: usize = 18;
 /// File descriptors per process (`proc::FdTable`, `fs::FdTable`).
 pub const MAX_FDS: usize = 16;
 /// Open-file table slots, system-wide (`fs::Vfs` files, `file_init`'s table).
@@ -60,8 +61,6 @@ pub const MAX_WALK: u32 = 80;
 /// Kernel virtual-address free-list nodes (`kva::Kva`). A `u8` holds the
 /// count (`kva::Kva`'s `nslots`), hence the assert below.
 pub const MAX_KVA_RANGES: usize = 128;
-/// Kernel stacks awaiting deferred reclaim (`kva_init`).
-pub const MAX_DEFERRED_STACKS: usize = 8;
 /// Pages one deferred unmap batch holds (`kva_init`).
 pub const MAX_UNMAP_PAGES: usize = 32;
 /// Mounted FAT volumes (`fat_init`).
