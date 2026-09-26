@@ -950,7 +950,7 @@ that review cites means the review's text.
 | I34 | A PTE change that removes or narrows a translation takes effect only after every CPU that could hold the old one has invalidated and acknowledged; until then no frame, table page, or VA is reused and no page counts as clean (§2.4) | `kva_init::unmap_shootdown` (kernel); `addr_space_init::shootdown_user` (user) | documented | Partly: kernel unmaps free frames and VA only after `wait_acks`; a user change invalidates only on the calling CPU, enough only while I8 holds, and nothing yet clears a dirty bit (ROADMAP §12.3) |
 | I35 | A user PTE change invalidates the second-level translations (EPT, NPT, stage-2) of its range on every CPU that may hold them before the frame's count drops (§2.4) | none yet | documented | Not relied on yet: no hypervisor exists until ROADMAP §21.2, which lands it |
 | I36 | `current` is read in one instruction, and every other per-CPU access but the CPU-id hint runs with IF=0 ([§2.9](#29-preemption-and-interrupt-state) rule 5) | `per_cpu_init`; the syscall stub's `gs:[current]` load | documented | Partly: the syscall stub reads `current` in one load, but `current_thread`, `current_id`, `current_pid`, and `per_cpu!` load `gs:[0]` and then the field, and `current()` hands out `&'static PerCpu` at any IF; no preempted thread changes CPU yet (ROADMAP §10.3, F039) |
-| I37 | Nothing is silently swallowed: an error is returned to its caller, or handled where it arises by a counter and a rate-limited line, a recorded error state, or a bounded retry (§2.5) | every module; ROADMAP §10.1's lints | documented | No: nothing checks a discard, and the kernel review's dropped errors remain (ROADMAP §10.1 audit; §10.2, F080; §10.11, F051, F063; §10.12, F115; §13.9, F124) |
+| I37 | Nothing is silently swallowed: an error is returned to its caller, or handled where it arises by a counter and a rate-limited line, a recorded error state, or a bounded retry (§2.5) | every module; ROADMAP §10.1's lints | documented | No: nothing checks a discard, and the kernel review's dropped errors remain (ROADMAP §10.1 audit; §10.11, F051, F063; §10.12, F115; §13.9, F124) |
 | I38 | A return to user mode restores only what the §5.10 rule 10 validator accepted from any writer of the saved frame, and its last check for pending work runs with IF=0 (§5.10 rule 11) | the validators in each port's pure half; the exit paths | documented | Rule 10 holds vacuously: no writer of a saved user context exists before ROADMAP §13.8 and §17.4. Rule 11 does not: pending signals are acted on only at syscall entry and after the `wait4` sleep (ROADMAP §10.6, F033) |
 | I39 | On aarch64, an ASID a CPU has used since its last local TLB flush names one address space on that CPU ([§11.2](#112-address-space-on-aarch64)) | the ASID allocator (ROADMAP §11.2) | documented | Not relied on yet: the aarch64 port does not exist; ROADMAP §11.2's host tests and loom model enforce it when it lands |
 | I40 | A thread sleeps, or takes a sleeping lock, only with IF=1 and no spinlock held (§2.1, [§2.9](#29-preemption-and-interrupt-state) rule 4) | none yet | documented | No: syscall bodies run with IF=0 until they block (§2.9 rule 3; ROADMAP §10.6); nothing asserts either condition until ROADMAP §10.3's may-sleep box (F108) |
@@ -1518,9 +1518,10 @@ memory BARs under the 32 MiB cap, fills the device registry, and emits
 next. Drivers register, then bind after the scan, not inline. Virtio-rng
 matches by id when a modern virtio device is present (ktest adds one; e2e
 does not). Ramdisk init follows bind and emits `block: <name> <n> sectors`.
-Partition scan stamps an MBR on `ram0` and, on a `vda` of at least 1024 sectors whose table fails to
-parse or has no entries, a GPT that overwrites LBA 0–33 and the last 33 sectors of a whole-disk image
-on first boot ([section 10.5](#105-partitions); ROADMAP §10.11, F003). It emits
+Partition scan stamps an MBR on `ram0`. Only a `kernel_tests` build stamps a GPT, and only on a `vda`
+whose table fails to parse or has no entries and whose LBA 0–33 and last 33 sectors all read back as
+zeros; the production kernel never writes `vda` here ([section 10.5](#105-partitions); ROADMAP
+§10.11, F003). It emits
 `block: <parent>p<N> <n> sectors` per child. A writeback cache thread starts
 before the scan. `fs_init` then makes the FAT initrd `/` (a ramfs root only when the initrd is not
 live) and mounts devfs / procfs / tmpfs / sysfs on `/dev` `/proc` `/tmp` `/sys` and vibefs at
@@ -4364,15 +4365,54 @@ in the test harness produces either false confidence or a debugging session in t
 Those tests exercise `check_markers_in_order`, which no runner calls; `run_qemu_and_check`, the
 matcher every e2e run uses, has no unit test (ROADMAP §10.2, F141).
 
-`make test-vibefs-crash` (`run_vibefs_crash.py`) formats a 256 KiB image with `mkfs-vibefs`, boots
-the `vibefs_crash` build on it, kills QEMU up to 0.18 s after the first `vibeOS: vibefs: wr` line,
-and passes a round when `fsck-vibefs` exits 0 and prints `errors 0`. It does not mount the image or
-check `/crash/w` against the committed-generation criterion that [VIBEFS.md](VIBEFS.md) §12
-requires, and the guest discards `sync_fs` errors, so a round passes after the volume has filled
-and commits have stopped (ROADMAP §10.2, F080). Planned (ROADMAP §10.2): the disk is served by the
-volatile-cache device, an NBD server in hostlib that records every write and flush, and each round
-checks the images rebuilt from its trace, since a kill loses no write QEMU received, under
-`cache=writeback` or `cache=none` alike.
+The `vibefs_crash` build (`vibefs_init::crash_loop`) prints no boot contract past its own lines,
+which `run_vibefs_crash.py` knows:
+
+| Line | Meaning |
+|---|---|
+| `vibeOS: vibefs: crash-ready` | `vda` is mounted at `/crash` and iteration 0 is committed |
+| `vibeOS: vibefs: wr <n>` | iteration `n` (from 1) starts: `/crash/w` opened with `O_TRUNC`, 300 bytes of `(n + k) as u8` written, closed, then `sync_fs` |
+| `vibeOS: vibefs: mount fail <err>` | failure line: `/crash` could not be made or `vda` not mounted; the guest halts |
+| `vibeOS: vibefs: sync fail <err>` | failure line: an open, write, close or `sync_fs` of an iteration failed (`short write` for a short write); the guest halts |
+
+`make test-vibefs-crash` first runs the hostlib tests (`nbd-cache`, `vibefs-cat`), then
+`run_vibefs_crash.py` over the volatile-cache device (F080; ROADMAP §10.2). Each of 8 rounds
+(`VIBEOS_CRASH_ROUNDS`; the run seed is `VIBEOS_CRASH_SEED` and every failure prints it with the
+round) works in a short `mkdtemp` directory, since macOS allows 104 bytes of unix socket path:
+
+1. `mkfs-vibefs` a 256 KiB image, the size `vibefs::tests::crash_workload_seeded_points` proves
+   200 commits fit, require `fsck-vibefs` to print `errors 0 warnings 0`, read its generation `G`,
+   and copy it to the served image.
+2. Start `nbd-cache` on it with a seed from the run's RNG. It is an NBD server in hostlib that
+   advertises only `HAS_FLAGS|SEND_FLUSH`, replies to a write when it arrives and to a flush
+   `1 + xorshift(seed) % 20` ms later, and keeps reading, tracing and replying to the requests that
+   arrive meanwhile, so a write sent before a flush completes is not covered by it. Its JSONL trace
+   records each write and flush on arrival and each reply once sent, and `<trace>.data` holds the
+   write payloads in trace order.
+3. Boot the `vibefs_crash` build with the disk served over NBD (§8.4), `cache=` rotating through
+   `writeback`, `none` and `writethrough`, and SIGKILL QEMU up to `CRASH_KILL_MAX_S` (0.05 s)
+   after `vibeOS: vibefs: wr K`, K uniform in [1, 200]. After the kill the harness reads serial to
+   EOF, so a `wr` line already in the pipe is not lost. The round fails unless QEMU died of that
+   SIGKILL with the last `wr N` at least K, and unless `nbd-cache` then exits 0 (it exits 1 after
+   a FUA, TRIM, unknown or out-of-range request).
+4. Require that a replay of every traced write equals the served image: a kill loses no write the
+   device received, under any of the three cache modes, so only images rebuilt from the trace can
+   show a lost unflushed write. A write is durable once the device has replied to a flush it
+   received after replying to that write. The harness rebuilds one image per write that changes a
+   superblock slot (the writes durable when it arrived, plus that write; a write that changes part
+   of a slot fails the round, and one that rewrites a slot unchanged, as Limine's BIOS stage does
+   to LBA 0 before the kernel runs, is skipped) and one at the kill (the durable writes plus a
+   seeded subset, each kept with probability 1/2, of the later ones).
+5. On every image `fsck-vibefs` must print `errors 0 warnings 0`, and `vibefs-cat <img> /w` must
+   return one iteration's content, iteration `i`, with `i` no older than the last iteration whose
+   final flush the device replied before that image's crash point. A super write's iteration is its
+   generation − `G` − 1, and its commit's final flush is the first flush that arrived after its
+   reply. The kill image must also hold `N` or `N` − 1, and the trace must show `N` − 1's final
+   flush replied, since `wr N` follows that commit's `sync_fs`.
+
+A failed round keeps its directory (base and served images, trace, and the failing image named
+`super@<index>.img` or `kill.img`) and prints its path. Each round logs K, N, the cache mode, the
+number of images checked, and the trace's write and flush counts.
 
 ## 8.4 QEMU flags
 
@@ -4381,6 +4421,7 @@ checks the images rebuilt from its trace, since a kill loses no write QEMU recei
 | `make run` | `-cdrom vibeos.iso -m 128M -smp 2 -cpu max -accel tcg -no-reboot -serial stdio` (Makefile `QEMU_BASE`, plus `-serial stdio` from the `run` recipe) |
 | e2e | as above plus `-display none -monitor unix:...,server=on,wait=off` (`harness.qemu_argv`) |
 | ktest | as e2e plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04`, `-device e1000e`, `-device edu` (planned, ROADMAP §11.7: `-device edu,dma_mask=0xFFFFFFFF` on both architectures), `-device virtio-rng-pci,disable-legacy=on`, virtio-blk (`-drive file=…,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>`). Extra NICs/edu/virtio are ktest-only; e2e stays the default `pc` set (`pci: 6 devices`). After a green first boot the harness reboots the same disk and requires `vibeOS: persist: intact`. |
+| vibefs crash | as e2e plus `-boot order=d` and the volatile-cache device: `-drive file.driver=nbd,file.server.type=unix,file.server.path=<sock>,format=raw,if=none,id=vibehd,cache=<writeback\|none\|writethrough>` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>,write-cache=on` (`harness.virtio_blk_args(..., nbd=True)`). QEMU 8.2 accepts the `file.driver=nbd` form; `cache=unsafe` is refused, since it drops flushes |
 | LAPIC fallback | `-cpu qemu64,-tsc-deadline` |
 | SMP stress | `-smp 4` |
 | aarch64 (`ARCH=aarch64`) | Planned (ROADMAP §11.7): `qemu-system-aarch64 -machine virt,acpi=off,gic-version=3`, with `-cpu max` under TCG or `-cpu host` under HVF (`virt` defaults to the 32-bit `cortex-a15`); the §10.2 probe's firmware code read-only on pflash unit 0 and a per-run copy of its variable-store template on unit 1; the ISO on a CD-ROM, `-device virtio-scsi-pci -device scsi-cd,drive=cd0 -drive if=none,id=cd0,media=cdrom,readonly=on,file=<iso>`, so the ktest disk is the only virtio-blk device; and `-device ramfb`, `virtio-keyboard-pci`, `virtio-tablet-pci`, `pvpanic-pci`, and `vmcoreinfo` |
@@ -4414,8 +4455,10 @@ harness defaults match them.
 | `VIBEOS_SKIP_PERSIST` | off | `run_ktest` |
 | `VIBEOS_CRASH_ROUNDS` | `8` | `run_vibefs_crash` |
 | `VIBEOS_CRASH_SEED` | time-based | `run_vibefs_crash` |
-| `VIBEOS_MKFS` | `mkfs-vibefs` | `run_vibefs_crash` |
+| `VIBEOS_MKFS` | `mkfs-vibefs` | `run_vibefs_crash`, `run_e2e` (the `test-e2e` tier's vda images) |
 | `VIBEOS_FSCK` | `fsck-vibefs` | `run_vibefs_crash` |
+| `VIBEOS_NBD_CACHE` | `nbd-cache` | `run_vibefs_crash` |
+| `VIBEOS_VIBEFS_CAT` | `vibefs-cat` | `run_vibefs_crash` |
 
 `VIBEOS_BIOS` reaches QEMU as `-bios`, which accepts only an image whose size is a multiple of
 64 KiB. apt's combined `/usr/share/ovmf/OVMF.fd`, the Makefile's `OVMF` default and the one CI uses,
@@ -5282,11 +5325,16 @@ them (ROADMAP §10.12, F117). Only in-guest tests use the child devices:
 `mount_dev` accepts only `ram0` and `vda`, and devfs block nodes return
 `NotSupp` (ROADMAP §10.4, F081).
 
-`part_init::init` runs in every build. It stamps an MBR on `ram0`, and it
-stamps a GPT on `vda` whenever `vda`'s table fails to parse or has no
-entries, including after a read error; the only guard is a 512-byte block
-size and at least 1024 sectors. A whole-disk vibefs or FAT32 image on `vda`
-loses LBA 0 to 33 and its last 33 sectors on the first boot (ROADMAP §10.11,
+`part_init::init` stamps an MBR on `ram0` (RAM) in every build. Only a
+`kernel_tests` build stamps a GPT, through `stamp_vda_gpt`, and only on an
+all-zero `vda`: a table that fails to parse or has no entries, a 512-byte
+block size, at least 1024 sectors, and LBA 0 to 33 and the last 33 sectors
+all reading back as zeros. A read error returns the error and stamps
+nothing. The production build compiles neither `stamp_vda_gpt` nor its call,
+so it writes a disk only for a mounted filesystem or a write to its device
+node. `make test-e2e` boots the production ISO with a 1 MiB `mkfs-vibefs`
+image on `vda` and with a 1 MiB image whose only non-zero bytes are `0x55AA`
+at offset 510, and requires each image's SHA-256 unchanged (ROADMAP §10.11,
 F003).
 
 Rule: a lookup of a block device by an identity it carries (a filesystem

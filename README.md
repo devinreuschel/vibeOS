@@ -27,9 +27,7 @@ paging / COW) are not started. See [The arc](docs/ROADMAP.md#the-arc).
 Do not run code you do not trust on vibeOS, and keep no secrets on it: until Phase 10 closes a process
 can crash the kernel, and until Phase 18 nothing stops one from reading other processes' memory
 ([DESIGN §2.10](docs/DESIGN.md#210-trust-boundaries)).
-Do not attach a virtio-blk disk you want to keep: every boot writes a GPT over the first one (`vda`) when
-it is 512 KiB or more and its partition table is missing, empty, or unreadable (F003), and
-`vibeos-ktest.iso` writes fixed sectors of any attached one (F145).
+Do not attach a disk you want to keep to `vibeos-ktest.iso`, which stamps a GPT on an all-zero `vda` and writes fixed sectors of any attached one (F145).
 Releases: [GitHub Releases](https://github.com/devinreuschel/vibeOS/releases). From Phase 8 on, the commit that closes a phase
 gets a `phase-<N>` tag and the next `v0.<m>.0` release, numbered in closing order: `v0.8.0` to `v0.14.0` are Phases 8 to 14,
 later release notes name their phase, and Phase 39 is `v1.0.0` ([How to read this](docs/ROADMAP.md#how-to-read-this)).

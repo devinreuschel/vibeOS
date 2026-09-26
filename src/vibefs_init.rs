@@ -800,33 +800,57 @@ const _: () = {
 /// contract line. Printed *before* the write+fsync so a kill can land
 /// inside `write` / `Flush` (docs/VIBEFS.md §12).
 #[cfg(feature = "vibefs_crash")]
+/// The `vibefs_crash` build's workload (VIBEFS §12 item 2, ROADMAP §10.2).
+/// Mounts `vda` at `/crash`, commits iteration 0, prints `crash-ready`, then
+/// for each N from 1 prints `wr N` and commits iteration N: `/crash/w` with
+/// `O_TRUNC`, 300 bytes of `(N + k) as u8`, close, `sync_fs`. Any error
+/// prints a registered failure line and halts, so the harness sees it.
 pub fn crash_loop() -> ! {
     use crate::file_init;
     use crate::x86;
-    use vibeos::fs::{O_CREAT, O_RDWR, O_TRUNC, OpenFlags};
 
-    let _ = file_init::mkdir(b"/crash", 0o755);
-    if mount_dev("vda", "/crash", false).is_err() {
-        crate::marker!("vibeOS: vibefs: mount fail");
+    /// One committed iteration of `crash_loop`. The error is the text its
+    /// failure line carries.
+    fn crash_iter(n: u32) -> Result<(), &'static str> {
+        use crate::file_init;
+        use vibeos::fs::{O_CREAT, O_RDWR, O_TRUNC, OpenFlags};
+
+        let flags = OpenFlags::from_bits(O_RDWR | O_CREAT | O_TRUNC);
+        let f = file_init::open(b"/crash/w", flags, 0o644).map_err(|e| e.as_str())?;
+        let mut buf = [0u8; 300];
+        for (k, b) in buf.iter_mut().enumerate() {
+            *b = n.wrapping_add(k as u32) as u8;
+        }
+        let wrote = file_init::write(&f, &buf);
+        let closed = file_init::close(f);
+        match wrote {
+            Ok(w) if w == buf.len() => {}
+            Ok(_) => return Err("short write"),
+            Err(e) => return Err(e.as_str()),
+        }
+        closed.map_err(|e| e.as_str())?;
+        file_init::sync_fs().map_err(|e| e.as_str())
+    }
+
+    if let Err(e) = file_init::mkdir(b"/crash", 0o755)
+        .and_then(|()| mount_dev("vda", "/crash", false).map(|_| ()))
+    {
+        crate::marker!("vibeOS: vibefs: mount fail {}", e.as_str());
+        x86::halt();
+    }
+    if let Err(e) = crash_iter(0) {
+        crate::marker!("vibeOS: vibefs: sync fail {e}");
         x86::halt();
     }
     crate::marker!("vibeOS: vibefs: crash-ready");
-    let flags = OpenFlags::from_bits(O_RDWR | O_CREAT | O_TRUNC);
-    let mut i = 0u32;
+    let mut n = 1u32;
     loop {
-        crate::marker!("vibeOS: vibefs: wr {i}");
-        if let Ok(f) = file_init::open(b"/crash/w", flags, 0o644) {
-            let mut buf = [0u8; 300];
-            let mut k = 0usize;
-            while k < buf.len() {
-                buf[k] = i.wrapping_add(k as u32) as u8;
-                k += 1;
-            }
-            let _ = file_init::write(&f, &buf);
-            let _ = file_init::close(f);
+        crate::marker!("vibeOS: vibefs: wr {n}");
+        if let Err(e) = crash_iter(n) {
+            crate::marker!("vibeOS: vibefs: sync fail {e}");
+            x86::halt();
         }
-        let _ = file_init::sync_fs();
-        i = i.wrapping_add(1);
+        n = n.wrapping_add(1);
         thread_init::yield_now();
     }
 }

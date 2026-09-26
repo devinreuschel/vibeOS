@@ -564,38 +564,43 @@ and with an explicit flag, and never writes over a live file's bytes.
 
 Not a clean unmount.
 
-1. **Host:** a disk wrapper that drops writes after a randomized budget,
-   including in the middle of a commit (`write` of a metadata block or the
-   super, and `Flush`). Then `fsck`. Repeat. A clean `fsck` plus `mount`
-   must yield the tree of a committed generation at or after the last
-   `fsync` or `sync` that returned before the crash point, never a mix that
-   fails a checksum while `fsck` said ok.
-2. **QEMU:** `mkfs` an image that ROADMAP §10.2's volatile-cache device
-   serves as the guest's virtio-blk disk with a volatile write cache, boot a
-   write loop that `fsync`s, `kill -9` QEMU at a randomized point after the
-   loop has started (including mid-`write`/`Flush`), rebuild images from the
-   device's trace (for each superblock write, the writes durable when it
-   arrived plus that write; at the kill, the durable writes plus a seeded
-   subset of the later ones), then host `fsck-vibefs` on each. Same pass
-   criterion. A kill alone loses no write QEMU received, whatever its cache
-   mode, so it cannot show a missing flush.
+1. **Host:** `CrashDisk` in `src/vibefs.rs` (test code) wraps the image.
+   `CrashDisk::seeded(img, p, seed)` models a volatile write cache: writes
+   since the last flush stay pending (reads see them newest-first), a flush
+   at device op `p` or earlier applies them in order, and at op `p + 1`
+   each pending write reaches the image with probability 1/2 from the
+   seed, in order, and every later op is dropped, so a later write can
+   survive where an earlier one did not. `crash_workload_seeded_points`
+   runs the guest's workload (§12 item 2: truncate `/w`, write 300 bytes of
+   iteration N, sync) on a 256 KiB image, first once for all 200
+   iterations, which must never return `NoSpace`, and then at 1,000 seeded
+   crash points. At each, `fsck` must report 0 errors and 0 warnings, the
+   volume must mount, and `/w` must hold iteration N or N-1, N being the
+   last iteration started before the crash. `CrashDisk::new(img, p)` keeps
+   ops 1 to `p` and drops the suffix; `crash_at_each_write_is_consistent`
+   runs it at every op of another workload and requires `fsck` 0 errors
+   and a mount.
+2. **QEMU:** `make test-vibefs-crash` `mkfs`es a 256 KiB image that ROADMAP
+   §10.2's volatile-cache device (`nbd-cache`) serves as the guest's
+   virtio-blk disk with a volatile write cache. The `vibefs_crash` build
+   mounts it at `/crash`, commits iteration 0, and then for each N from 1
+   prints `wr N` and commits iteration N (`/crash/w` truncated, 300 bytes
+   of `(N + k) as u8` written, `sync_fs`), halting on any error. The
+   harness `kill -9`s QEMU a jitter of up to 0.05 s after `wr K` for a
+   random K in [1, 200], rebuilds images from the device's trace (for each
+   superblock write, the writes durable when it arrived plus that write;
+   at the kill, the durable writes plus a seeded subset of the later
+   ones), and runs host `fsck-vibefs` and `vibefs-cat` on each. Every
+   image must report `errors 0 warnings 0` and hold at `/w` an iteration
+   no older than the last whose commit's final flush the device completed
+   before that image's crash point, and the kill image N or N-1. A kill
+   alone loses no write QEMU received, whatever its cache mode, so it
+   cannot show a missing flush; the rebuilt images can. DESIGN §8.3 has
+   the details.
 
 Killing only between syscalls is not enough; the host wrapper injects the
-drop on device write calls, which is inside `write`/`fsync`.
-
-v1's tests do not check this pass criterion yet:
-
-- the host test (`crash_at_each_write_is_consistent` in `src/vibefs.rs`)
-  replays one workload once per device operation N (a write or a flush),
-  applies ops 1 to N in order, drops every later op, and checks only that
-  `fsck` reports 0 errors
-  and `mount` succeeds; the committed-generation oracle and reordering
-  since the last flush arrive with ROADMAP §12.5
-- the QEMU test (`tests/harness/run_vibefs_crash.py`) passes when
-  `fsck-vibefs` prints `errors 0`. It does not read `/crash/w` from the
-  image or check it against that criterion. The guest ignores `sync_fs`
-  errors, and the harness kills QEMU over a plain file image, which loses
-  no write QEMU received (F080; ROADMAP §10.2)
+drop on device write calls, which is inside `write`/`fsync`, and the
+device's trace carries every write and flush the guest sent.
 
 ---
 
