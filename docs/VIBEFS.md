@@ -269,14 +269,6 @@ commit rule still holds. After any sequence of commits and remounts, every
 block from 2 on with a refcount above 0 is reachable from the live tree or a
 snapshot. v1 code does not meet this yet:
 
-- after the super flush, commit re-marks only the alloc and inode blocks as
-  metadata, so the next commit never drops the directory blocks it wrote; a
-  64-block volume stops committing after about 57 syncs (F014; ROADMAP
-  §10.11)
-- mount's table holds 48 metadata blocks (`MAX_META`), fewer than the 73
-  above, and fails past that, and commit does not check the cap, so a
-  volume within v1's caps can fail to commit and commit can write a volume
-  that mount rejects (F014; ROADMAP §10.11)
 - a `write` that needs a fifth extent fails and leaks a block (§13, F051;
   ROADMAP §10.11)
 
@@ -449,9 +441,10 @@ device the block layer runs them as written.
 Steps 1 to 4 make every allocation the commit needs, blocks and kernel
 memory alike, including the memory step 7 uses; steps 5 to 7 allocate
 nothing, so a commit whose super is durable always finishes its switch
-in memory (DESIGN §4.4). v1's commit allocates no kernel memory,
-and ROADMAP §10.11's F014 box moves its one table-slot check, `MAX_META`,
-before step 5.
+in memory (DESIGN §4.4). v1's commit allocates no kernel memory, and
+it counts the metadata blocks it will write against `MAX_META` before
+step 2, failing with `NoSpace` while the old super is live, so recording
+them as the new generation's metadata after step 6 cannot fail.
 
 An error at step 5 or 6 leaves the new super's state unknown: the write
 may have reached the media before the error was reported, and a later
@@ -587,10 +580,8 @@ v1's tests do not check this pass criterion yet:
 - the QEMU test (`tests/harness/run_vibefs_crash.py`) passes when
   `fsck-vibefs` prints `errors 0`. It does not read `/crash/w` from the
   image or check it against that criterion. The guest ignores `sync_fs`
-  errors, and the 64-block image fills near generation 57 (§6, F014),
-  after which rounds kill a volume that no longer changes; and it kills
-  QEMU over a plain file image, which loses no write QEMU received (F080;
-  ROADMAP §10.2)
+  errors, and the harness kills QEMU over a plain file image, which loses
+  no write QEMU received (F080; ROADMAP §10.2)
 
 ---
 

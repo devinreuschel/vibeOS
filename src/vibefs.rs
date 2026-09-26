@@ -36,7 +36,11 @@ pub const HDR: usize = 32;
 pub const INODE_PER_LEAF: usize = (BLOCK - HDR) / INODE_REC;
 pub const DENT_PER_LEAF: usize = (BLOCK - HDR) / DENT_REC;
 pub const INODE_INT_PER: usize = (BLOCK - HDR) / 8;
-pub const MAX_META: usize = 48;
+/// Metadata blocks in one v1 generation, at most: the alloc block, the
+/// inode leaves and their internal node, and one leaf per directory plus the
+/// one directory that can pass a leaf (docs/VIBEFS.md §6).
+pub const MAX_META: usize = 1 + (MAX_INODES.div_ceil(INODE_PER_LEAF) + 1) + (MAX_INODES + 2);
+const _: () = assert!(MAX_META == 73);
 pub const MAX_DROP: usize = 96;
 pub const SB_CRC_OFF: usize = 4092;
 /// A file ends at or below this byte, so its last block index is at most
@@ -1817,6 +1821,11 @@ impl Vol {
             i += 1;
         }
         let need = 1 + ileaves + iints + dblocks;
+        // Every block counted here goes into `self.meta` after the super
+        // flush, so the table check runs while the old super is live.
+        if need > MAX_META {
+            return Err(Error::NoSpace);
+        }
         if self.free_count() < need as u32 {
             return Err(Error::NoSpace);
         }
@@ -1824,15 +1833,25 @@ impl Vol {
         let mut old_meta = [0u32; MAX_META];
         old_meta[..old_meta_n as usize].copy_from_slice(&self.meta[..old_meta_n as usize]);
 
+        // Every metadata block this commit writes; `self.meta` after step 7.
+        let mut new_meta = [0u32; MAX_META];
+        let mut n_new = 0usize;
         let alloc_bno = self.alloc_block()?;
+        *new_meta.get_mut(n_new).ok_or(Error::NoSpace)? = alloc_bno;
+        n_new += 1;
         let mut ileaf = [0u32; 8];
         let mut li = 0usize;
         while li < ileaves {
             ileaf[li] = self.alloc_block()?;
+            *new_meta.get_mut(n_new).ok_or(Error::NoSpace)? = ileaf[li];
+            n_new += 1;
             li += 1;
         }
         let iroot = if iints > 0 {
-            self.alloc_block()?
+            let b = self.alloc_block()?;
+            *new_meta.get_mut(n_new).ok_or(Error::NoSpace)? = b;
+            n_new += 1;
+            b
         } else {
             ileaf[0]
         };
@@ -1859,10 +1878,15 @@ impl Vol {
                 let mut k = 0usize;
                 while k < leaves {
                     dleaf[k] = self.alloc_block()?;
+                    *new_meta.get_mut(n_new).ok_or(Error::NoSpace)? = dleaf[k];
+                    n_new += 1;
                     k += 1;
                 }
                 let droot = if ints > 0 {
-                    self.alloc_block()?
+                    let b = self.alloc_block()?;
+                    *new_meta.get_mut(n_new).ok_or(Error::NoSpace)? = b;
+                    n_new += 1;
+                    b
                 } else {
                     dleaf[0]
                 };
@@ -2000,14 +2024,11 @@ impl Vol {
         self.ndrop = 0;
         self.txn = [0; MAX_BLOCKS.div_ceil(8)];
         self.nmeta = 0;
-        self.mark_meta(alloc_bno)?;
-        li = 0;
-        while li < ileaves {
-            self.mark_meta(ileaf[li])?;
-            li += 1;
-        }
-        if iints > 0 && iroot != ileaf[0] {
-            self.mark_meta(iroot)?;
+        // `need <= MAX_META` was checked before the first allocation, so no
+        // call below fails with the new super on disk.
+        debug_assert_eq!(n_new, need);
+        for &b in &new_meta[..n_new] {
+            self.mark_meta(b)?;
         }
         self.dirty = false;
         Ok(())
@@ -2755,5 +2776,67 @@ mod tests {
             assert_eq!(v.read(d, ino, 0, &mut out).unwrap(), 300);
             assert_eq!(out, payload(64));
         });
+    }
+
+    #[test]
+    fn commit_free_count_constant() {
+        let mut b = fresh(64 * BLOCK);
+        let free = with_vol(&mut b, |v, d| {
+            let ino = new_file(v, d, b"f");
+            assert_eq!(v.write(d, ino, 0, &payload(0)).unwrap(), 300);
+            v.sync(d).unwrap();
+            let free = v.free_count();
+            let mut i = 1u32;
+            while i <= 200 {
+                assert_eq!(v.write(d, ino, 0, &payload(i)).unwrap(), 300);
+                v.sync(d)
+                    .unwrap_or_else(|e| panic!("sync at commit {i}: {e:?}"));
+                assert_eq!(v.free_count(), free, "free count after commit {i}");
+                i += 1;
+            }
+            free
+        });
+        with_vol(&mut b, |v, _| {
+            assert_eq!(v.free_count(), free, "after remount")
+        });
+        let r = fsck_of(&mut b);
+        assert_eq!((r.errors, r.warnings), (0, 0));
+    }
+
+    #[test]
+    fn nested_dirs_63_commit_remount() {
+        let mut b = fresh(256 * BLOCK);
+        with_vol(&mut b, |v, d| {
+            let mut dir = ROOT_INO;
+            let mut n = 0usize;
+            while n < 63 {
+                v.create(d, dir, b"d", InodeKind::Dir, 0o755, None)
+                    .unwrap_or_else(|e| panic!("mkdir {n}: {e:?}"));
+                dir = v.lookup(d, dir, b"d").unwrap().ino;
+                n += 1;
+            }
+            v.sync(d).unwrap();
+            assert_eq!(v.nmeta, 70);
+        });
+        let mut path = Vec::new();
+        let mut n = 0usize;
+        while n < 63 {
+            if n > 0 {
+                path.push(b'/');
+            }
+            path.push(b'd');
+            n += 1;
+        }
+        with_vol(&mut b, |v, d| {
+            assert!(v.walk(d, &path).unwrap().is_dir());
+            v.dirty = true;
+            v.sync(d).unwrap();
+            assert_eq!(v.nmeta, 70);
+        });
+        with_vol(&mut b, |v, d| {
+            assert!(v.walk(d, &path).unwrap().is_dir());
+        });
+        let r = fsck_of(&mut b);
+        assert_eq!((r.errors, r.warnings), (0, 0));
     }
 }
