@@ -19,6 +19,7 @@ pub(super) const TESTS: &[Test] = &[
     test("spawn_stack_oom", spawn_stack_oom).deadline(10_000),
     test("fork_oom", fork_oom).deadline(10_000),
     test("lifetime_stack_reclaim", lifetime_stack_reclaim).deadline(120_000),
+    test("exit_burst", exit_burst).deadline(60_000),
 ];
 
 /// The free-frame count at a quiescent point (ROADMAP §10.2, F074): the
@@ -316,6 +317,86 @@ fn lifetime_stack_reclaim() -> Outcome {
     let after = quiescent_free_frames();
     if after != base {
         return crate::fail_fmt!("frames {base} -> {after} after {exits} exits");
+    }
+    Outcome::Ok
+}
+
+// Spin about 10 million iterations (several 10 ms quanta under TCG), then
+// exit(0).
+user_code!(
+    SPIN_EXIT0,
+    "
+    mov ecx, 10000000
+1:
+    dec ecx
+    jnz 1b
+    xor edi, edi
+    mov eax, 60
+    syscall
+    ud2
+    "
+);
+
+/// Processes [`exit_burst`] starts.
+const BURST: usize = 16;
+/// CPU the burst runs on.
+const BURST_CPU: u32 = 1;
+
+static BURST_PIDS: [AtomicU32; BURST] = [const { AtomicU32::new(0) }; BURST];
+static BURST_SPAWNED: AtomicU32 = AtomicU32::new(0);
+static BURST_FAILED: AtomicBool = AtomicBool::new(false);
+static BURST_DONE: AtomicBool = AtomicBool::new(false);
+
+/// On [`BURST_CPU`]: start the burst there, since a process's thread is
+/// pinned to the CPU that spawns it.
+fn burst_spawner() {
+    for slot in BURST_PIDS.iter() {
+        match user::spawn(&Image::Code(SPIN_EXIT0, DEFAULT), &["burst"]) {
+            Ok(pid) => {
+                slot.store(pid, Ordering::Relaxed);
+                BURST_SPAWNED.fetch_add(1, Ordering::AcqRel);
+            }
+            Err(_) => {
+                BURST_FAILED.store(true, Ordering::Release);
+                break;
+            }
+        }
+    }
+    BURST_DONE.store(true, Ordering::Release);
+}
+
+/// Every switch tail empties the dead-stack slot (ROADMAP §10.10, F010):
+/// 16 processes on one CPU exit back to back, each switching to a sibling
+/// resumed from timer preemption, and the kernel stays up.
+fn exit_burst() -> Outcome {
+    if !per_cpu_init::is_online(BURST_CPU) {
+        return Outcome::Skip("needs 2 cpus");
+    }
+    BURST_SPAWNED.store(0, Ordering::Release);
+    BURST_FAILED.store(false, Ordering::Release);
+    BURST_DONE.store(false, Ordering::Release);
+    if let Err(e) = thread_init::spawn_on("burst", burst_spawner, BURST_CPU) {
+        return crate::fail_fmt!("spawn: {}", e.as_str());
+    }
+    let t0 = time_init::now_ns();
+    while !BURST_DONE.load(Ordering::Acquire) {
+        if time_init::now_ns().saturating_sub(t0) > WAIT_NS {
+            return Outcome::Fail("burst spawner did not finish");
+        }
+        thread_init::yield_now();
+    }
+    let n = BURST_SPAWNED.load(Ordering::Acquire) as usize;
+    let mut bad = 0u32;
+    for slot in BURST_PIDS.iter().take(n) {
+        if user::wait(slot.load(Ordering::Relaxed)) != wait_exited(0) {
+            bad += 1;
+        }
+    }
+    if BURST_FAILED.load(Ordering::Acquire) {
+        return crate::fail_fmt!("only {n} of {BURST} processes started");
+    }
+    if bad != 0 {
+        return crate::fail_fmt!("{bad} of {BURST} processes did not exit 0");
     }
     Outcome::Ok
 }

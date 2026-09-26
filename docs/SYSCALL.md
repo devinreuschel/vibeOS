@@ -126,7 +126,7 @@ names, Linux values:
 | `ENOEXEC` | 8 | malformed ELF, `ET_DYN`, or `PT_INTERP` |
 | `EBADF` | 9 | closed / out-of-range fd |
 | `ECHILD` | 10 | `wait4` with no matching child |
-| `EAGAIN` | 11 | `fork` with pids 2 to 15 all in use, zombies included (`MAX_PROCS` is 16; pid 0 is unused and pid 1 is reserved for `/sbin/init`) |
+| `EAGAIN` | 11 | `fork` with pids 2 to 17 all in use, zombies included (`MAX_PROCS` is 18; pid 0 is unused and pid 1 is reserved for `/sbin/init`) |
 | `ENOMEM` | 12 | AS clone / load; an ELF file above 64 KiB |
 | `EACCES` | 13 | defined; no syscall returns it |
 | `EFAULT` | 14 | bad user pointer / length |
