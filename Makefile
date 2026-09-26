@@ -219,9 +219,13 @@ test-harness:
 # name them: make expands a prerequisite list when it reads the rule.
 MKFS_VIBEFS := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/mkfs-vibefs
 FSCK_VIBEFS := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/fsck-vibefs
+NBD_CACHE := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/nbd-cache
+VIBEFS_CAT := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/vibefs-cat
 
-$(MKFS_VIBEFS) $(FSCK_VIBEFS): src/vibefs.rs tests/hostlib/src/bin/mkfs_vibefs.rs \
-		tests/hostlib/src/bin/fsck_vibefs.rs tests/hostlib/Cargo.toml crates/core/Cargo.toml
+$(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT): src/vibefs.rs \
+		tests/hostlib/src/bin/mkfs_vibefs.rs tests/hostlib/src/bin/fsck_vibefs.rs \
+		tests/hostlib/src/bin/nbd_cache.rs tests/hostlib/src/bin/vibefs_cat.rs \
+		tests/hostlib/Cargo.toml crates/core/Cargo.toml
 	cargo build -p vibeos-hostlib-tests --bins --target $(HOST_TRIPLE)
 
 test-e2e: $(ISO) $(MKFS_VIBEFS)

@@ -5,7 +5,7 @@ edition = "2024"
 license = "MIT"
 publish = false
 
-# Host mkfs/fsck. Portable tests live in `vibeos-core` (`make test-unit`).
+# Host mkfs/fsck, the crash test's nbd-cache and vibefs-cat. Portable tests live in `vibeos-core` (`make test-unit`).
 # Parent `.cargo/config.toml` defaults to the kernel triple, so Makefile
 # host recipes pass `--target $(HOST_TRIPLE)`.
 autolib = false
@@ -17,6 +17,14 @@ path = "src/bin/mkfs_vibefs.rs"
 [[bin]]
 name = "fsck-vibefs"
 path = "src/bin/fsck_vibefs.rs"
+
+[[bin]]
+name = "nbd-cache"
+path = "src/bin/nbd_cache.rs"
+
+[[bin]]
+name = "vibefs-cat"
+path = "src/bin/vibefs_cat.rs"
 
 [[bin]]
 name = "mkinitrd"
