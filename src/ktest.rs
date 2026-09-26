@@ -3291,10 +3291,26 @@ fn reset_irq_obs() {
     }
 }
 
+/// `time_init::now_ns` value [`obs_stall`] spins until; 0 is disarmed.
+static OBS_STALL_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Stall [`record_irq_cpu`] before its last store while
+/// `msix_cpu_publish_last` has the stall armed.
+fn obs_stall() {
+    let until = OBS_STALL_NS.load(Ordering::Acquire);
+    if until == 0 {
+        return;
+    }
+    while time_init::now_ns() < until {
+        core::hint::spin_loop();
+    }
+}
+
 fn record_irq_cpu() {
     let cpu = per_cpu_init::current().cpu_id;
     IRQ_CPU.store(cpu, Ordering::SeqCst);
     IRQ_HITS.fetch_add(1, Ordering::SeqCst);
+    obs_stall();
     if (cpu as usize) < CPU_HITS.len() {
         CPU_HITS[cpu as usize].fetch_add(1, Ordering::SeqCst);
     }
