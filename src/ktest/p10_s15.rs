@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::addr_space::UserPerms;
 use vibeos::paging::PAGE_SIZE_4K;
-use vibeos::proc::{SIGILL, SIGKILL, wait_signaled};
+use vibeos::proc::{SIGILL, SIGKILL, SIGTRAP, wait_signaled};
 use vibeos::syscall::SYS_KILL;
 use vibeos::vectors;
 
@@ -24,6 +24,7 @@ pub(super) const TESTS: &[Test] = &[
     test("ac_clear_on_exception", test_ac_clear_on_exception).deadline(30_000),
     test("ac_clear_user_popf", test_ac_clear_user_popf).deadline(30_000),
     test("ist_gs_sign", test_ist_gs_sign).deadline(30_000),
+    test("user_exceptions", test_user_exceptions).deadline(30_000),
 ];
 
 const RFLAGS_AC: u64 = 1 << 18;
@@ -419,6 +420,70 @@ fn test_ist_gs_sign() -> Outcome {
             hits[1],
             hits[2]
         );
+    }
+    Outcome::Ok
+}
+
+/// One ring-3 exception case: `code` must end with `wait_signaled(sig)`.
+/// A `kvm_only` case needs hardware behaviour TCG does not model and is
+/// skipped off KVM. Later slices add rows (C-SUITES).
+struct ExcCase {
+    name: &'static str,
+    code: &'static [u8],
+    sig: u32,
+    kvm_only: bool,
+}
+
+/// CPUID leaf 0x4000_0000 names the hypervisor; KVM's is `KVMKVMKVM`.
+fn on_kvm() -> bool {
+    let (_, b, c, d) = x86::cpuid(0x4000_0000, 0);
+    let mut id = [0u8; 12];
+    id[..4].copy_from_slice(&b.to_le_bytes());
+    id[4..8].copy_from_slice(&c.to_le_bytes());
+    id[8..].copy_from_slice(&d.to_le_bytes());
+    &id[..9] == b"KVMKVMKVM"
+}
+
+// int3, then exit(1) if it returns.
+user_code!(
+    USER_INT3,
+    "
+    int3
+    mov edi, 1
+    mov eax, 60
+    syscall
+    ud2
+    "
+);
+
+const EXC_CASES: &[ExcCase] = &[ExcCase {
+    name: "int3",
+    code: USER_INT3,
+    sig: SIGTRAP,
+    kvm_only: false,
+}];
+
+fn test_user_exceptions() -> Outcome {
+    let kvm = EXC_CASES.iter().any(|c| c.kvm_only) && on_kvm();
+    for case in EXC_CASES {
+        if case.kvm_only && !kvm {
+            crate::marker!(
+                "vibeOS: ktest:   user_exceptions: {} skipped off KVM",
+                case.name
+            );
+            continue;
+        }
+        let before = settled_frames();
+        let st = match user::run(&Image::Code(case.code, DEFAULT), &[case.name]) {
+            Ok(st) => st,
+            Err(e) => return crate::fail_fmt!("{}: spawn: {}", case.name, e.as_str()),
+        };
+        if st != wait_signaled(case.sig) {
+            return crate::fail_fmt!("{}: status {st:#x}, want signal {}", case.name, case.sig);
+        }
+        if !user::frames_settle(before) {
+            return crate::fail_fmt!("{}: frame leak", case.name);
+        }
     }
     Outcome::Ok
 }

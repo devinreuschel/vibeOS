@@ -2552,8 +2552,10 @@ vector's body: a plain `fn(&mut TrapFrame)` that `idt::set_handler` registers, o
 that passes a ring-3 fault to `proc_init::try_user_fault` and otherwise dumps and halts. `init`
 registers the named exception, PIC, LAPIC, and IPI bodies; `irq_init` (`0x31`–`0x7F`) and
 `kbd_init` (`0x21`, `0x30`) register theirs the same way, so their entries take the same GS step.
-No body is an `extern "x86-interrupt"` function. Every gate is a DPL-0 interrupt gate
-(`IdtEntry::interrupt`, type `0x8E`): it clears IF on entry, and `int n` from ring 3 raises `#GP`.
+No body is an `extern "x86-interrupt"` function. Every gate is an interrupt gate
+(`IdtEntry::interrupt`), so it clears IF on entry. Every gate but `#BP`'s is DPL 0 (type `0x8E`), so
+`int n` from ring 3 raises `#GP`; `#BP`'s is DPL 3 (type `0xEE`), so a user `int3` reaches its body
+and gets `SIGTRAP`.
 `#DF`, NMI, `#MC`, and `#DB` run on IST stacks (§5.1).
 
 `catch::intercept` runs in the dispatcher before the body of every vector below `0x20`, in every build; only the in-guest test
@@ -2575,7 +2577,7 @@ fault, downstream of it.
 | `0x00` | `#DE` | dump, halt | `SIGFPE` | as the rule |
 | `0x01` | `#DB` | dump on IST, halt. Planned (ROADMAP §17.4, §18.4): three cases continue instead. A hit whose saved DR6 names only slots the current thread's tracer armed is dropped, as Linux drops a kernel-mode hit of a ptrace breakpoint; DR6.BS clears TF in the saved frame and logs once, as Linux does; in the ROADMAP §18.4 detector build a hit on a detector slot is reported | `SIGTRAP` (RFLAGS.TF, `int1`, a breakpoint or watchpoint the tracer armed); in the ROADMAP §18.4 detector build a hit on detector slots alone resumes with no signal and is counted | halts the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
 | `0x02` | NMI | dump on IST, halt. Planned (ROADMAP §10.7, F135): the handler first reads and clears its CPU's stop request word (§2.5 step 1): STOP stops the CPU, a CPU already stopped halts again at once, and an NMI with no request on the dump owner returns at once. Planned (ROADMAP §25.5): a backtrace or lockup request, and an external NMI on a CPU that is neither stopped nor the dump owner, are handled and return | not a ring-3 fault: the Ring 0 column applies | as the rule |
-| `0x03` | `#BP` | log, continue | `SIGTRAP` (`int3`) | `int3` hits the DPL-0 gate, raises `#GP`, and gets `SIGSEGV`. Rule; not yet enforced: ROADMAP §10.6 (F148) |
+| `0x03` | `#BP` | log, continue | `SIGTRAP` (`int3`) | as the rule |
 | `0x04`, `0x05`, `0x07`, `0x0A` | `#OF`, `#BR`, `#NM`, `#TS` | dump, halt | `SIGSEGV` | `sig_for_vec` has no row, so one would halt the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
 | `0x06` | `#UD` | dump, halt | `SIGILL` | as the rule; an SSE floating-point error also arrives here (row `0x13`) |
 | `0x08` | `#DF` | dump on IST, halt | not a ring-3 fault: the Ring 0 column applies | as the rule |
@@ -3015,8 +3017,8 @@ architectures. Planned (ROADMAP §11.3, §11.6): the aarch64 port does not exist
    CPL-3 `#DB` calls `try_user_fault` (the ring-3 `#DB` kill §5.2 requires) only after rule 3's
    move, because `try_user_fault` ends in `finish_exit`, which can switch threads.
 7. Every gate but `#BP` is DPL 0, so `int n` from ring 3 raises `#GP`; the `#BP` gate is DPL 3, so
-   `int3` delivers `SIGTRAP`. RFLAGS.TF and `int1` (`0xF1`) reach `#DB` at any DPL. Rule; not yet
-   enforced: ROADMAP §10.6 (F148). Every gate is DPL 0 today (`IdtEntry::interrupt`, type `0x8E`).
+   `int3` delivers `SIGTRAP`. RFLAGS.TF and `int1` (`0xF1`) reach `#DB` at any DPL. `ROWS` gives
+   each gate its DPL, and `IdtEntry::interrupt` encodes it (type `0x8E`, or `0xEE` for `#BP`).
 8. Ring 3 never halts the kernel: §2.5 states the rule, and the §5.2 table gives each vector's ring-3
    action, §11.5's each aarch64 exception class's. Rule; not yet enforced for each §5.2 row whose last column names a ROADMAP line.
 9. An entry stub saves the exception's syndrome into its frame before anything can turn IF on or

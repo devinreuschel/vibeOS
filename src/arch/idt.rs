@@ -175,7 +175,9 @@ const fn build_rows() -> [Row; 256] {
         rows[v] = Row {
             err: vectors::pushes_error_code(v as u8),
             ist,
-            dpl: 0,
+            // `int3` from ring 3 reaches its body; any other `int n` from
+            // ring 3 raises `#GP`.
+            dpl: if v as u8 == vectors::BP { 3 } else { 0 },
             paranoid: ist != 0,
         };
         v += 1;
@@ -504,6 +506,9 @@ fn default_body(frame: &mut TrapFrame) {
 }
 
 fn breakpoint(frame: &mut TrapFrame) {
+    if frame.user_mode() {
+        crate::proc_init::try_user_fault(vectors::BP, &frame.iret, 0, None);
+    }
     dump(b"#BP", &frame.iret, None, None);
 }
 
@@ -651,6 +656,14 @@ pub unsafe fn init() {
     register_named();
     unsafe { load() };
 }
+
+const _: () = {
+    let mut v = 0;
+    while v < 256 {
+        assert!(ROWS[v].dpl == if v == vectors::BP as usize { 3 } else { 0 });
+        v += 1;
+    }
+};
 
 /// Kernel invariant: stub `v` starts with the bytes `ROWS[v]` asks for.
 fn check_stub(stub: *const u8, v: usize, row: &Row) {
