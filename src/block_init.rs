@@ -113,12 +113,30 @@ impl IoWaiter {
         }
     }
 
-    fn finish(&self, res: Result<(), BlockError>) {
-        self.done.store(pack(res), Ordering::Release);
+    /// Complete the waiter: under SCHED, wake its queue, then store `done`
+    /// with Release as the last access to it (DESIGN §2.8, §10.1). `wait`
+    /// can return through the lock-free `poll` the moment that store is
+    /// visible, so nothing after it may touch `*this`. A raw pointer, not
+    /// `&self`: a reference argument counts as dereferenceable for the
+    /// whole call, so the compiler could read `*self` after the store.
+    ///
+    /// # Safety
+    ///
+    /// `this` points to a live waiter whose `done` is `ST_PEND`, and it
+    /// stays live until this call's `done` store and no longer.
+    unsafe fn finish(this: *const IoWaiter, res: Result<(), BlockError>) {
+        let st = pack(res);
         #[cfg(feature = "kernel_tests")]
         testing::finish_stall();
         thread_init::with_sched(|s| {
-            s.wake_all(unsafe { &mut *self.wq.get() });
+            // SAFETY: invariant I11 (DESIGN §2.7), established at
+            // `block_init::IoWaiter::wait`: `wait` cannot return before the
+            // `done` store below, so the waiter is live here, and its `wq`
+            // is touched only under SCHED, which this closure holds.
+            s.wake_all(unsafe { &mut *(*this).wq.get() });
+            // SAFETY: invariant I11, as above (`block_init::IoWaiter::wait`):
+            // the waiter is live until this store, which is the last access.
+            unsafe { (*this).done.store(st, Ordering::Release) };
         });
     }
 }
@@ -191,7 +209,10 @@ fn complete_req(req: &Request, res: Result<(), BlockError>) {
     while i < req.nwait {
         let p = req.waiters[i as usize];
         if p != 0 {
-            unsafe { &*(p as *const IoWaiter) }.finish(res);
+            // SAFETY: invariant I11 (DESIGN §10.1): the cookie is a live
+            // waiter registered by `block_init::submit` or
+            // `virtio_blk_init::submit`, and this completer claimed the request.
+            unsafe { IoWaiter::finish(p as *const IoWaiter, res) }
         }
         i += 1;
     }
