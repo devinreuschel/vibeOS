@@ -994,6 +994,18 @@ pub fn set_pid_cr3(id: ThreadId, pid: u32, cr3: u64) {
     });
 }
 
+/// The first TCB, Dead ones included, whose saved root is `root`. Reads
+/// only; `addr_space_init::teardown` asks it before it frees a root.
+pub(crate) fn tcb_naming_root(root: u64) -> Option<ThreadId> {
+    with_sched(|s| {
+        s.slots
+            .iter()
+            .flatten()
+            .find(|t| t.as_cr3 & vibeos::paging::PTE_ADDR_MASK == root)
+            .map(|t| t.id)
+    })
+}
+
 /// Park on `wq` forever (still a far deadline). SCHED dropped before switch.
 pub fn wait_on(wq: &mut WaitQueue) {
     with_sched(|s| s.begin_wait(wq, FAR_DEADLINE));

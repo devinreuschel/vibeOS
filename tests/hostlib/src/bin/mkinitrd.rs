@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
 
-use vibeos::fat::{self, FatError, FatVol, INITRD_BYTES, MemDisk, SEC};
+use vibeos::fat::{self, FatError, FatInode, FatVol, INITRD_BYTES, MemDisk, SEC};
 
 const NOW: u32 = 1_262_304_000;
 
@@ -109,9 +109,7 @@ fn add_file(vol: &mut FatVol, disk: &mut MemDisk, dest: &str, data: &[u8]) -> Re
     if data.is_empty() {
         return Ok(());
     }
-    let r = vol.iget(node.dir_clu, node.dir_off)?;
-    let wrote = vol.write_ino(disk, r.key(), 0, false, data);
-    let put = vol.iput(disk, r);
-    wrote?;
-    put
+    let mut words = FatInode::of_node(&node);
+    vol.write_ino(disk, &mut words, true, 0, false, data)?;
+    Ok(())
 }

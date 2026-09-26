@@ -92,6 +92,9 @@ GONE: list[tuple[str, str]] = [
     ("MAX_DEFERRED_STACKS", "every switch tail empties the"),
     ("defer_free", "every switch tail empties the"),
     ("reap_zombies", "a dead thread's kernel stack is reused"),
+    ("inos", "FAT and vibefs behind `InodeOps`"),
+    ("ino_of", "FAT and vibefs behind `InodeOps`"),
+    ("by_ino", "FAT and vibefs behind `InodeOps`"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

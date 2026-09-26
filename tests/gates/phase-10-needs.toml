@@ -87,6 +87,13 @@ why = "claim: missing edge found by the Phase 10 planning survey and review (sur
 # Phase 10 boxes.
 
 [[box]]
+key = "vibefs `commit` calls `mark_meta` on"
+needs = [
+  "vibefs `commit` writes an alloc-map",  # L1494
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
 key = "the `-smp 4` `ipi: ack timeout` panic root-caused and fixed"
 needs = [
   "the in-guest registry runs in production's interrupt context",
@@ -338,7 +345,7 @@ needs = [
   "`make test-unit` runs doc tests,",  # L1293
   "`kva_init::vmap` returns a move-only handle",  # L1299
 ]
-why = "text: lands with or after the box above; claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+why = "text: lands with or after the box above; claim: missing edge found by the Phase 10 planning survey and review (extra, survey); claim: the vmap handle holds its Frames (box 1299)"
 
 [[box]]
 key = "an IF-off tracer in an `irqoff` build variant"
@@ -522,3 +529,11 @@ needs = [
   "`vibeos.ktest=<glob>` runs only the matching",  # L1228
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1294
+[[box]]
+key = "`addr_space_init::load_cr3_u64` and `syscall_init::switch_cr3_for` become `unsafe"
+needs = [
+  "`IrqCell::force_unlock`, `log_init::force_unlock`, which calls it,",  # L1285
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
