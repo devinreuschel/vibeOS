@@ -454,6 +454,9 @@ fn qemu_exit(code: u32) -> ! {
 const WARM_STACK_PAGES: usize = 16;
 /// Ceiling on walk rounds: two coalesces take at most two free lists' worth.
 const WARM_ROUNDS: usize = 3 * vibeos::limits::MAX_KVA_RANGES;
+/// Default-size stacks the warm-up allocates and frees: past one free-list
+/// coalesce, since the node pool is `MAX_KVA_RANGES` (128).
+const WARM_DEFAULT_STACKS: usize = 2 * vibeos::limits::MAX_KVA_RANGES;
 /// Ceiling on [`settle_threads`]' wait.
 const SETTLE_MS: u64 = 2_000;
 /// Thread slots [`quiesce_frames`] leaves empty: `thread_init::adopt_ap_idle`
@@ -477,8 +480,12 @@ static WARMED: AtomicBool = AtomicBool::new(false);
 /// page that `unmap` never frees. So: let every pending thread finish and
 /// its stack come back; fill the empty thread slots, all but
 /// [`EMPTY_SLOT_RESERVE`], with threads that exit at once, so later spawns
-/// reuse Dead boxes; and walk KVA through two coalesces with the timer on,
-/// so the free list starts again at VA the walk mapped.
+/// reuse Dead boxes; walk KVA through two coalesces with the timer on, so
+/// the free list starts again at VA the walk mapped; and allocate and free
+/// [`WARM_DEFAULT_STACKS`] default-size stacks. It runs once per boot, from
+/// the registry or from the first `p10_s08::quiescent_free_frames` caller,
+/// which then waits for the threads and stacks to settle before it reads
+/// the count.
 pub(crate) fn quiesce_frames() {
     if WARMED.swap(true, Ordering::AcqRel) {
         return;
@@ -515,6 +522,17 @@ pub(crate) fn quiesce_frames() {
     let (coalesces, rounds) = warm_kva();
     if coalesces < 2 {
         crate::marker!("vibeOS: ktest:   warm-up: kva coalesces {coalesces} in {rounds} rounds");
+    }
+    // Then the size every default spawn takes, directly, so a spawn that
+    // misses its CPU's stack cache maps VA the warm-up mapped.
+    let mut i = 0;
+    while i < WARM_DEFAULT_STACKS {
+        let Ok(stack) = kva_init::alloc_guarded_stack(vibeos::kva::DEFAULT_STACK_PAGES) else {
+            crate::marker!("vibeOS: ktest:   warm-up: default stack {i} failed");
+            break;
+        };
+        kva_init::free_stack(stack);
+        i += 1;
     }
 }
 
@@ -901,7 +919,7 @@ fn test_stack_guard() -> Outcome {
 }
 
 fn test_kva_roundtrip() -> Outcome {
-    let before = free_frames();
+    let before = p10_s08::quiescent_free_frames();
     let Ok(stack) = kva_init::alloc_guarded_stack(4) else {
         return Outcome::Fail("alloc_guarded_stack");
     };
@@ -912,7 +930,7 @@ fn test_kva_roundtrip() -> Outcome {
         return Outcome::Fail("stack did not take 4 frames");
     }
     kva_init::free_stack(stack);
-    let after = free_frames();
+    let after = p10_s08::quiescent_free_frames();
     if after != before {
         crate::marker!("vibeOS: ktest:   before={before} after={after}");
         return Outcome::Fail("free did not restore frame count");
@@ -1056,7 +1074,7 @@ fn test_star_sysret_layout() -> Outcome {
 }
 
 fn test_addrspace_map_unmap_teardown() -> Outcome {
-    let before = free_frames();
+    let before = p10_s08::quiescent_free_frames();
     let Some(mut space) = addr_space_init::create() else {
         return Outcome::Fail("create");
     };
@@ -1098,7 +1116,7 @@ fn test_addrspace_map_unmap_teardown() -> Outcome {
     if st.pt_frames == 0 {
         return Outcome::Fail("teardown pt");
     }
-    if free_frames() != before {
+    if p10_s08::quiescent_free_frames() != before {
         return Outcome::Fail("frame leak");
     }
     Outcome::Ok
@@ -1204,7 +1222,7 @@ user_code!(
 );
 
 fn test_ring3_syscall_enosys() -> Outcome {
-    let before = free_frames();
+    let before = p10_s08::quiescent_free_frames();
     let st = match user::run(&user::Image::Code(ENOSYS_PROBE, user::DEFAULT), &["enosys"]) {
         Ok(st) => st,
         Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
@@ -1215,14 +1233,16 @@ fn test_ring3_syscall_enosys() -> Outcome {
     if st != wait_signaled(SIGILL) {
         return crate::fail_fmt!("status {st:#x}, want SIGILL");
     }
-    if !user::frames_settle(before) {
+    let after = p10_s08::quiescent_free_frames();
+    if after != before {
+        crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
         return Outcome::Fail("enosys frame leak");
     }
     Outcome::Ok
 }
 
 fn test_ring3_hello_exit() -> Outcome {
-    let before = free_frames();
+    let before = p10_s08::quiescent_free_frames();
     let pid = match proc_init::spawn_elf("/hello", 0, 0) {
         Ok(pid) => pid,
         Err(e) => return crate::fail_fmt!("spawn /hello: {}", e.as_str()),
@@ -1231,7 +1251,9 @@ fn test_ring3_hello_exit() -> Outcome {
     if st != wait_exited(42) {
         return crate::fail_fmt!("hello status {st:#x}, want exited 42");
     }
-    if !user::frames_settle(before) {
+    let after = p10_s08::quiescent_free_frames();
+    if after != before {
+        crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
         return Outcome::Fail("hello frame leak");
     }
     Outcome::Ok
@@ -1334,7 +1356,7 @@ fn test_syscall_ptr_validate() -> Outcome {
 }
 
 fn test_user_syscalls() -> Outcome {
-    let before = free_frames();
+    let before = p10_s08::quiescent_free_frames();
     let pid = match proc_init::spawn_elf("/bin/tests", 0, 0) {
         Ok(pid) => pid,
         Err(e) => return crate::fail_fmt!("spawn /bin/tests: {}", e.as_str()),
@@ -1343,7 +1365,9 @@ fn test_user_syscalls() -> Outcome {
     if st != wait_exited(0) {
         return crate::fail_fmt!("tests status {st:#x}, want exited 0");
     }
-    if !user::frames_settle(before) {
+    let after = p10_s08::quiescent_free_frames();
+    if after != before {
+        crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
         return Outcome::Fail("tests frame leak");
     }
     Outcome::Ok
@@ -1855,9 +1879,9 @@ fn test_failed_ap_cleanup() -> Outcome {
     // unmap_4k does not return that PT. Warm up, then the measured wave
     // must restore the frame count (ROADMAP failed-AP exit gate).
     smp_init::exercise_fail_cleanup();
-    let n0 = free_frames();
+    let n0 = p10_s08::quiescent_free_frames();
     smp_init::exercise_fail_cleanup();
-    let n1 = free_frames();
+    let n1 = p10_s08::quiescent_free_frames();
     if n0 != n1 {
         crate::marker!("vibeOS: ktest:   frames {n0} -> {n1}");
         Outcome::Fail("failed AP leaked frames")
@@ -2125,19 +2149,21 @@ fn test_idle_runs() -> Outcome {
 fn dying_entry() {}
 
 fn test_reap_returns_frames() -> Outcome {
-    let _g = x86::InterruptGuard::enter();
-    let before = free_frames();
-    let Ok(h) = thread_init::spawn_here("dying", dying_entry) else {
-        return Outcome::Fail("spawn");
-    };
-    thread_init::yield_now();
-    if thread_init::current_id() != registry_tid() {
-        return Outcome::Fail("did not return to the registry");
+    let before = p10_s08::quiescent_free_frames();
+    {
+        let _g = x86::InterruptGuard::enter();
+        let Ok(h) = thread_init::spawn_here("dying", dying_entry) else {
+            return Outcome::Fail("spawn");
+        };
+        thread_init::yield_now();
+        if thread_init::current_id() != registry_tid() {
+            return Outcome::Fail("did not return to the registry");
+        }
+        if thread_init::try_state(h.id()) != Some(ThreadState::Dead) {
+            return Outcome::Fail("returned thread not dead");
+        }
     }
-    if thread_init::try_state(h.id()) != Some(ThreadState::Dead) {
-        return Outcome::Fail("returned thread not dead");
-    }
-    let after = free_frames();
+    let after = p10_s08::quiescent_free_frames();
     if after != before {
         crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
         return Outcome::Fail("reap did not restore frames");
@@ -3818,7 +3844,7 @@ fn test_intx_free_masks() -> Outcome {
 }
 
 fn test_dma_alloc() -> Outcome {
-    let before = free_frames();
+    let before = p10_s08::quiescent_free_frames();
     let Some(buf) = dma_init::alloc(DmaAlloc::dma32(0x1000)) else {
         return Outcome::Fail("alloc");
     };
@@ -3865,7 +3891,7 @@ fn test_dma_alloc() -> Outcome {
     {
         return Outcome::Fail("boundary refuse");
     }
-    if free_frames() != before {
+    if p10_s08::quiescent_free_frames() != before {
         return Outcome::Fail("leak");
     }
     Outcome::Ok
