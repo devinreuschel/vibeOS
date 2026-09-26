@@ -112,10 +112,11 @@ impl AcProbe {
     }
 }
 
-/// Free frames once the stacks of threads that earlier tests left dead are
-/// freed, since the next thread exit would free them inside this test.
+/// Free frames once no dead thread's stack an earlier test left is still
+/// on its way back, since it would land inside this test's count.
 fn settled_frames() -> usize {
-    thread_init::reap_zombies();
+    // A shortfall shows as a frame mismatch in the caller.
+    let _ = super::settle_threads();
     super::free_frames()
 }
 
