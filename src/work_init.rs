@@ -5,6 +5,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use vibeos::ipi::MAX_IPI_CPUS;
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::wait::WaitQueue;
 use vibeos::work::{WorkItem, WorkQueues};
@@ -16,12 +17,14 @@ use crate::thread_init;
 
 struct State {
     q: WorkQueues,
-    wq: WaitQueue,
+    /// One wait queue per CPU id: each CPU's worker waits on its own, so
+    /// [`kick_dead_stacks`] wakes only this CPU's.
+    wq: [WaitQueue; MAX_IPI_CPUS],
 }
 
 static ST: IrqCell<State> = IrqCell::new(State {
     q: WorkQueues::new(),
-    wq: WaitQueue::new(),
+    wq: [const { WaitQueue::new() }; MAX_IPI_CPUS],
 });
 static LIVE: AtomicBool = AtomicBool::new(false);
 
@@ -34,7 +37,9 @@ fn push(hi: bool, item: WorkItem) -> bool {
                 st.q.push(item)
             };
             if ok {
-                s.wake_all(&mut st.wq);
+                for wq in st.wq.iter_mut() {
+                    s.wake_all(wq);
+                }
             }
             ok
         })
@@ -52,14 +57,34 @@ pub fn raise_softirq(func: fn(usize), arg: usize) -> bool {
     push(true, WorkItem::new(func, arg))
 }
 
+/// This CPU's worker wait queue index. A worker is pinned to its CPU.
+fn my_queue() -> usize {
+    (thread_init::current_cpu() as usize).min(MAX_IPI_CPUS - 1)
+}
+
+/// Wake this CPU's worker. IF=0 or IF=1; takes SCHED.
+#[allow(
+    dead_code,
+    reason = "the switch tail's dead-stack list calls it from ROADMAP §10.10"
+)]
+pub(crate) fn kick_dead_stacks() {
+    let me = my_queue();
+    thread_init::with_sched(|s| {
+        ST.with(|st| {
+            s.wake_all(&mut st.wq[me]);
+        })
+    });
+}
+
 fn worker() {
+    let me = my_queue();
     loop {
         let item = thread_init::with_sched(|s| {
             ST.with(|st| {
                 if let Some(w) = st.q.pop() {
                     return Some(w);
                 }
-                s.begin_wait(&mut st.wq, FAR_DEADLINE);
+                s.begin_wait(&mut st.wq[me], FAR_DEADLINE);
                 None
             })
         });
