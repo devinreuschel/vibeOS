@@ -1,15 +1,18 @@
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 //! Kernel AddressSpace: buddy + PT lock. ROADMAP §9.2.
 
+use core::fmt;
 use core::sync::atomic::Ordering;
 
 use vibeos::addr_space::{AddressSpace, AsError, FrameFree, TeardownStats, UserPerms};
-use vibeos::paging::{FrameAlloc, PAGE_SIZE_4K};
+use vibeos::paging::{FrameAlloc, PAGE_SIZE_4K, PTE_ADDR_MASK};
 use vibeos::pmm::Frames;
+use vibeos::thread::ThreadId;
 
 use crate::paging_init;
 use crate::per_cpu_init;
 use crate::pmm_init;
+use crate::thread_init;
 use crate::x86;
 
 struct BuddyPool;
@@ -60,9 +63,57 @@ pub unsafe fn unmap(space: &mut AddressSpace, va: u64, len: u64) -> Result<(), A
     Ok(())
 }
 
+/// What still holds a root that [`teardown`] was asked to free.
+enum RootHolder {
+    /// CPU `cpu` has it loaded (CR3; TTBR0 on aarch64), or last recorded
+    /// loading it.
+    Cr3 { cpu: u32 },
+    /// That thread's `Tcb.as_cr3` names it.
+    Tcb(ThreadId),
+}
+
+impl fmt::Debug for RootHolder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RootHolder::Cr3 { cpu } => write!(f, "Cr3 {{ cpu: {cpu} }}"),
+            RootHolder::Tcb(id) => write!(f, "Tcb({})", id.0),
+        }
+    }
+}
+
+/// Who still holds `root`: this CPU's live CR3, any CPU's recorded root,
+/// or any TCB's saved root. Returns with no lock held, so the caller's
+/// assertion never fires under PT or SCHED.
+fn root_holder(root: u64) -> Option<RootHolder> {
+    let here = per_cpu_init::try_current().map_or(0, |c| c.cpu_id);
+    if x86::read_cr3() & PTE_ADDR_MASK == root {
+        return Some(RootHolder::Cr3 { cpu: here });
+    }
+    let mut id = 0u32;
+    while (id as usize) < per_cpu_init::cpu_count() {
+        if let Some(r) = per_cpu_init::cpu(id) {
+            let loaded = r.as_cr3.load(Ordering::Acquire);
+            if loaded != 0 && loaded & PTE_ADDR_MASK == root {
+                return Some(RootHolder::Cr3 { cpu: id });
+            }
+        }
+        id += 1;
+    }
+    thread_init::tcb_naming_root(root).map(RootHolder::Tcb)
+}
+
+/// Free `space`'s page tables and frames. Asserts first that no CPU has
+/// its root loaded and no TCB names it (invariant I128).
 pub fn teardown(mut space: AddressSpace) -> TeardownStats {
+    let root = space.root().as_u64();
+    if let Some(h) = root_holder(root) {
+        panic!("addr_space: teardown of root {root:#x} still loaded: {h:?}");
+    }
     paging_init::with_pt(|_pt| {
         let mut pool = BuddyPool;
+        // SAFETY: invariant I128, established here: `root_holder` found no
+        // CPU with the root loaded and no TCB naming it, so no CPU walks
+        // these tables once they are freed.
         unsafe { space.teardown_pool(&mut pool) }
     })
 }
