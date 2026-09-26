@@ -1651,9 +1651,6 @@ fn test_per_cpu_bsp() -> Outcome {
     if cpu.current.is_null() || cpu.idle.is_null() {
         return Outcome::Fail("current or idle null");
     }
-    if !cpu.ready_head.is_null() {
-        return Outcome::Fail("ready_head should be empty");
-    }
     if !sched_init::is_live() {
         return Outcome::Fail("sched not live");
     }

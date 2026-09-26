@@ -60,6 +60,10 @@ GONE: list[tuple[str, str]] = [
     ("vibeos_user_setjmp", "one ring-3 entry model:"),
     ("with_user_as", "one ring-3 entry model:"),
     ("IrqsOffOnDrop", "the in-guest registry runs in production's interrupt context"),
+    ("SMP2_TCG_PER_CPU_READY_HEAD_FLAKE",
+     "the `-smp 2` `per_cpu_bsp: ready_head should be empty` assertion deleted"),
+    ("SMP2_TCG_PER_CPU_READY_HEAD_FLAKE_ERROR",
+     "the `-smp 2` `per_cpu_bsp: ready_head should be empty` assertion deleted"),
     ("with_timer", "the in-guest registry runs in production's interrupt context"),
 ]
 

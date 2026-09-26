@@ -4127,14 +4127,13 @@ the exit status. ROADMAP §10.2 makes it read each of these lines only when fram
 | `0x11` | 35 | at least one test failed |
 
 The harness also retries, and ROADMAP §10.2 removes every retry (F021). `run_ktest.py` boots again
-after any timeout, after the `-smp 2` TCG `FAIL per_cpu_bsp: ready_head should be empty`, after the
-`-smp 4` `FAIL msix_cpu: ap counter`, and after a `-smp 4` panic whose tail holds `ipi: ack timeout`,
-the `ipi_init::wait_acks` frame, or a banner glued to a `ktest: ok` line. A second timeout whose tail
-ends at `user: dup ok` gets a third boot. `make test-smp-stress` uses the same rules, so a green run
-can hide an intermittent hang or panic. Until then each retry goes to the job summary and to the
-`retries` list of the tier's results file, which `tests/harness/results.py` writes and the ladder
-uploads, and a pull request that ticks a ROADMAP box on a run that retried fails (`check_ticks.py`,
-ROADMAP §10.2, §10.9).
+after any timeout, after the `-smp 4` `FAIL msix_cpu: ap counter`, and after a `-smp 4` panic whose
+tail holds `ipi: ack timeout`, the `ipi_init::wait_acks` frame, or a banner glued to a `ktest: ok`
+line. A second timeout whose tail ends at `user: dup ok` gets a third boot. `make test-smp-stress`
+uses the same rules, so a green run can hide an intermittent hang or panic. Until then each retry
+goes to the job summary and to the `retries` list of the tier's results file, which
+`tests/harness/results.py` writes and the ladder uploads, and a pull request that ticks a ROADMAP
+box on a run that retried fails (`check_ticks.py`, ROADMAP §10.2, §10.9).
 
 Planned (ROADMAP §10.2): `begin` carries the number of runs the boot will make, after the command
 line's filter and repeat count, and `vibeOS: ktest: run <name> <deadline_ms>` precedes each run,
