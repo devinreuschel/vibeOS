@@ -974,7 +974,11 @@ fn sys_execve(path: u64, argv: u64, envp: u64, frame: *mut SyscallFrame) -> i64 
         set_as(s);
     }
     thread_init::set_pid_cr3(tid, pid, cr3);
-    addr_space_init::load_cr3_u64(cr3);
+    // SAFETY: invariant I128, established at `addr_space_init::teardown`:
+    // `cr3` is the root of the space `create` built and `p.space` now owns,
+    // and `set_pid_cr3` recorded it in this thread's TCB on the line above,
+    // here.
+    unsafe { addr_space_init::load_cr3_u64(cr3) };
     if let Some(old) = old {
         addr_space_init::teardown(*old);
     }

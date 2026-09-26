@@ -317,8 +317,12 @@ pub fn set_rsp0_for(cpu: &mut PerCpu, tcb: &Tcb) {
 }
 
 /// Load `tcb`'s CR3 if it differs. Skip when the next thread shares AS.
-/// Caller already holds `&mut PerCpu` (IRQ-off).
-pub fn switch_cr3_for(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
+///
+/// # Safety
+/// `cpu` is this CPU's own `PerCpu`, held with IF=0 as `on_switch` holds
+/// it. `tcb.as_cr3` is 0 or a root that invariant I128 keeps alive while a
+/// TCB names it (`addr_space_init::teardown`).
+pub unsafe fn switch_cr3_for(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
     let want = if tcb.as_cr3 == 0 {
         crate::paging_init::kernel_cr3()
     } else {

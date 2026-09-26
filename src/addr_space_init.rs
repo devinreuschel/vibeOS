@@ -141,7 +141,17 @@ pub fn load_cr3(space: &AddressSpace) {
     });
 }
 
-pub fn load_cr3_u64(want: u64) {
+/// Load `want` into CR3 unless this CPU already has it (or it is 0), and
+/// record it in this CPU's `PerCpuRemote.as_cr3`.
+///
+/// # Safety
+/// `want` is 0, or the physical address of a PML4 whose kernel half is the
+/// kernel's: one that `paging_init::install`, [`create`] or [`clone_full`]
+/// built. That PML4 stays allocated while it is loaded. Unless `want` is
+/// the kernel root, the caller has recorded it in the current thread's
+/// `Tcb.as_cr3` before the call (`execve` does, through
+/// `thread_init::set_pid_cr3`), so [`teardown`] sees it (invariant I128).
+pub unsafe fn load_cr3_u64(want: u64) {
     per_cpu_init::with_current(|cpu| {
         if cpu.remote.as_cr3.load(Ordering::Relaxed) == want || want == 0 {
             return;
@@ -152,7 +162,10 @@ pub fn load_cr3_u64(want: u64) {
 }
 
 pub fn load_kernel_cr3() {
-    load_cr3_u64(paging_init::kernel_cr3());
+    // SAFETY: the kernel root comes from `paging_init::kernel_cr3`, which
+    // `paging_init::install` published and nothing frees; it is the kernel
+    // root, so no TCB need name it.
+    unsafe { load_cr3_u64(paging_init::kernel_cr3()) };
 }
 
 /// Full AS copy for fork. Caller must not be running on `src`'s CR3
