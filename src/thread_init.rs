@@ -159,7 +159,7 @@ static SPAWN_RR: AtomicU32 = AtomicU32::new(0);
 /// the switch tail has run; it drops that level, and turns IF on when the
 /// nest reaches 0, before `entry`.
 extern "C" fn trampoline() {
-    reap_zombies();
+    tail_reap();
     per_cpu_init::irq_nest_leave();
     if per_cpu_init::irq_nest() == 0 {
         crate::x86::sti();
@@ -184,6 +184,8 @@ fn thread_exit() -> ! {
             kva_init::defer_free(stack)
         }
     }
+    #[cfg(feature = "kernel_tests")]
+    testing::exit_stall();
     schedule();
     panic!("dead thread resumed");
 }
@@ -295,7 +297,7 @@ fn schedule_inner(from_irq: bool) {
     assert!(!new_ptr.is_null(), "schedule: next vanished");
     switch_now(old_ptr, new_ptr);
     if !from_irq {
-        reap_zombies();
+        tail_reap();
     }
 }
 
@@ -359,6 +361,16 @@ fn relink(s: &mut Sched) {
         };
         cpu.ready_head = head;
     });
+}
+
+/// A switch tail's reap, marked for `ipi_init::testing`'s count of
+/// shootdowns sent from a switch tail.
+fn tail_reap() {
+    #[cfg(feature = "kernel_tests")]
+    crate::ipi_init::testing::tail_enter();
+    reap_zombies();
+    #[cfg(feature = "kernel_tests")]
+    crate::ipi_init::testing::tail_leave();
 }
 
 pub(crate) fn reap_zombies() {
@@ -834,7 +846,7 @@ pub fn switch_to(id: ThreadId) {
         (s.ptr(old_id), s.ptr(id))
     });
     switch_now(old_ptr, new_ptr);
-    reap_zombies();
+    tail_reap();
 }
 
 pub fn current_id() -> ThreadId {
@@ -938,7 +950,51 @@ pub fn snapshot(out: &mut [ThreadInfo]) -> usize {
 /// Hooks the in-guest tests arm (DESIGN §8.2). `kernel_tests` builds only.
 #[cfg(feature = "kernel_tests")]
 pub mod testing {
-    use core::sync::atomic::{AtomicBool, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+
+    use crate::time_init;
+
+    /// CPU whose exits [`exit_stall`] holds, or `u32::MAX`.
+    static STALL_CPU: AtomicU32 = AtomicU32::new(u32::MAX);
+    /// Exits left to hold.
+    static STALL_LEFT: AtomicU32 = AtomicU32::new(0);
+    /// How long each held exit spins, in ms of TSC time.
+    static STALL_MS: AtomicU64 = AtomicU64::new(0);
+
+    /// Hold the next `exits` thread exits on `cpu` for `ms` of TSC time
+    /// each, between the store that makes the exiting thread's stack
+    /// reclaimable and the switch off it. The hold spins with IF=0 and
+    /// services no IPI.
+    pub fn arm_exit_stall(cpu: u32, exits: u32, ms: u64) {
+        STALL_CPU.store(cpu, Ordering::Relaxed);
+        STALL_MS.store(ms, Ordering::Relaxed);
+        STALL_LEFT.store(exits, Ordering::Release);
+    }
+
+    pub fn disarm_exit_stall() {
+        STALL_LEFT.store(0, Ordering::Release);
+        STALL_CPU.store(u32::MAX, Ordering::Relaxed);
+    }
+
+    /// Called by `thread_exit` just before it switches away.
+    pub(super) fn exit_stall() {
+        if STALL_CPU.load(Ordering::Relaxed) != super::current_cpu() {
+            return;
+        }
+        if STALL_LEFT
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+            .is_err()
+        {
+            return;
+        }
+        let cycles = STALL_MS
+            .load(Ordering::Relaxed)
+            .saturating_mul(time_init::tsc_per_ms());
+        let end = time_init::read_tsc().saturating_add(cycles);
+        while time_init::read_tsc() < end {
+            core::hint::spin_loop();
+        }
+    }
 
     /// One-shot: the next spawn from a process context fails as if its
     /// kernel stack could not be allocated.
