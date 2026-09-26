@@ -937,7 +937,7 @@ that review cites means the review's text.
 | I20 | `now_ns` is monotonic | seqlock plus `time::monotonic_max` over `time_init::LAST_NS` | enforced | Yes, by construction, so the monotonicity tests cannot fail (ROADMAP §10.2, F100) |
 | I21 | A run queue is touched only by its owner CPU with IF=0 (§2.3) | `per_cpu_init::with_current` | enforced (busy flag) | Partly: only the owner writes it, but `diag::cpus_to` (the shell `cpus` command) and in-guest tests read another CPU's `runq` length with no lock, and `&'static PerCpu` aliases the `&mut` (ROADMAP §10.3, F039) |
 | I22 | A `BootCell` is set once, before SMP, and holds `Sync` data (§2.3) | `cell.rs` | documented | No: `per_cpu_init::CPUS` holds the non-`Sync` `PerCpu`, which the unbounded `Sync` impl allows (ROADMAP §10.3, F017, F039); the set-once check is a `debug_assert!` (ROADMAP §10.2, F137); every switch writes the BSP's TSS after publication through a pointer cast from `&Bsp` (ROADMAP §10.3, F089) |
-| I23 | The block layer orders only overlapping writes and a sequential zone's writes; a `Flush` makes durable every write completed before it was submitted, and a `Fua` write is durable when it completes (§10.2) | `block.rs` | documented | No: C-LOOK can reorder overlapping writes, a block-cache flush misses writeback already in flight, and `Fua` does not exist (ROADMAP §10.11, F043) |
+| I23 | The block layer orders only overlapping writes and a sequential zone's writes; a `Flush` makes durable every write completed before it was submitted, and a `Fua` write is durable when it completes (§10.2) | `block.rs` | documented | No: C-LOOK can reorder overlapping writes, and a block-cache flush misses writeback already in flight (ROADMAP §10.11, F043) |
 | I24 | vibefs never overwrites a live block before the newer superblock is durable, and from v2 reuses a block a commit freed only after the next commit's superblock is durable, so the older slot's tree stays whole; a v2 NOCOW file's data blocks are the one exception, overwritten in place ([VIBEFS.md](VIBEFS.md) §15) | vibefs commit | documented | No after a failed commit: the in-memory generation advances before the superblock write, so the retry writes the slot that holds the only valid superblock (ROADMAP §12.5, F050). Otherwise it rests on v1's on-disk refcounts, which its mount does not check (F061); v2 keeps no per-block count and checks its pointers and allocation map as it reads each block (VIBEFS.md §15; ROADMAP §14.8) |
 | I25 | Per-thread CPU state is saved and restored in full (§7.5) | `syscall_init::on_switch`, `thread::switch_context` | documented | No: `FS_BASE` is not switched (ROADMAP §11.6, F022); `fork` and `execve` get the FPU state wrong (ROADMAP §10.6, F069); no entry from ring 3 saves a complete user frame, so the user GPRs of a thread preempted in ring 3 are at no known place, and a context whose RCX and R11 differ from its RIP and RFLAGS cannot be returned to (ROADMAP §10.6) |
 | I26 | Every kernel stack has a guard page (§2.4) | `kva_init::alloc_guarded_stack` | documented | No: boot runs on Limine's unguarded stack (ROADMAP §10.6, F072) |
@@ -5022,7 +5022,15 @@ journaled: it uses CoW metadata plus an atomic superblock switch
 ([VIBEFS.md](VIBEFS.md) §2, §10), and a generation is durable when its
 superblock write, carrying `Fua`, completes.
 
-Adjacent read, write, and discard requests merge; a `Flush` merges with nothing.
+Adjacent read, write, and discard requests merge; a `Flush`, or a write that
+carries `Fua`, merges with nothing.
+
+`block::Queue` records each request it dispatches in an in-flight table, and
+both drivers retire it there: `Queue::complete` when the device reports
+success, `Queue::abort` when the request fails for good, and `Queue::requeue`
+when it is retried. `complete` on a `Fua` write to a device without FUA returns
+`Deferred`, so the driver wakes nobody, and the queue's next dispatch is the
+`Flush` that reports the write.
 
 Why: a fence that holds every later request until the earlier ones complete
 serializes the device. With a queue per CPU ([section 10.4](#104-virtio-blk)),
@@ -5036,10 +5044,9 @@ Rejected: a device-wide `Barrier` that every later request waits behind; and a
 fence per queue, since one filesystem writes from every CPU's queue and would
 wait for completions anyway.
 
-Not yet: C-LOOK can reorder overlapping writes whatever their seq, `Fua` does
-not exist, and the block cache's `flush` does not wait for writeback already in
-flight ([section 10.6](#106-block-cache)). ROADMAP §10.11 lands all of it
-(F043).
+Not yet: C-LOOK can reorder overlapping writes whatever their seq, and the
+block cache's `flush` does not wait for writeback already in flight
+([section 10.6](#106-block-cache)). ROADMAP §10.11 lands all of it (F043).
 
 ## 10.3 Failure
 

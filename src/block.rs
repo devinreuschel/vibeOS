@@ -14,10 +14,23 @@
 //!   `Flush` before any read, write, or discard, whatever is in flight, and
 //!   nothing waits behind it. Ramdisk flush is a successful no-op (memory
 //!   is the media).
+//! - A [`Op::Write`] may carry `Fua` ([`Request::with_fua`]): its
+//!   completion means it is durable. With [`Queue::native_fua`] the device
+//!   gets the flag. Otherwise the queue completes it: [`Queue::complete`]
+//!   on the write returns [`Completion::Deferred`] and wakes nobody, the
+//!   next [`Queue::pick`] returns a `Flush` that carries the write's
+//!   waiters, and that `Flush`'s completion reports the write. A `Fua`
+//!   write merges with nothing, and one that fails for good reports its
+//!   error and sends no `Flush`.
 //!
-//! Completions: the queue lock is never held across `BlockDevice` I/O
-//! or a waiter wake. A later virtio-blk threaded IRQ (DESIGN §2.2 / §5.4)
-//! can call the same complete path. Hard IRQ only enqueues work.
+//! Completions: [`Queue::pick`] records each dispatch in an in-flight
+//! table. A driver calls [`Queue::complete`] when a dispatch succeeds,
+//! [`Queue::abort`] when it fails for good, and [`Queue::requeue`] to
+//! retry it; each retires the dispatch. The queue lock is never held
+//! across `BlockDevice` I/O or a waiter wake: a driver completes under the
+//! lock, drops it, then wakes. A later virtio-blk threaded IRQ (DESIGN
+//! §2.2 / §5.4) can call the same complete path. Hard IRQ only enqueues
+//! work.
 
 use crate::fmt_util;
 
@@ -163,6 +176,8 @@ pub struct Request {
     /// Caller cookies (kernel: `IoWaiter` pointers). 0 = none.
     pub waiters: [usize; MAX_SEGS],
     pub nwait: u8,
+    /// Durable on completion (module docs). Only a [`Op::Write`] carries it.
+    pub fua: bool,
 }
 
 impl Request {
@@ -175,7 +190,14 @@ impl Request {
             seq: 0,
             waiters: [0; MAX_SEGS],
             nwait: 0,
+            fua: false,
         }
+    }
+
+    /// Mark the write `Fua`. [`Queue::submit`] rejects it on any other op.
+    pub fn with_fua(mut self) -> Self {
+        self.fua = true;
+        self
     }
 
     pub fn with_seg(mut self, ptr: usize, len: usize) -> Self {
@@ -217,7 +239,7 @@ enum MergeKind {
 }
 
 fn merge_kind(a: &Request, b: &Request) -> MergeKind {
-    if a.bio.op != b.bio.op || !a.bio.op.can_merge() {
+    if a.bio.op != b.bio.op || !a.bio.op.can_merge() || a.fua || b.fua {
         return MergeKind::None;
     }
     if a.end_lba() == b.bio.lba {
@@ -299,6 +321,39 @@ fn merge_into(dst: &mut Request, src: Request, kind: MergeKind) -> bool {
     }
 }
 
+/// What a driver does after [`Queue::complete`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Completion {
+    /// Wake the request's waiters.
+    Report,
+    /// Wake nobody: an emulated-`Fua` write whose `Flush` is still due.
+    Deferred,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FlightState {
+    /// With the device.
+    Dispatched,
+    /// An emulated-`Fua` write that completed; its `Flush` is not sent yet.
+    FlushDue,
+}
+
+/// One dispatch [`Queue::pick`] handed a driver. The waiters are kept so a
+/// `Flush` sent for an emulated-`Fua` write can report it.
+#[derive(Clone, Copy, Debug)]
+struct Flight {
+    seq: u64,
+    #[allow(
+        dead_code,
+        reason = "the overlapping-write order reads it (ROADMAP §10.11, F043)"
+    )]
+    bio: Bio,
+    emulated_fua: bool,
+    state: FlightState,
+    waiters: [usize; MAX_SEGS],
+    nwait: u8,
+}
+
 /// Per-device pending list. C-LOOK elevator (one-way, wrap to lowest LBA).
 /// A queued [`Op::Flush`] goes first and holds back nothing.
 pub struct Queue {
@@ -306,8 +361,12 @@ pub struct Queue {
     n: usize,
     next_seq: u32,
     last_lba: u64,
+    /// Dispatches not yet retired by `complete`, `abort`, or `requeue`.
+    flights: [Option<Flight>; MAX_QUEUE],
     pub running: bool,
     pub failed: bool,
+    /// The device honours FUA on a write, so the queue sends no `Flush`.
+    pub native_fua: bool,
 }
 
 impl Queue {
@@ -317,8 +376,10 @@ impl Queue {
             n: 0,
             next_seq: 0,
             last_lba: 0,
+            flights: [None; MAX_QUEUE],
             running: false,
             failed: false,
+            native_fua: false,
         }
     }
 
@@ -328,6 +389,19 @@ impl Queue {
 
     pub fn is_empty(&self) -> bool {
         self.n == 0
+    }
+
+    /// Dispatches not yet retired, a pending emulated-`Fua` `Flush` included.
+    pub fn in_flight(&self) -> usize {
+        let mut n = 0usize;
+        let mut i = 0usize;
+        while i < MAX_QUEUE {
+            if self.flights[i].is_some() {
+                n += 1;
+            }
+            i += 1;
+        }
+        n
     }
 
     fn try_merge(&mut self, req: &Request) -> bool {
@@ -360,24 +434,79 @@ impl Queue {
         Err(BlockError::QueueFull)
     }
 
+    fn fresh_seq(&mut self) -> u32 {
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.wrapping_add(1);
+        seq
+    }
+
     /// Merge if possible, else enqueue. Assigns `seq`.
     pub fn submit(&mut self, mut req: Request) -> Result<(), BlockError> {
+        if req.fua && req.bio.op != Op::Write {
+            return Err(BlockError::Inval);
+        }
         if self.failed {
             return Err(BlockError::Failed);
         }
         if self.n >= MAX_QUEUE {
             return Err(BlockError::QueueFull);
         }
-        req.seq = self.next_seq;
-        self.next_seq = self.next_seq.wrapping_add(1);
+        req.seq = self.fresh_seq();
         if self.try_merge(&req) {
             return Ok(());
         }
         self.insert_slot(req)
     }
 
-    /// Put a failed I/O back without a new seq.
+    fn flight_index(&self, seq: u64, state: FlightState) -> Option<usize> {
+        let mut i = 0usize;
+        while i < MAX_QUEUE {
+            if let Some(f) = self.flights[i]
+                && f.seq == seq
+                && f.state == state
+            {
+                return Some(i);
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Retire the dispatch of `seq`. An unknown seq is a no-op.
+    fn retire(&mut self, seq: u64) {
+        if let Some(i) = self.flight_index(seq, FlightState::Dispatched) {
+            self.flights[i] = None;
+        }
+    }
+
+    /// The dispatch of `seq` succeeded. [`Completion::Report`] for an
+    /// unknown seq, so a driver never loses a wake.
+    pub fn complete(&mut self, seq: u64) -> Completion {
+        let Some(i) = self.flight_index(seq, FlightState::Dispatched) else {
+            return Completion::Report;
+        };
+        match self.flights[i].as_mut() {
+            Some(f) if f.emulated_fua => {
+                f.state = FlightState::FlushDue;
+                Completion::Deferred
+            }
+            _ => {
+                self.flights[i] = None;
+                Completion::Report
+            }
+        }
+    }
+
+    /// The dispatch of `seq` failed for good. Its waiters take the error
+    /// from the driver, and an emulated-`Fua` write sends no `Flush`.
+    pub fn abort(&mut self, seq: u64) {
+        self.retire(seq);
+    }
+
+    /// Put a failed I/O back without a new seq. Retires its dispatch
+    /// whether or not the queue takes it back.
     pub fn requeue(&mut self, req: Request) -> Result<(), BlockError> {
+        self.retire(u64::from(req.seq));
         if self.failed {
             return Err(BlockError::Failed);
         }
@@ -393,12 +522,45 @@ impl Queue {
         Some(r)
     }
 
-    /// Next dispatchable request. None if idle. The lowest-seq queued
-    /// [`Op::Flush`] first, then C-LOOK over the rest.
+    /// The `Flush` a [`FlightState::FlushDue`] entry owes, with a fresh seq
+    /// and the write's waiters.
+    fn due_flush(&mut self) -> Option<(usize, Request)> {
+        let mut i = 0usize;
+        while i < MAX_QUEUE {
+            if let Some(f) = self.flights[i]
+                && f.state == FlightState::FlushDue
+            {
+                let mut r = Request::new(Op::Flush, 0, 0);
+                r.seq = self.fresh_seq();
+                r.waiters = f.waiters;
+                r.nwait = f.nwait;
+                return Some((i, r));
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Next dispatchable request, recorded in the in-flight table. `None`
+    /// if idle or the table is full. An emulated-`Fua` write's `Flush`
+    /// first, then the lowest-seq queued [`Op::Flush`], then C-LOOK over
+    /// the rest.
     pub fn pick(&mut self) -> Option<Request> {
+        if let Some((i, r)) = self.due_flush() {
+            self.flights[i] = Some(Flight {
+                seq: u64::from(r.seq),
+                bio: r.bio,
+                emulated_fua: false,
+                state: FlightState::Dispatched,
+                waiters: r.waiters,
+                nwait: r.nwait,
+            });
+            return Some(r);
+        }
         if self.n == 0 {
             return None;
         }
+        let free = self.flights.iter().position(Option::is_none)?;
         let mut flush: Option<(u32, usize)> = None;
         let mut best_fwd: Option<(u64, usize)> = None;
         let mut best_wrap: Option<(u64, usize)> = None;
@@ -427,32 +589,49 @@ impl Queue {
             }
             i += 1;
         }
-        if let Some((_, i)) = flush {
-            return self.take(i);
-        }
-        let idx = match (best_fwd, best_wrap) {
-            (Some((_, i)), _) | (None, Some((_, i))) => i,
-            (None, None) => return None,
+        let r = if let Some((_, i)) = flush {
+            self.take(i)?
+        } else {
+            let idx = match (best_fwd, best_wrap) {
+                (Some((_, i)), _) | (None, Some((_, i))) => i,
+                (None, None) => return None,
+            };
+            let r = self.take(idx)?;
+            self.last_lba = r.end_lba();
+            r
         };
-        let r = self.take(idx)?;
-        self.last_lba = r.end_lba();
+        self.flights[free] = Some(Flight {
+            seq: u64::from(r.seq),
+            bio: r.bio,
+            emulated_fua: r.fua && !self.native_fua,
+            state: FlightState::Dispatched,
+            waiters: r.waiters,
+            nwait: r.nwait,
+        });
         Some(r)
     }
 
-    /// Drain everything. Caller completes waiters after dropping the lock.
+    /// Hand back every queued request, then each pending emulated-`Fua`
+    /// `Flush`, up to `out.len()`. Callers loop until it returns 0 and
+    /// complete waiters after dropping the lock.
     pub fn drain(&mut self, out: &mut [Option<Request>; MAX_QUEUE]) -> usize {
         let mut n = 0usize;
         let mut i = 0usize;
-        while i < MAX_QUEUE {
-            if let Some(r) = self.slots[i].take()
-                && n < MAX_QUEUE
-            {
+        while i < MAX_QUEUE && n < out.len() {
+            if let Some(r) = self.take(i) {
                 out[n] = Some(r);
                 n += 1;
             }
             i += 1;
         }
-        self.n = 0;
+        while n < out.len() {
+            let Some((i, r)) = self.due_flush() else {
+                break;
+            };
+            self.flights[i] = None;
+            out[n] = Some(r);
+            n += 1;
+        }
         n
     }
 
@@ -710,9 +889,129 @@ mod tests {
         // holds up the read submitted after it.
         q.submit(Request::new(Op::Flush, 0, 0)).unwrap();
         q.submit(rd(1, 1, 2)).unwrap();
-        assert_eq!(q.pick().unwrap().bio.op, Op::Flush);
+        let f = q.pick().unwrap();
+        assert_eq!(f.bio.op, Op::Flush);
+        // The read is dispatched while the Flush is still in flight.
         assert_eq!(q.pick().unwrap().bio.op, Op::Read);
+        assert_eq!(q.in_flight(), 3);
+        assert_eq!(q.complete(u64::from(f.seq)), Completion::Report);
         assert!(q.pick().is_none());
+        assert_eq!(q.complete(u64::from(w.seq)), Completion::Report);
+        assert_eq!(q.in_flight(), 1);
+    }
+
+    #[test]
+    fn fua_without_device_fua() {
+        let mut q = Queue::new();
+        assert!(!q.native_fua);
+        q.submit(wr(4, 1, 1).with_waiter(77).with_fua()).unwrap();
+        let w = q.pick().unwrap();
+        assert!(w.fua);
+        assert!(q.pick().is_none());
+        // The write completed, but it is not reported until a Flush sent
+        // after that completion completes.
+        assert_eq!(q.complete(u64::from(w.seq)), Completion::Deferred);
+        let f = q.pick().unwrap();
+        assert_eq!(f.bio.op, Op::Flush);
+        assert_ne!(f.seq, w.seq);
+        assert_eq!(f.nwait, 1);
+        assert_eq!(f.waiters[0], 77);
+        assert!(q.pick().is_none());
+        assert_eq!(q.complete(u64::from(f.seq)), Completion::Report);
+        assert_eq!(q.in_flight(), 0);
+    }
+
+    #[test]
+    fn fua_on_device_with_fua() {
+        let mut q = Queue::new();
+        q.native_fua = true;
+        q.submit(wr(4, 1, 1).with_waiter(5).with_fua()).unwrap();
+        let w = q.pick().unwrap();
+        assert!(w.fua);
+        assert_eq!(q.complete(u64::from(w.seq)), Completion::Report);
+        assert!(q.pick().is_none());
+        assert_eq!(q.in_flight(), 0);
+    }
+
+    #[test]
+    fn fua_write_error_sends_no_flush() {
+        let mut q = Queue::new();
+        q.submit(wr(4, 1, 1).with_fua()).unwrap();
+        let w = q.pick().unwrap();
+        q.abort(u64::from(w.seq));
+        assert!(q.pick().is_none());
+        assert_eq!(q.in_flight(), 0);
+    }
+
+    #[test]
+    fn fua_only_on_write() {
+        let mut q = Queue::new();
+        assert_eq!(q.submit(rd(0, 1, 1).with_fua()), Err(BlockError::Inval));
+        assert_eq!(
+            q.submit(Request::new(Op::Flush, 0, 0).with_fua()),
+            Err(BlockError::Inval)
+        );
+        assert_eq!(
+            q.submit(Request::new(Op::Discard, 0, 1).with_fua()),
+            Err(BlockError::Inval)
+        );
+        assert!(q.is_empty());
+        // A Fua write merges with nothing.
+        q.submit(wr(0, 1, 1)).unwrap();
+        q.submit(wr(1, 1, 2).with_fua()).unwrap();
+        q.submit(wr(2, 1, 3)).unwrap();
+        assert_eq!(q.len(), 3);
+    }
+
+    #[test]
+    fn drain_hands_back_pending_fua_flush() {
+        let mut q = Queue::new();
+        q.submit(wr(4, 1, 1).with_waiter(9).with_fua()).unwrap();
+        let w = q.pick().unwrap();
+        q.submit(rd(0, 1, 2)).unwrap();
+        assert_eq!(q.complete(u64::from(w.seq)), Completion::Deferred);
+        let mut out = [None; MAX_QUEUE];
+        assert_eq!(q.drain(&mut out), 2);
+        assert_eq!(out[0].unwrap().bio.op, Op::Read);
+        let f = out[1].unwrap();
+        assert_eq!(f.bio.op, Op::Flush);
+        assert_eq!(f.waiters[0], 9);
+        assert_eq!(q.drain(&mut out), 0);
+        assert_eq!(q.in_flight(), 0);
+        assert!(q.pick().is_none());
+    }
+
+    #[test]
+    fn requeue_retires_inflight() {
+        let mut q = Queue::new();
+        q.submit(wr(4, 1, 1)).unwrap();
+        let w = q.pick().unwrap();
+        assert_eq!(q.in_flight(), 1);
+        q.requeue(w).unwrap();
+        assert_eq!(q.in_flight(), 0);
+        let again = q.pick().unwrap();
+        assert_eq!(again.seq, w.seq);
+        assert_eq!(q.in_flight(), 1);
+        assert_eq!(q.complete(u64::from(again.seq)), Completion::Report);
+        assert_eq!(q.in_flight(), 0);
+        // An unknown seq is a report, never a panic.
+        assert_eq!(q.complete(12345), Completion::Report);
+        q.abort(12345);
+    }
+
+    #[test]
+    fn full_inflight_table_holds_dispatch() {
+        let mut q = Queue::new();
+        let mut i = 0u64;
+        while i < MAX_QUEUE as u64 {
+            q.submit(wr(i * 2, 1, 1)).unwrap();
+            assert!(q.pick().is_some());
+            i += 1;
+        }
+        q.submit(wr(999, 1, 1)).unwrap();
+        assert!(q.pick().is_none());
+        assert_eq!(q.complete(0), Completion::Report);
+        assert_eq!(q.pick().unwrap().bio.lba, 999);
     }
 
     #[test]
