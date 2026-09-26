@@ -1571,8 +1571,8 @@ mod tests {
         assert_eq!(v.stat(None, "/tmp").unwrap().kind, InodeKind::Dir);
         assert_eq!(v.stat(None, "/sys").unwrap().kind, InodeKind::Dir);
         assert!(has_name(&mut v, "/", b"dev"));
-        let fid = v.open(None, "/dev/null", O_RDWR, 0).unwrap();
-        assert_eq!(v.write(fid, b"x").unwrap(), 1);
+        let fid = v.open_path(None, "/dev/null", O_RDWR, 0).unwrap();
+        assert_eq!(v.write(&fid, b"x").unwrap(), 1);
         v.close(fid).unwrap();
     }
 
@@ -1639,14 +1639,14 @@ mod tests {
         assert!(has_name(&mut v, "/dev", b"tty"));
         assert_eq!(v.stat(None, "/dev/null").unwrap().kind, InodeKind::Chr);
         assert_eq!(v.stat(None, "/dev/zero").unwrap().kind, InodeKind::Chr);
-        let fid = v.open(None, "/dev/null", O_RDWR, 0).unwrap();
-        assert_eq!(v.write(fid, b"drop").unwrap(), 4);
+        let fid = v.open_path(None, "/dev/null", O_RDWR, 0).unwrap();
+        assert_eq!(v.write(&fid, b"drop").unwrap(), 4);
         let mut buf = [0xFFu8; 8];
-        assert_eq!(v.read(fid, &mut buf).unwrap(), 0);
+        assert_eq!(v.read(&fid, &mut buf).unwrap(), 0);
         v.close(fid).unwrap();
-        let z = v.open(None, "/dev/zero", O_RDWR, 0).unwrap();
+        let z = v.open_path(None, "/dev/zero", O_RDWR, 0).unwrap();
         let mut buf = [0xFFu8; 8];
-        assert_eq!(v.read(z, &mut buf).unwrap(), 8);
+        assert_eq!(v.read(&z, &mut buf).unwrap(), 8);
         assert_eq!(buf, [0u8; 8]);
         v.close(z).unwrap();
     }
@@ -1655,15 +1655,15 @@ mod tests {
     fn devfs_random_does_not_block() {
         let (mut v, _k) = boot();
         v.now = 0x1234_5678;
-        let fid = v.open(None, "/dev/random", O_RDWR, 0).unwrap();
+        let fid = v.open_path(None, "/dev/random", O_RDWR, 0).unwrap();
         let mut a = [0u8; 16];
         let mut b = [0u8; 16];
-        assert_eq!(v.read(fid, &mut a).unwrap(), 16);
-        assert_eq!(v.read(fid, &mut b).unwrap(), 16);
+        assert_eq!(v.read(&fid, &mut a).unwrap(), 16);
+        assert_eq!(v.read(&fid, &mut b).unwrap(), 16);
         assert_ne!(a, b);
         v.close(fid).unwrap();
-        let u = v.open(None, "/dev/urandom", O_RDWR, 0).unwrap();
-        assert_eq!(v.read(u, &mut a).unwrap(), 16);
+        let u = v.open_path(None, "/dev/urandom", O_RDWR, 0).unwrap();
+        assert_eq!(v.read(&u, &mut a).unwrap(), 16);
         v.close(u).unwrap();
     }
 
@@ -1679,30 +1679,32 @@ mod tests {
         let s = v.stat(None, "/dev/ram0").unwrap();
         assert_eq!(s.kind, InodeKind::Blk);
         assert_eq!(s.size, 256 * 512);
-        let fid = v.open(None, "/dev/ram0", O_RDWR, 0).unwrap();
+        let fid = v.open_path(None, "/dev/ram0", O_RDWR, 0).unwrap();
         let mut buf = [0u8; 4];
-        assert_eq!(v.read(fid, &mut buf).unwrap_err(), FsError::NotSupp);
+        assert_eq!(v.read(&fid, &mut buf).unwrap_err(), FsError::NotSupp);
         v.close(fid).unwrap();
     }
 
     #[test]
     fn tmpfs_uses_cache_and_evicts() {
         let (mut v, k) = boot();
-        let fid = v.open(None, "/tmp/big", O_RDWR | O_CREAT, 0o644).unwrap();
+        let fid = v
+            .open_path(None, "/tmp/big", O_RDWR | O_CREAT, 0o644)
+            .unwrap();
         let one = [0x5Au8; 1];
         let mut i = 0u64;
         while i < 6 {
-            v.seek(fid, (i * PAGE as u64) as i64, SEEK_SET).unwrap();
-            assert_eq!(v.write(fid, &one).unwrap(), 1);
+            v.seek(&fid, (i * PAGE as u64) as i64, SEEK_SET).unwrap();
+            assert_eq!(v.write(&fid, &one).unwrap(), 1);
             i += 1;
         }
         assert!(
             k.fs.tmp_cache_stats().evicts >= 1,
             "tmpfs must evict through the Phase 7 cache, not pin a Vec"
         );
-        v.seek(fid, 0, SEEK_SET).unwrap();
+        v.seek(&fid, 0, SEEK_SET).unwrap();
         let mut out = [0u8; 1];
-        assert_eq!(v.read(fid, &mut out).unwrap(), 1);
+        assert_eq!(v.read(&fid, &mut out).unwrap(), 1);
         assert_eq!(out[0], 0x5A);
         v.close(fid).unwrap();
         assert_eq!(v.stat(None, "/tmp/big").unwrap().size, 5 * PAGE as u64 + 1);
@@ -1713,8 +1715,8 @@ mod tests {
         let (mut v, _k) = boot();
         v.mkdir(None, "/tmp/a", 0o755).unwrap();
         v.creat(None, "/tmp/a/f", 0o644).unwrap();
-        let fid = v.open(None, "/tmp/a/f", O_RDWR, 0).unwrap();
-        assert_eq!(v.write(fid, b"hi").unwrap(), 2);
+        let fid = v.open_path(None, "/tmp/a/f", O_RDWR, 0).unwrap();
+        assert_eq!(v.write(&fid, b"hi").unwrap(), 2);
         v.close(fid).unwrap();
         v.unlink(None, "/tmp/a/f").unwrap();
         assert_eq!(v.stat(None, "/tmp/a/f").unwrap_err(), FsError::NotFound);
@@ -1731,14 +1733,14 @@ mod tests {
         assert!(has_name(&mut v, "/proc/1", b"status"));
         assert!(has_name(&mut v, "/proc/1", b"maps"));
         assert!(has_name(&mut v, "/proc/1", b"fd"));
-        let fid = v.open(None, "/proc/1/cmdline", O_RDWR, 0).unwrap();
+        let fid = v.open_path(None, "/proc/1/cmdline", O_RDWR, 0).unwrap();
         let mut buf = [0u8; 16];
-        let n = v.read(fid, &mut buf).unwrap();
+        let n = v.read(&fid, &mut buf).unwrap();
         assert!(n > 0);
         assert_eq!(&buf[..6], b"vibeos");
         v.close(fid).unwrap();
-        let st = v.open(None, "/proc/1/status", O_RDWR, 0).unwrap();
-        let n = v.read(st, &mut buf).unwrap();
+        let st = v.open_path(None, "/proc/1/status", O_RDWR, 0).unwrap();
+        let n = v.read(&st, &mut buf).unwrap();
         assert!(n > 0);
         v.close(st).unwrap();
         assert_eq!(v.stat(None, "/proc/1/fd").unwrap().kind, InodeKind::Dir);
@@ -1757,22 +1759,22 @@ mod tests {
             .unwrap();
         assert!(has_name(&mut v, "/sys/devices", b"00:01.0"));
         let fid = v
-            .open(None, "/sys/devices/00:01.0/vendor", O_RDWR, 0)
+            .open_path(None, "/sys/devices/00:01.0/vendor", O_RDWR, 0)
             .unwrap();
         let mut buf = [0u8; 16];
-        let n = v.read(fid, &mut buf).unwrap();
+        let n = v.read(&fid, &mut buf).unwrap();
         assert_eq!(&buf[..n], b"0x1af4\n");
         v.close(fid).unwrap();
         let d = v
-            .open(None, "/sys/devices/00:01.0/driver", O_RDWR, 0)
+            .open_path(None, "/sys/devices/00:01.0/driver", O_RDWR, 0)
             .unwrap();
-        let n = v.read(d, &mut buf).unwrap();
+        let n = v.read(&d, &mut buf).unwrap();
         assert_eq!(&buf[..n], b"virtio-blk\n");
         v.close(d).unwrap();
         let unbound = v
-            .open(None, "/sys/devices/00:02.0/driver", O_RDWR, 0)
+            .open_path(None, "/sys/devices/00:02.0/driver", O_RDWR, 0)
             .unwrap();
-        let n = v.read(unbound, &mut buf).unwrap();
+        let n = v.read(&unbound, &mut buf).unwrap();
         assert_eq!(&buf[..n], b"-\n");
         v.close(unbound).unwrap();
         assert!(has_name(&mut v, "/sys/bus/pci/drivers", b"virtio-blk"));
@@ -1783,8 +1785,8 @@ mod tests {
     #[test]
     fn console_write_captured() {
         let (mut v, k) = boot();
-        let fid = v.open(None, "/dev/console", O_RDWR, 0).unwrap();
-        assert_eq!(v.write(fid, b"hi").unwrap(), 2);
+        let fid = v.open_path(None, "/dev/console", O_RDWR, 0).unwrap();
+        assert_eq!(v.write(&fid, b"hi").unwrap(), 2);
         let mut out = [0u8; 8];
         let n = k.fs.cons_captured(&mut out);
         assert_eq!(&out[..n], b"hi");

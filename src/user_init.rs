@@ -9,7 +9,7 @@ use vibeos::elf::{
     self, AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_FLAGS, AT_GID, AT_PAGESZ, AT_PHDR,
     AT_PHENT, AT_PHNUM, AT_SECURE, AT_UID, Auxv, ElfError, Image,
 };
-use vibeos::fs::{FsError, O_RDONLY};
+use vibeos::fs::{FileRef, FsError, O_RDONLY, OpenFlags};
 use vibeos::paging::PAGE_SIZE_4K;
 
 use crate::addr_space_init;
@@ -61,27 +61,30 @@ fn align_up(x: u64, a: u64) -> u64 {
 }
 
 fn read_path(path: &str) -> Result<Vec<u8>, LoadError> {
-    let st = file_init::stat_path(path).map_err(LoadError::Fs)?;
+    let f = file_init::open_routed(path.as_bytes(), OpenFlags::from_bits(O_RDONLY), 0)
+        .map_err(LoadError::Fs)?;
+    let r = read_file(&f);
+    let _ = file_init::close(f);
+    r
+}
+
+fn read_file(f: &FileRef) -> Result<Vec<u8>, LoadError> {
+    let st = file_init::stat(f).map_err(LoadError::Fs)?;
     if st.size == 0 {
         return Err(LoadError::Empty);
     }
     if st.size > MAX_ELF {
         return Err(LoadError::TooBig);
     }
-    let fid = file_init::open(path, O_RDONLY, 0).map_err(LoadError::Fs)?;
     let mut buf = vec![0u8; st.size as usize];
     let mut n = 0usize;
     while n < buf.len() {
-        match file_init::read(fid, &mut buf[n..]) {
+        match file_init::read(f, &mut buf[n..]) {
             Ok(0) => break,
             Ok(k) => n += k,
-            Err(e) => {
-                let _ = file_init::close(fid);
-                return Err(LoadError::Fs(e));
-            }
+            Err(e) => return Err(LoadError::Fs(e)),
         }
     }
-    let _ = file_init::close(fid);
     buf.truncate(n);
     Ok(buf)
 }

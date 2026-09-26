@@ -1,11 +1,13 @@
 //! In-guest tests of P10-S11, VFS single dispatch I: backend InodeOps and inode identity (DESIGN §8.2).
 
-use vibeos::fs::{Dirent, FsError, InodeKind, Name, O_CREAT, O_RDWR, SEEK_SET, Stat, Vfs};
+use vibeos::fs::{
+    FileId, FsError, InodeKind, O_CREAT, O_DIRECTORY, O_RDONLY, O_RDWR, OpenFlags, SEEK_SET, Stat,
+};
 
+use super::p10_s12::fid;
 use super::{Outcome, Test, test};
 use crate::fat_init;
 use crate::file_init;
-use crate::fs_init;
 use crate::vibefs_init;
 
 pub(super) const TESTS: &[Test] = &[
@@ -24,13 +26,13 @@ pub(super) const TESTS: &[Test] = &[
 /// A failed step and its error.
 type Step<T> = Result<T, (&'static str, FsError)>;
 
-/// Run one `Vfs` call under the VFS lock, naming it for the failure line.
-fn vfs<T>(what: &'static str, f: impl FnOnce(&mut Vfs) -> Result<T, FsError>) -> Step<T> {
-    fs_init::with(f).map_err(|e| (what, e))
+/// Run one File API call on `Vfs`, naming it for the failure line.
+fn vfs<T>(what: &'static str, r: Result<T, FsError>) -> Step<T> {
+    r.map_err(|e| (what, e))
 }
 
 fn vstat(path: &str) -> Result<Stat, FsError> {
-    fs_init::with(|v| v.stat(None, path))
+    fid::stat_path(path)
 }
 
 fn failed(r: Step<()>) -> Outcome {
@@ -42,15 +44,10 @@ fn failed(r: Step<()>) -> Outcome {
 
 /// How often `dir` lists `.`, `..` and `named` through `Vfs`.
 fn count_names(dir: &str, named: &[u8]) -> Step<(u32, u32, u32)> {
-    let p = vfs("resolve", |v| v.resolve(None, dir, true))?;
-    let mut d = Dirent {
-        ino: 0,
-        kind: InodeKind::Reg,
-        name: Name::EMPTY,
-    };
+    let flags = OpenFlags::from_bits(O_RDONLY | O_DIRECTORY);
+    let f = vfs("open dir", file_init::open(dir.as_bytes(), flags, 0))?;
     let (mut dot, mut dotdot, mut hit) = (0u32, 0u32, 0u32);
-    let mut cookie = 0u64;
-    while let Some(next) = vfs("readdir", |v| v.readdir(p, cookie, &mut d))? {
+    let r = file_init::readdir(&f, &mut |d| {
         let n = d.name.as_bytes();
         if n == b"." {
             dot += 1;
@@ -59,16 +56,16 @@ fn count_names(dir: &str, named: &[u8]) -> Step<(u32, u32, u32)> {
         } else if n.eq_ignore_ascii_case(named) {
             hit += 1;
         }
-        cookie = next;
-    }
+        true
+    });
+    let c = file_init::close(f);
+    vfs("readdir", r)?;
+    vfs("close dir", c)?;
     Ok((dot, dotdot, hit))
 }
 
 fn mkdir_s11() -> Step<()> {
-    match fs_init::with(|v| v.mkdir(None, "/s11", 0o755)) {
-        Ok(_) | Err(FsError::Exists) => Ok(()),
-        Err(e) => Err(("mkdir /s11", e)),
-    }
+    vfs("mkdir /s11", file_init::mkdir(b"/s11", 0o755))
 }
 
 /// Free bytes on the initrd volume, read outside the VFS lock.
@@ -86,11 +83,11 @@ fn test_vfs_fat_ops_initrd() -> Outcome {
 }
 
 fn fat_ops_initrd() -> Step<()> {
-    let name = match file_init::stat_path("/hello.txt") {
+    let name = match fid::stat_path("/hello.txt") {
         Ok(_) => "/hello.txt",
         Err(_) => "/HELLO.TXT",
     };
-    let api = file_init::stat_path(name).map_err(|e| ("file api stat", e))?;
+    let api = fid::stat_path(name).map_err(|e| ("file api stat", e))?;
     let vs = vstat(name).map_err(|e| ("vfs stat", e))?;
     if (vs.size, vs.ino, vs.kind) != (api.size, api.ino, InodeKind::Reg) {
         return Err(("hello.txt size or ino", FsError::Io));
@@ -99,19 +96,19 @@ fn fat_ops_initrd() -> Step<()> {
         return Err(("readdir / names", FsError::Io));
     }
     mkdir_s11()?;
-    vfs("creat", |v| v.creat(None, "/s11/f", 0o644))?;
-    let one = vfs("open 1", |v| v.open(None, "/s11/f", O_RDWR, 0))?;
-    let two = vfs("open 2", |v| v.open(None, "/s11/f", O_RDWR, 0))?;
+    vfs("creat", fid::creat("/s11/f"))?;
+    let one = vfs("open 1", fid::open("/s11/f", O_RDWR, 0))?;
+    let two = vfs("open 2", fid::open("/s11/f", O_RDWR, 0))?;
     let mut data = [0u8; 300];
     for (i, b) in data.iter_mut().enumerate() {
         *b = (i as u8).wrapping_mul(13);
     }
     let mut back = [0u8; 300];
-    let wrote = vfs("write", |v| v.write(one, &data));
-    let read = vfs("read", |v| v.read(two, &mut back));
+    let wrote = vfs("write", fid::write(one, &data));
+    let read = vfs("read", fid::read(two, &mut back));
     let size = vstat("/s11/f").map(|s| s.size).map_err(|e| ("stat", e));
-    let c1 = vfs("close 1", |v| v.close(one));
-    let c2 = vfs("close 2", |v| v.close(two));
+    let c1 = vfs("close 1", fid::close(one));
+    let c2 = vfs("close 2", fid::close(two));
     if wrote? != 300 || read? != 300 || back != data {
         return Err(("300-byte round trip", FsError::Io));
     }
@@ -120,8 +117,8 @@ fn fat_ops_initrd() -> Step<()> {
     }
     c1?;
     c2?;
-    vfs("unlink", |v| v.unlink(None, "/s11/f"))?;
-    match (vstat("/s11/f"), file_init::stat_path("/s11/f")) {
+    vfs("unlink", fid::unlink_path("/s11/f", false))?;
+    match (vstat("/s11/f"), fid::stat_path("/s11/f")) {
         (Err(FsError::NotFound), Err(FsError::NotFound)) => Ok(()),
         _ => Err(("unlinked file still found", FsError::Io)),
     }
@@ -138,31 +135,31 @@ fn fat_unlinked_open_inode() -> Step<()> {
     mkdir_s11()?;
     let base = initrd_free()?;
     let old = [0x5Au8; 1500];
-    let fid = vfs("open", |v| v.open(None, "/s11/u", O_RDWR | O_CREAT, 0o644))?;
-    let r = unlinked_open_body(fid, &old);
-    let c = vfs("close", |v| v.close(fid));
+    let f = vfs("open", fid::open("/s11/u", O_RDWR | O_CREAT, 0o644))?;
+    let r = unlinked_open_body(f, &old);
+    let c = vfs("close", fid::close(f));
     r?;
     c?;
     let after = initrd_free()?;
-    vfs("cleanup unlink", |v| v.unlink(None, "/s11/u"))?;
+    vfs("cleanup unlink", fid::unlink_path("/s11/u", false))?;
     if after != base {
         return Err(("free bytes after close differ from baseline", FsError::Io));
     }
     Ok(())
 }
 
-fn unlinked_open_body(fid: u16, old: &[u8; 1500]) -> Step<()> {
-    if vfs("write", |v| v.write(fid, old))? != old.len() {
+fn unlinked_open_body(f: FileId, old: &[u8; 1500]) -> Step<()> {
+    if vfs("write", fid::write(f, old))? != old.len() {
         return Err(("short write", FsError::Io));
     }
-    vfs("unlink", |v| v.unlink(None, "/s11/u"))?;
-    vfs("creat again", |v| v.creat(None, "/s11/u", 0o644))?;
+    vfs("unlink", fid::unlink_path("/s11/u", false))?;
+    vfs("creat again", fid::creat("/s11/u"))?;
     if vstat("/s11/u").map_err(|e| ("stat new", e))?.size != 0 {
         return Err(("new file not empty", FsError::Io));
     }
-    vfs("seek", |v| v.seek(fid, 0, SEEK_SET))?;
+    vfs("seek", fid::seek(f, 0, SEEK_SET))?;
     let mut back = [0u8; 1500];
-    if vfs("read old", |v| v.read(fid, &mut back))? != old.len() || &back != old {
+    if vfs("read old", fid::read(f, &mut back))? != old.len() || &back != old {
         return Err(("old bytes", FsError::Io));
     }
     Ok(())
@@ -177,14 +174,13 @@ fn test_vfs_fat_file_api_one_inode() -> Outcome {
 
 fn fat_file_api_one_inode() -> Step<()> {
     mkdir_s11()?;
-    let fid =
-        file_init::open("/s11/g", O_RDWR | O_CREAT, 0o644).map_err(|e| ("file api open", e))?;
+    let f = fid::open("/s11/g", O_RDWR | O_CREAT, 0o644).map_err(|e| ("file api open", e))?;
     let data = [0xC3u8; 5000];
-    let wrote = file_init::write(fid, &data).map_err(|e| ("file api write", e));
+    let wrote = fid::write(f, &data).map_err(|e| ("file api write", e));
     let vs = vstat("/s11/g").map_err(|e| ("vfs stat", e));
-    let closed = file_init::close(fid).map_err(|e| ("file api close", e));
-    let api = file_init::stat_path("/s11/g").map_err(|e| ("file api stat", e));
-    let gone = file_init::unlink_path("/s11/g", false).map_err(|e| ("file api unlink", e));
+    let closed = fid::close(f).map_err(|e| ("file api close", e));
+    let api = fid::stat_path("/s11/g").map_err(|e| ("file api stat", e));
+    let gone = fid::unlink_path("/s11/g", false).map_err(|e| ("file api unlink", e));
     let (wrote, vs, api) = (wrote?, vs?, api?);
     closed?;
     gone?;
@@ -205,17 +201,14 @@ fn test_vfs_vibe_ops_mem() -> Outcome {
 }
 
 fn vibe_ops_mem() -> Step<()> {
-    match fs_init::with(|v| v.mkdir(None, "/vibe/s11", 0o755)) {
-        Ok(_) | Err(FsError::Exists) => {}
-        Err(e) => return Err(("mkdir", e)),
-    }
-    vfs("creat", |v| v.creat(None, "/vibe/s11/f", 0o644))?;
-    let fid = vfs("open", |v| v.open(None, "/vibe/s11/f", O_RDWR, 0))?;
+    vfs("mkdir", file_init::mkdir(b"/vibe/s11", 0o755))?;
+    vfs("creat", fid::creat("/vibe/s11/f"))?;
+    let f = vfs("open", fid::open("/vibe/s11/f", O_RDWR, 0))?;
     let mut back = [0u8; 8];
-    let wrote = vfs("write", |v| v.write(fid, b"vibe ops"));
-    let sought = vfs("seek", |v| v.seek(fid, 0, SEEK_SET));
-    let read = vfs("read", |v| v.read(fid, &mut back));
-    let closed = vfs("close", |v| v.close(fid));
+    let wrote = vfs("write", fid::write(f, b"vibe ops"));
+    let sought = vfs("seek", fid::seek(f, 0, SEEK_SET));
+    let read = vfs("read", fid::read(f, &mut back));
+    let closed = vfs("close", fid::close(f));
     if wrote? != 8 || read? != 8 || &back != b"vibe ops" {
         return Err(("round trip", FsError::Io));
     }
@@ -227,10 +220,10 @@ fn vibe_ops_mem() -> Step<()> {
     if count_names("/vibe/s11", b"f")? != (1, 1, 1) {
         return Err(("readdir names", FsError::Io));
     }
-    file_init::symlink_path("/vibe/s11/l", "/vibe/s11/f").map_err(|e| ("symlink", e))?;
+    file_init::symlink_path(b"/vibe/s11/l", b"/vibe/s11/f").map_err(|e| ("symlink", e))?;
     let l = vstat("/vibe/s11/l").map_err(|e| ("stat link", e))?;
     let f = vstat("/vibe/s11/f").map_err(|e| ("stat file", e))?;
-    let k = vfs("lstat", |v| v.lstat(None, "/vibe/s11/l"))?;
+    let k = vfs("lstat", fid::lstat_path("/vibe/s11/l"))?;
     if l.ino != f.ino || l.kind != InodeKind::Reg || k.kind != InodeKind::Lnk {
         return Err(("symlink not followed", FsError::Io));
     }

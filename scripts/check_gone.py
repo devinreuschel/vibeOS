@@ -90,6 +90,15 @@ GONE: list[tuple[str, str]] = [
     ("inos", "FAT and vibefs behind `InodeOps`"),
     ("ino_of", "FAT and vibefs behind `InodeOps`"),
     ("by_ino", "FAT and vibefs behind `InodeOps`"),
+    ("Back", "FAT and vibefs behind `InodeOps`;"),
+    ("Walked", "FAT and vibefs behind `InodeOps`;"),
+    ("fat_vol_of", "FAT and vibefs behind `InodeOps`;"),
+    ("fat_iget", "FAT and vibefs behind `InodeOps`;"),
+    ("fat_dcache", "FAT and vibefs behind `InodeOps`;"),
+    ("vfs_ls_snap", "FAT and vibefs behind `InodeOps`;"),
+    ("vol_walk", "FAT and vibefs behind `InodeOps`;"),
+    ("is_kernfs", "FAT and vibefs behind `InodeOps`;"),
+    ("vfs_attach", "FAT and vibefs behind `InodeOps`;"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

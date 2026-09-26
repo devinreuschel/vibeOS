@@ -420,8 +420,8 @@ PT and BUDDY, so an allocation under either fails only when it grows the heap, t
 recursive-lock check or the rank check on PT, and passes every test that does not grow the heap
 (ROADMAP §10.3).
 
-Filesystem spinlocks take `RANK_DEVICE`: today the VFS lock, the open-file table, and each backend's
-mount and slot-allocation locks. The rank order therefore forbids heap allocation under them and
+Filesystem spinlocks take `RANK_DEVICE`: today the VFS lock, which also guards the open-file table,
+the ramfs and kernfs store locks, and each backend's mount and slot-allocation locks. The rank order therefore forbids heap allocation under them and
 allows logging. The VFS tables are static, so bring-up allocates nothing under them. Filesystems get
 no spin rank of their own; adding one changes this list and `src/lock.rs` in the same commit.
 
