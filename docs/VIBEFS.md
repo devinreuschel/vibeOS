@@ -125,7 +125,8 @@ at or below byte 2^44 − 4096, so its last block index is at most
 with `FileTooBig` (`EFBIG`), leaving the file unchanged, and shortens one
 that would cross it to end at the limit. `truncate` refuses a larger
 size with `FileTooBig`, and `lseek` refuses a larger offset with
-`EINVAL` (F008; ROADMAP §10.11).
+`EINVAL`. Block arithmetic is checked `u64`, converted to a `u32` block
+index only after the check (F008; ROADMAP §10.11).
 
 ---
 

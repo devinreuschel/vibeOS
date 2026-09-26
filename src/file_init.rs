@@ -37,7 +37,7 @@ struct Walked {
     vol: u8,
     ino: u32,
     kind: InodeKind,
-    size: u32,
+    size: u64,
     clu: u32,
     mode: u16,
     nlink: u32,
@@ -51,7 +51,7 @@ impl Walked {
             vol,
             ino: n.ino,
             kind: n.kind,
-            size: n.size,
+            size: u64::from(n.size),
             clu: n.clu,
             mode: if n.kind == InodeKind::Dir {
                 S_IFDIR_MODE
@@ -756,7 +756,7 @@ pub fn stat_path(path: &str) -> Result<Stat, FsError> {
         kind: node.kind,
         mode: node.mode,
         nlink: node.nlink,
-        size: node.size as u64,
+        size: node.size,
         atime: node.mtime,
         mtime: node.mtime,
         ctime: node.mtime,
@@ -832,7 +832,7 @@ pub fn vfs_attach(path: &str) -> Result<PathRef, FsError> {
             v.sb_of_path(pdir)?,
             node.ino,
             node.kind,
-            node.size as u64,
+            node.size,
             node.clu,
         )?;
         match v.fat_dcache(pdir, name, islot) {

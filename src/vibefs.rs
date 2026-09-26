@@ -399,7 +399,7 @@ impl Snap {
 pub struct Node {
     pub ino: u32,
     pub kind: InodeKind,
-    pub size: u32,
+    pub size: u64,
     pub mode: u16,
     pub nlink: u32,
     pub mtime: u64,
@@ -956,11 +956,7 @@ impl Vol {
         let mut n = Node::EMPTY;
         n.ino = r.ino;
         n.kind = kind_of(r.kind)?;
-        n.size = if r.size > u32::MAX as u64 {
-            u32::MAX
-        } else {
-            r.size as u32
-        };
+        n.size = r.size;
         n.mode = r.mode;
         n.nlink = r.nlink;
         n.mtime = r.mtime;
@@ -1302,17 +1298,27 @@ impl Vol {
         Ok(self.inodes[s].size)
     }
 
-    fn map_block(&self, ino_slot: usize, file_blk: u32) -> Option<(usize, u32)> {
-        let r = &self.inodes[ino_slot];
-        let mut i = 0usize;
-        while i < r.n_ext as usize {
-            let e = r.extents[i];
-            if file_blk >= e.log && file_blk < e.log + e.len {
-                return Some((i, e.phys + (file_blk - e.log)));
+    /// The extent index and physical block of file block `file_blk`, or
+    /// `None` for a hole. Extent ends are compared in `u64`; an extent
+    /// whose physical block overflows is `Corrupt`.
+    fn map_block(&self, ino_slot: usize, file_blk: u32) -> Result<Option<(usize, u32)>, Error> {
+        let r = self.inodes.get(ino_slot).ok_or(Error::Corrupt)?;
+        let fb = u64::from(file_blk);
+        for (i, e) in r.extents.iter().take(r.n_ext as usize).enumerate() {
+            let start = u64::from(e.log);
+            let end = start.checked_add(u64::from(e.len)).ok_or(Error::Corrupt)?;
+            if fb >= start && fb < end {
+                let phys = e.phys.checked_add(file_blk - e.log).ok_or(Error::Corrupt)?;
+                return Ok(Some((i, phys)));
             }
-            i += 1;
         }
-        None
+        Ok(None)
+    }
+
+    /// File block index and offset within it of byte `pos`.
+    fn block_of(pos: u64) -> Result<(u32, usize), Error> {
+        let fblk = u32::try_from(pos / BLOCK as u64).map_err(|_| Error::FileTooBig)?;
+        Ok((fblk, (pos % BLOCK as u64) as usize))
     }
 
     pub fn read<D: Disk>(
@@ -1338,11 +1344,10 @@ impl Vol {
         }
         let mut done = 0usize;
         while done < want {
-            let pos = off + done as u64;
-            let fblk = (pos / BLOCK as u64) as u32;
-            let pin = (pos as usize) % BLOCK;
+            let pos = off.checked_add(done as u64).ok_or(Error::FileTooBig)?;
+            let (fblk, pin) = Self::block_of(pos)?;
             let n = (BLOCK - pin).min(want - done);
-            let (ei, phys) = match self.map_block(is, fblk) {
+            let (ei, phys) = match self.map_block(is, fblk)? {
                 Some(mapping) => mapping,
                 None => {
                     buf[done..done + n].fill(0);
@@ -1429,12 +1434,11 @@ impl Vol {
         }
         let mut done = 0usize;
         while done < buf.len() {
-            let pos = off + done as u64;
-            let fblk = (pos / BLOCK as u64) as u32;
-            let pin = (pos as usize) % BLOCK;
+            let pos = off.checked_add(done as u64).ok_or(Error::FileTooBig)?;
+            let (fblk, pin) = Self::block_of(pos)?;
             let n = (BLOCK - pin).min(buf.len() - done);
             let is = self.inode_slot(ino)?;
-            let existing = self.map_block(is, fblk);
+            let existing = self.map_block(is, fblk)?;
             self.iobuf.fill(0);
             if let Some((ei, phys)) = existing {
                 d.read_block(phys, &mut self.iobuf)?;
@@ -1472,18 +1476,33 @@ impl Vol {
         newp: u32,
         crc: u32,
     ) -> Result<(), Error> {
-        let (ei, _) = self.map_block(is, fblk).ok_or(Error::Inval)?;
+        let (ei, _) = self.map_block(is, fblk)?.ok_or(Error::Inval)?;
         let e = self.inodes[is].extents[ei];
         if e.len == 1 {
             self.inodes[is].extents[ei].phys = newp;
             self.inodes[is].extents[ei].crc = crc;
             return Ok(());
         }
-        // split into prefix + new + suffix; may need extra extent slots
-        let left_len = fblk - e.log;
-        let right_log = fblk + 1;
-        let right_phys = e.phys + left_len + 1;
-        let right_len = e.log + e.len - right_log;
+        // split into prefix + new + suffix; may need extra extent slots.
+        // `map_block` found `fblk` inside `e`.
+        let fb = u64::from(fblk);
+        let left_len = fb.checked_sub(u64::from(e.log)).ok_or(Error::Corrupt)?;
+        let right_log = fb.checked_add(1).ok_or(Error::Corrupt)?;
+        let right_phys = u64::from(e.phys)
+            .checked_add(left_len)
+            .and_then(|p| p.checked_add(1))
+            .ok_or(Error::Corrupt)?;
+        let right_len = u64::from(e.log)
+            .checked_add(u64::from(e.len))
+            .and_then(|end| end.checked_sub(right_log))
+            .ok_or(Error::Corrupt)?;
+        let to32 = |v: u64| u32::try_from(v).map_err(|_| Error::Corrupt);
+        let (left_len, right_log, right_phys, right_len) = (
+            to32(left_len)?,
+            to32(right_log)?,
+            to32(right_phys)?,
+            to32(right_len)?,
+        );
         // shrink original to left, or replace with the new block if left_len==0
         if left_len == 0 {
             self.inodes[is].extents[ei] = Extent {
@@ -1541,27 +1560,26 @@ impl Vol {
             self.bump_mtime(ino);
             return Ok(());
         }
-        let keep_blks = if new == 0 {
-            0
-        } else {
-            (new as usize).div_ceil(BLOCK) as u32
-        };
-        let n_ext = self.inodes[is].n_ext as usize;
+        let keep_blks = u32::try_from(new.div_ceil(BLOCK as u64)).map_err(|_| Error::FileTooBig)?;
+        let n_ext = (self.inodes[is].n_ext as usize).min(MAX_EXT);
         let mut i = 0usize;
         while i < n_ext {
             let e = self.inodes[is].extents[i];
+            let end = u64::from(e.log)
+                .checked_add(u64::from(e.len))
+                .ok_or(Error::Corrupt)?;
             if e.log >= keep_blks {
                 let mut b = 0u32;
                 while b < e.len {
-                    self.pending_drop(e.phys + b)?;
+                    self.pending_drop(e.phys.checked_add(b).ok_or(Error::Corrupt)?)?;
                     b += 1;
                 }
                 self.inodes[is].extents[i] = Extent::EMPTY;
-            } else if e.log + e.len > keep_blks {
+            } else if end > u64::from(keep_blks) {
                 let keep = keep_blks - e.log;
                 let mut b = keep;
                 while b < e.len {
-                    self.pending_drop(e.phys + b)?;
+                    self.pending_drop(e.phys.checked_add(b).ok_or(Error::Corrupt)?)?;
                     b += 1;
                 }
                 self.inodes[is].extents[i].len = keep;
@@ -2632,6 +2650,45 @@ mod tests {
             );
             v.truncate(d, ino, MAX_FILE_SIZE).unwrap();
             assert_eq!(v.file_size(ino).unwrap(), MAX_FILE_SIZE);
+        });
+    }
+
+    #[test]
+    fn node_size_above_4gib() {
+        let mut b = fresh(256 * 1024);
+        with_vol(&mut b, |v, d| {
+            let ino = new_file(v, d, b"five");
+            assert_eq!(v.write(d, ino, 5 << 30, b"x").unwrap(), 1);
+            let n = v.lookup(d, ROOT_INO, b"five").unwrap();
+            assert_eq!(n.size, (5u64 << 30) + 1);
+        });
+    }
+
+    #[test]
+    fn block_math_near_u32_limit() {
+        let mut b = fresh(256 * 1024);
+        with_vol(&mut b, |v, d| {
+            let ino = new_file(v, d, b"top");
+            let start = MAX_FILE_SIZE - 2 * BLOCK as u64;
+            let mut two = vec![0u8; 2 * BLOCK];
+            let mut i = 0usize;
+            while i < two.len() {
+                two[i] = (i % 253) as u8;
+                i += 1;
+            }
+            assert_eq!(v.write(d, ino, start, &two).unwrap(), two.len());
+            assert_eq!(v.file_size(ino).unwrap(), MAX_FILE_SIZE);
+            // Overwrite part of the first block: the split path.
+            two[10..20].fill(0xAB);
+            assert_eq!(v.write(d, ino, start + 10, &[0xAB; 10]).unwrap(), 10);
+            let mut out = vec![0u8; 2 * BLOCK];
+            assert_eq!(v.read(d, ino, start, &mut out).unwrap(), out.len());
+            assert_eq!(out, two);
+            v.truncate(d, ino, MAX_FILE_SIZE - BLOCK as u64).unwrap();
+            assert_eq!(v.file_size(ino).unwrap(), MAX_FILE_SIZE - BLOCK as u64);
+            let mut out = vec![0u8; 2 * BLOCK];
+            assert_eq!(v.read(d, ino, start, &mut out).unwrap(), BLOCK);
+            assert_eq!(out[..BLOCK], two[..BLOCK]);
         });
     }
 }

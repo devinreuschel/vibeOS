@@ -32,6 +32,7 @@ pub(super) const TESTS: &[Test] = &[
         test_fat_unlinked_open_frees_at_close,
     ),
     test("vibefs_efbig", test_vibefs_efbig),
+    test("vibefs_seek_end_5gib", test_vibefs_seek_end_5gib),
 ];
 
 /// Each open-file slot's `(used, refs)`.
@@ -679,6 +680,103 @@ fn test_vibefs_efbig() -> Outcome {
     };
     if st != wait_exited(0) {
         return crate::fail_fmt!("status {st:#x}, want exited 0 (step {})", st >> 8);
+    }
+    match u {
+        Ok(()) => Outcome::Ok,
+        Err(e) => crate::fail_fmt!("unlink: {}", e.as_str()),
+    }
+}
+
+// On /vibe/big5 (O_RDWR|O_CREAT|O_TRUNC): lseek to 5 GiB, write "x",
+// SEEK_END returns 5 GiB + 1 (exit 3 if not), and the byte read back at
+// 5 GiB is "x" (4). Exit 1 if the open fails, 2 if the lseek or write
+// fails, 0 when every step passes.
+user_code!(
+    VIBEFS_BIG5,
+    "
+    lea rdi, [rip + 90f]
+    mov esi, 0x242
+    xor edx, edx
+    mov eax, 2
+    syscall
+    mov edi, 1
+    test rax, rax
+    js 80f
+    mov r12, rax
+    mov r13, 0x140000000
+    mov rdi, r12
+    mov rsi, r13
+    xor edx, edx
+    mov eax, 8
+    syscall
+    mov edi, 2
+    cmp rax, r13
+    jne 80f
+    mov rdi, r12
+    lea rsi, [rip + 91f]
+    mov edx, 1
+    mov eax, 1
+    syscall
+    mov edi, 2
+    cmp rax, 1
+    jne 80f
+    mov rdi, r12
+    xor esi, esi
+    mov edx, 2
+    mov eax, 8
+    syscall
+    mov edi, 3
+    lea rcx, [r13 + 1]
+    cmp rax, rcx
+    jne 80f
+    mov rdi, r12
+    mov rsi, r13
+    xor edx, edx
+    mov eax, 8
+    syscall
+    mov edi, 4
+    cmp rax, r13
+    jne 80f
+    sub rsp, 16
+    mov byte ptr [rsp], 0
+    mov rdi, r12
+    mov rsi, rsp
+    mov edx, 1
+    xor eax, eax
+    syscall
+    mov edi, 4
+    cmp rax, 1
+    jne 80f
+    cmp byte ptr [rsp], 0x78
+    jne 80f
+    xor edi, edi
+80:
+    mov eax, 60
+    syscall
+    ud2
+90:
+    .asciz \"/vibe/big5\"
+91:
+    .ascii \"x\"
+    "
+);
+
+fn test_vibefs_seek_end_5gib() -> Outcome {
+    const BIG: u64 = (5 << 30) + 1;
+    let st = user::run(&Image::Code(VIBEFS_BIG5, DEFAULT), &["big5"]);
+    let size = file_init::stat_path("/vibe/big5").map(|s| s.size);
+    let u = unlink_quiet("/vibe/big5");
+    let st = match st {
+        Ok(st) => st,
+        Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
+    };
+    if st != wait_exited(0) {
+        return crate::fail_fmt!("status {st:#x}, want exited 0 (step {})", st >> 8);
+    }
+    match size {
+        Ok(BIG) => {}
+        Ok(n) => return crate::fail_fmt!("stat size {n}, want {BIG}"),
+        Err(e) => return crate::fail_fmt!("stat: {}", e.as_str()),
     }
     match u {
         Ok(()) => Outcome::Ok,
