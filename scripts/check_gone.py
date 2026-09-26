@@ -84,6 +84,7 @@ GONE: list[tuple[str, str]] = [
     ("restore_evict", "the block layer keeps only the orders DESIGN §10.2 names"),
     ("stash_evict", "the block layer keeps only the orders DESIGN §10.2 names"),
     ("writeback_all", "the block layer keeps only the orders DESIGN §10.2 names"),
+    ("set_hhdm_offset", "a `Buddy::new` argument replaces"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

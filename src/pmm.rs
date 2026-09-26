@@ -10,15 +10,15 @@
 //! somewhere unrelated hours later. Guard pages on kernel stacks are the
 //! rule that keeps this survivable (DESIGN §9.2).
 //!
-//! Host-testability. The allocator holds an `hhdm_offset` that maps a
-//! physical address to the (kernel-virtual, or host-owned) address at
-//! which the free-list node lives:
+//! Host-testability. `Buddy::new(hhdm)` fixes, for the allocator's whole
+//! life, the offset that maps a physical address to the (kernel-virtual,
+//! or host-owned) address at which the free-list node lives:
 //!
 //!   node_ptr(phys) = phys + hhdm_offset
 //!
-//! In the kernel this is Limine's HHDM offset. In host tests it is
-//! `real_backing_ptr - phys_base`, so the same code drives a `Vec`-backed
-//! pool without any hardware.
+//! In the kernel this is `paging_init::HHDM_BASE`. In host tests it is
+//! `real_backing_ptr - phys_base` ([`testing::Pool`]), so the same code
+//! drives a `Vec`-backed pool without any hardware.
 //!
 //! What is deliberately deferred to Slice B / phase 4:
 //! - Per-frame metadata array (refcounts, page cache linkage, etc).
@@ -74,23 +74,17 @@ pub struct Buddy {
 }
 
 impl Buddy {
-    /// New empty buddy. `hhdm_offset` will be filled in by
-    /// [`Buddy::set_hhdm_offset`] before the first `insert_region`.
-    pub const fn new() -> Self {
+    /// New empty buddy whose free-list nodes live at `phys + hhdm`. The
+    /// offset is fixed for the allocator's life: every range later handed
+    /// to `insert_region` must be writable at that offset.
+    pub const fn new(hhdm: u64) -> Self {
         Self {
             heads: [NULL; MAX_ORDER + 1],
             counts: [0; MAX_ORDER + 1],
             total_frames: 0,
             free_frames: 0,
-            hhdm_offset: 0,
+            hhdm_offset: hhdm,
         }
-    }
-
-    /// Set the offset that maps physical -> writable virtual for free-list
-    /// node access. Must be called before any `insert_region`/`allocate`/
-    /// `deallocate`.
-    pub fn set_hhdm_offset(&mut self, offset: u64) {
-        self.hhdm_offset = offset;
     }
 
     pub fn hhdm_offset(&self) -> u64 {
@@ -376,12 +370,6 @@ impl Buddy {
     }
 }
 
-impl Default for Buddy {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[inline]
 const fn align_up(x: u64, align: u64) -> u64 {
     (x + align - 1) & !(align - 1)
@@ -407,55 +395,59 @@ pub const fn crosses_boundary(phys: u64, size: u64, boundary: u64) -> bool {
     (phys & mask) + size > boundary
 }
 
+/// Host-test backing store shared by the `pmm`, `dma`, `paging` and
+/// `addr_space` tests.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::{Buddy, PAGE_SIZE, PhysAddr};
+    use std::vec;
+    use std::vec::Vec;
+
+    /// 4 MiB aligned so a 1024-frame pool registers as one order-10 block.
+    pub(crate) const TEST_PHYS_BASE: u64 = 0x0040_0000;
+
+    /// Vec-backed "physical memory". Owns the backing buffer and builds a
+    /// `Buddy` whose offset maps `TEST_PHYS_BASE` onto it.
+    pub(crate) struct Pool {
+        _mem: Vec<u64>,
+        pub(crate) phys_base: u64,
+        pub(crate) phys_end: u64,
+        pub(crate) buddy: Buddy,
+    }
+
+    impl Pool {
+        pub(crate) fn new(frames: usize) -> Self {
+            // Poison bytes so a bug reading uninitialized memory shows up.
+            let words = (frames * PAGE_SIZE as usize) / 8;
+            let mem: Vec<u64> = vec![0xDEAD_BEEF_DEAD_BEEFu64; words];
+            let hhdm = (mem.as_ptr() as u64).wrapping_sub(TEST_PHYS_BASE);
+            let phys_end = TEST_PHYS_BASE + (frames as u64) * PAGE_SIZE;
+            let mut buddy = Buddy::new(hhdm);
+            unsafe { buddy.insert_region(TEST_PHYS_BASE, phys_end) };
+            Self {
+                _mem: mem,
+                phys_base: TEST_PHYS_BASE,
+                phys_end,
+                buddy,
+            }
+        }
+
+        pub(crate) fn contains(&self, phys: PhysAddr) -> bool {
+            phys >= self.phys_base && phys < self.phys_end
+        }
+    }
+}
+
 // ------------------ host tests ------------------
 
 #[cfg(test)]
 mod tests {
+    use super::testing::{Pool, TEST_PHYS_BASE};
     use super::*;
 
     use std::panic;
     use std::vec;
     use std::vec::Vec;
-
-    // 4 MiB aligned so a 1024-frame pool can register as a single
-    // order-10 block. Real hardware picks whatever the memmap says; here
-    // we can be tidy about it.
-    const TEST_PHYS_BASE: u64 = 0x0040_0000;
-
-    /// Vec-backed "physical memory" for host tests. Owns the backing
-    /// buffer and constructs a `Buddy` with an `hhdm_offset` that maps
-    /// `TEST_PHYS_BASE` into the buffer.
-    struct Pool {
-        _mem: Vec<u64>,
-        phys_base: u64,
-        phys_end: u64,
-        buddy: Buddy,
-    }
-
-    impl Pool {
-        fn new(frames: usize) -> Self {
-            // Poison bytes so a bug reading uninitialized memory shows up.
-            let words = (frames * PAGE_SIZE as usize) / 8;
-            let mem: Vec<u64> = vec![0xDEAD_BEEF_DEAD_BEEFu64; words];
-            let ptr = mem.as_ptr() as u64;
-            let hhdm_offset = ptr.wrapping_sub(TEST_PHYS_BASE);
-            let mut buddy = Buddy::new();
-            buddy.set_hhdm_offset(hhdm_offset);
-            unsafe {
-                buddy.insert_region(TEST_PHYS_BASE, TEST_PHYS_BASE + (frames as u64) * PAGE_SIZE);
-            }
-            Self {
-                _mem: mem,
-                phys_base: TEST_PHYS_BASE,
-                phys_end: TEST_PHYS_BASE + (frames as u64) * PAGE_SIZE,
-                buddy,
-            }
-        }
-
-        fn contains(&self, phys: PhysAddr) -> bool {
-            phys >= self.phys_base && phys < self.phys_end
-        }
-    }
 
     #[test]
     fn exhaustion_returns_none() {
@@ -622,8 +614,7 @@ mod tests {
         let words = (32 * PAGE_SIZE as usize) / 8;
         let mem: Vec<u64> = vec![0u64; words];
         let ptr = mem.as_ptr() as u64;
-        let mut buddy = Buddy::new();
-        buddy.set_hhdm_offset(ptr);
+        let mut buddy = Buddy::new(ptr);
         unsafe { buddy.insert_region(0, 32 * PAGE_SIZE) };
         assert_eq!(buddy.stats().total_frames, 31);
     }
@@ -636,8 +627,7 @@ mod tests {
         let words = (10 * PAGE_SIZE as usize) / 8;
         let mem: Vec<u64> = vec![0u64; words];
         let ptr = mem.as_ptr() as u64;
-        let mut buddy = Buddy::new();
-        buddy.set_hhdm_offset(ptr.wrapping_sub(TEST_PHYS_BASE));
+        let mut buddy = Buddy::new(ptr.wrapping_sub(TEST_PHYS_BASE));
         unsafe {
             buddy.insert_region(TEST_PHYS_BASE + 100, TEST_PHYS_BASE + 9 * PAGE_SIZE + 200);
         }

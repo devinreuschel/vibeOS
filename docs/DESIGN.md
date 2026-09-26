@@ -1735,6 +1735,7 @@ get guard pages.
 
 ```rust
 pmm_init::with_buddy(|b| ..)                       // the global `Buddy`, RANK_BUDDY, IRQ-off
+const Buddy::new(hhdm: u64) -> Buddy               // free-list nodes at phys + hhdm
 Buddy::allocate_frame() -> Option<PhysAddr>        // order 0
 Buddy::allocate(order: u8) -> Option<PhysAddr>     // order <= MAX_ORDER (10)
 Buddy::allocate_constrained(bytes, align, boundary) -> Option<(PhysAddr, u8)>  // DMA, §4.7

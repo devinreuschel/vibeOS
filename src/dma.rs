@@ -234,30 +234,8 @@ pub fn crosses_boundary(phys: u64, size: u64, boundary: u64) -> bool {
 mod tests {
     use super::*;
     use crate::pmm::MAX_ORDER;
+    use crate::pmm::testing::Pool;
     use core::sync::atomic::AtomicU16;
-    use std::vec;
-    use std::vec::Vec;
-
-    const PHYS_BASE: u64 = 0x0040_0000;
-
-    struct Pool {
-        _mem: Vec<u64>,
-        buddy: Buddy,
-    }
-
-    impl Pool {
-        fn new(frames: usize) -> Self {
-            let words = (frames * PAGE_SIZE as usize) / 8;
-            let mem: Vec<u64> = vec![0u64; words];
-            let ptr = mem.as_ptr() as u64;
-            let mut buddy = Buddy::new();
-            buddy.set_hhdm_offset(ptr.wrapping_sub(PHYS_BASE));
-            unsafe {
-                buddy.insert_region(PHYS_BASE, PHYS_BASE + (frames as u64) * PAGE_SIZE);
-            }
-            Self { _mem: mem, buddy }
-        }
-    }
 
     #[test]
     fn identity_never_returns_a_high_va() {
