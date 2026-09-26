@@ -13,8 +13,8 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use vibeos::fs::{
-    Dirent, FsError, FsType, Inode, InodeInfo, InodeKind, InodeOps, MAX_PATH, Name, OpCx, S_IFMT,
-    VibeFs,
+    Dirent, FileSystem, FsError, FsType, Inode, InodeInfo, InodeKind, InodeOps, MAX_PATH, Name,
+    OpCx, S_IFDIR_MODE, S_IFMT,
 };
 use vibeos::lock::RANK_DEVICE;
 use vibeos::vibefs::{self, BLOCK, Disk, Error, Node, ROOT_INO, Vol};
@@ -337,6 +337,10 @@ impl InodeOps for VibeOps {
         with_slot_now(vol_of(cx), |v, d| v.unlink(d, dir.key[0], name, false))
     }
 
+    fn rmdir(&self, cx: &mut OpCx<'_>, dir: &mut Inode, name: &[u8]) -> Result<(), FsError> {
+        with_slot_now(vol_of(cx), |v, d| v.unlink(d, dir.key[0], name, true))
+    }
+
     fn read(
         &self,
         cx: &mut OpCx<'_>,
@@ -399,6 +403,44 @@ impl InodeOps for VibeOps {
 
     fn readlink(&self, cx: &mut OpCx<'_>, ino: &Inode, buf: &mut [u8]) -> Result<usize, FsError> {
         with_slot_now(vol_of(cx), |v, d| v.readlink(d, ino.key[0], buf))
+    }
+}
+
+/// vibefs registration for volume `vol`: its superblock's private words
+/// are `[vol, 0]`.
+pub struct VibeFs {
+    vol: u8,
+}
+
+static VIBE_FS: [VibeFs; MAX_VOLS] = [VibeFs { vol: 0 }, VibeFs { vol: 1 }];
+
+impl FileSystem for VibeFs {
+    fn name(&self) -> &'static str {
+        "vibefs"
+    }
+
+    fn fstype(&self) -> FsType {
+        FsType::Vibe
+    }
+
+    fn ops(&'static self) -> Option<&'static dyn InodeOps> {
+        Some(&VibeOps)
+    }
+
+    fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
+        *cx.private = [u64::from(self.vol), 0];
+        Ok(InodeInfo {
+            key: [ROOT_INO, 0, 0],
+            ino: ROOT_INO,
+            kind: InodeKind::Dir,
+            mode: S_IFDIR_MODE,
+            nlink: 2,
+            size: 0,
+            atime: cx.now,
+            mtime: cx.now,
+            ctime: cx.now,
+            private: [0, 0],
+        })
     }
 }
 
@@ -649,17 +691,7 @@ pub fn mount_mem(at: &str) -> Result<u8, FsError> {
         return Err(FsError::Io);
     }
     register_mnt(VOL_MEM, at)?;
-    match fs_init::with(|v| {
-        v.mount(
-            None,
-            at,
-            &VibeFs {
-                root_ino: ROOT_INO,
-                vol: VOL_MEM,
-                ops: Some(&VibeOps),
-            },
-        )
-    }) {
+    match fs_init::with(|v| v.mount(None, at, &VIBE_FS[VOL_MEM as usize])) {
         Ok(_) => Ok(VOL_MEM),
         Err(e) => {
             let _ = unregister_mnt(at);
@@ -719,17 +751,7 @@ pub fn mount_dev(name: &str, at: &str) -> Result<u8, FsError> {
         drop_slot(id);
         return Err(e);
     }
-    match fs_init::with(|v| {
-        v.mount(
-            None,
-            at,
-            &VibeFs {
-                root_ino: ROOT_INO,
-                vol: id,
-                ops: Some(&VibeOps),
-            },
-        )
-    }) {
+    match fs_init::with(|v| v.mount(None, at, &VIBE_FS[id as usize])) {
         Ok(_) => Ok(id),
         Err(e) => {
             let _ = unregister_mnt(at);

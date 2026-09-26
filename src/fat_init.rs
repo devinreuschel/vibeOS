@@ -13,12 +13,12 @@
 //! may yield.
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use vibeos::fat::{self, Disk, FatError, FatInode, FatVol, INITRD_BYTES, Node, SEC};
 use vibeos::fs::{
-    Dirent, FatFs, FsError, FsType, Inode, InodeHandle, InodeInfo, InodeKind, InodeOps, InodeRef,
-    MAX_PATH, Name, OpCx, S_IFDIR_MODE, S_IFREG_MODE,
+    Dirent, FileSystem, FsError, FsType, Inode, InodeHandle, InodeInfo, InodeKind, InodeOps,
+    InodeRef, MAX_PATH, Name, OpCx, S_IFDIR_MODE, S_IFREG_MODE,
 };
 use vibeos::lock::RANK_DEVICE;
 
@@ -335,6 +335,16 @@ impl InodeOps for FatOps {
         })
     }
 
+    /// Remove the empty directory `name`; its cluster is freed by `evict`
+    /// at its last put.
+    fn rmdir(&self, cx: &mut OpCx<'_>, dir: &mut Inode, name: &[u8]) -> Result<(), FsError> {
+        let clu = dir.private[0] as u32;
+        with_slot_now(vol_of(cx), |v, d| {
+            v.unlink(d, clu, name, true)?;
+            Ok(())
+        })
+    }
+
     fn read(
         &self,
         cx: &mut OpCx<'_>,
@@ -441,6 +451,50 @@ fn store(n: &mut Inode, w: &FatInode) {
     n.size = w.size;
 }
 
+/// FAT32 registration for volume `vol`: its superblock's private words
+/// are `[vol, 0]`, and its root inode's `[root_clu, 0]` from [`ROOT_CLU`].
+pub struct FatFs {
+    vol: u8,
+}
+
+static FAT_FS: [FatFs; MAX_VOLS] = [FatFs { vol: 0 }, FatFs { vol: 1 }];
+/// Each volume's root cluster, stored before the volume is mounted.
+static ROOT_CLU: [AtomicU32; MAX_VOLS] = [AtomicU32::new(0), AtomicU32::new(0)];
+
+impl FileSystem for FatFs {
+    fn name(&self) -> &'static str {
+        "fat32"
+    }
+
+    fn fstype(&self) -> FsType {
+        FsType::Fat
+    }
+
+    fn ops(&'static self) -> Option<&'static dyn InodeOps> {
+        Some(&FatOps)
+    }
+
+    fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
+        *cx.private = [u64::from(self.vol), 0];
+        let root_clu = ROOT_CLU
+            .get(self.vol as usize)
+            .ok_or(FsError::Io)?
+            .load(Ordering::Acquire);
+        Ok(InodeInfo {
+            key: [0, 0, 0],
+            ino: fat::ROOT_INO,
+            kind: InodeKind::Dir,
+            mode: S_IFDIR_MODE,
+            nlink: 2,
+            size: 0,
+            atime: cx.now,
+            mtime: cx.now,
+            ctime: cx.now,
+            private: [u64::from(root_clu), 0],
+        })
+    }
+}
+
 pub fn live() -> bool {
     LIVE.load(Ordering::Acquire)
 }
@@ -483,11 +537,8 @@ pub fn init() {
     SLOTS[0].busy.store(false, Ordering::Release);
     NVOL.store(1, Ordering::Release);
     let sb = fs_init::with(|v| {
-        let root = v.mount_root_fs(&FatFs {
-            root_clu,
-            vol: VOL_INITRD,
-            ops: Some(&FatOps),
-        })?;
+        ROOT_CLU[VOL_INITRD as usize].store(root_clu, Ordering::Release);
+        let root = v.mount_root_fs(&FAT_FS[VOL_INITRD as usize])?;
         v.sb_of_path(root)
     });
     if let Ok(sb) = sb {
@@ -811,16 +862,9 @@ pub fn mount_dev(name: &str, at: &str) -> Result<u8, FsError> {
         drop_slot(id);
         return Err(e);
     }
+    ROOT_CLU[id as usize].store(root_clu, Ordering::Release);
     match fs_init::with(|v| {
-        let m = v.mount(
-            None,
-            at,
-            &FatFs {
-                root_clu,
-                vol: id,
-                ops: Some(&FatOps),
-            },
-        )?;
+        let m = v.mount(None, at, &FAT_FS[id as usize])?;
         v.sb_of_mount(m)
     }) {
         Ok(sb) => {

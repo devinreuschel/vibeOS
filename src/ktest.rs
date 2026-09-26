@@ -4725,7 +4725,7 @@ fn test_vfs_walk() -> Outcome {
         return Outcome::Fail("attach");
     }
     fs_init::with(|v| {
-        if v.mount(None, "/ram", &vibeos::fs::RamFs).is_err() {
+        if v.mount(None, "/ram", &fs_init::RAMFS).is_err() {
             return Outcome::Fail("mount");
         }
         if v.creat(None, "/ram/f", 0o644).is_err() {

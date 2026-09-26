@@ -185,7 +185,7 @@ impl FileSystem for DevFs {
     fn fstype(&self) -> FsType {
         FsType::Dev
     }
-    fn ops(&self) -> Option<&'static dyn InodeOps> {
+    fn ops(&'static self) -> Option<&'static dyn InodeOps> {
         Some(&DevFs)
     }
     fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
@@ -208,7 +208,7 @@ impl FileSystem for TmpFs {
     fn fstype(&self) -> FsType {
         FsType::Tmp
     }
-    fn ops(&self) -> Option<&'static dyn InodeOps> {
+    fn ops(&'static self) -> Option<&'static dyn InodeOps> {
         Some(&TmpFs)
     }
     fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
@@ -224,7 +224,7 @@ impl FileSystem for ProcFs {
     fn fstype(&self) -> FsType {
         FsType::Proc
     }
-    fn ops(&self) -> Option<&'static dyn InodeOps> {
+    fn ops(&'static self) -> Option<&'static dyn InodeOps> {
         Some(&ProcFs)
     }
     fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
@@ -249,7 +249,7 @@ impl FileSystem for SysFs {
     fn fstype(&self) -> FsType {
         FsType::Sys
     }
-    fn ops(&self) -> Option<&'static dyn InodeOps> {
+    fn ops(&'static self) -> Option<&'static dyn InodeOps> {
         Some(&SysFs)
     }
     fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
@@ -287,6 +287,14 @@ macro_rules! kern_ops {
                 kern_create(cx, dir, name, kind, mode, target)
             }
             fn unlink(
+                &self,
+                cx: &mut OpCx<'_>,
+                dir: &mut Inode,
+                name: &[u8],
+            ) -> Result<(), FsError> {
+                kern_unlink(cx, dir, name)
+            }
+            fn rmdir(
                 &self,
                 cx: &mut OpCx<'_>,
                 dir: &mut Inode,
@@ -1476,7 +1484,7 @@ mod tests {
 
     fn boot() -> Vfs {
         let mut v = Vfs::new();
-        v.mount_root().unwrap();
+        v.mount_root_fs(crate::fs::tests::ramfs()).unwrap();
         v.mount_pseudo().unwrap();
         v
     }
@@ -1484,7 +1492,7 @@ mod tests {
     #[test]
     fn mount_pseudo_on_keyed_root() {
         let mut v = Vfs::new();
-        v.mount_root_fs(&crate::fs::tests::keyfs_new()).unwrap();
+        v.mount_root_fs(crate::fs::tests::keyfs_new()).unwrap();
         v.mount_pseudo().unwrap();
         assert_eq!(v.stat(None, "/dev").unwrap().kind, InodeKind::Dir);
         assert_eq!(v.stat(None, "/proc").unwrap().kind, InodeKind::Dir);

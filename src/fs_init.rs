@@ -7,7 +7,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use vibeos::fs::{FsError, PathRef, Vfs};
+use vibeos::fs::{FsError, Guarded, PathRef, RamFs, RamState, Vfs};
 use vibeos::lock::RANK_DEVICE;
 
 use crate::block_init;
@@ -20,6 +20,10 @@ use crate::vibefs_init;
 use crate::virtio_blk_init;
 
 static VFS: SpinMutex<Vfs> = SpinMutex::with_rank(Vfs::new(), RANK_DEVICE);
+/// Every ramfs instance's nodes: the root when FAT is not live, and each
+/// `mount ramfs`.
+pub static RAMFS: RamFs<SpinMutex<RamState>> =
+    RamFs::new(SpinMutex::with_rank(RamState::new(), RANK_DEVICE));
 static LIVE: AtomicBool = AtomicBool::new(false);
 
 pub fn init() {
@@ -30,7 +34,7 @@ pub fn init() {
     } else {
         let ok = {
             let mut g = VFS.lock();
-            g.mount_root().is_ok()
+            g.mount_root_fs(&RAMFS).is_ok()
         };
         LIVE.store(ok, Ordering::Release);
     }
@@ -100,6 +104,13 @@ fn populate_sysfs() {
             let _ = v.sysfs_add_device(bdf, d.vendor, d.device_id, d.class, drv);
         });
         i += 1;
+    }
+}
+
+impl<T: Send> Guarded<T> for SpinMutex<T> {
+    fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        let mut g = self.lock();
+        f(&mut g)
     }
 }
 

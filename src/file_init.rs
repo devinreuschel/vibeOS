@@ -6,8 +6,8 @@
 
 use vibeos::fat::Node;
 use vibeos::fs::{
-    self, Dirent, FsError, FsType, InodeHandle, InodeInfo, InodeKind, InodeRef, MAX_NAME, MAX_PATH,
-    Name, O_ACCMODE, O_APPEND, O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY,
+    Dirent, FsError, FsType, InodeHandle, InodeInfo, InodeKind, InodeRef, MAX_NAME, MAX_PATH, Name,
+    O_ACCMODE, O_APPEND, O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY,
     PathRef, S_IFDIR_MODE, S_IFLNK_MODE, S_IFREG_MODE, SEEK_CUR, SEEK_END, SEEK_SET, Stat,
     split_basename,
 };
@@ -1629,7 +1629,7 @@ fn cmd_mount(args: &[&str]) {
             }
             let _ = mkdir_p(args[2]);
             let _ = vfs_attach(args[2]);
-            match fs_init::with(|v| v.mount(None, args[2], &fs::RamFs)) {
+            match fs_init::with(|v| v.mount(None, args[2], &fs_init::RAMFS)) {
                 Ok(_) => {
                     let _ = writeln!(Console, "vibeOS: mount: ramfs on {}", args[2]);
                 }

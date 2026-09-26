@@ -2,8 +2,9 @@
 //!
 //! Bounded caches with clock eviction. Path walk is iterative with a
 //! symlink-depth cap (loop → [`FsError::Loop`], not stack smash).
-//! Dummy [`RamFs`] is enough to unit-test walks. Pseudo filesystems
-//! share [`kernfs`] (one dir tree, four skins).
+//! [`RamFs`], whose store sits behind its own [`Guarded`] lock, is enough
+//! to unit-test walks. Pseudo filesystems share [`kernfs`] (one dir tree,
+//! four skins).
 //!
 //! Dispatch: a superblock's `ops` pointer ([`InodeOps`]) is the only way
 //! to a backend, and no backend receives `&Vfs`: an op gets an [`OpCx`]
@@ -23,8 +24,10 @@
 //! under the lock. No FS work from hard IRQ (DESIGN §2.2).
 
 mod kernfs;
+mod ramfs;
 
 pub use kernfs::{DevFs, ProcFs, SysFs, TmpFs};
+pub use ramfs::{RamFs, RamState};
 
 pub use crate::limits::MAX_DENTRIES;
 pub use crate::limits::MAX_FDS;
@@ -284,8 +287,22 @@ pub struct OpCx<'a> {
     pub fstype: FsType,
     pub private: &'a mut [u64; 2],
     pub now: u64,
-    ram: &'a mut [RamNode; MAX_RAM_NODES],
     kern: &'a mut kernfs::KernState,
+}
+
+/// A lock a backend's store, or the [`Vfs`], sits behind: a seam over the
+/// kernel's `SpinMutex` and, in host tests, `std::sync::Mutex`, not a lock
+/// of its own.
+pub trait Guarded<T> {
+    fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R;
+}
+
+#[cfg(test)]
+impl<T> Guarded<T> for std::sync::Mutex<T> {
+    fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        let mut g = self.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut g)
+    }
 }
 
 /// Per-inode ops, reached only through a superblock's `ops` pointer.
@@ -305,6 +322,32 @@ pub trait InodeOps: Sync {
         target: Option<&[u8]>,
     ) -> Result<InodeInfo, FsError>;
     fn unlink(&self, cx: &mut OpCx<'_>, dir: &mut Inode, name: &[u8]) -> Result<(), FsError>;
+    /// Remove the empty directory `name` from `dir`.
+    fn rmdir(&self, _cx: &mut OpCx<'_>, _dir: &mut Inode, _name: &[u8]) -> Result<(), FsError> {
+        Err(FsError::NotSupp)
+    }
+    /// Give `target` the further name `name` in `dir`.
+    fn link(
+        &self,
+        _cx: &mut OpCx<'_>,
+        _dir: &mut Inode,
+        _name: &[u8],
+        _target: &mut Inode,
+    ) -> Result<(), FsError> {
+        Err(FsError::NotSupp)
+    }
+    /// Move `oname` in `odir` to `nname` in `ndir`. The moved inode's new
+    /// key when the move changed it, as FAT's dirent-location key does.
+    fn rename(
+        &self,
+        _cx: &mut OpCx<'_>,
+        _odir: &mut Inode,
+        _oname: &[u8],
+        _ndir: &mut Inode,
+        _nname: &[u8],
+    ) -> Result<Option<Key>, FsError> {
+        Err(FsError::NotSupp)
+    }
     fn read(
         &self,
         cx: &mut OpCx<'_>,
@@ -349,10 +392,10 @@ pub trait InodeOps: Sync {
 
 /// Mount-time half of a filesystem: its ops pointer, and the root inode
 /// `fill_super` reports after setting up the superblock's private words.
-pub trait FileSystem {
+pub trait FileSystem: Sync {
     fn name(&self) -> &'static str;
     fn fstype(&self) -> FsType;
-    fn ops(&self) -> Option<&'static dyn InodeOps>;
+    fn ops(&'static self) -> Option<&'static dyn InodeOps>;
     fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError>;
 }
 
@@ -393,179 +436,6 @@ pub struct Evicted {
     pub key: Key,
     pub private: [u64; 2],
     pub size: u64,
-}
-
-pub struct RamFs;
-
-impl FileSystem for RamFs {
-    fn name(&self) -> &'static str {
-        "ramfs"
-    }
-
-    fn fstype(&self) -> FsType {
-        FsType::Ram
-    }
-
-    fn ops(&self) -> Option<&'static dyn InodeOps> {
-        Some(&RamFs)
-    }
-
-    fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
-        ram_fill_super(cx)
-    }
-}
-
-impl InodeOps for RamFs {
-    fn lookup(&self, cx: &mut OpCx<'_>, dir: &Inode, name: &[u8]) -> Result<InodeInfo, FsError> {
-        ram_lookup(cx, dir, name)
-    }
-
-    fn create(
-        &self,
-        cx: &mut OpCx<'_>,
-        dir: &mut Inode,
-        name: &[u8],
-        kind: InodeKind,
-        mode: u16,
-        target: Option<&[u8]>,
-    ) -> Result<InodeInfo, FsError> {
-        ram_create(cx, dir, name, kind, mode, target)
-    }
-
-    fn unlink(&self, cx: &mut OpCx<'_>, dir: &mut Inode, name: &[u8]) -> Result<(), FsError> {
-        ram_unlink(cx, dir, name)
-    }
-
-    fn read(
-        &self,
-        cx: &mut OpCx<'_>,
-        ino: &mut Inode,
-        off: u64,
-        buf: &mut [u8],
-    ) -> Result<usize, FsError> {
-        ram_read(cx, ino, off, buf)
-    }
-
-    fn write(
-        &self,
-        cx: &mut OpCx<'_>,
-        ino: &mut Inode,
-        off: u64,
-        buf: &[u8],
-    ) -> Result<usize, FsError> {
-        ram_write(cx, ino, off, buf)
-    }
-
-    fn truncate(&self, cx: &mut OpCx<'_>, ino: &mut Inode, size: u64) -> Result<(), FsError> {
-        ram_truncate(cx, ino, size)
-    }
-
-    fn readdir(
-        &self,
-        cx: &mut OpCx<'_>,
-        dir: &Inode,
-        cookie: u64,
-        out: &mut Dirent,
-    ) -> Result<Option<u64>, FsError> {
-        ram_readdir(cx, dir, cookie, out)
-    }
-
-    fn getattr(&self, cx: &mut OpCx<'_>, ino: &mut Inode) -> Result<(), FsError> {
-        if let Some(r) = ram_get(cx.ram, cx.sb, ino.key[0]) {
-            r.meta_into(ino);
-        }
-        Ok(())
-    }
-
-    fn readlink(&self, cx: &mut OpCx<'_>, ino: &Inode, buf: &mut [u8]) -> Result<usize, FsError> {
-        ram_readlink(cx, ino, buf)
-    }
-
-    fn evict(&self, cx: &mut OpCx<'_>, ino: &Inode) -> Result<(), FsError> {
-        ram_evict(cx, ino.key[0]);
-        Ok(())
-    }
-
-    fn kill_sb(&self, cx: &mut OpCx<'_>) {
-        ram_drop_sb(cx.ram, cx.sb);
-    }
-}
-
-/// FAT32 registration. On-disk I/O lives in `fat` / `fat_init`; the
-/// superblock's private words are `[vol, 0]` and the root inode's are
-/// `[root_clu, 0]`.
-pub struct FatFs {
-    pub root_clu: u32,
-    pub vol: u8,
-    pub ops: Option<&'static dyn InodeOps>,
-}
-
-impl FileSystem for FatFs {
-    fn name(&self) -> &'static str {
-        "fat32"
-    }
-
-    fn fstype(&self) -> FsType {
-        FsType::Fat
-    }
-
-    fn ops(&self) -> Option<&'static dyn InodeOps> {
-        self.ops
-    }
-
-    fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
-        *cx.private = [u64::from(self.vol), 0];
-        Ok(InodeInfo {
-            key: [0, 0, 0],
-            ino: crate::fat::ROOT_INO,
-            kind: InodeKind::Dir,
-            mode: S_IFDIR_MODE,
-            nlink: 2,
-            size: 0,
-            atime: cx.now,
-            mtime: cx.now,
-            ctime: cx.now,
-            private: [u64::from(self.root_clu), 0],
-        })
-    }
-}
-
-/// vibefs registration. On-disk I/O lives in `vibefs` / `vibefs_init`;
-/// the superblock's private words are `[vol, 0]`.
-pub struct VibeFs {
-    pub root_ino: u32,
-    pub vol: u8,
-    pub ops: Option<&'static dyn InodeOps>,
-}
-
-impl FileSystem for VibeFs {
-    fn name(&self) -> &'static str {
-        "vibefs"
-    }
-
-    fn fstype(&self) -> FsType {
-        FsType::Vibe
-    }
-
-    fn ops(&self) -> Option<&'static dyn InodeOps> {
-        self.ops
-    }
-
-    fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
-        *cx.private = [u64::from(self.vol), 0];
-        Ok(InodeInfo {
-            key: [self.root_ino, 0, 0],
-            ino: self.root_ino,
-            kind: InodeKind::Dir,
-            mode: S_IFDIR_MODE,
-            nlink: 2,
-            size: 0,
-            atime: cx.now,
-            mtime: cx.now,
-            ctime: cx.now,
-            private: [0, 0],
-        })
-    }
 }
 
 /// An in-core inode. `key` is the backend's identity for it and
@@ -721,52 +591,6 @@ impl File {
     };
 }
 
-#[derive(Clone, Copy)]
-struct RamDent {
-    name: Name,
-    ino: u32,
-}
-
-impl RamDent {
-    const EMPTY: Self = Self {
-        name: Name::EMPTY,
-        ino: 0,
-    };
-}
-
-#[derive(Clone, Copy)]
-struct RamNode {
-    used: bool,
-    sb: u8,
-    kind: InodeKind,
-    mode: u16,
-    nlink: u32,
-    size: u64,
-    atime: u64,
-    mtime: u64,
-    ctime: u64,
-    data: [u8; MAX_FILE_BYTES],
-    dents: [RamDent; MAX_DIR_ENTS],
-    ndent: u8,
-}
-
-impl RamNode {
-    const EMPTY: Self = Self {
-        used: false,
-        sb: 0,
-        kind: InodeKind::Reg,
-        mode: 0,
-        nlink: 0,
-        size: 0,
-        atime: 0,
-        mtime: 0,
-        ctime: 0,
-        data: [0; MAX_FILE_BYTES],
-        dents: [RamDent::EMPTY; MAX_DIR_ENTS],
-        ndent: 0,
-    };
-}
-
 /// Phase 9 hangs an [`FdTable`] on a process. Slice A owns the shape.
 #[derive(Clone, Copy)]
 pub struct FdTable {
@@ -825,7 +649,6 @@ pub struct Vfs {
     supers: [Super; MAX_MOUNTS],
     mounts: [Mount; MAX_MOUNTS],
     files: [File; MAX_FILES],
-    ram: [RamNode; MAX_RAM_NODES],
     kern: kernfs::KernState,
     ihand: u16,
     dhand: u16,
@@ -841,7 +664,6 @@ impl Vfs {
             supers: [Super::EMPTY; MAX_MOUNTS],
             mounts: [Mount::EMPTY; MAX_MOUNTS],
             files: [File::EMPTY; MAX_FILES],
-            ram: [RamNode::EMPTY; MAX_RAM_NODES],
             kern: kernfs::KernState::new(),
             ihand: 0,
             dhand: 0,
@@ -863,11 +685,7 @@ impl Vfs {
         })
     }
 
-    pub fn mount_root(&mut self) -> Result<PathRef, FsError> {
-        self.mount_root_fs(&RamFs)
-    }
-
-    pub fn mount_root_fs(&mut self, fs: &dyn FileSystem) -> Result<PathRef, FsError> {
+    pub fn mount_root_fs(&mut self, fs: &'static dyn FileSystem) -> Result<PathRef, FsError> {
         if self.mounts[0].used {
             return Err(FsError::Busy);
         }
@@ -891,7 +709,7 @@ impl Vfs {
         &mut self,
         cwd: Option<PathRef>,
         at: &str,
-        fs: &dyn FileSystem,
+        fs: &'static dyn FileSystem,
     ) -> Result<u8, FsError> {
         let dir = self.resolve(cwd, at, true)?;
         let islot = self.d_islot(dir.dslot)?;
@@ -909,7 +727,7 @@ impl Vfs {
         r
     }
 
-    fn mount_on(&mut self, dir: PathRef, fs: &dyn FileSystem) -> Result<u8, FsError> {
+    fn mount_on(&mut self, dir: PathRef, fs: &'static dyn FileSystem) -> Result<u8, FsError> {
         let m = self.alloc_mount()?;
         let (sb, r_dslot) = self.new_super(fs)?;
         self.mounts[m as usize] = Mount {
@@ -1072,7 +890,7 @@ impl Vfs {
         }
         let ds = self.lookup_step(dir.mount, dir.dslot, name)?;
         let victim = self.d_islot(ds)?;
-        self.remove_name(dir, islot, name, victim)
+        self.remove_name(dir, islot, name, victim, false)
     }
 
     /// Unlink `name`, whose inode is `victim`, from `dir` (inode `islot`)
@@ -1085,11 +903,17 @@ impl Vfs {
         islot: u16,
         name: &[u8],
         victim: u16,
+        rmdir: bool,
     ) -> Result<(), FsError> {
         let sb = self.sb_of(dir.mount);
         self.ihold(victim)?;
         self.dcache_drop_name(sb, dir.dslot, name);
-        if let Err(e) = self.ops_unlink(sb, islot, name) {
+        let r = if rmdir {
+            self.with_op(sb, islot, |o, cx, d| o.rmdir(cx, d, name))
+        } else {
+            self.ops_unlink(sb, islot, name)
+        };
+        if let Err(e) = r {
             self.iput(victim);
             return Err(e);
         }
@@ -1132,17 +956,12 @@ impl Vfs {
         if self.inodes[cslot as usize].kind != InodeKind::Dir {
             return Err(FsError::NotDir);
         }
-        let sb = self.sb_of(dir.mount);
-        match self.fstype(sb) {
-            FsType::Ram | FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
-                let islot = self.d_islot(dir.dslot)?;
-                self.remove_name(dir, islot, name, cslot)
-            }
-            FsType::Fat | FsType::Vibe => Err(FsError::NotSupp),
-        }
+        let islot = self.d_islot(dir.dslot)?;
+        self.remove_name(dir, islot, name, cslot, true)
     }
 
-    /// Hard link. FAT returns [`FsError::NotSupp`].
+    /// Hard link, through the superblock's ops; FAT's returns
+    /// [`FsError::NotSupp`].
     pub fn link(&mut self, cwd: Option<PathRef>, old: &str, new: &str) -> Result<(), FsError> {
         let src = self.resolve(cwd, old, true)?;
         let sslot = self.d_islot(src.dslot)?;
@@ -1150,12 +969,6 @@ impl Vfs {
             return Err(FsError::Inval);
         }
         let sb = self.sb_of(src.mount);
-        match self.fstype(sb) {
-            FsType::Fat | FsType::Vibe | FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
-                return Err(FsError::NotSupp);
-            }
-            FsType::Ram => {}
-        }
         let (parent, name) = split_basename(new.as_bytes())?;
         if name_is_dot(name) || name_is_dotdot(name) {
             return Err(FsError::Inval);
@@ -1167,11 +980,7 @@ impl Vfs {
                     return Err(FsError::Inval);
                 }
                 let dislot = v.d_islot(dir.dslot)?;
-                let dnode = v.inodes[dislot as usize].key[0];
-                let target = v.inodes[sslot as usize].key[0];
-                ram_link(&mut v.ram, v.now, sb, dnode, name, target)?;
-                v.ops_getattr(sb, sslot)?;
-                v.ops_getattr(sb, dislot)?;
+                v.with_op2(sb, dislot, sslot, |o, cx, d, t| o.link(cx, d, name, t))?;
                 v.dcache_drop_neg_in_dir(sb, dir.dslot);
                 v.dcache_drop_name(sb, dir.dslot, name);
                 Ok(())
@@ -1211,19 +1020,15 @@ impl Vfs {
         if self.is_mountpoint(od, oname) || self.is_mountpoint(nd, nname) {
             return Err(FsError::Busy);
         }
-        match self.fstype(osb) {
-            FsType::Fat | FsType::Vibe | FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
-                return Err(FsError::NotSupp);
-            }
-            FsType::Ram => {
-                let oslot = self.d_islot(od.dslot)?;
-                let nslot = self.d_islot(nd.dslot)?;
-                let odir = self.inodes[oslot as usize].key[0];
-                let ndir = self.inodes[nslot as usize].key[0];
-                ram_rename(&mut self.ram, self.now, osb, odir, oname, ndir, nname)?;
-                self.ops_getattr(osb, oslot)?;
-                self.ops_getattr(osb, nslot)?;
-            }
+        let src = self.lookup_step(od.mount, od.dslot, oname)?;
+        let from = self.inodes[self.d_islot(src)? as usize].key;
+        let oslot = self.d_islot(od.dslot)?;
+        let nslot = self.d_islot(nd.dslot)?;
+        let moved = self.with_op2(osb, oslot, nslot, |o, cx, a, b| {
+            o.rename(cx, a, oname, b, nname)
+        })?;
+        if let Some(to) = moved {
+            self.rekey(osb, from, to)?;
         }
         self.dcache_drop_name(osb, od.dslot, oname);
         self.dcache_drop_name(nsb, nd.dslot, nname);
@@ -1450,18 +1255,6 @@ impl Vfs {
         Ok(self.files[i].offset)
     }
 
-    pub fn ram_used(&self) -> usize {
-        let mut n = 0usize;
-        let mut i = 0usize;
-        while i < MAX_RAM_NODES {
-            if self.ram[i].used {
-                n += 1;
-            }
-            i += 1;
-        }
-        n
-    }
-
     pub fn fstype_at(&self, p: PathRef) -> Result<FsType, FsError> {
         if (p.mount as usize) >= MAX_MOUNTS || !self.mounts[p.mount as usize].used {
             return Err(FsError::Io);
@@ -1665,7 +1458,6 @@ impl Vfs {
         let Vfs {
             supers,
             inodes,
-            ram,
             kern,
             ..
         } = self;
@@ -1675,10 +1467,24 @@ impl Vfs {
             fstype: s.fstype,
             private: &mut s.private,
             now,
-            ram,
             kern,
         };
         f(ops, &mut cx, &mut inodes[islot as usize])
+    }
+
+    /// [`Self::with_op`] on two inodes, which may be one: each is handed
+    /// to `f` as a copy and written back after it, `a` first.
+    fn with_op2<R>(
+        &mut self,
+        sb: u8,
+        a: u16,
+        b: u16,
+        f: impl FnOnce(&dyn InodeOps, &mut OpCx<'_>, &mut Inode, &mut Inode) -> Result<R, FsError>,
+    ) -> Result<R, FsError> {
+        let mut ib = self.inodes[b as usize];
+        let r = self.with_op(sb, a, |o, cx, ia| f(o, cx, ia, &mut ib));
+        self.inodes[b as usize] = ib;
+        r
     }
 
     fn ops_lookup(&mut self, sb: u8, dir: u16, name: &[u8]) -> Result<InodeInfo, FsError> {
@@ -1750,16 +1556,13 @@ impl Vfs {
             return;
         };
         let now = self.now;
-        let Vfs {
-            supers, ram, kern, ..
-        } = self;
+        let Vfs { supers, kern, .. } = self;
         let s = &mut supers[sb as usize];
         let mut cx = OpCx {
             sb,
             fstype: s.fstype,
             private: &mut s.private,
             now,
-            ram,
             kern,
         };
         ops.kill_sb(&mut cx);
@@ -1768,16 +1571,13 @@ impl Vfs {
     /// Fill a new superblock through `fs`, which sets its private words.
     fn fill_super(&mut self, sb: u8, fs: &dyn FileSystem) -> Result<InodeInfo, FsError> {
         let now = self.now;
-        let Vfs {
-            supers, ram, kern, ..
-        } = self;
+        let Vfs { supers, kern, .. } = self;
         let s = &mut supers[sb as usize];
         let mut cx = OpCx {
             sb,
             fstype: s.fstype,
             private: &mut s.private,
             now,
-            ram,
             kern,
         };
         fs.fill_super(&mut cx)
@@ -2210,7 +2010,7 @@ impl Vfs {
     /// Allocate and fill a superblock with its root inode and its root
     /// dentry, which the superblock holds once. An error undoes every
     /// step taken, last first.
-    fn new_super(&mut self, fs: &dyn FileSystem) -> Result<(u8, u16), FsError> {
+    fn new_super(&mut self, fs: &'static dyn FileSystem) -> Result<(u8, u16), FsError> {
         let sb = self.alloc_super()?;
         self.supers[sb as usize].fstype = fs.fstype();
         self.supers[sb as usize].ops = fs.ops();
@@ -2626,476 +2426,20 @@ fn name_is_dotdot(n: &[u8]) -> bool {
     n.len() == 2 && n[0] == b'.' && n[1] == b'.'
 }
 
-fn ram_idx(node: u32) -> Option<usize> {
-    if node == 0 {
-        return None;
-    }
-    let i = (node - 1) as usize;
-    if i >= MAX_RAM_NODES { None } else { Some(i) }
-}
-
-fn ram_get(ram: &[RamNode; MAX_RAM_NODES], sb: u8, node: u32) -> Option<&RamNode> {
-    let r = &ram[ram_idx(node)?];
-    if r.used && r.sb == sb { Some(r) } else { None }
-}
-
-fn ram_get_mut(ram: &mut [RamNode; MAX_RAM_NODES], sb: u8, node: u32) -> Option<&mut RamNode> {
-    let r = &mut ram[ram_idx(node)?];
-    if r.used && r.sb == sb { Some(r) } else { None }
-}
-
-impl RamNode {
-    fn meta_into(&self, ino: &mut Inode) {
-        ino.kind = self.kind;
-        ino.mode = self.mode;
-        ino.nlink = self.nlink;
-        ino.size = self.size;
-        ino.atime = self.atime;
-        ino.mtime = self.mtime;
-        ino.ctime = self.ctime;
-    }
-
-    fn info(&self, node: u32) -> InodeInfo {
-        InodeInfo {
-            key: [node, 0, 0],
-            ino: node,
-            kind: self.kind,
-            mode: self.mode,
-            nlink: self.nlink,
-            size: self.size,
-            atime: self.atime,
-            mtime: self.mtime,
-            ctime: self.ctime,
-            private: [0; 2],
-        }
-    }
-}
-
-fn ram_alloc(ram: &mut [RamNode; MAX_RAM_NODES], sb: u8) -> Result<u32, FsError> {
-    let mut i = 0usize;
-    while i < MAX_RAM_NODES {
-        if !ram[i].used {
-            ram[i] = RamNode::EMPTY;
-            ram[i].used = true;
-            ram[i].sb = sb;
-            return Ok((i as u32) + 1);
-        }
-        i += 1;
-    }
-    Err(FsError::NoSpace)
-}
-
-/// RamFs `evict`: free a node with no links.
-fn ram_evict(cx: &mut OpCx<'_>, node: u32) {
-    if let Some(r) = ram_get_mut(cx.ram, cx.sb, node)
-        && r.nlink == 0
-    {
-        *r = RamNode::EMPTY;
-    }
-}
-
-fn ram_drop_sb(ram: &mut [RamNode; MAX_RAM_NODES], sb: u8) {
-    let mut i = 0usize;
-    while i < MAX_RAM_NODES {
-        if ram[i].used && ram[i].sb == sb {
-            ram[i] = RamNode::EMPTY;
-        }
-        i += 1;
-    }
-}
-
-fn ram_fill_super(cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
-    let node = ram_alloc(cx.ram, cx.sb)?;
-    let t = cx.now;
-    let r = ram_get_mut(cx.ram, cx.sb, node).ok_or(FsError::NotFound)?;
-    r.kind = InodeKind::Dir;
-    r.mode = S_IFDIR_MODE;
-    r.nlink = 2;
-    r.size = 0;
-    r.atime = t;
-    r.mtime = t;
-    r.ctime = t;
-    Ok(r.info(node))
-}
-
-fn ram_lookup(cx: &mut OpCx<'_>, dir: &Inode, name: &[u8]) -> Result<InodeInfo, FsError> {
-    let r = ram_get(cx.ram, cx.sb, dir.key[0]).ok_or(FsError::NotFound)?;
-    if r.kind != InodeKind::Dir {
-        return Err(FsError::NotDir);
-    }
-    let mut i = 0usize;
-    while i < r.ndent as usize {
-        if r.dents[i].name.eq_bytes(name) {
-            let child = r.dents[i].ino;
-            let c = ram_get(cx.ram, cx.sb, child).ok_or(FsError::NotFound)?;
-            return Ok(c.info(child));
-        }
-        i += 1;
-    }
-    Err(FsError::NotFound)
-}
-
-fn ram_create(
-    cx: &mut OpCx<'_>,
-    dir: &mut Inode,
-    name: &[u8],
-    kind: InodeKind,
-    mode: u16,
-    target: Option<&[u8]>,
-) -> Result<InodeInfo, FsError> {
-    let nm = Name::from_bytes(name)?;
-    if nm.is_dot() || nm.is_dotdot() {
-        return Err(FsError::Inval);
-    }
-    if kind == InodeKind::Lnk {
-        let t = target.ok_or(FsError::Inval)?;
-        if t.is_empty() || t.len() > MAX_FILE_BYTES {
-            return Err(FsError::Inval);
-        }
-    }
-    match kind {
-        InodeKind::Reg | InodeKind::Dir | InodeKind::Lnk => {}
-        InodeKind::Chr | InodeKind::Blk => return Err(FsError::NotSupp),
-    }
-    let sb = cx.sb;
-    let dir_node = dir.key[0];
-    {
-        let r = ram_get(cx.ram, sb, dir_node).ok_or(FsError::NotFound)?;
-        if r.kind != InodeKind::Dir {
-            return Err(FsError::NotDir);
-        }
-        let mut i = 0usize;
-        while i < r.ndent as usize {
-            if r.dents[i].name.eq_bytes(name) {
-                return Err(FsError::Exists);
-            }
-            i += 1;
-        }
-        if r.ndent as usize >= MAX_DIR_ENTS {
-            return Err(FsError::NoSpace);
-        }
-    }
-    let node = ram_alloc(cx.ram, sb)?;
-    let t = cx.now;
-    let info = {
-        let r = ram_get_mut(cx.ram, sb, node).ok_or(FsError::NotFound)?;
-        r.kind = kind;
-        r.mode = (mode & !S_IFMT) | kind.ifmt();
-        r.nlink = if kind == InodeKind::Dir { 2 } else { 1 };
-        r.atime = t;
-        r.mtime = t;
-        r.ctime = t;
-        r.size = 0;
-        if let (InodeKind::Lnk, Some(tgt)) = (kind, target) {
-            r.data[..tgt.len()].copy_from_slice(tgt);
-            r.size = tgt.len() as u64;
-        }
-        r.info(node)
-    };
-    let r = ram_get_mut(cx.ram, sb, dir_node).ok_or(FsError::NotFound)?;
-    let n = r.ndent as usize;
-    r.dents[n] = RamDent {
-        name: nm,
-        ino: node,
-    };
-    r.ndent += 1;
-    r.mtime = t;
-    r.ctime = t;
-    if kind == InodeKind::Dir {
-        r.nlink = r.nlink.saturating_add(1);
-    }
-    r.meta_into(dir);
-    Ok(info)
-}
-
-/// Remove `name` from `dir`. The child keeps its node until [`Vfs`]
-/// evicts it at its last put; a removed directory has no links left.
-fn ram_unlink(cx: &mut OpCx<'_>, dir: &mut Inode, name: &[u8]) -> Result<(), FsError> {
-    let sb = cx.sb;
-    let dir_node = dir.key[0];
-    let (idx, child) = {
-        let r = ram_get(cx.ram, sb, dir_node).ok_or(FsError::NotFound)?;
-        if r.kind != InodeKind::Dir {
-            return Err(FsError::NotDir);
-        }
-        let mut found = None;
-        let mut i = 0usize;
-        while i < r.ndent as usize {
-            if r.dents[i].name.eq_bytes(name) {
-                found = Some((i, r.dents[i].ino));
-                break;
-            }
-            i += 1;
-        }
-        found.ok_or(FsError::NotFound)?
-    };
-    let c = ram_get(cx.ram, sb, child).ok_or(FsError::NotFound)?;
-    let kind = c.kind;
-    if kind == InodeKind::Dir && c.ndent != 0 {
-        return Err(FsError::NotEmpty);
-    }
-    let t = cx.now;
-    if let Some(c) = ram_get_mut(cx.ram, sb, child) {
-        c.nlink = if kind == InodeKind::Dir {
-            0
-        } else {
-            c.nlink.saturating_sub(1)
-        };
-        c.ctime = t;
-    }
-    let r = ram_get_mut(cx.ram, sb, dir_node).ok_or(FsError::NotFound)?;
-    let last = r.ndent as usize - 1;
-    r.dents[idx] = r.dents[last];
-    r.dents[last] = RamDent::EMPTY;
-    r.ndent -= 1;
-    r.mtime = t;
-    r.ctime = t;
-    if kind == InodeKind::Dir {
-        r.nlink = r.nlink.saturating_sub(1);
-    }
-    r.meta_into(dir);
-    Ok(())
-}
-
-fn ram_read(
-    cx: &mut OpCx<'_>,
-    ino: &mut Inode,
-    off: u64,
-    buf: &mut [u8],
-) -> Result<usize, FsError> {
-    let r = ram_get(cx.ram, cx.sb, ino.key[0]).ok_or(FsError::NotFound)?;
-    match r.kind {
-        InodeKind::Dir => Err(FsError::IsDir),
-        InodeKind::Reg | InodeKind::Lnk => {
-            if off > r.size {
-                return Ok(0);
-            }
-            let start = off as usize;
-            let avail = (r.size as usize).saturating_sub(start);
-            let n = avail.min(buf.len());
-            buf[..n].copy_from_slice(&r.data[start..start + n]);
-            Ok(n)
-        }
-        InodeKind::Chr | InodeKind::Blk => Err(FsError::NotSupp),
-    }
-}
-
-fn ram_write(cx: &mut OpCx<'_>, ino: &mut Inode, off: u64, buf: &[u8]) -> Result<usize, FsError> {
-    let t = cx.now;
-    let r = ram_get_mut(cx.ram, cx.sb, ino.key[0]).ok_or(FsError::NotFound)?;
-    match r.kind {
-        InodeKind::Dir => Err(FsError::IsDir),
-        InodeKind::Lnk | InodeKind::Chr | InodeKind::Blk => Err(FsError::Inval),
-        InodeKind::Reg => {
-            if off as usize > MAX_FILE_BYTES {
-                return Err(FsError::NoSpace);
-            }
-            let start = off as usize;
-            if start + buf.len() > MAX_FILE_BYTES {
-                return Err(FsError::NoSpace);
-            }
-            r.data[start..start + buf.len()].copy_from_slice(buf);
-            let end = (start + buf.len()) as u64;
-            if end > r.size {
-                r.size = end;
-            }
-            r.mtime = t;
-            r.ctime = t;
-            r.meta_into(ino);
-            Ok(buf.len())
-        }
-    }
-}
-
-fn ram_truncate(cx: &mut OpCx<'_>, ino: &mut Inode, size: u64) -> Result<(), FsError> {
-    if size as usize > MAX_FILE_BYTES {
-        return Err(FsError::NoSpace);
-    }
-    let t = cx.now;
-    let r = ram_get_mut(cx.ram, cx.sb, ino.key[0]).ok_or(FsError::NotFound)?;
-    match r.kind {
-        InodeKind::Dir => Err(FsError::IsDir),
-        InodeKind::Lnk | InodeKind::Chr | InodeKind::Blk => Err(FsError::Inval),
-        InodeKind::Reg => {
-            let old = r.size as usize;
-            let n = size as usize;
-            if n < old {
-                r.data[n..old].fill(0);
-            } else {
-                r.data[old..n].fill(0);
-            }
-            r.size = size;
-            r.mtime = t;
-            r.ctime = t;
-            r.meta_into(ino);
-            Ok(())
-        }
-    }
-}
-
-fn ram_readdir(
-    cx: &mut OpCx<'_>,
-    dir: &Inode,
-    cookie: u64,
-    out: &mut Dirent,
-) -> Result<Option<u64>, FsError> {
-    let r = ram_get(cx.ram, cx.sb, dir.key[0]).ok_or(FsError::NotFound)?;
-    if r.kind != InodeKind::Dir {
-        return Err(FsError::NotDir);
-    }
-    let i = cookie as usize;
-    if i >= r.ndent as usize {
-        return Ok(None);
-    }
-    let child = r.dents[i].ino;
-    let kind = ram_get(cx.ram, cx.sb, child)
-        .map(|c| c.kind)
-        .unwrap_or(InodeKind::Reg);
-    out.ino = child;
-    out.kind = kind;
-    out.name = r.dents[i].name;
-    Ok(Some(cookie + 1))
-}
-
-/// Link `name` in directory node `dir_node` to node `target`.
-fn ram_link(
-    ram: &mut [RamNode; MAX_RAM_NODES],
-    now: u64,
-    sb: u8,
-    dir_node: u32,
-    name: &[u8],
-    target: u32,
-) -> Result<(), FsError> {
-    let nm = Name::from_bytes(name)?;
-    {
-        let t = ram_get(ram, sb, target).ok_or(FsError::NotFound)?;
-        if t.kind != InodeKind::Reg {
-            return Err(FsError::Inval);
-        }
-    }
-    {
-        let r = ram_get(ram, sb, dir_node).ok_or(FsError::NotFound)?;
-        if r.kind != InodeKind::Dir {
-            return Err(FsError::NotDir);
-        }
-        let mut i = 0usize;
-        while i < r.ndent as usize {
-            if r.dents[i].name.eq_bytes(name) {
-                return Err(FsError::Exists);
-            }
-            i += 1;
-        }
-        if r.ndent as usize >= MAX_DIR_ENTS {
-            return Err(FsError::NoSpace);
-        }
-    }
-    {
-        let r = ram_get_mut(ram, sb, dir_node).ok_or(FsError::NotFound)?;
-        let n = r.ndent as usize;
-        r.dents[n] = RamDent {
-            name: nm,
-            ino: target,
-        };
-        r.ndent += 1;
-        r.mtime = now;
-        r.ctime = now;
-    }
-    if let Some(t) = ram_get_mut(ram, sb, target) {
-        t.nlink = t.nlink.saturating_add(1);
-        t.ctime = now;
-    }
-    Ok(())
-}
-
-/// Move `oname` in directory node `odir` to `nname` in `ndir`.
-fn ram_rename(
-    ram: &mut [RamNode; MAX_RAM_NODES],
-    now: u64,
-    sb: u8,
-    odir: u32,
-    oname: &[u8],
-    ndir: u32,
-    nname: &[u8],
-) -> Result<(), FsError> {
-    let nm = Name::from_bytes(nname)?;
-    let (idx, node) = {
-        let r = ram_get(ram, sb, odir).ok_or(FsError::NotFound)?;
-        let mut found = None;
-        let mut i = 0usize;
-        while i < r.ndent as usize {
-            if r.dents[i].name.eq_bytes(oname) {
-                found = Some((i, r.dents[i].ino));
-                break;
-            }
-            i += 1;
-        }
-        found.ok_or(FsError::NotFound)?
-    };
-    let kind = ram_get(ram, sb, node).ok_or(FsError::NotFound)?.kind;
-    if odir == ndir && oname == nname {
-        return Ok(());
-    }
-    {
-        let r = ram_get(ram, sb, ndir).ok_or(FsError::NotFound)?;
-        if r.kind != InodeKind::Dir {
-            return Err(FsError::NotDir);
-        }
-        let mut i = 0usize;
-        while i < r.ndent as usize {
-            if r.dents[i].name.eq_bytes(nname) {
-                return Err(FsError::Exists);
-            }
-            i += 1;
-        }
-        if odir != ndir && r.ndent as usize >= MAX_DIR_ENTS {
-            return Err(FsError::NoSpace);
-        }
-    }
-    {
-        let r = ram_get_mut(ram, sb, odir).ok_or(FsError::NotFound)?;
-        let last = r.ndent as usize - 1;
-        r.dents[idx] = r.dents[last];
-        r.dents[last] = RamDent::EMPTY;
-        r.ndent -= 1;
-        r.mtime = now;
-        if kind == InodeKind::Dir {
-            r.nlink = r.nlink.saturating_sub(1);
-        }
-    }
-    let r = ram_get_mut(ram, sb, ndir).ok_or(FsError::NotFound)?;
-    let n = r.ndent as usize;
-    r.dents[n] = RamDent {
-        name: nm,
-        ino: node,
-    };
-    r.ndent += 1;
-    r.mtime = now;
-    if kind == InodeKind::Dir {
-        r.nlink = r.nlink.saturating_add(1);
-    }
-    Ok(())
-}
-
-fn ram_readlink(cx: &mut OpCx<'_>, ino: &Inode, buf: &mut [u8]) -> Result<usize, FsError> {
-    let r = ram_get(cx.ram, cx.sb, ino.key[0]).ok_or(FsError::NotFound)?;
-    match r.kind {
-        InodeKind::Lnk => {
-            let n = (r.size as usize).min(buf.len()).min(MAX_FILE_BYTES);
-            buf[..n].copy_from_slice(&r.data[..n]);
-            Ok(n)
-        }
-        InodeKind::Dir => Err(FsError::IsDir),
-        InodeKind::Reg | InodeKind::Chr | InodeKind::Blk => Err(FsError::Inval),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A ramfs over a store of its own, which the test leaks.
+    pub(super) fn ramfs() -> &'static RamFs<std::sync::Mutex<RamState>> {
+        std::boxed::Box::leak(std::boxed::Box::new(RamFs::new(std::sync::Mutex::new(
+            RamState::new(),
+        ))))
+    }
+
     fn ram() -> Vfs {
         let mut v = Vfs::new();
-        v.mount_root().unwrap();
+        v.mount_root_fs(ramfs()).unwrap();
         v
     }
 
@@ -3225,7 +2569,7 @@ mod tests {
         let mut v = ram();
         v.mkdir(None, "/mnt", 0o755).unwrap();
         let mnt_before = v.stat(None, "/mnt").unwrap().ino;
-        v.mount(None, "/mnt", &RamFs).unwrap();
+        v.mount(None, "/mnt", ramfs()).unwrap();
         let mnt_after = v.stat(None, "/mnt").unwrap();
         assert_eq!(mnt_after.kind, InodeKind::Dir);
         assert_ne!(mnt_after.ino, mnt_before);
@@ -3245,7 +2589,9 @@ mod tests {
 
     #[test]
     fn unlinked_open_keeps_data_until_close() {
-        let mut v = ram();
+        let fs = ramfs();
+        let mut v = Vfs::new();
+        v.mount_root_fs(fs).unwrap();
         let mut tab = FdTable::new();
         let fd = v
             .fd_open(&mut tab, None, "/f", O_RDWR | O_CREAT, 0o644)
@@ -3258,9 +2604,9 @@ mod tests {
         let mut buf = [0u8; 8];
         assert_eq!(v.read(fid, &mut buf).unwrap(), 5);
         assert_eq!(&buf[..5], b"hello");
-        let used = v.ram_used();
+        let used = fs.with(|st| st.used());
         v.fd_close(&mut tab, fd).unwrap();
-        assert!(v.ram_used() < used);
+        assert!(fs.with(|st| st.used()) < used);
         v.creat(None, "/f", 0o644).unwrap();
         let s = v.stat(None, "/f").unwrap();
         assert_eq!(s.size, 0);
@@ -3416,10 +2762,7 @@ mod tests {
         assert_eq!(v.supers.len(), limits::MAX_MOUNTS);
         assert_eq!(v.mounts.len(), limits::MAX_MOUNTS);
         assert_eq!(v.files.len(), limits::MAX_OPEN_FILES);
-        assert_eq!(v.ram.len(), limits::MAX_RAM_NODES);
         assert_eq!(FdTable::new().fds.len(), limits::MAX_FDS);
-        assert_eq!(RamNode::EMPTY.data.len(), limits::MAX_TMPFS_FILE_BYTES);
-        assert_eq!(RamNode::EMPTY.dents.len(), limits::MAX_TMPFS_DIR_ENTS);
     }
 
     /// Negative lookups of fresh names under `dir` until the dentry cache
@@ -3438,7 +2781,7 @@ mod tests {
         let mut v = ram();
         v.mkdir(None, "/a", 0o755).unwrap();
         v.mkdir(None, "/a/m", 0o755).unwrap();
-        v.mount(None, "/a/m", &RamFs).unwrap();
+        v.mount(None, "/a/m", ramfs()).unwrap();
         v.creat(None, "/a/m/marker", 0o644).unwrap();
         let marker = v.stat(None, "/a/m/marker").unwrap().ino;
         assert_dcache_sound(&v);
@@ -3519,7 +2862,7 @@ mod tests {
         let mut v = ram();
         v.mkdir(None, "/p", 0o755).unwrap();
         v.mkdir(None, "/q", 0o755).unwrap();
-        v.mount(None, "/p", &RamFs).unwrap();
+        v.mount(None, "/p", ramfs()).unwrap();
         mount_again(&mut v, "/p", "/q");
         assert_dcache_sound(&v);
         v.creat(None, "/p/f", 0o644).unwrap();
@@ -3565,7 +2908,7 @@ mod tests {
             d.clock = false;
         }
         v.dhand = mp;
-        let m = v.mount(None, "/a/m", &RamFs).unwrap();
+        let m = v.mount(None, "/a/m", ramfs()).unwrap();
         let mt = v.mounts[m as usize];
         assert_eq!(mt.mp_dslot, mp);
         assert_ne!(mt.mp_dslot, mt.root_dslot);
@@ -3579,7 +2922,7 @@ mod tests {
     fn dcache_f065_umount_checks_before_state() {
         let mut v = ram();
         v.mkdir(None, "/m", 0o755).unwrap();
-        v.mount(None, "/m", &RamFs).unwrap();
+        v.mount(None, "/m", ramfs()).unwrap();
         v.creat(None, "/m/f", 0o644).unwrap();
         let f = v.resolve(None, "/m/f", true).unwrap();
         let held = v.iref(f).unwrap();
@@ -3632,12 +2975,12 @@ mod tests {
 
     static KEYFS: std::sync::Mutex<Vec<Store>> = std::sync::Mutex::new(Vec::new());
 
-    pub(super) fn keyfs_new() -> KeyFs {
+    pub(super) fn keyfs_new() -> &'static KeyFs {
         let mut g = KEYFS.lock().unwrap();
         g.push(Store::default());
-        KeyFs {
+        std::boxed::Box::leak(std::boxed::Box::new(KeyFs {
             id: (g.len() - 1) as u64,
-        }
+        }))
     }
 
     fn with_store<R>(id: u64, f: impl FnOnce(&mut Store) -> R) -> R {
@@ -3667,7 +3010,7 @@ mod tests {
         fn fstype(&self) -> FsType {
             FsType::Ram
         }
-        fn ops(&self) -> Option<&'static dyn InodeOps> {
+        fn ops(&'static self) -> Option<&'static dyn InodeOps> {
             Some(&KeyOps)
         }
         fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
@@ -3813,12 +3156,41 @@ mod tests {
         }
     }
 
+    /// A filesystem with no ops: its root and nothing else.
+    struct NoOpsFs;
+
+    impl FileSystem for NoOpsFs {
+        fn name(&self) -> &'static str {
+            "noops"
+        }
+        fn fstype(&self) -> FsType {
+            FsType::Fat
+        }
+        fn ops(&'static self) -> Option<&'static dyn InodeOps> {
+            None
+        }
+        fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
+            Ok(InodeInfo {
+                key: [0, 0, 0],
+                ino: 1,
+                kind: InodeKind::Dir,
+                mode: S_IFDIR_MODE,
+                nlink: 2,
+                size: 0,
+                atime: cx.now,
+                mtime: cx.now,
+                ctime: cx.now,
+                private: [2, 0],
+            })
+        }
+    }
+
     /// `ram()` with a fresh `KeyFs` on `/k`; its store id.
     fn keyed() -> (Vfs, u64) {
         let mut v = ram();
         v.mkdir(None, "/k", 0o755).unwrap();
         let fs = keyfs_new();
-        v.mount(None, "/k", &fs).unwrap();
+        v.mount(None, "/k", fs).unwrap();
         (v, fs.id)
     }
 
@@ -3876,16 +3248,7 @@ mod tests {
         v.umount(None, "/k").unwrap();
         assert_eq!(with_store(id, |s| s.evicts), 1);
         v.mkdir(None, "/n", 0o755).unwrap();
-        v.mount(
-            None,
-            "/n",
-            &FatFs {
-                root_clu: 2,
-                vol: 0,
-                ops: None,
-            },
-        )
-        .unwrap();
+        v.mount(None, "/n", &NoOpsFs).unwrap();
         assert_eq!(v.stat(None, "/n/x").unwrap_err(), FsError::NotSupp);
         assert_eq!(v.creat(None, "/n/y", 0o644).unwrap_err(), FsError::NotSupp);
         assert_eq!(v.stat(None, "/n").unwrap().kind, InodeKind::Dir);
