@@ -919,7 +919,7 @@ that review cites means the review's text.
 | I2 | Hard-IRQ context never blocks or allocates (§2.2) | convention | documented | Yes, unchecked: only `irq_init::dispatch` sets `IN_ISR`, and no blocking primitive asserts it (ROADMAP §10.3, F110) |
 | I3 | IF=0 through every return-to-user sequence (§5.10 rule 4) | FMASK (§7.2) | documented | No: the syscall exit has no `cli` and `console_init::wait_key` returns with IF=1 (F001); `enter_user_full` runs with IF=1 (F006) (ROADMAP §10.6) |
 | I4 | Kernel code outside the §5.10 entry and exit sequences runs with `GS_BASE` = this CPU's `PerCpu` (§5.10) | `arch::gs`, `per_cpu_init` | documented | No: the IF=1 window in `enter_user_full` (F006), an NMI, `#MC`, or `#DB` taken in the syscall entry or exit window, and a fault on the return-to-user `iretq` (both F007) run on the user base (ROADMAP §10.6) |
-| I5 | One entry stub per vector makes the `swapgs` decision (§5.10 rule 1) | `arch/idt.rs` | enforced by construction: `idt::init` points every gate at a stub it generates | Yes |
+| I5 | One entry stub per vector makes the `swapgs` decision (§5.10 rule 1) | `arch/idt.rs` | enforced by construction: `idt::init` points every gate at a stub it generates, and `scripts/check_entry.py` fails on an `x86-interrupt` handler outside `src/arch/` | Yes |
 | I6 | Ring 3 never halts the kernel, pid 1's exit excepted (§2.5, §5.2, §11.5) | `proc_init::try_user_fault` | documented | No: ring-3 `#DB`, and `#AC` when `CR0.AM` is set, halt (F005), and so do the I4 windows (ROADMAP §10.6) |
 | I7 | The kernel reads or writes user memory only through the §5.1 user-memory accessors, and writes an address space that is not running only through the fill API (ROADMAP §10.6) | `addr_space.rs`; the arch accessors from ROADMAP §10.6 | enforced by SMAP where the CPU has it (PAN on aarch64, ROADMAP §11.6); the fill-API rule is documented | Partly: today's accessors copy through the physmap after `check_user_range`, and `write_bytes` ignores the PTE's `WRITABLE` bit (ROADMAP §10.6, F023) |
 | I8 | One thread per address space changes its regions, and another CPU changes its page tables only under its page-table lock (§2.11) | process model | assumed | Yes: only the owning thread touches a space. Lock-free user copies, local-only `invlpg`, and `&'static AddressSpace` depend on it. ROADMAP §10.6 replaces `&'static` with a counted object, §12.1's reverse map changes page tables from other CPUs under the space's page-table lock, §12.3 shoots down every CPU in the space's set, and §13.1's threads bring the address-space lock |
@@ -2950,7 +2950,8 @@ architectures. Planned (ROADMAP §11.3, §11.6): the aarch64 port does not exist
 1. One entry stub per vector, owned by `arch/idt.rs` and generated from one table. The stub runs
    `cld`, `clac` when SMAP is live, the GS decision, and rule 9's syndrome save, calls a body
    function, and mirrors the GS decision on exit. `idt::set_handler` takes a body function, never a
-   gate, and no `extern "x86-interrupt"` function exists outside `src/arch/`.
+   gate, and no `extern "x86-interrupt"` function exists outside `src/arch/`; `scripts/check_entry.py`
+   in `make check` enforces that last clause.
 2. A non-IST vector decides `swapgs` from the saved CS.RPL (`arch::gs::from_user`), with one
    exception: a `#GP`, `#NP`, or `#SS` whose saved RIP is a return-to-user `iretq` arrives with the
    kernel CS and the user GS, and its handler swaps GS and sends the process `SIGSEGV`. User
