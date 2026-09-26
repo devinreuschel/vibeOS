@@ -272,7 +272,7 @@ $(MKFS_VIBEFS) $(FSCK_VIBEFS): src/vibefs.rs tests/hostlib/src/bin/mkfs_vibefs.r
 test-vibefs-crash: $(ISO_VIBEFS_CRASH) $(MKFS_VIBEFS) $(FSCK_VIBEFS)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_VIBEFS_CRASH) VIBEOS_MKFS=$(MKFS_VIBEFS) VIBEOS_FSCK=$(FSCK_VIBEFS) python3 tests/harness/run_vibefs_crash.py
 
-test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-pit test-e2e-highmem test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
+test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
 
 # Longer high-CPU stress. Scheduled CI, not every push. ROADMAP §4.11.
 test-smp-stress: $(ISO_KTEST)
