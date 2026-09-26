@@ -586,8 +586,7 @@ per-CPU inbox plus a reschedule IPI. More SMP-specific rules in [section 7.7](#7
 - Buddy free list nodes live inside the free pages themselves. A stray write into freed memory
   corrupts the allocator, so guard pages on stacks are not optional. One stack has none: Limine's
   boot stack (at least 64 KiB, no guard page, in bootloader-reclaimable memory), which all of boot
-  and, in `kernel_tests` builds, the in-guest test registry run on, so an overflow there corrupts
-  memory silently (ROADMAP §10.6, F072).
+  runs on, so an overflow there corrupts memory silently (ROADMAP §10.6, F072).
 - A PTE change that removes or narrows a translation takes effect only when every CPU that could hold
   the old translation has invalidated it and acknowledged. Such changes are unmapping, making a PTE
   not-present, read-only, or NX, and clearing its dirty bit. The rule covers kernel and user
@@ -946,7 +945,7 @@ that review cites means the review's text.
 | I28 | A line the harness takes as the kernel's is framed, and no user byte can produce the frame (§2.6) | `serial::Serial`, `console_init::write` | documented | No: nothing is framed, and the harness matches every line, so ring 3 can print a contract line (`/bin/sh` prints `shell ready`) or fail a run with `panicked at` (ROADMAP §10.2) |
 | I29 | A catch hook intercepts only a CPL-0 fault on the CPU that armed it, inside an in-guest test's catch window | `arch::catch` | assumed | Partly: production never arms it, but `intercept` runs first in every exception handler of every build, and its armed state is global, so in a `kernel_tests` build a fault with the armed vector on any CPU, at any CPL, is caught (ROADMAP §10.2, F146) |
 | I30 | Interrupt and exception handlers run with RFLAGS.AC=0 (§5.10 rule 5) | none | documented | No: the gates keep ring 3's AC (ROADMAP §10.6, F088) |
-| I31 | Every IF=0 stretch outside §2.9 rule 2's exemptions retires at most 100,000 instructions ([§2.9](#29-preemption-and-interrupt-state) rule 2) | §2.9; ROADMAP §10.3's IF-off tracer | documented | No: syscall bodies run with IF=0 until they block, the in-guest test runner holds IF off for the whole run, and a console `write` scrolls the framebuffer once per newline with IF=0 (ROADMAP §10.6, F044; ROADMAP §10.2, F075); the heap's first-fit `alloc`, its address-ordered insertion on `dealloc`, and a moving `realloc`'s copy run under the IRQ-off HEAP lock over a free list whose length user churn sets (ROADMAP §12.6); the buddy's double-free check walks the free lists (ROADMAP §12.1, F029); a `klog!` emit waits on the UART with IF off, about 8 ms per 96-byte line on a 115200-baud 16550, which no QEMU tier paces (ROADMAP §19.5); ROADMAP §10.10 makes a shootdown survive a violation (F011) |
+| I31 | Every IF=0 stretch outside §2.9 rule 2's exemptions retires at most 100,000 instructions ([§2.9](#29-preemption-and-interrupt-state) rule 2) | §2.9; ROADMAP §10.3's IF-off tracer | documented | No: syscall bodies run with IF=0 until they block, and a console `write` scrolls the framebuffer once per newline with IF=0 (ROADMAP §10.6, F044); the heap's first-fit `alloc`, its address-ordered insertion on `dealloc`, and a moving `realloc`'s copy run under the IRQ-off HEAP lock over a free list whose length user churn sets (ROADMAP §12.6); the buddy's double-free check walks the free lists (ROADMAP §12.1, F029); a `klog!` emit waits on the UART with IF off, about 8 ms per 96-byte line on a 115200-baud 16550, which no QEMU tier paces (ROADMAP §19.5); ROADMAP §10.10 makes a shootdown survive a violation (F011) |
 | I32 | A handler on an IST stack never blocks, switches threads, or takes a lock, and an IST vector taken at CPL 3 leaves the IST stack before its body runs (§5.10 rules 3 and 6) | the IST entry stubs and handlers | documented | Partly: every IST handler halts, so none blocks or switches, except that under `kernel_tests` an armed `catch` steps RIP and returns or longjmps off the IST stack; no IST entry leaves the IST stack yet (ROADMAP §10.6, F005, F007) |
 | I33 | A fault body reads CR2, DR6, ESR, and FAR from its frame, where the entry stub saved them before IF could turn on (§5.10 rule 9) | the `arch/idt.rs` stubs; the aarch64 vectors (ROADMAP §11.3) | documented | Yes, only because every fault body runs with IF=0 and reads CR2 before anything else can fault (`arch::idt::page_fault`); ROADMAP §10.6's IF=1 bodies need the stub save (its syscall-body and generated-stub boxes) |
 | I34 | A PTE change that removes or narrows a translation takes effect only after every CPU that could hold the old one has invalidated and acknowledged; until then no frame, table page, or VA is reused and no page counts as clean (§2.4) | `kva_init::unmap_shootdown` (kernel); `addr_space_init::shootdown_user` (user) | documented | Partly: kernel unmaps free frames and VA only after `wait_acks`; a user change invalidates only on the calling CPU, enough only while I8 holds, and nothing yet clears a dirty bit (ROADMAP §12.3) |
@@ -955,7 +954,7 @@ that review cites means the review's text.
 | I37 | Nothing is silently swallowed: an error is returned to its caller, or handled where it arises by a counter and a rate-limited line, a recorded error state, or a bounded retry (§2.5) | every module; ROADMAP §10.1's lints | documented | No: nothing checks a discard, and the kernel review's dropped errors remain (ROADMAP §10.1 audit; §10.2, F080; §10.11, F051, F063; §10.12, F115; §13.9, F124) |
 | I38 | A return to user mode restores only what the §5.10 rule 10 validator accepted from any writer of the saved frame, and its last check for pending work runs with IF=0 (§5.10 rule 11) | the validators in each port's pure half; the exit paths | documented | Rule 10 holds vacuously: no writer of a saved user context exists before ROADMAP §13.8 and §17.4. Rule 11 does not: pending signals are acted on only at syscall entry and after the `wait4` sleep (ROADMAP §10.6, F033) |
 | I39 | On aarch64, an ASID a CPU has used since its last local TLB flush names one address space on that CPU ([§11.2](#112-address-space-on-aarch64)) | the ASID allocator (ROADMAP §11.2) | documented | Not relied on yet: the aarch64 port does not exist; ROADMAP §11.2's host tests and loom model enforce it when it lands |
-| I40 | A thread sleeps, or takes a sleeping lock, only with IF=1 and no spinlock held (§2.1, [§2.9](#29-preemption-and-interrupt-state) rule 4) | none yet | documented | No: syscall bodies run with IF=0 until they block (§2.9 rule 3; ROADMAP §10.6), and in-guest tests sleep under the registry's IF-off guard (ROADMAP §10.2, F075); nothing asserts either condition until ROADMAP §10.3's may-sleep box (F108) |
+| I40 | A thread sleeps, or takes a sleeping lock, only with IF=1 and no spinlock held (§2.1, [§2.9](#29-preemption-and-interrupt-state) rule 4) | none yet | documented | No: syscall bodies run with IF=0 until they block (§2.9 rule 3; ROADMAP §10.6); nothing asserts either condition until ROADMAP §10.3's may-sleep box (F108) |
 | I41 | No sleeping lock of levels 2 to 4 is held across a copy to or from user memory, and code that holds the address-space lock takes no level-1 lock (§2.1) | none yet | documented | Yes, vacuously: the address-space lock, page waits, and the filesystems' block-mapping locks arrive with ROADMAP §12.5 and §13.1, and ROADMAP §13.12's lock-dependency build reports a violation the first time one happens |
 | I42 | Kernel-binary code that a syscall, a device, or a disk image reaches does not panic on that input, running out of memory or table slots included (AGENTS rule 4, [§4.4](#44-kernel-heap)) | convention; `vibeos::kalloc` from ROADMAP §10.4 | documented | No: a full thread table and a full deferred-stack list panic (ROADMAP §10.4, F037; ROADMAP §10.10, F010), and `alloc`'s growing calls panic on a failed allocation until ROADMAP §10.4's `kalloc` |
 
@@ -2648,9 +2647,7 @@ The kernel binary exposes this as `irq_init::allocate_vector`. Allocate is refus
 inside a device hard-IRQ: `irq_init::dispatch` sets a per-CPU `IN_ISR` flag around the handler. The
 timer, IPI, and keyboard ISRs do not set it, and no blocking primitive checks it (ROADMAP §10.3,
 F110). That flag is not the `InterruptGuard` nest: `allocate_vector` takes only spinlocks, so a
-caller with IF off may allocate, and only a device hard-IRQ is refused. The in-guest registry also
-holds a guard on the BSP until ROADMAP §10.2 moves it to a thread (F075), so a nest check would
-refuse every allocate from `ktest`.
+caller with IF off may allocate, and only a device hard-IRQ is refused.
 
 Planned (ROADMAP §11.3, on x86_64 before the GIC): drivers name an interrupt by an `IrqId`, a `u32`
 the IRQ layer allocates, never a hardware number. It indexes the handler table, the interrupt's
@@ -4096,10 +4093,15 @@ accept that the real coverage is in-guest.
 A second kernel build with `--features kernel_tests` that boots normally, runs a registry of test
 functions after init, reports over serial, and exits QEMU through the `isa-debug-exit` device.
 
-The registry runs on the bootstrap thread under an `InterruptGuard`, so each test starts with IF
-off, and `with_timer` turns interrupts on inside it. Planned (ROADMAP §10.2, F075): the registry
-runs on a spawned kernel thread with IF on and `irq_nest` 0, on a guarded 64 KiB stack, and a test
-that needs interrupts off takes its own guard.
+`ktest::run`, called on the bootstrap thread at the end of boot, spawns the registry as the kernel
+thread `ktest`, pinned to CPU 0, on a guarded 64 KiB KVA stack (`thread_init::spawn_opts`; `spawn`
+gives 16 KiB), and parks the bootstrap thread. The registry runs each test with IF on and
+`irq_nest` 0, the context production kernel threads run in, and a `spawn_here` worker, which copies
+its spawner's `irq_nest`, starts with IF on too. A test that needs interrupts off takes its own
+`InterruptGuard`: the cooperative `switch_to` and `yield_now` tests, and every `arch::catch` window
+that can longjmp out of an interrupt gate, since the skipped `iretq` would leave IF off. After each
+test the registry fails it if IF is off or `irq_nest` is not 0, and restores both. `ktest_context`
+checks the registry's context and a `spawn_here` worker's.
 
 Built into a separate Cargo target directory (`target-kernel-tests`) with its own ISO. This is not
 fussiness: sharing a target directory means a feature-enabled ELF can end up packaged into the
@@ -4167,7 +4169,7 @@ name costs a full debug cycle to learn anything.
 Keyboard IRQ regressions (#66). `kbd_gsi_unmasked` requires a live IOAPIC route (fails if PIC IRQ1
 is the fallback after the LAPIC already masked the 8259). `kbd_8042_clock` reads the live controller
 byte (clock on, INT1 on). `kbd_ps2_irq` writes 8042 command `0xD2` (present the next data byte as
-keyboard input) with scancode `0x1E` and expects `a` on the PS/2 ring after pulsing IF — handler,
+keyboard input) with scancode `0x1E` and expects `a` on the PS/2 ring with interrupts on — handler,
 INT1, GSI, ISR, decoder. Command `0xD2` does not exercise the device clock; that is
 `kbd_8042_clock` plus e2e / `make test-ps2` `sendkey`. Serial mux cannot satisfy `kbd_ps2_irq`.
 
@@ -4605,9 +4607,9 @@ Buddy free list nodes live inside free pages, and a kernel stack overflow wrote 
 every kernel stack gets an unmapped guard below it, and stack overflow is a page fault, reported
 from a stack known to be good, rather than silent corruption: x86_64's `#DF` runs on IST 1 (§5.1),
 and aarch64's vector entries test the stack bit of §4.5's layout and move to a per-CPU overflow
-stack (§11.5 rule 6; ROADMAP §11.3). The bootstrap thread breaks the rule (`stack: None`): `_start`,
-all of boot, and the `kernel_tests` registry run on Limine's stack (at least 64 KiB, no guard page,
-in bootloader-reclaimable memory). The kernel sends no stack size request (ROADMAP §10.6, F072).
+stack (§11.5 rule 6; ROADMAP §11.3). The bootstrap thread breaks the rule (`stack: None`): `_start`
+and all of boot run on Limine's stack (at least 64 KiB, no guard page, in bootloader-reclaimable
+memory). The kernel sends no stack size request (ROADMAP §10.6, F072).
 
 **A PTE edit appears to have no effect.**
 No `invlpg` after the edit. Rule: `invlpg` after any single-PTE modification, including MMIO attribute

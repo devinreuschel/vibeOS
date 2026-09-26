@@ -59,6 +59,8 @@ GONE: list[tuple[str, str]] = [
     ("vibeos_user_longjmp", "one ring-3 entry model:"),
     ("vibeos_user_setjmp", "one ring-3 entry model:"),
     ("with_user_as", "one ring-3 entry model:"),
+    ("IrqsOffOnDrop", "the in-guest registry runs in production's interrupt context"),
+    ("with_timer", "the in-guest registry runs in production's interrupt context"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",
