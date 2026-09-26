@@ -34,6 +34,7 @@ IMAGE_BYTES = 256 * 1024
 WR_PREFIX = "vibeOS: vibefs: wr "
 READY = "vibeOS: vibefs: crash-ready"
 MOUNT_FAIL = "vibeOS: vibefs: mount fail"
+SYNC_FAIL = "vibeOS: vibefs: sync fail"
 
 
 def _mkfs(mkfs: str, path: str) -> None:
@@ -70,7 +71,7 @@ def _one_round(
         cfg = env.qemu(
             extra=virtio_blk_args(disk, env.smp, discard=False),
             boot_order="d",
-            extra_panic=(MOUNT_FAIL,),
+            extra_panic=(MOUNT_FAIL, SYNC_FAIL),
         )
         raw = run_qemu_until_exit(
             cfg,

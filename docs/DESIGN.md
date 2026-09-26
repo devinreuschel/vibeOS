@@ -950,7 +950,7 @@ that review cites means the review's text.
 | I34 | A PTE change that removes or narrows a translation takes effect only after every CPU that could hold the old one has invalidated and acknowledged; until then no frame, table page, or VA is reused and no page counts as clean (§2.4) | `kva_init::unmap_shootdown` (kernel); `addr_space_init::shootdown_user` (user) | documented | Partly: kernel unmaps free frames and VA only after `wait_acks`; a user change invalidates only on the calling CPU, enough only while I8 holds, and nothing yet clears a dirty bit (ROADMAP §12.3) |
 | I35 | A user PTE change invalidates the second-level translations (EPT, NPT, stage-2) of its range on every CPU that may hold them before the frame's count drops (§2.4) | none yet | documented | Not relied on yet: no hypervisor exists until ROADMAP §21.2, which lands it |
 | I36 | `current` is read in one instruction, and every other per-CPU access but the CPU-id hint runs with IF=0 ([§2.9](#29-preemption-and-interrupt-state) rule 5) | `per_cpu_init`; the syscall stub's `gs:[current]` load | documented | Partly: the syscall stub reads `current` in one load, but `current_thread`, `current_id`, `current_pid`, and `per_cpu!` load `gs:[0]` and then the field, and `current()` hands out `&'static PerCpu` at any IF; no preempted thread changes CPU yet (ROADMAP §10.3, F039) |
-| I37 | Nothing is silently swallowed: an error is returned to its caller, or handled where it arises by a counter and a rate-limited line, a recorded error state, or a bounded retry (§2.5) | every module; ROADMAP §10.1's lints | documented | No: nothing checks a discard, and the kernel review's dropped errors remain (ROADMAP §10.1 audit; §10.2, F080; §10.11, F051, F063; §10.12, F115; §13.9, F124) |
+| I37 | Nothing is silently swallowed: an error is returned to its caller, or handled where it arises by a counter and a rate-limited line, a recorded error state, or a bounded retry (§2.5) | every module; ROADMAP §10.1's lints | documented | No: nothing checks a discard, and the kernel review's dropped errors remain (ROADMAP §10.1 audit; §10.11, F051, F063; §10.12, F115; §13.9, F124) |
 | I38 | A return to user mode restores only what the §5.10 rule 10 validator accepted from any writer of the saved frame, and its last check for pending work runs with IF=0 (§5.10 rule 11) | the validators in each port's pure half; the exit paths | documented | Rule 10 holds vacuously: no writer of a saved user context exists before ROADMAP §13.8 and §17.4. Rule 11 does not: pending signals are acted on only at syscall entry and after the `wait4` sleep (ROADMAP §10.6, F033) |
 | I39 | On aarch64, an ASID a CPU has used since its last local TLB flush names one address space on that CPU ([§11.2](#112-address-space-on-aarch64)) | the ASID allocator (ROADMAP §11.2) | documented | Not relied on yet: the aarch64 port does not exist; ROADMAP §11.2's host tests and loom model enforce it when it lands |
 | I40 | A thread sleeps, or takes a sleeping lock, only with IF=1 and no spinlock held (§2.1, [§2.9](#29-preemption-and-interrupt-state) rule 4) | none yet | documented | No: syscall bodies run with IF=0 until they block (§2.9 rule 3; ROADMAP §10.6); nothing asserts either condition until ROADMAP §10.3's may-sleep box (F108) |
@@ -4364,6 +4364,16 @@ Python, standard library only. `subprocess` with its own timeout rather than she
 in the test harness produces either false confidence or a debugging session in the wrong repository.
 Those tests exercise `check_markers_in_order`, which no runner calls; `run_qemu_and_check`, the
 matcher every e2e run uses, has no unit test (ROADMAP §10.2, F141).
+
+The `vibefs_crash` build (`vibefs_init::crash_loop`) prints no boot contract past its own lines,
+which `run_vibefs_crash.py` knows:
+
+| Line | Meaning |
+|---|---|
+| `vibeOS: vibefs: crash-ready` | `vda` is mounted at `/crash` and iteration 0 is committed |
+| `vibeOS: vibefs: wr <n>` | iteration `n` (from 1) starts: `/crash/w` opened with `O_TRUNC`, 300 bytes of `(n + k) as u8` written, closed, then `sync_fs` |
+| `vibeOS: vibefs: mount fail <err>` | failure line: `/crash` could not be made or `vda` not mounted; the guest halts |
+| `vibeOS: vibefs: sync fail <err>` | failure line: an open, write, close or `sync_fs` of an iteration failed (`short write` for a short write); the guest halts |
 
 `make test-vibefs-crash` (`run_vibefs_crash.py`) formats a 256 KiB image with `mkfs-vibefs`, boots
 the `vibefs_crash` build on it, kills QEMU up to 0.18 s after the first `vibeOS: vibefs: wr` line,
