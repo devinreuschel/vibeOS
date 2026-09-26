@@ -814,12 +814,44 @@ pub fn probe<D: Disk>(d: &mut D) -> bool {
     pick_super(d, &mut buf).is_ok()
 }
 
-fn write_alloc_into(v: &Vol, buf: &mut [u8; BLOCK]) {
+/// The one decrement rule for a committed block that a commit replaces or
+/// drops (docs/VIBEFS.md §10 steps 3 and 7). Blocks 0 and 1, a block past
+/// `nblocks` (a crafted image can hand mount one) and a block already free
+/// are left alone.
+fn drop_ref(bitmap: &mut [u8], refc: &mut [u8], nblocks: u32, b: u32) {
+    if b < 2 || b >= nblocks {
+        return;
+    }
+    let Some(r) = refc.get_mut(b as usize) else {
+        return;
+    };
+    if *r == 0 {
+        return;
+    }
+    *r -= 1;
+    if *r == 0
+        && let Some(byte) = bitmap.get_mut(b as usize / 8)
+    {
+        *byte &= !(1 << (b % 8));
+    }
+}
+
+/// Serialize the alloc map with `old_meta` and the drop list already
+/// dropped, so the map a commit writes matches memory after step 7.
+fn write_alloc_into(v: &Vol, old_meta: &[u32], buf: &mut [u8; BLOCK]) {
     let nbytes = (v.nblocks as usize).div_ceil(8);
     meta_hdr(buf, META_ALLOC, 0, v.nblocks as u16, v.generation, 0);
     buf[HDR..HDR + nbytes].copy_from_slice(&v.bitmap[..nbytes]);
     buf[HDR + nbytes..HDR + nbytes + v.nblocks as usize]
         .copy_from_slice(&v.refc[..v.nblocks as usize]);
+    {
+        let (head, rest) = buf.split_at_mut(HDR + nbytes);
+        let bitmap = &mut head[HDR..];
+        let refc = &mut rest[..v.nblocks as usize];
+        for &b in old_meta.iter().chain(v.drop[..v.ndrop as usize].iter()) {
+            drop_ref(bitmap, refc, v.nblocks, b);
+        }
+    }
     finish_meta(buf);
 }
 
@@ -1948,7 +1980,7 @@ impl Vol {
         self.inode_root = iroot;
         self.alloc_root = alloc_bno;
         let mut sbuf = [0u8; BLOCK];
-        write_alloc_into(self, &mut sbuf);
+        write_alloc_into(self, &old_meta[..old_meta_n as usize], &mut sbuf);
         d.write_block(alloc_bno, &sbuf)?;
         d.flush()?;
 
@@ -1957,28 +1989,13 @@ impl Vol {
         d.write_block(slot as u32, &sbuf)?;
         d.flush()?;
 
-        // drop replaced committed meta
-        let mut m = 0usize;
-        while m < old_meta_n as usize {
-            let b = old_meta[m];
-            if b >= 2 && self.refc[b as usize] > 0 {
-                self.refc[b as usize] -= 1;
-                if self.refc[b as usize] == 0 {
-                    bit_set(&mut self.bitmap, b, false);
-                }
-            }
-            m += 1;
-        }
-        let mut p = 0usize;
-        while p < self.ndrop as usize {
-            let b = self.drop[p];
-            if b >= 2 && self.refc[b as usize] > 0 {
-                self.refc[b as usize] -= 1;
-                if self.refc[b as usize] == 0 {
-                    bit_set(&mut self.bitmap, b, false);
-                }
-            }
-            p += 1;
+        // In memory, apply the drops the alloc map above already carries.
+        let nblocks = self.nblocks;
+        for &b in old_meta[..old_meta_n as usize]
+            .iter()
+            .chain(self.drop[..self.ndrop as usize].iter())
+        {
+            drop_ref(&mut self.bitmap, &mut self.refc, nblocks, b);
         }
         self.ndrop = 0;
         self.txn = [0; MAX_BLOCKS.div_ceil(8)];
@@ -2090,7 +2107,7 @@ pub fn mkfs<D: Disk>(d: &mut D, label: &[u8], v: &mut Vol) -> Result<(), Error> 
     finish_meta(&mut v.iobuf);
     d.write_block(leaf, &v.iobuf)?;
     let mut sbuf = [0u8; BLOCK];
-    write_alloc_into(v, &mut sbuf);
+    write_alloc_into(v, &[], &mut sbuf);
     d.write_block(alloc_bno, &sbuf)?;
     pack_super(&mut sbuf, v, 0);
     d.write_block(0, &sbuf)?;
@@ -2689,6 +2706,54 @@ mod tests {
             let mut out = vec![0u8; 2 * BLOCK];
             assert_eq!(v.read(d, ino, start, &mut out).unwrap(), BLOCK);
             assert_eq!(out[..BLOCK], two[..BLOCK]);
+        });
+    }
+
+    /// `fsck` over the image in `b`.
+    fn fsck_of(b: &mut [u8]) -> FsckReport {
+        let mut d = MemDisk::new(b).unwrap();
+        fsck(&mut d).unwrap()
+    }
+
+    fn payload(seed: u32) -> [u8; 300] {
+        let mut p = [0u8; 300];
+        let mut i = 0usize;
+        while i < p.len() {
+            p[i] = (seed as usize * 31 + i) as u8;
+            i += 1;
+        }
+        p
+    }
+
+    #[test]
+    fn sessions_64_no_leak() {
+        let mut b = fresh(64 * BLOCK);
+        with_vol(&mut b, |v, d| {
+            let ino = new_file(v, d, b"f");
+            assert_eq!(v.write(d, ino, 0, &payload(0)).unwrap(), 300);
+            v.sync(d).unwrap();
+        });
+        let free = with_vol(&mut b, |v, _| v.df().1);
+        let warn0 = fsck_of(&mut b).warnings;
+        let mut s = 1u32;
+        while s <= 64 {
+            with_vol(&mut b, |v, d| {
+                assert_eq!(v.df().1, free, "free bytes at session {s}");
+                let ino = v.lookup(d, ROOT_INO, b"f").unwrap().ino;
+                assert_eq!(v.write(d, ino, 0, &payload(s)).unwrap(), 300);
+                v.sync(d)
+                    .unwrap_or_else(|e| panic!("sync at session {s}: {e:?}"));
+            });
+            let r = fsck_of(&mut b);
+            assert_eq!(r.errors, 0, "fsck errors at session {s}");
+            assert_eq!(r.warnings, warn0, "fsck warnings at session {s}");
+            s += 1;
+        }
+        with_vol(&mut b, |v, d| {
+            let ino = v.lookup(d, ROOT_INO, b"f").unwrap().ino;
+            let mut out = [0u8; 300];
+            assert_eq!(v.read(d, ino, 0, &mut out).unwrap(), 300);
+            assert_eq!(out, payload(64));
         });
     }
 }

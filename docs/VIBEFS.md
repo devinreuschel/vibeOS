@@ -269,9 +269,6 @@ commit rule still holds. After any sequence of commits and remounts, every
 block from 2 on with a refcount above 0 is reachable from the live tree or a
 snapshot. v1 code does not meet this yet:
 
-- the alloc map it writes omits the commit's own drops, which happen only
-  in memory, so the blocks the last commit of a mount session replaced stay
-  allocated on disk (F049; ROADMAP §10.11)
 - after the super flush, commit re-marks only the alloc and inode blocks as
   metadata, so the next commit never drops the directory blocks it wrote; a
   64-block volume stops committing after about 57 syncs (F014; ROADMAP
@@ -438,9 +435,10 @@ One transaction = one generation bump.
    the slot opposite the super this mount last mounted or committed. The
    generation and roots change in memory only after step 6 succeeds.
 6. `Flush`.
-7. In memory, drop refcounts on the replaced metadata and data. The other
-   slot keeps the previous generation, which mount falls back to when the
-   new super is torn; never copy the new super into it.
+7. In memory, apply the drops that step 3's alloc map already carries: the
+   refcounts of the replaced metadata and data. The other slot keeps the
+   previous generation, which mount falls back to when the new super is
+   torn; never copy the new super into it.
 
 Each step starts only after the one before it has completed, since the
 block layer orders nothing (DESIGN §10.2). Steps 5 and 6 together are a
