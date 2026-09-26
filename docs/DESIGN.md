@@ -3586,7 +3586,7 @@ Contents (`src/per_cpu.rs`):
   only an in-guest test reads (ROADMAP §10.7 deletes it, F111)
 - `irq_nest`, `slice_tsc`, `idle_tsc`, and `switch_scratch`, a `CpuContext` that no code reads or writes
 - `tsc_per_ms` (a copy of the BSP's value, [section 6.2](#62-calibrating-the-tsc)) and `timer_mode`
-- `kernel_rsp0` and `as_cr3`, which the context switch updates; `tss`, through which it writes TSS.RSP0; and `fallback_rsp0`, the RSP0 it uses for a thread without `Tcb.stack` (below)
+- `kernel_rsp0`, which the context switch updates; `tss`, through which it writes TSS.RSP0; and `fallback_rsp0`, the RSP0 it uses for a thread without `Tcb.stack` (below)
 - `syscall_scratch`: the user RSP, the syscall return value, and the `iretq` RIP, RFLAGS, and RSP.
   It is per CPU, not per thread, so it is valid only while IF=0. The syscall exit breaks this: it
   runs without a `cli`, and a console `read` that waited in `sti; hlt` returns to it with IF=1
@@ -3594,7 +3594,9 @@ Contents (`src/per_cpu.rs`):
   `syscall` and the entry's stack switch; the exit keeps the return value and its `iretq` frame in
   the thread's user frame ([section 5.10](#510-privilege-transitions)).
 - `remote`, this CPU's `PerCpuRemote` in a separate per-CPU array: `ticks`, `switches`, `runq_len`,
-  `ready`, `wake_inbox` and `apic_id`, all atomics; it is the only per-CPU state another CPU reads.
+  `ready`, `wake_inbox`, `apic_id`, and `as_cr3`, the root this CPU last loaded: an `AtomicU64` its
+  owner stores after each CR3 write and `addr_space_init::teardown` reads. All are atomics; it is the
+  only per-CPU state another CPU reads.
   `wake_inbox` is a `u64` `ThreadId` bitset: a remote CPU ORs in a thread's bit and sends IPI `0xFD`
   (planned: a bitmap sized from the limits, §7.6). `ready` is the flag an AP sets last in bring-up
   ([section 7.4](#74-ap-bring-up-sequence)).

@@ -1,6 +1,8 @@
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 //! Kernel AddressSpace: buddy + PT lock. ROADMAP §9.2.
 
+use core::sync::atomic::Ordering;
+
 use vibeos::addr_space::{AddressSpace, AsError, FrameFree, TeardownStats, UserPerms};
 use vibeos::paging::{FrameAlloc, PAGE_SIZE_4K};
 use vibeos::pmm::Frames;
@@ -80,21 +82,21 @@ fn shootdown_user(space: &AddressSpace, va: u64, len: u64) {
 pub fn load_cr3(space: &AddressSpace) {
     let want = space.root().as_u64();
     per_cpu_init::with_current(|cpu| {
-        if cpu.as_cr3 == want {
+        if cpu.remote.as_cr3.load(Ordering::Relaxed) == want {
             return;
         }
         unsafe { x86::write_cr3(want) };
-        cpu.as_cr3 = want;
+        cpu.remote.as_cr3.store(want, Ordering::Release);
     });
 }
 
 pub fn load_cr3_u64(want: u64) {
     per_cpu_init::with_current(|cpu| {
-        if cpu.as_cr3 == want || want == 0 {
+        if cpu.remote.as_cr3.load(Ordering::Relaxed) == want || want == 0 {
             return;
         }
         unsafe { x86::write_cr3(want) };
-        cpu.as_cr3 = want;
+        cpu.remote.as_cr3.store(want, Ordering::Release);
     });
 }
 
@@ -111,5 +113,9 @@ pub fn clone_full(src: &vibeos::addr_space::AddressSpace) -> Option<AddressSpace
 }
 
 pub fn cr3_was_skipped(space: &AddressSpace) -> bool {
-    crate::per_cpu_init::current().as_cr3 == space.root().as_u64()
+    crate::per_cpu_init::current()
+        .remote
+        .as_cr3
+        .load(Ordering::Relaxed)
+        == space.root().as_u64()
 }

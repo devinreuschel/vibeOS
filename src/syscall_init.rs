@@ -241,7 +241,9 @@ pub unsafe fn init_bsp() {
         let top = gdt::bsp_rsp0_top();
         cpu.fallback_rsp0 = top;
         cpu.kernel_rsp0 = top;
-        cpu.as_cr3 = crate::paging_init::kernel_cr3();
+        cpu.remote
+            .as_cr3
+            .store(crate::paging_init::kernel_cr3(), Ordering::Release);
     });
     seed_current_fpu();
 }
@@ -256,7 +258,9 @@ pub unsafe fn init_ap(tss: *mut Tss, rsp0: u64) {
         cpu.tss = tss;
         cpu.fallback_rsp0 = rsp0;
         cpu.kernel_rsp0 = rsp0;
-        cpu.as_cr3 = crate::paging_init::kernel_cr3();
+        cpu.remote
+            .as_cr3
+            .store(crate::paging_init::kernel_cr3(), Ordering::Release);
     });
     seed_current_fpu();
 }
@@ -320,11 +324,11 @@ pub fn switch_cr3_for(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
     } else {
         tcb.as_cr3
     };
-    if cpu.as_cr3 == want || want == 0 {
+    if cpu.remote.as_cr3.load(Ordering::Relaxed) == want || want == 0 {
         return true;
     }
     unsafe { x86::write_cr3(want) };
-    cpu.as_cr3 = want;
+    cpu.remote.as_cr3.store(want, Ordering::Release);
     false
 }
 
