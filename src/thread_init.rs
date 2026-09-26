@@ -400,15 +400,25 @@ fn bootstrap_entry() {
 }
 
 pub fn spawn(name: &'static str, entry: fn()) -> ThreadHandle {
-    spawn_inner(name, entry, CpuAffinity::Any, true, 0, 0, 0)
+    spawn_inner(
+        name,
+        entry,
+        CpuAffinity::Any,
+        true,
+        0,
+        0,
+        0,
+        DEFAULT_STACK_PAGES,
+    )
 }
 
-/// Pin to this CPU. In-guest tests that `switch_to` / `yield_now` a
-/// worker must use this: `ktest::run` holds IF off on the BSP, so an
-/// `Any` spawn would RR onto an AP the BSP cannot switch to.
+/// Pin to this CPU: `switch_to` reaches only this CPU's run queue, so an
+/// in-guest test that `switch_to`s a worker must spawn it here.
 ///
-/// Copies `irq_nest` so `switch_to` does not `sti` the worker (incoming
-/// nest 0 would enable IF; a tick then preempts the cooperative chain).
+/// Copies the caller's `irq_nest`. A worker started from the IF=1 in-guest
+/// registry runs with IF on; one started under a test's own guard runs with
+/// IF off, so `switch_to` does not `sti` it and a tick cannot preempt a
+/// cooperative `switch_to` chain.
 pub fn spawn_here(name: &'static str, entry: fn()) -> ThreadHandle {
     spawn_inner(
         name,
@@ -418,15 +428,57 @@ pub fn spawn_here(name: &'static str, entry: fn()) -> ThreadHandle {
         per_cpu_init::irq_nest(),
         0,
         0,
+        DEFAULT_STACK_PAGES,
     )
 }
 
 pub fn spawn_on(name: &'static str, entry: fn(), cpu: u32) -> ThreadHandle {
-    spawn_inner(name, entry, CpuAffinity::Pinned(cpu), true, 0, 0, 0)
+    spawn_inner(
+        name,
+        entry,
+        CpuAffinity::Pinned(cpu),
+        true,
+        0,
+        0,
+        0,
+        DEFAULT_STACK_PAGES,
+    )
+}
+
+/// Stack size and CPU for [`spawn_opts`].
+#[derive(Clone, Copy)]
+pub struct SpawnOpts {
+    /// Stack pages, without the guard page. `kva_init::alloc_guarded_stack`
+    /// takes at most 32.
+    pub stack_pages: usize,
+    /// `Some(c)` pins the thread to CPU `c`, which must be online; `None`
+    /// lets it run on any CPU.
+    pub cpu: Option<u32>,
+}
+
+/// Spawn a Ready kernel thread with `opts`' stack size and CPU. It starts
+/// with `irq_nest` 0, so it runs with IF on, as [`spawn`]'s threads do.
+/// `opts.stack_pages` must be at most 32 (`kva_init`'s limit) and
+/// `opts.cpu`, when set, an online CPU.
+pub fn spawn_opts(name: &'static str, entry: fn(), opts: SpawnOpts) -> ThreadHandle {
+    let affinity = match opts.cpu {
+        Some(c) => CpuAffinity::Pinned(c),
+        None => CpuAffinity::Any,
+    };
+    spawn_inner(name, entry, affinity, true, 0, 0, 0, opts.stack_pages)
 }
 
 pub(crate) fn spawn_idle(entry: fn()) -> ThreadHandle {
-    spawn_inner("idle", entry, CpuAffinity::Pinned(0), false, 0, 0, 0)
+    spawn_inner(
+        "idle",
+        entry,
+        CpuAffinity::Pinned(0),
+        false,
+        0,
+        0,
+        0,
+        DEFAULT_STACK_PAGES,
+    )
 }
 
 /// User process thread. Not runnable until [`make_ready`].
@@ -439,6 +491,7 @@ pub fn spawn_user(name: &'static str, entry: fn(), pid: u32, cr3: u64) -> Thread
         0,
         pid,
         cr3,
+        DEFAULT_STACK_PAGES,
     )
 }
 
@@ -516,6 +569,7 @@ fn choose_cpu(affinity: CpuAffinity) -> u32 {
     cpu
 }
 
+#[allow(clippy::too_many_arguments)] // TCB fields and stack size chosen at spawn
 fn spawn_inner(
     name: &'static str,
     entry: fn(),
@@ -524,8 +578,9 @@ fn spawn_inner(
     irq_nest: u32,
     pid: u32,
     as_cr3: u64,
+    stack_pages: usize,
 ) -> ThreadHandle {
-    let stack = kva_init::alloc_guarded_stack(DEFAULT_STACK_PAGES).expect("thread stack");
+    let stack = kva_init::alloc_guarded_stack(stack_pages).expect("thread stack");
     let top = stack.top().as_u64();
     assert!(top.is_multiple_of(16), "kva stack top not 16-aligned");
     let ks = KernelStack {

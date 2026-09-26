@@ -828,12 +828,6 @@ ISA_DEBUG_FAIL = 35  # write 0x11
 KTEST_BEGIN = "vibeOS: ktest: begin"
 KTEST_END = "vibeOS: ktest: end"
 KTEST_FAIL_PREFIX = "vibeOS: ktest: FAIL"
-SMP2_TCG_PER_CPU_READY_HEAD_FLAKE = (
-    "vibeOS: ktest: FAIL per_cpu_bsp: ready_head should be empty"
-)
-SMP2_TCG_PER_CPU_READY_HEAD_FLAKE_ERROR = (
-    f"ktest FAIL: {SMP2_TCG_PER_CPU_READY_HEAD_FLAKE}"
-)
 SMP4_MSIX_AP_COUNTER_FLAKE = (
     "ktest FAIL: vibeOS: ktest: FAIL msix_cpu: ap counter"
 )
@@ -874,14 +868,11 @@ def retryable_ktest_failure(
     accel: str | None = None,
     failure_lines: Iterable[str] = (),
 ) -> bool:
-    if (
-        smp == 2
-        and not persist_reboot
-        and _accel_name(accel) == "tcg"
-        and message == SMP2_TCG_PER_CPU_READY_HEAD_FLAKE_ERROR
-        and tuple(failure_lines) == (SMP2_TCG_PER_CPU_READY_HEAD_FLAKE,)
-    ):
-        return True
+    """True for a -smp 4 failure the harness boots again for (DESIGN §8.2).
+
+    `persist_reboot`, `accel` and `failure_lines` select nothing now;
+    `run_ktest` still passes them until ROADMAP §10.2 removes the retries.
+    """
     if smp != 4:
         return False
     if message == SMP4_MSIX_AP_COUNTER_FLAKE:

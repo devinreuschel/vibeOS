@@ -16,7 +16,6 @@ from tests.harness.harness import (
     ISA_DEBUG_FAIL,
     ISA_DEBUG_PASS,
     OVMF_BOOT_ARGS,
-    SMP2_TCG_PER_CPU_READY_HEAD_FLAKE,
     SMP4_IPI_WAIT_ACKS_FRAME,
     DeadlineReader,
     HarnessError,
@@ -350,67 +349,6 @@ class TestKtestProtocol(unittest.TestCase):
             )
         )
 
-    def test_smp2_tcg_per_cpu_ready_head_sole_failure_is_retryable(self) -> None:
-        line = SMP2_TCG_PER_CPU_READY_HEAD_FLAKE
-        msg = f"ktest FAIL: {line}"
-        self.assertTrue(
-            retryable_ktest_failure(
-                2,
-                msg,
-                accel="tcg",
-                failure_lines=(line,),
-            )
-        )
-
-    def test_per_cpu_ready_head_retry_requires_exact_scope(self) -> None:
-        line = SMP2_TCG_PER_CPU_READY_HEAD_FLAKE
-        msg = f"ktest FAIL: {line}"
-        other = "vibeOS: ktest: FAIL unrelated: reason"
-        self.assertFalse(
-            retryable_ktest_failure(
-                4,
-                msg,
-                accel="tcg",
-                failure_lines=(line,),
-            )
-        )
-        self.assertFalse(
-            retryable_ktest_failure(
-                2,
-                msg,
-                accel="kvm",
-                failure_lines=(line,),
-            )
-        )
-        self.assertFalse(
-            retryable_ktest_failure(
-                2,
-                msg,
-                persist_reboot=True,
-                accel="tcg",
-                failure_lines=(line,),
-            )
-        )
-        self.assertFalse(
-            retryable_ktest_failure(2, msg, accel="tcg")
-        )
-        self.assertFalse(
-            retryable_ktest_failure(
-                2,
-                msg,
-                accel="tcg",
-                failure_lines=(line, other),
-            )
-        )
-        self.assertFalse(
-            retryable_ktest_failure(
-                2,
-                msg + "!",
-                accel="tcg",
-                failure_lines=(line,),
-            )
-        )
-
     def test_smp4_ipi_ack_panic_is_retryable_on_first_boot(self) -> None:
         msg = (
             "panic signature 'vibeOS: panic:' in: "
@@ -494,11 +432,22 @@ class TestSilentUserSyscallsHang(unittest.TestCase):
 
 class TestKernelBootRetry(unittest.TestCase):
     @staticmethod
+    def _msix_ap_counter_failure() -> RunResult:
+        return RunResult(
+            lines=[
+                "vibeOS: ktest: begin",
+                "vibeOS: ktest: FAIL msix_cpu: ap counter",
+                "vibeOS: ktest: end",
+            ],
+            exit_code=ISA_DEBUG_FAIL,
+        )
+
+    @staticmethod
     def _per_cpu_ready_head_failure() -> RunResult:
         return RunResult(
             lines=[
                 "vibeOS: ktest: begin",
-                SMP2_TCG_PER_CPU_READY_HEAD_FLAKE,
+                "vibeOS: ktest: FAIL per_cpu_bsp: ready_head should be empty",
                 "vibeOS: ktest: end",
             ],
             exit_code=ISA_DEBUG_FAIL,
@@ -519,9 +468,9 @@ class TestKernelBootRetry(unittest.TestCase):
         )
 
     def test_exact_failure_retries_once_then_passes(self) -> None:
-        failed = self._per_cpu_ready_head_failure()
+        failed = self._msix_ap_counter_failure()
         passed = self._passing_initial_boot()
-        cfg = QemuConfig(iso="x.iso", smp=2, extra=("-accel", "tcg"))
+        cfg = QemuConfig(iso="x.iso", smp=4, extra=("-accel", "tcg"))
         with mock.patch.object(
             run_ktest,
             "run_qemu_until_exit",
@@ -536,8 +485,8 @@ class TestKernelBootRetry(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
 
     def test_exact_failure_stops_after_one_retry(self) -> None:
-        failed = self._per_cpu_ready_head_failure()
-        cfg = QemuConfig(iso="x.iso", smp=2, extra=("-accel", "tcg"))
+        failed = self._msix_ap_counter_failure()
+        cfg = QemuConfig(iso="x.iso", smp=4, extra=("-accel", "tcg"))
         with mock.patch.object(
             run_ktest,
             "run_qemu_until_exit",
@@ -550,6 +499,23 @@ class TestKernelBootRetry(unittest.TestCase):
                     persist_reboot=False,
                 )
         self.assertEqual(run.call_count, 2)
+
+    def test_per_cpu_ready_head_failure_is_not_retried(self) -> None:
+        failed = self._per_cpu_ready_head_failure()
+        passed = self._passing_initial_boot()
+        cfg = QemuConfig(iso="x.iso", smp=2, extra=("-accel", "tcg"))
+        with mock.patch.object(
+            run_ktest,
+            "run_qemu_until_exit",
+            side_effect=(failed, passed),
+        ) as run:
+            with self.assertRaises(HarnessError):
+                run_ktest._ktest_boot(
+                    cfg,
+                    timeout=1.0,
+                    persist_reboot=False,
+                )
+        self.assertEqual(run.call_count, 1)
 
     @staticmethod
     def _dup_ok_timeout() -> HarnessError:
