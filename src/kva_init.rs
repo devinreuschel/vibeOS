@@ -3,12 +3,14 @@
 //! `vibeos::kva::Kva` hands out VA. This module maps order-0 frames into
 //! the reserved ranges, leaves the guard page unmapped, and keeps a
 //! deferred-free list for stacks that cannot be unmapped from themselves.
+//! `vmap` hands out a move-only [`Vmap`] that holds its `Frames`, and
+//! `vunmap` takes it back, so the span unmapped is the span freed.
 //! The KVA free-list lives under the page-table lock. Unmap, drop PT,
 //! shootdown, then free VA to the tail.
 #![allow(dead_code)]
 
 use vibeos::kva::{KVA_END, KVA_SIZE, KVA_START, Kva, KvaError, KvaStats, PAGE_SIZE};
-use vibeos::paging::{PhysAddr, VirtAddr, heap_flags, stack_flags};
+use vibeos::paging::{MapError, PhysAddr, VirtAddr, heap_flags, stack_flags};
 use vibeos::pmm::Frames;
 pub use vibeos::thread::GuardedStack;
 use vibeos::thread::MAX_STACK_PAGES;
@@ -149,44 +151,103 @@ pub fn drain_deferred() {
     }
 }
 
-/// Present `frames` contiguously. Caller keeps the frames; `vunmap`
-/// only releases the VA.
-pub fn vmap(frames: &[PhysAddr]) -> Option<VirtAddr> {
-    if frames.is_empty() || frames.len() > MAX_UNMAP {
-        return None;
-    }
-    let mut vas = [VirtAddr(0); MAX_UNMAP];
-    let n = frames.len();
-    let va = paging_init::with_pt(|pt| {
-        let len = n as u64 * PAGE_SIZE;
-        let va_u = KVA.with(|k| k.alloc(len))?;
-        for (i, &pa) in frames.iter().enumerate() {
-            let page = VirtAddr(va_u + i as u64 * PAGE_SIZE);
-            if unsafe { paging_init::map_4k_locked(pt, page, pa, heap_flags()) }.is_err() {
-                unsafe { unmap_only_locked(pt, VirtAddr(va_u), i) };
-                KVA.with(|k| k.free(va_u, len).expect("kva: free-list"));
-                return None;
-            }
-            vas[i] = page;
-        }
-        Some(VirtAddr(va_u))
-    })?;
-    let mut i = 0;
-    while i < n {
-        vibeos::paging::tlb_shootdown_others(vas[i]);
-        i += 1;
-    }
-    Some(va)
+/// One `Frames` block mapped contiguously into KVA. Move-only: only
+/// [`vmap`] builds one and [`vunmap`] takes it back, returning the
+/// `Frames`. Dropping one leaks its span and its `Frames` (DESIGN §4.5).
+#[must_use]
+pub struct Vmap {
+    base: VirtAddr,
+    frames: Frames,
 }
 
-pub fn vunmap(va: VirtAddr, nframes: usize) {
-    unmap_shootdown(va, nframes);
+impl Vmap {
+    /// First mapped VA.
+    pub fn base(&self) -> VirtAddr {
+        self.base
+    }
+
+    /// Mapped span in bytes: the frame count times the page size.
+    pub fn len(&self) -> u64 {
+        self.frames.count() as u64 * PAGE_SIZE
+    }
+
+    /// Always false: a `Vmap` maps at least one frame.
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+const _: fn(Vmap) -> Frames = vunmap;
+crate::cell::assert_not_impl!(Vmap: Clone);
+crate::cell::assert_not_impl!(Vmap: Copy);
+
+/// Map `frames` contiguously into KVA. A block of more than `MAX_UNMAP`
+/// frames is refused with `KvaError::Size`, so [`vunmap`] always unmaps
+/// the whole span. On any failure the frames go back to the buddy.
+pub fn vmap(frames: Frames) -> Result<Vmap, KvaError> {
+    let n = frames.count();
+    if n > MAX_UNMAP {
+        pmm_init::with_buddy(|b| b.free(frames));
+        return Err(KvaError::Size);
+    }
+    let len = n as u64 * PAGE_SIZE;
+    let pa0 = frames.base();
+    let mut mapped = 0usize;
+    let r = paging_init::with_pt(|pt| {
+        let va = KVA.with(|k| k.alloc(len)).ok_or((None, KvaError::NoVa))?;
+        while mapped < n {
+            let off = mapped as u64 * PAGE_SIZE;
+            let page = VirtAddr(va + off);
+            if let Err(e) =
+                unsafe { paging_init::map_4k_locked(pt, page, PhysAddr(pa0 + off), heap_flags()) }
+            {
+                let e = match e {
+                    MapError::OutOfFrames => KvaError::NoFrames,
+                    _ => KvaError::Map,
+                };
+                return Err((Some(VirtAddr(va)), e));
+            }
+            mapped += 1;
+        }
+        Ok(VirtAddr(va))
+    });
+    match r {
+        Ok(base) => {
+            let mut i = 0;
+            while i < n {
+                vibeos::paging::tlb_shootdown_others(VirtAddr(
+                    base.as_u64() + i as u64 * PAGE_SIZE,
+                ));
+                i += 1;
+            }
+            Ok(Vmap { base, frames })
+        }
+        Err((va, e)) => {
+            // Unmap and shoot down what was mapped, and only then free the
+            // VA and the frames.
+            if let Some(va) = va {
+                unmap_shootdown(va, mapped);
+                free_va(va, len);
+            }
+            pmm_init::with_buddy(|b| b.free(frames));
+            Err(e)
+        }
+    }
+}
+
+/// Unmap `v`'s span, shoot it down, free exactly that span of VA, and
+/// return its `Frames`.
+pub fn vunmap(v: Vmap) -> Frames {
+    let Vmap { base, frames } = v;
+    let n = frames.count();
+    unmap_shootdown(base, n);
     paging_init::with_pt(|_pt| {
         KVA.with(|k| {
-            k.free(va.as_u64(), nframes as u64 * PAGE_SIZE)
+            k.free(base.as_u64(), n as u64 * PAGE_SIZE)
                 .expect("kva: free-list")
         })
     });
+    frames
 }
 
 /// # Safety

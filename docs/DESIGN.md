@@ -1820,8 +1820,7 @@ naming the allocation site. `GuardedStack`, `DmaBuffer`, the `vmap` handle, and 
 `Frames` they were built from. A frame that a page-table entry maps, a user leaf or a table page, is
 consumed into that entry, which is its owner record until §4.6's frame metadata exists, and only the
 page-table code that removes the entry takes it back, through an `unsafe fn` whose safety comment
-names the entry. Not yet built: the `vmap` handle (ROADMAP §10.3); until it lands, `kva_init::vmap`
-takes `&[PhysAddr]` and its caller keeps the frames' tokens.
+names the entry.
 
 ## 4.3 Page tables
 
@@ -2214,8 +2213,8 @@ which leaves an allocator that lands later, such as the slab after the KASAN bui
 ## 4.5 Kernel virtual address allocator
 
 The heap answers "give me 40 bytes". The KVA allocator answers "give me 16 KiB of contiguous virtual
-address space with an unmapped guard below it". Guarded kernel stacks are the motivating case, `vmap` of
-non-contiguous frames is the second.
+address space with an unmapped guard below it". Guarded kernel stacks are the motivating case, `vmap`
+is the second.
 
 - A guarded stack is a power-of-two size *S* and starts at an address aligned to *2S*, and the *S*
   bytes of VA below it stay unmapped, so overflow takes a page fault instead of quietly eating
@@ -2231,6 +2230,13 @@ non-contiguous frames is the second.
 - A `GuardedStack` (`vibeos::thread::GuardedStack`, re-exported as `kva_init::GuardedStack`) is a
   move-only handle with private fields; only `kva_init::alloc_guarded_stack` builds one, and
   `free_stack` takes it by value.
+- `kva_init::vmap(Frames) -> Result<Vmap, KvaError>` maps one buddy block of at most 32 frames
+  (`MAX_UNMAP`) contiguously and refuses a larger one with `KvaError::Size`; on any failure it returns
+  the frames to the buddy. The `Vmap` is a move-only handle with private fields (`base()`, `len()`)
+  that holds the block's `Frames` (§4.2). `vunmap(Vmap) -> Frames` unmaps, shoots down, and frees
+  exactly the span the handle records, then hands back the `Frames`, so the span unmapped always equals
+  the span returned to the free list. Dropping a `Vmap` leaks its span and its `Frames`. A
+  compile-time assertion in `kva_init` fails the build if `Vmap` is `Copy` or `Clone`.
 - Stack frames are allocated as *n* separate order-0 frames, not one order-*k* block. Stacks do not
   need physical contiguity and requesting it fragments the buddy allocator for nothing. The
   `GuardedStack` holds each frame's `Frames` (§4.2), and `free_stack` frees those tokens after the
@@ -3940,7 +3946,7 @@ ROADMAP §10.7's forensics to report. `lifetime_shootdown_ack_late` holds IF off
 while another unmaps. What holds IF=0 that long today: syscall bodies until they block (ROADMAP
 §10.6, F011), and a console `write` with many newlines (ROADMAP §10.6, F044). As built, one round invalidates one VA
 (`shootdown_va`) on every online CPU; ROADMAP §12.3 replaces it with the rounds above. `kva_init::unmap_shootdown` unmaps at most 32 pages (`MAX_UNMAP`) and leaves the
-rest mapped with no error, while `vunmap` frees the whole VA span it was given (ROADMAP §10.3, F107).
+rest mapped with no error.
 
 The shootdown handler allocates nothing and takes no lock ([§2.2](#22-interrupt-handler-rules)). It
 reads a request slot and executes `invlpg`.
