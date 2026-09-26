@@ -159,14 +159,24 @@ impl Disk for MemDisk<'_> {
     }
 }
 
-/// Drops writes after `limit` device ops (write or flush). Power-loss stand-in.
+/// Power-loss stand-in for host tests. `new` drops every device op (write or
+/// flush) after `limit`, an in-order suffix. `seeded` models a volatile write
+/// cache: writes since the last flush stay pending, and at the crash a seeded
+/// subset of them reaches the medium, so a later write can survive where an
+/// earlier one did not (F080).
+#[cfg(test)]
 pub struct CrashDisk<'a> {
     data: &'a mut [u8],
     pub ops: u64,
     pub limit: u64,
     pub dropped: u64,
+    /// `Some` for `seeded`: the writes since the last flush, oldest first.
+    pending: Option<Vec<(u32, [u8; BLOCK])>>,
+    seed: u64,
+    pub crashed: bool,
 }
 
+#[cfg(test)]
 impl<'a> CrashDisk<'a> {
     pub fn new(data: &'a mut [u8], limit: u64) -> Result<Self, Error> {
         if data.len() < MIN_BLOCKS as usize * BLOCK || !data.len().is_multiple_of(BLOCK) {
@@ -177,44 +187,114 @@ impl<'a> CrashDisk<'a> {
             ops: 0,
             limit,
             dropped: 0,
+            pending: None,
+            seed: 0,
+            crashed: false,
         })
+    }
+
+    /// A flush at op `limit` or earlier applies the pending writes in order.
+    /// Past `limit`, and in `crash`, each pending write is kept with
+    /// probability 1/2 (xorshift from `seed`), and every later op is dropped.
+    pub fn seeded(data: &'a mut [u8], limit: u64, seed: u64) -> Result<Self, Error> {
+        let mut c = Self::new(data, limit)?;
+        c.pending = Some(Vec::new());
+        c.seed = seed | 1;
+        Ok(c)
+    }
+
+    /// Power loss now. Idempotent.
+    pub fn crash(&mut self) {
+        if self.crashed {
+            return;
+        }
+        self.crashed = true;
+        let pend = self.pending.take().unwrap_or_default();
+        for (bno, buf) in &pend {
+            self.seed ^= self.seed << 13;
+            self.seed ^= self.seed >> 7;
+            self.seed ^= self.seed << 17;
+            if self.seed & 1 == 1
+                && let Ok(r) = self.range(*bno)
+            {
+                self.data[r].copy_from_slice(buf);
+            } else {
+                self.dropped = self.dropped.saturating_add(1);
+            }
+        }
+        self.pending = Some(Vec::new());
+    }
+
+    fn range(&self, bno: u32) -> Result<core::ops::Range<usize>, Error> {
+        let off = (bno as usize).checked_mul(BLOCK).ok_or(Error::Inval)?;
+        let end = off.checked_add(BLOCK).ok_or(Error::Inval)?;
+        if end > self.data.len() {
+            return Err(Error::Io);
+        }
+        Ok(off..end)
+    }
+
+    fn store(&mut self, bno: u32, buf: &[u8; BLOCK]) -> Result<(), Error> {
+        let r = self.range(bno)?;
+        self.data[r].copy_from_slice(buf);
+        Ok(())
+    }
+
+    /// Counts one op; false when it is past the crash and must be dropped.
+    fn tick(&mut self) -> bool {
+        self.ops = self.ops.saturating_add(1);
+        if self.ops > self.limit {
+            if self.pending.is_some() {
+                self.crash();
+            }
+            self.dropped = self.dropped.saturating_add(1);
+            return false;
+        }
+        !self.crashed
     }
 }
 
+#[cfg(test)]
 impl Disk for CrashDisk<'_> {
     fn nblocks(&self) -> u32 {
         (self.data.len() / BLOCK) as u32
     }
 
     fn read_block(&mut self, bno: u32, buf: &mut [u8; BLOCK]) -> Result<(), Error> {
-        let off = (bno as usize).checked_mul(BLOCK).ok_or(Error::Inval)?;
-        let end = off.checked_add(BLOCK).ok_or(Error::Inval)?;
-        if end > self.data.len() {
-            return Err(Error::Io);
+        let r = self.range(bno)?;
+        if let Some(p) = self.pending.as_ref()
+            && let Some((_, b)) = p.iter().rev().find(|(n, _)| *n == bno)
+        {
+            buf.copy_from_slice(b);
+            return Ok(());
         }
-        buf.copy_from_slice(&self.data[off..end]);
+        buf.copy_from_slice(&self.data[r]);
         Ok(())
     }
 
     fn write_block(&mut self, bno: u32, buf: &[u8; BLOCK]) -> Result<(), Error> {
-        self.ops = self.ops.saturating_add(1);
-        if self.ops > self.limit {
-            self.dropped = self.dropped.saturating_add(1);
+        if !self.tick() {
             return Ok(());
         }
-        let off = (bno as usize).checked_mul(BLOCK).ok_or(Error::Inval)?;
-        let end = off.checked_add(BLOCK).ok_or(Error::Inval)?;
-        if end > self.data.len() {
-            return Err(Error::Io);
+        self.range(bno)?;
+        match self.pending.as_mut() {
+            Some(p) => {
+                p.push((bno, *buf));
+                Ok(())
+            }
+            None => self.store(bno, buf),
         }
-        self.data[off..end].copy_from_slice(buf);
-        Ok(())
     }
 
     fn flush(&mut self) -> Result<(), Error> {
-        self.ops = self.ops.saturating_add(1);
-        if self.ops > self.limit {
-            self.dropped = self.dropped.saturating_add(1);
+        if !self.tick() {
+            return Ok(());
+        }
+        if let Some(p) = self.pending.take() {
+            for (bno, buf) in &p {
+                self.store(*bno, buf)?;
+            }
+            self.pending = Some(Vec::new());
         }
         Ok(())
     }
@@ -2808,6 +2888,109 @@ mod tests {
                 mount(&mut disk, &mut vol).expect("mount after crash");
                 i += 1;
             }
+        }
+    }
+
+    fn xorshift64(s: &mut u64) -> u64 {
+        *s ^= *s << 13;
+        *s ^= *s >> 7;
+        *s ^= *s << 17;
+        *s
+    }
+
+    /// Iterations the crash workload commits; `run_vibefs_crash.KILL_COMMIT_MAX`.
+    const CRASH_ITERS: u32 = 200;
+    const CRASH_ITER_BYTES: usize = 300;
+
+    fn crash_payload(n: u32) -> [u8; CRASH_ITER_BYTES] {
+        let mut p = [0u8; CRASH_ITER_BYTES];
+        for (k, b) in p.iter_mut().enumerate() {
+            *b = (n as usize + k) as u8;
+        }
+        p
+    }
+
+    /// One iteration of the guest's `crash_loop`: open `/w` with `O_TRUNC`,
+    /// write 300 bytes, sync.
+    fn crash_iter<D: Disk>(v: &mut Vol, d: &mut D, n: u32) -> Result<(), Error> {
+        let w = match v.lookup(d, ROOT_INO, b"w") {
+            Ok(w) => w,
+            Err(Error::NotFound) => {
+                v.create(d, ROOT_INO, b"w", InodeKind::Reg, 0o644, None)?;
+                v.lookup(d, ROOT_INO, b"w")?
+            }
+            Err(e) => return Err(e),
+        };
+        v.truncate(d, w.ino, 0)?;
+        let wrote = v.write(d, w.ino, 0, &crash_payload(n))?;
+        assert_eq!(wrote, CRASH_ITER_BYTES);
+        v.sync(d)
+    }
+
+    fn crash_decode(b: &[u8]) -> Option<u32> {
+        let n = u32::from(*b.first()?);
+        (b.len() == CRASH_ITER_BYTES && b == crash_payload(n)).then_some(n)
+    }
+
+    #[test]
+    fn crash_workload_seeded_points() {
+        // 256 KiB: `run_vibefs_crash.IMAGE_BYTES`, the guest's image.
+        let mut base = fresh(256 * 1024);
+        {
+            let mut d = MemDisk::new(&mut base).unwrap();
+            let mut v = Vol::new();
+            mount(&mut d, &mut v).unwrap();
+            crash_iter(&mut v, &mut d, 0).unwrap();
+        }
+        // Probe: 200 commits fit the image, and T counts their device ops.
+        let total = {
+            let mut img = base.clone();
+            let mut c = CrashDisk::seeded(&mut img, u64::MAX, 1).unwrap();
+            let mut v = Vol::new();
+            mount(&mut c, &mut v).unwrap();
+            for n in 1..=CRASH_ITERS {
+                crash_iter(&mut v, &mut c, n)
+                    .unwrap_or_else(|e| panic!("probe iteration {n}: {e:?}"));
+            }
+            c.ops
+        };
+        let mut rng = 0x5eed_c0de_u64;
+        for _ in 0..1000 {
+            let p = 1 + xorshift64(&mut rng) % total;
+            let seed_p = xorshift64(&mut rng);
+            let mut img = base.clone();
+            let mut last = 0u32;
+            {
+                let mut c = CrashDisk::seeded(&mut img, p, seed_p).unwrap();
+                let mut v = Vol::new();
+                mount(&mut c, &mut v).unwrap();
+                for n in 1..=CRASH_ITERS {
+                    if c.ops >= p {
+                        break;
+                    }
+                    last = n;
+                    if crash_iter(&mut v, &mut c, n).is_err() {
+                        break;
+                    }
+                }
+                c.crash();
+            }
+            let ctx = format!("seed {seed_p:#x} p {p} N {last}");
+            let mut disk = MemDisk::new(&mut img).unwrap();
+            let r = fsck(&mut disk).unwrap_or_else(|e| panic!("{ctx}: fsck {e:?}"));
+            assert_eq!((r.errors, r.warnings), (0, 0), "{ctx}: fsck");
+            let mut vol = Vol::new();
+            mount(&mut disk, &mut vol).unwrap_or_else(|e| panic!("{ctx}: mount {e:?}"));
+            let w = vol
+                .lookup(&mut disk, ROOT_INO, b"w")
+                .unwrap_or_else(|e| panic!("{ctx}: /w {e:?}"));
+            let mut buf = [0u8; 512];
+            let got = vol.read(&mut disk, w.ino, 0, &mut buf).unwrap();
+            let i = crash_decode(&buf[..got]);
+            assert!(
+                i == Some(last) || (last > 0 && i == Some(last - 1)),
+                "{ctx}: /w holds {i:?}"
+            );
         }
     }
 

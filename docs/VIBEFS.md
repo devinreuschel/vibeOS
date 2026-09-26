@@ -564,12 +564,22 @@ and with an explicit flag, and never writes over a live file's bytes.
 
 Not a clean unmount.
 
-1. **Host:** a disk wrapper that drops writes after a randomized budget,
-   including in the middle of a commit (`write` of a metadata block or the
-   super, and `Flush`). Then `fsck`. Repeat. A clean `fsck` plus `mount`
-   must yield the tree of a committed generation at or after the last
-   `fsync` or `sync` that returned before the crash point, never a mix that
-   fails a checksum while `fsck` said ok.
+1. **Host:** `CrashDisk` in `src/vibefs.rs` (test code) wraps the image.
+   `CrashDisk::seeded(img, p, seed)` models a volatile write cache: writes
+   since the last flush stay pending (reads see them newest-first), a flush
+   at device op `p` or earlier applies them in order, and at op `p + 1`
+   each pending write reaches the image with probability 1/2 from the
+   seed, in order, and every later op is dropped, so a later write can
+   survive where an earlier one did not. `crash_workload_seeded_points`
+   runs the guest's workload (§12 item 2: truncate `/w`, write 300 bytes of
+   iteration N, sync) on a 256 KiB image, first once for all 200
+   iterations, which must never return `NoSpace`, and then at 1,000 seeded
+   crash points. At each, `fsck` must report 0 errors and 0 warnings, the
+   volume must mount, and `/w` must hold iteration N or N-1, N being the
+   last iteration started before the crash. `CrashDisk::new(img, p)` keeps
+   ops 1 to `p` and drops the suffix; `crash_at_each_write_is_consistent`
+   runs it at every op of another workload and requires `fsck` 0 errors
+   and a mount.
 2. **QEMU:** `mkfs` an image that ROADMAP §10.2's volatile-cache device
    serves as the guest's virtio-blk disk with a volatile write cache, boot a
    write loop that `fsync`s, `kill -9` QEMU at a randomized point after the
@@ -583,14 +593,8 @@ Not a clean unmount.
 Killing only between syscalls is not enough; the host wrapper injects the
 drop on device write calls, which is inside `write`/`fsync`.
 
-v1's tests do not check this pass criterion yet:
+v1's QEMU test does not check this pass criterion yet:
 
-- the host test (`crash_at_each_write_is_consistent` in `src/vibefs.rs`)
-  replays one workload once per device operation N (a write or a flush),
-  applies ops 1 to N in order, drops every later op, and checks only that
-  `fsck` reports 0 errors
-  and `mount` succeeds; the committed-generation oracle and reordering
-  since the last flush arrive with ROADMAP §12.5
 - the QEMU test (`tests/harness/run_vibefs_crash.py`) passes when
   `fsck-vibefs` prints `errors 0`. It does not read `/crash/w` from the
   image or check it against that criterion. The guest ignores `sync_fs`
