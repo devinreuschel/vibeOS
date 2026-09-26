@@ -325,9 +325,20 @@ needs = ["`PerCpu` split into owner-only state and a remote view"]
 why = "text: lands after the F039 box above"
 
 [[box]]
+key = "`DmaBuffer` and `GuardedStack` are move-only"
+needs = [
+  "`make test-unit` runs doc tests,",  # L1293
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
 key = "the buddy hands out an owner token"
-needs = ["`DmaBuffer` and `GuardedStack` are move-only handles"]
-why = "text: lands with or after the box above"
+needs = [
+  "`DmaBuffer` and `GuardedStack` are move-only handles",
+  "`make test-unit` runs doc tests,",  # L1293
+  "`kva_init::vmap` returns a move-only handle",  # L1299
+]
+why = "text: lands with or after the box above; claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
 
 [[box]]
 key = "an IF-off tracer in an `irqoff` build variant"
