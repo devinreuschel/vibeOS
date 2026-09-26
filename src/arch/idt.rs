@@ -216,6 +216,9 @@ const PARANOID_MASK: u32 = {
     m
 };
 
+/// DR6 with no debug condition recorded (SDM Vol. 3B, 18.2.3).
+const DR6_IDLE: u32 = 0xFFFF_0FF0;
+
 /// Bytes from one stub to the next.
 const STUB_STRIDE: usize = 32;
 
@@ -372,32 +375,48 @@ global_asm!(
     vibeos_trap_iret:
         iretq
 
-    // NMI, #DB, #DF, #MC. ebx (callee-saved) keeps the swap decision
-    // across the call, and the exit mirrors it.
+    // NMI, #DB, #DF, #MC. A CPL-3 frame swaps by CS.RPL. A CPL-0 frame can
+    // interrupt the syscall entry or exit with the user GS base loaded, so
+    // it swaps only when GS_BASE is not a kernel (negative) address; #DF,
+    // whose saved CS is undefined, always decides from the sign. ebx
+    // (callee-saved) keeps the decision across the call, and the exit
+    // mirrors it. DR6 is saved, then reset to its idle value.
     .balign 16
     .global vibeos_trap_entry_ist
     vibeos_trap_entry_ist:
         vibeos_trap_save
         xor ebx, ebx
+        cmp edi, {df}
+        je 1f
         test byte ptr [rsp + {cs}], 3
         jz 1f
         swapgs
         mov ebx, 1
+        jmp 2f
     1:
-        mov qword ptr [rsp + {cr2}], 0
-        xor eax, eax
-        cmp edi, {db}
-        jne 2f
-        mov rax, dr6
+        mov ecx, {gs_base}
+        rdmsr
+        test edx, edx
+        js 2f
+        swapgs
+        mov ebx, 1
     2:
+        mov qword ptr [rsp + {cr2}], 0
+        mov qword ptr [rsp + {dr6}], 0
+        cmp edi, {db}
+        jne 3f
+        mov rax, dr6
         mov [rsp + {dr6}], rax
+        mov eax, {dr6_idle}
+        mov dr6, rax
+    3:
         mov rdi, rsp
         call {dispatch}
         vibeos_trap_exit_cli
         test ebx, ebx
-        jz 3f
+        jz 5f
         swapgs
-    3:
+    5:
         vibeos_trap_restore
     .global vibeos_trap_iret_ist
     vibeos_trap_iret_ist:
@@ -416,6 +435,9 @@ global_asm!(
     cs = const F_CS,
     pf = const vectors::PF,
     db = const vectors::DB,
+    df = const vectors::DF,
+    gs_base = const x86::IA32_GS_BASE,
+    dr6_idle = const DR6_IDLE,
     debug = const cfg!(debug_assertions) as u8,
     dispatch = sym trap_dispatch,
 );
@@ -496,6 +518,8 @@ fn nmi(frame: &mut TrapFrame) {
     crate::panic::exception_halt(b"nmi", &frame.iret, None, None);
 }
 
+/// Under `kernel_tests` a `testing` hook for `#DB` runs first, in the
+/// dispatcher, and can resume instead.
 fn debug_ex(frame: &mut TrapFrame) {
     crate::panic::exception_halt(b"#DB", &frame.iret, None, None);
 }
@@ -744,6 +768,11 @@ pub mod testing {
         HOOKS[vector as usize].store(p, Ordering::Release);
     }
     static CPL3_HITS: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
+
+    /// Entries of `vector` whose saved CS.RPL was 3, since boot.
+    pub fn cpl3_hits(vector: u8) -> u64 {
+        CPL3_HITS[vector as usize].load(Ordering::Relaxed)
+    }
 
     pub(super) fn on_entry(frame: &mut TrapFrame, v: u8) -> bool {
         if frame.user_mode() {

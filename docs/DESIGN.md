@@ -918,7 +918,7 @@ that review cites means the review's text.
 | I1 | Lock rank HEAP < PT < BUDDY < SCHED < DEVICE < SERIAL (§2.1); a second lock of a held rank only through `lock_nested` (§2.3) | `lock.rs`, `sync_init::lock_enter` | enforced at runtime, per CPU | Partly: `lock.rs` still ranks the heap after PT and BUDDY, so an allocation under either fails only when it grows the heap; a nested lock of the same rank passes the check and its release clears the rank bit the outer lock still holds, `IrqCell` has no rank, and a lock held across a switch goes unseen (ROADMAP §10.3, §13.12, F108) |
 | I2 | Hard-IRQ context never blocks or allocates (§2.2) | convention | documented | Yes, unchecked: only `irq_init::dispatch` sets `IN_ISR`, and no blocking primitive asserts it (ROADMAP §10.3, F110) |
 | I3 | IF=0 through every return-to-user sequence (§5.10 rule 4) | FMASK (§7.2) | documented | No: the syscall exit has no `cli` and `console_init::wait_key` returns with IF=1 (F001); `enter_user_full` runs with IF=1 (F006) (ROADMAP §10.6) |
-| I4 | Kernel code outside the §5.10 entry and exit sequences runs with `GS_BASE` = this CPU's `PerCpu` (§5.10) | `arch::gs`, `per_cpu_init` | documented | No: the IF=1 window in `enter_user_full` (F006), an NMI, `#MC`, or `#DB` taken in the syscall entry or exit window, and a fault on the return-to-user `iretq` (both F007) run on the user base (ROADMAP §10.6) |
+| I4 | Kernel code outside the §5.10 entry and exit sequences runs with `GS_BASE` = this CPU's `PerCpu` (§5.10) | `arch::gs`, `per_cpu_init` | documented | No: the IF=1 window in `enter_user_full` (F006) and a fault on the return-to-user `iretq` (F007) run on the user base (ROADMAP §10.6) |
 | I5 | One entry stub per vector makes the `swapgs` decision (§5.10 rule 1) | `arch/idt.rs` | enforced by construction: `idt::init` points every gate at a stub it generates, and `scripts/check_entry.py` fails on an `x86-interrupt` handler outside `src/arch/` | Yes |
 | I6 | Ring 3 never halts the kernel, pid 1's exit excepted (§2.5, §5.2, §11.5) | `proc_init::try_user_fault` | documented | No: ring-3 `#DB`, and `#AC` when `CR0.AM` is set, halt (F005), and so do the I4 windows (ROADMAP §10.6) |
 | I7 | The kernel reads or writes user memory only through the §5.1 user-memory accessors, and writes an address space that is not running only through the fill API (ROADMAP §10.6) | `addr_space.rs`; the arch accessors from ROADMAP §10.6 | enforced by SMAP where the CPU has it (PAN on aarch64, ROADMAP §11.6); the fill-API rule is documented | Partly: today's accessors copy through the physmap after `check_user_range`, and `write_bytes` ignores the PTE's `WRITABLE` bit (ROADMAP §10.6, F023) |
@@ -2976,9 +2976,10 @@ architectures. Planned (ROADMAP §11.3, §11.6): the aarch64 port does not exist
    ROADMAP §25.3's recovery runs. The IST exit (restore the GS state found, then `iretq` on the IST
    stack) serves only CPL-0 frames and `#DF`. So while a user thread is in the kernel its user GS
    base is in `KERNEL_GS_BASE`, however it entered, and the context switch reads it there (ROADMAP
-   §18.3). Linux's x86_64 entry splits the IST vectors the same way. Rule; not yet enforced: ROADMAP
-   §10.6 (F005, F007); the IST handlers decide from CS.RPL at every CPL and run their bodies on the
-   IST stack. The sign test fails once FSGSBASE lets userspace write a kernel-half GS base. Planned
+   §18.3). Linux's x86_64 entry splits the IST vectors the same way. The CPL-0 and `#DF` sign test
+   is built: the IST entry path reads `GS_BASE` with `rdmsr` and keeps its decision in `ebx` for the
+   exit. Rule; not yet enforced for a CPL-3 frame: ROADMAP §10.6 (F005); the IST entry swaps by
+   CS.RPL but runs the body on the IST stack and returns through the IST exit. The sign test fails once FSGSBASE lets userspace write a kernel-half GS base. Planned
    (ROADMAP §18.3, F133): with FSGSBASE on, a CPL-0 IST entry and `#DF` save `GS_BASE` with
    `rdgsbase`, load this CPU's `PerCpu` pointer, and restore the saved value on exit. A CPL-3 entry
    keeps its `swapgs`: the save-and-load protocol would leave `KERNEL_GS_BASE` holding the `PerCpu`
@@ -4691,8 +4692,7 @@ user load a kernel-half base, saves `GS_BASE` and loads the per-CPU base uncondi
 §18.3). Applying that save-and-load protocol to a CPL-3 frame as well leaves the `PerCpu` address in
 `KERNEL_GS_BASE` while the thread is in the kernel, so a switch from the moved body saves it as the
 thread's GS base, and the thread resumes on another CPU with a kernel address as its GS base, or
-with two CPUs sharing one `PerCpu`. Not yet enforced: the `arch/idt.rs` IST entries decide from
-CS.RPL at CPL 0 too ([section 7.5](#75-per-cpu-data)).
+with two CPUs sharing one `PerCpu`.
 
 **A user program halts every CPU.**
 Ring-3 activity reaches `exception_halt` on three paths. `debug_ex` has no ring-3 branch and
