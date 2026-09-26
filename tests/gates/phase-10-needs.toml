@@ -270,6 +270,14 @@ needs = [
 ]
 why = "claim: `user_exceptions`' `int3`, x87 `#MF` and SIMD `#XM` cases are the next two boxes'"
 
+# L1062
+[[box]]
+key = "`SIGFPE` from a user x87"
+needs = [
+  "one per-CPU control-register routine, run",  # L1398
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
 [[box]]
 key = "`spawn_inner` returns `Result` instead of calling"
 needs = ["`vibeos-core` gains `kalloc`"]
