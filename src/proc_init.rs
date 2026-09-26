@@ -16,9 +16,9 @@ use vibeos::fs::FsError;
 use vibeos::kbd::{DecodedKey, NamedKey};
 use vibeos::proc::{
     Creds, Cwd, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, InitState, MAX_FDS, MAX_PROCS,
-    ProcState, SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGSTOP, SigAct,
-    WNOHANG, default_action, fd_flags_from_open, reaper_for, sig_name, wait_exited, wait_signaled,
-    wait_stopped,
+    ProcState, SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGSTOP, SIGTRAP,
+    SigAct, WNOHANG, default_action, fd_flags_from_open, reaper_for, sig_name, wait_exited,
+    wait_signaled, wait_stopped,
 };
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::syscall::{
@@ -1328,6 +1328,7 @@ fn sig_for_vec(vec: u8) -> Option<u32> {
         vectors::UD => Some(SIGILL),
         vectors::NP | vectors::SS => Some(SIGBUS),
         vectors::GP | vectors::PF => Some(SIGSEGV),
+        vectors::BP => Some(SIGTRAP),
         _ => None,
     }
 }

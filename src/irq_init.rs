@@ -9,11 +9,9 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use vibeos::apic::{Polarity, Trigger};
-use vibeos::desc::InterruptFrame;
 use vibeos::dev::Device;
 use vibeos::irq::{
-    self, IrqError, MsixEntry, POOL_END, POOL_START, VectorPool, in_pool, msi_message_addr,
-    msi_message_data, pool_index,
+    self, IrqError, MsixEntry, VectorPool, in_pool, msi_message_addr, msi_message_data, pool_index,
 };
 use vibeos::pci::{self, Bdf};
 use vibeos::sched::FAR_DEADLINE;
@@ -96,8 +94,8 @@ fn set_in_isr(on: bool) {
     }
 }
 
-extern "x86-interrupt" fn device_irq<const N: u8>(_frame: InterruptFrame) {
-    dispatch(N);
+fn device_irq(frame: &mut arch::idt::TrapFrame) {
+    dispatch(frame.vector as u8);
 }
 
 pub fn dispatch(vec: u8) {
@@ -416,19 +414,10 @@ pub fn init() {
 }
 
 fn install_pool_stubs() {
-    // 0x30 is the keyboard overlay. Dispatcher owns the rest of the pool.
-    macro_rules! stubs {
-        ($($n:literal),* $(,)?) => {
-            $(arch::idt::set_handler($n, device_irq::<$n>);)*
-        };
+    // 0x30 is the keyboard's. The dispatcher owns the rest of the pool.
+    for v in vectors::DEVICE_VEC_START..=vectors::DEVICE_VEC_END {
+        arch::idt::set_handler(v, device_irq);
     }
-    stubs!(
-        49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71,
-        72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94,
-        95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113,
-        114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127
-    );
-    let _ = (POOL_START, POOL_END);
 }
 
 #[cfg(feature = "kernel_tests")]
