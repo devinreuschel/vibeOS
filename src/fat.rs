@@ -737,7 +737,11 @@ impl FatVol {
         if src_name == dst_name && src_dir == dst_dir {
             return Ok(());
         }
+        self.check_name(dst_name)?;
         let src = self.lookup(d, src_dir, src_name)?;
+        if src.kind == InodeKind::Dir && self.in_subtree(d, src.clu, dst_dir)? {
+            return Err(FatError::Inval);
+        }
         let r = self.iget(src.dir_clu, src.dir_off)?;
         let res = self.rename_to(d, src, &r, src_dir, dst_dir, dst_name);
         let put = self.iput(d, r);
@@ -755,6 +759,10 @@ impl FatVol {
         dst_name: &[u8],
     ) -> Result<(), FatError> {
         match self.lookup(d, dst_dir, dst_name) {
+            // The source's own dirent, as a case-only rename finds it: the
+            // new name is written before the old one goes, so nothing is
+            // unlinked.
+            Ok(dst) if (dst.dir_clu, dst.dir_off) == (src.dir_clu, src.dir_off) => {}
             Ok(dst) => {
                 if dst.kind == InodeKind::Dir {
                     return Err(FatError::IsDir);
@@ -787,10 +795,60 @@ impl FatVol {
         ent[..11].copy_from_slice(&short);
         let short_off = ent_off + (n_lfn * ENT) as u32;
         self.write_dir_raw(d, dst_dir, short_off, &ent)?;
+        if src.kind == InodeKind::Dir && src_dir != dst_dir {
+            let parent = if dst_dir == self.info.root_clus {
+                0
+            } else {
+                dst_dir
+            };
+            self.set_dotdot(d, src.clu, parent)?;
+        }
         d.flush()?;
         self.rekey(r, dst_dir, short_off);
         self.mark_deleted(d, src_dir, src.dir_off)?;
         d.flush()
+    }
+
+    /// The parent cluster `dir`'s `..` entry names, the root's for 0.
+    fn dotdot_of<D: Disk>(&mut self, d: &mut D, dir: u32) -> Result<u32, FatError> {
+        let mut ent = [0u8; ENT];
+        if !self.read_dir_raw(d, dir, ENT as u32, &mut ent)? || &ent[..11] != b"..         " {
+            return Err(FatError::Corrupt);
+        }
+        let clu = (le16(&ent, 20) as u32) << 16 | le16(&ent, 26) as u32;
+        Ok(if clu == 0 { self.info.root_clus } else { clu })
+    }
+
+    /// Point `dir`'s `..` entry at `parent` (0 for the root, as
+    /// `init_dir_cluster` writes it).
+    fn set_dotdot<D: Disk>(&mut self, d: &mut D, dir: u32, parent: u32) -> Result<(), FatError> {
+        let mut ent = [0u8; ENT];
+        if !self.read_dir_raw(d, dir, ENT as u32, &mut ent)? || &ent[..11] != b"..         " {
+            return Err(FatError::Corrupt);
+        }
+        put_le16(&mut ent, 20, (parent >> 16) as u16);
+        put_le16(&mut ent, 26, parent as u16);
+        self.write_dir_raw(d, dir, ENT as u32, &ent)
+    }
+
+    /// Whether directory `dir` is `top` or lies below it, walking `..` up
+    /// to the root.
+    fn in_subtree<D: Disk>(&mut self, d: &mut D, top: u32, dir: u32) -> Result<bool, FatError> {
+        let mut cur = dir;
+        let mut steps = 0u32;
+        loop {
+            if cur == top {
+                return Ok(true);
+            }
+            if cur == self.info.root_clus {
+                return Ok(false);
+            }
+            if steps > self.info.nclus {
+                return Err(FatError::Corrupt);
+            }
+            cur = self.dotdot_of(d, cur)?;
+            steps += 1;
+        }
     }
 
     pub fn sync<D: Disk>(&mut self, d: &mut D) -> Result<(), FatError> {
@@ -2904,6 +2962,134 @@ mod tests {
         with_vol(&mut b, |v, d| {
             let counted = v.count_free(d).unwrap();
             assert_eq!(v.free, counted, "FSInfo free count after a remount");
+        });
+        fsck(&b);
+    }
+
+    /// `n` bytes of a pattern that differs per `seed`.
+    fn pattern(seed: u8, n: usize) -> Vec<u8> {
+        (0..n).map(|i| (i as u8).wrapping_mul(7) ^ seed).collect()
+    }
+
+    /// Names in `dir` equal to `name` ignoring ASCII case.
+    fn ci_names(v: &mut FatVol, d: &mut MemDisk, dir: u32, name: &[u8]) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut node = Node::EMPTY;
+        let mut cookie = 0u64;
+        while let Some(next) = v.readdir(d, dir, cookie, &mut node).unwrap() {
+            if node.name().eq_ignore_ascii_case(name) {
+                out.push(node.name().to_vec());
+            }
+            cookie = next;
+        }
+        out
+    }
+
+    fn case_only_rename(from: &[u8], to: &[u8]) {
+        let mut b = fresh(INITRD_BYTES);
+        let (clu, size, data) = with_vol(&mut b, |v, d| {
+            let root = v.info.root_clus;
+            // Leave three deleted slots ahead of `from`, so the rename's two
+            // new entries fit without growing the directory: `dir_reserve`
+            // still extends one at the first 0x00 entry (F053).
+            v.create(d, root, b"scratch-slot.bin", false).unwrap();
+            v.unlink(d, root, b"scratch-slot.bin", false).unwrap();
+            let data = pattern(0x5A, 3 * v.info.clus_bytes());
+            let r = create_iget(v, d, root, from);
+            v.write_ino(d, r.key(), 0, false, &data).unwrap();
+            v.iput(d, r).unwrap();
+            let src = v.lookup(d, root, from).unwrap();
+            let free = v.free;
+            v.rename(d, root, from, root, to).unwrap();
+            assert_eq!(v.free, free, "a case-only rename frees nothing");
+            let got = v.lookup(d, root, to).unwrap();
+            assert_eq!((got.clu, got.size), (src.clu, src.size));
+            let mut out = vec![0u8; data.len()];
+            v.read(d, got.clu, got.size, 0, &mut out).unwrap();
+            assert_eq!(out, data);
+            assert_eq!(ci_names(v, d, root, from), vec![to.to_vec()]);
+            v.sync(d).unwrap();
+            (got.clu, got.size, data)
+        });
+        with_vol(&mut b, |v, d| {
+            let root = v.info.root_clus;
+            let r = create_iget(v, d, root, b"OTHER.BIN");
+            v.write_ino(d, r.key(), 0, false, &pattern(0xA5, data.len()))
+                .unwrap();
+            v.iput(d, r).unwrap();
+            let got = v.lookup(d, root, to).unwrap();
+            assert_eq!((got.clu, got.size), (clu, size));
+            let mut out = vec![0u8; data.len()];
+            v.read(d, got.clu, got.size, 0, &mut out).unwrap();
+            assert_eq!(out, data, "the renamed file's clusters were reused");
+            v.sync(d).unwrap();
+        });
+        fsck(&b);
+    }
+
+    #[test]
+    fn rename_case_only() {
+        case_only_rename(b"a", b"A");
+    }
+
+    #[test]
+    fn rename_case_only_lfn() {
+        case_only_rename(b"hello.txt", b"Hello.txt");
+    }
+
+    #[test]
+    fn rename_into_own_subtree_einval() {
+        let mut b = fresh(INITRD_BYTES);
+        with_vol(&mut b, |v, d| {
+            let root = v.info.root_clus;
+            let p = v.create(d, root, b"p", true).unwrap();
+            let c = v.create(d, p.clu, b"c", true).unwrap();
+            let free = v.free;
+            assert_eq!(
+                v.rename(d, root, b"p", c.clu, b"q").unwrap_err(),
+                FatError::Inval
+            );
+            assert_eq!(
+                v.rename(d, root, b"p", p.clu, b"q").unwrap_err(),
+                FatError::Inval
+            );
+            assert_eq!(v.lookup(d, root, b"p").unwrap().clu, p.clu);
+            assert_eq!(v.lookup(d, p.clu, b"c").unwrap().clu, c.clu);
+            assert_eq!(v.free, free);
+            v.sync(d).unwrap();
+        });
+        fsck(&b);
+    }
+
+    #[test]
+    fn rename_dir_dotdot_names_new_parent() {
+        let mut b = fresh(INITRD_BYTES);
+        with_vol(&mut b, |v, d| {
+            let root = v.info.root_clus;
+            let a = v.create(d, root, b"a", true).unwrap();
+            let bb = v.create(d, root, b"b", true).unwrap();
+            let dd = v.create(d, a.clu, b"d", true).unwrap();
+            let r = create_iget(v, d, dd.clu, b"IN.TXT");
+            v.write_ino(d, r.key(), 0, false, b"inside").unwrap();
+            v.iput(d, r).unwrap();
+            v.rename(d, a.clu, b"d", bb.clu, b"d").unwrap();
+            assert_eq!(v.dotdot_of(d, dd.clu).unwrap(), bb.clu);
+            let mut ent = [0u8; ENT];
+            v.read_dir_raw(d, dd.clu, ENT as u32, &mut ent).unwrap();
+            assert_eq!(
+                (le16(&ent, 20) as u32) << 16 | le16(&ent, 26) as u32,
+                bb.clu
+            );
+            v.rename(d, bb.clu, b"d", root, b"d").unwrap();
+            v.read_dir_raw(d, dd.clu, ENT as u32, &mut ent).unwrap();
+            assert_eq!((le16(&ent, 20), le16(&ent, 26)), (0, 0));
+            let got = v.lookup(d, root, b"d").unwrap();
+            assert_eq!(got.clu, dd.clu);
+            let f = v.lookup(d, got.clu, b"IN.TXT").unwrap();
+            let mut out = [0u8; 6];
+            v.read(d, f.clu, f.size, 0, &mut out).unwrap();
+            assert_eq!(&out, b"inside");
+            v.sync(d).unwrap();
         });
         fsck(&b);
     }

@@ -1305,12 +1305,19 @@ impl Vol {
         if src_dir == dst_dir && src_name == dst_name {
             return Ok(());
         }
-        if self.find_dent(dst_dir, dst_name).is_ok() {
-            self.unlink(d, dst_dir, dst_name, false)?;
-        }
+        // Validate before anything changes, so a refused rename loses no
+        // destination.
         let ds = self.inode_slot(dst_dir)?;
         if self.inodes[ds].kind != KIND_DIR {
             return Err(Error::NotDir);
+        }
+        let src_ino = self.dents[e].ino;
+        let ss = self.inode_slot(src_ino)?;
+        if self.inodes[ss].kind == KIND_DIR && self.in_subtree(src_ino, dst_dir)? {
+            return Err(Error::Inval);
+        }
+        if self.find_dent(dst_dir, dst_name).is_ok() {
+            self.unlink(d, dst_dir, dst_name, false)?;
         }
         let mut nm = [0u8; MAX_NAME];
         nm[..dst_name.len()].copy_from_slice(dst_name);
@@ -1320,6 +1327,31 @@ impl Vol {
         self.bump_mtime(src_dir);
         self.bump_mtime(dst_dir);
         Ok(())
+    }
+
+    /// Whether directory `dir` is `top` or lies below it, walking up through
+    /// the one dirent that names each directory to the root.
+    fn in_subtree(&self, top: u32, dir: u32) -> Result<bool, Error> {
+        let mut cur = dir;
+        let mut steps = 0usize;
+        loop {
+            if cur == top {
+                return Ok(true);
+            }
+            if cur == self.root_ino {
+                return Ok(false);
+            }
+            if steps >= MAX_INODES {
+                return Err(Error::Corrupt);
+            }
+            let up = self
+                .dents
+                .iter()
+                .find(|de| de.used && de.ino == cur)
+                .ok_or(Error::Corrupt)?;
+            cur = up.parent;
+            steps += 1;
+        }
     }
 
     fn extent_crc<D: Disk>(&mut self, d: &mut D, phys: u32, len: u32) -> Result<u32, Error> {
@@ -3179,5 +3211,37 @@ mod tests {
         with_vol(&mut b, |v, d| assert_eq!(root_kind(v, d), META_DIR_INT));
         let r = fsck_of(&mut b);
         assert_eq!(r.count(Defect::DupName), 1, "{r:?}");
+    }
+
+    #[test]
+    fn rename_dir_into_own_subtree_einval() {
+        let mut b = fresh(64 * BLOCK);
+        with_vol(&mut b, |v, d| {
+            v.create(d, ROOT_INO, b"p", InodeKind::Dir, 0o755, None)
+                .unwrap();
+            let p = v.lookup(d, ROOT_INO, b"p").unwrap().ino;
+            v.create(d, p, b"c", InodeKind::Dir, 0o755, None).unwrap();
+            let c = v.lookup(d, p, b"c").unwrap().ino;
+            assert_eq!(
+                v.rename(d, ROOT_INO, b"p", c, b"q").unwrap_err(),
+                Error::Inval
+            );
+            assert_eq!(
+                v.rename(d, ROOT_INO, b"p", p, b"q").unwrap_err(),
+                Error::Inval
+            );
+            let x = new_file(v, d, b"tmp");
+            v.rename(d, ROOT_INO, b"tmp", c, b"x").unwrap();
+            assert_eq!(
+                v.rename(d, ROOT_INO, b"p", c, b"x").unwrap_err(),
+                Error::Inval
+            );
+            assert_eq!(v.lookup(d, c, b"x").unwrap().ino, x);
+            assert_eq!(v.walk(d, b"/p/c").unwrap().ino, c);
+            v.sync(d).unwrap();
+        });
+        let r = fsck_of(&mut b);
+        assert_eq!(r.errors, 0, "{r:?}");
+        assert_eq!(r.count(Defect::Unreachable), 0);
     }
 }
