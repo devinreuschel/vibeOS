@@ -2218,6 +2218,9 @@ non-contiguous frames is the second.
   when CR2 lies in the guard of the stack the interrupted code ran on; it uses the same layout, so
   stack allocation has one path. Rule; not yet enforced: ROADMAP §11.3. Today a guarded stack of *n*
   pages reserves *n+1* pages of VA, maps the upper *n*, and has no alignment.
+- A `GuardedStack` (`vibeos::thread::GuardedStack`, re-exported as `kva_init::GuardedStack`) is a
+  move-only handle with private fields; only `kva_init::alloc_guarded_stack` builds one, and
+  `free_stack` takes it by value.
 - Stack frames are allocated as *n* separate order-0 frames, not one order-*k* block. Stacks do not
   need physical contiguity and requesting it fragments the buddy allocator for nothing. Planned
   (ROADMAP §10.3): the `GuardedStack` holds each frame's `Frames` (§4.2).

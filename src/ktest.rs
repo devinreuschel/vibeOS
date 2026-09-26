@@ -514,7 +514,7 @@ fn warm_kva() -> (usize, usize) {
     let mut coalesces = 0;
     let mut rounds = 0;
     while coalesces < 2 && rounds < WARM_ROUNDS {
-        let Some(stack) = kva_init::alloc_guarded_stack(WARM_STACK_PAGES) else {
+        let Ok(stack) = kva_init::alloc_guarded_stack(WARM_STACK_PAGES) else {
             break;
         };
         let n = kva_init::stats().free_ranges;
@@ -820,16 +820,16 @@ fn test_heap_oom() -> Outcome {
 }
 
 fn test_stack_guard() -> Outcome {
-    let Some(stack) = kva_init::alloc_guarded_stack(4) else {
+    let Ok(stack) = kva_init::alloc_guarded_stack(4) else {
         return Outcome::Fail("alloc_guarded_stack");
     };
-    unsafe { (stack.mapped_base().as_u64() as *mut u64).write_volatile(0x1111_2222) };
-    let got = unsafe { (stack.mapped_base().as_u64() as *const u64).read_volatile() };
+    unsafe { (stack.base().as_u64() as *mut u64).write_volatile(0x1111_2222) };
+    let got = unsafe { (stack.base().as_u64() as *const u64).read_volatile() };
     if got != 0x1111_2222 {
         kva_init::free_stack(stack);
         return Outcome::Fail("mapped stack not writable");
     }
-    let guard = stack.guard.as_u64();
+    let guard = stack.guard().as_u64();
     let fault = catch_fault(|| unsafe {
         (guard as *mut u8).write_volatile(1);
     });
@@ -843,7 +843,7 @@ fn test_stack_guard() -> Outcome {
 
 fn test_kva_roundtrip() -> Outcome {
     let before = free_frames();
-    let Some(stack) = kva_init::alloc_guarded_stack(4) else {
+    let Ok(stack) = kva_init::alloc_guarded_stack(4) else {
         return Outcome::Fail("alloc_guarded_stack");
     };
     let mid = free_frames();
@@ -863,7 +863,7 @@ fn test_kva_roundtrip() -> Outcome {
 
 fn test_kva_deferred() -> Outcome {
     let before = free_frames();
-    let Some(stack) = kva_init::alloc_guarded_stack(4) else {
+    let Ok(stack) = kva_init::alloc_guarded_stack(4) else {
         return Outcome::Fail("alloc_guarded_stack");
     };
     let mid = free_frames();
@@ -1410,10 +1410,10 @@ fn test_bootcell_set_once() -> Outcome {
 }
 
 fn test_df_on_ist() -> Outcome {
-    let Some(stack) = kva_init::alloc_guarded_stack(1) else {
+    let Ok(stack) = kva_init::alloc_guarded_stack(1) else {
         return Outcome::Fail("guarded stack");
     };
-    let poison = stack.guard.as_u64() + 0x800;
+    let poison = stack.guard().as_u64() + 0x800;
     let g = x86::InterruptGuard::enter();
     let caught = arch::catch::catch(vectors::DF, || unsafe {
         vibeos_fault_on_bad_stack(poison);

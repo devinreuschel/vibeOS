@@ -5,7 +5,7 @@
 
 use core::mem::{offset_of, size_of};
 
-use crate::paging::PAGE_SIZE_4K;
+use crate::paging::{PAGE_SIZE_4K, VirtAddr};
 use crate::time::Instant;
 
 /// Global TCB table size. UP today; phase 4 still addresses by id.
@@ -93,17 +93,56 @@ impl WaitOutcome {
     }
 }
 
-/// Guarded kernel stack identity (default 4×4 KiB + unmapped guard).
-/// Mapping is `kva_init`'s; this is only the VA so `Tcb` can live here.
-#[derive(Clone, Copy, Debug)]
-pub struct KernelStack {
-    pub guard: u64,
-    pub pages: usize,
+/// Most pages one guarded kernel stack maps (the guard page not counted).
+pub const MAX_STACK_PAGES: usize = 32;
+
+/// A guarded kernel stack: `pages` mapped pages above one unmapped guard
+/// page at `guard` (default 4×4 KiB, DESIGN §4.5). A move-only handle
+/// with private fields: only `kva_init::alloc_guarded_stack` builds one
+/// (through [`GuardedStack::from_raw_parts`]) and only `kva_init::free_stack`
+/// takes it apart, so the stack is freed once, by its owner. It lives in
+/// this crate so `Tcb` can own it.
+pub struct GuardedStack {
+    guard: VirtAddr,
+    pages: usize,
 }
 
-impl KernelStack {
-    pub fn top(self) -> u64 {
-        self.guard + (self.pages as u64 + 1) * PAGE_SIZE_4K
+impl GuardedStack {
+    /// # Safety
+    /// `[guard, guard + (pages + 1) * 4 KiB)` came from
+    /// `Kva::alloc_guarded(pages)`, its upper `pages` pages are mapped,
+    /// the guard page is not, and no other `GuardedStack` names the range.
+    pub unsafe fn from_raw_parts(guard: VirtAddr, pages: usize) -> Self {
+        Self { guard, pages }
+    }
+
+    /// Give the range back to the allocator that built it.
+    ///
+    /// # Safety
+    /// The caller unmaps the range and shoots it down on every CPU before
+    /// any of its frames or its VA is reused.
+    pub unsafe fn into_raw_parts(self) -> (VirtAddr, usize) {
+        (self.guard, self.pages)
+    }
+
+    /// The unmapped guard page.
+    pub fn guard(&self) -> VirtAddr {
+        self.guard
+    }
+
+    /// The lowest mapped byte.
+    pub fn base(&self) -> VirtAddr {
+        VirtAddr(self.guard.as_u64() + PAGE_SIZE_4K)
+    }
+
+    /// One past the highest mapped byte: the initial RSP.
+    pub fn top(&self) -> VirtAddr {
+        VirtAddr(self.guard.as_u64() + (self.pages as u64 + 1) * PAGE_SIZE_4K)
+    }
+
+    /// Mapped pages, the guard page not counted.
+    pub fn pages(&self) -> usize {
+        self.pages
     }
 }
 
@@ -126,7 +165,7 @@ pub struct Tcb {
     pub id: ThreadId,
     pub name: &'static str,
     pub state: ThreadState,
-    pub stack: Option<KernelStack>,
+    pub stack: Option<GuardedStack>,
     pub context: CpuContext,
     pub entry: fn(),
     /// Intrusive ready-list link. Slice B; phase 4 is per-CPU.
