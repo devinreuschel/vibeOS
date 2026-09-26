@@ -369,13 +369,13 @@ pub fn set_handler(vec: u8, h: extern "x86-interrupt" fn(InterruptFrame)) {
 
 fn set_noerr(vec: u8, h: extern "x86-interrupt" fn(InterruptFrame), ist: u8) {
     IDT.with(|idt| {
-        idt.0[vec as usize] = IdtEntry::interrupt(fn_addr_noerr(h), KERNEL_CS, ist);
+        idt.0[vec as usize] = IdtEntry::interrupt(fn_addr_noerr(h), KERNEL_CS, ist, 0);
     });
 }
 
 fn set_err(vec: u8, h: extern "x86-interrupt" fn(InterruptFrame, u64), ist: u8) {
     IDT.with(|idt| {
-        idt.0[vec as usize] = IdtEntry::interrupt(fn_addr_err(h), KERNEL_CS, ist);
+        idt.0[vec as usize] = IdtEntry::interrupt(fn_addr_err(h), KERNEL_CS, ist, 0);
     });
 }
 
