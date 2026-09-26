@@ -1331,7 +1331,10 @@ fn test_irqcell_reentry_panics() -> Outcome {
             C.with(|_| {});
         });
     });
-    C.force_unlock();
+    // SAFETY: the `arch::catch` longjmp skipped both `Unlock`s and neither
+    // closure resumes, so the holder never touches `C` again; established
+    // here.
+    unsafe { C.force_unlock() };
     per_cpu_init::current()
         .irq_nest
         .store(nest0, Ordering::Relaxed);

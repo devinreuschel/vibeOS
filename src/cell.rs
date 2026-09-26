@@ -134,9 +134,14 @@ impl<T> IrqCell<T> {
         self.data.get()
     }
 
-    /// Panic dump and in-guest catch of a re-entry panic: other CPUs are
-    /// halted or the Drop path was skipped by longjmp.
-    pub fn force_unlock(&self) {
+    /// Clear the owner so the next `with` takes the cell. For the panic
+    /// dump and the in-guest catch of a re-entry panic.
+    ///
+    /// # Safety
+    /// The recorded holder never touches the payload again: its CPU is
+    /// stopped on the panic path (DESIGN §2.5), or an `arch::catch`
+    /// longjmp skipped its `Unlock` and its closure will not resume.
+    pub unsafe fn force_unlock(&self) {
         self.owner.store(0, Ordering::Release);
     }
 }
@@ -191,7 +196,9 @@ mod tests {
             });
         }));
         assert!(hit.is_err());
-        c.force_unlock();
+        // SAFETY: the unwind ended both `with` closures, so the recorded
+        // holder never touches the payload again; established here.
+        unsafe { c.force_unlock() };
         c.with(|v| *v = 1);
         assert_eq!(c.with(|v| *v), 1);
     }
