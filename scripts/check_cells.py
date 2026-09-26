@@ -2,8 +2,12 @@
 """Cells and their soundness rules (DESIGN §2.3, AGENTS.md rule 6).
 
 - Every function in MUST_BE_UNSAFE exists and is declared `unsafe fn`.
-- No `unsafe impl` of `Send` or `Sync` for a type in NO_UNSAFE_IMPL.
-- Generic `Sync` impls live in src/cell.rs; `static mut` only in catch.
+- Each `unsafe impl` of `Send` or `Sync`, its header read whole, bounds
+  every type parameter by `Send`, and a `Sync` impl for a type in
+  SHARES_REF also by `Sync`; a generic one appears only in
+  GENERIC_IMPL_FILES. None is for a type in NO_UNSAFE_IMPL.
+- `static mut` only in catch; no `&'static mut` return; no
+  `static_mut_refs` allow.
 """
 
 from __future__ import annotations
@@ -27,6 +31,15 @@ MUST_BE_UNSAFE: list[tuple[str, str]] = [
     ("src/log_init.rs", "dump_tail"),
     ("src/per_cpu_init.rs", "with_cpu"),
 ]
+
+# The only files that may hold a generic `unsafe impl` of `Send` or `Sync`
+# (one with a type parameter), so no new cell type appears elsewhere.
+# src/kalloc.rs holds `TryArc`'s one bounded pair (C-KALLOC).
+GENERIC_IMPL_FILES: tuple[str, ...] = ("src/cell.rs", "src/sync_init.rs", "src/kalloc.rs")
+
+# Types that share `&T` between holders, whose `Sync` needs `T: Send + Sync`
+# (AGENTS.md rule 6); every other type's `Sync` and `Send` need `T: Send`.
+SHARES_REF: tuple[str, ...] = ("BootCell", "RwLock")
 
 # Types that must stay `Sync` from their fields alone: an `unsafe impl` of
 # `Send` or `Sync` for one fails anywhere, so each field stays atomic or
@@ -248,16 +261,48 @@ def unsafe_impls(text: str) -> list[Impl]:
     return impls
 
 
+def _bound_traits(bounds: str) -> set[str]:
+    """`?Sized + core::marker::Send + 'a` -> {"Send"}: `?` bounds and
+    lifetimes are no bound."""
+    out: set[str] = set()
+    for b in split_top(bounds, "+"):
+        if b.startswith("?") or b.startswith("'"):
+            continue
+        out.add(_last_segment(b))
+    return out
+
+
 def impl_errors(path: str, text: str) -> list[str]:
-    """The `unsafe impl` rules for one file (DESIGN §2.3, AGENTS.md rule 6)."""
+    """The `unsafe impl` rules for one file (DESIGN §2.3, AGENTS.md rule 6).
+
+    One error per failing impl, at the line of its `unsafe impl`.
+    """
     errors: list[str] = []
     for imp in unsafe_impls(text):
         if imp.trait not in _AUTO_TRAITS:
             continue
+        problems: list[str] = []
         if imp.self_ty in NO_UNSAFE_IMPL:
+            problems.append(f"{imp.self_ty} must be {imp.trait} from its fields alone")
+        if imp.params and path not in GENERIC_IMPL_FILES:
+            problems.append(
+                "a generic impl belongs only in " + ", ".join(GENERIC_IMPL_FILES)
+            )
+        need = ["Send"]
+        if imp.trait == "Sync" and imp.self_ty in SHARES_REF:
+            need.append("Sync")
+        for name, inline in imp.params:
+            have = _bound_traits(inline)
+            for lhs, bounds in imp.where:
+                if lhs == name:
+                    have |= _bound_traits(bounds)
+            missing = [t for t in need if t not in have]
+            if missing:
+                problems.append(f"{name} is not bounded by {' + '.join(missing)}")
+        if problems:
             errors.append(
                 f"{path}:{imp.line}: unsafe impl {imp.trait} for {imp.self_ty}: "
-                f"{imp.self_ty} must be {imp.trait} from its fields alone"
+                + "; ".join(problems)
             )
     return errors
 
@@ -292,8 +337,6 @@ def legacy_errors(path: str, text: str) -> list[str]:
     errors: list[str] = []
     for n, ln in enumerate(text.splitlines(), 1):
         where = f"{path}:{n}:{ln}"
-        if "unsafe impl<T> Sync" in ln and path != "src/cell.rs":
-            errors.append(f"generic Sync outside cell.rs: {where}")
         if "static mut" in ln and path != "src/arch/catch.rs":
             errors.append(f"static mut outside catch.rs: {where}")
         if "-> &'static mut" in ln:
