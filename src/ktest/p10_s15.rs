@@ -11,9 +11,11 @@ use vibeos::vectors;
 use super::user::{self, DEFAULT, Image, user_code};
 use super::{Outcome, Test, test};
 use crate::addr_space_init;
+use crate::apic_init;
 use crate::arch::idt::TrapFrame;
 use crate::arch::idt::testing;
 use crate::ipi_init;
+use crate::irq_init;
 use crate::per_cpu_init;
 use crate::proc_init;
 use crate::thread_init;
@@ -25,6 +27,8 @@ pub(super) const TESTS: &[Test] = &[
     test("ac_clear_user_popf", test_ac_clear_user_popf).deadline(30_000),
     test("ist_gs_sign", test_ist_gs_sign).deadline(30_000),
     test("user_exceptions", test_user_exceptions).deadline(30_000),
+    test("user_device_irq", test_user_device_irq).deadline(30_000),
+    test("user_ipi", test_user_ipi).deadline(30_000),
 ];
 
 const RFLAGS_AC: u64 = 1 << 18;
@@ -486,4 +490,184 @@ fn test_user_exceptions() -> Outcome {
         }
     }
     Outcome::Ok
+}
+
+// Interrupts taken at CPL 3: a child spins in ring 3 on CPU 0 while
+// another CPU sends it a device-pool vector and the keyboard's
+// (`user_device_irq`), or reschedule IPIs (`user_ipi`). Each body must
+// find its `PerCpu` through GS; before the generated stubs the pool and
+// keyboard gates skipped the GS step and halted the kernel.
+
+// Spin 100,000 `pause`s, then getpid so a pending SIGKILL acts; forever.
+user_code!(
+    SPIN_GETPID,
+    "
+2:
+    mov ecx, 100000
+1:
+    pause
+    dec ecx
+    jnz 1b
+    mov eax, 39
+    syscall
+    jmp 2b
+    "
+);
+
+/// CPL-3 hits each vector must reach.
+const IRQ_HITS_WANT: u64 = 16;
+
+static IRQ_CHILD: AtomicU64 = AtomicU64::new(0);
+static IRQ_SPAWNED: AtomicBool = AtomicBool::new(false);
+/// Vectors the sender sends, 0 for none, and each one's CPL-3 hits at start.
+static IRQ_VECS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+static IRQ_BASE: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+static IRQ_SENT: AtomicBool = AtomicBool::new(false);
+static POOL_HITS: AtomicU64 = AtomicU64::new(0);
+static POOL_OFF_CPU0: AtomicU64 = AtomicU64::new(0);
+
+/// Pinned to CPU 0, so the child is too (`thread_init::spawn_user`).
+fn irq_spawner() {
+    let pid = match user::spawn(&Image::Code(SPIN_GETPID, DEFAULT), &["spin_getpid"]) {
+        Ok(pid) => u64::from(pid),
+        Err(_) => u64::MAX,
+    };
+    IRQ_CHILD.store(pid, Ordering::Relaxed);
+    IRQ_SPAWNED.store(true, Ordering::Release);
+}
+
+fn irq_vec(i: usize) -> Option<u8> {
+    match IRQ_VECS[i].load(Ordering::Acquire) {
+        0 => None,
+        v => u8::try_from(v).ok(),
+    }
+}
+
+fn irq_hits(i: usize) -> u64 {
+    irq_vec(i).map_or(u64::MAX, |v| {
+        testing::cpl3_hits(v).wrapping_sub(IRQ_BASE[i].load(Ordering::Acquire))
+    })
+}
+
+/// Sends each vector to CPU 0 about every 50 us until each has
+/// `IRQ_HITS_WANT` CPL-3 hits, for at most 5 s.
+fn irq_sender() {
+    let deadline = time_init::now_ns().saturating_add(5_000_000_000);
+    while (irq_hits(0) < IRQ_HITS_WANT || irq_hits(1) < IRQ_HITS_WANT)
+        && time_init::now_ns() < deadline
+    {
+        for v in [irq_vec(0), irq_vec(1)].into_iter().flatten() {
+            // A failed send shows as a shortfall in the hit counts.
+            let _ = apic_init::send_ipi_cpu(0, v);
+        }
+        let t = time_init::now_ns().saturating_add(50_000);
+        while time_init::now_ns() < t {
+            core::hint::spin_loop();
+        }
+    }
+    IRQ_SENT.store(true, Ordering::Release);
+}
+
+fn pool_hit() {
+    if per_cpu_init::current().cpu_id != 0 {
+        POOL_OFF_CPU0.fetch_add(1, Ordering::Relaxed);
+    }
+    POOL_HITS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Sleep until `pred` holds, for at most `ms`.
+fn sleep_until(pred: impl Fn() -> bool, ms: u64) -> bool {
+    let deadline = time_init::now_ns().saturating_add(ms.saturating_mul(1_000_000));
+    while !pred() {
+        if time_init::now_ns() >= deadline {
+            return false;
+        }
+        thread_init::sleep_ms(1);
+    }
+    true
+}
+
+/// Run the ring-3 child on CPU 0 and send it `vecs` (one or two) from
+/// another CPU.
+fn user_irqs(vecs: &[u8]) -> Outcome {
+    let Some(sender_cpu) = super::second_cpu() else {
+        return Outcome::Skip("needs 2 CPUs");
+    };
+    for slot in &IRQ_VECS {
+        slot.store(0, Ordering::Release);
+    }
+    IRQ_SPAWNED.store(false, Ordering::Release);
+    IRQ_SENT.store(false, Ordering::Release);
+    let cpl3_before = cpl3_total();
+    super::spawn_thread_on("irq_spawner", irq_spawner, 0);
+    if !sleep_until(|| IRQ_SPAWNED.load(Ordering::Acquire), 5_000) {
+        return Outcome::Fail("spawner did not run");
+    }
+    let Ok(pid) = u32::try_from(IRQ_CHILD.load(Ordering::Relaxed)) else {
+        return Outcome::Fail("spawn");
+    };
+    // Send only once the child has taken an interrupt in ring 3: an IPI
+    // inside `enter_user_full`'s IF=1 window runs on the user GS base
+    // (F006, ROADMAP §10.6), which this test does not cover.
+    let in_ring3 = sleep_until(|| cpl3_total() != cpl3_before, 5_000);
+    if in_ring3 {
+        for (i, &v) in vecs.iter().enumerate().take(IRQ_VECS.len()) {
+            IRQ_BASE[i].store(testing::cpl3_hits(v), Ordering::Release);
+            IRQ_VECS[i].store(u64::from(v), Ordering::Release);
+        }
+        super::spawn_thread_on("irq_sender", irq_sender, sender_cpu);
+        // The sender stops itself after 5 s.
+        let _ = sleep_until(|| IRQ_SENT.load(Ordering::Acquire), 10_000);
+    }
+    let hits = [irq_hits(0), irq_hits(1)].map(|h| if h == u64::MAX { 0 } else { h });
+    let _ = proc_init::dispatch(SYS_KILL, [u64::from(pid), u64::from(SIGKILL), 0, 0, 0, 0]);
+    let st = user::wait(pid);
+    if !in_ring3 {
+        return Outcome::Fail("child took no interrupt in ring 3");
+    }
+    if !IRQ_SENT.load(Ordering::Acquire) {
+        return Outcome::Fail("sender did not finish");
+    }
+    for (&v, &h) in vecs.iter().zip(&hits) {
+        if h < IRQ_HITS_WANT {
+            return crate::fail_fmt!("vector {v:#x}: {h} CPL-3 hits, want {IRQ_HITS_WANT}");
+        }
+    }
+    if st != wait_signaled(SIGKILL) {
+        return crate::fail_fmt!("status {st:#x}, want SIGKILL");
+    }
+    Outcome::Ok
+}
+
+fn test_user_device_irq() -> Outcome {
+    let v = match irq_init::allocate_vector(0) {
+        Ok(v) => v,
+        Err(e) => return Outcome::Fail(e.as_str()),
+    };
+    if irq_init::set_handler(v, pool_hit).is_err() {
+        let _ = irq_init::free_vector(v);
+        return Outcome::Fail("set_handler");
+    }
+    POOL_HITS.store(0, Ordering::Relaxed);
+    POOL_OFF_CPU0.store(0, Ordering::Relaxed);
+    let out = user_irqs(&[v, vectors::KBD]);
+    let freed = irq_init::free_vector(v);
+    if !matches!(out, Outcome::Ok) {
+        return out;
+    }
+    if freed.is_err() {
+        return Outcome::Fail("free_vector");
+    }
+    if POOL_HITS.load(Ordering::Relaxed) == 0 || POOL_OFF_CPU0.load(Ordering::Relaxed) != 0 {
+        return crate::fail_fmt!(
+            "pool handler hits {}, off CPU 0 {}",
+            POOL_HITS.load(Ordering::Relaxed),
+            POOL_OFF_CPU0.load(Ordering::Relaxed)
+        );
+    }
+    Outcome::Ok
+}
+
+fn test_user_ipi() -> Outcome {
+    user_irqs(&[vectors::IPI_RESCHEDULE])
 }
