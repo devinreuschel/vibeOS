@@ -1,7 +1,8 @@
 //! VFS bring-up. ROADMAP §8.1 / §8.4 / §8.6.
 //!
 //! RANK_DEVICE (DESIGN §2.1). FAT initrd is root when live; otherwise
-//! ramfs. Then kernfs skins on `/dev` `/proc` `/tmp` `/sys`. File I/O
+//! ramfs. Then kernfs skins on `/dev` `/proc` `/tmp` `/sys`, whose mount
+//! points `mount_pseudo` makes through the root's `InodeOps`. File I/O
 //! drops this lock before block waits. No serial marker.
 
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -34,7 +35,6 @@ pub fn init() {
         LIVE.store(ok, Ordering::Release);
     }
     if live() {
-        attach_pseudo_dirs();
         let _ = with(|v| v.mount_pseudo());
         populate_devfs();
         populate_sysfs();
@@ -50,18 +50,6 @@ fn attach_vibefs() {
     let _ = file_init::mkdir("/vibe", 0o755);
     let _ = file_init::vfs_attach("/vibe");
     let _ = vibefs_init::mount_mem("/vibe");
-}
-
-/// FAT has no VFS mkdir. Create the mount points via the File API and
-/// warm the dcache so `mount_pseudo` can cover them.
-fn attach_pseudo_dirs() {
-    if !fat_init::live() {
-        return;
-    }
-    for p in ["/dev", "/proc", "/tmp", "/sys"] {
-        let _ = file_init::mkdir(p, 0o755);
-        let _ = file_init::vfs_attach(p);
-    }
 }
 
 fn populate_devfs() {

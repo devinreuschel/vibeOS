@@ -1,17 +1,24 @@
 //! FAT volumes: initrd + block-backed mounts. ROADMAP §8.2–8.3 / §8.6.
 //!
 //! The volume lives in BSS. A busy flag (not the IRQ-off mutex) is held
-//! across I/O so RANK_DEVICE is not nested with the cache and VFS is
-//! never held at the same time (DESIGN §2.1 / #62 ACK). `sync` uses
-//! cache/device Flush (DESIGN §10.2).
+//! across I/O so RANK_DEVICE is not nested with the cache (DESIGN §2.1 /
+//! #62 ACK). `sync` uses cache/device Flush (DESIGN §10.2).
+//!
+//! Two paths reach a volume. The File API takes the busy flag, waiting
+//! for it, and then the VFS lock, briefly, to copy an inode's words in
+//! and out; never the reverse. [`FatOps`] runs under the VFS lock, which
+//! until ROADMAP §10.4's VFS-lock box is an IRQ-off spinlock, so it never
+//! waits: it takes the flag with one compare-and-swap and returns `Busy`
+//! when the volume is busy or sits on a block device, whose cache reads
+//! may yield.
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use vibeos::fat::{self, Disk, FatError, FatInode, FatVol, INITRD_BYTES, Node, SEC};
 use vibeos::fs::{
-    FatFs, FsError, FsType, Inode, InodeHandle, InodeInfo, InodeKind, InodeRef, MAX_PATH,
-    S_IFDIR_MODE, S_IFREG_MODE,
+    Dirent, FatFs, FsError, FsType, Inode, InodeHandle, InodeInfo, InodeKind, InodeOps, InodeRef,
+    MAX_PATH, Name, OpCx, S_IFDIR_MODE, S_IFREG_MODE,
 };
 use vibeos::lock::RANK_DEVICE;
 
@@ -177,15 +184,40 @@ fn drop_busy(id: u8) {
     }
 }
 
-fn with_slot<R>(
+/// Take volume `id`'s busy flag with one compare-and-swap: `Busy` when
+/// another holder has it.
+fn grab_now(id: u8) -> Result<(), FsError> {
+    let i = id as usize;
+    if i >= MAX_VOLS || !SLOTS[i].used.load(Ordering::Acquire) {
+        return Err(FsError::Io);
+    }
+    if SLOTS[i]
+        .busy
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(FsError::Busy);
+    }
+    if !SLOTS[i].used.load(Ordering::Acquire) {
+        SLOTS[i].busy.store(false, Ordering::Release);
+        return Err(FsError::Io);
+    }
+    Ok(())
+}
+
+/// Run `f` on volume `id`, whose busy flag the caller took, and drop the
+/// flag.
+fn with_grabbed<R>(
     id: u8,
     f: impl FnOnce(&mut FatVol, &mut Io) -> Result<R, FsError>,
 ) -> Result<R, FsError> {
-    grab(id)?;
     let i = id as usize;
+    // SAFETY: the busy flag of `SLOTS[i]`, which the caller took through
+    // `fat_init::grab` or `fat_init::grab_now` and which is dropped only
+    // below, makes this thread the one accessor of the slot's `vol` and
+    // `back` until `drop_busy`; `i < MAX_VOLS` was checked there.
     let r = unsafe {
-        let vol = (*SLOTS[i].vol.get()).as_mut();
-        match vol {
+        match (*SLOTS[i].vol.get()).as_mut() {
             None => Err(FsError::Io),
             Some(v) => {
                 let mut io = Io {
@@ -197,6 +229,29 @@ fn with_slot<R>(
     };
     drop_busy(id);
     r
+}
+
+/// Run `f` on volume `id`, waiting for its busy flag. Never under the VFS
+/// lock.
+fn with_slot<R>(
+    id: u8,
+    f: impl FnOnce(&mut FatVol, &mut Io) -> Result<R, FsError>,
+) -> Result<R, FsError> {
+    grab(id)?;
+    with_grabbed(id, f)
+}
+
+/// Run `f` on volume `id` without waiting, as [`FatOps`] must under the
+/// VFS lock: `Busy` when the volume is busy or on a block device.
+fn with_slot_now<R>(
+    id: u8,
+    f: impl FnOnce(&mut FatVol, &mut Io) -> Result<R, FsError>,
+) -> Result<R, FsError> {
+    grab_now(id)?;
+    with_grabbed(id, |v, io| match io.back {
+        Back::Initrd => f(v, io),
+        Back::Dev(_) => Err(FsError::Busy),
+    })
 }
 
 /// The superblock volume `id` is mounted as.
@@ -230,6 +285,125 @@ pub fn inode_info(
         mtime,
         ctime: mtime,
         private: [u64::from(first_clu), dirent_word(dir_clu, dir_off)],
+    }
+}
+
+/// FAT's [`InodeOps`], behind a FAT superblock's `ops` pointer. The
+/// superblock's private words are `[vol, 0]`; an inode's are
+/// `[first_clu, (dir_clu << 32) | dir_off]`.
+pub struct FatOps;
+
+fn vol_of(cx: &OpCx<'_>) -> u8 {
+    cx.private[0] as u8
+}
+
+impl InodeOps for FatOps {
+    fn lookup(&self, cx: &mut OpCx<'_>, dir: &Inode, name: &[u8]) -> Result<InodeInfo, FsError> {
+        let clu = dir.private[0] as u32;
+        with_slot_now(vol_of(cx), |v, d| Ok(node_info(&v.lookup(d, clu, name)?)))
+    }
+
+    fn create(
+        &self,
+        cx: &mut OpCx<'_>,
+        dir: &mut Inode,
+        name: &[u8],
+        kind: InodeKind,
+        _mode: u16,
+        _target: Option<&[u8]>,
+    ) -> Result<InodeInfo, FsError> {
+        let is_dir = match kind {
+            InodeKind::Reg => false,
+            InodeKind::Dir => true,
+            InodeKind::Lnk | InodeKind::Chr | InodeKind::Blk => return Err(FsError::NotSupp),
+        };
+        let clu = dir.private[0] as u32;
+        with_slot_now(vol_of(cx), |v, d| {
+            Ok(node_info(&v.create(d, clu, name, is_dir)?))
+        })
+    }
+
+    /// Remove the dirent only: the victim's chain is freed by `evict` at
+    /// its last put.
+    fn unlink(&self, cx: &mut OpCx<'_>, dir: &mut Inode, name: &[u8]) -> Result<(), FsError> {
+        let clu = dir.private[0] as u32;
+        with_slot_now(vol_of(cx), |v, d| {
+            v.unlink(d, clu, name, false)?;
+            Ok(())
+        })
+    }
+
+    fn read(
+        &self,
+        cx: &mut OpCx<'_>,
+        ino: &mut Inode,
+        off: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, FsError> {
+        let w = words(ino);
+        with_slot_now(vol_of(cx), |v, d| Ok(v.read_ino(d, &w, off, buf)?))
+    }
+
+    fn write(
+        &self,
+        cx: &mut OpCx<'_>,
+        ino: &mut Inode,
+        off: u64,
+        buf: &[u8],
+    ) -> Result<usize, FsError> {
+        let mut w = words(ino);
+        let linked = ino.nlink != 0;
+        let r = with_slot_now(vol_of(cx), |v, d| {
+            Ok(v.write_ino(d, &mut w, linked, off, false, buf))
+        });
+        store(ino, &w);
+        Ok(r??.0)
+    }
+
+    fn truncate(&self, cx: &mut OpCx<'_>, ino: &mut Inode, size: u64) -> Result<(), FsError> {
+        let mut w = words(ino);
+        let linked = ino.nlink != 0;
+        let r = with_slot_now(vol_of(cx), |v, d| {
+            Ok(v.truncate_ino(d, &mut w, linked, size))
+        });
+        store(ino, &w);
+        Ok(r??)
+    }
+
+    /// The on-disk `.` and `..` are skipped: `Vfs::readdir` makes both.
+    fn readdir(
+        &self,
+        cx: &mut OpCx<'_>,
+        dir: &Inode,
+        cookie: u64,
+        out: &mut Dirent,
+    ) -> Result<Option<u64>, FsError> {
+        let clu = dir.private[0] as u32;
+        with_slot_now(vol_of(cx), |v, d| {
+            let mut c = cookie;
+            let mut n = Node::EMPTY;
+            loop {
+                let Some(next) = v.readdir(d, clu, c, &mut n)? else {
+                    return Ok(None);
+                };
+                c = next;
+                if n.name() != b"." && n.name() != b".." {
+                    break;
+                }
+            }
+            out.ino = n.ino;
+            out.kind = n.kind;
+            out.name = Name::from_bytes(n.name())?;
+            Ok(Some(c))
+        })
+    }
+
+    fn evict(&self, cx: &mut OpCx<'_>, ino: &Inode) -> Result<(), FsError> {
+        if ino.nlink != 0 {
+            return Ok(());
+        }
+        let first = ino.private[0] as u32;
+        with_slot_now(vol_of(cx), |v, d| Ok(v.free_chain(d, first)?))
     }
 }
 
@@ -308,7 +482,7 @@ pub fn init() {
         let root = v.mount_root_fs(&FatFs {
             root_clu,
             vol: VOL_INITRD,
-            ops: None,
+            ops: Some(&FatOps),
         })?;
         v.sb_of_path(root)
     });
@@ -624,7 +798,7 @@ pub fn mount_dev(name: &str, at: &str) -> Result<u8, FsError> {
             &FatFs {
                 root_clu,
                 vol: id,
-                ops: None,
+                ops: Some(&FatOps),
             },
         )?;
         v.sb_of_mount(m)
@@ -647,7 +821,7 @@ pub fn umount(at: &str) -> Result<(), FsError> {
         vol = fs_init::with(|v| {
             let p = v.resolve(None, at, true).ok()?;
             if v.fstype_at(p).ok() == Some(FsType::Fat) {
-                v.fat_vol_of(p).ok()
+                v.sb_private(p).ok().map(|w| w[0] as u8)
             } else {
                 None
             }

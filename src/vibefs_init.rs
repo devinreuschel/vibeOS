@@ -1,12 +1,21 @@
 //! vibefs volumes. ROADMAP §8.5 / docs/VIBEFS.md.
 //!
-//! BSS image by default. Busy flag (not IRQ-off mutex) across I/O so
-//! VFS is never held (DESIGN §2.1). `sync` uses disk `Flush`.
+//! BSS image by default. Busy flag (not IRQ-off mutex) across I/O
+//! (DESIGN §2.1). `sync` uses disk `Flush`.
+//!
+//! [`VibeOps`] runs under the VFS lock, which until ROADMAP §10.4's
+//! VFS-lock box is an IRQ-off spinlock, so it never waits: it takes the
+//! busy flag with one compare-and-swap and returns `Busy` when the volume
+//! is busy or sits on a block device. The File API takes the flag first
+//! and the VFS lock second, never the reverse.
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use vibeos::fs::{FsError, FsType, MAX_PATH, VibeFs};
+use vibeos::fs::{
+    Dirent, FsError, FsType, Inode, InodeInfo, InodeKind, InodeOps, MAX_PATH, Name, OpCx, S_IFMT,
+    VibeFs,
+};
 use vibeos::lock::RANK_DEVICE;
 use vibeos::vibefs::{self, BLOCK, Disk, Error, Node, ROOT_INO, Vol};
 
@@ -204,9 +213,35 @@ fn drop_busy(id: u8) {
     }
 }
 
-fn with_slot<R>(id: u8, f: impl FnOnce(&mut Vol, &mut Io) -> Result<R, Error>) -> Result<R, Error> {
-    grab(id)?;
+/// Take volume `id`'s busy flag with one compare-and-swap: `Busy` when
+/// another holder has it.
+fn grab_now(id: u8) -> Result<(), FsError> {
     let i = id as usize;
+    if i >= MAX_VOLS || !SLOTS[i].used.load(Ordering::Acquire) {
+        return Err(FsError::Io);
+    }
+    if SLOTS[i]
+        .busy
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(FsError::Busy);
+    }
+    if !SLOTS[i].used.load(Ordering::Acquire) {
+        SLOTS[i].busy.store(false, Ordering::Release);
+        return Err(FsError::Io);
+    }
+    Ok(())
+}
+
+/// Run `f` on volume `id`, whose busy flag the caller took, and drop the
+/// flag.
+fn with_grabbed<R, E>(id: u8, f: impl FnOnce(&mut Vol, &mut Io) -> Result<R, E>) -> Result<R, E> {
+    let i = id as usize;
+    // SAFETY: the busy flag of `SLOTS[i]`, which the caller took through
+    // `vibefs_init::grab` or `vibefs_init::grab_now` and which is dropped
+    // only below, makes this thread the one accessor of the slot's `vol`
+    // and `back` until `drop_busy`; `i < MAX_VOLS` was checked there.
     let r = unsafe {
         let v = &mut *SLOTS[i].vol.get();
         let mut io = Io {
@@ -216,6 +251,155 @@ fn with_slot<R>(id: u8, f: impl FnOnce(&mut Vol, &mut Io) -> Result<R, Error>) -
     };
     drop_busy(id);
     r
+}
+
+/// Run `f` on volume `id`, waiting for its busy flag. Never under the VFS
+/// lock.
+fn with_slot<R>(id: u8, f: impl FnOnce(&mut Vol, &mut Io) -> Result<R, Error>) -> Result<R, Error> {
+    grab(id)?;
+    with_grabbed(id, f)
+}
+
+/// Run `f` on volume `id` without waiting, as [`VibeOps`] must under the
+/// VFS lock: `Busy` when the volume is busy or on a block device.
+fn with_slot_now<R>(
+    id: u8,
+    f: impl FnOnce(&mut Vol, &mut Io) -> Result<R, Error>,
+) -> Result<R, FsError> {
+    grab_now(id)?;
+    with_grabbed(id, |v, io| match io.back {
+        Back::Mem => f(v, io).map_err(Error::to_fs),
+        Back::Dev(_) => Err(FsError::Busy),
+    })
+}
+
+/// The one conversion from a vibefs inode's fields to its `Vfs` inode:
+/// key `[ino, 0, 0]`, the mode's permission bits from the node and its
+/// type from `kind`.
+pub fn inode_info(
+    ino: u32,
+    kind: InodeKind,
+    mode: u16,
+    nlink: u32,
+    size: u64,
+    mtime: u64,
+) -> InodeInfo {
+    InodeInfo {
+        key: [ino, 0, 0],
+        ino,
+        kind,
+        mode: (mode & !S_IFMT) | kind.ifmt(),
+        nlink,
+        size,
+        atime: mtime,
+        mtime,
+        ctime: mtime,
+        private: [0; 2],
+    }
+}
+
+fn node_info(n: &Node) -> InodeInfo {
+    inode_info(n.ino, n.kind, n.mode, n.nlink, n.size, n.mtime)
+}
+
+/// vibefs's [`InodeOps`], behind a vibefs superblock's `ops` pointer. The
+/// superblock's private words are `[vol, 0]`.
+pub struct VibeOps;
+
+fn vol_of(cx: &OpCx<'_>) -> u8 {
+    cx.private[0] as u8
+}
+
+impl InodeOps for VibeOps {
+    fn lookup(&self, cx: &mut OpCx<'_>, dir: &Inode, name: &[u8]) -> Result<InodeInfo, FsError> {
+        with_slot_now(vol_of(cx), |v, d| {
+            Ok(node_info(&v.lookup(d, dir.key[0], name)?))
+        })
+    }
+
+    fn create(
+        &self,
+        cx: &mut OpCx<'_>,
+        dir: &mut Inode,
+        name: &[u8],
+        kind: InodeKind,
+        mode: u16,
+        target: Option<&[u8]>,
+    ) -> Result<InodeInfo, FsError> {
+        with_slot_now(vol_of(cx), |v, d| {
+            Ok(node_info(
+                &v.create(d, dir.key[0], name, kind, mode, target)?,
+            ))
+        })
+    }
+
+    fn unlink(&self, cx: &mut OpCx<'_>, dir: &mut Inode, name: &[u8]) -> Result<(), FsError> {
+        with_slot_now(vol_of(cx), |v, d| v.unlink(d, dir.key[0], name, false))
+    }
+
+    fn read(
+        &self,
+        cx: &mut OpCx<'_>,
+        ino: &mut Inode,
+        off: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, FsError> {
+        with_slot_now(vol_of(cx), |v, d| v.read(d, ino.key[0], off, buf))
+    }
+
+    fn write(
+        &self,
+        cx: &mut OpCx<'_>,
+        ino: &mut Inode,
+        off: u64,
+        buf: &[u8],
+    ) -> Result<usize, FsError> {
+        let n = with_slot_now(vol_of(cx), |v, d| v.write(d, ino.key[0], off, buf))?;
+        let end = off.checked_add(n as u64).ok_or(FsError::FileTooBig)?;
+        ino.size = ino.size.max(end);
+        Ok(n)
+    }
+
+    fn truncate(&self, cx: &mut OpCx<'_>, ino: &mut Inode, size: u64) -> Result<(), FsError> {
+        with_slot_now(vol_of(cx), |v, d| v.truncate(d, ino.key[0], size))?;
+        ino.size = size;
+        Ok(())
+    }
+
+    /// `.` and `..` are skipped should vibefs list them: `Vfs::readdir`
+    /// makes both.
+    fn readdir(
+        &self,
+        cx: &mut OpCx<'_>,
+        dir: &Inode,
+        cookie: u64,
+        out: &mut Dirent,
+    ) -> Result<Option<u64>, FsError> {
+        let r = with_slot_now(vol_of(cx), |v, d| {
+            let mut c = cookie;
+            let mut n = Node::EMPTY;
+            loop {
+                let Some(next) = v.readdir(d, dir.key[0], c, &mut n)? else {
+                    return Ok(None);
+                };
+                c = next;
+                if n.name() != b"." && n.name() != b".." {
+                    return Ok(Some((c, n)));
+                }
+            }
+        })?;
+        let Some((c, n)) = r else {
+            return Ok(None);
+        };
+        out.ino = n.ino;
+        out.kind = n.kind;
+        out.name = Name::from_bytes(n.name())?;
+        Ok(Some(c))
+    }
+
+    fn readlink(&self, cx: &mut OpCx<'_>, ino: &Inode, buf: &mut [u8]) -> Result<usize, FsError> {
+        with_slot_now(vol_of(cx), |v, d| v.readlink(d, ino.key[0], buf))
+    }
 }
 
 pub fn live() -> bool {
@@ -472,7 +656,7 @@ pub fn mount_mem(at: &str) -> Result<u8, FsError> {
             &VibeFs {
                 root_ino: ROOT_INO,
                 vol: VOL_MEM,
-                ops: None,
+                ops: Some(&VibeOps),
             },
         )
     }) {
@@ -542,7 +726,7 @@ pub fn mount_dev(name: &str, at: &str) -> Result<u8, FsError> {
             &VibeFs {
                 root_ino: ROOT_INO,
                 vol: id,
-                ops: None,
+                ops: Some(&VibeOps),
             },
         )
     }) {
@@ -561,7 +745,7 @@ pub fn umount(at: &str) -> Result<(), FsError> {
         vol = fs_init::with(|v| {
             let p = v.resolve(None, at, true).ok()?;
             if v.fstype_at(p).ok() == Some(FsType::Vibe) {
-                v.fat_vol_of(p).ok()
+                v.sb_private(p).ok().map(|w| w[0] as u8)
             } else {
                 None
             }

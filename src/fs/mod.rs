@@ -12,6 +12,13 @@
 //! mounts and files. A dentry counts its holders, so a directory stays
 //! in the cache while a child names it.
 //!
+//! Interim lock rule, until ROADMAP §10.4's box makes the VFS lock a
+//! `BlockingMutex`: `Vfs` calls [`InodeOps`] with its IRQ-off spinlock
+//! held, so an op never waits (DESIGN §2.1, §2.9 rule 4). A disk backend
+//! takes its volume with one compare-and-swap and returns `Busy` when the
+//! volume is busy or on a block device; its File API path takes the
+//! volume first and this lock second, never the reverse.
+//!
 //! Locks (kernel): RANK_DEVICE. Tables are static; do not allocate
 //! under the lock. No FS work from hard IRQ (DESIGN §2.2).
 
@@ -1469,59 +1476,9 @@ impl Vfs {
         Ok(self.sb_of(p.mount))
     }
 
-    pub fn fat_vol_of(&self, p: PathRef) -> Result<u8, FsError> {
-        Ok(self.sb_private(p)?[0] as u8)
-    }
-
-    /// Cache a FAT inode the File API walked, keyed `[ino, 0, 1]`: a third
-    /// word no dirent key has.
-    pub fn fat_iget(
-        &mut self,
-        sb: u8,
-        ino: u32,
-        kind: InodeKind,
-        size: u64,
-        clu: u32,
-    ) -> Result<u16, FsError> {
-        let dir = kind == InodeKind::Dir;
-        let info = InodeInfo {
-            key: [ino, 0, 1],
-            ino,
-            kind,
-            mode: if dir { S_IFDIR_MODE } else { S_IFREG_MODE },
-            nlink: if dir { 2 } else { 1 },
-            size,
-            atime: self.now,
-            mtime: self.now,
-            ctime: self.now,
-            private: [u64::from(clu), 0],
-        };
-        self.iget_info(sb, &info)
-    }
-
-    pub fn fat_dcache(
-        &mut self,
-        parent: PathRef,
-        name: &[u8],
-        islot: u16,
-    ) -> Result<PathRef, FsError> {
-        let sb = self.sb_of(parent.mount);
-        self.dcache_drop_name(sb, parent.dslot, name);
-        self.dcache_drop_neg_in_dir(sb, parent.dslot);
-        let ds = self.dcache_insert(sb, parent.dslot, name, Some(islot))?;
-        Ok(PathRef {
-            mount: parent.mount,
-            dslot: ds,
-        })
-    }
-
     pub fn drop_name(&mut self, parent: PathRef, name: &[u8]) {
         let sb = self.sb_of(parent.mount);
         self.dcache_drop_name(sb, parent.dslot, name);
-    }
-
-    pub fn release_inode(&mut self, islot: u16) {
-        self.iput(islot);
     }
 
     /// A counted reference to the inode `info` describes: the cached one
@@ -3652,7 +3609,7 @@ mod tests {
     /// by the store id in its superblock's private word 0. Node `n` has
     /// key `[n, 0, 0]`, `st_ino` `n + 100` and private words `[7 * n, w]`,
     /// where `w` counts the writes made through the inode.
-    struct KeyFs {
+    pub(super) struct KeyFs {
         id: u64,
     }
 
@@ -3675,7 +3632,7 @@ mod tests {
 
     static KEYFS: std::sync::Mutex<Vec<Store>> = std::sync::Mutex::new(Vec::new());
 
-    fn keyfs_new() -> KeyFs {
+    pub(super) fn keyfs_new() -> KeyFs {
         let mut g = KEYFS.lock().unwrap();
         g.push(Store::default());
         KeyFs {

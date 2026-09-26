@@ -361,8 +361,8 @@ kern_ops!(SysFs);
 
 impl Vfs {
     /// Mount the four pseudo filesystems. Call after [`Vfs::mount_root`].
-    /// FAT root cannot mkdir through VFS; those mount points are created
-    /// via the File API and attached first (Exist / already-a-dir is ok).
+    /// Each mount point is made with `mkdir` through the root's ops
+    /// (Exist / already-a-dir is ok).
     pub fn mount_pseudo(&mut self) -> Result<(), FsError> {
         self.ensure_mount_dir("/dev")?;
         self.ensure_mount_dir("/proc")?;
@@ -376,37 +376,16 @@ impl Vfs {
     }
 
     fn ensure_mount_dir(&mut self, path: &str) -> Result<(), FsError> {
-        match self.mkdir(None, path, 0o755) {
+        let e = match self.mkdir(None, path, 0o755) {
             Ok(_) | Err(FsError::Exists) => return Ok(()),
-            Err(_) => {}
-        }
-        if let Ok(p) = self.resolve(None, path, true) {
-            let islot = self.d_islot(p.dslot)?;
-            if self.inodes[islot as usize].kind == InodeKind::Dir {
-                return Ok(());
-            }
-            return Err(FsError::NotDir);
-        }
-        // FAT has no VFS mkdir. Plant a dir dentry so `mount` can cover it.
-        let (parent, name) = super::split_basename(path.as_bytes())?;
-        if super::name_is_dot(name) || super::name_is_dotdot(name) {
-            return Err(FsError::Inval);
-        }
-        let dir = self.walk(None, parent, true)?;
-        let sb = self.sb_of(dir.mount);
-        let mut ino = 0x8000_0000u32;
-        let mut i = 0usize;
-        while i < name.len() {
-            ino = ino.wrapping_mul(33).wrapping_add(name[i] as u32);
-            i += 1;
-        }
-        let islot = self.fat_iget(sb, ino, InodeKind::Dir, 0, 0)?;
-        match self.fat_dcache(dir, name, islot) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                self.release_inode(islot);
-                Err(e)
-            }
+            Err(e) => e,
+        };
+        let p = self.resolve(None, path, true).map_err(|_| e)?;
+        let islot = self.d_islot(p.dslot)?;
+        if self.inodes[islot as usize].kind == InodeKind::Dir {
+            Ok(())
+        } else {
+            Err(FsError::NotDir)
         }
     }
 
@@ -1503,19 +1482,15 @@ mod tests {
     }
 
     #[test]
-    fn mount_pseudo_on_fat_root() {
+    fn mount_pseudo_on_keyed_root() {
         let mut v = Vfs::new();
-        v.mount_root_fs(&crate::fs::FatFs {
-            root_clu: 2,
-            vol: 0,
-            ops: None,
-        })
-        .unwrap();
+        v.mount_root_fs(&crate::fs::tests::keyfs_new()).unwrap();
         v.mount_pseudo().unwrap();
         assert_eq!(v.stat(None, "/dev").unwrap().kind, InodeKind::Dir);
         assert_eq!(v.stat(None, "/proc").unwrap().kind, InodeKind::Dir);
         assert_eq!(v.stat(None, "/tmp").unwrap().kind, InodeKind::Dir);
         assert_eq!(v.stat(None, "/sys").unwrap().kind, InodeKind::Dir);
+        assert!(has_name(&mut v, "/", b"dev"));
         let fid = v.open(None, "/dev/null", O_RDWR, 0).unwrap();
         assert_eq!(v.write(fid, b"x").unwrap(), 1);
         v.close(fid).unwrap();
