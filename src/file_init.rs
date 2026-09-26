@@ -4,7 +4,7 @@
 //! Flush (DESIGN §10.2). FAT rejects symlink/link with `NotSupp`; vibefs
 //! stores POSIX mode and symlinks (docs/VIBEFS.md).
 
-use vibeos::fat::Node;
+use vibeos::fat::{InoKey, InoRef, Node};
 use vibeos::fs::{
     self, Dirent, FsError, FsType, InodeKind, MAX_NAME, MAX_PATH, Name, O_ACCMODE, O_APPEND,
     O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, PathRef, S_IFDIR_MODE,
@@ -39,8 +39,6 @@ struct Walked {
     kind: InodeKind,
     size: u32,
     clu: u32,
-    dir_clu: u32,
-    dir_off: u32,
     mode: u16,
     nlink: u32,
     mtime: u64,
@@ -55,8 +53,6 @@ impl Walked {
             kind: n.kind,
             size: n.size,
             clu: n.clu,
-            dir_clu: n.dir_clu,
-            dir_off: n.dir_off,
             mode: if n.kind == InodeKind::Dir {
                 S_IFDIR_MODE
             } else {
@@ -75,8 +71,6 @@ impl Walked {
             kind: n.kind,
             size: n.size,
             clu: n.ino,
-            dir_clu: n.ino,
-            dir_off: 0,
             mode: n.mode,
             nlink: n.nlink,
             mtime: n.mtime,
@@ -101,24 +95,33 @@ pub struct FileId {
     pub r#gen: u16,
 }
 
+/// What an open file refers to: a counted reference to FAT's in-core
+/// inode, or a vibefs inode number.
+enum FileNode {
+    None,
+    Fat(InoRef),
+    Vibe(u32),
+}
+
+/// A copy of a [`FileNode`] that names the inode without counting it.
+#[derive(Clone, Copy)]
+enum NodeKey {
+    Fat(InoKey),
+    Vibe(u32),
+}
+
 /// An open-file table slot. `used` and `refs` are set by `alloc_fid` and
 /// changed after that only by `addref` and `close`, under `FILES`; `gen`
-/// is bumped by the `close` that frees the slot.
-#[derive(Clone, Copy)]
+/// is bumped by the `close` that frees the slot. The file's size and
+/// clusters live in its inode, never here.
 struct OpenFile {
     used: bool,
     refs: u16,
     r#gen: u16,
-    back: Back,
     vol: u8,
     flags: u32,
     offset: u64,
-    ino: u32,
-    kind: InodeKind,
-    clu: u32,
-    size: u32,
-    dir_clu: u32,
-    dir_off: u32,
+    node: FileNode,
 }
 
 impl OpenFile {
@@ -126,19 +129,24 @@ impl OpenFile {
         used: false,
         refs: 0,
         r#gen: 0,
-        back: Back::Fat,
         vol: 0,
         flags: 0,
         offset: 0,
-        ino: 0,
-        kind: InodeKind::Reg,
-        clu: 0,
-        size: 0,
-        dir_clu: 0,
-        dir_off: 0,
+        node: FileNode::None,
     };
 }
 
+/// What `read`, `write` and `seek` copy out of a slot.
+#[derive(Clone, Copy)]
+struct View {
+    vol: u8,
+    flags: u32,
+    offset: u64,
+    node: NodeKey,
+}
+
+/// Never held across backend I/O, a yield, or `fat_init::iput` (DESIGN
+/// §2.1).
 static FILES: SpinMutex<[OpenFile; MAX_OPEN]> =
     SpinMutex::with_rank([OpenFile::EMPTY; MAX_OPEN], RANK_DEVICE);
 
@@ -338,25 +346,23 @@ fn vol_parent(path: &str) -> Result<(Walked, [u8; MAX_NAME], u8), FsError> {
 }
 
 /// Put `f` in a free slot with one reference, keeping the slot's
-/// generation.
-fn alloc_fid(f: OpenFile) -> Result<FileId, FsError> {
+/// generation. A full table hands `f` back for its inode to be put.
+fn alloc_fid(f: OpenFile) -> Result<FileId, OpenFile> {
     let mut g = FILES.lock();
-    let mut i = 0usize;
-    while i < MAX_OPEN {
-        if !g[i].used {
-            let slot_gen = g[i].r#gen;
-            g[i] = f;
-            g[i].used = true;
-            g[i].refs = 1;
-            g[i].r#gen = slot_gen;
-            return Ok(FileId {
-                fid: i as u16,
-                r#gen: slot_gen,
-            });
-        }
-        i += 1;
-    }
-    Err(FsError::NoSpace)
+    let Some(i) = g.iter().position(|s| !s.used) else {
+        return Err(f);
+    };
+    let slot_gen = g[i].r#gen;
+    g[i] = OpenFile {
+        used: true,
+        refs: 1,
+        r#gen: slot_gen,
+        ..f
+    };
+    Ok(FileId {
+        fid: i as u16,
+        r#gen: slot_gen,
+    })
 }
 
 /// The live slot `id` names: `Badf` when it is out of range, unused, or
@@ -369,32 +375,45 @@ fn slot_of(g: &[OpenFile; MAX_OPEN], id: FileId) -> Result<usize, FsError> {
     }
 }
 
-fn get_file(id: FileId) -> Result<OpenFile, FsError> {
+fn get_file(id: FileId) -> Result<View, FsError> {
     let g = FILES.lock();
-    let i = slot_of(&g, id)?;
-    Ok(g[i])
+    let f = &g[slot_of(&g, id)?];
+    let node = match &f.node {
+        FileNode::Fat(r) => NodeKey::Fat(r.key()),
+        FileNode::Vibe(ino) => NodeKey::Vibe(*ino),
+        FileNode::None => return Err(FsError::Badf),
+    };
+    Ok(View {
+        vol: f.vol,
+        flags: f.flags,
+        offset: f.offset,
+        node,
+    })
 }
 
-/// The fields an operation changed, written back by [`put_file`].
-enum Put {
-    Offset(u64),
-    Wrote { offset: u64, clu: u32, size: u32 },
-}
-
-/// Write back only what `p` names; `refs` and `used` are never written
-/// from a snapshot.
-fn put_file(id: FileId, p: Put) -> Result<(), FsError> {
+/// Write back the offset, the one field `read`, `write` and `seek`
+/// change; `refs` and `used` are never written from a snapshot.
+fn put_file(id: FileId, offset: u64) -> Result<(), FsError> {
     let mut g = FILES.lock();
     let i = slot_of(&g, id)?;
-    match p {
-        Put::Offset(offset) => g[i].offset = offset,
-        Put::Wrote { offset, clu, size } => {
-            g[i].offset = offset;
-            g[i].clu = clu;
-            g[i].size = size;
-        }
-    }
+    g[i].offset = offset;
     Ok(())
+}
+
+/// Drop the inode reference an open file held.
+fn release(vol: u8, node: FileNode) -> Result<(), FsError> {
+    match node {
+        FileNode::Fat(r) => fat_init::iput(vol, r),
+        FileNode::Vibe(_) | FileNode::None => Ok(()),
+    }
+}
+
+/// Release `node` on an error path: `e`, or the release's own error.
+fn release_err(vol: u8, node: FileNode, e: FsError) -> FsError {
+    match release(vol, node) {
+        Ok(()) => e,
+        Err(put) => put,
+    }
 }
 
 fn err_line(op: &str, e: FsError) {
@@ -516,67 +535,78 @@ pub fn open(path: &str, flags: u32, _mode: u16) -> Result<FileId, FsError> {
             Err(e) => return Err(e),
         }
     }
-    let mut node = vol_walk(path)?;
-    if node.kind == InodeKind::Dir {
+    let (w, node) = walk_node(path)?;
+    let kind_ok = if w.kind == InodeKind::Dir {
         let acc = flags & O_ACCMODE;
         if acc == O_WRONLY || acc == O_RDWR || flags & O_TRUNC != 0 {
-            return Err(FsError::IsDir);
+            Err(FsError::IsDir)
+        } else {
+            Ok(())
         }
     } else if flags & O_DIRECTORY != 0 {
-        return Err(FsError::NotDir);
+        Err(FsError::NotDir)
+    } else {
+        Ok(())
+    };
+    if let Err(e) = kind_ok {
+        return Err(release_err(w.vol, node, e));
     }
-    if flags & O_TRUNC != 0 && node.kind == InodeKind::Reg {
-        match node.back {
-            Back::Fat => {
-                let mut clu = node.clu;
-                let mut size = node.size;
-                fat_init::truncate(
-                    node.vol,
-                    node.dir_clu,
-                    node.dir_off,
-                    node.ino,
-                    &mut clu,
-                    &mut size,
-                    0,
-                )?;
-                node.clu = clu;
-                node.size = size;
-            }
-            Back::Vibe => {
-                vibefs_init::truncate(node.vol, node.ino, 0)?;
-                node.size = 0;
-            }
+    if flags & O_TRUNC != 0 && w.kind == InodeKind::Reg {
+        let r = match &node {
+            FileNode::Fat(r) => fat_init::truncate(w.vol, r.key(), 0),
+            FileNode::Vibe(ino) => vibefs_init::truncate(w.vol, *ino, 0),
+            FileNode::None => Ok(()),
+        };
+        if let Err(e) = r {
+            return Err(release_err(w.vol, node, e));
         }
     }
     alloc_fid(OpenFile {
         used: true,
         refs: 1,
         r#gen: 0,
-        back: node.back,
-        vol: node.vol,
+        vol: w.vol,
         flags,
         offset: 0,
-        ino: node.ino,
-        kind: node.kind,
-        clu: node.clu,
-        size: node.size,
-        dir_clu: node.dir_clu,
-        dir_off: node.dir_off,
+        node,
     })
+    .map_err(|f| release_err(f.vol, f.node, FsError::NoSpace))
 }
 
-/// Drop one reference; the last frees the slot and bumps its generation.
-pub fn close(id: FileId) -> Result<(), FsError> {
-    let mut g = FILES.lock();
-    let i = slot_of(&g, id)?;
-    if g[i].refs > 1 {
-        g[i].refs -= 1;
-        return Ok(());
+/// Walk `path` and take what an open file holds on its inode: a counted
+/// reference for FAT, taken in the walk's volume-lock section.
+fn walk_node(path: &str) -> Result<(Walked, FileNode), FsError> {
+    let abs = join_cwd(path)?;
+    let pb = path_used(&abs);
+    let (vv, vs) = vibefs_init::route(pb);
+    let (fv, fs) = fat_init::route(pb);
+    if vs > fs {
+        let rest = vibefs_init::routed_rest(pb, vs);
+        let w = Walked::from_vibe(vv, vibefs_init::walk(vv, rest)?);
+        Ok((w, FileNode::Vibe(w.ino)))
+    } else {
+        let rest = fat_init::routed_rest(pb, fs);
+        let (n, r) = fat_init::walk_iget(fv, rest)?;
+        Ok((Walked::from_fat(fv, n), FileNode::Fat(r)))
     }
-    let next_gen = g[i].r#gen.wrapping_add(1);
-    g[i] = OpenFile::EMPTY;
-    g[i].r#gen = next_gen;
-    Ok(())
+}
+
+/// Drop one reference; the last frees the slot, bumps its generation, and
+/// then, with `FILES` dropped, puts the inode reference.
+pub fn close(id: FileId) -> Result<(), FsError> {
+    let (vol, node) = {
+        let mut g = FILES.lock();
+        let i = slot_of(&g, id)?;
+        if g[i].refs > 1 {
+            g[i].refs -= 1;
+            return Ok(());
+        }
+        let next_gen = g[i].r#gen.wrapping_add(1);
+        let old = core::mem::replace(&mut g[i], OpenFile::EMPTY);
+        g[i].r#gen = next_gen;
+        (old.vol, old.node)
+    };
+    release(vol, node)
 }
 
 /// Extra process fd pointing at the same kernel file.
@@ -592,55 +622,28 @@ pub fn read(id: FileId, buf: &mut [u8]) -> Result<usize, FsError> {
     if f.flags & O_ACCMODE == O_WRONLY {
         return Err(FsError::Inval);
     }
-    if f.kind == InodeKind::Dir {
-        return Err(FsError::IsDir);
-    }
-    let n = match f.back {
-        Back::Fat => fat_init::read(f.vol, f.clu, f.size, f.offset, buf)?,
-        Back::Vibe => vibefs_init::read(f.vol, f.ino, f.offset, buf)?,
+    let n = match f.node {
+        NodeKey::Fat(k) => fat_init::read(f.vol, k, f.offset, buf)?,
+        NodeKey::Vibe(ino) => vibefs_init::read(f.vol, ino, f.offset, buf)?,
     };
-    put_file(id, Put::Offset(f.offset.saturating_add(n as u64)))?;
+    put_file(id, f.offset.saturating_add(n as u64))?;
     Ok(n)
 }
 
 pub fn write(id: FileId, buf: &[u8]) -> Result<usize, FsError> {
-    let mut f = get_file(id)?;
+    let f = get_file(id)?;
     if f.flags & O_ACCMODE == O_RDONLY {
         return Err(FsError::Inval);
     }
-    if f.kind == InodeKind::Dir {
-        return Err(FsError::IsDir);
-    }
-    if f.flags & O_APPEND != 0 {
-        f.offset = f.size as u64;
-    }
-    let n = match f.back {
-        Back::Fat => fat_init::write(
-            f.vol,
-            f.dir_clu,
-            f.dir_off,
-            f.ino,
-            &mut f.clu,
-            &mut f.size,
-            f.offset,
-            buf,
-        )?,
-        Back::Vibe => {
-            let n = vibefs_init::write(f.vol, f.ino, f.offset, buf)?;
-            f.size = f.size.max((f.offset as u32).saturating_add(n as u32));
-            n
-        }
+    // O_APPEND: the backend reads the inode's size under its volume lock.
+    let append = f.flags & O_APPEND != 0;
+    let (n, pos) = match f.node {
+        NodeKey::Fat(k) => fat_init::write(f.vol, k, f.offset, append, buf)?,
+        NodeKey::Vibe(ino) => vibefs_init::write(f.vol, ino, f.offset, append, buf)?,
     };
     #[cfg(feature = "kernel_tests")]
     testing::write_window();
-    put_file(
-        id,
-        Put::Wrote {
-            offset: f.offset.saturating_add(n as u64),
-            clu: f.clu,
-            size: f.size,
-        },
-    )?;
+    put_file(id, pos.saturating_add(n as u64))?;
     Ok(n)
 }
 
@@ -648,14 +651,18 @@ pub fn write(id: FileId, buf: &[u8]) -> Result<usize, FsError> {
 pub fn seek(id: FileId, off: i64, whence: u32) -> Result<u64, FsError> {
     let f = get_file(id)?;
     let base = match whence {
-        SEEK_SET => 0i64,
-        SEEK_CUR => i64::try_from(f.offset).map_err(|_| FsError::Inval)?,
-        SEEK_END => i64::from(f.size),
+        SEEK_SET => 0,
+        SEEK_CUR => f.offset,
+        SEEK_END => match f.node {
+            NodeKey::Fat(k) => fat_init::size(f.vol, k)?,
+            NodeKey::Vibe(ino) => vibefs_init::size(f.vol, ino)?,
+        },
         _ => return Err(FsError::Inval),
     };
+    let base = i64::try_from(base).map_err(|_| FsError::Inval)?;
     let n = base.checked_add(off).ok_or(FsError::Inval)?;
     let n = u64::try_from(n).map_err(|_| FsError::Inval)?;
-    put_file(id, Put::Offset(n))?;
+    put_file(id, n)?;
     Ok(n)
 }
 
@@ -957,28 +964,16 @@ pub fn link_path(_old: &str, _new: &str) -> Result<(), FsError> {
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn truncate_path(path: &str, size: u64) -> Result<(), FsError> {
-    let node = vol_walk(path)?;
-    if node.kind != InodeKind::Reg {
-        return Err(FsError::IsDir);
-    }
-    match node.back {
-        Back::Fat => {
-            if size > u32::MAX as u64 {
-                return Err(FsError::Inval);
-            }
-            let mut clu = node.clu;
-            let mut sz = node.size;
-            fat_init::truncate(
-                node.vol,
-                node.dir_clu,
-                node.dir_off,
-                node.ino,
-                &mut clu,
-                &mut sz,
-                size as u32,
-            )
-        }
-        Back::Vibe => vibefs_init::truncate(node.vol, node.ino, size),
+    let (w, node) = walk_node(path)?;
+    let r = match &node {
+        _ if w.kind != InodeKind::Reg => Err(FsError::IsDir),
+        FileNode::Fat(r) => fat_init::truncate(w.vol, r.key(), size),
+        FileNode::Vibe(ino) => vibefs_init::truncate(w.vol, *ino, size),
+        FileNode::None => Ok(()),
+    };
+    match r {
+        Ok(()) => release(w.vol, node),
+        Err(e) => Err(release_err(w.vol, node, e)),
     }
 }
 

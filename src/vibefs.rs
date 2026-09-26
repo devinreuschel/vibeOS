@@ -1290,6 +1290,12 @@ impl Vol {
         Ok(())
     }
 
+    /// The size of inode `ino`, which `SEEK_END` and `O_APPEND` read.
+    pub fn file_size(&self, ino: u32) -> Result<u64, Error> {
+        let s = self.inode_slot(ino)?;
+        Ok(self.inodes[s].size)
+    }
+
     fn map_block(&self, ino_slot: usize, file_blk: u32) -> Option<(usize, u32)> {
         let r = &self.inodes[ino_slot];
         let mut i = 0usize;

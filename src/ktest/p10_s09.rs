@@ -2,12 +2,16 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use vibeos::fs::{FsError, O_CREAT, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, SEEK_CUR, SEEK_SET};
+use vibeos::fs::{
+    FsError, O_APPEND, O_CREAT, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, SEEK_CUR, SEEK_END,
+    SEEK_SET,
+};
 use vibeos::limits::MAX_OPEN_FILES;
 use vibeos::proc::wait_exited;
 
 use super::user::{self, DEFAULT, Image, user_code};
 use super::{Outcome, Test, test};
+use crate::fat_init;
 use crate::file_init::{self, FileId};
 use crate::thread_init;
 use crate::time_init;
@@ -19,6 +23,14 @@ pub(super) const TESTS: &[Test] = &[
         test_file_table_stale_writeback_ebadf,
     ),
     test("open_creat_exists_opens", test_open_creat_exists_opens),
+    test(
+        "inode_size_shared_across_opens",
+        test_inode_size_shared_across_opens,
+    ),
+    test(
+        "fat_unlinked_open_frees_at_close",
+        test_fat_unlinked_open_frees_at_close,
+    ),
 ];
 
 /// Each open-file slot's `(used, refs)`.
@@ -399,4 +411,199 @@ fn test_open_creat_exists_opens() -> Outcome {
         return Outcome::Fail("unlink after");
     }
     excl
+}
+
+/// Close every handle in `ids`, then unlink `path`; the first error.
+fn close_unlink(ids: &[Option<FileId>], path: &str) -> Result<(), FsError> {
+    let mut r = Ok(());
+    for &id in ids.iter().flatten() {
+        if let Err(e) = file_init::close(id)
+            && r.is_ok()
+        {
+            r = Err(e);
+        }
+    }
+    let u = unlink_quiet(path);
+    r.and(u)
+}
+
+/// Four opens of `path`: a writer, a second descriptor, an `O_APPEND`
+/// one and an `O_TRUNC` one, all see one size.
+fn shared_size(path: &str) -> Outcome {
+    let mut ids: [Option<FileId>; 4] = [None; 4];
+    let out = shared_size_on(path, &mut ids);
+    let c = close_unlink(&ids, path);
+    if !matches!(out, Outcome::Ok) {
+        return out;
+    }
+    match c {
+        Ok(()) => Outcome::Ok,
+        Err(e) => crate::fail_fmt!("{path}: close/unlink: {}", e.as_str()),
+    }
+}
+
+fn shared_size_on(path: &str, ids: &mut [Option<FileId>; 4]) -> Outcome {
+    let flags = [
+        O_RDWR | O_CREAT | O_TRUNC,
+        O_RDWR,
+        O_WRONLY | O_APPEND,
+        O_RDWR | O_TRUNC,
+    ];
+    let mut open = |k: usize| -> Result<FileId, Outcome> {
+        match file_init::open(path, flags[k], 0) {
+            Ok(id) => {
+                ids[k] = Some(id);
+                Ok(id)
+            }
+            Err(e) => Err(crate::fail_fmt!("{path}: open {k}: {}", e.as_str())),
+        }
+    };
+    let a = match open(0) {
+        Ok(id) => id,
+        Err(o) => return o,
+    };
+    let b = match open(1) {
+        Ok(id) => id,
+        Err(o) => return o,
+    };
+    if file_init::write(a, &[b'a'; 100]) != Ok(100) {
+        return crate::fail_fmt!("{path}: write 100");
+    }
+    match file_init::seek(b, 0, SEEK_END) {
+        Ok(100) => {}
+        r => return crate::fail_fmt!("{path}: second SEEK_END {r:?}, want 100"),
+    }
+    let c = match open(2) {
+        Ok(id) => id,
+        Err(o) => return o,
+    };
+    if file_init::write(c, b"Z") != Ok(1) {
+        return crate::fail_fmt!("{path}: append write");
+    }
+    let mut z = [0u8; 1];
+    if file_init::seek(b, 100, SEEK_SET) != Ok(100) || file_init::read(b, &mut z) != Ok(1) {
+        return crate::fail_fmt!("{path}: read back byte 100");
+    }
+    if &z != b"Z" {
+        return crate::fail_fmt!("{path}: byte 100 is {:#x}, want Z", z[0]);
+    }
+    let d = match open(3) {
+        Ok(id) => id,
+        Err(o) => return o,
+    };
+    if file_init::write(b, b"xyz") != Ok(3) {
+        return crate::fail_fmt!("{path}: write after O_TRUNC");
+    }
+    for (k, id) in [a, b, c, d].into_iter().enumerate() {
+        match file_init::seek(id, 0, SEEK_END) {
+            Ok(104) => {}
+            r => return crate::fail_fmt!("{path}: fd {k} SEEK_END {r:?}, want 104"),
+        }
+    }
+    match file_init::stat_path(path) {
+        Ok(st) if st.size == 104 => Outcome::Ok,
+        Ok(st) => crate::fail_fmt!("{path}: stat size {}, want 104", st.size),
+        Err(e) => crate::fail_fmt!("{path}: stat: {}", e.as_str()),
+    }
+}
+
+fn test_inode_size_shared_across_opens() -> Outcome {
+    for path in ["/f13s.txt", "/vibe/f13s"] {
+        let out = shared_size(path);
+        if !matches!(out, Outcome::Ok) {
+            return out;
+        }
+    }
+    Outcome::Ok
+}
+
+/// Free bytes on the FAT initrd.
+fn fat_free() -> Result<u64, FsError> {
+    fat_init::df(fat_init::VOL_INITRD).map(|(_, _, free, _)| free)
+}
+
+fn test_fat_unlinked_open_frees_at_close() -> Outcome {
+    const PATH: &str = "/f13u.txt";
+    const FL: u32 = O_RDWR | O_CREAT | O_TRUNC;
+    if unlink_quiet(PATH).is_err() {
+        return Outcome::Fail("unlink before");
+    }
+    let Ok(before) = fat_free() else {
+        return Outcome::Fail("df");
+    };
+    let a = match file_init::open(PATH, FL, 0) {
+        Ok(a) => a,
+        Err(e) => return crate::fail_fmt!("open: {}", e.as_str()),
+    };
+    let out = unlinked_open(PATH, a, before);
+    let c = file_init::close(a);
+    let u = unlink_quiet(PATH);
+    if !matches!(out, Outcome::Ok) {
+        return out;
+    }
+    if let Err(e) = c.and(u) {
+        return crate::fail_fmt!("close/unlink: {}", e.as_str());
+    }
+    match fat_free() {
+        Ok(f) if f == before => Outcome::Ok,
+        Ok(f) => crate::fail_fmt!("free {f} after the last close, want {before}"),
+        Err(e) => crate::fail_fmt!("df: {}", e.as_str()),
+    }
+}
+
+fn unlinked_open(path: &str, a: FileId, before: u64) -> Outcome {
+    let mut data = [0u8; 1500];
+    let mut i = 0usize;
+    while i < data.len() {
+        data[i] = (i % 251) as u8;
+        i += 1;
+    }
+    if file_init::write(a, &data) != Ok(data.len()) {
+        return Outcome::Fail("write");
+    }
+    let Ok(held) = fat_free() else {
+        return Outcome::Fail("df");
+    };
+    if held >= before {
+        return crate::fail_fmt!("free {held} with the file written, before {before}");
+    }
+    if let Err(e) = file_init::unlink_path(path, false) {
+        return crate::fail_fmt!("unlink open file: {}", e.as_str());
+    }
+    match fat_free() {
+        Ok(f) if f == held => {}
+        r => return crate::fail_fmt!("free {r:?} after unlink, want {held}"),
+    }
+    let mut back = [0u8; 1500];
+    if file_init::seek(a, 0, SEEK_SET) != Ok(0) || file_init::read(a, &mut back) != Ok(1500) {
+        return Outcome::Fail("read back after unlink");
+    }
+    if back != data {
+        return Outcome::Fail("data changed after unlink");
+    }
+    // A new file of the same name is another inode.
+    let n = match file_init::open(path, O_RDWR | O_CREAT | O_TRUNC, 0) {
+        Ok(n) => n,
+        Err(e) => return crate::fail_fmt!("open new: {}", e.as_str()),
+    };
+    let w = file_init::write(n, b"new");
+    let new_end = file_init::seek(n, 0, SEEK_END);
+    let old_end = file_init::seek(a, 0, SEEK_END);
+    let cn = file_init::close(n);
+    if w != Ok(3) || new_end != Ok(3) {
+        return crate::fail_fmt!("new file: write {w:?}, size {new_end:?}");
+    }
+    if old_end != Ok(1500) {
+        return crate::fail_fmt!("unlinked file size {old_end:?}, want 1500");
+    }
+    if let Err(e) = cn {
+        return crate::fail_fmt!("close new: {}", e.as_str());
+    }
+    if let Err(e) = unlink_quiet(path) {
+        return crate::fail_fmt!("unlink new: {}", e.as_str());
+    }
+    match fat_free() {
+        Ok(f) if f == held => Outcome::Ok,
+        r => crate::fail_fmt!("free {r:?} while the unlinked file is open, want {held}"),
+    }
 }

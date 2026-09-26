@@ -228,8 +228,10 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   a full open-file or fd table `open(O_TRUNC)` truncates the file and then
   fails with `EMFILE` (F057;
   ROADMAP §10.4)
-- `lseek`: any offset from 0 to `i64::MAX` is accepted, and `SEEK_END`
-  uses the 32-bit `OpenFile.size`. A vibefs `write` just below file
+- `lseek`: any offset from 0 to `i64::MAX` is accepted. `SEEK_END`
+  reads the size from the file's inode (FAT's counted in-core inode or
+  the vibefs inode), so it sees writes through any descriptor. A vibefs
+  `write` just below file
   offset 2^44 makes the next access to that block panic the kernel,
   since both Cargo profiles check overflow (DESIGN §3.5), and a write at
   2^44 or above overwrites the file's low blocks (F008; ROADMAP §10.11)
@@ -281,10 +283,13 @@ are the console mux (serial and framebuffer).
 A file fd names a slot in one system-wide open-file table,
 `file_init::FILES` (16 entries), shared by every process with no
 per-process quota, and the generation the slot had when the file was
-opened. The slot holds the offset, size, and open flags, so fds
-that `dup` or `fork` copied share one offset. While the table is full, every
-`open` and every `execve` (which needs a slot to read the image) fails with
-`EMFILE` in every process (F057; ROADMAP §10.4).
+opened. The slot holds a reference to the file's inode (a counted
+reference to FAT's in-core inode, or a vibefs inode number), the offset,
+and the open flags, so fds that `dup` or `fork` copied share one offset,
+and separate opens of one FAT file share its size and first cluster.
+While the table is full, every `open` and every `execve` (which needs a
+slot to read the image) fails with `EMFILE` in every process (F057;
+ROADMAP §10.4).
 
 - `dup` / `dup2` copy the slot and clear `FD_CLOEXEC` on the new fd
 - `open` `O_CLOEXEC` becomes per-fd `FD_CLOEXEC`; `execve` drops those
@@ -300,16 +305,16 @@ that `dup` or `fork` copied share one offset. While the table is full, every
   reach the FAT `vibe` directory that the vibefs mount hides, and
   `/vibe/./f` returns `EINVAL` (F056, F086; ROADMAP §10.4)
 - `read`, `write`, and `lseek` copy the slot out, drop the table lock for
-  the I/O, and write back only the offset (and, for a `write`, the size
-  and first cluster it changed). `refs` and `used` change only in `addref`
-  and `close`, under the table lock, and the `close` that frees a slot
-  bumps its generation, so a lookup or write-back through a descriptor
-  whose slot was closed and reused fails with `EBADF`. Two calls on one
-  open file that overlap still lose one call's offset update. They cannot
-  overlap while syscall bodies run with IF=0, every user thread runs on one
-  CPU, and no file syscall blocks; after §10.6 makes syscall bodies
-  preemptible a process and its `fork` child can overlap on one inherited
-  descriptor and lose an offset update until §13.1's position lock (F055)
+  the I/O, and write back only the offset. `refs` and `used` change only
+  in `addref` and `close`, under the table lock, and the `close` that
+  frees a slot bumps its generation, so a lookup or write-back through a
+  descriptor whose slot was closed and reused fails with `EBADF`. Two
+  calls on one open file that overlap still lose one call's offset update.
+  They cannot overlap while syscall bodies run with IF=0, every user
+  thread runs on one CPU, and no file syscall blocks; after §10.6 makes
+  syscall bodies preemptible a process and its `fork` child can overlap on
+  one inherited descriptor and lose an offset update until §13.1's
+  position lock (F055)
 - a kernel-side `dispatch()` probe with no process still sees `getpid=0`
   and `EBADF` for a closed fd; pointer-validation tests run as spawned
   ring-3 programs

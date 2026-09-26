@@ -480,7 +480,7 @@ impl FatVol {
         }
     }
 
-    pub fn read<D: Disk>(
+    fn read<D: Disk>(
         &mut self,
         d: &mut D,
         clu: u32,
@@ -498,7 +498,7 @@ impl FatVol {
     }
 
     #[allow(clippy::too_many_arguments)] // FAT dirent + cluster + size update
-    pub fn write<D: Disk>(
+    fn write<D: Disk>(
         &mut self,
         d: &mut D,
         dir_clu: u32,
@@ -544,7 +544,8 @@ impl FatVol {
         Ok(buf.len())
     }
 
-    pub fn truncate<D: Disk>(
+    #[cfg(test)]
+    fn truncate<D: Disk>(
         &mut self,
         d: &mut D,
         dir_clu: u32,
@@ -1038,6 +1039,9 @@ impl FatVol {
     ) -> Result<usize, FatError> {
         let i = self.ent_of(k)?;
         let n = self.inos[i].inode;
+        if n.kind == InodeKind::Dir {
+            return Err(FatError::IsDir);
+        }
         let size = u32::try_from(n.size).map_err(|_| FatError::Corrupt)?;
         self.read(d, n.first_clu, size, off, buf)
     }
@@ -1054,6 +1058,9 @@ impl FatVol {
     ) -> Result<(usize, u64), FatError> {
         let i = self.ent_of(k)?;
         let n = self.inos[i].inode;
+        if n.kind == InodeKind::Dir {
+            return Err(FatError::IsDir);
+        }
         let pos = if append { n.size } else { off };
         let mut first = n.first_clu;
         let mut size = u32::try_from(n.size).map_err(|_| FatError::Corrupt)?;
@@ -1075,6 +1082,9 @@ impl FatVol {
         let new = u32::try_from(new).map_err(|_| FatError::Inval)?;
         let i = self.ent_of(k)?;
         let n = self.inos[i].inode;
+        if n.kind == InodeKind::Dir {
+            return Err(FatError::IsDir);
+        }
         let mut first = n.first_clu;
         let mut size = u32::try_from(n.size).map_err(|_| FatError::Corrupt)?;
         let dirent = self.dirent_of(i);
@@ -1102,13 +1112,6 @@ impl FatVol {
         n.dir_clu = e.inode.dir_clu;
         n.dir_off = e.inode.dir_off;
         Ok(n)
-    }
-
-    pub fn put_size(&mut self, ino: u32, clu: u32, size: u32) {
-        if let Some(e) = self.inos.iter_mut().find(|e| e.used && e.inode.ino == ino) {
-            e.inode.first_clu = clu;
-            e.inode.size = u64::from(size);
-        }
     }
 
     fn check_name(&self, name: &[u8]) -> Result<(), FatError> {
@@ -2858,6 +2861,49 @@ mod tests {
                 v.iput(d, r).unwrap();
             }
             v.sync(d).unwrap();
+        });
+        fsck(&b);
+    }
+
+    #[test]
+    fn fat_inode_two_descriptors() {
+        let mut b = fresh(INITRD_BYTES);
+        with_vol(&mut b, |v, d| {
+            let root = v.info.root_clus;
+            let n = v.create(d, root, b"two.bin", false).unwrap();
+            let one = v.iget(n.dir_clu, n.dir_off).unwrap();
+            let two = v.iget(n.dir_clu, n.dir_off).unwrap();
+            assert_eq!(
+                v.write_ino(d, one.key(), 0, false, b"AAAA").unwrap(),
+                (4, 0)
+            );
+            assert_eq!(v.write_ino(d, two.key(), 0, false, b"BB").unwrap(), (2, 0));
+            let first = v.inode(&one).first_clu;
+            assert!(first >= 2);
+            assert_eq!(v.inode(&two).first_clu, first, "one first cluster");
+            assert_eq!(read_back(v, d, &two), b"BBAA");
+            v.truncate_ino(d, one.key(), 0).unwrap();
+            assert_eq!(v.inode(&two).first_clu, 0);
+            assert_eq!(v.inode(&two).size, 0);
+            assert_eq!(
+                v.write_ino(d, two.key(), 5000, false, &[3u8; 10]).unwrap(),
+                (10, 5000)
+            );
+            assert_eq!(v.inode(&one).size, 5010);
+            assert_eq!(v.inode(&two).size, 5010);
+            let got = v.lookup(d, root, b"two.bin").unwrap();
+            assert_eq!(got.size, 5010);
+            assert_eq!(got.clu, v.inode(&one).first_clu);
+            let data = read_back(v, d, &one);
+            assert!(data[..5000].iter().all(|&x| x == 0));
+            assert_eq!(&data[5000..], &[3u8; 10]);
+            v.iput(d, one).unwrap();
+            v.iput(d, two).unwrap();
+            v.sync(d).unwrap();
+        });
+        with_vol(&mut b, |v, d| {
+            let counted = v.count_free(d).unwrap();
+            assert_eq!(v.free, counted, "FSInfo free count after a remount");
         });
         fsck(&b);
     }
