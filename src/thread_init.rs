@@ -4,20 +4,25 @@
 //! (owner CPU only, IRQs off). Cross-CPU wake is inbox + IPI 0xFD, never
 //! a remote runq lock. Never held across `switch_context`, heap free, or
 //! KVA/stack reclaim.
+//!
+//! A dead thread's kernel stack stays with the CPU that ran it: `thread_exit`
+//! parks it in that CPU's `PerCpu.dead_stack`, and [`finish_switch`], the
+//! switch tail that runs on that CPU once `switch_context` has moved it off
+//! the stack, puts it in the CPU's stack cache or on its dead list, which
+//! the CPU's workqueue worker unmaps and frees with IF=1 (DESIGN §4.5).
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use vibeos::ipi::{home_cpu, pick_cpu};
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::lock::RANK_SCHED;
-use vibeos::paging::VirtAddr;
 use vibeos::sched::{
     FAR_DEADLINE, SWEEP_TICKS, TimeoutQueue, effective_deadline, enqueue_runnable, take_next,
 };
 use vibeos::thread::{
-    CpuAffinity, CpuContext, KernelStack, MAX_THREADS, Tcb, ThreadId, ThreadState, WaitOutcome,
+    CpuAffinity, CpuContext, MAX_THREADS, Tcb, ThreadId, ThreadState, WaitOutcome,
     apply_if_on_resume, prepare_thread, switch_context,
 };
 use vibeos::time::Instant;
@@ -28,6 +33,24 @@ use crate::per_cpu_init;
 use crate::sync_init::SpinMutex;
 use crate::time_init;
 use crate::x86::InterruptGuard;
+
+/// Why a `spawn*` call made no thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpawnError {
+    /// Every TCB slot holds a live thread.
+    NoSlot,
+    /// The kernel stack could not be allocated.
+    NoMemory,
+}
+
+impl SpawnError {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoSlot => "no thread slot",
+            Self::NoMemory => "no memory for a kernel stack",
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct ThreadHandle {
@@ -136,9 +159,23 @@ impl Sched {
 
 static SCHED: SpinMutex<Sched> = SpinMutex::with_rank(Sched::empty(), RANK_SCHED);
 static SPAWN_RR: AtomicU32 = AtomicU32::new(0);
+/// Frames of the stacks every CPU's stack cache holds. A global atomic, not
+/// a `PerCpu` field, so no CPU reads another's `PerCpu`.
+static CACHED_STACK_FRAMES: AtomicUsize = AtomicUsize::new(0);
+/// Dead threads' stacks parked in a `PerCpu.dead_stack` slot or on a dead
+/// list: taken from their thread and not yet cached or freed.
+static STACKS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
+/// A new thread's first code. It starts at `irq_nest` + 1, IF=0 (the
+/// first-run level `spawn_inner` adds), so a tick cannot switch away before
+/// the switch tail has run; it drops that level, and turns IF on when the
+/// nest reaches 0, before `entry`.
 extern "C" fn trampoline() {
-    reap_zombies();
+    finish_switch();
+    per_cpu_init::irq_nest_leave();
+    if per_cpu_init::irq_nest() == 0 {
+        crate::x86::sti();
+    }
     let entry = unsafe { (*per_cpu_init::current_thread()).entry };
     entry();
     thread_exit();
@@ -149,19 +186,37 @@ pub fn exit_current() -> ! {
 }
 
 fn thread_exit() -> ! {
-    // IF-on-resume leaves IF set. Hold it off across Dead → defer_free →
-    // schedule so a tick cannot preempt a Dead thread still on-CPU.
+    // IF-on-resume leaves IF set. Hold it off from the park to the switch:
+    // a tick cannot preempt a thread whose stack is parked, and the switch
+    // tail that takes the stack runs on this CPU after the switch.
     let _irq = InterruptGuard::enter();
-    unsafe {
-        let p = per_cpu_init::current_thread();
-        (*p).state = ThreadState::Dead;
-        if let Some(ks) = (*p).stack.take() {
-            kva_init::defer_free(GuardedStack {
-                guard: VirtAddr(ks.guard),
-                pages: ks.pages,
-            });
-        }
+    let p = per_cpu_init::current_thread();
+    // SAFETY: `p` is this CPU's running thread (`per_cpu_init::set_current_thread`
+    // in `thread_init::switch_now`), whose `Tcb` stays in `SCHED` (invariant
+    // I9) and whose `stack` only this thread and `thread_init::spawn_inner`
+    // write, and a spawn reuses the slot only once the state below is Dead.
+    let stack = unsafe { (*p).stack.take() };
+    if let Some(stack) = stack {
+        // The store that makes the stack reclaimable. Only this CPU's
+        // `finish_switch` takes it, after `switch_context` has moved this
+        // CPU off it (invariant I10).
+        per_cpu_init::with_current(|cpu| {
+            assert!(
+                cpu.dead_stack.is_none(),
+                "thread_exit: dead-stack slot full"
+            );
+            cpu.dead_stack = Some(stack);
+        });
+        STACKS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
     }
+    // Under SCHED, as every other state store; the slot stays unreusable
+    // while `on_cpu` is set, until this CPU's switch tail clears it.
+    with_sched(|_| {
+        // SAFETY: as above; SCHED orders this store with `spawn_inner`'s scan.
+        unsafe { (*p).state = ThreadState::Dead };
+    });
+    #[cfg(feature = "kernel_tests")]
+    testing::exit_stall();
     schedule();
     panic!("dead thread resumed");
 }
@@ -217,7 +272,7 @@ fn schedule_inner(from_irq: bool) {
         }
 
         if !from_irq {
-            let ticks = per_cpu_init::current().ticks;
+            let ticks = per_cpu_init::current().remote.ticks.load(Ordering::Relaxed);
             if ticks.is_multiple_of(SWEEP_TICKS) {
                 for t in s.timeouts.overdue(now) {
                     if n_overdue < overdue.len() {
@@ -265,24 +320,25 @@ fn schedule_inner(from_irq: bool) {
     });
 
     if old_id == new_id || old_ptr.is_null() || new_ptr.is_null() {
-        if !from_irq {
-            reap_zombies();
-        }
         return;
     }
     assert!(!new_ptr.is_null(), "schedule: next vanished");
     switch_now(old_ptr, new_ptr);
-    if !from_irq {
-        reap_zombies();
-    }
+    finish_switch();
 }
 
 fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
     let now = time_init::read_tsc();
     per_cpu_init::with_current_switch(|cpu| {
+        // For the switch tail that runs next on this CPU.
+        cpu.tail_prev = old_ptr;
         let delta = now.wrapping_sub(cpu.slice_tsc);
         cpu.slice_tsc = now;
-        cpu.switches = cpu.switches.wrapping_add(1);
+        // Single writer: only this CPU stores its `switches`.
+        let switches = cpu.remote.switches.load(Ordering::Relaxed);
+        cpu.remote
+            .switches
+            .store(switches.wrapping_add(1), Ordering::Relaxed);
         unsafe {
             (*old_ptr).run_tsc = (*old_ptr).run_tsc.wrapping_add(delta);
             (*old_ptr).switches = (*old_ptr).switches.wrapping_add(1);
@@ -296,10 +352,16 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
                 cpu.irq_nest.load(Ordering::Relaxed),
             );
             per_cpu_init::set_current_thread(cpu, new_ptr);
+            (*new_ptr).on_cpu.store(true, Ordering::Relaxed);
             crate::syscall_init::on_switch(cpu, old_ptr, new_ptr);
-            switch_context(&mut (*old_ptr).context, &(*new_ptr).context);
         }
     });
+    // SAFETY: both TCBs are live entries of `SCHED` that this CPU runs
+    // or was given, established at `thread_init::schedule_inner` and
+    // `thread_init::switch_to`, and IF=0 under their `InterruptGuard`,
+    // which spans the switch; the `&mut PerCpu` above has ended (DESIGN
+    // §7.5).
+    unsafe { switch_context(&mut (*old_ptr).context, &(*new_ptr).context) };
 }
 
 fn relink(s: &mut Sched) {
@@ -330,10 +392,105 @@ fn relink(s: &mut Sched) {
     });
 }
 
-pub(crate) fn reap_zombies() {
-    // Stacks only. Dead TCBs stay queryable (`state == Dead`) until spawn
-    // reuses the slot. Never unmap a stack we are running on.
-    kva_init::drain_deferred();
+/// The switch tail: runs on this CPU after every `switch_context` returns,
+/// on both `schedule_inner` paths (the preempt one included), in
+/// `switch_to`, and first thing in `trampoline`, with IF=0. It empties
+/// this CPU's dead-stack slot: the stack goes into this CPU's stack cache,
+/// or onto its dead list, whose worker it wakes. It never unmaps,
+/// allocates, or sends a shootdown.
+pub(crate) fn finish_switch() {
+    debug_assert!(
+        !crate::x86::interrupts_enabled(),
+        "finish_switch with IF on"
+    );
+    #[cfg(feature = "kernel_tests")]
+    crate::ipi_init::testing::tail_enter();
+    let (prev, kick) = per_cpu_init::with_current(|cpu| {
+        let prev = core::mem::replace(&mut cpu.tail_prev, core::ptr::null_mut());
+        let Some(stack) = cpu.dead_stack.take() else {
+            return (prev, false);
+        };
+        let pages = stack.pages();
+        let refused = if pages == DEFAULT_STACK_PAGES {
+            cpu.stack_cache.put(stack).err()
+        } else {
+            Some(stack)
+        };
+        match refused {
+            None => {
+                CACHED_STACK_FRAMES.fetch_add(pages, Ordering::AcqRel);
+                STACKS_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+                (prev, false)
+            }
+            Some(stack) => {
+                kva_init::park_on_list(&mut cpu.dead_list, stack);
+                (prev, true)
+            }
+        }
+    });
+    if kick {
+        crate::work_init::kick_dead_stacks();
+    }
+    #[cfg(feature = "kernel_tests")]
+    crate::ipi_init::testing::tail_leave();
+    if !prev.is_null() {
+        // SAFETY: `prev` is the TCB this CPU switched off (stored in
+        // `tail_prev` by `thread_init::switch_now`), a live entry of `SCHED`
+        // (invariant I9); `switch_context` has returned, so every save into
+        // it is done. This Release store is this CPU's last access to it:
+        // after it `spawn_inner` may rewrite the slot (AGENTS rule 5).
+        unsafe { (*prev).on_cpu.store(false, Ordering::Release) };
+    }
+}
+
+/// Take this CPU's whole dead list, for its worker. Owner CPU, IF=0.
+/// Returns the list head, 0 when empty.
+pub(crate) fn take_dead_stacks() -> u64 {
+    per_cpu_init::with_current(|cpu| core::mem::replace(&mut cpu.dead_list, 0))
+}
+
+/// The worker has freed `n` stacks it took with [`take_dead_stacks`].
+pub(crate) fn stacks_reclaimed(n: usize) {
+    STACKS_IN_FLIGHT.fetch_sub(n, Ordering::AcqRel);
+}
+
+/// Frames the stack caches of every CPU hold.
+pub fn cached_stack_frames() -> usize {
+    CACHED_STACK_FRAMES.load(Ordering::Acquire)
+}
+
+/// Dead threads' stacks not yet cached or freed.
+pub fn stacks_in_flight() -> usize {
+    STACKS_IN_FLIGHT.load(Ordering::Acquire)
+}
+
+/// A default-size stack from this CPU's cache, zeroed, or `None`.
+fn cached_stack() -> Option<GuardedStack> {
+    let stack = per_cpu_init::with_current(|cpu| cpu.stack_cache.take())?;
+    CACHED_STACK_FRAMES.fetch_sub(stack.pages(), Ordering::AcqRel);
+    let len = stack.pages() * vibeos::paging::PAGE_SIZE_4K as usize;
+    // SAFETY: the stack's `pages` pages above `base` are mapped writable
+    // and owned by this handle alone: no thread runs on a cached stack
+    // (invariant I10, established at `thread_init::finish_switch`).
+    unsafe { core::ptr::write_bytes(stack.base().as_u64() as *mut u8, 0, len) };
+    Some(stack)
+}
+
+/// Keep a stack a failed spawn did not use: this CPU's cache if it has
+/// room and the stack is default-size, else free it.
+fn return_stack(stack: GuardedStack) {
+    let pages = stack.pages();
+    let refused = if pages == DEFAULT_STACK_PAGES {
+        per_cpu_init::with_current(|cpu| cpu.stack_cache.put(stack).err())
+    } else {
+        Some(stack)
+    };
+    match refused {
+        None => {
+            CACHED_STACK_FRAMES.fetch_add(pages, Ordering::AcqRel);
+        }
+        Some(stack) => kva_init::free_stack(stack),
+    }
 }
 
 /// `sti; hlt` with a closed lost-wakeup window: cli, drain inbox, recheck
@@ -365,6 +522,7 @@ pub unsafe fn init_bootstrap() {
         id: ThreadId::BOOTSTRAP,
         name: "bootstrap",
         state: ThreadState::Running,
+        on_cpu: AtomicBool::new(true),
         stack: None,
         context: CpuContext::empty(),
         entry: bootstrap_entry,
@@ -399,17 +557,27 @@ fn bootstrap_entry() {
     panic!("bootstrap entry called");
 }
 
-pub fn spawn(name: &'static str, entry: fn()) -> ThreadHandle {
-    spawn_inner(name, entry, CpuAffinity::Any, true, 0, 0, 0)
+pub fn spawn(name: &'static str, entry: fn()) -> Result<ThreadHandle, SpawnError> {
+    spawn_inner(
+        name,
+        entry,
+        CpuAffinity::Any,
+        true,
+        0,
+        0,
+        0,
+        DEFAULT_STACK_PAGES,
+    )
 }
 
-/// Pin to this CPU. In-guest tests that `switch_to` / `yield_now` a
-/// worker must use this: `ktest::run` holds IF off on the BSP, so an
-/// `Any` spawn would RR onto an AP the BSP cannot switch to.
+/// Pin to this CPU: `switch_to` reaches only this CPU's run queue, so an
+/// in-guest test that `switch_to`s a worker must spawn it here.
 ///
-/// Copies `irq_nest` so `switch_to` does not `sti` the worker (incoming
-/// nest 0 would enable IF; a tick then preempts the cooperative chain).
-pub fn spawn_here(name: &'static str, entry: fn()) -> ThreadHandle {
+/// Copies the caller's `irq_nest`. A worker started from the IF=1 in-guest
+/// registry runs with IF on; one started under a test's own guard runs with
+/// IF off, so `switch_to` does not `sti` it and a tick cannot preempt a
+/// cooperative `switch_to` chain.
+pub fn spawn_here(name: &'static str, entry: fn()) -> Result<ThreadHandle, SpawnError> {
     spawn_inner(
         name,
         entry,
@@ -418,19 +586,70 @@ pub fn spawn_here(name: &'static str, entry: fn()) -> ThreadHandle {
         per_cpu_init::irq_nest(),
         0,
         0,
+        DEFAULT_STACK_PAGES,
     )
 }
 
-pub fn spawn_on(name: &'static str, entry: fn(), cpu: u32) -> ThreadHandle {
-    spawn_inner(name, entry, CpuAffinity::Pinned(cpu), true, 0, 0, 0)
+pub fn spawn_on(name: &'static str, entry: fn(), cpu: u32) -> Result<ThreadHandle, SpawnError> {
+    spawn_inner(
+        name,
+        entry,
+        CpuAffinity::Pinned(cpu),
+        true,
+        0,
+        0,
+        0,
+        DEFAULT_STACK_PAGES,
+    )
 }
 
-pub(crate) fn spawn_idle(entry: fn()) -> ThreadHandle {
-    spawn_inner("idle", entry, CpuAffinity::Pinned(0), false, 0, 0, 0)
+/// Stack size and CPU for [`spawn_opts`].
+#[derive(Clone, Copy)]
+pub struct SpawnOpts {
+    /// Stack pages, without the guard page. `kva_init::alloc_guarded_stack`
+    /// takes at most 32.
+    pub stack_pages: usize,
+    /// `Some(c)` pins the thread to CPU `c`, which must be online; `None`
+    /// lets it run on any CPU.
+    pub cpu: Option<u32>,
+}
+
+/// Spawn a Ready kernel thread with `opts`' stack size and CPU. It starts
+/// with `irq_nest` 0, so it runs with IF on, as [`spawn`]'s threads do.
+/// `opts.stack_pages` must be at most 32 (`kva_init`'s limit) and
+/// `opts.cpu`, when set, an online CPU.
+pub fn spawn_opts(
+    name: &'static str,
+    entry: fn(),
+    opts: SpawnOpts,
+) -> Result<ThreadHandle, SpawnError> {
+    let affinity = match opts.cpu {
+        Some(c) => CpuAffinity::Pinned(c),
+        None => CpuAffinity::Any,
+    };
+    spawn_inner(name, entry, affinity, true, 0, 0, 0, opts.stack_pages)
+}
+
+pub(crate) fn spawn_idle(entry: fn()) -> Result<ThreadHandle, SpawnError> {
+    spawn_inner(
+        "idle",
+        entry,
+        CpuAffinity::Pinned(0),
+        false,
+        0,
+        0,
+        0,
+        DEFAULT_STACK_PAGES,
+    )
 }
 
 /// User process thread. Not runnable until [`make_ready`].
-pub fn spawn_user(name: &'static str, entry: fn(), pid: u32, cr3: u64) -> ThreadHandle {
+pub fn spawn_user(
+    name: &'static str,
+    entry: fn(),
+    pid: u32,
+    cr3: u64,
+) -> Result<ThreadHandle, SpawnError> {
     spawn_inner(
         name,
         entry,
@@ -439,6 +658,7 @@ pub fn spawn_user(name: &'static str, entry: fn(), pid: u32, cr3: u64) -> Thread
         0,
         pid,
         cr3,
+        DEFAULT_STACK_PAGES,
     )
 }
 
@@ -455,16 +675,18 @@ pub fn make_ready(id: ThreadId) {
 }
 
 /// AP idle: running on `stack` already. No synthetic frame, not on the FIFO.
-pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Option<ThreadId> {
-    let ks = KernelStack {
-        guard: stack.guard.as_u64(),
-        pages: stack.pages,
-    };
+/// `Err(stack)` hands the stack back when no TCB slot is free.
+#[allow(
+    clippy::result_large_err,
+    reason = "the stack comes back by value so the caller frees it once; a Box would allocate on the failure path"
+)]
+pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, GuardedStack> {
     let mut tcb = Box::new(Tcb {
         id: ThreadId(0),
         name: "idle",
         state: ThreadState::Running,
-        stack: Some(ks),
+        on_cpu: AtomicBool::new(true),
+        stack: Some(stack),
         context: CpuContext::empty(),
         entry: ap_idle_entry,
         next: None,
@@ -480,14 +702,15 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Option<ThreadId> {
         syscall_count: 0,
         pid: 0,
     });
-    let id = with_sched(|s| {
-        let slot = s.slots.iter().position(|x| x.is_none())?;
+    with_sched(|s| {
+        let Some(slot) = s.slots.iter().position(|x| x.is_none()) else {
+            return Err(tcb.stack.take().expect("adopt_ap_idle: stack set above"));
+        };
         let id = ThreadId(slot as u32);
         tcb.id = id;
         s.slots[slot] = Some(tcb);
-        Some(id)
-    })?;
-    Some(id)
+        Ok(id)
+    })
 }
 
 /// Timeout path: TCB never ran. Return the stack so the caller can free it.
@@ -496,11 +719,7 @@ pub fn abandon_ap_idle(id: ThreadId) -> Option<GuardedStack> {
         s.timeouts.remove(id);
         let t = s.get_mut(id)?;
         t.state = ThreadState::Dead;
-        let ks = t.stack.take()?;
-        Some(GuardedStack {
-            guard: VirtAddr(ks.guard),
-            pages: ks.pages,
-        })
+        t.stack.take()
     })
 }
 
@@ -516,6 +735,11 @@ fn choose_cpu(affinity: CpuAffinity) -> u32 {
     cpu
 }
 
+/// Build a Ready (or, `enqueue` false, parked) thread. The stack comes
+/// first, then a TCB slot: a `Dead` one is rewritten under SCHED, else a new
+/// `Tcb` box goes into an empty one. Neither the box nor the stack is
+/// allocated or freed under SCHED, which ranks above HEAP, PT and BUDDY.
+#[allow(clippy::too_many_arguments)] // TCB fields and stack size chosen at spawn
 fn spawn_inner(
     name: &'static str,
     entry: fn(),
@@ -524,53 +748,71 @@ fn spawn_inner(
     irq_nest: u32,
     pid: u32,
     as_cr3: u64,
-) -> ThreadHandle {
-    let stack = kva_init::alloc_guarded_stack(DEFAULT_STACK_PAGES).expect("thread stack");
+    stack_pages: usize,
+) -> Result<ThreadHandle, SpawnError> {
+    #[cfg(feature = "kernel_tests")]
+    if current_pid() != 0 && testing::FAIL_FORK_STACK.swap(false, Ordering::AcqRel) {
+        return Err(SpawnError::NoMemory);
+    }
+    let cached = if stack_pages == DEFAULT_STACK_PAGES {
+        cached_stack()
+    } else {
+        None
+    };
+    let stack = match cached {
+        Some(s) => s,
+        None => kva_init::alloc_guarded_stack(stack_pages).map_err(|_| SpawnError::NoMemory)?,
+    };
     let top = stack.top().as_u64();
     assert!(top.is_multiple_of(16), "kva stack top not 16-aligned");
-    let ks = KernelStack {
-        guard: stack.guard.as_u64(),
-        pages: stack.pages,
-    };
+    // Taken by whichever path below installs it in a TCB.
+    let mut stack = Some(stack);
     let tramp = trampoline as *const () as u64;
-    let cur = current_id();
-    let idle = per_cpu_init::current().idle_id;
     let cpu = choose_cpu(affinity);
+    // The first-run level: `trampoline` runs the switch tail with IF=0 and
+    // then drops it.
+    let first_nest = irq_nest + 1;
 
     // Dead slot: rewrite the Box. 2000 spawn/exit must not churn the
-    // heap (one extra mapped page shows up as a leaked frame).
+    // heap (one extra mapped page shows up as a leaked frame). A Dead
+    // thread whose CPU has not finished switching off it still has
+    // `on_cpu` set; its CPU clears it with Release (`finish_switch`).
     if let Some(id) = with_sched(|s| {
         let slot = s.slots.iter().position(|x| match x.as_ref() {
-            Some(t) => t.state == ThreadState::Dead && t.id != cur && t.id != idle,
+            Some(t) => t.state == ThreadState::Dead && !t.on_cpu.load(Ordering::Acquire),
             None => false,
         })?;
         let id = ThreadId(slot as u32);
         s.timeouts.remove(id);
-        let tcb = s.slots[slot].as_mut().expect("dead slot");
+        let tcb = s.slots[slot].as_deref_mut()?;
         assert!(tcb.stack.is_none(), "dead tcb still owns stack");
+        let ks = stack.take()?;
         fill_tcb(
-            tcb, name, entry, affinity, cpu, ks, top, tramp, irq_nest, pid, as_cr3,
+            tcb, name, entry, affinity, cpu, ks, top, tramp, first_nest, pid, as_cr3,
         );
         if enqueue {
             s.place(cpu, id);
         }
         Some(id)
     }) {
-        return ThreadHandle { id };
+        return Ok(ThreadHandle { id });
     }
 
+    // Until ROADMAP §10.4's `TryBox`, the one infallible allocation left
+    // on this path: the heap grows or the kernel panics (DESIGN §4.4).
     let mut tcb = Box::new(Tcb {
         id: ThreadId(0),
         name,
         state: ThreadState::Ready,
-        stack: Some(ks),
+        on_cpu: AtomicBool::new(false),
+        stack,
         context: CpuContext::empty(),
         entry,
         next: None,
         prev: None,
         affinity,
         cpu,
-        irq_nest,
+        irq_nest: first_nest,
         switches: 0,
         run_tsc: 0,
         wait_outcome: WaitOutcome::Woken,
@@ -582,12 +824,11 @@ fn spawn_inner(
     prepare_thread(&mut tcb.context, top, tramp);
     unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
 
-    let id = with_sched(|s| {
-        let slot = s
-            .slots
-            .iter()
-            .position(|x| x.is_none())
-            .expect("thread table full");
+    let placed = with_sched(|s| {
+        let Some(slot) = s.slots.iter().position(|x| x.is_none()) else {
+            // Dropped after SCHED is released: no heap free under it.
+            return Err(tcb);
+        };
         let id = ThreadId(slot as u32);
         s.timeouts.remove(id);
         tcb.id = id;
@@ -595,9 +836,18 @@ fn spawn_inner(
         if enqueue {
             s.place(cpu, id);
         }
-        id
+        Ok(id)
     });
-    ThreadHandle { id }
+    match placed {
+        Ok(id) => Ok(ThreadHandle { id }),
+        Err(mut tcb) => {
+            if let Some(ks) = tcb.stack.take() {
+                return_stack(ks);
+            }
+            drop(tcb);
+            Err(SpawnError::NoSlot)
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)] // TCB fields filled at spawn
@@ -607,7 +857,7 @@ fn fill_tcb(
     entry: fn(),
     affinity: CpuAffinity,
     cpu: u32,
-    ks: KernelStack,
+    ks: GuardedStack,
     top: u64,
     tramp: u64,
     irq_nest: u32,
@@ -721,7 +971,7 @@ pub fn switch_to(id: ThreadId) {
         (s.ptr(old_id), s.ptr(id))
     });
     switch_now(old_ptr, new_ptr);
-    reap_zombies();
+    finish_switch();
 }
 
 pub fn current_id() -> ThreadId {
@@ -742,6 +992,18 @@ pub fn set_pid_cr3(id: ThreadId, pid: u32, cr3: u64) {
             t.as_cr3 = cr3;
         }
     });
+}
+
+/// The first TCB, Dead ones included, whose saved root is `root`. Reads
+/// only; `addr_space_init::teardown` asks it before it frees a root.
+pub(crate) fn tcb_naming_root(root: u64) -> Option<ThreadId> {
+    with_sched(|s| {
+        s.slots
+            .iter()
+            .flatten()
+            .find(|t| t.as_cr3 & vibeos::paging::PTE_ADDR_MASK == root)
+            .map(|t| t.id)
+    })
 }
 
 /// Park on `wq` forever (still a far deadline). SCHED dropped before switch.
@@ -820,4 +1082,92 @@ pub fn snapshot(out: &mut [ThreadInfo]) -> usize {
         }
         n
     })
+}
+
+/// Hooks the in-guest tests arm (DESIGN §8.2). `kernel_tests` builds only.
+#[cfg(feature = "kernel_tests")]
+pub mod testing {
+    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+
+    use crate::time_init;
+
+    /// CPU whose exits [`exit_stall`] holds, or `u32::MAX`.
+    static STALL_CPU: AtomicU32 = AtomicU32::new(u32::MAX);
+    /// Exits left to hold.
+    static STALL_LEFT: AtomicU32 = AtomicU32::new(0);
+    /// How long each held exit spins, in ms of TSC time.
+    static STALL_MS: AtomicU64 = AtomicU64::new(0);
+
+    /// Hold the next `exits` thread exits on `cpu` for `ms` of TSC time
+    /// each, between the store that makes the exiting thread's stack
+    /// reclaimable and the switch off it. The hold spins with IF=0 and
+    /// services no IPI.
+    pub fn arm_exit_stall(cpu: u32, exits: u32, ms: u64) {
+        STALL_CPU.store(cpu, Ordering::Relaxed);
+        STALL_MS.store(ms, Ordering::Relaxed);
+        STALL_LEFT.store(exits, Ordering::Release);
+    }
+
+    pub fn disarm_exit_stall() {
+        STALL_LEFT.store(0, Ordering::Release);
+        STALL_CPU.store(u32::MAX, Ordering::Relaxed);
+    }
+
+    /// Called by `thread_exit` just before it switches away.
+    pub(super) fn exit_stall() {
+        if STALL_CPU.load(Ordering::Relaxed) != super::current_cpu() {
+            return;
+        }
+        if STALL_LEFT
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+            .is_err()
+        {
+            return;
+        }
+        let cycles = STALL_MS
+            .load(Ordering::Relaxed)
+            .saturating_mul(time_init::tsc_per_ms());
+        let end = time_init::read_tsc().saturating_add(cycles);
+        while time_init::read_tsc() < end {
+            core::hint::spin_loop();
+        }
+    }
+
+    /// One-shot: the next spawn from a process context fails as if its
+    /// kernel stack could not be allocated.
+    pub(super) static FAIL_FORK_STACK: AtomicBool = AtomicBool::new(false);
+
+    /// Move this CPU's cached stacks onto its dead list and wake its worker,
+    /// which unmaps and frees them.
+    pub fn drain_local_stack_cache() {
+        let kick = crate::per_cpu_init::with_current(|cpu| {
+            let mut any = false;
+            while let Some(stack) = cpu.stack_cache.take() {
+                super::CACHED_STACK_FRAMES.fetch_sub(stack.pages(), Ordering::AcqRel);
+                super::STACKS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
+                crate::kva_init::park_on_list(&mut cpu.dead_list, stack);
+                any = true;
+            }
+            any
+        });
+        if kick {
+            crate::work_init::kick_dead_stacks();
+        }
+    }
+
+    /// Put `stack`, which nothing runs on, on this CPU's dead list and wake
+    /// its worker, as the switch tail does with a stack the cache refuses.
+    pub fn park_on_local_list(stack: crate::kva_init::GuardedStack) {
+        super::STACKS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
+        crate::per_cpu_init::with_current(|cpu| {
+            crate::kva_init::park_on_list(&mut cpu.dead_list, stack);
+        });
+        crate::work_init::kick_dead_stacks();
+    }
+
+    /// Make the next `spawn*` made on behalf of a process (a `fork`) return
+    /// `SpawnError::NoMemory` before it allocates anything. One-shot.
+    pub fn fail_next_fork_stack() {
+        FAIL_FORK_STACK.store(true, Ordering::Release);
+    }
 }

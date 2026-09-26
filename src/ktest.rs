@@ -8,22 +8,26 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::arch::global_asm;
+use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::addr_space::{UserMemError, UserPerms};
 use vibeos::apic::{Polarity, TimerMode, Trigger};
 use vibeos::block::{BlockError, DeviceState, Op};
-use vibeos::desc::{IstSlot, KERNEL_CS, TSS_SEL, USER_CS_RPL};
+use vibeos::desc::{IstSlot, KERNEL_CS, TSS_SEL};
 use vibeos::dev::{ClaimError, Device, Driver, IdMatch, ProbeError};
 use vibeos::dma::{self, DMA32_BOUNDARY, DmaAlloc};
 use vibeos::fs::{FsError, InodeKind, O_CREAT, O_RDWR};
 use vibeos::heap::HEAP_SIZE;
 use vibeos::irq::{self, IrqError};
 use vibeos::kva::PAGE_SIZE;
+use vibeos::lock::RANK_DEVICE;
 use vibeos::paging::{PAGE_SIZE_4K, PageFlags, PhysAddr, USER_END, VirtAddr, heap_flags};
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
-use vibeos::syscall;
-use vibeos::thread::{RFLAGS_RESERVED1, ThreadId, ThreadState};
+use vibeos::per_cpu::PerCpuRemote;
+use vibeos::pmm::Frames;
+use vibeos::proc::{SIGILL, wait_exited, wait_signaled, wexitstatus, wifexited};
+use vibeos::thread::{ThreadId, ThreadState};
 use vibeos::time::{CalibSource, Instant, calib_band, calib_in_band};
 use vibeos::vectors;
 use vibeos::virtio::F_VERSION_1;
@@ -47,178 +51,393 @@ use crate::part_init;
 use crate::pci_init;
 use crate::per_cpu_init;
 use crate::pmm_init;
+use crate::proc_init;
 use crate::sched_init;
 use crate::smp_init;
 use crate::sync_init::{BlockingMutex, Channel, Condvar, RwLock, Semaphore, SpinMutex};
 use crate::syscall_init;
-use crate::thread_init;
+use crate::thread_init::{self, ThreadHandle};
 use crate::time_init;
-use crate::user_init;
 use crate::vibefs_init;
 use crate::virtio_blk_init;
 use crate::virtio_init;
 use crate::work_init;
 use crate::x86;
+use p10_s12::fid;
+mod user;
+use user::user_code;
 
 const ISA_DEBUG_EXIT: u16 = 0xF4;
 const EXIT_PASS: u32 = 0x10;
 const EXIT_FAIL: u32 = 0x11;
 
 #[derive(Clone, Copy)]
-enum Outcome {
+pub(crate) enum Outcome {
     Ok,
     Fail(&'static str),
+    FailFmt(FailMsg),
     Skip(&'static str),
 }
 
-type TestFn = fn() -> Outcome;
+const FAIL_MSG_BYTES: usize = 120;
 
-const TESTS: &[(&str, TestFn)] = &[
-    ("map_unmap", test_map_unmap),
-    ("nx_enforcement", test_nx_enforcement),
-    ("heap_box", test_heap_box),
-    ("heap_reuse", test_heap_reuse),
-    ("heap_align", test_heap_align),
-    ("heap_growth", test_heap_growth),
-    ("heap_oom", test_heap_oom),
-    ("stack_guard", test_stack_guard),
-    ("kva_roundtrip", test_kva_roundtrip),
-    ("kva_deferred", test_kva_deferred),
-    ("vmap", test_vmap),
-    ("mmio_uc_flags", test_mmio_uc_flags),
-    ("acpi_discovery", test_acpi_discovery),
-    ("gdt_selectors", test_gdt_selectors),
-    ("star_sysret_layout", test_star_sysret_layout),
-    (
+/// A formatted failure reason, cut at [`FAIL_MSG_BYTES`] on a character
+/// boundary. Build one with [`crate::fail_fmt!`].
+#[derive(Clone, Copy)]
+pub(crate) struct FailMsg {
+    buf: [u8; FAIL_MSG_BYTES],
+    len: u8,
+    full: bool,
+}
+
+impl FailMsg {
+    pub(crate) fn from_args(args: fmt::Arguments<'_>) -> FailMsg {
+        let mut m = FailMsg {
+            buf: [0; FAIL_MSG_BYTES],
+            len: 0,
+            full: false,
+        };
+        if fmt::write(&mut m, args).is_err() {
+            // A `Display` impl failed: say so rather than drop the error
+            // (DESIGN §2.5). Appended only if it fits whole.
+            const MARK: &str = " <fmt error>";
+            if m.full || (m.len as usize) + MARK.len() > FAIL_MSG_BYTES {
+                return m;
+            }
+            m.push_whole(MARK);
+        }
+        m
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.len as usize]).unwrap_or("<invalid utf-8>")
+    }
+
+    fn push_whole(&mut self, s: &str) {
+        for ch in s.chars() {
+            let at = self.len as usize;
+            let n = ch.len_utf8();
+            if self.full || at + n > FAIL_MSG_BYTES {
+                self.full = true;
+                return;
+            }
+            ch.encode_utf8(&mut self.buf[at..at + n]);
+            self.len += n as u8;
+        }
+    }
+}
+
+impl fmt::Write for FailMsg {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.push_whole(s);
+        Ok(())
+    }
+}
+
+/// `Outcome::FailFmt` with a `format_args!` reason, cut at 120 bytes.
+#[macro_export]
+macro_rules! fail_fmt {
+    ($($arg:tt)*) => {
+        $crate::ktest::Outcome::FailFmt($crate::ktest::FailMsg::from_args(format_args!($($arg)*)))
+    };
+}
+
+pub(crate) type TestFn = fn() -> Outcome;
+
+/// One registry row. `deadline_ms`, `once` and `opt_in` are data until the
+/// runner enforces them (ROADMAP §10.2).
+#[derive(Clone, Copy)]
+pub(crate) struct Test {
+    pub name: &'static str,
+    pub run: TestFn,
+    pub deadline_ms: u32,
+    pub once: bool,
+    pub opt_in: bool,
+}
+
+/// A row with the default deadline (10 s), run on every repeat, not opt-in.
+pub(crate) const fn test(name: &'static str, run: TestFn) -> Test {
+    Test {
+        name,
+        run,
+        deadline_ms: 10_000,
+        once: false,
+        opt_in: false,
+    }
+}
+
+impl Test {
+    pub const fn deadline(self, ms: u32) -> Test {
+        Test {
+            deadline_ms: ms,
+            ..self
+        }
+    }
+
+    pub const fn once(self) -> Test {
+        Test { once: true, ..self }
+    }
+
+    pub const fn opt_in(self) -> Test {
+        Test {
+            opt_in: true,
+            ..self
+        }
+    }
+}
+
+pub(crate) type Suite = &'static [Test];
+
+mod p10_s01;
+mod p10_s02;
+mod p10_s04;
+mod p10_s05;
+mod p10_s06;
+mod p10_s07;
+mod p10_s08;
+mod p10_s09;
+mod p10_s11;
+mod p10_s12;
+mod p10_s13;
+mod p10_s14;
+mod p10_s15;
+mod p10_s16;
+mod p10_s17;
+mod p10_s18;
+mod p10_s19;
+mod p10_s20;
+mod p10_s21;
+mod p10_s22;
+mod p10_s23;
+
+const TESTS: &[Test] = &[
+    test("map_unmap", test_map_unmap),
+    test("nx_enforcement", test_nx_enforcement),
+    test("heap_box", test_heap_box),
+    test("heap_reuse", test_heap_reuse),
+    test("heap_align", test_heap_align),
+    test("heap_growth", test_heap_growth),
+    test("heap_oom", test_heap_oom),
+    test("stack_guard", test_stack_guard),
+    test("kva_roundtrip", test_kva_roundtrip),
+    test("kva_deferred", test_kva_deferred),
+    test("vmap", test_vmap),
+    test("mmio_uc_flags", test_mmio_uc_flags),
+    test("acpi_discovery", test_acpi_discovery),
+    test("gdt_selectors", test_gdt_selectors),
+    test("star_sysret_layout", test_star_sysret_layout),
+    test(
         "addrspace_map_unmap_teardown",
         test_addrspace_map_unmap_teardown,
     ),
-    ("user_ptr_helpers", test_user_ptr_helpers),
-    ("cr3_switch_skip", test_cr3_switch_skip),
-    ("ring3_syscall_enosys", test_ring3_syscall_enosys),
-    ("ring3_hello_exit", test_ring3_hello_exit),
-    ("syscall_dispatch", test_syscall_dispatch),
-    ("syscall_ptr_validate", test_syscall_ptr_validate),
-    ("user_syscalls", test_user_syscalls),
-    ("int3_roundtrip", test_int3_roundtrip),
-    ("scoped_pf", test_scoped_pf),
-    ("gp_catch", test_gp_catch),
-    ("irqcell_reentry_panics", test_irqcell_reentry_panics),
-    ("bootcell_set_once", test_bootcell_set_once),
-    ("bootinfo_consistent", test_bootinfo_consistent),
-    ("df_on_ist", test_df_on_ist),
-    ("pit_tick_rate", test_pit_tick_rate),
-    ("now_us_monotonic", test_now_us_monotonic),
-    ("now_us_under_yields", test_now_us_under_yields),
-    ("tsc_calib_source", test_tsc_calib_source),
-    ("uptime_sides", test_uptime_sides),
-    ("rtc_offset", test_rtc_offset),
-    ("lapic_timer_mode", test_lapic_timer_mode),
-    ("lapic_timer_rearm", test_lapic_timer_rearm),
-    ("ioapic_pit_gsi_masked", test_ioapic_pit_gsi_masked),
-    ("per_cpu_bsp", test_per_cpu_bsp),
-    ("per_cpu_identity", test_per_cpu_identity),
-    ("trampoline_page", test_trampoline_page),
-    ("failed_ap_cleanup", test_failed_ap_cleanup),
-    ("spawn_sentinel", test_spawn_sentinel),
-    ("switch_two_threads", test_switch_two_threads),
-    ("irq_guard_nest", test_irq_guard_nest),
-    ("spin_mutex", test_spin_mutex),
-    ("lock_spins", test_lock_spins),
-    ("yield_now_switches", test_yield_now_switches),
-    ("sleep_ms_50", test_sleep_ms_50),
-    ("preempt_two_threads", test_preempt_two_threads),
-    ("idle_runs", test_idle_runs),
-    ("reap_returns_frames", test_reap_returns_frames),
-    ("reap_many_via_idle", test_reap_many_via_idle),
-    ("blocking_mutex_counter", test_blocking_mutex_counter),
-    ("rwlock_exclusion", test_rwlock_exclusion),
-    ("rwlock_writer_timeout", test_rwlock_writer_timeout),
-    ("semaphore_wake", test_semaphore_wake),
-    ("condvar_signal", test_condvar_signal),
-    ("condvar_wait_releases", test_condvar_wait_releases),
-    ("channel_mpsc", test_channel_mpsc),
-    ("mutex_deadline", test_mutex_deadline),
-    ("sync_try_paths", test_sync_try_paths),
-    ("sched_lock_timer_irq", test_sched_lock_timer_irq),
-    ("spawn_exit_thousands", test_spawn_exit_thousands),
-    ("cross_cpu_spawn", test_cross_cpu_spawn),
-    ("reschedule_ipi_wake_ap", test_reschedule_ipi_wake_ap),
-    ("call_function_ipi", test_call_function_ipi),
-    ("cpu_hardening", test_cpu_hardening),
-    ("tlb_shootdown_remote", test_tlb_shootdown_remote),
-    ("alloc_stress_smp", test_alloc_stress_smp),
-    ("log_boot_captured", test_log_boot_captured),
-    ("log_runtime_filter", test_log_runtime_filter),
-    ("log_emit_roundtrip", test_log_emit_roundtrip),
-    ("log_dmesg_no_recapture", test_log_dmesg_no_recapture),
-    ("fb_bgrx_roundtrip", test_fb_bgrx_roundtrip),
-    ("fb_pitch", test_fb_pitch),
-    ("fb_cr_home", test_fb_cr_home),
-    ("kbd_gsi_unmasked", test_kbd_gsi_unmasked),
-    ("kbd_8042_clock", test_kbd_8042_clock),
-    ("kbd_ps2_irq", test_kbd_ps2_irq),
-    ("console_mux", test_console_mux),
-    ("kbd_ring_drain", test_kbd_ring_drain),
-    ("shell_registry", test_shell_registry),
-    ("shell_dispatch", test_shell_dispatch),
-    ("shell_dmesg_level", test_shell_dmesg_level),
-    ("pci_qemu_set", test_pci_qemu_set),
-    ("pci_bar_map", test_pci_bar_map),
-    ("pci_cfg_rw", test_pci_cfg_rw),
-    ("pci_claim_exclusive", test_pci_claim_exclusive),
-    ("pci_bind_order", test_pci_bind_order),
-    ("lspci_cmd", test_lspci_cmd),
-    ("irq_pool", test_irq_pool),
-    ("irq_free_threaded", test_irq_free_threaded),
-    ("msix_cpu", test_msix_cpu),
-    ("intx_fallback", test_intx_fallback),
-    ("intx_free_masks", test_intx_free_masks),
-    ("dma_alloc", test_dma_alloc),
-    ("dma_edu", test_dma_edu),
-    ("workqueue", test_workqueue),
-    ("virtio_bind", test_virtio_bind),
-    ("virtio_vq", test_virtio_vq),
-    ("dev_random_source", test_dev_random_source),
-    ("block_ramdisk_rw", test_block_ramdisk_rw),
-    ("block_concurrent", test_block_concurrent),
-    ("block_retry", test_block_retry),
-    ("block_vblk_rw", test_block_vblk_rw),
-    ("block_vblk_irq", test_block_vblk_irq),
-    ("block_vblk_deep", test_block_vblk_deep),
-    ("block_vblk_concurrent", test_block_vblk_concurrent),
-    ("block_vblk_mq", test_block_vblk_mq),
-    ("block_persist", test_block_persist),
-    ("block_part_mbr", test_block_part_mbr),
-    ("block_part_gpt", test_block_part_gpt),
-    ("block_cache_hit", test_block_cache_hit),
-    ("block_cache_evict", test_block_cache_evict),
-    ("vfs_walk", test_vfs_walk),
-    ("pseudo_fs", test_pseudo_fs),
-    ("fat_initrd", test_fat_initrd),
-    ("vibefs", test_vibefs),
+    test("user_ptr_helpers", test_user_ptr_helpers),
+    test("cr3_switch_skip", test_cr3_switch_skip),
+    test("ring3_syscall_enosys", test_ring3_syscall_enosys),
+    test("ring3_hello_exit", test_ring3_hello_exit),
+    test("syscall_dispatch", test_syscall_dispatch),
+    test("syscall_ptr_validate", test_syscall_ptr_validate),
+    test("user_syscalls", test_user_syscalls),
+    test("int3_roundtrip", test_int3_roundtrip),
+    test("scoped_pf", test_scoped_pf),
+    test("gp_catch", test_gp_catch),
+    test("irqcell_reentry_panics", test_irqcell_reentry_panics),
+    test("bootcell_set_once", test_bootcell_set_once),
+    test("bootinfo_consistent", test_bootinfo_consistent),
+    test("df_on_ist", test_df_on_ist),
+    test("pit_tick_rate", test_pit_tick_rate),
+    test("now_us_monotonic", test_now_us_monotonic),
+    test("now_us_under_yields", test_now_us_under_yields),
+    test("tsc_calib_source", test_tsc_calib_source),
+    test("uptime_sides", test_uptime_sides),
+    test("rtc_offset", test_rtc_offset),
+    test("lapic_timer_mode", test_lapic_timer_mode),
+    test("lapic_timer_rearm", test_lapic_timer_rearm),
+    test("ioapic_pit_gsi_masked", test_ioapic_pit_gsi_masked),
+    test("per_cpu_bsp", test_per_cpu_bsp),
+    test("per_cpu_identity", test_per_cpu_identity),
+    test("trampoline_page", test_trampoline_page),
+    test("failed_ap_cleanup", test_failed_ap_cleanup),
+    test("spawn_sentinel", test_spawn_sentinel),
+    test("switch_two_threads", test_switch_two_threads),
+    test("irq_guard_nest", test_irq_guard_nest),
+    test("spin_mutex", test_spin_mutex),
+    test("lock_spins", test_lock_spins),
+    test("yield_now_switches", test_yield_now_switches),
+    test("sleep_ms_50", test_sleep_ms_50),
+    test("preempt_two_threads", test_preempt_two_threads),
+    test("idle_runs", test_idle_runs),
+    test("reap_returns_frames", test_reap_returns_frames),
+    test("reap_many_via_idle", test_reap_many_via_idle),
+    test("blocking_mutex_counter", test_blocking_mutex_counter),
+    test("rwlock_exclusion", test_rwlock_exclusion),
+    test("rwlock_writer_timeout", test_rwlock_writer_timeout),
+    test("semaphore_wake", test_semaphore_wake),
+    test("condvar_signal", test_condvar_signal),
+    test("condvar_wait_releases", test_condvar_wait_releases),
+    test("channel_mpsc", test_channel_mpsc),
+    test("mutex_deadline", test_mutex_deadline),
+    test("sync_try_paths", test_sync_try_paths),
+    test("sched_lock_timer_irq", test_sched_lock_timer_irq),
+    test("spawn_exit_thousands", test_spawn_exit_thousands),
+    test("cross_cpu_spawn", test_cross_cpu_spawn),
+    test("reschedule_ipi_wake_ap", test_reschedule_ipi_wake_ap),
+    test("call_function_ipi", test_call_function_ipi),
+    test("cpu_hardening", test_cpu_hardening),
+    test("tlb_shootdown_remote", test_tlb_shootdown_remote),
+    test("alloc_stress_smp", test_alloc_stress_smp),
+    test("log_boot_captured", test_log_boot_captured),
+    test("log_runtime_filter", test_log_runtime_filter),
+    test("log_emit_roundtrip", test_log_emit_roundtrip),
+    test("log_dmesg_no_recapture", test_log_dmesg_no_recapture),
+    test("fb_bgrx_roundtrip", test_fb_bgrx_roundtrip),
+    test("fb_pitch", test_fb_pitch),
+    test("fb_cr_home", test_fb_cr_home),
+    test("kbd_gsi_unmasked", test_kbd_gsi_unmasked),
+    test("kbd_8042_clock", test_kbd_8042_clock),
+    test("kbd_ps2_irq", test_kbd_ps2_irq),
+    test("console_mux", test_console_mux),
+    test("kbd_ring_drain", test_kbd_ring_drain),
+    test("shell_registry", test_shell_registry),
+    test("shell_dispatch", test_shell_dispatch),
+    test("shell_dmesg_level", test_shell_dmesg_level),
+    test("pci_qemu_set", test_pci_qemu_set),
+    test("pci_bar_map", test_pci_bar_map),
+    test("pci_cfg_rw", test_pci_cfg_rw),
+    test("pci_claim_exclusive", test_pci_claim_exclusive),
+    test("pci_bind_order", test_pci_bind_order),
+    test("lspci_cmd", test_lspci_cmd),
+    test("irq_pool", test_irq_pool),
+    test("irq_free_threaded", test_irq_free_threaded),
+    test("msix_cpu", test_msix_cpu),
+    test("intx_fallback", test_intx_fallback),
+    test("intx_free_masks", test_intx_free_masks),
+    test("dma_alloc", test_dma_alloc),
+    test("dma_edu", test_dma_edu),
+    test("workqueue", test_workqueue),
+    test("virtio_bind", test_virtio_bind),
+    test("virtio_vq", test_virtio_vq),
+    test("dev_random_source", test_dev_random_source),
+    test("block_ramdisk_rw", test_block_ramdisk_rw),
+    test("block_concurrent", test_block_concurrent),
+    test("block_retry", test_block_retry),
+    test("block_vblk_rw", test_block_vblk_rw),
+    test("block_vblk_irq", test_block_vblk_irq),
+    test("block_vblk_deep", test_block_vblk_deep),
+    test("block_vblk_concurrent", test_block_vblk_concurrent),
+    test("block_vblk_mq", test_block_vblk_mq),
+    test("block_persist", test_block_persist),
+    test("block_part_mbr", test_block_part_mbr),
+    test("block_part_gpt", test_block_part_gpt),
+    test("block_cache_hit", test_block_cache_hit),
+    test("block_cache_evict", test_block_cache_evict),
+    test("vfs_walk", test_vfs_walk),
+    test("pseudo_fs", test_pseudo_fs),
+    test("fat_initrd", test_fat_initrd),
+    test("vibefs", test_vibefs),
+    test("ktest_rows", test_ktest_rows),
+    test("ktest_fail_fmt", test_ktest_fail_fmt),
+    test("ktest_helpers", test_ktest_helpers),
 ];
 
+/// The legacy list first, then each slice's suite in ID order (DESIGN §8.2).
+const SUITES: &[Suite] = &[
+    TESTS,
+    p10_s01::TESTS,
+    p10_s02::TESTS,
+    p10_s04::TESTS,
+    p10_s05::TESTS,
+    p10_s06::TESTS,
+    p10_s07::TESTS,
+    p10_s08::TESTS,
+    p10_s09::TESTS,
+    p10_s11::TESTS,
+    p10_s12::TESTS,
+    p10_s13::TESTS,
+    p10_s14::TESTS,
+    p10_s15::TESTS,
+    p10_s16::TESTS,
+    p10_s17::TESTS,
+    p10_s18::TESTS,
+    p10_s19::TESTS,
+    p10_s20::TESTS,
+    p10_s21::TESTS,
+    p10_s22::TESTS,
+    p10_s23::TESTS,
+];
+
+/// Name of the registry's kernel thread.
+const REGISTRY_NAME: &str = "ktest";
+/// The registry's stack: 64 KiB, the boot stack size Limine guarantees
+/// (ROADMAP §10.2).
+const REGISTRY_STACK_PAGES: usize = 16;
+
+/// The registry thread's id, `u32::MAX` until it starts.
+static REGISTRY_TID: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// The id of the thread [`registry_main`] runs on.
+fn registry_tid() -> ThreadId {
+    ThreadId(REGISTRY_TID.load(Ordering::Acquire))
+}
+
+/// Start the registry on its own kernel thread, pinned to CPU 0, and park
+/// the bootstrap thread for good (DESIGN §8.2).
 pub fn run() -> ! {
-    // IRQs off: PIC is masked, but page-table walks should not race a
-    // stray spurious line.
-    let _cli = x86::InterruptGuard::enter();
+    if let Err(e) = thread_init::spawn_opts(
+        REGISTRY_NAME,
+        registry_main,
+        thread_init::SpawnOpts {
+            stack_pages: REGISTRY_STACK_PAGES,
+            cpu: Some(0),
+        },
+    ) {
+        panic!("ktest: registry thread: {}", e.as_str());
+    }
+    loop {
+        thread_init::park(None);
+    }
+}
+
+/// Run every suite with IF on and `irq_nest` 0, the context production
+/// kernel threads run in, then exit QEMU.
+fn registry_main() {
+    REGISTRY_TID.store(thread_init::current_id().0, Ordering::Release);
     crate::marker!("vibeOS: ktest: begin");
+    quiesce_frames();
     let mut failed = false;
-    for &(name, f) in TESTS {
-        match f() {
-            Outcome::Ok => {
-                crate::marker!("vibeOS: ktest: ok {name}");
+    for suite in SUITES {
+        for t in suite.iter() {
+            let name = t.name;
+            let mut outcome = (t.run)();
+            // A test that needs interrupts off takes its own guard and
+            // drops it before it returns.
+            let if_on = x86::interrupts_enabled();
+            let nest = per_cpu_init::irq_nest();
+            if !if_on || nest != 0 {
+                per_cpu_init::current().irq_nest.store(0, Ordering::Relaxed);
+                x86::sti();
+                if !matches!(outcome, Outcome::Fail(_) | Outcome::FailFmt(_)) {
+                    outcome = crate::fail_fmt!("left IF={} irq_nest={}", u8::from(if_on), nest);
+                }
             }
-            Outcome::Fail(why) => {
-                // Same shape as skip: reason on the protocol line so
-                // check_ktest_output (which raises on that line alone)
-                // is enough to diagnose (DESIGN §8.2).
-                crate::marker!("vibeOS: ktest: FAIL {name}: {why}");
-                failed = true;
-            }
-            Outcome::Skip(reason) => {
-                crate::marker!("vibeOS: ktest: skip {name}: {reason}");
+            match outcome {
+                Outcome::Ok => {
+                    crate::marker!("vibeOS: ktest: ok {name}");
+                }
+                Outcome::Fail(why) => {
+                    // Same shape as skip: reason on the protocol line so
+                    // check_ktest_output (which raises on that line alone)
+                    // is enough to diagnose (DESIGN §8.2).
+                    crate::marker!("vibeOS: ktest: FAIL {name}: {why}");
+                    failed = true;
+                }
+                Outcome::FailFmt(msg) => {
+                    let why = msg.as_str();
+                    crate::marker!("vibeOS: ktest: FAIL {name}: {why}");
+                    failed = true;
+                }
+                Outcome::Skip(reason) => {
+                    crate::marker!("vibeOS: ktest: skip {name}: {reason}");
+                }
             }
         }
     }
@@ -231,32 +450,265 @@ fn qemu_exit(code: u32) -> ! {
     x86::halt();
 }
 
-fn free_frames() -> usize {
-    pmm_init::with_buddy(|b| b.stats().free_frames)
+/// Pages per stack in [`quiesce_frames`]' KVA walk: 17 pages of VA a round,
+/// so one walk between two coalesces covers about 8 MiB.
+const WARM_STACK_PAGES: usize = 16;
+/// Ceiling on walk rounds: two coalesces take at most two free lists' worth.
+const WARM_ROUNDS: usize = 3 * vibeos::limits::MAX_KVA_RANGES;
+/// Default-size stacks the warm-up allocates and frees: past one free-list
+/// coalesce, since the node pool is `MAX_KVA_RANGES` (128).
+const WARM_DEFAULT_STACKS: usize = 2 * vibeos::limits::MAX_KVA_RANGES;
+/// Ceiling on [`settle_threads`]' wait.
+const SETTLE_MS: u64 = 2_000;
+/// Thread slots [`quiesce_frames`] leaves empty: `thread_init::adopt_ap_idle`
+/// takes only an empty slot, and `failed_ap_cleanup` calls it twice.
+const EMPTY_SLOT_RESERVE: usize = 2;
+
+/// Set once [`quiesce_frames`] has run; it runs once per boot.
+static WARMED: AtomicBool = AtomicBool::new(false);
+
+/// Shared setup before the first frame-accounting test (ROADMAP §10.2,
+/// F074): after it, `free_frames()` moves only for what a test itself
+/// allocates and frees, so the tests compare against a quiescent baseline
+/// and a leak in their window still shows.
+///
+/// Three things move the count outside a test's window. A thread spawned
+/// before the registry (the boot `/hello`, whose `wait_kernel` returns at
+/// the reap, before the thread parks its stack) can still be running or
+/// have its stack on its CPU's dead list. A spawn into an empty
+/// thread slot boxes a new `Tcb`, which can grow the heap. A stack or vmap
+/// carved from KVA that no mapping has reached before takes a page-table
+/// page that `unmap` never frees. So: let every pending thread finish and
+/// its stack come back; fill the empty thread slots, all but
+/// [`EMPTY_SLOT_RESERVE`], with threads that exit at once, so later spawns
+/// reuse Dead boxes; walk KVA through two coalesces with the timer on, so
+/// the free list starts again at VA the walk mapped; and allocate and free
+/// [`WARM_DEFAULT_STACKS`] default-size stacks. It runs once per boot, from
+/// the registry or from the first `p10_s08::quiescent_free_frames` caller,
+/// which then waits for the threads and stacks to settle before it reads
+/// the count.
+pub(crate) fn quiesce_frames() {
+    if WARMED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if !settle_threads() {
+        crate::marker!("vibeOS: ktest:   warm-up: threads did not settle");
+    }
+    let mut buf = [thread_init::ThreadInfo {
+        id: ThreadId::NONE,
+        name: "",
+        state: ThreadState::Dead,
+        cpu: 0,
+    }; vibeos::thread::MAX_THREADS];
+    let empty = (vibeos::thread::MAX_THREADS - thread_init::snapshot(&mut buf))
+        .saturating_sub(EMPTY_SLOT_RESERVE);
+    // Under the guard none of these runs, dies, and frees its slot for the
+    // next spawn before every empty slot has a Tcb.
+    {
+        let _g = x86::InterruptGuard::enter();
+        let mut i = 0;
+        while i < empty {
+            if thread_init::spawn_here("warm", dying_entry).is_err() {
+                break;
+            }
+            i += 1;
+        }
+    }
+    if !settle_threads() {
+        crate::marker!("vibeOS: ktest:   warm-up: warm threads did not exit");
+    }
+    // The first coalesce can come after a round or two, when the free list
+    // is nearly full already; the second comes after a full list of rounds,
+    // so the VA it merges back to the list's head is mapped past that.
+    let (coalesces, rounds) = warm_kva();
+    if coalesces < 2 {
+        crate::marker!("vibeOS: ktest:   warm-up: kva coalesces {coalesces} in {rounds} rounds");
+    }
+    // Then the size every default spawn takes, directly, so a spawn that
+    // misses its CPU's stack cache maps VA the warm-up mapped.
+    let mut i = 0;
+    while i < WARM_DEFAULT_STACKS {
+        let Ok(stack) = kva_init::alloc_guarded_stack(vibeos::kva::DEFAULT_STACK_PAGES) else {
+            crate::marker!("vibeOS: ktest:   warm-up: default stack {i} failed");
+            break;
+        };
+        kva_init::free_stack(stack);
+        i += 1;
+    }
 }
 
-fn alloc_frame() -> Option<PhysAddr> {
-    pmm_init::with_buddy(|b| b.allocate_frame()).map(PhysAddr)
+/// Allocate and free guarded stacks until `Kva::free` has coalesced twice.
+/// The timer stays on: at `-smp 4` each round's shootdowns take long enough
+/// that an IF-off walk loses PIT ticks. Returns (coalesces, rounds).
+fn warm_kva() -> (usize, usize) {
+    let mut coalesces = 0;
+    let mut rounds = 0;
+    while coalesces < 2 && rounds < WARM_ROUNDS {
+        let Ok(stack) = kva_init::alloc_guarded_stack(WARM_STACK_PAGES) else {
+            break;
+        };
+        let n = kva_init::stats().free_ranges;
+        kva_init::free_stack(stack);
+        // A free adds one range unless `Kva::free` ran its coalesce.
+        if kva_init::stats().free_ranges <= n {
+            coalesces += 1;
+        }
+        rounds += 1;
+    }
+    (coalesces, rounds)
 }
 
-fn free_frame(pa: PhysAddr) {
-    pmm_init::with_buddy(|b| unsafe { b.deallocate_frame(pa.as_u64()) });
+/// With the timer on, sleep until no thread but this one and the idle
+/// threads is Ready or Running and no dead thread's stack is still on its
+/// way to a stack cache or back to the buddy. False if that takes longer
+/// than [`SETTLE_MS`].
+pub(crate) fn settle_threads() -> bool {
+    let me = thread_init::current_id();
+    let t0 = time_init::uptime_ms();
+    loop {
+        let mut buf = [thread_init::ThreadInfo {
+            id: ThreadId::NONE,
+            name: "",
+            state: ThreadState::Dead,
+            cpu: 0,
+        }; vibeos::thread::MAX_THREADS];
+        let n = thread_init::snapshot(&mut buf);
+        let busy = thread_init::stacks_in_flight() != 0
+            || buf[..n].iter().any(|t| {
+                t.id != me
+                    && t.name != "idle"
+                    && matches!(t.state, ThreadState::Ready | ThreadState::Running)
+            });
+        if !busy {
+            break true;
+        }
+        if time_init::uptime_ms().saturating_sub(t0) > SETTLE_MS {
+            break false;
+        }
+        thread_init::sleep_ms(1);
+    }
 }
 
-struct Fault {
-    cr2: u64,
-    error: u64,
+/// Free frames: the buddy's, and those of the stacks the CPUs' stack caches
+/// hold, which a spawn reuses (ROADMAP §10.10).
+pub(crate) fn free_frames() -> usize {
+    pmm_init::with_buddy(|b| b.stats().free_frames) + thread_init::cached_stack_frames()
 }
 
-fn catch_fault<F: FnOnce()>(f: F) -> Option<Fault> {
+pub(crate) fn alloc_frame() -> Option<PhysAddr> {
+    alloc_frames(0)
+}
+
+pub(crate) fn free_frame(pa: PhysAddr) {
+    // SAFETY: an unknown base frees nothing, and a held one is freed once
+    // (`ktest::take_held` removes it), so the contract of
+    // `ktest::dealloc_frames` holds for any `pa`.
+    unsafe { dealloc_frames(pa, 0) };
+}
+
+pub(crate) struct Fault {
+    pub(crate) cr2: u64,
+    pub(crate) error: u64,
+}
+
+pub(crate) fn catch_fault<F: FnOnce()>(f: F) -> Option<Fault> {
+    // A hit longjmps out of the #PF gate and skips the `iretq` that would
+    // restore IF; the guard restores it.
+    let _g = x86::InterruptGuard::enter();
     arch::catch::catch(vectors::PF, f).map(|c| Fault {
         cr2: c.cr2,
         error: c.error,
     })
 }
 
-fn catch_alloc_error<F: FnOnce()>(f: F) -> bool {
+pub(crate) fn catch_alloc_error<F: FnOnce()>(f: F) -> bool {
     arch::catch::catch_alloc(f)
+}
+
+// Helpers for APIs that concurrent Phase 10 slices change. A new test
+// reaches those APIs only through these; the slice that changes one
+// updates its helper here (DESIGN §8.2).
+
+pub(crate) fn spawn_thread(name: &'static str, entry: fn()) -> ThreadHandle {
+    match thread_init::spawn(name, entry) {
+        Ok(h) => h,
+        Err(e) => panic!("ktest: spawn {name}: {}", e.as_str()),
+    }
+}
+
+pub(crate) fn spawn_thread_on(name: &'static str, entry: fn(), cpu: u32) -> ThreadHandle {
+    match thread_init::spawn_on(name, entry, cpu) {
+        Ok(h) => h,
+        Err(e) => panic!("ktest: spawn {name} on cpu{cpu}: {}", e.as_str()),
+    }
+}
+
+/// Blocks the frame helpers handed out, as the `Frames` that own them.
+/// The helpers trade bare addresses (C-SUITES), so the tokens wait here.
+/// Never held together with BUDDY.
+static HELD: SpinMutex<[Option<Frames>; 16]> =
+    SpinMutex::with_rank([const { None }; 16], RANK_DEVICE);
+
+/// Remove and return the held token whose base is `pa`.
+fn take_held(pa: PhysAddr) -> Option<Frames> {
+    let mut held = HELD.lock();
+    let slot = held
+        .iter_mut()
+        .find(|s| s.as_ref().is_some_and(|f| f.base() == pa.as_u64()))?;
+    slot.take()
+}
+
+/// A naturally aligned block of `1 << order` frames. `None` when the
+/// buddy is out, or when 16 blocks are already out through these helpers.
+pub(crate) fn alloc_frames(order: u8) -> Option<PhysAddr> {
+    let f = pmm_init::with_buddy(|b| b.alloc(order))?;
+    let pa = PhysAddr(f.base());
+    let spare = {
+        let mut held = HELD.lock();
+        match held.iter_mut().find(|s| s.is_none()) {
+            Some(slot) => {
+                *slot = Some(f);
+                None
+            }
+            None => Some(f),
+        }
+    };
+    match spare {
+        None => Some(pa),
+        Some(f) => {
+            pmm_init::with_buddy(|b| b.free(f));
+            None
+        }
+    }
+}
+
+/// Free a block [`alloc_frames`] returned. A base it did not hand out, or
+/// already freed, is ignored.
+///
+/// # Safety
+/// `pa` is a block that [`alloc_frames`] returned for this same `order`, and
+/// nothing still maps or uses it.
+pub(crate) unsafe fn dealloc_frames(pa: PhysAddr, order: u8) {
+    if let Some(f) = take_held(pa) {
+        debug_assert_eq!(f.order(), order, "ktest: dealloc_frames order");
+        pmm_init::with_buddy(|b| b.free(f));
+    }
+}
+
+/// A naturally aligned block of `1 << order` frames as its owning
+/// `Frames`, for an API that takes the token (`kva_init::vmap`). The
+/// caller gives it back with [`free_frames_owned`].
+pub(crate) fn alloc_frames_owned(order: u8) -> Option<Frames> {
+    pmm_init::with_buddy(|b| b.alloc(order))
+}
+
+/// Free a block [`alloc_frames_owned`] returned, once nothing maps it.
+pub(crate) fn free_frames_owned(f: Frames) {
+    pmm_init::with_buddy(|b| b.free(f));
+}
+
+pub(crate) fn cpu_remote(id: u32) -> Option<&'static PerCpuRemote> {
+    per_cpu_init::cpu(id)
 }
 
 unsafe extern "C" {
@@ -458,16 +910,16 @@ fn test_heap_oom() -> Outcome {
 }
 
 fn test_stack_guard() -> Outcome {
-    let Some(stack) = kva_init::alloc_guarded_stack(4) else {
+    let Ok(stack) = kva_init::alloc_guarded_stack(4) else {
         return Outcome::Fail("alloc_guarded_stack");
     };
-    unsafe { (stack.mapped_base().as_u64() as *mut u64).write_volatile(0x1111_2222) };
-    let got = unsafe { (stack.mapped_base().as_u64() as *const u64).read_volatile() };
+    unsafe { (stack.base().as_u64() as *mut u64).write_volatile(0x1111_2222) };
+    let got = unsafe { (stack.base().as_u64() as *const u64).read_volatile() };
     if got != 0x1111_2222 {
         kva_init::free_stack(stack);
         return Outcome::Fail("mapped stack not writable");
     }
-    let guard = stack.guard.as_u64();
+    let guard = stack.guard().as_u64();
     let fault = catch_fault(|| unsafe {
         (guard as *mut u8).write_volatile(1);
     });
@@ -480,8 +932,8 @@ fn test_stack_guard() -> Outcome {
 }
 
 fn test_kva_roundtrip() -> Outcome {
-    let before = free_frames();
-    let Some(stack) = kva_init::alloc_guarded_stack(4) else {
+    let before = p10_s08::quiescent_free_frames();
+    let Ok(stack) = kva_init::alloc_guarded_stack(4) else {
         return Outcome::Fail("alloc_guarded_stack");
     };
     let mid = free_frames();
@@ -491,7 +943,7 @@ fn test_kva_roundtrip() -> Outcome {
         return Outcome::Fail("stack did not take 4 frames");
     }
     kva_init::free_stack(stack);
-    let after = free_frames();
+    let after = p10_s08::quiescent_free_frames();
     if after != before {
         crate::marker!("vibeOS: ktest:   before={before} after={after}");
         return Outcome::Fail("free did not restore frame count");
@@ -499,46 +951,40 @@ fn test_kva_roundtrip() -> Outcome {
     Outcome::Ok
 }
 
+/// A stack parked on this CPU's dead list comes back through its worker
+/// (ROADMAP §10.10).
 fn test_kva_deferred() -> Outcome {
-    let before = free_frames();
-    let Some(stack) = kva_init::alloc_guarded_stack(4) else {
+    let before = p10_s08::quiescent_free_frames();
+    let Ok(stack) = kva_init::alloc_guarded_stack(4) else {
         return Outcome::Fail("alloc_guarded_stack");
     };
-    let mid = free_frames();
-    kva_init::defer_free(stack);
-    if free_frames() != mid {
-        kva_init::drain_deferred();
-        return Outcome::Fail("defer freed too early");
+    if free_frames() + 4 != before {
+        kva_init::free_stack(stack);
+        return Outcome::Fail("stack did not take 4 frames");
     }
-    kva_init::drain_deferred();
-    let after = free_frames();
+    thread_init::testing::park_on_local_list(stack);
+    let after = p10_s08::quiescent_free_frames();
     if after != before {
         crate::marker!("vibeOS: ktest:   before={before} after={after}");
-        return Outcome::Fail("drain did not free");
+        return Outcome::Fail("worker did not free the parked stack");
     }
     Outcome::Ok
 }
 
 fn test_vmap() -> Outcome {
-    let Some(a) = alloc_frame() else {
-        return Outcome::Fail("frame a");
+    let Some(f) = alloc_frames_owned(1) else {
+        return Outcome::Fail("frames");
     };
-    let Some(b) = alloc_frame() else {
-        free_frame(a);
-        return Outcome::Fail("frame b");
-    };
-    let Some(va) = kva_init::vmap(&[a, b]) else {
-        free_frame(a);
-        free_frame(b);
+    // `vmap` frees the frames itself when it fails.
+    let Ok(v) = kva_init::vmap(f) else {
         return Outcome::Fail("vmap");
     };
+    let va = v.base();
     unsafe { (va.as_u64() as *mut u64).write_volatile(0x100) };
     unsafe { ((va.as_u64() + PAGE_SIZE) as *mut u64).write_volatile(0x200) };
     let ga = unsafe { (va.as_u64() as *const u64).read_volatile() };
     let gb = unsafe { ((va.as_u64() + PAGE_SIZE) as *const u64).read_volatile() };
-    kva_init::vunmap(va, 2);
-    free_frame(a);
-    free_frame(b);
+    free_frames_owned(kva_init::vunmap(v));
     if ga != 0x100 || gb != 0x200 {
         return Outcome::Fail("vmap readback");
     }
@@ -634,33 +1080,8 @@ fn test_star_sysret_layout() -> Outcome {
     Outcome::Ok
 }
 
-fn hhdm_mut(pa: PhysAddr) -> *mut u8 {
-    (paging_init::HHDM_BASE.wrapping_add(pa.as_u64())) as *mut u8
-}
-
-fn write_user_va(space: &vibeos::addr_space::AddressSpace, va: u64, bytes: &[u8]) -> bool {
-    let Some((pa, _, _)) = space.mapper().translate(VirtAddr(va)) else {
-        return false;
-    };
-    let dst = hhdm_mut(PhysAddr(pa.as_u64() & !0xFFF));
-    let off = (va & 0xFFF) as usize;
-    let mut i = 0;
-    while i < bytes.len() {
-        unsafe { dst.add(off + i).write_volatile(bytes[i]) };
-        i += 1;
-    }
-    true
-}
-
-fn read_user_u64(space: &vibeos::addr_space::AddressSpace, va: u64) -> Option<u64> {
-    let (pa, _, _) = space.mapper().translate(VirtAddr(va))?;
-    let src = hhdm_mut(PhysAddr(pa.as_u64() & !0xFFF)) as *const u64;
-    let off = ((va & 0xFFF) / 8) as usize;
-    Some(unsafe { src.add(off).read_volatile() })
-}
-
 fn test_addrspace_map_unmap_teardown() -> Outcome {
-    let before = free_frames();
+    let before = p10_s08::quiescent_free_frames();
     let Some(mut space) = addr_space_init::create() else {
         return Outcome::Fail("create");
     };
@@ -671,6 +1092,10 @@ fn test_addrspace_map_unmap_teardown() -> Outcome {
     {
         return Outcome::Fail("map_anon");
     }
+    // IF stays off while this thread runs on `space`'s CR3: the registry
+    // thread has IF=1 and `as_cr3 == 0`, so a switch away and back in this
+    // window would reload the kernel CR3 under the user VA below.
+    let irqs_off = x86::InterruptGuard::enter();
     addr_space_init::load_cr3(&space);
     x86::invlpg(va);
     // User PTE: SMAP would #PF a kernel store/load via this VA.
@@ -682,20 +1107,23 @@ fn test_addrspace_map_unmap_teardown() -> Outcome {
     x86::clac();
     if got != 0x1111_2222_3333_4444 {
         addr_space_init::load_kernel_cr3();
+        drop(irqs_off);
         addr_space_init::teardown(space);
         return Outcome::Fail("readback");
     }
     if unsafe { addr_space_init::unmap(&mut space, va, PAGE_SIZE_4K * 2) }.is_err() {
         addr_space_init::load_kernel_cr3();
+        drop(irqs_off);
         addr_space_init::teardown(space);
         return Outcome::Fail("unmap");
     }
     addr_space_init::load_kernel_cr3();
+    drop(irqs_off);
     let st = addr_space_init::teardown(space);
     if st.pt_frames == 0 {
         return Outcome::Fail("teardown pt");
     }
-    if free_frames() != before {
+    if p10_s08::quiescent_free_frames() != before {
         return Outcome::Fail("frame leak");
     }
     Outcome::Ok
@@ -746,10 +1174,15 @@ fn test_cr3_switch_skip() -> Outcome {
         addr_space_init::teardown(a);
         return Outcome::Fail("create b");
     };
+    // IF stays off while this thread runs on a user CR3 (see
+    // test_addrspace_map_unmap_teardown): a switch away and back would reload
+    // the kernel CR3 between the load and the read.
+    let irqs_off = x86::InterruptGuard::enter();
     addr_space_init::load_cr3(&a);
     let cr3_a = x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK;
     if !addr_space_init::cr3_was_skipped(&a) {
         addr_space_init::load_kernel_cr3();
+        drop(irqs_off);
         addr_space_init::teardown(a);
         addr_space_init::teardown(b);
         return Outcome::Fail("a not recorded");
@@ -757,6 +1190,7 @@ fn test_cr3_switch_skip() -> Outcome {
     addr_space_init::load_cr3(&a);
     if (x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK) != cr3_a {
         addr_space_init::load_kernel_cr3();
+        drop(irqs_off);
         addr_space_init::teardown(a);
         addr_space_init::teardown(b);
         return Outcome::Fail("skip mutated cr3");
@@ -765,111 +1199,68 @@ fn test_cr3_switch_skip() -> Outcome {
     let cr3_b = x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK;
     if cr3_b == cr3_a {
         addr_space_init::load_kernel_cr3();
+        drop(irqs_off);
         addr_space_init::teardown(a);
         addr_space_init::teardown(b);
         return Outcome::Fail("b shares a cr3");
     }
     addr_space_init::load_kernel_cr3();
+    drop(irqs_off);
     addr_space_init::teardown(a);
     addr_space_init::teardown(b);
     Outcome::Ok
 }
 
-fn trampoline_bytes(result_va: u64) -> [u8; 19] {
-    let mut b = [0u8; 19];
-    b[0] = 0xB8;
-    b[1..5].copy_from_slice(&0x00C0_FFEEu32.to_le_bytes());
-    b[5] = 0x0F;
-    b[6] = 0x05;
-    b[7] = 0x48;
-    b[8] = 0xA3;
-    b[9..17].copy_from_slice(&result_va.to_le_bytes());
-    b[17] = 0x0F;
-    b[18] = 0x0B;
-    b
-}
+// syscall 0xC0FFEE, then `ud2` if rax is -ENOSYS, else exit(1).
+user_code!(
+    ENOSYS_PROBE,
+    "
+    mov eax, 0xC0FFEE
+    syscall
+    cmp rax, -38
+    jne 1f
+    ud2
+1:
+    mov edi, 1
+    mov eax, 60
+    syscall
+    ud2
+    "
+);
 
 fn test_ring3_syscall_enosys() -> Outcome {
-    // 1 GiB: past the 512 MiB GLOBAL identity window so a stale TLB
-    // entry cannot alias the trampoline as NX kernel pages.
-    const CODE: u64 = 0x0000_0000_4000_0000;
-    const STACK: u64 = 0x0000_0000_4000_1000;
-    const DATA: u64 = 0x0000_0000_4000_2000;
-    let before = free_frames();
-    let Some(mut space) = addr_space_init::create() else {
-        return Outcome::Fail("create");
+    let before = p10_s08::quiescent_free_frames();
+    let st = match user::run(&user::Image::Code(ENOSYS_PROBE, user::DEFAULT), &["enosys"]) {
+        Ok(st) => st,
+        Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
     };
-    let map_ok = unsafe {
-        addr_space_init::map_anon(&mut space, CODE, PAGE_SIZE_4K, UserPerms::RX).is_ok()
-            && addr_space_init::map_anon(&mut space, STACK, PAGE_SIZE_4K, UserPerms::RW).is_ok()
-            && addr_space_init::map_anon(&mut space, DATA, PAGE_SIZE_4K, UserPerms::RW).is_ok()
-    };
-    if !map_ok {
-        addr_space_init::teardown(space);
-        return Outcome::Fail("map trampoline");
-    }
-    let bytes = trampoline_bytes(DATA);
-    if !write_user_va(&space, CODE, &bytes) {
-        addr_space_init::teardown(space);
-        return Outcome::Fail("write trampoline");
-    }
-    if !write_user_va(&space, DATA, &[0u8; 8]) {
-        addr_space_init::teardown(space);
-        return Outcome::Fail("zero result");
-    }
-    addr_space_init::load_cr3(&space);
-    x86::invlpg(CODE);
-    x86::invlpg(STACK);
-    x86::invlpg(DATA);
-    let caught = arch::catch::catch(vectors::UD, || unsafe {
-        syscall_init::enter_user(CODE, STACK + PAGE_SIZE_4K, RFLAGS_RESERVED1, 0);
-    });
-    arch::gs::force_kernel();
-    addr_space_init::load_kernel_cr3();
-    let got = read_user_u64(&space, DATA);
-    addr_space_init::teardown(space);
-    let Some(c) = caught else {
-        return Outcome::Fail("no #UD after trampoline");
-    };
-    if c.frame.cs != USER_CS_RPL as u64 {
-        return Outcome::Fail("ud cs not user");
-    }
-    let Some(val) = got else {
-        return Outcome::Fail("result unmapped");
-    };
-    if val != (-(syscall::ENOSYS as i64)) as u64 {
-        crate::marker!("vibeOS: ktest:   enosys rax={val:#x}");
+    if st == wait_exited(1) {
         return Outcome::Fail("rax not -ENOSYS");
     }
-    if free_frames() != before {
-        return Outcome::Fail("trampoline frame leak");
+    if st != wait_signaled(SIGILL) {
+        return crate::fail_fmt!("status {st:#x}, want SIGILL");
+    }
+    let after = p10_s08::quiescent_free_frames();
+    if after != before {
+        crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
+        return Outcome::Fail("enosys frame leak");
     }
     Outcome::Ok
 }
 
 fn test_ring3_hello_exit() -> Outcome {
-    let before = free_frames();
-    match user_init::run_path("/hello") {
-        Ok(42) => {}
-        Ok(st) => {
-            crate::marker!("vibeOS: ktest:   hello status={st}");
-            return Outcome::Fail("status not 42");
-        }
-        Err(e) => {
-            crate::marker!("vibeOS: ktest:   hello err={}", e.as_str());
-            return Outcome::Fail("load/run");
-        }
+    let before = p10_s08::quiescent_free_frames();
+    let pid = match proc_init::spawn_elf("/hello", 0, 0) {
+        Ok(pid) => pid,
+        Err(e) => return crate::fail_fmt!("spawn /hello: {}", e.as_str()),
+    };
+    let st = proc_init::wait_kernel(pid);
+    if st != wait_exited(42) {
+        return crate::fail_fmt!("hello status {st:#x}, want exited 42");
     }
-    let (buf, n) = syscall_init::stdout_bytes();
-    let out = &buf[..n];
-    if !out
-        .windows(b"hello from ring3".len())
-        .any(|w| w == b"hello from ring3")
-    {
-        return Outcome::Fail("stdout missing hello");
-    }
-    arch::gs::force_kernel();
-    if free_frames() != before {
+    let after = p10_s08::quiescent_free_frames();
+    if after != before {
+        crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
         return Outcome::Fail("hello frame leak");
     }
     Outcome::Ok
@@ -893,85 +1284,100 @@ fn test_syscall_dispatch() -> Outcome {
     Outcome::Ok
 }
 
+// write(1, "hi\n" in its page, 3) must return 3; then NULL/8, a kernel
+// pointer/8, the unmapped page after its own/8, and -1/2 must each return
+// -EFAULT. Exits 11 to 15 at the first mismatch, else 0.
+user_code!(
+    PTR_VALIDATE,
+    "
+    lea rbx, [rip]
+    and rbx, -4096
+    mov edi, 1
+    lea rsi, [rip + 9f]
+    mov edx, 3
+    mov eax, 1
+    syscall
+    mov r12d, 11
+    cmp rax, 3
+    jne 8f
+    mov edi, 1
+    xor esi, esi
+    mov edx, 8
+    mov eax, 1
+    syscall
+    mov r12d, 12
+    cmp rax, -14
+    jne 8f
+    mov edi, 1
+    mov rsi, 0xFFFF800000001000
+    mov edx, 8
+    mov eax, 1
+    syscall
+    mov r12d, 13
+    cmp rax, -14
+    jne 8f
+    mov edi, 1
+    lea rsi, [rbx + 0x1000]
+    mov edx, 8
+    mov eax, 1
+    syscall
+    mov r12d, 14
+    cmp rax, -14
+    jne 8f
+    mov edi, 1
+    mov rsi, -1
+    mov edx, 2
+    mov eax, 1
+    syscall
+    mov r12d, 15
+    cmp rax, -14
+    jne 8f
+    xor r12d, r12d
+8:
+    mov edi, r12d
+    mov eax, 60
+    syscall
+    ud2
+9:
+    .byte 0x68, 0x69, 0x0a
+    "
+);
+
 fn test_syscall_ptr_validate() -> Outcome {
-    let Some(mut space) = addr_space_init::create() else {
-        return Outcome::Fail("create");
+    let st = match user::run(&user::Image::Code(PTR_VALIDATE, user::DEFAULT), &["ptrs"]) {
+        Ok(st) => st,
+        Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
     };
-    let va = 0x0000_0000_4000_0000u64;
-    if unsafe { addr_space_init::map_anon(&mut space, va, PAGE_SIZE_4K, UserPerms::RW) }.is_err() {
-        addr_space_init::teardown(space);
-        return Outcome::Fail("map");
+    if !wifexited(st) {
+        return crate::fail_fmt!("status {st:#x}, want exited");
     }
-    if space.write_bytes(va, b"hi\n").is_err() {
-        addr_space_init::teardown(space);
-        return Outcome::Fail("poke");
+    match wexitstatus(st) {
+        0 => Outcome::Ok,
+        11 => Outcome::Fail("good write"),
+        12 => Outcome::Fail("null"),
+        13 => Outcome::Fail("kernel ptr"),
+        14 => Outcome::Fail("unmapped"),
+        15 => Outcome::Fail("overflow"),
+        code => crate::fail_fmt!("exit {code}"),
     }
-    syscall_init::reset_stdout();
-    let rc = syscall_init::with_user_as(&mut space, || {
-        let ok = syscall_init::dispatch(vibeos::syscall::SYS_WRITE, [1, va, 3, 0, 0, 0]);
-        let n = syscall_init::dispatch(vibeos::syscall::SYS_WRITE, [1, 0, 8, 0, 0, 0]);
-        let k = syscall_init::dispatch(
-            vibeos::syscall::SYS_WRITE,
-            [1, 0xFFFF_8000_0000_1000, 8, 0, 0, 0],
-        );
-        let u = syscall_init::dispatch(
-            vibeos::syscall::SYS_WRITE,
-            [1, va + PAGE_SIZE_4K, 8, 0, 0, 0],
-        );
-        let o = syscall_init::dispatch(vibeos::syscall::SYS_WRITE, [1, u64::MAX, 2, 0, 0, 0]);
-        (ok, n, k, u, o)
-    });
-    addr_space_init::teardown(space);
-    if rc.0 != 3 {
-        return Outcome::Fail("good write");
-    }
-    let ef = vibeos::syscall::neg(vibeos::syscall::EFAULT);
-    if rc.1 != ef {
-        return Outcome::Fail("null");
-    }
-    if rc.2 != ef {
-        return Outcome::Fail("kernel ptr");
-    }
-    if rc.3 != ef {
-        return Outcome::Fail("unmapped");
-    }
-    if rc.4 != ef {
-        return Outcome::Fail("overflow");
-    }
-    Outcome::Ok
 }
 
 fn test_user_syscalls() -> Outcome {
-    // Spawned fork children enter with IF on. The ktest registry holds
-    // IF off; enable the tick so wait4/yield can run them, same as the
-    // later block tests. Bound `run_user` still cli's around setjmp.
-    with_timer(|| {
-        let before = free_frames();
-        match user_init::run_path("/bin/tests") {
-            Ok(0) => {}
-            Ok(st) => {
-                crate::marker!("vibeOS: ktest:   tests status={st}");
-                return Outcome::Fail("status not 0");
-            }
-            Err(e) => {
-                crate::marker!("vibeOS: ktest:   tests err={}", e.as_str());
-                return Outcome::Fail("load/run");
-            }
-        }
-        let (buf, n) = syscall_init::stdout_bytes();
-        let out = &buf[..n];
-        if !out
-            .windows(b"user: tests ok".len())
-            .any(|w| w == b"user: tests ok")
-        {
-            return Outcome::Fail("stdout missing ok");
-        }
-        arch::gs::force_kernel();
-        if free_frames() != before {
-            return Outcome::Fail("tests frame leak");
-        }
-        Outcome::Ok
-    })
+    let before = p10_s08::quiescent_free_frames();
+    let pid = match proc_init::spawn_elf("/bin/tests", 0, 0) {
+        Ok(pid) => pid,
+        Err(e) => return crate::fail_fmt!("spawn /bin/tests: {}", e.as_str()),
+    };
+    let st = proc_init::wait_kernel(pid);
+    if st != wait_exited(0) {
+        return crate::fail_fmt!("tests status {st:#x}, want exited 0");
+    }
+    let after = p10_s08::quiescent_free_frames();
+    if after != before {
+        crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
+        return Outcome::Fail("tests frame leak");
+    }
+    Outcome::Ok
 }
 
 fn test_int3_roundtrip() -> Outcome {
@@ -1000,6 +1406,7 @@ fn test_scoped_pf() -> Outcome {
 }
 
 fn test_gp_catch() -> Outcome {
+    let g = x86::InterruptGuard::enter();
     let caught = arch::catch::catch(vectors::GP, || unsafe {
         core::arch::asm!(
             "mov ds, {0:x}",
@@ -1007,6 +1414,7 @@ fn test_gp_catch() -> Outcome {
             options(nostack, preserves_flags)
         );
     });
+    drop(g);
     match caught {
         Some(c)
             if c.vector == vectors::GP && c.frame.cs == KERNEL_CS as u64 && c.frame.rip != 0 =>
@@ -1020,13 +1428,18 @@ fn test_gp_catch() -> Outcome {
 
 fn test_irqcell_reentry_panics() -> Outcome {
     static C: crate::cell::IrqCell<u32> = crate::cell::IrqCell::new(0);
+    // The longjmp skips both `IrqCell` guards; this one restores IF.
+    let _g = x86::InterruptGuard::enter();
     let nest0 = per_cpu_init::irq_nest();
     let hit = arch::catch::catch_panic(|| {
         C.with(|_| {
             C.with(|_| {});
         });
     });
-    C.force_unlock();
+    // SAFETY: the `arch::catch` longjmp skipped both `Unlock`s and neither
+    // closure resumes, so the holder never touches `C` again; established
+    // here.
+    unsafe { C.force_unlock() };
     per_cpu_init::current()
         .irq_nest
         .store(nest0, Ordering::Relaxed);
@@ -1087,13 +1500,15 @@ fn test_bootcell_set_once() -> Outcome {
 }
 
 fn test_df_on_ist() -> Outcome {
-    let Some(stack) = kva_init::alloc_guarded_stack(1) else {
+    let Ok(stack) = kva_init::alloc_guarded_stack(1) else {
         return Outcome::Fail("guarded stack");
     };
-    let poison = stack.guard.as_u64() + 0x800;
+    let poison = stack.guard().as_u64() + 0x800;
+    let g = x86::InterruptGuard::enter();
     let caught = arch::catch::catch(vectors::DF, || unsafe {
         vibeos_fault_on_bad_stack(poison);
     });
+    drop(g);
     kva_init::free_stack(stack);
     let Some(c) = caught else {
         return Outcome::Fail("did not reach df handler");
@@ -1112,69 +1527,50 @@ fn test_df_on_ist() -> Outcome {
     }
 }
 
-struct IrqsOffOnDrop;
-impl Drop for IrqsOffOnDrop {
-    fn drop(&mut self) {
-        x86::cli();
+fn test_pit_tick_rate() -> Outcome {
+    let t0 = time_init::uptime_ms();
+    time_init::busy_wait_ms(80);
+    let t1 = time_init::uptime_ms();
+    let dt = t1.saturating_sub(t0);
+    if (40..=160).contains(&dt) {
+        Outcome::Ok
+    } else {
+        crate::marker!("vibeOS: ktest:   ticks {t0} -> {t1} dt={dt}");
+        Outcome::Fail("pit not ~1 kHz")
     }
 }
 
-fn with_timer<F: FnOnce() -> Outcome>(f: F) -> Outcome {
-    let _off = IrqsOffOnDrop;
-    x86::sti();
-    f()
-}
-
-fn test_pit_tick_rate() -> Outcome {
-    with_timer(|| {
-        let t0 = time_init::uptime_ms();
-        time_init::busy_wait_ms(80);
-        let t1 = time_init::uptime_ms();
-        let dt = t1.saturating_sub(t0);
-        if (40..=160).contains(&dt) {
-            Outcome::Ok
-        } else {
-            crate::marker!("vibeOS: ktest:   ticks {t0} -> {t1} dt={dt}");
-            Outcome::Fail("pit not ~1 kHz")
-        }
-    })
-}
-
 fn test_now_us_monotonic() -> Outcome {
-    with_timer(|| {
-        let mut last = time_init::now_us();
-        let mut i = 0u32;
-        while i < 10_000 {
-            let n = time_init::now_us();
-            if n < last {
-                crate::marker!("vibeOS: ktest:   now_us {last} -> {n} at {i}");
-                return Outcome::Fail("now_us went backwards");
-            }
-            last = n;
-            i += 1;
+    let mut last = time_init::now_us();
+    let mut i = 0u32;
+    while i < 10_000 {
+        let n = time_init::now_us();
+        if n < last {
+            crate::marker!("vibeOS: ktest:   now_us {last} -> {n} at {i}");
+            return Outcome::Fail("now_us went backwards");
         }
-        Outcome::Ok
-    })
+        last = n;
+        i += 1;
+    }
+    Outcome::Ok
 }
 
 fn test_now_us_under_yields() -> Outcome {
-    with_timer(|| {
-        let mut last = time_init::now_us();
-        let mut i = 0u32;
-        while i < 10_000 {
-            let n = time_init::now_us();
-            if n < last {
-                crate::marker!("vibeOS: ktest:   yield now_us {last} -> {n} at {i}");
-                return Outcome::Fail("now_us went backwards under yield");
-            }
-            last = n;
-            if i.is_multiple_of(200) {
-                x86::hlt_once();
-            }
-            i += 1;
+    let mut last = time_init::now_us();
+    let mut i = 0u32;
+    while i < 10_000 {
+        let n = time_init::now_us();
+        if n < last {
+            crate::marker!("vibeOS: ktest:   yield now_us {last} -> {n} at {i}");
+            return Outcome::Fail("now_us went backwards under yield");
         }
-        Outcome::Ok
-    })
+        last = n;
+        if i.is_multiple_of(200) {
+            x86::hlt_once();
+        }
+        i += 1;
+    }
+    Outcome::Ok
 }
 
 fn test_tsc_calib_source() -> Outcome {
@@ -1223,42 +1619,38 @@ fn test_tsc_calib_source() -> Outcome {
 }
 
 fn test_uptime_sides() -> Outcome {
-    with_timer(|| {
-        time_init::busy_wait_ms(30);
-        let tick = time_init::uptime_ms();
-        let us = time_init::now_us();
-        if tick == 0 {
-            return Outcome::Fail("tick still 0");
-        }
-        let tick_us = tick.saturating_mul(1000);
-        let lo = tick_us.saturating_mul(50) / 100;
-        let hi = tick_us.saturating_mul(150) / 100 + 2000;
-        if us >= lo && us <= hi {
-            Outcome::Ok
-        } else {
-            crate::marker!("vibeOS: ktest:   tick {tick} ms tsc {us} us");
-            Outcome::Fail("tick and tsc sides diverged")
-        }
-    })
+    time_init::busy_wait_ms(30);
+    let tick = time_init::uptime_ms();
+    let us = time_init::now_us();
+    if tick == 0 {
+        return Outcome::Fail("tick still 0");
+    }
+    let tick_us = tick.saturating_mul(1000);
+    let lo = tick_us.saturating_mul(50) / 100;
+    let hi = tick_us.saturating_mul(150) / 100 + 2000;
+    if us >= lo && us <= hi {
+        Outcome::Ok
+    } else {
+        crate::marker!("vibeOS: ktest:   tick {tick} ms tsc {us} us");
+        Outcome::Fail("tick and tsc sides diverged")
+    }
 }
 
 fn test_rtc_offset() -> Outcome {
     let Some(a) = time_init::unix_time_s() else {
         return Outcome::Skip("rtc unread");
     };
-    with_timer(|| {
-        time_init::busy_wait_ms(20);
-        let Some(b) = time_init::unix_time_s() else {
-            return Outcome::Fail("rtc lost");
-        };
-        if b < a {
-            return Outcome::Fail("wall clock went backwards");
-        }
-        let _ = time_init::deadline_after(Instant {
-            ns: time_init::now_ns(),
-        });
-        Outcome::Ok
-    })
+    time_init::busy_wait_ms(20);
+    let Some(b) = time_init::unix_time_s() else {
+        return Outcome::Fail("rtc lost");
+    };
+    if b < a {
+        return Outcome::Fail("wall clock went backwards");
+    }
+    let _ = time_init::deadline_after(Instant {
+        ns: time_init::now_ns(),
+    });
+    Outcome::Ok
 }
 
 fn test_lapic_timer_mode() -> Outcome {
@@ -1288,7 +1680,7 @@ fn test_lapic_timer_mode() -> Outcome {
 }
 
 fn test_lapic_timer_rearm() -> Outcome {
-    with_timer(|| match apic_init::timer_mode() {
+    match apic_init::timer_mode() {
         TimerMode::Pit => {
             let t0 = time_init::uptime_ms();
             time_init::busy_wait_ms(50);
@@ -1311,7 +1703,7 @@ fn test_lapic_timer_rearm() -> Outcome {
                 Outcome::Fail("rearm stalled")
             }
         }
-    })
+    }
 }
 
 fn test_ioapic_pit_gsi_masked() -> Outcome {
@@ -1352,8 +1744,8 @@ fn test_per_cpu_bsp() -> Outcome {
     if crate::per_cpu!(cpu_id) != 0 {
         return Outcome::Fail("per_cpu! cpu_id");
     }
-    if thread_init::current_id() != ThreadId::BOOTSTRAP {
-        return Outcome::Fail("current not bootstrap");
+    if thread_init::current_id() != registry_tid() {
+        return Outcome::Fail("current not the registry");
     }
     if cpu.idle_id == ThreadId::BOOTSTRAP {
         return Outcome::Fail("idle still bootstrap");
@@ -1366,9 +1758,6 @@ fn test_per_cpu_bsp() -> Outcome {
     }
     if cpu.current.is_null() || cpu.idle.is_null() {
         return Outcome::Fail("current or idle null");
-    }
-    if !cpu.ready_head.is_null() {
-        return Outcome::Fail("ready_head should be empty");
     }
     if !sched_init::is_live() {
         return Outcome::Fail("sched not live");
@@ -1400,35 +1789,61 @@ fn test_per_cpu_identity() -> Outcome {
     if n < 2 {
         return Outcome::Skip("no AP");
     }
+    let bsp_apic = bsp.remote.apic_id.load(Ordering::Relaxed);
+    let mut aps = 0u64;
     let mut i = 1u32;
     while i < n as u32 {
-        let Some(c) = per_cpu_init::cpu(i) else {
+        let Some(c) = cpu_remote(i) else {
             return Outcome::Fail("missing slot");
         };
         if !c.ready.load(Ordering::Acquire) {
             return Outcome::Fail("ap not ready");
         }
-        if c.cpu_id != i {
-            return Outcome::Fail("ap cpu_id");
-        }
-        if c.self_ptr as u64 != c as *const _ as u64 {
-            return Outcome::Fail("ap self_ptr");
-        }
-        if c.idle.is_null() || c.current.is_null() {
-            return Outcome::Fail("ap idle/current");
-        }
-        if c.apic_id == bsp.apic_id {
+        if c.apic_id.load(Ordering::Relaxed) == bsp_apic {
             return Outcome::Fail("ap apic_id");
         }
         if !per_cpu_init::is_online(i) {
             return Outcome::Fail("ap online mask");
         }
-        if c.tsc_per_ms == 0 {
-            return Outcome::Fail("ap tsc_per_ms");
+        if i < 64 {
+            aps |= 1u64 << i;
         }
         i += 1;
     }
+    // The owner-only checks run on each AP, which alone may read its
+    // `PerCpu` (DESIGN §7.5).
+    IDENTITY_BAD.store(0, Ordering::SeqCst);
+    IDENTITY_SEEN.store(0, Ordering::SeqCst);
+    ipi_init::call_mask(aps, identity_on_ap, core::ptr::null_mut(), true);
+    if IDENTITY_SEEN.load(Ordering::Acquire) != aps {
+        return Outcome::Fail("ap did not run the owner check");
+    }
+    if IDENTITY_BAD.load(Ordering::Acquire) != 0 {
+        return Outcome::Fail("ap owner-only state");
+    }
     Outcome::Ok
+}
+
+/// Bit `cpu_id` of each AP whose owner-only check failed or ran.
+static IDENTITY_BAD: AtomicU64 = AtomicU64::new(0);
+static IDENTITY_SEEN: AtomicU64 = AtomicU64::new(0);
+
+fn identity_on_ap(_: *mut ()) {
+    let c = per_cpu_init::current();
+    let id = c.cpu_id;
+    if id >= 64 {
+        return;
+    }
+    let ok = core::ptr::eq(c.self_ptr, per_cpu_init::gs_self())
+        && per_cpu_init::slot_ptr(id) == Some(c.self_ptr)
+        && !c.idle.is_null()
+        && !c.current.is_null()
+        && c.tsc_per_ms != 0
+        && per_cpu_init::cpu(id).is_some_and(|r| core::ptr::eq(r, c.remote));
+    if !ok {
+        IDENTITY_BAD.fetch_or(1u64 << id, Ordering::Release);
+    }
+    IDENTITY_SEEN.fetch_or(1u64 << id, Ordering::Release);
 }
 
 fn test_trampoline_page() -> Outcome {
@@ -1471,9 +1886,9 @@ fn test_failed_ap_cleanup() -> Outcome {
     // unmap_4k does not return that PT. Warm up, then the measured wave
     // must restore the frame count (ROADMAP failed-AP exit gate).
     smp_init::exercise_fail_cleanup();
-    let n0 = free_frames();
+    let n0 = p10_s08::quiescent_free_frames();
     smp_init::exercise_fail_cleanup();
-    let n1 = free_frames();
+    let n1 = p10_s08::quiescent_free_frames();
     if n0 != n1 {
         crate::marker!("vibeOS: ktest:   frames {n0} -> {n1}");
         Outcome::Fail("failed AP leaked frames")
@@ -1489,9 +1904,12 @@ fn sentinel_entry() {
 }
 
 fn test_spawn_sentinel() -> Outcome {
+    let _g = x86::InterruptGuard::enter();
     SENTINEL.store(0, Ordering::SeqCst);
     let nest0 = per_cpu_init::irq_nest();
-    let h = thread_init::spawn_here("sentinel", sentinel_entry);
+    let Ok(h) = thread_init::spawn_here("sentinel", sentinel_entry) else {
+        return Outcome::Fail("spawn");
+    };
     if h.id() == ThreadId::BOOTSTRAP {
         return Outcome::Fail("spawned bootstrap id");
     }
@@ -1502,8 +1920,8 @@ fn test_spawn_sentinel() -> Outcome {
     if thread_init::name(h.id()) != "sentinel" {
         return Outcome::Fail("name lost");
     }
-    if thread_init::current_id() != ThreadId::BOOTSTRAP {
-        return Outcome::Fail("did not return to bootstrap");
+    if thread_init::current_id() != registry_tid() {
+        return Outcome::Fail("did not return to the registry");
     }
     if thread_init::state(h.id()) != ThreadState::Dead {
         return Outcome::Fail("returned thread not dead");
@@ -1526,14 +1944,19 @@ fn thread_a() {
 
 fn thread_b() {
     STEPS.fetch_add(1, Ordering::SeqCst);
-    thread_init::switch_to(ThreadId::BOOTSTRAP);
+    thread_init::switch_to(registry_tid());
 }
 
 fn test_switch_two_threads() -> Outcome {
+    let _g = x86::InterruptGuard::enter();
     STEPS.store(0, Ordering::SeqCst);
     let nest0 = per_cpu_init::irq_nest();
-    let a = thread_init::spawn_here("a", thread_a);
-    let b = thread_init::spawn_here("b", thread_b);
+    let Ok(a) = thread_init::spawn_here("a", thread_a) else {
+        return Outcome::Fail("spawn");
+    };
+    let Ok(b) = thread_init::spawn_here("b", thread_b) else {
+        return Outcome::Fail("spawn");
+    };
     A_ID.store(a.id().raw(), Ordering::SeqCst);
     B_ID.store(b.id().raw(), Ordering::SeqCst);
     thread_init::switch_to(a.id());
@@ -1557,10 +1980,8 @@ fn test_switch_two_threads() -> Outcome {
 }
 
 fn test_irq_guard_nest() -> Outcome {
-    let _off = IrqsOffOnDrop;
-    x86::sti();
     if !x86::interrupts_enabled() {
-        return Outcome::Fail("sti did not set IF");
+        return Outcome::Fail("registry runs with IF off");
     }
     let nest0 = per_cpu_init::irq_nest();
     {
@@ -1636,8 +2057,11 @@ fn yielder_entry() {
 }
 
 fn test_yield_now_switches() -> Outcome {
+    let _g = x86::InterruptGuard::enter();
     YIELD_FLAG.store(0, Ordering::SeqCst);
-    let _h = thread_init::spawn_here("yielder", yielder_entry);
+    let Ok(_h) = thread_init::spawn_here("yielder", yielder_entry) else {
+        return Outcome::Fail("spawn");
+    };
     thread_init::yield_now();
     if YIELD_FLAG.load(Ordering::SeqCst) != 1 {
         return Outcome::Fail("yielder did not run");
@@ -1650,23 +2074,21 @@ fn test_yield_now_switches() -> Outcome {
 }
 
 fn test_sleep_ms_50() -> Outcome {
-    with_timer(|| {
-        let t0 = time_init::uptime_ms();
-        let u0 = time_init::now_us();
-        thread_init::sleep_ms(50);
-        let dt = time_init::uptime_ms().saturating_sub(t0);
-        let du = time_init::now_us().saturating_sub(u0) / 1_000;
-        if (50..=100).contains(&dt) {
-            return Outcome::Ok;
-        }
-        // TCG: ticks coalesce under SMP; sleep is now_ns. Keep 50–100 on
-        // invariant TSC.
-        if !time_init::tsc_invariant() && (40..=400).contains(&du) && (1..=400).contains(&dt) {
-            return Outcome::Ok;
-        }
-        crate::marker!("vibeOS: ktest:   sleep_ms dt={dt} du={du}");
-        Outcome::Fail("sleep_ms not 50-100ms")
-    })
+    let t0 = time_init::uptime_ms();
+    let u0 = time_init::now_us();
+    thread_init::sleep_ms(50);
+    let dt = time_init::uptime_ms().saturating_sub(t0);
+    let du = time_init::now_us().saturating_sub(u0) / 1_000;
+    if (50..=100).contains(&dt) {
+        return Outcome::Ok;
+    }
+    // TCG: ticks coalesce under SMP; sleep is now_ns. Keep 50–100 on
+    // invariant TSC.
+    if !time_init::tsc_invariant() && (40..=400).contains(&du) && (1..=400).contains(&dt) {
+        return Outcome::Ok;
+    }
+    crate::marker!("vibeOS: ktest:   sleep_ms dt={dt} du={du}");
+    Outcome::Fail("sleep_ms not 50-100ms")
 }
 
 static PREEMPT_A: AtomicU64 = AtomicU64::new(0);
@@ -1691,59 +2113,64 @@ fn test_preempt_two_threads() -> Outcome {
     PREEMPT_A.store(0, Ordering::SeqCst);
     PREEMPT_B.store(0, Ordering::SeqCst);
     PREEMPT_STOP.store(false, Ordering::SeqCst);
-    let _a = thread_init::spawn("preempt-a", preempt_a);
-    let _b = thread_init::spawn("preempt-b", preempt_b);
-    with_timer(|| {
-        let t0 = time_init::uptime_ms();
-        loop {
-            let a = PREEMPT_A.load(Ordering::Relaxed);
-            let b = PREEMPT_B.load(Ordering::Relaxed);
-            if a > 0 && b > 0 {
-                PREEMPT_STOP.store(true, Ordering::SeqCst);
-                let t1 = time_init::uptime_ms();
-                while time_init::uptime_ms().saturating_sub(t1) < 50 {
-                    core::hint::spin_loop();
-                }
-                crate::marker!("vibeOS: ktest:   preempt a={a} b={b}");
-                return Outcome::Ok;
+    let Ok(_a) = thread_init::spawn("preempt-a", preempt_a) else {
+        return Outcome::Fail("spawn");
+    };
+    let Ok(_b) = thread_init::spawn("preempt-b", preempt_b) else {
+        return Outcome::Fail("spawn");
+    };
+    let t0 = time_init::uptime_ms();
+    loop {
+        let a = PREEMPT_A.load(Ordering::Relaxed);
+        let b = PREEMPT_B.load(Ordering::Relaxed);
+        if a > 0 && b > 0 {
+            PREEMPT_STOP.store(true, Ordering::SeqCst);
+            let t1 = time_init::uptime_ms();
+            while time_init::uptime_ms().saturating_sub(t1) < 50 {
+                core::hint::spin_loop();
             }
-            if time_init::uptime_ms().saturating_sub(t0) > 500 {
-                PREEMPT_STOP.store(true, Ordering::SeqCst);
-                crate::marker!("vibeOS: ktest:   preempt a={a} b={b}");
-                return Outcome::Fail("no preemption");
-            }
-            core::hint::spin_loop();
+            crate::marker!("vibeOS: ktest:   preempt a={a} b={b}");
+            return Outcome::Ok;
         }
-    })
+        if time_init::uptime_ms().saturating_sub(t0) > 500 {
+            PREEMPT_STOP.store(true, Ordering::SeqCst);
+            crate::marker!("vibeOS: ktest:   preempt a={a} b={b}");
+            return Outcome::Fail("no preemption");
+        }
+        core::hint::spin_loop();
+    }
 }
 
 fn test_idle_runs() -> Outcome {
-    with_timer(|| {
-        let t0 = sched_init::idle_tsc();
-        thread_init::sleep_ms(20);
-        let t1 = sched_init::idle_tsc();
-        if t1 > t0 {
-            Outcome::Ok
-        } else {
-            crate::marker!("vibeOS: ktest:   idle_tsc {t0} -> {t1}");
-            Outcome::Fail("idle did not run")
-        }
-    })
+    let t0 = sched_init::idle_tsc();
+    thread_init::sleep_ms(20);
+    let t1 = sched_init::idle_tsc();
+    if t1 > t0 {
+        Outcome::Ok
+    } else {
+        crate::marker!("vibeOS: ktest:   idle_tsc {t0} -> {t1}");
+        Outcome::Fail("idle did not run")
+    }
 }
 
 fn dying_entry() {}
 
 fn test_reap_returns_frames() -> Outcome {
-    let before = free_frames();
-    let h = thread_init::spawn_here("dying", dying_entry);
-    thread_init::yield_now();
-    if thread_init::current_id() != ThreadId::BOOTSTRAP {
-        return Outcome::Fail("did not return to bootstrap");
+    let before = p10_s08::quiescent_free_frames();
+    {
+        let _g = x86::InterruptGuard::enter();
+        let Ok(h) = thread_init::spawn_here("dying", dying_entry) else {
+            return Outcome::Fail("spawn");
+        };
+        thread_init::yield_now();
+        if thread_init::current_id() != registry_tid() {
+            return Outcome::Fail("did not return to the registry");
+        }
+        if thread_init::try_state(h.id()) != Some(ThreadState::Dead) {
+            return Outcome::Fail("returned thread not dead");
+        }
     }
-    if thread_init::try_state(h.id()) != Some(ThreadState::Dead) {
-        return Outcome::Fail("returned thread not dead");
-    }
-    let after = free_frames();
+    let after = p10_s08::quiescent_free_frames();
     if after != before {
         crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
         return Outcome::Fail("reap did not restore frames");
@@ -1753,61 +2180,64 @@ fn test_reap_returns_frames() -> Outcome {
 
 const REAP_MANY: usize = 16;
 
+/// Two waves of dying threads, the first while the registry sleeps (the
+/// last death switches to idle), the second while it runs (the last death
+/// resumes it or idle from the preempt path); every stack comes back
+/// whichever switch tail took it (ROADMAP §10.2, F074; §10.10).
 fn test_reap_many_via_idle() -> Outcome {
-    with_timer(|| {
-        let before = free_frames();
-        let mut ids = [ThreadId::NONE; REAP_MANY];
+    let before = p10_s08::quiescent_free_frames();
+    let mut ids = [ThreadId::NONE; REAP_MANY];
 
-        // Park bootstrap so the last death switches to idle. Idle's
-        // from_irq resume skips reap; the idle loop must drain.
-        let mut i = 0;
-        while i < REAP_MANY {
-            ids[i] = thread_init::spawn_here("dying", dying_entry).id();
-            i += 1;
+    let mut i = 0;
+    while i < REAP_MANY {
+        let Ok(h) = thread_init::spawn_here("dying", dying_entry) else {
+            return Outcome::Fail("spawn");
+        };
+        ids[i] = h.id();
+        i += 1;
+    }
+    thread_init::sleep_ms(30);
+    i = 0;
+    while i < REAP_MANY {
+        if thread_init::try_state(ids[i]) != Some(ThreadState::Dead) {
+            return Outcome::Fail("parked wave not dead");
         }
-        thread_init::sleep_ms(30);
+        i += 1;
+    }
+
+    i = 0;
+    while i < REAP_MANY {
+        let Ok(h) = thread_init::spawn_here("dying", dying_entry) else {
+            return Outcome::Fail("spawn");
+        };
+        ids[i] = h.id();
+        i += 1;
+    }
+    let t0 = time_init::uptime_ms();
+    loop {
+        let mut n = 0usize;
         i = 0;
         while i < REAP_MANY {
-            if thread_init::try_state(ids[i]) != Some(ThreadState::Dead) {
-                return Outcome::Fail("parked wave not dead");
+            if thread_init::try_state(ids[i]) == Some(ThreadState::Dead) {
+                n += 1;
             }
             i += 1;
         }
+        if n == REAP_MANY {
+            break;
+        }
+        if time_init::uptime_ms().saturating_sub(t0) > 200 {
+            return Outcome::Fail("running wave not dead");
+        }
+        core::hint::spin_loop();
+    }
 
-        // Stay Running. Last death resumes us on the IRQ path (no reap).
-        // yield_now no-switch must drain.
-        i = 0;
-        while i < REAP_MANY {
-            ids[i] = thread_init::spawn_here("dying", dying_entry).id();
-            i += 1;
-        }
-        let t0 = time_init::uptime_ms();
-        loop {
-            let mut n = 0usize;
-            i = 0;
-            while i < REAP_MANY {
-                if thread_init::try_state(ids[i]) == Some(ThreadState::Dead) {
-                    n += 1;
-                }
-                i += 1;
-            }
-            if n == REAP_MANY {
-                break;
-            }
-            if time_init::uptime_ms().saturating_sub(t0) > 200 {
-                return Outcome::Fail("running wave not dead");
-            }
-            core::hint::spin_loop();
-        }
-        thread_init::yield_now();
-
-        let after = free_frames();
-        if after != before {
-            crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
-            return Outcome::Fail("reap did not restore frames");
-        }
-        Outcome::Ok
-    })
+    let after = p10_s08::quiescent_free_frames();
+    if after != before {
+        crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
+        return Outcome::Fail("reap did not restore frames");
+    }
+    Outcome::Ok
 }
 
 const MUTEX_ITERS: u64 = 1000;
@@ -1827,29 +2257,31 @@ fn mutex_worker() {
 fn test_blocking_mutex_counter() -> Outcome {
     MUTEX_DONE.store(0, Ordering::SeqCst);
     *COUNTER.lock() = 0;
-    let _a = thread_init::spawn("mu-a", mutex_worker);
-    let _b = thread_init::spawn("mu-b", mutex_worker);
-    with_timer(|| {
-        let t0 = time_init::uptime_ms();
-        loop {
-            if MUTEX_DONE.load(Ordering::SeqCst) == 2 {
-                break;
-            }
-            if time_init::uptime_ms().saturating_sub(t0) > 8_000 {
-                let n = MUTEX_DONE.load(Ordering::SeqCst);
-                let c = *COUNTER.lock();
-                crate::marker!("vibeOS: ktest:   mutex done={n} count={c}");
-                return Outcome::Fail("mutex stall");
-            }
-            thread_init::yield_now();
+    let Ok(_a) = thread_init::spawn("mu-a", mutex_worker) else {
+        return Outcome::Fail("spawn");
+    };
+    let Ok(_b) = thread_init::spawn("mu-b", mutex_worker) else {
+        return Outcome::Fail("spawn");
+    };
+    let t0 = time_init::uptime_ms();
+    loop {
+        if MUTEX_DONE.load(Ordering::SeqCst) == 2 {
+            break;
         }
-        let c = *COUNTER.lock();
-        if c != MUTEX_ITERS * 2 {
-            crate::marker!("vibeOS: ktest:   mutex count={c}");
-            return Outcome::Fail("mutex count");
+        if time_init::uptime_ms().saturating_sub(t0) > 8_000 {
+            let n = MUTEX_DONE.load(Ordering::SeqCst);
+            let c = *COUNTER.lock();
+            crate::marker!("vibeOS: ktest:   mutex done={n} count={c}");
+            return Outcome::Fail("mutex stall");
         }
-        Outcome::Ok
-    })
+        thread_init::yield_now();
+    }
+    let c = *COUNTER.lock();
+    if c != MUTEX_ITERS * 2 {
+        crate::marker!("vibeOS: ktest:   mutex count={c}");
+        return Outcome::Fail("mutex count");
+    }
+    Outcome::Ok
 }
 
 static RW: RwLock<u64> = RwLock::new(0);
@@ -1864,36 +2296,38 @@ fn rw_writer() {
 fn test_rwlock_exclusion() -> Outcome {
     RW_DONE.store(0, Ordering::SeqCst);
     *RW.write() = 0;
-    with_timer(|| {
-        {
-            let r = RW.read();
-            let _a = thread_init::spawn("rw-a", rw_writer);
-            let _b = thread_init::spawn("rw-b", rw_writer);
-            thread_init::yield_now();
-            thread_init::sleep_ms(5);
-            if RW_DONE.load(Ordering::SeqCst) != 0 {
-                return Outcome::Fail("writer ran under read");
-            }
-            if *r != 0 {
-                return Outcome::Fail("reader saw writer");
-            }
-            drop(r);
+    {
+        let r = RW.read();
+        let Ok(_a) = thread_init::spawn("rw-a", rw_writer) else {
+            return Outcome::Fail("spawn");
+        };
+        let Ok(_b) = thread_init::spawn("rw-b", rw_writer) else {
+            return Outcome::Fail("spawn");
+        };
+        thread_init::yield_now();
+        thread_init::sleep_ms(5);
+        if RW_DONE.load(Ordering::SeqCst) != 0 {
+            return Outcome::Fail("writer ran under read");
         }
-        let t0 = time_init::uptime_ms();
-        loop {
-            if RW_DONE.load(Ordering::SeqCst) == 2 {
-                break;
-            }
-            if time_init::uptime_ms().saturating_sub(t0) > 2_000 {
-                return Outcome::Fail("rwlock stall");
-            }
-            thread_init::yield_now();
+        if *r != 0 {
+            return Outcome::Fail("reader saw writer");
         }
-        if *RW.read() != 2 {
-            return Outcome::Fail("rwlock count");
+        drop(r);
+    }
+    let t0 = time_init::uptime_ms();
+    loop {
+        if RW_DONE.load(Ordering::SeqCst) == 2 {
+            break;
         }
-        Outcome::Ok
-    })
+        if time_init::uptime_ms().saturating_sub(t0) > 2_000 {
+            return Outcome::Fail("rwlock stall");
+        }
+        thread_init::yield_now();
+    }
+    if *RW.read() != 2 {
+        return Outcome::Fail("rwlock count");
+    }
+    Outcome::Ok
 }
 
 static RW_TO: RwLock<u64> = RwLock::new(0);
@@ -1917,31 +2351,33 @@ fn test_rwlock_writer_timeout() -> Outcome {
     RW_WR_OUT.store(0, Ordering::SeqCst);
     RW_RD_GOT.store(0, Ordering::SeqCst);
     *RW_TO.write() = 0;
-    with_timer(|| {
-        let r = RW_TO.read();
-        let _w = thread_init::spawn("rw-to-w", rw_timeout_writer);
-        thread_init::yield_now();
-        thread_init::sleep_ms(5);
-        let _rd = thread_init::spawn("rw-to-r", rw_pref_reader);
-        thread_init::yield_now();
-        thread_init::sleep_ms(40);
-        if RW_WR_OUT.load(Ordering::SeqCst) != 1 {
+    let r = RW_TO.read();
+    let Ok(_w) = thread_init::spawn("rw-to-w", rw_timeout_writer) else {
+        return Outcome::Fail("spawn");
+    };
+    thread_init::yield_now();
+    thread_init::sleep_ms(5);
+    let Ok(_rd) = thread_init::spawn("rw-to-r", rw_pref_reader) else {
+        return Outcome::Fail("spawn");
+    };
+    thread_init::yield_now();
+    thread_init::sleep_ms(40);
+    if RW_WR_OUT.load(Ordering::SeqCst) != 1 {
+        drop(r);
+        return Outcome::Fail("writer did not timeout");
+    }
+    let t0 = time_init::uptime_ms();
+    loop {
+        if RW_RD_GOT.load(Ordering::SeqCst) == 1 {
             drop(r);
-            return Outcome::Fail("writer did not timeout");
+            return Outcome::Ok;
         }
-        let t0 = time_init::uptime_ms();
-        loop {
-            if RW_RD_GOT.load(Ordering::SeqCst) == 1 {
-                drop(r);
-                return Outcome::Ok;
-            }
-            if time_init::uptime_ms().saturating_sub(t0) > 2_000 {
-                drop(r);
-                return Outcome::Fail("reader stranded after writer timeout");
-            }
-            thread_init::yield_now();
+        if time_init::uptime_ms().saturating_sub(t0) > 2_000 {
+            drop(r);
+            return Outcome::Fail("reader stranded after writer timeout");
         }
-    })
+        thread_init::yield_now();
+    }
 }
 
 static SEM: Semaphore = Semaphore::new(0);
@@ -1954,27 +2390,29 @@ fn sem_waiter() {
 
 fn test_semaphore_wake() -> Outcome {
     SEM_N.store(0, Ordering::SeqCst);
-    let _a = thread_init::spawn("sem-a", sem_waiter);
-    let _b = thread_init::spawn("sem-b", sem_waiter);
-    with_timer(|| {
+    let Ok(_a) = thread_init::spawn("sem-a", sem_waiter) else {
+        return Outcome::Fail("spawn");
+    };
+    let Ok(_b) = thread_init::spawn("sem-b", sem_waiter) else {
+        return Outcome::Fail("spawn");
+    };
+    thread_init::yield_now();
+    thread_init::sleep_ms(5);
+    if SEM_N.load(Ordering::SeqCst) != 0 {
+        return Outcome::Fail("sema acquired empty");
+    }
+    SEM.release();
+    SEM.release();
+    let t0 = time_init::uptime_ms();
+    loop {
+        if SEM_N.load(Ordering::SeqCst) == 2 {
+            return Outcome::Ok;
+        }
+        if time_init::uptime_ms().saturating_sub(t0) > 2_000 {
+            return Outcome::Fail("sema stall");
+        }
         thread_init::yield_now();
-        thread_init::sleep_ms(5);
-        if SEM_N.load(Ordering::SeqCst) != 0 {
-            return Outcome::Fail("sema acquired empty");
-        }
-        SEM.release();
-        SEM.release();
-        let t0 = time_init::uptime_ms();
-        loop {
-            if SEM_N.load(Ordering::SeqCst) == 2 {
-                return Outcome::Ok;
-            }
-            if time_init::uptime_ms().saturating_sub(t0) > 2_000 {
-                return Outcome::Fail("sema stall");
-            }
-            thread_init::yield_now();
-        }
-    })
+    }
 }
 
 static CM: BlockingMutex<bool> = BlockingMutex::new(false);
@@ -1992,25 +2430,25 @@ fn cv_waiter() {
 fn test_condvar_signal() -> Outcome {
     CV_DONE.store(false, Ordering::SeqCst);
     *CM.lock() = false;
-    let _h = thread_init::spawn("cv", cv_waiter);
-    with_timer(|| {
-        thread_init::sleep_ms(10);
-        {
-            let mut g = CM.lock();
-            *g = true;
-            CV.notify_one();
+    let Ok(_h) = thread_init::spawn("cv", cv_waiter) else {
+        return Outcome::Fail("spawn");
+    };
+    thread_init::sleep_ms(10);
+    {
+        let mut g = CM.lock();
+        *g = true;
+        CV.notify_one();
+    }
+    let t0 = time_init::uptime_ms();
+    loop {
+        if CV_DONE.load(Ordering::SeqCst) {
+            return Outcome::Ok;
         }
-        let t0 = time_init::uptime_ms();
-        loop {
-            if CV_DONE.load(Ordering::SeqCst) {
-                return Outcome::Ok;
-            }
-            if time_init::uptime_ms().saturating_sub(t0) > 2_000 {
-                return Outcome::Fail("condvar stall");
-            }
-            thread_init::yield_now();
+        if time_init::uptime_ms().saturating_sub(t0) > 2_000 {
+            return Outcome::Fail("condvar stall");
         }
-    })
+        thread_init::yield_now();
+    }
 }
 
 static CVREL_M: BlockingMutex<u32> = BlockingMutex::new(0);
@@ -2029,34 +2467,34 @@ fn test_condvar_wait_releases() -> Outcome {
     CVREL_WAITING.store(false, Ordering::SeqCst);
     CVREL_DONE.store(false, Ordering::SeqCst);
     *CVREL_M.lock() = 0;
-    let _h = thread_init::spawn("cvrel", cvrel_waiter);
-    with_timer(|| {
-        let t0 = time_init::uptime_ms();
-        loop {
-            if CVREL_WAITING.load(Ordering::SeqCst) {
-                break;
-            }
-            if time_init::uptime_ms().saturating_sub(t0) > 2_000 {
-                return Outcome::Fail("waiter never locked");
-            }
-            thread_init::yield_now();
+    let Ok(_h) = thread_init::spawn("cvrel", cvrel_waiter) else {
+        return Outcome::Fail("spawn");
+    };
+    let t0 = time_init::uptime_ms();
+    loop {
+        if CVREL_WAITING.load(Ordering::SeqCst) {
+            break;
         }
-        {
-            let mut g = CVREL_M.lock();
-            *g = 1;
-            CVREL_CV.notify_one();
+        if time_init::uptime_ms().saturating_sub(t0) > 2_000 {
+            return Outcome::Fail("waiter never locked");
         }
-        let t1 = time_init::uptime_ms();
-        loop {
-            if CVREL_DONE.load(Ordering::SeqCst) {
-                return Outcome::Ok;
-            }
-            if time_init::uptime_ms().saturating_sub(t1) > 2_000 {
-                return Outcome::Fail("condvar wait held mutex");
-            }
-            thread_init::yield_now();
+        thread_init::yield_now();
+    }
+    {
+        let mut g = CVREL_M.lock();
+        *g = 1;
+        CVREL_CV.notify_one();
+    }
+    let t1 = time_init::uptime_ms();
+    loop {
+        if CVREL_DONE.load(Ordering::SeqCst) {
+            return Outcome::Ok;
         }
-    })
+        if time_init::uptime_ms().saturating_sub(t1) > 2_000 {
+            return Outcome::Fail("condvar wait held mutex");
+        }
+        thread_init::yield_now();
+    }
 }
 
 static CH: Channel<u64, 4> = Channel::new();
@@ -2074,29 +2512,29 @@ fn ch_consumer() {
 
 fn test_channel_mpsc() -> Outcome {
     CH_SUM.store(0, Ordering::SeqCst);
-    let _c = thread_init::spawn("ch-rx", ch_consumer);
-    with_timer(|| {
-        let mut i = 1u64;
-        while i <= 32 {
-            CH.send(i);
-            i += 1;
-        }
-        let t0 = time_init::uptime_ms();
-        loop {
-            let s = CH_SUM.load(Ordering::SeqCst);
-            if s != 0 {
-                if s != 32 * 33 / 2 {
-                    crate::marker!("vibeOS: ktest:   chan sum={s}");
-                    return Outcome::Fail("channel sum");
-                }
-                return Outcome::Ok;
+    let Ok(_c) = thread_init::spawn("ch-rx", ch_consumer) else {
+        return Outcome::Fail("spawn");
+    };
+    let mut i = 1u64;
+    while i <= 32 {
+        CH.send(i);
+        i += 1;
+    }
+    let t0 = time_init::uptime_ms();
+    loop {
+        let s = CH_SUM.load(Ordering::SeqCst);
+        if s != 0 {
+            if s != 32 * 33 / 2 {
+                crate::marker!("vibeOS: ktest:   chan sum={s}");
+                return Outcome::Fail("channel sum");
             }
-            if time_init::uptime_ms().saturating_sub(t0) > 2_000 {
-                return Outcome::Fail("channel stall");
-            }
-            thread_init::yield_now();
+            return Outcome::Ok;
         }
-    })
+        if time_init::uptime_ms().saturating_sub(t0) > 2_000 {
+            return Outcome::Fail("channel stall");
+        }
+        thread_init::yield_now();
+    }
 }
 
 static TM: BlockingMutex<u64> = BlockingMutex::new(0);
@@ -2112,17 +2550,17 @@ fn timeout_waiter() {
 
 fn test_mutex_deadline() -> Outcome {
     TM_OUT.store(0, Ordering::SeqCst);
-    with_timer(|| {
-        let g = TM.lock();
-        let _h = thread_init::spawn("tm", timeout_waiter);
-        thread_init::sleep_ms(40);
-        if TM_OUT.load(Ordering::SeqCst) != 1 {
-            drop(g);
-            return Outcome::Fail("deadline did not fire");
-        }
+    let g = TM.lock();
+    let Ok(_h) = thread_init::spawn("tm", timeout_waiter) else {
+        return Outcome::Fail("spawn");
+    };
+    thread_init::sleep_ms(40);
+    if TM_OUT.load(Ordering::SeqCst) != 1 {
         drop(g);
-        Outcome::Ok
-    })
+        return Outcome::Fail("deadline did not fire");
+    }
+    drop(g);
+    Outcome::Ok
 }
 
 fn test_sync_try_paths() -> Outcome {
@@ -2151,60 +2589,60 @@ fn test_sync_try_paths() -> Outcome {
 }
 
 fn test_sched_lock_timer_irq() -> Outcome {
-    with_timer(|| {
-        let nest0 = per_cpu_init::irq_nest();
-        let t0 = per_cpu_init::current().ticks;
-        let wall0 = time_init::uptime_ms();
-        loop {
-            if per_cpu_init::current().ticks != t0 {
-                break;
-            }
-            if time_init::uptime_ms().saturating_sub(wall0) > 200 {
-                return Outcome::Fail("no ticks before lock");
-            }
-            core::hint::spin_loop();
+    let nest0 = per_cpu_init::irq_nest();
+    let t0 = per_cpu_init::current().remote.ticks.load(Ordering::Relaxed);
+    let wall0 = time_init::uptime_ms();
+    loop {
+        if per_cpu_init::current().remote.ticks.load(Ordering::Relaxed) != t0 {
+            break;
         }
-        let held = per_cpu_init::current().ticks;
-        let inner = thread_init::with_sched_lock(|| {
-            if x86::interrupts_enabled() {
-                return Outcome::Fail("SCHED left IF on");
-            }
-            time_init::busy_wait_ms(20);
-            if x86::interrupts_enabled() {
-                return Outcome::Fail("IF on during hold");
-            }
-            if per_cpu_init::current().ticks != held {
-                return Outcome::Fail("timer ran under SCHED");
-            }
-            Outcome::Ok
-        });
-        match inner {
-            Outcome::Ok => {}
-            other => return other,
+        if time_init::uptime_ms().saturating_sub(wall0) > 200 {
+            return Outcome::Fail("no ticks before lock");
         }
-        match apic_init::timer_mode() {
-            TimerMode::Pit => unsafe {
-                core::arch::asm!("int $0x20");
-            },
-            TimerMode::TscDeadline | TimerMode::Periodic => unsafe {
-                core::arch::asm!("int $0xF0");
-            },
+        core::hint::spin_loop();
+    }
+    let held = per_cpu_init::current().remote.ticks.load(Ordering::Relaxed);
+    let inner = thread_init::with_sched_lock(|| {
+        if x86::interrupts_enabled() {
+            return Outcome::Fail("SCHED left IF on");
         }
-        if per_cpu_init::current().ticks <= held {
-            return Outcome::Fail("forced timer IRQ did not run");
+        time_init::busy_wait_ms(20);
+        if x86::interrupts_enabled() {
+            return Outcome::Fail("IF on during hold");
         }
-        if per_cpu_init::irq_nest() != nest0 {
-            return Outcome::Fail("irq_nest leaked");
+        if per_cpu_init::current().remote.ticks.load(Ordering::Relaxed) != held {
+            return Outcome::Fail("timer ran under SCHED");
         }
         Outcome::Ok
-    })
+    });
+    match inner {
+        Outcome::Ok => {}
+        other => return other,
+    }
+    match apic_init::timer_mode() {
+        TimerMode::Pit => unsafe {
+            core::arch::asm!("int $0x20");
+        },
+        TimerMode::TscDeadline | TimerMode::Periodic => unsafe {
+            core::arch::asm!("int $0xF0");
+        },
+    }
+    if per_cpu_init::current().remote.ticks.load(Ordering::Relaxed) <= held {
+        return Outcome::Fail("forced timer IRQ did not run");
+    }
+    if per_cpu_init::irq_nest() != nest0 {
+        return Outcome::Fail("irq_nest leaked");
+    }
+    Outcome::Ok
 }
 
 const SPAWN_EXIT_N: usize = 2000;
-const SPAWN_EXIT_WARMUP: usize = 256;
 
 fn spawn_until_dead(name: &'static str) -> Outcome {
-    let h = thread_init::spawn_here(name, dying_entry);
+    let _g = x86::InterruptGuard::enter();
+    let Ok(h) = thread_init::spawn_here(name, dying_entry) else {
+        return Outcome::Fail("spawn");
+    };
     thread_init::yield_now();
     if thread_init::try_state(h.id()) != Some(ThreadState::Dead) {
         thread_init::yield_now();
@@ -2217,21 +2655,8 @@ fn spawn_until_dead(name: &'static str) -> Outcome {
 }
 
 fn test_spawn_exit_thousands() -> Outcome {
-    // First-fit KVA walks new VA until coalesce. Mapping a fresh 2MiB
-    // window allocates a PT page that unmap_4k does not free. Warm up
-    // past one free-list overflow so the 2000 recycle already-mapped VA.
+    let before = p10_s08::quiescent_free_frames();
     let mut i = 0usize;
-    while i < SPAWN_EXIT_WARMUP {
-        match spawn_until_dead("die") {
-            Outcome::Ok => {}
-            other => return other,
-        }
-        i += 1;
-    }
-    thread_init::reap_zombies();
-
-    let before = free_frames();
-    i = 0;
     while i < SPAWN_EXIT_N {
         match spawn_until_dead("die") {
             Outcome::Ok => {}
@@ -2239,8 +2664,7 @@ fn test_spawn_exit_thousands() -> Outcome {
         }
         i += 1;
     }
-    thread_init::reap_zombies();
-    let after = free_frames();
+    let after = p10_s08::quiescent_free_frames();
     if after != before {
         let h = crate::heap_init::stats();
         let k = kva_init::stats();
@@ -2255,7 +2679,7 @@ fn test_spawn_exit_thousands() -> Outcome {
     Outcome::Ok
 }
 
-fn second_cpu() -> Option<u32> {
+pub(crate) fn second_cpu() -> Option<u32> {
     let mask = per_cpu_init::online_mask();
     let mut i = 1u32;
     while i < 64 {
@@ -2267,13 +2691,21 @@ fn second_cpu() -> Option<u32> {
     None
 }
 
-fn spin_until_ns(pred: impl Fn() -> bool, ns: u64) -> bool {
+/// `ipi_init::service_incoming` from thread context. With IF on, an IPI
+/// between `service_calls`' acked check and its ack would run the callback
+/// twice, so this holds IF off across the call.
+fn service_incoming_guarded() {
+    let _g = x86::InterruptGuard::enter();
+    ipi_init::service_incoming();
+}
+
+pub(crate) fn spin_until_ns(pred: impl Fn() -> bool, ns: u64) -> bool {
     let t0 = time_init::now_ns();
     while !pred() {
         if time_init::now_ns().saturating_sub(t0) > ns {
             return false;
         }
-        ipi_init::service_incoming();
+        service_incoming_guarded();
         core::hint::spin_loop();
     }
     true
@@ -2293,7 +2725,9 @@ fn test_cross_cpu_spawn() -> Outcome {
     };
     XCPU_FLAG.store(0, Ordering::SeqCst);
     XCPU_CPU.store(0xFFFF, Ordering::SeqCst);
-    let h = thread_init::spawn_on("xcpu", xcpu_entry, ap);
+    let Ok(h) = thread_init::spawn_on("xcpu", xcpu_entry, ap) else {
+        return Outcome::Fail("spawn");
+    };
     if !spin_until_ns(|| XCPU_FLAG.load(Ordering::SeqCst) != 0, 500_000_000) {
         return Outcome::Fail("AP thread did not run");
     }
@@ -2324,7 +2758,9 @@ fn test_reschedule_ipi_wake_ap() -> Outcome {
     };
     WAKE_FLAG.store(0, Ordering::SeqCst);
     let before = ipi_init::reschedule_count();
-    let _h = thread_init::spawn_on("wake-ap", wake_ap_entry, ap);
+    let Ok(_h) = thread_init::spawn_on("wake-ap", wake_ap_entry, ap) else {
+        return Outcome::Fail("spawn");
+    };
     if !spin_until_ns(|| WAKE_FLAG.load(Ordering::SeqCst) != 0, 500_000_000) {
         return Outcome::Fail("idle AP not woken");
     }
@@ -2519,7 +2955,9 @@ fn test_alloc_stress_smp() -> Outcome {
     let mut c = 1u32;
     while c < 64 {
         if mask & (1u64 << c) != 0 {
-            let _ = thread_init::spawn_on("hammer", alloc_hammer, c);
+            let Ok(_) = thread_init::spawn_on("hammer", alloc_hammer, c) else {
+                return Outcome::Fail("spawn");
+            };
         }
         c += 1;
     }
@@ -2699,30 +3137,28 @@ fn test_kbd_8042_clock() -> Outcome {
 }
 
 /// 0xD2 → IRQ1 → decoder → PS/2 ring. Serial mux cannot satisfy this.
-/// ktest holds IF off; pulse it. Device clock is `kbd_8042_clock` / sendkey.
+/// Device clock is `kbd_8042_clock` / sendkey.
 fn test_kbd_ps2_irq() -> Outcome {
     if !crate::kbd_init::live() {
         return Outcome::Fail("kbd not live");
     }
-    with_timer(|| {
-        let mut n = 64u32;
-        while n > 0 && crate::console_init::read().is_some() {
-            n -= 1;
+    let mut n = 64u32;
+    while n > 0 && crate::console_init::read().is_some() {
+        n -= 1;
+    }
+    if !crate::kbd_init::inject_scancode(0x1E) {
+        return Outcome::Fail("0xD2 inject");
+    }
+    let t0 = crate::time_init::now_us();
+    loop {
+        if let Some(vibeos::kbd::DecodedKey::Char(b'a')) = crate::kbd_init::pop() {
+            return Outcome::Ok;
         }
-        if !crate::kbd_init::inject_scancode(0x1E) {
-            return Outcome::Fail("0xD2 inject");
+        if crate::time_init::now_us().saturating_sub(t0) > 50_000 {
+            return Outcome::Fail("no irq key");
         }
-        let t0 = crate::time_init::now_us();
-        loop {
-            if let Some(vibeos::kbd::DecodedKey::Char(b'a')) = crate::kbd_init::pop() {
-                return Outcome::Ok;
-            }
-            if crate::time_init::now_us().saturating_sub(t0) > 50_000 {
-                return Outcome::Fail("no irq key");
-            }
-            core::hint::spin_loop();
-        }
-    })
+        core::hint::spin_loop();
+    }
 }
 
 fn test_console_mux() -> Outcome {
@@ -2948,6 +3384,8 @@ fn test_pci_bind_order() -> Outcome {
 }
 
 static LSPCI_STACK: AtomicU32 = AtomicU32::new(0);
+/// How long [`test_lspci_cmd`] yields for its worker.
+const LSPCI_WAIT_NS: u64 = 2_000_000_000;
 
 fn lspci_stack_entry() {
     let ok = crate::shell_init::dispatch_line("lspci").is_ok()
@@ -2965,8 +3403,17 @@ fn test_lspci_cmd() -> Outcome {
     // Shell stacks are 16 KiB. lspci on _start would miss a full
     // [Device; 64] snapshot overflowing the guard.
     LSPCI_STACK.store(0, Ordering::SeqCst);
-    let h = thread_init::spawn_here("lspci-stk", lspci_stack_entry);
+    let Ok(h) = thread_init::spawn_here("lspci-stk", lspci_stack_entry) else {
+        return Outcome::Fail("spawn");
+    };
     thread_init::switch_to(h.id());
+    // The worker runs with IF on, so a tick can hand the CPU back first.
+    let t0 = time_init::now_ns();
+    while LSPCI_STACK.load(Ordering::SeqCst) == 0
+        && time_init::now_ns().saturating_sub(t0) < LSPCI_WAIT_NS
+    {
+        thread_init::yield_now();
+    }
     match LSPCI_STACK.load(Ordering::SeqCst) {
         1 => Outcome::Ok,
         2 => Outcome::Fail("lspci/devices"),
@@ -3004,28 +3451,48 @@ static IRQ_ALLOC: AtomicU32 = AtomicU32::new(0);
 static IRQ_MMIO: AtomicU64 = AtomicU64::new(0);
 static CPU_HITS: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
 
+/// Zero the observer. `IRQ_HITS` goes last, as `record_irq_cpu` publishes
+/// it last (AGENTS rule 5).
 fn reset_irq_obs() {
     IRQ_CPU.store(0xFFFF, Ordering::SeqCst);
-    IRQ_HITS.store(0, Ordering::SeqCst);
     IRQ_ALLOC.store(0, Ordering::SeqCst);
     let mut i = 0usize;
     while i < CPU_HITS.len() {
         CPU_HITS[i].store(0, Ordering::SeqCst);
         i += 1;
     }
+    IRQ_HITS.store(0, Ordering::SeqCst);
 }
 
-fn record_irq_cpu() {
-    let cpu = per_cpu_init::current().cpu_id;
-    IRQ_CPU.store(cpu, Ordering::SeqCst);
-    IRQ_HITS.fetch_add(1, Ordering::SeqCst);
-    if (cpu as usize) < CPU_HITS.len() {
-        CPU_HITS[cpu as usize].fetch_add(1, Ordering::SeqCst);
+/// `time_init::now_ns` value [`obs_stall`] spins until; 0 is disarmed.
+static OBS_STALL_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Stall [`record_irq_cpu`] before its last store while
+/// `msix_cpu_publish_last` has the stall armed.
+fn obs_stall() {
+    let until = OBS_STALL_NS.load(Ordering::Acquire);
+    if until == 0 {
+        return;
+    }
+    while time_init::now_ns() < until {
+        core::hint::spin_loop();
     }
 }
 
+/// Count a hit on this CPU. `IRQ_HITS`, which tests wait on, is published
+/// last, so a waiter that sees it also sees `CPU_HITS` and `IRQ_CPU`
+/// (AGENTS rule 5, F021).
+fn record_irq_cpu() {
+    let cpu = per_cpu_init::current().cpu_id;
+    if (cpu as usize) < CPU_HITS.len() {
+        CPU_HITS[cpu as usize].fetch_add(1, Ordering::SeqCst);
+    }
+    IRQ_CPU.store(cpu, Ordering::SeqCst);
+    obs_stall();
+    IRQ_HITS.fetch_add(1, Ordering::SeqCst);
+}
+
 fn on_msix() {
-    record_irq_cpu();
     match irq_init::allocate_vector(0) {
         Err(IrqError::InIrq) => IRQ_ALLOC.store(1, Ordering::SeqCst),
         Ok(_) => IRQ_ALLOC.store(2, Ordering::SeqCst),
@@ -3035,6 +3502,9 @@ fn on_msix() {
     if va != 0 {
         mmio_w32(va, E1000_ICR, 0xFFFF_FFFF);
     }
+    // Last: `IRQ_HITS` is what `test_msix_cpu` waits on, so every store it
+    // then reads (IRQ_ALLOC) comes before it (publish last, F021).
+    record_irq_cpu();
 }
 
 fn on_intx() {
@@ -3160,7 +3630,7 @@ fn test_msix_cpu() -> Outcome {
     let Some(mmio) = bar0_va(&dev) else {
         return Outcome::Fail("e1000e bar0");
     };
-    let Some(cpu) = per_cpu_init::cpu(ap) else {
+    let Some(cpu) = cpu_remote(ap) else {
         return Outcome::Fail("no apic id");
     };
     let vec = match irq_init::allocate_vector(0) {
@@ -3181,7 +3651,7 @@ fn test_msix_cpu() -> Outcome {
     }
     reset_irq_obs();
     IRQ_MMIO.store(mmio, Ordering::SeqCst);
-    if let Err(e) = irq_init::enable_msix(&dev, 0, vec, cpu.apic_id as u8) {
+    if let Err(e) = irq_init::enable_msix(&dev, 0, vec, cpu.apic_id.load(Ordering::Relaxed) as u8) {
         let _ = irq_init::free_vector(vec);
         return Outcome::Fail(e.as_str());
     }
@@ -3383,23 +3853,24 @@ fn test_intx_free_masks() -> Outcome {
 }
 
 fn test_dma_alloc() -> Outcome {
-    let before = free_frames();
+    let before = p10_s08::quiescent_free_frames();
     let Some(buf) = dma_init::alloc(DmaAlloc::dma32(0x1000)) else {
         return Outcome::Fail("alloc");
     };
-    if buf.device.as_u64() != buf.phys {
+    if buf.device().as_u64() != buf.phys() {
         dma_init::free(buf);
         return Outcome::Fail("device != phys");
     }
-    if buf.virt != paging_init::HHDM_BASE.wrapping_add(buf.phys) {
+    if buf.virt() != paging_init::HHDM_BASE.wrapping_add(buf.phys()) {
         dma_init::free(buf);
         return Outcome::Fail("virt not hhdm");
     }
-    if buf.device.as_u64() == buf.virt {
+    if buf.device().as_u64() == buf.virt() {
         dma_init::free(buf);
         return Outcome::Fail("device is va");
     }
-    if buf.phys >= DMA32_BOUNDARY || dma::crosses_boundary(buf.phys, buf.len, DMA32_BOUNDARY) {
+    if buf.phys() >= DMA32_BOUNDARY || dma::crosses_boundary(buf.phys(), buf.len(), DMA32_BOUNDARY)
+    {
         dma_init::free(buf);
         return Outcome::Fail("dma32");
     }
@@ -3415,7 +3886,7 @@ fn test_dma_alloc() -> Outcome {
             return Outcome::Fail("sg");
         }
     };
-    if sg.n != 1 || sg.entries[0].addr != buf.device {
+    if sg.n != 1 || sg.entries[0].addr != buf.device() {
         dma_init::free(buf);
         return Outcome::Fail("sg entry");
     }
@@ -3429,7 +3900,7 @@ fn test_dma_alloc() -> Outcome {
     {
         return Outcome::Fail("boundary refuse");
     }
-    if free_frames() != before {
+    if p10_s08::quiescent_free_frames() != before {
         return Outcome::Fail("leak");
     }
     Outcome::Ok
@@ -3473,7 +3944,7 @@ fn test_dma_edu() -> Outcome {
     }
     src.sync_for_device();
     dst.sync_for_device();
-    mmio_w32(mmio, EDU_DMA_SRC, src.device.as_u64() as u32);
+    mmio_w32(mmio, EDU_DMA_SRC, src.device().as_u64() as u32);
     mmio_w32(mmio, EDU_DMA_DST, EDU_DMA_BUF);
     mmio_w32(mmio, EDU_DMA_CNT, 64);
     dma::dma_wmb();
@@ -3487,7 +3958,7 @@ fn test_dma_edu() -> Outcome {
         return Outcome::Fail("dma to edu");
     }
     mmio_w32(mmio, EDU_DMA_SRC, EDU_DMA_BUF);
-    mmio_w32(mmio, EDU_DMA_DST, dst.device.as_u64() as u32);
+    mmio_w32(mmio, EDU_DMA_DST, dst.device().as_u64() as u32);
     mmio_w32(mmio, EDU_DMA_CNT, 64);
     dma::dma_wmb();
     mmio_w32(mmio, EDU_DMA_CMD, EDU_DMA_RUN | EDU_DMA_TO_PCI);
@@ -3617,21 +4088,19 @@ fn test_dev_random_source() -> Outcome {
     if !fs_init::live() {
         return Outcome::Fail("not live");
     }
-    fs_init::with(|v| {
-        let Ok(fid) = v.open(None, "/dev/random", O_RDWR, 0) else {
-            return Outcome::Fail("open");
-        };
-        let mut buf = [0u8; 16];
-        let n = v.read(fid, &mut buf);
-        let _ = v.close(fid);
-        if n.ok() != Some(16) {
-            return Outcome::Fail("read");
-        }
-        match vibeos::entropy::last_source() {
-            vibeos::entropy::Source::XorShift => Outcome::Fail("xorshift"),
-            vibeos::entropy::Source::VirtioRng | vibeos::entropy::Source::RdRand => Outcome::Ok,
-        }
-    })
+    let Ok(f) = fid::open("/dev/random", O_RDWR, 0) else {
+        return Outcome::Fail("open");
+    };
+    let mut buf = [0u8; 16];
+    let n = fid::read(f, &mut buf);
+    let _ = fid::close(f);
+    if n.ok() != Some(16) {
+        return Outcome::Fail("read");
+    }
+    match vibeos::entropy::last_source() {
+        vibeos::entropy::Source::XorShift => Outcome::Fail("xorshift"),
+        vibeos::entropy::Source::VirtioRng | vibeos::entropy::Source::RdRand => Outcome::Ok,
+    }
 }
 
 fn test_block_ramdisk_rw() -> Outcome {
@@ -3670,9 +4139,6 @@ fn test_block_ramdisk_rw() -> Outcome {
     }
     if d.flush().is_err() {
         return Outcome::Fail("flush");
-    }
-    if block_init::barrier().is_err() {
-        return Outcome::Fail("barrier");
     }
     if d.discard(1, 1).is_err() {
         return Outcome::Fail("discard");
@@ -3756,56 +4222,62 @@ fn test_block_concurrent() -> Outcome {
     BLK_WID.store(0, Ordering::SeqCst);
     BLK_DONE.store(0, Ordering::SeqCst);
     BLK_FAIL.store(0, Ordering::SeqCst);
-    let _a = thread_init::spawn("blk-a", blk_worker);
-    let _b = thread_init::spawn("blk-b", blk_worker);
-    with_timer(|| {
-        let t0 = time_init::uptime_ms();
-        loop {
-            if BLK_DONE.load(Ordering::SeqCst) == 2 {
-                break;
-            }
-            if time_init::uptime_ms().saturating_sub(t0) > 8_000 {
-                return Outcome::Fail("rw stall");
-            }
-            thread_init::yield_now();
+    let Ok(_a) = thread_init::spawn("blk-a", blk_worker) else {
+        return Outcome::Fail("spawn");
+    };
+    let Ok(_b) = thread_init::spawn("blk-b", blk_worker) else {
+        return Outcome::Fail("spawn");
+    };
+    let t0 = time_init::uptime_ms();
+    loop {
+        if BLK_DONE.load(Ordering::SeqCst) == 2 {
+            break;
         }
-        if BLK_FAIL.load(Ordering::SeqCst) != 0 {
-            return Outcome::Fail("rw corrupt");
+        if time_init::uptime_ms().saturating_sub(t0) > 8_000 {
+            return Outcome::Fail("rw stall");
         }
-        TEAR_ID.store(0, Ordering::SeqCst);
-        TEAR_DONE.store(0, Ordering::SeqCst);
-        let _c = thread_init::spawn("tear-a", tear_worker);
-        let _d = thread_init::spawn("tear-b", tear_worker);
-        let t1 = time_init::uptime_ms();
-        loop {
-            if TEAR_DONE.load(Ordering::SeqCst) == 2 {
-                break;
-            }
-            if time_init::uptime_ms().saturating_sub(t1) > 8_000 {
-                return Outcome::Fail("tear stall");
-            }
-            thread_init::yield_now();
+        thread_init::yield_now();
+    }
+    if BLK_FAIL.load(Ordering::SeqCst) != 0 {
+        return Outcome::Fail("rw corrupt");
+    }
+    TEAR_ID.store(0, Ordering::SeqCst);
+    TEAR_DONE.store(0, Ordering::SeqCst);
+    let Ok(_c) = thread_init::spawn("tear-a", tear_worker) else {
+        return Outcome::Fail("spawn");
+    };
+    let Ok(_d) = thread_init::spawn("tear-b", tear_worker) else {
+        return Outcome::Fail("spawn");
+    };
+    let t1 = time_init::uptime_ms();
+    loop {
+        if TEAR_DONE.load(Ordering::SeqCst) == 2 {
+            break;
         }
-        if BLK_FAIL.load(Ordering::SeqCst) != 0 {
-            return Outcome::Fail("tear write");
+        if time_init::uptime_ms().saturating_sub(t1) > 8_000 {
+            return Outcome::Fail("tear stall");
         }
-        let mut out = [0u8; 512];
-        if block_init::read(0, &mut out).is_err() {
-            return Outcome::Fail("tear read");
+        thread_init::yield_now();
+    }
+    if BLK_FAIL.load(Ordering::SeqCst) != 0 {
+        return Outcome::Fail("tear write");
+    }
+    let mut out = [0u8; 512];
+    if block_init::read(0, &mut out).is_err() {
+        return Outcome::Fail("tear read");
+    }
+    let b0 = out[0];
+    if b0 != 0xAA && b0 != 0x55 {
+        return Outcome::Fail("tear pattern");
+    }
+    let mut i = 1usize;
+    while i < 512 {
+        if out[i] != b0 {
+            return Outcome::Fail("torn sector");
         }
-        let b0 = out[0];
-        if b0 != 0xAA && b0 != 0x55 {
-            return Outcome::Fail("tear pattern");
-        }
-        let mut i = 1usize;
-        while i < 512 {
-            if out[i] != b0 {
-                return Outcome::Fail("torn sector");
-            }
-            i += 1;
-        }
-        Outcome::Ok
-    })
+        i += 1;
+    }
+    Outcome::Ok
 }
 
 fn test_block_retry() -> Outcome {
@@ -3858,172 +4330,163 @@ fn test_block_vblk_rw() -> Outcome {
         Some(_) => return Outcome::Fail("wrong driver"),
         None => return Outcome::Fail("unbound"),
     }
-    with_timer(|| {
-        let d = match virtio_blk_init::device() {
-            Some(d) => d,
-            None => return Outcome::Fail("no device"),
-        };
-        if d.name() != virtio_blk_init::name() {
-            return Outcome::Fail("name");
-        }
-        if d.logical_block_size() == 0 || d.logical_block_size() % 512 != 0 {
-            return Outcome::Fail("bs");
-        }
-        if d.capacity_sectors() < 16 {
-            return Outcome::Fail("cap");
-        }
-        if d.state() != DeviceState::Ready {
-            return Outcome::Fail("state");
-        }
-        let bs = d.logical_block_size() as usize;
-        if bs != 512 {
-            return Outcome::Fail("need 512");
-        }
-        let mut buf = [0u8; 512];
-        let mut i = 0usize;
-        while i < 512 {
-            buf[i] = (i as u8).wrapping_add(0xA1);
-            i += 1;
-        }
-        if d.write(1, &buf).is_err() {
-            return Outcome::Fail("write");
-        }
-        let mut out = [0u8; 512];
-        if d.read(1, &mut out).is_err() {
-            return Outcome::Fail("read");
-        }
-        if out != buf {
-            return Outcome::Fail("mismatch");
-        }
-        // unaligned multi-sector: 3 sectors not at LBA 0
-        let mut multi = [0u8; 1536];
-        i = 0;
-        while i < 1536 {
-            multi[i] = (i as u8).wrapping_add(0x5C);
-            i += 1;
-        }
-        if d.write(5, &multi).is_err() {
-            return Outcome::Fail("multi write");
-        }
-        let mut mout = [0u8; 1536];
-        if d.read(5, &mut mout).is_err() || mout != multi {
-            return Outcome::Fail("multi read");
-        }
-        if d.flush().is_err() {
-            return Outcome::Fail("flush");
-        }
-        if !virtio_blk_init::has_flush() {
-            // device did not offer F_FLUSH; flush is a successful no-op
-        }
-        if virtio_blk_init::barrier().is_err() {
-            return Outcome::Fail("barrier");
-        }
-        if virtio_blk_init::has_discard() && d.discard(5, 1).is_err() {
-            return Outcome::Fail("discard");
-        }
-        match d.read(0, &mut [0u8; 100]) {
-            Err(BlockError::Inval) => {}
-            _ => return Outcome::Fail("unaligned buf"),
-        }
-        match d.write(d.capacity_sectors(), &buf) {
-            Err(BlockError::Inval) => {}
-            _ => return Outcome::Fail("past end"),
-        }
-        Outcome::Ok
-    })
+    let d = match virtio_blk_init::device() {
+        Some(d) => d,
+        None => return Outcome::Fail("no device"),
+    };
+    if d.name() != virtio_blk_init::name() {
+        return Outcome::Fail("name");
+    }
+    if d.logical_block_size() == 0 || d.logical_block_size() % 512 != 0 {
+        return Outcome::Fail("bs");
+    }
+    if d.capacity_sectors() < 16 {
+        return Outcome::Fail("cap");
+    }
+    if d.state() != DeviceState::Ready {
+        return Outcome::Fail("state");
+    }
+    let bs = d.logical_block_size() as usize;
+    if bs != 512 {
+        return Outcome::Fail("need 512");
+    }
+    let mut buf = [0u8; 512];
+    let mut i = 0usize;
+    while i < 512 {
+        buf[i] = (i as u8).wrapping_add(0xA1);
+        i += 1;
+    }
+    if d.write(1, &buf).is_err() {
+        return Outcome::Fail("write");
+    }
+    let mut out = [0u8; 512];
+    if d.read(1, &mut out).is_err() {
+        return Outcome::Fail("read");
+    }
+    if out != buf {
+        return Outcome::Fail("mismatch");
+    }
+    // unaligned multi-sector: 3 sectors not at LBA 0
+    let mut multi = [0u8; 1536];
+    i = 0;
+    while i < 1536 {
+        multi[i] = (i as u8).wrapping_add(0x5C);
+        i += 1;
+    }
+    if d.write(5, &multi).is_err() {
+        return Outcome::Fail("multi write");
+    }
+    let mut mout = [0u8; 1536];
+    if d.read(5, &mut mout).is_err() || mout != multi {
+        return Outcome::Fail("multi read");
+    }
+    if d.flush().is_err() {
+        return Outcome::Fail("flush");
+    }
+    if !virtio_blk_init::has_flush() {
+        // device did not offer F_FLUSH; flush is a successful no-op
+    }
+    if virtio_blk_init::has_discard() && d.discard(5, 1).is_err() {
+        return Outcome::Fail("discard");
+    }
+    match d.read(0, &mut [0u8; 100]) {
+        Err(BlockError::Inval) => {}
+        _ => return Outcome::Fail("unaligned buf"),
+    }
+    match d.write(d.capacity_sectors(), &buf) {
+        Err(BlockError::Inval) => {}
+        _ => return Outcome::Fail("past end"),
+    }
+    Outcome::Ok
 }
 
 fn test_block_vblk_irq() -> Outcome {
     if !virtio_blk_init::live() {
         return Outcome::Skip("no virtio-blk");
     }
-    with_timer(|| {
-        let t0 = virtio_blk_init::top_hits();
-        let th0 = virtio_blk_init::thread_hits();
-        let c0 = virtio_blk_init::completions();
-        let buf = [0x3Du8; 512];
-        if virtio_blk_init::write(2, &buf).is_err() {
-            return Outcome::Fail("write");
-        }
-        let mut out = [0u8; 512];
-        if virtio_blk_init::read(2, &mut out).is_err() || out != buf {
-            return Outcome::Fail("read");
-        }
-        if virtio_blk_init::completions() <= c0 {
-            return Outcome::Fail("no complete");
-        }
-        if virtio_blk_init::top_hits() <= t0 {
-            return Outcome::Fail("no top");
-        }
-        if virtio_blk_init::thread_hits() <= th0 {
-            return Outcome::Fail("no thread");
-        }
-        Outcome::Ok
-    })
+    let t0 = virtio_blk_init::top_hits();
+    let th0 = virtio_blk_init::thread_hits();
+    let c0 = virtio_blk_init::completions();
+    let buf = [0x3Du8; 512];
+    if virtio_blk_init::write(2, &buf).is_err() {
+        return Outcome::Fail("write");
+    }
+    let mut out = [0u8; 512];
+    if virtio_blk_init::read(2, &mut out).is_err() || out != buf {
+        return Outcome::Fail("read");
+    }
+    if virtio_blk_init::completions() <= c0 {
+        return Outcome::Fail("no complete");
+    }
+    if virtio_blk_init::top_hits() <= t0 {
+        return Outcome::Fail("no top");
+    }
+    if virtio_blk_init::thread_hits() <= th0 {
+        return Outcome::Fail("no thread");
+    }
+    Outcome::Ok
 }
 
 fn test_block_vblk_deep() -> Outcome {
     if !virtio_blk_init::live() {
         return Outcome::Skip("no virtio-blk");
     }
-    with_timer(|| {
-        let w0 = IoWaiter::new();
-        let w1 = IoWaiter::new();
-        let w2 = IoWaiter::new();
-        let w3 = IoWaiter::new();
-        let w4 = IoWaiter::new();
-        let w5 = IoWaiter::new();
-        let w6 = IoWaiter::new();
-        let w7 = IoWaiter::new();
-        let b0 = [0x10u8; 512];
-        let b1 = [0x11u8; 512];
-        let b2 = [0x12u8; 512];
-        let b3 = [0x13u8; 512];
-        let b4 = [0x14u8; 512];
-        let b5 = [0x15u8; 512];
-        let b6 = [0x16u8; 512];
-        let b7 = [0x17u8; 512];
-        // gapped LBAs so the elevator does not merge them into one VQ request
-        let subs = [
-            virtio_blk_init::submit(Op::Write, 10, 1, b0.as_ptr() as usize, 512, &w0),
-            virtio_blk_init::submit(Op::Write, 12, 1, b1.as_ptr() as usize, 512, &w1),
-            virtio_blk_init::submit(Op::Write, 14, 1, b2.as_ptr() as usize, 512, &w2),
-            virtio_blk_init::submit(Op::Write, 16, 1, b3.as_ptr() as usize, 512, &w3),
-            virtio_blk_init::submit(Op::Write, 18, 1, b4.as_ptr() as usize, 512, &w4),
-            virtio_blk_init::submit(Op::Write, 20, 1, b5.as_ptr() as usize, 512, &w5),
-            virtio_blk_init::submit(Op::Write, 22, 1, b6.as_ptr() as usize, 512, &w6),
-            virtio_blk_init::submit(Op::Write, 24, 1, b7.as_ptr() as usize, 512, &w7),
-        ];
-        let mut i = 0usize;
-        while i < 8 {
-            if subs[i].is_err() {
-                return Outcome::Fail("submit");
-            }
-            i += 1;
+    let w0 = IoWaiter::new();
+    let w1 = IoWaiter::new();
+    let w2 = IoWaiter::new();
+    let w3 = IoWaiter::new();
+    let w4 = IoWaiter::new();
+    let w5 = IoWaiter::new();
+    let w6 = IoWaiter::new();
+    let w7 = IoWaiter::new();
+    let b0 = [0x10u8; 512];
+    let b1 = [0x11u8; 512];
+    let b2 = [0x12u8; 512];
+    let b3 = [0x13u8; 512];
+    let b4 = [0x14u8; 512];
+    let b5 = [0x15u8; 512];
+    let b6 = [0x16u8; 512];
+    let b7 = [0x17u8; 512];
+    // gapped LBAs so the elevator does not merge them into one VQ request
+    let subs = [
+        virtio_blk_init::submit(Op::Write, 10, 1, b0.as_ptr() as usize, 512, &w0),
+        virtio_blk_init::submit(Op::Write, 12, 1, b1.as_ptr() as usize, 512, &w1),
+        virtio_blk_init::submit(Op::Write, 14, 1, b2.as_ptr() as usize, 512, &w2),
+        virtio_blk_init::submit(Op::Write, 16, 1, b3.as_ptr() as usize, 512, &w3),
+        virtio_blk_init::submit(Op::Write, 18, 1, b4.as_ptr() as usize, 512, &w4),
+        virtio_blk_init::submit(Op::Write, 20, 1, b5.as_ptr() as usize, 512, &w5),
+        virtio_blk_init::submit(Op::Write, 22, 1, b6.as_ptr() as usize, 512, &w6),
+        virtio_blk_init::submit(Op::Write, 24, 1, b7.as_ptr() as usize, 512, &w7),
+    ];
+    let mut i = 0usize;
+    while i < 8 {
+        if subs[i].is_err() {
+            return Outcome::Fail("submit");
         }
-        if w0.wait().is_err()
-            || w1.wait().is_err()
-            || w2.wait().is_err()
-            || w3.wait().is_err()
-            || w4.wait().is_err()
-            || w5.wait().is_err()
-            || w6.wait().is_err()
-            || w7.wait().is_err()
-        {
-            return Outcome::Fail("wait");
-        }
-        let mut out = [0u8; 512];
-        if virtio_blk_init::read(10, &mut out).is_err() || out != b0 {
-            return Outcome::Fail("r0");
-        }
-        if virtio_blk_init::read(18, &mut out).is_err() || out != b4 {
-            return Outcome::Fail("r4");
-        }
-        if virtio_blk_init::read(24, &mut out).is_err() || out != b7 {
-            return Outcome::Fail("r7");
-        }
-        Outcome::Ok
-    })
+        i += 1;
+    }
+    if w0.wait().is_err()
+        || w1.wait().is_err()
+        || w2.wait().is_err()
+        || w3.wait().is_err()
+        || w4.wait().is_err()
+        || w5.wait().is_err()
+        || w6.wait().is_err()
+        || w7.wait().is_err()
+    {
+        return Outcome::Fail("wait");
+    }
+    let mut out = [0u8; 512];
+    if virtio_blk_init::read(10, &mut out).is_err() || out != b0 {
+        return Outcome::Fail("r0");
+    }
+    if virtio_blk_init::read(18, &mut out).is_err() || out != b4 {
+        return Outcome::Fail("r4");
+    }
+    if virtio_blk_init::read(24, &mut out).is_err() || out != b7 {
+        return Outcome::Fail("r7");
+    }
+    Outcome::Ok
 }
 
 const VBLK_ITERS: u32 = 40;
@@ -4062,27 +4525,29 @@ fn test_block_vblk_concurrent() -> Outcome {
     if !virtio_blk_init::live() {
         return Outcome::Skip("no virtio-blk");
     }
-    with_timer(|| {
-        VBLK_WID.store(0, Ordering::SeqCst);
-        VBLK_DONE.store(0, Ordering::SeqCst);
-        VBLK_FAIL.store(0, Ordering::SeqCst);
-        let _a = thread_init::spawn("vblk-a", vblk_worker);
-        let _b = thread_init::spawn("vblk-b", vblk_worker);
-        let t0 = time_init::uptime_ms();
-        loop {
-            if VBLK_DONE.load(Ordering::SeqCst) == 2 {
-                break;
-            }
-            if time_init::uptime_ms().saturating_sub(t0) > 15_000 {
-                return Outcome::Fail("stall");
-            }
-            thread_init::yield_now();
+    VBLK_WID.store(0, Ordering::SeqCst);
+    VBLK_DONE.store(0, Ordering::SeqCst);
+    VBLK_FAIL.store(0, Ordering::SeqCst);
+    let Ok(_a) = thread_init::spawn("vblk-a", vblk_worker) else {
+        return Outcome::Fail("spawn");
+    };
+    let Ok(_b) = thread_init::spawn("vblk-b", vblk_worker) else {
+        return Outcome::Fail("spawn");
+    };
+    let t0 = time_init::uptime_ms();
+    loop {
+        if VBLK_DONE.load(Ordering::SeqCst) == 2 {
+            break;
         }
-        if VBLK_FAIL.load(Ordering::SeqCst) != 0 {
-            return Outcome::Fail("corrupt");
+        if time_init::uptime_ms().saturating_sub(t0) > 15_000 {
+            return Outcome::Fail("stall");
         }
-        Outcome::Ok
-    })
+        thread_init::yield_now();
+    }
+    if VBLK_FAIL.load(Ordering::SeqCst) != 0 {
+        return Outcome::Fail("corrupt");
+    }
+    Outcome::Ok
 }
 
 fn test_block_vblk_mq() -> Outcome {
@@ -4113,41 +4578,39 @@ fn test_block_persist() -> Outcome {
     if !virtio_blk_init::live() {
         return Outcome::Skip("no virtio-blk");
     }
-    with_timer(|| {
-        let lba = virtio_blk_init::persist_lba();
-        if lba == 0 {
-            return Outcome::Fail("no persist lba");
-        }
-        let mut buf = [0u8; 512];
-        if virtio_blk_init::read(lba, &mut buf).is_err() {
-            return Outcome::Fail("read");
-        }
-        if buf[0..8] == PERSIST_MAGIC {
-            let mut i = 8usize;
-            while i < 512 {
-                if buf[i] != 0xA5 {
-                    return Outcome::Fail("corrupt");
-                }
-                i += 1;
-            }
-            crate::marker!("vibeOS: persist: intact");
-            return Outcome::Ok;
-        }
-        buf[0..8].copy_from_slice(&PERSIST_MAGIC);
+    let lba = virtio_blk_init::persist_lba();
+    if lba == 0 {
+        return Outcome::Fail("no persist lba");
+    }
+    let mut buf = [0u8; 512];
+    if virtio_blk_init::read(lba, &mut buf).is_err() {
+        return Outcome::Fail("read");
+    }
+    if buf[0..8] == PERSIST_MAGIC {
         let mut i = 8usize;
         while i < 512 {
-            buf[i] = 0xA5;
+            if buf[i] != 0xA5 {
+                return Outcome::Fail("corrupt");
+            }
             i += 1;
         }
-        if virtio_blk_init::write(lba, &buf).is_err() {
-            return Outcome::Fail("write");
-        }
-        if virtio_blk_init::flush().is_err() {
-            return Outcome::Fail("flush");
-        }
-        crate::marker!("vibeOS: persist: wrote");
-        Outcome::Ok
-    })
+        crate::marker!("vibeOS: persist: intact");
+        return Outcome::Ok;
+    }
+    buf[0..8].copy_from_slice(&PERSIST_MAGIC);
+    let mut i = 8usize;
+    while i < 512 {
+        buf[i] = 0xA5;
+        i += 1;
+    }
+    if virtio_blk_init::write(lba, &buf).is_err() {
+        return Outcome::Fail("write");
+    }
+    if virtio_blk_init::flush().is_err() {
+        return Outcome::Fail("flush");
+    }
+    crate::marker!("vibeOS: persist: wrote");
+    Outcome::Ok
 }
 
 fn test_block_part_mbr() -> Outcome {
@@ -4206,50 +4669,48 @@ fn test_block_part_gpt() -> Outcome {
     if !virtio_blk_init::live() {
         return Outcome::Skip("no virtio-blk");
     }
-    with_timer(|| {
-        let Some(i1) = part_init::find_name("vdap1") else {
-            return Outcome::Fail("no vdap1");
-        };
-        let Some(i2) = part_init::find_name("vdap2") else {
-            return Outcome::Fail("no vdap2");
-        };
-        let Some((_, _, _, k1)) = part_init::info(i1) else {
-            return Outcome::Fail("info p1");
-        };
-        let Some((_, n2, _, k2)) = part_init::info(i2) else {
-            return Outcome::Fail("info p2");
-        };
-        if part_init::type_str(k1) != "efi" {
-            return Outcome::Fail("efi guid");
-        }
-        if part_init::type_str(k2) != "linux" {
-            return Outcome::Fail("linux guid");
-        }
-        if n2 < 16 {
-            return Outcome::Fail("linux small");
-        }
-        let Some(d) = part_init::device(i1) else {
-            return Outcome::Fail("no d1");
-        };
-        let mut buf = [0u8; 512];
-        buf[0] = 0xE1;
-        buf[100] = 0xE2;
-        if d.write(1, &buf).is_err() {
-            return Outcome::Fail("write");
-        }
-        let mut out = [0u8; 512];
-        if d.read(1, &mut out).is_err() || out != buf {
-            return Outcome::Fail("read");
-        }
-        if d.flush().is_err() {
-            return Outcome::Fail("flush");
-        }
-        match d.write(d.capacity_sectors(), &buf) {
-            Err(BlockError::Inval) => {}
-            _ => return Outcome::Fail("gpt overflow"),
-        }
-        Outcome::Ok
-    })
+    let Some(i1) = part_init::find_name("vdap1") else {
+        return Outcome::Fail("no vdap1");
+    };
+    let Some(i2) = part_init::find_name("vdap2") else {
+        return Outcome::Fail("no vdap2");
+    };
+    let Some((_, _, _, k1)) = part_init::info(i1) else {
+        return Outcome::Fail("info p1");
+    };
+    let Some((_, n2, _, k2)) = part_init::info(i2) else {
+        return Outcome::Fail("info p2");
+    };
+    if part_init::type_str(k1) != "efi" {
+        return Outcome::Fail("efi guid");
+    }
+    if part_init::type_str(k2) != "linux" {
+        return Outcome::Fail("linux guid");
+    }
+    if n2 < 16 {
+        return Outcome::Fail("linux small");
+    }
+    let Some(d) = part_init::device(i1) else {
+        return Outcome::Fail("no d1");
+    };
+    let mut buf = [0u8; 512];
+    buf[0] = 0xE1;
+    buf[100] = 0xE2;
+    if d.write(1, &buf).is_err() {
+        return Outcome::Fail("write");
+    }
+    let mut out = [0u8; 512];
+    if d.read(1, &mut out).is_err() || out != buf {
+        return Outcome::Fail("read");
+    }
+    if d.flush().is_err() {
+        return Outcome::Fail("flush");
+    }
+    match d.write(d.capacity_sectors(), &buf) {
+        Err(BlockError::Inval) => {}
+        _ => return Outcome::Fail("gpt overflow"),
+    }
+    Outcome::Ok
 }
 
 fn test_block_cache_hit() -> Outcome {
@@ -4335,186 +4796,170 @@ fn test_vfs_walk() -> Outcome {
     if !fs_init::live() {
         return Outcome::Fail("not live");
     }
-    if file_init::mkdir("/a", 0o755).is_err() {
+    if file_init::mkdir(b"/a", 0o755).is_err() {
         return Outcome::Fail("mkdir");
     }
-    if file_init::creat("/a/f").is_err() {
+    if file_init::creat(b"/a/f").is_err() {
         return Outcome::Fail("creat");
     }
-    match file_init::stat_path("/a/./f") {
+    match fid::stat_path("/a/./f") {
         Ok(s) if s.kind == InodeKind::Reg => {}
         _ => return Outcome::Fail("dot walk"),
     }
-    match file_init::stat_path("/a/f/../f") {
+    match fid::stat_path("/a/f/../f") {
         Ok(s) if s.kind == InodeKind::Reg => {}
         _ => return Outcome::Fail("dotdot"),
     }
-    if file_init::mkdir("/ram", 0o755).is_err() {
+    if file_init::mkdir(b"/ram", 0o755).is_err() {
         return Outcome::Fail("ramdir");
     }
-    if file_init::vfs_attach("/ram").is_err() {
-        return Outcome::Fail("attach");
+    if file_init::mount(b"none", b"/ram", b"ramfs", false).is_err() {
+        return Outcome::Fail("mount");
     }
-    fs_init::with(|v| {
-        if v.mount(None, "/ram", &vibeos::fs::RamFs).is_err() {
-            return Outcome::Fail("mount");
-        }
-        if v.creat(None, "/ram/f", 0o644).is_err() {
-            return Outcome::Fail("rf");
-        }
-        if v.symlink(None, "/ram/l", "/ram/f").is_err() {
-            return Outcome::Fail("symlink");
-        }
-        match v.stat(None, "/ram/l") {
-            Ok(s) if s.kind == InodeKind::Reg => {}
-            _ => return Outcome::Fail("follow"),
-        }
-        if v.symlink(None, "/ram/loop", "/ram/loop").is_err() {
-            return Outcome::Fail("loopc");
-        }
-        match v.stat(None, "/ram/loop") {
-            Err(FsError::Loop) => {}
-            _ => return Outcome::Fail("noloop"),
-        }
-        match v.stat(None, "/ram/..") {
-            Ok(s) if s.kind == InodeKind::Dir => {}
-            _ => return Outcome::Fail("cross"),
-        }
-        Outcome::Ok
-    })
+    if file_init::creat(b"/ram/f").is_err() {
+        return Outcome::Fail("rf");
+    }
+    if file_init::symlink_path(b"/ram/l", b"/ram/f").is_err() {
+        return Outcome::Fail("symlink");
+    }
+    match fid::stat_path("/ram/l") {
+        Ok(s) if s.kind == InodeKind::Reg => {}
+        _ => return Outcome::Fail("follow"),
+    }
+    if file_init::symlink_path(b"/ram/loop", b"/ram/loop").is_err() {
+        return Outcome::Fail("loopc");
+    }
+    match fid::stat_path("/ram/loop") {
+        Err(FsError::Loop) => {}
+        _ => return Outcome::Fail("noloop"),
+    }
+    match fid::stat_path("/ram/..") {
+        Ok(s) if s.kind == InodeKind::Dir => {}
+        _ => return Outcome::Fail("cross"),
+    }
+    Outcome::Ok
 }
 
-fn dir_has(v: &mut vibeos::fs::Vfs, path: &str, want: &[u8]) -> bool {
-    let Ok(dir) = v.resolve(None, path, true) else {
+fn dir_has(path: &str, want: &[u8]) -> bool {
+    let flags = vibeos::fs::OpenFlags::from_bits(vibeos::fs::O_RDONLY | vibeos::fs::O_DIRECTORY);
+    let Ok(f) = file_init::open(path.as_bytes(), flags, 0) else {
         return false;
     };
-    let mut d = vibeos::fs::Dirent {
-        ino: 0,
-        kind: InodeKind::Reg,
-        name: vibeos::fs::Name::EMPTY,
-    };
-    let mut cookie = 0u64;
-    loop {
-        match v.readdir(dir, cookie, &mut d) {
-            Ok(Some(next)) => {
-                if d.name.eq_bytes(want) {
-                    return true;
-                }
-                cookie = next;
-            }
-            _ => return false,
-        }
-    }
+    let mut hit = false;
+    let r = file_init::readdir(&f, &mut |d| {
+        hit = d.name.eq_bytes(want);
+        !hit
+    });
+    let _ = file_init::close(f);
+    r.is_ok() && hit
 }
 
 fn test_pseudo_fs() -> Outcome {
     if !fs_init::live() {
         return Outcome::Fail("not live");
     }
-    fs_init::with(|v| {
-        match v.stat(None, "/dev") {
-            Ok(s) if s.kind == InodeKind::Dir => {}
-            _ => return Outcome::Fail("/dev"),
+    match fid::stat_path("/dev") {
+        Ok(s) if s.kind == InodeKind::Dir => {}
+        _ => return Outcome::Fail("/dev"),
+    }
+    match fid::stat_path("/proc") {
+        Ok(s) if s.kind == InodeKind::Dir => {}
+        _ => return Outcome::Fail("/proc"),
+    }
+    match fid::stat_path("/tmp") {
+        Ok(s) if s.kind == InodeKind::Dir => {}
+        _ => return Outcome::Fail("/tmp"),
+    }
+    match fid::stat_path("/sys") {
+        Ok(s) if s.kind == InodeKind::Dir => {}
+        _ => return Outcome::Fail("/sys"),
+    }
+    if !dir_has("/dev", b"null")
+        || !dir_has("/dev", b"zero")
+        || !dir_has("/dev", b"random")
+        || !dir_has("/dev", b"console")
+        || !dir_has("/dev", b"tty")
+    {
+        return Outcome::Fail("dev chars");
+    }
+    if !dir_has("/dev", b"ram0") {
+        return Outcome::Fail("dev ram0");
+    }
+    match fid::stat_path("/dev/null") {
+        Ok(s) if s.kind == InodeKind::Chr => {}
+        _ => return Outcome::Fail("null kind"),
+    }
+    let Ok(f) = fid::open("/dev/null", O_RDWR, 0) else {
+        return Outcome::Fail("open null");
+    };
+    if fid::write(f, b"x").ok() != Some(1) {
+        let _ = fid::close(f);
+        return Outcome::Fail("write null");
+    }
+    let _ = fid::close(f);
+    let Ok(z) = fid::open("/dev/zero", O_RDWR, 0) else {
+        return Outcome::Fail("open zero");
+    };
+    let mut buf = [0xFFu8; 4];
+    if fid::read(z, &mut buf).ok() != Some(4) || buf != [0u8; 4] {
+        let _ = fid::close(z);
+        return Outcome::Fail("read zero");
+    }
+    let _ = fid::close(z);
+    let Ok(r) = fid::open("/dev/random", O_RDWR, 0) else {
+        return Outcome::Fail("open rand");
+    };
+    if fid::read(r, &mut buf).ok() != Some(4) {
+        let _ = fid::close(r);
+        return Outcome::Fail("read rand");
+    }
+    let _ = fid::close(r);
+    if fid::creat("/tmp/f").is_err() {
+        return Outcome::Fail("tmp creat");
+    }
+    let Ok(t) = fid::open("/tmp/f", O_RDWR | O_CREAT, 0o644) else {
+        return Outcome::Fail("tmp open");
+    };
+    if fid::write(t, b"ok").ok() != Some(2) {
+        let _ = fid::close(t);
+        return Outcome::Fail("tmp write");
+    }
+    if fid::seek(t, 0, vibeos::fs::SEEK_SET).is_err() {
+        let _ = fid::close(t);
+        return Outcome::Fail("tmp seek");
+    }
+    buf = [0u8; 4];
+    if fid::read(t, &mut buf).ok() != Some(2) || &buf[..2] != b"ok" {
+        let _ = fid::close(t);
+        return Outcome::Fail("tmp read");
+    }
+    let _ = fid::close(t);
+    if !dir_has("/proc", b"1") || !dir_has("/proc", b"self") {
+        return Outcome::Fail("proc stubs");
+    }
+    if !dir_has("/proc/1", b"cmdline")
+        || !dir_has("/proc/1", b"status")
+        || !dir_has("/proc/1", b"maps")
+        || !dir_has("/proc/1", b"fd")
+    {
+        return Outcome::Fail("proc/1");
+    }
+    let Ok(c) = fid::open("/proc/1/cmdline", O_RDWR, 0) else {
+        return Outcome::Fail("cmdline");
+    };
+    buf = [0u8; 4];
+    match fid::read(c, &mut buf) {
+        Ok(n) if n > 0 => {}
+        _ => {
+            let _ = fid::close(c);
+            return Outcome::Fail("cmdline read");
         }
-        match v.stat(None, "/proc") {
-            Ok(s) if s.kind == InodeKind::Dir => {}
-            _ => return Outcome::Fail("/proc"),
-        }
-        match v.stat(None, "/tmp") {
-            Ok(s) if s.kind == InodeKind::Dir => {}
-            _ => return Outcome::Fail("/tmp"),
-        }
-        match v.stat(None, "/sys") {
-            Ok(s) if s.kind == InodeKind::Dir => {}
-            _ => return Outcome::Fail("/sys"),
-        }
-        if !dir_has(v, "/dev", b"null")
-            || !dir_has(v, "/dev", b"zero")
-            || !dir_has(v, "/dev", b"random")
-            || !dir_has(v, "/dev", b"console")
-            || !dir_has(v, "/dev", b"tty")
-        {
-            return Outcome::Fail("dev chars");
-        }
-        if !dir_has(v, "/dev", b"ram0") {
-            return Outcome::Fail("dev ram0");
-        }
-        match v.stat(None, "/dev/null") {
-            Ok(s) if s.kind == InodeKind::Chr => {}
-            _ => return Outcome::Fail("null kind"),
-        }
-        let Ok(fid) = v.open(None, "/dev/null", O_RDWR, 0) else {
-            return Outcome::Fail("open null");
-        };
-        if v.write(fid, b"x").ok() != Some(1) {
-            let _ = v.close(fid);
-            return Outcome::Fail("write null");
-        }
-        let _ = v.close(fid);
-        let Ok(z) = v.open(None, "/dev/zero", O_RDWR, 0) else {
-            return Outcome::Fail("open zero");
-        };
-        let mut buf = [0xFFu8; 4];
-        if v.read(z, &mut buf).ok() != Some(4) || buf != [0u8; 4] {
-            let _ = v.close(z);
-            return Outcome::Fail("read zero");
-        }
-        let _ = v.close(z);
-        let Ok(r) = v.open(None, "/dev/random", O_RDWR, 0) else {
-            return Outcome::Fail("open rand");
-        };
-        if v.read(r, &mut buf).ok() != Some(4) {
-            let _ = v.close(r);
-            return Outcome::Fail("read rand");
-        }
-        let _ = v.close(r);
-        if v.creat(None, "/tmp/f", 0o644).is_err() {
-            return Outcome::Fail("tmp creat");
-        }
-        let Ok(t) = v.open(None, "/tmp/f", O_RDWR | O_CREAT, 0o644) else {
-            return Outcome::Fail("tmp open");
-        };
-        if v.write(t, b"ok").ok() != Some(2) {
-            let _ = v.close(t);
-            return Outcome::Fail("tmp write");
-        }
-        if v.seek(t, 0, vibeos::fs::SEEK_SET).is_err() {
-            let _ = v.close(t);
-            return Outcome::Fail("tmp seek");
-        }
-        buf = [0u8; 4];
-        if v.read(t, &mut buf).ok() != Some(2) || &buf[..2] != b"ok" {
-            let _ = v.close(t);
-            return Outcome::Fail("tmp read");
-        }
-        let _ = v.close(t);
-        if !dir_has(v, "/proc", b"1") || !dir_has(v, "/proc", b"self") {
-            return Outcome::Fail("proc stubs");
-        }
-        if !dir_has(v, "/proc/1", b"cmdline")
-            || !dir_has(v, "/proc/1", b"status")
-            || !dir_has(v, "/proc/1", b"maps")
-            || !dir_has(v, "/proc/1", b"fd")
-        {
-            return Outcome::Fail("proc/1");
-        }
-        let Ok(c) = v.open(None, "/proc/1/cmdline", O_RDWR, 0) else {
-            return Outcome::Fail("cmdline");
-        };
-        buf = [0u8; 4];
-        match v.read(c, &mut buf) {
-            Ok(n) if n > 0 => {}
-            _ => {
-                let _ = v.close(c);
-                return Outcome::Fail("cmdline read");
-            }
-        }
-        let _ = v.close(c);
-        if !dir_has(v, "/sys", b"devices") || !dir_has(v, "/sys", b"bus") {
-            return Outcome::Fail("sys skeleton");
-        }
-        Outcome::Ok
-    })
+    }
+    let _ = fid::close(c);
+    if !dir_has("/sys", b"devices") || !dir_has("/sys", b"bus") {
+        return Outcome::Fail("sys skeleton");
+    }
+    Outcome::Ok
 }
 
 fn test_fat_initrd() -> Outcome {
@@ -4524,49 +4969,49 @@ fn test_fat_initrd() -> Outcome {
     if fat_init::nvol() == 0 {
         return Outcome::Fail("nvol");
     }
-    match file_init::stat_path("/hello.txt") {
+    match fid::stat_path("/hello.txt") {
         Ok(s) if s.kind == InodeKind::Reg && s.size > 0 => {}
         Ok(_) => return Outcome::Fail("hello meta"),
-        Err(_) => match file_init::stat_path("/HELLO.TXT") {
+        Err(_) => match fid::stat_path("/HELLO.TXT") {
             Ok(s) if s.kind == InodeKind::Reg && s.size > 0 => {}
             _ => return Outcome::Fail("hello"),
         },
     }
-    if file_init::mkdir("/kt", 0o755).is_err() {
+    if file_init::mkdir(b"/kt", 0o755).is_err() {
         return Outcome::Fail("mkdir");
     }
-    match file_init::open("/kt/w.txt", vibeos::fs::O_RDWR | vibeos::fs::O_CREAT, 0o644) {
+    match fid::open("/kt/w.txt", O_RDWR | O_CREAT, 0o644) {
         Ok(fid) => {
-            if file_init::write(fid, b"abc").ok() != Some(3) {
-                let _ = file_init::close(fid);
+            if fid::write(fid, b"abc").ok() != Some(3) {
+                let _ = fid::close(fid);
                 return Outcome::Fail("write");
             }
-            if file_init::seek(fid, 0, vibeos::fs::SEEK_SET).is_err() {
-                let _ = file_init::close(fid);
+            if fid::seek(fid, 0, vibeos::fs::SEEK_SET).is_err() {
+                let _ = fid::close(fid);
                 return Outcome::Fail("seek");
             }
             let mut buf = [0u8; 4];
-            match file_init::read(fid, &mut buf) {
+            match fid::read(fid, &mut buf) {
                 Ok(3) if &buf[..3] == b"abc" => {}
                 _ => {
-                    let _ = file_init::close(fid);
+                    let _ = fid::close(fid);
                     return Outcome::Fail("read");
                 }
             }
-            let _ = file_init::close(fid);
+            let _ = fid::close(fid);
         }
         Err(_) => return Outcome::Fail("open"),
     }
-    if file_init::truncate_path("/kt/w.txt", 1).is_err() {
+    if file_init::truncate_path(b"/kt/w.txt", 1).is_err() {
         return Outcome::Fail("trunc");
     }
-    if file_init::unlink_path("/kt/w.txt", false).is_err() {
+    if fid::unlink_path("/kt/w.txt", false).is_err() {
         return Outcome::Fail("unlink");
     }
-    if file_init::symlink_path("/s", "/kt").err() != Some(FsError::NotSupp) {
+    if file_init::symlink_path(b"/s", b"/kt").err() != Some(FsError::NotSupp) {
         return Outcome::Fail("symlink supp");
     }
-    if file_init::link_path("/hello.txt", "/h2").err() != Some(FsError::NotSupp) {
+    if file_init::link_path(b"/hello.txt", b"/h2").err() != Some(FsError::NotSupp) {
         return Outcome::Fail("link supp");
     }
     if file_init::sync_fs().is_err() {
@@ -4582,62 +5027,62 @@ fn test_vibefs() -> Outcome {
     if vibefs_init::nvol() == 0 {
         return Outcome::Fail("nvol");
     }
-    match file_init::stat_path("/vibe") {
+    match fid::stat_path("/vibe") {
         Ok(s) if s.kind == InodeKind::Dir => {}
         _ => return Outcome::Fail("mount"),
     }
-    if file_init::mkdir("/vibe/d", 0o755).is_err() {
+    if file_init::mkdir(b"/vibe/d", 0o755).is_err() {
         return Outcome::Fail("mkdir");
     }
-    match file_init::open("/vibe/d/f", O_RDWR | O_CREAT, 0o644) {
+    match fid::open("/vibe/d/f", O_RDWR | O_CREAT, 0o644) {
         Ok(fid) => {
-            if file_init::write(fid, b"hello").ok() != Some(5) {
-                let _ = file_init::close(fid);
+            if fid::write(fid, b"hello").ok() != Some(5) {
+                let _ = fid::close(fid);
                 return Outcome::Fail("write");
             }
-            if file_init::seek(fid, 0, vibeos::fs::SEEK_SET).is_err() {
-                let _ = file_init::close(fid);
+            if fid::seek(fid, 0, vibeos::fs::SEEK_SET).is_err() {
+                let _ = fid::close(fid);
                 return Outcome::Fail("seek");
             }
             let mut buf = [0u8; 8];
-            match file_init::read(fid, &mut buf) {
+            match fid::read(fid, &mut buf) {
                 Ok(5) if &buf[..5] == b"hello" => {}
                 _ => {
-                    let _ = file_init::close(fid);
+                    let _ = fid::close(fid);
                     return Outcome::Fail("read");
                 }
             }
-            let _ = file_init::close(fid);
+            let _ = fid::close(fid);
         }
         Err(_) => return Outcome::Fail("open"),
     }
-    match file_init::stat_path("/vibe/d/f") {
+    match fid::stat_path("/vibe/d/f") {
         Ok(s) if s.kind == InodeKind::Reg && (s.mode & 0o777) == 0o644 => {}
         _ => return Outcome::Fail("mode"),
     }
-    if file_init::symlink_path("/vibe/l", "/vibe/d/f").is_err() {
+    if file_init::symlink_path(b"/vibe/l", b"/vibe/d/f").is_err() {
         return Outcome::Fail("symlink");
     }
-    match file_init::open("/vibe/big", O_RDWR | O_CREAT, 0o644) {
+    match fid::open("/vibe/big", O_RDWR | O_CREAT, 0o644) {
         Ok(fid) => {
             let payload = [b'x'; 200];
-            if file_init::write(fid, &payload).ok() != Some(200) {
-                let _ = file_init::close(fid);
+            if fid::write(fid, &payload).ok() != Some(200) {
+                let _ = fid::close(fid);
                 return Outcome::Fail("extent w");
             }
-            if file_init::seek(fid, 0, vibeos::fs::SEEK_SET).is_err() {
-                let _ = file_init::close(fid);
+            if fid::seek(fid, 0, vibeos::fs::SEEK_SET).is_err() {
+                let _ = fid::close(fid);
                 return Outcome::Fail("extent seek");
             }
             let mut out = [0u8; 200];
-            match file_init::read(fid, &mut out) {
+            match fid::read(fid, &mut out) {
                 Ok(200) if out == payload => {}
                 _ => {
-                    let _ = file_init::close(fid);
+                    let _ = fid::close(fid);
                     return Outcome::Fail("extent r");
                 }
             }
-            let _ = file_init::close(fid);
+            let _ = fid::close(fid);
         }
         Err(_) => return Outcome::Fail("extent open"),
     }
@@ -4646,6 +5091,124 @@ fn test_vibefs() -> Outcome {
     }
     if file_init::sync_fs().is_err() {
         return Outcome::Fail("sync");
+    }
+    Outcome::Ok
+}
+
+fn test_ktest_rows() -> Outcome {
+    let mut seen = 0usize;
+    for (si, suite) in SUITES.iter().enumerate() {
+        for (ri, t) in suite.iter().enumerate() {
+            seen += 1;
+            if t.deadline_ms == 0 {
+                return crate::fail_fmt!("zero deadline on {}", t.name);
+            }
+            for (sj, other) in SUITES.iter().enumerate().skip(si) {
+                let from = if sj == si { ri + 1 } else { 0 };
+                if other[from..].iter().any(|o| o.name == t.name) {
+                    return crate::fail_fmt!("duplicate test name {}", t.name);
+                }
+            }
+        }
+    }
+    if seen < TESTS.len() {
+        return Outcome::Fail("SUITES does not hold the legacy list");
+    }
+    let d = test("d", test_ktest_rows);
+    if d.deadline_ms != 10_000 || d.once || d.opt_in {
+        return Outcome::Fail("test() defaults");
+    }
+    let b = d.deadline(20_000).once().opt_in();
+    if b.deadline_ms != 20_000 || !b.once || !b.opt_in {
+        return Outcome::Fail("builder did not set deadline/once/opt_in");
+    }
+    Outcome::Ok
+}
+
+struct FailingDisplay;
+
+impl fmt::Display for FailingDisplay {
+    fn fmt(&self, _: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Err(fmt::Error)
+    }
+}
+
+fn test_ktest_fail_fmt() -> Outcome {
+    let m = FailMsg::from_args(format_args!("n={}", 7));
+    if m.as_str() != "n=7" {
+        return Outcome::Fail("n={} did not round-trip");
+    }
+    // 199 spaces then `x`: 200 formatted bytes.
+    let m = FailMsg::from_args(format_args!("{:>200}", "x"));
+    if m.as_str().len() != FAIL_MSG_BYTES || m.as_str().bytes().any(|c| c != b' ') {
+        return Outcome::Fail("200 bytes did not cut to 120");
+    }
+    // 119 `x` then a 2-byte `é`: the character goes whole.
+    let m = FailMsg::from_args(format_args!("{:x>119}{}", "", 'é'));
+    if m.as_str().len() != 119 || m.as_str().bytes().any(|c| c != b'x') {
+        return Outcome::Fail("split a character at the cut");
+    }
+    let m = FailMsg::from_args(format_args!("a{}", FailingDisplay));
+    if m.as_str() != "a <fmt error>" {
+        return Outcome::Fail("Display error not marked");
+    }
+    match crate::fail_fmt!("id {}", 3) {
+        Outcome::FailFmt(m) if m.as_str() == "id 3" => Outcome::Ok,
+        _ => Outcome::Fail("fail_fmt! did not build FailFmt"),
+    }
+}
+
+static HELPER_RAN: AtomicBool = AtomicBool::new(false);
+
+fn helper_entry() {
+    HELPER_RAN.store(true, Ordering::SeqCst);
+}
+
+/// Wait up to 1 s for `helper_entry` to run in `h` and `h` to die. The
+/// thread may land on this CPU, so yield as well as serve IPIs.
+fn helper_ran_and_died(h: ThreadHandle) -> bool {
+    let t0 = time_init::now_ns();
+    loop {
+        let dead = matches!(
+            thread_init::try_state(h.id()),
+            Some(ThreadState::Dead) | None
+        );
+        if HELPER_RAN.load(Ordering::SeqCst) && dead {
+            return true;
+        }
+        if time_init::now_ns().saturating_sub(t0) > 1_000_000_000 {
+            return false;
+        }
+        thread_init::yield_now();
+        service_incoming_guarded();
+        core::hint::spin_loop();
+    }
+}
+
+fn test_ktest_helpers() -> Outcome {
+    let Some(pa) = alloc_frames(2) else {
+        return Outcome::Fail("alloc_frames(2)");
+    };
+    let aligned = pa.as_u64() % (4 * PAGE_SIZE_4K) == 0;
+    // SAFETY: `pa` is the order-2 block `alloc_frames(2)` returned above,
+    // freed once; established here.
+    unsafe { dealloc_frames(pa, 2) };
+    if !aligned {
+        return Outcome::Fail("order-2 block not 16 KiB aligned");
+    }
+    if cpu_remote(0).is_none() {
+        return Outcome::Fail("cpu_remote(0) is None");
+    }
+    if cpu_remote(per_cpu_init::cpu_count() as u32).is_some() {
+        return Outcome::Fail("cpu_remote(cpu_count) is Some");
+    }
+    HELPER_RAN.store(false, Ordering::SeqCst);
+    if !helper_ran_and_died(spawn_thread("ktest-helper", helper_entry)) {
+        return Outcome::Fail("spawn_thread entry did not run and exit");
+    }
+    HELPER_RAN.store(false, Ordering::SeqCst);
+    if !helper_ran_and_died(spawn_thread_on("ktest-helper0", helper_entry, 0)) {
+        return Outcome::Fail("spawn_thread_on(0) entry did not run and exit");
     }
     Outcome::Ok
 }

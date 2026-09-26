@@ -5,8 +5,8 @@
 
 use crate::fs::{MAX_PATH, O_CLOEXEC};
 
-pub const MAX_PROCS: usize = 16;
-pub const MAX_FDS: usize = 16;
+pub use crate::limits::MAX_FDS;
+pub use crate::limits::MAX_PROCS;
 pub const INIT_PID: u32 = 1;
 pub const NAME_MAX: usize = 16;
 
@@ -54,6 +54,37 @@ impl ProcState {
     }
 }
 
+/// Pid 1's slot as the orphan reaper rule reads it (ROADMAP §10.5, F068).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InitState {
+    Live,
+    Stopped,
+    Zombie,
+    Absent,
+}
+
+impl InitState {
+    /// The state of pid 1's slot; an unused slot is `Absent`.
+    pub const fn of(s: ProcState) -> Self {
+        match s {
+            ProcState::Unused => Self::Absent,
+            ProcState::Live => Self::Live,
+            ProcState::Stopped => Self::Stopped,
+            ProcState::Zombie => Self::Zombie,
+        }
+    }
+}
+
+/// The pid that adopts an orphan: pid 1 while init is live or stopped,
+/// otherwise none, and the orphan's zombie is freed when it exits
+/// (ROADMAP §10.5, F068).
+pub const fn reaper_for(init: InitState) -> Option<u32> {
+    match init {
+        InitState::Live | InitState::Stopped => Some(INIT_PID),
+        InitState::Zombie | InitState::Absent => None,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Creds {
     pub uid: u32,
@@ -75,7 +106,12 @@ impl Creds {
 pub enum FdKind {
     None,
     Console,
-    File(u16),
+    /// An open-file table slot and the generation it had when this fd was
+    /// made (C-FDGEN).
+    File {
+        fid: u16,
+        r#gen: u16,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,7 +129,7 @@ impl Fd {
     pub const fn is_open(self) -> bool {
         match self.kind {
             FdKind::None => false,
-            FdKind::Console | FdKind::File(_) => true,
+            FdKind::Console | FdKind::File { .. } => true,
         }
     }
 
@@ -204,16 +240,14 @@ impl FdTable {
         Ok(displaced)
     }
 
-    /// Drop CLOEXEC fds on exec. Returns closed file fids for the caller
-    /// to `close` in the file table.
-    pub fn apply_cloexec(&mut self) -> [Option<u16>; MAX_FDS] {
+    /// Drop CLOEXEC fds on exec. Returns the dropped fds for the caller
+    /// to close in the file table.
+    pub fn apply_cloexec(&mut self) -> [Option<Fd>; MAX_FDS] {
         let mut gone = [None; MAX_FDS];
         let mut i = 0usize;
         while i < MAX_FDS {
             if self.slots[i].is_open() && self.slots[i].cloexec() {
-                if let FdKind::File(fid) = self.slots[i].kind {
-                    gone[i] = Some(fid);
-                }
+                gone[i] = Some(self.slots[i]);
                 self.slots[i] = Fd::EMPTY;
             }
             i += 1;
@@ -356,6 +390,18 @@ mod tests {
     }
 
     #[test]
+    fn reaper_for_init_state() {
+        assert_eq!(InitState::of(ProcState::Unused), InitState::Absent);
+        assert_eq!(InitState::of(ProcState::Live), InitState::Live);
+        assert_eq!(InitState::of(ProcState::Stopped), InitState::Stopped);
+        assert_eq!(InitState::of(ProcState::Zombie), InitState::Zombie);
+        assert_eq!(reaper_for(InitState::Live), Some(INIT_PID));
+        assert_eq!(reaper_for(InitState::Stopped), Some(INIT_PID));
+        assert_eq!(reaper_for(InitState::Zombie), None);
+        assert_eq!(reaper_for(InitState::Absent), None);
+    }
+
+    #[test]
     fn fd_table_stdio_dup_cloexec() {
         let mut t = FdTable::stdio();
         assert!(matches!(t.get(0).unwrap().kind, FdKind::Console));
@@ -368,13 +414,16 @@ mod tests {
         t.set(
             4,
             Fd {
-                kind: FdKind::File(7),
+                kind: FdKind::File { fid: 7, r#gen: 2 },
                 flags: FD_CLOEXEC,
             },
         )
         .unwrap();
         let gone = t.apply_cloexec();
-        assert_eq!(gone[4], Some(7));
+        assert_eq!(
+            gone[4].map(|f| f.kind),
+            Some(FdKind::File { fid: 7, r#gen: 2 })
+        );
         assert!(t.get(4).is_none());
         assert!(t.get(1).is_some());
         let old = t.dup2(1, 2).unwrap();
@@ -402,7 +451,7 @@ mod tests {
         assert_eq!(ProcState::Zombie.name(), "zombie");
         assert_eq!(Creds::ROOT.uid, 0);
         assert_eq!(INIT_PID, 1);
-        assert_eq!(MAX_PROCS, 16);
+        assert_eq!(MAX_PROCS, 18);
         let c = Cwd::root();
         assert_eq!(c.as_bytes(), b"/");
         assert_eq!(default_action(SIGCONT), SigAct::Cont);
@@ -430,11 +479,16 @@ mod tests {
         t.close(0);
         assert_eq!(
             t.alloc(Fd {
-                kind: FdKind::File(1),
+                kind: FdKind::File { fid: 1, r#gen: 0 },
                 flags: 0,
             })
             .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn fixed_tables_match_limits() {
+        assert_eq!(FdTable::empty().slots.len(), crate::limits::MAX_FDS);
     }
 }

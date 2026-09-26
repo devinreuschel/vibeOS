@@ -470,4 +470,11 @@ mod tests {
         assert_eq!(effective_deadline(None), FAR_DEADLINE);
         assert_eq!(effective_deadline(Some(at(3))).ns, 3);
     }
+
+    #[test]
+    fn fixed_tables_match_limits() {
+        use crate::limits::MAX_THREADS;
+        assert_eq!(ReadyQueue::empty().buf.len(), MAX_THREADS);
+        assert_eq!(TimeoutQueue::empty().items.len(), MAX_THREADS);
+    }
 }

@@ -1,16 +1,22 @@
-//! Kernel File API + shell file commands. ROADMAP §8.6.
+//! Kernel File API + shell file commands. ROADMAP §8.6 / §10.4.
 //!
-//! VFS lock is not held across FAT/vibefs/block I/O. `sync` issues a block
-//! Flush (DESIGN §10.2). FAT rejects symlink/link with `NotSupp`; vibefs
-//! stores POSIX mode and symlinks (docs/VIBEFS.md).
+//! A thin File API over `Vfs` (C-FILEAPI): every function runs
+//! [`fs_init::api`], which calls a backend only with the VFS lock dropped,
+//! so a backend may wait for its volume and its disk. Relative paths are
+//! joined with the shell's working directory. `sync` issues a block Flush
+//! (DESIGN §10.2). FAT rejects symlink/link with `NotSupp`; vibefs stores
+//! POSIX mode and symlinks (docs/VIBEFS.md).
+//!
+//! Path syscalls keep their reach until ROADMAP §10.4 routes them through
+//! `Vfs`: [`open_routed`] resolves FAT and vibefs paths through the
+//! backends' route tables, then opens the inode it finds as a `Vfs` file,
+//! so reads, writes, seeks and closes share one table and one data path.
 
-use vibeos::fat::Node;
 use vibeos::fs::{
-    self, Dirent, FsError, FsType, InodeKind, MAX_NAME, MAX_PATH, Name, O_ACCMODE, O_APPEND,
-    O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, PathRef, S_IFDIR_MODE,
-    S_IFLNK_MODE, S_IFREG_MODE, SEEK_CUR, SEEK_END, SEEK_SET, Stat, split_basename,
+    DirEntry, FileId, FileRef, FsError, InodeKind, InodeRef, MAX_NAME, MAX_PATH, O_CREAT,
+    O_DIRECTORY, O_EXCL, O_RDONLY, O_TRUNC, O_WRONLY, OpenFlags, S_IFREG, SeekFrom, Stat,
+    split_basename,
 };
-use vibeos::lock::RANK_DEVICE;
 use vibeos::shell::{Command, LineEditor, MAX_COMMANDS};
 
 use crate::cell::IrqCell;
@@ -18,115 +24,9 @@ use crate::console_init::Console;
 use crate::fat_init;
 use crate::fs_init;
 use crate::shell_init;
-use crate::sync_init::SpinMutex;
 use crate::vibefs_init;
 
 use core::fmt::Write;
-
-const MAX_OPEN: usize = 16;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Back {
-    Fat,
-    Vibe,
-}
-
-#[derive(Clone, Copy)]
-struct Walked {
-    back: Back,
-    vol: u8,
-    ino: u32,
-    kind: InodeKind,
-    size: u32,
-    clu: u32,
-    dir_clu: u32,
-    dir_off: u32,
-    mode: u16,
-    nlink: u32,
-    mtime: u64,
-}
-
-impl Walked {
-    fn from_fat(vol: u8, n: Node) -> Self {
-        Self {
-            back: Back::Fat,
-            vol,
-            ino: n.ino,
-            kind: n.kind,
-            size: n.size,
-            clu: n.clu,
-            dir_clu: n.dir_clu,
-            dir_off: n.dir_off,
-            mode: if n.kind == InodeKind::Dir {
-                S_IFDIR_MODE
-            } else {
-                S_IFREG_MODE
-            },
-            nlink: if n.kind == InodeKind::Dir { 2 } else { 1 },
-            mtime: n.mtime,
-        }
-    }
-
-    fn from_vibe(vol: u8, n: vibeos::vibefs::Node) -> Self {
-        Self {
-            back: Back::Vibe,
-            vol,
-            ino: n.ino,
-            kind: n.kind,
-            size: n.size,
-            clu: n.ino,
-            dir_clu: n.ino,
-            dir_off: 0,
-            mode: n.mode,
-            nlink: n.nlink,
-            mtime: n.mtime,
-        }
-    }
-
-    #[allow(dead_code)]
-    fn dir_key(self) -> u32 {
-        match self.back {
-            Back::Fat => self.clu,
-            Back::Vibe => self.ino,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct OpenFile {
-    used: bool,
-    refs: u16,
-    back: Back,
-    vol: u8,
-    flags: u32,
-    offset: u64,
-    ino: u32,
-    kind: InodeKind,
-    clu: u32,
-    size: u32,
-    dir_clu: u32,
-    dir_off: u32,
-}
-
-impl OpenFile {
-    const EMPTY: Self = Self {
-        used: false,
-        refs: 0,
-        back: Back::Fat,
-        vol: 0,
-        flags: 0,
-        offset: 0,
-        ino: 0,
-        kind: InodeKind::Reg,
-        clu: 0,
-        size: 0,
-        dir_clu: 0,
-        dir_off: 0,
-    };
-}
-
-static FILES: SpinMutex<[OpenFile; MAX_OPEN]> =
-    SpinMutex::with_rank([OpenFile::EMPTY; MAX_OPEN], RANK_DEVICE);
 
 struct CwdBuf {
     buf: [u8; MAX_PATH],
@@ -157,15 +57,15 @@ fn set_cwd(p: &[u8]) {
     });
 }
 
-fn join_cwd(path: &str) -> Result<[u8; MAX_PATH], FsError> {
-    let p = path.as_bytes();
+/// `path`, made absolute against the working directory, and its length.
+fn join_cwd(p: &[u8]) -> Result<([u8; MAX_PATH], usize), FsError> {
     let mut out = [0u8; MAX_PATH];
     if p.first() == Some(&b'/') {
         if p.len() > MAX_PATH {
             return Err(FsError::NameTooLong);
         }
         out[..p.len()].copy_from_slice(p);
-        return Ok(out);
+        return Ok((out, p.len()));
     }
     let cwd = cwd_copy();
     let mut n = cwd.1;
@@ -180,185 +80,372 @@ fn join_cwd(path: &str) -> Result<[u8; MAX_PATH], FsError> {
         out[n] = b'/';
         n += 1;
     }
-    if n + p.len() > MAX_PATH {
+    let end = n.checked_add(p.len()).ok_or(FsError::NameTooLong)?;
+    if end > MAX_PATH {
         return Err(FsError::NameTooLong);
     }
-    out[n..n + p.len()].copy_from_slice(p);
-    Ok(out)
+    out[n..end].copy_from_slice(p);
+    Ok((out, end))
 }
 
-fn path_used(buf: &[u8; MAX_PATH]) -> &[u8] {
-    let mut n = buf.len();
-    while n > 0 && buf[n - 1] == 0 {
-        n -= 1;
+/// Run `f` on `path` made absolute.
+fn with_abs<R>(path: &[u8], f: impl FnOnce(&[u8]) -> Result<R, FsError>) -> Result<R, FsError> {
+    let (buf, n) = join_cwd(path)?;
+    f(&buf[..n])
+}
+
+// ---- C-FILEAPI ----
+
+/// Open `path`; `O_CREAT` creates a regular file with `mode`, `O_TRUNC`
+/// empties one.
+pub fn open(path: &[u8], flags: OpenFlags, mode: u32) -> Result<FileRef, FsError> {
+    with_abs(path, |p| fs_init::api().open(None, p, flags, mode))
+}
+
+pub fn read(f: &FileRef, buf: &mut [u8]) -> Result<usize, FsError> {
+    fs_init::api().read(f, buf)
+}
+
+pub fn write(f: &FileRef, buf: &[u8]) -> Result<usize, FsError> {
+    fs_init::api().write(f, buf)
+}
+
+pub fn seek(f: &FileRef, pos: SeekFrom) -> Result<u64, FsError> {
+    fs_init::api().seek(f, pos)
+}
+
+/// Drop one reference; the last frees the slot, changes its generation,
+/// and puts the inode, with the VFS lock dropped for any release.
+pub fn close(f: FileRef) -> Result<(), FsError> {
+    fs_init::api().close(f)
+}
+
+pub fn stat(f: &FileRef) -> Result<Stat, FsError> {
+    fs_init::api().stat(f)
+}
+
+/// Report each entry of open directory `f` to `cb`, `.` and `..` first,
+/// until `cb` returns false; `cb` runs with the VFS lock dropped.
+pub fn readdir(f: &FileRef, cb: &mut dyn FnMut(&DirEntry) -> bool) -> Result<(), FsError> {
+    fs_init::api().readdir(f, cb)
+}
+
+/// Make directory `path`; one already there is kept.
+pub fn mkdir(path: &[u8], mode: u32) -> Result<(), FsError> {
+    match with_abs(path, |p| fs_init::api().mkdir(None, p, mode)) {
+        Ok(()) | Err(FsError::Exists) => Ok(()),
+        Err(e) => Err(e),
     }
-    &buf[..n]
 }
 
-fn vol_walk(path: &str) -> Result<Walked, FsError> {
-    let abs = join_cwd(path)?;
-    walk_abs(path_used(&abs))
+pub fn unlink(path: &[u8]) -> Result<(), FsError> {
+    unlink_path(path, false)
 }
 
-fn is_kernfs(t: FsType) -> bool {
-    match t {
-        FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => true,
-        FsType::Ram | FsType::Fat | FsType::Vibe => false,
-    }
+pub fn rmdir(path: &[u8]) -> Result<(), FsError> {
+    unlink_path(path, true)
 }
 
-#[derive(Clone, Copy)]
-struct VfsLsEnt {
-    name: [u8; MAX_NAME],
-    nlen: u8,
-    kind: InodeKind,
-    size: u64,
-}
-
-impl VfsLsEnt {
-    const EMPTY: Self = Self {
-        name: [0; MAX_NAME],
-        nlen: 0,
-        kind: InodeKind::Reg,
-        size: 0,
-    };
-}
-
-const VFS_LS_MAX: usize = 32;
-type VfsLsSnap = (InodeKind, u64, [VfsLsEnt; VFS_LS_MAX], usize);
-
-/// Snapshot a kernfs node. None = not kernfs (caller uses FAT).
-/// Does not print; VFS is not held across serial.
-fn vfs_ls_snap(path: &str) -> Result<Option<VfsLsSnap>, FsError> {
-    let abs = join_cwd(path)?;
-    let s = core::str::from_utf8(path_used(&abs)).map_err(|_| FsError::Inval)?;
-    fs_init::with(|v| {
-        let p = match v.resolve(None, s, true) {
-            Ok(p) => p,
-            Err(FsError::NotFound) | Err(FsError::Io) => return Ok(None),
-            Err(e) => return Err(e),
-        };
-        if !is_kernfs(v.fstype_at(p)?) {
-            return Ok(None);
+fn unlink_path(path: &[u8], dir: bool) -> Result<(), FsError> {
+    with_abs(path, |p| {
+        let api = fs_init::api();
+        if dir {
+            api.rmdir(None, p)
+        } else {
+            api.unlink(None, p)
         }
-        let st = v.stat(None, s)?;
-        if st.kind != InodeKind::Dir {
-            return Ok(Some((st.kind, st.size, [VfsLsEnt::EMPTY; VFS_LS_MAX], 0)));
-        }
-        let mut ents = [VfsLsEnt::EMPTY; VFS_LS_MAX];
-        let mut n = 0usize;
-        let mut d = Dirent {
-            ino: 0,
-            kind: InodeKind::Reg,
-            name: Name::EMPTY,
-        };
-        let mut cookie = 0u64;
-        loop {
-            match v.readdir(p, cookie, &mut d) {
-                Ok(None) => break,
-                Ok(Some(next)) => {
-                    cookie = next;
-                    let nb = d.name.as_bytes();
-                    if nb == b"." || nb == b".." {
-                        continue;
-                    }
-                    if n < VFS_LS_MAX {
-                        let l = nb.len().min(MAX_NAME);
-                        ents[n].name[..l].copy_from_slice(&nb[..l]);
-                        ents[n].nlen = l as u8;
-                        ents[n].kind = d.kind;
-                        ents[n].size = 0;
-                        n += 1;
-                    }
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(Some((st.kind, st.size, ents, n)))
     })
 }
 
-fn walk_abs(pb: &[u8]) -> Result<Walked, FsError> {
+pub fn rename(old: &[u8], new: &[u8]) -> Result<(), FsError> {
+    let (ob, on) = join_cwd(old)?;
+    with_abs(new, |n| fs_init::api().rename(None, &ob[..on], n))
+}
+
+/// Mount `fstype` from `source` on `target`: `fat32` and `vibefs` from a
+/// block device (`ram0`, `vda`), `ramfs` from nothing.
+pub fn mount(source: &[u8], target: &[u8], fstype: &[u8], ro: bool) -> Result<(), FsError> {
+    let src = core::str::from_utf8(source).map_err(|_| FsError::Inval)?;
+    let (buf, n) = join_cwd(target)?;
+    let at = core::str::from_utf8(&buf[..n]).map_err(|_| FsError::Inval)?;
+    match fstype {
+        b"fat32" => fat_init::mount_dev(src, at, ro).map(|_| ()),
+        b"vibefs" => vibefs_init::mount_dev(src, at, ro).map(|_| ()),
+        b"ramfs" => fs_init::api()
+            .mount_fs(None, at.as_bytes(), &fs_init::RAMFS, None, ro)
+            .map(|_| ()),
+        _ => Err(FsError::Inval),
+    }
+}
+
+/// Unmount the mount whose root `target` names; its superblock's last
+/// mount releases the volume.
+pub fn umount(target: &[u8]) -> Result<(), FsError> {
+    with_abs(target, |p| fs_init::api().umount(None, p))
+}
+
+// ---- added ----
+
+/// A new count on open file `id`, for one syscall.
+pub fn fget(id: FileId) -> Result<FileRef, FsError> {
+    fs_init::api().fget(id)
+}
+
+/// Extra process fd pointing at the same kernel file.
+pub fn addref(id: FileId) -> Result<(), FsError> {
+    fs_init::api().addref(id)
+}
+
+/// Write back an open file's offset, the one field `read`, `write` and
+/// `seek` change: `refs` and `used` are never written from a snapshot,
+/// and a slot freed and reused meanwhile fails with `Badf`.
+#[allow(dead_code)]
+pub fn put_file(f: &FileRef, offset: u64) -> Result<(), FsError> {
+    seek(f, SeekFrom::Start(offset)).map(|_| ())
+}
+
+pub fn stat_path(path: &[u8]) -> Result<Stat, FsError> {
+    with_abs(path, |p| fs_init::api().stat_path(None, p, true))
+}
+
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+pub fn symlink_path(path: &[u8], target: &[u8]) -> Result<(), FsError> {
+    with_abs(path, |p| fs_init::api().symlink(None, p, target))
+}
+
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+pub fn link_path(old: &[u8], new: &[u8]) -> Result<(), FsError> {
+    let (ob, on) = join_cwd(old)?;
+    with_abs(new, |n| fs_init::api().link(None, &ob[..on], n))
+}
+
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+pub fn truncate_path(path: &[u8], size: u64) -> Result<(), FsError> {
+    with_abs(path, |p| fs_init::api().truncate(None, p, size))
+}
+
+/// Write every mounted filesystem's dirty state to its device.
+pub fn sync_fs() -> Result<(), FsError> {
+    fs_init::api().sync()
+}
+
+/// Make `path` and every missing parent.
+pub fn mkdir_p(path: &[u8]) -> Result<(), FsError> {
+    let (buf, len) = join_cwd(path)?;
+    let pb = &buf[..len];
+    let mut i = 0usize;
+    while i < pb.len() && pb[i] == b'/' {
+        i += 1;
+    }
+    while i < pb.len() {
+        let mut j = i;
+        while j < pb.len() && pb[j] != b'/' {
+            j += 1;
+        }
+        let slice = &pb[..j];
+        if slice.len() > 1 {
+            match stat_path(slice) {
+                Ok(s) if s.kind == InodeKind::Dir => {}
+                Ok(_) => return Err(FsError::NotDir),
+                Err(FsError::NotFound) => mkdir(slice, 0o755)?,
+                Err(e) => return Err(e),
+            }
+        }
+        while j < pb.len() && pb[j] == b'/' {
+            j += 1;
+        }
+        i = j;
+    }
+    Ok(())
+}
+
+/// Create regular file `path`, or empty it.
+#[allow(dead_code)]
+pub fn creat(path: &[u8]) -> Result<(), FsError> {
+    let f = open(
+        path,
+        OpenFlags::from_bits(O_WRONLY | O_CREAT | O_TRUNC),
+        0o644,
+    )?;
+    close(f)
+}
+
+// ---- path syscalls, until ROADMAP §10.4 routes them through `Vfs` ----
+
+/// The volume a routed path is on, the rest of the path within it, and
+/// the backend's walk.
+struct Routed<'a> {
+    vol: u8,
+    rest: &'a [u8],
+    walk_iget: fn(u8, &[u8]) -> Result<InodeRef, FsError>,
+}
+
+/// The volume serving absolute path `pb`: the longest mount prefix of
+/// the FAT and vibefs route tables, the initrd by default.
+fn route(pb: &[u8]) -> Routed<'_> {
     let (vv, vs) = vibefs_init::route(pb);
     let (fv, fs) = fat_init::route(pb);
     if vs > fs {
-        let rest = vibefs_init::routed_rest(pb, vs);
-        Ok(Walked::from_vibe(vv, vibefs_init::walk(vv, rest)?))
+        Routed {
+            vol: vv,
+            rest: vibefs_init::routed_rest(pb, vs),
+            walk_iget: vibefs_init::walk_iget,
+        }
     } else {
-        let rest = fat_init::routed_rest(pb, fs);
-        Ok(Walked::from_fat(fv, fat_init::walk(fv, rest)?))
+        Routed {
+            vol: fv,
+            rest: fat_init::routed_rest(pb, fs),
+            walk_iget: fat_init::walk_iget,
+        }
     }
 }
 
-fn vol_parent(path: &str) -> Result<(Walked, [u8; MAX_NAME], u8), FsError> {
-    let abs = join_cwd(path)?;
-    let pb = path_used(&abs);
-    let (vv, vs) = vibefs_init::route(pb);
-    let (fv, fs) = fat_init::route(pb);
-    let (back, vol, strip) = if vs > fs {
-        (Back::Vibe, vv, vs)
-    } else {
-        (Back::Fat, fv, fs)
-    };
-    let rest = if back == Back::Vibe {
-        vibefs_init::routed_rest(pb, strip)
-    } else {
-        fat_init::routed_rest(pb, strip)
-    };
-    let (parent, name) = split_basename(rest)?;
+/// A counted reference to the `Vfs` inode absolute path `pb` names,
+/// walked by its backend.
+fn walk_abs(pb: &[u8]) -> Result<InodeRef, FsError> {
+    let r = route(pb);
+    (r.walk_iget)(r.vol, r.rest)
+}
+
+/// A counted reference to the directory absolute path `pb` is in, and
+/// its last component.
+fn vol_parent(pb: &[u8]) -> Result<(InodeRef, &[u8]), FsError> {
+    let r = route(pb);
+    let (parent, name) = split_basename(r.rest)?;
     if name.len() > MAX_NAME {
         return Err(FsError::NameTooLong);
     }
-    let pth = if parent.is_empty() { b"/" } else { parent };
-    let dir = if back == Back::Vibe {
-        Walked::from_vibe(vol, vibefs_init::walk(vol, pth)?)
-    } else {
-        Walked::from_fat(vol, fat_init::walk(vol, pth)?)
-    };
-    if dir.kind != InodeKind::Dir {
-        return Err(FsError::NotDir);
-    }
-    let mut nb = [0u8; MAX_NAME];
-    nb[..name.len()].copy_from_slice(name);
-    Ok((dir, nb, name.len() as u8))
+    let pth: &[u8] = if parent.is_empty() { b"/" } else { parent };
+    let dir = (r.walk_iget)(r.vol, pth)?;
+    Ok((dir, name))
 }
 
-fn alloc_fid(f: OpenFile) -> Result<u16, FsError> {
-    let mut g = FILES.lock();
-    let mut i = 0usize;
-    while i < MAX_OPEN {
-        if !g[i].used {
-            g[i] = f;
-            g[i].used = true;
-            if g[i].refs == 0 {
-                g[i].refs = 1;
+/// Open `path` as the path syscalls do until ROADMAP §10.4: FAT and
+/// vibefs only, walked through the route tables, then opened as the
+/// `Vfs` file on the inode found.
+pub fn open_routed(path: &[u8], flags: OpenFlags, mode: u32) -> Result<FileRef, FsError> {
+    #[cfg(feature = "kernel_tests")]
+    testing::routed_open();
+    let (buf, n) = join_cwd(path)?;
+    let pb = &buf[..n];
+    let api = fs_init::api();
+    let excl = flags.bits() & O_EXCL != 0;
+    if flags.bits() & O_CREAT != 0 {
+        match walk_abs(pb) {
+            Ok(r) => {
+                api.put(r);
+                if excl {
+                    return Err(FsError::Exists);
+                }
             }
-            return Ok(i as u16);
+            Err(FsError::NotFound) => {
+                let (dir, name) = vol_parent(pb)?;
+                let perm = (mode & 0o7777) as u16;
+                let r = api.create_in(&dir, name, InodeKind::Reg, perm | S_IFREG);
+                api.put(dir);
+                match r {
+                    Ok(()) => {}
+                    // Created since the walk: without O_EXCL, open it.
+                    Err(FsError::Exists) if !excl => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Err(e) => return Err(e),
         }
-        i += 1;
     }
-    Err(FsError::NoSpace)
+    api.open_inode(walk_abs(pb)?, flags)
 }
 
-fn get_file(fid: u16) -> Result<OpenFile, FsError> {
-    let g = FILES.lock();
-    let i = fid as usize;
-    if i >= MAX_OPEN || !g[i].used {
-        return Err(FsError::Badf);
+/// Hooks for the in-guest tests (AGENTS.md rule 9): atomics only, and no
+/// wait here is longer than 10,000 `yield_now` calls.
+#[cfg(feature = "kernel_tests")]
+pub mod testing {
+    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+    use vibeos::limits::MAX_OPEN_FILES;
+
+    use crate::fs_init;
+    use crate::thread_init;
+
+    static WRITE_YIELD: AtomicBool = AtomicBool::new(false);
+    static HOLD: AtomicBool = AtomicBool::new(false);
+    static HELD: AtomicBool = AtomicBool::new(false);
+    static RELEASE: AtomicBool = AtomicBool::new(false);
+    static OPEN_RACE: AtomicBool = AtomicBool::new(false);
+    static ROUTED: AtomicU32 = AtomicU32::new(0);
+
+    /// The most `yield_now` calls any wait here makes.
+    const MAX_YIELDS: u32 = 10_000;
+
+    /// Each [`super::write`] yields once between its backend I/O and its
+    /// write-back to the open-file table.
+    pub fn set_write_yield(on: bool) {
+        WRITE_YIELD.store(on, Ordering::Release);
     }
-    Ok(g[i])
+
+    /// The next [`super::write`] waits between its backend I/O and its
+    /// write-back until [`release_write`].
+    pub fn hold_next_write() {
+        RELEASE.store(false, Ordering::Release);
+        HELD.store(false, Ordering::Release);
+        HOLD.store(true, Ordering::Release);
+    }
+
+    /// Whether the held write has reached its wait.
+    pub fn write_held() -> bool {
+        HELD.load(Ordering::Acquire)
+    }
+
+    /// Let the held write go on.
+    pub fn release_write() {
+        RELEASE.store(true, Ordering::Release);
+    }
+
+    /// [`super::open`] with `O_CREAT` creates the file itself between its
+    /// walk and its create, as another opener would.
+    pub fn set_open_race(on: bool) {
+        OPEN_RACE.store(on, Ordering::Release);
+    }
+
+    /// The `Vfs` File API's `open_race` hook.
+    pub fn open_race() -> bool {
+        OPEN_RACE.load(Ordering::Acquire)
+    }
+
+    /// The `Vfs` File API's `write_window` hook, with the VFS lock
+    /// dropped.
+    pub fn write_window() {
+        if HOLD.swap(false, Ordering::AcqRel) {
+            HELD.store(true, Ordering::Release);
+            let mut n = 0u32;
+            while !RELEASE.load(Ordering::Acquire) && n < MAX_YIELDS {
+                thread_init::yield_now();
+                n += 1;
+            }
+            HELD.store(false, Ordering::Release);
+        }
+        if WRITE_YIELD.load(Ordering::Acquire) {
+            thread_init::yield_now();
+        }
+    }
+
+    pub(super) fn routed_open() {
+        ROUTED.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// `(Vfs::open` opens, routed opens) so far.
+    pub fn open_counts() -> (u32, u32) {
+        let v = fs_init::with(|v| v.stats.opens);
+        (v, ROUTED.load(Ordering::Acquire))
+    }
+
+    /// Each open-file slot's `(used, refs, gen)`.
+    pub fn table() -> [(bool, u16, u16); MAX_OPEN_FILES] {
+        fs_init::with(|v| v.file_table())
+    }
 }
 
-fn put_file(fid: u16, f: OpenFile) -> Result<(), FsError> {
-    let mut g = FILES.lock();
-    let i = fid as usize;
-    if i >= MAX_OPEN || !g[i].used {
-        return Err(FsError::Badf);
-    }
-    g[i] = f;
-    g[i].used = true;
-    Ok(())
-}
+// ---- shell ----
 
 fn err_line(op: &str, e: FsError) {
     let _ = writeln!(Console, "vibeOS: {op}: {}", e.as_str());
@@ -444,422 +531,64 @@ pub fn init() {
     let _ = MAX_COMMANDS;
 }
 
-pub fn open(path: &str, flags: u32, _mode: u16) -> Result<u16, FsError> {
-    if flags & O_CREAT != 0 {
-        match vol_walk(path) {
-            Ok(_) => {
-                if flags & O_EXCL != 0 {
-                    return Err(FsError::Exists);
-                }
-            }
-            Err(FsError::NotFound) => {
-                let (dir, name, nlen) = vol_parent(path)?;
-                match dir.back {
-                    Back::Fat => {
-                        fat_init::create(dir.vol, dir.clu, &name[..nlen as usize], false)?;
-                    }
-                    Back::Vibe => {
-                        vibefs_init::create(
-                            dir.vol,
-                            dir.ino,
-                            &name[..nlen as usize],
-                            InodeKind::Reg,
-                            0o644,
-                            None,
-                        )?;
-                    }
-                }
-            }
-            Err(e) => return Err(e),
+/// Report each entry of directory `path` but `.` and `..` to `cb`, with
+/// the VFS lock dropped.
+fn list_dir(path: &[u8], cb: &mut dyn FnMut(&DirEntry)) -> Result<(), FsError> {
+    let f = open(path, OpenFlags::from_bits(O_RDONLY | O_DIRECTORY), 0)?;
+    let r = readdir(&f, &mut |d| {
+        let n = d.name.as_bytes();
+        if n != b"." && n != b".." {
+            cb(d);
         }
-    }
-    let mut node = vol_walk(path)?;
-    if node.kind == InodeKind::Dir {
-        let acc = flags & O_ACCMODE;
-        if acc == O_WRONLY || acc == O_RDWR || flags & O_TRUNC != 0 {
-            return Err(FsError::IsDir);
+        true
+    });
+    let c = close(f);
+    r.and(c)
+}
+
+/// `path/name` into `out`; its length.
+fn child_path(path: &[u8], name: &[u8], out: &mut [u8; MAX_PATH]) -> Result<usize, FsError> {
+    let (buf, mut n) = join_cwd(path)?;
+    out[..n].copy_from_slice(&buf[..n]);
+    if n == 0 || out[n - 1] != b'/' {
+        if n >= MAX_PATH {
+            return Err(FsError::NameTooLong);
         }
-    } else if flags & O_DIRECTORY != 0 {
-        return Err(FsError::NotDir);
+        out[n] = b'/';
+        n += 1;
     }
-    if flags & O_TRUNC != 0 && node.kind == InodeKind::Reg {
-        match node.back {
-            Back::Fat => {
-                let mut clu = node.clu;
-                let mut size = node.size;
-                fat_init::truncate(
-                    node.vol,
-                    node.dir_clu,
-                    node.dir_off,
-                    node.ino,
-                    &mut clu,
-                    &mut size,
-                    0,
-                )?;
-                node.clu = clu;
-                node.size = size;
-            }
-            Back::Vibe => {
-                vibefs_init::truncate(node.vol, node.ino, 0)?;
-                node.size = 0;
-            }
+    let end = n.checked_add(name.len()).ok_or(FsError::NameTooLong)?;
+    if end > MAX_PATH {
+        return Err(FsError::NameTooLong);
+    }
+    out[n..end].copy_from_slice(name);
+    Ok(end)
+}
+
+fn rm_r(path: &[u8]) -> Result<(), FsError> {
+    let st = stat_path(path)?;
+    if st.kind != InodeKind::Dir {
+        return unlink(path);
+    }
+    let mut kids: [[u8; MAX_NAME]; 16] = [[0; MAX_NAME]; 16];
+    let mut klens = [0u8; 16];
+    let mut nk = 0usize;
+    list_dir(path, &mut |d| {
+        let n = d.name.as_bytes();
+        if nk < 16 {
+            kids[nk][..n.len()].copy_from_slice(n);
+            klens[nk] = n.len() as u8;
+            nk += 1;
         }
-    }
-    alloc_fid(OpenFile {
-        used: true,
-        refs: 1,
-        back: node.back,
-        vol: node.vol,
-        flags,
-        offset: 0,
-        ino: node.ino,
-        kind: node.kind,
-        clu: node.clu,
-        size: node.size,
-        dir_clu: node.dir_clu,
-        dir_off: node.dir_off,
-    })
-}
-
-pub fn close(fid: u16) -> Result<(), FsError> {
-    let mut g = FILES.lock();
-    let i = fid as usize;
-    if i >= MAX_OPEN || !g[i].used {
-        return Err(FsError::Badf);
-    }
-    if g[i].refs > 1 {
-        g[i].refs -= 1;
-        return Ok(());
-    }
-    g[i] = OpenFile::EMPTY;
-    Ok(())
-}
-
-/// Extra process fd pointing at the same kernel file.
-pub fn addref(fid: u16) -> Result<(), FsError> {
-    let mut g = FILES.lock();
-    let i = fid as usize;
-    if i >= MAX_OPEN || !g[i].used {
-        return Err(FsError::Badf);
-    }
-    g[i].refs = g[i].refs.saturating_add(1);
-    Ok(())
-}
-
-pub fn read(fid: u16, buf: &mut [u8]) -> Result<usize, FsError> {
-    let mut f = get_file(fid)?;
-    if f.flags & O_ACCMODE == O_WRONLY {
-        return Err(FsError::Inval);
-    }
-    if f.kind == InodeKind::Dir {
-        return Err(FsError::IsDir);
-    }
-    let n = match f.back {
-        Back::Fat => fat_init::read(f.vol, f.clu, f.size, f.offset, buf)?,
-        Back::Vibe => vibefs_init::read(f.vol, f.ino, f.offset, buf)?,
-    };
-    f.offset = f.offset.saturating_add(n as u64);
-    put_file(fid, f)?;
-    Ok(n)
-}
-
-pub fn write(fid: u16, buf: &[u8]) -> Result<usize, FsError> {
-    let mut f = get_file(fid)?;
-    if f.flags & O_ACCMODE == O_RDONLY {
-        return Err(FsError::Inval);
-    }
-    if f.kind == InodeKind::Dir {
-        return Err(FsError::IsDir);
-    }
-    if f.flags & O_APPEND != 0 {
-        f.offset = f.size as u64;
-    }
-    let n = match f.back {
-        Back::Fat => fat_init::write(
-            f.vol,
-            f.dir_clu,
-            f.dir_off,
-            f.ino,
-            &mut f.clu,
-            &mut f.size,
-            f.offset,
-            buf,
-        )?,
-        Back::Vibe => {
-            let n = vibefs_init::write(f.vol, f.ino, f.offset, buf)?;
-            f.size = f.size.max((f.offset as u32).saturating_add(n as u32));
-            n
-        }
-    };
-    f.offset = f.offset.saturating_add(n as u64);
-    put_file(fid, f)?;
-    Ok(n)
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn seek(fid: u16, off: i64, whence: u32) -> Result<u64, FsError> {
-    let mut f = get_file(fid)?;
-    let base = match whence {
-        SEEK_SET => 0i64,
-        SEEK_CUR => f.offset as i64,
-        SEEK_END => f.size as i64,
-        _ => return Err(FsError::Inval),
-    };
-    let n = base.saturating_add(off);
-    if n < 0 {
-        return Err(FsError::Inval);
-    }
-    f.offset = n as u64;
-    put_file(fid, f)?;
-    Ok(n as u64)
-}
-
-pub fn stat_path(path: &str) -> Result<Stat, FsError> {
-    let node = vol_walk(path)?;
-    Ok(Stat {
-        ino: node.ino,
-        kind: node.kind,
-        mode: node.mode,
-        nlink: node.nlink,
-        size: node.size as u64,
-        atime: node.mtime,
-        mtime: node.mtime,
-        ctime: node.mtime,
-    })
-}
-
-pub fn mkdir_one(path: &str) -> Result<(), FsError> {
-    let (dir, name, nlen) = vol_parent(path)?;
-    match dir.back {
-        Back::Fat => match fat_init::create(dir.vol, dir.clu, &name[..nlen as usize], true) {
-            Ok(_) | Err(FsError::Exists) => Ok(()),
-            Err(e) => Err(e),
-        },
-        Back::Vibe => {
-            match vibefs_init::create(
-                dir.vol,
-                dir.ino,
-                &name[..nlen as usize],
-                InodeKind::Dir,
-                0o755,
-                None,
-            ) {
-                Ok(_) | Err(FsError::Exists) => Ok(()),
-                Err(e) => Err(e),
-            }
-        }
-    }
-}
-
-pub fn mkdir_p(path: &str) -> Result<(), FsError> {
-    let abs = join_cwd(path)?;
-    let pb = path_used(&abs);
+    })?;
     let mut i = 0usize;
-    while i < pb.len() && pb[i] == b'/' {
+    while i < nk {
+        let mut child = [0u8; MAX_PATH];
+        let n = child_path(path, &kids[i][..klens[i] as usize], &mut child)?;
+        rm_r(&child[..n])?;
         i += 1;
     }
-    while i < pb.len() {
-        let mut j = i;
-        while j < pb.len() && pb[j] != b'/' {
-            j += 1;
-        }
-        let slice = &pb[..j];
-        if slice.len() > 1 {
-            let s = core::str::from_utf8(slice).map_err(|_| FsError::Inval)?;
-            match vol_walk(s) {
-                Ok(n) if n.kind == InodeKind::Dir => {}
-                Ok(_) => return Err(FsError::NotDir),
-                Err(FsError::NotFound) => mkdir_one(s)?,
-                Err(e) => return Err(e),
-            }
-        }
-        while j < pb.len() && pb[j] == b'/' {
-            j += 1;
-        }
-        i = j;
-    }
-    Ok(())
-}
-
-pub fn vfs_attach(path: &str) -> Result<PathRef, FsError> {
-    let node = vol_walk(path)?;
-    let abs = join_cwd(path)?;
-    let pb = path_used(&abs);
-    let (parent, name) = split_basename(pb)?;
-    fs_init::with(|v| {
-        let pdir = if parent.is_empty() || parent == b"/" {
-            v.root()?
-        } else {
-            let s = core::str::from_utf8(parent).map_err(|_| FsError::Inval)?;
-            v.resolve(None, s, true)?
-        };
-        let islot = v.fat_iget(
-            v.sb_of_path(pdir)?,
-            node.ino,
-            node.kind,
-            node.size as u64,
-            node.clu,
-        )?;
-        match v.fat_dcache(pdir, name, islot) {
-            Ok(p) => Ok(p),
-            Err(e) => {
-                v.release_inode(islot);
-                Err(e)
-            }
-        }
-    })
-}
-
-pub fn unlink_path(path: &str, rmdir: bool) -> Result<(), FsError> {
-    let (dir, name, nlen) = vol_parent(path)?;
-    match dir.back {
-        Back::Fat => fat_init::unlink(dir.vol, dir.clu, &name[..nlen as usize], rmdir)?,
-        Back::Vibe => vibefs_init::unlink(dir.vol, dir.ino, &name[..nlen as usize], rmdir)?,
-    }
-    if let Ok(pref) = fs_init::with(|v| v.resolve(None, "/", true)) {
-        fs_init::with(|v| v.drop_name(pref, &name[..nlen as usize]));
-    }
-    Ok(())
-}
-
-fn rm_r(path: &str) -> Result<(), FsError> {
-    let node = vol_walk(path)?;
-    if node.kind == InodeKind::Dir {
-        let mut cookie = 0u64;
-        let mut kids: [[u8; MAX_NAME]; 16] = [[0; MAX_NAME]; 16];
-        let mut klens = [0u8; 16];
-        let mut nk = 0usize;
-        loop {
-            let next = match node.back {
-                Back::Fat => {
-                    let mut n = Node::EMPTY;
-                    let r = fat_init::readdir(node.vol, node.clu, cookie, &mut n)?;
-                    if r.is_some() && n.name() != b"." && n.name() != b".." && nk < 16 {
-                        let l = n.name_len as usize;
-                        kids[nk][..l].copy_from_slice(n.name());
-                        klens[nk] = n.name_len;
-                        nk += 1;
-                    }
-                    r
-                }
-                Back::Vibe => {
-                    let mut n = vibeos::vibefs::Node::EMPTY;
-                    let r = vibefs_init::readdir(node.vol, node.ino, cookie, &mut n)?;
-                    if r.is_some() && n.name() != b"." && n.name() != b".." && nk < 16 {
-                        let l = n.name_len as usize;
-                        kids[nk][..l].copy_from_slice(n.name());
-                        klens[nk] = n.name_len;
-                        nk += 1;
-                    }
-                    r
-                }
-            };
-            match next {
-                None => break,
-                Some(nx) => cookie = nx,
-            }
-        }
-        let abs = join_cwd(path)?;
-        let mut i = 0usize;
-        while i < nk {
-            let mut child = [0u8; MAX_PATH];
-            let pb = path_used(&abs);
-            let mut n = pb.len();
-            child[..n].copy_from_slice(pb);
-            if n == 0 || child[n - 1] != b'/' {
-                child[n] = b'/';
-                n += 1;
-            }
-            let ln = klens[i] as usize;
-            child[n..n + ln].copy_from_slice(&kids[i][..ln]);
-            let s = core::str::from_utf8(&child[..n + ln]).map_err(|_| FsError::Inval)?;
-            rm_r(s)?;
-            i += 1;
-        }
-        unlink_path(path, true)
-    } else {
-        unlink_path(path, false)
-    }
-}
-
-pub fn rename_path(old: &str, new: &str) -> Result<(), FsError> {
-    let (sd, sn, sl) = vol_parent(old)?;
-    let (dd, dn, dl) = vol_parent(new)?;
-    if sd.vol != dd.vol || sd.back != dd.back {
-        return Err(FsError::Inval);
-    }
-    match sd.back {
-        Back::Fat => fat_init::rename(
-            sd.vol,
-            sd.clu,
-            &sn[..sl as usize],
-            dd.clu,
-            &dn[..dl as usize],
-        ),
-        Back::Vibe => vibefs_init::rename(
-            sd.vol,
-            sd.ino,
-            &sn[..sl as usize],
-            dd.ino,
-            &dn[..dl as usize],
-        ),
-    }
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn symlink_path(path: &str, target: &str) -> Result<(), FsError> {
-    let (dir, name, nlen) = vol_parent(path)?;
-    match dir.back {
-        Back::Fat => Err(FsError::NotSupp),
-        Back::Vibe => {
-            vibefs_init::create(
-                dir.vol,
-                dir.ino,
-                &name[..nlen as usize],
-                InodeKind::Lnk,
-                S_IFLNK_MODE,
-                Some(target.as_bytes()),
-            )?;
-            Ok(())
-        }
-    }
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn link_path(_old: &str, _new: &str) -> Result<(), FsError> {
-    Err(FsError::NotSupp)
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn truncate_path(path: &str, size: u64) -> Result<(), FsError> {
-    let node = vol_walk(path)?;
-    if node.kind != InodeKind::Reg {
-        return Err(FsError::IsDir);
-    }
-    match node.back {
-        Back::Fat => {
-            if size > u32::MAX as u64 {
-                return Err(FsError::Inval);
-            }
-            let mut clu = node.clu;
-            let mut sz = node.size;
-            fat_init::truncate(
-                node.vol,
-                node.dir_clu,
-                node.dir_off,
-                node.ino,
-                &mut clu,
-                &mut sz,
-                size as u32,
-            )
-        }
-        Back::Vibe => vibefs_init::truncate(node.vol, node.ino, size),
-    }
-}
-
-pub fn sync_fs() -> Result<(), FsError> {
-    fat_init::sync_all()?;
-    vibefs_init::sync_all()
+    rmdir(path)
 }
 
 #[cfg_attr(
@@ -867,100 +596,23 @@ pub fn sync_fs() -> Result<(), FsError> {
     allow(dead_code)
 )]
 fn names_in(
-    dir: Walked,
-    prefix: &[u8],
-    out: &mut [[u8; MAX_NAME]; 16],
-    lens: &mut [u8; 16],
-) -> usize {
-    let mut n = 0usize;
-    let mut cookie = 0u64;
-    loop {
-        let nm_ok: Option<(usize, [u8; MAX_NAME], u8)> = match dir.back {
-            Back::Fat => {
-                let mut node = Node::EMPTY;
-                match fat_init::readdir(dir.vol, dir.clu, cookie, &mut node) {
-                    Ok(Some(next)) => {
-                        cookie = next;
-                        let nm = node.name();
-                        if nm == b"." || nm == b".." {
-                            None
-                        } else if nm.len() >= prefix.len()
-                            && nm[..prefix.len()].eq_ignore_ascii_case(prefix)
-                        {
-                            let mut buf = [0u8; MAX_NAME];
-                            let l = nm.len().min(MAX_NAME);
-                            buf[..l].copy_from_slice(&nm[..l]);
-                            Some((1, buf, l as u8))
-                        } else {
-                            None
-                        }
-                    }
-                    _ => break,
-                }
-            }
-            Back::Vibe => {
-                let mut node = vibeos::vibefs::Node::EMPTY;
-                match vibefs_init::readdir(dir.vol, dir.ino, cookie, &mut node) {
-                    Ok(Some(next)) => {
-                        cookie = next;
-                        let nm = node.name();
-                        if nm == b"." || nm == b".." {
-                            None
-                        } else if nm.len() >= prefix.len()
-                            && nm[..prefix.len()].eq_ignore_ascii_case(prefix)
-                        {
-                            let mut buf = [0u8; MAX_NAME];
-                            let l = nm.len().min(MAX_NAME);
-                            buf[..l].copy_from_slice(&nm[..l]);
-                            Some((1, buf, l as u8))
-                        } else {
-                            None
-                        }
-                    }
-                    _ => break,
-                }
-            }
-        };
-        if let Some((_, buf, l)) = nm_ok
-            && n < 16
-        {
-            out[n] = buf;
-            lens[n] = l;
-            n += 1;
-        }
-    }
-    n
-}
-
-#[cfg_attr(
-    not(all(not(feature = "kernel_tests"), feature = "kernel_shell")),
-    allow(dead_code)
-)]
-fn vfs_complete_names(
     dirp: &[u8],
     prefix: &[u8],
     out: &mut [[u8; MAX_NAME]; 16],
     lens: &mut [u8; 16],
-) -> Option<usize> {
-    let path = if dirp.is_empty() {
-        "."
-    } else {
-        core::str::from_utf8(dirp).ok()?
-    };
-    let (_, _, ents, n) = vfs_ls_snap(path).ok()??;
-    let mut k = 0usize;
-    let mut i = 0usize;
-    while i < n {
-        let nm = &ents[i].name[..ents[i].nlen as usize];
-        if nm.len() >= prefix.len() && nm[..prefix.len()].eq_ignore_ascii_case(prefix) && k < 16 {
+) -> usize {
+    let path: &[u8] = if dirp.is_empty() { b"." } else { dirp };
+    let mut n = 0usize;
+    let _ = list_dir(path, &mut |d| {
+        let nm = d.name.as_bytes();
+        if nm.len() >= prefix.len() && nm[..prefix.len()].eq_ignore_ascii_case(prefix) && n < 16 {
             let l = nm.len().min(MAX_NAME);
-            out[k][..l].copy_from_slice(&nm[..l]);
-            lens[k] = l as u8;
-            k += 1;
+            out[n][..l].copy_from_slice(&nm[..l]);
+            lens[n] = l as u8;
+            n += 1;
         }
-        i += 1;
-    }
-    Some(k)
+    });
+    n
 }
 
 /// Tab: complete the word at the cursor against the current directory
@@ -998,39 +650,7 @@ pub fn complete_line(ed: &mut LineEditor) {
     };
     let mut names = [[0u8; MAX_NAME]; 16];
     let mut lens = [0u8; 16];
-    let n = match vfs_complete_names(dirp, pref, &mut names, &mut lens) {
-        Some(n) => n,
-        None => {
-            let dir_node = if dirp.is_empty() {
-                let (b, n) = cwd_copy();
-                walk_abs(&b[..n])
-            } else if dirp.first() == Some(&b'/') {
-                let mut t = [0u8; MAX_PATH];
-                let n = dirp.len().min(MAX_PATH);
-                t[..n].copy_from_slice(&dirp[..n]);
-                walk_abs(&t[..n])
-            } else {
-                let mut t = [0u8; MAX_PATH];
-                let (cwd, n0) = cwd_copy();
-                let mut n = n0;
-                t[..n].copy_from_slice(&cwd[..n]);
-                if n > 0 && t[n - 1] != b'/' {
-                    t[n] = b'/';
-                    n += 1;
-                }
-                let add = dirp.len().min(MAX_PATH.saturating_sub(n));
-                t[n..n + add].copy_from_slice(&dirp[..add]);
-                walk_abs(&t[..n + add])
-            };
-            let Ok(dir) = dir_node else {
-                return;
-            };
-            if dir.kind != InodeKind::Dir {
-                return;
-            }
-            names_in(dir, pref, &mut names, &mut lens)
-        }
-    };
+    let n = names_in(dirp, pref, &mut names, &mut lens);
     if n == 0 {
         return;
     }
@@ -1158,115 +778,36 @@ fn cmd_ls(args: &[&str]) {
         }
         i += 1;
     }
-    match vfs_ls_snap(path) {
-        Ok(Some((kind, size, ents, n))) => {
-            if kind != InodeKind::Dir {
-                if long {
-                    let _ = writeln!(Console, "{} {} {}", kind.as_str(), size, path);
-                } else {
-                    let _ = writeln!(Console, "{path}");
-                }
-                return;
-            }
-            let mut i = 0usize;
-            while i < n {
-                if long {
-                    let k = ents[i].kind.as_str();
-                    let _ = write!(Console, "{k} {:>8} ", ents[i].size);
-                    console_init_write_name(&ents[i].name[..ents[i].nlen as usize]);
-                    console_init_write(b"\n");
-                } else {
-                    console_init_write_name(&ents[i].name[..ents[i].nlen as usize]);
-                    console_init_write(b"\n");
-                }
-                i += 1;
-            }
-            return;
-        }
-        Ok(None) => {}
-        Err(e) => {
-            err_line("ls", e);
-            return;
-        }
-    }
-    let node = match vol_walk(path) {
-        Ok(n) => n,
+    let st = match stat_path(path.as_bytes()) {
+        Ok(s) => s,
         Err(e) => {
             err_line("ls", e);
             return;
         }
     };
-    if node.kind != InodeKind::Dir {
+    if st.kind != InodeKind::Dir {
         if long {
-            let _ = writeln!(Console, "{} {} {}", node.kind.as_str(), node.size, path);
+            let _ = writeln!(Console, "{} {} {}", st.kind.as_str(), st.size, path);
         } else {
             let _ = writeln!(Console, "{path}");
         }
         return;
     }
-    let mut cookie = 0u64;
-    loop {
-        match node.back {
-            Back::Fat => {
-                let mut n = Node::EMPTY;
-                match fat_init::readdir(node.vol, node.clu, cookie, &mut n) {
-                    Ok(None) => break,
-                    Ok(Some(next)) => {
-                        cookie = next;
-                        if n.name() == b"." || n.name() == b".." {
-                            continue;
-                        }
-                        if long {
-                            let k = n.kind.as_str();
-                            let _ = write!(Console, "{k} {:>8} ", n.size);
-                            console_init_write_name(n.name());
-                            console_init_write(b"\n");
-                        } else {
-                            console_init_write_name(n.name());
-                            console_init_write(b"\n");
-                        }
-                    }
-                    Err(e) => {
-                        err_line("ls", e);
-                        return;
-                    }
-                }
-            }
-            Back::Vibe => {
-                let mut n = vibeos::vibefs::Node::EMPTY;
-                match vibefs_init::readdir(node.vol, node.ino, cookie, &mut n) {
-                    Ok(None) => break,
-                    Ok(Some(next)) => {
-                        cookie = next;
-                        if n.name() == b"." || n.name() == b".." {
-                            continue;
-                        }
-                        if long {
-                            let k = n.kind.as_str();
-                            let _ = write!(Console, "{k} {:>8} ", n.size);
-                            console_init_write_name(n.name());
-                            console_init_write(b"\n");
-                        } else {
-                            console_init_write_name(n.name());
-                            console_init_write(b"\n");
-                        }
-                    }
-                    Err(e) => {
-                        err_line("ls", e);
-                        return;
-                    }
-                }
-            }
+    let r = list_dir(path.as_bytes(), &mut |d| {
+        let name = d.name.as_bytes();
+        if long {
+            let mut child = [0u8; MAX_PATH];
+            let size = child_path(path.as_bytes(), name, &mut child)
+                .and_then(|n| stat_path(&child[..n]))
+                .map_or(0, |s| s.size);
+            let _ = write!(Console, "{} {:>8} ", d.kind.as_str(), size);
         }
+        crate::console_init::write(name);
+        crate::console_init::write(b"\n");
+    });
+    if let Err(e) = r {
+        err_line("ls", e);
     }
-}
-
-fn console_init_write(b: &[u8]) {
-    crate::console_init::write(b);
-}
-
-fn console_init_write_name(n: &[u8]) {
-    crate::console_init::write(n);
 }
 
 fn cmd_cat(args: &[&str]) {
@@ -1276,11 +817,11 @@ fn cmd_cat(args: &[&str]) {
     }
     let mut i = 1usize;
     while i < args.len() {
-        match open(args[i], O_RDONLY, 0) {
-            Ok(fid) => {
+        match open(args[i].as_bytes(), OpenFlags::from_bits(O_RDONLY), 0) {
+            Ok(f) => {
                 let mut buf = [0u8; 512];
                 loop {
-                    match read(fid, &mut buf) {
+                    match read(&f, &mut buf) {
                         Ok(0) => break,
                         Ok(n) => crate::console_init::write(&buf[..n]),
                         Err(e) => {
@@ -1289,7 +830,7 @@ fn cmd_cat(args: &[&str]) {
                         }
                     }
                 }
-                let _ = close(fid);
+                let _ = close(f);
             }
             Err(e) => err_line("cat", e),
         }
@@ -1302,34 +843,37 @@ fn cmd_cp(args: &[&str]) {
         err_line("cp", FsError::Inval);
         return;
     }
-    match open(args[1], O_RDONLY, 0) {
-        Ok(src) => {
-            match open(args[2], O_WRONLY | O_CREAT | O_TRUNC, 0o644) {
-                Ok(dst) => {
-                    let mut buf = [0u8; 512];
-                    loop {
-                        match read(src, &mut buf) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                if write(dst, &buf[..n]).is_err() {
-                                    err_line("cp", FsError::Io);
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                err_line("cp", e);
-                                break;
-                            }
+    let src = match open(args[1].as_bytes(), OpenFlags::from_bits(O_RDONLY), 0) {
+        Ok(f) => f,
+        Err(e) => {
+            err_line("cp", e);
+            return;
+        }
+    };
+    let dflags = OpenFlags::from_bits(O_WRONLY | O_CREAT | O_TRUNC);
+    match open(args[2].as_bytes(), dflags, 0o644) {
+        Ok(dst) => {
+            let mut buf = [0u8; 512];
+            loop {
+                match read(&src, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if write(&dst, &buf[..n]).is_err() {
+                            err_line("cp", FsError::Io);
+                            break;
                         }
                     }
-                    let _ = close(dst);
+                    Err(e) => {
+                        err_line("cp", e);
+                        break;
+                    }
                 }
-                Err(e) => err_line("cp", e),
             }
-            let _ = close(src);
+            let _ = close(dst);
         }
         Err(e) => err_line("cp", e),
     }
+    let _ = close(src);
 }
 
 fn cmd_mv(args: &[&str]) {
@@ -1337,7 +881,7 @@ fn cmd_mv(args: &[&str]) {
         err_line("mv", FsError::Inval);
         return;
     }
-    if let Err(e) = rename_path(args[1], args[2]) {
+    if let Err(e) = rename(args[1].as_bytes(), args[2].as_bytes()) {
         err_line("mv", e);
     }
 }
@@ -1352,9 +896,9 @@ fn cmd_rm(args: &[&str]) {
             continue;
         }
         let r = if rec {
-            rm_r(args[i])
+            rm_r(args[i].as_bytes())
         } else {
-            unlink_path(args[i], false)
+            unlink(args[i].as_bytes())
         };
         if let Err(e) = r {
             err_line("rm", e);
@@ -1373,9 +917,9 @@ fn cmd_mkdir(args: &[&str]) {
             continue;
         }
         let r = if p {
-            mkdir_p(args[i])
+            mkdir_p(args[i].as_bytes())
         } else {
-            mkdir_one(args[i])
+            mkdir(args[i].as_bytes(), 0o755)
         };
         if let Err(e) = r {
             err_line("mkdir", e);
@@ -1391,9 +935,13 @@ fn cmd_touch(args: &[&str]) {
     }
     let mut i = 1usize;
     while i < args.len() {
-        match open(args[i], O_WRONLY | O_CREAT, 0o644) {
-            Ok(fid) => {
-                let _ = close(fid);
+        match open(
+            args[i].as_bytes(),
+            OpenFlags::from_bits(O_WRONLY | O_CREAT),
+            0o644,
+        ) {
+            Ok(f) => {
+                let _ = close(f);
             }
             Err(e) => err_line("touch", e),
         }
@@ -1403,7 +951,7 @@ fn cmd_touch(args: &[&str]) {
 
 fn cmd_stat(args: &[&str]) {
     let path = args.get(1).copied().unwrap_or(".");
-    match stat_path(path) {
+    match stat_path(path.as_bytes()) {
         Ok(s) => {
             let _ = writeln!(
                 Console,
@@ -1454,50 +1002,28 @@ fn cmd_mount(args: &[&str]) {
         );
         return;
     }
-    match args[1] {
-        "fat32" => {
-            if args.len() < 4 {
-                err_line("mount", FsError::Inval);
-                return;
-            }
-            let _ = mkdir_p(args[3]);
-            let _ = vfs_attach(args[3]);
-            match fat_init::mount_dev(args[2], args[3]) {
-                Ok(_) => {
-                    let _ = writeln!(Console, "vibeOS: mount: fat32 {} on {}", args[2], args[3]);
-                }
-                Err(e) => err_line("mount", e),
-            }
+    let (source, target) = match args[1] {
+        "fat32" | "vibefs" if args.len() >= 4 => (args[2], args[3]),
+        "ramfs" if args.len() >= 3 => ("none", args[2]),
+        _ => {
+            err_line("mount", FsError::Inval);
+            return;
         }
-        "vibefs" => {
-            if args.len() < 4 {
-                err_line("mount", FsError::Inval);
-                return;
-            }
-            let _ = mkdir_p(args[3]);
-            let _ = vfs_attach(args[3]);
-            match vibefs_init::mount_dev(args[2], args[3]) {
-                Ok(_) => {
-                    let _ = writeln!(Console, "vibeOS: mount: vibefs {} on {}", args[2], args[3]);
-                }
-                Err(e) => err_line("mount", e),
-            }
+    };
+    let _ = mkdir_p(target.as_bytes());
+    match mount(
+        source.as_bytes(),
+        target.as_bytes(),
+        args[1].as_bytes(),
+        false,
+    ) {
+        Ok(()) if args[1] == "ramfs" => {
+            let _ = writeln!(Console, "vibeOS: mount: ramfs on {target}");
         }
-        "ramfs" => {
-            if args.len() < 3 {
-                err_line("mount", FsError::Inval);
-                return;
-            }
-            let _ = mkdir_p(args[2]);
-            let _ = vfs_attach(args[2]);
-            match fs_init::with(|v| v.mount(None, args[2], &fs::RamFs)) {
-                Ok(_) => {
-                    let _ = writeln!(Console, "vibeOS: mount: ramfs on {}", args[2]);
-                }
-                Err(e) => err_line("mount", e),
-            }
+        Ok(()) => {
+            let _ = writeln!(Console, "vibeOS: mount: {} {source} on {target}", args[1]);
         }
-        _ => err_line("mount", FsError::Inval),
+        Err(e) => err_line("mount", e),
     }
 }
 
@@ -1506,10 +1032,7 @@ fn cmd_umount(args: &[&str]) {
         err_line("umount", FsError::Inval);
         return;
     }
-    if fat_init::umount(args[1]).is_ok() {
-        return;
-    }
-    if let Err(e) = vibefs_init::umount(args[1]) {
+    if let Err(e) = umount(args[1].as_bytes()) {
         err_line("umount", e);
     }
 }
@@ -1522,26 +1045,20 @@ fn cmd_sync(_args: &[&str]) {
 
 fn cmd_cd(args: &[&str]) {
     let path = args.get(1).copied().unwrap_or("/");
-    let abs = match join_cwd(path) {
+    let (abs, n) = match join_cwd(path.as_bytes()) {
         Ok(a) => a,
         Err(e) => {
             err_line("cd", e);
             return;
         }
     };
-    match vol_walk(path) {
-        Ok(n) if n.kind == InodeKind::Dir => {
-            let pb = path_used(&abs);
-            let mut norm = [0u8; MAX_PATH];
-            let nlen = if pb.is_empty() {
-                norm[0] = b'/';
-                1
+    match stat_path(path.as_bytes()) {
+        Ok(s) if s.kind == InodeKind::Dir => {
+            if n == 0 {
+                set_cwd(b"/");
             } else {
-                let n = pb.len().min(MAX_PATH);
-                norm[..n].copy_from_slice(&pb[..n]);
-                n
-            };
-            set_cwd(&norm[..nlen]);
+                set_cwd(&abs[..n]);
+            }
         }
         Ok(_) => err_line("cd", FsError::NotDir),
         Err(e) => err_line("cd", e),
@@ -1553,18 +1070,3 @@ fn cmd_pwd(_args: &[&str]) {
     crate::console_init::write(&b[..n]);
     crate::console_init::write(b"\n");
 }
-
-#[allow(dead_code)]
-pub fn mkdir(path: &str, _mode: u16) -> Result<(), FsError> {
-    mkdir_one(path)
-}
-
-#[allow(dead_code)]
-pub fn creat(path: &str) -> Result<(), FsError> {
-    let fid = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)?;
-    close(fid)
-}
-
-const _: () = {
-    let _ = (SEEK_SET, SEEK_CUR, SEEK_END, PathRef { mount: 0, dslot: 0 });
-};

@@ -20,14 +20,17 @@ Drivers live in `run_*.py` and must not parse the environment or build argv.
 | `VIBEOS_QEMU_ACCEL` | `tcg` (empty omits `-accel`) | all |
 | `VIBEOS_TIMEOUT` | `60` e2e/ps2, `90` ktest/crash | all |
 | `VIBEOS_QEMU_EXTRA` | empty | all |
+| `VIBEOS_TIER` | `adhoc`; each `make test-*` recipe sets its target name | all (`results.py`) |
 | `VIBEOS_EXPECT_PANIC` | off (`""` / `0`) | `run_e2e` |
 | `VIBEOS_GP_TEST` | off | `run_e2e` |
 | `VIBEOS_EXPECT_PIT` | off | `run_e2e` |
 | `VIBEOS_SKIP_PERSIST` | off | `run_ktest` |
 | `VIBEOS_CRASH_ROUNDS` | `8` | `run_vibefs_crash` |
 | `VIBEOS_CRASH_SEED` | time-based | `run_vibefs_crash` |
-| `VIBEOS_MKFS` | `mkfs-vibefs` | `run_vibefs_crash` |
+| `VIBEOS_MKFS` | `mkfs-vibefs` | `run_vibefs_crash`, `run_e2e` |
 | `VIBEOS_FSCK` | `fsck-vibefs` | `run_vibefs_crash` |
+| `VIBEOS_NBD_CACHE` | `nbd-cache` | `run_vibefs_crash` |
+| `VIBEOS_VIBEFS_CAT` | `vibefs-cat` | `run_vibefs_crash` |
 """
 
 from __future__ import annotations
@@ -330,7 +333,9 @@ DEFAULT_CPU = "max"
 DEFAULT_MEM = "128M"
 DEFAULT_ACCEL = "tcg"
 LAPIC_TIMER_MODES = ("tsc-deadline", "periodic", "pit")
-CRASH_KILL_MAX_S = 0.18
+CRASH_KILL_MAX_S = 0.05
+# `cache=unsafe` drops flushes, so the volatile-cache device never sees them.
+NBD_CACHE_MODES = ("writeback", "none", "writethrough")
 
 
 @dataclass
@@ -358,6 +363,7 @@ class EnvConfig:
     accel: str | None
     timeout: float
     extra: tuple[str, ...]
+    tier: str = "adhoc"
 
     def qemu(
         self,
@@ -421,6 +427,7 @@ def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
         accel=DEFAULT_ACCEL if accel_raw is None else accel_raw,
         timeout=timeout,
         extra=extra,
+        tier=os.environ.get("VIBEOS_TIER") or "adhoc",
     )
 
 
@@ -439,9 +446,9 @@ def overlay_env(mapping: dict[str, str] | None = None, *, clear: bool = False) -
         os.environ.update(old)
 
 
-def make_disk(nbytes: int, prefix: str) -> str:
-    """tempfile + ftruncate. Caller unlinks."""
-    fd, path = tempfile.mkstemp(prefix=prefix, suffix=".img")
+def make_disk(nbytes: int, prefix: str, *, directory: str | None = None) -> str:
+    """tempfile + ftruncate, in `directory` when given. Caller unlinks."""
+    fd, path = tempfile.mkstemp(prefix=prefix, suffix=".img", dir=directory)
     try:
         os.ftruncate(fd, nbytes)
     finally:
@@ -449,16 +456,32 @@ def make_disk(nbytes: int, prefix: str) -> str:
     return path
 
 
-def virtio_blk_args(disk: str, smp: int, *, discard: bool = True) -> tuple[str, ...]:
-    drive = f"file={disk},if=none,id=vibehd,format=raw,cache=writeback"
-    if discard:
-        drive += ",discard=unmap"
-    return (
-        "-drive",
-        drive,
-        "-device",
-        f"virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues={smp}",
-    )
+def virtio_blk_args(
+    disk: str,
+    smp: int,
+    *,
+    discard: bool = True,
+    nbd: bool = False,
+    cache: str = "writeback",
+) -> tuple[str, ...]:
+    """The virtio-blk drive. With `nbd`, `disk` is the unix socket of the
+    volatile-cache device (`nbd-cache`), served with no discard and a
+    volatile write cache on the device (`write-cache=on`), so a guest flush
+    reaches the server under every `cache` mode."""
+    if cache not in NBD_CACHE_MODES:
+        raise HarnessError(f"cache={cache!r}: not one of {NBD_CACHE_MODES}")
+    device = f"virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues={smp}"
+    if nbd:
+        drive = (
+            f"file.driver=nbd,file.server.type=unix,file.server.path={disk},"
+            f"format=raw,if=none,id=vibehd,cache={cache}"
+        )
+        device += ",write-cache=on"
+    else:
+        drive = f"file={disk},if=none,id=vibehd,format=raw,cache={cache}"
+        if discard:
+            drive += ",discard=unmap"
+    return ("-drive", drive, "-device", device)
 
 
 def ktest_devices(disk: str, smp: int) -> tuple[str, ...]:
@@ -475,7 +498,8 @@ def ktest_devices(disk: str, smp: int) -> tuple[str, ...]:
 
 
 def kill_delay(rng: random.Random) -> float:
-    """SIGKILL wait after the first `vibeOS: vibefs: wr` line. In `[0, 0.18]` s."""
+    """The crash test's SIGKILL jitter after the `vibeOS: vibefs: wr K` line
+    it waits for. In `[0, CRASH_KILL_MAX_S]` s."""
     return rng.uniform(0.0, CRASH_KILL_MAX_S)
 
 
@@ -825,12 +849,6 @@ ISA_DEBUG_FAIL = 35  # write 0x11
 KTEST_BEGIN = "vibeOS: ktest: begin"
 KTEST_END = "vibeOS: ktest: end"
 KTEST_FAIL_PREFIX = "vibeOS: ktest: FAIL"
-SMP2_TCG_PER_CPU_READY_HEAD_FLAKE = (
-    "vibeOS: ktest: FAIL per_cpu_bsp: ready_head should be empty"
-)
-SMP2_TCG_PER_CPU_READY_HEAD_FLAKE_ERROR = (
-    f"ktest FAIL: {SMP2_TCG_PER_CPU_READY_HEAD_FLAKE}"
-)
 SMP4_MSIX_AP_COUNTER_FLAKE = (
     "ktest FAIL: vibeOS: ktest: FAIL msix_cpu: ap counter"
 )
@@ -871,14 +889,11 @@ def retryable_ktest_failure(
     accel: str | None = None,
     failure_lines: Iterable[str] = (),
 ) -> bool:
-    if (
-        smp == 2
-        and not persist_reboot
-        and _accel_name(accel) == "tcg"
-        and message == SMP2_TCG_PER_CPU_READY_HEAD_FLAKE_ERROR
-        and tuple(failure_lines) == (SMP2_TCG_PER_CPU_READY_HEAD_FLAKE,)
-    ):
-        return True
+    """True for a -smp 4 failure the harness boots again for (DESIGN §8.2).
+
+    `persist_reboot`, `accel` and `failure_lines` select nothing now;
+    `run_ktest` still passes them until ROADMAP §10.2 removes the retries.
+    """
     if smp != 4:
         return False
     if message == SMP4_MSIX_AP_COUNTER_FLAKE:
@@ -986,6 +1001,17 @@ def run_qemu_until_exit(
     kill_at: float | None = None
     reader = DeadlineReader(proc.stdout.fileno(), deadline)
 
+    def take(line: str) -> None:
+        result.lines.append(line)
+        for sig in panic_signatures:
+            if sig in line:
+                result.panic_line = line
+                drain_panic_tail(reader, result)
+                proc.kill()
+                raise HarnessError(
+                    f"panic signature {sig!r} in: {line!r}{serial_tail(result.lines)}"
+                )
+
     try:
         while True:
             kind, line = reader.next_event()
@@ -993,22 +1019,21 @@ def run_qemu_until_exit(
                 now = time.monotonic()
                 if kill_at is not None and now < deadline:
                     proc.kill()
+                    # The reader checks its deadline before it reads, so lines
+                    # already in the pipe at the kill are read here, to EOF.
+                    reader.set_deadline(time.monotonic() + 2.0)
+                    while True:
+                        kind, line = reader.next_event()
+                        if kind != "line":
+                            break
+                        take(line)
                     break
                 result.timed_out = True
                 proc.kill()
                 break
             if kind == "eof":
                 break
-            result.lines.append(line)
-            for sig in panic_signatures:
-                if sig in line:
-                    result.panic_line = line
-                    drain_panic_tail(reader, result)
-                    proc.kill()
-                    raise HarnessError(
-                        f"panic signature {sig!r} in: {line!r}"
-                        f"{serial_tail(result.lines)}"
-                    )
+            take(line)
             if kill_after is not None and kill_at is None:
                 delay = kill_after(line)
                 if delay is not None:

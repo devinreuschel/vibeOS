@@ -9,6 +9,7 @@
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use vibeos::ipi::{MAX_IPI_CPUS, all_acked, inbox_bit, waiter_mask};
+use vibeos::log::Level;
 use vibeos::paging::VirtAddr;
 use vibeos::thread::ThreadId;
 use vibeos::vectors;
@@ -120,32 +121,78 @@ fn service_calls() {
     CALL_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Wait until every CPU in `waiters` has acked. Never panics and never
+/// returns early: `shootdown_va` and `call_mask` callers free frames and
+/// reuse their slot as soon as it returns (DESIGN §7.9). After each second
+/// without every ack (or [`NO_TSC_LATE_POLLS`] polls without a TSC) it logs
+/// the CPUs that have not acked and counts it in [`ack_late_count`]; a CPU
+/// that never acks is a hang for ROADMAP §10.7's forensics.
 fn wait_acks(waiters: u64, acked: &AtomicU64) {
     if waiters == 0 {
         return;
     }
     assert!(!x86::interrupts_enabled(), "ipi: ack wait with IF on");
     let k = time_init::tsc_per_ms();
+    let period = k.saturating_mul(1000);
     let start = time_init::read_tsc();
-    let cap = if k == 0 {
-        0
-    } else {
-        (k as u128).saturating_mul(1000) as u64
-    };
+    let mut last = start;
     let mut spins = 0u64;
     loop {
-        if all_acked(waiters, acked.load(Ordering::Acquire)) {
+        let got = acked.load(Ordering::Acquire);
+        if all_acked(waiters, got) {
             return;
         }
         service_incoming();
         spins = spins.wrapping_add(1);
-        if cap != 0 && time_init::read_tsc().wrapping_sub(start) > cap {
-            panic!("ipi: ack timeout waiters={waiters:#x}");
-        }
-        if cap == 0 && spins > 50_000_000 {
-            panic!("ipi: ack timeout (no tsc)");
+        let late = if k != 0 {
+            let now = time_init::read_tsc();
+            if now.wrapping_sub(last) >= period {
+                last = now;
+                Some((now.wrapping_sub(start) / period, "s"))
+            } else {
+                None
+            }
+        } else if spins.is_multiple_of(NO_TSC_LATE_POLLS) {
+            Some((spins, "polls"))
+        } else {
+            None
+        };
+        if let Some((n, unit)) = late {
+            ACK_LATE.fetch_add(1, Ordering::Relaxed);
+            crate::klog!(
+                Level::Warn,
+                "vibeOS: ipi: wait_acks late {} {}:{}",
+                n,
+                unit,
+                CpuList(waiters & !got)
+            );
         }
         core::hint::spin_loop();
+    }
+}
+
+/// Late periods [`wait_acks`] has logged since boot.
+static ACK_LATE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+pub fn ack_late_count() -> u64 {
+    ACK_LATE.load(Ordering::Relaxed)
+}
+
+/// Without a TSC, [`wait_acks`] logs every this many polls.
+const NO_TSC_LATE_POLLS: u64 = 50_000_000;
+
+/// A CPU mask written as ` cpu<n>` for each set bit.
+struct CpuList(u64);
+
+impl core::fmt::Display for CpuList {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut m = self.0;
+        while m != 0 {
+            write!(f, " cpu{}", m.trailing_zeros())?;
+            m &= m - 1;
+        }
+        Ok(())
     }
 }
 
@@ -156,6 +203,8 @@ fn wait_acks(waiters: u64, acked: &AtomicU64) {
 /// run through `service_incoming` (IF off cannot take the IPI).
 pub fn shootdown_va(va: VirtAddr) {
     let _irq = x86::InterruptGuard::enter();
+    #[cfg(feature = "kernel_tests")]
+    testing::note_shootdown();
     let me = my_index() as u32;
     let waiters = waiter_mask(per_cpu_init::online_mask(), me);
     if waiters == 0 {
@@ -203,7 +252,7 @@ pub fn place_ready(cpu: u32, id: ThreadId) {
 
 pub fn drain_inbox() -> bool {
     per_cpu_init::with_current(|pc| {
-        let bits = pc.wake_inbox.swap(0, Ordering::Acquire);
+        let bits = pc.remote.wake_inbox.swap(0, Ordering::Acquire);
         if bits == 0 {
             return false;
         }
@@ -312,4 +361,42 @@ pub fn shootdown_count() -> u64 {
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn call_count() -> u64 {
     CALL_COUNT.load(Ordering::Relaxed)
+}
+
+/// Counts of what switch tails do, for the in-guest tests (DESIGN §8.2).
+/// `kernel_tests` builds only.
+#[cfg(feature = "kernel_tests")]
+pub mod testing {
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    use vibeos::ipi::MAX_IPI_CPUS;
+
+    use super::my_index;
+
+    /// Per CPU: inside a switch tail. Owner CPU only, IF=0.
+    static IN_TAIL: [AtomicBool; MAX_IPI_CPUS] = [const { AtomicBool::new(false) }; MAX_IPI_CPUS];
+    /// Shootdowns started while their CPU's `IN_TAIL` was set.
+    static FROM_TAIL: AtomicU64 = AtomicU64::new(0);
+
+    /// This CPU enters a switch tail. IF=0.
+    pub fn tail_enter() {
+        IN_TAIL[my_index()].store(true, Ordering::Relaxed);
+    }
+
+    /// This CPU leaves its switch tail. IF=0.
+    pub fn tail_leave() {
+        IN_TAIL[my_index()].store(false, Ordering::Relaxed);
+    }
+
+    /// Shootdowns sent from a switch tail since boot.
+    pub fn shootdowns_from_tail() -> u64 {
+        FROM_TAIL.load(Ordering::Acquire)
+    }
+
+    /// `shootdown_va`'s count, IF=0.
+    pub(super) fn note_shootdown() {
+        if IN_TAIL[my_index()].load(Ordering::Relaxed) {
+            FROM_TAIL.fetch_add(1, Ordering::AcqRel);
+        }
+    }
 }

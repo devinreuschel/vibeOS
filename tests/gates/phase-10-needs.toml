@@ -29,7 +29,7 @@ needs = ["every IDT vector enters through a stub that `arch/idt.rs` generates"]
 why = "claim: reopened (F004); the generated stubs make the swapgs decision"
 
 [[box]]
-key = "the scheduler is SMP-safe; today another CPU can unmap"
+key = "the scheduler is SMP-safe"
 needs = [
   "a dead thread's kernel stack is reused or freed only by the CPU that ran it",
   "`PerCpu` split into owner-only state and a remote view",
@@ -43,13 +43,20 @@ why = "claim: reopened (F002)"
 
 [[box]]
 key = "vibefs survives injected power loss during a write"
-needs = ["the vibefs crash test can fail"]
-why = "claim: reopened (F014, F080); the crash test must be able to fail"
+needs = [
+  "the vibefs crash test can fail",
+  "vibefs `commit` calls `mark_meta` on",  # L1493
+]
+why = "claim: reopened (F014, F080); the crash test must be able to fail; claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 [[box]]
 key = "crash consistency testing by killing QEMU at randomized points"
-needs = ["the vibefs crash test can fail"]
-why = "claim: reopened (F014, F080)"
+needs = [
+  "the vibefs crash test can fail",
+  "a volatile-cache device, the backend",  # L1250
+  "the block layer keeps only",  # L1485
+]
+why = "claim: reopened (F014, F080); claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 [[box]]
 key = "flush ordering that does not leave a directory entry pointing at unallocated clusters"
@@ -68,7 +75,30 @@ needs = [
 ]
 why = "claim: reopened (F014, F049)"
 
+# L1037
+[[box]]
+key = "a bound (`"
+needs = [
+  "one ring-3 entry model: `/hello`",  # L1402
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1038
+[[box]]
+key = "an orphan goes to pid"
+needs = [
+  "a host-tested `vibeos-core` helper picks",  # L1364
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
 # Phase 10 boxes.
+
+[[box]]
+key = "vibefs `commit` calls `mark_meta` on"
+needs = [
+  "vibefs `commit` writes an alloc-map",  # L1494
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
 [[box]]
 key = "the `-smp 4` `ipi: ack timeout` panic root-caused and fixed"
@@ -105,8 +135,10 @@ key = "the vibefs crash test can fail"
 needs = [
   "vibefs `commit` calls `mark_meta` on every",
   "vibefs `commit` writes an alloc-map block",
+  "a volatile-cache device, the backend",  # L1250
+  "the block layer keeps only",  # L1485
 ]
-why = "text: lands with §10.11's commit-leak fixes"
+why = "text: lands with §10.11's commit-leak fixes; claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
 [[box]]
 key = "`BootCell<T>` is `Sync` only when"
@@ -122,6 +154,14 @@ why = "claim: the tables take their sizes from the limits constants"
 key = "exec returns `ENOMEM` for an image whose page-rounded"
 needs = ["one `limits` module in `vibeos-core` names every"]
 why = "claim: its cap lives in the limits module"
+
+# L1315
+[[box]]
+key = "one `limits` module in `vibeos-core`"
+needs = [
+  "exec returns `ENOMEM` for an",  # L1380
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
 [[box]]
 key = "`disallowed-types` denies `alloc`'s"
@@ -252,6 +292,14 @@ needs = [
 ]
 why = "text: needs §10.10's fallible spawn_inner; claim: its Tcb allocation is fallible"
 
+[[box]]
+key = "`scripts/check_ticks.py`, which a `ticks` CI"
+needs = [
+  "until those retries are gone,",
+  "`scripts/check_review_refs.py` reads `tests/gates/phase-10-needs.toml`: each row",
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
 # Lands-after, lands-with and lands-before clauses in box text.
 
 [[box]]
@@ -293,9 +341,20 @@ needs = ["`PerCpu` split into owner-only state and a remote view"]
 why = "text: lands after the F039 box above"
 
 [[box]]
+key = "`DmaBuffer` and `GuardedStack` are move-only"
+needs = [
+  "`make test-unit` runs doc tests,",  # L1293
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
 key = "the buddy hands out an owner token"
-needs = ["`DmaBuffer` and `GuardedStack` are move-only handles"]
-why = "text: lands with or after the box above"
+needs = [
+  "`DmaBuffer` and `GuardedStack` are move-only handles",
+  "`make test-unit` runs doc tests,",  # L1293
+  "`kva_init::vmap` returns a move-only handle",  # L1299
+]
+why = "text: lands with or after the box above; claim: missing edge found by the Phase 10 planning survey and review (extra, survey); claim: the vmap handle holds its Frames (box 1299)"
 
 [[box]]
 key = "an IF-off tracer in an `irqoff` build variant"
@@ -397,6 +456,13 @@ needs = [
 ]
 why = "text: lands after the ksyms, release-boot and assert! boxes and the release.yml box"
 
+[[box]]
+key = "gate inputs: `tests/gates/inputs.toml` lists every file a gate reads"
+needs = []
+why = """no edge: its lands-with clauses ("a fix lands with the list entry it retires", \
+"a new check land with the code they check") are about a fix and a check, not a box; \
+the box's owner extends this row"""
+
 # Closes rows (How to read this): the box named by `key` lands all the work
 # of each box in `closes`, and the commit that ticks it ticks them.
 
@@ -448,3 +514,45 @@ why = "the §9.4 deferral box"
 key = "`elf::parse` host tests also cover checked-in static binaries"
 closes = ["host tests that parse checked-in static binaries"]
 why = "the §9.4 deferral box"
+
+# L1286
+[[box]]
+key = "`scripts/check_cells.py` reads each `unsafe impl`"
+needs = [
+  "`BootCell<T>` is `Sync` only when",  # L1284
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1473
+[[box]]
+key = "every switch tail empties the"
+needs = [
+  "a dead thread's kernel stack is reused",  # L1472
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1247
+[[box]]
+key = "`reap_many_via_idle` compares frame counts against"
+needs = [
+  "`vibeos.ktest=<glob>` runs only the matching",  # L1228
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1294
+[[box]]
+key = "`addr_space_init::load_cr3_u64` and `syscall_init::switch_cr3_for` become `unsafe"
+needs = [
+  "`IrqCell::force_unlock`, `log_init::force_unlock`, which calls it,",  # L1285
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1324
+[[box]]
+key = "FAT and vibefs behind `InodeOps`;"
+needs = [
+  "one refcounted in-core FAT inode",  # L1330
+  "the dentry cache never resolves",  # L1331
+  "`scripts/check_gone.py`, which `make check` runs,",  # L1460
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"

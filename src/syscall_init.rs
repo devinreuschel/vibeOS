@@ -5,16 +5,16 @@
 use core::arch::global_asm;
 use core::mem::offset_of;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use vibeos::addr_space::AddressSpace;
 use vibeos::desc::{KERNEL_CS, STAR_SYSRET, Tss, USER_CS_RPL, USER_DS_RPL};
 use vibeos::per_cpu::PerCpu;
 use vibeos::syscall::{SyscallFrame, UserRegs};
-use vibeos::thread::{Fxsave, RFLAGS_IF, RFLAGS_RESERVED1, Tcb};
+use vibeos::thread::{Fxsave, Tcb};
 
 use crate::arch::gdt;
-use crate::cell::{BootCell, IrqCell};
+use crate::cell::BootCell;
 use crate::per_cpu_init;
 use crate::x86::{
     self, CR0_EM, CR0_MP, CR0_TS, CR4_OSFXSR, EFER_SCE, FMASK_SYSCALL, IA32_EFER, IA32_FMASK,
@@ -40,7 +40,7 @@ global_asm!(
     .global vibeos_syscall_entry
     .type vibeos_syscall_entry, @function
     vibeos_syscall_entry:
-        // Only swapgs besides arch::gs::do_swapgs. User RSP is live.
+        // The syscall's GS switch (arch::gs). User RSP is live.
         swapgs
         mov qword ptr gs:[{user_rsp}], rsp
         mov rsp, qword ptr gs:[{ksp}]
@@ -105,6 +105,8 @@ global_asm!(
         mov r15, [rsp + 120]
         mov rcx, [rsp + 16]
         mov rsp, [rsp]
+    .global vibeos_syscall_exit_swapgs
+    vibeos_syscall_exit_swapgs:
         swapgs
         sysretq
 
@@ -137,6 +139,8 @@ global_asm!(
         mov r11, qword ptr gs:[{iret_rip}]
         push r11
         mov rax, qword ptr gs:[{retval}]
+    .global vibeos_syscall_iret_swapgs
+    vibeos_syscall_iret_swapgs:
         swapgs
         iretq
 
@@ -241,7 +245,9 @@ pub unsafe fn init_bsp() {
         let top = gdt::bsp_rsp0_top();
         cpu.fallback_rsp0 = top;
         cpu.kernel_rsp0 = top;
-        cpu.as_cr3 = crate::paging_init::kernel_cr3();
+        cpu.remote
+            .as_cr3
+            .store(crate::paging_init::kernel_cr3(), Ordering::Release);
     });
     seed_current_fpu();
 }
@@ -256,7 +262,9 @@ pub unsafe fn init_ap(tss: *mut Tss, rsp0: u64) {
         cpu.tss = tss;
         cpu.fallback_rsp0 = rsp0;
         cpu.kernel_rsp0 = rsp0;
-        cpu.as_cr3 = crate::paging_init::kernel_cr3();
+        cpu.remote
+            .as_cr3
+            .store(crate::paging_init::kernel_cr3(), Ordering::Release);
     });
     seed_current_fpu();
 }
@@ -302,8 +310,8 @@ pub fn fpu_template() -> Fxsave {
 /// Update TSS.RSP0 + `kernel_rsp0` for `tcb`. Every context switch.
 /// Caller already holds `&mut PerCpu` (IRQ-off).
 pub fn set_rsp0_for(cpu: &mut PerCpu, tcb: &Tcb) {
-    let top = match tcb.stack {
-        Some(ks) => ks.top(),
+    let top = match &tcb.stack {
+        Some(s) => s.top().as_u64(),
         None => cpu.fallback_rsp0,
     };
     cpu.kernel_rsp0 = top;
@@ -313,18 +321,22 @@ pub fn set_rsp0_for(cpu: &mut PerCpu, tcb: &Tcb) {
 }
 
 /// Load `tcb`'s CR3 if it differs. Skip when the next thread shares AS.
-/// Caller already holds `&mut PerCpu` (IRQ-off).
-pub fn switch_cr3_for(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
+///
+/// # Safety
+/// `cpu` is this CPU's own `PerCpu`, held with IF=0 as `on_switch` holds
+/// it. `tcb.as_cr3` is 0 or a root that invariant I128 keeps alive while a
+/// TCB names it (`addr_space_init::teardown`).
+pub unsafe fn switch_cr3_for(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
     let want = if tcb.as_cr3 == 0 {
         crate::paging_init::kernel_cr3()
     } else {
         tcb.as_cr3
     };
-    if cpu.as_cr3 == want || want == 0 {
+    if cpu.remote.as_cr3.load(Ordering::Relaxed) == want || want == 0 {
         return true;
     }
     unsafe { x86::write_cr3(want) };
-    cpu.as_cr3 = want;
+    cpu.remote.as_cr3.store(want, Ordering::Release);
     false
 }
 
@@ -362,6 +374,13 @@ pub fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
 /// `rip`/`rsp` are mapped executable/writable in the loaded CR3 with
 /// user pages. IF in `rflags` should stay clear unless IRQs in ring 3
 /// are intended.
+#[cfg_attr(
+    feature = "kernel_tests",
+    allow(
+        dead_code,
+        reason = "no caller since the bound model went; P10-S17 deletes it"
+    )
+)]
 pub unsafe fn enter_user(rip: u64, rsp: u64, rflags: u64, fs_base: u64) -> ! {
     let cpu = per_cpu_init::current();
     let ptr = cpu.self_ptr as u64;
@@ -413,81 +432,11 @@ pub fn star_configured() -> bool {
     syscall_cs == KERNEL_CS && sysret_cs == STAR_SYSRET && (efer & EFER_SCE) != 0
 }
 
-// --- Slice B: dispatch, early fd1, user exit longjmp ---
-
-#[repr(C)]
-struct JmpBuf {
-    rbx: u64,
-    rbp: u64,
-    r12: u64,
-    r13: u64,
-    r14: u64,
-    r15: u64,
-    rsp: u64,
-    rip: u64,
-}
+// --- Slice B: dispatch, early fd1 ---
 
 static TRACE: AtomicBool = AtomicBool::new(false);
-static IN_USER: AtomicBool = AtomicBool::new(false);
-static EXIT_STATUS: AtomicI32 = AtomicI32::new(0);
 static CURRENT_AS: AtomicPtr<AddressSpace> = AtomicPtr::new(ptr::null_mut());
-static USER_JMP: IrqCell<JmpBuf> = IrqCell::new(JmpBuf {
-    rbx: 0,
-    rbp: 0,
-    r12: 0,
-    r13: 0,
-    r14: 0,
-    r15: 0,
-    rsp: 0,
-    rip: 0,
-});
-static STDOUT_LEN: AtomicUsize = AtomicUsize::new(0);
-static STDOUT: IrqCell<[u8; 256]> = IrqCell::new([0; 256]);
 static SYSCALLS: AtomicU64 = AtomicU64::new(0);
-
-unsafe extern "C" {
-    fn vibeos_user_setjmp(buf: *mut JmpBuf) -> i32;
-    fn vibeos_user_longjmp(buf: *mut JmpBuf, val: i32) -> !;
-}
-
-global_asm!(
-    r#"
-    .pushsection .text
-    .global vibeos_user_setjmp
-    .type vibeos_user_setjmp, @function
-    vibeos_user_setjmp:
-        mov [rdi + 0x00], rbx
-        mov [rdi + 0x08], rbp
-        mov [rdi + 0x10], r12
-        mov [rdi + 0x18], r13
-        mov [rdi + 0x20], r14
-        mov [rdi + 0x28], r15
-        lea rax, [rsp + 8]
-        mov [rdi + 0x30], rax
-        mov rax, [rsp]
-        mov [rdi + 0x38], rax
-        xor eax, eax
-        ret
-
-    .global vibeos_user_longjmp
-    .type vibeos_user_longjmp, @function
-    vibeos_user_longjmp:
-        mov rbx, [rdi + 0x00]
-        mov rbp, [rdi + 0x08]
-        mov r12, [rdi + 0x10]
-        mov r13, [rdi + 0x18]
-        mov r14, [rdi + 0x20]
-        mov r15, [rdi + 0x28]
-        mov rsp, [rdi + 0x30]
-        mov eax, esi
-        test eax, eax
-        jnz 1f
-        mov eax, 1
-    1:
-        jmp [rdi + 0x38]
-    .popsection
-    "#
-);
 
 #[cfg_attr(feature = "kernel_tests", allow(dead_code))] // tracing / procfs; parked
 pub fn set_trace(on: bool) {
@@ -509,19 +458,6 @@ pub fn syscall_count() -> u64 {
     }
 }
 
-pub fn reset_stdout() {
-    STDOUT_LEN.store(0, Ordering::Release);
-}
-
-pub fn stdout_bytes() -> ([u8; 256], usize) {
-    STDOUT.with(|buf| {
-        let n = STDOUT_LEN.load(Ordering::Acquire).min(256);
-        let mut out = [0u8; 256];
-        out[..n].copy_from_slice(&buf[..n]);
-        (out, n)
-    })
-}
-
 fn current_as() -> Option<&'static AddressSpace> {
     let p = CURRENT_AS.load(Ordering::Acquire);
     if p.is_null() {
@@ -529,13 +465,6 @@ fn current_as() -> Option<&'static AddressSpace> {
     } else {
         Some(unsafe { &*p })
     }
-}
-
-pub fn with_user_as<R>(space: &mut AddressSpace, f: impl FnOnce() -> R) -> R {
-    crate::proc_init::bind_probe(space);
-    let r = f();
-    crate::proc_init::unbind_probe();
-    r
 }
 
 pub fn peek_user_as() -> Option<&'static AddressSpace> {
@@ -553,84 +482,12 @@ pub fn clear_user_as() {
     CURRENT_AS.store(ptr::null_mut(), Ordering::Release);
 }
 
-pub fn in_user() -> bool {
-    IN_USER.load(Ordering::Acquire)
-}
-
-pub fn capture_stdout(bytes: &[u8]) {
-    STDOUT.with(|buf| {
-        let mut n = STDOUT_LEN.load(Ordering::Relaxed);
-        let mut i = 0;
-        while i < bytes.len() && n < 256 {
-            buf[n] = bytes[i];
-            n += 1;
-            i += 1;
-        }
-        STDOUT_LEN.store(n, Ordering::Release);
-    });
-}
-
-pub fn set_exit_status(st: i32) {
-    EXIT_STATUS.store(st, Ordering::Release);
-}
-
-pub fn exit_status() -> i32 {
-    EXIT_STATUS.load(Ordering::Acquire)
-}
-
-pub fn longjmp_user(status: i32) -> ! {
-    EXIT_STATUS.store(status, Ordering::Release);
-    crate::arch::gs::force_kernel();
-    unsafe { vibeos_user_longjmp(USER_JMP.as_ptr(), 1) };
-}
-
 fn bump_counter() {
     SYSCALLS.fetch_add(1, Ordering::Relaxed);
     let t = per_cpu_init::current_thread();
     if !t.is_null() {
         unsafe { (*t).syscall_count = (*t).syscall_count.wrapping_add(1) };
     }
-}
-
-fn flags_if_on() -> bool {
-    let r: u64;
-    unsafe {
-        core::arch::asm!("pushfq; pop {0}", out(reg) r, options(nostack));
-    }
-    r & RFLAGS_IF != 0
-}
-
-/// Run `rip`/`rsp` in ring 3 until `exit`. Returns the low 8 status bits.
-///
-/// # Safety
-/// `space` is loaded into CR3 and covers `rip`/`rsp`. Lives until return.
-pub unsafe fn run_user(space: &mut AddressSpace, rip: u64, rsp: u64, fs_base: u64) -> i32 {
-    let if_on = flags_if_on();
-    x86::cli();
-    reset_stdout();
-    EXIT_STATUS.store(0, Ordering::Release);
-    CURRENT_AS.store(space as *mut AddressSpace, Ordering::Release);
-    let t = per_cpu_init::current_thread();
-    if !t.is_null() {
-        unsafe { (*t).as_cr3 = space.root().as_u64() };
-    }
-    crate::addr_space_init::load_cr3(space);
-    let rc = unsafe { vibeos_user_setjmp(USER_JMP.as_ptr()) };
-    if rc != 0 {
-        crate::arch::gs::force_kernel();
-        crate::addr_space_init::load_kernel_cr3();
-        if !t.is_null() {
-            unsafe { (*t).as_cr3 = 0 };
-        }
-        CURRENT_AS.store(ptr::null_mut(), Ordering::Release);
-        IN_USER.store(false, Ordering::Release);
-        if if_on {
-            x86::sti();
-        }
-        return EXIT_STATUS.load(Ordering::Acquire) & 0xff;
-    }
-    IN_USER.store(true, Ordering::Release);
-    unsafe { enter_user(rip, rsp, RFLAGS_RESERVED1, fs_base) };
 }
 
 #[unsafe(no_mangle)]

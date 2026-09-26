@@ -18,19 +18,32 @@ pub const PAGE_SIZE: u64 = 4096;
 /// Default kernel stack: 4 pages (16 KiB) plus the unmapped guard.
 pub const DEFAULT_STACK_PAGES: usize = 4;
 
-const MAX_RANGES: usize = 128;
+use crate::limits::MAX_KVA_RANGES as MAX_RANGES;
 
-/// Free-list node pool exhausted after coalesce. Not a VA OOM (`alloc`
-/// still returns `None` for that).
+/// Why a KVA request failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KvaError {
+    /// Free-list node pool exhausted after coalesce. Not a VA OOM
+    /// (`Kva::alloc` still returns `None` for that; `kva_init` says `NoVa`).
     Exhausted,
+    /// A page count of 0 or above the cap.
+    Size,
+    /// No free VA range of the size asked for.
+    NoVa,
+    /// The buddy had no frame to map.
+    NoFrames,
+    /// The page tables refused a mapping.
+    Map,
 }
 
 impl KvaError {
     pub fn as_str(self) -> &'static str {
         match self {
             KvaError::Exhausted => "exhausted",
+            KvaError::Size => "size",
+            KvaError::NoVa => "no va",
+            KvaError::NoFrames => "no frames",
+            KvaError::Map => "map",
         }
     }
 }
@@ -353,5 +366,14 @@ mod tests {
         assert_eq!(k.stats().capacity, PAGE_SIZE);
         assert_eq!(k.stats().used, 0);
         assert_eq!(k.stats().free_ranges, 1);
+    }
+
+    #[test]
+    fn fixed_tables_match_limits() {
+        use crate::limits::MAX_KVA_RANGES;
+        let k = Kva::empty();
+        assert_eq!(k.nodes.len(), MAX_KVA_RANGES);
+        assert_eq!(k.next.len(), MAX_KVA_RANGES);
+        assert_eq!(k.slots.len(), MAX_KVA_RANGES);
     }
 }

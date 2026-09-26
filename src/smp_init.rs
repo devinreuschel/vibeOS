@@ -21,7 +21,7 @@ use crate::apic_init;
 use crate::arch;
 use crate::arch::gdt::{self, ApTables, CpuTables};
 use crate::cell::IrqCell;
-use crate::kva_init::{self, GuardedStack};
+use crate::kva_init;
 use crate::per_cpu_init;
 use crate::thread_init;
 use crate::time_init;
@@ -36,6 +36,13 @@ struct Starting {
     cpu: *mut PerCpu,
     cpu_tables: *mut CpuTables,
 }
+
+// SAFETY: the BSP hands the two pointers to the one AP `start_one` starts,
+// before its SIPI, and the AP reads them once in `ap_entry`; established at
+// `smp_init::start_one`, which starts one AP at a time and waits for its
+// `ready` before writing `STARTING` again. Neither pointee is touched by
+// the BSP while the AP owns it.
+unsafe impl Send for Starting {}
 
 impl Starting {
     const fn empty() -> Self {
@@ -53,7 +60,8 @@ struct ApAlloc {
     cpu_id: u32,
     apic_id: u8,
     tables: ApTables,
-    stack: GuardedStack,
+    /// The idle stack's top, read before the stack moves into its TCB.
+    stack_top: u64,
     idle_id: ThreadId,
     published: bool,
 }
@@ -95,54 +103,73 @@ fn patch_params(cr3: u64, stack_top: u64, entry: u64, idt_limit: u16, idt_base: 
 fn alloc_ap_resources(cpu_id: u32, apic_id: u8, publish: bool) -> Option<ApAlloc> {
     let tables = gdt::alloc_ap_tables()?;
     let stack = match kva_init::alloc_guarded_stack(DEFAULT_STACK_PAGES) {
-        Some(s) => s,
-        None => {
+        Ok(s) => s,
+        Err(_) => {
             gdt::free_ap_tables(tables);
             return None;
         }
     };
-    let Some(idle_id) = thread_init::adopt_ap_idle(cpu_id, stack) else {
-        kva_init::free_stack(stack);
-        gdt::free_ap_tables(tables);
-        return None;
+    let stack_top = stack.top().as_u64();
+    let idle_id = match thread_init::adopt_ap_idle(cpu_id, stack) {
+        Ok(id) => id,
+        Err(stack) => {
+            kva_init::free_stack(stack);
+            gdt::free_ap_tables(tables);
+            return None;
+        }
     };
     let idle_ptr = thread_init::tcb_ptr(idle_id);
     if publish {
-        let _ = per_cpu_init::with_cpu(cpu_id, |cpu| {
-            cpu.apic_id = apic_id as u32;
-            cpu.idle_id = idle_id;
-            cpu.idle = idle_ptr;
-            per_cpu_init::set_current_thread(cpu, idle_ptr);
-            cpu.tsc_per_ms = time_init::tsc_per_ms();
-            cpu.timer_mode = apic_init::timer_mode();
-            cpu.ready.store(false, Ordering::Relaxed);
-            core::sync::atomic::compiler_fence(Ordering::SeqCst);
-        });
+        // SAFETY: CPU `cpu_id` is not running, `with_cpu`'s contract,
+        // established at `smp_init::start_one`: no INIT or SIPI has gone to
+        // it yet (`start_one` sends them after this returns).
+        let _ = unsafe {
+            per_cpu_init::with_cpu(cpu_id, |cpu| {
+                cpu.remote.apic_id.store(apic_id as u32, Ordering::Relaxed);
+                cpu.idle_id = idle_id;
+                cpu.idle = idle_ptr;
+                per_cpu_init::set_current_thread(cpu, idle_ptr);
+                cpu.tsc_per_ms = time_init::tsc_per_ms();
+                cpu.timer_mode = apic_init::timer_mode();
+                cpu.remote.ready.store(false, Ordering::Relaxed);
+                core::sync::atomic::compiler_fence(Ordering::SeqCst);
+            })
+        };
     }
     Some(ApAlloc {
         cpu_id,
         apic_id,
         tables,
-        stack,
+        stack_top,
         idle_id,
         published: publish,
     })
 }
 
-fn free_ap_resources(a: ApAlloc) {
+/// Undo [`alloc_ap_resources`]. `sipi_sent`: a SIPI went to the AP, which
+/// may have accepted it and stalled past the ready timeout and may still
+/// run on its slot (ROADMAP §11.4, F032), so its owner-only fields are left
+/// alone; nothing reads an offline slot's owner-only fields.
+fn free_ap_resources(a: ApAlloc, sipi_sent: bool) {
     if a.published {
-        let _ = per_cpu_init::with_cpu(a.cpu_id, |cpu| {
-            cpu.idle = core::ptr::null_mut();
-            per_cpu_init::set_current_thread(cpu, core::ptr::null_mut());
-            cpu.idle_id = ThreadId::NONE;
-            cpu.ready.store(false, Ordering::Relaxed);
-            cpu.apic_id = 0;
-        });
+        if let Some(r) = per_cpu_init::cpu(a.cpu_id) {
+            r.ready.store(false, Ordering::Relaxed);
+            r.apic_id.store(0, Ordering::Relaxed);
+        }
+        if !sipi_sent {
+            // SAFETY: CPU `a.cpu_id` is not running, `with_cpu`'s contract,
+            // established at `smp_init::start_one`: no SIPI went to it.
+            let _ = unsafe {
+                per_cpu_init::with_cpu(a.cpu_id, |cpu| {
+                    cpu.idle = core::ptr::null_mut();
+                    per_cpu_init::set_current_thread(cpu, core::ptr::null_mut());
+                    cpu.idle_id = ThreadId::NONE;
+                })
+            };
+        }
     }
     if let Some(stack) = thread_init::abandon_ap_idle(a.idle_id) {
         kva_init::free_stack(stack);
-    } else {
-        kva_init::free_stack(a.stack);
     }
     gdt::free_ap_tables(a.tables);
 }
@@ -165,17 +192,17 @@ fn start_one(a: ApAlloc) -> bool {
     let cr3 = x86::read_cr3();
     if cr3 > 0xFFFF_FFFF {
         crate::marker!("vibeOS: smp: cr3 above 4GiB");
-        free_ap_resources(a);
+        free_ap_resources(a, false);
         return false;
     }
-    let stack_top = a.stack.top().as_u64();
+    let stack_top = a.stack_top;
     let entry = ap_entry as *const () as usize as u64;
     let (idt_limit, idt_base) = arch::idt::pointer();
 
-    let cpu_ptr = match per_cpu_init::cpu(cpu_id) {
-        Some(c) => c.self_ptr,
+    let cpu_ptr = match per_cpu_init::slot_ptr(cpu_id) {
+        Some(p) => p,
         None => {
-            free_ap_resources(a);
+            free_ap_resources(a, false);
             return false;
         }
     };
@@ -192,7 +219,7 @@ fn start_one(a: ApAlloc) -> bool {
 
     if apic_init::send_ipi(apic_id, 0, IpiMode::Init).is_err() {
         crate::marker!("vibeOS: smp: INIT failed");
-        free_ap_resources(a);
+        free_ap_resources(a, false);
         return false;
     }
     time_init::busy_wait_ms(INIT_WAIT_MS);
@@ -202,7 +229,7 @@ fn start_one(a: ApAlloc) -> bool {
 
     if !wait_ready(cpu_id) {
         crate::marker!("vibeOS: smp: apic {apic_id} timed out");
-        free_ap_resources(a);
+        free_ap_resources(a, true);
         return false;
     }
 
@@ -240,7 +267,7 @@ extern "C" fn ap_entry() -> ! {
         cpu.cpu_id,
         marker::SCHED_CPU_SUFFIX
     );
-    cpu.ready.store(true, Ordering::Release);
+    cpu.remote.ready.store(true, Ordering::Release);
     x86::sti();
     crate::sched_init::idle_loop();
 }
@@ -254,7 +281,10 @@ pub unsafe fn init() {
     install_blob();
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
 
-    let bsp_apic = per_cpu_init::current().apic_id as u8;
+    let bsp_apic = per_cpu_init::current()
+        .remote
+        .apic_id
+        .load(Ordering::Relaxed) as u8;
     let Some(info) = acpi_init::info() else {
         crate::marker!(marker::SMP_DONE);
         return;
@@ -292,7 +322,7 @@ pub unsafe fn init() {
 #[cfg(feature = "kernel_tests")]
 pub fn exercise_fail_cleanup() {
     if let Some(a) = alloc_ap_resources(0xFE, 0xFE, false) {
-        free_ap_resources(a);
+        free_ap_resources(a, false);
     }
 }
 

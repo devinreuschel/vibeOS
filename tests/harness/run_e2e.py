@@ -3,19 +3,28 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
+import subprocess
 import sys
 from collections.abc import Callable
 from typing import TypeVar
 
+from tests.harness import results
 from tests.harness.harness import (
+    EnvConfig,
     HarnessError,
     boot_contract_markers,
     env_config,
     env_expect_panic,
     env_flag,
+    env_str,
     halt_test_markers,
+    make_disk,
+    qemu_argv,
     run_qemu_and_check,
     run_qemu_console_input,
+    virtio_blk_args,
 )
 
 _T = TypeVar("_T")
@@ -64,11 +73,84 @@ def _retry_hang(label: str, fn: Callable[[], _T]) -> _T:
         if "timed out" not in msg and "no shell ready" not in msg:
             raise
         print(f"[e2e] retry {label}: {e}", file=sys.stderr)
+        results.current().retry(label, results.failure_line(msg))
+        _record_missing(msg)
         return fn()
+
+
+def _record_missing(message: str) -> None:
+    name = results.missing_marker(message)
+    if name is not None:
+        results.current().record("marker", name, "failed")
+
+
+VDA_BYTES = 1 << 20
+VDA_MARKER = "vibeOS: block: vda 2048 sectors"
+
+
+def _sha256(path: str) -> str:
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def _vda_image(case: str, path: str) -> None:
+    if case == "vda_vibefs_untouched":
+        mkfs = env_str("VIBEOS_MKFS", "mkfs-vibefs")
+        r = subprocess.run([mkfs, "-L", "vda", path], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise HarnessError(f"{case}: mkfs-vibefs failed: {r.stderr or r.stdout}")
+    else:
+        # The entry-less MBR `part` also finds on a whole-disk FAT32 volume.
+        with open(path, "r+b") as f:
+            f.seek(510)
+            f.write(b"\x55\xaa")
+
+
+def _check_vda_untouched(env: EnvConfig) -> None:
+    """The production kernel writes no byte of a `vda` it did not format (F003).
+
+    Boots the production ISO once per image through `shell ready` and compares
+    the image's SHA-256 before and after. No retry: the standing gate forbids one.
+    """
+    res = results.current()
+    for case in ("vda_vibefs_untouched", "vda_55aa_untouched"):
+        disk = make_disk(VDA_BYTES, "vibeos-vda-")
+        try:
+            _vda_image(case, disk)
+            before = _sha256(disk)
+            # SeaBIOS would try to boot the 0x55AA disk.
+            cfg = env.qemu(extra=virtio_blk_args(disk, env.smp), boot_order="d")
+            try:
+                result = run_qemu_and_check(
+                    cfg,
+                    boot_contract_markers(cpu=env.cpu, smp=env.smp),
+                    timeout_s=env.timeout,
+                )
+            except HarnessError as e:
+                _record_missing(str(e))
+                res.add_boot(qemu_argv(cfg, None), cfg, None)
+                res.record("marker", case, "failed")
+                raise HarnessError(f"{case}: {e}") from e
+            res.add_boot(qemu_argv(cfg, None), cfg, result.exit_code)
+            if VDA_MARKER not in result.lines:
+                res.record("marker", case, "failed")
+                raise HarnessError(f"{case}: no {VDA_MARKER!r}")
+            after = _sha256(disk)
+            if after != before:
+                res.record("marker", case, "failed")
+                raise HarnessError(f"{case}: vda sha256 changed {before} -> {after}")
+            res.record("marker", case, "passed")
+            print(f"[e2e]   . {case} ok", file=sys.stderr)
+        finally:
+            try:
+                os.unlink(disk)
+            except OSError:
+                pass
 
 
 def main() -> int:
     env = env_config(default_iso="vibeos.iso", default_timeout=60)
+    res = results.Results(env.tier)
     expect_panic = env_expect_panic()
     gp_test = env_flag("VIBEOS_GP_TEST")
     expect_pit = env_flag("VIBEOS_EXPECT_PIT")
@@ -125,8 +207,13 @@ def main() -> int:
                 ),
             )
     except HarnessError as e:
+        _record_missing(str(e))
+        res.add_boot(qemu_argv(cfg, None), cfg, None)
         print(f"[e2e] FAIL: {e}", file=sys.stderr)
         return 1
+    for name in result.matched:
+        res.record("marker", name, "passed")
+    res.add_boot(qemu_argv(cfg, None), cfg, result.exit_code)
 
     print(f"[e2e] ok: {len(result.matched)} markers matched", file=sys.stderr)
     for name in result.matched:
@@ -146,13 +233,24 @@ def main() -> int:
                 lambda: run_qemu_console_input(cfg, timeout_s=env.timeout),
             )
         except HarnessError as e:
+            _record_missing(str(e))
+            res.add_boot(qemu_argv(cfg, None), cfg, None)
             print(f"[e2e] FAIL: {e}", file=sys.stderr)
             return 1
+        for name in inp.matched:
+            res.record("marker", name, "passed")
+        res.add_boot(qemu_argv(cfg, None), cfg, inp.exit_code)
         print("[e2e]   . console input serial+ps2 ok", file=sys.stderr)
         for name in inp.matched:
             print(f"[e2e]     . {name}", file=sys.stderr)
+        if env.tier == "test-e2e":
+            try:
+                _check_vda_untouched(env)
+            except HarnessError as e:
+                print(f"[e2e] FAIL: {e}", file=sys.stderr)
+                return 1
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(results.run_main(main))

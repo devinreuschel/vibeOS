@@ -13,7 +13,7 @@ use crate::fs::{FsError, InodeKind};
 pub const SEC: usize = 512;
 pub const INITRD_BYTES: usize = 64 * 1024;
 pub const MAX_CLUS_BYTES: usize = 4096;
-pub const MAX_NAME: usize = 64;
+pub use crate::limits::MAX_NAME;
 pub const FAT_CACHE: usize = 8;
 pub const EOC_MIN: u32 = 0x0FFFFFF8;
 pub const BAD_CLUS: u32 = 0x0FFFFFF7;
@@ -80,6 +80,12 @@ impl FatError {
             FatError::NameTooLong => FsError::NameTooLong,
             FatError::NotSupp => FsError::NotSupp,
         }
+    }
+}
+
+impl From<FatError> for FsError {
+    fn from(e: FatError) -> Self {
+        e.to_fs()
     }
 }
 
@@ -253,33 +259,62 @@ pub struct FatVol {
     pub free: u32,
     fsinfo_dirty: bool,
     pub now: u32,
-    inos: [InoEnt; MAX_INOS],
-    next_ino: u32,
 }
 
-const MAX_INOS: usize = 96;
-
-#[derive(Clone, Copy)]
-struct InoEnt {
-    used: bool,
-    dir_clu: u32,
-    dir_off: u32,
-    ino: u32,
-    clu: u32,
-    size: u32,
-    kind: InodeKind,
+/// A FAT file's inode words, owned by the caller (the `Vfs` inode, from
+/// ROADMAP §10.4's `InodeOps` box). Its identity is its dirent location,
+/// `(dir_clu, dir_off)` (the root directory is `(0, 0)`), never the first
+/// cluster, which changes on an empty file's first write and on truncate
+/// to 0. While the file is open these words, not the dirent, hold the
+/// first cluster and the size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FatInode {
+    pub dir_clu: u32,
+    pub dir_off: u32,
+    pub first_clu: u32,
+    pub size: u64,
+    pub kind: InodeKind,
 }
 
-impl InoEnt {
-    const EMPTY: Self = Self {
-        used: false,
-        dir_clu: 0,
-        dir_off: 0,
-        ino: 0,
-        clu: 0,
-        size: 0,
-        kind: InodeKind::Reg,
+impl FatInode {
+    /// The words of the file `n` names, as its dirent holds them.
+    pub fn of_node(n: &Node) -> Self {
+        Self {
+            dir_clu: n.dir_clu,
+            dir_off: n.dir_off,
+            first_clu: n.clu,
+            size: u64::from(n.size),
+            kind: n.kind,
+        }
+    }
+}
+
+/// What [`FatVol::rename`] moved: the source dirent `from` and where its
+/// entry now is, `to`, each `(dir_clu, dir_off)`, and the entry the rename
+/// replaced, whose clusters the caller frees once nothing holds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RenameMoved {
+    pub from: (u32, u32),
+    pub to: (u32, u32),
+    pub replaced: Option<FatInode>,
+}
+
+/// The `st_ino` of the dirent at `(dir_clu, dir_off)`: [`ROOT_INO`] for
+/// the root, `(dir_clu << 16) | (dir_off / 32)` when both halves fit in
+/// 16 bits, and otherwise the fold `dir_clu * 0x9E3779B9 ^ (dir_off / 32)`,
+/// moved past 0 and [`ROOT_INO`]. A pure function of the dirent, so both
+/// the File API and `Vfs` report the same number.
+pub fn stat_ino(dir_clu: u32, dir_off: u32) -> u32 {
+    if dir_clu == 0 && dir_off == 0 {
+        return ROOT_INO;
+    }
+    let idx = dir_off / ENT as u32;
+    let n = if dir_clu < 0x1_0000 && idx < 0x1_0000 {
+        (dir_clu << 16) | idx
+    } else {
+        dir_clu.wrapping_mul(0x9E37_79B9) ^ idx
     };
+    if n <= ROOT_INO { n + 2 } else { n }
 }
 
 impl FatVol {
@@ -301,8 +336,6 @@ impl FatVol {
             free: 0xFFFFFFFF,
             fsinfo_dirty: false,
             now: 0,
-            inos: [InoEnt::EMPTY; MAX_INOS],
-            next_ino: 2,
         };
         if info.fsinfo != 0 && info.fsinfo < info.rsvd {
             let mut fs = [0u8; SEC];
@@ -419,7 +452,7 @@ impl FatVol {
         }
     }
 
-    pub fn read<D: Disk>(
+    fn read<D: Disk>(
         &mut self,
         d: &mut D,
         clu: u32,
@@ -437,11 +470,26 @@ impl FatVol {
     }
 
     #[allow(clippy::too_many_arguments)] // FAT dirent + cluster + size update
-    pub fn write<D: Disk>(
+    fn write<D: Disk>(
         &mut self,
         d: &mut D,
         dir_clu: u32,
         dir_off: u32,
+        first: &mut u32,
+        size: &mut u32,
+        off: u64,
+        buf: &[u8],
+    ) -> Result<usize, FatError> {
+        self.write_chain(d, Some((dir_clu, dir_off)), first, size, off, buf)
+    }
+
+    /// Write `buf` at `off` into the chain at `*first`, growing it and
+    /// `*size` as needed. `dirent` is the short entry to keep in step, or
+    /// `None` for an unlinked file whose old slot may belong to another.
+    fn write_chain<D: Disk>(
+        &mut self,
+        d: &mut D,
+        dirent: Option<(u32, u32)>,
         first: &mut u32,
         size: &mut u32,
         off: u64,
@@ -455,21 +503,38 @@ impl FatVol {
             return Err(FatError::NoSpace);
         }
         let need = end as u32;
+        let old_first = *first;
         self.ensure_size(d, first, *size, need)?;
         self.write_at(d, *first, off, buf)?;
-        if need > *size {
-            *size = need;
-            self.update_short(d, dir_clu, dir_off, *first, *size)?;
+        if need > *size || *first != old_first {
+            *size = (*size).max(need);
+            if let Some((dir_clu, dir_off)) = dirent {
+                self.update_short(d, dir_clu, dir_off, *first, *size)?;
+            }
             d.flush()?;
         }
         Ok(buf.len())
     }
 
-    pub fn truncate<D: Disk>(
+    #[cfg(test)]
+    fn truncate<D: Disk>(
         &mut self,
         d: &mut D,
         dir_clu: u32,
         dir_off: u32,
+        first: &mut u32,
+        size: &mut u32,
+        new: u32,
+    ) -> Result<(), FatError> {
+        self.truncate_chain(d, Some((dir_clu, dir_off)), first, size, new)
+    }
+
+    /// Set the chain at `*first` to `new` bytes. `dirent` as for
+    /// [`Self::write_chain`].
+    fn truncate_chain<D: Disk>(
+        &mut self,
+        d: &mut D,
+        dirent: Option<(u32, u32)>,
         first: &mut u32,
         size: &mut u32,
         new: u32,
@@ -480,26 +545,28 @@ impl FatVol {
         if new > *size {
             self.ensure_size(d, first, *size, new)?;
             *size = new;
-            self.update_short(d, dir_clu, dir_off, *first, *size)?;
+            if let Some((dir_clu, dir_off)) = dirent {
+                self.update_short(d, dir_clu, dir_off, *first, *size)?;
+            }
             return d.flush();
         }
         // Size first while clusters stay allocated. Then drop the cluster
         // pointer (still allocated) so the dirent never names a free cluster.
-        self.update_short(d, dir_clu, dir_off, *first, new)?;
-        d.flush()?;
+        if let Some((dir_clu, dir_off)) = dirent {
+            self.update_short(d, dir_clu, dir_off, *first, new)?;
+            d.flush()?;
+        }
         let cb = self.info.clus_bytes() as u32;
         let keep = if new == 0 { 0 } else { new.div_ceil(cb) };
         if keep == 0 {
             let old = *first;
             *first = 0;
             *size = new;
-            self.update_short(d, dir_clu, dir_off, 0, new)?;
-            d.flush()?;
-            if old >= 2 {
-                self.free_chain(d, old)?;
-                self.commit_fat(d)?;
+            if let Some((dir_clu, dir_off)) = dirent {
+                self.update_short(d, dir_clu, dir_off, 0, new)?;
                 d.flush()?;
             }
+            self.free_chain(d, old)?;
             return Ok(());
         }
         let mut clu = *first;
@@ -582,13 +649,16 @@ impl FatVol {
         self.node_from_short(dir_clu, short_off, &ent, name)
     }
 
+    /// Remove `name` from `dir_clu` and return the removed entry's words.
+    /// Its clusters stay allocated: the caller frees them with
+    /// [`Self::free_chain`] once nothing holds the file.
     pub fn unlink<D: Disk>(
         &mut self,
         d: &mut D,
         dir_clu: u32,
         name: &[u8],
         rmdir: bool,
-    ) -> Result<(), FatError> {
+    ) -> Result<FatInode, FatError> {
         if name_is_dot(name) || name_is_dotdot(name) {
             return Err(FatError::Inval);
         }
@@ -605,14 +675,12 @@ impl FatVol {
         }
         self.mark_deleted(d, dir_clu, node.dir_off)?;
         d.flush()?;
-        if node.clu >= 2 {
-            self.free_chain(d, node.clu)?;
-            self.commit_fat(d)?;
-            d.flush()?;
-        }
-        Ok(())
+        Ok(FatInode::of_node(&node))
     }
 
+    /// Move `src_name` in `src_dir` to `dst_name` in `dst_dir`, replacing
+    /// a file there. The caller moves an open file's words to `to` and
+    /// frees `replaced` once nothing holds it.
     pub fn rename<D: Disk>(
         &mut self,
         d: &mut D,
@@ -620,17 +688,31 @@ impl FatVol {
         src_name: &[u8],
         dst_dir: u32,
         dst_name: &[u8],
-    ) -> Result<(), FatError> {
-        if src_name == dst_name && src_dir == dst_dir {
-            return Ok(());
-        }
+    ) -> Result<RenameMoved, FatError> {
         let src = self.lookup(d, src_dir, src_name)?;
+        let from = (src.dir_clu, src.dir_off);
+        if src_name == dst_name && src_dir == dst_dir {
+            return Ok(RenameMoved {
+                from,
+                to: from,
+                replaced: None,
+            });
+        }
+        self.check_name(dst_name)?;
+        if src.kind == InodeKind::Dir && self.in_subtree(d, src.clu, dst_dir)? {
+            return Err(FatError::Inval);
+        }
+        let mut replaced = None;
         match self.lookup(d, dst_dir, dst_name) {
+            // The source's own dirent, as a case-only rename finds it: the
+            // new name is written before the old one goes, so nothing is
+            // unlinked.
+            Ok(dst) if (dst.dir_clu, dst.dir_off) == from => {}
             Ok(dst) => {
                 if dst.kind == InodeKind::Dir {
                     return Err(FatError::IsDir);
                 }
-                self.unlink(d, dst_dir, dst_name, false)?;
+                replaced = Some(self.unlink(d, dst_dir, dst_name, false)?);
             }
             Err(FatError::NotFound) => {}
             Err(e) => return Err(e),
@@ -658,9 +740,64 @@ impl FatVol {
         ent[..11].copy_from_slice(&short);
         let short_off = ent_off + (n_lfn * ENT) as u32;
         self.write_dir_raw(d, dst_dir, short_off, &ent)?;
+        if src.kind == InodeKind::Dir && src_dir != dst_dir {
+            let parent = if dst_dir == self.info.root_clus {
+                0
+            } else {
+                dst_dir
+            };
+            self.set_dotdot(d, src.clu, parent)?;
+        }
         d.flush()?;
         self.mark_deleted(d, src_dir, src.dir_off)?;
-        d.flush()
+        d.flush()?;
+        Ok(RenameMoved {
+            from,
+            to: (dst_dir, short_off),
+            replaced,
+        })
+    }
+
+    /// The parent cluster `dir`'s `..` entry names, the root's for 0.
+    fn dotdot_of<D: Disk>(&mut self, d: &mut D, dir: u32) -> Result<u32, FatError> {
+        let mut ent = [0u8; ENT];
+        if !self.read_dir_raw(d, dir, ENT as u32, &mut ent)? || &ent[..11] != b"..         " {
+            return Err(FatError::Corrupt);
+        }
+        let clu = (le16(&ent, 20) as u32) << 16 | le16(&ent, 26) as u32;
+        Ok(if clu == 0 { self.info.root_clus } else { clu })
+    }
+
+    /// Point `dir`'s `..` entry at `parent` (0 for the root, as
+    /// `init_dir_cluster` writes it).
+    fn set_dotdot<D: Disk>(&mut self, d: &mut D, dir: u32, parent: u32) -> Result<(), FatError> {
+        let mut ent = [0u8; ENT];
+        if !self.read_dir_raw(d, dir, ENT as u32, &mut ent)? || &ent[..11] != b"..         " {
+            return Err(FatError::Corrupt);
+        }
+        put_le16(&mut ent, 20, (parent >> 16) as u16);
+        put_le16(&mut ent, 26, parent as u16);
+        self.write_dir_raw(d, dir, ENT as u32, &ent)
+    }
+
+    /// Whether directory `dir` is `top` or lies below it, walking `..` up
+    /// to the root.
+    fn in_subtree<D: Disk>(&mut self, d: &mut D, top: u32, dir: u32) -> Result<bool, FatError> {
+        let mut cur = dir;
+        let mut steps = 0u32;
+        loop {
+            if cur == top {
+                return Ok(true);
+            }
+            if cur == self.info.root_clus {
+                return Ok(false);
+            }
+            if steps > self.info.nclus {
+                return Err(FatError::Corrupt);
+            }
+            cur = self.dotdot_of(d, cur)?;
+            steps += 1;
+        }
     }
 
     pub fn sync<D: Disk>(&mut self, d: &mut D) -> Result<(), FatError> {
@@ -699,7 +836,7 @@ impl FatVol {
         dir_off: u32,
     ) -> Result<Node, FatError> {
         let mut n = Node::EMPTY;
-        n.ino = self.ino_of(dir_clu, dir_off, clu, size, kind);
+        n.ino = stat_ino(dir_clu, dir_off);
         n.kind = kind;
         n.clu = clu;
         n.size = size;
@@ -738,76 +875,63 @@ impl FatVol {
         Ok(n)
     }
 
-    fn ino_of(&mut self, dir_clu: u32, dir_off: u32, clu: u32, size: u32, kind: InodeKind) -> u32 {
-        if dir_clu == 0 && dir_off == 0 {
-            return ROOT_INO;
+    pub fn read_ino<D: Disk>(
+        &mut self,
+        d: &mut D,
+        n: &FatInode,
+        off: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, FatError> {
+        if n.kind == InodeKind::Dir {
+            return Err(FatError::IsDir);
         }
-        let mut i = 0usize;
-        while i < MAX_INOS {
-            if self.inos[i].used
-                && self.inos[i].dir_clu == dir_clu
-                && self.inos[i].dir_off == dir_off
-            {
-                self.inos[i].clu = clu;
-                self.inos[i].size = size;
-                self.inos[i].kind = kind;
-                return self.inos[i].ino;
-            }
-            i += 1;
-        }
-        i = 0;
-        while i < MAX_INOS {
-            if !self.inos[i].used {
-                let ino = self.next_ino;
-                self.next_ino = self.next_ino.saturating_add(1);
-                self.inos[i] = InoEnt {
-                    used: true,
-                    dir_clu,
-                    dir_off,
-                    ino,
-                    clu,
-                    size,
-                    kind,
-                };
-                return ino;
-            }
-            i += 1;
-        }
-        dir_clu.wrapping_mul(0x9E37) ^ dir_off ^ (clu << 1)
+        let size = u32::try_from(n.size).map_err(|_| FatError::Corrupt)?;
+        self.read(d, n.first_clu, size, off, buf)
     }
 
-    pub fn by_ino(&self, ino: u32) -> Result<Node, FatError> {
-        if ino == ROOT_INO {
-            return Ok(self.root());
+    /// Write `buf` at `off`, or at the end of the file when `append` is
+    /// set; returns the count written and the position it wrote at. The
+    /// dirent is kept in step while `linked`; an unlinked file's old slot
+    /// may belong to another. `n` is updated even when a later step
+    /// fails, since the chain may have grown.
+    pub fn write_ino<D: Disk>(
+        &mut self,
+        d: &mut D,
+        n: &mut FatInode,
+        linked: bool,
+        off: u64,
+        append: bool,
+        buf: &[u8],
+    ) -> Result<(usize, u64), FatError> {
+        if n.kind == InodeKind::Dir {
+            return Err(FatError::IsDir);
         }
-        let mut i = 0usize;
-        while i < MAX_INOS {
-            if self.inos[i].used && self.inos[i].ino == ino {
-                let e = self.inos[i];
-                let mut n = Node::EMPTY;
-                n.ino = e.ino;
-                n.kind = e.kind;
-                n.clu = e.clu;
-                n.size = e.size;
-                n.dir_clu = e.dir_clu;
-                n.dir_off = e.dir_off;
-                return Ok(n);
-            }
-            i += 1;
-        }
-        Err(FatError::NotFound)
+        let pos = if append { n.size } else { off };
+        let mut size = u32::try_from(n.size).map_err(|_| FatError::Corrupt)?;
+        let dirent = linked.then_some((n.dir_clu, n.dir_off));
+        let r = self.write_chain(d, dirent, &mut n.first_clu, &mut size, pos, buf);
+        n.size = u64::from(size);
+        Ok((r?, pos))
     }
 
-    pub fn put_size(&mut self, ino: u32, clu: u32, size: u32) {
-        let mut i = 0usize;
-        while i < MAX_INOS {
-            if self.inos[i].used && self.inos[i].ino == ino {
-                self.inos[i].clu = clu;
-                self.inos[i].size = size;
-                return;
-            }
-            i += 1;
+    /// Set the file to `new` bytes; `linked` and `n` as for
+    /// [`Self::write_ino`].
+    pub fn truncate_ino<D: Disk>(
+        &mut self,
+        d: &mut D,
+        n: &mut FatInode,
+        linked: bool,
+        new: u64,
+    ) -> Result<(), FatError> {
+        let new = u32::try_from(new).map_err(|_| FatError::Inval)?;
+        if n.kind == InodeKind::Dir {
+            return Err(FatError::IsDir);
         }
+        let mut size = u32::try_from(n.size).map_err(|_| FatError::Corrupt)?;
+        let dirent = linked.then_some((n.dir_clu, n.dir_off));
+        let r = self.truncate_chain(d, dirent, &mut n.first_clu, &mut size, new);
+        n.size = u64::from(size);
+        r
     }
 
     fn check_name(&self, name: &[u8]) -> Result<(), FatError> {
@@ -1493,7 +1617,18 @@ impl FatVol {
         Err(FatError::NoSpace)
     }
 
-    fn free_chain<D: Disk>(&mut self, d: &mut D, mut clu: u32) -> Result<(), FatError> {
+    /// Free the chain at `first_clu` of a file nothing holds any more,
+    /// as the last close of an unlinked file does, and commit the FAT.
+    pub fn free_chain<D: Disk>(&mut self, d: &mut D, first_clu: u32) -> Result<(), FatError> {
+        if first_clu < 2 {
+            return Ok(());
+        }
+        self.release_chain(d, first_clu)?;
+        self.commit_fat(d)?;
+        d.flush()
+    }
+
+    fn release_chain<D: Disk>(&mut self, d: &mut D, mut clu: u32) -> Result<(), FatError> {
         let mut n = 0u32;
         while clu >= 2 && !is_eoc(clu) {
             let next = self.fat_get(d, clu)?;
@@ -2243,11 +2378,11 @@ mod tests {
             assert!(dir.is_dir());
             v.create(d, dir.clu, b"a.txt", false).unwrap();
             assert_eq!(
-                v.unlink(d, v.info.root_clus, b"sub", true).unwrap_err(),
+                unlink_free(v, d, v.info.root_clus, b"sub", true).unwrap_err(),
                 FatError::NotEmpty
             );
-            v.unlink(d, dir.clu, b"a.txt", false).unwrap();
-            v.unlink(d, v.info.root_clus, b"sub", true).unwrap();
+            unlink_free(v, d, dir.clu, b"a.txt", false).unwrap();
+            unlink_free(v, d, v.info.root_clus, b"sub", true).unwrap();
             assert_eq!(
                 v.lookup(d, v.info.root_clus, b"sub").unwrap_err(),
                 FatError::NotFound
@@ -2272,7 +2407,7 @@ mod tests {
             let mut out = [0u8; 16];
             let got = v.read(d, clu, size, 0, &mut out).unwrap();
             assert_eq!(got, 10);
-            v.unlink(d, v.info.root_clus, b"t.bin", false).unwrap();
+            unlink_free(v, d, v.info.root_clus, b"t.bin", false).unwrap();
             v.sync(d).unwrap();
         });
         fsck(&b);
@@ -2426,5 +2561,344 @@ mod tests {
         assert_eq!(FatError::NotSupp.as_str(), "not supp");
         assert_eq!(FatError::NotSupp.to_fs(), FsError::NotSupp);
         assert_eq!(FatError::Corrupt.to_fs(), FsError::Inval);
+    }
+
+    #[test]
+    fn fixed_tables_match_limits() {
+        assert_eq!(Node::EMPTY.name.len(), crate::limits::MAX_NAME);
+    }
+
+    /// Unlink `name` and free its clusters, as the last put of a file
+    /// nothing holds does.
+    fn unlink_free(
+        v: &mut FatVol,
+        d: &mut MemDisk,
+        dir: u32,
+        name: &[u8],
+        rmdir: bool,
+    ) -> Result<(), FatError> {
+        let gone = v.unlink(d, dir, name, rmdir)?;
+        v.free_chain(d, gone.first_clu)
+    }
+
+    /// Create `name` in `dir`; the caller-owned words of the new file.
+    fn create_words(v: &mut FatVol, d: &mut MemDisk, dir: u32, name: &[u8]) -> FatInode {
+        let n = v.create(d, dir, name, false).unwrap();
+        FatInode::of_node(&n)
+    }
+
+    fn read_back(v: &mut FatVol, d: &mut MemDisk, n: &FatInode) -> Vec<u8> {
+        let size = n.size as usize;
+        let mut out = vec![0u8; size];
+        let got = v.read_ino(d, n, 0, &mut out).unwrap();
+        assert_eq!(got, size);
+        out
+    }
+
+    #[test]
+    fn fat_unlinked_open_frees_at_last_iput() {
+        let mut b = fresh(INITRD_BYTES);
+        with_vol(&mut b, |v, d| {
+            let root = v.info.root_clus;
+            let before = v.free;
+            let mut w = create_words(v, d, root, b"GONE.BIN");
+            assert_eq!(
+                v.write_ino(d, &mut w, true, 0, false, &[5u8; 1500])
+                    .unwrap(),
+                (1500, 0)
+            );
+            let held = v.free;
+            assert!(held < before);
+            let gone = v.unlink(d, root, b"GONE.BIN", false).unwrap();
+            assert_eq!((gone.dir_clu, gone.dir_off), (w.dir_clu, w.dir_off));
+            assert_eq!(
+                v.lookup(d, root, b"GONE.BIN").unwrap_err(),
+                FatError::NotFound
+            );
+            assert_eq!(v.free, held, "an open unlinked file keeps its clusters");
+            assert_eq!(read_back(v, d, &w), vec![5u8; 1500]);
+            assert_eq!(
+                v.write_ino(d, &mut w, false, 0, true, b"xy").unwrap(),
+                (2, 1500)
+            );
+            v.free_chain(d, w.first_clu).unwrap();
+            assert_eq!(v.free, before, "the last put frees the chain");
+            let counted = v.count_free(d).unwrap();
+            assert_eq!(v.free, counted);
+            v.sync(d).unwrap();
+        });
+        fsck(&b);
+    }
+
+    #[test]
+    fn fat_create_in_freed_slot_new_inode() {
+        let mut b = fresh(INITRD_BYTES);
+        with_vol(&mut b, |v, d| {
+            let root = v.info.root_clus;
+            let mut old = create_words(v, d, root, b"A.BIN");
+            v.write_ino(d, &mut old, true, 0, false, b"old").unwrap();
+            v.unlink(d, root, b"A.BIN", false).unwrap();
+            let n = v.create(d, root, b"B.BIN", false).unwrap();
+            assert_eq!(n.dir_off, old.dir_off, "the new file takes the freed slot");
+            let mut new = FatInode::of_node(&n);
+            v.write_ino(d, &mut new, true, 0, false, b"new!").unwrap();
+            // Growing the unlinked file never writes its old dirent slot.
+            v.write_ino(d, &mut old, false, 0, true, &[1u8; 700])
+                .unwrap();
+            let got = v.lookup(d, root, b"B.BIN").unwrap();
+            assert_eq!((got.size, got.clu), (4, new.first_clu));
+            assert_ne!(old.first_clu, new.first_clu);
+            assert_eq!(&read_back(v, d, &old)[..3], b"old");
+            assert_eq!(read_back(v, d, &new), b"new!");
+            v.free_chain(d, old.first_clu).unwrap();
+            let counted = v.count_free(d).unwrap();
+            assert_eq!(v.free, counted);
+            v.sync(d).unwrap();
+        });
+        fsck(&b);
+    }
+
+    #[test]
+    fn fat_rename_rekeys_open_inode() {
+        let mut b = fresh(INITRD_BYTES);
+        with_vol(&mut b, |v, d| {
+            let root = v.info.root_clus;
+            let a = v.create(d, root, b"a", true).unwrap();
+            let bb = v.create(d, root, b"b", true).unwrap();
+            let mut w = create_words(v, d, a.clu, b"X.TXT");
+            v.write_ino(d, &mut w, true, 0, false, b"hi").unwrap();
+            let moved = v.rename(d, a.clu, b"X.TXT", bb.clu, b"Y.TXT").unwrap();
+            assert_eq!(moved.from, (w.dir_clu, w.dir_off));
+            assert_eq!(moved.replaced, None);
+            (w.dir_clu, w.dir_off) = moved.to;
+            let y = v.lookup(d, bb.clu, b"Y.TXT").unwrap();
+            assert_eq!((w.dir_clu, w.dir_off), (bb.clu, y.dir_off));
+            assert_eq!(y.ino, stat_ino(w.dir_clu, w.dir_off));
+            v.write_ino(d, &mut w, true, 0, true, b" there").unwrap();
+            let y = v.lookup(d, bb.clu, b"Y.TXT").unwrap();
+            assert_eq!(y.size, 8);
+            assert_eq!(read_back(v, d, &w), b"hi there");
+            v.sync(d).unwrap();
+        });
+        fsck(&b);
+    }
+
+    #[test]
+    fn fat_rename_reports_replaced() {
+        let mut b = fresh(INITRD_BYTES);
+        with_vol(&mut b, |v, d| {
+            let root = v.info.root_clus;
+            let mut src = create_words(v, d, root, b"S.BIN");
+            v.write_ino(d, &mut src, true, 0, false, &[1u8; 700])
+                .unwrap();
+            let mut dst = create_words(v, d, root, b"D.BIN");
+            v.write_ino(d, &mut dst, true, 0, false, &[2u8; 900])
+                .unwrap();
+            let held = v.free;
+            let moved = v.rename(d, root, b"S.BIN", root, b"D.BIN").unwrap();
+            let gone = moved.replaced.unwrap();
+            assert_eq!((gone.dir_clu, gone.dir_off), (dst.dir_clu, dst.dir_off));
+            assert_eq!(gone.first_clu, dst.first_clu);
+            assert_eq!(v.free, held, "the replaced file keeps its clusters");
+            v.free_chain(d, gone.first_clu).unwrap();
+            let got = v.lookup(d, root, b"D.BIN").unwrap();
+            assert_eq!((got.clu, got.size), (src.first_clu, 700));
+            let counted = v.count_free(d).unwrap();
+            assert_eq!(v.free, counted);
+            v.sync(d).unwrap();
+        });
+        fsck(&b);
+    }
+
+    #[test]
+    fn fat_inode_two_descriptors() {
+        let mut b = fresh(INITRD_BYTES);
+        with_vol(&mut b, |v, d| {
+            let root = v.info.root_clus;
+            let n = v.create(d, root, b"two.bin", false).unwrap();
+            // One inode's words, reached through two descriptors' offsets.
+            let mut w = FatInode::of_node(&n);
+            let (one, two) = (0u64, 0u64);
+            assert_eq!(
+                v.write_ino(d, &mut w, true, one, false, b"AAAA").unwrap(),
+                (4, 0)
+            );
+            assert_eq!(
+                v.write_ino(d, &mut w, true, two, false, b"BB").unwrap(),
+                (2, 0)
+            );
+            let first = w.first_clu;
+            assert!(first >= 2);
+            assert_eq!(read_back(v, d, &w), b"BBAA");
+            v.truncate_ino(d, &mut w, true, 0).unwrap();
+            assert_eq!(w.first_clu, 0);
+            assert_eq!(w.size, 0);
+            assert_eq!(
+                v.write_ino(d, &mut w, true, 5000, false, &[3u8; 10])
+                    .unwrap(),
+                (10, 5000)
+            );
+            assert_eq!(w.size, 5010);
+            let got = v.lookup(d, root, b"two.bin").unwrap();
+            assert_eq!(got.size, 5010);
+            assert_eq!(got.clu, w.first_clu);
+            let data = read_back(v, d, &w);
+            assert!(data[..5000].iter().all(|&x| x == 0));
+            assert_eq!(&data[5000..], &[3u8; 10]);
+            v.sync(d).unwrap();
+        });
+        with_vol(&mut b, |v, d| {
+            let counted = v.count_free(d).unwrap();
+            assert_eq!(v.free, counted, "FSInfo free count after a remount");
+        });
+        fsck(&b);
+    }
+
+    #[test]
+    fn stat_ino_distinct() {
+        assert_eq!(stat_ino(0, 0), ROOT_INO);
+        let mut seen = std::collections::HashSet::new();
+        for clu in [2u32, 3, 7, 0xFFFF] {
+            for off in (0..64u32).map(|i| i * ENT as u32) {
+                let n = stat_ino(clu, off);
+                assert!(n != 0 && n != ROOT_INO);
+                assert!(seen.insert(n), "stat_ino({clu}, {off}) repeats");
+            }
+        }
+        for (clu, off) in [
+            (0x1_0000, 0),
+            (0x0FFF_FFFF, 32),
+            (2, 0x20_0000),
+            (0, 32),
+            (1, 0),
+        ] {
+            let n = stat_ino(clu, off);
+            assert!(n != 0 && n != ROOT_INO, "fold of ({clu}, {off})");
+        }
+    }
+
+    /// `n` bytes of a pattern that differs per `seed`.
+    fn pattern(seed: u8, n: usize) -> Vec<u8> {
+        (0..n).map(|i| (i as u8).wrapping_mul(7) ^ seed).collect()
+    }
+
+    /// Names in `dir` equal to `name` ignoring ASCII case.
+    fn ci_names(v: &mut FatVol, d: &mut MemDisk, dir: u32, name: &[u8]) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut node = Node::EMPTY;
+        let mut cookie = 0u64;
+        while let Some(next) = v.readdir(d, dir, cookie, &mut node).unwrap() {
+            if node.name().eq_ignore_ascii_case(name) {
+                out.push(node.name().to_vec());
+            }
+            cookie = next;
+        }
+        out
+    }
+
+    fn case_only_rename(from: &[u8], to: &[u8]) {
+        let mut b = fresh(INITRD_BYTES);
+        let (clu, size, data) = with_vol(&mut b, |v, d| {
+            let root = v.info.root_clus;
+            // Leave three deleted slots ahead of `from`, so the rename's two
+            // new entries fit without growing the directory: `dir_reserve`
+            // still extends one at the first 0x00 entry (F053).
+            v.create(d, root, b"scratch-slot.bin", false).unwrap();
+            unlink_free(v, d, root, b"scratch-slot.bin", false).unwrap();
+            let data = pattern(0x5A, 3 * v.info.clus_bytes());
+            let mut w = create_words(v, d, root, from);
+            v.write_ino(d, &mut w, true, 0, false, &data).unwrap();
+            let src = v.lookup(d, root, from).unwrap();
+            let free = v.free;
+            v.rename(d, root, from, root, to).unwrap();
+            assert_eq!(v.free, free, "a case-only rename frees nothing");
+            let got = v.lookup(d, root, to).unwrap();
+            assert_eq!((got.clu, got.size), (src.clu, src.size));
+            let mut out = vec![0u8; data.len()];
+            v.read(d, got.clu, got.size, 0, &mut out).unwrap();
+            assert_eq!(out, data);
+            assert_eq!(ci_names(v, d, root, from), vec![to.to_vec()]);
+            v.sync(d).unwrap();
+            (got.clu, got.size, data)
+        });
+        with_vol(&mut b, |v, d| {
+            let root = v.info.root_clus;
+            let mut w = create_words(v, d, root, b"OTHER.BIN");
+            v.write_ino(d, &mut w, true, 0, false, &pattern(0xA5, data.len()))
+                .unwrap();
+            let got = v.lookup(d, root, to).unwrap();
+            assert_eq!((got.clu, got.size), (clu, size));
+            let mut out = vec![0u8; data.len()];
+            v.read(d, got.clu, got.size, 0, &mut out).unwrap();
+            assert_eq!(out, data, "the renamed file's clusters were reused");
+            v.sync(d).unwrap();
+        });
+        fsck(&b);
+    }
+
+    #[test]
+    fn rename_case_only() {
+        case_only_rename(b"a", b"A");
+    }
+
+    #[test]
+    fn rename_case_only_lfn() {
+        case_only_rename(b"hello.txt", b"Hello.txt");
+    }
+
+    #[test]
+    fn rename_into_own_subtree_einval() {
+        let mut b = fresh(INITRD_BYTES);
+        with_vol(&mut b, |v, d| {
+            let root = v.info.root_clus;
+            let p = v.create(d, root, b"p", true).unwrap();
+            let c = v.create(d, p.clu, b"c", true).unwrap();
+            let free = v.free;
+            assert_eq!(
+                v.rename(d, root, b"p", c.clu, b"q").unwrap_err(),
+                FatError::Inval
+            );
+            assert_eq!(
+                v.rename(d, root, b"p", p.clu, b"q").unwrap_err(),
+                FatError::Inval
+            );
+            assert_eq!(v.lookup(d, root, b"p").unwrap().clu, p.clu);
+            assert_eq!(v.lookup(d, p.clu, b"c").unwrap().clu, c.clu);
+            assert_eq!(v.free, free);
+            v.sync(d).unwrap();
+        });
+        fsck(&b);
+    }
+
+    #[test]
+    fn rename_dir_dotdot_names_new_parent() {
+        let mut b = fresh(INITRD_BYTES);
+        with_vol(&mut b, |v, d| {
+            let root = v.info.root_clus;
+            let a = v.create(d, root, b"a", true).unwrap();
+            let bb = v.create(d, root, b"b", true).unwrap();
+            let dd = v.create(d, a.clu, b"d", true).unwrap();
+            let mut w = create_words(v, d, dd.clu, b"IN.TXT");
+            v.write_ino(d, &mut w, true, 0, false, b"inside").unwrap();
+            v.rename(d, a.clu, b"d", bb.clu, b"d").unwrap();
+            assert_eq!(v.dotdot_of(d, dd.clu).unwrap(), bb.clu);
+            let mut ent = [0u8; ENT];
+            v.read_dir_raw(d, dd.clu, ENT as u32, &mut ent).unwrap();
+            assert_eq!(
+                (le16(&ent, 20) as u32) << 16 | le16(&ent, 26) as u32,
+                bb.clu
+            );
+            v.rename(d, bb.clu, b"d", root, b"d").unwrap();
+            v.read_dir_raw(d, dd.clu, ENT as u32, &mut ent).unwrap();
+            assert_eq!((le16(&ent, 20), le16(&ent, 26)), (0, 0));
+            let got = v.lookup(d, root, b"d").unwrap();
+            assert_eq!(got.clu, dd.clu);
+            let f = v.lookup(d, got.clu, b"IN.TXT").unwrap();
+            let mut out = [0u8; 6];
+            v.read(d, f.clu, f.size, 0, &mut out).unwrap();
+            assert_eq!(&out, b"inside");
+            v.sync(d).unwrap();
+        });
+        fsck(&b);
     }
 }

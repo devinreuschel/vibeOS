@@ -126,7 +126,7 @@ names, Linux values:
 | `ENOEXEC` | 8 | malformed ELF, `ET_DYN`, or `PT_INTERP` |
 | `EBADF` | 9 | closed / out-of-range fd |
 | `ECHILD` | 10 | `wait4` with no matching child |
-| `EAGAIN` | 11 | `fork` with pids 2 to 15 all in use, zombies included (`MAX_PROCS` is 16; pid 0 is unused and pid 1 is reserved for `/sbin/init`) |
+| `EAGAIN` | 11 | `fork` with pids 2 to 17 all in use, zombies included (`MAX_PROCS` is 18; pid 0 is unused and pid 1 is reserved for `/sbin/init`) |
 | `ENOMEM` | 12 | AS clone / load; an ELF file above 64 KiB |
 | `EACCES` | 13 | defined; no syscall returns it |
 | `EFAULT` | 14 | bad user pointer / length |
@@ -136,6 +136,7 @@ names, Linux values:
 | `EISDIR` | 21 | |
 | `EINVAL` | 22 | `lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the non-Linux cases in §2.1 |
 | `EMFILE` | 24 | per-process fd table full (`open`); the non-Linux cases in §2.1 |
+| `EFBIG` | 27 | a vibefs `write` that starts at or past the file-size limit, byte 2^44 − 4096 (VIBEFS.md §3) |
 | `ENAMETOOLONG` | 36 | path of 256 bytes or more; name above 64 bytes; an `execve` argv string of 256 bytes or more, which Linux accepts (ROADMAP §10.5). ROADMAP §13.9 moves the path and name limits to Linux's 4096 and 255 |
 | `ENOSYS` | 38 | unknown number |
 
@@ -164,13 +165,12 @@ F083) replaces them with one `KError` table that generates §2.
   UTF-8; Linux hands a path's bytes to the filesystem and accepts any
   argument byte but NUL (ROADMAP §10.4)
 - `dup` with a full fd table returns `EBADF` (Linux `EMFILE`) (ROADMAP §10.4)
-- `ENFILE`, `EFBIG`, `ENOSPC`, `ESPIPE`, `ENOTEMPTY`, and `ELOOP` are not
+- `ENFILE`, `ENOSPC`, `ESPIPE`, `ENOTEMPTY`, and `ELOOP` are not
   defined in `src/syscall.rs` (F083; ROADMAP §10.4)
-- `fork` near memory exhaustion panics instead of returning `ENOMEM`:
-  `thread_init::spawn_inner` calls `expect` on its stack allocation. More
-  than 8 exits in a row, each switching to a thread resumed from timer
-  preemption, overflow the 8-entry deferred-stack list, and `defer_free`
-  panics on a full list (F010; ROADMAP §10.10)
+- `fork` near memory exhaustion: a kernel stack that cannot be allocated
+  returns `ENOMEM` and frees the clone, but the child's TCB box and the
+  boxed address space panic when the heap cannot grow, until ROADMAP
+  §10.4's fallible allocation (F010; ROADMAP §10.4)
 
 ---
 
@@ -212,7 +212,7 @@ the errno the baseline returns: `read(-1, <unmapped>, 1)` is `EBADF`, and
 | 500 | `psinfo` | 2 | `rdi` buf, `rsi` len; vibeOS-specific |
 
 `sched_yield` calls the kernel `yield_now` when the caller has a pid
-(bound `run_user` or a spawned process). A kernel-side `dispatch()`
+(any spawned process). A kernel-side `dispatch()`
 probe with no process (ktest, IF off) returns `0` without scheduling.
 
 ### 3.1 Behavior and differences from Linux
@@ -228,11 +228,14 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   a full open-file or fd table `open(O_TRUNC)` truncates the file and then
   fails with `EMFILE` (F057;
   ROADMAP §10.4)
-- `lseek`: any offset from 0 to `i64::MAX` is accepted, and `SEEK_END`
-  uses the 32-bit `OpenFile.size`. A vibefs `write` just below file
-  offset 2^44 makes the next access to that block panic the kernel,
-  since both Cargo profiles check overflow (DESIGN §3.5), and a write at
-  2^44 or above overwrites the file's low blocks (F008; ROADMAP §10.11)
+- `lseek`: `SEEK_END` reads the size from the file's inode (FAT's
+  counted in-core inode or the vibefs inode), so it sees writes through
+  any descriptor. On a vibefs file a resulting offset above 2^44 − 4096
+  (VIBEFS.md §3) returns `EINVAL`, as Linux's does past a filesystem's
+  maximum file size; a `write` that starts at or past the limit returns
+  `EFBIG`, and one that would cross it is cut short at the limit, as
+  Linux's is. On a FAT file any offset from 0 to `i64::MAX` is accepted
+  (F008; ROADMAP §10.11)
 - `execve`: the image is read whole and must be at most 64 KiB (`ENOMEM`)
   until ROADMAP §10.4 removes `MAX_ELF`. `p_memsz` is bounded only by
   `USER_END`, so a small ELF can map pages until physical memory runs out,
@@ -253,8 +256,16 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   `pid`, process group `-pid` (F149; ROADMAP §13.7). A `pid` that names a
   zombie returns `ESRCH`; Linux returns 0 (ROADMAP §13.7). A
   default-terminate or default-stop signal to pid 1 kills or stops init,
-  after which orphans stay zombies; Linux delivers to init only the signals
-  it handles (F068; ROADMAP §10.5)
+  after which an orphan has no reaper and is freed when it exits (`exit`
+  below); Linux delivers to init only the signals it handles (F068; ROADMAP
+  §10.5)
+- `exit`: the caller's children go to the reaper `proc::reaper_for` picks:
+  pid 1 while init is live or stopped; otherwise none, so a child reads
+  `getppid()` 0 and is freed when it exits (a zombie child at once), as in
+  the `kernel_tests` and `kernel_shell` builds. A process the kernel starts
+  has parent 0: `/sbin/init`, and the boot `/hello` and the in-guest test
+  programs, which `proc_init::wait_kernel` reaps. Linux reparents to a subreaper or
+  init and panics when init exits (ROADMAP §10.5, F068)
 - `psinfo`: writes one `<pid> <ppid> <state> <name>` line per process
   (state `run`, `stop`, or `zombie`). It formats the whole lines that fit in
   512 bytes and copies at most `rsi` of those bytes. Number 500 is in the
@@ -272,10 +283,14 @@ are the console mux (serial and framebuffer).
 
 A file fd names a slot in one system-wide open-file table,
 `file_init::FILES` (16 entries), shared by every process with no
-per-process quota. The slot holds the offset, size, and open flags, so fds
-that `dup` or `fork` copied share one offset. While the table is full, every
-`open` and every `execve` (which needs a slot to read the image) fails with
-`EMFILE` in every process (F057; ROADMAP §10.4).
+per-process quota, and the generation the slot had when the file was
+opened. The slot holds a reference to the file's inode (a counted
+reference to FAT's in-core inode, or a vibefs inode number), the offset,
+and the open flags, so fds that `dup` or `fork` copied share one offset,
+and separate opens of one FAT file share its size and first cluster.
+While the table is full, every `open` and every `execve` (which needs a
+slot to read the image) fails with `EMFILE` in every process (F057;
+ROADMAP §10.4).
 
 - `dup` / `dup2` copy the slot and clear `FD_CLOEXEC` on the new fd
 - `open` `O_CLOEXEC` becomes per-fd `FD_CLOEXEC`; `execve` drops those
@@ -291,17 +306,19 @@ that `dup` or `fork` copied share one offset. While the table is full, every
   reach the FAT `vibe` directory that the vibefs mount hides, and
   `/vibe/./f` returns `EINVAL` (F056, F086; ROADMAP §10.4)
 - `read`, `write`, and `lseek` copy the slot out, drop the table lock for
-  the I/O, and write the whole slot back, `refs` included, so two calls on
-  one open file that overlap lose one call's update, and a stale `refs` can
-  free a slot another descriptor still holds. They cannot overlap while
-  syscall bodies run with IF=0, every user thread runs on one CPU, and no
-  file syscall blocks. ROADMAP §10.4 keeps `refs` out of the write-back
-  before §10.6 makes syscall bodies preemptible; after that a process and
-  its `fork` child can overlap on one inherited descriptor and lose an
-  offset update until §13.1's position lock (F055)
+  the I/O, and write back only the offset. `refs` and `used` change only
+  in `addref` and `close`, under the table lock, and the `close` that
+  frees a slot bumps its generation, so a lookup or write-back through a
+  descriptor whose slot was closed and reused fails with `EBADF`. Two
+  calls on one open file that overlap still lose one call's offset update.
+  They cannot overlap while syscall bodies run with IF=0, every user
+  thread runs on one CPU, and no file syscall blocks; after §10.6 makes
+  syscall bodies preemptible a process and its `fork` child can overlap on
+  one inherited descriptor and lose an offset update until §13.1's
+  position lock (F055)
 - a kernel-side `dispatch()` probe with no process still sees `getpid=0`
-  and `EBADF` for a closed fd; `with_user_as` binds a temporary process
-  so pointer-validation tests use a process fd table
+  and `EBADF` for a closed fd; pointer-validation tests run as spawned
+  ring-3 programs
 
 ---
 
@@ -355,12 +372,11 @@ does not meet this yet:
   runs with IF=1, so an interrupt between its `mov gs` and its `iretq`
   reads `gs:[0]` at VA 0 at CPL 0 and halts (F006; ROADMAP §10.6)
 - a console `write` keeps IF=0 for its whole length and acks no IPI, so a
-  TLB shootdown that another CPU sends during a write longer than about
-  1 s panics in `wait_acks` (F011; ROADMAP §10.10)
-- a vibefs `write` just below file offset 2^44 (§3.1; F008, ROADMAP §10.11)
+  TLB shootdown that another CPU sends during a write waits in
+  `wait_acks`, which logs the late CPU once a second, until the write ends
+  (F011; ROADMAP §10.10)
 - an ELF with a huge `p_memsz` (§3.1; F009, ROADMAP §10.6)
-- a `fork` near memory exhaustion, or a burst of exits (§2.1; F010,
-  ROADMAP §10.10)
+- a `fork` near memory exhaustion (§2.1; F010, ROADMAP §10.10)
 
 ---
 

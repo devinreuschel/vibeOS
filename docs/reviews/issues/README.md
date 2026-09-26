@@ -10,14 +10,14 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 |---|---|---|---|---|---|---|
 | [A1](A1-directory-per-subsystem.md) | Directory per subsystem, matching a corrected module map | High | L | III | Q1, A2 | `proposed` |
 | [A2](A2-portable-half-host-tests.md) | Make the portable half portable; host tests on any host | High | M | II | C1 | `in progress (#88)` |
-| [A3](A3-vfs-single-dispatch.md) | Make the VFS the only file-operation dispatch point | High | L | III | Q3 | `proposed` |
+| [A3](A3-vfs-single-dispatch.md) | Make the VFS the only file-operation dispatch point | High | L | III | Q3 | `in progress (#194)` |
 | [A4](A4-break-module-cycles.md) | Break the mutual dependencies between kernel modules | Medium | M | III | A3, A1 | `proposed` |
-| [Q1](Q1-fmt-clippy-warnings-gates.md) | Land the promised gates: rustfmt, clippy, `-D warnings` | High | S | I | — | `in progress (#80)` |
+| [Q1](Q1-fmt-clippy-warnings-gates.md) | Land the promised gates: rustfmt, clippy, `-D warnings` | High | S | I | — | `implemented (#80, #194)` |
 | [Q2](Q2-isolate-test-hooks.md) | Isolate `kernel_tests` scaffolding from production modules | Medium | M | II | Q1 | `proposed` |
 | [Q3](Q3-boot-cell-primitive.md) | One boot-cell primitive; retire `static mut` and `&'static mut` accessors | Medium | S+M | II | — | `implemented (#87)` |
 | [Q4](Q4-naming-consistency.md) | Naming and feature-flag consistency | Low | S | II | — | `implemented (#83)` |
 | [Q5](Q5-split-monolithic-files.md) | Split monolithic files; add a size guard | Medium | M | III | A1, T1 | `proposed` |
-| [D1](D1-heap-backed-tables.md) | Heap-allocate the growable fixed-capacity tables (Phase 10) | High | L | III | Q3, A3 | `proposed` |
+| [D1](D1-heap-backed-tables.md) | Heap-allocate the growable fixed-capacity tables (Phase 10) | High | L | III | Q3, A3 | `in progress (#194)` |
 | [D2](D2-driver-instances.md) | Driver and volume instances instead of module singletons | Medium | L | III | A1, Q3 | `proposed` |
 | [D3](D3-bootinfo.md) | Capture boot information once (`BootInfo`) | Low | S | I | Q3 | `implemented (#90, #91)` |
 | [E1](E1-parser-robustness-lints.md) | Lock in parser robustness with restriction lints | Low | S | II | Q1 | `in progress (#86)` |

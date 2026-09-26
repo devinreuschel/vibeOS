@@ -52,8 +52,9 @@ pub const IPI_RESCHEDULE: u8 = 0xFD;
 pub const IPI_HALT: u8 = 0xFE;
 pub const LAPIC_SPURIOUS: u8 = 0xFF;
 
-/// Exception vectors that push an error code. Installing a no-code
-/// `x86-interrupt` handler on these misaligns the iret frame.
+/// Exception vectors that push an error code. `arch::idt`'s stub table
+/// reads this in a `const` context to decide which stubs push a zero, so
+/// a wrong answer misaligns that vector's frame.
 pub const fn pushes_error_code(vec: u8) -> bool {
     matches!(vec, DF | TS | NP | SS | GP | PF | AC | CP | 29 | 30)
 }
@@ -127,12 +128,11 @@ mod tests {
 
     #[test]
     fn error_code_set_matches_sdm() {
-        for v in 0u8..=31 {
-            let want = matches!(v, 8 | 10 | 11 | 12 | 13 | 14 | 17 | 21 | 29 | 30);
+        for v in 0u8..=255 {
+            // SDM Vol. 3A Table 6-1; nothing at 32 or above pushes one.
+            let want = v < 32 && matches!(v, 8 | 10 | 11 | 12 | 13 | 14 | 17 | 21 | 29 | 30);
             assert_eq!(pushes_error_code(v), want, "vec {v}");
         }
-        assert!(!pushes_error_code(IRQ_PIT));
-        assert!(!pushes_error_code(LAPIC_SPURIOUS));
     }
 
     #[test]

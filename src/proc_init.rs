@@ -12,16 +12,17 @@ use core::fmt::Write;
 
 use vibeos::addr_space::AddressSpace;
 use vibeos::desc::InterruptFrame;
-use vibeos::fs::FsError;
+use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, SeekFrom};
 use vibeos::kbd::{DecodedKey, NamedKey};
 use vibeos::proc::{
-    Creds, Cwd, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, MAX_FDS, MAX_PROCS, ProcState, SIGBUS,
-    SIGCHLD, SIGCONT, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGSTOP, SigAct, WNOHANG, default_action,
-    fd_flags_from_open, sig_name, wait_exited, wait_signaled, wait_stopped,
+    Creds, Cwd, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, InitState, MAX_FDS, MAX_PROCS,
+    ProcState, SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGSTOP, SIGTRAP,
+    SigAct, WNOHANG, default_action, fd_flags_from_open, reaper_for, sig_name, wait_exited,
+    wait_signaled, wait_stopped,
 };
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::syscall::{
-    self, E2BIG, EAGAIN, EBADF, EBUSY, ECHILD, EEXIST, EFAULT, EINVAL, EIO, EISDIR, EMFILE,
+    self, E2BIG, EAGAIN, EBADF, EBUSY, ECHILD, EEXIST, EFAULT, EFBIG, EINVAL, EIO, EISDIR, EMFILE,
     ENAMETOOLONG, ENOENT, ENOEXEC, ENOMEM, ENOSYS, ENOTDIR, ESRCH, F_GETFD, F_SETFD, SYS_CLOSE,
     SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_EXIT, SYS_FCNTL, SYS_FORK, SYS_GETPID, SYS_GETPPID,
     SYS_KILL, SYS_LSEEK, SYS_OPEN, SYS_PSINFO, SYS_READ, SYS_SCHED_YIELD, SYS_WAIT4, SYS_WRITE,
@@ -37,8 +38,8 @@ use crate::console_init;
 use crate::file_init;
 use crate::serial::Serial;
 use crate::syscall_init;
-use crate::thread_init;
-use crate::user_init::{self, LoadError};
+use crate::thread_init::{self, SpawnError};
+use crate::user_init::{self, LoadError, Loaded};
 
 struct Proc {
     state: ProcState,
@@ -51,10 +52,9 @@ struct Proc {
     fds: FdTable,
     wait_status: u32,
     pending: u32,
-    bound: bool,
+    /// No reaper: freed at exit, ROADMAP §10.5.
+    autoreap: bool,
     space: Option<Box<AddressSpace>>,
-    /// Bound `run_user` / probe: caller owns the AS. Spawned uses `space`.
-    borrowed: *const AddressSpace,
     entry: UserRegs,
     wait_wq: WaitQueue,
     stop_wq: WaitQueue,
@@ -73,9 +73,8 @@ impl Proc {
             fds: FdTable::empty(),
             wait_status: 0,
             pending: 0,
-            bound: false,
+            autoreap: false,
             space: None,
-            borrowed: core::ptr::null(),
             entry: UserRegs::empty(),
             wait_wq: WaitQueue::new(),
             stop_wq: WaitQueue::new(),
@@ -83,6 +82,8 @@ impl Proc {
     }
 }
 
+/// The process table. `procs[0]` is never a process: its `wait_wq` is the
+/// kernel's, on which [`wait_kernel`] sleeps for ppid-0 processes.
 struct Table {
     procs: [Proc; MAX_PROCS],
 }
@@ -154,6 +155,7 @@ fn fs_errno(e: FsError) -> i32 {
         FsError::Busy => EBUSY,
         FsError::Badf => EBADF,
         FsError::Io => EIO,
+        FsError::FileTooBig => EFBIG,
         FsError::Loop | FsError::NotEmpty | FsError::NotSupp => EINVAL,
     }
 }
@@ -166,6 +168,16 @@ fn load_errno(e: LoadError) -> i32 {
         LoadError::Mem(_) => EFAULT,
         LoadError::Empty => ENOEXEC,
         LoadError::NoProc => EAGAIN,
+        LoadError::Spawn(e) => spawn_errno(e),
+    }
+}
+
+/// Linux's errno for a thread `fork` or a new process could not get:
+/// `EAGAIN` for a full thread table, `ENOMEM` for a kernel stack.
+fn spawn_errno(e: SpawnError) -> i32 {
+    match e {
+        SpawnError::NoSlot => EAGAIN,
+        SpawnError::NoMemory => ENOMEM,
     }
 }
 
@@ -177,9 +189,8 @@ fn current_pid() -> u32 {
     thread_init::current_pid()
 }
 
-/// Address space for the current syscall / `run_user`.
-/// Spawned processes own a Box; bound `run_user` stores a borrowed pointer
-/// so a child's `clear_as` cannot steal the parent's.
+/// Address space for the current syscall: the process's own, or the
+/// global `CURRENT_AS` when the caller has no pid.
 pub fn current_space() -> Option<&'static AddressSpace> {
     let pid = current_pid();
     if pid != 0
@@ -193,13 +204,7 @@ pub fn current_space() -> Option<&'static AddressSpace> {
 fn space_of(pid: u32) -> Option<&'static AddressSpace> {
     with_table(|t| {
         let p = t.get(pid)?;
-        if let Some(ref s) = p.space {
-            Some(&**s as *const AddressSpace)
-        } else if !p.borrowed.is_null() {
-            Some(p.borrowed)
-        } else {
-            None
-        }
+        p.space.as_ref().map(|s| &**s as *const AddressSpace)
     })
     .map(|p| unsafe { &*p })
 }
@@ -248,7 +253,7 @@ fn alloc_pid(prefer: u32) -> Option<u32> {
     })
 }
 
-fn init_slot(t: &mut Table, pid: u32, ppid: u32, name: &'static str, bound: bool) {
+fn init_slot(t: &mut Table, pid: u32, ppid: u32, name: &'static str) {
     let p = &mut t.procs[pid as usize];
     *p = Proc::empty();
     p.state = ProcState::Live;
@@ -256,12 +261,40 @@ fn init_slot(t: &mut Table, pid: u32, ppid: u32, name: &'static str, bound: bool
     p.ppid = ppid;
     p.name = name;
     p.fds = FdTable::stdio();
-    p.bound = bound;
 }
 
-fn close_fd_slot(fd: Fd) {
-    if let FdKind::File(fid) = fd.kind {
-        let _ = file_init::close(fid);
+/// The open-file table handle an fd names, if it names a file.
+fn file_id(fd: Fd) -> Option<FileId> {
+    match fd.kind {
+        FdKind::File { fid, r#gen } => Some(FileId { fid, r#gen }),
+        FdKind::None | FdKind::Console => None,
+    }
+}
+
+/// Read through open file `id` under a count of this syscall's own.
+fn file_read(id: FileId, buf: &mut [u8]) -> Result<usize, FsError> {
+    let f = file_init::fget(id)?;
+    let r = file_init::read(&f, buf);
+    let c = file_init::close(f);
+    let n = r?;
+    c?;
+    Ok(n)
+}
+
+/// Write through open file `id` under a count of this syscall's own.
+fn file_write(id: FileId, buf: &[u8]) -> Result<usize, FsError> {
+    let f = file_init::fget(id)?;
+    let r = file_init::write(&f, buf);
+    let c = file_init::close(f);
+    let n = r?;
+    c?;
+    Ok(n)
+}
+
+fn close_fd_slot(fd: Fd) -> Result<(), FsError> {
+    match file_id(fd) {
+        Some(id) => file_init::close(FileRef::from_raw(id)),
+        None => Ok(()),
     }
 }
 
@@ -269,7 +302,7 @@ fn close_all_fds(fds: &mut FdTable) {
     let mut i = 0u32;
     while i < MAX_FDS as u32 {
         if let Some(old) = fds.close(i) {
-            close_fd_slot(old);
+            let _ = close_fd_slot(old);
         }
         i += 1;
     }
@@ -278,16 +311,13 @@ fn close_all_fds(fds: &mut FdTable) {
 fn dup_table(src: FdTable) -> Option<FdTable> {
     let mut i = 0u32;
     while i < MAX_FDS as u32 {
-        if let Some(fd) = src.get(i)
-            && let FdKind::File(fid) = fd.kind
-            && file_init::addref(fid).is_err()
+        if let Some(id) = src.get(i).and_then(file_id)
+            && file_init::addref(id).is_err()
         {
             let mut j = 0u32;
             while j < i {
-                if let Some(fd) = src.get(j)
-                    && let FdKind::File(fid) = fd.kind
-                {
-                    let _ = file_init::close(fid);
+                if let Some(id) = src.get(j).and_then(file_id) {
+                    let _ = file_init::close(FileRef::from_raw(id));
                 }
                 j += 1;
             }
@@ -314,49 +344,6 @@ fn user_thread_entry() {
     unsafe { syscall_init::enter_user_full(&regs) };
 }
 
-/// Bind `run_user` on the current kernel thread. Caller owns `space`.
-pub fn bind_current(space: &mut AddressSpace, name: &'static str) -> u32 {
-    let pid = alloc_pid(0).expect("proc table");
-    let tid = thread_init::current_id();
-    with_table(|t| {
-        init_slot(t, pid, 0, name, true);
-        t.procs[pid as usize].tid = tid;
-        t.procs[pid as usize].borrowed = space as *const AddressSpace;
-    });
-    thread_init::set_pid_cr3(tid, pid, space.root().as_u64());
-    set_as(space);
-    pid
-}
-
-pub fn unbind_current() {
-    let pid = current_pid();
-    if pid == 0 {
-        clear_as();
-        return;
-    }
-    let fds = with_table(|t| {
-        let fds = t.get(pid).map(|p| p.fds).unwrap_or_else(FdTable::empty);
-        if let Some(p) = t.get_mut(pid) {
-            *p = Proc::empty();
-        }
-        fds
-    });
-    let mut fds = fds;
-    close_all_fds(&mut fds);
-    let tid = thread_init::current_id();
-    thread_init::set_pid_cr3(tid, 0, 0);
-    clear_as();
-}
-
-/// Kernel-side `dispatch()` probe: stdio + borrowed AS.
-pub fn bind_probe(space: &mut AddressSpace) -> u32 {
-    bind_current(space, "probe")
-}
-
-pub fn unbind_probe() {
-    unbind_current();
-}
-
 #[cfg_attr(feature = "kernel_tests", allow(dead_code))]
 pub fn start_init() {
     match spawn_elf("/sbin/init", INIT_PID, 0) {
@@ -367,8 +354,33 @@ pub fn start_init() {
     }
 }
 
-fn spawn_elf(path: &str, prefer: u32, ppid: u32) -> Result<u32, LoadError> {
-    let loaded = user_init::load_path(path, &[path])?;
+/// Start the ELF at `path` as a new process with parent `ppid` (0: the
+/// kernel, which reaps it with [`wait_kernel`]).
+pub(crate) fn spawn_elf(path: &str, prefer: u32, ppid: u32) -> Result<u32, LoadError> {
+    start_loaded(
+        user_init::load_path(path, &[path])?,
+        prefer,
+        ppid,
+        intern_name(path),
+    )
+}
+
+/// Start the in-memory ELF image `elf` with `argv` as a new process with
+/// parent `ppid` (0: the kernel, which reaps it with [`wait_kernel`]).
+pub(crate) fn spawn_image(elf: &[u8], argv: &[&[u8]], ppid: u32) -> Result<u32, LoadError> {
+    let name = match argv.first().map(|a| core::str::from_utf8(a)) {
+        Some(Ok(a)) => intern_name(a),
+        _ => "user",
+    };
+    start_loaded(user_init::load_image(elf, argv)?, 0, ppid, name)
+}
+
+fn start_loaded(
+    loaded: Loaded,
+    prefer: u32,
+    ppid: u32,
+    name: &'static str,
+) -> Result<u32, LoadError> {
     let pid = match alloc_pid(prefer) {
         Some(p) => p,
         None => {
@@ -377,19 +389,25 @@ fn spawn_elf(path: &str, prefer: u32, ppid: u32) -> Result<u32, LoadError> {
         }
     };
     let cr3 = loaded.space.root().as_u64();
-    let name = intern_name(path);
     let mut entry = UserRegs::empty();
     entry.rip = loaded.entry;
     entry.rsp = loaded.rsp;
     entry.rflags = RFLAGS_RESERVED1 | RFLAGS_IF;
     entry.fs_base = loaded.fs;
     let boxed = Box::new(loaded.space);
+    let h = match thread_init::spawn_user(name, user_thread_entry, pid, cr3) {
+        Ok(h) => h,
+        Err(e) => {
+            with_table(|t| t.procs[pid as usize] = Proc::empty());
+            addr_space_init::teardown(*boxed);
+            return Err(LoadError::Spawn(e));
+        }
+    };
     with_table(|t| {
-        init_slot(t, pid, ppid, name, false);
+        init_slot(t, pid, ppid, name);
         t.procs[pid as usize].space = Some(boxed);
         t.procs[pid as usize].entry = entry;
     });
-    let h = thread_init::spawn_user(name, user_thread_entry, pid, cr3);
     with_table(|t| {
         if let Some(p) = t.get_mut(pid) {
             p.tid = h.id();
@@ -397,6 +415,53 @@ fn spawn_elf(path: &str, prefer: u32, ppid: u32) -> Result<u32, LoadError> {
     });
     thread_init::make_ready(h.id());
     Ok(pid)
+}
+
+enum KernelWait {
+    Done(u32),
+    Sleep,
+    NotKernelChild,
+}
+
+/// Block until `pid`, a process whose parent is the kernel (ppid 0),
+/// exits; reap it and return its `wait4` status word. Returns once the
+/// zombie is reaped, before its address space and kernel stack are freed.
+pub(crate) fn wait_kernel(pid: u32) -> u32 {
+    debug_assert_eq!(current_pid(), 0);
+    loop {
+        let r = thread_init::with_sched(|s| {
+            TABLE.with(|t| {
+                let Some(p) = t.get(pid) else {
+                    return KernelWait::NotKernelChild;
+                };
+                if p.ppid != 0 {
+                    return KernelWait::NotKernelChild;
+                }
+                match p.state {
+                    ProcState::Zombie => {
+                        let st = p.wait_status;
+                        reap_zombie(t, pid);
+                        KernelWait::Done(st)
+                    }
+                    ProcState::Live | ProcState::Stopped => {
+                        s.begin_wait(&mut t.procs[0].wait_wq, FAR_DEADLINE);
+                        KernelWait::Sleep
+                    }
+                    ProcState::Unused => KernelWait::NotKernelChild,
+                }
+            })
+        });
+        assert!(
+            !matches!(r, KernelWait::NotKernelChild),
+            "wait_kernel({pid}): not a live kernel-parented process; only kernel code calls \
+             wait_kernel, once per ppid-0 pid that spawn_elf or spawn_image returned, and only \
+             wait_kernel reaps a ppid-0 process"
+        );
+        match r {
+            KernelWait::Done(st) => return st,
+            KernelWait::Sleep | KernelWait::NotKernelChild => thread_init::schedule(),
+        }
+    }
 }
 
 pub fn syscall(frame: *mut SyscallFrame) -> i64 {
@@ -436,7 +501,7 @@ fn dispatch_frame(nr: u64, args: [u64; 6], frame: *mut SyscallFrame) -> i64 {
         SYS_FORK => sys_fork(frame),
         SYS_EXECVE => sys_execve(args[0], args[1], args[2], frame),
         SYS_EXIT => {
-            if !syscall_init::in_user() && current_pid() == 0 {
+            if current_pid() == 0 {
                 0
             } else {
                 sys_exit(args[0], false)
@@ -529,7 +594,7 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> i64 {
     };
     match slot.kind {
         FdKind::None => syscall::neg(EBADF),
-        FdKind::Console | FdKind::File(_) => {
+        FdKind::Console | FdKind::File { .. } => {
             if let Err(e) = validate_buf(buf, len) {
                 return syscall::neg(e);
             }
@@ -547,24 +612,23 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> i64 {
                     return syscall::neg(EFAULT);
                 }
                 match slot.kind {
-                    FdKind::Console => {
-                        syscall_init::capture_stdout(&scratch[..n]);
-                        console_init::write(&scratch[..n]);
-                    }
-                    FdKind::File(fid) => match file_init::write(fid, &scratch[..n]) {
-                        Ok(k) => {
-                            if k < n {
-                                return (done + k as u64) as i64;
+                    FdKind::Console => console_init::write(&scratch[..n]),
+                    FdKind::File { fid, r#gen } => {
+                        match file_write(FileId { fid, r#gen }, &scratch[..n]) {
+                            Ok(k) => {
+                                if k < n {
+                                    return (done + k as u64) as i64;
+                                }
+                            }
+                            Err(e) => {
+                                return if done == 0 {
+                                    syscall::neg(fs_errno(e))
+                                } else {
+                                    done as i64
+                                };
                             }
                         }
-                        Err(e) => {
-                            return if done == 0 {
-                                syscall::neg(fs_errno(e))
-                            } else {
-                                done as i64
-                            };
-                        }
-                    },
+                    }
                     FdKind::None => return syscall::neg(EBADF),
                 }
                 done += n as u64;
@@ -619,10 +683,10 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> i64 {
             }
             n as i64
         }
-        FdKind::File(fid) => {
+        FdKind::File { fid, r#gen } => {
             let mut scratch = [0u8; 256];
             let n = (len as usize).min(scratch.len());
-            match file_init::read(fid, &mut scratch[..n]) {
+            match file_read(FileId { fid, r#gen }, &mut scratch[..n]) {
                 Ok(k) => {
                     if k > 0 && space.write_bytes(buf, &scratch[..k]).is_err() {
                         return syscall::neg(EFAULT);
@@ -690,13 +754,17 @@ fn sys_open(path: u64, flags: u64, _mode: u64) -> i64 {
         Ok(n) => n,
         Err(e) => return syscall::neg(e),
     };
-    let Ok(path) = core::str::from_utf8(&buf[..n]) else {
+    if core::str::from_utf8(&buf[..n]).is_err() {
         return syscall::neg(EINVAL);
-    };
-    match file_init::open(path, flags as u32, 0) {
-        Ok(fid) => {
+    }
+    match file_init::open_routed(&buf[..n], OpenFlags::from_bits(flags as u32), 0) {
+        Ok(f) => {
+            let id = f.into_raw();
             let slot = Fd {
-                kind: FdKind::File(fid),
+                kind: FdKind::File {
+                    fid: id.fid,
+                    r#gen: id.r#gen,
+                },
                 flags: fd_flags_from_open(flags as u32),
             };
             let pid = current_pid();
@@ -704,7 +772,7 @@ fn sys_open(path: u64, flags: u64, _mode: u64) -> i64 {
             match r {
                 Some(fd) => fd as i64,
                 None => {
-                    let _ = file_init::close(fid);
+                    let _ = file_init::close(FileRef::from_raw(id));
                     syscall::neg(EMFILE)
                 }
             }
@@ -717,10 +785,10 @@ fn sys_close(fd: u64) -> i64 {
     let pid = current_pid();
     let old = with_table(|t| t.get_mut(pid).and_then(|p| p.fds.close(fd as u32)));
     match old {
-        Some(s) => {
-            close_fd_slot(s);
-            0
-        }
+        Some(s) => match close_fd_slot(s) {
+            Ok(()) => 0,
+            Err(e) => syscall::neg(fs_errno(e)),
+        },
         None => syscall::neg(EBADF),
     }
 }
@@ -730,10 +798,17 @@ fn sys_lseek(fd: u64, off: u64, whence: u64) -> i64 {
         return syscall::neg(EBADF);
     };
     match slot.kind {
-        FdKind::File(fid) => match file_init::seek(fid, off as i64, whence as u32) {
-            Ok(n) => n as i64,
-            Err(e) => syscall::neg(fs_errno(e)),
-        },
+        FdKind::File { fid, r#gen } => {
+            let r = SeekFrom::from_whence(off as i64, whence as u32).and_then(|pos| {
+                let f = file_init::fget(FileId { fid, r#gen })?;
+                let r = file_init::seek(&f, pos);
+                file_init::close(f).and(r)
+            });
+            match r {
+                Ok(n) => n as i64,
+                Err(e) => syscall::neg(fs_errno(e)),
+            }
+        }
         FdKind::Console => syscall::neg(EINVAL),
         FdKind::None => syscall::neg(EBADF),
     }
@@ -744,14 +819,14 @@ fn sys_dup(old: u64) -> i64 {
     let r = with_table(|t| {
         let p = t.get_mut(pid)?;
         let s = p.fds.get(old as u32)?;
-        if let FdKind::File(fid) = s.kind {
-            file_init::addref(fid).ok()?;
+        if let Some(id) = file_id(s) {
+            file_init::addref(id).ok()?;
         }
         match p.fds.dup(old as u32) {
             Ok(n) => Some(n),
             Err(_) => {
-                if let FdKind::File(fid) = s.kind {
-                    let _ = file_init::close(fid);
+                if let Some(id) = file_id(s) {
+                    let _ = file_init::close(FileRef::from_raw(id));
                 }
                 None
             }
@@ -772,16 +847,16 @@ fn sys_dup2(old: u64, new: u64) -> i64 {
             return Some((new as u32, None));
         }
         let s = p.fds.get(old as u32)?;
-        if let FdKind::File(fid) = s.kind
-            && file_init::addref(fid).is_err()
+        if let Some(id) = file_id(s)
+            && file_init::addref(id).is_err()
         {
             return None;
         }
         match p.fds.dup2(old as u32, new as u32) {
             Ok(displaced) => Some((new as u32, displaced)),
             Err(_) => {
-                if let FdKind::File(fid) = s.kind {
-                    let _ = file_init::close(fid);
+                if let Some(id) = file_id(s) {
+                    let _ = file_init::close(FileRef::from_raw(id));
                 }
                 None
             }
@@ -790,7 +865,7 @@ fn sys_dup2(old: u64, new: u64) -> i64 {
     match r {
         Some((n, disp)) => {
             if let Some(d) = disp {
-                close_fd_slot(d);
+                let _ = close_fd_slot(d);
             }
             n as i64
         }
@@ -854,9 +929,20 @@ fn sys_fork(frame: *mut SyscallFrame) -> i64 {
     let mut child_regs = child_regs;
     child_regs.fs_base = fs;
     let boxed = Box::new(cloned);
-    let h = thread_init::spawn_user("user", user_thread_entry, pid, cr3);
+    let h = match thread_init::spawn_user("user", user_thread_entry, pid, cr3) {
+        Ok(h) => h,
+        Err(e) => {
+            // Nothing names the clone's root yet: no thread was made.
+            addr_space_init::teardown(*boxed);
+            close_all_fds(&mut { fds });
+            with_table(|t| {
+                t.procs[pid as usize] = Proc::empty();
+            });
+            return syscall::neg(spawn_errno(e));
+        }
+    };
     with_table(|t| {
-        init_slot(t, pid, ppid, "user", false);
+        init_slot(t, pid, ppid, "user");
         let p = &mut t.procs[pid as usize];
         p.fds = fds;
         p.cwd = cwd;
@@ -864,13 +950,9 @@ fn sys_fork(frame: *mut SyscallFrame) -> i64 {
         p.space = Some(boxed);
         p.entry = child_regs;
         p.tid = h.id();
-        p.bound = false;
     });
     thread_init::make_ready(h.id());
     // Child may run (and exit) before we return. POSIX allows either order.
-    // Lets a fork-bomb fill the table with zombies instead of a live herd
-    // that wait4 would have to schedule under ktest's IF-off registry.
-    thread_init::yield_now();
     pid as i64
 }
 
@@ -937,8 +1019,8 @@ fn sys_execve(path: u64, argv: u64, envp: u64, frame: *mut SyscallFrame) -> i64 
     };
     let mut i = 0usize;
     while i < MAX_FDS {
-        if let Some(fid) = gone[i] {
-            let _ = file_init::close(fid);
+        if let Some(fd) = gone[i] {
+            let _ = close_fd_slot(fd);
         }
         i += 1;
     }
@@ -946,7 +1028,11 @@ fn sys_execve(path: u64, argv: u64, envp: u64, frame: *mut SyscallFrame) -> i64 
         set_as(s);
     }
     thread_init::set_pid_cr3(tid, pid, cr3);
-    addr_space_init::load_cr3_u64(cr3);
+    // SAFETY: invariant I128, established at `addr_space_init::teardown`:
+    // `cr3` is the root of the space `create` built and `p.space` now owns,
+    // and `set_pid_cr3` recorded it in this thread's TCB on the line above,
+    // here.
+    unsafe { addr_space_init::load_cr3_u64(cr3) };
     if let Some(old) = old {
         addr_space_init::teardown(*old);
     }
@@ -969,34 +1055,18 @@ fn sys_exit(status: u64, _from_signal: bool) -> i64 {
     finish_exit(wait_exited(status as u32), false);
 }
 
-fn finish_exit(wait_status: u32, from_fault: bool) -> ! {
+fn finish_exit(wait_status: u32, _from_fault: bool) -> ! {
     let pid = current_pid();
     if pid == 0 {
-        if syscall_init::in_user() {
-            syscall_init::longjmp_user((wait_status >> 8) as i32);
-        }
         thread_init::exit_current();
-    }
-    let bound = with_table(|t| t.get(pid).map(|p| p.bound).unwrap_or(false));
-    if bound {
-        syscall_init::set_exit_status(if from_fault {
-            128 + (wait_status & 0x7f) as i32
-        } else {
-            ((wait_status >> 8) & 0xff) as i32
-        });
-        if syscall_init::in_user() {
-            syscall_init::longjmp_user(syscall_init::exit_status());
-        }
-        return_status_or_die(wait_status);
     }
     let (old, ppid, fds, tid) = thread_init::with_sched(|s| {
         TABLE.with(|t| {
-            reparent_children(t, pid);
-            if t.procs[INIT_PID as usize].state != ProcState::Unused {
+            if reparent_children(t, pid) {
                 s.wake_all(&mut t.procs[INIT_PID as usize].wait_wq);
             }
             let p = t.get_mut(pid);
-            let (space, ppid, fds, tid) = match p {
+            let (space, ppid, fds, tid, autoreap) = match p {
                 Some(p) => {
                     p.state = ProcState::Zombie;
                     p.wait_status = wait_status;
@@ -1004,24 +1074,30 @@ fn finish_exit(wait_status: u32, from_fault: bool) -> ! {
                     let space = p.space.take();
                     let fds = p.fds;
                     p.fds = FdTable::empty();
-                    (space, p.ppid, fds, p.tid)
+                    (space, p.ppid, fds, p.tid, p.autoreap)
                 }
-                None => (None, 0, FdTable::empty(), ThreadId::NONE),
+                None => (None, 0, FdTable::empty(), ThreadId::NONE, false),
             };
-            if ppid != 0 {
+            if autoreap {
+                // No reaper (ROADMAP §10.5): nobody waits, so free the slot now.
+                reap_zombie(t, pid);
+            } else {
                 if let Some(par) = t.get_mut(ppid) {
                     par.pending |= bit(SIGCHLD);
                 }
+                // ppid 0 wakes the kernel's queue (`wait_kernel`).
                 s.wake_all(&mut t.procs[ppid as usize].wait_wq);
             }
             (space, ppid, fds, tid)
         })
     });
-    let _ = tid;
     let mut fds = fds;
     close_all_fds(&mut fds);
     let _ = ppid;
     if let Some(space) = old {
+        // The TCB stops naming the root before the kernel root is loaded,
+        // so a switch back in between cannot reload it (invariant I128).
+        thread_init::set_pid_cr3(tid, 0, 0);
         crate::arch::gs::force_kernel();
         addr_space_init::load_kernel_cr3();
         clear_as();
@@ -1031,23 +1107,38 @@ fn finish_exit(wait_status: u32, from_fault: bool) -> ! {
     thread_init::exit_current();
 }
 
-fn return_status_or_die(_st: u32) -> ! {
-    thread_init::exit_current();
-}
-
-fn reparent_children(t: &mut Table, dead: u32) {
+/// Give `dead`'s children to the reaper `reaper_for` picks (ROADMAP §10.5,
+/// F068). With none, a zombie child is freed now and a live one gets
+/// ppid 0 and `autoreap`, so `finish_exit` frees it. True when init
+/// adopted a child and its wait queue needs a wake.
+fn reparent_children(t: &mut Table, dead: u32) -> bool {
+    // An exiting init is still `Live` here; it must not adopt its own children.
+    let init = if dead == INIT_PID {
+        InitState::Zombie
+    } else {
+        InitState::of(t.procs[INIT_PID as usize].state)
+    };
+    let reaper = reaper_for(init);
+    let mut adopted = false;
     let mut i = 1usize;
     while i < MAX_PROCS {
-        if t.procs[i].state != ProcState::Unused && t.procs[i].ppid == dead {
-            t.procs[i].ppid = INIT_PID;
-            if t.procs[INIT_PID as usize].state != ProcState::Unused {
-                let wq = &mut t.procs[INIT_PID as usize].wait_wq as *mut WaitQueue;
-                // Wake after SCHED section via cookie: same lock, do it now.
-                let _ = wq;
+        let p = &mut t.procs[i];
+        if p.state != ProcState::Unused && p.ppid == dead && p.pid != dead {
+            match reaper {
+                Some(r) => {
+                    p.ppid = r;
+                    adopted = true;
+                }
+                None if p.state == ProcState::Zombie => reap_zombie(t, i as u32),
+                None => {
+                    p.ppid = 0;
+                    p.autoreap = true;
+                }
             }
         }
         i += 1;
     }
+    adopted
 }
 
 fn sys_wait4(pid: u64, status: u64, options: u64) -> i64 {
@@ -1263,6 +1354,7 @@ fn sig_for_vec(vec: u8) -> Option<u32> {
         vectors::UD => Some(SIGILL),
         vectors::NP | vectors::SS => Some(SIGBUS),
         vectors::GP | vectors::PF => Some(SIGSEGV),
+        vectors::BP => Some(SIGTRAP),
         _ => None,
     }
 }

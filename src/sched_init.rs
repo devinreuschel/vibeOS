@@ -16,7 +16,11 @@ static LIVE: AtomicBool = AtomicBool::new(false);
 /// Bootstrap thread is current. IRQ0 may already be live; `on_timer_tick`
 /// is a no-op until `LIVE`.
 pub unsafe fn init() {
-    let h = thread_init::spawn_idle(idle_main);
+    // Before `irq: enabled`: DESIGN §4.4's boot policy panics here.
+    let h = match thread_init::spawn_idle(idle_main) {
+        Ok(h) => h,
+        Err(e) => panic!("sched: idle thread: {}", e.as_str()),
+    };
     let ptr = thread_init::tcb_ptr(h.id());
     assert!(!ptr.is_null(), "idle tcb");
     per_cpu_init::with_current(|cpu| {
@@ -39,9 +43,11 @@ pub fn on_timer_tick() {
         return;
     }
     let preempt = per_cpu_init::with_current(|cpu| {
-        cpu.ticks = cpu.ticks.wrapping_add(1);
+        // Single writer: only this CPU stores its `ticks`.
+        let ticks = cpu.remote.ticks.load(Ordering::Relaxed).wrapping_add(1);
+        cpu.remote.ticks.store(ticks, Ordering::Relaxed);
         let idle = cpu.current == cpu.idle && !cpu.idle.is_null();
-        vibeos::sched::should_preempt(cpu.ticks, idle)
+        vibeos::sched::should_preempt(ticks, idle)
     });
     if preempt {
         thread_init::schedule_preempt();
@@ -51,9 +57,6 @@ pub fn on_timer_tick() {
 /// Shared idle body for BSP and APs. DESIGN §7.8.
 pub fn idle_loop() -> ! {
     loop {
-        // Timer preempt resumes idle with from_irq, so schedule skips
-        // reap. Drain here: not on a dying stack, not on the IRQ path.
-        thread_init::reap_zombies();
         thread_init::yield_now();
         thread_init::halt_if_idle();
     }

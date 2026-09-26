@@ -8,8 +8,8 @@ use core::fmt;
 use crate::pci::{self, Bar, BarKind, Bdf, CapSet, FuncInfo, MAX_BARS, MAX_SCAN};
 
 pub const MAX_DEVICES: usize = MAX_SCAN;
-pub const MAX_DRIVERS: usize = 16;
-pub const MAX_CLAIMS: usize = 64;
+pub use crate::limits::MAX_CLAIMS;
+pub use crate::limits::MAX_DRIVERS;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IdMatch {
@@ -768,5 +768,12 @@ mod tests {
         assert_eq!(d.resources[0].size, 0x1000);
         assert_eq!(d.caps.msi, Some(0x50));
         assert!(d.bound.is_none());
+    }
+
+    #[test]
+    fn fixed_tables_match_limits() {
+        let r = Registry::new();
+        assert_eq!(r.drivers.len(), crate::limits::MAX_DRIVERS);
+        assert_eq!(r.claims.len(), crate::limits::MAX_CLAIMS);
     }
 }

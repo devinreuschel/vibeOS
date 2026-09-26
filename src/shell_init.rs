@@ -65,7 +65,9 @@ pub fn init() {
     register_builtins();
     #[cfg(all(not(feature = "kernel_tests"), feature = "kernel_shell"))]
     {
-        let _ = thread_init::spawn_on("shell", shell_main, 0);
+        if let Err(e) = thread_init::spawn_on("shell", shell_main, 0) {
+            crate::klog!(Level::Error, "shell: spawn failed: {}", e.as_str());
+        }
     }
 }
 

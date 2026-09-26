@@ -36,9 +36,16 @@ pub const HDR: usize = 32;
 pub const INODE_PER_LEAF: usize = (BLOCK - HDR) / INODE_REC;
 pub const DENT_PER_LEAF: usize = (BLOCK - HDR) / DENT_REC;
 pub const INODE_INT_PER: usize = (BLOCK - HDR) / 8;
-pub const MAX_META: usize = 48;
+/// Metadata blocks in one v1 generation, at most: the alloc block, the
+/// inode leaves and their internal node, and one leaf per directory plus the
+/// one directory that can pass a leaf (docs/VIBEFS.md §6).
+pub const MAX_META: usize = 1 + (MAX_INODES.div_ceil(INODE_PER_LEAF) + 1) + (MAX_INODES + 2);
+const _: () = assert!(MAX_META == 73);
 pub const MAX_DROP: usize = 96;
 pub const SB_CRC_OFF: usize = 4092;
+/// A file ends at or below this byte, so its last block index is at most
+/// `u32::MAX - 1` (docs/VIBEFS.md §3).
+pub const MAX_FILE_SIZE: u64 = u32::MAX as u64 * BLOCK as u64;
 
 const KIND_REG_U: u8 = KIND_REG;
 const KIND_DIR_U: u8 = KIND_DIR;
@@ -57,6 +64,7 @@ pub enum Error {
     NotEmpty,
     NameTooLong,
     NotSupp,
+    FileTooBig,
 }
 
 impl Error {
@@ -73,6 +81,7 @@ impl Error {
             Error::NotEmpty => "not empty",
             Error::NameTooLong => "name too long",
             Error::NotSupp => "not supp",
+            Error::FileTooBig => "file too big",
         }
     }
 
@@ -88,6 +97,7 @@ impl Error {
             Error::NotEmpty => FsError::NotEmpty,
             Error::NameTooLong => FsError::NameTooLong,
             Error::NotSupp => FsError::NotSupp,
+            Error::FileTooBig => FsError::FileTooBig,
         }
     }
 }
@@ -149,14 +159,24 @@ impl Disk for MemDisk<'_> {
     }
 }
 
-/// Drops writes after `limit` device ops (write or flush). Power-loss stand-in.
+/// Power-loss stand-in for host tests. `new` drops every device op (write or
+/// flush) after `limit`, an in-order suffix. `seeded` models a volatile write
+/// cache: writes since the last flush stay pending, and at the crash a seeded
+/// subset of them reaches the medium, so a later write can survive where an
+/// earlier one did not (F080).
+#[cfg(test)]
 pub struct CrashDisk<'a> {
     data: &'a mut [u8],
     pub ops: u64,
     pub limit: u64,
     pub dropped: u64,
+    /// `Some` for `seeded`: the writes since the last flush, oldest first.
+    pending: Option<Vec<(u32, [u8; BLOCK])>>,
+    seed: u64,
+    pub crashed: bool,
 }
 
+#[cfg(test)]
 impl<'a> CrashDisk<'a> {
     pub fn new(data: &'a mut [u8], limit: u64) -> Result<Self, Error> {
         if data.len() < MIN_BLOCKS as usize * BLOCK || !data.len().is_multiple_of(BLOCK) {
@@ -167,44 +187,114 @@ impl<'a> CrashDisk<'a> {
             ops: 0,
             limit,
             dropped: 0,
+            pending: None,
+            seed: 0,
+            crashed: false,
         })
+    }
+
+    /// A flush at op `limit` or earlier applies the pending writes in order.
+    /// Past `limit`, and in `crash`, each pending write is kept with
+    /// probability 1/2 (xorshift from `seed`), and every later op is dropped.
+    pub fn seeded(data: &'a mut [u8], limit: u64, seed: u64) -> Result<Self, Error> {
+        let mut c = Self::new(data, limit)?;
+        c.pending = Some(Vec::new());
+        c.seed = seed | 1;
+        Ok(c)
+    }
+
+    /// Power loss now. Idempotent.
+    pub fn crash(&mut self) {
+        if self.crashed {
+            return;
+        }
+        self.crashed = true;
+        let pend = self.pending.take().unwrap_or_default();
+        for (bno, buf) in &pend {
+            self.seed ^= self.seed << 13;
+            self.seed ^= self.seed >> 7;
+            self.seed ^= self.seed << 17;
+            if self.seed & 1 == 1
+                && let Ok(r) = self.range(*bno)
+            {
+                self.data[r].copy_from_slice(buf);
+            } else {
+                self.dropped = self.dropped.saturating_add(1);
+            }
+        }
+        self.pending = Some(Vec::new());
+    }
+
+    fn range(&self, bno: u32) -> Result<core::ops::Range<usize>, Error> {
+        let off = (bno as usize).checked_mul(BLOCK).ok_or(Error::Inval)?;
+        let end = off.checked_add(BLOCK).ok_or(Error::Inval)?;
+        if end > self.data.len() {
+            return Err(Error::Io);
+        }
+        Ok(off..end)
+    }
+
+    fn store(&mut self, bno: u32, buf: &[u8; BLOCK]) -> Result<(), Error> {
+        let r = self.range(bno)?;
+        self.data[r].copy_from_slice(buf);
+        Ok(())
+    }
+
+    /// Counts one op; false when it is past the crash and must be dropped.
+    fn tick(&mut self) -> bool {
+        self.ops = self.ops.saturating_add(1);
+        if self.ops > self.limit {
+            if self.pending.is_some() {
+                self.crash();
+            }
+            self.dropped = self.dropped.saturating_add(1);
+            return false;
+        }
+        !self.crashed
     }
 }
 
+#[cfg(test)]
 impl Disk for CrashDisk<'_> {
     fn nblocks(&self) -> u32 {
         (self.data.len() / BLOCK) as u32
     }
 
     fn read_block(&mut self, bno: u32, buf: &mut [u8; BLOCK]) -> Result<(), Error> {
-        let off = (bno as usize).checked_mul(BLOCK).ok_or(Error::Inval)?;
-        let end = off.checked_add(BLOCK).ok_or(Error::Inval)?;
-        if end > self.data.len() {
-            return Err(Error::Io);
+        let r = self.range(bno)?;
+        if let Some(p) = self.pending.as_ref()
+            && let Some((_, b)) = p.iter().rev().find(|(n, _)| *n == bno)
+        {
+            buf.copy_from_slice(b);
+            return Ok(());
         }
-        buf.copy_from_slice(&self.data[off..end]);
+        buf.copy_from_slice(&self.data[r]);
         Ok(())
     }
 
     fn write_block(&mut self, bno: u32, buf: &[u8; BLOCK]) -> Result<(), Error> {
-        self.ops = self.ops.saturating_add(1);
-        if self.ops > self.limit {
-            self.dropped = self.dropped.saturating_add(1);
+        if !self.tick() {
             return Ok(());
         }
-        let off = (bno as usize).checked_mul(BLOCK).ok_or(Error::Inval)?;
-        let end = off.checked_add(BLOCK).ok_or(Error::Inval)?;
-        if end > self.data.len() {
-            return Err(Error::Io);
+        self.range(bno)?;
+        match self.pending.as_mut() {
+            Some(p) => {
+                p.push((bno, *buf));
+                Ok(())
+            }
+            None => self.store(bno, buf),
         }
-        self.data[off..end].copy_from_slice(buf);
-        Ok(())
     }
 
     fn flush(&mut self) -> Result<(), Error> {
-        self.ops = self.ops.saturating_add(1);
-        if self.ops > self.limit {
-            self.dropped = self.dropped.saturating_add(1);
+        if !self.tick() {
+            return Ok(());
+        }
+        if let Some(p) = self.pending.take() {
+            for (bno, buf) in &p {
+                self.store(*bno, buf)?;
+            }
+            self.pending = Some(Vec::new());
         }
         Ok(())
     }
@@ -393,7 +483,7 @@ impl Snap {
 pub struct Node {
     pub ino: u32,
     pub kind: InodeKind,
-    pub size: u32,
+    pub size: u64,
     pub mode: u16,
     pub nlink: u32,
     pub mtime: u64,
@@ -422,11 +512,107 @@ impl Node {
     }
 }
 
+/// A class of defect `fsck` reports (docs/VIBEFS.md §11). Every class but
+/// `Leak` is an error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Defect {
+    /// The volume does not mount, an out-of-range inode kind included.
+    Mount,
+    /// An extent is empty or runs outside the volume.
+    Extent,
+    /// An extent's data does not match its CRC.
+    DataCrc,
+    /// A mode's `S_IFMT` bits name another kind than the inode's.
+    Mode,
+    /// A dirent's kind differs from its inode's.
+    Kind,
+    /// A dirent names an inode that does not exist.
+    Dangling,
+    /// The inline flag on an inode larger than `INLINE` bytes.
+    Inline,
+    /// Two entries of one directory share a name.
+    DupName,
+    /// A directory's `nlink` differs from the dirents naming it.
+    DirNlink,
+    /// A non-directory's `nlink` differs from the dirents naming it.
+    Nlink,
+    /// An inode the root does not reach through dirents.
+    Unreachable,
+    /// A reachable block whose refcount is 0.
+    RefFree,
+    /// A reachable block whose bitmap bit is clear.
+    BitFree,
+    /// An unreachable block with a refcount or its bit set (a warning).
+    Leak,
+}
+
+impl Defect {
+    pub const ALL: [Defect; 14] = [
+        Defect::Mount,
+        Defect::Extent,
+        Defect::DataCrc,
+        Defect::Mode,
+        Defect::Kind,
+        Defect::Dangling,
+        Defect::Inline,
+        Defect::DupName,
+        Defect::DirNlink,
+        Defect::Nlink,
+        Defect::Unreachable,
+        Defect::RefFree,
+        Defect::BitFree,
+        Defect::Leak,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Defect::Mount => "mount",
+            Defect::Extent => "extent",
+            Defect::DataCrc => "data-crc",
+            Defect::Mode => "mode",
+            Defect::Kind => "kind",
+            Defect::Dangling => "dangling",
+            Defect::Inline => "inline",
+            Defect::DupName => "dup-name",
+            Defect::DirNlink => "dir-nlink",
+            Defect::Nlink => "nlink",
+            Defect::Unreachable => "unreachable",
+            Defect::RefFree => "ref-free",
+            Defect::BitFree => "bit-free",
+            Defect::Leak => "leak",
+        }
+    }
+
+    pub fn is_warning(self) -> bool {
+        self == Defect::Leak
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FsckReport {
     pub errors: u32,
     pub warnings: u32,
     pub generation: u64,
+    /// Defects found, indexed by `Defect as usize`.
+    pub counts: [u32; 14],
+}
+
+impl FsckReport {
+    pub fn count(&self, d: Defect) -> u32 {
+        self.counts.get(d as usize).copied().unwrap_or(0)
+    }
+
+    fn add(&mut self, d: Defect) {
+        if let Some(c) = self.counts.get_mut(d as usize) {
+            *c = c.saturating_add(1);
+        }
+        if d.is_warning() {
+            self.warnings = self.warnings.saturating_add(1);
+        } else {
+            self.errors = self.errors.saturating_add(1);
+        }
+    }
 }
 
 pub struct Vol {
@@ -808,12 +994,44 @@ pub fn probe<D: Disk>(d: &mut D) -> bool {
     pick_super(d, &mut buf).is_ok()
 }
 
-fn write_alloc_into(v: &Vol, buf: &mut [u8; BLOCK]) {
+/// The one decrement rule for a committed block that a commit replaces or
+/// drops (docs/VIBEFS.md §10 steps 3 and 7). Blocks 0 and 1, a block past
+/// `nblocks` (a crafted image can hand mount one) and a block already free
+/// are left alone.
+fn drop_ref(bitmap: &mut [u8], refc: &mut [u8], nblocks: u32, b: u32) {
+    if b < 2 || b >= nblocks {
+        return;
+    }
+    let Some(r) = refc.get_mut(b as usize) else {
+        return;
+    };
+    if *r == 0 {
+        return;
+    }
+    *r -= 1;
+    if *r == 0
+        && let Some(byte) = bitmap.get_mut(b as usize / 8)
+    {
+        *byte &= !(1 << (b % 8));
+    }
+}
+
+/// Serialize the alloc map with `old_meta` and the drop list already
+/// dropped, so the map a commit writes matches memory after step 7.
+fn write_alloc_into(v: &Vol, old_meta: &[u32], buf: &mut [u8; BLOCK]) {
     let nbytes = (v.nblocks as usize).div_ceil(8);
     meta_hdr(buf, META_ALLOC, 0, v.nblocks as u16, v.generation, 0);
     buf[HDR..HDR + nbytes].copy_from_slice(&v.bitmap[..nbytes]);
     buf[HDR + nbytes..HDR + nbytes + v.nblocks as usize]
         .copy_from_slice(&v.refc[..v.nblocks as usize]);
+    {
+        let (head, rest) = buf.split_at_mut(HDR + nbytes);
+        let bitmap = &mut head[HDR..];
+        let refc = &mut rest[..v.nblocks as usize];
+        for &b in old_meta.iter().chain(v.drop[..v.ndrop as usize].iter()) {
+            drop_ref(bitmap, refc, v.nblocks, b);
+        }
+    }
     finish_meta(buf);
 }
 
@@ -950,11 +1168,7 @@ impl Vol {
         let mut n = Node::EMPTY;
         n.ino = r.ino;
         n.kind = kind_of(r.kind)?;
-        n.size = if r.size > u32::MAX as u64 {
-            u32::MAX
-        } else {
-            r.size as u32
-        };
+        n.size = r.size;
         n.mode = r.mode;
         n.nlink = r.nlink;
         n.mtime = r.mtime;
@@ -1171,12 +1385,19 @@ impl Vol {
         if src_dir == dst_dir && src_name == dst_name {
             return Ok(());
         }
-        if self.find_dent(dst_dir, dst_name).is_ok() {
-            self.unlink(d, dst_dir, dst_name, false)?;
-        }
+        // Validate before anything changes, so a refused rename loses no
+        // destination.
         let ds = self.inode_slot(dst_dir)?;
         if self.inodes[ds].kind != KIND_DIR {
             return Err(Error::NotDir);
+        }
+        let src_ino = self.dents[e].ino;
+        let ss = self.inode_slot(src_ino)?;
+        if self.inodes[ss].kind == KIND_DIR && self.in_subtree(src_ino, dst_dir)? {
+            return Err(Error::Inval);
+        }
+        if self.find_dent(dst_dir, dst_name).is_ok() {
+            self.unlink(d, dst_dir, dst_name, false)?;
         }
         let mut nm = [0u8; MAX_NAME];
         nm[..dst_name.len()].copy_from_slice(dst_name);
@@ -1186,6 +1407,31 @@ impl Vol {
         self.bump_mtime(src_dir);
         self.bump_mtime(dst_dir);
         Ok(())
+    }
+
+    /// Whether directory `dir` is `top` or lies below it, walking up through
+    /// the one dirent that names each directory to the root.
+    fn in_subtree(&self, top: u32, dir: u32) -> Result<bool, Error> {
+        let mut cur = dir;
+        let mut steps = 0usize;
+        loop {
+            if cur == top {
+                return Ok(true);
+            }
+            if cur == self.root_ino {
+                return Ok(false);
+            }
+            if steps >= MAX_INODES {
+                return Err(Error::Corrupt);
+            }
+            let up = self
+                .dents
+                .iter()
+                .find(|de| de.used && de.ino == cur)
+                .ok_or(Error::Corrupt)?;
+            cur = up.parent;
+            steps += 1;
+        }
     }
 
     fn extent_crc<D: Disk>(&mut self, d: &mut D, phys: u32, len: u32) -> Result<u32, Error> {
@@ -1290,17 +1536,33 @@ impl Vol {
         Ok(())
     }
 
-    fn map_block(&self, ino_slot: usize, file_blk: u32) -> Option<(usize, u32)> {
-        let r = &self.inodes[ino_slot];
-        let mut i = 0usize;
-        while i < r.n_ext as usize {
-            let e = r.extents[i];
-            if file_blk >= e.log && file_blk < e.log + e.len {
-                return Some((i, e.phys + (file_blk - e.log)));
+    /// The size of inode `ino`, which `SEEK_END` and `O_APPEND` read.
+    pub fn file_size(&self, ino: u32) -> Result<u64, Error> {
+        let s = self.inode_slot(ino)?;
+        Ok(self.inodes[s].size)
+    }
+
+    /// The extent index and physical block of file block `file_blk`, or
+    /// `None` for a hole. Extent ends are compared in `u64`; an extent
+    /// whose physical block overflows is `Corrupt`.
+    fn map_block(&self, ino_slot: usize, file_blk: u32) -> Result<Option<(usize, u32)>, Error> {
+        let r = self.inodes.get(ino_slot).ok_or(Error::Corrupt)?;
+        let fb = u64::from(file_blk);
+        for (i, e) in r.extents.iter().take(r.n_ext as usize).enumerate() {
+            let start = u64::from(e.log);
+            let end = start.checked_add(u64::from(e.len)).ok_or(Error::Corrupt)?;
+            if fb >= start && fb < end {
+                let phys = e.phys.checked_add(file_blk - e.log).ok_or(Error::Corrupt)?;
+                return Ok(Some((i, phys)));
             }
-            i += 1;
         }
-        None
+        Ok(None)
+    }
+
+    /// File block index and offset within it of byte `pos`.
+    fn block_of(pos: u64) -> Result<(u32, usize), Error> {
+        let fblk = u32::try_from(pos / BLOCK as u64).map_err(|_| Error::FileTooBig)?;
+        Ok((fblk, (pos % BLOCK as u64) as usize))
     }
 
     pub fn read<D: Disk>(
@@ -1326,11 +1588,10 @@ impl Vol {
         }
         let mut done = 0usize;
         while done < want {
-            let pos = off + done as u64;
-            let fblk = (pos / BLOCK as u64) as u32;
-            let pin = (pos as usize) % BLOCK;
+            let pos = off.checked_add(done as u64).ok_or(Error::FileTooBig)?;
+            let (fblk, pin) = Self::block_of(pos)?;
             let n = (BLOCK - pin).min(want - done);
-            let (ei, phys) = match self.map_block(is, fblk) {
+            let (ei, phys) = match self.map_block(is, fblk)? {
                 Some(mapping) => mapping,
                 None => {
                     buf[done..done + n].fill(0);
@@ -1384,6 +1645,17 @@ impl Vol {
         if self.inodes[is].kind == KIND_LNK {
             return Err(Error::Inval);
         }
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        // Refuse a write that starts at or past the limit, and cut one
+        // that would cross it short at the limit, as Linux does.
+        if off >= MAX_FILE_SIZE {
+            return Err(Error::FileTooBig);
+        }
+        let room = MAX_FILE_SIZE - off;
+        let keep = usize::try_from(room).map_or(buf.len(), |r| r.min(buf.len()));
+        let buf = &buf[..keep];
         let end = off.saturating_add(buf.len() as u64);
         if end <= INLINE as u64
             && (self.inodes[is].flags & F_INLINE != 0)
@@ -1406,12 +1678,11 @@ impl Vol {
         }
         let mut done = 0usize;
         while done < buf.len() {
-            let pos = off + done as u64;
-            let fblk = (pos / BLOCK as u64) as u32;
-            let pin = (pos as usize) % BLOCK;
+            let pos = off.checked_add(done as u64).ok_or(Error::FileTooBig)?;
+            let (fblk, pin) = Self::block_of(pos)?;
             let n = (BLOCK - pin).min(buf.len() - done);
             let is = self.inode_slot(ino)?;
-            let existing = self.map_block(is, fblk);
+            let existing = self.map_block(is, fblk)?;
             self.iobuf.fill(0);
             if let Some((ei, phys)) = existing {
                 d.read_block(phys, &mut self.iobuf)?;
@@ -1449,18 +1720,33 @@ impl Vol {
         newp: u32,
         crc: u32,
     ) -> Result<(), Error> {
-        let (ei, _) = self.map_block(is, fblk).ok_or(Error::Inval)?;
+        let (ei, _) = self.map_block(is, fblk)?.ok_or(Error::Inval)?;
         let e = self.inodes[is].extents[ei];
         if e.len == 1 {
             self.inodes[is].extents[ei].phys = newp;
             self.inodes[is].extents[ei].crc = crc;
             return Ok(());
         }
-        // split into prefix + new + suffix; may need extra extent slots
-        let left_len = fblk - e.log;
-        let right_log = fblk + 1;
-        let right_phys = e.phys + left_len + 1;
-        let right_len = e.log + e.len - right_log;
+        // split into prefix + new + suffix; may need extra extent slots.
+        // `map_block` found `fblk` inside `e`.
+        let fb = u64::from(fblk);
+        let left_len = fb.checked_sub(u64::from(e.log)).ok_or(Error::Corrupt)?;
+        let right_log = fb.checked_add(1).ok_or(Error::Corrupt)?;
+        let right_phys = u64::from(e.phys)
+            .checked_add(left_len)
+            .and_then(|p| p.checked_add(1))
+            .ok_or(Error::Corrupt)?;
+        let right_len = u64::from(e.log)
+            .checked_add(u64::from(e.len))
+            .and_then(|end| end.checked_sub(right_log))
+            .ok_or(Error::Corrupt)?;
+        let to32 = |v: u64| u32::try_from(v).map_err(|_| Error::Corrupt);
+        let (left_len, right_log, right_phys, right_len) = (
+            to32(left_len)?,
+            to32(right_log)?,
+            to32(right_phys)?,
+            to32(right_len)?,
+        );
         // shrink original to left, or replace with the new block if left_len==0
         if left_len == 0 {
             self.inodes[is].extents[ei] = Extent {
@@ -1494,6 +1780,9 @@ impl Vol {
         if self.inodes[is].kind == KIND_DIR {
             return Err(Error::IsDir);
         }
+        if new > MAX_FILE_SIZE {
+            return Err(Error::FileTooBig);
+        }
         let old = self.inodes[is].size;
         if new >= old {
             if self.inodes[is].flags & F_INLINE != 0 && new <= INLINE as u64 {
@@ -1515,27 +1804,26 @@ impl Vol {
             self.bump_mtime(ino);
             return Ok(());
         }
-        let keep_blks = if new == 0 {
-            0
-        } else {
-            (new as usize).div_ceil(BLOCK) as u32
-        };
-        let n_ext = self.inodes[is].n_ext as usize;
+        let keep_blks = u32::try_from(new.div_ceil(BLOCK as u64)).map_err(|_| Error::FileTooBig)?;
+        let n_ext = (self.inodes[is].n_ext as usize).min(MAX_EXT);
         let mut i = 0usize;
         while i < n_ext {
             let e = self.inodes[is].extents[i];
+            let end = u64::from(e.log)
+                .checked_add(u64::from(e.len))
+                .ok_or(Error::Corrupt)?;
             if e.log >= keep_blks {
                 let mut b = 0u32;
                 while b < e.len {
-                    self.pending_drop(e.phys + b)?;
+                    self.pending_drop(e.phys.checked_add(b).ok_or(Error::Corrupt)?)?;
                     b += 1;
                 }
                 self.inodes[is].extents[i] = Extent::EMPTY;
-            } else if e.log + e.len > keep_blks {
+            } else if end > u64::from(keep_blks) {
                 let keep = keep_blks - e.log;
                 let mut b = keep;
                 while b < e.len {
-                    self.pending_drop(e.phys + b)?;
+                    self.pending_drop(e.phys.checked_add(b).ok_or(Error::Corrupt)?)?;
                     b += 1;
                 }
                 self.inodes[is].extents[i].len = keep;
@@ -1741,6 +2029,11 @@ impl Vol {
             i += 1;
         }
         let need = 1 + ileaves + iints + dblocks;
+        // Every block counted here goes into `self.meta` after the super
+        // flush, so the table check runs while the old super is live.
+        if need > MAX_META {
+            return Err(Error::NoSpace);
+        }
         if self.free_count() < need as u32 {
             return Err(Error::NoSpace);
         }
@@ -1748,15 +2041,25 @@ impl Vol {
         let mut old_meta = [0u32; MAX_META];
         old_meta[..old_meta_n as usize].copy_from_slice(&self.meta[..old_meta_n as usize]);
 
+        // Every metadata block this commit writes; `self.meta` after step 7.
+        let mut new_meta = [0u32; MAX_META];
+        let mut n_new = 0usize;
         let alloc_bno = self.alloc_block()?;
+        *new_meta.get_mut(n_new).ok_or(Error::NoSpace)? = alloc_bno;
+        n_new += 1;
         let mut ileaf = [0u32; 8];
         let mut li = 0usize;
         while li < ileaves {
             ileaf[li] = self.alloc_block()?;
+            *new_meta.get_mut(n_new).ok_or(Error::NoSpace)? = ileaf[li];
+            n_new += 1;
             li += 1;
         }
         let iroot = if iints > 0 {
-            self.alloc_block()?
+            let b = self.alloc_block()?;
+            *new_meta.get_mut(n_new).ok_or(Error::NoSpace)? = b;
+            n_new += 1;
+            b
         } else {
             ileaf[0]
         };
@@ -1783,10 +2086,15 @@ impl Vol {
                 let mut k = 0usize;
                 while k < leaves {
                     dleaf[k] = self.alloc_block()?;
+                    *new_meta.get_mut(n_new).ok_or(Error::NoSpace)? = dleaf[k];
+                    n_new += 1;
                     k += 1;
                 }
                 let droot = if ints > 0 {
-                    self.alloc_block()?
+                    let b = self.alloc_block()?;
+                    *new_meta.get_mut(n_new).ok_or(Error::NoSpace)? = b;
+                    n_new += 1;
+                    b
                 } else {
                     dleaf[0]
                 };
@@ -1904,7 +2212,7 @@ impl Vol {
         self.inode_root = iroot;
         self.alloc_root = alloc_bno;
         let mut sbuf = [0u8; BLOCK];
-        write_alloc_into(self, &mut sbuf);
+        write_alloc_into(self, &old_meta[..old_meta_n as usize], &mut sbuf);
         d.write_block(alloc_bno, &sbuf)?;
         d.flush()?;
 
@@ -1913,40 +2221,22 @@ impl Vol {
         d.write_block(slot as u32, &sbuf)?;
         d.flush()?;
 
-        // drop replaced committed meta
-        let mut m = 0usize;
-        while m < old_meta_n as usize {
-            let b = old_meta[m];
-            if b >= 2 && self.refc[b as usize] > 0 {
-                self.refc[b as usize] -= 1;
-                if self.refc[b as usize] == 0 {
-                    bit_set(&mut self.bitmap, b, false);
-                }
-            }
-            m += 1;
-        }
-        let mut p = 0usize;
-        while p < self.ndrop as usize {
-            let b = self.drop[p];
-            if b >= 2 && self.refc[b as usize] > 0 {
-                self.refc[b as usize] -= 1;
-                if self.refc[b as usize] == 0 {
-                    bit_set(&mut self.bitmap, b, false);
-                }
-            }
-            p += 1;
+        // In memory, apply the drops the alloc map above already carries.
+        let nblocks = self.nblocks;
+        for &b in old_meta[..old_meta_n as usize]
+            .iter()
+            .chain(self.drop[..self.ndrop as usize].iter())
+        {
+            drop_ref(&mut self.bitmap, &mut self.refc, nblocks, b);
         }
         self.ndrop = 0;
         self.txn = [0; MAX_BLOCKS.div_ceil(8)];
         self.nmeta = 0;
-        self.mark_meta(alloc_bno)?;
-        li = 0;
-        while li < ileaves {
-            self.mark_meta(ileaf[li])?;
-            li += 1;
-        }
-        if iints > 0 && iroot != ileaf[0] {
-            self.mark_meta(iroot)?;
+        // `need <= MAX_META` was checked before the first allocation, so no
+        // call below fails with the new super on disk.
+        debug_assert_eq!(n_new, need);
+        for &b in &new_meta[..n_new] {
+            self.mark_meta(b)?;
         }
         self.dirty = false;
         Ok(())
@@ -2046,7 +2336,7 @@ pub fn mkfs<D: Disk>(d: &mut D, label: &[u8], v: &mut Vol) -> Result<(), Error> 
     finish_meta(&mut v.iobuf);
     d.write_block(leaf, &v.iobuf)?;
     let mut sbuf = [0u8; BLOCK];
-    write_alloc_into(v, &mut sbuf);
+    write_alloc_into(v, &[], &mut sbuf);
     d.write_block(alloc_bno, &sbuf)?;
     pack_super(&mut sbuf, v, 0);
     d.write_block(0, &sbuf)?;
@@ -2153,82 +2443,154 @@ pub fn mount<D: Disk>(d: &mut D, v: &mut Vol) -> Result<(), Error> {
 pub fn fsck<D: Disk>(d: &mut D) -> Result<FsckReport, Error> {
     // Host/tests only. A Vol on this stack is ~30KiB; do not call from
     // the kernel (16 KiB stacks).
+    let mut r = FsckReport {
+        errors: 0,
+        warnings: 0,
+        generation: 0,
+        counts: [0; 14],
+    };
     let mut v = Vol::new();
     if mount(d, &mut v).is_err() {
-        return Ok(FsckReport {
-            errors: 1,
-            warnings: 0,
-            generation: 0,
-        });
+        r.add(Defect::Mount);
+        return Ok(r);
     }
-    let mut errors = 0u32;
-    let mut warnings = 0u32;
+    r.generation = v.generation;
+
+    // Inodes: extents, data CRCs, mode and inline flag.
     let mut reached = [false; MAX_BLOCKS];
     reached[0] = true;
     reached[1] = true;
+    for &b in &v.meta[..v.nmeta as usize] {
+        if let Some(x) = reached.get_mut(b as usize) {
+            *x = true;
+        }
+    }
     let mut i = 0usize;
-    while i < v.nmeta as usize {
-        let b = v.meta[i] as usize;
-        if b < MAX_BLOCKS {
-            reached[b] = true;
+    while i < MAX_INODES {
+        if !v.inodes[i].used {
+            i += 1;
+            continue;
+        }
+        let ino = v.inodes[i];
+        let mut e = 0usize;
+        while e < ino.n_ext as usize {
+            let ex = ino.extents[e];
+            if ex.len == 0 || ex.phys < 2 || ex.phys as u64 + ex.len as u64 > v.nblocks as u64 {
+                r.add(Defect::Extent);
+            } else {
+                for x in &mut reached[ex.phys as usize..(ex.phys + ex.len) as usize] {
+                    *x = true;
+                }
+                if v.flags & FLAG_DATA_CRC != 0 && v.check_extent(d, ex).is_err() {
+                    r.add(Defect::DataCrc);
+                }
+            }
+            e += 1;
+        }
+        let fmt = ino.mode & crate::fs::S_IFMT;
+        if let Ok(k) = kind_of(ino.kind)
+            && fmt != 0
+            && fmt != k.ifmt()
+        {
+            r.add(Defect::Mode);
+        }
+        if ino.flags & F_INLINE != 0 && ino.size > INLINE as u64 {
+            r.add(Defect::Inline);
+        }
+        // Link count against the dirents naming it; the root has none.
+        let mut links = 0u32;
+        for de in &v.dents {
+            if de.used && de.ino == ino.ino {
+                links += 1;
+            }
+        }
+        if ino.ino != v.root_ino && links != ino.nlink {
+            if ino.kind == KIND_DIR {
+                r.add(Defect::DirNlink);
+            } else {
+                r.add(Defect::Nlink);
+            }
         }
         i += 1;
+    }
+
+    // Dirents: target, kind, and names unique within a directory.
+    let mut j = 0usize;
+    while j < MAX_DENTS {
+        let de = v.dents[j];
+        if !de.used {
+            j += 1;
+            continue;
+        }
+        match v.inode_slot(de.ino) {
+            Ok(s) => {
+                if v.inodes[s].kind != de.kind {
+                    r.add(Defect::Kind);
+                }
+            }
+            Err(_) => r.add(Defect::Dangling),
+        }
+        let mut k = 0usize;
+        while k < j {
+            let o = &v.dents[k];
+            if o.used && o.parent == de.parent && o.name() == de.name() {
+                r.add(Defect::DupName);
+                break;
+            }
+            k += 1;
+        }
+        j += 1;
+    }
+
+    // Reachability from the root through dirents, one pass per level.
+    let mut live = [false; MAX_INODES];
+    if let Ok(s) = v.inode_slot(v.root_ino) {
+        live[s] = true;
+    }
+    let mut pass = 0usize;
+    while pass < MAX_INODES {
+        let mut changed = false;
+        for de in &v.dents {
+            if !de.used {
+                continue;
+            }
+            let (Ok(ps), Ok(cs)) = (v.inode_slot(de.parent), v.inode_slot(de.ino)) else {
+                continue;
+            };
+            if live[ps] && v.inodes[ps].kind == KIND_DIR && !live[cs] {
+                live[cs] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+        pass += 1;
     }
     i = 0;
     while i < MAX_INODES {
-        if v.inodes[i].used {
-            let n_ext = v.inodes[i].n_ext as usize;
-            let mut e = 0usize;
-            while e < n_ext {
-                let ex = v.inodes[i].extents[e];
-                if ex.len == 0 || ex.phys < 2 || ex.phys as u64 + ex.len as u64 > v.nblocks as u64 {
-                    errors += 1;
-                } else {
-                    let mut b = 0u32;
-                    while b < ex.len {
-                        reached[(ex.phys + b) as usize] = true;
-                        b += 1;
-                    }
-                    if v.flags & FLAG_DATA_CRC != 0 && v.check_extent(d, ex).is_err() {
-                        errors += 1;
-                    }
-                }
-                e += 1;
-            }
-            if v.inodes[i].kind == KIND_DIR {
-                let mut links = 0u32;
-                let mut j = 0usize;
-                while j < MAX_DENTS {
-                    if v.dents[j].used && v.dents[j].ino == v.inodes[i].ino {
-                        links += 1;
-                    }
-                    j += 1;
-                }
-                if v.inodes[i].ino == ROOT_INO {
-                    // root has no dirent
-                } else if links != v.inodes[i].nlink {
-                    errors += 1;
-                }
-            }
+        if v.inodes[i].used && !live[i] {
+            r.add(Defect::Unreachable);
         }
         i += 1;
     }
-    i = 2;
-    while i < v.nblocks as usize {
-        let alloc = v.refc[i] > 0;
-        if alloc && !reached[i] {
-            warnings += 1;
+
+    // Blocks from 2 on: refcount and bitmap against reachability.
+    let mut b = 2u32;
+    while b < v.nblocks {
+        let reach = reached[b as usize];
+        let refc = v.refc[b as usize];
+        let bit = bit_get(&v.bitmap, b);
+        if reach && refc == 0 {
+            r.add(Defect::RefFree);
+        } else if reach && !bit {
+            r.add(Defect::BitFree);
+        } else if !reach && (refc > 0 || bit) {
+            r.add(Defect::Leak);
         }
-        if reached[i] && !alloc {
-            errors += 1;
-        }
-        i += 1;
+        b += 1;
     }
-    Ok(FsckReport {
-        errors,
-        warnings,
-        generation: v.generation,
-    })
+    Ok(r)
 }
 
 #[cfg(test)]
@@ -2529,6 +2891,109 @@ mod tests {
         }
     }
 
+    fn xorshift64(s: &mut u64) -> u64 {
+        *s ^= *s << 13;
+        *s ^= *s >> 7;
+        *s ^= *s << 17;
+        *s
+    }
+
+    /// Iterations the crash workload commits; `run_vibefs_crash.KILL_COMMIT_MAX`.
+    const CRASH_ITERS: u32 = 200;
+    const CRASH_ITER_BYTES: usize = 300;
+
+    fn crash_payload(n: u32) -> [u8; CRASH_ITER_BYTES] {
+        let mut p = [0u8; CRASH_ITER_BYTES];
+        for (k, b) in p.iter_mut().enumerate() {
+            *b = (n as usize + k) as u8;
+        }
+        p
+    }
+
+    /// One iteration of the guest's `crash_loop`: open `/w` with `O_TRUNC`,
+    /// write 300 bytes, sync.
+    fn crash_iter<D: Disk>(v: &mut Vol, d: &mut D, n: u32) -> Result<(), Error> {
+        let w = match v.lookup(d, ROOT_INO, b"w") {
+            Ok(w) => w,
+            Err(Error::NotFound) => {
+                v.create(d, ROOT_INO, b"w", InodeKind::Reg, 0o644, None)?;
+                v.lookup(d, ROOT_INO, b"w")?
+            }
+            Err(e) => return Err(e),
+        };
+        v.truncate(d, w.ino, 0)?;
+        let wrote = v.write(d, w.ino, 0, &crash_payload(n))?;
+        assert_eq!(wrote, CRASH_ITER_BYTES);
+        v.sync(d)
+    }
+
+    fn crash_decode(b: &[u8]) -> Option<u32> {
+        let n = u32::from(*b.first()?);
+        (b.len() == CRASH_ITER_BYTES && b == crash_payload(n)).then_some(n)
+    }
+
+    #[test]
+    fn crash_workload_seeded_points() {
+        // 256 KiB: `run_vibefs_crash.IMAGE_BYTES`, the guest's image.
+        let mut base = fresh(256 * 1024);
+        {
+            let mut d = MemDisk::new(&mut base).unwrap();
+            let mut v = Vol::new();
+            mount(&mut d, &mut v).unwrap();
+            crash_iter(&mut v, &mut d, 0).unwrap();
+        }
+        // Probe: 200 commits fit the image, and T counts their device ops.
+        let total = {
+            let mut img = base.clone();
+            let mut c = CrashDisk::seeded(&mut img, u64::MAX, 1).unwrap();
+            let mut v = Vol::new();
+            mount(&mut c, &mut v).unwrap();
+            for n in 1..=CRASH_ITERS {
+                crash_iter(&mut v, &mut c, n)
+                    .unwrap_or_else(|e| panic!("probe iteration {n}: {e:?}"));
+            }
+            c.ops
+        };
+        let mut rng = 0x5eed_c0de_u64;
+        for _ in 0..1000 {
+            let p = 1 + xorshift64(&mut rng) % total;
+            let seed_p = xorshift64(&mut rng);
+            let mut img = base.clone();
+            let mut last = 0u32;
+            {
+                let mut c = CrashDisk::seeded(&mut img, p, seed_p).unwrap();
+                let mut v = Vol::new();
+                mount(&mut c, &mut v).unwrap();
+                for n in 1..=CRASH_ITERS {
+                    if c.ops >= p {
+                        break;
+                    }
+                    last = n;
+                    if crash_iter(&mut v, &mut c, n).is_err() {
+                        break;
+                    }
+                }
+                c.crash();
+            }
+            let ctx = format!("seed {seed_p:#x} p {p} N {last}");
+            let mut disk = MemDisk::new(&mut img).unwrap();
+            let r = fsck(&mut disk).unwrap_or_else(|e| panic!("{ctx}: fsck {e:?}"));
+            assert_eq!((r.errors, r.warnings), (0, 0), "{ctx}: fsck");
+            let mut vol = Vol::new();
+            mount(&mut disk, &mut vol).unwrap_or_else(|e| panic!("{ctx}: mount {e:?}"));
+            let w = vol
+                .lookup(&mut disk, ROOT_INO, b"w")
+                .unwrap_or_else(|e| panic!("{ctx}: /w {e:?}"));
+            let mut buf = [0u8; 512];
+            let got = vol.read(&mut disk, w.ino, 0, &mut buf).unwrap();
+            let i = crash_decode(&buf[..got]);
+            assert!(
+                i == Some(last) || (last > 0 && i == Some(last - 1)),
+                "{ctx}: /w holds {i:?}"
+            );
+        }
+    }
+
     #[test]
     fn error_strings_cover() {
         for e in [
@@ -2543,8 +3008,423 @@ mod tests {
             Error::NotEmpty,
             Error::NameTooLong,
             Error::NotSupp,
+            Error::FileTooBig,
         ] {
             assert!(!e.as_str().is_empty());
         }
+    }
+
+    /// A regular file `name` in the root; its inode number.
+    fn new_file(v: &mut Vol, d: &mut MemDisk, name: &[u8]) -> u32 {
+        v.create(d, ROOT_INO, name, InodeKind::Reg, 0o644, None)
+            .unwrap();
+        v.lookup(d, ROOT_INO, name).unwrap().ino
+    }
+
+    fn n_ext(v: &Vol, ino: u32) -> u8 {
+        v.inodes[v.inode_slot(ino).unwrap()].n_ext
+    }
+
+    #[test]
+    fn write_past_size_limit() {
+        assert_eq!(MAX_FILE_SIZE, (1u64 << 44) - 4096);
+        let mut b = fresh(256 * 1024);
+        with_vol(&mut b, |v, d| {
+            let ino = new_file(v, d, b"big");
+            assert_eq!(v.write(d, ino, 0, b"abc").unwrap(), 3);
+            let df = v.df();
+            let ext = n_ext(v, ino);
+            for off in [MAX_FILE_SIZE, 1u64 << 44] {
+                assert_eq!(v.write(d, ino, off, b"x").unwrap_err(), Error::FileTooBig);
+            }
+            assert_eq!(v.write(d, ino, MAX_FILE_SIZE, b"").unwrap(), 0);
+            assert_eq!(v.file_size(ino).unwrap(), 3);
+            let mut out = [0u8; 8];
+            assert_eq!(v.read(d, ino, 0, &mut out).unwrap(), 3);
+            assert_eq!(&out[..3], b"abc");
+            assert_eq!(v.df(), df);
+            assert_eq!(n_ext(v, ino), ext);
+        });
+    }
+
+    #[test]
+    fn write_crossing_size_limit_is_short() {
+        let mut b = fresh(256 * 1024);
+        with_vol(&mut b, |v, d| {
+            let ino = new_file(v, d, b"edge");
+            assert_eq!(v.write(d, ino, MAX_FILE_SIZE - 1, b"xy").unwrap(), 1);
+            assert_eq!(v.file_size(ino).unwrap(), MAX_FILE_SIZE);
+            let mut out = [0u8; 4];
+            assert_eq!(v.read(d, ino, MAX_FILE_SIZE - 1, &mut out).unwrap(), 1);
+            assert_eq!(out[0], b'x');
+        });
+    }
+
+    #[test]
+    fn truncate_past_size_limit() {
+        let mut b = fresh(256 * 1024);
+        with_vol(&mut b, |v, d| {
+            let ino = new_file(v, d, b"t");
+            assert_eq!(
+                v.truncate(d, ino, MAX_FILE_SIZE + 1).unwrap_err(),
+                Error::FileTooBig
+            );
+            v.truncate(d, ino, MAX_FILE_SIZE).unwrap();
+            assert_eq!(v.file_size(ino).unwrap(), MAX_FILE_SIZE);
+        });
+    }
+
+    #[test]
+    fn node_size_above_4gib() {
+        let mut b = fresh(256 * 1024);
+        with_vol(&mut b, |v, d| {
+            let ino = new_file(v, d, b"five");
+            assert_eq!(v.write(d, ino, 5 << 30, b"x").unwrap(), 1);
+            let n = v.lookup(d, ROOT_INO, b"five").unwrap();
+            assert_eq!(n.size, (5u64 << 30) + 1);
+        });
+    }
+
+    #[test]
+    fn block_math_near_u32_limit() {
+        let mut b = fresh(256 * 1024);
+        with_vol(&mut b, |v, d| {
+            let ino = new_file(v, d, b"top");
+            let start = MAX_FILE_SIZE - 2 * BLOCK as u64;
+            let mut two = vec![0u8; 2 * BLOCK];
+            let mut i = 0usize;
+            while i < two.len() {
+                two[i] = (i % 253) as u8;
+                i += 1;
+            }
+            assert_eq!(v.write(d, ino, start, &two).unwrap(), two.len());
+            assert_eq!(v.file_size(ino).unwrap(), MAX_FILE_SIZE);
+            // Overwrite part of the first block: the split path.
+            two[10..20].fill(0xAB);
+            assert_eq!(v.write(d, ino, start + 10, &[0xAB; 10]).unwrap(), 10);
+            let mut out = vec![0u8; 2 * BLOCK];
+            assert_eq!(v.read(d, ino, start, &mut out).unwrap(), out.len());
+            assert_eq!(out, two);
+            v.truncate(d, ino, MAX_FILE_SIZE - BLOCK as u64).unwrap();
+            assert_eq!(v.file_size(ino).unwrap(), MAX_FILE_SIZE - BLOCK as u64);
+            let mut out = vec![0u8; 2 * BLOCK];
+            assert_eq!(v.read(d, ino, start, &mut out).unwrap(), BLOCK);
+            assert_eq!(out[..BLOCK], two[..BLOCK]);
+        });
+    }
+
+    /// `fsck` over the image in `b`.
+    fn fsck_of(b: &mut [u8]) -> FsckReport {
+        let mut d = MemDisk::new(b).unwrap();
+        fsck(&mut d).unwrap()
+    }
+
+    fn payload(seed: u32) -> [u8; 300] {
+        let mut p = [0u8; 300];
+        let mut i = 0usize;
+        while i < p.len() {
+            p[i] = (seed as usize * 31 + i) as u8;
+            i += 1;
+        }
+        p
+    }
+
+    #[test]
+    fn sessions_64_no_leak() {
+        let mut b = fresh(64 * BLOCK);
+        with_vol(&mut b, |v, d| {
+            let ino = new_file(v, d, b"f");
+            assert_eq!(v.write(d, ino, 0, &payload(0)).unwrap(), 300);
+            v.sync(d).unwrap();
+        });
+        let free = with_vol(&mut b, |v, _| v.df().1);
+        let warn0 = fsck_of(&mut b).warnings;
+        let mut s = 1u32;
+        while s <= 64 {
+            with_vol(&mut b, |v, d| {
+                assert_eq!(v.df().1, free, "free bytes at session {s}");
+                let ino = v.lookup(d, ROOT_INO, b"f").unwrap().ino;
+                assert_eq!(v.write(d, ino, 0, &payload(s)).unwrap(), 300);
+                v.sync(d)
+                    .unwrap_or_else(|e| panic!("sync at session {s}: {e:?}"));
+            });
+            let r = fsck_of(&mut b);
+            assert_eq!(r.errors, 0, "fsck errors at session {s}");
+            assert_eq!(r.warnings, warn0, "fsck warnings at session {s}");
+            s += 1;
+        }
+        with_vol(&mut b, |v, d| {
+            let ino = v.lookup(d, ROOT_INO, b"f").unwrap().ino;
+            let mut out = [0u8; 300];
+            assert_eq!(v.read(d, ino, 0, &mut out).unwrap(), 300);
+            assert_eq!(out, payload(64));
+        });
+    }
+
+    #[test]
+    fn commit_free_count_constant() {
+        let mut b = fresh(64 * BLOCK);
+        let free = with_vol(&mut b, |v, d| {
+            let ino = new_file(v, d, b"f");
+            assert_eq!(v.write(d, ino, 0, &payload(0)).unwrap(), 300);
+            v.sync(d).unwrap();
+            let free = v.free_count();
+            let mut i = 1u32;
+            while i <= 200 {
+                assert_eq!(v.write(d, ino, 0, &payload(i)).unwrap(), 300);
+                v.sync(d)
+                    .unwrap_or_else(|e| panic!("sync at commit {i}: {e:?}"));
+                assert_eq!(v.free_count(), free, "free count after commit {i}");
+                i += 1;
+            }
+            free
+        });
+        with_vol(&mut b, |v, _| {
+            assert_eq!(v.free_count(), free, "after remount")
+        });
+        let r = fsck_of(&mut b);
+        assert_eq!((r.errors, r.warnings), (0, 0));
+    }
+
+    #[test]
+    fn nested_dirs_63_commit_remount() {
+        let mut b = fresh(256 * BLOCK);
+        with_vol(&mut b, |v, d| {
+            let mut dir = ROOT_INO;
+            let mut n = 0usize;
+            while n < 63 {
+                v.create(d, dir, b"d", InodeKind::Dir, 0o755, None)
+                    .unwrap_or_else(|e| panic!("mkdir {n}: {e:?}"));
+                dir = v.lookup(d, dir, b"d").unwrap().ino;
+                n += 1;
+            }
+            v.sync(d).unwrap();
+            assert_eq!(v.nmeta, 70);
+        });
+        let mut path = Vec::new();
+        let mut n = 0usize;
+        while n < 63 {
+            if n > 0 {
+                path.push(b'/');
+            }
+            path.push(b'd');
+            n += 1;
+        }
+        with_vol(&mut b, |v, d| {
+            assert!(v.walk(d, &path).unwrap().is_dir());
+            v.dirty = true;
+            v.sync(d).unwrap();
+            assert_eq!(v.nmeta, 70);
+        });
+        with_vol(&mut b, |v, d| {
+            assert!(v.walk(d, &path).unwrap().is_dir());
+        });
+        let r = fsck_of(&mut b);
+        assert_eq!((r.errors, r.warnings), (0, 0));
+    }
+
+    /// `f` (300 bytes, one extent), `g` (5 bytes, inline) and `p/c` on a
+    /// 64-block image that fsck finds clean.
+    fn base_tree() -> Vec<u8> {
+        let mut b = fresh(64 * BLOCK);
+        with_vol(&mut b, |v, d| {
+            let f = new_file(v, d, b"f");
+            assert_eq!(v.write(d, f, 0, &payload(1)).unwrap(), 300);
+            let g = new_file(v, d, b"g");
+            assert_eq!(v.write(d, g, 0, b"hello").unwrap(), 5);
+            v.create(d, ROOT_INO, b"p", InodeKind::Dir, 0o755, None)
+                .unwrap();
+            let p = v.lookup(d, ROOT_INO, b"p").unwrap().ino;
+            v.create(d, p, b"c", InodeKind::Dir, 0o755, None).unwrap();
+            v.sync(d).unwrap();
+        });
+        let r = fsck_of(&mut b);
+        assert_eq!((r.errors, r.warnings), (0, 0));
+        b
+    }
+
+    /// The base tree with `plant` applied in memory and committed.
+    fn planted(plant: impl FnOnce(&mut Vol, &mut MemDisk)) -> FsckReport {
+        let mut b = base_tree();
+        with_vol(&mut b, |v, d| {
+            plant(v, d);
+            v.dirty = true;
+            v.sync(d).unwrap();
+        });
+        fsck_of(&mut b)
+    }
+
+    /// The base tree with `plant(bitmap, refc, f's data block)` applied to
+    /// the on-disk `ALLOC` block, re-sealed in place.
+    fn planted_alloc(plant: impl FnOnce(&mut [u8], &mut [u8], u32)) -> FsckReport {
+        let mut b = base_tree();
+        let (root, n, fblk) = with_vol(&mut b, |v, d| {
+            let f = v.lookup(d, ROOT_INO, b"f").unwrap().ino;
+            let s = v.inode_slot(f).unwrap();
+            assert_eq!(v.inodes[s].n_ext, 1);
+            (v.alloc_root, v.nblocks, v.inodes[s].extents[0].phys)
+        });
+        {
+            let mut d = MemDisk::new(&mut b).unwrap();
+            let mut blk = [0u8; BLOCK];
+            d.read_block(root, &mut blk).unwrap();
+            let nbytes = (n as usize).div_ceil(8);
+            {
+                let (head, rest) = blk.split_at_mut(HDR + nbytes);
+                plant(&mut head[HDR..], &mut rest[..n as usize], fblk);
+            }
+            finish_meta(&mut blk);
+            d.write_block(root, &blk).unwrap();
+        }
+        fsck_of(&mut b)
+    }
+
+    fn slot_of(v: &mut Vol, d: &mut MemDisk, dir: u32, name: &[u8]) -> (usize, usize) {
+        let e = v.find_dent(dir, name).unwrap();
+        let ino = v.lookup(d, dir, name).unwrap().ino;
+        (e, v.inode_slot(ino).unwrap())
+    }
+
+    #[test]
+    fn fsck_reports_each_planted_defect() {
+        let expect = |what: &str, r: FsckReport, class: Defect, n: Option<u32>| {
+            assert!(r.count(class) > 0, "{what}: no {} in {r:?}", class.as_str());
+            if let Some(n) = n {
+                assert_eq!(r.count(class), n, "{what}: {r:?}");
+            }
+            if class == Defect::Leak {
+                assert_eq!(r.errors, 0, "{what}: {r:?}");
+            } else {
+                assert!(r.errors > 0, "{what}: {r:?}");
+            }
+        };
+        let r = planted(|v, d| {
+            let (e, _) = slot_of(v, d, ROOT_INO, b"f");
+            v.dents[e].kind = KIND_DIR;
+        });
+        expect("dirent kind", r, Defect::Kind, None);
+        let r = planted(|v, d| {
+            let (_, s) = slot_of(v, d, ROOT_INO, b"f");
+            v.inodes[s].mode = crate::fs::S_IFDIR | 0o644;
+        });
+        expect("mode", r, Defect::Mode, None);
+        let r = planted(|v, d| {
+            let (_, s) = slot_of(v, d, ROOT_INO, b"g");
+            assert!(v.inodes[s].flags & F_INLINE != 0);
+            v.inodes[s].size = 200;
+        });
+        expect("inline", r, Defect::Inline, None);
+        let r = planted(|v, d| {
+            let (e, _) = slot_of(v, d, ROOT_INO, b"g");
+            v.dents[e].name[0] = b'f';
+        });
+        expect("dup name", r, Defect::DupName, Some(1));
+        let r = planted(|v, d| {
+            let (_, s) = slot_of(v, d, ROOT_INO, b"f");
+            v.inodes[s].nlink = 2;
+        });
+        expect("nlink", r, Defect::Nlink, Some(1));
+        let r = planted(|v, d| {
+            let (e, _) = slot_of(v, d, ROOT_INO, b"g");
+            v.dents[e].used = false;
+        });
+        expect("dirent emptied", r, Defect::Unreachable, Some(1));
+        let r = planted(|v, d| {
+            let p = v.lookup(d, ROOT_INO, b"p").unwrap().ino;
+            let c = v.lookup(d, p, b"c").unwrap().ino;
+            let e = v.find_dent(ROOT_INO, b"p").unwrap();
+            v.dents[e].parent = c;
+        });
+        expect("dir in own subtree", r, Defect::Unreachable, Some(2));
+        let r = planted(|v, d| {
+            let (e, _) = slot_of(v, d, ROOT_INO, b"g");
+            v.dents[e].ino = 999;
+        });
+        expect("dangling", r, Defect::Dangling, Some(1));
+        let r = planted(|v, d| {
+            let (_, s) = slot_of(v, d, ROOT_INO, b"g");
+            v.inodes[s].kind = 9;
+        });
+        expect("kind out of range", r, Defect::Mount, Some(1));
+        let r = planted_alloc(|bm, _, b| bit_set(bm, b, false));
+        expect("bit clear", r, Defect::BitFree, Some(1));
+        let r = planted_alloc(|bm, rc, b| {
+            bit_set(bm, b, false);
+            rc[b as usize] = 0;
+        });
+        expect("refcount clear", r, Defect::RefFree, Some(1));
+        let r = planted_alloc(|bm, rc, _| {
+            let last = rc.len() as u32 - 1;
+            assert_eq!(rc[last as usize], 0);
+            bit_set(bm, last, true);
+        });
+        expect("bit on a free block", r, Defect::Leak, Some(1));
+    }
+
+    #[test]
+    fn fsck_dir_int_57_entries() {
+        let name = |i: usize| [b'f', b'0' + (i / 10) as u8, b'0' + (i % 10) as u8];
+        let mut b = fresh(64 * BLOCK);
+        with_vol(&mut b, |v, d| {
+            let mut i = 0usize;
+            while i < 57 {
+                new_file(v, d, &name(i));
+                i += 1;
+            }
+            v.sync(d).unwrap();
+        });
+        let r = fsck_of(&mut b);
+        assert_eq!((r.errors, r.warnings), (0, 0));
+        let root_kind = |v: &mut Vol, d: &mut MemDisk| {
+            let s = v.inode_slot(ROOT_INO).unwrap();
+            let mut blk = [0u8; BLOCK];
+            d.read_block(v.inodes[s].dir_root, &mut blk).unwrap();
+            blk[4]
+        };
+        with_vol(&mut b, |v, d| {
+            assert_eq!(root_kind(v, d), META_DIR_INT);
+            assert_eq!(v.dir_count(ROOT_INO), 57);
+            v.lookup(d, ROOT_INO, &name(56)).unwrap();
+            // Two entries now share a name; fsck must read both leaves.
+            let e = v.find_dent(ROOT_INO, &name(3)).unwrap();
+            v.dents[e].name[..3].copy_from_slice(&name(55));
+            v.dirty = true;
+            v.sync(d).unwrap();
+        });
+        with_vol(&mut b, |v, d| assert_eq!(root_kind(v, d), META_DIR_INT));
+        let r = fsck_of(&mut b);
+        assert_eq!(r.count(Defect::DupName), 1, "{r:?}");
+    }
+
+    #[test]
+    fn rename_dir_into_own_subtree_einval() {
+        let mut b = fresh(64 * BLOCK);
+        with_vol(&mut b, |v, d| {
+            v.create(d, ROOT_INO, b"p", InodeKind::Dir, 0o755, None)
+                .unwrap();
+            let p = v.lookup(d, ROOT_INO, b"p").unwrap().ino;
+            v.create(d, p, b"c", InodeKind::Dir, 0o755, None).unwrap();
+            let c = v.lookup(d, p, b"c").unwrap().ino;
+            assert_eq!(
+                v.rename(d, ROOT_INO, b"p", c, b"q").unwrap_err(),
+                Error::Inval
+            );
+            assert_eq!(
+                v.rename(d, ROOT_INO, b"p", p, b"q").unwrap_err(),
+                Error::Inval
+            );
+            let x = new_file(v, d, b"tmp");
+            v.rename(d, ROOT_INO, b"tmp", c, b"x").unwrap();
+            assert_eq!(
+                v.rename(d, ROOT_INO, b"p", c, b"x").unwrap_err(),
+                Error::Inval
+            );
+            assert_eq!(v.lookup(d, c, b"x").unwrap().ino, x);
+            assert_eq!(v.walk(d, b"/p/c").unwrap().ino, c);
+            v.sync(d).unwrap();
+        });
+        let r = fsck_of(&mut b);
+        assert_eq!(r.errors, 0, "{r:?}");
+        assert_eq!(r.count(Defect::Unreachable), 0);
     }
 }

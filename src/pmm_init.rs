@@ -26,7 +26,7 @@ use crate::sync_init::SpinMutex;
 /// means the entry point lives at physical 0x8000.
 const AP_TRAMPOLINE_PHYS: u64 = 0x8000;
 
-static BUDDY: SpinMutex<Buddy> = SpinMutex::with_rank(Buddy::new(), RANK_BUDDY);
+static BUDDY: SpinMutex<Buddy> = SpinMutex::with_rank(Buddy::new(HHDM_BASE), RANK_BUDDY);
 
 /// Post-init access to the global buddy. IRQ-aware, rank buddy.
 pub fn with_buddy<R>(f: impl FnOnce(&mut Buddy) -> R) -> R {
@@ -99,7 +99,6 @@ impl Excludes {
 /// - Single CPU, before interrupts are enabled.
 pub unsafe fn init(info: &BootInfo) -> PmmStats {
     let mut buddy = BUDDY.lock();
-    buddy.set_hhdm_offset(HHDM_BASE);
 
     let mut excl = Excludes::new();
     // AP trampoline. DESIGN §2.4 keeps 0x8000 reserved forever, even

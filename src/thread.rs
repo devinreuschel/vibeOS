@@ -4,12 +4,14 @@
 //! The TCB table, KVA mapping, and `spawn` live in the binary crate.
 
 use core::mem::{offset_of, size_of};
+use core::sync::atomic::AtomicBool;
 
-use crate::paging::PAGE_SIZE_4K;
+use crate::paging::{PAGE_SIZE_4K, VirtAddr};
+use crate::pmm::Frames;
 use crate::time::Instant;
 
 /// Global TCB table size. UP today; phase 4 still addresses by id.
-pub const MAX_THREADS: usize = 64;
+pub use crate::limits::MAX_THREADS;
 
 /// x86 reserved-1 bit. `prepare_thread` seeds this and leaves IF clear.
 pub const RFLAGS_RESERVED1: u64 = 0x2;
@@ -93,17 +95,72 @@ impl WaitOutcome {
     }
 }
 
-/// Guarded kernel stack identity (default 4×4 KiB + unmapped guard).
-/// Mapping is `kva_init`'s; this is only the VA so `Tcb` can live here.
-#[derive(Clone, Copy, Debug)]
-pub struct KernelStack {
-    pub guard: u64,
-    pub pages: usize,
+/// Most pages one guarded kernel stack maps (the guard page not counted).
+pub const MAX_STACK_PAGES: usize = 32;
+
+/// A guarded kernel stack: `pages` mapped pages above one unmapped guard
+/// page at `guard` (default 4×4 KiB, DESIGN §4.5), and the order-0
+/// [`Frames`] of each mapped page, lowest first. A move-only handle with
+/// private fields: only `kva_init::alloc_guarded_stack` builds one
+/// (through [`GuardedStack::from_raw_parts`]) and only `kva_init::free_stack`
+/// takes it apart, so the stack and its frames are freed once, by their
+/// owner. It lives in this crate so `Tcb` can own it.
+pub struct GuardedStack {
+    guard: VirtAddr,
+    pages: usize,
+    frames: [Option<Frames>; MAX_STACK_PAGES],
 }
 
-impl KernelStack {
-    pub fn top(self) -> u64 {
-        self.guard + (self.pages as u64 + 1) * PAGE_SIZE_4K
+impl GuardedStack {
+    /// # Safety
+    /// `[guard, guard + (pages + 1) * 4 KiB)` came from
+    /// `Kva::alloc_guarded(pages)`, the guard page is not mapped, upper
+    /// page `i` maps `frames[i]` for every `i < pages`, the other slots are
+    /// `None`, and no other `GuardedStack` names the range.
+    pub unsafe fn from_raw_parts(
+        guard: VirtAddr,
+        pages: usize,
+        frames: [Option<Frames>; MAX_STACK_PAGES],
+    ) -> Self {
+        Self {
+            guard,
+            pages,
+            frames,
+        }
+    }
+
+    /// Give the range and its frames back to the allocator that built it.
+    ///
+    /// # Safety
+    /// The caller unmaps the range and shoots it down on every CPU before
+    /// any of its frames or its VA is reused.
+    pub unsafe fn into_raw_parts(self) -> (VirtAddr, usize, [Option<Frames>; MAX_STACK_PAGES]) {
+        (self.guard, self.pages, self.frames)
+    }
+
+    /// The unmapped guard page.
+    pub fn guard(&self) -> VirtAddr {
+        self.guard
+    }
+
+    /// The lowest mapped byte.
+    pub fn base(&self) -> VirtAddr {
+        VirtAddr(self.guard.as_u64() + PAGE_SIZE_4K)
+    }
+
+    /// One past the highest mapped byte: the initial RSP.
+    pub fn top(&self) -> VirtAddr {
+        VirtAddr(self.guard.as_u64() + (self.pages as u64 + 1) * PAGE_SIZE_4K)
+    }
+
+    /// Mapped pages, the guard page not counted.
+    pub fn pages(&self) -> usize {
+        self.pages
+    }
+
+    /// The frame each mapped page holds, lowest page first.
+    pub fn frames(&self) -> &[Option<Frames>] {
+        &self.frames[..self.pages.min(MAX_STACK_PAGES)]
     }
 }
 
@@ -126,7 +183,16 @@ pub struct Tcb {
     pub id: ThreadId,
     pub name: &'static str,
     pub state: ThreadState,
-    pub stack: Option<KernelStack>,
+    /// Set while a CPU runs this thread or is still switching off it: the
+    /// incoming side of `thread_init::switch_now` sets it (Relaxed), and
+    /// `thread_init::finish_switch` on that CPU clears it with Release as
+    /// its last access to the TCB, after `switch_context` has saved every
+    /// piece of DESIGN §7.5's per-thread state. `thread_init::spawn_inner`
+    /// reuses a Dead slot only after an Acquire load finds it clear, and
+    /// ROADMAP §13.8's core dump and §17.4's `ptrace` requests wait on it
+    /// too. A running bootstrap or AP idle TCB starts set.
+    pub on_cpu: AtomicBool,
+    pub stack: Option<GuardedStack>,
     pub context: CpuContext,
     pub entry: fn(),
     /// Intrusive ready-list link. Slice B; phase 4 is per-CPU.

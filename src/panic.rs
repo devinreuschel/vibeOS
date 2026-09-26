@@ -78,7 +78,12 @@ fn begin_dump() {
         finish();
     }
     crate::ipi_init::halt_others();
-    crate::log_init::force_unlock();
+    // SAFETY: DESIGN §2.5 step 1, established at `ipi_init::halt_others`:
+    // the other CPUs are sent the stop IPI before the log cell is taken
+    // from its holder. `halt_others` does not wait, and a CPU spinning
+    // with IF=0 can miss the IPI until ROADMAP §10.7's stop primitive
+    // (F135), so this is the dump's accepted risk, not a proof.
+    unsafe { crate::log_init::force_unlock() };
     Serial::init();
 }
 
@@ -189,7 +194,12 @@ fn finish() -> ! {
 fn dump_common(rip: u64, rbp: u64, rsp: u64, rflags: u64) {
     dump_regs(rbp, rsp, rflags, rip);
     dump_thread();
-    crate::log_init::dump_tail(DUMP_LAST);
+    // SAFETY: DESIGN §2.5 step 1, established at `ipi_init::halt_others`
+    // (called by `begin_dump` before every `dump_common`): the other CPUs
+    // were sent the stop IPI. `halt_others` does not wait, and a CPU
+    // spinning with IF=0 can miss the IPI until ROADMAP §10.7's stop
+    // primitive (F135).
+    unsafe { crate::log_init::dump_tail(DUMP_LAST) };
     dump_backtrace(rip, rbp);
 }
 

@@ -16,7 +16,6 @@ from tests.harness.harness import (
     ISA_DEBUG_FAIL,
     ISA_DEBUG_PASS,
     OVMF_BOOT_ARGS,
-    SMP2_TCG_PER_CPU_READY_HEAD_FLAKE,
     SMP4_IPI_WAIT_ACKS_FRAME,
     DeadlineReader,
     HarnessError,
@@ -350,67 +349,6 @@ class TestKtestProtocol(unittest.TestCase):
             )
         )
 
-    def test_smp2_tcg_per_cpu_ready_head_sole_failure_is_retryable(self) -> None:
-        line = SMP2_TCG_PER_CPU_READY_HEAD_FLAKE
-        msg = f"ktest FAIL: {line}"
-        self.assertTrue(
-            retryable_ktest_failure(
-                2,
-                msg,
-                accel="tcg",
-                failure_lines=(line,),
-            )
-        )
-
-    def test_per_cpu_ready_head_retry_requires_exact_scope(self) -> None:
-        line = SMP2_TCG_PER_CPU_READY_HEAD_FLAKE
-        msg = f"ktest FAIL: {line}"
-        other = "vibeOS: ktest: FAIL unrelated: reason"
-        self.assertFalse(
-            retryable_ktest_failure(
-                4,
-                msg,
-                accel="tcg",
-                failure_lines=(line,),
-            )
-        )
-        self.assertFalse(
-            retryable_ktest_failure(
-                2,
-                msg,
-                accel="kvm",
-                failure_lines=(line,),
-            )
-        )
-        self.assertFalse(
-            retryable_ktest_failure(
-                2,
-                msg,
-                persist_reboot=True,
-                accel="tcg",
-                failure_lines=(line,),
-            )
-        )
-        self.assertFalse(
-            retryable_ktest_failure(2, msg, accel="tcg")
-        )
-        self.assertFalse(
-            retryable_ktest_failure(
-                2,
-                msg,
-                accel="tcg",
-                failure_lines=(line, other),
-            )
-        )
-        self.assertFalse(
-            retryable_ktest_failure(
-                2,
-                msg + "!",
-                accel="tcg",
-                failure_lines=(line,),
-            )
-        )
-
     def test_smp4_ipi_ack_panic_is_retryable_on_first_boot(self) -> None:
         msg = (
             "panic signature 'vibeOS: panic:' in: "
@@ -494,11 +432,22 @@ class TestSilentUserSyscallsHang(unittest.TestCase):
 
 class TestKernelBootRetry(unittest.TestCase):
     @staticmethod
+    def _msix_ap_counter_failure() -> RunResult:
+        return RunResult(
+            lines=[
+                "vibeOS: ktest: begin",
+                "vibeOS: ktest: FAIL msix_cpu: ap counter",
+                "vibeOS: ktest: end",
+            ],
+            exit_code=ISA_DEBUG_FAIL,
+        )
+
+    @staticmethod
     def _per_cpu_ready_head_failure() -> RunResult:
         return RunResult(
             lines=[
                 "vibeOS: ktest: begin",
-                SMP2_TCG_PER_CPU_READY_HEAD_FLAKE,
+                "vibeOS: ktest: FAIL per_cpu_bsp: ready_head should be empty",
                 "vibeOS: ktest: end",
             ],
             exit_code=ISA_DEBUG_FAIL,
@@ -519,9 +468,9 @@ class TestKernelBootRetry(unittest.TestCase):
         )
 
     def test_exact_failure_retries_once_then_passes(self) -> None:
-        failed = self._per_cpu_ready_head_failure()
+        failed = self._msix_ap_counter_failure()
         passed = self._passing_initial_boot()
-        cfg = QemuConfig(iso="x.iso", smp=2, extra=("-accel", "tcg"))
+        cfg = QemuConfig(iso="x.iso", smp=4, extra=("-accel", "tcg"))
         with mock.patch.object(
             run_ktest,
             "run_qemu_until_exit",
@@ -536,8 +485,8 @@ class TestKernelBootRetry(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
 
     def test_exact_failure_stops_after_one_retry(self) -> None:
-        failed = self._per_cpu_ready_head_failure()
-        cfg = QemuConfig(iso="x.iso", smp=2, extra=("-accel", "tcg"))
+        failed = self._msix_ap_counter_failure()
+        cfg = QemuConfig(iso="x.iso", smp=4, extra=("-accel", "tcg"))
         with mock.patch.object(
             run_ktest,
             "run_qemu_until_exit",
@@ -550,6 +499,23 @@ class TestKernelBootRetry(unittest.TestCase):
                     persist_reboot=False,
                 )
         self.assertEqual(run.call_count, 2)
+
+    def test_per_cpu_ready_head_failure_is_not_retried(self) -> None:
+        failed = self._per_cpu_ready_head_failure()
+        passed = self._passing_initial_boot()
+        cfg = QemuConfig(iso="x.iso", smp=2, extra=("-accel", "tcg"))
+        with mock.patch.object(
+            run_ktest,
+            "run_qemu_until_exit",
+            side_effect=(failed, passed),
+        ) as run:
+            with self.assertRaises(HarnessError):
+                run_ktest._ktest_boot(
+                    cfg,
+                    timeout=1.0,
+                    persist_reboot=False,
+                )
+        self.assertEqual(run.call_count, 1)
 
     @staticmethod
     def _dup_ok_timeout() -> HarnessError:
@@ -898,16 +864,81 @@ class TestDevicePresets(unittest.TestCase):
         self.assertIn("disable-legacy=on", without)
         self.assertIn("num-queues=2", without)
 
+    def test_virtio_blk_nbd_drive_per_cache_mode(self) -> None:
+        from tests.harness.harness import virtio_blk_args
+
+        for mode in ("writeback", "none", "writethrough"):
+            blob = " ".join(virtio_blk_args("/s/sock", 2, nbd=True, cache=mode))
+            self.assertIn(
+                "file.driver=nbd,file.server.type=unix,file.server.path=/s/sock", blob
+            )
+            self.assertIn("format=raw", blob)
+            self.assertIn(f"cache={mode}", blob)
+            self.assertIn("write-cache=on", blob)
+            self.assertNotIn("discard", blob)
+        self.assertNotIn("write-cache", " ".join(virtio_blk_args("/d", 2)))
+
+    def test_virtio_blk_rejects_unsafe_cache(self) -> None:
+        from tests.harness.harness import virtio_blk_args
+
+        with self.assertRaises(HarnessError):
+            virtio_blk_args("/s/sock", 2, nbd=True, cache="unsafe")
+
     def test_kill_delay_window(self) -> None:
         import random
 
         from tests.harness.harness import CRASH_KILL_MAX_S, kill_delay
 
+        self.assertEqual(CRASH_KILL_MAX_S, 0.05)
         rng = random.Random(0)
         for _ in range(256):
             d = kill_delay(rng)
             self.assertGreaterEqual(d, 0.0)
             self.assertLessEqual(d, CRASH_KILL_MAX_S)
+
+    def test_make_disk_in_directory(self) -> None:
+        import tempfile
+
+        from tests.harness.harness import make_disk
+
+        with tempfile.TemporaryDirectory() as d:
+            p = make_disk(8192, "t-", directory=d)
+            self.assertEqual(os.path.dirname(p), d)
+            self.assertEqual(os.path.getsize(p), 8192)
+
+    def test_run_until_exit_drains_after_harness_kill(self) -> None:
+        import signal
+        import tempfile
+
+        from tests.harness.harness import overlay_env, run_qemu_until_exit
+
+        with tempfile.TemporaryDirectory() as d:
+            qemu = os.path.join(d, "qemu-system-x86_64")
+            with open(qemu, "w", encoding="utf-8") as f:
+                f.write(
+                    "#!/bin/sh\n"
+                    "echo 'vibeOS: vibefs: wr 1'\n"
+                    "sleep 0.05\n"
+                    "echo 'vibeOS: vibefs: wr 2'\n"
+                    "exec sleep 30\n"
+                )
+            os.chmod(qemu, 0o755)
+            iso = os.path.join(d, "x.iso")
+            open(iso, "wb").close()
+
+            def kill_after(line: str) -> float | None:
+                if line.endswith("wr 1"):
+                    time.sleep(0.3)
+                    return 0.0
+                return None
+
+            path = d + os.pathsep + os.environ.get("PATH", "")
+            with overlay_env({"PATH": path}):
+                r = run_qemu_until_exit(
+                    QemuConfig(iso=iso, accel=""), timeout_s=20, kill_after=kill_after
+                )
+        self.assertIn("vibeOS: vibefs: wr 2", r.lines)
+        self.assertEqual(r.exit_code, -signal.SIGKILL)
 
 
 class TestEnvConfig(unittest.TestCase):
@@ -932,6 +963,18 @@ class TestEnvConfig(unittest.TestCase):
             self.assertEqual(env_int("VIBEOS_SMP", 2), 4)
         with overlay_env({"VIBEOS_SMP": ""}):
             self.assertEqual(env_int("VIBEOS_SMP", 2), 2)
+
+    def test_env_config_tier(self) -> None:
+        from tests.harness.harness import env_config, overlay_env
+
+        with overlay_env({}, clear=True):
+            self.assertEqual(env_config(default_iso="x.iso", default_timeout=1).tier, "adhoc")
+        with overlay_env({"VIBEOS_TIER": ""}):
+            self.assertEqual(env_config(default_iso="x.iso", default_timeout=1).tier, "adhoc")
+        with overlay_env({"VIBEOS_TIER": "test-kernel"}):
+            self.assertEqual(
+                env_config(default_iso="x.iso", default_timeout=1).tier, "test-kernel"
+            )
 
     def test_env_config_defaults_match_makefile(self) -> None:
         # Keep in sync with Makefile VIBEOS_* ?= (make run). C2.
