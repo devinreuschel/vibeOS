@@ -37,6 +37,13 @@ struct Starting {
     cpu_tables: *mut CpuTables,
 }
 
+// SAFETY: the BSP hands the two pointers to the one AP `start_one` starts,
+// before its SIPI, and the AP reads them once in `ap_entry`; established at
+// `smp_init::start_one`, which starts one AP at a time and waits for its
+// `ready` before writing `STARTING` again. Neither pointee is touched by
+// the BSP while the AP owns it.
+unsafe impl Send for Starting {}
+
 impl Starting {
     const fn empty() -> Self {
         Self {

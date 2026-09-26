@@ -99,6 +99,19 @@ pub struct PerCpu {
     pub remote: &'static PerCpuRemote,
 }
 
+// SAFETY: invariant I120 and invariant I21, established at
+// `per_cpu_init::cpu`, `per_cpu_init::with_current` and
+// `per_cpu_init::with_cpu`: `per_cpu_init::CPUS` hands a `PerCpu` to its
+// owner CPU alone (`with_current`, busy flag, IF=0), or through the
+// `unsafe fn` `with_cpu` to the BSP while that CPU is not running; other
+// CPUs read only the atomic `PerCpuRemote` that `remote` points to. The raw
+// pointers it holds are owner-only and never dereferenced by another CPU.
+unsafe impl Send for PerCpu {}
+// SAFETY: as for `Send` above: invariant I120 and invariant I21,
+// established at `per_cpu_init::cpu`, `per_cpu_init::with_current` and
+// `per_cpu_init::with_cpu`.
+unsafe impl Sync for PerCpu {}
+
 impl PerCpu {
     pub const fn new(remote: &'static PerCpuRemote) -> Self {
         Self {

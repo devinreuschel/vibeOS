@@ -28,10 +28,7 @@ static REMOTE: BootCell<Box<[PerCpuRemote]>> = BootCell::new();
 // `cpu(id)` shares `&PerCpuRemote` across CPUs, so the view must be `Sync`
 // from its atomic fields alone; `scripts/check_cells.py` rejects an
 // `unsafe impl` of `Send` or `Sync` for it (invariant I120).
-const _: () = {
-    const fn sync<T: Sync>() {}
-    sync::<PerCpuRemote>();
-};
+crate::cell::assert_impl!(PerCpuRemote: Sync);
 static LIVE: AtomicBool = AtomicBool::new(false);
 /// Bit `cpu_id`. MADTs with >64 CPUs need a wider mask later.
 static ONLINE: AtomicU64 = AtomicU64::new(0);
