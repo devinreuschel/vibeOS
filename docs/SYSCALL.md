@@ -373,8 +373,9 @@ does not meet this yet:
   runs with IF=1, so an interrupt between its `mov gs` and its `iretq`
   reads `gs:[0]` at VA 0 at CPL 0 and halts (F006; ROADMAP §10.6)
 - a console `write` keeps IF=0 for its whole length and acks no IPI, so a
-  TLB shootdown that another CPU sends during a write longer than about
-  1 s panics in `wait_acks` (F011; ROADMAP §10.10)
+  TLB shootdown that another CPU sends during a write waits in
+  `wait_acks`, which logs the late CPU once a second, until the write ends
+  (F011; ROADMAP §10.10)
 - an ELF with a huge `p_memsz` (§3.1; F009, ROADMAP §10.6)
 - a `fork` near memory exhaustion, or a burst of exits (§2.1; F010,
   ROADMAP §10.10)

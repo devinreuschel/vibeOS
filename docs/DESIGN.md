@@ -924,7 +924,7 @@ that review cites means the review's text.
 | I8 | One thread per address space changes its regions, and another CPU changes its page tables only under its page-table lock (§2.11) | process model | assumed | Yes: only the owning thread touches a space. Lock-free user copies, local-only `invlpg`, and `&'static AddressSpace` depend on it. ROADMAP §10.6 replaces `&'static` with a counted object, §12.1's reverse map changes page tables from other CPUs under the space's page-table lock, §12.3 shoots down every CPU in the space's set, and §13.1's threads bring the address-space lock |
 | I9 | TCBs are never freed, so a `*mut Tcb` stays valid | 64-slot table, `thread_init` | assumed | Yes, but `spawn_inner` can reuse a Dead slot whose thread is still switching out (ROADMAP §10.10, F012) |
 | I10 | A dead thread's stack is freed only after its CPU has switched off it (§2.8, §4.5) | `kva_init::DEFERRED` | documented | No: any CPU drains the global list (F012), and the 8-slot list panics when full (F010) (ROADMAP §10.10) |
-| I11 | A completer's publishing store is its last access to the waiter (§2.8) | `block_init::IoWaiter` | documented | No: `IoWaiter::finish` runs `wake_all` after it stores `done` (ROADMAP §10.10, F002) |
+| I11 | A completer's publishing store is its last access to the waiter (§2.8) | `block_init::IoWaiter::finish` | enforced by the in-guest `lifetime_iowaiter_publish_last` | Yes: `finish` runs `wake_all` under SCHED, then stores `done` with Release as its last access (ROADMAP §10.10, F002); ROADMAP §10.8 adds its loom model |
 | I12 | Every kernel PML4 slot exists before the first user address space | `AddressSpace::new` copies PML4[256..512) once | assumed | Yes, by boot order only: `paging_init::install` creates none of the heap, KVA, and `ioremap` PML4 slots; each appears on its region's first mapping, and no current path makes a first mapping after `/hello` (ROADMAP §12.1, F101) |
 | I13 | The low identity window is removed after `smp: done` (§4.1) | none yet | documented | No: it stays mapped and GLOBAL, VA 0 included (ROADMAP §10.6, F085) |
 | I14 | Every buddy frame and page table lies inside the physmap (§4.1) | `pmm_init::init`, `paging_init::physmap_extent` | enforced | Yes; a framebuffer above the 8 GiB cap is not covered (ROADMAP §11.2, F020) |
@@ -944,7 +944,7 @@ that review cites means the review's text.
 | I28 | A line the harness takes as the kernel's is framed, and no user byte can produce the frame (§2.6) | `serial::Serial`, `console_init::write` | documented | No: nothing is framed, and the harness matches every line, so ring 3 can print a contract line (`/bin/sh` prints `shell ready`) or fail a run with `panicked at` (ROADMAP §10.2) |
 | I29 | A catch hook intercepts only a CPL-0 fault on the CPU that armed it, inside an in-guest test's catch window | `arch::catch` | assumed | Partly: production never arms it, but `intercept` runs first in every exception handler of every build, and its armed state is global, so in a `kernel_tests` build a fault with the armed vector on any CPU, at any CPL, is caught (ROADMAP §10.2, F146) |
 | I30 | Interrupt and exception handlers run with RFLAGS.AC=0 (§5.10 rule 5) | none | documented | No: the gates keep ring 3's AC (ROADMAP §10.6, F088) |
-| I31 | Every IF=0 stretch outside §2.9 rule 2's exemptions retires at most 100,000 instructions ([§2.9](#29-preemption-and-interrupt-state) rule 2) | §2.9; ROADMAP §10.3's IF-off tracer | documented | No: syscall bodies run with IF=0 until they block, and a console `write` scrolls the framebuffer once per newline with IF=0 (ROADMAP §10.6, F044); the heap's first-fit `alloc`, its address-ordered insertion on `dealloc`, and a moving `realloc`'s copy run under the IRQ-off HEAP lock over a free list whose length user churn sets (ROADMAP §12.6); the buddy's double-free check walks the free lists (ROADMAP §12.1, F029); a `klog!` emit waits on the UART with IF off, about 8 ms per 96-byte line on a 115200-baud 16550, which no QEMU tier paces (ROADMAP §19.5); ROADMAP §10.10 makes a shootdown survive a violation (F011) |
+| I31 | Every IF=0 stretch outside §2.9 rule 2's exemptions retires at most 100,000 instructions ([§2.9](#29-preemption-and-interrupt-state) rule 2) | §2.9; ROADMAP §10.3's IF-off tracer | documented | No: syscall bodies run with IF=0 until they block, and a console `write` scrolls the framebuffer once per newline with IF=0 (ROADMAP §10.6, F044); the heap's first-fit `alloc`, its address-ordered insertion on `dealloc`, and a moving `realloc`'s copy run under the IRQ-off HEAP lock over a free list whose length user churn sets (ROADMAP §12.6); the buddy's double-free check walks the free lists (ROADMAP §12.1, F029); a `klog!` emit waits on the UART with IF off, about 8 ms per 96-byte line on a 115200-baud 16550, which no QEMU tier paces (ROADMAP §19.5); a shootdown survives a violation: `wait_acks` keeps waiting and logs the CPUs that have not acknowledged once a second (§7.9, F011) |
 | I32 | A handler on an IST stack never blocks, switches threads, or takes a lock, and an IST vector taken at CPL 3 leaves the IST stack before its body runs (§5.10 rules 3 and 6) | the IST entry stubs and handlers | documented | Partly: every IST handler halts, so none blocks or switches, except that under `kernel_tests` an armed `catch` steps RIP and returns or longjmps off the IST stack; no IST entry leaves the IST stack yet (ROADMAP §10.6, F005, F007) |
 | I33 | A fault body reads CR2, DR6, ESR, and FAR from its frame, where the entry stub saved them before IF could turn on (§5.10 rule 9) | the `arch/idt.rs` stubs; the aarch64 vectors (ROADMAP §11.3) | documented | Yes, only because every fault body runs with IF=0 and reads CR2 before anything else can fault (`arch::idt::page_fault`); ROADMAP §10.6's IF=1 bodies need the stub save (its syscall-body and generated-stub boxes) |
 | I34 | A PTE change that removes or narrows a translation takes effect only after every CPU that could hold the old one has invalidated and acknowledged; until then no frame, table page, or VA is reused and no page counts as clean (§2.4) | `kva_init::unmap_shootdown` (kernel); `addr_space_init::shootdown_user` (user) | documented | Partly: kernel unmaps free frames and VA only after `wait_acks`; a user change invalidates only on the calling CPU, enough only while I8 holds, and nothing yet clears a dirty bit (ROADMAP §12.3) |
@@ -978,8 +978,6 @@ The rule for every completion, hand-off, and deferred reclaim:
 
 Rule; not yet enforced. The violations, and the ROADMAP lines that fix them:
 
-- `IoWaiter::finish` stores `done`, then takes SCHED and runs `wake_all` on the `WaitQueue` inside
-  the waiter, which lives on the submitter's stack (ROADMAP §10.10, F002).
 - `thread_exit` puts its own stack on the global `kva_init::DEFERRED` list, and any CPU's
   `reap_zombies` can unmap it before the exiting CPU has finished `switch_context` (ROADMAP §10.10,
   F012).
@@ -1277,7 +1275,7 @@ them; everything else uses counts alone.
 Today the code breaks rules 1, 2, 4, and 5: TCBs are never freed and their slots are rewritten in
 place (I9; ROADMAP §10.10, F012), address spaces are reached through `&'static` references built
 from table-owned boxes (ROADMAP §10.6, F019), block completions point into stack frames (ROADMAP
-§10.10, F002; §12.5, F042), a pid is the index of its process-table slot, handed out lowest first
+§12.5, F042), a pid is the index of its process-table slot, handed out lowest first
 (ROADMAP §10.4, F127), and a tid is its TCB slot index, in a space of its own. Nothing implements
 rule 3's operation gate or rule 6's deferred release yet (ROADMAP §10.4). A process's working
 directory is a path string: one kernel-global `file_init::CWD` serves every process, and `Proc::cwd`
@@ -3906,13 +3904,14 @@ CPUs shooting down at once. The wait loop therefore calls `service_incoming` and
 slots so a spinning initiator still helps its peers. This is not optional; it is the difference
 between working and a hang that only appears under load.
 
-The wait is bounded: `ipi_init::wait_acks` panics after 1000 × `tsc_per_ms` TSC cycles (1 s) without
-every acknowledgement. Planned (ROADMAP §10.10): the wait never panics; after 1 s it keeps waiting and
-logs, at most once a second, the CPUs that have not acknowledged. A target CPU that holds IF=0 that
-long without polling `service_incoming` makes a shootdown panic the kernel. The in-guest test runner
-holds IF=0 for the whole run,
-and a syscall body runs with the IF=0 that FMASK set until it blocks (ROADMAP §10.10, F011); a console
-`write` with many newlines is the long case (ROADMAP §10.6, F044). As built, one round invalidates one VA
+The wait never panics, because `shootdown_va` and `call_mask` free frames and reuse their slot as
+soon as `ipi_init::wait_acks` returns. After each second (1000 × `tsc_per_ms` cycles) without every
+acknowledgement, it logs `vibeOS: ipi: wait_acks late <n> s: cpu<i> …` and counts it in
+`ipi_init::ack_late_count`. Without a TSC it logs every 50,000,000 polls. A CPU at IF=0 that does not
+poll `service_incoming` delays every shootdown until it does. One that never does leaves a hang for
+ROADMAP §10.7's forensics to report. `lifetime_shootdown_ack_late` holds IF off for 3 s on one CPU
+while another unmaps. What holds IF=0 that long today: syscall bodies until they block (ROADMAP
+§10.6, F011), and a console `write` with many newlines (ROADMAP §10.6, F044). As built, one round invalidates one VA
 (`shootdown_va`) on every online CPU; ROADMAP §12.3 replaces it with the rounds above. `kva_init::unmap_shootdown` unmaps at most 32 pages (`MAX_UNMAP`) and leaves the
 rest mapped with no error, while `vunmap` frees the whole VA span it was given (ROADMAP §10.3, F107).
 
@@ -4730,12 +4729,13 @@ owns the queue (mutex, rwlock, condvar, channel) must outlive every waiter. Drop
 still blocked is a use-after-free on the next timeout or wake.
 
 **An I/O completion writes into a stack frame its waiter has already reused.**
-`IoWaiter` lives on the submitter's stack. `IoWaiter::finish` stores `done` with Release, then takes
-SCHED and runs `wake_all` on the `WaitQueue` inside the waiter; `wait()` returns as soon as its
-lock-free `poll()` sees `done`, so the wake can land in whatever frame reused that stack (ROADMAP
-§10.10, F002). Rule: publish last ([section 2.8](#28-publish-last)). For `IoWaiter`: take SCHED,
-wake, then store `done` with Release inside that section, which `poll()` loads with Acquire
-([section 10.1](#101-completions)).
+`IoWaiter` lives on the submitter's stack, and `wait()` returns as soon as its lock-free `poll()`
+sees `done`, so any access the completer makes to the waiter after that store can land in whatever
+frame reused that stack. A lock taken after the store does not help, and neither does storing `done`
+under SCHED before the wake (F002). Rule: publish last ([section 2.8](#28-publish-last)).
+`IoWaiter::finish` takes SCHED, runs `wake_all` on the waiter's queue, and stores `done` with Release
+inside that section, which `poll()` loads with Acquire ([section 10.1](#101-completions)). It is an
+`unsafe fn` over a raw pointer, so no reference to the waiter outlives the store.
 
 **Condvar waiter never sees the predicate.**
 Wake does not carry the condition. Mesa: `wait` re-acquires the mutex and returns; the caller loops
@@ -4950,8 +4950,9 @@ that drop; virtio-blk submits to a virtqueue after the same drop and completes f
 Rule: completion begins with the claim ([§10.3](#103-failure) step 2), and only the party that
 claimed a request touches it. It wakes the waiters under SCHED and then stores the status with
 Release inside that section, as its last access to each waiter ([section 2.8](#28-publish-last));
-`poll()` loads it with Acquire. `IoWaiter::finish` breaks this: it stores `done` with Release before
-it takes SCHED, then wakes (ROADMAP §10.10, F002). Never hold the queue lock across I/O or across
+`poll()` loads it with Acquire. `IoWaiter::finish` does this, and the in-guest
+`lifetime_iowaiter_publish_last`, which holds the completer just before SCHED, fails if the store
+comes first (ROADMAP §10.10, F002). Never hold the queue lock across I/O or across
 that wake (DEVICE then SCHED is the wrong order). Hard IRQ must not run this path: enqueue work only
 (DESIGN [§2.2](#22-interrupt-handler-rules)). Ramdisk backing is BSS, not a heap `Vec`: allocating
 under RANK_DEVICE would take RANK_HEAP (lock order).

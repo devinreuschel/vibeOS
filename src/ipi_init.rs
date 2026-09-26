@@ -9,6 +9,7 @@
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use vibeos::ipi::{MAX_IPI_CPUS, all_acked, inbox_bit, waiter_mask};
+use vibeos::log::Level;
 use vibeos::paging::VirtAddr;
 use vibeos::thread::ThreadId;
 use vibeos::vectors;
@@ -120,32 +121,78 @@ fn service_calls() {
     CALL_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Wait until every CPU in `waiters` has acked. Never panics and never
+/// returns early: `shootdown_va` and `call_mask` callers free frames and
+/// reuse their slot as soon as it returns (DESIGN §7.9). After each second
+/// without every ack (or [`NO_TSC_LATE_POLLS`] polls without a TSC) it logs
+/// the CPUs that have not acked and counts it in [`ack_late_count`]; a CPU
+/// that never acks is a hang for ROADMAP §10.7's forensics.
 fn wait_acks(waiters: u64, acked: &AtomicU64) {
     if waiters == 0 {
         return;
     }
     assert!(!x86::interrupts_enabled(), "ipi: ack wait with IF on");
     let k = time_init::tsc_per_ms();
+    let period = k.saturating_mul(1000);
     let start = time_init::read_tsc();
-    let cap = if k == 0 {
-        0
-    } else {
-        (k as u128).saturating_mul(1000) as u64
-    };
+    let mut last = start;
     let mut spins = 0u64;
     loop {
-        if all_acked(waiters, acked.load(Ordering::Acquire)) {
+        let got = acked.load(Ordering::Acquire);
+        if all_acked(waiters, got) {
             return;
         }
         service_incoming();
         spins = spins.wrapping_add(1);
-        if cap != 0 && time_init::read_tsc().wrapping_sub(start) > cap {
-            panic!("ipi: ack timeout waiters={waiters:#x}");
-        }
-        if cap == 0 && spins > 50_000_000 {
-            panic!("ipi: ack timeout (no tsc)");
+        let late = if k != 0 {
+            let now = time_init::read_tsc();
+            if now.wrapping_sub(last) >= period {
+                last = now;
+                Some((now.wrapping_sub(start) / period, "s"))
+            } else {
+                None
+            }
+        } else if spins.is_multiple_of(NO_TSC_LATE_POLLS) {
+            Some((spins, "polls"))
+        } else {
+            None
+        };
+        if let Some((n, unit)) = late {
+            ACK_LATE.fetch_add(1, Ordering::Relaxed);
+            crate::klog!(
+                Level::Warn,
+                "vibeOS: ipi: wait_acks late {} {}:{}",
+                n,
+                unit,
+                CpuList(waiters & !got)
+            );
         }
         core::hint::spin_loop();
+    }
+}
+
+/// Late periods [`wait_acks`] has logged since boot.
+static ACK_LATE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+pub fn ack_late_count() -> u64 {
+    ACK_LATE.load(Ordering::Relaxed)
+}
+
+/// Without a TSC, [`wait_acks`] logs every this many polls.
+const NO_TSC_LATE_POLLS: u64 = 50_000_000;
+
+/// A CPU mask written as ` cpu<n>` for each set bit.
+struct CpuList(u64);
+
+impl core::fmt::Display for CpuList {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut m = self.0;
+        while m != 0 {
+            write!(f, " cpu{}", m.trailing_zeros())?;
+            m &= m - 1;
+        }
+        Ok(())
     }
 }
 
