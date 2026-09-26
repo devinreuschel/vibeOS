@@ -537,3 +537,13 @@ needs = [
   "`IrqCell::force_unlock`, `log_init::force_unlock`, which calls it,",  # L1285
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1324
+[[box]]
+key = "FAT and vibefs behind `InodeOps`;"
+needs = [
+  "one refcounted in-core FAT inode",  # L1330
+  "the dentry cache never resolves",  # L1331
+  "`scripts/check_gone.py`, which `make check` runs,",  # L1460
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"

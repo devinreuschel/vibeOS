@@ -9,12 +9,14 @@ use vibeos::fs::{
 use vibeos::limits::MAX_OPEN_FILES;
 use vibeos::proc::wait_exited;
 
+use super::p10_s12::fid;
 use super::user::{self, DEFAULT, Image, user_code};
 use super::{Outcome, Test, test};
 use crate::fat_init;
-use crate::file_init::{self, FileId};
+use crate::file_init;
 use crate::thread_init;
 use crate::time_init;
+use vibeos::fs::FileId;
 
 pub(super) const TESTS: &[Test] = &[
     test("file_table_fork_churn", test_file_table_fork_churn),
@@ -42,7 +44,7 @@ fn holders() -> [(bool, u16); MAX_OPEN_FILES] {
 
 /// Read up to `out.len()` bytes of `path` from offset 0; the count read.
 fn read_all(path: &str, out: &mut [u8]) -> Result<usize, FsError> {
-    let fid = file_init::open(path, O_RDONLY, 0)?;
+    let fid = fid::open(path, O_RDONLY, 0)?;
     let mut n = 0usize;
     let r = loop {
         let Some(rest) = out.get_mut(n..) else {
@@ -51,13 +53,13 @@ fn read_all(path: &str, out: &mut [u8]) -> Result<usize, FsError> {
         if rest.is_empty() {
             break Ok(n);
         }
-        match file_init::read(fid, rest) {
+        match fid::read(fid, rest) {
             Ok(0) => break Ok(n),
             Ok(k) => n = n.saturating_add(k),
             Err(e) => break Err(e),
         }
     };
-    let c = file_init::close(fid);
+    let c = fid::close(fid);
     let n = r?;
     c?;
     Ok(n)
@@ -65,7 +67,7 @@ fn read_all(path: &str, out: &mut [u8]) -> Result<usize, FsError> {
 
 /// Unlink `path`; a missing file is not an error.
 fn unlink_quiet(path: &str) -> Result<(), FsError> {
-    match file_init::unlink_path(path, false) {
+    match fid::unlink_path(path, false) {
         Ok(()) | Err(FsError::NotFound) => Ok(()),
         Err(e) => Err(e),
     }
@@ -280,8 +282,8 @@ fn stale_helper() {
         n += 1;
     }
     if file_init::testing::write_held()
-        && file_init::close(unpack(STALE_A.load(Ordering::Acquire))).is_ok()
-        && let Ok(b) = file_init::open("/f55t.txt", O_RDWR | O_CREAT | O_TRUNC, 0)
+        && fid::close(unpack(STALE_A.load(Ordering::Acquire))).is_ok()
+        && let Ok(b) = fid::open("/f55t.txt", O_RDWR | O_CREAT | O_TRUNC, 0)
     {
         STALE_B.store(pack(b), Ordering::Release);
         STALE_B_OK.store(true, Ordering::Release);
@@ -306,25 +308,25 @@ fn test_file_table_stale_writeback_ebadf() -> Outcome {
 fn stale_writeback() -> Outcome {
     const FL: u32 = O_RDWR | O_CREAT | O_TRUNC;
     // A handle whose slot was closed and reused.
-    let a = match file_init::open("/f55s.txt", FL, 0) {
+    let a = match fid::open("/f55s.txt", FL, 0) {
         Ok(a) => a,
         Err(e) => return crate::fail_fmt!("open s: {}", e.as_str()),
     };
-    if let Err(e) = file_init::close(a) {
+    if let Err(e) = fid::close(a) {
         return crate::fail_fmt!("close s: {}", e.as_str());
     }
-    let b = match file_init::open("/f55t.txt", FL, 0) {
+    let b = match fid::open("/f55t.txt", FL, 0) {
         Ok(b) => b,
         Err(e) => return crate::fail_fmt!("open t: {}", e.as_str()),
     };
     let stale = [
-        ("write", file_init::write(a, b"x").err()),
-        ("seek", file_init::seek(a, 5, SEEK_SET).err()),
-        ("addref", file_init::addref(a).err()),
-        ("close", file_init::close(a).err()),
+        ("write", fid::write(a, b"x").err()),
+        ("seek", fid::seek(a, 5, SEEK_SET).err()),
+        ("addref", fid::addref(a).err()),
+        ("close", fid::close(a).err()),
     ];
-    let pos = file_init::seek(b, 0, SEEK_CUR);
-    let cb = file_init::close(b);
+    let pos = fid::seek(b, 0, SEEK_CUR);
+    let cb = fid::close(b);
     if b.fid != a.fid || b.r#gen == a.r#gen {
         return crate::fail_fmt!("slot not reused: {a:?} then {b:?}");
     }
@@ -341,7 +343,7 @@ fn stale_writeback() -> Outcome {
     }
     // A write held between its I/O and its write-back while another
     // thread closes its file and opens another into the slot.
-    let a = match file_init::open("/f55s.txt", FL, 0) {
+    let a = match fid::open("/f55s.txt", FL, 0) {
         Ok(a) => a,
         Err(e) => return crate::fail_fmt!("open s: {}", e.as_str()),
     };
@@ -350,7 +352,7 @@ fn stale_writeback() -> Outcome {
     STALE_DONE.store(false, Ordering::Release);
     file_init::testing::hold_next_write();
     super::spawn_thread("f55-stale", stale_helper);
-    let w = file_init::write(a, b"x");
+    let w = fid::write(a, b"x");
     let deadline = time_init::now_ns().saturating_add(1_000_000_000);
     while !STALE_DONE.load(Ordering::Acquire) && time_init::now_ns() < deadline {
         thread_init::yield_now();
@@ -359,12 +361,12 @@ fn stale_writeback() -> Outcome {
         return Outcome::Fail("helper did not finish");
     }
     if !STALE_B_OK.load(Ordering::Acquire) {
-        let _ = file_init::close(a);
+        let _ = fid::close(a);
         return Outcome::Fail("helper: no held write, or close/open failed");
     }
     let b = unpack(STALE_B.load(Ordering::Acquire));
-    let pos = file_init::seek(b, 0, SEEK_CUR);
-    let cb = file_init::close(b);
+    let pos = fid::seek(b, 0, SEEK_CUR);
+    let cb = fid::close(b);
     if b.fid != a.fid {
         return crate::fail_fmt!("slot not reused: {a:?} then {b:?}");
     }
@@ -385,11 +387,11 @@ fn test_open_creat_exists_opens() -> Outcome {
         return Outcome::Fail("unlink before");
     }
     file_init::testing::set_open_race(true);
-    let r = file_init::open("/f55r.txt", O_RDWR | O_CREAT, 0);
+    let r = fid::open("/f55r.txt", O_RDWR | O_CREAT, 0);
     file_init::testing::set_open_race(false);
     match r {
         Ok(id) => {
-            if let Err(e) = file_init::close(id) {
+            if let Err(e) = fid::close(id) {
                 return crate::fail_fmt!("close: {}", e.as_str());
             }
         }
@@ -399,12 +401,12 @@ fn test_open_creat_exists_opens() -> Outcome {
         return Outcome::Fail("unlink");
     }
     file_init::testing::set_open_race(true);
-    let r = file_init::open("/f55r.txt", O_RDWR | O_CREAT | O_EXCL, 0);
+    let r = fid::open("/f55r.txt", O_RDWR | O_CREAT | O_EXCL, 0);
     file_init::testing::set_open_race(false);
     let excl = match r {
         Err(FsError::Exists) => Outcome::Ok,
         Ok(id) => {
-            let _ = file_init::close(id);
+            let _ = fid::close(id);
             Outcome::Fail("O_CREAT|O_EXCL opened, want Exists")
         }
         Err(e) => crate::fail_fmt!("O_CREAT|O_EXCL: {}, want Exists", e.as_str()),
@@ -419,7 +421,7 @@ fn test_open_creat_exists_opens() -> Outcome {
 fn close_unlink(ids: &[Option<FileId>], path: &str) -> Result<(), FsError> {
     let mut r = Ok(());
     for &id in ids.iter().flatten() {
-        if let Err(e) = file_init::close(id)
+        if let Err(e) = fid::close(id)
             && r.is_ok()
         {
             r = Err(e);
@@ -452,7 +454,7 @@ fn shared_size_on(path: &str, ids: &mut [Option<FileId>; 4]) -> Outcome {
         O_RDWR | O_TRUNC,
     ];
     let mut open = |k: usize| -> Result<FileId, Outcome> {
-        match file_init::open(path, flags[k], 0) {
+        match fid::open(path, flags[k], 0) {
             Ok(id) => {
                 ids[k] = Some(id);
                 Ok(id)
@@ -468,10 +470,10 @@ fn shared_size_on(path: &str, ids: &mut [Option<FileId>; 4]) -> Outcome {
         Ok(id) => id,
         Err(o) => return o,
     };
-    if file_init::write(a, &[b'a'; 100]) != Ok(100) {
+    if fid::write(a, &[b'a'; 100]) != Ok(100) {
         return crate::fail_fmt!("{path}: write 100");
     }
-    match file_init::seek(b, 0, SEEK_END) {
+    match fid::seek(b, 0, SEEK_END) {
         Ok(100) => {}
         r => return crate::fail_fmt!("{path}: second SEEK_END {r:?}, want 100"),
     }
@@ -479,11 +481,11 @@ fn shared_size_on(path: &str, ids: &mut [Option<FileId>; 4]) -> Outcome {
         Ok(id) => id,
         Err(o) => return o,
     };
-    if file_init::write(c, b"Z") != Ok(1) {
+    if fid::write(c, b"Z") != Ok(1) {
         return crate::fail_fmt!("{path}: append write");
     }
     let mut z = [0u8; 1];
-    if file_init::seek(b, 100, SEEK_SET) != Ok(100) || file_init::read(b, &mut z) != Ok(1) {
+    if fid::seek(b, 100, SEEK_SET) != Ok(100) || fid::read(b, &mut z) != Ok(1) {
         return crate::fail_fmt!("{path}: read back byte 100");
     }
     if &z != b"Z" {
@@ -493,16 +495,16 @@ fn shared_size_on(path: &str, ids: &mut [Option<FileId>; 4]) -> Outcome {
         Ok(id) => id,
         Err(o) => return o,
     };
-    if file_init::write(b, b"xyz") != Ok(3) {
+    if fid::write(b, b"xyz") != Ok(3) {
         return crate::fail_fmt!("{path}: write after O_TRUNC");
     }
     for (k, id) in [a, b, c, d].into_iter().enumerate() {
-        match file_init::seek(id, 0, SEEK_END) {
+        match fid::seek(id, 0, SEEK_END) {
             Ok(104) => {}
             r => return crate::fail_fmt!("{path}: fd {k} SEEK_END {r:?}, want 104"),
         }
     }
-    match file_init::stat_path(path) {
+    match fid::stat_path(path) {
         Ok(st) if st.size == 104 => Outcome::Ok,
         Ok(st) => crate::fail_fmt!("{path}: stat size {}, want 104", st.size),
         Err(e) => crate::fail_fmt!("{path}: stat: {}", e.as_str()),
@@ -533,12 +535,12 @@ fn test_fat_unlinked_open_frees_at_close() -> Outcome {
     let Ok(before) = fat_free() else {
         return Outcome::Fail("df");
     };
-    let a = match file_init::open(PATH, FL, 0) {
+    let a = match fid::open(PATH, FL, 0) {
         Ok(a) => a,
         Err(e) => return crate::fail_fmt!("open: {}", e.as_str()),
     };
     let out = unlinked_open(PATH, a, before);
-    let c = file_init::close(a);
+    let c = fid::close(a);
     let u = unlink_quiet(PATH);
     if !matches!(out, Outcome::Ok) {
         return out;
@@ -560,7 +562,7 @@ fn unlinked_open(path: &str, a: FileId, before: u64) -> Outcome {
         data[i] = (i % 251) as u8;
         i += 1;
     }
-    if file_init::write(a, &data) != Ok(data.len()) {
+    if fid::write(a, &data) != Ok(data.len()) {
         return Outcome::Fail("write");
     }
     let Ok(held) = fat_free() else {
@@ -569,7 +571,7 @@ fn unlinked_open(path: &str, a: FileId, before: u64) -> Outcome {
     if held >= before {
         return crate::fail_fmt!("free {held} with the file written, before {before}");
     }
-    if let Err(e) = file_init::unlink_path(path, false) {
+    if let Err(e) = fid::unlink_path(path, false) {
         return crate::fail_fmt!("unlink open file: {}", e.as_str());
     }
     match fat_free() {
@@ -577,21 +579,21 @@ fn unlinked_open(path: &str, a: FileId, before: u64) -> Outcome {
         r => return crate::fail_fmt!("free {r:?} after unlink, want {held}"),
     }
     let mut back = [0u8; 1500];
-    if file_init::seek(a, 0, SEEK_SET) != Ok(0) || file_init::read(a, &mut back) != Ok(1500) {
+    if fid::seek(a, 0, SEEK_SET) != Ok(0) || fid::read(a, &mut back) != Ok(1500) {
         return Outcome::Fail("read back after unlink");
     }
     if back != data {
         return Outcome::Fail("data changed after unlink");
     }
     // A new file of the same name is another inode.
-    let n = match file_init::open(path, O_RDWR | O_CREAT | O_TRUNC, 0) {
+    let n = match fid::open(path, O_RDWR | O_CREAT | O_TRUNC, 0) {
         Ok(n) => n,
         Err(e) => return crate::fail_fmt!("open new: {}", e.as_str()),
     };
-    let w = file_init::write(n, b"new");
-    let new_end = file_init::seek(n, 0, SEEK_END);
-    let old_end = file_init::seek(a, 0, SEEK_END);
-    let cn = file_init::close(n);
+    let w = fid::write(n, b"new");
+    let new_end = fid::seek(n, 0, SEEK_END);
+    let old_end = fid::seek(a, 0, SEEK_END);
+    let cn = fid::close(n);
     if w != Ok(3) || new_end != Ok(3) {
         return crate::fail_fmt!("new file: write {w:?}, size {new_end:?}");
     }
@@ -764,7 +766,7 @@ user_code!(
 fn test_vibefs_seek_end_5gib() -> Outcome {
     const BIG: u64 = (5 << 30) + 1;
     let st = user::run(&Image::Code(VIBEFS_BIG5, DEFAULT), &["big5"]);
-    let size = file_init::stat_path("/vibe/big5").map(|s| s.size);
+    let size = fid::stat_path("/vibe/big5").map(|s| s.size);
     let u = unlink_quiet("/vibe/big5");
     let st = match st {
         Ok(st) => st,

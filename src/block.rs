@@ -234,8 +234,8 @@ impl Request {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MergeKind {
     None,
-    Back,
-    Front,
+    BackMerge,
+    FrontMerge,
 }
 
 fn merge_kind(a: &Request, b: &Request) -> MergeKind {
@@ -243,9 +243,9 @@ fn merge_kind(a: &Request, b: &Request) -> MergeKind {
         return MergeKind::None;
     }
     if a.end_lba() == b.bio.lba {
-        MergeKind::Back
+        MergeKind::BackMerge
     } else if b.end_lba() == a.bio.lba {
-        MergeKind::Front
+        MergeKind::FrontMerge
     } else {
         MergeKind::None
     }
@@ -254,7 +254,7 @@ fn merge_kind(a: &Request, b: &Request) -> MergeKind {
 fn merge_into(dst: &mut Request, src: Request, kind: MergeKind) -> bool {
     match kind {
         MergeKind::None => false,
-        MergeKind::Back | MergeKind::Front => {
+        MergeKind::BackMerge | MergeKind::FrontMerge => {
             if (dst.nseg as usize) + (src.nseg as usize) > MAX_SEGS {
                 return false;
             }
@@ -265,7 +265,7 @@ fn merge_into(dst: &mut Request, src: Request, kind: MergeKind) -> bool {
             let Some(nsect) = nsect else {
                 return false;
             };
-            if matches!(kind, MergeKind::Front) {
+            if matches!(kind, MergeKind::FrontMerge) {
                 let mut segs = [Seg::EMPTY; MAX_SEGS];
                 let mut i = 0u8;
                 while i < src.nseg {

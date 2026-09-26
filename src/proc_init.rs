@@ -12,7 +12,7 @@ use core::fmt::Write;
 
 use vibeos::addr_space::AddressSpace;
 use vibeos::desc::InterruptFrame;
-use vibeos::fs::FsError;
+use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, SeekFrom};
 use vibeos::kbd::{DecodedKey, NamedKey};
 use vibeos::proc::{
     Creds, Cwd, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, InitState, MAX_FDS, MAX_PROCS,
@@ -35,7 +35,7 @@ use vibeos::wait::WaitQueue;
 use crate::addr_space_init;
 use crate::cell::IrqCell;
 use crate::console_init;
-use crate::file_init::{self, FileId};
+use crate::file_init;
 use crate::serial::Serial;
 use crate::syscall_init;
 use crate::thread_init::{self, SpawnError};
@@ -271,9 +271,29 @@ fn file_id(fd: Fd) -> Option<FileId> {
     }
 }
 
+/// Read through open file `id` under a count of this syscall's own.
+fn file_read(id: FileId, buf: &mut [u8]) -> Result<usize, FsError> {
+    let f = file_init::fget(id)?;
+    let r = file_init::read(&f, buf);
+    let c = file_init::close(f);
+    let n = r?;
+    c?;
+    Ok(n)
+}
+
+/// Write through open file `id` under a count of this syscall's own.
+fn file_write(id: FileId, buf: &[u8]) -> Result<usize, FsError> {
+    let f = file_init::fget(id)?;
+    let r = file_init::write(&f, buf);
+    let c = file_init::close(f);
+    let n = r?;
+    c?;
+    Ok(n)
+}
+
 fn close_fd_slot(fd: Fd) -> Result<(), FsError> {
     match file_id(fd) {
-        Some(id) => file_init::close(id),
+        Some(id) => file_init::close(FileRef::from_raw(id)),
         None => Ok(()),
     }
 }
@@ -297,7 +317,7 @@ fn dup_table(src: FdTable) -> Option<FdTable> {
             let mut j = 0u32;
             while j < i {
                 if let Some(id) = src.get(j).and_then(file_id) {
-                    let _ = file_init::close(id);
+                    let _ = file_init::close(FileRef::from_raw(id));
                 }
                 j += 1;
             }
@@ -594,7 +614,7 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> i64 {
                 match slot.kind {
                     FdKind::Console => console_init::write(&scratch[..n]),
                     FdKind::File { fid, r#gen } => {
-                        match file_init::write(FileId { fid, r#gen }, &scratch[..n]) {
+                        match file_write(FileId { fid, r#gen }, &scratch[..n]) {
                             Ok(k) => {
                                 if k < n {
                                     return (done + k as u64) as i64;
@@ -666,7 +686,7 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> i64 {
         FdKind::File { fid, r#gen } => {
             let mut scratch = [0u8; 256];
             let n = (len as usize).min(scratch.len());
-            match file_init::read(FileId { fid, r#gen }, &mut scratch[..n]) {
+            match file_read(FileId { fid, r#gen }, &mut scratch[..n]) {
                 Ok(k) => {
                     if k > 0 && space.write_bytes(buf, &scratch[..k]).is_err() {
                         return syscall::neg(EFAULT);
@@ -734,11 +754,12 @@ fn sys_open(path: u64, flags: u64, _mode: u64) -> i64 {
         Ok(n) => n,
         Err(e) => return syscall::neg(e),
     };
-    let Ok(path) = core::str::from_utf8(&buf[..n]) else {
+    if core::str::from_utf8(&buf[..n]).is_err() {
         return syscall::neg(EINVAL);
-    };
-    match file_init::open(path, flags as u32, 0) {
-        Ok(id) => {
+    }
+    match file_init::open_routed(&buf[..n], OpenFlags::from_bits(flags as u32), 0) {
+        Ok(f) => {
+            let id = f.into_raw();
             let slot = Fd {
                 kind: FdKind::File {
                     fid: id.fid,
@@ -751,7 +772,7 @@ fn sys_open(path: u64, flags: u64, _mode: u64) -> i64 {
             match r {
                 Some(fd) => fd as i64,
                 None => {
-                    let _ = file_init::close(id);
+                    let _ = file_init::close(FileRef::from_raw(id));
                     syscall::neg(EMFILE)
                 }
             }
@@ -778,7 +799,12 @@ fn sys_lseek(fd: u64, off: u64, whence: u64) -> i64 {
     };
     match slot.kind {
         FdKind::File { fid, r#gen } => {
-            match file_init::seek(FileId { fid, r#gen }, off as i64, whence as u32) {
+            let r = SeekFrom::from_whence(off as i64, whence as u32).and_then(|pos| {
+                let f = file_init::fget(FileId { fid, r#gen })?;
+                let r = file_init::seek(&f, pos);
+                file_init::close(f).and(r)
+            });
+            match r {
                 Ok(n) => n as i64,
                 Err(e) => syscall::neg(fs_errno(e)),
             }
@@ -800,7 +826,7 @@ fn sys_dup(old: u64) -> i64 {
             Ok(n) => Some(n),
             Err(_) => {
                 if let Some(id) = file_id(s) {
-                    let _ = file_init::close(id);
+                    let _ = file_init::close(FileRef::from_raw(id));
                 }
                 None
             }
@@ -830,7 +856,7 @@ fn sys_dup2(old: u64, new: u64) -> i64 {
             Ok(displaced) => Some((new as u32, displaced)),
             Err(_) => {
                 if let Some(id) = file_id(s) {
-                    let _ = file_init::close(id);
+                    let _ = file_init::close(FileRef::from_raw(id));
                 }
                 None
             }
