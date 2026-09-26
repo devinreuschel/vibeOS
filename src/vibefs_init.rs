@@ -37,14 +37,14 @@ const _: () = assert!(IMAGE_BYTES / BLOCK <= vibeos::vibefs::MAX_BLOCKS);
 const _: () = assert!(IMAGE_BYTES.is_multiple_of(BLOCK));
 
 #[derive(Clone, Copy)]
-enum Back {
+enum Media {
     Mem,
     Dev(u32),
 }
 
 struct Slot {
     vol: UnsafeCell<Vol>,
-    back: UnsafeCell<Back>,
+    back: UnsafeCell<Media>,
     used: AtomicBool,
     busy: AtomicBool,
 }
@@ -55,7 +55,7 @@ impl Slot {
     const fn empty() -> Self {
         Self {
             vol: UnsafeCell::new(Vol::new()),
-            back: UnsafeCell::new(Back::Mem),
+            back: UnsafeCell::new(Media::Mem),
             used: AtomicBool::new(false),
             busy: AtomicBool::new(false),
         }
@@ -88,7 +88,7 @@ static LIVE: AtomicBool = AtomicBool::new(false);
 static NVOL: AtomicU8 = AtomicU8::new(0);
 
 struct Io {
-    back: Back,
+    back: Media,
 }
 
 fn secs_per_blk(bs: u32) -> Result<u32, Error> {
@@ -101,8 +101,8 @@ fn secs_per_blk(bs: u32) -> Result<u32, Error> {
 impl Disk for Io {
     fn nblocks(&self) -> u32 {
         match self.back {
-            Back::Mem => (IMAGE_BYTES / BLOCK) as u32,
-            Back::Dev(cache_init::DEV_RAM0) => {
+            Media::Mem => (IMAGE_BYTES / BLOCK) as u32,
+            Media::Dev(cache_init::DEV_RAM0) => {
                 let bs = block_init::logical_block_size();
                 let n = block_init::capacity_sectors();
                 if bs == 0 {
@@ -111,7 +111,7 @@ impl Disk for Io {
                     ((n * bs as u64) / BLOCK as u64) as u32
                 }
             }
-            Back::Dev(cache_init::DEV_VDA) => {
+            Media::Dev(cache_init::DEV_VDA) => {
                 let bs = virtio_blk_init::logical_block_size();
                 let n = virtio_blk_init::capacity_sectors();
                 if bs == 0 {
@@ -120,13 +120,13 @@ impl Disk for Io {
                     (n.saturating_mul(bs as u64) / BLOCK as u64) as u32
                 }
             }
-            Back::Dev(_) => 0,
+            Media::Dev(_) => 0,
         }
     }
 
     fn read_block(&mut self, bno: u32, buf: &mut [u8; BLOCK]) -> Result<(), Error> {
         match self.back {
-            Back::Mem => {
+            Media::Mem => {
                 let off = (bno as usize).checked_mul(BLOCK).ok_or(Error::Inval)?;
                 let end = off.checked_add(BLOCK).ok_or(Error::Inval)?;
                 IMAGE.with(|data| {
@@ -137,7 +137,7 @@ impl Disk for Io {
                     Ok(())
                 })
             }
-            Back::Dev(dev) => {
+            Media::Dev(dev) => {
                 let bs = match dev {
                     cache_init::DEV_RAM0 => block_init::logical_block_size(),
                     _ => virtio_blk_init::logical_block_size(),
@@ -151,7 +151,7 @@ impl Disk for Io {
 
     fn write_block(&mut self, bno: u32, buf: &[u8; BLOCK]) -> Result<(), Error> {
         match self.back {
-            Back::Mem => {
+            Media::Mem => {
                 let off = (bno as usize).checked_mul(BLOCK).ok_or(Error::Inval)?;
                 let end = off.checked_add(BLOCK).ok_or(Error::Inval)?;
                 IMAGE.with(|data| {
@@ -162,7 +162,7 @@ impl Disk for Io {
                     Ok(())
                 })
             }
-            Back::Dev(dev) => {
+            Media::Dev(dev) => {
                 let bs = match dev {
                     cache_init::DEV_RAM0 => block_init::logical_block_size(),
                     _ => virtio_blk_init::logical_block_size(),
@@ -176,8 +176,8 @@ impl Disk for Io {
 
     fn flush(&mut self) -> Result<(), Error> {
         match self.back {
-            Back::Mem => Ok(()),
-            Back::Dev(dev) => cache_init::flush(dev).map_err(|_| Error::Io),
+            Media::Mem => Ok(()),
+            Media::Dev(dev) => cache_init::flush(dev).map_err(|_| Error::Io),
         }
     }
 }
@@ -268,8 +268,8 @@ fn with_slot_now<R>(
 ) -> Result<R, FsError> {
     grab_now(id)?;
     with_grabbed(id, |v, io| match io.back {
-        Back::Mem => f(v, io).map_err(Error::to_fs),
-        Back::Dev(_) => Err(FsError::Busy),
+        Media::Mem => f(v, io).map_err(Error::to_fs),
+        Media::Dev(_) => Err(FsError::Busy),
     })
 }
 
@@ -413,7 +413,7 @@ pub fn nvol() -> u8 {
 
 pub fn init() {
     IMAGE.with(|buf| buf.fill(0));
-    let mut io = Io { back: Back::Mem };
+    let mut io = Io { back: Media::Mem };
     let vref = unsafe { &mut *SLOTS[0].vol.get() };
     vref.clear();
     if vibefs::mkfs(&mut io, b"vibe", vref).is_err() {
@@ -425,7 +425,7 @@ pub fn init() {
         return;
     }
     unsafe {
-        *SLOTS[0].back.get() = Back::Mem;
+        *SLOTS[0].back.get() = Media::Mem;
     }
     SLOTS[0].used.store(true, Ordering::Release);
     SLOTS[0].busy.store(false, Ordering::Release);
@@ -536,8 +536,8 @@ pub fn df(id: u8) -> Result<(FsType, u64, u64, u32), FsError> {
 #[allow(dead_code)]
 pub fn probe_dev(name: &str) -> bool {
     let back = match name {
-        "ram0" => Back::Dev(cache_init::DEV_RAM0),
-        "vda" => Back::Dev(cache_init::DEV_VDA),
+        "ram0" => Media::Dev(cache_init::DEV_RAM0),
+        "vda" => Media::Dev(cache_init::DEV_VDA),
         _ => return false,
     };
     let mut io = Io { back };
@@ -674,13 +674,13 @@ pub fn mount_dev(name: &str, at: &str) -> Result<u8, FsError> {
             if !block_init::live() {
                 return Err(FsError::Io);
             }
-            Back::Dev(cache_init::DEV_RAM0)
+            Media::Dev(cache_init::DEV_RAM0)
         }
         "vda" => {
             if !virtio_blk_init::live() {
                 return Err(FsError::Io);
             }
-            Back::Dev(cache_init::DEV_VDA)
+            Media::Dev(cache_init::DEV_VDA)
         }
         _ => return Err(FsError::Inval),
     };

@@ -36,14 +36,14 @@ const MNT_MAX: usize = 2;
 const MNT_PATH: usize = 64;
 
 #[derive(Clone, Copy)]
-enum Back {
+enum Media {
     Initrd,
     Dev(u32),
 }
 
 struct Slot {
     vol: UnsafeCell<Option<FatVol>>,
-    back: UnsafeCell<Back>,
+    back: UnsafeCell<Media>,
     used: AtomicBool,
     busy: AtomicBool,
     /// The `Vfs` superblock the volume is mounted as, [`NO_SB`] until then.
@@ -56,7 +56,7 @@ impl Slot {
     const fn empty() -> Self {
         Self {
             vol: UnsafeCell::new(None),
-            back: UnsafeCell::new(Back::Initrd),
+            back: UnsafeCell::new(Media::Initrd),
             used: AtomicBool::new(false),
             busy: AtomicBool::new(false),
             sb: AtomicU8::new(NO_SB),
@@ -92,7 +92,7 @@ static NVOL: AtomicU8 = AtomicU8::new(0);
 const INITRD_RO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/initrd.fat"));
 
 struct Io {
-    back: Back,
+    back: Media,
 }
 
 impl Disk for Io {
@@ -102,16 +102,16 @@ impl Disk for Io {
 
     fn nsectors(&self) -> u32 {
         match self.back {
-            Back::Initrd => (INITRD_BYTES / SEC) as u32,
-            Back::Dev(cache_init::DEV_RAM0) => block_init::capacity_sectors() as u32,
-            Back::Dev(cache_init::DEV_VDA) => virtio_blk_init::capacity_sectors() as u32,
-            Back::Dev(_) => 0,
+            Media::Initrd => (INITRD_BYTES / SEC) as u32,
+            Media::Dev(cache_init::DEV_RAM0) => block_init::capacity_sectors() as u32,
+            Media::Dev(cache_init::DEV_VDA) => virtio_blk_init::capacity_sectors() as u32,
+            Media::Dev(_) => 0,
         }
     }
 
     fn read(&mut self, lba: u32, buf: &mut [u8]) -> Result<(), FatError> {
         match self.back {
-            Back::Initrd => {
+            Media::Initrd => {
                 let ss = SEC;
                 let off = (lba as usize).checked_mul(ss).ok_or(FatError::Inval)?;
                 let end = off.checked_add(ss).ok_or(FatError::Inval)?;
@@ -123,13 +123,13 @@ impl Disk for Io {
                     Ok(())
                 })
             }
-            Back::Dev(dev) => cache_init::read(dev, lba as u64, buf).map_err(|_| FatError::Io),
+            Media::Dev(dev) => cache_init::read(dev, lba as u64, buf).map_err(|_| FatError::Io),
         }
     }
 
     fn write(&mut self, lba: u32, buf: &[u8]) -> Result<(), FatError> {
         match self.back {
-            Back::Initrd => {
+            Media::Initrd => {
                 let ss = SEC;
                 let off = (lba as usize).checked_mul(ss).ok_or(FatError::Inval)?;
                 let end = off.checked_add(ss).ok_or(FatError::Inval)?;
@@ -141,14 +141,14 @@ impl Disk for Io {
                     Ok(())
                 })
             }
-            Back::Dev(dev) => cache_init::write(dev, lba as u64, buf).map_err(|_| FatError::Io),
+            Media::Dev(dev) => cache_init::write(dev, lba as u64, buf).map_err(|_| FatError::Io),
         }
     }
 
     fn flush(&mut self) -> Result<(), FatError> {
         match self.back {
-            Back::Initrd => Ok(()),
-            Back::Dev(dev) => cache_init::flush(dev).map_err(|_| FatError::Io),
+            Media::Initrd => Ok(()),
+            Media::Dev(dev) => cache_init::flush(dev).map_err(|_| FatError::Io),
         }
     }
 }
@@ -249,8 +249,8 @@ fn with_slot_now<R>(
 ) -> Result<R, FsError> {
     grab_now(id)?;
     with_grabbed(id, |v, io| match io.back {
-        Back::Initrd => f(v, io),
-        Back::Dev(_) => Err(FsError::Busy),
+        Media::Initrd => f(v, io),
+        Media::Dev(_) => Err(FsError::Busy),
     })
 }
 
@@ -464,7 +464,9 @@ pub fn init() {
         LIVE.store(false, Ordering::Release);
         return;
     }
-    let mut io = Io { back: Back::Initrd };
+    let mut io = Io {
+        back: Media::Initrd,
+    };
     let vol = match FatVol::mount(&mut io) {
         Ok(v) => v,
         Err(_) => {
@@ -475,7 +477,7 @@ pub fn init() {
     let root_clu = vol.info.root_clus;
     unsafe {
         *SLOTS[0].vol.get() = Some(vol);
-        *SLOTS[0].back.get() = Back::Initrd;
+        *SLOTS[0].back.get() = Media::Initrd;
     }
     SLOTS[0].used.store(true, Ordering::Release);
     SLOTS[0].busy.store(false, Ordering::Release);
@@ -762,13 +764,13 @@ pub fn mount_dev(name: &str, at: &str) -> Result<u8, FsError> {
             if !block_init::live() {
                 return Err(FsError::Io);
             }
-            Back::Dev(cache_init::DEV_RAM0)
+            Media::Dev(cache_init::DEV_RAM0)
         }
         "vda" => {
             if !virtio_blk_init::live() {
                 return Err(FsError::Io);
             }
-            Back::Dev(cache_init::DEV_VDA)
+            Media::Dev(cache_init::DEV_VDA)
         }
         _ => return Err(FsError::Inval),
     };
