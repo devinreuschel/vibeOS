@@ -944,7 +944,7 @@ that review cites means the review's text.
 | I27 | `vibeos-core` does not panic on data (§2.5) | clippy deny on `unwrap`, `expect`, `panic` | enforced in part | No: indexing and overflow checks panic on crafted input; §2.5 lists the cases and their ROADMAP lines |
 | I28 | A line the harness takes as the kernel's is framed, and no user byte can produce the frame (§2.6) | `serial::Serial`, `console_init::write` | documented | No: nothing is framed, and the harness matches every line, so ring 3 can print a contract line (`/bin/sh` prints `shell ready`) or fail a run with `panicked at` (ROADMAP §10.2) |
 | I29 | A catch hook intercepts only a CPL-0 fault on the CPU that armed it, inside an in-guest test's catch window | `arch::catch` | assumed | Partly: production never arms it, but `intercept` runs first in every exception handler of every build, and its armed state is global, so in a `kernel_tests` build a fault with the armed vector on any CPU, at any CPL, is caught (ROADMAP §10.2, F146) |
-| I30 | Interrupt and exception handlers run with RFLAGS.AC=0 (§5.10 rule 5) | none | documented | No: the gates keep ring 3's AC (ROADMAP §10.6, F088) |
+| I30 | Interrupt and exception handlers run with RFLAGS.AC=0 (§5.10 rule 5) | `arch/idt.rs` stubs | enforced by construction: every stub's first instruction is `clac` where the CPU has SMAP | Yes |
 | I31 | Every IF=0 stretch outside §2.9 rule 2's exemptions retires at most 100,000 instructions ([§2.9](#29-preemption-and-interrupt-state) rule 2) | §2.9; ROADMAP §10.3's IF-off tracer | documented | No: syscall bodies run with IF=0 until they block, and a console `write` scrolls the framebuffer once per newline with IF=0 (ROADMAP §10.6, F044); the heap's first-fit `alloc`, its address-ordered insertion on `dealloc`, and a moving `realloc`'s copy run under the IRQ-off HEAP lock over a free list whose length user churn sets (ROADMAP §12.6); the buddy's double-free check walks the free lists (ROADMAP §12.1, F029); a `klog!` emit waits on the UART with IF off, about 8 ms per 96-byte line on a 115200-baud 16550, which no QEMU tier paces (ROADMAP §19.5); ROADMAP §10.10 makes a shootdown survive a violation (F011) |
 | I32 | A handler on an IST stack never blocks, switches threads, or takes a lock, and an IST vector taken at CPL 3 leaves the IST stack before its body runs (§5.10 rules 3 and 6) | the IST entry stubs and handlers | documented | Partly: every IST handler halts, so none blocks or switches, except that under `kernel_tests` an armed `catch` steps RIP and returns or longjmps off the IST stack; no IST entry leaves the IST stack yet (ROADMAP §10.6, F005, F007) |
 | I33 | A fault body reads CR2, DR6, ESR, and FAR from its frame, where the entry stub saved them before IF could turn on (§5.10 rule 9) | the `arch/idt.rs` stubs; the aarch64 vectors (ROADMAP §11.3) | documented | Yes, only because every fault body runs with IF=0 and reads CR2 before anything else can fault (`arch::idt::page_fault`); ROADMAP §10.6's IF=1 bodies need the stub save (its syscall-body and generated-stub boxes) |
@@ -2997,8 +2997,9 @@ architectures. Planned (ROADMAP §11.3, §11.6): the aarch64 port does not exist
    user-frame box).
 5. Every interrupt and exception entry clears RFLAGS.AC before any other code: an interrupt gate
    clears IF and TF but not AC, and ring 3 can set AC with `popf`. The syscall entry clears AC
-   through FMASK (bit 18). Rule; not yet enforced: ROADMAP §10.6 (F088); no interrupt or exception
-   entry runs `clac`. Planned (ROADMAP §10.6):
+   through FMASK (bit 18). Every generated stub starts with `clac`, and `idt::init` points each gate
+   at the stub when CPUID reports SMAP and 3 bytes in, past the `clac`, where it would be `#UD`
+   otherwise; the stub's `iretq` restores the interrupted AC. Planned (ROADMAP §10.6):
    `stac` appears only inside the user-memory accessors.
 6. A handler on an IST stack does not block and does not switch threads: a nested entry of the same
    vector restarts at the top of that IST stack and overwrites the first frame. It also takes no

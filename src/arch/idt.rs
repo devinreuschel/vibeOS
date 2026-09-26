@@ -1,8 +1,9 @@
 //! IDT, generated entry stubs, and exception bodies. DESIGN §5.2, §5.10.
 //!
 //! Every vector 0 to 255 enters through a stub that this module generates
-//! from [`ROWS`]. A stub pushes a zero where the CPU pushes no error code
-//! and its vector, then jumps to one of two entry paths, which build a
+//! from [`ROWS`]. A stub clears RFLAGS.AC, pushes a zero where the CPU
+//! pushes no error code and its vector, then jumps to one of two entry
+//! paths, which build a
 //! [`TrapFrame`], make the `swapgs` decision, save CR2 (`#PF`) or DR6
 //! (`#DB`) into the frame, and call [`trap_dispatch`]. The dispatcher runs
 //! the body that [`set_handler`] registered, or [`default_body`]. Unhandled
@@ -218,19 +219,24 @@ const PARANOID_MASK: u32 = {
 /// Bytes from one stub to the next.
 const STUB_STRIDE: usize = 32;
 
+/// `clac`, the first instruction of every stub; `#UD` without SMAP.
+const CLAC: [u8; 3] = [0x0F, 0x01, 0xCA];
+
 unsafe extern "C" {
     /// First of 256 stubs, `STUB_STRIDE` bytes apart.
     static vibeos_trap_stubs: [u8; 256 * STUB_STRIDE];
 }
 
-// The stubs and both entry paths. A stub is `cld`, a zero where the CPU
-// pushes no error code, its vector, and a jump; `.org` fails the build if
-// one outgrows the stride. Bytes are spelled out so `init` can check them.
+// The stubs and both entry paths. A stub is `clac`, `cld`, a zero where
+// the CPU pushes no error code, its vector, and a jump; `.org` fails the
+// build if one outgrows the stride. Bytes are spelled out so `init` can
+// check them. A gate skips the 3-byte `clac` where the CPU has no SMAP.
 // Neither entry path writes `rbp` before the `call`, so a backtrace from a
 // body walks on into the interrupted frames.
 global_asm!(
     r#"
     .macro vibeos_trap_stub v
+        .byte 0x0F, 0x01, 0xCA
         .byte 0xFC
         .if (\v) >= 32
         .byte 0x6A, 0x00
@@ -597,16 +603,25 @@ pub unsafe fn load() {
 }
 
 /// Point all 256 gates at their stubs, register the named bodies, `lidt`.
+/// Each gate enters at the stub's `clac` when CPUID reports SMAP, the bit
+/// `arch::cpu::harden` enables it from, and just past it otherwise. This
+/// runs before `harden`, and `clac` is legal once CPUID reports SMAP.
 ///
 /// # Safety
 /// GDT already loaded. PIC already remapped and masked.
 pub unsafe fn init() {
     let base = (&raw const vibeos_trap_stubs).cast::<u8>();
+    let skip = if crate::arch::cpu::cpuid_features().smap {
+        0
+    } else {
+        CLAC.len()
+    };
     IDT.with(|idt| {
         for (v, row) in ROWS.iter().enumerate() {
             let stub = base.wrapping_add(v * STUB_STRIDE);
             check_stub(stub, v, row);
-            idt.0[v] = IdtEntry::interrupt(stub as u64, KERNEL_CS, row.ist, row.dpl);
+            let gate = stub.wrapping_add(skip) as u64;
+            idt.0[v] = IdtEntry::interrupt(gate, KERNEL_CS, row.ist, row.dpl);
         }
     });
     register_named();
@@ -615,12 +630,15 @@ pub unsafe fn init() {
 
 /// Kernel invariant: stub `v` starts with the bytes `ROWS[v]` asks for.
 fn check_stub(stub: *const u8, v: usize, row: &Row) {
-    let mut want = [0u8; 8];
+    let mut want = [0u8; 12];
     let mut n = 0;
     let mut put = |b: u8| {
         want[n] = b;
         n += 1;
     };
+    for b in CLAC {
+        put(b);
+    }
     put(0xFC);
     if !row.err {
         put(0x6A);
@@ -719,6 +737,12 @@ pub mod testing {
     pub type Hook = fn(&mut TrapFrame) -> bool;
 
     static HOOKS: [AtomicUsize; 256] = [const { AtomicUsize::new(0) }; 256];
+
+    /// Run `hook` on every entry of `vector` until it is cleared with `None`.
+    pub fn set_hook(vector: u8, hook: Option<Hook>) {
+        let p = hook.map_or(0, |h| h as usize);
+        HOOKS[vector as usize].store(p, Ordering::Release);
+    }
     static CPL3_HITS: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 
     pub(super) fn on_entry(frame: &mut TrapFrame, v: u8) -> bool {
