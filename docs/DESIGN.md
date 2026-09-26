@@ -922,7 +922,7 @@ that review cites means the review's text.
 | I6 | Ring 3 never halts the kernel, pid 1's exit excepted (§2.5, §5.2, §11.5) | `proc_init::try_user_fault` | documented | No: ring-3 `#DB`, and `#AC` when `CR0.AM` is set, halt (F005), and so do the I4 windows (ROADMAP §10.6) |
 | I7 | The kernel reads or writes user memory only through the §5.1 user-memory accessors, and writes an address space that is not running only through the fill API (ROADMAP §10.6) | `addr_space.rs`; the arch accessors from ROADMAP §10.6 | enforced by SMAP where the CPU has it (PAN on aarch64, ROADMAP §11.6); the fill-API rule is documented | Partly: today's accessors copy through the physmap after `check_user_range`, and `write_bytes` ignores the PTE's `WRITABLE` bit (ROADMAP §10.6, F023) |
 | I8 | One thread per address space changes its regions, and another CPU changes its page tables only under its page-table lock (§2.11) | process model | assumed | Yes: only the owning thread touches a space. Lock-free user copies, local-only `invlpg`, and `&'static AddressSpace` depend on it. ROADMAP §10.6 replaces `&'static` with a counted object, §12.1's reverse map changes page tables from other CPUs under the space's page-table lock, §12.3 shoots down every CPU in the space's set, and §13.1's threads bring the address-space lock |
-| I9 | TCBs are never freed, so a `*mut Tcb` stays valid | 64-slot table, `thread_init` | assumed | Yes, but `spawn_inner` can reuse a Dead slot whose thread is still switching out (ROADMAP §10.10, F012) |
+| I9 | TCBs are never freed, so a `*mut Tcb` stays valid | 64-slot table, `thread_init` | assumed; slot reuse enforced by the in-guest `lifetime_dead_slot_on_cpu` | Yes: `spawn_inner` reuses a Dead slot only after an Acquire load finds its `Tcb.on_cpu` clear, which its CPU's `thread_init::finish_switch` clears with Release once `switch_context` has returned, and `thread_exit` stores `Dead` under SCHED (ROADMAP §10.10, F012) |
 | I10 | A dead thread's stack is freed only after its CPU has switched off it (§2.8, §4.5) | `thread_init::finish_switch` | enforced by the in-guest `lifetime_stack_reclaim` | Yes: `thread_exit` parks the stack in its CPU's `PerCpu.dead_stack`, and only that CPU's switch tail, after `switch_context` has returned, moves it into the CPU's stack cache or onto its dead list, which that CPU's worker frees (ROADMAP §10.10, F012) |
 | I11 | A completer's publishing store is its last access to the waiter (§2.8) | `block_init::IoWaiter::finish` | enforced by the in-guest `lifetime_iowaiter_publish_last` | Yes: `finish` runs `wake_all` under SCHED, then stores `done` with Release as its last access (ROADMAP §10.10, F002); ROADMAP §10.8 adds its loom model |
 | I12 | Every kernel PML4 slot exists before the first user address space | `AddressSpace::new` copies PML4[256..512) once | assumed | Yes, by boot order only: `paging_init::install` creates none of the heap, KVA, and `ioremap` PML4 slots; each appears on its region's first mapping, and no current path makes a first mapping after `/hello` (ROADMAP §12.1, F101) |
@@ -979,8 +979,6 @@ The rule for every completion, hand-off, and deferred reclaim:
 
 Rule; not yet enforced. The violations, and the ROADMAP lines that fix them:
 
-- `spawn_inner` can reuse a Dead TCB slot while its thread is still switching out on another CPU
-  (ROADMAP §10.10, F012).
 - On the bring-up timeout, `smp_init::start_one` frees an AP's kernel stack, GDT/TSS, and IST and
   RSP0 stacks without an INIT, so an AP that is still running uses freed memory (ROADMAP §11.4,
   F032).
@@ -3724,12 +3722,12 @@ releases the OS Lock on every aarch64 core. Planned: nothing arms a debug slot b
 Another thread reads or writes a thread's saved per-thread state (any row of this table, the user
 frame of [section 5.10](#510-privilege-transitions) included) only while that thread is held
 stopped, in a ptrace stop (ROADMAP §17.4) or parked for a core dump (ROADMAP §13.8), and only after
-an Acquire load has seen the thread's `on_cpu` flag (ROADMAP §10.10) clear. Stopping is not enough:
+an Acquire load has seen the thread's `on_cpu` flag clear. Stopping is not enough:
 a stopped thread wakes its tracer before its CPU has switched away from it, and until then some rows
 exist only in that CPU's registers (the FP state under the binding above, and the user FS and GS
-bases under FSGSBASE, ROADMAP §18.3). The switch away finishes every save in this table before it
-clears `on_cpu` with a Release store, its last access to the outgoing thread
-([§2.8](#28-publish-last)). The reader holds the stop for the whole access, as Linux's ptrace does:
+bases under FSGSBASE, ROADMAP §18.3). The switch away finishes every save in this table before
+`thread_init::finish_switch`, on that CPU once `switch_context` has returned, clears `on_cpu` with
+a Release store, its last access to the outgoing thread ([§2.8](#28-publish-last)). The reader holds the stop for the whole access, as Linux's ptrace does:
 nothing resumes the thread meanwhile, and a `SIGKILL` that arrives takes effect when the access
 ends, so the thread cannot exit and free the kernel stack that holds its user frame under the
 reader. A write follows the binding's rule above, so the thread's next return to user mode loads

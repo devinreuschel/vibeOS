@@ -13,7 +13,7 @@
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use vibeos::ipi::{home_cpu, pick_cpu};
 use vibeos::kva::DEFAULT_STACK_PAGES;
@@ -209,8 +209,12 @@ fn thread_exit() -> ! {
         });
         STACKS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
     }
-    // SAFETY: as above.
-    unsafe { (*p).state = ThreadState::Dead };
+    // Under SCHED, as every other state store; the slot stays unreusable
+    // while `on_cpu` is set, until this CPU's switch tail clears it.
+    with_sched(|_| {
+        // SAFETY: as above; SCHED orders this store with `spawn_inner`'s scan.
+        unsafe { (*p).state = ThreadState::Dead };
+    });
     #[cfg(feature = "kernel_tests")]
     testing::exit_stall();
     schedule();
@@ -348,6 +352,7 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
                 cpu.irq_nest.load(Ordering::Relaxed),
             );
             per_cpu_init::set_current_thread(cpu, new_ptr);
+            (*new_ptr).on_cpu.store(true, Ordering::Relaxed);
             crate::syscall_init::on_switch(cpu, old_ptr, new_ptr);
         }
     });
@@ -400,10 +405,10 @@ pub(crate) fn finish_switch() {
     );
     #[cfg(feature = "kernel_tests")]
     crate::ipi_init::testing::tail_enter();
-    let kick = per_cpu_init::with_current(|cpu| {
-        cpu.tail_prev = core::ptr::null_mut();
+    let (prev, kick) = per_cpu_init::with_current(|cpu| {
+        let prev = core::mem::replace(&mut cpu.tail_prev, core::ptr::null_mut());
         let Some(stack) = cpu.dead_stack.take() else {
-            return false;
+            return (prev, false);
         };
         let pages = stack.pages();
         let refused = if pages == DEFAULT_STACK_PAGES {
@@ -415,11 +420,11 @@ pub(crate) fn finish_switch() {
             None => {
                 CACHED_STACK_FRAMES.fetch_add(pages, Ordering::AcqRel);
                 STACKS_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
-                false
+                (prev, false)
             }
             Some(stack) => {
                 kva_init::park_on_list(&mut cpu.dead_list, stack);
-                true
+                (prev, true)
             }
         }
     });
@@ -428,6 +433,14 @@ pub(crate) fn finish_switch() {
     }
     #[cfg(feature = "kernel_tests")]
     crate::ipi_init::testing::tail_leave();
+    if !prev.is_null() {
+        // SAFETY: `prev` is the TCB this CPU switched off (stored in
+        // `tail_prev` by `thread_init::switch_now`), a live entry of `SCHED`
+        // (invariant I9); `switch_context` has returned, so every save into
+        // it is done. This Release store is this CPU's last access to it:
+        // after it `spawn_inner` may rewrite the slot (AGENTS rule 5).
+        unsafe { (*prev).on_cpu.store(false, Ordering::Release) };
+    }
 }
 
 /// Take this CPU's whole dead list, for its worker. Owner CPU, IF=0.
@@ -509,6 +522,7 @@ pub unsafe fn init_bootstrap() {
         id: ThreadId::BOOTSTRAP,
         name: "bootstrap",
         state: ThreadState::Running,
+        on_cpu: AtomicBool::new(true),
         stack: None,
         context: CpuContext::empty(),
         entry: bootstrap_entry,
@@ -671,6 +685,7 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, Guard
         id: ThreadId(0),
         name: "idle",
         state: ThreadState::Running,
+        on_cpu: AtomicBool::new(true),
         stack: Some(stack),
         context: CpuContext::empty(),
         entry: ap_idle_entry,
@@ -753,18 +768,18 @@ fn spawn_inner(
     // Taken by whichever path below installs it in a TCB.
     let mut stack = Some(stack);
     let tramp = trampoline as *const () as u64;
-    let cur = current_id();
-    let idle = per_cpu_init::current().idle_id;
     let cpu = choose_cpu(affinity);
     // The first-run level: `trampoline` runs the switch tail with IF=0 and
     // then drops it.
     let first_nest = irq_nest + 1;
 
     // Dead slot: rewrite the Box. 2000 spawn/exit must not churn the
-    // heap (one extra mapped page shows up as a leaked frame).
+    // heap (one extra mapped page shows up as a leaked frame). A Dead
+    // thread whose CPU has not finished switching off it still has
+    // `on_cpu` set; its CPU clears it with Release (`finish_switch`).
     if let Some(id) = with_sched(|s| {
         let slot = s.slots.iter().position(|x| match x.as_ref() {
-            Some(t) => t.state == ThreadState::Dead && t.id != cur && t.id != idle,
+            Some(t) => t.state == ThreadState::Dead && !t.on_cpu.load(Ordering::Acquire),
             None => false,
         })?;
         let id = ThreadId(slot as u32);
@@ -789,6 +804,7 @@ fn spawn_inner(
         id: ThreadId(0),
         name,
         state: ThreadState::Ready,
+        on_cpu: AtomicBool::new(false),
         stack,
         context: CpuContext::empty(),
         entry,
