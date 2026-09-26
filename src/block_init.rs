@@ -115,9 +115,74 @@ impl IoWaiter {
 
     fn finish(&self, res: Result<(), BlockError>) {
         self.done.store(pack(res), Ordering::Release);
+        #[cfg(feature = "kernel_tests")]
+        testing::finish_stall();
         thread_init::with_sched(|s| {
             s.wake_all(unsafe { &mut *self.wq.get() });
         });
+    }
+}
+
+/// Test hooks for the completion path (`lifetime_iowaiter_publish_last`,
+/// ROADMAP §10.10). `kernel_tests` only (AGENTS.md rule 9).
+#[cfg(feature = "kernel_tests")]
+pub mod testing {
+    use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+    use crate::time_init;
+
+    static STALLS_LEFT: AtomicU32 = AtomicU32::new(0);
+    static STALL_MAX_US: AtomicU32 = AtomicU32::new(0);
+    static STALLS_RUN: AtomicU32 = AtomicU32::new(0);
+    static RETURNS: AtomicU64 = AtomicU64::new(0);
+
+    /// Hold the next `count` completers just before they take SCHED, each
+    /// until a submitter calls [`note_return`] or `max_us` passes.
+    pub fn arm_finish_stall(count: u32, max_us: u32) {
+        STALLS_RUN.store(0, Ordering::Relaxed);
+        STALL_MAX_US.store(max_us, Ordering::Relaxed);
+        STALLS_LEFT.store(count, Ordering::Release);
+    }
+
+    pub fn disarm_finish_stall() {
+        STALLS_LEFT.store(0, Ordering::Release);
+    }
+
+    /// A submitter's request returned to it; ends a running stall.
+    pub fn note_return() {
+        RETURNS.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn finish_stalls_run() -> u32 {
+        STALLS_RUN.load(Ordering::Acquire)
+    }
+
+    /// Take one armed stall, if any is left, and spin until a submitter
+    /// returns or the bound passes. IF is left as found.
+    pub(super) fn finish_stall() {
+        let mut left = STALLS_LEFT.load(Ordering::Acquire);
+        loop {
+            let Some(next) = left.checked_sub(1) else {
+                return;
+            };
+            match STALLS_LEFT.compare_exchange_weak(left, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => break,
+                Err(now) => left = now,
+            }
+        }
+        STALLS_RUN.fetch_add(1, Ordering::AcqRel);
+        let k = time_init::tsc_per_ms();
+        if k == 0 {
+            return;
+        }
+        let max = k.saturating_mul(u64::from(STALL_MAX_US.load(Ordering::Relaxed))) / 1000;
+        let r0 = RETURNS.load(Ordering::Acquire);
+        let t0 = time_init::read_tsc();
+        while RETURNS.load(Ordering::Acquire) == r0 && time_init::read_tsc().wrapping_sub(t0) < max
+        {
+            core::hint::spin_loop();
+        }
     }
 }
 
