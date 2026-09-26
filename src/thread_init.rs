@@ -301,9 +301,14 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
             );
             per_cpu_init::set_current_thread(cpu, new_ptr);
             crate::syscall_init::on_switch(cpu, old_ptr, new_ptr);
-            switch_context(&mut (*old_ptr).context, &(*new_ptr).context);
         }
     });
+    // SAFETY: both TCBs are live entries of `SCHED` that this CPU runs
+    // or was given, established at `thread_init::schedule_inner` and
+    // `thread_init::switch_to`, and IF=0 under their `InterruptGuard`,
+    // which spans the switch; the `&mut PerCpu` above has ended (DESIGN
+    // §7.5).
+    unsafe { switch_context(&mut (*old_ptr).context, &(*new_ptr).context) };
 }
 
 fn relink(s: &mut Sched) {

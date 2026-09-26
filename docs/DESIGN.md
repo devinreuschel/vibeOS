@@ -3608,20 +3608,22 @@ kernel stack, a `#GP`, `#NP`, or `#SS` on a labeled user-return `iretq` becomes 
 `enter_user_full` runs `cli` before its `mov gs`) and §18.3 for FSGSBASE, where a user can load a
 kernel-half base. See [section 9.3](#93-interrupts).
 
-`with_current` gives `&mut PerCpu` with IRQs off and panics on same-CPU re-entry. `switch_now` uses
-`with_current_switch`: the `InterruptGuard` spans `switch_context` (it lives on the outgoing stack)
-but the re-entry flag does not, so the incoming thread can take IRQs and `with_current`. Neither
-`&mut` is exclusive. `with_current_switch` keeps its `&mut` live across `switch_context`, `with_cpu`
-(a safe `pub fn`) returns `&mut` to any CPU's slot, and `ap_entry` builds one from `STARTING`, while
-`cpu(id)`, `current()`, and `try_current()` return `&'static PerCpu` to the same memory.
-`diag::cpus_to` (also the shell `cpus` command) and in-guest tests read another CPU's non-atomic
-`ticks`, `switches`, and `runq` length while its owner writes them (ROADMAP §10.3, F039).
+Which accessor may alias which. `cpu(id)` returns `&'static PerCpuRemote`, which is never taken
+`&mut`, so it may alias anything; the owner reaches its own view through `PerCpu.remote`.
+`with_current` and `with_current_switch` give this CPU's `&mut PerCpu` with IF=0 and the busy flag
+(`WITH_BUSY`), so neither nests in the other or in itself; `with_current_switch` takes no
+`InterruptGuard` of its own, needs the caller's, and returns before `switch_context`, so the
+incoming thread can take IRQs and `with_current`. `with_cpu` is an `unsafe fn` for a CPU that is not
+running: `smp_init` uses it before an AP's SIPI, and after a SIPI it clears only the view.
+`ap_entry` holds its slot's `&mut` from `STARTING` until it publishes `ready`. `current()` and
+`try_current()` return `&'static PerCpu`, which must not be live across a `with_current*` scope or a
+preemption point. Rule; not yet enforced: ROADMAP §10.3's `current` box (F039).
 
 ### Per-thread CPU state
 
-`thread_init::switch_now` switches a thread's CPU state inside `with_current_switch`: it swaps
-`irq_nest` between the TCB and `PerCpu`, calls `syscall_init::on_switch` (FPU, RSP0, CR3), then
-`thread::switch_context` (callee-saved GPRs, RSP, RIP, RFLAGS). AGENTS.md rule 8 governs adding
+`thread_init::switch_now` swaps `irq_nest` between the TCB and `PerCpu` and calls
+`syscall_init::on_switch` (FPU, RSP0, CR3) inside `with_current_switch`, then calls
+`thread::switch_context` (callee-saved GPRs, RSP, RIP, RFLAGS) after that `&mut` has ended. AGENTS.md rule 8 governs adding
 user-visible CPU state; the commit that adds it also adds its row here. The Arch column names the
 port a row belongs to; the aarch64 rows are planned (ROADMAP Phase 11), and there `switch_now` calls
 that port's `on_switch` and `switch_context`. A control that holds one value for every thread, such
@@ -3770,8 +3772,8 @@ The global lock order is in [section 2.1](#21-lock-order) and the one-spinlock r
 [section 2.3](#23-locking-with-interrupts). Additions specific to SMP:
 
 - Never lock a remote CPU's per-CPU state. Per-CPU locks are taken only by the owning CPU, with
-  interrupts off. `per_cpu_init::with_cpu` can reach any CPU's slot ([section 7.5](#75-per-cpu-data),
-  F039). Planned (ROADMAP §19.4): the one exception is a CPU's timer base
+  interrupts off. `per_cpu_init::with_cpu`, an `unsafe fn`, reaches another CPU's slot only while that CPU
+  is not running ([section 7.5](#75-per-cpu-data)). Planned (ROADMAP §19.4): the one exception is a CPU's timer base
   ([§6.5](#65-timers-and-timeouts)), whose lock any CPU takes to arm, re-arm, or cancel a timer on
   it.
 - A thread moves between CPUs only through the target's inbox, pushed by the CPU that owns the

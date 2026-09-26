@@ -136,24 +136,33 @@ pub fn with_current<R>(f: impl FnOnce(&mut PerCpu) -> R) -> R {
     with_ptr(p, f)
 }
 
-/// `&mut PerCpu` for `switch_now`. IRQs off; no busy flag.
+/// Exclusive `&mut PerCpu` for `switch_now`'s bookkeeping. Needs IF=0.
 ///
-/// `InterruptGuard` spans `switch_context` (object stays on the outgoing
-/// stack; `irq_nest` is swapped onto the incoming TCB). `WITH_BUSY` must
-/// not: the incoming thread takes IRQs and `with_current`.
+/// The caller's `InterruptGuard` spans `switch_context`, which the caller
+/// runs after this returns: the `&mut` and the busy flag end before the
+/// switch, so the incoming thread can take IRQs and `with_current`
+/// (DESIGN §7.5, §9.4).
 #[inline(always)]
 pub fn with_current_switch<R>(f: impl FnOnce(&mut PerCpu) -> R) -> R {
-    let _irq = InterruptGuard::enter();
+    assert!(
+        !x86::interrupts_enabled(),
+        "per_cpu: with_current_switch with IF on"
+    );
     assert!(is_live(), "per_cpu: not live");
     let p = gs_self();
     assert!(!p.is_null(), "per_cpu: gs null");
-    f(unsafe { &mut *p })
+    with_ptr(p, f)
 }
 
-/// Exclusive `&mut PerCpu` for `id`. IRQs off. BSP bring-up of APs, owner
-/// CPU runq. Never a remote run queue (DESIGN §7.7).
+/// Exclusive `&mut PerCpu` for CPU `id`. IRQs off. BSP bring-up of an AP
+/// before its SIPI. Never a remote run queue (DESIGN §7.7).
+///
+/// # Safety
+/// CPU `id` is not running: it has not been sent a SIPI, or it never
+/// accepted one. No other scope on its slot is live (the busy flag panics
+/// on one on this CPU, not on another).
 #[inline(always)]
-pub fn with_cpu<R>(id: u32, f: impl FnOnce(&mut PerCpu) -> R) -> Option<R> {
+pub unsafe fn with_cpu<R>(id: u32, f: impl FnOnce(&mut PerCpu) -> R) -> Option<R> {
     let _irq = InterruptGuard::enter();
     let cpus = CPUS.try_get()?;
     let cpu = cpus.get(id as usize)?;
