@@ -554,8 +554,8 @@ The lock, the serviced spins, and the two cells:
 |------|-----|
 | `SpinMutex` | Shared across CPUs. IRQ-aware. Ranked (§2.1): `lock` refuses a lock whose rank, or a later one, this CPU already holds, and `lock_nested` takes a second lock of a held rank (below). Its spin is a serviced spin. |
 | Serviced spin | `SpinMutex::lock`, `ipi_init::wait_acks`, and the call-function slot wait each call `ipi_init::service_incoming` on every iteration, so a CPU that waits on another with IF=0 still acknowledges shootdowns and runs call-function work ([§2.9](#29-preemption-and-interrupt-state) rule 2). That work runs inside whatever the spinning CPU holds, so, like an NMI, `#MC`, or CPL-0 `#DB` handler, it takes no lock ([§2.2](#22-interrupt-handler-rules)'s last row). Planned (ROADMAP §10.7, F135): `service_incoming` first reads this CPU's stop request word, and STOP runs §2.5's stop routine before any slot is served, so a serviced spin stops for a panic with no interrupt, on either architecture and GIC version. On aarch64 a serviced spin never executes WFE and waits with `core::hint::spin_loop`: a masked interrupt is a wake-up event for WFI but not for WFE (Arm ARM DDI 0487, the WFE and WFI wake-up events), so a WFE spinner with IRQs masked neither takes an SGI nor wakes to poll. A line that puts WFE in a serviced spin also makes every publisher of serviced work, the stop word included, issue `sev` after its Release store, and says so. |
-| `IrqCell` | IRQ-off exclusive access: `with` takes IRQs off, panics on same-CPU re-entry, and spins while another CPU holds it. Used for CPU-local and boot-only state and as an unranked cross-CPU lock (among them `proc_init::TABLE`, `kva_init::KVA` and `DEFERRED`, `work_init::ST`, `irq_init::IRQ`, `file_init::CWD`, and `log_init::LOG`). Its `Sync` impl has no `T: Send` bound, and `force_unlock` is a safe fn (ROADMAP §10.3, F017). Its spin does not service IPIs, so a cross-CPU cell held across a wait on another CPU can stall a shootdown. Planned (ROADMAP §10.3, F108): every cross-CPU `IrqCell` but the log ring becomes a ranked `SpinMutex`; the log ring's holders never wait on another CPU (§2.5), and ROADMAP §19.5 replaces it with §2.5's lockless ring. |
-| `BootCell` | Write once before `smp: done`, then shared `&T`. State written after publication sits behind its own `UnsafeCell` inside `T`. Not yet enforced: every switch writes the BSP's TSS through a pointer cast from `&Bsp` (ROADMAP §10.3, F089). The set-once check is a `debug_assert!` (ROADMAP §10.2, F137), and the `Sync` impl has no `T: Send + Sync` bound, so `per_cpu_init::CPUS` shares the non-`Sync` `PerCpu` (ROADMAP §10.3, F017, F039). |
+| `IrqCell` | IRQ-off exclusive access: `with` takes IRQs off, panics on same-CPU re-entry, and spins while another CPU holds it. Used for CPU-local and boot-only state and as an unranked cross-CPU lock (among them `proc_init::TABLE`, `kva_init::KVA` and `DEFERRED`, `work_init::ST`, `irq_init::IRQ`, `file_init::CWD`, and `log_init::LOG`). It is `Send` and `Sync` only when `T: Send`, as `Mutex` is; const assertions in `src/cell.rs` fail the build otherwise. Its spin does not service IPIs, so a cross-CPU cell held across a wait on another CPU can stall a shootdown. Planned (ROADMAP §10.3, F108): every cross-CPU `IrqCell` but the log ring becomes a ranked `SpinMutex`; the log ring's holders never wait on another CPU (§2.5), and ROADMAP §19.5 replaces it with §2.5's lockless ring. |
+| `BootCell` | Write once before `smp: done`, then shared `&T`. State written after publication sits behind its own `UnsafeCell` inside `T`. Not yet enforced: every switch writes the BSP's TSS through a pointer cast from `&Bsp` (ROADMAP §10.3, F089). The set-once check is a `debug_assert!` (ROADMAP §10.2, F137). It is `Sync` only when `T: Send + Sync` and `Send` only when `T: Send`, as `OnceLock` is, and const assertions in `src/cell.rs` fail the build otherwise; `PerCpu`, whose raw pointers make it neither, carries its own `unsafe impl` naming invariants I120 and I21 (§7.5). |
 
 Two locks of one rank nest only through `lock_nested`, in a pair order the call site's comment
 names, and a per-rank count keeps the outer rank held when the inner lock drops. ROADMAP §12.1 adds
@@ -569,7 +569,7 @@ those records the wake and performs it after dropping the lock, as §10.1's comp
 top half wakes its bottom half with no device lock held; the rank check fails the other order on
 every call.
 
-They live in `src/cell.rs` (`BootCell`, `IrqCell`) and `src/sync_init.rs` (`SpinMutex`). Do not add another `UnsafeCell` + `unsafe impl<T> Sync` wrapper. Planned (ROADMAP §10.3, F017): `scripts/check_cells.py` reads each impl header whole and allows a generic `unsafe impl` of `Send` or `Sync` only in these two files and only with AGENTS.md rule 6's bounds; a concrete type that holds an `UnsafeCell` or a raw pointer may carry its own impl, whose `// SAFETY:` line names the invariant. `static mut` is only the asm-owned `vibeos_jmpbuf` in `arch/catch.rs`. Accessors do not return `&'static mut`.
+They live in `src/cell.rs` (`BootCell`, `IrqCell`) and `src/sync_init.rs` (`SpinMutex`). Do not add another `UnsafeCell` + `unsafe impl<T> Sync` wrapper. `scripts/check_cells.py` reads each `unsafe impl` of `Send` or `Sync` whole, from `unsafe impl` to its `{`, and allows a generic one only in these two files and `src/kalloc.rs` (`TryArc`'s one bounded pair) and only with AGENTS.md rule 6's bounds: every type parameter bounded by `Send`, and by `Sync` too for `Sync` on a type that shares `&T` (`BootCell`, `RwLock`); `?Sized` alone is no bound. A concrete type that holds an `UnsafeCell` or a raw pointer may carry its own impl, whose `// SAFETY:` line names the invariant, except `PerCpuRemote`, which must be `Sync` from its atomic fields alone (§7.5). `static mut` is only the asm-owned `vibeos_jmpbuf` in `arch/catch.rs`. Accessors do not return `&'static mut`.
 
 Cross-CPU rule: a CPU never touches another CPU's run queue directly. Work is handed over through a
 per-CPU inbox plus a reschedule IPI. More SMP-specific rules in [section 7.7](#77-locking-with-more-than-one-cpu).
@@ -935,8 +935,8 @@ that review cites means the review's text.
 | I18 | EOI before any switch; a one-shot timer is rearmed before yielding (§5.8) | timer ISRs | documented | Yes; no test tier runs the TSC-deadline timer, the only one-shot source, so nothing exercises the rearm (ROADMAP §10.1, F078) |
 | I19 | I/O APIC high dword written before the low; IST index zero-based in software, one-based in the gate (§5.1, §5.6) | `apic.rs`, `desc.rs` | enforced, host-tested | Yes |
 | I20 | `now_ns` is monotonic | seqlock plus `time::monotonic_max` over `time_init::LAST_NS` | enforced | Yes, by construction, so the monotonicity tests cannot fail (ROADMAP §10.2, F100) |
-| I21 | A run queue is touched only by its owner CPU with IF=0 (§2.3) | `per_cpu_init::with_current` | enforced (busy flag) | Partly: only the owner writes it, but `diag::cpus_to` (the shell `cpus` command) and in-guest tests read another CPU's `runq` length with no lock, and `&'static PerCpu` aliases the `&mut` (ROADMAP §10.3, F039) |
-| I22 | A `BootCell` is set once, before SMP, and holds `Sync` data (§2.3) | `cell.rs` | documented | No: `per_cpu_init::CPUS` holds the non-`Sync` `PerCpu`, which the unbounded `Sync` impl allows (ROADMAP §10.3, F017, F039); the set-once check is a `debug_assert!` (ROADMAP §10.2, F137); every switch writes the BSP's TSS after publication through a pointer cast from `&Bsp` (ROADMAP §10.3, F089) |
+| I21 | A run queue is touched only by its owner CPU with IF=0 (§2.3) | `per_cpu_init::with_current`, `per_cpu_init::cpu` | enforced (busy flag; the remote view) | Partly: other CPUs read only the atomic `runq_len` in `PerCpuRemote`, but `current()` and `try_current()` hand out `&'static PerCpu` at any IF (ROADMAP §10.3, F039) |
+| I22 | A `BootCell` is set once, before SMP, and holds `Sync` data (§2.3) | `cell.rs` | enforced in part (the `Sync` part: the `T: Send + Sync` bound and `cell.rs`'s assertions) | No: the set-once check is a `debug_assert!` (ROADMAP §10.2, F137); every switch writes the BSP's TSS after publication through a pointer cast from `&Bsp` (ROADMAP §10.3, F089) |
 | I23 | The block layer orders only overlapping writes and a sequential zone's writes; a `Flush` makes durable every write completed before it was submitted, and a `Fua` write is durable when it completes (§10.2) | `block.rs` | documented | No: C-LOOK can reorder overlapping writes, a block-cache flush misses writeback already in flight, and `Fua` does not exist (ROADMAP §10.11, F043) |
 | I24 | vibefs never overwrites a live block before the newer superblock is durable, and from v2 reuses a block a commit freed only after the next commit's superblock is durable, so the older slot's tree stays whole; a v2 NOCOW file's data blocks are the one exception, overwritten in place ([VIBEFS.md](VIBEFS.md) §15) | vibefs commit | documented | No after a failed commit: the in-memory generation advances before the superblock write, so the retry writes the slot that holds the only valid superblock (ROADMAP §12.5, F050). Otherwise it rests on v1's on-disk refcounts, which its mount does not check (F061); v2 keeps no per-block count and checks its pointers and allocation map as it reads each block (VIBEFS.md §15; ROADMAP §14.8) |
 | I25 | Per-thread CPU state is saved and restored in full (§7.5) | `syscall_init::on_switch`, `thread::switch_context` | documented | No: `FS_BASE` is not switched (ROADMAP §11.6, F022); `fork` and `execve` get the FPU state wrong (ROADMAP §10.6, F069); no entry from ring 3 saves a complete user frame, so the user GPRs of a thread preempted in ring 3 are at no known place, and a context whose RCX and R11 differ from its RIP and RFLAGS cannot be returned to (ROADMAP §10.6) |
@@ -957,6 +957,7 @@ that review cites means the review's text.
 | I40 | A thread sleeps, or takes a sleeping lock, only with IF=1 and no spinlock held (§2.1, [§2.9](#29-preemption-and-interrupt-state) rule 4) | none yet | documented | No: syscall bodies run with IF=0 until they block (§2.9 rule 3; ROADMAP §10.6); nothing asserts either condition until ROADMAP §10.3's may-sleep box (F108) |
 | I41 | No sleeping lock of levels 2 to 4 is held across a copy to or from user memory, and code that holds the address-space lock takes no level-1 lock (§2.1) | none yet | documented | Yes, vacuously: the address-space lock, page waits, and the filesystems' block-mapping locks arrive with ROADMAP §12.5 and §13.1, and ROADMAP §13.12's lock-dependency build reports a violation the first time one happens |
 | I42 | Kernel-binary code that a syscall, a device, or a disk image reaches does not panic on that input, running out of memory or table slots included (AGENTS rule 4, [§4.4](#44-kernel-heap)) | convention; `vibeos::kalloc` from ROADMAP §10.4 | documented | No: a full thread table and a full deferred-stack list panic (ROADMAP §10.4, F037; ROADMAP §10.10, F010), and `alloc`'s growing calls panic on a failed allocation until ROADMAP §10.4's `kalloc` |
+| I120 | Another CPU reads a CPU's per-CPU state only through its `PerCpuRemote`, whose fields are atomics, and takes `&mut` to another CPU's `PerCpu` only through `with_cpu` while that CPU is not running (§7.5) | `per_cpu_init::cpu`, `per_cpu_init::with_cpu` | enforced (the view type, its const assertion, and `check_cells.py`'s type and must-be-unsafe lists) | Yes, except an AP that accepted a SIPI and stalled past the ready timeout (ROADMAP §11.4, F032) |
 
 ## 2.8 Publish last
 
@@ -3562,14 +3563,12 @@ not yet enforced: ROADMAP §10.3 (F039).
 
 Contents (`src/per_cpu.rs`):
 
-- `self_ptr`, logical CPU id, APIC id
+- `self_ptr` and logical CPU id
 - `current`, `idle`, and `idle_id`
 - `runq`, this CPU's ready FIFO (owner only, IRQs off), and `ready_head`, a copy of its head that
   only an in-guest test reads (ROADMAP §10.7 deletes it, F111)
-- `wake_inbox`, a `u64` `ThreadId` bitset: a remote CPU ORs in a thread's bit and sends IPI `0xFD` (planned: a bitmap sized from the limits, §7.6)
-- `irq_nest`, tick and switch counts, `slice_tsc`, `idle_tsc`, and `switch_scratch`, a `CpuContext` that no code reads or writes
+- `irq_nest`, `slice_tsc`, `idle_tsc`, and `switch_scratch`, a `CpuContext` that no code reads or writes
 - `tsc_per_ms` (a copy of the BSP's value, [section 6.2](#62-calibrating-the-tsc)) and `timer_mode`
-- `ready`, the flag an AP sets last in bring-up ([section 7.4](#74-ap-bring-up-sequence))
 - `kernel_rsp0` and `as_cr3`, which the context switch updates; `tss`, through which it writes TSS.RSP0; and `fallback_rsp0`, the RSP0 it uses for a thread without `Tcb.stack` (below)
 - `syscall_scratch`: the user RSP, the syscall return value, and the `iretq` RIP, RFLAGS, and RSP.
   It is per CPU, not per thread, so it is valid only while IF=0. The syscall exit breaks this: it
@@ -3577,6 +3576,11 @@ Contents (`src/per_cpu.rs`):
   (ROADMAP §10.6, F001). Planned (ROADMAP §10.6): it shrinks to one word, the user RSP between
   `syscall` and the entry's stack switch; the exit keeps the return value and its `iretq` frame in
   the thread's user frame ([section 5.10](#510-privilege-transitions)).
+- `remote`, this CPU's `PerCpuRemote` in a separate per-CPU array: `ticks`, `switches`, `runq_len`,
+  `ready`, `wake_inbox` and `apic_id`, all atomics; it is the only per-CPU state another CPU reads.
+  `wake_inbox` is a `u64` `ThreadId` bitset: a remote CPU ORs in a thread's bit and sends IPI `0xFD`
+  (planned: a bitmap sized from the limits, §7.6). `ready` is the flag an AP sets last in bring-up
+  ([section 7.4](#74-ap-bring-up-sequence)).
 
 `per_cpu_init::init_bsp` allocates one `PerCpu` per MADT CPU in a heap array, not a static array
 sized by a `MAX_CPUS` guess, and installs the BSP at slot 0; each AP installs its own slot with
@@ -3603,20 +3607,22 @@ kernel stack, a `#GP`, `#NP`, or `#SS` on a labeled user-return `iretq` becomes 
 `enter_user_full` runs `cli` before its `mov gs`) and §18.3 for FSGSBASE, where a user can load a
 kernel-half base. See [section 9.3](#93-interrupts).
 
-`with_current` gives `&mut PerCpu` with IRQs off and panics on same-CPU re-entry. `switch_now` uses
-`with_current_switch`: the `InterruptGuard` spans `switch_context` (it lives on the outgoing stack)
-but the re-entry flag does not, so the incoming thread can take IRQs and `with_current`. Neither
-`&mut` is exclusive. `with_current_switch` keeps its `&mut` live across `switch_context`, `with_cpu`
-(a safe `pub fn`) returns `&mut` to any CPU's slot, and `ap_entry` builds one from `STARTING`, while
-`cpu(id)`, `current()`, and `try_current()` return `&'static PerCpu` to the same memory.
-`diag::cpus_to` (also the shell `cpus` command) and in-guest tests read another CPU's non-atomic
-`ticks`, `switches`, and `runq` length while its owner writes them (ROADMAP §10.3, F039).
+Which accessor may alias which. `cpu(id)` returns `&'static PerCpuRemote`, which is never taken
+`&mut`, so it may alias anything; the owner reaches its own view through `PerCpu.remote`.
+`with_current` and `with_current_switch` give this CPU's `&mut PerCpu` with IF=0 and the busy flag
+(`WITH_BUSY`), so neither nests in the other or in itself; `with_current_switch` takes no
+`InterruptGuard` of its own, needs the caller's, and returns before `switch_context`, so the
+incoming thread can take IRQs and `with_current`. `with_cpu` is an `unsafe fn` for a CPU that is not
+running: `smp_init` uses it before an AP's SIPI, and after a SIPI it clears only the view.
+`ap_entry` holds its slot's `&mut` from `STARTING` until it publishes `ready`. `current()` and
+`try_current()` return `&'static PerCpu`, which must not be live across a `with_current*` scope or a
+preemption point. Rule; not yet enforced: ROADMAP §10.3's `current` box (F039).
 
 ### Per-thread CPU state
 
-`thread_init::switch_now` switches a thread's CPU state inside `with_current_switch`: it swaps
-`irq_nest` between the TCB and `PerCpu`, calls `syscall_init::on_switch` (FPU, RSP0, CR3), then
-`thread::switch_context` (callee-saved GPRs, RSP, RIP, RFLAGS). AGENTS.md rule 8 governs adding
+`thread_init::switch_now` swaps `irq_nest` between the TCB and `PerCpu` and calls
+`syscall_init::on_switch` (FPU, RSP0, CR3) inside `with_current_switch`, then calls
+`thread::switch_context` (callee-saved GPRs, RSP, RIP, RFLAGS) after that `&mut` has ended. AGENTS.md rule 8 governs adding
 user-visible CPU state; the commit that adds it also adds its row here. The Arch column names the
 port a row belongs to; the aarch64 rows are planned (ROADMAP Phase 11), and there `switch_now` calls
 that port's `on_switch` and `switch_context`. A control that holds one value for every thread, such
@@ -3765,8 +3771,8 @@ The global lock order is in [section 2.1](#21-lock-order) and the one-spinlock r
 [section 2.3](#23-locking-with-interrupts). Additions specific to SMP:
 
 - Never lock a remote CPU's per-CPU state. Per-CPU locks are taken only by the owning CPU, with
-  interrupts off. `per_cpu_init::with_cpu` can reach any CPU's slot ([section 7.5](#75-per-cpu-data),
-  F039). Planned (ROADMAP §19.4): the one exception is a CPU's timer base
+  interrupts off. `per_cpu_init::with_cpu`, an `unsafe fn`, reaches another CPU's slot only while that CPU
+  is not running ([section 7.5](#75-per-cpu-data)). Planned (ROADMAP §19.4): the one exception is a CPU's timer base
   ([§6.5](#65-timers-and-timeouts)), whose lock any CPU takes to arm, re-arm, or cancel a timer on
   it.
 - A thread moves between CPUs only through the target's inbox, pushed by the CPU that owns the

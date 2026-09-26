@@ -487,3 +487,11 @@ why = "the §9.4 deferral box"
 key = "`elf::parse` host tests also cover checked-in static binaries"
 closes = ["host tests that parse checked-in static binaries"]
 why = "the §9.4 deferral box"
+
+# L1286
+[[box]]
+key = "`scripts/check_cells.py` reads each `unsafe impl`"
+needs = [
+  "`BootCell<T>` is `Sync` only when",  # L1284
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
