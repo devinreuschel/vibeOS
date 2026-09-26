@@ -26,7 +26,7 @@
 mod kernfs;
 mod ramfs;
 
-pub use kernfs::{DevFs, ProcFs, SysFs, TmpFs};
+pub use kernfs::{KernFs, KernSkin, KernState};
 pub use ramfs::{RamFs, RamState};
 
 pub use crate::limits::MAX_DENTRIES;
@@ -287,7 +287,6 @@ pub struct OpCx<'a> {
     pub fstype: FsType,
     pub private: &'a mut [u64; 2],
     pub now: u64,
-    kern: &'a mut kernfs::KernState,
 }
 
 /// A lock a backend's store, or the [`Vfs`], sits behind: a seam over the
@@ -649,7 +648,6 @@ pub struct Vfs {
     supers: [Super; MAX_MOUNTS],
     mounts: [Mount; MAX_MOUNTS],
     files: [File; MAX_FILES],
-    kern: kernfs::KernState,
     ihand: u16,
     dhand: u16,
     pub now: u64,
@@ -664,7 +662,6 @@ impl Vfs {
             supers: [Super::EMPTY; MAX_MOUNTS],
             mounts: [Mount::EMPTY; MAX_MOUNTS],
             files: [File::EMPTY; MAX_FILES],
-            kern: kernfs::KernState::new(),
             ihand: 0,
             dhand: 0,
             now: 0,
@@ -1455,19 +1452,13 @@ impl Vfs {
     ) -> Result<R, FsError> {
         let ops = self.supers[sb as usize].ops.ok_or(FsError::NotSupp)?;
         let now = self.now;
-        let Vfs {
-            supers,
-            inodes,
-            kern,
-            ..
-        } = self;
+        let Vfs { supers, inodes, .. } = self;
         let s = &mut supers[sb as usize];
         let mut cx = OpCx {
             sb,
             fstype: s.fstype,
             private: &mut s.private,
             now,
-            kern,
         };
         f(ops, &mut cx, &mut inodes[islot as usize])
     }
@@ -1556,14 +1547,13 @@ impl Vfs {
             return;
         };
         let now = self.now;
-        let Vfs { supers, kern, .. } = self;
+        let Vfs { supers, .. } = self;
         let s = &mut supers[sb as usize];
         let mut cx = OpCx {
             sb,
             fstype: s.fstype,
             private: &mut s.private,
             now,
-            kern,
         };
         ops.kill_sb(&mut cx);
     }
@@ -1571,14 +1561,13 @@ impl Vfs {
     /// Fill a new superblock through `fs`, which sets its private words.
     fn fill_super(&mut self, sb: u8, fs: &dyn FileSystem) -> Result<InodeInfo, FsError> {
         let now = self.now;
-        let Vfs { supers, kern, .. } = self;
+        let Vfs { supers, .. } = self;
         let s = &mut supers[sb as usize];
         let mut cx = OpCx {
             sb,
             fstype: s.fstype,
             private: &mut s.private,
             now,
-            kern,
         };
         fs.fill_super(&mut cx)
     }
