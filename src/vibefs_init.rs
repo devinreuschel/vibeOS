@@ -741,6 +741,7 @@ pub fn mount_dev(name: &str, at: &str) -> Result<u8, FsError> {
 
 pub fn umount(at: &str) -> Result<(), FsError> {
     let mut vol = unregister_mnt(at);
+    let registered = vol.is_some();
     if vol.is_none() {
         vol = fs_init::with(|v| {
             let p = v.resolve(None, at, true).ok()?;
@@ -754,11 +755,18 @@ pub fn umount(at: &str) -> Result<(), FsError> {
     if let Some(id) = vol {
         let _ = sync(id);
     }
-    let r = fs_init::with(|v| v.umount(None, at));
+    // A volume `Vfs` still mounts keeps its slot: a later mount must not
+    // reuse the id while the old superblock's inodes name it.
+    if let Err(e) = fs_init::with(|v| v.umount(None, at)) {
+        if registered && let Some(id) = vol {
+            register_mnt(id, at)?;
+        }
+        return Err(e);
+    }
     if let Some(id) = vol {
         drop_slot(id);
     }
-    r
+    Ok(())
 }
 
 const _: () = {

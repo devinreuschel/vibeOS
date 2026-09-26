@@ -622,9 +622,11 @@ pub fn rename(
             release_removed(v, d, sb, &gone)?;
         }
         match sb {
-            Some(sb) => {
-                fs_init::with(|vfs| vfs.rekey(sb, [m.from.0, m.from.1, 0], [m.to.0, m.to.1, 0]))
-            }
+            // The new name may be cached negative.
+            Some(sb) => fs_init::with(|vfs| {
+                vfs.drop_negatives(sb);
+                vfs.rekey(sb, [m.from.0, m.from.1, 0], [m.to.0, m.to.1, 0])
+            }),
             None => Ok(()),
         }
     })
@@ -833,6 +835,7 @@ pub fn mount_dev(name: &str, at: &str) -> Result<u8, FsError> {
 
 pub fn umount(at: &str) -> Result<(), FsError> {
     let mut vol = unregister_mnt(at);
+    let registered = vol.is_some();
     if vol.is_none() {
         vol = fs_init::with(|v| {
             let p = v.resolve(None, at, true).ok()?;
@@ -846,11 +849,18 @@ pub fn umount(at: &str) -> Result<(), FsError> {
     if let Some(id) = vol {
         let _ = sync(id);
     }
-    let r = fs_init::with(|v| v.umount(None, at));
+    // A volume `Vfs` still mounts keeps its slot: a later mount must not
+    // reuse the id while the old superblock's inodes name it.
+    if let Err(e) = fs_init::with(|v| v.umount(None, at)) {
+        if registered && let Some(id) = vol {
+            register_mnt(id, at)?;
+        }
+        return Err(e);
+    }
     if let Some(id) = vol {
         drop_slot(id);
     }
-    r
+    Ok(())
 }
 
 const _: () = {
