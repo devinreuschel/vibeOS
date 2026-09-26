@@ -32,6 +32,9 @@
 
 #![allow(clippy::identity_op)] // order-0 size is `1 << 0` on purpose
 
+use core::num::NonZeroU64;
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 pub const PAGE_BITS: u32 = 12;
 pub const PAGE_SIZE: u64 = 1 << PAGE_BITS;
 
@@ -42,6 +45,146 @@ pub const PAGE_SIZE: u64 = 1 << PAGE_BITS;
 pub const MAX_ORDER: usize = 10;
 
 pub type PhysAddr = u64;
+
+/// Frames whose [`Frames`] token was dropped instead of freed. A
+/// statistic that orders nothing, so every access is Relaxed.
+static LEAKED_FRAMES: AtomicUsize = AtomicUsize::new(0);
+
+/// Frames leaked by dropped [`Frames`] tokens since boot. `meminfo`
+/// prints it.
+pub fn leaked_frames() -> usize {
+    LEAKED_FRAMES.load(Ordering::Relaxed)
+}
+
+/// Ownership of one buddy block: `2^order` frames at `base`. Only
+/// [`Buddy::alloc`] and [`Buddy::alloc_constrained`] hand one out, and
+/// [`Buddy::free`] takes it back; [`PhysAddr`] stays a `Copy` address
+/// that owns nothing (DESIGN §4.2). A page-table entry holds a frame by
+/// [`Frames::into_entry`], and the page-table code that clears the entry
+/// takes it back with [`Frames::from_entry`].
+///
+/// Dropping a `Frames` leaks the block: the drop counts it in
+/// [`leaked_frames`] and never frees, since a free on drop would take
+/// BUDDY under whatever lock the holder was dropped under. In debug builds
+/// it then panics naming the `alloc` call that made it.
+///
+/// A token cannot be copied:
+///
+/// ```compile_fail,E0382
+/// fn twice(f: vibeos::pmm::Frames) -> (vibeos::pmm::Frames, vibeos::pmm::Frames) {
+///     (f, f)
+/// }
+/// ```
+///
+/// or cloned:
+///
+/// ```compile_fail,E0277
+/// fn need<T: Clone>() {}
+/// need::<vibeos::pmm::Frames>();
+/// ```
+///
+/// or made from an address:
+///
+/// ```compile_fail,E0277
+/// let f: vibeos::pmm::Frames = 0x1000u64.into();
+/// # core::mem::forget(f);
+/// ```
+///
+/// and only `unsafe` code rebuilds one from a cleared entry:
+///
+/// ```compile_fail,E0133
+/// let f = vibeos::pmm::Frames::from_entry(0x1000, 0);
+/// # core::mem::forget(f);
+/// ```
+#[must_use = "a dropped Frames leaks its block; pass it to Buddy::free"]
+pub struct Frames {
+    /// `base | order`: the base is page aligned and never frame 0, so the
+    /// order fits in the low bits and the value is never zero.
+    raw: NonZeroU64,
+    #[cfg(debug_assertions)]
+    site: &'static core::panic::Location<'static>,
+}
+
+impl Frames {
+    const ORDER_MASK: u64 = PAGE_SIZE - 1;
+
+    /// # Safety
+    /// `base` is nonzero and aligned to `order`, and `order <= MAX_ORDER`.
+    #[track_caller]
+    unsafe fn new(base: PhysAddr, order: u8) -> Self {
+        // SAFETY: `base` is nonzero (this fn's contract), so `base | order`
+        // is too.
+        let raw = unsafe { NonZeroU64::new_unchecked(base | order as u64) };
+        Self {
+            raw,
+            #[cfg(debug_assertions)]
+            site: core::panic::Location::caller(),
+        }
+    }
+
+    /// Physical base of the block.
+    pub fn base(&self) -> PhysAddr {
+        self.raw.get() & !Self::ORDER_MASK
+    }
+
+    /// The block is `2^order` frames.
+    pub fn order(&self) -> u8 {
+        (self.raw.get() & Self::ORDER_MASK) as u8
+    }
+
+    /// Frames in the block.
+    pub fn count(&self) -> usize {
+        1usize << self.order()
+    }
+
+    /// Move ownership into a page-table entry or another owner record,
+    /// which [`Frames::from_entry`] later turns back into a token.
+    pub fn into_entry(self) -> PhysAddr {
+        let base = self.base();
+        core::mem::forget(self);
+        base
+    }
+
+    /// Take a frame back out of the record that holds it.
+    ///
+    /// # Safety
+    /// `pa` came from [`Frames::into_entry`] of a `Frames` of this
+    /// `order`, and the caller just cleared the entry that held it, so no
+    /// other token or entry names the block.
+    #[track_caller]
+    pub unsafe fn from_entry(pa: PhysAddr, order: u8) -> Frames {
+        // SAFETY: `into_entry` returned the base of a live token, which is
+        // nonzero and aligned to `order <= MAX_ORDER` (this fn's contract).
+        unsafe { Frames::new(pa, order) }
+    }
+}
+
+impl Drop for Frames {
+    #[allow(
+        clippy::panic,
+        reason = "ROADMAP §10.3: a dropped Frames panics in debug builds, DESIGN §4.2"
+    )]
+    fn drop(&mut self) {
+        LEAKED_FRAMES.fetch_add(self.count(), Ordering::Relaxed);
+        #[cfg(debug_assertions)]
+        {
+            // A host test that fails while it holds a token unwinds
+            // through here; a second panic would abort the test binary.
+            #[cfg(any(test, feature = "std"))]
+            if std::thread::panicking() {
+                return;
+            }
+            panic!(
+                "pmm: dropped Frames {:#x} order {} allocated at {}:{}:{}",
+                self.base(),
+                self.order(),
+                self.site.file(),
+                self.site.line(),
+                self.site.column()
+            );
+        }
+    }
+}
 
 /// Snapshot of allocator state. Computed cheaply; the running counter is
 /// O(1) and `largest_free_order` is a linear scan over the (small) order
@@ -71,6 +214,10 @@ pub struct Buddy {
     total_frames: usize,
     free_frames: usize,
     hhdm_offset: u64,
+    /// `[span_lo, span_hi)` covers every range `insert_region` took, so
+    /// `free` refuses a block that was never this buddy's.
+    span_lo: u64,
+    span_hi: u64,
 }
 
 impl Buddy {
@@ -84,6 +231,8 @@ impl Buddy {
             total_frames: 0,
             free_frames: 0,
             hhdm_offset: hhdm,
+            span_lo: u64::MAX,
+            span_hi: 0,
         }
     }
 
@@ -120,6 +269,10 @@ impl Buddy {
         let start = start.max(PAGE_SIZE);
         let mut a = align_up(start, PAGE_SIZE);
         let b = align_down(end, PAGE_SIZE);
+        if a < b {
+            self.span_lo = self.span_lo.min(a);
+            self.span_hi = self.span_hi.max(b);
+        }
         while a < b {
             let remaining_pages = (b - a) / PAGE_SIZE;
             // Largest order whose block fits: bounded by alignment of `a`
@@ -131,6 +284,84 @@ impl Buddy {
             unsafe { self.push_free(a, k as u8) };
             a += PAGE_SIZE << k;
         }
+    }
+
+    /// Allocate a block of `order`, owned by the returned token. Splits
+    /// down from a larger order if none is available at `order` directly.
+    /// Returns `None` on exhaustion or for `order > MAX_ORDER`.
+    #[track_caller]
+    #[must_use]
+    pub fn alloc(&mut self, order: u8) -> Option<Frames> {
+        let base = self.allocate(order)?;
+        // SAFETY: `allocate` returned a block of `order <= MAX_ORDER`
+        // aligned to its size, and frame 0 never enters the buddy
+        // (invariant I15, established at `pmm::Buddy::insert_region`).
+        Some(unsafe { Frames::new(base, order) })
+    }
+
+    /// Allocate a block of `order` whose end, `base + 2^order` frames, is
+    /// at or below `max_phys`. Walks the free lists at `order` and above
+    /// for the first block that fits, unlinks it and splits it down.
+    #[track_caller]
+    #[must_use]
+    pub fn alloc_constrained(&mut self, order: u8, max_phys: u64) -> Option<Frames> {
+        let target = order as usize;
+        if target > MAX_ORDER {
+            return None;
+        }
+        let size = PAGE_SIZE << order;
+        let fits = |base: u64| base.checked_add(size).is_some_and(|end| end <= max_phys);
+        let mut k = target;
+        let mut found = NULL;
+        while k <= MAX_ORDER && found == NULL {
+            let mut cur = self.heads[k];
+            while cur != NULL {
+                if fits(cur) {
+                    found = cur;
+                    break;
+                }
+                // SAFETY: `cur` is a free-list node of order `k`, whose
+                // nodes live in free pages this buddy owns.
+                cur = unsafe { (*self.node_ptr(cur)).next };
+            }
+            if found == NULL {
+                k += 1;
+            }
+        }
+        if found == NULL {
+            return None;
+        }
+        // SAFETY: `found` is on the order-`k` free list (the walk above).
+        unsafe { self.unlink(found, k as u8) };
+        // Keep the low piece, push the high half at each order below `k`.
+        while k > target {
+            k -= 1;
+            // SAFETY: the high half of a block this buddy just unlinked is
+            // unused and this buddy's.
+            unsafe { self.push_free(found + (PAGE_SIZE << k), k as u8) };
+        }
+        // SAFETY: `found` is aligned to its order-`k` block and so to
+        // `order`, and is not frame 0 (invariant I15, established at
+        // `pmm::Buddy::insert_region`).
+        Some(unsafe { Frames::new(found, order) })
+    }
+
+    /// Give a block back. Safe: only a token this buddy handed out, or one
+    /// rebuilt from the entry that held it, names a block.
+    ///
+    /// Panics if the block lies outside every range `insert_region` took,
+    /// or is already free.
+    pub fn free(&mut self, f: Frames) {
+        let (base, order) = (f.base(), f.order());
+        core::mem::forget(f);
+        let end = base.checked_add(PAGE_SIZE << order);
+        assert!(
+            base >= self.span_lo && end.is_some_and(|e| e <= self.span_hi),
+            "pmm: free {base:#x} order {order} outside the buddy's span"
+        );
+        // SAFETY: the token owned the block, so it was allocated at `order`
+        // and is not yet free; `deallocate` also checks both.
+        unsafe { self.deallocate(base, order) };
     }
 
     /// Allocate a block of `order`. Splits down from a larger order if
@@ -454,15 +685,15 @@ mod tests {
         let mut p = Pool::new(16);
         // 16 frames, order 0. Drain them one at a time.
         let mut taken = Vec::new();
-        while let Some(a) = p.buddy.allocate(0) {
-            taken.push(a);
+        while let Some(f) = p.buddy.alloc(0) {
+            taken.push(f);
         }
         assert_eq!(taken.len(), 16);
-        assert!(p.buddy.allocate(0).is_none());
-        assert!(p.buddy.allocate(3).is_none());
+        assert!(p.buddy.alloc(0).is_none());
+        assert!(p.buddy.alloc(3).is_none());
         // Now free everything and confirm we're back at 16 free.
-        for a in taken {
-            unsafe { p.buddy.deallocate(a, 0) };
+        for f in taken {
+            p.buddy.free(f);
         }
         assert_eq!(p.buddy.stats().free_frames, 16);
     }
@@ -471,15 +702,17 @@ mod tests {
     fn per_order_alignment() {
         let mut p = Pool::new(1024);
         for order in 0u8..=(MAX_ORDER as u8) {
-            let block = p.buddy.allocate(order).expect("order fits in 1024 frames");
+            let block = p.buddy.alloc(order).expect("order fits in 1024 frames");
             let block_size = PAGE_SIZE << order;
             assert!(
-                block & (block_size - 1) == 0,
-                "order {order} allocation {block:#x} not aligned to {block_size:#x}"
+                block.base() & (block_size - 1) == 0,
+                "order {order} allocation {:#x} not aligned to {block_size:#x}",
+                block.base()
             );
-            assert!(p.contains(block));
-            unsafe { p.buddy.deallocate(block, order) };
+            assert!(p.contains(block.base()));
+            p.buddy.free(block);
         }
+        assert!(p.buddy.alloc(MAX_ORDER as u8 + 1).is_none());
     }
 
     #[test]
@@ -492,11 +725,11 @@ mod tests {
         assert_eq!(s0.largest_free_order, Some(10));
 
         // Take an order-3 block; largest order stays.
-        let a = p.buddy.allocate(3).unwrap();
+        let a = p.buddy.alloc(3).unwrap();
         let s1 = p.buddy.stats();
         assert_eq!(s1.free_frames, 1024 - 8);
 
-        unsafe { p.buddy.deallocate(a, 3) };
+        p.buddy.free(a);
         let s2 = p.buddy.stats();
         assert_eq!(s2, s0, "state after alloc+free must equal initial");
     }
@@ -510,7 +743,7 @@ mod tests {
         // Split all the way down: allocate all 8 as order-0.
         let mut frames = Vec::new();
         for _ in 0..8 {
-            frames.push(p.buddy.allocate(0).unwrap());
+            frames.push(p.buddy.alloc(0).unwrap());
         }
         assert_eq!(p.buddy.stats().free_frames, 0);
         assert_eq!(p.buddy.stats().largest_free_order, None);
@@ -518,9 +751,14 @@ mod tests {
         // Free every other one. Because buddies are paired by XOR of
         // (PAGE_SIZE << order), freeing frames [0,2,4,6] leaves each with
         // an allocated buddy, so nothing merges.
-        frames.sort();
-        for &f in &[frames[0], frames[2], frames[4], frames[6]] {
-            unsafe { p.buddy.deallocate(f, 0) };
+        frames.sort_by_key(|f| f.base());
+        let mut odd = Vec::new();
+        for (i, f) in frames.into_iter().enumerate() {
+            if i % 2 == 0 {
+                p.buddy.free(f);
+            } else {
+                odd.push(f);
+            }
         }
         let mid = p.buddy.stats();
         assert_eq!(mid.free_frames, 4);
@@ -528,8 +766,8 @@ mod tests {
 
         // Now free the odd ones; each free should cascade all the way
         // back up to the single order-3 block we started with.
-        for &f in &[frames[1], frames[3], frames[5], frames[7]] {
-            unsafe { p.buddy.deallocate(f, 0) };
+        for f in odd {
+            p.buddy.free(f);
         }
         let end = p.buddy.stats();
         assert_eq!(end.free_frames, 8);
@@ -544,12 +782,12 @@ mod tests {
     fn split_and_merge_across_orders() {
         let mut p = Pool::new(16); // one order-4 block
         assert_eq!(p.buddy.stats().largest_free_order, Some(4));
-        let a = p.buddy.allocate(2).unwrap(); // splits 4 -> 3 -> 2
+        let a = p.buddy.alloc(2).unwrap(); // splits 4 -> 3 -> 2
         let s = p.buddy.stats();
         assert_eq!(s.free_frames, 12);
         // We should now have one free block at each of orders 2 and 3.
         assert_eq!(s.largest_free_order, Some(3));
-        unsafe { p.buddy.deallocate(a, 2) };
+        p.buddy.free(a);
         assert_eq!(p.buddy.stats().largest_free_order, Some(4));
     }
 
@@ -568,7 +806,7 @@ mod tests {
         let mut p = Pool::new(256);
         let baseline = p.buddy.stats();
 
-        let mut live: Vec<(PhysAddr, u8)> = Vec::new();
+        let mut live: Vec<Frames> = Vec::new();
         for _ in 0..5000 {
             // Bias toward smaller orders so we exercise splits and merges
             // rather than immediately exhausting the pool.
@@ -576,18 +814,17 @@ mod tests {
             let free = coin < 0x80 && !live.is_empty();
             if free {
                 let i = (next() as usize) % live.len();
-                let (a, o) = live.swap_remove(i);
-                unsafe { p.buddy.deallocate(a, o) };
+                p.buddy.free(live.swap_remove(i));
             } else {
                 let order = ((next() & 0x7) as u8).min(5);
-                if let Some(a) = p.buddy.allocate(order) {
-                    live.push((a, order));
+                if let Some(f) = p.buddy.alloc(order) {
+                    live.push(f);
                 }
             }
         }
         // Drain remaining allocations.
-        for (a, o) in live.drain(..) {
-            unsafe { p.buddy.deallocate(a, o) };
+        for f in live.drain(..) {
+            p.buddy.free(f);
         }
         let end = p.buddy.stats();
         assert_eq!(
@@ -599,12 +836,122 @@ mod tests {
     #[test]
     fn double_free_is_detected() {
         let mut p = Pool::new(16);
-        let a = p.buddy.allocate(0).unwrap();
-        unsafe { p.buddy.deallocate(a, 0) };
+        let pa = p.buddy.alloc(0).unwrap().into_entry();
+        p.buddy.free(unsafe { Frames::from_entry(pa, 0) });
+        // A forged second token for the same frame: `free` forgets it
+        // before it checks, so the panic leaks nothing.
         let res = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            unsafe { p.buddy.deallocate(a, 0) };
+            p.buddy.free(unsafe { Frames::from_entry(pa, 0) });
         }));
         assert!(res.is_err(), "double free must panic");
+    }
+
+    #[test]
+    fn free_outside_span_is_refused() {
+        let mut p = Pool::new(16);
+        let res = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            p.buddy.free(unsafe { Frames::from_entry(p.phys_end, 0) });
+        }));
+        assert!(res.is_err(), "a block above the span must panic");
+        assert_eq!(p.buddy.stats().free_frames, 16);
+    }
+
+    #[test]
+    fn dropped_frames_leak_and_stay_allocated() {
+        // The only host test that drops a `Frames`: the leak counter is
+        // one static shared by every test in the process.
+        let mut p = Pool::new(16);
+        let line = line!() + 1;
+        let f = p.buddy.alloc(0).unwrap();
+        let base = f.base();
+        let res = panic::catch_unwind(panic::AssertUnwindSafe(|| drop(f)));
+        assert_eq!(res.is_err(), cfg!(debug_assertions));
+        if let Err(e) = res {
+            let msg = e
+                .downcast_ref::<std::string::String>()
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            assert!(msg.contains(&std::format!("{base:#x} order 0")), "{msg}");
+            assert!(msg.contains(&std::format!("{}:{line}:", file!())), "{msg}");
+        }
+        assert_eq!(leaked_frames(), 1);
+        let s = p.buddy.stats();
+        assert_eq!(s.free_frames, s.total_frames - 1);
+        assert!(!unsafe { p.buddy.covered_by_free_block(base, 0) });
+    }
+
+    #[test]
+    fn alloc_constrained_respects_max_phys() {
+        let mut p = Pool::new(64);
+        let s0 = p.buddy.stats();
+        // Only the first frame ends at or below base + 4 KiB.
+        let low = p
+            .buddy
+            .alloc_constrained(0, TEST_PHYS_BASE + PAGE_SIZE)
+            .unwrap();
+        assert_eq!(low.base(), TEST_PHYS_BASE);
+        assert_eq!(low.order(), 0);
+        assert!(
+            p.buddy
+                .alloc_constrained(0, TEST_PHYS_BASE + PAGE_SIZE)
+                .is_none()
+        );
+        // Nothing ends at or below the pool's base.
+        assert!(p.buddy.alloc_constrained(0, TEST_PHYS_BASE).is_none());
+        // A limit inside the pool: every block ends at or below it.
+        let limit = TEST_PHYS_BASE + 16 * PAGE_SIZE;
+        let mut got = Vec::new();
+        while let Some(f) = p.buddy.alloc_constrained(1, limit) {
+            assert!(f.base() + (PAGE_SIZE << 1) <= limit);
+            assert_eq!(f.base() & (2 * PAGE_SIZE - 1), 0);
+            got.push(f);
+        }
+        // 16 frames below the limit, one taken: 7 order-1 blocks fit.
+        assert_eq!(got.len(), 7);
+        let big = p.buddy.alloc_constrained(4, u64::MAX).unwrap();
+        assert!(big.base() >= limit);
+        assert!(
+            p.buddy
+                .alloc_constrained(MAX_ORDER as u8 + 1, u64::MAX)
+                .is_none()
+        );
+        p.buddy.free(big);
+        for f in got {
+            p.buddy.free(f);
+        }
+        p.buddy.free(low);
+        assert_eq!(p.buddy.stats(), s0);
+    }
+
+    #[test]
+    fn from_entry_round_trip() {
+        let mut p = Pool::new(16);
+        let s0 = p.buddy.stats();
+        let f = p.buddy.alloc(1).unwrap();
+        let base = f.base();
+        let pa = f.into_entry();
+        assert_eq!(pa, base);
+        assert_eq!(p.buddy.stats().free_frames, 14);
+        let back = unsafe { Frames::from_entry(pa, 1) };
+        assert_eq!(back.base(), base);
+        assert_eq!(back.order(), 1);
+        p.buddy.free(back);
+        assert_eq!(p.buddy.stats(), s0);
+    }
+
+    #[test]
+    fn frames_accessors() {
+        let mut p = Pool::new(64);
+        let f = p.buddy.alloc(3).unwrap();
+        assert_eq!(f.order(), 3);
+        assert_eq!(f.count(), 8);
+        assert_eq!(f.base() & (8 * PAGE_SIZE - 1), 0);
+        assert!(p.contains(f.base()));
+        assert_eq!(
+            core::mem::size_of::<Option<Frames>>(),
+            core::mem::size_of::<Frames>()
+        );
+        p.buddy.free(f);
     }
 
     #[test]
