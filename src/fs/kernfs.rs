@@ -11,8 +11,9 @@ use crate::block::BlockError;
 use crate::cache::{self, Backend, Cache, CacheKey, CacheStats, PAGE};
 
 use super::{
-    Dirent, FileSystem, FsError, FsType, Inode, InodeKind, InodeOps, MAX_KERN_NODES, MAX_MOUNTS,
-    MAX_NAME, Name, S_IFBLK, S_IFCHR, S_IFDIR_MODE, S_IFLNK_MODE, S_IFMT, S_IFREG_MODE, Stat, Vfs,
+    Dirent, FileSystem, FsError, FsType, Inode, InodeInfo, InodeKind, InodeOps, MAX_KERN_NODES,
+    MAX_MOUNTS, MAX_NAME, Name, OpCx, S_IFBLK, S_IFCHR, S_IFDIR_MODE, S_IFLNK_MODE, S_IFMT,
+    S_IFREG_MODE, Vfs,
 };
 
 pub const TMPFS_CACHE_PAGES: usize = 4;
@@ -184,15 +185,19 @@ impl FileSystem for DevFs {
     fn fstype(&self) -> FsType {
         FsType::Dev
     }
-    fn fill_super(&self, vfs: &mut Vfs, sb: u8) -> Result<u32, FsError> {
-        let root = kern_mk_root(vfs, sb)?;
-        kern_mk_special(vfs, sb, root, b"null", KernKind::Null, 0)?;
-        kern_mk_special(vfs, sb, root, b"zero", KernKind::Zero, 0)?;
-        kern_mk_special(vfs, sb, root, b"random", KernKind::Random, 0)?;
-        kern_mk_special(vfs, sb, root, b"urandom", KernKind::Urandom, 0)?;
-        kern_mk_special(vfs, sb, root, b"console", KernKind::Console, 0)?;
-        kern_mk_special(vfs, sb, root, b"tty", KernKind::Tty, 0)?;
-        Ok(root)
+    fn ops(&self) -> Option<&'static dyn InodeOps> {
+        Some(&DevFs)
+    }
+    fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
+        let (k, now, sb) = (&mut *cx.kern, cx.now, cx.sb);
+        let root = kern_mk_root(k, now, sb)?;
+        kern_mk_special(k, now, sb, root, b"null", KernKind::Null, 0)?;
+        kern_mk_special(k, now, sb, root, b"zero", KernKind::Zero, 0)?;
+        kern_mk_special(k, now, sb, root, b"random", KernKind::Random, 0)?;
+        kern_mk_special(k, now, sb, root, b"urandom", KernKind::Urandom, 0)?;
+        kern_mk_special(k, now, sb, root, b"console", KernKind::Console, 0)?;
+        kern_mk_special(k, now, sb, root, b"tty", KernKind::Tty, 0)?;
+        kern_info(k, sb, root)
     }
 }
 
@@ -203,8 +208,12 @@ impl FileSystem for TmpFs {
     fn fstype(&self) -> FsType {
         FsType::Tmp
     }
-    fn fill_super(&self, vfs: &mut Vfs, sb: u8) -> Result<u32, FsError> {
-        kern_mk_root(vfs, sb)
+    fn ops(&self) -> Option<&'static dyn InodeOps> {
+        Some(&TmpFs)
+    }
+    fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
+        let root = kern_mk_root(cx.kern, cx.now, cx.sb)?;
+        kern_info(cx.kern, cx.sb, root)
     }
 }
 
@@ -215,17 +224,21 @@ impl FileSystem for ProcFs {
     fn fstype(&self) -> FsType {
         FsType::Proc
     }
-    fn fill_super(&self, vfs: &mut Vfs, sb: u8) -> Result<u32, FsError> {
-        let root = kern_mk_root(vfs, sb)?;
+    fn ops(&self) -> Option<&'static dyn InodeOps> {
+        Some(&ProcFs)
+    }
+    fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
+        let (k, now, sb) = (&mut *cx.kern, cx.now, cx.sb);
+        let root = kern_mk_root(k, now, sb)?;
         // Phase 9 owns Process. One kernel-thread stub so a shell-only
         // boot does not panic looking up cmdline/status/maps/fd.
-        let p1 = kern_mk_dir(vfs, sb, root, b"1")?;
-        kern_mk_special(vfs, sb, p1, b"cmdline", KernKind::ProcCmdline, 1)?;
-        kern_mk_special(vfs, sb, p1, b"status", KernKind::ProcStatus, 1)?;
-        kern_mk_special(vfs, sb, p1, b"maps", KernKind::ProcMaps, 1)?;
-        let _fd = kern_mk_special(vfs, sb, p1, b"fd", KernKind::ProcFdDir, 1)?;
-        kern_mk_lnk(vfs, sb, root, b"self", b"1")?;
-        Ok(root)
+        let p1 = kern_mk_dir(k, now, sb, root, b"1")?;
+        kern_mk_special(k, now, sb, p1, b"cmdline", KernKind::ProcCmdline, 1)?;
+        kern_mk_special(k, now, sb, p1, b"status", KernKind::ProcStatus, 1)?;
+        kern_mk_special(k, now, sb, p1, b"maps", KernKind::ProcMaps, 1)?;
+        let _fd = kern_mk_special(k, now, sb, p1, b"fd", KernKind::ProcFdDir, 1)?;
+        kern_mk_lnk(k, now, sb, root, b"self", b"1")?;
+        kern_info(k, sb, root)
     }
 }
 
@@ -236,69 +249,106 @@ impl FileSystem for SysFs {
     fn fstype(&self) -> FsType {
         FsType::Sys
     }
-    fn fill_super(&self, vfs: &mut Vfs, sb: u8) -> Result<u32, FsError> {
-        let root = kern_mk_root(vfs, sb)?;
-        let _devices = kern_mk_dir(vfs, sb, root, b"devices")?;
-        let bus = kern_mk_dir(vfs, sb, root, b"bus")?;
-        let pci = kern_mk_dir(vfs, sb, bus, b"pci")?;
-        let _pdev = kern_mk_dir(vfs, sb, pci, b"devices")?;
-        let _pdrv = kern_mk_dir(vfs, sb, pci, b"drivers")?;
-        Ok(root)
+    fn ops(&self) -> Option<&'static dyn InodeOps> {
+        Some(&SysFs)
+    }
+    fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
+        let (k, now, sb) = (&mut *cx.kern, cx.now, cx.sb);
+        let root = kern_mk_root(k, now, sb)?;
+        let _devices = kern_mk_dir(k, now, sb, root, b"devices")?;
+        let bus = kern_mk_dir(k, now, sb, root, b"bus")?;
+        let pci = kern_mk_dir(k, now, sb, bus, b"pci")?;
+        let _pdev = kern_mk_dir(k, now, sb, pci, b"devices")?;
+        let _pdrv = kern_mk_dir(k, now, sb, pci, b"drivers")?;
+        kern_info(k, sb, root)
     }
 }
 
 macro_rules! kern_ops {
     ($ty:ty) => {
         impl InodeOps for $ty {
-            fn lookup(&self, vfs: &mut Vfs, dir_islot: u16, name: &[u8]) -> Result<u32, FsError> {
-                kern_lookup(vfs, dir_islot, name)
+            fn lookup(
+                &self,
+                cx: &mut OpCx<'_>,
+                dir: &Inode,
+                name: &[u8],
+            ) -> Result<InodeInfo, FsError> {
+                kern_lookup(cx, dir, name)
             }
             fn create(
                 &self,
-                vfs: &mut Vfs,
-                dir_islot: u16,
+                cx: &mut OpCx<'_>,
+                dir: &mut Inode,
                 name: &[u8],
                 kind: InodeKind,
                 mode: u16,
                 target: Option<&[u8]>,
-            ) -> Result<u32, FsError> {
-                kern_create(vfs, dir_islot, name, kind, mode, target)
+            ) -> Result<InodeInfo, FsError> {
+                kern_create(cx, dir, name, kind, mode, target)
             }
-            fn unlink(&self, vfs: &mut Vfs, dir_islot: u16, name: &[u8]) -> Result<(), FsError> {
-                kern_unlink(vfs, dir_islot, name)
+            fn unlink(
+                &self,
+                cx: &mut OpCx<'_>,
+                dir: &mut Inode,
+                name: &[u8],
+            ) -> Result<(), FsError> {
+                kern_unlink(cx, dir, name)
             }
             fn read(
                 &self,
-                vfs: &mut Vfs,
-                islot: u16,
+                cx: &mut OpCx<'_>,
+                ino: &mut Inode,
                 off: u64,
                 buf: &mut [u8],
             ) -> Result<usize, FsError> {
-                kern_read(vfs, islot, off, buf)
+                kern_read(cx, ino, off, buf)
             }
             fn write(
                 &self,
-                vfs: &mut Vfs,
-                islot: u16,
+                cx: &mut OpCx<'_>,
+                ino: &mut Inode,
                 off: u64,
                 buf: &[u8],
             ) -> Result<usize, FsError> {
-                kern_write(vfs, islot, off, buf)
+                kern_write(cx, ino, off, buf)
             }
-            fn truncate(&self, vfs: &mut Vfs, islot: u16, size: u64) -> Result<(), FsError> {
-                kern_truncate(vfs, islot, size)
+            fn truncate(
+                &self,
+                cx: &mut OpCx<'_>,
+                ino: &mut Inode,
+                size: u64,
+            ) -> Result<(), FsError> {
+                kern_truncate(cx, ino, size)
             }
             fn readdir(
                 &self,
-                vfs: &mut Vfs,
-                islot: u16,
+                cx: &mut OpCx<'_>,
+                dir: &Inode,
                 cookie: u64,
                 out: &mut Dirent,
             ) -> Result<Option<u64>, FsError> {
-                kern_readdir(vfs, islot, cookie, out)
+                kern_readdir(cx, dir, cookie, out)
             }
-            fn stat(&self, vfs: &mut Vfs, islot: u16) -> Result<Stat, FsError> {
-                kern_stat(vfs, islot)
+            fn getattr(&self, cx: &mut OpCx<'_>, ino: &mut Inode) -> Result<(), FsError> {
+                if let Some(n) = kern_get(cx.kern, cx.sb, ino.key[0]) {
+                    n.meta_into(ino);
+                }
+                Ok(())
+            }
+            fn readlink(
+                &self,
+                cx: &mut OpCx<'_>,
+                ino: &Inode,
+                buf: &mut [u8],
+            ) -> Result<usize, FsError> {
+                kern_readlink(cx, ino, buf)
+            }
+            fn evict(&self, cx: &mut OpCx<'_>, ino: &Inode) -> Result<(), FsError> {
+                kern_try_free(cx.kern, cx.sb, ino.key[0]);
+                Ok(())
+            }
+            fn kill_sb(&self, cx: &mut OpCx<'_>) {
+                kern_drop_sb(cx.kern, cx.sb, cx.fstype == FsType::Tmp);
             }
         }
     };
@@ -372,8 +422,16 @@ impl Vfs {
     /// `block: <name>` (ram0, vda, ram0p1, …).
     pub fn devfs_add_block(&mut self, name: &[u8], size: u64) -> Result<u32, FsError> {
         let sb = sb_of_type(self, FsType::Dev).ok_or(FsError::Io)?;
-        let root = self.supers[sb as usize].root_ino;
-        kern_mk_special(self, sb, root, name, KernKind::Block, size)
+        let root = self.inodes[self.supers[sb as usize].root_islot as usize].key[0];
+        kern_mk_special(
+            &mut self.kern,
+            self.now,
+            sb,
+            root,
+            name,
+            KernKind::Block,
+            size,
+        )
     }
 
     /// PCI device + driver binding under `/sys`. `name` is the BDF
@@ -387,21 +445,23 @@ impl Vfs {
         driver: Option<&[u8]>,
     ) -> Result<(), FsError> {
         let sb = sb_of_type(self, FsType::Sys).ok_or(FsError::Io)?;
-        let root = self.supers[sb as usize].root_ino;
-        let devices = kern_lookup_ino(self, sb, root, b"devices")?;
-        let bus = kern_lookup_ino(self, sb, root, b"bus")?;
-        let pci = kern_lookup_ino(self, sb, bus, b"pci")?;
-        let pci_devs = kern_lookup_ino(self, sb, pci, b"devices")?;
-        let pci_drvs = kern_lookup_ino(self, sb, pci, b"drivers")?;
+        let root = self.inodes[self.supers[sb as usize].root_islot as usize].key[0];
+        let (k, now) = (&mut self.kern, self.now);
+        let devices = kern_lookup_ino(k, sb, root, b"devices")?;
+        let bus = kern_lookup_ino(k, sb, root, b"bus")?;
+        let pci = kern_lookup_ino(k, sb, bus, b"pci")?;
+        let pci_devs = kern_lookup_ino(k, sb, pci, b"devices")?;
+        let pci_drvs = kern_lookup_ino(k, sb, pci, b"drivers")?;
 
-        let ddir = match kern_lookup_ino(self, sb, devices, name) {
+        let ddir = match kern_lookup_ino(k, sb, devices, name) {
             Ok(ino) => ino,
-            Err(FsError::NotFound) => kern_mk_dir(self, sb, devices, name)?,
+            Err(FsError::NotFound) => kern_mk_dir(k, now, sb, devices, name)?,
             Err(e) => return Err(e),
         };
         let packed = ((vendor as u64) << 16) | (device as u64);
         kern_mk_sys_attr(
-            self,
+            k,
+            now,
             sb,
             ddir,
             b"vendor",
@@ -411,7 +471,8 @@ impl Vfs {
             None,
         )?;
         kern_mk_sys_attr(
-            self,
+            k,
+            now,
             sb,
             ddir,
             b"device",
@@ -421,7 +482,8 @@ impl Vfs {
             None,
         )?;
         kern_mk_sys_attr(
-            self,
+            k,
+            now,
             sb,
             ddir,
             b"class",
@@ -435,7 +497,8 @@ impl Vfs {
             _ => b"-",
         };
         kern_mk_sys_attr(
-            self,
+            k,
+            now,
             sb,
             ddir,
             b"driver",
@@ -447,15 +510,15 @@ impl Vfs {
 
         let mut rel = [0u8; MAX_NAME];
         let rlen = rel_to_devices(name, &mut rel)?;
-        kern_mk_lnk(self, sb, pci_devs, name, &rel[..rlen])?;
+        kern_mk_lnk(k, now, sb, pci_devs, name, &rel[..rlen])?;
 
         if drv_bytes != b"-" {
-            let ddir_drv = match kern_lookup_ino(self, sb, pci_drvs, drv_bytes) {
+            let ddir_drv = match kern_lookup_ino(k, sb, pci_drvs, drv_bytes) {
                 Ok(ino) => ino,
-                Err(FsError::NotFound) => kern_mk_dir(self, sb, pci_drvs, drv_bytes)?,
+                Err(FsError::NotFound) => kern_mk_dir(k, now, sb, pci_drvs, drv_bytes)?,
                 Err(e) => return Err(e),
             };
-            let _ = kern_mk_lnk(self, sb, ddir_drv, name, &rel[..rlen]);
+            let _ = kern_mk_lnk(k, now, sb, ddir_drv, name, &rel[..rlen]);
         }
         Ok(())
     }
@@ -514,35 +577,36 @@ fn kern_idx(ino: u32) -> Option<usize> {
     if i >= MAX_KERN_NODES { None } else { Some(i) }
 }
 
-fn kern_get(vfs: &Vfs, sb: u8, ino: u32) -> Option<&KernNode> {
+fn kern_get(k: &KernState, sb: u8, ino: u32) -> Option<&KernNode> {
     let i = kern_idx(ino)?;
-    let n = &vfs.kern.nodes[i];
+    let n = &k.nodes[i];
     if n.used && n.sb == sb { Some(n) } else { None }
 }
 
-fn kern_get_mut(vfs: &mut Vfs, sb: u8, ino: u32) -> Option<&mut KernNode> {
+fn kern_get_mut(k: &mut KernState, sb: u8, ino: u32) -> Option<&mut KernNode> {
     let i = kern_idx(ino)?;
-    let n = &mut vfs.kern.nodes[i];
+    let n = &mut k.nodes[i];
     if n.used && n.sb == sb { Some(n) } else { None }
 }
 
-pub(super) fn kern_nlink(vfs: &Vfs, sb: u8, ino: u32) -> u32 {
-    kern_get(vfs, sb, ino).map(|n| n.nlink).unwrap_or(0)
+impl KernNode {
+    fn meta_into(&self, ino: &mut Inode) {
+        ino.kind = self.kind.inode_kind();
+        ino.mode = self.mode;
+        ino.nlink = self.nlink;
+        ino.size = self.size;
+        ino.atime = self.atime;
+        ino.mtime = self.mtime;
+        ino.ctime = self.ctime;
+    }
 }
 
-pub(super) struct KernMeta {
-    pub kind: InodeKind,
-    pub mode: u16,
-    pub nlink: u32,
-    pub size: u64,
-    pub atime: u64,
-    pub mtime: u64,
-    pub ctime: u64,
-}
-
-pub(super) fn kern_meta(vfs: &Vfs, sb: u8, ino: u32) -> Option<KernMeta> {
-    let n = kern_get(vfs, sb, ino)?;
-    Some(KernMeta {
+/// Node `ino`'s [`InodeInfo`], keyed `[ino, 0, 0]`.
+fn kern_info(k: &KernState, sb: u8, ino: u32) -> Result<InodeInfo, FsError> {
+    let n = kern_get(k, sb, ino).ok_or(FsError::NotFound)?;
+    Ok(InodeInfo {
+        key: [ino, 0, 0],
+        ino,
         kind: n.kind.inode_kind(),
         mode: n.mode,
         nlink: n.nlink,
@@ -550,16 +614,17 @@ pub(super) fn kern_meta(vfs: &Vfs, sb: u8, ino: u32) -> Option<KernMeta> {
         atime: n.atime,
         mtime: n.mtime,
         ctime: n.ctime,
+        private: [0; 2],
     })
 }
 
-fn kern_alloc(vfs: &mut Vfs, sb: u8) -> Result<u32, FsError> {
+fn kern_alloc(k: &mut KernState, sb: u8) -> Result<u32, FsError> {
     let mut i = 0usize;
     while i < MAX_KERN_NODES {
-        if !vfs.kern.nodes[i].used {
-            vfs.kern.nodes[i] = KernNode::EMPTY;
-            vfs.kern.nodes[i].used = true;
-            vfs.kern.nodes[i].sb = sb;
+        if !k.nodes[i].used {
+            k.nodes[i] = KernNode::EMPTY;
+            k.nodes[i].used = true;
+            k.nodes[i].sb = sb;
             return Ok((i as u32) + 1);
         }
         i += 1;
@@ -567,36 +632,36 @@ fn kern_alloc(vfs: &mut Vfs, sb: u8) -> Result<u32, FsError> {
     Err(FsError::NoSpace)
 }
 
-fn kern_link(vfs: &mut Vfs, parent: u32, child: u32) {
+fn kern_link(k: &mut KernState, parent: u32, child: u32) {
     let Some(pi) = kern_idx(parent) else {
         return;
     };
     let Some(ci) = kern_idx(child) else {
         return;
     };
-    vfs.kern.nodes[ci].parent = parent;
-    vfs.kern.nodes[ci].next = vfs.kern.nodes[pi].child;
-    vfs.kern.nodes[pi].child = child;
+    k.nodes[ci].parent = parent;
+    k.nodes[ci].next = k.nodes[pi].child;
+    k.nodes[pi].child = child;
 }
 
-fn kern_unlink_child(vfs: &mut Vfs, parent: u32, child: u32) {
+fn kern_unlink_child(k: &mut KernState, parent: u32, child: u32) {
     let Some(pi) = kern_idx(parent) else {
         return;
     };
     let mut prev: Option<usize> = None;
-    let mut cur = vfs.kern.nodes[pi].child;
+    let mut cur = k.nodes[pi].child;
     while cur != 0 {
         let Some(ci) = kern_idx(cur) else {
             break;
         };
-        let next = vfs.kern.nodes[ci].next;
+        let next = k.nodes[ci].next;
         if cur == child {
             match prev {
-                None => vfs.kern.nodes[pi].child = next,
-                Some(p) => vfs.kern.nodes[p].next = next,
+                None => k.nodes[pi].child = next,
+                Some(p) => k.nodes[p].next = next,
             }
-            vfs.kern.nodes[ci].next = 0;
-            vfs.kern.nodes[ci].parent = 0;
+            k.nodes[ci].next = 0;
+            k.nodes[ci].parent = 0;
             return;
         }
         prev = Some(ci);
@@ -604,11 +669,11 @@ fn kern_unlink_child(vfs: &mut Vfs, parent: u32, child: u32) {
     }
 }
 
-fn kern_find_child(vfs: &Vfs, sb: u8, parent: u32, name: &[u8]) -> Option<u32> {
-    let p = kern_get(vfs, sb, parent)?;
+fn kern_find_child(k: &KernState, sb: u8, parent: u32, name: &[u8]) -> Option<u32> {
+    let p = kern_get(k, sb, parent)?;
     let mut cur = p.child;
     while cur != 0 {
-        let Some(n) = kern_get(vfs, sb, cur) else {
+        let Some(n) = kern_get(k, sb, cur) else {
             break;
         };
         if n.name.eq_bytes(name) {
@@ -619,14 +684,14 @@ fn kern_find_child(vfs: &Vfs, sb: u8, parent: u32, name: &[u8]) -> Option<u32> {
     None
 }
 
-fn kern_lookup_ino(vfs: &Vfs, sb: u8, parent: u32, name: &[u8]) -> Result<u32, FsError> {
-    kern_find_child(vfs, sb, parent, name).ok_or(FsError::NotFound)
+fn kern_lookup_ino(k: &KernState, sb: u8, parent: u32, name: &[u8]) -> Result<u32, FsError> {
+    kern_find_child(k, sb, parent, name).ok_or(FsError::NotFound)
 }
 
-fn kern_mk_root(vfs: &mut Vfs, sb: u8) -> Result<u32, FsError> {
-    let ino = kern_alloc(vfs, sb)?;
-    let t = vfs.now;
-    if let Some(n) = kern_get_mut(vfs, sb, ino) {
+fn kern_mk_root(k: &mut KernState, now: u64, sb: u8) -> Result<u32, FsError> {
+    let ino = kern_alloc(k, sb)?;
+    let t = now;
+    if let Some(n) = kern_get_mut(k, sb, ino) {
         n.kind = KernKind::Dir;
         n.mode = S_IFDIR_MODE;
         n.nlink = 2;
@@ -638,14 +703,20 @@ fn kern_mk_root(vfs: &mut Vfs, sb: u8) -> Result<u32, FsError> {
     Ok(ino)
 }
 
-fn kern_mk_dir(vfs: &mut Vfs, sb: u8, parent: u32, name: &[u8]) -> Result<u32, FsError> {
-    if kern_find_child(vfs, sb, parent, name).is_some() {
+fn kern_mk_dir(
+    k: &mut KernState,
+    now: u64,
+    sb: u8,
+    parent: u32,
+    name: &[u8],
+) -> Result<u32, FsError> {
+    if kern_find_child(k, sb, parent, name).is_some() {
         return Err(FsError::Exists);
     }
     let nm = Name::from_bytes(name)?;
-    let ino = kern_alloc(vfs, sb)?;
-    let t = vfs.now;
-    if let Some(n) = kern_get_mut(vfs, sb, ino) {
+    let ino = kern_alloc(k, sb)?;
+    let t = now;
+    if let Some(n) = kern_get_mut(k, sb, ino) {
         n.kind = KernKind::Dir;
         n.mode = S_IFDIR_MODE;
         n.nlink = 2;
@@ -654,8 +725,8 @@ fn kern_mk_dir(vfs: &mut Vfs, sb: u8, parent: u32, name: &[u8]) -> Result<u32, F
         n.ctime = t;
         n.name = nm;
     }
-    kern_link(vfs, parent, ino);
-    if let Some(p) = kern_get_mut(vfs, sb, parent) {
+    kern_link(k, parent, ino);
+    if let Some(p) = kern_get_mut(k, sb, parent) {
         p.nlink = p.nlink.saturating_add(1);
         p.mtime = t;
         p.ctime = t;
@@ -664,19 +735,20 @@ fn kern_mk_dir(vfs: &mut Vfs, sb: u8, parent: u32, name: &[u8]) -> Result<u32, F
 }
 
 fn kern_mk_lnk(
-    vfs: &mut Vfs,
+    k: &mut KernState,
+    now: u64,
     sb: u8,
     parent: u32,
     name: &[u8],
     target: &[u8],
 ) -> Result<u32, FsError> {
-    if let Some(ino) = kern_find_child(vfs, sb, parent, name) {
+    if let Some(ino) = kern_find_child(k, sb, parent, name) {
         return Ok(ino);
     }
     let nm = Name::from_bytes(name)?;
-    let ino = kern_alloc(vfs, sb)?;
-    let t = vfs.now;
-    if let Some(n) = kern_get_mut(vfs, sb, ino) {
+    let ino = kern_alloc(k, sb)?;
+    let t = now;
+    if let Some(n) = kern_get_mut(k, sb, ino) {
         n.kind = KernKind::Lnk;
         n.mode = S_IFLNK_MODE;
         n.nlink = 1;
@@ -690,25 +762,26 @@ fn kern_mk_lnk(
             return Err(FsError::Inval);
         }
     }
-    kern_link(vfs, parent, ino);
-    touch_dir(vfs, sb, parent, t);
+    kern_link(k, parent, ino);
+    touch_dir(k, sb, parent, t);
     Ok(ino)
 }
 
 fn kern_mk_special(
-    vfs: &mut Vfs,
+    k: &mut KernState,
+    now: u64,
     sb: u8,
     parent: u32,
     name: &[u8],
     kind: KernKind,
     tag: u64,
 ) -> Result<u32, FsError> {
-    if let Some(ino) = kern_find_child(vfs, sb, parent, name) {
+    if let Some(ino) = kern_find_child(k, sb, parent, name) {
         return Ok(ino);
     }
     let nm = Name::from_bytes(name)?;
-    let ino = kern_alloc(vfs, sb)?;
-    let t = vfs.now;
+    let ino = kern_alloc(k, sb)?;
+    let t = now;
     let size = match kind {
         KernKind::ProcCmdline => PROC_CMDLINE.len() as u64,
         KernKind::ProcStatus => PROC_STATUS.len() as u64,
@@ -728,7 +801,7 @@ fn kern_mk_special(
     } else {
         1
     };
-    if let Some(n) = kern_get_mut(vfs, sb, ino) {
+    if let Some(n) = kern_get_mut(k, sb, ino) {
         n.kind = kind;
         n.mode = mode;
         n.nlink = nlink;
@@ -739,19 +812,20 @@ fn kern_mk_special(
         n.name = nm;
         n.tag = tag;
     }
-    kern_link(vfs, parent, ino);
+    kern_link(k, parent, ino);
     if kind.inode_kind() == InodeKind::Dir
-        && let Some(p) = kern_get_mut(vfs, sb, parent)
+        && let Some(p) = kern_get_mut(k, sb, parent)
     {
         p.nlink = p.nlink.saturating_add(1);
     }
-    touch_dir(vfs, sb, parent, t);
+    touch_dir(k, sb, parent, t);
     Ok(ino)
 }
 
 #[allow(clippy::too_many_arguments)] // sysfs attr packed PCI identity
 fn kern_mk_sys_attr(
-    vfs: &mut Vfs,
+    k: &mut KernState,
+    now: u64,
     sb: u8,
     parent: u32,
     name: &[u8],
@@ -760,12 +834,12 @@ fn kern_mk_sys_attr(
     class: u8,
     driver: Option<&[u8]>,
 ) -> Result<u32, FsError> {
-    if let Some(ino) = kern_find_child(vfs, sb, parent, name) {
+    if let Some(ino) = kern_find_child(k, sb, parent, name) {
         return Ok(ino);
     }
     let nm = Name::from_bytes(name)?;
-    let ino = kern_alloc(vfs, sb)?;
-    let t = vfs.now;
+    let ino = kern_alloc(k, sb)?;
+    let t = now;
     let size = match which {
         SYS_ATTR_VENDOR | SYS_ATTR_DEVICE => 7,
         SYS_ATTR_CLASS => 5,
@@ -778,7 +852,7 @@ fn kern_mk_sys_attr(
         }
         _ => 0,
     };
-    if let Some(n) = kern_get_mut(vfs, sb, ino) {
+    if let Some(n) = kern_get_mut(k, sb, ino) {
         n.kind = KernKind::SysAttr;
         n.mode = S_IFREG_MODE;
         n.nlink = 1;
@@ -793,107 +867,73 @@ fn kern_mk_sys_attr(
         n.tag = packed;
         n.tag2 = ((class as u64) << 8) | (which as u64);
     }
-    kern_link(vfs, parent, ino);
-    touch_dir(vfs, sb, parent, t);
+    kern_link(k, parent, ino);
+    touch_dir(k, sb, parent, t);
     Ok(ino)
 }
 
-fn touch_dir(vfs: &mut Vfs, sb: u8, ino: u32, t: u64) {
-    if let Some(p) = kern_get_mut(vfs, sb, ino) {
+fn touch_dir(k: &mut KernState, sb: u8, ino: u32, t: u64) {
+    if let Some(p) = kern_get_mut(k, sb, ino) {
         p.mtime = t;
         p.ctime = t;
     }
 }
 
-pub(super) fn kern_fill_inode(vfs: &mut Vfs, slot: u16, sb: u8, ino: u32) -> Result<(), FsError> {
-    let m = kern_meta(vfs, sb, ino).ok_or(FsError::NotFound)?;
-    vfs.inodes[slot as usize] = Inode {
-        used: true,
-        clock: true,
-        refs: 0,
-        sb,
-        ino,
-        kind: m.kind,
-        mode: m.mode,
-        nlink: m.nlink,
-        size: m.size,
-        atime: m.atime,
-        mtime: m.mtime,
-        ctime: m.ctime,
-        data0: 0,
-    };
-    Ok(())
-}
-
-pub(super) fn kern_drop_sb(vfs: &mut Vfs, sb: u8) {
-    let is_tmp = vfs.supers[sb as usize].fstype == FsType::Tmp;
+fn kern_drop_sb(k: &mut KernState, sb: u8, is_tmp: bool) {
     let mut i = 0usize;
     while i < MAX_KERN_NODES {
-        if vfs.kern.nodes[i].used && vfs.kern.nodes[i].sb == sb {
-            if vfs.kern.nodes[i].kind == KernKind::File {
-                tmp_free_extent(vfs, i);
+        if k.nodes[i].used && k.nodes[i].sb == sb {
+            if k.nodes[i].kind == KernKind::File {
+                tmp_free_extent(k, i);
             }
-            vfs.kern.nodes[i] = KernNode::EMPTY;
+            k.nodes[i] = KernNode::EMPTY;
         }
         i += 1;
     }
     if is_tmp {
-        vfs.kern.tmp_bits = 0;
-        vfs.kern.tmp_cache.drop_dev(TMPFS_DEV);
-        vfs.kern.tmp_back = [0u8; TMPFS_BACK_BYTES];
+        k.tmp_bits = 0;
+        k.tmp_cache.drop_dev(TMPFS_DEV);
+        k.tmp_back = [0u8; TMPFS_BACK_BYTES];
     }
 }
 
-pub(super) fn kern_try_free(vfs: &mut Vfs, sb: u8, ino: u32) {
+/// kernfs `evict`: free a node with no links.
+fn kern_try_free(k: &mut KernState, sb: u8, ino: u32) {
     let Some(i) = kern_idx(ino) else {
         return;
     };
-    if !vfs.kern.nodes[i].used || vfs.kern.nodes[i].sb != sb {
+    if !k.nodes[i].used || k.nodes[i].sb != sb || k.nodes[i].nlink != 0 {
         return;
     }
-    if vfs.kern.nodes[i].nlink != 0 {
-        return;
+    if k.nodes[i].kind == KernKind::File {
+        tmp_free_extent(k, i);
     }
-    let mut c = 0usize;
-    while c < super::MAX_INODES {
-        if vfs.inodes[c].used
-            && vfs.inodes[c].sb == sb
-            && vfs.inodes[c].ino == ino
-            && vfs.inodes[c].refs != 0
-        {
-            return;
-        }
-        c += 1;
-    }
-    if vfs.kern.nodes[i].kind == KernKind::File {
-        tmp_free_extent(vfs, i);
-    }
-    vfs.kern.nodes[i] = KernNode::EMPTY;
+    k.nodes[i] = KernNode::EMPTY;
 }
 
-pub(super) fn kern_lookup(vfs: &mut Vfs, dir_islot: u16, name: &[u8]) -> Result<u32, FsError> {
-    let sb = vfs.inodes[dir_islot as usize].sb;
-    let ino = vfs.inodes[dir_islot as usize].ino;
-    let n = kern_get(vfs, sb, ino).ok_or(FsError::NotFound)?;
+fn kern_lookup(cx: &mut OpCx<'_>, dir: &Inode, name: &[u8]) -> Result<InodeInfo, FsError> {
+    let (k, sb) = (&*cx.kern, cx.sb);
+    let n = kern_get(k, sb, dir.key[0]).ok_or(FsError::NotFound)?;
     if n.kind.inode_kind() != InodeKind::Dir {
         return Err(FsError::NotDir);
     }
-    kern_find_child(vfs, sb, ino, name).ok_or(FsError::NotFound)
+    let child = kern_find_child(k, sb, dir.key[0], name).ok_or(FsError::NotFound)?;
+    kern_info(k, sb, child)
 }
 
-pub(super) fn kern_create(
-    vfs: &mut Vfs,
-    dir_islot: u16,
+fn kern_create(
+    cx: &mut OpCx<'_>,
+    dir: &mut Inode,
     name: &[u8],
     kind: InodeKind,
     mode: u16,
     target: Option<&[u8]>,
-) -> Result<u32, FsError> {
-    let sb = vfs.inodes[dir_islot as usize].sb;
-    if vfs.supers[sb as usize].fstype != FsType::Tmp {
+) -> Result<InodeInfo, FsError> {
+    if cx.fstype != FsType::Tmp {
         return Err(FsError::NotSupp);
     }
-    let dir_ino = vfs.inodes[dir_islot as usize].ino;
+    let (k, now, sb) = (&mut *cx.kern, cx.now, cx.sb);
+    let dir_ino = dir.key[0];
     let nm = Name::from_bytes(name)?;
     if nm.is_dot() || nm.is_dotdot() {
         return Err(FsError::Inval);
@@ -908,84 +948,77 @@ pub(super) fn kern_create(
             return Err(FsError::Inval);
         }
     }
-    let d = kern_get(vfs, sb, dir_ino).ok_or(FsError::NotFound)?;
+    let d = kern_get(k, sb, dir_ino).ok_or(FsError::NotFound)?;
     if d.kind.inode_kind() != InodeKind::Dir {
         return Err(FsError::NotDir);
     }
-    if kern_find_child(vfs, sb, dir_ino, name).is_some() {
+    if kern_find_child(k, sb, dir_ino, name).is_some() {
         return Err(FsError::Exists);
     }
-    match kind {
-        InodeKind::Dir => kern_mk_dir(vfs, sb, dir_ino, name),
-        InodeKind::Lnk => kern_mk_lnk(vfs, sb, dir_ino, name, target.unwrap_or(b"")),
+    let ino = match kind {
+        InodeKind::Dir => kern_mk_dir(k, now, sb, dir_ino, name)?,
+        InodeKind::Lnk => kern_mk_lnk(k, now, sb, dir_ino, name, target.unwrap_or(b""))?,
         InodeKind::Reg => {
-            let ino = kern_alloc(vfs, sb)?;
-            let t = vfs.now;
-            if let Some(n) = kern_get_mut(vfs, sb, ino) {
+            let ino = kern_alloc(k, sb)?;
+            if let Some(n) = kern_get_mut(k, sb, ino) {
                 n.kind = KernKind::File;
                 n.mode = (mode & !S_IFMT) | InodeKind::Reg.ifmt();
                 n.nlink = 1;
-                n.atime = t;
-                n.mtime = t;
-                n.ctime = t;
+                n.atime = now;
+                n.mtime = now;
+                n.ctime = now;
                 n.name = nm;
             }
-            kern_link(vfs, dir_ino, ino);
-            touch_dir(vfs, sb, dir_ino, t);
-            Ok(ino)
+            kern_link(k, dir_ino, ino);
+            touch_dir(k, sb, dir_ino, now);
+            ino
         }
-        InodeKind::Chr | InodeKind::Blk => Err(FsError::NotSupp),
+        InodeKind::Chr | InodeKind::Blk => return Err(FsError::NotSupp),
+    };
+    if let Some(n) = kern_get(k, sb, dir_ino) {
+        n.meta_into(dir);
     }
+    kern_info(k, sb, ino)
 }
 
-pub(super) fn kern_unlink(vfs: &mut Vfs, dir_islot: u16, name: &[u8]) -> Result<(), FsError> {
-    let sb = vfs.inodes[dir_islot as usize].sb;
-    if vfs.supers[sb as usize].fstype != FsType::Tmp {
+/// Remove `name` from `dir`. The child keeps its node until [`Vfs`]
+/// evicts it at its last put; a removed directory has no links left.
+fn kern_unlink(cx: &mut OpCx<'_>, dir: &mut Inode, name: &[u8]) -> Result<(), FsError> {
+    if cx.fstype != FsType::Tmp {
         return Err(FsError::NotSupp);
     }
-    let dir_ino = vfs.inodes[dir_islot as usize].ino;
-    let child = kern_find_child(vfs, sb, dir_ino, name).ok_or(FsError::NotFound)?;
-    let kind = kern_get(vfs, sb, child).ok_or(FsError::NotFound)?.kind;
-    if kind.inode_kind() == InodeKind::Dir {
-        let ch = kern_get(vfs, sb, child).ok_or(FsError::NotFound)?;
-        if ch.child != 0 {
-            return Err(FsError::NotEmpty);
-        }
+    let (k, t, sb) = (&mut *cx.kern, cx.now, cx.sb);
+    let dir_ino = dir.key[0];
+    let child = kern_find_child(k, sb, dir_ino, name).ok_or(FsError::NotFound)?;
+    let ch = kern_get(k, sb, child).ok_or(FsError::NotFound)?;
+    let is_dir = ch.kind.inode_kind() == InodeKind::Dir;
+    if is_dir && ch.child != 0 {
+        return Err(FsError::NotEmpty);
     }
-    let t = vfs.now;
-    kern_unlink_child(vfs, dir_ino, child);
-    if kind.inode_kind() == InodeKind::Dir
-        && let Some(p) = kern_get_mut(vfs, sb, dir_ino)
-    {
+    kern_unlink_child(k, dir_ino, child);
+    if is_dir && let Some(p) = kern_get_mut(k, sb, dir_ino) {
         p.nlink = p.nlink.saturating_sub(1);
     }
-    if let Some(c) = kern_get_mut(vfs, sb, child) {
-        c.nlink = c.nlink.saturating_sub(1);
+    if let Some(c) = kern_get_mut(k, sb, child) {
+        c.nlink = if is_dir { 0 } else { c.nlink.saturating_sub(1) };
         c.ctime = t;
     }
-    let mut i = 0usize;
-    while i < super::MAX_INODES {
-        if vfs.inodes[i].used && vfs.inodes[i].sb == sb && vfs.inodes[i].ino == child {
-            vfs.inodes[i].nlink = kern_nlink(vfs, sb, child);
-            vfs.inodes[i].ctime = t;
-        }
-        i += 1;
+    touch_dir(k, sb, dir_ino, t);
+    if let Some(n) = kern_get(k, sb, dir_ino) {
+        n.meta_into(dir);
     }
-    kern_try_free(vfs, sb, child);
-    touch_dir(vfs, sb, dir_ino, t);
-    vfs.inodes[dir_islot as usize].nlink = kern_nlink(vfs, sb, dir_ino);
     Ok(())
 }
 
-pub(super) fn kern_read(
-    vfs: &mut Vfs,
-    islot: u16,
+fn kern_read(
+    cx: &mut OpCx<'_>,
+    ino: &mut Inode,
     off: u64,
     buf: &mut [u8],
 ) -> Result<usize, FsError> {
-    let sb = vfs.inodes[islot as usize].sb;
-    let ino = vfs.inodes[islot as usize].ino;
-    let kind = kern_get(vfs, sb, ino).ok_or(FsError::NotFound)?.kind;
+    let (k, now, sb) = (&mut *cx.kern, cx.now, cx.sb);
+    let ino = ino.key[0];
+    let kind = kern_get(k, sb, ino).ok_or(FsError::NotFound)?.kind;
     match kind {
         KernKind::Dir | KernKind::ProcFdDir => Err(FsError::IsDir),
         KernKind::Null => Ok(0),
@@ -1002,7 +1035,7 @@ pub(super) fn kern_read(
                     crate::entropy::set_last_source(crate::entropy::Source::XorShift);
                 }
                 while i < buf.len() {
-                    let x = mix_rng(vfs);
+                    let x = mix_rng(k, now);
                     let b = x.to_le_bytes();
                     let n = (buf.len() - i).min(8);
                     buf[i..i + n].copy_from_slice(&b[..n]);
@@ -1014,26 +1047,21 @@ pub(super) fn kern_read(
         KernKind::Console | KernKind::Tty => Ok(0),
         KernKind::Block => Err(FsError::NotSupp),
         KernKind::Lnk => {
-            let n = kern_get(vfs, sb, ino).ok_or(FsError::NotFound)?;
+            let n = kern_get(k, sb, ino).ok_or(FsError::NotFound)?;
             copy_off(target_bytes(n), off, buf)
         }
         KernKind::ProcCmdline => copy_off(PROC_CMDLINE, off, buf),
         KernKind::ProcStatus => copy_off(PROC_STATUS, off, buf),
         KernKind::ProcMaps => copy_off(PROC_MAPS, off, buf),
-        KernKind::SysAttr => sys_attr_read(vfs, sb, ino, off, buf),
-        KernKind::File => tmp_read(vfs, sb, ino, off, buf),
+        KernKind::SysAttr => sys_attr_read(k, sb, ino, off, buf),
+        KernKind::File => tmp_read(k, sb, ino, off, buf),
     }
 }
 
-pub(super) fn kern_write(
-    vfs: &mut Vfs,
-    islot: u16,
-    off: u64,
-    buf: &[u8],
-) -> Result<usize, FsError> {
-    let sb = vfs.inodes[islot as usize].sb;
-    let ino = vfs.inodes[islot as usize].ino;
-    let kind = kern_get(vfs, sb, ino).ok_or(FsError::NotFound)?.kind;
+fn kern_write(cx: &mut OpCx<'_>, ino: &mut Inode, off: u64, buf: &[u8]) -> Result<usize, FsError> {
+    let (k, now, sb) = (&mut *cx.kern, cx.now, cx.sb);
+    let key = ino.key[0];
+    let kind = kern_get(k, sb, key).ok_or(FsError::NotFound)?.kind;
     match kind {
         KernKind::Dir | KernKind::ProcFdDir => Err(FsError::IsDir),
         KernKind::Null | KernKind::Zero => Ok(buf.len()),
@@ -1043,8 +1071,8 @@ pub(super) fn kern_write(
             // holds RANK_DEVICE and DESIGN §2.1 forbids holding that
             // across serial.
             let n = buf.len().min(64);
-            vfs.kern.cons_out[..n].copy_from_slice(&buf[..n]);
-            vfs.kern.cons_len = n as u8;
+            k.cons_out[..n].copy_from_slice(&buf[..n]);
+            k.cons_len = n as u8;
             Ok(buf.len())
         }
         KernKind::Block => Err(FsError::NotSupp),
@@ -1053,30 +1081,41 @@ pub(super) fn kern_write(
         | KernKind::ProcStatus
         | KernKind::ProcMaps
         | KernKind::SysAttr => Err(FsError::Inval),
-        KernKind::File => tmp_write(vfs, sb, ino, off, buf),
+        KernKind::File => {
+            let n = tmp_write(k, now, sb, key, off, buf)?;
+            if let Some(node) = kern_get(k, sb, key) {
+                node.meta_into(ino);
+            }
+            Ok(n)
+        }
     }
 }
 
-pub(super) fn kern_truncate(vfs: &mut Vfs, islot: u16, size: u64) -> Result<(), FsError> {
-    let sb = vfs.inodes[islot as usize].sb;
-    let ino = vfs.inodes[islot as usize].ino;
-    let kind = kern_get(vfs, sb, ino).ok_or(FsError::NotFound)?.kind;
+fn kern_truncate(cx: &mut OpCx<'_>, ino: &mut Inode, size: u64) -> Result<(), FsError> {
+    let (k, now, sb) = (&mut *cx.kern, cx.now, cx.sb);
+    let key = ino.key[0];
+    let kind = kern_get(k, sb, key).ok_or(FsError::NotFound)?.kind;
     match kind {
-        KernKind::File => tmp_truncate(vfs, sb, ino, size),
+        KernKind::File => {
+            tmp_truncate(k, now, sb, key, size)?;
+            if let Some(node) = kern_get(k, sb, key) {
+                node.meta_into(ino);
+            }
+            Ok(())
+        }
         KernKind::Dir | KernKind::ProcFdDir => Err(FsError::IsDir),
         _ => Err(FsError::Inval),
     }
 }
 
-pub(super) fn kern_readdir(
-    vfs: &mut Vfs,
-    islot: u16,
+fn kern_readdir(
+    cx: &mut OpCx<'_>,
+    dir: &Inode,
     cookie: u64,
     out: &mut Dirent,
 ) -> Result<Option<u64>, FsError> {
-    let sb = vfs.inodes[islot as usize].sb;
-    let ino = vfs.inodes[islot as usize].ino;
-    let n = kern_get(vfs, sb, ino).ok_or(FsError::NotFound)?;
+    let (k, sb) = (&*cx.kern, cx.sb);
+    let n = kern_get(k, sb, dir.key[0]).ok_or(FsError::NotFound)?;
     if n.kind.inode_kind() != InodeKind::Dir {
         return Err(FsError::NotDir);
     }
@@ -1084,51 +1123,21 @@ pub(super) fn kern_readdir(
     let mut i = 0u64;
     while cur != 0 {
         if i == cookie {
-            let c = kern_get(vfs, sb, cur).ok_or(FsError::NotFound)?;
+            let c = kern_get(k, sb, cur).ok_or(FsError::NotFound)?;
             out.ino = cur;
             out.kind = c.kind.inode_kind();
             out.name = c.name;
             return Ok(Some(cookie + 1));
         }
-        let next = kern_get(vfs, sb, cur).ok_or(FsError::NotFound)?.next;
+        let next = kern_get(k, sb, cur).ok_or(FsError::NotFound)?.next;
         cur = next;
         i += 1;
     }
     Ok(None)
 }
 
-pub(super) fn kern_stat(vfs: &mut Vfs, islot: u16) -> Result<Stat, FsError> {
-    let sb = vfs.inodes[islot as usize].sb;
-    let ino = vfs.inodes[islot as usize].ino;
-    if let Some(m) = kern_meta(vfs, sb, ino) {
-        return Ok(Stat {
-            ino,
-            kind: m.kind,
-            mode: m.mode,
-            nlink: m.nlink,
-            size: m.size,
-            atime: m.atime,
-            mtime: m.mtime,
-            ctime: m.ctime,
-        });
-    }
-    let n = &vfs.inodes[islot as usize];
-    Ok(Stat {
-        ino: n.ino,
-        kind: n.kind,
-        mode: n.mode,
-        nlink: n.nlink,
-        size: n.size,
-        atime: n.atime,
-        mtime: n.mtime,
-        ctime: n.ctime,
-    })
-}
-
-pub(super) fn kern_readlink(vfs: &mut Vfs, islot: u16, buf: &mut [u8]) -> Result<usize, FsError> {
-    let sb = vfs.inodes[islot as usize].sb;
-    let ino = vfs.inodes[islot as usize].ino;
-    let n = kern_get(vfs, sb, ino).ok_or(FsError::NotFound)?;
+fn kern_readlink(cx: &mut OpCx<'_>, ino: &Inode, buf: &mut [u8]) -> Result<usize, FsError> {
+    let n = kern_get(cx.kern, cx.sb, ino.key[0]).ok_or(FsError::NotFound)?;
     match n.kind {
         KernKind::Lnk => {
             let t = target_bytes(n);
@@ -1155,8 +1164,14 @@ const PROC_CMDLINE: &[u8] = b"vibeos\0";
 const PROC_STATUS: &[u8] = b"Name:\tvibeos\nState:\tR (running)\nPid:\t1\nThreads:\t1\n";
 const PROC_MAPS: &[u8] = b"# no user mappings; process objects are phase 9\n";
 
-fn sys_attr_read(vfs: &Vfs, sb: u8, ino: u32, off: u64, buf: &mut [u8]) -> Result<usize, FsError> {
-    let n = kern_get(vfs, sb, ino).ok_or(FsError::NotFound)?;
+fn sys_attr_read(
+    k: &KernState,
+    sb: u8,
+    ino: u32,
+    off: u64,
+    buf: &mut [u8],
+) -> Result<usize, FsError> {
+    let n = kern_get(k, sb, ino).ok_or(FsError::NotFound)?;
     let which = (n.tag2 & 0xff) as u8;
     let class = ((n.tag2 >> 8) & 0xff) as u8;
     let vendor = (n.tag >> 16) as u16;
@@ -1214,10 +1229,10 @@ fn fmt_hex_u8(n: u8, out: &mut [u8]) -> usize {
     5
 }
 
-fn mix_rng(vfs: &mut Vfs) -> u64 {
-    let mut x = vfs.kern.rng;
+fn mix_rng(k: &mut KernState, now: u64) -> u64 {
+    let mut x = k.rng;
     if x == 0 {
-        x = vfs.now ^ 0x9E37_79B9_7F4A_7C15;
+        x = now ^ 0x9E37_79B9_7F4A_7C15;
         if x == 0 {
             x = 1;
         }
@@ -1226,7 +1241,7 @@ fn mix_rng(vfs: &mut Vfs) -> u64 {
     x ^= x << 13;
     x ^= x >> 7;
     x ^= x << 17;
-    vfs.kern.rng = x;
+    k.rng = x;
     x
 }
 
@@ -1234,14 +1249,14 @@ fn bit_get(bits: u64, i: usize) -> bool {
     i < 64 && (bits & (1u64 << i)) != 0
 }
 
-fn tmp_alloc_run(vfs: &mut Vfs, n: usize) -> Result<u16, FsError> {
+fn tmp_alloc_run(k: &mut KernState, n: usize) -> Result<u16, FsError> {
     if n == 0 {
         return Ok(0);
     }
     if n > TMPFS_BACK_PAGES {
         return Err(FsError::NoSpace);
     }
-    let bits = vfs.kern.tmp_bits;
+    let bits = k.tmp_bits;
     let mut i = 0usize;
     while i + n <= TMPFS_BACK_PAGES {
         let mut ok = true;
@@ -1260,10 +1275,10 @@ fn tmp_alloc_run(vfs: &mut Vfs, n: usize) -> Result<u16, FsError> {
                 b |= 1u64 << (i + j);
                 j += 1;
             }
-            vfs.kern.tmp_bits = b;
+            k.tmp_bits = b;
             let start = i * PAGE;
-            vfs.kern.tmp_back[start..start + n * PAGE].fill(0);
-            tmp_invalidate_pages(vfs, i as u16, n as u16);
+            k.tmp_back[start..start + n * PAGE].fill(0);
+            tmp_invalidate_pages(k, i as u16, n as u16);
             return Ok(i as u16);
         }
         i += 1;
@@ -1271,11 +1286,11 @@ fn tmp_alloc_run(vfs: &mut Vfs, n: usize) -> Result<u16, FsError> {
     Err(FsError::NoSpace)
 }
 
-fn tmp_free_run(vfs: &mut Vfs, start: u16, n: u16) {
+fn tmp_free_run(k: &mut KernState, start: u16, n: u16) {
     if n == 0 {
         return;
     }
-    let mut b = vfs.kern.tmp_bits;
+    let mut b = k.tmp_bits;
     let mut j = 0u16;
     while j < n {
         let i = start as usize + j as usize;
@@ -1284,27 +1299,25 @@ fn tmp_free_run(vfs: &mut Vfs, start: u16, n: u16) {
         }
         j += 1;
     }
-    vfs.kern.tmp_bits = b;
-    tmp_invalidate_pages(vfs, start, n);
+    k.tmp_bits = b;
+    tmp_invalidate_pages(k, start, n);
 }
 
-fn tmp_invalidate_pages(vfs: &mut Vfs, start: u16, n: u16) {
+fn tmp_invalidate_pages(k: &mut KernState, start: u16, n: u16) {
     let mut j = 0u16;
     while j < n {
         let off = (start as u64 + j as u64) * PAGE as u64;
-        vfs.kern
-            .tmp_cache
-            .invalidate(CacheKey::page(TMPFS_DEV, off));
+        k.tmp_cache.invalidate(CacheKey::page(TMPFS_DEV, off));
         j += 1;
     }
 }
 
-fn tmp_free_extent(vfs: &mut Vfs, idx: usize) {
-    let start = vfs.kern.nodes[idx].extent_page;
-    let n = vfs.kern.nodes[idx].extent_pages;
-    tmp_free_run(vfs, start, n);
-    vfs.kern.nodes[idx].extent_page = 0;
-    vfs.kern.nodes[idx].extent_pages = 0;
+fn tmp_free_extent(k: &mut KernState, idx: usize) {
+    let start = k.nodes[idx].extent_page;
+    let n = k.nodes[idx].extent_pages;
+    tmp_free_run(k, start, n);
+    k.nodes[idx].extent_page = 0;
+    k.nodes[idx].extent_pages = 0;
 }
 
 fn tmp_pages_for(size: u64) -> usize {
@@ -1315,66 +1328,66 @@ fn tmp_pages_for(size: u64) -> usize {
     }
 }
 
-fn tmp_ensure(vfs: &mut Vfs, sb: u8, ino: u32, new_size: u64) -> Result<(), FsError> {
+fn tmp_ensure(k: &mut KernState, sb: u8, ino: u32, new_size: u64) -> Result<(), FsError> {
     let Some(idx) = kern_idx(ino) else {
         return Err(FsError::NotFound);
     };
-    if !vfs.kern.nodes[idx].used || vfs.kern.nodes[idx].sb != sb {
+    if !k.nodes[idx].used || k.nodes[idx].sb != sb {
         return Err(FsError::NotFound);
     }
     let need = tmp_pages_for(new_size);
-    let have = vfs.kern.nodes[idx].extent_pages as usize;
+    let have = k.nodes[idx].extent_pages as usize;
     if need <= have {
         return Ok(());
     }
     if have == 0 {
-        let p = tmp_alloc_run(vfs, need)?;
-        vfs.kern.nodes[idx].extent_page = p;
-        vfs.kern.nodes[idx].extent_pages = need as u16;
+        let p = tmp_alloc_run(k, need)?;
+        k.nodes[idx].extent_page = p;
+        k.nodes[idx].extent_pages = need as u16;
         return Ok(());
     }
-    let start = vfs.kern.nodes[idx].extent_page as usize;
+    let start = k.nodes[idx].extent_page as usize;
     let extra = need - have;
     let mut can = true;
     let mut j = 0usize;
     while j < extra {
-        if start + have + j >= TMPFS_BACK_PAGES || bit_get(vfs.kern.tmp_bits, start + have + j) {
+        if start + have + j >= TMPFS_BACK_PAGES || bit_get(k.tmp_bits, start + have + j) {
             can = false;
             break;
         }
         j += 1;
     }
     if can {
-        let mut b = vfs.kern.tmp_bits;
+        let mut b = k.tmp_bits;
         let mut j = 0usize;
         while j < extra {
             b |= 1u64 << (start + have + j);
             j += 1;
         }
-        vfs.kern.tmp_bits = b;
+        k.tmp_bits = b;
         let off = (start + have) * PAGE;
-        vfs.kern.tmp_back[off..off + extra * PAGE].fill(0);
-        tmp_invalidate_pages(vfs, (start + have) as u16, extra as u16);
-        vfs.kern.nodes[idx].extent_pages = need as u16;
+        k.tmp_back[off..off + extra * PAGE].fill(0);
+        tmp_invalidate_pages(k, (start + have) as u16, extra as u16);
+        k.nodes[idx].extent_pages = need as u16;
         return Ok(());
     }
-    let newp = tmp_alloc_run(vfs, need)?;
-    let old = vfs.kern.nodes[idx].extent_page as usize;
+    let newp = tmp_alloc_run(k, need)?;
+    let old = k.nodes[idx].extent_page as usize;
     let oldn = have;
     let dst = newp as usize * PAGE;
     let src = old * PAGE;
     if oldn > 0 {
         let nbytes = oldn * PAGE;
-        vfs.kern.tmp_back.copy_within(src..src + nbytes, dst);
+        k.tmp_back.copy_within(src..src + nbytes, dst);
     }
-    tmp_free_run(vfs, old as u16, oldn as u16);
-    vfs.kern.nodes[idx].extent_page = newp;
-    vfs.kern.nodes[idx].extent_pages = need as u16;
+    tmp_free_run(k, old as u16, oldn as u16);
+    k.nodes[idx].extent_page = newp;
+    k.nodes[idx].extent_pages = need as u16;
     Ok(())
 }
 
-fn tmp_byte_off(vfs: &Vfs, sb: u8, ino: u32, logical: u64) -> Result<u64, FsError> {
-    let n = kern_get(vfs, sb, ino).ok_or(FsError::NotFound)?;
+fn tmp_byte_off(k: &KernState, sb: u8, ino: u32, logical: u64) -> Result<u64, FsError> {
+    let n = kern_get(k, sb, ino).ok_or(FsError::NotFound)?;
     if n.extent_pages == 0 {
         return Err(FsError::Io);
     }
@@ -1382,15 +1395,15 @@ fn tmp_byte_off(vfs: &Vfs, sb: u8, ino: u32, logical: u64) -> Result<u64, FsErro
 }
 
 fn tmp_rw_cache(
-    vfs: &mut Vfs,
+    k: &mut KernState,
     byte_off: u64,
     buf: &mut [u8],
     write: bool,
     src: &[u8],
 ) -> Result<(), FsError> {
-    let cache = &mut vfs.kern.tmp_cache;
+    let cache = &mut k.tmp_cache;
     let back = SliceBack {
-        data: RefCell::new(&mut vfs.kern.tmp_back[..]),
+        data: RefCell::new(&mut k.tmp_back[..]),
     };
     let r = if write {
         cache::cached_write(cache, &back, TMPFS_DEV, byte_off, src)
@@ -1400,8 +1413,14 @@ fn tmp_rw_cache(
     r.map_err(|_| FsError::Io)
 }
 
-fn tmp_read(vfs: &mut Vfs, sb: u8, ino: u32, off: u64, buf: &mut [u8]) -> Result<usize, FsError> {
-    let size = kern_get(vfs, sb, ino).ok_or(FsError::NotFound)?.size;
+fn tmp_read(
+    k: &mut KernState,
+    sb: u8,
+    ino: u32,
+    off: u64,
+    buf: &mut [u8],
+) -> Result<usize, FsError> {
+    let size = kern_get(k, sb, ino).ok_or(FsError::NotFound)?.size;
     if off >= size {
         return Ok(0);
     }
@@ -1410,22 +1429,29 @@ fn tmp_read(vfs: &mut Vfs, sb: u8, ino: u32, off: u64, buf: &mut [u8]) -> Result
     if n == 0 {
         return Ok(0);
     }
-    let byte_off = tmp_byte_off(vfs, sb, ino, off)?;
-    tmp_rw_cache(vfs, byte_off, &mut buf[..n], false, b"")?;
+    let byte_off = tmp_byte_off(k, sb, ino, off)?;
+    tmp_rw_cache(k, byte_off, &mut buf[..n], false, b"")?;
     Ok(n)
 }
 
-fn tmp_write(vfs: &mut Vfs, sb: u8, ino: u32, off: u64, buf: &[u8]) -> Result<usize, FsError> {
+fn tmp_write(
+    k: &mut KernState,
+    now: u64,
+    sb: u8,
+    ino: u32,
+    off: u64,
+    buf: &[u8],
+) -> Result<usize, FsError> {
     if buf.is_empty() {
         return Ok(0);
     }
     let end = off.saturating_add(buf.len() as u64);
-    tmp_ensure(vfs, sb, ino, end)?;
-    let byte_off = tmp_byte_off(vfs, sb, ino, off)?;
+    tmp_ensure(k, sb, ino, end)?;
+    let byte_off = tmp_byte_off(k, sb, ino, off)?;
     let mut dummy = [0u8; 1];
-    tmp_rw_cache(vfs, byte_off, &mut dummy, true, buf)?;
-    let t = vfs.now;
-    if let Some(n) = kern_get_mut(vfs, sb, ino) {
+    tmp_rw_cache(k, byte_off, &mut dummy, true, buf)?;
+    let t = now;
+    if let Some(n) = kern_get_mut(k, sb, ino) {
         if end > n.size {
             n.size = end;
         }
@@ -1435,32 +1461,32 @@ fn tmp_write(vfs: &mut Vfs, sb: u8, ino: u32, off: u64, buf: &[u8]) -> Result<us
     Ok(buf.len())
 }
 
-fn tmp_truncate(vfs: &mut Vfs, sb: u8, ino: u32, size: u64) -> Result<(), FsError> {
+fn tmp_truncate(k: &mut KernState, now: u64, sb: u8, ino: u32, size: u64) -> Result<(), FsError> {
     let Some(idx) = kern_idx(ino) else {
         return Err(FsError::NotFound);
     };
-    if !vfs.kern.nodes[idx].used || vfs.kern.nodes[idx].sb != sb {
+    if !k.nodes[idx].used || k.nodes[idx].sb != sb {
         return Err(FsError::NotFound);
     }
-    let old = vfs.kern.nodes[idx].size;
+    let old = k.nodes[idx].size;
     if size > old {
-        tmp_ensure(vfs, sb, ino, size)?;
+        tmp_ensure(k, sb, ino, size)?;
     } else {
         let need = tmp_pages_for(size) as u16;
-        let have = vfs.kern.nodes[idx].extent_pages;
+        let have = k.nodes[idx].extent_pages;
         if need < have {
-            let start = vfs.kern.nodes[idx].extent_page;
-            tmp_free_run(vfs, start + need, have - need);
-            vfs.kern.nodes[idx].extent_pages = need;
+            let start = k.nodes[idx].extent_page;
+            tmp_free_run(k, start + need, have - need);
+            k.nodes[idx].extent_pages = need;
             if need == 0 {
-                vfs.kern.nodes[idx].extent_page = 0;
+                k.nodes[idx].extent_page = 0;
             }
         }
     }
-    let t = vfs.now;
-    vfs.kern.nodes[idx].size = size;
-    vfs.kern.nodes[idx].mtime = t;
-    vfs.kern.nodes[idx].ctime = t;
+    let t = now;
+    k.nodes[idx].size = size;
+    k.nodes[idx].mtime = t;
+    k.nodes[idx].ctime = t;
     Ok(())
 }
 
@@ -1482,6 +1508,7 @@ mod tests {
         v.mount_root_fs(&crate::fs::FatFs {
             root_clu: 2,
             vol: 0,
+            ops: None,
         })
         .unwrap();
         v.mount_pseudo().unwrap();

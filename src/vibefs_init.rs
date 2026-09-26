@@ -472,6 +472,7 @@ pub fn mount_mem(at: &str) -> Result<u8, FsError> {
             &VibeFs {
                 root_ino: ROOT_INO,
                 vol: VOL_MEM,
+                ops: None,
             },
         )
     }) {
@@ -541,6 +542,7 @@ pub fn mount_dev(name: &str, at: &str) -> Result<u8, FsError> {
             &VibeFs {
                 root_ino: ROOT_INO,
                 vol: id,
+                ops: None,
             },
         )
     }) {

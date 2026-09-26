@@ -2,9 +2,15 @@
 //!
 //! Bounded caches with clock eviction. Path walk is iterative with a
 //! symlink-depth cap (loop → [`FsError::Loop`], not stack smash).
-//! Dummy [`RamFs`] is enough to unit-test walks. [`FatFs`] is a VFS
-//! stub (on-disk I/O lives in `fat` / `fat_init`). Pseudo filesystems
+//! Dummy [`RamFs`] is enough to unit-test walks. Pseudo filesystems
 //! share [`kernfs`] (one dir tree, four skins).
+//!
+//! Dispatch: a superblock's `ops` pointer ([`InodeOps`]) is the only way
+//! to a backend, and no backend receives `&Vfs`: an op gets an [`OpCx`]
+//! and the [`Inode`]s it acts on. An inode carries its backend's
+//! identity (`key`) and two private words; `Vfs` owns inodes, dentries,
+//! mounts and files. A dentry counts its holders, so a directory stays
+//! in the cache while a child names it.
 //!
 //! Locks (kernel): RANK_DEVICE. Tables are static; do not allocate
 //! under the lock. No FS work from hard IRQ (DESIGN §2.2).
@@ -243,37 +249,143 @@ pub struct VfsStats {
     pub i_evicts: u32,
 }
 
-/// Mount / root-inode fill. Concrete filesystems implement this.
-pub trait FileSystem {
-    fn name(&self) -> &'static str;
-    fn fstype(&self) -> FsType;
-    fn fill_super(&self, vfs: &mut Vfs, sb: u8) -> Result<u32, FsError>;
+/// A backend's identity for one of its inodes, unique within its
+/// superblock: FAT's dirent location `[dir_clu, dir_off, 0]`, vibefs's
+/// inode number `[ino, 0, 0]`, ramfs's and kernfs's node `[node, 0, 0]`.
+pub type Key = [u32; 3];
+
+/// What a backend reports about one of its inodes; [`Vfs`] fills an
+/// [`Inode`] from it the first time the key is looked up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InodeInfo {
+    pub key: Key,
+    pub ino: u32,
+    pub kind: InodeKind,
+    pub mode: u16,
+    pub nlink: u32,
+    pub size: u64,
+    pub atime: u64,
+    pub mtime: u64,
+    pub ctime: u64,
+    pub private: [u64; 2],
 }
 
-/// Per-inode ops. May block on a real FS; never call from hard IRQ.
-pub trait InodeOps {
-    fn lookup(&self, vfs: &mut Vfs, dir_islot: u16, name: &[u8]) -> Result<u32, FsError>;
+/// What an [`InodeOps`] call may touch besides the inodes it is handed:
+/// its superblock's private words and the clock. Never the [`Vfs`].
+pub struct OpCx<'a> {
+    pub sb: u8,
+    pub fstype: FsType,
+    pub private: &'a mut [u64; 2],
+    pub now: u64,
+    ram: &'a mut [RamNode; MAX_RAM_NODES],
+    kern: &'a mut kernfs::KernState,
+}
+
+/// Per-inode ops, reached only through a superblock's `ops` pointer.
+/// `ino` or `dir` is a [`Vfs`] table slot the caller holds a count on for
+/// the call. Until ROADMAP §10.4's VFS-lock box, [`Vfs`] calls these with
+/// its IRQ-off spinlock held, so an op never waits (DESIGN §2.1, §2.9
+/// rule 4).
+pub trait InodeOps: Sync {
+    fn lookup(&self, cx: &mut OpCx<'_>, dir: &Inode, name: &[u8]) -> Result<InodeInfo, FsError>;
     fn create(
         &self,
-        vfs: &mut Vfs,
-        dir_islot: u16,
+        cx: &mut OpCx<'_>,
+        dir: &mut Inode,
         name: &[u8],
         kind: InodeKind,
         mode: u16,
         target: Option<&[u8]>,
-    ) -> Result<u32, FsError>;
-    fn unlink(&self, vfs: &mut Vfs, dir_islot: u16, name: &[u8]) -> Result<(), FsError>;
-    fn read(&self, vfs: &mut Vfs, islot: u16, off: u64, buf: &mut [u8]) -> Result<usize, FsError>;
-    fn write(&self, vfs: &mut Vfs, islot: u16, off: u64, buf: &[u8]) -> Result<usize, FsError>;
-    fn truncate(&self, vfs: &mut Vfs, islot: u16, size: u64) -> Result<(), FsError>;
+    ) -> Result<InodeInfo, FsError>;
+    fn unlink(&self, cx: &mut OpCx<'_>, dir: &mut Inode, name: &[u8]) -> Result<(), FsError>;
+    fn read(
+        &self,
+        cx: &mut OpCx<'_>,
+        ino: &mut Inode,
+        off: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, FsError>;
+    fn write(
+        &self,
+        cx: &mut OpCx<'_>,
+        ino: &mut Inode,
+        off: u64,
+        buf: &[u8],
+    ) -> Result<usize, FsError>;
+    fn truncate(&self, cx: &mut OpCx<'_>, ino: &mut Inode, size: u64) -> Result<(), FsError>;
     fn readdir(
         &self,
-        vfs: &mut Vfs,
-        islot: u16,
+        cx: &mut OpCx<'_>,
+        dir: &Inode,
         cookie: u64,
         out: &mut Dirent,
     ) -> Result<Option<u64>, FsError>;
-    fn stat(&self, vfs: &mut Vfs, islot: u16) -> Result<Stat, FsError>;
+    fn getattr(&self, _cx: &mut OpCx<'_>, _ino: &mut Inode) -> Result<(), FsError> {
+        Ok(())
+    }
+    fn readlink(
+        &self,
+        _cx: &mut OpCx<'_>,
+        _ino: &Inode,
+        _buf: &mut [u8],
+    ) -> Result<usize, FsError> {
+        Err(FsError::Inval)
+    }
+    /// Release the storage of an inode with no links and no references.
+    /// An `Err` leaves the inode unhashed for a later retry.
+    fn evict(&self, _cx: &mut OpCx<'_>, _ino: &Inode) -> Result<(), FsError> {
+        Ok(())
+    }
+    /// Drop the backend state of an unmounted superblock.
+    fn kill_sb(&self, _cx: &mut OpCx<'_>) {}
+}
+
+/// Mount-time half of a filesystem: its ops pointer, and the root inode
+/// `fill_super` reports after setting up the superblock's private words.
+pub trait FileSystem {
+    fn name(&self) -> &'static str;
+    fn fstype(&self) -> FsType;
+    fn ops(&self) -> Option<&'static dyn InodeOps>;
+    fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError>;
+}
+
+/// A counted reference to a [`Vfs`] inode, from [`Vfs::iget_key`] or
+/// [`Vfs::iref`]. Hand it back to [`Vfs::put_ref`]: dropping it leaks the
+/// count.
+#[must_use]
+#[derive(Debug)]
+pub struct InodeRef {
+    slot: u16,
+    r#gen: u32,
+}
+
+impl InodeRef {
+    /// A copyable name for this reference's inode, checked against the
+    /// slot's generation on every use.
+    pub fn handle(&self) -> InodeHandle {
+        InodeHandle {
+            slot: self.slot,
+            r#gen: self.r#gen,
+        }
+    }
+}
+
+/// A copyable, generation-checked name for a referenced [`Vfs`] inode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InodeHandle {
+    slot: u16,
+    r#gen: u32,
+}
+
+/// What [`Vfs::put_ref`] hands back when it drops the last reference to
+/// an inode with no links: the backend's words, for the caller to release
+/// its storage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Evicted {
+    pub sb: u8,
+    pub key: Key,
+    pub private: [u64; 2],
+    pub size: u64,
 }
 
 pub struct RamFs;
@@ -287,64 +399,98 @@ impl FileSystem for RamFs {
         FsType::Ram
     }
 
-    fn fill_super(&self, vfs: &mut Vfs, sb: u8) -> Result<u32, FsError> {
-        ram_fill_super(vfs, sb)
+    fn ops(&self) -> Option<&'static dyn InodeOps> {
+        Some(&RamFs)
+    }
+
+    fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
+        ram_fill_super(cx)
     }
 }
 
 impl InodeOps for RamFs {
-    fn lookup(&self, vfs: &mut Vfs, dir_islot: u16, name: &[u8]) -> Result<u32, FsError> {
-        ram_lookup(vfs, dir_islot, name)
+    fn lookup(&self, cx: &mut OpCx<'_>, dir: &Inode, name: &[u8]) -> Result<InodeInfo, FsError> {
+        ram_lookup(cx, dir, name)
     }
 
     fn create(
         &self,
-        vfs: &mut Vfs,
-        dir_islot: u16,
+        cx: &mut OpCx<'_>,
+        dir: &mut Inode,
         name: &[u8],
         kind: InodeKind,
         mode: u16,
         target: Option<&[u8]>,
-    ) -> Result<u32, FsError> {
-        ram_create(vfs, dir_islot, name, kind, mode, target)
+    ) -> Result<InodeInfo, FsError> {
+        ram_create(cx, dir, name, kind, mode, target)
     }
 
-    fn unlink(&self, vfs: &mut Vfs, dir_islot: u16, name: &[u8]) -> Result<(), FsError> {
-        ram_unlink(vfs, dir_islot, name)
+    fn unlink(&self, cx: &mut OpCx<'_>, dir: &mut Inode, name: &[u8]) -> Result<(), FsError> {
+        ram_unlink(cx, dir, name)
     }
 
-    fn read(&self, vfs: &mut Vfs, islot: u16, off: u64, buf: &mut [u8]) -> Result<usize, FsError> {
-        ram_read(vfs, islot, off, buf)
+    fn read(
+        &self,
+        cx: &mut OpCx<'_>,
+        ino: &mut Inode,
+        off: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, FsError> {
+        ram_read(cx, ino, off, buf)
     }
 
-    fn write(&self, vfs: &mut Vfs, islot: u16, off: u64, buf: &[u8]) -> Result<usize, FsError> {
-        ram_write(vfs, islot, off, buf)
+    fn write(
+        &self,
+        cx: &mut OpCx<'_>,
+        ino: &mut Inode,
+        off: u64,
+        buf: &[u8],
+    ) -> Result<usize, FsError> {
+        ram_write(cx, ino, off, buf)
     }
 
-    fn truncate(&self, vfs: &mut Vfs, islot: u16, size: u64) -> Result<(), FsError> {
-        ram_truncate(vfs, islot, size)
+    fn truncate(&self, cx: &mut OpCx<'_>, ino: &mut Inode, size: u64) -> Result<(), FsError> {
+        ram_truncate(cx, ino, size)
     }
 
     fn readdir(
         &self,
-        vfs: &mut Vfs,
-        islot: u16,
+        cx: &mut OpCx<'_>,
+        dir: &Inode,
         cookie: u64,
         out: &mut Dirent,
     ) -> Result<Option<u64>, FsError> {
-        ram_readdir(vfs, islot, cookie, out)
+        ram_readdir(cx, dir, cookie, out)
     }
 
-    fn stat(&self, vfs: &mut Vfs, islot: u16) -> Result<Stat, FsError> {
-        ram_stat(vfs, islot)
+    fn getattr(&self, cx: &mut OpCx<'_>, ino: &mut Inode) -> Result<(), FsError> {
+        if let Some(r) = ram_get(cx.ram, cx.sb, ino.key[0]) {
+            r.meta_into(ino);
+        }
+        Ok(())
+    }
+
+    fn readlink(&self, cx: &mut OpCx<'_>, ino: &Inode, buf: &mut [u8]) -> Result<usize, FsError> {
+        ram_readlink(cx, ino, buf)
+    }
+
+    fn evict(&self, cx: &mut OpCx<'_>, ino: &Inode) -> Result<(), FsError> {
+        ram_evict(cx, ino.key[0]);
+        Ok(())
+    }
+
+    fn kill_sb(&self, cx: &mut OpCx<'_>) {
+        ram_drop_sb(cx.ram, cx.sb);
     }
 }
 
-/// FAT32 super fill. On-disk I/O lives in `fat` / `fat_init`; VFS
-/// only stores the root cluster in the inode `data0`.
+/// FAT32 registration. On-disk I/O lives in `fat` / `fat_init`; the
+/// superblock's private words are `[vol, 0]` and the root inode's are
+/// `[root_clu, 0]`.
 pub struct FatFs {
     pub root_clu: u32,
     pub vol: u8,
+    pub ops: Option<&'static dyn InodeOps>,
 }
 
 impl FileSystem for FatFs {
@@ -356,17 +502,33 @@ impl FileSystem for FatFs {
         FsType::Fat
     }
 
-    fn fill_super(&self, vfs: &mut Vfs, sb: u8) -> Result<u32, FsError> {
-        vfs.supers[sb as usize].fat_clu = self.root_clu;
-        vfs.supers[sb as usize].fat_vol = self.vol;
-        Ok(1)
+    fn ops(&self) -> Option<&'static dyn InodeOps> {
+        self.ops
+    }
+
+    fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
+        *cx.private = [u64::from(self.vol), 0];
+        Ok(InodeInfo {
+            key: [0, 0, 0],
+            ino: crate::fat::ROOT_INO,
+            kind: InodeKind::Dir,
+            mode: S_IFDIR_MODE,
+            nlink: 2,
+            size: 0,
+            atime: cx.now,
+            mtime: cx.now,
+            ctime: cx.now,
+            private: [u64::from(self.root_clu), 0],
+        })
     }
 }
 
-/// vibefs super fill. On-disk I/O lives in `vibefs` / `vibefs_init`.
+/// vibefs registration. On-disk I/O lives in `vibefs` / `vibefs_init`;
+/// the superblock's private words are `[vol, 0]`.
 pub struct VibeFs {
     pub root_ino: u32,
     pub vol: u8,
+    pub ops: Option<&'static dyn InodeOps>,
 }
 
 impl FileSystem for VibeFs {
@@ -378,28 +540,48 @@ impl FileSystem for VibeFs {
         FsType::Vibe
     }
 
-    fn fill_super(&self, vfs: &mut Vfs, sb: u8) -> Result<u32, FsError> {
-        vfs.supers[sb as usize].fat_clu = self.root_ino;
-        vfs.supers[sb as usize].fat_vol = self.vol;
-        Ok(self.root_ino)
+    fn ops(&self) -> Option<&'static dyn InodeOps> {
+        self.ops
+    }
+
+    fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
+        *cx.private = [u64::from(self.vol), 0];
+        Ok(InodeInfo {
+            key: [self.root_ino, 0, 0],
+            ino: self.root_ino,
+            kind: InodeKind::Dir,
+            mode: S_IFDIR_MODE,
+            nlink: 2,
+            size: 0,
+            atime: cx.now,
+            mtime: cx.now,
+            ctime: cx.now,
+            private: [0, 0],
+        })
     }
 }
 
+/// An in-core inode. `key` is the backend's identity for it and
+/// `private` two words only its backend reads or writes; the rest is the
+/// metadata `stat` reports. `gen` changes each time the slot is filled,
+/// so an [`InodeHandle`] to an earlier occupant is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Inode {
+pub struct Inode {
     used: bool,
     clock: bool,
     refs: u16,
     sb: u8,
-    ino: u32,
-    kind: InodeKind,
-    mode: u16,
-    nlink: u32,
-    size: u64,
-    atime: u64,
-    mtime: u64,
-    ctime: u64,
-    data0: u32,
+    r#gen: u32,
+    pub key: Key,
+    pub ino: u32,
+    pub kind: InodeKind,
+    pub mode: u16,
+    pub nlink: u32,
+    pub size: u64,
+    pub atime: u64,
+    pub mtime: u64,
+    pub ctime: u64,
+    pub private: [u64; 2],
 }
 
 impl Inode {
@@ -408,6 +590,8 @@ impl Inode {
         clock: false,
         refs: 0,
         sb: 0,
+        r#gen: 0,
+        key: [0; 3],
         ino: 0,
         kind: InodeKind::Reg,
         mode: 0,
@@ -416,8 +600,21 @@ impl Inode {
         atime: 0,
         mtime: 0,
         ctime: 0,
-        data0: 0,
+        private: [0; 2],
     };
+
+    fn stat(&self) -> Stat {
+        Stat {
+            ino: self.ino,
+            kind: self.kind,
+            mode: self.mode,
+            nlink: self.nlink,
+            size: self.size,
+            atime: self.atime,
+            mtime: self.mtime,
+            ctime: self.ctime,
+        }
+    }
 }
 
 /// A dentry cache slot. `refs` counts its holders (DESIGN §2.11 rule 2):
@@ -454,26 +651,26 @@ impl Dentry {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A mounted filesystem instance. `ops` is the only dispatch to its
+/// backend; `private` holds two words only the backend reads or writes.
+#[derive(Clone, Copy)]
 struct Super {
     used: bool,
     fstype: FsType,
-    root_ino: u32,
+    ops: Option<&'static dyn InodeOps>,
+    private: [u64; 2],
     root_islot: u16,
     root_dslot: u16,
-    fat_clu: u32,
-    fat_vol: u8,
 }
 
 impl Super {
     const EMPTY: Self = Self {
         used: false,
         fstype: FsType::Ram,
-        root_ino: 0,
+        ops: None,
+        private: [0; 2],
         root_islot: 0,
         root_dslot: 0,
-        fat_clu: 0,
-        fat_vol: 0,
     };
 }
 
@@ -764,6 +961,19 @@ impl Vfs {
             }
             n += 1;
         }
+        // Unlinked inodes whose release failed at their last put: the
+        // backend must take them back before the superblock goes.
+        let mut n = 0usize;
+        while n < MAX_INODES {
+            let ino = &self.inodes[n];
+            if ino.used && ino.sb == sb && ino.refs == 0 && ino.nlink == 0 {
+                if self.ops_evict(sb, n as u16).is_err() {
+                    return Err(FsError::Busy);
+                }
+                self.inode_clear(n);
+            }
+            n += 1;
+        }
         let mp = self.mounts[m as usize].mp_dslot;
         self.dput(mp);
         self.sb_teardown(sb);
@@ -786,14 +996,18 @@ impl Vfs {
 
     pub fn stat(&mut self, cwd: Option<PathRef>, path: &str) -> Result<Stat, FsError> {
         let p = self.resolve(cwd, path, true)?;
-        let islot = self.d_islot(p.dslot)?;
-        self.ops_stat(self.sb_of(p.mount), islot)
+        self.stat_at(p)
     }
 
     pub fn lstat(&mut self, cwd: Option<PathRef>, path: &str) -> Result<Stat, FsError> {
         let p = self.resolve(cwd, path, false)?;
+        self.stat_at(p)
+    }
+
+    fn stat_at(&mut self, p: PathRef) -> Result<Stat, FsError> {
         let islot = self.d_islot(p.dslot)?;
-        self.ops_stat(self.sb_of(p.mount), islot)
+        self.ops_getattr(self.sb_of(p.mount), islot)?;
+        Ok(self.inodes[islot as usize].stat())
     }
 
     pub fn mkdir(
@@ -849,9 +1063,39 @@ impl Vfs {
         if self.is_mountpoint(dir, name) {
             return Err(FsError::Busy);
         }
+        let ds = self.lookup_step(dir.mount, dir.dslot, name)?;
+        let victim = self.d_islot(ds)?;
+        self.remove_name(dir, islot, name, victim)
+    }
+
+    /// Unlink `name`, whose inode is `victim`, from `dir` (inode `islot`)
+    /// through the backend. The victim is held across the call, so its
+    /// last put, here or at a later close, is what releases its storage;
+    /// no backend scans the inode table.
+    fn remove_name(
+        &mut self,
+        dir: PathRef,
+        islot: u16,
+        name: &[u8],
+        victim: u16,
+    ) -> Result<(), FsError> {
         let sb = self.sb_of(dir.mount);
+        self.ihold(victim)?;
         self.dcache_drop_name(sb, dir.dslot, name);
-        self.ops_unlink(sb, islot, name)?;
+        if let Err(e) = self.ops_unlink(sb, islot, name) {
+            self.iput(victim);
+            return Err(e);
+        }
+        let v = &mut self.inodes[victim as usize];
+        v.nlink = if v.kind == InodeKind::Dir {
+            0
+        } else {
+            v.nlink.saturating_sub(1)
+        };
+        v.ctime = self.now;
+        let got = self.ops_getattr(sb, victim);
+        self.iput(victim);
+        got?;
         self.inodes[islot as usize].mtime = self.now;
         self.inodes[islot as usize].ctime = self.now;
         Ok(())
@@ -882,15 +1126,13 @@ impl Vfs {
             return Err(FsError::NotDir);
         }
         let sb = self.sb_of(dir.mount);
-        self.dcache_drop_name(sb, dir.dslot, name);
         match self.fstype(sb) {
             FsType::Ram | FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
                 let islot = self.d_islot(dir.dslot)?;
-                self.ops_unlink(sb, islot, name)?;
+                self.remove_name(dir, islot, name, cslot)
             }
-            FsType::Fat | FsType::Vibe => return Err(FsError::NotSupp),
+            FsType::Fat | FsType::Vibe => Err(FsError::NotSupp),
         }
-        Ok(())
     }
 
     /// Hard link. FAT returns [`FsError::NotSupp`].
@@ -918,7 +1160,11 @@ impl Vfs {
                     return Err(FsError::Inval);
                 }
                 let dislot = v.d_islot(dir.dslot)?;
-                ram_link(v, dislot, name, v.inodes[sslot as usize].ino)?;
+                let dnode = v.inodes[dislot as usize].key[0];
+                let target = v.inodes[sslot as usize].key[0];
+                ram_link(&mut v.ram, v.now, sb, dnode, name, target)?;
+                v.ops_getattr(sb, sslot)?;
+                v.ops_getattr(sb, dislot)?;
                 v.dcache_drop_neg_in_dir(sb, dir.dslot);
                 v.dcache_drop_name(sb, dir.dslot, name);
                 Ok(())
@@ -965,7 +1211,11 @@ impl Vfs {
             FsType::Ram => {
                 let oslot = self.d_islot(od.dslot)?;
                 let nslot = self.d_islot(nd.dslot)?;
-                ram_rename(self, oslot, oname, nslot, nname)?;
+                let odir = self.inodes[oslot as usize].key[0];
+                let ndir = self.inodes[nslot as usize].key[0];
+                ram_rename(&mut self.ram, self.now, osb, odir, oname, ndir, nname)?;
+                self.ops_getattr(osb, oslot)?;
+                self.ops_getattr(osb, nslot)?;
             }
         }
         self.dcache_drop_name(osb, od.dslot, oname);
@@ -1022,7 +1272,7 @@ impl Vfs {
         if flags & O_TRUNC != 0 && kind == InodeKind::Reg {
             let sb = self.sb_of(p.mount);
             self.ops_truncate(sb, islot, 0)?;
-            self.sync_inode_from_ram(islot);
+            self.ops_getattr(sb, islot)?;
         }
         self.file_alloc(islot, p.mount, flags)
     }
@@ -1108,7 +1358,7 @@ impl Vfs {
         }
         let sb = self.sb_of(mount);
         let n = self.ops_write(sb, islot, off, buf)?;
-        self.sync_inode_from_ram(islot);
+        self.ops_getattr(sb, islot)?;
         self.files[fid as usize].offset = off.saturating_add(n as u64);
         self.inodes[islot as usize].mtime = self.now;
         self.inodes[islot as usize].ctime = self.now;
@@ -1142,7 +1392,7 @@ impl Vfs {
         }
         let sb = self.sb_of(p.mount);
         self.ops_truncate(sb, islot, size)?;
-        self.sync_inode_from_ram(islot);
+        self.ops_getattr(sb, islot)?;
         self.inodes[islot as usize].mtime = self.now;
         self.inodes[islot as usize].ctime = self.now;
         Ok(())
@@ -1220,12 +1470,11 @@ impl Vfs {
     }
 
     pub fn fat_vol_of(&self, p: PathRef) -> Result<u8, FsError> {
-        if (p.mount as usize) >= MAX_MOUNTS || !self.mounts[p.mount as usize].used {
-            return Err(FsError::Io);
-        }
-        Ok(self.supers[self.sb_of(p.mount) as usize].fat_vol)
+        Ok(self.sb_private(p)?[0] as u8)
     }
 
+    /// Cache a FAT inode the File API walked, keyed `[ino, 0, 1]`: a third
+    /// word no dirent key has.
     pub fn fat_iget(
         &mut self,
         sb: u8,
@@ -1234,39 +1483,20 @@ impl Vfs {
         size: u64,
         clu: u32,
     ) -> Result<u16, FsError> {
-        let mut i = 0usize;
-        while i < MAX_INODES {
-            if self.inodes[i].used && self.inodes[i].sb == sb && self.inodes[i].ino == ino {
-                self.inodes[i].size = size;
-                self.inodes[i].data0 = clu;
-                self.inodes[i].kind = kind;
-                self.inodes[i].refs = self.inodes[i].refs.saturating_add(1);
-                self.inodes[i].clock = true;
-                return Ok(i as u16);
-            }
-            i += 1;
-        }
-        let slot = self.inode_alloc()?;
-        self.inodes[slot as usize] = Inode {
-            used: true,
-            clock: true,
-            refs: 1,
-            sb,
+        let dir = kind == InodeKind::Dir;
+        let info = InodeInfo {
+            key: [ino, 0, 1],
             ino,
             kind,
-            mode: if kind == InodeKind::Dir {
-                S_IFDIR_MODE
-            } else {
-                S_IFREG_MODE
-            },
-            nlink: if kind == InodeKind::Dir { 2 } else { 1 },
+            mode: if dir { S_IFDIR_MODE } else { S_IFREG_MODE },
+            nlink: if dir { 2 } else { 1 },
             size,
             atime: self.now,
             mtime: self.now,
             ctime: self.now,
-            data0: clu,
+            private: [u64::from(clu), 0],
         };
-        Ok(slot)
+        self.iget_info(sb, &info)
     }
 
     pub fn fat_dcache(
@@ -1292,6 +1522,144 @@ impl Vfs {
 
     pub fn release_inode(&mut self, islot: u16) {
         self.iput(islot);
+    }
+
+    /// A counted reference to the inode `info` describes: the cached one
+    /// when `(sb, info.key)` is hashed, else a slot filled from `info`.
+    pub fn iget_key(&mut self, sb: u8, info: &InodeInfo) -> Result<InodeRef, FsError> {
+        self.sb_live(sb)?;
+        let slot = self.iget_info(sb, info)?;
+        Ok(InodeRef {
+            slot,
+            r#gen: self.inodes[slot as usize].r#gen,
+        })
+    }
+
+    /// A counted reference to the inode `p` names.
+    pub fn iref(&mut self, p: PathRef) -> Result<InodeRef, FsError> {
+        let slot = self.d_islot(p.dslot)?;
+        self.ihold(slot)?;
+        Ok(InodeRef {
+            slot,
+            r#gen: self.inodes[slot as usize].r#gen,
+        })
+    }
+
+    /// Drop a reference. The last one on an inode with no links clears
+    /// its slot and returns the backend's words; the backend is not
+    /// called, so the caller releases its storage.
+    pub fn put_ref(&mut self, r: InodeRef) -> Option<Evicted> {
+        let i = self.slot_of(r.handle()).ok()?;
+        let n = &mut self.inodes[i];
+        debug_assert!(n.refs != 0, "put_ref of an unreferenced inode");
+        n.refs = n.refs.saturating_sub(1);
+        if n.refs != 0 || n.nlink != 0 {
+            return None;
+        }
+        let out = Evicted {
+            sb: n.sb,
+            key: n.key,
+            private: n.private,
+            size: n.size,
+        };
+        self.inode_clear(i);
+        Some(out)
+    }
+
+    /// The inode `h` names; `Badf` when its slot was refilled.
+    pub fn inode(&self, h: InodeHandle) -> Result<&Inode, FsError> {
+        let i = self.slot_of(h)?;
+        Ok(&self.inodes[i])
+    }
+
+    pub fn inode_mut(&mut self, h: InodeHandle) -> Result<&mut Inode, FsError> {
+        let i = self.slot_of(h)?;
+        Ok(&mut self.inodes[i])
+    }
+
+    /// Move the hashed inode keyed `from` to `to`, as a rename made
+    /// outside `Vfs` does, and drop the dentries that name it. A cached
+    /// inode already at `to` leaves the hash.
+    pub fn rekey(&mut self, sb: u8, from: Key, to: Key) -> Result<(), FsError> {
+        self.sb_live(sb)?;
+        if from == to {
+            return Ok(());
+        }
+        if let Some(t) = self.hashed(sb, to) {
+            self.unhash(t);
+        }
+        if let Some(f) = self.hashed(sb, from) {
+            self.drop_dentries_of(f);
+            self.inodes[f as usize].key = to;
+        }
+        Ok(())
+    }
+
+    /// An unlink made outside `Vfs`: the inode keyed `key` gets no links
+    /// and leaves the hash, and the dentries naming it are dropped. True
+    /// when it is still referenced; its last put then reports it.
+    pub fn forget(&mut self, sb: u8, key: Key) -> bool {
+        match self.hashed(sb, key) {
+            Some(i) => self.unhash(i),
+            None => false,
+        }
+    }
+
+    /// Cache `name` in `parent` as the inode `info` describes, and return
+    /// its dentry. A name already cached positive returns that dentry.
+    pub fn attach(
+        &mut self,
+        parent: PathRef,
+        name: &[u8],
+        info: &InodeInfo,
+    ) -> Result<PathRef, FsError> {
+        let sb = self.sb_of_path(parent)?;
+        if let Some(ds) = self.dcache_find(sb, parent.dslot, name) {
+            if !self.dentries[ds as usize].negative {
+                return Ok(PathRef {
+                    mount: parent.mount,
+                    dslot: ds,
+                });
+            }
+            self.dentry_evict(ds);
+        }
+        let islot = self.iget_info(sb, info)?;
+        match self.dcache_insert(sb, parent.dslot, name, Some(islot)) {
+            Ok(ds) => Ok(PathRef {
+                mount: parent.mount,
+                dslot: ds,
+            }),
+            Err(e) => {
+                self.iput(islot);
+                Err(e)
+            }
+        }
+    }
+
+    /// Drop every negative dentry of `sb`, as a create made outside
+    /// `Vfs` requires.
+    pub fn drop_negatives(&mut self, sb: u8) {
+        let mut i = 0usize;
+        while i < MAX_DENTRIES {
+            let d = &self.dentries[i];
+            if d.used && d.sb == sb && d.negative {
+                self.dentry_evict(i as u16);
+            }
+            i += 1;
+        }
+    }
+
+    pub fn sb_of_mount(&self, m: u8) -> Result<u8, FsError> {
+        match self.mounts.get(m as usize) {
+            Some(x) if x.used => Ok(x.sb),
+            _ => Err(FsError::Io),
+        }
+    }
+
+    /// The private words of the superblock `p` is on.
+    pub fn sb_private(&self, p: PathRef) -> Result<[u64; 2], FsError> {
+        let sb = self.sb_of_path(p)?;
+        Ok(self.supers[sb as usize].private)
     }
 }
 
@@ -1327,14 +1695,37 @@ impl Vfs {
         Ok((f.islot, f.mount, f.flags, f.offset))
     }
 
-    fn ops_lookup(&mut self, sb: u8, dir: u16, name: &[u8]) -> Result<u32, FsError> {
-        match self.fstype(sb) {
-            FsType::Ram => RamFs.lookup(self, dir, name),
-            FsType::Fat | FsType::Vibe => Err(FsError::NotSupp),
-            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
-                kernfs::kern_lookup(self, dir, name)
-            }
-        }
+    /// Run `f` on superblock `sb`'s ops with an [`OpCx`] built from
+    /// fields disjoint from the inode table, and `inode(islot)`.
+    fn with_op<R>(
+        &mut self,
+        sb: u8,
+        islot: u16,
+        f: impl FnOnce(&dyn InodeOps, &mut OpCx<'_>, &mut Inode) -> Result<R, FsError>,
+    ) -> Result<R, FsError> {
+        let ops = self.supers[sb as usize].ops.ok_or(FsError::NotSupp)?;
+        let now = self.now;
+        let Vfs {
+            supers,
+            inodes,
+            ram,
+            kern,
+            ..
+        } = self;
+        let s = &mut supers[sb as usize];
+        let mut cx = OpCx {
+            sb,
+            fstype: s.fstype,
+            private: &mut s.private,
+            now,
+            ram,
+            kern,
+        };
+        f(ops, &mut cx, &mut inodes[islot as usize])
+    }
+
+    fn ops_lookup(&mut self, sb: u8, dir: u16, name: &[u8]) -> Result<InodeInfo, FsError> {
+        self.with_op(sb, dir, |o, cx, d| o.lookup(cx, d, name))
     }
 
     fn ops_create(
@@ -1345,54 +1736,26 @@ impl Vfs {
         kind: InodeKind,
         mode: u16,
         target: Option<&[u8]>,
-    ) -> Result<u32, FsError> {
-        match self.fstype(sb) {
-            FsType::Ram => RamFs.create(self, dir, name, kind, mode, target),
-            FsType::Fat | FsType::Vibe => Err(FsError::NotSupp),
-            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
-                kernfs::kern_create(self, dir, name, kind, mode, target)
-            }
-        }
+    ) -> Result<InodeInfo, FsError> {
+        self.with_op(sb, dir, |o, cx, d| {
+            o.create(cx, d, name, kind, mode, target)
+        })
     }
 
     fn ops_unlink(&mut self, sb: u8, dir: u16, name: &[u8]) -> Result<(), FsError> {
-        match self.fstype(sb) {
-            FsType::Ram => RamFs.unlink(self, dir, name),
-            FsType::Fat | FsType::Vibe => Err(FsError::NotSupp),
-            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
-                kernfs::kern_unlink(self, dir, name)
-            }
-        }
+        self.with_op(sb, dir, |o, cx, d| o.unlink(cx, d, name))
     }
 
     fn ops_read(&mut self, sb: u8, islot: u16, off: u64, buf: &mut [u8]) -> Result<usize, FsError> {
-        match self.fstype(sb) {
-            FsType::Ram => RamFs.read(self, islot, off, buf),
-            FsType::Fat | FsType::Vibe => Err(FsError::NotSupp),
-            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
-                kernfs::kern_read(self, islot, off, buf)
-            }
-        }
+        self.with_op(sb, islot, |o, cx, n| o.read(cx, n, off, buf))
     }
 
     fn ops_write(&mut self, sb: u8, islot: u16, off: u64, buf: &[u8]) -> Result<usize, FsError> {
-        match self.fstype(sb) {
-            FsType::Ram => RamFs.write(self, islot, off, buf),
-            FsType::Fat | FsType::Vibe => Err(FsError::NotSupp),
-            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
-                kernfs::kern_write(self, islot, off, buf)
-            }
-        }
+        self.with_op(sb, islot, |o, cx, n| o.write(cx, n, off, buf))
     }
 
     fn ops_truncate(&mut self, sb: u8, islot: u16, size: u64) -> Result<(), FsError> {
-        match self.fstype(sb) {
-            FsType::Ram => RamFs.truncate(self, islot, size),
-            FsType::Fat | FsType::Vibe => Err(FsError::NotSupp),
-            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
-                kernfs::kern_truncate(self, islot, size)
-            }
-        }
+        self.with_op(sb, islot, |o, cx, n| o.truncate(cx, n, size))
     }
 
     fn ops_readdir(
@@ -1402,33 +1765,65 @@ impl Vfs {
         cookie: u64,
         out: &mut Dirent,
     ) -> Result<Option<u64>, FsError> {
-        match self.fstype(sb) {
-            FsType::Ram => RamFs.readdir(self, islot, cookie, out),
-            FsType::Fat | FsType::Vibe => Err(FsError::NotSupp),
-            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
-                kernfs::kern_readdir(self, islot, cookie, out)
-            }
-        }
-    }
-
-    fn ops_stat(&mut self, sb: u8, islot: u16) -> Result<Stat, FsError> {
-        match self.fstype(sb) {
-            FsType::Ram => RamFs.stat(self, islot),
-            FsType::Fat | FsType::Vibe => fat_stat_inode(self, islot),
-            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
-                kernfs::kern_stat(self, islot)
-            }
-        }
+        self.with_op(sb, islot, |o, cx, d| o.readdir(cx, d, cookie, out))
     }
 
     fn ops_readlink(&mut self, sb: u8, islot: u16, buf: &mut [u8]) -> Result<usize, FsError> {
-        match self.fstype(sb) {
-            FsType::Ram => ram_readlink(self, islot, buf),
-            FsType::Fat | FsType::Vibe => Err(FsError::NotSupp),
-            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
-                kernfs::kern_readlink(self, islot, buf)
-            }
+        self.with_op(sb, islot, |o, cx, n| o.readlink(cx, n, buf))
+    }
+
+    /// Refresh inode `islot` from its backend. A superblock with no ops
+    /// has nothing to refresh.
+    fn ops_getattr(&mut self, sb: u8, islot: u16) -> Result<(), FsError> {
+        if self.supers[sb as usize].ops.is_none() {
+            return Ok(());
         }
+        self.with_op(sb, islot, |o, cx, n| o.getattr(cx, n))
+    }
+
+    fn ops_evict(&mut self, sb: u8, islot: u16) -> Result<(), FsError> {
+        if self.supers[sb as usize].ops.is_none() {
+            return Ok(());
+        }
+        self.with_op(sb, islot, |o, cx, n| o.evict(cx, n))
+    }
+
+    fn ops_kill_sb(&mut self, sb: u8) {
+        let Some(ops) = self.supers[sb as usize].ops else {
+            return;
+        };
+        let now = self.now;
+        let Vfs {
+            supers, ram, kern, ..
+        } = self;
+        let s = &mut supers[sb as usize];
+        let mut cx = OpCx {
+            sb,
+            fstype: s.fstype,
+            private: &mut s.private,
+            now,
+            ram,
+            kern,
+        };
+        ops.kill_sb(&mut cx);
+    }
+
+    /// Fill a new superblock through `fs`, which sets its private words.
+    fn fill_super(&mut self, sb: u8, fs: &dyn FileSystem) -> Result<InodeInfo, FsError> {
+        let now = self.now;
+        let Vfs {
+            supers, ram, kern, ..
+        } = self;
+        let s = &mut supers[sb as usize];
+        let mut cx = OpCx {
+            sb,
+            fstype: s.fstype,
+            private: &mut s.private,
+            now,
+            ram,
+            kern,
+        };
+        fs.fill_super(&mut cx)
     }
 
     fn alloc_super(&mut self) -> Result<u8, FsError> {
@@ -1494,56 +1889,135 @@ impl Vfs {
         *dslot = self.dentries[*dslot as usize].parent;
     }
 
-    /// A counted reference to inode `ino` of `sb`. An unlinked inode
-    /// (`nlink == 0`) is out of the hash: a new file that reuses its
-    /// number gets a slot of its own.
-    fn iget(&mut self, sb: u8, ino: u32) -> Result<u16, FsError> {
-        let mut i = 0usize;
-        while i < MAX_INODES {
-            if self.inodes[i].used
-                && self.inodes[i].sb == sb
-                && self.inodes[i].ino == ino
-                && self.inodes[i].nlink != 0
-            {
-                self.inodes[i].refs = self.inodes[i].refs.saturating_add(1);
-                self.inodes[i].clock = true;
-                return Ok(i as u16);
-            }
-            i += 1;
+    /// A counted reference to the inode `info` describes. A used inode
+    /// of `sb` with the same key and links is a hit, and its cached state
+    /// wins over `info`: it is the authoritative inode. An unlinked one
+    /// (`nlink == 0`) is out of the hash, so a new file that reuses its
+    /// key gets a slot of its own.
+    fn iget_info(&mut self, sb: u8, info: &InodeInfo) -> Result<u16, FsError> {
+        if let Some(i) = self.hashed(sb, info.key) {
+            self.ihold(i)?;
+            self.inodes[i as usize].clock = true;
+            return Ok(i);
         }
         let slot = self.inode_alloc()?;
-        self.inode_load(slot, sb, ino)?;
-        self.inodes[slot as usize].refs = 1;
-        self.inodes[slot as usize].clock = true;
+        let g = self.inodes[slot as usize].r#gen.wrapping_add(1);
+        self.inodes[slot as usize] = Inode {
+            used: true,
+            clock: true,
+            refs: 1,
+            sb,
+            r#gen: g,
+            key: info.key,
+            ino: info.ino,
+            kind: info.kind,
+            mode: info.mode,
+            nlink: info.nlink,
+            size: info.size,
+            atime: info.atime,
+            mtime: info.mtime,
+            ctime: info.ctime,
+            private: info.private,
+        };
         Ok(slot)
     }
 
+    /// The hashed inode of `sb` keyed `key`.
+    fn hashed(&self, sb: u8, key: Key) -> Option<u16> {
+        let mut i = 0usize;
+        while i < MAX_INODES {
+            let n = &self.inodes[i];
+            if n.used && n.sb == sb && n.key == key && n.nlink != 0 {
+                return Some(i as u16);
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Count one more reference to used inode `islot`.
+    fn ihold(&mut self, islot: u16) -> Result<(), FsError> {
+        let n = &mut self.inodes[islot as usize];
+        n.refs = n.refs.checked_add(1).ok_or(FsError::NoSpace)?;
+        Ok(())
+    }
+
+    /// Empty inode slot `i`, keeping its generation.
+    fn inode_clear(&mut self, i: usize) {
+        let g = self.inodes[i].r#gen;
+        self.inodes[i] = Inode {
+            r#gen: g,
+            ..Inode::EMPTY
+        };
+    }
+
+    /// The live slot `h` names: `Badf` when out of range, empty, or of
+    /// another generation.
+    fn slot_of(&self, h: InodeHandle) -> Result<usize, FsError> {
+        let i = h.slot as usize;
+        match self.inodes.get(i) {
+            Some(n) if n.used && n.r#gen == h.r#gen => Ok(i),
+            _ => Err(FsError::Badf),
+        }
+    }
+
+    fn sb_live(&self, sb: u8) -> Result<(), FsError> {
+        match self.supers.get(sb as usize) {
+            Some(s) if s.used => Ok(()),
+            _ => Err(FsError::Io),
+        }
+    }
+
+    /// Take inode `i` out of the hash: no links, and the dentries naming
+    /// it dropped. An unreferenced one is cleared without calling its
+    /// backend. True when it is still referenced.
+    fn unhash(&mut self, i: u16) -> bool {
+        self.drop_dentries_of(i);
+        let n = &mut self.inodes[i as usize];
+        n.nlink = 0;
+        if n.refs == 0 {
+            self.inode_clear(i as usize);
+            false
+        } else {
+            true
+        }
+    }
+
+    /// Drop the dentries naming inode `i` that nothing but their own
+    /// descendants holds, releasing their counts on it without a put.
+    fn drop_dentries_of(&mut self, i: u16) {
+        let mut d = 0usize;
+        while d < MAX_DENTRIES {
+            let e = self.dentries[d];
+            if e.used && !e.negative && e.islot == i && !e.is_root(d as u16) {
+                if e.refs != 0 && e.refs == self.child_count(d as u16) {
+                    self.dentry_prune(d as u16);
+                }
+                if self.dentries[d].refs == 0 {
+                    self.stats.d_evicts = self.stats.d_evicts.saturating_add(1);
+                    self.dentries[d] = Dentry::EMPTY;
+                    self.dput(e.parent);
+                    let r = &mut self.inodes[i as usize].refs;
+                    *r = r.saturating_sub(1);
+                }
+            }
+            d += 1;
+        }
+    }
+
+    /// Drop a reference. The last one on an inode with no links releases
+    /// its storage through the backend; an `Err` leaves it unhashed for
+    /// the clock sweep or `umount` to retry.
     fn iput(&mut self, islot: u16) {
         let i = islot as usize;
-        if i >= MAX_INODES || !self.inodes[i].used {
-            return;
-        }
-        if self.inodes[i].refs == 0 {
+        if i >= MAX_INODES || !self.inodes[i].used || self.inodes[i].refs == 0 {
             return;
         }
         self.inodes[i].refs -= 1;
-        if self.inodes[i].refs == 0 {
+        if self.inodes[i].refs == 0 && self.inodes[i].nlink == 0 {
             let sb = self.inodes[i].sb;
-            let ino = self.inodes[i].ino;
-            match self.fstype(sb) {
-                FsType::Ram => {
-                    ram_try_free(self, sb, ino);
-                    if ram_nlink(self, sb, ino) == 0 {
-                        self.inodes[i] = Inode::EMPTY;
-                    }
-                }
-                FsType::Fat | FsType::Vibe => {}
-                FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
-                    kernfs::kern_try_free(self, sb, ino);
-                    if kernfs::kern_nlink(self, sb, ino) == 0 {
-                        self.inodes[i] = Inode::EMPTY;
-                    }
-                }
+            if self.ops_evict(sb, islot).is_ok() {
+                self.inode_clear(i);
             }
         }
     }
@@ -1572,13 +2046,14 @@ impl Vfs {
                 n += 1;
                 continue;
             }
-            self.inode_evict(s as u16);
-            return Ok(s as u16);
+            if self.inode_evict(s as u16) {
+                return Ok(s as u16);
+            }
+            n += 1;
         }
         let mut s = 0usize;
         while s < MAX_INODES {
-            if self.inodes[s].used && self.inodes[s].refs == 0 {
-                self.inode_evict(s as u16);
+            if self.inodes[s].used && self.inodes[s].refs == 0 && self.inode_evict(s as u16) {
                 return Ok(s as u16);
             }
             s += 1;
@@ -1586,62 +2061,19 @@ impl Vfs {
         Err(FsError::NoSpace)
     }
 
-    fn inode_evict(&mut self, slot: u16) {
+    /// Empty unreferenced inode `slot`. One with no links is released
+    /// through its backend first; false when that fails.
+    fn inode_evict(&mut self, slot: u16) -> bool {
         let i = slot as usize;
         if !self.inodes[i].used || self.inodes[i].refs != 0 {
-            return;
+            return false;
+        }
+        if self.inodes[i].nlink == 0 && self.ops_evict(self.inodes[i].sb, slot).is_err() {
+            return false;
         }
         self.stats.i_evicts = self.stats.i_evicts.saturating_add(1);
-        let sb = self.inodes[i].sb;
-        let ino = self.inodes[i].ino;
-        match self.fstype(sb) {
-            FsType::Ram => ram_try_free(self, sb, ino),
-            FsType::Fat | FsType::Vibe => {}
-            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
-                kernfs::kern_try_free(self, sb, ino)
-            }
-        }
-        self.inodes[i] = Inode::EMPTY;
-    }
-
-    fn inode_load(&mut self, slot: u16, sb: u8, ino: u32) -> Result<(), FsError> {
-        match self.fstype(sb) {
-            FsType::Ram => ram_fill_inode(self, slot, sb, ino),
-            FsType::Fat | FsType::Vibe => fat_fill_inode(self, slot, sb, ino),
-            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
-                kernfs::kern_fill_inode(self, slot, sb, ino)
-            }
-        }
-    }
-
-    fn sync_inode_from_ram(&mut self, islot: u16) {
-        let sb = self.inodes[islot as usize].sb;
-        let ino = self.inodes[islot as usize].ino;
-        match self.fstype(sb) {
-            FsType::Ram => {
-                if let Some(r) = ram_meta(self, sb, ino) {
-                    self.inodes[islot as usize].size = r.size;
-                    self.inodes[islot as usize].nlink = r.nlink;
-                    self.inodes[islot as usize].mode = r.mode;
-                    self.inodes[islot as usize].kind = r.kind;
-                    self.inodes[islot as usize].mtime = r.mtime;
-                    self.inodes[islot as usize].ctime = r.ctime;
-                    self.inodes[islot as usize].atime = r.atime;
-                }
-            }
-            FsType::Fat | FsType::Vibe => {}
-            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
-                if let Some(r) = kernfs::kern_meta(self, sb, ino) {
-                    self.inodes[islot as usize].size = r.size;
-                    self.inodes[islot as usize].nlink = r.nlink;
-                    self.inodes[islot as usize].mode = r.mode;
-                    self.inodes[islot as usize].kind = r.kind;
-                    self.inodes[islot as usize].mtime = r.mtime;
-                    self.inodes[islot as usize].ctime = r.ctime;
-                    self.inodes[islot as usize].atime = r.atime;
-                }
-            }
-        }
+        self.inode_clear(i);
+        true
     }
 
     fn dentry_force_alloc(&mut self) -> Result<u16, FsError> {
@@ -1824,14 +2256,15 @@ impl Vfs {
     fn new_super(&mut self, fs: &dyn FileSystem) -> Result<(u8, u16), FsError> {
         let sb = self.alloc_super()?;
         self.supers[sb as usize].fstype = fs.fstype();
-        let ino = match fs.fill_super(self, sb) {
+        self.supers[sb as usize].ops = fs.ops();
+        let info = match self.fill_super(sb, fs) {
             Ok(i) => i,
             Err(e) => {
                 self.sb_teardown(sb);
                 return Err(e);
             }
         };
-        let islot = match self.iget(sb, ino) {
+        let islot = match self.iget_info(sb, &info) {
             Ok(i) => i,
             Err(e) => {
                 self.sb_teardown(sb);
@@ -1858,7 +2291,6 @@ impl Vfs {
         };
         let s = &mut self.supers[sb as usize];
         s.used = true;
-        s.root_ino = ino;
         s.root_islot = islot;
         s.root_dslot = dslot;
         Ok((sb, dslot))
@@ -1882,17 +2314,11 @@ impl Vfs {
         let mut n = 0usize;
         while n < MAX_INODES {
             if self.inodes[n].used && self.inodes[n].sb == sb {
-                self.inodes[n] = Inode::EMPTY;
+                self.inode_clear(n);
             }
             n += 1;
         }
-        match self.fstype(sb) {
-            FsType::Ram => ram_drop_sb(self, sb),
-            FsType::Fat | FsType::Vibe => {}
-            FsType::Dev | FsType::Tmp | FsType::Proc | FsType::Sys => {
-                kernfs::kern_drop_sb(self, sb)
-            }
-        }
+        self.ops_kill_sb(sb);
         self.supers[sb as usize] = Super::EMPTY;
     }
 
@@ -1986,8 +2412,8 @@ impl Vfs {
         }
         let dir_islot = self.d_islot(dir)?;
         match self.ops_lookup(sb, dir_islot, name) {
-            Ok(ino) => {
-                let islot = self.iget(sb, ino)?;
+            Ok(info) => {
+                let islot = self.iget_info(sb, &info)?;
                 match self.dcache_insert(sb, dir, name, Some(islot)) {
                     Ok(ds) => Ok(ds),
                     Err(e) => {
@@ -2131,9 +2557,9 @@ impl Vfs {
         let sb = self.sb_of(dir.mount);
         self.dcache_drop_neg_in_dir(sb, dir.dslot);
         self.dcache_drop_name(sb, dir.dslot, name);
-        let ino = self.ops_create(sb, dir_islot, name, kind, mode, target)?;
-        self.sync_inode_from_ram(dir_islot);
-        let islot = self.iget(sb, ino)?;
+        let info = self.ops_create(sb, dir_islot, name, kind, mode, target)?;
+        self.ops_getattr(sb, dir_islot)?;
+        let islot = self.iget_info(sb, &info)?;
         let ds = match self.dcache_insert(sb, dir.dslot, name, Some(islot)) {
             Ok(d) => d,
             Err(e) => {
@@ -2243,61 +2669,58 @@ fn name_is_dotdot(n: &[u8]) -> bool {
     n.len() == 2 && n[0] == b'.' && n[1] == b'.'
 }
 
-fn ram_idx(ino: u32) -> Option<usize> {
-    if ino == 0 {
+fn ram_idx(node: u32) -> Option<usize> {
+    if node == 0 {
         return None;
     }
-    let i = (ino - 1) as usize;
+    let i = (node - 1) as usize;
     if i >= MAX_RAM_NODES { None } else { Some(i) }
 }
 
-fn ram_get(vfs: &Vfs, sb: u8, ino: u32) -> Option<&RamNode> {
-    let i = ram_idx(ino)?;
-    let r = &vfs.ram[i];
+fn ram_get(ram: &[RamNode; MAX_RAM_NODES], sb: u8, node: u32) -> Option<&RamNode> {
+    let r = &ram[ram_idx(node)?];
     if r.used && r.sb == sb { Some(r) } else { None }
 }
 
-fn ram_get_mut(vfs: &mut Vfs, sb: u8, ino: u32) -> Option<&mut RamNode> {
-    let i = ram_idx(ino)?;
-    let r = &mut vfs.ram[i];
+fn ram_get_mut(ram: &mut [RamNode; MAX_RAM_NODES], sb: u8, node: u32) -> Option<&mut RamNode> {
+    let r = &mut ram[ram_idx(node)?];
     if r.used && r.sb == sb { Some(r) } else { None }
 }
 
-fn ram_nlink(vfs: &Vfs, sb: u8, ino: u32) -> u32 {
-    ram_get(vfs, sb, ino).map(|r| r.nlink).unwrap_or(0)
+impl RamNode {
+    fn meta_into(&self, ino: &mut Inode) {
+        ino.kind = self.kind;
+        ino.mode = self.mode;
+        ino.nlink = self.nlink;
+        ino.size = self.size;
+        ino.atime = self.atime;
+        ino.mtime = self.mtime;
+        ino.ctime = self.ctime;
+    }
+
+    fn info(&self, node: u32) -> InodeInfo {
+        InodeInfo {
+            key: [node, 0, 0],
+            ino: node,
+            kind: self.kind,
+            mode: self.mode,
+            nlink: self.nlink,
+            size: self.size,
+            atime: self.atime,
+            mtime: self.mtime,
+            ctime: self.ctime,
+            private: [0; 2],
+        }
+    }
 }
 
-#[derive(Clone, Copy)]
-struct RamMeta {
-    kind: InodeKind,
-    mode: u16,
-    nlink: u32,
-    size: u64,
-    atime: u64,
-    mtime: u64,
-    ctime: u64,
-}
-
-fn ram_meta(vfs: &Vfs, sb: u8, ino: u32) -> Option<RamMeta> {
-    let r = ram_get(vfs, sb, ino)?;
-    Some(RamMeta {
-        kind: r.kind,
-        mode: r.mode,
-        nlink: r.nlink,
-        size: r.size,
-        atime: r.atime,
-        mtime: r.mtime,
-        ctime: r.ctime,
-    })
-}
-
-fn ram_alloc(vfs: &mut Vfs, sb: u8) -> Result<u32, FsError> {
+fn ram_alloc(ram: &mut [RamNode; MAX_RAM_NODES], sb: u8) -> Result<u32, FsError> {
     let mut i = 0usize;
     while i < MAX_RAM_NODES {
-        if !vfs.ram[i].used {
-            vfs.ram[i] = RamNode::EMPTY;
-            vfs.ram[i].used = true;
-            vfs.ram[i].sb = sb;
+        if !ram[i].used {
+            ram[i] = RamNode::EMPTY;
+            ram[i].used = true;
+            ram[i].sb = sb;
             return Ok((i as u32) + 1);
         }
         i += 1;
@@ -2305,128 +2728,50 @@ fn ram_alloc(vfs: &mut Vfs, sb: u8) -> Result<u32, FsError> {
     Err(FsError::NoSpace)
 }
 
-fn ram_try_free(vfs: &mut Vfs, sb: u8, ino: u32) {
-    let Some(i) = ram_idx(ino) else {
-        return;
-    };
-    if !vfs.ram[i].used || vfs.ram[i].sb != sb {
-        return;
+/// RamFs `evict`: free a node with no links.
+fn ram_evict(cx: &mut OpCx<'_>, node: u32) {
+    if let Some(r) = ram_get_mut(cx.ram, cx.sb, node)
+        && r.nlink == 0
+    {
+        *r = RamNode::EMPTY;
     }
-    if vfs.ram[i].nlink != 0 {
-        return;
-    }
-    let mut c = 0usize;
-    while c < MAX_INODES {
-        if vfs.inodes[c].used
-            && vfs.inodes[c].sb == sb
-            && vfs.inodes[c].ino == ino
-            && vfs.inodes[c].refs != 0
-        {
-            return;
-        }
-        c += 1;
-    }
-    vfs.ram[i] = RamNode::EMPTY;
 }
 
-fn ram_drop_sb(vfs: &mut Vfs, sb: u8) {
+fn ram_drop_sb(ram: &mut [RamNode; MAX_RAM_NODES], sb: u8) {
     let mut i = 0usize;
     while i < MAX_RAM_NODES {
-        if vfs.ram[i].used && vfs.ram[i].sb == sb {
-            vfs.ram[i] = RamNode::EMPTY;
+        if ram[i].used && ram[i].sb == sb {
+            ram[i] = RamNode::EMPTY;
         }
         i += 1;
     }
 }
 
-fn ram_fill_super(vfs: &mut Vfs, sb: u8) -> Result<u32, FsError> {
-    let ino = ram_alloc(vfs, sb)?;
-    let t = vfs.now;
-    if let Some(r) = ram_get_mut(vfs, sb, ino) {
-        r.kind = InodeKind::Dir;
-        r.mode = S_IFDIR_MODE;
-        r.nlink = 2;
-        r.size = 0;
-        r.atime = t;
-        r.mtime = t;
-        r.ctime = t;
-    }
-    Ok(ino)
+fn ram_fill_super(cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
+    let node = ram_alloc(cx.ram, cx.sb)?;
+    let t = cx.now;
+    let r = ram_get_mut(cx.ram, cx.sb, node).ok_or(FsError::NotFound)?;
+    r.kind = InodeKind::Dir;
+    r.mode = S_IFDIR_MODE;
+    r.nlink = 2;
+    r.size = 0;
+    r.atime = t;
+    r.mtime = t;
+    r.ctime = t;
+    Ok(r.info(node))
 }
 
-fn ram_fill_inode(vfs: &mut Vfs, slot: u16, sb: u8, ino: u32) -> Result<(), FsError> {
-    let r = ram_meta(vfs, sb, ino).ok_or(FsError::NotFound)?;
-    vfs.inodes[slot as usize] = Inode {
-        used: true,
-        clock: true,
-        refs: 0,
-        sb,
-        ino,
-        kind: r.kind,
-        mode: r.mode,
-        nlink: r.nlink,
-        size: r.size,
-        atime: r.atime,
-        mtime: r.mtime,
-        ctime: r.ctime,
-        data0: 0,
-    };
-    Ok(())
-}
-
-fn fat_fill_inode(vfs: &mut Vfs, slot: u16, sb: u8, ino: u32) -> Result<(), FsError> {
-    let root = vfs.supers[sb as usize].root_ino;
-    let dir = ino == root || ino == 1;
-    vfs.inodes[slot as usize] = Inode {
-        used: true,
-        clock: true,
-        refs: 0,
-        sb,
-        ino,
-        kind: if dir { InodeKind::Dir } else { InodeKind::Reg },
-        mode: if dir { S_IFDIR_MODE } else { S_IFREG_MODE },
-        nlink: if dir { 2 } else { 1 },
-        size: 0,
-        atime: vfs.now,
-        mtime: vfs.now,
-        ctime: vfs.now,
-        data0: if dir {
-            vfs.supers[sb as usize].fat_clu
-        } else {
-            0
-        },
-    };
-    Ok(())
-}
-
-fn fat_stat_inode(vfs: &Vfs, islot: u16) -> Result<Stat, FsError> {
-    let i = &vfs.inodes[islot as usize];
-    if !i.used {
-        return Err(FsError::NotFound);
-    }
-    Ok(Stat {
-        ino: i.ino,
-        kind: i.kind,
-        mode: i.mode,
-        nlink: i.nlink,
-        size: i.size,
-        atime: i.atime,
-        mtime: i.mtime,
-        ctime: i.ctime,
-    })
-}
-
-fn ram_lookup(vfs: &mut Vfs, dir_islot: u16, name: &[u8]) -> Result<u32, FsError> {
-    let sb = vfs.inodes[dir_islot as usize].sb;
-    let ino = vfs.inodes[dir_islot as usize].ino;
-    let r = ram_get(vfs, sb, ino).ok_or(FsError::NotFound)?;
+fn ram_lookup(cx: &mut OpCx<'_>, dir: &Inode, name: &[u8]) -> Result<InodeInfo, FsError> {
+    let r = ram_get(cx.ram, cx.sb, dir.key[0]).ok_or(FsError::NotFound)?;
     if r.kind != InodeKind::Dir {
         return Err(FsError::NotDir);
     }
     let mut i = 0usize;
     while i < r.ndent as usize {
         if r.dents[i].name.eq_bytes(name) {
-            return Ok(r.dents[i].ino);
+            let child = r.dents[i].ino;
+            let c = ram_get(cx.ram, cx.sb, child).ok_or(FsError::NotFound)?;
+            return Ok(c.info(child));
         }
         i += 1;
     }
@@ -2434,13 +2779,13 @@ fn ram_lookup(vfs: &mut Vfs, dir_islot: u16, name: &[u8]) -> Result<u32, FsError
 }
 
 fn ram_create(
-    vfs: &mut Vfs,
-    dir_islot: u16,
+    cx: &mut OpCx<'_>,
+    dir: &mut Inode,
     name: &[u8],
     kind: InodeKind,
     mode: u16,
     target: Option<&[u8]>,
-) -> Result<u32, FsError> {
+) -> Result<InodeInfo, FsError> {
     let nm = Name::from_bytes(name)?;
     if nm.is_dot() || nm.is_dotdot() {
         return Err(FsError::Inval);
@@ -2455,10 +2800,10 @@ fn ram_create(
         InodeKind::Reg | InodeKind::Dir | InodeKind::Lnk => {}
         InodeKind::Chr | InodeKind::Blk => return Err(FsError::NotSupp),
     }
-    let sb = vfs.inodes[dir_islot as usize].sb;
-    let dir_ino = vfs.inodes[dir_islot as usize].ino;
+    let sb = cx.sb;
+    let dir_node = dir.key[0];
     {
-        let r = ram_get(vfs, sb, dir_ino).ok_or(FsError::NotFound)?;
+        let r = ram_get(cx.ram, sb, dir_node).ok_or(FsError::NotFound)?;
         if r.kind != InodeKind::Dir {
             return Err(FsError::NotDir);
         }
@@ -2473,50 +2818,46 @@ fn ram_create(
             return Err(FsError::NoSpace);
         }
     }
-    let ino = ram_alloc(vfs, sb)?;
-    let t = vfs.now;
-    if let Some(r) = ram_get_mut(vfs, sb, ino) {
+    let node = ram_alloc(cx.ram, sb)?;
+    let t = cx.now;
+    let info = {
+        let r = ram_get_mut(cx.ram, sb, node).ok_or(FsError::NotFound)?;
         r.kind = kind;
         r.mode = (mode & !S_IFMT) | kind.ifmt();
         r.nlink = if kind == InodeKind::Dir { 2 } else { 1 };
         r.atime = t;
         r.mtime = t;
         r.ctime = t;
-        match kind {
-            InodeKind::Lnk => {
-                if let Some(tgt) = target {
-                    r.data[..tgt.len()].copy_from_slice(tgt);
-                    r.size = tgt.len() as u64;
-                }
-            }
-            InodeKind::Reg | InodeKind::Dir => {
-                r.size = 0;
-            }
-            InodeKind::Chr | InodeKind::Blk => {
-                r.size = 0;
-            }
+        r.size = 0;
+        if let (InodeKind::Lnk, Some(tgt)) = (kind, target) {
+            r.data[..tgt.len()].copy_from_slice(tgt);
+            r.size = tgt.len() as u64;
         }
+        r.info(node)
+    };
+    let r = ram_get_mut(cx.ram, sb, dir_node).ok_or(FsError::NotFound)?;
+    let n = r.ndent as usize;
+    r.dents[n] = RamDent {
+        name: nm,
+        ino: node,
+    };
+    r.ndent += 1;
+    r.mtime = t;
+    r.ctime = t;
+    if kind == InodeKind::Dir {
+        r.nlink = r.nlink.saturating_add(1);
     }
-    {
-        let r = ram_get_mut(vfs, sb, dir_ino).ok_or(FsError::NotFound)?;
-        let n = r.ndent as usize;
-        r.dents[n] = RamDent { name: nm, ino };
-        r.ndent += 1;
-        r.mtime = t;
-        r.ctime = t;
-        if kind == InodeKind::Dir {
-            r.nlink = r.nlink.saturating_add(1);
-        }
-    }
-    vfs.inodes[dir_islot as usize].nlink = ram_nlink(vfs, sb, dir_ino);
-    Ok(ino)
+    r.meta_into(dir);
+    Ok(info)
 }
 
-fn ram_unlink(vfs: &mut Vfs, dir_islot: u16, name: &[u8]) -> Result<(), FsError> {
-    let sb = vfs.inodes[dir_islot as usize].sb;
-    let dir_ino = vfs.inodes[dir_islot as usize].ino;
-    let child = {
-        let r = ram_get(vfs, sb, dir_ino).ok_or(FsError::NotFound)?;
+/// Remove `name` from `dir`. The child keeps its node until [`Vfs`]
+/// evicts it at its last put; a removed directory has no links left.
+fn ram_unlink(cx: &mut OpCx<'_>, dir: &mut Inode, name: &[u8]) -> Result<(), FsError> {
+    let sb = cx.sb;
+    let dir_node = dir.key[0];
+    let (idx, child) = {
+        let r = ram_get(cx.ram, sb, dir_node).ok_or(FsError::NotFound)?;
         if r.kind != InodeKind::Dir {
             return Err(FsError::NotDir);
         }
@@ -2531,48 +2872,41 @@ fn ram_unlink(vfs: &mut Vfs, dir_islot: u16, name: &[u8]) -> Result<(), FsError>
         }
         found.ok_or(FsError::NotFound)?
     };
-    let (idx, ino) = child;
-    let kind = ram_get(vfs, sb, ino).ok_or(FsError::NotFound)?.kind;
-    if kind == InodeKind::Dir {
-        let nd = ram_get(vfs, sb, ino).ok_or(FsError::NotFound)?.ndent;
-        if nd != 0 {
-            return Err(FsError::NotEmpty);
-        }
+    let c = ram_get(cx.ram, sb, child).ok_or(FsError::NotFound)?;
+    let kind = c.kind;
+    if kind == InodeKind::Dir && c.ndent != 0 {
+        return Err(FsError::NotEmpty);
     }
-    let t = vfs.now;
-    {
-        let r = ram_get_mut(vfs, sb, dir_ino).ok_or(FsError::NotFound)?;
-        let last = r.ndent as usize - 1;
-        r.dents[idx] = r.dents[last];
-        r.dents[last] = RamDent::EMPTY;
-        r.ndent -= 1;
-        r.mtime = t;
-        r.ctime = t;
-        if kind == InodeKind::Dir {
-            r.nlink = r.nlink.saturating_sub(1);
-        }
-    }
-    if let Some(c) = ram_get_mut(vfs, sb, ino) {
-        c.nlink = c.nlink.saturating_sub(1);
+    let t = cx.now;
+    if let Some(c) = ram_get_mut(cx.ram, sb, child) {
+        c.nlink = if kind == InodeKind::Dir {
+            0
+        } else {
+            c.nlink.saturating_sub(1)
+        };
         c.ctime = t;
     }
-    let mut i = 0usize;
-    while i < MAX_INODES {
-        if vfs.inodes[i].used && vfs.inodes[i].sb == sb && vfs.inodes[i].ino == ino {
-            vfs.inodes[i].nlink = ram_nlink(vfs, sb, ino);
-            vfs.inodes[i].ctime = t;
-        }
-        i += 1;
+    let r = ram_get_mut(cx.ram, sb, dir_node).ok_or(FsError::NotFound)?;
+    let last = r.ndent as usize - 1;
+    r.dents[idx] = r.dents[last];
+    r.dents[last] = RamDent::EMPTY;
+    r.ndent -= 1;
+    r.mtime = t;
+    r.ctime = t;
+    if kind == InodeKind::Dir {
+        r.nlink = r.nlink.saturating_sub(1);
     }
-    ram_try_free(vfs, sb, ino);
-    vfs.inodes[dir_islot as usize].nlink = ram_nlink(vfs, sb, dir_ino);
+    r.meta_into(dir);
     Ok(())
 }
 
-fn ram_read(vfs: &mut Vfs, islot: u16, off: u64, buf: &mut [u8]) -> Result<usize, FsError> {
-    let sb = vfs.inodes[islot as usize].sb;
-    let ino = vfs.inodes[islot as usize].ino;
-    let r = ram_get(vfs, sb, ino).ok_or(FsError::NotFound)?;
+fn ram_read(
+    cx: &mut OpCx<'_>,
+    ino: &mut Inode,
+    off: u64,
+    buf: &mut [u8],
+) -> Result<usize, FsError> {
+    let r = ram_get(cx.ram, cx.sb, ino.key[0]).ok_or(FsError::NotFound)?;
     match r.kind {
         InodeKind::Dir => Err(FsError::IsDir),
         InodeKind::Reg | InodeKind::Lnk => {
@@ -2589,11 +2923,9 @@ fn ram_read(vfs: &mut Vfs, islot: u16, off: u64, buf: &mut [u8]) -> Result<usize
     }
 }
 
-fn ram_write(vfs: &mut Vfs, islot: u16, off: u64, buf: &[u8]) -> Result<usize, FsError> {
-    let sb = vfs.inodes[islot as usize].sb;
-    let ino = vfs.inodes[islot as usize].ino;
-    let t = vfs.now;
-    let r = ram_get_mut(vfs, sb, ino).ok_or(FsError::NotFound)?;
+fn ram_write(cx: &mut OpCx<'_>, ino: &mut Inode, off: u64, buf: &[u8]) -> Result<usize, FsError> {
+    let t = cx.now;
+    let r = ram_get_mut(cx.ram, cx.sb, ino.key[0]).ok_or(FsError::NotFound)?;
     match r.kind {
         InodeKind::Dir => Err(FsError::IsDir),
         InodeKind::Lnk | InodeKind::Chr | InodeKind::Blk => Err(FsError::Inval),
@@ -2612,19 +2944,18 @@ fn ram_write(vfs: &mut Vfs, islot: u16, off: u64, buf: &[u8]) -> Result<usize, F
             }
             r.mtime = t;
             r.ctime = t;
+            r.meta_into(ino);
             Ok(buf.len())
         }
     }
 }
 
-fn ram_truncate(vfs: &mut Vfs, islot: u16, size: u64) -> Result<(), FsError> {
+fn ram_truncate(cx: &mut OpCx<'_>, ino: &mut Inode, size: u64) -> Result<(), FsError> {
     if size as usize > MAX_FILE_BYTES {
         return Err(FsError::NoSpace);
     }
-    let sb = vfs.inodes[islot as usize].sb;
-    let ino = vfs.inodes[islot as usize].ino;
-    let t = vfs.now;
-    let r = ram_get_mut(vfs, sb, ino).ok_or(FsError::NotFound)?;
+    let t = cx.now;
+    let r = ram_get_mut(cx.ram, cx.sb, ino.key[0]).ok_or(FsError::NotFound)?;
     match r.kind {
         InodeKind::Dir => Err(FsError::IsDir),
         InodeKind::Lnk | InodeKind::Chr | InodeKind::Blk => Err(FsError::Inval),
@@ -2632,35 +2963,26 @@ fn ram_truncate(vfs: &mut Vfs, islot: u16, size: u64) -> Result<(), FsError> {
             let old = r.size as usize;
             let n = size as usize;
             if n < old {
-                let mut i = n;
-                while i < old {
-                    r.data[i] = 0;
-                    i += 1;
-                }
+                r.data[n..old].fill(0);
             } else {
-                let mut i = old;
-                while i < n {
-                    r.data[i] = 0;
-                    i += 1;
-                }
+                r.data[old..n].fill(0);
             }
             r.size = size;
             r.mtime = t;
             r.ctime = t;
+            r.meta_into(ino);
             Ok(())
         }
     }
 }
 
 fn ram_readdir(
-    vfs: &mut Vfs,
-    islot: u16,
+    cx: &mut OpCx<'_>,
+    dir: &Inode,
     cookie: u64,
     out: &mut Dirent,
 ) -> Result<Option<u64>, FsError> {
-    let sb = vfs.inodes[islot as usize].sb;
-    let ino = vfs.inodes[islot as usize].ino;
-    let r = ram_get(vfs, sb, ino).ok_or(FsError::NotFound)?;
+    let r = ram_get(cx.ram, cx.sb, dir.key[0]).ok_or(FsError::NotFound)?;
     if r.kind != InodeKind::Dir {
         return Err(FsError::NotDir);
     }
@@ -2669,7 +2991,7 @@ fn ram_readdir(
         return Ok(None);
     }
     let child = r.dents[i].ino;
-    let kind = ram_get(vfs, sb, child)
+    let kind = ram_get(cx.ram, cx.sb, child)
         .map(|c| c.kind)
         .unwrap_or(InodeKind::Reg);
     out.ino = child;
@@ -2678,18 +3000,24 @@ fn ram_readdir(
     Ok(Some(cookie + 1))
 }
 
-fn ram_link(vfs: &mut Vfs, dir_islot: u16, name: &[u8], target: u32) -> Result<(), FsError> {
+/// Link `name` in directory node `dir_node` to node `target`.
+fn ram_link(
+    ram: &mut [RamNode; MAX_RAM_NODES],
+    now: u64,
+    sb: u8,
+    dir_node: u32,
+    name: &[u8],
+    target: u32,
+) -> Result<(), FsError> {
     let nm = Name::from_bytes(name)?;
-    let sb = vfs.inodes[dir_islot as usize].sb;
-    let dir_ino = vfs.inodes[dir_islot as usize].ino;
     {
-        let t = ram_get(vfs, sb, target).ok_or(FsError::NotFound)?;
+        let t = ram_get(ram, sb, target).ok_or(FsError::NotFound)?;
         if t.kind != InodeKind::Reg {
             return Err(FsError::Inval);
         }
     }
     {
-        let r = ram_get(vfs, sb, dir_ino).ok_or(FsError::NotFound)?;
+        let r = ram_get(ram, sb, dir_node).ok_or(FsError::NotFound)?;
         if r.kind != InodeKind::Dir {
             return Err(FsError::NotDir);
         }
@@ -2704,41 +3032,37 @@ fn ram_link(vfs: &mut Vfs, dir_islot: u16, name: &[u8], target: u32) -> Result<(
             return Err(FsError::NoSpace);
         }
     }
-    let tnow = vfs.now;
     {
-        let r = ram_get_mut(vfs, sb, dir_ino).ok_or(FsError::NotFound)?;
+        let r = ram_get_mut(ram, sb, dir_node).ok_or(FsError::NotFound)?;
         let n = r.ndent as usize;
         r.dents[n] = RamDent {
             name: nm,
             ino: target,
         };
         r.ndent += 1;
-        r.mtime = tnow;
-        r.ctime = tnow;
+        r.mtime = now;
+        r.ctime = now;
     }
-    if let Some(t) = ram_get_mut(vfs, sb, target) {
+    if let Some(t) = ram_get_mut(ram, sb, target) {
         t.nlink = t.nlink.saturating_add(1);
-        t.ctime = tnow;
+        t.ctime = now;
     }
     Ok(())
 }
 
+/// Move `oname` in directory node `odir` to `nname` in `ndir`.
 fn ram_rename(
-    vfs: &mut Vfs,
-    oslot: u16,
+    ram: &mut [RamNode; MAX_RAM_NODES],
+    now: u64,
+    sb: u8,
+    odir: u32,
     oname: &[u8],
-    nslot: u16,
+    ndir: u32,
     nname: &[u8],
 ) -> Result<(), FsError> {
     let nm = Name::from_bytes(nname)?;
-    let sb = vfs.inodes[oslot as usize].sb;
-    if vfs.inodes[nslot as usize].sb != sb {
-        return Err(FsError::Inval);
-    }
-    let odir = vfs.inodes[oslot as usize].ino;
-    let ndir = vfs.inodes[nslot as usize].ino;
-    let child = {
-        let r = ram_get(vfs, sb, odir).ok_or(FsError::NotFound)?;
+    let (idx, node) = {
+        let r = ram_get(ram, sb, odir).ok_or(FsError::NotFound)?;
         let mut found = None;
         let mut i = 0usize;
         while i < r.ndent as usize {
@@ -2750,13 +3074,12 @@ fn ram_rename(
         }
         found.ok_or(FsError::NotFound)?
     };
-    let (idx, ino) = child;
-    let kind = ram_get(vfs, sb, ino).ok_or(FsError::NotFound)?.kind;
+    let kind = ram_get(ram, sb, node).ok_or(FsError::NotFound)?.kind;
     if odir == ndir && oname == nname {
         return Ok(());
     }
     {
-        let r = ram_get(vfs, sb, ndir).ok_or(FsError::NotFound)?;
+        let r = ram_get(ram, sb, ndir).ok_or(FsError::NotFound)?;
         if r.kind != InodeKind::Dir {
             return Err(FsError::NotDir);
         }
@@ -2771,63 +3094,33 @@ fn ram_rename(
             return Err(FsError::NoSpace);
         }
     }
-    let t = vfs.now;
     {
-        let r = ram_get_mut(vfs, sb, odir).ok_or(FsError::NotFound)?;
+        let r = ram_get_mut(ram, sb, odir).ok_or(FsError::NotFound)?;
         let last = r.ndent as usize - 1;
         r.dents[idx] = r.dents[last];
         r.dents[last] = RamDent::EMPTY;
         r.ndent -= 1;
-        r.mtime = t;
+        r.mtime = now;
         if kind == InodeKind::Dir {
             r.nlink = r.nlink.saturating_sub(1);
         }
     }
-    {
-        let r = ram_get_mut(vfs, sb, ndir).ok_or(FsError::NotFound)?;
-        let n = r.ndent as usize;
-        r.dents[n] = RamDent { name: nm, ino };
-        r.ndent += 1;
-        r.mtime = t;
-        if kind == InodeKind::Dir {
-            r.nlink = r.nlink.saturating_add(1);
-        }
+    let r = ram_get_mut(ram, sb, ndir).ok_or(FsError::NotFound)?;
+    let n = r.ndent as usize;
+    r.dents[n] = RamDent {
+        name: nm,
+        ino: node,
+    };
+    r.ndent += 1;
+    r.mtime = now;
+    if kind == InodeKind::Dir {
+        r.nlink = r.nlink.saturating_add(1);
     }
     Ok(())
 }
 
-fn ram_stat(vfs: &mut Vfs, islot: u16) -> Result<Stat, FsError> {
-    let sb = vfs.inodes[islot as usize].sb;
-    let ino = vfs.inodes[islot as usize].ino;
-    if let Some(r) = ram_get(vfs, sb, ino) {
-        return Ok(Stat {
-            ino,
-            kind: r.kind,
-            mode: r.mode,
-            nlink: r.nlink,
-            size: r.size,
-            atime: r.atime,
-            mtime: r.mtime,
-            ctime: r.ctime,
-        });
-    }
-    let n = &vfs.inodes[islot as usize];
-    Ok(Stat {
-        ino: n.ino,
-        kind: n.kind,
-        mode: n.mode,
-        nlink: n.nlink,
-        size: n.size,
-        atime: n.atime,
-        mtime: n.mtime,
-        ctime: n.ctime,
-    })
-}
-
-fn ram_readlink(vfs: &mut Vfs, islot: u16, buf: &mut [u8]) -> Result<usize, FsError> {
-    let sb = vfs.inodes[islot as usize].sb;
-    let ino = vfs.inodes[islot as usize].ino;
-    let r = ram_get(vfs, sb, ino).ok_or(FsError::NotFound)?;
+fn ram_readlink(cx: &mut OpCx<'_>, ino: &Inode, buf: &mut [u8]) -> Result<usize, FsError> {
+    let r = ram_get(cx.ram, cx.sb, ino.key[0]).ok_or(FsError::NotFound)?;
     match r.kind {
         InodeKind::Lnk => {
             let n = (r.size as usize).min(buf.len()).min(MAX_FILE_BYTES);
@@ -3332,21 +3625,20 @@ mod tests {
         v.mount(None, "/m", &RamFs).unwrap();
         v.creat(None, "/m/f", 0o644).unwrap();
         let f = v.resolve(None, "/m/f", true).unwrap();
-        let fi = v.islot(f).unwrap();
-        let held = v.iget(v.sb_of(f.mount), v.inodes[fi as usize].ino).unwrap();
+        let held = v.iref(f).unwrap();
         v.resolve(None, "/m", true).unwrap();
-        let before = (v.dentries, v.inodes, v.mounts, v.supers);
+        let before = (v.dentries, v.inodes, v.mounts);
         assert_eq!(v.umount(None, "/m").unwrap_err(), FsError::Busy);
-        assert_eq!((v.dentries, v.inodes, v.mounts, v.supers), before);
-        v.iput(held);
+        assert_eq!((v.dentries, v.inodes, v.mounts), before);
+        assert_eq!(v.put_ref(held), None);
         assert_eq!(v.stat(None, "/m/f").unwrap().kind, InodeKind::Reg);
         v.creat(None, "/m/g", 0o644).unwrap();
         let g = v.resolve(None, "/m/g", true).unwrap();
         v.dget(g.dslot).unwrap();
         v.resolve(None, "/m", true).unwrap();
-        let before = (v.dentries, v.inodes, v.mounts, v.supers);
+        let before = (v.dentries, v.inodes, v.mounts);
         assert_eq!(v.umount(None, "/m").unwrap_err(), FsError::Busy);
-        assert_eq!((v.dentries, v.inodes, v.mounts, v.supers), before);
+        assert_eq!((v.dentries, v.inodes, v.mounts), before);
         assert_eq!(v.stat(None, "/m/g").unwrap().kind, InodeKind::Reg);
         v.dput(g.dslot);
         assert_dcache_sound(&v);
@@ -3354,5 +3646,380 @@ mod tests {
         assert_dcache_sound(&v);
         assert_eq!(v.stat(None, "/m/f").unwrap_err(), FsError::NotFound);
         assert!(v.inodes.iter().all(|i| !i.used || i.sb == 0));
+    }
+
+    /// A test backend whose storage lives outside `Vfs`, in `KEYFS`, found
+    /// by the store id in its superblock's private word 0. Node `n` has
+    /// key `[n, 0, 0]`, `st_ino` `n + 100` and private words `[7 * n, w]`,
+    /// where `w` counts the writes made through the inode.
+    struct KeyFs {
+        id: u64,
+    }
+
+    struct KeyOps;
+
+    #[derive(Clone)]
+    struct KNode {
+        kind: InodeKind,
+        nlink: u32,
+        data: Vec<u8>,
+        alive: bool,
+    }
+
+    #[derive(Default)]
+    struct Store {
+        nodes: Vec<KNode>,
+        names: Vec<(u32, Vec<u8>, u32)>,
+        evicts: u32,
+    }
+
+    static KEYFS: std::sync::Mutex<Vec<Store>> = std::sync::Mutex::new(Vec::new());
+
+    fn keyfs_new() -> KeyFs {
+        let mut g = KEYFS.lock().unwrap();
+        g.push(Store::default());
+        KeyFs {
+            id: (g.len() - 1) as u64,
+        }
+    }
+
+    fn with_store<R>(id: u64, f: impl FnOnce(&mut Store) -> R) -> R {
+        f(&mut KEYFS.lock().unwrap()[id as usize])
+    }
+
+    fn knode_info(s: &Store, n: u32) -> InodeInfo {
+        let k = &s.nodes[n as usize];
+        InodeInfo {
+            key: [n, 0, 0],
+            ino: n + 100,
+            kind: k.kind,
+            mode: k.kind.ifmt() | 0o644,
+            nlink: k.nlink,
+            size: k.data.len() as u64,
+            atime: 0,
+            mtime: 0,
+            ctime: 0,
+            private: [7 * u64::from(n), 0],
+        }
+    }
+
+    impl FileSystem for KeyFs {
+        fn name(&self) -> &'static str {
+            "keyfs"
+        }
+        fn fstype(&self) -> FsType {
+            FsType::Ram
+        }
+        fn ops(&self) -> Option<&'static dyn InodeOps> {
+            Some(&KeyOps)
+        }
+        fn fill_super(&self, cx: &mut OpCx<'_>) -> Result<InodeInfo, FsError> {
+            *cx.private = [self.id, 0];
+            with_store(self.id, |s| {
+                s.nodes.push(KNode {
+                    kind: InodeKind::Dir,
+                    nlink: 2,
+                    data: Vec::new(),
+                    alive: true,
+                });
+                Ok(knode_info(s, 0))
+            })
+        }
+    }
+
+    impl InodeOps for KeyOps {
+        fn lookup(
+            &self,
+            cx: &mut OpCx<'_>,
+            dir: &Inode,
+            name: &[u8],
+        ) -> Result<InodeInfo, FsError> {
+            with_store(cx.private[0], |s| {
+                let n = s
+                    .names
+                    .iter()
+                    .find(|e| e.0 == dir.key[0] && e.1 == name)
+                    .ok_or(FsError::NotFound)?
+                    .2;
+                Ok(knode_info(s, n))
+            })
+        }
+        fn create(
+            &self,
+            cx: &mut OpCx<'_>,
+            dir: &mut Inode,
+            name: &[u8],
+            kind: InodeKind,
+            _mode: u16,
+            _target: Option<&[u8]>,
+        ) -> Result<InodeInfo, FsError> {
+            with_store(cx.private[0], |s| {
+                if s.names.iter().any(|e| e.0 == dir.key[0] && e.1 == name) {
+                    return Err(FsError::Exists);
+                }
+                s.nodes.push(KNode {
+                    kind,
+                    nlink: 1,
+                    data: Vec::new(),
+                    alive: true,
+                });
+                let n = (s.nodes.len() - 1) as u32;
+                s.names.push((dir.key[0], name.to_vec(), n));
+                Ok(knode_info(s, n))
+            })
+        }
+        fn unlink(&self, cx: &mut OpCx<'_>, dir: &mut Inode, name: &[u8]) -> Result<(), FsError> {
+            with_store(cx.private[0], |s| {
+                let i = s
+                    .names
+                    .iter()
+                    .position(|e| e.0 == dir.key[0] && e.1 == name)
+                    .ok_or(FsError::NotFound)?;
+                let n = s.names.remove(i).2 as usize;
+                s.nodes[n].nlink -= 1;
+                Ok(())
+            })
+        }
+        fn read(
+            &self,
+            cx: &mut OpCx<'_>,
+            ino: &mut Inode,
+            off: u64,
+            buf: &mut [u8],
+        ) -> Result<usize, FsError> {
+            with_store(cx.private[0], |s| {
+                let d = &s.nodes[ino.key[0] as usize].data;
+                let off = (off as usize).min(d.len());
+                let n = buf.len().min(d.len() - off);
+                buf[..n].copy_from_slice(&d[off..off + n]);
+                Ok(n)
+            })
+        }
+        fn write(
+            &self,
+            cx: &mut OpCx<'_>,
+            ino: &mut Inode,
+            off: u64,
+            buf: &[u8],
+        ) -> Result<usize, FsError> {
+            with_store(cx.private[0], |s| {
+                let d = &mut s.nodes[ino.key[0] as usize].data;
+                let end = off as usize + buf.len();
+                if d.len() < end {
+                    d.resize(end, 0);
+                }
+                d[off as usize..end].copy_from_slice(buf);
+                ino.size = ino.size.max(end as u64);
+                ino.private[1] += 1;
+                Ok(buf.len())
+            })
+        }
+        fn truncate(&self, cx: &mut OpCx<'_>, ino: &mut Inode, size: u64) -> Result<(), FsError> {
+            with_store(cx.private[0], |s| {
+                s.nodes[ino.key[0] as usize].data.resize(size as usize, 0);
+                ino.size = size;
+                Ok(())
+            })
+        }
+        fn readdir(
+            &self,
+            cx: &mut OpCx<'_>,
+            dir: &Inode,
+            cookie: u64,
+            out: &mut Dirent,
+        ) -> Result<Option<u64>, FsError> {
+            with_store(cx.private[0], |s| {
+                let mut kids = s.names.iter().filter(|e| e.0 == dir.key[0]);
+                let Some(e) = kids.nth(cookie as usize) else {
+                    return Ok(None);
+                };
+                out.ino = e.2 + 100;
+                out.kind = s.nodes[e.2 as usize].kind;
+                out.name = Name::from_bytes(&e.1)?;
+                Ok(Some(cookie + 1))
+            })
+        }
+        fn getattr(&self, cx: &mut OpCx<'_>, ino: &mut Inode) -> Result<(), FsError> {
+            with_store(cx.private[0], |s| {
+                if let Some(k) = s.nodes.get(ino.key[0] as usize) {
+                    ino.nlink = k.nlink;
+                }
+                Ok(())
+            })
+        }
+        fn evict(&self, cx: &mut OpCx<'_>, ino: &Inode) -> Result<(), FsError> {
+            with_store(cx.private[0], |s| {
+                s.nodes[ino.key[0] as usize].alive = false;
+                s.evicts += 1;
+                Ok(())
+            })
+        }
+    }
+
+    /// `ram()` with a fresh `KeyFs` on `/k`; its store id.
+    fn keyed() -> (Vfs, u64) {
+        let mut v = ram();
+        v.mkdir(None, "/k", 0o755).unwrap();
+        let fs = keyfs_new();
+        v.mount(None, "/k", &fs).unwrap();
+        (v, fs.id)
+    }
+
+    #[test]
+    fn ops_keyed_backend_via_super_ops() {
+        let (mut v, id) = keyed();
+        v.creat(None, "/k/a", 0o644).unwrap();
+        let na = with_store(id, |s| {
+            let n = s.names[0].2;
+            s.names.push((0, b"b".to_vec(), n));
+            s.nodes[n as usize].nlink += 1;
+            n
+        });
+        let a = v.resolve(None, "/k/a", true).unwrap();
+        let b = v.resolve(None, "/k/b", true).unwrap();
+        assert_ne!(a.dslot, b.dslot);
+        assert_eq!(
+            v.islot(a).unwrap(),
+            v.islot(b).unwrap(),
+            "one inode per key"
+        );
+        assert_eq!(v.stat(None, "/k/b").unwrap().ino, na + 100);
+        let fid = v.open(None, "/k/a", O_RDWR, 0).unwrap();
+        assert_eq!(v.write(fid, b"hello").unwrap(), 5);
+        assert_eq!(v.write(fid, b"!").unwrap(), 1);
+        assert_eq!(v.stat(None, "/k/b").unwrap().size, 6);
+        let r = v.iref(b).unwrap();
+        let n = *v.inode(r.handle()).unwrap();
+        assert_eq!(n.key, [na, 0, 0]);
+        assert_eq!(
+            n.private,
+            [7 * u64::from(na), 2],
+            "private words round-trip"
+        );
+        assert_eq!(v.put_ref(r), None);
+        v.seek(fid, 0, SEEK_SET).unwrap();
+        let mut buf = [0u8; 8];
+        assert_eq!(v.read(fid, &mut buf).unwrap(), 6);
+        assert_eq!(&buf[..6], b"hello!");
+        v.unlink(None, "/k/a").unwrap();
+        v.unlink(None, "/k/b").unwrap();
+        assert_eq!(v.stat(None, "/k/b").unwrap_err(), FsError::NotFound);
+        assert_eq!(
+            with_store(id, |s| s.evicts),
+            0,
+            "an open file keeps its storage"
+        );
+        v.close(fid).unwrap();
+        assert_eq!(
+            with_store(id, |s| s.evicts),
+            1,
+            "evicted once at the last put"
+        );
+        assert!(!with_store(id, |s| s.nodes[na as usize].alive));
+        v.umount(None, "/k").unwrap();
+        assert_eq!(with_store(id, |s| s.evicts), 1);
+        v.mkdir(None, "/n", 0o755).unwrap();
+        v.mount(
+            None,
+            "/n",
+            &FatFs {
+                root_clu: 2,
+                vol: 0,
+                ops: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(v.stat(None, "/n/x").unwrap_err(), FsError::NotSupp);
+        assert_eq!(v.creat(None, "/n/y", 0o644).unwrap_err(), FsError::NotSupp);
+        assert_eq!(v.stat(None, "/n").unwrap().kind, InodeKind::Dir);
+        assert_dcache_sound(&v);
+    }
+
+    #[test]
+    fn ops_inode_ref_api() {
+        let (mut v, id) = keyed();
+        let k = v.resolve(None, "/k", true).unwrap();
+        let sb = v.sb_of_mount(k.mount).unwrap();
+        assert_eq!(v.sb_private(k).unwrap(), [id, 0]);
+        let info = InodeInfo {
+            key: [42, 0, 0],
+            ino: 4242,
+            kind: InodeKind::Reg,
+            mode: S_IFREG_MODE,
+            nlink: 1,
+            size: 9,
+            atime: 0,
+            mtime: 0,
+            ctime: 0,
+            private: [5, 6],
+        };
+        let r1 = v.iget_key(sb, &info).unwrap();
+        let r2 = v.iget_key(sb, &InodeInfo { size: 1, ..info }).unwrap();
+        let h = r1.handle();
+        assert_eq!(h, r2.handle(), "one inode per key");
+        assert_eq!(v.inode(h).unwrap().size, 9, "the cached inode wins");
+        v.inode_mut(h).unwrap().size = 11;
+        let x = v.attach(k, b"x", &info).unwrap();
+        assert_eq!(
+            v.attach(k, b"x", &info).unwrap(),
+            x,
+            "a cached name returns its dentry"
+        );
+        assert_eq!(v.stat(None, "/k/x").unwrap().ino, 4242);
+        assert_eq!(v.stat(None, "/k/x").unwrap().size, 11);
+        v.rekey(sb, [42, 0, 0], [43, 0, 0]).unwrap();
+        assert_eq!(v.inode(h).unwrap().key, [43, 0, 0]);
+        assert!(
+            v.dcache_peek(sb, k.dslot, b"x").is_none(),
+            "rekey drops its dentries"
+        );
+        assert!(!v.forget(sb, [44, 0, 0]));
+        assert!(v.forget(sb, [43, 0, 0]), "still referenced");
+        assert_eq!(v.inode(h).unwrap().nlink, 0);
+        let other = v
+            .iget_key(
+                sb,
+                &InodeInfo {
+                    key: [43, 0, 0],
+                    ..info
+                },
+            )
+            .unwrap();
+        assert_ne!(other.handle(), h, "a forgotten inode is out of the hash");
+        assert_eq!(v.put_ref(other), None);
+        assert_eq!(v.put_ref(r2), None);
+        assert_eq!(
+            v.put_ref(r1),
+            Some(Evicted {
+                sb,
+                key: [43, 0, 0],
+                private: [5, 6],
+                size: 11,
+            })
+        );
+        assert_eq!(v.inode(h).unwrap_err(), FsError::Badf);
+        let again = v.iget_key(sb, &info).unwrap();
+        if again.handle() != h {
+            assert_eq!(v.inode(h).unwrap_err(), FsError::Badf, "a stale generation");
+        }
+        assert_eq!(v.put_ref(again), None);
+        assert_eq!(
+            with_store(id, |s| s.evicts),
+            0,
+            "put_ref never calls the backend"
+        );
+        assert_eq!(v.stat(None, "/k/none").unwrap_err(), FsError::NotFound);
+        assert!(
+            v.dentries
+                .iter()
+                .any(|d| d.used && d.sb == sb && d.negative)
+        );
+        v.drop_negatives(sb);
+        assert!(
+            !v.dentries
+                .iter()
+                .any(|d| d.used && d.sb == sb && d.negative)
+        );
+        assert_dcache_sound(&v);
     }
 }

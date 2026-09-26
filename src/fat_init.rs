@@ -236,6 +236,7 @@ pub fn init() {
         v.mount_root_fs(&FatFs {
             root_clu,
             vol: VOL_INITRD,
+            ops: None,
         })
         .is_ok()
     });
@@ -496,7 +497,17 @@ pub fn mount_dev(name: &str, at: &str) -> Result<u8, FsError> {
         drop_slot(id);
         return Err(e);
     }
-    match fs_init::with(|v| v.mount(None, at, &FatFs { root_clu, vol: id })) {
+    match fs_init::with(|v| {
+        v.mount(
+            None,
+            at,
+            &FatFs {
+                root_clu,
+                vol: id,
+                ops: None,
+            },
+        )
+    }) {
         Ok(_) => Ok(id),
         Err(e) => {
             let _ = unregister_mnt(at);
