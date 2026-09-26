@@ -241,7 +241,9 @@ pub unsafe fn init_bsp() {
         let top = gdt::bsp_rsp0_top();
         cpu.fallback_rsp0 = top;
         cpu.kernel_rsp0 = top;
-        cpu.as_cr3 = crate::paging_init::kernel_cr3();
+        cpu.remote
+            .as_cr3
+            .store(crate::paging_init::kernel_cr3(), Ordering::Release);
     });
     seed_current_fpu();
 }
@@ -256,7 +258,9 @@ pub unsafe fn init_ap(tss: *mut Tss, rsp0: u64) {
         cpu.tss = tss;
         cpu.fallback_rsp0 = rsp0;
         cpu.kernel_rsp0 = rsp0;
-        cpu.as_cr3 = crate::paging_init::kernel_cr3();
+        cpu.remote
+            .as_cr3
+            .store(crate::paging_init::kernel_cr3(), Ordering::Release);
     });
     seed_current_fpu();
 }
@@ -313,18 +317,22 @@ pub fn set_rsp0_for(cpu: &mut PerCpu, tcb: &Tcb) {
 }
 
 /// Load `tcb`'s CR3 if it differs. Skip when the next thread shares AS.
-/// Caller already holds `&mut PerCpu` (IRQ-off).
-pub fn switch_cr3_for(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
+///
+/// # Safety
+/// `cpu` is this CPU's own `PerCpu`, held with IF=0 as `on_switch` holds
+/// it. `tcb.as_cr3` is 0 or a root that invariant I128 keeps alive while a
+/// TCB names it (`addr_space_init::teardown`).
+pub unsafe fn switch_cr3_for(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
     let want = if tcb.as_cr3 == 0 {
         crate::paging_init::kernel_cr3()
     } else {
         tcb.as_cr3
     };
-    if cpu.as_cr3 == want || want == 0 {
+    if cpu.remote.as_cr3.load(Ordering::Relaxed) == want || want == 0 {
         return true;
     }
     unsafe { x86::write_cr3(want) };
-    cpu.as_cr3 = want;
+    cpu.remote.as_cr3.store(want, Ordering::Release);
     false
 }
 

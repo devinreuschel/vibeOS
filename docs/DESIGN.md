@@ -957,6 +957,7 @@ that review cites means the review's text.
 | I41 | No sleeping lock of levels 2 to 4 is held across a copy to or from user memory, and code that holds the address-space lock takes no level-1 lock (§2.1) | none yet | documented | Yes, vacuously: the address-space lock, page waits, and the filesystems' block-mapping locks arrive with ROADMAP §12.5 and §13.1, and ROADMAP §13.12's lock-dependency build reports a violation the first time one happens |
 | I42 | Kernel-binary code that a syscall, a device, or a disk image reaches does not panic on that input, running out of memory or table slots included (AGENTS rule 4, [§4.4](#44-kernel-heap)) | convention; `vibeos::kalloc` from ROADMAP §10.4 | documented | No: a full thread table and a full deferred-stack list panic (ROADMAP §10.4, F037; ROADMAP §10.10, F010), and `alloc`'s growing calls panic on a failed allocation until ROADMAP §10.4's `kalloc` |
 | I120 | Another CPU reads a CPU's per-CPU state only through its `PerCpuRemote`, whose fields are atomics, and takes `&mut` to another CPU's `PerCpu` only through `with_cpu` while that CPU is not running (§7.5) | `per_cpu_init::cpu`, `per_cpu_init::with_cpu` | enforced (the view type, its const assertion, and `check_cells.py`'s type and must-be-unsafe lists) | Yes, except an AP that accepted a SIPI and stalled past the ready timeout (ROADMAP §11.4, F032) |
+| I128 | A page-table root is freed only when no CPU has it loaded (CR3; TTBR0 on aarch64) and no TCB's `as_cr3` names it; a path that drops or replaces a thread's space records the replacement (or 0) in `as_cr3` and loads it before `teardown` | `addr_space_init::teardown` (assertion); `proc_init::finish_exit`, `proc_init::sys_execve` | enforced at runtime, every build | Yes |
 
 ## 2.8 Publish last
 
@@ -1819,8 +1820,7 @@ naming the allocation site. `GuardedStack`, `DmaBuffer`, the `vmap` handle, and 
 `Frames` they were built from. A frame that a page-table entry maps, a user leaf or a table page, is
 consumed into that entry, which is its owner record until §4.6's frame metadata exists, and only the
 page-table code that removes the entry takes it back, through an `unsafe fn` whose safety comment
-names the entry. Not yet built: the `vmap` handle (ROADMAP §10.3); until it lands, `kva_init::vmap`
-takes `&[PhysAddr]` and its caller keeps the frames' tokens.
+names the entry.
 
 ## 4.3 Page tables
 
@@ -1840,6 +1840,13 @@ above `map_end` first gets fresh 4 KiB UC leaves (`map_gap`). Inside `map_end`,
 shares the leaf becomes UC too, and its walk can skip a trailing leaf of an unaligned range (ROADMAP
 §11.2, F104). Planned (ROADMAP §11.2): these devices move to `ioremap`, the physmap maps no device
 memory, and this patch and `map_gap` are deleted (§4.1).
+
+The kernel tables are reached only through `paging_init::current_mapper()`, which takes the PT lock
+and returns a `MapperGuard` that holds it for as long as the guard lives and derefs to the `Mapper`
+over the kernel root. No code builds an unlocked kernel `Mapper`. `with_pt` hands its closure that
+guard, and the `_locked` map and unmap helpers take `&mut MapperGuard`, so a caller that holds PT
+proves it by the argument it passes rather than by a comment. A shootdown waits for other CPUs, so it
+runs after the guard drops (§7.9).
 
 ### PTE flag policy
 
@@ -2206,8 +2213,8 @@ which leaves an allocator that lands later, such as the slab after the KASAN bui
 ## 4.5 Kernel virtual address allocator
 
 The heap answers "give me 40 bytes". The KVA allocator answers "give me 16 KiB of contiguous virtual
-address space with an unmapped guard below it". Guarded kernel stacks are the motivating case, `vmap` of
-non-contiguous frames is the second.
+address space with an unmapped guard below it". Guarded kernel stacks are the motivating case, `vmap`
+is the second.
 
 - A guarded stack is a power-of-two size *S* and starts at an address aligned to *2S*, and the *S*
   bytes of VA below it stay unmapped, so overflow takes a page fault instead of quietly eating
@@ -2223,6 +2230,13 @@ non-contiguous frames is the second.
 - A `GuardedStack` (`vibeos::thread::GuardedStack`, re-exported as `kva_init::GuardedStack`) is a
   move-only handle with private fields; only `kva_init::alloc_guarded_stack` builds one, and
   `free_stack` takes it by value.
+- `kva_init::vmap(Frames) -> Result<Vmap, KvaError>` maps one buddy block of at most 32 frames
+  (`MAX_UNMAP`) contiguously and refuses a larger one with `KvaError::Size`; on any failure it returns
+  the frames to the buddy. The `Vmap` is a move-only handle with private fields (`base()`, `len()`)
+  that holds the block's `Frames` (§4.2). `vunmap(Vmap) -> Frames` unmaps, shoots down, and frees
+  exactly the span the handle records, then hands back the `Frames`, so the span unmapped always equals
+  the span returned to the free list. Dropping a `Vmap` leaks its span and its `Frames`. A
+  compile-time assertion in `kva_init` fails the build if `Vmap` is `Copy` or `Clone`.
 - Stack frames are allocated as *n* separate order-0 frames, not one order-*k* block. Stacks do not
   need physical contiguity and requesting it fragments the buddy allocator for nothing. The
   `GuardedStack` holds each frame's `Frames` (§4.2), and `free_stack` frees those tokens after the
@@ -3579,7 +3593,7 @@ Contents (`src/per_cpu.rs`):
   only an in-guest test reads (ROADMAP §10.7 deletes it, F111)
 - `irq_nest`, `slice_tsc`, `idle_tsc`, and `switch_scratch`, a `CpuContext` that no code reads or writes
 - `tsc_per_ms` (a copy of the BSP's value, [section 6.2](#62-calibrating-the-tsc)) and `timer_mode`
-- `kernel_rsp0` and `as_cr3`, which the context switch updates; `tss`, through which it writes TSS.RSP0; and `fallback_rsp0`, the RSP0 it uses for a thread without `Tcb.stack` (below)
+- `kernel_rsp0`, which the context switch updates; `tss`, through which it writes TSS.RSP0; and `fallback_rsp0`, the RSP0 it uses for a thread without `Tcb.stack` (below)
 - `syscall_scratch`: the user RSP, the syscall return value, and the `iretq` RIP, RFLAGS, and RSP.
   It is per CPU, not per thread, so it is valid only while IF=0. The syscall exit breaks this: it
   runs without a `cli`, and a console `read` that waited in `sti; hlt` returns to it with IF=1
@@ -3587,7 +3601,9 @@ Contents (`src/per_cpu.rs`):
   `syscall` and the entry's stack switch; the exit keeps the return value and its `iretq` frame in
   the thread's user frame ([section 5.10](#510-privilege-transitions)).
 - `remote`, this CPU's `PerCpuRemote` in a separate per-CPU array: `ticks`, `switches`, `runq_len`,
-  `ready`, `wake_inbox` and `apic_id`, all atomics; it is the only per-CPU state another CPU reads.
+  `ready`, `wake_inbox`, `apic_id`, and `as_cr3`, the root this CPU last loaded: an `AtomicU64` its
+  owner stores after each CR3 write and `addr_space_init::teardown` reads. All are atomics; it is the
+  only per-CPU state another CPU reads.
   `wake_inbox` is a `u64` `ThreadId` bitset: a remote CPU ORs in a thread's bit and sends IPI `0xFD`
   (planned: a bitmap sized from the limits, §7.6). `ready` is the flag an AP sets last in bring-up
   ([section 7.4](#74-ap-bring-up-sequence)).
@@ -3930,7 +3946,7 @@ ROADMAP §10.7's forensics to report. `lifetime_shootdown_ack_late` holds IF off
 while another unmaps. What holds IF=0 that long today: syscall bodies until they block (ROADMAP
 §10.6, F011), and a console `write` with many newlines (ROADMAP §10.6, F044). As built, one round invalidates one VA
 (`shootdown_va`) on every online CPU; ROADMAP §12.3 replaces it with the rounds above. `kva_init::unmap_shootdown` unmaps at most 32 pages (`MAX_UNMAP`) and leaves the
-rest mapped with no error, while `vunmap` frees the whole VA span it was given (ROADMAP §10.3, F107).
+rest mapped with no error.
 
 The shootdown handler allocates nothing and takes no lock ([§2.2](#22-interrupt-handler-rules)). It
 reads a request slot and executes `invlpg`.
