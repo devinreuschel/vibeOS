@@ -864,16 +864,81 @@ class TestDevicePresets(unittest.TestCase):
         self.assertIn("disable-legacy=on", without)
         self.assertIn("num-queues=2", without)
 
+    def test_virtio_blk_nbd_drive_per_cache_mode(self) -> None:
+        from tests.harness.harness import virtio_blk_args
+
+        for mode in ("writeback", "none", "writethrough"):
+            blob = " ".join(virtio_blk_args("/s/sock", 2, nbd=True, cache=mode))
+            self.assertIn(
+                "file.driver=nbd,file.server.type=unix,file.server.path=/s/sock", blob
+            )
+            self.assertIn("format=raw", blob)
+            self.assertIn(f"cache={mode}", blob)
+            self.assertIn("write-cache=on", blob)
+            self.assertNotIn("discard", blob)
+        self.assertNotIn("write-cache", " ".join(virtio_blk_args("/d", 2)))
+
+    def test_virtio_blk_rejects_unsafe_cache(self) -> None:
+        from tests.harness.harness import virtio_blk_args
+
+        with self.assertRaises(HarnessError):
+            virtio_blk_args("/s/sock", 2, nbd=True, cache="unsafe")
+
     def test_kill_delay_window(self) -> None:
         import random
 
         from tests.harness.harness import CRASH_KILL_MAX_S, kill_delay
 
+        self.assertEqual(CRASH_KILL_MAX_S, 0.05)
         rng = random.Random(0)
         for _ in range(256):
             d = kill_delay(rng)
             self.assertGreaterEqual(d, 0.0)
             self.assertLessEqual(d, CRASH_KILL_MAX_S)
+
+    def test_make_disk_in_directory(self) -> None:
+        import tempfile
+
+        from tests.harness.harness import make_disk
+
+        with tempfile.TemporaryDirectory() as d:
+            p = make_disk(8192, "t-", directory=d)
+            self.assertEqual(os.path.dirname(p), d)
+            self.assertEqual(os.path.getsize(p), 8192)
+
+    def test_run_until_exit_drains_after_harness_kill(self) -> None:
+        import signal
+        import tempfile
+
+        from tests.harness.harness import overlay_env, run_qemu_until_exit
+
+        with tempfile.TemporaryDirectory() as d:
+            qemu = os.path.join(d, "qemu-system-x86_64")
+            with open(qemu, "w", encoding="utf-8") as f:
+                f.write(
+                    "#!/bin/sh\n"
+                    "echo 'vibeOS: vibefs: wr 1'\n"
+                    "sleep 0.05\n"
+                    "echo 'vibeOS: vibefs: wr 2'\n"
+                    "exec sleep 30\n"
+                )
+            os.chmod(qemu, 0o755)
+            iso = os.path.join(d, "x.iso")
+            open(iso, "wb").close()
+
+            def kill_after(line: str) -> float | None:
+                if line.endswith("wr 1"):
+                    time.sleep(0.3)
+                    return 0.0
+                return None
+
+            path = d + os.pathsep + os.environ.get("PATH", "")
+            with overlay_env({"PATH": path}):
+                r = run_qemu_until_exit(
+                    QemuConfig(iso=iso, accel=""), timeout_s=20, kill_after=kill_after
+                )
+        self.assertIn("vibeOS: vibefs: wr 2", r.lines)
+        self.assertEqual(r.exit_code, -signal.SIGKILL)
 
 
 class TestEnvConfig(unittest.TestCase):

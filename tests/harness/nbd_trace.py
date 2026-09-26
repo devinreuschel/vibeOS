@@ -34,13 +34,13 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from types import TracebackType
 
-from tests.harness.harness import HarnessError
+from tests.harness.harness import NBD_CACHE_MODES, HarnessError
 
 BLOCK = 4096
 SUPER_SLOTS = (0, 4096)
 ITER_BYTES = 300
 KILL_COMMIT_MAX = 200
-CACHE_MODES = ("writeback", "none", "writethrough")
+CACHE_MODES = NBD_CACHE_MODES
 WR_PREFIX = "vibeOS: vibefs: wr "
 # VIBEFS §4: the superblock's generation is a u64 LE at byte 16 of its slot.
 SUPER_GEN_OFF = 16
