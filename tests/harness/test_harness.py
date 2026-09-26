@@ -6,6 +6,7 @@ Runs under `python3 -m unittest discover`. Standard-library only.
 from __future__ import annotations
 
 import os
+import socket
 import time
 import unittest
 from unittest import mock
@@ -15,6 +16,9 @@ from tests.harness.harness import (
     HPET_OFF_MACHINE,
     ISA_DEBUG_FAIL,
     ISA_DEBUG_PASS,
+    MCE_DUMP_NEEDLES,
+    MCE_MCG_STATUS,
+    MCE_UC_STATUS,
     OVMF_BOOT_ARGS,
     SMP4_IPI_WAIT_ACKS_FRAME,
     DeadlineReader,
@@ -22,10 +26,13 @@ from tests.harness.harness import (
     Marker,
     QemuConfig,
     RunResult,
+    _monitor_reply,
     check_markers_in_order,
+    check_mce_dump,
     contains_panic,
     drain_panic_tail,
     effective_accel_name,
+    mce_monitor_cmd,
     qemu_argv,
     retryable_ktest_failure,
     serial_tail,
@@ -971,6 +978,71 @@ class TestEnvConfig(unittest.TestCase):
             self.assertEqual(env.accel, "")
             self.assertEqual(env.timeout, 12.5)
             self.assertEqual(env.extra, ("-nic", "none"))
+
+
+class TestMceHelpers(unittest.TestCase):
+    DUMP = [
+        "vibeOS: #MC rip=0xffffffff80001234 cs=0x8 rflags=0x2 rsp=0x0 ss=0x0",
+        "vibeOS: regs: rbp=0x0 rsp=0x0 rflags=0x2 rip=0xffffffff80001234 cr3=0x1000",
+        "vibeOS: panic: thread cpu=0 tid=0 idle",
+        "vibeOS: backtrace:",
+        "vibeOS: panic: halted",
+    ]
+
+    def test_command_format(self) -> None:
+        cmd = mce_monitor_cmd(
+            cpu=0, bank=1, status=MCE_UC_STATUS, mcg_status=MCE_MCG_STATUS
+        )
+        self.assertEqual(cmd, "mce 0 1 0xb200000000000000 0x5 0x0 0x0")
+        cmd = mce_monitor_cmd(
+            cpu=3, bank=2, status=1, mcg_status=4, addr=0x1000, misc=0x86
+        )
+        self.assertEqual(cmd, "mce 3 2 0x1 0x4 0x1000 0x86")
+
+    def test_rejects_values(self) -> None:
+        with self.assertRaisesRegex(HarnessError, "cpu"):
+            mce_monitor_cmd(cpu=-1, bank=1, status=1, mcg_status=5)
+        with self.assertRaisesRegex(HarnessError, "status"):
+            mce_monitor_cmd(cpu=0, bank=1, status=1 << 64, mcg_status=5)
+        with self.assertRaisesRegex(HarnessError, "misc"):
+            mce_monitor_cmd(cpu=0, bank=1, status=1, mcg_status=5, misc=-2)
+        mce_monitor_cmd(cpu=0, bank=1, status=(1 << 64) - 1, mcg_status=5)
+
+    def test_passing_dump(self) -> None:
+        check_mce_dump(self.DUMP, exit_code=None, reply="")
+        check_mce_dump(self.DUMP, exit_code=-9, reply="", needles=MCE_DUMP_NEEDLES)
+
+    def test_qemu_exit_before_dump_carries_reply(self) -> None:
+        reply = "mce 0 1 0xb200000000000000 0x5 0x0 0x0 MCE capability is not enabled"
+        with self.assertRaises(HarnessError) as cm:
+            check_mce_dump(["vibeOS: smp: done"], exit_code=0, reply=reply)
+        msg = str(cm.exception)
+        self.assertIn("QEMU exited (status 0) before the #MC dump", msg)
+        self.assertIn("MCE capability is not enabled", msg)
+
+    def test_no_dump_while_running(self) -> None:
+        with self.assertRaisesRegex(HarnessError, "no #MC dump within"):
+            check_mce_dump([], exit_code=None, reply="")
+
+    def test_dump_on_wrong_cpu(self) -> None:
+        dump = [ln.replace("cpu=0", "cpu=1") for ln in self.DUMP]
+        with self.assertRaisesRegex(HarnessError, "joint needle"):
+            check_mce_dump(dump, exit_code=None, reply="")
+
+    def test_dump_cut_short(self) -> None:
+        with self.assertRaisesRegex(HarnessError, "halted"):
+            check_mce_dump(self.DUMP[:-1], exit_code=0, reply="")
+
+    def test_monitor_reply_reads_to_prompt(self) -> None:
+        a, b = socket.socketpair()
+        with a, b:
+            b.sendall(b"mce 0 1 0x1 0x5 0x0 0x0\r\n\x1b[Kbad value\r\n(qemu) ")
+            self.assertEqual(
+                _monitor_reply(a, 1.0), "bad value"
+            )
+            b.sendall(b"partial")
+            b.close()
+            self.assertEqual(_monitor_reply(a, 1.0), "partial")
 
 
 if __name__ == "__main__":

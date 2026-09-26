@@ -9,15 +9,20 @@ from typing import TypeVar
 
 from tests.harness import results
 from tests.harness.harness import (
+    MCE_MCG_STATUS,
+    MCE_UC_STATUS,
+    EnvConfig,
     HarnessError,
     boot_contract_markers,
     env_config,
     env_expect_panic,
     env_flag,
     halt_test_markers,
+    mce_monitor_cmd,
     qemu_argv,
     run_qemu_and_check,
     run_qemu_console_input,
+    run_qemu_inject_mce,
 )
 
 _T = TypeVar("_T")
@@ -77,8 +82,38 @@ def _record_missing(message: str) -> None:
         results.current().record("marker", name, "failed")
 
 
+def _mce_main(env: EnvConfig) -> int:
+    """Boot, inject an uncorrected machine check on CPU 0, expect dump and halt."""
+    results.Results(env.tier)
+    cfg = env.qemu()
+    markers = boot_contract_markers(cpu=env.cpu, smp=env.smp)
+    cmd = mce_monitor_cmd(
+        cpu=0, bank=1, status=MCE_UC_STATUS, mcg_status=MCE_MCG_STATUS
+    )
+    try:
+        result = run_qemu_inject_mce(
+            cfg, markers, cmd=cmd, timeout_s=env.timeout
+        )
+    except HarnessError as e:
+        _record_missing(str(e))
+        if results.missing_marker(str(e)) is None:
+            results.current().record("marker", "mce_dump", "failed")
+        results.current().add_boot(qemu_argv(cfg, None), cfg, None)
+        print(f"[e2e] FAIL: {e}", file=sys.stderr)
+        return 1
+    for name in result.matched:
+        results.current().record("marker", name, "passed")
+    results.current().record("marker", "mce_dump", "passed")
+    results.current().add_boot(qemu_argv(cfg, None), cfg, result.exit_code)
+    print(f"[e2e] ok: {len(result.matched)} markers matched", file=sys.stderr)
+    print(f"[e2e]   . {cmd}: #MC dump and halt", file=sys.stderr)
+    return 0
+
+
 def main() -> int:
     env = env_config(default_iso="vibeos.iso", default_timeout=60)
+    if env_flag("VIBEOS_MCE_TEST"):
+        return _mce_main(env)
     res = results.Results(env.tier)
     expect_panic = env_expect_panic()
     gp_test = env_flag("VIBEOS_GP_TEST")

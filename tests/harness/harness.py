@@ -24,6 +24,7 @@ Drivers live in `run_*.py` and must not parse the environment or build argv.
 | `VIBEOS_EXPECT_PANIC` | off (`""` / `0`) | `run_e2e` |
 | `VIBEOS_GP_TEST` | off | `run_e2e` |
 | `VIBEOS_EXPECT_PIT` | off | `run_e2e` |
+| `VIBEOS_MCE_TEST` | off | `run_e2e` |
 | `VIBEOS_SKIP_PERSIST` | off | `run_ktest` |
 | `VIBEOS_CRASH_ROUNDS` | `8` | `run_vibefs_crash` |
 | `VIBEOS_CRASH_SEED` | time-based | `run_vibefs_crash` |
@@ -35,6 +36,7 @@ from __future__ import annotations
 
 import os
 import random
+import re
 import select
 import shutil
 import socket
@@ -700,6 +702,206 @@ def run_qemu_and_check(
         dump = dump_after_panic(result.lines, panic_signatures)
         check_dump_needles(dump, dump_needles)
 
+    return result
+
+
+# Injected machine check (ROADMAP §10.6): QEMU's HMP `mce` operands.
+# MCi_STATUS VAL|UC|EN|PCC; MCG_STATUS RIPV|MCIP.
+MCE_UC_STATUS = 0xB200_0000_0000_0000
+MCE_MCG_STATUS = 0x5
+# The `#MC` body's `panic::exception_halt` line, the dump's thread line on
+# the CPU the check was injected on, and the end of the dump.
+MCE_DUMP_NEEDLES: tuple[str | tuple[str, ...], ...] = (
+    "vibeOS: #MC rip=0x",
+    ("vibeOS: panic: thread", "cpu=0"),
+    PANIC_DONE,
+)
+# How long the guest has after the injection to finish its dump.
+MCE_DUMP_WAIT_S = 20.0
+_U64_MAX = (1 << 64) - 1
+
+
+def mce_monitor_cmd(
+    *,
+    cpu: int,
+    bank: int,
+    status: int,
+    mcg_status: int,
+    addr: int = 0,
+    misc: int = 0,
+) -> str:
+    """The HMP `mce <cpu> <bank> <status> <mcg_status> <addr> <misc>` line."""
+    for name, v in (
+        ("cpu", cpu),
+        ("bank", bank),
+        ("status", status),
+        ("mcg_status", mcg_status),
+        ("addr", addr),
+        ("misc", misc),
+    ):
+        if v < 0 or v > _U64_MAX:
+            raise HarnessError(f"mce {name} {v:#x} is not a 64-bit unsigned value")
+    return f"mce {cpu} {bank} {status:#x} {mcg_status:#x} {addr:#x} {misc:#x}"
+
+
+def _monitor_reply(mon: socket.socket, timeout: float) -> str:
+    """Read the monitor's text until its next `(qemu)` prompt, EOF, or `timeout`.
+
+    The prompt must follow a newline, so the echoed command line does not end
+    the read. The echo (QEMU's readline redraws it once per keystroke) is
+    dropped with everything before the first newline, and so are terminal
+    escapes; a reply with no newline is returned whole.
+    """
+    buf = bytearray()
+    deadline = time.monotonic() + timeout
+    while True:
+        text = buf.decode("utf-8", errors="replace")
+        nl = text.find("\n")
+        if nl >= 0 and "(qemu)" in text[nl:]:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            mon.settimeout(min(remaining, 0.5))
+            chunk = mon.recv(4096)
+        except TimeoutError:
+            continue
+        except OSError:
+            break
+        if not chunk:
+            break
+        buf.extend(chunk)
+    text = buf.decode("utf-8", errors="replace")
+    nl = text.find("\n")
+    if nl >= 0:
+        text = text[nl + 1 :]
+    text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+    return " ".join(text.replace("(qemu)", " ").split())
+
+
+def check_mce_dump(
+    after: list[str],
+    *,
+    exit_code: int | None,
+    reply: str,
+    needles: tuple[str | tuple[str, ...], ...] = MCE_DUMP_NEEDLES,
+) -> None:
+    """Check the serial lines seen after an `mce` injection.
+
+    The first needle is the dump's opening line. When it never appeared, the
+    error says whether QEMU exited on its own (`exit_code`) and carries the
+    monitor's reply, the only place QEMU says why an injection failed.
+    """
+    if not needles:
+        raise HarnessError("check_mce_dump: no needles")
+    first = needles[0]
+    started = any(
+        all(part in line for part in first) if isinstance(first, tuple) else first in line
+        for line in after
+    )
+    if not started:
+        if exit_code is not None:
+            why = f"QEMU exited (status {exit_code}) before the #MC dump"
+        else:
+            why = f"no #MC dump within {MCE_DUMP_WAIT_S:g}s"
+        raise HarnessError(f"{why}; monitor: {reply!r}{serial_tail(after)}")
+    check_dump_needles(after, needles)
+
+
+def run_qemu_inject_mce(
+    cfg: QemuConfig,
+    markers: list[Marker],
+    *,
+    cmd: str,
+    timeout_s: float,
+    dump_needles: tuple[str | tuple[str, ...], ...] = MCE_DUMP_NEEDLES,
+) -> RunResult:
+    """Boot, wait for `markers`, inject a machine check with `cmd`, check the dump.
+
+    Before the injection any panic signature fails the run. After it the
+    lines are collected until `PANIC_DONE`, EOF, or `MCE_DUMP_WAIT_S`, and
+    `check_mce_dump` judges them. Never retries.
+    """
+    if not shutil.which("qemu-system-x86_64"):
+        raise HarnessError("qemu-system-x86_64 not on PATH")
+    if not os.path.exists(cfg.iso):
+        raise HarnessError(f"ISO missing: {cfg.iso}")
+
+    monitor_sock = _pick_monitor_path()
+    argv = qemu_argv(cfg, monitor_sock)
+    panic_signatures = _panic_sigs(cfg, PANIC_SIGNATURES, ())
+
+    proc = subprocess.Popen(
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        bufsize=1,
+        text=True,
+    )
+    assert proc.stdout is not None
+
+    result = RunResult()
+    marker_idx = 0
+    reader = DeadlineReader(proc.stdout.fileno(), time.monotonic() + timeout_s)
+    after: list[str] = []
+    reply = ""
+    exited: int | None = None
+    try:
+        while marker_idx < len(markers):
+            kind, line = reader.next_event()
+            if kind == "timeout":
+                result.timed_out = True
+                missing = markers[marker_idx].name
+                raise HarnessError(
+                    f"timed out after {timeout_s}s; {len(result.matched)}/{len(markers)} "
+                    f"markers; missing {missing!r}{serial_tail(result.lines)}"
+                )
+            if kind == "eof":
+                raise HarnessError(
+                    f"missing marker {markers[marker_idx].name!r} after "
+                    f"{len(result.lines)} lines"
+                )
+            result.lines.append(line)
+            for sig in panic_signatures:
+                if sig in line:
+                    result.panic_line = line
+                    raise HarnessError(f"panic signature {sig!r} in: {line!r}")
+            if markers[marker_idx].matches(line):
+                result.matched.append(markers[marker_idx].name)
+                marker_idx += 1
+
+        with _connect_monitor(monitor_sock) as mon:
+            mon.sendall((cmd + "\n").encode())
+            reply = _monitor_reply(mon, 2.0)
+
+        reader.set_deadline(time.monotonic() + MCE_DUMP_WAIT_S)
+        while True:
+            kind, line = reader.next_event()
+            if kind == "eof":
+                try:
+                    exited = proc.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    exited = None
+                break
+            if kind == "timeout":
+                break
+            result.lines.append(line)
+            after.append(line)
+            if PANIC_DONE in line:
+                break
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        try:
+            result.exit_code = proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            result.exit_code = proc.wait()
+
+    check_mce_dump(after, exit_code=exited, reply=reply, needles=dump_needles)
+    result.panic_line = next((ln for ln in after if "vibeOS: panic:" in ln), None)
     return result
 
 
