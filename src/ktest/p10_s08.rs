@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::pmm::{Frames, MAX_ORDER};
 use vibeos::proc::wait_exited;
-use vibeos::thread::{ThreadId, ThreadState};
+use vibeos::thread::{MAX_THREADS, ThreadId, ThreadState};
 
 use super::user::{self, DEFAULT, Image, user_code};
 use super::{Outcome, Test, test};
@@ -20,6 +20,7 @@ pub(super) const TESTS: &[Test] = &[
     test("fork_oom", fork_oom).deadline(10_000),
     test("lifetime_stack_reclaim", lifetime_stack_reclaim).deadline(120_000),
     test("exit_burst", exit_burst).deadline(60_000),
+    test("lifetime_dead_slot_on_cpu", lifetime_dead_slot_on_cpu).deadline(180_000),
 ];
 
 /// The free-frame count at a quiescent point (ROADMAP §10.2, F074): the
@@ -397,6 +398,182 @@ fn exit_burst() -> Outcome {
     }
     if bad != 0 {
         return crate::fail_fmt!("{bad} of {BURST} processes did not exit 0");
+    }
+    Outcome::Ok
+}
+
+/// Dead slots left for CPU 0's exits once the fillers hold the rest.
+const FREE_SLOTS: u32 = 4;
+/// Spawns each spawner on CPUs 1 to 3 makes.
+const SPAWNS_PER_CPU: u32 = 400;
+
+static FILL_LIVE: AtomicU32 = AtomicU32::new(0);
+/// Fillers told to exit, taken one at a time.
+static FILL_RELEASE: AtomicU32 = AtomicU32::new(0);
+static FILL_ALL: AtomicBool = AtomicBool::new(false);
+static SPAWN_GO: AtomicBool = AtomicBool::new(false);
+static SPAWNERS_DONE: AtomicU32 = AtomicU32::new(0);
+static SPAWN_BAD: AtomicBool = AtomicBool::new(false);
+/// Per TCB slot: spawns that returned it, and runs of a child in it.
+static SPAWNED: [AtomicU32; MAX_THREADS] = [const { AtomicU32::new(0) }; MAX_THREADS];
+static RAN: [AtomicU32; MAX_THREADS] = [const { AtomicU32::new(0) }; MAX_THREADS];
+
+/// Hold a TCB slot, asleep on CPU 0, until released.
+fn filler_entry() {
+    FILL_LIVE.fetch_add(1, Ordering::AcqRel);
+    loop {
+        if FILL_ALL.load(Ordering::Acquire)
+            || FILL_RELEASE
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+                .is_ok()
+        {
+            break;
+        }
+        thread_init::sleep_ms(2);
+    }
+    FILL_LIVE.fetch_sub(1, Ordering::AcqRel);
+}
+
+fn child_entry() {
+    if let Some(r) = RAN.get(thread_init::current_id().0 as usize) {
+        r.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// On CPUs 1 to 3: spawn children onto CPU 0 as fast as slots come free.
+fn slot_spawner() {
+    while !SPAWN_GO.load(Ordering::Acquire) {
+        thread_init::yield_now();
+    }
+    let t0 = time_init::now_ns();
+    let mut n = 0u32;
+    while n < SPAWNS_PER_CPU {
+        match thread_init::spawn_on("child", child_entry, 0) {
+            Ok(h) => {
+                if let Some(s) = SPAWNED.get(h.id().0 as usize) {
+                    s.fetch_add(1, Ordering::AcqRel);
+                }
+                n += 1;
+            }
+            Err(SpawnError::NoSlot) => thread_init::yield_now(),
+            Err(SpawnError::NoMemory) => {
+                SPAWN_BAD.store(true, Ordering::Release);
+                break;
+            }
+        }
+        if time_init::now_ns().saturating_sub(t0) > 6 * WAIT_NS {
+            SPAWN_BAD.store(true, Ordering::Release);
+            break;
+        }
+    }
+    SPAWNERS_DONE.fetch_add(1, Ordering::AcqRel);
+}
+
+fn wait_for(pred: impl Fn() -> bool, ns: u64) -> bool {
+    let t0 = time_init::now_ns();
+    while !pred() {
+        if time_init::now_ns().saturating_sub(t0) > ns {
+            return false;
+        }
+        thread_init::sleep_ms(1);
+    }
+    true
+}
+
+/// Let every filler go and wait for them, bounded.
+fn release_fillers() -> bool {
+    FILL_ALL.store(true, Ordering::Release);
+    wait_for(|| FILL_LIVE.load(Ordering::Acquire) == 0, WAIT_NS)
+}
+
+/// A spawn reuses a `Dead` TCB slot only once its CPU has switched off it
+/// (ROADMAP §10.10, F012): fillers hold every slot but four, so the only
+/// Dead slots are CPU 0's exits, held open for 10 ms on the first 100;
+/// spawners on CPUs 1 to 3 respawn into them, and every child runs its
+/// entry exactly once.
+fn lifetime_dead_slot_on_cpu() -> Outcome {
+    if !tail_cpus_online() {
+        return Outcome::Skip("needs 4 cpus");
+    }
+    for (s, r) in SPAWNED.iter().zip(RAN.iter()) {
+        s.store(0, Ordering::Relaxed);
+        r.store(0, Ordering::Relaxed);
+    }
+    FILL_LIVE.store(0, Ordering::Release);
+    FILL_RELEASE.store(0, Ordering::Release);
+    FILL_ALL.store(false, Ordering::Release);
+    SPAWN_GO.store(false, Ordering::Release);
+    SPAWNERS_DONE.store(0, Ordering::Release);
+    SPAWN_BAD.store(false, Ordering::Release);
+
+    // The spawners take their slots before the fillers take the rest.
+    let mut spawners = 0u32;
+    for cpu in 1..TAIL_CPUS {
+        if let Err(e) = thread_init::spawn_on("slot-spawner", slot_spawner, cpu) {
+            SPAWN_GO.store(true, Ordering::Release);
+            SPAWN_BAD.store(true, Ordering::Release);
+            let _done = wait_for(
+                || SPAWNERS_DONE.load(Ordering::Acquire) == spawners,
+                WAIT_NS,
+            );
+            return crate::fail_fmt!("spawner: {}", e.as_str());
+        }
+        spawners += 1;
+    }
+    // Fill every free slot, then let four fillers exit on CPU 0.
+    let mut fillers = 0u32;
+    loop {
+        match thread_init::spawn_on("filler", filler_entry, 0) {
+            Ok(_) => fillers += 1,
+            Err(SpawnError::NoSlot) => break,
+            Err(SpawnError::NoMemory) => {
+                SPAWN_GO.store(true, Ordering::Release);
+                let _released = release_fillers();
+                return Outcome::Fail("filler spawn: no memory");
+            }
+        }
+    }
+    let fill_target = fillers;
+    if !wait_for(|| FILL_LIVE.load(Ordering::Acquire) == fill_target, WAIT_NS) {
+        SPAWN_GO.store(true, Ordering::Release);
+        let _released = release_fillers();
+        return Outcome::Fail("fillers did not start");
+    }
+    FILL_RELEASE.store(FREE_SLOTS.min(fillers), Ordering::Release);
+    let left = fill_target.saturating_sub(FREE_SLOTS);
+    if !wait_for(|| FILL_LIVE.load(Ordering::Acquire) == left, WAIT_NS) {
+        SPAWN_GO.store(true, Ordering::Release);
+        let _released = release_fillers();
+        return Outcome::Fail("fillers did not exit");
+    }
+
+    thread_init::testing::arm_exit_stall(0, STALL_EXITS, STALL_MS);
+    SPAWN_GO.store(true, Ordering::Release);
+    let done = wait_for(
+        || SPAWNERS_DONE.load(Ordering::Acquire) == spawners,
+        6 * WAIT_NS,
+    );
+    let sum = |a: &[AtomicU32]| a.iter().map(|x| x.load(Ordering::Acquire)).sum::<u32>();
+    let ran = wait_for(|| sum(&RAN) >= sum(&SPAWNED), WAIT_NS);
+    thread_init::testing::disarm_exit_stall();
+    let released = release_fillers();
+    if !done {
+        return Outcome::Fail("spawners did not finish");
+    }
+    if SPAWN_BAD.load(Ordering::Acquire) {
+        return Outcome::Fail("a spawner gave up");
+    }
+    for (slot, (s, r)) in SPAWNED.iter().zip(RAN.iter()).enumerate() {
+        let (s, r) = (s.load(Ordering::Acquire), r.load(Ordering::Acquire));
+        if s != r {
+            return crate::fail_fmt!("slot {slot}: spawned {s}, ran {r}");
+        }
+    }
+    if !ran {
+        return Outcome::Fail("children did not run");
+    }
+    if !released {
+        return Outcome::Fail("fillers did not exit at the end");
     }
     Outcome::Ok
 }
