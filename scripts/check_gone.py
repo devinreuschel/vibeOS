@@ -87,6 +87,9 @@ GONE: list[tuple[str, str]] = [
     ("writeback_all", "the block layer keeps only the orders DESIGN §10.2 names"),
     ("set_hhdm_offset", "a `Buddy::new` argument replaces"),
     ("from_phys", "`DmaBuffer` and `GuardedStack` are move-only"),
+    ("inos", "FAT and vibefs behind `InodeOps`"),
+    ("ino_of", "FAT and vibefs behind `InodeOps`"),
+    ("by_ino", "FAT and vibefs behind `InodeOps`"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

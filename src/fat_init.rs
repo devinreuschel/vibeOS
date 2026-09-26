@@ -8,8 +8,11 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use vibeos::fat::{self, Disk, FatError, FatVol, INITRD_BYTES, InoKey, InoRef, Node, SEC};
-use vibeos::fs::{FatFs, FsError, FsType, MAX_PATH};
+use vibeos::fat::{self, Disk, FatError, FatInode, FatVol, INITRD_BYTES, Node, SEC};
+use vibeos::fs::{
+    FatFs, FsError, FsType, Inode, InodeHandle, InodeInfo, InodeKind, InodeRef, MAX_PATH,
+    S_IFDIR_MODE, S_IFREG_MODE,
+};
 use vibeos::lock::RANK_DEVICE;
 
 use crate::block_init;
@@ -36,6 +39,8 @@ struct Slot {
     back: UnsafeCell<Back>,
     used: AtomicBool,
     busy: AtomicBool,
+    /// The `Vfs` superblock the volume is mounted as.
+    sb: AtomicU8,
 }
 
 unsafe impl Sync for Slot {}
@@ -47,6 +52,7 @@ impl Slot {
             back: UnsafeCell::new(Back::Initrd),
             used: AtomicBool::new(false),
             busy: AtomicBool::new(false),
+            sb: AtomicU8::new(0),
         }
     }
 }
@@ -173,14 +179,14 @@ fn drop_busy(id: u8) {
 
 fn with_slot<R>(
     id: u8,
-    f: impl FnOnce(&mut FatVol, &mut Io) -> Result<R, FatError>,
-) -> Result<R, FatError> {
+    f: impl FnOnce(&mut FatVol, &mut Io) -> Result<R, FsError>,
+) -> Result<R, FsError> {
     grab(id)?;
     let i = id as usize;
     let r = unsafe {
         let vol = (*SLOTS[i].vol.get()).as_mut();
         match vol {
-            None => Err(FatError::Io),
+            None => Err(FsError::Io),
             Some(v) => {
                 let mut io = Io {
                     back: *SLOTS[i].back.get(),
@@ -191,6 +197,72 @@ fn with_slot<R>(
     };
     drop_busy(id);
     r
+}
+
+/// The superblock volume `id` is mounted as.
+fn sb_of(id: u8) -> u8 {
+    SLOTS
+        .get(id as usize)
+        .map_or(0, |s| s.sb.load(Ordering::Acquire))
+}
+
+/// The one conversion from a FAT file's dirent fields to its `Vfs`
+/// inode: key `[dir_clu, dir_off, 0]` (the root is `[0, 0, 0]`), private
+/// words `[first_clu, (dir_clu << 32) | dir_off]`, `st_ino` from
+/// [`fat::stat_ino`].
+pub fn inode_info(
+    dir_clu: u32,
+    dir_off: u32,
+    first_clu: u32,
+    size: u64,
+    kind: InodeKind,
+    mtime: u64,
+) -> InodeInfo {
+    let dir = kind == InodeKind::Dir;
+    InodeInfo {
+        key: [dir_clu, dir_off, 0],
+        ino: fat::stat_ino(dir_clu, dir_off),
+        kind,
+        mode: if dir { S_IFDIR_MODE } else { S_IFREG_MODE },
+        nlink: if dir { 2 } else { 1 },
+        size,
+        atime: mtime,
+        mtime,
+        ctime: mtime,
+        private: [u64::from(first_clu), dirent_word(dir_clu, dir_off)],
+    }
+}
+
+fn node_info(n: &Node) -> InodeInfo {
+    inode_info(
+        n.dir_clu,
+        n.dir_off,
+        n.clu,
+        u64::from(n.size),
+        n.kind,
+        n.mtime,
+    )
+}
+
+fn dirent_word(dir_clu: u32, dir_off: u32) -> u64 {
+    (u64::from(dir_clu) << 32) | u64::from(dir_off)
+}
+
+/// A FAT inode's words, copied out of its `Vfs` inode.
+fn words(n: &Inode) -> FatInode {
+    FatInode {
+        dir_clu: n.key[0],
+        dir_off: n.key[1],
+        first_clu: n.private[0] as u32,
+        size: n.size,
+        kind: n.kind,
+    }
+}
+
+/// Write a FAT inode's words back into its `Vfs` inode.
+fn store(n: &mut Inode, w: &FatInode) {
+    n.private = [u64::from(w.first_clu), dirent_word(w.dir_clu, w.dir_off)];
+    n.size = w.size;
 }
 
 pub fn live() -> bool {
@@ -232,77 +304,124 @@ pub fn init() {
     SLOTS[0].used.store(true, Ordering::Release);
     SLOTS[0].busy.store(false, Ordering::Release);
     NVOL.store(1, Ordering::Release);
-    let ok = fs_init::with(|v| {
-        v.mount_root_fs(&FatFs {
+    let sb = fs_init::with(|v| {
+        let root = v.mount_root_fs(&FatFs {
             root_clu,
             vol: VOL_INITRD,
             ops: None,
-        })
-        .is_ok()
+        })?;
+        v.sb_of_path(root)
     });
-    LIVE.store(ok, Ordering::Release);
+    if let Ok(sb) = sb {
+        SLOTS[0].sb.store(sb, Ordering::Release);
+    }
+    LIVE.store(sb.is_ok(), Ordering::Release);
 }
 
 #[allow(dead_code)]
 pub fn lookup(id: u8, dir_clu: u32, name: &[u8]) -> Result<Node, FsError> {
-    with_slot(id, |v, d| v.lookup(d, dir_clu, name)).map_err(FatError::to_fs)
+    with_slot(id, |v, d| Ok(v.lookup(d, dir_clu, name)?))
 }
 
 pub fn walk(id: u8, path: &[u8]) -> Result<Node, FsError> {
-    with_slot(id, |v, d| v.walk(d, path)).map_err(FatError::to_fs)
+    with_slot(id, |v, d| Ok(v.walk(d, path)?))
 }
 
 pub fn readdir(id: u8, dir_clu: u32, cookie: u64, out: &mut Node) -> Result<Option<u64>, FsError> {
-    with_slot(id, |v, d| v.readdir(d, dir_clu, cookie, out)).map_err(FatError::to_fs)
+    with_slot(id, |v, d| Ok(v.readdir(d, dir_clu, cookie, out)?))
 }
 
-/// Walk `path` and count a reference to the inode it names, in one
-/// volume-lock section.
-pub fn walk_iget(id: u8, path: &[u8]) -> Result<(Node, InoRef), FsError> {
+/// Walk `path` and count a reference to the `Vfs` inode it names, with
+/// the volume held: busy flag first, then the VFS lock, never the
+/// reverse.
+pub fn walk_iget(id: u8, path: &[u8]) -> Result<(Node, InodeRef), FsError> {
+    let sb = sb_of(id);
     with_slot(id, |v, d| {
         let n = v.walk(d, path)?;
-        let r = v.iget(n.dir_clu, n.dir_off)?;
+        let r = fs_init::with(|vfs| vfs.iget_key(sb, &node_info(&n)))?;
         Ok((n, r))
     })
-    .map_err(FatError::to_fs)
 }
 
 /// Drop a reference; the last one on an unlinked file frees its clusters.
-pub fn iput(id: u8, r: InoRef) -> Result<(), FsError> {
-    with_slot(id, |v, d| v.iput(d, r)).map_err(FatError::to_fs)
+pub fn iput(id: u8, r: InodeRef) -> Result<(), FsError> {
+    match fs_init::with(|v| v.put_ref(r)) {
+        None => Ok(()),
+        Some(gone) => with_slot(id, |v, d| Ok(v.free_chain(d, gone.private[0] as u32)?)),
+    }
 }
 
-/// The size of the referenced inode `k`.
-pub fn size(id: u8, k: InoKey) -> Result<u64, FsError> {
-    with_slot(id, |v, _| Ok(v.inode_at(k)?.size)).map_err(FatError::to_fs)
+/// The size of the referenced inode `h`.
+pub fn size(_id: u8, h: InodeHandle) -> Result<u64, FsError> {
+    fs_init::with(|v| Ok(v.inode(h)?.size))
 }
 
-pub fn read(id: u8, k: InoKey, off: u64, buf: &mut [u8]) -> Result<usize, FsError> {
-    with_slot(id, |v, d| v.read_ino(d, k, off, buf)).map_err(FatError::to_fs)
+pub fn read(id: u8, h: InodeHandle, off: u64, buf: &mut [u8]) -> Result<usize, FsError> {
+    with_slot(id, |v, d| {
+        let w = fs_init::with(|vfs| vfs.inode(h).map(words))?;
+        Ok(v.read_ino(d, &w, off, buf)?)
+    })
+}
+
+/// Run `f` on inode `h`'s words with the volume held, and write them
+/// back, even when `f` fails: the chain may have grown. The VFS lock is
+/// taken twice, briefly, and never across the volume I/O.
+fn with_words<R>(
+    id: u8,
+    h: InodeHandle,
+    f: impl FnOnce(&mut FatVol, &mut Io, &mut FatInode, bool) -> Result<R, FatError>,
+) -> Result<R, FsError> {
+    with_slot(id, |v, d| {
+        let (mut w, linked) = fs_init::with(|vfs| vfs.inode(h).map(|n| (words(n), n.nlink != 0)))?;
+        let r = f(v, d, &mut w, linked);
+        fs_init::with(|vfs| vfs.inode_mut(h).map(|n| store(n, &w)))?;
+        Ok(r?)
+    })
 }
 
 /// Write `buf` at `off`, or at the inode's size when `append` is set;
 /// the count written and the position written at.
 pub fn write(
     id: u8,
-    k: InoKey,
+    h: InodeHandle,
     off: u64,
     append: bool,
     buf: &[u8],
 ) -> Result<(usize, u64), FsError> {
-    with_slot(id, |v, d| v.write_ino(d, k, off, append, buf)).map_err(FatError::to_fs)
+    with_words(id, h, |v, d, w, linked| {
+        v.write_ino(d, w, linked, off, append, buf)
+    })
 }
 
 pub fn create(id: u8, dir_clu: u32, name: &[u8], dir: bool) -> Result<Node, FsError> {
-    with_slot(id, |v, d| v.create(d, dir_clu, name, dir)).map_err(FatError::to_fs)
+    let sb = sb_of(id);
+    with_slot(id, |v, d| {
+        let n = v.create(d, dir_clu, name, dir)?;
+        fs_init::with(|vfs| vfs.drop_negatives(sb));
+        Ok(n)
+    })
+}
+
+/// Free a removed entry's clusters now unless a `Vfs` inode still holds
+/// it; its last put frees them then.
+fn release_removed(vol: &mut FatVol, d: &mut Io, sb: u8, gone: &FatInode) -> Result<(), FsError> {
+    let held = fs_init::with(|vfs| vfs.forget(sb, [gone.dir_clu, gone.dir_off, 0]));
+    if !held {
+        vol.free_chain(d, gone.first_clu)?;
+    }
+    Ok(())
 }
 
 pub fn unlink(id: u8, dir_clu: u32, name: &[u8], rmdir: bool) -> Result<(), FsError> {
-    with_slot(id, |v, d| v.unlink(d, dir_clu, name, rmdir)).map_err(FatError::to_fs)
+    let sb = sb_of(id);
+    with_slot(id, |v, d| {
+        let gone = v.unlink(d, dir_clu, name, rmdir)?;
+        release_removed(v, d, sb, &gone)
+    })
 }
 
-pub fn truncate(id: u8, k: InoKey, new: u64) -> Result<(), FsError> {
-    with_slot(id, |v, d| v.truncate_ino(d, k, new)).map_err(FatError::to_fs)
+pub fn truncate(id: u8, h: InodeHandle, new: u64) -> Result<(), FsError> {
+    with_words(id, h, |v, d, w, linked| v.truncate_ino(d, w, linked, new))
 }
 
 pub fn rename(
@@ -312,11 +431,18 @@ pub fn rename(
     dst_dir: u32,
     dst_name: &[u8],
 ) -> Result<(), FsError> {
-    with_slot(id, |v, d| v.rename(d, src_dir, src_name, dst_dir, dst_name)).map_err(FatError::to_fs)
+    let sb = sb_of(id);
+    with_slot(id, |v, d| {
+        let m = v.rename(d, src_dir, src_name, dst_dir, dst_name)?;
+        if let Some(gone) = m.replaced {
+            release_removed(v, d, sb, &gone)?;
+        }
+        fs_init::with(|vfs| vfs.rekey(sb, [m.from.0, m.from.1, 0], [m.to.0, m.to.1, 0]))
+    })
 }
 
 pub fn sync(id: u8) -> Result<(), FsError> {
-    with_slot(id, |v, d| v.sync(d)).map_err(FatError::to_fs)
+    with_slot(id, |v, d| Ok(v.sync(d)?))
 }
 
 pub fn sync_all() -> Result<(), FsError> {
@@ -339,12 +465,6 @@ pub fn df(id: u8) -> Result<(FsType, u64, u64, u32), FsError> {
             v.info.nclus,
         ))
     })
-    .map_err(FatError::to_fs)
-}
-
-#[allow(dead_code)]
-pub fn by_ino(id: u8, ino: u32) -> Result<Node, FsError> {
-    with_slot(id, |v, _| v.by_ino(ino)).map_err(FatError::to_fs)
 }
 
 /// `(vol, strip)`: skip `strip` bytes of `path`; if nothing remains, walk `"/"`.
@@ -461,7 +581,7 @@ pub fn mount_dev(name: &str, at: &str) -> Result<u8, FsError> {
         _ => return Err(FsError::Inval),
     };
     let mut io = Io { back };
-    let vol = FatVol::mount(&mut io).map_err(FatError::to_fs)?;
+    let vol = FatVol::mount(&mut io)?;
     let root_clu = vol.info.root_clus;
     let id = {
         let _g = ALLOC.lock();
@@ -498,7 +618,7 @@ pub fn mount_dev(name: &str, at: &str) -> Result<u8, FsError> {
         return Err(e);
     }
     match fs_init::with(|v| {
-        v.mount(
+        let m = v.mount(
             None,
             at,
             &FatFs {
@@ -506,9 +626,13 @@ pub fn mount_dev(name: &str, at: &str) -> Result<u8, FsError> {
                 vol: id,
                 ops: None,
             },
-        )
+        )?;
+        v.sb_of_mount(m)
     }) {
-        Ok(_) => Ok(id),
+        Ok(sb) => {
+            SLOTS[id as usize].sb.store(sb, Ordering::Release);
+            Ok(id)
+        }
         Err(e) => {
             let _ = unregister_mnt(at);
             drop_slot(id);

@@ -3142,7 +3142,7 @@ mod tests {
         v
     }
 
-    fn ino_of(v: &Vfs, p: PathRef) -> u32 {
+    fn st_ino_of(v: &Vfs, p: PathRef) -> u32 {
         let s = v.islot(p).unwrap();
         v.inodes[s as usize].ino
     }
@@ -3163,16 +3163,16 @@ mod tests {
         v.mkdir(None, "/a/b", 0o755).unwrap();
         let b = v.resolve(None, "/a/b", true).unwrap();
         let same = v.resolve(None, "/a/b/.", true).unwrap();
-        assert_eq!(ino_of(&v, b), ino_of(&v, same));
+        assert_eq!(st_ino_of(&v, b), st_ino_of(&v, same));
         let a = v.resolve(None, "/a/b/..", true).unwrap();
         let a2 = v.resolve(None, "/a", true).unwrap();
-        assert_eq!(ino_of(&v, a), ino_of(&v, a2));
+        assert_eq!(st_ino_of(&v, a), st_ino_of(&v, a2));
         let root = v.resolve(None, "/a/b/../..", true).unwrap();
-        assert_eq!(ino_of(&v, root), ino_of(&v, v.root().unwrap()));
+        assert_eq!(st_ino_of(&v, root), st_ino_of(&v, v.root().unwrap()));
         let stay = v.resolve(None, "/..", true).unwrap();
-        assert_eq!(ino_of(&v, stay), ino_of(&v, v.root().unwrap()));
+        assert_eq!(st_ino_of(&v, stay), st_ino_of(&v, v.root().unwrap()));
         let mixed = v.resolve(None, "/a/./b/../b", true).unwrap();
-        assert_eq!(ino_of(&v, mixed), ino_of(&v, b));
+        assert_eq!(st_ino_of(&v, mixed), st_ino_of(&v, b));
     }
 
     #[test]
@@ -3432,9 +3432,9 @@ mod tests {
         v.creat(None, "/a/f", 0o644).unwrap();
         let a = v.resolve(None, "/a", true).unwrap();
         let f = v.resolve(Some(a), "f", true).unwrap();
-        assert_eq!(v.stat(Some(a), "f").unwrap().ino, ino_of(&v, f));
+        assert_eq!(v.stat(Some(a), "f").unwrap().ino, st_ino_of(&v, f));
         let root = v.resolve(Some(a), "..", true).unwrap();
-        assert_eq!(ino_of(&v, root), ino_of(&v, v.root().unwrap()));
+        assert_eq!(st_ino_of(&v, root), st_ino_of(&v, v.root().unwrap()));
     }
 
     #[test]
