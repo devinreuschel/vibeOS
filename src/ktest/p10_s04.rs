@@ -305,7 +305,7 @@ fn lifetime_shootdown_ack_late() -> Outcome {
         others
     };
     let h = pick.trailing_zeros();
-    let Some(stack) = kva_init::alloc_guarded_stack(4) else {
+    let Ok(stack) = kva_init::alloc_guarded_stack(4) else {
         return Outcome::Fail("alloc_guarded_stack");
     };
     let late0 = ipi_init::ack_late_count();

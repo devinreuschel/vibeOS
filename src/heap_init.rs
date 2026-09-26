@@ -11,6 +11,7 @@ use core::ptr;
 use vibeos::heap::{HEAP_END, HEAP_INITIAL, HEAP_SIZE, HEAP_START, Heap, HeapStats, PAGE_SIZE};
 use vibeos::lock::RANK_HEAP;
 use vibeos::paging::{PhysAddr, VirtAddr, heap_flags};
+use vibeos::pmm::Frames;
 
 use crate::paging_init;
 use crate::pmm_init;
@@ -46,13 +47,20 @@ pub fn stats() -> HeapStats {
     HEAP.lock().0.stats()
 }
 
+/// Map one heap page. Its frame's `Frames` is consumed into the leaf: the
+/// heap never unmaps a heap-window page (DESIGN §4.4), so that entry is
+/// the frame's owner record for good.
 fn map_one(va: u64) -> Result<(), ()> {
     let va = VirtAddr(va);
     let r = paging_init::with_pt(|| {
-        let pa = pmm_init::with_buddy(|b| b.allocate_frame()).ok_or(())?;
+        let pa = pmm_init::with_buddy(|b| b.alloc(0)).ok_or(())?.into_entry();
         unsafe {
             paging_init::map_4k_locked(va, PhysAddr(pa), heap_flags()).map_err(|_| {
-                pmm_init::with_buddy(|b| b.deallocate_frame(pa));
+                // SAFETY: `pa` is the order-0 `into_entry` above, and the
+                // failed map wrote no entry, so nothing else names it
+                // (the contract `pmm::Frames::from_entry` states, met here).
+                let f = Frames::from_entry(pa, 0);
+                pmm_init::with_buddy(|b| b.free(f));
             })
         }
     });

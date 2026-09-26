@@ -201,11 +201,11 @@ fn fail_armed(dev: &Device, common: u64, vecs: &[u8], nvec: usize) {
 }
 
 fn slot_base(slots: &DmaBuffer, si: usize) -> *mut u8 {
-    (slots.virt as usize + si * SLOT_STRIDE) as *mut u8
+    (slots.virt() as usize + si * SLOT_STRIDE) as *mut u8
 }
 
 fn slot_dev(slots: &DmaBuffer, si: usize, off: usize) -> u64 {
-    slots.device.as_u64() + (si * SLOT_STRIDE + off) as u64
+    slots.device().as_u64() + (si * SLOT_STRIDE + off) as u64
 }
 
 fn copy_to_bounce(slots: &DmaBuffer, si: usize, req: &Request) {
@@ -815,7 +815,7 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
         return Err(VirtioError::Failed);
     };
     unsafe {
-        core::ptr::write_bytes(slots.virt as *mut u8, 0, slots.len as usize);
+        core::ptr::write_bytes(slots.virt() as *mut u8, 0, slots.len() as usize);
     }
 
     let mut vqs: [Option<Vq>; MAX_VQ] = [None, None, None, None, None, None, None, None];
@@ -941,25 +941,25 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
             return Err(VirtioError::Failed);
         };
         unsafe {
-            core::ptr::write_bytes(qdma.virt as *mut u8, 0, qdma.len as usize);
+            core::ptr::write_bytes(qdma.virt() as *mut u8, 0, qdma.len() as usize);
         }
-        let mut vq = SplitQueue::new(layout, qdma.virt as *mut u8, feat & F_EVENT_IDX != 0);
+        let mut vq = SplitQueue::new(layout, qdma.virt() as *mut u8, feat & F_EVENT_IDX != 0);
         vq.init();
         qdma.sync_for_device();
         w64(
             common,
             COMMON_OFF_QDESC,
-            qdma.device.as_u64() + layout.desc_off as u64,
+            qdma.device().as_u64() + layout.desc_off as u64,
         );
         w64(
             common,
             COMMON_OFF_QDRIVER,
-            qdma.device.as_u64() + layout.avail_off as u64,
+            qdma.device().as_u64() + layout.avail_off as u64,
         );
         w64(
             common,
             COMMON_OFF_QDEVICE,
-            qdma.device.as_u64() + layout.used_off as u64,
+            qdma.device().as_u64() + layout.used_off as u64,
         );
         w16(
             common,

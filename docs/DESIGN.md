@@ -1733,13 +1733,17 @@ lists, and the resulting crash happens later, somewhere unrelated. This is exact
 get guard pages.
 
 ```rust
-pmm_init::with_buddy(|b| ..)                       // the global `Buddy`, RANK_BUDDY, IRQ-off
-Buddy::allocate_frame() -> Option<PhysAddr>        // order 0
-Buddy::allocate(order: u8) -> Option<PhysAddr>     // order <= MAX_ORDER (10)
-Buddy::allocate_constrained(bytes, align, boundary) -> Option<(PhysAddr, u8)>  // DMA, §4.7
-unsafe Buddy::deallocate_frame(pa: PhysAddr)
-unsafe Buddy::deallocate(pa: PhysAddr, order: u8)  // asserts alignment and no double free
-Buddy::stats() -> PmmStats                         // total, free, largest free order
+pmm_init::with_buddy(|b| ..)                   // the global `Buddy`, RANK_BUDDY, IRQ-off
+const Buddy::new(hhdm: u64) -> Buddy           // free-list nodes at phys + hhdm
+Buddy::alloc(order: u8) -> Option<Frames>      // order <= MAX_ORDER (10)
+Buddy::alloc_constrained(order, max_phys) -> Option<Frames>  // ends at or below max_phys
+Buddy::free(f: Frames)                         // safe
+Buddy::order_for(bytes, align) -> Option<u8>   // DMA sizing, §4.7
+Buddy::stats() -> PmmStats                     // total, free, largest free order
+Frames::base() -> PhysAddr, order() -> u8, count() -> usize
+Frames::into_entry(self) -> PhysAddr           // ownership moves into a page-table entry
+unsafe Frames::from_entry(pa, order) -> Frames // only after clearing that entry
+pmm::leaked_frames() -> usize                  // dropped tokens; `meminfo` prints it
 ```
 
 Initialization walks the Limine memory map and ingests every `USABLE` region as power-of-two aligned
@@ -1815,8 +1819,8 @@ naming the allocation site. `GuardedStack`, `DmaBuffer`, the `vmap` handle, and 
 `Frames` they were built from. A frame that a page-table entry maps, a user leaf or a table page, is
 consumed into that entry, which is its owner record until §4.6's frame metadata exists, and only the
 page-table code that removes the entry takes it back, through an `unsafe fn` whose safety comment
-names the entry. Rule; not yet enforced: the API above hands out and takes back `PhysAddr`, so safe
-code can free a frame it does not own (ROADMAP §10.3, F018).
+names the entry. Not yet built: the `vmap` handle (ROADMAP §10.3); until it lands, `kva_init::vmap`
+takes `&[PhysAddr]` and its caller keeps the frames' tokens.
 
 ## 4.3 Page tables
 
@@ -2216,9 +2220,13 @@ non-contiguous frames is the second.
   when CR2 lies in the guard of the stack the interrupted code ran on; it uses the same layout, so
   stack allocation has one path. Rule; not yet enforced: ROADMAP §11.3. Today a guarded stack of *n*
   pages reserves *n+1* pages of VA, maps the upper *n*, and has no alignment.
+- A `GuardedStack` (`vibeos::thread::GuardedStack`, re-exported as `kva_init::GuardedStack`) is a
+  move-only handle with private fields; only `kva_init::alloc_guarded_stack` builds one, and
+  `free_stack` takes it by value.
 - Stack frames are allocated as *n* separate order-0 frames, not one order-*k* block. Stacks do not
-  need physical contiguity and requesting it fragments the buddy allocator for nothing. Planned
-  (ROADMAP §10.3): the `GuardedStack` holds each frame's `Frames` (§4.2).
+  need physical contiguity and requesting it fragments the buddy allocator for nothing. The
+  `GuardedStack` holds each frame's `Frames` (§4.2), and `free_stack` frees those tokens after the
+  shootdown, never whatever the page-table entries name.
 - A freed VA range returns to the free list only after its shootdown completes (§2.4;
   `kva_init::unmap_shootdown`). Freed ranges go to the tail of the free list, so a stale pointer into
   one keeps faulting for as long as possible instead of reaching the range's next owner; that is a
@@ -2344,9 +2352,12 @@ adopts the chained design when the 99th percentile passes 64.
 
 ## 4.7 DMA
 
-`DmaBuffer` is physically contiguous (buddy `allocate_constrained`: size, alignment, and an optional
-power-of-two boundary the buffer must not cross). Planned (ROADMAP §10.3): it holds the `Frames`
-that `alloc_constrained` returns (§4.2). A boundary is not an address limit:
+`DmaBuffer` is physically contiguous: one buddy block whose order `DmaAlloc::order` picks from the
+size, the alignment, and an optional power-of-two boundary the buffer must not cross, refusing a size
+above the boundary. `DmaBuffer` is a move-only handle with private fields; only
+`dma::alloc_from_buddy`, which `dma_init::alloc` calls, builds one, and `dma_init::free` takes it by
+value. It holds the `Frames` that `alloc_constrained` returns (§4.2), with `max_phys = u64::MAX`,
+since no address limit applies until ROADMAP §20.6. A boundary is not an address limit:
 `DmaAlloc::dma32` sets a 4 GiB boundary, so its buffer never crosses a 4 GiB line, but the buffer can
 lie above 4 GiB once RAM extends there, and no allocator keeps a 32-bit device's buffer below 4 GiB
 (ROADMAP §20.6, F030). The device-visible address is `dma_to_device(phys)` (identity until an IOMMU

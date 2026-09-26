@@ -21,9 +21,11 @@ use vibeos::fs::{FsError, InodeKind, O_CREAT, O_RDWR};
 use vibeos::heap::HEAP_SIZE;
 use vibeos::irq::{self, IrqError};
 use vibeos::kva::PAGE_SIZE;
+use vibeos::lock::RANK_DEVICE;
 use vibeos::paging::{PAGE_SIZE_4K, PageFlags, PhysAddr, USER_END, VirtAddr, heap_flags};
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
 use vibeos::per_cpu::PerCpuRemote;
+use vibeos::pmm::Frames;
 use vibeos::proc::{SIGILL, wait_exited, wait_signaled, wexitstatus, wifexited};
 use vibeos::thread::{ThreadId, ThreadState};
 use vibeos::time::{CalibSource, Instant, calib_band, calib_in_band};
@@ -514,7 +516,7 @@ fn warm_kva() -> (usize, usize) {
     let mut coalesces = 0;
     let mut rounds = 0;
     while coalesces < 2 && rounds < WARM_ROUNDS {
-        let Some(stack) = kva_init::alloc_guarded_stack(WARM_STACK_PAGES) else {
+        let Ok(stack) = kva_init::alloc_guarded_stack(WARM_STACK_PAGES) else {
             break;
         };
         let n = kva_init::stats().free_ranges;
@@ -564,11 +566,14 @@ pub(crate) fn free_frames() -> usize {
 }
 
 pub(crate) fn alloc_frame() -> Option<PhysAddr> {
-    pmm_init::with_buddy(|b| b.allocate_frame()).map(PhysAddr)
+    alloc_frames(0)
 }
 
 pub(crate) fn free_frame(pa: PhysAddr) {
-    pmm_init::with_buddy(|b| unsafe { b.deallocate_frame(pa.as_u64()) });
+    // SAFETY: an unknown base frees nothing, and a held one is freed once
+    // (`ktest::take_held` removes it), so the contract of
+    // `ktest::dealloc_frames` holds for any `pa`.
+    unsafe { dealloc_frames(pa, 0) };
 }
 
 pub(crate) struct Fault {
@@ -602,19 +607,56 @@ pub(crate) fn spawn_thread_on(name: &'static str, entry: fn(), cpu: u32) -> Thre
     thread_init::spawn_on(name, entry, cpu)
 }
 
-/// A naturally aligned block of `1 << order` frames.
-pub(crate) fn alloc_frames(order: u8) -> Option<PhysAddr> {
-    pmm_init::with_buddy(|b| b.allocate(order)).map(PhysAddr)
+/// Blocks the frame helpers handed out, as the `Frames` that own them.
+/// The helpers trade bare addresses (C-SUITES), so the tokens wait here.
+/// Never held together with BUDDY.
+static HELD: SpinMutex<[Option<Frames>; 16]> =
+    SpinMutex::with_rank([const { None }; 16], RANK_DEVICE);
+
+/// Remove and return the held token whose base is `pa`.
+fn take_held(pa: PhysAddr) -> Option<Frames> {
+    let mut held = HELD.lock();
+    let slot = held
+        .iter_mut()
+        .find(|s| s.as_ref().is_some_and(|f| f.base() == pa.as_u64()))?;
+    slot.take()
 }
 
+/// A naturally aligned block of `1 << order` frames. `None` when the
+/// buddy is out, or when 16 blocks are already out through these helpers.
+pub(crate) fn alloc_frames(order: u8) -> Option<PhysAddr> {
+    let f = pmm_init::with_buddy(|b| b.alloc(order))?;
+    let pa = PhysAddr(f.base());
+    let spare = {
+        let mut held = HELD.lock();
+        match held.iter_mut().find(|s| s.is_none()) {
+            Some(slot) => {
+                *slot = Some(f);
+                None
+            }
+            None => Some(f),
+        }
+    };
+    match spare {
+        None => Some(pa),
+        Some(f) => {
+            pmm_init::with_buddy(|b| b.free(f));
+            None
+        }
+    }
+}
+
+/// Free a block [`alloc_frames`] returned. A base it did not hand out, or
+/// already freed, is ignored.
+///
 /// # Safety
 /// `pa` is a block that [`alloc_frames`] returned for this same `order`, and
-/// it is freed once.
+/// nothing still maps or uses it.
 pub(crate) unsafe fn dealloc_frames(pa: PhysAddr, order: u8) {
-    // SAFETY: `pa` is a live order-`order` block from `pmm::Buddy::allocate`,
-    // freed once; established by `ktest::alloc_frames` and this fn's
-    // `# Safety` contract.
-    pmm_init::with_buddy(|b| unsafe { b.deallocate(pa.as_u64(), order) });
+    if let Some(f) = take_held(pa) {
+        debug_assert_eq!(f.order(), order, "ktest: dealloc_frames order");
+        pmm_init::with_buddy(|b| b.free(f));
+    }
 }
 
 pub(crate) fn cpu_remote(id: u32) -> Option<&'static PerCpuRemote> {
@@ -820,16 +862,16 @@ fn test_heap_oom() -> Outcome {
 }
 
 fn test_stack_guard() -> Outcome {
-    let Some(stack) = kva_init::alloc_guarded_stack(4) else {
+    let Ok(stack) = kva_init::alloc_guarded_stack(4) else {
         return Outcome::Fail("alloc_guarded_stack");
     };
-    unsafe { (stack.mapped_base().as_u64() as *mut u64).write_volatile(0x1111_2222) };
-    let got = unsafe { (stack.mapped_base().as_u64() as *const u64).read_volatile() };
+    unsafe { (stack.base().as_u64() as *mut u64).write_volatile(0x1111_2222) };
+    let got = unsafe { (stack.base().as_u64() as *const u64).read_volatile() };
     if got != 0x1111_2222 {
         kva_init::free_stack(stack);
         return Outcome::Fail("mapped stack not writable");
     }
-    let guard = stack.guard.as_u64();
+    let guard = stack.guard().as_u64();
     let fault = catch_fault(|| unsafe {
         (guard as *mut u8).write_volatile(1);
     });
@@ -843,7 +885,7 @@ fn test_stack_guard() -> Outcome {
 
 fn test_kva_roundtrip() -> Outcome {
     let before = free_frames();
-    let Some(stack) = kva_init::alloc_guarded_stack(4) else {
+    let Ok(stack) = kva_init::alloc_guarded_stack(4) else {
         return Outcome::Fail("alloc_guarded_stack");
     };
     let mid = free_frames();
@@ -863,7 +905,7 @@ fn test_kva_roundtrip() -> Outcome {
 
 fn test_kva_deferred() -> Outcome {
     let before = free_frames();
-    let Some(stack) = kva_init::alloc_guarded_stack(4) else {
+    let Ok(stack) = kva_init::alloc_guarded_stack(4) else {
         return Outcome::Fail("alloc_guarded_stack");
     };
     let mid = free_frames();
@@ -1410,10 +1452,10 @@ fn test_bootcell_set_once() -> Outcome {
 }
 
 fn test_df_on_ist() -> Outcome {
-    let Some(stack) = kva_init::alloc_guarded_stack(1) else {
+    let Ok(stack) = kva_init::alloc_guarded_stack(1) else {
         return Outcome::Fail("guarded stack");
     };
-    let poison = stack.guard.as_u64() + 0x800;
+    let poison = stack.guard().as_u64() + 0x800;
     let g = x86::InterruptGuard::enter();
     let caught = arch::catch::catch(vectors::DF, || unsafe {
         vibeos_fault_on_bad_stack(poison);
@@ -3725,19 +3767,20 @@ fn test_dma_alloc() -> Outcome {
     let Some(buf) = dma_init::alloc(DmaAlloc::dma32(0x1000)) else {
         return Outcome::Fail("alloc");
     };
-    if buf.device.as_u64() != buf.phys {
+    if buf.device().as_u64() != buf.phys() {
         dma_init::free(buf);
         return Outcome::Fail("device != phys");
     }
-    if buf.virt != paging_init::HHDM_BASE.wrapping_add(buf.phys) {
+    if buf.virt() != paging_init::HHDM_BASE.wrapping_add(buf.phys()) {
         dma_init::free(buf);
         return Outcome::Fail("virt not hhdm");
     }
-    if buf.device.as_u64() == buf.virt {
+    if buf.device().as_u64() == buf.virt() {
         dma_init::free(buf);
         return Outcome::Fail("device is va");
     }
-    if buf.phys >= DMA32_BOUNDARY || dma::crosses_boundary(buf.phys, buf.len, DMA32_BOUNDARY) {
+    if buf.phys() >= DMA32_BOUNDARY || dma::crosses_boundary(buf.phys(), buf.len(), DMA32_BOUNDARY)
+    {
         dma_init::free(buf);
         return Outcome::Fail("dma32");
     }
@@ -3753,7 +3796,7 @@ fn test_dma_alloc() -> Outcome {
             return Outcome::Fail("sg");
         }
     };
-    if sg.n != 1 || sg.entries[0].addr != buf.device {
+    if sg.n != 1 || sg.entries[0].addr != buf.device() {
         dma_init::free(buf);
         return Outcome::Fail("sg entry");
     }
@@ -3811,7 +3854,7 @@ fn test_dma_edu() -> Outcome {
     }
     src.sync_for_device();
     dst.sync_for_device();
-    mmio_w32(mmio, EDU_DMA_SRC, src.device.as_u64() as u32);
+    mmio_w32(mmio, EDU_DMA_SRC, src.device().as_u64() as u32);
     mmio_w32(mmio, EDU_DMA_DST, EDU_DMA_BUF);
     mmio_w32(mmio, EDU_DMA_CNT, 64);
     dma::dma_wmb();
@@ -3825,7 +3868,7 @@ fn test_dma_edu() -> Outcome {
         return Outcome::Fail("dma to edu");
     }
     mmio_w32(mmio, EDU_DMA_SRC, EDU_DMA_BUF);
-    mmio_w32(mmio, EDU_DMA_DST, dst.device.as_u64() as u32);
+    mmio_w32(mmio, EDU_DMA_DST, dst.device().as_u64() as u32);
     mmio_w32(mmio, EDU_DMA_CNT, 64);
     dma::dma_wmb();
     mmio_w32(mmio, EDU_DMA_CMD, EDU_DMA_RUN | EDU_DMA_TO_PCI);

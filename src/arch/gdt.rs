@@ -9,7 +9,6 @@ use alloc::boxed::Box;
 use core::mem::size_of;
 
 use vibeos::desc::{GDT_LIMIT, Gdt, IstSlot, KERNEL_CS, KERNEL_DS, TSS_SEL, Tss};
-use vibeos::paging::VirtAddr;
 
 use crate::cell::BootCell;
 use crate::kva_init::{self, GuardedStack};
@@ -77,22 +76,6 @@ struct Bsp {
     rsp0: GuardedStack,
 }
 
-impl Bsp {
-    const fn empty() -> Self {
-        Self {
-            tables: CpuTables::empty(),
-            ist: [GuardedStack {
-                guard: VirtAddr(0),
-                pages: 0,
-            }; 4],
-            rsp0: GuardedStack {
-                guard: VirtAddr(0),
-                pages: 0,
-            },
-        }
-    }
-}
-
 static BSP: BootCell<Bsp> = BootCell::new();
 
 /// Per-AP GDT/TSS plus the IST/RSP0 stacks they point at.
@@ -104,29 +87,41 @@ pub struct ApTables {
 
 /// Allocate per-CPU GDT/TSS and guarded IST/RSP0 stacks. Caller `load`s.
 pub fn alloc_ap_tables() -> Option<ApTables> {
-    let ist0 = kva_init::alloc_guarded_stack(IST_PAGES)?;
-    let ist1 = kva_init::alloc_guarded_stack(IST_PAGES).or_else(|| {
-        kva_init::free_stack(ist0);
-        None
-    })?;
-    let ist2 = kva_init::alloc_guarded_stack(IST_PAGES).or_else(|| {
-        kva_init::free_stack(ist0);
-        kva_init::free_stack(ist1);
-        None
-    })?;
-    let ist3 = kva_init::alloc_guarded_stack(IST_PAGES).or_else(|| {
-        kva_init::free_stack(ist0);
-        kva_init::free_stack(ist1);
-        kva_init::free_stack(ist2);
-        None
-    })?;
-    let rsp0 = kva_init::alloc_guarded_stack(RSP0_PAGES).or_else(|| {
-        kva_init::free_stack(ist0);
-        kva_init::free_stack(ist1);
-        kva_init::free_stack(ist2);
-        kva_init::free_stack(ist3);
-        None
-    })?;
+    let ist0 = kva_init::alloc_guarded_stack(IST_PAGES).ok()?;
+    let ist1 = match kva_init::alloc_guarded_stack(IST_PAGES) {
+        Ok(s) => s,
+        Err(_) => {
+            kva_init::free_stack(ist0);
+            return None;
+        }
+    };
+    let ist2 = match kva_init::alloc_guarded_stack(IST_PAGES) {
+        Ok(s) => s,
+        Err(_) => {
+            kva_init::free_stack(ist0);
+            kva_init::free_stack(ist1);
+            return None;
+        }
+    };
+    let ist3 = match kva_init::alloc_guarded_stack(IST_PAGES) {
+        Ok(s) => s,
+        Err(_) => {
+            kva_init::free_stack(ist0);
+            kva_init::free_stack(ist1);
+            kva_init::free_stack(ist2);
+            return None;
+        }
+    };
+    let rsp0 = match kva_init::alloc_guarded_stack(RSP0_PAGES) {
+        Ok(s) => s,
+        Err(_) => {
+            kva_init::free_stack(ist0);
+            kva_init::free_stack(ist1);
+            kva_init::free_stack(ist2);
+            kva_init::free_stack(ist3);
+            return None;
+        }
+    };
     let ist = [ist0, ist1, ist2, ist3];
     let mut tables = Box::new(CpuTables::empty());
     tables.init(
@@ -142,12 +137,12 @@ pub fn alloc_ap_tables() -> Option<ApTables> {
 }
 
 pub fn free_ap_tables(t: ApTables) {
-    kva_init::free_stack(t.rsp0);
-    let mut i = 0;
-    while i < t.ist.len() {
-        kva_init::free_stack(t.ist[i]);
-        i += 1;
+    let ApTables { tables, ist, rsp0 } = t;
+    kva_init::free_stack(rsp0);
+    for s in ist {
+        kva_init::free_stack(s);
     }
+    drop(tables);
 }
 
 /// Allocate IST + RSP0 stacks, fill GDT/TSS, load them.
@@ -169,9 +164,11 @@ pub unsafe fn init_bsp() {
         ist[3].top().as_u64(),
     ];
     let rsp0_top = rsp0.top().as_u64();
-    let mut bsp = Bsp::empty();
-    bsp.ist = ist;
-    bsp.rsp0 = rsp0;
+    let bsp = Bsp {
+        tables: CpuTables::empty(),
+        ist,
+        rsp0,
+    };
     // `tables.init` writes the TSS base into the GDT. Do that after
     // `set` so the base is the BootCell address, not this stack slot.
     unsafe { BSP.set(bsp) };
@@ -189,11 +186,11 @@ pub fn bsp_rsp0_top() -> u64 {
     BSP.get().rsp0.top().as_u64()
 }
 
-/// `[mapped_base, top)` of an IST stack. Used by the in-guest DF test.
+/// `[base, top)` of an IST stack. Used by the in-guest DF test.
 #[allow(dead_code)]
 pub fn ist_span(slot: IstSlot) -> (u64, u64) {
-    let s = BSP.get().ist[slot.index()];
-    (s.mapped_base().as_u64(), s.top().as_u64())
+    let s = &BSP.get().ist[slot.index()];
+    (s.base().as_u64(), s.top().as_u64())
 }
 
 /// # Safety

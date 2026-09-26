@@ -2,7 +2,8 @@
 //! Kernel AddressSpace: buddy + PT lock. ROADMAP §9.2.
 
 use vibeos::addr_space::{AddressSpace, AsError, FrameFree, TeardownStats, UserPerms};
-use vibeos::paging::{FrameAlloc, PAGE_SIZE_4K, PhysAddr};
+use vibeos::paging::{FrameAlloc, PAGE_SIZE_4K};
+use vibeos::pmm::Frames;
 
 use crate::paging_init;
 use crate::per_cpu_init;
@@ -12,16 +13,14 @@ use crate::x86;
 struct BuddyPool;
 
 unsafe impl FrameAlloc for BuddyPool {
-    fn alloc_frame(&mut self) -> Option<PhysAddr> {
-        pmm_init::with_buddy(|b| b.allocate_frame()).map(PhysAddr)
+    fn alloc_frame(&mut self) -> Option<Frames> {
+        pmm_init::with_buddy(|b| b.alloc(0))
     }
 }
 
 unsafe impl FrameFree for BuddyPool {
-    /// # Safety
-    /// `pa` is an owned frame this pool may return to the buddy.
-    unsafe fn free_frame(&mut self, pa: PhysAddr) {
-        pmm_init::with_buddy(|b| unsafe { b.deallocate_frame(pa.as_u64()) });
+    fn free_frame(&mut self, f: Frames) {
+        pmm_init::with_buddy(|b| b.free(f));
     }
 }
 

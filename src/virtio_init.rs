@@ -199,7 +199,7 @@ fn harvest() {
             }
             if n != 0 {
                 q.data.sync_for_cpu();
-                publish_pool(q.data.virt, last);
+                publish_pool(q.data.virt(), last);
                 IN_FLIGHT.store(false, Ordering::Release);
             }
         }
@@ -308,26 +308,26 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
         return Err(VirtioError::Failed);
     };
     unsafe {
-        core::ptr::write_bytes(qdma.virt as *mut u8, 0, qdma.len as usize);
-        core::ptr::write_bytes(data.virt as *mut u8, 0, data.len as usize);
+        core::ptr::write_bytes(qdma.virt() as *mut u8, 0, qdma.len() as usize);
+        core::ptr::write_bytes(data.virt() as *mut u8, 0, data.len() as usize);
     }
-    let mut vq = SplitQueue::new(layout, qdma.virt as *mut u8, feat & F_EVENT_IDX != 0);
+    let mut vq = SplitQueue::new(layout, qdma.virt() as *mut u8, feat & F_EVENT_IDX != 0);
     vq.init();
     qdma.sync_for_device();
     w64(
         common,
         COMMON_OFF_QDESC,
-        qdma.device.as_u64() + layout.desc_off as u64,
+        qdma.device().as_u64() + layout.desc_off as u64,
     );
     w64(
         common,
         COMMON_OFF_QDRIVER,
-        qdma.device.as_u64() + layout.avail_off as u64,
+        qdma.device().as_u64() + layout.avail_off as u64,
     );
     w64(
         common,
         COMMON_OFF_QDEVICE,
-        qdma.device.as_u64() + layout.used_off as u64,
+        qdma.device().as_u64() + layout.used_off as u64,
     );
     w16(common, COMMON_OFF_QMSIX, 0);
     w16(common, COMMON_OFF_QENABLE, 1);
@@ -350,9 +350,9 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
 
     ISR_VA.store(isr, Ordering::Release);
     FEATURES.store(feat, Ordering::Release);
-    QDMA_DEV.store(qdma.device.as_u64(), Ordering::Release);
-    DATA_DEV.store(data.device.as_u64(), Ordering::Release);
-    DATA_VIRT.store(data.virt, Ordering::Release);
+    QDMA_DEV.store(qdma.device().as_u64(), Ordering::Release);
+    DATA_DEV.store(data.device().as_u64(), Ordering::Release);
+    DATA_VIRT.store(data.virt(), Ordering::Release);
 
     let mut g = Q.lock();
     *g = Some(Q {
@@ -518,15 +518,15 @@ pub fn rng_request() -> Result<(), VirtioError> {
     if IN_FLIGHT.load(Ordering::Acquire) {
         return Ok(());
     }
-    let table = q.data.device.as_u64();
+    let table = q.data.device().as_u64();
     let payload = table + RNG_PAYLOAD_OFF as u64;
     unsafe {
         core::ptr::write_bytes(
-            (q.data.virt as *mut u8).add(RNG_PAYLOAD_OFF),
+            (q.data.virt() as *mut u8).add(RNG_PAYLOAD_OFF),
             0,
             RNG_PAYLOAD,
         );
-        write_indirect_write(q.data.virt as *mut u8, payload, RNG_PAYLOAD as u32);
+        write_indirect_write(q.data.virt() as *mut u8, payload, RNG_PAYLOAD as u32);
     }
     q.data.sync_for_device();
     if q.features & F_INDIRECT_DESC != 0 {

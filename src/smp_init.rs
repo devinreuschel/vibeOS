@@ -21,7 +21,7 @@ use crate::apic_init;
 use crate::arch;
 use crate::arch::gdt::{self, ApTables, CpuTables};
 use crate::cell::IrqCell;
-use crate::kva_init::{self, GuardedStack};
+use crate::kva_init;
 use crate::per_cpu_init;
 use crate::thread_init;
 use crate::time_init;
@@ -60,7 +60,8 @@ struct ApAlloc {
     cpu_id: u32,
     apic_id: u8,
     tables: ApTables,
-    stack: GuardedStack,
+    /// The idle stack's top, read before the stack moves into its TCB.
+    stack_top: u64,
     idle_id: ThreadId,
     published: bool,
 }
@@ -102,16 +103,20 @@ fn patch_params(cr3: u64, stack_top: u64, entry: u64, idt_limit: u16, idt_base: 
 fn alloc_ap_resources(cpu_id: u32, apic_id: u8, publish: bool) -> Option<ApAlloc> {
     let tables = gdt::alloc_ap_tables()?;
     let stack = match kva_init::alloc_guarded_stack(DEFAULT_STACK_PAGES) {
-        Some(s) => s,
-        None => {
+        Ok(s) => s,
+        Err(_) => {
             gdt::free_ap_tables(tables);
             return None;
         }
     };
-    let Some(idle_id) = thread_init::adopt_ap_idle(cpu_id, stack) else {
-        kva_init::free_stack(stack);
-        gdt::free_ap_tables(tables);
-        return None;
+    let stack_top = stack.top().as_u64();
+    let idle_id = match thread_init::adopt_ap_idle(cpu_id, stack) {
+        Ok(id) => id,
+        Err(stack) => {
+            kva_init::free_stack(stack);
+            gdt::free_ap_tables(tables);
+            return None;
+        }
     };
     let idle_ptr = thread_init::tcb_ptr(idle_id);
     if publish {
@@ -135,7 +140,7 @@ fn alloc_ap_resources(cpu_id: u32, apic_id: u8, publish: bool) -> Option<ApAlloc
         cpu_id,
         apic_id,
         tables,
-        stack,
+        stack_top,
         idle_id,
         published: publish,
     })
@@ -165,8 +170,6 @@ fn free_ap_resources(a: ApAlloc, sipi_sent: bool) {
     }
     if let Some(stack) = thread_init::abandon_ap_idle(a.idle_id) {
         kva_init::free_stack(stack);
-    } else {
-        kva_init::free_stack(a.stack);
     }
     gdt::free_ap_tables(a.tables);
 }
@@ -192,7 +195,7 @@ fn start_one(a: ApAlloc) -> bool {
         free_ap_resources(a, false);
         return false;
     }
-    let stack_top = a.stack.top().as_u64();
+    let stack_top = a.stack_top;
     let entry = ap_entry as *const () as usize as u64;
     let (idt_limit, idt_base) = arch::idt::pointer();
 
