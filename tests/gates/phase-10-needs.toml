@@ -338,7 +338,7 @@ needs = [
   "`make test-unit` runs doc tests,",  # L1293
   "`kva_init::vmap` returns a move-only handle",  # L1299
 ]
-why = "text: lands with or after the box above; claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+why = "text: lands with or after the box above; claim: missing edge found by the Phase 10 planning survey and review (extra, survey); claim: the vmap handle holds its Frames (box 1299)"
 
 [[box]]
 key = "an IF-off tracer in an `irqoff` build variant"
@@ -504,5 +504,13 @@ why = "the §9.4 deferral box"
 key = "`scripts/check_cells.py` reads each `unsafe impl`"
 needs = [
   "`BootCell<T>` is `Sync` only when",  # L1284
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1294
+[[box]]
+key = "`addr_space_init::load_cr3_u64` and `syscall_init::switch_cr3_for` become `unsafe"
+needs = [
+  "`IrqCell::force_unlock`, `log_init::force_unlock`, which calls it,",  # L1285
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
