@@ -393,6 +393,12 @@ const fn align_down(x: u64, align: u64) -> u64 {
 }
 
 /// True if `[phys, phys+size)` straddles a power-of-two `boundary`.
+///
+/// ```
+/// use vibeos::pmm::crosses_boundary;
+/// assert!(crosses_boundary(0xFFFF_F800, 0x1000, 1 << 32));
+/// assert!(!crosses_boundary(0x1000, 0x1000, 1 << 32));
+/// ```
 pub const fn crosses_boundary(phys: u64, size: u64, boundary: u64) -> bool {
     if boundary == 0 || size == 0 {
         return false;
