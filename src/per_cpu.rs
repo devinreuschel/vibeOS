@@ -168,6 +168,10 @@ pub struct PerCpu {
     /// the stacks themselves (`kva_init::park_on_list`); 0 when empty. This
     /// CPU's workqueue worker frees them with IF=1.
     pub dead_list: u64,
+    /// The TCB address of the thread whose FP state this CPU's registers
+    /// last held, `fpu::NO_OWNER` for none (DESIGN §7.5, the FP binding).
+    /// Compared, never dereferenced.
+    pub fp_owner: usize,
     /// This CPU's view in `per_cpu_init`'s separate array, the only
     /// per-CPU state another CPU reads.
     pub remote: &'static PerCpuRemote,
@@ -210,6 +214,7 @@ impl PerCpu {
             dead_stack: None,
             stack_cache: StackCache::new(),
             dead_list: 0,
+            fp_owner: crate::fpu::NO_OWNER,
             remote,
         }
     }
@@ -236,6 +241,12 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fp_owner_starts_empty() {
+        static R: PerCpuRemote = PerCpuRemote::new();
+        assert_eq!(PerCpu::new(&R).fp_owner, crate::fpu::NO_OWNER);
+    }
 
     #[test]
     fn self_ptr_is_offset_zero() {

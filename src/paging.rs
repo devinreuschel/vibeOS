@@ -44,6 +44,12 @@ pub const PTES_PER_TABLE: usize = 512;
 /// User canonical half, exclusive end. DESIGN §4.1.
 pub const USER_END: u64 = 0x0000_8000_0000_0000;
 pub const USER_MAX: u64 = USER_END - 1;
+/// Exclusive end of what a user mapping may cover: the top page of the
+/// canonical half stays unmapped, so a `syscall` in the last mapped page
+/// cannot leave a non-canonical return RIP (DESIGN §4.1, C-USERMAPEND).
+/// The ELF loader and every user range check use it.
+pub const USER_MAP_END: u64 = USER_END - PAGE_SIZE_4K;
+const _: () = assert!(USER_MAP_END == 0x0000_7FFF_FFFF_F000);
 /// First page of the user half stays unmapped (null deref). ROADMAP §9.2.
 pub const NULL_GUARD_LEN: u64 = PAGE_SIZE_4K;
 /// PML4 indices `KERNEL_PML4_FIRST..512` are the shared kernel half.
@@ -867,6 +873,13 @@ unsafe impl FrameAlloc for crate::pmm::testing::Pool {
 mod tests {
     use super::*;
     use crate::pmm::testing::Pool;
+
+    #[test]
+    fn user_map_end_is_top_page_below_user_end() {
+        assert_eq!(USER_MAP_END, 0x0000_7FFF_FFFF_F000);
+        assert_eq!(USER_END - USER_MAP_END, PAGE_SIZE_4K);
+        assert!(is_canonical(USER_MAP_END) && !is_canonical(USER_END));
+    }
 
     /// A mapper over a fresh root from `pool`. The root's token moves
     /// into the mapper, which the test never tears down.

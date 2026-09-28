@@ -258,7 +258,8 @@ fn init_8042() -> bool {
     true
 }
 
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+/// Queue `k` as if the keyboard had sent it. Test hook (AGENTS.md rule 9).
+#[cfg(feature = "kernel_tests")]
 pub fn push_for_test(k: DecodedKey) {
     KBD.with(|kbd| kbd.ring.push(k));
 }

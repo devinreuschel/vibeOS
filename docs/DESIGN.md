@@ -1365,11 +1365,14 @@ Target notes:
 - `disable-redzone: true`. Interrupt handlers clobber the red zone.
 - Frame pointers are forced (`-C force-frame-pointers=yes`) so panic dumps can symbolize.
 - The kernel is built soft-float, so compiled kernel code uses no SSE or x87 registers; kernel SSE
-  would need a save around each use, and none exists. User code gets SSE: `arch::cpu::init_control_regs`
-  clears `CR0.EM` and `CR0.TS` and sets `CR0.MP`, `CR0.NE`, `CR4.OSFXSR` and `CR4.OSXMMEXCPT` on
-  every CPU, so x87 and SSE floating-point errors reach `#MF` and `#XF` (§5.2), and
-  `syscall_init::switch_fpu` saves and restores each thread's 512-byte FXSAVE image (`Tcb.fpu`) on
-  every switch.
+  would need a save around each use, and none exists. Nothing traps a kernel FP use, since `CR0.TS`
+  stays clear, so `make` runs `scripts/check_kernel_fp.py` on each linked kernel ELF: with the
+  toolchain's `llvm-objdump` (the `llvm-tools` component) it fails the build, and deletes the ELF,
+  on any x87, MMX, SSE, or AVX instruction outside `syscall_init::fp_save`, `fp_load`, and
+  `fp_init_template`. User code gets SSE: `arch::cpu::init_control_regs` clears `CR0.EM` and
+  `CR0.TS` and sets `CR0.MP`, `CR0.NE`, `CR4.OSFXSR` and `CR4.OSXMMEXCPT` on every CPU, so x87 and
+  SSE floating-point errors reach `#MF` and `#XF` (§5.2), and each thread's 512-byte FXSAVE image
+  (`Tcb.fpu`) follows the FP binding (§7.5).
 - User code never builds for a bare target. `x86_64-unknown-none` has the soft-float Rust ABI: an
   `f64` multiply compiles to a call to `__muldf3`, `f64` arguments pass in integer registers, and
   rustc warns that enabling SSE there breaks the target's ABI. A user program built for it would use
@@ -1607,7 +1610,7 @@ adopting it re-plans this table. Kernel regions are fixed, not discovered, excep
 
 | Range | Size | Role |
 |-------|------|------|
-| `0x0000_0000_0000_0000` – `0x0000_7FFF_FFFF_FFFF` | 128 TiB | User address space, one PML4 per process (`AddressSpace`), below `USER_END`. Page 0 is never mapped (`NULL_GUARD_LEN`). The top 4 KiB page is mappable, so a `syscall` in its last two bytes leaves RCX non-canonical (`0x0000_8000_0000_0000`), and on KVM and hardware the exit `iretq` raises `#GP` on the user GS base (ROADMAP §10.6, F007). Each user PML4 copies the kernel's PML4[256..512) at creation, so the whole kernel half stays mapped, supervisor-only, while ring 3 runs: no KPTI (ROADMAP §18.3, F024, F133). |
+| `0x0000_0000_0000_0000` – `0x0000_7FFF_FFFF_FFFF` | 128 TiB | User address space, one PML4 per process (`AddressSpace`), below `USER_END`. Page 0 is never mapped (`NULL_GUARD_LEN`). The top 4 KiB page is never mapped either: user mappings end at `USER_MAP_END` (`0x0000_7FFF_FFFF_F000`), which the ELF loader and every address-space range check use, so a `syscall` in the last mappable page returns to a canonical RIP. The syscall exit still sends a non-canonical saved RIP to `SIGSEGV` (§5.10 rule 2). Each user PML4 copies the kernel's PML4[256..512) at creation, so the whole kernel half stays mapped, supervisor-only, while ring 3 runs: no KPTI (ROADMAP §18.3, F024, F133). |
 | `0x0000_0000_0000_0000` – `0x0000_0000_2000_0000` | 512 MiB | Low identity window, kernel PML4 only (user PML4s do not copy slot 0). 2 MiB pages, GLOBAL; the first 2 MiB supervisor writable and executable. |
 | *hole* | | Non-canonical. Any pointer here is a bug. |
 | Limine's HHDM offset +, inside the slot `0xFFFF_8000_0000_0000` – `0xFFFF_C000_0000_0000` | 64 TiB slot; today `map_end` ≤ 8 GiB, plus leaves added above it | Physmap, `virt = phys + ` the HHDM offset, discovered at boot (below the table); today the constant `HHDM_BASE`, which `boot::capture` asserts Limine's offset equals. 2 MiB pages up to `map_end`. Above it: 4 KiB leaves from `acpi_init::map_gap` (no cap), and write-back leaves for a display BAR0 from `paging_init::ensure_physmap_wb` (below `PHYSMAP_CAP`). The physmap never leaves its slot (below the table). |
@@ -2513,7 +2516,7 @@ because it is Linux's compat code segment, and a far transfer or `rt_sigreturn` 
 `SIGSEGV` (`docs/LINUX.md`, `no-compat-cs`). The kernel selectors are invisible to user code and keep
 their places. Rule; not yet enforced: ROADMAP §10.6. Today user data is `0x18`, user code `0x20`, and
 the TSS `0x28`, and `STAR.SYSRET_CS` is `0x10`, so ring 3 runs with CS `0x23`, which is Linux's compat
-code selector, and SS `0x1B`, and `enter_user` and `enter_user_full` load `0x1B` into DS, ES, FS, and
+code selector, and SS `0x1B`, and `enter_user_full` loads `0x1B` into DS, ES, FS, and
 GS.
 
 User-memory access will go through `copy_from_user`/`copy_to_user`, which dereference the user VA
@@ -2601,8 +2604,8 @@ fault, downstream of it.
 | `0x04`, `0x05`, `0x07`, `0x0A` | `#OF`, `#BR`, `#NM`, `#TS` | dump, halt | `SIGSEGV` | `sig_for_vec` has no row, so one would halt the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
 | `0x06` | `#UD` | dump, halt | `SIGILL` | as the rule |
 | `0x08` | `#DF` | dump on IST, halt | not a ring-3 fault: the Ring 0 column applies | as the rule |
-| `0x0B`, `0x0C` | `#NP`, `#SS` | dump, halt | `SIGBUS`; `SIGSEGV` for a fault on the return-to-user `iretq` (§5.10 rule 2) | the `iretq` case halts. Rule; not yet enforced: ROADMAP §10.6 (F007) |
-| `0x0D` | `#GP` | dump with error code, halt | `SIGSEGV`, including a fault on the return-to-user `iretq` (§5.10 rule 2) | the `iretq` case halts. Rule; not yet enforced: ROADMAP §10.6 (F007) |
+| `0x0B`, `0x0C` | `#NP`, `#SS` | dump, halt | `SIGBUS`; `SIGSEGV` for a fault on the return-to-user `iretq` (§5.10 rule 2) | as the rule |
+| `0x0D` | `#GP` | dump with error code, halt | `SIGSEGV`, including a fault on the return-to-user `iretq` (§5.10 rule 2) | as the rule |
 | `0x0E` | `#PF` | dump with CR2, halt. Planned (ROADMAP §10.6, §12.2): a fault inside a user-memory accessor is handled by that accessor's kind (§5.1) and ends in `EFAULT` or a short count | `SIGSEGV`. Planned (ROADMAP §12.2): a fault on a page that a region reserves is resolved first, and one through a file mapping on a page wholly past EOF, or on a page whose fill fails, gets `SIGBUS`, and so does a store through a shared file mapping whose space reservation fails (§4.3) | as the rule |
 | `0x10` | `#MF` | dump, halt | `SIGFPE` | as the rule |
 | `0x11` | `#AC` | dump, halt | `SIGBUS`, for a misaligned access while ring 3 has set RFLAGS.AC; `CR0.AM` is set on every CPU, as Linux sets it | as the rule |
@@ -2907,7 +2910,7 @@ not "fix" this by inheriting the outgoing nest onto the incoming thread.
 ## 5.10 Privilege transitions
 
 Every entry to and exit from ring 3, and the state each boundary must hold. "User GS" means
-`GS_BASE` holds the user base (0; `enter_user` and `enter_user_full` write it) and `KERNEL_GS_BASE`
+`GS_BASE` holds the user base (0; `enter_user_full` writes it) and `KERNEL_GS_BASE`
 holds this CPU's `PerCpu`. "Kernel GS" means `GS_BASE` holds this CPU's `PerCpu`; `KERNEL_GS_BASE`
 then holds the user base after a `swapgs`, or the `PerCpu` address after `per_cpu_init::init_bsp`,
 `install_gs`, or `arch::gs::force_kernel` (§7.5). The table is the required state. A rule the
@@ -2948,7 +2951,7 @@ its RIP and RFLAGS cannot be returned to; and `enter_user_full` takes a second f
 | `vibeos_syscall_entry`, before its `swapgs` | 0, user RSP | user | 0 (FMASK) | 0 (FMASK) |
 | syscall entry after its `swapgs`, and the syscall body | 0, `PerCpu.kernel_rsp0` | kernel | 0 until the stub has moved the user RSP out of the scratch and runs `sti`; 1 in the body ([§2.9](#29-preemption-and-interrupt-state) rule 3) | 0 |
 | syscall exit, from the return of `vibeos_syscall_stub` to `sysretq` or `iretq` | 0, kernel stack, then the user RSP | kernel; user after `swapgs` | 0 (rule 4) | 0 |
-| `enter_user` and `enter_user_full`, from `mov gs` to `iretq` | 0, kernel stack | user | 0 (rule 4) | 0 |
+| `enter_user_full`, from `mov gs` to `iretq` | 0, kernel stack | user | 0 (rule 4) | 0 |
 | non-IST vector taken at CPL 3 | 0, TSS.RSP0 | user until the stub's `swapgs` | 0 (interrupt gate); a fault or trap body then runs with IF=1, after the stub has saved the syndrome (rule 9), an interrupt's top half with IF=0 (§2.9 rule 3) | ring 3's until the stub's `clac` (rule 5) |
 | non-IST vector taken at CPL 0 | 0, interrupted stack | kernel, except rule 2's case | 0 (interrupt gate) | the interrupted value until the stub's `clac` (rule 5) |
 | IST vector taken at CPL 0 (`#DB`, NMI, `#MC`), and `#DF` | 0, its IST stack | whatever the interrupted point held (rule 3) | 0 | the interrupted value until the stub's `clac` (rule 5) |
@@ -2978,10 +2981,15 @@ architectures. Planned (ROADMAP §11.3, §11.6): the aarch64 port does not exist
    exception: a `#GP`, `#NP`, or `#SS` whose saved RIP is a return-to-user `iretq` arrives with the
    kernel CS and the user GS, and its handler swaps GS and sends the process `SIGSEGV`. User
    mappings end at `USER_MAP_END` (`0x0000_7FFF_FFFF_F000`), so a `syscall` in the last user page
-   cannot leave a non-canonical return RIP. Rule; not yet enforced: ROADMAP §10.6 (F007). The
-   syscall exit sends a non-canonical return RIP to `swapgs; iretq`, and on KVM or hardware the
-   `#GP` that `iretq` raises runs on the user GS base and ends in a silent hang or triple fault;
-   TCG skips the canonical check.
+   cannot leave a non-canonical return RIP. Built so: the labeled return-to-user `iretq`s are the
+   syscall slow path's (`vibeos_syscall_iretq`), `vibeos_iret_user_full_iretq`, and the vector
+   exits' (`vibeos_trap_iret`, `vibeos_trap_iret_ist`). The dispatcher runs
+   `idt::user_return_fault` for `#GP`, `#NP`, and `#SS` before anything that reads `gs:`: when
+   the saved RIP is one of those labels and the `iretq` frame at the saved RSP has CS.RPL 3, it
+   loads `GS_BASE` from `KERNEL_GS_BASE` if `GS_BASE` is not a kernel (negative) address, and
+   kills the process with `SIGSEGV`. The syscall exit tests the saved RIP after its `cli` and
+   sends a non-canonical one to `vibeos_syscall_bad_rip`, which kills the process on the kernel
+   GS before any `swapgs`, so it reaches neither `sysretq` nor `iretq`.
 3. An IST vector taken at CPL 0 decides `swapgs` from the sign of `GS_BASE` (`rdmsr`; a kernel base
    is negative), because it can interrupt CPL-0 code that has the user GS loaded (the rows above
    whose GS column says user), and on exit it restores the GS state it found. `#DF` does the same at
@@ -3012,12 +3020,14 @@ architectures. Planned (ROADMAP §11.3, §11.6): the aarch64 port does not exist
    of it. The exit keeps its own state in the thread's user frame (above), never in per-CPU scratch:
    `PerCpu.syscall_scratch` holds only the user RSP between `syscall` and the entry's stack switch,
    as in Linux. Required: the syscall exit runs `cli` right after `call vibeos_syscall_stub`;
-   `enter_user` and `enter_user_full` run `cli` before `mov gs`; each checks IF=0 in debug builds;
-   `iretq` restores ring 3's IF from the frame. Rule; not yet enforced: ROADMAP §10.6 (F001, F006).
-   The syscall exit has no `cli`, and `console_init::wait_key` returns with IF=1 from its `sti; hlt`
-   (F001); `enter_user_full` runs with IF=1 (F006). The syscall exit also stages the return value
-   and the `iretq` frame in `PerCpu.syscall_scratch`, per CPU, not per thread (ROADMAP §10.6, the
-   user-frame box).
+   `enter_user_full` runs `cli` before `mov gs`; each checks IF=0 in debug builds; `iretq`
+   restores ring 3's IF from the frame. Both are built so. The syscall exit's `cli` follows the
+   call, and in debug builds each exit path checks IF before its `swapgs` and faults at
+   `vibeos_exit_if_set`; `console_init::wait_key` returns with the IF it was entered with.
+   `enter_user_full` runs `cli` and then `vibeos_iret_user_full`, one asm sequence that checks IF
+   in debug builds (faulting at `vibeos_enter_if_set`), loads the data selectors, writes
+   `KERNEL_GS_BASE`, `GS_BASE`, and `FS_BASE`, and runs `iretq`. The syscall exit also stages the return value and the `iretq` frame in
+   `PerCpu.syscall_scratch`, per CPU, not per thread (ROADMAP §10.6, the user-frame box).
 5. Every interrupt and exception entry clears RFLAGS.AC before any other code: an interrupt gate
    clears IF and TF but not AC, and ring 3 can set AC with `popf`. The syscall entry clears AC
    through FMASK (bit 18). Every generated stub starts with `clac`, and `idt::init` points each gate
@@ -3468,7 +3478,7 @@ Relevant MSRs across this section:
 | `0xC000_0081` | `IA32_STAR`. `SYSCALL` loads CS `0x08`; `SYSRET` base `0x10` gives user SS `0x1B` and CS `0x23`. Planned (ROADMAP §10.6): base `0x23`, giving SS `0x2b` and CS `0x33`, as on Linux ([section 5.1](#51-gdt-and-tss)). |
 | `0xC000_0082` | `IA32_LSTAR`. `vibeos_syscall_entry`. |
 | `0xC000_0084` | `IA32_FMASK`. `0x47700`: `SYSCALL` clears TF, IF, DF, IOPL, NT, and AC. |
-| `0xC000_0100` | `IA32_FS_BASE`. User TLS base, written by `enter_user`, `enter_user_full`, and `execve`; not switched per thread ([section 7.5](#75-per-cpu-data)). |
+| `0xC000_0100` | `IA32_FS_BASE`. User TLS base, written by `enter_user_full` and `execve`; not switched per thread ([section 7.5](#75-per-cpu-data)). |
 | `0xC000_0101` | `IA32_GS_BASE`. The `PerCpu` address in ring 0; the user GS base (0) in ring 3. |
 | `0xC000_0102` | `IA32_KERNEL_GS_BASE`. The inactive GS base: the `PerCpu` address while the CPU runs ring 3, the user GS base after an entry `swapgs` ([section 7.5](#75-per-cpu-data)). |
 
@@ -3573,8 +3583,8 @@ bring-up.
 ## 7.5 Per-CPU data
 
 One `PerCpu` struct per CPU. In ring 0, `GS_BASE` holds its address. While the CPU runs ring 3,
-`KERNEL_GS_BASE` holds it and `GS_BASE` holds the user GS base (always 0). `enter_user` and
-`enter_user_full` set that state, each `swapgs` exchanges the two, and `per_cpu_init::init_bsp`,
+`KERNEL_GS_BASE` holds it and `GS_BASE` holds the user GS base (always 0).
+`enter_user_full` sets that state, each `swapgs` exchanges the two, and `per_cpu_init::init_bsp`,
 `per_cpu_init::install_gs`, and `arch::gs::force_kernel` set both MSRs to the `PerCpu` address.
 
 `self_ptr` sits at offset 0 so `gs:[0]` yields the struct address, which is how a `&PerCpu` is obtained
@@ -3656,14 +3666,14 @@ as `CR4.TSD` or `SCTLR_EL1.UCT`, is a row of §11.4's table instead.
 | x86_64 | RFLAGS | `CpuContext.rflags`; IF comes from `irq_nest` (`apply_if_on_resume`) | `switch_context` | switched |
 | both | `irq_nest` | `Tcb.irq_nest`, swapped with `PerCpu.irq_nest` | `switch_now` | switched |
 | x86_64 | user GPRs, RIP, RSP, RFLAGS, CS, SS, and the original syscall number | the thread's user frame at the top of `Tcb.stack` ([section 5.10](#510-privilege-transitions)), saved by every entry from ring 3 | the RSP0 switch, which gives each thread its own entry stack | switched. Rule; not yet enforced: ROADMAP §10.6. The syscall entry saves a 16-word frame whose `rcx` and `r11` slots double as RIP and RFLAGS, and an interrupt or exception entry saves only what its `x86-interrupt` handler clobbers, so a thread preempted in ring 3 has `rbx`, `rbp`, and `r12`-`r15` in spill slots the compiler chose |
-| x86_64 | x87, SSE, MXCSR | `Tcb.fpu`, a 512-byte FXSAVE image | the FP binding below: `fxsave64` at the switch away from a thread whose state is live, `fxrstor64` in the return to ring 3 when the registers hold another thread's state | switched. Rule; not yet enforced: the binding lands in ROADMAP §10.6. Today `switch_fpu` in `on_switch` runs `fxsave64` for the old thread and `fxrstor64` for the new on every switch, and the syscall entry and exit also save and restore it. `fork` gives the child `fpu_template()`, not the parent's image, and `execve` keeps the old image's registers (ROADMAP §10.6, F069). The template is captured after `fninit`, which resets only the x87 control, status, and tag words, so MXCSR and the XMM and ST registers hold whatever the loader left (ROADMAP §10.6, F129). FXSAVE covers no XSAVE state; `CR4.OSXSAVE`, `CR4.PKE`, and `EFER.FFXSR` are assumed clear and never asserted (ROADMAP §11.1, F130). |
+| x86_64 | x87, SSE, MXCSR | `Tcb.fpu`, a 512-byte FXSAVE image | the FP binding below: `fxsave64` at the switch away from a thread whose state is live, `fxrstor64` in the return to ring 3 when the registers hold another thread's state | switched, by the binding as built: `PerCpu.fp_owner` and `Tcb.fp_cpu`, whose transitions are `vibeos::fpu`. `syscall_init::switch_fpu` in `on_switch` saves a live state with `fp_save` and loads nothing; `vibeos_fp_user_return` runs with IF=0 after the syscall exit's `cli`, in `idt::exit_to_user` after a `cli`, and in `enter_user_full` after its `cli`, and loads with `fp_load` when the registers hold another thread's state. The syscall entry and exit neither save nor restore it. A new TCB, and one `fill_tcb` reuses, starts with `fp_cpu` empty, and `thread_init::fp_invalidate` empties it for a write to `Tcb.fpu`. `fork` gives the child `fpu_template()`, not the parent's image, and `execve` keeps the old image's registers (ROADMAP §10.6, F069). The template is captured after `fninit`, which resets only the x87 control, status, and tag words, so MXCSR and the XMM and ST registers hold whatever the loader left (ROADMAP §10.6, F129). FXSAVE covers no XSAVE state; `CR4.OSXSAVE`, `CR4.PKE`, and `EFER.FFXSR` are assumed clear and never asserted (ROADMAP §11.1, F130). |
 | x86_64 | RSP0 | TSS.RSP0 and `PerCpu.kernel_rsp0`: the top of `Tcb.stack`, or `fallback_rsp0` for the bootstrap thread | `set_rsp0_for` in `on_switch` | switched |
 | x86_64 | CR3 | `Tcb.as_cr3` (0 means the kernel PML4) | `switch_cr3_for` in `on_switch`, skipped when unchanged | switched; no PCID (ROADMAP §18.3 adds it with §7.9's flush generation) |
-| x86_64 | FS_BASE (user TLS) | not saved | nothing | not switched. `enter_user`, `enter_user_full`, and `execve` write it; `force_kernel`'s `mov fs` zeroes it on every exit or kill; `fork` copies the live MSR, so a child can inherit another process's base (ROADMAP §11.6, F022). |
+| x86_64 | FS_BASE (user TLS) | not saved | nothing | not switched. `enter_user_full` and `execve` write it; `force_kernel`'s `mov fs` zeroes it on every exit or kill; `fork` copies the live MSR, so a child can inherit another process's base (ROADMAP §11.6, F022). |
 | x86_64 | user GS base | not saved; always 0 | nothing | holds while no `ARCH_SET_GS` or FSGSBASE exists (ROADMAP §18.3); from then on it is per thread, and while the thread is in the kernel it is in `KERNEL_GS_BASE` whichever vector it entered by, IST vectors included ([section 5.10](#510-privilege-transitions) rule 3), where the switch away reads it |
 | x86_64 | DR0-DR3, DR7 | the thread's decoded debug slots, and the tracer's masked DR7 for `PEEKUSER` | the switch, by the Debug state paragraph below | not built: nothing arms them before ROADMAP §17.4 |
 | x86_64 | DR6 | the thread's virtual DR6 | not switched: the `#DB` body writes the thread's copy from the DR6 its entry saved (§5.10) | not built: ROADMAP §17.4 |
-| x86_64 | DS, ES, FS, and GS selectors | the thread's own four, saved at the switch away | `on_switch`, which loads the incoming thread's four before it writes `FS_BASE` and `GS_BASE`, since a selector load can clear the matching base | Rule; not yet enforced: ROADMAP §10.6 ([section 5.1](#51-gdt-and-tss)). `enter_user` and `enter_user_full` load `0x1B` into all four and nothing saves them, so a selector ring 3 loads with `mov` is lost at the next switch |
+| x86_64 | DS, ES, FS, and GS selectors | the thread's own four, saved at the switch away | `on_switch`, which loads the incoming thread's four before it writes `FS_BASE` and `GS_BASE`, since a selector load can clear the matching base | Rule; not yet enforced: ROADMAP §10.6 ([section 5.1](#51-gdt-and-tss)). `enter_user_full` loads `0x1B` into all four and nothing saves them, so a selector ring 3 loads with `mov` is lost at the next switch |
 | x86_64 | `PerCpu.syscall_scratch` | per CPU | not switched | valid only while IF=0 (above; F001); one word, the user RSP at entry, once ROADMAP §10.6 keeps the exit's state in the user frame |
 | aarch64 | `x19`-`x29`, SP, LR | `Tcb.context` | `switch_context` (ROADMAP §11.4) | not built |
 | aarch64 | DAIF.I and F | come from `irq_nest`, as on x86_64 | `switch_context` | not built |
@@ -3696,8 +3706,8 @@ is soft-float and never makes FP state live; a firmware call that may use the re
 `CR0.TS` stays clear, and on aarch64 every CPU sets `CPACR_EL1.FPEN` (`CPTR_EL2`'s field under VHE)
 to `0b11` at bring-up and never changes it, so FPEN is not per-thread state. SVE and SME are the
 exception: they trap at a thread's first use to size and set up their state, as on Linux, and their
-enable bits are per-thread rows (ROADMAP §23.1). Rule; not yet enforced: ROADMAP §10.6 for x86_64
-and §11.6 for aarch64; the row above gives the code as built.
+enable bits are per-thread rows (ROADMAP §23.1). Built on x86_64 (the row above). Rule; not yet
+enforced on aarch64: ROADMAP §11.6.
 
 Why: every user thread uses FP (x86_64 user code passes floats and copies memory in XMM registers,
 and every aarch64 compiler emits NEON), so a first-use trap sets up nothing that creation could not,

@@ -309,6 +309,8 @@ fn schedule_inner(from_irq: bool) {
         cpu.runq.remove(idle);
         take_next(&mut cpu.runq, idle)
     });
+    #[cfg(feature = "kernel_tests")]
+    let next = requeue_next_cpu(next, cur, idle, me);
 
     let (old_ptr, new_ptr, old_id, new_id) = with_sched(|s| {
         if let Some(t) = s.get_mut(next) {
@@ -325,6 +327,54 @@ fn schedule_inner(from_irq: bool) {
     assert!(!new_ptr.is_null(), "schedule: next vanished");
     switch_now(old_ptr, new_ptr);
     finish_switch();
+}
+
+/// C-REQUEUE-HOOK: while `testing::set_requeue_next_cpu` is on, a user
+/// thread or a `CpuAffinity::Any` kernel thread that this CPU dequeues
+/// while another thread is current moves to the next online CPU instead
+/// of running here, once per slice it runs. A preempted thread that is the
+/// only runnable one here stays queued while this CPU runs idle, whose
+/// dequeue then moves it. Never the running thread, an idle thread, or a
+/// pinned kernel thread; the move goes out through `place` after the
+/// SCHED lock drops, before any switch.
+#[cfg(feature = "kernel_tests")]
+fn requeue_next_cpu(next: ThreadId, cur: ThreadId, idle: ThreadId, me: u32) -> ThreadId {
+    if !testing::requeue_on() || next == idle {
+        return next;
+    }
+    let Some(target) = testing::next_online_cpu(me) else {
+        return next;
+    };
+    let movable = |t: &Tcb| t.pid != 0 || t.affinity == CpuAffinity::Any;
+    if next == cur {
+        if with_sched(|s| s.get(cur).is_some_and(movable)) {
+            per_cpu_init::with_current(|cpu| cpu.runq.push_back(cur));
+            return idle;
+        }
+        return next;
+    }
+    if testing::take_arrived(next) {
+        return next;
+    }
+    let moved = with_sched(|s| {
+        let Some(t) = s.get_mut(next) else {
+            return false;
+        };
+        if !movable(t) {
+            return false;
+        }
+        t.cpu = target;
+        if t.pid != 0 {
+            t.affinity = CpuAffinity::Pinned(target);
+        }
+        s.place(target, next);
+        true
+    });
+    if !moved {
+        return next;
+    }
+    testing::moved(next);
+    per_cpu_init::with_current(|cpu| take_next(&mut cpu.runq, idle))
 }
 
 fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
@@ -536,6 +586,7 @@ pub unsafe fn init_bootstrap() {
         wait_outcome: WaitOutcome::Woken,
         as_cr3: 0,
         fpu: crate::syscall_init::fpu_template(),
+        fp_cpu: None,
         syscall_count: 0,
         pid: 0,
     });
@@ -699,6 +750,7 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, Guard
         wait_outcome: WaitOutcome::Woken,
         as_cr3: 0,
         fpu: crate::syscall_init::fpu_template(),
+        fp_cpu: None,
         syscall_count: 0,
         pid: 0,
     });
@@ -818,6 +870,7 @@ fn spawn_inner(
         wait_outcome: WaitOutcome::Woken,
         as_cr3,
         fpu: crate::syscall_init::fpu_template(),
+        fp_cpu: None,
         syscall_count: 0,
         pid,
     });
@@ -850,6 +903,13 @@ fn spawn_inner(
     }
 }
 
+/// A write to `tcb.fpu` makes the saved image the thread's state: no
+/// CPU's registers hold it any more, so its next return to user mode
+/// loads what was written (DESIGN §7.5, C-FPBIND).
+pub fn fp_invalidate(tcb: &mut Tcb) {
+    vibeos::fpu::invalidate(&mut tcb.fp_cpu);
+}
+
 #[allow(clippy::too_many_arguments)] // TCB fields filled at spawn
 fn fill_tcb(
     tcb: &mut Tcb,
@@ -878,6 +938,8 @@ fn fill_tcb(
     tcb.wait_outcome = WaitOutcome::Woken;
     tcb.as_cr3 = as_cr3;
     tcb.fpu = crate::syscall_init::fpu_template();
+    // A reused TCB address: no CPU's `fp_owner` may match it.
+    fp_invalidate(tcb);
     tcb.syscall_count = 0;
     tcb.pid = pid;
     prepare_thread(&mut tcb.context, top, tramp);
@@ -1089,6 +1151,9 @@ pub fn snapshot(out: &mut [ThreadInfo]) -> usize {
 pub mod testing {
     use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+    use vibeos::thread::{MAX_THREADS, ThreadId};
+
+    use crate::per_cpu_init;
     use crate::time_init;
 
     /// CPU whose exits [`exit_stall`] holds, or `u32::MAX`.
@@ -1169,5 +1234,47 @@ pub mod testing {
     /// `SpawnError::NoMemory` before it allocates anything. One-shot.
     pub fn fail_next_fork_stack() {
         FAIL_FORK_STACK.store(true, Ordering::Release);
+    }
+
+    static REQUEUE: AtomicBool = AtomicBool::new(false);
+    static REQUEUES: AtomicU64 = AtomicU64::new(0);
+    /// Set when a thread was moved, cleared by the dequeue that runs it.
+    static ARRIVED: [AtomicBool; MAX_THREADS] = [const { AtomicBool::new(false) }; MAX_THREADS];
+
+    /// C-REQUEUE-HOOK: move each user or `CpuAffinity::Any` thread to the
+    /// next online CPU when its CPU dequeues it (`requeue_next_cpu`).
+    pub fn set_requeue_next_cpu(on: bool) {
+        REQUEUE.store(on, Ordering::Release);
+    }
+
+    /// Moves the hook has made since boot.
+    pub fn requeues() -> u64 {
+        REQUEUES.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn requeue_on() -> bool {
+        REQUEUE.load(Ordering::Acquire)
+    }
+
+    /// The first online CPU after `me`, wrapping; `None` with one CPU.
+    pub(super) fn next_online_cpu(me: u32) -> Option<u32> {
+        let mask = per_cpu_init::online_mask();
+        (1..64u32)
+            .map(|d| me.wrapping_add(d) % 64)
+            .find(|&c| mask & (1u64 << c) != 0)
+    }
+
+    pub(super) fn moved(id: ThreadId) {
+        if let Some(a) = ARRIVED.get(id.raw() as usize) {
+            a.store(true, Ordering::Relaxed);
+        }
+        REQUEUES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Whether `id` arrived by a move and has not run since; clears it.
+    pub(super) fn take_arrived(id: ThreadId) -> bool {
+        ARRIVED
+            .get(id.raw() as usize)
+            .is_some_and(|a| a.swap(false, Ordering::Relaxed))
     }
 }

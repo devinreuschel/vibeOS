@@ -1,6 +1,6 @@
 //! ELF64 parse + initial stack. ROADMAP §9.4. Mapping is the kernel half.
 
-use crate::paging::{NULL_GUARD_LEN, PAGE_SIZE_4K, USER_END, is_canonical};
+use crate::paging::{NULL_GUARD_LEN, PAGE_SIZE_4K, USER_MAP_END, is_canonical};
 
 pub const ELFMAG0: u8 = 0x7F;
 pub const ELFCLASS64: u8 = 2;
@@ -159,7 +159,7 @@ fn check_user_va(va: u64, len: u64) -> Result<(), ElfError> {
     if !is_canonical(va) || !is_canonical(end.wrapping_sub(1)) {
         return Err(ElfError::KernelVa);
     }
-    if va >= USER_END || end > USER_END {
+    if va >= USER_MAP_END || end > USER_MAP_END {
         return Err(ElfError::KernelVa);
     }
     if va < NULL_GUARD_LEN {
@@ -537,6 +537,17 @@ mod tests {
 
     fn parse_err(data: &[u8]) -> ElfError {
         parse(data).expect_err("expected parse error")
+    }
+
+    #[test]
+    fn load_ending_at_user_end_is_kernel_va() {
+        use crate::paging::USER_END;
+        let code = [0xCCu8; 4096];
+        let top = build_elf(USER_END - PAGE_SIZE_4K, &code, &[]);
+        assert_eq!(parse_err(&top), ElfError::KernelVa);
+        let below = build_elf(USER_MAP_END - PAGE_SIZE_4K, &code, &[]);
+        let img = parse(&below).unwrap();
+        assert_eq!(img.loads()[0].vaddr + img.loads()[0].memsz, USER_MAP_END);
     }
 
     #[test]

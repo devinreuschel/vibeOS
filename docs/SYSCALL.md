@@ -58,8 +58,12 @@ is ignored where Linux's call ignores it (`open`) and returns `EINVAL` where
 Linux's call rejects it (`openat2`, `clone3`, `renameat2`). Today dispatch
 matches all 64 bits of `rax`, and only `kill`'s `pid` is truncated (§3.1).
 
-The entry saves the x87 and SSE state (`fxsave64`) and the exit restores it
-(`fxrstor64`), so a syscall preserves it. Two calls differ from Linux
+A syscall preserves the x87 and SSE state. The kernel never touches those
+registers (it is soft-float, and `make` rejects a kernel ELF with an FP or
+SIMD instruction outside its save and load routines), so neither the entry
+nor the exit saves them: the FP binding of DESIGN §7.5 saves a thread's
+state only when a switch takes the CPU away from it, and the exit, with
+IF=0, loads it only when the registers hold another thread's. Two calls differ from Linux
 (F069; ROADMAP §10.6): a `fork` child starts from the boot FXSAVE
 template instead of the parent's x87, XMM, and MXCSR state, and `execve`
 hands the new image the old image's x87 and XMM registers, MXCSR, and FCW.
@@ -68,9 +72,11 @@ The rule the fix implements: `fork` copies the caller's FP state, and
 registers zeroed.
 
 `FMASK` (DESIGN §7.2) clears `TF`, `IF`, `DF`, `IOPL`, `NT`, and `AC` on
-entry. The fast path is `sysretq`. The exit takes `iretq` when the saved
-RIP is non-canonical or `RF` or `VM` is set in RFLAGS; a spawned or forked process's
-first entry also uses `iretq` (`enter_user_full`).
+entry. The fast path is `sysretq`. The exit takes `iretq` when `RF` or `VM`
+is set in RFLAGS; a spawned or forked process's first entry also uses
+`iretq` (`enter_user_full`). A fault on either `iretq` (a `#GP`, `#NP`, or
+`#SS` whose RIP is the labeled instruction) kills the process with
+`SIGSEGV`, and never halts the kernel (DESIGN §5.10 rule 2).
 
 The rule ROADMAP §10.6 implements (DESIGN §5.10): every entry from ring 3
 saves a complete user frame, in the order of Linux's `user_regs_struct`, and
@@ -88,20 +94,25 @@ RSP out of the per-CPU scratch into its frame and then runs `sti`. Today it
 does not, and FMASK's IF=0 lasts until the body blocks (ROADMAP §10.6).
 
 From the return of `vibeos_syscall_stub` to `sysretq` or `iretq`, the exit
-path needs IF=0: it stores the return value in `gs:[retval]`, stages the
-`iretq` frame in `gs:[iret_*]`, and loads the user RSP before `swapgs`.
+path runs with IF=0: it stores the return value in `gs:[retval]`, stages the
+`iretq` frame in `gs:[iret_*]`, and loads the user RSP before `swapgs`, so
+an interrupt there could let another thread's syscall on this CPU overwrite
+the scratch, or push its frame on the user stack at CPL 0. The exit's first
+instruction after the call is `cli`, whatever IF the body returned with,
+and in debug builds each exit path checks IF before its `swapgs` (on the
+`sysretq` path before it loads the user RSP) and faults at
+`vibeos_exit_if_set`, a `ud2`, if IF is set. `console_init::wait_key`, which
+a console `read` blocks in, returns with the IF it was entered with.
 ROADMAP §10.6 moves the return value and the `iretq` frame into the thread's
 user frame, which leaves the per-CPU scratch holding only the user RSP
-between `syscall` and the stack switch. A console `read` breaks this: it
-returns through `console_init::wait_key`, which leaves IF=1, and nothing
-clears IF before the exit (F001; ROADMAP §10.6).
+between `syscall` and the stack switch.
 
-A non-canonical saved RIP reaches `iretq`, which raises `#GP` at CPL 0
-after `swapgs` has loaded the user GS base; on KVM and hardware the kernel
-then hangs or triple-faults (TCG skips the canonical check). A `syscall` in
-the last two bytes of a mapping that ends at `USER_END` produces that RIP
-(F007; ROADMAP §10.6 keeps the top user page unmapped and sends a
-non-canonical RIP to `SIGSEGV`).
+The top user page is never mapped: user mappings end at `USER_MAP_END`
+(`0x0000_7FFF_FFFF_F000`), and `execve` of an image with a segment above it
+fails with `ENOEXEC`, so a `syscall` in the last mappable page returns to a
+canonical RIP. A saved RIP that is non-canonical anyway reaches neither
+`sysretq` nor `iretq`: after its `cli` the exit tests it and kills the
+process with `SIGSEGV` on the kernel GS, before any `swapgs`.
 
 ---
 

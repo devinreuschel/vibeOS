@@ -212,6 +212,10 @@ pub struct Tcb {
     /// User CR3. 0 means the shared kernel PML4.
     pub as_cr3: u64,
     pub fpu: Fxsave,
+    /// The CPU that last loaded or held this thread's FP state, `None`
+    /// until its first return to user mode and after any write to `fpu`
+    /// (DESIGN §7.5, the FP binding; `vibeos::fpu`).
+    pub fp_cpu: Option<u32>,
     /// Syscall counter. Aggregated per-process in Slice C.
     pub syscall_count: u64,
     /// 0 = kernel thread. Process pid otherwise.
