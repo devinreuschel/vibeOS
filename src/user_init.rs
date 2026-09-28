@@ -281,7 +281,6 @@ pub fn load_image(elf: &[u8], argv: &[&[u8]]) -> Result<Loaded, LoadError> {
 }
 
 #[cfg(feature = "kernel_tests")]
-#[expect(dead_code, reason = "read by exec_huge_memsz, ROADMAP §10.6")]
 pub(crate) mod testing {
     use alloc::vec::Vec;
     use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};

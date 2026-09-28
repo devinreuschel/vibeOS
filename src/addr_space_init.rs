@@ -182,7 +182,6 @@ pub unsafe fn unmap(space: &mut AddressSpace, va: u64, len: u64) -> Result<(), A
 }
 
 #[cfg(feature = "kernel_tests")]
-#[expect(dead_code, reason = "read by exec_huge_memsz, ROADMAP §10.6")]
 pub(crate) mod testing {
     use core::sync::atomic::{AtomicU64, Ordering};
 
