@@ -66,12 +66,11 @@ mod vibefs_init;
 mod virtio_blk_init;
 mod virtio_init;
 mod work_init;
-mod x86;
 
 #[cfg(feature = "kernel_tests")]
 mod ktest;
 
-use arch::x86_64::apic_init;
+use arch::x86_64::{apic_init, cpu as x86};
 use mm::{heap_init, kva_init, paging_init, pmm_init};
 
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
