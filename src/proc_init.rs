@@ -509,7 +509,7 @@ fn dispatch_frame(nr: u64, args: [u64; 6], frame: *mut SyscallFrame) -> i64 {
         SYS_BRK => sys_brk(args[0]),
         SYS_DUP => sys_dup(args[0]),
         SYS_DUP2 => sys_dup2(args[0], args[1]),
-        SYS_GETPID => current_pid() as i64,
+        SYS_GETPID => sys_getpid(),
         SYS_GETPPID => with_table(|t| t.get(current_pid()).map(|p| p.ppid).unwrap_or(0)) as i64,
         SYS_SCHED_YIELD => {
             if current_pid() != 0 {
@@ -534,43 +534,55 @@ fn dispatch_frame(nr: u64, args: [u64; 6], frame: *mut SyscallFrame) -> i64 {
     }
 }
 
+/// Act on this process's pending signals at syscall entry. Each turn is
+/// one SCHED section: a stop sets Stopped and arms the `stop_wq` wait in
+/// the section that decides it, so a `SIGCONT` that `sys_kill` sends in
+/// between finds the thread on the queue (ROADMAP §10.6, F033). The loop
+/// re-checks after every `schedule()`, which can return early.
 fn apply_pending(frame: *mut SyscallFrame) {
     let pid = current_pid();
     if pid == 0 {
         return;
     }
     loop {
-        let act = with_table(|t| {
-            let Some(p) = t.get_mut(pid) else {
-                return Pending::None;
-            };
-            if p.pending & bit(SIGKILL) != 0 {
-                return Pending::Die(SIGKILL);
-            }
-            if p.state == ProcState::Stopped || p.pending & bit(SIGSTOP) != 0 {
-                p.state = ProcState::Stopped;
-                p.pending &= !bit(SIGSTOP);
-                return Pending::Stop;
-            }
-            let pend = p.pending;
-            let mut s = 1u32;
-            while s <= 31 {
-                if pend & bit(s) != 0 && s != SIGCHLD && s != SIGCONT {
-                    match default_action(s) {
-                        SigAct::Term => return Pending::Die(s),
-                        SigAct::Stop => {
-                            p.state = ProcState::Stopped;
-                            p.pending &= !bit(s);
-                            return Pending::Stop;
+        let act = thread_init::with_sched(|s| {
+            TABLE.with(|t| {
+                let Some(p) = t.get_mut(pid) else {
+                    return Pending::None;
+                };
+                if p.pending & bit(SIGKILL) != 0 {
+                    return Pending::Die(SIGKILL);
+                }
+                let mut stop = false;
+                if p.state == ProcState::Stopped || p.pending & bit(SIGSTOP) != 0 {
+                    p.pending &= !bit(SIGSTOP);
+                    stop = true;
+                } else {
+                    let pend = p.pending;
+                    let mut sig = 1u32;
+                    while sig <= 31 && !stop {
+                        if pend & bit(sig) != 0 && sig != SIGCHLD && sig != SIGCONT {
+                            match default_action(sig) {
+                                SigAct::Term => return Pending::Die(sig),
+                                SigAct::Stop => {
+                                    p.pending &= !bit(sig);
+                                    stop = true;
+                                }
+                                SigAct::Ign | SigAct::Cont => {
+                                    p.pending &= !bit(sig);
+                                }
+                            }
                         }
-                        SigAct::Ign | SigAct::Cont => {
-                            p.pending &= !bit(s);
-                        }
+                        sig += 1;
                     }
                 }
-                s += 1;
-            }
-            Pending::None
+                if !stop {
+                    return Pending::None;
+                }
+                p.state = ProcState::Stopped;
+                s.begin_wait(&mut p.stop_wq, FAR_DEADLINE);
+                Pending::Stop
+            })
         });
         match act {
             Pending::None => return,
@@ -579,8 +591,9 @@ fn apply_pending(frame: *mut SyscallFrame) {
                 finish_exit(wait_signaled(sig), true);
             }
             Pending::Stop => {
-                let wq = unsafe { &mut (*TABLE.as_ptr()).procs[pid as usize].stop_wq };
-                thread_init::wait_on(wq);
+                #[cfg(feature = "kernel_tests")]
+                testing::stop_stall(pid);
+                thread_init::schedule();
             }
         }
     }
@@ -590,6 +603,16 @@ enum Pending {
     None,
     Die(u32),
     Stop,
+}
+
+fn sys_getpid() -> i64 {
+    let pid = current_pid();
+    #[cfg(feature = "kernel_tests")]
+    {
+        testing::getpid_spin(pid);
+        testing::on_getpid(pid);
+    }
+    pid as i64
 }
 
 fn lookup_fd(fd: u64) -> Option<Fd> {
@@ -651,6 +674,10 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> i64 {
                     FdKind::None => return syscall::neg(EBADF),
                 }
                 done += n as u64;
+            }
+            #[cfg(feature = "kernel_tests")]
+            if matches!(slot.kind, FdKind::Console) {
+                testing::console_write_returned();
             }
             done as i64
         }
@@ -915,6 +942,9 @@ fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
     })
 }
 
+// Out of line: `dispatch_frame` keeps only the running syscall's frame,
+// and a preempted body carries an interrupt and a switch on top of it.
+#[inline(never)]
 fn sys_fork(frame: *mut SyscallFrame) -> i64 {
     if frame.is_null() {
         return syscall::neg(EINVAL);
@@ -984,6 +1014,9 @@ fn sys_fork(frame: *mut SyscallFrame) -> i64 {
     pid as i64
 }
 
+// Out of line: `dispatch_frame` keeps only the running syscall's frame,
+// and a preempted body carries an interrupt and a switch on top of it.
+#[inline(never)]
 fn sys_execve(path: u64, argv: u64, envp: u64, frame: *mut SyscallFrame) -> i64 {
     if frame.is_null() {
         return syscall::neg(EINVAL);
@@ -1346,52 +1379,45 @@ fn sys_kill(pid: u64, sig: u64) -> i64 {
     }
     let target = pid as u32;
     let self_pid = current_pid();
-    let r = with_table(|t| {
-        let Some(p) = t.get_mut(target) else {
-            return Err(ESRCH);
-        };
-        if p.state == ProcState::Unused || p.state == ProcState::Zombie {
-            return Err(ESRCH);
-        }
-        match default_action(sig) {
-            SigAct::Ign => {
-                if sig == SIGCHLD {
+    let r = thread_init::with_sched(|s| {
+        TABLE.with(|t| {
+            let Some(p) = t.get_mut(target) else {
+                return Err(ESRCH);
+            };
+            if p.state == ProcState::Unused || p.state == ProcState::Zombie {
+                return Err(ESRCH);
+            }
+            match default_action(sig) {
+                SigAct::Ign => {
+                    if sig == SIGCHLD {
+                        p.pending |= bit(sig);
+                    }
+                }
+                SigAct::Cont => {
+                    if p.state == ProcState::Stopped {
+                        p.state = ProcState::Live;
+                        p.pending &= !bit(SIGSTOP);
+                        s.wake_all(&mut p.stop_wq);
+                    }
+                }
+                SigAct::Stop => {
+                    p.pending |= bit(SIGSTOP);
+                    p.state = ProcState::Stopped;
+                    s.wake_all(&mut p.wait_wq);
+                    s.wake_all(&mut p.stop_wq);
+                }
+                SigAct::Term => {
                     p.pending |= bit(sig);
+                    s.wake_all(&mut p.wait_wq);
+                    s.wake_all(&mut p.stop_wq);
                 }
-                Ok((p.tid, false, false))
             }
-            SigAct::Cont => {
-                let was = p.state == ProcState::Stopped;
-                if was {
-                    p.state = ProcState::Live;
-                    p.pending &= !bit(SIGSTOP);
-                }
-                Ok((p.tid, was, false))
-            }
-            SigAct::Stop => {
-                p.pending |= bit(SIGSTOP);
-                p.state = ProcState::Stopped;
-                Ok((p.tid, false, true))
-            }
-            SigAct::Term => {
-                p.pending |= bit(sig);
-                Ok((p.tid, false, true))
-            }
-        }
+            Ok(())
+        })
     });
     match r {
         Err(e) => syscall::neg(e),
-        Ok((tid, cont, wake)) => {
-            let _ = tid;
-            if cont {
-                let wq = unsafe { &mut (*TABLE.as_ptr()).procs[target as usize].stop_wq };
-                thread_init::wake_queue(wq);
-            }
-            if wake {
-                let t = unsafe { &mut (*TABLE.as_ptr()).procs[target as usize] };
-                thread_init::wake_queue(&mut t.wait_wq);
-                thread_init::wake_queue(&mut t.stop_wq);
-            }
+        Ok(()) => {
             if target == self_pid && default_action(sig) == SigAct::Term {
                 finish_exit(wait_signaled(sig), true);
             }
@@ -1400,6 +1426,9 @@ fn sys_kill(pid: u64, sig: u64) -> i64 {
     }
 }
 
+// Out of line: `dispatch_frame` keeps only the running syscall's frame,
+// and a preempted body carries an interrupt and a switch on top of it.
+#[inline(never)]
 fn sys_psinfo(buf: u64, len: u64) -> i64 {
     if let Err(e) = validate_buf(buf, len) {
         return syscall::neg(e);
@@ -1495,3 +1524,154 @@ pub fn try_user_fault(vec: u8, frame: &InterruptFrame, err: u64, cr2: Option<u64
 const _: fn(u32) = |s| {
     let _ = wait_stopped(s);
 };
+
+/// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
+#[cfg(feature = "kernel_tests")]
+pub(crate) mod testing {
+    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+
+    use vibeos::proc::MAX_PROCS;
+
+    use crate::per_cpu_init;
+    use crate::thread_init;
+    use crate::time_init;
+
+    static GETPIDS: [AtomicU64; MAX_PROCS] = [const { AtomicU64::new(0) }; MAX_PROCS];
+
+    /// `getpid` calls `pid` has made since boot.
+    pub(crate) fn getpid_count(pid: u32) -> u64 {
+        GETPIDS
+            .get(pid as usize)
+            .map_or(0, |c| c.load(Ordering::Acquire))
+    }
+
+    pub(super) fn on_getpid(pid: u32) {
+        if let Some(c) = GETPIDS.get(pid as usize) {
+            c.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    /// The pid the next stop stall holds; 0 for none.
+    static STALL_PID: AtomicU32 = AtomicU32::new(0);
+    static STALL_IN: AtomicBool = AtomicBool::new(false);
+    static STALL_RELEASE: AtomicBool = AtomicBool::new(false);
+
+    /// Hold `pid` once, at its next stop, between the stop decision and
+    /// its sleep, until [`release_stop_stall`] or 1 s of TSC time.
+    pub(crate) fn arm_stop_stall(pid: u32) {
+        STALL_IN.store(false, Ordering::Release);
+        STALL_RELEASE.store(false, Ordering::Release);
+        STALL_PID.store(pid, Ordering::Release);
+    }
+
+    /// The armed process sits in the stall.
+    pub(crate) fn stop_stalled() -> bool {
+        STALL_IN.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn release_stop_stall() {
+        STALL_RELEASE.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn disarm_stop_stall() {
+        STALL_PID.store(0, Ordering::Release);
+        STALL_RELEASE.store(true, Ordering::Release);
+    }
+
+    /// Spins on TSC time; never services IPIs.
+    pub(super) fn stop_stall(pid: u32) {
+        if STALL_PID
+            .compare_exchange(pid, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        STALL_IN.store(true, Ordering::Release);
+        let t0 = time_init::now_ns();
+        while !STALL_RELEASE.load(Ordering::Acquire)
+            && time_init::now_ns().saturating_sub(t0) < 1_000_000_000
+        {
+            core::hint::spin_loop();
+        }
+    }
+
+    static SPIN_ARMED: AtomicBool = AtomicBool::new(false);
+    static SPIN_START_NS: AtomicU64 = AtomicU64::new(0);
+    static SPIN_DONE_NS: AtomicU64 = AtomicU64::new(0);
+    static SPIN_SW_START: AtomicU64 = AtomicU64::new(0);
+    static SPIN_SW_END: AtomicU64 = AtomicU64::new(0);
+
+    /// TSC time of the spin, in the body of one user `getpid`.
+    pub(crate) const SPIN_NS: u64 = 50_000_000;
+
+    /// The next `getpid` from a process on CPU 0 spins for [`SPIN_NS`].
+    pub(crate) fn arm_getpid_spin() {
+        SPIN_START_NS.store(0, Ordering::Release);
+        SPIN_DONE_NS.store(0, Ordering::Release);
+        SPIN_ARMED.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn disarm_getpid_spin() {
+        SPIN_ARMED.store(false, Ordering::Release);
+    }
+
+    /// `now_ns` when the spin started; 0 before.
+    pub(crate) fn spin_start_ns() -> u64 {
+        SPIN_START_NS.load(Ordering::Acquire)
+    }
+
+    /// `now_ns` when the spinning `getpid` was done; 0 before.
+    pub(crate) fn spin_done_ns() -> u64 {
+        SPIN_DONE_NS.load(Ordering::Acquire)
+    }
+
+    /// CPU 0's context switches at the spin's start and end.
+    pub(crate) fn spin_switches() -> (u64, u64) {
+        (
+            SPIN_SW_START.load(Ordering::Acquire),
+            SPIN_SW_END.load(Ordering::Acquire),
+        )
+    }
+
+    fn cpu0_switches() -> u64 {
+        per_cpu_init::cpu(0).map_or(0, |c| c.switches.load(Ordering::Relaxed))
+    }
+
+    /// Spins on TSC time; never services IPIs.
+    pub(super) fn getpid_spin(pid: u32) {
+        if pid == 0 || !SPIN_ARMED.load(Ordering::Acquire) {
+            return;
+        }
+        if thread_init::current_cpu() != 0 || !SPIN_ARMED.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        SPIN_SW_START.store(cpu0_switches(), Ordering::Release);
+        let t0 = time_init::now_ns();
+        SPIN_START_NS.store(t0.max(1), Ordering::Release);
+        while time_init::now_ns().saturating_sub(t0) < SPIN_NS {
+            core::hint::spin_loop();
+        }
+        SPIN_SW_END.store(cpu0_switches(), Ordering::Release);
+        SPIN_DONE_NS.store(time_init::now_ns(), Ordering::Release);
+    }
+
+    static WRITE_ARMED: AtomicBool = AtomicBool::new(false);
+    static WRITE_DONE_NS: AtomicU64 = AtomicU64::new(0);
+
+    /// Record when the next console `write` returns.
+    pub(crate) fn arm_console_write_record() {
+        WRITE_DONE_NS.store(0, Ordering::Release);
+        WRITE_ARMED.store(true, Ordering::Release);
+    }
+
+    /// `now_ns` when the armed console `write` returned; 0 before.
+    pub(crate) fn console_write_done_ns() -> u64 {
+        WRITE_DONE_NS.load(Ordering::Acquire)
+    }
+
+    pub(super) fn console_write_returned() {
+        if WRITE_ARMED.swap(false, Ordering::AcqRel) {
+            WRITE_DONE_NS.store(time_init::now_ns().max(1), Ordering::Release);
+        }
+    }
+}

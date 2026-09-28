@@ -7,6 +7,7 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use vibeos::console::BackendId;
+use vibeos::fb::CHUNK;
 use vibeos::kbd::DecodedKey;
 use vibeos::marker;
 
@@ -48,14 +49,26 @@ pub fn enabled(id: BackendId) -> bool {
     }
 }
 
-/// Fan-out. Silent backends. Serial TX lock is dropped before the FB lock
-/// (ranks SERIAL then DEVICE are not nested).
+/// Fan-out, one [`CHUNK`] at a time: serial under its TX lock, then the
+/// framebuffer's grid under the console lock, never nested (ranks SERIAL
+/// then DEVICE). Silent backends. IF is on between chunks whenever the
+/// caller runs with IF=1 (DESIGN §2.9 rule 2). An empty write only lets
+/// the framebuffer redraw.
 pub fn write(bytes: &[u8]) {
-    if SERIAL_ON.load(Ordering::Acquire) {
-        Serial::write_bytes_plain(bytes);
+    let fb = FB_ON.load(Ordering::Acquire);
+    if bytes.is_empty() {
+        if fb {
+            fb_init::write(bytes);
+        }
+        return;
     }
-    if FB_ON.load(Ordering::Acquire) {
-        fb_init::write(bytes);
+    for chunk in bytes.chunks(CHUNK) {
+        if SERIAL_ON.load(Ordering::Acquire) {
+            Serial::write_bytes_plain(chunk);
+        }
+        if fb {
+            fb_init::write(chunk);
+        }
     }
 }
 
