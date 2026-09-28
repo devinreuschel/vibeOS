@@ -145,9 +145,174 @@ pub const fn ring3_action(kind: TrapKind) -> Ring3Action {
     }
 }
 
-/// The x86_64 decode: an IDT vector and its error code to a `TrapKind`.
+/// How portable code reads and changes a syscall's saved user context: the
+/// number, the arguments, the return value, the instruction and stack
+/// pointers, and the rewind that restarts the call (ROADMAP §10.3, §10.6).
+pub trait SyscallAbi {
+    type Frame;
+    fn nr(f: &Self::Frame) -> u64;
+    /// Argument `i` (0 to 5); 0 for any other `i`.
+    fn arg(f: &Self::Frame, i: usize) -> u64;
+    fn set_ret(f: &mut Self::Frame, v: u64);
+    fn ip(f: &Self::Frame) -> u64;
+    fn set_ip(f: &mut Self::Frame, v: u64);
+    fn sp(f: &Self::Frame) -> u64;
+    fn set_sp(f: &mut Self::Frame, v: u64);
+    /// Rewind the frame so the return to user mode runs the syscall again.
+    fn restart(f: &mut Self::Frame);
+}
+
+/// The x86_64 decode: an IDT vector and its error code to a `TrapKind`,
+/// and the user frame every entry from ring 3 saves.
 pub mod x86_64 {
-    use super::{DebugCause, FpCause, FpUnit, PageFaultCause, TrapKind};
+    use super::{DebugCause, FpCause, FpUnit, PageFaultCause, SyscallAbi, TrapKind};
+    use crate::desc::{USER_CS_RPL, USER_DS_RPL};
+    use crate::paging::USER_MAP_END;
+
+    /// A ring-3 register frame: the 21 words of Linux's x86_64
+    /// `struct user_regs_struct`, in its order, low address first (layout
+    /// as `arch/x86/include/asm/user_64.h` defines it). The last five are
+    /// the hardware `iretq` frame. Every entry from ring 3 saves one at the
+    /// top of the thread's kernel stack, and every return to ring 3 leaves
+    /// from it (DESIGN §5.10, §7.5).
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct UserFrame {
+        pub r15: u64,
+        pub r14: u64,
+        pub r13: u64,
+        pub r12: u64,
+        pub rbp: u64,
+        pub rbx: u64,
+        pub r11: u64,
+        pub r10: u64,
+        pub r9: u64,
+        pub r8: u64,
+        pub rax: u64,
+        pub rcx: u64,
+        pub rdx: u64,
+        pub rsi: u64,
+        pub rdi: u64,
+        /// The syscall number at a syscall entry, -1 at any other entry.
+        pub orig_rax: u64,
+        pub rip: u64,
+        pub cs: u64,
+        pub rflags: u64,
+        pub rsp: u64,
+        pub ss: u64,
+    }
+
+    /// RFLAGS bits the first return to ring 3 sets: IF and reserved bit 1.
+    const RFLAGS_USER: u64 = 0x202;
+    const RFLAGS_TF: u64 = 1 << 8;
+    const RFLAGS_RF: u64 = 1 << 16;
+    const RFLAGS_VM: u64 = 1 << 17;
+
+    impl UserFrame {
+        pub const fn zeroed() -> Self {
+            Self {
+                r15: 0,
+                r14: 0,
+                r13: 0,
+                r12: 0,
+                rbp: 0,
+                rbx: 0,
+                r11: 0,
+                r10: 0,
+                r9: 0,
+                r8: 0,
+                rax: 0,
+                rcx: 0,
+                rdx: 0,
+                rsi: 0,
+                rdi: 0,
+                orig_rax: 0,
+                rip: 0,
+                cs: 0,
+                rflags: 0,
+                rsp: 0,
+                ss: 0,
+            }
+        }
+
+        /// A new program's first frame: every GPR zero, IF set, the user
+        /// selectors, and RCX/R11 equal to RIP/RFLAGS as a `syscall` leaves
+        /// them, so the exit takes `sysretq`.
+        pub const fn new_user(rip: u64, rsp: u64) -> Self {
+            let mut f = Self::zeroed();
+            f.rip = rip;
+            f.rcx = rip;
+            f.rsp = rsp;
+            f.rflags = RFLAGS_USER;
+            f.r11 = RFLAGS_USER;
+            f.cs = USER_CS_RPL as u64;
+            f.ss = USER_DS_RPL as u64;
+            f.orig_rax = u64::MAX;
+            f
+        }
+    }
+
+    /// Whether the syscall exit may leave `f` through `sysretq`, as Linux
+    /// decides: `sysretq` reloads RIP from RCX and RFLAGS from R11, loads
+    /// fixed selectors, and cannot return with RF, TF or VM set or to a RIP
+    /// at or above `USER_MAP_END`. Otherwise the exit uses `iretq`.
+    pub const fn sysret_ok(f: &UserFrame) -> bool {
+        f.rip == f.rcx
+            && f.rflags == f.r11
+            && f.cs == USER_CS_RPL as u64
+            && f.ss == USER_DS_RPL as u64
+            && f.rip < USER_MAP_END
+            && f.rflags & (RFLAGS_RF | RFLAGS_TF | RFLAGS_VM) == 0
+    }
+
+    /// The x86_64 Linux syscall ABI over [`UserFrame`].
+    pub struct Abi;
+
+    impl SyscallAbi for Abi {
+        type Frame = UserFrame;
+
+        fn nr(f: &UserFrame) -> u64 {
+            f.orig_rax
+        }
+
+        fn arg(f: &UserFrame, i: usize) -> u64 {
+            match i {
+                0 => f.rdi,
+                1 => f.rsi,
+                2 => f.rdx,
+                3 => f.r10,
+                4 => f.r8,
+                5 => f.r9,
+                _ => 0,
+            }
+        }
+
+        fn set_ret(f: &mut UserFrame, v: u64) {
+            f.rax = v;
+        }
+
+        fn ip(f: &UserFrame) -> u64 {
+            f.rip
+        }
+
+        fn set_ip(f: &mut UserFrame, v: u64) {
+            f.rip = v;
+        }
+
+        fn sp(f: &UserFrame) -> u64 {
+            f.rsp
+        }
+
+        fn set_sp(f: &mut UserFrame, v: u64) {
+            f.rsp = v;
+        }
+
+        /// `syscall` is two bytes (`0F 05`).
+        fn restart(f: &mut UserFrame) {
+            f.rax = f.orig_rax;
+            f.rip = f.rip.wrapping_sub(2);
+        }
+    }
 
     const PF_PRESENT: u64 = 1 << 0;
     const PF_WRITE: u64 = 1 << 1;
@@ -217,9 +382,139 @@ pub mod x86_64 {
 
 #[cfg(test)]
 mod tests {
+    use core::mem::{offset_of, size_of};
+
     use super::si_code::*;
-    use super::x86_64::{decode, fp_cause};
+    use super::x86_64::{Abi, UserFrame, decode, fp_cause, sysret_ok};
     use super::*;
+    use crate::desc::{USER_CS_RPL, USER_DS_RPL};
+    use crate::paging::USER_MAP_END;
+
+    #[test]
+    fn user_frame_offsets() {
+        let want = [
+            offset_of!(UserFrame, r15),
+            offset_of!(UserFrame, r14),
+            offset_of!(UserFrame, r13),
+            offset_of!(UserFrame, r12),
+            offset_of!(UserFrame, rbp),
+            offset_of!(UserFrame, rbx),
+            offset_of!(UserFrame, r11),
+            offset_of!(UserFrame, r10),
+            offset_of!(UserFrame, r9),
+            offset_of!(UserFrame, r8),
+            offset_of!(UserFrame, rax),
+            offset_of!(UserFrame, rcx),
+            offset_of!(UserFrame, rdx),
+            offset_of!(UserFrame, rsi),
+            offset_of!(UserFrame, rdi),
+            offset_of!(UserFrame, orig_rax),
+            offset_of!(UserFrame, rip),
+            offset_of!(UserFrame, cs),
+            offset_of!(UserFrame, rflags),
+            offset_of!(UserFrame, rsp),
+            offset_of!(UserFrame, ss),
+        ];
+        for (i, off) in want.iter().enumerate() {
+            assert_eq!(*off, i * 8, "word {i}");
+        }
+        assert_eq!(size_of::<UserFrame>(), 168);
+    }
+
+    fn sample() -> UserFrame {
+        UserFrame {
+            rdi: 10,
+            rsi: 11,
+            rdx: 12,
+            r10: 13,
+            r8: 14,
+            r9: 15,
+            rcx: 16,
+            r11: 17,
+            rax: 18,
+            orig_rax: 39,
+            rip: 0x40_1002,
+            rsp: 0x7000,
+            ..UserFrame::zeroed()
+        }
+    }
+
+    #[test]
+    fn abi_linux_syscall_registers() {
+        let mut f = sample();
+        assert_eq!(Abi::nr(&f), 39);
+        let args: [u64; 7] = core::array::from_fn(|i| Abi::arg(&f, i));
+        assert_eq!(args, [10, 11, 12, 13, 14, 15, 0]);
+        assert_eq!(Abi::arg(&f, usize::MAX), 0);
+        Abi::set_ret(&mut f, (-38i64) as u64);
+        assert_eq!(f.rax, (-38i64) as u64);
+        assert_eq!(Abi::ip(&f), 0x40_1002);
+        Abi::set_ip(&mut f, 0x40_2000);
+        assert_eq!(f.rip, 0x40_2000);
+        assert_eq!(Abi::sp(&f), 0x7000);
+        Abi::set_sp(&mut f, 0x8000);
+        assert_eq!(f.rsp, 0x8000);
+        // Nothing else moved.
+        assert_eq!((f.rcx, f.r11, f.orig_rax), (16, 17, 39));
+    }
+
+    #[test]
+    fn abi_restart_rewinds() {
+        let mut f = sample();
+        Abi::restart(&mut f);
+        assert_eq!(f.rax, 39);
+        assert_eq!(f.rip, 0x40_1000);
+        assert_eq!(f.orig_rax, 39);
+    }
+
+    #[test]
+    fn new_user_frame_takes_sysret() {
+        let f = UserFrame::new_user(0x40_0000, 0x7fff_f000);
+        assert!(sysret_ok(&f));
+        assert_eq!((f.rip, f.rcx, f.rsp), (0x40_0000, 0x40_0000, 0x7fff_f000));
+        assert_eq!((f.rflags, f.r11), (0x202, 0x202));
+        assert_eq!(f.cs, u64::from(USER_CS_RPL));
+        assert_eq!(f.ss, u64::from(USER_DS_RPL));
+        assert_eq!(f.orig_rax, u64::MAX);
+        assert_eq!((f.rax, f.rdi, f.r15), (0, 0, 0));
+    }
+
+    #[test]
+    fn sysret_ok_rule() {
+        let base = UserFrame::new_user(0x40_0000, 0x7fff_f000);
+        assert!(sysret_ok(&base));
+        let bad: [fn(&mut UserFrame); 8] = [
+            |f| f.rcx = f.rip + 1,
+            |f| f.r11 = f.rflags | 1,
+            |f| f.cs = 0x08,
+            |f| f.ss = 0x10,
+            |f| {
+                f.rip = USER_MAP_END;
+                f.rcx = USER_MAP_END;
+            },
+            |f| {
+                f.rflags |= 1 << 16;
+                f.r11 = f.rflags;
+            },
+            |f| {
+                f.rflags |= 1 << 8;
+                f.r11 = f.rflags;
+            },
+            |f| {
+                f.rflags |= 1 << 17;
+                f.r11 = f.rflags;
+            },
+        ];
+        for (i, change) in bad.iter().enumerate() {
+            let mut f = base;
+            change(&mut f);
+            assert!(!sysret_ok(&f), "case {i}");
+        }
+        let mut f = base;
+        f.rip = USER_MAP_END - 1;
+        f.rcx = f.rip;
+        assert!(sysret_ok(&f));
+    }
 
     const fn s(sig: u32, si_code: i32) -> Ring3Action {
         Ring3Action::Signal { sig, si_code }
