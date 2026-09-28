@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.harness import results, run_ktest
+from tests.harness import results, run_e2e, run_ktest
 from tests.harness.harness import (
     ISA_DEBUG_PASS,
     QemuConfig,
@@ -144,6 +144,40 @@ class TestResults(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             r = results.Results("a b/c:d.e-f_g", out_dir=Path(d))
             self.assertEqual(r.write().name, "x86_64-a_b_c_d.e-f_g.json")
+
+    def test_e2e_retry_hang_reaches_summary_and_results(self) -> None:
+        # Box 1246's proof. No driver retries now (TestNoRetry), so this
+        # records the retry an e2e driver would have taken, with its label
+        # and the missing marker the timeout names, and checks it reaches
+        # both the job summary and the tier's results file.
+        msg = (
+            "timed out after 1.0s; 3/40 markers; missing 'heap_ok'"
+            "\n--- serial tail 1/1 ---\nvibeOS: serial `online`"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            summary = Path(d) / "summary.md"
+            out = Path(d) / "results"
+            with overlay_env({"GITHUB_STEP_SUMMARY": str(summary)}):
+                r = results.Results("test-e2e", out_dir=out)
+                results.current().retry("marker boot", results.failure_line(msg))
+                run_e2e._record_missing(msg)
+            data = _load(r.write())
+            text = summary.read_text(encoding="utf-8")
+        self.assertEqual(
+            data["retries"],
+            [
+                {
+                    "label": "marker boot",
+                    "failure_line": "timed out after 1.0s; 3/40 markers; missing 'heap_ok'",
+                }
+            ],
+        )
+        self.assertEqual(data["marker"], {"passed": [], "failed": ["heap_ok"]})
+        self.assertEqual(
+            text,
+            "- harness retry (`test-e2e`, marker boot): "
+            "`timed out after 1.0s; 3/40 markers; missing 'heap_ok'`\n",
+        )
 
     def test_ktest_boot_records_one_boot_and_no_retry(self) -> None:
         passing = RunResult(
