@@ -11,7 +11,6 @@ from unittest import mock
 from tests.harness import results, run_e2e, run_ktest
 from tests.harness.harness import (
     ISA_DEBUG_PASS,
-    HarnessError,
     QemuConfig,
     RunResult,
     overlay_env,
@@ -147,27 +146,23 @@ class TestResults(unittest.TestCase):
             self.assertEqual(r.write().name, "x86_64-a_b_c_d.e-f_g.json")
 
     def test_e2e_retry_hang_reaches_summary_and_results(self) -> None:
+        # Box 1246's proof. No driver retries now (TestNoRetry), so this
+        # records the retry an e2e driver would have taken, with its label
+        # and the missing marker the timeout names, and checks it reaches
+        # both the job summary and the tier's results file.
+        msg = (
+            "timed out after 1.0s; 3/40 markers; missing 'heap_ok'"
+            "\n--- serial tail 1/1 ---\nvibeOS: serial `online`"
+        )
         with tempfile.TemporaryDirectory() as d:
             summary = Path(d) / "summary.md"
             out = Path(d) / "results"
-            calls = 0
-
-            def boot() -> str:
-                nonlocal calls
-                calls += 1
-                if calls == 1:
-                    raise HarnessError(
-                        "timed out after 1.0s; 3/40 markers; missing 'heap_ok'"
-                        "\n--- serial tail 1/1 ---\nvibeOS: serial `online`"
-                    )
-                return "booted"
-
             with overlay_env({"GITHUB_STEP_SUMMARY": str(summary)}):
                 r = results.Results("test-e2e", out_dir=out)
-                self.assertEqual(run_e2e._retry_hang("marker boot", boot), "booted")
+                results.current().retry("marker boot", results.failure_line(msg))
+                run_e2e._record_missing(msg)
             data = _load(r.write())
             text = summary.read_text(encoding="utf-8")
-        self.assertEqual(calls, 2)
         self.assertEqual(
             data["retries"],
             [
@@ -184,7 +179,7 @@ class TestResults(unittest.TestCase):
             "`timed out after 1.0s; 3/40 markers; missing 'heap_ok'`\n",
         )
 
-    def test_ktest_boot_retry_reaches_summary_and_results(self) -> None:
+    def test_ktest_boot_records_one_boot_and_no_retry(self) -> None:
         passing = RunResult(
             lines=[
                 "vibeOS: block: vda 8192 sectors",
@@ -203,25 +198,20 @@ class TestResults(unittest.TestCase):
             with overlay_env({"GITHUB_STEP_SUMMARY": str(summary)}):
                 r = results.Results("test-kernel", out_dir=Path(d) / "results")
                 with mock.patch.object(
-                    run_ktest,
-                    "run_qemu_until_exit",
-                    side_effect=(HarnessError("timed out after 90.0s; 40 lines"), passing),
+                    run_ktest, "run_qemu_until_exit", side_effect=(passing,)
                 ):
                     got = run_ktest._ktest_boot(cfg, timeout=1.0, persist_reboot=False)
             data = _load(r.write())
-            text = summary.read_text(encoding="utf-8")
+            wrote_summary = summary.exists()
         self.assertIs(got, passing)
-        self.assertEqual(
-            data["retries"],
-            [{"label": "ktest attempt 1", "failure_line": "timed out after 90.0s; 40 lines"}],
-        )
+        self.assertEqual(data["retries"], [])
         self.assertEqual(data["ktest"], {"passed": ["alpha"], "skipped": [], "failed": []})
         qemu = data["qemu"]
         assert isinstance(qemu, list)
         self.assertEqual(len(qemu), 1)
         self.assertEqual(qemu[0]["exit"], ISA_DEBUG_PASS)
         self.assertEqual(qemu[0]["accel"], "tcg")
-        self.assertIn("(`test-kernel`, ktest attempt 1): `timed out after 90.0s", text)
+        self.assertFalse(wrote_summary)
 
     def test_run_main_writes_on_failure(self) -> None:
         with tempfile.TemporaryDirectory() as d:

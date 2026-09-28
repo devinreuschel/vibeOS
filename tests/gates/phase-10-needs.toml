@@ -514,7 +514,32 @@ closes = [
   "`make test-kernel` at `-smp 2` and `-smp 4` both pass with no harness retry",
   "the `-smp 4` in-guest tier re-run weekly by `smp-stress.yml`",
 ]
-why = "reopened by design review J136"
+needs = [
+  "the `/bin/tests` stall after `user:",  # L1240
+  "the `-smp 4` `ipi: ack",  # L1241
+  "the `-smp 4` `msix_cpu: ap",  # L1242
+  "the `-smp 2` `per_cpu_bsp: ready_head",  # L1243
+]
+why = "reopened by design review J136 (closes); needs: claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "`make test-kernel` at `-smp 2`"
+needs = [
+  "the `/bin/tests` stall after `user:",  # L1240
+  "the `-smp 4` `ipi: ack",  # L1241
+  "the `-smp 4` `msix_cpu: ap",  # L1242
+  "the `-smp 2` `per_cpu_bsp: ready_head",  # L1243
+  "the harness retries nothing: after",  # L1244
+  "`reap_many_via_idle` compares frame counts against",  # L1247
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "the `-smp 4` in-guest tier"
+needs = [
+  "the harness retries nothing: after",  # L1244
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 [[box]]
 key = "an in-guest test finds every CPU's `PerCpu.ticks` advancing"

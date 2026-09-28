@@ -127,6 +127,9 @@ GONE: list[tuple[str, str]] = [
     ("wait_on", "stop and continue cannot lose a wakeup"),
     ("wake_queue", "stop and continue cannot lose a wakeup"),
     ("scroll_copy", "console `write` holds IF=0 only for bounded work"),
+    ("_retry_hang", "the harness retries nothing"),
+    ("retryable_ktest_failure", "the harness retries nothing"),
+    ("silent_user_syscalls_hang", "the harness retries nothing"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

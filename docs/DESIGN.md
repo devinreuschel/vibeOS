@@ -4187,16 +4187,11 @@ the exit status. ROADMAP §10.2 makes it read each of these lines only when fram
 | `0x10` | 33 | all tests passed |
 | `0x11` | 35 | at least one test failed |
 
-The harness also retries, and ROADMAP §10.2 removes every retry (F021). `run_ktest.py` boots again
-after any timeout, after the `-smp 4` `FAIL msix_cpu: ap counter`, and after a `-smp 4` panic whose
-tail holds `ipi: ack timeout`, the `ipi_init::wait_acks` frame, or a banner glued to a `ktest: ok`
-line. A second timeout whose tail ends at `user: dup ok` gets a third boot, although the stall it was
-added for is fixed (a forked child's first entry to ring 3 took a timer tick with the user GS loaded,
-ROADMAP §10.6), and `user_fork_wait_stall` catches it. `make test-smp-stress`
-uses the same rules, so a green run can hide an intermittent hang or panic. Until then each retry
-goes to the job summary and to the `retries` list of the tier's results file, which
-`tests/harness/results.py` writes and the ladder uploads, and a pull request that ticks a ROADMAP
-box on a run that retried fails (`check_ticks.py`, ROADMAP §10.2, §10.9).
+The harness retries nothing (ROADMAP §10.2, F021): `run_ktest.py` boots each configuration once for
+the first boot and once for the persist reboot, `run_e2e.py` boots each variant once, and a timeout, a
+`FAIL` line, a panic signature, or a missing marker fails the tier, in `make test-smp-stress` as in
+every other tier. The results file keeps its `retries` list, which stays empty, and `check_ticks.py`
+still fails a pull request whose results list a retry (ROADMAP §10.9).
 
 Planned (ROADMAP §10.2): `begin` carries the number of runs the boot will make, after the command
 line's filter and repeat count, and `vibeOS: ktest: run <name> <deadline_ms>` precedes each run,
@@ -4304,8 +4299,7 @@ the diagnostic `time: calibrated hpet <n>/ms`; `make test-e2e-pit` asserts
 In the production ISO, `shell ready` is written from ring 3 by `/bin/sh`, which `/sbin/init` starts
 after waiting for `/bin/tests`. `init` passes no status pointer to `wait4`, and the harness matches
 neither `user: tests ok` nor `user: tests fail`, so a failing `/bin/tests` passes every e2e variant
-(ROADMAP §10.5, F073). `run_e2e.py` boots once more when either boot times out or the console-input boot
-ends without `shell ready` (`_retry_hang`; ROADMAP §10.2, F021).
+(ROADMAP §10.5, F073).
 
 `smp: done` before `shell ready` is deliberate. Put SMP bring-up after the shell starts and an AP
 failure becomes invisible, because the harness sees its last marker and passes. `pci: <n> devices`
@@ -4584,8 +4578,7 @@ rustflags source. A job that sets `RUSTFLAGS` drops both (ROADMAP §10.1, F147).
 GitHub Actions records per-step duration. Measured on `main` at `88370e5` (run 35796216463): `check`
 53 s, then the ladder 160 s, serialized by `needs: check`. The ladder spends 58 s on setup, toolchain,
 kernel clippy, and ISO build before the first QEMU step, then 98 s across nine QEMU steps (longest:
-vibefs crash, 22 s); about **3m40s** end to end. Across ten green runs up to `90ce475` the ladder took
-156-307 s (median about 206 s), because the harness retried a hung boot (ROADMAP §10.2). A fmt or
+vibefs crash, 22 s); about **3m40s** end to end. A fmt or
 hostlib lint failure should go red in about a minute without starting QEMU. From ROADMAP §10.9's CI
 history on, a measured number recorded in this document cites the commit it was measured at and the CPU
 model or machine it ran on (ROADMAP, How to read this).
@@ -5037,7 +5030,7 @@ against a fresh sample in a wider band, so runs that hit a real hang or panic ca
 line, and it is fixed there. No retry, skip, wider band, or longer timeout lands to make it pass,
 and a test that repeats a measurement until one sample passes has a wider band. A test skips only
 when its tier cannot run what it checks: its skip line names what the configuration lacks, and a
-tier CI runs has it. Not yet enforced: the harness retries until ROADMAP §10.2 deletes the retries.
+tier CI runs has it. `scripts/check_gone.py` keeps the deleted retry helpers out of the tree (ROADMAP §10.2).
 
 **A stall retried instead of traced.**
 From PR #75 on, `/bin/tests` sometimes stopped after `user: dup ok` and the harness booted again. The

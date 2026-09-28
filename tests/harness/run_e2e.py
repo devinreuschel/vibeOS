@@ -7,8 +7,6 @@ import hashlib
 import os
 import subprocess
 import sys
-from collections.abc import Callable
-from typing import TypeVar
 
 from tests.harness import results
 from tests.harness.harness import (
@@ -30,8 +28,6 @@ from tests.harness.harness import (
     run_qemu_inject_mce,
     virtio_blk_args,
 )
-
-_T = TypeVar("_T")
 
 # Default QEMU `pc` (i440fx) set used by vibeOS e2e. No UHCI unless `-usb`.
 PCI_GOLDEN = (
@@ -66,20 +62,6 @@ def _check_pci_qemu_set(lines: list[str]) -> None:
         raise HarnessError(f"pci count not an int: {count_line!r}") from e
     if n < len(PCI_GOLDEN):
         raise HarnessError(f"pci count {n} < golden {len(PCI_GOLDEN)}")
-
-
-def _retry_hang(label: str, fn: Callable[[], _T]) -> _T:
-    """One silent timeout / missing last marker is a QEMU hang, not a contract fail."""
-    try:
-        return fn()
-    except HarnessError as e:
-        msg = str(e)
-        if "timed out" not in msg and "no shell ready" not in msg:
-            raise
-        print(f"[e2e] retry {label}: {e}", file=sys.stderr)
-        results.current().retry(label, results.failure_line(msg))
-        _record_missing(msg)
-        return fn()
 
 
 def _record_missing(message: str) -> None:
@@ -224,25 +206,13 @@ def main() -> int:
         )
 
     try:
-        if expect_panic or gp_test:
-            result = run_qemu_and_check(
-                cfg,
-                markers,
-                timeout_s=env.timeout,
-                expect_panic=expect_panic,
-                dump_needles=dump_needles,
-            )
-        else:
-            result = _retry_hang(
-                "marker boot",
-                lambda: run_qemu_and_check(
-                    cfg,
-                    markers,
-                    timeout_s=env.timeout,
-                    expect_panic=expect_panic,
-                    dump_needles=dump_needles,
-                ),
-            )
+        result = run_qemu_and_check(
+            cfg,
+            markers,
+            timeout_s=env.timeout,
+            expect_panic=expect_panic,
+            dump_needles=dump_needles,
+        )
     except HarnessError as e:
         _record_missing(str(e))
         res.add_boot(qemu_argv(cfg, None), cfg, None)
@@ -265,10 +235,7 @@ def main() -> int:
             return 1
         print("[e2e]   . pci qemu set ok", file=sys.stderr)
         try:
-            inp = _retry_hang(
-                "console input",
-                lambda: run_qemu_console_input(cfg, timeout_s=env.timeout),
-            )
+            inp = run_qemu_console_input(cfg, timeout_s=env.timeout)
         except HarnessError as e:
             _record_missing(str(e))
             res.add_boot(qemu_argv(cfg, None), cfg, None)
