@@ -131,8 +131,7 @@ fn setup_tls(space: &mut AddressSpace, img: &Image<'_>, stack_base: u64) -> Resu
         return Ok(0);
     };
     let aligned = align_up(tls.memsz, tls.align.max(1));
-    let need = aligned.saturating_add(8);
-    let map_len = elf::page_up(need.max(PAGE_SIZE_4K));
+    let map_len = tls.map_len().ok_or(LoadError::Elf(ElfError::ImageTooBig))?;
     let tls_map = stack_base.saturating_sub(map_len);
     unsafe { addr_space_init::map_anon(space, tls_map, map_len, UserPerms::RW) }
         .map_err(LoadError::As)?;

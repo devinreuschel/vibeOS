@@ -12,6 +12,7 @@ use core::fmt::Write;
 
 use vibeos::addr_space::AddressSpace;
 use vibeos::desc::InterruptFrame;
+use vibeos::elf::ElfError;
 use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, SeekFrom};
 use vibeos::kbd::{DecodedKey, NamedKey};
 use vibeos::proc::{
@@ -163,6 +164,7 @@ fn fs_errno(e: FsError) -> i32 {
 fn load_errno(e: LoadError) -> i32 {
     match e {
         LoadError::Fs(f) => fs_errno(f),
+        LoadError::Elf(ElfError::ImageTooBig) => ENOMEM,
         LoadError::Elf(_) => ENOEXEC,
         LoadError::As(_) | LoadError::TooBig => ENOMEM,
         LoadError::Mem(_) => EFAULT,

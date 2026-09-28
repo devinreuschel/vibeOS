@@ -248,9 +248,11 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   Linux's is. On a FAT file any offset from 0 to `i64::MAX` is accepted
   (F008; ROADMAP §10.11)
 - `execve`: the image is read whole and must be at most 64 KiB (`ENOMEM`)
-  until ROADMAP §10.4 removes `MAX_ELF`. `p_memsz` is bounded only by
-  `USER_END`, so a small ELF can map pages until physical memory runs out,
-  with IF=0 and the page-table lock held (F009; ROADMAP §10.6). An empty
+  until ROADMAP §10.4 removes `MAX_ELF`. An image whose page-rounded
+  `PT_LOAD` and `PT_TLS` bytes together exceed 1 GiB
+  (`limits::EXEC_IMAGE_MAX`) returns `ENOMEM` before anything is mapped,
+  where Linux loads it while memory lasts (LINUX.md `exec-image-cap`; F009,
+  ROADMAP §10.6). An empty
   argv becomes `[path]`; Linux starts the image with `argc` 1 and an empty
   `argv[0]` (ROADMAP §10.5). `envp` is not read, and the new stack gets an
   empty environment (§7; ROADMAP §9.4 defers the copy to §10.5)
