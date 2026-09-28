@@ -22,6 +22,7 @@ use crate::x86;
 pub(super) const TESTS: &[Test] = &[
     test("stop_cont_no_lost_wakeup", test_stop_cont_no_lost_wakeup).deadline(30_000),
     test("syscall_body_if_on", test_syscall_body_if_on).deadline(30_000),
+    test("kill_line_whole", test_kill_line_whole).deadline(30_000),
     test("console_write_newlines", test_console_write_newlines).deadline(60_000),
     test(
         "lifetime_console_write_acks_shootdown",
@@ -452,6 +453,47 @@ fn body_cr2() -> Outcome {
     let during = idt_testing::pf_during_yield();
     if during != CR2_B {
         return crate::fail_fmt!("#PF body during A's yield had cr2 {during:#x}, want B's");
+    }
+    for (who, pid, want) in [("A", a, CR2_A), ("B", b, CR2_B)] {
+        match kill_line_cr2(pid) {
+            Some(c) if c == want => {}
+            got => {
+                return crate::fail_fmt!(
+                    "{who} (pid {pid}) kill line cr2 {got:x?}, want {want:#x}"
+                );
+            }
+        }
+    }
+    Outcome::Ok
+}
+
+/// A ring-3 kill line reaches the log ring whole, although the fault body
+/// that writes it runs with IF=1: A's kill line is held open mid-write
+/// until B, on the same CPU, has written its own, and each line still
+/// names its own process's CR2.
+fn test_kill_line_whole() -> Outcome {
+    BODY_SPAWNED.store(false, Ordering::Release);
+    proc_testing::arm_kill_line_yield(CR2_A);
+    super::spawn_thread_on("s19_kill_faults", body_spawn_faults, 0);
+    let spawned = sleep_until(|| BODY_SPAWNED.load(Ordering::Acquire), 5_000);
+    let (a, b) = (spawned_pid(0), spawned_pid(1));
+    let sts = if spawned {
+        [a.map(user::wait), b.map(user::wait)]
+    } else {
+        [None, None]
+    };
+    proc_testing::disarm_kill_line_yield();
+    if !spawned {
+        return Outcome::Fail("fault spawner did not run");
+    }
+    let (Some(a), Some(b)) = (a, b) else {
+        return Outcome::Fail("spawn A or B");
+    };
+    let segv = wait_signaled(SIGSEGV);
+    for (who, st) in [("A", sts[0]), ("B", sts[1])] {
+        if st != Some(segv) {
+            return crate::fail_fmt!("{who} status {st:?}, want {segv:#x}");
+        }
     }
     for (who, pid, want) in [("A", a, CR2_A), ("B", b, CR2_B)] {
         match kill_line_cr2(pid) {

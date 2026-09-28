@@ -1524,10 +1524,14 @@ pub fn try_user_fault(f: &TrapFrame) {
         f.user().rip,
         f.error_code
     );
+    #[cfg(feature = "kernel_tests")]
+    testing::kill_line_yield(f);
     if f.vector == u64::from(vectors::PF) {
         let _ = write!(Serial, " cr2=0x{:x}", f.cr2);
     }
     let _ = writeln!(Serial);
+    #[cfg(feature = "kernel_tests")]
+    testing::kill_line_done();
     crate::arch::gs::force_kernel();
     finish_exit(wait_signaled(sig), true);
 }
@@ -1544,9 +1548,50 @@ pub(crate) mod testing {
     use vibeos::proc::MAX_PROCS;
     use vibeos::syscall::{SYS_GETPID, UserFrame};
 
+    use crate::arch::idt::TrapFrame;
     use crate::per_cpu_init;
     use crate::thread_init;
     use crate::time_init;
+
+    /// `cr2` of the `#PF` whose kill line yields once; 0 for none.
+    static KILL_YIELD_CR2: AtomicU64 = AtomicU64::new(0);
+    /// Kill lines `try_user_fault` has finished writing since boot.
+    static KILL_LINES: AtomicU64 = AtomicU64::new(0);
+
+    /// The next CPL-3 `#PF` at `cr2` that ends in a kill yields while
+    /// `try_user_fault` writes its kill line, until another kill line is
+    /// written, for at most 1 s of TSC time.
+    pub(crate) fn arm_kill_line_yield(cr2: u64) {
+        KILL_YIELD_CR2.store(cr2, Ordering::Release);
+    }
+
+    pub(crate) fn disarm_kill_line_yield() {
+        KILL_YIELD_CR2.store(0, Ordering::Release);
+    }
+
+    pub(super) fn kill_line_yield(f: &TrapFrame) {
+        let armed = KILL_YIELD_CR2.load(Ordering::Acquire);
+        if armed == 0
+            || f.vector != u64::from(vibeos::vectors::PF)
+            || f.cr2 != armed
+            || KILL_YIELD_CR2
+                .compare_exchange(armed, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return;
+        }
+        let n0 = KILL_LINES.load(Ordering::Acquire);
+        let t0 = time_init::now_ns();
+        while KILL_LINES.load(Ordering::Acquire) == n0
+            && time_init::now_ns().saturating_sub(t0) < 1_000_000_000
+        {
+            thread_init::yield_now();
+        }
+    }
+
+    pub(super) fn kill_line_done() {
+        KILL_LINES.fetch_add(1, Ordering::AcqRel);
+    }
 
     static GETPIDS: [AtomicU64; MAX_PROCS] = [const { AtomicU64::new(0) }; MAX_PROCS];
 
