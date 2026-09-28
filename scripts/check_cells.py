@@ -340,7 +340,7 @@ def legacy_errors(path: str, text: str) -> list[str]:
     errors: list[str] = []
     for n, ln in enumerate(text.splitlines(), 1):
         where = f"{path}:{n}:{ln}"
-        if "static mut" in ln and path != "src/arch/catch.rs":
+        if "static mut" in ln and path != "src/arch/x86_64/catch.rs":
             errors.append(f"static mut outside catch.rs: {where}")
         if "-> &'static mut" in ln:
             errors.append(f"function returns &'static mut: {where}")

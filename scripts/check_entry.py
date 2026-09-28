@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One entry path: no `x86-interrupt` handler outside `src/arch/` (AGENTS.md rule 1).
 
-Every IDT vector enters through a stub that `src/arch/idt.rs` generates, and
+Every IDT vector enters through a stub that `src/arch/x86_64/idt.rs` generates, and
 `idt::set_handler` takes a plain body fn (ROADMAP §10.6, DESIGN §5.10 rule 1).
 Two rules:
 - `x86_interrupt_outside_arch`: an `extern "x86-interrupt"` in a `.rs` file

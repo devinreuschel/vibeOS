@@ -28,7 +28,6 @@ extern crate alloc;
 
 mod acpi_init;
 mod addr_space_init;
-mod apic_init;
 mod arch;
 mod block_init;
 mod boot;
@@ -72,6 +71,7 @@ mod x86;
 #[cfg(feature = "kernel_tests")]
 mod ktest;
 
+use arch::x86_64::apic_init;
 use mm::{heap_init, kva_init, paging_init, pmm_init};
 
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};

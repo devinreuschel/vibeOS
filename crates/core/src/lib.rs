@@ -15,7 +15,7 @@
 
 pub mod acpi;
 pub mod addr_space;
-pub mod apic;
+pub mod arch;
 pub mod block;
 pub mod cache;
 // Kernel `mod cell` in main.rs. Host tests only: production vibeos-core
@@ -24,7 +24,6 @@ pub mod cache;
 #[path = "../../../src/cell.rs"]
 pub mod cell;
 pub mod console;
-pub mod desc;
 pub mod dev;
 pub mod dma;
 pub mod elf;
@@ -47,7 +46,6 @@ pub mod mm;
 pub mod part;
 pub mod pci;
 pub mod per_cpu;
-pub mod pic;
 pub mod proc;
 pub mod sched;
 pub mod shell;
@@ -58,12 +56,11 @@ pub mod syscall;
 pub mod thread;
 pub mod time;
 pub mod trap;
-pub mod uart;
-pub mod vectors;
 pub mod vibefs;
 pub mod virtio;
 pub mod virtio_blk;
 pub mod wait;
 pub mod work;
 
+pub use arch::x86_64::{apic, desc, pic, uart, vectors};
 pub use mm::{heap, kva, paging, pmm};

@@ -29,7 +29,7 @@ class TestOutsideArch(unittest.TestCase):
         self.assertEqual([e.split(":")[0] for e in errs], sorted(files))
 
     def test_handler_in_arch_is_allowed(self) -> None:
-        self.assertEqual(x86_interrupt_outside_arch({"src/arch/idt.rs": HANDLER}), [])
+        self.assertEqual(x86_interrupt_outside_arch({"src/arch/x86_64/idt.rs": HANDLER}), [])
 
     def test_commented_line_is_ignored(self) -> None:
         files = {"src/kbd_init.rs": f"// was: {ABI} fn kbd()\n"
@@ -52,7 +52,7 @@ class TestStaleFeature(unittest.TestCase):
         self.assertTrue(errs[0].startswith("src/main.rs:2: "), errs[0])
 
     def test_feature_is_accepted_while_an_arch_handler_exists(self) -> None:
-        files = {"src/main.rs": FEATURE, "src/arch/idt.rs": HANDLER}
+        files = {"src/main.rs": FEATURE, "src/arch/x86_64/idt.rs": HANDLER}
         self.assertEqual(stale_abi_feature(FEATURE, files), [])
 
     def test_commented_feature_is_ignored(self) -> None:
@@ -72,7 +72,7 @@ class TestTree(unittest.TestCase):
     def test_scope_is_rust_under_the_four_roots(self) -> None:
         files = scoped_files()
         self.assertIn("src/main.rs", files)
-        self.assertIn("src/arch/idt.rs", files)
+        self.assertIn("src/arch/x86_64/idt.rs", files)
         self.assertTrue(all(p.endswith(".rs") for p in files))
         self.assertTrue(all(p.split("/")[0] in check_entry.SCOPE for p in files))
 
