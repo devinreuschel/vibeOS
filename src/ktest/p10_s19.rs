@@ -23,6 +23,11 @@ pub(super) const TESTS: &[Test] = &[
     test("stop_cont_no_lost_wakeup", test_stop_cont_no_lost_wakeup).deadline(30_000),
     test("syscall_body_if_on", test_syscall_body_if_on).deadline(30_000),
     test("console_write_newlines", test_console_write_newlines).deadline(60_000),
+    test(
+        "lifetime_console_write_acks_shootdown",
+        test_lifetime_console_write_acks_shootdown,
+    )
+    .deadline(60_000),
 ];
 
 /// Sleep until `pred` holds, for at most `ms`.
@@ -649,5 +654,116 @@ fn console_if_off_write() -> Outcome {
         return Outcome::Fail("the next write with IF on left Z undrawn");
     }
     fb_init::write(b"\n");
+    Outcome::Ok
+}
+
+// Fill 1 MiB past the code page with "x\r" pairs, which neither wrap nor
+// scroll, and write(1, them, 1 MiB); exit 0 when it returned 1 MiB.
+user_code!(
+    S19_XCR_MIB,
+    "
+    mov rdi, 0x40001000
+    mov ecx, 0x80000
+    mov ax, 0x0d78
+    rep stosw
+    mov edi, 1
+    mov rsi, 0x40001000
+    mov edx, 0x100000
+    mov eax, 1
+    syscall
+    xor edi, edi
+    cmp rax, 0x100000
+    setne dil
+    mov eax, 60
+    syscall
+    ud2
+    "
+);
+
+const XCR_LAYOUT: Layout = Layout {
+    vaddr: 0x4000_0000,
+    memsz: Some(0x10_1000),
+    writable: true,
+};
+
+static ACK_PID: AtomicU64 = AtomicU64::new(0);
+static ACK_SPAWNED: AtomicBool = AtomicBool::new(false);
+static ACK_DONE: AtomicBool = AtomicBool::new(false);
+/// What the write record held when the unmap returned; `u64::MAX` when
+/// the write took fewer than 2 grid holds in time or `vmap` failed.
+static ACK_AT_UNMAP: AtomicU64 = AtomicU64::new(0);
+
+fn ack_spawner() {
+    let pid = match user::spawn(&Image::Code(S19_XCR_MIB, XCR_LAYOUT), &["xcr_mib"]) {
+        Ok(pid) => u64::from(pid),
+        Err(_) => u64::MAX,
+    };
+    ACK_PID.store(pid, Ordering::Relaxed);
+    ACK_SPAWNED.store(true, Ordering::Release);
+}
+
+/// On the second CPU: once the write has taken 2 grid holds, map and
+/// unmap one frame, and record whether the write had returned by then.
+fn ack_unmapper() {
+    let rec = if spin_until(|| fb_testing::grid_holds() >= 2, 10_000_000_000) {
+        match super::alloc_frames_owned(0).map(kva_init::vmap) {
+            Some(Ok(v)) => {
+                free_frames_owned(kva_init::vunmap(v));
+                proc_testing::console_write_done_ns()
+            }
+            _ => u64::MAX,
+        }
+    } else {
+        u64::MAX
+    };
+    ACK_AT_UNMAP.store(rec, Ordering::Release);
+    ACK_DONE.store(true, Ordering::Release);
+}
+
+/// A 1 MiB console `write` from ring 3 on CPU 0 acknowledges a shootdown
+/// another CPU sends during it: the unmap returns before the write does
+/// (ROADMAP §10.10, F011).
+fn test_lifetime_console_write_acks_shootdown() -> Outcome {
+    let Some(other) = super::second_cpu() else {
+        return Outcome::Skip("needs 2 CPUs");
+    };
+    if !fb_console_on() {
+        return Outcome::Fail("no framebuffer console");
+    }
+    ACK_SPAWNED.store(false, Ordering::Release);
+    ACK_DONE.store(false, Ordering::Release);
+    ACK_AT_UNMAP.store(0, Ordering::Release);
+    let st = {
+        let _serial = SerialOff::new();
+        fb_testing::reset();
+        proc_testing::arm_console_write_record();
+        super::spawn_thread_on("s19_ack_unmap", ack_unmapper, other);
+        super::spawn_thread_on("s19_ack_spawn", ack_spawner, 0);
+        if !sleep_until(|| ACK_SPAWNED.load(Ordering::Acquire), 5_000) {
+            return Outcome::Fail("spawner did not run");
+        }
+        let Ok(pid) = u32::try_from(ACK_PID.load(Ordering::Relaxed)) else {
+            return Outcome::Fail("spawn");
+        };
+        user::wait(pid)
+    };
+    if !sleep_until(|| ACK_DONE.load(Ordering::Acquire), 15_000) {
+        return Outcome::Fail("unmap thread did not finish");
+    }
+    if st != 0 {
+        return crate::fail_fmt!("write program status {st:#x}, want 0");
+    }
+    match ACK_AT_UNMAP.load(Ordering::Acquire) {
+        0 => {}
+        u64::MAX => return Outcome::Fail("no unmap during the write"),
+        _ => return Outcome::Fail("the write returned before the unmap"),
+    }
+    if proc_testing::console_write_done_ns() == 0 {
+        return Outcome::Fail("the write record is empty");
+    }
+    let holds = fb_testing::grid_holds();
+    if holds < 4096 {
+        return crate::fail_fmt!("{holds} grid holds, want at least 4096");
+    }
     Outcome::Ok
 }

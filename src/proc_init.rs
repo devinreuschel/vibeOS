@@ -662,6 +662,10 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> i64 {
                 }
                 done += n as u64;
             }
+            #[cfg(feature = "kernel_tests")]
+            if matches!(slot.kind, FdKind::Console) {
+                testing::console_write_returned();
+            }
             done as i64
         }
     }
@@ -1618,5 +1622,25 @@ pub(crate) mod testing {
         }
         SPIN_SW_END.store(cpu0_switches(), Ordering::Release);
         SPIN_DONE_NS.store(time_init::now_ns(), Ordering::Release);
+    }
+
+    static WRITE_ARMED: AtomicBool = AtomicBool::new(false);
+    static WRITE_DONE_NS: AtomicU64 = AtomicU64::new(0);
+
+    /// Record when the next console `write` returns.
+    pub(crate) fn arm_console_write_record() {
+        WRITE_DONE_NS.store(0, Ordering::Release);
+        WRITE_ARMED.store(true, Ordering::Release);
+    }
+
+    /// `now_ns` when the armed console `write` returned; 0 before.
+    pub(crate) fn console_write_done_ns() -> u64 {
+        WRITE_DONE_NS.load(Ordering::Acquire)
+    }
+
+    pub(super) fn console_write_returned() {
+        if WRITE_ARMED.swap(false, Ordering::AcqRel) {
+            WRITE_DONE_NS.store(time_init::now_ns().max(1), Ordering::Release);
+        }
     }
 }
