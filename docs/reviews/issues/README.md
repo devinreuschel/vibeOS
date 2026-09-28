@@ -38,7 +38,7 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 | [B4](B4-build-rs-inputs.md) | Simplify `build.rs` inputs and the initrd path | Low | S–M | II | B1 | `implemented (#89)` |
 | [I1](I1-macos-job-ovmf.md) | macOS CI job; find OVMF wherever it lives | Low | S | II | A2 | `proposed` |
 | [DOC1](DOC1-top-of-funnel-docs.md) | README, DESIGN header, module map, MIT LICENSE | High | S | I | — | `implemented (#78)` |
-| [DOC2](DOC2-split-design-doc.md) | Split `DESIGN.md`; as-built in tables, not prose | Medium | M | III | A1 (helpful) | `proposed` |
+| [DOC2](DOC2-split-design-doc.md) | Split `DESIGN.md`; as-built in tables, not prose | Medium | M | III | A1 (helpful) | `in progress (#194)` |
 | [DOC3](DOC3-agents-md.md) | Version the agent instructions in the repo (`AGENTS.md`) | High | S | I | — | `implemented (#78)` |
 | [DOC4](DOC4-changelog-style.md) | Keep `CHANGELOG.md` short and user-facing | Low | S | I | B3 | `in progress (#81)` |
 | [DX1](DX1-make-check-and-lint-config.md) | A fast local gate (`make check`) and formatter/linter configuration | Medium | S | I | Q1, B1, A2 | `in progress (#76)` |

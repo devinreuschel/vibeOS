@@ -160,6 +160,7 @@ check:
 	        python3 "$$s" || exit 1; \
 	    fi; \
 	done
+	python3 scripts/doc_refs.py
 	@echo "check: ok"
 
 all: $(ISO)
