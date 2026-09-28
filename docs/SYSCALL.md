@@ -252,7 +252,10 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   `PT_LOAD` and `PT_TLS` bytes together exceed 1 GiB
   (`limits::EXEC_IMAGE_MAX`) returns `ENOMEM` before anything is mapped,
   where Linux loads it while memory lasts (LINUX.md `exec-image-cap`; F009,
-  ROADMAP §10.6). An empty
+  ROADMAP §10.6). Under the cap, every page is allocated and zeroed at the
+  call, in chunks of at most 512 pages (one leaf table), with the page-table
+  lock dropped between chunks; a frame shortage unmaps and frees what the
+  load mapped and returns `ENOMEM` to the old image. An empty
   argv becomes `[path]`; Linux starts the image with `argc` 1 and an empty
   `argv[0]` (ROADMAP §10.5). `envp` is not read, and the new stack gets an
   empty environment (§7; ROADMAP §9.4 defers the copy to §10.5)

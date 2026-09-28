@@ -106,7 +106,6 @@ fn map_loads(space: &mut AddressSpace, img: &Image<'_>) -> Result<(), LoadError>
             Ok(()) | Err(AsError::Overlap) => {}
             Err(e) => return Err(LoadError::As(e)),
         }
-        space.zero_bytes(start, len).map_err(LoadError::Mem)?;
         if seg.filesz != 0 {
             let bytes = img.file_bytes(*seg).map_err(LoadError::Elf)?;
             space
@@ -235,6 +234,15 @@ fn fill_stack(space: &AddressSpace, img: &Image<'_>, argv: &[&[u8]]) -> Result<u
 
 /// Build a new address space. Caller installs it only after this returns.
 pub fn load_path(path: &str, argv: &[&str]) -> Result<Loaded, LoadError> {
+    #[cfg(feature = "kernel_tests")]
+    let before = testing::free_now();
+    let r = load_path_inner(path, argv);
+    #[cfg(feature = "kernel_tests")]
+    testing::record(before, r.is_ok());
+    r
+}
+
+fn load_path_inner(path: &str, argv: &[&str]) -> Result<Loaded, LoadError> {
     let bytes = read_path(path)?;
     let argv_b: Vec<&[u8]> = if argv.is_empty() {
         vec![path.as_bytes()]
@@ -269,5 +277,62 @@ pub fn load_image(elf: &[u8], argv: &[&[u8]]) -> Result<Loaded, LoadError> {
             addr_space_init::teardown(space);
             Err(e)
         }
+    }
+}
+
+#[cfg(feature = "kernel_tests")]
+#[expect(dead_code, reason = "read by exec_huge_memsz, ROADMAP §10.6")]
+pub(crate) mod testing {
+    use alloc::vec::Vec;
+    use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    use crate::pmm_init;
+
+    /// Free-frame counts around one [`super::load_path`] call.
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) struct ExecFrames {
+        /// Buddy free frames at entry.
+        pub before: usize,
+        /// Buddy free frames at return, after a failed load's teardown.
+        pub after: usize,
+        pub ok: bool,
+    }
+
+    const SLOTS: usize = 4;
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    static BEFORE: [AtomicU64; SLOTS] = [const { AtomicU64::new(0) }; SLOTS];
+    static AFTER: [AtomicU64; SLOTS] = [const { AtomicU64::new(0) }; SLOTS];
+    static OK: [AtomicU64; SLOTS] = [const { AtomicU64::new(0) }; SLOTS];
+
+    pub(super) fn free_now() -> usize {
+        pmm_init::with_buddy(|b| b.stats().free_frames)
+    }
+
+    pub(super) fn record(before: usize, ok: bool) {
+        let after = free_now();
+        let i = NEXT.load(Ordering::Relaxed);
+        BEFORE[i % SLOTS].store(before as u64, Ordering::Relaxed);
+        AFTER[i % SLOTS].store(after as u64, Ordering::Relaxed);
+        OK[i % SLOTS].store(u64::from(ok), Ordering::Relaxed);
+        NEXT.store(i.wrapping_add(1), Ordering::Release);
+    }
+
+    /// Forget the recorded loads.
+    pub(crate) fn clear_exec_frames() {
+        NEXT.store(0, Ordering::Release);
+    }
+
+    /// The last four `load_path` calls since [`clear_exec_frames`], oldest
+    /// first.
+    pub(crate) fn exec_frames() -> Vec<ExecFrames> {
+        let n = NEXT.load(Ordering::Acquire);
+        let first = n.saturating_sub(SLOTS);
+        (first..n)
+            .map(|i| ExecFrames {
+                before: BEFORE[i % SLOTS].load(Ordering::Relaxed) as usize,
+                after: AFTER[i % SLOTS].load(Ordering::Relaxed) as usize,
+                ok: OK[i % SLOTS].load(Ordering::Relaxed) != 0,
+            })
+            .collect()
     }
 }
