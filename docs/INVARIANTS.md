@@ -1,0 +1,1059 @@
+# 2. Invariants
+
+Index: [DESIGN.md](DESIGN.md). This file holds DESIGN §2, and its headings keep DESIGN's numbers.
+
+Break these and the failure shows up somewhere else, hours later.
+
+## 2.1 Lock order
+
+Acquire in this order, release in reverse. Never take a lower number while holding a higher one, and
+take a second lock of a number already held only through §2.3's nested acquire.
+
+1. heap
+2. page tables: the kernel's lock, and from ROADMAP §12.1 one lock per address space
+3. physical allocator (buddy)
+4. scheduler (also: wait-queue lists and blocking-primitive predicates)
+5. device / driver locks
+6. serial
+
+Serial is last so any lock holder can still log. Heap is first because growing it takes PT and then
+BUDDY, and nothing allocates from or frees to the heap while holding either. Page tables come before
+the buddy because mapping a page allocates its table frames. Blocking `WaitQueue`s are serialized by
+the scheduler lock: the predicate check and the enqueue happen under that same lock (DESIGN
+[§9.4](PITFALLS.md#94-concurrency)).
+
+Planned (ROADMAP §13.3): a seventh rank, SOCK, ahead of all six, for socket state (below). Planned
+(ROADMAP §19.4): a TIMER rank just before SERIAL, for the per-CPU timer bases
+([§6.5](TIME.md#65-timers-and-timeouts)), so code under any other spinlock may arm, re-arm, or cancel a
+timer.
+
+The six ranks order spinlocks: `SpinMutex`, and the cross-CPU `IrqCell`s that ROADMAP §10.3 turns
+into ranked `SpinMutex`es. Sleeping locks form a tier outside all six: `BlockingMutex`, `RwLock`,
+`Semaphore`, and waiting for a page or buffer to finish I/O. A thread takes a sleeping lock only with
+IF=1 and no spinlock held ([§2.9](#29-preemption-and-interrupt-state) rule 4), so every sleeping lock
+ranks before every spin rank, and no spinlock is ever held across a sleep. Within the sleeping tier,
+outermost first:
+
+1. the locks a call may hold across a copy to or from user memory, outermost first: an open file
+   description's position lock; then a stream's lock (a pipe's lock, a socket's owner lock, a TTY's
+   read lock or write lock); then the filesystem namespace and inode locks: the mount table, then a
+   directory, then an inode in it; a parent directory before its child. A `rename` takes the
+   volume's rename lock, then its two directories: an ancestor before its descendant, and two
+   directories neither of which contains the other in address order
+2. the address-space lock (ROADMAP §13.1: `mmap`, `munmap`, and `mprotect` take it for writing, the
+   fault path for reading). It guards the region tree only. A page-table entry changes under its
+   space's page-table spinlock (the PT rank above), so the reverse-map unmap that direct reclaim
+   does ([§4.4](MEMORY.md#44-kernel-heap)) takes no address-space lock; it takes the reverse-map lock
+   (level 3b) only by try-lock. The fault path never waits while it holds it (below)
+3. waits on a page-cache page, in a file's mapping or a block device's
+   ([§10.6](BLOCK.md#106-block-cache); ROADMAP §12.5)
+
+   3b. the reverse-map lock of a file mapping or an anonymous object ([§4.6](MEMORY.md#46-what-comes-later)),
+   a sleeping `RwLock`. A walk that finds every PTE mapping a page takes it for reading, possibly
+   with that page held busy; linking or unlinking a region, or changing a linked region's range,
+   takes it for writing, possibly under the address-space lock. No level-4 lock is held when it is
+   taken: writeback's clean step walks before writeback takes the filesystem's locks. Code holding
+   it takes no lock of levels 1 to 4 and no second reverse-map lock, except that for a region linked
+   into two objects the file mapping's is taken before the anonymous object's; spinlocks may follow
+   it, as after any sleeping lock. It is numbered 3b so that level 4 keeps its number.
+4. a filesystem's block-mapping and volume I/O locks, which its page-fill and writeback paths take
+   and which are never held across a user copy. Writeback and a filesystem commit take no lock of
+   levels 1 and 2 and take a page busy only by try-lock, coming back later for a page they find
+   busy, so a thread that holds an inode lock, its address-space lock, or a busy page can always
+   wait for writeback progress ([§4.4](MEMORY.md#44-kernel-heap) rule 3). A thread that has joined an open
+   vibefs v2 transaction, which a commit waits for, holds it as a level-4 lock
+   ([VIBEFS.md](VIBEFS.md) §15; ROADMAP §14.8)
+
+A copy through a faulting accessor (§5.1) may fault, and the fault path takes the address-space lock
+for reading, then page waits, then, to fill a file page, the filesystem's level-4 locks. So such a
+copy is allowed while level-1 locks are held, as `write` needs, and under no lock of levels 2 to 4,
+level 3b included. The reverse is forbidden: code that holds the address-space lock takes no level-1
+lock. A non-faulting accessor (§5.1) takes no fault path and no lock, so it may run under any of
+them.
+
+The position lock serializes `read`, `readv`, `write`, `writev`, `lseek`, and `getdents64` on one
+open file description of a regular file or directory, so threads and processes that share the
+description through `CLONE_FILES`, `fork`, or `dup` each see a whole offset update (Linux's
+`f_pos_lock`). Every such call takes it. `pread64` and `pwrite64` take none, and neither does a
+description of a pipe, socket, TTY, or character device, whose I/O does not use the offset. The
+file's size belongs to its inode and changes under the inode lock. A stream's lock guards the
+stream's buffer and is held across its user copy, never across a wait for a party that needs it: a
+pipe's lock and a socket's owner lock, which readers and writers both take, are dropped before the
+caller sleeps on the stream's wait queue, while a TTY's read lock, which only readers take, may be
+held while a reader waits for input (Linux's `atomic_read_lock`). So a `read` blocked on a shared
+pipe, socket, or TTY never holds off a `write` through the same description. Two stream locks nest
+only in address order, under a ROADMAP §13.12 subclass, as a pipe-to-pipe `splice` needs. A TTY's
+input queue, its line and echo state, and the termios settings its input side reads are under a
+spinlock, because the line discipline runs in the input device's bottom half
+([§5.4](INTERRUPTS.md#54-irq-registration)), which takes no sleeping-tier lock. Session, process-group, and
+process-table state is under spinlocks (ROADMAP §10.3 makes the process table a ranked `SpinMutex`),
+which a holder of any level-1 lock may take.
+
+A buffered `write` whose user buffer maps the very page it writes would fault on that page while it
+holds the page busy (level 3) and wait on itself. So the write path copies into a busy page only
+through a non-faulting accessor (§5.1), which returns a short count instead of taking the fault. On
+a short count it releases the page, faults the rest of the source in with no page held, and retries.
+This is Linux's `fault_in_iov_iter_readable` loop. A `read` into a buffer that maps the page it
+reads needs no such loop, because it copies from a page that is up to date and not busy.
+
+The fault path meets these levels in that order, but from ROADMAP §13.1 it never waits while it
+holds the address-space lock. It holds the lock for reading only to find the region and to install
+the PTE, and takes a page busy only by try-lock. When the page is busy, not yet up to date, or under
+a writeback that a store must wait for, the fault takes a counted reference to the page, drops the
+address-space lock, and then waits for the page or fills it, taking the filesystem's level-4 locks
+with no level-2 lock held. It then drops the reference and restarts from the region lookup, since
+the region may have been split, moved, or unmapped meanwhile. This is Linux's `VM_FAULT_RETRY`.
+Within one attempt the fault still installs only against the PTE it read (ROADMAP §12.2). An
+allocation with reclaim may run under the lock, because reclaim takes a sleeping lock only by
+try-lock and bounds each of its waits ([§4.4](MEMORY.md#44-kernel-heap) rule 3). So a fault that waits for a
+disk holds up no `mmap`, `munmap`, `mprotect`, or `fork` in its process, no fault queued behind
+them, and no OOM reaper's try-lock.
+
+Every wait on the fault path ends early when the thread's process has a fatal signal pending: the
+address-space lock's acquire, a page wait, the fill's acquire of level-4 locks and its wait for the
+page's read, direct reclaim's wait for writeback, and the OOM killer's wait for its victim.
+`BlockingMutex` and `RwLock` gain killable acquires for this; they are not new lock types (AGENTS.md
+rule 10). A read whose waiter leaves keeps running, and its completion finishes the fill and
+releases the page. A user fault then returns to the signal, and a fault inside a user-memory
+accessor takes the exception-table fixup. The buffered `write` loop above checks for a fatal signal
+on each pass and returns the bytes written so far, or `EINTR` if there are none, and `fork` checks
+between the regions it copies and again before it makes the child runnable, and fails if one is
+pending, as Linux's `dup_mmap` and `copy_process` do, so an OOM victim cannot finish cloning itself.
+Other sleeping locks and waits stay uninterruptible, as most of Linux's are. Planned (ROADMAP §12.6,
+§13.1).
+
+The rename order is Linux's too: `rmdir` holds a parent and then the child it removes, so a
+`rename` whose directories were an ancestor and its descendant, taken in address order, could hold
+the child and wait for the parent. The rename lock serializes cross-directory renames, which is why
+unrelated directories may go in any fixed order. `mmap` of a file takes a counted reference to the file's
+page-cache object before it takes the address-space lock, never the inode lock inside it. A region's
+references go the other way: they are dropped after the address-space lock is released. `munmap`, a
+`MAP_FIXED` replacement, `mremap`, `mprotect`'s merge, `execve`'s release of the old image, and
+exit's teardown move each removed region onto a local list under the lock and drop the list after
+unlocking, since a last reference can release an unlinked inode, which takes that inode's lock and
+the filesystem's block-mapping locks (Linux defers `fput` for the same reason). `msync` and an
+`fsync` of a mapped range take counted references to the files of the regions they cover under the
+lock for reading, release it, and then write back and wait (Linux releases `mmap_lock` before
+`vfs_fsync_range`). Holding the lock across that writeback deadlocks three threads: an `msync`
+holding it for reading waits for the inode lock of a `write` whose user buffer faults, the fault's
+read request parks behind an `mmap` queued for writing, and the `mmap` waits for the `msync`. A
+filesystem with a single volume lock ranks it at level 4, so it must drop it before any user copy.
+This is Linux's order (`i_rwsem`, then `mmap_lock`, then the page lock, then the filesystem's own
+block-mapping locks), chosen for the same reason: a `write` that faults on its user buffer while
+holding the inode lock must not meet an `mmap` that holds the address-space lock and wants that
+inode lock. ROADMAP §13.12's lock-dependency build checks both tiers.
+
+The rank check fails an allocation or a free made while PT, BUDDY, SCHED, DEVICE, or SERIAL is held,
+on every call, whether or not the heap grows. Growth takes PT and then BUDDY after dropping HEAP
+(`heap_init::grow_for`), so the frame allocation it makes can enter direct reclaim with nothing held
+([§4.4](MEMORY.md#44-kernel-heap) rule 1). Rule; not yet enforced: `src/lock.rs` ranks the heap third, after
+PT and BUDDY, so an allocation under either fails only when it grows the heap, through PT's
+recursive-lock check or the rank check on PT, and passes every test that does not grow the heap
+(ROADMAP §10.3).
+
+Filesystem spinlocks take `RANK_DEVICE`: today the VFS lock, which also guards the open-file table,
+the ramfs and kernfs store locks, and each backend's mount and slot-allocation locks. The rank order therefore forbids heap allocation under them and
+allows logging. The VFS tables are static, so bring-up allocates nothing under them. Filesystems get
+no spin rank of their own; adding one changes this list and `src/lock.rs` in the same commit.
+
+After ROADMAP §10.4's A3 work, the VFS lock is a `BlockingMutex` at level 1's mount-table position.
+It guards the namespace tables (mounts, dentries, and the inode and open-file tables) and is held
+for a lookup, an insert, or a removal. It is never held across a backend's data I/O, a wait on a
+pipe, TTY, socket, or page, or a user copy. A lookup returns counted inode and file references
+(§2.11 rules 1 and 2). `read`, `write`, `truncate`, `fsync`, and `getdents64` then run on those
+references with the VFS lock dropped, under the backend's own locks (an inode's at level 1, a
+volume's at level 4), and a backend operation receives its superblock and inode through them, never
+`&Vfs`. A namespace change (create, unlink, rename, mkdir, mount) and the directory read of a
+dentry-cache miss may hold the VFS lock across the backend's directory I/O. Lookups leave the lock
+with ROADMAP §19.5's RCU walk; namespace changes stay serialized by it. The fault path and the
+writeback threads reach a file's backend through the counted page-cache reference that the region or
+the page holds, and never take the VFS lock. Each FAT and vibefs volume is a level-4 `BlockingMutex`
+that owns the volume and that nothing force-clears. It is taken with a plain `lock()`, as Linux
+takes FAT's `fat_lock`, and contention never fails an operation; from ROADMAP §12.6 only a page
+fill's acquire of it is killable, and ends early on a fatal signal (above).
+
+Why: a lock that every file operation takes and that backends block under serializes all file I/O
+behind one block wait, deadlocks a named-pipe read against its writer, and leaves the fault path,
+which holds the page it fills busy (level 3), no legal way to fill a file page. Rule; not yet
+enforced: the VFS lock is a `RANK_DEVICE` spinlock that the File API drops before any FAT or block
+wait, and each FAT and vibefs volume sits behind a busy flag whose waiter yields and fails the
+operation with `EIO` after 1,000,000 yields, and which `drop_slot` force-clears (ROADMAP §10.4,
+F060).
+
+A socket has two locks, as Linux's `lock_sock` and `bh_lock_sock` do. Its spinlock, at the SOCK
+rank, guards the protocol state and the socket's queues; network receive and timer callbacks
+([§2.2](#22-interrupt-handler-rules)) take it, and code under it may allocate fallibly and wake. Its
+owner lock is a flag that changes only under that spinlock, with waiters on the socket's wait queue:
+a syscall holds it across its user copies, as a level-1 stream lock, and releases it before it
+sleeps for data or buffer space. A receive or timer callback that finds the socket owned appends its
+packet or event to the socket's bounded backlog, dropping and counting it when the backlog is full;
+the owner drains the backlog as it releases the owner lock and clears the flag only once the backlog
+is empty. Two sockets' spinlocks nest only through `lock_nested` (§2.3), in address order, as a
+socket pair needs. ROADMAP §13.3 adds the lock pair and the rank, §15.5 the backlog.
+
+## 2.2 Interrupt handler rules
+
+An interrupt handler must not:
+
+- allocate or free (no heap, no buddy, no `Vec`, no `format!`)
+- take any lock that is ever held with interrupts enabled
+- log at anything but the most extreme failure path
+- run unbounded loops
+
+An interrupt handler must:
+
+- EOI before it can possibly context switch, so the controller is not held across a switch
+- rearm its own one-shot timer source before doing anything else that can yield
+- keep its stack frame small: only `#DF`, NMI, `#MC`, and `#DB` enter on dedicated IST stacks
+  (§5.1), and NMI, `#MC`, and `#DB` move to the thread's kernel stack when they interrupt ring 3
+  (§5.10 rule 3); every other vector runs on the interrupted kernel stack, or on TSS.RSP0 when it
+  interrupts ring 3; on aarch64 every vector runs on the interrupted kernel stack, or on the thread's
+  kernel stack when it interrupts EL0, after an entry test that moves it to this CPU's overflow stack
+  when that stack has overflowed (§11.5 rule 6); on either architecture, a handler on the
+  interrupted kernel stack runs inside the 4 KiB that §4.5's stack budget leaves above the deepest
+  path
+
+Both of the "must" rules are expanded in [section 5.8](INTERRUPTS.md#58-handler-ordering-rules), because both are
+easy to violate and expensive to debug.
+
+Blocking and allocation are a class of bug, not an instance. Context rules:
+
+| Context | May block? | May alloc? | Scheduling class ([§7.8](SMP.md#78-per-cpu-scheduling)) |
+|---------|------------|------------|---|
+| Hard IRQ / MSI handler | No | No | None: it runs on the thread it interrupted |
+| Softirq equivalent (high-prio workqueue) | No | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](MEMORY.md#44-kernel-heap)); the hard IRQ only enqueues | Its CPU's worker: fair, nice -20 |
+| RCU read-side section ([§2.12](#212-rcu)) | No; it may be preempted | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](MEMORY.md#44-kernel-heap)) | Its thread's |
+| Threaded IRQ bottom half | Only for its own device's resources, with a deadline; never for an I/O completion ([§5.4](INTERRUPTS.md#54-irq-registration)) | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](MEMORY.md#44-kernel-heap)) | `SCHED_FIFO` 50 |
+| Block error handler ([§10.3](BLOCK.md#103-failure)) | Yes, with IF=1 and no spinlock held | Fallible only, without direct reclaim ([§4.4](MEMORY.md#44-kernel-heap)) | As a threaded bottom half ([§7.8](SMP.md#78-per-cpu-scheduling)) |
+| Workqueue worker | Yes | Yes, fallible only ([§4.4](MEMORY.md#44-kernel-heap)); without direct reclaim while it runs a softirq-equivalent item (row above) | Fair, nice 0 |
+| Driver `probe` | Yes | Yes, fallible only ([§4.4](MEMORY.md#44-kernel-heap)); a failed probe leaves its device unbound and logs why | Fair, nice 0 |
+| Syscall body, fault handler for a CPL-3 fault | Yes ([§2.9](#29-preemption-and-interrupt-state)) | Yes, fallible only ([§4.4](MEMORY.md#44-kernel-heap)) | The calling thread's |
+| CPL-0 fault in a faulting user accessor (§5.1; may sleep from ROADMAP §12.2) | Yes ([§2.9](#29-preemption-and-interrupt-state) rule 3); may take the address-space lock (§2.1) | Yes, fallible only ([§4.4](MEMORY.md#44-kernel-heap)) | The calling thread's |
+| CPL-0 fault in a non-faulting user accessor (§5.1) | No: it goes straight to the fixup | No | The calling thread's |
+| Network receive: a queue's threaded bottom half ([§5.4](INTERRUPTS.md#54-irq-registration)) | No: it takes no sleeping lock and never waits for a socket's owner; a packet for an owned socket goes on its backlog (§2.1) | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](MEMORY.md#44-kernel-heap)) | `SCHED_FIFO` 50; fair, nice 0 past its budget |
+| Timer callback: a timeout-wheel callback ([§6.5](TIME.md#65-timers-and-timeouts)), run as a softirq-equivalent item on the CPU whose wheel fired it | No | Fallible only, without direct reclaim, down to half of the reserve ([§4.4](MEMORY.md#44-kernel-heap)) | Its CPU's worker: fair, nice -20 |
+| NMI and `#MC` at any CPL, `#DB` at CPL 0; shootdown and call-function work run from a spin | No | No | None: it runs inside whatever it interrupted |
+
+Code in the last row runs inside whatever IF=0 section its CPU was in, locks included: an NMI,
+`#MC`, or `#DB` interrupts it, and a CPU in a serviced spin (§2.3) runs incoming shootdown and
+call-function work there. So that code takes no lock of any kind (a `SpinMutex`, an `IrqCell`, or a
+TAS, the log ring's TAS and the serial TX lock included), since the section it interrupted may hold
+that very lock. It allocates nothing, does a bounded amount of work, and writes only per-CPU state
+and lock-free rings. A call-function closure that needs a lock queues a work item on its CPU
+instead. The panic path (§2.5) is the one exception: it reads the log ring and writes COM1 without
+taking their locks.
+
+The hard-IRQ top half acknowledges and wakes. Work that allocates or blocks runs on a kernel thread
+([section 5.4](INTERRUPTS.md#54-irq-registration), ROADMAP §6.6). The timer interrupt's top half also expires
+deadline timers whose action is a wake or a signal, at most 32 wakes per interrupt
+([§6.5](TIME.md#65-timers-and-timeouts)). A last put of a counted object runs the object's release in place
+only where [§2.11](#211-object-lifetimes) rule 6 allows it; anywhere else the release is deferred to
+a workqueue worker.
+
+Network receive polls its queue for at most a budget of packets per wake, so one flooded queue
+cannot hold its CPU; [§7.8](SMP.md#78-per-cpu-scheduling) gives the budget and what runs past it. Loopback
+has no interrupt: its transmit queues the packet, and receive runs as a softirq-equivalent item on
+the sending CPU. A timer callback (TCP's retransmit and delayed-ACK timers) runs on the CPU whose
+timeout wheel fired it; a POSIX timer's or a `timerfd`'s expiry is a deadline timer and runs in the
+timer interrupt's top half instead ([§6.5](TIME.md#65-timers-and-timeouts)).
+`cancel_sync` returns only once the callback runs on no CPU, as `free_vector` does for a handler
+(§5.4), and a pending timer holds counted references to what its callback touches
+([§2.11](#211-object-lifetimes) rule 5).
+
+## 2.3 Locking with interrupts
+
+Every spinlock that is taken from both an ISR and normal context disables interrupts for the whole
+critical section. That is the default: `SpinMutex` is IRQ-aware, and the non-IRQ-aware variant does
+not exist. The scheduler lock, the input ring, the buddy allocator, and the heap all qualify.
+
+Pick one spinlock implementation and use it everywhere. The old tree ended up with two (a ticket lock
+in one design doc, an IRQ-guarded spin mutex in the code) and the mismatch was a source of confusion
+for weeks.
+
+`SpinMutex` is that implementation: a compare-and-swap lock until ROADMAP §27.5 makes it a queued
+(MCS) lock, for every lock in one change. A waiter spins with IF=0, and nothing that can run inside
+another holder's IF=0 section takes a lock (the serviced-spin row below, and
+[§2.2](#22-interrupt-handler-rules)'s last row), so a CPU waits for at most one `SpinMutex` at a
+time, and the queued lock needs one queue node per CPU. From ROADMAP §21.4, a waiter under KVM on
+x86_64 that has spun a bound halts with IF=0 until it is kicked. It still services incoming work, as
+§2.9 rule 2 requires: every publisher of work that `service_incoming` serves kicks a target it finds
+halted, after its Release store and a full fence.
+
+The lock, the serviced spins, and the two cells:
+
+| Primitive | Use |
+|------|-----|
+| `SpinMutex` | Shared across CPUs. IRQ-aware. Ranked (§2.1): `lock` refuses a lock whose rank, or a later one, this CPU already holds, and `lock_nested` takes a second lock of a held rank (below). Its spin is a serviced spin. |
+| Serviced spin | `SpinMutex::lock`, `ipi_init::wait_acks`, and the call-function slot wait each call `ipi_init::service_incoming` on every iteration, so a CPU that waits on another with IF=0 still acknowledges shootdowns and runs call-function work ([§2.9](#29-preemption-and-interrupt-state) rule 2). That work runs inside whatever the spinning CPU holds, so, like an NMI, `#MC`, or CPL-0 `#DB` handler, it takes no lock ([§2.2](#22-interrupt-handler-rules)'s last row). Planned (ROADMAP §10.7, F135): `service_incoming` first reads this CPU's stop request word, and STOP runs §2.5's stop routine before any slot is served, so a serviced spin stops for a panic with no interrupt, on either architecture and GIC version. On aarch64 a serviced spin never executes WFE and waits with `core::hint::spin_loop`: a masked interrupt is a wake-up event for WFI but not for WFE (Arm ARM DDI 0487, the WFE and WFI wake-up events), so a WFE spinner with IRQs masked neither takes an SGI nor wakes to poll. A line that puts WFE in a serviced spin also makes every publisher of serviced work, the stop word included, issue `sev` after its Release store, and says so. |
+| `IrqCell` | IRQ-off exclusive access: `with` takes IRQs off, panics on same-CPU re-entry, and spins while another CPU holds it. Used for CPU-local and boot-only state and as an unranked cross-CPU lock (among them `proc_init::TABLE`, `kva_init::KVA`, `work_init::ST`, `irq_init::IRQ`, `file_init::CWD`, and `log_init::LOG`). It is `Send` and `Sync` only when `T: Send`, as `Mutex` is; const assertions in `src/cell.rs` fail the build otherwise. Its spin does not service IPIs, so a cross-CPU cell held across a wait on another CPU can stall a shootdown. Planned (ROADMAP §10.3, F108): every cross-CPU `IrqCell` but the log ring becomes a ranked `SpinMutex`; the log ring's holders never wait on another CPU (§2.5), and ROADMAP §19.5 replaces it with §2.5's lockless ring. |
+| `BootCell` | Write once before `smp: done`, then shared `&T`. State written after publication sits behind its own `UnsafeCell` inside `T`. Not yet enforced: every switch writes the BSP's TSS through a pointer cast from `&Bsp` (ROADMAP §10.3, F089). The set-once check is a `debug_assert!` (ROADMAP §10.2, F137). It is `Sync` only when `T: Send + Sync` and `Send` only when `T: Send`, as `OnceLock` is, and const assertions in `src/cell.rs` fail the build otherwise; `PerCpu`, whose raw pointers make it neither, carries its own `unsafe impl` naming invariants I120 and I21 (§7.5). |
+
+Two locks of one rank nest only through `lock_nested`, in a pair order the call site's comment
+names, and a per-rank count keeps the outer rank held when the inner lock drops. ROADMAP §12.1 adds
+`fork`'s pair, the parent's page-table lock before the child's. ROADMAP §13.12's lock classes add
+address order for a socket pair and check every pair order. Rule; not yet enforced: `lock` lets a
+lock of a held rank nest, the inner release clears the rank bit the outer lock still holds, and
+nothing stops the code in §2.2's last row from taking a lock (I1; ROADMAP §10.3, F108).
+
+A wake takes the scheduler lock, which ranks before device and serial locks. So code holding one of
+those records the wake and performs it after dropping the lock, as §10.1's completion does, and a
+top half wakes its bottom half with no device lock held; the rank check fails the other order on
+every call.
+
+They live in `src/cell.rs` (`BootCell`, `IrqCell`) and `src/sync_init.rs` (`SpinMutex`). Do not add another `UnsafeCell` + `unsafe impl<T> Sync` wrapper. `scripts/check_cells.py` reads each `unsafe impl` of `Send` or `Sync` whole, from `unsafe impl` to its `{`, and allows a generic one only in these two files and `src/kalloc.rs` (`TryArc`'s one bounded pair) and only with AGENTS.md rule 6's bounds: every type parameter bounded by `Send`, and by `Sync` too for `Sync` on a type that shares `&T` (`BootCell`, `RwLock`); `?Sized` alone is no bound. A concrete type that holds an `UnsafeCell` or a raw pointer may carry its own impl, whose `// SAFETY:` line names the invariant, except `PerCpuRemote`, which must be `Sync` from its atomic fields alone (§7.5). `static mut` is only the asm-owned `vibeos_jmpbuf` in `arch/catch.rs`. Accessors do not return `&'static mut`.
+
+Cross-CPU rule: a CPU never touches another CPU's run queue directly. Work is handed over through a
+per-CPU inbox plus a reschedule IPI. More SMP-specific rules in [section 7.7](SMP.md#77-locking-with-more-than-one-cpu).
+
+## 2.4 Memory invariants
+
+- The buddy takes only memory the boot memory map marks usable, less physical page 0, the AP
+  trampoline page (§7.3), and the kernel image, framebuffers, and boot modules wherever they overlap
+  usable memory. Limine keeps usable entries clear of every other entry, so the last three are
+  defensive; `pmm_init` clips each usable range against all of them as it reads `BootInfo`, with no
+  fixed-size list, so no exclusion is ever dropped. Rule; not yet enforced: `pmm_init` keeps an
+  8-entry `Excludes` list, admits a range past the eighth with a `pmm: excludes overflow` line, and
+  excludes the fixed page `0x8000` (ROADMAP §10.6).
+- Buddy free list nodes live inside the free pages themselves. A stray write into freed memory
+  corrupts the allocator, so guard pages on stacks are not optional. One stack has none: Limine's
+  boot stack (at least 64 KiB, no guard page, in bootloader-reclaimable memory), which all of boot
+  runs on, so an overflow there corrupts memory silently (ROADMAP §10.6, F072).
+- A PTE change that removes or narrows a translation takes effect only when every CPU that could hold
+  the old translation has invalidated it and acknowledged. Such changes are unmapping, making a PTE
+  not-present, read-only, or NX, and clearing its dirty bit. The rule covers kernel and user
+  mappings, CPU TLBs and paging-structure caches, and, from ROADMAP §18.1, the IOTLB. On aarch64 the
+  acknowledgement is the completion of the broadcast TLBI's `dsb ish`. Until then nothing relies on
+  the change: no frame or page-table page is freed or reused, no virtual address is reused,
+  `mprotect`, `munmap`, `mremap`, and `madvise(MADV_DONTNEED)` do not return, `fork` does not make
+  the child runnable, and no page counts as clean. Clearing only the accessed bit, as LRU aging does,
+  needs no completed invalidation: a stale accessed bit only misjudges how recently a page was used.
+  Kernel mappings are `GLOBAL`, so every online CPU could hold them ([§7.9](SMP.md#79-tlb-shootdown)).
+  Rule; not yet enforced for user mappings: `addr_space_init::shootdown_user` invalidates only on the
+  calling CPU, which is enough only while one thread owns each address space (I8; ROADMAP §12.3).
+- MMIO pages are mapped uncacheable. QEMU tolerates write-back MMIO; real hardware does not. On
+  aarch64 they are Device-nGnRE (ROADMAP §11.1), and a device access is ordered against Normal
+  memory only by [§4.7](MEMORY.md#47-dma)'s accessors.
+- Every mapping is `NO_EXECUTE` unless it holds code that is fetched. Exception: the low identity
+  window's first 2 MiB is executable, though only the trampoline page (§7.3) is fetched, and only
+  during AP bring-up (ROADMAP §10.6, F085).
+- A value copied to user memory has no padding and no uninitialized bytes. Reading a padding byte is
+  undefined behaviour in Rust, and copying one out leaks kernel stack or heap. A typed copy-out takes
+  only a type whose bytes are all initialized, proved at compile time (ROADMAP §10.6); a byte slice
+  passes as it is. Holds today only because every copy-out takes a byte slice built by hand; nothing
+  checks it until that box lands.
+- A second-level translation of guest memory (an EPT or NPT entry on x86_64, a stage-2 entry on
+  aarch64) is a mapping of the host frame behind it, since ROADMAP §21.2 backs guest RAM with the
+  VMM's address space. Every change or removal of a user PTE (`munmap`, a COW write-protect or
+  break, a permission reduction, a reverse-map unmap, a migration, `MADV_DONTNEED`) invalidates the
+  second-level translations of that range on every CPU that may hold them before the frame's count
+  drops. On x86_64 every vCPU of the VM flushes the VM's translations before it next enters the
+  guest (`INVEPT` on VMX, a flush of the guest's ASID through the VMCB on SVM), a vCPU running in
+  guest mode is kicked out first, and a vCPU that enters on a CPU other than the one it last ran on
+  flushes there too. On aarch64 the host issues `TLBI IPAS2E1IS` for the range, `DSB ISH`,
+  `TLBI VMALLE1IS`, and `DSB ISH` under the VM's VMID. A second-level fault reads the address
+  space's invalidation sequence before it looks up the host PTE, and retries if an invalidation ran
+  in between. A vhost worker reaches guest memory as a thread of the VMM's address space does: it
+  holds a `users` reference ([§2.11](#211-object-lifetimes)) from the VMM's `VHOST_SET_OWNER` until
+  its device is released, and it copies only through the ROADMAP §10.6 accessors, never through a
+  frame or a kernel mapping it caches. This is Linux's `mmu_notifier` with KVM's invalidation
+  sequence. Planned (ROADMAP §21.2): no hypervisor exists yet.
+
+## 2.5 Panic policy
+
+Binding order (do not invert):
+
+1. Stop every other CPU first. Today `ipi_init::halt_others` sets `HALTING`, broadcasts the halt IPI
+   `0xFE` (Fixed delivery), and returns without waiting. A CPU spinning with IF=0 does not take the
+   IPI, and once `HALTING` is set its serial writes skip the TX lock, so it can write COM1 during the
+   dump; a second panicking CPU re-runs `Serial::init` mid-dump. Planned (ROADMAP §10.7, F135; §11.3
+   on aarch64): one stop primitive, which every path that stops the other CPUs uses, ROADMAP §25.4's
+   capture jump included:
+   - The first CPU into `begin_dump` claims the dump (the `DUMPING` swap) before it stops anyone. A
+     CPU that finds the dump claimed by another CPU sets no request and runs the stop routine itself;
+     the owner re-entering prints `vibeOS: panic: reentered` and halts, as today.
+   - The owner sets `HALTING`, then for each other online CPU sets STOP in that CPU's request word
+     and sends it the stop IPI (`0xFE`, Fixed, on x86_64; the stop SGI on aarch64). A CPU stops at
+     the first of: taking the IPI; its next `service_incoming` poll, which reads the request word
+     before any slot, so a CPU in a serviced spin (§2.3) stops with IF=0 and no interrupt, on either
+     GIC version; its next serial write or log append; or the NMI below. The request stays set, so a
+     CPU that reaches a poll late still stops.
+   - After 100 ms of counter time the owner sends NMI to each CPU that has not acknowledged (the NMI
+     IPI on x86_64; on aarch64 the GICv3 pseudo-NMI from ROADMAP §25.5, and nothing on GICv2) and
+     waits 10 ms more. For each other online CPU it prints
+     `vibeOS: panic: cpu N stopped (ipi|poll|nmi|panic)`, where `panic` names a CPU that stopped in
+     its own `begin_dump`, or `vibeOS: panic: cpu N not stopped`. A CPU left `not stopped` loops
+     without polling, which §2.9 rule 2 already makes a bug. Planned (ROADMAP §20.9): a CPU inside a
+     firmware call is the exception, since SMM holds off even an NMI; while its firmware record
+     ([§4.8](MEMORY.md#48-firmware-runtime-services)) is set it is printed
+     `vibeOS: panic: cpu N not stopped (in firmware)`, and every CPU found in firmware also gets a
+     `vibeOS: panic: cpu N in firmware: <service>` line and a backtrace from the record's saved
+     frame.
+   - The stop routine saves its CPU's interrupted registers and frame pointer in a per-CPU
+     crash-register slot, sets the CPU's `stopped` flag, acknowledges, and halts with every interrupt
+     masked (on aarch64, a `wfi` loop with DAIF set). The dump prints each saved slot.
+   - The NMI handler first reads and clears its CPU's request word. STOP runs the stop routine; on a
+     CPU whose `stopped` flag is set the handler halts again and does nothing else; an NMI with no
+     request on the dump owner returns at once, so the dump completes. Any other NMI with no request
+     dumps and halts, as today, until ROADMAP §25.5 makes it an all-CPU backtrace.
+   - Only the owner writes COM1. A4's raw serial layer (ROADMAP §10.3) holds `HALTING`, the owner's
+     CPU id, and a write that takes no lock and no `InterruptGuard` and writes only on the owner;
+     once `HALTING` is set, a serial write or log append on any other CPU runs the stop routine
+     instead.
+
+   Why one primitive: an IPI misses a CPU spinning with IF=0, and aarch64 has no NMI before ROADMAP
+   §25.5 and none on GICv2, but the commonest such CPU, a waiter on a lock the panicking CPU holds,
+   already polls `service_incoming` on every iteration. Rejected: an NMI-only stop, which leaves
+   IRQ-masked aarch64 waiters running into the dump and the capture kernel; a separate stop path for
+   the capture jump, a second implementation (AGENTS.md rule 10) under which only capture panics
+   record the other CPUs' registers; keying the NMI handler on the global `HALTING` flag, under which
+   any NMI halts the dumping CPU mid-dump; and dropping other CPUs' writes after `HALTING`, which
+   leaves the writer running.
+2. Re-initialize serial from scratch (the panic may be *in* the serial path).
+3. Print location and message; dump registers, the current thread, and the last N log records.
+   From ROADMAP §19.5, every record serial has not printed goes out first (the log contract below),
+   unless a capture kernel is loaded (step 6), whose vmcore holds the ring.
+4. Symbolized backtrace when frame pointers exist (in-image sorted table, binary search, no alloc).
+5. Encode the panic record (ROADMAP §20.1) in a fixed buffer, and copy it to §20.1's reserved RAM
+   region when one is configured. Memory stores only: no lock, no firmware call, nothing that waits.
+   Planned (ROADMAP §20.1); today there is no record.
+6. If a capture kernel is loaded (ROADMAP §25.4), jump to it. Before the jump the panicking CPU does
+   only this: it takes ROADMAP §20.9's runtime-services lock and the ERST backend's lock (ROADMAP §25.6) each
+   with a trylock and never releases either; it sets an armed watchdog (ROADMAP §20.6) to its longest
+   timeout and feeds it once; and it writes pvpanic's crash-loaded event (bit 1), which a host
+   records without stopping the guest, where the kernel found a pvpanic device (ROADMAP §10.7,
+   §11.7) that lists that event. It flushes no log backlog, sends nothing over netconsole, and calls
+   no firmware. The crash handover passes runtime services, and ERST, on to the capture kernel only
+   where that lock's trylock succeeded, and names the CPU the capture kernel starts on and the
+   physical address of step 5's record. The capture kernel writes the vmcore, feeding that watchdog
+   after each chunk, so a dump that takes longer than the timeout survives and a capture that stops
+   making progress is still reset; then it writes that record through each store its handover passed
+   on (ROADMAP §25.6), and then resets through step 7's ACPI or PSCI path; where no store was
+   passed, the copy in reserved RAM is the record. It never calls firmware its handover withheld,
+   which a stopped CPU, or on GICv2 a CPU still running, may have been inside. Planned (ROADMAP
+   §25.4, §25.6).
+7. Otherwise, halt or reset. Today: a `cli; hlt` loop, or QEMU `isa-debug-exit` under the
+   `panic_exit` test feature. Planned, in this order: send the dump over netconsole where one is
+   configured (ROADMAP §25.6); write the record to an EFI variable or to ERST under that store's
+   trylock (ROADMAP §25.6), last among the writes, since a firmware call has no time bound; write
+   pvpanic's panicked event (bit 0) where the kernel found the device, after which the host may
+   pause or end the guest; then, with `panic=<seconds>` (ROADMAP §22.2), wait and reset through the
+   ACPI or PSCI path of the `reboot` call, and otherwise `cli; hlt`.
+
+   Why two branches: a capture kernel exists to take the one complete dump, so nothing that can
+   wait, or that lets a host stop the guest, runs before the jump. pvpanic's panicked event pauses
+   the harness's QEMU (`-action panic=pause`) and lets a host's crash policy end the guest; its
+   crash-loaded event does neither. Linux likewise runs no panic notifier before its crash jump
+   unless `crash_kexec_post_notifiers` is set. Rejected: one linear order (record, pvpanic, jump,
+   reset, halt), which pauses the guest and calls firmware before the capture kernel runs; an EFI
+   write before the jump whenever the trylock succeeds, which puts an unbounded call ahead of the
+   vmcore when the capture kernel can write the same record after it; and a switch like Linux's,
+   which is two orders to specify and test.
+
+No unwinding: `panic = "abort"`. Serial TX in this path is a bounded THRE poll; drop the byte on
+timeout (see [§9.6](PITFALLS.md#96-hardware-polling)). Do not take SCHED. Allocate nothing, the panic record
+(ROADMAP §20.1) included: the dump, the backtrace, and the record use fixed buffers and reserved
+memory, since the panicking CPU or a stopped one may hold the heap lock. The log ring is readable
+after the halt IPI without taking its TAS (force-unlock if the panicking CPU held it).
+
+The panic record outlives the reset that follows a panic (ROADMAP §20.1, §25.6). Planned: every
+store uses one format, a header holding a magic and a format version, a sequence number, and a
+checksum, which every release of a major version reads (ROADMAP §22.1). Reserved RAM holds one
+record; from ROADMAP §25.6 an EFI variable store or ERST holds at most two, the newest and the one
+before, and an EFI record is at most 1 KiB. The kernel writes an EFI variable only when
+`QueryVariableInfo` reports room for it with 5 KiB to spare, as Linux's x86 EFI code requires, since
+some firmware stops booting with a full variable store; otherwise it writes the next store in line.
+The next boot logs each record it finds into the kernel log and then deletes it, so a panic loop
+cannot fill the store and ROADMAP §22.2's `BootNext` write keeps working. The retired-frame list
+(ROADMAP §25.3) follows the same rules: one variable of at most 64 entries, applied only on the
+machine and memory map it was written for.
+
+Log ring (ROADMAP §5.5):
+
+- 256 records of up to 96 message bytes; a wrap drops the oldest record and counts it, and the panic
+  dump prints the count (`last N (M dropped)`).
+- Compile-time maximum level: `trace` in debug builds, `debug` in release. Runtime filter: an
+  `AtomicU8`, default `info`.
+- The panic dump prints the last 24 records.
+- The ring's lock (`log_init::LOG`, an `IrqCell`) is IRQ-off and outside the §2.1 rank order; never
+  hold it across serial TX.
+- `klog!` and formatted `Serial` writes keep IF off for the whole emit, so the per-CPU capture stage
+  cannot interleave with a preempting thread.
+- `dmesg` prints through a plain serial path that does not re-capture.
+- Host tests cover overflow, filtering, and symbol lookup.
+- One global IRQ-safe ring and a serial try-lock sink. The sink drops its copy of a record when
+  another CPU holds the TX lock, and `log_fmt` drops a record its CPU emits while already inside
+  `log_fmt`; neither drop is counted. Planned: a log record reaches serial whole (ROADMAP §10.2,
+  F138); the log contract below (ROADMAP §19.5).
+
+Planned (ROADMAP §19.5), the log contract:
+
+- One store: a lockless ring of fixed-size slots, each with a state word. A writer takes the
+  record's sequence number from one 64-bit counter with a `fetch_add`, claims slot `seq mod N` with
+  a compare-and-swap on its state word, fills it, and commits it with a Release store; a writer that
+  finds its slot still being written drops its record and counts it. A reader copies a slot and
+  checks its state word before and after, as a seqlock reader does. So any context may append, NMI
+  and `#MC` included, and the ring is readable after a panic with no lock. A record carries its
+  sequence number, CPU id, level, and timestamp. Its timestamp is `now_ns`, which any context may
+  read (§6.4).
+- One printer thread per console prints records in sequence order, so an emitter never waits for
+  the UART. Where records were overwritten or dropped before it reached them, it prints
+  `vibeOS: log: N records dropped`, and `/dev/kmsg` returns `EPIPE` there (ROADMAP §13.9). Until a
+  console's printer thread runs, records print synchronously as they are appended; after `HALTING`
+  only the dump owner prints, synchronously, through the owner write (step 1).
+- `marker!` writes its line to serial under one TX hold before it returns, then appends its record
+  marked printed on serial. The mark is per console, so the framebuffer printer still prints it.
+  Markers therefore keep program order among themselves whatever the printer does; a `klog!` record
+  the serial printer has not reached yet can print after a later marker.
+- An emitter in NMI or `#MC` context only appends and takes no console lock (§2.2); its records
+  print when a printer reaches them.
+- The panic dump first prints, through the owner write, every record serial has not printed, unless
+  a capture kernel is loaded (step 6).
+
+Why: per-CPU buffers have no total order without a timestamp merge, `/dev/kmsg` exposes one
+sequence number per record, and ROADMAP §25.5 logs from NMI context, where the `IrqCell` ring panics
+on re-entry. Linux's printk ended in the same shape: a lockless ring from 5.10, with its per-CPU
+safe and NMI buffers removed in 5.15. Rejected: per-CPU staging drained by a printer, which has no
+total order; printing every record synchronously, which at 115,200 baud (about 11.5 KB/s) stalls
+every emitter; markers through the printer, which lose a marker whose CPU then hangs and make the
+harness's order depend on scheduling; and Linux's variable-length descriptor and data rings, which
+96-byte records do not need and which loom models less easily.
+
+Symbols come from a two-pass link (Makefile `KERNEL_VARIANT`): `nm` output from the first link fills
+an in-image `.rodata` table (`KSYMS`) that the second link builds in. Rule: every function has the same address
+in both links. Not yet enforced: nothing compares them, and in the panic-test build the
+reference to the filled table compiles larger than the empty one and shifts every later function, so
+that ISO's table mis-names frames (ROADMAP §10.2, F084). Planned (ROADMAP §10.2, F084): `KSYMS`
+moves to its own `.ksyms` section, which the kernel finds only through the linker-defined
+`__ksyms_start` and `__ksyms_end`, so the code that reads it is the same size empty and filled.
+Frame pointers come from `-C force-frame-pointers=yes` in `.cargo/config.toml` (§3.1); there is no
+target JSON.
+
+Rule: `vibeos-core` (`src/lib.rs`) does not panic on data; its parsers and table walks return the
+module error. Enforced only for `unwrap`, `expect`, and `panic!`: clippy denies `unwrap_used`,
+`expect_used`, and `panic` on that crate (allowed in `#[cfg(test)]`). Neither `indexing_slicing` nor
+`arithmetic_side_effects` is enabled, and both Cargo profiles set `overflow-checks = true` (§3.5),
+which turns an arithmetic overflow into a panic. Planned (ROADMAP §10.1): both lints are denied in every
+byte parser ROADMAP §10.2's fuzzers cover, vibefs v1 excepted until ROADMAP §14.8 retires it, and
+the kernel binary denies `unwrap_used`, `expect_used`, `panic`, `unreachable`, `todo`, and
+`unimplemented` crate-wide, where a site a kernel invariant bounds keeps an `#[allow]` that names the
+invariant (§9.4). Crafted input panics portable code: a FAT BPB whose
+`rsvd + num_fats * FATSz32` overflows in `parse_bpb` (ROADMAP §10.2, F064); a CRC-valid vibefs leaf whose count
+exceeds the per-leaf maximum (F061; ROADMAP §14.8 retires v1 for a v2 that validates every block it reads); a vibefs truncate-grow that keeps `F_INLINE`
+past 128 bytes (ROADMAP §13.9, F062). Panics in the kernel binary end in the binding order above.
+
+Exceptions follow the per-vector table in [section 5.2](INTERRUPTS.md#52-idt-and-exceptions), whose Ring 0 column
+names each ring-0 case that continues instead of halting. A kernel `#BP`
+logs and continues. Planned (ROADMAP §17.4, §18.4): so do three ring-0 `#DB` cases, which §5.2's row
+lists: a hit on a debug slot the current thread's tracer armed, a stray single step, and, in the
+data-race detector's build, a hit on its own slots. Every other exception taken in ring 0 dumps and
+halts in the same order as `#[panic_handler]`. Planned (ROADMAP §10.6): a `#PF` (on aarch64, a data
+abort) at CPL 0 whose faulting instruction has an exception-table entry is not a kernel fault; only
+the §5.1 user-memory accessors have entries, and §5.1 says how each kind ends. Rule: ring 3 never
+halts the kernel. An exception raised by ring-3 code, or by a return to ring 3, sends that process
+the signal §5.2 gives the vector (§11.5 the exception class, on aarch64), and the kernel keeps
+running. The signal's action then applies, as on Linux: from ROADMAP §13.8 a handler may catch it,
+from §17.4 a tracer sees it first, and a fault signal the process blocks or ignores still takes its
+default action. The default action, the only one today, ends the process and prints
+`user: pid N killed SIG<name>`. Pid 1 is the exception. When init exits, by `exit` or by a signal,
+the kernel panics with a line naming the exit status, or the signal and, for a fault, the faulting
+address, as Linux panics when init dies. Planned: ROADMAP §10.5 (F068). Not yet enforced: the
+entry-path windows of §5.10 (ROADMAP §10.6, F006, F007). Every ring-3 trap takes its signal from
+§5.2's table through `proc_init::sig_for_vec`, a ring-3 `#DB` included. An NMI dumps and halts on its IST stack; from
+ROADMAP §10.7 the NMI handler first reads its CPU's stop request word (step 1).
+
+Rule: nothing is silently swallowed. An error is returned to its caller, or handled where it arises
+in one of three ways: a counter plus a log line at most once a second; an error state recorded on
+the device, volume, or file, which a later call reports, as Linux's `errseq_t` does for writeback
+errors; or a retry whose bound and give-up path its comment names. A result may be dropped only when
+it carries no failure anyone could act on, such as cleanup after an earlier error that was already
+returned, or the `fmt::Result` of a write to `Serial`, which cannot fail. Clippy's
+`let_underscore_must_use` and `unused_result_ok` catch a dropped `#[must_use]` value, and a kept drop
+carries `#[expect(clippy::let_underscore_must_use, reason = "...")]` naming the case above, so an
+exemption whose drop goes away fails the build; `#[cfg(test)]` code and the `kernel_tests`-only
+`ktest` module are exempt. An `if let Ok` with no `else`, and `let _ = f().ok()`, are review items,
+since no lint sees them. Not yet enforced: neither lint runs, `let _ =` drops a `Result` in more than
+40 files, and the kernel review found dropped errors that ROADMAP §10.2 (F080), §10.11 (F051, F063,
+and the tmpfs readahead eviction), §10.12 (F115), and §13.9 (F124) fix; ROADMAP §10.1 lands the
+lints and audits every site.
+
+Hardware events are also lost in three cases. An exception before `idt::init` (PMM, the CR3 switch,
+ACPI discovery, heap, KVA, GDT, PIC) goes to whatever IDT Limine left and resets or hangs with no
+output (ROADMAP §11.1, F136). LINT1 is masked on every CPU and MADT NMI entries (types 3 and 4) are
+not parsed, so a chipset or external NMI never reaches the NMI handler (ROADMAP §20.1, F096). An
+interrupt on a pool vector no handler owns is EOIed and ignored with no count (ROADMAP §10.6).
+
+## 2.6 Serial markers
+
+Every boot line is `vibeOS: ` followed by lowercase text: `<subsystem>: <state>`, or
+`<subsystem> <state>` for the one-word lines (`serial online`, `heap ok`, `gdt ok`, `idt ok`,
+`console ok`, `shell ready`); units keep their case (`4KiB`), and no line ends in a period or an
+exclamation mark. Success markers are asserted by the e2e harness in order. Adding a marker means
+updating the contract in [section 8.3](TESTING.md#83-end-to-end) in the same commit.
+
+The markers are a contract with the harness, not an interface for software outside the tree: ROADMAP
+§39.1 classes them `internal`, so a release may change one, with section 8.3's contract in the same
+commit.
+
+`marker!` for contract lines (never filtered, always captured); `klog!` for everything else;
+`PlainSerial` only for `dmesg` and panic dumps. `marker!` writes serial before it returns; from
+ROADMAP §19.5 a `klog!` line reaches serial when a printer thread gets to it
+([§2.5](#25-panic-policy)).
+
+```
+vibeOS: serial online
+vibeOS: limine: rev 3 ok
+vibeOS: pmm: 32741 free 4KiB frames
+vibeOS: paging: cr3 ok
+vibeOS: paging: mmio uc
+vibeOS: heap ok
+vibeOS: kva: ready
+vibeOS: gdt ok
+vibeOS: pic: remapped
+vibeOS: idt ok
+vibeOS: per_cpu: bsp ready
+vibeOS: acpi: xsdt 9 tables
+vibeOS: time: tsc 2500000/ms
+```
+
+Every line the kernel writes to its console UART starts with the byte 0x1E (ASCII RS), which
+terminals ignore: `marker!` and `klog!` lines, ktest verdicts, and the panic dump alike. The harness
+takes only framed lines as the kernel's (§8.3), so no user byte may produce the frame. The kernel
+writes one line per call, and a `\r`, `\n`, or 0x1E inside a line prints as `?`, so a string a user
+chose (a path, a thread name) cannot start a line of its own. The console UART's user write path (the
+console `write` today, the ROADMAP §13.7 serial TTY and its echo later) prints a 0x1E in user bytes
+as `?`, and a record a user writes through `/dev/kmsg` prints unframed. Before a framed line, the
+kernel writes a newline when the last byte on that UART was user output that did not end one. The
+framebuffer console never draws the frame, and a UART that is not the console carries neither frame
+nor escape. Rule; not yet enforced: nothing is framed, and the harness matches every line (ROADMAP
+§10.2).
+
+## 2.7 Invariant register
+
+Every invariant the code relies on, and how it is kept. Status: *enforced* means code, a type, or a
+test fails when the invariant breaks; *documented* means a rule in the section named or in a code
+comment, with nothing that checks it; *assumed* means relied on but stated only in this table.
+"Holds today" is the state at the commit that last changed the row; where the answer is no or
+partly, the row names the ROADMAP line that fixes it. DOC2 (ROADMAP §10.3) moves this table to its
+own file. These ids name invariants; ROADMAP's bare `I1` names the architecture review's issue, a
+separate namespace, so code, `// SAFETY:` comments, and commit messages cite a row as `invariant I<n>`.
+A rule the code relies on gets a row, with the next free id, in the commit that states it. Ids I1 to
+I29 descend from KERNEL_REVIEW §3.9, and several have been restated since (I3 most of all), so an id
+that review cites means the review's text.
+
+| # | Invariant | Established at | Status | Holds today |
+|---|-----------|----------------|--------|-------------|
+| I1 | Lock rank HEAP < PT < BUDDY < SCHED < DEVICE < SERIAL (§2.1); a second lock of a held rank only through `lock_nested` (§2.3) | `lock.rs`, `sync_init::lock_enter` | enforced at runtime, per CPU | Partly: `lock.rs` still ranks the heap after PT and BUDDY, so an allocation under either fails only when it grows the heap; a nested lock of the same rank passes the check and its release clears the rank bit the outer lock still holds, `IrqCell` has no rank, and a lock held across a switch goes unseen (ROADMAP §10.3, §13.12, F108) |
+| I2 | Hard-IRQ context never blocks or allocates (§2.2) | convention | documented | Yes, unchecked: only `irq_init::dispatch` sets `IN_ISR`, and no blocking primitive asserts it (ROADMAP §10.3, F110) |
+| I3 | IF=0 through every return-to-user sequence (§5.10 rule 4) | FMASK (§7.2) | documented | No: the syscall exit has no `cli` and `console_init::wait_key` returns with IF=1 (F001); `syscall_init::first_return` runs with IF=1 (F006) (ROADMAP §10.6) |
+| I4 | Kernel code outside the §5.10 entry and exit sequences runs with `GS_BASE` = this CPU's `PerCpu` (§5.10) | `arch::gs`, `per_cpu_init` | documented | No: the IF=1 window in `syscall_init::first_return` (F006) and a fault on the return-to-user `iretq` (F007) run on the user base (ROADMAP §10.6) |
+| I5 | One entry stub per vector makes the `swapgs` decision (§5.10 rule 1) | `arch/idt.rs` | enforced by construction: `idt::init` points every gate at a stub it generates, and `scripts/check_entry.py` fails on an `x86-interrupt` handler outside `src/arch/` | Yes |
+| I6 | Ring 3 never halts the kernel, pid 1's exit excepted (§2.5, §5.2, §11.5) | `proc_init::try_user_fault` | documented | No: the I4 windows halt (ROADMAP §10.6) |
+| I7 | The kernel reads or writes user memory only through the §5.1 user-memory accessors, and writes an address space that is not running only through the fill API (ROADMAP §10.6) | `addr_space.rs`; the arch accessors from ROADMAP §10.6 | enforced by SMAP where the CPU has it (PAN on aarch64, ROADMAP §11.6); the fill-API rule is documented | Partly: today's accessors copy through the physmap after `check_user_range`, and `write_bytes` ignores the PTE's `WRITABLE` bit (ROADMAP §10.6, F023) |
+| I8 | One thread per address space changes its regions, and another CPU changes its page tables only under its page-table lock (§2.11) | process model | assumed | Yes: only the owning thread touches a space. Lock-free user copies, local-only `invlpg`, and `&'static AddressSpace` depend on it. ROADMAP §10.6 replaces `&'static` with a counted object, §12.1's reverse map changes page tables from other CPUs under the space's page-table lock, §12.3 shoots down every CPU in the space's set, and §13.1's threads bring the address-space lock |
+| I9 | TCBs are never freed, so a `*mut Tcb` stays valid | 64-slot table, `thread_init` | assumed; slot reuse enforced by the in-guest `lifetime_dead_slot_on_cpu` | Yes: `spawn_inner` reuses a Dead slot only after an Acquire load finds its `Tcb.on_cpu` clear, which its CPU's `thread_init::finish_switch` clears with Release once `switch_context` has returned, and `thread_exit` stores `Dead` under SCHED (ROADMAP §10.10, F012) |
+| I10 | A dead thread's stack is freed only after its CPU has switched off it (§2.8, §4.5) | `thread_init::finish_switch` | enforced by the in-guest `lifetime_stack_reclaim` | Yes: `thread_exit` parks the stack in its CPU's `PerCpu.dead_stack`, and only that CPU's switch tail, after `switch_context` has returned, moves it into the CPU's stack cache or onto its dead list, which that CPU's worker frees (ROADMAP §10.10, F012) |
+| I11 | A completer's publishing store is its last access to the waiter (§2.8) | `block_init::IoWaiter::finish` | enforced by the in-guest `lifetime_iowaiter_publish_last` | Yes: `finish` runs `wake_all` under SCHED, then stores `done` with Release as its last access (ROADMAP §10.10, F002); ROADMAP §10.8 adds its loom model |
+| I12 | Every kernel PML4 slot exists before the first user address space | `AddressSpace::new` copies PML4[256..512) once | assumed | Yes, by boot order only: `paging_init::install` creates none of the heap, KVA, and `ioremap` PML4 slots; each appears on its region's first mapping, and no current path makes a first mapping after `/hello` (ROADMAP §12.1, F101) |
+| I13 | The low identity window is removed after `smp: done` (§4.1) | none yet | documented | No: it stays mapped and GLOBAL, VA 0 included (ROADMAP §10.6, F085) |
+| I14 | Every buddy frame and page table lies inside the physmap (§4.1) | `pmm_init::init`, `paging_init::physmap_extent` | enforced | Yes; a framebuffer above the 8 GiB cap is not covered (ROADMAP §11.2, F020) |
+| I15 | Frame 0, the trampoline page, and the kernel image, framebuffers, and boot modules never enter the buddy (§2.4) | `pmm_init::init`; `Buddy::insert_region` skips frame 0 | enforced | Partly: the trampoline page is the fixed `0x8000`, which boot uses whatever the memory map says there (bootloader-reclaimable under SeaBIOS); `Excludes` holds 8 ranges, and a range past the 8th stays in the buddy with a `pmm: excludes overflow` line, which Limine's rule that usable entries overlap no other entry leaves unreachable (ROADMAP §10.6) |
+| I16 | The kernel PML4 lies below 4 GiB, because the trampoline loads a 32-bit CR3 | `smp_init::start_one` | enforced by skipping every AP | Not guaranteed: the PML4 frame has no address limit, and above 4 GiB every AP is skipped with a `smp: cr3 above 4GiB` line (ROADMAP §20.1) |
+| I17 | MMIO is UC, RAM is WB, and no frame has both (§2.4) | `acpi_init`, `Mapper::patch_physmap_uc` | documented | Partly: a whole 2 MiB leaf goes UC with no RAM check, and a trailing leaf can be skipped (ROADMAP §11.2, F104) |
+| I18 | EOI before any switch; a one-shot timer is rearmed before yielding (§5.8) | timer ISRs | documented | Yes; no test tier runs the TSC-deadline timer, the only one-shot source, so nothing exercises the rearm (ROADMAP §10.1, F078) |
+| I19 | I/O APIC high dword written before the low; IST index zero-based in software, one-based in the gate (§5.1, §5.6) | `apic.rs`, `desc.rs` | enforced, host-tested | Yes |
+| I20 | `now_ns` is monotonic | seqlock plus `time::monotonic_max` over `time_init::LAST_NS` | enforced | Yes, by construction, so the monotonicity tests cannot fail (ROADMAP §10.2, F100) |
+| I21 | A run queue is touched only by its owner CPU with IF=0 (§2.3) | `per_cpu_init::with_current`, `per_cpu_init::cpu` | enforced (busy flag; the remote view) | Partly: other CPUs read only the atomic `runq_len` in `PerCpuRemote`, but `current()` and `try_current()` hand out `&'static PerCpu` at any IF (ROADMAP §10.3, F039) |
+| I22 | A `BootCell` is set once, before SMP, and holds `Sync` data (§2.3) | `cell.rs` | enforced in part (the `Sync` part: the `T: Send + Sync` bound and `cell.rs`'s assertions) | No: the set-once check is a `debug_assert!` (ROADMAP §10.2, F137); every switch writes the BSP's TSS after publication through a pointer cast from `&Bsp` (ROADMAP §10.3, F089) |
+| I23 | The block layer orders only overlapping writes and a sequential zone's writes; a `Flush` makes durable every write completed before it was submitted, and a `Fua` write is durable when it completes (§10.2) | `block.rs` | documented | No: C-LOOK can reorder overlapping writes (ROADMAP §10.11, F043) |
+| I24 | vibefs never overwrites a live block before the newer superblock is durable, and from v2 reuses a block a commit freed only after the next commit's superblock is durable, so the older slot's tree stays whole; a v2 NOCOW file's data blocks are the one exception, overwritten in place ([VIBEFS.md](VIBEFS.md) §15) | vibefs commit | documented | No after a failed commit: the in-memory generation advances before the superblock write, so the retry writes the slot that holds the only valid superblock (ROADMAP §12.5, F050). Otherwise it rests on v1's on-disk refcounts, which its mount does not check (F061); v2 keeps no per-block count and checks its pointers and allocation map as it reads each block (VIBEFS.md §15; ROADMAP §14.8) |
+| I25 | Per-thread CPU state is saved and restored in full (§7.5) | `syscall_init::on_switch`, `thread::switch_context` | documented | No: `FS_BASE` is not switched (ROADMAP §11.6, F022); `fork` and `execve` get the FPU state wrong (ROADMAP §10.6, F069) |
+| I26 | Every kernel stack has a guard page (§2.4) | `kva_init::alloc_guarded_stack` | documented | No: boot runs on Limine's unguarded stack (ROADMAP §10.6, F072) |
+| I27 | `vibeos-core` does not panic on data (§2.5) | clippy deny on `unwrap`, `expect`, `panic` | enforced in part | No: indexing and overflow checks panic on crafted input; §2.5 lists the cases and their ROADMAP lines |
+| I28 | A line the harness takes as the kernel's is framed, and no user byte can produce the frame (§2.6) | `serial::Serial`, `console_init::write` | documented | No: nothing is framed, and the harness matches every line, so ring 3 can print a contract line (`/bin/sh` prints `shell ready`) or fail a run with `panicked at` (ROADMAP §10.2) |
+| I29 | A catch hook intercepts only a CPL-0 fault on the CPU that armed it, inside an in-guest test's catch window | `arch::catch` | assumed | Partly: production never arms it, but `intercept` runs first in every exception handler of every build, and its armed state is global, so in a `kernel_tests` build a fault with the armed vector on any CPU, at any CPL, is caught (ROADMAP §10.2, F146) |
+| I30 | Interrupt and exception handlers run with RFLAGS.AC=0 (§5.10 rule 5) | `arch/idt.rs` stubs | enforced by construction: every stub's first instruction is `clac` where the CPU has SMAP | Yes |
+| I31 | Every IF=0 stretch outside §2.9 rule 2's exemptions retires at most 100,000 instructions ([§2.9](#29-preemption-and-interrupt-state) rule 2) | §2.9; ROADMAP §10.3's IF-off tracer | documented | No: the heap's first-fit `alloc`, its address-ordered insertion on `dealloc`, and a moving `realloc`'s copy run under the IRQ-off HEAP lock over a free list whose length user churn sets (ROADMAP §12.6); the buddy's double-free check walks the free lists (ROADMAP §12.1, F029); a `klog!` emit waits on the UART with IF off, about 8 ms per 96-byte line on a 115200-baud 16550, which no QEMU tier paces (ROADMAP §19.5); a shootdown survives a violation: `wait_acks` keeps waiting and logs the CPUs that have not acknowledged once a second (§7.9, F011) |
+| I32 | A handler on an IST stack never blocks, switches threads, or takes a lock, and an IST vector taken at CPL 3 leaves the IST stack before its body runs (§5.10 rules 3 and 6) | the IST entry stubs and handlers | documented | Partly: an IST vector taken at CPL 3 moves its frame to the thread's kernel stack before its body (`arch::idt::vibeos_trap_entry_ist`); on a CPL-0 frame every IST handler halts, so none blocks or switches, except that under `kernel_tests` an armed `catch` steps RIP and returns or longjmps off the IST stack (ROADMAP §10.6, F007) |
+| I33 | A fault body reads CR2, DR6, ESR, and FAR from its frame, where the entry stub saved them before IF could turn on (§5.10 rule 9) | the `arch/idt.rs` stubs; the aarch64 vectors (ROADMAP §11.3) | documented | Yes: the generated stubs save CR2 and DR6 before any body turns IF on |
+| I34 | A PTE change that removes or narrows a translation takes effect only after every CPU that could hold the old one has invalidated and acknowledged; until then no frame, table page, or VA is reused and no page counts as clean (§2.4) | `kva_init::unmap_shootdown` (kernel); `addr_space_init::shootdown_user` (user) | documented | Partly: kernel unmaps free frames and VA only after `wait_acks`; a user change invalidates only on the calling CPU, enough only while I8 holds, and nothing yet clears a dirty bit (ROADMAP §12.3) |
+| I35 | A user PTE change invalidates the second-level translations (EPT, NPT, stage-2) of its range on every CPU that may hold them before the frame's count drops (§2.4) | none yet | documented | Not relied on yet: no hypervisor exists until ROADMAP §21.2, which lands it |
+| I36 | `current` is read in one instruction, and every other per-CPU access but the CPU-id hint runs with IF=0 ([§2.9](#29-preemption-and-interrupt-state) rule 5) | `per_cpu_init`; the syscall stub's `gs:[current]` load | documented | Partly: the syscall stub reads `current` in one load, but `current_thread`, `current_id`, `current_pid`, and `per_cpu!` load `gs:[0]` and then the field, and `current()` hands out `&'static PerCpu` at any IF; no preempted thread changes CPU yet (ROADMAP §10.3, F039) |
+| I37 | Nothing is silently swallowed: an error is returned to its caller, or handled where it arises by a counter and a rate-limited line, a recorded error state, or a bounded retry (§2.5) | every module; ROADMAP §10.1's lints | documented | No: nothing checks a discard, and the kernel review's dropped errors remain (ROADMAP §10.1 audit; §10.11, F051, F063; §10.12, F115; §13.9, F124) |
+| I38 | A return to user mode restores only what the §5.10 rule 10 validator accepted from any writer of the saved frame, and its last check for pending work runs with IF=0 (§5.10 rule 11) | the validators in each port's pure half; the exit paths | documented | Rule 10 holds vacuously: no writer of a saved user context exists before ROADMAP §13.8 and §17.4. Rule 11 does not: pending signals are acted on only at syscall entry and after the `wait4` sleep (ROADMAP §10.6, F033) |
+| I39 | On aarch64, an ASID a CPU has used since its last local TLB flush names one address space on that CPU ([§11.2](PORTABILITY.md#112-address-space-on-aarch64)) | the ASID allocator (ROADMAP §11.2) | documented | Not relied on yet: the aarch64 port does not exist; ROADMAP §11.2's host tests and loom model enforce it when it lands |
+| I40 | A thread sleeps, or takes a sleeping lock, only with IF=1 and no spinlock held (§2.1, [§2.9](#29-preemption-and-interrupt-state) rule 4) | none yet | documented | No: nothing asserts either condition until ROADMAP §10.3's may-sleep box (F108) |
+| I41 | No sleeping lock of levels 2 to 4 is held across a copy to or from user memory, and code that holds the address-space lock takes no level-1 lock (§2.1) | none yet | documented | Yes, vacuously: the address-space lock, page waits, and the filesystems' block-mapping locks arrive with ROADMAP §12.5 and §13.1, and ROADMAP §13.12's lock-dependency build reports a violation the first time one happens |
+| I42 | Kernel-binary code that a syscall, a device, or a disk image reaches does not panic on that input, running out of memory or table slots included (AGENTS rule 4, [§4.4](MEMORY.md#44-kernel-heap)) | `vibeos::kalloc` on the `fork`, `execve`, `open` and thread-spawn paths; convention elsewhere | enforced on those paths by the in-guest `kalloc_nomem` test; documented elsewhere | Partly: those paths return `ENOMEM` (ROADMAP §10.4, F010); `alloc`'s growing calls elsewhere still panic on a failed allocation until ROADMAP §10.4's box that makes allocation after `irq: enabled` fallible on every path |
+| I120 | Another CPU reads a CPU's per-CPU state only through its `PerCpuRemote`, whose fields are atomics, and takes `&mut` to another CPU's `PerCpu` only through `with_cpu` while that CPU is not running (§7.5) | `per_cpu_init::cpu`, `per_cpu_init::with_cpu` | enforced (the view type, its const assertion, and `check_cells.py`'s type and must-be-unsafe lists) | Yes, except an AP that accepted a SIPI and stalled past the ready timeout (ROADMAP §11.4, F032) |
+| I128 | A page-table root is freed only when no CPU has it loaded (CR3; TTBR0 on aarch64) and no TCB's `as_cr3` names it; a path that drops or replaces a thread's space records the replacement (or 0) in `as_cr3` and loads it before `teardown` | `addr_space_init::teardown` (assertion); `proc_init::finish_exit`, `proc_init::sys_execve` | enforced at runtime, every build | Yes |
+
+## 2.8 Publish last
+
+The rule for every completion, hand-off, and deferred reclaim:
+
+1. In a completion or hand-off, the store that lets the other side return, free, or reuse an object
+   is the publisher's last access to that object; after it the publisher touches only its own stack
+   and statics. The other side can see the store on a lock-free path (`IoWaiter::poll`, any Acquire
+   load of a done flag) and return before the publisher's next instruction, so a lock taken after
+   the store does not make a later access safe. The store is a Release store, a Release
+   read-modify-write, or the unlock of a lock that the other side takes before it frees or reuses
+   the object, and the other side reads it with Acquire. Program order alone does not make a store
+   the last access: on a weakly ordered CPU, a load or store the publisher made to the object
+   earlier can still be performed after a Relaxed store is visible.
+2. An object that its owning CPU may still use (the kernel stack it runs on, a TCB that is switching
+   out, an AP's stacks and tables during bring-up, and the old kernel's code, tables, and stacks
+   when a planned kexec hands its memory to the new kernel, ROADMAP §25.4) is freed only after that
+   CPU has passed a point the reclaimer can observe: its `switch_context` away from the object has
+   returned, or INIT has stopped the AP. A global list that any CPU drains does not meet this rule.
+
+Rule; not yet enforced. The violations, and the ROADMAP lines that fix them:
+
+- On the bring-up timeout, `smp_init::start_one` frees an AP's kernel stack, GDT/TSS, and IST and
+  RSP0 stacks without an INIT, so an AP that is still running uses freed memory (ROADMAP §11.4,
+  F032).
+
+## 2.9 Preemption and interrupt state
+
+IF here means this CPU's maskable-interrupt enable: RFLAGS.IF on x86_64, and PSTATE.I clear on
+aarch64, where the kernel masks and unmasks F with I
+([§11.5](PORTABILITY.md#115-aarch64-exceptions-and-privilege-transitions)) and ROADMAP §25.5's pseudo-NMIs later
+make `InterruptGuard` mask by priority instead. The rules below hold on both architectures.
+
+The kernel is preemptible wherever IF=1. The timer tick and the reschedule IPI call
+`schedule_preempt`, which may switch away from any thread whose `irq_nest` is 0: kernel threads,
+syscall bodies, and fault handlers alike. One IF=1 stretch is not preemptible: from
+[§3.3](BOOT.md#33-_start-order)'s step 13b to step 15 (`irq: enabled`), the BSP takes the tick with IF=1,
+but `on_timer_tick` switches nothing until the idle thread exists. Boot bounds it. Planned (ROADMAP
+§20.9): another exception, `efi_rt` inside a firmware call, which runs with IF=1 and is not
+switched away from until the call returns ([§4.8](MEMORY.md#48-firmware-runtime-services)). Turning
+interrupts off is how code says "not now", so every IF=0 stretch has a reason from the list below
+and a bound.
+
+1. IF=0 only in: an interrupt or exception entry or exit stub; a hard-IRQ top half (§2.2); a
+   spinlock or `IrqCell` critical section (§2.3); an `InterruptGuard` section that must not be
+   preempted or moved to another CPU: a per-CPU access (rule 5), a change to this CPU's registers
+   that must match the running thread (FP state, `FS_BASE`), the [§7.9](SMP.md#79-tlb-shootdown)
+   shootdown wait, the [§7.6](SMP.md#76-ipis) call-function wait, or the
+   [§7.11](SMP.md#711-cpu-offline-and-online) offline rendezvous; the scheduler's switch path; the
+   return-to-user sequences of [§5.10](INTERRUPTS.md#510-privilege-transitions) rule 4, which begin at rule 11's
+   last exit-work check; the panic and halt paths
+   (§2.5); and a CPU's bring-up before its first `sti` (the BSP before §3.3's step 13b, an AP
+   before it enters idle).
+2. An IF=0 stretch does a bounded amount of work: at most 100,000 instructions from the instruction
+   that turns IF off to the one that turns it back on, tens of microseconds on a current core. The
+   panic, halt, and bring-up paths of rule 1, the [§7.9](SMP.md#79-tlb-shootdown) shootdown and
+   call-function waits, and the time a spinlock acquire spends spinning, which the holders' own
+   bounds limit, are exempt. No loop whose trip count a user, a device, or a disk image controls
+   runs with IF=0, and nothing waits for another CPU with IF=0 without servicing incoming IPIs
+   ([§7.9](SMP.md#79-tlb-shootdown)). A TLB invalidation is such a wait on x86_64, so on both
+   architectures it is called only where §7.9's calling contract allows. A long job holds its lock for one bounded chunk at a time and turns
+   IF back on between chunks; a walk over a user address space's page tables holds the space's
+   page-table lock for at most one leaf table (512 entries) at a time. ROADMAP §10.3's IF-off tracer
+   measures every stretch, and the bound is checked under TCG with `-icount shift=0` on one CPU,
+   where guest time advances 1 ns per instruction retired, so 100 µs of guest time is exactly the
+   bound whatever the host's load. Rule; not yet enforced: ROADMAP §12.6 turns the check on, and I31
+   lists the violations.
+3. A syscall body runs with IF=1. After `swapgs`, the entry stub copies the user RSP from
+   `PerCpu.syscall_scratch` into its frame on the thread's kernel stack, then runs `sti`; from there
+   on the scratch belongs to whichever thread next enters on this CPU. The exit stub runs `cli`
+   before it loads the user RSP (§5.10 rule 4), and keeps its state in the thread's user frame
+   (§5.10), not in the scratch. A fault or trap taken at CPL 3 runs its body with IF=1 once its
+   frame is on the thread's kernel stack with the fault's syndrome saved in it (§5.10 rule 9), and
+   so does a `#PF` taken at CPL 0 inside a faulting user-memory accessor (§5.1) once ROADMAP §12.2
+   lets it sleep, since the code it interrupted ran with IF=1; a fault inside a non-faulting
+   accessor runs no body: the handler finds its exception-table entry before it touches IF and goes
+   to the fixup; a hardware interrupt's top half keeps IF=0. Built so: the syscall entry runs `sti`
+   directly after the last push of the user frame, and `idt::trap_dispatch` runs `sti` before the
+   body of a vector 0 to 31 taken at CPL 3 that does not enter on an IST stack, and of a CPL-3
+   `#DB`, whose stub has moved the frame off its IST stack, once `catch::intercept` has declined
+   the frame. The syscall exit keeps its return value in the user frame's `rax` slot.
+4. Code that may sleep (waits on a wait queue, takes a sleeping lock (§2.1), allocates with
+   reclaim (ROADMAP §12.6), or copies through a faulting user-memory accessor (§5.1) once ROADMAP
+   §12.2 lets its fault sleep) runs with IF=1, no spinlock held, and outside any RCU read-side section
+   ([§2.12](#212-rcu)), and asserts each in debug builds (ROADMAP §10.3; the read-side check from
+   §19.5).
+5. `current`, the running thread's TCB pointer, is read only through `arch::current_tcb()`: one
+   instruction that preemption cannot split, whose answer the switch keeps right on every CPU. On
+   x86_64 it is one `gs`-relative load of `PerCpu.current` (`mov reg, gs:[offset]`), never `gs:[0]`
+   followed by a field load; on aarch64 it reads `SP_EL0`, which holds the running thread's TCB
+   pointer whenever the CPU runs at EL1 (EL2 under VHE), as on Linux arm64 (ROADMAP §11.6).
+   `arch::cpu_id_hint()` is the one other per-CPU read allowed with IF=1, for callers that tolerate
+   an answer that is already stale, such as the log prefix and a queue choice: it loads the
+   immutable `PerCpu.cpu_id` through this CPU's per-CPU base and returns the value, never a
+   reference. Every other per-CPU access, taking a `&PerCpu` and indexing a per-CPU table by CPU id
+   included, happens with IF=0 (`with_current`, `IrqCell`), and the reference does not outlive that
+   stretch, because a preemption with IF=1 can move the thread to another CPU between the lookup and
+   the use. Rule; not yet enforced: ROADMAP §10.3 (F039). `per_cpu_init::current_thread`,
+   `thread_init::current_id` and `current_pid`, and the `per_cpu!` macro load `gs:[0]` and then the
+   field, and `per_cpu_init::current()` and `try_current()` return a `&'static PerCpu` at any IF.
+   The split read is latent while no preempted thread changes CPU: user threads stay pinned, and
+   §13.10's `sched_setaffinity`, §19.4's balancing, and §19.6's offlining move preempted threads.
+
+Why this model: a syscall body that runs with IF=0 cannot acknowledge a TLB shootdown (F011) or
+take the tick (F044), so every long syscall (`fork`'s copy, `execve`'s load, a large `read`)
+would need its own IF-on window, and ROADMAP §12.2's fault path must sleep. Linux runs syscalls
+with interrupts on and preempts wherever no lock is held, so its behaviour settles edge cases.
+Rejected: keeping syscall bodies at IF=0 and adding a polling window to each long call, which is
+how ROADMAP §10.6 first fixed console `write`; it has to be repeated in every call that loops and
+it still starves the tick. The bound counts instructions, not time, so its check gives the same
+answer on every run. Rejected: a time bound checked on the ROADMAP §10.1 KVM leg, whose hosted runner is
+itself a VM that can deschedule a vCPU mid-stretch.
+
+## 2.10 Trust boundaries
+
+Whom the kernel trusts, and the ROADMAP line where each boundary hardens. Until ROADMAP §18.8's
+`docs/THREAT_MODEL.md` exists, this table is the threat model, and that document grows from it.
+"Untrusted" means the source may send any bytes, at any time, as often as it likes, and the kernel
+must neither halt nor corrupt memory it has not given to that source (AGENTS.md rule 4).
+
+| Principal | Trusted for | Can do today what a hardened kernel stops | Hardens in |
+|---|---|---|---|
+| Ring-3 code | Nothing: it must not halt or corrupt the kernel (I6) | Halt the kernel (F004 to F010); every process is root, so it can read any file and signal any process | ROADMAP §10.4, §10.6, §10.10, and §10.11 (halts), §13.9 (uids), §18.6 (capabilities, `seccomp`) |
+| Disk images and partition tables | Nothing: a parse returns `Corrupt` | Panic the kernel with a crafted image or table that root mounts or attaches (F061, F064, F117) | ROADMAP §10.2 (FAT BPB), §13.9 (partition tables), §14.8 (vibefs v2 validates every block it reads; v1 is retired); §18.7 (a LUKS2 header is parsed by the initrd's unlock tool, never by the kernel) |
+| Devices: config space, rings, registers, interrupts | Nothing for halts (rule 4); everything for DMA | Read or write any physical memory by DMA; forge an MSI, and so halt the kernel with an interrupt on a vector no handler owns (ROADMAP §10.6) | ROADMAP §10.6 (stray interrupts), §18.1 (IOMMU, interrupt remapping, used-ring checks, F048) |
+| Firmware tables: ACPI, device tree, SMBIOS, the memory map | What they describe, but not their bounds: a malformed table is refused, never followed out of range | Halt boot with a malformed table before the IDT exists (F136) | ROADMAP §11.1 (early exceptions report themselves), §20.1 (table bounds) |
+| The network | Nothing, from the first packet | Not reachable yet | ROADMAP §15.10 fuzzes every parser from the start; §15.4, §15.6, and §15.8 defend against off-path guessing (keyed sequence numbers, ports, and IP IDs, RFC 5961, SYN cookies, checked PMTU messages, randomized DNS ids), which §15.10's simulated attacker checks |
+| Speculation and timing side channels | Out of scope: no KPTI and no Spectre or MDS mitigations; the kernel half is mapped in every user address space (F024, F025, F131, F132) | Read kernel and other processes' memory on an affected CPU | ROADMAP §18.3 |
+| Limine, the firmware, the CPU, and, under a VM, the VMM that provides them | Everything | Not applicable | ROADMAP §18.7 measures and verifies the boot chain: the signed Limine binary, its enrolled configuration and command line, the kernel, the initrd, and a kernel `kexec_file_load` starts (§25.4). Each slot's root, the state partition, and the key-set root record on them are outside it (§18.7's owner decision) |
+| The host running QEMU, the harness, and CI | Everything; they are the test oracle | Not applicable | Never |
+| Agent sessions, and the accounts they act through | Writing code, and opening and merging pull requests through the repository's rulesets; nothing else: no release or phase tag, deployment approval, repository setting, ruleset, environment, or secret | Act as the owner on GitHub: agents run with the owner's account and token, so every owner-only control in the release chain (the `release` environment's approval, the tag rules, ROADMAP §22.5's setting) is one prompt injection away | The agent-boundary decision below, before ROADMAP §14.6's first key |
+| Code under test: candidate commits, agent-written code and tools, guests, third-party build systems, as seen by the machines that run them | Nothing: on a CI runner or a rig VM it reaches no secret, credential, or host service beyond its job; on the dev host, no credential beyond the agent account's own | On the dev host, read every credential of the owner's account: the `gh` token, git's credentials, SSH keys, a signed-in browser | The agent-boundary decision below (dev host); ROADMAP §10.1 and §14.6 (release jobs); ROADMAP Funded goals, Self-hosted runners (rig) |
+
+One device can end the system: the one that holds the root filesystem. Once it is `Failed` or
+`Gone`, an init that has not locked its memory dies of `SIGBUS` at its next page-in of a page
+reclaim dropped, and the pid-1 panic ([§2.5](#25-panic-policy)) follows, which ROADMAP §22.2's
+`panic=` turns into a reset. The root device supplies the code init runs, so its loss crosses no
+trust boundary. The remedy is a redundant root (ROADMAP §29.2), not an exemption for init, which
+would fault again at once.
+
+Consequence: until Phase 10 closes, a process can crash the kernel (the ring-3 row), and until
+Phase 18 closes, nothing stops one from reading another process's data. README says not to run
+untrusted code on it or keep secrets on it.
+
+**Interim posture (owner decision, 2026-09-23, [design review G006](reviews/DESIGN_REVIEWS.md)).** The
+owner accepted the open gaps in the table above until the ROADMAP lines that close them, the last in
+Phase 18: speculation side channels (with no KPTI, a user process on a Meltdown-affected Intel CPU,
+bare metal or under KVM, can read all RAM through the physmap), DMA that no IOMMU confines (§18.1),
+every process running as root (§13.9), and root-mounted crafted images that panic the kernel. Why: the
+kernel has no users and no secrets; QEMU's TCG, the harness default, does not model the speculation
+Meltdown needs, and under KVM the exposure depends on the host CPU; and ROADMAP §10.6 rewrites the
+entry path as one generated stub per vector, which keeps a later KPTI CR3 switch local. Rejected:
+moving KPTI and syscall-index masking (ROADMAP §18.3's F024 and F025 boxes) into Phase 13, which costs a slice
+of entry-path work, a CR3 switch on every entry, and a measurable syscall slowdown on affected CPUs;
+and moving all of ROADMAP §18.3 before Phase 14's `login`, which costs most of a phase ahead of the
+self-hosting work.
+
+The acceptance assumes one user. It goes back to the owner before `login` lands (ROADMAP §14.3), when
+a second user can share the machine. Keeping any gap past the line that closes it, or adding a gap,
+is likewise the owner's decision, not an agent's.
+
+**Agent boundary.** What separates agent sessions, and the code they write, from the owner's
+credentials and from wherever the root key is made or used (ROADMAP §14.6) is the owner's decision, in
+the block below. Until it is recorded, agents run under the owner's macOS account and GitHub identity,
+as the two rows above say, AGENTS.md's Identity rules hold as policy that nothing enforces, and
+ROADMAP §14.6's custody box waits for the answer, so no key exists before it.
+
+> **OWNER DECISION NEEDED (review J002)**: agents act as you. They run shell commands under your
+> macOS account and push, open, and merge pull requests with your GitHub token, and GitHub checks
+> every owner-only step by account: the `release` environment's approval (H007), who may create
+> release and phase tags, rulesets, and the private-reporting setting (ROADMAP §22.5). A prompt
+> injection in an issue, a pull request comment, or a web page an agent reads could push a release
+> tag and approve its own release run in your name. The root key, as ROADMAP §14.6 wrote the
+> procedure, would be made on that same account with a tool agents wrote, so anything an agent runs
+> could read it, and it is the one key an installed system cannot recover from.
+>
+> Recommended, at $0: (1) Agents get a GitHub machine account (GitHub's terms allow one beside your
+> personal account) with this repository's Write role only: no Maintain or Admin role, no
+> environment reviewer, no ruleset bypass. It uses a fine-grained token if GitHub issues one to a
+> collaborator on a personal-account repository, and otherwise a classic token with the `repo` and
+> `workflow` scopes, whose reach is that Write role; moving the repository to a free organization is
+> the other way. None of your own GitHub credentials stays on the macOS account agents run under: not
+> the `gh` token, git's keychain entries, SSH keys registered to your account, or a github.com
+> session in a browser an agent tool can drive. You push tags and approve release runs from a second
+> macOS account or GitHub Mobile. A GitHub App in place of the machine account gives the same
+> boundary, with its private key where agents mint tokens. (2) The root key is made and used only in
+> that second macOS account, which holds no agent tooling, with macOS's own `/usr/bin/ssh-keygen`,
+> which System Integrity Protection keeps agents from changing; it is written passphrase-encrypted
+> to removable media and used only while no agent session runs. Cost: two accounts, moving your
+> credentials once, and commits and pull requests that show the agent account as their author.
+>
+> If you decline (1), the H007 record says that anyone holding your token, agent sessions included,
+> can approve a release run, and AGENTS.md's maintainer-only steps stay policy that nothing
+> enforces. If you decline (2), the root key is made where you choose, and THREAT_MODEL (ROADMAP
+> §18.8) lists a root key on a machine agents use as a known escalation path. No key exists before
+> `v0.14.0`, and ROADMAP §14.6's custody box waits for this answer.
+
+## 2.11 Object lifetimes
+
+How an object that more than one thread or CPU can reach is created, shared, and destroyed. §2.8
+covers the last store of a hand-off; these rules cover the rest.
+
+1. One owner, or a count. An object one thread uses is owned by it (a stack value, a `Box`). An
+   object that more than one thread or CPU can reach (an address space, an open file description, an
+   inode, a mount, a device instance, a pipe) is reference-counted, and its last put ends it
+   (rule 3). A mount and the filesystem instance it shows, its superblock, are separate counted
+   objects: several mounts (another namespace's copy, a bind mount, a second mount of the same
+   device) can show one superblock, which lives while any mount, inode, or open file holds it. A
+   process's working directory and root are counted references to a directory (a mount and a
+   dentry), never path strings: a relative walk starts from the working directory and an absolute
+   one from the root, `fork` copies both references, rename moves the dentry a reference holds, and
+   `chroot` (ROADMAP §14.9) and `pivot_root` (ROADMAP §18.6) replace them. The count is `kalloc`'s
+   `TryArc` (increment `Relaxed`, decrement `Release`, and an `Acquire` fence before the release, as
+   `alloc::sync::Arc` does), a table slot's own count (rule 2), or a frame's count in
+   ROADMAP §12.1's frame array. A count with other rules, such as a get-unless-zero count whose last
+   put runs a teardown before the memory goes, rule 3's operation gate, or a per-CPU count, is
+   written once as a shared type, beside `TryArc` in `kalloc` or beside `BlockingMutex` in `sync`,
+   with host tests and a loom model (ROADMAP §10.8), and then reused; no subsystem writes its own
+   (AGENTS.md rule 10). `&'static` refers only to what lives for the whole run: a static item, a
+   string literal, the contents of a `BootCell`, or memory allocated at boot and never freed. It
+   never refers to heap memory a table owns, and it is never built from a raw pointer
+   (AGENTS.md rule 6).
+2. Tables hold references or quiescent slots. A lookup structure (the process table, the TCB table,
+   the dentry cache, the device registry) holds a counted reference, or a slot it reuses only once
+   the object's count is zero and no CPU still runs on it or through it (a TCB's `on_cpu` flag,
+   ROADMAP §10.10, which a tracer and the core-dump writer also wait on before they touch the
+   thread's saved state, [§7.5](SMP.md#75-per-cpu-data)).
+3. Two teardowns. An object whose life ends when its users are done (an address space, a pipe, an
+   unlinked inode, a mount after a lazy unmount) is released by the last put; when RCU readers can
+   also find it, it is unpublished first, and its memory is freed a grace period after that put
+   ([§2.12](#212-rcu)). A lookup structure that can still find it without holding a count loses it
+   first: the release unpublishes it and waits for the lookups in progress, under that structure's
+   lock or by rule 2's quiescent slot, before it frees anything. Until the last put, a reference
+   still held keeps working. An object removed while references remain, because what backs it is
+   gone or has been told to go (a device, a network interface), is killed in this order: unpublish
+   it from every lookup structure, so no new reference can be taken; close its gate, the count of
+   operations in progress that every operation through a reference enters and leaves, so that every
+   new operation fails at once with the object's error, and wake every thread sleeping on the
+   object, so that each one rechecks the gate and fails; wait only for the operations already inside
+   (an active-operation count, or, for lockless readers, an RCU grace period, §2.12), each of which
+   ends within the object's own bound, such as a request's deadline ([§10.3](BLOCK.md#103-failure)); release
+   what it holds (frames, vectors, DMA buffers, stopping the device first,
+   [§5.4](INTERRUPTS.md#54-irq-registration)); and free its memory at the last put, whenever that comes, and a
+   grace period later when RCU readers could find it (§2.12). No step waits for a reference to drop,
+   or for a lock that an operation in progress needs in order to finish.
+4. Ids are not pointers. A pid, tid, descriptor, or device id that crosses the syscall boundary or
+   sits in a table is looked up on each use, never cached as a pointer. Pids and tids share one id
+   space and one allocator, and a process's pid is the tid of its first thread. They are allocated
+   in increasing order up to `pid_max` (ROADMAP §10.4 gives its value) and then wrap to 300, skipping
+   every id in use, as Linux does with its `RESERVED_PIDS`, so a freed id is not handed out again at
+   once. An id is in use while a process or thread, a process group, or a session carries it, as
+   Linux keeps its `struct pid`. A
+   pidfd (ROADMAP §23.1) refers to that id object, not to the number, so once the process is reaped
+   it answers `ESRCH` and never reaches a later holder of the number.
+5. Asynchronous work owns what it touches. A request, timer, work item, or completion that outlives
+   the call that started it holds counted references to every object it will touch (ROADMAP §12.5's
+   owned block submission). It drops each one after its last access to the object
+   ([§2.8](#28-publish-last)) and outside any spinlock section: [§10.1](BLOCK.md#101-completions)'s
+   completer drops its waiter and buffer references after it leaves SCHED.
+6. Release runs only where it may free and sleep. A last put runs the object's release, which frees
+   memory and may sleep or take a sleeping lock. It runs in place only where direct reclaim may run:
+   IF=1, this CPU's `HELD` rank mask empty, and a thread that is not a no-reclaim thread and is
+   outside any RCU read-side section ([§4.4](MEMORY.md#44-kernel-heap) rule 1). Anywhere else (a hard-IRQ top
+   half, a timer or IPI callback, a spinlock section, a threaded bottom half or softirq-equivalent
+   item, a writeback thread, a thread already in reclaim, an RCU read-side section), the put defers:
+   it links the object onto this CPU's deferred-release list through a node the object's allocation
+   carries, so it allocates nothing, and queues a work item that runs the release with IF=1.
+   `TryArc`'s drop makes this check and defers by itself, because a completion or a timer cannot
+   know that its put is the last and Rust drops values implicitly; `put_deferred` is the explicit
+   form, for code that knows its put may be the last. A count whose release only returns memory to
+   an allocator (a frame's, ROADMAP §12.1) follows that allocator's lock rank instead (§2.1). Any
+   other count type says which rule it follows, and in debug builds its last put asserts that it may
+   release where it is. Linux defers the same way (`fput` through `delayed_fput`, and
+   `mmput_async`).
+
+An address space has two counts, as Linux's `mm_users` and `mm_count`. `users` counts the threads
+that run in it and a remote accessor's temporary pin (ptrace, `/proc/<pid>/mem`, `process_vm_readv`,
+procfs `maps` and `smaps`). A pin is taken only by get-unless-zero, so it fails once the last thread
+has left, and it lasts one access, so no remote reader keeps a dead process's memory. The last
+`users` put runs the teardown. The core is a `TryArc` that each region and each `users` holder
+references, and so does a CPU that keeps the root loaded after its thread leaves; it holds the root
+table, the page-table lock, and the CPU set. Freeing the core frees the root and the struct and runs
+no teardown. Teardown runs in one order over the whole space: zap every region's PTEs, keeping the
+frames they drop until the shootdown completes (ROADMAP §12.3); unlink every region from its
+reverse-map object, taking that object's lock for writing; free the page-table pages below the root,
+clearing each parent entry under the space's page-table lock; then drop the regions and their core
+references. `munmap` follows the same order for its range and frees only the table pages that no
+remaining region covers. The reverse map is a lookup structure in rule 3's sense, and unlinking
+under its write lock is rule 3's unpublish together with its wait for operations in progress. So a
+reverse-map walker takes no count: it holds the object's reverse-map lock for reading while it
+borrows each region's core and takes that core's page-table lock, and a region it can see still has
+its core and its page tables. A walker that took `users` could drop the last one and run the
+teardown inside direct reclaim ([§4.4](MEMORY.md#44-kernel-heap) rule 2). Code running inside direct reclaim
+or the OOM killer releases nothing: a put there that may be the last hands the release to a
+workqueue worker. Rule; not yet enforced: an address space has one owner, its process-table slot,
+and is reached through `&'static` references (ROADMAP §10.6, F019), and one global `PT` lock serves
+every space until ROADMAP §12.1.
+
+Why: the kernel review's CRITICAL and HIGH lifetime findings (F002, F012, F019) each came from an
+object that one subsystem freed or reused while another could still reach it, under a scheme that
+subsystem invented. A removal waits for the operations in progress and not for every reference,
+because a mount or an open descriptor keeps its reference for as long as it likes; Linux kills a
+block queue or a network device the same way. A release in atomic context is deferred, not
+forbidden, because a completion or a timer cannot know that its put is the last. The check sits in
+`TryArc`'s drop because Rust drops values implicitly, and it is §4.4 rule 1's test, so one predicate
+decides where reclaim and release may run. Rejected: keeping one scheme per subsystem, which is how
+those bugs arose; never freeing (today's TCBs), which aliases a dying object as soon as its slot is
+reused; a removal that waits for the count to reach zero, which hangs behind any holder; and
+deferral only at call sites marked by hand, which misses an implicit drop. RCU (§2.12) is kept for
+lockless readers only, and it adds a grace period to their objects' counts rather than replacing
+them; everything else uses counts alone.
+
+Today the code breaks rules 1, 2, 4, and 5: TCBs are never freed and their slots are rewritten in
+place (I9; ROADMAP §10.10, F012), address spaces are reached through `&'static` references built
+from table-owned boxes (ROADMAP §10.6, F019), block completions point into stack frames (ROADMAP
+§12.5, F042), a pid is the index of its process-table slot, handed out lowest first
+(ROADMAP §10.4, F127), and a tid is its TCB slot index, in a space of its own. Nothing implements
+rule 3's operation gate or rule 6's deferred release yet (ROADMAP §10.4). A process's working
+directory is a path string: one kernel-global `file_init::CWD` serves every process, and `Proc::cwd`
+is a buffer nothing reads (ROADMAP §10.4, F057).
+
+## 2.12 RCU
+
+Lockless readers (ROADMAP §19.5: the dentry cache, the mount table, the routing table) find objects
+without a lock or a count, so an object they can reach is freed only after every reader that might
+hold it has finished. RCU is how the kernel knows. vibeOS's RCU is preemptible, as Linux's is in a
+fully preemptible kernel.
+
+1. A read-side section increments a nesting count in the TCB on entry and decrements it on exit. A
+   reader runs with IF=1 and may be preempted, but it never sleeps: it takes no sleeping lock
+   (§2.1), waits on no queue, copies no user memory, and allocates only without reclaim
+   ([§4.4](MEMORY.md#44-kernel-heap) rule 1). Code running with IF=0 is a reader too, because a CPU with IF=0
+   passes no quiescent state except at the switch point of a context switch.
+2. A CPU passes a quiescent state at a context switch whose outgoing thread's count is zero, in its
+   idle loop, on a return to user mode, and at a tick that interrupts a thread whose count is zero.
+   A CPU in tickless idle or offline (ROADMAP §19.6) is quiescent throughout.
+3. A thread switched out with a nonzero count joins the blocked-reader list and leaves it at its
+   outermost exit, on whatever CPU it then runs. The list has its own spinlock, ranked after SCHED
+   because the switch path takes it inside SCHED; the rank enters §2.1 with the code. It is one list
+   until ROADMAP §27.5's tree gives each leaf its own. A grace period ends when every CPU has passed
+   a quiescent state since it began and no reader that entered its section before it began is still
+   on the list.
+4. A preempted reader holds every grace period open until it runs again. A reader that has held the
+   current grace period open past a bound is boosted through ROADMAP §19.4's priority inheritance to
+   the priority of RCU's grace-period thread until its outermost exit, as Linux's RCU priority
+   boosting does. Real-time threads above that priority can still hold a grace period open for as
+   long as they run, as on Linux.
+5. An object that RCU readers can find and that is counted (§2.11 rule 1) is freed only after it is
+   unpublished and its count has reached zero, and then a grace period has passed. A reader takes a
+   count only with get-unless-zero, an increment that fails when the count is already zero, so it
+   never revives an object whose last reference is gone.
+6. An RCU path walk never waits on I/O or a sleeping lock. On a dentry-cache miss, a mount it cannot
+   pin, or a sequence count that changed under it, it takes counted references with get-unless-zero
+   to the last dentry and mount it validated, leaves the read side, and continues as a reference
+   walk under the sleeping locks, as Linux's `LOOKUP_RCU` walk falls back. When get-unless-zero
+   fails, the walk restarts from its starting point as a reference walk.
+
+Why: §2.9 has one way to say "not now", IF=0, and its rule 2 forbids an IF=0 path walk whose length
+a user sets, so readers run with IF=1 and can be preempted. The nesting count does not disable
+preemption; it only tells the grace-period machinery whom to wait for, so it is not a second "not
+now". Linux's preemptible RCU has this shape, and its behaviour settles edge cases. Rejected:
+classic RCU with IF=0 readers (rule 2); a preempt-disable count beside IF, which every per-CPU rule
+would then have to account for; epoch-based reclamation, which scans every thread's epoch for each
+grace period and stalls on a preempted reader the same way; and sleepable RCU alone, which has no
+fast read side for the dentry cache.
+
+Cost: the blocked-reader list and boosting make RCU larger than a classic implementation, and a
+preempted reader lengthens grace periods, so memory waiting on them grows under load
+([§4.4](MEMORY.md#44-kernel-heap) rule 3 counts it as freeable).
+
+Planned (ROADMAP §19.5): nothing uses RCU yet.

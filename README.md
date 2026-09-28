@@ -26,7 +26,7 @@ Phase 10 (consolidation) is in progress; Phase 11 (portability: the aarch64 port
 paging / COW) are not started. See [The arc](docs/ROADMAP.md#the-arc).
 Do not run code you do not trust on vibeOS, and keep no secrets on it: until Phase 10 closes a process
 can crash the kernel, and until Phase 18 nothing stops one from reading other processes' memory
-([DESIGN §2.10](docs/DESIGN.md#210-trust-boundaries)).
+([DESIGN §2.10](docs/INVARIANTS.md#210-trust-boundaries)).
 Do not attach a disk you want to keep to `vibeos-ktest.iso`, which stamps a GPT on an all-zero `vda` and writes fixed sectors of any attached one (F145).
 Releases: [GitHub Releases](https://github.com/devinreuschel/vibeOS/releases). From Phase 8 on, the commit that closes a phase
 gets a `phase-<N>` tag and the next `v0.<m>.0` release, numbered in closing order: `v0.8.0` to `v0.14.0` are Phases 8 to 14,
@@ -54,8 +54,17 @@ Agents: start at [AGENTS.md](AGENTS.md).
 Docs live in [`docs/`](docs/). The other docs in the root are the changelog, [AGENTS.md](AGENTS.md) (with its
 `CLAUDE.md` pointer), [CONTRIBUTING.md](CONTRIBUTING.md), and [LICENSE](LICENSE).
 
-- [DESIGN.md](docs/DESIGN.md): invariants, boot order, address map, interrupts, time, SMP, testing, and
-  a list of bugs already paid for once. Decisions, not narration.
+- [DESIGN.md](docs/DESIGN.md): the design's index: the overview, the documentation rules, and a
+  Contents table naming each section's file. Decisions, not narration. Each topic file keeps DESIGN's
+  section numbers:
+  - [INVARIANTS.md](docs/INVARIANTS.md) (§2): lock order, handler rules, panic policy, markers, the
+    invariant register, trust boundaries, object lifetimes.
+  - [BOOT.md](docs/BOOT.md) (§3), [MEMORY.md](docs/MEMORY.md) (§4),
+    [INTERRUPTS.md](docs/INTERRUPTS.md) (§5), [TIME.md](docs/TIME.md) (§6), [SMP.md](docs/SMP.md) (§7)
+    and [TESTING.md](docs/TESTING.md) (§8).
+  - [PITFALLS.md](docs/PITFALLS.md) (§9): bugs already paid for once.
+  - [BLOCK.md](docs/BLOCK.md) (§10), [PORTABILITY.md](docs/PORTABILITY.md) (§11) and
+    [DEVICES.md](docs/DEVICES.md) (§12).
 - [ROADMAP.md](docs/ROADMAP.md): 40 phases in eight eras, from boot through self-hosting to a stable 1.0,
   all on free infrastructure, each with a goal, an exit gate, and per-part task lists; what money would
   add is a separate list of funded goals.
@@ -66,7 +75,7 @@ Docs live in [`docs/`](docs/). The other docs in the root are the changelog, [AG
 - [reviews/](docs/reviews/): the architecture, roadmap, and kernel reviews Phase 10 comes from,
   per-item plans in `reviews/issues/`, and the design reviews' decisions in `DESIGN_REVIEWS.md`.
 
-Read [section 9](docs/DESIGN.md#9-pitfalls) before touching boot, paging, interrupts, syscall entry and exit, or AP bring-up.
+Read [INVARIANTS.md](docs/INVARIANTS.md) and [PITFALLS.md](docs/PITFALLS.md) before touching boot, paging, interrupts, syscall entry and exit, or AP bring-up.
 
 ## License
 
