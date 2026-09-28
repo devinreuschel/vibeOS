@@ -94,7 +94,9 @@ fn read_file(f: &FileRef) -> Result<Vec<u8>, LoadError> {
 }
 
 fn map_loads(space: &mut AddressSpace, img: &Image<'_>) -> Result<(), LoadError> {
+    let mut top = 0u64;
     for seg in img.loads() {
+        top = top.max(seg.vaddr.saturating_add(seg.memsz));
         if seg.memsz == 0 {
             continue;
         }
@@ -113,6 +115,9 @@ fn map_loads(space: &mut AddressSpace, img: &Image<'_>) -> Result<(), LoadError>
                 .map_err(LoadError::Mem)?;
         }
     }
+    // The heap starts on the page after the image, as on Linux with
+    // randomization off.
+    space.set_brk_start(elf::page_up(top));
     Ok(())
 }
 

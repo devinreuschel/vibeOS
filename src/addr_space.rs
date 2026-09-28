@@ -14,6 +14,39 @@ use crate::pmm::Frames;
 
 pub use crate::limits::MAX_REGIONS;
 
+// `prot` bits, as Linux's include/uapi/asm-generic/mman-common.h defines
+// them.
+pub const PROT_READ: u64 = 0x1;
+pub const PROT_WRITE: u64 = 0x2;
+pub const PROT_EXEC: u64 = 0x4;
+
+// `mmap` flags. The map types are Linux's include/uapi/linux/mman.h;
+// `MAP_NORESERVE` is include/uapi/asm-generic/mman.h; the rest are
+// include/uapi/asm-generic/mman-common.h.
+pub const MAP_SHARED: u64 = 0x1;
+pub const MAP_PRIVATE: u64 = 0x2;
+/// The map-type field (`MAP_TYPE` in include/uapi/linux/mman.h).
+pub const MAP_TYPE: u64 = 0xf;
+pub const MAP_FIXED: u64 = 0x10;
+pub const MAP_ANONYMOUS: u64 = 0x20;
+pub const MAP_NORESERVE: u64 = 0x4000;
+pub const MAP_POPULATE: u64 = 0x8000;
+pub const MAP_STACK: u64 = 0x2_0000;
+pub const MAP_FIXED_NOREPLACE: u64 = 0x10_0000;
+
+/// Every flag `mmap` accepts; any other bit is `EINVAL`.
+const MAP_ACCEPTED: u64 = MAP_TYPE
+    | MAP_FIXED
+    | MAP_ANONYMOUS
+    | MAP_NORESERVE
+    | MAP_POPULATE
+    | MAP_STACK
+    | MAP_FIXED_NOREPLACE;
+
+/// Top of the `mmap` area: 128 MiB below `USER_MAP_END`, where Linux puts
+/// its mmap base with randomization off. Placement runs down from here.
+pub const MMAP_TOP: u64 = USER_MAP_END - (128 << 20);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UserPerms {
     pub write: bool,
@@ -50,6 +83,8 @@ impl UserPerms {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backing {
     Anonymous,
+    /// `PROT_NONE`: the range is taken, and no frame backs it.
+    Reserved,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,7 +106,54 @@ pub enum AsError {
     AlreadyMapped,
     NoRegionSlot,
     NotMapped,
+    /// No free range for an `mmap` placement.
+    NoVaSpace,
     Map(MapError),
+}
+
+/// What `brk(want)` does, from [`AddressSpace::brk_plan`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrkPlan {
+    /// Leave the break where it is and return it.
+    Current,
+    /// Move the break within its last page: no page changes.
+    SamePage,
+    /// Map `[va, va+len)` onto the heap.
+    Grow { va: u64, len: u64 },
+    /// Unmap `[va, va+len)` from the heap's top.
+    Shrink { va: u64, len: u64 },
+}
+
+/// How a request treats its `addr`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fixed {
+    /// A hint.
+    No,
+    /// `MAP_FIXED`.
+    Replace,
+    /// `MAP_FIXED_NOREPLACE`.
+    NoReplace,
+}
+
+/// A decoded anonymous `mmap`: `len` is page-rounded, and `perms` is `None`
+/// for `PROT_NONE`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MmapReq {
+    pub addr: u64,
+    pub len: u64,
+    pub perms: Option<UserPerms>,
+    pub fixed: Fixed,
+}
+
+/// Why [`mmap_request`] refused a call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MmapError {
+    /// `EINVAL`.
+    Inval,
+    /// `ENOMEM`.
+    NoMem,
+    /// A file mapping (no `MAP_ANONYMOUS`): `EBADF` or `ENODEV`.
+    NotAnon,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,6 +191,10 @@ pub struct AddressSpace {
     regions: [Option<Region>; MAX_REGIONS],
     user_frames: usize,
     pt_frames: usize,
+    /// Page after the image's highest `PT_LOAD`: where the heap starts.
+    brk_start: u64,
+    /// The program break; the heap region ends at `page_up(brk)`.
+    brk: u64,
 }
 
 struct Counting<'a, A: FrameAlloc> {
@@ -143,6 +229,8 @@ impl AddressSpace {
             regions: [None; MAX_REGIONS],
             user_frames: 0,
             pt_frames: 1,
+            brk_start: 0,
+            brk: 0,
         };
         space.mapper.copy_kernel_half_from(kernel);
         Some(space)
@@ -347,6 +435,146 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// The program break.
+    pub fn brk(&self) -> u64 {
+        self.brk
+    }
+
+    /// Where the heap starts; 0 before a loader sets it.
+    pub fn brk_start(&self) -> u64 {
+        self.brk_start
+    }
+
+    /// Start the heap, empty, at `va` rounded up to a page. The loader calls
+    /// it after mapping the image.
+    pub fn set_brk_start(&mut self, va: u64) {
+        let start = page_up(va).unwrap_or(USER_MAP_END);
+        self.brk_start = start;
+        self.brk = start;
+    }
+
+    /// Move the break after its pages changed as [`brk_plan`] said.
+    ///
+    /// [`brk_plan`]: AddressSpace::brk_plan
+    pub fn set_brk(&mut self, want: u64) {
+        self.brk = want;
+    }
+
+    /// What `brk(want)` does. `brk(0)`, a value below the start, an end past
+    /// `USER_MAP_END`, and growth into another region leave the break
+    /// where it is.
+    pub fn brk_plan(&self, want: u64) -> BrkPlan {
+        if self.brk_start == 0 || want == 0 || want < self.brk_start || want > USER_MAP_END {
+            return BrkPlan::Current;
+        }
+        let (Some(top), Some(new_top)) = (page_up(self.brk), page_up(want)) else {
+            return BrkPlan::Current;
+        };
+        if new_top == top {
+            BrkPlan::SamePage
+        } else if new_top > top {
+            let len = new_top - top;
+            if self.overlaps(top, len) {
+                BrkPlan::Current
+            } else {
+                BrkPlan::Grow { va: top, len }
+            }
+        } else {
+            BrkPlan::Shrink {
+                va: new_top,
+                len: top - new_top,
+            }
+        }
+    }
+
+    /// Before a heap growth maps `[va, va+len)`: the range is free, and a
+    /// slot is free when the heap has no region yet.
+    pub fn heap_grow_check(&self, va: u64, len: u64) -> Result<(), AsError> {
+        check_map_range(va, len)?;
+        if self.overlaps(va, len) {
+            return Err(AsError::Overlap);
+        }
+        if self.heap_slot().is_none() && !self.regions.iter().any(|r| r.is_none()) {
+            return Err(AsError::NoRegionSlot);
+        }
+        Ok(())
+    }
+
+    /// After `[va, va+len)` is mapped: extend the heap region over it (or
+    /// record it as the heap region) and set the break to `want`.
+    pub fn heap_grow_commit(&mut self, va: u64, len: u64, want: u64) -> Result<(), AsError> {
+        match self.heap_slot() {
+            Some(i) => {
+                if let Some(r) = self.regions[i].as_mut() {
+                    r.len = r.len.checked_add(len).ok_or(AsError::Overflow)?;
+                }
+            }
+            None => self.insert_region(Region {
+                start: va,
+                len,
+                perms: UserPerms::RW,
+                backing: Backing::Anonymous,
+            })?,
+        }
+        self.brk = want;
+        Ok(())
+    }
+
+    /// The heap region's slot: the region that starts at the heap's start.
+    fn heap_slot(&self) -> Option<usize> {
+        self.regions
+            .iter()
+            .position(|r| r.is_some_and(|r| r.start == self.brk_start))
+    }
+
+    /// Where an `mmap` of `req` goes. A fixed request below `NULL_GUARD_LEN`
+    /// is `NullGuard`, one past `USER_MAP_END` is `KernelRange`, and one
+    /// over a region is `Overlap`. Otherwise a free hint, rounded down to a
+    /// page, is used; otherwise the highest free range below `MMAP_TOP`,
+    /// or `NoVaSpace`.
+    pub fn mmap_place(&self, req: &MmapReq) -> Result<u64, AsError> {
+        let len = req.len;
+        if req.fixed != Fixed::No {
+            if req.addr < NULL_GUARD_LEN {
+                return Err(AsError::NullGuard);
+            }
+            let end = req.addr.checked_add(len).ok_or(AsError::KernelRange)?;
+            if end > USER_MAP_END {
+                return Err(AsError::KernelRange);
+            }
+            if self.overlaps(req.addr, len) {
+                return Err(AsError::Overlap);
+            }
+            return Ok(req.addr);
+        }
+        let hint = req.addr & !(PAGE_SIZE_4K - 1);
+        if hint >= NULL_GUARD_LEN
+            && hint
+                .checked_add(len)
+                .is_some_and(|e| e <= USER_MAP_END && !self.overlaps(hint, len))
+        {
+            return Ok(hint);
+        }
+        let mut end = MMAP_TOP;
+        loop {
+            let start = end
+                .checked_sub(len)
+                .filter(|&s| s >= NULL_GUARD_LEN)
+                .ok_or(AsError::NoVaSpace)?;
+            let below = self
+                .regions
+                .iter()
+                .flatten()
+                .filter(|r| r.start < end && start < r.start.saturating_add(r.len))
+                .map(|r| r.start)
+                .min();
+            match below {
+                None => return Ok(start),
+                Some(s) => end = s,
+            }
+        }
+    }
+
     /// Free every user leaf + user PT page + the PML4, the root last.
     /// Kernel-half PDPTs are not touched. `free` must return frames to
     /// `alloc`.
@@ -498,6 +726,63 @@ impl AddressSpace {
     }
 }
 
+/// `x` rounded up to a page, or `None` on overflow.
+fn page_up(x: u64) -> Option<u64> {
+    Some(x.checked_add(PAGE_SIZE_4K - 1)? & !(PAGE_SIZE_4K - 1))
+}
+
+/// Decode an anonymous `mmap(addr, len, prot, flags, fd, off)`, checking in
+/// the order Linux's mmap(2) does: an unaligned `off`, then a file mapping,
+/// then a zero `len`, a map type other than `MAP_PRIVATE` or a flag
+/// outside the accepted set, a `prot` bit other than R, W or X, a `len`
+/// that rounds past `USER_MAP_END`, and a fixed request's unaligned `addr`.
+pub fn mmap_request(
+    addr: u64,
+    len: u64,
+    prot: u64,
+    flags: u64,
+    off: u64,
+) -> Result<MmapReq, MmapError> {
+    if !off.is_multiple_of(PAGE_SIZE_4K) {
+        return Err(MmapError::Inval);
+    }
+    if flags & MAP_ANONYMOUS == 0 {
+        return Err(MmapError::NotAnon);
+    }
+    if len == 0 {
+        return Err(MmapError::Inval);
+    }
+    if flags & MAP_TYPE != MAP_PRIVATE || flags & !MAP_ACCEPTED != 0 {
+        return Err(MmapError::Inval);
+    }
+    if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
+        return Err(MmapError::Inval);
+    }
+    let len = page_up(len)
+        .filter(|&l| l <= USER_MAP_END)
+        .ok_or(MmapError::NoMem)?;
+    let fixed = if flags & MAP_FIXED_NOREPLACE != 0 {
+        Fixed::NoReplace
+    } else if flags & MAP_FIXED != 0 {
+        Fixed::Replace
+    } else {
+        Fixed::No
+    };
+    if fixed != Fixed::No && !addr.is_multiple_of(PAGE_SIZE_4K) {
+        return Err(MmapError::Inval);
+    }
+    let perms = (prot != 0).then_some(UserPerms {
+        write: prot & PROT_WRITE != 0,
+        exec: prot & PROT_EXEC != 0,
+    });
+    Ok(MmapReq {
+        addr,
+        len,
+        perms,
+        fixed,
+    })
+}
+
 fn check_map_range(va: u64, len: u64) -> Result<(), AsError> {
     if len == 0 {
         return Ok(());
@@ -578,9 +863,11 @@ impl AddressSpace {
             }
             let lo = r.start.max(va);
             let hi = r_end.min(end);
-            // SAFETY: `[lo, hi)` lies in this region, whose leaves hold
-            // order-0 tokens from `pool` (this fn's contract).
-            unsafe { self.unmap_pages(lo, hi - lo, pool, flush)? };
+            if r.backing != Backing::Reserved {
+                // SAFETY: `[lo, hi)` lies in this region, whose leaves hold
+                // order-0 tokens from `pool` (this fn's contract).
+                unsafe { self.unmap_pages(lo, hi - lo, pool, flush)? };
+            }
             let below = (r.start < va).then(|| Region {
                 len: va - r.start,
                 ..r
@@ -617,10 +904,17 @@ impl AddressSpace {
         alloc: &mut A,
     ) -> Result<AddressSpace, AsError> {
         let mut dst = unsafe { AddressSpace::new(kernel, alloc) }.ok_or(AsError::OutOfFrames)?;
+        dst.brk_start = self.brk_start;
+        dst.brk = self.brk;
         let rc = (|| {
             let mut buf = [0u8; 256];
             for r in self.regions() {
                 if r.len == 0 {
+                    continue;
+                }
+                if r.backing == Backing::Reserved {
+                    dst.check_new_region(r.start, r.len)?;
+                    dst.insert_region(r)?;
                     continue;
                 }
                 unsafe { dst.map_anon(r.start, r.len, r.perms, alloc)? };
@@ -1107,6 +1401,276 @@ mod tests {
             assert!(f < r, "page {i}: flush at {f}, free at {r}");
         }
         unsafe { a.teardown_pool(&mut pool) };
+    }
+
+    #[test]
+    fn addr_space_brk_grow_shrink() {
+        let mut pool = Pool::new(128);
+        let kernel = kernel_mapper(&mut pool);
+        let before = used(&pool);
+        let mut a = unsafe { AddressSpace::new(&kernel, &mut pool) }.unwrap();
+        assert_eq!(a.brk_plan(BASE + P), BrkPlan::Current);
+        a.set_brk_start(BASE + 0x10);
+        let b = BASE + P;
+        assert_eq!((a.brk_start(), a.brk()), (b, b));
+        assert_eq!(a.brk_plan(0), BrkPlan::Current);
+        assert_eq!(a.brk_plan(b - 1), BrkPlan::Current);
+        assert_eq!(a.brk_plan(USER_MAP_END + 1), BrkPlan::Current);
+        assert_eq!(a.brk_plan(b), BrkPlan::SamePage);
+        // Grow into the first page, then within it, then across two more.
+        let grow = |a: &mut AddressSpace, pool: &mut Pool, want: u64| match a.brk_plan(want) {
+            BrkPlan::Grow { va, len } => {
+                a.heap_grow_check(va, len).unwrap();
+                unsafe { a.map_pages(va, len, UserPerms::RW, pool).unwrap() };
+                a.heap_grow_commit(va, len, want).unwrap();
+            }
+            BrkPlan::SamePage => a.set_brk(want),
+            other => panic!("brk({want:#x}): {other:?}"),
+        };
+        grow(&mut a, &mut pool, b + 0x10);
+        assert_eq!(a.brk_plan(b + 0x20), BrkPlan::SamePage);
+        grow(&mut a, &mut pool, b + 0x20);
+        grow(&mut a, &mut pool, b + 2 * P + 8);
+        grow(&mut a, &mut pool, b + 3 * P);
+        assert_eq!(a.brk(), b + 3 * P);
+        let rs: Vec<Region> = a.regions().collect();
+        assert_eq!(rs.len(), 1);
+        assert_eq!((rs[0].start, rs[0].len), (b, 3 * P));
+        assert_eq!(a.user_frames(), 3);
+        // Shrink to one page: the two above go.
+        assert_eq!(
+            a.brk_plan(b + P),
+            BrkPlan::Shrink {
+                va: b + P,
+                len: 2 * P
+            }
+        );
+        unsafe { a.unmap_free(b + P, 2 * P, &mut pool, &mut nop).unwrap() };
+        a.set_brk(b + P);
+        assert_eq!(a.user_frames(), 1);
+        assert_eq!(a.regions().next().map(|r| r.len), Some(P));
+        // Growth into another region leaves the break.
+        unsafe { a.map_anon(b + 2 * P, P, UserPerms::RW, &mut pool).unwrap() };
+        assert_eq!(a.brk_plan(b + 3 * P), BrkPlan::Current);
+        assert_eq!(a.heap_grow_check(b + P, 2 * P), Err(AsError::Overlap));
+        // Shrinking to the start removes the heap region; growth adds it back.
+        unsafe { a.unmap_free(b, P, &mut pool, &mut nop).unwrap() };
+        a.set_brk(b);
+        assert_eq!(a.regions().count(), 1);
+        grow(&mut a, &mut pool, b + 8);
+        assert_eq!(a.regions().count(), 2);
+        unsafe { a.teardown_pool(&mut pool) };
+        assert_eq!(used(&pool), before);
+    }
+
+    fn req(addr: u64, len: u64, fixed: Fixed) -> MmapReq {
+        MmapReq {
+            addr,
+            len,
+            perms: Some(UserPerms::RW),
+            fixed,
+        }
+    }
+
+    #[test]
+    fn addr_space_mmap_anon_placement() {
+        let mut pool = Pool::new(128);
+        let kernel = kernel_mapper(&mut pool);
+        let mut a = unsafe { AddressSpace::new(&kernel, &mut pool) }.unwrap();
+        assert_eq!(MMAP_TOP, 0x7FFF_F7FF_F000);
+        let top = a.mmap_place(&req(0, 4 * P, Fixed::No)).unwrap();
+        assert_eq!(top, MMAP_TOP - 4 * P);
+        unsafe { a.map_anon(top, 4 * P, UserPerms::RW, &mut pool).unwrap() };
+        assert_eq!(a.mmap_place(&req(0, 2 * P, Fixed::No)), Ok(top - 2 * P));
+        // A region at the top leaves a gap too small for 2 pages, which
+        // placement skips.
+        unsafe {
+            a.map_anon(top - 3 * P, 2 * P, UserPerms::RW, &mut pool)
+                .unwrap()
+        };
+        assert_eq!(a.mmap_place(&req(0, 2 * P, Fixed::No)), Ok(top - 5 * P));
+        assert_eq!(a.mmap_place(&req(0, P, Fixed::No)), Ok(top - P));
+        // A free hint is used, rounded down; a taken one is ignored.
+        assert_eq!(a.mmap_place(&req(BASE + 5, P, Fixed::No)), Ok(BASE));
+        assert_eq!(a.mmap_place(&req(top + 8, P, Fixed::No)), Ok(top - P));
+        // Fixed requests.
+        assert_eq!(a.mmap_place(&req(BASE, P, Fixed::Replace)), Ok(BASE));
+        assert_eq!(
+            a.mmap_place(&req(top, P, Fixed::NoReplace)),
+            Err(AsError::Overlap)
+        );
+        assert_eq!(
+            a.mmap_place(&req(top, P, Fixed::Replace)),
+            Err(AsError::Overlap)
+        );
+        assert_eq!(
+            a.mmap_place(&req(0, P, Fixed::Replace)),
+            Err(AsError::NullGuard)
+        );
+        assert_eq!(
+            a.mmap_place(&req(USER_MAP_END, P, Fixed::NoReplace)),
+            Err(AsError::KernelRange)
+        );
+        // Too long for the space below `MMAP_TOP`.
+        assert_eq!(
+            a.mmap_place(&req(0, MMAP_TOP, Fixed::No)),
+            Err(AsError::NoVaSpace)
+        );
+        unsafe { a.teardown_pool(&mut pool) };
+    }
+
+    #[test]
+    fn mmap_request_decodes_flags() {
+        const PA: u64 = MAP_PRIVATE | MAP_ANONYMOUS;
+        const RW: u64 = PROT_READ | PROT_WRITE;
+        let ok = |prot, flags| mmap_request(0x1000, 10, prot, flags, 0);
+        for extra in [
+            0,
+            MAP_NORESERVE,
+            MAP_POPULATE,
+            MAP_STACK,
+            MAP_NORESERVE | MAP_POPULATE | MAP_STACK,
+        ] {
+            let r = ok(RW, PA | extra).unwrap();
+            assert_eq!(r.len, P);
+            assert_eq!(r.fixed, Fixed::No);
+            assert_eq!(
+                ok(RW, PA | extra | MAP_FIXED).unwrap().fixed,
+                Fixed::Replace
+            );
+            assert_eq!(
+                ok(RW, PA | extra | MAP_FIXED_NOREPLACE).unwrap().fixed,
+                Fixed::NoReplace
+            );
+        }
+        for (prot, perms) in [
+            (0, None),
+            (PROT_READ, Some(UserPerms::READ)),
+            (PROT_WRITE, Some(UserPerms::RW)),
+            (RW, Some(UserPerms::RW)),
+            (PROT_EXEC, Some(UserPerms::RX)),
+            (PROT_READ | PROT_EXEC, Some(UserPerms::RX)),
+            (RW | PROT_EXEC, Some(UserPerms::RWX)),
+        ] {
+            assert_eq!(ok(prot, PA).unwrap().perms, perms, "prot {prot}");
+        }
+        // Each error, and that the earlier check wins.
+        use MmapError::*;
+        let cases: [(u64, u64, u64, u64, u64, MmapError); 11] = [
+            (0, 0, 8, MAP_SHARED, 1, Inval),
+            (0, 0, RW, MAP_PRIVATE, 0, NotAnon),
+            (0, 0, 8, MAP_SHARED, 0, NotAnon),
+            (0, 0, 8, MAP_SHARED | MAP_ANONYMOUS, 0, Inval),
+            (0, P, RW, MAP_ANONYMOUS, 0, Inval),
+            (0, P, RW, MAP_SHARED | MAP_ANONYMOUS, 0, Inval),
+            (0, P, RW, PA | 0x100, 0, Inval),
+            (0, P, 8, PA, 0, Inval),
+            (0, 1 << 47, 8, PA, 0, Inval),
+            (0, 1 << 47, RW, PA, 0, NoMem),
+            (0x4000_0001, P, RW, PA | MAP_FIXED, 0, Inval),
+        ];
+        for (addr, len, prot, flags, off, want) in cases {
+            assert_eq!(
+                mmap_request(addr, len, prot, flags, off),
+                Err(want),
+                "addr {addr:#x} len {len:#x} prot {prot} flags {flags:#x} off {off}"
+            );
+        }
+        assert_eq!(mmap_request(0, u64::MAX, RW, PA, 0), Err(NoMem));
+        assert_eq!(
+            mmap_request(0, USER_MAP_END, RW, PA, 0).map(|r| r.len),
+            Ok(USER_MAP_END)
+        );
+        assert_eq!(
+            mmap_request(0x4000_0001, P, RW, PA | MAP_FIXED_NOREPLACE, 0),
+            Err(Inval)
+        );
+        assert_eq!(
+            mmap_request(0x4000_0001, P, RW, PA, 0).map(|r| r.addr),
+            Ok(0x4000_0001)
+        );
+    }
+
+    /// Record a `PROT_NONE` reservation, as the kernel's `mmap` does.
+    fn reserve(a: &mut AddressSpace, va: u64, len: u64) -> Result<(), AsError> {
+        a.check_new_region(va, len)?;
+        a.insert_region(Region {
+            start: va,
+            len,
+            perms: UserPerms::READ,
+            backing: Backing::Reserved,
+        })
+    }
+
+    #[test]
+    fn prot_none_reserves_no_frames() {
+        let mut pool = Pool::new(64);
+        let kernel = kernel_mapper(&mut pool);
+        let mut a = unsafe { AddressSpace::new(&kernel, &mut pool) }.unwrap();
+        let after_new = used(&pool);
+        reserve(&mut a, BASE, 16 * P).unwrap();
+        assert_eq!(used(&pool), after_new);
+        assert_eq!(a.user_frames(), 0);
+        assert_eq!(a.check_user_range(BASE, 1), Err(UserMemError::Unmapped));
+        assert_eq!(
+            unsafe { a.map_anon(BASE + P, P, UserPerms::RW, &mut pool) },
+            Err(AsError::Overlap)
+        );
+        assert_eq!(
+            a.mmap_place(&req(0, 17 * P, Fixed::No)),
+            Ok(MMAP_TOP - 17 * P)
+        );
+        // Unmapping splits the reservation and frees nothing.
+        let mut flushes = 0;
+        unsafe {
+            a.unmap_free(BASE + 4 * P, 4 * P, &mut pool, &mut |_| flushes += 1)
+                .unwrap()
+        };
+        assert_eq!(flushes, 0);
+        assert_eq!(a.regions().count(), 2);
+        assert_eq!(used(&pool), after_new);
+        unsafe { a.teardown_pool(&mut pool) };
+    }
+
+    #[test]
+    fn clone_keeps_brk_and_reservations() {
+        let mut pool = Pool::new(128);
+        let kernel = kernel_mapper(&mut pool);
+        let before = used(&pool);
+        let mut a = unsafe { AddressSpace::new(&kernel, &mut pool) }.unwrap();
+        a.set_brk_start(BASE);
+        let BrkPlan::Grow { va, len } = a.brk_plan(BASE + 0x1800) else {
+            panic!("no grow");
+        };
+        unsafe { a.map_pages(va, len, UserPerms::RW, &mut pool).unwrap() };
+        a.heap_grow_commit(va, len, BASE + 0x1800).unwrap();
+        a.write_bytes(BASE + 0x1000, b"heap").unwrap();
+        reserve(&mut a, BASE + 16 * P, 4 * P).unwrap();
+        let mut c = unsafe { a.clone_anon(&kernel, &mut pool) }.unwrap();
+        assert_eq!((c.brk_start(), c.brk()), (BASE, BASE + 0x1800));
+        assert_eq!(c.user_frames(), 2);
+        let mut got = [0u8; 4];
+        c.read_bytes(BASE + 0x1000, &mut got).unwrap();
+        assert_eq!(&got, b"heap");
+        let mut rs: Vec<(u64, u64, Backing)> =
+            c.regions().map(|r| (r.start, r.len, r.backing)).collect();
+        rs.sort_by_key(|r| r.0);
+        assert_eq!(
+            rs,
+            [
+                (BASE, 2 * P, Backing::Anonymous),
+                (BASE + 16 * P, 4 * P, Backing::Reserved)
+            ]
+        );
+        assert_eq!(
+            c.check_user_range(BASE + 16 * P, 1),
+            Err(UserMemError::Unmapped)
+        );
+        unsafe {
+            c.teardown_pool(&mut pool);
+            a.teardown_pool(&mut pool);
+        }
+        assert_eq!(used(&pool), before);
     }
 
     #[test]
