@@ -17,7 +17,6 @@ pub mod acpi;
 pub mod addr_space;
 pub mod arch;
 pub mod block;
-pub mod cache;
 // Kernel `mod cell` in main.rs. Host tests only: production vibeos-core
 // has no InterruptGuard / per_cpu_init.
 #[cfg(test)]
@@ -25,9 +24,8 @@ pub mod cache;
 pub mod cell;
 pub mod console;
 pub mod dev;
-pub mod dma;
+pub mod drivers;
 pub mod elf;
-pub mod entropy;
 pub mod fat;
 pub mod fb;
 pub mod fmt_util;
@@ -40,8 +38,6 @@ pub mod limits;
 pub mod log;
 pub mod marker;
 pub mod mm;
-pub mod part;
-pub mod pci;
 pub mod proc;
 pub mod sched;
 pub mod shell;
@@ -52,10 +48,11 @@ pub mod syscall;
 pub mod time;
 pub mod trap;
 pub mod vibefs;
-pub mod virtio;
-pub mod virtio_blk;
 
 pub use arch::x86_64::{apic, desc, pic, uart, vectors};
+pub use block::{cache, part};
+pub use dev::{dma, entropy, pci, virtio};
+pub use drivers::virtio_blk;
 pub use irq::ipi;
 pub use mm::{heap, kva, paging, pmm};
 pub use sched::{fpu, thread, wait, work};
