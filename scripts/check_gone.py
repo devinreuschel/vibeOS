@@ -53,7 +53,7 @@ GONE: list[tuple[str, str]] = [
     ("run_path", "one ring-3 entry model:"),
     ("run_user", "one ring-3 entry model:"),
     ("set_exit_status", "one ring-3 entry model:"),
-    ("src/syscall_init.rs: static STDOUT", "one ring-3 entry model:"),
+    ("src/proc/syscall_init.rs: static STDOUT", "one ring-3 entry model:"),
     ("stdout_bytes", "one ring-3 entry model:"),
     ("unbind_current", "one ring-3 entry model:"),
     ("unbind_probe", "one ring-3 entry model:"),

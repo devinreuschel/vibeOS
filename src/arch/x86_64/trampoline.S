@@ -6,7 +6,7 @@
  *
  * Linked into `.trampoline` and copied to 0x8000. Addresses in the blob
  * are physical (BASE), not the kernel VMA. `.org` pins the layout, which
- * `global_asm!` assembles (arch/trampoline.rs), so far jumps and the
+ * `global_asm!` assembles (arch/x86_64/trampoline.rs), so far jumps and the
  * GDT pointer stay byte-stable.
  *
  * Param block (BSP write_volatile, not in this blob):

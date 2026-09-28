@@ -203,7 +203,7 @@ class TestImplHeaders(unittest.TestCase):
 
     def test_other_traits_are_ignored(self) -> None:
         text = "unsafe impl<A: FrameAlloc> FrameAlloc for Counting<'_, A> {}\n"
-        self.assertEqual(self.errs(text, "crates/core/src/addr_space.rs"), [])
+        self.assertEqual(self.errs(text, "crates/core/src/proc/addr_space.rs"), [])
 
     def test_header_fields(self) -> None:
         text = ("unsafe impl<'a, T: ?Sized + Send, const N: usize>\n"

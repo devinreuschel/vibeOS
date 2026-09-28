@@ -33,17 +33,17 @@ class TestScan(unittest.TestCase):
                 self.assertIn("vibeos::x::f: ", errs[0])
 
     def test_save_and_load_routines_pass(self) -> None:
-        self.assertEqual(scan(listing(f"vibeos::syscall_init::fp_save{H}",
+        self.assertEqual(scan(listing(f"vibeos::proc::syscall_init::fp_save{H}",
                                       "fxsave64\t[rdi]", "ret")), [])
-        self.assertEqual(scan(listing(f"vibeos::syscall_init::fp_load{H}",
+        self.assertEqual(scan(listing(f"vibeos::proc::syscall_init::fp_load{H}",
                                       "fxrstor64\t[rdi]", "ret")), [])
-        self.assertEqual(scan(listing(f"vibeos::syscall_init::fp_init_template{H}",
+        self.assertEqual(scan(listing(f"vibeos::proc::syscall_init::fp_init_template{H}",
                                       "fninit", "fxsave64\t[rdi]", "ret")), [])
 
     def test_allow_list_is_per_mnemonic(self) -> None:
-        errs = scan(listing(f"vibeos::syscall_init::fp_save{H}", "fxrstor64\t[rdi]"))
+        errs = scan(listing(f"vibeos::proc::syscall_init::fp_save{H}", "fxrstor64\t[rdi]"))
         self.assertEqual(len(errs), 1, errs)
-        errs = scan(listing(f"vibeos::syscall_init::fp_load{H}", "movaps\txmm0, xmm1"))
+        errs = scan(listing(f"vibeos::proc::syscall_init::fp_load{H}", "movaps\txmm0, xmm1"))
         self.assertEqual(len(errs), 1, errs)
 
     def test_non_fp_instructions_pass(self) -> None:
@@ -60,7 +60,7 @@ class TestScan(unittest.TestCase):
         self.assertEqual(scan(listing(f"vibeos::x::c{H}", call)), [])
 
     def test_llvm_suffix_is_stripped(self) -> None:
-        sym = "vibeos::syscall_init::fp_save (.llvm.11294618185531973296)"
+        sym = "vibeos::proc::syscall_init::fp_save (.llvm.11294618185531973296)"
         self.assertEqual(scan(listing(sym, "fxsave64\t[rdi]")), [])
 
     def test_trampoline_section_is_skipped(self) -> None:

@@ -3,6 +3,10 @@
 //! Kernel table / fork / exec live in `proc_init`. COW is Phase 12.
 //! User signal handlers are Phase 13.
 
+pub mod addr_space;
+pub mod elf;
+pub mod syscall;
+
 use crate::fs::{MAX_PATH, O_CLOEXEC};
 
 pub use crate::limits::MAX_FDS;

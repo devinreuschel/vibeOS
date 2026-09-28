@@ -32,7 +32,7 @@ class TestOutsideArch(unittest.TestCase):
         self.assertEqual(x86_interrupt_outside_arch({"src/arch/x86_64/idt.rs": HANDLER}), [])
 
     def test_commented_line_is_ignored(self) -> None:
-        files = {"src/kbd_init.rs": f"// was: {ABI} fn kbd()\n"
+        files = {"src/console/kbd_init.rs": f"// was: {ABI} fn kbd()\n"
                                     f"fn kbd() {{}} // not {ABI}\n"}
         self.assertEqual(x86_interrupt_outside_arch(files), [])
 

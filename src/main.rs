@@ -27,28 +27,23 @@
 extern crate alloc;
 
 mod acpi;
-mod addr_space_init;
 mod arch;
 mod block;
 mod boot;
 mod cell;
-mod console_init;
+mod console;
 mod dev;
 mod drivers;
-mod fb_init;
 mod fs;
 mod irq;
-mod kbd_init;
 mod log;
 mod mm;
-mod proc_init;
+mod proc;
 mod sched;
-mod shell_init;
+mod shell;
 mod smp;
 mod sync;
-mod syscall_init;
 mod time;
-mod user_init;
 
 #[cfg(feature = "kernel_tests")]
 mod ktest;
@@ -56,13 +51,16 @@ mod ktest;
 use acpi::acpi_init;
 use arch::x86_64::{apic_init, cpu as x86};
 use block::{block_init, cache_init, part_init};
+use console::{console_init, fb_init, kbd_init};
 use dev::{dev_init, dma_init, entropy_init, pci_init, virtio_init};
 use drivers::virtio_blk_init;
 use fs::{fat_init, file_init, fs_init, vibefs_init};
 use irq::{ipi_init, irq_init};
 use log::{diag, ksyms, log_init, panic, serial};
 use mm::{heap_init, kva_init, paging_init, pmm_init};
+use proc::{addr_space_init, proc_init, syscall_init, user_init};
 use sched::{sched_init, thread_init, work_init};
+use shell::shell_init;
 use smp::{per_cpu_init, smp_init};
 use sync::sync_init;
 use time::time_init;
