@@ -585,6 +585,8 @@ fn apply_pending(frame: Option<&mut UserFrame>) {
                 }
                 p.state = ProcState::Stopped;
                 s.begin_wait(&mut p.stop_wq, FAR_DEADLINE);
+                #[cfg(feature = "kernel_tests")]
+                testing::stop_decided(pid);
                 Pending::Stop
             })
         });
@@ -1628,7 +1630,8 @@ pub(crate) mod testing {
         STALL_PID.store(pid, Ordering::Release);
     }
 
-    /// The armed process sits in the stall.
+    /// The armed process has decided to stop and armed its `stop_wq` wait:
+    /// it sits between its stop decision and its sleep.
     pub(crate) fn stop_stalled() -> bool {
         STALL_IN.load(Ordering::Acquire)
     }
@@ -1640,6 +1643,18 @@ pub(crate) mod testing {
     pub(crate) fn disarm_stop_stall() {
         STALL_PID.store(0, Ordering::Release);
         STALL_RELEASE.store(true, Ordering::Release);
+    }
+
+    /// Called in the SCHED section that arms a stopping process's
+    /// `stop_wq` wait: marks the stall when `pid` is the armed process. A
+    /// tick after that section parks the thread, since a preempted
+    /// `Blocked` thread is not requeued, and [`stop_stall`] would then run
+    /// only after the `SIGCONT` that the sender sends once it sees the
+    /// stall; so the stall is marked here, before IF can come back on.
+    pub(super) fn stop_decided(pid: u32) {
+        if STALL_PID.load(Ordering::Acquire) == pid {
+            STALL_IN.store(true, Ordering::Release);
+        }
     }
 
     /// Spins on TSC time; never services IPIs.
