@@ -496,20 +496,6 @@ impl AddressSpace {
             va < r_end && r.start < end
         })
     }
-
-    fn drop_regions_covered(&mut self, va: u64, len: u64) {
-        let end = va.saturating_add(len);
-        let mut i = 0;
-        while i < MAX_REGIONS {
-            if let Some(r) = self.regions[i] {
-                let r_end = r.start.saturating_add(r.len);
-                if va <= r.start && r_end <= end {
-                    self.regions[i] = None;
-                }
-            }
-            i += 1;
-        }
-    }
 }
 
 fn check_map_range(va: u64, len: u64) -> Result<(), AsError> {
@@ -541,35 +527,76 @@ pub unsafe trait FrameFree {
 }
 
 impl AddressSpace {
+    /// `munmap` of `[va, va+len)`: every region in the range is trimmed,
+    /// split or removed, and each of its leaves is cleared, flushed with
+    /// `flush(va)` after its PTE is cleared, and freed to `pool`. Holes and
+    /// an empty range are fine. The range is page-aligned and ends at or
+    /// below `USER_MAP_END`; it may start below `NULL_GUARD_LEN`. When a
+    /// split needs a region slot and none is free, returns `NoRegionSlot`
+    /// with nothing changed. Allocates nothing.
+    ///
     /// # Safety
-    /// Pages in `[va, va+len)` are mapped by this space; `pool` owns the unmapped frames.
-    pub unsafe fn unmap_free<A>(&mut self, va: u64, len: u64, pool: &mut A) -> Result<(), AsError>
-    where
-        A: FrameAlloc + FrameFree,
-    {
-        check_map_range(va, len)?;
+    /// Every leaf in the range holds an order-0 token that `pool` may take
+    /// back, and `flush` removes the page from every TLB that may hold it.
+    pub unsafe fn unmap_free<A: FrameFree>(
+        &mut self,
+        va: u64,
+        len: u64,
+        pool: &mut A,
+        flush: &mut dyn FnMut(u64),
+    ) -> Result<(), AsError> {
+        if !va.is_multiple_of(PAGE_SIZE_4K) || !len.is_multiple_of(PAGE_SIZE_4K) {
+            return Err(AsError::Misaligned);
+        }
+        let end = va.checked_add(len).ok_or(AsError::Overflow)?;
+        if end > USER_MAP_END {
+            return Err(AsError::KernelRange);
+        }
         if len == 0 {
             return Ok(());
         }
-        let mut off = 0u64;
-        while off < len {
-            let page = VirtAddr(va + off);
-            match unsafe { self.mapper.unmap_page(page) } {
-                Some((pa, PageSize::Size4K)) => {
-                    // SAFETY: `unmap_page` just cleared this user leaf, which
-                    // held an order-0 token `map_anon` consumed into it
-                    // (the contract `pmm::Frames::from_entry` states).
-                    pool.free_frame(unsafe { Frames::from_entry(pa.as_u64(), 0) });
-                    self.user_frames = self.user_frames.saturating_sub(1);
-                }
-                Some((_, PageSize::Size2M)) => {
-                    return Err(AsError::Map(MapError::PageSizeMismatch));
-                }
-                None => return Err(AsError::NotMapped),
-            }
-            off += PAGE_SIZE_4K;
+        // Regions do not overlap, so at most one strictly contains the
+        // range and needs a second slot for its upper part.
+        let split = self
+            .regions
+            .iter()
+            .flatten()
+            .any(|r| r.start < va && end < r.start.saturating_add(r.len));
+        if split && !self.regions.iter().any(|r| r.is_none()) {
+            return Err(AsError::NoRegionSlot);
         }
-        self.drop_regions_covered(va, len);
+        let mut i = 0;
+        while i < MAX_REGIONS {
+            let Some(r) = self.regions[i] else {
+                i += 1;
+                continue;
+            };
+            let r_end = r.start.saturating_add(r.len);
+            if r_end <= va || end <= r.start {
+                i += 1;
+                continue;
+            }
+            let lo = r.start.max(va);
+            let hi = r_end.min(end);
+            // SAFETY: `[lo, hi)` lies in this region, whose leaves hold
+            // order-0 tokens from `pool` (this fn's contract).
+            unsafe { self.unmap_pages(lo, hi - lo, pool, flush)? };
+            let below = (r.start < va).then(|| Region {
+                len: va - r.start,
+                ..r
+            });
+            let above = (end < r_end).then(|| Region {
+                start: end,
+                len: r_end - end,
+                ..r
+            });
+            self.regions[i] = below.or(above);
+            if let (Some(_), Some(up)) = (below, above) {
+                // The first pass found a free slot for this split.
+                self.insert_region(up)?;
+            }
+            i += 1;
+        }
         Ok(())
     }
 
@@ -739,7 +766,7 @@ mod tests {
         assert!(aspace.check_user_range(user_va, 16).is_ok());
         unsafe {
             aspace
-                .unmap_free(user_va, PAGE_SIZE_4K * 2, &mut pool)
+                .unmap_free(user_va, PAGE_SIZE_4K * 2, &mut pool, &mut |_| {})
                 .unwrap();
         }
         assert_eq!(aspace.user_frames(), 0);
@@ -911,6 +938,175 @@ mod tests {
         assert_eq!(used(&pool), after_new + aspace.pt_frames() - 1 + 2);
         unsafe { aspace.teardown_pool(&mut pool) };
         assert_eq!(used(&pool), baseline);
+    }
+
+    const P: u64 = PAGE_SIZE_4K;
+    const BASE: u64 = 0x0000_0000_0040_0000;
+
+    fn nop(_: u64) {}
+
+    #[test]
+    fn addr_space_munmap_splits_region() {
+        let mut pool = Pool::new(128);
+        let kernel = kernel_mapper(&mut pool);
+        let before = used(&pool);
+        let mut a = unsafe { AddressSpace::new(&kernel, &mut pool) }.unwrap();
+        unsafe { a.map_anon(BASE, 3 * P, UserPerms::RW, &mut pool).unwrap() };
+        a.write_bytes(BASE, b"one").unwrap();
+        a.write_bytes(BASE + 2 * P, b"three").unwrap();
+        unsafe { a.unmap_free(BASE + P, P, &mut pool, &mut nop).unwrap() };
+        let mut rs: Vec<Region> = a.regions().collect();
+        rs.sort_by_key(|r| r.start);
+        assert_eq!(rs.len(), 2);
+        assert_eq!((rs[0].start, rs[0].len), (BASE, P));
+        assert_eq!((rs[1].start, rs[1].len), (BASE + 2 * P, P));
+        assert_eq!(a.user_frames(), 2);
+        assert_eq!(a.check_user_range(BASE + P, 1), Err(UserMemError::Unmapped));
+        let mut c = unsafe { a.clone_anon(&kernel, &mut pool) }.unwrap();
+        let mut got = [0u8; 5];
+        c.read_bytes(BASE, &mut got[..3]).unwrap();
+        assert_eq!(&got[..3], b"one");
+        c.read_bytes(BASE + 2 * P, &mut got).unwrap();
+        assert_eq!(&got, b"three");
+        assert_eq!(c.user_frames(), 2);
+        unsafe {
+            c.teardown_pool(&mut pool);
+            a.teardown_pool(&mut pool);
+        }
+        assert_eq!(used(&pool), before);
+    }
+
+    #[test]
+    fn munmap_trims_spans_and_holes() {
+        let mut pool = Pool::new(128);
+        let kernel = kernel_mapper(&mut pool);
+        let before = used(&pool);
+        let mut a = unsafe { AddressSpace::new(&kernel, &mut pool) }.unwrap();
+        let r2 = BASE + 8 * P;
+        unsafe {
+            a.map_anon(BASE, 4 * P, UserPerms::RW, &mut pool).unwrap();
+            a.map_anon(r2, 4 * P, UserPerms::RW, &mut pool).unwrap();
+        }
+        let base_used = used(&pool) - a.user_frames();
+        // Head of the first region.
+        unsafe { a.unmap_free(BASE, P, &mut pool, &mut nop).unwrap() };
+        // Tail of the second.
+        unsafe { a.unmap_free(r2 + 3 * P, P, &mut pool, &mut nop).unwrap() };
+        assert_eq!(a.user_frames(), 6);
+        // A span over the first's tail, the hole, and the second's head.
+        unsafe {
+            a.unmap_free(BASE + 2 * P, 8 * P, &mut pool, &mut nop)
+                .unwrap()
+        };
+        let mut rs: Vec<(u64, u64)> = a.regions().map(|r| (r.start, r.len)).collect();
+        rs.sort();
+        assert_eq!(rs, [(BASE + P, P), (r2 + 2 * P, P)]);
+        assert_eq!(a.user_frames(), 2);
+        // A hole, an empty range, and a range below the null guard.
+        unsafe {
+            a.unmap_free(BASE + 4 * P, 4 * P, &mut pool, &mut nop)
+                .unwrap();
+            a.unmap_free(BASE, 0, &mut pool, &mut nop).unwrap();
+            a.unmap_free(0, P, &mut pool, &mut nop).unwrap();
+        }
+        assert_eq!(a.user_frames(), 2);
+        assert_eq!(used(&pool), base_used + a.user_frames());
+        assert_eq!(
+            unsafe { a.unmap_free(BASE + 1, P, &mut pool, &mut nop) },
+            Err(AsError::Misaligned)
+        );
+        assert_eq!(
+            unsafe { a.unmap_free(USER_MAP_END, P, &mut pool, &mut nop) },
+            Err(AsError::KernelRange)
+        );
+        unsafe { a.teardown_pool(&mut pool) };
+        assert_eq!(used(&pool), before);
+    }
+
+    #[test]
+    fn munmap_split_needs_slot() {
+        let mut pool = Pool::new(128);
+        let kernel = kernel_mapper(&mut pool);
+        let mut a = unsafe { AddressSpace::new(&kernel, &mut pool) }.unwrap();
+        unsafe { a.map_anon(BASE, 3 * P, UserPerms::RW, &mut pool).unwrap() };
+        let mut va = BASE + 4 * P;
+        while a.regions().count() < MAX_REGIONS {
+            unsafe { a.map_anon(va, P, UserPerms::RW, &mut pool).unwrap() };
+            va += 2 * P;
+        }
+        let frames = a.user_frames();
+        let used_before = used(&pool);
+        assert_eq!(
+            unsafe { a.unmap_free(BASE + P, P, &mut pool, &mut nop) },
+            Err(AsError::NoRegionSlot)
+        );
+        assert_eq!(a.user_frames(), frames);
+        assert_eq!(used(&pool), used_before);
+        assert!(a.check_user_range(BASE, 3 * P).is_ok());
+        // A trim needs no slot.
+        unsafe { a.unmap_free(BASE, P, &mut pool, &mut nop).unwrap() };
+        assert_eq!(a.user_frames(), frames - 1);
+        unsafe { a.teardown_pool(&mut pool) };
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Ev {
+        Flush(u64),
+        Free(u64),
+    }
+
+    /// A pool that logs each frame it takes back into a log it shares with
+    /// the flush.
+    struct Logging<'a> {
+        pool: &'a mut Pool,
+        log: &'a core::cell::RefCell<Vec<Ev>>,
+    }
+
+    unsafe impl FrameFree for Logging<'_> {
+        fn free_frame(&mut self, f: Frames) {
+            self.log.borrow_mut().push(Ev::Free(f.base()));
+            self.pool.buddy.free(f);
+        }
+    }
+
+    #[test]
+    fn munmap_flush_before_free() {
+        let mut pool = Pool::new(128);
+        let kernel = kernel_mapper(&mut pool);
+        let mut a = unsafe { AddressSpace::new(&kernel, &mut pool) }.unwrap();
+        unsafe { a.map_anon(BASE, 4 * P, UserPerms::RW, &mut pool).unwrap() };
+        let pas: Vec<u64> = (0..4)
+            .map(|i| {
+                a.mapper()
+                    .translate(VirtAddr(BASE + i * P))
+                    .unwrap()
+                    .0
+                    .as_u64()
+            })
+            .collect();
+        let log = core::cell::RefCell::new(Vec::new());
+        {
+            let mut lp = Logging {
+                pool: &mut pool,
+                log: &log,
+            };
+            let mut flush = |va: u64| log.borrow_mut().push(Ev::Flush(va));
+            unsafe { a.unmap_free(BASE, 4 * P, &mut lp, &mut flush).unwrap() };
+        }
+        let log = log.into_inner();
+        assert_eq!(log.len(), 8);
+        for i in 0..4u64 {
+            let f = log
+                .iter()
+                .position(|e| *e == Ev::Flush(BASE + i * P))
+                .unwrap();
+            let r = log
+                .iter()
+                .position(|e| *e == Ev::Free(pas[i as usize]))
+                .unwrap();
+            assert!(f < r, "page {i}: flush at {f}, free at {r}");
+        }
+        unsafe { a.teardown_pool(&mut pool) };
     }
 
     #[test]

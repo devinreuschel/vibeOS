@@ -170,14 +170,36 @@ fn local_flush(space: &AddressSpace) -> impl FnMut(u64) + use<> {
     }
 }
 
+/// `munmap` of `[va, va+len)` over `AddressSpace::unmap_free`, taking `PT`
+/// once per chunk ([`CHUNK_PAGES`]). Each page leaves this CPU's TLB before
+/// its frame is freed when `space` is the loaded CR3. Only the first chunk
+/// can split a region, so a full region table fails it before anything is
+/// unmapped.
+///
 /// # Safety
-/// Same contract as `AddressSpace::unmap_free`.
+/// Same contract as `AddressSpace::unmap_free`, whose flush this fn
+/// supplies.
 pub unsafe fn unmap(space: &mut AddressSpace, va: u64, len: u64) -> Result<(), AsError> {
-    paging_init::with_pt(|_pt| {
-        let mut pool = BuddyPool;
-        unsafe { space.unmap_free(va, len, &mut pool) }
-    })?;
-    shootdown_user(space, va, len);
+    let end = va.checked_add(len).ok_or(AsError::Overflow)?;
+    if len == 0 {
+        // SAFETY: an empty range touches no leaf; `unmap_free` checks it.
+        return paging_init::with_pt(|_pt| unsafe {
+            space.unmap_free(va, 0, &mut BuddyPool, &mut |_| {})
+        });
+    }
+    let mut flush = local_flush(space);
+    let mut cur = va;
+    while cur < end {
+        let ce = chunk_end(cur, end);
+        with_pt_chunk((ce - cur) / PAGE_SIZE_4K, || {
+            let mut pool = BuddyPool;
+            // SAFETY: this fn's contract; `flush` invalidates the page on
+            // this CPU, the only one that runs the space's thread
+            // (`thread_init::spawn_user` pins it).
+            unsafe { space.unmap_free(cur, ce - cur, &mut pool, &mut flush) }
+        })?;
+        cur = ce;
+    }
     Ok(())
 }
 
@@ -263,18 +285,6 @@ pub fn teardown(mut space: AddressSpace) -> TeardownStats {
         // these tables once they are freed.
         unsafe { space.teardown_pool(&mut pool) }
     })
-}
-
-fn shootdown_user(space: &AddressSpace, va: u64, len: u64) {
-    let cur = x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK;
-    if cur != space.root().as_u64() {
-        return;
-    }
-    let mut off = 0u64;
-    while off < len {
-        x86::invlpg(va + off);
-        off += PAGE_SIZE_4K;
-    }
 }
 
 pub fn load_cr3(space: &AddressSpace) {
