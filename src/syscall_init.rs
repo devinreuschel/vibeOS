@@ -543,6 +543,11 @@ pub unsafe fn first_return(fs_base: u64) -> ! {
             "mov es, ax",
             "mov fs, ax",
             "mov gs, ax",
+            // kernel_tests: hold the window after the GS load open (ROADMAP
+            // §10.2, F021); the call keeps the live RDI, RSI and R8, and
+            // RSP 16-byte aligned (four pushes).
+            #[cfg(feature = "kernel_tests")]
+            "push rdi; push rsi; push r8; push r8; call {stall}; pop r8; pop r8; pop rsi; pop rdi",
             "mov ecx, {gs_base}",
             "mov eax, edi",
             "mov rdx, rdi",
@@ -566,6 +571,8 @@ pub unsafe fn first_return(fs_base: u64) -> ! {
             fs_base = const IA32_FS_BASE,
             user_ss = const USER_DS_RPL as u32,
             frame_pad = const size_of::<UserFrame>() + PAD,
+            #[cfg(feature = "kernel_tests")]
+            stall = sym testing::fork_wait_stall_point,
             in("rsi") fs_base,
             options(noreturn),
         );
@@ -658,12 +665,14 @@ pub fn dispatch(nr: u64, args: [u64; 6]) -> i64 {
 /// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
 #[cfg(feature = "kernel_tests")]
 pub(crate) mod testing {
-    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
     use core::mem::size_of;
     use vibeos::paging::USER_END;
 
     use vibeos::syscall::UserFrame;
+
+    use crate::time_init;
 
     /// Syscall number plus one whose next exit gets a non-canonical RIP;
     /// 0 for none.
@@ -723,5 +732,35 @@ pub(crate) mod testing {
         // wrote and nothing else refers to; established by
         // `thread_init::spawn_user`.
         unsafe { (*(at as *mut UserFrame)).rip = USER_END };
+    }
+
+    /// First ring-3 entries [`fork_wait_stall_point`] still holds.
+    static FORK_WAIT_STALLS: AtomicU32 = AtomicU32::new(0);
+
+    /// How long [`fork_wait_stall_point`] holds one entry: two ticks of
+    /// the 1 kHz timer.
+    const FORK_WAIT_STALL_NS: u64 = 2_000_000;
+
+    /// Hold the next `n` first ring-3 entries at [`fork_wait_stall_point`];
+    /// 0 disarms.
+    pub(crate) fn arm_fork_wait_stall(n: u32) {
+        FORK_WAIT_STALLS.store(n, Ordering::Release);
+    }
+
+    /// In a first ring-3 entry, once GS is loaded for ring 3: while armed,
+    /// spin for [`FORK_WAIT_STALL_NS`], so an interrupt the entry takes
+    /// there lands inside that window (ROADMAP §10.2, F021). It reads no
+    /// `gs:` operand, since GS already names the user's base.
+    pub(crate) extern "C" fn fork_wait_stall_point() {
+        if FORK_WAIT_STALLS
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+            .is_err()
+        {
+            return;
+        }
+        let t0 = time_init::now_ns();
+        while time_init::now_ns().saturating_sub(t0) < FORK_WAIT_STALL_NS {
+            core::hint::spin_loop();
+        }
     }
 }
