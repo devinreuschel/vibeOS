@@ -15,9 +15,11 @@ commit ticks (whitespace collapsed). The line splits at its first ` -- `.
 The proof exists at the head: a `make <target>` rule, a path (optionally
 `<path>::<name>`), a `"<marker text>"`, or an identifier (a ktest registry row,
 a user test, a host `#[test]`, a harness or script `def`, a harness or script
-file). Its definition changes in `git diff base...head`, or its name appears in
-the ticked line; otherwise the line carries `(existing: <reason>)`, which the
-report lists.
+file). A bare word that names none of those but is a Makefile target
+(`test-e2e-mce`) is that `make` rule, since ROADMAP's How to read this names
+"a `make` target" as a proof without the `make` word. Its definition changes
+in `git diff base...head`, or its name appears in the ticked line; otherwise
+the line carries `(existing: <reason>)`, which the report lists.
 
 Modes:
 - bare (`make check`): pairing and the diff rule on `origin/main..HEAD`, or
@@ -55,6 +57,7 @@ HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 TICKED = re.compile(r"^\s*- \[x\] (.*)$")
 EXISTING = re.compile(r"^(.*?)\s+\(existing:\s*(.*)\)$")
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+MAKE_TARGET = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 JOB = re.compile(r"^([A-Za-z0-9_.-]+\.ya?ml):([A-Za-z0-9_-]+)$")
 FAILS_BEFORE = re.compile(r"\bthe tests? fails? before the fix\b", re.I)
 FAILS_BEFORE_LINE = re.compile(r'^(\S+)\s+([0-9a-f]{7,40})\s+"(.*)"$')
@@ -376,7 +379,14 @@ def resolve(proof: str, tree: Tree) -> tuple[list[Definition], str]:
     if j:
         return _resolve_job(j.group(1), j.group(2), tree), proof
     if IDENT.match(proof):
-        return _resolve_ident(proof, tree), proof
+        defs = _resolve_ident(proof, tree)
+        if defs:
+            return defs, proof
+    if MAKE_TARGET.match(proof):
+        text = tree.read("Makefile")
+        rng = _make_rule(text, proof) if text is not None else None
+        if rng:
+            return [Definition("make", "Makefile", *rng, proof)], proof
     return [], proof
 
 

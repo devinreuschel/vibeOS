@@ -280,6 +280,8 @@ class TestDiffRule(RepoCase):
     KINDS: list[tuple[str, str, str, str]] = [
         # proof, path, old, new
         ("make test-kernel", "Makefile", "echo kernel", "echo kernel2"),
+        # A bare Makefile target is its `make` rule (ROADMAP, How to read this).
+        ("test-kernel", "Makefile", "echo kernel", "echo kernel2"),
         ("tests/harness/test_x.py", "tests/harness/test_x.py", "x = 1", "x = 2"),
         ("tests/harness/test_x.py::test_py", "tests/harness/test_x.py", "x = 1", "x = 2"),
         ('"vibeOS: boot: 4 cpus up"', "src/boot.rs", ", n);", ", m);"),
@@ -336,11 +338,24 @@ class TestDiffRule(RepoCase):
 
     def test_proof_not_found(self) -> None:
         for proof in ("make nothing", "tests/harness/none.py", "tests/harness/test_x.py::nope",
-                      '"vibeOS: never"', "not_a_def", "not_a_test", "two words"):
+                      '"vibeOS: never"', "not_a_def", "not_a_test", "two words",
+                      "test-nothing"):
             with self.subTest(proof=proof):
                 self.setUp()
                 self.commit(f"t\n\nProves: {proof} (existing: x) -- {self.PREFIX}", "delta box")
                 self.assertErrors(self.run_check(), "proof not found at the head")
+
+    def test_bare_make_target(self) -> None:
+        """A bare word is a Makefile target only when it names no test or
+        script, so an identifier keeps its own definition first."""
+        tree = check_ticks.Tree("HEAD", self.repo.path)
+        for proof in ("test-kernel", "lint"):
+            with self.subTest(proof=proof):
+                defs, name = check_ticks.resolve(proof, tree)
+                self.assertEqual([(d.kind, d.path, d.name) for d in defs],
+                                 [("make", "Makefile", proof)])
+                self.assertEqual(name, proof)
+        self.assertEqual({d.kind for d in check_ticks.resolve("test_py", tree)[0]}, {"py"})
 
     def test_registry_row_is_not_any_call(self) -> None:
         """`asm!("int3", ...)` and `fail("handler", ...)` in src/ktest.rs are
