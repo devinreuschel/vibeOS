@@ -496,7 +496,7 @@ fn dispatch_frame(nr: u64, args: [u64; 6], frame: *mut SyscallFrame) -> i64 {
         SYS_BRK => sys_brk(args[0]),
         SYS_DUP => sys_dup(args[0]),
         SYS_DUP2 => sys_dup2(args[0], args[1]),
-        SYS_GETPID => current_pid() as i64,
+        SYS_GETPID => sys_getpid(),
         SYS_GETPPID => with_table(|t| t.get(current_pid()).map(|p| p.ppid).unwrap_or(0)) as i64,
         SYS_SCHED_YIELD => {
             if current_pid() != 0 {
@@ -566,6 +566,8 @@ fn apply_pending(frame: *mut SyscallFrame) {
                 finish_exit(wait_signaled(sig), true);
             }
             Pending::Stop => {
+                #[cfg(feature = "kernel_tests")]
+                testing::stop_stall(pid);
                 let wq = unsafe { &mut (*TABLE.as_ptr()).procs[pid as usize].stop_wq };
                 thread_init::wait_on(wq);
             }
@@ -577,6 +579,13 @@ enum Pending {
     None,
     Die(u32),
     Stop,
+}
+
+fn sys_getpid() -> i64 {
+    let pid = current_pid();
+    #[cfg(feature = "kernel_tests")]
+    testing::on_getpid(pid);
+    pid as i64
 }
 
 fn lookup_fd(fd: u64) -> Option<Fd> {
@@ -1464,3 +1473,72 @@ pub fn try_user_fault(vec: u8, frame: &InterruptFrame, err: u64, cr2: Option<u64
 const _: fn(u32) = |s| {
     let _ = wait_stopped(s);
 };
+
+/// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
+#[cfg(feature = "kernel_tests")]
+pub(crate) mod testing {
+    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+
+    use vibeos::proc::MAX_PROCS;
+
+    use crate::time_init;
+
+    static GETPIDS: [AtomicU64; MAX_PROCS] = [const { AtomicU64::new(0) }; MAX_PROCS];
+
+    /// `getpid` calls `pid` has made since boot.
+    pub(crate) fn getpid_count(pid: u32) -> u64 {
+        GETPIDS
+            .get(pid as usize)
+            .map_or(0, |c| c.load(Ordering::Acquire))
+    }
+
+    pub(super) fn on_getpid(pid: u32) {
+        if let Some(c) = GETPIDS.get(pid as usize) {
+            c.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    /// The pid the next stop stall holds; 0 for none.
+    static STALL_PID: AtomicU32 = AtomicU32::new(0);
+    static STALL_IN: AtomicBool = AtomicBool::new(false);
+    static STALL_RELEASE: AtomicBool = AtomicBool::new(false);
+
+    /// Hold `pid` once, at its next stop, between the stop decision and
+    /// its sleep, until [`release_stop_stall`] or 1 s of TSC time.
+    pub(crate) fn arm_stop_stall(pid: u32) {
+        STALL_IN.store(false, Ordering::Release);
+        STALL_RELEASE.store(false, Ordering::Release);
+        STALL_PID.store(pid, Ordering::Release);
+    }
+
+    /// The armed process sits in the stall.
+    pub(crate) fn stop_stalled() -> bool {
+        STALL_IN.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn release_stop_stall() {
+        STALL_RELEASE.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn disarm_stop_stall() {
+        STALL_PID.store(0, Ordering::Release);
+        STALL_RELEASE.store(true, Ordering::Release);
+    }
+
+    /// Spins on TSC time; never services IPIs.
+    pub(super) fn stop_stall(pid: u32) {
+        if STALL_PID
+            .compare_exchange(pid, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        STALL_IN.store(true, Ordering::Release);
+        let t0 = time_init::now_ns();
+        while !STALL_RELEASE.load(Ordering::Acquire)
+            && time_init::now_ns().saturating_sub(t0) < 1_000_000_000
+        {
+            core::hint::spin_loop();
+        }
+    }
+}
