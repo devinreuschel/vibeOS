@@ -6,11 +6,11 @@ This file is the contract. Cursor rules and `CLAUDE.md` point here. Longer mater
 ## Read first
 
 1. [README.md](README.md) — status and how to build.
-2. [docs/DESIGN.md](docs/DESIGN.md) [§2](docs/INVARIANTS.md#2-invariants) and [§9](docs/PITFALLS.md#9-pitfalls) before touching boot, paging, interrupts, syscall entry and exit, or AP bring-up.
+2. [docs/INVARIANTS.md](docs/INVARIANTS.md) (DESIGN §2) and [docs/PITFALLS.md](docs/PITFALLS.md) (DESIGN §9) before touching boot, paging, interrupts, syscall entry and exit, or AP bring-up.
 3. The [ROADMAP.md](docs/ROADMAP.md) phase you are implementing. Checkboxes are the status. Tick a box only in the commit that makes its proving test pass, and name that test in a `Proves: <test> -- <the box's first words>` trailer ([How to read this](docs/ROADMAP.md#how-to-read-this)). A phase closes when its exit-gate lines pass and every box in its sections outside Stretch is ticked or carries a `lands in §M.x` note that defers it to a later phase. In Phase 10, take work in the order its **Order** paragraph gives, and tick no box before the boxes `tests/gates/phase-10-needs.toml` lists for it. Change a ticked box's text only in a commit that reopens it or names its proof again.
 4. When documents differ: AGENTS.md and DESIGN §2's invariants bind every ROADMAP box, and a box decides over the issue plan or kernel-review Fix it cites ([How to read this](docs/ROADMAP.md#how-to-read-this), Precedence).
 
-`docs/INVARIANTS.md` / `docs/PITFALLS.md` are a later split (DOC2). Until then, DESIGN §2 / §9.
+[docs/DESIGN.md](docs/DESIGN.md) is the design's index: §2 to §12 live in the topic files its Contents table names and keep their numbers, so `DESIGN §x.y` names a section wherever it lives. `python3 scripts/doc_refs.py --where x.y` prints its file.
 
 ## Standing gates
 
