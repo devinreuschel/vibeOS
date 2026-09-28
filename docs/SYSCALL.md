@@ -58,8 +58,12 @@ is ignored where Linux's call ignores it (`open`) and returns `EINVAL` where
 Linux's call rejects it (`openat2`, `clone3`, `renameat2`). Today dispatch
 matches all 64 bits of `rax`, and only `kill`'s `pid` is truncated (§3.1).
 
-The entry saves the x87 and SSE state (`fxsave64`) and the exit restores it
-(`fxrstor64`), so a syscall preserves it. Two calls differ from Linux
+A syscall preserves the x87 and SSE state. The kernel never touches those
+registers (it is soft-float, and `make` rejects a kernel ELF with an FP or
+SIMD instruction outside its save and load routines), so neither the entry
+nor the exit saves them: the FP binding of DESIGN §7.5 saves a thread's
+state only when a switch takes the CPU away from it, and the exit, with
+IF=0, loads it only when the registers hold another thread's. Two calls differ from Linux
 (F069; ROADMAP §10.6): a `fork` child starts from the boot FXSAVE
 template instead of the parent's x87, XMM, and MXCSR state, and `execve`
 hands the new image the old image's x87 and XMM registers, MXCSR, and FCW.

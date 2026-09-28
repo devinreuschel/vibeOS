@@ -545,7 +545,10 @@ fn user_return_fault(frame: &TrapFrame) {
 
 /// The last step before the stub's exit for a frame whose saved CS.RPL is
 /// 3. Only the dispatcher calls it.
-pub fn exit_to_user(_frame: &mut TrapFrame) {}
+pub fn exit_to_user(_frame: &mut TrapFrame) {
+    x86::cli();
+    crate::syscall_init::vibeos_fp_user_return();
+}
 
 /// Run `body` for `vector`. Writes no gate: every gate already points at
 /// its stub.

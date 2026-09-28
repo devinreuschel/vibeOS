@@ -586,6 +586,7 @@ pub unsafe fn init_bootstrap() {
         wait_outcome: WaitOutcome::Woken,
         as_cr3: 0,
         fpu: crate::syscall_init::fpu_template(),
+        fp_cpu: None,
         syscall_count: 0,
         pid: 0,
     });
@@ -749,6 +750,7 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, Guard
         wait_outcome: WaitOutcome::Woken,
         as_cr3: 0,
         fpu: crate::syscall_init::fpu_template(),
+        fp_cpu: None,
         syscall_count: 0,
         pid: 0,
     });
@@ -868,6 +870,7 @@ fn spawn_inner(
         wait_outcome: WaitOutcome::Woken,
         as_cr3,
         fpu: crate::syscall_init::fpu_template(),
+        fp_cpu: None,
         syscall_count: 0,
         pid,
     });
@@ -900,6 +903,13 @@ fn spawn_inner(
     }
 }
 
+/// A write to `tcb.fpu` makes the saved image the thread's state: no
+/// CPU's registers hold it any more, so its next return to user mode
+/// loads what was written (DESIGN §7.5, C-FPBIND).
+pub fn fp_invalidate(tcb: &mut Tcb) {
+    vibeos::fpu::invalidate(&mut tcb.fp_cpu);
+}
+
 #[allow(clippy::too_many_arguments)] // TCB fields filled at spawn
 fn fill_tcb(
     tcb: &mut Tcb,
@@ -928,6 +938,8 @@ fn fill_tcb(
     tcb.wait_outcome = WaitOutcome::Woken;
     tcb.as_cr3 = as_cr3;
     tcb.fpu = crate::syscall_init::fpu_template();
+    // A reused TCB address: no CPU's `fp_owner` may match it.
+    fp_invalidate(tcb);
     tcb.syscall_count = 0;
     tcb.pid = pid;
     prepare_thread(&mut tcb.context, top, tramp);

@@ -9,6 +9,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use vibeos::addr_space::AddressSpace;
 use vibeos::desc::{InterruptFrame, KERNEL_CS, STAR_SYSRET, Tss, USER_CS_RPL, USER_DS_RPL};
+use vibeos::fpu;
 use vibeos::per_cpu::PerCpu;
 use vibeos::syscall::{SyscallFrame, UserRegs};
 use vibeos::thread::{Fxsave, Tcb};
@@ -31,8 +32,6 @@ const IRET_RIP: usize = SCRATCH + 16;
 const IRET_RFLAGS: usize = SCRATCH + 24;
 const IRET_RSP: usize = SCRATCH + 32;
 const KSP: usize = offset_of!(PerCpu, kernel_rsp0);
-const CURRENT: usize = offset_of!(PerCpu, current);
-const FPU: usize = offset_of!(Tcb, fpu);
 const RF_VM: u64 = (1 << 16) | (1 << 17);
 
 global_asm!(
@@ -64,11 +63,6 @@ global_asm!(
         mov rax, qword ptr gs:[{user_rsp}]
         push rax
 
-        mov rax, qword ptr gs:[{current}]
-        test rax, rax
-        jz 1f
-        fxsave64 [rax + {fpu}]
-    1:
         mov rdi, rsp
         call vibeos_syscall_stub
         // IF is off from here to sysretq or iretq (AGENTS.md rule 2).
@@ -83,11 +77,9 @@ global_asm!(
         cmp rax, rcx
         jne 20f
 
-        mov rax, qword ptr gs:[{current}]
-        test rax, rax
-        jz 2f
-        fxrstor64 [rax + {fpu}]
-    2:
+        // The FP binding check (DESIGN §7.5); clobbers only registers
+        // the exit reloads from the frame or gs:[retval].
+        call vibeos_fp_user_return
         mov r11, [rsp + 88]
         test r11, {rf_vm}
         jnz 10f
@@ -240,8 +232,6 @@ global_asm!(
     iret_rflags = const IRET_RFLAGS,
     iret_rsp = const IRET_RSP,
     ksp = const KSP,
-    current = const CURRENT,
-    fpu = const FPU,
     rf_vm = const RF_VM,
     if_check = const cfg!(debug_assertions) as u8,
     bad_rip = sym vibeos_syscall_bad_rip,
@@ -358,22 +348,13 @@ pub unsafe fn init_ap(tss: *mut Tss, rsp0: u64) {
     seed_current_fpu();
 }
 
-/// `fninit` and, on the first CPU, the template capture. `init_control_regs`
-/// has already cleared `CR0.EM`, which `fninit` needs, and set
-/// `CR4.OSFXSR`, which `fxsave64` needs for the XMM registers.
+/// Reset the x87 unit and, on the first CPU, keep the captured image as
+/// the template (`fp_init_template`). `init_control_regs` has already
+/// cleared `CR0.EM` and set `CR4.OSFXSR`, which that routine needs.
 fn init_fpu() {
-    unsafe {
-        core::arch::asm!("fninit", options(nomem, nostack));
-    }
+    let mut tmpl = Fxsave::empty();
+    fp_init_template(&mut tmpl);
     if FPU_TEMPLATE.try_get().is_none() {
-        let mut tmpl = Fxsave::empty();
-        unsafe {
-            core::arch::asm!(
-                "fxsave64 [{p}]",
-                p = in(reg) &mut tmpl,
-                options(nostack),
-            );
-        }
         unsafe { FPU_TEMPLATE.set(tmpl) };
         FPU_READY.store(true, Ordering::Release);
     }
@@ -382,8 +363,85 @@ fn init_fpu() {
 fn seed_current_fpu() {
     let p = per_cpu_init::current_thread();
     if !p.is_null() {
-        unsafe { (*p).fpu = fpu_template() };
+        unsafe {
+            (*p).fpu = fpu_template();
+            crate::thread_init::fp_invalidate(&mut *p);
+        }
     }
+}
+
+// The kernel's only FP and SIMD instructions (`scripts/check_kernel_fp.py`
+// allows these three routines and no other).
+
+/// `fninit`, then capture the FP state into `img`.
+#[inline(never)]
+fn fp_init_template(img: &mut Fxsave) {
+    // SAFETY: invariant: CR0.EM is clear and CR4.OSFXSR set, so `fninit`
+    // and `fxsave64` execute, and `img` is a 16-byte aligned 512-byte
+    // `Fxsave`; established by `arch::cpu::init_control_regs` and
+    // `vibeos::thread::Fxsave`.
+    unsafe {
+        core::arch::asm!("fninit", "fxsave64 [{p}]", p = in(reg) img, options(nostack));
+    }
+}
+
+/// Save this CPU's FP registers into `tcb.fpu`. Only when the binding says
+/// they hold `tcb`'s state, with IF=0 (`switch_fpu`, and a read of the
+/// running thread's state inside an `InterruptGuard`, DESIGN §7.5).
+#[inline(never)]
+pub fn fp_save(tcb: &mut Tcb) {
+    // SAFETY: invariant: CR4.OSFXSR is set, and `tcb.fpu` is a 16-byte
+    // aligned 512-byte `Fxsave` inside a live TCB; established by
+    // `arch::cpu::init_control_regs` and the const assert after
+    // `vibeos::thread::Tcb`.
+    unsafe {
+        core::arch::asm!("fxsave64 [{p}]", p = in(reg) &mut tcb.fpu, options(nostack));
+    }
+}
+
+/// Load `tcb.fpu` into this CPU's FP registers. Only from
+/// `vibeos_fp_user_return`, with IF=0.
+#[inline(never)]
+fn fp_load(tcb: &Tcb) {
+    debug_assert!(
+        x86::read_cr0() & x86::CR0_TS == 0,
+        "fp_load with CR0.TS set"
+    );
+    // SAFETY: invariant: CR4.OSFXSR is set, CR0.TS clear, and `tcb.fpu` is
+    // a 16-byte aligned FXSAVE image with MXCSR's reserved bits clear (the
+    // boot template or a save of this hardware); established by
+    // `arch::cpu::init_control_regs`, `syscall_init::fp_init_template` and
+    // `syscall_init::fp_save`.
+    unsafe {
+        core::arch::asm!("fxrstor64 [{p}]", p = in(reg) &tcb.fpu, options(nostack));
+    }
+}
+
+/// The FP binding check on every return to ring 3 (DESIGN §7.5): the
+/// syscall exit, `idt::exit_to_user`, and `enter_user_full`, each with
+/// IF=0 on the kernel GS. Loads the current thread's `Tcb.fpu` unless
+/// this CPU's registers already hold its state, then binds both fields.
+#[unsafe(no_mangle)]
+pub extern "C" fn vibeos_fp_user_return() {
+    debug_assert!(!x86::interrupts_enabled(), "FP binding check with IF on");
+    if !FPU_READY.load(Ordering::Acquire) {
+        return;
+    }
+    per_cpu_init::with_current(|cpu| {
+        let t = cpu.current;
+        if t.is_null() {
+            return;
+        }
+        // SAFETY: invariant: `cpu.current` is the TCB this CPU runs, live
+        // and touched only by this CPU while it runs, and IF=0 keeps it
+        // current; established by `thread_init::switch_now`.
+        let tcb = unsafe { &mut *t };
+        let (me, addr) = (cpu.cpu_id, t as usize);
+        if fpu::user_return(cpu.fp_owner, me, addr, tcb.fp_cpu) == fpu::UserReturn::Load {
+            fp_load(tcb);
+            fpu::bind(&mut cpu.fp_owner, me, addr, &mut tcb.fp_cpu);
+        }
+    });
 }
 
 pub fn fpu_template() -> Fxsave {
@@ -426,26 +484,32 @@ pub unsafe fn switch_cr3_for(cpu: &mut PerCpu, tcb: &Tcb) -> bool {
     false
 }
 
-pub fn switch_fpu(old: *mut Tcb, new: *mut Tcb) {
-    if !FPU_READY.load(Ordering::Acquire) {
+/// The switch away from `old`: save its FP state if this CPU's registers
+/// hold it (the FP binding, DESIGN §7.5). Loads nothing: the next return
+/// to ring 3 does.
+pub fn switch_fpu(cpu: &mut PerCpu, old: *mut Tcb) {
+    if !FPU_READY.load(Ordering::Acquire) || old.is_null() {
         return;
     }
-    unsafe {
-        if !old.is_null() {
-            let p = core::ptr::addr_of_mut!((*old).fpu);
-            core::arch::asm!("fxsave64 [{p}]", p = in(reg) p, options(nostack));
-        }
-        if !new.is_null() {
-            let p = core::ptr::addr_of!((*new).fpu);
-            core::arch::asm!("fxrstor64 [{p}]", p = in(reg) p, options(nostack));
-        }
+    // SAFETY: invariant: `old` is the TCB this CPU is switching off, live
+    // until the switch tail clears its `on_cpu`, with IF=0; established
+    // by `thread_init::switch_now`.
+    let old = unsafe { &mut *old };
+    if fpu::switch_away(
+        cpu.fp_owner,
+        cpu.cpu_id,
+        old as *mut Tcb as usize,
+        old.fp_cpu,
+    ) == fpu::SwitchAway::Save
+    {
+        fp_save(old);
     }
 }
 
 /// Hardware side of a context switch: FPU, RSP0, CR3. Call before
 /// `switch_context`. Caller already holds `&mut PerCpu` (IRQ-off).
 pub fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
-    switch_fpu(old, new);
+    switch_fpu(cpu, old);
     if !new.is_null() {
         unsafe {
             set_rsp0_for(cpu, &*new);
@@ -464,6 +528,7 @@ pub unsafe fn enter_user_full(regs: &UserRegs) -> ! {
     x86::cli();
     #[cfg(feature = "kernel_tests")]
     let regs = &testing::entry_regs(regs);
+    vibeos_fp_user_return();
     let ptr = per_cpu_init::current().self_ptr as u64;
     // SAFETY: invariant: IF=0 from the `cli` above to the `iretq`, `ptr`
     // is this CPU's `PerCpu`, and `regs` is a user context the caller

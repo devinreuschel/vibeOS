@@ -1365,11 +1365,14 @@ Target notes:
 - `disable-redzone: true`. Interrupt handlers clobber the red zone.
 - Frame pointers are forced (`-C force-frame-pointers=yes`) so panic dumps can symbolize.
 - The kernel is built soft-float, so compiled kernel code uses no SSE or x87 registers; kernel SSE
-  would need a save around each use, and none exists. User code gets SSE: `arch::cpu::init_control_regs`
-  clears `CR0.EM` and `CR0.TS` and sets `CR0.MP`, `CR0.NE`, `CR4.OSFXSR` and `CR4.OSXMMEXCPT` on
-  every CPU, so x87 and SSE floating-point errors reach `#MF` and `#XF` (§5.2), and
-  `syscall_init::switch_fpu` saves and restores each thread's 512-byte FXSAVE image (`Tcb.fpu`) on
-  every switch.
+  would need a save around each use, and none exists. Nothing traps a kernel FP use, since `CR0.TS`
+  stays clear, so `make` runs `scripts/check_kernel_fp.py` on each linked kernel ELF: with the
+  toolchain's `llvm-objdump` (the `llvm-tools` component) it fails the build, and deletes the ELF,
+  on any x87, MMX, SSE, or AVX instruction outside `syscall_init::fp_save`, `fp_load`, and
+  `fp_init_template`. User code gets SSE: `arch::cpu::init_control_regs` clears `CR0.EM` and
+  `CR0.TS` and sets `CR0.MP`, `CR0.NE`, `CR4.OSFXSR` and `CR4.OSXMMEXCPT` on every CPU, so x87 and
+  SSE floating-point errors reach `#MF` and `#XF` (§5.2), and each thread's 512-byte FXSAVE image
+  (`Tcb.fpu`) follows the FP binding (§7.5).
 - User code never builds for a bare target. `x86_64-unknown-none` has the soft-float Rust ABI: an
   `f64` multiply compiles to a call to `__muldf3`, `f64` arguments pass in integer registers, and
   rustc warns that enabling SSE there breaks the target's ABI. A user program built for it would use
@@ -3663,7 +3666,7 @@ as `CR4.TSD` or `SCTLR_EL1.UCT`, is a row of §11.4's table instead.
 | x86_64 | RFLAGS | `CpuContext.rflags`; IF comes from `irq_nest` (`apply_if_on_resume`) | `switch_context` | switched |
 | both | `irq_nest` | `Tcb.irq_nest`, swapped with `PerCpu.irq_nest` | `switch_now` | switched |
 | x86_64 | user GPRs, RIP, RSP, RFLAGS, CS, SS, and the original syscall number | the thread's user frame at the top of `Tcb.stack` ([section 5.10](#510-privilege-transitions)), saved by every entry from ring 3 | the RSP0 switch, which gives each thread its own entry stack | switched. Rule; not yet enforced: ROADMAP §10.6. The syscall entry saves a 16-word frame whose `rcx` and `r11` slots double as RIP and RFLAGS, and an interrupt or exception entry saves only what its `x86-interrupt` handler clobbers, so a thread preempted in ring 3 has `rbx`, `rbp`, and `r12`-`r15` in spill slots the compiler chose |
-| x86_64 | x87, SSE, MXCSR | `Tcb.fpu`, a 512-byte FXSAVE image | the FP binding below: `fxsave64` at the switch away from a thread whose state is live, `fxrstor64` in the return to ring 3 when the registers hold another thread's state | switched. Rule; not yet enforced: the binding lands in ROADMAP §10.6. Today `switch_fpu` in `on_switch` runs `fxsave64` for the old thread and `fxrstor64` for the new on every switch, and the syscall entry and exit also save and restore it. `fork` gives the child `fpu_template()`, not the parent's image, and `execve` keeps the old image's registers (ROADMAP §10.6, F069). The template is captured after `fninit`, which resets only the x87 control, status, and tag words, so MXCSR and the XMM and ST registers hold whatever the loader left (ROADMAP §10.6, F129). FXSAVE covers no XSAVE state; `CR4.OSXSAVE`, `CR4.PKE`, and `EFER.FFXSR` are assumed clear and never asserted (ROADMAP §11.1, F130). |
+| x86_64 | x87, SSE, MXCSR | `Tcb.fpu`, a 512-byte FXSAVE image | the FP binding below: `fxsave64` at the switch away from a thread whose state is live, `fxrstor64` in the return to ring 3 when the registers hold another thread's state | switched, by the binding as built: `PerCpu.fp_owner` and `Tcb.fp_cpu`, whose transitions are `vibeos::fpu`. `syscall_init::switch_fpu` in `on_switch` saves a live state with `fp_save` and loads nothing; `vibeos_fp_user_return` runs with IF=0 after the syscall exit's `cli`, in `idt::exit_to_user` after a `cli`, and in `enter_user_full` after its `cli`, and loads with `fp_load` when the registers hold another thread's state. The syscall entry and exit neither save nor restore it. A new TCB, and one `fill_tcb` reuses, starts with `fp_cpu` empty, and `thread_init::fp_invalidate` empties it for a write to `Tcb.fpu`. `fork` gives the child `fpu_template()`, not the parent's image, and `execve` keeps the old image's registers (ROADMAP §10.6, F069). The template is captured after `fninit`, which resets only the x87 control, status, and tag words, so MXCSR and the XMM and ST registers hold whatever the loader left (ROADMAP §10.6, F129). FXSAVE covers no XSAVE state; `CR4.OSXSAVE`, `CR4.PKE`, and `EFER.FFXSR` are assumed clear and never asserted (ROADMAP §11.1, F130). |
 | x86_64 | RSP0 | TSS.RSP0 and `PerCpu.kernel_rsp0`: the top of `Tcb.stack`, or `fallback_rsp0` for the bootstrap thread | `set_rsp0_for` in `on_switch` | switched |
 | x86_64 | CR3 | `Tcb.as_cr3` (0 means the kernel PML4) | `switch_cr3_for` in `on_switch`, skipped when unchanged | switched; no PCID (ROADMAP §18.3 adds it with §7.9's flush generation) |
 | x86_64 | FS_BASE (user TLS) | not saved | nothing | not switched. `enter_user_full` and `execve` write it; `force_kernel`'s `mov fs` zeroes it on every exit or kill; `fork` copies the live MSR, so a child can inherit another process's base (ROADMAP §11.6, F022). |
@@ -3703,8 +3706,8 @@ is soft-float and never makes FP state live; a firmware call that may use the re
 `CR0.TS` stays clear, and on aarch64 every CPU sets `CPACR_EL1.FPEN` (`CPTR_EL2`'s field under VHE)
 to `0b11` at bring-up and never changes it, so FPEN is not per-thread state. SVE and SME are the
 exception: they trap at a thread's first use to size and set up their state, as on Linux, and their
-enable bits are per-thread rows (ROADMAP §23.1). Rule; not yet enforced: ROADMAP §10.6 for x86_64
-and §11.6 for aarch64; the row above gives the code as built.
+enable bits are per-thread rows (ROADMAP §23.1). Built on x86_64 (the row above). Rule; not yet
+enforced on aarch64: ROADMAP §11.6.
 
 Why: every user thread uses FP (x86_64 user code passes floats and copies memory in XMM registers,
 and every aarch64 compiler emits NEON), so a first-use trap sets up nothing that creation could not,
