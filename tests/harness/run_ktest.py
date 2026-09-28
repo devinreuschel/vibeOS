@@ -13,15 +13,12 @@ from tests.harness.harness import (
     QemuConfig,
     RunResult,
     check_ktest_output,
-    effective_accel_name,
     env_config,
     env_flag,
     ktest_devices,
     make_disk,
     qemu_argv,
-    retryable_ktest_failure,
     run_qemu_until_exit,
-    silent_user_syscalls_hang,
 )
 
 DISK_BYTES = 4 * 1024 * 1024
@@ -47,69 +44,31 @@ def _block_name(name: str) -> Callable[[str], bool]:
 
 
 def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool) -> RunResult:
-    """One ktest QEMU. Retry once on a known host-timing flake.
+    """One ktest QEMU. It never retries (ROADMAP §10.2, F021).
 
-    The #75 `user: dup ok` wait4 stall can survive that first retry under
-    periodic LAPIC; give that exact timeout class one extra attempt.
+    A timeout, a `FAIL` line, a panic signature, or a missing marker raises
+    `HarnessError` from this one boot.
     """
-    tag = "persist reboot" if persist_reboot else "ktest"
-    last: HarnessError | None = None
-    for attempt in range(3):
-        raw = None
-        try:
-            raw = run_qemu_until_exit(cfg, timeout_s=timeout)
-            results.current().add_boot(qemu_argv(cfg, None), cfg, raw.exit_code)
-            results.current().record_ktest_lines(raw.lines)
-            check_ktest_output(raw.lines, raw.exit_code)
-            _require_line(raw.lines, _block_name("vda"), "missing virtio-blk marker")
-            _require_line(raw.lines, _block_name("vdap1"), "missing vdap1 marker")
-            if persist_reboot:
-                _require_line(
-                    raw.lines,
-                    lambda ln: ln == "vibeOS: persist: intact",
-                    "persist pattern did not survive reboot",
-                )
-            else:
-                _require_line(raw.lines, _block_name("vdap2"), "missing vdap2 marker")
-                _require_line(
-                    raw.lines,
-                    lambda ln: ln == "vibeOS: persist: wrote",
-                    "missing persist wrote",
-                )
-            return raw
-        except HarnessError as e:
-            last = e
-            timed_out = "timed out" in str(e)
-            failure_lines = (
-                [
-                    line
-                    for line in raw.lines
-                    if line.startswith("vibeOS: ktest: FAIL")
-                ]
-                if raw is not None
-                else []
-            )
-            retryable = retryable_ktest_failure(
-                cfg.smp,
-                str(e),
-                persist_reboot=persist_reboot,
-                accel=effective_accel_name(cfg),
-                failure_lines=failure_lines,
-            )
-            extra_dup_ok = timed_out and silent_user_syscalls_hang(str(e))
-            if (attempt == 0 and (timed_out or retryable)) or (
-                attempt == 1 and extra_dup_ok
-            ):
-                reason = "timeout" if timed_out else "known ktest timing flake"
-                print(f"[{tag}] retry after {reason}: {e}", file=sys.stderr)
-                results.current().retry(
-                    f"{tag} attempt {attempt + 1}",
-                    results.failure_line(str(e), raw.lines if raw is not None else []),
-                )
-                continue
-            raise
-    assert last is not None
-    raise last
+    raw = run_qemu_until_exit(cfg, timeout_s=timeout)
+    results.current().add_boot(qemu_argv(cfg, None), cfg, raw.exit_code)
+    results.current().record_ktest_lines(raw.lines)
+    check_ktest_output(raw.lines, raw.exit_code)
+    _require_line(raw.lines, _block_name("vda"), "missing virtio-blk marker")
+    _require_line(raw.lines, _block_name("vdap1"), "missing vdap1 marker")
+    if persist_reboot:
+        _require_line(
+            raw.lines,
+            lambda ln: ln == "vibeOS: persist: intact",
+            "persist pattern did not survive reboot",
+        )
+    else:
+        _require_line(raw.lines, _block_name("vdap2"), "missing vdap2 marker")
+        _require_line(
+            raw.lines,
+            lambda ln: ln == "vibeOS: persist: wrote",
+            "missing persist wrote",
+        )
+    return raw
 
 
 def main() -> int:

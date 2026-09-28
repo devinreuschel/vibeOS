@@ -1051,65 +1051,9 @@ ISA_DEBUG_FAIL = 35  # write 0x11
 KTEST_BEGIN = "vibeOS: ktest: begin"
 KTEST_END = "vibeOS: ktest: end"
 KTEST_FAIL_PREFIX = "vibeOS: ktest: FAIL"
-SMP4_MSIX_AP_COUNTER_FLAKE = (
-    "ktest FAIL: vibeOS: ktest: FAIL msix_cpu: ap counter"
-)
-SMP4_IPI_ACK_PANIC = "ipi: ack timeout waiters="
-# Backtrace frame when UART/dmesg chops `msg: ipi: ack timeout` out of
-# the last-40 serial tail (CI 35789075345: idle drain_deferred shootdown).
-SMP4_IPI_WAIT_ACKS_FRAME = "ipi_init::wait_acks"
-# TCG SMP serial glues a ktest ok line to the panic banner; kill-on-sig
-# then drops `msg: ipi: ack timeout` so #75's needle never appears.
+# After a panic banner, keep reading this long so the dump's `msg:` line and
+# the backtrace land in the HarnessError and the results file.
 PANIC_DRAIN_S = 0.4
-
-
-def _same_line_ktest_ok_panic(message: str) -> bool:
-    """True when `ktest: ok` and `vibeOS: panic:` share a serial line."""
-    start = 0
-    while True:
-        i = message.find("vibeOS: ktest: ok ", start)
-        if i < 0:
-            return False
-        nl = message.find("\n", i)
-        panic = message.find("vibeOS: panic:", i)
-        if panic >= 0 and (nl < 0 or panic < nl):
-            return True
-        start = i + 1
-
-
-def silent_user_syscalls_hang(message: str) -> bool:
-    # #75 class: wait4 stall after userspace `dup`, ~101 lines, no ktest_end.
-    # run_qemu_until_exit raises (raw is None); match the serial tail instead.
-    return "timed out after" in message and message.rstrip().endswith("user: dup ok")
-
-
-def retryable_ktest_failure(
-    smp: int,
-    message: str,
-    *,
-    persist_reboot: bool = False,
-    accel: str | None = None,
-    failure_lines: Iterable[str] = (),
-) -> bool:
-    """True for a -smp 4 failure the harness boots again for (DESIGN §8.2).
-
-    `persist_reboot`, `accel` and `failure_lines` select nothing now;
-    `run_ktest` still passes them until ROADMAP §10.2 removes the retries.
-    """
-    if smp != 4:
-        return False
-    if message == SMP4_MSIX_AP_COUNTER_FLAKE:
-        return True
-    if "panic signature 'vibeOS: panic:'" not in message:
-        return False
-    # First boot or persist. Drain puts `ipi: ack timeout` in the error;
-    # UART merge is the same flake with the body chopped. When the banner
-    # is its own line, last-40 often keeps the wait_acks frame instead.
-    return (
-        SMP4_IPI_ACK_PANIC in message
-        or SMP4_IPI_WAIT_ACKS_FRAME in message
-        or _same_line_ktest_ok_panic(message)
-    )
 
 
 def drain_panic_tail(
