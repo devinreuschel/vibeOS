@@ -165,6 +165,9 @@ global_asm!(
     .global vibeos_exit_if_set
     vibeos_exit_if_set:
         ud2
+    .global vibeos_enter_if_set
+    vibeos_enter_if_set:
+        ud2
         .endif
 
     .global vibeos_iret_user
@@ -434,12 +437,19 @@ pub unsafe fn enter_user_full(regs: &UserRegs) -> ! {
     unsafe {
         x86::wrmsr(IA32_KERNEL_GS_BASE, ptr);
         core::arch::asm!(
+            // Debug builds: IF must be clear (AGENTS.md rule 2).
+            ".if {if_check}",
+            "pushfq",
+            "test qword ptr [rsp], 0x200",
+            "lea rsp, [rsp + 8]",
+            "jnz vibeos_enter_if_set",
+            ".endif",
             "mov ds, {0:x}",
             "mov es, {0:x}",
             "mov fs, {0:x}",
             "mov gs, {0:x}",
             in(reg) USER_DS_RPL,
-            options(nostack, preserves_flags),
+            if_check = const cfg!(debug_assertions) as u8,
         );
         x86::wrmsr(IA32_GS_BASE, 0);
         x86::wrmsr(IA32_FS_BASE, regs.fs_base);
