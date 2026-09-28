@@ -1517,21 +1517,27 @@ pub fn try_user_fault(f: &TrapFrame) {
     let Some((sig, _si_code)) = sig_for_vec(f) else {
         return;
     };
-    let _ = write!(
-        Serial,
-        "user: pid {pid} killed SIG{} rip=0x{:x} err=0x{:x}",
-        sig_name(sig),
-        f.user().rip,
-        f.error_code
-    );
+    // One `writeln!`, so one IF-off region (`Serial::write_fmt`): the body
+    // runs with IF=1, and a thread that ran on this CPU between two writes
+    // would land inside this line in the CPU's log capture stage.
+    let (name, rip, err) = (sig_name(sig), f.user().rip, f.error_code);
+    let _ = if f.vector == u64::from(vectors::PF) {
+        writeln!(
+            Serial,
+            "user: pid {pid} killed SIG{name} rip=0x{rip:x} err=0x{err:x} cr2=0x{:x}",
+            f.cr2
+        )
+    } else {
+        writeln!(
+            Serial,
+            "user: pid {pid} killed SIG{name} rip=0x{rip:x} err=0x{err:x}"
+        )
+    };
     #[cfg(feature = "kernel_tests")]
-    testing::kill_line_yield(f);
-    if f.vector == u64::from(vectors::PF) {
-        let _ = write!(Serial, " cr2=0x{:x}", f.cr2);
+    {
+        testing::kill_line_yield(f);
+        testing::kill_line_done();
     }
-    let _ = writeln!(Serial);
-    #[cfg(feature = "kernel_tests")]
-    testing::kill_line_done();
     crate::arch::gs::force_kernel();
     finish_exit(wait_signaled(sig), true);
 }
@@ -1558,9 +1564,10 @@ pub(crate) mod testing {
     /// Kill lines `try_user_fault` has finished writing since boot.
     static KILL_LINES: AtomicU64 = AtomicU64::new(0);
 
-    /// The next CPL-3 `#PF` at `cr2` that ends in a kill yields while
-    /// `try_user_fault` writes its kill line, until another kill line is
-    /// written, for at most 1 s of TSC time.
+    /// The next CPL-3 `#PF` at `cr2` that ends in a kill yields in
+    /// `try_user_fault` once its kill line is written, until another kill
+    /// line is written, for at most 1 s of TSC time: a kill line written
+    /// in pieces would take the other line inside it.
     pub(crate) fn arm_kill_line_yield(cr2: u64) {
         KILL_YIELD_CR2.store(cr2, Ordering::Release);
     }
