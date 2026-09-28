@@ -213,8 +213,9 @@ needs = [
   "`addr_space_init::teardown` asserts that no CPU's CR3",
   "the open-file table never writes `refs` or `used` back from a snapshot",
   "stop and continue cannot lose a wakeup",
+  "the syscall exit path runs",  # L1387
 ]
-why = "text: lands after the teardown (F106), open-file table (F055) and stop-wait (F033) boxes"
+why = "text: lands after the teardown (F106), open-file table (F055) and stop-wait (F033) boxes; the exit `cli` of the syscall-exit box closes the window"
 
 [[box]]
 key = "every exit to ring 3, the syscall exit included, checks the current process's pending set"
