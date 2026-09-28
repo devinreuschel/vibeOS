@@ -2601,19 +2601,21 @@ fn test_sched_lock_timer_irq() -> Outcome {
         }
         core::hint::spin_loop();
     }
-    let held = per_cpu_init::current().remote.ticks.load(Ordering::Relaxed);
-    let inner = thread_init::with_sched_lock(|| {
+    // Read under the lock, with IF off: a tick between a read before the
+    // lock and the lock's `cli` is not one that ran under SCHED.
+    let (inner, held) = thread_init::with_sched_lock(|| {
+        let held = per_cpu_init::current().remote.ticks.load(Ordering::Relaxed);
         if x86::interrupts_enabled() {
-            return Outcome::Fail("SCHED left IF on");
+            return (Outcome::Fail("SCHED left IF on"), held);
         }
         time_init::busy_wait_ms(20);
         if x86::interrupts_enabled() {
-            return Outcome::Fail("IF on during hold");
+            return (Outcome::Fail("IF on during hold"), held);
         }
         if per_cpu_init::current().remote.ticks.load(Ordering::Relaxed) != held {
-            return Outcome::Fail("timer ran under SCHED");
+            return (Outcome::Fail("timer ran under SCHED"), held);
         }
-        Outcome::Ok
+        (Outcome::Ok, held)
     });
     match inner {
         Outcome::Ok => {}
