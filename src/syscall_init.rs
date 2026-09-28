@@ -104,6 +104,14 @@ global_asm!(
         mov r14, [rsp + 112]
         mov r15, [rsp + 120]
         mov rcx, [rsp + 16]
+        // Debug builds: IF must be clear (AGENTS.md rule 2). On the
+        // kernel stack, before RSP becomes the user's.
+        .if {if_check}
+        pushfq
+        test qword ptr [rsp], 0x200
+        lea rsp, [rsp + 8]
+        jnz vibeos_exit_if_set
+        .endif
         mov rsp, [rsp]
     .global vibeos_syscall_exit_swapgs
     vibeos_syscall_exit_swapgs:
@@ -139,10 +147,23 @@ global_asm!(
         mov r11, qword ptr gs:[{iret_rip}]
         push r11
         mov rax, qword ptr gs:[{retval}]
+        .if {if_check}
+        pushfq
+        test qword ptr [rsp], 0x200
+        lea rsp, [rsp + 8]
+        jnz vibeos_exit_if_set
+        .endif
     .global vibeos_syscall_iret_swapgs
     vibeos_syscall_iret_swapgs:
         swapgs
         iretq
+
+        .if {if_check}
+    // A return to ring 3 found IF set (debug builds).
+    .global vibeos_exit_if_set
+    vibeos_exit_if_set:
+        ud2
+        .endif
 
     .global vibeos_iret_user
     .type vibeos_iret_user, @function
@@ -189,6 +210,7 @@ global_asm!(
     current = const CURRENT,
     fpu = const FPU,
     rf_vm = const RF_VM,
+    if_check = const cfg!(debug_assertions) as u8,
     user_cs = const USER_CS_RPL as u64,
     user_ss = const USER_DS_RPL as u64,
     ur_rax = const offset_of!(UserRegs, rax),

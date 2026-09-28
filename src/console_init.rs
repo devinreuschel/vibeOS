@@ -113,9 +113,29 @@ pub fn wait_key() -> DecodedKey {
             thread_init::yield_now();
             continue;
         }
+        #[cfg(feature = "kernel_tests")]
+        testing::HALTS.fetch_add(1, Ordering::Relaxed);
         unsafe {
             core::arch::asm!("sti; hlt", options(nomem, nostack));
         }
+    }
+}
+
+/// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
+#[cfg(feature = "kernel_tests")]
+pub(crate) mod testing {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    pub(super) static HALTS: AtomicU64 = AtomicU64::new(0);
+
+    /// Calls of `wait_key` that reached its `sti; hlt`, since the last
+    /// [`reset_halts`].
+    pub(crate) fn halts() -> u64 {
+        HALTS.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn reset_halts() {
+        HALTS.store(0, Ordering::Relaxed);
     }
 }
 
