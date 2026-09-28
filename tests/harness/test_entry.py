@@ -23,7 +23,7 @@ class TestOutsideArch(unittest.TestCase):
         self.assertTrue(errs[0].startswith("src/irq/irq_init.rs:2: "), errs[0])
 
     def test_handler_under_crates_user_and_tests_is_reported(self) -> None:
-        files = {"crates/x/src/lib.rs": HANDLER, "user/bin/y.rs": HANDLER,
+        files = {"crates/x/src/y.rs": HANDLER, "user/bin/y.rs": HANDLER,
                  "tests/hostlib/src/z.rs": HANDLER}
         errs = x86_interrupt_outside_arch(files)
         self.assertEqual([e.split(":")[0] for e in errs], sorted(files))
