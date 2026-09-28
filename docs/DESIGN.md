@@ -825,10 +825,9 @@ from §17.4 a tracer sees it first, and a fault signal the process blocks or ign
 default action. The default action, the only one today, ends the process and prints
 `user: pid N killed SIG<name>`. Pid 1 is the exception. When init exits, by `exit` or by a signal,
 the kernel panics with a line naming the exit status, or the signal and, for a fault, the faulting
-address, as Linux panics when init dies. Planned: ROADMAP §10.5 (F068). Not yet enforced: ring-3
-`#DB` halts the kernel (ROADMAP §10.6, F005), and so do the
-entry-path windows of §5.10 (ROADMAP §10.6, F006, F007); §5.2's last column lists every
-vector whose ring-3 action differs from the rule. An NMI dumps and halts on its IST stack; from
+address, as Linux panics when init dies. Planned: ROADMAP §10.5 (F068). Not yet enforced: the
+entry-path windows of §5.10 (ROADMAP §10.6, F006, F007). Every ring-3 trap takes its signal from
+§5.2's table through `proc_init::sig_for_vec`, a ring-3 `#DB` included. An NMI dumps and halts on its IST stack; from
 ROADMAP §10.7 the NMI handler first reads its CPU's stop request word (step 1).
 
 Rule: nothing is silently swallowed. An error is returned to its caller, or handled where it arises
@@ -917,7 +916,7 @@ that review cites means the review's text.
 | I3 | IF=0 through every return-to-user sequence (§5.10 rule 4) | FMASK (§7.2) | documented | No: the syscall exit has no `cli` and `console_init::wait_key` returns with IF=1 (F001); `syscall_init::first_return` runs with IF=1 (F006) (ROADMAP §10.6) |
 | I4 | Kernel code outside the §5.10 entry and exit sequences runs with `GS_BASE` = this CPU's `PerCpu` (§5.10) | `arch::gs`, `per_cpu_init` | documented | No: the IF=1 window in `syscall_init::first_return` (F006) and a fault on the return-to-user `iretq` (F007) run on the user base (ROADMAP §10.6) |
 | I5 | One entry stub per vector makes the `swapgs` decision (§5.10 rule 1) | `arch/idt.rs` | enforced by construction: `idt::init` points every gate at a stub it generates, and `scripts/check_entry.py` fails on an `x86-interrupt` handler outside `src/arch/` | Yes |
-| I6 | Ring 3 never halts the kernel, pid 1's exit excepted (§2.5, §5.2, §11.5) | `proc_init::try_user_fault` | documented | No: ring-3 `#DB` halts (F005), and so do the I4 windows (ROADMAP §10.6) |
+| I6 | Ring 3 never halts the kernel, pid 1's exit excepted (§2.5, §5.2, §11.5) | `proc_init::try_user_fault` | documented | No: the I4 windows halt (ROADMAP §10.6) |
 | I7 | The kernel reads or writes user memory only through the §5.1 user-memory accessors, and writes an address space that is not running only through the fill API (ROADMAP §10.6) | `addr_space.rs`; the arch accessors from ROADMAP §10.6 | enforced by SMAP where the CPU has it (PAN on aarch64, ROADMAP §11.6); the fill-API rule is documented | Partly: today's accessors copy through the physmap after `check_user_range`, and `write_bytes` ignores the PTE's `WRITABLE` bit (ROADMAP §10.6, F023) |
 | I8 | One thread per address space changes its regions, and another CPU changes its page tables only under its page-table lock (§2.11) | process model | assumed | Yes: only the owning thread touches a space. Lock-free user copies, local-only `invlpg`, and `&'static AddressSpace` depend on it. ROADMAP §10.6 replaces `&'static` with a counted object, §12.1's reverse map changes page tables from other CPUs under the space's page-table lock, §12.3 shoots down every CPU in the space's set, and §13.1's threads bring the address-space lock |
 | I9 | TCBs are never freed, so a `*mut Tcb` stays valid | 64-slot table, `thread_init` | assumed; slot reuse enforced by the in-guest `lifetime_dead_slot_on_cpu` | Yes: `spawn_inner` reuses a Dead slot only after an Acquire load finds its `Tcb.on_cpu` clear, which its CPU's `thread_init::finish_switch` clears with Release once `switch_context` has returned, and `thread_exit` stores `Dead` under SCHED (ROADMAP §10.10, F012) |
@@ -943,7 +942,7 @@ that review cites means the review's text.
 | I29 | A catch hook intercepts only a CPL-0 fault on the CPU that armed it, inside an in-guest test's catch window | `arch::catch` | assumed | Partly: production never arms it, but `intercept` runs first in every exception handler of every build, and its armed state is global, so in a `kernel_tests` build a fault with the armed vector on any CPU, at any CPL, is caught (ROADMAP §10.2, F146) |
 | I30 | Interrupt and exception handlers run with RFLAGS.AC=0 (§5.10 rule 5) | `arch/idt.rs` stubs | enforced by construction: every stub's first instruction is `clac` where the CPU has SMAP | Yes |
 | I31 | Every IF=0 stretch outside §2.9 rule 2's exemptions retires at most 100,000 instructions ([§2.9](#29-preemption-and-interrupt-state) rule 2) | §2.9; ROADMAP §10.3's IF-off tracer | documented | No: the heap's first-fit `alloc`, its address-ordered insertion on `dealloc`, and a moving `realloc`'s copy run under the IRQ-off HEAP lock over a free list whose length user churn sets (ROADMAP §12.6); the buddy's double-free check walks the free lists (ROADMAP §12.1, F029); a `klog!` emit waits on the UART with IF off, about 8 ms per 96-byte line on a 115200-baud 16550, which no QEMU tier paces (ROADMAP §19.5); a shootdown survives a violation: `wait_acks` keeps waiting and logs the CPUs that have not acknowledged once a second (§7.9, F011) |
-| I32 | A handler on an IST stack never blocks, switches threads, or takes a lock, and an IST vector taken at CPL 3 leaves the IST stack before its body runs (§5.10 rules 3 and 6) | the IST entry stubs and handlers | documented | Partly: every IST handler halts, so none blocks or switches, except that under `kernel_tests` an armed `catch` steps RIP and returns or longjmps off the IST stack; no IST entry leaves the IST stack yet (ROADMAP §10.6, F005, F007) |
+| I32 | A handler on an IST stack never blocks, switches threads, or takes a lock, and an IST vector taken at CPL 3 leaves the IST stack before its body runs (§5.10 rules 3 and 6) | the IST entry stubs and handlers | documented | Partly: an IST vector taken at CPL 3 moves its frame to the thread's kernel stack before its body (`arch::idt::vibeos_trap_entry_ist`); on a CPL-0 frame every IST handler halts, so none blocks or switches, except that under `kernel_tests` an armed `catch` steps RIP and returns or longjmps off the IST stack (ROADMAP §10.6, F007) |
 | I33 | A fault body reads CR2, DR6, ESR, and FAR from its frame, where the entry stub saved them before IF could turn on (§5.10 rule 9) | the `arch/idt.rs` stubs; the aarch64 vectors (ROADMAP §11.3) | documented | Yes: the generated stubs save CR2 and DR6 before any body turns IF on |
 | I34 | A PTE change that removes or narrows a translation takes effect only after every CPU that could hold the old one has invalidated and acknowledged; until then no frame, table page, or VA is reused and no page counts as clean (§2.4) | `kva_init::unmap_shootdown` (kernel); `addr_space_init::shootdown_user` (user) | documented | Partly: kernel unmaps free frames and VA only after `wait_acks`; a user change invalidates only on the calling CPU, enough only while I8 holds, and nothing yet clears a dirty bit (ROADMAP §12.3) |
 | I35 | A user PTE change invalidates the second-level translations (EPT, NPT, stage-2) of its range on every CPU that may hold them before the frame's count drops (§2.4) | none yet | documented | Not relied on yet: no hypervisor exists until ROADMAP §21.2, which lands it |
@@ -1033,11 +1032,10 @@ and a bound.
    lets it sleep, since the code it interrupted ran with IF=1; a fault inside a non-faulting
    accessor runs no body: the handler finds its exception-table entry before it touches IF and goes
    to the fixup; a hardware interrupt's top half keeps IF=0. Built so: the syscall entry runs `sti`
-   directly after the push that moves the user RSP into its frame, and `idt::trap_dispatch` runs
-   `sti` before the body of a vector 0 to 31 taken at CPL 3 that does not enter on an IST stack,
-   once `catch::intercept` has declined the frame. Rule; not yet enforced: ROADMAP §10.6. The
-   syscall exit keeps its return value and its slow path's `iretq` words in `gs:` scratch, which its
-   `cli` protects, and a `#DB` taken at CPL 3 runs its body on its IST stack with IF=0.
+   directly after the last push of the user frame, and `idt::trap_dispatch` runs `sti` before the
+   body of a vector 0 to 31 taken at CPL 3 that does not enter on an IST stack, and of a CPL-3
+   `#DB`, whose stub has moved the frame off its IST stack, once `catch::intercept` has declined
+   the frame. The syscall exit keeps its return value in the user frame's `rax` slot.
 4. Code that may sleep (waits on a wait queue, takes a sleeping lock (§2.1), allocates with
    reclaim (ROADMAP §12.6), or copies through a faulting user-memory accessor (§5.1) once ROADMAP
    §12.2 lets its fault sleep) runs with IF=1, no spinlock held, and outside any RCU read-side section
@@ -2600,8 +2598,10 @@ registry (`kernel_tests`) arms it. Planned (ROADMAP §10.2, F146): it compiles o
 `kernel_tests` and acts only on a CPL-0 frame on the CPU that armed it.
 
 Rule: ring 3 never halts the kernel. Each exception vector has one row below. The Ring 3 column is
-the rule; the last column says what the code does where it differs. Planned (ROADMAP §10.6, F005):
-the table lives in `vibeos-core`. The x86_64 port decodes each vector and error code into a portable
+the rule; the last column says what the code does where it differs. The table lives in
+`vibeos-core` (`vibeos::trap`), and `proc_init::sig_for_vec` reads each ring-3 answer from it,
+after refining the cause from the frame's DR6 (`#DB`) or the thread's FSW and MXCSR (`#MF`,
+`#XM`). The x86_64 port decodes each vector and error code into a portable
 `TrapKind`, as the aarch64 port decodes its exception classes
 ([§11.5](#115-aarch64-exceptions-and-privilege-transitions)), and one table gives each `TrapKind` its ring-3
 action, the signal and the `si_code` Linux sends; a host test runs each vector `0x00`–`0x1F` through
@@ -2612,10 +2612,10 @@ fault, downstream of it.
 | Vector | Name | Ring 0 | Ring 3 | Ring 3, as built |
 |--------|------|--------|--------|------------------|
 | `0x00` | `#DE` | dump, halt | `SIGFPE` | as the rule |
-| `0x01` | `#DB` | dump on IST, halt. Planned (ROADMAP §17.4, §18.4): three cases continue instead. A hit whose saved DR6 names only slots the current thread's tracer armed is dropped, as Linux drops a kernel-mode hit of a ptrace breakpoint; DR6.BS clears TF in the saved frame and logs once, as Linux does; in the ROADMAP §18.4 detector build a hit on a detector slot is reported | `SIGTRAP` (RFLAGS.TF, `int1`, a breakpoint or watchpoint the tracer armed); in the ROADMAP §18.4 detector build a hit on detector slots alone resumes with no signal and is counted | halts the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
+| `0x01` | `#DB` | dump on IST, halt. Planned (ROADMAP §17.4, §18.4): three cases continue instead. A hit whose saved DR6 names only slots the current thread's tracer armed is dropped, as Linux drops a kernel-mode hit of a ptrace breakpoint; DR6.BS clears TF in the saved frame and logs once, as Linux does; in the ROADMAP §18.4 detector build a hit on a detector slot is reported | `SIGTRAP` (RFLAGS.TF, `int1`, a breakpoint or watchpoint the tracer armed); in the ROADMAP §18.4 detector build a hit on detector slots alone resumes with no signal and is counted | as the rule: the stub moves a CPL-3 frame off its IST stack, and the body runs with IF=1 and kills the process with `SIGTRAP` (§5.10 rule 3) |
 | `0x02` | NMI | dump on IST, halt. Planned (ROADMAP §10.7, F135): the handler first reads and clears its CPU's stop request word (§2.5 step 1): STOP stops the CPU, a CPU already stopped halts again at once, and an NMI with no request on the dump owner returns at once. Planned (ROADMAP §25.5): a backtrace or lockup request, and an external NMI on a CPU that is neither stopped nor the dump owner, are handled and return | not a ring-3 fault: the Ring 0 column applies | as the rule |
 | `0x03` | `#BP` | log, continue | `SIGTRAP` (`int3`) | as the rule |
-| `0x04`, `0x05`, `0x07`, `0x0A` | `#OF`, `#BR`, `#NM`, `#TS` | dump, halt | `SIGSEGV` | `sig_for_vec` has no row, so one would halt the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
+| `0x04`, `0x05`, `0x07`, `0x0A` | `#OF`, `#BR`, `#NM`, `#TS` | dump, halt | `SIGSEGV` | as the rule |
 | `0x06` | `#UD` | dump, halt | `SIGILL` | as the rule |
 | `0x08` | `#DF` | dump on IST, halt | not a ring-3 fault: the Ring 0 column applies | as the rule |
 | `0x0B`, `0x0C` | `#NP`, `#SS` | dump, halt | `SIGBUS`; `SIGSEGV` for a fault on the return-to-user `iretq` (§5.10 rule 2) | as the rule |
@@ -2625,7 +2625,7 @@ fault, downstream of it.
 | `0x11` | `#AC` | dump, halt | `SIGBUS`, for a misaligned access while ring 3 has set RFLAGS.AC; `CR0.AM` is set on every CPU, as Linux sets it | as the rule |
 | `0x12` | `#MC` | dump on IST, halt. Planned (ROADMAP §25.1, §25.3): only a fatal machine check, or an action-required error in kernel memory, halts; a lower severity is recorded and the CPU continues | not a ring-3 fault: the Ring 0 column applies. Planned (ROADMAP §25.3): an action-required error that ring-3 code consumed is recorded by the handler and recovered in exit work (§5.10 rule 11), which sends `SIGBUS` with `BUS_MCEERR_AR` | as the rule |
 | `0x13` | `#XF` | dump, halt | `SIGFPE` | as the rule |
-| `0x09`, `0x0F`, `0x14`–`0x1F` | reserved, `#VE`, `#CP`, `#HV`, `#VC`, `#SX` | dump, halt | `SIGSEGV` | `sig_for_vec` has no row, so one would halt the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
+| `0x09`, `0x0F`, `0x14`–`0x1F` | reserved, `#VE`, `#CP`, `#HV`, `#VC`, `#SX` | dump, halt | `SIGSEGV` | as the rule |
 | `0x20`–`0xFF` | IRQs and IPIs | handle, return. An interrupt no handler owns is counted per vector and per CPU, EOIed at the controller that delivered it (the LAPIC when its in-service bit for the vector is set, else the 8259), logged at most once a second per vector, and ignored; §5.5 gives the 8259 lines. Rule; not yet enforced: a pool vector (`0x31`–`0x7F`) with no handler is EOIed and ignored with no count, a vector in `0x80`–`0xEF` or `0xF3`–`0xFA` dumps and halts, and an 8259 line with no handler other than IRQ7 and IRQ15 prints `irq: unexpected` and halts the CPU that took it (ROADMAP §10.6) | handle, return to ring 3 | as the rule |
 
 A halting handler prints the interrupt frame (RIP, CS, RFLAGS, RSP, SS), the error code where the
@@ -3025,8 +3025,10 @@ architectures. Planned (ROADMAP §11.3, §11.6): the aarch64 port does not exist
    base is in `KERNEL_GS_BASE`, however it entered, and the context switch reads it there (ROADMAP
    §18.3). Linux's x86_64 entry splits the IST vectors the same way. The CPL-0 and `#DF` sign test
    is built: the IST entry path reads `GS_BASE` with `rdmsr` and keeps its decision in `ebx` for the
-   exit. Rule; not yet enforced for a CPL-3 frame: ROADMAP §10.6 (F005); the IST entry swaps by
-   CS.RPL but runs the body on the IST stack and returns through the IST exit. The sign test fails once FSGSBASE lets userspace write a kernel-half GS base. Planned
+   exit. The CPL-3 path is built too: `vibeos_trap_entry_ist` swaps by CS.RPL, saves DR6 for `#DB`
+   and resets it, copies the whole `TrapFrame` to `PerCpu.kernel_rsp0` minus its size, switches RSP
+   there, and joins the non-IST entry's call; the dispatcher turns IF on for a CPL-3 `#DB` body, and
+   the frame leaves through the non-IST exit (`vibeos_trap_iret`). The sign test fails once FSGSBASE lets userspace write a kernel-half GS base. Planned
    (ROADMAP §18.3, F133): with FSGSBASE on, a CPL-0 IST entry and `#DF` save `GS_BASE` with
    `rdgsbase`, load this CPU's `PerCpu` pointer, and restore the saved value on exit. A CPL-3 entry
    keeps its `swapgs`: the save-and-load protocol would leave `KERNEL_GS_BASE` holding the `PerCpu`
@@ -3062,15 +3064,17 @@ architectures. Planned (ROADMAP §11.3, §11.6): the aarch64 port does not exist
    requests), three more things hold: an NMI handler takes no fault and runs no `iretq` before its
    own, since either unblocks NMIs while its IST frame is live (ROADMAP §25.5, F139); NMI, `#MC`,
    and `#DB` entries save DR7 and clear it before anything else (ROADMAP §18.4); and `#DF` never
-   returns. Holds today because every IST handler halts, except that under `kernel_tests` an armed
-   `catch` steps RIP and returns or longjmps off the IST stack. Planned (ROADMAP §10.6, F005): a
-   CPL-3 `#DB` calls `try_user_fault` (the ring-3 `#DB` kill §5.2 requires) only after rule 3's
-   move, because `try_user_fault` ends in `finish_exit`, which can switch threads.
+   returns. Holds today for CPL-0 frames because every IST handler halts on them, except that under
+   `kernel_tests` an armed `catch` steps RIP and returns or longjmps off the IST stack. A CPL-3
+   `#DB` calls `try_user_fault` (the ring-3 `#DB` kill §5.2 requires) only after rule 3's move, on
+   the thread's kernel stack with IF=1, because `try_user_fault` ends in `finish_exit`, which can
+   switch threads.
 7. Every gate but `#BP` is DPL 0, so `int n` from ring 3 raises `#GP`; the `#BP` gate is DPL 3, so
    `int3` delivers `SIGTRAP`. RFLAGS.TF and `int1` (`0xF1`) reach `#DB` at any DPL. `ROWS` gives
    each gate its DPL, and `IdtEntry::interrupt` encodes it (type `0x8E`, or `0xEE` for `#BP`).
 8. Ring 3 never halts the kernel: §2.5 states the rule, and the §5.2 table gives each vector's ring-3
-   action, §11.5's each aarch64 exception class's. Rule; not yet enforced for each §5.2 row whose last column names a ROADMAP line.
+   action, §11.5's each aarch64 exception class's. On x86_64 `proc_init::sig_for_vec` reads every
+   ring-3 answer from that one table (`vibeos::trap`).
 9. An entry stub saves the exception's syndrome into its frame before anything can turn IF on or
    raise another fault on that CPU, on both architectures: CR2 for `#PF`, and DR6 for `#DB`, which
    it then clears, as Linux does, before a CPL-3 `#DB` frame leaves the IST stack; ESR_EL1 and
@@ -3080,7 +3084,9 @@ architectures. Planned (ROADMAP §11.3, §11.6): the aarch64 port does not exist
    ([§2.9](#29-preemption-and-interrupt-state) rule 3). On x86_64 only an NMI, `#MC`, or `#DB` can
    run between the delivery and the save, and none of their handlers takes a page fault (ROADMAP
    §25.5 for the NMI handler, which a debug build checks by comparing CR2 at its exit with its value
-   at entry). Rule; not yet enforced: ROADMAP §11.3 (the aarch64 vectors).
+   at entry). Built so on x86_64: the `#DB` body reads DR6 only from `TrapFrame.dr6`
+   (`vectors::dr6_cause`), and the stub writes DR6 back to `vectors::DR6_RESET`. Rule; not yet
+   enforced: ROADMAP §11.3 (the aarch64 vectors).
 10. Return state, on both architectures. A saved user frame that anything other than an entry from
     user mode wrote (`rt_sigreturn`, ptrace's `SETREGS`, `SETREGSET` of `NT_PRSTATUS` or
     `NT_PRFPREG`, `POKEUSER`, and any later writer of a saved context) passes one validator per
@@ -4796,9 +4802,10 @@ thread's GS base, and the thread resumes on another CPU with a kernel address as
 with two CPUs sharing one `PerCpu`.
 
 **A user program halts every CPU.**
-Ring-3 activity reaches `exception_halt` on three paths. `debug_ex` has no ring-3 branch and
-`sig_for_vec` maps neither `#DB` nor `#AC`, so a user `popf` that sets `RFLAGS.TF`, or an `int1`
-(`0xF1`), halts the kernel (F005). A new thread's first return (`syscall_init::first_return`)
+Ring-3 activity reached `exception_halt` on three paths. `debug_ex` had no ring-3 branch and
+`sig_for_vec` mapped neither `#DB` nor `#AC`, so a user `popf` that set `RFLAGS.TF`, or an `int1`
+(`0xF1`), halted the kernel (F005); now `sig_for_vec` reads the `vibeos::trap` table and a CPL-3
+`#DB` leaves its IST stack and ends in `SIGTRAP`. A new thread's first return (`syscall_init::first_return`)
 ran with IF=1, so an interrupt between its `mov gs` and its `iretq` reads `gs:[0]` at VA 0 (F006). A `syscall` in the last two bytes
 of the top user page leaves RIP at the non-canonical `0x0000_8000_0000_0000`, and the `#GP` on the user-return `iretq` runs on the user GS
 base; TCG skips that canonical check, and KVM and hardware do not (F007). ROADMAP §10.6 closes all

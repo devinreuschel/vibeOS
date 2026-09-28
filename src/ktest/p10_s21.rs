@@ -2,7 +2,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use vibeos::proc::SIGKILL;
+use vibeos::proc::{SIGILL, SIGKILL, SIGTRAP, wait_signaled};
 use vibeos::syscall::SYS_KILL;
 use vibeos::vectors;
 
@@ -18,6 +18,9 @@ pub(super) const TESTS: &[Test] = &[
     test("syscall_rcx_canary", test_syscall_rcx_canary).deadline(30_000),
     test("fork_child_gprs", test_fork_child_gprs).deadline(30_000),
     test("preempt_gpr_canaries", test_preempt_gpr_canaries).deadline(60_000),
+    test("user_single_step", test_user_single_step).deadline(30_000),
+    test("user_int1", test_user_int1).deadline(30_000),
+    test("user_tf_repin", test_user_tf_repin).deadline(60_000),
 ];
 
 /// What `arm_rcx_canary` puts in the frame's `rcx`: not the return RIP.
@@ -393,3 +396,148 @@ const _: () = {
     assert!(idt_testing::GPR_CANARIES[0] == 0xC0DE_0000_0000_0101);
     assert!(idt_testing::GPR_CANARIES[14] == 0xC0DE_0000_0000_0F0F);
 };
+
+// Set RFLAGS.TF with popf: the single-step trap follows the nop.
+user_code!(
+    SINGLE_STEP,
+    "
+    pushfq
+    or qword ptr [rsp], 0x100
+    popfq
+    nop
+    nop
+    xor edi, edi
+    mov eax, 60
+    syscall
+    ud2
+    "
+);
+
+// int1 (ICEBP).
+user_code!(
+    INT1,
+    "
+    .byte 0xf1
+    xor edi, edi
+    mov eax, 60
+    syscall
+    ud2
+    "
+);
+
+/// Run `code` and expect `SIGTRAP` in its `wait4` status, the kernel up.
+fn expect_sigtrap(code: &'static [u8], name: &str) -> Outcome {
+    match user::run(&Image::Code(code, DEFAULT), &[name]) {
+        Ok(st) if st == wait_signaled(SIGTRAP) => Outcome::Ok,
+        Ok(st) => crate::fail_fmt!("status {st:#x}, want SIGTRAP"),
+        Err(e) => crate::fail_fmt!("spawn: {}", e.as_str()),
+    }
+}
+
+/// A user `popf` that sets TF ends in `SIGTRAP`, not a halt.
+fn test_user_single_step() -> Outcome {
+    expect_sigtrap(SINGLE_STEP, "single_step")
+}
+
+/// A user `int1` ends in `SIGTRAP`, not a halt. TCG (QEMU 8.2) does not
+/// deliver `int1` as `#DB`, and the child dies of `#UD`'s `SIGILL`
+/// instead, so off KVM either signal passes, with the kernel up.
+fn test_user_int1() -> Outcome {
+    if super::p10_s16::on_kvm() {
+        return expect_sigtrap(INT1, "int1");
+    }
+    match user::run(&Image::Code(INT1, DEFAULT), &["int1"]) {
+        Ok(st) if st == wait_signaled(SIGTRAP) => Outcome::Ok,
+        Ok(st) if st == wait_signaled(SIGILL) => {
+            crate::marker!(
+                "vibeOS: ktest:   user_int1: SIGILL off KVM (TCG takes int1 as an invalid opcode)"
+            );
+            Outcome::Ok
+        }
+        Ok(st) => crate::fail_fmt!("status {st:#x}, want SIGTRAP (or SIGILL off KVM)"),
+        Err(e) => crate::fail_fmt!("spawn: {}", e.as_str()),
+    }
+}
+
+// Set TF; the #DB after the nop re-pins the thread and clears TF. Then 100
+// getpid calls with rdi = HOOK_MAGIC, and exit(0). The instruction after
+// the popf is a nop, never a syscall.
+user_code!(
+    TF_REPIN,
+    "
+    pushfq
+    or qword ptr [rsp], 0x100
+    popfq
+    nop
+    nop
+    mov r12d, 100
+1:
+    movabs rdi, 0x5EEDCA1100005A21
+    mov eax, 39
+    syscall
+    dec r12d
+    jnz 1b
+    xor edi, edi
+    mov eax, 60
+    syscall
+    ud2
+    "
+);
+
+static REPIN_CHILD: AtomicU64 = AtomicU64::new(0);
+static REPIN_SPAWNED: AtomicBool = AtomicBool::new(false);
+static REPIN_STOP: AtomicBool = AtomicBool::new(false);
+
+/// Pinned to CPU 0, so the child is too (`thread_init::spawn_user`).
+fn repin_spawner() {
+    let pid = match user::spawn(&Image::Code(TF_REPIN, DEFAULT), &["tf_repin"]) {
+        Ok(pid) => u64::from(pid),
+        Err(_) => u64::MAX,
+    };
+    REPIN_CHILD.store(pid, Ordering::Relaxed);
+    REPIN_SPAWNED.store(true, Ordering::Release);
+}
+
+/// Pinned to CPU 0: the thread the `#DB` body's yield switches to.
+fn repin_yielder() {
+    while !REPIN_STOP.load(Ordering::Acquire) {
+        thread_init::yield_now();
+    }
+}
+
+/// A CPL-3 `#DB` body that yields moves to another CPU; the program then
+/// runs there with `PerCpu` matching the CPU at each of 100 `getpid`s, and
+/// exits 0: the moved frame returned through the common exit.
+fn test_user_tf_repin() -> Outcome {
+    if super::second_cpu().is_none() {
+        return Outcome::Skip("needs 2 CPUs");
+    }
+    let base = DEFAULT.vaddr;
+    REPIN_SPAWNED.store(false, Ordering::Release);
+    REPIN_STOP.store(false, Ordering::Release);
+    idt_testing::arm_db_repin(base, base + 0x1000);
+    proc_testing::arm_getpid_apic();
+    super::spawn_thread_on("repin_yielder", repin_yielder, 0);
+    super::spawn_thread_on("repin_spawner", repin_spawner, 0);
+    let spawned = sleep_until(|| REPIN_SPAWNED.load(Ordering::Acquire), 5_000);
+    let pid = u32::try_from(REPIN_CHILD.load(Ordering::Relaxed)).ok();
+    let st = match (spawned, pid) {
+        (true, Some(pid)) => Some(user::wait(pid)),
+        _ => None,
+    };
+    REPIN_STOP.store(true, Ordering::Release);
+    idt_testing::disarm_db_repin();
+    proc_testing::disarm();
+    let Some(st) = st else {
+        return Outcome::Fail("spawn");
+    };
+    let (from, to) = idt_testing::repin_cpus();
+    let (checks, bad) = (proc_testing::apic_checks(), proc_testing::apic_mismatches());
+    if st != 0 || from == u32::MAX || from == to || checks != 100 || bad != 0 {
+        return crate::fail_fmt!(
+            "status {st:#x}, cpus {from} -> {to}, {checks} apic checks, {bad} mismatches; \
+             want 0, two CPUs, 100, 0"
+        );
+    }
+    Outcome::Ok
+}

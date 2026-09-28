@@ -8,7 +8,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use vibeos::addr_space::AddressSpace;
-use vibeos::desc::{InterruptFrame, KERNEL_CS, STAR_SYSRET, Tss, USER_CS_RPL, USER_DS_RPL};
+use vibeos::desc::{KERNEL_CS, STAR_SYSRET, Tss, USER_CS_RPL, USER_DS_RPL};
 use vibeos::fpu;
 use vibeos::per_cpu::PerCpu;
 use vibeos::syscall::UserFrame;
@@ -17,6 +17,7 @@ use vibeos::trap::x86_64::sysret_ok;
 use vibeos::vectors;
 
 use crate::arch::gdt;
+use crate::arch::idt::TrapFrame;
 use crate::cell::BootCell;
 use crate::per_cpu_init;
 use crate::x86::{
@@ -216,16 +217,9 @@ unsafe extern "C" fn vibeos_syscall_bad_rip(frame: *mut UserFrame) -> ! {
     // established by `syscall_init::vibeos_syscall_entry` or
     // `thread_init::spawn_user`.
     let f = unsafe { &*frame };
-    let view = InterruptFrame {
-        rip: f.rip,
-        cs: f.cs,
-        rflags: f.rflags,
-        rsp: f.rsp,
-        ss: f.ss,
-    };
     #[cfg(feature = "kernel_tests")]
     testing::BAD_RIP_KILLS.fetch_add(1, Ordering::Relaxed);
-    crate::proc_init::try_user_fault(vectors::GP, &view, 0, None);
+    crate::proc_init::try_user_fault(&TrapFrame::for_user(vectors::GP, 0, f));
     panic!(
         "syscall: non-canonical return RIP {:#x} with no process",
         f.rip
@@ -397,6 +391,39 @@ pub extern "C" fn vibeos_fp_user_return() {
             fpu::bind(&mut cpu.fp_owner, me, addr, &mut tcb.fp_cpu);
         }
     });
+}
+
+/// The running thread's x87 status word, x87 control word, and MXCSR,
+/// read under the FP binding's read rule (DESIGN §7.5, C-FPBIND): inside
+/// an `InterruptGuard`, this CPU's registers are saved into `Tcb.fpu`
+/// first when they hold its state. `None` before the FPU is set up or
+/// with no current thread.
+pub fn current_fp_words() -> Option<(u32, u32, u32)> {
+    if !FPU_READY.load(Ordering::Acquire) {
+        return None;
+    }
+    per_cpu_init::with_current(|cpu| {
+        let t = cpu.current;
+        if t.is_null() {
+            return None;
+        }
+        // SAFETY: invariant: `cpu.current` is the TCB this CPU runs, live
+        // and touched only by this CPU while it runs, and `with_current`'s
+        // IF=0 keeps it current; established by `thread_init::switch_now`.
+        let tcb = unsafe { &mut *t };
+        if fpu::switch_away(cpu.fp_owner, cpu.cpu_id, t as usize, tcb.fp_cpu)
+            == fpu::SwitchAway::Save
+        {
+            fp_save(tcb);
+        }
+        // FXSAVE layout (Intel SDM Vol. 1, 10.5.1): FCW at 0, FSW at 2,
+        // MXCSR at 24.
+        let b = &tcb.fpu.bytes;
+        let fcw = u32::from(u16::from_le_bytes([b[0], b[1]]));
+        let fsw = u32::from(u16::from_le_bytes([b[2], b[3]]));
+        let mxcsr = u32::from_le_bytes([b[24], b[25], b[26], b[27]]);
+        Some((fsw, fcw, mxcsr))
+    })
 }
 
 pub fn fpu_template() -> Fxsave {

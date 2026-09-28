@@ -417,15 +417,12 @@ program itself is a process kill (DESIGN §5.2 CPL split), not `EFAULT`.
 §2.5 for ring-3 exceptions, AGENTS.md rule 4 for syscall paths). The code
 does not meet this yet:
 
-- ring-3 `#DB` (from `RFLAGS.TF` or `INT1`) halts every CPU (F005; ROADMAP
-  §10.6)
 - a device or keyboard interrupt taken in ring 3 runs with the user GS
   base and halts (F004; ROADMAP §10.6)
 - the exit-path faults in §1 (F001, F007; ROADMAP §10.6)
 - a forked or spawned process's first ring-3 entry,
   `syscall_init::first_return`, runs with IF=1, so an interrupt between its `mov gs` and its `iretq`
   reads `gs:[0]` at VA 0 at CPL 0 and halts (F006; ROADMAP §10.6)
-- an ELF with a huge `p_memsz` (§3.1; F009, ROADMAP §10.6)
 - a `fork` near memory exhaustion (§2.1; F010, ROADMAP §10.10)
 
 ---

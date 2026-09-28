@@ -17,6 +17,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use vibeos::desc::{IdtEntry, InterruptFrame, IstSlot, KERNEL_CS};
 use vibeos::fmt_util;
+use vibeos::per_cpu::PerCpu;
 use vibeos::syscall::UserFrame;
 use vibeos::vectors;
 
@@ -104,6 +105,44 @@ const _: () = {
 };
 
 impl TrapFrame {
+    /// A frame for `vector` over the user context `user`, for a ring-3 fault
+    /// that no stub saved: the syscall exit's non-canonical RIP, and a fault
+    /// on a return-to-user `iretq`.
+    pub fn for_user(vector: u8, error_code: u64, user: &UserFrame) -> Self {
+        let mut f = Self {
+            pad: 0,
+            vector: u64::from(vector),
+            error_code,
+            cr2: 0,
+            dr6: 0,
+            r15: 0,
+            r14: 0,
+            r13: 0,
+            r12: 0,
+            rbp: 0,
+            rbx: 0,
+            r11: 0,
+            r10: 0,
+            r9: 0,
+            r8: 0,
+            rax: 0,
+            rcx: 0,
+            rdx: 0,
+            rsi: 0,
+            rdi: 0,
+            orig_rax: 0,
+            iret: InterruptFrame {
+                rip: 0,
+                cs: 0,
+                rflags: 0,
+                rsp: 0,
+                ss: 0,
+            },
+        };
+        *f.user_mut() = *user;
+        f
+    }
+
     #[inline]
     pub fn user_mode(&self) -> bool {
         gs::from_user(self.user().cs)
@@ -217,9 +256,6 @@ const PARANOID_MASK: u32 = {
     }
     m
 };
-
-/// DR6 with no debug condition recorded (SDM Vol. 3B, 18.2.3).
-const DR6_IDLE: u32 = 0xFFFF_0FF0;
 
 /// Bytes from one stub to the next.
 const STUB_STRIDE: usize = 32;
@@ -365,6 +401,8 @@ global_asm!(
     2:
         mov [rsp + {cr2}], rax
         mov qword ptr [rsp + {dr6}], 0
+    // An IST vector taken at CPL 3 joins here on the thread's kernel stack.
+    .Lvibeos_trap_call:
         mov rdi, rsp
         call {dispatch}
         vibeos_trap_exit_cli
@@ -377,12 +415,16 @@ global_asm!(
     vibeos_trap_iret:
         iretq
 
-    // NMI, #DB, #DF, #MC. A CPL-3 frame swaps by CS.RPL. A CPL-0 frame can
+    // NMI, #DB, #DF, #MC. A CPL-3 frame swaps by CS.RPL, saves DR6 (#DB)
+    // and resets it to its idle value, copies the whole frame from the IST
+    // stack to the top of the thread's kernel stack, where its tail is the
+    // thread's user frame, and continues there as any CPL-3 entry does,
+    // leaving the IST stack free (DESIGN §5.10 rule 3). A CPL-0 frame can
     // interrupt the syscall entry or exit with the user GS base loaded, so
     // it swaps only when GS_BASE is not a kernel (negative) address; #DF,
     // whose saved CS is undefined, always decides from the sign. ebx
-    // (callee-saved) keeps the decision across the call, and the exit
-    // mirrors it. DR6 is saved, then reset to its idle value.
+    // (callee-saved) keeps that decision across the call, and the IST exit
+    // mirrors it.
     .balign 16
     .global vibeos_trap_entry_ist
     vibeos_trap_entry_ist:
@@ -393,8 +435,23 @@ global_asm!(
         test byte ptr [rsp + {cs}], 3
         jz 1f
         swapgs
-        mov ebx, 1
-        jmp 2f
+        mov qword ptr [rsp + {cr2}], 0
+        mov qword ptr [rsp + {dr6}], 0
+        cmp edi, {db}
+        jne 6f
+        mov rax, dr6
+        mov [rsp + {dr6}], rax
+        mov eax, {dr6_idle}
+        mov dr6, rax
+    6:
+        mov rsi, rsp
+        mov rdi, qword ptr gs:[{ksp}]
+        sub rdi, {frame_bytes}
+        mov rdx, rdi
+        mov ecx, {frame_words}
+        rep movsq
+        mov rsp, rdx
+        jmp .Lvibeos_trap_call
     1:
         mov ecx, {gs_base}
         rdmsr
@@ -439,7 +496,10 @@ global_asm!(
     db = const vectors::DB,
     df = const vectors::DF,
     gs_base = const x86::IA32_GS_BASE,
-    dr6_idle = const DR6_IDLE,
+    dr6_idle = const vectors::DR6_RESET,
+    ksp = const offset_of!(PerCpu, kernel_rsp0),
+    frame_bytes = const size_of::<TrapFrame>(),
+    frame_words = const size_of::<TrapFrame>() / 8,
     debug = const cfg!(debug_assertions) as u8,
     dispatch = sym trap_dispatch,
 );
@@ -489,9 +549,11 @@ unsafe extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
     }
 }
 
-/// Vectors 0 to 31 that do not enter through an IST stack.
+/// Vectors 0 to 31 that do not enter through an IST stack, and `#DB`,
+/// whose CPL-3 frame the stub has moved off its IST stack. NMI and `#MC`
+/// keep IF=0.
 fn cpl3_body_if_on(v: u8) -> bool {
-    v < 32 && (PARANOID_MASK >> v) & 1 == 0
+    v < 32 && ((PARANOID_MASK >> v) & 1 == 0 || v == vectors::DB)
 }
 
 /// Test hook, then `catch::intercept`. `true` skips the body.
@@ -549,7 +611,15 @@ fn user_return_fault(frame: &TrapFrame) {
         // and `arch::idt::vibeos_trap_entry`.
         unsafe { x86::wrmsr(x86::IA32_GS_BASE, x86::rdmsr(x86::IA32_KERNEL_GS_BASE)) };
     }
-    crate::proc_init::try_user_fault(vectors::GP, &user, frame.error_code, None);
+    let ctx = UserFrame {
+        rip: user.rip,
+        cs: user.cs,
+        rflags: user.rflags,
+        rsp: user.rsp,
+        ss: user.ss,
+        ..UserFrame::zeroed()
+    };
+    crate::proc_init::try_user_fault(&TrapFrame::for_user(vectors::GP, frame.error_code, &ctx));
     panic!(
         "idt: user-return iretq fault with no process, rip={:#x}",
         user.rip
@@ -574,7 +644,7 @@ fn default_body(frame: &mut TrapFrame) {
     let err = frame.error_code;
     let cr2 = (n == vectors::PF).then_some(frame.cr2);
     if frame.user_mode() {
-        crate::proc_init::try_user_fault(n, &frame.iret, err, cr2);
+        crate::proc_init::try_user_fault(frame);
     }
     let err = vectors::pushes_error_code(n).then_some(err);
     x86::cli();
@@ -583,14 +653,14 @@ fn default_body(frame: &mut TrapFrame) {
 
 fn breakpoint(frame: &mut TrapFrame) {
     if frame.user_mode() {
-        crate::proc_init::try_user_fault(vectors::BP, &frame.iret, 0, None);
+        crate::proc_init::try_user_fault(frame);
     }
     dump(b"#BP", &frame.iret, None, None);
 }
 
 fn invalid_opcode(frame: &mut TrapFrame) {
     if frame.user_mode() {
-        crate::proc_init::try_user_fault(vectors::UD, &frame.iret, 0, None);
+        crate::proc_init::try_user_fault(frame);
     }
     x86::cli();
     crate::panic::exception_halt(b"#UD", &frame.iret, None, None);
@@ -600,35 +670,46 @@ fn nmi(frame: &mut TrapFrame) {
     crate::panic::exception_halt(b"nmi", &frame.iret, None, None);
 }
 
-/// Under `kernel_tests` a `testing` hook for `#DB` runs first, in the
-/// dispatcher, and can resume instead.
+/// A CPL-3 `#DB` (a single step, `int1`, a hardware breakpoint) kills the
+/// process with `SIGTRAP`: its frame is on the thread's kernel stack and
+/// its body runs with IF=1, so the kill path may block. The cause comes
+/// from the DR6 the stub saved, never from the register (DESIGN §5.10
+/// rule 9). Under `kernel_tests` a `testing` hook for `#DB` runs first, in
+/// the dispatcher, and can resume instead.
 fn debug_ex(frame: &mut TrapFrame) {
+    if frame.user_mode() {
+        #[cfg(feature = "kernel_tests")]
+        if testing::on_user_db(frame) {
+            return;
+        }
+        crate::proc_init::try_user_fault(frame);
+    }
+    x86::cli();
     crate::panic::exception_halt(b"#DB", &frame.iret, None, None);
 }
 
-/// `vector` 11, 12 or 13 from ring 3 kills the process and does not
+/// A vector 11, 12 or 13 from ring 3 kills the process and does not
 /// return; from the kernel it returns, and the caller halts.
-fn kill_if_user(frame: &mut TrapFrame, vector: u8) {
-    let err = frame.error_code;
+fn kill_if_user(frame: &mut TrapFrame) {
     if frame.user_mode() {
-        crate::proc_init::try_user_fault(vector, &frame.iret, err, None);
+        crate::proc_init::try_user_fault(frame);
     }
 }
 
 fn segment_not_present(frame: &mut TrapFrame) {
-    kill_if_user(frame, vectors::NP);
+    kill_if_user(frame);
     x86::cli();
     crate::panic::exception_vec(vectors::NP, &frame.iret, Some(frame.error_code), None);
 }
 
 fn stack_fault(frame: &mut TrapFrame) {
-    kill_if_user(frame, vectors::SS);
+    kill_if_user(frame);
     x86::cli();
     crate::panic::exception_vec(vectors::SS, &frame.iret, Some(frame.error_code), None);
 }
 
 fn general_protection(frame: &mut TrapFrame) {
-    kill_if_user(frame, vectors::GP);
+    kill_if_user(frame);
     x86::cli();
     crate::panic::exception_halt(b"#GP", &frame.iret, Some(frame.error_code), None);
 }
@@ -640,7 +721,7 @@ fn page_fault(frame: &mut TrapFrame) {
     if frame.user_mode() {
         #[cfg(feature = "kernel_tests")]
         testing::on_user_pf(frame);
-        crate::proc_init::try_user_fault(vectors::PF, &frame.iret, err, Some(cr2));
+        crate::proc_init::try_user_fault(frame);
     }
     x86::cli();
     crate::panic::exception_halt(b"#PF", &frame.iret, Some(err), Some(cr2));
@@ -852,7 +933,7 @@ fn dump(kind: &[u8], frame: &InterruptFrame, err: Option<u64>, cr2: Option<u64>)
 pub mod testing {
     use core::mem::size_of;
     use core::ptr;
-    use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
     use vibeos::syscall::UserFrame;
     use vibeos::vectors;
@@ -1017,6 +1098,61 @@ pub mod testing {
             frame.user_mut().rip = CANARY_EXIT.load(Ordering::Acquire);
         }
     }
+
+    /// The one-shot `#DB` re-pin hook's code range `[lo, hi)`; 0 when
+    /// disarmed or spent.
+    static REPIN_LO: AtomicU64 = AtomicU64::new(0);
+    static REPIN_HI: AtomicU64 = AtomicU64::new(0);
+    static REPIN_FROM: AtomicU32 = AtomicU32::new(u32::MAX);
+    static REPIN_TO: AtomicU32 = AtomicU32::new(u32::MAX);
+
+    /// The next CPL-3 `#DB` whose saved RIP is in `[lo, hi)`, at the top
+    /// of its body: yield with the C-REQUEUE-HOOK on, so the thread moves
+    /// to another CPU, clear TF in the frame, and resume the program
+    /// instead of killing it.
+    pub fn arm_db_repin(lo: u64, hi: u64) {
+        REPIN_FROM.store(u32::MAX, Ordering::Release);
+        REPIN_TO.store(u32::MAX, Ordering::Release);
+        REPIN_HI.store(hi, Ordering::Release);
+        REPIN_LO.store(lo, Ordering::Release);
+    }
+
+    pub fn disarm_db_repin() {
+        REPIN_LO.store(0, Ordering::Release);
+    }
+
+    /// The CPU the re-pinned `#DB` body started on and the one it resumed
+    /// on; `u32::MAX` for none.
+    pub fn repin_cpus() -> (u32, u32) {
+        (
+            REPIN_FROM.load(Ordering::Acquire),
+            REPIN_TO.load(Ordering::Acquire),
+        )
+    }
+
+    /// Top of a CPL-3 `#DB` body, IF=1. `true`: resume the program.
+    pub(super) fn on_user_db(frame: &mut TrapFrame) -> bool {
+        let lo = REPIN_LO.load(Ordering::Acquire);
+        let rip = frame.user().rip;
+        if lo == 0
+            || rip < lo
+            || rip >= REPIN_HI.load(Ordering::Acquire)
+            || REPIN_LO
+                .compare_exchange(lo, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return false;
+        }
+        REPIN_FROM.store(crate::thread_init::current_cpu(), Ordering::Release);
+        crate::thread_init::testing::set_requeue_next_cpu(true);
+        crate::thread_init::yield_now();
+        crate::thread_init::testing::set_requeue_next_cpu(false);
+        REPIN_TO.store(crate::thread_init::current_cpu(), Ordering::Release);
+        frame.user_mut().rflags &= !RFLAGS_TF;
+        true
+    }
+
+    const RFLAGS_TF: u64 = 1 << 8;
 
     pub(super) fn on_entry(frame: &mut TrapFrame, v: u8) -> bool {
         if frame.user_mode() {

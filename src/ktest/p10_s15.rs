@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::addr_space::UserPerms;
 use vibeos::paging::PAGE_SIZE_4K;
-use vibeos::proc::{SIGBUS, SIGFPE, SIGILL, SIGKILL, SIGTRAP, wait_signaled};
+use vibeos::proc::{SIGBUS, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGTRAP, wait_signaled};
 use vibeos::syscall::SYS_KILL;
 use vibeos::vectors;
 
@@ -500,7 +500,74 @@ user_code!(
     "
 );
 
+// Divide by zero.
+user_code!(
+    USER_DE,
+    "
+    xor edx, edx
+    xor ecx, ecx
+    div ecx
+    mov eax, 60
+    xor edi, edi
+    syscall
+    "
+);
+
+user_code!(
+    USER_UD,
+    "
+    ud2
+    "
+);
+
+// cli at CPL 3 (IOPL 0): #GP.
+user_code!(
+    USER_GP,
+    "
+    cli
+    mov eax, 60
+    xor edi, edi
+    syscall
+    "
+);
+
+// A load from a user page nothing maps.
+user_code!(
+    USER_PF,
+    "
+    mov eax, 0x70000000
+    mov rax, qword ptr [rax]
+    mov eax, 60
+    xor edi, edi
+    syscall
+    "
+);
+
 const EXC_CASES: &[ExcCase] = &[
+    ExcCase {
+        name: "de",
+        code: USER_DE,
+        sig: SIGFPE,
+        kvm_only: false,
+    },
+    ExcCase {
+        name: "ud",
+        code: USER_UD,
+        sig: SIGILL,
+        kvm_only: false,
+    },
+    ExcCase {
+        name: "gp",
+        code: USER_GP,
+        sig: SIGSEGV,
+        kvm_only: false,
+    },
+    ExcCase {
+        name: "pf",
+        code: USER_PF,
+        sig: SIGSEGV,
+        kvm_only: false,
+    },
     ExcCase {
         name: "int3",
         code: USER_INT3,

@@ -10,7 +10,6 @@ use core::fmt::Write;
 use core::mem::MaybeUninit;
 
 use vibeos::addr_space::{AddressSpace, AsError, MmapError, mmap_request};
-use vibeos::desc::InterruptFrame;
 use vibeos::elf::ElfError;
 use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, SeekFrom};
 use vibeos::kalloc::{TryBox, TryVec};
@@ -18,9 +17,8 @@ use vibeos::kbd::{DecodedKey, NamedKey};
 use vibeos::paging::{PAGE_SIZE_4K, USER_MAP_END};
 use vibeos::proc::{
     Creds, Cwd, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, InitState, MAX_FDS, MAX_PROCS,
-    ProcState, SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGSTOP, SIGTRAP,
-    SigAct, WNOHANG, default_action, fd_flags_from_open, reaper_for, sig_name, wait_exited,
-    wait_signaled, wait_stopped,
+    ProcState, SIGCHLD, SIGCONT, SIGKILL, SIGSTOP, SigAct, WNOHANG, default_action,
+    fd_flags_from_open, reaper_for, sig_name, wait_exited, wait_signaled, wait_stopped,
 };
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::syscall::{
@@ -31,12 +29,13 @@ use vibeos::syscall::{
     SYS_SCHED_YIELD, SYS_WAIT4, SYS_WRITE, UserFrame,
 };
 use vibeos::thread::ThreadId;
-use vibeos::trap::SyscallAbi;
 use vibeos::trap::x86_64::Abi;
+use vibeos::trap::{self, FpCause, FpUnit, Ring3Action, SyscallAbi, TrapKind};
 use vibeos::vectors;
 use vibeos::wait::WaitQueue;
 
 use crate::addr_space_init;
+use crate::arch::idt::TrapFrame;
 use crate::cell::IrqCell;
 use crate::console_init;
 use crate::file_init;
@@ -1482,36 +1481,51 @@ pub fn write_ps(w: &mut impl Write) {
     }
 }
 
-fn sig_for_vec(vec: u8) -> Option<u32> {
-    match vec {
-        vectors::DE | vectors::MF | vectors::XF => Some(SIGFPE),
-        vectors::UD => Some(SIGILL),
-        vectors::NP | vectors::SS => Some(SIGBUS),
-        vectors::GP | vectors::PF => Some(SIGSEGV),
-        vectors::BP => Some(SIGTRAP),
-        vectors::AC => Some(SIGBUS),
-        _ => None,
+/// The signal and `si_code` for a trap raised by ring-3 code: the port's
+/// decode of the vector and error code, the cause refined from the frame's
+/// DR6 (`#DB`) or the thread's FSW and MXCSR (`#MF`, `#XM`), then the one
+/// table in `vibeos::trap` (DESIGN §5.2). `None`: not a ring-3 fault.
+fn sig_for_vec(f: &TrapFrame) -> Option<(u32, i32)> {
+    let kind = match trap::x86_64::decode(f.vector as u8, f.error_code) {
+        TrapKind::Debug(_) => TrapKind::Debug(vectors::dr6_cause(f.dr6)),
+        TrapKind::FloatingPoint(unit, _) => {
+            let cause =
+                syscall_init::current_fp_words().map_or(FpCause::Unknown, |(fsw, fcw, mx)| {
+                    match unit {
+                        FpUnit::X87 => trap::x86_64::fp_cause(fsw, fcw),
+                        FpUnit::Simd => trap::x86_64::fp_cause(mx & 0x3F, (mx >> 7) & 0x3F),
+                    }
+                });
+            TrapKind::FloatingPoint(unit, cause)
+        }
+        k => k,
+    };
+    match trap::ring3_action(kind) {
+        Ring3Action::Signal { sig, si_code } => Some((sig, si_code)),
+        Ring3Action::NotRing3 => None,
     }
 }
 
 /// User exception: default action (kill) + diagnostic. Kernel stays up.
-/// No-op if this is not a user process (trampoline / no pid).
-pub fn try_user_fault(vec: u8, frame: &InterruptFrame, err: u64, cr2: Option<u64>) {
+/// No-op if this is not a user process (trampoline / no pid), or the
+/// vector is not a ring-3 fault.
+pub fn try_user_fault(f: &TrapFrame) {
     let pid = current_pid();
     if pid == 0 {
         return;
     }
-    let Some(sig) = sig_for_vec(vec) else {
+    let Some((sig, _si_code)) = sig_for_vec(f) else {
         return;
     };
     let _ = write!(
         Serial,
-        "user: pid {pid} killed SIG{} rip=0x{:x} err=0x{err:x}",
+        "user: pid {pid} killed SIG{} rip=0x{:x} err=0x{:x}",
         sig_name(sig),
-        frame.rip
+        f.user().rip,
+        f.error_code
     );
-    if let Some(c) = cr2 {
-        let _ = write!(Serial, " cr2=0x{c:x}");
+    if f.vector == u64::from(vectors::PF) {
+        let _ = write!(Serial, " cr2=0x{:x}", f.cr2);
     }
     let _ = writeln!(Serial);
     crate::arch::gs::force_kernel();
@@ -1687,9 +1701,30 @@ pub(crate) mod testing {
         RCX_CANARY.store(canary, Ordering::Release);
     }
 
+    static APIC_ARMED: AtomicBool = AtomicBool::new(false);
+    static APIC_CHECKS: AtomicU32 = AtomicU32::new(0);
+    static APIC_MISMATCHES: AtomicU32 = AtomicU32::new(0);
+
+    /// At each `getpid` whose `rdi` is [`HOOK_MAGIC`], compare this CPU's
+    /// `PerCpu` LAPIC ID with the one CPUID reports for the CPU running.
+    pub(crate) fn arm_getpid_apic() {
+        APIC_CHECKS.store(0, Ordering::Release);
+        APIC_MISMATCHES.store(0, Ordering::Release);
+        APIC_ARMED.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn apic_checks() -> u32 {
+        APIC_CHECKS.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn apic_mismatches() -> u32 {
+        APIC_MISMATCHES.load(Ordering::Acquire)
+    }
+
     /// Undo every `arm_*` hook of this group.
     pub(crate) fn disarm() {
         RCX_CANARY.store(0, Ordering::Release);
+        APIC_ARMED.store(false, Ordering::Release);
     }
 
     /// Top of `proc_init::syscall`, before the dispatch.
@@ -1700,6 +1735,19 @@ pub(crate) mod testing {
         let c = RCX_CANARY.swap(0, Ordering::AcqRel);
         if c != 0 {
             frame.rcx = c;
+        }
+        if APIC_ARMED.load(Ordering::Acquire) {
+            // One IF=0 stretch: the `PerCpu` read and CPUID see one CPU.
+            let _g = crate::x86::InterruptGuard::enter();
+            let mine = per_cpu_init::current()
+                .remote
+                .apic_id
+                .load(Ordering::Relaxed);
+            let (_, ebx, _, _) = crate::x86::cpuid(1, 0);
+            APIC_CHECKS.fetch_add(1, Ordering::AcqRel);
+            if ebx >> 24 != mine {
+                APIC_MISMATCHES.fetch_add(1, Ordering::AcqRel);
+            }
         }
     }
 }
