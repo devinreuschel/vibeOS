@@ -177,74 +177,173 @@ impl AddressSpace {
         perms: UserPerms,
         alloc: &mut A,
     ) -> Result<(), AsError> {
-        check_map_range(va, len)?;
-        if self.overlaps(va, len) {
-            return Err(AsError::Overlap);
-        }
-        let slot = self
-            .regions
-            .iter()
-            .position(|r| r.is_none())
-            .ok_or(AsError::NoRegionSlot)?;
-
-        let pages = (len / PAGE_SIZE_4K) as usize;
-        let flags = perms.flags();
-        let mut extra = 0usize;
-        let mut mapped = 0u64;
-        while mapped < len {
-            let mut n = 0usize;
-            let page_va = VirtAddr(va + mapped);
-            let pa = {
-                let mut c = Counting {
-                    inner: &mut *alloc,
-                    n: &mut n,
-                };
-                // The leaf's token moves into the entry `map_page` writes;
-                // `unmap_free` and `teardown` take it back.
-                PhysAddr(c.alloc_frame().ok_or(AsError::OutOfFrames)?.into_entry())
-            };
-            extra += n;
-            let mut n_pt = 0usize;
-            let map_rc = {
-                let mut c = Counting {
-                    inner: &mut *alloc,
-                    n: &mut n_pt,
-                };
-                unsafe {
-                    self.mapper.map_page(
-                        page_va,
-                        pa,
-                        flags,
-                        PageSize::Size4K,
-                        MapMode::Fresh,
-                        &mut c,
-                    )
-                }
-            };
-            extra += n_pt;
-            if let Err(e) = map_rc {
-                // SAFETY: `pa` is the order-0 `into_entry` above, and a
-                // failed `map_page` writes no leaf, so no entry holds it (the
-                // contract `pmm::Frames::from_entry` states, met here).
-                alloc.free_frame(unsafe { Frames::from_entry(pa.as_u64(), 0) });
-                let _ = unsafe { self.unmap_free(va, mapped, alloc) };
-                return Err(match e {
-                    MapError::OutOfFrames => AsError::OutOfFrames,
-                    MapError::AlreadyMapped => AsError::AlreadyMapped,
-                    other => AsError::Map(other),
-                });
-            }
-            mapped += PAGE_SIZE_4K;
-        }
-
-        self.user_frames += pages;
-        self.pt_frames += extra - pages;
-        self.regions[slot] = Some(Region {
+        self.check_new_region(va, len)?;
+        // SAFETY: `check_new_region` found `[va, va+len)` in the user half
+        // and clear of every region, and every leaf in this space belongs to
+        // a region (invariant of `addr_space::AddressSpace::insert_region`),
+        // so no page there is mapped; `alloc` hands out owned frames (this
+        // fn's contract).
+        unsafe { self.map_pages(va, len, perms, alloc)? };
+        let region = Region {
             start: va,
             len,
             perms,
             backing: Backing::Anonymous,
-        });
+        };
+        if let Err(e) = self.insert_region(region) {
+            // SAFETY: `map_pages` just mapped every page of the range with
+            // a frame from `alloc`, and nothing else has seen them, here.
+            unsafe { self.unmap_pages(va, len, alloc, &mut |_| {})? };
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// The checks a new region at `[va, va+len)` passes before anything is
+    /// mapped: an aligned user-half range, no overlap with a region, and a
+    /// free region slot.
+    pub fn check_new_region(&self, va: u64, len: u64) -> Result<(), AsError> {
+        check_map_range(va, len)?;
+        if self.overlaps(va, len) {
+            return Err(AsError::Overlap);
+        }
+        if !self.regions.iter().any(|r| r.is_none()) {
+            return Err(AsError::NoRegionSlot);
+        }
+        Ok(())
+    }
+
+    /// Record `r` in a free slot. Every mapped user leaf lies in a region
+    /// once its mapping call returns.
+    pub fn insert_region(&mut self, r: Region) -> Result<(), AsError> {
+        let slot = self
+            .regions
+            .iter_mut()
+            .find(|s| s.is_none())
+            .ok_or(AsError::NoRegionSlot)?;
+        *slot = Some(r);
+        Ok(())
+    }
+
+    /// Map each page of `[va, va+len)` to a fresh frame from `alloc`, with
+    /// `perms`. Records no region and does not zero the frames. Counts
+    /// `user_frames` per leaf mapped and `pt_frames` per table allocated,
+    /// on success and on failure alike. On any failure it unmaps and frees
+    /// every leaf this call mapped and returns the error (F009).
+    ///
+    /// # Safety
+    /// No page of `[va, va+len)` is mapped in this space, and `alloc`
+    /// returns owned frames.
+    pub unsafe fn map_pages<A: FrameAlloc + FrameFree>(
+        &mut self,
+        va: u64,
+        len: u64,
+        perms: UserPerms,
+        alloc: &mut A,
+    ) -> Result<(), AsError> {
+        check_map_range(va, len)?;
+        let flags = perms.flags();
+        let mut mapped = 0u64;
+        while mapped < len {
+            let page_va = VirtAddr(va + mapped);
+            let err = match alloc.alloc_frame() {
+                None => AsError::OutOfFrames,
+                Some(leaf) => {
+                    // The leaf's token moves into the entry `map_page`
+                    // writes; `unmap_pages` and `teardown` take it back.
+                    let pa = PhysAddr(leaf.into_entry());
+                    let mut n_pt = 0usize;
+                    let rc = {
+                        let mut c = Counting {
+                            inner: &mut *alloc,
+                            n: &mut n_pt,
+                        };
+                        // SAFETY: `page_va` is unmapped (this fn's contract)
+                        // and `pa` is the frame just taken from `alloc`,
+                        // which nothing else names, here.
+                        unsafe {
+                            self.mapper.map_page(
+                                page_va,
+                                pa,
+                                flags,
+                                PageSize::Size4K,
+                                MapMode::Fresh,
+                                &mut c,
+                            )
+                        }
+                    };
+                    // Tables `map_page` linked in stay in the tree, and
+                    // `teardown` frees them, whether or not the leaf landed.
+                    self.pt_frames += n_pt;
+                    match rc {
+                        Ok(()) => {
+                            self.user_frames += 1;
+                            mapped += PAGE_SIZE_4K;
+                            continue;
+                        }
+                        Err(e) => {
+                            // SAFETY: `pa` is the order-0 `into_entry`
+                            // above, and a failed `map_page` writes no leaf,
+                            // so no entry holds it (the contract
+                            // `pmm::Frames::from_entry` states), here.
+                            alloc.free_frame(unsafe { Frames::from_entry(pa.as_u64(), 0) });
+                            match e {
+                                MapError::OutOfFrames => AsError::OutOfFrames,
+                                MapError::AlreadyMapped => AsError::AlreadyMapped,
+                                other => AsError::Map(other),
+                            }
+                        }
+                    }
+                }
+            };
+            // SAFETY: this call mapped every page of `[va, va+mapped)` with
+            // a frame from `alloc`, here.
+            unsafe { self.unmap_pages(va, mapped, alloc, &mut |_| {})? };
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// Clear every present leaf in `[va, va+len)` and give its frame to
+    /// `pool`. `flush(va)` runs after each leaf's PTE is cleared and before
+    /// its frame is freed. Pages with no leaf are skipped. Touches no
+    /// region.
+    ///
+    /// # Safety
+    /// Every leaf in the range holds an order-0 token that `pool` may take
+    /// back, and `flush` removes the page from every TLB that may hold it.
+    pub unsafe fn unmap_pages<A: FrameFree>(
+        &mut self,
+        va: u64,
+        len: u64,
+        pool: &mut A,
+        flush: &mut dyn FnMut(u64),
+    ) -> Result<(), AsError> {
+        check_map_range(va, len)?;
+        let mut off = 0u64;
+        while off < len {
+            let page = VirtAddr(va + off);
+            match self.mapper.translate(page) {
+                None => {}
+                Some((_, PageSize::Size2M, _)) => {
+                    return Err(AsError::Map(MapError::PageSizeMismatch));
+                }
+                Some((_, PageSize::Size4K, _)) => {
+                    // SAFETY: the TLB entry for `page` goes through `flush`
+                    // below, before its frame is freed (this fn's contract).
+                    if let Some((pa, _)) = unsafe { self.mapper.unmap_page(page) } {
+                        flush(page.as_u64());
+                        // SAFETY: `unmap_page` just cleared this user leaf,
+                        // which held an order-0 token that
+                        // `addr_space::AddressSpace::map_pages` consumed into
+                        // it (the contract `pmm::Frames::from_entry` states).
+                        pool.free_frame(unsafe { Frames::from_entry(pa.as_u64(), 0) });
+                        self.user_frames = self.user_frames.saturating_sub(1);
+                    }
+                }
+            }
+            off += PAGE_SIZE_4K;
+        }
         Ok(())
     }
 
@@ -260,9 +359,9 @@ impl AddressSpace {
         F: FnMut(Frames),
     {
         // SAFETY: every user-half entry holds a token `map_page` (tables)
-        // or `map_anon` (leaves) consumed with `into_entry`, as
+        // or `map_pages` (leaves) consumed with `into_entry`, as
         // `paging::Mapper::free_user_half` requires; established by
-        // `addr_space::AddressSpace::map_anon`.
+        // `addr_space::AddressSpace::map_pages`.
         let walked = unsafe { self.mapper.free_user_half(free) };
         // SAFETY: `AddressSpace::new` consumed the root's order-0 token
         // into this mapper, and this space is not used again (this fn's
@@ -777,6 +876,41 @@ mod tests {
                 | UserMemError::NullGuard => assert_eq!(e.errno(), 14),
             }
         }
+    }
+
+    #[test]
+    fn map_anon_rolls_back_on_leaf_oom() {
+        let mut pool = Pool::new(16);
+        let kernel = kernel_mapper(&mut pool);
+        let baseline = used(&pool);
+        let mut aspace = unsafe { AddressSpace::new(&kernel, &mut pool) }.unwrap();
+        let after_new = used(&pool);
+        let va = 0x0000_0000_0040_0000u64;
+        assert_eq!(
+            unsafe { aspace.map_anon(va, 64 * PAGE_SIZE_4K, UserPerms::RW, &mut pool) },
+            Err(AsError::OutOfFrames)
+        );
+        assert_eq!(aspace.user_frames(), 0);
+        assert_eq!(aspace.regions().count(), 0);
+        assert_eq!(
+            aspace.check_user_range(va, PAGE_SIZE_4K),
+            Err(UserMemError::Unmapped)
+        );
+        assert_eq!(
+            aspace.check_user_range(va + 8 * PAGE_SIZE_4K, PAGE_SIZE_4K),
+            Err(UserMemError::Unmapped)
+        );
+        assert_eq!(used(&pool), after_new + aspace.pt_frames() - 1);
+        unsafe {
+            aspace
+                .map_anon(va, 2 * PAGE_SIZE_4K, UserPerms::RW, &mut pool)
+                .unwrap();
+        }
+        assert_eq!(aspace.user_frames(), 2);
+        assert_eq!(aspace.regions().count(), 1);
+        assert_eq!(used(&pool), after_new + aspace.pt_frames() - 1 + 2);
+        unsafe { aspace.teardown_pool(&mut pool) };
+        assert_eq!(used(&pool), baseline);
     }
 
     #[test]
