@@ -90,8 +90,7 @@ the RCX and R11 slots, so a context whose RCX and R11 differ from them
 cannot be returned to.
 
 The body runs with IF=1 (DESIGN §2.9 rule 3): the entry stub moves the user
-RSP out of the per-CPU scratch into its frame and then runs `sti`. Today it
-does not, and FMASK's IF=0 lasts until the body blocks (ROADMAP §10.6).
+RSP out of the per-CPU scratch into its frame and then runs `sti`.
 
 From the return of `vibeos_syscall_stub` to `sysretq` or `iretq`, the exit
 path runs with IF=0: it stores the return value in `gs:[retval]`, stages the
@@ -366,12 +365,10 @@ ROADMAP §10.4).
   in `addref` and `close`, under the table lock, and the `close` that
   frees a slot bumps its generation, so a lookup or write-back through a
   descriptor whose slot was closed and reused fails with `EBADF`. Two
-  calls on one open file that overlap still lose one call's offset update.
-  They cannot overlap while syscall bodies run with IF=0, every user
-  thread runs on one CPU, and no file syscall blocks; after §10.6 makes
-  syscall bodies preemptible a process and its `fork` child can overlap on
-  one inherited descriptor and lose an offset update until §13.1's
-  position lock (F055)
+  calls on one open file that overlap still lose one call's offset update:
+  syscall bodies are preemptible, so a process and its `fork` child can
+  overlap on one inherited descriptor and lose an offset update until
+  §13.1's position lock (F055)
 - a kernel-side `dispatch()` probe with no process still sees `getpid=0`
   and `EBADF` for a closed fd; pointer-validation tests run as spawned
   ring-3 programs
@@ -427,10 +424,9 @@ does not meet this yet:
 - a forked or spawned process's first ring-3 entry, `enter_user_full`,
   runs with IF=1, so an interrupt between its `mov gs` and its `iretq`
   reads `gs:[0]` at VA 0 at CPL 0 and halts (F006; ROADMAP §10.6)
-- a console `write` keeps IF=0 for its whole length and acks no IPI, so a
-  TLB shootdown that another CPU sends during a write waits in
-  `wait_acks`, which logs the late CPU once a second, until the write ends
-  (F011; ROADMAP §10.10)
+- a console `write` holds IF=0 for each 256-byte chunk, and each newline
+  on the last row copies the whole framebuffer inside that stretch (F044;
+  ROADMAP §10.6)
 - an ELF with a huge `p_memsz` (§3.1; F009, ROADMAP §10.6)
 - a `fork` near memory exhaustion (§2.1; F010, ROADMAP §10.10)
 

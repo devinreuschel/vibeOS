@@ -595,7 +595,10 @@ enum Pending {
 fn sys_getpid() -> i64 {
     let pid = current_pid();
     #[cfg(feature = "kernel_tests")]
-    testing::on_getpid(pid);
+    {
+        testing::getpid_spin(pid);
+        testing::on_getpid(pid);
+    }
     pid as i64
 }
 
@@ -920,6 +923,9 @@ fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
     })
 }
 
+// Out of line: `dispatch_frame` keeps only the running syscall's frame,
+// and a preempted body carries an interrupt and a switch on top of it.
+#[inline(never)]
 fn sys_fork(frame: *mut SyscallFrame) -> i64 {
     if frame.is_null() {
         return syscall::neg(EINVAL);
@@ -982,6 +988,9 @@ fn sys_fork(frame: *mut SyscallFrame) -> i64 {
     pid as i64
 }
 
+// Out of line: `dispatch_frame` keeps only the running syscall's frame,
+// and a preempted body carries an interrupt and a switch on top of it.
+#[inline(never)]
 fn sys_execve(path: u64, argv: u64, envp: u64, frame: *mut SyscallFrame) -> i64 {
     if frame.is_null() {
         return syscall::neg(EINVAL);
@@ -1382,6 +1391,9 @@ fn sys_kill(pid: u64, sig: u64) -> i64 {
     }
 }
 
+// Out of line: `dispatch_frame` keeps only the running syscall's frame,
+// and a preempted body carries an interrupt and a switch on top of it.
+#[inline(never)]
 fn sys_psinfo(buf: u64, len: u64) -> i64 {
     if let Err(e) = validate_buf(buf, len) {
         return syscall::neg(e);
@@ -1485,6 +1497,8 @@ pub(crate) mod testing {
 
     use vibeos::proc::MAX_PROCS;
 
+    use crate::per_cpu_init;
+    use crate::thread_init;
     use crate::time_init;
 
     static GETPIDS: [AtomicU64; MAX_PROCS] = [const { AtomicU64::new(0) }; MAX_PROCS];
@@ -1544,5 +1558,65 @@ pub(crate) mod testing {
         {
             core::hint::spin_loop();
         }
+    }
+
+    static SPIN_ARMED: AtomicBool = AtomicBool::new(false);
+    static SPIN_START_NS: AtomicU64 = AtomicU64::new(0);
+    static SPIN_DONE_NS: AtomicU64 = AtomicU64::new(0);
+    static SPIN_SW_START: AtomicU64 = AtomicU64::new(0);
+    static SPIN_SW_END: AtomicU64 = AtomicU64::new(0);
+
+    /// TSC time of the spin, in the body of one user `getpid`.
+    pub(crate) const SPIN_NS: u64 = 50_000_000;
+
+    /// The next `getpid` from a process on CPU 0 spins for [`SPIN_NS`].
+    pub(crate) fn arm_getpid_spin() {
+        SPIN_START_NS.store(0, Ordering::Release);
+        SPIN_DONE_NS.store(0, Ordering::Release);
+        SPIN_ARMED.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn disarm_getpid_spin() {
+        SPIN_ARMED.store(false, Ordering::Release);
+    }
+
+    /// `now_ns` when the spin started; 0 before.
+    pub(crate) fn spin_start_ns() -> u64 {
+        SPIN_START_NS.load(Ordering::Acquire)
+    }
+
+    /// `now_ns` when the spinning `getpid` was done; 0 before.
+    pub(crate) fn spin_done_ns() -> u64 {
+        SPIN_DONE_NS.load(Ordering::Acquire)
+    }
+
+    /// CPU 0's context switches at the spin's start and end.
+    pub(crate) fn spin_switches() -> (u64, u64) {
+        (
+            SPIN_SW_START.load(Ordering::Acquire),
+            SPIN_SW_END.load(Ordering::Acquire),
+        )
+    }
+
+    fn cpu0_switches() -> u64 {
+        per_cpu_init::cpu(0).map_or(0, |c| c.switches.load(Ordering::Relaxed))
+    }
+
+    /// Spins on TSC time; never services IPIs.
+    pub(super) fn getpid_spin(pid: u32) {
+        if pid == 0 || !SPIN_ARMED.load(Ordering::Acquire) {
+            return;
+        }
+        if thread_init::current_cpu() != 0 || !SPIN_ARMED.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        SPIN_SW_START.store(cpu0_switches(), Ordering::Release);
+        let t0 = time_init::now_ns();
+        SPIN_START_NS.store(t0.max(1), Ordering::Release);
+        while time_init::now_ns().saturating_sub(t0) < SPIN_NS {
+            core::hint::spin_loop();
+        }
+        SPIN_SW_END.store(cpu0_switches(), Ordering::Release);
+        SPIN_DONE_NS.store(time_init::now_ns(), Ordering::Release);
     }
 }

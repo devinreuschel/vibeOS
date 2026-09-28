@@ -243,8 +243,10 @@ impl TimeoutQueue {
         n
     }
 
-    /// Ids whose deadline is at least `OVERDUE_NS` behind `now`.
-    pub fn overdue(self, now: Instant) -> impl Iterator<Item = Timeout> {
+    /// Ids whose deadline is at least `OVERDUE_NS` behind `now`. Borrows
+    /// the queue: `schedule_inner` runs on top of any preempted syscall
+    /// body's stack, where a copy of the whole queue does not fit.
+    pub fn overdue(&self, now: Instant) -> impl Iterator<Item = Timeout> + '_ {
         let mut i = 0usize;
         core::iter::from_fn(move || {
             while i < self.len {

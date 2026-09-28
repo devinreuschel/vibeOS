@@ -62,6 +62,10 @@ global_asm!(
         push rax
         mov rax, qword ptr gs:[{user_rsp}]
         push rax
+        // The body runs with IF=1 (DESIGN §2.9 rule 3). Not before the
+        // push above: another thread's `syscall` on this CPU overwrites
+        // gs:[user_rsp].
+        sti
 
         mov rdi, rsp
         call vibeos_syscall_stub

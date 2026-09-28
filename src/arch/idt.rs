@@ -464,6 +464,12 @@ unsafe extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
         user_return_fault(frame);
     }
     if !pre_body(frame, v) {
+        // A fault or trap taken at CPL 3 runs its body with IF=1 (DESIGN
+        // §2.9 rule 3): the stub has saved the frame, CR2 included. IST
+        // vectors and IRQ top halves keep IF=0.
+        if cpl3_body_if_on(v) && frame.user_mode() {
+            x86::sti();
+        }
         let p = BODIES[v as usize].load(Ordering::Acquire);
         if p == 0 {
             default_body(frame);
@@ -477,6 +483,11 @@ unsafe extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
     if frame.user_mode() {
         exit_to_user(frame);
     }
+}
+
+/// Vectors 0 to 31 that do not enter through an IST stack.
+fn cpl3_body_if_on(v: u8) -> bool {
+    v < 32 && (PARANOID_MASK >> v) & 1 == 0
 }
 
 /// Test hook, then `catch::intercept`. `true` skips the body.
@@ -564,6 +575,7 @@ fn default_body(frame: &mut TrapFrame) {
         crate::proc_init::try_user_fault(n, &frame.iret, err, cr2);
     }
     let err = vectors::pushes_error_code(n).then_some(err);
+    x86::cli();
     crate::panic::exception_vec(n, &frame.iret, err, cr2);
 }
 
@@ -578,6 +590,7 @@ fn invalid_opcode(frame: &mut TrapFrame) {
     if frame.user_mode() {
         crate::proc_init::try_user_fault(vectors::UD, &frame.iret, 0, None);
     }
+    x86::cli();
     crate::panic::exception_halt(b"#UD", &frame.iret, None, None);
 }
 
@@ -602,24 +615,32 @@ fn kill_if_user(frame: &mut TrapFrame, vector: u8) {
 
 fn segment_not_present(frame: &mut TrapFrame) {
     kill_if_user(frame, vectors::NP);
+    x86::cli();
     crate::panic::exception_vec(vectors::NP, &frame.iret, Some(frame.error_code), None);
 }
 
 fn stack_fault(frame: &mut TrapFrame) {
     kill_if_user(frame, vectors::SS);
+    x86::cli();
     crate::panic::exception_vec(vectors::SS, &frame.iret, Some(frame.error_code), None);
 }
 
 fn general_protection(frame: &mut TrapFrame) {
     kill_if_user(frame, vectors::GP);
+    x86::cli();
     crate::panic::exception_halt(b"#GP", &frame.iret, Some(frame.error_code), None);
 }
 
+/// Reads CR2 from the frame: with IF=1 a preempting thread's fault can
+/// change the register (DESIGN §5.10 rule 9).
 fn page_fault(frame: &mut TrapFrame) {
     let (err, cr2) = (frame.error_code, frame.cr2);
     if frame.user_mode() {
+        #[cfg(feature = "kernel_tests")]
+        testing::on_user_pf(frame);
         crate::proc_init::try_user_fault(vectors::PF, &frame.iret, err, Some(cr2));
     }
+    x86::cli();
     crate::panic::exception_halt(b"#PF", &frame.iret, Some(err), Some(cr2));
 }
 
@@ -827,7 +848,7 @@ fn dump(kind: &[u8], frame: &InterruptFrame, err: Option<u64>, cr2: Option<u64>)
 /// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
 #[cfg(feature = "kernel_tests")]
 pub mod testing {
-    use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
     use super::TrapFrame;
 
@@ -847,6 +868,56 @@ pub mod testing {
     /// Entries of `vector` whose saved CS.RPL was 3, since boot.
     pub fn cpl3_hits(vector: u8) -> u64 {
         CPL3_HITS[vector as usize].load(Ordering::Relaxed)
+    }
+
+    /// `cr2` of the fault whose `#PF` body yields once, at its top; 0 for none.
+    static PF_YIELD_CR2: AtomicU64 = AtomicU64::new(0);
+    static PF_YIELDING: AtomicBool = AtomicBool::new(false);
+    static PF_DURING_YIELD: AtomicU64 = AtomicU64::new(0);
+
+    /// The next CPL-3 `#PF` at `cr2` yields at the top of its body until
+    /// another CPL-3 `#PF` body has run, for at most 1 s of TSC time.
+    pub fn arm_pf_yield(cr2: u64) {
+        PF_DURING_YIELD.store(0, Ordering::Release);
+        PF_YIELDING.store(false, Ordering::Release);
+        PF_YIELD_CR2.store(cr2, Ordering::Release);
+    }
+
+    pub fn disarm_pf_yield() {
+        PF_YIELD_CR2.store(0, Ordering::Release);
+    }
+
+    /// The `cr2` of the first CPL-3 `#PF` body that ran during the yield;
+    /// 0 for none.
+    pub fn pf_during_yield() -> u64 {
+        PF_DURING_YIELD.load(Ordering::Acquire)
+    }
+
+    /// Top of a CPL-3 `#PF` body, after the dispatcher's `sti`.
+    pub(super) fn on_user_pf(frame: &TrapFrame) {
+        if PF_YIELDING.load(Ordering::Acquire) {
+            if PF_DURING_YIELD.load(Ordering::Acquire) == 0 {
+                PF_DURING_YIELD.store(frame.cr2, Ordering::Release);
+            }
+            return;
+        }
+        let armed = PF_YIELD_CR2.load(Ordering::Acquire);
+        if armed == 0
+            || frame.cr2 != armed
+            || PF_YIELD_CR2
+                .compare_exchange(armed, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return;
+        }
+        PF_YIELDING.store(true, Ordering::Release);
+        let t0 = crate::time_init::now_ns();
+        while PF_DURING_YIELD.load(Ordering::Acquire) == 0
+            && crate::time_init::now_ns().saturating_sub(t0) < 1_000_000_000
+        {
+            crate::thread_init::yield_now();
+        }
+        PF_YIELDING.store(false, Ordering::Release);
     }
 
     pub(super) fn on_entry(frame: &mut TrapFrame, v: u8) -> bool {
