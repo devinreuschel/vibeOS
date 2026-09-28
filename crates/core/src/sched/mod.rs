@@ -5,6 +5,11 @@
 //! keep a global blocked list. A timing wheel can replace `TimeoutQueue`
 //! without changing callers. Kernel `schedule` / idle live in the binary crate.
 
+pub mod fpu;
+pub mod thread;
+pub mod wait;
+pub mod work;
+
 use crate::thread::{MAX_THREADS, ThreadId, ThreadState};
 use crate::time::Instant;
 

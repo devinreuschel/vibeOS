@@ -72,9 +72,9 @@ class TestMustBeUnsafe(unittest.TestCase):
 
     def test_list_holds_the_box_functions(self) -> None:
         for entry in [("src/cell.rs", "IrqCell::force_unlock"),
-                      ("src/log_init.rs", "force_unlock"),
-                      ("src/log_init.rs", "with_logger_unlocked"),
-                      ("src/log_init.rs", "dump_tail"),
+                      ("src/log/log_init.rs", "force_unlock"),
+                      ("src/log/log_init.rs", "with_logger_unlocked"),
+                      ("src/log/log_init.rs", "dump_tail"),
                       ("src/smp/per_cpu_init.rs", "with_cpu")]:
             self.assertIn(entry, check_cells.MUST_BE_UNSAFE)
 
@@ -141,7 +141,7 @@ class TestImplHeaders(unittest.TestCase):
 
     def test_where_adds_to_inline_bounds(self) -> None:
         text = "unsafe impl<T: Send> Sync for RwLock<T> where T: Sync {}\n"
-        self.assertEqual(self.errs(text, "src/sync_init.rs"), [])
+        self.assertEqual(self.errs(text, "src/sync/sync_init.rs"), [])
 
     def test_sized_alone_is_no_bound(self) -> None:
         self.assertEqual(self.errs("unsafe impl<T: ?Sized> Send for IrqCell<T> {}\n"),
@@ -151,15 +151,15 @@ class TestImplHeaders(unittest.TestCase):
 
     def test_two_parameters_name_the_unbounded_one(self) -> None:
         text = "unsafe impl<A: Send, B> Send for Pair<A, B> {}\n"
-        self.assertEqual(self.errs(text, "src/sync_init.rs"), [
-            "src/sync_init.rs:1: unsafe impl Send for Pair: B is not bounded by Send"])
+        self.assertEqual(self.errs(text, "src/sync/sync_init.rs"), [
+            "src/sync/sync_init.rs:1: unsafe impl Send for Pair: B is not bounded by Send"])
 
     def test_const_generic_and_lifetimes_are_not_type_parameters(self) -> None:
         for text in ("unsafe impl<T: Send, const N: usize> Sync for Channel<T, N> {}\n",
                      "unsafe impl<'a, T: Send + 'a> Send for Guard<'a, T> {}\n",
                      "unsafe impl<const N: usize> Sync for Ring<N> {}\n"):
             with self.subTest(text=text):
-                self.assertEqual(self.errs(text, "src/sync_init.rs"), [])
+                self.assertEqual(self.errs(text, "src/sync/sync_init.rs"), [])
 
     def test_shares_ref_needs_sync(self) -> None:
         for ty in ("BootCell", "RwLock"):
@@ -194,7 +194,7 @@ class TestImplHeaders(unittest.TestCase):
 
     def test_spin_mutex_guard_form(self) -> None:
         text = "unsafe impl<T: Send + Sync> Sync for SpinMutexGuard<'_, T> {}\n"
-        self.assertEqual(self.errs(text, "src/sync_init.rs"), [])
+        self.assertEqual(self.errs(text, "src/sync/sync_init.rs"), [])
 
     def test_try_arc_form(self) -> None:
         for trait in ("Send", "Sync"):
@@ -223,7 +223,7 @@ class TestImplHeaders(unittest.TestCase):
         impls = unsafe_impls(text)
         self.assertEqual(sum(1 for i in impls if i.params), 8)
         self.assertEqual(sum(1 for i in impls if not i.params), 4)
-        self.assertEqual(self.errs(text, "src/sync_init.rs"), [])
+        self.assertEqual(self.errs(text, "src/sync/sync_init.rs"), [])
 
     def test_tree_passes(self) -> None:
         for path, text in check_cells.read_tree().items():

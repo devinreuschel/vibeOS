@@ -4,6 +4,8 @@
 //! [`InterruptGuard`] so every acquire runs with IF off. Host tests
 //! drive it with a fake owner token.
 
+pub mod lock;
+
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// 0 means unlocked. Owners are never 0.
