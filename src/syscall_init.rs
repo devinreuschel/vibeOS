@@ -11,7 +11,7 @@ use vibeos::addr_space::AddressSpace;
 use vibeos::desc::{InterruptFrame, KERNEL_CS, STAR_SYSRET, Tss, USER_CS_RPL, USER_DS_RPL};
 use vibeos::fpu;
 use vibeos::per_cpu::PerCpu;
-use vibeos::syscall::{UserFrame, UserRegs};
+use vibeos::syscall::UserFrame;
 use vibeos::thread::{Fxsave, Tcb};
 use vibeos::trap::x86_64::sysret_ok;
 use vibeos::vectors;
@@ -189,60 +189,6 @@ global_asm!(
         ud2
         .endif
 
-    .global vibeos_iret_user_full
-    .type vibeos_iret_user_full, @function
-    vibeos_iret_user_full:
-        // IF is off from here to iretq (AGENTS.md rule 2); after
-        // `mov gs` nothing may read gs:.
-        .if {if_check}
-        pushfq
-        test qword ptr [rsp], 0x200
-        lea rsp, [rsp + 8]
-        jnz vibeos_enter_if_set
-        .endif
-        mov r8, rdx
-        mov eax, {user_ss}
-        mov ds, ax
-        mov es, ax
-        mov fs, ax
-        mov gs, ax
-        mov ecx, {kernel_gs_base}
-        mov eax, esi
-        mov rdx, rsi
-        shr rdx, 32
-        wrmsr
-        mov ecx, {gs_base}
-        xor eax, eax
-        xor edx, edx
-        wrmsr
-        mov ecx, {fs_base}
-        mov eax, r8d
-        mov rdx, r8
-        shr rdx, 32
-        wrmsr
-        push {user_ss}
-        push qword ptr [rdi + {ur_rsp}]
-        push qword ptr [rdi + {ur_rflags}]
-        push {user_cs}
-        push qword ptr [rdi + {ur_rip}]
-        mov rax, [rdi + {ur_rax}]
-        mov rbx, [rdi + {ur_rbx}]
-        mov rcx, [rdi + {ur_rcx}]
-        mov rdx, [rdi + {ur_rdx}]
-        mov rsi, [rdi + {ur_rsi}]
-        mov rbp, [rdi + {ur_rbp}]
-        mov r8,  [rdi + {ur_r8}]
-        mov r9,  [rdi + {ur_r9}]
-        mov r10, [rdi + {ur_r10}]
-        mov r11, [rdi + {ur_r11}]
-        mov r12, [rdi + {ur_r12}]
-        mov r13, [rdi + {ur_r13}]
-        mov r14, [rdi + {ur_r14}]
-        mov r15, [rdi + {ur_r15}]
-        mov rdi, [rdi + {ur_rdi}]
-    .global vibeos_iret_user_full_iretq
-    vibeos_iret_user_full_iretq:
-        iretq
     .popsection
     "#,
     user_rsp = const SCRATCH,
@@ -254,29 +200,8 @@ global_asm!(
     enosys = const ENOSYS_RET,
     if_check = const cfg!(debug_assertions) as u8,
     bad_rip = sym vibeos_syscall_bad_rip,
-    kernel_gs_base = const IA32_KERNEL_GS_BASE,
-    gs_base = const IA32_GS_BASE,
-    fs_base = const IA32_FS_BASE,
     user_cs = const USER_CS_RPL as u64,
     user_ss = const USER_DS_RPL as u64,
-    ur_rax = const offset_of!(UserRegs, rax),
-    ur_rbx = const offset_of!(UserRegs, rbx),
-    ur_rcx = const offset_of!(UserRegs, rcx),
-    ur_rdx = const offset_of!(UserRegs, rdx),
-    ur_rsi = const offset_of!(UserRegs, rsi),
-    ur_rdi = const offset_of!(UserRegs, rdi),
-    ur_rbp = const offset_of!(UserRegs, rbp),
-    ur_r8 = const offset_of!(UserRegs, r8),
-    ur_r9 = const offset_of!(UserRegs, r9),
-    ur_r10 = const offset_of!(UserRegs, r10),
-    ur_r11 = const offset_of!(UserRegs, r11),
-    ur_r12 = const offset_of!(UserRegs, r12),
-    ur_r13 = const offset_of!(UserRegs, r13),
-    ur_r14 = const offset_of!(UserRegs, r14),
-    ur_r15 = const offset_of!(UserRegs, r15),
-    ur_rip = const offset_of!(UserRegs, rip),
-    ur_rsp = const offset_of!(UserRegs, rsp),
-    ur_rflags = const offset_of!(UserRegs, rflags),
 );
 
 /// The syscall exit's non-canonical-RIP path: kernel stack and GS, IF=0,
@@ -322,9 +247,6 @@ unsafe extern "C" fn vibeos_sysret_ok(f: *const UserFrame) -> bool {
 
 unsafe extern "C" {
     fn vibeos_syscall_entry();
-    /// Loads the user data selectors, `KERNEL_GS_BASE` = `percpu`,
-    /// `GS_BASE` = 0 and `FS_BASE` = `fs_base`, then `iretq`s to `regs`.
-    fn vibeos_iret_user_full(regs: *const UserRegs, percpu: u64, fs_base: u64) -> !;
 }
 
 /// Write CR0 and CR4 whole (`arch::cpu::init_control_regs`), then program
@@ -451,7 +373,7 @@ fn fp_load(tcb: &Tcb) {
 }
 
 /// The FP binding check on every return to ring 3 (DESIGN §7.5): the
-/// syscall exit, `idt::exit_to_user`, and `enter_user_full`, each with
+/// syscall exit (which `first_return` enters too) and `idt::exit_to_user`, each with
 /// IF=0 on the kernel GS. Loads the current thread's `Tcb.fpu` unless
 /// this CPU's registers already hold its state, then binds both fields.
 #[unsafe(no_mangle)]
@@ -551,23 +473,76 @@ pub fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
     }
 }
 
-/// `iretq` into ring 3 with a full GPR set (fork child / spawned process).
-/// Runs `cli` first; `iretq` restores ring 3's IF from `regs.rflags`.
+/// A spawned or forked thread's first return to ring 3: the ordinary
+/// syscall exit over the user frame its creator wrote at the top of its
+/// kernel stack (`thread_init::spawn_user`). Runs `cli`, checks IF in
+/// debug builds, loads the user data selectors, sets `KERNEL_GS_BASE` =
+/// `PerCpu` before the selector loads (which zero the GS base), then
+/// `GS_BASE` = `PerCpu`, `KERNEL_GS_BASE` = 0 (the user GS base) and
+/// `FS_BASE` = `fs_base`, and jumps to `vibeos_syscall_return`.
 ///
 /// # Safety
-/// `regs.rip`/`regs.rsp` are mapped in the loaded CR3. `regs.rflags`
-/// should include the reserved-1 bit.
-pub unsafe fn enter_user_full(regs: &UserRegs) -> ! {
-    x86::cli();
+/// The running thread is a user thread whose kernel stack holds, at its
+/// top, the user frame `thread_init::spawn_user` wrote, with a loaded CR3
+/// that maps its user RIP and RSP.
+pub unsafe fn first_return(fs_base: u64) -> ! {
     #[cfg(feature = "kernel_tests")]
-    let regs = &testing::entry_regs(regs);
-    vibeos_fp_user_return();
-    let ptr = per_cpu_init::current().self_ptr as u64;
-    // SAFETY: invariant: IF=0 from the `cli` above to the `iretq`, `ptr`
-    // is this CPU's `PerCpu`, and `regs` is a user context the caller
-    // vouches for (this fn's contract); established here and by
-    // `per_cpu_init::current`.
-    unsafe { vibeos_iret_user_full(regs as *const UserRegs, ptr, regs.fs_base) }
+    testing::on_first_return();
+    // SAFETY: invariant I25: `kernel_rsp0` is the top of this thread's
+    // kernel stack, whose top 168 bytes are its user frame, and the pad
+    // word below it is where `vibeos_syscall_return` expects RSP; IF=0
+    // from the `cli` to `sysretq` or `iretq`; established by
+    // `thread_init::spawn_user` and `syscall_init::set_rsp0_for`.
+    unsafe {
+        core::arch::asm!(
+            "cli",
+            ".if {if_check}",
+            "pushfq",
+            "test qword ptr [rsp], 0x200",
+            "lea rsp, [rsp + 8]",
+            "jnz vibeos_enter_if_set",
+            ".endif",
+            "mov rdi, qword ptr gs:[0]",
+            "mov r8, qword ptr gs:[{ksp}]",
+            // KERNEL_GS_BASE = PerCpu first: `mov gs` below zeroes GS_BASE,
+            // and an NMI in between swaps by the sign of GS_BASE.
+            "mov ecx, {kernel_gs_base}",
+            "mov eax, edi",
+            "mov rdx, rdi",
+            "shr rdx, 32",
+            "wrmsr",
+            "mov eax, {user_ss}",
+            "mov ds, ax",
+            "mov es, ax",
+            "mov fs, ax",
+            "mov gs, ax",
+            "mov ecx, {gs_base}",
+            "mov eax, edi",
+            "mov rdx, rdi",
+            "shr rdx, 32",
+            "wrmsr",
+            "mov ecx, {kernel_gs_base}",
+            "xor eax, eax",
+            "xor edx, edx",
+            "wrmsr",
+            "mov ecx, {fs_base}",
+            "mov eax, esi",
+            "mov rdx, rsi",
+            "shr rdx, 32",
+            "wrmsr",
+            "lea rsp, [r8 - {frame_pad}]",
+            "jmp vibeos_syscall_return",
+            if_check = const cfg!(debug_assertions) as u8,
+            ksp = const KSP,
+            kernel_gs_base = const IA32_KERNEL_GS_BASE,
+            gs_base = const IA32_GS_BASE,
+            fs_base = const IA32_FS_BASE,
+            user_ss = const USER_DS_RPL as u32,
+            frame_pad = const size_of::<UserFrame>() + PAD,
+            in("rsi") fs_base,
+            options(noreturn),
+        );
+    }
 }
 
 pub fn star_configured() -> bool {
@@ -658,8 +633,10 @@ pub fn dispatch(nr: u64, args: [u64; 6]) -> i64 {
 pub(crate) mod testing {
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+    use core::mem::size_of;
     use vibeos::paging::USER_END;
-    use vibeos::syscall::{UserFrame, UserRegs};
+
+    use vibeos::syscall::UserFrame;
 
     /// Syscall number plus one whose next exit gets a non-canonical RIP;
     /// 0 for none.
@@ -679,7 +656,7 @@ pub(crate) mod testing {
         ARMED_ENTRY.store(false, Ordering::Release);
     }
 
-    /// The next `enter_user_full` enters at a non-canonical RIP.
+    /// The next `first_return` returns to a non-canonical RIP.
     pub(crate) fn arm_noncanonical_entry() {
         ARMED_ENTRY.store(true, Ordering::Release);
     }
@@ -705,11 +682,19 @@ pub(crate) mod testing {
         }
     }
 
-    pub(super) fn entry_regs(regs: &UserRegs) -> UserRegs {
-        let mut r = *regs;
-        if ARMED_ENTRY.swap(false, Ordering::AcqRel) {
-            r.rip = USER_END;
+    /// Top of `first_return`: an armed entry gets a non-canonical RIP in
+    /// the frame it returns over.
+    pub(super) fn on_first_return() {
+        if !ARMED_ENTRY.swap(false, Ordering::AcqRel) {
+            return;
         }
-        r
+        let _g = crate::x86::InterruptGuard::enter();
+        let top = crate::per_cpu_init::current().kernel_rsp0;
+        let at = top - size_of::<UserFrame>() as u64;
+        // SAFETY: invariant I25: `kernel_rsp0` is the top of this thread's
+        // kernel stack, whose top 168 bytes are the user frame its creator
+        // wrote and nothing else refers to; established by
+        // `thread_init::spawn_user`.
+        unsafe { (*(at as *mut UserFrame)).rip = USER_END };
     }
 }

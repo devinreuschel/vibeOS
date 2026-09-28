@@ -390,9 +390,8 @@ fn test_ist_gs_sign() -> Outcome {
         Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
     };
     // Arm once the child has taken an interrupt in ring 3, so it is past
-    // `enter_user_full`: with breakpoints armed, TCG takes interrupts at
-    // every instruction, which widens that function's IF=1 window with the
-    // user GS base loaded (F006, ROADMAP §10.6).
+    // its first return (`syscall_init::first_return`), whose selector and
+    // MSR block this test does not cover.
     let in_ring3 = wait_until(|| cpl3_total() != cpl3_before, 5_000);
     if in_ring3 {
         testing::set_hook(vectors::DB, Some(db_hook));
@@ -667,9 +666,8 @@ fn user_irqs(vecs: &[u8]) -> Outcome {
     let Ok(pid) = u32::try_from(IRQ_CHILD.load(Ordering::Relaxed)) else {
         return Outcome::Fail("spawn");
     };
-    // Send only once the child has taken an interrupt in ring 3: an IPI
-    // inside `enter_user_full`'s IF=1 window runs on the user GS base
-    // (F006, ROADMAP §10.6), which this test does not cover.
+    // Send only once the child has taken an interrupt in ring 3: its first
+    // return (`syscall_init::first_return`) is `user_entry_irq`'s to cover.
     let in_ring3 = sleep_until(|| cpl3_total() != cpl3_before, 5_000);
     if in_ring3 {
         for (i, &v) in vecs.iter().enumerate().take(IRQ_VECS.len()) {

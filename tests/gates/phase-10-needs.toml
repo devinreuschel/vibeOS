@@ -444,9 +444,9 @@ why = "text: lands after the generated-stub box above and the syscall-exit and I
 key = "one FP binding on x86_64"
 needs = [
   "the syscall exit path runs with IF=0 from the dispatcher's return",
-  "`enter_user_full` executes `cli` before it loads",
+  "`syscall_init::first_return` executes `cli` before it loads",
 ]
-why = "text: lands after the syscall-exit box (F001) and the `enter_user_full` box (F006)"
+why = "text: lands after the syscall-exit box (F001) and the `syscall_init::first_return` box (F006)"
 
 [[box]]
 key = "x86_64 user FP state follows the psABI across `fork` and `execve`"
@@ -580,7 +580,7 @@ why = "claim: missing edge found by the Phase 10 planning survey and review (ext
 
 # L1390
 [[box]]
-key = "`enter_user_full` executes `cli` before it loads"
+key = "`syscall_init::first_return` executes `cli` before it loads"
 needs = [
   "ring 3 runs with Linux's",  # L1391
 ]

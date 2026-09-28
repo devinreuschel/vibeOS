@@ -28,9 +28,9 @@ use vibeos::syscall::{
     ENAMETOOLONG, ENODEV, ENOENT, ENOEXEC, ENOMEM, ENOSYS, ENOTDIR, EPERM, ESRCH, F_GETFD, F_SETFD,
     SYS_BRK, SYS_CLOSE, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_EXIT, SYS_FCNTL, SYS_FORK, SYS_GETPID,
     SYS_GETPPID, SYS_KILL, SYS_LSEEK, SYS_MMAP, SYS_MUNMAP, SYS_OPEN, SYS_PSINFO, SYS_READ,
-    SYS_SCHED_YIELD, SYS_WAIT4, SYS_WRITE, UserFrame, UserRegs,
+    SYS_SCHED_YIELD, SYS_WAIT4, SYS_WRITE, UserFrame,
 };
-use vibeos::thread::{RFLAGS_IF, RFLAGS_RESERVED1, ThreadId};
+use vibeos::thread::ThreadId;
 use vibeos::trap::SyscallAbi;
 use vibeos::trap::x86_64::Abi;
 use vibeos::vectors;
@@ -59,7 +59,8 @@ struct Proc {
     /// No reaper: freed at exit, ROADMAP §10.5.
     autoreap: bool,
     space: Option<TryBox<AddressSpace>>,
-    entry: UserRegs,
+    /// `FS_BASE` for the first return to ring 3 (`user_thread_entry`).
+    fs_base: u64,
     wait_wq: WaitQueue,
     stop_wq: WaitQueue,
 }
@@ -79,7 +80,7 @@ impl Proc {
             pending: 0,
             autoreap: false,
             space: None,
-            entry: UserRegs::empty(),
+            fs_base: 0,
             wait_wq: WaitQueue::new(),
             stop_wq: WaitQueue::new(),
         }
@@ -337,18 +338,21 @@ fn dup_table(src: FdTable) -> Option<FdTable> {
 
 fn user_thread_entry() {
     let pid = current_pid();
-    let regs = with_table(|t| {
+    let fs = with_table(|t| {
         t.get(pid).map(|p| {
             if let Some(ref s) = p.space {
                 set_as(s);
             }
-            p.entry
+            p.fs_base
         })
     });
-    let Some(regs) = regs else {
+    let Some(fs) = fs else {
         thread_init::exit_current();
     };
-    unsafe { syscall_init::enter_user_full(&regs) };
+    // SAFETY: invariant I25: this is a user thread whose kernel stack
+    // holds at its top the user frame its creator wrote, and its CR3 maps
+    // that frame's RIP and RSP; established by `thread_init::spawn_user`.
+    unsafe { syscall_init::first_return(fs) };
 }
 
 #[cfg_attr(feature = "kernel_tests", allow(dead_code))]
@@ -407,13 +411,10 @@ fn start_loaded(
         }
     };
     let cr3 = loaded.space.root().as_u64();
-    let mut entry = UserRegs::empty();
-    entry.rip = loaded.entry;
-    entry.rsp = loaded.rsp;
-    entry.rflags = RFLAGS_RESERVED1 | RFLAGS_IF;
-    entry.fs_base = loaded.fs;
+    let frame = UserFrame::new_user(loaded.entry, loaded.rsp);
+    let fs = loaded.fs;
     let boxed = slot.write(loaded.space);
-    let h = match thread_init::spawn_user(name, user_thread_entry, pid, cr3) {
+    let h = match thread_init::spawn_user(name, user_thread_entry, pid, cr3, &frame) {
         Ok(h) => h,
         Err(e) => {
             with_table(|t| t.procs[pid as usize] = Proc::empty());
@@ -424,7 +425,7 @@ fn start_loaded(
     with_table(|t| {
         init_slot(t, pid, ppid, name);
         t.procs[pid as usize].space = Some(boxed);
-        t.procs[pid as usize].entry = entry;
+        t.procs[pid as usize].fs_base = fs;
     });
     with_table(|t| {
         if let Some(p) = t.get_mut(pid) {
@@ -986,12 +987,11 @@ fn sys_fork(frame: Option<&mut UserFrame>) -> i64 {
         return syscall::neg(ENOMEM);
     };
     let cr3 = cloned.root().as_u64();
-    let child_regs = UserRegs::from_syscall(frame, 0);
+    let mut child = *frame;
+    child.rax = 0;
     let fs = crate::x86::rdmsr(crate::x86::IA32_FS_BASE);
-    let mut child_regs = child_regs;
-    child_regs.fs_base = fs;
     let boxed = slot.write(cloned);
-    let h = match thread_init::spawn_user("user", user_thread_entry, pid, cr3) {
+    let h = match thread_init::spawn_user("user", user_thread_entry, pid, cr3, &child) {
         Ok(h) => h,
         Err(e) => {
             // Nothing names the clone's root yet: no thread was made.
@@ -1010,7 +1010,7 @@ fn sys_fork(frame: Option<&mut UserFrame>) -> i64 {
         p.cwd = cwd;
         p.creds = creds;
         p.space = Some(boxed);
-        p.entry = child_regs;
+        p.fs_base = fs;
         p.tid = h.id();
     });
     thread_init::make_ready(h.id());
@@ -1076,11 +1076,7 @@ fn sys_execve(path: u64, argv: u64, envp: u64, frame: Option<&mut UserFrame>) ->
         let p = t.get_mut(pid)?;
         let gone = p.fds.apply_cloexec();
         p.name = name;
-        p.entry.rip = entry;
-        p.entry.rsp = rsp;
-        p.entry.fs_base = fs;
-        p.entry.rax = 0;
-        p.entry.rflags = RFLAGS_RESERVED1 | RFLAGS_IF;
+        p.fs_base = fs;
         let old = p.space.take();
         p.space = boxed.take();
         Some((old, gone, p.tid, cr3))

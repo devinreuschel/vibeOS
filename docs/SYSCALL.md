@@ -85,8 +85,8 @@ equals the saved R11, CS and SS are the user selectors, RIP is below
 (`vibeos::trap::x86_64::sysret_ok`); otherwise it restores all 15 GPRs from
 the frame and uses `iretq` on the frame's tail, as Linux does, so a hook or
 a later `execve` that changes RCX or R11 returns them intact. A
-spawned or forked process's first entry uses `iretq`
-(`enter_user_full`). A fault on either `iretq` (a `#GP`, `#NP`, or
+spawned or forked process's first entry is the same exit over the frame its
+creator wrote (`syscall_init::first_return`, DESIGN §5.10 rule 4). A fault on either `iretq` (a `#GP`, `#NP`, or
 `#SS` whose RIP is the labeled instruction) kills the process with
 `SIGSEGV`, and never halts the kernel (DESIGN §5.10 rule 2). A restartable
 syscall resumes by reloading `rax` from `orig_rax` and moving RIP back 2
@@ -422,8 +422,8 @@ does not meet this yet:
 - a device or keyboard interrupt taken in ring 3 runs with the user GS
   base and halts (F004; ROADMAP §10.6)
 - the exit-path faults in §1 (F001, F007; ROADMAP §10.6)
-- a forked or spawned process's first ring-3 entry, `enter_user_full`,
-  runs with IF=1, so an interrupt between its `mov gs` and its `iretq`
+- a forked or spawned process's first ring-3 entry,
+  `syscall_init::first_return`, runs with IF=1, so an interrupt between its `mov gs` and its `iretq`
   reads `gs:[0]` at VA 0 at CPL 0 and halts (F006; ROADMAP §10.6)
 - an ELF with a huge `p_memsz` (§3.1; F009, ROADMAP §10.6)
 - a `fork` near memory exhaustion (§2.1; F010, ROADMAP §10.10)

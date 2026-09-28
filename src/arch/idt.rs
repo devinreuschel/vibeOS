@@ -503,18 +503,16 @@ fn pre_body(frame: &mut TrapFrame, v: u8) -> bool {
 // Labels on the `iretq` instructions that return to ring 3.
 unsafe extern "C" {
     static vibeos_syscall_iretq: u8;
-    static vibeos_iret_user_full_iretq: u8;
     static vibeos_trap_iret: u8;
     static vibeos_trap_iret_ist: u8;
 }
 
 /// Whether `rip` is one of the labeled `iretq` instructions that return
-/// to ring 3: the syscall slow path, `vibeos_iret_user_full`, and both
-/// vector exits.
+/// to ring 3: the syscall slow path, which a new thread's first return
+/// takes too, and both vector exits.
 fn is_user_return_iretq(rip: u64) -> bool {
     [
         (&raw const vibeos_syscall_iretq) as u64,
-        (&raw const vibeos_iret_user_full_iretq) as u64,
         (&raw const vibeos_trap_iret) as u64,
         (&raw const vibeos_trap_iret_ist) as u64,
     ]
@@ -542,7 +540,7 @@ fn user_return_fault(frame: &TrapFrame) {
     if (x86::rdmsr(x86::IA32_GS_BASE) as i64) >= 0 {
         // The exit's `swapgs` left this CPU's `PerCpu` in KERNEL_GS_BASE.
         // SAFETY: invariant: KERNEL_GS_BASE holds this CPU's `PerCpu`
-        // from the exit's `swapgs` (or `vibeos_iret_user_full`'s write)
+        // from the exit's `swapgs` (or `syscall_init::first_return`'s write)
         // until `iretq` completes; established by `syscall_init`'s exits
         // and `arch::idt::vibeos_trap_entry`.
         unsafe { x86::wrmsr(x86::IA32_GS_BASE, x86::rdmsr(x86::IA32_KERNEL_GS_BASE)) };
