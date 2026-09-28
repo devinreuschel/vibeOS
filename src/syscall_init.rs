@@ -418,6 +418,8 @@ pub unsafe fn enter_user_full(regs: &UserRegs) -> ! {
             options(nostack, preserves_flags),
         );
         x86::wrmsr(IA32_GS_BASE, 0);
+        #[cfg(feature = "kernel_tests")]
+        testing::fork_wait_stall_point();
         x86::wrmsr(IA32_FS_BASE, regs.fs_base);
         vibeos_iret_user_full(regs as *const UserRegs);
     }
@@ -497,4 +499,42 @@ pub extern "C" fn vibeos_syscall_stub(frame: *mut SyscallFrame) -> i64 {
 
 pub fn dispatch(nr: u64, args: [u64; 6]) -> i64 {
     crate::proc_init::dispatch(nr, args)
+}
+
+/// Hooks the in-guest tests arm (DESIGN §8.2). `kernel_tests` builds only.
+#[cfg(feature = "kernel_tests")]
+pub mod testing {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    use crate::time_init;
+
+    /// First ring-3 entries [`fork_wait_stall_point`] still holds.
+    static FORK_WAIT_STALLS: AtomicU32 = AtomicU32::new(0);
+
+    /// How long [`fork_wait_stall_point`] holds one entry: two ticks of
+    /// the 1 kHz timer.
+    const FORK_WAIT_STALL_NS: u64 = 2_000_000;
+
+    /// Hold the next `n` first ring-3 entries at [`fork_wait_stall_point`];
+    /// 0 disarms.
+    pub(crate) fn arm_fork_wait_stall(n: u32) {
+        FORK_WAIT_STALLS.store(n, Ordering::Release);
+    }
+
+    /// In a first ring-3 entry, once GS is loaded for ring 3: while armed,
+    /// spin for [`FORK_WAIT_STALL_NS`], so an interrupt the entry takes
+    /// there lands inside that window (ROADMAP §10.2, F021). It reads no
+    /// `gs:` operand, since GS already names the user's base.
+    pub(crate) extern "C" fn fork_wait_stall_point() {
+        if FORK_WAIT_STALLS
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+            .is_err()
+        {
+            return;
+        }
+        let t0 = time_init::now_ns();
+        while time_init::now_ns().saturating_sub(t0) < FORK_WAIT_STALL_NS {
+            core::hint::spin_loop();
+        }
+    }
 }
