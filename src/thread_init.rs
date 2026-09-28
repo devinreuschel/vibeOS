@@ -12,10 +12,10 @@
 //! the CPU's workqueue worker unmaps and frees with IF=1 (DESIGN §4.5).
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
-use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use vibeos::ipi::{home_cpu, pick_cpu};
+use vibeos::kalloc::TryBox;
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::lock::RANK_SCHED;
 use vibeos::sched::{
@@ -64,7 +64,7 @@ impl ThreadHandle {
 }
 
 pub(crate) struct Sched {
-    slots: [Option<Box<Tcb>>; MAX_THREADS],
+    slots: [Option<TryBox<Tcb>>; MAX_THREADS],
     timeouts: TimeoutQueue,
     places: [(u32, ThreadId); MAX_THREADS],
     place_n: usize,
@@ -568,7 +568,8 @@ pub fn halt_if_idle() {
 /// # Safety
 /// Single-CPU, `GS_BASE` live, not already initialized.
 pub unsafe fn init_bootstrap() {
-    let mut tcb = Box::new(Tcb {
+    // Before `irq: enabled`, where DESIGN §4.4 allows a boot-time panic.
+    let tcb = TryBox::try_new(Tcb {
         id: ThreadId::BOOTSTRAP,
         name: "bootstrap",
         state: ThreadState::Running,
@@ -590,6 +591,9 @@ pub unsafe fn init_bootstrap() {
         syscall_count: 0,
         pid: 0,
     });
+    let Ok(mut tcb) = tcb else {
+        panic!("thread: bootstrap TCB");
+    };
     let ptr = &mut *tcb as *mut Tcb;
     {
         let mut s = SCHED.lock();
@@ -732,12 +736,14 @@ pub fn make_ready(id: ThreadId) {
     reason = "the stack comes back by value so the caller frees it once; a Box would allocate on the failure path"
 )]
 pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, GuardedStack> {
-    let mut tcb = Box::new(Tcb {
+    // Built without the stack, which the AP is running on: a failed
+    // allocation must not drop it.
+    let tcb = TryBox::try_new(Tcb {
         id: ThreadId(0),
         name: "idle",
         state: ThreadState::Running,
         on_cpu: AtomicBool::new(true),
-        stack: Some(stack),
+        stack: None,
         context: CpuContext::empty(),
         entry: ap_idle_entry,
         next: None,
@@ -754,15 +760,27 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, Guard
         syscall_count: 0,
         pid: 0,
     });
-    with_sched(|s| {
+    let Ok(mut tcb) = tcb else {
+        return Err(stack);
+    };
+    tcb.stack = Some(stack);
+    let placed = with_sched(|s| {
         let Some(slot) = s.slots.iter().position(|x| x.is_none()) else {
-            return Err(tcb.stack.take().expect("adopt_ap_idle: stack set above"));
+            // Dropped after SCHED is released: no heap free under it.
+            return Err(tcb);
         };
         let id = ThreadId(slot as u32);
         tcb.id = id;
         s.slots[slot] = Some(tcb);
         Ok(id)
-    })
+    });
+    match placed {
+        Ok(id) => Ok(id),
+        Err(mut tcb) => match tcb.stack.take() {
+            Some(stack) => Err(stack),
+            None => unreachable!("adopt_ap_idle: stack set above"),
+        },
+    }
 }
 
 /// Timeout path: TCB never ran. Return the stack so the caller can free it.
@@ -850,14 +868,14 @@ fn spawn_inner(
         return Ok(ThreadHandle { id });
     }
 
-    // Until ROADMAP §10.4's `TryBox`, the one infallible allocation left
-    // on this path: the heap grows or the kernel panics (DESIGN §4.4).
-    let mut tcb = Box::new(Tcb {
+    // Built without the stack, so a failed allocation drops no stack; the
+    // stack goes back as a full table's does (DESIGN §4.4).
+    let tcb = TryBox::try_new(Tcb {
         id: ThreadId(0),
         name,
         state: ThreadState::Ready,
         on_cpu: AtomicBool::new(false),
-        stack,
+        stack: None,
         context: CpuContext::empty(),
         entry,
         next: None,
@@ -874,6 +892,16 @@ fn spawn_inner(
         syscall_count: 0,
         pid,
     });
+    let mut tcb = match tcb {
+        Ok(t) => t,
+        Err(_) => {
+            if let Some(ks) = stack.take() {
+                return_stack(ks);
+            }
+            return Err(SpawnError::NoMemory);
+        }
+    };
+    tcb.stack = stack;
     prepare_thread(&mut tcb.context, top, tramp);
     unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
 
