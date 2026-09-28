@@ -129,23 +129,24 @@ names, Linux values:
 
 | Name | Value | Used |
 |------|------:|------|
-| `EPERM` | 1 | defined; no syscall returns it |
+| `EPERM` | 1 | `mmap` with `MAP_FIXED` or `MAP_FIXED_NOREPLACE` below `NULL_GUARD_LEN` (page 0) |
 | `ENOENT` | 2 | `open`/`execve` missing path |
 | `ESRCH` | 3 | `kill`: no such process, a zombie, `pid` 0, or a negative 32-bit `pid` (§3.1) |
 | `EIO` | 5 | device I/O error; a FAT or vibefs volume still busy after 1,000,000 yields |
 | `E2BIG` | 7 | `execve` argv with 16 or more entries. ROADMAP §10.5 moves to Linux's limits: a string over 131,072 bytes with its NUL, or argv and envp together over a quarter of `RLIMIT_STACK` |
 | `ENOEXEC` | 8 | malformed ELF, `ET_DYN`, or `PT_INTERP` |
-| `EBADF` | 9 | closed / out-of-range fd |
+| `EBADF` | 9 | closed / out-of-range fd; a file `mmap` (no `MAP_ANONYMOUS`) with a bad fd |
 | `ECHILD` | 10 | `wait4` with no matching child |
 | `EAGAIN` | 11 | `fork` with pids 2 to 17 all in use, zombies included (`MAX_PROCS` is 18; pid 0 is unused and pid 1 is reserved for `/sbin/init`) |
-| `ENOMEM` | 12 | AS clone / load; an ELF file above 64 KiB |
+| `ENOMEM` | 12 | AS clone / load; an ELF file above 64 KiB, or an image above `limits::EXEC_IMAGE_MAX`; `mmap` with no free range, a full region table, a `len` past `USER_MAP_END`, or no frames; a `munmap` that must split a region when the region table is full |
 | `EACCES` | 13 | defined; no syscall returns it |
 | `EFAULT` | 14 | bad user pointer / length |
 | `EBUSY` | 16 | defined; no syscall returns it |
-| `EEXIST` | 17 | `O_EXCL` |
+| `EEXIST` | 17 | `O_EXCL`; `mmap` with `MAP_FIXED_NOREPLACE` (or `MAP_FIXED`, §3.1) over a mapping |
+| `ENODEV` | 19 | a file `mmap` (no `MAP_ANONYMOUS`) on an open fd: file mappings come in ROADMAP §12.4 |
 | `ENOTDIR` | 20 | |
 | `EISDIR` | 21 | |
-| `EINVAL` | 22 | `lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the non-Linux cases in §2.1 |
+| `EINVAL` | 22 | `lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the `mmap` and `munmap` argument checks in §3.1; the non-Linux cases in §2.1 |
 | `EMFILE` | 24 | per-process fd table full (`open`); the non-Linux cases in §2.1 |
 | `EFBIG` | 27 | a vibefs `write` that starts at or past the file-size limit, byte 2^44 − 4096 (VIBEFS.md §3) |
 | `ENAMETOOLONG` | 36 | path of 256 bytes or more; name above 64 bytes; an `execve` argv string of 256 bytes or more, which Linux accepts (ROADMAP §10.5). ROADMAP §13.9 moves the path and name limits to Linux's 4096 and 255 |
@@ -209,6 +210,9 @@ the errno the baseline returns: `read(-1, <unmapped>, 1)` is `EBADF`, and
 | 2 | `open` | 3 | `rdi` path, a C string of at most 255 bytes |
 | 3 | `close` | 1 | |
 | 8 | `lseek` | 3 | |
+| 9 | `mmap` | 6 | anonymous and private only; returns the address |
+| 11 | `munmap` | 2 | |
+| 12 | `brk` | 1 | returns the break; `0` if the caller is not a process |
 | 24 | `sched_yield` | 0 | |
 | 32 | `dup` | 1 | CLOEXEC cleared on the new fd |
 | 33 | `dup2` | 2 | |
@@ -247,10 +251,51 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   `EFBIG`, and one that would cross it is cut short at the limit, as
   Linux's is. On a FAT file any offset from 0 to `i64::MAX` is accepted
   (F008; ROADMAP §10.11)
+- `mmap`: anonymous private mappings only: `MAP_PRIVATE|MAP_ANONYMOUS`,
+  plus any of `MAP_FIXED`, `MAP_FIXED_NOREPLACE`, `MAP_NORESERVE`,
+  `MAP_POPULATE`, and `MAP_STACK`. `prot` is any mix of `PROT_READ`,
+  `PROT_WRITE`, and `PROT_EXEC`, where W or X also allows reads, and
+  `PROT_NONE` reserves the range with no frames. Each page is allocated and
+  zeroed at the call until ROADMAP §12.4. The checks run in mmap(2)'s
+  order: an `off` that is not page-aligned is `EINVAL`; a file mapping (no
+  `MAP_ANONYMOUS`) is `EBADF` for a bad fd and `ENODEV` otherwise, until
+  ROADMAP §12.4 adds file mappings; then a `len` of 0, a map type other
+  than `MAP_PRIVATE` (`MAP_SHARED` included, until ROADMAP §12.4), any
+  other flag bit, and a `prot` bit other than the three are `EINVAL`,
+  where Linux ignores unknown flag bits; a `len` that rounds past
+  `USER_MAP_END` is `ENOMEM`; a fixed request whose `addr` is not
+  page-aligned is `EINVAL`. A fixed request below page 0's guard is
+  `EPERM`, and one past `USER_MAP_END` is `ENOMEM`. `MAP_FIXED` over an
+  existing mapping returns `EEXIST`, as `MAP_FIXED_NOREPLACE` does, where
+  Linux replaces the mapping (ROADMAP §12.4). Without a fixed flag a free
+  hint is used, rounded down to a page; otherwise the highest free range
+  below `0x7FFF_F7FF_F000` (DESIGN §4.1), or `ENOMEM`. Each call is its own
+  region, never merged with a neighbour, so a full region table (32,
+  `limits::MAX_REGIONS`) is `ENOMEM` (ROADMAP §10.4 sizes it)
+- `munmap`: `addr` must be page-aligned, `len` non-zero, and the range at or
+  below `USER_MAP_END` (`EINVAL`); `len` rounds up to a page. It trims,
+  splits, or removes the mappings in the range, and holes are fine. Each
+  page leaves the TLB before its frame is freed. A split that finds the
+  region table full returns `ENOMEM` with nothing unmapped, as mmap(2)
+  documents. It allocates no memory (ROADMAP §10.5)
+- `brk`: returns the new break, or the current one when the call fails,
+  as the raw call does (glibc's `brk` wrapper turns that into `-1` and
+  `ENOMEM`). The break starts on the page after the image's highest
+  `PT_LOAD`, as on Linux with randomization off, and `execve` resets it,
+  while `fork` copies it. `brk(0)`, a value below the start, a value past
+  `USER_MAP_END`, growth into another mapping (the stack included), and a
+  frame shortage leave it where it is. Growth maps zeroed pages at the call
+  (ROADMAP §12.4 makes them lazy); shrinking unmaps the whole pages above
+  the new break
 - `execve`: the image is read whole and must be at most 64 KiB (`ENOMEM`)
-  until ROADMAP §10.4 removes `MAX_ELF`. `p_memsz` is bounded only by
-  `USER_END`, so a small ELF can map pages until physical memory runs out,
-  with IF=0 and the page-table lock held (F009; ROADMAP §10.6). An empty
+  until ROADMAP §10.4 removes `MAX_ELF`. An image whose page-rounded
+  `PT_LOAD` and `PT_TLS` bytes together exceed 1 GiB
+  (`limits::EXEC_IMAGE_MAX`) returns `ENOMEM` before anything is mapped,
+  where Linux loads it while memory lasts (LINUX.md `exec-image-cap`; F009,
+  ROADMAP §10.6). Under the cap, every page is allocated and zeroed at the
+  call, in chunks of at most 512 pages (one leaf table), with the page-table
+  lock dropped between chunks; a frame shortage unmaps and frees what the
+  load mapped and returns `ENOMEM` to the old image. An empty
   argv becomes `[path]`; Linux starts the image with `argc` 1 and an empty
   `argv[0]` (ROADMAP §10.5). `envp` is not read, and the new stack gets an
   empty environment (§7; ROADMAP §9.4 defers the copy to §10.5)

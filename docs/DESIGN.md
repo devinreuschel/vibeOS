@@ -1625,6 +1625,17 @@ Regions must not overlap and every one asserts that its range is unmapped before
 a real failure mode: two subsystems in the old tree were both designed at `0xFFFF_C000_*` and only one
 noticed.
 
+Inside the user half, the loader maps each `PT_LOAD` at its `p_vaddr`, and the `brk` heap starts on
+the page after the highest segment's end (`AddressSpace::set_brk_start`), as on Linux with
+randomization off; it is one region that grows and shrinks at its top. The 32 stack pages end at
+`0x8000_0000`, with the TLS block, when the image has one, in the pages just below them. Anonymous
+`mmap` places a request with no usable hint top-down from `MMAP_TOP` (`USER_MAP_END` − 128 MiB,
+`0x7FFF_F7FF_F000`, Linux's base without randomization), one region per call, never merged. Every
+page of the image, the heap, and an `mmap` is allocated and zeroed at the call until ROADMAP §12.4
+makes them lazy; a `PROT_NONE` mapping is a region with no frames. `munmap` trims, splits, or
+removes the regions in its range, so `fork`'s copy (`clone_anon`) sees exactly the pages that are
+mapped.
+
 The KASAN build passes each architecture's shadow offset to LLVM explicitly
 (`-Cllvm-args=-asan-mapping-offset=`), never LLVM's default: LLVM picks its Linux kernel offset only
 for a Linux x86_64 triple, and for both kernel targets its default is a user-space offset whose
