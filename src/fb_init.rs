@@ -1,20 +1,24 @@
-//! Framebuffer text console. ROADMAP §5.1.
+//! Framebuffer text console. ROADMAP §5.1, §10.6.
 //!
 //! BGRX, Limine pitch, release bounds checks. Drawing stays off the
 //! IRQ path. Double buffering is deferred (ROADMAP §5.1; lands in §16.1).
+//!
+//! The console lock, [`CONSOLE`], guards the RAM text grid and the
+//! framebuffer. A write holds it once per [`CHUNK`] to update the grid,
+//! and, when its caller runs with IF=1, redraws what is dirty in pieces of
+//! at most [`vibeos::fb::PIECE_BYTES`], one lock hold each, drawing every piece from
+//! the grid as it then stands. A write with IF off updates only the grid
+//! and leaves the redraw to the next write with IF on (DESIGN §2.9 rule 2).
 
-use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use vibeos::fb::{
-    CellAction, TextGrid, glyph_origin, last_text_row_offset, pack_bgrx, pixel_offset, scroll_copy,
-    text_row_bytes,
-};
+use vibeos::fb::{CHUNK, MAX_CELLS, TextGrid, glyph_origin, pack_bgrx, pixel_offset};
 use vibeos::font::{self, FONT_H, FONT_W};
 use vibeos::lock::RANK_DEVICE;
 
 use crate::boot::FbInfo;
 use crate::sync_init::SpinMutex;
+use crate::x86;
 
 const BANNER_ROWS: u32 = 1;
 const BG: u32 = pack_bgrx(0x12, 0x12, 0x18);
@@ -23,17 +27,36 @@ const BANNER_BG: u32 = pack_bgrx(0x28, 0x18, 0x48);
 const BANNER_FG: u32 = pack_bgrx(0xF0, 0xE0, 0x88);
 const BANNER: &[u8] = b" vibeOS";
 
+/// The framebuffer's hardware fields, from the bootloader.
 struct Fb {
     base: u64,
     width: u32,
     height: u32,
     pitch: u64,
     size: u64,
+}
+
+/// What the console lock guards.
+struct Console {
     grid: TextGrid,
+    /// The byte each text cell shows on the framebuffer, row-major by
+    /// screen position, so a redraw skips a cell that already shows its
+    /// grid byte without reading VRAM.
+    shown: [u8; MAX_CELLS],
+    fb: Option<Fb>,
 }
 
 static READY: AtomicBool = AtomicBool::new(false);
-static FB: SpinMutex<Option<Fb>> = SpinMutex::with_rank(None, RANK_DEVICE);
+/// The console lock: the RAM text grid and the framebuffer it is drawn
+/// to. Held for one chunk's grid update or one redraw piece at a time.
+static CONSOLE: SpinMutex<Console> = SpinMutex::with_rank(
+    Console {
+        grid: TextGrid::empty(),
+        shown: [0; MAX_CELLS],
+        fb: None,
+    },
+    RANK_DEVICE,
+);
 static FB_PHYS: AtomicU64 = AtomicU64::new(0);
 static FB_LEN: AtomicU64 = AtomicU64::new(0);
 
@@ -61,12 +84,19 @@ pub fn init() -> bool {
     else {
         return false;
     };
+    {
+        let mut c = CONSOLE.lock();
+        if !c.grid.configure(fb.width, fb.height, BANNER_ROWS) {
+            return false;
+        }
+        fb.fill(BG);
+        c.shown.fill(b' ');
+        fb.fill_banner();
+        fb.paint_string(0, 0, BANNER, BANNER_FG, BANNER_BG);
+        c.fb = Some(fb);
+    }
     FB_PHYS.store(info.phys, Ordering::Release);
     FB_LEN.store(info.size, Ordering::Release);
-    fb.fill(BG);
-    fb.fill_banner();
-    fb.paint_string(0, 0, BANNER, BANNER_FG, BANNER_BG);
-    *FB.lock() = Some(fb);
     READY.store(true, Ordering::Release);
     true
 }
@@ -83,10 +113,11 @@ impl Fb {
             height: i.height,
             pitch: i.pitch,
             size: i.size,
-            grid: TextGrid::new(i.width, i.height, BANNER_ROWS)?,
         })
     }
 
+    /// The one bound on every framebuffer access: `(x, y)` inside the
+    /// mode and its 4 bytes inside the mapped `size`.
     fn pixel_ptr(&self, x: u32, y: u32) -> Option<*mut u32> {
         let off = pixel_offset(x, y, self.width, self.height, self.pitch)?;
         if off.checked_add(4)? > self.size {
@@ -99,11 +130,17 @@ impl Fb {
         let Some(p) = self.pixel_ptr(x, y) else {
             return;
         };
+        // SAFETY: invariant: `p` is a 4-byte-aligned pixel inside the
+        // framebuffer mapping the bootloader handed over, which stays
+        // mapped for the kernel's life; established by
+        // `fb_init::Fb::pixel_ptr`.
         unsafe { p.write_volatile(color) };
     }
 
     fn get_pixel(&self, x: u32, y: u32) -> Option<u32> {
         let p = self.pixel_ptr(x, y)?;
+        // SAFETY: invariant: as in `put_pixel`; established by
+        // `fb_init::Fb::pixel_ptr`.
         Some(unsafe { p.read_volatile() })
     }
 
@@ -132,120 +169,108 @@ impl Fb {
         }
     }
 
-    fn paint_glyph(&self, col: u32, row: u32, ch: u8) {
+    /// Paint cell `(col, row)`. Its last pixel's bound covers the whole
+    /// cell, so the rows are written without a check per pixel.
+    fn paint_glyph(&self, col: u32, row: u32, ch: u8, fg: u32, bg: u32) {
         let (px, py) = glyph_origin(col, row);
-        let (fg, bg) = if row < self.grid.banner_rows {
-            (BANNER_FG, BANNER_BG)
-        } else {
-            (FG, BG)
+        let (Some(first), Some(_)) = (
+            self.pixel_ptr(px, py),
+            self.pixel_ptr(px.saturating_add(FONT_W - 1), py.saturating_add(FONT_H - 1)),
+        ) else {
+            return;
         };
-        let mut gy = 0u8;
-        while gy < FONT_H as u8 {
-            let mut gx = 0u8;
-            while gx < FONT_W as u8 {
-                let on = font::glyph_pixel(ch, gx, gy);
-                self.put_pixel(px + gx as u32, py + gy as u32, if on { fg } else { bg });
+        let mut line = first as u64;
+        for &bits in font::glyph(ch) {
+            let mut gx = 0u32;
+            while gx < FONT_W {
+                let color = if bits & (1 << gx) != 0 { fg } else { bg };
+                let p = line.wrapping_add(u64::from(gx) * 4) as *mut u32;
+                // SAFETY: invariant: pixel `(px + gx, py + gy)` lies between
+                // the cell's first and last pixels, which both passed the
+                // bound, so it is inside the framebuffer mapping the
+                // bootloader handed over; established by
+                // `fb_init::Fb::pixel_ptr`.
+                unsafe { p.write_volatile(color) };
                 gx += 1;
             }
-            gy += 1;
+            line = line.wrapping_add(self.pitch);
         }
     }
 
     fn paint_string(&self, col: u32, row: u32, s: &[u8], fg: u32, bg: u32) {
-        let (mut px, py) = glyph_origin(col, row);
+        let mut c = col;
         for &ch in s {
-            let mut gy = 0u8;
-            while gy < FONT_H as u8 {
-                let mut gx = 0u8;
-                while gx < FONT_W as u8 {
-                    let on = font::glyph_pixel(ch, gx, gy);
-                    self.put_pixel(px + gx as u32, py + gy as u32, if on { fg } else { bg });
-                    gx += 1;
-                }
-                gy += 1;
-            }
-            px = px.saturating_add(FONT_W);
-        }
-    }
-
-    fn scroll(&self) {
-        let Some((src, dst, len)) = scroll_copy(self.grid.banner_rows, self.grid.rows, self.pitch)
-        else {
-            return;
-        };
-        if dst.checked_add(len).map(|e| e > self.size).unwrap_or(true)
-            || src.checked_add(len).map(|e| e > self.size).unwrap_or(true)
-        {
-            return;
-        }
-        unsafe {
-            ptr::copy(
-                self.base.wrapping_add(src) as *const u8,
-                self.base.wrapping_add(dst) as *mut u8,
-                len as usize,
-            );
-        }
-        self.clear_last_row();
-    }
-
-    fn clear_last_row(&self) {
-        let Some(off) = last_text_row_offset(self.grid.rows, self.pitch) else {
-            return;
-        };
-        let Some(row_bytes) = text_row_bytes(self.pitch) else {
-            return;
-        };
-        if off
-            .checked_add(row_bytes)
-            .map(|e| e > self.size)
-            .unwrap_or(true)
-        {
-            return;
-        }
-        let y0 = (self.grid.rows - 1) * FONT_H;
-        let mut y = y0;
-        while y < y0 + FONT_H && y < self.height {
-            let mut x = 0;
-            while x < self.width {
-                self.put_pixel(x, y, BG);
-                x += 1;
-            }
-            y += 1;
-        }
-    }
-
-    /// `\r` homes the column (same row). The line editor paints in place
-    /// with it; dropping CR made the FB reprint the prompt.
-    fn write_bytes(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            match self.grid.put(b) {
-                CellAction::None => {}
-                CellAction::Glyph { col, row, ch } => self.paint_glyph(col, row, ch),
-                CellAction::Scroll => self.scroll(),
-                CellAction::GlyphThenScroll { col, row, ch } => {
-                    self.scroll();
-                    self.paint_glyph(col, row, ch);
-                }
-            }
+            self.paint_glyph(c, row, ch, fg, bg);
+            c = c.saturating_add(1);
         }
     }
 }
 
-/// Silent. Never logs.
+/// Redraw what is dirty, one piece per console-lock hold, each drawn from
+/// the grid as it stands under that hold. Only with IF=1.
+fn redraw() {
+    loop {
+        let mut g = CONSOLE.lock();
+        let c = &mut *g;
+        let Some(p) = c.grid.next_piece() else {
+            return;
+        };
+        let mut painted = 0usize;
+        if let Some(fb) = c.fb.as_ref() {
+            let cols = c.grid.cols() as usize;
+            let mut i = 0;
+            while i < p.n {
+                let col = p.col + i;
+                let ch = c.grid.cell(p.row, col);
+                let at = (p.row as usize)
+                    .checked_mul(cols)
+                    .and_then(|r| r.checked_add(col as usize));
+                if let Some(shown) = at.and_then(|at| c.shown.get_mut(at))
+                    && *shown != ch
+                {
+                    fb.paint_glyph(col, p.row, ch, FG, BG);
+                    *shown = ch;
+                    painted += 1;
+                }
+                i += 1;
+            }
+        }
+        #[cfg(feature = "kernel_tests")]
+        testing::on_piece(painted * vibeos::fb::CELL_BYTES);
+        #[cfg(not(feature = "kernel_tests"))]
+        let _ = painted;
+    }
+}
+
+/// Silent. Never logs. One console-lock hold per [`CHUNK`] of `bytes`
+/// for the grid; with IF=1 the redraw follows each chunk, and an empty
+/// write only redraws.
 pub fn write(bytes: &[u8]) {
     if !READY.load(Ordering::Acquire) {
         return;
     }
-    let mut g = FB.lock();
-    if let Some(fb) = g.as_mut() {
-        fb.write_bytes(bytes);
+    let mut rest = bytes;
+    loop {
+        let (chunk, tail) = rest.split_at(rest.len().min(CHUNK));
+        {
+            let _st = CONSOLE.lock().grid.write_chunk(chunk);
+            #[cfg(feature = "kernel_tests")]
+            testing::on_chunk(_st);
+        }
+        if x86::interrupts_enabled() {
+            redraw();
+        }
+        if tail.is_empty() {
+            return;
+        }
+        rest = tail;
     }
 }
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn put_pixel(x: u32, y: u32, color: u32) -> bool {
-    let g = FB.lock();
-    let Some(fb) = g.as_ref() else {
+    let c = CONSOLE.lock();
+    let Some(fb) = c.fb.as_ref() else {
         return false;
     };
     if fb.pixel_ptr(x, y).is_none() {
@@ -257,24 +282,82 @@ pub fn put_pixel(x: u32, y: u32, color: u32) -> bool {
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn get_pixel(x: u32, y: u32) -> Option<u32> {
-    let g = FB.lock();
-    g.as_ref()?.get_pixel(x, y)
+    let c = CONSOLE.lock();
+    c.fb.as_ref()?.get_pixel(x, y)
 }
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn pitch() -> Option<u64> {
-    let g = FB.lock();
-    g.as_ref().map(|f| f.pitch)
+    let c = CONSOLE.lock();
+    c.fb.as_ref().map(|f| f.pitch)
 }
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn width() -> Option<u32> {
-    let g = FB.lock();
-    g.as_ref().map(|f| f.width)
+    let c = CONSOLE.lock();
+    c.fb.as_ref().map(|f| f.width)
 }
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn cursor() -> Option<(u32, u32)> {
-    let g = FB.lock();
-    g.as_ref().map(|f| (f.grid.col, f.grid.row))
+    let c = CONSOLE.lock();
+    c.fb.as_ref().map(|_| c.grid.cursor())
+}
+
+/// In-guest test counters. `kernel_tests` only (AGENTS.md rule 9).
+#[cfg(feature = "kernel_tests")]
+pub(crate) mod testing {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    use vibeos::fb::ChunkStats;
+
+    static HOLDS: AtomicU64 = AtomicU64::new(0);
+    static MAX_PIECE_BYTES: AtomicU64 = AtomicU64::new(0);
+    static MAX_CHUNK_SCROLLS: AtomicU64 = AtomicU64::new(0);
+    static SCROLLS: AtomicU64 = AtomicU64::new(0);
+    static PIECES: AtomicU64 = AtomicU64::new(0);
+
+    pub(crate) fn reset() {
+        HOLDS.store(0, Ordering::Release);
+        MAX_PIECE_BYTES.store(0, Ordering::Release);
+        MAX_CHUNK_SCROLLS.store(0, Ordering::Release);
+        SCROLLS.store(0, Ordering::Release);
+        PIECES.store(0, Ordering::Release);
+    }
+
+    /// Redraw pieces taken, since [`reset`].
+    pub(crate) fn pieces() -> u64 {
+        PIECES.load(Ordering::Acquire)
+    }
+
+    /// Console-lock holds that updated the grid, since [`reset`].
+    pub(crate) fn grid_holds() -> u64 {
+        HOLDS.load(Ordering::Acquire)
+    }
+
+    /// The most framebuffer bytes one redraw piece wrote, since [`reset`].
+    pub(crate) fn max_piece_bytes() -> u64 {
+        MAX_PIECE_BYTES.load(Ordering::Acquire)
+    }
+
+    /// The most scrolls one chunk made.
+    pub(crate) fn max_chunk_scrolls() -> u64 {
+        MAX_CHUNK_SCROLLS.load(Ordering::Acquire)
+    }
+
+    /// Chunks that scrolled.
+    pub(crate) fn scrolls() -> u64 {
+        SCROLLS.load(Ordering::Acquire)
+    }
+
+    pub(super) fn on_chunk(st: ChunkStats) {
+        HOLDS.fetch_add(1, Ordering::AcqRel);
+        MAX_CHUNK_SCROLLS.fetch_max(u64::from(st.scrolls), Ordering::AcqRel);
+        SCROLLS.fetch_add(u64::from(st.scrolls), Ordering::AcqRel);
+    }
+
+    pub(super) fn on_piece(bytes: usize) {
+        PIECES.fetch_add(1, Ordering::AcqRel);
+        MAX_PIECE_BYTES.fetch_max(bytes as u64, Ordering::AcqRel);
+    }
 }

@@ -2,21 +2,27 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use vibeos::console::BackendId;
+use vibeos::fb::PIECE_BYTES;
 use vibeos::proc::{SIGCONT, SIGKILL, SIGSEGV, SIGSTOP, wait_signaled};
 use vibeos::syscall::SYS_KILL;
 
-use super::user::{self, DEFAULT, Image, user_code};
-use super::{Outcome, Test, free_frames_owned, test};
+use super::user::{self, DEFAULT, Image, Layout, user_code};
+use super::{Outcome, Test, cpu_remote, free_frames_owned, test};
 use crate::arch::idt::testing as idt_testing;
+use crate::console_init;
+use crate::fb_init::{self, testing as fb_testing};
 use crate::kva_init;
 use crate::log_init;
 use crate::proc_init::{self, testing as proc_testing};
 use crate::thread_init;
 use crate::time_init;
+use crate::x86;
 
 pub(super) const TESTS: &[Test] = &[
     test("stop_cont_no_lost_wakeup", test_stop_cont_no_lost_wakeup).deadline(30_000),
     test("syscall_body_if_on", test_syscall_body_if_on).deadline(30_000),
+    test("console_write_newlines", test_console_write_newlines).deadline(60_000),
 ];
 
 /// Sleep until `pred` holds, for at most `ms`.
@@ -452,5 +458,196 @@ fn body_cr2() -> Outcome {
             }
         }
     }
+    Outcome::Ok
+}
+
+// Fill the 4096 bytes past the code page with '\n', write(1, them, 4096),
+// then getpid (the done flag); exit 0 when the write returned 4096.
+user_code!(
+    S19_NEWLINES,
+    "
+    mov rdi, 0x40001000
+    mov ecx, 4096
+    mov al, 10
+    rep stosb
+    mov edi, 1
+    mov rsi, 0x40001000
+    mov edx, 4096
+    mov eax, 1
+    syscall
+    mov r12, rax
+    mov eax, 39
+    syscall
+    xor edi, edi
+    cmp r12, 4096
+    setne dil
+    mov eax, 60
+    syscall
+    ud2
+    "
+);
+
+const NEWLINES_LAYOUT: Layout = Layout {
+    vaddr: 0x4000_0000,
+    memsz: Some(0x2000),
+    writable: true,
+};
+
+/// Turns the serial backend of `console_init::write` off, and back to
+/// what it was on drop, so a test's big write reaches only the grid.
+struct SerialOff(bool);
+
+impl SerialOff {
+    fn new() -> Self {
+        let was = console_init::enabled(BackendId::Serial);
+        console_init::set_enabled(BackendId::Serial, false);
+        SerialOff(was)
+    }
+}
+
+impl Drop for SerialOff {
+    fn drop(&mut self) {
+        console_init::set_enabled(BackendId::Serial, self.0);
+    }
+}
+
+/// The framebuffer console is up and `console_init::write` reaches it.
+fn fb_console_on() -> bool {
+    fb_init::ready() && console_init::enabled(BackendId::Framebuffer)
+}
+
+static NL_PIDS: AtomicU64 = AtomicU64::new(0);
+static NL_SPAWNED: AtomicBool = AtomicBool::new(false);
+/// 0 while watching, 1 when CPU 0 ticked during the write, 2 when the
+/// write was done first, 3 when no grid hold came.
+static NL_TICK: AtomicU32 = AtomicU32::new(0);
+
+fn nl_spawner() {
+    let pid = match user::spawn(&Image::Code(S19_NEWLINES, NEWLINES_LAYOUT), &["newlines"]) {
+        Ok(pid) => u64::from(pid),
+        Err(_) => u64::MAX,
+    };
+    NL_PIDS.store(pid, Ordering::Relaxed);
+    NL_SPAWNED.store(true, Ordering::Release);
+}
+
+/// On the second CPU: CPU 0's tick count after the write's first grid
+/// hold, then whether it advances before the program's `getpid` after
+/// the write.
+fn nl_watcher() {
+    let ticks = || cpu_remote(0).map_or(0, |c| c.ticks.load(Ordering::Relaxed));
+    let started = spin_until(
+        || fb_testing::grid_holds() >= 1 && NL_SPAWNED.load(Ordering::Acquire),
+        10_000_000_000,
+    );
+    let t0 = ticks();
+    let Ok(pid) = u32::try_from(NL_PIDS.load(Ordering::Relaxed)) else {
+        NL_TICK.store(3, Ordering::Release);
+        return;
+    };
+    if !started {
+        NL_TICK.store(3, Ordering::Release);
+        return;
+    }
+    // The program calls getpid only after its write returns.
+    let base = proc_testing::getpid_count(pid);
+    let done = || proc_testing::getpid_count(pid) > base;
+    let ticked = spin_until(|| ticks() > t0 || done(), 30_000_000_000);
+    let r = if ticked && ticks() > t0 && !done() {
+        1
+    } else {
+        2
+    };
+    NL_TICK.store(r, Ordering::Release);
+}
+
+/// A 4096-newline console `write` from ring 3 on CPU 0 holds IF=0 only
+/// per chunk and per redraw piece: CPU 0 ticks during it, each hold draws
+/// at most 16 KiB, and each chunk scrolls at most once (ROADMAP §10.6,
+/// F044). A write with IF off leaves its redraw to the next write.
+fn test_console_write_newlines() -> Outcome {
+    let Some(other) = super::second_cpu() else {
+        return Outcome::Skip("needs 2 CPUs");
+    };
+    if !fb_console_on() {
+        return Outcome::Fail("no framebuffer console");
+    }
+    NL_PIDS.store(u64::MAX, Ordering::Relaxed);
+    NL_SPAWNED.store(false, Ordering::Release);
+    NL_TICK.store(0, Ordering::Release);
+    let st = {
+        let _serial = SerialOff::new();
+        fb_testing::reset();
+        super::spawn_thread_on("s19_nl_watch", nl_watcher, other);
+        super::spawn_thread_on("s19_nl_spawn", nl_spawner, 0);
+        if !sleep_until(|| NL_SPAWNED.load(Ordering::Acquire), 5_000) {
+            return Outcome::Fail("spawner did not run");
+        }
+        let Ok(pid) = u32::try_from(NL_PIDS.load(Ordering::Relaxed)) else {
+            return Outcome::Fail("spawn");
+        };
+        user::wait(pid)
+    };
+    if !sleep_until(|| NL_TICK.load(Ordering::Acquire) != 0, 35_000) {
+        return Outcome::Fail("watcher did not finish");
+    }
+    if st != 0 {
+        return crate::fail_fmt!("newline program status {st:#x}, want 0");
+    }
+    match NL_TICK.load(Ordering::Acquire) {
+        1 => {}
+        3 => return Outcome::Fail("the write took no grid hold"),
+        _ => return Outcome::Fail("no tick during the write"),
+    }
+    let holds = fb_testing::grid_holds();
+    if holds < 16 {
+        return crate::fail_fmt!("{holds} grid holds, want at least 16");
+    }
+    let piece = fb_testing::max_piece_bytes();
+    if piece > PIECE_BYTES as u64 {
+        return crate::fail_fmt!("a redraw hold wrote {piece} bytes, want at most {PIECE_BYTES}");
+    }
+    if fb_testing::pieces() == 0 {
+        return Outcome::Fail("the write redrew nothing");
+    }
+    let scrolls = fb_testing::max_chunk_scrolls();
+    if scrolls > 1 {
+        return crate::fail_fmt!("a chunk scrolled {scrolls} times");
+    }
+    if fb_testing::scrolls() == 0 {
+        return Outcome::Fail("4096 newlines never scrolled");
+    }
+    console_if_off_write()
+}
+
+/// A `Z` written with IF off stays background until a write with IF on.
+fn console_if_off_write() -> Outcome {
+    let Some((gx, gy)) = (0..8u8)
+        .flat_map(|y| (0..8u8).map(move |x| (x, y)))
+        .find(|&(x, y)| vibeos::fb::glyph_pixel(b'Z', x, y))
+    else {
+        return Outcome::Fail("Z has no lit pixel");
+    };
+    fb_init::write(b"\n");
+    let Some((col, row)) = fb_init::cursor() else {
+        return Outcome::Fail("no cursor");
+    };
+    let (ox, oy) = vibeos::fb::glyph_origin(col, row);
+    let (x, y) = (ox + u32::from(gx), oy + u32::from(gy));
+    let Some(bg) = fb_init::get_pixel(x, y) else {
+        return Outcome::Fail("cursor cell off screen");
+    };
+    {
+        let _g = x86::InterruptGuard::enter();
+        fb_init::write(b"Z");
+    }
+    if fb_init::get_pixel(x, y) != Some(bg) {
+        return Outcome::Fail("a write with IF off drew its glyph");
+    }
+    fb_init::write(b"");
+    if fb_init::get_pixel(x, y) == Some(bg) {
+        return Outcome::Fail("the next write with IF on left Z undrawn");
+    }
+    fb_init::write(b"\n");
     Outcome::Ok
 }

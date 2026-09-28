@@ -424,9 +424,6 @@ does not meet this yet:
 - a forked or spawned process's first ring-3 entry, `enter_user_full`,
   runs with IF=1, so an interrupt between its `mov gs` and its `iretq`
   reads `gs:[0]` at VA 0 at CPL 0 and halts (F006; ROADMAP §10.6)
-- a console `write` holds IF=0 for each 256-byte chunk, and each newline
-  on the last row copies the whole framebuffer inside that stretch (F044;
-  ROADMAP §10.6)
 - an ELF with a huge `p_memsz` (§3.1; F009, ROADMAP §10.6)
 - a `fork` near memory exhaustion (§2.1; F010, ROADMAP §10.10)
 
