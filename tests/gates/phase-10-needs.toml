@@ -564,3 +564,19 @@ needs = [
   "`scripts/check_gone.py`, which `make check` runs,",  # L1460
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1390
+[[box]]
+key = "`enter_user` and `enter_user_full` execute `cli`"
+needs = [
+  "ring 3 runs with Linux's",  # L1391
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L989
+[[box]]
+key = "a non-canonical saved RIP gets"
+needs = [
+  "the top user page is",  # L1383
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
