@@ -3040,8 +3040,9 @@ architectures. Planned (ROADMAP §11.3, §11.6): the aarch64 port does not exist
    `vibeos_exit_if_set`; `console_init::wait_key` returns with the IF it was entered with.
    `enter_user_full` runs `cli` and then `vibeos_iret_user_full`, one asm sequence that checks IF
    in debug builds (faulting at `vibeos_enter_if_set`), loads the data selectors, writes
-   `KERNEL_GS_BASE`, `GS_BASE`, and `FS_BASE`, and runs `iretq`. The syscall exit also stages the return value and the `iretq` frame in
-   `PerCpu.syscall_scratch`, per CPU, not per thread (ROADMAP §10.6, the user-frame box).
+   `KERNEL_GS_BASE`, `GS_BASE`, and `FS_BASE`, and runs `iretq`. The syscall exit stores the
+   return value in the user frame's `rax` slot and reads everything it restores from the frame; no
+   exit instruction writes a `gs:` operand.
 5. Every interrupt and exception entry clears RFLAGS.AC before any other code: an interrupt gate
    clears IF and TF but not AC, and ring 3 can set AC with `popf`. The syscall entry clears AC
    through FMASK (bit 18). Every generated stub starts with `clac`, and `idt::init` points each gate
@@ -3617,12 +3618,11 @@ Contents (`src/per_cpu.rs`):
 - `irq_nest`, `slice_tsc`, `idle_tsc`, and `switch_scratch`, a `CpuContext` that no code reads or writes
 - `tsc_per_ms` (a copy of the BSP's value, [section 6.2](#62-calibrating-the-tsc)) and `timer_mode`
 - `kernel_rsp0`, which the context switch updates; `tss`, through which it writes TSS.RSP0; and `fallback_rsp0`, the RSP0 it uses for a thread without `Tcb.stack` (below)
-- `syscall_scratch`: the user RSP, the syscall return value, and the `iretq` RIP, RFLAGS, and RSP.
-  It is per CPU, not per thread, so it is valid only while IF=0. The syscall exit breaks this: it
-  runs without a `cli`, and a console `read` that waited in `sti; hlt` returns to it with IF=1
-  (ROADMAP §10.6, F001). Planned (ROADMAP §10.6): it shrinks to one word, the user RSP between
-  `syscall` and the entry's stack switch; the exit keeps the return value and its `iretq` frame in
-  the thread's user frame ([section 5.10](#510-privilege-transitions)).
+- `syscall_scratch`: one word, the user RSP between `syscall` and the entry's stack switch, which
+  copies it into the user frame. It is per CPU, not per thread, so it is valid only while IF=0; the
+  entry's `sti` follows the copy. No exit writes it: the exit keeps the return value and its
+  `iretq` frame in the thread's user frame ([section 5.10](#510-privilege-transitions)). It sits
+  at the end of the owner-only part.
 - `remote`, this CPU's `PerCpuRemote` in a separate per-CPU array: `ticks`, `switches`, `runq_len`,
   `ready`, `wake_inbox`, `apic_id`, and `as_cr3`, the root this CPU last loaded: an `AtomicU64` its
   owner stores after each CR3 write and `addr_space_init::teardown` reads. All are atomics; it is the
@@ -3688,7 +3688,7 @@ as `CR4.TSD` or `SCTLR_EL1.UCT`, is a row of §11.4's table instead.
 | x86_64 | DR0-DR3, DR7 | the thread's decoded debug slots, and the tracer's masked DR7 for `PEEKUSER` | the switch, by the Debug state paragraph below | not built: nothing arms them before ROADMAP §17.4 |
 | x86_64 | DR6 | the thread's virtual DR6 | not switched: the `#DB` body writes the thread's copy from the DR6 its entry saved (§5.10) | not built: ROADMAP §17.4 |
 | x86_64 | DS, ES, FS, and GS selectors | the thread's own four, saved at the switch away | `on_switch`, which loads the incoming thread's four before it writes `FS_BASE` and `GS_BASE`, since a selector load can clear the matching base | Rule; not yet enforced: ROADMAP §10.6 ([section 5.1](#51-gdt-and-tss)). `enter_user_full` loads `0x1B` into all four and nothing saves them, so a selector ring 3 loads with `mov` is lost at the next switch |
-| x86_64 | `PerCpu.syscall_scratch` | per CPU | not switched | valid only while IF=0 (above; F001); one word, the user RSP at entry, once ROADMAP §10.6 keeps the exit's state in the user frame |
+| x86_64 | `PerCpu.syscall_scratch` | per CPU | not switched | valid only while IF=0 (above); one word, the user RSP from `syscall` to the entry's stack switch; the exit keeps its state in the user frame |
 | aarch64 | `x19`-`x29`, SP, LR | `Tcb.context` | `switch_context` (ROADMAP §11.4) | not built |
 | aarch64 | DAIF.I and F | come from `irq_nest`, as on x86_64 | `switch_context` | not built |
 | aarch64 | user `x0`-`x30`, SP, PC, PSTATE, `orig_x0`, and the syscall number | the thread's user frame at the top of `Tcb.stack` ([section 5.10](#510-privilege-transitions)) | every entry from EL0 saves it, and each return to EL0 leaves `SP_ELx` at the top of the thread's stack for the next entry | not built: ROADMAP §11.6 |

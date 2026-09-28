@@ -28,9 +28,11 @@ use vibeos::syscall::{
     ENAMETOOLONG, ENODEV, ENOENT, ENOEXEC, ENOMEM, ENOSYS, ENOTDIR, EPERM, ESRCH, F_GETFD, F_SETFD,
     SYS_BRK, SYS_CLOSE, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_EXIT, SYS_FCNTL, SYS_FORK, SYS_GETPID,
     SYS_GETPPID, SYS_KILL, SYS_LSEEK, SYS_MMAP, SYS_MUNMAP, SYS_OPEN, SYS_PSINFO, SYS_READ,
-    SYS_SCHED_YIELD, SYS_WAIT4, SYS_WRITE, SyscallFrame, UserRegs,
+    SYS_SCHED_YIELD, SYS_WAIT4, SYS_WRITE, UserFrame, UserRegs,
 };
 use vibeos::thread::{RFLAGS_IF, RFLAGS_RESERVED1, ThreadId};
+use vibeos::trap::SyscallAbi;
+use vibeos::trap::x86_64::Abi;
 use vibeos::vectors;
 use vibeos::wait::WaitQueue;
 
@@ -480,12 +482,14 @@ pub(crate) fn wait_kernel(pid: u32) -> u32 {
     }
 }
 
-pub fn syscall(frame: *mut SyscallFrame) -> i64 {
-    apply_pending(frame);
-    let f = unsafe { &mut *frame };
-    let nr = f.nr;
-    let args = f.args();
-    let ret = dispatch_frame(nr, args, f);
+/// A syscall from ring 3, over the user frame its entry saved.
+pub fn syscall(frame: &mut UserFrame) -> i64 {
+    #[cfg(feature = "kernel_tests")]
+    testing::on_entry(frame);
+    apply_pending(Some(&mut *frame));
+    let nr = Abi::nr(frame);
+    let args: [u64; 6] = core::array::from_fn(|i| Abi::arg(frame, i));
+    let ret = dispatch_frame(nr, args, Some(frame));
     if syscall_init::trace_enabled() {
         let name = syscall::info(nr).map(|i| i.name).unwrap_or("?");
         let _ = writeln!(Serial, "user: syscall {name} nr={nr} = {ret}");
@@ -494,10 +498,10 @@ pub fn syscall(frame: *mut SyscallFrame) -> i64 {
 }
 
 pub fn dispatch(nr: u64, args: [u64; 6]) -> i64 {
-    dispatch_frame(nr, args, core::ptr::null_mut())
+    dispatch_frame(nr, args, None)
 }
 
-fn dispatch_frame(nr: u64, args: [u64; 6], frame: *mut SyscallFrame) -> i64 {
+fn dispatch_frame(nr: u64, args: [u64; 6], frame: Option<&mut UserFrame>) -> i64 {
     match nr {
         SYS_READ => sys_read(args[0], args[1], args[2]),
         SYS_WRITE => sys_write(args[0], args[1], args[2]),
@@ -539,7 +543,7 @@ fn dispatch_frame(nr: u64, args: [u64; 6], frame: *mut SyscallFrame) -> i64 {
 /// the section that decides it, so a `SIGCONT` that `sys_kill` sends in
 /// between finds the thread on the queue (ROADMAP §10.6, F033). The loop
 /// re-checks after every `schedule()`, which can return early.
-fn apply_pending(frame: *mut SyscallFrame) {
+fn apply_pending(frame: Option<&mut UserFrame>) {
     let pid = current_pid();
     if pid == 0 {
         return;
@@ -945,10 +949,10 @@ fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
 // Out of line: `dispatch_frame` keeps only the running syscall's frame,
 // and a preempted body carries an interrupt and a switch on top of it.
 #[inline(never)]
-fn sys_fork(frame: *mut SyscallFrame) -> i64 {
-    if frame.is_null() {
+fn sys_fork(frame: Option<&mut UserFrame>) -> i64 {
+    let Some(frame) = frame else {
         return syscall::neg(EINVAL);
-    }
+    };
     let ppid = current_pid();
     if ppid == 0 {
         return syscall::neg(EINVAL);
@@ -982,7 +986,7 @@ fn sys_fork(frame: *mut SyscallFrame) -> i64 {
         return syscall::neg(ENOMEM);
     };
     let cr3 = cloned.root().as_u64();
-    let child_regs = UserRegs::from_syscall(unsafe { &*frame }, 0);
+    let child_regs = UserRegs::from_syscall(frame, 0);
     let fs = crate::x86::rdmsr(crate::x86::IA32_FS_BASE);
     let mut child_regs = child_regs;
     child_regs.fs_base = fs;
@@ -1017,10 +1021,10 @@ fn sys_fork(frame: *mut SyscallFrame) -> i64 {
 // Out of line: `dispatch_frame` keeps only the running syscall's frame,
 // and a preempted body carries an interrupt and a switch on top of it.
 #[inline(never)]
-fn sys_execve(path: u64, argv: u64, envp: u64, frame: *mut SyscallFrame) -> i64 {
-    if frame.is_null() {
+fn sys_execve(path: u64, argv: u64, envp: u64, frame: Option<&mut UserFrame>) -> i64 {
+    let Some(frame) = frame else {
         return syscall::neg(EINVAL);
-    }
+    };
     let pid = current_pid();
     if pid == 0 {
         return syscall::neg(EINVAL);
@@ -1106,13 +1110,10 @@ fn sys_execve(path: u64, argv: u64, envp: u64, frame: *mut SyscallFrame) -> i64 
     if let Some(old) = old {
         addr_space_init::teardown(old.into_inner());
     }
-    let f = unsafe { &mut *frame };
-    let mut regs = UserRegs::empty();
-    regs.rip = entry;
-    regs.rsp = rsp;
-    regs.rflags = RFLAGS_RESERVED1 | RFLAGS_IF;
-    regs.fs_base = fs;
-    regs.apply_to_syscall(f);
+    *frame = UserFrame {
+        orig_rax: frame.orig_rax,
+        ..UserFrame::new_user(entry, rsp)
+    };
     unsafe { crate::x86::wrmsr(crate::x86::IA32_FS_BASE, fs) };
     0
 }
@@ -1331,7 +1332,7 @@ fn sys_wait4(pid: u64, status: u64, options: u64) -> i64 {
                 if let Some(s) = current_space() {
                     set_as(s);
                 }
-                apply_pending(core::ptr::null_mut());
+                apply_pending(None);
             }
         }
     }
@@ -1531,6 +1532,7 @@ pub(crate) mod testing {
     use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
     use vibeos::proc::MAX_PROCS;
+    use vibeos::syscall::{SYS_GETPID, UserFrame};
 
     use crate::per_cpu_init;
     use crate::thread_init;
@@ -1672,6 +1674,36 @@ pub(crate) mod testing {
     pub(super) fn console_write_returned() {
         if WRITE_ARMED.swap(false, Ordering::AcqRel) {
             WRITE_DONE_NS.store(time_init::now_ns().max(1), Ordering::Release);
+        }
+    }
+
+    /// The `rdi` of a `getpid` that the entry hooks below act on: a test
+    /// program's own call, armed before the program exists.
+    pub(crate) const HOOK_MAGIC: u64 = 0x5EED_CA11_0000_5A21;
+
+    /// The canary the next marked `getpid` writes into its frame's `rcx`;
+    /// 0 for none.
+    static RCX_CANARY: AtomicU64 = AtomicU64::new(0);
+
+    /// The next `getpid` whose `rdi` is [`HOOK_MAGIC`] returns with `rcx`
+    /// = `canary` in its user frame.
+    pub(crate) fn arm_rcx_canary(canary: u64) {
+        RCX_CANARY.store(canary, Ordering::Release);
+    }
+
+    /// Undo every `arm_*` hook of this group.
+    pub(crate) fn disarm() {
+        RCX_CANARY.store(0, Ordering::Release);
+    }
+
+    /// Top of `proc_init::syscall`, before the dispatch.
+    pub(super) fn on_entry(frame: &mut UserFrame) {
+        if frame.orig_rax != SYS_GETPID || frame.rdi != HOOK_MAGIC {
+            return;
+        }
+        let c = RCX_CANARY.swap(0, Ordering::AcqRel);
+        if c != 0 {
+            frame.rcx = c;
         }
     }
 }

@@ -81,37 +81,6 @@ pub const fn neg(errno: i32) -> i64 {
     -(errno as i64)
 }
 
-/// Saved frame on the kernel stack. Layout matches `vibeos_syscall_entry`
-/// pushes, low address first.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct SyscallFrame {
-    pub user_rsp: u64,
-    pub nr: u64,
-    pub rip: u64,
-    pub arg2: u64,
-    pub rbx: u64,
-    pub rbp: u64,
-    pub arg1: u64,
-    pub arg0: u64,
-    pub arg4: u64,
-    pub arg5: u64,
-    pub arg3: u64,
-    pub r11: u64,
-    pub r12: u64,
-    pub r13: u64,
-    pub r14: u64,
-    pub r15: u64,
-}
-
-impl SyscallFrame {
-    pub const fn args(self) -> [u64; 6] {
-        [
-            self.arg0, self.arg1, self.arg2, self.arg3, self.arg4, self.arg5,
-        ]
-    }
-}
-
 /// Full user GPR set for fork child / exec / iret-into-user.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -162,46 +131,28 @@ impl UserRegs {
         }
     }
 
-    pub fn from_syscall(f: &SyscallFrame, retval: u64) -> Self {
+    pub fn from_syscall(f: &UserFrame, retval: u64) -> Self {
         Self {
             rax: retval,
             rbx: f.rbx,
-            rcx: f.rip,
-            rdx: f.arg2,
-            rsi: f.arg1,
-            rdi: f.arg0,
+            rcx: f.rcx,
+            rdx: f.rdx,
+            rsi: f.rsi,
+            rdi: f.rdi,
             rbp: f.rbp,
-            r8: f.arg4,
-            r9: f.arg5,
-            r10: f.arg3,
+            r8: f.r8,
+            r9: f.r9,
+            r10: f.r10,
             r11: f.r11,
             r12: f.r12,
             r13: f.r13,
             r14: f.r14,
             r15: f.r15,
             rip: f.rip,
-            rsp: f.user_rsp,
-            rflags: f.r11,
+            rsp: f.rsp,
+            rflags: f.rflags,
             fs_base: 0,
         }
-    }
-
-    pub fn apply_to_syscall(self, f: &mut SyscallFrame) {
-        f.user_rsp = self.rsp;
-        f.rip = self.rip;
-        f.arg2 = self.rdx;
-        f.rbx = self.rbx;
-        f.rbp = self.rbp;
-        f.arg1 = self.rsi;
-        f.arg0 = self.rdi;
-        f.arg4 = self.r8;
-        f.arg5 = self.r9;
-        f.arg3 = self.r10;
-        f.r11 = self.rflags;
-        f.r12 = self.r12;
-        f.r13 = self.r13;
-        f.r14 = self.r14;
-        f.r15 = self.r15;
     }
 }
 
@@ -420,7 +371,6 @@ pub fn validate_args(
 mod tests {
     use super::*;
     use crate::addr_space::UserMemError;
-    use core::mem::{offset_of, size_of};
 
     #[test]
     fn errno_linux_values() {
@@ -483,20 +433,6 @@ mod tests {
         }
         assert_eq!(n, TABLE.len());
         assert_eq!(n, 20);
-    }
-
-    #[test]
-    fn frame_layout_matches_entry_pushes() {
-        assert_eq!(size_of::<SyscallFrame>(), 128);
-        assert_eq!(offset_of!(SyscallFrame, user_rsp), 0);
-        assert_eq!(offset_of!(SyscallFrame, nr), 8);
-        assert_eq!(offset_of!(SyscallFrame, rip), 16);
-        assert_eq!(offset_of!(SyscallFrame, arg2), 24);
-        assert_eq!(offset_of!(SyscallFrame, arg1), 48);
-        assert_eq!(offset_of!(SyscallFrame, arg0), 56);
-        assert_eq!(offset_of!(SyscallFrame, arg4), 64);
-        assert_eq!(offset_of!(SyscallFrame, arg5), 72);
-        assert_eq!(offset_of!(SyscallFrame, arg3), 80);
     }
 
     #[test]
