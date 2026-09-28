@@ -585,6 +585,8 @@ fn apply_pending(frame: Option<&mut UserFrame>) {
                 }
                 p.state = ProcState::Stopped;
                 s.begin_wait(&mut p.stop_wq, FAR_DEADLINE);
+                #[cfg(feature = "kernel_tests")]
+                testing::stop_decided(pid);
                 Pending::Stop
             })
         });
@@ -1517,17 +1519,27 @@ pub fn try_user_fault(f: &TrapFrame) {
     let Some((sig, _si_code)) = sig_for_vec(f) else {
         return;
     };
-    let _ = write!(
-        Serial,
-        "user: pid {pid} killed SIG{} rip=0x{:x} err=0x{:x}",
-        sig_name(sig),
-        f.user().rip,
-        f.error_code
-    );
-    if f.vector == u64::from(vectors::PF) {
-        let _ = write!(Serial, " cr2=0x{:x}", f.cr2);
+    // One `writeln!`, so one IF-off region (`Serial::write_fmt`): the body
+    // runs with IF=1, and a thread that ran on this CPU between two writes
+    // would land inside this line in the CPU's log capture stage.
+    let (name, rip, err) = (sig_name(sig), f.user().rip, f.error_code);
+    let _ = if f.vector == u64::from(vectors::PF) {
+        writeln!(
+            Serial,
+            "user: pid {pid} killed SIG{name} rip=0x{rip:x} err=0x{err:x} cr2=0x{:x}",
+            f.cr2
+        )
+    } else {
+        writeln!(
+            Serial,
+            "user: pid {pid} killed SIG{name} rip=0x{rip:x} err=0x{err:x}"
+        )
+    };
+    #[cfg(feature = "kernel_tests")]
+    {
+        testing::kill_line_yield(f);
+        testing::kill_line_done();
     }
-    let _ = writeln!(Serial);
     crate::arch::gs::force_kernel();
     finish_exit(wait_signaled(sig), true);
 }
@@ -1544,9 +1556,51 @@ pub(crate) mod testing {
     use vibeos::proc::MAX_PROCS;
     use vibeos::syscall::{SYS_GETPID, UserFrame};
 
+    use crate::arch::idt::TrapFrame;
     use crate::per_cpu_init;
     use crate::thread_init;
     use crate::time_init;
+
+    /// `cr2` of the `#PF` whose kill line yields once; 0 for none.
+    static KILL_YIELD_CR2: AtomicU64 = AtomicU64::new(0);
+    /// Kill lines `try_user_fault` has finished writing since boot.
+    static KILL_LINES: AtomicU64 = AtomicU64::new(0);
+
+    /// The next CPL-3 `#PF` at `cr2` that ends in a kill yields in
+    /// `try_user_fault` once its kill line is written, until another kill
+    /// line is written, for at most 1 s of TSC time: a kill line written
+    /// in pieces would take the other line inside it.
+    pub(crate) fn arm_kill_line_yield(cr2: u64) {
+        KILL_YIELD_CR2.store(cr2, Ordering::Release);
+    }
+
+    pub(crate) fn disarm_kill_line_yield() {
+        KILL_YIELD_CR2.store(0, Ordering::Release);
+    }
+
+    pub(super) fn kill_line_yield(f: &TrapFrame) {
+        let armed = KILL_YIELD_CR2.load(Ordering::Acquire);
+        if armed == 0
+            || f.vector != u64::from(vibeos::vectors::PF)
+            || f.cr2 != armed
+            || KILL_YIELD_CR2
+                .compare_exchange(armed, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return;
+        }
+        let n0 = KILL_LINES.load(Ordering::Acquire);
+        let t0 = time_init::now_ns();
+        while KILL_LINES.load(Ordering::Acquire) == n0
+            && time_init::now_ns().saturating_sub(t0) < 1_000_000_000
+        {
+            thread_init::yield_now();
+        }
+    }
+
+    pub(super) fn kill_line_done() {
+        KILL_LINES.fetch_add(1, Ordering::AcqRel);
+    }
 
     static GETPIDS: [AtomicU64; MAX_PROCS] = [const { AtomicU64::new(0) }; MAX_PROCS];
 
@@ -1576,7 +1630,8 @@ pub(crate) mod testing {
         STALL_PID.store(pid, Ordering::Release);
     }
 
-    /// The armed process sits in the stall.
+    /// The armed process has decided to stop and armed its `stop_wq` wait:
+    /// it sits between its stop decision and its sleep.
     pub(crate) fn stop_stalled() -> bool {
         STALL_IN.load(Ordering::Acquire)
     }
@@ -1588,6 +1643,18 @@ pub(crate) mod testing {
     pub(crate) fn disarm_stop_stall() {
         STALL_PID.store(0, Ordering::Release);
         STALL_RELEASE.store(true, Ordering::Release);
+    }
+
+    /// Called in the SCHED section that arms a stopping process's
+    /// `stop_wq` wait: marks the stall when `pid` is the armed process. A
+    /// tick after that section parks the thread, since a preempted
+    /// `Blocked` thread is not requeued, and [`stop_stall`] would then run
+    /// only after the `SIGCONT` that the sender sends once it sees the
+    /// stall; so the stall is marked here, before IF can come back on.
+    pub(super) fn stop_decided(pid: u32) {
+        if STALL_PID.load(Ordering::Acquire) == pid {
+            STALL_IN.store(true, Ordering::Release);
+        }
     }
 
     /// Spins on TSC time; never services IPIs.

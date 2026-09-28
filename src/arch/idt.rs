@@ -1143,6 +1143,12 @@ pub mod testing {
         {
             return false;
         }
+        // IF off from the store of the first CPU to the hook's end: a tick
+        // before the yield, or on the new CPU before the hook is off, would
+        // preempt the thread with the hook on and move it again, back to
+        // CPU 0 at `-smp 2`. The yield switches away with IF off, as
+        // `thread_exit` does.
+        let _irq = crate::x86::InterruptGuard::enter();
         REPIN_FROM.store(crate::thread_init::current_cpu(), Ordering::Release);
         crate::thread_init::testing::set_requeue_next_cpu(true);
         crate::thread_init::yield_now();

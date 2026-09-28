@@ -145,6 +145,11 @@ fn test_exec_huge_memsz() -> Outcome {
             return crate::fail_fmt!("write {path}: {}", e.as_str());
         }
     }
+    // Each load compares the buddy count at its entry and return, so no
+    // dead thread's stack an earlier test left may reach the buddy between.
+    if !super::settle_threads() {
+        return Outcome::Fail("threads did not settle");
+    }
     as_testing::reset_chunks();
     exec_testing::clear_exec_frames();
     let rc = user::run(

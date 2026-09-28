@@ -366,13 +366,16 @@ fn requeue_next_cpu(next: ThreadId, cur: ThreadId, idle: ThreadId, me: u32) -> T
         if t.pid != 0 {
             t.affinity = CpuAffinity::Pinned(target);
         }
+        // Before the place: `with_sched` hands the thread to `target` as
+        // its lock drops, and a dequeue there that finds no arrival would
+        // move it again.
+        testing::moved(next);
         s.place(target, next);
         true
     });
     if !moved {
         return next;
     }
-    testing::moved(next);
     per_cpu_init::with_current(|cpu| take_next(&mut cpu.runq, idle))
 }
 
@@ -1287,7 +1290,15 @@ pub mod testing {
 
     /// C-REQUEUE-HOOK: move each user or `CpuAffinity::Any` thread to the
     /// next online CPU when its CPU dequeues it (`requeue_next_cpu`).
+    /// Turning it on forgets the arrivals an earlier use left: a thread
+    /// moved just before the hook went off keeps its flag, and a later
+    /// thread in that slot would run where it is dequeued instead of moving.
     pub fn set_requeue_next_cpu(on: bool) {
+        if on {
+            for a in ARRIVED.iter() {
+                a.store(false, Ordering::Relaxed);
+            }
+        }
         REQUEUE.store(on, Ordering::Release);
     }
 
@@ -1310,7 +1321,7 @@ pub mod testing {
 
     pub(super) fn moved(id: ThreadId) {
         if let Some(a) = ARRIVED.get(id.raw() as usize) {
-            a.store(true, Ordering::Relaxed);
+            a.store(true, Ordering::Release);
         }
         REQUEUES.fetch_add(1, Ordering::Relaxed);
     }
@@ -1319,6 +1330,6 @@ pub mod testing {
     pub(super) fn take_arrived(id: ThreadId) -> bool {
         ARRIVED
             .get(id.raw() as usize)
-            .is_some_and(|a| a.swap(false, Ordering::Relaxed))
+            .is_some_and(|a| a.swap(false, Ordering::AcqRel))
     }
 }
