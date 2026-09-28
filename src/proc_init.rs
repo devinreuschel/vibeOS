@@ -158,6 +158,7 @@ fn fs_errno(e: FsError) -> i32 {
         FsError::Badf => EBADF,
         FsError::Io => EIO,
         FsError::FileTooBig => EFBIG,
+        FsError::NoMem => ENOMEM,
         FsError::Loop | FsError::NotEmpty | FsError::NotSupp => EINVAL,
     }
 }

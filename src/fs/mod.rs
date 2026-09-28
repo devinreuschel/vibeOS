@@ -99,6 +99,8 @@ pub enum FsError {
     Io,
     /// Past a filesystem's maximum file size.
     FileTooBig,
+    /// A kernel heap allocation failed (DESIGN §4.4).
+    NoMem,
 }
 
 impl FsError {
@@ -118,6 +120,7 @@ impl FsError {
             FsError::NotSupp => "not supp",
             FsError::Io => "io",
             FsError::FileTooBig => "file too big",
+            FsError::NoMem => "no memory",
         }
     }
 }

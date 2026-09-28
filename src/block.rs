@@ -46,6 +46,8 @@ pub enum BlockError {
     Io,
     Failed,
     QueueFull,
+    /// A kernel heap allocation failed (DESIGN §4.4).
+    NoMem,
 }
 
 impl BlockError {
@@ -55,6 +57,7 @@ impl BlockError {
             BlockError::Io => "io",
             BlockError::Failed => "failed",
             BlockError::QueueFull => "queue full",
+            BlockError::NoMem => "no memory",
         }
     }
 
