@@ -953,7 +953,7 @@ that review cites means the review's text.
 | I39 | On aarch64, an ASID a CPU has used since its last local TLB flush names one address space on that CPU ([§11.2](#112-address-space-on-aarch64)) | the ASID allocator (ROADMAP §11.2) | documented | Not relied on yet: the aarch64 port does not exist; ROADMAP §11.2's host tests and loom model enforce it when it lands |
 | I40 | A thread sleeps, or takes a sleeping lock, only with IF=1 and no spinlock held (§2.1, [§2.9](#29-preemption-and-interrupt-state) rule 4) | none yet | documented | No: syscall bodies run with IF=0 until they block (§2.9 rule 3; ROADMAP §10.6); nothing asserts either condition until ROADMAP §10.3's may-sleep box (F108) |
 | I41 | No sleeping lock of levels 2 to 4 is held across a copy to or from user memory, and code that holds the address-space lock takes no level-1 lock (§2.1) | none yet | documented | Yes, vacuously: the address-space lock, page waits, and the filesystems' block-mapping locks arrive with ROADMAP §12.5 and §13.1, and ROADMAP §13.12's lock-dependency build reports a violation the first time one happens |
-| I42 | Kernel-binary code that a syscall, a device, or a disk image reaches does not panic on that input, running out of memory or table slots included (AGENTS rule 4, [§4.4](#44-kernel-heap)) | convention; `vibeos::kalloc` from ROADMAP §10.4 | documented | No: a full thread table panics (ROADMAP §10.4, F037), and `alloc`'s growing calls panic on a failed allocation until ROADMAP §10.4's `kalloc` |
+| I42 | Kernel-binary code that a syscall, a device, or a disk image reaches does not panic on that input, running out of memory or table slots included (AGENTS rule 4, [§4.4](#44-kernel-heap)) | `vibeos::kalloc` on the `fork`, `execve`, `open` and thread-spawn paths; convention elsewhere | enforced on those paths by the in-guest `kalloc_nomem` test; documented elsewhere | Partly: those paths return `ENOMEM` (ROADMAP §10.4, F010); `alloc`'s growing calls elsewhere still panic on a failed allocation until ROADMAP §10.4's box that makes allocation after `irq: enabled` fallible on every path |
 | I120 | Another CPU reads a CPU's per-CPU state only through its `PerCpuRemote`, whose fields are atomics, and takes `&mut` to another CPU's `PerCpu` only through `with_cpu` while that CPU is not running (§7.5) | `per_cpu_init::cpu`, `per_cpu_init::with_cpu` | enforced (the view type, its const assertion, and `check_cells.py`'s type and must-be-unsafe lists) | Yes, except an AP that accepted a SIPI and stalled past the ready timeout (ROADMAP §11.4, F032) |
 | I128 | A page-table root is freed only when no CPU has it loaded (CR3; TTBR0 on aarch64) and no TCB's `as_cr3` names it; a path that drops or replaces a thread's space records the replacement (or 0) in `as_cr3` and loads it before `teardown` | `addr_space_init::teardown` (assertion); `proc_init::finish_exit`, `proc_init::sys_execve` | enforced at runtime, every build | Yes |
 
@@ -1987,10 +1987,11 @@ Rust-for-Linux settled on (`KBox`, `KVec`) after starting from `alloc`'s collect
 `disallowed-methods` list of infallible constructors, which misses the calls it does not name and
 leaves `Box` and `Arc` with no fallible path on stable Rust.
 
-Rule; not yet enforced: syscall paths, driver probes (`virtio_blk_init`'s `Box::new`), and
-`spawn_inner`'s TCB box use the infallible API today; a kernel stack that cannot be allocated is
-`SpawnError::NoMemory`, but `spawn_inner`'s TCB box, which a `fork` reaches when no Dead slot is
-free, panics when the heap cannot grow (F010). ROADMAP §10.4 lands `kalloc` in Phase 10's first wave and the lints after it. Rejected: making small allocations never fail by having the allocator wait
+Rule; enforced in part: `fork`, `execve`, `open`, and thread creation in `spawn_inner` allocate
+through `kalloc` and return `ENOMEM`, which the in-guest `kalloc_nomem` test checks (ROADMAP
+§10.4); a kernel stack that cannot be allocated is `SpawnError::NoMemory` (F010). Driver probes
+(`virtio_blk_init`'s `Box::new`) and other paths use the infallible API until ROADMAP §10.4's box
+that makes allocation after `irq: enabled` fallible on every path. Rejected: making small allocations never fail by having the allocator wait
 until the OOM killer frees memory (Linux's "too small to fail"), because an allocation made with a
 spinlock held, or on a path the OOM victim needs in order to exit, cannot wait, and a failed
 `Box::new` cannot be handled by its caller; AGENTS.md rule 4 forbids a user-triggerable panic.

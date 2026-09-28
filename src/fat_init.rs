@@ -17,6 +17,7 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
+use vibeos::block::BlockError;
 use vibeos::fat::{self, Disk, FatError, FatInode, FatVol, INITRD_BYTES, Node, SEC};
 use vibeos::fs::{
     Dirent, FileSystem, FsError, FsType, Inode, InodeHandle, InodeInfo, InodeKind, InodeOps,
@@ -33,6 +34,15 @@ use crate::thread_init;
 use crate::virtio_blk_init;
 
 use vibeos::limits::MAX_FAT_VOLS as MAX_VOLS;
+
+/// A cache error as FAT sees it: a refused heap allocation stays
+/// `NoMem` (ENOMEM), anything else is `Io`.
+fn fat_io_err(e: BlockError) -> FatError {
+    match e {
+        BlockError::NoMem => FatError::NoMem,
+        _ => FatError::Io,
+    }
+}
 pub const VOL_INITRD: u8 = 0;
 const MNT_MAX: usize = 2;
 const MNT_PATH: usize = 64;
@@ -125,7 +135,7 @@ impl Disk for Io {
                     Ok(())
                 })
             }
-            Media::Dev(dev) => cache_init::read(dev, lba as u64, buf).map_err(|_| FatError::Io),
+            Media::Dev(dev) => cache_init::read(dev, lba as u64, buf).map_err(fat_io_err),
         }
     }
 
@@ -143,14 +153,14 @@ impl Disk for Io {
                     Ok(())
                 })
             }
-            Media::Dev(dev) => cache_init::write(dev, lba as u64, buf).map_err(|_| FatError::Io),
+            Media::Dev(dev) => cache_init::write(dev, lba as u64, buf).map_err(fat_io_err),
         }
     }
 
     fn flush(&mut self) -> Result<(), FatError> {
         match self.back {
             Media::Initrd => Ok(()),
-            Media::Dev(dev) => cache_init::flush(dev).map_err(|_| FatError::Io),
+            Media::Dev(dev) => cache_init::flush(dev).map_err(fat_io_err),
         }
     }
 }

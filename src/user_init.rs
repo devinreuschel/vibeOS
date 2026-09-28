@@ -1,15 +1,13 @@
 //! Load a static ELF, from the filesystem or from memory, into a new
 //! address space. ROADMAP §9.4 / §9.8.
 
-use alloc::vec;
-use alloc::vec::Vec;
-
 use vibeos::addr_space::{AddressSpace, AsError, UserMemError, UserPerms};
 use vibeos::elf::{
     self, AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_FLAGS, AT_GID, AT_PAGESZ, AT_PHDR,
     AT_PHENT, AT_PHNUM, AT_SECURE, AT_UID, Auxv, ElfError, Image,
 };
 use vibeos::fs::{FileRef, FsError, O_RDONLY, OpenFlags};
+use vibeos::kalloc::TryVec;
 use vibeos::paging::PAGE_SIZE_4K;
 
 use crate::addr_space_init;
@@ -32,6 +30,8 @@ pub enum LoadError {
     NoProc,
     /// The process's thread could not be made.
     Spawn(SpawnError),
+    /// A kernel heap allocation failed (DESIGN §4.4).
+    NoMem,
 }
 
 impl LoadError {
@@ -45,6 +45,7 @@ impl LoadError {
             Self::Empty => "empty",
             Self::NoProc => "eagain",
             Self::Spawn(e) => e.as_str(),
+            Self::NoMem => "enomem",
         }
     }
 }
@@ -64,7 +65,7 @@ fn align_up(x: u64, a: u64) -> u64 {
     }
 }
 
-fn read_path(path: &str) -> Result<Vec<u8>, LoadError> {
+fn read_path(path: &str) -> Result<TryVec<u8>, LoadError> {
     let f = file_init::open_routed(path.as_bytes(), OpenFlags::from_bits(O_RDONLY), 0)
         .map_err(LoadError::Fs)?;
     let r = read_file(&f);
@@ -72,7 +73,9 @@ fn read_path(path: &str) -> Result<Vec<u8>, LoadError> {
     r
 }
 
-fn read_file(f: &FileRef) -> Result<Vec<u8>, LoadError> {
+/// Read `f` whole, at most its stated size, into a buffer reserved up
+/// front, so the reads never reallocate.
+fn read_file(f: &FileRef) -> Result<TryVec<u8>, LoadError> {
     let st = file_init::stat(f).map_err(LoadError::Fs)?;
     if st.size == 0 {
         return Err(LoadError::Empty);
@@ -80,16 +83,19 @@ fn read_file(f: &FileRef) -> Result<Vec<u8>, LoadError> {
     if st.size > MAX_ELF {
         return Err(LoadError::TooBig);
     }
-    let mut buf = vec![0u8; st.size as usize];
-    let mut n = 0usize;
-    while n < buf.len() {
-        match file_init::read(f, &mut buf[n..]) {
+    let size = st.size as usize;
+    let mut buf = TryVec::try_with_capacity(size).map_err(|_| LoadError::NoMem)?;
+    let mut chunk = [0u8; 512];
+    while buf.len() < size {
+        let want = (size - buf.len()).min(chunk.len());
+        match file_init::read(f, &mut chunk[..want]) {
             Ok(0) => break,
-            Ok(k) => n += k,
+            Ok(k) => buf
+                .try_extend_from_slice(&chunk[..k.min(want)])
+                .map_err(|_| LoadError::NoMem)?,
             Err(e) => return Err(LoadError::Fs(e)),
         }
     }
-    buf.truncate(n);
     Ok(buf)
 }
 
@@ -172,7 +178,13 @@ fn at_random() -> [u8; 16] {
 
 fn fill_stack(space: &AddressSpace, img: &Image<'_>, argv: &[&[u8]]) -> Result<u64, LoadError> {
     let len = (STACK_PAGES * PAGE_SIZE_4K) as usize;
-    let mut mem = vec![0u8; len];
+    let mut mem = TryVec::try_with_capacity(len).map_err(|_| LoadError::NoMem)?;
+    let zero = [0u8; 256];
+    while mem.len() < len {
+        let n = (len - mem.len()).min(zero.len());
+        mem.try_extend_from_slice(&zero[..n])
+            .map_err(|_| LoadError::NoMem)?;
+    }
     let mut aux = [
         Auxv {
             tag: AT_PAGESZ,
@@ -230,7 +242,7 @@ fn fill_stack(space: &AddressSpace, img: &Image<'_>, argv: &[&[u8]]) -> Result<u
     if img.phdr_va.is_none() {
         aux[4].val = 0;
     }
-    let rsp = elf::build_initial_stack(STACK_TOP, &mut mem, argv, &[], &aux, &at_random())
+    let rsp = elf::build_initial_stack(STACK_TOP, &mut mem[..], argv, &[], &aux, &at_random())
         .map_err(LoadError::Elf)?;
     let base = STACK_TOP - len as u64;
     space.write_bytes(base, &mem).map_err(LoadError::Mem)?;
@@ -249,11 +261,18 @@ pub fn load_path(path: &str, argv: &[&str]) -> Result<Loaded, LoadError> {
 
 fn load_path_inner(path: &str, argv: &[&str]) -> Result<Loaded, LoadError> {
     let bytes = read_path(path)?;
-    let argv_b: Vec<&[u8]> = if argv.is_empty() {
-        vec![path.as_bytes()]
-    } else {
-        argv.iter().map(|a| a.as_bytes()).collect()
-    };
+    let mut argv_b =
+        TryVec::<&[u8]>::try_with_capacity(argv.len().max(1)).map_err(|_| LoadError::NoMem)?;
+    if argv.is_empty() {
+        argv_b
+            .try_push(path.as_bytes())
+            .map_err(|_| LoadError::NoMem)?;
+    }
+    for a in argv {
+        argv_b
+            .try_push(a.as_bytes())
+            .map_err(|_| LoadError::NoMem)?;
+    }
     load_image(&bytes, &argv_b)
 }
 
