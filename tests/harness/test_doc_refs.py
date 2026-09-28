@@ -159,7 +159,7 @@ class CitationTest(unittest.TestCase):
     def test_design_dangling(self) -> None:
         self.assertEqual(
             self.run_on(f"x\n{cite('DESIGN', '5.99')}"),
-            ["src/x.rs:2: DESIGN §5.99: no such section in the DESIGN files"],
+            [f"src/x.rs:2: {cite('DESIGN', '5.99')}: no such section in the DESIGN files"],
         )
 
     def test_roadmap(self) -> None:
@@ -167,28 +167,31 @@ class CitationTest(unittest.TestCase):
         self.assertEqual(self.run_on(text), [])
         self.assertEqual(
             self.run_on(cite("ROADMAP", "10.99")),
-            ["src/x.rs:1: ROADMAP §10.99: no such section in docs/ROADMAP.md"],
+            [f"src/x.rs:1: {cite('ROADMAP', '10.99')}: no such section in docs/ROADMAP.md"],
         )
 
     def test_wrapped_in_rust_comment(self) -> None:
         self.assertEqual(self.run_on("// panics (DESIGN\n// §2.5) here"), [])
         self.assertEqual(
             self.run_on("x\n/// panics (DESIGN\n/// §2.99) here"),
-            ["src/x.rs:2: DESIGN §2.99: no such section in the DESIGN files"],
+            [f"src/x.rs:2: {cite('DESIGN', '2.99')}: no such section in the DESIGN files"],
         )
 
     def test_wrapped_in_markdown(self) -> None:
         self.assertEqual(self.run_on("as ROADMAP\n§10.3 says", "docs/X.md"), [])
         self.assertEqual(
             self.run_on("as\nDESIGN\n§7.99 says", "docs/X.md"),
-            ["docs/X.md:2: DESIGN §7.99: no such section in the DESIGN files"],
+            [f"docs/X.md:2: {cite('DESIGN', '7.99')}: no such section in the DESIGN files"],
         )
 
     def test_topic_file_citation(self) -> None:
         self.assertEqual(self.run_on(cite("MEMORY.md", "4.4")), [])
         self.assertEqual(
             self.run_on(cite("INVARIANTS.md", "4.4")),
-            ["src/x.rs:1: INVARIANTS.md §4.4: not in docs/INVARIANTS.md (it is in docs/MEMORY.md)"],
+            [
+                f"src/x.rs:1: {cite('INVARIANTS.md', '4.4')}: not in docs/INVARIANTS.md"
+                " (it is in docs/MEMORY.md)"
+            ],
         )
         self.assertEqual(self.run_on(cite("MEMORY", "9.99")), [])
 
@@ -247,7 +250,8 @@ class TreeTest(unittest.TestCase):
         files["docs/reviews/old.md"] = cite("ROADMAP", "17.8")
         files["src/main.rs"] = cite("ROADMAP", "17.8")
         self.assertEqual(
-            check_tree(files), ["src/main.rs:1: ROADMAP §17.8: no such section in docs/ROADMAP.md"]
+            check_tree(files),
+            [f"src/main.rs:1: {cite('ROADMAP', '17.8')}: no such section in docs/ROADMAP.md"],
         )
 
 

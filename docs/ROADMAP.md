@@ -450,7 +450,7 @@ paging cannot be verified from the host.
 ### 1.6 In-guest test infrastructure
 - [x] `kernel_tests` feature builds a second kernel that runs a test registry after init
 - [x] separate Cargo target directory and separate ISO, so a test build can never be packaged as production
-- [x] `ktest_ok` / `ktest_fail` / `ktest_skip(name, reason)` with the serial protocol from [DESIGN.md](DESIGN.md#82-in-guest-tests)
+- [x] `ktest_ok` / `ktest_fail` / `ktest_skip(name, reason)` with the serial protocol from [DESIGN §8.2](TESTING.md#82-in-guest-tests)
 - [x] `isa-debug-exit` at port `0xf4`: `0x10` for pass, `0x11` for fail
 - [x] `tests/harness/run_ktest.py` requiring `begin` and `end`, rejecting any `FAIL`, checking the exit status
 - [x] failing tests print enough context to diagnose without a rerun
@@ -469,7 +469,7 @@ and a monotonic clock nobody has to distrust.
 **Unlocks.** Preemption. Delays that AP bring-up needs. Every driver.
 
 **Exit gate**
-- [x] `gdt ok`, `pic: remapped`, `idt ok`, `acpi: xsdt <n> tables`, `time: tsc <n>/ms` in the order [DESIGN.md](DESIGN.md#33-_start-order) specifies
+- [x] `gdt ok`, `pic: remapped`, `idt ok`, `acpi: xsdt <n> tables`, `time: tsc <n>/ms` in the order [DESIGN §3.3](BOOT.md#33-_start-order) specifies
 - [x] a kernel `int3` returns; `int3_roundtrip` does not check that the `#BP` handler ran (F142)
 - [x] a deliberate `#GP` prints its interrupt frame (`rip`, `cs`, `rflags`, `rsp`, `ss`), the error code, `cr3`, and the handler's own `rbp` (F070), not the interrupted general-purpose registers, then `vibeOS: panic: halted` (`make test-e2e-gp`); no tier observes the halt (F141)
 - [x] a deliberate stack overflow lands in the double fault handler on its IST stack, proven by an in-guest test
@@ -1544,7 +1544,7 @@ behaviour; what a user program sees follows Linux on each architecture (How to r
 
 **Exit gate**
 - [ ] `make ARCH=aarch64` produces a bootable image; `make ARCH=aarch64 run` boots under DESIGN §8.4's aarch64 command line (`qemu-system-aarch64 -machine virt,acpi=off,gic-version=3`; §11.5, §11.7), with `-accel hvf` on the macOS dev host (GitHub's arm64 runners have no `/dev/kvm`, so the project has no arm64 KVM host)
-- [ ] every marker in the shared and aarch64 lists of the [DESIGN.md](DESIGN.md#83-end-to-end) contract, from `serial online` through `shell ready`, appears in order on aarch64, from one harness with an `ARCH` parameter
+- [ ] every marker in the shared and aarch64 lists of the [DESIGN §8.3](TESTING.md#83-end-to-end) contract, from `serial online` through `shell ready`, appears in order on aarch64, from one harness with an `ARCH` parameter
 - [ ] `make test-kernel ARCH=aarch64` passes every in-guest test that is not x86-specific, including the Phase 6 MSI-X tests and the §10.6 user-memory tests, on the default `gic-version=3`, where MSI-X goes through the ITS, and again with `gic-version=2`, where it goes through GICv2m, and the harness reads the verdict from QEMU's exit status and its QMP `GUEST_PANICKED` event under TCG and HVF (§11.7); each x86-specific test is `ktest_skip`ped with a reason naming the x86 feature it needs, and the harness fails if the skipped set differs from the aarch64 rows of `tests/harness/skips.toml` (§10.2), which `docs/ARCH.md` links; each skip row also names the aarch64 test that proves the same property, or says that the property has no aarch64 counterpart and why, and `scripts/check_arch.py` fails a row that does neither
 - [ ] `/bin/tests` from the Phase 10 user crate passes on aarch64 at EL0, against the arm64 syscall numbers
 - [ ] the harness types `echo serial-ok` into the shell on aarch64 through the PL011 and a second command through the QEMU monitor's `sendkey` and virtio-keyboard, and reads both echoes on serial, as the x86 e2e boot does through COM1 and PS/2

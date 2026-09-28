@@ -26,7 +26,7 @@ Phase 10 (consolidation) is in progress; Phase 11 (portability: the aarch64 port
 paging / COW) are not started. See [The arc](docs/ROADMAP.md#the-arc).
 Do not run code you do not trust on vibeOS, and keep no secrets on it: until Phase 10 closes a process
 can crash the kernel, and until Phase 18 nothing stops one from reading other processes' memory
-([DESIGN §2.10](docs/DESIGN.md#210-trust-boundaries)).
+([DESIGN §2.10](docs/INVARIANTS.md#210-trust-boundaries)).
 Do not attach a disk you want to keep to `vibeos-ktest.iso`, which stamps a GPT on an all-zero `vda` and writes fixed sectors of any attached one (F145).
 Releases: [GitHub Releases](https://github.com/devinreuschel/vibeOS/releases). From Phase 8 on, the commit that closes a phase
 gets a `phase-<N>` tag and the next `v0.<m>.0` release, numbered in closing order: `v0.8.0` to `v0.14.0` are Phases 8 to 14,
@@ -66,7 +66,7 @@ Docs live in [`docs/`](docs/). The other docs in the root are the changelog, [AG
 - [reviews/](docs/reviews/): the architecture, roadmap, and kernel reviews Phase 10 comes from,
   per-item plans in `reviews/issues/`, and the design reviews' decisions in `DESIGN_REVIEWS.md`.
 
-Read [section 9](docs/DESIGN.md#9-pitfalls) before touching boot, paging, interrupts, syscall entry and exit, or AP bring-up.
+Read [section 9](docs/PITFALLS.md#9-pitfalls) before touching boot, paging, interrupts, syscall entry and exit, or AP bring-up.
 
 ## License
 
