@@ -1287,7 +1287,15 @@ pub mod testing {
 
     /// C-REQUEUE-HOOK: move each user or `CpuAffinity::Any` thread to the
     /// next online CPU when its CPU dequeues it (`requeue_next_cpu`).
+    /// Turning it on forgets the arrivals an earlier use left: a thread
+    /// moved just before the hook went off keeps its flag, and a later
+    /// thread in that slot would run where it is dequeued instead of moving.
     pub fn set_requeue_next_cpu(on: bool) {
+        if on {
+            for a in ARRIVED.iter() {
+                a.store(false, Ordering::Relaxed);
+            }
+        }
         REQUEUE.store(on, Ordering::Release);
     }
 
