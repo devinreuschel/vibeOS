@@ -43,19 +43,16 @@ mod fat_init;
 mod fb_init;
 mod file_init;
 mod fs_init;
-mod heap_init;
 mod ipi_init;
 mod irq_init;
 mod kbd_init;
 mod ksyms;
-mod kva_init;
 mod log_init;
-mod paging_init;
+mod mm;
 mod panic;
 mod part_init;
 mod pci_init;
 mod per_cpu_init;
-mod pmm_init;
 mod proc_init;
 mod sched_init;
 mod serial;
@@ -74,6 +71,8 @@ mod x86;
 
 #[cfg(feature = "kernel_tests")]
 mod ktest;
+
+use mm::{heap_init, kva_init, paging_init, pmm_init};
 
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
