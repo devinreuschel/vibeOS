@@ -35,10 +35,8 @@ mod cell;
 mod console_init;
 mod dev;
 mod drivers;
-mod fat_init;
 mod fb_init;
-mod file_init;
-mod fs_init;
+mod fs;
 mod irq;
 mod kbd_init;
 mod log;
@@ -51,7 +49,6 @@ mod sync;
 mod syscall_init;
 mod time;
 mod user_init;
-mod vibefs_init;
 
 #[cfg(feature = "kernel_tests")]
 mod ktest;
@@ -61,6 +58,7 @@ use arch::x86_64::{apic_init, cpu as x86};
 use block::{block_init, cache_init, part_init};
 use dev::{dev_init, dma_init, entropy_init, pci_init, virtio_init};
 use drivers::virtio_blk_init;
+use fs::{fat_init, file_init, fs_init, vibefs_init};
 use irq::{ipi_init, irq_init};
 use log::{diag, ksyms, log_init, panic, serial};
 use mm::{heap_init, kva_init, paging_init, pmm_init};

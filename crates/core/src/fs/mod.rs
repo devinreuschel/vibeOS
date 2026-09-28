@@ -32,8 +32,10 @@
 //! Locks (kernel): RANK_DEVICE. Tables are static; do not allocate
 //! under the lock. No FS work from hard IRQ (DESIGN §2.2).
 
+pub mod fat;
 mod kernfs;
 mod ramfs;
+pub mod vibefs;
 
 pub use kernfs::{KernFs, KernSkin, KernState};
 pub use ramfs::{RamFs, RamState};
