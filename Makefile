@@ -75,6 +75,7 @@ $(2)/$(TARGET)/$(PROFILE_DIR)/vibeos: $(KERNEL_DEPS)
 	VIBEOS_INITRD=$(INITRD) CARGO_TARGET_DIR=$(2) $$(CARGO) build $$(CARGO_FLAGS) $(3)
 	python3 scripts/gen_ksyms.py --nm "$$(NM)" $$@ $(2)/vibeos-ksyms.rs
 	VIBEOS_INITRD=$(INITRD) VIBEOS_KSYMS=$(2)/vibeos-ksyms.rs CARGO_TARGET_DIR=$(2) $$(CARGO) build $$(CARGO_FLAGS) $(3)
+	python3 scripts/check_kernel_fp.py --objdump "$$(OBJDUMP)" $$@ || { rm -f $$@; exit 1; }
 $(4): $(2)/$(TARGET)/$(PROFILE_DIR)/vibeos limine.conf $(LIMINE_BIN)
 	LIMINE_DIR=$$(LIMINE_DIR) scripts/mkiso.sh $$< $$@ build/iso_root_$(1)
 endef

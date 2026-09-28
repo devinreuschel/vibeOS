@@ -12,15 +12,14 @@
 //! the CPU's workqueue worker unmaps and frees with IF=1 (DESIGN §4.5).
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
-use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use vibeos::ipi::{home_cpu, pick_cpu};
+use vibeos::kalloc::TryBox;
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::lock::RANK_SCHED;
-use vibeos::sched::{
-    FAR_DEADLINE, SWEEP_TICKS, TimeoutQueue, effective_deadline, enqueue_runnable, take_next,
-};
+use vibeos::sched::{SWEEP_TICKS, TimeoutQueue, effective_deadline, enqueue_runnable, take_next};
+use vibeos::syscall::UserFrame;
 use vibeos::thread::{
     CpuAffinity, CpuContext, MAX_THREADS, Tcb, ThreadId, ThreadState, WaitOutcome,
     apply_if_on_resume, prepare_thread, switch_context,
@@ -64,7 +63,7 @@ impl ThreadHandle {
 }
 
 pub(crate) struct Sched {
-    slots: [Option<Box<Tcb>>; MAX_THREADS],
+    slots: [Option<TryBox<Tcb>>; MAX_THREADS],
     timeouts: TimeoutQueue,
     places: [(u32, ThreadId); MAX_THREADS],
     place_n: usize,
@@ -309,6 +308,8 @@ fn schedule_inner(from_irq: bool) {
         cpu.runq.remove(idle);
         take_next(&mut cpu.runq, idle)
     });
+    #[cfg(feature = "kernel_tests")]
+    let next = requeue_next_cpu(next, cur, idle, me);
 
     let (old_ptr, new_ptr, old_id, new_id) = with_sched(|s| {
         if let Some(t) = s.get_mut(next) {
@@ -325,6 +326,54 @@ fn schedule_inner(from_irq: bool) {
     assert!(!new_ptr.is_null(), "schedule: next vanished");
     switch_now(old_ptr, new_ptr);
     finish_switch();
+}
+
+/// C-REQUEUE-HOOK: while `testing::set_requeue_next_cpu` is on, a user
+/// thread or a `CpuAffinity::Any` kernel thread that this CPU dequeues
+/// while another thread is current moves to the next online CPU instead
+/// of running here, once per slice it runs. A preempted thread that is the
+/// only runnable one here stays queued while this CPU runs idle, whose
+/// dequeue then moves it. Never the running thread, an idle thread, or a
+/// pinned kernel thread; the move goes out through `place` after the
+/// SCHED lock drops, before any switch.
+#[cfg(feature = "kernel_tests")]
+fn requeue_next_cpu(next: ThreadId, cur: ThreadId, idle: ThreadId, me: u32) -> ThreadId {
+    if !testing::requeue_on() || next == idle {
+        return next;
+    }
+    let Some(target) = testing::next_online_cpu(me) else {
+        return next;
+    };
+    let movable = |t: &Tcb| t.pid != 0 || t.affinity == CpuAffinity::Any;
+    if next == cur {
+        if with_sched(|s| s.get(cur).is_some_and(movable)) {
+            per_cpu_init::with_current(|cpu| cpu.runq.push_back(cur));
+            return idle;
+        }
+        return next;
+    }
+    if testing::take_arrived(next) {
+        return next;
+    }
+    let moved = with_sched(|s| {
+        let Some(t) = s.get_mut(next) else {
+            return false;
+        };
+        if !movable(t) {
+            return false;
+        }
+        t.cpu = target;
+        if t.pid != 0 {
+            t.affinity = CpuAffinity::Pinned(target);
+        }
+        s.place(target, next);
+        true
+    });
+    if !moved {
+        return next;
+    }
+    testing::moved(next);
+    per_cpu_init::with_current(|cpu| take_next(&mut cpu.runq, idle))
 }
 
 fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
@@ -518,7 +567,8 @@ pub fn halt_if_idle() {
 /// # Safety
 /// Single-CPU, `GS_BASE` live, not already initialized.
 pub unsafe fn init_bootstrap() {
-    let mut tcb = Box::new(Tcb {
+    // Before `irq: enabled`, where DESIGN §4.4 allows a boot-time panic.
+    let tcb = TryBox::try_new(Tcb {
         id: ThreadId::BOOTSTRAP,
         name: "bootstrap",
         state: ThreadState::Running,
@@ -536,9 +586,13 @@ pub unsafe fn init_bootstrap() {
         wait_outcome: WaitOutcome::Woken,
         as_cr3: 0,
         fpu: crate::syscall_init::fpu_template(),
+        fp_cpu: None,
         syscall_count: 0,
         pid: 0,
     });
+    let Ok(mut tcb) = tcb else {
+        panic!("thread: bootstrap TCB");
+    };
     let ptr = &mut *tcb as *mut Tcb;
     {
         let mut s = SCHED.lock();
@@ -643,14 +697,18 @@ pub(crate) fn spawn_idle(entry: fn()) -> Result<ThreadHandle, SpawnError> {
     )
 }
 
-/// User process thread. Not runnable until [`make_ready`].
+/// User process thread. Not runnable until [`make_ready`]. `frame` is
+/// the user frame its first return to ring 3 leaves from (DESIGN §5.10):
+/// it goes at the top of the new stack, and the switch context starts
+/// below it, so `entry` ends in `syscall_init::first_return`.
 pub fn spawn_user(
     name: &'static str,
     entry: fn(),
     pid: u32,
     cr3: u64,
+    frame: &UserFrame,
 ) -> Result<ThreadHandle, SpawnError> {
-    spawn_inner(
+    let h = spawn_inner(
         name,
         entry,
         CpuAffinity::Pinned(current_cpu()),
@@ -659,8 +717,33 @@ pub fn spawn_user(
         pid,
         cr3,
         DEFAULT_STACK_PAGES,
-    )
+    )?;
+    let tramp = trampoline as *const () as u64;
+    with_sched(|s| {
+        let tcb = s.get_mut(h.id());
+        let top = tcb
+            .as_ref()
+            .and_then(|t| t.stack.as_ref())
+            .map(|st| st.top().as_u64());
+        let (Some(tcb), Some(top)) = (tcb, top) else {
+            panic!("spawn_user: thread {} has no stack", h.id().0);
+        };
+        let at = top - USER_FRAME_BYTES as u64;
+        // SAFETY: invariant I25: `[top - 168, top)` is the user frame of
+        // this thread's own kernel stack, mapped and unused: the thread is
+        // not runnable before `make_ready`, and nothing else refers to its
+        // stack; established by `thread_init::spawn_inner`.
+        unsafe { (at as *mut UserFrame).write(*frame) };
+        // The pad word below the frame, as the syscall entry leaves it.
+        prepare_thread(&mut tcb.context, at - 8, tramp);
+        // SAFETY: invariant: `context.rsp` is 8 bytes below the pad word,
+        // inside this thread's unused stack; established here.
+        unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
+    });
+    Ok(h)
 }
+
+const USER_FRAME_BYTES: usize = core::mem::size_of::<UserFrame>();
 
 pub fn make_ready(id: ThreadId) {
     with_sched(|s| {
@@ -681,12 +764,14 @@ pub fn make_ready(id: ThreadId) {
     reason = "the stack comes back by value so the caller frees it once; a Box would allocate on the failure path"
 )]
 pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, GuardedStack> {
-    let mut tcb = Box::new(Tcb {
+    // Built without the stack, which the AP is running on: a failed
+    // allocation must not drop it.
+    let tcb = TryBox::try_new(Tcb {
         id: ThreadId(0),
         name: "idle",
         state: ThreadState::Running,
         on_cpu: AtomicBool::new(true),
-        stack: Some(stack),
+        stack: None,
         context: CpuContext::empty(),
         entry: ap_idle_entry,
         next: None,
@@ -699,18 +784,31 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, Guard
         wait_outcome: WaitOutcome::Woken,
         as_cr3: 0,
         fpu: crate::syscall_init::fpu_template(),
+        fp_cpu: None,
         syscall_count: 0,
         pid: 0,
     });
-    with_sched(|s| {
+    let Ok(mut tcb) = tcb else {
+        return Err(stack);
+    };
+    tcb.stack = Some(stack);
+    let placed = with_sched(|s| {
         let Some(slot) = s.slots.iter().position(|x| x.is_none()) else {
-            return Err(tcb.stack.take().expect("adopt_ap_idle: stack set above"));
+            // Dropped after SCHED is released: no heap free under it.
+            return Err(tcb);
         };
         let id = ThreadId(slot as u32);
         tcb.id = id;
         s.slots[slot] = Some(tcb);
         Ok(id)
-    })
+    });
+    match placed {
+        Ok(id) => Ok(id),
+        Err(mut tcb) => match tcb.stack.take() {
+            Some(stack) => Err(stack),
+            None => unreachable!("adopt_ap_idle: stack set above"),
+        },
+    }
 }
 
 /// Timeout path: TCB never ran. Return the stack so the caller can free it.
@@ -798,14 +896,14 @@ fn spawn_inner(
         return Ok(ThreadHandle { id });
     }
 
-    // Until ROADMAP §10.4's `TryBox`, the one infallible allocation left
-    // on this path: the heap grows or the kernel panics (DESIGN §4.4).
-    let mut tcb = Box::new(Tcb {
+    // Built without the stack, so a failed allocation drops no stack; the
+    // stack goes back as a full table's does (DESIGN §4.4).
+    let tcb = TryBox::try_new(Tcb {
         id: ThreadId(0),
         name,
         state: ThreadState::Ready,
         on_cpu: AtomicBool::new(false),
-        stack,
+        stack: None,
         context: CpuContext::empty(),
         entry,
         next: None,
@@ -818,9 +916,20 @@ fn spawn_inner(
         wait_outcome: WaitOutcome::Woken,
         as_cr3,
         fpu: crate::syscall_init::fpu_template(),
+        fp_cpu: None,
         syscall_count: 0,
         pid,
     });
+    let mut tcb = match tcb {
+        Ok(t) => t,
+        Err(_) => {
+            if let Some(ks) = stack.take() {
+                return_stack(ks);
+            }
+            return Err(SpawnError::NoMemory);
+        }
+    };
+    tcb.stack = stack;
     prepare_thread(&mut tcb.context, top, tramp);
     unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
 
@@ -848,6 +957,13 @@ fn spawn_inner(
             Err(SpawnError::NoSlot)
         }
     }
+}
+
+/// A write to `tcb.fpu` makes the saved image the thread's state: no
+/// CPU's registers hold it any more, so its next return to user mode
+/// loads what was written (DESIGN §7.5, C-FPBIND).
+pub fn fp_invalidate(tcb: &mut Tcb) {
+    vibeos::fpu::invalidate(&mut tcb.fp_cpu);
 }
 
 #[allow(clippy::too_many_arguments)] // TCB fields filled at spawn
@@ -878,6 +994,8 @@ fn fill_tcb(
     tcb.wait_outcome = WaitOutcome::Woken;
     tcb.as_cr3 = as_cr3;
     tcb.fpu = crate::syscall_init::fpu_template();
+    // A reused TCB address: no CPU's `fp_owner` may match it.
+    fp_invalidate(tcb);
     tcb.syscall_count = 0;
     tcb.pid = pid;
     prepare_thread(&mut tcb.context, top, tramp);
@@ -1006,18 +1124,6 @@ pub(crate) fn tcb_naming_root(root: u64) -> Option<ThreadId> {
     })
 }
 
-/// Park on `wq` forever (still a far deadline). SCHED dropped before switch.
-pub fn wait_on(wq: &mut WaitQueue) {
-    with_sched(|s| s.begin_wait(wq, FAR_DEADLINE));
-    schedule();
-}
-
-pub fn wake_queue(wq: &mut WaitQueue) {
-    with_sched(|s| {
-        s.wake_all(wq);
-    });
-}
-
 pub fn current_cpu() -> u32 {
     per_cpu_init::current().cpu_id
 }
@@ -1089,6 +1195,9 @@ pub fn snapshot(out: &mut [ThreadInfo]) -> usize {
 pub mod testing {
     use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+    use vibeos::thread::{MAX_THREADS, ThreadId};
+
+    use crate::per_cpu_init;
     use crate::time_init;
 
     /// CPU whose exits [`exit_stall`] holds, or `u32::MAX`.
@@ -1169,5 +1278,47 @@ pub mod testing {
     /// `SpawnError::NoMemory` before it allocates anything. One-shot.
     pub fn fail_next_fork_stack() {
         FAIL_FORK_STACK.store(true, Ordering::Release);
+    }
+
+    static REQUEUE: AtomicBool = AtomicBool::new(false);
+    static REQUEUES: AtomicU64 = AtomicU64::new(0);
+    /// Set when a thread was moved, cleared by the dequeue that runs it.
+    static ARRIVED: [AtomicBool; MAX_THREADS] = [const { AtomicBool::new(false) }; MAX_THREADS];
+
+    /// C-REQUEUE-HOOK: move each user or `CpuAffinity::Any` thread to the
+    /// next online CPU when its CPU dequeues it (`requeue_next_cpu`).
+    pub fn set_requeue_next_cpu(on: bool) {
+        REQUEUE.store(on, Ordering::Release);
+    }
+
+    /// Moves the hook has made since boot.
+    pub fn requeues() -> u64 {
+        REQUEUES.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn requeue_on() -> bool {
+        REQUEUE.load(Ordering::Acquire)
+    }
+
+    /// The first online CPU after `me`, wrapping; `None` with one CPU.
+    pub(super) fn next_online_cpu(me: u32) -> Option<u32> {
+        let mask = per_cpu_init::online_mask();
+        (1..64u32)
+            .map(|d| me.wrapping_add(d) % 64)
+            .find(|&c| mask & (1u64 << c) != 0)
+    }
+
+    pub(super) fn moved(id: ThreadId) {
+        if let Some(a) = ARRIVED.get(id.raw() as usize) {
+            a.store(true, Ordering::Relaxed);
+        }
+        REQUEUES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Whether `id` arrived by a move and has not run since; clears it.
+    pub(super) fn take_arrived(id: ThreadId) -> bool {
+        ARRIVED
+            .get(id.raw() as usize)
+            .is_some_and(|a| a.swap(false, Ordering::Relaxed))
     }
 }

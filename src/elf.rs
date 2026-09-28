@@ -1,6 +1,11 @@
 //! ELF64 parse + initial stack. ROADMAP §9.4. Mapping is the kernel half.
 
-use crate::paging::{NULL_GUARD_LEN, PAGE_SIZE_4K, USER_END, is_canonical};
+use crate::limits::EXEC_IMAGE_MAX;
+use crate::paging::{NULL_GUARD_LEN, PAGE_SIZE_4K, USER_MAP_END, is_canonical};
+
+// ROADMAP §10.6's exec box: an image under the cap but larger than the
+// default 128 MiB guest (192 MiB of `p_memsz`) must reach the loader.
+const _: () = assert!(EXEC_IMAGE_MAX > 192 << 20);
 
 pub const ELFMAG0: u8 = 0x7F;
 pub const ELFCLASS64: u8 = 2;
@@ -61,6 +66,9 @@ pub enum ElfError {
     NoLoad,
     Overlap,
     Stack,
+    /// Page-rounded `PT_LOAD` plus `PT_TLS` bytes above
+    /// [`EXEC_IMAGE_MAX`], or a sum that overflows (F009).
+    ImageTooBig,
 }
 
 impl ElfError {
@@ -83,6 +91,7 @@ impl ElfError {
             Self::NoLoad => "no pt_load",
             Self::Overlap => "overlap",
             Self::Stack => "stack",
+            Self::ImageTooBig => "image too big",
         }
     }
 }
@@ -104,6 +113,21 @@ pub struct TlsSeg {
     pub filesz: u64,
     pub memsz: u64,
     pub align: u64,
+}
+
+impl TlsSeg {
+    /// Bytes the loader maps for the TLS block: `memsz` rounded up to
+    /// `align`, plus the 8-byte thread pointer slot, page-rounded and at
+    /// least one page. `None` when that overflows.
+    pub fn map_len(&self) -> Option<u64> {
+        let aligned = if self.align <= 1 {
+            self.memsz
+        } else {
+            self.memsz.checked_add(self.align - 1)? & !(self.align - 1)
+        };
+        let need = aligned.checked_add(8)?.max(PAGE_SIZE_4K);
+        Some(need.checked_add(PAGE_SIZE_4K - 1)? & !(PAGE_SIZE_4K - 1))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,7 +183,7 @@ fn check_user_va(va: u64, len: u64) -> Result<(), ElfError> {
     if !is_canonical(va) || !is_canonical(end.wrapping_sub(1)) {
         return Err(ElfError::KernelVa);
     }
-    if va >= USER_END || end > USER_END {
+    if va >= USER_MAP_END || end > USER_MAP_END {
         return Err(ElfError::KernelVa);
     }
     if va < NULL_GUARD_LEN {
@@ -292,6 +316,9 @@ pub fn parse(data: &[u8]) -> Result<Image<'_>, ElfError> {
                 if p_filesz > p_memsz {
                     return Err(ElfError::FileszGtMemsz);
                 }
+                if p_align != 0 && !p_align.is_power_of_two() {
+                    return Err(ElfError::BadAlign);
+                }
                 tls = Some(TlsSeg {
                     vaddr: p_vaddr,
                     offset: p_offset,
@@ -310,6 +337,7 @@ pub fn parse(data: &[u8]) -> Result<Image<'_>, ElfError> {
     if nload == 0 {
         return Err(ElfError::NoLoad);
     }
+    image_bytes(&loads[..nload], tls)?;
     if !saw_gnu_stack {
         stack_exec = false;
     }
@@ -343,6 +371,35 @@ pub fn parse(data: &[u8]) -> Result<Image<'_>, ElfError> {
         phnum,
         phdr_va,
     })
+}
+
+/// The bytes the loader maps for `loads` and `tls`: each `PT_LOAD`'s
+/// page-rounded span plus [`TlsSeg::map_len`]. Above [`EXEC_IMAGE_MAX`], or
+/// on overflow, the image is refused before anything is mapped (F009).
+fn image_bytes(loads: &[LoadSeg], tls: Option<TlsSeg>) -> Result<u64, ElfError> {
+    let mut total = 0u64;
+    for s in loads {
+        if s.memsz == 0 {
+            continue;
+        }
+        let end = s.vaddr.checked_add(s.memsz).ok_or(ElfError::ImageTooBig)?;
+        let end = end
+            .checked_add(PAGE_SIZE_4K - 1)
+            .ok_or(ElfError::ImageTooBig)?
+            & !(PAGE_SIZE_4K - 1);
+        let span = end
+            .checked_sub(page_down(s.vaddr))
+            .ok_or(ElfError::ImageTooBig)?;
+        total = total.checked_add(span).ok_or(ElfError::ImageTooBig)?;
+    }
+    if let Some(t) = tls {
+        let len = t.map_len().ok_or(ElfError::ImageTooBig)?;
+        total = total.checked_add(len).ok_or(ElfError::ImageTooBig)?;
+    }
+    if total > EXEC_IMAGE_MAX {
+        return Err(ElfError::ImageTooBig);
+    }
+    Ok(total)
 }
 
 impl Image<'_> {
@@ -540,6 +597,17 @@ mod tests {
     }
 
     #[test]
+    fn load_ending_at_user_end_is_kernel_va() {
+        use crate::paging::USER_END;
+        let code = [0xCCu8; 4096];
+        let top = build_elf(USER_END - PAGE_SIZE_4K, &code, &[]);
+        assert_eq!(parse_err(&top), ElfError::KernelVa);
+        let below = build_elf(USER_MAP_END - PAGE_SIZE_4K, &code, &[]);
+        let img = parse(&below).unwrap();
+        assert_eq!(img.loads()[0].vaddr + img.loads()[0].memsz, USER_MAP_END);
+    }
+
+    #[test]
     fn good_static_exec() {
         let code = [0x90u8, 0x90, 0xC3];
         let elf = build_elf(0x4000_0000, &code, &[]);
@@ -703,6 +771,7 @@ mod tests {
             ElfError::NoLoad,
             ElfError::Overlap,
             ElfError::Stack,
+            ElfError::ImageTooBig,
         ] {
             match e {
                 ElfError::Truncated
@@ -721,11 +790,67 @@ mod tests {
                 | ElfError::TooManyLoads
                 | ElfError::NoLoad
                 | ElfError::Overlap
-                | ElfError::Stack => {
+                | ElfError::Stack
+                | ElfError::ImageTooBig => {
                     assert!(!e.as_str().is_empty());
                 }
             }
         }
+    }
+
+    /// Set the builder's first `PT_LOAD`'s `p_memsz`.
+    fn set_memsz(b: &mut [u8], memsz: u64) {
+        put64(b, 64 + 40, memsz);
+    }
+
+    #[test]
+    fn exec_cap_rejects_64g_accepts_192m() {
+        let code = [0x90u8, 0xC3];
+        let mut e = build_elf(0x4000_0000, &code, &[]);
+        set_memsz(&mut e, 64 << 30);
+        assert_eq!(parse_err(&e), ElfError::ImageTooBig);
+        set_memsz(&mut e, 192 << 20);
+        assert!(parse(&e).is_ok());
+        set_memsz(&mut e, EXEC_IMAGE_MAX);
+        assert!(parse(&e).is_ok());
+        set_memsz(&mut e, EXEC_IMAGE_MAX + PAGE_SIZE_4K);
+        assert_eq!(parse_err(&e), ElfError::ImageTooBig);
+        // One byte past the cap is one more page.
+        set_memsz(&mut e, EXEC_IMAGE_MAX + 1);
+        assert_eq!(parse_err(&e), ElfError::ImageTooBig);
+    }
+
+    #[test]
+    fn exec_cap_counts_tls() {
+        let code = [0x90u8, 0xC3];
+        let tls =
+            |memsz: u64, align: u64| (PT_TLS, PF_R, 0x1000u64, 0x4000_0000u64, 0, memsz, align);
+        let mut e = build_elf(0x4000_0000, &code, &[tls(8 << 10, 8)]);
+        set_memsz(&mut e, EXEC_IMAGE_MAX - PAGE_SIZE_4K);
+        assert_eq!(parse_err(&e), ElfError::ImageTooBig);
+        // A small TLS block maps one page, which fills the cap exactly.
+        let mut e = build_elf(0x4000_0000, &code, &[tls(8, 8)]);
+        set_memsz(&mut e, EXEC_IMAGE_MAX - PAGE_SIZE_4K);
+        assert!(parse(&e).is_ok());
+        let e = build_elf(0x4000_0000, &code, &[tls(8, 3)]);
+        assert_eq!(parse_err(&e), ElfError::BadAlign);
+        let e = build_elf(0x4000_0000, &code, &[tls(8, 1 << 40)]);
+        assert_eq!(parse_err(&e), ElfError::ImageTooBig);
+        let e = build_elf(0x4000_0000, &code, &[tls(8, 1 << 63)]);
+        assert_eq!(parse_err(&e), ElfError::ImageTooBig);
+        let seg = |memsz, align| TlsSeg {
+            vaddr: 0,
+            offset: 0,
+            filesz: 0,
+            memsz,
+            align,
+        };
+        assert_eq!(seg(0, 1).map_len(), Some(PAGE_SIZE_4K));
+        assert_eq!(seg(4088, 8).map_len(), Some(PAGE_SIZE_4K));
+        assert_eq!(seg(4089, 8).map_len(), Some(2 * PAGE_SIZE_4K));
+        assert_eq!(seg(8, 1 << 20).map_len(), Some((1 << 20) + PAGE_SIZE_4K));
+        assert_eq!(seg(u64::MAX, 1).map_len(), None);
+        assert_eq!(seg(u64::MAX - 4, 1).map_len(), None);
     }
 
     #[test]

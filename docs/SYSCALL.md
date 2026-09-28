@@ -58,8 +58,12 @@ is ignored where Linux's call ignores it (`open`) and returns `EINVAL` where
 Linux's call rejects it (`openat2`, `clone3`, `renameat2`). Today dispatch
 matches all 64 bits of `rax`, and only `kill`'s `pid` is truncated (§3.1).
 
-The entry saves the x87 and SSE state (`fxsave64`) and the exit restores it
-(`fxrstor64`), so a syscall preserves it. Two calls differ from Linux
+A syscall preserves the x87 and SSE state. The kernel never touches those
+registers (it is soft-float, and `make` rejects a kernel ELF with an FP or
+SIMD instruction outside its save and load routines), so neither the entry
+nor the exit saves them: the FP binding of DESIGN §7.5 saves a thread's
+state only when a switch takes the CPU away from it, and the exit, with
+IF=0, loads it only when the registers hold another thread's. Two calls differ from Linux
 (F069; ROADMAP §10.6): a `fork` child starts from the boot FXSAVE
 template instead of the parent's x87, XMM, and MXCSR state, and `execve`
 hands the new image the old image's x87 and XMM registers, MXCSR, and FCW.
@@ -68,40 +72,47 @@ The rule the fix implements: `fork` copies the caller's FP state, and
 registers zeroed.
 
 `FMASK` (DESIGN §7.2) clears `TF`, `IF`, `DF`, `IOPL`, `NT`, and `AC` on
-entry. The fast path is `sysretq`. The exit takes `iretq` when the saved
-RIP is non-canonical or `RF` or `VM` is set in RFLAGS; a spawned or forked process's
-first entry also uses `iretq` (`enter_user_full`).
-
-The rule ROADMAP §10.6 implements (DESIGN §5.10): every entry from ring 3
-saves a complete user frame, in the order of Linux's `user_regs_struct`, and
-the syscall exit uses `sysretq` only when the saved RIP equals the saved
-RCX, the saved RFLAGS equals the saved R11, CS and SS are the user
-selectors, RIP is below `USER_MAP_END`, and RF, TF, and VM are clear;
-otherwise it restores every register from the frame and uses `iretq`, as
-Linux does. A restartable syscall resumes by reloading `rax` from `orig_rax`
-and moving RIP back 2 bytes. Today the frame keeps RIP and RFLAGS only in
-the RCX and R11 slots, so a context whose RCX and R11 differ from them
-cannot be returned to.
+entry. The entry saves the user frame, the 21 words of Linux's
+`user_regs_struct` (`vibeos::syscall::UserFrame`), at the top of the
+thread's kernel stack: RCX in both the `rcx` and `rip` slots, R11 in both
+`r11` and `rflags`, the syscall number in `orig_rax`, `-ENOSYS` in the `rax`
+slot (as Linux shows at a syscall-entry stop), the user selectors in `cs`
+and `ss`, and the user RSP, which it copies out of the per-CPU scratch, in
+`rsp`. The exit stores the return value in the `rax` slot and uses
+`sysretq` only when the saved RIP equals the saved RCX, the saved RFLAGS
+equals the saved R11, CS and SS are the user selectors, RIP is below
+`USER_MAP_END`, and RF, TF, and VM are clear
+(`vibeos::trap::x86_64::sysret_ok`); otherwise it restores all 15 GPRs from
+the frame and uses `iretq` on the frame's tail, as Linux does, so a hook or
+a later `execve` that changes RCX or R11 returns them intact. A
+spawned or forked process's first entry is the same exit over the frame its
+creator wrote (`syscall_init::first_return`, DESIGN §5.10 rule 4). A fault on either `iretq` (a `#GP`, `#NP`, or
+`#SS` whose RIP is the labeled instruction) kills the process with
+`SIGSEGV`, and never halts the kernel (DESIGN §5.10 rule 2). A restartable
+syscall resumes by reloading `rax` from `orig_rax` and moving RIP back 2
+bytes (`SyscallAbi::restart`).
 
 The body runs with IF=1 (DESIGN §2.9 rule 3): the entry stub moves the user
-RSP out of the per-CPU scratch into its frame and then runs `sti`. Today it
-does not, and FMASK's IF=0 lasts until the body blocks (ROADMAP §10.6).
+RSP out of the per-CPU scratch into its frame and then runs `sti`.
 
 From the return of `vibeos_syscall_stub` to `sysretq` or `iretq`, the exit
-path needs IF=0: it stores the return value in `gs:[retval]`, stages the
-`iretq` frame in `gs:[iret_*]`, and loads the user RSP before `swapgs`.
-ROADMAP §10.6 moves the return value and the `iretq` frame into the thread's
-user frame, which leaves the per-CPU scratch holding only the user RSP
-between `syscall` and the stack switch. A console `read` breaks this: it
-returns through `console_init::wait_key`, which leaves IF=1, and nothing
-clears IF before the exit (F001; ROADMAP §10.6).
+path runs with IF=0: it stores the return value in the frame's `rax` slot,
+reads everything it restores from the frame, and loads the user RSP before
+`swapgs`, so an interrupt there could push its frame on the user stack at
+CPL 0. No exit instruction writes a `gs:` operand; the per-CPU scratch
+holds only the user RSP, between `syscall` and the entry's stack switch.
+The exit's first instruction after the call is `cli`, whatever IF the body
+returned with, and in debug builds each exit path checks IF before its
+`swapgs` (on the `sysretq` path before it loads the user RSP) and faults at
+`vibeos_exit_if_set`, a `ud2`, if IF is set. `console_init::wait_key`, which
+a console `read` blocks in, returns with the IF it was entered with.
 
-A non-canonical saved RIP reaches `iretq`, which raises `#GP` at CPL 0
-after `swapgs` has loaded the user GS base; on KVM and hardware the kernel
-then hangs or triple-faults (TCG skips the canonical check). A `syscall` in
-the last two bytes of a mapping that ends at `USER_END` produces that RIP
-(F007; ROADMAP §10.6 keeps the top user page unmapped and sends a
-non-canonical RIP to `SIGSEGV`).
+The top user page is never mapped: user mappings end at `USER_MAP_END`
+(`0x0000_7FFF_FFFF_F000`), and `execve` of an image with a segment above it
+fails with `ENOEXEC`, so a `syscall` in the last mappable page returns to a
+canonical RIP. A saved RIP that is non-canonical anyway reaches neither
+`sysretq` nor `iretq`: after its `cli` the exit tests it and kills the
+process with `SIGSEGV` on the kernel GS, before any `swapgs`.
 
 ---
 
@@ -118,23 +129,24 @@ names, Linux values:
 
 | Name | Value | Used |
 |------|------:|------|
-| `EPERM` | 1 | defined; no syscall returns it |
+| `EPERM` | 1 | `mmap` with `MAP_FIXED` or `MAP_FIXED_NOREPLACE` below `NULL_GUARD_LEN` (page 0) |
 | `ENOENT` | 2 | `open`/`execve` missing path |
 | `ESRCH` | 3 | `kill`: no such process, a zombie, `pid` 0, or a negative 32-bit `pid` (§3.1) |
 | `EIO` | 5 | device I/O error; a FAT or vibefs volume still busy after 1,000,000 yields |
 | `E2BIG` | 7 | `execve` argv with 16 or more entries. ROADMAP §10.5 moves to Linux's limits: a string over 131,072 bytes with its NUL, or argv and envp together over a quarter of `RLIMIT_STACK` |
 | `ENOEXEC` | 8 | malformed ELF, `ET_DYN`, or `PT_INTERP` |
-| `EBADF` | 9 | closed / out-of-range fd |
+| `EBADF` | 9 | closed / out-of-range fd; a file `mmap` (no `MAP_ANONYMOUS`) with a bad fd |
 | `ECHILD` | 10 | `wait4` with no matching child |
 | `EAGAIN` | 11 | `fork` with pids 2 to 17 all in use, zombies included (`MAX_PROCS` is 18; pid 0 is unused and pid 1 is reserved for `/sbin/init`) |
-| `ENOMEM` | 12 | AS clone / load; an ELF file above 64 KiB |
+| `ENOMEM` | 12 | AS clone / load; an ELF file above 64 KiB, or an image above `limits::EXEC_IMAGE_MAX`; `mmap` with no free range, a full region table, a `len` past `USER_MAP_END`, or no frames; a `munmap` that must split a region when the region table is full; a kernel heap allocation that fails in `fork`, `execve`, or `open` (DESIGN §4.4) |
 | `EACCES` | 13 | defined; no syscall returns it |
 | `EFAULT` | 14 | bad user pointer / length |
 | `EBUSY` | 16 | defined; no syscall returns it |
-| `EEXIST` | 17 | `O_EXCL` |
+| `EEXIST` | 17 | `O_EXCL`; `mmap` with `MAP_FIXED_NOREPLACE` (or `MAP_FIXED`, §3.1) over a mapping |
+| `ENODEV` | 19 | a file `mmap` (no `MAP_ANONYMOUS`) on an open fd: file mappings come in ROADMAP §12.4 |
 | `ENOTDIR` | 20 | |
 | `EISDIR` | 21 | |
-| `EINVAL` | 22 | `lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the non-Linux cases in §2.1 |
+| `EINVAL` | 22 | `lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the `mmap` and `munmap` argument checks in §3.1; the non-Linux cases in §2.1 |
 | `EMFILE` | 24 | per-process fd table full (`open`); the non-Linux cases in §2.1 |
 | `EFBIG` | 27 | a vibefs `write` that starts at or past the file-size limit, byte 2^44 − 4096 (VIBEFS.md §3) |
 | `ENAMETOOLONG` | 36 | path of 256 bytes or more; name above 64 bytes; an `execve` argv string of 256 bytes or more, which Linux accepts (ROADMAP §10.5). ROADMAP §13.9 moves the path and name limits to Linux's 4096 and 255 |
@@ -198,6 +210,9 @@ the errno the baseline returns: `read(-1, <unmapped>, 1)` is `EBADF`, and
 | 2 | `open` | 3 | `rdi` path, a C string of at most 255 bytes |
 | 3 | `close` | 1 | |
 | 8 | `lseek` | 3 | |
+| 9 | `mmap` | 6 | anonymous and private only; returns the address |
+| 11 | `munmap` | 2 | |
+| 12 | `brk` | 1 | returns the break; `0` if the caller is not a process |
 | 24 | `sched_yield` | 0 | |
 | 32 | `dup` | 1 | CLOEXEC cleared on the new fd |
 | 33 | `dup2` | 2 | |
@@ -236,10 +251,51 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   `EFBIG`, and one that would cross it is cut short at the limit, as
   Linux's is. On a FAT file any offset from 0 to `i64::MAX` is accepted
   (F008; ROADMAP §10.11)
+- `mmap`: anonymous private mappings only: `MAP_PRIVATE|MAP_ANONYMOUS`,
+  plus any of `MAP_FIXED`, `MAP_FIXED_NOREPLACE`, `MAP_NORESERVE`,
+  `MAP_POPULATE`, and `MAP_STACK`. `prot` is any mix of `PROT_READ`,
+  `PROT_WRITE`, and `PROT_EXEC`, where W or X also allows reads, and
+  `PROT_NONE` reserves the range with no frames. Each page is allocated and
+  zeroed at the call until ROADMAP §12.4. The checks run in mmap(2)'s
+  order: an `off` that is not page-aligned is `EINVAL`; a file mapping (no
+  `MAP_ANONYMOUS`) is `EBADF` for a bad fd and `ENODEV` otherwise, until
+  ROADMAP §12.4 adds file mappings; then a `len` of 0, a map type other
+  than `MAP_PRIVATE` (`MAP_SHARED` included, until ROADMAP §12.4), any
+  other flag bit, and a `prot` bit other than the three are `EINVAL`,
+  where Linux ignores unknown flag bits; a `len` that rounds past
+  `USER_MAP_END` is `ENOMEM`; a fixed request whose `addr` is not
+  page-aligned is `EINVAL`. A fixed request below page 0's guard is
+  `EPERM`, and one past `USER_MAP_END` is `ENOMEM`. `MAP_FIXED` over an
+  existing mapping returns `EEXIST`, as `MAP_FIXED_NOREPLACE` does, where
+  Linux replaces the mapping (ROADMAP §12.4). Without a fixed flag a free
+  hint is used, rounded down to a page; otherwise the highest free range
+  below `0x7FFF_F7FF_F000` (DESIGN §4.1), or `ENOMEM`. Each call is its own
+  region, never merged with a neighbour, so a full region table (32,
+  `limits::MAX_REGIONS`) is `ENOMEM` (ROADMAP §10.4 sizes it)
+- `munmap`: `addr` must be page-aligned, `len` non-zero, and the range at or
+  below `USER_MAP_END` (`EINVAL`); `len` rounds up to a page. It trims,
+  splits, or removes the mappings in the range, and holes are fine. Each
+  page leaves the TLB before its frame is freed. A split that finds the
+  region table full returns `ENOMEM` with nothing unmapped, as mmap(2)
+  documents. It allocates no memory (ROADMAP §10.5)
+- `brk`: returns the new break, or the current one when the call fails,
+  as the raw call does (glibc's `brk` wrapper turns that into `-1` and
+  `ENOMEM`). The break starts on the page after the image's highest
+  `PT_LOAD`, as on Linux with randomization off, and `execve` resets it,
+  while `fork` copies it. `brk(0)`, a value below the start, a value past
+  `USER_MAP_END`, growth into another mapping (the stack included), and a
+  frame shortage leave it where it is. Growth maps zeroed pages at the call
+  (ROADMAP §12.4 makes them lazy); shrinking unmaps the whole pages above
+  the new break
 - `execve`: the image is read whole and must be at most 64 KiB (`ENOMEM`)
-  until ROADMAP §10.4 removes `MAX_ELF`. `p_memsz` is bounded only by
-  `USER_END`, so a small ELF can map pages until physical memory runs out,
-  with IF=0 and the page-table lock held (F009; ROADMAP §10.6). An empty
+  until ROADMAP §10.4 removes `MAX_ELF`. An image whose page-rounded
+  `PT_LOAD` and `PT_TLS` bytes together exceed 1 GiB
+  (`limits::EXEC_IMAGE_MAX`) returns `ENOMEM` before anything is mapped,
+  where Linux loads it while memory lasts (LINUX.md `exec-image-cap`; F009,
+  ROADMAP §10.6). Under the cap, every page is allocated and zeroed at the
+  call, in chunks of at most 512 pages (one leaf table), with the page-table
+  lock dropped between chunks; a frame shortage unmaps and frees what the
+  load mapped and returns `ENOMEM` to the old image. An empty
   argv becomes `[path]`; Linux starts the image with `argc` 1 and an empty
   `argv[0]` (ROADMAP §10.5). `envp` is not read, and the new stack gets an
   empty environment (§7; ROADMAP §9.4 defers the copy to §10.5)
@@ -310,12 +366,10 @@ ROADMAP §10.4).
   in `addref` and `close`, under the table lock, and the `close` that
   frees a slot bumps its generation, so a lookup or write-back through a
   descriptor whose slot was closed and reused fails with `EBADF`. Two
-  calls on one open file that overlap still lose one call's offset update.
-  They cannot overlap while syscall bodies run with IF=0, every user
-  thread runs on one CPU, and no file syscall blocks; after §10.6 makes
-  syscall bodies preemptible a process and its `fork` child can overlap on
-  one inherited descriptor and lose an offset update until §13.1's
-  position lock (F055)
+  calls on one open file that overlap still lose one call's offset update:
+  syscall bodies are preemptible, so a process and its `fork` child can
+  overlap on one inherited descriptor and lose an offset update until
+  §13.1's position lock (F055)
 - a kernel-side `dispatch()` probe with no process still sees `getpid=0`
   and `EBADF` for a closed fd; pointer-validation tests run as spawned
   ring-3 programs
@@ -363,19 +417,12 @@ program itself is a process kill (DESIGN §5.2 CPL split), not `EFAULT`.
 §2.5 for ring-3 exceptions, AGENTS.md rule 4 for syscall paths). The code
 does not meet this yet:
 
-- ring-3 `#DB` (from `RFLAGS.TF` or `INT1`) halts every CPU (F005; ROADMAP
-  §10.6)
 - a device or keyboard interrupt taken in ring 3 runs with the user GS
   base and halts (F004; ROADMAP §10.6)
 - the exit-path faults in §1 (F001, F007; ROADMAP §10.6)
-- a forked or spawned process's first ring-3 entry, `enter_user_full`,
-  runs with IF=1, so an interrupt between its `mov gs` and its `iretq`
+- a forked or spawned process's first ring-3 entry,
+  `syscall_init::first_return`, runs with IF=1, so an interrupt between its `mov gs` and its `iretq`
   reads `gs:[0]` at VA 0 at CPL 0 and halts (F006; ROADMAP §10.6)
-- a console `write` keeps IF=0 for its whole length and acks no IPI, so a
-  TLB shootdown that another CPU sends during a write waits in
-  `wait_acks`, which logs the late CPU once a second, until the write ends
-  (F011; ROADMAP §10.10)
-- an ELF with a huge `p_memsz` (§3.1; F009, ROADMAP §10.6)
 - a `fork` near memory exhaustion (§2.1; F010, ROADMAP §10.10)
 
 ---

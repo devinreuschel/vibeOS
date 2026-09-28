@@ -35,9 +35,12 @@ pub const MAX_DENTRIES: usize = 48;
 pub const MAX_MOUNTS: usize = 8;
 /// Mapped regions per address space (`addr_space::AddressSpace`).
 pub const MAX_REGIONS: usize = 32;
-/// Cap on an executable image's page-rounded `PT_LOAD` plus `PT_TLS` bytes.
-/// Declared here; ROADMAP §10.6's exec box sets the value and the loader reads it.
-pub const EXEC_IMAGE_MAX: u64 = 256 * 1024 * 1024;
+/// Cap on an executable image's page-rounded `PT_LOAD` plus `PT_TLS` bytes,
+/// which `elf::parse` checks before anything is mapped (ROADMAP §10.6,
+/// F009). 1 GiB: above the 192 MiB that the exec test loads into its
+/// 128 MiB guest, and the size of the 1-2 GiB window that static `ET_EXEC`
+/// images link into.
+pub const EXEC_IMAGE_MAX: u64 = 1 << 30;
 /// `pid_max`: pids and tids count up to it, Linux's default (ROADMAP §10.4).
 pub const PID_MAX: u32 = 32_768;
 /// Where pid allocation wraps to, Linux's `RESERVED_PIDS` (ROADMAP §10.4).

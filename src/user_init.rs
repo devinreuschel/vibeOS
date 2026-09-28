@@ -1,15 +1,13 @@
 //! Load a static ELF, from the filesystem or from memory, into a new
 //! address space. ROADMAP §9.4 / §9.8.
 
-use alloc::vec;
-use alloc::vec::Vec;
-
 use vibeos::addr_space::{AddressSpace, AsError, UserMemError, UserPerms};
 use vibeos::elf::{
     self, AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_FLAGS, AT_GID, AT_PAGESZ, AT_PHDR,
     AT_PHENT, AT_PHNUM, AT_SECURE, AT_UID, Auxv, ElfError, Image,
 };
 use vibeos::fs::{FileRef, FsError, O_RDONLY, OpenFlags};
+use vibeos::kalloc::TryVec;
 use vibeos::paging::PAGE_SIZE_4K;
 
 use crate::addr_space_init;
@@ -32,6 +30,8 @@ pub enum LoadError {
     NoProc,
     /// The process's thread could not be made.
     Spawn(SpawnError),
+    /// A kernel heap allocation failed (DESIGN §4.4).
+    NoMem,
 }
 
 impl LoadError {
@@ -45,6 +45,7 @@ impl LoadError {
             Self::Empty => "empty",
             Self::NoProc => "eagain",
             Self::Spawn(e) => e.as_str(),
+            Self::NoMem => "enomem",
         }
     }
 }
@@ -64,7 +65,7 @@ fn align_up(x: u64, a: u64) -> u64 {
     }
 }
 
-fn read_path(path: &str) -> Result<Vec<u8>, LoadError> {
+fn read_path(path: &str) -> Result<TryVec<u8>, LoadError> {
     let f = file_init::open_routed(path.as_bytes(), OpenFlags::from_bits(O_RDONLY), 0)
         .map_err(LoadError::Fs)?;
     let r = read_file(&f);
@@ -72,7 +73,9 @@ fn read_path(path: &str) -> Result<Vec<u8>, LoadError> {
     r
 }
 
-fn read_file(f: &FileRef) -> Result<Vec<u8>, LoadError> {
+/// Read `f` whole, at most its stated size, into a buffer reserved up
+/// front, so the reads never reallocate.
+fn read_file(f: &FileRef) -> Result<TryVec<u8>, LoadError> {
     let st = file_init::stat(f).map_err(LoadError::Fs)?;
     if st.size == 0 {
         return Err(LoadError::Empty);
@@ -80,21 +83,26 @@ fn read_file(f: &FileRef) -> Result<Vec<u8>, LoadError> {
     if st.size > MAX_ELF {
         return Err(LoadError::TooBig);
     }
-    let mut buf = vec![0u8; st.size as usize];
-    let mut n = 0usize;
-    while n < buf.len() {
-        match file_init::read(f, &mut buf[n..]) {
+    let size = st.size as usize;
+    let mut buf = TryVec::try_with_capacity(size).map_err(|_| LoadError::NoMem)?;
+    let mut chunk = [0u8; 512];
+    while buf.len() < size {
+        let want = (size - buf.len()).min(chunk.len());
+        match file_init::read(f, &mut chunk[..want]) {
             Ok(0) => break,
-            Ok(k) => n += k,
+            Ok(k) => buf
+                .try_extend_from_slice(&chunk[..k.min(want)])
+                .map_err(|_| LoadError::NoMem)?,
             Err(e) => return Err(LoadError::Fs(e)),
         }
     }
-    buf.truncate(n);
     Ok(buf)
 }
 
 fn map_loads(space: &mut AddressSpace, img: &Image<'_>) -> Result<(), LoadError> {
+    let mut top = 0u64;
     for seg in img.loads() {
+        top = top.max(seg.vaddr.saturating_add(seg.memsz));
         if seg.memsz == 0 {
             continue;
         }
@@ -106,7 +114,6 @@ fn map_loads(space: &mut AddressSpace, img: &Image<'_>) -> Result<(), LoadError>
             Ok(()) | Err(AsError::Overlap) => {}
             Err(e) => return Err(LoadError::As(e)),
         }
-        space.zero_bytes(start, len).map_err(LoadError::Mem)?;
         if seg.filesz != 0 {
             let bytes = img.file_bytes(*seg).map_err(LoadError::Elf)?;
             space
@@ -114,6 +121,9 @@ fn map_loads(space: &mut AddressSpace, img: &Image<'_>) -> Result<(), LoadError>
                 .map_err(LoadError::Mem)?;
         }
     }
+    // The heap starts on the page after the image, as on Linux with
+    // randomization off.
+    space.set_brk_start(elf::page_up(top));
     Ok(())
 }
 
@@ -131,8 +141,7 @@ fn setup_tls(space: &mut AddressSpace, img: &Image<'_>, stack_base: u64) -> Resu
         return Ok(0);
     };
     let aligned = align_up(tls.memsz, tls.align.max(1));
-    let need = aligned.saturating_add(8);
-    let map_len = elf::page_up(need.max(PAGE_SIZE_4K));
+    let map_len = tls.map_len().ok_or(LoadError::Elf(ElfError::ImageTooBig))?;
     let tls_map = stack_base.saturating_sub(map_len);
     unsafe { addr_space_init::map_anon(space, tls_map, map_len, UserPerms::RW) }
         .map_err(LoadError::As)?;
@@ -169,7 +178,13 @@ fn at_random() -> [u8; 16] {
 
 fn fill_stack(space: &AddressSpace, img: &Image<'_>, argv: &[&[u8]]) -> Result<u64, LoadError> {
     let len = (STACK_PAGES * PAGE_SIZE_4K) as usize;
-    let mut mem = vec![0u8; len];
+    let mut mem = TryVec::try_with_capacity(len).map_err(|_| LoadError::NoMem)?;
+    let zero = [0u8; 256];
+    while mem.len() < len {
+        let n = (len - mem.len()).min(zero.len());
+        mem.try_extend_from_slice(&zero[..n])
+            .map_err(|_| LoadError::NoMem)?;
+    }
     let mut aux = [
         Auxv {
             tag: AT_PAGESZ,
@@ -227,7 +242,7 @@ fn fill_stack(space: &AddressSpace, img: &Image<'_>, argv: &[&[u8]]) -> Result<u
     if img.phdr_va.is_none() {
         aux[4].val = 0;
     }
-    let rsp = elf::build_initial_stack(STACK_TOP, &mut mem, argv, &[], &aux, &at_random())
+    let rsp = elf::build_initial_stack(STACK_TOP, &mut mem[..], argv, &[], &aux, &at_random())
         .map_err(LoadError::Elf)?;
     let base = STACK_TOP - len as u64;
     space.write_bytes(base, &mem).map_err(LoadError::Mem)?;
@@ -236,12 +251,28 @@ fn fill_stack(space: &AddressSpace, img: &Image<'_>, argv: &[&[u8]]) -> Result<u
 
 /// Build a new address space. Caller installs it only after this returns.
 pub fn load_path(path: &str, argv: &[&str]) -> Result<Loaded, LoadError> {
+    #[cfg(feature = "kernel_tests")]
+    let before = testing::free_now();
+    let r = load_path_inner(path, argv);
+    #[cfg(feature = "kernel_tests")]
+    testing::record(before, r.is_ok());
+    r
+}
+
+fn load_path_inner(path: &str, argv: &[&str]) -> Result<Loaded, LoadError> {
     let bytes = read_path(path)?;
-    let argv_b: Vec<&[u8]> = if argv.is_empty() {
-        vec![path.as_bytes()]
-    } else {
-        argv.iter().map(|a| a.as_bytes()).collect()
-    };
+    let mut argv_b =
+        TryVec::<&[u8]>::try_with_capacity(argv.len().max(1)).map_err(|_| LoadError::NoMem)?;
+    if argv.is_empty() {
+        argv_b
+            .try_push(path.as_bytes())
+            .map_err(|_| LoadError::NoMem)?;
+    }
+    for a in argv {
+        argv_b
+            .try_push(a.as_bytes())
+            .map_err(|_| LoadError::NoMem)?;
+    }
     load_image(&bytes, &argv_b)
 }
 
@@ -270,5 +301,61 @@ pub fn load_image(elf: &[u8], argv: &[&[u8]]) -> Result<Loaded, LoadError> {
             addr_space_init::teardown(space);
             Err(e)
         }
+    }
+}
+
+#[cfg(feature = "kernel_tests")]
+pub(crate) mod testing {
+    use alloc::vec::Vec;
+    use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    use crate::pmm_init;
+
+    /// Free-frame counts around one [`super::load_path`] call.
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) struct ExecFrames {
+        /// Buddy free frames at entry.
+        pub before: usize,
+        /// Buddy free frames at return, after a failed load's teardown.
+        pub after: usize,
+        pub ok: bool,
+    }
+
+    const SLOTS: usize = 4;
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    static BEFORE: [AtomicU64; SLOTS] = [const { AtomicU64::new(0) }; SLOTS];
+    static AFTER: [AtomicU64; SLOTS] = [const { AtomicU64::new(0) }; SLOTS];
+    static OK: [AtomicU64; SLOTS] = [const { AtomicU64::new(0) }; SLOTS];
+
+    pub(super) fn free_now() -> usize {
+        pmm_init::with_buddy(|b| b.stats().free_frames)
+    }
+
+    pub(super) fn record(before: usize, ok: bool) {
+        let after = free_now();
+        let i = NEXT.load(Ordering::Relaxed);
+        BEFORE[i % SLOTS].store(before as u64, Ordering::Relaxed);
+        AFTER[i % SLOTS].store(after as u64, Ordering::Relaxed);
+        OK[i % SLOTS].store(u64::from(ok), Ordering::Relaxed);
+        NEXT.store(i.wrapping_add(1), Ordering::Release);
+    }
+
+    /// Forget the recorded loads.
+    pub(crate) fn clear_exec_frames() {
+        NEXT.store(0, Ordering::Release);
+    }
+
+    /// The last four `load_path` calls since [`clear_exec_frames`], oldest
+    /// first.
+    pub(crate) fn exec_frames() -> Vec<ExecFrames> {
+        let n = NEXT.load(Ordering::Acquire);
+        let first = n.saturating_sub(SLOTS);
+        (first..n)
+            .map(|i| ExecFrames {
+                before: BEFORE[i % SLOTS].load(Ordering::Relaxed) as usize,
+                after: AFTER[i % SLOTS].load(Ordering::Relaxed) as usize,
+                ok: OK[i % SLOTS].load(Ordering::Relaxed) != 0,
+            })
+            .collect()
     }
 }

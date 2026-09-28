@@ -4,7 +4,9 @@
 use core::fmt;
 use core::sync::atomic::Ordering;
 
-use vibeos::addr_space::{AddressSpace, AsError, FrameFree, TeardownStats, UserPerms};
+use vibeos::addr_space::{
+    AddressSpace, AsError, Backing, BrkPlan, FrameFree, MmapReq, Region, TeardownStats, UserPerms,
+};
 use vibeos::paging::{FrameAlloc, PAGE_SIZE_4K, PTE_ADDR_MASK};
 use vibeos::pmm::Frames;
 use vibeos::thread::ThreadId;
@@ -36,6 +38,34 @@ pub fn create() -> Option<AddressSpace> {
     unsafe { AddressSpace::new(&kernel, &mut pool) }
 }
 
+/// Pages one hold of `PT` maps or unmaps: one leaf table's worth. A chunk
+/// never crosses a 2 MiB boundary either, so it touches one leaf table
+/// (ROADMAP §10.6, F009).
+pub const CHUNK_PAGES: u64 = 512;
+
+/// End of the chunk that starts at `cur`: at most [`CHUNK_PAGES`] pages,
+/// up to the next 2 MiB boundary or `end`, whichever comes first.
+fn chunk_end(cur: u64, end: u64) -> u64 {
+    let span = CHUNK_PAGES * PAGE_SIZE_4K;
+    (cur & !(span - 1)).saturating_add(span).min(end)
+}
+
+/// Run `f` with `PT` held, for a chunk of `pages` pages.
+fn with_pt_chunk<R>(pages: u64, f: impl FnOnce() -> R) -> R {
+    paging_init::with_pt(|_pt| {
+        #[cfg(feature = "kernel_tests")]
+        testing::note_hold(pages);
+        #[cfg(not(feature = "kernel_tests"))]
+        let _ = pages;
+        f()
+    })
+}
+
+/// Map `[va, va+len)` with zeroed frames and record it as one region. Takes
+/// `PT` once per chunk ([`CHUNK_PAGES`]) and zeroes each chunk with `PT`
+/// dropped. On failure every page it mapped is unmapped and freed, also
+/// chunk by chunk, and no region is recorded.
+///
 /// # Safety
 /// Same contract as `AddressSpace::map_anon`.
 pub unsafe fn map_anon(
@@ -44,23 +74,220 @@ pub unsafe fn map_anon(
     len: u64,
     perms: UserPerms,
 ) -> Result<(), AsError> {
-    paging_init::with_pt(|_pt| {
-        let mut pool = BuddyPool;
-        unsafe { space.map_anon(va, len, perms, &mut pool) }
-    })?;
-    shootdown_user(space, va, len);
+    space.check_new_region(va, len)?;
+    // SAFETY: `check_new_region` found the range free of regions, so no
+    // page in it is mapped (invariant of
+    // `addr_space::AddressSpace::insert_region`); this fn's contract.
+    unsafe { map_chunks(space, va, len, perms)? };
+    let region = Region {
+        start: va,
+        len,
+        perms,
+        backing: Backing::Anonymous,
+    };
+    if let Err(e) = space.insert_region(region) {
+        // SAFETY: `map_chunks` just mapped the whole range from the buddy,
+        // here.
+        unsafe { unmap_chunks(space, va, len)? };
+        return Err(e);
+    }
     Ok(())
 }
 
+/// Map and zero `[va, va+len)` chunk by chunk; roll back on failure.
+///
 /// # Safety
-/// Same contract as `AddressSpace::unmap_free`.
-pub unsafe fn unmap(space: &mut AddressSpace, va: u64, len: u64) -> Result<(), AsError> {
-    paging_init::with_pt(|_pt| {
-        let mut pool = BuddyPool;
-        unsafe { space.unmap_free(va, len, &mut pool) }
-    })?;
-    shootdown_user(space, va, len);
+/// No page of `[va, va+len)` is mapped in `space`.
+unsafe fn map_chunks(
+    space: &mut AddressSpace,
+    va: u64,
+    len: u64,
+    perms: UserPerms,
+) -> Result<(), AsError> {
+    let end = va.checked_add(len).ok_or(AsError::Overflow)?;
+    let mut cur = va;
+    while cur < end {
+        let ce = chunk_end(cur, end);
+        let n = ce - cur;
+        let rc = with_pt_chunk(n / PAGE_SIZE_4K, || {
+            let mut pool = BuddyPool;
+            // SAFETY: `[cur, ce)` is inside the unmapped range this fn's
+            // contract names, and the buddy hands out owned frames.
+            unsafe { space.map_pages(cur, n, perms, &mut pool) }
+        });
+        // `map_pages` rolled its own chunk back; a failed zero leaves this
+        // chunk mapped, so it is rolled back with the rest.
+        let done = match rc {
+            Ok(()) => match space.zero_bytes(cur, n) {
+                Ok(()) => {
+                    cur = ce;
+                    continue;
+                }
+                Err(_) => (ce, AsError::NotMapped),
+            },
+            Err(e) => (cur, e),
+        };
+        // SAFETY: this call mapped `[va, done.0)` from the buddy, here.
+        unsafe { unmap_chunks(space, va, done.0 - va)? };
+        return Err(done.1);
+    }
     Ok(())
+}
+
+/// Unmap and free every leaf in `[va, va+len)`, chunk by chunk, flushing
+/// each page from this CPU's TLB before its frame is freed when `space` is
+/// the loaded CR3.
+///
+/// # Safety
+/// Same contract as `AddressSpace::unmap_pages`, whose flush this fn
+/// supplies.
+unsafe fn unmap_chunks(space: &mut AddressSpace, va: u64, len: u64) -> Result<(), AsError> {
+    let end = va.checked_add(len).ok_or(AsError::Overflow)?;
+    let mut flush = local_flush(space);
+    let mut cur = va;
+    while cur < end {
+        let ce = chunk_end(cur, end);
+        with_pt_chunk((ce - cur) / PAGE_SIZE_4K, || {
+            let mut pool = BuddyPool;
+            // SAFETY: this fn's contract; `flush` invalidates the page on
+            // this CPU, the only one that runs the space's thread
+            // (`thread_init::spawn_user` pins it).
+            unsafe { space.unmap_pages(cur, ce - cur, &mut pool, &mut flush) }
+        })?;
+        cur = ce;
+    }
+    Ok(())
+}
+
+/// A flush for `space`'s pages: `invlpg` when it is this CPU's CR3,
+/// nothing otherwise.
+fn local_flush(space: &AddressSpace) -> impl FnMut(u64) + use<> {
+    let loaded = x86::read_cr3() & PTE_ADDR_MASK == space.root().as_u64();
+    move |va| {
+        if loaded {
+            x86::invlpg(va);
+        }
+    }
+}
+
+/// `munmap` of `[va, va+len)` over `AddressSpace::unmap_free`, taking `PT`
+/// once per chunk ([`CHUNK_PAGES`]). Each page leaves this CPU's TLB before
+/// its frame is freed when `space` is the loaded CR3. Only the first chunk
+/// can split a region, so a full region table fails it before anything is
+/// unmapped.
+///
+/// # Safety
+/// Same contract as `AddressSpace::unmap_free`, whose flush this fn
+/// supplies.
+pub unsafe fn unmap(space: &mut AddressSpace, va: u64, len: u64) -> Result<(), AsError> {
+    let end = va.checked_add(len).ok_or(AsError::Overflow)?;
+    if len == 0 {
+        // SAFETY: an empty range touches no leaf; `unmap_free` checks it.
+        return paging_init::with_pt(|_pt| unsafe {
+            space.unmap_free(va, 0, &mut BuddyPool, &mut |_| {})
+        });
+    }
+    let mut flush = local_flush(space);
+    let mut cur = va;
+    while cur < end {
+        let ce = chunk_end(cur, end);
+        with_pt_chunk((ce - cur) / PAGE_SIZE_4K, || {
+            let mut pool = BuddyPool;
+            // SAFETY: this fn's contract; `flush` invalidates the page on
+            // this CPU, the only one that runs the space's thread
+            // (`thread_init::spawn_user` pins it).
+            unsafe { space.unmap_free(cur, ce - cur, &mut pool, &mut flush) }
+        })?;
+        cur = ce;
+    }
+    Ok(())
+}
+
+/// `brk(want)` on `space`: returns the new break, or the current one when
+/// `want` is 0, below the heap's start, past `USER_MAP_END`, into another
+/// region, or more than the free frames cover. Growth maps zeroed pages in
+/// chunks like [`map_anon`]; shrinking unmaps the whole pages above the new
+/// break.
+pub fn brk(space: &mut AddressSpace, want: u64) -> u64 {
+    let moved = match space.brk_plan(want) {
+        BrkPlan::Current => return space.brk(),
+        BrkPlan::SamePage => Ok(()),
+        BrkPlan::Grow { va, len } => brk_grow(space, va, len, want),
+        // SAFETY: the heap's leaves were mapped from the buddy by
+        // `brk_grow`, here, and `unmap` supplies the flush.
+        BrkPlan::Shrink { va, len } => unsafe { unmap(space, va, len) },
+    };
+    // A failed move leaves the break where it was, as brk(2) returns it.
+    if moved.is_ok() {
+        space.set_brk(want);
+    }
+    space.brk()
+}
+
+fn brk_grow(space: &mut AddressSpace, va: u64, len: u64, want: u64) -> Result<(), AsError> {
+    space.heap_grow_check(va, len)?;
+    // SAFETY: `heap_grow_check` found `[va, va+len)` in the user half and
+    // clear of every region, so no page in it is mapped (invariant of
+    // `addr_space::AddressSpace::insert_region`).
+    unsafe { map_chunks(space, va, len, UserPerms::RW)? };
+    if let Err(e) = space.heap_grow_commit(va, len, want) {
+        // SAFETY: `map_chunks` just mapped the range from the buddy, here.
+        unsafe { unmap_chunks(space, va, len)? };
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Anonymous `mmap` of `req` in `space`: places it (`AddressSpace::
+/// mmap_place`), then maps zeroed pages as [`map_anon`] does, or for
+/// `PROT_NONE` records a reservation with no frames. Returns the address.
+pub fn mmap(space: &mut AddressSpace, req: &MmapReq) -> Result<u64, AsError> {
+    let va = space.mmap_place(req)?;
+    match req.perms {
+        None => {
+            space.check_new_region(va, req.len)?;
+            space.insert_region(Region {
+                start: va,
+                len: req.len,
+                perms: UserPerms::READ,
+                backing: Backing::Reserved,
+            })?;
+        }
+        // SAFETY: `map_anon` checks the range is in the user half and clear
+        // of every region, and maps from the buddy, which hands out owned
+        // frames (`addr_space_init::BuddyPool`).
+        Some(perms) => unsafe { map_anon(space, va, req.len, perms)? },
+    }
+    Ok(va)
+}
+
+#[cfg(feature = "kernel_tests")]
+pub(crate) mod testing {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    static HOLDS: AtomicU64 = AtomicU64::new(0);
+    static MAX_PAGES: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn note_hold(pages: u64) {
+        HOLDS.fetch_add(1, Ordering::Relaxed);
+        MAX_PAGES.fetch_max(pages, Ordering::Relaxed);
+    }
+
+    /// Zero the chunk counters.
+    pub(crate) fn reset_chunks() {
+        HOLDS.store(0, Ordering::Relaxed);
+        MAX_PAGES.store(0, Ordering::Relaxed);
+    }
+
+    /// `(holds, max_pages_per_hold)`: how many times the chunked map and
+    /// unmap paths took `PT` since [`reset_chunks`], and the most pages one
+    /// hold covered.
+    pub(crate) fn chunk_stats() -> (u64, u64) {
+        (
+            HOLDS.load(Ordering::Relaxed),
+            MAX_PAGES.load(Ordering::Relaxed),
+        )
+    }
 }
 
 /// What still holds a root that [`teardown`] was asked to free.
@@ -116,18 +343,6 @@ pub fn teardown(mut space: AddressSpace) -> TeardownStats {
         // these tables once they are freed.
         unsafe { space.teardown_pool(&mut pool) }
     })
-}
-
-fn shootdown_user(space: &AddressSpace, va: u64, len: u64) {
-    let cur = x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK;
-    if cur != space.root().as_u64() {
-        return;
-    }
-    let mut off = 0u64;
-    while off < len {
-        x86::invlpg(va + off);
-        off += PAGE_SIZE_4K;
-    }
 }
 
 pub fn load_cr3(space: &AddressSpace) {

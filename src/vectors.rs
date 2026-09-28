@@ -26,6 +26,27 @@ pub const XF: u8 = 0x13;
 pub const VE: u8 = 0x14;
 pub const CP: u8 = 0x15;
 
+/// DR6 bits the `#DB` body reads (Intel SDM Vol. 3B, 18.2.3): BS, the
+/// single-step trap, and B0-B3, the breakpoint conditions DR0-DR3 met.
+pub const DR6_BS: u64 = 1 << 14;
+pub const DR6_B0_B3: u64 = 0xF;
+/// DR6 with no debug condition recorded: its reset value, which the `#DB`
+/// entry writes back after saving it, as Linux clears it.
+pub const DR6_RESET: u64 = 0xFFFF_0FF0;
+
+/// The `#DB` cause the saved DR6 records: a single step, a hardware
+/// breakpoint, or neither (`int1`, or a condition DR6 does not name).
+pub const fn dr6_cause(dr6: u64) -> crate::trap::DebugCause {
+    use crate::trap::DebugCause;
+    if dr6 & DR6_BS != 0 {
+        DebugCause::SingleStep
+    } else if dr6 & DR6_B0_B3 != 0 {
+        DebugCause::HwBreakpoint
+    } else {
+        DebugCause::Other
+    }
+}
+
 /// Legacy PIC after remap. Live only until the I/O APIC takes over.
 pub const IRQ_BASE: u8 = 0x20;
 pub const IRQ_SLAVE_BASE: u8 = 0x28;
@@ -103,6 +124,17 @@ pub const NAMED: &[(&str, u8)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dr6_cause() {
+        use crate::trap::DebugCause;
+        assert_eq!(super::dr6_cause(DR6_RESET), DebugCause::Other);
+        assert_eq!(super::dr6_cause(DR6_RESET | DR6_BS), DebugCause::SingleStep);
+        assert_eq!(super::dr6_cause(DR6_RESET | 0x4), DebugCause::HwBreakpoint);
+        // A step that also met a breakpoint condition reports the step.
+        assert_eq!(super::dr6_cause(DR6_BS | 0x1), DebugCause::SingleStep);
+        assert_eq!(super::dr6_cause(0), DebugCause::Other);
+    }
 
     #[test]
     fn named_vectors_are_unique() {

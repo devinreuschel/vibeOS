@@ -118,6 +118,15 @@ GONE: list[tuple[str, str]] = [
     ("set_err", "every IDT vector enters through a stub"),
     ("set_noerr", "every IDT vector enters through a stub"),
     ("harden", "one per-CPU control-register routine, run"),
+    ("enter_user", "`syscall_init::first_return` executes `cli`"),
+    ("vibeos_iret_user", "`syscall_init::first_return` executes `cli`"),
+    ("UserRegs", "one user frame (DESIGN §5.10):"),
+    ("SyscallFrame", "one user frame (DESIGN §5.10):"),
+    ("enter_user_full", "one user frame (DESIGN §5.10):"),
+    ("vibeos_iret_user_full", "one user frame (DESIGN §5.10):"),
+    ("wait_on", "stop and continue cannot lose a wakeup"),
+    ("wake_queue", "stop and continue cannot lose a wakeup"),
+    ("scroll_copy", "console `write` holds IF=0 only for bounded work"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

@@ -65,6 +65,8 @@ pub enum Error {
     NameTooLong,
     NotSupp,
     FileTooBig,
+    /// A kernel heap allocation below the volume failed.
+    NoMem,
 }
 
 impl Error {
@@ -82,6 +84,7 @@ impl Error {
             Error::NameTooLong => "name too long",
             Error::NotSupp => "not supp",
             Error::FileTooBig => "file too big",
+            Error::NoMem => "no memory",
         }
     }
 
@@ -98,6 +101,7 @@ impl Error {
             Error::NameTooLong => FsError::NameTooLong,
             Error::NotSupp => FsError::NotSupp,
             Error::FileTooBig => FsError::FileTooBig,
+            Error::NoMem => FsError::NoMem,
         }
     }
 }

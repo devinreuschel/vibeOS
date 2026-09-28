@@ -1,7 +1,13 @@
-//! Framebuffer pixel math and the text grid. ROADMAP §5.1.
+//! Framebuffer pixel math and the RAM text grid. ROADMAP §5.1, §10.6.
 //!
 //! Pixel address is `base + y * pitch + x * 4` (BGRX). Bounds checks are
 //! real (`Option`), not `debug_assert`. Pitch is independent of `width*4`.
+//!
+//! [`TextGrid`] is the console's text in RAM: one byte per cell, a
+//! ring-row origin so a scroll costs O(1) plus clearing rows, the cursor,
+//! and per-row dirty spans. A writer updates it one [`CHUNK`] at a time;
+//! the framebuffer is redrawn from it in [`Piece`]s of at most
+//! [`PIECE_BYTES`], so nothing ever reads VRAM back (DESIGN §2.9 rule 2).
 
 use crate::font::{self, FONT_H, FONT_W};
 
@@ -21,132 +27,293 @@ pub fn pixel_offset(x: u32, y: u32, width: u32, height: u32, pitch: u64) -> Opti
     row.checked_add(col)
 }
 
-/// Bytes in one text row: `FONT_H` scanlines of `pitch`.
-pub fn text_row_bytes(pitch: u64) -> Option<u64> {
-    (FONT_H as u64).checked_mul(pitch)
-}
+/// Bytes a console write hands the grid per console-lock hold.
+pub const CHUNK: usize = 256;
+/// Framebuffer bytes one redraw piece writes at most, per console-lock hold.
+pub const PIECE_BYTES: usize = 16 * 1024;
+/// Framebuffer bytes one cell covers at 32 bpp.
+pub const CELL_BYTES: usize = (FONT_W * FONT_H * 4) as usize;
+/// Cells one piece draws at most.
+pub const PIECE_CELLS: u32 = (PIECE_BYTES / CELL_BYTES) as u32;
+/// Grid limits: 3840×2160 with the 8×8 font. A larger screen shows the
+/// grid in its top-left corner.
+pub const MAX_COLS: u32 = 3840 / FONT_W;
+pub const MAX_ROWS: u32 = 2160 / FONT_H;
+/// Cells in the largest grid.
+pub const MAX_CELLS: usize = (MAX_COLS * MAX_ROWS) as usize;
 
-/// `memmove` window for a scroll that leaves `banner_rows` text rows put.
-/// Returns `(src_off, dst_off, len)` in bytes from the FB base.
-/// `None` if there is nothing to move (too few rows) or overflow.
-pub fn scroll_copy(banner_rows: u32, rows: u32, pitch: u64) -> Option<(u64, u64, u64)> {
-    if rows <= banner_rows + 1 {
-        return None;
-    }
-    let row_bytes = text_row_bytes(pitch)?;
-    let dst = (banner_rows as u64).checked_mul(row_bytes)?;
-    let src = dst.checked_add(row_bytes)?;
-    let moving = (rows - banner_rows - 1) as u64;
-    let len = moving.checked_mul(row_bytes)?;
-    Some((src, dst, len))
-}
+const _: () = assert!(PIECE_CELLS >= 1 && PIECE_CELLS as usize * CELL_BYTES <= PIECE_BYTES);
+const _: () = assert!(MAX_COLS <= u16::MAX as u32);
 
-/// Offset of the last text row (the one a scroll clears).
-pub fn last_text_row_offset(rows: u32, pitch: u64) -> Option<u64> {
-    if rows == 0 {
-        return None;
-    }
-    let row_bytes = text_row_bytes(pitch)?;
-    ((rows - 1) as u64).checked_mul(row_bytes)
-}
-
+/// Up to [`PIECE_CELLS`] dirty cells of one row, `col..col + n`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CellAction {
-    None,
-    Glyph {
-        col: u32,
-        row: u32,
-        ch: u8,
-    },
-    Scroll,
-    /// Wrap off the last row: scroll first, then paint.
-    GlyphThenScroll {
-        col: u32,
-        row: u32,
-        ch: u8,
-    },
+pub struct Piece {
+    pub row: u32,
+    pub col: u32,
+    pub n: u32,
 }
 
-/// Text cursor + wrap/scroll. Banner rows are never the cursor's home
-/// and survive `Scroll`. `\n` next row, `\r` column 0 same row, `0x08`
-/// backspace (paint space).
+/// What one [`TextGrid::write_chunk`] did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChunkStats {
+    /// 1 if the chunk ran past the last row, else 0.
+    pub scrolls: u32,
+    /// `min(newlines past the bottom, text rows)`.
+    pub scroll_rows: u32,
+}
+
+/// Dirty columns `lo..hi` of one row; empty when `lo == hi`.
 #[derive(Clone, Copy, Debug)]
+struct Span {
+    lo: u16,
+    hi: u16,
+}
+
+impl Span {
+    const EMPTY: Span = Span { lo: 0, hi: 0 };
+
+    fn is_empty(self) -> bool {
+        self.lo >= self.hi
+    }
+}
+
+/// The console text in RAM. Banner rows are never the cursor's home,
+/// never scroll, and are never dirty. `\n` next row, `\r` column 0 same
+/// row, `0x08` backspace (blank the cell). Configured in place: it lives
+/// inside the console lock's `static` and is never built on the stack.
 pub struct TextGrid {
-    pub cols: u32,
-    pub rows: u32,
-    pub banner_rows: u32,
-    pub col: u32,
-    pub row: u32,
+    cells: [u8; MAX_CELLS],
+    dirty: [Span; MAX_ROWS as usize],
+    cols: u32,
+    rows: u32,
+    banner_rows: u32,
+    /// Physical row of logical text row `banner_rows`, minus `banner_rows`.
+    origin: u32,
+    col: u32,
+    row: u32,
+    /// No row below this one is dirty.
+    dirty_from: u32,
+    /// Rows scrolled by the chunk being written.
+    scrolled: u32,
 }
 
 impl TextGrid {
-    pub fn new(pixel_w: u32, pixel_h: u32, banner_rows: u32) -> Option<Self> {
-        let cols = pixel_w / FONT_W;
-        let rows = pixel_h / FONT_H;
-        if cols == 0 || rows == 0 || banner_rows >= rows {
+    /// An unconfigured grid: no rows, nothing to draw.
+    pub const fn empty() -> Self {
+        Self {
+            cells: [0; MAX_CELLS],
+            dirty: [Span::EMPTY; MAX_ROWS as usize],
+            cols: 0,
+            rows: 0,
+            banner_rows: 0,
+            origin: 0,
+            col: 0,
+            row: 0,
+            dirty_from: 0,
+            scrolled: 0,
+        }
+    }
+
+    /// Size the grid for a `pixel_w`×`pixel_h` screen, clear it, and home
+    /// the cursor below the banner. `false`, leaving the grid empty, when
+    /// the screen has no text row below `banner_rows`.
+    pub fn configure(&mut self, pixel_w: u32, pixel_h: u32, banner_rows: u32) -> bool {
+        let cols = (pixel_w / FONT_W).min(MAX_COLS);
+        let rows = (pixel_h / FONT_H).min(MAX_ROWS);
+        self.cols = 0;
+        self.rows = 0;
+        self.banner_rows = 0;
+        self.origin = 0;
+        self.col = 0;
+        self.row = 0;
+        self.dirty_from = 0;
+        self.scrolled = 0;
+        self.dirty = [Span::EMPTY; MAX_ROWS as usize];
+        let Some(used) = (cols as usize).checked_mul(rows as usize) else {
+            return false;
+        };
+        if cols == 0 || rows == 0 || banner_rows >= rows || used > MAX_CELLS {
+            return false;
+        }
+        self.cells[..used].fill(b' ');
+        self.cols = cols;
+        self.rows = rows;
+        self.banner_rows = banner_rows;
+        self.row = banner_rows;
+        self.dirty_from = rows;
+        true
+    }
+
+    pub fn cols(&self) -> u32 {
+        self.cols
+    }
+
+    pub fn rows(&self) -> u32 {
+        self.rows
+    }
+
+    pub fn banner_rows(&self) -> u32 {
+        self.banner_rows
+    }
+
+    /// `(col, row)` of the next cell a visible byte fills.
+    pub fn cursor(&self) -> (u32, u32) {
+        (self.col, self.row)
+    }
+
+    fn text_rows(&self) -> u32 {
+        self.rows - self.banner_rows
+    }
+
+    /// Index of logical cell `(col, row)`; `None` outside the grid.
+    fn index(&self, col: u32, row: u32) -> Option<usize> {
+        if col >= self.cols || row >= self.rows {
             return None;
         }
-        Some(Self {
-            cols,
-            rows,
-            banner_rows,
-            col: 0,
-            row: banner_rows,
-        })
+        let phys = if row < self.banner_rows {
+            row
+        } else {
+            self.banner_rows + (row - self.banner_rows + self.origin) % self.text_rows()
+        };
+        Some(phys as usize * self.cols as usize + col as usize)
     }
 
-    pub fn put(&mut self, ch: u8) -> CellAction {
+    /// The byte at `(col, row)` as the grid stands; a blank outside it.
+    pub fn cell(&self, row: u32, col: u32) -> u8 {
+        self.index(col, row)
+            .and_then(|i| self.cells.get(i).copied())
+            .unwrap_or(b' ')
+    }
+
+    fn set(&mut self, col: u32, row: u32, ch: u8) {
+        if let Some(c) = self.index(col, row).and_then(|i| self.cells.get_mut(i)) {
+            *c = ch;
+        }
+        self.mark(row, col, col + 1);
+    }
+
+    /// Mark columns `lo..hi` of text row `row` dirty.
+    fn mark(&mut self, row: u32, lo: u32, hi: u32) {
+        if row < self.banner_rows || row >= self.rows {
+            return;
+        }
+        let hi = hi.min(self.cols);
+        if lo >= hi {
+            return;
+        }
+        let Some(s) = self.dirty.get_mut(row as usize) else {
+            return;
+        };
+        if s.is_empty() {
+            *s = Span {
+                lo: lo as u16,
+                hi: hi as u16,
+            };
+        } else {
+            s.lo = s.lo.min(lo as u16);
+            s.hi = s.hi.max(hi as u16);
+        }
+        self.dirty_from = self.dirty_from.min(row);
+    }
+
+    /// Advance the ring by one row and blank the new last row.
+    fn scroll_one(&mut self) {
+        self.origin = (self.origin + 1) % self.text_rows();
+        let last = self.rows - 1;
+        if let Some(i) = self.index(0, last) {
+            let end = i + self.cols as usize;
+            if let Some(row) = self.cells.get_mut(i..end) {
+                row.fill(b' ');
+            }
+        }
+        self.scrolled = self.scrolled.saturating_add(1);
+    }
+
+    fn newline(&mut self) {
+        self.col = 0;
+        if self.row + 1 >= self.rows {
+            self.scroll_one();
+        } else {
+            self.row += 1;
+        }
+    }
+
+    fn put(&mut self, ch: u8) {
         match ch {
             b'\n' => self.newline(),
-            b'\r' => {
-                self.col = 0;
-                CellAction::None
+            b'\r' => self.col = 0,
+            0x08 => {
+                if self.col > 0 {
+                    self.col -= 1;
+                } else if self.row > self.banner_rows {
+                    self.row -= 1;
+                    self.col = self.cols - 1;
+                } else {
+                    return;
+                }
+                self.set(self.col, self.row, b' ');
             }
-            0x08 => self.backspace(),
-            _ => self.put_visible(ch),
+            _ => {
+                if self.col >= self.cols {
+                    self.newline();
+                }
+                self.set(self.col, self.row, ch);
+                self.col += 1;
+            }
         }
     }
 
-    fn put_visible(&mut self, ch: u8) -> CellAction {
-        let mut scrolled = false;
-        if self.col >= self.cols {
-            scrolled = matches!(self.newline(), CellAction::Scroll);
+    /// Put `bytes` (at most [`CHUNK`] from a console write) into the
+    /// grid. A chunk that runs past the last row reports one scroll of
+    /// `min(newlines past the bottom, text rows)` rows and marks every
+    /// text row dirty; nothing is drawn.
+    pub fn write_chunk(&mut self, bytes: &[u8]) -> ChunkStats {
+        if self.rows == 0 {
+            return ChunkStats::default();
         }
-        let col = self.col;
-        let row = self.row;
-        self.col = self.col.saturating_add(1);
-        if scrolled {
-            CellAction::GlyphThenScroll { col, row, ch }
-        } else {
-            CellAction::Glyph { col, row, ch }
+        self.scrolled = 0;
+        for &b in bytes {
+            self.put(b);
+        }
+        if self.scrolled == 0 {
+            return ChunkStats::default();
+        }
+        let scroll_rows = self.scrolled.min(self.text_rows());
+        self.scrolled = 0;
+        let mut r = self.banner_rows;
+        while r < self.rows {
+            self.mark(r, 0, self.cols);
+            r += 1;
+        }
+        ChunkStats {
+            scrolls: 1,
+            scroll_rows,
         }
     }
 
-    fn newline(&mut self) -> CellAction {
-        self.col = 0;
-        self.row = self.row.saturating_add(1);
-        if self.row >= self.rows {
-            self.row = self.rows - 1;
-            CellAction::Scroll
-        } else {
-            CellAction::None
+    /// Take the next run of at most [`PIECE_CELLS`] dirty cells of one
+    /// row and clear their marks. The caller draws them from [`cell`] as
+    /// the grid then stands, under the same console-lock hold.
+    ///
+    /// [`cell`]: TextGrid::cell
+    pub fn next_piece(&mut self) -> Option<Piece> {
+        let mut r = self.dirty_from.max(self.banner_rows);
+        while r < self.rows {
+            let s = self.dirty.get_mut(r as usize)?;
+            if !s.is_empty() {
+                let lo = u32::from(s.lo);
+                let n = (u32::from(s.hi) - lo).min(PIECE_CELLS);
+                s.lo += n as u16;
+                if s.is_empty() {
+                    *s = Span::EMPTY;
+                }
+                self.dirty_from = r;
+                return Some(Piece { row: r, col: lo, n });
+            }
+            r += 1;
         }
-    }
-
-    fn backspace(&mut self) -> CellAction {
-        if self.col > 0 {
-            self.col -= 1;
-        } else if self.row > self.banner_rows {
-            self.row -= 1;
-            self.col = self.cols.saturating_sub(1);
-        } else {
-            return CellAction::None;
-        }
-        CellAction::Glyph {
-            col: self.col,
-            row: self.row,
-            ch: b' ',
-        }
+        self.dirty_from = self.rows;
+        None
     }
 }
 
@@ -167,7 +334,26 @@ pub use font::glyph_pixel;
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
+    use std::boxed::Box;
+    use std::vec::Vec;
+
     use super::*;
+
+    fn grid(pixel_w: u32, pixel_h: u32, banner_rows: u32) -> Box<TextGrid> {
+        let mut g = Box::new(TextGrid::empty());
+        assert!(g.configure(pixel_w, pixel_h, banner_rows));
+        g
+    }
+
+    fn drain(g: &mut TextGrid) -> Vec<Piece> {
+        let mut v = Vec::new();
+        while let Some(p) = g.next_piece() {
+            v.push(p);
+        }
+        v
+    }
 
     #[test]
     fn pitch_is_not_width_times_four() {
@@ -204,80 +390,152 @@ mod tests {
     }
 
     #[test]
+    fn configure_rejects_no_text_row() {
+        let mut g = Box::new(TextGrid::empty());
+        assert!(!g.configure(16, 8, 1));
+        assert!(!g.configure(4, 24, 1));
+        assert_eq!(g.write_chunk(b"abc\n\n\n"), ChunkStats::default());
+        assert_eq!(g.next_piece(), None);
+        // A huge screen keeps the grid within its limits.
+        assert!(g.configure(u32::MAX, u32::MAX, 1));
+        assert_eq!((g.cols(), g.rows()), (MAX_COLS, MAX_ROWS));
+    }
+
+    #[test]
     fn wrap_and_scroll_leave_banner() {
-        let mut g = TextGrid::new(16, 24, 1).unwrap(); // 2 cols, 3 rows, banner=1
-        assert_eq!(g.cols, 2);
-        assert_eq!(g.rows, 3);
-        assert_eq!(g.row, 1);
-        assert_eq!(
-            g.put(b'A'),
-            CellAction::Glyph {
-                col: 0,
-                row: 1,
-                ch: b'A'
-            }
-        );
-        assert_eq!(
-            g.put(b'B'),
-            CellAction::Glyph {
-                col: 1,
-                row: 1,
-                ch: b'B'
-            }
-        );
+        let mut g = grid(16, 24, 1); // 2 cols, 3 rows, banner=1
+        assert_eq!((g.cols(), g.rows(), g.banner_rows()), (2, 3, 1));
+        assert_eq!(g.cursor(), (0, 1));
+        assert_eq!(g.write_chunk(b"AB"), ChunkStats::default());
+        assert_eq!((g.cell(1, 0), g.cell(1, 1)), (b'A', b'B'));
         // wrap to next text row
-        assert_eq!(
-            g.put(b'C'),
-            CellAction::Glyph {
-                col: 0,
-                row: 2,
-                ch: b'C'
-            }
-        );
-        assert_eq!(
-            g.put(b'D'),
-            CellAction::Glyph {
-                col: 1,
-                row: 2,
-                ch: b'D'
-            }
-        );
+        assert_eq!(g.write_chunk(b"CD"), ChunkStats::default());
+        assert_eq!((g.cell(2, 0), g.cell(2, 1)), (b'C', b'D'));
         // next wrap scrolls; banner row 0 is not the cursor
-        let a = g.put(b'E');
+        let st = g.write_chunk(b"E");
         assert_eq!(
-            a,
-            CellAction::GlyphThenScroll {
-                col: 0,
-                row: 2,
-                ch: b'E'
+            st,
+            ChunkStats {
+                scrolls: 1,
+                scroll_rows: 1
             }
         );
-        assert_eq!(g.row, 2);
-        assert_eq!(g.banner_rows, 1);
-        assert_eq!(g.put(b'\n'), CellAction::Scroll);
-        assert_eq!(g.row, 2);
-        assert_eq!(g.col, 0);
+        assert_eq!((g.cell(1, 0), g.cell(1, 1)), (b'C', b'D'));
+        assert_eq!((g.cell(2, 0), g.cell(2, 1)), (b'E', b' '));
+        assert_eq!(g.cell(0, 0), b' ');
+        assert_eq!(g.cursor(), (1, 2));
+        assert_eq!(g.write_chunk(b"\n").scrolls, 1);
+        assert_eq!(g.cursor(), (0, 2));
+        assert_eq!((g.cell(1, 0), g.cell(2, 0)), (b'E', b' '));
+        assert!(drain(&mut g).iter().all(|p| p.row >= 1));
     }
 
     #[test]
     fn newline_from_banner_home() {
-        let mut g = TextGrid::new(8, 24, 1).unwrap();
-        assert_eq!(g.rows, 3);
-        assert_eq!(g.put(b'\n'), CellAction::None);
-        assert_eq!(g.row, 2);
-        assert_eq!(g.col, 0);
+        let mut g = grid(8, 24, 1);
+        assert_eq!(g.rows(), 3);
+        assert_eq!(g.write_chunk(b"\n"), ChunkStats::default());
+        assert_eq!(g.cursor(), (0, 2));
     }
 
     #[test]
-    fn scroll_copy_skips_banner() {
-        let pitch = 40u64;
-        let (src, dst, len) = scroll_copy(1, 4, pitch).unwrap();
-        let row = text_row_bytes(pitch).unwrap();
-        assert_eq!(dst, row); // start of row 1
-        assert_eq!(src, 2 * row);
-        assert_eq!(len, 2 * row); // rows 2..3 → 1..2
-        assert!(scroll_copy(1, 2, pitch).is_none());
-        assert_eq!(last_text_row_offset(4, pitch), Some(3 * row));
+    fn grid_scrolls_once_per_chunk() {
+        let mut g = grid(16, 32, 1); // 2 cols, 4 rows, 3 text rows
+        let st = g.write_chunk(b"A\nB\nC\nD");
+        assert_eq!(
+            st,
+            ChunkStats {
+                scrolls: 1,
+                scroll_rows: 1
+            }
+        );
+        assert_eq!(
+            [g.cell(1, 0), g.cell(2, 0), g.cell(3, 0)],
+            [b'B', b'C', b'D']
+        );
+        // 10 newlines past the bottom: one scroll, capped at the text rows.
+        let st = g.write_chunk(&[b'\n'; 10]);
+        assert_eq!(
+            st,
+            ChunkStats {
+                scrolls: 1,
+                scroll_rows: 3
+            }
+        );
+        assert_eq!([g.cell(1, 0), g.cell(2, 0), g.cell(3, 0)], [b' '; 3]);
+        assert_eq!(g.write_chunk(b"xy").scrolls, 0);
+        let mut big = [b'\n'; CHUNK];
+        big[0] = b'q';
+        let st = g.write_chunk(&big);
+        assert_eq!(st.scrolls, 1);
+        assert_eq!(st.scroll_rows, 3);
+        assert_eq!(g.cell(0, 0), b' ');
+    }
+
+    #[test]
+    fn redraw_pieces_at_most_16k() {
+        let mut g = grid(1024, 768, 1); // 128 cols, 96 rows
+        assert_eq!(g.write_chunk(&[b'\n'; CHUNK]).scrolls, 1);
+        let pieces = drain(&mut g);
+        let mut cells = 0u64;
+        for p in &pieces {
+            assert!(p.n >= 1 && p.n <= PIECE_CELLS);
+            assert!(p.n as usize * CELL_BYTES <= PIECE_BYTES);
+            assert!(p.row >= 1 && p.row < 96);
+            assert!(p.col + p.n <= 128);
+            cells += u64::from(p.n);
+        }
+        assert_eq!(cells, 128 * 95);
+        assert_eq!(pieces.len(), 95 * 2);
+        assert_eq!(g.next_piece(), None);
+    }
+
+    #[test]
+    fn piece_draws_grid_as_it_stands() {
+        let mut g = grid(80, 32, 1); // 10 cols, 4 rows
+        g.write_chunk(b"abc");
+        let row = g.cursor().1;
+        let p = g.next_piece().unwrap();
+        assert_eq!(p, Piece { row, col: 0, n: 3 });
+        // A writer changes the grid before the piece is drawn: the
+        // piece draws the new byte, and the cell is dirty again.
+        g.write_chunk(b"\rX");
+        assert_eq!(g.cell(p.row, p.col), b'X');
+        assert_eq!(g.next_piece(), Some(Piece { row, col: 0, n: 1 }));
+        assert_eq!(g.next_piece(), None);
+    }
+
+    #[test]
+    fn if_off_write_leaves_redraw() {
+        let mut g = grid(80, 32, 1);
+        // A writer with IF off updates only the grid; its cells stay
+        // dirty for the next writer with IF on.
+        g.write_chunk(b"hi");
+        g.write_chunk(b"");
+        let row = g.cursor().1;
+        assert_eq!(g.next_piece(), Some(Piece { row, col: 0, n: 2 }));
+        assert_eq!(g.next_piece(), None);
+    }
+
+    #[test]
+    fn backspace_blanks_the_cell() {
+        let mut g = grid(16, 32, 1);
+        g.write_chunk(b"ab");
+        drain(&mut g);
+        g.write_chunk(&[0x08]);
+        assert_eq!(g.cursor(), (1, 1));
+        assert_eq!(g.cell(1, 1), b' ');
+        assert_eq!(
+            g.next_piece(),
+            Some(Piece {
+                row: 1,
+                col: 1,
+                n: 1
+            })
+        );
+        // At the banner's edge backspace does nothing.
+        g.write_chunk(&[0x08, 0x08, 0x08]);
+        assert_eq!(g.cursor(), (0, 1));
     }
 
     #[test]
@@ -287,95 +545,34 @@ mod tests {
 
     #[test]
     fn cr_homes_column_same_row() {
-        let mut g = TextGrid::new(80, 32, 1).unwrap(); // 10 cols, 4 rows
-        let row = g.row;
-        assert_eq!(
-            g.put(b'A'),
-            CellAction::Glyph {
-                col: 0,
-                row,
-                ch: b'A'
-            }
-        );
-        assert_eq!(
-            g.put(b'B'),
-            CellAction::Glyph {
-                col: 1,
-                row,
-                ch: b'B'
-            }
-        );
-        assert_eq!(
-            g.put(b'C'),
-            CellAction::Glyph {
-                col: 2,
-                row,
-                ch: b'C'
-            }
-        );
-        assert_eq!(g.col, 3);
-        assert_eq!(g.put(b'\r'), CellAction::None);
-        assert_eq!(g.col, 0);
-        assert_eq!(g.row, row);
-        assert_eq!(
-            g.put(b'X'),
-            CellAction::Glyph {
-                col: 0,
-                row,
-                ch: b'X'
-            }
-        );
-        assert_eq!(g.col, 1);
-        assert_eq!(g.row, row);
+        let mut g = grid(80, 32, 1); // 10 cols, 4 rows
+        let row = g.cursor().1;
+        g.write_chunk(b"ABC");
+        assert_eq!(g.cursor(), (3, row));
+        g.write_chunk(b"\r");
+        assert_eq!(g.cursor(), (0, row));
+        g.write_chunk(b"X");
+        assert_eq!(g.cursor(), (1, row));
+        assert_eq!([g.cell(row, 0), g.cell(row, 1)], [b'X', b'B']);
     }
 
     #[test]
     fn crlf_is_one_newline() {
-        let mut g = TextGrid::new(16, 32, 1).unwrap();
-        let start = g.row;
-        g.put(b'A');
-        assert_eq!(g.put(b'\r'), CellAction::None);
-        assert_eq!(g.put(b'\n'), CellAction::None);
-        assert_eq!(g.col, 0);
-        assert_eq!(g.row, start + 1);
+        let mut g = grid(16, 32, 1);
+        let start = g.cursor().1;
+        g.write_chunk(b"A\r\n");
+        assert_eq!(g.cursor(), (0, start + 1));
     }
 
     #[test]
     fn cr_paint_overwrites_in_place() {
         // Shell paint: CR, rewrite, pad shorter with spaces, CR, cursor.
-        let mut g = TextGrid::new(80, 32, 1).unwrap();
-        let home = g.row;
-        for &b in b"ab" {
-            g.put(b);
-        }
-        assert_eq!(g.col, 2);
-        assert_eq!(g.put(b'\r'), CellAction::None);
-        assert_eq!(
-            g.put(b'a'),
-            CellAction::Glyph {
-                col: 0,
-                row: home,
-                ch: b'a'
-            }
-        );
-        assert_eq!(
-            g.put(b' '),
-            CellAction::Glyph {
-                col: 1,
-                row: home,
-                ch: b' '
-            }
-        );
-        assert_eq!(g.put(b'\r'), CellAction::None);
-        assert_eq!(
-            g.put(b'a'),
-            CellAction::Glyph {
-                col: 0,
-                row: home,
-                ch: b'a'
-            }
-        );
-        assert_eq!(g.col, 1);
-        assert_eq!(g.row, home);
+        let mut g = grid(80, 32, 1);
+        let home = g.cursor().1;
+        g.write_chunk(b"ab");
+        assert_eq!(g.cursor(), (2, home));
+        g.write_chunk(b"\ra \ra");
+        assert_eq!([g.cell(home, 0), g.cell(home, 1)], [b'a', b' ']);
+        assert_eq!(g.cursor(), (1, home));
     }
 }

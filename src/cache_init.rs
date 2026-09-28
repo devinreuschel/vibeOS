@@ -16,6 +16,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use vibeos::block::BlockError;
 use vibeos::cache::{self, Cache, CacheKey, CacheStats, DEFAULT_PAGES, FillNeed, FlushStep, PAGE};
+use vibeos::kalloc::TryVec;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::wait::WaitQueue;
@@ -136,8 +137,16 @@ fn backend_write(dev: u32, offset: u64, page: &[u8]) -> Result<(), BlockError> {
     raw_write(dev, offset / bs, &page[..n])
 }
 
-fn page_vec() -> alloc::vec::Vec<u8> {
-    alloc::vec![0u8; PAGE]
+/// A zeroed page buffer; `NoMem` when the heap refuses it (DESIGN §4.4).
+fn page_vec() -> Result<TryVec<u8>, BlockError> {
+    let mut v = TryVec::try_with_capacity(PAGE).map_err(|_| BlockError::NoMem)?;
+    let zero = [0u8; 256];
+    while v.len() < PAGE {
+        // Within the reserved capacity: never reallocates.
+        v.try_extend_from_slice(&zero)
+            .map_err(|_| BlockError::NoMem)?;
+    }
+    Ok(v)
 }
 
 /// Sleep until `slot`'s writeback ends. Returns at once if it is not in
@@ -275,8 +284,8 @@ pub fn read(dev: u32, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
         return Err(BlockError::Inval);
     }
     let base = byte_off(dev, lba)?;
-    let mut evict = page_vec();
-    let mut page = page_vec();
+    let mut evict = page_vec()?;
+    let mut page = page_vec()?;
     let mut done = 0usize;
     let mut spins = 0u32;
     while done < buf.len() {
@@ -326,8 +335,8 @@ pub fn write(dev: u32, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
         return Err(BlockError::Inval);
     }
     let base = byte_off(dev, lba)?;
-    let mut evict = page_vec();
-    let mut page = page_vec();
+    let mut evict = page_vec()?;
+    let mut page = page_vec()?;
     let mut done = 0usize;
     let mut spins = 0u32;
     while done < buf.len() {
@@ -365,7 +374,7 @@ pub fn write(dev: u32, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
 
 /// `blk-wb`'s pass: write back each dirty page not already in writeback.
 fn writeback_dev(dev: Option<u32>) -> Result<(), BlockError> {
-    let mut data = page_vec();
+    let mut data = page_vec()?;
     let mut start = 0usize;
     loop {
         let next = {
@@ -390,7 +399,7 @@ fn writeback_dev(dev: Option<u32>) -> Result<(), BlockError> {
 /// and eviction writes), write pages dirtied meanwhile, and send the
 /// device `Flush` only when `dev` has no dirty and no writeback slot.
 pub fn flush(dev: u32) -> Result<(), BlockError> {
-    let mut data = page_vec();
+    let mut data = page_vec()?;
     loop {
         let step = { CACHE.lock().flush_step(Some(dev), &mut data) };
         match step {

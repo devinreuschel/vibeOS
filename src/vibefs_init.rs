@@ -13,6 +13,7 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
+use vibeos::block::BlockError;
 use vibeos::fs::{
     Dirent, FileSystem, FsError, FsType, Inode, InodeHandle, InodeInfo, InodeKind, InodeOps,
     InodeRef, Key, MAX_PATH, Name, OpCx, S_IFDIR_MODE, S_IFMT,
@@ -30,6 +31,15 @@ use crate::virtio_blk_init;
 
 pub const VOL_MEM: u8 = 0;
 use vibeos::limits::MAX_VIBEFS_VOLS as MAX_VOLS;
+
+/// A cache error as vibefs sees it: a refused heap allocation stays
+/// `NoMem` (ENOMEM), anything else is `Io`.
+fn vibefs_io_err(e: BlockError) -> Error {
+    match e {
+        BlockError::NoMem => Error::NoMem,
+        _ => Error::Io,
+    }
+}
 const MNT_MAX: usize = 2;
 const MNT_PATH: usize = 64;
 pub const IMAGE_BYTES: usize = 256 * 1024;
@@ -148,7 +158,7 @@ impl Disk for Io {
                 };
                 let spb = secs_per_blk(bs)?;
                 let lba = bno as u64 * spb as u64;
-                cache_init::read(dev, lba, buf).map_err(|_| Error::Io)
+                cache_init::read(dev, lba, buf).map_err(vibefs_io_err)
             }
         }
     }
@@ -173,7 +183,7 @@ impl Disk for Io {
                 };
                 let spb = secs_per_blk(bs)?;
                 let lba = bno as u64 * spb as u64;
-                cache_init::write(dev, lba, buf).map_err(|_| Error::Io)
+                cache_init::write(dev, lba, buf).map_err(vibefs_io_err)
             }
         }
     }
@@ -181,7 +191,7 @@ impl Disk for Io {
     fn flush(&mut self) -> Result<(), Error> {
         match self.back {
             Media::Mem => Ok(()),
-            Media::Dev(dev) => cache_init::flush(dev).map_err(|_| Error::Io),
+            Media::Dev(dev) => cache_init::flush(dev).map_err(vibefs_io_err),
         }
     }
 }

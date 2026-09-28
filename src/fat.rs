@@ -48,6 +48,8 @@ pub enum FatError {
     NotEmpty,
     NameTooLong,
     NotSupp,
+    /// A kernel heap allocation below the volume failed.
+    NoMem,
 }
 
 impl FatError {
@@ -64,6 +66,7 @@ impl FatError {
             FatError::NotEmpty => "not empty",
             FatError::NameTooLong => "name too long",
             FatError::NotSupp => "not supp",
+            FatError::NoMem => "no memory",
         }
     }
 
@@ -79,6 +82,7 @@ impl FatError {
             FatError::NotEmpty => FsError::NotEmpty,
             FatError::NameTooLong => FsError::NameTooLong,
             FatError::NotSupp => FsError::NotSupp,
+            FatError::NoMem => FsError::NoMem,
         }
     }
 }

@@ -6,33 +6,36 @@
 
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
-use alloc::boxed::Box;
-use alloc::vec::Vec;
 use core::fmt::Write;
+use core::mem::MaybeUninit;
 
-use vibeos::addr_space::AddressSpace;
-use vibeos::desc::InterruptFrame;
+use vibeos::addr_space::{AddressSpace, AsError, MmapError, mmap_request};
+use vibeos::elf::ElfError;
 use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, SeekFrom};
+use vibeos::kalloc::{TryBox, TryVec};
 use vibeos::kbd::{DecodedKey, NamedKey};
+use vibeos::paging::{PAGE_SIZE_4K, USER_MAP_END};
 use vibeos::proc::{
     Creds, Cwd, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, InitState, MAX_FDS, MAX_PROCS,
-    ProcState, SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGSTOP, SIGTRAP,
-    SigAct, WNOHANG, default_action, fd_flags_from_open, reaper_for, sig_name, wait_exited,
-    wait_signaled, wait_stopped,
+    ProcState, SIGCHLD, SIGCONT, SIGKILL, SIGSTOP, SigAct, WNOHANG, default_action,
+    fd_flags_from_open, reaper_for, sig_name, wait_exited, wait_signaled, wait_stopped,
 };
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::syscall::{
     self, E2BIG, EAGAIN, EBADF, EBUSY, ECHILD, EEXIST, EFAULT, EFBIG, EINVAL, EIO, EISDIR, EMFILE,
-    ENAMETOOLONG, ENOENT, ENOEXEC, ENOMEM, ENOSYS, ENOTDIR, ESRCH, F_GETFD, F_SETFD, SYS_CLOSE,
-    SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_EXIT, SYS_FCNTL, SYS_FORK, SYS_GETPID, SYS_GETPPID,
-    SYS_KILL, SYS_LSEEK, SYS_OPEN, SYS_PSINFO, SYS_READ, SYS_SCHED_YIELD, SYS_WAIT4, SYS_WRITE,
-    SyscallFrame, UserRegs,
+    ENAMETOOLONG, ENODEV, ENOENT, ENOEXEC, ENOMEM, ENOSYS, ENOTDIR, EPERM, ESRCH, F_GETFD, F_SETFD,
+    SYS_BRK, SYS_CLOSE, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_EXIT, SYS_FCNTL, SYS_FORK, SYS_GETPID,
+    SYS_GETPPID, SYS_KILL, SYS_LSEEK, SYS_MMAP, SYS_MUNMAP, SYS_OPEN, SYS_PSINFO, SYS_READ,
+    SYS_SCHED_YIELD, SYS_WAIT4, SYS_WRITE, UserFrame,
 };
-use vibeos::thread::{RFLAGS_IF, RFLAGS_RESERVED1, ThreadId};
+use vibeos::thread::ThreadId;
+use vibeos::trap::x86_64::Abi;
+use vibeos::trap::{self, FpCause, FpUnit, Ring3Action, SyscallAbi, TrapKind};
 use vibeos::vectors;
 use vibeos::wait::WaitQueue;
 
 use crate::addr_space_init;
+use crate::arch::idt::TrapFrame;
 use crate::cell::IrqCell;
 use crate::console_init;
 use crate::file_init;
@@ -54,8 +57,9 @@ struct Proc {
     pending: u32,
     /// No reaper: freed at exit, ROADMAP §10.5.
     autoreap: bool,
-    space: Option<Box<AddressSpace>>,
-    entry: UserRegs,
+    space: Option<TryBox<AddressSpace>>,
+    /// `FS_BASE` for the first return to ring 3 (`user_thread_entry`).
+    fs_base: u64,
     wait_wq: WaitQueue,
     stop_wq: WaitQueue,
 }
@@ -75,7 +79,7 @@ impl Proc {
             pending: 0,
             autoreap: false,
             space: None,
-            entry: UserRegs::empty(),
+            fs_base: 0,
             wait_wq: WaitQueue::new(),
             stop_wq: WaitQueue::new(),
         }
@@ -156,6 +160,7 @@ fn fs_errno(e: FsError) -> i32 {
         FsError::Badf => EBADF,
         FsError::Io => EIO,
         FsError::FileTooBig => EFBIG,
+        FsError::NoMem => ENOMEM,
         FsError::Loop | FsError::NotEmpty | FsError::NotSupp => EINVAL,
     }
 }
@@ -163,12 +168,14 @@ fn fs_errno(e: FsError) -> i32 {
 fn load_errno(e: LoadError) -> i32 {
     match e {
         LoadError::Fs(f) => fs_errno(f),
+        LoadError::Elf(ElfError::ImageTooBig) => ENOMEM,
         LoadError::Elf(_) => ENOEXEC,
         LoadError::As(_) | LoadError::TooBig => ENOMEM,
         LoadError::Mem(_) => EFAULT,
         LoadError::Empty => ENOEXEC,
         LoadError::NoProc => EAGAIN,
         LoadError::Spawn(e) => spawn_errno(e),
+        LoadError::NoMem => ENOMEM,
     }
 }
 
@@ -330,18 +337,21 @@ fn dup_table(src: FdTable) -> Option<FdTable> {
 
 fn user_thread_entry() {
     let pid = current_pid();
-    let regs = with_table(|t| {
+    let fs = with_table(|t| {
         t.get(pid).map(|p| {
             if let Some(ref s) = p.space {
                 set_as(s);
             }
-            p.entry
+            p.fs_base
         })
     });
-    let Some(regs) = regs else {
+    let Some(fs) = fs else {
         thread_init::exit_current();
     };
-    unsafe { syscall_init::enter_user_full(&regs) };
+    // SAFETY: invariant I25: this is a user thread whose kernel stack
+    // holds at its top the user frame its creator wrote, and its CR3 maps
+    // that frame's RIP and RSP; established by `thread_init::spawn_user`.
+    unsafe { syscall_init::first_return(fs) };
 }
 
 #[cfg_attr(feature = "kernel_tests", allow(dead_code))]
@@ -357,7 +367,9 @@ pub fn start_init() {
 /// Start the ELF at `path` as a new process with parent `ppid` (0: the
 /// kernel, which reaps it with [`wait_kernel`]).
 pub(crate) fn spawn_elf(path: &str, prefer: u32, ppid: u32) -> Result<u32, LoadError> {
+    let slot = space_slot().ok_or(LoadError::NoMem)?;
     start_loaded(
+        slot,
         user_init::load_path(path, &[path])?,
         prefer,
         ppid,
@@ -372,10 +384,19 @@ pub(crate) fn spawn_image(elf: &[u8], argv: &[&[u8]], ppid: u32) -> Result<u32, 
         Some(Ok(a)) => intern_name(a),
         _ => "user",
     };
-    start_loaded(user_init::load_image(elf, argv)?, 0, ppid, name)
+    let slot = space_slot().ok_or(LoadError::NoMem)?;
+    start_loaded(slot, user_init::load_image(elf, argv)?, 0, ppid, name)
+}
+
+/// The heap slot a new address space moves into, taken before the space
+/// is built: `AddressSpace` has no `Drop`, so a space that a failed
+/// `TryBox::try_new` dropped would leak its frames.
+fn space_slot() -> Option<TryBox<MaybeUninit<AddressSpace>>> {
+    TryBox::<AddressSpace>::try_new_uninit().ok()
 }
 
 fn start_loaded(
+    slot: TryBox<MaybeUninit<AddressSpace>>,
     loaded: Loaded,
     prefer: u32,
     ppid: u32,
@@ -389,24 +410,21 @@ fn start_loaded(
         }
     };
     let cr3 = loaded.space.root().as_u64();
-    let mut entry = UserRegs::empty();
-    entry.rip = loaded.entry;
-    entry.rsp = loaded.rsp;
-    entry.rflags = RFLAGS_RESERVED1 | RFLAGS_IF;
-    entry.fs_base = loaded.fs;
-    let boxed = Box::new(loaded.space);
-    let h = match thread_init::spawn_user(name, user_thread_entry, pid, cr3) {
+    let frame = UserFrame::new_user(loaded.entry, loaded.rsp);
+    let fs = loaded.fs;
+    let boxed = slot.write(loaded.space);
+    let h = match thread_init::spawn_user(name, user_thread_entry, pid, cr3, &frame) {
         Ok(h) => h,
         Err(e) => {
             with_table(|t| t.procs[pid as usize] = Proc::empty());
-            addr_space_init::teardown(*boxed);
+            addr_space_init::teardown(boxed.into_inner());
             return Err(LoadError::Spawn(e));
         }
     };
     with_table(|t| {
         init_slot(t, pid, ppid, name);
         t.procs[pid as usize].space = Some(boxed);
-        t.procs[pid as usize].entry = entry;
+        t.procs[pid as usize].fs_base = fs;
     });
     with_table(|t| {
         if let Some(p) = t.get_mut(pid) {
@@ -464,12 +482,14 @@ pub(crate) fn wait_kernel(pid: u32) -> u32 {
     }
 }
 
-pub fn syscall(frame: *mut SyscallFrame) -> i64 {
-    apply_pending(frame);
-    let f = unsafe { &mut *frame };
-    let nr = f.nr;
-    let args = f.args();
-    let ret = dispatch_frame(nr, args, f);
+/// A syscall from ring 3, over the user frame its entry saved.
+pub fn syscall(frame: &mut UserFrame) -> i64 {
+    #[cfg(feature = "kernel_tests")]
+    testing::on_entry(frame);
+    apply_pending(Some(&mut *frame));
+    let nr = Abi::nr(frame);
+    let args: [u64; 6] = core::array::from_fn(|i| Abi::arg(frame, i));
+    let ret = dispatch_frame(nr, args, Some(frame));
     if syscall_init::trace_enabled() {
         let name = syscall::info(nr).map(|i| i.name).unwrap_or("?");
         let _ = writeln!(Serial, "user: syscall {name} nr={nr} = {ret}");
@@ -478,19 +498,22 @@ pub fn syscall(frame: *mut SyscallFrame) -> i64 {
 }
 
 pub fn dispatch(nr: u64, args: [u64; 6]) -> i64 {
-    dispatch_frame(nr, args, core::ptr::null_mut())
+    dispatch_frame(nr, args, None)
 }
 
-fn dispatch_frame(nr: u64, args: [u64; 6], frame: *mut SyscallFrame) -> i64 {
+fn dispatch_frame(nr: u64, args: [u64; 6], frame: Option<&mut UserFrame>) -> i64 {
     match nr {
         SYS_READ => sys_read(args[0], args[1], args[2]),
         SYS_WRITE => sys_write(args[0], args[1], args[2]),
         SYS_OPEN => sys_open(args[0], args[1], args[2]),
         SYS_CLOSE => sys_close(args[0]),
         SYS_LSEEK => sys_lseek(args[0], args[1], args[2]),
+        SYS_MMAP => sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5]),
+        SYS_MUNMAP => sys_munmap(args[0], args[1]),
+        SYS_BRK => sys_brk(args[0]),
         SYS_DUP => sys_dup(args[0]),
         SYS_DUP2 => sys_dup2(args[0], args[1]),
-        SYS_GETPID => current_pid() as i64,
+        SYS_GETPID => sys_getpid(),
         SYS_GETPPID => with_table(|t| t.get(current_pid()).map(|p| p.ppid).unwrap_or(0)) as i64,
         SYS_SCHED_YIELD => {
             if current_pid() != 0 {
@@ -515,43 +538,55 @@ fn dispatch_frame(nr: u64, args: [u64; 6], frame: *mut SyscallFrame) -> i64 {
     }
 }
 
-fn apply_pending(frame: *mut SyscallFrame) {
+/// Act on this process's pending signals at syscall entry. Each turn is
+/// one SCHED section: a stop sets Stopped and arms the `stop_wq` wait in
+/// the section that decides it, so a `SIGCONT` that `sys_kill` sends in
+/// between finds the thread on the queue (ROADMAP §10.6, F033). The loop
+/// re-checks after every `schedule()`, which can return early.
+fn apply_pending(frame: Option<&mut UserFrame>) {
     let pid = current_pid();
     if pid == 0 {
         return;
     }
     loop {
-        let act = with_table(|t| {
-            let Some(p) = t.get_mut(pid) else {
-                return Pending::None;
-            };
-            if p.pending & bit(SIGKILL) != 0 {
-                return Pending::Die(SIGKILL);
-            }
-            if p.state == ProcState::Stopped || p.pending & bit(SIGSTOP) != 0 {
-                p.state = ProcState::Stopped;
-                p.pending &= !bit(SIGSTOP);
-                return Pending::Stop;
-            }
-            let pend = p.pending;
-            let mut s = 1u32;
-            while s <= 31 {
-                if pend & bit(s) != 0 && s != SIGCHLD && s != SIGCONT {
-                    match default_action(s) {
-                        SigAct::Term => return Pending::Die(s),
-                        SigAct::Stop => {
-                            p.state = ProcState::Stopped;
-                            p.pending &= !bit(s);
-                            return Pending::Stop;
+        let act = thread_init::with_sched(|s| {
+            TABLE.with(|t| {
+                let Some(p) = t.get_mut(pid) else {
+                    return Pending::None;
+                };
+                if p.pending & bit(SIGKILL) != 0 {
+                    return Pending::Die(SIGKILL);
+                }
+                let mut stop = false;
+                if p.state == ProcState::Stopped || p.pending & bit(SIGSTOP) != 0 {
+                    p.pending &= !bit(SIGSTOP);
+                    stop = true;
+                } else {
+                    let pend = p.pending;
+                    let mut sig = 1u32;
+                    while sig <= 31 && !stop {
+                        if pend & bit(sig) != 0 && sig != SIGCHLD && sig != SIGCONT {
+                            match default_action(sig) {
+                                SigAct::Term => return Pending::Die(sig),
+                                SigAct::Stop => {
+                                    p.pending &= !bit(sig);
+                                    stop = true;
+                                }
+                                SigAct::Ign | SigAct::Cont => {
+                                    p.pending &= !bit(sig);
+                                }
+                            }
                         }
-                        SigAct::Ign | SigAct::Cont => {
-                            p.pending &= !bit(s);
-                        }
+                        sig += 1;
                     }
                 }
-                s += 1;
-            }
-            Pending::None
+                if !stop {
+                    return Pending::None;
+                }
+                p.state = ProcState::Stopped;
+                s.begin_wait(&mut p.stop_wq, FAR_DEADLINE);
+                Pending::Stop
+            })
         });
         match act {
             Pending::None => return,
@@ -560,8 +595,9 @@ fn apply_pending(frame: *mut SyscallFrame) {
                 finish_exit(wait_signaled(sig), true);
             }
             Pending::Stop => {
-                let wq = unsafe { &mut (*TABLE.as_ptr()).procs[pid as usize].stop_wq };
-                thread_init::wait_on(wq);
+                #[cfg(feature = "kernel_tests")]
+                testing::stop_stall(pid);
+                thread_init::schedule();
             }
         }
     }
@@ -571,6 +607,16 @@ enum Pending {
     None,
     Die(u32),
     Stop,
+}
+
+fn sys_getpid() -> i64 {
+    let pid = current_pid();
+    #[cfg(feature = "kernel_tests")]
+    {
+        testing::getpid_spin(pid);
+        testing::on_getpid(pid);
+    }
+    pid as i64
 }
 
 fn lookup_fd(fd: u64) -> Option<Fd> {
@@ -632,6 +678,10 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> i64 {
                     FdKind::None => return syscall::neg(EBADF),
                 }
                 done += n as u64;
+            }
+            #[cfg(feature = "kernel_tests")]
+            if matches!(slot.kind, FdKind::Console) {
+                testing::console_write_returned();
             }
             done as i64
         }
@@ -722,8 +772,8 @@ fn copy_user_str(va: u64, out: &mut [u8]) -> Result<usize, i32> {
     Err(ENAMETOOLONG)
 }
 
-fn copy_cvec(va: u64) -> Result<Vec<Vec<u8>>, i32> {
-    let mut v = Vec::new();
+fn copy_cvec(va: u64) -> Result<TryVec<TryVec<u8>>, i32> {
+    let mut v = TryVec::new();
     if va == 0 {
         return Ok(v);
     }
@@ -742,7 +792,9 @@ fn copy_cvec(va: u64) -> Result<Vec<Vec<u8>>, i32> {
         }
         let mut buf = [0u8; 256];
         let n = copy_user_str(p, &mut buf)?;
-        v.push(buf[..n].to_vec());
+        let mut s = TryVec::try_with_capacity(n).map_err(|_| ENOMEM)?;
+        s.try_extend_from_slice(&buf[..n]).map_err(|_| ENOMEM)?;
+        v.try_push(s).map_err(|_| ENOMEM)?;
         i += 1;
     }
     Err(E2BIG)
@@ -894,10 +946,13 @@ fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
     })
 }
 
-fn sys_fork(frame: *mut SyscallFrame) -> i64 {
-    if frame.is_null() {
+// Out of line: `dispatch_frame` keeps only the running syscall's frame,
+// and a preempted body carries an interrupt and a switch on top of it.
+#[inline(never)]
+fn sys_fork(frame: Option<&mut UserFrame>) -> i64 {
+    let Some(frame) = frame else {
         return syscall::neg(EINVAL);
-    }
+    };
     let ppid = current_pid();
     if ppid == 0 {
         return syscall::neg(EINVAL);
@@ -916,6 +971,13 @@ fn sys_fork(frame: *mut SyscallFrame) -> i64 {
         close_all_fds(&mut { fds });
         return syscall::neg(EAGAIN);
     };
+    let Some(slot) = space_slot() else {
+        close_all_fds(&mut { fds });
+        with_table(|t| {
+            t.procs[pid as usize] = Proc::empty();
+        });
+        return syscall::neg(ENOMEM);
+    };
     let Some(cloned) = addr_space_init::clone_full(src) else {
         close_all_fds(&mut { fds });
         with_table(|t| {
@@ -924,16 +986,15 @@ fn sys_fork(frame: *mut SyscallFrame) -> i64 {
         return syscall::neg(ENOMEM);
     };
     let cr3 = cloned.root().as_u64();
-    let child_regs = UserRegs::from_syscall(unsafe { &*frame }, 0);
+    let mut child = *frame;
+    child.rax = 0;
     let fs = crate::x86::rdmsr(crate::x86::IA32_FS_BASE);
-    let mut child_regs = child_regs;
-    child_regs.fs_base = fs;
-    let boxed = Box::new(cloned);
-    let h = match thread_init::spawn_user("user", user_thread_entry, pid, cr3) {
+    let boxed = slot.write(cloned);
+    let h = match thread_init::spawn_user("user", user_thread_entry, pid, cr3, &child) {
         Ok(h) => h,
         Err(e) => {
             // Nothing names the clone's root yet: no thread was made.
-            addr_space_init::teardown(*boxed);
+            addr_space_init::teardown(boxed.into_inner());
             close_all_fds(&mut { fds });
             with_table(|t| {
                 t.procs[pid as usize] = Proc::empty();
@@ -948,7 +1009,7 @@ fn sys_fork(frame: *mut SyscallFrame) -> i64 {
         p.cwd = cwd;
         p.creds = creds;
         p.space = Some(boxed);
-        p.entry = child_regs;
+        p.fs_base = fs;
         p.tid = h.id();
     });
     thread_init::make_ready(h.id());
@@ -956,10 +1017,13 @@ fn sys_fork(frame: *mut SyscallFrame) -> i64 {
     pid as i64
 }
 
-fn sys_execve(path: u64, argv: u64, envp: u64, frame: *mut SyscallFrame) -> i64 {
-    if frame.is_null() {
+// Out of line: `dispatch_frame` keeps only the running syscall's frame,
+// and a preempted body carries an interrupt and a switch on top of it.
+#[inline(never)]
+fn sys_execve(path: u64, argv: u64, envp: u64, frame: Option<&mut UserFrame>) -> i64 {
+    let Some(frame) = frame else {
         return syscall::neg(EINVAL);
-    }
+    };
     let pid = current_pid();
     if pid == 0 {
         return syscall::neg(EINVAL);
@@ -977,17 +1041,26 @@ fn sys_execve(path: u64, argv: u64, envp: u64, frame: *mut SyscallFrame) -> i64 
         Err(e) => return syscall::neg(e),
     };
     let _ = envp;
-    let mut argv_s: Vec<&str> = Vec::new();
+    let Ok(mut argv_s) = TryVec::<&str>::try_with_capacity(argv_v.len().max(1)) else {
+        return syscall::neg(ENOMEM);
+    };
     if argv_v.is_empty() {
-        argv_s.push(path_s);
+        if argv_s.try_push(path_s).is_err() {
+            return syscall::neg(ENOMEM);
+        }
     } else {
-        for a in &argv_v {
-            match core::str::from_utf8(a) {
-                Ok(s) => argv_s.push(s),
-                Err(_) => return syscall::neg(EINVAL),
+        for a in argv_v.iter() {
+            let Ok(s) = core::str::from_utf8(a) else {
+                return syscall::neg(EINVAL);
+            };
+            if argv_s.try_push(s).is_err() {
+                return syscall::neg(ENOMEM);
             }
         }
     }
+    let Some(slot) = space_slot() else {
+        return syscall::neg(ENOMEM);
+    };
     let loaded = match user_init::load_path(path_s, &argv_s) {
         Ok(l) => l,
         Err(e) => return syscall::neg(load_errno(e)),
@@ -996,24 +1069,20 @@ fn sys_execve(path: u64, argv: u64, envp: u64, frame: *mut SyscallFrame) -> i64 
     let entry = loaded.entry;
     let rsp = loaded.rsp;
     let fs = loaded.fs;
-    let mut boxed = Some(Box::new(loaded.space));
+    let mut boxed = Some(slot.write(loaded.space));
     let cr3 = boxed.as_ref().map(|s| s.root().as_u64()).unwrap_or(0);
     let old = with_table(|t| {
         let p = t.get_mut(pid)?;
         let gone = p.fds.apply_cloexec();
         p.name = name;
-        p.entry.rip = entry;
-        p.entry.rsp = rsp;
-        p.entry.fs_base = fs;
-        p.entry.rax = 0;
-        p.entry.rflags = RFLAGS_RESERVED1 | RFLAGS_IF;
+        p.fs_base = fs;
         let old = p.space.take();
         p.space = boxed.take();
         Some((old, gone, p.tid, cr3))
     });
     let Some((old, gone, tid, cr3)) = old else {
         if let Some(b) = boxed {
-            addr_space_init::teardown(*b);
+            addr_space_init::teardown(b.into_inner());
         }
         return syscall::neg(ESRCH);
     };
@@ -1034,17 +1103,85 @@ fn sys_execve(path: u64, argv: u64, envp: u64, frame: *mut SyscallFrame) -> i64 
     // here.
     unsafe { addr_space_init::load_cr3_u64(cr3) };
     if let Some(old) = old {
-        addr_space_init::teardown(*old);
+        addr_space_init::teardown(old.into_inner());
     }
-    let f = unsafe { &mut *frame };
-    let mut regs = UserRegs::empty();
-    regs.rip = entry;
-    regs.rsp = rsp;
-    regs.rflags = RFLAGS_RESERVED1 | RFLAGS_IF;
-    regs.fs_base = fs;
-    regs.apply_to_syscall(f);
+    *frame = UserFrame {
+        orig_rax: frame.orig_rax,
+        ..UserFrame::new_user(entry, rsp)
+    };
     unsafe { crate::x86::wrmsr(crate::x86::IA32_FS_BASE, fs) };
     0
+}
+
+/// Run `f` on the calling process's own address space, after the table
+/// lock is released. `None` for pid 0 or a process with no space.
+fn with_own_space<R>(f: impl FnOnce(&mut AddressSpace) -> R) -> Option<R> {
+    let pid = current_pid();
+    if pid == 0 {
+        return None;
+    }
+    let ptr = with_table(|t| {
+        let p = t.get_mut(pid)?;
+        p.space.as_mut().map(|b| &mut **b as *mut AddressSpace)
+    })?;
+    // SAFETY: a process's space is replaced or taken only by its own thread
+    // (`proc_init::sys_execve`, `proc_init::finish_exit`), and that thread
+    // is the caller, here, so the box outlives `f`; processes are
+    // single-threaded, so nothing else reaches the space while `f` runs.
+    Some(f(unsafe { &mut *ptr }))
+}
+
+/// Anonymous private `mmap` (SYSCALL.md §3.1).
+fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> i64 {
+    let req = match mmap_request(addr, len, prot, flags, off) {
+        Ok(r) => r,
+        Err(MmapError::Inval) => return syscall::neg(EINVAL),
+        Err(MmapError::NoMem) => return syscall::neg(ENOMEM),
+        Err(MmapError::NotAnon) => {
+            let e = if lookup_fd(fd).is_none() {
+                EBADF
+            } else {
+                ENODEV
+            };
+            return syscall::neg(e);
+        }
+    };
+    match with_own_space(|s| addr_space_init::mmap(s, &req)) {
+        None => syscall::neg(EINVAL),
+        Some(Ok(va)) => va as i64,
+        Some(Err(AsError::Overlap)) => syscall::neg(EEXIST),
+        Some(Err(AsError::NullGuard)) => syscall::neg(EPERM),
+        Some(Err(AsError::Misaligned)) => syscall::neg(EINVAL),
+        Some(Err(_)) => syscall::neg(ENOMEM),
+    }
+}
+
+/// `munmap` (SYSCALL.md §3.1): allocates nothing.
+fn sys_munmap(addr: u64, len: u64) -> i64 {
+    if !addr.is_multiple_of(PAGE_SIZE_4K) || len == 0 {
+        return syscall::neg(EINVAL);
+    }
+    let Some(len) = len
+        .checked_add(PAGE_SIZE_4K - 1)
+        .map(|l| l & !(PAGE_SIZE_4K - 1))
+        .filter(|&l| addr.checked_add(l).is_some_and(|e| e <= USER_MAP_END))
+    else {
+        return syscall::neg(EINVAL);
+    };
+    // SAFETY: every leaf of the caller's space was mapped from the buddy by
+    // `addr_space_init::map_anon` or `addr_space_init::brk`, and `unmap`
+    // supplies the flush, here.
+    match with_own_space(|s| unsafe { addr_space_init::unmap(s, addr, len) }) {
+        None => syscall::neg(EINVAL),
+        Some(Ok(())) => 0,
+        Some(Err(AsError::NoRegionSlot)) => syscall::neg(ENOMEM),
+        Some(Err(_)) => syscall::neg(EINVAL),
+    }
+}
+
+/// `brk`: the new break, or the current one on failure; 0 for pid 0.
+fn sys_brk(want: u64) -> i64 {
+    with_own_space(|s| addr_space_init::brk(s, want)).unwrap_or(0) as i64
 }
 
 fn p_space_ref(pid: u32) -> Option<&'static AddressSpace> {
@@ -1101,7 +1238,7 @@ fn finish_exit(wait_status: u32, _from_fault: bool) -> ! {
         crate::arch::gs::force_kernel();
         addr_space_init::load_kernel_cr3();
         clear_as();
-        addr_space_init::teardown(*space);
+        addr_space_init::teardown(space.into_inner());
     }
     crate::arch::gs::force_kernel();
     thread_init::exit_current();
@@ -1190,7 +1327,7 @@ fn sys_wait4(pid: u64, status: u64, options: u64) -> i64 {
                 if let Some(s) = current_space() {
                     set_as(s);
                 }
-                apply_pending(core::ptr::null_mut());
+                apply_pending(None);
             }
         }
     }
@@ -1238,52 +1375,45 @@ fn sys_kill(pid: u64, sig: u64) -> i64 {
     }
     let target = pid as u32;
     let self_pid = current_pid();
-    let r = with_table(|t| {
-        let Some(p) = t.get_mut(target) else {
-            return Err(ESRCH);
-        };
-        if p.state == ProcState::Unused || p.state == ProcState::Zombie {
-            return Err(ESRCH);
-        }
-        match default_action(sig) {
-            SigAct::Ign => {
-                if sig == SIGCHLD {
+    let r = thread_init::with_sched(|s| {
+        TABLE.with(|t| {
+            let Some(p) = t.get_mut(target) else {
+                return Err(ESRCH);
+            };
+            if p.state == ProcState::Unused || p.state == ProcState::Zombie {
+                return Err(ESRCH);
+            }
+            match default_action(sig) {
+                SigAct::Ign => {
+                    if sig == SIGCHLD {
+                        p.pending |= bit(sig);
+                    }
+                }
+                SigAct::Cont => {
+                    if p.state == ProcState::Stopped {
+                        p.state = ProcState::Live;
+                        p.pending &= !bit(SIGSTOP);
+                        s.wake_all(&mut p.stop_wq);
+                    }
+                }
+                SigAct::Stop => {
+                    p.pending |= bit(SIGSTOP);
+                    p.state = ProcState::Stopped;
+                    s.wake_all(&mut p.wait_wq);
+                    s.wake_all(&mut p.stop_wq);
+                }
+                SigAct::Term => {
                     p.pending |= bit(sig);
+                    s.wake_all(&mut p.wait_wq);
+                    s.wake_all(&mut p.stop_wq);
                 }
-                Ok((p.tid, false, false))
             }
-            SigAct::Cont => {
-                let was = p.state == ProcState::Stopped;
-                if was {
-                    p.state = ProcState::Live;
-                    p.pending &= !bit(SIGSTOP);
-                }
-                Ok((p.tid, was, false))
-            }
-            SigAct::Stop => {
-                p.pending |= bit(SIGSTOP);
-                p.state = ProcState::Stopped;
-                Ok((p.tid, false, true))
-            }
-            SigAct::Term => {
-                p.pending |= bit(sig);
-                Ok((p.tid, false, true))
-            }
-        }
+            Ok(())
+        })
     });
     match r {
         Err(e) => syscall::neg(e),
-        Ok((tid, cont, wake)) => {
-            let _ = tid;
-            if cont {
-                let wq = unsafe { &mut (*TABLE.as_ptr()).procs[target as usize].stop_wq };
-                thread_init::wake_queue(wq);
-            }
-            if wake {
-                let t = unsafe { &mut (*TABLE.as_ptr()).procs[target as usize] };
-                thread_init::wake_queue(&mut t.wait_wq);
-                thread_init::wake_queue(&mut t.stop_wq);
-            }
+        Ok(()) => {
             if target == self_pid && default_action(sig) == SigAct::Term {
                 finish_exit(wait_signaled(sig), true);
             }
@@ -1292,6 +1422,9 @@ fn sys_kill(pid: u64, sig: u64) -> i64 {
     }
 }
 
+// Out of line: `dispatch_frame` keeps only the running syscall's frame,
+// and a preempted body carries an interrupt and a switch on top of it.
+#[inline(never)]
 fn sys_psinfo(buf: u64, len: u64) -> i64 {
     if let Err(e) = validate_buf(buf, len) {
         return syscall::neg(e);
@@ -1348,36 +1481,51 @@ pub fn write_ps(w: &mut impl Write) {
     }
 }
 
-fn sig_for_vec(vec: u8) -> Option<u32> {
-    match vec {
-        vectors::DE | vectors::MF | vectors::XF => Some(SIGFPE),
-        vectors::UD => Some(SIGILL),
-        vectors::NP | vectors::SS => Some(SIGBUS),
-        vectors::GP | vectors::PF => Some(SIGSEGV),
-        vectors::BP => Some(SIGTRAP),
-        vectors::AC => Some(SIGBUS),
-        _ => None,
+/// The signal and `si_code` for a trap raised by ring-3 code: the port's
+/// decode of the vector and error code, the cause refined from the frame's
+/// DR6 (`#DB`) or the thread's FSW and MXCSR (`#MF`, `#XM`), then the one
+/// table in `vibeos::trap` (DESIGN §5.2). `None`: not a ring-3 fault.
+fn sig_for_vec(f: &TrapFrame) -> Option<(u32, i32)> {
+    let kind = match trap::x86_64::decode(f.vector as u8, f.error_code) {
+        TrapKind::Debug(_) => TrapKind::Debug(vectors::dr6_cause(f.dr6)),
+        TrapKind::FloatingPoint(unit, _) => {
+            let cause =
+                syscall_init::current_fp_words().map_or(FpCause::Unknown, |(fsw, fcw, mx)| {
+                    match unit {
+                        FpUnit::X87 => trap::x86_64::fp_cause(fsw, fcw),
+                        FpUnit::Simd => trap::x86_64::fp_cause(mx & 0x3F, (mx >> 7) & 0x3F),
+                    }
+                });
+            TrapKind::FloatingPoint(unit, cause)
+        }
+        k => k,
+    };
+    match trap::ring3_action(kind) {
+        Ring3Action::Signal { sig, si_code } => Some((sig, si_code)),
+        Ring3Action::NotRing3 => None,
     }
 }
 
 /// User exception: default action (kill) + diagnostic. Kernel stays up.
-/// No-op if this is not a user process (trampoline / no pid).
-pub fn try_user_fault(vec: u8, frame: &InterruptFrame, err: u64, cr2: Option<u64>) {
+/// No-op if this is not a user process (trampoline / no pid), or the
+/// vector is not a ring-3 fault.
+pub fn try_user_fault(f: &TrapFrame) {
     let pid = current_pid();
     if pid == 0 {
         return;
     }
-    let Some(sig) = sig_for_vec(vec) else {
+    let Some((sig, _si_code)) = sig_for_vec(f) else {
         return;
     };
     let _ = write!(
         Serial,
-        "user: pid {pid} killed SIG{} rip=0x{:x} err=0x{err:x}",
+        "user: pid {pid} killed SIG{} rip=0x{:x} err=0x{:x}",
         sig_name(sig),
-        frame.rip
+        f.user().rip,
+        f.error_code
     );
-    if let Some(c) = cr2 {
-        let _ = write!(Serial, " cr2=0x{c:x}");
+    if f.vector == u64::from(vectors::PF) {
+        let _ = write!(Serial, " cr2=0x{:x}", f.cr2);
     }
     let _ = writeln!(Serial);
     crate::arch::gs::force_kernel();
@@ -1387,3 +1535,219 @@ pub fn try_user_fault(vec: u8, frame: &InterruptFrame, err: u64, cr2: Option<u64
 const _: fn(u32) = |s| {
     let _ = wait_stopped(s);
 };
+
+/// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
+#[cfg(feature = "kernel_tests")]
+pub(crate) mod testing {
+    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+
+    use vibeos::proc::MAX_PROCS;
+    use vibeos::syscall::{SYS_GETPID, UserFrame};
+
+    use crate::per_cpu_init;
+    use crate::thread_init;
+    use crate::time_init;
+
+    static GETPIDS: [AtomicU64; MAX_PROCS] = [const { AtomicU64::new(0) }; MAX_PROCS];
+
+    /// `getpid` calls `pid` has made since boot.
+    pub(crate) fn getpid_count(pid: u32) -> u64 {
+        GETPIDS
+            .get(pid as usize)
+            .map_or(0, |c| c.load(Ordering::Acquire))
+    }
+
+    pub(super) fn on_getpid(pid: u32) {
+        if let Some(c) = GETPIDS.get(pid as usize) {
+            c.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    /// The pid the next stop stall holds; 0 for none.
+    static STALL_PID: AtomicU32 = AtomicU32::new(0);
+    static STALL_IN: AtomicBool = AtomicBool::new(false);
+    static STALL_RELEASE: AtomicBool = AtomicBool::new(false);
+
+    /// Hold `pid` once, at its next stop, between the stop decision and
+    /// its sleep, until [`release_stop_stall`] or 1 s of TSC time.
+    pub(crate) fn arm_stop_stall(pid: u32) {
+        STALL_IN.store(false, Ordering::Release);
+        STALL_RELEASE.store(false, Ordering::Release);
+        STALL_PID.store(pid, Ordering::Release);
+    }
+
+    /// The armed process sits in the stall.
+    pub(crate) fn stop_stalled() -> bool {
+        STALL_IN.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn release_stop_stall() {
+        STALL_RELEASE.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn disarm_stop_stall() {
+        STALL_PID.store(0, Ordering::Release);
+        STALL_RELEASE.store(true, Ordering::Release);
+    }
+
+    /// Spins on TSC time; never services IPIs.
+    pub(super) fn stop_stall(pid: u32) {
+        if STALL_PID
+            .compare_exchange(pid, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        STALL_IN.store(true, Ordering::Release);
+        let t0 = time_init::now_ns();
+        while !STALL_RELEASE.load(Ordering::Acquire)
+            && time_init::now_ns().saturating_sub(t0) < 1_000_000_000
+        {
+            core::hint::spin_loop();
+        }
+    }
+
+    static SPIN_ARMED: AtomicBool = AtomicBool::new(false);
+    static SPIN_START_NS: AtomicU64 = AtomicU64::new(0);
+    static SPIN_DONE_NS: AtomicU64 = AtomicU64::new(0);
+    static SPIN_SW_START: AtomicU64 = AtomicU64::new(0);
+    static SPIN_SW_END: AtomicU64 = AtomicU64::new(0);
+
+    /// TSC time of the spin, in the body of one user `getpid`.
+    pub(crate) const SPIN_NS: u64 = 50_000_000;
+
+    /// The next `getpid` from a process on CPU 0 spins for [`SPIN_NS`].
+    pub(crate) fn arm_getpid_spin() {
+        SPIN_START_NS.store(0, Ordering::Release);
+        SPIN_DONE_NS.store(0, Ordering::Release);
+        SPIN_ARMED.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn disarm_getpid_spin() {
+        SPIN_ARMED.store(false, Ordering::Release);
+    }
+
+    /// `now_ns` when the spin started; 0 before.
+    pub(crate) fn spin_start_ns() -> u64 {
+        SPIN_START_NS.load(Ordering::Acquire)
+    }
+
+    /// `now_ns` when the spinning `getpid` was done; 0 before.
+    pub(crate) fn spin_done_ns() -> u64 {
+        SPIN_DONE_NS.load(Ordering::Acquire)
+    }
+
+    /// CPU 0's context switches at the spin's start and end.
+    pub(crate) fn spin_switches() -> (u64, u64) {
+        (
+            SPIN_SW_START.load(Ordering::Acquire),
+            SPIN_SW_END.load(Ordering::Acquire),
+        )
+    }
+
+    fn cpu0_switches() -> u64 {
+        per_cpu_init::cpu(0).map_or(0, |c| c.switches.load(Ordering::Relaxed))
+    }
+
+    /// Spins on TSC time; never services IPIs.
+    pub(super) fn getpid_spin(pid: u32) {
+        if pid == 0 || !SPIN_ARMED.load(Ordering::Acquire) {
+            return;
+        }
+        if thread_init::current_cpu() != 0 || !SPIN_ARMED.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        SPIN_SW_START.store(cpu0_switches(), Ordering::Release);
+        let t0 = time_init::now_ns();
+        SPIN_START_NS.store(t0.max(1), Ordering::Release);
+        while time_init::now_ns().saturating_sub(t0) < SPIN_NS {
+            core::hint::spin_loop();
+        }
+        SPIN_SW_END.store(cpu0_switches(), Ordering::Release);
+        SPIN_DONE_NS.store(time_init::now_ns(), Ordering::Release);
+    }
+
+    static WRITE_ARMED: AtomicBool = AtomicBool::new(false);
+    static WRITE_DONE_NS: AtomicU64 = AtomicU64::new(0);
+
+    /// Record when the next console `write` returns.
+    pub(crate) fn arm_console_write_record() {
+        WRITE_DONE_NS.store(0, Ordering::Release);
+        WRITE_ARMED.store(true, Ordering::Release);
+    }
+
+    /// `now_ns` when the armed console `write` returned; 0 before.
+    pub(crate) fn console_write_done_ns() -> u64 {
+        WRITE_DONE_NS.load(Ordering::Acquire)
+    }
+
+    pub(super) fn console_write_returned() {
+        if WRITE_ARMED.swap(false, Ordering::AcqRel) {
+            WRITE_DONE_NS.store(time_init::now_ns().max(1), Ordering::Release);
+        }
+    }
+
+    /// The `rdi` of a `getpid` that the entry hooks below act on: a test
+    /// program's own call, armed before the program exists.
+    pub(crate) const HOOK_MAGIC: u64 = 0x5EED_CA11_0000_5A21;
+
+    /// The canary the next marked `getpid` writes into its frame's `rcx`;
+    /// 0 for none.
+    static RCX_CANARY: AtomicU64 = AtomicU64::new(0);
+
+    /// The next `getpid` whose `rdi` is [`HOOK_MAGIC`] returns with `rcx`
+    /// = `canary` in its user frame.
+    pub(crate) fn arm_rcx_canary(canary: u64) {
+        RCX_CANARY.store(canary, Ordering::Release);
+    }
+
+    static APIC_ARMED: AtomicBool = AtomicBool::new(false);
+    static APIC_CHECKS: AtomicU32 = AtomicU32::new(0);
+    static APIC_MISMATCHES: AtomicU32 = AtomicU32::new(0);
+
+    /// At each `getpid` whose `rdi` is [`HOOK_MAGIC`], compare this CPU's
+    /// `PerCpu` LAPIC ID with the one CPUID reports for the CPU running.
+    pub(crate) fn arm_getpid_apic() {
+        APIC_CHECKS.store(0, Ordering::Release);
+        APIC_MISMATCHES.store(0, Ordering::Release);
+        APIC_ARMED.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn apic_checks() -> u32 {
+        APIC_CHECKS.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn apic_mismatches() -> u32 {
+        APIC_MISMATCHES.load(Ordering::Acquire)
+    }
+
+    /// Undo every `arm_*` hook of this group.
+    pub(crate) fn disarm() {
+        RCX_CANARY.store(0, Ordering::Release);
+        APIC_ARMED.store(false, Ordering::Release);
+    }
+
+    /// Top of `proc_init::syscall`, before the dispatch.
+    pub(super) fn on_entry(frame: &mut UserFrame) {
+        if frame.orig_rax != SYS_GETPID || frame.rdi != HOOK_MAGIC {
+            return;
+        }
+        let c = RCX_CANARY.swap(0, Ordering::AcqRel);
+        if c != 0 {
+            frame.rcx = c;
+        }
+        if APIC_ARMED.load(Ordering::Acquire) {
+            // One IF=0 stretch: the `PerCpu` read and CPUID see one CPU.
+            let _g = crate::x86::InterruptGuard::enter();
+            let mine = per_cpu_init::current()
+                .remote
+                .apic_id
+                .load(Ordering::Relaxed);
+            let (_, ebx, _, _) = crate::x86::cpuid(1, 0);
+            APIC_CHECKS.fetch_add(1, Ordering::AcqRel);
+            if ebx >> 24 != mine {
+                APIC_MISMATCHES.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+    }
+}

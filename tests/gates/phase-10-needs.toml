@@ -213,8 +213,9 @@ needs = [
   "`addr_space_init::teardown` asserts that no CPU's CR3",
   "the open-file table never writes `refs` or `used` back from a snapshot",
   "stop and continue cannot lose a wakeup",
+  "the syscall exit path runs",  # L1387
 ]
-why = "text: lands after the teardown (F106), open-file table (F055) and stop-wait (F033) boxes"
+why = "text: lands after the teardown (F106), open-file table (F055) and stop-wait (F033) boxes; the exit `cli` of the syscall-exit box closes the window"
 
 [[box]]
 key = "every exit to ring 3, the syscall exit included, checks the current process's pending set"
@@ -276,8 +277,11 @@ key = "no fault or trap that ring-3 code raises reaches `exception_halt`"
 needs = [
   "the `#BP` gate is DPL 3",
   "one per-CPU control-register routine",
+  "an IST vector taken at",
+  "every IDT vector enters through",
+  "one user frame (DESIGN §5.10):",
 ]
-why = "claim: `user_exceptions`' `int3`, x87 `#MF` and SIMD `#XM` cases are the next two boxes'"
+why = "claim: `user_exceptions`' `int3`, x87 `#MF` and SIMD `#XM` cases are the next two boxes'; claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
 # L1062
 [[box]]
@@ -299,6 +303,14 @@ needs = [
   "`vibeos-core` gains `kalloc`",
 ]
 why = "text: needs §10.10's fallible spawn_inner; claim: its Tcb allocation is fallible"
+
+[[box]]
+key = "`vibeos-core` gains `kalloc` (`TryBox`, `TryVec`,"
+needs = [
+  "`brk` and anonymous `mmap`/`munmap`, eagerly",  # L1356
+  "`spawn_inner` returns `Result` instead of",  # L1475
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
 
 [[box]]
 key = "`scripts/check_ticks.py`, which a `ticks` CI"
@@ -424,16 +436,17 @@ needs = [
   "every IDT vector enters through a stub that `arch/idt.rs` generates",
   "the syscall exit path runs with IF=0 from the dispatcher's return",
   "syscall bodies run with IF=1",
+  "an `arch` module boundary built",
 ]
-why = "text: lands after the generated-stub box above and the syscall-exit and IF=1 boxes"
+why = "text: lands after the generated-stub box above and the syscall-exit and IF=1 boxes; claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 [[box]]
 key = "one FP binding on x86_64"
 needs = [
   "the syscall exit path runs with IF=0 from the dispatcher's return",
-  "`enter_user` and `enter_user_full` execute `cli`",
+  "`syscall_init::first_return` executes `cli` before it loads",
 ]
-why = "text: lands after the syscall-exit box (F001) and the `enter_user` box (F006)"
+why = "text: lands after the syscall-exit box (F001) and the `syscall_init::first_return` box (F006)"
 
 [[box]]
 key = "x86_64 user FP state follows the psABI across `fork` and `execve`"
@@ -562,5 +575,21 @@ needs = [
   "one refcounted in-core FAT inode",  # L1330
   "the dentry cache never resolves",  # L1331
   "`scripts/check_gone.py`, which `make check` runs,",  # L1460
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1390
+[[box]]
+key = "`syscall_init::first_return` executes `cli` before it loads"
+needs = [
+  "ring 3 runs with Linux's",  # L1391
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L989
+[[box]]
+key = "a non-canonical saved RIP gets"
+needs = [
+  "the top user page is",  # L1383
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
