@@ -494,16 +494,17 @@ impl AddressSpace {
         if self.overlaps(va, len) {
             return Err(AsError::Overlap);
         }
-        if self.heap_slot().is_none() && !self.regions.iter().any(|r| r.is_none()) {
+        if self.heap_slot(va).is_none() && !self.regions.iter().any(|r| r.is_none()) {
             return Err(AsError::NoRegionSlot);
         }
         Ok(())
     }
 
-    /// After `[va, va+len)` is mapped: extend the heap region over it (or
-    /// record it as the heap region) and set the break to `want`.
+    /// After `[va, va+len)` is mapped: extend the heap region that ends at
+    /// `va` over it (or record the range as a new region) and set the break
+    /// to `want`.
     pub fn heap_grow_commit(&mut self, va: u64, len: u64, want: u64) -> Result<(), AsError> {
-        match self.heap_slot() {
+        match self.heap_slot(va) {
             Some(i) => {
                 if let Some(r) = self.regions[i].as_mut() {
                     r.len = r.len.checked_add(len).ok_or(AsError::Overflow)?;
@@ -520,11 +521,18 @@ impl AddressSpace {
         Ok(())
     }
 
-    /// The heap region's slot: the region that starts at the heap's start.
-    fn heap_slot(&self) -> Option<usize> {
-        self.regions
-            .iter()
-            .position(|r| r.is_some_and(|r| r.start == self.brk_start))
+    /// The slot of the heap region a growth at `top` extends: the anonymous
+    /// read-write region at or above the heap's start that ends at `top`.
+    /// `None` when the heap is empty, or a `munmap` removed its top page.
+    fn heap_slot(&self, top: u64) -> Option<usize> {
+        self.regions.iter().position(|r| {
+            r.is_some_and(|r| {
+                r.start >= self.brk_start
+                    && r.start.saturating_add(r.len) == top
+                    && r.backing == Backing::Anonymous
+                    && r.perms == UserPerms::RW
+            })
+        })
     }
 
     /// Where an `mmap` of `req` goes. A fixed request below `NULL_GUARD_LEN`
@@ -1459,6 +1467,18 @@ mod tests {
         assert_eq!(a.regions().count(), 1);
         grow(&mut a, &mut pool, b + 8);
         assert_eq!(a.regions().count(), 2);
+        // A hole unmapped in the heap's middle stays a hole when it grows.
+        unsafe { a.unmap_free(b + 2 * P, P, &mut pool, &mut nop).unwrap() };
+        grow(&mut a, &mut pool, b + P + 8);
+        unsafe { a.unmap_free(b + P, P, &mut pool, &mut nop).unwrap() };
+        a.set_brk(b + 2 * P);
+        grow(&mut a, &mut pool, b + 3 * P);
+        let mut rs: Vec<(u64, u64)> = a.regions().map(|r| (r.start, r.len)).collect();
+        rs.sort();
+        assert_eq!(rs, [(b, P), (b + 2 * P, P)]);
+        assert_eq!(a.user_frames(), 2);
+        let mut c = unsafe { a.clone_anon(&kernel, &mut pool) }.unwrap();
+        unsafe { c.teardown_pool(&mut pool) };
         unsafe { a.teardown_pool(&mut pool) };
         assert_eq!(used(&pool), before);
     }

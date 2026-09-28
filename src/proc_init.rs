@@ -10,11 +10,12 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use vibeos::addr_space::AddressSpace;
+use vibeos::addr_space::{AddressSpace, AsError, MmapError, mmap_request};
 use vibeos::desc::InterruptFrame;
 use vibeos::elf::ElfError;
 use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, SeekFrom};
 use vibeos::kbd::{DecodedKey, NamedKey};
+use vibeos::paging::{PAGE_SIZE_4K, USER_MAP_END};
 use vibeos::proc::{
     Creds, Cwd, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, InitState, MAX_FDS, MAX_PROCS,
     ProcState, SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGSTOP, SIGTRAP,
@@ -24,10 +25,10 @@ use vibeos::proc::{
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::syscall::{
     self, E2BIG, EAGAIN, EBADF, EBUSY, ECHILD, EEXIST, EFAULT, EFBIG, EINVAL, EIO, EISDIR, EMFILE,
-    ENAMETOOLONG, ENOENT, ENOEXEC, ENOMEM, ENOSYS, ENOTDIR, ESRCH, F_GETFD, F_SETFD, SYS_CLOSE,
-    SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_EXIT, SYS_FCNTL, SYS_FORK, SYS_GETPID, SYS_GETPPID,
-    SYS_KILL, SYS_LSEEK, SYS_OPEN, SYS_PSINFO, SYS_READ, SYS_SCHED_YIELD, SYS_WAIT4, SYS_WRITE,
-    SyscallFrame, UserRegs,
+    ENAMETOOLONG, ENODEV, ENOENT, ENOEXEC, ENOMEM, ENOSYS, ENOTDIR, EPERM, ESRCH, F_GETFD, F_SETFD,
+    SYS_BRK, SYS_CLOSE, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_EXIT, SYS_FCNTL, SYS_FORK, SYS_GETPID,
+    SYS_GETPPID, SYS_KILL, SYS_LSEEK, SYS_MMAP, SYS_MUNMAP, SYS_OPEN, SYS_PSINFO, SYS_READ,
+    SYS_SCHED_YIELD, SYS_WAIT4, SYS_WRITE, SyscallFrame, UserRegs,
 };
 use vibeos::thread::{RFLAGS_IF, RFLAGS_RESERVED1, ThreadId};
 use vibeos::vectors;
@@ -490,6 +491,9 @@ fn dispatch_frame(nr: u64, args: [u64; 6], frame: *mut SyscallFrame) -> i64 {
         SYS_OPEN => sys_open(args[0], args[1], args[2]),
         SYS_CLOSE => sys_close(args[0]),
         SYS_LSEEK => sys_lseek(args[0], args[1], args[2]),
+        SYS_MMAP => sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5]),
+        SYS_MUNMAP => sys_munmap(args[0], args[1]),
+        SYS_BRK => sys_brk(args[0]),
         SYS_DUP => sys_dup(args[0]),
         SYS_DUP2 => sys_dup2(args[0], args[1]),
         SYS_GETPID => current_pid() as i64,
@@ -1047,6 +1051,77 @@ fn sys_execve(path: u64, argv: u64, envp: u64, frame: *mut SyscallFrame) -> i64 
     regs.apply_to_syscall(f);
     unsafe { crate::x86::wrmsr(crate::x86::IA32_FS_BASE, fs) };
     0
+}
+
+/// Run `f` on the calling process's own address space, after the table
+/// lock is released. `None` for pid 0 or a process with no space.
+fn with_own_space<R>(f: impl FnOnce(&mut AddressSpace) -> R) -> Option<R> {
+    let pid = current_pid();
+    if pid == 0 {
+        return None;
+    }
+    let ptr = with_table(|t| {
+        let p = t.get_mut(pid)?;
+        p.space.as_mut().map(|b| &mut **b as *mut AddressSpace)
+    })?;
+    // SAFETY: a process's space is replaced or taken only by its own thread
+    // (`proc_init::sys_execve`, `proc_init::finish_exit`), and that thread
+    // is the caller, here, so the box outlives `f`; processes are
+    // single-threaded, so nothing else reaches the space while `f` runs.
+    Some(f(unsafe { &mut *ptr }))
+}
+
+/// Anonymous private `mmap` (SYSCALL.md §3.1).
+fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> i64 {
+    let req = match mmap_request(addr, len, prot, flags, off) {
+        Ok(r) => r,
+        Err(MmapError::Inval) => return syscall::neg(EINVAL),
+        Err(MmapError::NoMem) => return syscall::neg(ENOMEM),
+        Err(MmapError::NotAnon) => {
+            let e = if lookup_fd(fd).is_none() {
+                EBADF
+            } else {
+                ENODEV
+            };
+            return syscall::neg(e);
+        }
+    };
+    match with_own_space(|s| addr_space_init::mmap(s, &req)) {
+        None => syscall::neg(EINVAL),
+        Some(Ok(va)) => va as i64,
+        Some(Err(AsError::Overlap)) => syscall::neg(EEXIST),
+        Some(Err(AsError::NullGuard)) => syscall::neg(EPERM),
+        Some(Err(AsError::Misaligned)) => syscall::neg(EINVAL),
+        Some(Err(_)) => syscall::neg(ENOMEM),
+    }
+}
+
+/// `munmap` (SYSCALL.md §3.1): allocates nothing.
+fn sys_munmap(addr: u64, len: u64) -> i64 {
+    if !addr.is_multiple_of(PAGE_SIZE_4K) || len == 0 {
+        return syscall::neg(EINVAL);
+    }
+    let Some(len) = len
+        .checked_add(PAGE_SIZE_4K - 1)
+        .map(|l| l & !(PAGE_SIZE_4K - 1))
+        .filter(|&l| addr.checked_add(l).is_some_and(|e| e <= USER_MAP_END))
+    else {
+        return syscall::neg(EINVAL);
+    };
+    // SAFETY: every leaf of the caller's space was mapped from the buddy by
+    // `addr_space_init::map_anon` or `addr_space_init::brk`, and `unmap`
+    // supplies the flush, here.
+    match with_own_space(|s| unsafe { addr_space_init::unmap(s, addr, len) }) {
+        None => syscall::neg(EINVAL),
+        Some(Ok(())) => 0,
+        Some(Err(AsError::NoRegionSlot)) => syscall::neg(ENOMEM),
+        Some(Err(_)) => syscall::neg(EINVAL),
+    }
+}
+
+/// `brk`: the new break, or the current one on failure; 0 for pid 0.
+fn sys_brk(want: u64) -> i64 {
+    with_own_space(|s| addr_space_init::brk(s, want)).unwrap_or(0) as i64
 }
 
 fn p_space_ref(pid: u32) -> Option<&'static AddressSpace> {

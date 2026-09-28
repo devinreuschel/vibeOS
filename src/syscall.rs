@@ -28,6 +28,8 @@ pub const EBADF: i32 = 9;
 pub const EBUSY: i32 = 16;
 /// Linux `EEXIST`.
 pub const EEXIST: i32 = 17;
+/// Linux `ENODEV`.
+pub const ENODEV: i32 = 19;
 /// Linux `ENOTDIR`.
 pub const ENOTDIR: i32 = 20;
 /// Linux `EISDIR`.
@@ -54,6 +56,9 @@ pub const SYS_WRITE: u64 = 1;
 pub const SYS_OPEN: u64 = 2;
 pub const SYS_CLOSE: u64 = 3;
 pub const SYS_LSEEK: u64 = 8;
+pub const SYS_MMAP: u64 = 9;
+pub const SYS_MUNMAP: u64 = 11;
+pub const SYS_BRK: u64 = 12;
 pub const SYS_DUP: u64 = 32;
 pub const SYS_DUP2: u64 = 33;
 pub const SYS_GETPID: u64 = 39;
@@ -277,6 +282,27 @@ const LSEEK: SyscallInfo = SyscallInfo {
     ptr_mask: 0,
     len_arg: 0xff,
 };
+const MMAP: SyscallInfo = SyscallInfo {
+    name: "mmap",
+    nr: SYS_MMAP,
+    arity: 6,
+    ptr_mask: 0,
+    len_arg: 0xff,
+};
+const MUNMAP: SyscallInfo = SyscallInfo {
+    name: "munmap",
+    nr: SYS_MUNMAP,
+    arity: 2,
+    ptr_mask: 0,
+    len_arg: 0xff,
+};
+const BRK: SyscallInfo = SyscallInfo {
+    name: "brk",
+    nr: SYS_BRK,
+    arity: 1,
+    ptr_mask: 0,
+    len_arg: 0xff,
+};
 const DUP: SyscallInfo = SyscallInfo {
     name: "dup",
     nr: SYS_DUP,
@@ -363,8 +389,8 @@ const PSINFO: SyscallInfo = SyscallInfo {
 };
 
 const TABLE: &[SyscallInfo] = &[
-    READ, WRITE, OPEN, CLOSE, LSEEK, DUP, DUP2, YIELD, GETPID, GETPPID, FORK, EXECVE, EXIT, WAIT4,
-    KILL, FCNTL, PSINFO,
+    READ, WRITE, OPEN, CLOSE, LSEEK, MMAP, MUNMAP, BRK, DUP, DUP2, YIELD, GETPID, GETPPID, FORK,
+    EXECVE, EXIT, WAIT4, KILL, FCNTL, PSINFO,
 ];
 
 pub fn info(nr: u64) -> Option<SyscallInfo> {
@@ -452,6 +478,7 @@ mod tests {
         assert_eq!(ENOMEM, 12);
         assert_eq!(EACCES, 13);
         assert_eq!(EFAULT, 14);
+        assert_eq!(ENODEV, 19);
         assert_eq!(EINVAL, 22);
         assert_eq!(EMFILE, 24);
         assert_eq!(EFBIG, 27);
@@ -477,20 +504,27 @@ mod tests {
         assert!(info(SYS_READ).is_some());
         assert!(info(SYS_OPEN).is_some());
         assert!(info(SYS_PSINFO).is_some());
+        assert_eq!(info(SYS_MMAP).map(|i| (i.arity, i.ptr_mask)), Some((6, 0)));
+        assert_eq!(
+            info(SYS_MUNMAP).map(|i| (i.arity, i.ptr_mask)),
+            Some((2, 0))
+        );
+        assert_eq!(info(SYS_BRK).map(|i| (i.arity, i.ptr_mask)), Some((1, 0)));
         assert!(info(0xC0FFEE).is_none());
         assert!(info(u64::MAX).is_none());
         let mut n = 0;
         for e in TABLE {
             n += 1;
             match e.nr {
-                SYS_READ | SYS_WRITE | SYS_OPEN | SYS_CLOSE | SYS_LSEEK | SYS_DUP | SYS_DUP2
-                | SYS_SCHED_YIELD | SYS_GETPID | SYS_GETPPID | SYS_FORK | SYS_EXECVE | SYS_EXIT
-                | SYS_WAIT4 | SYS_KILL | SYS_FCNTL | SYS_PSINFO => {}
+                SYS_READ | SYS_WRITE | SYS_OPEN | SYS_CLOSE | SYS_LSEEK | SYS_MMAP | SYS_MUNMAP
+                | SYS_BRK | SYS_DUP | SYS_DUP2 | SYS_SCHED_YIELD | SYS_GETPID | SYS_GETPPID
+                | SYS_FORK | SYS_EXECVE | SYS_EXIT | SYS_WAIT4 | SYS_KILL | SYS_FCNTL
+                | SYS_PSINFO => {}
                 _ => panic!("unexpected nr"),
             }
         }
         assert_eq!(n, TABLE.len());
-        assert_eq!(n, 17);
+        assert_eq!(n, 20);
     }
 
     #[test]

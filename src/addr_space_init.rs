@@ -5,7 +5,7 @@ use core::fmt;
 use core::sync::atomic::Ordering;
 
 use vibeos::addr_space::{
-    AddressSpace, AsError, Backing, FrameFree, Region, TeardownStats, UserPerms,
+    AddressSpace, AsError, Backing, BrkPlan, FrameFree, MmapReq, Region, TeardownStats, UserPerms,
 };
 use vibeos::paging::{FrameAlloc, PAGE_SIZE_4K, PTE_ADDR_MASK};
 use vibeos::pmm::Frames;
@@ -201,6 +201,64 @@ pub unsafe fn unmap(space: &mut AddressSpace, va: u64, len: u64) -> Result<(), A
         cur = ce;
     }
     Ok(())
+}
+
+/// `brk(want)` on `space`: returns the new break, or the current one when
+/// `want` is 0, below the heap's start, past `USER_MAP_END`, into another
+/// region, or more than the free frames cover. Growth maps zeroed pages in
+/// chunks like [`map_anon`]; shrinking unmaps the whole pages above the new
+/// break.
+pub fn brk(space: &mut AddressSpace, want: u64) -> u64 {
+    let moved = match space.brk_plan(want) {
+        BrkPlan::Current => return space.brk(),
+        BrkPlan::SamePage => Ok(()),
+        BrkPlan::Grow { va, len } => brk_grow(space, va, len, want),
+        // SAFETY: the heap's leaves were mapped from the buddy by
+        // `brk_grow`, here, and `unmap` supplies the flush.
+        BrkPlan::Shrink { va, len } => unsafe { unmap(space, va, len) },
+    };
+    // A failed move leaves the break where it was, as brk(2) returns it.
+    if moved.is_ok() {
+        space.set_brk(want);
+    }
+    space.brk()
+}
+
+fn brk_grow(space: &mut AddressSpace, va: u64, len: u64, want: u64) -> Result<(), AsError> {
+    space.heap_grow_check(va, len)?;
+    // SAFETY: `heap_grow_check` found `[va, va+len)` in the user half and
+    // clear of every region, so no page in it is mapped (invariant of
+    // `addr_space::AddressSpace::insert_region`).
+    unsafe { map_chunks(space, va, len, UserPerms::RW)? };
+    if let Err(e) = space.heap_grow_commit(va, len, want) {
+        // SAFETY: `map_chunks` just mapped the range from the buddy, here.
+        unsafe { unmap_chunks(space, va, len)? };
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Anonymous `mmap` of `req` in `space`: places it (`AddressSpace::
+/// mmap_place`), then maps zeroed pages as [`map_anon`] does, or for
+/// `PROT_NONE` records a reservation with no frames. Returns the address.
+pub fn mmap(space: &mut AddressSpace, req: &MmapReq) -> Result<u64, AsError> {
+    let va = space.mmap_place(req)?;
+    match req.perms {
+        None => {
+            space.check_new_region(va, req.len)?;
+            space.insert_region(Region {
+                start: va,
+                len: req.len,
+                perms: UserPerms::READ,
+                backing: Backing::Reserved,
+            })?;
+        }
+        // SAFETY: `map_anon` checks the range is in the user half and clear
+        // of every region, and maps from the buddy, which hands out owned
+        // frames (`addr_space_init::BuddyPool`).
+        Some(perms) => unsafe { map_anon(space, va, req.len, perms)? },
+    }
+    Ok(va)
 }
 
 #[cfg(feature = "kernel_tests")]
