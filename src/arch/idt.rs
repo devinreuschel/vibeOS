@@ -106,14 +106,11 @@ const _: () = {
 impl TrapFrame {
     #[inline]
     pub fn user_mode(&self) -> bool {
-        gs::from_user(self.iret.cs)
+        gs::from_user(self.user().cs)
     }
 
-    /// The 21 `user_regs_struct` words, `r15` to `ss`.
-    #[allow(
-        dead_code,
-        reason = "C-TRAPFRAME accessor; P10-S21 builds the user frame on it"
-    )]
+    /// The 21 `user_regs_struct` words, `r15` to `ss`: for a CS.RPL 3
+    /// frame, the thread's user frame at the top of its kernel stack.
     pub fn user(&self) -> &UserFrame {
         // SAFETY: invariant: bytes `F_USER..` of a `TrapFrame` have
         // `UserFrame`'s layout, and a pointer derived from `&self` covers
@@ -128,9 +125,12 @@ impl TrapFrame {
     }
 
     /// Mutable form of [`TrapFrame::user`]. The exit restores what it holds.
-    #[allow(
-        dead_code,
-        reason = "C-TRAPFRAME accessor; P10-S21 builds the user frame on it"
+    #[cfg_attr(
+        not(feature = "kernel_tests"),
+        allow(
+            dead_code,
+            reason = "only kernel_tests hooks rewrite a trapped user frame today"
+        )
     )]
     pub fn user_mut(&mut self) -> &mut UserFrame {
         // SAFETY: invariant: bytes `F_USER..` of a `TrapFrame` have
@@ -462,6 +462,10 @@ unsafe extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
     // fault on a return-to-user `iretq` arrives on the user GS.
     if matches!(v, vectors::NP | vectors::SS | vectors::GP) {
         user_return_fault(frame);
+    }
+    #[cfg(feature = "kernel_tests")]
+    if frame.user_mode() {
+        testing::on_cpl3_entry(frame);
     }
     if !pre_body(frame, v) {
         // A fault or trap taken at CPL 3 runs its body with IF=1 (DESIGN
@@ -846,7 +850,12 @@ fn dump(kind: &[u8], frame: &InterruptFrame, err: Option<u64>, cr2: Option<u64>)
 /// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
 #[cfg(feature = "kernel_tests")]
 pub mod testing {
+    use core::mem::size_of;
+    use core::ptr;
     use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+
+    use vibeos::syscall::UserFrame;
+    use vibeos::vectors;
 
     use super::TrapFrame;
 
@@ -916,6 +925,97 @@ pub mod testing {
             crate::thread_init::yield_now();
         }
         PF_YIELDING.store(false, Ordering::Release);
+    }
+
+    /// The 15 GPR canaries of `arm_canaries`, in `UserFrame` order
+    /// (`r15` to `rdi`): `0xC0DE_0000_0000_0000 | i << 8 | i`, `i` from 1.
+    pub const GPR_CANARIES: [u64; 15] = {
+        let mut c = [0u64; 15];
+        let mut i = 0;
+        while i < 15 {
+            let n = (i + 1) as u64;
+            c[i] = 0xC0DE_0000_0000_0000 | (n << 8) | n;
+            i += 1;
+        }
+        c
+    };
+
+    /// The canary hook's code range `[lo, hi)`, 0 when disarmed.
+    static CANARY_LO: AtomicU64 = AtomicU64::new(0);
+    static CANARY_HI: AtomicU64 = AtomicU64::new(0);
+    static CANARY_EXIT: AtomicU64 = AtomicU64::new(0);
+    static CANARY_TARGET: AtomicU64 = AtomicU64::new(0);
+    static CANARY_HITS: AtomicU64 = AtomicU64::new(0);
+    static CANARY_BAD: AtomicU64 = AtomicU64::new(0);
+    static CANARY_MISPLACED: AtomicU64 = AtomicU64::new(0);
+
+    /// For each CPL-3 `IPI_RESCHEDULE` entry whose saved RIP is in
+    /// `[lo, hi)`, check that the stub's user frame sits at the top of the
+    /// current thread's kernel stack and holds [`GPR_CANARIES`]; at the
+    /// `target`th good hit, send the frame's RIP to `exit_va`.
+    pub fn arm_canaries(lo: u64, hi: u64, exit_va: u64, target: u64) {
+        CANARY_HITS.store(0, Ordering::Release);
+        CANARY_BAD.store(0, Ordering::Release);
+        CANARY_MISPLACED.store(0, Ordering::Release);
+        CANARY_EXIT.store(exit_va, Ordering::Release);
+        CANARY_TARGET.store(target, Ordering::Release);
+        CANARY_HI.store(hi, Ordering::Release);
+        CANARY_LO.store(lo, Ordering::Release);
+    }
+
+    pub fn disarm_canaries() {
+        CANARY_LO.store(0, Ordering::Release);
+        CANARY_HI.store(0, Ordering::Release);
+    }
+
+    pub fn hits() -> u64 {
+        CANARY_HITS.load(Ordering::Acquire)
+    }
+
+    pub fn bad() -> u64 {
+        CANARY_BAD.load(Ordering::Acquire)
+    }
+
+    pub fn misplaced() -> u64 {
+        CANARY_MISPLACED.load(Ordering::Acquire)
+    }
+
+    /// Every CPL-3 entry, before the body.
+    pub(super) fn on_cpl3_entry(frame: &mut TrapFrame) {
+        let lo = CANARY_LO.load(Ordering::Acquire);
+        let rip = frame.iret.rip;
+        if frame.vector != u64::from(vectors::IPI_RESCHEDULE)
+            || lo == 0
+            || rip < lo
+            || rip >= CANARY_HI.load(Ordering::Acquire)
+        {
+            return;
+        }
+        let t = crate::per_cpu_init::current_thread();
+        // SAFETY: invariant: a non-null current thread is this CPU's live
+        // TCB while it runs, and IF=0 keeps it current; established by
+        // `per_cpu_init::set_current_thread`.
+        let top = (!t.is_null())
+            .then(|| unsafe { (*t).stack.as_ref().map(|s| s.top().as_u64()) })
+            .flatten();
+        let at = ptr::from_ref(frame.user()) as u64;
+        if top.is_none_or(|top| at != top - size_of::<UserFrame>() as u64) {
+            CANARY_MISPLACED.fetch_add(1, Ordering::AcqRel);
+            return;
+        }
+        let u = frame.user();
+        let got = [
+            u.r15, u.r14, u.r13, u.r12, u.rbp, u.rbx, u.r11, u.r10, u.r9, u.r8, u.rax, u.rcx,
+            u.rdx, u.rsi, u.rdi,
+        ];
+        if got != GPR_CANARIES {
+            CANARY_BAD.fetch_add(1, Ordering::AcqRel);
+            return;
+        }
+        let hits = CANARY_HITS.fetch_add(1, Ordering::AcqRel) + 1;
+        if hits == CANARY_TARGET.load(Ordering::Acquire) {
+            frame.user_mut().rip = CANARY_EXIT.load(Ordering::Acquire);
+        }
     }
 
     pub(super) fn on_entry(frame: &mut TrapFrame, v: u8) -> bool {
