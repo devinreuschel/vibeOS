@@ -521,43 +521,55 @@ fn dispatch_frame(nr: u64, args: [u64; 6], frame: *mut SyscallFrame) -> i64 {
     }
 }
 
+/// Act on this process's pending signals at syscall entry. Each turn is
+/// one SCHED section: a stop sets Stopped and arms the `stop_wq` wait in
+/// the section that decides it, so a `SIGCONT` that `sys_kill` sends in
+/// between finds the thread on the queue (ROADMAP §10.6, F033). The loop
+/// re-checks after every `schedule()`, which can return early.
 fn apply_pending(frame: *mut SyscallFrame) {
     let pid = current_pid();
     if pid == 0 {
         return;
     }
     loop {
-        let act = with_table(|t| {
-            let Some(p) = t.get_mut(pid) else {
-                return Pending::None;
-            };
-            if p.pending & bit(SIGKILL) != 0 {
-                return Pending::Die(SIGKILL);
-            }
-            if p.state == ProcState::Stopped || p.pending & bit(SIGSTOP) != 0 {
-                p.state = ProcState::Stopped;
-                p.pending &= !bit(SIGSTOP);
-                return Pending::Stop;
-            }
-            let pend = p.pending;
-            let mut s = 1u32;
-            while s <= 31 {
-                if pend & bit(s) != 0 && s != SIGCHLD && s != SIGCONT {
-                    match default_action(s) {
-                        SigAct::Term => return Pending::Die(s),
-                        SigAct::Stop => {
-                            p.state = ProcState::Stopped;
-                            p.pending &= !bit(s);
-                            return Pending::Stop;
+        let act = thread_init::with_sched(|s| {
+            TABLE.with(|t| {
+                let Some(p) = t.get_mut(pid) else {
+                    return Pending::None;
+                };
+                if p.pending & bit(SIGKILL) != 0 {
+                    return Pending::Die(SIGKILL);
+                }
+                let mut stop = false;
+                if p.state == ProcState::Stopped || p.pending & bit(SIGSTOP) != 0 {
+                    p.pending &= !bit(SIGSTOP);
+                    stop = true;
+                } else {
+                    let pend = p.pending;
+                    let mut sig = 1u32;
+                    while sig <= 31 && !stop {
+                        if pend & bit(sig) != 0 && sig != SIGCHLD && sig != SIGCONT {
+                            match default_action(sig) {
+                                SigAct::Term => return Pending::Die(sig),
+                                SigAct::Stop => {
+                                    p.pending &= !bit(sig);
+                                    stop = true;
+                                }
+                                SigAct::Ign | SigAct::Cont => {
+                                    p.pending &= !bit(sig);
+                                }
+                            }
                         }
-                        SigAct::Ign | SigAct::Cont => {
-                            p.pending &= !bit(s);
-                        }
+                        sig += 1;
                     }
                 }
-                s += 1;
-            }
-            Pending::None
+                if !stop {
+                    return Pending::None;
+                }
+                p.state = ProcState::Stopped;
+                s.begin_wait(&mut p.stop_wq, FAR_DEADLINE);
+                Pending::Stop
+            })
         });
         match act {
             Pending::None => return,
@@ -568,8 +580,7 @@ fn apply_pending(frame: *mut SyscallFrame) {
             Pending::Stop => {
                 #[cfg(feature = "kernel_tests")]
                 testing::stop_stall(pid);
-                let wq = unsafe { &mut (*TABLE.as_ptr()).procs[pid as usize].stop_wq };
-                thread_init::wait_on(wq);
+                thread_init::schedule();
             }
         }
     }
@@ -1324,52 +1335,45 @@ fn sys_kill(pid: u64, sig: u64) -> i64 {
     }
     let target = pid as u32;
     let self_pid = current_pid();
-    let r = with_table(|t| {
-        let Some(p) = t.get_mut(target) else {
-            return Err(ESRCH);
-        };
-        if p.state == ProcState::Unused || p.state == ProcState::Zombie {
-            return Err(ESRCH);
-        }
-        match default_action(sig) {
-            SigAct::Ign => {
-                if sig == SIGCHLD {
+    let r = thread_init::with_sched(|s| {
+        TABLE.with(|t| {
+            let Some(p) = t.get_mut(target) else {
+                return Err(ESRCH);
+            };
+            if p.state == ProcState::Unused || p.state == ProcState::Zombie {
+                return Err(ESRCH);
+            }
+            match default_action(sig) {
+                SigAct::Ign => {
+                    if sig == SIGCHLD {
+                        p.pending |= bit(sig);
+                    }
+                }
+                SigAct::Cont => {
+                    if p.state == ProcState::Stopped {
+                        p.state = ProcState::Live;
+                        p.pending &= !bit(SIGSTOP);
+                        s.wake_all(&mut p.stop_wq);
+                    }
+                }
+                SigAct::Stop => {
+                    p.pending |= bit(SIGSTOP);
+                    p.state = ProcState::Stopped;
+                    s.wake_all(&mut p.wait_wq);
+                    s.wake_all(&mut p.stop_wq);
+                }
+                SigAct::Term => {
                     p.pending |= bit(sig);
+                    s.wake_all(&mut p.wait_wq);
+                    s.wake_all(&mut p.stop_wq);
                 }
-                Ok((p.tid, false, false))
             }
-            SigAct::Cont => {
-                let was = p.state == ProcState::Stopped;
-                if was {
-                    p.state = ProcState::Live;
-                    p.pending &= !bit(SIGSTOP);
-                }
-                Ok((p.tid, was, false))
-            }
-            SigAct::Stop => {
-                p.pending |= bit(SIGSTOP);
-                p.state = ProcState::Stopped;
-                Ok((p.tid, false, true))
-            }
-            SigAct::Term => {
-                p.pending |= bit(sig);
-                Ok((p.tid, false, true))
-            }
-        }
+            Ok(())
+        })
     });
     match r {
         Err(e) => syscall::neg(e),
-        Ok((tid, cont, wake)) => {
-            let _ = tid;
-            if cont {
-                let wq = unsafe { &mut (*TABLE.as_ptr()).procs[target as usize].stop_wq };
-                thread_init::wake_queue(wq);
-            }
-            if wake {
-                let t = unsafe { &mut (*TABLE.as_ptr()).procs[target as usize] };
-                thread_init::wake_queue(&mut t.wait_wq);
-                thread_init::wake_queue(&mut t.stop_wq);
-            }
+        Ok(()) => {
             if target == self_pid && default_action(sig) == SigAct::Term {
                 finish_exit(wait_signaled(sig), true);
             }

@@ -18,9 +18,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use vibeos::ipi::{home_cpu, pick_cpu};
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::lock::RANK_SCHED;
-use vibeos::sched::{
-    FAR_DEADLINE, SWEEP_TICKS, TimeoutQueue, effective_deadline, enqueue_runnable, take_next,
-};
+use vibeos::sched::{SWEEP_TICKS, TimeoutQueue, effective_deadline, enqueue_runnable, take_next};
 use vibeos::thread::{
     CpuAffinity, CpuContext, MAX_THREADS, Tcb, ThreadId, ThreadState, WaitOutcome,
     apply_if_on_resume, prepare_thread, switch_context,
@@ -1066,18 +1064,6 @@ pub(crate) fn tcb_naming_root(root: u64) -> Option<ThreadId> {
             .find(|t| t.as_cr3 & vibeos::paging::PTE_ADDR_MASK == root)
             .map(|t| t.id)
     })
-}
-
-/// Park on `wq` forever (still a far deadline). SCHED dropped before switch.
-pub fn wait_on(wq: &mut WaitQueue) {
-    with_sched(|s| s.begin_wait(wq, FAR_DEADLINE));
-    schedule();
-}
-
-pub fn wake_queue(wq: &mut WaitQueue) {
-    with_sched(|s| {
-        s.wake_all(wq);
-    });
 }
 
 pub fn current_cpu() -> u32 {

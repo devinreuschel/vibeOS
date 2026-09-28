@@ -120,6 +120,8 @@ GONE: list[tuple[str, str]] = [
     ("harden", "one per-CPU control-register routine, run"),
     ("enter_user", "`enter_user_full` executes `cli` before it loads"),
     ("vibeos_iret_user", "`enter_user_full` executes `cli` before it loads"),
+    ("wait_on", "stop and continue cannot lose a wakeup"),
+    ("wake_queue", "stop and continue cannot lose a wakeup"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",
