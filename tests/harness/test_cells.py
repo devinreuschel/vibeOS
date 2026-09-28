@@ -89,7 +89,7 @@ class TestRemoteView(unittest.TestCase):
     def test_unsafe_impl_for_view_fails_anywhere(self) -> None:
         for trait in ("Send", "Sync"):
             text = f"// SAFETY: no.\nunsafe impl {trait} for PerCpuRemote {{}}\n"
-            for path in ("src/per_cpu.rs", "src/cell.rs", "src/x.rs"):
+            for path in ("crates/core/src/per_cpu.rs", "src/cell.rs", "src/x.rs"):
                 with self.subTest(trait=trait, path=path):
                     self.assertEqual(impl_errors(path, text), [
                         f"{path}:2: unsafe impl {trait} for PerCpuRemote: "
@@ -104,7 +104,7 @@ class TestRemoteView(unittest.TestCase):
         text = ("impl Default for PerCpuRemote {}\n"
                 "unsafe impl Send for PerCpu {}\n"
                 "// unsafe impl Sync for PerCpuRemote {}\n")
-        self.assertEqual(impl_errors("src/per_cpu.rs", text), [])
+        self.assertEqual(impl_errors("crates/core/src/per_cpu.rs", text), [])
 
     def test_with_cpu_must_be_unsafe(self) -> None:
         entry = [("src/per_cpu_init.rs", "with_cpu")]
@@ -183,7 +183,7 @@ class TestImplHeaders(unittest.TestCase):
     def test_concrete_impl_passes_anywhere(self) -> None:
         text = ("// SAFETY: invariant I120, established at `per_cpu_init::cpu`.\n"
                 "unsafe impl Sync for PerCpu {}\n")
-        self.assertEqual(self.errs(text, "src/per_cpu.rs"), [])
+        self.assertEqual(self.errs(text, "crates/core/src/per_cpu.rs"), [])
 
     def test_comment_inside_a_header(self) -> None:
         text = ("unsafe impl<T /* no { here */: Send> // a { comment\n"
@@ -199,11 +199,11 @@ class TestImplHeaders(unittest.TestCase):
     def test_try_arc_form(self) -> None:
         for trait in ("Send", "Sync"):
             text = f"unsafe impl<T: ?Sized + Send + Sync> {trait} for TryArc<T> {{}}\n"
-            self.assertEqual(self.errs(text, "src/kalloc.rs"), [])
+            self.assertEqual(self.errs(text, "crates/core/src/kalloc.rs"), [])
 
     def test_other_traits_are_ignored(self) -> None:
         text = "unsafe impl<A: FrameAlloc> FrameAlloc for Counting<'_, A> {}\n"
-        self.assertEqual(self.errs(text, "src/addr_space.rs"), [])
+        self.assertEqual(self.errs(text, "crates/core/src/addr_space.rs"), [])
 
     def test_header_fields(self) -> None:
         text = ("unsafe impl<'a, T: ?Sized + Send, const N: usize>\n"

@@ -21,6 +21,7 @@ pub mod cache;
 // Kernel `mod cell` in main.rs. Host tests only: production vibeos-core
 // has no InterruptGuard / per_cpu_init.
 #[cfg(test)]
+#[path = "../../../src/cell.rs"]
 pub mod cell;
 pub mod console;
 pub mod desc;
