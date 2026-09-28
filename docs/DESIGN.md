@@ -4190,7 +4190,9 @@ the exit status. ROADMAP §10.2 makes it read each of these lines only when fram
 The harness also retries, and ROADMAP §10.2 removes every retry (F021). `run_ktest.py` boots again
 after any timeout, after the `-smp 4` `FAIL msix_cpu: ap counter`, and after a `-smp 4` panic whose
 tail holds `ipi: ack timeout`, the `ipi_init::wait_acks` frame, or a banner glued to a `ktest: ok`
-line. A second timeout whose tail ends at `user: dup ok` gets a third boot. `make test-smp-stress`
+line. A second timeout whose tail ends at `user: dup ok` gets a third boot, although the stall it was
+added for is fixed (a forked child's first entry to ring 3 took a timer tick with the user GS loaded,
+ROADMAP §10.6), and `user_fork_wait_stall` catches it. `make test-smp-stress`
 uses the same rules, so a green run can hide an intermittent hang or panic. Until then each retry
 goes to the job summary and to the `retries` list of the tier's results file, which
 `tests/harness/results.py` writes and the ladder uploads, and a pull request that ticks a ROADMAP
@@ -5036,6 +5038,16 @@ line, and it is fixed there. No retry, skip, wider band, or longer timeout lands
 and a test that repeats a measurement until one sample passes has a wider band. A test skips only
 when its tier cannot run what it checks: its skip line names what the configuration lacks, and a
 tier CI runs has it. Not yet enforced: the harness retries until ROADMAP §10.2 deletes the retries.
+
+**A stall retried instead of traced.**
+From PR #75 on, `/bin/tests` sometimes stopped after `user: dup ok` and the harness booted again. The
+cause was a forked child's first entry to ring 3 (`syscall_init::enter_user_full`, F006): it loaded
+the user GS selector and wrote `GS_BASE` = 0 with IF=1, so a timer tick in that window was taken at
+CPL 0 without `swapgs`, its `gs:[0]` read faulted at VA 0, and the kernel halted without printing a
+line. Rule: a return to ring 3 runs `cli` before its first ring-3 segment or base load
+([section 5.10](#510-privilege-transitions) rule 4); a hang is captured, each CPU's registers and
+backtrace, before anything boots again; and a stall gets a test that holds its window open before its
+fix lands (ROADMAP §10.2, F021).
 
 ---
 
