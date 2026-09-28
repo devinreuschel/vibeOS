@@ -17,8 +17,8 @@ use crate::arch::gdt;
 use crate::cell::BootCell;
 use crate::per_cpu_init;
 use crate::x86::{
-    self, CR0_EM, CR0_MP, CR0_TS, CR4_OSFXSR, EFER_SCE, FMASK_SYSCALL, IA32_EFER, IA32_FMASK,
-    IA32_FS_BASE, IA32_GS_BASE, IA32_KERNEL_GS_BASE, IA32_LSTAR, IA32_STAR,
+    self, EFER_SCE, FMASK_SYSCALL, IA32_EFER, IA32_FMASK, IA32_FS_BASE, IA32_GS_BASE,
+    IA32_KERNEL_GS_BASE, IA32_LSTAR, IA32_STAR,
 };
 
 static FPU_READY: AtomicBool = AtomicBool::new(false);
@@ -217,11 +217,13 @@ unsafe extern "C" {
     fn vibeos_iret_user_full(regs: *const UserRegs) -> !;
 }
 
-/// Program SYSCALL MSRs, FPU, and TSS.RSP0 wiring. Per CPU.
+/// Write CR0 and CR4 whole (`arch::cpu::init_control_regs`), then program
+/// the SYSCALL MSRs and the FPU. Per CPU.
 ///
 /// # Safety
 /// GDT loaded, `GS_BASE` is this CPU's `PerCpu`.
 pub unsafe fn init_cpu() {
+    crate::arch::cpu::init_control_regs();
     let entry = vibeos_syscall_entry as *const () as u64;
     let star = ((STAR_SYSRET as u64) << 48) | ((KERNEL_CS as u64) << 32);
     unsafe {
@@ -269,13 +271,10 @@ pub unsafe fn init_ap(tss: *mut Tss, rsp0: u64) {
     seed_current_fpu();
 }
 
+/// `fninit` and, on the first CPU, the template capture. `init_control_regs`
+/// has already cleared `CR0.EM`, which `fninit` needs, and set
+/// `CR4.OSFXSR`, which `fxsave64` needs for the XMM registers.
 fn init_fpu() {
-    let mut cr0 = x86::read_cr0();
-    cr0 &= !(CR0_EM | CR0_TS);
-    cr0 |= CR0_MP;
-    unsafe { x86::write_cr0(cr0) };
-    let cr4 = x86::read_cr4() | CR4_OSFXSR;
-    unsafe { x86::write_cr4(cr4) };
     unsafe {
         core::arch::asm!("fninit", options(nomem, nostack));
     }

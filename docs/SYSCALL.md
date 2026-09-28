@@ -363,8 +363,8 @@ program itself is a process kill (DESIGN §5.2 CPL split), not `EFAULT`.
 §2.5 for ring-3 exceptions, AGENTS.md rule 4 for syscall paths). The code
 does not meet this yet:
 
-- ring-3 `#DB` (from `RFLAGS.TF` or `INT1`) halts every CPU, and `#AC` has
-  no signal mapping either (F005; ROADMAP §10.6)
+- ring-3 `#DB` (from `RFLAGS.TF` or `INT1`) halts every CPU (F005; ROADMAP
+  §10.6)
 - a device or keyboard interrupt taken in ring 3 runs with the user GS
   base and halts (F004; ROADMAP §10.6)
 - the exit-path faults in §1 (F001, F007; ROADMAP §10.6)

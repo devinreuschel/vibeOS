@@ -105,17 +105,37 @@ pub const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
 /// TF|IF|DF|IOPL|NT|AC. Cleared on `syscall`.
 pub const FMASK_SYSCALL: u64 = 0x47700;
 
-pub const CR0_EM: u64 = 1 << 2;
+pub const CR0_PE: u64 = 1 << 0;
 pub const CR0_MP: u64 = 1 << 1;
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+pub const CR0_EM: u64 = 1 << 2;
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub const CR0_TS: u64 = 1 << 3;
+pub const CR0_ET: u64 = 1 << 4;
+pub const CR0_NE: u64 = 1 << 5;
 pub const CR0_WP: u64 = 1 << 16;
+pub const CR0_AM: u64 = 1 << 18;
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+pub const CR0_NW: u64 = 1 << 29;
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+pub const CR0_CD: u64 = 1 << 30;
+pub const CR0_PG: u64 = 1 << 31;
+pub const CR4_PAE: u64 = 1 << 5;
+pub const CR4_MCE: u64 = 1 << 6;
+pub const CR4_PGE: u64 = 1 << 7;
 pub const CR4_OSFXSR: u64 = 1 << 9;
+pub const CR4_OSXMMEXCPT: u64 = 1 << 10;
 pub const CR4_UMIP: u64 = 1 << 11;
+pub const CR4_LA57: u64 = 1 << 12;
 pub const CR4_SMEP: u64 = 1 << 20;
 pub const CR4_SMAP: u64 = 1 << 21;
 
 /// CPUID.01H:ECX[30]
 pub const CPUID_ECX_RDRAND: u32 = 1 << 30;
+/// CPUID.01H:EDX[7]
+pub const CPUID_EDX_MCE: u32 = 1 << 7;
+/// CPUID.01H:EDX[13]
+pub const CPUID_EDX_PGE: u32 = 1 << 13;
 /// CPUID.(EAX=7,ECX=0):EBX[7]
 pub const CPUID_EBX_SMEP: u32 = 1 << 7;
 /// CPUID.(EAX=7,ECX=0):EBX[20]
@@ -125,7 +145,7 @@ pub const CPUID_ECX_UMIP: u32 = 1 << 2;
 
 static SMAP_LIVE: AtomicBool = AtomicBool::new(false);
 
-/// `stac`/`clac` are #UD when SMAP is not present. Harden sets this.
+/// `stac`/`clac` are #UD when SMAP is not present. `arch::cpu::init_control_regs` sets this.
 #[inline]
 pub fn smap_live() -> bool {
     SMAP_LIVE.load(Ordering::Acquire)
@@ -201,6 +221,7 @@ pub fn rdrand64() -> Option<u64> {
 }
 
 #[inline]
+#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn read_cr0() -> u64 {
     let val: u64;
     unsafe { asm!("mov {}, cr0", out(reg) val, options(nomem, nostack, preserves_flags)) };

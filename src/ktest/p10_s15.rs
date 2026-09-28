@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::addr_space::UserPerms;
 use vibeos::paging::PAGE_SIZE_4K;
-use vibeos::proc::{SIGILL, SIGKILL, SIGTRAP, wait_signaled};
+use vibeos::proc::{SIGBUS, SIGFPE, SIGILL, SIGKILL, SIGTRAP, wait_signaled};
 use vibeos::syscall::SYS_KILL;
 use vibeos::vectors;
 
@@ -439,16 +439,6 @@ struct ExcCase {
     kvm_only: bool,
 }
 
-/// CPUID leaf 0x4000_0000 names the hypervisor; KVM's is `KVMKVMKVM`.
-fn on_kvm() -> bool {
-    let (_, b, c, d) = x86::cpuid(0x4000_0000, 0);
-    let mut id = [0u8; 12];
-    id[..4].copy_from_slice(&b.to_le_bytes());
-    id[4..8].copy_from_slice(&c.to_le_bytes());
-    id[8..].copy_from_slice(&d.to_le_bytes());
-    &id[..9] == b"KVMKVMKVM"
-}
-
 // int3, then exit(1) if it returns.
 user_code!(
     USER_INT3,
@@ -461,15 +451,85 @@ user_code!(
     "
 );
 
-const EXC_CASES: &[ExcCase] = &[ExcCase {
-    name: "int3",
-    code: USER_INT3,
-    sig: SIGTRAP,
-    kvm_only: false,
-}];
+// x87 divide by zero with ZM unmasked (FCW 0x037B); `fwait` raises the
+// pending error as #MF, since CR0.NE is set.
+user_code!(
+    USER_X87_MF,
+    "
+    fninit
+    push 0x037B
+    fldcw word ptr [rsp]
+    fld1
+    fldz
+    fdivp st(1), st
+    fwait
+    mov eax, 60
+    xor edi, edi
+    syscall
+    "
+);
+
+// SSE divide by zero with MXCSR.ZM clear (0x1D80): #XM, since
+// CR4.OSXMMEXCPT is set. TCG does not raise #XM.
+user_code!(
+    USER_SIMD_XM,
+    "
+    push 0x1D80
+    ldmxcsr dword ptr [rsp]
+    mov eax, 1
+    cvtsi2ss xmm0, eax
+    xorps xmm1, xmm1
+    divss xmm0, xmm1
+    mov eax, 60
+    xor edi, edi
+    syscall
+    "
+);
+
+// RFLAGS.AC set, then a misaligned load: #AC, since CR0.AM is set. TCG
+// does not model alignment checks.
+user_code!(
+    USER_AC_MISALIGNED,
+    "
+    pushfq
+    or qword ptr [rsp], 0x40000
+    popfq
+    mov eax, dword ptr [rsp+1]
+    mov eax, 60
+    xor edi, edi
+    syscall
+    "
+);
+
+const EXC_CASES: &[ExcCase] = &[
+    ExcCase {
+        name: "int3",
+        code: USER_INT3,
+        sig: SIGTRAP,
+        kvm_only: false,
+    },
+    ExcCase {
+        name: "x87_mf",
+        code: USER_X87_MF,
+        sig: SIGFPE,
+        kvm_only: false,
+    },
+    ExcCase {
+        name: "simd_xm",
+        code: USER_SIMD_XM,
+        sig: SIGFPE,
+        kvm_only: true,
+    },
+    ExcCase {
+        name: "ac_misaligned",
+        code: USER_AC_MISALIGNED,
+        sig: SIGBUS,
+        kvm_only: true,
+    },
+];
 
 fn test_user_exceptions() -> Outcome {
-    let kvm = EXC_CASES.iter().any(|c| c.kvm_only) && on_kvm();
+    let kvm = EXC_CASES.iter().any(|c| c.kvm_only) && super::p10_s16::on_kvm();
     for case in EXC_CASES {
         if case.kvm_only && !kvm {
             crate::marker!(

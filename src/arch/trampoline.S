@@ -50,7 +50,7 @@ pm32:
     mov ds, eax
     mov es, eax
     mov ss, eax
-    /* PAE + PGE. GLOBAL kernel mappings match the BSP tables. */
+    /* PAE + PGE for long mode; arch::cpu::init_control_regs rewrites CR4 whole once the AP runs Rust. */
     mov eax, cr4
     or eax, 0xA0
     mov cr4, eax

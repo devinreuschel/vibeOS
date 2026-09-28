@@ -633,8 +633,8 @@ pub unsafe fn load() {
 
 /// Point all 256 gates at their stubs, register the named bodies, `lidt`.
 /// Each gate enters at the stub's `clac` when CPUID reports SMAP, the bit
-/// `arch::cpu::harden` enables it from, and just past it otherwise. This
-/// runs before `harden`, and `clac` is legal once CPUID reports SMAP.
+/// `arch::cpu::init_control_regs` enables it from, and just past it otherwise.
+/// This runs before that routine, and `clac` is legal once CPUID reports SMAP.
 ///
 /// # Safety
 /// GDT already loaded. PIC already remapped and masked.

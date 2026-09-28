@@ -194,7 +194,6 @@ fn normal_boot_tail() {
 
     unsafe { arch::idt::init() };
     crate::marker!(marker::IDT_OK);
-    arch::cpu::harden();
 
     // DESIGN §3.3 step 11. After GDT: `mov gs` already ran. Before
     // IRQ0 so ISRs can `gs:[0]`. Allocate + wrmsr GS bases, then

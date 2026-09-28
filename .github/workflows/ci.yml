@@ -149,6 +149,9 @@ jobs:
       - name: e2e (#GP dump+halt)
         run: make test-e2e-gp
 
+      - name: e2e (#MC dump+halt)
+        run: make test-e2e-mce
+
       - name: e2e (PIT calibration fallback)
         run: make test-e2e-pit
 
