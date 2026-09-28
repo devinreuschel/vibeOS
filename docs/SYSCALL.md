@@ -88,13 +88,18 @@ RSP out of the per-CPU scratch into its frame and then runs `sti`. Today it
 does not, and FMASK's IF=0 lasts until the body blocks (ROADMAP §10.6).
 
 From the return of `vibeos_syscall_stub` to `sysretq` or `iretq`, the exit
-path needs IF=0: it stores the return value in `gs:[retval]`, stages the
-`iretq` frame in `gs:[iret_*]`, and loads the user RSP before `swapgs`.
+path runs with IF=0: it stores the return value in `gs:[retval]`, stages the
+`iretq` frame in `gs:[iret_*]`, and loads the user RSP before `swapgs`, so
+an interrupt there could let another thread's syscall on this CPU overwrite
+the scratch, or push its frame on the user stack at CPL 0. The exit's first
+instruction after the call is `cli`, whatever IF the body returned with,
+and in debug builds each exit path checks IF before its `swapgs` (on the
+`sysretq` path before it loads the user RSP) and faults at
+`vibeos_exit_if_set`, a `ud2`, if IF is set. `console_init::wait_key`, which
+a console `read` blocks in, returns with the IF it was entered with.
 ROADMAP §10.6 moves the return value and the `iretq` frame into the thread's
 user frame, which leaves the per-CPU scratch holding only the user RSP
-between `syscall` and the stack switch. A console `read` breaks this: it
-returns through `console_init::wait_key`, which leaves IF=1, and nothing
-clears IF before the exit (F001; ROADMAP §10.6).
+between `syscall` and the stack switch.
 
 A non-canonical saved RIP reaches `iretq`, which raises `#GP` at CPL 0
 after `swapgs` has loaded the user GS base; on KVM and hardware the kernel

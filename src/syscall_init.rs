@@ -70,6 +70,8 @@ global_asm!(
     1:
         mov rdi, rsp
         call vibeos_syscall_stub
+        // IF is off from here to sysretq or iretq (AGENTS.md rule 2).
+        cli
         mov qword ptr gs:[{retval}], rax
 
         mov rax, qword ptr gs:[{current}]

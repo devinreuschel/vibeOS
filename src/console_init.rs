@@ -16,7 +16,7 @@ use crate::log_init;
 use crate::per_cpu_init;
 use crate::serial::Serial;
 use crate::thread_init;
-use crate::x86::InterruptGuard;
+use crate::x86::{self, InterruptGuard};
 
 static SERIAL_ON: AtomicBool = AtomicBool::new(false);
 static FB_ON: AtomicBool = AtomicBool::new(false);
@@ -85,10 +85,24 @@ pub fn read() -> Option<DecodedKey> {
     None
 }
 
-/// Block for one key. Drain with IRQs off; never hold the FB/serial lock
-/// across the wait. `sti; hlt` is one instruction so a keyboard IRQ
-/// cannot slip between enable and halt.
+/// Block for one key, and return with IF as it was on entry: a syscall
+/// body that calls this returns to an exit that must run with IF=0
+/// (AGENTS.md rule 2).
 pub fn wait_key() -> DecodedKey {
+    let if_on = x86::interrupts_enabled();
+    let k = wait_key_loop();
+    if if_on {
+        x86::sti();
+    } else {
+        x86::cli();
+    }
+    k
+}
+
+/// Drain with IRQs off; never hold the FB/serial lock across the wait.
+/// `sti; hlt` is one instruction so a keyboard IRQ cannot slip between
+/// enable and halt. May return with IF=1.
+fn wait_key_loop() -> DecodedKey {
     loop {
         if let Some(k) = read() {
             return k;

@@ -3013,11 +3013,12 @@ architectures. Planned (ROADMAP §11.3, §11.6): the aarch64 port does not exist
    `PerCpu.syscall_scratch` holds only the user RSP between `syscall` and the entry's stack switch,
    as in Linux. Required: the syscall exit runs `cli` right after `call vibeos_syscall_stub`;
    `enter_user` and `enter_user_full` run `cli` before `mov gs`; each checks IF=0 in debug builds;
-   `iretq` restores ring 3's IF from the frame. Rule; not yet enforced: ROADMAP §10.6 (F001, F006).
-   The syscall exit has no `cli`, and `console_init::wait_key` returns with IF=1 from its `sti; hlt`
-   (F001); `enter_user_full` runs with IF=1 (F006). The syscall exit also stages the return value
-   and the `iretq` frame in `PerCpu.syscall_scratch`, per CPU, not per thread (ROADMAP §10.6, the
-   user-frame box).
+   `iretq` restores ring 3's IF from the frame. The syscall exit is built so: `cli` follows the
+   call, and in debug builds each exit path checks IF before its `swapgs` and faults at
+   `vibeos_exit_if_set`; `console_init::wait_key` returns with the IF it was entered with. Rule;
+   not yet enforced for `enter_user` and `enter_user_full`: ROADMAP §10.6 (F006); they run with
+   IF=1. The syscall exit also stages the return value and the `iretq` frame in
+   `PerCpu.syscall_scratch`, per CPU, not per thread (ROADMAP §10.6, the user-frame box).
 5. Every interrupt and exception entry clears RFLAGS.AC before any other code: an interrupt gate
    clears IF and TF but not AC, and ring 3 can set AC with `popf`. The syscall entry clears AC
    through FMASK (bit 18). Every generated stub starts with `clac`, and `idt::init` points each gate
