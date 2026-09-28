@@ -32,6 +32,8 @@ pub enum LoadError {
     NoProc,
     /// The process's thread could not be made.
     Spawn(SpawnError),
+    /// A kernel heap allocation failed (DESIGN §4.4).
+    NoMem,
 }
 
 impl LoadError {
@@ -45,6 +47,7 @@ impl LoadError {
             Self::Empty => "empty",
             Self::NoProc => "eagain",
             Self::Spawn(e) => e.as_str(),
+            Self::NoMem => "enomem",
         }
     }
 }

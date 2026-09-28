@@ -6,14 +6,15 @@
 
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt::Write;
+use core::mem::MaybeUninit;
 
 use vibeos::addr_space::{AddressSpace, AsError, MmapError, mmap_request};
 use vibeos::desc::InterruptFrame;
 use vibeos::elf::ElfError;
 use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, SeekFrom};
+use vibeos::kalloc::TryBox;
 use vibeos::kbd::{DecodedKey, NamedKey};
 use vibeos::paging::{PAGE_SIZE_4K, USER_MAP_END};
 use vibeos::proc::{
@@ -56,7 +57,7 @@ struct Proc {
     pending: u32,
     /// No reaper: freed at exit, ROADMAP §10.5.
     autoreap: bool,
-    space: Option<Box<AddressSpace>>,
+    space: Option<TryBox<AddressSpace>>,
     entry: UserRegs,
     wait_wq: WaitQueue,
     stop_wq: WaitQueue,
@@ -172,6 +173,7 @@ fn load_errno(e: LoadError) -> i32 {
         LoadError::Empty => ENOEXEC,
         LoadError::NoProc => EAGAIN,
         LoadError::Spawn(e) => spawn_errno(e),
+        LoadError::NoMem => ENOMEM,
     }
 }
 
@@ -360,7 +362,9 @@ pub fn start_init() {
 /// Start the ELF at `path` as a new process with parent `ppid` (0: the
 /// kernel, which reaps it with [`wait_kernel`]).
 pub(crate) fn spawn_elf(path: &str, prefer: u32, ppid: u32) -> Result<u32, LoadError> {
+    let slot = space_slot().ok_or(LoadError::NoMem)?;
     start_loaded(
+        slot,
         user_init::load_path(path, &[path])?,
         prefer,
         ppid,
@@ -375,10 +379,19 @@ pub(crate) fn spawn_image(elf: &[u8], argv: &[&[u8]], ppid: u32) -> Result<u32, 
         Some(Ok(a)) => intern_name(a),
         _ => "user",
     };
-    start_loaded(user_init::load_image(elf, argv)?, 0, ppid, name)
+    let slot = space_slot().ok_or(LoadError::NoMem)?;
+    start_loaded(slot, user_init::load_image(elf, argv)?, 0, ppid, name)
+}
+
+/// The heap slot a new address space moves into, taken before the space
+/// is built: `AddressSpace` has no `Drop`, so a space that a failed
+/// `TryBox::try_new` dropped would leak its frames.
+fn space_slot() -> Option<TryBox<MaybeUninit<AddressSpace>>> {
+    TryBox::<AddressSpace>::try_new_uninit().ok()
 }
 
 fn start_loaded(
+    slot: TryBox<MaybeUninit<AddressSpace>>,
     loaded: Loaded,
     prefer: u32,
     ppid: u32,
@@ -397,12 +410,12 @@ fn start_loaded(
     entry.rsp = loaded.rsp;
     entry.rflags = RFLAGS_RESERVED1 | RFLAGS_IF;
     entry.fs_base = loaded.fs;
-    let boxed = Box::new(loaded.space);
+    let boxed = slot.write(loaded.space);
     let h = match thread_init::spawn_user(name, user_thread_entry, pid, cr3) {
         Ok(h) => h,
         Err(e) => {
             with_table(|t| t.procs[pid as usize] = Proc::empty());
-            addr_space_init::teardown(*boxed);
+            addr_space_init::teardown(boxed.into_inner());
             return Err(LoadError::Spawn(e));
         }
     };
@@ -922,6 +935,13 @@ fn sys_fork(frame: *mut SyscallFrame) -> i64 {
         close_all_fds(&mut { fds });
         return syscall::neg(EAGAIN);
     };
+    let Some(slot) = space_slot() else {
+        close_all_fds(&mut { fds });
+        with_table(|t| {
+            t.procs[pid as usize] = Proc::empty();
+        });
+        return syscall::neg(ENOMEM);
+    };
     let Some(cloned) = addr_space_init::clone_full(src) else {
         close_all_fds(&mut { fds });
         with_table(|t| {
@@ -934,12 +954,12 @@ fn sys_fork(frame: *mut SyscallFrame) -> i64 {
     let fs = crate::x86::rdmsr(crate::x86::IA32_FS_BASE);
     let mut child_regs = child_regs;
     child_regs.fs_base = fs;
-    let boxed = Box::new(cloned);
+    let boxed = slot.write(cloned);
     let h = match thread_init::spawn_user("user", user_thread_entry, pid, cr3) {
         Ok(h) => h,
         Err(e) => {
             // Nothing names the clone's root yet: no thread was made.
-            addr_space_init::teardown(*boxed);
+            addr_space_init::teardown(boxed.into_inner());
             close_all_fds(&mut { fds });
             with_table(|t| {
                 t.procs[pid as usize] = Proc::empty();
@@ -994,6 +1014,9 @@ fn sys_execve(path: u64, argv: u64, envp: u64, frame: *mut SyscallFrame) -> i64 
             }
         }
     }
+    let Some(slot) = space_slot() else {
+        return syscall::neg(ENOMEM);
+    };
     let loaded = match user_init::load_path(path_s, &argv_s) {
         Ok(l) => l,
         Err(e) => return syscall::neg(load_errno(e)),
@@ -1002,7 +1025,7 @@ fn sys_execve(path: u64, argv: u64, envp: u64, frame: *mut SyscallFrame) -> i64 
     let entry = loaded.entry;
     let rsp = loaded.rsp;
     let fs = loaded.fs;
-    let mut boxed = Some(Box::new(loaded.space));
+    let mut boxed = Some(slot.write(loaded.space));
     let cr3 = boxed.as_ref().map(|s| s.root().as_u64()).unwrap_or(0);
     let old = with_table(|t| {
         let p = t.get_mut(pid)?;
@@ -1019,7 +1042,7 @@ fn sys_execve(path: u64, argv: u64, envp: u64, frame: *mut SyscallFrame) -> i64 
     });
     let Some((old, gone, tid, cr3)) = old else {
         if let Some(b) = boxed {
-            addr_space_init::teardown(*b);
+            addr_space_init::teardown(b.into_inner());
         }
         return syscall::neg(ESRCH);
     };
@@ -1040,7 +1063,7 @@ fn sys_execve(path: u64, argv: u64, envp: u64, frame: *mut SyscallFrame) -> i64 
     // here.
     unsafe { addr_space_init::load_cr3_u64(cr3) };
     if let Some(old) = old {
-        addr_space_init::teardown(*old);
+        addr_space_init::teardown(old.into_inner());
     }
     let f = unsafe { &mut *frame };
     let mut regs = UserRegs::empty();
@@ -1178,7 +1201,7 @@ fn finish_exit(wait_status: u32, _from_fault: bool) -> ! {
         crate::arch::gs::force_kernel();
         addr_space_init::load_kernel_cr3();
         clear_as();
-        addr_space_init::teardown(*space);
+        addr_space_init::teardown(space.into_inner());
     }
     crate::arch::gs::force_kernel();
     thread_init::exit_current();
