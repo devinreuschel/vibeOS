@@ -170,19 +170,37 @@ global_asm!(
         ud2
         .endif
 
-    .global vibeos_iret_user
-    .type vibeos_iret_user, @function
-    vibeos_iret_user:
-        push {user_ss}
-        push rsi
-        push rdx
-        push {user_cs}
-        push rdi
-        iretq
-
     .global vibeos_iret_user_full
     .type vibeos_iret_user_full, @function
     vibeos_iret_user_full:
+        // IF is off from here to iretq (AGENTS.md rule 2); after
+        // `mov gs` nothing may read gs:.
+        .if {if_check}
+        pushfq
+        test qword ptr [rsp], 0x200
+        lea rsp, [rsp + 8]
+        jnz vibeos_enter_if_set
+        .endif
+        mov r8, rdx
+        mov eax, {user_ss}
+        mov ds, ax
+        mov es, ax
+        mov fs, ax
+        mov gs, ax
+        mov ecx, {kernel_gs_base}
+        mov eax, esi
+        mov rdx, rsi
+        shr rdx, 32
+        wrmsr
+        mov ecx, {gs_base}
+        xor eax, eax
+        xor edx, edx
+        wrmsr
+        mov ecx, {fs_base}
+        mov eax, r8d
+        mov rdx, r8
+        shr rdx, 32
+        wrmsr
         push {user_ss}
         push qword ptr [rdi + {ur_rsp}]
         push qword ptr [rdi + {ur_rflags}]
@@ -216,6 +234,9 @@ global_asm!(
     fpu = const FPU,
     rf_vm = const RF_VM,
     if_check = const cfg!(debug_assertions) as u8,
+    kernel_gs_base = const IA32_KERNEL_GS_BASE,
+    gs_base = const IA32_GS_BASE,
+    fs_base = const IA32_FS_BASE,
     user_cs = const USER_CS_RPL as u64,
     user_ss = const USER_DS_RPL as u64,
     ur_rax = const offset_of!(UserRegs, rax),
@@ -240,8 +261,9 @@ global_asm!(
 
 unsafe extern "C" {
     fn vibeos_syscall_entry();
-    fn vibeos_iret_user(rip: u64, rsp: u64, rflags: u64) -> !;
-    fn vibeos_iret_user_full(regs: *const UserRegs) -> !;
+    /// Loads the user data selectors, `KERNEL_GS_BASE` = `percpu`,
+    /// `GS_BASE` = 0 and `FS_BASE` = `fs_base`, then `iretq`s to `regs`.
+    fn vibeos_iret_user_full(regs: *const UserRegs, percpu: u64, fs_base: u64) -> !;
 }
 
 /// Write CR0 and CR4 whole (`arch::cpu::init_control_regs`), then program
@@ -394,67 +416,20 @@ pub fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
     }
 }
 
-/// `iretq` into ring 3. Does not return.
-///
-/// # Safety
-/// `rip`/`rsp` are mapped executable/writable in the loaded CR3 with
-/// user pages. IF in `rflags` should stay clear unless IRQs in ring 3
-/// are intended.
-#[cfg_attr(
-    feature = "kernel_tests",
-    allow(
-        dead_code,
-        reason = "no caller since the bound model went; P10-S17 deletes it"
-    )
-)]
-pub unsafe fn enter_user(rip: u64, rsp: u64, rflags: u64, fs_base: u64) -> ! {
-    let cpu = per_cpu_init::current();
-    let ptr = cpu.self_ptr as u64;
-    unsafe {
-        x86::wrmsr(IA32_KERNEL_GS_BASE, ptr);
-        core::arch::asm!(
-            "mov ds, {0:x}",
-            "mov es, {0:x}",
-            "mov fs, {0:x}",
-            "mov gs, {0:x}",
-            in(reg) USER_DS_RPL,
-            options(nostack, preserves_flags),
-        );
-        x86::wrmsr(IA32_GS_BASE, 0);
-        x86::wrmsr(IA32_FS_BASE, fs_base);
-        vibeos_iret_user(rip, rsp, rflags);
-    }
-}
-
 /// `iretq` into ring 3 with a full GPR set (fork child / spawned process).
+/// Runs `cli` first; `iretq` restores ring 3's IF from `regs.rflags`.
 ///
 /// # Safety
 /// `regs.rip`/`regs.rsp` are mapped in the loaded CR3. `regs.rflags`
 /// should include the reserved-1 bit.
 pub unsafe fn enter_user_full(regs: &UserRegs) -> ! {
-    let cpu = per_cpu_init::current();
-    let ptr = cpu.self_ptr as u64;
-    unsafe {
-        x86::wrmsr(IA32_KERNEL_GS_BASE, ptr);
-        core::arch::asm!(
-            // Debug builds: IF must be clear (AGENTS.md rule 2).
-            ".if {if_check}",
-            "pushfq",
-            "test qword ptr [rsp], 0x200",
-            "lea rsp, [rsp + 8]",
-            "jnz vibeos_enter_if_set",
-            ".endif",
-            "mov ds, {0:x}",
-            "mov es, {0:x}",
-            "mov fs, {0:x}",
-            "mov gs, {0:x}",
-            in(reg) USER_DS_RPL,
-            if_check = const cfg!(debug_assertions) as u8,
-        );
-        x86::wrmsr(IA32_GS_BASE, 0);
-        x86::wrmsr(IA32_FS_BASE, regs.fs_base);
-        vibeos_iret_user_full(regs as *const UserRegs);
-    }
+    x86::cli();
+    let ptr = per_cpu_init::current().self_ptr as u64;
+    // SAFETY: invariant: IF=0 from the `cli` above to the `iretq`, `ptr`
+    // is this CPU's `PerCpu`, and `regs` is a user context the caller
+    // vouches for (this fn's contract); established here and by
+    // `per_cpu_init::current`.
+    unsafe { vibeos_iret_user_full(regs as *const UserRegs, ptr, regs.fs_base) }
 }
 
 pub fn star_configured() -> bool {

@@ -1,4 +1,4 @@
-//! In-guest tests of P10-S17, Syscall exit IF=0, enter_user, USER_MAP_END and the FP binding (DESIGN §8.2).
+//! In-guest tests of P10-S17, Syscall exit IF=0, enter_user_full, USER_MAP_END and the FP binding (DESIGN §8.2).
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
