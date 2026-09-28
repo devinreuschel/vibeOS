@@ -8,10 +8,11 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use vibeos::addr_space::AddressSpace;
-use vibeos::desc::{KERNEL_CS, STAR_SYSRET, Tss, USER_CS_RPL, USER_DS_RPL};
+use vibeos::desc::{InterruptFrame, KERNEL_CS, STAR_SYSRET, Tss, USER_CS_RPL, USER_DS_RPL};
 use vibeos::per_cpu::PerCpu;
 use vibeos::syscall::{SyscallFrame, UserRegs};
 use vibeos::thread::{Fxsave, Tcb};
+use vibeos::vectors;
 
 use crate::arch::gdt;
 use crate::cell::BootCell;
@@ -73,20 +74,20 @@ global_asm!(
         // IF is off from here to sysretq or iretq (AGENTS.md rule 2).
         cli
         mov qword ptr gs:[{retval}], rax
+        // A non-canonical return RIP reaches neither sysretq nor iretq:
+        // the process gets SIGSEGV (AGENTS.md rule 1).
+        mov rcx, [rsp + 16]
+        mov rax, rcx
+        shl rax, 16
+        sar rax, 16
+        cmp rax, rcx
+        jne 20f
 
         mov rax, qword ptr gs:[{current}]
         test rax, rax
         jz 2f
         fxrstor64 [rax + {fpu}]
     2:
-        mov rcx, [rsp + 16]
-        mov rax, rcx
-        sar rax, 47
-        cmp rax, 0
-        je 3f
-        cmp rax, -1
-        jne 10f
-    3:
         mov r11, [rsp + 88]
         test r11, {rf_vm}
         jnz 10f
@@ -158,7 +159,14 @@ global_asm!(
     .global vibeos_syscall_iret_swapgs
     vibeos_syscall_iret_swapgs:
         swapgs
+    .global vibeos_syscall_iretq
+    vibeos_syscall_iretq:
         iretq
+
+    20:
+        mov rdi, rsp
+        call {bad_rip}
+        ud2
 
         .if {if_check}
     // A return to ring 3 found IF set (debug builds).
@@ -221,6 +229,8 @@ global_asm!(
         mov r14, [rdi + {ur_r14}]
         mov r15, [rdi + {ur_r15}]
         mov rdi, [rdi + {ur_rdi}]
+    .global vibeos_iret_user_full_iretq
+    vibeos_iret_user_full_iretq:
         iretq
     .popsection
     "#,
@@ -234,6 +244,7 @@ global_asm!(
     fpu = const FPU,
     rf_vm = const RF_VM,
     if_check = const cfg!(debug_assertions) as u8,
+    bad_rip = sym vibeos_syscall_bad_rip,
     kernel_gs_base = const IA32_KERNEL_GS_BASE,
     gs_base = const IA32_GS_BASE,
     fs_base = const IA32_FS_BASE,
@@ -258,6 +269,33 @@ global_asm!(
     ur_rsp = const offset_of!(UserRegs, rsp),
     ur_rflags = const offset_of!(UserRegs, rflags),
 );
+
+/// The syscall exit's non-canonical-RIP path: kernel stack and GS, IF=0,
+/// the return value already stored. Kills the process with `SIGSEGV`
+/// through the ordinary user-fault path.
+///
+/// # Safety
+/// `frame` is the saved syscall frame the exit is returning over.
+unsafe extern "C" fn vibeos_syscall_bad_rip(frame: *mut SyscallFrame) -> ! {
+    // SAFETY: invariant: `frame` is this thread's saved syscall frame on
+    // its kernel stack, which nothing else refers to at the exit;
+    // established by `syscall_init::vibeos_syscall_entry`.
+    let f = unsafe { &*frame };
+    let view = InterruptFrame {
+        rip: f.rip,
+        cs: u64::from(USER_CS_RPL),
+        rflags: f.r11,
+        rsp: f.user_rsp,
+        ss: u64::from(USER_DS_RPL),
+    };
+    #[cfg(feature = "kernel_tests")]
+    testing::BAD_RIP_KILLS.fetch_add(1, Ordering::Relaxed);
+    crate::proc_init::try_user_fault(vectors::GP, &view, 0, None);
+    panic!(
+        "syscall: non-canonical return RIP {:#x} with no process",
+        f.rip
+    );
+}
 
 unsafe extern "C" {
     fn vibeos_syscall_entry();
@@ -424,6 +462,8 @@ pub fn on_switch(cpu: &mut PerCpu, old: *mut Tcb, new: *mut Tcb) {
 /// should include the reserved-1 bit.
 pub unsafe fn enter_user_full(regs: &UserRegs) -> ! {
     x86::cli();
+    #[cfg(feature = "kernel_tests")]
+    let regs = &testing::entry_regs(regs);
     let ptr = per_cpu_init::current().self_ptr as u64;
     // SAFETY: invariant: IF=0 from the `cli` above to the `iretq`, `ptr`
     // is this CPU's `PerCpu`, and `regs` is a user context the caller
@@ -501,9 +541,77 @@ fn bump_counter() {
 #[unsafe(no_mangle)]
 pub extern "C" fn vibeos_syscall_stub(frame: *mut SyscallFrame) -> i64 {
     bump_counter();
-    crate::proc_init::syscall(frame)
+    let r = crate::proc_init::syscall(frame);
+    #[cfg(feature = "kernel_tests")]
+    testing::on_exit(frame);
+    r
 }
 
 pub fn dispatch(nr: u64, args: [u64; 6]) -> i64 {
     crate::proc_init::dispatch(nr, args)
+}
+
+/// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
+#[cfg(feature = "kernel_tests")]
+pub(crate) mod testing {
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    use vibeos::paging::USER_END;
+    use vibeos::syscall::{SyscallFrame, UserRegs};
+
+    /// Syscall number plus one whose next exit gets a non-canonical RIP;
+    /// 0 for none.
+    static ARMED_NR: AtomicU64 = AtomicU64::new(0);
+    static ARMED_ENTRY: AtomicBool = AtomicBool::new(false);
+    pub(super) static BAD_RIP_KILLS: AtomicU64 = AtomicU64::new(0);
+
+    /// The next exit of syscall `nr` from a process returns to a
+    /// non-canonical RIP.
+    pub(crate) fn arm_noncanonical_rip(nr: u64) {
+        ARMED_NR.store(nr.wrapping_add(1), Ordering::Release);
+    }
+
+    /// Undo [`arm_noncanonical_rip`] and [`arm_noncanonical_entry`].
+    pub(crate) fn disarm_noncanonical() {
+        ARMED_NR.store(0, Ordering::Release);
+        ARMED_ENTRY.store(false, Ordering::Release);
+    }
+
+    /// The next `enter_user_full` enters at a non-canonical RIP.
+    pub(crate) fn arm_noncanonical_entry() {
+        ARMED_ENTRY.store(true, Ordering::Release);
+    }
+
+    /// Processes the syscall exit's non-canonical path has killed.
+    pub(crate) fn bad_rip_kills() -> u64 {
+        BAD_RIP_KILLS.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn on_exit(frame: *mut SyscallFrame) {
+        let t = crate::per_cpu_init::current_thread();
+        // SAFETY: invariant: a non-null current thread is this CPU's live
+        // TCB while it runs; established by `per_cpu_init::set_current_thread`.
+        if t.is_null() || unsafe { (*t).pid } == 0 {
+            return;
+        }
+        // SAFETY: invariant: `frame` is this thread's saved syscall frame
+        // on its kernel stack, which the dispatcher has returned from;
+        // established by `syscall_init::vibeos_syscall_entry`.
+        let f = unsafe { &mut *frame };
+        let armed = f.nr.wrapping_add(1);
+        if ARMED_NR
+            .compare_exchange(armed, 0, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            f.rip = USER_END;
+        }
+    }
+
+    pub(super) fn entry_regs(regs: &UserRegs) -> UserRegs {
+        let mut r = *regs;
+        if ARMED_ENTRY.swap(false, Ordering::AcqRel) {
+            r.rip = USER_END;
+        }
+        r
+    }
 }

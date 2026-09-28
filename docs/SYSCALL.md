@@ -68,9 +68,11 @@ The rule the fix implements: `fork` copies the caller's FP state, and
 registers zeroed.
 
 `FMASK` (DESIGN §7.2) clears `TF`, `IF`, `DF`, `IOPL`, `NT`, and `AC` on
-entry. The fast path is `sysretq`. The exit takes `iretq` when the saved
-RIP is non-canonical or `RF` or `VM` is set in RFLAGS; a spawned or forked process's
-first entry also uses `iretq` (`enter_user_full`).
+entry. The fast path is `sysretq`. The exit takes `iretq` when `RF` or `VM`
+is set in RFLAGS; a spawned or forked process's first entry also uses
+`iretq` (`enter_user_full`). A fault on either `iretq` (a `#GP`, `#NP`, or
+`#SS` whose RIP is the labeled instruction) kills the process with
+`SIGSEGV`, and never halts the kernel (DESIGN §5.10 rule 2).
 
 The rule ROADMAP §10.6 implements (DESIGN §5.10): every entry from ring 3
 saves a complete user frame, in the order of Linux's `user_regs_struct`, and
@@ -101,12 +103,12 @@ ROADMAP §10.6 moves the return value and the `iretq` frame into the thread's
 user frame, which leaves the per-CPU scratch holding only the user RSP
 between `syscall` and the stack switch.
 
-A non-canonical saved RIP reaches `iretq`, which raises `#GP` at CPL 0
-after `swapgs` has loaded the user GS base; on KVM and hardware the kernel
-then hangs or triple-faults (TCG skips the canonical check). A `syscall` in
-the last two bytes of a mapping that ends at `USER_END` produces that RIP
-(F007; ROADMAP §10.6 keeps the top user page unmapped and sends a
-non-canonical RIP to `SIGSEGV`).
+The top user page is never mapped: user mappings end at `USER_MAP_END`
+(`0x0000_7FFF_FFFF_F000`), and `execve` of an image with a segment above it
+fails with `ENOEXEC`, so a `syscall` in the last mappable page returns to a
+canonical RIP. A saved RIP that is non-canonical anyway reaches neither
+`sysretq` nor `iretq`: after its `cli` the exit tests it and kills the
+process with `SIGSEGV` on the kernel GS, before any `swapgs`.
 
 ---
 

@@ -1607,7 +1607,7 @@ adopting it re-plans this table. Kernel regions are fixed, not discovered, excep
 
 | Range | Size | Role |
 |-------|------|------|
-| `0x0000_0000_0000_0000` – `0x0000_7FFF_FFFF_FFFF` | 128 TiB | User address space, one PML4 per process (`AddressSpace`), below `USER_END`. Page 0 is never mapped (`NULL_GUARD_LEN`). The top 4 KiB page is mappable, so a `syscall` in its last two bytes leaves RCX non-canonical (`0x0000_8000_0000_0000`), and on KVM and hardware the exit `iretq` raises `#GP` on the user GS base (ROADMAP §10.6, F007). Each user PML4 copies the kernel's PML4[256..512) at creation, so the whole kernel half stays mapped, supervisor-only, while ring 3 runs: no KPTI (ROADMAP §18.3, F024, F133). |
+| `0x0000_0000_0000_0000` – `0x0000_7FFF_FFFF_FFFF` | 128 TiB | User address space, one PML4 per process (`AddressSpace`), below `USER_END`. Page 0 is never mapped (`NULL_GUARD_LEN`). The top 4 KiB page is never mapped either: user mappings end at `USER_MAP_END` (`0x0000_7FFF_FFFF_F000`), which the ELF loader and every address-space range check use, so a `syscall` in the last mappable page returns to a canonical RIP. The syscall exit still sends a non-canonical saved RIP to `SIGSEGV` (§5.10 rule 2). Each user PML4 copies the kernel's PML4[256..512) at creation, so the whole kernel half stays mapped, supervisor-only, while ring 3 runs: no KPTI (ROADMAP §18.3, F024, F133). |
 | `0x0000_0000_0000_0000` – `0x0000_0000_2000_0000` | 512 MiB | Low identity window, kernel PML4 only (user PML4s do not copy slot 0). 2 MiB pages, GLOBAL; the first 2 MiB supervisor writable and executable. |
 | *hole* | | Non-canonical. Any pointer here is a bug. |
 | Limine's HHDM offset +, inside the slot `0xFFFF_8000_0000_0000` – `0xFFFF_C000_0000_0000` | 64 TiB slot; today `map_end` ≤ 8 GiB, plus leaves added above it | Physmap, `virt = phys + ` the HHDM offset, discovered at boot (below the table); today the constant `HHDM_BASE`, which `boot::capture` asserts Limine's offset equals. 2 MiB pages up to `map_end`. Above it: 4 KiB leaves from `acpi_init::map_gap` (no cap), and write-back leaves for a display BAR0 from `paging_init::ensure_physmap_wb` (below `PHYSMAP_CAP`). The physmap never leaves its slot (below the table). |
@@ -2601,8 +2601,8 @@ fault, downstream of it.
 | `0x04`, `0x05`, `0x07`, `0x0A` | `#OF`, `#BR`, `#NM`, `#TS` | dump, halt | `SIGSEGV` | `sig_for_vec` has no row, so one would halt the kernel. Rule; not yet enforced: ROADMAP §10.6 (F005) |
 | `0x06` | `#UD` | dump, halt | `SIGILL` | as the rule |
 | `0x08` | `#DF` | dump on IST, halt | not a ring-3 fault: the Ring 0 column applies | as the rule |
-| `0x0B`, `0x0C` | `#NP`, `#SS` | dump, halt | `SIGBUS`; `SIGSEGV` for a fault on the return-to-user `iretq` (§5.10 rule 2) | the `iretq` case halts. Rule; not yet enforced: ROADMAP §10.6 (F007) |
-| `0x0D` | `#GP` | dump with error code, halt | `SIGSEGV`, including a fault on the return-to-user `iretq` (§5.10 rule 2) | the `iretq` case halts. Rule; not yet enforced: ROADMAP §10.6 (F007) |
+| `0x0B`, `0x0C` | `#NP`, `#SS` | dump, halt | `SIGBUS`; `SIGSEGV` for a fault on the return-to-user `iretq` (§5.10 rule 2) | as the rule |
+| `0x0D` | `#GP` | dump with error code, halt | `SIGSEGV`, including a fault on the return-to-user `iretq` (§5.10 rule 2) | as the rule |
 | `0x0E` | `#PF` | dump with CR2, halt. Planned (ROADMAP §10.6, §12.2): a fault inside a user-memory accessor is handled by that accessor's kind (§5.1) and ends in `EFAULT` or a short count | `SIGSEGV`. Planned (ROADMAP §12.2): a fault on a page that a region reserves is resolved first, and one through a file mapping on a page wholly past EOF, or on a page whose fill fails, gets `SIGBUS`, and so does a store through a shared file mapping whose space reservation fails (§4.3) | as the rule |
 | `0x10` | `#MF` | dump, halt | `SIGFPE` | as the rule |
 | `0x11` | `#AC` | dump, halt | `SIGBUS`, for a misaligned access while ring 3 has set RFLAGS.AC; `CR0.AM` is set on every CPU, as Linux sets it | as the rule |
@@ -2978,10 +2978,15 @@ architectures. Planned (ROADMAP §11.3, §11.6): the aarch64 port does not exist
    exception: a `#GP`, `#NP`, or `#SS` whose saved RIP is a return-to-user `iretq` arrives with the
    kernel CS and the user GS, and its handler swaps GS and sends the process `SIGSEGV`. User
    mappings end at `USER_MAP_END` (`0x0000_7FFF_FFFF_F000`), so a `syscall` in the last user page
-   cannot leave a non-canonical return RIP. Rule; not yet enforced: ROADMAP §10.6 (F007). The
-   syscall exit sends a non-canonical return RIP to `swapgs; iretq`, and on KVM or hardware the
-   `#GP` that `iretq` raises runs on the user GS base and ends in a silent hang or triple fault;
-   TCG skips the canonical check.
+   cannot leave a non-canonical return RIP. Built so: the labeled return-to-user `iretq`s are the
+   syscall slow path's (`vibeos_syscall_iretq`), `vibeos_iret_user_full_iretq`, and the vector
+   exits' (`vibeos_trap_iret`, `vibeos_trap_iret_ist`). The dispatcher runs
+   `idt::user_return_fault` for `#GP`, `#NP`, and `#SS` before anything that reads `gs:`: when
+   the saved RIP is one of those labels and the `iretq` frame at the saved RSP has CS.RPL 3, it
+   loads `GS_BASE` from `KERNEL_GS_BASE` if `GS_BASE` is not a kernel (negative) address, and
+   kills the process with `SIGSEGV`. The syscall exit tests the saved RIP after its `cli` and
+   sends a non-canonical one to `vibeos_syscall_bad_rip`, which kills the process on the kernel
+   GS before any `swapgs`, so it reaches neither `sysretq` nor `iretq`.
 3. An IST vector taken at CPL 0 decides `swapgs` from the sign of `GS_BASE` (`rdmsr`; a kernel base
    is negative), because it can interrupt CPL-0 code that has the user GS loaded (the rows above
    whose GS column says user), and on exit it restores the GS state it found. `#DF` does the same at

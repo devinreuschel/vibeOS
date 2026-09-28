@@ -7,7 +7,7 @@
 
 use crate::paging::{
     FrameAlloc, KERNEL_PML4_FIRST, MapError, MapMode, Mapper, NULL_GUARD_LEN, PAGE_SIZE_4K,
-    PTES_PER_TABLE, PageFlags, PageSize, PhysAddr, Probe, USER_END, VirtAddr, is_canonical,
+    PTES_PER_TABLE, PageFlags, PageSize, PhysAddr, Probe, USER_MAP_END, VirtAddr, is_canonical,
     user_leaf_flags,
 };
 use crate::pmm::Frames;
@@ -286,7 +286,7 @@ impl AddressSpace {
             if !is_canonical(ptr) {
                 return Err(UserMemError::NonCanonical);
             }
-            if ptr >= USER_END {
+            if ptr >= USER_MAP_END {
                 return Err(UserMemError::Kernel);
             }
             return Ok(());
@@ -295,7 +295,7 @@ impl AddressSpace {
         if !is_canonical(ptr) || !is_canonical(end.wrapping_sub(1)) {
             return Err(UserMemError::NonCanonical);
         }
-        if ptr >= USER_END || end > USER_END {
+        if ptr >= USER_MAP_END || end > USER_MAP_END {
             return Err(UserMemError::Kernel);
         }
         if ptr < NULL_GUARD_LEN {
@@ -424,7 +424,7 @@ fn check_map_range(va: u64, len: u64) -> Result<(), AsError> {
     if va < NULL_GUARD_LEN {
         return Err(AsError::NullGuard);
     }
-    if va >= USER_END || end > USER_END {
+    if va >= USER_MAP_END || end > USER_MAP_END {
         return Err(AsError::KernelRange);
     }
     if !is_canonical(va) || !is_canonical(end - 1) {
@@ -554,6 +554,23 @@ mod tests {
     }
 
     #[test]
+    fn top_page_is_not_mappable() {
+        let mut pool = Pool::new(64);
+        let kernel = kernel_mapper(&mut pool);
+        let mut aspace = unsafe { AddressSpace::new(&kernel, &mut pool) }.unwrap();
+        assert_eq!(
+            unsafe { aspace.map_anon(USER_MAP_END, PAGE_SIZE_4K, UserPerms::RW, &mut pool) },
+            Err(AsError::KernelRange)
+        );
+        let below = USER_MAP_END - PAGE_SIZE_4K;
+        assert!(unsafe { aspace.map_anon(below, PAGE_SIZE_4K, UserPerms::RW, &mut pool) }.is_ok());
+        assert!(aspace.check_user_range(below, PAGE_SIZE_4K).is_ok());
+        assert!(aspace.check_user_range(USER_MAP_END, 1).is_err());
+        assert!(aspace.check_user_range(below, PAGE_SIZE_4K + 1).is_err());
+        unsafe { aspace.teardown_pool(&mut pool) };
+    }
+
+    #[test]
     fn null_guard_and_kernel_rejected() {
         let mut pool = Pool::new(64);
         let kernel = kernel_mapper(&mut pool);
@@ -564,7 +581,14 @@ mod tests {
             Err(AsError::NullGuard)
         );
         assert_eq!(
-            unsafe { aspace.map_anon(USER_END, PAGE_SIZE_4K, UserPerms::RW, &mut pool) },
+            unsafe {
+                aspace.map_anon(
+                    crate::paging::USER_END,
+                    PAGE_SIZE_4K,
+                    UserPerms::RW,
+                    &mut pool,
+                )
+            },
             Err(AsError::KernelRange)
         );
         assert_eq!(

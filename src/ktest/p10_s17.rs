@@ -2,20 +2,28 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use vibeos::elf::ElfError;
 use vibeos::kbd::DecodedKey;
+use vibeos::paging::{PAGE_SIZE_4K, USER_MAP_END};
+use vibeos::proc::{SIGSEGV, wait_signaled};
+use vibeos::syscall::SYS_GETPID;
 use vibeos::vectors;
 
-use super::user::{self, DEFAULT, Image, user_code};
+use super::user::{self, DEFAULT, Image, Layout, user_code};
 use super::{Outcome, Test, test};
 use crate::apic_init;
 use crate::console_init;
 use crate::kbd_init;
+use crate::syscall_init::testing as sc_testing;
 use crate::thread_init;
 use crate::time_init;
+use crate::user_init::LoadError;
 
 pub(super) const TESTS: &[Test] = &[
     test("console_read_exit", test_console_read_exit).deadline(30_000),
     test("user_entry_irq", test_user_entry_irq).deadline(120_000),
+    test("exec_top_page_enoexec", test_exec_top_page_enoexec).deadline(30_000),
+    test("noncanonical_rip_sigsegv", test_noncanonical_rip_sigsegv).deadline(30_000),
 ];
 
 /// Sleep until `pred` holds, for at most `ms`.
@@ -170,6 +178,99 @@ fn test_user_entry_irq() -> Outcome {
     }
     if st != 0 {
         return crate::fail_fmt!("status {st:#x}, want 0");
+    }
+    Outcome::Ok
+}
+
+// getpid, then a jmp to a `syscall` in the page's last two bytes, whose
+// return RIP is the first byte past the page.
+user_code!(
+    SYSCALL_AT_PAGE_END,
+    "
+    mov eax, 39
+    jmp 1f
+    .org vibeos_user_code_SYSCALL_AT_PAGE_END + 4094, 0xcc
+1:
+    syscall
+    "
+);
+
+/// An image whose last page is the one below `USER_END` does not load:
+/// its `syscall` would return to a non-canonical RIP. The same code one
+/// page lower loads, and its `syscall` returns to the unmapped top page.
+fn test_exec_top_page_enoexec() -> Outcome {
+    let at = |vaddr| Image::Code(SYSCALL_AT_PAGE_END, Layout { vaddr, ..DEFAULT });
+    match user::spawn(&at(USER_MAP_END), &["top_page"]) {
+        Err(LoadError::Elf(ElfError::KernelVa)) => {}
+        Err(e) => return crate::fail_fmt!("top page: {}, want kernel va", e.as_str()),
+        Ok(pid) => {
+            let st = user::wait(pid);
+            return crate::fail_fmt!("top page loaded, status {st:#x}");
+        }
+    }
+    let st = match user::run(&at(USER_MAP_END - PAGE_SIZE_4K), &["below_top"]) {
+        Ok(st) => st,
+        Err(e) => return crate::fail_fmt!("page below: spawn: {}", e.as_str()),
+    };
+    if st != wait_signaled(SIGSEGV) {
+        return crate::fail_fmt!("page below: status {st:#x}, want SIGSEGV");
+    }
+    Outcome::Ok
+}
+
+// getpid, then exit(0).
+user_code!(
+    GETPID_EXIT0,
+    "
+    mov eax, 39
+    syscall
+    xor edi, edi
+    mov eax, 60
+    syscall
+    ud2
+    "
+);
+
+// exit(0).
+user_code!(
+    EXIT0,
+    "
+    xor edi, edi
+    mov eax, 60
+    syscall
+    ud2
+    "
+);
+
+/// A syscall whose saved RIP a hook makes non-canonical kills the process
+/// with `SIGSEGV` on the exit's own path, before `swapgs`; a process whose
+/// first entry `iretq`s to a non-canonical RIP gets `SIGSEGV` too (on KVM
+/// from the labeled `iretq`'s `#GP`, on TCG from the fetch).
+fn test_noncanonical_rip_sigsegv() -> Outcome {
+    let kills = sc_testing::bad_rip_kills();
+    sc_testing::arm_noncanonical_rip(SYS_GETPID);
+    let st = user::run(&Image::Code(GETPID_EXIT0, DEFAULT), &["bad_rip_exit"]);
+    sc_testing::disarm_noncanonical();
+    let st = match st {
+        Ok(st) => st,
+        Err(e) => return crate::fail_fmt!("exit case: spawn: {}", e.as_str()),
+    };
+    if st != wait_signaled(SIGSEGV) {
+        return crate::fail_fmt!("exit case: status {st:#x}, want SIGSEGV");
+    }
+    let got = sc_testing::bad_rip_kills().wrapping_sub(kills);
+    if got != 1 {
+        return crate::fail_fmt!("exit case: {got} bad-RIP kills, want 1");
+    }
+    sc_testing::arm_noncanonical_entry();
+    let st = user::run(&Image::Code(EXIT0, DEFAULT), &["bad_rip_entry"]);
+    sc_testing::disarm_noncanonical();
+    let st = match st {
+        Ok(st) => st,
+        Err(e) => return crate::fail_fmt!("entry case: spawn: {}", e.as_str()),
+    };
+    if st != wait_signaled(SIGSEGV) {
+        return crate::fail_fmt!("entry case: status {st:#x}, want SIGSEGV");
     }
     Outcome::Ok
 }

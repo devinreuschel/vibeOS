@@ -458,6 +458,11 @@ unsafe extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
     // by `arch::idt::vibeos_trap_entry` and `arch::idt::vibeos_trap_entry_ist`.
     let frame = unsafe { &mut *frame };
     let v = frame.vector as u8;
+    // Before anything that reads `gs:`, `catch::intercept` included: a
+    // fault on a return-to-user `iretq` arrives on the user GS.
+    if matches!(v, vectors::NP | vectors::SS | vectors::GP) {
+        user_return_fault(frame);
+    }
     if !pre_body(frame, v) {
         let p = BODIES[v as usize].load(Ordering::Acquire);
         if p == 0 {
@@ -482,6 +487,60 @@ fn pre_body(frame: &mut TrapFrame, v: u8) -> bool {
         return true;
     }
     v < 32 && catch::intercept(frame)
+}
+
+// Labels on the `iretq` instructions that return to ring 3.
+unsafe extern "C" {
+    static vibeos_syscall_iretq: u8;
+    static vibeos_iret_user_full_iretq: u8;
+    static vibeos_trap_iret: u8;
+    static vibeos_trap_iret_ist: u8;
+}
+
+/// Whether `rip` is one of the labeled `iretq` instructions that return
+/// to ring 3: the syscall slow path, `vibeos_iret_user_full`, and both
+/// vector exits.
+fn is_user_return_iretq(rip: u64) -> bool {
+    [
+        (&raw const vibeos_syscall_iretq) as u64,
+        (&raw const vibeos_iret_user_full_iretq) as u64,
+        (&raw const vibeos_trap_iret) as u64,
+        (&raw const vibeos_trap_iret_ist) as u64,
+    ]
+    .contains(&rip)
+}
+
+/// A `#GP`, `#NP`, or `#SS` raised by a return-to-user `iretq` (a
+/// non-canonical RIP, a bad selector) arrives with the kernel CS and,
+/// after the exit's `swapgs`, the user GS base. Move to the kernel GS if
+/// `GS_BASE` is not a kernel (negative) address, then kill the process
+/// with `SIGSEGV` whatever the vector (DESIGN §5.2, §5.10 rule 2). Returns
+/// when the fault is anything else.
+fn user_return_fault(frame: &TrapFrame) {
+    if gs::from_user(frame.iret.cs) || !is_user_return_iretq(frame.iret.rip) {
+        return;
+    }
+    // SAFETY: invariant: a CPL-0 fault whose RIP is a labeled user-return
+    // `iretq` left RSP at that `iretq`'s five-word frame on this CPU's
+    // kernel stack; established by the `global_asm!` in `syscall_init`
+    // and `arch::idt` that places each label.
+    let user = unsafe { ptr::read(frame.iret.rsp as *const InterruptFrame) };
+    if !gs::from_user(user.cs) {
+        return;
+    }
+    if (x86::rdmsr(x86::IA32_GS_BASE) as i64) >= 0 {
+        // The exit's `swapgs` left this CPU's `PerCpu` in KERNEL_GS_BASE.
+        // SAFETY: invariant: KERNEL_GS_BASE holds this CPU's `PerCpu`
+        // from the exit's `swapgs` (or `vibeos_iret_user_full`'s write)
+        // until `iretq` completes; established by `syscall_init`'s exits
+        // and `arch::idt::vibeos_trap_entry`.
+        unsafe { x86::wrmsr(x86::IA32_GS_BASE, x86::rdmsr(x86::IA32_KERNEL_GS_BASE)) };
+    }
+    crate::proc_init::try_user_fault(vectors::GP, &user, frame.error_code, None);
+    panic!(
+        "idt: user-return iretq fault with no process, rip={:#x}",
+        user.rip
+    );
 }
 
 /// The last step before the stub's exit for a frame whose saved CS.RPL is
