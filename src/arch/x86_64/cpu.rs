@@ -552,7 +552,6 @@ pub fn interrupts_enabled() -> bool {
     rflags() & (1 << 9) != 0
 }
 
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Features {
     pub smep: bool,

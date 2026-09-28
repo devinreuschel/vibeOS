@@ -26,7 +26,7 @@
 
 extern crate alloc;
 
-mod acpi_init;
+mod acpi;
 mod addr_space_init;
 mod arch;
 mod block_init;
@@ -42,8 +42,7 @@ mod fat_init;
 mod fb_init;
 mod file_init;
 mod fs_init;
-mod ipi_init;
-mod irq_init;
+mod irq;
 mod kbd_init;
 mod ksyms;
 mod log_init;
@@ -51,16 +50,15 @@ mod mm;
 mod panic;
 mod part_init;
 mod pci_init;
-mod per_cpu_init;
 mod proc_init;
 mod sched_init;
 mod serial;
 mod shell_init;
-mod smp_init;
+mod smp;
 mod sync_init;
 mod syscall_init;
 mod thread_init;
-mod time_init;
+mod time;
 mod user_init;
 mod vibefs_init;
 mod virtio_blk_init;
@@ -70,8 +68,12 @@ mod work_init;
 #[cfg(feature = "kernel_tests")]
 mod ktest;
 
+use acpi::acpi_init;
 use arch::x86_64::{apic_init, cpu as x86};
+use irq::{ipi_init, irq_init};
 use mm::{heap_init, kva_init, paging_init, pmm_init};
+use smp::{per_cpu_init, smp_init};
+use time::time_init;
 
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 

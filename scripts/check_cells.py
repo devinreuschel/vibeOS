@@ -29,7 +29,7 @@ MUST_BE_UNSAFE: list[tuple[str, str]] = [
     ("src/log_init.rs", "force_unlock"),
     ("src/log_init.rs", "with_logger_unlocked"),
     ("src/log_init.rs", "dump_tail"),
-    ("src/per_cpu_init.rs", "with_cpu"),
+    ("src/smp/per_cpu_init.rs", "with_cpu"),
     ("src/addr_space_init.rs", "load_cr3_u64"),
     ("src/syscall_init.rs", "switch_cr3_for"),
 ]

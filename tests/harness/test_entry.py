@@ -18,9 +18,9 @@ FEATURE = "#![no_std]\n#![feature(abi_x86_interrupt)]\n"
 
 class TestOutsideArch(unittest.TestCase):
     def test_handler_in_src_is_reported(self) -> None:
-        errs = x86_interrupt_outside_arch({"src/irq_init.rs": "fn a() {}\n" + HANDLER})
+        errs = x86_interrupt_outside_arch({"src/irq/irq_init.rs": "fn a() {}\n" + HANDLER})
         self.assertEqual(len(errs), 1)
-        self.assertTrue(errs[0].startswith("src/irq_init.rs:2: "), errs[0])
+        self.assertTrue(errs[0].startswith("src/irq/irq_init.rs:2: "), errs[0])
 
     def test_handler_under_crates_user_and_tests_is_reported(self) -> None:
         files = {"crates/x/src/lib.rs": HANDLER, "user/bin/y.rs": HANDLER,
@@ -84,12 +84,12 @@ class TestTree(unittest.TestCase):
 
     def test_planted_handler_fails(self) -> None:
         planted = dict(scoped_files())
-        planted["src/irq_init.rs"] += HANDLER
+        planted["src/irq/irq_init.rs"] += HANDLER
         err = io.StringIO()
         with mock.patch.object(check_entry, "scoped_files", return_value=planted), \
                 contextlib.redirect_stderr(err):
             self.assertEqual(check_entry.main([]), 1)
-        self.assertIn("src/irq_init.rs:", err.getvalue())
+        self.assertIn("src/irq/irq_init.rs:", err.getvalue())
 
     def test_usage(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()):
