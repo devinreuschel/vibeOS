@@ -72,39 +72,40 @@ The rule the fix implements: `fork` copies the caller's FP state, and
 registers zeroed.
 
 `FMASK` (DESIGN §7.2) clears `TF`, `IF`, `DF`, `IOPL`, `NT`, and `AC` on
-entry. The fast path is `sysretq`. The exit takes `iretq` when `RF` or `VM`
-is set in RFLAGS; a spawned or forked process's first entry also uses
-`iretq` (`enter_user_full`). A fault on either `iretq` (a `#GP`, `#NP`, or
+entry. The entry saves the user frame, the 21 words of Linux's
+`user_regs_struct` (`vibeos::syscall::UserFrame`), at the top of the
+thread's kernel stack: RCX in both the `rcx` and `rip` slots, R11 in both
+`r11` and `rflags`, the syscall number in `orig_rax`, `-ENOSYS` in the `rax`
+slot (as Linux shows at a syscall-entry stop), the user selectors in `cs`
+and `ss`, and the user RSP, which it copies out of the per-CPU scratch, in
+`rsp`. The exit stores the return value in the `rax` slot and uses
+`sysretq` only when the saved RIP equals the saved RCX, the saved RFLAGS
+equals the saved R11, CS and SS are the user selectors, RIP is below
+`USER_MAP_END`, and RF, TF, and VM are clear
+(`vibeos::trap::x86_64::sysret_ok`); otherwise it restores all 15 GPRs from
+the frame and uses `iretq` on the frame's tail, as Linux does, so a hook or
+a later `execve` that changes RCX or R11 returns them intact. A
+spawned or forked process's first entry is the same exit over the frame its
+creator wrote (`syscall_init::first_return`, DESIGN §5.10 rule 4). A fault on either `iretq` (a `#GP`, `#NP`, or
 `#SS` whose RIP is the labeled instruction) kills the process with
-`SIGSEGV`, and never halts the kernel (DESIGN §5.10 rule 2).
-
-The rule ROADMAP §10.6 implements (DESIGN §5.10): every entry from ring 3
-saves a complete user frame, in the order of Linux's `user_regs_struct`, and
-the syscall exit uses `sysretq` only when the saved RIP equals the saved
-RCX, the saved RFLAGS equals the saved R11, CS and SS are the user
-selectors, RIP is below `USER_MAP_END`, and RF, TF, and VM are clear;
-otherwise it restores every register from the frame and uses `iretq`, as
-Linux does. A restartable syscall resumes by reloading `rax` from `orig_rax`
-and moving RIP back 2 bytes. Today the frame keeps RIP and RFLAGS only in
-the RCX and R11 slots, so a context whose RCX and R11 differ from them
-cannot be returned to.
+`SIGSEGV`, and never halts the kernel (DESIGN §5.10 rule 2). A restartable
+syscall resumes by reloading `rax` from `orig_rax` and moving RIP back 2
+bytes (`SyscallAbi::restart`).
 
 The body runs with IF=1 (DESIGN §2.9 rule 3): the entry stub moves the user
 RSP out of the per-CPU scratch into its frame and then runs `sti`.
 
 From the return of `vibeos_syscall_stub` to `sysretq` or `iretq`, the exit
-path runs with IF=0: it stores the return value in `gs:[retval]`, stages the
-`iretq` frame in `gs:[iret_*]`, and loads the user RSP before `swapgs`, so
-an interrupt there could let another thread's syscall on this CPU overwrite
-the scratch, or push its frame on the user stack at CPL 0. The exit's first
-instruction after the call is `cli`, whatever IF the body returned with,
-and in debug builds each exit path checks IF before its `swapgs` (on the
-`sysretq` path before it loads the user RSP) and faults at
+path runs with IF=0: it stores the return value in the frame's `rax` slot,
+reads everything it restores from the frame, and loads the user RSP before
+`swapgs`, so an interrupt there could push its frame on the user stack at
+CPL 0. No exit instruction writes a `gs:` operand; the per-CPU scratch
+holds only the user RSP, between `syscall` and the entry's stack switch.
+The exit's first instruction after the call is `cli`, whatever IF the body
+returned with, and in debug builds each exit path checks IF before its
+`swapgs` (on the `sysretq` path before it loads the user RSP) and faults at
 `vibeos_exit_if_set`, a `ud2`, if IF is set. `console_init::wait_key`, which
 a console `read` blocks in, returns with the IF it was entered with.
-ROADMAP §10.6 moves the return value and the `iretq` frame into the thread's
-user frame, which leaves the per-CPU scratch holding only the user RSP
-between `syscall` and the stack switch.
 
 The top user page is never mapped: user mappings end at `USER_MAP_END`
 (`0x0000_7FFF_FFFF_F000`), and `execve` of an image with a segment above it
@@ -416,15 +417,12 @@ program itself is a process kill (DESIGN §5.2 CPL split), not `EFAULT`.
 §2.5 for ring-3 exceptions, AGENTS.md rule 4 for syscall paths). The code
 does not meet this yet:
 
-- ring-3 `#DB` (from `RFLAGS.TF` or `INT1`) halts every CPU (F005; ROADMAP
-  §10.6)
 - a device or keyboard interrupt taken in ring 3 runs with the user GS
   base and halts (F004; ROADMAP §10.6)
 - the exit-path faults in §1 (F001, F007; ROADMAP §10.6)
-- a forked or spawned process's first ring-3 entry, `enter_user_full`,
-  runs with IF=1, so an interrupt between its `mov gs` and its `iretq`
+- a forked or spawned process's first ring-3 entry,
+  `syscall_init::first_return`, runs with IF=1, so an interrupt between its `mov gs` and its `iretq`
   reads `gs:[0]` at VA 0 at CPL 0 and halts (F006; ROADMAP §10.6)
-- an ELF with a huge `p_memsz` (§3.1; F009, ROADMAP §10.6)
 - a `fork` near memory exhaustion (§2.1; F010, ROADMAP §10.10)
 
 ---

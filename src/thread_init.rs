@@ -19,6 +19,7 @@ use vibeos::kalloc::TryBox;
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::lock::RANK_SCHED;
 use vibeos::sched::{SWEEP_TICKS, TimeoutQueue, effective_deadline, enqueue_runnable, take_next};
+use vibeos::syscall::UserFrame;
 use vibeos::thread::{
     CpuAffinity, CpuContext, MAX_THREADS, Tcb, ThreadId, ThreadState, WaitOutcome,
     apply_if_on_resume, prepare_thread, switch_context,
@@ -696,14 +697,18 @@ pub(crate) fn spawn_idle(entry: fn()) -> Result<ThreadHandle, SpawnError> {
     )
 }
 
-/// User process thread. Not runnable until [`make_ready`].
+/// User process thread. Not runnable until [`make_ready`]. `frame` is
+/// the user frame its first return to ring 3 leaves from (DESIGN §5.10):
+/// it goes at the top of the new stack, and the switch context starts
+/// below it, so `entry` ends in `syscall_init::first_return`.
 pub fn spawn_user(
     name: &'static str,
     entry: fn(),
     pid: u32,
     cr3: u64,
+    frame: &UserFrame,
 ) -> Result<ThreadHandle, SpawnError> {
-    spawn_inner(
+    let h = spawn_inner(
         name,
         entry,
         CpuAffinity::Pinned(current_cpu()),
@@ -712,8 +717,33 @@ pub fn spawn_user(
         pid,
         cr3,
         DEFAULT_STACK_PAGES,
-    )
+    )?;
+    let tramp = trampoline as *const () as u64;
+    with_sched(|s| {
+        let tcb = s.get_mut(h.id());
+        let top = tcb
+            .as_ref()
+            .and_then(|t| t.stack.as_ref())
+            .map(|st| st.top().as_u64());
+        let (Some(tcb), Some(top)) = (tcb, top) else {
+            panic!("spawn_user: thread {} has no stack", h.id().0);
+        };
+        let at = top - USER_FRAME_BYTES as u64;
+        // SAFETY: invariant I25: `[top - 168, top)` is the user frame of
+        // this thread's own kernel stack, mapped and unused: the thread is
+        // not runnable before `make_ready`, and nothing else refers to its
+        // stack; established by `thread_init::spawn_inner`.
+        unsafe { (at as *mut UserFrame).write(*frame) };
+        // The pad word below the frame, as the syscall entry leaves it.
+        prepare_thread(&mut tcb.context, at - 8, tramp);
+        // SAFETY: invariant: `context.rsp` is 8 bytes below the pad word,
+        // inside this thread's unused stack; established here.
+        unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
+    });
+    Ok(h)
 }
+
+const USER_FRAME_BYTES: usize = core::mem::size_of::<UserFrame>();
 
 pub fn make_ready(id: ThreadId) {
     with_sched(|s| {

@@ -140,11 +140,6 @@ pub struct PerCpu {
     pub slice_tsc: u64,
     pub switch_scratch: CpuContext,
     pub timer_mode: TimerMode,
-    /// Syscall entry and exit scratch, per CPU and valid only while IF=0:
-    /// the user RSP, the syscall return value, and the `iretq` frame
-    /// (DESIGN §7.5). `KERNEL_GS_BASE` holds `PerCpu` while CPL=3; see
-    /// `arch::gs`.
-    pub syscall_scratch: [u64; 6],
     /// Local ready FIFO. Owner CPU only, IRQs off. DESIGN §7.8.
     pub runq: ReadyQueue,
     /// Kernel stack top used by `syscall` and written into TSS.RSP0.
@@ -172,6 +167,11 @@ pub struct PerCpu {
     /// last held, `fpu::NO_OWNER` for none (DESIGN §7.5, the FP binding).
     /// Compared, never dereferenced.
     pub fp_owner: usize,
+    /// The user RSP between `syscall` and the entry's stack switch, which
+    /// copies it into the user frame; valid only while IF=0 (DESIGN §7.5).
+    /// No exit writes it. `KERNEL_GS_BASE` holds `PerCpu` while CPL=3; see
+    /// `arch::gs`.
+    pub syscall_scratch: u64,
     /// This CPU's view in `per_cpu_init`'s separate array, the only
     /// per-CPU state another CPU reads.
     pub remote: &'static PerCpuRemote,
@@ -205,7 +205,6 @@ impl PerCpu {
             slice_tsc: 0,
             switch_scratch: CpuContext::empty(),
             timer_mode: TimerMode::Pit,
-            syscall_scratch: [0; 6],
             runq: ReadyQueue::empty(),
             kernel_rsp0: 0,
             tss: core::ptr::null_mut(),
@@ -215,6 +214,7 @@ impl PerCpu {
             stack_cache: StackCache::new(),
             dead_list: 0,
             fp_owner: crate::fpu::NO_OWNER,
+            syscall_scratch: 0,
             remote,
         }
     }
@@ -265,7 +265,7 @@ mod tests {
         assert!(p.runq.is_empty());
         assert_eq!(p.timer_mode, TimerMode::Pit);
         assert!(core::ptr::eq(p.remote, &R));
-        assert_eq!(p.syscall_scratch, [0; 6]);
+        assert_eq!(p.syscall_scratch, 0);
         assert!(p.tss.is_null());
         assert_eq!(p.kernel_rsp0, 0);
         assert_eq!(p.remote.as_cr3.load(Ordering::Relaxed), 0);
@@ -277,6 +277,8 @@ mod tests {
         // remote view (C-PERCPU layout).
         assert!(offset_of!(PerCpu, tail_prev) > offset_of!(PerCpu, fallback_rsp0));
         assert!(offset_of!(PerCpu, dead_list) < offset_of!(PerCpu, remote));
+        assert!(offset_of!(PerCpu, syscall_scratch) > offset_of!(PerCpu, fp_owner));
+        assert!(offset_of!(PerCpu, syscall_scratch) < offset_of!(PerCpu, remote));
     }
 
     /// A stack handle over a range nothing maps, with no frames, so the

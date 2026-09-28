@@ -1,4 +1,4 @@
-//! In-guest tests of P10-S17, Syscall exit IF=0, enter_user_full, USER_MAP_END and the FP binding (DESIGN §8.2).
+//! In-guest tests of P10-S17, Syscall exit IF=0, syscall_init::first_return, USER_MAP_END and the FP binding (DESIGN §8.2).
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -154,7 +154,7 @@ fn entry_ipi_sender() {
     ENTRY_SENDER_DONE.store(true, Ordering::Release);
 }
 
-/// Forked processes enter ring 3 through `enter_user_full` on CPU 0 while
+/// Forked processes enter ring 3 through `syscall_init::first_return` on CPU 0 while
 /// another CPU keeps sending it reschedule IPIs; an interrupt taken there
 /// with the user GS loaded halts the kernel, and the debug-build check
 /// before the selector loads faults if IF is set.

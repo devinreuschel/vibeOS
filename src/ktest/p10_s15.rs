@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::addr_space::UserPerms;
 use vibeos::paging::PAGE_SIZE_4K;
-use vibeos::proc::{SIGBUS, SIGFPE, SIGILL, SIGKILL, SIGTRAP, wait_signaled};
+use vibeos::proc::{SIGBUS, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGTRAP, wait_signaled};
 use vibeos::syscall::SYS_KILL;
 use vibeos::vectors;
 
@@ -390,9 +390,8 @@ fn test_ist_gs_sign() -> Outcome {
         Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
     };
     // Arm once the child has taken an interrupt in ring 3, so it is past
-    // `enter_user_full`: with breakpoints armed, TCG takes interrupts at
-    // every instruction, which widens that function's IF=1 window with the
-    // user GS base loaded (F006, ROADMAP §10.6).
+    // its first return (`syscall_init::first_return`), whose selector and
+    // MSR block this test does not cover.
     let in_ring3 = wait_until(|| cpl3_total() != cpl3_before, 5_000);
     if in_ring3 {
         testing::set_hook(vectors::DB, Some(db_hook));
@@ -501,7 +500,74 @@ user_code!(
     "
 );
 
+// Divide by zero.
+user_code!(
+    USER_DE,
+    "
+    xor edx, edx
+    xor ecx, ecx
+    div ecx
+    mov eax, 60
+    xor edi, edi
+    syscall
+    "
+);
+
+user_code!(
+    USER_UD,
+    "
+    ud2
+    "
+);
+
+// cli at CPL 3 (IOPL 0): #GP.
+user_code!(
+    USER_GP,
+    "
+    cli
+    mov eax, 60
+    xor edi, edi
+    syscall
+    "
+);
+
+// A load from a user page nothing maps.
+user_code!(
+    USER_PF,
+    "
+    mov eax, 0x70000000
+    mov rax, qword ptr [rax]
+    mov eax, 60
+    xor edi, edi
+    syscall
+    "
+);
+
 const EXC_CASES: &[ExcCase] = &[
+    ExcCase {
+        name: "de",
+        code: USER_DE,
+        sig: SIGFPE,
+        kvm_only: false,
+    },
+    ExcCase {
+        name: "ud",
+        code: USER_UD,
+        sig: SIGILL,
+        kvm_only: false,
+    },
+    ExcCase {
+        name: "gp",
+        code: USER_GP,
+        sig: SIGSEGV,
+        kvm_only: false,
+    },
+    ExcCase {
+        name: "pf",
+        code: USER_PF,
+        sig: SIGSEGV,
+        kvm_only: false,
+    },
     ExcCase {
         name: "int3",
         code: USER_INT3,
@@ -667,9 +733,8 @@ fn user_irqs(vecs: &[u8]) -> Outcome {
     let Ok(pid) = u32::try_from(IRQ_CHILD.load(Ordering::Relaxed)) else {
         return Outcome::Fail("spawn");
     };
-    // Send only once the child has taken an interrupt in ring 3: an IPI
-    // inside `enter_user_full`'s IF=1 window runs on the user GS base
-    // (F006, ROADMAP §10.6), which this test does not cover.
+    // Send only once the child has taken an interrupt in ring 3: its first
+    // return (`syscall_init::first_return`) is `user_entry_irq`'s to cover.
     let in_ring3 = sleep_until(|| cpl3_total() != cpl3_before, 5_000);
     if in_ring3 {
         for (i, &v) in vecs.iter().enumerate().take(IRQ_VECS.len()) {
