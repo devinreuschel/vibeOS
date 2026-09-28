@@ -82,7 +82,7 @@ These are not style preferences. They shape every subsystem.
    MSRV (§3.1), the oldest Rust that Kani (ROADMAP §10.8) and Verus (Phase 38) use: each pins its
    own toolchain, older than the kernel's nightly, and must build the code the kernel links. Nightly
    features stay in the kernel binary. `scripts/check_core_stable.py` in `make check` finds no
-   feature attribute in `src/lib.rs`. Rule; not yet enforced: nothing builds the crate with its
+   feature attribute in `crates/core/src/lib.rs`. Rule; not yet enforced: nothing builds the crate with its
    MSRV, which would reject a feature attribute however it is formatted and any API or syntax newer
    than the MSRV (ROADMAP §10.1).
 

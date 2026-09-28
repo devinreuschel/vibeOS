@@ -105,7 +105,7 @@ its real-mode trampoline from memory below 1 MiB at boot. Rule; not yet enforced
 `smp` each define `0x8000`, and `smp_init` copies the blob there without reading the memory map,
 which types that page bootloader-reclaimable under SeaBIOS (ROADMAP §10.6).
 
-The trampoline is `src/arch/trampoline.S`, assembled with `global_asm!` into `.trampoline` (inside
+The trampoline is `src/arch/x86_64/trampoline.S`, assembled with `global_asm!` into `.trampoline` (inside
 `__rodata_start..__rodata_end` so the kernel map covers the copy source) and copied to the chosen
 page. It goes: real mode, set up a GDT, enable protected mode, load CR3 from the param block, set
 `EFER.LME` and `EFER.NXE`, enable paging, long jump to 64-bit, load the stack, call the Rust entry
@@ -203,7 +203,7 @@ is never read through it: `arch::current_tcb()` loads `current` with one `gs`-re
 and `arch::cpu_id_hint()` loads `cpu_id` the same way for callers that tolerate a stale id. Rule;
 not yet enforced: ROADMAP §10.3 (F039).
 
-Contents (`src/per_cpu.rs`):
+Contents (`crates/core/src/smp/per_cpu.rs`):
 
 - `self_ptr` and logical CPU id
 - `current`, `idle`, and `idle_id`
@@ -234,7 +234,7 @@ and cap the CPU count at 64: the MADT `apic_ids` array (`acpi::MAX_CPUS`), `irq_
 
 `per_cpu_init::current()` is valid only after the entry path has put the kernel base in `GS_BASE`. The
 `swapgs` instructions are the three in `vibeos_syscall_entry` (entry, `sysretq` exit, `iretq` exit)
-and the entry and exit ones in the `arch/idt.rs` entry paths that every generated stub jumps to
+and the entry and exit ones in the `arch/x86_64/idt.rs` entry paths that every generated stub jumps to
 ([section 5.10](INTERRUPTS.md#510-privilege-transitions) rule 1).
 
 The CS.RPL rule is also wrong wherever CS is the kernel's while `GS_BASE` holds the user base: NMI,

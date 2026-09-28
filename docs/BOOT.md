@@ -246,7 +246,7 @@ budget is what bounds a whole path.
 and UEFI artifacts, then builds a hybrid ISO with `xorriso` and runs `limine bios-install`. Hybrid
 means the same image boots BIOS and UEFI, which matters for real hardware later.
 
-The Makefile lists every `.rs` and `.asm` under `src/` as a prerequisite. A hand-maintained short list
+The Makefile lists every `.rs` and `.asm` under `src/` and `crates/core/src/` as a prerequisite. A hand-maintained short list
 produced stale ISOs when new subsystem directories appeared.
 
 `make run` boots with COM1 on stdio and more than one CPU, so the default developer loop exercises SMP

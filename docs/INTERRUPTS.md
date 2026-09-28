@@ -87,7 +87,7 @@ silent reboot loop.
 
 ## 5.2 IDT and exceptions
 
-One IDT of 256 gates (`arch::idt::IDT`) is shared by every CPU. `arch/idt.rs` generates one entry
+One IDT of 256 gates (`arch::idt::IDT`) is shared by every CPU. `arch/x86_64/idt.rs` generates one entry
 stub per vector from one `const` table, `ROWS`, whose rows give each vector's error-code flag
 (`vectors::pushes_error_code`, read in a `const` context), IST slot, and gate DPL; `idt::init`
 points every gate at its stub. The stub builds an `arch::idt::TrapFrame`: the vector, the error
@@ -500,7 +500,7 @@ architectures. Planned (ROADMAP §11.3, §11.6): the aarch64 port does not exist
 | exception or IRQ taken at the kernel's level | the kernel's level, the interrupted stack, or this CPU's overflow stack when the entry's stack test finds it overflowed ([§11.5](PORTABILITY.md#115-aarch64-exceptions-and-privilege-transitions) rule 6) | all set by the exception; D and A clear once the frame is saved | set by the exception; the interrupted value returns with `SPSR_EL1` | `current`, untouched |
 | return to EL0, from the first write of `ELR_EL1`, `SPSR_EL1`, or `SP_EL0` to `eret` | the kernel's level, then EL0 at `eret` | all set, until `eret` loads EL0's from `SPSR_EL1`; `MDSCR_EL1.SS` set after the last exit-work check, for a thread being stepped only (§7.5) | EL0 does not use it | the user SP, restored from the frame |
 
-1. One entry stub per vector, owned by `arch/idt.rs` and generated from one table. The stub runs
+1. One entry stub per vector, owned by `arch/x86_64/idt.rs` and generated from one table. The stub runs
    `cld`, `clac` when SMAP is live, the GS decision, and rule 9's syndrome save, calls a body
    function, and mirrors the GS decision on exit. `idt::set_handler` takes a body function, never a
    gate, and no `extern "x86-interrupt"` function exists outside `src/arch/`; `scripts/check_entry.py`
