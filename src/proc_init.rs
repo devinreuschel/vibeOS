@@ -6,7 +6,6 @@
 
 #![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
-use alloc::vec::Vec;
 use core::fmt::Write;
 use core::mem::MaybeUninit;
 
@@ -14,7 +13,7 @@ use vibeos::addr_space::{AddressSpace, AsError, MmapError, mmap_request};
 use vibeos::desc::InterruptFrame;
 use vibeos::elf::ElfError;
 use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, SeekFrom};
-use vibeos::kalloc::TryBox;
+use vibeos::kalloc::{TryBox, TryVec};
 use vibeos::kbd::{DecodedKey, NamedKey};
 use vibeos::paging::{PAGE_SIZE_4K, USER_MAP_END};
 use vibeos::proc::{
@@ -741,8 +740,8 @@ fn copy_user_str(va: u64, out: &mut [u8]) -> Result<usize, i32> {
     Err(ENAMETOOLONG)
 }
 
-fn copy_cvec(va: u64) -> Result<Vec<Vec<u8>>, i32> {
-    let mut v = Vec::new();
+fn copy_cvec(va: u64) -> Result<TryVec<TryVec<u8>>, i32> {
+    let mut v = TryVec::new();
     if va == 0 {
         return Ok(v);
     }
@@ -761,7 +760,9 @@ fn copy_cvec(va: u64) -> Result<Vec<Vec<u8>>, i32> {
         }
         let mut buf = [0u8; 256];
         let n = copy_user_str(p, &mut buf)?;
-        v.push(buf[..n].to_vec());
+        let mut s = TryVec::try_with_capacity(n).map_err(|_| ENOMEM)?;
+        s.try_extend_from_slice(&buf[..n]).map_err(|_| ENOMEM)?;
+        v.try_push(s).map_err(|_| ENOMEM)?;
         i += 1;
     }
     Err(E2BIG)
@@ -1003,14 +1004,20 @@ fn sys_execve(path: u64, argv: u64, envp: u64, frame: *mut SyscallFrame) -> i64 
         Err(e) => return syscall::neg(e),
     };
     let _ = envp;
-    let mut argv_s: Vec<&str> = Vec::new();
+    let Ok(mut argv_s) = TryVec::<&str>::try_with_capacity(argv_v.len().max(1)) else {
+        return syscall::neg(ENOMEM);
+    };
     if argv_v.is_empty() {
-        argv_s.push(path_s);
+        if argv_s.try_push(path_s).is_err() {
+            return syscall::neg(ENOMEM);
+        }
     } else {
-        for a in &argv_v {
-            match core::str::from_utf8(a) {
-                Ok(s) => argv_s.push(s),
-                Err(_) => return syscall::neg(EINVAL),
+        for a in argv_v.iter() {
+            let Ok(s) = core::str::from_utf8(a) else {
+                return syscall::neg(EINVAL);
+            };
+            if argv_s.try_push(s).is_err() {
+                return syscall::neg(ENOMEM);
             }
         }
     }
