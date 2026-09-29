@@ -331,6 +331,10 @@ pub(crate) const TESTS: &[Test] = &[
     test("virtio_bind", dev::ktest::test_virtio_bind),
     test("virtio_vq", dev::ktest::test_virtio_vq),
     test("dev_random_source", dev::ktest::test_dev_random_source),
+    test(
+        "dev_probe_alloc_fail",
+        dev::ktest::test_dev_probe_alloc_fail,
+    ),
     test("block_ramdisk_rw", block::ktest::test_block_ramdisk_rw),
     test("block_concurrent", block::ktest::test_block_concurrent),
     test("block_retry", block::ktest::test_block_retry),

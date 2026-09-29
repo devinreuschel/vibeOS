@@ -1,23 +1,27 @@
 //! In-guest tests for dev (kernel_tests only). Rows: the list in crate::ktest.
 
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicBool, Ordering};
 use vibeos::dev::{ClaimError, Device, Driver, IdMatch, ProbeError};
 use vibeos::dma::{self, DMA32_BOUNDARY, DmaAlloc};
 use vibeos::fs::O_RDWR;
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_MASTER, CMD_MEM};
 
+use vibeos::kalloc::TryBox;
 use vibeos::pci::CfgIo;
 use vibeos::virtio::{F_EVENT_IDX, F_INDIRECT_DESC, F_VERSION_1};
 
 use crate::dev_init;
 use crate::dma_init;
 use crate::fs_init;
+use crate::heap_init::{self, fail_after::Scope};
 use crate::ktest::{
     EDU_IDENT, EDU_IDENT_VAL, Outcome, bar0_va, fid, find_edu, mmio_r32, mmio_w32,
     quiescent_free_frames, spin_until_ns,
 };
+use crate::log_init;
 use crate::paging_init;
 use crate::pci_init;
+use crate::thread_init;
 use crate::virtio_init;
 
 // ---- Hooks the dev tests (and other subsystems' tests) use. Their state
@@ -474,4 +478,92 @@ pub(crate) fn test_dev_random_source() -> Outcome {
         vibeos::entropy::Source::XorShift => Outcome::Fail("xorshift"),
         vibeos::entropy::Source::VirtioRng | vibeos::entropy::Source::RdRand => Outcome::Ok,
     }
+}
+
+/// Set while `dev_probe_alloc_fail` binds, so `ktest-nomem` matches PIIX4
+/// ACPI only then and later `bind_all` calls ignore it.
+static NOMEM_ARMED: AtomicBool = AtomicBool::new(false);
+
+static NOMEM_IDS: &[IdMatch] = &[IdMatch::vid_did(0x8086, 0x7113)];
+
+/// A driver whose probe allocates, for PIIX4 ACPI, which no other driver
+/// binds (ROADMAP §10.4's fallible-allocation box).
+struct NoMemDrv;
+
+static NOMEM_DRV: NoMemDrv = NoMemDrv;
+
+impl Driver for NoMemDrv {
+    fn name(&self) -> &'static str {
+        "ktest-nomem"
+    }
+    fn ids(&self) -> &'static [IdMatch] {
+        if NOMEM_ARMED.load(Ordering::Acquire) {
+            NOMEM_IDS
+        } else {
+            &[]
+        }
+    }
+    fn probe(&self, _dev: &mut Device) -> Result<(), ProbeError> {
+        let b = TryBox::try_new([0u8; 64])?;
+        drop(b);
+        Ok(())
+    }
+    fn remove(&self, _dev: &mut Device) {}
+}
+
+/// Whether a record written after `mark` (a `log_init::written` count)
+/// contains every one of `needles`.
+fn logged_since(mark: u64, needles: &[&str]) -> bool {
+    let new = log_init::written().saturating_sub(mark) as usize;
+    let len = log_init::ring_len();
+    (len.saturating_sub(new)..len).any(|i| {
+        log_init::record_at(i).is_some_and(|r| {
+            let m = r.msg();
+            needles.iter().all(|n| {
+                let n = n.as_bytes();
+                m.windows(n.len()).any(|w| w == n)
+            })
+        })
+    })
+}
+
+/// A probe whose allocation fails leaves its device unbound, with a log
+/// line naming the driver and the device, and the kernel up.
+pub(crate) fn test_dev_probe_alloc_fail() -> Outcome {
+    let registered = dev_init::register_driver(&NOMEM_DRV) || {
+        let g = dev_init::REG.lock();
+        (0..g.driver_count()).any(|i| g.driver_at(i).is_some_and(|d| d.name() == "ktest-nomem"))
+    };
+    if !registered {
+        return Outcome::Fail("register");
+    }
+    let Some((_, before)) = find_id(0x8086, 0x7113) else {
+        return Outcome::Skip("no PIIX4 ACPI function");
+    };
+    if before.bound.is_some() {
+        return Outcome::Fail("already bound");
+    }
+    let mark = log_init::written();
+    NOMEM_ARMED.store(true, Ordering::Release);
+    heap_init::fail_after::arm(0, Scope::Thread(thread_init::current_id()));
+    dev_init::bind_all();
+    let seen = heap_init::fail_after::disarm();
+    NOMEM_ARMED.store(false, Ordering::Release);
+    let Some((_, after)) = find_id(0x8086, 0x7113) else {
+        return Outcome::Fail("device gone");
+    };
+    if after.bound.is_some() {
+        return Outcome::Fail("bound");
+    }
+    let bdf = alloc::format!("{}", after.addr);
+    if !logged_since(mark, &["probe ktest-nomem", &bdf]) {
+        return Outcome::Fail("no log line");
+    }
+    if seen.refused < 1 {
+        return Outcome::Fail("not refused");
+    }
+    if TryBox::try_new(0u64).is_err() {
+        return Outcome::Fail("alloc after disarm");
+    }
+    Outcome::Ok
 }
