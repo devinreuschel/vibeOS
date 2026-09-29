@@ -21,6 +21,11 @@ endif
 # repo root on sys.path so `from tests.harness.harness import` resolves.
 export PYTHONPATH := $(CURDIR)
 CARGO_PROFILE ?= dev
+# Every time in the initrd and the ISOs (ROADMAP §10.2, F152): the caller's
+# SOURCE_DATE_EPOCH, else the commit's time, else 2010-01-01.
+SOURCE_DATE_EPOCH ?= $(or $(shell git log -1 --format=%ct 2>/dev/null),1262304000)
+SOURCE_DATE_EPOCH := $(SOURCE_DATE_EPOCH)
+export SOURCE_DATE_EPOCH
 ifeq ($(CARGO_PROFILE),release)
 CARGO_FLAGS   := --release
 else
@@ -271,6 +276,7 @@ layout: $(KERNEL_ELF)
 test-unit:
 	VIBEOS_TIER=$@ cargo test -p vibeos-core --lib --features std --target $(HOST_TRIPLE)
 	VIBEOS_TIER=$@ cargo test -p vibeos-core --doc --features std --target $(HOST_TRIPLE)
+	VIBEOS_TIER=$@ cargo test -p vibeos-hostlib-tests --target $(HOST_TRIPLE)
 
 test-harness:
 	VIBEOS_TIER=$@ GITHUB_STEP_SUMMARY= python3 -m unittest discover -s tests/harness -t . -v

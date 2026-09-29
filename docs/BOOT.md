@@ -268,6 +268,15 @@ produced stale ISOs when new subsystem directories appeared. The host tools (`mk
 their rules list `$(HOSTLIB_DEPS)`: every kernel source, `Cargo.lock`, the manifests, and
 `tests/hostlib/src/bin/*.rs`.
 
+Builds are reproducible: two builds of one commit give byte-identical kernels, initrd and ISOs
+(ROADMAP §10.2, F151, F152). No build time or builder identity lands in them. The Makefile exports
+`SOURCE_DATE_EPOCH`: the caller's value, else the commit's time (`git log -1 --format=%ct`), else
+`1262304000`. `mkinitrd` stamps the files it adds with that time, in destination order whatever the
+`--add` order. `mkiso.sh` stages every file above its time pin, which sets each staged path's times to
+the epoch, and runs `xorriso` with `-r`, so Rock Ridge records uid and gid 0, and with
+`--modification-date` and `--set_all_file_dates` at the epoch's UTC time. An incremental build keeps
+the epoch of the commit it last rebuilt a file at; compare clean builds.
+
 `make run` boots with COM1 on stdio and more than one CPU, so the default developer loop exercises SMP
 rather than discovering AP bugs only in CI. Full flag set in [section 8.4](TESTING.md#84-qemu-flags).
 
