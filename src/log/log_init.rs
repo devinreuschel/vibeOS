@@ -49,6 +49,12 @@ static SINK_DROPS: AtomicU64 = AtomicU64::new(0);
 /// Records `log_fmt` dropped because its CPU was already inside `log_fmt`.
 static REENTRY_DROPS: AtomicU64 = AtomicU64::new(0);
 
+/// The address of the log ring's static, which VMCOREINFO's
+/// `SYMBOL(vibeos_log)` carries (docs/VMCOREINFO.md).
+pub(crate) fn ring_root() -> u64 {
+    core::ptr::from_ref(&LOG).addr() as u64
+}
+
 fn cpu_index() -> usize {
     per_cpu_init::try_current()
         .map(|c| c.cpu_id as usize)
