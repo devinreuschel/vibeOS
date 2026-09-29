@@ -273,6 +273,9 @@ def main() -> int:
             "intentional panic-test",
             ("vibeOS: logrec:", "serial online"),
             "rust_begin_unwind",
+            # The symbolized frame the ksyms table names right only when the
+            # second link leaves .text in place (ROADMAP §10.2, F084).
+            ("  0x", "core::panicking::panic_fmt"),
             "vibeOS: panic: halted",
         )
     else:
