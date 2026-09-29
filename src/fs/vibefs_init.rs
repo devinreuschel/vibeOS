@@ -52,16 +52,29 @@ enum Media {
     Dev(u32),
 }
 
-struct Slot {
+/// A volume slot. Its `vol` and `back` cells belong to the one thread
+/// holding `busy`, or, while `used` is clear, to the one path filling the
+/// slot (invariant I236).
+pub(super) struct Slot {
     vol: UnsafeCell<Vol>,
     back: UnsafeCell<Media>,
-    used: AtomicBool,
-    busy: AtomicBool,
+    pub(super) used: AtomicBool,
+    pub(super) busy: AtomicBool,
     /// The `Vfs` superblock the volume is mounted as, [`NO_SB`] until then.
     sb: AtomicU8,
 }
 
+// SAFETY: invariant I236: one thread at a time reaches a slot's `vol` and
+// `back` cells, through the busy flag `fs::vibefs_init::grab` takes or
+// the clear `used` flag of a slot being filled, and their contents are
+// `Send` (asserted below); established by `fs::vibefs_init::grab`.
 unsafe impl Sync for Slot {}
+
+const _: () = {
+    const fn send<T: Send>() {}
+    send::<Vol>();
+    send::<Media>();
+};
 
 impl Slot {
     const fn empty() -> Self {
@@ -92,8 +105,9 @@ impl Mnt {
     };
 }
 
-static SLOTS: [Slot; MAX_VOLS] = [Slot::empty(), Slot::empty()];
-static ALLOC: SpinMutex<()> = SpinMutex::with_rank((), RANK_DEVICE);
+pub(super) static SLOTS: [Slot; MAX_VOLS] = [Slot::empty(), Slot::empty()];
+/// Taken to claim a free slot (`mount_dev`).
+pub(super) static ALLOC: SpinMutex<()> = SpinMutex::with_rank((), RANK_DEVICE);
 static MNTS: SpinMutex<[Mnt; MNT_MAX]> =
     SpinMutex::with_rank([Mnt::EMPTY, Mnt::EMPTY], RANK_DEVICE);
 static IMAGE: SpinMutex<[u8; IMAGE_BYTES]> = SpinMutex::with_rank([0; IMAGE_BYTES], RANK_DEVICE);
@@ -104,9 +118,10 @@ pub(super) fn with_image<R>(f: impl FnOnce(&mut [u8; IMAGE_BYTES]) -> R) -> R {
     f(&mut g)
 }
 static LIVE: AtomicBool = AtomicBool::new(false);
-static NVOL: AtomicU8 = AtomicU8::new(0);
+/// Slots in use, which the in-guest test `vibefs` reads.
+pub(super) static NVOL: AtomicU8 = AtomicU8::new(0);
 
-struct Io {
+pub(super) struct Io {
     back: Media,
 }
 
@@ -236,10 +251,11 @@ fn drop_busy(id: u8) {
 /// flag.
 fn with_grabbed<R, E>(id: u8, f: impl FnOnce(&mut Vol, &mut Io) -> Result<R, E>) -> Result<R, E> {
     let i = id as usize;
-    // SAFETY: the busy flag of `SLOTS[i]`, which the caller took through
-    // `vibefs_init::grab` and which is dropped
-    // only below, makes this thread the one accessor of the slot's `vol`
-    // and `back` until `drop_busy`; `i < MAX_VOLS` was checked there.
+    // SAFETY: invariant I236: the busy flag of `SLOTS[i]`, which the
+    // caller took and which is dropped only below, makes this thread the
+    // one accessor of the slot's `vol` and `back` until `drop_busy`;
+    // `i < MAX_VOLS` was checked there; established by
+    // `fs::vibefs_init::grab`.
     let r = unsafe {
         let v = &mut *SLOTS[i].vol.get();
         let mut io = Io {
@@ -253,7 +269,10 @@ fn with_grabbed<R, E>(id: u8, f: impl FnOnce(&mut Vol, &mut Io) -> Result<R, E>)
 
 /// Run `f` on volume `id`, waiting for its busy flag. Never under the VFS
 /// lock.
-fn with_slot<R>(id: u8, f: impl FnOnce(&mut Vol, &mut Io) -> Result<R, Error>) -> Result<R, Error> {
+pub(super) fn with_slot<R>(
+    id: u8,
+    f: impl FnOnce(&mut Vol, &mut Io) -> Result<R, Error>,
+) -> Result<R, Error> {
     grab(id)?;
     with_grabbed(id, f)
 }
@@ -535,16 +554,28 @@ impl FileSystem for VibeFs {
         let vol = vol_of(cx);
         let _ = unregister_mnt(at);
         if last {
-            if sync(vol).is_err() {
-                crate::klog!(
+            let mnt = core::str::from_utf8(at).unwrap_or("?");
+            if let Err(e) = sync(vol) {
+                crate::klog_ratelimited!(
+                    1000,
                     vibeos::log::Level::Warn,
-                    "vibeOS: vibefs: sync at umount failed"
+                    "vibeOS: vibefs: sync of {} at umount failed: {}",
+                    mnt,
+                    e.as_str()
                 );
             }
             if let Some(s) = SLOTS.get(vol as usize) {
                 s.sb.store(NO_SB, Ordering::Release);
             }
-            drop_slot(vol);
+            if let Err(e) = drop_slot(vol) {
+                crate::klog_ratelimited!(
+                    1000,
+                    vibeos::log::Level::Warn,
+                    "vibeOS: vibefs: volume of {} still held at umount, slot kept: {}",
+                    mnt,
+                    e.as_str()
+                );
+            }
         }
     }
 }
@@ -562,14 +593,12 @@ pub fn live() -> bool {
     LIVE.load(Ordering::Acquire)
 }
 
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn nvol() -> u8 {
-    NVOL.load(Ordering::Acquire)
-}
-
 pub fn init() {
     with_image(|buf| buf.fill(0));
     let mut io = Io { back: Media::Mem };
+    // SAFETY: invariant I236: slot 0's `used` flag is clear, so no `grab`
+    // takes it, and this boot path is its one writer until the Release
+    // store of `used` below, although other CPUs run; established here.
     let vref = unsafe { &mut *SLOTS[0].vol.get() };
     vref.clear();
     if vibefs::mkfs(&mut io, b"vibe", vref).is_err() {
@@ -580,6 +609,7 @@ pub fn init() {
         LIVE.store(false, Ordering::Release);
         return;
     }
+    // SAFETY: invariant I236, as for `vref` above; established here.
     unsafe {
         *SLOTS[0].back.get() = Media::Mem;
     }
@@ -600,11 +630,6 @@ pub fn walk_iget(id: u8, path: &[u8]) -> Result<InodeRef, FsError> {
     })
 }
 
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn snapshot(id: u8, name: &[u8]) -> Result<(), FsError> {
-    with_slot(id, |v, d| v.snapshot(d, name)).map_err(Error::to_fs)
-}
-
 pub fn sync(id: u8) -> Result<(), FsError> {
     with_slot(id, |v, d| v.sync(d)).map_err(Error::to_fs)
 }
@@ -615,17 +640,6 @@ pub fn df(id: u8) -> Result<(FsType, u64, u64, u32), FsError> {
         Ok((FsType::Vibe, tot, free, n))
     })
     .map_err(Error::to_fs)
-}
-
-#[allow(dead_code)]
-pub fn probe_dev(name: &str) -> bool {
-    let back = match name {
-        "ram0" => Media::Dev(cache_init::DEV_RAM0),
-        "vda" => Media::Dev(cache_init::DEV_VDA),
-        _ => return false,
-    };
-    let mut io = Io { back };
-    vibefs::probe(&mut io)
 }
 
 /// `(vol, strip)`: strip==0 means no vibe mount on this path.
@@ -712,18 +726,35 @@ fn recount() {
     NVOL.store(n, Ordering::Release);
 }
 
-fn drop_slot(id: u8) {
+/// Free volume `id`'s slot. When `grab` cannot take its busy flag the
+/// slot is left as it is, still owned by its holder, and the error is
+/// returned.
+pub(super) fn drop_slot(id: u8) -> Result<(), Error> {
     if id == VOL_MEM {
-        return;
+        return Ok(());
     }
-    let i = id as usize;
-    if i >= MAX_VOLS {
-        return;
-    }
-    let _ = grab(id);
-    SLOTS[i].used.store(false, Ordering::Release);
+    let Some(slot) = SLOTS.get(id as usize) else {
+        return Ok(());
+    };
+    grab(id)?;
+    slot.used.store(false, Ordering::Release);
     drop_busy(id);
     recount();
+    Ok(())
+}
+
+/// Drop the spare slot a mount made, logging a failure; the mount's
+/// result stands either way.
+fn drop_spare(id: u8) {
+    if let Err(e) = drop_slot(id) {
+        crate::klog_ratelimited!(
+            1000,
+            vibeos::log::Level::Warn,
+            "vibeOS: vibefs: spare volume {} still held, slot kept: {}",
+            id,
+            e.as_str()
+        );
+    }
 }
 
 pub fn mount_mem(at: &str) -> Result<u8, FsError> {
@@ -783,12 +814,15 @@ pub fn mount_dev(name: &str, at: &str, ro: bool) -> Result<u8, FsError> {
         }
         i as u8
     };
+    // SAFETY: invariant I236: this thread set the slot's `busy` flag
+    // under `ALLOC` above, and drops it only below; established here.
     let vref = unsafe { &mut *SLOTS[id as usize].vol.get() };
     if vibefs::mount(&mut io, vref).is_err() {
         SLOTS[id as usize].used.store(false, Ordering::Release);
         SLOTS[id as usize].busy.store(false, Ordering::Release);
         return Err(FsError::Inval);
     }
+    // SAFETY: invariant I236, as for `vref` above; established here.
     unsafe {
         *SLOTS[id as usize].back.get() = back;
     }
@@ -796,12 +830,12 @@ pub fn mount_dev(name: &str, at: &str, ro: bool) -> Result<u8, FsError> {
     recount();
     match api.mount_fs(None, at.as_bytes(), &VIBE_FS[id as usize], dev, ro) {
         Ok(m) if m.shared => {
-            drop_slot(id);
+            drop_spare(id);
             Ok(fs_init::with(|v| v.sb_private(m.sb))?[0] as u8)
         }
         Ok(_) => Ok(id),
         Err(e) => {
-            drop_slot(id);
+            drop_spare(id);
             Err(e)
         }
     }

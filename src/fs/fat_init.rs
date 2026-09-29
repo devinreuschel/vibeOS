@@ -52,16 +52,29 @@ enum Media {
     Dev(u32),
 }
 
-struct Slot {
+/// A volume slot. Its `vol` and `back` cells belong to the one thread
+/// holding `busy`, or, while `used` is clear, to the one path filling the
+/// slot (invariant I236).
+pub(super) struct Slot {
     vol: UnsafeCell<Option<FatVol>>,
     back: UnsafeCell<Media>,
-    used: AtomicBool,
-    busy: AtomicBool,
+    pub(super) used: AtomicBool,
+    pub(super) busy: AtomicBool,
     /// The `Vfs` superblock the volume is mounted as, [`NO_SB`] until then.
     sb: AtomicU8,
 }
 
+// SAFETY: invariant I236: one thread at a time reaches a slot's `vol` and
+// `back` cells, through the busy flag `fs::fat_init::grab` takes or the
+// clear `used` flag of a slot being filled, and their contents are
+// `Send` (asserted below); established by `fs::fat_init::grab`.
 unsafe impl Sync for Slot {}
+
+const _: () = {
+    const fn send<T: Send>() {}
+    send::<Option<FatVol>>();
+    send::<Media>();
+};
 
 impl Slot {
     const fn empty() -> Self {
@@ -92,8 +105,9 @@ impl Mnt {
     };
 }
 
-static SLOTS: [Slot; MAX_VOLS] = [Slot::empty(), Slot::empty()];
-static ALLOC: SpinMutex<()> = SpinMutex::with_rank((), RANK_DEVICE);
+pub(super) static SLOTS: [Slot; MAX_VOLS] = [Slot::empty(), Slot::empty()];
+/// Taken to claim a free slot (`mount_dev`).
+pub(super) static ALLOC: SpinMutex<()> = SpinMutex::with_rank((), RANK_DEVICE);
 static MNTS: SpinMutex<[Mnt; MNT_MAX]> =
     SpinMutex::with_rank([Mnt::EMPTY, Mnt::EMPTY], RANK_DEVICE);
 static INITRD: SpinMutex<[u8; INITRD_BYTES]> = SpinMutex::with_rank([0; INITRD_BYTES], RANK_DEVICE);
@@ -104,7 +118,8 @@ pub(super) fn with_initrd<R>(f: impl FnOnce(&mut [u8; INITRD_BYTES]) -> R) -> R 
     f(&mut g)
 }
 static LIVE: AtomicBool = AtomicBool::new(false);
-static NVOL: AtomicU8 = AtomicU8::new(0);
+/// Slots in use, which the in-guest test `fat_initrd` reads.
+pub(super) static NVOL: AtomicU8 = AtomicU8::new(0);
 
 const INITRD_RO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/initrd.fat"));
 
@@ -208,10 +223,11 @@ fn with_grabbed<R>(
     f: impl FnOnce(&mut FatVol, &mut Io) -> Result<R, FsError>,
 ) -> Result<R, FsError> {
     let i = id as usize;
-    // SAFETY: the busy flag of `SLOTS[i]`, which the caller took through
-    // `fat_init::grab` and which is dropped only
-    // below, makes this thread the one accessor of the slot's `vol` and
-    // `back` until `drop_busy`; `i < MAX_VOLS` was checked there.
+    // SAFETY: invariant I236: the busy flag of `SLOTS[i]`, which the
+    // caller took and which is dropped only below, makes this thread the
+    // one accessor of the slot's `vol` and `back` until `drop_busy`;
+    // `i < MAX_VOLS` was checked there; established by
+    // `fs::fat_init::grab`.
     let r = unsafe {
         match (*SLOTS[i].vol.get()).as_mut() {
             None => Err(FsError::Io),
@@ -558,24 +574,31 @@ impl FileSystem for FatFs {
         let vol = vol_of(cx);
         let _ = unregister_mnt(at);
         if last {
-            if sync(vol).is_err() {
-                crate::klog!(
+            let mnt = core::str::from_utf8(at).unwrap_or("?");
+            if let Err(e) = sync(vol) {
+                crate::klog_ratelimited!(
+                    1000,
                     vibeos::log::Level::Warn,
-                    "vibeOS: fat: sync at umount failed"
+                    "vibeOS: fat: sync of {} at umount failed: {}",
+                    mnt,
+                    e.as_str()
                 );
             }
-            drop_slot(vol);
+            if let Err(e) = drop_slot(vol) {
+                crate::klog_ratelimited!(
+                    1000,
+                    vibeos::log::Level::Warn,
+                    "vibeOS: fat: volume of {} still held at umount, slot kept: {}",
+                    mnt,
+                    e.as_str()
+                );
+            }
         }
     }
 }
 
 pub fn live() -> bool {
     LIVE.load(Ordering::Acquire)
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn nvol() -> u8 {
-    NVOL.load(Ordering::Acquire)
 }
 
 pub fn init() {
@@ -603,6 +626,9 @@ pub fn init() {
         }
     };
     let root_clu = vol.info.root_clus;
+    // SAFETY: invariant I236: slot 0's `used` flag is clear, so no `grab`
+    // takes it, and this boot path is its one writer until the Release
+    // store of `used` below; established here.
     unsafe {
         *SLOTS[0].vol.get() = Some(vol);
         *SLOTS[0].back.get() = Media::Initrd;
@@ -713,22 +739,41 @@ fn unregister_mnt(p: &[u8]) -> Option<u8> {
     None
 }
 
-fn drop_slot(id: u8) {
+/// Free volume `id`'s slot. When `grab` cannot take its busy flag the
+/// slot is left as it is, still owned by its holder, and the error is
+/// returned.
+pub(super) fn drop_slot(id: u8) -> Result<(), FatError> {
     if id == VOL_INITRD {
-        return;
+        return Ok(());
     }
-    let i = id as usize;
-    if i >= MAX_VOLS {
-        return;
-    }
-    let _ = grab(id);
+    let Some(slot) = SLOTS.get(id as usize) else {
+        return Ok(());
+    };
+    grab(id)?;
+    // SAFETY: invariant I236: `grab` above took the slot's busy flag,
+    // which is dropped only below; established by `fs::fat_init::grab`.
     unsafe {
-        *SLOTS[i].vol.get() = None;
+        *slot.vol.get() = None;
     }
-    SLOTS[i].used.store(false, Ordering::Release);
-    SLOTS[i].sb.store(NO_SB, Ordering::Release);
+    slot.used.store(false, Ordering::Release);
+    slot.sb.store(NO_SB, Ordering::Release);
     drop_busy(id);
     recount();
+    Ok(())
+}
+
+/// Drop the spare slot a mount made, logging a failure; the mount's
+/// result stands either way.
+fn drop_spare(id: u8) {
+    if let Err(e) = drop_slot(id) {
+        crate::klog_ratelimited!(
+            1000,
+            vibeos::log::Level::Warn,
+            "vibeOS: fat: spare volume {} still held, slot kept: {}",
+            id,
+            e.as_str()
+        );
+    }
 }
 
 /// Mount the FAT volume on block device `name` on `at`. A device `Vfs`
@@ -778,6 +823,8 @@ pub fn mount_dev(name: &str, at: &str, ro: bool) -> Result<u8, FsError> {
         }
         i as u8
     };
+    // SAFETY: invariant I236: this thread set the slot's `busy` flag
+    // under `ALLOC` above, and drops it only below; established here.
     unsafe {
         *SLOTS[id as usize].vol.get() = Some(vol);
         *SLOTS[id as usize].back.get() = back;
@@ -787,12 +834,12 @@ pub fn mount_dev(name: &str, at: &str, ro: bool) -> Result<u8, FsError> {
     ROOT_CLU[id as usize].store(root_clu, Ordering::Release);
     match api.mount_fs(None, at.as_bytes(), &FAT_FS[id as usize], dev, ro) {
         Ok(m) if m.shared => {
-            drop_slot(id);
+            drop_spare(id);
             Ok(fs_init::with(|v| v.sb_private(m.sb))?[0] as u8)
         }
         Ok(_) => Ok(id),
         Err(e) => {
-            drop_slot(id);
+            drop_spare(id);
             Err(e)
         }
     }

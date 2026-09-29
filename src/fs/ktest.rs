@@ -10,8 +10,10 @@ use vibeos::limits::MAX_OPEN_FILES;
 use vibeos::proc::wait_exited;
 
 mod hooks;
+mod slots;
 
 use hooks::{link_path, symlink_path, truncate_path};
+pub(crate) use slots::test_fs_drop_slot_busy_keeps_slot;
 
 use crate::fat_init;
 use crate::file_init;
@@ -197,7 +199,7 @@ pub(crate) fn test_fat_initrd() -> Outcome {
     if !fat_init::live() {
         return Outcome::Fail("not live");
     }
-    if fat_init::nvol() == 0 {
+    if fat_init::NVOL.load(Ordering::Acquire) == 0 {
         return Outcome::Fail("nvol");
     }
     match fid::stat_path("/hello.txt") {
@@ -255,7 +257,7 @@ pub(crate) fn test_vibefs() -> Outcome {
     if !vibefs_init::live() {
         return Outcome::Fail("not live");
     }
-    if vibefs_init::nvol() == 0 {
+    if vibefs_init::NVOL.load(Ordering::Acquire) == 0 {
         return Outcome::Fail("nvol");
     }
     match fid::stat_path("/vibe") {
@@ -317,7 +319,7 @@ pub(crate) fn test_vibefs() -> Outcome {
         }
         Err(_) => return Outcome::Fail("extent open"),
     }
-    if vibefs_init::snapshot(vibefs_init::VOL_MEM, b"s0").is_err() {
+    if vibefs_init::with_slot(vibefs_init::VOL_MEM, |v, d| v.snapshot(d, b"s0")).is_err() {
         return Outcome::Fail("snap");
     }
     if file_init::sync_fs().is_err() {

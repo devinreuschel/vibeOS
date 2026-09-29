@@ -1,13 +1,5 @@
 //! Filesystems: the kernel half of subsystem `fs` (DESIGN §1.3).
 
-#[allow(
-    clippy::let_underscore_must_use,
-    reason = "audit pending, ROADMAP §10.1"
-)]
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 pub(crate) mod fat_init;
 pub(crate) mod file_init;
 pub(crate) mod fs_init;
@@ -26,12 +18,4 @@ pub(crate) mod fs_init;
 pub mod ktest;
 #[cfg(feature = "vibefs_crash")]
 pub(crate) mod vibefs_crash;
-#[allow(
-    clippy::let_underscore_must_use,
-    reason = "audit pending, ROADMAP §10.1"
-)]
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 pub(crate) mod vibefs_init;
