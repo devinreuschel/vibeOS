@@ -196,7 +196,12 @@ fn at_random() -> [u8; 16] {
     b
 }
 
-fn fill_stack(space: &AddressSpace, img: &Image<'_>, argv: &[&[u8]]) -> Result<u64, LoadError> {
+fn fill_stack(
+    space: &AddressSpace,
+    img: &Image<'_>,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> Result<u64, LoadError> {
     let len = (STACK_PAGES * PAGE_SIZE_4K) as usize;
     let mut mem = TryVec::try_with_capacity(len).map_err(|_| LoadError::NoMem)?;
     let zero = [0u8; 256];
@@ -262,24 +267,34 @@ fn fill_stack(space: &AddressSpace, img: &Image<'_>, argv: &[&[u8]]) -> Result<u
     if img.phdr_va.is_none() {
         aux[4].val = 0;
     }
-    let rsp = elf::build_initial_stack(STACK_TOP, &mut mem[..], argv, &[], &aux, &at_random())
+    let rsp = elf::build_initial_stack(STACK_TOP, &mut mem[..], argv, envp, &aux, &at_random())
         .map_err(LoadError::Elf)?;
     let base = STACK_TOP - len as u64;
     space.write_bytes(base, &mem).map_err(LoadError::Mem)?;
     Ok(rsp)
 }
 
-/// Build a new address space. Caller installs it only after this returns.
-pub fn load_path(path: &str, argv: &[&str]) -> Result<Loaded, LoadError> {
+/// Build a new address space from the file at `path`, with `argv` (or
+/// `[path]` when empty) and `envp` on its initial stack. Caller installs
+/// it only after this returns.
+pub fn load_path<A: AsRef<[u8]>>(
+    path: &str,
+    argv: &[A],
+    envp: &[&[u8]],
+) -> Result<Loaded, LoadError> {
     #[cfg(feature = "kernel_tests")]
     let before = crate::proc::ktest::free_now();
-    let r = load_path_inner(path, argv);
+    let r = load_path_inner(path, argv, envp);
     #[cfg(feature = "kernel_tests")]
     crate::proc::ktest::record(before, r.is_ok());
     r
 }
 
-fn load_path_inner(path: &str, argv: &[&str]) -> Result<Loaded, LoadError> {
+fn load_path_inner<A: AsRef<[u8]>>(
+    path: &str,
+    argv: &[A],
+    envp: &[&[u8]],
+) -> Result<Loaded, LoadError> {
     let bytes = read_path(path)?;
     let mut argv_b =
         TryVec::<&[u8]>::try_with_capacity(argv.len().max(1)).map_err(|_| LoadError::NoMem)?;
@@ -289,16 +304,26 @@ fn load_path_inner(path: &str, argv: &[&str]) -> Result<Loaded, LoadError> {
             .map_err(|_| LoadError::NoMem)?;
     }
     for a in argv {
-        argv_b
-            .try_push(a.as_bytes())
-            .map_err(|_| LoadError::NoMem)?;
+        argv_b.try_push(a.as_ref()).map_err(|_| LoadError::NoMem)?;
     }
-    load_image(&bytes, &argv_b)
+    load_image_env(&bytes, &argv_b, envp)
 }
 
 /// Build a new address space from the ELF image `elf`, with `argv` on its
 /// initial stack as given. Caller installs it only after this returns.
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "C-RING3's in-guest entry, `proc_init::spawn_image`, is its caller"
+    )
+)]
 pub fn load_image(elf: &[u8], argv: &[&[u8]]) -> Result<Loaded, LoadError> {
+    load_image_env(elf, argv, &[])
+}
+
+/// [`load_image`] with `envp` on the initial stack as well.
+fn load_image_env(elf: &[u8], argv: &[&[u8]], envp: &[&[u8]]) -> Result<Loaded, LoadError> {
     let img = elf::parse(elf).map_err(LoadError::Elf)?;
     let Some(mut space) = addr_space_init::create() else {
         return Err(LoadError::As(AsError::OutOfFrames));
@@ -307,7 +332,7 @@ pub fn load_image(elf: &[u8], argv: &[&[u8]]) -> Result<Loaded, LoadError> {
         map_loads(&mut space, &img)?;
         let (stack_base, _) = map_stack(&mut space, img.stack_exec)?;
         let fs = setup_tls(&mut space, &img, stack_base)?;
-        let rsp = fill_stack(&space, &img, argv)?;
+        let rsp = fill_stack(&space, &img, argv, envp)?;
         Ok((img.entry, rsp, fs))
     })();
     match mapped {

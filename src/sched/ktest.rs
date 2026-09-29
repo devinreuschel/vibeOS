@@ -1,7 +1,9 @@
 //! In-guest tests for sched (kernel_tests only). Rows: the list in crate::ktest.
 
+mod counted;
 mod hooks;
 mod sleep;
+pub(crate) use counted::test_counted_deferred_release;
 pub(crate) use hooks::{RequeueGuard, requeues, set_requeue_next_cpu, work_live};
 pub(crate) use sleep::{
     block_in_hard_irq_asserts, in_hard_irq_top_bottom, lock_across_switch_asserts,

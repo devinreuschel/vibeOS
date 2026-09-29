@@ -20,6 +20,8 @@ use vibeos::wait::{
     ChannelModel, CondModel, MutexModel, RwLockModel, SemaModel, WriterTimeoutWake, deadline_of,
 };
 
+use vibeos::sync::OpGate;
+
 use crate::sync_init;
 use crate::thread_init;
 use crate::time_init;
@@ -473,6 +475,29 @@ impl Condvar {
         });
     }
 
+    /// Under SCHED, begin a wait on this condvar's queue unless `done()`
+    /// holds, then sleep until woken or `deadline`. `None` at once if
+    /// `done()` held. Checking under the same SCHED as the enqueue loses no
+    /// wake-up from a waker that changes the state before it notifies.
+    pub(crate) fn wait_unless(
+        &self,
+        done: impl FnOnce() -> bool,
+        deadline: Instant,
+    ) -> Option<WaitOutcome> {
+        let waiting = thread_init::with_sched(|s| {
+            if done() {
+                return false;
+            }
+            // SAFETY: this primitive's model is touched only under SCHED, which
+            // `with_sched` holds here, so this `&mut` is the only reference to it;
+            // established by `thread_init::with_sched`.
+            let st = unsafe { &mut *self.state.get() };
+            s.begin_wait(&mut st.wq, deadline);
+            true
+        });
+        waiting.then(wait_resume)
+    }
+
     pub fn notify_all(&self) {
         thread_init::with_sched(|s| {
             // SAFETY: this primitive's model is touched only under SCHED, which
@@ -619,5 +644,36 @@ impl<T, const N: usize> Channel<T, N> {
                 }
             }
         }
+    }
+}
+
+// ----- Operation gate sleep (DESIGN §2.11 rule 3) -----
+
+/// Where `OpGate::kill` sleeps. Static, so a waiter's queue never lives
+/// inside a gate its owner frees (`thread_init::unlink_wait` casts the
+/// wait cookie back to the queue).
+static GATE_WAITERS: Condvar = Condvar::new();
+
+/// How long a killer sleeps before it rechecks its gate: it covers a wake
+/// `gate_wake` skipped under a lock ranked after SCHED.
+const GATE_RECHECK_NS: u64 = 10_000_000;
+
+/// The sleep `sync::set_gate_wait` installs for `OpGate::kill`: sleep
+/// until woken or 10 ms pass, unless `g` is already empty. `kill` loops on
+/// it until the gate is empty.
+pub(crate) fn gate_sleep(g: &OpGate) {
+    let deadline = Instant {
+        ns: time_init::now_ns().saturating_add(GATE_RECHECK_NS),
+    };
+    // Woken or timed out, `kill` rechecks the gate either way.
+    GATE_WAITERS.wait_unless(|| g.inside() == 0, deadline);
+}
+
+/// The wake `sync::set_gate_wait` installs: the last operation out of a
+/// dead gate wakes every killer, where this CPU may take SCHED. Elsewhere
+/// the killer's 10 ms recheck finds the gate empty.
+pub(crate) fn gate_wake() {
+    if sync_init::may_take_sched() {
+        GATE_WAITERS.notify_all();
     }
 }

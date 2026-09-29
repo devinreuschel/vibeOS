@@ -21,19 +21,24 @@ endif
 # repo root on sys.path so `from tests.harness.harness import` resolves.
 export PYTHONPATH := $(CURDIR)
 CARGO_PROFILE ?= dev
+# Every time in the initrd and the ISOs (ROADMAP §10.2, F152): the caller's
+# SOURCE_DATE_EPOCH, else the commit's time, else 2010-01-01.
+SOURCE_DATE_EPOCH ?= $(or $(shell git log -1 --format=%ct 2>/dev/null),1262304000)
+SOURCE_DATE_EPOCH := $(SOURCE_DATE_EPOCH)
+export SOURCE_DATE_EPOCH
 ifeq ($(CARGO_PROFILE),release)
 CARGO_FLAGS   := --release
-PROFILE_DIR   := release
 else
 CARGO_FLAGS   :=
-PROFILE_DIR   := debug
 endif
 
-ISO              := vibeos.iso
-ISO_PANIC        := vibeos-panic.iso
-ISO_GP           := vibeos-gp.iso
-ISO_KTEST        := vibeos-ktest.iso
-ISO_VIBEFS_CRASH := vibeos-vibefs-crash.iso
+# Every build product lives under build/ (ROADMAP §10.2): the named kernel
+# ELFs in build/kernels/, the ISOs and their staging roots beside them.
+ISO              := build/vibeos.iso
+ISO_PANIC        := build/vibeos-panic.iso
+ISO_GP           := build/vibeos-gp.iso
+ISO_KTEST        := build/vibeos-ktest.iso
+ISO_VIBEFS_CRASH := build/vibeos-vibefs-crash.iso
 
 LIMINE_DIR := ./limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
@@ -59,6 +64,11 @@ QEMU_BASE = qemu-system-x86_64 \
 # script, the limine config, and this Makefile. A find(1) so newly added
 # source dirs are not silently missed (DESIGN §9.1).
 KERNEL_SRCS := $(shell find src crates/core/src -type f \( -name '*.rs' -o -name '*.asm' -o -name '*.S' \) 2>/dev/null)
+# Host tools and the initrd build from vibeos-core too, so they list every
+# kernel source, the lockfile, the manifests and every hostlib binary
+# (ROADMAP §10.2, F143).
+HOSTLIB_DEPS := $(KERNEL_SRCS) Cargo.lock Cargo.toml crates/core/Cargo.toml tests/hostlib/Cargo.toml \
+	$(wildcard tests/hostlib/src/bin/*.rs)
 USER_HELLO  := user/hello
 USER_INIT   := user/init
 USER_SH     := user/sh
@@ -75,42 +85,72 @@ endif
 OBJDUMP := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-objdump),$(LLVM_TOOL_DIR)/llvm-objdump,llvm-objdump)
 NM      := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-nm),$(LLVM_TOOL_DIR)/llvm-nm,llvm-nm)
 
-# Two-pass ksyms: first link has an empty table in .rodata, nm fills it,
-# and the second link must not move .text (DESIGN §2.5; not yet enforced,
-# ROADMAP §10.2, F084).
-# $(1)=variant name  $(2)=target dir  $(3)=feature flags  $(4)=iso file
+# The cargo that builds a shipped artifact: the kernel's two links. Cargo's
+# trim-paths remaps the checkout, the sysroot and $CARGO_HOME out of panic
+# Locations, DWARF and symbol names (ROADMAP §10.2, F151). It is unstable on
+# the pinned nightly, so it goes on the command line: a manifest's
+# `cargo-features` would stop every stable cargo reading the workspace.
+# -Zunstable-options also enables --artifact-dir. Host tools do not ship.
+CARGO_SHIP = $(CARGO) -Ztrim-paths -Zunstable-options --config 'profile.$(CARGO_PROFILE).trim-paths="all"'
+
+# One kernel variant (DESIGN §8.2): every variant builds in the one target/,
+# and --artifact-dir copies its ELF out under cargo's lock, so a parallel
+# build of another variant cannot swap it. The recipe removes the named ELF
+# first and writes it last, and the variant's ISO reads only that file, so a
+# test build cannot be packaged as production.
+# Two-pass ksyms: the first link has an empty table, nm fills it, and the
+# second link must not move .text: --check regenerates the table from the
+# final ELF and fails on any difference (DESIGN §2.5).
+# $(1)=variant name  $(2)=feature flags  $(3)=iso file
 # Feature flags use repeated --features, never commas (those split $(call)).
-# $$ so $(CARGO) is expanded when the recipe runs, not at $(eval) time.
+# $$ so $(CARGO_SHIP) is expanded when the recipe runs, not at $(eval) time.
+# `cp`, not `mv`: cargo may hard-link the artifact to its own copy.
 define KERNEL_VARIANT
-$(2)/$(TARGET)/$(PROFILE_DIR)/vibeos: $(KERNEL_DEPS)
-	VIBEOS_INITRD=$(INITRD) CARGO_TARGET_DIR=$(2) $$(CARGO) build $$(CARGO_FLAGS) $(3)
-	python3 scripts/gen_ksyms.py --nm "$$(NM)" $$@ $(2)/vibeos-ksyms.rs
-	VIBEOS_INITRD=$(INITRD) VIBEOS_KSYMS=$(2)/vibeos-ksyms.rs CARGO_TARGET_DIR=$(2) $$(CARGO) build $$(CARGO_FLAGS) $(3)
-	python3 scripts/check_kernel_fp.py --objdump "$$(OBJDUMP)" $$@ || { rm -f $$@; exit 1; }
-$(4): $(2)/$(TARGET)/$(PROFILE_DIR)/vibeos limine.conf $(LIMINE_BIN)
+KERNEL_ELFS += build/kernels/vibeos-$(1).elf
+ISOS += $(3)
+ifneq ($(VIBEOS_PREBUILT),1)
+build/kernels/vibeos-$(1).elf: $(KERNEL_DEPS) $(PROFILE_STAMP)
+	rm -rf $$@ build/kernels/vibeos-$(1).ksyms.rs build/kernels/.vibeos-$(1)
+	VIBEOS_INITRD=$(INITRD) $$(CARGO_SHIP) build $$(CARGO_FLAGS) $(2) --artifact-dir build/kernels/.vibeos-$(1)
+	python3 scripts/gen_ksyms.py --nm "$$(NM)" build/kernels/.vibeos-$(1)/vibeos build/kernels/vibeos-$(1).ksyms.rs
+	VIBEOS_INITRD=$(INITRD) VIBEOS_KSYMS=$(CURDIR)/build/kernels/vibeos-$(1).ksyms.rs $$(CARGO_SHIP) build $$(CARGO_FLAGS) $(2) --artifact-dir build/kernels/.vibeos-$(1)
+	python3 scripts/gen_ksyms.py --nm "$$(NM)" --check build/kernels/.vibeos-$(1)/vibeos build/kernels/vibeos-$(1).ksyms.rs
+	python3 scripts/check_kernel_fp.py --objdump "$$(OBJDUMP)" build/kernels/.vibeos-$(1)/vibeos
+	cp build/kernels/.vibeos-$(1)/vibeos $$@
+$(3): build/kernels/vibeos-$(1).elf limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py
 	LIMINE_DIR=$$(LIMINE_DIR) scripts/mkiso.sh $$< $$@ build/iso_root_$(1)
+endif
 endef
 
-ifneq ($(VIBEOS_PREBUILT),1)
-# prod: no extra features
-$(eval $(call KERNEL_VARIANT,prod,$(CURDIR)/target,,$(ISO)))
+# The named ELFs do not name the profile, so each depends on a stamp that
+# changes only when CARGO_PROFILE does: a release build after a dev build
+# relinks instead of reusing the dev ELF.
+PROFILE_STAMP := build/kernels/profile.stamp
+$(PROFILE_STAMP): FORCE
+	@mkdir -p $(dir $@)
+	@[ "$$(cat $@ 2>/dev/null)" = "$(CARGO_PROFILE)" ] || echo "$(CARGO_PROFILE)" > $@
+
+.PHONY: FORCE
+FORCE:
+
+KERNEL_ELFS :=
+ISOS :=
+# default: no extra features
+$(eval $(call KERNEL_VARIANT,default,,$(ISO)))
 # panic: deliberate panic-test dump
-$(eval $(call KERNEL_VARIANT,panic,$(CURDIR)/target-panic,--features panic_test --features panic_exit,$(ISO_PANIC)))
+$(eval $(call KERNEL_VARIANT,panic,--features panic_test --features panic_exit,$(ISO_PANIC)))
 # gp: deliberate #GP after IDT
-$(eval $(call KERNEL_VARIANT,gp,$(CURDIR)/target-gp,--features gp_test --features panic_exit,$(ISO_GP)))
-# ktest: in-guest registry; own dir so it cannot leak into production
-$(eval $(call KERNEL_VARIANT,ktest,$(CURDIR)/target-kernel-tests,--features kernel_tests,$(ISO_KTEST)))
-# vibefs_crash: write-loop kernel for QEMU-kill fsck
-$(eval $(call KERNEL_VARIANT,vibefs_crash,$(CURDIR)/target-vibefs-crash,--features vibefs_crash,$(ISO_VIBEFS_CRASH)))
-endif
+$(eval $(call KERNEL_VARIANT,gp,--features gp_test --features panic_exit,$(ISO_GP)))
+# ktest: in-guest registry, never packaged as production
+$(eval $(call KERNEL_VARIANT,ktest,--features kernel_tests,$(ISO_KTEST)))
+# vibefs-crash: write-loop kernel for QEMU-kill fsck
+$(eval $(call KERNEL_VARIANT,vibefs-crash,--features vibefs_crash,$(ISO_VIBEFS_CRASH)))
 
-KERNEL_ELF := $(CURDIR)/target/$(TARGET)/$(PROFILE_DIR)/vibeos
-KERNEL_TESTS_DIR := $(CURDIR)/target-kernel-tests
-KERNEL_VIBEFS_CRASH_DIR := $(CURDIR)/target-vibefs-crash
+KERNEL_ELF := build/kernels/vibeos-default.elf
 
-.PHONY: help check check-python check-msrv all kernel iso run run-panic clean distclean setup layout prebuilt \
+.PHONY: help check check-python check-msrv all kernel iso isos repro run run-panic clean distclean setup layout prebuilt \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-gp test-e2e-mce test \
-        test-e2e-pit test-e2e-highmem test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
+        test-e2e-pit test-e2e-highmem test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
         test-smp-stress test-vibefs-crash test-e2e-uefi
 
 help:
@@ -119,12 +159,15 @@ help:
 	  '  check                 fast local gate (clippy/unit/harness/python)' \
 	  '  check-python          ruff and mypy (VIBEOS_ALLOW_MISSING_TOOLS=1 skips a missing one)' \
 	  '  check-msrv            vibeos-core with its MSRV toolchain (rust-version), host and kernel target' \
-	  '  all / iso             kernel + vibeos.iso (hybrid BIOS/UEFI)' \
-	  '  kernel                kernel ELF only' \
+	  '  all / iso             kernel + build/vibeos.iso (hybrid BIOS/UEFI)' \
+	  '  kernel                kernel ELF only (build/kernels/vibeos-default.elf)' \
+	  '  isos                  every ISO variant, as build/vibeos*.iso' \
+	  '  repro                 build this commit twice; fail unless byte-identical (REPRO_ARGS=--share-rustup)' \
 	  '  run                   boot production ISO in QEMU' \
 	  '  run-panic             boot panic-test ISO' \
 	  '  layout                objdump sections + __kernel_ symbols' \
 	  '  test-unit             vibeos-core host tests (any host triple)' \
+	  '  models-quick          loom models (loom_*) at 3 preemptions, ROADMAP §10.8' \
 	  '  test-harness          python unit tests for the harness' \
 	  '  test-e2e              boot contract on the production ISO' \
 	  '  test-e2e-uefi         same, OVMF (prints a skip, then fails, if missing)' \
@@ -133,6 +176,7 @@ help:
 	  '  test-e2e-mce          injected #MC dump+halt contract' \
 	  '  test-e2e-pit          PIT calibration fallback' \
 	  '  test-e2e-highmem      boot contract with 9 GiB, past the physmap cap' \
+	  '  test-e2e-strace       vibeos.strace=1 via fw_cfg: cmdline echo + syscall trace' \
 	  '  test-ps2              QEMU sendkey echo (also part of test-e2e)' \
 	  '  test-kernel           in-guest tests, -smp 2' \
 	  '  test-kernel-smp4      in-guest tests, -smp 4' \
@@ -197,6 +241,7 @@ check:
 	cargo clippy --bin vibeos -- -D warnings
 	$(MAKE) test-unit
 	cargo test -p vibeos-core --lib --features std --target $(HOST_TRIPLE) --config 'profile.test.debug-assertions=false' -- release_assert_
+	$(MAKE) models-quick
 	$(MAKE) test-harness
 	$(MAKE) check-python
 	$(CARGO) build --bin vibeos --profile hookcheck --config 'profile.hookcheck.inherits="dev"'
@@ -241,8 +286,7 @@ $(LIMINE_BIN):
 	@echo "limine binaries missing; run ./setup.sh" >&2
 	@exit 1
 
-$(INITRD): $(shell find crates/core/src/fs/fat -type f -name '*.rs') tests/hostlib/src/bin/mkinitrd.rs tests/hostlib/Cargo.toml \
-		crates/core/Cargo.toml $(USER_HELLO) $(USER_INIT) $(USER_SH) $(USER_TESTS)
+$(INITRD): $(HOSTLIB_DEPS) $(USER_HELLO) $(USER_INIT) $(USER_SH) $(USER_TESTS)
 	mkdir -p $(dir $@)
 	cargo run -p vibeos-hostlib-tests --bin mkinitrd --target $(HOST_TRIPLE) --quiet -- $(abspath $@) \
 	    --add $(abspath $(USER_HELLO)):/hello \
@@ -267,6 +311,13 @@ user/tests: user/tests.bin scripts/mkuserelf.py
 
 iso: $(ISO)
 
+isos: $(ISOS)
+
+# Two clean builds of one commit, compared byte for byte (ROADMAP §10.2,
+# DESIGN §3.6). REPRO_ARGS: see scripts/repro_build.py.
+repro:
+	python3 scripts/repro_build.py $(REPRO_ARGS)
+
 run: $(ISO)
 	$(QEMU_BASE) -serial stdio
 
@@ -283,6 +334,14 @@ layout: $(KERNEL_ELF)
 test-unit:
 	VIBEOS_TIER=$@ cargo test -p vibeos-core --lib --features std --target $(HOST_TRIPLE)
 	VIBEOS_TIER=$@ cargo test -p vibeos-core --doc --features std --target $(HOST_TRIPLE)
+	VIBEOS_TIER=$@ cargo test -p vibeos-hostlib-tests --target $(HOST_TRIPLE)
+
+# Loom models (C-LOOM): every `loom_*` test, each variant a `_fails` test that
+# passes only when loom finds its race. Own target dir: `--cfg loom` rebuilds
+# everything.
+.PHONY: models-quick
+models-quick:
+	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR)/loom RUSTFLAGS="--cfg loom -D warnings" LOOM_MAX_PREEMPTIONS=3 cargo test -p vibeos-core --lib --features std --release --target $(HOST_TRIPLE) -- loom_ --test-threads=1
 
 test-harness:
 	VIBEOS_TIER=$@ GITHUB_STEP_SUMMARY= python3 -m unittest discover -s tests/harness -t . -v
@@ -296,10 +355,7 @@ NBD_CACHE := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/nbd-cache
 VIBEFS_CAT := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/vibefs-cat
 
 ifneq ($(VIBEOS_PREBUILT),1)
-$(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT): $(shell find crates/core/src/fs/vibefs -type f -name '*.rs') \
-		tests/hostlib/src/bin/mkfs_vibefs.rs tests/hostlib/src/bin/fsck_vibefs.rs \
-		tests/hostlib/src/bin/nbd_cache.rs tests/hostlib/src/bin/vibefs_cat.rs \
-		tests/hostlib/Cargo.toml crates/core/Cargo.toml
+$(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT): $(HOSTLIB_DEPS)
 	cargo build -p vibeos-hostlib-tests --bins --target $(HOST_TRIPLE)
 endif
 
@@ -351,6 +407,11 @@ test-e2e-pit: $(ISO)
 test-e2e-highmem: $(ISO)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) VIBEOS_MEM=9G python3 tests/harness/run_e2e.py
 
+# Kernel command line through fw_cfg (BOOT.md §3.2): vibeos.strace=1 turns
+# the syscall trace on; the echo shows limine.conf's words, then the harness's.
+test-e2e-strace: $(ISO)
+	VIBEOS_TIER=test-e2e-strace VIBEOS_ISO=$(ISO) VIBEOS_CMDLINE=vibeos.strace=1 python3 -c 'from tests.harness.run_e2e import strace_main; raise SystemExit(strace_main())'
+
 test-kernel: $(ISO_KTEST)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) python3 tests/harness/run_ktest.py
 
@@ -367,7 +428,7 @@ test-vibefs-crash: $(ISO_VIBEFS_CRASH) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_VIBEFS_CRASH) VIBEOS_MKFS=$(MKFS_VIBEFS) VIBEOS_FSCK=$(FSCK_VIBEFS) \
 	    VIBEOS_NBD_CACHE=$(NBD_CACHE) VIBEOS_VIBEFS_CAT=$(VIBEFS_CAT) python3 tests/harness/run_vibefs_crash.py
 
-test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
+test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-strace test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
 
 # Longer high-CPU stress. Scheduled CI, not every push. ROADMAP §4.11.
 test-smp-stress: $(ISO_KTEST)
@@ -379,11 +440,10 @@ gate:
 	@test -n "$(PHASE)" || { echo "gate: set PHASE=N" >&2; exit 2; }
 	python3 scripts/gate.py --phase "$(PHASE)" $(if $(filter 1,$(RECORD)),--record) $(if $(COMMIT),--commit "$(COMMIT)")
 
+# Keeps build/results/ and a macOS build/OVMF.fd.
 clean:
-	rm -rf build/iso_root_* iso_root iso_root_panic iso_root_gp iso_root_ktest iso_root_vibefs_crash \
-	    $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_KTEST) $(ISO_VIBEFS_CRASH) \
-	    target-panic target-gp $(KERNEL_TESTS_DIR) $(KERNEL_VIBEFS_CRASH_DIR) \
-	    $(INITRD) initrd.fat \
+	rm -rf build/kernels build/iso_root_* $(ISOS) $(addsuffix .xorriso-version,$(ISOS)) \
+	    $(INITRD) \
 	    user/hello user/hello.bin user/init user/init.bin user/sh user/sh.bin \
 	    user/tests user/tests.bin
 	$(CARGO) clean
