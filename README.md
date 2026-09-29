@@ -37,7 +37,7 @@ No release exists yet: Phases 8 and 9 are tagged when Phase 10 closes the gate l
 Quickstart:
 
     ./setup.sh          # fetches Limine binaries, verifies host tools
-    make check          # fast local gate (fmt, host and kernel clippy, host units, harness, ruff/mypy, check scripts)
+    make check          # fast local gate (fmt, host and kernel clippy, host units, harness, ruff/mypy, check scripts, cargo deny)
     make                # kernel + build/vibeos.iso (hybrid BIOS/UEFI)
     make run            # QEMU window = PS/2; the terminal is COM1 (`-serial stdio`)
     make test           # host + harness units, e2e (BIOS, UEFI, panic, #GP, #MC, PIT, 9 GiB), in-guest, vibefs crash
@@ -80,4 +80,6 @@ Read [INVARIANTS.md](docs/INVARIANTS.md) and [PITFALLS.md](docs/PITFALLS.md) bef
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). Every ISO carries `/LICENSES/LICENSE` and
+`/LICENSES/THIRD-PARTY-NOTICES.txt`, the notices its third-party code requires;
+`python3 scripts/gen_notices.py --out <file>` regenerates the latter.

@@ -56,6 +56,21 @@ lint_tool() {
 }
 lint_tool ruff
 lint_tool mypy
+# cargo-deny, for `make check`'s `cargo deny check licenses bans sources`
+# (ROADMAP §10.9), against the version the check job pins. Reported, not
+# required: only the check job installs it.
+deny_pin=$(sed -n 's/^ *CARGO_DENY_VERSION: *//p' "$ROOT/.github/workflows/ci.yml" | head -n1)
+deny_install="cargo install cargo-deny --locked --version $deny_pin"
+if command -v cargo-deny >/dev/null 2>&1; then
+    deny_version=$(cargo-deny --version 2>&1 | sed -n 1p)
+    if [ "$deny_version" = "cargo-deny $deny_pin" ]; then
+        echo "setup: found cargo-deny ($deny_version)"
+    else
+        echo "setup: found $deny_version, not the pinned $deny_pin; $deny_install" >&2
+    fi
+else
+    echo "setup: missing required tool: cargo-deny (make check fails without it unless VIBEOS_ALLOW_MISSING_TOOLS=1; $deny_install)" >&2
+fi
 if command -v fsck.fat >/dev/null 2>&1; then
     echo "setup: found fsck.fat ($(fsck.fat --help 2>&1 | head -n1))"
 else
