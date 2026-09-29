@@ -295,10 +295,16 @@ and measured behaviour, or from sources whose license lets it into an MIT tree:
   tools or are free-licensed and fetched by SHA-256; copyrighted media is never committed.
 - A binary the project publishes (an image, a package, a release asset, or a workflow artifact
   anyone can download) carries the copyright and license notices its third-party code's licenses
-  require: `/LICENSES/` on an image, and the same file as an asset beside it in a release, generated
-  by ROADMAP §10.9's notices script. A copyleft binary also carries its source offer (ROADMAP
-  §14.10). Rule; not yet enforced: today's ISO carries Limine's binaries, the `limine` crate, and
-  Rust's `core` and `alloc` with no notice (ROADMAP §10.9).
+  require. Every ISO carries `/LICENSES/LICENSE`, vibeOS's own, and
+  `/LICENSES/THIRD-PARTY-NOTICES.txt`, which `scripts/mkiso.sh` generates with
+  `scripts/gen_notices.py` (ROADMAP §10.9): Limine's license and the texts of the projects its
+  `3RDPARTY.md` lists, kept in `third_party/limine/` with the release they came from; the license
+  files of every crate in the normal dependency graph of each shipped binary, from the registry or
+  `third_party/crates/`; Rust's `COPYRIGHT-library.html` notice for the standard library, with the
+  license texts it names; and the notice of each file a provenance header marks as adapted. Host
+  tests fail when an entry is missing or `third_party/limine/` names a release other than the one
+  `setup.sh` pins. Planned (ROADMAP §10.9): the same file as an asset beside the image in each
+  release. A copyleft binary also carries its source offer (ROADMAP §14.10).
 
 Why: one function derived from GPL code would put the kernel under the GPL, against the project's
 license. The kernel review's spot check found no such copy, but no rule said so. Adapted code is

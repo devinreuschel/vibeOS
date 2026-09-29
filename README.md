@@ -79,4 +79,6 @@ Read [INVARIANTS.md](docs/INVARIANTS.md) and [PITFALLS.md](docs/PITFALLS.md) bef
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). Every ISO carries `/LICENSES/LICENSE` and
+`/LICENSES/THIRD-PARTY-NOTICES.txt`, the notices its third-party code requires;
+`python3 scripts/gen_notices.py --out <file>` regenerates the latter.

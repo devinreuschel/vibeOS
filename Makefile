@@ -61,6 +61,10 @@ KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml crates/core/Cargo.toml build.rs linker.
 	scripts/gen_ksyms.py scripts/mkuserelf.py scripts/mkiso.sh \
 	user/hello.asm user/init.asm user/sh.asm user/tests.asm user/sys.inc \
 	.cargo/config.toml Cargo.lock
+# What mkiso.sh's /LICENSES/ notices are generated from (ROADMAP §10.9); the
+# crate graph comes from Cargo.lock, which the ELF already depends on.
+NOTICES_DEPS := LICENSE setup.sh scripts/gen_notices.py scripts/check_provenance.py \
+	$(wildcard third_party/limine/* third_party/limine/*/* third_party/crates/*/*)
 
 ifneq ($(VIBEOS_PREBUILT),1)
 LLVM_TOOL_DIR := $(shell rustc --print sysroot)/lib/rustlib/$(shell rustc -vV | sed -n 's/^host: //p')/bin
@@ -100,7 +104,7 @@ build/kernels/vibeos-$(1).elf: $(KERNEL_DEPS) $(PROFILE_STAMP)
 	python3 scripts/gen_ksyms.py --nm "$$(NM)" --check build/kernels/.vibeos-$(1)/vibeos build/kernels/vibeos-$(1).ksyms.rs
 	python3 scripts/check_kernel_fp.py --objdump "$$(OBJDUMP)" build/kernels/.vibeos-$(1)/vibeos
 	cp build/kernels/.vibeos-$(1)/vibeos $$@
-$(3): build/kernels/vibeos-$(1).elf $(INITRD) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py
+$(3): build/kernels/vibeos-$(1).elf $(INITRD) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
 	LIMINE_DIR=$$(LIMINE_DIR) scripts/mkiso.sh $$< $(INITRD) $$@ build/iso_root_$(1)
 endif
 endef
