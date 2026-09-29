@@ -17,13 +17,6 @@ use vibeos::limits::MAX_BOOT_MODULES;
 use vibeos::log::Level;
 use vibeos::paging::HHDM_BASE;
 
-#[cfg_attr(
-    not(feature = "kernel_tests"),
-    expect(
-        dead_code,
-        reason = "`dma_write`'s first production caller is ROADMAP §10.12's VMCOREINFO (P10-S82)"
-    )
-)]
 pub mod fw_cfg_init;
 
 #[cfg(feature = "kernel_tests")]

@@ -23,6 +23,7 @@ import tests.harness.run_ktest as run_ktest
 from tests.harness import frame, results
 from tests.harness.harness import (
     AP_ONLINE,
+    FORENSICS_DEVICES,
     HPET_OFF_MACHINE,
     ISA_DEBUG_FAIL,
     ISA_DEBUG_PASS,
@@ -49,6 +50,7 @@ from tests.harness.harness import (
     is_dump_banner,
     iter_lines_with_deadline,
     kernel_text,
+    ktest_devices,
     mce_monitor_cmd,
     overlay_env,
     qemu_argv,
@@ -1407,6 +1409,33 @@ class TestQemuArgv(unittest.TestCase):
         self.assertNotIn("-boot", argv)
         self.assertNotIn("-fw_cfg", argv)
         self.assertFalse(any("if=pflash" in a for a in argv))
+
+    def test_forensics_devices_on_every_boot(self) -> None:
+        self.assertEqual(
+            FORENSICS_DEVICES, ("-device", "pvpanic", "-device", "vmcoreinfo")
+        )
+        with _firmware() as fw:
+            cfgs = [
+                QemuConfig(iso="x.iso"),
+                QemuConfig(iso="x.iso", firmware=fw),
+                QemuConfig(iso="x.iso", hpet=False),
+            ]
+            argvs = [qemu_argv(c, "/tmp/mon") for c in cfgs]
+        for argv in argvs:
+            devices = [argv[i + 1] for i, a in enumerate(argv) if a == "-device"]
+            self.assertEqual(devices.count("pvpanic"), 1, argv)
+            self.assertEqual(devices.count("vmcoreinfo"), 1, argv)
+
+    def test_ktest_argv_has_forensics_devices(self) -> None:
+        cfg = QemuConfig(iso="x.iso", extra=ktest_devices("disk.img", 2))
+        argv = qemu_argv(cfg, "/tmp/mon")
+        devices = [argv[i + 1] for i, a in enumerate(argv) if a == "-device"]
+        self.assertEqual(devices.count("pvpanic"), 1)
+        self.assertEqual(devices.count("vmcoreinfo"), 1)
+        extra = list(ktest_devices("disk.img", 2))
+        self.assertEqual(argv[-len(extra) :], extra)
+        i = argv.index("vmcoreinfo")
+        self.assertEqual(argv[i - 3 : i + 1], list(FORENSICS_DEVICES))
 
     def test_display_none_by_default(self) -> None:
         argv = qemu_argv(QemuConfig(iso="x.iso"), None)

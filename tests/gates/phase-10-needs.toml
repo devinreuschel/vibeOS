@@ -1097,3 +1097,18 @@ needs = [
   "an in-guest test finds every",  # L1198
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "one VMCOREINFO note, in Linux's"
+needs = [
+  "a kernel command line: `cmdline:`",  # L1227
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "the log ring, TCB, and"
+needs = [
+  "portable code reaches atomics, fences,",  # L1433
+  "the §10.4 wake inbox's push",  # L1434
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
