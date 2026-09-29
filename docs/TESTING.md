@@ -212,6 +212,45 @@ When the run holds `vibeOS: ktest: ok serial_frame`, `_check_serial_frame` requi
 with each of the three as `?`, the second as the exact unframed line `?serial-frame open`, and the
 third framed on a later line of its own, since the kernel breaks the open user line first.
 
+Kernel stack depth (ROADMAP §10.2, DESIGN §4.5):
+
+```
+vibeOS: stack: <size> used <used> of <budget> by tid <tid> <name>
+vibeOS: stack: report <n> sizes <lost> lost
+```
+
+In `kernel_tests` builds `kva_init::alloc_guarded_stack` fills every new guarded stack with
+`vibeos::sched::stack_depth::PATTERN`: `spawn_inner`'s stacks, AP idle stacks and the registry's
+64 KiB stack. `cached_stack` fills a stack it takes from a CPU's stack cache again, after zeroing
+it and before the new thread's first frame goes on it. The switch tail (`finish_switch`) scans the
+dead-stack slot's stack before it caches it or links it onto the dead list, and records the bytes
+from the lowest word that no longer holds the pattern to the top, for the thread that just switched
+off it. Just before `vibeOS: ktest: end` the registry scans every live thread's stack, one `SCHED`
+section per thread (`thread_init::testing::scan_live_stacks`), and prints one `stack:` line per
+stack size with the deepest use seen and the thread that reached it, then the report line: `<n>`
+sizes, and `<lost>` records of a ninth size the table (8 sizes) had no room for. The budget is the
+stack's size minus 4 KiB, the room DESIGN §4.5 keeps for a hard-IRQ top half and its entry frame.
+`run_ktest.py`'s `check_stack_depth` fails a boot that has no report line, a `lost` other than 0,
+a size line count other than `<n>`, or a use over its stack's budget, and appends the lines to
+`$GITHUB_STEP_SUMMARY` when it is set, one block per boot: they are the budget's evidence. A top
+half with its entry frame over 4 KiB that pushes a path over is DESIGN §4.5's fallback, per-CPU
+interrupt stacks. `stack_depth_exit_scan` spawns a 16 KiB worker that puts 4 KiB on its stack and
+requires its exit record between 4 KiB and the budget. When `VIBEOS_KTEST` is unset, `make
+test-kernel` also runs the planted stack boot (`_planted_boot`, through `_single_test_boot`, which
+boots one test on a fresh disk): the opt-in `stack_depth_planted`, whose thread `stack-plant`
+recurses 13 levels of a 1 KiB array with IF=0, so no top half lands at depth, and requires an exit
+record of at least 13 KiB. That boot passes only when `check_planted` finds the report whole and
+`stack-plant` the one use over budget; it records `stack_depth_planted` in the results file.
+Then the FAT stack boot (`_fat_boot`, ROADMAP §10.4, F058): the opt-in `fat_vda_16k_stack` alone
+on a fresh disk, since it overwrites `vda`'s first 256 KiB with a FAT32 image through the block
+cache. Its worker, started with `spawn_on`'s 16 KiB stack on a CPU that has a virtio-blk queue
+vector (`virtio_blk_init::queue_vector`), mounts `vda` through the File API, writes 64 KiB at offset
+100 and reads it back, and unmounts; while it writes, `fs::ktest::on_cache_write`, which `fat_init`'s
+`Io::write` calls before each block-cache write, sends that CPU a self-IPI on the vector whenever IF
+is on, so the virtio-blk top half lands on the write path. The test requires at least 64 self-IPIs
+and no send error, at least as many new top-half runs, and the worker's exit depth within budget;
+the boot requires its `ok` line and the stack check as every boot does.
+
 When a test fails, print enough to diagnose it without a rerun. A failing test that only prints its
 name costs a full debug cycle to learn anything.
 

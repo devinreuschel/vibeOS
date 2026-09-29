@@ -122,6 +122,111 @@ def _check_serial_frame(lines: list[str]) -> None:
         )
 
 
+# Kernel stack depth (TESTING.md §8.2, DESIGN §4.5): one line per stack
+# size and a report line, just before `vibeOS: ktest: end`.
+STACK_MARGIN = 4096
+_STACK_LINE_RE = re.compile(
+    r"vibeOS: stack: (\d+) used (\d+) of (\d+) by tid (\d+) (\S+)"
+)
+_STACK_REPORT_RE = re.compile(r"vibeOS: stack: report (\d+) sizes (\d+) lost")
+
+
+@dataclasses.dataclass(frozen=True)
+class StackDepth:
+    """The deepest use of one stack size, and the thread that reached it."""
+
+    size: int
+    used: int
+    tid: int
+    name: str
+
+    @property
+    def budget(self) -> int:
+        """The stack's size minus DESIGN §4.5's 4 KiB margin."""
+        return max(self.size - STACK_MARGIN, 0)
+
+    @property
+    def over(self) -> bool:
+        return self.used > self.budget
+
+    def line(self) -> str:
+        return (
+            f"vibeOS: stack: {self.size} used {self.used} of {self.budget} "
+            f"by tid {self.tid} {self.name}"
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class StackReport:
+    """A boot's stack lines: `sizes` and `lost` from the report line
+    (`None` when the boot printed none), and each size's deepest use."""
+
+    depths: tuple[StackDepth, ...]
+    sizes: int | None
+    lost: int | None
+
+    @property
+    def over(self) -> tuple[StackDepth, ...]:
+        return tuple(d for d in self.depths if d.over)
+
+    def problems(self) -> list[str]:
+        """Why the report fails the boot: no report line, a size line
+        count that differs from it, a `lost` other than 0, or a use over
+        its stack's budget."""
+        if self.sizes is None or self.lost is None:
+            return ["no `vibeOS: stack: report` line"]
+        out: list[str] = []
+        if self.sizes != len(self.depths):
+            out.append(f"report names {self.sizes} sizes, {len(self.depths)} lines printed")
+        if self.lost != 0:
+            out.append(f"{self.lost} stack sizes lost")
+        out += [
+            f"tid {d.tid} {d.name} used {d.used} of {d.size}, over its budget {d.budget}"
+            for d in self.over
+        ]
+        return out
+
+
+def check_stack_depth(lines: Iterable[str], *, enforce: bool = True) -> StackReport:
+    """Parse a boot's stack lines (kernel text, `frame.kernel_lines`).
+    With `enforce`, raise `HarnessError` for any of
+    `StackReport.problems` (ROADMAP §10.2)."""
+    depths: list[StackDepth] = []
+    sizes = lost = None
+    for ln in lines:
+        m = _STACK_LINE_RE.fullmatch(ln)
+        if m is not None:
+            depths.append(
+                StackDepth(int(m.group(1)), int(m.group(2)), int(m.group(4)), m.group(5))
+            )
+            continue
+        r = _STACK_REPORT_RE.fullmatch(ln)
+        if r is not None:
+            sizes, lost = int(r.group(1)), int(r.group(2))
+    report = StackReport(tuple(depths), sizes, lost)
+    if enforce:
+        bad = report.problems()
+        if bad:
+            raise HarnessError("stack depth: " + "; ".join(bad))
+    return report
+
+
+def write_stack_summary(label: str, report: StackReport) -> None:
+    """Append the boot's stack lines to `$GITHUB_STEP_SUMMARY` when it is
+    set: the budget's evidence (ROADMAP §10.2)."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    out = [f"### kernel stack depth: {label}", ""]
+    out += [f"- `{d.line()}`" + (" **over budget**" if d.over else "") for d in report.depths]
+    if report.sizes is None:
+        out.append("- no report line")
+    else:
+        out.append(f"- `vibeOS: stack: report {report.sizes} sizes {report.lost} lost`")
+    with open(path, "a", encoding="utf-8") as f:
+        f.write("\n".join(out) + "\n\n")
+
+
 def _block_name(name: str) -> Callable[[str], bool]:
     def pred(ln: str) -> bool:
         bits = ln.split()
@@ -145,18 +250,29 @@ def ran(lines: Iterable[str], name: str) -> bool:
 PERSIST_TEST = "block_persist"
 
 
-def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool) -> RunResult:
+def _ktest_boot(
+    cfg: QemuConfig,
+    timeout: float,
+    *,
+    persist_reboot: bool,
+    label: str = "ktest",
+    enforce_stack: bool = True,
+) -> RunResult:
     """One ktest QEMU. It never retries (ROADMAP §10.2, F021).
 
-    A timeout, a `FAIL` line, a panic signature, or a missing marker raises
-    `HarnessError` from this one boot. The persist lines are required only
-    when the boot ran `block_persist`.
+    A timeout, a `FAIL` line, a panic signature, a missing marker, or a
+    stack depth report `check_stack_depth` refuses (unless not
+    `enforce_stack`) raises `HarnessError` from this one boot. The persist
+    lines are required only when the boot ran `block_persist`. The stack
+    lines go to the job summary under `label`.
     """
     raw = run_qemu_until_exit(cfg, timeout_s=timeout)
     results.current().add_boot(qemu_argv(cfg, None), cfg, raw.exit_code)
     klines = frame.kernel_lines(raw.lines)
     results.current().record_ktest_lines(klines)
     check_ktest_output(raw.lines, raw.exit_code)
+    write_stack_summary(label, check_stack_depth(klines, enforce=False))
+    check_stack_depth(klines, enforce=enforce_stack)
     if SERIAL_WHOLE_OK in klines:
         _check_serial_whole(klines)
     if SERIAL_FRAME_OK in klines:
@@ -226,7 +342,13 @@ def check_select_run(lines: Iterable[str], expected: dict[str, int], absent: Ite
 
 
 def _proof_boot(
-    env: EnvConfig, label: str, *, ktest: str, repeat: int | None, cmdline: str = ""
+    env: EnvConfig,
+    label: str,
+    *,
+    ktest: str,
+    repeat: int | None,
+    cmdline: str = "",
+    enforce_stack: bool = True,
 ) -> RunResult:
     """One proof boot on a fresh disk, with its own selection."""
     penv = dataclasses.replace(
@@ -235,7 +357,13 @@ def _proof_boot(
     disk = make_disk(DISK_BYTES, "vibeos-vblk-")
     try:
         cfg = penv.qemu(extra=ktest_devices(disk, env.smp), boot_order="d")
-        raw = _ktest_boot(cfg, env.timeout, persist_reboot=False)
+        raw = _ktest_boot(
+            cfg,
+            env.timeout,
+            persist_reboot=False,
+            label=f"{env.tier} {label}",
+            enforce_stack=enforce_stack,
+        )
     finally:
         try:
             os.unlink(disk)
@@ -268,6 +396,57 @@ def _repeat_boot(env: EnvConfig) -> None:
     """`reap_many_via_idle` 20 times in one boot (ROADMAP §10.2, F074)."""
     raw = _proof_boot(env, "repeat", ktest=REPEAT_TEST, repeat=REPEAT_N)
     check_select_run(raw.lines, {REPEAT_TEST: REPEAT_N}, ())
+
+
+# The planted stack boot (ROADMAP §10.2): `stack_depth_planted` recurses at
+# least 13 KiB on a 16 KiB stack, over its 12 KiB budget.
+PLANT_TEST = "stack_depth_planted"
+PLANT_THREAD = "stack-plant"
+
+
+def check_planted(report: StackReport) -> None:
+    """The planted boot's verdict: the report is whole, and the one use
+    over budget is thread `stack-plant`'s. Raises `HarnessError`."""
+    over = [d.name for d in report.over]
+    if over != [PLANT_THREAD]:
+        raise HarnessError(f"planted stack: over budget {over}, want [{PLANT_THREAD!r}]")
+    rest = [p for p in report.problems() if f" {PLANT_THREAD} used " not in p]
+    if rest:
+        raise HarnessError("planted stack: " + "; ".join(rest))
+
+
+def _single_test_boot(
+    env: EnvConfig, test: str, label: str, *, enforce_stack: bool = True
+) -> RunResult:
+    """One boot of test `test` alone (`VIBEOS_KTEST`), on a fresh disk."""
+    return _proof_boot(env, label, ktest=test, repeat=None, enforce_stack=enforce_stack)
+
+
+def _planted_boot(env: EnvConfig) -> None:
+    """The expect-fail stack boot: `stack_depth_planted` alone, which passes
+    only when `check_stack_depth` names `stack-plant` over budget and
+    nothing else fails (ROADMAP §10.2)."""
+    try:
+        raw = _single_test_boot(env, PLANT_TEST, "planted stack", enforce_stack=False)
+        check_planted(check_stack_depth(frame.kernel_lines(raw.lines), enforce=False))
+    except HarnessError:
+        _record(PLANT_TEST, False)
+        raise
+    _record(PLANT_TEST, True)
+    print(f"[ktest] planted stack: {PLANT_THREAD} over budget, as planted", file=sys.stderr)
+
+
+# The FAT stack boot (ROADMAP §10.4, F058): a disk-backed FAT mount and a
+# 64 KiB write on `vda` from a 16 KiB stack, in its own boot on a fresh disk,
+# since its image overwrites the GPT `vda` boots with.
+FAT_STACK_TEST = "fat_vda_16k_stack"
+
+
+def _fat_boot(env: EnvConfig) -> None:
+    """`fat_vda_16k_stack` alone; the stack check is enforced as in every
+    boot, and its `ok` line is required."""
+    raw = _single_test_boot(env, FAT_STACK_TEST, "fat 16k stack")
+    check_select_run(raw.lines, {FAT_STACK_TEST: 1}, ())
 
 
 def print_ktest_summary(summary: KtestSummary, exit_code: int | None) -> None:
@@ -359,7 +538,7 @@ def main() -> int:
     try:
         cfg = env.qemu(extra=ktest_devices(disk, env.smp), boot_order="d")
         try:
-            raw = _ktest_boot(cfg, env.timeout, persist_reboot=False)
+            raw = _ktest_boot(cfg, env.timeout, persist_reboot=False, label=env.tier)
         except HarnessError as e:
             print(f"[ktest] FAIL: {e}", file=sys.stderr)
             return 1
@@ -367,7 +546,9 @@ def main() -> int:
 
         if not skip_persist and ran(raw.lines, PERSIST_TEST):
             try:
-                _ktest_boot(cfg, env.timeout, persist_reboot=True)
+                _ktest_boot(
+                    cfg, env.timeout, persist_reboot=True, label=f"{env.tier} persist reboot"
+                )
             except HarnessError as e:
                 print(f"[ktest] FAIL persist reboot: {e}", file=sys.stderr)
                 return 1
@@ -388,6 +569,8 @@ def main() -> int:
         proofs.append(("repeat boot", _repeat_boot))
     if env.smp >= 2:
         proofs.append(("deadline trip boot", ktest_deadline_trip))
+    proofs.append(("planted stack boot", _planted_boot))
+    proofs.append(("fat 16k stack boot", _fat_boot))
     for label, proof in proofs:
         try:
             proof(env)

@@ -277,9 +277,40 @@ large enough to overflow the boot stack Limine provides, and it faults on entry 
 anything. The kernel asks Limine for a 256 KiB stack for the steps before `per_cpu: bsp ready`, and
 from that step on boot runs on a real, guarded stack: the bootstrap thread's 64 KiB KVA stack
 (§4.5), where an overflow faults on the guard page. If a boot function needs a big frame, box it or
-run it after that step; do not rely on the optimizer. Planned (ROADMAP §10.2): a `make check` script bounds each function's
-frame at a value recorded here. The bound is a screen for one oversized frame; §4.5's measured
-budget is what bounds a whole path.
+run it after that step; do not rely on the optimizer.
+
+The frame screen (ROADMAP §10.2, F058): `scripts/check_stack_sizes.py`, in `make check`, which builds
+the default kernel ELF first (`make kernel`, the dev profile `make` builds), fails when a function
+reachable from a syscall or a shell command has a frame over `BOUND_BYTES` = 7168 bytes. Interrupts
+land on the interrupted thread's kernel stack (§2.2) and syscall bodies take them (§2.9), so one
+frame near 16 KiB leaves no room for the path around it and a hard-IRQ top half with its entry frame,
+which §4.5's 4 KiB margin is for. The kernel target's rustflags carry `-Z emit-stack-sizes`, and
+`linker.ld` keeps `.stack_sizes` as an `INFO` (non-alloc) section; the script reads it and the
+section and symbol tables with the standard library, and the call graph from `llvm-objdump -d`. The
+roots are `vibeos_syscall_entry` and every address-taken function: one whose address a code operand
+names other than as a direct call or jump target, or an aligned 8-byte word of allocated data other
+than the ksyms table, which names every function for backtraces (an address a `linker.ld` symbol
+also names, such as `__text_start`, the first function's, is not taken by being loaded; and
+`NOT_ROOTS` names `boot_rest`, the boot's continuation on the bootstrap thread's 64 KiB stack, which
+runs before any syscall or shell command). That covers
+the shell commands through their registry, the table syscalls, the `dyn InodeOps` vtables, and
+thread and IRQ entries, and makes the rule conservative at every indirect call. From the roots it
+follows direct calls and jumps into other functions (tail calls). Precompiled `core`, `alloc` and
+`compiler_builtins` carry no entries; `--report N` lists them with the `N` largest frames, and they
+never fail. An entry whose address is no function start, one the link discarded, is skipped.
+
+The bound is 7168 bytes, not the 4096 the box started from: measured on the dev profile at the
+commit that added the screen, the reachable frames over 4096 outside the FAT stack work were
+`block_init::fail_rest` and `virtio_blk_init::fail_rest` (7048 each), `vibefs::Vol::sync` (5768),
+`vibefs::commit::mount` (4856), `vibefs_init::mount_dev` (4472) and `virtio_blk_init::blk_work`
+(4296), and 7168 is the smallest multiple of 1024 above them. It stays below the 12760-byte frame
+`fat_init::mount_dev` had while it built `FatVol` by value, which the screen names. Three frames
+are over even that and are listed in the script's `KNOWN_OVER`, each with the frame it may not grow
+past, and an entry fails once its function is back under the bound: the virtio-blk probe
+(`BlkDriver::probe`, 16824 bytes, through the `dyn Driver` vtable) and the tmpfs instance of the
+block cache's `cached_read` and `cached_write` (8424 and 8360 bytes, on the read and write
+syscalls through kernfs). The ROADMAP box closes when that list is empty. The screen is for one
+oversized frame; §4.5's measured budget is what bounds a whole path.
 
 Neither profile writes a host path into what ships. Every cargo build the Makefile runs for a shipped
 artifact goes through `CARGO_SHIP`, which sets Cargo's `trim-paths = "all"` for the profile being

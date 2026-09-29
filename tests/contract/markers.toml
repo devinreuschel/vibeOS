@@ -1147,6 +1147,22 @@ arch = "both"
 source = "kernel"
 section = "§10.2"
 
+# Kernel stack depth (TESTING.md §8.2): one line per stack size, then the
+# report line, just before `vibeOS: ktest: end`; run_ktest.py checks them.
+[[marker]]
+text = "vibeOS: stack: <size> used <used> of <budget> by tid <tid> <name>"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.2"
+
+[[marker]]
+text = "vibeOS: stack: report <n> sizes <lost> lost"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.2"
+
 [[marker]]
 text = "vibeOS: ktest: FAIL <name>: deadline"
 kind = "failure"

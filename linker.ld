@@ -94,6 +94,12 @@ SECTIONS
     . = ALIGN(4K);
     __kernel_vma_end = .;
 
+    /* Frame sizes from -Z emit-stack-sizes: INFO, so nothing maps or loads
+     * them; scripts/check_stack_sizes.py reads them from the ELF. */
+    .stack_sizes 0 (INFO) : {
+        KEEP(*(.stack_sizes))
+    }
+
     /DISCARD/ : {
         *(.eh_frame*)
         *(.note .note.*)

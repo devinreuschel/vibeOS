@@ -46,7 +46,7 @@ These rules come from [KERNEL_REVIEW.md §8.1](docs/reviews/KERNEL_REVIEW.md#81-
 ## How to run
 
     ./setup.sh          # Limine clone + host-tool check (verifies pinned Limine commit)
-    make check          # fast local gate (fmt, host and kernel clippy, host units, harness, ruff/mypy, check scripts, cargo deny)
+    make check          # fast local gate (fmt, host and kernel clippy, host units, harness, ruff/mypy, the default kernel ELF, check scripts, cargo deny)
     make                # kernel + build/vibeos.iso
     make run            # QEMU window = PS/2; the terminal is COM1
     make test-unit      # vibeos-core unit tests on the host triple
@@ -59,7 +59,7 @@ These rules come from [KERNEL_REVIEW.md §8.1](docs/reviews/KERNEL_REVIEW.md#81-
 
 Kernel target is built-in `x86_64-unknown-none` (B2); user programs build for `x86_64-unknown-linux-musl`, linked by `rust-lld` with no C compiler (ROADMAP §10.5). `./setup.sh` runs `rustup target add` for both.
 
-`make check` needs `ruff`, `mypy` and `cargo-deny` at the versions the `check` job in `.github/workflows/ci.yml` pins (`./setup.sh` prints cargo-deny's install command), and `fsck.fat` (`dosfstools`) for the FAT host tests, and it fails when one is missing. `VIBEOS_ALLOW_MISSING_TOOLS=1` is a gate switch, not one of the `VIBEOS_*` QEMU overrides `harness.py` reads: the Makefile and the FAT host test read it, skip each check whose tool is missing, and print the check they skipped. CI never sets it. `make check` also builds `vibeos-core` with its MSRV toolchain, which `./setup.sh` installs, and fails without it on the same terms.
+`make check` builds the default kernel ELF, so it needs `nasm`, and it needs `ruff`, `mypy` and `cargo-deny` at the versions the `check` job in `.github/workflows/ci.yml` pins (`./setup.sh` prints cargo-deny's install command), and `fsck.fat` (`dosfstools`) for the FAT host tests, and it fails when one is missing. `VIBEOS_ALLOW_MISSING_TOOLS=1` is a gate switch, not one of the `VIBEOS_*` QEMU overrides `harness.py` reads: the Makefile and the FAT host test read it, skip each check whose tool is missing, and print the check they skipped. CI never sets it. `make check` also builds `vibeos-core` with its MSRV toolchain, which `./setup.sh` installs, and fails without it on the same terms.
 
 `VIBEOS_*` overrides: `SMP`, `QEMU_CPU`, `MEM`, `QEMU_ACCEL` (default `tcg`), `ISO`, `TIMEOUT`, `BIOS` (`uefi` boots the probed UEFI firmware), `FW_X86_64` (the firmware code image `uefi` boots), `QEMU_EXTRA`. One reader, which holds the only defaults: `tests/harness/harness.py` (`env_config`); the Makefile sets none. `make run`, `make run-panic` and `make debug` honour the same settings: they start QEMU through `tests/harness/run_interactive.py`.
 

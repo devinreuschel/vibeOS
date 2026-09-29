@@ -109,12 +109,42 @@ pub fn alloc_guarded_stack(pages: usize) -> Result<GuardedStack, KvaError> {
         return Err(e);
     }
     shoot_span(base, pages);
+    #[cfg(feature = "kernel_tests")]
+    fill_stack(base, pages);
     // SAFETY: `[guard, guard + (pages + 1) pages)` came from
     // `Kva::alloc_guarded(pages)` above, upper page `i` maps `frames[i]`
     // (the loop above), the other slots are `None`, the guard page was
     // never mapped, and this is the only handle built for the range (the
     // contract `GuardedStack::from_raw_parts` states, established here).
     Ok(unsafe { GuardedStack::from_raw_parts(guard, pages, frames) })
+}
+
+/// Fill a fresh stack's `pages` mapped pages above `base` with
+/// `stack_depth::PATTERN`, for the depth scan (DESIGN §4.5, TESTING §8.2).
+#[cfg(feature = "kernel_tests")]
+fn fill_stack(base: VirtAddr, pages: usize) {
+    let words = pages * (PAGE_SIZE as usize / 8);
+    // SAFETY: `alloc_guarded_stack` mapped `[base, base + pages)` writable
+    // from fresh frames and shot the span down, and no handle to it exists
+    // yet, so nothing else reads or writes it; established here.
+    let s = unsafe { core::slice::from_raw_parts_mut(base.as_u64() as *mut u64, words) };
+    vibeos::sched::stack_depth::fill(s);
+}
+
+/// Fill `stack` with `stack_depth::PATTERN` again, before a thread reuses
+/// it (`thread_init::spawn_inner`).
+///
+/// # Safety
+/// No thread runs on `stack` and nothing else reads or writes its pages
+/// until the call returns.
+#[cfg(feature = "kernel_tests")]
+pub unsafe fn refill_stack(stack: &GuardedStack) {
+    let words = stack.pages() * (PAGE_SIZE as usize / 8);
+    // SAFETY: the handle's `pages` pages above `base` are mapped writable
+    // (`mm::kva_init::alloc_guarded_stack`), and the caller keeps every
+    // other accessor off them (this fn's contract); established here.
+    let s = unsafe { core::slice::from_raw_parts_mut(stack.base().as_u64() as *mut u64, words) };
+    vibeos::sched::stack_depth::fill(s);
 }
 
 /// Return each held frame to the buddy. Only after the pages that mapped

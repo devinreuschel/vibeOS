@@ -28,7 +28,8 @@ fn has_discard() -> bool {
     features() & F_DISCARD != 0
 }
 
-fn top_hits() -> u32 {
+/// Runs of the virtio-blk top half (`blk_top`).
+pub(crate) fn top_hits() -> u32 {
     virtio_blk_init::TOP_HITS.load(Ordering::Acquire)
 }
 

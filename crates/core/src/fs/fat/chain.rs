@@ -25,14 +25,16 @@ impl FatVol {
         }
     }
 
+    /// Read cluster `clu` into `buf`; its size. An associated fn over
+    /// `info`, so a caller can pass its own `clbuf`.
     pub(super) fn read_cluster<D: Disk>(
-        &mut self,
+        info: &FatInfo,
         d: &mut D,
         clu: u32,
         buf: &mut [u8],
     ) -> Result<usize, FatError> {
-        let n = self.info.clus_bytes();
-        let lba = self.info.clus_lba(clu)?;
+        let n = info.clus_bytes();
+        let lba = info.clus_lba(clu)?;
         let dst = buf.get_mut(..n).ok_or(FatError::Inval)?;
         let (secs, _) = dst.as_chunks_mut::<SEC>();
         for (i, sec) in (0u32..).zip(secs) {
@@ -42,9 +44,13 @@ impl FatVol {
     }
 
     pub(super) fn zero_cluster<D: Disk>(&mut self, d: &mut D, clu: u32) -> Result<(), FatError> {
-        let z = [0u8; MAX_CLUS_BYTES];
         let n = self.info.clus_bytes();
-        self.write_cluster(d, clu, z.get(..n).ok_or(FatError::Corrupt)?)
+        Self::write_cluster(
+            &self.info,
+            d,
+            clu,
+            ZERO_CLUSTER.get(..n).ok_or(FatError::Corrupt)?,
+        )
     }
 
     pub(super) fn fat_get<D: Disk>(&mut self, d: &mut D, clu: u32) -> Result<u32, FatError> {

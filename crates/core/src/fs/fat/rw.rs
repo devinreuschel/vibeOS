@@ -526,15 +526,14 @@ impl FatVol {
                 return Err(FatError::Corrupt);
             }
         }
-        let mut clbuf = [0u8; MAX_CLUS_BYTES];
         let mut rest: &mut [u8] = buf;
         while !rest.is_empty() {
             if clu < 2 || is_eoc(clu) {
                 rest.fill(0);
                 break;
             }
-            let n = self.read_cluster(d, clu, &mut clbuf)?;
-            let src = clbuf.get(pin..n).ok_or(FatError::Corrupt)?;
+            let n = Self::read_cluster(&self.info, d, clu, &mut self.clbuf)?;
+            let src = self.clbuf.get(pin..n).ok_or(FatError::Corrupt)?;
             let take = src.len().min(rest.len());
             let (head, tail) = core::mem::take(&mut rest)
                 .split_at_mut_checked(take)
@@ -569,20 +568,24 @@ impl FatVol {
             }
             s = s.checked_add(1).ok_or(FatError::Corrupt)?;
         }
-        let mut clbuf = [0u8; MAX_CLUS_BYTES];
         let mut rest = buf;
         while !rest.is_empty() {
             if clu < 2 || is_eoc(clu) {
                 return Err(FatError::Corrupt);
             }
-            let n = self.read_cluster(d, clu, &mut clbuf)?;
-            let dst = clbuf.get_mut(pin..n).ok_or(FatError::Corrupt)?;
+            let n = Self::read_cluster(&self.info, d, clu, &mut self.clbuf)?;
+            let dst = self.clbuf.get_mut(pin..n).ok_or(FatError::Corrupt)?;
             let take = dst.len().min(rest.len());
             let (head, tail) = rest.split_at_checked(take).ok_or(FatError::Corrupt)?;
             dst.get_mut(..take)
                 .ok_or(FatError::Corrupt)?
                 .copy_from_slice(head);
-            self.write_cluster(d, clu, clbuf.get(..n).ok_or(FatError::Corrupt)?)?;
+            Self::write_cluster(
+                &self.info,
+                d,
+                clu,
+                self.clbuf.get(..n).ok_or(FatError::Corrupt)?,
+            )?;
             rest = tail;
             pin = 0;
             if rest.is_empty() {

@@ -348,6 +348,13 @@ needs = [
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
+[[box]]
+key = "a `make check` script reads"
+needs = [
+  "a disk-backed FAT mount fits",  # L1341
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
 # Lands-after, lands-with and lands-before clauses in box text.
 
 [[box]]

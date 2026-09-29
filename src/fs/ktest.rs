@@ -13,11 +13,13 @@ mod hooks;
 mod initrd;
 mod ops;
 mod slots;
+mod stack16k;
 
 use hooks::{link_path, symlink_path, truncate_path};
 pub(crate) use initrd::test_initrd_module_sized;
 pub(crate) use ops::{test_vfs_backends_via_ops, test_vfs_fat_one_inode};
 pub(crate) use slots::test_fs_drop_slot_busy_keeps_slot;
+pub(crate) use stack16k::{fat_vda_16k_stack, on_cache_write};
 
 use crate::fat_init;
 use crate::file_init;
@@ -1342,4 +1344,8 @@ pub(crate) const TESTS: &[Test] = &[
         test_fs_drop_slot_busy_keeps_slot,
     )
     .deadline(26_000),
+    test("fat_vda_16k_stack", fat_vda_16k_stack)
+        .deadline(30_000)
+        .opt_in()
+        .once(),
 ];
