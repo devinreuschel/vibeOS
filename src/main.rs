@@ -237,7 +237,7 @@ fn normal_boot_tail() {
 
     // Phase 6 slice A: scan → list → bind. Marker before `shell ready`
     // so lspci is available once the shell thread runs.
-    crate::pci_init::init();
+    crate::pci_init::init(crate::dev_init::push);
     crate::work_init::init();
     crate::virtio_init::init();
     crate::virtio_blk_init::init();
