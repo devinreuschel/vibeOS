@@ -913,3 +913,30 @@ needs = [
   "one registry of counted block-device",  # L1342
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1513
+[[box]]
+key = "`part_init` registers a child for"
+needs = [
+  "one registry of counted block-device",  # L1342
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L859
+[[box]]
+key = "GPT and MBR partition tables"
+needs = [
+  "one registry of counted block-device",  # L1342
+  "`parse_mbr` copies the four primary",  # L1512
+  "`part_init` registers a child for",  # L1513
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L881
+[[box]]
+key = "MBR parsing including extended and"
+needs = [
+  "`parse_mbr` copies the four primary",  # L1512
+  "`part_init` registers a child for",  # L1513
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
