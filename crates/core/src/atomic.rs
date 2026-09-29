@@ -36,7 +36,7 @@ pub fn compiler_fence(order: Ordering) {
 
 /// `std::thread_local!` for the stub port's host build, loom's under
 /// `cfg(loom)`.
-#[cfg(all(not(loom), feature = "std"))]
+#[cfg(all(not(loom), any(test, feature = "std")))]
 pub use std::thread_local;
 
 #[cfg(loom)]

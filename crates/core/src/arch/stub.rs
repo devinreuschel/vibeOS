@@ -3,6 +3,9 @@
 //!
 //! Compiled in host builds only. Its state is per host thread, so parallel
 //! tests never share it, and settable through the free functions below. Each
+//! host thread starts as its own CPU: `cpu_id` differs between live threads,
+//! so an `IrqCell` two threads contend is taken in turn, not read as
+//! re-entry. Each
 //! seam call that has an effect records an [`Event`] in a bounded log that a
 //! test reads with [`take_events`]. The stub holds no assembly: `switch`
 //! records the switch and returns, and user addresses are host pointers.
@@ -14,6 +17,7 @@ use super::{
     Barriers, BootHandover, ContextSwitch, CycleCounter, InterruptMask, Ipi, IpiSend, MmioWidth,
     PageTable, PerCpuBase, Port, SyscallAbi, UserAccess,
 };
+use crate::atomic::statics::AtomicU32;
 use crate::atomic::{Ordering, fence};
 use crate::paging::{PhysAddr, VirtAddr};
 
@@ -173,6 +177,8 @@ struct State {
     freq_hz: Option<u64>,
     irqs_on: bool,
     cpu_id: u32,
+    /// This thread's own CPU id, which `reset` restores.
+    home_cpu: u32,
     root: u64,
     refuse_ipis: bool,
     user_fault: Option<u64>,
@@ -186,6 +192,7 @@ impl State {
         freq_hz: Some(1_000_000_000),
         irqs_on: true,
         cpu_id: 0,
+        home_cpu: 0,
         root: 0,
         refuse_ipis: false,
         user_fault: None,
@@ -210,8 +217,25 @@ impl State {
     }
 }
 
-std::thread_local! {
-    static STATE: RefCell<State> = const { RefCell::new(State::DEFAULT) };
+/// The CPU id the next host thread's state starts with. A `static`, so
+/// `core`'s atomic (C-ATOMICS). Ids are never reused: no portable code
+/// indexes a per-CPU table by the stub's `cpu_id`.
+static NEXT_CPU: AtomicU32 = AtomicU32::new(0);
+
+/// A new thread's state: the defaults, on a CPU id no other thread started
+/// with.
+fn thread_state() -> State {
+    // Relaxed: the counter only hands out distinct ids; it orders nothing.
+    let id = NEXT_CPU.fetch_add(1, Ordering::Relaxed);
+    State {
+        cpu_id: id,
+        home_cpu: id,
+        ..State::DEFAULT
+    }
+}
+
+crate::atomic::thread_local! {
+    static STATE: RefCell<State> = RefCell::new(thread_state());
 }
 
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
@@ -226,10 +250,16 @@ fn addr<T>(p: *const T) -> u64 {
     p as usize as u64
 }
 
-/// Restore the defaults: cycles 0, step 1, 1 GHz, IRQs on, CPU 0, root 0,
-/// IPIs accepted, no user fault, and an empty log.
+/// Restore the defaults: cycles 0, step 1, 1 GHz, IRQs on, this thread's
+/// own CPU id, root 0, IPIs accepted, no user fault, and an empty log.
 pub fn reset() {
-    with(|s| *s = State::DEFAULT);
+    with(|s| {
+        *s = State {
+            cpu_id: s.home_cpu,
+            home_cpu: s.home_cpu,
+            ..State::DEFAULT
+        }
+    });
 }
 
 /// Set the counter's next read.
@@ -247,7 +277,7 @@ pub fn set_freq_hz(v: Option<u64>) {
     with(|s| s.freq_hz = v);
 }
 
-/// Set what `cpu_id` returns.
+/// Set what `cpu_id` returns on this thread, until `reset`.
 pub fn set_cpu_id(v: u32) {
     with(|s| s.cpu_id = v);
 }
@@ -613,6 +643,7 @@ mod tests {
     #[test]
     fn portable_core_on_stub_port() {
         reset();
+        set_cpu_id(0);
         let mut reg = 0u32;
         let mut user = [0u8; 4];
         let reg_p: *mut u32 = &mut reg;
@@ -738,13 +769,47 @@ mod tests {
         reset();
         set_cpu_id(3);
         let held = Arch::save_disable();
-        let (cpu, on) = std::thread::spawn(|| (Arch::cpu_id(), Arch::enabled()))
-            .join()
-            .unwrap();
-        assert_eq!((cpu, on), (0, true));
+        let (cpu, on) = std::thread::spawn(|| {
+            let fresh = (Arch::cpu_id(), Arch::enabled());
+            set_cpu_id(7);
+            fresh
+        })
+        .join()
+        .unwrap();
+        assert!(on);
+        assert_ne!(cpu, 3);
         assert_eq!(Arch::cpu_id(), 3);
         assert!(!Arch::enabled());
         Arch::restore(held);
+    }
+
+    #[test]
+    fn stub_cpu_id_per_thread() {
+        use std::sync::mpsc::channel;
+        let (ids_tx, ids) = channel();
+        let mut stops = std::vec::Vec::new();
+        let mut threads = std::vec::Vec::new();
+        for _ in 0..2 {
+            let ids_tx = ids_tx.clone();
+            let (stop_tx, stop) = channel::<()>();
+            stops.push(stop_tx);
+            threads.push(std::thread::spawn(move || {
+                let id = Arch::cpu_id();
+                reset();
+                ids_tx.send((id, Arch::cpu_id())).unwrap();
+                // Stay live until both ids are read.
+                stop.recv().unwrap();
+            }));
+        }
+        let (a, b) = (ids.recv().unwrap(), ids.recv().unwrap());
+        for s in stops {
+            s.send(()).unwrap();
+        }
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_ne!(a.0, b.0, "two live host threads share a CPU id");
+        assert_eq!((a.0, b.0), (a.1, b.1), "reset keeps the thread's id");
     }
 
     #[test]

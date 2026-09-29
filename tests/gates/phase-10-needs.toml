@@ -1038,3 +1038,16 @@ needs = [
   "the in-guest clock tests can",  # L1255
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1434
+[[box]]
+key = "the §10.4 wake inbox's push"
+needs = [
+  "an `arch` module boundary built",  # L1277
+  "the seam proven by a",  # L1279
+  "the cross-CPU wake inbox holds",  # L1317
+  "portable code reaches atomics, fences,",  # L1433
+  "`IoWaiter::finish` makes its `done` store",  # L1470
+  "`spawn_inner` reuses a `Dead` TCB",  # L1474
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"

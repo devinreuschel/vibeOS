@@ -36,6 +36,7 @@ pub mod blockdev;
 pub mod cache;
 pub mod part;
 
+use crate::atomic::{AtomicU32, Ordering};
 use crate::fmt_util;
 
 pub const DEFAULT_BLOCK_SIZE: u32 = 512;
@@ -799,11 +800,79 @@ pub fn write_marker(f: &mut impl core::fmt::Write, name: &str, sectors: u64) -> 
     f.write_str(" sectors")
 }
 
+/// A completion's status word (DESIGN §10.1): [`DoneWord::PENDING`] until
+/// the completer publishes the status, which is its last access to the
+/// waiter that holds the word (DESIGN §2.8 rule 1). The atomic is private,
+/// so no caller names an order.
+#[repr(transparent)]
+pub struct DoneWord(AtomicU32);
+
+impl DoneWord {
+    /// The status before `publish`; no published status is 0.
+    pub const PENDING: u32 = 0;
+
+    /// A pending word. `const` outside `cfg(loom)`, whose atomics have no
+    /// `const fn new` (C-ATOMICS).
+    #[cfg(not(loom))]
+    pub const fn new() -> Self {
+        Self(AtomicU32::new(Self::PENDING))
+    }
+
+    /// A pending word (loom's atomics have no `const fn new`).
+    #[cfg(loom)]
+    pub fn new() -> Self {
+        Self(AtomicU32::new(Self::PENDING))
+    }
+
+    /// Publish `status`, never [`PENDING`](Self::PENDING). The completer's
+    /// last access to the waiter: a poller that sees it may free the waiter
+    /// at once.
+    #[inline(always)]
+    pub fn publish(&self, status: u32) {
+        debug_assert!(status != Self::PENDING, "DoneWord::publish(PENDING)");
+        // Release: pairs with the Acquire load in `poll`, so the waiter sees
+        // everything the completer did before it.
+        self.0.store(status, Ordering::Release);
+    }
+
+    /// The published status, or `None` while pending.
+    #[inline(always)]
+    pub fn poll(&self) -> Option<u32> {
+        // Acquire: pairs with the Release store in `publish`.
+        match self.0.load(Ordering::Acquire) {
+            Self::PENDING => None,
+            s => Some(s),
+        }
+    }
+}
+
+#[cfg(not(loom))]
+impl Default for DoneWord {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use std::sync::Mutex;
+
+    #[test]
+    fn done_word_publish_poll() {
+        let w = DoneWord::new();
+        assert_eq!(w.poll(), None);
+        w.publish(7);
+        assert_eq!(w.poll(), Some(7));
+        if cfg!(debug_assertions) {
+            let hit = std::panic::catch_unwind(|| DoneWord::new().publish(DoneWord::PENDING));
+            assert!(
+                hit.is_err(),
+                "publish(PENDING) panics under debug_assertions"
+            );
+        }
+    }
 
     #[test]
     fn block_error_no_memory_not_retryable() {
