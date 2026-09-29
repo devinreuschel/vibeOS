@@ -357,7 +357,7 @@ fn normal_boot_tail() {
     {
         use crate::serial::Serial;
         use core::fmt::Write;
-        match crate::proc_init::spawn_elf("/hello", 0, 0) {
+        match crate::proc_init::spawn_elf("/hello", &[], &[], 0, 0) {
             Ok(pid) => {
                 let st = crate::proc_init::wait_kernel(pid);
                 let code = if vibeos::proc::wifsignaled(st) {

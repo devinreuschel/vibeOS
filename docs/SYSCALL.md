@@ -451,8 +451,10 @@ Static ELF64, no libc, hand-written `syscall` stubs. Initrd:
 - `/bin/tests` — syscall / `EFAULT` / `fork`+`exec`+`wait` / fault-kill runner
 - `/bin/sh` — interactive shell; prints `vibeOS: shell ready` then `vibeos>`
 
-Stack: `argc`, `argv`, an empty `envp` (`execve` does not read its `envp`
-argument), and `auxv`: `AT_PAGESZ`, `AT_ENTRY`, `AT_PHENT`, `AT_PHNUM`,
+Stack: `argc`, `argv`, `envp`, and `auxv`. Init's `argv` and `envp` come
+from the kernel command line (BOOT.md §3.2), at most 8 of each; `execve`
+still passes an empty `envp` (it does not read its `envp` argument). The
+`auxv`: `AT_PAGESZ`, `AT_ENTRY`, `AT_PHENT`, `AT_PHNUM`,
 `AT_PHDR` (0 when no header table is mapped), `AT_BASE` 0, `AT_FLAGS` 0,
 `AT_UID`, `AT_EUID`, `AT_GID`, and `AT_EGID` (all 0), `AT_CLKTCK` 100,
 `AT_SECURE` 0, `AT_RANDOM`, `AT_NULL`. `AT_RANDOM` is one TSC read and a
