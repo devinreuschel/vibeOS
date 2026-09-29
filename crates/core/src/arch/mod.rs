@@ -177,8 +177,8 @@ pub trait ContextSwitch {
     fn resume_with_irqs(ctx: &mut Self::Context, enabled: bool);
 }
 
-/// A complete port: every seam trait. Each port writes `impl Port for Arch {}`,
-/// so the compiler names any missing supertrait there.
+/// A complete port: every seam trait. Each port implements `Port` for its
+/// type with an empty impl, so the compiler names any missing supertrait there.
 pub trait Port:
     BootHandover
     + InterruptMask
