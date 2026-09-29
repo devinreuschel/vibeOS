@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import subprocess
 import tarfile
 import tempfile
@@ -23,7 +24,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from scripts import ci_history
+from scripts import check_workflows, ci_history
 from scripts.ci_history import ApiError, HistoryError, HistoryRepo, NotRecorded
 
 REPO = "owner/vibeOS"
@@ -288,6 +289,11 @@ class TestRecord(unittest.TestCase):
             )
             self.assertNotIn("commit", rec, kw)
             self.assertTrue(warnings, kw)
+
+    def test_no_shell_in_tool(self) -> None:
+        src = Path(ci_history.__file__).read_text(encoding="utf-8")
+        for banned in ("shell=True", "os.system", "os.popen"):
+            self.assertNotIn(banned, src)
 
     def test_rejects_run_of_another_path(self) -> None:
         run = {**run_obj(), "path": ".github/workflows/evil.yml"}
@@ -1022,6 +1028,121 @@ class TestArchive(GitIsolated):
         h = self.repo("full")
         h.open(depth=None)
         self.assertGreater(h.packed_bytes(), 0)
+
+
+WORKFLOW = ci_history.ROOT / ".github/workflows/ci-history.yml"
+
+
+class TestWorkflow(unittest.TestCase):
+    def setUp(self) -> None:
+        self.text = WORKFLOW.read_text(encoding="utf-8")
+        self.wf = check_workflows.parse(self.text, str(WORKFLOW))
+        jobs = self.wf.get("jobs")
+        assert jobs is not None
+        self.jobs = {j.key: j for j in jobs.children}
+
+    def test_permissions(self) -> None:
+        top = self.wf.get("permissions")
+        assert top is not None
+        self.assertEqual([(g.key, g.value) for g in top.children], [("contents", "read")])
+        self.assertEqual(set(self.jobs), {"record", "daily"})
+        for name, job in self.jobs.items():
+            perm = job.get("permissions")
+            assert perm is not None, name
+            self.assertEqual(
+                sorted((g.key, g.value) for g in perm.children),
+                [("actions", "read"), ("contents", "write")], name,
+            )
+            for g in perm.children:
+                self.assertTrue(g.comment, f"{name}: {g.key} names no need")
+        self.assertEqual(check_workflows.rule_permissions(
+            check_workflows.Tree(workflows={str(WORKFLOW): self.wf})), [])
+
+    def test_checks_out_only_history(self) -> None:
+        self.assertNotIn("actions/checkout", self.text)
+        uses = [n for n in self.wf.walk() if n.key == "uses"]
+        self.assertEqual(uses, [])  # no action at all, so none needs a pin
+        # the tool clones the one branch into its own work tree
+        self.assertEqual(ci_history.BRANCH, "ci-history")
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "RUNNER_TEMP": "/rt",
+                                          "GITHUB_REPOSITORY": REPO}):
+            self.assertEqual(ci_history.default_workdir(), Path("/rt/ci-history"))
+            self.assertEqual(ci_history.default_remote(), f"https://github.com/{REPO}.git")
+
+    def steps(self, job: str) -> list[check_workflows.Node]:
+        steps = self.jobs[job].get("steps")
+        assert steps is not None
+        return steps.items
+
+    def run_text(self, step: check_workflows.Node) -> str:
+        run = step.get("run")
+        return run.value or "" if run is not None else ""
+
+    def test_tool_from_default_branch(self) -> None:
+        for job in ("record", "daily"):
+            first = self.run_text(self.steps(job)[0])
+            for f in ("ci_history.py", "gatelib.py"):
+                self.assertIn(f, first)
+            self.assertIn("contents/scripts/$f?ref=$GITHUB_SHA", first)
+            self.assertIn('"$RUNNER_TEMP/tool/scripts/$f"', first)
+            self.assertIn("gh auth setup-git", first)
+            for step in self.steps(job)[1:]:
+                self.assertTrue(
+                    self.run_text(step).startswith(
+                        'python3 "$RUNNER_TEMP/tool/scripts/ci_history.py"'), job)
+        # the fetched layout imports gatelib as the tree does
+        src = Path(ci_history.__file__).read_text(encoding="utf-8")
+        self.assertIn("from scripts import gatelib", src)
+        record = [self.run_text(s) for s in self.steps("record")[1:]]
+        self.assertEqual(record, [
+            'python3 "$RUNNER_TEMP/tool/scripts/ci_history.py" --event "$GITHUB_EVENT_PATH"'])
+        daily = [self.run_text(s).split("ci_history.py\"", 1)[1] for s in self.steps("daily")[1:]]
+        self.assertEqual(daily, [" --rotate", " --backfill --limit 200", ""])
+
+    def test_no_run_fields_in_yaml(self) -> None:
+        self.assertIsNone(re.search(r"workflow_run\.|head_sha|head_branch", self.text))
+        for n in self.wf.walk():
+            if n.key in ("run", "env") or (n.kind == "scalar" and n.key and n.key.isupper()):
+                for v in [n.value or ""] + [c.value or "" for c in n.children]:
+                    self.assertNotIn("github.event.", v)
+                    self.assertNotIn("inputs.", v)
+        for n in self.wf.walk():
+            if n.key == "run":
+                self.assertNotIn("${{", n.value or "")
+        self.assertEqual(check_workflows.rule_no_expr_in_run(
+            check_workflows.Tree(workflows={str(WORKFLOW): self.wf})), [])
+
+    def test_triggers(self) -> None:
+        on = self.wf.get("on")
+        assert on is not None
+        wr = on.get("workflow_run")
+        assert wr is not None
+        workflows, types = wr.get("workflows"), wr.get("types")
+        assert workflows is not None and types is not None
+        self.assertEqual(workflows.scalars(), sorted(ci_history.WORKFLOWS))
+        self.assertEqual(types.scalars(), ["completed"])
+        sched = on.get("schedule")
+        assert sched is not None
+        self.assertEqual([i.get("cron").value for i in sched.items  # type: ignore[union-attr]
+                          ], ["23 4 * * *"])
+        self.assertIsNotNone(on.get("workflow_dispatch"))
+        cond = {k: (j.get("if").value if j.get("if") else None)  # type: ignore[union-attr]
+                for k, j in self.jobs.items()}
+        self.assertEqual(cond, {"record": "github.event_name == 'workflow_run'",
+                                "daily": "github.event_name != 'workflow_run'"})
+        for job in self.jobs.values():
+            self.assertIsNone(job.get("concurrency"))
+            self.assertEqual(job.get("runs-on").value, "ubuntu-26.04")  # type: ignore[union-attr]
+
+    def test_workflow_names_match_files(self) -> None:
+        # `workflow_run` matches by name: a rename would silently stop the history
+        for key, spec in ci_history.WORKFLOWS.items():
+            wf = check_workflows.parse(
+                (ci_history.ROOT / spec.path).read_text(encoding="utf-8"), spec.path)
+            name = wf.get("name")
+            self.assertEqual(name.value if name else None, key, spec.path)
+        name = self.wf.get("name")
+        self.assertEqual(name.value if name else None, "ci-history")
 
 
 if __name__ == "__main__":

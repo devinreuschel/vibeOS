@@ -520,11 +520,47 @@ each pass 40 s alone and cannot split below a target.
 | `smp-stress` | weekly Monday 06:00 UTC + dispatch | `-smp 4`, longer timeout (`VIBEOS_TIMEOUT=180`); planned (ROADMAP §10.2): the §8.2 per-run deadlines, with no longer timeout |
 | `nightly-canary` | same workflow, non-blocking | undated latest nightly, `make iso && make test-unit` |
 | `release` | `v*` tags | `make test-e2e` (BIOS) only, then production + ktest ISO, changelog section, GitHub Release. It does not wait for `ci` at the tagged commit, and the ktest ISO writes fixed LBAs of any virtio-blk disk attached at boot (ROADMAP §10.1, F145). Planned (ROADMAP §10.1): dispatched from `main` with the release tag as input; a `build` job with `contents: read` and `actions: read`, no cache, and no persisted token, then a `publish` job that runs no repository script; from ROADMAP §14.6 a `sign` job in the `release` environment between them, and from §22.4 a keyless `verify` job on vibeOS. From ROADMAP §18.7 the `sign` job is two key jobs, `sign-files` and `sign-manifest`, with an unprivileged `assemble` job between them, since images hold the signed kernels and Limine binaries and the manifest lists the images (ROADMAP §22.1). |
+| `ci-history` | `ci` or `release` run completes; daily 04:23 UTC; dispatch | `record` (on a completed run): the run's record on the `ci-history` branch. `daily` (schedule, dispatch): the packed size and the 500 MB rotation (`--rotate`), the backfill (`--backfill --limit 200`), then the completeness check, which turns it red on a missing record (CI history, below). Each job holds `contents: write` and `actions: read` only and checks out nothing. |
 
 The `ticks` job (ROADMAP §10.9) runs after the jobs that run the tiers, the `tier` matrix, and reads
 the `build/results/` files they upload. A pull request run tests the merge of its head with its
 base, so the results files carry the merge commit, which `--run-commit` names; `check_ticks.py`
 reads commits and their messages from the pull request's head.
+
+**CI history.** ROADMAP §10.9's `ci-history` workflow keeps what `ci` and `release` ran past
+GitHub's 90-day limit on Actions logs and artifacts. When a run of either completes, its `record`
+job writes one JSON record per run id, `runs/<workflow>/<run_id>.json`, to the orphan `ci-history`
+branch (C-HISTORY): the run id, workflow, `attempt`, event, head SHA, branch, conclusion, start and
+finish; per job its conclusion, `created`, `started`, `completed`, seconds and per-step seconds, the
+results files of its `results-<arch>-<job>` artifact and the runner data of its `runner-<job>`
+artifact, `<job>` naming the job by the slug of its display name; and, for a workflow that takes a
+commit as input, that commit (`release`'s `commit-input` artifact). A re-run replaces the run's
+record with its latest attempt, which `attempt` names. No record carries an actor, author or
+e-mail: the branch is public data (DESIGN §1.5). The job holds `contents: write` and
+`actions: read` only, checks out nothing but a clone of `ci-history` alone, and runs
+`scripts/ci_history.py` and `scripts/gatelib.py` as fetched from the default branch at
+`GITHUB_SHA`, never the triggering commit's. No field of the run reaches a shell line: the tool
+reads only the run id from the event file, checks the workflow's name, path and repository against
+its allowlist, takes the rest from the API, and reads artifacts as capped bytes in memory. On a
+rejected push it re-applies its one file on the new tip, up to 10 times, so concurrent runs lose no
+record. The `daily` job (04:23 UTC, and on dispatch) runs `--rotate`, then `--backfill --limit
+200`, which records each `ci` run on `main` that the API still lists and the branch lacks, or
+writes a tombstone (`"jobs": []` and `"tombstone": "<reason>"`) when the jobs API answers 404, 410
+or no jobs, then the completeness check. That check, `python3 scripts/ci_history.py` with no mode,
+fails on any `ci` run on `main` (a push or dispatch run of this repository's `main`) since the
+history landed, that is whose head commit descends from the oldest commit on `main` that touches
+`ci-history.yml`, with no record or tombstone. A tombstone passes unless a gate map's `job` entry
+names the workflow, the run proves the gated commit (`--gated`, else the checkout's `HEAD`), and no
+successful full record proves it. `python3 scripts/ci_history.py --series ci` prints each `main`
+run's push-to-green time (its latest job end minus its earliest job creation) and their median,
+the numbers ROADMAP §10.1 reads; `--job` and `--step` narrow it to a job or a step. `--rotate`
+writes the branch's packed size (`size-pack` of a full clone) to the job summary; past
+500,000,000 bytes it moves the oldest UTC year's records into a zstd archive, the asset of the
+prerelease `ci-history-<year>`, never marked latest and tagged at the branch's tip before the
+rotation, lists it in `archives.json` with its SHA-256 and run ids, and restarts the branch from an
+orphan commit holding the rest, pushed with a lease on the tip it read. It refuses to archive the
+current year and fails with the size instead. `ci_history.py` reads the branch and the archives
+alike. The packed size is recorded here once the first daily run measures it (ROADMAP §10.9).
 
 **Workflow rules.** `scripts/check_workflows.py`, which `make check` runs, reads every workflow
 with a stdlib YAML subset reader that fails on anything it does not parse (anchors, aliases, tags,
@@ -539,8 +575,9 @@ pinned as `@<40 hex>  # <version>`, where `./` paths and `docker://…@sha256:` 
 clause and runs every rule on the real files.
 
 Rule; not yet enforced: a job that holds a signing key or a write token runs no code from the
-candidate commit, restores no cache, checks out nothing, and receives only artifacts and their
-SHA-256 list (ROADMAP §10.1, §14.6). Today `release` builds, tests, and publishes in one job with
+candidate commit, restores no cache, checks out nothing (ROADMAP §10.9's history job checks out
+only the `ci-history` branch and runs `main`'s `scripts/ci_history.py`, never the candidate's), and
+receives only artifacts and their SHA-256 list (ROADMAP §10.1, §14.6). Today `release` builds, tests, and publishes in one job with
 `contents: write`, a persisted checkout token, and restored caches.
 
 **Runners.** Every Linux job runs on GitHub's free `ubuntu-26.04` image (`ubuntu-26.04-arm` for
