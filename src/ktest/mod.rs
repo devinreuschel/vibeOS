@@ -480,6 +480,7 @@ pub(crate) const TESTS: &[Test] = &[
         arch::ktest::test_force_kernel_irq_window,
     )
     .deadline(30_000),
+    test("arch_seam_core", arch::ktest::test_arch_seam_core),
     test("console_read_exit", proc::ktest::test_console_read_exit).deadline(30_000),
     test("user_entry_irq", proc::ktest::test_user_entry_irq).deadline(120_000),
     test(

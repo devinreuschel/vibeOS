@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""The portable crate builds on stable Rust (DESIGN §1.1), and its byte
-parsers deny panicking indexing and arithmetic (ROADMAP §10.1).
+"""The portable crate's byte parsers deny panicking indexing and arithmetic
+(ROADMAP §10.1).
 
-`vibeos-core` enables no language or library feature: Verus (ROADMAP Phase 38),
-Kani, loom, and Miri each pin their own toolchain, and they must keep building
-the crate. Feature attributes are crate-level, so the crate root is the only
-file to check. Nightly features stay in the kernel binary (`src/main.rs`).
+`vibeos-core` builds on stable Rust (DESIGN §1.1): `make check` builds it with
+its MSRV (`make check-msrv`), which rejects a feature attribute however it is
+formatted and any API or syntax newer than the MSRV, so this script no longer
+searches for one.
 
 `missing_parser_attrs` checks each `PARSERS` row for its `indexing_slicing`
 and `arithmetic_side_effects` attribute, except rows on `PARSERS_PENDING`,
@@ -20,16 +20,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CORE_ROOT = ROOT / "crates" / "core" / "src" / "lib.rs"
-
-# `#![feature(..)]` or `#![cfg_attr(<cond>, feature(..))]`; `feature = "std"`
-# inside a cfg predicate is a Cargo feature, not a language feature.
-FEATURE_ATTR = re.compile(r"^\s*#!\[\s*(?:cfg_attr\s*\(.*,\s*)?feature\s*\(")
-
-
-def find_features(text: str) -> list[int]:
-    """1-based line numbers of crate-level feature attributes."""
-    return [n for n, line in enumerate(text.splitlines(), start=1) if FEATURE_ATTR.match(line)]
-
 
 # The byte parsers (ROADMAP §10.1, C-LINTS): each denies `indexing_slicing` and
 # `arithmetic_side_effects`, which `overflow-checks` and bounds checks would
@@ -159,15 +149,10 @@ def missing_parser_attrs(core_src: Path,
 
 
 def main() -> int:
-    lines = find_features(CORE_ROOT.read_text(encoding="utf-8"))
-    rel = CORE_ROOT.relative_to(ROOT)
-    for n in lines:
-        msg = f"{rel}:{n}: vibeos-core enables a nightly feature (DESIGN §1.1)"
-        print(msg, file=sys.stderr)
     errors = missing_parser_attrs(CORE_ROOT.parent)
     for e in errors:
         print(f"check_core_stable: {e}", file=sys.stderr)
-    if lines or errors:
+    if errors:
         return 1
     print("check_core_stable: ok")
     return 0
