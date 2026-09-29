@@ -271,7 +271,9 @@ measured on it (ROADMAP, How to read this). Both set `overflow-checks = true`, s
 overflow panics in shipped images as it does in tests, and AGENTS.md rule 4's `checked_*` rule holds
 in both. What must hold in release is an `assert!` (§9.4). The nightly `release-profile` job builds
 and boots the release profile, `make CARGO_PROFILE=release test-e2e test-kernel` under TCG (TESTING.md
-§8.6); releases still ship the dev profile (ROADMAP §10.2, F137).
+§8.6); v* releases ship the release profile: `make release-artifacts OUT=<dir>` builds their images
+with `CARGO_PROFILE=release`, and `release.yml` runs the production-image e2e targets on those images
+before it publishes (ROADMAP §10.1, §10.2).
 
 `opt-level = 1` for the dev profile. At `opt-level = 0` the page table setup function's stack frame is
 large enough to overflow the boot stack Limine provides, and it faults on entry before printing

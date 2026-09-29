@@ -29,7 +29,9 @@ Do not run code you do not trust on vibeOS, and keep no secrets on it: until Pha
 can crash the kernel, and until Phase 18 nothing stops one from reading other processes' memory
 ([DESIGN §2.10](docs/INVARIANTS.md#210-trust-boundaries)).
 Do not attach a disk you want to keep to `vibeos-ktest.iso`, which stamps a GPT on an all-zero `vda` and writes fixed sectors of any attached one (F145).
-Releases: [GitHub Releases](https://github.com/devinreuschel/vibeOS/releases). From Phase 8 on, the commit that closes a phase
+Releases: [GitHub Releases](https://github.com/devinreuschel/vibeOS/releases). The maintainer pushes the tags and dispatches `release.yml` from `main`
+([docs/RELEASING.md](docs/RELEASING.md)); a release publishes `vibeos.iso` alone, built with the release profile,
+only after `ci` passed on the tagged commit. From Phase 8 on, the commit that closes a phase
 gets a `phase-<N>` tag and the next `v0.<m>.0` release, numbered in closing order: `v0.8.0` to `v0.14.0` are Phases 8 to 14,
 later release notes name their phase, and Phase 39 is `v1.0.0` ([How to read this](docs/ROADMAP.md#how-to-read-this)).
 No release exists yet: Phases 8 and 9 are tagged when Phase 10 closes the gate lines of Phases 0 to 9 that the kernel review and a later design review reopened.

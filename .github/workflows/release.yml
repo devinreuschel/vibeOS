@@ -1,32 +1,71 @@
 name: release
 
+# One trigger (ROADMAP §10.1): the owner dispatches this workflow from `main`
+# with the release tag (docs/RELEASING.md), so the workflow that publishes is
+# always main's, never a copy a tag carries. ROADMAP §14.6 adds a schedule
+# that only re-signs metadata.
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag: {description: "release tag, v0.<m>.0", required: true, type: string}
 
-# Least privilege (ROADMAP §10.1): the workflow reads; only the job that
-# publishes is granted a write.
+# Least privilege (ROADMAP §10.1): the workflow reads; `build` also reads the
+# Actions API, and only `publish` is granted a write.
 permissions:
   contents: read
 
+concurrency: {group: release, cancel-in-progress: false}
+
 jobs:
-  release:
-    name: build ISO and publish
+  # Read-only. main's scripts/release_check.py runs before any code of the
+  # tag's tree; then the tag's commit is built from scratch (no restored
+  # cache, a fresh Limine clone), tested, and uploaded with its SHA-256 list.
+  build:
     runs-on: ubuntu-26.04
+    permissions:
+      contents: read # checks out main's scripts and the tag's commit
+      actions: read # reads ci's runs and the gate map's jobs through the API (ROADMAP §10.9)
+    outputs:
+      commit: ${{ steps.gate.outputs.commit }}
     # The harness fails every boot when QEMU is not this version (ROADMAP
     # §10.1): resolute's qemu-system-x86 1:10.2.1+ds-1ubuntu3. Move the pin
-    # and DESIGN §8.6 together.
+    # and DESIGN §8.6 together. The packages are ci.yml's build, tier and
+    # check jobs' together, since `make gate` runs their commands.
     env:
       VIBEOS_QEMU_VERSION: "10.2.1"
-    permissions:
-      contents: write # publishes the GitHub Release (softprops/action-gh-release)
+      APT_PACKAGES: qemu-system-x86 xorriso nasm ovmf-generic dosfstools
+      TAG: ${{ inputs.tag }}
     steps:
+      # A dispatch runs the dispatched ref's copy of this file: this guard
+      # holds only in copies that carry it, until ROADMAP §14.6's `release`
+      # environment admits main alone (docs/RELEASING.md).
+      - name: dispatched from main
+        env: {REF: "${{ github.ref }}"}
+        run: |
+          if [ "$REF" != refs/heads/main ]; then
+            echo "release: dispatch release.yml from main, not $REF (docs/RELEASING.md)" >&2
+            exit 1
+          fi
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with: {ref: "${{ github.sha }}", path: trusted, sparse-checkout: scripts, persist-credentials: false}
+
+      # The tag is annotated, its commit is on main, a ci run proving that
+      # commit concluded success, and one phase-<N> tag sits on it.
+      - name: annotated tag, commit on main, ci success
+        id: gate
+        env: {GH_TOKEN: "${{ github.token }}", REPO: "${{ github.repository }}"}
+        run: |
+          python3 trusted/scripts/release_check.py --repo "$REPO" --tag "$TAG" >> "$GITHUB_OUTPUT"
+          rm -rf trusted
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with: {ref: "${{ steps.gate.outputs.commit }}", fetch-depth: 0, persist-credentials: false}
 
       - name: install host tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 xorriso nasm ovmf dosfstools
+          sudo apt-get install -y $APT_PACKAGES
 
       - name: install rust nightly
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
@@ -35,47 +74,174 @@ jobs:
           components: rust-src, llvm-tools, rustfmt, clippy
           targets: x86_64-unknown-none, x86_64-unknown-linux-musl
 
-      - name: cache cargo registry
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+      # vibeos-core's MSRV, which `make check` builds it with (ROADMAP §10.1),
+      # read from its manifest.
+      - name: install rust MSRV
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' crates/core/Cargo.toml)
+          rustup toolchain install "$msrv" --profile minimal --target x86_64-unknown-none --no-self-update
 
-      - name: cache limine binaries
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: limine
-          key: limine-v9.6.7-binary-ee5d29cd0a8034612dcd1df3f00052480db785c5
+      # Pinned as in ci.yml's check job (ROADMAP §10.1, DX1).
+      - name: install python linters
+        run: |
+          python3 -m pip install --user --break-system-packages ruff==0.16.9 mypy==2.3.1
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      # Pinned as in ci.yml's check job (ROADMAP §10.9).
+      - name: install cargo-deny
+        env:
+          CARGO_DENY_VERSION: 0.20.2
+          CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+        run: |
+          name="cargo-deny-$CARGO_DENY_VERSION-x86_64-unknown-linux-musl"
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/$name.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/$CARGO_DENY_VERSION/$name.tar.gz"
+          echo "$CARGO_DENY_SHA256  $RUNNER_TEMP/$name.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+          mkdir -p "$HOME/.local/bin"
+          install -m 755 "$RUNNER_TEMP/$name/cargo-deny" "$HOME/.local/bin/cargo-deny"
+          "$HOME/.local/bin/cargo-deny" --version
+
+      # Clones Limine at its pinned commit and builds its host tool: nothing
+      # here is restored, so both are fresh (ROADMAP §10.1).
       - name: setup
         run: ./setup.sh
 
-      - name: build production ISO
-        run: make iso
-
-      - name: e2e (BIOS)
-        run: make test-e2e
-
-      - name: build ktest ISO
-        run: make vibeos-ktest.iso
-
-      # F144: the tag reaches the script through the environment, never
-      # through `${{ }}` inside `run:`.
-      - name: changelog section
+      # The phase's exit gate at the tag's commit (ROADMAP §10.9). It runs
+      # before the release images are built, since its `make test` writes
+      # the dev-profile results and ISO the release steps below replace.
+      - name: make gate
         env:
-          TAG: ${{ github.ref_name }}
-        run: python3 scripts/changelog_section.py --tag "$TAG" > /tmp/release-body.md
+          GH_TOKEN: ${{ github.token }}
+          PHASE: ${{ steps.gate.outputs.phase }}
+          VIBEOS_QEMU_ACCEL: tcg
+          OVMF: /usr/share/ovmf/OVMF.fd
+        run: make gate PHASE="$PHASE"
+
+      # The release profile's production ISO (ROADMAP §10.2, BOOT.md §3.5).
+      - name: make release-artifacts
+        run: make release-artifacts OUT=dist
+
+      # Assets beside the image: the notices (DESIGN §1.5) and the xorriso
+      # version the ISO's volume descriptor records (BOOT.md §3.6).
+      - name: third-party notices
+        run: python3 scripts/gen_notices.py --out dist/THIRD-PARTY-NOTICES.txt
+
+      - name: xorriso version
+        run: cp build/vibeos.iso.xorriso-version dist/vibeos.iso.xorriso-version
+
+      # Every e2e target that boots only the production image, on the
+      # release-profile ISO just built (ROADMAP §10.2).
+      - name: make CARGO_PROFILE=release test-e2e
+        env: {VIBEOS_QEMU_ACCEL: tcg}
+        run: make CARGO_PROFILE=release test-e2e
+
+      - name: make CARGO_PROFILE=release test-e2e-uefi
+        env: {VIBEOS_QEMU_ACCEL: tcg, OVMF: /usr/share/ovmf/OVMF.fd}
+        run: make CARGO_PROFILE=release test-e2e-uefi
+
+      - name: make CARGO_PROFILE=release test-e2e-mce
+        env: {VIBEOS_QEMU_ACCEL: tcg}
+        run: make CARGO_PROFILE=release test-e2e-mce
+
+      - name: make CARGO_PROFILE=release test-e2e-pit
+        env: {VIBEOS_QEMU_ACCEL: tcg}
+        run: make CARGO_PROFILE=release test-e2e-pit
+
+      - name: make CARGO_PROFILE=release test-e2e-highmem
+        env: {VIBEOS_QEMU_ACCEL: tcg}
+        run: make CARGO_PROFILE=release test-e2e-highmem
+
+      - name: make CARGO_PROFILE=release test-e2e-strace
+        env: {VIBEOS_QEMU_ACCEL: tcg}
+        run: make CARGO_PROFILE=release test-e2e-strace
+
+      # The tested image is the published one.
+      - name: tested image is the release image
+        run: cmp build/vibeos.iso dist/vibeos.iso
+
+      # C-HISTORY: the run's ci-history record names the tag's commit.
+      - name: commit input
+        env:
+          COMMIT: ${{ steps.gate.outputs.commit }}
+        run: |
+          mkdir -p build
+          printf '{"schema": 1, "commit": "%s"}\n' "$COMMIT" > build/commit.json
+
+      - name: upload commit input
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: commit-input
+          path: build/commit.json
+          if-no-files-found: error
+          retention-days: 30
+
+      # No changelog section, no release: the script fails before any upload.
+      - name: release notes
+        run: python3 scripts/changelog_section.py --tag "$TAG" > dist/release-notes.md
+
+      - name: SHA-256 list
+        working-directory: dist
+        run: sha256sum -- * > "$RUNNER_TEMP/SHA256SUMS" && mv "$RUNNER_TEMP/SHA256SUMS" SHA256SUMS
+
+      - name: upload release files
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release
+          path: dist
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: runner record
+        if: always()
+        run: python3 scripts/runner_info.py
+
+      # C-RESULTS, named as ci.yml's tier jobs name theirs: `results-<arch>-<job>`.
+      - name: upload harness results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results-x86_64-build
+          path: build/results/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: upload runner record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runner-build
+          path: build/runner.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  # The only job with a write grant: it checks out nothing and runs no
+  # repository script, receives the build's files and their SHA-256 list,
+  # checks them, and publishes vibeos.iso as the one image (ROADMAP §10.1).
+  # ROADMAP §14.6 puts a `sign` job in the `release` environment between the two.
+  publish:
+    needs: build
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write # creates the GitHub Release; checks out nothing, runs no repository script
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release
+          path: dist
+
+      - name: check SHA-256 list
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS
 
       - name: GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
+          tag_name: ${{ inputs.tag }}
+          target_commitish: ${{ needs.build.outputs.commit }}
+          body_path: dist/release-notes.md
           files: |
-            vibeos.iso
-            vibeos-ktest.iso
-          body_path: /tmp/release-body.md
+            dist/vibeos.iso
+            dist/vibeos.iso.xorriso-version
+            dist/THIRD-PARTY-NOTICES.txt
           fail_on_unmatched_files: true
