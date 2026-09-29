@@ -20,7 +20,7 @@ use crate::ktest::user::{self, DEFAULT, Image, Layout, user_code};
 use crate::ktest::{Outcome, quiescent_free_frames, spawn_thread};
 use crate::per_cpu_init;
 use crate::proc_init::{self, testing as proc_testing};
-use crate::sync_init::Semaphore;
+use crate::sync::blocking_init::Semaphore;
 use crate::syscall_init::{self, testing as entry_testing};
 use crate::thread_init;
 use crate::time_init;

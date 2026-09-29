@@ -86,7 +86,6 @@ KNOWN: list[str] = [
     "two-way kernel:proc::proc_init kernel:proc::syscall_init",
     "two-way kernel:proc::syscall_init kernel:sched::thread_init",
     "two-way kernel:sched::thread_init kernel:sched::work_init",
-    "two-way kernel:sched::thread_init kernel:sync::sync_init",
 ]
 
 PATH_STARTS = frozenset({"crate", "$crate", "self", "super", "vibeos"})

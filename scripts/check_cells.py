@@ -36,8 +36,10 @@ MUST_BE_UNSAFE: list[tuple[str, str]] = [
 
 # The only files that may hold a generic `unsafe impl` of `Send` or `Sync`
 # (one with a type parameter), so no new cell type appears elsewhere.
-# crates/core/src/kalloc.rs holds `TryArc`'s one bounded pair (C-KALLOC).
+# crates/core/src/kalloc.rs holds `TryArc`'s one bounded pair (C-KALLOC), and
+# src/sync/blocking_init.rs the blocking locks that left sync_init (A4).
 GENERIC_IMPL_FILES: tuple[str, ...] = ("src/cell.rs", "src/sync/sync_init.rs",
+                                       "src/sync/blocking_init.rs",
                                        "crates/core/src/kalloc.rs")
 
 # Types that share `&T` between holders, whose `Sync` needs `T: Send + Sync`
