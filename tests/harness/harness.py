@@ -1851,23 +1851,23 @@ def boot_contract_markers(
     )
     after.append(
         Marker(
-            "vibeOS: block: ",
+            "vibeOS: block: ram0 ",
             "block_ramdisk",
-            and_contains=(" ram0 ", " sectors"),
+            and_contains=(" sectors",),
         )
     )
     after.append(
         Marker(
-            "vibeOS: block: ",
+            "vibeOS: block: ram0p1 ",
             "block_ram0p1",
-            and_contains=(" ram0p1 ", " sectors"),
+            and_contains=(" sectors",),
         )
     )
     after.append(
         Marker(
-            "vibeOS: block: ",
+            "vibeOS: block: ram0p2 ",
             "block_ram0p2",
-            and_contains=(" ram0p2 ", " sectors"),
+            and_contains=(" sectors",),
         )
     )
     # gp-test trips after PCI enum / ramdisk and never reaches the shell thread.
