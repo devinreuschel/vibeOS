@@ -8,6 +8,7 @@
 
 use vibeos::block::blockdev::{Backing, BlockName, BlockRef, DiskSeq, Registry};
 use vibeos::block::{BlockError, write_marker};
+use vibeos::dev::Instance;
 use vibeos::lock::RANK_DEVICE;
 
 use crate::sync_init::SpinMutex;
@@ -63,4 +64,21 @@ pub fn unregister(dev: &BlockRef) -> Result<(), BlockError> {
         r.kill()?;
     }
     Ok(())
+}
+
+/// Make `h`, a filesystem's volume instance, the holder of `dev`, which
+/// owns it from then on. `Exists` when `dev` has one, `Gone` when it is
+/// not registered.
+pub fn set_holder(dev: &BlockRef, h: Instance) -> Result<(), BlockError> {
+    REG.lock().set_holder(dev, h)
+}
+
+/// A reference to `dev`'s holder.
+pub fn holder(dev: &BlockRef) -> Option<Instance> {
+    REG.lock().holder(dev)
+}
+
+/// Take `dev`'s holder out; the caller drops it with the table unlocked.
+pub fn take_holder(dev: &BlockRef) -> Option<Instance> {
+    REG.lock().take_holder(dev)
 }

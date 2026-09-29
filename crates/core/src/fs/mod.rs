@@ -45,6 +45,8 @@ pub use file::{FileId, FileRef, SeekFrom};
 pub use ramfs::{RamFs, RamState};
 pub use walk::{WalkCall, WalkReply, WalkStep, Walker, split_basename};
 
+use crate::dev::{Instance, same_instance};
+
 pub use crate::limits::MAX_DENTRIES;
 pub use crate::limits::MAX_FDS;
 pub use crate::limits::MAX_INODES;
@@ -327,6 +329,8 @@ pub struct OpCx<'a> {
     pub fstype: FsType,
     pub private: &'a mut [u64; 2],
     pub now: u64,
+    /// The superblock's volume instance, when its backend gave one.
+    pub vol: Option<&'a Instance>,
 }
 
 /// A lock a backend's store, or the [`Vfs`], sits behind: a seam over the
@@ -669,7 +673,7 @@ impl Dentry {
 /// shares it. `busy` counts the superblock hooks in flight (`fill_super`,
 /// `on_mount`, `sync`, the last unmount's), each with the VFS lock
 /// dropped: the slot stays while any runs.
-#[derive(Clone, Copy)]
+/// Not `Copy`: it holds a counted reference to its volume.
 struct Super {
     used: bool,
     /// Its `fill_super` runs; not mounted yet.
@@ -686,6 +690,9 @@ struct Super {
     maxbytes: u64,
     root_islot: u16,
     root_dslot: u16,
+    /// The backend's volume instance, which the superblock holds a count
+    /// on; the backend reads it from each op's [`OpCx::vol`].
+    vol: Option<Instance>,
 }
 
 impl Super {
@@ -703,6 +710,7 @@ impl Super {
         maxbytes: 0,
         root_islot: 0,
         root_dslot: 0,
+        vol: None,
     };
 
     fn live(&self) -> bool {
@@ -903,6 +911,7 @@ pub struct Call {
     fstype: FsType,
     private: [u64; 2],
     now: u64,
+    vol: Option<Instance>,
     before: Inode,
     ino: Inode,
 }
@@ -920,6 +929,7 @@ impl Call {
             fstype: self.fstype,
             private: &mut private,
             now: self.now,
+            vol: self.vol.as_ref(),
         };
         f(self.ops, &mut cx, &mut self.ino)
     }
@@ -937,6 +947,7 @@ impl Call {
             fstype: self.fstype,
             private: &mut private,
             now: self.now,
+            vol: self.vol.as_ref(),
         };
         f(self.ops, &mut cx, &mut self.ino, &mut other.ino)
     }
@@ -952,6 +963,7 @@ pub struct SbCall {
     fstype: FsType,
     private: [u64; 2],
     now: u64,
+    vol: Option<Instance>,
 }
 
 impl SbCall {
@@ -964,6 +976,7 @@ impl SbCall {
             fstype: self.fstype,
             private: &mut self.private,
             now: self.now,
+            vol: self.vol.as_ref(),
         };
         f(self.fs, self.ops, &mut cx)
     }
@@ -1145,7 +1158,7 @@ impl Vfs {
         &mut self,
         fs: &'static dyn FileSystem,
     ) -> Result<PathRef, FsError> {
-        self.api(|a| a.mount_root(fs, None, false))?;
+        self.api(|a| a.mount_root(fs, None, false, None))?;
         self.root()
     }
 
@@ -1155,7 +1168,7 @@ impl Vfs {
         at: &str,
         fs: &'static dyn FileSystem,
     ) -> Result<u8, FsError> {
-        self.api(|a| a.mount_fs(cwd, at.as_bytes(), fs, None, false))
+        self.api(|a| a.mount_fs(cwd, at.as_bytes(), fs, None, false, None))
             .map(|m| m.mount)
     }
 
@@ -1166,7 +1179,7 @@ impl Vfs {
         dev: u64,
         ro: bool,
     ) -> Result<Mounted, FsError> {
-        self.api(|a| a.mount_fs(None, at.as_bytes(), fs, Some(dev), ro))
+        self.api(|a| a.mount_fs(None, at.as_bytes(), fs, Some(dev), ro, None))
     }
 
     pub(crate) fn umount(&mut self, cwd: Option<PathRef>, at: &str) -> Result<(), FsError> {

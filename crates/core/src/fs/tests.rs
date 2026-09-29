@@ -783,7 +783,7 @@ fn locked_vfs() -> &'static std::sync::Mutex<Vfs> {
     let vfs: &'static std::sync::Mutex<Vfs> =
         std::boxed::Box::leak(std::boxed::Box::new(std::sync::Mutex::new(Vfs::new())));
     let api = FileApi::new(vfs);
-    api.mount_root(ramfs(), None, false).unwrap();
+    api.mount_root(ramfs(), None, false, None).unwrap();
     api.mkdir(None, b"/blk", 0o755).unwrap();
     vfs
 }
@@ -811,8 +811,24 @@ fn backend_ops_run_with_vfs_lock_dropped() {
         calls: std::sync::atomic::AtomicU32::new(0),
     }));
     let api = FileApi::new(vfs);
-    let m = api.mount_fs(None, b"/blk", fs, Some(3), false).unwrap();
+    let vol = crate::dev::instance(7u32).unwrap();
+    let m = api
+        .mount_fs(None, b"/blk", fs, Some(3), false, Some(vol.clone()))
+        .unwrap();
     assert!(!m.shared);
+    // The superblock holds the volume; `/` shows none.
+    let p = api.walk(None, b"/blk", true).unwrap();
+    let shown = vfs.lock().unwrap().volume_of(p).unwrap();
+    api.put_path(p);
+    assert!(crate::dev::same_instance(&shown, &vol));
+    assert_eq!(shown.downcast_ref::<u32>(), Some(&7));
+    assert!(vfs.lock().unwrap().shows_volume(&vol));
+    let root = vfs.lock().unwrap().root().unwrap();
+    assert_eq!(
+        vfs.lock().unwrap().volume_of(root).unwrap_err(),
+        FsError::Inval
+    );
+    drop(shown);
     let rw = OpenFlags::from_bits(O_RDWR | O_CREAT);
     let f = api.open(None, b"/blk/a", rw, 0o644).unwrap();
     assert_eq!(api.write(&f, b"hello").unwrap(), 5);
@@ -848,6 +864,8 @@ fn backend_ops_run_with_vfs_lock_dropped() {
         with_store(fs.key.id, |s| s.umounts.clone()),
         vec![(b"/blk".to_vec(), true)]
     );
+    // The released superblock dropped its count on the volume.
+    assert!(!vfs.lock().unwrap().shows_volume(&vol));
     assert!(fs.calls.load(std::sync::atomic::Ordering::Relaxed) >= 20);
     assert_dcache_sound(&vfs.lock().unwrap());
 }

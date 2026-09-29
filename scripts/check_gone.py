@@ -196,6 +196,16 @@ GONE: list[tuple[str, str]] = [
     ("QUEUE_VECS", "driver and volume state as"),
     ("Vda", "driver and volume state as"),
     ("src/drivers/virtio_blk_init/mod.rs: static ISR_VA", "driver and volume state as"),
+    ("MAX_VOLS", "driver and volume state as"),
+    ("MAX_FAT_VOLS", "driver and volume state as"),
+    ("MAX_VIBEFS_VOLS", "driver and volume state as"),
+    ("NVOL", "driver and volume state as"),
+    ("nvol", "driver and volume state as"),
+    ("VOL_INITRD", "driver and volume state as"),
+    ("VOL_MEM", "driver and volume state as"),
+    ("src/fs/fat_init.rs: static SLOTS", "driver and volume state as"),
+    ("src/fs/vibefs_init.rs: static SLOTS", "driver and volume state as"),
+    ("src/fs/vibefs_init.rs: static IMAGE", "driver and volume state as"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

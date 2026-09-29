@@ -18,6 +18,7 @@ use crate::atomic::statics;
 use crate::atomic::{AtomicBool, Ordering};
 use crate::block::part::{self, PartKind};
 use crate::block::{BlockDevice, BlockError, DeviceState, MAX_BLOCKDEVS};
+use crate::dev::Instance;
 use crate::kalloc::{TryArc, TryBox};
 use crate::sync::OpGate;
 use core::fmt;
@@ -408,12 +409,16 @@ impl BlockRef {
 /// back after it leaves the table's lock.
 pub struct Registry {
     slots: [Option<BlockRef>; MAX_BLOCKDEVS],
+    /// Each slot's holder: the volume instance a filesystem built on the
+    /// device (DESIGN §12.1 rule 1), owned by the entry while it is here.
+    holders: [Option<Instance>; MAX_BLOCKDEVS],
 }
 
 impl Registry {
     pub const fn new() -> Self {
         Self {
             slots: [const { None }; MAX_BLOCKDEVS],
+            holders: [const { None }; MAX_BLOCKDEVS],
         }
     }
 
@@ -447,6 +452,38 @@ impl Registry {
         dev.set_published(true);
         *slot = Some(dev);
         Ok(())
+    }
+
+    /// Make `h` the holder of published `dev`. `Exists` when it has one,
+    /// `Gone` when `dev` is not published; `h` is then put, deferred.
+    pub fn set_holder(&mut self, dev: &BlockRef, h: Instance) -> Result<(), BlockError> {
+        let slot = match self.find_id(dev.id()).and_then(|i| self.holders.get_mut(i)) {
+            Some(s) if s.is_none() => s,
+            Some(_) => {
+                h.put_deferred();
+                return Err(BlockError::Exists);
+            }
+            None => {
+                h.put_deferred();
+                return Err(BlockError::Gone);
+            }
+        };
+        *slot = Some(h);
+        Ok(())
+    }
+
+    /// A reference to `dev`'s holder.
+    pub fn holder(&self, dev: &BlockRef) -> Option<Instance> {
+        self.find_id(dev.id())
+            .and_then(|i| self.holders.get(i))
+            .and_then(|h| h.clone())
+    }
+
+    /// Take `dev`'s holder out of the entry; the caller drops it unlocked.
+    pub fn take_holder(&mut self, dev: &BlockRef) -> Option<Instance> {
+        self.find_id(dev.id())
+            .and_then(|i| self.holders.get_mut(i))
+            .and_then(Option::take)
     }
 
     fn find_id(&self, id: u64) -> Option<usize> {
@@ -531,6 +568,11 @@ impl Registry {
             let Some(r) = self.slots.get_mut(i).and_then(Option::take) else {
                 break;
             };
+            // The entry's holder goes with it, released deferred: nothing
+            // is freed under the table's lock.
+            if let Some(h) = self.holders.get_mut(i).and_then(Option::take) {
+                h.put_deferred();
+            }
             r.set_published(false);
             let Some(o) = out.get_mut(k) else { break };
             *o = Some(r);
@@ -824,6 +866,53 @@ mod tests {
         );
         // Geometry of a killed parent is `Gone`.
         assert_eq!(orphan.err(), Some(BlockError::Gone));
+    }
+
+    /// A volume instance counting its drops.
+    struct Vol(&'static std::sync::atomic::AtomicU32);
+
+    impl Drop for Vol {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn holder_owned_by_entry() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static DROPS: AtomicU32 = AtomicU32::new(0);
+        let seq = DiskSeq::new();
+        let mut reg = Registry::new();
+        let d = disk(&mut reg, &seq, b"hold", 16);
+        assert!(reg.holder(&d).is_none());
+        reg.set_holder(&d, crate::dev::instance(Vol(&DROPS)).unwrap())
+            .unwrap();
+        // A second holder is refused and dropped; the first stays.
+        assert_eq!(
+            reg.set_holder(&d, crate::dev::instance(Vol(&DROPS)).unwrap()),
+            Err(BlockError::Exists)
+        );
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+        let h = reg.holder(&d).unwrap();
+        assert!(h.downcast_ref::<Vol>().is_some());
+        assert!(crate::dev::same_instance(&h, &reg.holder(&d).unwrap()));
+        // Taken out, the entry holds none; put back, it holds it again.
+        let t = reg.take_holder(&d).unwrap();
+        assert!(crate::dev::same_instance(&h, &t));
+        assert!(reg.holder(&d).is_none() && reg.take_holder(&d).is_none());
+        reg.set_holder(&d, t).unwrap();
+        // Unregistering the entry drops its reference; a held clone stays.
+        remove(&mut reg, &d);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+        assert!(h.downcast_ref::<Vol>().is_some());
+        drop(h);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 2);
+        // An unpublished entry takes no holder.
+        assert_eq!(
+            reg.set_holder(&d, crate::dev::instance(Vol(&DROPS)).unwrap()),
+            Err(BlockError::Gone)
+        );
+        assert_eq!(DROPS.load(Ordering::SeqCst), 3);
     }
 
     #[test]
