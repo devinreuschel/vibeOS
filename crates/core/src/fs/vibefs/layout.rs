@@ -161,7 +161,38 @@ pub(super) fn parse_meta(buf: &[u8; BLOCK], want: u8) -> Result<(u8, u16, u32), 
     Ok((buf[5], le16(buf, 6), le32(buf, 20)))
 }
 
+/// What a superblock records, borrowed apart from the buffer it is packed
+/// into, so a commit can pack it into the volume's own `iobuf`.
+struct SuperParts<'a> {
+    flags: u8,
+    nblocks: u32,
+    generation: u64,
+    inode_root: u32,
+    alloc_root: u32,
+    next_ino: u32,
+    root_ino: u32,
+    uuid: &'a [u8; 16],
+    label: &'a [u8; 32],
+    snaps: &'a [Snap; MAX_SNAPS],
+}
+
 pub(super) fn pack_super(buf: &mut [u8; BLOCK], v: &Vol, slot: u8) {
+    let p = SuperParts {
+        flags: v.flags,
+        nblocks: v.nblocks,
+        generation: v.generation,
+        inode_root: v.inode_root,
+        alloc_root: v.alloc_root,
+        next_ino: v.next_ino,
+        root_ino: v.root_ino,
+        uuid: &v.uuid,
+        label: &v.label,
+        snaps: &v.snaps,
+    };
+    pack_super_parts(buf, &p, slot);
+}
+
+fn pack_super_parts(buf: &mut [u8; BLOCK], v: &SuperParts<'_>, slot: u8) {
     buf.fill(0);
     put32(buf, 0, MAGIC_SUPER);
     put16(buf, 4, VERSION);
@@ -174,8 +205,8 @@ pub(super) fn pack_super(buf: &mut [u8; BLOCK], v: &Vol, slot: u8) {
     put32(buf, 28, v.alloc_root);
     put32(buf, 32, v.next_ino);
     put32(buf, 36, v.root_ino);
-    buf[40..56].copy_from_slice(&v.uuid);
-    buf[56..88].copy_from_slice(&v.label);
+    buf[40..56].copy_from_slice(v.uuid);
+    buf[56..88].copy_from_slice(v.label);
     let mut ns = 0u8;
     let mut i = 0usize;
     while i < MAX_SNAPS {
@@ -280,30 +311,117 @@ pub fn probe<D: Disk>(d: &mut D) -> bool {
 /// Serialize the alloc map with `old_meta` and the drop list already
 /// dropped, so the map a commit writes matches memory after step 7.
 pub(super) fn write_alloc_into(v: &Vol, old_meta: &[u32], buf: &mut [u8; BLOCK]) {
-    let nbytes = (v.nblocks as usize).div_ceil(8);
-    meta_hdr(buf, META_ALLOC, 0, v.nblocks as u16, v.generation, 0);
-    buf[HDR..HDR + nbytes].copy_from_slice(&v.bitmap[..nbytes]);
-    buf[HDR + nbytes..HDR + nbytes + v.nblocks as usize]
-        .copy_from_slice(&v.refc[..v.nblocks as usize]);
+    let drop = &v.drop[..v.ndrop as usize];
+    alloc_into(
+        buf,
+        v.nblocks,
+        v.generation,
+        &v.bitmap,
+        &v.refc,
+        drop,
+        old_meta,
+    );
+}
+
+/// The alloc map of a volume whose fields are borrowed apart from `buf`.
+fn alloc_into(
+    buf: &mut [u8; BLOCK],
+    nblocks: u32,
+    generation: u64,
+    bitmap_src: &[u8],
+    refc_src: &[u8],
+    dropped: &[u32],
+    old_meta: &[u32],
+) {
+    let nbytes = (nblocks as usize).div_ceil(8);
+    meta_hdr(buf, META_ALLOC, 0, nblocks as u16, generation, 0);
+    buf[HDR..HDR + nbytes].copy_from_slice(&bitmap_src[..nbytes]);
+    buf[HDR + nbytes..HDR + nbytes + nblocks as usize]
+        .copy_from_slice(&refc_src[..nblocks as usize]);
     {
         let (head, rest) = buf.split_at_mut(HDR + nbytes);
         let bitmap = &mut head[HDR..];
-        let refc = &mut rest[..v.nblocks as usize];
-        for &b in old_meta.iter().chain(v.drop[..v.ndrop as usize].iter()) {
-            drop_ref(bitmap, refc, v.nblocks, b);
+        let refc = &mut rest[..nblocks as usize];
+        for &b in old_meta.iter().chain(dropped.iter()) {
+            drop_ref(bitmap, refc, nblocks, b);
         }
     }
     finish_meta(buf);
 }
 
-pub(super) fn load_alloc(v: &mut Vol, buf: &[u8; BLOCK]) -> Result<(), Error> {
+impl Vol {
+    /// [`write_alloc_into`] into the volume's own `iobuf`, with no block
+    /// buffer on the stack (a commit runs on a 16 KiB kernel stack).
+    pub(super) fn alloc_into_iobuf(&mut self, old_meta: &[u32]) {
+        let Vol {
+            iobuf,
+            nblocks,
+            generation,
+            bitmap,
+            refc,
+            drop,
+            ndrop,
+            ..
+        } = self;
+        let dropped = &drop[..*ndrop as usize];
+        alloc_into(
+            iobuf,
+            *nblocks,
+            *generation,
+            bitmap,
+            refc,
+            dropped,
+            old_meta,
+        );
+    }
+
+    /// [`pack_super`] into the volume's own `iobuf`.
+    pub(super) fn super_into_iobuf(&mut self, slot: u8) {
+        let Vol {
+            iobuf,
+            flags,
+            nblocks,
+            generation,
+            inode_root,
+            alloc_root,
+            next_ino,
+            root_ino,
+            uuid,
+            label,
+            snaps,
+            ..
+        } = self;
+        let p = SuperParts {
+            flags: *flags,
+            nblocks: *nblocks,
+            generation: *generation,
+            inode_root: *inode_root,
+            alloc_root: *alloc_root,
+            next_ino: *next_ino,
+            root_ino: *root_ino,
+            uuid,
+            label,
+            snaps,
+        };
+        pack_super_parts(iobuf, &p, slot);
+    }
+}
+
+/// Load the alloc map in `v.iobuf`.
+pub(super) fn load_alloc(v: &mut Vol) -> Result<(), Error> {
+    let Vol {
+        iobuf: buf,
+        nblocks,
+        bitmap,
+        refc,
+        ..
+    } = v;
     parse_meta(buf, META_ALLOC)?;
-    let nbytes = (v.nblocks as usize).div_ceil(8);
-    if HDR + nbytes + v.nblocks as usize > BLOCK {
+    let nbytes = (*nblocks as usize).div_ceil(8);
+    if HDR + nbytes + *nblocks as usize > BLOCK {
         return Err(Error::Corrupt);
     }
-    v.bitmap[..nbytes].copy_from_slice(&buf[HDR..HDR + nbytes]);
-    v.refc[..v.nblocks as usize]
-        .copy_from_slice(&buf[HDR + nbytes..HDR + nbytes + v.nblocks as usize]);
+    bitmap[..nbytes].copy_from_slice(&buf[HDR..HDR + nbytes]);
+    refc[..*nblocks as usize].copy_from_slice(&buf[HDR + nbytes..HDR + nbytes + *nblocks as usize]);
     Ok(())
 }

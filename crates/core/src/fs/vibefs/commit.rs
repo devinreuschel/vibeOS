@@ -325,23 +325,22 @@ impl Vol {
         self.generation = self.generation.saturating_add(1);
         self.inode_root = iroot;
         self.alloc_root = alloc_bno;
-        let mut sbuf = [0u8; BLOCK];
-        write_alloc_into(self, &old_meta[..old_meta_n as usize], &mut sbuf);
-        d.write_block(alloc_bno, &sbuf)?;
+        self.alloc_into_iobuf(&old_meta[..old_meta_n as usize]);
+        d.write_block(alloc_bno, &self.iobuf)?;
         let slot = (self.generation % 2) as u8;
         #[cfg(any(test, feature = "crash_plant"))]
         let early_super = self.plant == Plant::EarlySuper;
         #[cfg(not(any(test, feature = "crash_plant")))]
         let early_super = false;
         if early_super {
-            pack_super(&mut sbuf, self, slot);
-            d.write_block(slot as u32, &sbuf)?;
+            self.super_into_iobuf(slot);
+            d.write_block(slot as u32, &self.iobuf)?;
         }
         d.flush()?;
 
         if !early_super {
-            pack_super(&mut sbuf, self, slot);
-            d.write_block(slot as u32, &sbuf)?;
+            self.super_into_iobuf(slot);
+            d.write_block(slot as u32, &self.iobuf)?;
         }
         d.flush()?;
 
@@ -373,11 +372,13 @@ impl Vol {
         Ok(())
     }
 
-    fn load_inode_leaf(&mut self, buf: &[u8; BLOCK]) -> Result<(), Error> {
-        let (_lvl, count, _) = parse_meta(buf, META_INODE_LEAF)?;
+    /// Load the inode leaf in `self.iobuf`. Each record is copied out
+    /// before its slot is taken, so no block buffer goes on the stack.
+    fn load_inode_leaf(&mut self) -> Result<(), Error> {
+        let (_lvl, count, _) = parse_meta(&self.iobuf, META_INODE_LEAF)?;
         let mut e = 0usize;
         while e < count as usize {
-            let rec = unpack_inode(&buf[HDR + e * INODE_REC..])?;
+            let rec = unpack_inode(&self.iobuf[HDR + e * INODE_REC..])?;
             let slot = self.alloc_ino_slot()?;
             self.inodes[slot] = rec;
             e += 1;
@@ -385,23 +386,26 @@ impl Vol {
         Ok(())
     }
 
-    fn load_dir_leaf(&mut self, buf: &[u8; BLOCK], parent: u32) -> Result<(), Error> {
-        let (_lvl, count, _) = parse_meta(buf, META_DIR_LEAF)?;
+    /// Load the directory leaf of `parent` in `self.iobuf`.
+    fn load_dir_leaf(&mut self, parent: u32) -> Result<(), Error> {
+        let (_lvl, count, _) = parse_meta(&self.iobuf, META_DIR_LEAF)?;
         let mut e = 0usize;
         while e < count as usize {
             let o = HDR + e * DENT_REC;
-            let de = self.alloc_dent()?;
+            let buf = &self.iobuf;
             let nlen = buf[o + 5];
             if nlen as usize > MAX_NAME || nlen == 0 {
                 return Err(Error::Corrupt);
             }
             let mut name = [0u8; MAX_NAME];
             name.copy_from_slice(&buf[o + 6..o + 6 + MAX_NAME]);
+            let (ino, kind) = (le32(buf, o), buf[o + 4]);
+            let de = self.alloc_dent()?;
             self.dents[de] = Dent {
                 used: true,
                 parent,
-                ino: le32(buf, o),
-                kind: buf[o + 4],
+                ino,
+                kind,
                 nlen,
                 name,
             };
@@ -413,8 +417,7 @@ impl Vol {
 
 pub fn mount<D: Disk>(d: &mut D, v: &mut Vol) -> Result<(), Error> {
     v.clear();
-    let mut blk = [0u8; BLOCK];
-    let sb = pick_super(d, &mut blk)?;
+    let sb = pick_super(d, &mut v.iobuf)?;
     if sb.nblocks != d.nblocks() && d.nblocks() < sb.nblocks {
         return Err(Error::Inval);
     }
@@ -430,33 +433,33 @@ pub fn mount<D: Disk>(d: &mut D, v: &mut Vol) -> Result<(), Error> {
     v.snaps = sb.snaps;
     v.dirty = false;
 
-    d.read_block(v.alloc_root, &mut blk)?;
-    load_alloc(v, &blk)?;
+    d.read_block(v.alloc_root, &mut v.iobuf)?;
+    load_alloc(v)?;
     v.mark_meta(v.alloc_root)?;
 
-    d.read_block(v.inode_root, &mut blk)?;
-    let kind = blk[4];
+    d.read_block(v.inode_root, &mut v.iobuf)?;
+    let kind = v.iobuf[4];
     match kind {
         META_INODE_LEAF => {
-            check_crc(&blk, 16)?;
+            check_crc(&v.iobuf, 16)?;
             v.mark_meta(v.inode_root)?;
-            v.load_inode_leaf(&blk)?;
+            v.load_inode_leaf()?;
         }
         META_INODE_INT => {
-            parse_meta(&blk, META_INODE_INT)?;
+            parse_meta(&v.iobuf, META_INODE_INT)?;
             v.mark_meta(v.inode_root)?;
-            let count = le16(&blk, 6) as usize;
+            let count = le16(&v.iobuf, 6) as usize;
             let mut kids = [0u32; 8];
             let mut i = 0usize;
             while i < count && i < 8 {
-                kids[i] = le32(&blk, HDR + i * 8 + 4);
+                kids[i] = le32(&v.iobuf, HDR + i * 8 + 4);
                 i += 1;
             }
             i = 0;
             while i < count && i < 8 {
-                d.read_block(kids[i], &mut blk)?;
+                d.read_block(kids[i], &mut v.iobuf)?;
                 v.mark_meta(kids[i])?;
-                v.load_inode_leaf(&blk)?;
+                v.load_inode_leaf()?;
                 i += 1;
             }
         }
@@ -469,28 +472,28 @@ pub fn mount<D: Disk>(d: &mut D, v: &mut Vol) -> Result<(), Error> {
             let root = v.inodes[i].dir_root;
             let ino = v.inodes[i].ino;
             if root != 0 {
-                d.read_block(root, &mut blk)?;
-                let k = blk[4];
+                d.read_block(root, &mut v.iobuf)?;
+                let k = v.iobuf[4];
                 match k {
                     META_DIR_LEAF => {
                         v.mark_meta(root)?;
-                        v.load_dir_leaf(&blk, ino)?;
+                        v.load_dir_leaf(ino)?;
                     }
                     META_DIR_INT => {
-                        parse_meta(&blk, META_DIR_INT)?;
+                        parse_meta(&v.iobuf, META_DIR_INT)?;
                         v.mark_meta(root)?;
-                        let count = le16(&blk, 6) as usize;
+                        let count = le16(&v.iobuf, 6) as usize;
                         let mut kids = [0u32; 8];
                         let mut j = 0usize;
                         while j < count && j < 8 {
-                            kids[j] = le32(&blk, HDR + j * DENT_REC);
+                            kids[j] = le32(&v.iobuf, HDR + j * DENT_REC);
                             j += 1;
                         }
                         j = 0;
                         while j < count && j < 8 {
-                            d.read_block(kids[j], &mut blk)?;
+                            d.read_block(kids[j], &mut v.iobuf)?;
                             v.mark_meta(kids[j])?;
-                            v.load_dir_leaf(&blk, ino)?;
+                            v.load_dir_leaf(ino)?;
                             j += 1;
                         }
                     }
