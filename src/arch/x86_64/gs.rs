@@ -28,18 +28,29 @@ pub fn from_user(cs: u64) -> bool {
 /// After a user exception `longjmp`s into `catch`, GS_BASE is already
 /// kernel (swapped on entry) but KERNEL_GS_BASE still holds the user base
 /// and DS/ES may be user.
+///
+/// `mov gs` zeroes `GS_BASE`, and an interrupt taken at CPL 0 does not
+/// swap, so IF stays 0 from before the segment loads until `GS_BASE` is
+/// back. `KERNEL_GS_BASE` is written first, so an NMI in the window, which
+/// swaps by the sign of `GS_BASE`, also lands on `PerCpu`.
 pub fn force_kernel() {
     let Some(cpu) = per_cpu_init::try_current() else {
         return;
     };
     let ptr = cpu.self_ptr as u64;
-    unsafe { load_data_segs(KERNEL_DS) };
+    let _irq = x86::InterruptGuard::enter();
+    // SAFETY: invariant I4, established here: both GS MSRs get this CPU's
+    // `PerCpu` (`per_cpu_init::try_current`), with IF=0 until `GS_BASE` is
+    // written back, and `KERNEL_DS` is the kernel data selector of the GDT
+    // `arch::x86_64::gdt::init_bsp` (or `smp_init`'s AP path) loaded.
+    unsafe {
+        x86::wrmsr(IA32_KERNEL_GS_BASE, ptr);
+        load_data_segs(KERNEL_DS);
+    }
     #[cfg(feature = "kernel_tests")]
     crate::arch::x86_64::catch::force_kernel_window();
-    unsafe {
-        x86::wrmsr(IA32_GS_BASE, ptr);
-        x86::wrmsr(IA32_KERNEL_GS_BASE, ptr);
-    }
+    // SAFETY: invariant I4, as above; established here.
+    unsafe { x86::wrmsr(IA32_GS_BASE, ptr) };
 }
 
 /// # Safety
