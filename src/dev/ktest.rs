@@ -1,7 +1,7 @@
 //! In-guest tests for dev (kernel_tests only). Rows: [`TESTS`].
 
 use core::sync::atomic::{AtomicBool, Ordering};
-use vibeos::dev::{ClaimError, Device, Driver, IdMatch, ProbeError};
+use vibeos::dev::{ClaimError, DevRef, Driver, IdMatch, Instance, ProbeError};
 use vibeos::dma::{self, DMA32_BOUNDARY, DmaAlloc};
 use vibeos::fs::O_RDWR;
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_MASTER, CMD_MEM};
@@ -33,19 +33,9 @@ pub(crate) fn len() -> usize {
     dev_init::REG.lock().len()
 }
 
-/// The first device with `vendor:device`, and its registry index.
-pub(crate) fn find_id(vendor: u16, device: u16) -> Option<(usize, Device)> {
-    let g = dev_init::REG.lock();
-    (0..g.len()).find_map(|i| {
-        g.get(i)
-            .filter(|d| d.vendor == vendor && d.device_id == device)
-            .map(|d| (i, *d))
-    })
-}
-
-/// Claim BAR `bar` of registry device `dev_i`.
-pub(crate) fn claim(dev_i: usize, bar: u8) -> Result<(), ClaimError> {
-    dev_init::REG.lock().claim(dev_i, bar)
+/// The first device with `vendor:device`.
+pub(crate) fn find_id(vendor: u16, device: u16) -> Option<DevRef> {
+    dev_init::find_id(vendor, device)
 }
 
 /// Whether the PCI scan has run.
@@ -137,7 +127,7 @@ pub(crate) fn test_pci_qemu_set() -> Outcome {
 }
 
 pub(crate) fn test_pci_bar_map() -> Outcome {
-    let Some((_, d)) = find_id(0x1234, 0x1111) else {
+    let Some(d) = find_id(0x1234, 0x1111) else {
         return Outcome::Fail("no vga");
     };
     let r = d.resources[0];
@@ -177,7 +167,7 @@ pub(crate) fn test_pci_cfg_rw() -> Outcome {
 }
 
 pub(crate) fn test_pci_claim_exclusive() -> Outcome {
-    let Some((i, d)) = find_id(0x8086, 0x100e) else {
+    let Some(d) = find_id(0x8086, 0x100e) else {
         return Outcome::Fail("no e1000");
     };
     let mut b = 0u8;
@@ -192,10 +182,10 @@ pub(crate) fn test_pci_claim_exclusive() -> Outcome {
     if !found {
         return Outcome::Fail("e1000 no bar");
     }
-    if let Err(e) = claim(i, b) {
+    if let Err(e) = dev_init::claim(&d, b) {
         return Outcome::Fail(e.as_str());
     }
-    match claim(i, b) {
+    match dev_init::claim(&d, b) {
         Err(ClaimError::Already) => Outcome::Ok,
         Err(_) => Outcome::Fail("wrong claim err"),
         Ok(()) => Outcome::Fail("double claim"),
@@ -218,10 +208,10 @@ impl Driver for HostBridgeDrv {
     fn order(&self) -> u8 {
         1
     }
-    fn probe(&self, _dev: &mut Device) -> Result<(), ProbeError> {
-        Ok(())
+    fn probe(&self, _dev: &DevRef) -> Result<Option<Instance>, ProbeError> {
+        Ok(None)
     }
-    fn remove(&self, _dev: &mut Device) {}
+    fn remove(&self, _dev: &DevRef) {}
 }
 
 pub(crate) fn test_pci_bind_order() -> Outcome {
@@ -229,10 +219,10 @@ pub(crate) fn test_pci_bind_order() -> Outcome {
         return Outcome::Fail("register");
     }
     dev_init::bind_all();
-    let Some((_, d)) = find_id(0x8086, 0x1237) else {
+    let Some(d) = find_id(0x8086, 0x1237) else {
         return Outcome::Fail("no host");
     };
-    match d.bound {
+    match dev_init::bound(&d) {
         Some("host-bridge") => Outcome::Ok,
         Some(_) => Outcome::Fail("wrong driver"),
         None => Outcome::Fail("unbound"),
@@ -310,7 +300,7 @@ const EDU_DMA_RUN: u32 = 1;
 const EDU_DMA_TO_PCI: u32 = 2;
 
 pub(crate) fn test_dma_edu() -> Outcome {
-    let Some((_, dev)) = find_edu() else {
+    let Some(dev) = find_edu() else {
         return Outcome::Skip("no edu");
     };
     let Some(mmio) = bar0_va(&dev) else {
@@ -392,18 +382,18 @@ pub(crate) fn test_dma_edu() -> Outcome {
     }
 }
 
-fn find_rng() -> Option<(usize, Device)> {
+fn find_rng() -> Option<DevRef> {
     find_id(0x1af4, 0x1044).or_else(|| find_id(0x1af4, 0x1004))
 }
 
 pub(crate) fn test_virtio_bind() -> Outcome {
-    let Some((_, d)) = find_rng() else {
+    let Some(d) = find_rng() else {
         return Outcome::Skip("no virtio-rng");
     };
     if !virtio_init::rng_bound() {
         return Outcome::Fail("unbound");
     }
-    match d.bound {
+    match dev_init::bound(&d) {
         Some("virtio-rng") => {}
         Some(_) => return Outcome::Fail("wrong driver"),
         None => return Outcome::Fail("id match"),
@@ -519,12 +509,12 @@ impl Driver for NoMemDrv {
             &[]
         }
     }
-    fn probe(&self, _dev: &mut Device) -> Result<(), ProbeError> {
+    fn probe(&self, _dev: &DevRef) -> Result<Option<Instance>, ProbeError> {
         let b = TryBox::try_new([0u8; 64])?;
         drop(b);
-        Ok(())
+        Ok(None)
     }
-    fn remove(&self, _dev: &mut Device) {}
+    fn remove(&self, _dev: &DevRef) {}
 }
 
 /// Whether a record written after `mark` (a `log_init::written` count)
@@ -553,10 +543,10 @@ pub(crate) fn test_dev_probe_alloc_fail() -> Outcome {
     if !registered {
         return Outcome::Fail("register");
     }
-    let Some((_, before)) = find_id(0x8086, 0x7113) else {
+    let Some(before) = find_id(0x8086, 0x7113) else {
         return Outcome::Skip("no PIIX4 ACPI function");
     };
-    if before.bound.is_some() {
+    if dev_init::bound(&before).is_some() {
         return Outcome::Fail("already bound");
     }
     let mark = log_init::written();
@@ -565,10 +555,10 @@ pub(crate) fn test_dev_probe_alloc_fail() -> Outcome {
     dev_init::bind_all();
     let seen = heap_init::fail_after::disarm();
     NOMEM_ARMED.store(false, Ordering::Release);
-    let Some((_, after)) = find_id(0x8086, 0x7113) else {
+    let Some(after) = find_id(0x8086, 0x7113) else {
         return Outcome::Fail("device gone");
     };
-    if after.bound.is_some() {
+    if dev_init::bound(&after).is_some() {
         return Outcome::Fail("bound");
     }
     let bdf = alloc::format!("{}", after.addr);

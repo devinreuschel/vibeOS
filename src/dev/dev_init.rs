@@ -1,9 +1,16 @@
 //! Device registry instance and bind. ROADMAP §6.1. The `lspci` and
 //! `devices` commands are in `shell::cmds::dev`.
+//!
+//! The registry holds counted entries ([`DevRef`]) and the instances their
+//! drivers returned (DESIGN §12.1 rule 1). Nothing is allocated under
+//! [`REG`]: [`push`] builds its entry before it takes the lock, and every
+//! reference a lookup returns is a clone the caller drops unlocked.
 
-use vibeos::dev::{Device, Driver, MAX_DEVICES, Registry};
+use vibeos::dev::{ClaimError, DevRef, Device, Driver, Instance, MAX_DEVICES, Registry};
+use vibeos::kalloc::AllocError;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::log::Level;
+use vibeos::pci::Bdf;
 
 use crate::pci_init;
 use crate::sync_init::SpinMutex;
@@ -11,8 +18,15 @@ use crate::sync_init::SpinMutex;
 /// The device registry. `dev::ktest` reads it for its hooks.
 pub(super) static REG: SpinMutex<Registry> = SpinMutex::with_rank(Registry::new(), RANK_DEVICE);
 
-pub fn push(d: Device) -> bool {
-    REG.lock().push(d)
+/// Register `d` under a fresh id. `AllocError` when the heap or the table
+/// is full.
+pub fn push(d: Device) -> Result<DevRef, AllocError> {
+    let id = REG.lock().take_id();
+    let r = DevRef::try_new(id, d)?;
+    // A clone goes in, so a refused insert drops only a count under the
+    // lock, and `r`'s own count after it.
+    REG.lock().insert(r.clone())?;
+    Ok(r)
 }
 
 pub fn register_driver(drv: &'static dyn Driver) -> bool {
@@ -20,32 +34,32 @@ pub fn register_driver(drv: &'static dyn Driver) -> bool {
 }
 
 pub fn bind_all() {
-    let mut jobs = [(0u8, 0u8); MAX_DEVICES];
+    let mut jobs: [Option<(u8, DevRef)>; MAX_DEVICES] = [const { None }; MAX_DEVICES];
     let n = REG.lock().collect_bind_jobs(&mut jobs);
-    let mut i = 0usize;
-    while i < n {
-        let (drv_i, dev_i) = jobs[i];
-        let Some((drv, mut dev)) = ({
+    for (drv_i, dev) in jobs.iter().take(n).flatten() {
+        let drv = {
             let g = REG.lock();
-            match (g.driver_at(drv_i as usize), g.get(dev_i as usize).copied()) {
-                (Some(drv), Some(dev)) if dev.bound.is_none() => Some((drv, dev)),
+            match g.driver_at(*drv_i as usize) {
+                Some(drv) if g.bound(dev).is_none() => Some(drv),
                 _ => None,
             }
-        }) else {
-            i += 1;
+        };
+        let Some(drv) = drv else {
             continue;
         };
         pci_init::enable_mem_master(dev.addr);
-        match drv.probe(&mut dev) {
-            Ok(()) => {
-                let name = drv.name();
-                let mut g = REG.lock();
-                if let Some(slot) = g.get_mut(dev_i as usize)
-                    && slot.bound.is_none()
+        match drv.probe(dev) {
+            Ok(inst) => {
+                // A device bound meanwhile keeps its driver; `inst` is
+                // dropped after the lock.
+                let mut spare = inst;
                 {
-                    *slot = dev;
-                    slot.bound = Some(name);
+                    let mut g = REG.lock();
+                    if g.bound(dev).is_none() && g.bind(dev, drv.name(), spare.take()) {
+                        continue;
+                    }
                 }
+                drop(spare);
             }
             // The device stays unbound, its slot untouched.
             Err(e) => crate::klog!(
@@ -58,12 +72,71 @@ pub fn bind_all() {
                 e.as_str()
             ),
         }
-        i += 1;
     }
 }
 
-pub fn get(i: usize) -> Option<Device> {
-    REG.lock().get(i).copied()
+/// A reference to device `i`, in registration order.
+pub fn get(i: usize) -> Option<DevRef> {
+    REG.lock().get(i)
+}
+
+/// The device at `bdf`.
+#[expect(
+    dead_code,
+    reason = "C-INSTANCES lookup: ROADMAP §10.12's claims (P10-S96) look a device up by address"
+)]
+pub fn find_bdf(bdf: Bdf) -> Option<DevRef> {
+    let mut i = 0usize;
+    while let Some(d) = get(i) {
+        if d.addr == bdf {
+            return Some(d);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The first device with `vendor:device`.
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "only the in-guest tests look a device up by id yet"
+    )
+)]
+pub fn find_id(vendor: u16, device: u16) -> Option<DevRef> {
+    let mut i = 0usize;
+    while let Some(d) = get(i) {
+        if d.vendor == vendor && d.device_id == device {
+            return Some(d);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The name of the driver bound to `dev`.
+pub fn bound(dev: &DevRef) -> Option<&'static str> {
+    REG.lock().bound(dev)
+}
+
+/// A reference to `dev`'s driver instance.
+#[expect(
+    dead_code,
+    reason = "C-INSTANCES: virtio-blk's instance lookup reads it once the driver returns one"
+)]
+pub fn instance(dev: &DevRef) -> Option<Instance> {
+    REG.lock().instance(dev)
+}
+
+/// Claim BAR `bar` of `dev`.
+pub fn claim(dev: &DevRef, bar: u8) -> Result<(), ClaimError> {
+    REG.lock().claim(dev, bar)
+}
+
+/// Whether BAR `bar` of `dev` is claimed.
+pub fn is_claimed(dev: &DevRef, bar: u8) -> bool {
+    REG.lock().is_claimed(dev, bar)
 }
 
 /// Bind any drivers already registered.

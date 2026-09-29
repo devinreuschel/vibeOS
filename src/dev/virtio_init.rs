@@ -4,7 +4,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use vibeos::dev::{Device, Driver, IdMatch, ProbeError};
+use vibeos::dev::{ClaimError, DevRef, Device, Driver, IdMatch, Instance, ProbeError};
 use vibeos::dma::{self, DmaAlloc, DmaBuffer};
 use vibeos::irq::IrqError;
 use vibeos::kalloc::TryBox;
@@ -272,7 +272,7 @@ fn kick(doorbell: u64) {
     }
 }
 
-fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
+fn setup(dev: &Device, caps: ModernCaps) -> Result<(), VirtioError> {
     let common_cap = caps.common.ok_or(VirtioError::NoCaps)?;
     let notify_cap = caps.notify.ok_or(VirtioError::NoCaps)?;
     let isr_cap = caps.isr.ok_or(VirtioError::NoCaps)?;
@@ -442,19 +442,26 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
     Ok(())
 }
 
-fn claim_bars(dev: &mut Device, caps: &ModernCaps) {
-    let mut mark = |c: Option<PciCap>| {
-        if let Some(c) = c {
-            let i = c.bar as usize;
-            if i < MAX_BARS && !dev.resources[i].is_empty() {
-                dev.resources[i].claimed = true;
+/// Claim each BAR a capability in `caps` lives in. Several capabilities
+/// share a BAR, so `Already` on one this device claimed is success.
+fn claim_bars(dev: &DevRef, caps: &ModernCaps) -> Result<(), ProbeError> {
+    for c in [caps.common, caps.notify, caps.isr, caps.device]
+        .into_iter()
+        .flatten()
+    {
+        let i = c.bar as usize;
+        if i >= MAX_BARS || dev.resources[i].is_empty() {
+            continue;
+        }
+        match dev_init::claim(dev, c.bar) {
+            Ok(()) | Err(ClaimError::Already) => {}
+            Err(ClaimError::Overlap) => return Err(ProbeError::Busy),
+            Err(ClaimError::Empty | ClaimError::BadIndex) => {
+                return Err(ProbeError::NoResource);
             }
         }
-    };
-    mark(caps.common);
-    mark(caps.notify);
-    mark(caps.isr);
-    mark(caps.device);
+    }
+    Ok(())
 }
 
 struct RngDriver;
@@ -476,17 +483,19 @@ impl Driver for RngDriver {
     fn order(&self) -> u8 {
         40
     }
-    fn probe(&self, dev: &mut Device) -> Result<(), ProbeError> {
+    /// virtio-rng stays one device with module state (ROADMAP §10.12), so
+    /// the registry owns no instance of it.
+    fn probe(&self, dev: &DevRef) -> Result<Option<Instance>, ProbeError> {
         let caps = virtio::read_modern_caps(&mut pci_init::HwCfg, dev.addr);
         if !caps.is_complete() {
             crate::marker!("vibeOS: virtio: missing modern caps");
             return Err(ProbeError::NoResource);
         }
-        claim_bars(dev, &caps);
+        claim_bars(dev, &caps)?;
         match setup(dev, caps) {
             Ok(()) => {
                 BOUND.store(true, Ordering::Release);
-                Ok(())
+                Ok(None)
             }
             Err(VirtioError::NoVersion1) => {
                 crate::marker!("vibeOS: virtio: no VERSION_1");
@@ -498,7 +507,7 @@ impl Driver for RngDriver {
             }
         }
     }
-    fn remove(&self, _dev: &mut Device) {}
+    fn remove(&self, _dev: &DevRef) {}
 }
 
 pub fn init() {

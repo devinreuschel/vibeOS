@@ -265,7 +265,7 @@ pub(crate) fn test_msix_cpu() -> Outcome {
     let Some(ap) = second_cpu() else {
         return Outcome::Skip("no AP");
     };
-    let Some((_, dev)) = crate::dev::ktest::find_id(0x8086, 0x10d3) else {
+    let Some(dev) = crate::dev::ktest::find_id(0x8086, 0x10d3) else {
         return Outcome::Skip("no e1000e");
     };
     if dev.caps.msix.is_none() {
@@ -333,7 +333,7 @@ pub(crate) fn test_intx_fallback() -> Outcome {
     let Some(ap) = second_cpu() else {
         return Outcome::Skip("no AP");
     };
-    let Some((_, dev)) = find_edu() else {
+    let Some(dev) = find_edu() else {
         return Outcome::Skip("no edu");
     };
     if dev.irq.pin == 0 {
@@ -406,7 +406,7 @@ pub(crate) fn test_intx_free_masks() -> Outcome {
     let Some(ap) = second_cpu() else {
         return Outcome::Skip("no AP");
     };
-    let Some((_, dev)) = find_edu() else {
+    let Some(dev) = find_edu() else {
         return Outcome::Skip("no edu");
     };
     if dev.irq.pin == 0 {

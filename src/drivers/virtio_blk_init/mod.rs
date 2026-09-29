@@ -12,7 +12,7 @@ use vibeos::block::blockdev::Backing;
 use vibeos::block::{
     BlockDevice, BlockError, Completion, DeviceState, MAX_QUEUE, Op, Queue, Request,
 };
-use vibeos::dev::{Device, Driver, IdMatch, ProbeError};
+use vibeos::dev::{ClaimError, DevRef, Device, Driver, IdMatch, Instance, ProbeError};
 use vibeos::dma::{self, DmaAlloc, DmaBuffer};
 use vibeos::irq::IrqError;
 use vibeos::kalloc::TryBox;
@@ -214,7 +214,7 @@ fn msix_table_size(dev: &Device) -> u16 {
     vibeos::pci::read_msix_cap(&mut hw, dev.addr, cap_off).table_size
 }
 
-fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
+fn setup(dev: &Device, caps: ModernCaps) -> Result<(), VirtioError> {
     let common_cap = caps.common.ok_or(VirtioError::NoCaps)?;
     let notify_cap = caps.notify.ok_or(VirtioError::NoCaps)?;
     let isr_cap = caps.isr.ok_or(VirtioError::NoCaps)?;
@@ -597,19 +597,26 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
     Ok(())
 }
 
-fn claim_bars(dev: &mut Device, caps: &ModernCaps) {
-    let mut mark = |c: Option<PciCap>| {
-        if let Some(c) = c {
-            let i = c.bar as usize;
-            if i < MAX_BARS && !dev.resources[i].is_empty() {
-                dev.resources[i].claimed = true;
+/// Claim each BAR a capability in `caps` lives in. Several capabilities
+/// share a BAR, so `Already` on one this device claimed is success.
+fn claim_bars(dev: &DevRef, caps: &ModernCaps) -> Result<(), ProbeError> {
+    for c in [caps.common, caps.notify, caps.isr, caps.device]
+        .into_iter()
+        .flatten()
+    {
+        let i = c.bar as usize;
+        if i >= MAX_BARS || dev.resources[i].is_empty() {
+            continue;
+        }
+        match dev_init::claim(dev, c.bar) {
+            Ok(()) | Err(ClaimError::Already) => {}
+            Err(ClaimError::Overlap) => return Err(ProbeError::Busy),
+            Err(ClaimError::Empty | ClaimError::BadIndex) => {
+                return Err(ProbeError::NoResource);
             }
         }
-    };
-    mark(caps.common);
-    mark(caps.notify);
-    mark(caps.isr);
-    mark(caps.device);
+    }
+    Ok(())
 }
 
 struct BlkDriver;
@@ -631,7 +638,7 @@ impl Driver for BlkDriver {
     fn order(&self) -> u8 {
         41
     }
-    fn probe(&self, dev: &mut Device) -> Result<(), ProbeError> {
+    fn probe(&self, dev: &DevRef) -> Result<Option<Instance>, ProbeError> {
         if LIVE.load(Ordering::Acquire) {
             crate::marker!("vibeOS: virtio: blk already bound");
             return Err(ProbeError::Failed);
@@ -641,9 +648,9 @@ impl Driver for BlkDriver {
             crate::marker!("vibeOS: virtio: blk missing modern caps");
             return Err(ProbeError::NoResource);
         }
-        claim_bars(dev, &caps);
+        claim_bars(dev, &caps)?;
         match setup(dev, caps) {
-            Ok(()) => Ok(()),
+            Ok(()) => Ok(None),
             Err(VirtioError::NoVersion1) => {
                 crate::marker!("vibeOS: virtio: blk no VERSION_1");
                 Err(ProbeError::Failed)
@@ -655,7 +662,7 @@ impl Driver for BlkDriver {
             }
         }
     }
-    fn remove(&self, _dev: &mut Device) {}
+    fn remove(&self, _dev: &DevRef) {}
 }
 
 pub fn init() {

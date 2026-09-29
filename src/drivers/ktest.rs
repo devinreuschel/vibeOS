@@ -3,7 +3,7 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use vibeos::block::{BlockError, DeviceState, Op};
-use vibeos::dev::Device;
+use vibeos::dev::DevRef;
 use vibeos::virtio_blk::{F_DISCARD, F_MQ};
 
 use crate::block_init::IoWaiter;
@@ -59,7 +59,7 @@ pub(crate) fn persist_lba() -> u64 {
     }
 }
 
-fn find_blk() -> Option<(usize, Device)> {
+fn find_blk() -> Option<DevRef> {
     crate::dev::ktest::find_id(0x1af4, 0x1042)
         .or_else(|| crate::dev::ktest::find_id(0x1af4, 0x1001))
 }
@@ -68,10 +68,10 @@ pub(crate) fn test_block_vblk_rw() -> Outcome {
     if !virtio_blk_init::live() {
         return Outcome::Skip("no virtio-blk");
     }
-    let Some((_, d)) = find_blk() else {
+    let Some(d) = find_blk() else {
         return Outcome::Fail("id missing");
     };
-    match d.bound {
+    match crate::dev_init::bound(&d) {
         Some("virtio-blk") => {}
         Some(_) => return Outcome::Fail("wrong driver"),
         None => return Outcome::Fail("unbound"),

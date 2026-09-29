@@ -444,7 +444,7 @@ fn populate_sysfs() {
     while let Some(d) = dev_init::get(i) {
         let mut name = [0u8; 8];
         let bdf = bdf_name(d.addr.bus, d.addr.device, d.addr.function, &mut name);
-        let drv = d.bound.map(|s| s.as_bytes());
+        let drv = dev_init::bound(&d).map(|s| s.as_bytes());
         if let Err(e) = fs_init::KERNFS.sysfs_add_device(bdf, d.vendor, d.device_id, d.class, drv) {
             failed = failed.saturating_add(1);
             last = Some(e);
