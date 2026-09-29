@@ -1152,6 +1152,174 @@ def rule_lane_map(tree: Tree) -> list[Problem]:
     return out
 
 
+# ROADMAP §10.1 (L1206, L1207): release.yml's shape. §14.6 adds `schedule` to
+# the triggers and its signers to the privileged commands.
+RELEASE_TRIGGERS = frozenset({"workflow_dispatch"})
+# Commands a privileged job may run: none of them runs a workspace file.
+PRIVILEGED_COMMANDS = frozenset({"cd", "sha256sum", "ls", "test", "echo", "printf", "cat"})
+RELEASE_ACTION = "softprops/action-gh-release"
+RELEASE_IMAGE = "vibeos.iso"
+_ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+_SEP_RE = re.compile(r"&&|\|\||;|\|")
+
+
+def _events(on: Node) -> list[tuple[str, Node]]:
+    """(event, node) per trigger of an `on:` mapping, list or scalar."""
+    if on.kind == "map":
+        return [(c.key or "", c) for c in on.children]
+    return [(s, on) for s in on.scalars()]
+
+
+def _steps(job: Node) -> list[Node]:
+    steps = job.get("steps")
+    return steps.items if steps is not None else []
+
+
+def _writes(perm: Node | None) -> bool:
+    if perm is None:
+        return False
+    if perm.kind == "scalar":
+        return perm.value == "write-all"
+    return any(g.value == "write" for g in perm.children)
+
+
+def _privileged(job: Node, top: Node | None) -> bool:
+    """A write grant, its own or else the workflow's, or the `release`
+    environment (ROADMAP §14.6)."""
+    perm = job.get("permissions")
+    env = job.get("environment")
+    name = env.get("name") if env is not None and env.kind == "map" else env
+    return _writes(perm if perm is not None else top) or (
+        name is not None and name.value == "release"
+    )
+
+
+def shell_commands(script: str) -> list[str]:
+    """The first word of each command in `script`, `NAME=value` words skipped."""
+    out = []
+    for line in script.replace("\\\n", " ").split("\n"):
+        if line.strip().startswith("#"):
+            continue
+        for part in _SEP_RE.split(line):
+            words = part.split()
+            while words and _ASSIGN_RE.match(words[0]):
+                words.pop(0)
+            if words:
+                out.append(words[0])
+    return out
+
+
+def rule_release_triggers(tree: Tree) -> list[Problem]:
+    """L1207: release.yml's one trigger is `workflow_dispatch` with a required `tag`."""
+    wf = tree.workflows.get(RELEASE)
+    if wf is None:
+        return []
+    on = wf.get("on")
+    if on is None:
+        return [Problem(RELEASE, 1, "release_triggers", "no `on:`")]
+    out = []
+    for event, node in _events(on):
+        if event not in RELEASE_TRIGGERS:
+            msg = f"trigger `{event}`; release.yml runs only on `workflow_dispatch`"
+            out.append(Problem(RELEASE, node.line, "release_triggers", msg))
+    dispatch = on.get("workflow_dispatch") if on.kind == "map" else None
+    inputs = dispatch.get("inputs") if dispatch is not None else None
+    tag = inputs.get("tag") if inputs is not None else None
+    required = tag.get("required") if tag is not None else None
+    if required is None or required.value != "true":
+        msg = "`workflow_dispatch` has no required `tag` input"
+        out.append(Problem(RELEASE, (dispatch or on).line, "release_triggers", msg))
+    return out
+
+
+def rule_release_no_cache(tree: Tree) -> list[Problem]:
+    """L1207: release.yml restores no cache, which could change what it builds."""
+    wf = tree.workflows.get(RELEASE)
+    out = []
+    for n in wf.walk() if wf is not None else []:
+        if n.key == "uses" and (n.value or "").startswith("actions/cache"):
+            out.append(Problem(RELEASE, n.line, "release_no_cache", f"uses {n.value}"))
+        if n.key == "with" and n.kind == "map" and n.get("cache") is not None:
+            out.append(Problem(RELEASE, n.line, "release_no_cache", "`with:` sets `cache`"))
+    return out
+
+
+def rule_release_no_workflow_write(tree: Tree) -> list[Problem]:
+    """L1207: release.yml grants no write workflow-wide; one job holds it."""
+    wf = tree.workflows.get(RELEASE)
+    top = wf.get("permissions") if wf is not None else None
+    if top is None or not _writes(top):
+        return []
+    msg = "workflow-wide write grant; grant it to the publishing job alone"
+    return [Problem(RELEASE, top.line, "release_no_workflow_write", msg)]
+
+
+def rule_release_privileged_jobs(tree: Tree) -> list[Problem]:
+    """L1207: a release.yml job with a write grant or the `release` environment
+    checks out nothing and runs no repository script (ROADMAP §10.1, §14.6)."""
+    wf = tree.workflows.get(RELEASE)
+    out = []
+    top = wf.get("permissions") if wf is not None else None
+    for job in _jobs(wf) if wf is not None else []:
+        if not _privileged(job, top):
+            continue
+
+        def bad(line: int, what: str, job: Node = job) -> None:
+            msg = f"privileged job `{job.key}` {what}"
+            out.append(Problem(RELEASE, line, "release_privileged_jobs", msg))
+
+        uses = job.get("uses")
+        if uses is not None and (uses.value or "").startswith("./"):
+            bad(uses.line, f"uses {uses.value}")
+        for step in _steps(job):
+            u = step.get("uses")
+            v = (u.value or "") if u is not None else ""
+            if u is not None and v.startswith("actions/checkout"):
+                bad(u.line, "checks out the repository")
+            elif u is not None and v.startswith("./"):
+                bad(u.line, f"uses the repository's {v}")
+            run = step.get("run")
+            if run is None or run.value is None:
+                continue
+            if "$(" in run.value or "`" in run.value:
+                bad(run.line, "runs a command substitution")
+            for cmd in shell_commands(run.value):
+                if cmd not in PRIVILEGED_COMMANDS:
+                    bad(run.line, f"runs `{cmd}`, outside PRIVILEGED_COMMANDS")
+    return out
+
+
+def rule_release_one_image(tree: Tree) -> list[Problem]:
+    """L1206: the release publishes vibeos.iso as its one image, after `build`."""
+    wf = tree.workflows.get(RELEASE)
+    if wf is None:
+        return []
+    out = []
+    seen = False
+    for job in _jobs(wf):
+        for step in _steps(job):
+            u = step.get("uses")
+            if u is None or not (u.value or "").startswith(RELEASE_ACTION):
+                continue
+            with_ = step.get("with")
+            files = with_.get("files") if with_ is not None else None
+            names = re.split(r"[\s,]+", files.value or "") if files is not None else []
+            bases = [Path(n).name for n in names if n]
+            for b in bases:
+                if b.endswith(".iso") and b != RELEASE_IMAGE:
+                    msg = f"publishes {b}; {RELEASE_IMAGE} is the one image"
+                    out.append(Problem(RELEASE, (files or u).line, "release_one_image", msg))
+            if RELEASE_IMAGE in bases:
+                seen = True
+            needs = job.get("needs")
+            if needs is None or "build" not in needs.scalars():
+                msg = f"publishing job `{job.key}` lacks `needs: build`"
+                out.append(Problem(RELEASE, job.line, "release_one_image", msg))
+    if not seen:
+        msg = f"no {RELEASE_ACTION} step publishes {RELEASE_IMAGE}"
+        out.append(Problem(RELEASE, 1, "release_one_image", msg))
+    return out
+
 RULES: list[Callable[[Tree], list[Problem]]] = [
     rule_no_expr_in_run,
     rule_permissions,
@@ -1169,6 +1337,11 @@ RULES: list[Callable[[Tree], list[Problem]]] = [
     rule_job_lane,
     rule_row_lane,
     rule_lane_map,
+    rule_release_triggers,
+    rule_release_no_cache,
+    rule_release_no_workflow_write,
+    rule_release_privileged_jobs,
+    rule_release_one_image,
 ]
 
 
