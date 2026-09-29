@@ -11,14 +11,14 @@ use core::fmt::Write;
 use core::panic::PanicInfo;
 
 use vibeos::desc::InterruptFrame;
-use vibeos::fmt_util;
+use vibeos::fmt_util::{self, StackBuf};
 use vibeos::log::DUMP_LAST;
 use vibeos::marker;
 use vibeos::symtab;
 
 use crate::ksyms::KSYMS;
 use crate::per_cpu_init;
-use crate::serial::Serial;
+use crate::serial::{self, Serial};
 use crate::x86;
 
 unsafe extern "C" {
@@ -76,7 +76,7 @@ fn begin_dump() {
     x86::cli();
     if !crate::serial::raw::claim_dump() {
         Serial::init();
-        Serial::write_bytes(b"vibeOS: panic: reentered\n");
+        Serial::write_line(b"vibeOS: panic: reentered\n");
         finish();
     }
     crate::ipi_init::halt_others();
@@ -89,23 +89,36 @@ fn begin_dump() {
     Serial::init();
 }
 
-fn hex(n: u64) {
+/// One dump line, which `f` builds in one stack buffer, in one write.
+fn dump_line(f: impl FnOnce(&mut StackBuf<'_>)) {
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a write to Serial cannot fail (DESIGN §2.5)"
+    )]
+    let _ = serial::write_line_with(|w| {
+        f(w);
+        Ok(())
+    });
+}
+
+fn hex(w: &mut StackBuf<'_>, n: u64) {
     let mut b = [0u8; 16];
-    Serial::write_bytes(fmt_util::write_hex(n, &mut b));
+    w.push_bytes(fmt_util::write_hex(n, &mut b));
 }
 
 fn dump_regs(rbp: u64, rsp: u64, rflags: u64, rip: u64) {
-    Serial::write_bytes(b"vibeOS: regs: rbp=0x");
-    hex(rbp);
-    Serial::write_bytes(b" rsp=0x");
-    hex(rsp);
-    Serial::write_bytes(b" rflags=0x");
-    hex(rflags);
-    Serial::write_bytes(b" rip=0x");
-    hex(rip);
-    Serial::write_bytes(b" cr3=0x");
-    hex(x86::read_cr3());
-    Serial::write_bytes(b"\n");
+    dump_line(|w| {
+        w.push_bytes(b"vibeOS: regs: rbp=0x");
+        hex(w, rbp);
+        w.push_bytes(b" rsp=0x");
+        hex(w, rsp);
+        w.push_bytes(b" rflags=0x");
+        hex(w, rflags);
+        w.push_bytes(b" rip=0x");
+        hex(w, rip);
+        w.push_bytes(b" cr3=0x");
+        hex(w, x86::read_cr3());
+    });
 }
 
 fn dump_thread() {
@@ -136,38 +149,38 @@ fn in_image(p: u64) -> bool {
     p >= kstart() && p < kend()
 }
 
-fn hex_trim(n: u64) {
+fn hex_trim(w: &mut StackBuf<'_>, n: u64) {
     let mut b = [0u8; 16];
     let s = fmt_util::write_hex(n, &mut b);
     let mut i = 0;
     while i + 1 < s.len() && s[i] == b'0' {
         i += 1;
     }
-    Serial::write_bytes(&s[i..]);
+    w.push_bytes(&s[i..]);
 }
 
 fn print_frame_addr(addr: u64) {
-    Serial::write_bytes(b"  ");
-    Serial::write_bytes(b"0x");
-    hex(addr);
-    if let Some(e) = symtab::lookup(KSYMS, addr) {
-        let off = symtab::offset(e, addr);
-        // Sparse tables (panic-test) would otherwise pin a RIP to the
-        // previous function with a huge offset.
-        if off < 0x1_0000 {
-            Serial::write_bytes(b" ");
-            Serial::write_bytes(e.name.as_bytes());
-            if off != 0 {
-                Serial::write_bytes(b"+0x");
-                hex_trim(off);
+    dump_line(|w| {
+        w.push_bytes(b"  0x");
+        hex(w, addr);
+        if let Some(e) = symtab::lookup(KSYMS, addr) {
+            let off = symtab::offset(e, addr);
+            // Sparse tables (panic-test) would otherwise pin a RIP to the
+            // previous function with a huge offset.
+            if off < 0x1_0000 {
+                w.push_bytes(b" ");
+                w.push_bytes(e.name.as_bytes());
+                if off != 0 {
+                    w.push_bytes(b"+0x");
+                    hex_trim(w, off);
+                }
             }
         }
-    }
-    Serial::write_bytes(b"\n");
+    });
 }
 
 fn dump_backtrace(rip: u64, rbp: u64) {
-    Serial::write_bytes(b"vibeOS: backtrace:\n");
+    Serial::write_line(b"vibeOS: backtrace:\n");
     let mut rip = rip;
     let mut rbp = rbp;
     let mut n = 0usize;
@@ -200,7 +213,7 @@ fn dump_backtrace(rip: u64, rbp: u64) {
 }
 
 fn finish() -> ! {
-    Serial::write_bytes(b"vibeOS: panic: halted\n");
+    Serial::write_line(b"vibeOS: panic: halted\n");
     #[cfg(feature = "panic_exit")]
     // SAFETY: `panic_exit` builds run under QEMU with isa-debug-exit at
     // port 0xF4, whose write ends the VM; established by the harness's
@@ -233,8 +246,7 @@ fn panic(info: &PanicInfo) -> ! {
     let rflags = x86::rflags();
     begin_dump();
 
-    Serial::write_bytes(marker::PANIC_BANNER.as_bytes());
-    Serial::write_bytes(b"\n");
+    Serial::write_line(marker::PANIC_BANNER.as_bytes());
 
     #[expect(
         clippy::let_underscore_must_use,
@@ -256,9 +268,36 @@ fn write_where(info: &PanicInfo) -> core::fmt::Result {
             loc.line(),
             loc.column()
         )?,
-        None => Serial::write_bytes(b"vibeOS: panic: at <unknown>\n"),
+        None => Serial::write_line(b"vibeOS: panic: at <unknown>\n"),
     }
     writeln!(Serial, "vibeOS: panic: msg: {}", info.message())
+}
+
+/// ` rip=0x.. cs=0x.. rflags=0x.. rsp=0x.. ss=0x..[ err=0x..][ cr2=0x..]`.
+pub(crate) fn frame_fields(
+    w: &mut StackBuf<'_>,
+    frame: &InterruptFrame,
+    err: Option<u64>,
+    cr2: Option<u64>,
+) {
+    w.push_bytes(b" rip=0x");
+    hex(w, frame.rip);
+    w.push_bytes(b" cs=0x");
+    hex(w, frame.cs);
+    w.push_bytes(b" rflags=0x");
+    hex(w, frame.rflags);
+    w.push_bytes(b" rsp=0x");
+    hex(w, frame.rsp);
+    w.push_bytes(b" ss=0x");
+    hex(w, frame.ss);
+    if let Some(e) = err {
+        w.push_bytes(b" err=0x");
+        hex(w, e);
+    }
+    if let Some(c) = cr2 {
+        w.push_bytes(b" cr2=0x");
+        hex(w, c);
+    }
 }
 
 pub fn exception_halt(
@@ -268,55 +307,23 @@ pub fn exception_halt(
     cr2: Option<u64>,
 ) -> ! {
     begin_dump();
-    Serial::write_bytes(b"vibeOS: ");
-    Serial::write_bytes(kind);
-    Serial::write_bytes(b" rip=0x");
-    hex(frame.rip);
-    Serial::write_bytes(b" cs=0x");
-    hex(frame.cs);
-    Serial::write_bytes(b" rflags=0x");
-    hex(frame.rflags);
-    Serial::write_bytes(b" rsp=0x");
-    hex(frame.rsp);
-    Serial::write_bytes(b" ss=0x");
-    hex(frame.ss);
-    if let Some(e) = err {
-        Serial::write_bytes(b" err=0x");
-        hex(e);
-    }
-    if let Some(c) = cr2 {
-        Serial::write_bytes(b" cr2=0x");
-        hex(c);
-    }
-    Serial::write_bytes(b"\n");
+    dump_line(|w| {
+        w.push_bytes(b"vibeOS: ");
+        w.push_bytes(kind);
+        frame_fields(w, frame, err, cr2);
+    });
     dump_common(frame.rip, x86::read_rbp(), frame.rsp, frame.rflags);
     finish();
 }
 
 pub fn exception_vec(n: u8, frame: &InterruptFrame, err: Option<u64>, cr2: Option<u64>) -> ! {
     begin_dump();
-    Serial::write_bytes(b"vibeOS: exception: vector ");
-    let mut b = [0u8; 4];
-    Serial::write_bytes(fmt_util::write_dec(n as u64, &mut b));
-    Serial::write_bytes(b" rip=0x");
-    hex(frame.rip);
-    Serial::write_bytes(b" cs=0x");
-    hex(frame.cs);
-    Serial::write_bytes(b" rflags=0x");
-    hex(frame.rflags);
-    Serial::write_bytes(b" rsp=0x");
-    hex(frame.rsp);
-    Serial::write_bytes(b" ss=0x");
-    hex(frame.ss);
-    if let Some(e) = err {
-        Serial::write_bytes(b" err=0x");
-        hex(e);
-    }
-    if let Some(c) = cr2 {
-        Serial::write_bytes(b" cr2=0x");
-        hex(c);
-    }
-    Serial::write_bytes(b"\n");
+    dump_line(|w| {
+        w.push_bytes(b"vibeOS: exception: vector ");
+        let mut b = [0u8; 4];
+        w.push_bytes(fmt_util::write_dec(n as u64, &mut b));
+        frame_fields(w, frame, err, cr2);
+    });
     dump_common(frame.rip, x86::read_rbp(), frame.rsp, frame.rflags);
     finish();
 }

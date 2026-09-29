@@ -430,11 +430,9 @@ The global lock order is in [section 2.1](INVARIANTS.md#21-lock-order) and the o
 - A lock taken from an ISR is taken with interrupts disabled in every other context too. The scheduler
   lock is the canonical case: the timer ISR calls into the scheduler, so any holder with interrupts
   enabled deadlocks the moment its own timer fires.
-- Serial TX takes a lock so bytes from different CPUs do not interleave. `Serial::write_fmt` keeps
-  IRQs off for the whole line but takes the TX lock once per `write_str` piece, so another CPU can
-  write between two pieces of a formatted line, and `log_fmt` sends a record and its newline as two
-  writes. The harness then misses a contract line split that way. Planned (ROADMAP §10.2, F138):
-  each line is formatted, newline included, into one buffer and written under one TX hold.
+- Serial TX takes a lock so bytes from different CPUs do not interleave. Each kernel line is
+  formatted, newline included, into one stack buffer and written under one TX hold, so another CPU
+  cannot split it (ROADMAP §10.2, F138).
 - klog records go to one global IRQ-safe log ring and to a serial sink that only try-locks TX.
   Per-CPU serial capture assembles serial output into lines for the ring. Planned (ROADMAP §19.5):
   one lockless ring any context may append to, and a printer thread per console (§2.5).

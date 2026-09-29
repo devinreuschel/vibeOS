@@ -5,7 +5,6 @@
 //! (DESIGN §2.2 / §5.4). Kick barriers are the Phase 6 `dma_wmb` story.
 //! Status bytes live in DMA, not on the submitter stack.
 
-use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::block::{
@@ -38,7 +37,6 @@ use crate::dma_init;
 use crate::irq_init;
 use crate::pci_init;
 use crate::per_cpu_init;
-use crate::serial::Serial;
 use crate::sync_init::SpinMutex;
 use crate::thread_init;
 
@@ -1105,7 +1103,7 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
         clippy::let_underscore_must_use,
         reason = "a write to Serial cannot fail (DESIGN §2.5)"
     )]
-    let _ = write_marker(&mut Serial, NAME, capacity).and_then(|()| writeln!(Serial));
+    let _ = crate::serial::write_line_with(|w| write_marker(w, NAME, capacity));
     let mq = if feat & F_MQ != 0 { "mq" } else { "sq" };
     crate::marker!(
         "vibeOS: virtio: blk {NAME} {} qsz={q0sz} nq={nq} {mq} feat={:#x} bs={blk_size} topo={}/{} discard={}",

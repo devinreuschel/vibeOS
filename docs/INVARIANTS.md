@@ -502,8 +502,8 @@ Log ring (ROADMAP §5.5):
 - One global IRQ-safe ring and a serial try-lock sink. The sink drops its copy of a record when
   another CPU holds the TX lock, and `log_fmt` drops a record its CPU emits while already inside
   `log_fmt`; each drop is counted, in `log_init::sink_drops` (once per record) and
-  `log_init::reentry_drops`. Planned: a log record reaches serial whole (ROADMAP §10.2,
-  F138); the log contract below (ROADMAP §19.5).
+  `log_init::reentry_drops`. `log_fmt` sends each record, newline included, in one try-lock
+  write (ROADMAP §10.2, F138). Planned: the log contract below (ROADMAP §19.5).
 
 Planned (ROADMAP §19.5), the log contract:
 
