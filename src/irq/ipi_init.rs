@@ -131,9 +131,13 @@ fn service_shootdowns() {
                     }
                 }
             }
-            s.acked.fetch_or(me, Ordering::Release);
-            vibeos::trace!(IpiAck, u64::from(vectors::IPI_SHOOTDOWN), i as u64);
             SHOOT_COUNT.fetch_add(1, Ordering::Relaxed);
+            vibeos::trace!(IpiAck, u64::from(vectors::IPI_SHOOTDOWN), i as u64);
+            // The ack is this handler's last access to the round (AGENTS.md
+            // rule 5): once `wait_acks` sees it, the initiator may start the
+            // next round, and a reader of `SHOOT_COUNT` that saw the ack
+            // (Acquire) sees this round counted.
+            s.acked.fetch_or(me, Ordering::Release);
         }
         i += 1;
     }
@@ -162,9 +166,10 @@ fn service_calls() {
         let _lockless = sync_init::lockless_section();
         f(arg);
     }
-    CALL.acked.fetch_or(me, Ordering::Release);
-    vibeos::trace!(IpiAck, u64::from(vectors::IPI_CALL), u64::MAX);
     CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+    vibeos::trace!(IpiAck, u64::from(vectors::IPI_CALL), u64::MAX);
+    // Publish last (AGENTS.md rule 5), as in `service_shootdowns`.
+    CALL.acked.fetch_or(me, Ordering::Release);
 }
 
 /// Wait until every CPU in `waiters` has acked. Never panics and never
