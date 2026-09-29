@@ -303,22 +303,39 @@ fn schedule_inner(from_irq: bool) {
         }
     }
 
-    let next = per_cpu_init::with_current(|cpu| {
+    let mut next = per_cpu_init::with_current(|cpu| {
         enqueue_runnable(&mut cpu.runq, cur, idle, cur_state);
         cpu.runq.remove(idle);
         take_next(&mut cpu.runq, idle)
     });
-    #[cfg(feature = "kernel_tests")]
-    let next = requeue_next_cpu(next, cur, idle, me);
 
-    let (old_ptr, new_ptr, old_id, new_id) = with_sched(|s| {
-        if let Some(t) = s.get_mut(next) {
-            t.state = ThreadState::Running;
-            t.cpu = me;
+    // A run-queue entry says only that some wake put the thread here. The
+    // wake's push reaches this CPU after its waker has dropped SCHED, so it
+    // can land after the thread has already resumed through its own
+    // `schedule`, which found it `Ready`, and has since blocked again or
+    // exited; the entry is then stale. SCHED decides: run a thread only
+    // while it is `Ready` and placed on this CPU, and drop any other entry.
+    let (old_ptr, new_ptr, old_id, new_id) = loop {
+        #[cfg(feature = "kernel_tests")]
+        let cand = requeue_next_cpu(next, cur, idle, me);
+        #[cfg(not(feature = "kernel_tests"))]
+        let cand = next;
+        let picked = with_sched(|s| {
+            if cand != idle && !s.get(cand).is_some_and(|t| runnable_on(t, me)) {
+                return None;
+            }
+            if let Some(t) = s.get_mut(cand) {
+                t.state = ThreadState::Running;
+                t.cpu = me;
+            }
+            relink(s);
+            Some((s.ptr(cur), s.ptr(cand), cur, cand))
+        });
+        match picked {
+            Some(p) => break p,
+            None => next = per_cpu_init::with_current(|cpu| take_next(&mut cpu.runq, idle)),
         }
-        relink(s);
-        (s.ptr(cur), s.ptr(next), cur, next)
-    });
+    };
 
     if old_id == new_id || old_ptr.is_null() || new_ptr.is_null() {
         return;
@@ -326,6 +343,14 @@ fn schedule_inner(from_irq: bool) {
     assert!(!new_ptr.is_null(), "schedule: next vanished");
     switch_now(old_ptr, new_ptr);
     finish_switch();
+}
+
+/// Whether `t` may run on CPU `cpu` now: `Ready`, and placed there. A
+/// thread is placed on one CPU at a time (`Sched::place_home`, `spawn_inner`,
+/// the requeue hook), and `schedule_inner` sets it `Running` under SCHED
+/// before the switch, so no other CPU's stale entry can run it meanwhile.
+fn runnable_on(t: &Tcb, cpu: u32) -> bool {
+    t.state == ThreadState::Ready && t.cpu == cpu
 }
 
 /// C-REQUEUE-HOOK: while `testing::set_requeue_next_cpu` is on, a user
@@ -344,7 +369,9 @@ fn requeue_next_cpu(next: ThreadId, cur: ThreadId, idle: ThreadId, me: u32) -> T
     let Some(target) = testing::next_online_cpu(me) else {
         return next;
     };
-    let movable = |t: &Tcb| t.pid != 0 || t.affinity == CpuAffinity::Any;
+    // A stale entry's thread is not runnable here and does not move:
+    // `schedule_inner` drops the entry.
+    let movable = |t: &Tcb| runnable_on(t, me) && (t.pid != 0 || t.affinity == CpuAffinity::Any);
     if next == cur {
         if with_sched(|s| s.get(cur).is_some_and(movable)) {
             per_cpu_init::with_current(|cpu| cpu.runq.push_back(cur));
