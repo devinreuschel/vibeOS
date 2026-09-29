@@ -34,6 +34,7 @@
 
 #![allow(clippy::identity_op)] // PTE masks read as `x << n` even when n is 0
 
+use crate::atomic::statics::{AtomicPtr, Ordering};
 use crate::pmm::Frames;
 
 pub const PAGE_SHIFT: u32 = 12;
@@ -198,6 +199,7 @@ pub unsafe trait FrameAlloc {
 }
 
 /// Errors from map / unmap / translate.
+#[must_use]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum MapError {
     /// Address not aligned to the requested page size.
@@ -305,7 +307,11 @@ impl Mapper {
         let mut level = 4;
         while level > leaf_level {
             let idx = va.index(level);
+            // SAFETY: `table_phys` is this root or a table the walk found
+            // under it, and every table this root reaches is a frame reached at `phys + hhdm_offset` (`mm::paging::Mapper::new`'s contract; invariant I14 for the kernel's); `idx < 512` stays inside it.
             let entry_ptr = unsafe { self.table_ptr(table_phys).add(idx) };
+            // SAFETY: `entry_ptr` points into a live table, as above
+            // (`mm::paging::Mapper::new`'s contract).
             let entry = unsafe { entry_ptr.read_volatile() };
 
             if entry & PageFlags::PRESENT == 0 {
@@ -314,12 +320,19 @@ impl Mapper {
                 // The table's token moves into the entry written below;
                 // `free_level` takes it back when it clears that entry.
                 let new = PhysAddr(f.into_entry());
+                // SAFETY: `zero_frame`'s contract; `new` is the order-0
+                // frame the token above owned, reached at `hhdm_offset` as
+                // `FrameAlloc`'s contract (`mm::paging::FrameAlloc`) says.
                 unsafe { self.zero_frame(new) };
                 // Interior tables always writable, always non-NX.
                 // Setting USER here is fine — permission is masked by
                 // the leaf's flags for kernel VAs.
                 let interior =
                     PageFlags(PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER);
+                // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract);
+                // `&mut self` makes this the root's one writer, and for the
+                // kernel root the page-table lock is held (invariant I226,
+                // established at `mm::paging_init::current_mapper`).
                 unsafe { entry_ptr.write_volatile(make_pte(new, interior)) };
                 table_phys = new;
             } else {
@@ -337,7 +350,10 @@ impl Mapper {
 
         // Now at the level holding the leaf slot.
         let idx = va.index(leaf_level);
+        // SAFETY: `table_phys` is a table the walk above reached, and
+        // every table this root reaches is a frame reached at `phys + hhdm_offset` (`mm::paging::Mapper::new`'s contract; invariant I14 for the kernel's); `idx < 512`.
         let entry_ptr = unsafe { self.table_ptr(table_phys).add(idx) };
+        // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract).
         let existing = unsafe { entry_ptr.read_volatile() };
         if existing & PageFlags::PRESENT != 0 {
             match mode {
@@ -357,6 +373,11 @@ impl Mapper {
         if matches!(size, PageSize::Size2M) {
             leaf_flags = leaf_flags.with(PageFlags::HUGE);
         }
+        // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract); the
+        // caller vouches for `pa` (this fn's `# Safety` contract,
+        // established here), and the page-table lock covers a kernel-root
+        // write (invariant I226, established at
+        // `mm::paging_init::current_mapper`).
         unsafe { entry_ptr.write_volatile(make_pte(pa, leaf_flags)) };
         Ok(())
     }
@@ -395,6 +416,8 @@ impl Mapper {
             } else {
                 (PageSize::Size4K, PAGE_SIZE_4K)
             };
+            // SAFETY: `map_page`'s contract, which this fn's `# Safety`
+            // passes on for the whole range, established here.
             unsafe { self.map_page(cur_va, cur_pa, flags, size, mode, alloc)? };
             off += step;
         }
@@ -415,7 +438,10 @@ impl Mapper {
         let mut level = 4;
         while level >= 1 {
             let idx = va.index(level);
+            // SAFETY: `table_phys` is this root or a table the walk found
+            // under it, and every table this root reaches is a frame reached at `phys + hhdm_offset` (`mm::paging::Mapper::new`'s contract; invariant I14 for the kernel's); `idx < 512`.
             let entry_ptr = unsafe { self.table_ptr(table_phys).add(idx) };
+            // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract).
             let entry = unsafe { entry_ptr.read_volatile() };
             if entry & PageFlags::PRESENT == 0 {
                 return None;
@@ -428,6 +454,10 @@ impl Mapper {
                     PageSize::Size2M
                 };
                 let phys = pte_phys(entry);
+                // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract),
+                // and the page-table lock covers a kernel-root write
+                // (invariant I226, established at
+                // `mm::paging_init::current_mapper`).
                 unsafe { entry_ptr.write_volatile(0) };
                 return Some((phys, size));
             }
@@ -444,6 +474,8 @@ impl Mapper {
         let mut level = 4;
         while level >= 1 {
             let idx = va.index(level);
+            // SAFETY: `table_phys` is this root or a table the walk found
+            // under it, and every table this root reaches is a frame reached at `phys + hhdm_offset` (`mm::paging::Mapper::new`'s contract; invariant I14 for the kernel's); `idx < 512`.
             let entry = unsafe { self.table_ptr(table_phys).add(idx).read_volatile() };
             if entry & PageFlags::PRESENT == 0 {
                 return None;
@@ -499,14 +531,24 @@ impl Mapper {
             let mut level = 4;
             while level > leaf_level {
                 let idx = va.index(level);
+                // SAFETY: `translate` just walked this path to a present
+                // leaf, so each table on it is live, and every table this root reaches is a frame reached at `phys + hhdm_offset` (`mm::paging::Mapper::new`'s contract; invariant I14 for the kernel's); `idx < 512`.
                 let entry = unsafe { self.table_ptr(table_phys).add(idx).read_volatile() };
                 table_phys = pte_phys(entry);
                 level -= 1;
             }
             let idx = va.index(leaf_level);
+            // SAFETY: as above, `table_phys` holds the present leaf
+            // `translate` found (`mm::paging::Mapper::new`'s contract).
             let entry_ptr = unsafe { self.table_ptr(table_phys).add(idx) };
+            // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract).
             let entry = unsafe { entry_ptr.read_volatile() };
             let patched = entry | PageFlags::PCD | PageFlags::PWT;
+            // SAFETY: `entry_ptr` points into a live table (`mm::paging::Mapper::new`'s contract); the
+            // caller walks the tables the CPU uses (this fn's `# Safety`
+            // contract, established here) under the page-table lock
+            // (invariant I226, established at
+            // `mm::paging_init::current_mapper`).
             unsafe { entry_ptr.write_volatile(patched) };
             touched += 1;
             off = off.saturating_add(size.bytes());
@@ -528,6 +570,8 @@ impl Mapper {
         let mut level: u8 = 4;
         loop {
             let idx = va.index(level);
+            // SAFETY: `table_phys` is this root or a table the walk found
+            // under it, and every table this root reaches is a frame reached at `phys + hhdm_offset` (`mm::paging::Mapper::new`'s contract; invariant I14 for the kernel's); `idx < 512`.
             let entry = unsafe { self.table_ptr(table_phys).add(idx).read_volatile() };
             if entry & PageFlags::PRESENT == 0 {
                 return Probe::Skip(slot_remaining(va.0, level));
@@ -632,13 +676,21 @@ impl Mapper {
         let dst_ptr = self.table_ptr(self.root);
         let mut i = KERNEL_PML4_FIRST;
         while i < PTES_PER_TABLE {
+            // SAFETY: `src`'s root is a live PML4 reached at its offset
+            // (`mm::paging::Mapper::new`'s contract), and `i < 512`.
             let e = unsafe { src_ptr.add(i).read_volatile() };
+            // SAFETY: this root is a live PML4 reached at `hhdm_offset`
+            // (`mm::paging::Mapper::new`'s contract), and `&mut self` makes this its one writer;
+            // `i < 512`.
             unsafe { dst_ptr.add(i).write_volatile(e) };
             i += 1;
         }
     }
 
     pub fn pml4_entry(&self, idx: usize) -> u64 {
+        assert!(idx < PTES_PER_TABLE, "paging: pml4_entry index {idx}");
+        // SAFETY: the root is a live PML4 reached at `hhdm_offset`
+        // (`mm::paging::Mapper::new`'s contract), and the assert keeps `idx` inside it.
         unsafe { self.table_ptr(self.root).add(idx).read_volatile() }
     }
 
@@ -660,10 +712,22 @@ impl Mapper {
             leaves: 0,
             tables: 0,
         };
+        // SAFETY: `free_level`'s contract; the root is this mapper's live
+        // PML4 (`mm::paging::Mapper::new`'s contract), and this fn's `# Safety` contract covers
+        // its user half, established here.
         unsafe { self.free_level(self.root, 4, true, free, &mut stats) };
         stats
     }
 
+    /// Clear and free every present entry of `table` at `level` (only the
+    /// user half when `pml4`), recursing into interior tables first.
+    ///
+    /// # Safety
+    /// `table` is a live table of this mapper at `level`, reached at
+    /// `hhdm_offset`, and each present entry it covers (below
+    /// `KERNEL_PML4_FIRST` when `pml4`) holds an order-0 frame whose
+    /// [`Frames`] was consumed into it with `into_entry` and that no other
+    /// token names, as [`Mapper::free_user_half`] requires.
     unsafe fn free_level<F: FnMut(Frames)>(
         &mut self,
         table: PhysAddr,
@@ -680,6 +744,8 @@ impl Mapper {
         };
         let mut i = 0usize;
         while i < end {
+            // SAFETY: `table` is live by this fn's `# Safety` contract,
+            // established here, and `i < 512`.
             let e = unsafe { ptr.add(i).read_volatile() };
             if e & PageFlags::PRESENT == 0 {
                 i += 1;
@@ -692,15 +758,20 @@ impl Mapper {
                 assert!(level == 1 && !huge, "addrspace: unexpected huge user leaf");
                 stats.leaves += 1;
             } else {
+                // SAFETY: `free_level`'s contract; `child` is the live
+                // interior table entry `i` points at, and this fn's
+                // `# Safety` contract covers its entries, established here.
                 unsafe { self.free_level(child, level - 1, false, free, stats) };
                 stats.tables += 1;
             }
             // Clear the entry before its frame is rebuilt and freed.
+            // SAFETY: `table` is live by this fn's `# Safety` contract, and
+            // `&mut self` makes this its one writer, established here.
             unsafe { ptr.add(i).write_volatile(0) };
             // SAFETY: entry `i` of this table held `child`, an order-0 frame
             // consumed with `into_entry` (this fn's `# Safety`, from
             // `free_user_half`'s caller), and the store above just cleared
-            // it; the contract `pmm::Frames::from_entry` states.
+            // it; the contract `mm::pmm::Frames::from_entry` states.
             free(unsafe { Frames::from_entry(child.as_u64(), 0) });
             i += 1;
         }
@@ -714,6 +785,9 @@ impl Mapper {
     pub unsafe fn zero_frame(&self, phys: PhysAddr) {
         let ptr = self.table_ptr(phys);
         for i in 0..PTES_PER_TABLE {
+            // SAFETY: `phys` is an owned page reached at `hhdm_offset` by
+            // this fn's `# Safety` contract, established here; `i < 512`
+            // words stay inside it.
             unsafe { ptr.add(i).write_volatile(0) };
         }
     }
@@ -856,26 +930,33 @@ pub struct UserFreeStats {
 
 /// TLB shootdown hook. Kernel installs the IPI 0xFC path (DESIGN §7.9).
 /// Host tests and pre-SMP boot leave this unset (local `invlpg` is enough).
-static SHOOTDOWN_HOOK: core::sync::atomic::AtomicPtr<()> =
-    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+static SHOOTDOWN_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
 pub fn set_tlb_shootdown_hook(f: fn(VirtAddr)) {
-    SHOOTDOWN_HOOK.store(f as *mut (), core::sync::atomic::Ordering::Release);
+    SHOOTDOWN_HOOK.store(f as *mut (), Ordering::Release);
 }
 
 /// Intentionally free-standing (not a method on `Mapper`) so architecture
 /// code can call it after any leaf edit including MMIO patches.
 #[inline]
 pub fn tlb_shootdown_others(va: VirtAddr) {
-    let p = SHOOTDOWN_HOOK.load(core::sync::atomic::Ordering::Acquire);
+    let p = SHOOTDOWN_HOOK.load(Ordering::Acquire);
     if p.is_null() {
         return;
     }
+    // SAFETY: the only non-null value `SHOOTDOWN_HOOK` ever holds is a
+    // `fn(VirtAddr)` cast to a pointer, stored by
+    // `mm::paging::set_tlb_shootdown_hook`; a fn pointer and `*mut ()` have
+    // the same size.
     let f: fn(VirtAddr) = unsafe { core::mem::transmute(p) };
     f(va);
 }
 
 // Host tests take their table frames from the shared buddy pool.
+// SAFETY: `FrameAlloc`'s contract; the pool's buddy hands out order-0
+// frames of host memory it owns, writable at the pool's offset, the one
+// every test `Mapper` is built with (`mm::pmm::Buddy::alloc` on the
+// pool's buddy).
 #[cfg(test)]
 unsafe impl FrameAlloc for crate::pmm::testing::Pool {
     fn alloc_frame(&mut self) -> Option<Frames> {
@@ -904,8 +985,14 @@ mod tests {
         // Zero via the HHDM physmap.
         let ptr = root.0.wrapping_add(pool.hhdm()) as *mut u64;
         for i in 0..PTES_PER_TABLE {
+            // SAFETY: `root` is an order-0 frame of the pool's host memory,
+            // reached at `pool.hhdm()`, and `i < 512` words stay inside it,
+            // established here.
             unsafe { ptr.add(i).write_volatile(0) };
         }
+        // SAFETY: `Mapper::new`'s contract; `root` is the zeroed pool frame
+        // above, which the mapper keeps, and the pool's offset reaches every
+        // frame it hands out, established here.
         unsafe { Mapper::new(root, pool.hhdm()) }
     }
 
@@ -959,6 +1046,8 @@ mod tests {
         let mut m = fresh_mapper(&mut pool);
         let va = VirtAddr(0xFFFF_C000_0010_0000);
         let pa = PhysAddr(0x0080_0000);
+        // SAFETY: `Mapper::map_page`'s contract; the host never touches the leaf's frame, and
+        // the tables are the pool's (`fresh_mapper`), established here.
         unsafe {
             m.map_page(
                 va,
@@ -978,6 +1067,8 @@ mod tests {
         let (got_mid, _, _) = m.translate(VirtAddr(va.0 + 0x123)).unwrap();
         assert_eq!(got_mid.0, pa.0 + 0x123);
         // Unmap returns the frame and translate is None.
+        // SAFETY: `Mapper::map_page`'s contract; the host never touches the leaf's frame, and
+        // the tables are the pool's (`fresh_mapper`), established here.
         let (unm_pa, unm_size) = unsafe { m.unmap_page(va).unwrap() };
         assert_eq!(unm_pa, pa);
         assert_eq!(unm_size, PageSize::Size4K);
@@ -990,6 +1081,8 @@ mod tests {
         let mut m = fresh_mapper(&mut pool);
         let va = VirtAddr(0xFFFF_8000_0020_0000);
         let pa = PhysAddr(0x0040_0000);
+        // SAFETY: `Mapper::map_page`'s contract; the host never touches the leaf's frame, and
+        // the tables are the pool's (`fresh_mapper`), established here.
         unsafe {
             m.map_page(
                 va,
@@ -1016,6 +1109,8 @@ mod tests {
         let mut m = fresh_mapper(&mut pool);
         let va = VirtAddr(0xFFFF_8000_0020_1000); // not 2M-aligned
         let pa = PhysAddr(0x0040_0000);
+        // SAFETY: `Mapper::map_page`'s contract; the host never touches the leaf's frame, and
+        // the tables are the pool's (`fresh_mapper`), established here.
         let err = unsafe {
             m.map_page(
                 va,
@@ -1037,6 +1132,8 @@ mod tests {
         let va = VirtAddr(0xFFFF_8000_0000_0000);
         let pa = PhysAddr(0);
         // 6 MiB: three whole 2M pages, no tail.
+        // SAFETY: `Mapper::map_range`'s contract; the host never touches the leaves' frames,
+        // and the tables are the pool's (`fresh_mapper`), established here.
         unsafe {
             m.map_range(
                 va,
@@ -1065,6 +1162,8 @@ mod tests {
         let va = VirtAddr(0xFFFF_8000_0000_0000 + PAGE_SIZE_4K);
         let pa = PhysAddr(PAGE_SIZE_4K);
         let len = 3 * PAGE_SIZE_2M;
+        // SAFETY: `Mapper::map_range`'s contract; the host never touches the leaves' frames,
+        // and the tables are the pool's (`fresh_mapper`), established here.
         unsafe {
             m.map_range(va, pa, len, physmap_flags(), MapMode::Fresh, &mut pool)
                 .unwrap();
@@ -1084,6 +1183,8 @@ mod tests {
         let mut m = fresh_mapper(&mut pool);
         let va = VirtAddr(0xFFFF_C000_0000_0000);
         let pa = PhysAddr(0x0080_0000);
+        // SAFETY: `Mapper::map_page`'s contract; the host never touches the leaf's frame, and
+        // the tables are the pool's (`fresh_mapper`), established here.
         unsafe {
             m.map_page(
                 va,
@@ -1095,6 +1196,8 @@ mod tests {
             )
             .unwrap();
         }
+        // SAFETY: `Mapper::map_page`'s contract; the host never touches the leaf's frame, and
+        // the tables are the pool's (`fresh_mapper`), established here.
         let err = unsafe {
             m.map_page(
                 va,
@@ -1108,6 +1211,8 @@ mod tests {
         };
         assert_eq!(err, MapError::AlreadyMapped);
         // Remap replaces the leaf.
+        // SAFETY: `Mapper::map_page`'s contract; the host never touches the leaf's frame, and
+        // the tables are the pool's (`fresh_mapper`), established here.
         unsafe {
             m.map_page(
                 va,
@@ -1128,6 +1233,8 @@ mod tests {
         let mut m = fresh_mapper(&mut pool);
         let va = VirtAddr(0xFFFF_8000_0040_0000);
         // Place a 2M leaf.
+        // SAFETY: `Mapper::map_page`'s contract; the host never touches the leaf's frame, and
+        // the tables are the pool's (`fresh_mapper`), established here.
         unsafe {
             m.map_page(
                 va,
@@ -1142,6 +1249,8 @@ mod tests {
         // Attempt a 4K page inside the 2M region: the L2 slot is a huge
         // leaf, so the walk to L1 fails with PageSizeMismatch.
         let inside = VirtAddr(va.0 + PAGE_SIZE_4K);
+        // SAFETY: `Mapper::map_page`'s contract; the host never touches the leaf's frame, and
+        // the tables are the pool's (`fresh_mapper`), established here.
         let err = unsafe {
             m.map_page(
                 inside,
@@ -1162,6 +1271,8 @@ mod tests {
         let mut m = fresh_mapper(&mut pool);
         // Fake up a physmap at HHDM_START mapping [0, 4 MiB) with 2M pages.
         let hhdm = VirtAddr(0xFFFF_8000_0000_0000);
+        // SAFETY: `Mapper::map_range`'s contract; the host never touches the leaves' frames,
+        // and the tables are the pool's (`fresh_mapper`), established here.
         unsafe {
             m.map_range(
                 hhdm,
@@ -1176,6 +1287,8 @@ mod tests {
         // Patch 8 KiB starting at phys 0x0020_1000: falls inside the
         // second 2M page. patch should touch exactly one 2M leaf and
         // leave it a 2M leaf.
+        // SAFETY: `Mapper::patch_physmap_uc`'s contract; on the host these tables stand in for
+        // the ones the CPU uses, established here.
         let touched = unsafe {
             m.patch_physmap_uc(hhdm, PhysAddr(0x0020_1000), 8 * 1024)
                 .unwrap()
@@ -1200,6 +1313,8 @@ mod tests {
         let mut m = fresh_mapper(&mut pool);
         let hhdm = VirtAddr(0xFFFF_8000_0000_0000);
         // Deliberately do NOT map anything into hhdm before patching.
+        // SAFETY: `Mapper::patch_physmap_uc`'s contract; on the host these tables stand in for
+        // the ones the CPU uses, established here.
         let err = unsafe {
             m.patch_physmap_uc(hhdm, PhysAddr(0), PAGE_SIZE_4K)
                 .unwrap_err()
@@ -1228,6 +1343,8 @@ mod tests {
         let mut m = fresh_mapper(&mut pool);
         let a = VirtAddr(0xFFFF_C000_0000_0000);
         let b = VirtAddr(0xFFFF_C000_0020_0000); // 2 MiB later
+        // SAFETY: `Mapper::map_page`'s contract; the host never touches the leaf's frame, and
+        // the tables are the pool's (`fresh_mapper`), established here.
         unsafe {
             m.map_page(
                 a,

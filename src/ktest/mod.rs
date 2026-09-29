@@ -957,7 +957,7 @@ fn settle() {
 /// dead list) depends on timing. So the highest VA the test maps moves by
 /// several MiB from run to run, and each 2 MiB span it reaches for the first
 /// time takes a table page, which stays in the kernel tables for good
-/// (`paging_init::table_pages`) and is no frame lost. No warm-up can map the
+/// (`mm::ktest::table_pages`) and is no frame lost. No warm-up can map the
 /// span ahead, since nothing bounds it but the KVA window.
 pub(crate) struct FrameCount {
     /// The buddy's free frames.
@@ -977,7 +977,7 @@ impl FrameCount {
         Self {
             buddy: pmm_init::with_buddy(|b| b.stats().free_frames),
             cached: thread_init::cached_stack_frames(),
-            tables: crate::paging_init::table_pages(),
+            tables: crate::mm::ktest::table_pages(),
             heap: crate::heap_init::stats().capacity / vibeos::paging::PAGE_SIZE_4K as usize,
         }
     }
