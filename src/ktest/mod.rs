@@ -5,8 +5,6 @@
 //! and exits QEMU through `isa-debug-exit`.
 
 use alloc::boxed::Box;
-use alloc::vec::Vec;
-use core::alloc::Layout;
 use core::arch::global_asm;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -18,11 +16,10 @@ use vibeos::desc::{IstSlot, KERNEL_CS, TSS_SEL};
 use vibeos::dev::{ClaimError, Device, Driver, IdMatch, ProbeError};
 use vibeos::dma::{self, DMA32_BOUNDARY, DmaAlloc};
 use vibeos::fs::{FsError, InodeKind, O_CREAT, O_RDWR};
-use vibeos::heap::HEAP_SIZE;
 use vibeos::irq::{self, IrqError};
 use vibeos::kva::PAGE_SIZE;
 use vibeos::lock::RANK_DEVICE;
-use vibeos::paging::{PAGE_SIZE_4K, PageFlags, PhysAddr, USER_END, VirtAddr, heap_flags};
+use vibeos::paging::{PAGE_SIZE_4K, PageFlags, PhysAddr, USER_END, VirtAddr};
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
 use vibeos::per_cpu::PerCpuRemote;
 use vibeos::pmm::Frames;
@@ -35,7 +32,6 @@ use vibeos::virtio::F_VERSION_1;
 use crate::acpi_init;
 use crate::addr_space_init;
 use crate::apic_init;
-use crate::arch;
 use crate::block_init::{self, IoWaiter};
 use crate::cache_init;
 use crate::dev_init;
@@ -63,6 +59,7 @@ use crate::virtio_blk_init;
 use crate::virtio_init;
 use crate::work_init;
 use crate::x86;
+use crate::{arch, mm};
 pub(crate) mod user;
 use user::user_code;
 
@@ -191,7 +188,6 @@ mod p10_s01;
 mod p10_s02;
 mod p10_s04;
 mod p10_s05;
-mod p10_s06;
 mod p10_s07;
 mod p10_s08;
 mod p10_s09;
@@ -212,18 +208,18 @@ mod p10_s23;
 /// last row whose path starts with that subsystem, or at the end if it has none (ROADMAP §10.2's T1
 /// box splits this list per subsystem).
 pub(crate) const TESTS: &[Test] = &[
-    test("map_unmap", test_map_unmap),
-    test("nx_enforcement", test_nx_enforcement),
-    test("heap_box", test_heap_box),
-    test("heap_reuse", test_heap_reuse),
-    test("heap_align", test_heap_align),
-    test("heap_growth", test_heap_growth),
-    test("heap_oom", test_heap_oom),
-    test("stack_guard", test_stack_guard),
-    test("kva_roundtrip", test_kva_roundtrip),
-    test("kva_deferred", test_kva_deferred),
-    test("vmap", test_vmap),
-    test("mmio_uc_flags", test_mmio_uc_flags),
+    test("map_unmap", mm::ktest::test_map_unmap),
+    test("nx_enforcement", mm::ktest::test_nx_enforcement),
+    test("heap_box", mm::ktest::test_heap_box),
+    test("heap_reuse", mm::ktest::test_heap_reuse),
+    test("heap_align", mm::ktest::test_heap_align),
+    test("heap_growth", mm::ktest::test_heap_growth),
+    test("heap_oom", mm::ktest::test_heap_oom),
+    test("stack_guard", mm::ktest::test_stack_guard),
+    test("kva_roundtrip", mm::ktest::test_kva_roundtrip),
+    test("kva_deferred", mm::ktest::test_kva_deferred),
+    test("vmap", mm::ktest::test_vmap),
+    test("mmio_uc_flags", mm::ktest::test_mmio_uc_flags),
     test("acpi_discovery", test_acpi_discovery),
     test("gdt_selectors", test_gdt_selectors),
     test("star_sysret_layout", test_star_sysret_layout),
@@ -284,8 +280,8 @@ pub(crate) const TESTS: &[Test] = &[
     test("reschedule_ipi_wake_ap", test_reschedule_ipi_wake_ap),
     test("call_function_ipi", test_call_function_ipi),
     test("cpu_hardening", test_cpu_hardening),
-    test("tlb_shootdown_remote", test_tlb_shootdown_remote),
-    test("alloc_stress_smp", test_alloc_stress_smp),
+    test("tlb_shootdown_remote", mm::ktest::test_tlb_shootdown_remote),
+    test("alloc_stress_smp", mm::ktest::test_alloc_stress_smp),
     test("log_boot_captured", test_log_boot_captured),
     test("log_runtime_filter", test_log_runtime_filter),
     test("log_emit_roundtrip", test_log_emit_roundtrip),
@@ -355,13 +351,19 @@ pub(crate) const TESTS: &[Test] = &[
     )
     .deadline(15_000),
     test("percpu_remote_view", p10_s05::percpu_remote_view),
-    test("frames_none_leaked", p10_s06::frames_none_leaked),
-    test("current_mapper_holds_pt", p10_s07::current_mapper_holds_pt),
+    test("frames_none_leaked", mm::ktest::frames_none_leaked),
+    test(
+        "current_mapper_holds_pt",
+        mm::ktest::current_mapper_holds_pt,
+    ),
     test(
         "teardown_live_root_asserts",
         p10_s07::teardown_live_root_asserts,
     ),
-    test("vmap_32_frames_unmapped", p10_s07::vmap_32_frames_unmapped),
+    test(
+        "vmap_32_frames_unmapped",
+        mm::ktest::vmap_32_frames_unmapped,
+    ),
     test("spawn_stack_oom", p10_s08::spawn_stack_oom).deadline(10_000),
     test("fork_oom", p10_s08::fork_oom).deadline(10_000),
     test("lifetime_stack_reclaim", p10_s08::lifetime_stack_reclaim).deadline(120_000),
@@ -833,281 +835,6 @@ global_asm!(
 );
 
 const WRITE_U8_1_LEN: u8 = 3;
-
-// ------------------ tests ------------------
-
-fn test_map_unmap() -> Outcome {
-    let Some(va) = kva_init::alloc_va(PAGE_SIZE) else {
-        return Outcome::Fail("kva alloc");
-    };
-    let Some(pa) = alloc_frame() else {
-        kva_init::free_va(va, PAGE_SIZE);
-        return Outcome::Fail("frame alloc");
-    };
-    if unsafe { paging_init::map_4k(va, pa, heap_flags()) }.is_err() {
-        free_frame(pa);
-        kva_init::free_va(va, PAGE_SIZE);
-        return Outcome::Fail("map_4k");
-    }
-    unsafe { (va.as_u64() as *mut u64).write_volatile(0xAABB_CCDD_EEFF_0011) };
-    let got = unsafe { (va.as_u64() as *const u64).read_volatile() };
-    if got != 0xAABB_CCDD_EEFF_0011 {
-        return Outcome::Fail("readback mismatch");
-    }
-    let Some((unmapped, _)) = (unsafe { paging_init::unmap_4k(va) }) else {
-        return Outcome::Fail("unmap returned none");
-    };
-    if unmapped != pa {
-        return Outcome::Fail("unmap phys mismatch");
-    }
-    free_frame(pa);
-    kva_init::free_va(va, PAGE_SIZE);
-    let fault = catch_fault(|| unsafe {
-        (va.as_u64() as *mut u8).write_volatile(1);
-    });
-    match fault {
-        Some(_) => Outcome::Ok,
-        None => Outcome::Fail("access after unmap did not fault"),
-    }
-}
-
-fn test_nx_enforcement() -> Outcome {
-    let Some(va) = kva_init::alloc_va(PAGE_SIZE) else {
-        return Outcome::Fail("kva alloc");
-    };
-    let Some(pa) = alloc_frame() else {
-        kva_init::free_va(va, PAGE_SIZE);
-        return Outcome::Fail("frame alloc");
-    };
-    if unsafe { paging_init::map_4k(va, pa, heap_flags()) }.is_err() {
-        free_frame(pa);
-        kva_init::free_va(va, PAGE_SIZE);
-        return Outcome::Fail("map_4k");
-    }
-    unsafe { (va.as_u64() as *mut u8).write_volatile(0xC3) };
-    let f: unsafe extern "C" fn() = unsafe { core::mem::transmute(va.as_u64()) };
-    core::hint::black_box(f);
-    let fault = catch_fault(|| unsafe { f() });
-    let _ = unsafe { paging_init::unmap_4k(va) };
-    free_frame(pa);
-    kva_init::free_va(va, PAGE_SIZE);
-    let Some(fault) = fault else {
-        return Outcome::Fail("NX execute did not fault");
-    };
-    // Error-code bit 4 is instruction-fetch (Intel SDM).
-    if fault.error & (1 << 4) == 0 {
-        crate::marker!(
-            "vibeOS: ktest:   nx err={:#x} cr2={:#x}",
-            fault.error,
-            fault.cr2
-        );
-        return Outcome::Fail("PF was not instruction-fetch");
-    }
-    Outcome::Ok
-}
-
-fn test_heap_box() -> Outcome {
-    let b = Box::new(0xDEAD_BEEFu64);
-    if *b != 0xDEAD_BEEF {
-        return Outcome::Fail("box payload");
-    }
-    drop(b);
-    Outcome::Ok
-}
-
-fn test_heap_growth() -> Outcome {
-    let mut v = Vec::new();
-    v.resize(2 * 1024 * 1024, 0xABu8);
-    if v.len() != 2 * 1024 * 1024 {
-        return Outcome::Fail("vec len");
-    }
-    if v[0] != 0xAB || v[v.len() - 1] != 0xAB {
-        return Outcome::Fail("vec pattern");
-    }
-    drop(v);
-    Outcome::Ok
-}
-
-fn test_heap_align() -> Outcome {
-    let mut align = 1usize;
-    while align <= 4096 {
-        let Ok(layout) = Layout::from_size_align(align, align) else {
-            return Outcome::Fail("layout");
-        };
-        let p = unsafe { alloc::alloc::alloc(layout) };
-        if p.is_null() {
-            return Outcome::Fail("alloc null");
-        }
-        if !(p as usize).is_multiple_of(align) {
-            unsafe { alloc::alloc::dealloc(p, layout) };
-            return Outcome::Fail("alignment");
-        }
-        unsafe { p.write(0x5A) };
-        unsafe { alloc::alloc::dealloc(p, layout) };
-        align *= 2;
-    }
-    Outcome::Ok
-}
-
-fn test_heap_reuse() -> Outcome {
-    let Ok(small) = Layout::from_size_align(16, 8) else {
-        return Outcome::Fail("layout");
-    };
-    let Ok(layout) = Layout::from_size_align(64, 8) else {
-        return Outcome::Fail("layout");
-    };
-    // Sandwich: live blocks on both sides so the hole cannot coalesce
-    // with a larger neighbour (first-fit would then carve a different VA).
-    let pad = unsafe { alloc::alloc::alloc(small) };
-    let a = unsafe { alloc::alloc::alloc(layout) };
-    let keep = unsafe { alloc::alloc::alloc(layout) };
-    if pad.is_null() || a.is_null() || keep.is_null() {
-        return Outcome::Fail("setup alloc");
-    }
-    unsafe { alloc::alloc::dealloc(a, layout) };
-    let b = unsafe { alloc::alloc::alloc(layout) };
-    if b.is_null() {
-        return Outcome::Fail("second alloc");
-    }
-    // Compare as usize through black_box: LLVM treats GlobalAlloc like
-    // malloc and will fold `a == b` after free at opt-level 1.
-    let reused = core::hint::black_box(a as usize) == core::hint::black_box(b as usize);
-    if !reused {
-        crate::marker!("vibeOS: ktest:   reuse pad={pad:p} a={a:p} keep={keep:p} b={b:p}");
-        unsafe {
-            alloc::alloc::dealloc(b, layout);
-            alloc::alloc::dealloc(keep, layout);
-            alloc::alloc::dealloc(pad, small);
-        };
-        return Outcome::Fail("did not reuse freed block");
-    }
-    let c = unsafe { alloc::alloc::realloc(b, layout, 32) };
-    let same = core::hint::black_box(c as usize) == core::hint::black_box(b as usize);
-    if !c.is_null() {
-        unsafe { alloc::alloc::dealloc(c, Layout::from_size_align(32, 8).unwrap()) };
-    }
-    unsafe { alloc::alloc::dealloc(keep, layout) };
-    unsafe { alloc::alloc::dealloc(pad, small) };
-    if !same {
-        return Outcome::Fail("realloc shrink moved");
-    }
-    Outcome::Ok
-}
-
-fn test_heap_oom() -> Outcome {
-    let hit = catch_alloc_error(|| {
-        let _v: Vec<u8> = Vec::with_capacity((HEAP_SIZE as usize) + 4096);
-    });
-    if !hit {
-        return Outcome::Fail("error handler not reached");
-    }
-    let b = Box::new(1u32);
-    if *b != 1 {
-        return Outcome::Fail("heap unusable after oom");
-    }
-    Outcome::Ok
-}
-
-fn test_stack_guard() -> Outcome {
-    let Ok(stack) = kva_init::alloc_guarded_stack(4) else {
-        return Outcome::Fail("alloc_guarded_stack");
-    };
-    unsafe { (stack.base().as_u64() as *mut u64).write_volatile(0x1111_2222) };
-    let got = unsafe { (stack.base().as_u64() as *const u64).read_volatile() };
-    if got != 0x1111_2222 {
-        kva_init::free_stack(stack);
-        return Outcome::Fail("mapped stack not writable");
-    }
-    let guard = stack.guard().as_u64();
-    let fault = catch_fault(|| unsafe {
-        (guard as *mut u8).write_volatile(1);
-    });
-    kva_init::free_stack(stack);
-    match fault {
-        Some(f) if (f.cr2 & !0xFFF) == (guard & !0xFFF) => Outcome::Ok,
-        Some(_) => Outcome::Fail("fault cr2 was not the guard page"),
-        None => Outcome::Fail("guard write did not fault"),
-    }
-}
-
-fn test_kva_roundtrip() -> Outcome {
-    let before = quiescent_free_frames();
-    let Ok(stack) = kva_init::alloc_guarded_stack(4) else {
-        return Outcome::Fail("alloc_guarded_stack");
-    };
-    let mid = free_frames();
-    if mid + 4 != before {
-        kva_init::free_stack(stack);
-        crate::marker!("vibeOS: ktest:   before={before} mid={mid}");
-        return Outcome::Fail("stack did not take 4 frames");
-    }
-    kva_init::free_stack(stack);
-    let after = quiescent_free_frames();
-    if after != before {
-        crate::marker!("vibeOS: ktest:   before={before} after={after}");
-        return Outcome::Fail("free did not restore frame count");
-    }
-    Outcome::Ok
-}
-
-/// A stack parked on this CPU's dead list comes back through its worker
-/// (ROADMAP §10.10).
-fn test_kva_deferred() -> Outcome {
-    let before = quiescent_free_frames();
-    let Ok(stack) = kva_init::alloc_guarded_stack(4) else {
-        return Outcome::Fail("alloc_guarded_stack");
-    };
-    if free_frames() + 4 != before {
-        kva_init::free_stack(stack);
-        return Outcome::Fail("stack did not take 4 frames");
-    }
-    thread_init::testing::park_on_local_list(stack);
-    let after = quiescent_free_frames();
-    if after != before {
-        crate::marker!("vibeOS: ktest:   before={before} after={after}");
-        return Outcome::Fail("worker did not free the parked stack");
-    }
-    Outcome::Ok
-}
-
-fn test_vmap() -> Outcome {
-    let Some(f) = alloc_frames_owned(1) else {
-        return Outcome::Fail("frames");
-    };
-    // `vmap` frees the frames itself when it fails.
-    let Ok(v) = kva_init::vmap(f) else {
-        return Outcome::Fail("vmap");
-    };
-    let va = v.base();
-    unsafe { (va.as_u64() as *mut u64).write_volatile(0x100) };
-    unsafe { ((va.as_u64() + PAGE_SIZE) as *mut u64).write_volatile(0x200) };
-    let ga = unsafe { (va.as_u64() as *const u64).read_volatile() };
-    let gb = unsafe { ((va.as_u64() + PAGE_SIZE) as *const u64).read_volatile() };
-    free_frames_owned(kva_init::vunmap(v));
-    if ga != 0x100 || gb != 0x200 {
-        return Outcome::Fail("vmap readback");
-    }
-    Outcome::Ok
-}
-
-fn test_mmio_uc_flags() -> Outcome {
-    // LAPIC (0xFEE0_0000) sits above QEMU's 128 MiB map_end, so the
-    // generic patch API is still proven on a leaf we know exists:
-    // 2 MiB, inside the identity rest / physmap. ACPI's real bases
-    // are checked by `acpi_discovery`.
-    let phys = PhysAddr(0x0020_0000);
-    if unsafe { paging_init::patch_physmap_uc(phys, 4096) }.is_err() {
-        return Outcome::Fail("patch_physmap_uc");
-    }
-    let va = VirtAddr(paging_init::HHDM_BASE + phys.as_u64());
-    let Some((_, _, flags)) = paging_init::translate(va) else {
-        return Outcome::Fail("translate");
-    };
-    if !flags.contains(PageFlags::PCD | PageFlags::PWT) {
-        return Outcome::Fail("PCD/PWT not set on physmap leaf");
-    }
-    Outcome::Ok
-}
 
 fn leaf_is_uc(phys: u64) -> bool {
     if phys == 0 {
@@ -2948,127 +2675,6 @@ fn test_cpu_hardening() -> Outcome {
             return Outcome::Fail("umip");
         }
         cpu += 1;
-    }
-    Outcome::Ok
-}
-
-struct ShootProbe {
-    va: u64,
-    /// 0 idle, 1 access ok, 2 fault.
-    result: AtomicU64,
-}
-
-fn shoot_touch(arg: *mut ()) {
-    let p = unsafe { &*(arg as *const ShootProbe) };
-    let fault = catch_fault(|| unsafe {
-        core::ptr::read_volatile(p.va as *const u64);
-    });
-    p.result
-        .store(if fault.is_some() { 2 } else { 1 }, Ordering::SeqCst);
-}
-
-fn test_tlb_shootdown_remote() -> Outcome {
-    let Some(ap) = second_cpu() else {
-        return Outcome::Skip("no AP");
-    };
-    let Some(va) = kva_init::alloc_va(PAGE_SIZE) else {
-        return Outcome::Fail("kva alloc");
-    };
-    let Some(pa) = alloc_frame() else {
-        kva_init::free_va(va, PAGE_SIZE);
-        return Outcome::Fail("frame alloc");
-    };
-    if unsafe { paging_init::map_4k(va, pa, heap_flags()) }.is_err() {
-        free_frame(pa);
-        kva_init::free_va(va, PAGE_SIZE);
-        return Outcome::Fail("map");
-    }
-    unsafe { (va.as_u64() as *mut u64).write_volatile(0xD15EA5E) };
-
-    let probe = ShootProbe {
-        va: va.as_u64(),
-        result: AtomicU64::new(0),
-    };
-    ipi_init::call_cpu(ap, shoot_touch, &probe as *const _ as *mut (), true);
-    if probe.result.load(Ordering::SeqCst) != 1 {
-        let _ = unsafe { paging_init::unmap_4k(va) };
-        free_frame(pa);
-        kva_init::free_va(va, PAGE_SIZE);
-        return Outcome::Fail("AP could not read mapped page");
-    }
-
-    let before = ipi_init::shootdown_count();
-    let _ = unsafe { paging_init::unmap_4k(va) };
-    probe.result.store(0, Ordering::SeqCst);
-    ipi_init::call_cpu(ap, shoot_touch, &probe as *const _ as *mut (), true);
-    if probe.result.load(Ordering::SeqCst) != 2 {
-        let _ = unsafe { paging_init::map_4k(va, pa, heap_flags()) };
-        free_frame(pa);
-        kva_init::free_va(va, PAGE_SIZE);
-        return Outcome::Fail("AP did not fault after unmap");
-    }
-    if per_cpu_init::online_mask().count_ones() > 1 && ipi_init::shootdown_count() <= before {
-        let _ = unsafe { paging_init::map_4k(va, pa, heap_flags()) };
-        free_frame(pa);
-        kva_init::free_va(va, PAGE_SIZE);
-        return Outcome::Fail("no shootdown IPI");
-    }
-
-    if unsafe { paging_init::map_4k(va, pa, heap_flags()) }.is_err() {
-        free_frame(pa);
-        kva_init::free_va(va, PAGE_SIZE);
-        return Outcome::Fail("remap");
-    }
-    unsafe { (va.as_u64() as *mut u64).write_volatile(0xD15EA5E) };
-    probe.result.store(0, Ordering::SeqCst);
-    ipi_init::call_cpu(ap, shoot_touch, &probe as *const _ as *mut (), true);
-    let ok = probe.result.load(Ordering::SeqCst) == 1;
-    let _ = unsafe { paging_init::unmap_4k(va) };
-    free_frame(pa);
-    kva_init::free_va(va, PAGE_SIZE);
-    if !ok {
-        return Outcome::Fail("AP could not read after remap");
-    }
-    Outcome::Ok
-}
-
-static HAMMER_DONE: AtomicU32 = AtomicU32::new(0);
-
-fn alloc_hammer() {
-    let mut i = 0u32;
-    while i < 128 {
-        let b = Box::new([i; 16]);
-        if b[0] != i {
-            return;
-        }
-        i += 1;
-    }
-    HAMMER_DONE.fetch_add(1, Ordering::SeqCst);
-}
-
-fn test_alloc_stress_smp() -> Outcome {
-    let mask = per_cpu_init::online_mask();
-    let n = mask.count_ones();
-    if n < 2 {
-        return Outcome::Skip("no AP");
-    }
-    HAMMER_DONE.store(0, Ordering::SeqCst);
-    let mut c = 1u32;
-    while c < 64 {
-        if mask & (1u64 << c) != 0 {
-            let Ok(_) = thread_init::spawn_on("hammer", alloc_hammer, c) else {
-                return Outcome::Fail("spawn");
-            };
-        }
-        c += 1;
-    }
-    alloc_hammer();
-    if !spin_until_ns(|| HAMMER_DONE.load(Ordering::SeqCst) >= n, 2_000_000_000) {
-        crate::marker!(
-            "vibeOS: ktest:   hammers {}",
-            HAMMER_DONE.load(Ordering::SeqCst)
-        );
-        return Outcome::Fail("allocator stress hung");
     }
     Outcome::Ok
 }
