@@ -22,13 +22,13 @@ from tests.harness.harness import (
     KtestSummary,
     QemuConfig,
     RunResult,
+    boot_contract_markers,
     check_ktest_output,
     contains_panic,
     default_iso,
     effective_accel_name,
     env_config,
     env_flag,
-    expected_lapic_mode,
     ktest_devices,
     ktest_lines,
     ktest_summary,
@@ -579,9 +579,12 @@ def hpet_off_config(env: EnvConfig, disk: str) -> QemuConfig:
 
 
 def lapic_timer_line(cfg: QemuConfig) -> str:
-    """The `lapic_timer` marker a boot without an HPET must print."""
-    mode = expected_lapic_mode(cpu=cfg.cpu, hpet=False, accel=effective_accel_name(cfg))
-    return f"vibeOS: time: lapic_timer ok ({mode})"
+    """The `lapic_timer` marker a boot without an HPET must print, from the
+    marker registry (`tests/contract/markers.toml`)."""
+    markers = boot_contract_markers(
+        hpet=False, cpu=cfg.cpu, accel=effective_accel_name(cfg), smp=cfg.smp
+    )
+    return next(m.substring for m in markers if m.name == "lapic_timer_ok")
 
 
 def check_hpet_off_boot(lines: list[str], exit_code: int | None, cfg: QemuConfig) -> None:
