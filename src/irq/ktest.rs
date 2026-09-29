@@ -11,7 +11,6 @@ use vibeos::thread::ThreadState;
 use vibeos::vectors;
 
 use crate::apic_init;
-use crate::dev_init;
 use crate::ipi_init;
 use crate::irq_init;
 use crate::ktest::{
@@ -262,7 +261,7 @@ pub(crate) fn test_msix_cpu() -> Outcome {
     let Some(ap) = second_cpu() else {
         return Outcome::Skip("no AP");
     };
-    let Some((_, dev)) = dev_init::find_id(0x8086, 0x10d3) else {
+    let Some((_, dev)) = crate::dev::ktest::find_id(0x8086, 0x10d3) else {
         return Outcome::Skip("no e1000e");
     };
     if dev.caps.msix.is_none() {

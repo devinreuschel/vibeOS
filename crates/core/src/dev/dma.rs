@@ -5,7 +5,7 @@
 //! aarch64 can fill them in. Descriptor publish uses real fences, not
 //! `compiler_fence`.
 
-use core::sync::atomic::{Ordering, compiler_fence, fence};
+use crate::atomic::{AtomicU16, Ordering, compiler_fence, fence};
 
 use crate::pmm::{self, Buddy, Frames, PAGE_SIZE};
 
@@ -236,6 +236,8 @@ impl Default for SgList {
 pub fn dma_wmb() {
     fence(Ordering::Release);
     #[cfg(target_arch = "x86_64")]
+    // SAFETY: `sfence` orders stores and touches no memory or register;
+    // established here.
     unsafe {
         core::arch::asm!("sfence", options(nostack, preserves_flags));
     }
@@ -249,6 +251,8 @@ pub fn dma_wmb() {
 pub fn dma_rmb() {
     fence(Ordering::Acquire);
     #[cfg(target_arch = "x86_64")]
+    // SAFETY: `lfence` orders loads and touches no memory or register;
+    // established here.
     unsafe {
         core::arch::asm!("lfence", options(nostack, preserves_flags));
     }
@@ -257,7 +261,7 @@ pub fn dma_rmb() {
 
 /// Publish `idx` after descriptor stores. Release + `sfence`.
 #[inline]
-pub fn publish_index(slot: &core::sync::atomic::AtomicU16, idx: u16) {
+pub fn publish_index(slot: &AtomicU16, idx: u16) {
     dma_wmb();
     slot.store(idx, Ordering::Release);
 }
@@ -297,7 +301,6 @@ mod tests {
     use super::*;
     use crate::pmm::MAX_ORDER;
     use crate::pmm::testing::Pool;
-    use core::sync::atomic::AtomicU16;
 
     #[test]
     fn identity_never_returns_a_high_va() {

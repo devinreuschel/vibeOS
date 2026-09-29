@@ -3,7 +3,6 @@
 //! `SpinMutex` is IRQ-aware (the only spinlock), with the lock-rank
 //! tracker. The blocking primitives, which call the scheduler, are in
 //! `sync::blocking_init`.
-#![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
@@ -30,9 +29,9 @@ pub fn set_spin_poll(f: fn()) {
     SPIN_POLL.store(f as *mut (), Ordering::Release);
 }
 
-/// Whether the spin-poll hook is set.
+/// Whether the spin-poll hook is set (`sync::ktest`).
 #[cfg(feature = "kernel_tests")]
-pub fn spin_poll_installed() -> bool {
+pub(super) fn spin_poll_installed() -> bool {
     !SPIN_POLL.load(Ordering::Acquire).is_null()
 }
 
@@ -55,7 +54,13 @@ pub struct SpinMutex<T> {
     rank: u8,
 }
 
+// SAFETY: invariant I232: `data` is reached only through a guard, and one
+// guard exists at a time, so sharing the mutex hands one holder at a time
+// `&mut T`, which `T: Send` covers (AGENTS.md rule 6); established by
+// `sync_init::SpinMutex::lock`.
 unsafe impl<T: Send> Sync for SpinMutex<T> {}
+// SAFETY: moving the mutex moves the `T` it owns, which `T: Send` allows;
+// the `SpinLock` holds only atomics. Established here.
 unsafe impl<T: Send> Send for SpinMutex<T> {}
 
 pub struct SpinMutexGuard<'a, T> {
@@ -67,10 +72,6 @@ pub struct SpinMutexGuard<'a, T> {
 }
 
 impl<T> SpinMutex<T> {
-    pub const fn new(v: T) -> Self {
-        Self::with_rank(v, 0)
-    }
-
     pub const fn with_rank(v: T, rank: u8) -> Self {
         Self {
             lock: SpinLock::new(),
@@ -143,6 +144,7 @@ impl<T> SpinMutex<T> {
 
     /// Whether any CPU, this one included, holds the lock right now. A
     /// snapshot, for tests: another CPU may take or drop it at once.
+    #[cfg(feature = "kernel_tests")]
     pub fn is_locked(&self) -> bool {
         self.lock.is_locked()
     }
@@ -158,12 +160,18 @@ impl<T> Drop for SpinMutexGuard<'_, T> {
 impl<T> Deref for SpinMutexGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
+        // SAFETY: invariant I232: this guard holds the lock, so no other
+        // reference to `data` exists; established by
+        // `sync_init::SpinMutex::lock`.
         unsafe { &*self.mutex.data.get() }
     }
 }
 
 impl<T> DerefMut for SpinMutexGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: invariant I232: this guard holds the lock and `&mut self`
+        // borrows it uniquely, so this is the only reference to `data`;
+        // established by `sync_init::SpinMutex::lock`.
         unsafe { &mut *self.mutex.data.get() }
     }
 }
@@ -175,11 +183,13 @@ fn owner_token() -> usize {
     }
 }
 
+/// Ranks `SPINS` counts (index by rank; 0 unused).
 #[cfg(feature = "kernel_tests")]
-const SPIN_RANKS: usize = 7;
+pub(super) const SPIN_RANKS: usize = 7;
 
+/// Spin iterations per lock rank, which `sync::ktest::spin_counts` reads.
 #[cfg(feature = "kernel_tests")]
-static SPINS: [AtomicU64; SPIN_RANKS] = [const { AtomicU64::new(0) }; SPIN_RANKS];
+pub(super) static SPINS: [AtomicU64; SPIN_RANKS] = [const { AtomicU64::new(0) }; SPIN_RANKS];
 
 #[cfg(feature = "kernel_tests")]
 fn record_spin(rank: u8) {
@@ -187,12 +197,6 @@ fn record_spin(rank: u8) {
     if i < SPIN_RANKS {
         SPINS[i].fetch_add(1, Ordering::Relaxed);
     }
-}
-
-/// Spin iterations per lock rank (index by rank; 0 unused). Phase 19 baseline.
-#[cfg(feature = "kernel_tests")]
-pub fn spin_counts() -> [u64; SPIN_RANKS] {
-    core::array::from_fn(|i| SPINS[i].load(Ordering::Relaxed))
 }
 
 fn lock_cpu() -> usize {
@@ -216,6 +220,7 @@ fn held_slot() -> Option<&'static AtomicU64> {
 }
 
 /// This CPU's held locks. `Held::EMPTY` before per-CPU data is live.
+#[cfg(feature = "kernel_tests")]
 pub fn held() -> Held {
     match held_slot() {
         // Relaxed: only this CPU writes its slot.
@@ -225,6 +230,7 @@ pub fn held() -> Held {
 }
 
 /// Bit `rank - 1` set for each rank this CPU holds.
+#[cfg(feature = "kernel_tests")]
 pub fn held_mask() -> u8 {
     held().mask()
 }
@@ -233,7 +239,10 @@ pub fn held_mask() -> u8 {
 static RANK_FAILURES: AtomicU64 = AtomicU64::new(0);
 
 #[track_caller]
-#[allow(clippy::panic)]
+#[allow(
+    clippy::panic,
+    reason = "a lock taken out of rank order is a kernel bug, never input: DESIGN §2.3's nesting rule, checked by `vibeos::lock::Held::acquire`"
+)]
 fn rank_refused(e: RankError, held: Held) -> ! {
     #[cfg(feature = "kernel_tests")]
     RANK_FAILURES.fetch_add(1, Ordering::Relaxed);

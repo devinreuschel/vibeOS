@@ -18,7 +18,7 @@ fn hw_fill(buf: &mut [u8]) -> (usize, Source) {
         if n > 0 {
             i += n;
             src = Source::VirtioRng;
-            let _ = virtio_init::rng_request();
+            refill();
         }
     }
     if i < buf.len() && x86::has_rdrand() {
@@ -52,6 +52,20 @@ pub fn init() {
     entropy::set_hw_fill(hw_fill);
     entropy::set_warn(warn_once);
     if virtio_init::rng_bound() {
-        let _ = virtio_init::rng_request();
+        refill();
+    }
+}
+
+/// Queue the next virtio-rng buffer. A failure leaves the pool to drain
+/// into RDRAND or xorshift; it is counted and logged at most once a second
+/// (DESIGN §2.5).
+fn refill() {
+    if let Err(e) = virtio_init::rng_request() {
+        crate::klog_ratelimited!(
+            1000,
+            Level::Warn,
+            "vibeOS: entropy: virtio-rng request failed: {}",
+            e.as_str()
+        );
     }
 }

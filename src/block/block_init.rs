@@ -3,14 +3,13 @@
 //! Queue lock (RANK_DEVICE) is dropped before the copy and before waiter
 //! wake (SCHED). Slice B can complete from a threaded IRQ with the same
 //! `IoWaiter` path. Kick is inline for ramdisk; virtio-blk replaces it.
-#![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
 use core::cell::UnsafeCell;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::block::{
-    self, BlockError, Completion, DeviceState, MAX_QUEUE, Op, Queue, Ramdisk, Request, write_marker,
+    BlockError, Completion, DeviceState, MAX_QUEUE, Op, Queue, Ramdisk, Request, write_marker,
 };
 use vibeos::lock::RANK_DEVICE;
 use vibeos::sched::FAR_DEADLINE;
@@ -40,8 +39,13 @@ static STATE: AtomicU8 = AtomicU8::new(0);
 static FAIL_NEXT: AtomicU32 = AtomicU32::new(0);
 static LIVE: AtomicBool = AtomicBool::new(false);
 static IO_REQS: AtomicU64 = AtomicU64::new(0);
-static FLUSHES: AtomicU64 = AtomicU64::new(0);
+/// `Flush` requests dispatched to ram0; `block::ktest::flushes` reads it.
+pub(super) static FLUSHES: AtomicU64 = AtomicU64::new(0);
 
+#[allow(
+    clippy::expect_used,
+    reason = "ram0's geometry is the nonzero constants `block_init::RAM0_BLOCK_SIZE` and `block_init::RAM0_SECTORS`, which `Ramdisk::new` accepts"
+)]
 fn ram() -> Ramdisk {
     Ramdisk::new(RAM0_NAME, RAM0_BLOCK_SIZE, RAM0_SECTORS).expect("ram0 geom")
 }
@@ -76,6 +80,9 @@ pub struct IoWaiter {
     wq: UnsafeCell<WaitQueue>,
 }
 
+// SAFETY: `done` is an atomic, and `wq` is touched only under SCHED
+// (`wait` and `finish` reach it inside `with_sched`), so sharing `&IoWaiter`
+// across threads races on nothing; established by `thread_init::with_sched`.
 unsafe impl Sync for IoWaiter {}
 
 impl IoWaiter {
@@ -104,6 +111,8 @@ impl IoWaiter {
                 if self.done.load(Ordering::Acquire) != ST_PEND {
                     return false;
                 }
+                // SAFETY: `wq` is touched only under SCHED, which this
+                // closure holds; established by `thread_init::with_sched`.
                 s.begin_wait(unsafe { &mut *self.wq.get() }, FAR_DEADLINE);
                 true
             });
@@ -149,31 +158,11 @@ pub mod testing {
 
     use crate::time_init;
 
-    static STALLS_LEFT: AtomicU32 = AtomicU32::new(0);
-    static STALL_MAX_US: AtomicU32 = AtomicU32::new(0);
-    static STALLS_RUN: AtomicU32 = AtomicU32::new(0);
-    static RETURNS: AtomicU64 = AtomicU64::new(0);
-
-    /// Hold the next `count` completers just before they take SCHED, each
-    /// until a submitter calls [`note_return`] or `max_us` passes.
-    pub fn arm_finish_stall(count: u32, max_us: u32) {
-        STALLS_RUN.store(0, Ordering::Relaxed);
-        STALL_MAX_US.store(max_us, Ordering::Relaxed);
-        STALLS_LEFT.store(count, Ordering::Release);
-    }
-
-    pub fn disarm_finish_stall() {
-        STALLS_LEFT.store(0, Ordering::Release);
-    }
-
-    /// A submitter's request returned to it; ends a running stall.
-    pub fn note_return() {
-        RETURNS.fetch_add(1, Ordering::Release);
-    }
-
-    pub fn finish_stalls_run() -> u32 {
-        STALLS_RUN.load(Ordering::Acquire)
-    }
+    // The stall's state; `block::ktest`'s setters arm and read it.
+    pub(in crate::block) static STALLS_LEFT: AtomicU32 = AtomicU32::new(0);
+    pub(in crate::block) static STALL_MAX_US: AtomicU32 = AtomicU32::new(0);
+    pub(in crate::block) static STALLS_RUN: AtomicU32 = AtomicU32::new(0);
+    pub(in crate::block) static RETURNS: AtomicU64 = AtomicU64::new(0);
 
     /// Take one armed stall, if any is left, and spin until a submitter
     /// returns or the bound passes. IF is left as found.
@@ -242,7 +231,10 @@ fn execute(req: &Request) -> Result<(), BlockError> {
         }
     }
     let mut data = DATA.lock();
-    ram().apply(&mut data[..], req)
+    // SAFETY: invariant I235: a queued request's segments stay valid and
+    // untouched until its completion runs, and none aliases the ramdisk's
+    // own `DATA`; established by `block_init::build`.
+    unsafe { ram().apply(&mut data[..], req) }
 }
 
 /// Take every queued request and every pending emulated-`Fua` `Flush`
@@ -439,6 +431,7 @@ pub fn flush() -> Result<(), BlockError> {
     blocking(Op::Flush, 0, 0, 0, 0)
 }
 
+#[cfg(feature = "kernel_tests")]
 /// Write `buf` at `lba` with `Fua`: durable when this returns `Ok`.
 pub fn write_fua(lba: u64, buf: &[u8]) -> Result<(), BlockError> {
     let bs = RAM0_BLOCK_SIZE as usize;
@@ -452,11 +445,7 @@ pub fn write_fua(lba: u64, buf: &[u8]) -> Result<(), BlockError> {
     w.wait()
 }
 
-/// `Flush` requests dispatched to ram0, emulated-`Fua` ones included.
-pub fn flushes() -> u64 {
-    FLUSHES.load(Ordering::Relaxed)
-}
-
+#[cfg(feature = "kernel_tests")]
 pub fn discard(lba: u64, nsectors: u64) -> Result<(), BlockError> {
     if nsectors > u32::MAX as u64 {
         return Err(BlockError::Inval);
@@ -493,7 +482,7 @@ pub fn inject_io_fails(n: u32) {
     FAIL_NEXT.store(n, Ordering::SeqCst);
 }
 
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+#[cfg(feature = "kernel_tests")]
 pub fn reset() {
     #[cfg(feature = "kernel_tests")]
     FAIL_NEXT.store(0, Ordering::SeqCst);
@@ -504,40 +493,6 @@ pub fn reset() {
     });
 }
 
-struct Ram0;
-
-impl block::BlockDevice for Ram0 {
-    fn name(&self) -> &'static str {
-        RAM0_NAME
-    }
-    fn logical_block_size(&self) -> u32 {
-        RAM0_BLOCK_SIZE
-    }
-    fn capacity_sectors(&self) -> u64 {
-        RAM0_SECTORS
-    }
-    fn state(&self) -> DeviceState {
-        state()
-    }
-    fn read(&self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
-        read(lba, buf)
-    }
-    fn write(&self, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
-        write(lba, buf)
-    }
-    fn flush(&self) -> Result<(), BlockError> {
-        flush()
-    }
-    fn discard(&self, lba: u64, nsectors: u64) -> Result<(), BlockError> {
-        discard(lba, nsectors)
-    }
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn device() -> &'static dyn block::BlockDevice {
-    &Ram0
-}
-
 pub fn init() {
     debug_assert_eq!(ram().byte_len(), RAM0_BYTES);
     {
@@ -546,6 +501,9 @@ pub fn init() {
     }
     STATE.store(DeviceState::Ready.as_u8(), Ordering::Release);
     LIVE.store(true, Ordering::Release);
-    let _ = write_marker(&mut Serial, RAM0_NAME, RAM0_SECTORS);
-    let _ = writeln!(Serial);
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a write to Serial cannot fail (DESIGN §2.5)"
+    )]
+    let _ = write_marker(&mut Serial, RAM0_NAME, RAM0_SECTORS).and_then(|()| writeln!(Serial));
 }

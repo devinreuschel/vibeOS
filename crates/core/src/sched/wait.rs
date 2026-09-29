@@ -305,6 +305,9 @@ impl<T, const N: usize> ChannelModel<T, N> {
             return None;
         }
         let i = self.head;
+        // SAFETY: the `len` slots from `head` (mod `N`) are initialized and
+        // `len > 0`, so slot `head` holds a value, read once here before
+        // `head` moves past it; established by `wait::ChannelModel::try_send`.
         let v = unsafe { self.slots[i].assume_init_read() };
         self.head = (self.head + 1) % N;
         self.len -= 1;

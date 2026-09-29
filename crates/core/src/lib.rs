@@ -30,25 +30,13 @@
 pub mod acpi;
 pub mod arch;
 pub mod atomic;
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 pub mod block;
 // Kernel `mod cell` in main.rs. Host tests only: production vibeos-core
 // has no InterruptGuard / per_cpu_init.
 #[cfg(test)]
 #[path = "../../../src/cell.rs"]
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 pub mod cell;
 pub mod console;
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 pub mod dev;
 pub mod drivers;
 pub mod fmt_util;
@@ -73,10 +61,6 @@ pub mod mm;
     reason = "audit pending, ROADMAP §10.1"
 )]
 pub mod proc;
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 pub mod sched;
 pub mod shell;
 pub mod smp;

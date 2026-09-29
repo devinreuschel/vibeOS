@@ -133,6 +133,10 @@ impl fmt::Write for PlainSerial {
 /// Write a marker line: `<msg>\n`. Captured into the log ring.
 /// Prefer `marker!` at call sites (DESIGN §2.6).
 pub fn line(msg: &str) {
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a write to Serial cannot fail (DESIGN §2.5)"
+    )]
     let _ = writeln!(Serial, "{msg}");
 }
 

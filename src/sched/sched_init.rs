@@ -13,13 +13,14 @@ static LIVE: AtomicBool = AtomicBool::new(false);
 /// Spawn the BSP idle thread, retarget `PerCpu.idle`, arm preemption.
 ///
 /// # Safety
-/// Bootstrap thread is current. IRQ0 may already be live; `on_timer_tick`
-/// is a no-op until `LIVE`.
+/// Call once, on the BSP, after `thread_init::init_bootstrap` and before
+/// `irq: enabled`, with the bootstrap thread current: it rewrites this
+/// CPU's `PerCpu.idle`, which the switch path reads. IRQ0 may already be
+/// live; `on_timer_tick` is a no-op until `LIVE`.
 pub unsafe fn init() {
-    // Before `irq: enabled`: DESIGN §4.4's boot policy panics here.
-    let h = match thread_init::spawn_idle(idle_main) {
-        Ok(h) => h,
-        Err(e) => panic!("sched: idle thread: {}", e.as_str()),
+    // Before `irq: enabled`: a failure halts (DESIGN §4.4's boot policy).
+    let Ok(h) = thread_init::spawn_idle(idle_main) else {
+        crate::boot::halt_with("vibeOS: sched: no idle thread");
     };
     let ptr = thread_init::tcb_ptr(h.id());
     assert!(!ptr.is_null(), "idle tcb");
@@ -67,7 +68,7 @@ fn idle_main() {
     idle_loop();
 }
 
-#[allow(dead_code)]
+#[cfg(feature = "kernel_tests")]
 pub fn idle_tsc() -> u64 {
     per_cpu_init::current().idle_tsc
 }

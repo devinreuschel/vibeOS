@@ -5,18 +5,16 @@
 //! (DESIGN §2.2 / §5.4). Kick barriers are the Phase 6 `dma_wmb` story.
 //! Status bytes live in DMA, not on the submitter stack.
 
-#![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-
-use alloc::boxed::Box;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::block::{
-    self, BlockError, Completion, DeviceState, MAX_QUEUE, Op, Queue, Request, write_marker,
+    BlockError, Completion, DeviceState, MAX_QUEUE, Op, Queue, Request, write_marker,
 };
 use vibeos::dev::{Device, Driver, IdMatch, ProbeError};
 use vibeos::dma::{self, DmaAlloc, DmaBuffer};
 use vibeos::irq::IrqError;
+use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::pci::MAX_BARS;
 use vibeos::virtio::{
@@ -28,10 +26,10 @@ use vibeos::virtio::{
     STATUS_FEATURES_OK, SplitLayout, SplitQueue, VENDOR_ID, VirtioError, notify_addr,
 };
 use vibeos::virtio_blk::{
-    CFG_BLK_SIZE, CFG_CAPACITY, CFG_DISCARD_ALIGN, CFG_MAX_DISCARD_SECTORS, CFG_MAX_DISCARD_SEG,
-    CFG_NUM_QUEUES, CFG_TOPOLOGY, F_DISCARD, F_FLUSH, F_MQ, F_TOPOLOGY, NAME, SECTOR, T_DISCARD,
-    T_FLUSH, T_IN, T_OUT, logical_capacity, map_status, nq_from_config, pack_discard, pack_header,
-    pick_blk_size, pick_features, sector_for_lba,
+    CFG_BLK_SIZE, CFG_CAPACITY, CFG_MAX_DISCARD_SECTORS, CFG_NUM_QUEUES, CFG_TOPOLOGY, F_DISCARD,
+    F_FLUSH, F_MQ, F_TOPOLOGY, NAME, SECTOR, T_DISCARD, T_FLUSH, T_IN, T_OUT, logical_capacity,
+    map_status, nq_from_config, pack_discard, pack_header, pick_blk_size, pick_features,
+    sector_for_lba,
 };
 
 use crate::block_init::{self, IoWaiter};
@@ -56,8 +54,6 @@ struct Vq {
     vq: SplitQueue,
     qdma: DmaBuffer,
     doorbell: u64,
-    #[allow(dead_code)]
-    vec: u8,
     inflight: [u8; MAX_QSIZE],
 }
 
@@ -73,34 +69,43 @@ struct Blk {
     running: bool,
 }
 
-static BLK: SpinMutex<Option<Box<Blk>>> = SpinMutex::with_rank(None, RANK_DEVICE);
+static BLK: SpinMutex<Option<TryBox<Blk>>> = SpinMutex::with_rank(None, RANK_DEVICE);
 static ISR_VA: AtomicU64 = AtomicU64::new(0);
 static LIVE: AtomicBool = AtomicBool::new(false);
 static STATE: AtomicU8 = AtomicU8::new(0);
-static FEATURES: AtomicU64 = AtomicU64::new(0);
+pub(super) static FEATURES: AtomicU64 = AtomicU64::new(0);
 static BLK_SIZE: AtomicU32 = AtomicU32::new(SECTOR);
 static CAP: AtomicU64 = AtomicU64::new(0);
 static NQ: AtomicU8 = AtomicU8::new(0);
-static TOP_HITS: AtomicU32 = AtomicU32::new(0);
-static THREAD_HITS: AtomicU32 = AtomicU32::new(0);
-static COMPLETIONS: AtomicU32 = AtomicU32::new(0);
+pub(super) static TOP_HITS: AtomicU32 = AtomicU32::new(0);
+pub(super) static THREAD_HITS: AtomicU32 = AtomicU32::new(0);
+pub(super) static COMPLETIONS: AtomicU32 = AtomicU32::new(0);
 static PHYS_EXP: AtomicU8 = AtomicU8::new(0);
 static ALIGN_OFF: AtomicU8 = AtomicU8::new(0);
 static MIN_IO: AtomicU16 = AtomicU16::new(0);
 static OPT_IO: AtomicU32 = AtomicU32::new(0);
 static MAX_DISCARD: AtomicU32 = AtomicU32::new(0);
 static IO_REQS: AtomicU64 = AtomicU64::new(0);
-static FLUSHES: AtomicU64 = AtomicU64::new(0);
+pub(super) static FLUSHES: AtomicU64 = AtomicU64::new(0);
 
 fn r8(va: u64, off: u16) -> u8 {
+    // SAFETY: invariant I234: `va` is a register of a BAR `map_mmio`
+    // mapped uncached for this bound device, and `off` a register offset
+    // inside that capability's region; established by `pci_init::map_mmio`.
     unsafe { core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u8) }
 }
 
 fn w8(va: u64, off: u16, v: u8) {
+    // SAFETY: invariant I234: `va` is a register of a BAR `map_mmio`
+    // mapped uncached for this bound device, and `off` a register offset
+    // inside that capability's region; established by `pci_init::map_mmio`.
     unsafe { core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u8, v) }
 }
 
 fn r16(va: u64, off: u16) -> u16 {
+    // SAFETY: invariant I234: `va` is a register of a BAR `map_mmio`
+    // mapped uncached for this bound device, and `off` a register offset
+    // inside that capability's region; established by `pci_init::map_mmio`.
     unsafe {
         u16::from_le(core::ptr::read_volatile(
             (va.wrapping_add(off as u64)) as *const u16,
@@ -109,12 +114,18 @@ fn r16(va: u64, off: u16) -> u16 {
 }
 
 fn w16(va: u64, off: u16, v: u16) {
+    // SAFETY: invariant I234: `va` is a register of a BAR `map_mmio`
+    // mapped uncached for this bound device, and `off` a register offset
+    // inside that capability's region; established by `pci_init::map_mmio`.
     unsafe {
         core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u16, v.to_le());
     }
 }
 
 fn r32(va: u64, off: u16) -> u32 {
+    // SAFETY: invariant I234: `va` is a register of a BAR `map_mmio`
+    // mapped uncached for this bound device, and `off` a register offset
+    // inside that capability's region; established by `pci_init::map_mmio`.
     unsafe {
         u32::from_le(core::ptr::read_volatile(
             (va.wrapping_add(off as u64)) as *const u32,
@@ -123,6 +134,9 @@ fn r32(va: u64, off: u16) -> u32 {
 }
 
 fn w32(va: u64, off: u16, v: u32) {
+    // SAFETY: invariant I234: `va` is a register of a BAR `map_mmio`
+    // mapped uncached for this bound device, and `off` a register offset
+    // inside that capability's region; established by `pci_init::map_mmio`.
     unsafe {
         core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u32, v.to_le());
     }
@@ -194,12 +208,18 @@ fn fail_armed(dev: &Device, common: u64, vecs: &[u8], nvec: usize) {
     irq_init::disable_msix(dev);
     let mut i = 0usize;
     while i < nvec {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "cleanup after an error the caller already returns: a vector that fails to free stays allocated, which nothing can act on (DESIGN §2.5)"
+        )]
         let _ = irq_init::free_vector(vecs[i]);
         i += 1;
     }
     fail_status(common);
 }
 
+/// Slot `si`'s first byte. `si < N_SLOTS`, so the slot lies inside `slots`,
+/// which `setup` allocates at `N_SLOTS * SLOT_STRIDE` bytes.
 fn slot_base(slots: &DmaBuffer, si: usize) -> *mut u8 {
     (slots.virt() as usize + si * SLOT_STRIDE) as *mut u8
 }
@@ -209,10 +229,16 @@ fn slot_dev(slots: &DmaBuffer, si: usize, off: usize) -> u64 {
 }
 
 fn copy_to_bounce(slots: &DmaBuffer, si: usize, req: &Request) {
+    // SAFETY: slot `si`'s `SLOT_META` header bytes precede its bounce area
+    // inside `slots`; established by `virtio_blk_init::slot_base`.
     let mut dst = unsafe { slot_base(slots, si).add(SLOT_META) };
     let mut i = 0u8;
     while i < req.nseg {
         let s = req.segs[i as usize];
+        // SAFETY: invariant I235: the segment's `len` bytes stay valid and
+        // untouched until the request completes, and `issue` checked that
+        // the segments total at most `BOUNCE`, the bounce area's size;
+        // established by `virtio_blk_init::build`.
         unsafe {
             core::ptr::copy_nonoverlapping(s.ptr as *const u8, dst, s.len);
             dst = dst.add(s.len);
@@ -222,10 +248,14 @@ fn copy_to_bounce(slots: &DmaBuffer, si: usize, req: &Request) {
 }
 
 fn copy_from_bounce(slots: &DmaBuffer, si: usize, req: &Request) {
+    // SAFETY: as in `copy_to_bounce`; established by
+    // `virtio_blk_init::slot_base`.
     let mut src = unsafe { slot_base(slots, si).add(SLOT_META) };
     let mut i = 0u8;
     while i < req.nseg {
         let s = req.segs[i as usize];
+        // SAFETY: invariant I235, as in `copy_to_bounce`; established by
+        // `virtio_blk_init::build`.
         unsafe {
             core::ptr::copy_nonoverlapping(src, s.ptr as *mut u8, s.len);
             src = src.add(s.len);
@@ -287,6 +317,10 @@ fn descs_for(op: Op) -> u16 {
 
 fn kick(doorbell: u64) {
     dma::dma_wmb();
+    // SAFETY: invariant I234: `doorbell` is a queue's notify register inside
+    // the notify capability's BAR, which `map_mmio` mapped uncached, checked
+    // against the capability length by `virtio::notify_addr`; established by
+    // `pci_init::map_mmio`.
     unsafe {
         core::ptr::write_volatile(doorbell as *mut u16, 0u16);
     }
@@ -333,6 +367,9 @@ fn issue(blk: &mut Blk, req: Request) -> Issued {
     };
 
     let base = slot_base(&blk.slots, si);
+    // SAFETY: slot `si` is free (`alloc_slot` just marked it), so the device
+    // owns none of its `SLOT_STRIDE` bytes; established by
+    // `virtio_blk_init::alloc_slot`.
     unsafe {
         core::ptr::write_bytes(base, 0, SLOT_STRIDE);
         let mut hdr = [0u8; 16];
@@ -358,6 +395,8 @@ fn issue(blk: &mut Blk, req: Request) -> Issued {
         }
         let mut disc = [0u8; 16];
         pack_discard(&mut disc, sector, n512, 0);
+        // SAFETY: as above: bytes 32..48 of the free slot `si`; established
+        // by `virtio_blk_init::alloc_slot`.
         unsafe {
             core::ptr::copy_nonoverlapping(disc.as_ptr(), base.add(32), 16);
         }
@@ -491,7 +530,7 @@ fn pump() {
         let mut again = false;
         {
             let mut g = BLK.lock();
-            let Some(blk) = g.as_mut() else {
+            let Some(blk) = g.as_deref_mut() else {
                 return;
             };
             loop {
@@ -570,7 +609,7 @@ fn fail_rest() {
         let mut dump = [None; MAX_QUEUE];
         let n = {
             let mut g = BLK.lock();
-            let Some(blk) = g.as_mut() else {
+            let Some(blk) = g.as_deref_mut() else {
                 return;
             };
             blk.q.fail();
@@ -594,7 +633,7 @@ fn fail_rest() {
 fn finish(mut req: Request, res: Result<(), BlockError>) {
     let seq = u64::from(req.seq);
     let mut g = BLK.lock();
-    let Some(blk) = g.as_mut() else {
+    let Some(blk) = g.as_deref_mut() else {
         drop(g);
         block_init::complete_waiters(&req, Err(BlockError::Failed));
         return;
@@ -635,7 +674,7 @@ fn harvest() {
     let mut n = 0usize;
     {
         let mut g = BLK.lock();
-        let Some(blk) = g.as_mut() else {
+        let Some(blk) = g.as_deref_mut() else {
             return;
         };
         let mut qi = 0usize;
@@ -655,6 +694,10 @@ fn harvest() {
                     }
                     let si = si as usize;
                     blk.slots.sync_for_cpu();
+                    // SAFETY: slot `si` is in flight on this queue, so the
+                    // device wrote its status byte at offset 16, synced for
+                    // the CPU above; established by
+                    // `virtio_blk_init::slot_base`.
                     let st = unsafe { *slot_base(&blk.slots, si).add(16) };
                     let res = map_status(st);
                     if let Some(req) = blk.slot_req[si].take() {
@@ -687,6 +730,8 @@ fn blk_top() {
     TOP_HITS.fetch_add(1, Ordering::SeqCst);
     let isr = ISR_VA.load(Ordering::Acquire);
     if isr != 0 {
+        // Reading the ISR status acknowledges the interrupt; the value
+        // itself is not needed (virtio 1.x §4.1.4.5).
         let _ = r8(isr, 0);
     }
 }
@@ -765,7 +810,6 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
     }
     if feat & F_DISCARD != 0 {
         MAX_DISCARD.store(r32(cfg, CFG_MAX_DISCARD_SECTORS), Ordering::Release);
-        let _ = (r32(cfg, CFG_MAX_DISCARD_SEG), r32(cfg, CFG_DISCARD_ALIGN));
     }
     let cfg_nq = r16(cfg, CFG_NUM_QUEUES);
     let common_nq = r16(common, COMMON_OFF_NUM_QUEUES);
@@ -793,12 +837,20 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
             }
         };
         if irq_init::set_threaded(vec, Some(blk_top), blk_work).is_err() {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "cleanup after an error the caller already returns: a vector that fails to free stays allocated, which nothing can act on (DESIGN §2.5)"
+            )]
             let _ = irq_init::free_vector(vec);
             fail_status(common);
             return Err(VirtioError::Failed);
         }
         if let Err(e) = irq_init::enable_msix(dev, 0, vec, pc.apic_id.load(Ordering::Relaxed) as u8)
         {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "cleanup after an error the caller already returns: a vector that fails to free stays allocated, which nothing can act on (DESIGN §2.5)"
+            )]
             let _ = irq_init::free_vector(vec);
             fail_status(common);
             return match e {
@@ -814,6 +866,8 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
         fail_armed(dev, common, &vecs, nvec);
         return Err(VirtioError::Failed);
     };
+    // SAFETY: `slots` was just allocated, `len()` bytes at `virt()`, and is
+    // not yet shared with the device; established by `dma_init::alloc`.
     unsafe {
         core::ptr::write_bytes(slots.virt() as *mut u8, 0, slots.len() as usize);
     }
@@ -829,7 +883,7 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
         } else {
             irq_init::threaded_cpu()
         };
-        let vec = if per_q_msix {
+        if per_q_msix {
             let Some(pc) = per_cpu_init::cpu(cpu) else {
                 dma_init::free(slots);
                 let mut j = 0usize;
@@ -858,6 +912,10 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
                 }
             };
             if irq_init::set_threaded(vec, Some(blk_top), blk_work).is_err() {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "cleanup after an error the caller already returns: a vector that fails to free stays allocated, which nothing can act on (DESIGN §2.5)"
+                )]
                 let _ = irq_init::free_vector(vec);
                 dma_init::free(slots);
                 let mut j = 0usize;
@@ -878,6 +936,10 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
             )
             .is_err()
             {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "cleanup after an error the caller already returns: a vector that fails to free stays allocated, which nothing can act on (DESIGN §2.5)"
+                )]
                 let _ = irq_init::free_vector(vec);
                 dma_init::free(slots);
                 let mut j = 0usize;
@@ -892,10 +954,7 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
             }
             vecs[nvec] = vec;
             nvec += 1;
-            vec
-        } else {
-            vecs[0]
-        };
+        }
 
         w16(common, COMMON_OFF_QSEL, qi as u16);
         let hw_qs = r16(common, COMMON_OFF_QSIZE);
@@ -940,10 +999,16 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
             fail_armed(dev, common, &vecs, nvec);
             return Err(VirtioError::Failed);
         };
+        // SAFETY: as for `slots` above; established by `dma_init::alloc`.
         unsafe {
             core::ptr::write_bytes(qdma.virt() as *mut u8, 0, qdma.len() as usize);
         }
-        let mut vq = SplitQueue::new(layout, qdma.virt() as *mut u8, feat & F_EVENT_IDX != 0);
+        // SAFETY: invariant I233: `qdma` is a page-aligned DMA buffer of at
+        // least `layout.total` bytes, which stays allocated beside the queue
+        // until the device is reset and it is freed; established by
+        // `dma_init::alloc`.
+        let mut vq =
+            unsafe { SplitQueue::new(layout, qdma.virt() as *mut u8, feat & F_EVENT_IDX != 0) };
         vq.init();
         qdma.sync_for_device();
         w64(
@@ -991,11 +1056,26 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
             vq,
             qdma,
             doorbell,
-            vec,
             inflight: [FREE; MAX_QSIZE],
         });
         qi += 1;
     }
+
+    // Allocate the driver state before the device goes live: a failure here
+    // unwinds like any other setup error, and no published state names a
+    // device without its `Blk` (DESIGN §4.4).
+    let Ok(uninit) = TryBox::<Blk>::try_new_uninit() else {
+        dma_init::free(slots);
+        let mut j = 0usize;
+        while j < nq {
+            if let Some(v) = vqs[j].take() {
+                dma_init::free(v.qdma);
+            }
+            j += 1;
+        }
+        fail_armed(dev, common, &vecs, nvec);
+        return Err(VirtioError::NoMemory);
+    };
 
     let st = r8(common, COMMON_OFF_STATUS);
     w8(common, COMMON_OFF_STATUS, st | STATUS_DRIVER_OK);
@@ -1007,7 +1087,7 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
     NQ.store(nq as u8, Ordering::Release);
     STATE.store(DeviceState::Ready.as_u8(), Ordering::Release);
 
-    let boxed = Box::new(Blk {
+    let boxed = uninit.write(Blk {
         q: Queue::new(),
         vqs,
         nq: nq as u8,
@@ -1021,8 +1101,11 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
     *BLK.lock() = Some(boxed);
     LIVE.store(true, Ordering::Release);
 
-    let _ = write_marker(&mut Serial, NAME, capacity);
-    let _ = writeln!(Serial);
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a write to Serial cannot fail (DESIGN §2.5)"
+    )]
+    let _ = write_marker(&mut Serial, NAME, capacity).and_then(|()| writeln!(Serial));
     let mq = if feat & F_MQ != 0 { "mq" } else { "sq" };
     crate::marker!(
         "vibeOS: virtio: blk {NAME} {} qsz={q0sz} nq={nq} {mq} feat={:#x} bs={blk_size} topo={}/{} discard={}",
@@ -1086,6 +1169,7 @@ impl Driver for BlkDriver {
                 crate::marker!("vibeOS: virtio: blk no VERSION_1");
                 Err(ProbeError::Failed)
             }
+            Err(VirtioError::NoMemory) => Err(ProbeError::NoMemory),
             Err(e) => {
                 crate::marker!("vibeOS: virtio: blk probe {}", e.as_str());
                 Err(ProbeError::Failed)
@@ -1096,7 +1180,12 @@ impl Driver for BlkDriver {
 }
 
 pub fn init() {
-    let _ = dev_init::register_driver(&BLK_DRV);
+    if !dev_init::register_driver(&BLK_DRV) {
+        crate::klog!(
+            vibeos::log::Level::Warn,
+            "vibeOS: virtio: blk driver not registered: registry full"
+        );
+    }
 }
 
 pub fn live() -> bool {
@@ -1119,47 +1208,8 @@ pub fn capacity_sectors() -> u64 {
     CAP.load(Ordering::Acquire)
 }
 
-pub fn features() -> u64 {
-    FEATURES.load(Ordering::Acquire)
-}
-
 pub fn num_queues() -> u8 {
     NQ.load(Ordering::Acquire)
-}
-
-pub fn has_mq() -> bool {
-    features() & F_MQ != 0 && num_queues() > 1
-}
-
-pub fn has_flush() -> bool {
-    features() & F_FLUSH != 0
-}
-
-pub fn has_discard() -> bool {
-    features() & F_DISCARD != 0
-}
-
-pub fn top_hits() -> u32 {
-    TOP_HITS.load(Ordering::Acquire)
-}
-
-pub fn thread_hits() -> u32 {
-    THREAD_HITS.load(Ordering::Acquire)
-}
-
-pub fn completions() -> u32 {
-    COMPLETIONS.load(Ordering::Acquire)
-}
-
-pub fn persist_lba() -> u64 {
-    // Inside the Linux GPT partition (starts at 512). Not GPT backup.
-    const LBA: u64 = 2048;
-    let cap = capacity_sectors();
-    if cap > LBA + 1 {
-        LBA
-    } else {
-        cap.saturating_sub(1)
-    }
 }
 
 pub fn io_reqs() -> u64 {
@@ -1168,7 +1218,7 @@ pub fn io_reqs() -> u64 {
 
 fn submit_req(req: Request) -> Result<bool, BlockError> {
     let mut g = BLK.lock();
-    let blk = g.as_mut().ok_or(BlockError::Failed)?;
+    let blk = g.as_deref_mut().ok_or(BlockError::Failed)?;
     blk.q.submit(req)?;
     if blk.running {
         Ok(false)
@@ -1241,6 +1291,7 @@ fn start(req: Request) -> Result<(), BlockError> {
     Ok(())
 }
 
+#[cfg(feature = "kernel_tests")]
 /// Async submit. `buf` lives until `w` completes. Hard IRQ must not call this.
 pub fn submit(
     op: Op,
@@ -1309,6 +1360,7 @@ pub fn flush() -> Result<(), BlockError> {
     blocking(Op::Flush, 0, 0, 0, 0)
 }
 
+#[cfg(feature = "kernel_tests")]
 /// Write `buf` at `lba` with `Fua`: durable when this returns `Ok`.
 /// virtio-blk has no FUA (DESIGN §10.4), so the queue sends a `Flush`.
 pub fn write_fua(lba: u64, buf: &[u8]) -> Result<(), BlockError> {
@@ -1327,12 +1379,7 @@ pub fn write_fua(lba: u64, buf: &[u8]) -> Result<(), BlockError> {
     )
 }
 
-/// `Flush` requests dispatched to vda, emulated-`Fua` ones and those
-/// finished locally without `F_FLUSH` included.
-pub fn flushes() -> u64 {
-    FLUSHES.load(Ordering::Relaxed)
-}
-
+#[cfg(feature = "kernel_tests")]
 pub fn discard(lba: u64, nsectors: u64) -> Result<(), BlockError> {
     if nsectors == 0 || nsectors > u32::MAX as u64 {
         return Err(BlockError::Inval);
@@ -1340,9 +1387,11 @@ pub fn discard(lba: u64, nsectors: u64) -> Result<(), BlockError> {
     blocking(Op::Discard, lba, nsectors as u32, 0, 0)
 }
 
+#[cfg(feature = "kernel_tests")]
 struct Vda;
 
-impl block::BlockDevice for Vda {
+#[cfg(feature = "kernel_tests")]
+impl vibeos::block::BlockDevice for Vda {
     fn name(&self) -> &'static str {
         NAME
     }
@@ -1369,7 +1418,8 @@ impl block::BlockDevice for Vda {
     }
 }
 
-pub fn device() -> Option<&'static dyn block::BlockDevice> {
+#[cfg(feature = "kernel_tests")]
+pub fn device() -> Option<&'static dyn vibeos::block::BlockDevice> {
     if live() { Some(&Vda) } else { None }
 }
 

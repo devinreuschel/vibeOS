@@ -55,7 +55,8 @@ fn with_ecam<R>(f: impl FnOnce(&mut Ecam) -> R) -> R {
     f(&mut g)
 }
 static CFG_LOCK: AtomicBool = AtomicBool::new(false);
-static LIVE: AtomicBool = AtomicBool::new(false);
+/// Set once the scan has run; `dev::ktest::pci_live` reads it.
+pub(super) static LIVE: AtomicBool = AtomicBool::new(false);
 
 fn with_cfg<R>(f: impl FnOnce() -> R) -> R {
     let _irq = InterruptGuard::enter();
@@ -72,6 +73,10 @@ fn with_cfg<R>(f: impl FnOnce() -> R) -> R {
 
 fn cf8_read32(bdf: Bdf, offset: u16) -> u32 {
     let addr = pci::cf8_addr(bdf.bus, bdf.device, bdf.function, offset);
+    // SAFETY: invariant: ports 0xCF8 and 0xCFC are the PCI type-1 config
+    // mechanism, and `with_cfg`, every caller's wrapper, holds `CFG_LOCK`
+    // across the address and data accesses; established by
+    // `pci_init::with_cfg`.
     unsafe {
         x86::outl(CFG_ADDR, addr);
         x86::inl(CFG_DATA)
@@ -80,6 +85,7 @@ fn cf8_read32(bdf: Bdf, offset: u16) -> u32 {
 
 fn cf8_write32(bdf: Bdf, offset: u16, val: u32) {
     let addr = pci::cf8_addr(bdf.bus, bdf.device, bdf.function, offset);
+    // SAFETY: as in `cf8_read32`; established by `pci_init::with_cfg`.
     unsafe {
         x86::outl(CFG_ADDR, addr);
         x86::outl(CFG_DATA, val);
@@ -107,9 +113,20 @@ fn map_mmio(phys: u64, len: u64, keep_wb: bool) -> Option<u64> {
         return None;
     }
     if end <= paging_init::map_end() {
-        let _ = unsafe { paging_init::patch_physmap_uc(PhysAddr(phys), len) };
+        // SAFETY: `paging_init::install` ran at boot, long before the PCI
+        // scan, and `end <= map_end()`, so the physmap covers the range;
+        // established by `paging_init::map_end`.
+        let patched = unsafe { paging_init::patch_physmap_uc(PhysAddr(phys), len) };
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "fixed by ROADMAP §10.12: `pci_init::map_mmio` refuses a range that overlaps a RAM-typed range"
+        )]
+        let _ = patched;
         Some(paging_init::HHDM_BASE.wrapping_add(phys))
     } else {
+        // SAFETY: the range is a BAR the scan read from config space, above
+        // the physmap, which only this mapping reaches; established by
+        // `pci_init::map_func_bars`, the one caller that passes BARs.
         unsafe { paging_init::ioremap(PhysAddr(phys), len) }.map(|v| v.as_u64())
     }
 }
@@ -161,11 +178,19 @@ fn ecam_va(phys: u64) -> Option<u64> {
     Some(pci::ecam_byte_va(va, phys))
 }
 
-fn ecam_read_at(va: u64) -> u32 {
+/// # Safety
+/// Invariant I234: `va` is a dword of an ECAM page `ecam_va` mapped.
+unsafe fn ecam_read_at(va: u64) -> u32 {
+    // SAFETY: invariant I234; established by `pci_init::ecam_read_at`'s
+    // `# Safety` contract.
     unsafe { (va as *const u32).read_volatile() }
 }
 
-fn ecam_write_at(va: u64, val: u32) {
+/// # Safety
+/// As [`ecam_read_at`].
+unsafe fn ecam_write_at(va: u64, val: u32) {
+    // SAFETY: invariant I234; established by `pci_init::ecam_write_at`'s
+    // `# Safety` contract.
     unsafe { (va as *mut u32).write_volatile(val) }
 }
 
@@ -181,7 +206,10 @@ impl CfgIo for HwCfg {
             let Some(va) = ecam_va(phys) else {
                 return 0xFFFF_FFFF;
             };
-            return with_cfg(|| ecam_read_at(va));
+            // SAFETY: invariant I234: `va` is the config dword's byte in
+            // the ECAM page `ecam_va` just mapped, and config offsets are
+            // dword-aligned below 4 KiB; established by `pci_init::map_mmio`.
+            return with_cfg(|| unsafe { ecam_read_at(va) });
         }
         if bdf.bus == 0 {
             return with_cfg(|| cf8_read32(bdf, offset));
@@ -197,7 +225,9 @@ impl CfgIo for HwCfg {
             let Some(va) = ecam_va(phys) else {
                 return;
             };
-            with_cfg(|| ecam_write_at(va, value));
+            // SAFETY: invariant I234, as in `read32`; established by
+            // `pci_init::map_mmio`.
+            with_cfg(|| unsafe { ecam_write_at(va, value) });
             return;
         }
         if bdf.bus == 0 {
@@ -254,14 +284,30 @@ pub fn init(publish: fn(Device) -> bool) {
         let info = found[i];
         let mut dev = Device::from_func(info);
         map_func_bars(&info, &mut dev);
-        let _ = write!(Serial, "vibeOS: pci: ");
-        let _ = pci::write_lspci_line(&mut Serial, &info);
-        let _ = writeln!(Serial);
-        let _ = publish(dev);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a write to Serial cannot fail (DESIGN §2.5)"
+        )]
+        let _ = scan_line(&info);
+        if !publish(dev) {
+            crate::klog_ratelimited!(
+                1000,
+                vibeos::log::Level::Warn,
+                "vibeOS: pci: registry full, {} not published",
+                info.bdf
+            );
+        }
         i += 1;
     }
     crate::marker!("vibeOS: pci: {} devices", n);
     LIVE.store(true, Ordering::Release);
+}
+
+/// One `pci:` scan line.
+fn scan_line(info: &FuncInfo) -> core::fmt::Result {
+    write!(Serial, "vibeOS: pci: ")?;
+    pci::write_lspci_line(&mut Serial, info)?;
+    writeln!(Serial)
 }
 
 pub fn enable_mem_master(bdf: Bdf) {
@@ -276,19 +322,4 @@ pub fn cfg_read16(bdf: Bdf, offset: u16) -> u16 {
 
 pub fn cfg_write_command(bdf: Bdf, cmd: u16) {
     pci::write_command(&mut HwCfg, bdf, cmd)
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn live() -> bool {
-    LIVE.load(Ordering::Acquire)
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn cfg_read32(bdf: Bdf, offset: u16) -> u32 {
-    HwCfg.read32(bdf, offset)
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn cfg_write32(bdf: Bdf, offset: u16, value: u32) {
-    HwCfg.write32(bdf, offset, value)
 }

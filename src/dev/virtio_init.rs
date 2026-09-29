@@ -2,14 +2,12 @@
 //!
 //! Transport + virtio-rng. virtio-blk is `virtio_blk_init`. ROADMAP §6.5.
 
-#![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-
-use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::dev::{Device, Driver, IdMatch, ProbeError};
 use vibeos::dma::{self, DmaAlloc, DmaBuffer};
 use vibeos::irq::IrqError;
+use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::pci::MAX_BARS;
 use vibeos::virtio::{
@@ -34,24 +32,22 @@ struct Q {
     qdma: DmaBuffer,
     data: DmaBuffer,
     doorbell: u64,
-    common: u64,
     features: u64,
-    vec: u8,
 }
 
 static Q: SpinMutex<Option<Q>> = SpinMutex::with_rank(None, RANK_DEVICE);
 static ISR_VA: AtomicU64 = AtomicU64::new(0);
-static TOP_HITS: AtomicU32 = AtomicU32::new(0);
-static THREAD_HITS: AtomicU32 = AtomicU32::new(0);
-static COMPLETIONS: AtomicU32 = AtomicU32::new(0);
-static LAST_LEN: AtomicU32 = AtomicU32::new(0);
-static ALLOCED: AtomicBool = AtomicBool::new(false);
-static SOFT_HITS: AtomicU32 = AtomicU32::new(0);
+pub(super) static TOP_HITS: AtomicU32 = AtomicU32::new(0);
+pub(super) static THREAD_HITS: AtomicU32 = AtomicU32::new(0);
+pub(super) static COMPLETIONS: AtomicU32 = AtomicU32::new(0);
+pub(super) static LAST_LEN: AtomicU32 = AtomicU32::new(0);
+pub(super) static ALLOCED: AtomicBool = AtomicBool::new(false);
+pub(super) static SOFT_HITS: AtomicU32 = AtomicU32::new(0);
 static BOUND: AtomicBool = AtomicBool::new(false);
-static FEATURES: AtomicU64 = AtomicU64::new(0);
-static QDMA_DEV: AtomicU64 = AtomicU64::new(0);
-static DATA_DEV: AtomicU64 = AtomicU64::new(0);
-static DATA_VIRT: AtomicU64 = AtomicU64::new(0);
+pub(super) static FEATURES: AtomicU64 = AtomicU64::new(0);
+pub(super) static QDMA_DEV: AtomicU64 = AtomicU64::new(0);
+pub(super) static DATA_DEV: AtomicU64 = AtomicU64::new(0);
+pub(super) static DATA_VIRT: AtomicU64 = AtomicU64::new(0);
 static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 const RNG_PAYLOAD: usize = 32;
@@ -61,14 +57,23 @@ static POOL_LEN: AtomicU32 = AtomicU32::new(0);
 static POOL_POS: AtomicU32 = AtomicU32::new(0);
 
 fn r8(va: u64, off: u16) -> u8 {
+    // SAFETY: invariant I234: `va` is a register of a BAR `map_mmio`
+    // mapped uncached for this bound device, and `off` a register offset
+    // inside that capability's region; established by `pci_init::map_mmio`.
     unsafe { core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u8) }
 }
 
 fn w8(va: u64, off: u16, v: u8) {
+    // SAFETY: invariant I234: `va` is a register of a BAR `map_mmio`
+    // mapped uncached for this bound device, and `off` a register offset
+    // inside that capability's region; established by `pci_init::map_mmio`.
     unsafe { core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u8, v) }
 }
 
 fn r16(va: u64, off: u16) -> u16 {
+    // SAFETY: invariant I234: `va` is a register of a BAR `map_mmio`
+    // mapped uncached for this bound device, and `off` a register offset
+    // inside that capability's region; established by `pci_init::map_mmio`.
     unsafe {
         u16::from_le(core::ptr::read_volatile(
             (va.wrapping_add(off as u64)) as *const u16,
@@ -77,12 +82,18 @@ fn r16(va: u64, off: u16) -> u16 {
 }
 
 fn w16(va: u64, off: u16, v: u16) {
+    // SAFETY: invariant I234: `va` is a register of a BAR `map_mmio`
+    // mapped uncached for this bound device, and `off` a register offset
+    // inside that capability's region; established by `pci_init::map_mmio`.
     unsafe {
         core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u16, v.to_le());
     }
 }
 
 fn r32(va: u64, off: u16) -> u32 {
+    // SAFETY: invariant I234: `va` is a register of a BAR `map_mmio`
+    // mapped uncached for this bound device, and `off` a register offset
+    // inside that capability's region; established by `pci_init::map_mmio`.
     unsafe {
         u32::from_le(core::ptr::read_volatile(
             (va.wrapping_add(off as u64)) as *const u32,
@@ -91,6 +102,9 @@ fn r32(va: u64, off: u16) -> u32 {
 }
 
 fn w32(va: u64, off: u16, v: u32) {
+    // SAFETY: invariant I234: `va` is a register of a BAR `map_mmio`
+    // mapped uncached for this bound device, and `off` a register offset
+    // inside that capability's region; established by `pci_init::map_mmio`.
     unsafe {
         core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u32, v.to_le());
     }
@@ -156,22 +170,37 @@ fn fail_status(common: u64) {
 
 fn fail_armed(dev: &Device, common: u64, vec: u8) {
     irq_init::disable_msix(dev);
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "cleanup after an error the caller already returns: a vector that fails to free stays allocated, which nothing can act on (DESIGN §2.5)"
+    )]
     let _ = irq_init::free_vector(vec);
     fail_status(common);
 }
 
+/// The softirq half: proves a work item may allocate. The test observable
+/// counts only an allocation that succeeded.
 fn on_soft(_arg: usize) {
-    let _b = Box::new(0x22u8);
-    SOFT_HITS.fetch_add(1, Ordering::SeqCst);
+    if TryBox::try_new(0x22u8).is_ok() {
+        SOFT_HITS.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 fn rng_top() {
     TOP_HITS.fetch_add(1, Ordering::SeqCst);
     let isr = ISR_VA.load(Ordering::Acquire);
     if isr != 0 {
+        // Reading the ISR status acknowledges the interrupt; the value
+        // itself is not needed (virtio 1.x §4.1.4.5).
         let _ = r8(isr, 0);
     }
-    let _ = work_init::raise_softirq(on_soft, 1);
+    if !work_init::raise_softirq(on_soft, 1) {
+        crate::klog_ratelimited!(
+            1000,
+            vibeos::log::Level::Warn,
+            "vibeOS: virtio: rng softirq ring full, work dropped"
+        );
+    }
 }
 
 fn publish_pool(virt: u64, len: u32) {
@@ -179,6 +208,10 @@ fn publish_pool(virt: u64, len: u32) {
     let p = virt.wrapping_add(RNG_PAYLOAD_OFF as u64) as *const u8;
     let mut i = 0usize;
     while i < n {
+        // SAFETY: invariant: `virt` is the rng's data buffer, whose
+        // `RNG_PAYLOAD` bytes from `RNG_PAYLOAD_OFF` the device wrote and
+        // `harvest` synced for the CPU, and `i < RNG_PAYLOAD`; established by
+        // `virtio_init::setup`, which allocates it.
         let b = unsafe { p.add(i).read_volatile() };
         POOL[i].store(b, Ordering::Relaxed);
         i += 1;
@@ -212,13 +245,19 @@ fn harvest() {
 
 fn rng_work() {
     THREAD_HITS.fetch_add(1, Ordering::SeqCst);
-    let _b = Box::new(0x11u8);
-    ALLOCED.store(true, Ordering::SeqCst);
+    // The threaded half may allocate; the observable records a success.
+    if TryBox::try_new(0x11u8).is_ok() {
+        ALLOCED.store(true, Ordering::SeqCst);
+    }
     harvest();
 }
 
 fn kick(doorbell: u64) {
     dma::dma_wmb();
+    // SAFETY: invariant I234: `doorbell` is queue 0's notify register inside
+    // the notify capability's BAR, which `map_mmio` mapped uncached, checked
+    // against the capability length by `virtio::notify_addr`; established by
+    // `pci_init::map_mmio`.
     unsafe {
         core::ptr::write_volatile(doorbell as *mut u16, 0u16);
     }
@@ -272,11 +311,19 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
         }
     };
     if irq_init::set_threaded(vec, Some(rng_top), rng_work).is_err() {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "cleanup after an error the caller already returns: a vector that fails to free stays allocated, which nothing can act on (DESIGN §2.5)"
+        )]
         let _ = irq_init::free_vector(vec);
         fail_status(common);
         return Err(VirtioError::Failed);
     }
     if let Err(e) = irq_init::enable_msix(dev, 0, vec, pc.apic_id.load(Ordering::Relaxed) as u8) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "cleanup after an error the caller already returns: a vector that fails to free stays allocated, which nothing can act on (DESIGN §2.5)"
+        )]
         let _ = irq_init::free_vector(vec);
         fail_status(common);
         return match e {
@@ -307,11 +354,19 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
         fail_armed(dev, common, vec);
         return Err(VirtioError::Failed);
     };
+    // SAFETY: both buffers were just allocated, are `len()` bytes long at
+    // `virt()`, and are not yet shared with the device; established by
+    // `dma_init::alloc`.
     unsafe {
         core::ptr::write_bytes(qdma.virt() as *mut u8, 0, qdma.len() as usize);
         core::ptr::write_bytes(data.virt() as *mut u8, 0, data.len() as usize);
     }
-    let mut vq = SplitQueue::new(layout, qdma.virt() as *mut u8, feat & F_EVENT_IDX != 0);
+    // SAFETY: invariant I233: `qdma` is a page-aligned DMA buffer of at
+    // least `layout.total` bytes, which stays allocated beside the queue
+    // until the device is reset and it is freed; established by
+    // `dma_init::alloc`.
+    let mut vq =
+        unsafe { SplitQueue::new(layout, qdma.virt() as *mut u8, feat & F_EVENT_IDX != 0) };
     vq.init();
     qdma.sync_for_device();
     w64(
@@ -360,9 +415,7 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
         qdma,
         data,
         doorbell,
-        common,
         features: feat,
-        vec,
     });
 
     crate::marker!(
@@ -436,59 +489,16 @@ impl Driver for RngDriver {
 }
 
 pub fn init() {
-    let _ = dev_init::register_driver(&RNG_DRV);
+    if !dev_init::register_driver(&RNG_DRV) {
+        crate::klog!(
+            vibeos::log::Level::Warn,
+            "vibeOS: virtio: rng driver not registered: registry full"
+        );
+    }
 }
 
 pub fn rng_bound() -> bool {
     BOUND.load(Ordering::Acquire)
-}
-
-pub fn rng_features() -> u64 {
-    FEATURES.load(Ordering::Acquire)
-}
-
-pub fn rng_uses_indirect() -> bool {
-    rng_features() & F_INDIRECT_DESC != 0
-}
-
-pub fn rng_uses_event_idx() -> bool {
-    rng_features() & F_EVENT_IDX != 0
-}
-
-pub fn rng_qdma_device() -> u64 {
-    QDMA_DEV.load(Ordering::Acquire)
-}
-
-pub fn rng_data_device() -> u64 {
-    DATA_DEV.load(Ordering::Acquire)
-}
-
-pub fn rng_data_virt() -> u64 {
-    DATA_VIRT.load(Ordering::Acquire)
-}
-
-pub fn rng_completions() -> u32 {
-    COMPLETIONS.load(Ordering::Acquire)
-}
-
-pub fn rng_top_hits() -> u32 {
-    TOP_HITS.load(Ordering::Acquire)
-}
-
-pub fn rng_thread_hits() -> u32 {
-    THREAD_HITS.load(Ordering::Acquire)
-}
-
-pub fn rng_alloced() -> bool {
-    ALLOCED.load(Ordering::Acquire)
-}
-
-pub fn rng_soft_hits() -> u32 {
-    SOFT_HITS.load(Ordering::Acquire)
-}
-
-pub fn rng_last_len() -> u32 {
-    LAST_LEN.load(Ordering::Acquire)
 }
 
 /// Copy harvested virtio-rng bytes. Does not take the queue lock.
@@ -523,6 +533,10 @@ pub fn rng_request() -> Result<(), VirtioError> {
     }
     let table = q.data.device().as_u64();
     let payload = table + RNG_PAYLOAD_OFF as u64;
+    // SAFETY: invariant: `data` is the rng's 64-byte, page-aligned DMA
+    // buffer, not in flight (`IN_FLIGHT` is clear under `Q`): its first 16
+    // bytes hold the indirect table and `RNG_PAYLOAD` bytes from
+    // `RNG_PAYLOAD_OFF` the payload; established by `virtio_init::setup`.
     unsafe {
         core::ptr::write_bytes(
             (q.data.virt() as *mut u8).add(RNG_PAYLOAD_OFF),
@@ -544,7 +558,5 @@ pub fn rng_request() -> Result<(), VirtioError> {
         kick(q.doorbell);
     }
     IN_FLIGHT.store(true, Ordering::Release);
-    let _ = q.common;
-    let _ = q.vec;
     Ok(())
 }

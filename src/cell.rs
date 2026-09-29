@@ -66,17 +66,27 @@ impl<T> BootCell<T> {
             UNSET,
             "BootCell::set twice"
         );
+        // SAFETY: invariant I22: `state` is still UNSET, so no reader has
+        // been handed `&T`, and this is the one writer, before `smp: done`;
+        // established by `cell::BootCell::set`'s `# Safety` contract.
         unsafe { (*self.data.get()).write(v) };
         self.state.store(SET, Ordering::Release);
     }
 
-    #[allow(clippy::expect_used)]
+    #[allow(
+        clippy::expect_used,
+        reason = "invariant I22: every `BootCell` the kernel reads is set during boot, before its first reader (`cell::BootCell::set`)"
+    )]
     pub fn get(&self) -> &T {
         self.try_get().expect("BootCell unset")
     }
 
     pub fn try_get(&self) -> Option<&T> {
         if self.state.load(Ordering::Acquire) == SET {
+            // SAFETY: invariant I22: SET is stored with Release after the one
+            // write, and this Acquire load saw it, so the value is
+            // initialized and never written again; established by
+            // `cell::BootCell::set`.
             Some(unsafe { (*self.data.get()).assume_init_ref() })
         } else {
             None
@@ -87,7 +97,9 @@ impl<T> BootCell<T> {
     /// so descriptor bases are not a stack temporary.
     #[inline]
     pub fn as_ptr(&self) -> *mut T {
-        unsafe { (*self.data.get()).as_mut_ptr() }
+        // `MaybeUninit<T>` is `repr(transparent)`, so the cast keeps the
+        // `UnsafeCell`'s provenance and builds no reference.
+        self.data.get().cast::<T>()
     }
 }
 
@@ -119,7 +131,10 @@ impl<T> IrqCell<T> {
     /// `SpinMutex::lock` is.
     #[inline(always)]
     #[track_caller]
-    #[allow(clippy::panic)]
+    #[allow(
+        clippy::panic,
+        reason = "IrqCell is never re-entered on its owner CPU (`cell::IrqCell::with`): IRQs are off while it is held, so only a kernel bug re-enters"
+    )]
     pub fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
         let _irq = InterruptGuard::enter();
         #[cfg(target_os = "none")]
@@ -142,6 +157,9 @@ impl<T> IrqCell<T> {
             }
         }
         let _u = Unlock(&self.owner);
+        // SAFETY: the Acquire compare-exchange above made this CPU the one
+        // owner until `_u` drops, so this is the only reference to `data`;
+        // established here.
         f(unsafe { &mut *self.data.get() })
     }
 
@@ -196,17 +214,13 @@ macro_rules! assert_not_impl {
 }
 pub(crate) use assert_not_impl;
 
-#[cfg(target_os = "none")]
-use alloc::rc::Rc;
 use core::cell::Cell;
-#[cfg(not(target_os = "none"))]
-use std::rc::Rc;
 
-// The bounds above, checked: `Rc` is neither `Send` nor `Sync`, `Cell` is
-// `Send` but not `Sync`.
-self::assert_not_impl!(IrqCell<Rc<()>>: Sync);
+// The bounds above, checked: a raw pointer is neither `Send` nor `Sync`,
+// `Cell` is `Send` but not `Sync`.
+self::assert_not_impl!(IrqCell<*const ()>: Sync);
 self::assert_not_impl!(BootCell<Cell<u8>>: Sync);
-self::assert_not_impl!(BootCell<Rc<()>>: Send);
+self::assert_not_impl!(BootCell<*const ()>: Send);
 self::assert_impl!(IrqCell<Cell<u8>>: Sync);
 
 fn owner_token() -> u32 {
@@ -229,6 +243,8 @@ mod tests {
     fn bootcell_set_get() {
         let c = BootCell::new();
         assert!(c.try_get().is_none());
+        // SAFETY: `c` is this test's local, set once, with no other
+        // thread; established here.
         unsafe { c.set(9u32) };
         assert_eq!(*c.get(), 9);
         assert_eq!(c.try_get().copied(), Some(9));
@@ -240,6 +256,8 @@ mod tests {
     #[should_panic(expected = "BootCell::set twice")]
     fn release_assert_bootcell_set_twice() {
         let c = BootCell::new();
+        // SAFETY: `c` is this test's local with no other thread; the second
+        // `set` panics on its assert before it writes; established here.
         unsafe {
             c.set(1u32);
             c.set(2u32);

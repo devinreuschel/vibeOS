@@ -51,6 +51,8 @@ pub(crate) fn test_bootcell_set_once() -> Outcome {
     if C.try_get().is_some() {
         return Outcome::Fail("already set");
     }
+    // SAFETY: `C` is this test's own static, set once here and never
+    // before, and no other CPU reads it; established here.
     unsafe { C.set(7) };
     match C.try_get() {
         Some(&7) => {}
@@ -85,8 +87,21 @@ pub(crate) fn test_spin_mutex() -> Outcome {
     Outcome::Ok
 }
 
+impl<T> SpinMutex<T> {
+    /// An unranked lock, which the rank checker does not count; production
+    /// locks take a rank (`SpinMutex::with_rank`, AGENTS.md Cells).
+    pub const fn new(v: T) -> Self {
+        Self::with_rank(v, 0)
+    }
+}
+
+/// Spin iterations per lock rank (index by rank; 0 unused). Phase 19 baseline.
+pub(crate) fn spin_counts() -> [u64; sync_init::SPIN_RANKS] {
+    core::array::from_fn(|i| sync_init::SPINS[i].load(Ordering::Relaxed))
+}
+
 pub(crate) fn test_lock_spins() -> Outcome {
-    let c = crate::sync_init::spin_counts();
+    let c = spin_counts();
     crate::marker!(
         "vibeOS: ktest:   spins heap={} pt={} buddy={} sched={} device={} serial={}",
         c[usize::from(RANK_HEAP)],
@@ -348,7 +363,7 @@ const CELL_CASES: &[CellCase] = &[
                 device: 0,
                 function: 0,
             };
-            let _ = crate::pci_init::cfg_read32(bdf, 0);
+            let _ = crate::dev::ktest::cfg_read32(bdf, 0);
         },
         file: "src/dev/pci_init.rs",
         rank: RANK_DEVICE,

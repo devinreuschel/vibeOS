@@ -38,7 +38,9 @@ fn with_st<R>(f: impl FnOnce(&mut State) -> R) -> R {
     let mut g = ST.lock_nested(1);
     f(&mut g)
 }
-static LIVE: AtomicBool = AtomicBool::new(false);
+/// Set once `init` has started the workers; `sched::ktest::work_live`
+/// reads it.
+pub(super) static LIVE: AtomicBool = AtomicBool::new(false);
 
 fn push(hi: bool, item: WorkItem) -> bool {
     thread_init::with_sched(|s| {
@@ -58,8 +60,9 @@ fn push(hi: bool, item: WorkItem) -> bool {
     })
 }
 
-/// Process context. May fail if the ring is full.
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
+/// Process context. May fail if the ring is full. No production caller
+/// yet; the in-guest tests use it.
+#[cfg(feature = "kernel_tests")]
 pub fn enqueue(func: fn(usize), arg: usize) -> bool {
     push(false, WorkItem::new(func, arg))
 }
@@ -121,11 +124,6 @@ fn worker() {
             Next::Wait => thread_init::schedule(),
         }
     }
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn live() -> bool {
-    LIVE.load(Ordering::Acquire)
 }
 
 /// One worker per online CPU, then the threaded-IRQ bottom half.

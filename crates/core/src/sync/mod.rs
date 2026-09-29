@@ -6,7 +6,7 @@
 
 pub mod lock;
 
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use crate::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// 0 means unlocked. Owners are never 0.
 pub const UNLOCKED: usize = 0;
@@ -17,7 +17,19 @@ pub struct SpinLock {
 }
 
 impl SpinLock {
+    /// `const`, so a kernel `static` `SpinMutex` can hold one. Loom's
+    /// atomics have no `const fn new` (C-ATOMICS), so a model builds it at
+    /// run time.
+    #[cfg(not(loom))]
     pub const fn new() -> Self {
+        Self {
+            locked: AtomicBool::new(false),
+            owner: AtomicUsize::new(UNLOCKED),
+        }
+    }
+
+    #[cfg(loom)]
+    pub fn new() -> Self {
         Self {
             locked: AtomicBool::new(false),
             owner: AtomicUsize::new(UNLOCKED),
@@ -38,7 +50,7 @@ impl SpinLock {
             if self.try_acquire(owner) {
                 return;
             }
-            core::hint::spin_loop();
+            crate::atomic::spin_loop();
         }
     }
 

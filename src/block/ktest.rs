@@ -15,12 +15,102 @@ use crate::thread_init;
 use crate::time_init;
 use crate::virtio_blk_init;
 
+// ---- Hooks the block tests arm. Their state stays in the production
+// files as `pub(in crate::block)` items.
+
+/// `Flush` requests dispatched to ram0, emulated-`Fua` ones included.
+fn flushes() -> u64 {
+    block_init::FLUSHES.load(Ordering::Relaxed)
+}
+
+/// Hold the next `count` completers just before they take SCHED, each
+/// until a submitter calls [`note_return`] or `max_us` passes.
+fn arm_finish_stall(count: u32, max_us: u32) {
+    blk_testing::STALLS_RUN.store(0, Ordering::Relaxed);
+    blk_testing::STALL_MAX_US.store(max_us, Ordering::Relaxed);
+    blk_testing::STALLS_LEFT.store(count, Ordering::Release);
+}
+
+fn disarm_finish_stall() {
+    blk_testing::STALLS_LEFT.store(0, Ordering::Release);
+}
+
+/// A submitter's request returned to it; ends a running stall.
+fn note_return() {
+    blk_testing::RETURNS.fetch_add(1, Ordering::Release);
+}
+
+fn finish_stalls_run() -> u32 {
+    blk_testing::STALLS_RUN.load(Ordering::Acquire)
+}
+
+/// Hold `blk-wb`'s next write of the page holding `byte_off` of `dev`.
+fn hold_wb(dev: u32, byte_off: u64) {
+    testing::RELEASE.store(false, Ordering::Release);
+    testing::HELD.store(false, Ordering::Release);
+    testing::DEV.store(dev, Ordering::Release);
+    testing::OFF.store(
+        vibeos::cache::CacheKey::page(dev, byte_off).offset,
+        Ordering::Release,
+    );
+}
+
+/// `blk-wb` is stopped at the hold point.
+fn held() -> bool {
+    testing::HELD.load(Ordering::Acquire)
+}
+
+/// Let a held write go, and disarm a hold not yet reached.
+fn release() {
+    testing::OFF.store(testing::UNARMED_OFF, Ordering::Release);
+    testing::RELEASE.store(true, Ordering::Release);
+}
+
+/// Whether the partition scan has run.
+fn part_live() -> bool {
+    crate::part_init::LIVE.load(Ordering::Acquire)
+}
+
+struct Ram0;
+
+impl vibeos::block::BlockDevice for Ram0 {
+    fn name(&self) -> &'static str {
+        block_init::RAM0_NAME
+    }
+    fn logical_block_size(&self) -> u32 {
+        block_init::RAM0_BLOCK_SIZE
+    }
+    fn capacity_sectors(&self) -> u64 {
+        block_init::RAM0_SECTORS
+    }
+    fn state(&self) -> DeviceState {
+        block_init::state()
+    }
+    fn read(&self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        block_init::read(lba, buf)
+    }
+    fn write(&self, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+        block_init::write(lba, buf)
+    }
+    fn flush(&self) -> Result<(), BlockError> {
+        block_init::flush()
+    }
+    fn discard(&self, lba: u64, nsectors: u64) -> Result<(), BlockError> {
+        block_init::discard(lba, nsectors)
+    }
+}
+
+/// ram0 as a block device.
+pub(crate) fn ram0_device() -> &'static dyn vibeos::block::BlockDevice {
+    &Ram0
+}
+
 pub(crate) fn test_block_ramdisk_rw() -> Outcome {
     if !block_init::live() {
         return Outcome::Fail("block not live");
     }
     block_init::reset();
-    let d = block_init::device();
+    let d = ram0_device();
     if d.name() != block_init::name() {
         return Outcome::Fail("name");
     }
@@ -232,7 +322,7 @@ pub(crate) fn test_block_retry() -> Outcome {
 }
 
 pub(crate) fn test_block_part_mbr() -> Outcome {
-    if !part_init::live() {
+    if !part_live() {
         return Outcome::Fail("parts not live");
     }
     let Some(i) = part_init::find_name("ram0p1") else {
@@ -509,7 +599,7 @@ fn iow_request(
         );
     }
     black_box(&mut *slot);
-    blk_testing::note_return();
+    note_return();
     r
 }
 
@@ -590,7 +680,7 @@ struct DisarmStall;
 
 impl Drop for DisarmStall {
     fn drop(&mut self) {
-        blk_testing::disarm_finish_stall();
+        disarm_finish_stall();
     }
 }
 
@@ -608,7 +698,7 @@ pub(crate) fn lifetime_iowaiter_publish_last() -> Outcome {
     IOW_OK.store(0, Ordering::Relaxed);
     IOW_ERRS.store(0, Ordering::Relaxed);
     IOW_BAD.store(false, Ordering::Release);
-    blk_testing::arm_finish_stall(IOW_STALLS, IOW_STALL_US);
+    arm_finish_stall(IOW_STALLS, IOW_STALL_US);
     let _disarm = DisarmStall;
     let mut i = 0;
     while i < IOW_THREADS {
@@ -643,7 +733,7 @@ pub(crate) fn lifetime_iowaiter_publish_last() -> Outcome {
     if ok != IOW_REQS {
         return crate::fail_fmt!("{} of {} requests completed", ok, IOW_REQS);
     }
-    let stalls = blk_testing::finish_stalls_run();
+    let stalls = finish_stalls_run();
     if stalls != IOW_STALLS {
         return crate::fail_fmt!("{} of {} completer stalls ran", stalls, IOW_STALLS);
     }
@@ -698,7 +788,7 @@ struct WbGuard {
 
 impl WbGuard {
     fn restore(&mut self) -> Result<(), BlockError> {
-        testing::release();
+        release();
         // A failed flush thread may still be waiting: wait out its flush.
         let _pending = wait_for(|| FLUSH_RES.load(Ordering::Acquire) != FLUSH_PENDING);
         cache_init::write(DEV_RAM0, WB_FIRST_LBA, &self.saved)?;
@@ -744,31 +834,31 @@ pub(crate) fn cache_flush_waits_writeback() -> Outcome {
         i += 1;
     }
     let held_off = WB_FIRST_LBA * 512;
-    testing::hold_wb(DEV_RAM0, held_off);
+    hold_wb(DEV_RAM0, held_off);
     if cache_init::write(DEV_RAM0, WB_FIRST_LBA, &dirty).is_err() {
         return Outcome::Fail("dirty");
     }
-    if !wait_for(testing::held) {
+    if !wait_for(held) {
         return Outcome::Fail("blk-wb never held");
     }
-    let flushes0 = block_init::flushes();
+    let flushes0 = flushes();
     FLUSH_RES.store(FLUSH_PENDING, Ordering::Release);
     let _flusher = spawn_thread("ktest-flush", flush_ram0);
     thread_init::sleep_ms(BLOCKED_MS);
     if FLUSH_RES.load(Ordering::Acquire) != FLUSH_PENDING {
         return Outcome::Fail("flush returned while a write was held");
     }
-    if block_init::flushes() != flushes0 {
+    if flushes() != flushes0 {
         return Outcome::Fail("Flush sent while a write was held");
     }
-    testing::release();
+    release();
     if !wait_for(|| FLUSH_RES.load(Ordering::Acquire) != FLUSH_PENDING) {
         return Outcome::Fail("flush never returned");
     }
     if FLUSH_RES.load(Ordering::Acquire) != FLUSH_OK {
         return Outcome::Fail("flush failed");
     }
-    if block_init::flushes() <= flushes0 {
+    if flushes() <= flushes0 {
         return Outcome::Fail("no Flush after release");
     }
     let mut page = [0u8; PAGE];
@@ -836,7 +926,7 @@ pub(crate) fn block_fua_write() -> Outcome {
         block_init::read,
         block_init::write,
         block_init::write_fua,
-        block_init::flushes,
+        flushes,
     );
     if !matches!(r, Outcome::Ok) {
         return r;
@@ -848,10 +938,10 @@ pub(crate) fn block_fua_write() -> Outcome {
         return Outcome::Skip("vda not 512");
     }
     fua_roundtrip(
-        virtio_blk_init::persist_lba().saturating_add(1),
+        crate::drivers::ktest::persist_lba().saturating_add(1),
         virtio_blk_init::read,
         virtio_blk_init::write,
         virtio_blk_init::write_fua,
-        virtio_blk_init::flushes,
+        crate::drivers::ktest::flushes,
     )
 }

@@ -2,8 +2,6 @@
 //!
 //! Device address is identity-mapped phys. Never a HHDM VA.
 
-#![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-
 use vibeos::dma::{self, DmaAlloc, DmaBuffer};
 
 use crate::paging_init;

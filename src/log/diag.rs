@@ -3,7 +3,7 @@
 //! `meminfo` / `uptime` / `cpus` write to any `fmt::Write` so the boot
 //! log and the shell share one implementation.
 
-use core::fmt::Write;
+use core::fmt::{self, Write};
 use core::sync::atomic::Ordering;
 
 use crate::apic_init;
@@ -20,6 +20,14 @@ pub fn meminfo() {
 }
 
 pub fn meminfo_to(w: &mut impl Write) {
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a diagnostic line to Serial or the console carries no failure anyone could act on (DESIGN §2.5)"
+    )]
+    let _ = meminfo_lines(w).and_then(|()| paging_init::dump_ranges_to(w));
+}
+
+fn meminfo_lines(w: &mut impl Write) -> fmt::Result {
     let pmm = pmm_init::with_buddy(|b| b.stats());
     let heap = heap_init::stats();
     let kva = kva_init::stats();
@@ -28,27 +36,22 @@ pub fn meminfo_to(w: &mut impl Write) {
         Some(o) => o as i32,
         None => -1,
     };
-    let _ = writeln!(
+    writeln!(
         w,
         "vibeOS: meminfo: total {} frames, free {}, used {}, largest order {}",
         pmm.total_frames, pmm.free_frames, used_frames, largest
-    );
-    let _ = writeln!(
+    )?;
+    writeln!(
         w,
         "vibeOS: meminfo: leaked {} frames",
         vibeos::pmm::leaked_frames()
-    );
-    let _ = writeln!(
+    )?;
+    writeln!(
         w,
         "vibeOS: meminfo: heap used {} B / capacity {} B",
         heap.used, heap.capacity
-    );
-    let _ = writeln!(w, "vibeOS: meminfo: kva used {} B", kva.used);
-    #[expect(
-        clippy::let_underscore_must_use,
-        reason = "DESIGN §2.5: a write to Serial or the console cannot fail"
-    )]
-    let _ = paging_init::dump_ranges_to(w);
+    )?;
+    writeln!(w, "vibeOS: meminfo: kva used {} B", kva.used)
 }
 
 /// Tick milliseconds and TSC microseconds side by side. ROADMAP §2.8.
@@ -59,6 +62,10 @@ pub fn uptime() {
 pub fn uptime_to(w: &mut impl Write) {
     let tick = time_init::uptime_ms();
     let us = time_init::now_us();
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a diagnostic line to Serial or the console carries no failure anyone could act on (DESIGN §2.5)"
+    )]
     let _ = writeln!(w, "vibeOS: uptime: tick {tick} ms, tsc {us} us");
 }
 
@@ -69,9 +76,17 @@ pub fn cpus() {
 }
 
 pub fn cpus_to(w: &mut impl Write) {
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a diagnostic line to Serial or the console carries no failure anyone could act on (DESIGN §2.5)"
+    )]
+    let _ = cpus_lines(w);
+}
+
+fn cpus_lines(w: &mut impl Write) -> fmt::Result {
     let mask = per_cpu_init::online_mask();
     let n = per_cpu_init::cpu_count();
-    let _ = writeln!(w, "vibeOS: cpus: n={n} online={mask:#x}");
+    writeln!(w, "vibeOS: cpus: n={n} online={mask:#x}")?;
     // Every CPU copies the BSP's timer mode at bring-up.
     let timer = apic_init::timer_mode();
     let mut i = 0u32;
@@ -80,7 +95,7 @@ pub fn cpus_to(w: &mut impl Write) {
             i += 1;
             continue;
         };
-        let _ = writeln!(
+        writeln!(
             w,
             "vibeOS: cpus: cpu{} apic={} ticks={} switches={} ready={} timer={}",
             i,
@@ -89,7 +104,8 @@ pub fn cpus_to(w: &mut impl Write) {
             c.switches.load(Ordering::Relaxed),
             c.runq_len.load(Ordering::Relaxed),
             timer.as_str()
-        );
+        )?;
         i += 1;
     }
+    Ok(())
 }

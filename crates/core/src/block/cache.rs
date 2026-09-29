@@ -496,7 +496,6 @@ impl<const N: usize> Cache<N> {
 
     /// Forget every page of `dev`. A slot in writeback keeps `F_WB`, so it
     /// is not reused before [`Cache::end_writeback`].
-    #[allow(dead_code)]
     pub fn drop_dev(&mut self, dev: u32) {
         let mut i = 0usize;
         while i < N {
@@ -593,6 +592,8 @@ pub fn cached_read<B: Backend, const N: usize>(
         && c.find(rk).is_none()
     {
         let mut dummy = [0u8; 1];
+        // A readahead that cannot be planned is skipped: it is only a hint,
+        // and the demand read above has already succeeded.
         if let Ok(Some(fill)) = c.plan_read(rk, 0, &mut dummy, &mut evict) {
             match fill.need {
                 FillNeed::None => {}

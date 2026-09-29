@@ -88,7 +88,8 @@ fn with_logger<R>(f: impl FnOnce(&mut Logger<RING_CAP, MSG_CAP>) -> R) -> R {
 /// whichever CPU held `LOG` never touches it again (DESIGN §2.5).
 pub unsafe fn force_unlock() {
     // SAFETY: the holder never touches `LOG` again, the precondition of
-    // `IrqCell::force_unlock`; established by this fn's contract.
+    // `IrqCell::force_unlock`; established by `log_init::force_unlock`'s
+    // `# Safety` contract.
     unsafe { LOG.force_unlock() };
 }
 
@@ -99,7 +100,8 @@ pub unsafe fn force_unlock() {
 /// no holder resumes after [`force_unlock`].
 pub unsafe fn with_logger_unlocked<R>(f: impl FnOnce(&Logger<RING_CAP, MSG_CAP>) -> R) -> R {
     // SAFETY: no writer runs during `f`, so a shared borrow of the payload
-    // does not alias a `&mut`; established by this fn's contract.
+    // does not alias a `&mut`; established by
+    // `log_init::with_logger_unlocked`'s `# Safety` contract.
     f(unsafe { &*LOG.as_ptr() })
 }
 
@@ -150,10 +152,15 @@ pub fn log_fmt(level: Level, args: fmt::Arguments<'_>) {
             buf: &mut buf,
             pos: 0,
         };
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "`StackBuf` truncates and never fails, so only a formatter's own error lands here, leaving a shorter record and nothing to act on (DESIGN §2.5)"
+        )]
         let _ = w.write_fmt(args);
         w.pos
     };
     let msg = &buf[..n];
+    // `false` means the runtime filter kept it out of the ring, not a failure.
     let _ = push_record(level, msg);
     let mut sent = crate::serial::Serial::try_write_bytes(msg);
     if !msg.ends_with(b"\n") {
@@ -220,6 +227,7 @@ pub fn capture_serial(bytes: &[u8]) {
                     let rec =
                         Record::from_msg(timestamp(), cpu_id(), Level::Info, &st.buf[..st.len]);
                     st.len = 0;
+                    // `false` means filtered out, not a failure.
                     let _ = LOG.with(|l| l.emit(rec));
                 }
                 continue;
@@ -304,6 +312,10 @@ pub fn write_record(w: &mut impl Write, r: &vibeos::log::Record<MSG_CAP>) {
     } else {
         "tsc"
     };
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a diagnostic line to Serial or the console carries no failure anyone could act on (DESIGN §2.5)"
+    )]
     let _ = writeln!(
         w,
         "vibeOS: dmesg: {}{} cpu{} {} {}",
@@ -322,13 +334,18 @@ pub fn write_record(w: &mut impl Write, r: &vibeos::log::Record<MSG_CAP>) {
 /// path only, after `panic::begin_dump`, with no other writer of `LOG`.
 pub unsafe fn dump_tail(n: usize) {
     // SAFETY: the holder never touches `LOG` again (panic path, after
-    // `begin_dump`); established by this fn's contract.
+    // `begin_dump`); established by `log_init::dump_tail`'s `# Safety`
+    // contract.
     unsafe { force_unlock() };
     let n = if n == 0 { DUMP_LAST } else { n };
-    // SAFETY: nothing writes `LOG` during the dump; established by this
-    // fn's contract.
+    // SAFETY: nothing writes `LOG` during the dump; established by
+    // `log_init::dump_tail`'s `# Safety` contract.
     unsafe {
         with_logger_unlocked(|l| {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "a write to Serial cannot fail (DESIGN §2.5)"
+            )]
             let _ = writeln!(
                 Serial,
                 "vibeOS: log: last {} ({} dropped, {} sink, {} reentry)",
@@ -343,6 +360,10 @@ pub unsafe fn dump_tail(n: usize) {
                 "tsc"
             };
             for r in l.ring.last_n(n) {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "a write to Serial cannot fail (DESIGN §2.5)"
+                )]
                 let _ = writeln!(
                     Serial,
                     "vibeOS: logrec: {}{} cpu{} {} {}",

@@ -144,11 +144,14 @@ pub struct IrqBind {
     pub line: u8,
 }
 
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProbeError {
     Busy,
     NoResource,
     Failed,
+    /// An allocation the probe needs failed (DESIGN §4.4).
+    NoMemory,
 }
 
 impl ProbeError {
@@ -157,10 +160,18 @@ impl ProbeError {
             ProbeError::Busy => "busy",
             ProbeError::NoResource => "no resource",
             ProbeError::Failed => "failed",
+            ProbeError::NoMemory => "no memory",
         }
     }
 }
 
+impl From<crate::kalloc::AllocError> for ProbeError {
+    fn from(_: crate::kalloc::AllocError) -> Self {
+        ProbeError::NoMemory
+    }
+}
+
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClaimError {
     Empty,
@@ -527,7 +538,9 @@ impl Registry {
             while dv < self.n_dev {
                 if self.devices[dv].bound.is_none() && self.devices[dv].matches_driver(drv) {
                     enable(&self.devices[dv]);
-                    if let Ok(()) = drv.probe(&mut self.devices[dv]) {
+                    // A failed probe leaves the device unbound for a later
+                    // driver; the kernel's `dev_init::bind_all` also logs it.
+                    if drv.probe(&mut self.devices[dv]).is_ok() {
                         self.devices[dv].bound = Some(drv.name())
                     }
                 }
@@ -558,6 +571,16 @@ mod tests {
     use super::*;
     use core::sync::atomic::{AtomicU32, Ordering};
 
+    #[test]
+    fn probe_error_no_memory_str() {
+        assert_eq!(ProbeError::NoMemory.as_str(), "no memory");
+        assert_eq!(
+            ProbeError::from(crate::kalloc::AllocError),
+            ProbeError::NoMemory
+        );
+        assert_eq!(crate::virtio::VirtioError::NoMemory.as_str(), "no memory");
+    }
+
     struct D {
         name: &'static str,
         ids: &'static [IdMatch],
@@ -565,9 +588,6 @@ mod tests {
         probes: AtomicU32,
         bar: u8,
     }
-
-    // Safety: tests are single-threaded.
-    unsafe impl Sync for D {}
 
     impl Driver for D {
         fn name(&self) -> &'static str {

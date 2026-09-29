@@ -4,6 +4,8 @@
 //! is not a data partition. GPT validates header + entry CRC and falls
 //! back to the backup header. Logical EBR walk is depth-bounded.
 
+#![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+
 use crate::block::BlockError;
 
 pub use crate::limits::MAX_PARTS;
@@ -52,12 +54,15 @@ pub const MBR_EXTENDED_LBA: u8 = 0x0F;
 pub const MBR_LINUX_EXTENDED: u8 = 0x85;
 pub const MBR_PROTECTIVE: u8 = 0xEE;
 
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PartError {
     Truncated,
     BadCrc,
     Invalid,
     Empty,
+    /// The parser's scratch could not be allocated (DESIGN §4.4).
+    NoMemory,
 }
 
 impl PartError {
@@ -67,6 +72,7 @@ impl PartError {
             PartError::BadCrc => "bad crc",
             PartError::Invalid => "invalid",
             PartError::Empty => "empty",
+            PartError::NoMemory => "no memory",
         }
     }
 }
@@ -114,7 +120,7 @@ impl Table {
 
     pub fn get(self, i: usize) -> Option<Part> {
         if i < self.n {
-            Some(self.parts[i])
+            self.parts.get(i).copied()
         } else {
             None
         }
@@ -170,49 +176,59 @@ pub fn mbr_type_name(sys: u8) -> &'static str {
 /// IEEE 802.3 / GPT CRC-32.
 pub fn crc32_ieee(data: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
-    let mut i = 0usize;
-    while i < data.len() {
-        crc ^= data[i] as u32;
-        let mut b = 0u8;
-        while b < 8 {
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
             if crc & 1 != 0 {
                 crc = (crc >> 1) ^ 0xEDB8_8320;
             } else {
                 crc >>= 1;
             }
-            b += 1;
         }
-        i += 1;
     }
     !crc
 }
 
-fn r32(b: &[u8], o: usize) -> u32 {
-    let mut x = [0u8; 4];
-    x.copy_from_slice(&b[o..o + 4]);
-    u32::from_le_bytes(x)
+/// `b[o..o + N]`, or `None` past the end.
+fn field<const N: usize>(b: &[u8], o: usize) -> Option<[u8; N]> {
+    b.get(o..o.checked_add(N)?)?.try_into().ok()
 }
 
-fn r64(b: &[u8], o: usize) -> u64 {
-    let mut x = [0u8; 8];
-    x.copy_from_slice(&b[o..o + 8]);
-    u64::from_le_bytes(x)
+fn r32(b: &[u8], o: usize) -> Option<u32> {
+    field(b, o).map(u32::from_le_bytes)
+}
+
+fn r64(b: &[u8], o: usize) -> Option<u64> {
+    field(b, o).map(u64::from_le_bytes)
+}
+
+fn r8(b: &[u8], o: usize) -> Option<u8> {
+    b.get(o).copied()
+}
+
+/// Store `src` at `b[o..]`. The packers check their buffer's length first,
+/// so a store past the end does not happen; it is skipped rather than
+/// panicking.
+fn put(b: &mut [u8], o: usize, src: &[u8]) {
+    if let Some(dst) = o.checked_add(src.len()).and_then(|end| b.get_mut(o..end)) {
+        dst.copy_from_slice(src);
+    }
 }
 
 fn w32(b: &mut [u8], o: usize, v: u32) {
-    b[o..o + 4].copy_from_slice(&v.to_le_bytes());
+    put(b, o, &v.to_le_bytes());
 }
 
 fn w64(b: &mut [u8], o: usize, v: u64) {
-    b[o..o + 8].copy_from_slice(&v.to_le_bytes());
+    put(b, o, &v.to_le_bytes());
 }
 
 fn push_part(t: &mut Table, p: Part) -> bool {
-    if t.n >= MAX_PARTS {
+    let Some(slot) = t.parts.get_mut(t.n) else {
         return false;
-    }
-    t.parts[t.n] = p;
-    t.n += 1;
+    };
+    *slot = p;
+    t.n = t.n.saturating_add(1);
     true
 }
 
@@ -220,54 +236,56 @@ fn next_index(t: &Table) -> u8 {
     (t.n as u8).saturating_add(1)
 }
 
-fn mbr_entry(sector: &[u8], i: usize) -> (u8, u64, u64) {
-    let o = MBR_PART_OFF + i * MBR_ENTRY_LEN;
-    let sys = sector[o + 4];
-    let start = r32(sector, o + 8) as u64;
-    let count = r32(sector, o + 12) as u64;
-    (sys, start, count)
+/// Byte offset of MBR entry `i` (0 to 3).
+fn mbr_entry_off(i: usize) -> Option<usize> {
+    i.checked_mul(MBR_ENTRY_LEN)?.checked_add(MBR_PART_OFF)
+}
+
+/// `(sys, start, count)` of MBR entry `i`, or `None` past the sector.
+fn mbr_entry(sector: &[u8], i: usize) -> Option<(u8, u64, u64)> {
+    let o = mbr_entry_off(i)?;
+    let sys = r8(sector, o.checked_add(4)?)?;
+    let start = r32(sector, o.checked_add(8)?)? as u64;
+    let count = r32(sector, o.checked_add(12)?)? as u64;
+    Some((sys, start, count))
 }
 
 fn write_mbr_entry(sector: &mut [u8], i: usize, sys: u8, start: u32, count: u32) {
-    let o = MBR_PART_OFF + i * MBR_ENTRY_LEN;
-    sector[o] = 0;
-    sector[o + 4] = sys;
-    w32(sector, o + 8, start);
-    w32(sector, o + 12, count);
+    let Some(o) = mbr_entry_off(i) else {
+        return;
+    };
+    put(sector, o, &[0]);
+    if let Some(at) = o.checked_add(4) {
+        put(sector, at, &[sys]);
+    }
+    if let Some(at) = o.checked_add(8) {
+        w32(sector, at, start);
+    }
+    if let Some(at) = o.checked_add(12) {
+        w32(sector, at, count);
+    }
+}
+
+/// Whether `sector` ends in the 0x55AA boot signature.
+fn has_mbr_sig(sector: &[u8]) -> bool {
+    field::<2>(sector, MBR_SIG_OFF) == Some([0x55, 0xAA])
 }
 
 pub fn pack_mbr(buf: &mut [u8], slots: &[(u8, u32, u32); 4]) {
-    if buf.len() < 512 {
+    let Some(sector) = buf.get_mut(..512) else {
         return;
-    }
-    let mut i = 0usize;
-    while i < 512 {
-        buf[i] = 0;
-        i += 1;
-    }
-    i = 0;
-    while i < 4 {
-        let (sys, start, count) = slots[i];
+    };
+    sector.fill(0);
+    for (i, &(sys, start, count)) in slots.iter().enumerate() {
         if sys != 0 && count != 0 {
-            write_mbr_entry(buf, i, sys, start, count);
+            write_mbr_entry(sector, i, sys, start, count);
         }
-        i += 1;
     }
-    buf[MBR_SIG_OFF] = 0x55;
-    buf[MBR_SIG_OFF + 1] = 0xAA;
+    put(sector, MBR_SIG_OFF, &[0x55, 0xAA]);
 }
 
 pub fn pack_protective_mbr(buf: &mut [u8], nsectors: u64) {
-    let count = if nsectors > 1 {
-        let n = nsectors - 1;
-        if n > u32::MAX as u64 {
-            u32::MAX
-        } else {
-            n as u32
-        }
-    } else {
-        0
-    };
+    let count = u32::try_from(nsectors.saturating_sub(1)).unwrap_or(u32::MAX);
     pack_mbr(
         buf,
         &[(MBR_PROTECTIVE, 1, count), (0, 0, 0), (0, 0, 0), (0, 0, 0)],
@@ -308,29 +326,25 @@ pub struct GptHeaderInfo {
 }
 
 pub fn pack_gpt_header(buf: &mut [u8], h: &GptHeaderInfo) {
-    if buf.len() < 512 {
+    let Some(sector) = buf.get_mut(..512) else {
         return;
-    }
-    let mut i = 0usize;
-    while i < 512 {
-        buf[i] = 0;
-        i += 1;
-    }
-    buf[0..8].copy_from_slice(GPT_SIG);
-    w32(buf, 8, GPT_REVISION);
-    w32(buf, 12, GPT_HEADER_SIZE);
-    w32(buf, 16, 0);
-    w64(buf, 24, h.my_lba);
-    w64(buf, 32, h.alt_lba);
-    w64(buf, 40, h.first_usable);
-    w64(buf, 48, h.last_usable);
-    buf[56..72].copy_from_slice(&h.disk_guid);
-    w64(buf, 72, h.part_lba);
-    w32(buf, 80, h.part_count);
-    w32(buf, 84, h.part_size);
-    w32(buf, 88, h.entries_crc);
-    let crc = crc32_ieee(&buf[..GPT_HEADER_SIZE as usize]);
-    w32(buf, 16, crc);
+    };
+    sector.fill(0);
+    put(sector, 0, GPT_SIG);
+    w32(sector, 8, GPT_REVISION);
+    w32(sector, 12, GPT_HEADER_SIZE);
+    w32(sector, 16, 0);
+    w64(sector, 24, h.my_lba);
+    w64(sector, 32, h.alt_lba);
+    w64(sector, 40, h.first_usable);
+    w64(sector, 48, h.last_usable);
+    put(sector, 56, &h.disk_guid);
+    w64(sector, 72, h.part_lba);
+    w32(sector, 80, h.part_count);
+    w32(sector, 84, h.part_size);
+    w32(sector, 88, h.entries_crc);
+    let crc = crc32_ieee(sector.get(..GPT_HEADER_SIZE as usize).unwrap_or(&[]));
+    w32(sector, 16, crc);
 }
 
 pub fn pack_gpt_entry(
@@ -341,34 +355,25 @@ pub fn pack_gpt_entry(
     last: u64,
     name: &str,
 ) {
-    if buf.len() < GPT_ENTRY_SIZE as usize {
+    let Some(e) = buf.get_mut(..GPT_ENTRY_SIZE as usize) else {
         return;
+    };
+    e.fill(0);
+    put(e, 0, type_guid);
+    put(e, 16, uniq);
+    w64(e, 32, first);
+    w64(e, 40, last);
+    if let Some(dst) = e.get_mut(56..56 + 72) {
+        utf16le_name(dst, name);
     }
-    let mut i = 0usize;
-    while i < GPT_ENTRY_SIZE as usize {
-        buf[i] = 0;
-        i += 1;
-    }
-    buf[0..16].copy_from_slice(type_guid);
-    buf[16..32].copy_from_slice(uniq);
-    w64(buf, 32, first);
-    w64(buf, 40, last);
-    utf16le_name(&mut buf[56..56 + 72], name);
 }
 
 fn utf16le_name(dst: &mut [u8], s: &str) {
-    let mut o = 0usize;
-    for c in s.chars() {
-        if o + 1 >= dst.len() {
+    for (c, pair) in s.chars().zip(dst.as_chunks_mut::<2>().0) {
+        let Ok(u) = u16::try_from(c as u32) else {
             break;
-        }
-        let u = c as u32;
-        if u > 0xFFFF {
-            break;
-        }
-        dst[o] = u as u8;
-        dst[o + 1] = (u >> 8) as u8;
-        o += 2;
+        };
+        pair.copy_from_slice(&u.to_le_bytes());
     }
 }
 
@@ -377,33 +382,32 @@ pub fn entries_crc(entries: &[u8]) -> u32 {
 }
 
 fn header_ok(sec: &[u8], nsectors: u64) -> bool {
-    if sec.len() < GPT_HEADER_SIZE as usize {
-        return false;
+    header_fields_ok(sec, nsectors).unwrap_or(false)
+}
+
+/// `None` when a field lies past `sec`.
+fn header_fields_ok(sec: &[u8], nsectors: u64) -> Option<bool> {
+    if field::<8>(sec, 0)? != *GPT_SIG {
+        return Some(false);
     }
-    if &sec[0..8] != GPT_SIG {
-        return false;
+    let size = r32(sec, 12)? as usize;
+    if size < GPT_HEADER_SIZE as usize {
+        return Some(false);
     }
-    let size = r32(sec, 12);
-    if size < 92 || size as usize > sec.len() {
-        return false;
-    }
-    let stored = r32(sec, 16);
+    let stored = r32(sec, 16)?;
     let mut tmp = [0u8; 512];
-    if size as usize > tmp.len() {
-        return false;
+    let dst = tmp.get_mut(..size)?;
+    dst.copy_from_slice(sec.get(..size)?);
+    w32(dst, 16, 0);
+    if crc32_ieee(dst) != stored {
+        return Some(false);
     }
-    tmp[..size as usize].copy_from_slice(&sec[..size as usize]);
-    w32(&mut tmp, 16, 0);
-    if crc32_ieee(&tmp[..size as usize]) != stored {
-        return false;
+    if r64(sec, 24)? >= nsectors {
+        return Some(false);
     }
-    let my = r64(sec, 24);
-    if my >= nsectors {
-        return false;
-    }
-    let psz = r32(sec, 84);
-    let nent = r32(sec, 80);
-    psz == GPT_ENTRY_SIZE && nent > 0 && nent <= 128
+    let psz = r32(sec, 84)?;
+    let nent = r32(sec, 80)?;
+    Some(psz == GPT_ENTRY_SIZE && nent > 0 && nent <= 128)
 }
 
 fn load_entries<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
@@ -423,8 +427,7 @@ fn load_entries<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
     if bs == 0 {
         return Err(PartError::Invalid);
     }
-    let nbytes = want as u64;
-    let nsec = nbytes.div_ceil(bs);
+    let nsec = (want as u64).div_ceil(bs);
     if part_lba
         .checked_add(nsec)
         .map(|e| e > nsectors)
@@ -432,42 +435,38 @@ fn load_entries<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
     {
         return Err(PartError::Truncated);
     }
-    let mut done = 0usize;
     let mut lba = part_lba;
-    while done < want {
+    for chunk in scratch
+        .get_mut(..want)
+        .ok_or(PartError::Truncated)?
+        .chunks_mut(sector_size as usize)
+    {
         read(lba, sector_buf).map_err(|_| PartError::Truncated)?;
-        let n = (want - done).min(sector_size as usize);
-        scratch[done..done + n].copy_from_slice(&sector_buf[..n]);
-        done += n;
+        let src = sector_buf.get(..chunk.len()).ok_or(PartError::Truncated)?;
+        chunk.copy_from_slice(src);
         lba = lba.saturating_add(1);
     }
     Ok(nent)
 }
 
 fn parse_gpt_entries(t: &mut Table, entries: &[u8], nent: u32, nsectors: u64) {
-    let mut i = 0u32;
-    while i < nent {
-        let o = (i as usize).saturating_mul(GPT_ENTRY_SIZE as usize);
-        if o + GPT_ENTRY_SIZE as usize > entries.len() {
+    let nent = nent as usize;
+    for e in entries
+        .as_chunks::<{ GPT_ENTRY_SIZE as usize }>()
+        .0
+        .iter()
+        .take(nent)
+    {
+        let (Some(guid), Some(first), Some(last)) = (field::<16>(e, 0), r64(e, 32), r64(e, 40))
+        else {
             break;
-        }
-        let e = &entries[o..o + GPT_ENTRY_SIZE as usize];
-        let mut guid = [0u8; 16];
-        guid.copy_from_slice(&e[0..16]);
-        if guid == GUID_UNUSED {
-            i += 1;
-            continue;
-        }
-        let first = r64(e, 32);
-        let last = r64(e, 40);
-        if last < first {
-            i += 1;
+        };
+        if guid == GUID_UNUSED || last < first {
             continue;
         }
         let n = last.saturating_sub(first).saturating_add(1);
         let end = first.saturating_add(n);
         if n == 0 || end > nsectors {
-            i += 1;
             continue;
         }
         let p = Part {
@@ -479,7 +478,6 @@ fn parse_gpt_entries(t: &mut Table, entries: &[u8], nent: u32, nsectors: u64) {
         if !push_part(t, p) {
             break;
         }
-        i += 1;
     }
 }
 
@@ -499,9 +497,9 @@ fn try_gpt<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
     if !header_ok(sector_buf, nsectors) {
         return Err(PartError::BadCrc);
     }
-    let part_lba = r64(sector_buf, 72);
-    let nent = r32(sector_buf, 80);
-    let stored_ecrc = r32(sector_buf, 88);
+    let part_lba = r64(sector_buf, 72).ok_or(PartError::Truncated)?;
+    let nent = r32(sector_buf, 80).ok_or(PartError::Truncated)?;
+    let stored_ecrc = r32(sector_buf, 88).ok_or(PartError::Truncated)?;
     let got = load_entries(
         read,
         part_lba,
@@ -512,11 +510,12 @@ fn try_gpt<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
         scratch,
     )?;
     let want = (got as usize).saturating_mul(GPT_ENTRY_SIZE as usize);
-    if crc32_ieee(&scratch[..want]) != stored_ecrc {
+    let entries = scratch.get(..want).ok_or(PartError::Truncated)?;
+    if crc32_ieee(entries) != stored_ecrc {
         return Err(PartError::BadCrc);
     }
     let mut t = Table::empty(TableOrigin::Gpt { used_backup });
-    parse_gpt_entries(&mut t, scratch, got, nsectors);
+    parse_gpt_entries(&mut t, entries, got, nsectors);
     Ok(t)
 }
 
@@ -530,30 +529,22 @@ fn parse_logical<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
 ) {
     let ext_end = ext_start.saturating_add(ext_count);
     let mut ebr = ext_start;
-    let mut depth = 0u32;
-    while depth < MAX_EBR_DEPTH {
-        depth += 1;
+    for _ in 0..MAX_EBR_DEPTH {
         if ebr >= nsectors || ebr >= ext_end {
             return;
         }
-        if read(ebr, sector_buf).is_err() {
+        if read(ebr, sector_buf).is_err() || !has_mbr_sig(sector_buf) {
             return;
         }
-        if sector_buf.len() < 512
-            || sector_buf[MBR_SIG_OFF] != 0x55
-            || sector_buf[MBR_SIG_OFF + 1] != 0xAA
-        {
+        let Some((sys, rel, count)) = mbr_entry(sector_buf, 0) else {
             return;
-        }
-        let (sys, rel, count) = mbr_entry(sector_buf, 0);
+        };
         if sys != 0 && count != 0 && !is_extended(sys) && sys != MBR_PROTECTIVE {
-            let start = match ebr.checked_add(rel) {
-                Some(s) => s,
-                None => return,
+            let Some(start) = ebr.checked_add(rel) else {
+                return;
             };
-            let end = match start.checked_add(count) {
-                Some(e) => e,
-                None => return,
+            let Some(end) = start.checked_add(count) else {
+                return;
             };
             if start >= nsectors || end > nsectors || start < ext_start || end > ext_end {
                 return;
@@ -568,13 +559,14 @@ fn parse_logical<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
                 return;
             }
         }
-        let (nsys, nrel, _) = mbr_entry(sector_buf, 1);
+        let Some((nsys, nrel, _)) = mbr_entry(sector_buf, 1) else {
+            return;
+        };
         if nrel == 0 || !is_extended(nsys) {
             return;
         }
-        let next = match ext_start.checked_add(nrel) {
-            Some(n) => n,
-            None => return,
+        let Some(next) = ext_start.checked_add(nrel) else {
+            return;
         };
         if next >= nsectors || next == ebr || next < ext_start || next >= ext_end {
             return;
@@ -589,27 +581,22 @@ fn parse_mbr<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
     sector_buf: &mut [u8],
 ) -> Result<Table, PartError> {
     let mut t = Table::empty(TableOrigin::Mbr);
-    let mut i = 0usize;
-    while i < 4 {
-        let (sys, start, count) = mbr_entry(sector_buf, i);
+    for i in 0..4 {
+        let (sys, start, count) = mbr_entry(sector_buf, i).ok_or(PartError::Truncated)?;
         if sys == 0 || count == 0 || sys == MBR_PROTECTIVE {
-            i += 1;
             continue;
         }
         if is_extended(sys) {
             parse_logical(&mut t, nsectors, read, sector_buf, start, count);
-            i += 1;
+            // `parse_logical` read EBRs into `sector_buf`; the next primary
+            // entry is read from sector 0 again.
+            read(0, sector_buf).map_err(|_| PartError::Truncated)?;
             continue;
         }
-        let end = match start.checked_add(count) {
-            Some(e) => e,
-            None => {
-                i += 1;
-                continue;
-            }
+        let Some(end) = start.checked_add(count) else {
+            continue;
         };
         if start >= nsectors || end > nsectors {
-            i += 1;
             continue;
         }
         let p = Part {
@@ -621,7 +608,6 @@ fn parse_mbr<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
         if !push_part(&mut t, p) {
             break;
         }
-        i += 1;
     }
     Ok(t)
 }
@@ -642,20 +628,10 @@ pub fn parse<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
         return Err(PartError::Empty);
     }
     read(0, sector_buf).map_err(|_| PartError::Truncated)?;
-    let mbr_sig = sector_buf.len() >= 512
-        && sector_buf[MBR_SIG_OFF] == 0x55
-        && sector_buf[MBR_SIG_OFF + 1] == 0xAA;
-    let mut protective = false;
-    if mbr_sig {
-        let mut i = 0usize;
-        while i < 4 {
-            let (sys, _, _) = mbr_entry(sector_buf, i);
-            if sys == MBR_PROTECTIVE {
-                protective = true;
-            }
-            i += 1;
-        }
-    }
+    let mbr_sig = has_mbr_sig(sector_buf);
+    let protective = mbr_sig
+        && (0..4)
+            .any(|i| mbr_entry(sector_buf, i).is_some_and(|(sys, _, _)| sys == MBR_PROTECTIVE));
     if nsectors >= 2 {
         let primary = try_gpt(
             nsectors,
@@ -676,7 +652,7 @@ pub fn parse<R: FnMut(u64, &mut [u8]) -> Result<(), BlockError>>(
                     &mut read,
                     sector_buf,
                     scratch,
-                    nsectors - 1,
+                    nsectors.saturating_sub(1),
                     true,
                 );
                 if let Ok(t) = backup {
@@ -702,7 +678,9 @@ pub fn parse_image(disk: &[u8], sector_size: u32) -> Result<Table, PartError> {
     if sector_size == 0 {
         return Err(PartError::Invalid);
     }
-    let nsectors = (disk.len() as u64) / (sector_size as u64);
+    let nsectors = (disk.len() as u64)
+        .checked_div(sector_size as u64)
+        .ok_or(PartError::Invalid)?;
     let mut sec = [0u8; 512];
     if sector_size as usize > sec.len() {
         return Err(PartError::Invalid);
@@ -713,12 +691,19 @@ pub fn parse_image(disk: &[u8], sector_size: u32) -> Result<Table, PartError> {
         sector_size,
         |lba, buf| {
             let bs = sector_size as usize;
-            let off = (lba as usize).checked_mul(bs).ok_or(BlockError::Inval)?;
-            if off.checked_add(bs).map(|e| e > disk.len()).unwrap_or(true) {
-                return Err(BlockError::Inval);
-            }
+            let off = usize::try_from(lba)
+                .ok()
+                .and_then(|l| l.checked_mul(bs))
+                .ok_or(BlockError::Inval)?;
             let n = buf.len().min(bs);
-            buf[..n].copy_from_slice(&disk[off..off + n]);
+            let src = off
+                .checked_add(n)
+                .and_then(|end| disk.get(off..end))
+                .filter(|_| off.checked_add(bs).is_some_and(|e| e <= disk.len()))
+                .ok_or(BlockError::Inval)?;
+            buf.get_mut(..n)
+                .ok_or(BlockError::Inval)?
+                .copy_from_slice(src);
             Ok(())
         },
         &mut sec,
@@ -727,6 +712,11 @@ pub fn parse_image(disk: &[u8], sector_size: u32) -> Result<Table, PartError> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "host tests: a failure ends the test, not the kernel"
+)]
 mod tests {
     use super::*;
 
@@ -848,6 +838,151 @@ mod tests {
         let t = parse_image(&d, 512).unwrap();
         assert_eq!(t.n, 1);
         assert_eq!(t.parts[0].start_lba, 9);
+    }
+
+    /// A primary entry after the extended one is read from sector 0, not
+    /// from the last EBR the logical walk left in the sector buffer.
+    #[test]
+    fn mbr_primary_after_extended() {
+        let mut d = disk(256 * 512);
+        let mut mbr = [0u8; 512];
+        pack_mbr(
+            &mut mbr,
+            &[
+                (MBR_EXTENDED, 8, 40),
+                (MBR_LINUX, 100, 16),
+                (0, 0, 0),
+                (0, 0, 0),
+            ],
+        );
+        put(&mut d, 0, &mbr);
+        let mut e1 = [0u8; 512];
+        pack_ebr(&mut e1, MBR_LINUX, 1, 8, 0, 0);
+        put(&mut d, 8, &e1);
+        let t = parse_image(&d, 512).unwrap();
+        assert_eq!(t.n, 2);
+        assert_eq!(t.parts[0].start_lba, 9);
+        assert_eq!(t.parts[1].start_lba, 100);
+        assert_eq!(t.parts[1].nsectors, 16);
+    }
+
+    /// Crafted GPT headers (ROADMAP §10.1): each field out of range gives
+    /// an error or drops the entry, never a panic.
+    #[test]
+    fn parse_rejects_crafted_gpt_header() {
+        const NSECT: u64 = 64;
+        let base = GptHeaderInfo {
+            my_lba: 1,
+            alt_lba: NSECT - 1,
+            first_usable: 34,
+            last_usable: NSECT - 34,
+            disk_guid: [7; 16],
+            part_lba: 2,
+            part_count: 128,
+            part_size: GPT_ENTRY_SIZE,
+            entries_crc: entries_crc(&[0u8; 128 * 128]),
+        };
+        let image = |h: GptHeaderInfo, entries: &[u8]| {
+            let mut d = disk(NSECT as usize * 512);
+            let mut mbr = [0u8; 512];
+            pack_protective_mbr(&mut mbr, NSECT);
+            put(&mut d, 0, &mbr);
+            let mut hdr = [0u8; 512];
+            pack_gpt_header(&mut hdr, &h);
+            put(&mut d, 1, &hdr);
+            d[2 * 512..2 * 512 + entries.len()].copy_from_slice(entries);
+            d
+        };
+        let bad = [
+            GptHeaderInfo {
+                part_count: 0,
+                ..base
+            },
+            GptHeaderInfo {
+                part_count: u32::MAX,
+                ..base
+            },
+            GptHeaderInfo {
+                part_size: 0,
+                ..base
+            },
+            GptHeaderInfo {
+                part_size: u32::MAX,
+                ..base
+            },
+            GptHeaderInfo {
+                part_lba: u64::MAX - 1,
+                ..base
+            },
+            GptHeaderInfo {
+                part_lba: NSECT - 2,
+                ..base
+            },
+            GptHeaderInfo {
+                my_lba: NSECT,
+                ..base
+            },
+            GptHeaderInfo {
+                my_lba: u64::MAX,
+                ..base
+            },
+        ];
+        for h in bad {
+            assert!(matches!(
+                parse_image(&image(h, &[]), 512),
+                Err(PartError::BadCrc | PartError::Truncated)
+            ));
+        }
+        // An entry whose first and last LBA lie past the capacity, or
+        // whose `last + 1` overflows, is dropped.
+        let mut entries = vec![0u8; 128 * 128];
+        pack_gpt_entry(
+            &mut entries,
+            &GUID_LINUX,
+            &[1; 16],
+            NSECT,
+            NSECT + 8,
+            "past",
+        );
+        pack_gpt_entry(
+            &mut entries[128..],
+            &GUID_LINUX,
+            &[2; 16],
+            40,
+            u64::MAX,
+            "wrap",
+        );
+        let h = GptHeaderInfo {
+            entries_crc: entries_crc(&entries),
+            ..base
+        };
+        let t = parse_image(&image(h, &entries), 512).unwrap();
+        assert_eq!(t.origin, TableOrigin::Gpt { used_backup: false });
+        assert_eq!(t.n, 0);
+    }
+
+    /// Crafted EBR chains (ROADMAP §10.1): offsets at the top of the u32
+    /// range and a logical start that overflows the extended partition give
+    /// no partition and no panic.
+    #[test]
+    fn parse_rejects_crafted_ebr_chain() {
+        let mut d = disk(64 * 512);
+        let mut mbr = [0u8; 512];
+        pack_mbr(
+            &mut mbr,
+            &[
+                (MBR_EXTENDED, u32::MAX, u32::MAX),
+                (MBR_EXTENDED_LBA, 8, 16),
+                (0, 0, 0),
+                (0, 0, 0),
+            ],
+        );
+        put(&mut d, 0, &mbr);
+        let mut e1 = [0u8; 512];
+        pack_ebr(&mut e1, MBR_LINUX, u32::MAX, u32::MAX, u32::MAX, u32::MAX);
+        put(&mut d, 8, &e1);
+        let t = parse_image(&d, 512).unwrap();
+        assert_eq!(t.n, 0);
     }
 
     #[test]
@@ -1043,6 +1178,7 @@ mod tests {
     fn error_strings() {
         assert_eq!(PartError::BadCrc.as_str(), "bad crc");
         assert_eq!(PartError::Truncated.as_str(), "truncated");
+        assert_eq!(PartError::NoMemory.as_str(), "no memory");
     }
 
     #[test]

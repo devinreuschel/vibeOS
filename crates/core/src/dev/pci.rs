@@ -2,6 +2,11 @@
 //!
 //! No port I/O and no MMIO. Kernel `pci_init` supplies [`CfgIo`]. Host
 //! tests drive a fake config space so R/W and size probes are portable.
+//!
+//! A byte parser of device-supplied config space (ROADMAP §10.1): indexing
+//! and arithmetic are denied, and a site bounded by construction keeps an
+//! `#[allow]` naming its bound.
+#![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use core::fmt;
 
@@ -37,7 +42,9 @@ pub const fn ecam_phys(
     if bus < start_bus || bus > end_bus {
         return None;
     }
-    Some(base.wrapping_add(ecam_off(bus - start_bus, dev, func, offset)))
+    // `bus >= start_bus` was checked above.
+    let rel = bus.wrapping_sub(start_bus);
+    Some(base.wrapping_add(ecam_off(rel, dev, func, offset)))
 }
 
 /// Cache slot for a newly mapped ECAM page. Overflow replaces the last
@@ -130,19 +137,34 @@ pub trait CfgIo {
     fn write32(&mut self, bdf: Bdf, offset: u16, value: u32);
 }
 
+/// Bit shift of byte `offset & 3` in its dword: 0, 8, 16 or 24.
+const fn byte_shift(offset: u16) -> u16 {
+    // Cannot wrap: at most 3 * 8.
+    (offset & 3).wrapping_mul(8)
+}
+
+/// Config offset `off` bytes past a capability at `cap`.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "a u8 capability pointer plus a u8 offset is at most 510, which fits u16"
+)]
+const fn cap_off(cap: u8, off: u8) -> u16 {
+    cap as u16 + off as u16
+}
+
 pub fn read16<C: CfgIo>(cfg: &mut C, bdf: Bdf, offset: u16) -> u16 {
     let v = cfg.read32(bdf, offset & !3);
-    ((v >> ((offset & 3) * 8)) & 0xFFFF) as u16
+    ((v >> byte_shift(offset)) & 0xFFFF) as u16
 }
 
 pub fn read8<C: CfgIo>(cfg: &mut C, bdf: Bdf, offset: u16) -> u8 {
     let v = cfg.read32(bdf, offset & !3);
-    ((v >> ((offset & 3) * 8)) & 0xFF) as u8
+    ((v >> byte_shift(offset)) & 0xFF) as u8
 }
 
 pub fn write16<C: CfgIo>(cfg: &mut C, bdf: Bdf, offset: u16, val: u16) {
     let aligned = offset & !3;
-    let shift = (offset & 3) * 8;
+    let shift = byte_shift(offset);
     let mut v = cfg.read32(bdf, aligned);
     v &= !(0xFFFFu32 << shift);
     v |= (val as u32) << shift;
@@ -290,6 +312,10 @@ pub fn decode_bar(raw0: u32, raw1: u32, mask0: u32, mask1: u32) -> (Bar, bool) {
 }
 
 /// Size-probe BAR `index` (0..5). Restores the original value(s).
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "`index < 6` is checked first, so `index + 1` and the BAR offsets stay below 0x28"
+)]
 pub fn probe_bar<C: CfgIo>(cfg: &mut C, bdf: Bdf, index: u8) -> (Bar, bool) {
     if index >= 6 {
         return (Bar::NONE, false);
@@ -352,7 +378,7 @@ pub fn walk_caps<C: CfgIo>(cfg: &mut C, bdf: Bdf) -> CapSet {
     let mut ptr = read8(cfg, bdf, CFG_CAP_PTR);
     let mut n = 0usize;
     while ptr >= 0x40 && n < MAX_CAP_WALK {
-        n += 1;
+        n = n.saturating_add(1);
         let id = read8(cfg, bdf, ptr as u16);
         match id {
             CAP_PM => out.pm = Some(ptr),
@@ -449,10 +475,12 @@ pub fn read_function<C: CfgIo>(cfg: &mut C, bdf: Bdf) -> Option<FuncInfo> {
     let mut i = 0u8;
     while i < n_bars {
         let (bar, wide) = probe_bar(cfg, bdf, i);
-        info.bars[i as usize] = bar;
+        if let Some(slot) = info.bars.get_mut(usize::from(i)) {
+            *slot = bar;
+        }
         if wide {
-            if (i as usize) + 1 < MAX_BARS {
-                info.bars[(i as usize) + 1] = Bar::NONE;
+            if let Some(upper) = info.bars.get_mut(usize::from(i).saturating_add(1)) {
+                *upper = Bar::NONE;
             }
             i = i.saturating_add(2);
         } else {
@@ -471,6 +499,11 @@ fn bar_slots(header: u8) -> u8 {
     }
 }
 
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "a u8 bus over 64 is at most 3, a valid index of `seen`, and `bus % 64` a valid shift"
+)]
 fn bus_bit(seen: &mut [u64; 4], bus: u8) -> bool {
     let i = (bus / 64) as usize;
     let bit = 1u64 << (bus % 64);
@@ -509,17 +542,17 @@ fn scan_bus<C: CfgIo>(
         let hdr = read8(cfg, bdf0, CFG_HEADER_TYPE);
         let max_fn = if hdr & HEADER_MULTI != 0 { 8u8 } else { 1u8 };
         for func in 0..max_fn {
-            if *n >= out.len() {
+            let Some(slot) = out.get_mut(*n) else {
                 return;
-            }
+            };
             let bdf = Bdf::new(bus, dev, func);
             let Some(info) = read_function(cfg, bdf) else {
                 continue;
             };
             let bridge = info.is_bridge();
             let sec = info.secondary_bus;
-            out[*n] = info;
-            *n += 1;
+            *slot = info;
+            *n = n.saturating_add(1);
             if bridge && sec != 0 && sec != bus {
                 scan_bus(cfg, sec, out, n, seen);
             }
@@ -557,8 +590,8 @@ impl MsiCap {
             cap,
             control,
             is_64,
-            addr_off: cap as u16 + 4,
-            data_off: cap as u16 + if is_64 { 12 } else { 8 },
+            addr_off: cap_off(cap, 4),
+            data_off: cap_off(cap, if is_64 { 12 } else { 8 }),
         }
     }
 }
@@ -579,7 +612,8 @@ impl MsixCap {
     pub fn parse(cap: u8, control: u16, table: u32, pba: u32) -> Self {
         Self {
             cap,
-            table_size: (control & MSIX_CTL_TABLE_SIZE) + 1,
+            // The field is 11 bits, so adding one cannot overflow u16.
+            table_size: (control & MSIX_CTL_TABLE_SIZE).wrapping_add(1),
             table_bir: (table & 7) as u8,
             table_off: table & !7,
             pba_bir: (pba & 7) as u8,
@@ -591,20 +625,22 @@ impl MsixCap {
 }
 
 pub fn read_msi_cap<C: CfgIo>(cfg: &mut C, bdf: Bdf, cap: u8) -> MsiCap {
-    let control = read16(cfg, bdf, cap as u16 + 2);
+    let control = read16(cfg, bdf, cap_off(cap, 2));
     MsiCap::parse(cap, control)
 }
 
 pub fn write_msi_message<C: CfgIo>(cfg: &mut C, bdf: Bdf, msi: MsiCap, addr: u32, data: u16) {
     cfg.write32(bdf, msi.addr_off, addr);
-    if msi.is_64 {
-        cfg.write32(bdf, msi.addr_off + 4, 0);
+    if msi.is_64
+        && let Some(hi) = msi.addr_off.checked_add(4)
+    {
+        cfg.write32(bdf, hi, 0);
     }
     write16(cfg, bdf, msi.data_off, data);
 }
 
 pub fn set_msi_enable<C: CfgIo>(cfg: &mut C, bdf: Bdf, cap: u8, enable: bool) {
-    let off = cap as u16 + 2;
+    let off = cap_off(cap, 2);
     let mut ctl = read16(cfg, bdf, off);
     if enable {
         ctl |= MSI_CTL_ENABLE;
@@ -615,14 +651,14 @@ pub fn set_msi_enable<C: CfgIo>(cfg: &mut C, bdf: Bdf, cap: u8, enable: bool) {
 }
 
 pub fn read_msix_cap<C: CfgIo>(cfg: &mut C, bdf: Bdf, cap: u8) -> MsixCap {
-    let control = read16(cfg, bdf, cap as u16 + 2);
-    let table = cfg.read32(bdf, cap as u16 + 4);
-    let pba = cfg.read32(bdf, cap as u16 + 8);
+    let control = read16(cfg, bdf, cap_off(cap, 2));
+    let table = cfg.read32(bdf, cap_off(cap, 4));
+    let pba = cfg.read32(bdf, cap_off(cap, 8));
     MsixCap::parse(cap, control, table, pba)
 }
 
 pub fn set_msix_enable<C: CfgIo>(cfg: &mut C, bdf: Bdf, cap: u8, enable: bool, func_mask: bool) {
-    let off = cap as u16 + 2;
+    let off = cap_off(cap, 2);
     let mut ctl = read16(cfg, bdf, off);
     if enable {
         ctl |= MSIX_CTL_ENABLE;
@@ -701,6 +737,11 @@ pub fn write_lspci_line(f: &mut impl fmt::Write, info: &FuncInfo) -> fmt::Result
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "host tests: a failure ends the test, not the kernel"
+)]
 mod tests {
     use super::*;
 
@@ -1181,5 +1222,39 @@ mod tests {
         f.put8(b, 0x41, 0x40);
         let c = walk_caps(&mut f, b);
         assert_eq!(c.vendor, Some(0x40));
+    }
+
+    /// Crafted config space (ROADMAP §10.1): a capability pointer at 0xFF,
+    /// whose next pointer lies past the 256-byte header; a two-entry loop;
+    /// and BARs that read back all ones. Each returns within the walk
+    /// bound, with no panic.
+    #[test]
+    fn read_function_crafted_cap_list() {
+        let mut f = Fake::new();
+        let b = Bdf::new(0, 5, 0);
+        f.device(b, 0x8086, 0x1237, 0x06, 0x00);
+        f.put16(b, CFG_STATUS, STATUS_CAPS);
+        f.put8(b, CFG_CAP_PTR, 0xFF);
+        f.put8(b, 0xFF, CAP_MSI);
+        for i in 0..6u8 {
+            f.set_bar32(b, i, 0xFFFF_FFF0, 0x10, false);
+            f.put32(b, CFG_BAR0 + u16::from(i) * 4, 0xFFFF_FFFF);
+        }
+        let info = read_function(&mut f, b).expect("present");
+        assert_eq!(info.caps.msi, Some(0xFF));
+        assert_eq!(info.bars.len(), MAX_BARS);
+
+        let l = Bdf::new(0, 6, 0);
+        f.device(l, 0x8086, 0x1237, 0x06, 0x00);
+        f.put16(l, CFG_STATUS, STATUS_CAPS);
+        f.put8(l, CFG_CAP_PTR, 0x40);
+        f.put8(l, 0x40, CAP_MSI);
+        f.put8(l, 0x41, 0x50);
+        f.put8(l, 0x50, CAP_MSIX);
+        f.put8(l, 0x51, 0x40);
+        let c = walk_caps(&mut f, l);
+        assert_eq!((c.msi, c.msix), (Some(0x40), Some(0x50)));
+        let msi = read_msi_cap(&mut f, l, 0xFF);
+        assert_eq!(msi.addr_off, 0xFF + 4);
     }
 }
