@@ -1159,6 +1159,13 @@ class TestDeadlineTrip(unittest.TestCase):
             run_ktest.check_deadline_trip(lines, "ktest_deadline_hang", 500)
 
 
+# The stack depth lines every passing ktest boot prints (TESTING §8.2).
+STACK_REPORT = (
+    "vibeOS: stack: 16384 used 4096 of 12288 by tid 1 t",
+    "vibeOS: stack: report 1 sizes 0 lost",
+)
+
+
 class TestPersistDecision(unittest.TestCase):
     """The persist lines and the reboot depend on `run block_persist`."""
 
@@ -1183,6 +1190,7 @@ class TestPersistDecision(unittest.TestCase):
                 "vibeOS: ktest: begin 1",
                 "vibeOS: ktest: run heap_box 10000",
                 "vibeOS: ktest: ok heap_box (3 us)",
+                *STACK_REPORT,
                 "vibeOS: ktest: end",
             ),
             persist_reboot=False,
@@ -1194,6 +1202,7 @@ class TestPersistDecision(unittest.TestCase):
             "vibeOS: ktest: begin 1",
             "vibeOS: ktest: run block_persist 10000",
             "vibeOS: ktest: ok block_persist (3 us)",
+            *STACK_REPORT,
             "vibeOS: ktest: end",
         )
         with self.assertRaisesRegex(HarnessError, "missing persist wrote"):
@@ -1208,6 +1217,7 @@ class TestPersistDecision(unittest.TestCase):
             "vibeOS: ktest: begin 1",
             "vibeOS: ktest: run heap_box 10000",
             "vibeOS: ktest: ok heap_box (3 us)",
+            *STACK_REPORT,
             "vibeOS: ktest: end",
         )
         env = {"VIBEOS_ISO": "x.iso", "VIBEOS_KTEST": "heap_box", "VIBEOS_QEMU_ACCEL": ""}
@@ -1233,6 +1243,7 @@ class TestNoRetry(unittest.TestCase):
                 K("vibeOS: block: vdap2 7647 sectors"),
                 K("vibeOS: persist: wrote"),
                 K("vibeOS: ktest: begin 1"),
+                *(K(t) for t in STACK_REPORT),
                 K("vibeOS: ktest: end"),
             ],
             exit_code=ISA_DEBUG_PASS,
@@ -2394,6 +2405,74 @@ class TestMceHelpers(unittest.TestCase):
             b.sendall(b"partial")
             b.close()
             self.assertEqual(_monitor_reply(a, 1.0), "partial")
+
+
+class TestStackDepthReport(unittest.TestCase):
+    """`run_ktest.check_stack_depth` and its job summary (ROADMAP §10.2,
+    TESTING §8.2)."""
+
+    OK = [
+        "vibeOS: ktest: ok a (1 us)",
+        "vibeOS: stack: 16384 used 6000 of 12288 by tid 7 stack-exit",
+        "vibeOS: stack: 65536 used 20000 of 61440 by tid 2 ktest",
+        "vibeOS: stack: report 2 sizes 0 lost",
+        "vibeOS: ktest: end",
+    ]
+
+    def test_parse(self) -> None:
+        r = run_ktest.check_stack_depth(self.OK)
+        self.assertEqual(r.sizes, 2)
+        self.assertEqual(r.lost, 0)
+        self.assertEqual(
+            r.depths[0], run_ktest.StackDepth(16384, 6000, 7, "stack-exit")
+        )
+        self.assertEqual(r.depths[1].budget, 61440)
+        self.assertEqual(r.over, ())
+        self.assertEqual(r.depths[0].line(), self.OK[1])
+
+    def test_budget_is_size_minus_4k(self) -> None:
+        at = ["vibeOS: stack: 16384 used 12288 of 12288 by tid 3 w",
+              "vibeOS: stack: report 1 sizes 0 lost"]
+        self.assertEqual(run_ktest.check_stack_depth(at).over, ())
+        over = ["vibeOS: stack: 16384 used 12296 of 99999 by tid 3 w",
+                "vibeOS: stack: report 1 sizes 0 lost"]
+        with self.assertRaisesRegex(HarnessError, "tid 3 w used 12296 of 16384"):
+            run_ktest.check_stack_depth(over)
+        r = run_ktest.check_stack_depth(over, enforce=False)
+        self.assertEqual([d.name for d in r.over], ["w"])
+
+    def test_missing_report(self) -> None:
+        with self.assertRaisesRegex(HarnessError, "no `vibeOS: stack: report` line"):
+            run_ktest.check_stack_depth(self.OK[:3])
+        r = run_ktest.check_stack_depth([], enforce=False)
+        self.assertIsNone(r.sizes)
+
+    def test_lost(self) -> None:
+        lines = self.OK[:3] + ["vibeOS: stack: report 2 sizes 1 lost"]
+        with self.assertRaisesRegex(HarnessError, "1 stack sizes lost"):
+            run_ktest.check_stack_depth(lines)
+
+    def test_count_mismatch(self) -> None:
+        lines = self.OK[:2] + ["vibeOS: stack: report 2 sizes 0 lost"]
+        with self.assertRaisesRegex(HarnessError, "report names 2 sizes, 1 lines"):
+            run_ktest.check_stack_depth(lines)
+
+    def test_summary_file(self) -> None:
+        import tempfile
+
+        r = run_ktest.check_stack_depth(self.OK)
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "summary.md")
+            with mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": path}):
+                run_ktest.write_stack_summary("test-kernel", r)
+                run_ktest.write_stack_summary("test-kernel persist reboot", r)
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        self.assertEqual(text.count("### kernel stack depth: "), 2)
+        self.assertIn(self.OK[1], text)
+        self.assertIn(self.OK[3], text)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            run_ktest.write_stack_summary("x", r)  # no file, no error
 
 
 if __name__ == "__main__":

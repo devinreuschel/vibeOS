@@ -658,6 +658,8 @@ pub(crate) fn finish_switch() {
     );
     #[cfg(feature = "kernel_tests")]
     crate::irq::ktest::tail_enter();
+    #[cfg(feature = "kernel_tests")]
+    testing::scan_dead_slot();
     let (prev, kick) = per_cpu_init::with_current(|cpu| {
         let prev = core::mem::replace(&mut cpu.tail_prev, core::ptr::null_mut());
         let Some(stack) = cpu.dead_stack.take() else {
@@ -743,6 +745,8 @@ fn cached_stack() -> Option<GuardedStack> {
     // and owned by this handle alone: no thread runs on a cached stack
     // (invariant I10, established at `thread_init::finish_switch`).
     unsafe { core::ptr::write_bytes(stack.base().as_u64() as *mut u8, 0, len) };
+    #[cfg(feature = "kernel_tests")]
+    testing::refill_cached(&stack);
     Some(stack)
 }
 

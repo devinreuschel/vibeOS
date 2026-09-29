@@ -1,10 +1,12 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use vibeos::sched::stack_depth::{self, Deepest};
 use vibeos::sched::take_next;
-use vibeos::thread::{CpuAffinity, MAX_THREADS, Tcb, ThreadId, ThreadState};
+use vibeos::thread::{CpuAffinity, GuardedStack, MAX_THREADS, Tcb, ThreadId, ThreadState};
 
 use super::{runnable_on, with_sched};
 
+use crate::kva_init;
 use crate::per_cpu_init;
 use crate::time_init;
 
@@ -320,3 +322,81 @@ pub fn take_refused_switch() -> Option<ThreadId> {
     let id = ThreadId(REFUSED_SWITCH.swap(ThreadId::NONE.0, Ordering::Relaxed));
     if id.is_none() { None } else { Some(id) }
 }
+
+/// Fill a stack `cached_stack` took from this CPU's cache again, before a
+/// new thread's first frame goes on it (DESIGN §4.5, TESTING §8.2).
+pub(super) fn refill_cached(stack: &GuardedStack) {
+    // SAFETY: `refill_stack`'s contract; a cached stack has no thread on
+    // it and `cached_stack` owns the handle alone (invariant I10,
+    // established at `sched::thread_init::finish_switch`).
+    unsafe { kva_init::refill_stack(stack) };
+}
+
+/// The switch tail's scan of this CPU's dead-stack slot, before the stack
+/// is cached, zeroed or linked onto the dead list: its depth is recorded
+/// for the thread that just switched off it, whose `Tcb` stays intact
+/// until `on_cpu` clears (TESTING §8.2).
+pub(super) fn scan_dead_slot() {
+    let found = per_cpu_init::with_current(|cpu| {
+        let s = cpu.dead_stack.as_ref()?;
+        Some((s.base().as_u64(), s.pages(), cpu.tail_prev))
+    });
+    let Some((base, pages, prev)) = found else {
+        return;
+    };
+    let words = pages * WORDS_PER_PAGE;
+    // SAFETY: the slot's stack is mapped (`mm::kva_init::alloc_guarded_stack`)
+    // and stays so: only this CPU's switch tail, running here, takes it
+    // from the slot (invariant I10, established at
+    // `sched::thread_init::thread_exit`).
+    let used = unsafe { stack_depth::used_volatile(base as *const u64, words) };
+    let (tid, name) = if prev.is_null() {
+        (0, "?")
+    } else {
+        // SAFETY: invariant I9: `tail_prev` is the TCB this CPU just
+        // switched off, a live entry of `SCHED` until the Release store
+        // of its `on_cpu` later in this switch tail; established by
+        // `sched::thread_init::switch_now`.
+        unsafe { ((*prev).id.0, (*prev).name) }
+    };
+    crate::sched::ktest::record(Deepest {
+        size: words * 8,
+        used,
+        tid,
+        name,
+    });
+}
+
+/// Scan every live thread's stack, one `SCHED` section per slot, and hand
+/// each measurement to `f` with the lock dropped (TESTING §8.2).
+pub fn scan_live_stacks(mut f: impl FnMut(Deepest)) {
+    let mut i = 0usize;
+    while i < MAX_THREADS {
+        let d = with_sched(|s| {
+            let t = s.slots.get(i)?.as_deref()?;
+            if t.state == ThreadState::Dead {
+                return None;
+            }
+            let st = t.stack.as_ref()?;
+            let words = st.pages() * WORDS_PER_PAGE;
+            // SAFETY: a thread that is not Dead keeps its stack mapped
+            // while SCHED is held: `thread_exit` stores Dead under SCHED
+            // before its switch hands the stack to reclaim (invariant I10,
+            // established at `sched::thread_init::thread_exit`).
+            let used =
+                unsafe { stack_depth::used_volatile(st.base().as_u64() as *const u64, words) };
+            Some(Deepest {
+                size: words * 8,
+                used,
+                tid: t.id.0,
+                name: t.name,
+            })
+        });
+        if let Some(d) = d {
+            f(d);
+        }
+        i += 1;
+    }
+}
+
+const WORDS_PER_PAGE: usize = vibeos::paging::PAGE_SIZE_4K as usize / 8;

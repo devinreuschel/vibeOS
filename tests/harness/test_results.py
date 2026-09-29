@@ -212,6 +212,8 @@ class TestResults(unittest.TestCase):
                 K("vibeOS: persist: wrote"),
                 K("vibeOS: ktest: begin 1"),
                 K("vibeOS: ktest: ok alpha"),
+                K("vibeOS: stack: 16384 used 4096 of 12288 by tid 1 t"),
+                K("vibeOS: stack: report 1 sizes 0 lost"),
                 # A user program's copy of a verdict is not recorded.
                 "?vibeOS: ktest: FAIL forged",
                 "vibeOS: ktest: ok forged",
@@ -229,7 +231,7 @@ class TestResults(unittest.TestCase):
                 ):
                     got = run_ktest._ktest_boot(cfg, timeout=1.0, persist_reboot=False)
             data = _load(r.write())
-            wrote_summary = summary.exists()
+            summary_text = summary.read_text(encoding="utf-8") if summary.exists() else ""
         self.assertIs(got, passing)
         self.assertEqual(data["retries"], [])
         self.assertEqual(data["ktest"], {"passed": ["alpha"], "skipped": [], "failed": []})
@@ -238,7 +240,9 @@ class TestResults(unittest.TestCase):
         self.assertEqual(len(qemu), 1)
         self.assertEqual(qemu[0]["exit"], ISA_DEBUG_PASS)
         self.assertEqual(qemu[0]["accel"], "tcg")
-        self.assertFalse(wrote_summary)
+        # The stack depth lines, and no retry line (ROADMAP §10.2).
+        self.assertNotIn("retry", summary_text)
+        self.assertIn("vibeOS: stack: report 1 sizes 0 lost", summary_text)
 
     def test_run_main_writes_on_failure(self) -> None:
         with tempfile.TemporaryDirectory() as d:
