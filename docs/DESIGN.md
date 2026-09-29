@@ -260,7 +260,21 @@ and measured behaviour, or from sources whose license lets it into an MIT tree:
   that option of a dual license), may be adapted into a vibeOS file. The file keeps the notice and
   carries a provenance header naming the upstream project, the file's path, the pinned tag or
   commit, and the upstream license as an SPDX identifier; ROADMAP §10.9 checks the header and ships
-  the notice. Code under Apache-2.0 alone, or under any license with a further condition, is never
+  the notice. The header sits within the file's first 40 lines, in one comment block (`//`, `#` or
+  `;` lines, or one `/* */` block with ` * ` prefixes), and runs to the end of that block:
+
+  ```
+  <c> Provenance: <https repository URL> <path in that repository> @ <tag or 40-hex commit>
+  <c> Upstream-License: <SPDX expression, as upstream states it>
+  <c> <upstream copyright line(s) and permission notice, verbatim>
+  ```
+
+  `scripts/check_provenance.py`, in `make check`, fails when a source file outside `third_party/`
+  has a copyright line or an SPDX line and no header, when a header lacks a field or its notice,
+  and when `Upstream-License` has no option made only of the notice-only ids above.
+  `check_provenance.py --fetch`, on the nightly job, fetches each recorded file at its pinned
+  revision and fails unless its SPDX line names the recorded license or, where it has none, its
+  first comment block holds that license's text. Code under Apache-2.0 alone, or under any license with a further condition, is never
   adapted into a vibeOS file: it enters as a crate under ROADMAP §10.9's `deny.toml` policy or as a
   port under §14.10, keeping its own license and NOTICE. That policy, which `make check` runs as
   `cargo deny check licenses bans sources`, admits crates from crates.io only, under the notice-only
