@@ -2,6 +2,8 @@
 
 pub(crate) mod diag;
 pub(crate) mod ksyms;
+#[cfg(feature = "kernel_tests")]
+pub mod ktest;
 pub(crate) mod log_init;
 pub(crate) mod panic;
 pub(crate) mod serial;

@@ -41,7 +41,7 @@ use crate::vibefs_init;
 use crate::virtio_blk_init;
 use crate::virtio_init;
 use crate::x86;
-use crate::{acpi, arch, boot, irq, mm, proc, sched, smp, sync, time};
+use crate::{acpi, arch, boot, irq, log, mm, proc, sched, smp, sync, time};
 pub(crate) mod user;
 
 const ISA_DEBUG_EXIT: u16 = 0xF4;
@@ -286,10 +286,13 @@ pub(crate) const TESTS: &[Test] = &[
     test("cpu_hardening", arch::ktest::test_cpu_hardening),
     test("tlb_shootdown_remote", mm::ktest::test_tlb_shootdown_remote),
     test("alloc_stress_smp", mm::ktest::test_alloc_stress_smp),
-    test("log_boot_captured", test_log_boot_captured),
-    test("log_runtime_filter", test_log_runtime_filter),
-    test("log_emit_roundtrip", test_log_emit_roundtrip),
-    test("log_dmesg_no_recapture", test_log_dmesg_no_recapture),
+    test("log_boot_captured", log::ktest::test_log_boot_captured),
+    test("log_runtime_filter", log::ktest::test_log_runtime_filter),
+    test("log_emit_roundtrip", log::ktest::test_log_emit_roundtrip),
+    test(
+        "log_dmesg_no_recapture",
+        log::ktest::test_log_dmesg_no_recapture,
+    ),
     test("fb_bgrx_roundtrip", test_fb_bgrx_roundtrip),
     test("fb_pitch", test_fb_pitch),
     test("fb_cr_home", test_fb_cr_home),
@@ -871,60 +874,6 @@ pub(crate) fn spin_until_ns(pred: impl Fn() -> bool, ns: u64) -> bool {
         core::hint::spin_loop();
     }
     true
-}
-
-fn test_log_boot_captured() -> Outcome {
-    if !crate::log_init::contains_msg("serial online") {
-        return Outcome::Fail("serial online missing from ring");
-    }
-    if !crate::log_init::contains_msg("smp: done") {
-        return Outcome::Fail("smp: done missing from ring");
-    }
-    if !crate::log_init::contains_msg("console ok") {
-        return Outcome::Fail("console ok missing from ring");
-    }
-    Outcome::Ok
-}
-
-fn test_log_runtime_filter() -> Outcome {
-    use vibeos::log::Level;
-    let old = crate::log_init::max_level();
-    crate::log_init::set_max_level(Level::Error);
-    crate::klog!(Level::Debug, "vibeOS: ktest: log-filter-hidden-xyz");
-    if crate::log_init::contains_msg("log-filter-hidden-xyz") {
-        crate::log_init::set_max_level(old);
-        return Outcome::Fail("debug stored at error max");
-    }
-    crate::log_init::set_max_level(Level::Trace);
-    crate::klog!(Level::Debug, "vibeOS: ktest: log-filter-visible-xyz");
-    let ok = crate::log_init::contains_msg("log-filter-visible-xyz");
-    crate::log_init::set_max_level(old);
-    if ok {
-        Outcome::Ok
-    } else {
-        Outcome::Fail("debug not stored after raising max")
-    }
-}
-
-fn test_log_emit_roundtrip() -> Outcome {
-    crate::klog!(vibeos::log::Level::Info, "vibeOS: ktest: log-roundtrip-abc");
-    if crate::log_init::contains_msg("log-roundtrip-abc") {
-        Outcome::Ok
-    } else {
-        Outcome::Fail("info record missing")
-    }
-}
-
-fn test_log_dmesg_no_recapture() -> Outcome {
-    let n = crate::log_init::ring_len();
-    crate::log_init::dmesg(Some(vibeos::log::Level::Info));
-    if crate::log_init::ring_len() != n {
-        return Outcome::Fail("dmesg recaptured into ring");
-    }
-    if crate::log_init::contains_msg("vibeOS: dmesg:") {
-        return Outcome::Fail("dmesg line stored");
-    }
-    Outcome::Ok
 }
 
 fn test_fb_bgrx_roundtrip() -> Outcome {
