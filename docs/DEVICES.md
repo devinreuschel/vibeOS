@@ -68,8 +68,7 @@ Rule; not yet enforced: the registry is a fixed array of `Copy` PCI records with
 bound in a per-driver `order()` (ROADMAP §6.1). `dev_init::bind_all` probes a copy of each record
 and writes it back, and it turns on memory decode and bus mastering before `probe`, as `irq_init`'s
 MSI and MSI-X setup does again. `pci_init` maps every memory BAR of every function at enumeration,
-before any claim ([§3.3](BOOT.md#33-_start-order)). Block devices are named by `&'static str` and reached
-by fixed ids (§10.6). ROADMAP §10.4 (D2) and §10.12 land rules 1 to 4 and 8 for PCI and block
+before any claim ([§3.3](BOOT.md#33-_start-order)). ROADMAP §10.4 (D2) and §10.12 land rules 1 to 4 and 8 for PCI and block
 devices, §11.5 and §20.7 apply rule 8 to device-tree and ACPI devices, §18.1 lands rule 6, and
 §20.2, §20.3, §20.9, and §25.4 land rules 5 and 7 for suspend, hubs, removal, and shutdown.
 
@@ -104,5 +103,10 @@ vectors are reused, because a device that is stopped but still translated can wr
 and a remapping entry left behind lets it raise the next owner's vector. Rejected: refusing removal
 while a filesystem is mounted, which a surprise removal cannot honor; forcing an unmount at removal,
 which races open descriptors and hides the error from the programs that hold them.
+
+Block devices have rule 9's first two steps. `Registry::unpublish` (`vibeos::block::blockdev`)
+takes a device and its subtree out of the block registry, deepest first, so no new `BlockRef` can
+be taken, and `BlockRef::kill` closes the device's gate, after which I/O through a handle still held
+returns `Gone`. Host tests cover both; nothing in the kernel calls them yet.
 
 Planned (ROADMAP §15.1, §20.3, §20.9): nothing is removed today.

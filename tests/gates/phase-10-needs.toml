@@ -905,3 +905,11 @@ needs = [
   "vibefs never rewrites corrupt data",  # L1496
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L883
+[[box]]
+key = "partitions exposed as offset-limited block"
+needs = [
+  "one registry of counted block-device",  # L1342
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
