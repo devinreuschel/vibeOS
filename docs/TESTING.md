@@ -562,6 +562,27 @@ orphan commit holding the rest, pushed with a lease on the tip it read. It refus
 current year and fails with the size instead. `ci_history.py` reads the branch and the archives
 alike. The packed size is recorded here once the first daily run measures it (ROADMAP §10.9).
 
+**Gate maps.** From Phase 10 on, `tests/gates/phase-<N>.toml` gives each exit-gate line of phase N
+but the tag the entries that prove it (ROADMAP §10.9, C-GATEMAP): one `[[line]]` per line, its `key`
+the line's full text after `- [ ] ` or `- [x] `, compared with whitespace collapsed, and
+`[[line.entry]]` rows that each hold exactly one of `cmd` (a local command), `job = {workflow, job}`
+(a job of a GitHub-hosted workflow that must be green on a run proving the gated commit, read through
+`gh`) or `record = {cmd}` (a dev-host record, below), with an optional `expect = "fail"` for a command
+that must fail, which counts only after a plain entry of its line passed in the same run. A line with
+several entries, one per architecture or accelerator for example, passes only when all of them pass.
+Each later phase adds its map in the slice that closes its gate; Phases 0 to 9 get none.
+`scripts/check_gates.py`, which `make check` runs, reads text only (no entry runs, no `gh`, no
+`ci-history`) and fails on a `phase-<N>.toml` with N below 10; on a key that matches no exit-gate
+line of phase N, matches the tag line, or repeats another; on a gate line but the tag with no entry;
+on an entry with none or two of `cmd`, `job` and `record`, or an `expect` other than `"fail"`; on an
+entry that runs `make gate` or `scripts/gate.py`, so the entry for a line that names the gate runs
+that line's other checks; on a line that names a `scripts/check_<x>.py` with no `cmd` or `record`
+entry containing that path; and on a job entry whose workflow has a `self-hosted` label anywhere
+outside a comment. Until a workflow a job entry names exists (`macos.yml`, `nightly.yml`), a
+`test -f .github/workflows/<wf>.yml` entry stands in for it, since `rule_gate_dispatch` rejects a
+missing workflow, so the line fails rather than passes without its job.
+`tests/harness/test_gates.py` holds a failing case per rule and runs the script on the tree.
+
 **Workflow rules.** `scripts/check_workflows.py`, which `make check` runs, reads every workflow
 with a stdlib YAML subset reader that fails on anything it does not parse (anchors, aliases, tags,
 `---`, multi-line flow) rather than misread it, and holds one function per rule in `RULES`. Besides

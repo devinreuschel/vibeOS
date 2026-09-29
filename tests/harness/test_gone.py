@@ -49,6 +49,17 @@ class TestFind(unittest.TestCase):
             "tests/harness/run_ps2.py: file named 'run_ps2.py' is gone (a box removed it)",
         ])
 
+    def test_gate_map_keys_not_read(self) -> None:
+        text = ('[[line]]\nkey = """\nthe `defer_free` list is\ngone"""\n[[line.entry]]\n'
+                'cmd = "grep defer_free src"\n[[line]]\nkey = "no defer_free"\n')
+        dropped = check_gone.drop_gate_keys("tests/gates/phase-10.toml", text)
+        self.assertEqual(dropped.count("\n"), text.count("\n"))
+        errs = run_find(["defer_free"], {"tests/gates/phase-10.toml": dropped})
+        self.assertEqual(errs, ["tests/gates/phase-10.toml:6: 'defer_free' is gone "
+                                "(a box removed it)"])
+        other = check_gone.drop_gate_keys("tests/gates/phase-10-needs.toml", text)
+        self.assertEqual(len(run_find(["defer_free"], {"x.toml": other})), 3)
+
     def test_definition_row(self) -> None:
         row = "src/fs/fat_init.rs: fn route"
         files = {"src/fs/fat_init.rs": "pub(crate) fn route(x: u8) {}\nlet route = 1;\n",
