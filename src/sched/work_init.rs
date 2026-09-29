@@ -14,7 +14,7 @@ use vibeos::work::{WorkClass, WorkItem, WorkQueues};
 use crate::irq_init;
 use crate::kva_init;
 use crate::per_cpu_init;
-use crate::sync_init::SpinMutex;
+use crate::sync_init::{self, SpinMutex};
 use crate::thread_init;
 
 struct State {
@@ -120,7 +120,13 @@ fn worker() {
                 let n = kva_init::free_parked(head);
                 thread_init::stacks_reclaimed(n);
             }
-            Next::Item(w, WorkClass::Soft | WorkClass::Normal) => w.run(),
+            Next::Item(w, WorkClass::Soft) => {
+                // A softirq-equivalent item runs as a no-reclaim thread
+                // (DESIGN §2.11 rule 6).
+                let _nr = sync_init::no_reclaim();
+                w.run();
+            }
+            Next::Item(w, WorkClass::Normal) => w.run(),
             Next::Wait => thread_init::schedule(),
         }
     }

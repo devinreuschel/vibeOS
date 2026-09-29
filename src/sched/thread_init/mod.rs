@@ -716,6 +716,7 @@ pub unsafe fn init_bootstrap() {
         fp_cpu: None,
         syscall_count: 0,
         pid: 0,
+        no_reclaim: AtomicU32::new(0),
     });
     let Ok(mut tcb) = tcb else {
         crate::boot::halt_with("vibeOS: thread: no memory for the bootstrap TCB");
@@ -925,6 +926,7 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, Guard
         fp_cpu: None,
         syscall_count: 0,
         pid: 0,
+        no_reclaim: AtomicU32::new(0),
     });
     let Ok(mut tcb) = tcb else {
         return Err(stack);
@@ -1061,6 +1063,7 @@ fn spawn_inner(
         fp_cpu: None,
         syscall_count: 0,
         pid,
+        no_reclaim: AtomicU32::new(0),
     });
     let mut tcb = match tcb {
         Ok(t) => t,

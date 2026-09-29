@@ -7,13 +7,14 @@
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::panic::Location;
-use core::ptr;
+use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 #[cfg(feature = "kernel_tests")]
 use core::sync::atomic::{AtomicU16, AtomicUsize};
 
 use vibeos::lock::{Held, RankError};
 use vibeos::sync::SpinLock;
+use vibeos::thread::Tcb;
 
 use crate::per_cpu_init;
 use crate::x86::InterruptGuard;
@@ -233,6 +234,51 @@ pub fn held() -> Held {
 #[cfg(feature = "kernel_tests")]
 pub fn held_mask() -> u8 {
     held().mask()
+}
+
+/// The current thread's `Tcb`, or `None` before per-CPU data is live and
+/// before the bootstrap thread is installed.
+fn current_tcb() -> Option<NonNull<Tcb>> {
+    NonNull::new(per_cpu_init::try_current()?.current)
+}
+
+/// While alive, the thread that made it is a no-reclaim thread: a counted
+/// object whose count reaches zero here defers its release (DESIGN §2.11
+/// rule 6). Built by [`no_reclaim`]; it names the thread's `Tcb`, so it is
+/// `!Send`.
+pub(crate) struct NoReclaim {
+    tcb: Option<NonNull<Tcb>>,
+}
+
+/// Mark the current thread no-reclaim until the returned guard drops.
+/// Nesting counts. Nothing before per-CPU data is live.
+pub(crate) fn no_reclaim() -> NoReclaim {
+    let tcb = current_tcb();
+    if let Some(t) = tcb {
+        // SAFETY: invariant I9: a `Tcb` is never freed, so the current
+        // thread's pointer stays valid, and `no_reclaim` is atomic because
+        // `Sched::get_mut` may build `&mut Tcb` for it on another CPU;
+        // established by `thread_init::spawn_inner`. Relaxed: only this
+        // thread reads its own count.
+        unsafe { t.as_ref() }
+            .no_reclaim
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    NoReclaim { tcb }
+}
+
+impl Drop for NoReclaim {
+    fn drop(&mut self) {
+        if let Some(t) = self.tcb {
+            // SAFETY: invariant I9: a `Tcb` is never freed, so the pointer
+            // `no_reclaim` took stays valid; established by
+            // `thread_init::spawn_inner`. The guard is `!Send`, so this is
+            // the thread whose count `no_reclaim` raised.
+            unsafe { t.as_ref() }
+                .no_reclaim
+                .fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 }
 
 #[cfg(feature = "kernel_tests")]
