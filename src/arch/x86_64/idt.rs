@@ -733,6 +733,10 @@ fn breakpoint(frame: &mut TrapFrame) {
     if frame.user_mode() {
         user_fault(frame);
     }
+    #[cfg(feature = "kernel_tests")]
+    if !frame.user_mode() {
+        testing::note_breakpoint();
+    }
     dump(b"#BP", &frame.iret, None, None);
 }
 
@@ -1031,6 +1035,22 @@ pub mod testing {
         let p = hook.map_or(0, |h| h as usize);
         HOOKS[vector as usize].store(p, Ordering::Release);
     }
+    /// CPL-0 `#BP`s whose body ran, past the catch intercept: the
+    /// `int3_roundtrip` test reads it (ROADMAP §10.2, F142).
+    static BP_HITS: AtomicU64 = AtomicU64::new(0);
+
+    /// Count a CPL-0 `#BP`; the `#BP` body calls it.
+    pub(super) fn note_breakpoint() {
+        // Release: pairs with the Acquire load in `bp_hits`.
+        BP_HITS.fetch_add(1, Ordering::Release);
+    }
+
+    /// CPL-0 `#BP` bodies run since boot.
+    pub fn bp_hits() -> u64 {
+        // Acquire: pairs with the Release add in `note_breakpoint`.
+        BP_HITS.load(Ordering::Acquire)
+    }
+
     static CPL3_HITS: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 
     /// Entries of `vector` whose saved CS.RPL was 3, since boot.

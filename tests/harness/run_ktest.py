@@ -10,11 +10,14 @@ import sys
 from collections import Counter
 from collections.abc import Callable, Iterable
 
-from tests.harness import frame, results
+from tests.harness import frame, results, skips
 from tests.harness.harness import (
+    BOOT_ALLOWANCE_S,
     PANIC_DONE,
+    TIMEOUT_SCALE,
     EnvConfig,
     HarnessError,
+    KtestDeadlines,
     KtestSummary,
     QemuConfig,
     RunResult,
@@ -241,6 +244,18 @@ def _block_name(name: str) -> Callable[[str], bool]:
     return pred
 
 
+def ktest_selection(cfg: QemuConfig) -> str:
+    """The `vibeos.ktest=` value the boot gets: `cfg.ktest`, else the last
+    such word of its command line (later words win in the kernel)."""
+    if cfg.ktest is not None:
+        return cfg.ktest
+    value = ""
+    for word in cfg.cmdline.split():
+        if word.startswith("vibeos.ktest="):
+            value = word[len("vibeos.ktest=") :]
+    return value
+
+
 def ran(lines: Iterable[str], name: str) -> bool:
     """Whether the boot printed a `run <name>` line."""
     return any(k.kind == "run" and k.name == name for k in ktest_lines(lines))
@@ -257,22 +272,33 @@ def _ktest_boot(
     persist_reboot: bool,
     label: str = "ktest",
     enforce_stack: bool = True,
+    scale: float = TIMEOUT_SCALE,
 ) -> RunResult:
     """One ktest QEMU. It never retries (ROADMAP §10.2, F021).
 
-    A timeout, a `FAIL` line, a panic signature, a missing marker, or a
+    `timeout` is the boot allowance and `scale` the timeout scale of the
+    progress deadline (`KtestDeadlines`). A timeout, a `FAIL` line, a panic
+    signature, a missing marker, a run without its result, a skipped set
+    that differs from `tests/harness/skips.toml` (`skips.check_skips`), or a
     stack depth report `check_stack_depth` refuses (unless not
     `enforce_stack`) raises `HarnessError` from this one boot. The persist
     lines are required only when the boot ran `block_persist`. The stack
     lines go to the job summary under `label`.
     """
-    raw = run_qemu_until_exit(cfg, timeout_s=timeout)
+    raw = run_qemu_until_exit(cfg, timeout_s=timeout, progress=KtestDeadlines(timeout, scale))
     results.current().add_boot(qemu_argv(cfg, None), cfg, raw.exit_code)
     klines = frame.kernel_lines(raw.lines)
     results.current().record_ktest_lines(klines)
-    check_ktest_output(raw.lines, raw.exit_code)
+    verdict = check_ktest_output(raw.lines, raw.exit_code)
     write_stack_summary(label, check_stack_depth(klines, enforce=False))
     check_stack_depth(klines, enforce=enforce_stack)
+    skips.check_skips(
+        verdict.ktest_skips,
+        verdict.ktest_runs,
+        skips.launch_config(cfg),
+        skips.load_skips(),
+        must_run=skips.must_run_names(ktest_selection(cfg)),
+    )
     if SERIAL_WHOLE_OK in klines:
         _check_serial_whole(klines)
     if SERIAL_FRAME_OK in klines:
@@ -363,6 +389,7 @@ def _proof_boot(
             persist_reboot=False,
             label=f"{env.tier} {label}",
             enforce_stack=enforce_stack,
+            scale=env.timeout_scale,
         )
     finally:
         try:
@@ -515,6 +542,7 @@ def ktest_deadline_trip(env: EnvConfig) -> None:
                     TRIP_KILL_AFTER_S if frame.kernel_text(ln) == PANIC_DONE else None
                 ),
                 expect_fail=True,
+                progress=KtestDeadlines(env.timeout, env.timeout_scale),
             )
             results.current().add_boot(qemu_argv(cfg, None), cfg, raw.exit_code)
             check_deadline_trip(raw.lines, TRIP_TEST, TRIP_DEADLINE_MS)
@@ -531,14 +559,16 @@ def ktest_deadline_trip(env: EnvConfig) -> None:
 
 
 def main() -> int:
-    env = env_config(default_iso=default_iso("ktest"), default_timeout=90)
+    env = env_config(default_iso=default_iso("ktest"), default_timeout=BOOT_ALLOWANCE_S)
     results.Results(env.tier)
     skip_persist = env_flag("VIBEOS_SKIP_PERSIST")
     disk = make_disk(DISK_BYTES, "vibeos-vblk-")
     try:
         cfg = env.qemu(extra=ktest_devices(disk, env.smp), boot_order="d")
         try:
-            raw = _ktest_boot(cfg, env.timeout, persist_reboot=False, label=env.tier)
+            raw = _ktest_boot(
+                cfg, env.timeout, persist_reboot=False, label=env.tier, scale=env.timeout_scale
+            )
         except HarnessError as e:
             print(f"[ktest] FAIL: {e}", file=sys.stderr)
             return 1
@@ -547,7 +577,11 @@ def main() -> int:
         if not skip_persist and ran(raw.lines, PERSIST_TEST):
             try:
                 _ktest_boot(
-                    cfg, env.timeout, persist_reboot=True, label=f"{env.tier} persist reboot"
+                    cfg,
+                    env.timeout,
+                    persist_reboot=True,
+                    label=f"{env.tier} persist reboot",
+                    scale=env.timeout_scale,
                 )
             except HarnessError as e:
                 print(f"[ktest] FAIL persist reboot: {e}", file=sys.stderr)

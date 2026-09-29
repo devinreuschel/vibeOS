@@ -211,6 +211,7 @@ class TestResults(unittest.TestCase):
                 K("vibeOS: block: vdap2 7647 sectors"),
                 K("vibeOS: persist: wrote"),
                 K("vibeOS: ktest: begin 1"),
+                K("vibeOS: ktest: run alpha 10000"),
                 K("vibeOS: ktest: ok alpha"),
                 K("vibeOS: stack: 16384 used 4096 of 12288 by tid 1 t"),
                 K("vibeOS: stack: report 1 sizes 0 lost"),

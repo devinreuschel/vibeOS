@@ -38,6 +38,7 @@ from dataclasses import dataclass
 
 from tests.harness import frame, results
 from tests.harness.harness import (
+    BOOT_ALLOWANCE_S,
     EnvConfig,
     HarnessError,
     default_iso,
@@ -260,7 +261,7 @@ def main() -> int:
     )
     args = ap.parse_args()
     plants = [p for p in args.plants.split(",") if p]
-    env = env_config(default_iso=default_iso("vibefs-crash"), default_timeout=90)
+    env = env_config(default_iso=default_iso("vibefs-crash"), default_timeout=BOOT_ALLOWANCE_S)
     res = results.Results(env.tier)
     tools = Tools(
         mkfs=env_str("VIBEOS_MKFS", "mkfs-vibefs"),

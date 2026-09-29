@@ -1012,3 +1012,12 @@ needs = [
   "a flight recorder (moved from",  # L1415
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+# L1230
+[[box]]
+key = "expected skips are data: `tests/harness/skips.toml`"
+needs = [
+  "a nightly x86_64 KVM leg",  # L1194
+  "`vibeos.ktest=<glob>` runs only the matching",  # L1228
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"

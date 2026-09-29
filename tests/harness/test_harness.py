@@ -6,8 +6,11 @@ Runs under `python3 -m unittest discover`. Standard-library only.
 from __future__ import annotations
 
 import os
+import platform
 import socket
+import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from collections.abc import Iterator
@@ -43,6 +46,7 @@ from tests.harness.harness import (
     effective_accel_name,
     halt_test_markers,
     is_dump_banner,
+    iter_lines_with_deadline,
     kernel_text,
     mce_monitor_cmd,
     overlay_env,
@@ -916,9 +920,11 @@ class TestKtestProtocol(unittest.TestCase):
 
         lines = [
             K("vibeOS: ktest: begin 1"),
+            K("vibeOS: ktest: run x 10000"),
             K("vibeOS: dmesg: 12 cpu0 info vibeOS: ktest: FAIL x: y"),
             K("vibeOS: logrec: 12 cpu0 info vibeOS: ktest: begin 0"),
             "vibeOS: ktest: FAIL forged: unframed",
+            K("vibeOS: ktest: ok x (5 us)"),
             K("vibeOS: ktest: end"),
         ]
         check_ktest_output(lines, ISA_DEBUG_PASS)
@@ -926,7 +932,12 @@ class TestKtestProtocol(unittest.TestCase):
     def test_wrong_exit_status(self) -> None:
         from tests.harness.harness import ISA_DEBUG_FAIL, HarnessError, check_ktest_output
 
-        lines = [K("vibeOS: ktest: begin 1"), K("vibeOS: ktest: end")]
+        lines = [
+            K("vibeOS: ktest: begin 1"),
+            K("vibeOS: ktest: run x 10000"),
+            K("vibeOS: ktest: ok x (5 us)"),
+            K("vibeOS: ktest: end"),
+        ]
         with self.assertRaises(HarnessError) as cm:
             check_ktest_output(lines, ISA_DEBUG_FAIL)
         self.assertIn("isa-debug-exit", str(cm.exception))
@@ -1243,6 +1254,8 @@ class TestNoRetry(unittest.TestCase):
                 K("vibeOS: block: vdap2 7647 sectors"),
                 K("vibeOS: persist: wrote"),
                 K("vibeOS: ktest: begin 1"),
+                K("vibeOS: ktest: run x 10000"),
+                K("vibeOS: ktest: ok x (5 us)"),
                 *(K(t) for t in STACK_REPORT),
                 K("vibeOS: ktest: end"),
             ],
@@ -2496,6 +2509,329 @@ class TestStackDepthReport(unittest.TestCase):
         self.assertIn(self.OK[3], text)
         with mock.patch.dict(os.environ, {}, clear=True):
             run_ktest.write_stack_summary("x", r)  # no file, no error
+
+
+class TestKtestVerdict(unittest.TestCase):
+    """The ktest verdict (ROADMAP §10.2): the partial line at a deadline,
+    the monitor directory, counted runs, and the per-run progress deadline."""
+
+    def test_partial_line_before_timeout(self) -> None:
+        r, w = os.pipe()
+        try:
+            os.write(w, K("vibeOS: ktest: run slow 100\n").encode() + b"vibeOS: stuck at")
+            reader = DeadlineReader(r, time.monotonic() + 0.3)
+            self.assertEqual(reader.next_event(), ("line", K("vibeOS: ktest: run slow 100")))
+            self.assertEqual(reader.next_event(), ("partial", "vibeOS: stuck at"))
+            self.assertEqual(reader.next_event(), ("timeout", ""))
+        finally:
+            os.close(r)
+            os.close(w)
+
+    def test_partial_line_kept_by_helpers(self) -> None:
+        r, w = os.pipe()
+        try:
+            os.write(w, b"a\nhalf")
+            got = list(iter_lines_with_deadline(r, time.monotonic() + 0.3))
+            self.assertEqual(got, ["a", "half"])
+        finally:
+            os.close(r)
+            os.close(w)
+        r, w = os.pipe()
+        try:
+            os.write(w, K("msg: x\n").encode() + b"\x1e  0xffff")
+            result = RunResult(lines=[K("vibeOS: panic:")])
+            drain_panic_tail(DeadlineReader(r, time.monotonic()), result, window_s=0.3)
+            self.assertEqual(result.lines, [K("vibeOS: panic:"), K("msg: x"), K("  0xffff")])
+        finally:
+            os.close(r)
+            os.close(w)
+
+    @staticmethod
+    def _boot(*body: str, n: int = 2) -> list[str]:
+        return [
+            K(f"vibeOS: ktest: begin {n}"),
+            *(K(f"vibeOS: ktest: {b}") for b in body),
+            K("vibeOS: ktest: end"),
+        ]
+
+    def test_count_matches_begin(self) -> None:
+        from tests.harness.harness import check_ktest_output
+
+        ok = self._boot("run a 10000", "ok a (3 us)", "run a 10000", "skip a: no AP")
+        r = check_ktest_output(ok, ISA_DEBUG_PASS)
+        self.assertEqual(r.ktest_runs, ["a", "a"])
+        self.assertEqual(r.ktest_skips, {"a": "no AP"})
+        for n in (1, 3):
+            with self.subTest(n=n):
+                lines = self._boot("run a 10000", "ok a (3 us)", "run b 10000", "ok b", n=n)
+                with self.assertRaisesRegex(HarnessError, f"begin {n}, but 2 runs and 2 results"):
+                    check_ktest_output(lines, ISA_DEBUG_PASS)
+
+    def test_run_without_result_is_named(self) -> None:
+        from tests.harness.harness import check_ktest_output
+
+        next_run = self._boot("run slow 10000", "run b 10000", "ok b")
+        with self.assertRaisesRegex(HarnessError, "run slow has no result"):
+            check_ktest_output(next_run, ISA_DEBUG_PASS)
+        at_end = self._boot("run a 10000", "ok a", "run slow 10000")
+        with self.assertRaisesRegex(HarnessError, "run slow has no result before end"):
+            check_ktest_output(at_end, ISA_DEBUG_PASS)
+        no_end = at_end[:-1]
+        with self.assertRaisesRegex(HarnessError, "ktest_end'; run slow has no result"):
+            check_ktest_output(no_end, ISA_DEBUG_PASS)
+
+    def test_result_without_run_fails(self) -> None:
+        from tests.harness.harness import check_ktest_output
+
+        lines = self._boot("run a 10000", "ok a", "ok b")
+        with self.assertRaisesRegex(HarnessError, "result for b with no open run"):
+            check_ktest_output(lines, ISA_DEBUG_PASS)
+        twice = self._boot("run a 10000", "ok a", "skip a: again")
+        with self.assertRaisesRegex(HarnessError, "result for a with no open run"):
+            check_ktest_output(twice, ISA_DEBUG_PASS)
+
+    def test_name_mismatch_fails(self) -> None:
+        from tests.harness.harness import check_ktest_output
+
+        lines = self._boot("run a 10000", "ok b", "run b 10000", "ok b")
+        with self.assertRaisesRegex(HarnessError, "run a got a result for b"):
+            check_ktest_output(lines, ISA_DEBUG_PASS)
+
+    def test_info_line_is_not_a_result(self) -> None:
+        from tests.harness.harness import check_ktest_output
+
+        lines = self._boot(
+            "info lock_spins: pt=0 buddy=0",
+            "run a 10000",
+            "info a: 12 rounds",
+            "ok a",
+            "info ktest: between",
+            n=1,
+        )
+        r = check_ktest_output(lines, ISA_DEBUG_PASS)
+        self.assertEqual(r.ktest_runs, ["a"])
+        only_info = self._boot("run a 10000", "info a: 1", n=1)
+        with self.assertRaisesRegex(HarnessError, "run a has no result before end"):
+            check_ktest_output(only_info, ISA_DEBUG_PASS)
+
+    def test_progress_deadline_windows(self) -> None:
+        from tests.harness.harness import KtestDeadlines
+
+        d = KtestDeadlines(60.0, 2.0)
+        self.assertEqual(d.start(100.0), 160.0)
+        # Noise, an unframed copy and a replay before `begin` extend nothing.
+        self.assertEqual(d.on_line(K("vibeOS: serial online"), 150.0), 160.0)
+        self.assertEqual(d.on_line("vibeOS: ktest: begin 3", 150.0), 160.0)
+        self.assertIn("no begin within 60 s", d.hung_message())
+        self.assertEqual(d.on_line(K("vibeOS: ktest: begin 3"), 150.0), 160.0)
+        self.assertIn("no run within 10 s of begin", d.hung_message())
+        # A run: (deadline_ms / 1000 + 5) * scale.
+        self.assertEqual(d.on_line(K("vibeOS: ktest: run a 2000"), 151.0), 165.0)
+        self.assertEqual(d.on_line(K("vibeOS: ktest: info a: 3"), 160.0), 165.0)
+        self.assertEqual(d.on_line(K("vibeOS: noise"), 160.0), 165.0)
+        self.assertEqual(d.hung_message(), "ktest hung in a: no result within 14 s")
+        # A result opens a gap of 5 * scale.
+        self.assertEqual(d.on_line(K("vibeOS: ktest: ok a (3 us)"), 162.0), 172.0)
+        self.assertIn("ktest hung in a: no run or end within 10 s", d.hung_message())
+        self.assertEqual(d.on_line(K("vibeOS: ktest: run b 500"), 163.0), 174.0)
+        self.assertEqual(d.on_line(K("vibeOS: ktest: FAIL b: why"), 164.0), 174.0)
+        self.assertEqual(d.on_line(K("vibeOS: ktest: run c 10000"), 165.0), 195.0)
+        self.assertEqual(d.on_line(K("vibeOS: ktest: skip c: no AP"), 166.0), 176.0)
+        # `end` gives the allowance again, unscaled.
+        self.assertEqual(d.on_line(K("vibeOS: ktest: end"), 167.0), 227.0)
+        self.assertEqual(d.on_line(K("vibeOS: ktest: run d 1"), 168.0), 227.0)
+        self.assertIn("did not exit within 60 s of end", d.hung_message())
+
+    def test_hung_run_named(self) -> None:
+        from tests.harness.harness import KtestDeadlines, run_qemu_until_exit
+
+        with tempfile.TemporaryDirectory() as tmp:
+            qemu = os.path.join(tmp, "qemu-system-x86_64")
+            with open(qemu, "w") as f:
+                f.write(
+                    "#!/bin/sh\n"
+                    "printf '\\036vibeOS: ktest: begin 1\\n'\n"
+                    "printf '\\036vibeOS: ktest: run slow 100\\n'\n"
+                    "printf '\\036vibeOS: slow: step 3 of'\n"
+                    "exec sleep 30\n"
+                )
+            os.chmod(qemu, 0o755)
+            iso = os.path.join(tmp, "x.iso")
+            open(iso, "w").close()
+            cfg = QemuConfig(iso=iso)
+            path = tmp + os.pathsep + os.environ.get("PATH", "")
+            t0 = time.monotonic()
+            with overlay_env({"PATH": path}):
+                with self.assertRaises(HarnessError) as cm:
+                    run_qemu_until_exit(cfg, timeout_s=30.0, progress=KtestDeadlines(5.0, 0.05))
+            elapsed = time.monotonic() - t0
+        msg = str(cm.exception)
+        self.assertIn("ktest hung in slow", msg)
+        # The partial line the guest was writing is in the serial tail.
+        self.assertIn("vibeOS: slow: step 3 of", msg)
+        self.assertLess(elapsed, 5.0)
+
+    def test_monitor_dir_removed_at_exit(self) -> None:
+        code = (
+            "from tests.harness.harness import _pick_monitor_path\n"
+            "import os\n"
+            "p = _pick_monitor_path()\n"
+            "assert os.path.isdir(os.path.dirname(p))\n"
+            "print(os.path.dirname(p))\n"
+        )
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        out = subprocess.run(
+            [sys.executable, "-c", code], cwd=root, capture_output=True, text=True, check=True
+        )
+        d = out.stdout.strip()
+        self.assertIn("vibeos-mon-", d)
+        self.assertFalse(os.path.exists(d), d)
+
+
+class TestSkips(unittest.TestCase):
+    """Expected skips as data (ROADMAP §10.2, `tests/harness/skips.py`)."""
+
+    TCG2: dict[str, str | int] = {
+        "arch": "x86_64",
+        "accel": "tcg",
+        "cpu": "max",
+        "smp": 2,
+        "mem": "128M",
+        "machine": "pc",
+        "host": "linux",
+    }
+
+    @staticmethod
+    def _rows(text: str) -> list[Any]:
+        import tomllib
+
+        from tests.harness.skips import parse_skips
+
+        return parse_skips(tomllib.loads(text))
+
+    def test_unlisted_skip_fails(self) -> None:
+        from tests.harness.skips import check_skips
+
+        with self.assertRaisesRegex(HarnessError, "msix_cpu skipped .'no e1000e'."):
+            check_skips({"msix_cpu": "no e1000e"}, ["msix_cpu"], self.TCG2, [])
+
+    def test_listed_test_that_ran_fails(self) -> None:
+        from tests.harness.skips import check_skips
+
+        rows = self._rows('[[skip]]\nname = "a"\nreason = "needs 4 cpus"\nsmp = 2\n')
+        with self.assertRaisesRegex(HarnessError, "a ran, but skips.toml lists it"):
+            check_skips({}, ["a"], self.TCG2, rows)
+        check_skips({"a": "needs 4 cpus"}, ["a"], self.TCG2, rows)
+        # At -smp 4 the row does not match, so a run is right and a skip is not.
+        smp4 = {**self.TCG2, "smp": 4}
+        check_skips({}, ["a"], smp4, rows)
+        with self.assertRaisesRegex(HarnessError, "no skips.toml row matches"):
+            check_skips({"a": "needs 4 cpus"}, ["a"], smp4, rows)
+
+    def test_omitted_field_matches_every_value(self) -> None:
+        from tests.harness.skips import row_matches
+
+        (row,) = self._rows('[[skip]]\nname = "a"\nreason = "r"\ncpu = "qemu64"\n')
+        for accel in ("tcg", "kvm", "hvf"):
+            self.assertTrue(row_matches(row, {**self.TCG2, "cpu": "qemu64", "accel": accel}))
+        self.assertFalse(row_matches(row, self.TCG2))
+        (anywhere,) = self._rows('[[skip]]\nname = "a"\nreason = "r"\n')
+        self.assertTrue(row_matches(anywhere, self.TCG2))
+
+    def test_array_value_is_any_of(self) -> None:
+        from tests.harness.skips import row_matches
+
+        (row,) = self._rows(
+            '[[skip]]\nname = "a"\nreason = "r"\nsmp = [1, 2, 3]\naccel = ["tcg", "kvm"]\n'
+        )
+        self.assertTrue(row_matches(row, self.TCG2))
+        self.assertTrue(row_matches(row, {**self.TCG2, "smp": 3, "accel": "kvm"}))
+        self.assertFalse(row_matches(row, {**self.TCG2, "smp": 4}))
+        self.assertFalse(row_matches(row, {**self.TCG2, "accel": "hvf"}))
+        # `cpu` is an exact string: `max` is not `max,+invtsc`.
+        (cpu,) = self._rows('[[skip]]\nname = "a"\nreason = "r"\ncpu = "max"\n')
+        self.assertFalse(row_matches(cpu, {**self.TCG2, "cpu": "max,+invtsc"}))
+
+    def test_unselected_row_is_ignored(self) -> None:
+        from tests.harness.skips import check_skips
+
+        rows = self._rows('[[skip]]\nname = "a"\nreason = "r"\n')
+        check_skips({}, ["b"], self.TCG2, rows)
+
+    def test_must_run_name_cannot_skip(self) -> None:
+        from tests.harness.skips import check_skips, must_run_names
+
+        self.assertEqual(
+            must_run_names("lifetime_*,exit_burst,fork_?om,a[bc],fork_oom"),
+            frozenset({"exit_burst", "fork_oom"}),
+        )
+        self.assertEqual(must_run_names(""), frozenset())
+        rows = self._rows('[[skip]]\nname = "a"\nreason = "r"\n')
+        with self.assertRaisesRegex(HarnessError, "VIBEOS_KTEST names it: it must run"):
+            check_skips({"a": "r"}, ["a"], self.TCG2, rows, must_run=must_run_names("a"))
+        check_skips({}, ["a"], self.TCG2, rows, must_run=must_run_names("a"))
+        check_skips({"a": "r"}, ["a"], self.TCG2, rows, must_run=must_run_names("a*"))
+
+    def test_reason_must_match(self) -> None:
+        from tests.harness.skips import check_skips
+
+        rows = self._rows('[[skip]]\nname = "a"\nreason = "no AP"\n')
+        with self.assertRaisesRegex(HarnessError, "a skipped with reason 'no edu'"):
+            check_skips({"a": "no edu"}, ["a"], self.TCG2, rows)
+
+    def test_every_problem_in_one_error(self) -> None:
+        from tests.harness.skips import check_skips
+
+        rows = self._rows('[[skip]]\nname = "a"\nreason = "r"\n')
+        with self.assertRaises(HarnessError) as cm:
+            check_skips({"b": "x"}, ["a", "b"], self.TCG2, rows)
+        self.assertIn("b skipped", str(cm.exception))
+        self.assertIn("a ran", str(cm.exception))
+
+    def test_bad_rows_rejected(self) -> None:
+        for text, why in (
+            ('[[skip]]\nname = "a"\nreason = "r"\nmemory = "1G"\n', "unknown key"),
+            ('[[skip]]\nname = "a"\n', "reason"),
+            ('[[skip]]\nreason = "r"\n', "name"),
+            ('[[skip]]\nname = "a"\nreason = "r"\nsmp = "2"\n', "not an integer"),
+            ('[[skip]]\nname = "a"\nreason = "r"\ncpu = 2\n', "not a non-empty string"),
+            ('[[skip]]\nname = "a"\nreason = "r"\ncpu = []\n', "empty array"),
+            ('[[skips]]\nname = "a"\n', "unknown top-level"),
+        ):
+            with self.subTest(why=why):
+                with self.assertRaisesRegex(HarnessError, why):
+                    self._rows(text)
+
+    def test_launch_config_hpet_off_machine(self) -> None:
+        from tests.harness.skips import launch_config
+
+        on = launch_config(QemuConfig(iso="x.iso", smp=4, cpu="qemu64,-tsc-deadline", accel="kvm"))
+        self.assertEqual(on["arch"], "x86_64")
+        self.assertEqual(on["accel"], "kvm")
+        self.assertEqual(on["cpu"], "qemu64,-tsc-deadline")
+        self.assertEqual(on["smp"], 4)
+        self.assertEqual(on["mem"], "128M")
+        self.assertEqual(on["machine"], "pc")
+        self.assertEqual(on["host"], platform.system().lower())
+        off = launch_config(QemuConfig(iso="x.iso", hpet=False, accel="tcg"))
+        self.assertEqual(off["machine"], "pc,hpet=off")
+        self.assertEqual(off["accel"], "tcg")
+
+    def test_ktest_selection(self) -> None:
+        self.assertEqual(run_ktest.ktest_selection(QemuConfig(iso="x", ktest="a,b*")), "a,b*")
+        cfg = QemuConfig(iso="x", cmdline="loglevel=8 vibeos.ktest=x vibeos.ktest=y,z")
+        self.assertEqual(run_ktest.ktest_selection(cfg), "y,z")
+        self.assertEqual(run_ktest.ktest_selection(QemuConfig(iso="x")), "")
+
+    def test_repo_skips_toml_loads(self) -> None:
+        from tests.harness.skips import FIELDS, SKIPS_TOML, load_skips
+
+        rows = load_skips(SKIPS_TOML)
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertTrue(set(row.match) <= set(FIELDS))
+        names = {r.name for r in rows}
+        self.assertIn("cpu_hardening", names)
 
 
 if __name__ == "__main__":

@@ -213,7 +213,7 @@ help:
 	  '  test-kernel-smp4      in-guest tests, -smp 4' \
 	  '  test-lapic-fallback   in-guest tests, TSC-deadline off' \
 	  '  test-vibefs-crash     QEMU-kill + host fsck-vibefs' \
-	  '  test-smp-stress       -smp 4, longer timeout (scheduled CI)' \
+	  '  test-smp-stress       -smp 4 in-guest tier (weekly CI)' \
 	  '  test                  all of the above except test-smp-stress and test-ps2' \
 	  '  test-vibefs-crash-plants  each vibeos.crash_plant= defect caught, then a clean round' \
 	  '  gate PHASE=N          phase exit gate: gate-map entries and box rules (RECORD=1: dev-host records)' \
@@ -504,9 +504,9 @@ test-vibefs-crash-plants: $(ISO_VIBEFS_CRASH) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NB
 
 test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-strace test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
 
-# Longer high-CPU stress. Scheduled CI, not every push. ROADMAP §4.11.
+# The -smp 4 in-guest tier, weekly in CI, not every push. ROADMAP §4.11.
 test-smp-stress: $(ISO_KTEST)
-	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) VIBEOS_SMP=4 VIBEOS_TIMEOUT=180 python3 tests/harness/run_ktest.py
+	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) VIBEOS_SMP=4 python3 tests/harness/run_ktest.py
 
 # Phase exit gate (ROADMAP §10.9): the gate map's entries and the box rules.
 .PHONY: gate

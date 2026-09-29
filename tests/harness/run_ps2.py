@@ -15,6 +15,7 @@ import sys
 
 from tests.harness import results
 from tests.harness.harness import (
+    BOOT_ALLOWANCE_S,
     HarnessError,
     default_iso,
     env_config,
@@ -24,7 +25,7 @@ from tests.harness.harness import (
 
 
 def main() -> int:
-    env = env_config(default_iso=default_iso(), default_timeout=60)
+    env = env_config(default_iso=default_iso(), default_timeout=BOOT_ALLOWANCE_S)
     res = results.Results(env.tier)
     cfg = env.qemu()
     try:
