@@ -2,6 +2,8 @@
 //! the table every scan records into, the end-of-run report, and the tests
 //! of the measurement (DESIGN §4.5, TESTING §8.2).
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use vibeos::lock::RANK_DEVICE;
 use vibeos::sched::stack_depth::{self, Deepest, DepthTable, SIZES};
 
@@ -82,6 +84,52 @@ pub(crate) fn stack_depth_exit_scan() -> Outcome {
     }
     if used > stack_depth::budget(16 * 1024) {
         return crate::fail_fmt!("used {} over budget", used);
+    }
+    Outcome::Ok
+}
+
+/// Levels [`plant_recurse`] goes down, each a [`PLANT_FRAME`] array and its frame.
+pub(crate) const PLANT_LEVELS: u32 = 13;
+
+/// Bytes of [`plant_recurse`]'s array at each level.
+const PLANT_FRAME: usize = 1024;
+
+/// The planted over-budget depth, at least 13 KiB (13312 bytes).
+pub(crate) const PLANT_MIN: usize = 13 * 1024;
+
+static PLANT_SINK: AtomicU32 = AtomicU32::new(0);
+
+#[inline(never)]
+fn plant_recurse(n: u32) -> u32 {
+    let mut a = [0u8; PLANT_FRAME];
+    a[0] = n as u8;
+    core::hint::black_box(&mut a);
+    let below = if n > 1 { plant_recurse(n - 1) } else { 0 };
+    below.wrapping_add(u32::from(core::hint::black_box(&a)[0]))
+}
+
+fn plant_worker() {
+    // IF=0 through the recursion, so no top half lands at depth: the
+    // deepest word written is the recursion's own.
+    let _g = crate::x86::InterruptGuard::enter();
+    let v = plant_recurse(core::hint::black_box(PLANT_LEVELS));
+    PLANT_SINK.store(v, Ordering::Relaxed);
+}
+
+/// Opt-in: thread `stack-plant` recurses at least 13 KiB deep on a 16 KiB
+/// stack, over its 12 KiB budget. The harness's planted boot passes only
+/// when the report names it over budget (TESTING §8.2).
+pub(crate) fn stack_depth_planted() -> Outcome {
+    let h = match thread_init::spawn("stack-plant", plant_worker) {
+        Ok(h) => h,
+        Err(_) => return Outcome::Fail("spawn"),
+    };
+    let Some(used) = wait_exit_depth(h.id().0) else {
+        return Outcome::Fail("no exit record within 2 s");
+    };
+    crate::ktest_info!("stack-plant used {} bytes", used);
+    if used < PLANT_MIN {
+        return crate::fail_fmt!("used {} < {}", used, PLANT_MIN);
     }
     Outcome::Ok
 }

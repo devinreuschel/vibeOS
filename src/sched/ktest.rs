@@ -7,7 +7,7 @@ mod reclaim;
 mod registry;
 mod sleep;
 pub(crate) use counted::test_counted_deferred_release;
-pub(crate) use depth::{record, report, stack_depth_exit_scan};
+pub(crate) use depth::{record, report, stack_depth_exit_scan, stack_depth_planted};
 pub(crate) use hooks::{RequeueGuard, requeues, set_requeue_next_cpu, work_live};
 pub(crate) use reclaim::dead_list_batched_rounds;
 pub(crate) use registry::{test_ktest_fail_fmt, test_ktest_helpers, test_ktest_rows};
@@ -1419,4 +1419,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("in_hard_irq_top_bottom", in_hard_irq_top_bottom),
     test("sleep_under_spinlock_asserts", sleep_under_spinlock_asserts),
     test("stack_depth_exit_scan", stack_depth_exit_scan),
+    test("stack_depth_planted", stack_depth_planted)
+        .opt_in()
+        .once(),
 ];

@@ -2457,6 +2457,29 @@ class TestStackDepthReport(unittest.TestCase):
         with self.assertRaisesRegex(HarnessError, "report names 2 sizes, 1 lines"):
             run_ktest.check_stack_depth(lines)
 
+    def test_planted_verdict(self) -> None:
+        plant = "vibeOS: stack: 16384 used 13560 of 12288 by tid 40 stack-plant"
+        ok = [plant, "vibeOS: stack: 65536 used 20000 of 61440 by tid 2 ktest",
+              "vibeOS: stack: report 2 sizes 0 lost"]
+        run_ktest.check_planted(run_ktest.check_stack_depth(ok, enforce=False))
+        # Not over budget: the check could not fail, so the boot fails.
+        under = [self.OK[1], self.OK[2], self.OK[3]]
+        with self.assertRaisesRegex(HarnessError, r"over budget \[\]"):
+            run_ktest.check_planted(run_ktest.check_stack_depth(under, enforce=False))
+        # Another thread over budget too.
+        other = [plant.replace("16384", "32768").replace("12288", "28672"),
+                 "vibeOS: stack: 16384 used 13000 of 12288 by tid 41 w",
+                 "vibeOS: stack: 32768 used 30000 of 28672 by tid 40 stack-plant",
+                 "vibeOS: stack: report 2 sizes 0 lost"][1:]
+        with self.assertRaisesRegex(HarnessError, "over budget"):
+            run_ktest.check_planted(run_ktest.check_stack_depth(other, enforce=False))
+        # Over budget but the report is not whole.
+        lost = [plant, "vibeOS: stack: report 1 sizes 1 lost"]
+        with self.assertRaisesRegex(HarnessError, "1 stack sizes lost"):
+            run_ktest.check_planted(run_ktest.check_stack_depth(lost, enforce=False))
+        with self.assertRaisesRegex(HarnessError, "no `vibeOS: stack: report`"):
+            run_ktest.check_planted(run_ktest.check_stack_depth([plant], enforce=False))
+
     def test_summary_file(self) -> None:
         import tempfile
 

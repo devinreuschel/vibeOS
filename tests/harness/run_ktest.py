@@ -342,7 +342,13 @@ def check_select_run(lines: Iterable[str], expected: dict[str, int], absent: Ite
 
 
 def _proof_boot(
-    env: EnvConfig, label: str, *, ktest: str, repeat: int | None, cmdline: str = ""
+    env: EnvConfig,
+    label: str,
+    *,
+    ktest: str,
+    repeat: int | None,
+    cmdline: str = "",
+    enforce_stack: bool = True,
 ) -> RunResult:
     """One proof boot on a fresh disk, with its own selection."""
     penv = dataclasses.replace(
@@ -351,7 +357,13 @@ def _proof_boot(
     disk = make_disk(DISK_BYTES, "vibeos-vblk-")
     try:
         cfg = penv.qemu(extra=ktest_devices(disk, env.smp), boot_order="d")
-        raw = _ktest_boot(cfg, env.timeout, persist_reboot=False, label=f"{env.tier} {label}")
+        raw = _ktest_boot(
+            cfg,
+            env.timeout,
+            persist_reboot=False,
+            label=f"{env.tier} {label}",
+            enforce_stack=enforce_stack,
+        )
     finally:
         try:
             os.unlink(disk)
@@ -384,6 +396,44 @@ def _repeat_boot(env: EnvConfig) -> None:
     """`reap_many_via_idle` 20 times in one boot (ROADMAP §10.2, F074)."""
     raw = _proof_boot(env, "repeat", ktest=REPEAT_TEST, repeat=REPEAT_N)
     check_select_run(raw.lines, {REPEAT_TEST: REPEAT_N}, ())
+
+
+# The planted stack boot (ROADMAP §10.2): `stack_depth_planted` recurses at
+# least 13 KiB on a 16 KiB stack, over its 12 KiB budget.
+PLANT_TEST = "stack_depth_planted"
+PLANT_THREAD = "stack-plant"
+
+
+def check_planted(report: StackReport) -> None:
+    """The planted boot's verdict: the report is whole, and the one use
+    over budget is thread `stack-plant`'s. Raises `HarnessError`."""
+    over = [d.name for d in report.over]
+    if over != [PLANT_THREAD]:
+        raise HarnessError(f"planted stack: over budget {over}, want [{PLANT_THREAD!r}]")
+    rest = [p for p in report.problems() if f" {PLANT_THREAD} used " not in p]
+    if rest:
+        raise HarnessError("planted stack: " + "; ".join(rest))
+
+
+def _single_test_boot(
+    env: EnvConfig, test: str, label: str, *, enforce_stack: bool = True
+) -> RunResult:
+    """One boot of test `test` alone (`VIBEOS_KTEST`), on a fresh disk."""
+    return _proof_boot(env, label, ktest=test, repeat=None, enforce_stack=enforce_stack)
+
+
+def _planted_boot(env: EnvConfig) -> None:
+    """The expect-fail stack boot: `stack_depth_planted` alone, which passes
+    only when `check_stack_depth` names `stack-plant` over budget and
+    nothing else fails (ROADMAP §10.2)."""
+    try:
+        raw = _single_test_boot(env, PLANT_TEST, "planted stack", enforce_stack=False)
+        check_planted(check_stack_depth(frame.kernel_lines(raw.lines), enforce=False))
+    except HarnessError:
+        _record(PLANT_TEST, False)
+        raise
+    _record(PLANT_TEST, True)
+    print(f"[ktest] planted stack: {PLANT_THREAD} over budget, as planted", file=sys.stderr)
 
 
 def print_ktest_summary(summary: KtestSummary, exit_code: int | None) -> None:
@@ -506,6 +556,7 @@ def main() -> int:
         proofs.append(("repeat boot", _repeat_boot))
     if env.smp >= 2:
         proofs.append(("deadline trip boot", ktest_deadline_trip))
+    proofs.append(("planted stack boot", _planted_boot))
     for label, proof in proofs:
         try:
             proof(env)

@@ -701,7 +701,18 @@ included, which no per-function bound sees. Rejected: raising the size when a pa
 tight, which nobody learns until the overflow halts the kernel; a static whole-call-graph bound,
 which loses the path at every indirect call (`dyn InodeOps`, IRQ handler tables, function pointers);
 and 8-page stacks everywhere, 16 MiB at the 1024-thread Phase 10 limit, which hide the regressions a
-measurement shows. Rule; not yet enforced: nothing measures stack depth (ROADMAP §10.2).
+measurement shows.
+
+Measured (ROADMAP §10.2, TESTING §8.2): in `kernel_tests` builds every guarded stack is filled with
+a pattern when `kva_init::alloc_guarded_stack` maps it and again when a spawn reuses it from a CPU's
+cache; the switch tail scans a dead thread's stack before the cache or the dead list takes it, and
+the registry scans every live thread's stack at the end of the run. Each boot prints the deepest use
+per stack size (`vibeOS: stack:` lines), and `run_ktest.py` fails a boot where a use is over the
+stack's size minus 4 KiB; the planted boot, `stack_depth_planted`'s 13 KiB recursion on a 16 KiB
+stack, proves the check fails. The deepest 16 KiB path measured when the check landed was a user
+spawn (`proc_init::spawn_image`, `start_loaded`, `thread_init::spawn_inner` and its `Tcb`,
+`user_init::new_space`) with an interrupt on top, about 11.9 KiB, after the FAT cluster buffers moved
+into the volume and virtio-blk's `pump` shrank to a 4-completion batch.
 
 ## 4.6 What comes later
 

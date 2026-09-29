@@ -235,7 +235,12 @@ a size line count other than `<n>`, or a use over its stack's budget, and append
 `$GITHUB_STEP_SUMMARY` when it is set, one block per boot: they are the budget's evidence. A top
 half with its entry frame over 4 KiB that pushes a path over is DESIGN §4.5's fallback, per-CPU
 interrupt stacks. `stack_depth_exit_scan` spawns a 16 KiB worker that puts 4 KiB on its stack and
-requires its exit record between 4 KiB and the budget.
+requires its exit record between 4 KiB and the budget. When `VIBEOS_KTEST` is unset, `make
+test-kernel` also runs the planted stack boot (`_planted_boot`, through `_single_test_boot`, which
+boots one test on a fresh disk): the opt-in `stack_depth_planted`, whose thread `stack-plant`
+recurses 13 levels of a 1 KiB array with IF=0, so no top half lands at depth, and requires an exit
+record of at least 13 KiB. That boot passes only when `check_planted` finds the report whole and
+`stack-plant` the one use over budget; it records `stack_depth_planted` in the results file.
 
 When a test fails, print enough to diagnose it without a rerun. A failing test that only prints its
 name costs a full debug cycle to learn anything.
