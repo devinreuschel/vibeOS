@@ -4,18 +4,17 @@
 //! module runs the registry over the real IDT, prints the serial protocol,
 //! and exits QEMU through `isa-debug-exit`.
 
-use alloc::boxed::Box;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use vibeos::apic::{Polarity, TimerMode, Trigger};
+use vibeos::apic::{Polarity, Trigger};
 use vibeos::block::{BlockError, DeviceState, Op};
 use vibeos::dev::{ClaimError, Device, Driver, IdMatch, ProbeError};
 use vibeos::dma::{self, DMA32_BOUNDARY, DmaAlloc};
 use vibeos::fs::{FsError, InodeKind, O_CREAT, O_RDWR};
 use vibeos::irq::{self, IrqError};
 use vibeos::lock::RANK_DEVICE;
-use vibeos::paging::{PAGE_SIZE_4K, PhysAddr};
+use vibeos::paging::PhysAddr;
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
 use vibeos::per_cpu::PerCpuRemote;
 use vibeos::pmm::Frames;
@@ -39,16 +38,14 @@ use crate::part_init;
 use crate::pci_init;
 use crate::per_cpu_init;
 use crate::pmm_init;
-use crate::sched_init;
 use crate::sync_init::SpinMutex;
 use crate::thread_init::{self, ThreadHandle};
 use crate::time_init;
 use crate::vibefs_init;
 use crate::virtio_blk_init;
 use crate::virtio_init;
-use crate::work_init;
 use crate::x86;
-use crate::{acpi, arch, boot, mm, proc, smp, sync, time};
+use crate::{acpi, arch, boot, mm, proc, sched, smp, sync, time};
 pub(crate) mod user;
 
 const ISA_DEBUG_EXIT: u16 = 0xF4;
@@ -174,12 +171,10 @@ pub(crate) type Suite = &'static [Test];
 
 mod p10_s02;
 mod p10_s04;
-mod p10_s08;
 mod p10_s09;
 mod p10_s11;
 mod p10_s12;
 mod p10_s13;
-mod p10_s17;
 mod p10_s19;
 mod p10_s23;
 
@@ -245,17 +240,23 @@ pub(crate) const TESTS: &[Test] = &[
     test("per_cpu_identity", smp::ktest::test_per_cpu_identity),
     test("trampoline_page", smp::ktest::test_trampoline_page),
     test("failed_ap_cleanup", smp::ktest::test_failed_ap_cleanup),
-    test("spawn_sentinel", test_spawn_sentinel),
-    test("switch_two_threads", test_switch_two_threads),
+    test("spawn_sentinel", sched::ktest::test_spawn_sentinel),
+    test("switch_two_threads", sched::ktest::test_switch_two_threads),
     test("irq_guard_nest", arch::ktest::test_irq_guard_nest),
     test("spin_mutex", sync::ktest::test_spin_mutex),
     test("lock_spins", sync::ktest::test_lock_spins),
-    test("yield_now_switches", test_yield_now_switches),
-    test("sleep_ms_50", test_sleep_ms_50),
-    test("preempt_two_threads", test_preempt_two_threads),
-    test("idle_runs", test_idle_runs),
-    test("reap_returns_frames", test_reap_returns_frames),
-    test("reap_many_via_idle", test_reap_many_via_idle),
+    test("yield_now_switches", sched::ktest::test_yield_now_switches),
+    test("sleep_ms_50", sched::ktest::test_sleep_ms_50),
+    test(
+        "preempt_two_threads",
+        sched::ktest::test_preempt_two_threads,
+    ),
+    test("idle_runs", sched::ktest::test_idle_runs),
+    test(
+        "reap_returns_frames",
+        sched::ktest::test_reap_returns_frames,
+    ),
+    test("reap_many_via_idle", sched::ktest::test_reap_many_via_idle),
     test(
         "blocking_mutex_counter",
         sync::ktest::test_blocking_mutex_counter,
@@ -274,9 +275,15 @@ pub(crate) const TESTS: &[Test] = &[
     test("channel_mpsc", sync::ktest::test_channel_mpsc),
     test("mutex_deadline", sync::ktest::test_mutex_deadline),
     test("sync_try_paths", sync::ktest::test_sync_try_paths),
-    test("sched_lock_timer_irq", test_sched_lock_timer_irq),
-    test("spawn_exit_thousands", test_spawn_exit_thousands),
-    test("cross_cpu_spawn", test_cross_cpu_spawn),
+    test(
+        "sched_lock_timer_irq",
+        sched::ktest::test_sched_lock_timer_irq,
+    ),
+    test(
+        "spawn_exit_thousands",
+        sched::ktest::test_spawn_exit_thousands,
+    ),
+    test("cross_cpu_spawn", sched::ktest::test_cross_cpu_spawn),
     test("reschedule_ipi_wake_ap", test_reschedule_ipi_wake_ap),
     test("call_function_ipi", test_call_function_ipi),
     test("cpu_hardening", arch::ktest::test_cpu_hardening),
@@ -310,7 +317,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("intx_free_masks", test_intx_free_masks),
     test("dma_alloc", test_dma_alloc),
     test("dma_edu", test_dma_edu),
-    test("workqueue", test_workqueue),
+    test("workqueue", sched::ktest::test_workqueue),
     test("virtio_bind", test_virtio_bind),
     test("virtio_vq", test_virtio_vq),
     test("dev_random_source", test_dev_random_source),
@@ -331,9 +338,9 @@ pub(crate) const TESTS: &[Test] = &[
     test("pseudo_fs", test_pseudo_fs),
     test("fat_initrd", test_fat_initrd),
     test("vibefs", test_vibefs),
-    test("ktest_rows", test_ktest_rows),
-    test("ktest_fail_fmt", test_ktest_fail_fmt),
-    test("ktest_helpers", test_ktest_helpers),
+    test("ktest_rows", sched::ktest::test_ktest_rows),
+    test("ktest_fail_fmt", sched::ktest::test_ktest_fail_fmt),
+    test("ktest_helpers", sched::ktest::test_ktest_helpers),
     test("user_code_exit", proc::ktest::test_user_code_exit),
     test("user_image_elf", proc::ktest::test_user_image_elf),
     test("user_code_layout", proc::ktest::test_user_code_layout),
@@ -341,7 +348,7 @@ pub(crate) const TESTS: &[Test] = &[
         "orphan_freed_no_init",
         proc::ktest::test_orphan_freed_no_init,
     ),
-    test("ktest_context", p10_s02::ktest_context),
+    test("ktest_context", sched::ktest::ktest_context),
     test("msix_cpu_publish_last", p10_s02::msix_cpu_publish_last),
     test(
         "lifetime_iowaiter_publish_last",
@@ -367,13 +374,17 @@ pub(crate) const TESTS: &[Test] = &[
         "vmap_32_frames_unmapped",
         mm::ktest::vmap_32_frames_unmapped,
     ),
-    test("spawn_stack_oom", p10_s08::spawn_stack_oom).deadline(10_000),
-    test("fork_oom", p10_s08::fork_oom).deadline(10_000),
-    test("lifetime_stack_reclaim", p10_s08::lifetime_stack_reclaim).deadline(120_000),
-    test("exit_burst", p10_s08::exit_burst).deadline(60_000),
+    test("spawn_stack_oom", sched::ktest::spawn_stack_oom).deadline(10_000),
+    test("fork_oom", sched::ktest::fork_oom).deadline(10_000),
+    test(
+        "lifetime_stack_reclaim",
+        sched::ktest::lifetime_stack_reclaim,
+    )
+    .deadline(120_000),
+    test("exit_burst", sched::ktest::exit_burst).deadline(60_000),
     test(
         "lifetime_dead_slot_on_cpu",
-        p10_s08::lifetime_dead_slot_on_cpu,
+        sched::ktest::lifetime_dead_slot_on_cpu,
     )
     .deadline(180_000),
     test("file_table_fork_churn", p10_s09::test_file_table_fork_churn),
@@ -435,8 +446,8 @@ pub(crate) const TESTS: &[Test] = &[
         proc::ktest::test_noncanonical_rip_sigsegv,
     )
     .deadline(30_000),
-    test("fp_no_leak", p10_s17::test_fp_no_leak).deadline(60_000),
-    test("fp_migrate_counter", p10_s17::test_fp_migrate_counter).deadline(30_000),
+    test("fp_no_leak", sched::ktest::test_fp_no_leak).deadline(60_000),
+    test("fp_migrate_counter", sched::ktest::test_fp_migrate_counter).deadline(30_000),
     test("exec_huge_memsz", proc::ktest::test_exec_huge_memsz).deadline(60_000),
     test(
         "brk_mmap_munmap_user",
@@ -831,372 +842,7 @@ pub(crate) fn cpu_remote(id: u32) -> Option<&'static PerCpuRemote> {
     per_cpu_init::cpu(id)
 }
 
-static SENTINEL: AtomicU64 = AtomicU64::new(0);
-
-fn sentinel_entry() {
-    SENTINEL.store(0xC0FFEE, Ordering::SeqCst);
-}
-
-fn test_spawn_sentinel() -> Outcome {
-    let _g = x86::InterruptGuard::enter();
-    SENTINEL.store(0, Ordering::SeqCst);
-    let nest0 = per_cpu_init::irq_nest();
-    let Ok(h) = thread_init::spawn_here("sentinel", sentinel_entry) else {
-        return Outcome::Fail("spawn");
-    };
-    if h.id() == ThreadId::BOOTSTRAP {
-        return Outcome::Fail("spawned bootstrap id");
-    }
-    thread_init::switch_to(h.id());
-    if SENTINEL.load(Ordering::SeqCst) != 0xC0FFEE {
-        return Outcome::Fail("sentinel not written");
-    }
-    if thread_init::name(h.id()) != "sentinel" {
-        return Outcome::Fail("name lost");
-    }
-    if thread_init::current_id() != registry_tid() {
-        return Outcome::Fail("did not return to the registry");
-    }
-    if thread_init::state(h.id()) != ThreadState::Dead {
-        return Outcome::Fail("returned thread not dead");
-    }
-    if per_cpu_init::irq_nest() != nest0 {
-        return Outcome::Fail("irq_nest leaked across spawn");
-    }
-    Outcome::Ok
-}
-
-static STEPS: AtomicU64 = AtomicU64::new(0);
-static A_ID: AtomicU32 = AtomicU32::new(0);
-static B_ID: AtomicU32 = AtomicU32::new(0);
-
-fn thread_a() {
-    STEPS.fetch_add(1, Ordering::SeqCst);
-    thread_init::switch_to(ThreadId(B_ID.load(Ordering::SeqCst)));
-    STEPS.fetch_add(1, Ordering::SeqCst);
-}
-
-fn thread_b() {
-    STEPS.fetch_add(1, Ordering::SeqCst);
-    thread_init::switch_to(registry_tid());
-}
-
-fn test_switch_two_threads() -> Outcome {
-    let _g = x86::InterruptGuard::enter();
-    STEPS.store(0, Ordering::SeqCst);
-    let nest0 = per_cpu_init::irq_nest();
-    let Ok(a) = thread_init::spawn_here("a", thread_a) else {
-        return Outcome::Fail("spawn");
-    };
-    let Ok(b) = thread_init::spawn_here("b", thread_b) else {
-        return Outcome::Fail("spawn");
-    };
-    A_ID.store(a.id().raw(), Ordering::SeqCst);
-    B_ID.store(b.id().raw(), Ordering::SeqCst);
-    thread_init::switch_to(a.id());
-    if STEPS.load(Ordering::SeqCst) != 2 {
-        return Outcome::Fail("expected a then b (2 steps)");
-    }
-    if thread_init::state(a.id()) != ThreadState::Ready {
-        return Outcome::Fail("a should still be ready");
-    }
-    thread_init::switch_to(a.id());
-    if STEPS.load(Ordering::SeqCst) != 3 {
-        return Outcome::Fail("a did not resume");
-    }
-    if thread_init::state(a.id()) != ThreadState::Dead {
-        return Outcome::Fail("a not dead after return");
-    }
-    if per_cpu_init::irq_nest() != nest0 {
-        return Outcome::Fail("irq_nest leaked across switch");
-    }
-    Outcome::Ok
-}
-
-static YIELD_FLAG: AtomicU64 = AtomicU64::new(0);
-
-fn yielder_entry() {
-    YIELD_FLAG.store(1, Ordering::SeqCst);
-    thread_init::yield_now();
-    YIELD_FLAG.store(2, Ordering::SeqCst);
-}
-
-fn test_yield_now_switches() -> Outcome {
-    let _g = x86::InterruptGuard::enter();
-    YIELD_FLAG.store(0, Ordering::SeqCst);
-    let Ok(_h) = thread_init::spawn_here("yielder", yielder_entry) else {
-        return Outcome::Fail("spawn");
-    };
-    thread_init::yield_now();
-    if YIELD_FLAG.load(Ordering::SeqCst) != 1 {
-        return Outcome::Fail("yielder did not run");
-    }
-    thread_init::yield_now();
-    if YIELD_FLAG.load(Ordering::SeqCst) != 2 {
-        return Outcome::Fail("yielder did not resume");
-    }
-    Outcome::Ok
-}
-
-fn test_sleep_ms_50() -> Outcome {
-    let t0 = time_init::uptime_ms();
-    let u0 = time_init::now_us();
-    thread_init::sleep_ms(50);
-    let dt = time_init::uptime_ms().saturating_sub(t0);
-    let du = time_init::now_us().saturating_sub(u0) / 1_000;
-    if (50..=100).contains(&dt) {
-        return Outcome::Ok;
-    }
-    // TCG: ticks coalesce under SMP; sleep is now_ns. Keep 50–100 on
-    // invariant TSC.
-    if !time_init::tsc_invariant() && (40..=400).contains(&du) && (1..=400).contains(&dt) {
-        return Outcome::Ok;
-    }
-    crate::marker!("vibeOS: ktest:   sleep_ms dt={dt} du={du}");
-    Outcome::Fail("sleep_ms not 50-100ms")
-}
-
-static PREEMPT_A: AtomicU64 = AtomicU64::new(0);
-static PREEMPT_B: AtomicU64 = AtomicU64::new(0);
-static PREEMPT_STOP: AtomicBool = AtomicBool::new(false);
-
-fn preempt_a() {
-    while !PREEMPT_STOP.load(Ordering::Relaxed) {
-        PREEMPT_A.fetch_add(1, Ordering::Relaxed);
-        core::hint::spin_loop();
-    }
-}
-
-fn preempt_b() {
-    while !PREEMPT_STOP.load(Ordering::Relaxed) {
-        PREEMPT_B.fetch_add(1, Ordering::Relaxed);
-        core::hint::spin_loop();
-    }
-}
-
-fn test_preempt_two_threads() -> Outcome {
-    PREEMPT_A.store(0, Ordering::SeqCst);
-    PREEMPT_B.store(0, Ordering::SeqCst);
-    PREEMPT_STOP.store(false, Ordering::SeqCst);
-    let Ok(_a) = thread_init::spawn("preempt-a", preempt_a) else {
-        return Outcome::Fail("spawn");
-    };
-    let Ok(_b) = thread_init::spawn("preempt-b", preempt_b) else {
-        return Outcome::Fail("spawn");
-    };
-    let t0 = time_init::uptime_ms();
-    loop {
-        let a = PREEMPT_A.load(Ordering::Relaxed);
-        let b = PREEMPT_B.load(Ordering::Relaxed);
-        if a > 0 && b > 0 {
-            PREEMPT_STOP.store(true, Ordering::SeqCst);
-            let t1 = time_init::uptime_ms();
-            while time_init::uptime_ms().saturating_sub(t1) < 50 {
-                core::hint::spin_loop();
-            }
-            crate::marker!("vibeOS: ktest:   preempt a={a} b={b}");
-            return Outcome::Ok;
-        }
-        if time_init::uptime_ms().saturating_sub(t0) > 500 {
-            PREEMPT_STOP.store(true, Ordering::SeqCst);
-            crate::marker!("vibeOS: ktest:   preempt a={a} b={b}");
-            return Outcome::Fail("no preemption");
-        }
-        core::hint::spin_loop();
-    }
-}
-
-fn test_idle_runs() -> Outcome {
-    let t0 = sched_init::idle_tsc();
-    thread_init::sleep_ms(20);
-    let t1 = sched_init::idle_tsc();
-    if t1 > t0 {
-        Outcome::Ok
-    } else {
-        crate::marker!("vibeOS: ktest:   idle_tsc {t0} -> {t1}");
-        Outcome::Fail("idle did not run")
-    }
-}
-
 pub(crate) fn dying_entry() {}
-
-fn test_reap_returns_frames() -> Outcome {
-    let before = quiescent_free_frames();
-    {
-        let _g = x86::InterruptGuard::enter();
-        let Ok(h) = thread_init::spawn_here("dying", dying_entry) else {
-            return Outcome::Fail("spawn");
-        };
-        thread_init::yield_now();
-        if thread_init::current_id() != registry_tid() {
-            return Outcome::Fail("did not return to the registry");
-        }
-        if thread_init::try_state(h.id()) != Some(ThreadState::Dead) {
-            return Outcome::Fail("returned thread not dead");
-        }
-    }
-    let after = quiescent_free_frames();
-    if after != before {
-        crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
-        return Outcome::Fail("reap did not restore frames");
-    }
-    Outcome::Ok
-}
-
-const REAP_MANY: usize = 16;
-
-/// Two waves of dying threads, the first while the registry sleeps (the
-/// last death switches to idle), the second while it runs (the last death
-/// resumes it or idle from the preempt path); every stack comes back
-/// whichever switch tail took it (ROADMAP §10.2, F074; §10.10).
-fn test_reap_many_via_idle() -> Outcome {
-    let before = quiescent_free_frames();
-    let mut ids = [ThreadId::NONE; REAP_MANY];
-
-    let mut i = 0;
-    while i < REAP_MANY {
-        let Ok(h) = thread_init::spawn_here("dying", dying_entry) else {
-            return Outcome::Fail("spawn");
-        };
-        ids[i] = h.id();
-        i += 1;
-    }
-    thread_init::sleep_ms(30);
-    i = 0;
-    while i < REAP_MANY {
-        if thread_init::try_state(ids[i]) != Some(ThreadState::Dead) {
-            return Outcome::Fail("parked wave not dead");
-        }
-        i += 1;
-    }
-
-    i = 0;
-    while i < REAP_MANY {
-        let Ok(h) = thread_init::spawn_here("dying", dying_entry) else {
-            return Outcome::Fail("spawn");
-        };
-        ids[i] = h.id();
-        i += 1;
-    }
-    let t0 = time_init::uptime_ms();
-    loop {
-        let mut n = 0usize;
-        i = 0;
-        while i < REAP_MANY {
-            if thread_init::try_state(ids[i]) == Some(ThreadState::Dead) {
-                n += 1;
-            }
-            i += 1;
-        }
-        if n == REAP_MANY {
-            break;
-        }
-        if time_init::uptime_ms().saturating_sub(t0) > 200 {
-            return Outcome::Fail("running wave not dead");
-        }
-        core::hint::spin_loop();
-    }
-
-    let after = quiescent_free_frames();
-    if after != before {
-        crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
-        return Outcome::Fail("reap did not restore frames");
-    }
-    Outcome::Ok
-}
-
-fn test_sched_lock_timer_irq() -> Outcome {
-    let nest0 = per_cpu_init::irq_nest();
-    let t0 = per_cpu_init::current().remote.ticks.load(Ordering::Relaxed);
-    let wall0 = time_init::uptime_ms();
-    loop {
-        if per_cpu_init::current().remote.ticks.load(Ordering::Relaxed) != t0 {
-            break;
-        }
-        if time_init::uptime_ms().saturating_sub(wall0) > 200 {
-            return Outcome::Fail("no ticks before lock");
-        }
-        core::hint::spin_loop();
-    }
-    // Read under the lock, with IF off: a tick between a read before the
-    // lock and the lock's `cli` is not one that ran under SCHED.
-    let (inner, held) = thread_init::with_sched_lock(|| {
-        let held = per_cpu_init::current().remote.ticks.load(Ordering::Relaxed);
-        if x86::interrupts_enabled() {
-            return (Outcome::Fail("SCHED left IF on"), held);
-        }
-        time_init::busy_wait_ms(20);
-        if x86::interrupts_enabled() {
-            return (Outcome::Fail("IF on during hold"), held);
-        }
-        if per_cpu_init::current().remote.ticks.load(Ordering::Relaxed) != held {
-            return (Outcome::Fail("timer ran under SCHED"), held);
-        }
-        (Outcome::Ok, held)
-    });
-    match inner {
-        Outcome::Ok => {}
-        other => return other,
-    }
-    match apic_init::timer_mode() {
-        TimerMode::Pit => unsafe {
-            core::arch::asm!("int $0x20");
-        },
-        TimerMode::TscDeadline | TimerMode::Periodic => unsafe {
-            core::arch::asm!("int $0xF0");
-        },
-    }
-    if per_cpu_init::current().remote.ticks.load(Ordering::Relaxed) <= held {
-        return Outcome::Fail("forced timer IRQ did not run");
-    }
-    if per_cpu_init::irq_nest() != nest0 {
-        return Outcome::Fail("irq_nest leaked");
-    }
-    Outcome::Ok
-}
-
-const SPAWN_EXIT_N: usize = 2000;
-
-fn spawn_until_dead(name: &'static str) -> Outcome {
-    let _g = x86::InterruptGuard::enter();
-    let Ok(h) = thread_init::spawn_here(name, dying_entry) else {
-        return Outcome::Fail("spawn");
-    };
-    thread_init::yield_now();
-    if thread_init::try_state(h.id()) != Some(ThreadState::Dead) {
-        thread_init::yield_now();
-    }
-    if thread_init::try_state(h.id()) != Some(ThreadState::Dead) {
-        Outcome::Fail("returned thread not dead")
-    } else {
-        Outcome::Ok
-    }
-}
-
-fn test_spawn_exit_thousands() -> Outcome {
-    let before = quiescent_free_frames();
-    let mut i = 0usize;
-    while i < SPAWN_EXIT_N {
-        match spawn_until_dead("die") {
-            Outcome::Ok => {}
-            other => return other,
-        }
-        i += 1;
-    }
-    let after = quiescent_free_frames();
-    if after != before {
-        let h = crate::heap_init::stats();
-        let k = kva_init::stats();
-        crate::marker!(
-            "vibeOS: ktest:   frames {before} -> {after} n={SPAWN_EXIT_N} heap {}/{} kva {}",
-            h.used,
-            h.capacity,
-            k.used
-        );
-        return Outcome::Fail("spawn/exit leaked frames");
-    }
-    Outcome::Ok
-}
 
 pub(crate) fn second_cpu() -> Option<u32> {
     let mask = per_cpu_init::online_mask();
@@ -1228,41 +874,6 @@ pub(crate) fn spin_until_ns(pred: impl Fn() -> bool, ns: u64) -> bool {
         core::hint::spin_loop();
     }
     true
-}
-
-static XCPU_FLAG: AtomicU64 = AtomicU64::new(0);
-static XCPU_CPU: AtomicU32 = AtomicU32::new(0xFFFF);
-
-fn xcpu_entry() {
-    XCPU_CPU.store(per_cpu_init::current().cpu_id, Ordering::SeqCst);
-    XCPU_FLAG.store(1, Ordering::SeqCst);
-}
-
-fn test_cross_cpu_spawn() -> Outcome {
-    let Some(ap) = second_cpu() else {
-        return Outcome::Skip("no AP");
-    };
-    XCPU_FLAG.store(0, Ordering::SeqCst);
-    XCPU_CPU.store(0xFFFF, Ordering::SeqCst);
-    let Ok(h) = thread_init::spawn_on("xcpu", xcpu_entry, ap) else {
-        return Outcome::Fail("spawn");
-    };
-    if !spin_until_ns(|| XCPU_FLAG.load(Ordering::SeqCst) != 0, 500_000_000) {
-        return Outcome::Fail("AP thread did not run");
-    }
-    if XCPU_CPU.load(Ordering::SeqCst) != ap {
-        return Outcome::Fail("thread ran on wrong cpu");
-    }
-    if !spin_until_ns(
-        || thread_init::try_state(h.id()) == Some(ThreadState::Dead),
-        500_000_000,
-    ) {
-        return Outcome::Fail("AP thread did not exit");
-    }
-    if thread_init::cpu_of(h.id()) != ap {
-        return Outcome::Fail("tcb.cpu != ap");
-    }
-    Outcome::Ok
 }
 
 static WAKE_FLAG: AtomicU64 = AtomicU64::new(0);
@@ -2332,27 +1943,6 @@ fn test_dma_edu() -> Outcome {
     } else {
         Outcome::Ok
     }
-}
-
-static WQ_HITS: AtomicU32 = AtomicU32::new(0);
-
-fn wq_mark(arg: usize) {
-    let _b = Box::new(arg as u8);
-    WQ_HITS.fetch_add(arg as u32, Ordering::SeqCst);
-}
-
-fn test_workqueue() -> Outcome {
-    if !work_init::live() {
-        return Outcome::Fail("work not live");
-    }
-    WQ_HITS.store(0, Ordering::SeqCst);
-    if !work_init::enqueue(wq_mark, 3) {
-        return Outcome::Fail("enqueue");
-    }
-    if !spin_until_ns(|| WQ_HITS.load(Ordering::SeqCst) == 3, 2_000_000_000) {
-        return Outcome::Fail("no worker");
-    }
-    Outcome::Ok
 }
 
 fn find_rng() -> Option<(usize, Device)> {
@@ -3432,124 +3022,6 @@ fn test_vibefs() -> Outcome {
     }
     if file_init::sync_fs().is_err() {
         return Outcome::Fail("sync");
-    }
-    Outcome::Ok
-}
-
-fn test_ktest_rows() -> Outcome {
-    let mut seen = 0usize;
-    for (si, suite) in SUITES.iter().enumerate() {
-        for (ri, t) in suite.iter().enumerate() {
-            seen += 1;
-            if t.deadline_ms == 0 {
-                return crate::fail_fmt!("zero deadline on {}", t.name);
-            }
-            for (sj, other) in SUITES.iter().enumerate().skip(si) {
-                let from = if sj == si { ri + 1 } else { 0 };
-                if other[from..].iter().any(|o| o.name == t.name) {
-                    return crate::fail_fmt!("duplicate test name {}", t.name);
-                }
-            }
-        }
-    }
-    if seen < TESTS.len() {
-        return Outcome::Fail("SUITES does not hold the legacy list");
-    }
-    let d = test("d", test_ktest_rows);
-    if d.deadline_ms != 10_000 || d.once || d.opt_in {
-        return Outcome::Fail("test() defaults");
-    }
-    let b = d.deadline(20_000).once().opt_in();
-    if b.deadline_ms != 20_000 || !b.once || !b.opt_in {
-        return Outcome::Fail("builder did not set deadline/once/opt_in");
-    }
-    Outcome::Ok
-}
-
-struct FailingDisplay;
-
-impl fmt::Display for FailingDisplay {
-    fn fmt(&self, _: &mut fmt::Formatter<'_>) -> fmt::Result {
-        Err(fmt::Error)
-    }
-}
-
-fn test_ktest_fail_fmt() -> Outcome {
-    let m = FailMsg::from_args(format_args!("n={}", 7));
-    if m.as_str() != "n=7" {
-        return Outcome::Fail("n={} did not round-trip");
-    }
-    // 199 spaces then `x`: 200 formatted bytes.
-    let m = FailMsg::from_args(format_args!("{:>200}", "x"));
-    if m.as_str().len() != FAIL_MSG_BYTES || m.as_str().bytes().any(|c| c != b' ') {
-        return Outcome::Fail("200 bytes did not cut to 120");
-    }
-    // 119 `x` then a 2-byte `é`: the character goes whole.
-    let m = FailMsg::from_args(format_args!("{:x>119}{}", "", 'é'));
-    if m.as_str().len() != 119 || m.as_str().bytes().any(|c| c != b'x') {
-        return Outcome::Fail("split a character at the cut");
-    }
-    let m = FailMsg::from_args(format_args!("a{}", FailingDisplay));
-    if m.as_str() != "a <fmt error>" {
-        return Outcome::Fail("Display error not marked");
-    }
-    match crate::fail_fmt!("id {}", 3) {
-        Outcome::FailFmt(m) if m.as_str() == "id 3" => Outcome::Ok,
-        _ => Outcome::Fail("fail_fmt! did not build FailFmt"),
-    }
-}
-
-static HELPER_RAN: AtomicBool = AtomicBool::new(false);
-
-fn helper_entry() {
-    HELPER_RAN.store(true, Ordering::SeqCst);
-}
-
-/// Wait up to 1 s for `helper_entry` to run in `h` and `h` to die. The
-/// thread may land on this CPU, so yield as well as serve IPIs.
-fn helper_ran_and_died(h: ThreadHandle) -> bool {
-    let t0 = time_init::now_ns();
-    loop {
-        let dead = matches!(
-            thread_init::try_state(h.id()),
-            Some(ThreadState::Dead) | None
-        );
-        if HELPER_RAN.load(Ordering::SeqCst) && dead {
-            return true;
-        }
-        if time_init::now_ns().saturating_sub(t0) > 1_000_000_000 {
-            return false;
-        }
-        thread_init::yield_now();
-        service_incoming_guarded();
-        core::hint::spin_loop();
-    }
-}
-
-fn test_ktest_helpers() -> Outcome {
-    let Some(pa) = alloc_frames(2) else {
-        return Outcome::Fail("alloc_frames(2)");
-    };
-    let aligned = pa.as_u64() % (4 * PAGE_SIZE_4K) == 0;
-    // SAFETY: `pa` is the order-2 block `alloc_frames(2)` returned above,
-    // freed once; established here.
-    unsafe { dealloc_frames(pa, 2) };
-    if !aligned {
-        return Outcome::Fail("order-2 block not 16 KiB aligned");
-    }
-    if cpu_remote(0).is_none() {
-        return Outcome::Fail("cpu_remote(0) is None");
-    }
-    if cpu_remote(per_cpu_init::cpu_count() as u32).is_some() {
-        return Outcome::Fail("cpu_remote(cpu_count) is Some");
-    }
-    HELPER_RAN.store(false, Ordering::SeqCst);
-    if !helper_ran_and_died(spawn_thread("ktest-helper", helper_entry)) {
-        return Outcome::Fail("spawn_thread entry did not run and exit");
-    }
-    HELPER_RAN.store(false, Ordering::SeqCst);
-    if !helper_ran_and_died(spawn_thread_on("ktest-helper0", helper_entry, 0)) {
-        return Outcome::Fail("spawn_thread_on(0) entry did not run and exit");
     }
     Outcome::Ok
 }
