@@ -14,7 +14,7 @@
 
 extern crate alloc;
 
-use crate::atomic::{AtomicUsize, Ordering, fence};
+use crate::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering, fence, statics};
 use alloc::boxed::Box;
 use alloc::collections::TryReserveError;
 use alloc::string::String;
@@ -24,9 +24,9 @@ use core::borrow::Borrow;
 use core::cmp::Ordering as CmpOrdering;
 use core::fmt;
 use core::marker::PhantomData;
-use core::mem::MaybeUninit;
+use core::mem::{self, MaybeUninit};
 use core::ops::{Deref, DerefMut};
-use core::ptr::NonNull;
+use core::ptr::{self, NonNull};
 
 /// A heap allocation failed. Callers map it to `ENOMEM` (or the errno
 /// Linux returns there) at the syscall boundary (DESIGN §4.4).
@@ -277,17 +277,52 @@ impl fmt::Debug for TryString {
 /// instead of overflowing, as Linux's `refcount_t` saturates (I27).
 const ARC_SATURATED: usize = isize::MAX as usize;
 
-/// The counted cell a [`TryArc`] points to. Its fields are private and
-/// `value` stays last, so it can be unsized and so fields can be added
-/// before it.
-#[doc(hidden)]
-pub struct ArcInner<T: ?Sized> {
+/// The head of every counted cell (DESIGN §2.11 rules 1 and 6): the count,
+/// the deferred-release link, and the function that frees the whole cell
+/// at the type it was allocated at. `#[repr(C)]` in [`ArcInner`] puts it at
+/// offset 0, so a cell's address is its header's.
+#[repr(C)]
+struct Header {
     count: AtomicUsize,
+    /// The next object on a [`DeferList`]; written only once the count
+    /// has reached zero.
+    next: AtomicPtr<Header>,
+    /// [`release_concrete`] for the value type the cell was built with,
+    /// before any unsizing, so it frees what was allocated (`dyn` included).
+    release: unsafe fn(NonNull<Header>),
+}
+
+/// The counted cell a [`TryArc`] points to: the header, then the value. Its
+/// fields are private and `value` stays last, so it can be unsized.
+#[doc(hidden)]
+#[repr(C)]
+pub struct ArcInner<T: ?Sized> {
+    hdr: Header,
     value: T,
+}
+
+/// Free the cell at `h` as an `ArcInner<V>`, dropping its value.
+///
+/// # Safety
+///
+/// `h` is the header of a cell [`TryArc::try_new_unsize`] built with value
+/// type `V`, its count has reached zero, and nothing else reaches it.
+unsafe fn release_concrete<V>(h: NonNull<Header>) {
+    // SAFETY: by this fn's `# Safety` contract, `h` is the address of a
+    // `Box<ArcInner<V>>` that `kalloc::TryArc::try_new_unsize` gave up with
+    // `TryBox::into_raw`, and `#[repr(C)]` puts the header at offset 0; no
+    // other owner remains.
+    drop(unsafe { TryBox::from_raw(h.cast::<ArcInner<V>>().as_ptr()) });
 }
 
 /// A shared, atomically counted pointer whose constructors return
 /// `Err(AllocError)`. `Clone` never allocates, so it is infallible.
+///
+/// The last put releases the cell in place where DESIGN §2.11 rule 6
+/// allows it, as the hook [`set_release_context`] installs decides, and
+/// otherwise hands it to the sink [`set_deferral`] installs, which links it
+/// onto a [`DeferList`] without allocating. [`TryArc::put_deferred`] always
+/// defers.
 pub struct TryArc<T: ?Sized> {
     ptr: NonNull<ArcInner<T>>,
     _owns: PhantomData<ArcInner<T>>,
@@ -314,15 +349,20 @@ impl<T: Send + 'static> TryArc<T> {
 impl<T: ?Sized> TryArc<T> {
     /// Build the cell at `V`'s own type, let `f` coerce it (`|b| b`, DESIGN
     /// §4.4), then take its raw pointer. `f` only coerces; it must not
-    /// allocate. `V: Send + 'static` because the last release may run on
-    /// another CPU. On failure `v` is dropped and `f` is not called.
+    /// allocate. `V: Send + 'static` because the last release may run later
+    /// on another CPU's worker. On failure `v` is dropped and `f` is not
+    /// called.
     pub fn try_new_unsize<V: Send + 'static>(
         v: V,
         f: impl FnOnce(Box<ArcInner<V>>) -> Box<ArcInner<T>>,
     ) -> Result<Self, AllocError> {
         let cell = TryBox::try_new_unsize(
             ArcInner {
-                count: AtomicUsize::new(1),
+                hdr: Header {
+                    count: AtomicUsize::new(1),
+                    next: AtomicPtr::new(ptr::null_mut()),
+                    release: release_concrete::<V>,
+                },
                 value: v,
             },
             f,
@@ -339,9 +379,73 @@ impl<T: ?Sized> TryArc<T> {
 
     fn inner(&self) -> &ArcInner<T> {
         // SAFETY: the cell is live while any `TryArc` to it exists: each
-        // holds one count, and `TryArc::drop` frees only when the count
-        // reaches zero (`kalloc::TryArc::drop`).
+        // holds one count, and `kalloc::put_raw` releases the cell only
+        // once the count reaches zero.
         unsafe { self.ptr.as_ref() }
+    }
+
+    /// The cell's header, at the cell's address.
+    fn header(&self) -> NonNull<Header> {
+        self.ptr.cast::<Header>()
+    }
+
+    /// Give up this reference. If it is the last, the cell goes to the
+    /// deferral sink in any context, and is released in place only when no
+    /// sink is installed (DESIGN §2.11 rule 6).
+    pub fn put_deferred(self) {
+        let h = self.header();
+        mem::forget(self);
+        // SAFETY: `self` held one count on the live cell at `h`
+        // (`kalloc::TryArc::try_new_unsize`), and `mem::forget` just above
+        // (here) keeps `Drop` from giving it up a second time.
+        unsafe { put_raw(h, Ordering::Release, true) }
+    }
+}
+
+/// Give up one count on the cell at `h`, decrementing with `dec` (the
+/// kernel's is `Release`). At zero, after an Acquire fence (DESIGN §2.11
+/// rule 1), release it in place when `force_defer` is false and the
+/// release-context hook allows it, and otherwise hand it to the deferral
+/// sink. Nothing here reads the cell after the decrement unless it was the
+/// last count (rust-lang/rust#55005).
+///
+/// # Safety
+///
+/// `h` is the header of a live cell that [`TryArc::try_new_unsize`] built,
+/// and the caller owns one of its counts, which it gives up here.
+unsafe fn put_raw(h: NonNull<Header>, dec: Ordering, force_defer: bool) {
+    let hp = h.as_ptr();
+    // SAFETY: the caller owns a count, so the cell stays live until this
+    // thread's decrement below; established by `kalloc::put_raw`'s
+    // `# Safety` section.
+    let mut c = unsafe { (*hp).count.load(Ordering::Relaxed) };
+    loop {
+        // At the saturation value the count sticks and the value leaks (I27).
+        if c >= ARC_SATURATED {
+            return;
+        }
+        // SAFETY: until this compare-exchange succeeds, the caller's count
+        // keeps the cell live; established by `kalloc::put_raw`'s
+        // `# Safety` section.
+        match unsafe {
+            (*hp)
+                .count
+                .compare_exchange_weak(c, c - 1, dec, Ordering::Relaxed)
+        } {
+            Ok(_) => break,
+            Err(now) => c = now,
+        }
+    }
+    if c != 1 {
+        return;
+    }
+    // Acquire pairs with every other holder's Release decrement.
+    fence(Ordering::Acquire);
+    let d = Deferred(h);
+    if !force_defer && release_context() {
+        d.release_now();
+    } else {
+        defer(d);
     }
 }
 
@@ -350,7 +454,7 @@ impl<T: ?Sized> Clone for TryArc<T> {
         // Relaxed, as in `alloc::sync::Arc`: the caller's own reference keeps
         // the cell alive, so nothing is published. At the saturation value
         // the count sticks and the value leaks, instead of panicking.
-        let count = &self.inner().count;
+        let count = &self.inner().hdr.count;
         let mut c = count.load(Ordering::Relaxed);
         // At the saturation value the count sticks (I27).
         while c < ARC_SATURATED {
@@ -368,28 +472,9 @@ impl<T: ?Sized> Clone for TryArc<T> {
 
 impl<T: ?Sized> Drop for TryArc<T> {
     fn drop(&mut self) {
-        // Release, so this holder's uses of the value happen before the
-        // last holder frees it; a saturated count never drops.
-        let count = &self.inner().count;
-        let mut c = count.load(Ordering::Relaxed);
-        loop {
-            if c >= ARC_SATURATED {
-                return;
-            }
-            match count.compare_exchange_weak(c, c - 1, Ordering::Release, Ordering::Relaxed) {
-                Ok(_) => break,
-                Err(now) => c = now,
-            }
-        }
-        if c != 1 {
-            return;
-        }
-        // Acquire pairs with every other holder's Release decrement.
-        fence(Ordering::Acquire);
-        // SAFETY: the count went from one to zero here, so this was the last
-        // `TryArc` to a cell that `TryArc::try_new_unsize` made with
-        // `TryBox::into_raw` (`kalloc::TryArc::try_new_unsize`).
-        drop(unsafe { TryBox::from_raw(self.ptr.as_ptr()) });
+        // SAFETY: this `TryArc` holds one count on the live cell it points
+        // to (`kalloc::TryArc::try_new_unsize`) and gives it up here, once.
+        unsafe { put_raw(self.header(), Ordering::Release, false) }
     }
 }
 
@@ -404,6 +489,223 @@ impl<T: ?Sized + fmt::Debug> fmt::Debug for TryArc<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&**self, f)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Deferred release (DESIGN §2.11 rule 6)
+
+/// Objects whose [`Deferred`] was dropped instead of released. A statistic
+/// that orders nothing, so every access is Relaxed.
+static DEFERRED_LEAKS: statics::AtomicUsize = statics::AtomicUsize::new(0);
+
+/// Counted objects leaked by dropped [`Deferred`] tokens since boot.
+pub fn deferred_leaks() -> usize {
+    DEFERRED_LEAKS.load(statics::Ordering::Relaxed)
+}
+
+/// A counted object whose count has reached zero and whose release is
+/// owed. [`Deferred::release_now`] or [`DeferList::push`] consumes it.
+/// Dropping one leaks the object: the drop counts it in
+/// [`deferred_leaks`], and in debug builds it panics.
+#[must_use = "a dropped Deferred leaks its object; release it or push it on a DeferList"]
+pub struct Deferred(NonNull<Header>);
+
+// SAFETY: a `Deferred` owns a cell no one else reaches, whose value type
+// is `Send + 'static`, so it may be released on any thread; the bound is
+// established by `kalloc::TryArc::try_new_unsize`, the only constructor of
+// a cell.
+unsafe impl Send for Deferred {}
+
+impl Deferred {
+    /// Release the object here: drop its value and free its cell.
+    pub fn release_now(self) {
+        let h = self.0;
+        mem::forget(self);
+        // SAFETY: `h` is the header of a cell whose count reached zero and
+        // which only this token reached (`kalloc::put_raw`); its `release`
+        // is `release_concrete` for the value type the cell was built with,
+        // established by `kalloc::TryArc::try_new_unsize`.
+        unsafe {
+            let release = (*h.as_ptr()).release;
+            release(h);
+        }
+    }
+}
+
+impl Drop for Deferred {
+    #[allow(
+        clippy::panic,
+        reason = "a dropped Deferred is a kernel bug, never input: it panics in debug builds, as a dropped pmm::Frames does (DESIGN §4.2)"
+    )]
+    fn drop(&mut self) {
+        DEFERRED_LEAKS.fetch_add(1, statics::Ordering::Relaxed);
+        #[cfg(debug_assertions)]
+        {
+            // A host test that fails while it holds a token unwinds
+            // through here; a second panic would abort the test binary.
+            #[cfg(any(test, feature = "std"))]
+            if std::thread::panicking() {
+                return;
+            }
+            panic!("kalloc: a Deferred release was dropped");
+        }
+    }
+}
+
+/// A list of counted objects owed a release, linked through their own
+/// headers, so a push allocates nothing. Pushes may come from any CPU and
+/// any context; [`DeferList::release_all`] runs where releasing is allowed.
+///
+/// `queued` says a release item for this list is queued or running, so
+/// callers queue at most one: [`DeferList::push`] and
+/// [`DeferList::claim`] set it and say whether the caller must queue one,
+/// [`DeferList::unclaim`] hands the duty back when queueing failed, and
+/// [`DeferList::release_all`] clears it before it takes the list.
+pub struct DeferList {
+    head: AtomicPtr<Header>,
+    queued: AtomicBool,
+}
+
+impl DeferList {
+    /// `const`, so the kernel can keep one per CPU in a `static`. Loom's
+    /// atomics have no `const fn new` (C-ATOMICS), so a model builds it at
+    /// run time.
+    #[cfg(not(loom))]
+    pub const fn new() -> Self {
+        Self {
+            head: AtomicPtr::new(ptr::null_mut()),
+            queued: AtomicBool::new(false),
+        }
+    }
+
+    #[cfg(loom)]
+    pub fn new() -> Self {
+        Self {
+            head: AtomicPtr::new(ptr::null_mut()),
+            queued: AtomicBool::new(false),
+        }
+    }
+
+    /// Link `d` onto the list. True if the caller must queue a release
+    /// item for it, because none was queued.
+    pub fn push(&self, d: Deferred) -> bool {
+        let h = d.0;
+        mem::forget(d);
+        let mut cur = self.head.load(Ordering::Relaxed);
+        loop {
+            // SAFETY: `h` is a cell whose count reached zero and which only
+            // this push reaches until the compare-exchange below publishes
+            // it (`kalloc::put_raw`).
+            unsafe { (*h.as_ptr()).next.store(cur, Ordering::Relaxed) };
+            // Release publishes `next`; Acquire, so the list stays one
+            // release sequence that `release_all`'s swap reads whole.
+            match self
+                .head
+                .compare_exchange(cur, h.as_ptr(), Ordering::AcqRel, Ordering::Relaxed)
+            {
+                Ok(_) => break,
+                Err(now) => cur = now,
+            }
+        }
+        !self.queued.swap(true, Ordering::AcqRel)
+    }
+
+    /// Take the duty to queue a release item: true if the list holds
+    /// objects and no item is queued for it.
+    pub fn claim(&self) -> bool {
+        !self.is_empty() && !self.queued.swap(true, Ordering::AcqRel)
+    }
+
+    /// Give back the duty [`push`](Self::push) or [`claim`](Self::claim)
+    /// handed out, when queueing the item failed. A later `claim` retries.
+    pub fn unclaim(&self) {
+        self.queued.store(false, Ordering::Release);
+    }
+
+    /// Release every object on the list and return how many. Run where
+    /// releasing is allowed (DESIGN §2.11 rule 6). It clears `queued`
+    /// before it takes the list, so an object pushed after the take makes
+    /// its pusher queue a new item.
+    pub fn release_all(&self) -> usize {
+        self.queued.store(false, Ordering::Release);
+        let mut p = self.head.swap(ptr::null_mut(), Ordering::AcqRel);
+        let mut n = 0usize;
+        while let Some(h) = NonNull::new(p) {
+            // SAFETY: every node on the list is a cell whose count reached
+            // zero, and the swap above took the list whole, so only this
+            // walk reaches it (`kalloc::DeferList::push`). Relaxed: the
+            // swap's Acquire read the push that published `next`.
+            p = unsafe { (*h.as_ptr()).next.load(Ordering::Relaxed) };
+            Deferred(h).release_now();
+            n = n.saturating_add(1);
+        }
+        n
+    }
+
+    /// Whether the list holds no object.
+    pub fn is_empty(&self) -> bool {
+        self.head.load(Ordering::Acquire).is_null()
+    }
+}
+
+#[cfg(not(loom))]
+impl Default for DeferList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The release-context hook: a `fn() -> bool`, or null for "release in
+/// place".
+static RELEASE_CONTEXT: statics::AtomicPtr<()> = statics::AtomicPtr::new(ptr::null_mut());
+/// The deferral sink: a `fn(Deferred)`, or null for "release in place".
+static DEFERRAL: statics::AtomicPtr<()> = statics::AtomicPtr::new(ptr::null_mut());
+
+// A hook slot holds a `fn` pointer as a data pointer.
+const _: () = assert!(mem::size_of::<fn() -> bool>() == mem::size_of::<*mut ()>());
+const _: () = assert!(mem::size_of::<fn(Deferred)>() == mem::size_of::<*mut ()>());
+
+/// Install the test for "a counted object may be released here" (DESIGN
+/// §2.11 rule 6). Until one is installed, every last put releases in place.
+pub fn set_release_context(f: fn() -> bool) {
+    // Release: pairs with the Acquire load in `release_context`.
+    RELEASE_CONTEXT.store(f as *mut (), statics::Ordering::Release);
+}
+
+/// Install the sink a deferred release goes to: it links the object onto
+/// this CPU's [`DeferList`] and queues the release item (C-COUNTED). Until
+/// one is installed, a deferred release runs in place.
+pub fn set_deferral(f: fn(Deferred)) {
+    // Release: pairs with the Acquire load in `defer`.
+    DEFERRAL.store(f as *mut (), statics::Ordering::Release);
+}
+
+fn release_context() -> bool {
+    // Acquire: pairs with the Release store in `set_release_context`.
+    let p = RELEASE_CONTEXT.load(statics::Ordering::Acquire);
+    if p.is_null() {
+        return true;
+    }
+    // SAFETY: invariant: a non-null `RELEASE_CONTEXT` holds a
+    // `fn() -> bool`, and a `fn` pointer is pointer-sized (the const
+    // assertion above); established by `kalloc::set_release_context`, its
+    // only store.
+    let f = unsafe { mem::transmute::<*mut (), fn() -> bool>(p) };
+    f()
+}
+
+fn defer(d: Deferred) {
+    // Acquire: pairs with the Release store in `set_deferral`.
+    let p = DEFERRAL.load(statics::Ordering::Acquire);
+    if p.is_null() {
+        d.release_now();
+        return;
+    }
+    // SAFETY: invariant: a non-null `DEFERRAL` holds a `fn(Deferred)`, and
+    // a `fn` pointer is pointer-sized (the const assertion above);
+    // established by `kalloc::set_deferral`, its only store.
+    let f = unsafe { mem::transmute::<*mut (), fn(Deferred)>(p) };
+    f(d);
 }
 
 // ---------------------------------------------------------------------------
@@ -819,15 +1121,15 @@ mod tests {
 
         // Saturation: the count sticks and no drop frees the value.
         let a = TryArc::try_new(Static(4)).unwrap();
-        a.inner().count.store(ARC_SATURATED, Ordering::Relaxed);
+        a.inner().hdr.count.store(ARC_SATURATED, Ordering::Relaxed);
         let b = a.clone();
         drop(b);
-        assert_eq!(a.inner().count.load(Ordering::Relaxed), ARC_SATURATED);
+        assert_eq!(a.inner().hdr.count.load(Ordering::Relaxed), ARC_SATURATED);
         let c = a.clone();
         drop(c);
         assert_eq!(ARC_DROPS.load(Ordering::Relaxed), d0 + 2);
         // Unstick it by hand so the last drop frees and live bytes return.
-        a.inner().count.store(1, Ordering::Relaxed);
+        a.inner().hdr.count.store(1, Ordering::Relaxed);
         drop(a);
         assert_eq!(ARC_DROPS.load(Ordering::Relaxed), d0 + 3);
         assert_eq!(live(), base);
@@ -920,5 +1222,204 @@ mod tests {
         assert!(m.iter().all(|(k, v)| *v == k * 10));
         drop(m);
         assert_eq!(live(), base);
+    }
+}
+
+#[cfg(all(test, not(loom)))]
+mod counted_tests {
+    extern crate std;
+
+    use super::*;
+    use core::cell::Cell;
+    use std::sync::Arc as StdArc;
+    use std::sync::Once;
+    use std::sync::atomic::{AtomicUsize as StdAtomicUsize, Ordering as StdOrdering};
+
+    std::thread_local! {
+        /// Whether this test thread simulates atomic context. Default
+        /// false, so other tests on their own threads still release in
+        /// place.
+        static ATOMIC: Cell<bool> = const { Cell::new(false) };
+        /// This thread's deferred-release list, the sink's target.
+        static LIST: DeferList = const { DeferList::new() };
+        /// Release items the sink was told to queue.
+        static QUEUED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn may_release() -> bool {
+        !ATOMIC.with(Cell::get)
+    }
+
+    fn sink(d: Deferred) {
+        if LIST.with(|l| l.push(d)) {
+            QUEUED.with(|q| q.set(q.get() + 1));
+        }
+    }
+
+    fn install() {
+        static HOOKS: Once = Once::new();
+        HOOKS.call_once(|| {
+            set_release_context(may_release);
+            set_deferral(sink);
+        });
+    }
+
+    fn atomic(on: bool) {
+        ATOMIC.with(|a| a.set(on));
+    }
+
+    fn queued() -> usize {
+        QUEUED.with(Cell::get)
+    }
+
+    /// Counts its drops through a shared counter.
+    struct Probe(StdArc<StdAtomicUsize>);
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, StdOrdering::SeqCst);
+        }
+    }
+
+    fn probe() -> (Probe, StdArc<StdAtomicUsize>) {
+        let n = StdArc::new(StdAtomicUsize::new(0));
+        (Probe(n.clone()), n)
+    }
+
+    fn drops(n: &StdAtomicUsize) -> usize {
+        n.load(StdOrdering::SeqCst)
+    }
+
+    #[test]
+    fn tryarc_atomic_drop_defers_until_release_all() {
+        install();
+        let (p, n) = probe();
+        let a = TryArc::try_new(p).unwrap();
+        let b = a.clone();
+        let q0 = queued();
+        atomic(true);
+        drop(a);
+        assert_eq!(drops(&n), 0);
+        assert!(
+            LIST.with(DeferList::is_empty),
+            "a put that is not the last deferred"
+        );
+        drop(b);
+        atomic(false);
+        assert_eq!(drops(&n), 0, "released in simulated atomic context");
+        assert!(!LIST.with(DeferList::is_empty));
+        assert_eq!(queued(), q0 + 1);
+        assert_eq!(LIST.with(DeferList::release_all), 1);
+        assert_eq!(drops(&n), 1);
+        assert!(LIST.with(DeferList::is_empty));
+        assert_eq!(LIST.with(DeferList::release_all), 0);
+    }
+
+    #[test]
+    fn tryarc_drop_releases_in_place_when_allowed() {
+        install();
+        let (p, n) = probe();
+        let a = TryArc::try_new(p).unwrap();
+        let b = a.clone();
+        drop(a);
+        assert_eq!(drops(&n), 0);
+        drop(b);
+        assert_eq!(drops(&n), 1);
+        assert!(LIST.with(DeferList::is_empty));
+    }
+
+    #[test]
+    fn tryarc_put_deferred_defers_in_any_context() {
+        install();
+        let (p, n) = probe();
+        let a = TryArc::try_new(p).unwrap();
+        let b = a.clone();
+        a.put_deferred();
+        assert_eq!(drops(&n), 0);
+        assert!(LIST.with(DeferList::is_empty));
+        let q0 = queued();
+        b.put_deferred();
+        assert_eq!(drops(&n), 0, "put_deferred released in place");
+        assert_eq!(queued(), q0 + 1);
+        assert_eq!(LIST.with(DeferList::release_all), 1);
+        assert_eq!(drops(&n), 1);
+    }
+
+    trait Named: Send + Sync {
+        fn name(&self) -> u64;
+    }
+
+    /// A value larger than its trait object's pointer, so freeing it at the
+    /// wrong layout would show.
+    struct Big {
+        _pad: [u64; 16],
+        id: u64,
+        _p: Probe,
+    }
+
+    impl Named for Big {
+        fn name(&self) -> u64 {
+            self.id
+        }
+    }
+
+    #[test]
+    fn tryarc_dyn_deferred_release_drops_value() {
+        install();
+        let (p, n) = probe();
+        let a: TryArc<dyn Named> = TryArc::<dyn Named>::try_new_unsize(
+            Big {
+                _pad: [0; 16],
+                id: 77,
+                _p: p,
+            },
+            |b| b,
+        )
+        .unwrap();
+        let b = a.clone();
+        assert_eq!(b.name(), 77);
+        drop(a);
+        atomic(true);
+        drop(b);
+        atomic(false);
+        assert_eq!(drops(&n), 0);
+        assert_eq!(LIST.with(DeferList::release_all), 1);
+        assert_eq!(drops(&n), 1, "the concrete value was not dropped");
+    }
+
+    #[test]
+    fn deferlist_claims_one_release_item() {
+        install();
+        let list = DeferList::new();
+        assert!(!list.claim(), "an empty list claimed");
+        let (p1, n1) = probe();
+        let (p2, n2) = probe();
+        let d1 = Deferred(TryArc::try_new(p1).unwrap().leak_header());
+        let d2 = Deferred(TryArc::try_new(p2).unwrap().leak_header());
+        assert!(list.push(d1), "the first push must queue an item");
+        assert!(!list.push(d2), "a second push queued another item");
+        assert!(!list.claim(), "claimed while an item is queued");
+        list.unclaim();
+        assert!(list.claim(), "no claim after unclaim");
+        assert!(!list.claim());
+        assert_eq!(list.release_all(), 2);
+        assert_eq!((drops(&n1), drops(&n2)), (1, 1));
+        assert!(list.is_empty());
+        assert!(!list.claim(), "an empty list claimed after release_all");
+        let (p3, n3) = probe();
+        let d3 = Deferred(TryArc::try_new(p3).unwrap().leak_header());
+        assert!(list.push(d3), "release_all left the list claimed");
+        assert_eq!(list.release_all(), 1);
+        assert_eq!(drops(&n3), 1);
+    }
+
+    impl<T: ?Sized> TryArc<T> {
+        /// Give up this sole reference without a put, as if its count had
+        /// just reached zero, and return its header.
+        fn leak_header(self) -> NonNull<Header> {
+            let h = self.header();
+            mem::forget(self);
+            h
+        }
     }
 }
