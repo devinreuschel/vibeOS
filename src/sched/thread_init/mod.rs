@@ -509,7 +509,7 @@ fn schedule_inner(from_irq: bool) {
     // while it is `Ready` and placed on this CPU, and drop any other entry.
     let (old_ptr, new_ptr, old_id, new_id) = loop {
         #[cfg(feature = "kernel_tests")]
-        let cand = requeue_next_cpu(next, cur, idle, me);
+        let cand = testing::requeue_next_cpu(next, cur, idle, me);
         #[cfg(not(feature = "kernel_tests"))]
         let cand = next;
         let picked = with_sched(|s| {
@@ -543,62 +543,6 @@ fn schedule_inner(from_irq: bool) {
 /// before the switch, so no other CPU's stale entry can run it meanwhile.
 fn runnable_on(t: &Tcb, cpu: u32) -> bool {
     t.state == ThreadState::Ready && t.cpu == cpu
-}
-
-/// C-REQUEUE-HOOK: while `sched::ktest::set_requeue_next_cpu` is on, a user
-/// thread or a `CpuAffinity::Any` kernel thread that this CPU dequeues
-/// while another thread is current moves to the next online CPU instead
-/// of running here, once per slice it runs. A preempted thread that is the
-/// only runnable one here stays queued while this CPU runs idle, whose
-/// dequeue then moves it. Never the running thread, an idle thread, or a
-/// pinned kernel thread; the move goes out through `place` after the
-/// SCHED lock drops, before any switch.
-#[cfg(feature = "kernel_tests")]
-fn requeue_next_cpu(next: ThreadId, cur: ThreadId, idle: ThreadId, me: u32) -> ThreadId {
-    if !testing::requeue_on() || next == idle {
-        return next;
-    }
-    let Some(target) = testing::next_online_cpu(me) else {
-        return next;
-    };
-    // A stale entry's thread is not runnable here and does not move:
-    // `schedule_inner` drops the entry.
-    let movable = |t: &Tcb| runnable_on(t, me) && (t.pid != 0 || t.affinity == CpuAffinity::Any);
-    if next == cur {
-        if with_sched(|s| s.get(cur).is_some_and(movable)) {
-            per_cpu_init::with_current(|cpu| cpu.runq.push_back(cur));
-            return idle;
-        }
-        return next;
-    }
-    let moved = with_sched(|s| {
-        let Some(slot) = s.slot_of(next) else {
-            return false;
-        };
-        if testing::take_arrived(slot) {
-            return false;
-        }
-        let Some(t) = s.get_mut(next) else {
-            return false;
-        };
-        if !movable(t) {
-            return false;
-        }
-        t.cpu = target;
-        if t.pid != 0 {
-            t.affinity = CpuAffinity::Pinned(target);
-        }
-        // Before the place: `with_sched` hands the thread to `target` as
-        // its lock drops, and a dequeue there that finds no arrival would
-        // move it again.
-        testing::moved(slot);
-        s.place(target, next);
-        true
-    });
-    if !moved {
-        return next;
-    }
-    per_cpu_init::with_current(|cpu| take_next(&mut cpu.runq, idle))
 }
 
 fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
@@ -726,6 +670,21 @@ pub(crate) fn finish_switch() {
 /// Returns the list head, 0 when empty.
 pub(crate) fn take_dead_stacks() -> u64 {
     per_cpu_init::with_current(|cpu| core::mem::replace(&mut cpu.dead_list, 0))
+}
+
+/// Free this CPU's dead list now, as its worker would: IF=1 only
+/// (`kva_init::free_parked`). True if a stack was freed.
+fn reclaim_dead_stacks_here() -> bool {
+    if !crate::x86::interrupts_enabled() {
+        return false;
+    }
+    let head = take_dead_stacks();
+    if head == 0 {
+        return false;
+    }
+    let n = kva_init::free_parked(head);
+    stacks_reclaimed(n);
+    n > 0
 }
 
 /// The worker has freed `n` stacks it took with [`take_dead_stacks`].
@@ -1123,7 +1082,15 @@ fn spawn_inner(
     };
     let stack = match cached {
         Some(s) => s,
-        None => kva_init::alloc_guarded_stack(stack_pages).map_err(|_| SpawnError::NoMemory)?,
+        None => match kva_init::alloc_guarded_stack(stack_pages) {
+            Ok(s) => s,
+            // Once: an exit burst can leave this CPU's dead list holding
+            // enough stacks for KVA to refuse (`Kva::alloc`'s live cap).
+            Err(_) if reclaim_dead_stacks_here() => {
+                kva_init::alloc_guarded_stack(stack_pages).map_err(|_| SpawnError::NoMemory)?
+            }
+            Err(_) => return Err(SpawnError::NoMemory),
+        },
     };
     let top = stack.top().as_u64();
     assert!(top.is_multiple_of(16), "kva stack top not 16-aligned");

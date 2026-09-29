@@ -1,6 +1,9 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use vibeos::thread::{MAX_THREADS, ThreadId, ThreadState};
+use vibeos::sched::take_next;
+use vibeos::thread::{CpuAffinity, MAX_THREADS, Tcb, ThreadId, ThreadState};
+
+use super::{runnable_on, with_sched};
 
 use crate::per_cpu_init;
 use crate::time_init;
@@ -244,4 +247,59 @@ pub fn name(id: ThreadId) -> &'static str {
 )]
 pub fn cpu_of(id: ThreadId) -> u32 {
     super::SCHED.lock().get(id).expect("unknown thread").cpu
+}
+
+/// C-REQUEUE-HOOK: while `sched::ktest::set_requeue_next_cpu` is on, a user
+/// thread or a `CpuAffinity::Any` kernel thread that this CPU dequeues
+/// while another thread is current moves to the next online CPU instead
+/// of running here, once per slice it runs. A preempted thread that is the
+/// only runnable one here stays queued while this CPU runs idle, whose
+/// dequeue then moves it. Never the running thread, an idle thread, or a
+/// pinned kernel thread; the move goes out through `place` after the
+/// SCHED lock drops, before any switch.
+pub(super) fn requeue_next_cpu(next: ThreadId, cur: ThreadId, idle: ThreadId, me: u32) -> ThreadId {
+    if !requeue_on() || next == idle {
+        return next;
+    }
+    let Some(target) = next_online_cpu(me) else {
+        return next;
+    };
+    // A stale entry's thread is not runnable here and does not move:
+    // `schedule_inner` drops the entry.
+    let movable = |t: &Tcb| runnable_on(t, me) && (t.pid != 0 || t.affinity == CpuAffinity::Any);
+    if next == cur {
+        if with_sched(|s| s.get(cur).is_some_and(movable)) {
+            per_cpu_init::with_current(|cpu| cpu.runq.push_back(cur));
+            return idle;
+        }
+        return next;
+    }
+    let did_move = with_sched(|s| {
+        let Some(slot) = s.slot_of(next) else {
+            return false;
+        };
+        if take_arrived(slot) {
+            return false;
+        }
+        let Some(t) = s.get_mut(next) else {
+            return false;
+        };
+        if !movable(t) {
+            return false;
+        }
+        t.cpu = target;
+        if t.pid != 0 {
+            t.affinity = CpuAffinity::Pinned(target);
+        }
+        // Before the place: `with_sched` hands the thread to `target` as
+        // its lock drops, and a dequeue there that finds no arrival would
+        // move it again.
+        moved(slot);
+        s.place(target, next);
+        true
+    });
+    if !did_move {
+        return next;
+    }
+    per_cpu_init::with_current(|cpu| take_next(&mut cpu.runq, idle))
 }
