@@ -1,6 +1,12 @@
 //! In-guest tests for log (kernel_tests only). Rows: the list in crate::ktest.
 
-use crate::ktest::Outcome;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+use vibeos::kva::DEFAULT_STACK_PAGES;
+use vibeos::log::Level;
+
+use crate::ktest::{Outcome, spin_until_ns};
+use crate::{per_cpu_init, thread_init, time_init};
 
 pub(crate) fn test_log_boot_captured() -> Outcome {
     if !crate::log_init::contains_msg("serial online") {
@@ -86,4 +92,136 @@ pub(crate) fn test_log_reentry_drop_counted() -> Outcome {
         return Outcome::Fail("inner record stored");
     }
     Outcome::Ok
+}
+
+// ---------------------------------------------------------------------------
+// serial_lines_whole (ROADMAP §10.2, F138)
+
+/// A fixed 36-byte tail, so each line reaches the writer as several pieces.
+const PAD: &str = "0123456789abcdefghijklmnopqrstuvwxyz";
+/// The numbered lines CPU 0 prints; `run_ktest.py` finds each whole.
+const WHOLE_LINES: u32 = 1000;
+/// The pause between two noise lines, so CPU 0 still gets the TX lock.
+const NOISE_PAUSE_NS: u64 = 20_000;
+const NOISE_WAIT_NS: u64 = 2_000_000_000;
+const WHOLE_WAIT_NS: u64 = 60_000_000_000;
+
+static NOISE_STOP: AtomicBool = AtomicBool::new(false);
+/// Noise threads that have printed their first line.
+static NOISE_STARTED: AtomicU32 = AtomicU32::new(0);
+/// Noise threads that have seen `NOISE_STOP` and are about to exit.
+static NOISE_EXITED: AtomicU32 = AtomicU32::new(0);
+/// Set by the CPU-0 printer thread once its last numbered line is out.
+static WHOLE_DONE: AtomicBool = AtomicBool::new(false);
+
+fn this_cpu() -> u32 {
+    per_cpu_init::try_current().map_or(0, |c| c.cpu_id)
+}
+
+fn serial_noise() {
+    let cpu = this_cpu();
+    let mut n = 0u64;
+    while !NOISE_STOP.load(Ordering::Acquire) {
+        crate::marker!("vibeOS: ktest: serial noise cpu{} {} {}", cpu, n, PAD);
+        crate::klog!(
+            Level::Info,
+            "vibeOS: ktest: serial noise klog cpu{} {} {}",
+            cpu,
+            n,
+            PAD
+        );
+        if n == 0 {
+            NOISE_STARTED.fetch_add(1, Ordering::AcqRel);
+        }
+        n = n.wrapping_add(1);
+        let t0 = time_init::now_ns();
+        while time_init::now_ns().saturating_sub(t0) < NOISE_PAUSE_NS {
+            core::hint::spin_loop();
+        }
+    }
+    // Release: the test reads the count with Acquire before it returns.
+    NOISE_EXITED.fetch_add(1, Ordering::Release);
+}
+
+fn print_whole() {
+    let mut i = 0u32;
+    while i < WHOLE_LINES {
+        crate::marker!(
+            "vibeOS: ktest: serial whole {} of {} {}",
+            i,
+            WHOLE_LINES,
+            PAD
+        );
+        i += 1;
+    }
+}
+
+fn whole_printer() {
+    print_whole();
+    WHOLE_DONE.store(true, Ordering::Release);
+}
+
+/// Every AP prints formatted lines in a loop while CPU 0 prints 1,000
+/// numbered markers; `run_ktest.py`'s `_check_serial_whole` finds all
+/// 1,000 whole (ROADMAP §10.2, F138).
+pub(crate) fn test_serial_lines_whole() -> Outcome {
+    let online = per_cpu_init::online_mask();
+    let aps: u32 = (1u32..64).filter(|&c| online & (1u64 << c) != 0).count() as u32;
+    if aps == 0 {
+        return Outcome::Skip("no AP");
+    }
+    NOISE_STOP.store(false, Ordering::Release);
+    NOISE_STARTED.store(0, Ordering::Release);
+    NOISE_EXITED.store(0, Ordering::Release);
+    WHOLE_DONE.store(false, Ordering::Release);
+    let mut spawned = 0u32;
+    for cpu in (1u32..64).filter(|&c| online & (1u64 << c) != 0) {
+        if thread_init::spawn_opts(
+            "serial-noise",
+            serial_noise,
+            thread_init::SpawnOpts {
+                stack_pages: DEFAULT_STACK_PAGES,
+                cpu: Some(cpu),
+            },
+        )
+        .is_err()
+        {
+            break;
+        }
+        spawned += 1;
+    }
+    let outcome = if spawned != aps {
+        Outcome::Fail("spawn")
+    } else if !spin_until_ns(
+        || NOISE_STARTED.load(Ordering::Acquire) == aps,
+        NOISE_WAIT_NS,
+    ) {
+        Outcome::Fail("an AP printed no noise line")
+    } else if this_cpu() == 0 {
+        print_whole();
+        Outcome::Ok
+    } else if thread_init::spawn_opts(
+        "serial-whole",
+        whole_printer,
+        thread_init::SpawnOpts {
+            stack_pages: DEFAULT_STACK_PAGES,
+            cpu: Some(0),
+        },
+    )
+    .is_err()
+    {
+        Outcome::Fail("spawn printer")
+    } else if !spin_until_ns(|| WHOLE_DONE.load(Ordering::Acquire), WHOLE_WAIT_NS) {
+        Outcome::Fail("printer did not finish")
+    } else {
+        Outcome::Ok
+    };
+    NOISE_STOP.store(true, Ordering::Release);
+    if !spin_until_ns(
+        || NOISE_EXITED.load(Ordering::Acquire) == spawned,
+        NOISE_WAIT_NS,
+    ) {
+        return Outcome::Fail("a noise thread did not exit");
+    }
+    outcome
 }

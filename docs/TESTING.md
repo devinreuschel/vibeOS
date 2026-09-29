@@ -131,6 +131,21 @@ its configuration, in either direction, so a lost `-device` or a regressed detec
 tests into skips fails the tier. Tests a run does not select print no run line and need no row, and
 a test that `VIBEOS_KTEST` names without a glob must run whatever the file says (ROADMAP §12.3).
 
+Besides the verdicts, `run_ktest.py` reads these lines of the in-guest tests themselves:
+
+```
+vibeOS: ktest: serial whole <i> of 1000 <pad>
+vibeOS: ktest: serial noise cpu<c> <n> <pad>
+vibeOS: ktest: serial noise klog cpu<c> <n> <pad>
+```
+
+`serial_lines_whole` (ROADMAP §10.2, F138) pins a thread to each AP that prints the two `serial noise`
+lines in a loop, while CPU 0 prints the 1,000 numbered `serial whole` lines; `<pad>` is a fixed
+36-byte string. When the run holds `vibeOS: ktest: ok serial_lines_whole`, `_check_serial_whole`
+requires each numbered line exactly once and fails on any line that holds `serial whole` or
+`serial noise` but is not exactly one of these lines, a fragment of a line another CPU split. A
+log-ring replay of one (`dmesg`, a dump's `logrec`) is checked for fragments and not counted.
+
 When a test fails, print enough to diagnose it without a rerun. A failing test that only prints its
 name costs a full debug cycle to learn anything.
 
