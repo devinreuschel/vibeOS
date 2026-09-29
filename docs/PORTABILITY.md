@@ -7,7 +7,10 @@ ports disagree about the kernel's own behaviour; for anything a user program can
 architecture's reference is Linux on that architecture (ROADMAP, How to read this). This section is the
 contract for the seam between them. `docs/ARCH.md` (ROADMAP §10.3) maps each row of the §11.1 table to
 the modules that implement it in each port. Planned: ROADMAP §10.3 builds the seam and Phase 11 the
-aarch64 port. Today no seam trait, stub port, or `docs/ARCH.md` exists; `thread.rs` and `dma.rs` in
+aarch64 port. Built so far: the seam traits and `Port` in `vibeos-core`'s `arch/mod.rs`, the stub port
+in `arch/stub.rs`, and the x86_64 port's zero-sized type with its `CycleCounter`, `InterruptMask`,
+`PerCpuBase`, and `SyscallAbi` impls, which kernel code names as `arch::current::Arch`; the other impls,
+`impl Port` for it, and `docs/ARCH.md` are planned in ROADMAP §10.3. `thread.rs` and `dma.rs` in
 `vibeos-core` carry `cfg(target_arch)` and assembly (ROADMAP §10.3); and the one port is x86_64's, in
 the kernel crate's `src/arch/` and in `vibeos-core`'s `desc.rs`, `pic.rs`, and `vectors.rs`. The rest of
 this section is the design those lines build.
@@ -110,8 +113,9 @@ The mechanism:
   whose supertraits are the table's traits, so a second port parameter never spreads into the types
   that hold it. The kernel crate names the concrete types once, in `arch::current` (for example
   `type AddressSpace = vibeos::AddressSpace<Arch>`), so kernel code never spells the parameter.
-- The kernel binary names its port once, `type Arch = arch::current::Arch;`, chosen by
-  `cfg(target_arch)` in the kernel crate. `vibeos-core` contains no `cfg(target_arch)` and no
+- The kernel binary names its port once, as `arch::current::Arch` in `src/arch/current.rs`, a type
+  alias chosen by `cfg(target_arch)` in the kernel crate, where a compile-time item checks that the
+  port implements the seam traits built so far. `vibeos-core` contains no `cfg(target_arch)` and no
   assembly, test modules included (ROADMAP Phase 10 gate); `scripts/check_core_stable.py` enforces
   it from ROADMAP §10.3's A2 box.
 - The atomics seam is the one exception: a module selected by `cfg(loom)` (ROADMAP §10.8), because
