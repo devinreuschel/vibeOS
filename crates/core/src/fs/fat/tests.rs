@@ -823,3 +823,84 @@ fn fat_bpb_cluster_count_above_max_is_corrupt() {
     let mut d = HugeDisk { boot };
     assert_eq!(FatVol::mount(&mut d).map(|_| ()), Err(FatError::Corrupt));
 }
+
+#[test]
+fn extend_nospace_leaks_nothing() {
+    let mut b = fresh(INITRD_BYTES);
+    let before = with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        let mut e = create_words(v, d, root, b"e.txt");
+        let mut f = create_words(v, d, root, b"FILL.BIN");
+        let cb = v.info.clus_bytes();
+        let n = (v.free as usize - 2) * cb;
+        v.write_ino(d, &mut f, true, 0, false, &vec![7u8; n])
+            .unwrap();
+        assert_eq!(v.free, 2);
+        v.sync(d).unwrap();
+        let before = (v.free_bytes(), v.count_free(d).unwrap());
+        assert_eq!(
+            v.write_ino(d, &mut e, true, 10 * cb as u64, false, b"x")
+                .unwrap_err(),
+            FatError::NoSpace
+        );
+        assert_eq!((e.first_clu, e.size), (0, 0));
+        assert_eq!((v.free_bytes(), v.count_free(d).unwrap()), before);
+        v.sync(d).unwrap();
+        before
+    });
+    with_vol(&mut b, |v, d| {
+        assert_eq!((v.free_bytes(), v.count_free(d).unwrap()), before);
+        let e = v.lookup(d, v.info.root_clus, b"e.txt").unwrap();
+        assert_eq!((e.clu, e.size), (0, 0));
+    });
+    fsck(&b);
+}
+
+#[test]
+fn extend_failure_rolls_back_chain() {
+    let mut b = fresh(INITRD_BYTES);
+    let (o_first, free) = with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        let mut e = create_words(v, d, root, b"e.txt");
+        let mut o = create_words(v, d, root, b"o.txt");
+        v.write_ino(d, &mut o, true, 0, false, b"one cluster")
+            .unwrap();
+        v.sync(d).unwrap();
+        let o_first = o.first_clu;
+        let free = v.count_free(d).unwrap();
+        assert_eq!(v.free, free);
+        // A lying FSInfo count: the pre-check passes and the allocation
+        // runs out part way.
+        v.free += 20;
+        let cb = v.info.clus_bytes() as u64;
+        let far = (u64::from(free) + 5) * cb;
+        for f in [&mut e, &mut o] {
+            let size = f.size;
+            let first = f.first_clu;
+            assert_eq!(
+                v.write_ino(d, f, true, far, false, b"x").unwrap_err(),
+                FatError::NoSpace
+            );
+            assert_eq!((f.first_clu, f.size), (first, size));
+            assert_eq!(v.count_free(d).unwrap(), free);
+            assert_eq!(v.free, free + 20);
+        }
+        assert!(is_eoc(v.fat_get(d, o_first).unwrap()));
+        v.free -= 20;
+        v.fsinfo_dirty = true;
+        v.sync(d).unwrap();
+        (o_first, free)
+    });
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        assert_eq!(v.count_free(d).unwrap(), free);
+        assert_eq!(v.free, free);
+        let e = v.lookup(d, root, b"e.txt").unwrap();
+        assert_eq!((e.clu, e.size), (0, 0));
+        let o = v.lookup(d, root, b"o.txt").unwrap();
+        assert_eq!((o.clu, o.size), (o_first, 11));
+        assert!(is_eoc(v.fat_get(d, o_first).unwrap()));
+        assert!(v.fats_identical(d).unwrap());
+    });
+    fsck(&b);
+}

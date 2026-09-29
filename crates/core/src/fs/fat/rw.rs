@@ -402,6 +402,10 @@ impl FatVol {
         r
     }
 
+    /// Grow the chain at `*first` to hold `new` bytes. `NoSpace` before
+    /// any allocation when the free count is short; a later error frees
+    /// the clusters this call allocated and restores the old end of chain
+    /// and `*first`, since mount trusts FSInfo's count, which can lie.
     fn ensure_size<D: Disk>(
         &mut self,
         d: &mut D,
@@ -417,38 +421,80 @@ impl FatVol {
         if need == 0 {
             return Ok(());
         }
-        if *first < 2 {
-            let c = self.alloc_clu(d, 0)?;
-            self.zero_cluster(d, c)?;
-            self.fat_set(d, c, EOC_MIN)?;
-            *first = c;
+        let (have, tail) = if *first < 2 {
+            (0, 0)
+        } else {
+            self.chain_len(d, *first)?
+        };
+        let short = match need.checked_sub(have) {
+            Some(n) if n > 0 => n,
+            _ => return Ok(()),
+        };
+        if short > self.free {
+            return Err(FatError::NoSpace);
         }
-        let mut clu = *first;
-        let mut have = 1u32;
-        loop {
-            let next = self.fat_get(d, clu)?;
-            if is_eoc(next) {
-                break;
-            }
-            if next < 2 || next == BAD_CLUS {
-                return Err(FatError::Corrupt);
-            }
-            have = have.checked_add(1).ok_or(FatError::Corrupt)?;
-            clu = next;
-            if have > self.info.nclus {
-                return Err(FatError::Corrupt);
+        let old_first = *first;
+        let mut grown = Grown {
+            head: 0,
+            unlinked: 0,
+        };
+        match self.extend_chain(d, first, tail, short, &mut grown) {
+            Ok(()) => d.flush(),
+            Err(e) => {
+                *first = old_first;
+                self.undo_extend(d, tail, &grown).and(Err(e))
             }
         }
-        while have < need {
-            let n = self.alloc_clu(d, clu)?;
+    }
+
+    /// Link `count` zeroed clusters after `tail`, or at `*first` when
+    /// `tail` is 0, and commit the FAT; `grown` records what an error
+    /// leaves for [`Self::undo_extend`].
+    fn extend_chain<D: Disk>(
+        &mut self,
+        d: &mut D,
+        first: &mut u32,
+        mut tail: u32,
+        count: u32,
+        grown: &mut Grown,
+    ) -> Result<(), FatError> {
+        for _ in 0..count {
+            // `alloc_clu` marks the cluster end of chain.
+            let n = self.alloc_clu(d, tail)?;
+            grown.unlinked = n;
             self.zero_cluster(d, n)?;
-            self.fat_set(d, clu, n)?;
-            self.fat_set(d, n, EOC_MIN)?;
-            clu = n;
-            have = have.checked_add(1).ok_or(FatError::Corrupt)?;
+            if tail < 2 {
+                *first = n;
+            } else {
+                self.fat_set(d, tail, n)?;
+            }
+            if grown.head == 0 {
+                grown.head = n;
+            }
+            grown.unlinked = 0;
+            tail = n;
         }
-        self.commit_fat(d)?;
-        d.flush()
+        self.commit_fat(d)
+    }
+
+    /// Free what a failed [`Self::extend_chain`] allocated and end the old
+    /// chain at `tail` again.
+    fn undo_extend<D: Disk>(
+        &mut self,
+        d: &mut D,
+        tail: u32,
+        grown: &Grown,
+    ) -> Result<(), FatError> {
+        if grown.unlinked >= 2 {
+            self.fat_set(d, grown.unlinked, 0)?;
+        }
+        if grown.head >= 2 {
+            if tail >= 2 {
+                self.fat_set(d, tail, EOC_MIN)?;
+            }
+            self.release_chain(d, grown.head)?;
+        }
+        self.commit_fat(d)
     }
 
     fn read_at<D: Disk>(
@@ -555,4 +601,11 @@ fn ent_at(base: u32, slot: usize) -> Result<u32, FatError> {
         .and_then(|b| u32::try_from(b).ok())
         .ok_or(FatError::NoSpace)?;
     base.checked_add(rel).ok_or(FatError::NoSpace)
+}
+
+/// The clusters a failed extend allocated: the first one it linked, and
+/// one it allocated but has not linked yet (0 for none).
+struct Grown {
+    head: u32,
+    unlinked: u32,
 }

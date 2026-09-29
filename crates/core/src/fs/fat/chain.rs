@@ -20,6 +20,30 @@ impl FatVol {
         }
     }
 
+    /// The cluster count of the chain at `first` and its last cluster.
+    pub(super) fn chain_len<D: Disk>(
+        &mut self,
+        d: &mut D,
+        first: u32,
+    ) -> Result<(u32, u32), FatError> {
+        let mut clu = first;
+        let mut have = 1u32;
+        loop {
+            let next = self.fat_get(d, clu)?;
+            if is_eoc(next) {
+                return Ok((have, clu));
+            }
+            if next < 2 || next == BAD_CLUS {
+                return Err(FatError::Corrupt);
+            }
+            have = have.checked_add(1).ok_or(FatError::Corrupt)?;
+            clu = next;
+            if have > self.info.nclus {
+                return Err(FatError::Corrupt);
+            }
+        }
+    }
+
     pub(super) fn read_cluster<D: Disk>(
         &mut self,
         d: &mut D,
@@ -146,7 +170,11 @@ impl FatVol {
         d.flush()
     }
 
-    fn release_chain<D: Disk>(&mut self, d: &mut D, mut clu: u32) -> Result<(), FatError> {
+    pub(super) fn release_chain<D: Disk>(
+        &mut self,
+        d: &mut D,
+        mut clu: u32,
+    ) -> Result<(), FatError> {
         let mut n = 0u32;
         while clu >= 2 && !is_eoc(clu) {
             let next = self.fat_get(d, clu)?;
