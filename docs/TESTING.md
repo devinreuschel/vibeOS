@@ -526,6 +526,18 @@ the `build/results/` files they upload. A pull request run tests the merge of it
 base, so the results files carry the merge commit, which `--run-commit` names; `check_ticks.py`
 reads commits and their messages from the pull request's head.
 
+**Workflow rules.** `scripts/check_workflows.py`, which `make check` runs, reads every workflow
+with a stdlib YAML subset reader that fails on anything it does not parse (anchors, aliases, tags,
+`---`, multi-line flow) rather than misread it, and holds one function per rule in `RULES`. Besides
+the trigger, runner, tier, and upstream rules this section states where they apply, it fails on
+`${{` inside an inline or block `run:` script, whose values reach a step through `env:` instead
+(`rule_no_expr_in_run`, F144); on a workflow without a top-level `permissions:` mapping, on
+`read-all` or `write-all`, and on any grant other than `contents: read` or `none`, at the top or in a
+job, without a comment beside it naming its need (`rule_permissions`); and on a remote `uses:` not
+pinned as `@<40 hex>  # <version>`, where `./` paths and `docker://…@sha256:` pass
+(`rule_action_pins`). `tests/harness/test_workflows.py` holds a failing and a passing case for each
+clause and runs every rule on the real files.
+
 Rule; not yet enforced: a job that holds a signing key or a write token runs no code from the
 candidate commit, restores no cache, checks out nothing, and receives only artifacts and their
 SHA-256 list (ROADMAP §10.1, §14.6). Today `release` builds, tests, and publishes in one job with
@@ -595,6 +607,15 @@ and `tier` write the runner's CPU model to the job summary, so the "after" figur
 failures are fixed. From ROADMAP §10.9's CI
 history on, a measured number recorded in the design docs cites the commit it was measured at and the CPU
 model or machine it ran on (ROADMAP, How to read this).
+
+A failure traced to a QEMU bug is not retried either: the kernel or the harness's QEMU command line
+(`harness.qemu_argv`) works around it, and the upstream report, with a reproducer, the QEMU version,
+and the workaround, is drafted in [UPSTREAM.md](UPSTREAM.md). Filing it needs an account, so the
+maintainer files it from their own and its link then replaces the draft's; the draft and the
+workaround are the proof, since a gate never needs a new account (ROADMAP, How to read this).
+`scripts/check_workflows.py` fails when this section does not link that file, when an entry misses
+its Reproducer, Versions, Workaround, or Upstream field, or when the Workaround's path does not
+exist (`rule_upstream`). No Phase 10 failure has been traced to a QEMU bug.
 
 Line-coverage floor for `vibeos-core` is **87%** (`--fail-under-lines 87` in
 `.github/workflows/ci.yml`). Measured 87.53% at `6cbe4fe` with `cargo llvm-cov -p vibeos-core --lib

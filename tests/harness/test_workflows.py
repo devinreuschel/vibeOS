@@ -27,6 +27,7 @@ from scripts.check_workflows import (
     rule_qemu_pin,
     rule_runs_on,
     rule_tiers,
+    rule_upstream,
 )
 
 WF = ".github/workflows/x.yml"
@@ -569,6 +570,59 @@ class TestBudgetDoc(unittest.TestCase):
     def test_missing_table_fails(self) -> None:
         t = Tree(workflows={CI: parse(tier_ci(), CI)}, testing_md="## 8.6 CI\n\nno table\n")
         self.assertEqual(rules(rule_budget_doc(t)), [(1, "budget_doc")])
+
+
+ENTRY = (
+    "### QEMU: a title\n\n**Reproducer.** run it\n\n**Versions.** 10.2.1\n\n"
+    "**Workaround.** `{path}` `qemu_argv`: an extra flag\n\n"
+    "**Upstream.** draft; the maintainer files it\n"
+)
+LINKED = "## 8.6 CI\n\nSee [UPSTREAM.md](UPSTREAM.md).\n"
+
+
+def upstream(md: str | None, testing: str = LINKED) -> list[tuple[int, str]]:
+    t = Tree(workflows={}, testing_md=testing, upstream_md=md, root=ROOT)
+    return [(p.line, p.message) for p in rule_upstream(t)]
+
+
+class TestUpstream(unittest.TestCase):
+    PRE = "# Upstream reports\n\nPreamble.\n\n```\n### not: an entry\n```\n\n"
+
+    def test_empty_file_and_complete_entry_pass(self) -> None:
+        self.assertEqual(upstream(self.PRE), [])
+        self.assertEqual(upstream(self.PRE + ENTRY.format(path="tests/harness/harness.py")), [])
+
+    def test_symbol_after_path_passes(self) -> None:
+        md = self.PRE + ENTRY.format(path="tests/harness/harness.py::qemu_argv")
+        self.assertEqual(upstream(md), [])
+
+    def test_missing_link_fails(self) -> None:
+        self.assertEqual(
+            upstream(self.PRE, testing="## 8.6 CI\n\nno link\n"),
+            [(1, "§8.6 does not link UPSTREAM.md")],
+        )
+
+    def test_missing_file_fails(self) -> None:
+        self.assertEqual(upstream(None), [(1, "docs/UPSTREAM.md is missing")])
+
+    def test_missing_fields_fail(self) -> None:
+        full = ENTRY.format(path="tests/harness/harness.py")
+        for field in ("Reproducer", "Versions", "Upstream"):
+            with self.subTest(field=field):
+                md = self.PRE + full.replace(f"**{field}.**", "")
+                self.assertEqual(upstream(md), [(9, f"entry has no **{field}.** field")])
+        md = self.PRE + full.replace("**Workaround.**", "")
+        self.assertEqual(upstream(md), [(9, "entry has no **Workaround.** field")])
+
+    def test_workaround_path_must_exist(self) -> None:
+        md = self.PRE + ENTRY.format(path="tests/harness/nope.py")
+        self.assertEqual(
+            upstream(md), [(9, "Workaround names no in-tree path first (tests/harness/nope.py)")]
+        )
+
+    def test_bad_heading_fails(self) -> None:
+        md = self.PRE + ENTRY.format(path="Makefile").replace("### QEMU: a title", "### a title")
+        self.assertEqual(upstream(md), [(9, "entry heading is not `### <project>: <title>`")])
 
 
 class TestTree(unittest.TestCase):

@@ -855,6 +855,55 @@ def rule_budget_doc(tree: Tree) -> list[Problem]:
     return out
 
 
+UPSTREAM = "docs/UPSTREAM.md"
+UPSTREAM_FIELDS = ("Reproducer", "Versions", "Workaround", "Upstream")
+ENTRY_RE = re.compile(r"### [^:\s][^:]*: \S")
+
+
+def _entries(md: str) -> list[tuple[int, str, str]]:
+    """(line, heading, body) per `### ` entry, fenced blocks skipped."""
+    out: list[tuple[int, str, list[str]]] = []
+    fenced = False
+    for no, ln in enumerate(md.splitlines(), 1):
+        if ln.startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        if ln.startswith("### "):
+            out.append((no, ln, []))
+        elif ln.startswith("#"):
+            out.append((no, "", []))
+        elif out:
+            out[-1][2].append(ln)
+    return [(no, h, "\n".join(body)) for no, h, body in out if h]
+
+
+def rule_upstream(tree: Tree) -> list[Problem]:
+    """L1245: a QEMU bug is worked around and its upstream report drafted, never retried."""
+    doc = "docs/TESTING.md"
+    first, text = section(tree.testing_md, "8.6")
+    out = []
+    if "](UPSTREAM.md" not in text:
+        out.append(Problem(doc, first or 1, "upstream", "§8.6 does not link UPSTREAM.md"))
+    if tree.upstream_md is None:
+        return [*out, Problem(UPSTREAM, 1, "upstream", "docs/UPSTREAM.md is missing")]
+    for no, heading, body in _entries(tree.upstream_md):
+        if not ENTRY_RE.match(heading):
+            msg = "entry heading is not `### <project>: <title>`"
+            out.append(Problem(UPSTREAM, no, "upstream", msg))
+        for f in UPSTREAM_FIELDS:
+            if f"**{f}.**" not in body:
+                out.append(Problem(UPSTREAM, no, "upstream", f"entry has no **{f}.** field"))
+        m = re.search(r"\*\*Workaround\.\*\*\s*`([^`]+)`", body)
+        if "**Workaround.**" in body:
+            path = re.split(r"::|:", m.group(1))[0] if m else ""
+            if not path or not (tree.root / path).exists():
+                msg = f"Workaround names no in-tree path first ({path or 'none'})"
+                out.append(Problem(UPSTREAM, no, "upstream", msg))
+    return out
+
+
 RULES: list[Callable[[Tree], list[Problem]]] = [
     rule_no_expr_in_run,
     rule_permissions,
@@ -866,6 +915,7 @@ RULES: list[Callable[[Tree], list[Problem]]] = [
     rule_gate_dispatch,
     rule_tiers,
     rule_budget_doc,
+    rule_upstream,
 ]
 
 
