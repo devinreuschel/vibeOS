@@ -1358,6 +1358,7 @@ class TestEnvConfig(unittest.TestCase):
             self.assertEqual(env.accel, "tcg")
             self.assertEqual(env.timeout, 60.0)
             self.assertEqual(env.extra, ())
+            self.assertEqual(env.qemu_version, "")
             cfg = env.qemu()
             self.assertEqual(cfg.iso, "vibeos.iso")
             self.assertEqual(cfg.smp, 2)
@@ -1378,6 +1379,7 @@ class TestEnvConfig(unittest.TestCase):
                 "VIBEOS_QEMU_ACCEL": "",
                 "VIBEOS_TIMEOUT": "12.5",
                 "VIBEOS_QEMU_EXTRA": "-nic none",
+                "VIBEOS_QEMU_VERSION": "10.2.1",
             },
             clear=True,
         ):
@@ -1390,6 +1392,98 @@ class TestEnvConfig(unittest.TestCase):
             self.assertEqual(env.accel, "")
             self.assertEqual(env.timeout, 12.5)
             self.assertEqual(env.extra, ("-nic", "none"))
+            self.assertEqual(env.qemu_version, "10.2.1")
+            self.assertEqual(env.qemu().qemu_version, "10.2.1")
+
+
+class TestQemuVersionPin(unittest.TestCase):
+    """ROADMAP §10.1: a Linux CI job fails when its QEMU is not the pinned one."""
+
+    LINE = "QEMU emulator version 10.2.1 (Debian 1:10.2.1+ds-1ubuntu3)"
+
+    def setUp(self) -> None:
+        from tests.harness import harness
+
+        self._saved = dict(harness._QEMU_VERSIONS)
+        harness._QEMU_VERSIONS.clear()
+        self.calls: list[str] = []
+
+    def tearDown(self) -> None:
+        from tests.harness import harness
+
+        harness._QEMU_VERSIONS.clear()
+        harness._QEMU_VERSIONS.update(self._saved)
+
+    def version(self, line: str) -> Any:
+        def f(binary: str) -> str:
+            self.calls.append(binary)
+            return line
+
+        return f
+
+    def pin(
+        self,
+        pin: str | None,
+        *,
+        env: dict[str, str] | None = None,
+        platform: str = "linux",
+        line: str = LINE,
+    ) -> None:
+        from tests.harness.harness import ensure_qemu_pinned
+
+        ensure_qemu_pinned(
+            "qemu-system-x86_64",
+            pin,
+            env={"CI": "true"} if env is None else env,
+            platform=platform,
+            version_line=self.version(line),
+        )
+
+    def test_match_passes_and_parses_ubuntu_line(self) -> None:
+        self.pin("10.2.1")
+        self.assertEqual(self.calls, ["qemu-system-x86_64"])
+
+    def test_mismatch_raises_naming_both(self) -> None:
+        with self.assertRaises(HarnessError) as cm:
+            self.pin("10.2.1", line="QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1)")
+        self.assertIn("8.2.2", str(cm.exception))
+        self.assertIn("10.2.1", str(cm.exception))
+
+    def test_empty_pin_raises(self) -> None:
+        with self.assertRaises(HarnessError) as cm:
+            self.pin("")
+        self.assertIn("VIBEOS_QEMU_VERSION", str(cm.exception))
+        self.assertEqual(self.calls, [])
+
+    def test_skips_without_ci_on_darwin_and_without_pin(self) -> None:
+        self.pin("1.0.0", env={})
+        self.pin("1.0.0", env={"CI": ""})
+        self.pin("1.0.0", platform="darwin")
+        self.pin(None)
+        self.assertEqual(self.calls, [])
+
+    def test_memoized_per_binary(self) -> None:
+        self.pin("10.2.1")
+        self.pin("10.2.1")
+        self.assertEqual(self.calls, ["qemu-system-x86_64"])
+        with self.assertRaises(HarnessError):
+            self.pin("10.2.2")
+        self.assertEqual(self.calls, ["qemu-system-x86_64"])
+
+    def test_qemu_argv_checks_the_config_pin(self) -> None:
+        from tests.harness import harness
+
+        cfg = harness.QemuConfig(iso="x.iso", qemu_version="10.2.1")
+        with mock.patch.object(harness, "ensure_qemu_pinned") as ens:
+            argv = harness.qemu_argv(cfg, None)
+        ens.assert_called_once_with("qemu-system-x86_64", "10.2.1")
+        self.assertEqual(argv[0], "qemu-system-x86_64")
+
+    def test_plain_config_is_not_checked(self) -> None:
+        from tests.harness import harness
+
+        with harness.overlay_env({"CI": "true"}):
+            harness.qemu_argv(harness.QemuConfig(iso="x.iso"), None)
 
 
 class TestMceHelpers(unittest.TestCase):

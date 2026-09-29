@@ -671,3 +671,14 @@ needs = [
   "`kernel_tests` hooks isolated in per-subsystem",  # L1223
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1201
+[[box]]
+key = "CI wall time cut inside"
+needs = [
+  "the CI budget, written into",  # L1199
+  "the harness retries nothing: after",  # L1244
+  "`tsc_calib_source` measures PIT channel 2",  # L1256
+  "`pit_tick_rate` counts timer interrupts, not",  # L1265
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"

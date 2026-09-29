@@ -7,7 +7,16 @@ CARGO  := cargo
 export CARGO_TARGET_DIR := $(CURDIR)/target
 # Host triple for vibeos-core tests and mkfs/fsck. Parent cargo config
 # defaults to $(TARGET), so host recipes pass --target $(HOST_TRIPLE).
+# VIBEOS_PREBUILT=1: the `make test-*` tiers use the files `make prebuilt`
+# packed (a CI tier job, DESIGN §8.6), so nothing here runs rustc or cargo
+# to build them: build/prebuilt.mk records the triple they were built for,
+# and the ISO and host-tool rules below are not defined, so a missing file
+# fails with "No rule to make target".
+ifeq ($(VIBEOS_PREBUILT),1)
+include build/prebuilt.mk
+else
 HOST_TRIPLE := $(shell rustc -vV | sed -n 's/^host: //p')
+endif
 # Script-style Python runners (`python3 tests/harness/run_e2e.py`) need the
 # repo root on sys.path so `from tests.harness.harness import` resolves.
 export PYTHONPATH := $(CURDIR)
@@ -60,7 +69,9 @@ KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml crates/core/Cargo.toml build.rs linker.
 	user/hello.asm user/init.asm user/sh.asm user/tests.asm user/sys.inc $(INITRD) \
 	.cargo/config.toml Cargo.lock
 
+ifneq ($(VIBEOS_PREBUILT),1)
 LLVM_TOOL_DIR := $(shell rustc --print sysroot)/lib/rustlib/$(shell rustc -vV | sed -n 's/^host: //p')/bin
+endif
 OBJDUMP := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-objdump),$(LLVM_TOOL_DIR)/llvm-objdump,llvm-objdump)
 NM      := $(if $(wildcard $(LLVM_TOOL_DIR)/llvm-nm),$(LLVM_TOOL_DIR)/llvm-nm,llvm-nm)
 
@@ -80,6 +91,7 @@ $(4): $(2)/$(TARGET)/$(PROFILE_DIR)/vibeos limine.conf $(LIMINE_BIN)
 	LIMINE_DIR=$$(LIMINE_DIR) scripts/mkiso.sh $$< $$@ build/iso_root_$(1)
 endef
 
+ifneq ($(VIBEOS_PREBUILT),1)
 # prod: no extra features
 $(eval $(call KERNEL_VARIANT,prod,$(CURDIR)/target,,$(ISO)))
 # panic: deliberate panic-test dump
@@ -90,12 +102,13 @@ $(eval $(call KERNEL_VARIANT,gp,$(CURDIR)/target-gp,--features gp_test --feature
 $(eval $(call KERNEL_VARIANT,ktest,$(CURDIR)/target-kernel-tests,--features kernel_tests,$(ISO_KTEST)))
 # vibefs_crash: write-loop kernel for QEMU-kill fsck
 $(eval $(call KERNEL_VARIANT,vibefs_crash,$(CURDIR)/target-vibefs-crash,--features vibefs_crash,$(ISO_VIBEFS_CRASH)))
+endif
 
 KERNEL_ELF := $(CURDIR)/target/$(TARGET)/$(PROFILE_DIR)/vibeos
 KERNEL_TESTS_DIR := $(CURDIR)/target-kernel-tests
 KERNEL_VIBEFS_CRASH_DIR := $(CURDIR)/target-vibefs-crash
 
-.PHONY: help check all kernel iso run run-panic clean distclean setup layout \
+.PHONY: help check all kernel iso run run-panic clean distclean setup layout prebuilt \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-gp test-e2e-mce test \
         test-e2e-pit test-e2e-highmem test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
         test-smp-stress test-vibefs-crash test-e2e-uefi
@@ -125,6 +138,8 @@ help:
 	  '  test-vibefs-crash     QEMU-kill + host fsck-vibefs' \
 	  '  test-smp-stress       -smp 4, longer timeout (scheduled CI)' \
 	  '  test                  all of the above except test-smp-stress and test-ps2' \
+	  '  prebuilt              every ISO and host tool a tier uses, as build/prebuilt.tar;' \
+	  '                        VIBEOS_PREBUILT=1 make test-* then uses them (CI tier jobs)' \
 	  '  clean / distclean     build products; distclean also drops limine/'
 
 # Fast local / CI `check` job gate (T3). It lints the kernel with its default
@@ -230,11 +245,25 @@ FSCK_VIBEFS := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/fsck-vibefs
 NBD_CACHE := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/nbd-cache
 VIBEFS_CAT := $(CARGO_TARGET_DIR)/$(HOST_TRIPLE)/debug/vibefs-cat
 
+ifneq ($(VIBEOS_PREBUILT),1)
 $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT): $(shell find crates/core/src/fs/vibefs -type f -name '*.rs') \
 		tests/hostlib/src/bin/mkfs_vibefs.rs tests/hostlib/src/bin/fsck_vibefs.rs \
 		tests/hostlib/src/bin/nbd_cache.rs tests/hostlib/src/bin/vibefs_cat.rs \
 		tests/hostlib/Cargo.toml crates/core/Cargo.toml
 	cargo build -p vibeos-hostlib-tests --bins --target $(HOST_TRIPLE)
+endif
+
+# What a tier job downloads instead of building (DESIGN §8.6): every ISO and
+# every host tool a `test-*` recipe lists. Recursive `=`, so it follows the
+# variables' paths. The tar keeps the executable bit, which upload-artifact
+# drops, and holds paths relative to $(CURDIR).
+PREBUILT_FILES = $(ISO) $(ISO_PANIC) $(ISO_GP) $(ISO_KTEST) $(ISO_VIBEFS_CRASH) \
+	$(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE) $(VIBEFS_CAT)
+
+prebuilt: $(PREBUILT_FILES)
+	mkdir -p build
+	printf 'HOST_TRIPLE := %s\n' '$(HOST_TRIPLE)' > build/prebuilt.mk
+	tar -cf build/prebuilt.tar build/prebuilt.mk $(patsubst $(CURDIR)/%,%,$(PREBUILT_FILES))
 
 test-e2e: $(ISO) $(MKFS_VIBEFS)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) VIBEOS_MKFS=$(MKFS_VIBEFS) python3 tests/harness/run_e2e.py

@@ -427,6 +427,8 @@ harness defaults match them.
 | `VIBEOS_FSCK` | `fsck-vibefs` | `run_vibefs_crash` |
 | `VIBEOS_NBD_CACHE` | `nbd-cache` | `run_vibefs_crash` |
 | `VIBEOS_VIBEFS_CAT` | `vibefs-cat` | `run_vibefs_crash` |
+| `VIBEOS_PREBUILT` | unset | the Makefile: `1` makes `make test-*` use the files `make prebuilt` packed (`build/prebuilt.tar`, unpacked in place) and build nothing, as a CI tier job does (§8.6) |
+| `VIBEOS_QEMU_VERSION` | unset; the QEMU version a CI job pins | `qemu_argv`, only under `CI` on Linux: it fails before the first boot when `qemu-system-x86_64 --version` differs, or when the variable is unset (§8.6, Runners) |
 
 `VIBEOS_BIOS` reaches QEMU as `-bios`, which accepts only an image whose size is a multiple of
 64 KiB. apt's combined `/usr/share/ovmf/OVMF.fd`, the Makefile's `OVMF` default and the one CI uses,
@@ -450,42 +452,114 @@ does not boot it twice.
 
 ## 8.6 CI and coverage
 
-Two jobs run on every push and pull request, on Linux, and `ticks` on pull requests; the other
-rows below are scheduled, dispatched, or run on a tag. `concurrency` cancels superseded runs that
-share a group, one per branch and event (`github.event_name` is in the key): a push run never
-cancels a pull request's run or its `ticks` job, a merge to `main` still cancels the push run of
-the merge before it, and a fork's pull request from its own `main` shares a slot only with other
-pull requests from a branch named `main`, never with `main`'s push runs. Planned (ROADMAP §10.1): `ci` runs on pushes to
-`main`, pull requests, and `workflow_dispatch`; a pull request's runs share one group per pull
-request number and cancel superseded ones, and every other run has its own group, so no `main` run
-is cancelled. A `pull_request` run never counts as proof of a commit (ROADMAP §10.9). The earlier
-one-ladder-job rule (runner queues) was lifted on 2026-09-22: the repo is public, so Actions minutes
-are free, and agents own the CI design. ROADMAP §10.1 plans a build-once job plus a tier matrix per
-architecture; until that lands the ladder is one job.
+`ci` runs on a push to `main`, on every pull request, and on `workflow_dispatch`, never on a push to
+another branch, with one temporary exception: until ROADMAP §10.1's trigger box is ticked, pushes to
+the Phase 10 integration branch (`phase-10`, and the branch that stands in for it) and to the
+`p10/**` slice branches run too, so a slice's race-proof test commit runs red before its fix
+(`TEMPORARY` in `scripts/check_workflows.py`). A pull request's runs share the concurrency group
+`ci-pr-<number>` and cancel superseded ones; every other run has a group of its own, `ci-run-<run
+id>`, so no run on `main` is cancelled or dropped as pending, and a fork's pull request from its own
+`main` shares nothing with `main`'s runs. `scripts/check_workflows.py` fails on `ci.yml` push branches
+other than `main` and the temporary list, on a `tags`, `branches-ignore` or `paths` filter, on a
+missing `pull_request` or `workflow_dispatch` trigger, or on a group that is not built that way
+(`rule_ci_triggers`); on any `concurrency` group built from `github.head_ref` or `github.ref_name`
+(`rule_concurrency_group`); and on a workflow a §10.9 gate entry names that has no
+`workflow_dispatch` trigger (`rule_gate_dispatch`). The other rows below are scheduled,
+dispatched, or run on a tag. A `pull_request` run never counts as proof of a commit (ROADMAP §10.9).
+
+**CI budget.** Every push to `main` and every pull-request update runs `check` and, alongside it,
+one `build` job per architecture (x86_64 now; from Phase 11 aarch64 on the arm64 runner, which also
+runs `make test-unit` and the hostlib tests natively, §11.4's aarch64 switch roundtrip among them).
+`build` runs `make prebuilt`, which builds every ISO variant and the host `mkfs`/`fsck`/`nbd-cache`/
+`vibefs-cat` tools once and packs them, with the host triple they were built for, into
+`build/prebuilt.tar`, uploaded as `prebuilt-<arch>`. A matrix of `tier` jobs per architecture
+(`needs: [check, build]`, `fail-fast: false`, TCG) downloads it and runs the same `make test-*`
+targets with `VIBEOS_PREBUILT=1`, which defines no ISO or host-tool rule, so a tier builds nothing
+and a missing file fails with `No rule to make target`: the Makefile stays the one definition of
+each tier. Tiers are grouped to about 40 s of QEMU each, a group over 60 s split at target
+boundaries, and each is its own check name, `tier (<arch>, <tier>)`, so a red pull request names
+the failing tier; the table below holds the grouping, and `scripts/check_workflows.py` fails when it
+and the matrix differ (`rule_budget_doc`), and when the `tier` job lacks `needs: [check, build]`,
+`fail-fast: false` or `VIBEOS_PREBUILT=1`, or a `make test` prerequisite is in no tier or in two, the
+ones `check` runs through `$(MAKE)` aside (`rule_tiers`). Everything else runs on a schedule: the
+macOS job, the KVM leg, the fuzzers, stress, and any job with a performance threshold. Later lines
+name two scheduled workflows, both on the pinned toolchain: the nightly job, which carries the KVM
+leg, and the weekly job (`smp-stress` today); the non-blocking `nightly-canary`, the one job on an
+undated nightly, is neither, and a line that needs its own workflow or another cadence names it
+(§20.8's `hardware-models`, §22.5's `fuzz.yml`, §24.2's rebuilds). A later line that says "in CI"
+for a functional test means a ladder tier; for a benchmark or a threshold it means the KVM leg. A
+red scheduled job blocks the next phase tag. The earlier no-matrix rule (runner queues) is lifted:
+the repository is public, so standard runners are free and unlimited, and the limits that matter
+are 20 concurrent jobs on the Free plan (at most 5 macOS; scheduled campaigns together hold at most
+10, so pushes keep the other 10) and 6 hours per job: a scheduled run longer than 5.5 hours is
+split into shards that hand their state on as artifacts, and the line that needs one says so;
+scheduled work runs in the 10 lanes of ROADMAP §10.1's next box (Scheduled capacity, below).
+
+Tiers, with each group's summed QEMU step time in the last green integration-branch `ci` run before
+the split (run 36522096073 at `30edb3d`, one `ubuntu-latest` runner, TCG); `vibefs-crash`'s figure
+includes its `cargo test` of the host tools, the one tier that needs the toolchain:
+
+| Arch | Tier | Targets | QEMU s |
+|---|---|---|---|
+| x86_64 | e2e-1 | `test-e2e`, `test-e2e-uefi`, `test-e2e-panic` | 32 |
+| x86_64 | e2e-2 | `test-e2e-gp`, `test-e2e-mce`, `test-e2e-pit`, `test-e2e-highmem` | 30 |
+| x86_64 | in-guest-1 | `test-kernel` | 64 |
+| x86_64 | in-guest-2 | `test-kernel-smp4` | 52 |
+| x86_64 | in-guest-3 | `test-lapic-fallback` | 50 |
+| x86_64 | vibefs-crash | `test-vibefs-crash` | 47 |
+
+`test-unit` and `test-harness` run inside `make check`, in the `check` job. The in-guest tiers
+each pass 40 s alone and cannot split below a target.
 
 | Job | When | What |
 |---|---|---|
 | `check` | push / PR | Installs `x86_64-unknown-none`. `make check` (fmt; clippy `-D warnings` on `vibeos-core` and hostlib for the host, `vibeos-core` for `x86_64-unknown-none`, and the kernel with default features; host units, harness, ruff/mypy, `scripts/check_*.py`) then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines 87`. No QEMU, no `setup.sh`. HTML report is a 7-day `core-coverage` artifact. |
-| `phase 0 ladder` | push / PR, `needs: check` | Limine, QEMU/nasm/xorriso/OVMF, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, `panic_test` with `panic_exit`, `gp_test` with `panic_exit`) and once with `kernel_shell` (the default set runs in `check`); ISO, e2e (BIOS/UEFI/panic/#GP/#MC/PIT/9 GiB), in-guest at `-smp 2` and `-smp 4`, LAPIC fallback, vibefs crash. Even after a failed step it writes a per-tier table and every harness retry to the job summary and uploads `build/results/` as `results-x86_64-phase0`. Green `main` uploads `vibeos.iso` (7 days). |
-| `ticks` | PR, `needs: phase0`, even after it fails | `scripts/check_ticks.py --base <PR base> --head <PR head> --run-commit $GITHUB_SHA --results <downloaded results-*> --summary $GITHUB_STEP_SUMMARY`: every box a commit of the pull request ticks pairs with a `Proves:` line, its proof exists at the head and is changed by the pull request or marked `(existing: ...)`, a ktest, utest, or marker proof passed in a results file of the head or the tested merge commit, no results file lists a retry, needs and closes rows hold, `Fails-before:` lines are present, and a bracketed proof passed on a scheduled run or `ci-history` record (read through `gh`, with `contents: read` and `actions: read`). The summary lists errors, `(existing: ...)` proofs, and notes. `make check` runs the pairing and diff rules bare against `origin/main` and skips them when that ref is missing, as in the `check` job's shallow checkout. |
+| `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/nasm/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, `panic_test` with `panic_exit`, `gp_test` with `panic_exit`) and once with `kernel_shell` (the default set runs in `check`); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos.iso` (7 days). |
+| `tier (<arch>, <tier>)` | push / PR, `needs: [check, build]` | One job per row of the tier table above: QEMU and OVMF, `prebuilt-<arch>` unpacked, the runner's CPU model to the job summary, then `make -k -j <jobs> --output-sync=target VIBEOS_PREBUILT=1 <targets>` under TCG (`jobs` is 1 until ROADMAP §10.1's parallel QEMU runs land). Even after a failed step it writes a per-tier table and every harness retry to the job summary and uploads `build/results/` as `results-<arch>-<tier>`. |
+| `ticks` | PR, `needs: tier`, even after it fails | `scripts/check_ticks.py --base <PR base> --head <PR head> --run-commit $GITHUB_SHA --results <downloaded results-*> --summary $GITHUB_STEP_SUMMARY`: every box a commit of the pull request ticks pairs with a `Proves:` line, its proof exists at the head and is changed by the pull request or marked `(existing: ...)`, a ktest, utest, or marker proof passed in a results file of the head or the tested merge commit, no results file lists a retry, needs and closes rows hold, `Fails-before:` lines are present, and a bracketed proof passed on a scheduled run or `ci-history` record (read through `gh`, with `contents: read` and `actions: read`). The summary lists errors, `(existing: ...)` proofs, and notes. `make check` runs the pairing and diff rules bare against `origin/main` and skips them when that ref is missing, as in the `check` job's shallow checkout. |
 | `smp-stress` | weekly Monday 06:00 UTC + dispatch | `-smp 4`, longer timeout (`VIBEOS_TIMEOUT=180`); planned (ROADMAP §10.2): the §8.2 per-run deadlines, with no longer timeout |
 | `nightly-canary` | same workflow, non-blocking | undated latest nightly, `make iso && make test-unit` |
 | `release` | `v*` tags | `make test-e2e` (BIOS) only, then production + ktest ISO, changelog section, GitHub Release. It does not wait for `ci` at the tagged commit, and the ktest ISO writes fixed LBAs of any virtio-blk disk attached at boot (ROADMAP §10.1, F145). Planned (ROADMAP §10.1): dispatched from `main` with the release tag as input; a `build` job with `contents: read` and `actions: read`, no cache, and no persisted token, then a `publish` job that runs no repository script; from ROADMAP §14.6 a `sign` job in the `release` environment between them, and from §22.4 a keyless `verify` job on vibeOS. From ROADMAP §18.7 the `sign` job is two key jobs, `sign-files` and `sign-manifest`, with an unprivileged `assemble` job between them, since images hold the signed kernels and Limine binaries and the manifest lists the images (ROADMAP §22.1). |
 
-The `ticks` job (ROADMAP §10.9) runs after the jobs that run the tiers, today the ladder, and reads
+The `ticks` job (ROADMAP §10.9) runs after the jobs that run the tiers, the `tier` matrix, and reads
 the `build/results/` files they upload. A pull request run tests the merge of its head with its
 base, so the results files carry the merge commit, which `--run-commit` names; `check_ticks.py`
 reads commits and their messages from the pull request's head.
+
+**Workflow rules.** `scripts/check_workflows.py`, which `make check` runs, reads every workflow
+with a stdlib YAML subset reader that fails on anything it does not parse (anchors, aliases, tags,
+`---`, multi-line flow) rather than misread it, and holds one function per rule in `RULES`. Besides
+the trigger, runner, tier, and upstream rules this section states where they apply, it fails on
+`${{` inside an inline or block `run:` script, whose values reach a step through `env:` instead
+(`rule_no_expr_in_run`, F144); on a workflow without a top-level `permissions:` mapping, on
+`read-all` or `write-all`, and on any grant other than `contents: read` or `none`, at the top or in a
+job, without a comment beside it naming its need (`rule_permissions`); and on a remote `uses:` not
+pinned as `@<40 hex>  # <version>`, where `./` paths and `docker://…@sha256:` pass
+(`rule_action_pins`). `tests/harness/test_workflows.py` holds a failing and a passing case for each
+clause and runs every rule on the real files.
 
 Rule; not yet enforced: a job that holds a signing key or a write token runs no code from the
 candidate commit, restores no cache, checks out nothing, and receives only artifacts and their
 SHA-256 list (ROADMAP §10.1, §14.6). Today `release` builds, tests, and publishes in one job with
 `contents: write`, a persisted checkout token, and restored caches.
 
-**Runners.** Planned (ROADMAP §11.7): every job that boots an aarch64 guest runs on an arm64 runner
+**Runners.** Every Linux job runs on GitHub's free `ubuntu-26.04` image (`ubuntu-26.04-arm` for
+arm64 jobs), whose apt QEMU 10.2.1 (`1:10.2.1+ds-1ubuntu3`) meets every QEMU minimum ROADMAP names
+(9.0 for Phase 11's EL2 boot and §20.1's boot with more than 255 vCPUs, 10.2 for §18.1's amd-iommu
+`dma-remap` and Phase 25's GHES injection). A line that needs QEMU 11.1 or later builds that release
+from its tarball, checked by SHA-256 and cached by version; none does yet. Every job that installs
+`qemu-system-*` sets `VIBEOS_QEMU_VERSION` to the version it pins, and when `CI` is set on Linux,
+`harness.qemu_argv` runs `ensure_qemu_pinned`, which compares `qemu-system-x86_64 --version` with
+that pin before the first boot and fails on a mismatch or an unset pin, so an image update that
+moves QEMU fails every tier loudly instead of changing what they test; move the pin and this
+paragraph together. `make check`, the macOS job, and a dev host's QEMU (Homebrew's included) are
+not checked. `scripts/check_workflows.py` fails on a `runs-on:` label other than these two and
+`macos-*` (`rule_runs_on`, which resolves `${{ matrix.X }}` to the matrix's values), and on a job
+that names `qemu-system` without a `VIBEOS_QEMU_VERSION` of the form `N.N.N` (`rule_qemu_pin`).
+Planned (ROADMAP §11.7): every job that boots an aarch64 guest runs on an arm64 runner
 (`ubuntu-26.04-arm`, or the scheduled macOS job's arm64 image), never on an x86_64 one. TCG adds no
 ordering to an aarch64 guest's loads and stores, so only an arm64 host lets a weak reordering reach
-guest code; an x86_64 host runs them in its TSO order. `scripts/check_workflows.py` checks it. From
+guest code; an x86_64 host runs them in its TSO order. `scripts/check_workflows.py` will check it. From
 ROADMAP Phase 11 on, `make gate` also needs two dev-host records that loop the -smp 4 in-guest tier
 and smp-stress under HVF for 30 minutes each (`tests/gates/common.toml`), the only gate that runs
 those tests on a weakly ordered CPU directly. The weekly aarch64 smp-stress leg records whether TCG
@@ -523,9 +597,25 @@ GitHub Actions records per-step duration. Measured on `main` at `88370e5` (run 3
 53 s, then the ladder 160 s, serialized by `needs: check`. The ladder spends 58 s on setup, toolchain,
 kernel clippy, and ISO build before the first QEMU step, then 98 s across nine QEMU steps (longest:
 vibefs crash, 22 s); about **3m40s** end to end. A fmt or
-hostlib lint failure should go red in about a minute without starting QEMU. From ROADMAP §10.9's CI
+hostlib lint failure should go red in about a minute without starting QEMU. Host packages come from a
+cache (ROADMAP §10.1): `check`, `build` and `tier` each name theirs in `APT_PACKAGES` and restore
+`~/apt-cache` under the key `apt-<ImageOS>-<ImageVersion>-<sha256 of the list>`; a hit installs the
+cached `.deb` files with `dpkg -i`, with no `apt-get update` and no download, and a miss runs
+`apt-get install` with `APT::Keep-Downloaded-Packages=true` and saves what it downloaded. `build`
+and `tier` write the runner's CPU model to the job summary, so the "after" figure, a `ci` run on
+`main`, can cite it; each tier's `jobs` stays 1 until the timing tests and the §10.2 retried
+failures are fixed. From ROADMAP §10.9's CI
 history on, a measured number recorded in the design docs cites the commit it was measured at and the CPU
 model or machine it ran on (ROADMAP, How to read this).
+
+A failure traced to a QEMU bug is not retried either: the kernel or the harness's QEMU command line
+(`harness.qemu_argv`) works around it, and the upstream report, with a reproducer, the QEMU version,
+and the workaround, is drafted in [UPSTREAM.md](UPSTREAM.md). Filing it needs an account, so the
+maintainer files it from their own and its link then replaces the draft's; the draft and the
+workaround are the proof, since a gate never needs a new account (ROADMAP, How to read this).
+`scripts/check_workflows.py` fails when this section does not link that file, when an entry misses
+its Reproducer, Versions, Workaround, or Upstream field, or when the Workaround's path does not
+exist (`rule_upstream`). No Phase 10 failure has been traced to a QEMU bug.
 
 Line-coverage floor for `vibeos-core` is **87%** (`--fail-under-lines 87` in
 `.github/workflows/ci.yml`). Measured 87.53% at `6cbe4fe` with `cargo llvm-cov -p vibeos-core --lib
