@@ -108,7 +108,7 @@ KERNEL_ELF := $(CURDIR)/target/$(TARGET)/$(PROFILE_DIR)/vibeos
 KERNEL_TESTS_DIR := $(CURDIR)/target-kernel-tests
 KERNEL_VIBEFS_CRASH_DIR := $(CURDIR)/target-vibefs-crash
 
-.PHONY: help check all kernel iso run run-panic clean distclean setup layout prebuilt \
+.PHONY: help check check-python all kernel iso run run-panic clean distclean setup layout prebuilt \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-gp test-e2e-mce test \
         test-e2e-pit test-e2e-highmem test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
         test-smp-stress test-vibefs-crash test-e2e-uefi
@@ -117,6 +117,7 @@ help:
 	@printf '%s\n' \
 	  'vibeOS make targets:' \
 	  '  check                 fast local gate (clippy/unit/harness/python)' \
+	  '  check-python          ruff and mypy (VIBEOS_ALLOW_MISSING_TOOLS=1 skips a missing one)' \
 	  '  all / iso             kernel + vibeos.iso (hybrid BIOS/UEFI)' \
 	  '  kernel                kernel ELF only' \
 	  '  run                   boot production ISO in QEMU' \
@@ -143,6 +144,33 @@ help:
 	  '                        VIBEOS_PREBUILT=1 make test-* then uses them (CI tier jobs)' \
 	  '  clean / distclean     build products; distclean also drops limine/'
 
+# VIBEOS_ALLOW_MISSING_TOOLS=1 is a gate switch (AGENTS.md How to run), not a
+# QEMU override: `make check` and the FAT host tests fail when a tool they
+# need is missing, unless it is set, when each skips that check and prints it.
+# Exported so a command-line setting reaches `cargo test`. CI never sets it.
+VIBEOS_ALLOW_MISSING_TOOLS ?=
+export VIBEOS_ALLOW_MISSING_TOOLS
+RUFF ?= ruff
+MYPY ?= mypy
+# $(call missing_tool,<tool>,<check>,<install hint>): shell text for a missing
+# <tool>. It prints the skip line under the switch; otherwise it names the tool
+# and the hint on stderr and exits 1. Arguments contain no commas.
+missing_tool = if [ "$(VIBEOS_ALLOW_MISSING_TOOLS)" = 1 ]; then \
+	    echo "check: skipped $(strip $(2)): $(strip $(1)) not installed (VIBEOS_ALLOW_MISSING_TOOLS=1)"; \
+	else \
+	    echo "check: $(strip $(1)) not installed; $(strip $(3)), or set VIBEOS_ALLOW_MISSING_TOOLS=1 to skip $(strip $(2))" >&2; \
+	    exit 1; \
+	fi
+# $(call run_py_tool,<tool>,<args>): run <tool> as a command, else as
+# `python3 -m <tool>`, else call missing_tool.
+run_py_tool = if command -v $(1) >/dev/null 2>&1; then \
+	    $(1) $(2); \
+	elif python3 -m $(1) --version >/dev/null 2>&1; then \
+	    python3 -m $(1) $(2); \
+	else \
+	    $(call missing_tool,$(1),$(strip $(1) $(2)),pip install the version the check job in .github/workflows/ci.yml pins); \
+	fi
+
 # Fast local / CI `check` job gate (T3). It lints the kernel with its default
 # features and vibeos-core's no_std build for the kernel target, so kernel-target
 # code compiles before every commit; CI's ladder lints each other ISO feature
@@ -160,20 +188,7 @@ check:
 	$(MAKE) test-unit
 	cargo test -p vibeos-core --lib --features std --target $(HOST_TRIPLE) --config 'profile.test.debug-assertions=false' -- release_assert_
 	$(MAKE) test-harness
-	@if command -v ruff >/dev/null 2>&1; then \
-	    ruff check tests scripts; \
-	elif python3 -m ruff --version >/dev/null 2>&1; then \
-	    python3 -m ruff check tests scripts; \
-	else \
-	    echo "check: ruff not installed; pip install ruff"; \
-	fi
-	@if command -v mypy >/dev/null 2>&1; then \
-	    mypy; \
-	elif python3 -m mypy --version >/dev/null 2>&1; then \
-	    python3 -m mypy; \
-	else \
-	    echo "check: mypy not installed; pip install mypy"; \
-	fi
+	$(MAKE) check-python
 	$(CARGO) build --bin vibeos --profile hookcheck --config 'profile.hookcheck.inherits="dev"'
 	@set +e; \
 	for s in scripts/check_*.py; do \
@@ -183,6 +198,11 @@ check:
 	done
 	python3 scripts/doc_refs.py
 	@echo "check: ok"
+
+# ruff and mypy over tests/ and scripts/ (DX1, F147).
+check-python:
+	@$(call run_py_tool,$(RUFF),check tests scripts)
+	@$(call run_py_tool,$(MYPY),)
 
 all: $(ISO)
 

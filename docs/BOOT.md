@@ -16,7 +16,7 @@ Power-on to `sti`. Limine does the ugly part (real mode, A20, long mode, ELF loa
 | Target | built-in `x86_64-unknown-none` (`rust-toolchain.toml` `targets`) |
 | Build | `cargo build` (default target in `.cargo/config.toml`) |
 | Panic | kernel target `abort`; host tests `unwind` (`profile.dev`) |
-| Extra host tools | `xorriso`, `nasm` (`user/*.asm`), `qemu-system-x86_64`, `python3`, `dosfstools` (`fsck.fat`; host FAT tests skip if missing) |
+| Extra host tools | `xorriso`, `nasm` (`user/*.asm`), `qemu-system-x86_64`, `python3`, `dosfstools` (`fsck.fat`; the host FAT tests fail without it unless `VIBEOS_ALLOW_MISSING_TOOLS=1`), `ruff` and `mypy` (`make check`, at the versions the `check` job pins) |
 
 `make` is the usual entry. It stages `build/initrd.fat` and passes `VIBEOS_INITRD` into `build.rs`.
 Bare `cargo check` / `cargo build` works: `build.rs` passes `-T$CARGO_MANIFEST_DIR/linker.ld` and

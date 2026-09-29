@@ -87,9 +87,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-check-
 
+      # Pinned (ROADMAP §10.1, DX1); .cursor/environment.json installs the
+      # same two versions.
       - name: install python linters
         run: |
-          python3 -m pip install --user --break-system-packages ruff mypy
+          python3 -m pip install --user --break-system-packages ruff==0.16.9 mypy==2.3.1
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: make check

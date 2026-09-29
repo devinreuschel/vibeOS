@@ -41,7 +41,7 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 | [DOC2](DOC2-split-design-doc.md) | Split `DESIGN.md`; as-built in tables, not prose | Medium | M | III | A1 (helpful) | `in progress (#194)` |
 | [DOC3](DOC3-agents-md.md) | Version the agent instructions in the repo (`AGENTS.md`) | High | S | I | — | `implemented (#78)` |
 | [DOC4](DOC4-changelog-style.md) | Keep `CHANGELOG.md` short and user-facing | Low | S | I | B3 | `implemented (#81, #194)` |
-| [DX1](DX1-make-check-and-lint-config.md) | A fast local gate (`make check`) and formatter/linter configuration | Medium | S | I | Q1, B1, A2 | `in progress (#76)` |
+| [DX1](DX1-make-check-and-lint-config.md) | A fast local gate (`make check`) and formatter/linter configuration | Medium | S | I | Q1, B1, A2 | `implemented (#76, #194)` |
 | [R1](R1-repo-tidy.md) | Tidy the root, `tests/`, and remote branches | Low | S | I | B1, T2 | `in progress (#78, #79)` |
 | [O1](O1-phase9-resume-note.md) | Note the Phase 9 pause and resume; research notes deferred | Low | S | II | — | `superseded: Phase 9 did not pause, so there is no resume to note; research notes stay deferred` |
 

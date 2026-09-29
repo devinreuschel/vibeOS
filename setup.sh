@@ -39,15 +39,27 @@ python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1
     || { echo "setup: python3 >= 3.11 required (found $pyver)" >&2; exit 1; }
 echo "setup: python3 $pyver"
 
-if command -v ruff >/dev/null 2>&1; then
-    echo "setup: found ruff ($(ruff --version))"
+# `make check` and the FAT host tests need these (ROADMAP §10.1). Reported,
+# not required here: the ladder, smp-stress and release jobs run this script
+# without them.
+lint_tool() {
+    local tool=$1 version
+    if command -v "$tool" >/dev/null 2>&1; then
+        version=$("$tool" --version 2>&1 | head -n1)
+    elif python3 -m "$tool" --version >/dev/null 2>&1; then
+        version=$(python3 -m "$tool" --version 2>&1 | head -n1)
+    else
+        echo "setup: missing required tool: $tool (make check fails without it unless VIBEOS_ALLOW_MISSING_TOOLS=1; pip install the version the check job in .github/workflows/ci.yml pins)" >&2
+        return 0
+    fi
+    echo "setup: found $tool ($version)"
+}
+lint_tool ruff
+lint_tool mypy
+if command -v fsck.fat >/dev/null 2>&1; then
+    echo "setup: found fsck.fat ($(fsck.fat --help 2>&1 | head -n1))"
 else
-    echo "setup: ruff not installed (optional; pip install ruff)"
-fi
-if command -v mypy >/dev/null 2>&1; then
-    echo "setup: found mypy ($(mypy --version | head -1))"
-else
-    echo "setup: mypy not installed (optional; pip install mypy)"
+    echo "setup: missing required tool: fsck.fat (make check fails without it unless VIBEOS_ALLOW_MISSING_TOOLS=1; install dosfstools)" >&2
 fi
 
 if [ -f "$TOOLCHAIN_FILE" ]; then
