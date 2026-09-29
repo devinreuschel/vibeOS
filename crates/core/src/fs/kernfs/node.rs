@@ -447,23 +447,17 @@ pub(super) fn kern_read(
             buf.fill(0);
             Ok(buf.len())
         }
+        // Hardware bytes only, until ROADMAP §13.10's CSPRNG: a short count
+        // when virtio-rng and RDRAND supply less, `Again` when they supply
+        // none (ROADMAP §10.12, F134).
         KernKind::Random | KernKind::Urandom => {
-            let mut i = crate::entropy::hw_fill(buf);
-            if i < buf.len() {
-                // Weak xorshift fallback when virtio-rng and rdrand are dry.
-                crate::entropy::warn_xorshift();
-                if i == 0 {
-                    crate::entropy::set_last_source(crate::entropy::Source::XorShift);
-                }
-                while i < buf.len() {
-                    let x = mix_rng(k);
-                    let b = x.to_le_bytes();
-                    let n = (buf.len() - i).min(8);
-                    buf[i..i + n].copy_from_slice(&b[..n]);
-                    i += n;
-                }
+            if buf.is_empty() {
+                return Ok(0);
             }
-            Ok(buf.len())
+            match crate::entropy::hw_fill(buf) {
+                0 => Err(FsError::Again),
+                n => Ok(n),
+            }
         }
         KernKind::Console | KernKind::Tty => Ok(0),
         // `KernSkin::read` sends a block node with a device to `blk_read`

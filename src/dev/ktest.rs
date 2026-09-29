@@ -469,15 +469,30 @@ pub(crate) fn test_dev_random_source() -> Outcome {
     let Ok(f) = fid::open("/dev/random", O_RDWR, 0) else {
         return Outcome::Fail("open");
     };
+    // Hardware bytes only (ROADMAP §10.12): a short count, or `Again`
+    // while virtio-rng refills and RDRAND is absent. Each attempt is its own
+    // VFS section, and the wait between them holds no lock (AGENTS rule 2).
     let mut buf = [0u8; 16];
-    let n = fid::read(f, &mut buf);
+    let t0 = crate::time_init::now_ns();
+    let n = loop {
+        match fid::read(f, &mut buf) {
+            Err(vibeos::fs::FsError::Again)
+                if crate::time_init::now_ns().saturating_sub(t0) < 2_000_000_000 =>
+            {
+                spin_until_ns(|| false, 1_000_000);
+            }
+            r => break r,
+        }
+    };
     let _ = fid::close(f);
-    if n.ok() != Some(16) {
-        return Outcome::Fail("read");
+    match n {
+        Ok(1..=16) => {}
+        Ok(n) => return crate::fail_fmt!("read {n} bytes"),
+        Err(e) => return crate::fail_fmt!("read: {}", e.as_str()),
     }
     match vibeos::entropy::last_source() {
-        vibeos::entropy::Source::XorShift => Outcome::Fail("xorshift"),
-        vibeos::entropy::Source::VirtioRng | vibeos::entropy::Source::RdRand => Outcome::Ok,
+        Some(_) => Outcome::Ok,
+        None => Outcome::Fail("no source"),
     }
 }
 
