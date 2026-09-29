@@ -427,6 +427,15 @@ pub(crate) const TESTS: &[Test] = &[
     test("user_device_irq", arch::ktest::test_user_device_irq).deadline(30_000),
     test("user_ipi", arch::ktest::test_user_ipi).deadline(30_000),
     test("cpu_control_regs", arch::ktest::cpu_control_regs),
+    test(
+        "catch_ignores_other_cpu",
+        arch::ktest::test_catch_ignores_other_cpu,
+    ),
+    test(
+        "catch_ignores_user_frame",
+        arch::ktest::test_catch_ignores_user_frame,
+    )
+    .deadline(30_000),
     test("console_read_exit", proc::ktest::test_console_read_exit).deadline(30_000),
     test("user_entry_irq", proc::ktest::test_user_entry_irq).deadline(120_000),
     test(
