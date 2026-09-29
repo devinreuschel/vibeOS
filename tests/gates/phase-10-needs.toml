@@ -778,3 +778,11 @@ needs = [
   "an `arch` module boundary built",  # L1277
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1317
+[[box]]
+key = "the cross-CPU wake inbox holds"
+needs = [
+  "one `limits` module in `vibeos-core`",  # L1315
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"

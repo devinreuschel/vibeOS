@@ -18,7 +18,10 @@ pub const RFLAGS_RESERVED1: u64 = 0x2;
 /// `RFLAGS.IF`. `schedule` ORs this on resume when `irq_nest == 0`.
 pub const RFLAGS_IF: u64 = 1 << 9;
 
-/// Slot index in the global TCB table. 0 is the bootstrap thread.
+/// A thread's id, from `proc::pid::PidAlloc`, which pids share (a
+/// process's pid is its first thread's tid). Never a table index: the
+/// thread table finds a TCB through a lookup (`proc::pid::IdIndex`). 0 is
+/// the bootstrap thread, which the allocator never hands out.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ThreadId(pub u32);

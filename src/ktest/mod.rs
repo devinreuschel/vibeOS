@@ -540,8 +540,16 @@ pub(crate) const TESTS: &[Test] = &[
     test("user_tf_repin", proc::ktest::test_user_tf_repin).deadline(60_000),
     test("user_fork_wait_stall", proc::ktest::user_fork_wait_stall),
     test(
+        "pid_not_reused_after_reap",
+        proc::ktest::pid_not_reused_after_reap,
+    ),
+    test(
         "shootdown_ack_while_busy",
         irq::ktest::shootdown_ack_while_busy,
+    ),
+    test(
+        "wake_inbox_and_kva_pool",
+        irq::ktest::wake_inbox_and_kva_pool,
     ),
 ];
 
@@ -637,12 +645,12 @@ fn qemu_exit(code: u32) -> ! {
 }
 
 /// Pages per stack in [`quiesce_frames`]' KVA walk: 17 pages of VA a round,
-/// so one walk between two coalesces covers about 8 MiB.
+/// so one walk between two coalesces covers `MAX_KVA_RANGES` times that.
 const WARM_STACK_PAGES: usize = 16;
 /// Ceiling on walk rounds: two coalesces take at most two free lists' worth.
 const WARM_ROUNDS: usize = 3 * vibeos::limits::MAX_KVA_RANGES;
 /// Default-size stacks the warm-up allocates and frees: past one free-list
-/// coalesce, since the node pool is `MAX_KVA_RANGES` (128).
+/// coalesce, since the node pool is `MAX_KVA_RANGES`.
 const WARM_DEFAULT_STACKS: usize = 2 * vibeos::limits::MAX_KVA_RANGES;
 /// Ceiling on [`settle_threads`]' wait.
 const SETTLE_MS: u64 = 2_000;

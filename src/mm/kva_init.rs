@@ -7,15 +7,10 @@
 //! `vmap` hands out a move-only [`Vmap`] that holds its `Frames`, and
 //! `vunmap` takes it back, so the span unmapped is the span freed.
 //! The KVA free-list lives under the page-table lock. Unmap, drop PT,
-//! shootdown, then free VA to the tail. A free that finds the free-list
-//! node pool full leaves the range reserved and counted, and
-//! [`release_va`] counts and logs the leak.
-
-use core::sync::atomic::{AtomicU64, Ordering};
+//! shootdown, then free VA to the tail ([`release_va`]).
 
 use vibeos::kva::{KVA_END, KVA_SIZE, KVA_START, Kva, KvaError, KvaStats, PAGE_SIZE};
 use vibeos::lock::RANK_PT;
-use vibeos::log::Level;
 use vibeos::paging::{MapError, PhysAddr, VirtAddr, heap_flags, stack_flags};
 use vibeos::pmm::Frames;
 pub use vibeos::thread::GuardedStack;
@@ -56,43 +51,10 @@ pub fn stats() -> KvaStats {
     paging_init::with_pt(|_pt| with_kva(|k| k.stats()))
 }
 
-/// Bytes of KVA left reserved by frees that found the free-list node pool
-/// full (ROADMAP §10.4's node-pool box removes the cap). A statistic that
-/// orders nothing, so Relaxed.
-static LEAKED_BYTES: AtomicU64 = AtomicU64::new(0);
-
-/// Free `[va, va + len)` to the KVA free list, under PT. Returns the bytes
-/// leaked: `len` when the node pool is full (`KvaError::Exhausted`, the one
-/// error `Kva::free` returns), which leaves the range reserved and counted
-/// in `used`; else 0.
-fn free_range(k: &mut Kva, va: u64, len: u64) -> u64 {
-    match k.free(va, len) {
-        Ok(()) => 0,
-        Err(_) => len,
-    }
-}
-
-/// Count `bytes` a full node pool leaked, and say so at most once a second
-/// (DESIGN §2.5, C-RATELIMIT). Called with PT dropped.
-fn note_leaked(bytes: u64) {
-    if bytes == 0 {
-        return;
-    }
-    let total = LEAKED_BYTES
-        .fetch_add(bytes, Ordering::Relaxed)
-        .saturating_add(bytes);
-    crate::klog_ratelimited!(
-        1000,
-        Level::Warn,
-        "vibeOS: kva: free-list full, {total} bytes leaked"
-    );
-}
-
-/// Give `[va, va + len)` back to the KVA free list; a full node pool leaks
-/// it, counted and logged ([`note_leaked`]).
+/// Give `[va, va + len)` back to the KVA free list. `Kva::free` always
+/// finds a node: `Kva::alloc` caps the live ranges below the pool size.
 pub(super) fn release_va(va: VirtAddr, len: u64) {
-    let leaked = paging_init::with_pt(|_pt| with_kva(|k| free_range(k, va.as_u64(), len)));
-    note_leaked(leaked);
+    paging_init::with_pt(|_pt| with_kva(|k| k.free(va.as_u64(), len)));
 }
 
 /// Reserve `pages+1` VA, map the upper `pages` from separate order-0
