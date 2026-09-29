@@ -43,23 +43,6 @@ ISO_VIBEFS_CRASH := build/vibeos-vibefs-crash.iso
 LIMINE_DIR := ./limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
 
-# QEMU config. `-smp 2` from day one, ROADMAP §0.5. VIBEOS_SMP / VIBEOS_QEMU_CPU
-# override so a single Makefile covers the SMP and LAPIC fallback variants.
-VIBEOS_SMP      ?= 2
-VIBEOS_QEMU_CPU ?= max
-VIBEOS_MEM      ?= 128M
-# TCG by default: KVM on a loaded host makes PIT/sleep tests flake.
-# Override with VIBEOS_QEMU_ACCEL=kvm (or empty for QEMU's default).
-VIBEOS_QEMU_ACCEL ?= tcg
-
-QEMU_BASE = qemu-system-x86_64 \
-    -cdrom $(ISO) \
-    -m $(VIBEOS_MEM) \
-    -smp $(VIBEOS_SMP) \
-    -cpu $(VIBEOS_QEMU_CPU) \
-    -accel $(VIBEOS_QEMU_ACCEL) \
-    -no-reboot
-
 # Prerequisites: everything under src/ and crates/core/src/, the linker
 # script, the limine config, and this Makefile. A find(1) so newly added
 # source dirs are not silently missed (DESIGN §9.1).
@@ -148,7 +131,7 @@ $(eval $(call KERNEL_VARIANT,vibefs-crash,--features vibefs_crash,$(ISO_VIBEFS_C
 
 KERNEL_ELF := build/kernels/vibeos-default.elf
 
-.PHONY: help check check-python check-msrv all kernel iso isos repro run run-panic clean distclean setup layout prebuilt \
+.PHONY: help check check-python check-msrv all kernel iso isos repro run run-panic debug clean distclean setup layout prebuilt \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-gp test-e2e-mce test \
         test-e2e-pit test-e2e-highmem test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
         test-smp-stress test-vibefs-crash test-e2e-uefi
@@ -163,14 +146,15 @@ help:
 	  '  kernel                kernel ELF only (build/kernels/vibeos-default.elf)' \
 	  '  isos                  every ISO variant, as build/vibeos*.iso' \
 	  '  repro                 build this commit twice; fail unless byte-identical (REPRO_ARGS=--share-rustup)' \
-	  '  run                   boot production ISO in QEMU' \
-	  '  run-panic             boot panic-test ISO' \
+	  '  run                   boot production ISO in a QEMU window, COM1 on the terminal (VIBEOS_* apply)' \
+	  '  run-panic             boot panic-test ISO, no window, COM1 on the terminal' \
+	  '  debug                 as run, halted with a gdb stub on :1234; then gdb -x scripts/vibeos.gdb' \
 	  '  layout                objdump sections + __kernel_ symbols' \
 	  '  test-unit             vibeos-core host tests (any host triple)' \
 	  '  models-quick          loom models (loom_*) at 3 preemptions, ROADMAP §10.8' \
 	  '  test-harness          python unit tests for the harness' \
 	  '  test-e2e              boot contract on the production ISO' \
-	  '  test-e2e-uefi         same, OVMF (prints a skip, then fails, if missing)' \
+	  '  test-e2e-uefi         same, UEFI firmware from the probe on pflash; none installed: skip (fail under CI)' \
 	  '  test-e2e-panic        panic-test dump contract' \
 	  '  test-e2e-gp           #GP dump+halt contract' \
 	  '  test-e2e-mce          injected #MC dump+halt contract' \
@@ -318,12 +302,23 @@ isos: $(ISOS)
 repro:
 	python3 scripts/repro_build.py $(REPRO_ARGS)
 
+# QEMU starts through the harness launcher, which builds the drivers' argv
+# from the same VIBEOS_* settings and defaults (DESIGN §8.4); the ISO is
+# harness.default_iso's unless VIBEOS_ISO names another.
 run: $(ISO)
-	$(QEMU_BASE) -serial stdio
+	python3 tests/harness/run_interactive.py run
 
 run-panic: $(ISO_PANIC)
-	qemu-system-x86_64 -cdrom $(ISO_PANIC) -m $(VIBEOS_MEM) -smp $(VIBEOS_SMP) \
-	    -cpu $(VIBEOS_QEMU_CPU) -accel $(VIBEOS_QEMU_ACCEL) -no-reboot -serial stdio -display none
+	python3 tests/harness/run_interactive.py panic
+
+# The initrd's programs, whose symbols `make debug` loads beside the kernel's.
+DEBUG_USER_ELFS := $(USER_HELLO) $(USER_INIT) $(USER_SH) $(USER_TESTS)
+
+# QEMU halted with a gdb stub on :1234 (`-s -S`); attach with
+# `gdb -x scripts/vibeos.gdb` from this directory (DESIGN §8.4).
+debug: $(ISO) $(KERNEL_ELF) $(DEBUG_USER_ELFS)
+	python3 tests/harness/run_interactive.py debug --kernel-elf $(KERNEL_ELF) \
+	    $(foreach e,$(DEBUG_USER_ELFS),--user-elf $(e))
 
 layout: $(KERNEL_ELF)
 	@echo "== sections =="
@@ -379,14 +374,23 @@ test-e2e: $(ISO) $(MKFS_VIBEFS)
 test-ps2: $(ISO)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) python3 tests/harness/run_ps2.py
 
-# UEFI path via OVMF. Skipped if OVMF is not installed.
-OVMF ?= /usr/share/ovmf/OVMF.fd
+# The boot contract under UEFI: the firmware probe (harness.FIRMWARE_TABLE,
+# VIBEOS_FW_X86_64) finds a code image and its variable-store template, which
+# the harness boots from pflash. One shell line, so the probe's answer decides
+# the run: 0 runs the harness and passes its status on; 1 (none installed)
+# prints a skip and exits 0, or fails when CI is set; 2 (a probe error) fails.
 test-e2e-uefi: $(ISO)
-	@if [ ! -f "$(OVMF)" ]; then \
-	    echo "test-e2e-uefi: OVMF not found at $(OVMF); skipping"; \
-	    exit 0; \
-	fi
-	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) VIBEOS_BIOS=$(OVMF) python3 tests/harness/run_e2e.py
+	@python3 tests/harness/run_interactive.py firmware x86_64; rc=$$?; \
+	case $$rc in \
+	    0) VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) VIBEOS_BIOS=uefi python3 tests/harness/run_e2e.py ;; \
+	    1) if [ -n "$$CI" ]; then \
+	           echo "test-e2e-uefi: FAIL: no x86_64 UEFI firmware installed, and CI is set" >&2; \
+	           exit 1; \
+	       fi; \
+	       echo "test-e2e-uefi: SKIP: no x86_64 UEFI firmware installed (apt: ovmf; Homebrew: qemu; or set VIBEOS_FW_X86_64)"; \
+	       exit 0 ;; \
+	    *) exit 2 ;; \
+	esac
 
 test-e2e-panic: $(ISO_PANIC)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_PANIC) VIBEOS_EXPECT_PANIC=1 python3 tests/harness/run_e2e.py
@@ -440,7 +444,7 @@ gate:
 	@test -n "$(PHASE)" || { echo "gate: set PHASE=N" >&2; exit 2; }
 	python3 scripts/gate.py --phase "$(PHASE)" $(if $(filter 1,$(RECORD)),--record) $(if $(COMMIT),--commit "$(COMMIT)")
 
-# Keeps build/results/ and a macOS build/OVMF.fd.
+# Keeps build/results/.
 clean:
 	rm -rf build/kernels build/iso_root_* $(ISOS) $(addsuffix .xorriso-version,$(ISOS)) \
 	    $(INITRD) \

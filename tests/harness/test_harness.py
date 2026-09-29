@@ -10,6 +10,8 @@ import socket
 import sys
 import time
 import unittest
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 from unittest import mock
 
@@ -1037,19 +1039,38 @@ class TestQemuArgv(unittest.TestCase):
         self.assertNotIn("-accel", argv)
 
     def test_ovmf_boots_cd_and_disables_pxe(self) -> None:
-        argv = qemu_argv(
-            QemuConfig(iso="x.iso", bios="/usr/share/ovmf/OVMF.fd"),
-            "/tmp/mon",
+        with _firmware() as fw:
+            argv = qemu_argv(QemuConfig(iso="x.iso", firmware=fw), "/tmp/mon")
+        drives = [argv[i + 1] for i, a in enumerate(argv) if a == "-drive"]
+        self.assertEqual(
+            drives[0], f"if=pflash,format=raw,unit=0,readonly=on,file={fw.code}"
         )
-        self.assertEqual(argv[argv.index("-bios") + 1], "/usr/share/ovmf/OVMF.fd")
+        self.assertTrue(drives[1].startswith("if=pflash,format=raw,unit=1,file="))
         i = argv.index("-boot")
         self.assertEqual(argv[i : i + len(OVMF_BOOT_ARGS)], list(OVMF_BOOT_ARGS))
 
     def test_seabios_omits_ovmf_boot_args(self) -> None:
         argv = qemu_argv(QemuConfig(iso="x.iso"), "/tmp/mon")
-        self.assertNotIn("-bios", argv)
         self.assertNotIn("-boot", argv)
         self.assertNotIn("-fw_cfg", argv)
+        self.assertFalse(any("if=pflash" in a for a in argv))
+
+    def test_display_none_by_default(self) -> None:
+        argv = qemu_argv(QemuConfig(iso="x.iso"), None)
+        i = argv.index("-display")
+        self.assertEqual(argv[i : i + 2], ["-display", "none"])
+        self.assertEqual(argv.count("-display"), 1)
+
+    def test_display_window_omits_display_none(self) -> None:
+        argv = qemu_argv(QemuConfig(iso="x.iso", display=True), None)
+        self.assertNotIn("-display", argv)
+        self.assertNotIn("none", argv)
+
+    def test_gdb_stub_args(self) -> None:
+        argv = qemu_argv(QemuConfig(iso="x.iso", gdb=True), None)
+        i = argv.index("-s")
+        self.assertEqual(argv[i : i + 2], ["-s", "-S"])
+        self.assertNotIn("-s", qemu_argv(QemuConfig(iso="x.iso"), None))
 
     def test_no_monitor_omits_flag(self) -> None:
         argv = qemu_argv(QemuConfig(iso="x.iso"), None)
@@ -1060,13 +1081,249 @@ class TestQemuArgv(unittest.TestCase):
         i = argv.index("-boot")
         self.assertEqual(argv[i : i + 2], ["-boot", "order=d"])
 
-    def test_ovmf_bios_wins_over_boot_order(self) -> None:
-        argv = qemu_argv(
-            QemuConfig(iso="x.iso", bios="/ovmf.fd", boot_order="d"),
-            None,
-        )
+    def test_ovmf_firmware_wins_over_boot_order(self) -> None:
+        with _firmware() as fw:
+            argv = qemu_argv(QemuConfig(iso="x.iso", firmware=fw, boot_order="d"), None)
         self.assertEqual(argv[argv.index("-boot") + 1], "order=d,menu=off")
         self.assertEqual(argv.count("-boot"), 1)
+
+
+@contextmanager
+def _firmware(directory: str | None = None) -> Iterator[Any]:
+    """An x86_64 Homebrew-named pair in a temporary directory."""
+    import tempfile
+
+    from tests.harness.harness import Firmware
+
+    with tempfile.TemporaryDirectory() as d:
+        if directory is not None:
+            d = os.path.join(d, directory)
+            os.makedirs(d)
+        code = os.path.join(d, "edk2-x86_64-code.fd")
+        tmpl = os.path.join(d, "edk2-i386-vars.fd")
+        with open(code, "wb") as f:
+            f.write(b"\x00" * 0x37C000)
+        with open(tmpl, "wb") as f:
+            f.write(bytes(range(256)) * 64)
+        yield Firmware("x86_64", code, tmpl)
+
+
+class TestPflashArgv(unittest.TestCase):
+    """ROADMAP §10.2 (F079): UEFI boots the code read-only from pflash unit 0
+    and a per-run copy of the variable-store template from unit 1."""
+
+    def tearDown(self) -> None:
+        from tests.harness.harness import remove_vars_copies
+
+        remove_vars_copies()
+
+    @staticmethod
+    def drives(argv: list[str]) -> list[str]:
+        return [argv[i + 1] for i, a in enumerate(argv) if a == "-drive"]
+
+    @staticmethod
+    def file_of(drive: str) -> str:
+        return drive.split(",file=", 1)[1].replace(",,", ",")
+
+    def test_unit0_readonly_unit1_copy(self) -> None:
+        with _firmware() as fw:
+            argv = qemu_argv(QemuConfig(iso="x.iso", firmware=fw), None)
+            d0, d1 = self.drives(argv)
+            self.assertEqual(d0, f"if=pflash,format=raw,unit=0,readonly=on,file={fw.code}")
+            self.assertTrue(d1.startswith("if=pflash,format=raw,unit=1,file="))
+            self.assertNotIn("readonly", d1)
+            copy = self.file_of(d1)
+            self.assertNotEqual(os.path.realpath(copy), os.path.realpath(fw.vars_template))
+            with open(copy, "rb") as a, open(fw.vars_template, "rb") as b:
+                self.assertEqual(a.read(), b.read())
+
+    def test_one_copy_per_launch(self) -> None:
+        with _firmware() as fw:
+            cfg = QemuConfig(iso="x.iso", firmware=fw)
+            first = self.file_of(self.drives(qemu_argv(cfg, None))[1])
+            with open(first, "wb") as f:
+                f.write(b"dirty")
+            second = self.file_of(self.drives(qemu_argv(cfg, None))[1])
+            self.assertNotEqual(first, second)
+            with open(second, "rb") as a, open(fw.vars_template, "rb") as b:
+                self.assertEqual(a.read(), b.read())
+
+    def test_removal(self) -> None:
+        from tests.harness import harness
+
+        with _firmware() as fw:
+            copy = harness.new_vars_copy(fw)
+            d = os.path.dirname(copy)
+            self.assertTrue(os.path.isfile(copy))
+            harness.remove_vars_copies()
+            self.assertFalse(os.path.exists(d))
+            # The next copy makes a new directory.
+            self.assertTrue(os.path.isfile(harness.new_vars_copy(fw)))
+
+    def test_one_boot(self) -> None:
+        with _firmware() as fw:
+            argv = qemu_argv(QemuConfig(iso="x.iso", firmware=fw, boot_order="c"), None)
+        self.assertEqual(argv.count("-boot"), 1)
+
+    def test_comma_escaping(self) -> None:
+        with _firmware("a,b") as fw:
+            argv = qemu_argv(QemuConfig(iso="x.iso", firmware=fw), None)
+            d0, d1 = self.drives(argv)
+            self.assertIn("a,,b", d0)
+            self.assertEqual(self.file_of(d0), fw.code)
+            self.assertTrue(os.path.isfile(self.file_of(d1)))
+
+    def test_no_bios_on_any_path(self) -> None:
+        with _firmware() as fw:
+            for cfg in (
+                QemuConfig(iso="x.iso"),
+                QemuConfig(iso="x.iso", firmware=fw),
+                QemuConfig(iso="x.iso", firmware=fw, display=True, gdb=True),
+            ):
+                self.assertFalse(any("bios" in a for a in qemu_argv(cfg, "/tmp/mon")))
+
+
+class TestFirmwareProbe(unittest.TestCase):
+    """ROADMAP §10.2 (I1): one probe table of (code, vars template) pairs per
+    architecture, and one variable per architecture that overrides it."""
+
+    def setUp(self) -> None:
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = self._tmp.name
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def put(self, path: str) -> str:
+        full = os.path.join(self.root, path.lstrip("/"))
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "wb") as f:
+            f.write(b"fw")
+        return full
+
+    def probe(self, arch: str, env: dict[str, str] | None = None) -> Any:
+        from tests.harness.harness import probe_firmware
+
+        return probe_firmware(arch, env or {}, root=self.root)
+
+    def test_every_row_under_a_root(self) -> None:
+        from tests.harness.harness import Firmware
+
+        rows = (
+            ("x86_64", "/usr/share/OVMF/OVMF_CODE_4M.fd", "/usr/share/OVMF/OVMF_VARS_4M.fd"),
+            ("aarch64", "/usr/share/AAVMF/AAVMF_CODE.fd", "/usr/share/AAVMF/AAVMF_VARS.fd"),
+            (
+                "x86_64",
+                "/opt/homebrew/share/qemu/edk2-x86_64-code.fd",
+                "/opt/homebrew/share/qemu/edk2-i386-vars.fd",
+            ),
+            (
+                "aarch64",
+                "/usr/local/share/qemu/edk2-aarch64-code.fd",
+                "/usr/local/share/qemu/edk2-arm-vars.fd",
+            ),
+        )
+        for arch, code, tmpl in rows:
+            with self.subTest(code=code):
+                self.tearDown()
+                self.setUp()
+                c, t = self.put(code), self.put(tmpl)
+                self.assertEqual(self.probe(arch), Firmware(arch, c, t))
+
+    def test_ubuntu_row_first(self) -> None:
+        ubuntu = self.put("/usr/share/OVMF/OVMF_CODE_4M.fd")
+        self.put("/usr/share/OVMF/OVMF_VARS_4M.fd")
+        self.put("/opt/homebrew/share/qemu/edk2-x86_64-code.fd")
+        self.put("/opt/homebrew/share/qemu/edk2-i386-vars.fd")
+        self.assertEqual(self.probe("x86_64").code, ubuntu)
+
+    def test_homebrew_prefix(self) -> None:
+        self.put("/usr/local/share/qemu/edk2-x86_64-code.fd")
+        self.put("/usr/local/share/qemu/edk2-i386-vars.fd")
+        code = self.put("/brew/share/qemu/edk2-x86_64-code.fd")
+        tmpl = self.put("/brew/share/qemu/edk2-i386-vars.fd")
+        fw = self.probe("x86_64", {"HOMEBREW_PREFIX": "/brew"})
+        self.assertEqual((fw.code, fw.vars_template), (code, tmpl))
+        fw = self.probe("x86_64")
+        self.assertTrue(fw.code.endswith("/usr/local/share/qemu/edk2-x86_64-code.fd"))
+
+    def test_code_without_template_fails(self) -> None:
+        from tests.harness.harness import FirmwareError
+
+        code = self.put("/usr/share/OVMF/OVMF_CODE_4M.fd")
+        # A complete later row does not rescue it: the first code image decides.
+        self.put("/opt/homebrew/share/qemu/edk2-x86_64-code.fd")
+        self.put("/opt/homebrew/share/qemu/edk2-i386-vars.fd")
+        with self.assertRaises(FirmwareError) as cm:
+            self.probe("x86_64")
+        self.assertIn(code, str(cm.exception))
+        self.assertIn(os.path.join(os.path.dirname(code), "OVMF_VARS_4M.fd"), str(cm.exception))
+
+    def test_architectures_never_cross(self) -> None:
+        self.put("/usr/share/AAVMF/AAVMF_CODE.fd")
+        self.put("/usr/share/AAVMF/AAVMF_VARS.fd")
+        self.put("/opt/homebrew/share/qemu/edk2-aarch64-code.fd")
+        self.put("/opt/homebrew/share/qemu/edk2-arm-vars.fd")
+        self.assertIsNone(self.probe("x86_64"))
+        self.tearDown()
+        self.setUp()
+        self.put("/usr/share/OVMF/OVMF_CODE_4M.fd")
+        self.put("/usr/share/OVMF/OVMF_VARS_4M.fd")
+        self.put("/opt/homebrew/share/qemu/edk2-x86_64-code.fd")
+        self.put("/opt/homebrew/share/qemu/edk2-i386-vars.fd")
+        self.assertIsNone(self.probe("aarch64"))
+
+    def test_nothing_found(self) -> None:
+        self.assertIsNone(self.probe("x86_64"))
+        self.assertIsNone(self.probe("aarch64"))
+
+    def test_variable_overrides_probe(self) -> None:
+        self.put("/usr/share/OVMF/OVMF_CODE_4M.fd")
+        self.put("/usr/share/OVMF/OVMF_VARS_4M.fd")
+        code = self.put("/elsewhere/edk2-x86_64-code.fd")
+        tmpl = self.put("/elsewhere/edk2-i386-vars.fd")
+        fw = self.probe("x86_64", {"VIBEOS_FW_X86_64": code})
+        self.assertEqual((fw.arch, fw.code, fw.vars_template), ("x86_64", code, tmpl))
+
+    def test_variable_failures(self) -> None:
+        from tests.harness.harness import FirmwareError
+
+        unknown = self.put("/fw/OVMF.fd")
+        aarch = self.put("/fw/AAVMF_CODE.fd")
+        self.put("/fw/AAVMF_VARS.fd")
+        lone = self.put("/lone/OVMF_CODE_4M.fd")
+        missing = os.path.join(self.root, "nope/OVMF_CODE_4M.fd")
+        for path, needle in (
+            (unknown, "not a code image"),
+            (aarch, "aarch64's code image"),
+            (missing, "no such file"),
+            (lone, "OVMF_VARS_4M.fd"),
+        ):
+            with self.subTest(path=path), self.assertRaisesRegex(FirmwareError, needle):
+                self.probe("x86_64", {"VIBEOS_FW_X86_64": path})
+
+    def test_variables_are_independent(self) -> None:
+        x = self.put("/x/OVMF_CODE_4M.fd")
+        self.put("/x/OVMF_VARS_4M.fd")
+        a = self.put("/a/edk2-aarch64-code.fd")
+        self.put("/a/edk2-arm-vars.fd")
+        env = {"VIBEOS_FW_X86_64": x, "VIBEOS_FW_AARCH64": a}
+        self.assertEqual(self.probe("x86_64", env).code, x)
+        self.assertEqual(self.probe("aarch64", env).code, a)
+        # One architecture's variable leaves the other's probe alone.
+        self.assertIsNone(self.probe("aarch64", {"VIBEOS_FW_X86_64": x}))
+        self.assertEqual(self.probe("x86_64", {"VIBEOS_FW_AARCH64": a}), None)
+
+    def test_one_variable_per_architecture(self) -> None:
+        from tests.harness.harness import FIRMWARE_TABLE, FIRMWARE_VARS
+
+        self.assertEqual(set(FIRMWARE_VARS), set(FIRMWARE_TABLE))
+        self.assertEqual(
+            FIRMWARE_VARS, {"x86_64": "VIBEOS_FW_X86_64", "aarch64": "VIBEOS_FW_AARCH64"}
+        )
+        self.assertEqual([len(rows) for rows in FIRMWARE_TABLE.values()], [2, 2])
 
 
 class TestStraceE2e(unittest.TestCase):
@@ -1169,7 +1426,8 @@ class TestFwCfgCmdline(unittest.TestCase):
         self.assertEqual(self.fw_cfg(argv), ["name=opt/vibeos/cmdline,string=vibeos.strace=1"])
         self.assertLess(argv.index("-fw_cfg"), argv.index("-S"))
         # Under OVMF the tianocore files stay, and ours is added once.
-        argv = qemu_argv(QemuConfig(iso="x.iso", bios="/o.fd", cmdline="a=1"), None)
+        with _firmware() as fw:
+            argv = qemu_argv(QemuConfig(iso="x.iso", firmware=fw, cmdline="a=1"), None)
         self.assertEqual(
             [f for f in self.fw_cfg(argv) if f.startswith("name=opt/vibeos/")],
             ["name=opt/vibeos/cmdline,string=a=1"],
@@ -1489,31 +1747,17 @@ class TestEnvConfig(unittest.TestCase):
                 env_config(default_iso="x.iso", default_timeout=1).tier, "test-kernel"
             )
 
-    def test_env_config_defaults_match_makefile(self) -> None:
-        # Keep in sync with Makefile VIBEOS_* ?= (make run). C2.
-        import pathlib
-        import re
-
+    def test_env_config_defaults(self) -> None:
+        # The only defaults: the Makefile sets none (ROADMAP §10.2).
         from tests.harness.harness import env_config, overlay_env
 
-        text = pathlib.Path(__file__).resolve().parents[2].joinpath("Makefile").read_text()
-        for key, val in (
-            ("VIBEOS_SMP", "2"),
-            ("VIBEOS_QEMU_CPU", "max"),
-            ("VIBEOS_MEM", "128M"),
-            ("VIBEOS_QEMU_ACCEL", "tcg"),
-        ):
-            self.assertRegex(
-                text,
-                re.compile(rf"^{re.escape(key)}\s*\?=\s*{re.escape(val)}\s*$", re.M),
-            )
         with overlay_env({}, clear=True):
             env = env_config(default_iso="vibeos.iso", default_timeout=60.0)
             self.assertEqual(env.iso, "vibeos.iso")
             self.assertEqual(env.smp, 2)
             self.assertEqual(env.cpu, "max")
             self.assertEqual(env.mem, "128M")
-            self.assertIsNone(env.bios)
+            self.assertIsNone(env.firmware)
             self.assertEqual(env.accel, "tcg")
             self.assertEqual(env.timeout, 60.0)
             self.assertEqual(env.extra, ())
@@ -1534,7 +1778,6 @@ class TestEnvConfig(unittest.TestCase):
                 "VIBEOS_SMP": "4",
                 "VIBEOS_QEMU_CPU": "qemu64",
                 "VIBEOS_MEM": "256M",
-                "VIBEOS_BIOS": "/ovmf.fd",
                 "VIBEOS_QEMU_ACCEL": "",
                 "VIBEOS_TIMEOUT": "12.5",
                 "VIBEOS_QEMU_EXTRA": "-nic none",
@@ -1547,12 +1790,34 @@ class TestEnvConfig(unittest.TestCase):
             self.assertEqual(env.smp, 4)
             self.assertEqual(env.cpu, "qemu64")
             self.assertEqual(env.mem, "256M")
-            self.assertEqual(env.bios, "/ovmf.fd")
+            self.assertIsNone(env.firmware)
             self.assertEqual(env.accel, "")
             self.assertEqual(env.timeout, 12.5)
             self.assertEqual(env.extra, ("-nic", "none"))
             self.assertEqual(env.qemu_version, "10.2.1")
             self.assertEqual(env.qemu().qemu_version, "10.2.1")
+
+    def test_env_config_firmware(self) -> None:
+        from tests.harness.harness import HarnessError, env_config, overlay_env
+
+        with _firmware() as fw:
+            for bios in ("", "seabios"):
+                env = {"VIBEOS_BIOS": bios, "VIBEOS_FW_X86_64": fw.code}
+                with self.subTest(bios=bios), overlay_env(env, clear=True):
+                    self.assertIsNone(env_config(default_iso="x", default_timeout=1).firmware)
+            with overlay_env({"VIBEOS_BIOS": "uefi", "VIBEOS_FW_X86_64": fw.code}, clear=True):
+                got = env_config(default_iso="x", default_timeout=1)
+                self.assertEqual(got.firmware, fw)
+                self.assertEqual(got.qemu().firmware, fw)
+            with overlay_env({"VIBEOS_BIOS": fw.code}, clear=True):
+                with self.assertRaisesRegex(HarnessError, "VIBEOS_FW_X86_64"):
+                    env_config(default_iso="x", default_timeout=1)
+        with (
+            overlay_env({"VIBEOS_BIOS": "uefi"}, clear=True),
+            mock.patch("tests.harness.harness.probe_firmware", return_value=None),
+            self.assertRaisesRegex(HarnessError, "VIBEOS_FW_X86_64"),
+        ):
+            env_config(default_iso="x", default_timeout=1)
 
     def test_env_config_cmdline_words(self) -> None:
         from tests.harness.harness import env_config, overlay_env

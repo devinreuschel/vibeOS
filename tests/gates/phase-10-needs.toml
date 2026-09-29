@@ -779,6 +779,40 @@ needs = [
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
+# L1237
+[[box]]
+key = "UEFI e2e boots the firmware"
+needs = [
+  "OVMF and the aarch64 edk2 firmware",  # L1236
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1238
+[[box]]
+key = "`test-e2e-uefi` checks for the firmware"
+needs = [
+  "OVMF and the aarch64 edk2 firmware",  # L1236
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1235
+[[box]]
+key = "a scheduled macOS CI job running"
+needs = [
+  "OVMF and the aarch64 edk2 firmware",  # L1236
+  "UEFI e2e boots the firmware",  # L1237
+  "`test-e2e-uefi` checks for the firmware",  # L1238
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1202
+[[box]]
+key = "`make debug`: QEMU `-s -S`,"
+needs = [
+  "the Makefile holds no QEMU",  # L1231
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
 # L1317
 [[box]]
 key = "the cross-CPU wake inbox holds"

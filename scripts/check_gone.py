@@ -155,6 +155,7 @@ GONE: list[tuple[str, str]] = [
     ("FEATURE_ATTR", "`vibeos-core` builds with its MSRV"),
     ("validate_buf", "user-VA accessors replace the physmap copy"),
     ("publish_uses_release_not_only_compiler_fence", "assertions that cannot fail replaced"),
+    ("QEMU_BASE", "the Makefile holds no QEMU command line"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

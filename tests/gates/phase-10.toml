@@ -17,10 +17,10 @@
 # file against docs/ROADMAP.md; docs/TESTING.md §8.5 and §8.6 describe the rest.
 #
 # `test -f .github/workflows/<wf>.yml` entries stand in for the job entries of
-# workflows not yet in the tree (macos.yml: check, test; nightly.yml: kvm,
-# models, miri), which check_workflows.py's rule_gate_dispatch rejects while
-# the file is missing; the slice that adds the workflow replaces them with the
-# job entries, so until then those lines fail rather than pass without them.
+# workflows not yet in the tree (nightly.yml: kvm, models, miri), which
+# check_workflows.py's rule_gate_dispatch rejects while the file is missing;
+# the slice that adds the workflow replaces them with the job entries, so
+# until then those lines fail rather than pass without them.
 
 [[line]]
 key = """
@@ -37,14 +37,14 @@ key = """
 [[line.entry]]
 cmd = "make check"
 [[line.entry]]
-cmd = "test -f .github/workflows/macos.yml"
+job = { workflow = "macos.yml", job = "check" }
 
 [[line]]
 key = """
 `make test` passes on the scheduled macOS CI job, with Homebrew's QEMU and its code-only
 `edk2-x86_64-code.fd` as the UEFI firmware (F079)"""
 [[line.entry]]
-cmd = "test -f .github/workflows/macos.yml"
+job = { workflow = "macos.yml", job = "test" }
 
 [[line]]
 key = """
