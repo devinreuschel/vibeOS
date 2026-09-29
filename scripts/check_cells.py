@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # where a file has two fns of one name. An entry leaves this list only in a
 # commit that says why, such as a type that now proves the argument.
 MUST_BE_UNSAFE: list[tuple[str, str]] = [
-    ("src/cell.rs", "IrqCell::force_unlock"),
+    ("crates/core/src/cell.rs", "IrqCell::force_unlock"),
     ("src/log/log_init.rs", "force_unlock"),
     ("src/log/log_init.rs", "with_logger_unlocked"),
     ("src/log/log_init.rs", "dump_tail"),
@@ -36,9 +36,11 @@ MUST_BE_UNSAFE: list[tuple[str, str]] = [
 
 # The only files that may hold a generic `unsafe impl` of `Send` or `Sync`
 # (one with a type parameter), so no new cell type appears elsewhere.
-# crates/core/src/kalloc.rs holds `TryArc`'s one bounded pair (C-KALLOC), and
+# crates/core/src/cell.rs holds the cells (`vibeos::cell`), which the kernel
+# names in src/cell.rs; crates/core/src/kalloc.rs holds `TryArc`'s one
+# bounded pair (C-KALLOC), and
 # src/sync/blocking_init.rs the blocking locks that left sync_init (A4).
-GENERIC_IMPL_FILES: tuple[str, ...] = ("src/cell.rs", "src/sync/sync_init.rs",
+GENERIC_IMPL_FILES: tuple[str, ...] = ("crates/core/src/cell.rs", "src/sync/sync_init.rs",
                                        "src/sync/blocking_init.rs",
                                        "crates/core/src/kalloc.rs")
 

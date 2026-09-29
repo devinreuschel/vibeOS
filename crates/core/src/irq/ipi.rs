@@ -3,6 +3,7 @@
 //! Portable: the wake inbox, RR placement, shootdown waiter/ack math.
 //! MMIO and IDT live in the binary crate.
 
+use crate::arch::InterruptMask;
 use crate::atomic::{AtomicU64, Ordering};
 use crate::thread::{CpuAffinity, MAX_THREADS};
 
@@ -13,7 +14,8 @@ pub const MAX_IPI_CPUS: usize = 64;
 /// `AtomicU64` words, one bit per thread-table slot, and a summary word
 /// with one bit per word. A remote CPU pushes a slot and sends `0xFD`; the
 /// owner drains it into its run queue. Nothing allocates, and a slot pushed
-/// twice before a drain is queued once.
+/// twice before a drain is queued once. The words are private: `push` and
+/// `drain` carry the only orders (ROADMAP §10.8's loom model runs them).
 pub struct WakeInbox<const WORDS: usize> {
     summary: AtomicU64,
     words: [AtomicU64; WORDS],
@@ -55,7 +57,10 @@ impl<const WORDS: usize> WakeInbox<WORDS> {
         let Some(word) = self.words.get(w) else {
             return false;
         };
+        // Release: pairs with the drain's Acquire swap of this word.
         word.fetch_or(1u64 << (slot % 64), Ordering::Release);
+        // Release, after the word bit: pairs with the drain's Acquire swap
+        // of the summary, so a drain that sees this bit sees the slot's.
         self.summary.fetch_or(1u64 << w, Ordering::Release);
         true
     }
@@ -65,7 +70,14 @@ impl<const WORDS: usize> WakeInbox<WORDS> {
     /// set bit in ascending order. True if `f` ran. A push that races the
     /// drain sets its summary bit after its slot bit, so a slot this drain
     /// misses is flagged for the next one.
-    pub fn drain(&self, mut f: impl FnMut(usize)) -> bool {
+    ///
+    /// Runs on the owner CPU with interrupts masked through the port `A`
+    /// (DESIGN §7.6), so a reschedule IPI's drain cannot interleave with
+    /// this one; checked in debug builds.
+    pub fn drain<A: InterruptMask>(&self, mut f: impl FnMut(usize)) -> bool {
+        debug_assert!(!A::enabled(), "WakeInbox::drain with interrupts on");
+        // Acquire: pairs with the Release summary `fetch_or` in `push`, so
+        // every word bit set before a summary bit this swap sees is visible.
         let mut summary = self.summary.swap(0, Ordering::Acquire);
         let mut any = false;
         while summary != 0 {
@@ -74,6 +86,7 @@ impl<const WORDS: usize> WakeInbox<WORDS> {
             let Some(word) = self.words.get(w) else {
                 continue;
             };
+            // Acquire: pairs with the Release word `fetch_or` in `push`.
             let mut bits = word.swap(0, Ordering::Acquire);
             while bits != 0 {
                 let b = bits.trailing_zeros() as usize;
@@ -241,10 +254,85 @@ pub fn home_cpu(affinity: CpuAffinity, last: u32, online: u64) -> u32 {
 mod tests {
     use super::*;
 
+    use crate::arch::stub::Arch;
+
+    /// Drain as the owner CPU does, masked.
+    fn drain<const W: usize>(inbox: &WakeInbox<W>, f: impl FnMut(usize)) -> bool {
+        let _masked = Arch::save_disable();
+        inbox.drain::<Arch>(f)
+    }
+
     fn drained<const W: usize>(inbox: &WakeInbox<W>) -> std::vec::Vec<usize> {
         let mut out = std::vec::Vec::new();
-        inbox.drain(|s| out.push(s));
+        drain(inbox, |s| out.push(s));
         out
+    }
+
+    #[test]
+    fn wake_inbox_push_drain() {
+        // Across a word boundary, and the largest id of a two-word inbox.
+        let two = WakeInbox::<2>::new();
+        for slot in [127, 64, 63, 0] {
+            assert!(two.push(slot));
+        }
+        // A double push drains once.
+        assert!(two.push(64));
+        assert_eq!(drained(&two), std::vec![0, 63, 64, 127]);
+        assert!(two.is_empty());
+        assert!(!drain(&two, |_| {}), "each id drains once");
+        // The kernel's inbox, at its largest id.
+        let inbox = ThreadInbox::new();
+        let last = MAX_THREADS - 1;
+        assert!(inbox.push(last));
+        assert!(inbox.push(last));
+        assert_eq!(drained(&inbox), std::vec![last]);
+        // Out of range, as P10-S56 made it: refused, nothing queued.
+        assert!(!two.push(128));
+        assert!(!inbox.push(INBOX_WORDS * 64));
+        assert!(!inbox.push(usize::MAX));
+        assert!(two.is_empty() && inbox.is_empty());
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "WakeInbox::drain with interrupts on")]
+    fn wake_inbox_drain_needs_mask() {
+        crate::arch::stub::reset();
+        let inbox = WakeInbox::<1>::new();
+        assert!(inbox.push(3));
+        inbox.drain::<Arch>(|_| {});
+    }
+
+    #[test]
+    fn wake_inbox_three_pushers() {
+        use std::sync::Arc;
+        const SLOTS: usize = 16 * 64;
+        let inbox = Arc::new(WakeInbox::<16>::new());
+        let pushers: std::vec::Vec<_> = (0..3)
+            .map(|k| {
+                let inbox = Arc::clone(&inbox);
+                std::thread::spawn(move || {
+                    for slot in (k..SLOTS).step_by(3) {
+                        assert!(inbox.push(slot));
+                    }
+                })
+            })
+            .collect();
+        // The owner drains, masked, until every slot has come out.
+        let mut seen = std::vec![0u32; SLOTS];
+        let mut total = 0;
+        while total < SLOTS {
+            drain(&inbox, |s| {
+                seen[s] += 1;
+                total += 1;
+            });
+            crate::atomic::spin_loop();
+        }
+        for p in pushers {
+            p.join().unwrap();
+        }
+        assert!(!drain(&inbox, |_| {}));
+        assert!(seen.iter().all(|&n| n == 1), "every slot drained once");
     }
 
     #[test]
@@ -265,7 +353,7 @@ mod tests {
         assert!(inbox.push(70));
         assert!(inbox.push(70));
         assert_eq!(drained(&inbox), std::vec![70]);
-        assert!(!inbox.drain(|_| {}), "nothing left");
+        assert!(!drain(&inbox, |_| {}), "nothing left");
     }
 
     #[test]
@@ -273,7 +361,7 @@ mod tests {
         let inbox = WakeInbox::<16>::new();
         assert!(inbox.push(5));
         assert!(inbox.push(900));
-        assert!(inbox.drain(|_| {}));
+        assert!(drain(&inbox, |_| {}));
         assert_eq!(inbox.summary.load(Ordering::Relaxed), 0);
         assert!(inbox.words.iter().all(|w| w.load(Ordering::Relaxed) == 0));
     }

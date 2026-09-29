@@ -5,11 +5,14 @@
 //! `IoWaiter` path. Kick is inline for ramdisk; virtio-blk replaces it.
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+#[cfg(feature = "kernel_tests")]
+use core::sync::atomic::AtomicU32;
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use vibeos::block::blockdev::Backing;
 use vibeos::block::{
-    BlockDevice, BlockError, Completion, DeviceState, MAX_QUEUE, Op, Queue, Ramdisk, Request,
+    BlockDevice, BlockError, Completion, DeviceState, DoneWord, MAX_QUEUE, Op, Queue, Ramdisk,
+    Request,
 };
 use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
@@ -31,6 +34,7 @@ const ST_INVAL: u32 = 2;
 const ST_IO: u32 = 3;
 const ST_FAILED: u32 = 4;
 const ST_QFULL: u32 = 5;
+const _: () = assert!(ST_PEND == DoneWord::PENDING);
 
 static Q: SpinMutex<Queue> = SpinMutex::with_rank(Queue::new(), RANK_DEVICE);
 // BSS, not a heap Vec: init must not take RANK_HEAP under RANK_DEVICE.
@@ -80,11 +84,11 @@ fn unpack(v: u32) -> Result<(), BlockError> {
 /// Blocking/async completion. Lives on the submitter stack until `wait`
 /// returns. Cookie in [`Request::waiters`] is this address.
 pub struct IoWaiter {
-    done: AtomicU32,
+    done: DoneWord,
     wq: UnsafeCell<WaitQueue>,
 }
 
-// SAFETY: `done` is an atomic, and `wq` is touched only under SCHED
+// SAFETY: `done` is a `DoneWord` (an atomic), and `wq` is touched only under SCHED
 // (`wait` and `finish` reach it inside `with_sched`), so sharing `&IoWaiter`
 // across threads races on nothing; established by `thread_init::with_sched`.
 unsafe impl Sync for IoWaiter {}
@@ -92,18 +96,13 @@ unsafe impl Sync for IoWaiter {}
 impl IoWaiter {
     pub const fn new() -> Self {
         Self {
-            done: AtomicU32::new(ST_PEND),
+            done: DoneWord::new(),
             wq: UnsafeCell::new(WaitQueue::new()),
         }
     }
 
     pub fn poll(&self) -> Option<Result<(), BlockError>> {
-        let st = self.done.load(Ordering::Acquire);
-        if st == ST_PEND {
-            None
-        } else {
-            Some(unpack(st))
-        }
+        self.done.poll().map(unpack)
     }
 
     pub fn wait(&self) -> Result<(), BlockError> {
@@ -112,7 +111,7 @@ impl IoWaiter {
                 return r;
             }
             let park = thread_init::with_sched(|s| {
-                if self.done.load(Ordering::Acquire) != ST_PEND {
+                if self.done.poll().is_some() {
                     return false;
                 }
                 // SAFETY: `wq` is touched only under SCHED, which this
@@ -126,8 +125,9 @@ impl IoWaiter {
         }
     }
 
-    /// Complete the waiter: under SCHED, wake its queue, then store `done`
-    /// with Release as the last access to it (DESIGN §2.8, §10.1). `wait`
+    /// Complete the waiter: under SCHED, wake its queue, then publish `done`
+    /// (`DoneWord::publish`, a Release store) as the last access to it
+    /// (DESIGN §2.8, §10.1). `wait`
     /// can return through the lock-free `poll` the moment that store is
     /// visible, so nothing after it may touch `*this`. A raw pointer, not
     /// `&self`: a reference argument counts as dereferenceable for the
@@ -135,7 +135,7 @@ impl IoWaiter {
     ///
     /// # Safety
     ///
-    /// `this` points to a live waiter whose `done` is `ST_PEND`, and it
+    /// `this` points to a live waiter whose `done` is pending, and it
     /// stays live until this call's `done` store and no longer.
     unsafe fn finish(this: *const IoWaiter, res: Result<(), BlockError>) {
         let st = pack(res);
@@ -149,7 +149,7 @@ impl IoWaiter {
             s.wake_all(unsafe { &mut *(*this).wq.get() });
             // SAFETY: invariant I11, as above (`block_init::IoWaiter::wait`):
             // the waiter is live until this store, which is the last access.
-            unsafe { (*this).done.store(st, Ordering::Release) };
+            unsafe { (*this).done.publish(st) };
         });
     }
 }

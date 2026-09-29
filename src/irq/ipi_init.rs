@@ -14,6 +14,7 @@ use vibeos::thread::ThreadId;
 use vibeos::vectors;
 
 use crate::apic_init;
+use crate::arch::current::Arch;
 use crate::per_cpu_init;
 use crate::sync_init;
 use crate::time_init;
@@ -346,7 +347,7 @@ pub fn drain_inbox() -> bool {
     let tid_of_slot = unsafe { core::mem::transmute::<*mut (), fn(usize) -> Option<ThreadId>>(p) };
     per_cpu_init::with_current(|pc| {
         let remote = pc.remote;
-        remote.wake_inbox.drain(|slot| {
+        remote.wake_inbox.drain::<Arch>(|slot| {
             if let Some(id) = tid_of_slot(slot) {
                 pc.runq.push_back(id);
             }
