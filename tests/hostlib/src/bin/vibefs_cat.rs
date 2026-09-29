@@ -2,6 +2,12 @@
 //! Same format module as the kernel. The crash harness reads `/w` with it
 //! (ROADMAP §10.2, F080). Exits 1 on any error, 2 on bad usage.
 
+#![allow(
+    clippy::disallowed_types,
+    clippy::disallowed_macros,
+    reason = "host tool: `alloc`'s growing calls may panic, and a failed allocation ends this host process, not the kernel (DESIGN §4.4)"
+)]
+
 use std::env;
 use std::io::{self, Write};
 use std::process::ExitCode;
@@ -9,8 +15,6 @@ use std::process::ExitCode;
 use vibeos::vibefs::{self, MemDisk, Vol};
 
 /// The bytes of `path` in the vibefs image `img`.
-#[allow(clippy::disallowed_macros, reason = "audit pending, ROADMAP §10.1")]
-#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
 fn cat(img: &mut [u8], path: &[u8]) -> Result<Vec<u8>, String> {
     let mut disk = MemDisk::new(img).map_err(|e| e.as_str().to_owned())?;
     let mut vol = Vol::new();
@@ -33,7 +37,6 @@ fn cat(img: &mut [u8], path: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let [image, path] = args.as_slice() else {
@@ -63,8 +66,6 @@ fn main() -> ExitCode {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_macros, reason = "audit pending, ROADMAP §10.1")]
-#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
 mod tests {
     use super::*;
     use vibeos::fs::InodeKind;

@@ -1,5 +1,11 @@
 //! Host FAT32 initrd. Same `fat::mkinitrd` as the kernel, plus optional files.
 
+#![allow(
+    clippy::disallowed_types,
+    clippy::disallowed_macros,
+    reason = "host tool: `alloc`'s growing calls may panic, and a failed allocation ends this host process, not the kernel (DESIGN §4.4)"
+)]
+
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -9,8 +15,6 @@ use vibeos::fat::{self, FatError, FatInode, FatVol, INITRD_BYTES, MemDisk, SEC};
 
 const NOW: u32 = 1_262_304_000;
 
-#[allow(clippy::disallowed_macros, reason = "audit pending, ROADMAP §10.1")]
-#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let mut path: Option<&str> = None;
