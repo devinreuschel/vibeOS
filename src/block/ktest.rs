@@ -942,6 +942,277 @@ pub(crate) fn block_fua_write() -> Outcome {
     )
 }
 
+// ---- part_six_entries: a heap-backed disk with a six-entry table.
+
+/// Sectors in the [`MemDisk`] `part_six_entries` registers.
+const MEM_SECT: u64 = 256;
+
+/// A 512-byte-sector disk in a `TryVec`, for tests that register a disk of
+/// their own.
+struct MemDisk {
+    data: crate::sync_init::SpinMutex<vibeos::kalloc::TryVec<u8>>,
+}
+
+impl MemDisk {
+    fn new(nsect: u64) -> Result<Self, BlockError> {
+        let n = usize::try_from(nsect)
+            .ok()
+            .and_then(|s| s.checked_mul(512))
+            .ok_or(BlockError::Inval)?;
+        let mut v = vibeos::kalloc::TryVec::try_with_capacity(n).map_err(|_| BlockError::NoMem)?;
+        let zero = [0u8; 512];
+        while v.len() < n {
+            v.try_extend_from_slice(&zero)
+                .map_err(|_| BlockError::NoMem)?;
+        }
+        Ok(Self {
+            data: crate::sync_init::SpinMutex::with_rank(v, vibeos::lock::RANK_DEVICE),
+        })
+    }
+
+    fn range(
+        &self,
+        len: usize,
+        lba: u64,
+        bytes: usize,
+    ) -> Result<core::ops::Range<usize>, BlockError> {
+        let off = usize::try_from(lba)
+            .ok()
+            .and_then(|l| l.checked_mul(512))
+            .ok_or(BlockError::Inval)?;
+        let end = off.checked_add(bytes).ok_or(BlockError::Inval)?;
+        if !bytes.is_multiple_of(512) || end > len {
+            return Err(BlockError::Inval);
+        }
+        Ok(off..end)
+    }
+}
+
+impl vibeos::block::BlockDevice for MemDisk {
+    fn logical_block_size(&self) -> u32 {
+        512
+    }
+    fn capacity_sectors(&self) -> u64 {
+        (self.data.lock().len() / 512) as u64
+    }
+    fn read(&self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        let d = self.data.lock();
+        let r = self.range(d.len(), lba, buf.len())?;
+        buf.copy_from_slice(d.get(r).ok_or(BlockError::Inval)?);
+        Ok(())
+    }
+    fn write(&self, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+        let mut d = self.data.lock();
+        let r = self.range(d.len(), lba, buf.len())?;
+        d.get_mut(r).ok_or(BlockError::Inval)?.copy_from_slice(buf);
+        Ok(())
+    }
+    fn flush(&self) -> Result<(), BlockError> {
+        Ok(())
+    }
+    fn discard(&self, lba: u64, n: u64) -> Result<(), BlockError> {
+        let bytes = usize::try_from(n)
+            .ok()
+            .and_then(|n| n.checked_mul(512))
+            .ok_or(BlockError::Inval)?;
+        let d = self.data.lock();
+        self.range(d.len(), lba, bytes).map(|_| ())
+    }
+}
+
+/// Register a fresh [`MemDisk`] named `name`, with no cache in front.
+fn mem_disk(name: &[u8]) -> Result<BlockRef, BlockError> {
+    use vibeos::block::blockdev::Backing;
+    let ops = vibeos::kalloc::TryBox::<dyn vibeos::block::BlockDevice>::try_new_unsize(
+        MemDisk::new(MEM_SECT)?,
+        |b| b,
+    )
+    .map_err(|_| BlockError::NoMem)?;
+    blockdev_init::register(name, Backing::Disk { ops, cache: None })
+}
+
+/// Write the MBR table: entry 0 extended (8, 120) with EBRs at 8, 40, 72
+/// and 104, each a 16-sector logical at +1; entries 1 and 2 primaries
+/// after it. Returns the six (start, length) pairs.
+fn stamp_six_mbr(d: &BlockRef) -> Result<[(u64, u64); 6], BlockError> {
+    use vibeos::part::{MBR_EXTENDED, MBR_LINUX, pack_ebr, pack_mbr};
+    let mut s = [0u8; 512];
+    pack_mbr(
+        &mut s,
+        &[
+            (MBR_EXTENDED, 8, 120),
+            (MBR_LINUX, 136, 16),
+            (MBR_LINUX, 160, 16),
+            (0, 0, 0),
+        ],
+    );
+    d.write_dev(0, &s)?;
+    let ebrs = [8u32, 40, 72, 104];
+    for (k, &e) in ebrs.iter().enumerate() {
+        let next = ebrs.get(k + 1).map_or(0, |n| n - 8);
+        let mut b = [0u8; 512];
+        pack_ebr(
+            &mut b,
+            MBR_LINUX,
+            1,
+            16,
+            next,
+            if next == 0 { 0 } else { 17 },
+        );
+        d.write_dev(e as u64, &b)?;
+    }
+    Ok([(9, 16), (41, 16), (73, 16), (105, 16), (136, 16), (160, 16)])
+}
+
+/// Write the GPT table: six 16-sector entries from LBA 34, the backup
+/// header at the last LBA. Returns the six (start, length) pairs.
+fn stamp_six_gpt(d: &BlockRef) -> Result<[(u64, u64); 6], BlockError> {
+    use vibeos::part::{
+        GPT_ENTRY_SIZE, GUID_LINUX, GptHeaderInfo, entries_crc, pack_gpt_entry, pack_gpt_header,
+        pack_protective_mbr,
+    };
+    const NENT: u32 = 128;
+    const ESZ: usize = GPT_ENTRY_SIZE as usize;
+    let elen = NENT as usize * ESZ;
+    let mut entries =
+        vibeos::kalloc::TryVec::try_with_capacity(elen).map_err(|_| BlockError::NoMem)?;
+    let zero = [0u8; 512];
+    while entries.len() < elen {
+        entries
+            .try_extend_from_slice(&zero)
+            .map_err(|_| BlockError::NoMem)?;
+    }
+    let mut parts = [(0u64, 0u64); 6];
+    for (k, p) in parts.iter_mut().enumerate() {
+        let start = 34 + 16 * k as u64;
+        *p = (start, 16);
+        let mut uniq = [0u8; 16];
+        uniq[0] = k as u8 + 1;
+        pack_gpt_entry(
+            &mut entries[k * ESZ..],
+            &GUID_LINUX,
+            &uniq,
+            start,
+            start + 15,
+            "kt",
+        );
+    }
+    let ecrc = entries_crc(&entries[..elen]);
+    let last = MEM_SECT - 1;
+    let back = last - 32;
+    let hdr = |my: u64, alt: u64, part_lba: u64| GptHeaderInfo {
+        my_lba: my,
+        alt_lba: alt,
+        first_usable: 34,
+        last_usable: back - 1,
+        disk_guid: [0x6B; 16],
+        part_lba,
+        part_count: NENT,
+        part_size: GPT_ENTRY_SIZE,
+        entries_crc: ecrc,
+    };
+    let mut s = [0u8; 512];
+    pack_protective_mbr(&mut s, MEM_SECT);
+    d.write_dev(0, &s)?;
+    let mut h = [0u8; 512];
+    pack_gpt_header(&mut h, &hdr(1, last, 2));
+    d.write_dev(1, &h)?;
+    for k in 0..32u64 {
+        let o = k as usize * 512;
+        d.write_dev(2 + k, &entries[o..o + 512])?;
+        d.write_dev(back + k, &entries[o..o + 512])?;
+    }
+    let mut b = [0u8; 512];
+    pack_gpt_header(&mut b, &hdr(last, 1, back));
+    d.write_dev(last, &b)?;
+    Ok(parts)
+}
+
+/// Writes a six-entry table and returns each entry's (start, length).
+type Stamp = fn(&BlockRef) -> Result<[(u64, u64); 6], BlockError>;
+
+/// Check one six-entry table on disk `name`, then unregister it.
+fn six_entries(name: &str, stamp: Stamp) -> Outcome {
+    let disk = match mem_disk(name.as_bytes()) {
+        Ok(d) => d,
+        Err(e) => return crate::fail_fmt!("{name}: register: {}", e.as_str()),
+    };
+    let r = six_entries_on(&disk, name, stamp);
+    if let Err(e) = blockdev_init::unregister(&disk) {
+        return crate::fail_fmt!("{name}: unregister: {}", e.as_str());
+    }
+    r
+}
+
+fn six_entries_on(disk: &BlockRef, name: &str, stamp: Stamp) -> Outcome {
+    let parts = match stamp(disk) {
+        Ok(p) => p,
+        Err(e) => return crate::fail_fmt!("{name}: stamp: {}", e.as_str()),
+    };
+    // A distinct byte at each entry's first LBA.
+    let tag = |k: usize| 0xA0u8 + k as u8;
+    for (k, &(start, _)) in parts.iter().enumerate() {
+        let mut s = [0u8; 512];
+        s[0] = tag(k);
+        if disk.write_dev(start, &s).is_err() {
+            return crate::fail_fmt!("{name}: tag {k}");
+        }
+    }
+    match part_init::scan(disk) {
+        Ok(r) if r.added == 6 && r.dropped == 0 => {}
+        Ok(r) => return crate::fail_fmt!("{name}: added {} dropped {}", r.added, r.dropped),
+        Err(e) => return crate::fail_fmt!("{name}: scan: {}", e.as_str()),
+    }
+    let mut seen = [false; 6];
+    for n in 1..=6u32 {
+        let Ok(cname) = vibeos::block::blockdev::BlockName::child(disk.name(), n) else {
+            return crate::fail_fmt!("{name}: child name {n}");
+        };
+        let Some(c) = blockdev_init::lookup(cname.as_bytes()) else {
+            return crate::fail_fmt!("{name}: no {}", cname.as_str());
+        };
+        if c.parent().map(BlockRef::id) != Some(disk.id()) {
+            return crate::fail_fmt!("{}: parent", cname.as_str());
+        }
+        let mut s = [0u8; 512];
+        if c.read(0, &mut s).is_err() {
+            return crate::fail_fmt!("{}: read", cname.as_str());
+        }
+        let cap = c.capacity_sectors().unwrap_or(0);
+        let hit = parts
+            .iter()
+            .enumerate()
+            .position(|(k, &(_, len))| s[0] == tag(k) && cap == len);
+        match hit.and_then(|k| seen.get_mut(k)) {
+            Some(f) if !*f => *f = true,
+            _ => {
+                return crate::fail_fmt!(
+                    "{}: cap {cap} byte {:#x} matches no entry",
+                    cname.as_str(),
+                    s[0]
+                );
+            }
+        }
+    }
+    // The names are taken now, so a second scan registers nothing.
+    match part_init::scan(disk) {
+        Ok(r) if r.added == 0 && r.dropped == 6 => Outcome::Ok,
+        Ok(r) => crate::fail_fmt!("{name}: rescan added {} dropped {}", r.added, r.dropped),
+        Err(e) => crate::fail_fmt!("{name}: rescan: {}", e.as_str()),
+    }
+}
+
+/// ROADMAP §10.12 (F117): an MBR table with an extended entry, four
+/// logicals and two primaries after it, and a six-entry GPT, each get six
+/// children `<disk>p1` to `<disk>p6`.
+pub(crate) fn part_six_entries() -> Outcome {
+    let r = six_entries("ktmbr", stamp_six_mbr);
+    if !matches!(r, Outcome::Ok) {
+        return r;
+    }
+    six_entries("ktgpt", stamp_six_gpt)
+}
+
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[

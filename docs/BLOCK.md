@@ -301,20 +301,21 @@ MBR (primary + extended/logical) and GPT parse in `crates/core/src/block/part.rs
 MBR type `0xEE` is not a data device; GPT is. Header and entry CRCs are
 checked; a bad primary falls back to the backup header at the last LBA.
 EBR walk is capped at 128; a corrupt next-LBA stops the chain. `parse_mbr`
-reads the four primary entries from `sector_buf`, which the EBR walk reuses,
-so a primary listed after an extended entry is read from the last EBR
-(ROADMAP §10.12, F117). Entries are checked against the disk size only: an
+copies the four MBR entries before the EBR walk reuses its sector buffer.
+Entries are checked against the disk size only: an
 entry that overlaps another entry or the table itself, a GPT header whose
 MyLBA is not the LBA it was read from, and a GPT entry outside the usable
 range are all accepted (ROADMAP §13.9, F117).
 
 Children are entries of the block registry ([§12.1](DEVICES.md#121-devices)), each a
 `BlockRef` with its disk as parent. Child LBA `l` maps to `start + l` and
-I/O past `nsectors` is `Inval`. `register_table` registers a disk's entries
-in order under generated names, `<parent>p<N>` (e.g. `ram0p1`, `vdap1`),
-and each registration prints the marker `vibeOS: block: <name> <n>
-sectors`. It stops at the first entry whose registration fails, with one
-log line naming the entry and the error (ROADMAP §10.12, F117). FAT and
+I/O past `nsectors` is `Inval`. `register_table` registers a child
+`<parent>p<N>` (e.g. `ram0p1`, `vdap1`) for every parsed entry, up to
+`MAX_PARTS` per table, `N` the entry's index in the table, and each
+registration prints the marker `vibeOS: block: <name> <n> sectors`. An
+entry it does not register, because the name does not fit in 32 bytes or
+the registry refuses it, gets a warning line naming the disk, the entry,
+and the reason, and the entries after it are still registered. FAT and
 vibefs `mount_dev` mount any registered name, a disk or a partition. Each
 registered device has a devfs block node, `/dev/<name>`, which reads and
 writes through its `BlockRef` with no lock held: a read at or past the end

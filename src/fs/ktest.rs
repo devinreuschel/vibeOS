@@ -145,7 +145,8 @@ pub(crate) fn test_pseudo_fs() -> Outcome {
     let Ok(r) = fid::open("/dev/random", O_RDWR, 0) else {
         return Outcome::Fail("open rand");
     };
-    if fid::read(r, &mut buf).ok() != Some(4) {
+    // Hardware bytes only: a short count, or none (ROADMAP §10.12).
+    if !matches!(fid::read(r, &mut buf), Ok(1..=4) | Err(FsError::Again)) {
         let _ = fid::close(r);
         return Outcome::Fail("read rand");
     }
