@@ -11,21 +11,6 @@ use crate::x86::{
     CR4_OSFXSR, CR4_OSXMMEXCPT, CR4_PAE, CR4_PGE,
 };
 
-/// CPUID.01H:ECX[31] (a hypervisor is present) and leaf `0x4000_0000`
-/// naming it `KVMKVMKVM\0\0\0`.
-pub(super) fn on_kvm() -> bool {
-    let (_, _, ecx1, _) = x86::cpuid(1, 0);
-    if ecx1 & (1 << 31) == 0 {
-        return false;
-    }
-    let (_, b, c, d) = x86::cpuid(0x4000_0000, 0);
-    let mut id = [0u8; 12];
-    id[..4].copy_from_slice(&b.to_le_bytes());
-    id[4..8].copy_from_slice(&c.to_le_bytes());
-    id[8..].copy_from_slice(&d.to_le_bytes());
-    &id == b"KVMKVMKVM\0\0\0"
-}
-
 /// One CPU's CR0 and CR4. A zero CR0 (PE and PG clear) is an empty slot.
 struct CrSnap {
     cr0: AtomicU64,

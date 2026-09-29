@@ -9,39 +9,15 @@ use vibeos::syscall::SYS_KILL;
 
 use super::user::{self, DEFAULT, Image, Layout, user_code};
 use super::{Outcome, cpu_remote, free_frames_owned};
+use super::{sleep_until_s19, spin_until};
 use crate::arch::idt::testing as idt_testing;
 use crate::console_init;
 use crate::fb_init::{self, testing as fb_testing};
 use crate::kva_init;
 use crate::log_init;
 use crate::proc_init::{self, testing as proc_testing};
-use crate::thread_init;
 use crate::time_init;
 use crate::x86;
-
-/// Sleep until `pred` holds, for at most `ms`.
-fn sleep_until(pred: impl Fn() -> bool, ms: u64) -> bool {
-    let deadline = time_init::now_ns().saturating_add(ms.saturating_mul(1_000_000));
-    while !pred() {
-        if time_init::now_ns() >= deadline {
-            return false;
-        }
-        thread_init::sleep_ms(1);
-    }
-    true
-}
-
-/// Spin on TSC time until `pred` holds, for at most `ns`.
-fn spin_until(pred: impl Fn() -> bool, ns: u64) -> bool {
-    let t0 = time_init::now_ns();
-    while !pred() {
-        if time_init::now_ns().saturating_sub(t0) > ns {
-            return false;
-        }
-        core::hint::spin_loop();
-    }
-    true
-}
 
 fn kill(pid: u32, sig: u32) -> i64 {
     proc_init::dispatch(SYS_KILL, [u64::from(pid), u64::from(sig), 0, 0, 0, 0])
@@ -157,14 +133,14 @@ pub(super) fn test_stop_cont_no_lost_wakeup() -> Outcome {
     STOP_DONE.store(false, Ordering::Release);
     STOP_ERR.store(StopErr::None as u32, Ordering::Release);
     super::spawn_thread_on("s19_stop_spawner", stop_spawner, 0);
-    if !sleep_until(|| STOP_SPAWNED.load(Ordering::Acquire), 5_000) {
+    if !sleep_until_s19(|| STOP_SPAWNED.load(Ordering::Acquire), 5_000) {
         return Outcome::Fail("spawner did not run");
     }
     let Ok(pid) = u32::try_from(STOP_PID.load(Ordering::Relaxed)) else {
         return Outcome::Fail("spawn");
     };
     super::spawn_thread_on("s19_stop_sender", stop_sender, sender_cpu);
-    let done = sleep_until(|| STOP_DONE.load(Ordering::Acquire), 25_000);
+    let done = sleep_until_s19(|| STOP_DONE.load(Ordering::Acquire), 25_000);
     proc_testing::disarm_stop_stall();
     let killed = kill(pid, SIGKILL);
     let st = user::wait(pid);
@@ -365,7 +341,7 @@ fn body_unmap_and_switch(other: u32) -> Result<(), Outcome> {
     super::spawn_thread_on("s19_body_busy", body_busy, 0);
     super::spawn_thread_on("s19_body_unmap", body_unmapper, other);
     super::spawn_thread_on("s19_body_spawn", body_spawn_getpid, 0);
-    let spawned = sleep_until(|| BODY_SPAWNED.load(Ordering::Acquire), 5_000);
+    let spawned = sleep_until_s19(|| BODY_SPAWNED.load(Ordering::Acquire), 5_000);
     let st = if spawned {
         spawned_pid(0).map(user::wait)
     } else {
@@ -373,7 +349,7 @@ fn body_unmap_and_switch(other: u32) -> Result<(), Outcome> {
     };
     BODY_STOP.store(true, Ordering::Release);
     proc_testing::disarm_getpid_spin();
-    let settled = sleep_until(
+    let settled = sleep_until_s19(
         || BODY_BUSY_DONE.load(Ordering::Acquire) && BODY_UNMAP_DONE.load(Ordering::Acquire),
         10_000,
     );
@@ -418,7 +394,7 @@ fn body_cr2() -> Outcome {
     BODY_SPAWNED.store(false, Ordering::Release);
     idt_testing::arm_pf_yield(CR2_A);
     super::spawn_thread_on("s19_body_faults", body_spawn_faults, 0);
-    let spawned = sleep_until(|| BODY_SPAWNED.load(Ordering::Acquire), 5_000);
+    let spawned = sleep_until_s19(|| BODY_SPAWNED.load(Ordering::Acquire), 5_000);
     let (a, b) = (spawned_pid(0), spawned_pid(1));
     let sts = if spawned {
         [a.map(user::wait), b.map(user::wait)]
@@ -463,7 +439,7 @@ pub(super) fn test_kill_line_whole() -> Outcome {
     BODY_SPAWNED.store(false, Ordering::Release);
     proc_testing::arm_kill_line_yield(CR2_A);
     super::spawn_thread_on("s19_kill_faults", body_spawn_faults, 0);
-    let spawned = sleep_until(|| BODY_SPAWNED.load(Ordering::Acquire), 5_000);
+    let spawned = sleep_until_s19(|| BODY_SPAWNED.load(Ordering::Acquire), 5_000);
     let (a, b) = (spawned_pid(0), spawned_pid(1));
     let sts = if spawned {
         [a.map(user::wait), b.map(user::wait)]
@@ -615,7 +591,7 @@ pub(super) fn test_console_write_newlines() -> Outcome {
         fb_testing::reset();
         super::spawn_thread_on("s19_nl_watch", nl_watcher, other);
         super::spawn_thread_on("s19_nl_spawn", nl_spawner, 0);
-        if !sleep_until(|| NL_SPAWNED.load(Ordering::Acquire), 5_000) {
+        if !sleep_until_s19(|| NL_SPAWNED.load(Ordering::Acquire), 5_000) {
             return Outcome::Fail("spawner did not run");
         }
         let Ok(pid) = u32::try_from(NL_PIDS.load(Ordering::Relaxed)) else {
@@ -623,7 +599,7 @@ pub(super) fn test_console_write_newlines() -> Outcome {
         };
         user::wait(pid)
     };
-    if !sleep_until(|| NL_TICK.load(Ordering::Acquire) != 0, 35_000) {
+    if !sleep_until_s19(|| NL_TICK.load(Ordering::Acquire) != 0, 35_000) {
         return Outcome::Fail("watcher did not finish");
     }
     if st != 0 {
@@ -769,7 +745,7 @@ pub(super) fn test_lifetime_console_write_acks_shootdown() -> Outcome {
         proc_testing::arm_console_write_record();
         super::spawn_thread_on("s19_ack_unmap", ack_unmapper, other);
         super::spawn_thread_on("s19_ack_spawn", ack_spawner, 0);
-        if !sleep_until(|| ACK_SPAWNED.load(Ordering::Acquire), 5_000) {
+        if !sleep_until_s19(|| ACK_SPAWNED.load(Ordering::Acquire), 5_000) {
             return Outcome::Fail("spawner did not run");
         }
         let Ok(pid) = u32::try_from(ACK_PID.load(Ordering::Relaxed)) else {
@@ -777,7 +753,7 @@ pub(super) fn test_lifetime_console_write_acks_shootdown() -> Outcome {
         };
         user::wait(pid)
     };
-    if !sleep_until(|| ACK_DONE.load(Ordering::Acquire), 15_000) {
+    if !sleep_until_s19(|| ACK_DONE.load(Ordering::Acquire), 15_000) {
         return Outcome::Fail("unmap thread did not finish");
     }
     if st != 0 {

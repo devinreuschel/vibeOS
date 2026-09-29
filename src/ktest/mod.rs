@@ -63,8 +63,7 @@ use crate::virtio_blk_init;
 use crate::virtio_init;
 use crate::work_init;
 use crate::x86;
-use p10_s12::fid;
-mod user;
+pub(crate) mod user;
 use user::user_code;
 
 const ISA_DEBUG_EXIT: u16 = 0xF4;
@@ -79,7 +78,7 @@ pub(crate) enum Outcome {
     Skip(&'static str),
 }
 
-const FAIL_MSG_BYTES: usize = 120;
+pub(crate) const FAIL_MSG_BYTES: usize = 120;
 
 /// A formatted failure reason, cut at [`FAIL_MSG_BYTES`] on a character
 /// boundary. Build one with [`crate::fail_fmt!`].
@@ -212,7 +211,7 @@ mod p10_s23;
 /// Rows run in this order. A new test goes in its subsystem's ktest.rs, and its row goes after the
 /// last row whose path starts with that subsystem, or at the end if it has none (ROADMAP §10.2's T1
 /// box splits this list per subsystem).
-const TESTS: &[Test] = &[
+pub(crate) const TESTS: &[Test] = &[
     test("map_unmap", test_map_unmap),
     test("nx_enforcement", test_nx_enforcement),
     test("heap_box", test_heap_box),
@@ -463,7 +462,7 @@ const TESTS: &[Test] = &[
 ];
 
 /// The one list, [`TESTS`] (DESIGN §8.2).
-const SUITES: &[Suite] = &[TESTS];
+pub(crate) const SUITES: &[Suite] = &[TESTS];
 
 /// Name of the registry's kernel thread.
 const REGISTRY_NAME: &str = "ktest";
@@ -475,7 +474,7 @@ const REGISTRY_STACK_PAGES: usize = 16;
 static REGISTRY_TID: AtomicU32 = AtomicU32::new(u32::MAX);
 
 /// The id of the thread [`registry_main`] runs on.
-fn registry_tid() -> ThreadId {
+pub(crate) fn registry_tid() -> ThreadId {
     ThreadId(REGISTRY_TID.load(Ordering::Acquire))
 }
 
@@ -584,7 +583,7 @@ static WARMED: AtomicBool = AtomicBool::new(false);
 /// reuse Dead boxes; walk KVA through two coalesces with the timer on, so
 /// the free list starts again at VA the walk mapped; and allocate and free
 /// [`WARM_DEFAULT_STACKS`] default-size stacks. It runs once per boot, from
-/// the registry or from the first `p10_s08::quiescent_free_frames` caller,
+/// the registry or from the first `quiescent_free_frames` caller,
 /// which then waits for the threads and stacks to settle before it reads
 /// the count.
 pub(crate) fn quiesce_frames() {
@@ -1032,7 +1031,7 @@ fn test_stack_guard() -> Outcome {
 }
 
 fn test_kva_roundtrip() -> Outcome {
-    let before = p10_s08::quiescent_free_frames();
+    let before = quiescent_free_frames();
     let Ok(stack) = kva_init::alloc_guarded_stack(4) else {
         return Outcome::Fail("alloc_guarded_stack");
     };
@@ -1043,7 +1042,7 @@ fn test_kva_roundtrip() -> Outcome {
         return Outcome::Fail("stack did not take 4 frames");
     }
     kva_init::free_stack(stack);
-    let after = p10_s08::quiescent_free_frames();
+    let after = quiescent_free_frames();
     if after != before {
         crate::marker!("vibeOS: ktest:   before={before} after={after}");
         return Outcome::Fail("free did not restore frame count");
@@ -1054,7 +1053,7 @@ fn test_kva_roundtrip() -> Outcome {
 /// A stack parked on this CPU's dead list comes back through its worker
 /// (ROADMAP §10.10).
 fn test_kva_deferred() -> Outcome {
-    let before = p10_s08::quiescent_free_frames();
+    let before = quiescent_free_frames();
     let Ok(stack) = kva_init::alloc_guarded_stack(4) else {
         return Outcome::Fail("alloc_guarded_stack");
     };
@@ -1063,7 +1062,7 @@ fn test_kva_deferred() -> Outcome {
         return Outcome::Fail("stack did not take 4 frames");
     }
     thread_init::testing::park_on_local_list(stack);
-    let after = p10_s08::quiescent_free_frames();
+    let after = quiescent_free_frames();
     if after != before {
         crate::marker!("vibeOS: ktest:   before={before} after={after}");
         return Outcome::Fail("worker did not free the parked stack");
@@ -1181,7 +1180,7 @@ fn test_star_sysret_layout() -> Outcome {
 }
 
 fn test_addrspace_map_unmap_teardown() -> Outcome {
-    let before = p10_s08::quiescent_free_frames();
+    let before = quiescent_free_frames();
     let Some(mut space) = addr_space_init::create() else {
         return Outcome::Fail("create");
     };
@@ -1223,7 +1222,7 @@ fn test_addrspace_map_unmap_teardown() -> Outcome {
     if st.pt_frames == 0 {
         return Outcome::Fail("teardown pt");
     }
-    if p10_s08::quiescent_free_frames() != before {
+    if quiescent_free_frames() != before {
         return Outcome::Fail("frame leak");
     }
     Outcome::Ok
@@ -1329,7 +1328,7 @@ user_code!(
 );
 
 fn test_ring3_syscall_enosys() -> Outcome {
-    let before = p10_s08::quiescent_free_frames();
+    let before = quiescent_free_frames();
     let st = match user::run(&user::Image::Code(ENOSYS_PROBE, user::DEFAULT), &["enosys"]) {
         Ok(st) => st,
         Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
@@ -1340,7 +1339,7 @@ fn test_ring3_syscall_enosys() -> Outcome {
     if st != wait_signaled(SIGILL) {
         return crate::fail_fmt!("status {st:#x}, want SIGILL");
     }
-    let after = p10_s08::quiescent_free_frames();
+    let after = quiescent_free_frames();
     if after != before {
         crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
         return Outcome::Fail("enosys frame leak");
@@ -1349,7 +1348,7 @@ fn test_ring3_syscall_enosys() -> Outcome {
 }
 
 fn test_ring3_hello_exit() -> Outcome {
-    let before = p10_s08::quiescent_free_frames();
+    let before = quiescent_free_frames();
     let pid = match proc_init::spawn_elf("/hello", 0, 0) {
         Ok(pid) => pid,
         Err(e) => return crate::fail_fmt!("spawn /hello: {}", e.as_str()),
@@ -1358,7 +1357,7 @@ fn test_ring3_hello_exit() -> Outcome {
     if st != wait_exited(42) {
         return crate::fail_fmt!("hello status {st:#x}, want exited 42");
     }
-    let after = p10_s08::quiescent_free_frames();
+    let after = quiescent_free_frames();
     if after != before {
         crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
         return Outcome::Fail("hello frame leak");
@@ -1463,7 +1462,7 @@ fn test_syscall_ptr_validate() -> Outcome {
 }
 
 fn test_user_syscalls() -> Outcome {
-    let before = p10_s08::quiescent_free_frames();
+    let before = quiescent_free_frames();
     let pid = match proc_init::spawn_elf("/bin/tests", 0, 0) {
         Ok(pid) => pid,
         Err(e) => return crate::fail_fmt!("spawn /bin/tests: {}", e.as_str()),
@@ -1472,7 +1471,7 @@ fn test_user_syscalls() -> Outcome {
     if st != wait_exited(0) {
         return crate::fail_fmt!("tests status {st:#x}, want exited 0");
     }
-    let after = p10_s08::quiescent_free_frames();
+    let after = quiescent_free_frames();
     if after != before {
         crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
         return Outcome::Fail("tests frame leak");
@@ -1986,9 +1985,9 @@ fn test_failed_ap_cleanup() -> Outcome {
     // unmap_4k does not return that PT. Warm up, then the measured wave
     // must restore the frame count (ROADMAP failed-AP exit gate).
     smp_init::exercise_fail_cleanup();
-    let n0 = p10_s08::quiescent_free_frames();
+    let n0 = quiescent_free_frames();
     smp_init::exercise_fail_cleanup();
-    let n1 = p10_s08::quiescent_free_frames();
+    let n1 = quiescent_free_frames();
     if n0 != n1 {
         crate::marker!("vibeOS: ktest:   frames {n0} -> {n1}");
         Outcome::Fail("failed AP leaked frames")
@@ -2253,10 +2252,10 @@ fn test_idle_runs() -> Outcome {
     }
 }
 
-fn dying_entry() {}
+pub(crate) fn dying_entry() {}
 
 fn test_reap_returns_frames() -> Outcome {
-    let before = p10_s08::quiescent_free_frames();
+    let before = quiescent_free_frames();
     {
         let _g = x86::InterruptGuard::enter();
         let Ok(h) = thread_init::spawn_here("dying", dying_entry) else {
@@ -2270,7 +2269,7 @@ fn test_reap_returns_frames() -> Outcome {
             return Outcome::Fail("returned thread not dead");
         }
     }
-    let after = p10_s08::quiescent_free_frames();
+    let after = quiescent_free_frames();
     if after != before {
         crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
         return Outcome::Fail("reap did not restore frames");
@@ -2285,7 +2284,7 @@ const REAP_MANY: usize = 16;
 /// resumes it or idle from the preempt path); every stack comes back
 /// whichever switch tail took it (ROADMAP §10.2, F074; §10.10).
 fn test_reap_many_via_idle() -> Outcome {
-    let before = p10_s08::quiescent_free_frames();
+    let before = quiescent_free_frames();
     let mut ids = [ThreadId::NONE; REAP_MANY];
 
     let mut i = 0;
@@ -2332,7 +2331,7 @@ fn test_reap_many_via_idle() -> Outcome {
         core::hint::spin_loop();
     }
 
-    let after = p10_s08::quiescent_free_frames();
+    let after = quiescent_free_frames();
     if after != before {
         crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
         return Outcome::Fail("reap did not restore frames");
@@ -2757,7 +2756,7 @@ fn spawn_until_dead(name: &'static str) -> Outcome {
 }
 
 fn test_spawn_exit_thousands() -> Outcome {
-    let before = p10_s08::quiescent_free_frames();
+    let before = quiescent_free_frames();
     let mut i = 0usize;
     while i < SPAWN_EXIT_N {
         match spawn_until_dead("die") {
@@ -2766,7 +2765,7 @@ fn test_spawn_exit_thousands() -> Outcome {
         }
         i += 1;
     }
-    let after = p10_s08::quiescent_free_frames();
+    let after = quiescent_free_frames();
     if after != before {
         let h = crate::heap_init::stats();
         let k = kva_init::stats();
@@ -2796,7 +2795,7 @@ pub(crate) fn second_cpu() -> Option<u32> {
 /// `ipi_init::service_incoming` from thread context. With IF on, an IPI
 /// between `service_calls`' acked check and its ack would run the callback
 /// twice, so this holds IF off across the call.
-fn service_incoming_guarded() {
+pub(crate) fn service_incoming_guarded() {
     let _g = x86::InterruptGuard::enter();
     ipi_init::service_incoming();
 }
@@ -3523,11 +3522,11 @@ fn test_lspci_cmd() -> Outcome {
     }
 }
 
-fn mmio_r32(va: u64, off: u32) -> u32 {
+pub(crate) fn mmio_r32(va: u64, off: u32) -> u32 {
     unsafe { core::ptr::read_volatile((va.wrapping_add(off as u64)) as *const u32) }
 }
 
-fn mmio_w32(va: u64, off: u32, val: u32) {
+pub(crate) fn mmio_w32(va: u64, off: u32, val: u32) {
     unsafe { core::ptr::write_volatile((va.wrapping_add(off as u64)) as *mut u32, val) }
 }
 
@@ -3541,11 +3540,11 @@ const E1000_ICR_OTHER: u32 = 1 << 24;
 /// Other -> MSI-X table entry 0, valid.
 const E1000_IVAR_OTHER0: u32 = 0x8 << 16;
 
-const EDU_IDENT: u32 = 0x00;
+pub(crate) const EDU_IDENT: u32 = 0x00;
 const EDU_IRQSTAT: u32 = 0x24;
 const EDU_RAISE: u32 = 0x60;
 const EDU_ACK: u32 = 0x64;
-const EDU_IDENT_VAL: u32 = 0x0100_00ED;
+pub(crate) const EDU_IDENT_VAL: u32 = 0x0100_00ED;
 
 static IRQ_CPU: AtomicU32 = AtomicU32::new(0xFFFF);
 static IRQ_HITS: AtomicU32 = AtomicU32::new(0);
@@ -3624,7 +3623,7 @@ fn on_intx_no_ack() {
     record_irq_cpu();
 }
 
-fn bar0_va(dev: &Device) -> Option<u64> {
+pub(crate) fn bar0_va(dev: &Device) -> Option<u64> {
     let r = dev.resources[0];
     if r.mapped_va != 0 {
         Some(r.mapped_va)
@@ -3633,7 +3632,7 @@ fn bar0_va(dev: &Device) -> Option<u64> {
     }
 }
 
-fn find_edu() -> Option<(usize, Device)> {
+pub(crate) fn find_edu() -> Option<(usize, Device)> {
     // QEMU 8.x edu is 1234:11e8 (old QEMU vendor). Later trees use 1b36:11e8.
     dev_init::find_id(0x1234, 0x11e8).or_else(|| dev_init::find_id(0x1b36, 0x11e8))
 }
@@ -3955,7 +3954,7 @@ fn test_intx_free_masks() -> Outcome {
 }
 
 fn test_dma_alloc() -> Outcome {
-    let before = p10_s08::quiescent_free_frames();
+    let before = quiescent_free_frames();
     let Some(buf) = dma_init::alloc(DmaAlloc::dma32(0x1000)) else {
         return Outcome::Fail("alloc");
     };
@@ -4002,7 +4001,7 @@ fn test_dma_alloc() -> Outcome {
     {
         return Outcome::Fail("boundary refuse");
     }
-    if p10_s08::quiescent_free_frames() != before {
+    if quiescent_free_frames() != before {
         return Outcome::Fail("leak");
     }
     Outcome::Ok
@@ -5313,4 +5312,131 @@ fn test_ktest_helpers() -> Outcome {
         return Outcome::Fail("spawn_thread_on(0) entry did not run and exit");
     }
     Outcome::Ok
+}
+
+/// The free-frame count at a quiescent point (ROADMAP §10.2, F074): the
+/// shared warm-up has run (once per boot, from whichever caller comes
+/// first), no thread but the caller and the idle threads is runnable, and
+/// no dead thread's stack is still on its way back. Every frame-accounting
+/// test takes its `before` and `after` from here.
+pub(crate) fn quiescent_free_frames() -> usize {
+    quiesce_frames();
+    if !quiesce() {
+        crate::marker!("vibeOS: ktest:   quiesce: threads did not settle");
+    }
+    free_frames()
+}
+
+/// Wait, bounded, until no thread but this one and the idle threads is
+/// Ready or Running and no dead thread's stack sits in a CPU's dead-stack
+/// slot or on its dead list. False if that did not happen in time.
+pub(crate) fn quiesce() -> bool {
+    settle_threads()
+}
+
+/// The File API with the copyable [`FileId`] handles the earlier suites
+/// were written against: each call takes back, or hands out, the count a
+/// [`FileRef`] carries, so their scenarios and assertions stay as they
+/// were.
+pub(crate) mod fid {
+    use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, SeekFrom, Stat};
+
+    use crate::file_init;
+
+    pub(crate) fn open(path: &str, flags: u32, mode: u32) -> Result<FileId, FsError> {
+        file_init::open(path.as_bytes(), OpenFlags::from_bits(flags), mode).map(FileRef::into_raw)
+    }
+
+    pub(crate) fn read(id: FileId, buf: &mut [u8]) -> Result<usize, FsError> {
+        file_init::read(&FileRef::from_raw(id), buf)
+    }
+
+    pub(crate) fn write(id: FileId, buf: &[u8]) -> Result<usize, FsError> {
+        file_init::write(&FileRef::from_raw(id), buf)
+    }
+
+    pub(crate) fn seek(id: FileId, off: i64, whence: u32) -> Result<u64, FsError> {
+        let pos = SeekFrom::from_whence(off, whence)?;
+        file_init::seek(&FileRef::from_raw(id), pos)
+    }
+
+    pub(crate) fn close(id: FileId) -> Result<(), FsError> {
+        file_init::close(FileRef::from_raw(id))
+    }
+
+    pub(crate) fn addref(id: FileId) -> Result<(), FsError> {
+        file_init::addref(id)
+    }
+
+    pub(crate) fn stat_path(path: &str) -> Result<Stat, FsError> {
+        file_init::stat_path(path.as_bytes())
+    }
+
+    /// `lstat` of absolute `path`.
+    pub(crate) fn lstat_path(path: &str) -> Result<Stat, FsError> {
+        crate::fs_init::api().stat_path(None, path.as_bytes(), false)
+    }
+
+    pub(crate) fn creat(path: &str) -> Result<(), FsError> {
+        file_init::creat(path.as_bytes())
+    }
+
+    pub(crate) fn unlink_path(path: &str, rmdir: bool) -> Result<(), FsError> {
+        if rmdir {
+            file_init::rmdir(path.as_bytes())
+        } else {
+            file_init::unlink(path.as_bytes())
+        }
+    }
+}
+
+/// CPUID.01H:ECX[31] (a hypervisor is present) and leaf `0x4000_0000`
+/// naming it `KVMKVMKVM\0\0\0`.
+pub(crate) fn on_kvm() -> bool {
+    let (_, _, ecx1, _) = x86::cpuid(1, 0);
+    if ecx1 & (1 << 31) == 0 {
+        return false;
+    }
+    let (_, b, c, d) = x86::cpuid(0x4000_0000, 0);
+    let mut id = [0u8; 12];
+    id[..4].copy_from_slice(&b.to_le_bytes());
+    id[4..8].copy_from_slice(&c.to_le_bytes());
+    id[8..].copy_from_slice(&d.to_le_bytes());
+    &id == b"KVMKVMKVM\0\0\0"
+}
+
+/// Sleep until `pred` holds, for at most `ms`.
+pub(crate) fn sleep_until(pred: impl Fn() -> bool, ms: u64) -> bool {
+    let deadline = time_init::now_ns().saturating_add(ms.saturating_mul(1_000_000));
+    while !pred() {
+        if time_init::now_ns() >= deadline {
+            return false;
+        }
+        thread_init::sleep_ms(1);
+    }
+    true
+}
+
+/// Sleep until `pred` holds, for at most `ms`.
+pub(crate) fn sleep_until_s19(pred: impl Fn() -> bool, ms: u64) -> bool {
+    let deadline = time_init::now_ns().saturating_add(ms.saturating_mul(1_000_000));
+    while !pred() {
+        if time_init::now_ns() >= deadline {
+            return false;
+        }
+        thread_init::sleep_ms(1);
+    }
+    true
+}
+
+/// Spin on TSC time until `pred` holds, for at most `ns`.
+pub(crate) fn spin_until(pred: impl Fn() -> bool, ns: u64) -> bool {
+    let t0 = time_init::now_ns();
+    while !pred() {
+        if time_init::now_ns().saturating_sub(t0) > ns {
+            return false;
+        }
+        core::hint::spin_loop();
+    }
+    true
 }

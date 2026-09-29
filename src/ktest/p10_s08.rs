@@ -7,6 +7,7 @@ use vibeos::proc::wait_exited;
 use vibeos::thread::{MAX_THREADS, ThreadId, ThreadState};
 
 use super::Outcome;
+use super::quiescent_free_frames;
 use super::user::{self, DEFAULT, Image, user_code};
 use crate::ipi_init;
 use crate::per_cpu_init;
@@ -14,26 +15,6 @@ use crate::pmm_init;
 use crate::thread_init::{self, SpawnError};
 use crate::time_init;
 use crate::x86;
-
-/// The free-frame count at a quiescent point (ROADMAP §10.2, F074): the
-/// shared warm-up has run (once per boot, from whichever caller comes
-/// first), no thread but the caller and the idle threads is runnable, and
-/// no dead thread's stack is still on its way back. Every frame-accounting
-/// test takes its `before` and `after` from here.
-pub(crate) fn quiescent_free_frames() -> usize {
-    super::quiesce_frames();
-    if !quiesce() {
-        crate::marker!("vibeOS: ktest:   quiesce: threads did not settle");
-    }
-    super::free_frames()
-}
-
-/// Wait, bounded, until no thread but this one and the idle threads is
-/// Ready or Running and no dead thread's stack sits in a CPU's dead-stack
-/// slot or on its dead list. False if that did not happen in time.
-fn quiesce() -> bool {
-    super::settle_threads()
-}
 
 fn dying_entry() {}
 

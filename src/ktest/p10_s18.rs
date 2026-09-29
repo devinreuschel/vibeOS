@@ -7,7 +7,7 @@ use vibeos::paging::PAGE_SIZE_4K;
 use vibeos::proc::{SIGSEGV, wait_signaled};
 
 use super::Outcome;
-use super::p10_s12::fid;
+use super::fid;
 use super::user::{self, Image, Layout, user_code};
 use crate::addr_space_init::testing as as_testing;
 use crate::pmm_init;

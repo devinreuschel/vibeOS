@@ -586,7 +586,7 @@ const EXC_CASES: &[ExcCase] = &[
 ];
 
 pub(super) fn test_user_exceptions() -> Outcome {
-    let kvm = EXC_CASES.iter().any(|c| c.kvm_only) && super::p10_s16::on_kvm();
+    let kvm = EXC_CASES.iter().any(|c| c.kvm_only) && super::on_kvm();
     for case in EXC_CASES {
         if case.kvm_only && !kvm {
             crate::marker!(

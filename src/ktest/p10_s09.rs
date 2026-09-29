@@ -10,7 +10,7 @@ use vibeos::limits::MAX_OPEN_FILES;
 use vibeos::proc::wait_exited;
 
 use super::Outcome;
-use super::p10_s12::fid;
+use super::fid;
 use super::user::{self, DEFAULT, Image, user_code};
 use crate::fat_init;
 use crate::file_init;

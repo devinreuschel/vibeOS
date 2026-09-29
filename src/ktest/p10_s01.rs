@@ -28,7 +28,7 @@ user_code!(
 );
 
 pub(super) fn test_user_code_exit() -> Outcome {
-    let before = super::p10_s08::quiescent_free_frames();
+    let before = super::quiescent_free_frames();
     let st = match user::run(&Image::Code(EXIT7_IF_KERNEL_CHILD, DEFAULT), &["exit7"]) {
         Ok(st) => st,
         Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
@@ -86,7 +86,7 @@ pub(super) fn test_user_code_layout() -> Outcome {
         memsz: Some(0x2000),
         writable: true,
     };
-    let before = super::p10_s08::quiescent_free_frames();
+    let before = super::quiescent_free_frames();
     let st = match user::run(&Image::Code(LAYOUT_WRITES, layout), &["layout"]) {
         Ok(st) => st,
         Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
@@ -186,7 +186,7 @@ fn ps() -> PsBuf {
 }
 
 pub(super) fn test_orphan_freed_no_init() -> Outcome {
-    let before = super::p10_s08::quiescent_free_frames();
+    let before = super::quiescent_free_frames();
     let st = match user::run(&Image::Code(ORPHAN_FORK, DEFAULT), &["orphan"]) {
         Ok(st) => st,
         Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),

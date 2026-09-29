@@ -5,7 +5,7 @@ use vibeos::fs::{
 };
 
 use super::Outcome;
-use super::p10_s12::fid;
+use super::fid;
 use crate::fat_init;
 use crate::file_init;
 use crate::vibefs_init;

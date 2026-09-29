@@ -11,6 +11,7 @@ use vibeos::syscall::{SYS_GETPID, SYS_KILL};
 use vibeos::vectors;
 
 use super::Outcome;
+use super::sleep_until;
 use super::user::{self, DEFAULT, Image, Layout, user_code};
 use crate::apic_init;
 use crate::console_init;
@@ -21,18 +22,6 @@ use crate::thread_init;
 use crate::time_init;
 use crate::user_init::LoadError;
 use crate::x86;
-
-/// Sleep until `pred` holds, for at most `ms`.
-fn sleep_until(pred: impl Fn() -> bool, ms: u64) -> bool {
-    let deadline = time_init::now_ns().saturating_add(ms.saturating_mul(1_000_000));
-    while !pred() {
-        if time_init::now_ns() >= deadline {
-            return false;
-        }
-        thread_init::sleep_ms(1);
-    }
-    true
-}
 
 // read(0, rsp, 1), then exit with the byte read; exit(2) if read does not
 // return 1.

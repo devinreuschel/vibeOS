@@ -434,7 +434,7 @@ pub(super) fn test_user_single_step() -> Outcome {
 /// deliver `int1` as `#DB`, and the child dies of `#UD`'s `SIGILL`
 /// instead, so off KVM either signal passes, with the kernel up.
 pub(super) fn test_user_int1() -> Outcome {
-    if super::p10_s16::on_kvm() {
+    if super::on_kvm() {
         return expect_sigtrap(INT1, "int1");
     }
     match user::run(&Image::Code(INT1, DEFAULT), &["int1"]) {
