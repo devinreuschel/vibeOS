@@ -832,7 +832,7 @@ mod tests {
         let mut reg = Registry::new();
         let mut held = std::vec::Vec::new();
         for i in 0..MAX_BLOCKDEVS {
-            let name = [b'd', b'0' + i as u8];
+            let name = [b'd', b'0' + (i / 10) as u8, b'0' + (i % 10) as u8];
             held.push(disk(&mut reg, &seq, &name, 8));
         }
         let extra = BlockRef::try_new(
@@ -851,7 +851,7 @@ mod tests {
         assert_eq!(reg.insert(extra.clone()), Err(BlockError::NoMem));
         let dup = BlockRef::try_new(
             seq.next().unwrap(),
-            BlockName::new(b"d0").unwrap(),
+            BlockName::new(b"d00").unwrap(),
             Backing::Disk {
                 ops: TryBox::<dyn BlockDevice>::try_new_unsize(
                     testing::MemDisk::new(512, 8),

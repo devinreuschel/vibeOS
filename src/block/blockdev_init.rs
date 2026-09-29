@@ -50,3 +50,17 @@ pub fn lookup_id(id: u64) -> Option<BlockRef> {
 pub fn snapshot(out: &mut [Option<BlockRef>]) -> usize {
     REG.lock().snapshot(out)
 }
+
+/// Take `dev` and its children out of the table, then close each one's gate
+/// with the table unlocked (DEVICES.md §12.2 rule 5). Test builds only:
+/// nothing unplugs a disk yet.
+#[cfg(feature = "kernel_tests")]
+pub fn unregister(dev: &BlockRef) -> Result<(), BlockError> {
+    use vibeos::block::MAX_BLOCKDEVS;
+    let mut out: [Option<BlockRef>; MAX_BLOCKDEVS] = [const { None }; MAX_BLOCKDEVS];
+    let n = REG.lock().unpublish(dev, &mut out)?;
+    for r in out.iter().take(n).flatten() {
+        r.kill()?;
+    }
+    Ok(())
+}

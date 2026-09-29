@@ -137,20 +137,55 @@ fn devfs_char_nodes() {
     v.close(z).unwrap();
 }
 
+/// A hardware source that has 5 bytes, from `RDRAND`.
+fn five_bytes(buf: &mut [u8]) -> (usize, Option<crate::entropy::Source>) {
+    let n = buf.len().min(5);
+    for (i, b) in buf.iter_mut().take(n).enumerate() {
+        *b = 0xE0 + i as u8;
+    }
+    (n, Some(crate::entropy::Source::RdRand))
+}
+
+/// Hardware sources with no byte.
+fn no_bytes(_buf: &mut [u8]) -> (usize, Option<crate::entropy::Source>) {
+    (0, None)
+}
+
+/// ROADMAP §10.12 (F134): `/dev/random` and `/dev/urandom` return only what
+/// the hardware hook supplies: a short count, or `Again` for none.
 #[test]
-fn devfs_random_does_not_block() {
+fn devfs_random_hardware_only() {
+    use crate::entropy::{Source, last_source, test_hook};
     let (mut v, _k) = boot();
-    v.now = 0x1234_5678;
-    let fid = v.open_path(None, "/dev/random", O_RDWR, 0).unwrap();
-    let mut a = [0u8; 16];
-    let mut b = [0u8; 16];
-    assert_eq!(v.read(&fid, &mut a).unwrap(), 16);
-    assert_eq!(v.read(&fid, &mut b).unwrap(), 16);
-    assert_ne!(a, b);
-    v.close(fid).unwrap();
-    let u = v.open_path(None, "/dev/urandom", O_RDWR, 0).unwrap();
-    assert_eq!(v.read(&u, &mut a).unwrap(), 16);
-    v.close(u).unwrap();
+    for path in ["/dev/random", "/dev/urandom"] {
+        let fid = v.open_path(None, path, O_RDWR, 0).unwrap();
+        {
+            let _g = test_hook(Some(five_bytes));
+            let mut buf = [0u8; 64];
+            assert_eq!(v.read(&fid, &mut buf), Ok(5), "{path}");
+            assert_eq!(buf[..5], [0xE0, 0xE1, 0xE2, 0xE3, 0xE4], "{path}");
+            assert!(buf[5..].iter().all(|&b| b == 0), "{path}");
+            assert_eq!(last_source(), Some(Source::RdRand), "{path}");
+            assert_eq!(v.read(&fid, &mut []), Ok(0), "{path}");
+        }
+        {
+            let _g = test_hook(Some(no_bytes));
+            let mut buf = [0u8; 64];
+            assert_eq!(v.read(&fid, &mut buf), Err(FsError::Again), "{path}");
+            assert_eq!(last_source(), None, "{path}");
+            assert_eq!(v.read(&fid, &mut []), Ok(0), "{path}");
+        }
+        {
+            // No hook at all, as on the host and before `entropy_init`.
+            let _g = test_hook(None);
+            let mut buf = [0u8; 8];
+            assert_eq!(v.read(&fid, &mut buf), Err(FsError::Again), "{path}");
+        }
+        v.close(fid).unwrap();
+    }
+    // `fs_errno` maps `Again` to Linux's EAGAIN.
+    assert_eq!(FsError::Again.as_str(), "again");
+    assert_eq!(crate::syscall::EAGAIN, 11);
 }
 
 /// A registry of the fake disk `fake` (64 sectors) and its partition
