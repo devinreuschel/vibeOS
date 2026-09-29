@@ -341,7 +341,7 @@ test-unit:
 # everything.
 .PHONY: models-quick
 models-quick:
-	RUSTFLAGS="--cfg loom -D warnings" LOOM_MAX_PREEMPTIONS=3 cargo test -p vibeos-core --lib --features std --release --target $(HOST_TRIPLE) --target-dir $(CARGO_TARGET_DIR)/loom -- loom_ --test-threads=1
+	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR)/loom RUSTFLAGS="--cfg loom -D warnings" LOOM_MAX_PREEMPTIONS=3 cargo test -p vibeos-core --lib --features std --release --target $(HOST_TRIPLE) -- loom_ --test-threads=1
 
 test-harness:
 	VIBEOS_TIER=$@ GITHUB_STEP_SUMMARY= python3 -m unittest discover -s tests/harness -t . -v
