@@ -123,6 +123,8 @@ Upward calls go only through hooks an upper layer installs at init, each listed 
 that sets it:
 
 - `paging::tlb_shootdown_others`, set by `ipi_init::init` before the first AP starts (§4.3).
+- `x86::set_per_cpu_hooks` (`InterruptGuard`'s nesting count and `x86::cpu_index`), set by
+  `per_cpu_init::init_bsp` before it marks the per-CPU area live.
 - Planned (ROADMAP §10.3, A4): the spin-poll hook in `sync_init`, set by `ipi_init::init`, and the
   scheduler hooks in `ipi_init`, set by `sched_init::init`.
 - Planned (ROADMAP §12.6): the allocation entry's hooks, set by the page cache (clean-page reclaim),

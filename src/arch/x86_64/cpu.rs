@@ -4,7 +4,8 @@
 //! CPU from values the BSP computes once from CPUID (DESIGN §5.1, §11.4).
 
 use core::arch::asm;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::ptr;
+use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use vibeos::log::Level;
 
@@ -296,6 +297,52 @@ pub fn halt() -> ! {
     }
 }
 
+// Per-CPU hooks (DESIGN §1.2): the per-CPU module's `init_bsp` installs them
+// before it marks the per-CPU area live. Unset, the nest hooks do nothing and
+// `cpu_index` returns `None`, as before the area exists.
+static NEST_ENTER: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+static NEST_LEAVE: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+static CPU_INDEX: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+
+/// Install the per-CPU hooks: `InterruptGuard`'s nesting count and this
+/// CPU's index. The per-CPU module's `init_bsp` calls it once, on the BSP.
+pub fn set_per_cpu_hooks(nest_enter: fn(), nest_leave: fn(), cpu_index: fn() -> Option<u32>) {
+    // Release: pairs with the Acquire loads in `run_hook` and `cpu_index`,
+    // so a CPU that sees a hook sees what `init_bsp` wrote before it.
+    NEST_ENTER.store(nest_enter as *mut (), Ordering::Release);
+    NEST_LEAVE.store(nest_leave as *mut (), Ordering::Release);
+    CPU_INDEX.store(cpu_index as *mut (), Ordering::Release);
+}
+
+/// Run a `fn()` hook of `set_per_cpu_hooks`, or nothing when it is unset.
+#[inline]
+fn run_hook(hook: &AtomicPtr<()>) {
+    // Acquire: pairs with the Release stores in `set_per_cpu_hooks`.
+    let p = hook.load(Ordering::Acquire);
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: invariant: a non-null `NEST_ENTER` or `NEST_LEAVE` holds a
+    // `fn()`; established by `arch::cpu::set_per_cpu_hooks`, their only
+    // store.
+    let f = unsafe { core::mem::transmute::<*mut (), fn()>(p) };
+    f();
+}
+
+/// This CPU's index (`cpu_id`), or `None` before the per-CPU area is live.
+pub fn cpu_index() -> Option<u32> {
+    // Acquire: pairs with the Release store in `set_per_cpu_hooks`.
+    let p = CPU_INDEX.load(Ordering::Acquire);
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: invariant: a non-null `CPU_INDEX` holds a
+    // `fn() -> Option<u32>`; established by `arch::cpu::set_per_cpu_hooks`,
+    // its only store.
+    let f = unsafe { core::mem::transmute::<*mut (), fn() -> Option<u32>>(p) };
+    f()
+}
+
 /// Save `RFLAGS.IF`, `cli`, restore on drop. DESIGN §2.3 / ROADMAP §3.5.
 /// Nested: each guard saves IF as it found it; only a guard that saw
 /// IF=1 restores it, so inner drops do not `sti` while an outer holds.
@@ -317,7 +364,7 @@ impl InterruptGuard {
                 out(reg) rflags,
             );
         }
-        crate::per_cpu_init::irq_nest_enter();
+        run_hook(&NEST_ENTER);
         Self {
             restore: rflags & (1 << 9) != 0,
         }
@@ -326,7 +373,7 @@ impl InterruptGuard {
 
 impl Drop for InterruptGuard {
     fn drop(&mut self) {
-        crate::per_cpu_init::irq_nest_leave();
+        run_hook(&NEST_LEAVE);
         if self.restore {
             unsafe { asm!("sti", options(nomem, nostack)) };
         }
