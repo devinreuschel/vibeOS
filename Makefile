@@ -206,6 +206,10 @@ run_py_tool = if command -v $(1) >/dev/null 2>&1; then \
 MSRV := $(shell sed -n 's/^rust-version = "\(.*\)"$$/\1/p' crates/core/Cargo.toml)
 MSRV_TOOLCHAIN ?= $(MSRV)
 
+# cargo-deny's version, which the check job in .github/workflows/ci.yml pins
+# (ROADMAP §10.9); it names the version in a missing-tool hint.
+CARGO_DENY_PIN := $(shell sed -n 's/^ *CARGO_DENY_VERSION: *//p' .github/workflows/ci.yml | head -n1)
+
 # Fast local / CI `check` job gate (T3). It lints the kernel with its default
 # features and vibeos-core's no_std build for the kernel target, so kernel-target
 # code compiles before every commit; CI's ladder lints each other ISO feature
@@ -237,6 +241,12 @@ check:
 	    fi; \
 	done
 	python3 scripts/doc_refs.py
+	@if command -v cargo-deny >/dev/null 2>&1; then \
+	    set -x; \
+	    cargo deny check licenses bans sources; \
+	else \
+	    $(call missing_tool,cargo-deny,cargo deny check licenses bans sources,cargo install cargo-deny --locked --version $(CARGO_DENY_PIN)); \
+	fi
 	@echo "check: ok"
 
 # ruff and mypy over tests/ and scripts/ (DX1, F147).

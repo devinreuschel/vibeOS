@@ -16,7 +16,7 @@ Power-on to `sti`. Limine does the ugly part (real mode, A20, long mode, ELF loa
 | Target | built-in `x86_64-unknown-none` (`rust-toolchain.toml` `targets`) |
 | Build | `cargo build` (default target in `.cargo/config.toml`) |
 | Panic | kernel target `abort`; host tests `unwind` (`profile.dev`) |
-| Extra host tools | `xorriso`, `nasm` (`user/*.asm`), `qemu-system-x86_64`, `python3`, `dosfstools` (`fsck.fat`; the host FAT tests fail without it unless `VIBEOS_ALLOW_MISSING_TOOLS=1`), `ruff` and `mypy` (`make check`, at the versions the `check` job pins) |
+| Extra host tools | `xorriso`, `nasm` (`user/*.asm`), `qemu-system-x86_64`, `python3`, `dosfstools` (`fsck.fat`; the host FAT tests fail without it unless `VIBEOS_ALLOW_MISSING_TOOLS=1`), `ruff` and `mypy` (`make check`, at the versions the `check` job pins), `cargo-deny` (`make check`'s `cargo deny check licenses bans sources`, at the version the `check` job pins; `cargo install cargo-deny --locked --version <pin>`) |
 
 `make` is the usual entry. It builds `build/initrd.fat` with hostlib `mkinitrd` and stages it on the
 ISO as `/boot/initrd.fat`, which `limine.conf`'s `module_path:` loads as a Limine module; the kernel

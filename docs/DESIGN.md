@@ -261,10 +261,13 @@ and measured behaviour, or from sources whose license lets it into an MIT tree:
   carries a provenance header naming the upstream project, the file's path, the pinned tag or
   commit, and the upstream license as an SPDX identifier; ROADMAP §10.9 checks the header and ships
   the notice. Code under Apache-2.0 alone, or under any license with a further condition, is never
-  adapted into a vibeOS file: it enters as a crate under ROADMAP §10.9's `cargo deny` policy or as a
-  port under §14.10, keeping its own license and NOTICE.
+  adapted into a vibeOS file: it enters as a crate under ROADMAP §10.9's `deny.toml` policy or as a
+  port under §14.10, keeping its own license and NOTICE. That policy, which `make check` runs as
+  `cargo deny check licenses bans sources`, admits crates from crates.io only, under the notice-only
+  licenses above or Apache-2.0 or Unicode-3.0, and only when `deny.toml`'s `[bans]` allow list names
+  the crate with the reason it is in the graph; another license needs an edit here first.
 - Cryptographic primitives and the TLS state machine are depended on, never written in-tree: pinned,
-  widely reviewed crates behind one facade, `vibeos-crypto`, under ROADMAP §10.9's `cargo deny`
+  widely reviewed crates behind one facade, `vibeos-crypto`, under ROADMAP §10.9's `deny.toml`
   policy, with RustCrypto and dalek for the primitives and rustls for TLS (ROADMAP §13.10, §14.7,
   §15.11). In-tree crypto code is the entropy pool, the CSPRNG's construction, the signature
   formats, and glue.
