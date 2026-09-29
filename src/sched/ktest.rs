@@ -1,5 +1,8 @@
 //! In-guest tests for sched (kernel_tests only). Rows: the list in crate::ktest.
 
+mod hooks;
+pub(crate) use hooks::{RequeueGuard, requeues, set_requeue_next_cpu, work_live};
+
 use alloc::boxed::Box;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -341,9 +344,14 @@ pub(crate) fn test_sched_lock_timer_irq() -> Outcome {
         other => return other,
     }
     match apic_init::timer_mode() {
+        // SAFETY: a software `int` to the timer vector enters its IDT stub
+        // as a tick would, with SCHED free again; established by
+        // `apic_init::timer_mode`, which names the live timer's vector.
         TimerMode::Pit => unsafe {
             core::arch::asm!("int $0x20");
         },
+        // SAFETY: as above, for the LAPIC timer's vector; established by
+        // `apic_init::timer_mode`.
         TimerMode::TscDeadline | TimerMode::Periodic => unsafe {
             core::arch::asm!("int $0xF0");
         },
@@ -444,7 +452,7 @@ fn wq_mark(arg: usize) {
 }
 
 pub(crate) fn test_workqueue() -> Outcome {
-    if !work_init::live() {
+    if !work_live() {
         return Outcome::Fail("work not live");
     }
     WQ_HITS.store(0, Ordering::SeqCst);
@@ -1452,24 +1460,15 @@ user_code!(
     "
 );
 
-/// Turns the requeue hook off when dropped.
-struct RequeueGuard;
-
-impl Drop for RequeueGuard {
-    fn drop(&mut self) {
-        thread_init::testing::set_requeue_next_cpu(false);
-    }
-}
-
 /// A user thread that the requeue hook moves to the next CPU each time
 /// it is preempted keeps its XMM state across every migration.
 pub(crate) fn test_fp_migrate_counter() -> Outcome {
     if crate::ktest::second_cpu().is_none() {
         return Outcome::Skip("needs 2 CPUs");
     }
-    let before = thread_init::testing::requeues();
+    let before = requeues();
     let pid = {
-        thread_init::testing::set_requeue_next_cpu(true);
+        set_requeue_next_cpu(true);
         let _g = RequeueGuard;
         let pid = match user::spawn(&Image::Code(FP_COUNTER, DEFAULT), &["fp_counter"]) {
             Ok(pid) => pid,
@@ -1481,7 +1480,7 @@ pub(crate) fn test_fp_migrate_counter() -> Outcome {
     // A failed kill shows as the status check below.
     let _ = proc_init::dispatch(SYS_KILL, [u64::from(pid), u64::from(SIGKILL), 0, 0, 0, 0]);
     let st = user::wait(pid);
-    let moves = thread_init::testing::requeues().wrapping_sub(before);
+    let moves = requeues().wrapping_sub(before);
     if st != wait_signaled(SIGKILL) {
         if st == 1 << 8 {
             return crate::fail_fmt!("xmm0 counter mismatch after {moves} moves");

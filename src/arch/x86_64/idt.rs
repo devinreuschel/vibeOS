@@ -1236,9 +1236,9 @@ pub mod testing {
         // `thread_exit` does.
         let _irq = crate::x86::InterruptGuard::enter();
         REPIN_FROM.store(crate::thread_init::current_cpu(), Ordering::Release);
-        crate::thread_init::testing::set_requeue_next_cpu(true);
+        crate::sched::ktest::set_requeue_next_cpu(true);
         crate::thread_init::yield_now();
-        crate::thread_init::testing::set_requeue_next_cpu(false);
+        crate::sched::ktest::set_requeue_next_cpu(false);
         REPIN_TO.store(crate::thread_init::current_cpu(), Ordering::Release);
         frame.user_mut().rflags &= !RFLAGS_TF;
         true

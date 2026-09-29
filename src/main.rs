@@ -72,11 +72,6 @@ mod block;
     reason = "audit pending, ROADMAP §10.1"
 )]
 mod boot;
-#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 mod cell;
 #[allow(
     clippy::undocumented_unsafe_blocks,
@@ -153,13 +148,6 @@ mod mm;
     reason = "audit pending, ROADMAP §10.1"
 )]
 mod proc;
-#[allow(clippy::expect_used, reason = "audit pending, ROADMAP §10.1")]
-#[allow(clippy::panic, reason = "audit pending, ROADMAP §10.1")]
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
-#[allow(clippy::unreachable, reason = "audit pending, ROADMAP §10.1")]
 mod sched;
 #[allow(
     clippy::let_underscore_must_use,

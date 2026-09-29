@@ -39,10 +39,6 @@ pub mod block;
 // has no InterruptGuard / per_cpu_init.
 #[cfg(test)]
 #[path = "../../../src/cell.rs"]
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 pub mod cell;
 pub mod console;
 #[allow(
@@ -78,10 +74,6 @@ pub mod mm;
     reason = "audit pending, ROADMAP §10.1"
 )]
 pub mod proc;
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 pub mod sched;
 pub mod shell;
 pub mod smp;

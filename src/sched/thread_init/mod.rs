@@ -10,7 +10,6 @@
 //! switch tail that runs on that CPU once `switch_context` has moved it off
 //! the stack, puts it in the CPU's stack cache or on its dead list, which
 //! the CPU's workqueue worker unmaps and frees with IF=1 (DESIGN §4.5).
-#![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 
@@ -221,7 +220,11 @@ impl Sched {
             _ => 0,
         };
         if cookie != 0 {
-            // SAFETY: cookie is a WaitQueue living under SCHED (mutex / chan / …).
+            // SAFETY: invariant: a Blocked thread's `wq` cookie is the address
+            // of the `WaitQueue` it waits on, which lives in a lock's model
+            // that is touched only under SCHED, held here, and stays put
+            // while a thread waits on it; established by
+            // `thread_init::Sched::begin_wait`.
             unsafe { &mut *(cookie as *mut WaitQueue) }.remove(id);
         }
     }
@@ -246,6 +249,9 @@ extern "C" fn trampoline() {
     if per_cpu_init::irq_nest() == 0 {
         crate::x86::sti();
     }
+    // SAFETY: invariant I9: the current thread's `Tcb` stays in `SCHED`,
+    // and `entry` is written only before the thread first runs; established
+    // by `thread_init::switch_now`, which sets the current thread.
     let entry = unsafe { (*per_cpu_init::current_thread()).entry };
     entry();
     thread_exit();
@@ -255,6 +261,10 @@ pub fn exit_current() -> ! {
     thread_exit();
 }
 
+#[allow(
+    clippy::panic,
+    reason = "invariant I9: a Dead thread is never placed on a run queue, so `schedule` never returns to it (`thread_init::runnable_on`)"
+)]
 fn thread_exit() -> ! {
     // IF-on-resume leaves IF set. Hold it off from the park to the switch:
     // a tick cannot preempt a thread whose stack is parked, and the switch
@@ -282,7 +292,9 @@ fn thread_exit() -> ! {
     // Under SCHED, as every other state store; the slot stays unreusable
     // while `on_cpu` is set, until this CPU's switch tail clears it.
     with_sched(|_| {
-        // SAFETY: as above; SCHED orders this store with `spawn_inner`'s scan.
+        // SAFETY: invariant I9: `p` is this CPU's running thread, whose `Tcb`
+        // stays in `SCHED`; SCHED, held here, orders this store with the
+        // scan in `thread_init::spawn_inner`.
         unsafe { (*p).state = ThreadState::Dead };
     });
     #[cfg(feature = "kernel_tests")]
@@ -424,7 +436,7 @@ fn runnable_on(t: &Tcb, cpu: u32) -> bool {
     t.state == ThreadState::Ready && t.cpu == cpu
 }
 
-/// C-REQUEUE-HOOK: while `testing::set_requeue_next_cpu` is on, a user
+/// C-REQUEUE-HOOK: while `sched::ktest::set_requeue_next_cpu` is on, a user
 /// thread or a `CpuAffinity::Any` kernel thread that this CPU dequeues
 /// while another thread is current moves to the next online CPU instead
 /// of running here, once per slice it runs. A preempted thread that is the
@@ -489,6 +501,11 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
         cpu.remote
             .switches
             .store(switches.wrapping_add(1), Ordering::Relaxed);
+        // SAFETY: invariant I9: both TCBs stay in `SCHED`; `old_ptr` is this
+        // CPU's running thread and `new_ptr` the one `schedule_inner` or
+        // `switch_to` set Running for this CPU under SCHED, so no other CPU
+        // writes these fields until the switch tail clears `on_cpu`;
+        // established by `thread_init::schedule_inner`.
         unsafe {
             (*old_ptr).run_tsc = (*old_ptr).run_tsc.wrapping_add(delta);
             (*old_ptr).switches = (*old_ptr).switches.wrapping_add(1);
@@ -605,11 +622,13 @@ pub(crate) fn stacks_reclaimed(n: usize) {
 }
 
 /// Frames the stack caches of every CPU hold.
+#[cfg(feature = "kernel_tests")]
 pub fn cached_stack_frames() -> usize {
     CACHED_STACK_FRAMES.load(Ordering::Acquire)
 }
 
 /// Dead threads' stacks not yet cached or freed.
+#[cfg(feature = "kernel_tests")]
 pub fn stacks_in_flight() -> usize {
     STACKS_IN_FLIGHT.load(Ordering::Acquire)
 }
@@ -647,16 +666,23 @@ fn return_stack(stack: GuardedStack) {
 /// runq, then `sti; hlt` as one pair. ROADMAP §4.8 / DESIGN §7.8.
 pub fn halt_if_idle() {
     loop {
+        // SAFETY: `cli` touches only IF; the `sti` below or the idle loop's
+        // next pass turns it back on; established here.
         unsafe {
             core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
         }
         crate::ipi_init::drain_inbox();
         if !per_cpu_init::current().runq.is_empty() {
+            // SAFETY: `sti` restores the IF=1 this idle loop runs with;
+            // established here.
             unsafe {
                 core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
             }
             return;
         }
+        // SAFETY: `sti; hlt` as one pair: the interrupt shadow keeps a
+        // wake-up IPI from landing between them (DESIGN §7.8); established
+        // here.
         unsafe {
             core::arch::asm!("sti; hlt", options(nomem, nostack));
         }
@@ -692,7 +718,7 @@ pub unsafe fn init_bootstrap() {
         pid: 0,
     });
     let Ok(mut tcb) = tcb else {
-        panic!("thread: bootstrap TCB");
+        crate::boot::halt_with("vibeOS: thread: no memory for the bootstrap TCB");
     };
     let ptr = &mut *tcb as *mut Tcb;
     {
@@ -708,6 +734,10 @@ pub unsafe fn init_bootstrap() {
     });
 }
 
+#[allow(
+    clippy::panic,
+    reason = "invariant: the bootstrap TCB is adopted Running and never started, so nothing enters its `entry` (`thread_init::init_bootstrap`)"
+)]
 fn bootstrap_entry() {
     panic!("bootstrap entry called");
 }
@@ -732,6 +762,7 @@ pub fn spawn(name: &'static str, entry: fn()) -> Result<ThreadHandle, SpawnError
 /// registry runs with IF on; one started under a test's own guard runs with
 /// IF off, so `switch_to` does not `sti` it and a tick cannot preempt a
 /// cooperative `switch_to` chain.
+#[cfg(feature = "kernel_tests")]
 pub fn spawn_here(name: &'static str, entry: fn()) -> Result<ThreadHandle, SpawnError> {
     spawn_inner(
         name,
@@ -759,6 +790,7 @@ pub fn spawn_on(name: &'static str, entry: fn(), cpu: u32) -> Result<ThreadHandl
 }
 
 /// Stack size and CPU for [`spawn_opts`].
+#[cfg(feature = "kernel_tests")]
 #[derive(Clone, Copy)]
 pub struct SpawnOpts {
     /// Stack pages, without the guard page. `kva_init::alloc_guarded_stack`
@@ -773,6 +805,7 @@ pub struct SpawnOpts {
 /// with `irq_nest` 0, so it runs with IF on, as [`spawn`]'s threads do.
 /// `opts.stack_pages` must be at most 32 (`kva_init`'s limit) and
 /// `opts.cpu`, when set, an online CPU.
+#[cfg(feature = "kernel_tests")]
 pub fn spawn_opts(
     name: &'static str,
     entry: fn(),
@@ -802,6 +835,10 @@ pub(crate) fn spawn_idle(entry: fn()) -> Result<ThreadHandle, SpawnError> {
 /// the user frame its first return to ring 3 leaves from (DESIGN §5.10):
 /// it goes at the top of the new stack, and the switch context starts
 /// below it, so `entry` ends in `syscall_init::first_return`.
+#[allow(
+    clippy::panic,
+    reason = "invariant: `spawn_inner` gives every thread it builds a stack, and a thread not yet `make_ready` never runs, so nothing takes it (`thread_init::spawn_inner`)"
+)]
 pub fn spawn_user(
     name: &'static str,
     entry: fn(),
@@ -892,23 +929,23 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, Guard
     let Ok(mut tcb) = tcb else {
         return Err(stack);
     };
-    tcb.stack = Some(stack);
     let placed = with_sched(|s| {
         let Some(slot) = s.slots.iter().position(|x| x.is_none()) else {
             // Dropped after SCHED is released: no heap free under it.
-            return Err(tcb);
+            return Err((tcb, stack));
         };
         let id = ThreadId(slot as u32);
         tcb.id = id;
+        tcb.stack = Some(stack);
         s.slots[slot] = Some(tcb);
         Ok(id)
     });
     match placed {
         Ok(id) => Ok(id),
-        Err(mut tcb) => match tcb.stack.take() {
-            Some(stack) => Err(stack),
-            None => unreachable!("adopt_ap_idle: stack set above"),
-        },
+        Err((tcb, stack)) => {
+            drop(tcb);
+            Err(stack)
+        }
     }
 }
 
@@ -922,6 +959,10 @@ pub fn abandon_ap_idle(id: ThreadId) -> Option<GuardedStack> {
     })
 }
 
+#[allow(
+    clippy::panic,
+    reason = "invariant: an AP idle TCB is adopted Running and never started, so nothing enters its `entry` (`thread_init::adopt_ap_idle`)"
+)]
 fn ap_idle_entry() {
     panic!("ap idle entry called");
 }
@@ -1032,6 +1073,9 @@ fn spawn_inner(
     };
     tcb.stack = stack;
     prepare_thread(&mut tcb.context, top, tramp);
+    // SAFETY: `prepare_thread` put `context.rsp` 8 bytes below `top`,
+    // inside the thread's own stack, mapped and not yet run on; established
+    // by `vibeos::thread::prepare_thread`.
     unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
 
     let placed = with_sched(|s| {
@@ -1100,6 +1144,9 @@ fn fill_tcb(
     tcb.syscall_count = 0;
     tcb.pid = pid;
     prepare_thread(&mut tcb.context, top, tramp);
+    // SAFETY: `prepare_thread` put `context.rsp` 8 bytes below `top`,
+    // inside the thread's own stack, mapped and not yet run on; established
+    // by `vibeos::thread::prepare_thread`.
     unsafe { (tcb.context.rsp as *mut u64).write_volatile(0) };
 }
 
@@ -1122,6 +1169,7 @@ pub fn park(deadline: Option<Instant>) {
 }
 
 /// Hold SCHED for `f`. IF is off for the whole call (IRQ-aware lock).
+#[cfg(feature = "kernel_tests")]
 pub fn with_sched_lock<R>(f: impl FnOnce() -> R) -> R {
     let _g = SCHED.lock();
     f()
@@ -1146,14 +1194,24 @@ pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
     r
 }
 
+#[cfg(feature = "kernel_tests")]
 pub fn last_wait_outcome() -> WaitOutcome {
     let p = per_cpu_init::current_thread();
     assert!(!p.is_null(), "no current thread");
+    // SAFETY: invariant I9: the current thread's `Tcb` stays in `SCHED`,
+    // and only this thread and the SCHED holder that wakes it write
+    // `wait_outcome`, before it runs again; established by
+    // `thread_init::Sched::wake_one`.
     unsafe { (*p).wait_outcome }
 }
 
 /// Test helper. Local CPU only — the target must already sit on this
 /// runq (spawn_here). Same nest-swap as `schedule`.
+#[cfg(feature = "kernel_tests")]
+#[allow(
+    clippy::expect_used,
+    reason = "invariant I9: a TCB slot once filled is never emptied, so an id `spawn_here` returned always names one (`thread_init::spawn_inner`)"
+)]
 pub fn switch_to(id: ThreadId) {
     let _irq = InterruptGuard::enter();
     crate::ipi_init::drain_inbox();
@@ -1198,12 +1256,23 @@ pub fn switch_to(id: ThreadId) {
 pub fn current_id() -> ThreadId {
     let p = per_cpu_init::current_thread();
     assert!(!p.is_null(), "no current thread");
+    // SAFETY: invariant I9: the current thread's `Tcb` stays in `SCHED`, and
+    // `id` changes only while its slot is Dead, never while it runs;
+    // established by `thread_init::spawn_inner`.
     unsafe { (*p).id }
 }
 
 pub fn current_pid() -> u32 {
     let p = per_cpu_init::current_thread();
-    if p.is_null() { 0 } else { unsafe { (*p).pid } }
+    if p.is_null() {
+        0
+    } else {
+        // SAFETY: invariant I9: the current thread's `Tcb` stays in `SCHED`,
+        // and `pid` is written only under SCHED by `set_pid_cr3` or a spawn,
+        // a word-sized store this read cannot tear; established by
+        // `thread_init::set_pid_cr3`.
+        unsafe { (*p).pid }
+    }
 }
 
 pub fn set_pid_cr3(id: ThreadId, pid: u32, cr3: u64) {
@@ -1231,32 +1300,43 @@ pub fn current_cpu() -> u32 {
     per_cpu_init::current().cpu_id
 }
 
-#[allow(dead_code)]
+#[cfg(feature = "kernel_tests")]
 pub fn current_tcb() -> *mut Tcb {
     let p = per_cpu_init::current_thread();
     assert!(!p.is_null(), "no current thread");
     p
 }
 
+#[cfg(feature = "kernel_tests")]
+#[allow(
+    clippy::expect_used,
+    reason = "invariant I9: a TCB slot once filled is never emptied, so an id a spawn returned always names one (`thread_init::spawn_inner`)"
+)]
 pub fn state(id: ThreadId) -> ThreadState {
     SCHED.lock().get(id).expect("unknown thread").state
 }
 
+#[cfg(feature = "kernel_tests")]
 pub fn try_state(id: ThreadId) -> Option<ThreadState> {
     SCHED.lock().get(id).map(|t| t.state)
 }
 
+#[cfg(feature = "kernel_tests")]
+#[allow(
+    clippy::expect_used,
+    reason = "invariant I9: a TCB slot once filled is never emptied, so an id a spawn returned always names one (`thread_init::spawn_inner`)"
+)]
 pub fn name(id: ThreadId) -> &'static str {
     SCHED.lock().get(id).expect("unknown thread").name
 }
 
+#[cfg(feature = "kernel_tests")]
+#[allow(
+    clippy::expect_used,
+    reason = "invariant I9: a TCB slot once filled is never emptied, so an id a spawn returned always names one (`thread_init::spawn_inner`)"
+)]
 pub fn cpu_of(id: ThreadId) -> u32 {
     SCHED.lock().get(id).expect("unknown thread").cpu
-}
-
-#[allow(dead_code)]
-pub fn run_tsc(id: ThreadId) -> u64 {
-    SCHED.lock().get(id).expect("unknown thread").run_tsc
 }
 
 pub fn tcb_ptr(id: ThreadId) -> *mut Tcb {

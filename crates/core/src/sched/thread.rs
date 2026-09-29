@@ -4,8 +4,8 @@
 //! The TCB table, KVA mapping, and `spawn` live in the binary crate.
 
 use core::mem::{offset_of, size_of};
-use core::sync::atomic::AtomicBool;
 
+use crate::atomic::AtomicBool;
 use crate::paging::{PAGE_SIZE_4K, VirtAddr};
 use crate::pmm::Frames;
 use crate::time::Instant;
@@ -431,10 +431,16 @@ unsafe extern "C" {
 /// `stack_top-8`. Host tests skip `cli` (ring 3). No FPU/SSE.
 ///
 /// # Safety
-/// `old` and `new` must be valid. `new.rsp` must point at a live stack.
-/// Caller is not using the red zone below either rsp.
+/// `old` is valid for writes of a `CpuContext` and `new` for reads of one,
+/// and neither is written by another CPU during the call. `new` was saved
+/// by `switch_context` or seeded by [`prepare_thread`], so `new.rsp`
+/// points into a live stack whose frame `new.rip` expects. The caller is
+/// not using the red zone below either `rsp`.
 #[cfg(target_arch = "x86_64")]
 pub unsafe fn switch_context(old: *mut CpuContext, new: *const CpuContext) {
+    // SAFETY: the caller meets this fn's `# Safety` contract, which is the
+    // asm's whole requirement; established by `thread::switch_context`'s
+    // callers, `thread_init::switch_now` in the kernel.
     unsafe { vibeos_switch_context(old, new) };
 }
 
@@ -515,6 +521,10 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     extern "C" fn worker_entry() {
         FLAG.store(0xC0FFEE, Ordering::SeqCst);
+        // SAFETY: this worker runs only from the switch in
+        // `switch_context_roundtrip`, whose frame holds both contexts and
+        // waits in that switch, which saved `MAIN_PTR`'s context; established
+        // here, as the test's only worker.
         unsafe {
             switch_context(
                 WORKER_PTR.load(Ordering::SeqCst),
@@ -537,6 +547,9 @@ mod tests {
         let worker_p = &raw mut worker_ctx;
         MAIN_PTR.store(main_p, Ordering::SeqCst);
         WORKER_PTR.store(worker_p, Ordering::SeqCst);
+        // SAFETY: `top` is 16-byte aligned inside `buf`, which outlives the
+        // worker, and both contexts are locals this frame owns; the worker
+        // switches straight back; established here.
         unsafe {
             prepare_thread(&mut *worker_p, top, worker_entry as *const () as u64);
             ((*worker_p).rsp as *mut u64).write_volatile(0);

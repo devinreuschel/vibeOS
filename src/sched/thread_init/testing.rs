@@ -85,29 +85,14 @@ pub fn fail_next_fork_stack() {
     FAIL_FORK_STACK.store(true, Ordering::Release);
 }
 
-static REQUEUE: AtomicBool = AtomicBool::new(false);
-static REQUEUES: AtomicU64 = AtomicU64::new(0);
+/// C-REQUEUE-HOOK's switch, which `sched::ktest::set_requeue_next_cpu`
+/// sets.
+pub(in crate::sched) static REQUEUE: AtomicBool = AtomicBool::new(false);
+/// Moves the hook has made since boot (`sched::ktest::requeues`).
+pub(in crate::sched) static REQUEUES: AtomicU64 = AtomicU64::new(0);
 /// Set when a thread was moved, cleared by the dequeue that runs it.
-static ARRIVED: [AtomicBool; MAX_THREADS] = [const { AtomicBool::new(false) }; MAX_THREADS];
-
-/// C-REQUEUE-HOOK: move each user or `CpuAffinity::Any` thread to the
-/// next online CPU when its CPU dequeues it (`requeue_next_cpu`).
-/// Turning it on forgets the arrivals an earlier use left: a thread
-/// moved just before the hook went off keeps its flag, and a later
-/// thread in that slot would run where it is dequeued instead of moving.
-pub fn set_requeue_next_cpu(on: bool) {
-    if on {
-        for a in ARRIVED.iter() {
-            a.store(false, Ordering::Relaxed);
-        }
-    }
-    REQUEUE.store(on, Ordering::Release);
-}
-
-/// Moves the hook has made since boot.
-pub fn requeues() -> u64 {
-    REQUEUES.load(Ordering::Relaxed)
-}
+pub(in crate::sched) static ARRIVED: [AtomicBool; MAX_THREADS] =
+    [const { AtomicBool::new(false) }; MAX_THREADS];
 
 pub(super) fn requeue_on() -> bool {
     REQUEUE.load(Ordering::Acquire)
