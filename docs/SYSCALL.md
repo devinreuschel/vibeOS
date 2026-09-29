@@ -473,6 +473,17 @@ gives the page the later segment's permissions, as Linux does). `PT_PHDR`
 VAs are `check_user_va`'d. Exit status is the kernel-reported low 8 bits
 (`user: exit N` diagnostic for the bootstrap hello).
 
+The Rust user runtime (`vibeos-user`, ROADMAP §10.5) is built; the
+initrd programs stay assembly until §10.5 ports them. `_start`, in `user/src/arch/<arch>/`,
+passes the initial stack pointer to `rt::start`, which reads `argc`,
+`argv`, `envp` and `auxv` into an `env::Env`, calls the program's
+`main!` function, and exits with its return value as the status. A panic
+writes `panicked at <file>:<line>:<col>:` and the message, one line
+each, to fd 2 in one `write` (cut at 512 bytes) and exits with status 101. Each program
+links as a static non-PIE `ET_EXEC` at `0x4000_0000` for
+`x86_64-unknown-linux-musl`, with no libc and no crt objects (BOOT.md
+§3.1).
+
 The kernel REPL is debug-only (`--features kernel_shell`). Production
 starts `/sbin/init` and parks.
 

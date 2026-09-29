@@ -214,6 +214,11 @@ jobs:
           cargo clippy --bin vibeos --features gp_test --features panic_exit -- -D warnings
           cargo clippy --bin vibeos --features kernel_shell -- -D warnings
 
+      # The Rust user programs (ROADMAP §10.5): links through rust-lld with no
+      # C compiler, and checks each ELF with scripts/check_user_elf.py.
+      - name: build the user programs (make user)
+        run: make user
+
       - name: build every ISO and host tool (make prebuilt)
         run: make prebuilt
 
