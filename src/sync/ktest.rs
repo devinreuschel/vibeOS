@@ -455,3 +455,12 @@ pub(crate) fn test_sync_try_paths() -> Outcome {
     CV.notify_all();
     Outcome::Ok
 }
+
+/// `ipi_init::init` installed `SpinMutex::lock`'s spin poll
+/// (`sync_init::set_spin_poll`), so a spinning CPU still services IPIs.
+pub(crate) fn test_spin_poll_hook_installed() -> Outcome {
+    if !crate::sync_init::spin_poll_installed() {
+        return Outcome::Fail("spin poll hook unset");
+    }
+    Outcome::Ok
+}

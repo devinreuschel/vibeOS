@@ -249,6 +249,10 @@ pub(crate) const TESTS: &[Test] = &[
     test("mutex_deadline", sync::ktest::test_mutex_deadline),
     test("sync_try_paths", sync::ktest::test_sync_try_paths),
     test(
+        "spin_poll_hook_installed",
+        sync::ktest::test_spin_poll_hook_installed,
+    ),
+    test(
         "sched_lock_timer_irq",
         sched::ktest::test_sched_lock_timer_irq,
     ),

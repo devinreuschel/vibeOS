@@ -341,6 +341,7 @@ pub fn call_cpu(cpu: u32, f: fn(*mut ()), arg: *mut (), wait: bool) {
 /// Install the shootdown hook. IDT overlays are already in place.
 pub fn init() {
     vibeos::paging::set_tlb_shootdown_hook(shootdown_va);
+    crate::sync_init::set_spin_poll(service_incoming);
 }
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]

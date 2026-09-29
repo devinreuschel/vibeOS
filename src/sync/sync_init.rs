@@ -8,8 +8,10 @@
 use core::cell::UnsafeCell;
 use core::mem::ManuallyDrop;
 use core::ops::{Deref, DerefMut};
+use core::ptr;
 #[cfg(feature = "kernel_tests")]
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 use vibeos::lock::{acquire_mask, can_acquire, release_mask};
 use vibeos::sync::SpinLock;
@@ -23,6 +25,36 @@ use crate::per_cpu_init;
 use crate::thread_init;
 use crate::time_init;
 use crate::x86::InterruptGuard;
+
+/// What `SpinMutex::lock` runs on each failed try: the IPI inbox's
+/// `service_incoming`, which the IPI module's `init` sets before the first
+/// AP starts (DESIGN §1.2, SMP.md §7.9). Unset, the spin only spins.
+static SPIN_POLL: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+
+/// Install the spin-poll hook.
+pub fn set_spin_poll(f: fn()) {
+    // Release: pairs with the Acquire load in `spin_poll`.
+    SPIN_POLL.store(f as *mut (), Ordering::Release);
+}
+
+/// Whether the spin-poll hook is set.
+#[cfg(feature = "kernel_tests")]
+pub fn spin_poll_installed() -> bool {
+    !SPIN_POLL.load(Ordering::Acquire).is_null()
+}
+
+#[inline]
+fn spin_poll() {
+    // Acquire: pairs with the Release store in `set_spin_poll`.
+    let p = SPIN_POLL.load(Ordering::Acquire);
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: invariant: a non-null `SPIN_POLL` holds a `fn()`; established
+    // by `sync_init::set_spin_poll`, its only store.
+    let f = unsafe { core::mem::transmute::<*mut (), fn()>(p) };
+    f();
+}
 
 pub struct SpinMutex<T> {
     lock: SpinLock,
@@ -60,7 +92,7 @@ impl<T> SpinMutex<T> {
         while !self.lock.try_acquire(owner) {
             #[cfg(feature = "kernel_tests")]
             record_spin(self.rank);
-            crate::ipi_init::service_incoming();
+            spin_poll();
             core::hint::spin_loop();
         }
         SpinMutexGuard {
