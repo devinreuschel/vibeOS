@@ -16,14 +16,15 @@ use vibeos::apic::{
     ioapic_pin, lvt_timer_periodic, poll_delivery_pending, redir_high, redir_is_masked, redir_low,
     redir_set_mask, svr_value, tsc_deadline_arm_plan, tsc_deadline_value, write_redir,
 };
+use vibeos::lock::RANK_DEVICE;
 use vibeos::marker;
 use vibeos::time::{FS_PER_MS, PIT_CALIB_MS, hpet_period_ok};
 use vibeos::vectors;
 
 use crate::acpi_init;
 use crate::arch;
-use crate::cell::IrqCell;
 use crate::paging_init;
+use crate::sync_init::SpinMutex;
 use crate::time_init;
 use crate::x86;
 
@@ -68,7 +69,13 @@ impl ApicState {
     }
 }
 
-static STATE: IrqCell<ApicState> = IrqCell::new(ApicState::empty());
+static STATE: SpinMutex<ApicState> = SpinMutex::with_rank(ApicState::empty(), RANK_DEVICE);
+
+/// Run `f` on the APIC state.
+fn with_state<R>(f: impl FnOnce(&mut ApicState) -> R) -> R {
+    let mut g = STATE.lock();
+    f(&mut g)
+}
 static TIMER_FIRES: AtomicU64 = AtomicU64::new(0);
 static LAPIC_VA: AtomicU64 = AtomicU64::new(0);
 static TSC_DEADLINE: AtomicBool = AtomicBool::new(false);
@@ -264,7 +271,7 @@ pub fn route_gsi(
     trigger: Trigger,
     polarity: Polarity,
 ) -> Result<(), IpiError> {
-    STATE.with(|st| {
+    with_state(|st| {
         if !st.ready {
             return Err(IpiError::NotReady);
         }
@@ -281,7 +288,7 @@ pub fn unmask_gsi(gsi: u32) {
 }
 
 fn set_gsi_mask(gsi: u32, masked: bool) {
-    STATE.with(|st| set_gsi_mask_inner(st, gsi, masked));
+    with_state(|st| set_gsi_mask_inner(st, gsi, masked));
 }
 
 fn set_gsi_mask_inner(st: &ApicState, gsi: u32, masked: bool) {
@@ -296,7 +303,7 @@ fn set_gsi_mask_inner(st: &ApicState, gsi: u32, masked: bool) {
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn gsi_masked(gsi: u32) -> Option<bool> {
-    STATE.with(|st| {
+    with_state(|st| {
         let (io, pin) = find_ioapic(st, gsi)?;
         let (lo, _) = apic::ioapic_redir_regs(pin);
         Some(redir_is_masked(io_read(io.va, lo)))
@@ -543,7 +550,7 @@ pub unsafe fn init() {
     let Some(va) = (unsafe { enable_lapic(madt) }) else {
         return;
     };
-    STATE.with(|st| {
+    with_state(|st| {
         st.lapic_va = va;
         enum_ioapics(madt, st);
         mask_all_pins(st);
@@ -558,7 +565,7 @@ pub unsafe fn init() {
 /// `sti` must already have run. TSC-deadline → periodic (HPET ÷16) → PIT.
 pub fn prove() {
     let want_td = cpuid_tsc_deadline();
-    let (ready, va) = STATE.with(|st| {
+    let (ready, va) = with_state(|st| {
         if !st.ready {
             st.mode = TimerMode::Pit;
             publish_isr(st);
@@ -575,13 +582,13 @@ pub fn prove() {
 
     if want_td && tsc_per_ms != 0 {
         TIMER_FIRES.store(0, Ordering::Relaxed);
-        STATE.with(|st| {
+        with_state(|st| {
             st.mode = TimerMode::TscDeadline;
             publish_isr(st);
         });
         arm_tsc_deadline(va, tsc_per_ms);
         if wait_fires(0, PROVE_MS) {
-            STATE.with(|st| commit_lapic(st, TimerMode::TscDeadline));
+            with_state(|st| commit_lapic(st, TimerMode::TscDeadline));
             return;
         }
         disarm_timer(va);
@@ -591,14 +598,14 @@ pub fn prove() {
     match calib_periodic(va) {
         Some(per_ms) => {
             TIMER_FIRES.store(0, Ordering::Relaxed);
-            STATE.with(|st| {
+            with_state(|st| {
                 st.ticks_per_ms = per_ms;
                 st.mode = TimerMode::Periodic;
                 publish_isr(st);
             });
             arm_periodic(va, per_ms);
             if wait_fires(0, PROVE_MS) {
-                STATE.with(|st| commit_lapic(st, TimerMode::Periodic));
+                with_state(|st| commit_lapic(st, TimerMode::Periodic));
                 return;
             }
             disarm_timer(va);
@@ -607,7 +614,7 @@ pub fn prove() {
         None => crate::marker!("vibeOS: time: periodic calib refused"),
     }
 
-    STATE.with(|st| {
+    with_state(|st| {
         st.mode = TimerMode::Pit;
         st.owns_tick = false;
         publish_isr(st);
@@ -632,12 +639,12 @@ fn commit_lapic(st: &mut ApicState, mode: TimerMode) {
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn timer_mode() -> TimerMode {
-    STATE.with(|st| st.mode)
+    with_state(|st| st.mode)
 }
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn owns_tick() -> bool {
-    STATE.with(|st| st.owns_tick)
+    with_state(|st| st.owns_tick)
 }
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
@@ -652,7 +659,7 @@ pub fn cpuid_has_tsc_deadline() -> bool {
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn is_ready() -> bool {
-    STATE.with(|st| st.ready)
+    with_state(|st| st.ready)
 }
 
 /// Enable this CPU's LAPIC (INIT resets it). Same MMIO VA as the BSP.
@@ -671,7 +678,7 @@ pub unsafe fn enable_ap() {
 
 /// Arm this CPU's timer in the mode the BSP proved. PIT: no local tick.
 pub fn arm_ap() {
-    STATE.with(|st| {
+    with_state(|st| {
         if st.lapic_va == 0 {
             return;
         }

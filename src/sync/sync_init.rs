@@ -258,7 +258,11 @@ fn lock_enter(rank: u8, nested: bool) -> u8 {
     if let Err(e) = r {
         rank_refused(e, held);
     }
-    slot.fetch_add(Held::count_unit(rank), Ordering::Relaxed);
+    let now = slot.fetch_add(Held::count_unit(rank), Ordering::Relaxed);
+    #[cfg(feature = "kernel_tests")]
+    testing::trace_record(rank, Held::from_raw(now).count(rank) + 1);
+    #[cfg(not(feature = "kernel_tests"))]
+    let _ = now;
     rank
 }
 
@@ -277,6 +281,8 @@ fn lock_leave(rank: u8) {
 /// Test access to the rank checker (kernel_tests only).
 #[cfg(feature = "kernel_tests")]
 pub mod testing {
+    use core::sync::atomic::{AtomicU16, AtomicUsize};
+
     use super::*;
 
     /// This CPU's held locks.
@@ -299,5 +305,75 @@ pub mod testing {
     /// Rank-checker refusals since boot.
     pub fn rank_failures() -> u64 {
         RANK_FAILURES.load(Ordering::Relaxed)
+    }
+
+    /// Entries one armed trace keeps; later acquisitions are dropped.
+    pub const TRACE_CAP: usize = 16;
+
+    /// One counted acquisition: its rank, this CPU's count of that rank
+    /// once it was taken, and the call site of `lock`, `try_lock` or
+    /// `lock_nested`.
+    #[derive(Clone, Copy)]
+    pub struct TraceEntry {
+        pub rank: u8,
+        pub count: u8,
+        pub at: &'static Location<'static>,
+    }
+
+    /// The CPU whose acquisitions are traced; `usize::MAX` when disarmed.
+    static TRACE_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
+    static TRACE_LEN: AtomicUsize = AtomicUsize::new(0);
+    /// `rank << 8 | count` of each entry.
+    static TRACE_RC: [AtomicU16; TRACE_CAP] = [const { AtomicU16::new(0) }; TRACE_CAP];
+    static TRACE_AT: [AtomicPtr<Location<'static>>; TRACE_CAP] =
+        [const { AtomicPtr::new(ptr::null_mut()) }; TRACE_CAP];
+
+    /// Trace this CPU's counted acquisitions until [`trace_take`]. Call with
+    /// IF off, so the thread stays on this CPU.
+    pub fn trace_arm() {
+        TRACE_LEN.store(0, Ordering::Relaxed);
+        TRACE_CPU.store(lock_cpu(), Ordering::Relaxed);
+    }
+
+    /// Disarm the trace and return what it recorded, in order.
+    pub fn trace_take() -> [Option<TraceEntry>; TRACE_CAP] {
+        TRACE_CPU.store(usize::MAX, Ordering::Relaxed);
+        let n = TRACE_LEN.load(Ordering::Relaxed).min(TRACE_CAP);
+        core::array::from_fn(|i| {
+            if i >= n {
+                return None;
+            }
+            let rc = TRACE_RC[i].load(Ordering::Relaxed);
+            let at = TRACE_AT[i].load(Ordering::Relaxed);
+            // SAFETY: invariant: a non-null `TRACE_AT` slot holds a
+            // `&'static Location` cast to a pointer, and nothing writes
+            // through it; established by `testing::trace_record`, its only
+            // store.
+            let at: &'static Location<'static> = unsafe { at.as_ref() }?;
+            Some(TraceEntry {
+                rank: (rc >> 8) as u8,
+                count: rc as u8,
+                at,
+            })
+        })
+    }
+
+    /// Record one acquisition if this CPU is armed. Relaxed throughout:
+    /// only the armed CPU writes, and it reads the result itself.
+    #[track_caller]
+    pub(super) fn trace_record(rank: u8, count: u8) {
+        if TRACE_CPU.load(Ordering::Relaxed) != lock_cpu() {
+            return;
+        }
+        let i = TRACE_LEN.load(Ordering::Relaxed);
+        if i >= TRACE_CAP {
+            return;
+        }
+        TRACE_RC[i].store(u16::from(rank) << 8 | u16::from(count), Ordering::Relaxed);
+        TRACE_AT[i].store(
+            core::ptr::from_ref(Location::caller()).cast_mut(),
+            Ordering::Relaxed,
+        );
+        TRACE_LEN.store(i + 1, Ordering::Relaxed);
     }
 }

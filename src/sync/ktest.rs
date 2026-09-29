@@ -8,6 +8,7 @@ use vibeos::time::Instant;
 
 use crate::arch;
 use crate::ktest::Outcome;
+use crate::kva_init;
 use crate::per_cpu_init;
 use crate::sync::blocking_init::{BlockingMutex, Channel, Condvar, RwLock, Semaphore};
 use crate::sync_init::{self, SpinMutex};
@@ -209,6 +210,154 @@ pub(crate) fn test_rank_lock_nested_keeps_outer() -> Outcome {
     }
     if RANK_B.try_lock().is_none() {
         return Outcome::Fail("RANK_B left held");
+    }
+    Outcome::Ok
+}
+
+fn noop_work(_: usize) {}
+
+/// Each cross-CPU cell box 1304 converted, the call that takes it as
+/// production does, and what the acquisition trace must hold for it.
+struct CellCase {
+    name: &'static str,
+    take: fn(),
+    file: &'static str,
+    rank: u8,
+    count: u8,
+}
+
+const CELL_CASES: &[CellCase] = &[
+    CellCase {
+        name: "kva_init::KVA",
+        take: || {
+            let _ = kva_init::stats();
+        },
+        file: "src/mm/kva_init.rs",
+        rank: RANK_PT,
+        count: 2,
+    },
+    CellCase {
+        name: "proc_init::TABLE",
+        take: || {
+            let _ = crate::proc_init::dispatch(vibeos::syscall::SYS_GETPPID, [0; 6]);
+        },
+        file: "src/proc/proc_init/mod.rs",
+        rank: RANK_SCHED,
+        count: 2,
+    },
+    CellCase {
+        name: "work_init::ST",
+        take: || {
+            if !crate::work_init::enqueue(noop_work, 0) {
+                crate::klog!(vibeos::log::Level::Warn, "ktest: work ring full");
+            }
+        },
+        file: "src/sched/work_init.rs",
+        rank: RANK_SCHED,
+        count: 2,
+    },
+    CellCase {
+        name: "irq_init::IRQ",
+        take: || {
+            let _ = crate::irq_init::cpu_of(0x40);
+        },
+        file: "src/irq/irq_init.rs",
+        rank: RANK_DEVICE,
+        count: 1,
+    },
+    CellCase {
+        name: "apic_init::STATE",
+        take: || {
+            let _ = crate::apic_init::timer_mode();
+        },
+        file: "src/arch/x86_64/apic_init.rs",
+        rank: RANK_DEVICE,
+        count: 1,
+    },
+    CellCase {
+        name: "kbd_init::KBD",
+        take: || {
+            if let Some(k) = crate::kbd_init::pop() {
+                crate::kbd_init::push_for_test(k);
+            }
+        },
+        file: "src/console/kbd_init.rs",
+        rank: RANK_DEVICE,
+        count: 1,
+    },
+    CellCase {
+        name: "pci_init::ECAM",
+        take: || {
+            let bdf = vibeos::dev::pci::Bdf {
+                segment: 0,
+                bus: 0,
+                device: 0,
+                function: 0,
+            };
+            let _ = crate::pci_init::cfg_read32(bdf, 0);
+        },
+        file: "src/dev/pci_init.rs",
+        rank: RANK_DEVICE,
+        count: 1,
+    },
+    CellCase {
+        name: "file_init::CWD",
+        take: || {
+            let _ = crate::file_init::cwd_copy();
+        },
+        file: "src/fs/file_init.rs",
+        rank: RANK_DEVICE,
+        count: 1,
+    },
+    CellCase {
+        name: "fat_init::INITRD",
+        take: crate::fs::ktest::probe_initrd,
+        file: "src/fs/fat_init.rs",
+        rank: RANK_DEVICE,
+        count: 1,
+    },
+    CellCase {
+        name: "vibefs_init::IMAGE",
+        take: crate::fs::ktest::probe_image,
+        file: "src/fs/vibefs_init.rs",
+        rank: RANK_DEVICE,
+        count: 1,
+    },
+];
+
+/// Every cross-CPU cell box 1304 converted is a ranked `SpinMutex`: taking
+/// it through its production path records an acquisition in its file, at
+/// its rank, nested where it pairs with the lock its callers hold.
+pub(crate) fn test_cross_cpu_cells_ranked() -> Outcome {
+    for c in CELL_CASES {
+        let trace = {
+            let _irq = x86::InterruptGuard::enter();
+            sync_init::testing::trace_arm();
+            (c.take)();
+            sync_init::testing::trace_take()
+        };
+        let found = trace
+            .iter()
+            .flatten()
+            .any(|e| e.at.file() == c.file && e.rank == c.rank && e.count == c.count);
+        if !found {
+            let mut seen = 0usize;
+            for e in trace.iter().flatten() {
+                if e.at.file() == c.file {
+                    return crate::fail_fmt!(
+                        "{}: rank {} count {} at line {}, want rank {} count {}",
+                        c.name,
+                        e.rank,
+                        e.count,
+                        e.at.line(),
+                        c.rank,
+                        c.count
+                    );
+                }
+                seen += 1;
+            }
+            return crate::fail_fmt!("{}: no ranked acquisition ({} others)", c.name, seen);
+        }
     }
     Outcome::Ok
 }

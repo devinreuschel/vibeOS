@@ -1479,3 +1479,13 @@ fn two_descriptors(a: &FileRef, b: &FileRef) -> StepS12<()> {
     }
     Ok(())
 }
+
+/// Take `fat_init::INITRD` as a volume read does (`cross_cpu_cells_ranked`).
+pub(crate) fn probe_initrd() {
+    super::fat_init::with_initrd(|_| ());
+}
+
+/// Take `vibefs_init::IMAGE` as a volume read does (`cross_cpu_cells_ranked`).
+pub(crate) fn probe_image() {
+    super::vibefs_init::with_image(|_| ());
+}

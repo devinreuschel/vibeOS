@@ -27,8 +27,8 @@ Planned (ROADMAP §13.3): a seventh rank, SOCK, ahead of all six, for socket sta
 ([§6.5](TIME.md#65-timers-and-timeouts)), so code under any other spinlock may arm, re-arm, or cancel a
 timer.
 
-The six ranks order spinlocks: `SpinMutex`, and the cross-CPU `IrqCell`s that ROADMAP §10.3 turns
-into ranked `SpinMutex`es. Sleeping locks form a tier outside all six: `BlockingMutex`, `RwLock`,
+The six ranks order spinlocks: every `SpinMutex`, and so every lock more than one CPU takes but the
+log ring's (§2.3). Sleeping locks form a tier outside all six: `BlockingMutex`, `RwLock`,
 `Semaphore`, and waiting for a page or buffer to finish I/O. A thread takes a sleeping lock only with
 IF=1 and no spinlock held ([§2.9](#29-preemption-and-interrupt-state) rule 4), so every sleeping lock
 ranks before every spin rank, and no spinlock is ever held across a sleep. Within the sleeping tier,
@@ -86,7 +86,7 @@ only in address order, under a ROADMAP §13.12 subclass, as a pipe-to-pipe `spli
 input queue, its line and echo state, and the termios settings its input side reads are under a
 spinlock, because the line discipline runs in the input device's bottom half
 ([§5.4](INTERRUPTS.md#54-irq-registration)), which takes no sleeping-tier lock. Session, process-group, and
-process-table state is under spinlocks (ROADMAP §10.3 makes the process table a ranked `SpinMutex`),
+process-table state is under spinlocks (the process table is a ranked `SpinMutex`, above),
 which a holder of any level-1 lock may take.
 
 A buffered `write` whose user buffer maps the very page it writes would fault on that page while it
@@ -149,8 +149,17 @@ on every call, whether or not the heap grows. Growth takes PT and then BUDDY aft
 ([§4.4](MEMORY.md#44-kernel-heap) rule 1).
 
 Filesystem spinlocks take `RANK_DEVICE`: today the VFS lock, which also guards the open-file table,
-the ramfs and kernfs store locks, and each backend's mount and slot-allocation locks. The rank order therefore forbids heap allocation under them and
-allows logging. The VFS tables are static, so bring-up allocates nothing under them. Filesystems get
+the ramfs and kernfs store locks, each backend's mount and slot-allocation locks, the working
+directory (`file_init::CWD`), and the initrd and vibefs images (`fat_init::INITRD`,
+`vibefs_init::IMAGE`). The rank order therefore forbids heap allocation under them and
+allows logging.
+
+The former cross-CPU `IrqCell`s are ranked `SpinMutex`es: the process table (`proc_init::TABLE`) and
+the work queues (`work_init::ST`) at SCHED, each taken through `lock_nested` under the scheduler lock,
+which serializes their wait queues; the KVA free-list (`kva_init::KVA`) at PT, through `lock_nested`
+under the page-table lock; and the IRQ vector pool and routes (`irq_init::IRQ`), the APIC state
+(`apic_init::STATE`), the keyboard ring (`kbd_init::KBD`), and the ECAM window (`pci_init::ECAM`) at
+DEVICE. The VFS tables are static, so bring-up allocates nothing under them. Filesystems get
 no spin rank of their own; adding one changes this list and `crates/core/src/sync/lock.rs` in the same commit.
 
 After ROADMAP §10.4's A3 work, the VFS lock is a `BlockingMutex` at level 1's mount-table position.
@@ -282,7 +291,7 @@ The lock, the serviced spins, and the two cells:
 |------|-----|
 | `SpinMutex` | Shared across CPUs. IRQ-aware. Ranked (§2.1): `lock` refuses a lock whose rank, or a later one, this CPU already holds, and `lock_nested` takes a second lock of a held rank (below). Its spin is a serviced spin. |
 | Serviced spin | `SpinMutex::lock`, `ipi_init::wait_acks`, and the call-function slot wait each call `ipi_init::service_incoming` on every iteration, so a CPU that waits on another with IF=0 still acknowledges shootdowns and runs call-function work ([§2.9](#29-preemption-and-interrupt-state) rule 2). That work runs inside whatever the spinning CPU holds, so, like an NMI, `#MC`, or CPL-0 `#DB` handler, it takes no lock ([§2.2](#22-interrupt-handler-rules)'s last row). Planned (ROADMAP §10.7, F135): `service_incoming` first reads this CPU's stop request word, and STOP runs §2.5's stop routine before any slot is served, so a serviced spin stops for a panic with no interrupt, on either architecture and GIC version. On aarch64 a serviced spin never executes WFE and waits with `core::hint::spin_loop`: a masked interrupt is a wake-up event for WFI but not for WFE (Arm ARM DDI 0487, the WFE and WFI wake-up events), so a WFE spinner with IRQs masked neither takes an SGI nor wakes to poll. A line that puts WFE in a serviced spin also makes every publisher of serviced work, the stop word included, issue `sev` after its Release store, and says so. |
-| `IrqCell` | IRQ-off exclusive access: `with` takes IRQs off, panics on same-CPU re-entry, and spins while another CPU holds it. Used for CPU-local and boot-only state and as an unranked cross-CPU lock (among them `proc_init::TABLE`, `kva_init::KVA`, `work_init::ST`, `irq_init::IRQ`, `file_init::CWD`, and `log_init::LOG`). It is `Send` and `Sync` only when `T: Send`, as `Mutex` is; const assertions in `src/cell.rs` fail the build otherwise. Its spin does not service IPIs, so a cross-CPU cell held across a wait on another CPU can stall a shootdown. Planned (ROADMAP §10.3, F108): every cross-CPU `IrqCell` but the log ring becomes a ranked `SpinMutex`; the log ring's holders never wait on another CPU (§2.5), and ROADMAP §19.5 replaces it with §2.5's lockless ring. |
+| `IrqCell` | IRQ-off exclusive access: `with` takes IRQs off, panics on same-CPU re-entry, and spins while another CPU holds it. Used only for CPU-local and boot-only state and for the log ring, the one cross-CPU exception: `log_init::LOG` keeps its unranked TAS because the panic path reads it without its lock and its holders never wait on another CPU (§2.5), and ROADMAP §19.5 replaces it with §2.5's lockless ring. The others: `log_init::STAGE`, one slot per CPU; `smp_init::STARTING` and `smp_init::LIVE_TABLES`, AP bring-up before `smp: done` (the `LIVE_TABLES` push allocates under the cell, which no rank allows); `arch::idt::IDT`, written by `idt::init` on the boot thread, whose address the APs load; `shell_init::REG`, CPU 0 only (the boot thread registers, and the kernel shell and the in-guest registry run pinned to CPU 0); and `arch::catch::LAST`, `kernel_tests` only, taken by the CPU that armed the one catch. It is `Send` and `Sync` only when `T: Send`, as `Mutex` is; const assertions in `src/cell.rs` fail the build otherwise. |
 | `BootCell` | Write once before `smp: done`, then shared `&T`. State written after publication sits behind its own `UnsafeCell` inside `T`. Not yet enforced: every switch writes the BSP's TSS through a pointer cast from `&Bsp` (ROADMAP §10.3, F089). The set-once check is a `debug_assert!` (ROADMAP §10.2, F137). It is `Sync` only when `T: Send + Sync` and `Send` only when `T: Send`, as `OnceLock` is, and const assertions in `src/cell.rs` fail the build otherwise; `PerCpu`, whose raw pointers make it neither, carries its own `unsafe impl` naming invariants I120 and I21 (§7.5). |
 
 Two locks of one rank nest only through `lock_nested`, in a pair order the call site's comment
@@ -641,7 +650,7 @@ that review cites means the review's text.
 
 | # | Invariant | Established at | Status | Holds today |
 |---|-----------|----------------|--------|-------------|
-| I1 | Lock rank HEAP < PT < BUDDY < SCHED < DEVICE < SERIAL (§2.1); a second lock of a held rank only through `lock_nested` (§2.3) | `lock.rs`, `sync_init::lock_enter` | enforced at runtime, per CPU | Partly: a nested lock of the same rank passes the check and its release clears the rank bit the outer lock still holds, `IrqCell` has no rank, and a lock held across a switch goes unseen (ROADMAP §10.3, §13.12, F108) |
+| I1 | Lock rank HEAP < PT < BUDDY < SCHED < DEVICE < SERIAL (§2.1); a second lock of a held rank only through `lock_nested` (§2.3) | `lock.rs`, `sync_init::lock_enter` | enforced at runtime, per CPU | Partly: a nested lock of the same rank passes the check and its release clears the rank bit the outer lock still holds, and a lock held across a switch goes unseen (ROADMAP §10.3, §13.12, F108) |
 | I2 | Hard-IRQ context never blocks or allocates (§2.2) | convention | documented | Yes, unchecked: only `irq_init::dispatch` sets `IN_ISR`, and no blocking primitive asserts it (ROADMAP §10.3, F110) |
 | I3 | IF=0 through every return-to-user sequence (§5.10 rule 4) | FMASK (§7.2) | documented | No: the syscall exit has no `cli` and `console_init::wait_key` returns with IF=1 (F001); `syscall_init::first_return` runs with IF=1 (F006) (ROADMAP §10.6) |
 | I4 | Kernel code outside the §5.10 entry and exit sequences runs with `GS_BASE` = this CPU's `PerCpu` (§5.10) | `arch::gs`, `per_cpu_init` | documented | No: the IF=1 window in `syscall_init::first_return` (F006) and a fault on the return-to-user `iretq` (F007) run on the user base (ROADMAP §10.6) |

@@ -9,14 +9,15 @@ use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use vibeos::dev::Device;
+use vibeos::lock::RANK_DEVICE;
 use vibeos::paging::{PAGE_SIZE_4K, PhysAddr};
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CfgIo, FuncInfo, MAX_SCAN, bar_map_allowed};
 
 use crate::acpi_init;
-use crate::cell::IrqCell;
 use crate::fb_init;
 use crate::paging_init;
 use crate::serial::Serial;
+use crate::sync_init::SpinMutex;
 use crate::x86::{self, InterruptGuard};
 
 const CFG_ADDR: u16 = 0xCF8;
@@ -46,7 +47,13 @@ impl Ecam {
     }
 }
 
-static ECAM: IrqCell<Ecam> = IrqCell::new(Ecam::empty());
+static ECAM: SpinMutex<Ecam> = SpinMutex::with_rank(Ecam::empty(), RANK_DEVICE);
+
+/// Run `f` on the ECAM window.
+fn with_ecam<R>(f: impl FnOnce(&mut Ecam) -> R) -> R {
+    let mut g = ECAM.lock();
+    f(&mut g)
+}
 static CFG_LOCK: AtomicBool = AtomicBool::new(false);
 static LIVE: AtomicBool = AtomicBool::new(false);
 
@@ -103,11 +110,11 @@ fn map_mmio(phys: u64, len: u64, keep_wb: bool) -> Option<u64> {
 }
 
 fn ecam_covers(bus: u8) -> bool {
-    ECAM.with(|e| e.base != 0 && bus >= e.start && bus <= e.end)
+    with_ecam(|e| e.base != 0 && bus >= e.start && bus <= e.end)
 }
 
 fn ecam_phys_of(bdf: Bdf, offset: u16) -> Option<u64> {
-    ECAM.with(|e| {
+    with_ecam(|e| {
         pci::ecam_phys(
             e.base,
             e.start,
@@ -125,7 +132,7 @@ fn ecam_phys_of(bdf: Bdf, offset: u16) -> Option<u64> {
 /// the table is full (a cache-only lookup would vanish later buses).
 fn ecam_va(phys: u64) -> Option<u64> {
     let page = phys & !(PAGE_SIZE_4K - 1);
-    if let Some(va) = ECAM.with(|e| {
+    if let Some(va) = with_ecam(|e| {
         let mut i = 0usize;
         while i < e.n {
             if e.phys[i] == page {
@@ -138,7 +145,7 @@ fn ecam_va(phys: u64) -> Option<u64> {
         return Some(va);
     }
     let va = map_mmio(page, PAGE_SIZE_4K, false)?;
-    ECAM.with(|e| {
+    with_ecam(|e| {
         let slot = pci::ecam_cache_slot(e.n, ECAM_CACHE);
         if e.n < ECAM_CACHE {
             e.n += 1;
@@ -222,7 +229,7 @@ fn map_func_bars(info: &FuncInfo, dev: &mut Device) {
 /// `pci: N devices`.
 pub fn init(publish: fn(Device) -> bool) {
     if let Some(m) = acpi_init::info().and_then(|i| i.mcfg) {
-        ECAM.with(|e| {
+        with_ecam(|e| {
             e.base = m.ecam_base;
             e.start = m.start_bus;
             e.end = m.end_bus;

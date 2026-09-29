@@ -10,7 +10,7 @@ pub(super) fn finish_exit(wait_status: u32, _from_fault: bool) -> ! {
         thread_init::exit_current();
     }
     let (old, ppid, fds, tid) = thread_init::with_sched(|s| {
-        TABLE.with(|t| {
+        table_locked(|t| {
             if reparent_children(t, pid) {
                 s.wake_all(&mut t.procs[INIT_PID as usize].wait_wq);
             }
@@ -99,7 +99,7 @@ pub(super) fn sys_wait4(pid: u64, status: u64, options: u64) -> i64 {
     let nohang = options & WNOHANG != 0;
     loop {
         let r = thread_init::with_sched(|s| {
-            TABLE.with(|t| {
+            table_locked(|t| {
                 if let Some((cpid, st, ztid)) = find_zombie(t, self_pid, want) {
                     reap_zombie(t, cpid);
                     let _ = ztid;
@@ -188,7 +188,7 @@ pub(super) fn sys_kill(pid: u64, sig: u64) -> i64 {
     let target = pid as u32;
     let self_pid = current_pid();
     let r = thread_init::with_sched(|s| {
-        TABLE.with(|t| {
+        table_locked(|t| {
             let Some(p) = t.get_mut(target) else {
                 return Err(ESRCH);
             };

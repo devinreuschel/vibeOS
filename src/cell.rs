@@ -2,8 +2,8 @@
 //!
 //! Three cells in the kernel:
 //! - [`crate::sync_init::SpinMutex`]: shared across CPUs
-//! - [`IrqCell`]: IRQ-off exclusive `&mut T` for CPU-local and boot-only state, and as an
-//!   unranked cross-CPU lock (DESIGN §2.3); same-CPU re-entry panics
+//! - [`IrqCell`]: IRQ-off exclusive `&mut T` for CPU-local and boot-only state, and the log
+//!   ring's unranked lock (DESIGN §2.3); same-CPU re-entry panics
 //! - [`BootCell`]: write once before `smp: done`, then shared `&T`
 //!
 //! Both carry std's bounds, as `OnceLock` and `Mutex` do: `BootCell<T>` is `Sync` only when
