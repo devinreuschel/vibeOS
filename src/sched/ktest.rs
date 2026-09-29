@@ -1117,11 +1117,11 @@ fn slot_spawner() {
                 }
                 n += 1;
             }
-            Err(SpawnError::NoSlot) => thread_init::yield_now(),
-            Err(SpawnError::NoMemory) => {
-                SPAWN_BAD.store(true, Ordering::Release);
-                break;
-            }
+            // A free slot comes with CPU 0's next exit, and KVA for a stack
+            // with its worker's next free: `Kva::alloc` refuses once
+            // `MAX_KVA_RANGES - 2` ranges are live, and the burst parks
+            // dead stacks on CPU 0's dead list faster than it frees them.
+            Err(SpawnError::NoSlot | SpawnError::NoMemory) => thread_init::yield_now(),
         }
         if time_init::now_ns().saturating_sub(t0) > 6 * WAIT_NS {
             SPAWN_BAD.store(true, Ordering::Release);
