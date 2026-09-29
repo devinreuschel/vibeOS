@@ -121,6 +121,7 @@ fails when an `OPTIONS` row has no row here with its class.
 | Option | Defined by | Class | Meaning | Box |
 |--------|------------|-------|---------|-----|
 | `vibeos.strace` | vibeOS | unstable | `vibeos.strace=1` (or bare, `y`, `Y`, `on`) prints one `user: syscall` line per syscall that returns ([SYSCALL.md §6](SYSCALL.md#6-tracing-and-counters)); anything else leaves it off | ROADMAP §10.7 |
+| `vibeos.crash_plant` | vibeOS | internal | `vibefs_crash` builds only, which the crash test boots; other builds drop it as an unrecognized dotted word. `vibeos.crash_plant=leak` leaves each commit's first directory block out of the metadata table, so the next commit leaks it; `vibeos.crash_plant=early_super` writes each commit's superblock before the Flush ahead of it; any other value prints `vibeOS: vibefs: bad crash_plant` and halts ([VIBEFS.md §12](VIBEFS.md#12-crash-consistency-test)) | ROADMAP §10.2 |
 
 Planned (ROADMAP §18.7, §22.2): under Secure Boot the kernel command line is the `cmdline:` of the
 Limine configuration enrolled into the signed Limine binary, which sets `editor_enabled: no`, so

@@ -697,6 +697,25 @@ fn register_mnt(vol: u8, p: &[u8]) -> Result<(), FsError> {
     Err(FsError::NoSpace)
 }
 
+/// Plant commit defect `p` in the volume mounted at `at`, found by its
+/// route as `unregister_mnt` finds it at umount (test-only: the
+/// `vibefs_crash` build, docs/VIBEFS.md §12).
+#[cfg(feature = "vibefs_crash")]
+pub(crate) fn set_plant(at: &[u8], p: vibefs::Plant) -> Result<(), FsError> {
+    let vol = {
+        let g = MNTS.lock();
+        g.iter()
+            .find(|m| m.used && m.path.get(..m.len as usize) == Some(at))
+            .map(|m| m.vol)
+    };
+    let vol = vol.ok_or(FsError::NotFound)?;
+    with_slot(vol, |v, _| {
+        v.set_plant(p);
+        Ok(())
+    })
+    .map_err(Error::to_fs)
+}
+
 fn unregister_mnt(p: &[u8]) -> Option<u8> {
     let mut g = MNTS.lock();
     let mut i = 0usize;
