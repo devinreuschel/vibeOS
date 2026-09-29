@@ -97,7 +97,11 @@ The mechanism:
   both ports' encodings. Its hardware half lives in the kernel crate under `arch/<name>/`, the
   assembly and the system-register and port access, and implements the traits on one zero-sized
   type: `arch::x86_64::Arch` or `arch::aarch64::Arch`. `vibeos-core` carries a third implementation,
-  `arch::stub::Arch`, which the host tests use.
+  `arch::stub::Arch` in `arch/stub.rs`, which the host tests use. The stub is compiled in host builds
+  only (`cfg(any(test, feature = "std"))`); its state is per host thread, so parallel tests never
+  share it, and settable (the counter and its step, the frequency, the CPU id, IPI refusal, a user-copy
+  fault address); and it records each seam call in a bounded event log, the first 256 events and a
+  count of the rest, which a test reads back.
 - Portable code that needs the seam takes the port as one type parameter of the type that uses it,
   never as `dyn`, so every seam call is resolved at compile time and inlines. A leaf type bounds the
   parameter by the traits it calls (`Mapper<A: PageTable>`, `SplitQueue<A: Barriers>`), so its

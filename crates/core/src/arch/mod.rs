@@ -192,3 +192,6 @@ pub trait Port:
     + ContextSwitch
 {
 }
+
+#[cfg(any(test, feature = "std"))]
+pub mod stub;
