@@ -53,7 +53,6 @@ INVARIANTS = "docs/INVARIANTS.md"
 # Files whose SAFETY comments fail at this tip, skipped until their sweep
 # (ROADMAP §10.1, C-LINTS) fixes them; `--failing` regenerates the list.
 PENDING: tuple[str, ...] = (
-    "src/proc/addr_space_init.rs",
 )
 
 # (path, regex of a false wording) for statements corrected against the code
