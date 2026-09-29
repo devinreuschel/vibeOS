@@ -6,22 +6,13 @@ use vibeos::proc::{SIGILL, SIGKILL, SIGTRAP, wait_signaled};
 use vibeos::syscall::SYS_KILL;
 use vibeos::vectors;
 
+use super::Outcome;
 use super::user::{self, DEFAULT, Image, Layout, user_code};
-use super::{Outcome, Test, test};
 use crate::apic_init;
 use crate::arch::idt::testing as idt_testing;
 use crate::proc_init::{self, testing as proc_testing};
 use crate::thread_init;
 use crate::time_init;
-
-pub(super) const TESTS: &[Test] = &[
-    test("syscall_rcx_canary", test_syscall_rcx_canary).deadline(30_000),
-    test("fork_child_gprs", test_fork_child_gprs).deadline(30_000),
-    test("preempt_gpr_canaries", test_preempt_gpr_canaries).deadline(60_000),
-    test("user_single_step", test_user_single_step).deadline(30_000),
-    test("user_int1", test_user_int1).deadline(30_000),
-    test("user_tf_repin", test_user_tf_repin).deadline(60_000),
-];
 
 /// What `arm_rcx_canary` puts in the frame's `rcx`: not the return RIP.
 const RCX_CANARY: u64 = 0x0C0F_FEE0_DEAD_BEEF;
@@ -49,7 +40,7 @@ const _: () = assert!(proc_testing::HOOK_MAGIC == 0x5EED_CA11_0000_5A21);
 /// A hook sets a `getpid`'s saved `rcx` to a canary that is not its
 /// return RIP; the exit then leaves through `iretq`, and the program finds
 /// the canary in RCX.
-fn test_syscall_rcx_canary() -> Outcome {
+pub(super) fn test_syscall_rcx_canary() -> Outcome {
     proc_testing::arm_rcx_canary(RCX_CANARY);
     let st = user::run(&Image::Code(RCX_CANARY_PROG, DEFAULT), &["rcx_canary"]);
     proc_testing::disarm();
@@ -191,7 +182,7 @@ user_code!(
 /// A forked child's first return to ring 3 is the syscall exit over the
 /// parent's frame with `rax` = 0: the 12 GPRs a syscall preserves reach
 /// the child intact, and the parent keeps its own.
-fn test_fork_child_gprs() -> Outcome {
+pub(super) fn test_fork_child_gprs() -> Outcome {
     let img = Image::Code(
         FORK_GPRS,
         Layout {
@@ -336,7 +327,7 @@ fn canary_sender() {
 /// A ring-3 loop holding canaries in all 15 GPRs takes 1,000 reschedule
 /// IPIs on CPU 0, and at each one the hook finds the canaries in the user
 /// frame at the top of the preempted thread's kernel stack.
-fn test_preempt_gpr_canaries() -> Outcome {
+pub(super) fn test_preempt_gpr_canaries() -> Outcome {
     let Some(sender_cpu) = super::second_cpu() else {
         return Outcome::Skip("needs 2 CPUs");
     };
@@ -435,14 +426,14 @@ fn expect_sigtrap(code: &'static [u8], name: &str) -> Outcome {
 }
 
 /// A user `popf` that sets TF ends in `SIGTRAP`, not a halt.
-fn test_user_single_step() -> Outcome {
+pub(super) fn test_user_single_step() -> Outcome {
     expect_sigtrap(SINGLE_STEP, "single_step")
 }
 
 /// A user `int1` ends in `SIGTRAP`, not a halt. TCG (QEMU 8.2) does not
 /// deliver `int1` as `#DB`, and the child dies of `#UD`'s `SIGILL`
 /// instead, so off KVM either signal passes, with the kernel up.
-fn test_user_int1() -> Outcome {
+pub(super) fn test_user_int1() -> Outcome {
     if super::p10_s16::on_kvm() {
         return expect_sigtrap(INT1, "int1");
     }
@@ -508,7 +499,7 @@ fn repin_yielder() {
 /// A CPL-3 `#DB` body that yields moves to another CPU; the program then
 /// runs there with `PerCpu` matching the CPU at each of 100 `getpid`s, and
 /// exits 0: the moved frame returned through the common exit.
-fn test_user_tf_repin() -> Outcome {
+pub(super) fn test_user_tf_repin() -> Outcome {
     if super::second_cpu().is_none() {
         return Outcome::Skip("needs 2 CPUs");
     }

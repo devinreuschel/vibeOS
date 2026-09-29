@@ -6,22 +6,14 @@ use vibeos::pmm::{Frames, MAX_ORDER};
 use vibeos::proc::wait_exited;
 use vibeos::thread::{MAX_THREADS, ThreadId, ThreadState};
 
+use super::Outcome;
 use super::user::{self, DEFAULT, Image, user_code};
-use super::{Outcome, Test, test};
 use crate::ipi_init;
 use crate::per_cpu_init;
 use crate::pmm_init;
 use crate::thread_init::{self, SpawnError};
 use crate::time_init;
 use crate::x86;
-
-pub(super) const TESTS: &[Test] = &[
-    test("spawn_stack_oom", spawn_stack_oom).deadline(10_000),
-    test("fork_oom", fork_oom).deadline(10_000),
-    test("lifetime_stack_reclaim", lifetime_stack_reclaim).deadline(120_000),
-    test("exit_burst", exit_burst).deadline(60_000),
-    test("lifetime_dead_slot_on_cpu", lifetime_dead_slot_on_cpu).deadline(180_000),
-];
 
 /// The free-frame count at a quiescent point (ROADMAP §10.2, F074): the
 /// shared warm-up has run (once per boot, from whichever caller comes
@@ -91,7 +83,7 @@ fn release_buddy(held: &mut [Option<Frames>; OOM_HOLD]) {
 /// With fewer than one kernel stack's frames free, a kernel-thread spawn
 /// returns `SpawnError::NoMemory` and the kernel stays up (ROADMAP §10.10,
 /// F010).
-fn spawn_stack_oom() -> Outcome {
+pub(super) fn spawn_stack_oom() -> Outcome {
     // A cached stack would let the spawn succeed with the buddy empty.
     thread_init::testing::drain_local_stack_cache();
     let base = quiescent_free_frames();
@@ -161,7 +153,7 @@ fn fork_armed() -> Result<(), Outcome> {
 
 /// A `fork` whose kernel-stack allocation fails, after `clone_full` has
 /// run, returns `ENOMEM` and frees what it took (ROADMAP §10.10, F010).
-fn fork_oom() -> Outcome {
+pub(super) fn fork_oom() -> Outcome {
     // The first run warms what a process start maps for good.
     if let Err(o) = fork_armed() {
         return o;
@@ -264,7 +256,7 @@ fn exit_batch() -> Result<(), Outcome> {
 /// exits on CPU 0, the first 100 held open between the store that makes
 /// the stack reclaimable and the switch, while CPUs 1 to 3 run switch
 /// tails; no switch tail sends a shootdown and the frames come back.
-fn lifetime_stack_reclaim() -> Outcome {
+pub(super) fn lifetime_stack_reclaim() -> Outcome {
     if !tail_cpus_online() {
         return Outcome::Skip("needs 4 cpus");
     }
@@ -369,7 +361,7 @@ fn burst_spawner() {
 /// Every switch tail empties the dead-stack slot (ROADMAP §10.10, F010):
 /// 16 processes on one CPU exit back to back, each switching to a sibling
 /// resumed from timer preemption, and the kernel stays up.
-fn exit_burst() -> Outcome {
+pub(super) fn exit_burst() -> Outcome {
     if !per_cpu_init::is_online(BURST_CPU) {
         return Outcome::Skip("needs 2 cpus");
     }
@@ -491,7 +483,7 @@ fn release_fillers() -> bool {
 /// Dead slots are CPU 0's exits, held open for 10 ms on the first 100;
 /// spawners on CPUs 1 to 3 respawn into them, and every child runs its
 /// entry exactly once.
-fn lifetime_dead_slot_on_cpu() -> Outcome {
+pub(super) fn lifetime_dead_slot_on_cpu() -> Outcome {
     if !tail_cpus_online() {
         return Outcome::Skip("needs 4 cpus");
     }

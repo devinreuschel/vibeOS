@@ -9,33 +9,14 @@ use vibeos::fs::{
 use vibeos::limits::MAX_OPEN_FILES;
 use vibeos::proc::wait_exited;
 
+use super::Outcome;
 use super::p10_s12::fid;
 use super::user::{self, DEFAULT, Image, user_code};
-use super::{Outcome, Test, test};
 use crate::fat_init;
 use crate::file_init;
 use crate::thread_init;
 use crate::time_init;
 use vibeos::fs::FileId;
-
-pub(super) const TESTS: &[Test] = &[
-    test("file_table_fork_churn", test_file_table_fork_churn),
-    test(
-        "file_table_stale_writeback_ebadf",
-        test_file_table_stale_writeback_ebadf,
-    ),
-    test("open_creat_exists_opens", test_open_creat_exists_opens),
-    test(
-        "inode_size_shared_across_opens",
-        test_inode_size_shared_across_opens,
-    ),
-    test(
-        "fat_unlinked_open_frees_at_close",
-        test_fat_unlinked_open_frees_at_close,
-    ),
-    test("vibefs_efbig", test_vibefs_efbig),
-    test("vibefs_seek_end_5gib", test_vibefs_seek_end_5gib),
-];
 
 /// Each open-file slot's `(used, refs)`.
 fn holders() -> [(bool, u16); MAX_OPEN_FILES] {
@@ -192,7 +173,7 @@ user_code!(
 
 const CHURN: usize = 1000;
 
-fn test_file_table_fork_churn() -> Outcome {
+pub(super) fn test_file_table_fork_churn() -> Outcome {
     if unlink_quiet("/f55a.txt").is_err() || unlink_quiet("/f55b.txt").is_err() {
         return Outcome::Fail("unlink before");
     }
@@ -292,7 +273,7 @@ fn stale_helper() {
     STALE_DONE.store(true, Ordering::Release);
 }
 
-fn test_file_table_stale_writeback_ebadf() -> Outcome {
+pub(super) fn test_file_table_stale_writeback_ebadf() -> Outcome {
     let out = stale_writeback();
     let us = unlink_quiet("/f55s.txt");
     let ut = unlink_quiet("/f55t.txt");
@@ -382,7 +363,7 @@ fn stale_writeback() -> Outcome {
     Outcome::Ok
 }
 
-fn test_open_creat_exists_opens() -> Outcome {
+pub(super) fn test_open_creat_exists_opens() -> Outcome {
     if unlink_quiet("/f55r.txt").is_err() {
         return Outcome::Fail("unlink before");
     }
@@ -511,7 +492,7 @@ fn shared_size_on(path: &str, ids: &mut [Option<FileId>; 4]) -> Outcome {
     }
 }
 
-fn test_inode_size_shared_across_opens() -> Outcome {
+pub(super) fn test_inode_size_shared_across_opens() -> Outcome {
     for path in ["/f13s.txt", "/vibe/f13s"] {
         let out = shared_size(path);
         if !matches!(out, Outcome::Ok) {
@@ -526,7 +507,7 @@ fn fat_free() -> Result<u64, FsError> {
     fat_init::df(fat_init::VOL_INITRD).map(|(_, _, free, _)| free)
 }
 
-fn test_fat_unlinked_open_frees_at_close() -> Outcome {
+pub(super) fn test_fat_unlinked_open_frees_at_close() -> Outcome {
     const PATH: &str = "/f13u.txt";
     const FL: u32 = O_RDWR | O_CREAT | O_TRUNC;
     if unlink_quiet(PATH).is_err() {
@@ -673,7 +654,7 @@ user_code!(
     "
 );
 
-fn test_vibefs_efbig() -> Outcome {
+pub(super) fn test_vibefs_efbig() -> Outcome {
     let st = user::run(&Image::Code(VIBEFS_EFBIG, DEFAULT), &["efbig"]);
     let u = unlink_quiet("/vibe/efbig");
     let st = match st {
@@ -763,7 +744,7 @@ user_code!(
     "
 );
 
-fn test_vibefs_seek_end_5gib() -> Outcome {
+pub(super) fn test_vibefs_seek_end_5gib() -> Outcome {
     const BIG: u64 = (5 << 30) + 1;
     let st = user::run(&Image::Code(VIBEFS_BIG5, DEFAULT), &["big5"]);
     let size = fid::stat_path("/vibe/big5").map(|s| s.size);

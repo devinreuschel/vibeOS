@@ -2,11 +2,9 @@
 
 use core::sync::atomic::Ordering;
 
-use super::{Outcome, Test, cpu_remote, spin_until_ns, test};
+use super::{Outcome, cpu_remote, spin_until_ns};
 use crate::per_cpu_init;
 use crate::x86;
-
-pub(super) const TESTS: &[Test] = &[test("percpu_remote_view", percpu_remote_view)];
 
 /// How long [`percpu_remote_view`] waits for this CPU's `ticks` to move.
 const TICK_WAIT_NS: u64 = 200_000_000;
@@ -15,7 +13,7 @@ const TICK_WAIT_NS: u64 = 200_000_000;
 /// keeps its fields current: `ready` and distinct `apic_id`s on every
 /// online CPU, `runq_len` after a `with_current` scope, and `ticks` with
 /// IF on.
-fn percpu_remote_view() -> Outcome {
+pub(super) fn percpu_remote_view() -> Outcome {
     let n = per_cpu_init::cpu_count();
     if n == 0 {
         return Outcome::Fail("cpu array empty");

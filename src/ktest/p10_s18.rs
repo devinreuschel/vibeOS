@@ -6,17 +6,12 @@ use vibeos::fs::{FsError, O_CREAT, O_TRUNC, O_WRONLY};
 use vibeos::paging::PAGE_SIZE_4K;
 use vibeos::proc::{SIGSEGV, wait_signaled};
 
+use super::Outcome;
 use super::p10_s12::fid;
 use super::user::{self, Image, Layout, user_code};
-use super::{Outcome, Test, test};
 use crate::addr_space_init::testing as as_testing;
 use crate::pmm_init;
 use crate::user_init::testing as exec_testing;
-
-pub(super) const TESTS: &[Test] = &[
-    test("exec_huge_memsz", test_exec_huge_memsz).deadline(60_000),
-    test("brk_mmap_munmap_user", test_brk_mmap_munmap_user).deadline(30_000),
-];
 
 /// Write `bytes` to `path`, creating or truncating it.
 fn write_file(path: &str, bytes: &[u8]) -> Result<(), FsError> {
@@ -125,7 +120,7 @@ const MEMSZ_192M: &str = "/vibe/s18_memsz_192m";
 /// `ENOMEM`; the warm 64 GiB load and the 192 MiB load leave the free-frame
 /// count where they found it; the loader held `PT` for at most one leaf
 /// table at a time; and a `fork` after them succeeds.
-fn test_exec_huge_memsz() -> Outcome {
+pub(super) fn test_exec_huge_memsz() -> Outcome {
     let total = pmm_init::with_buddy(|b| b.stats().total_frames) as u64;
     if total * PAGE_SIZE_4K >= 192 << 20 {
         return Outcome::Skip("guest RAM >= 192 MiB");
@@ -721,7 +716,7 @@ const S18_FILE: &str = "/vibe/s18_file";
 /// and mmap(2) define them, eagerly backed. Each program exits with the
 /// number of its first failed check, or dies of `SIGSEGV` where it touches
 /// a page it may not.
-fn test_brk_mmap_munmap_user() -> Outcome {
+pub(super) fn test_brk_mmap_munmap_user() -> Outcome {
     if let Err(e) = write_file(S18_FILE, b"s18 file mapping\n") {
         return crate::fail_fmt!("write {S18_FILE}: {}", e.as_str());
     }

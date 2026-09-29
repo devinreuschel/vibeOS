@@ -8,8 +8,8 @@ use vibeos::proc::{SIGBUS, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGTRAP, wait_signa
 use vibeos::syscall::SYS_KILL;
 use vibeos::vectors;
 
+use super::Outcome;
 use super::user::{self, DEFAULT, Image, user_code};
-use super::{Outcome, Test, test};
 use crate::addr_space_init;
 use crate::apic_init;
 use crate::arch::idt::TrapFrame;
@@ -21,15 +21,6 @@ use crate::proc_init;
 use crate::thread_init;
 use crate::time_init;
 use crate::x86;
-
-pub(super) const TESTS: &[Test] = &[
-    test("ac_clear_on_exception", test_ac_clear_on_exception).deadline(30_000),
-    test("ac_clear_user_popf", test_ac_clear_user_popf).deadline(30_000),
-    test("ist_gs_sign", test_ist_gs_sign).deadline(30_000),
-    test("user_exceptions", test_user_exceptions).deadline(30_000),
-    test("user_device_irq", test_user_device_irq).deadline(30_000),
-    test("user_ipi", test_user_ipi).deadline(30_000),
-];
 
 const RFLAGS_AC: u64 = 1 << 18;
 /// Page-fault error code bit 0: the page was present (a protection fault).
@@ -127,7 +118,7 @@ fn bp_hook(frame: &mut TrapFrame) -> bool {
     false
 }
 
-fn test_ac_clear_on_exception() -> Outcome {
+pub(super) fn test_ac_clear_on_exception() -> Outcome {
     if !x86::smap_live() {
         return Outcome::Skip("no SMAP");
     }
@@ -195,7 +186,7 @@ fn ud_hook(frame: &mut TrapFrame) -> bool {
     false
 }
 
-fn test_ac_clear_user_popf() -> Outcome {
+pub(super) fn test_ac_clear_user_popf() -> Outcome {
     if !x86::smap_live() {
         return Outcome::Skip("no SMAP");
     }
@@ -352,7 +343,7 @@ fn wait_until(pred: impl Fn() -> bool, ms: u64) -> bool {
     true
 }
 
-fn test_ist_gs_sign() -> Outcome {
+pub(super) fn test_ist_gs_sign() -> Outcome {
     let entry = (&raw const vibeos_syscall_entry).cast::<u8>();
     let sysret = (&raw const vibeos_syscall_exit_swapgs)
         .cast::<u8>()
@@ -594,7 +585,7 @@ const EXC_CASES: &[ExcCase] = &[
     },
 ];
 
-fn test_user_exceptions() -> Outcome {
+pub(super) fn test_user_exceptions() -> Outcome {
     let kvm = EXC_CASES.iter().any(|c| c.kvm_only) && super::p10_s16::on_kvm();
     for case in EXC_CASES {
         if case.kvm_only && !kvm {
@@ -765,7 +756,7 @@ fn user_irqs(vecs: &[u8]) -> Outcome {
     Outcome::Ok
 }
 
-fn test_user_device_irq() -> Outcome {
+pub(super) fn test_user_device_irq() -> Outcome {
     let v = match irq_init::allocate_vector(0) {
         Ok(v) => v,
         Err(e) => return Outcome::Fail(e.as_str()),
@@ -794,6 +785,6 @@ fn test_user_device_irq() -> Outcome {
     Outcome::Ok
 }
 
-fn test_user_ipi() -> Outcome {
+pub(super) fn test_user_ipi() -> Outcome {
     user_irqs(&[vectors::IPI_RESCHEDULE])
 }

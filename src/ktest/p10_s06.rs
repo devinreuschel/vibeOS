@@ -2,10 +2,8 @@
 
 use core::fmt;
 
-use super::{Outcome, Test, test};
+use super::Outcome;
 use crate::diag;
-
-pub(super) const TESTS: &[Test] = &[test("frames_none_leaked", frames_none_leaked)];
 
 // ---------------------------------------------------------------------------
 // frames_none_leaked (ROADMAP §10.3, F018)
@@ -41,7 +39,7 @@ impl fmt::Write for LineSeen {
 /// Every test before this one (the legacy list and the earlier suites)
 /// freed each `Frames` it took, so none was dropped, and `meminfo` says
 /// so on its `leaked` line.
-fn frames_none_leaked() -> Outcome {
+pub(super) fn frames_none_leaked() -> Outcome {
     let leaked = vibeos::pmm::leaked_frames();
     if leaked != 0 {
         return crate::fail_fmt!("{leaked} frames leaked by dropped Frames");

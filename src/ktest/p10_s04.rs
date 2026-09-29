@@ -7,7 +7,7 @@ use vibeos::block::{BlockError, Op};
 
 use vibeos::thread::ThreadState;
 
-use super::{Outcome, Test, spawn_thread, spawn_thread_on, test};
+use super::{Outcome, spawn_thread, spawn_thread_on};
 use crate::block_init::{self, IoWaiter, testing as blk_testing};
 use crate::ipi_init;
 use crate::kva_init;
@@ -15,15 +15,6 @@ use crate::per_cpu_init;
 use crate::thread_init;
 use crate::time_init;
 use crate::x86;
-
-pub(super) const TESTS: &[Test] = &[
-    test(
-        "lifetime_iowaiter_publish_last",
-        lifetime_iowaiter_publish_last,
-    )
-    .deadline(60_000),
-    test("lifetime_shootdown_ack_late", lifetime_shootdown_ack_late).deadline(15_000),
-];
 
 // ---------------------------------------------------------------------------
 // lifetime_iowaiter_publish_last (ROADMAP §10.10, F002; Phase 7 exit gate)
@@ -198,7 +189,7 @@ impl Drop for DisarmStall {
 /// every submitter reusing its waiter's memory as soon as it returns, 10,000
 /// ramdisk requests complete with no fault, no hung submitter, and no
 /// corrupt read (Phase 7's concurrent reads and writes line).
-fn lifetime_iowaiter_publish_last() -> Outcome {
+pub(super) fn lifetime_iowaiter_publish_last() -> Outcome {
     if !block_init::live() {
         return Outcome::Skip("no ram0");
     }
@@ -287,7 +278,7 @@ fn wait_ms(pred: impl Fn() -> bool, ms: u64) -> bool {
 /// ROADMAP §10.10 (F011): one CPU holds IF off for 3 s while another
 /// unmaps a KVA range; `wait_acks` waits for it without panicking, logs it
 /// late once a second, and both finish.
-fn lifetime_shootdown_ack_late() -> Outcome {
+pub(super) fn lifetime_shootdown_ack_late() -> Outcome {
     let k = time_init::tsc_per_ms();
     if k == 0 {
         return Outcome::Skip("no TSC");

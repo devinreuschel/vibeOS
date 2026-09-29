@@ -3,14 +3,12 @@
 use core::hint::spin_loop;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use super::{Outcome, Test, alloc_frames_owned, free_frames_owned, spin_until_ns, test};
+use super::{Outcome, alloc_frames_owned, free_frames_owned, spin_until_ns};
 use crate::kva_init;
 use crate::per_cpu_init;
 use crate::thread_init;
 use crate::time_init;
 use crate::x86;
-
-pub(super) const TESTS: &[Test] = &[test("shootdown_ack_while_busy", shootdown_ack_while_busy)];
 
 // ---------------------------------------------------------------------------
 // shootdown_ack_while_busy (ROADMAP §10.2, F011, F075)
@@ -72,7 +70,7 @@ fn shooter() {
 /// CPU-bound for 2 s, at the IF it runs at and without polling
 /// `service_incoming`, while every other online CPU loops `vmap`/`vunmap`
 /// shootdowns. No shootdown cycle may take 1 s.
-fn shootdown_ack_while_busy() -> Outcome {
+pub(super) fn shootdown_ack_while_busy() -> Outcome {
     let me = per_cpu_init::current().cpu_id;
     let others = per_cpu_init::online_mask() & !(1u64 << me);
     if others == 0 {

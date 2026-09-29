@@ -6,17 +6,12 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use vibeos::block::BlockError;
 use vibeos::cache::PAGE;
 
-use super::{Outcome, Test, spawn_thread, test};
+use super::{Outcome, spawn_thread};
 use crate::block_init;
 use crate::cache_init::{self, DEV_RAM0, testing};
 use crate::thread_init;
 use crate::time_init;
 use crate::virtio_blk_init;
-
-pub(super) const TESTS: &[Test] = &[
-    test("cache_flush_waits_writeback", cache_flush_waits_writeback),
-    test("block_fua_write", block_fua_write),
-];
 
 /// ram0's last ten pages (sectors 176..256): ten dirty pages put the
 /// 16-page cache over its dirty ratio, so `blk-wb` writes them.
@@ -83,7 +78,7 @@ impl Drop for WbGuard {
 
 /// `cache_init::flush` sends no `Flush` while `blk-wb` holds one write of
 /// the device, and the held page is on the device once it does.
-fn cache_flush_waits_writeback() -> Outcome {
+pub(super) fn cache_flush_waits_writeback() -> Outcome {
     if !cache_init::live() || !block_init::live() {
         return Outcome::Fail("no ram0 cache");
     }
@@ -189,7 +184,7 @@ fn fua_roundtrip(
     Outcome::Ok
 }
 
-fn block_fua_write() -> Outcome {
+pub(super) fn block_fua_write() -> Outcome {
     if !block_init::live() {
         return Outcome::Fail("no ram0");
     }

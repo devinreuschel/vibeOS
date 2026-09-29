@@ -8,17 +8,12 @@ use vibeos::proc::{SIGKILL, wait_exited, wait_signaled};
 use vibeos::syscall::SYS_KILL;
 
 use super::user::{self, Image, user_code};
-use super::{Outcome, Test, free_frames, spin_until_ns, test};
+use super::{Outcome, free_frames, spin_until_ns};
 use crate::file_init;
 use crate::heap_init::fail_after::{self, Scope, Seen};
 use crate::proc_init;
 use crate::thread_init;
 use crate::time_init;
-
-pub(super) const TESTS: &[Test] = &[
-    test("kalloc_fail_after_hook", test_kalloc_fail_after_hook),
-    test("kalloc_nomem", test_kalloc_nomem).deadline(120_000),
-];
 
 /// Counts the lines written to it.
 struct LineCount(usize);
@@ -71,7 +66,7 @@ impl Drop for Armed {
     }
 }
 
-fn test_kalloc_fail_after_hook() -> Outcome {
+pub(super) fn test_kalloc_fail_after_hook() -> Outcome {
     if !no_process() {
         return Outcome::Fail("a process is still running");
     }
@@ -511,7 +506,7 @@ fn munmap_16m() -> Outcome {
     Outcome::Ok
 }
 
-fn test_kalloc_nomem() -> Outcome {
+pub(super) fn test_kalloc_nomem() -> Outcome {
     // fork takes at least the address-space slot and execve that slot and
     // its file buffer; the in-memory opens below may take none.
     let loops: [(&str, &'static [u8], u32, usize); 4] = [

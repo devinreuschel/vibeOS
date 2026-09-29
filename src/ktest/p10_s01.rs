@@ -5,18 +5,11 @@ use core::fmt;
 
 use vibeos::proc::{wait_exited, wexitstatus, wifexited};
 
+use super::Outcome;
 use super::user::{self, DEFAULT, Image, Layout, user_code};
-use super::{Outcome, Test, test};
 use crate::proc_init;
 use crate::thread_init;
 use crate::time_init;
-
-pub(super) const TESTS: &[Test] = &[
-    test("user_code_exit", test_user_code_exit),
-    test("user_image_elf", test_user_image_elf),
-    test("user_code_layout", test_user_code_layout),
-    test("orphan_freed_no_init", test_orphan_freed_no_init),
-];
 
 // exit(7) when getppid() is 0 (the kernel spawned it), else exit(1).
 user_code!(
@@ -34,7 +27,7 @@ user_code!(
     "
 );
 
-fn test_user_code_exit() -> Outcome {
+pub(super) fn test_user_code_exit() -> Outcome {
     let before = super::p10_s08::quiescent_free_frames();
     let st = match user::run(&Image::Code(EXIT7_IF_KERNEL_CHILD, DEFAULT), &["exit7"]) {
         Ok(st) => st,
@@ -49,7 +42,7 @@ fn test_user_code_exit() -> Outcome {
     Outcome::Ok
 }
 
-fn test_user_image_elf() -> Outcome {
+pub(super) fn test_user_image_elf() -> Outcome {
     let elf: Vec<u8> = user::elf_bytes(&Image::Code(EXIT7_IF_KERNEL_CHILD, DEFAULT));
     // One 8 KiB leak per run, kernel_tests only: `Image::Elf` holds a
     // `'static` image.
@@ -87,7 +80,7 @@ user_code!(
     "
 );
 
-fn test_user_code_layout() -> Outcome {
+pub(super) fn test_user_code_layout() -> Outcome {
     let layout = Layout {
         vaddr: 0x5000_0000,
         memsz: Some(0x2000),
@@ -192,7 +185,7 @@ fn ps() -> PsBuf {
     b
 }
 
-fn test_orphan_freed_no_init() -> Outcome {
+pub(super) fn test_orphan_freed_no_init() -> Outcome {
     let before = super::p10_s08::quiescent_free_frames();
     let st = match user::run(&Image::Code(ORPHAN_FORK, DEFAULT), &["orphan"]) {
         Ok(st) => st,

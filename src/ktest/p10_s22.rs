@@ -4,14 +4,12 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use vibeos::thread::{MAX_THREADS, ThreadId, ThreadState};
 
+use super::Outcome;
 use super::user::{self, DEFAULT, Image, user_code};
-use super::{Outcome, Test, test};
 use crate::per_cpu_init;
 use crate::syscall_init::testing as entry_testing;
 use crate::thread_init;
 use crate::time_init;
-
-pub(super) const TESTS: &[Test] = &[test("user_fork_wait_stall", user_fork_wait_stall)];
 
 // `user/tests.asm` from its `dup(1)` on (ROADMAP §10.2, F021), for
 // FORK_WAIT_ROUNDS rounds: (1) dup(1), a zero-length write, close; (2) fork,
@@ -280,7 +278,7 @@ fn wait_run(cpu: u32) -> Outcome {
 /// a second one, while `syscall_init::testing::fork_wait_stall_point`
 /// holds each run's first ring-3 entries in the window after GS is
 /// loaded for ring 3 (ROADMAP §10.2, F021).
-fn user_fork_wait_stall() -> Outcome {
+pub(super) fn user_fork_wait_stall() -> Outcome {
     let here = per_cpu_init::current().cpu_id;
     let out = run_on(here);
     if !matches!(out, Outcome::Ok) {

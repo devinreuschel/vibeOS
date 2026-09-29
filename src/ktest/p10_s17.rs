@@ -10,8 +10,8 @@ use vibeos::proc::{SIGSEGV, wait_signaled};
 use vibeos::syscall::{SYS_GETPID, SYS_KILL};
 use vibeos::vectors;
 
+use super::Outcome;
 use super::user::{self, DEFAULT, Image, Layout, user_code};
-use super::{Outcome, Test, test};
 use crate::apic_init;
 use crate::console_init;
 use crate::kbd_init;
@@ -21,15 +21,6 @@ use crate::thread_init;
 use crate::time_init;
 use crate::user_init::LoadError;
 use crate::x86;
-
-pub(super) const TESTS: &[Test] = &[
-    test("console_read_exit", test_console_read_exit).deadline(30_000),
-    test("user_entry_irq", test_user_entry_irq).deadline(120_000),
-    test("exec_top_page_enoexec", test_exec_top_page_enoexec).deadline(30_000),
-    test("noncanonical_rip_sigsegv", test_noncanonical_rip_sigsegv).deadline(30_000),
-    test("fp_no_leak", test_fp_no_leak).deadline(60_000),
-    test("fp_migrate_counter", test_fp_migrate_counter).deadline(30_000),
-];
 
 /// Sleep until `pred` holds, for at most `ms`.
 fn sleep_until(pred: impl Fn() -> bool, ms: u64) -> bool {
@@ -70,7 +61,7 @@ user_code!(
 /// A user `read` on fd 0 blocks in `console_init::wait_key`'s halt branch
 /// until a key is queued, then returns through the syscall exit, whose
 /// debug-build check faults if `wait_key` left IF set.
-fn test_console_read_exit() -> Outcome {
+pub(super) fn test_console_read_exit() -> Outcome {
     console_init::testing::reset_halts();
     let pid = match user::spawn(&Image::Code(READ_ONE_KEY, DEFAULT), &["read_one_key"]) {
         Ok(pid) => pid,
@@ -158,7 +149,7 @@ fn entry_ipi_sender() {
 /// another CPU keeps sending it reschedule IPIs; an interrupt taken there
 /// with the user GS loaded halts the kernel, and the debug-build check
 /// before the selector loads faults if IF is set.
-fn test_user_entry_irq() -> Outcome {
+pub(super) fn test_user_entry_irq() -> Outcome {
     let Some(sender_cpu) = super::second_cpu() else {
         return Outcome::Skip("needs 2 CPUs");
     };
@@ -203,7 +194,7 @@ user_code!(
 /// An image whose last page is the one below `USER_END` does not load:
 /// its `syscall` would return to a non-canonical RIP. The same code one
 /// page lower loads, and its `syscall` returns to the unmapped top page.
-fn test_exec_top_page_enoexec() -> Outcome {
+pub(super) fn test_exec_top_page_enoexec() -> Outcome {
     let at = |vaddr| Image::Code(SYSCALL_AT_PAGE_END, Layout { vaddr, ..DEFAULT });
     match user::spawn(&at(USER_MAP_END), &["top_page"]) {
         Err(LoadError::Elf(ElfError::KernelVa)) => {}
@@ -251,7 +242,7 @@ user_code!(
 /// with `SIGSEGV` on the exit's own path, before `swapgs`; a process whose
 /// first entry `iretq`s to a non-canonical RIP gets `SIGSEGV` too (on KVM
 /// from the labeled `iretq`'s `#GP`, on TCG from the fetch).
-fn test_noncanonical_rip_sigsegv() -> Outcome {
+pub(super) fn test_noncanonical_rip_sigsegv() -> Outcome {
     let kills = sc_testing::bad_rip_kills();
     sc_testing::arm_noncanonical_rip(SYS_GETPID);
     let st = user::run(&Image::Code(GETPID_EXIT0, DEFAULT), &["bad_rip_exit"]);
@@ -449,7 +440,7 @@ fn fp_spawner() {
 
 /// A new process never sees another process's XMM state at its first
 /// instruction, and a yielding process keeps its own.
-fn test_fp_no_leak() -> Outcome {
+pub(super) fn test_fp_no_leak() -> Outcome {
     if x86::read_cr0() & x86::CR0_TS != 0 {
         return Outcome::Fail("CR0.TS set");
     }
@@ -509,7 +500,7 @@ impl Drop for RequeueGuard {
 
 /// A user thread that the requeue hook moves to the next CPU each time
 /// it is preempted keeps its XMM state across every migration.
-fn test_fp_migrate_counter() -> Outcome {
+pub(super) fn test_fp_migrate_counter() -> Outcome {
     if super::second_cpu().is_none() {
         return Outcome::Skip("needs 2 CPUs");
     }

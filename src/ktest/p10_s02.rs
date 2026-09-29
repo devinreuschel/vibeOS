@@ -5,17 +5,12 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::paging::PAGE_SIZE_4K;
 
-use super::{CPU_HITS, IRQ_CPU, IRQ_HITS, OBS_STALL_NS, Outcome, Test, test};
+use super::{CPU_HITS, IRQ_CPU, IRQ_HITS, OBS_STALL_NS, Outcome};
 use crate::paging_init;
 use crate::per_cpu_init;
 use crate::thread_init;
 use crate::time_init;
 use crate::x86;
-
-pub(super) const TESTS: &[Test] = &[
-    test("ktest_context", ktest_context),
-    test("msix_cpu_publish_last", msix_cpu_publish_last),
-];
 
 /// The registry's stack size ROADMAP §10.2 names.
 const REGISTRY_STACK_BYTES: u64 = 64 * 1024;
@@ -71,7 +66,7 @@ fn ctx_worker() {
 
 /// The registry, and a `spawn_here` worker it starts, run with IF on,
 /// `irq_nest` 0, and a guarded KVA stack (ROADMAP §10.2, F075).
-fn ktest_context() -> Outcome {
+pub(super) fn ktest_context() -> Outcome {
     if !x86::interrupts_enabled() {
         return Outcome::Fail("registry IF off");
     }
@@ -133,7 +128,7 @@ fn obs_publisher() {
 /// `record_irq_cpu` publishes `IRQ_HITS` last: once a waiter sees a hit, the
 /// hitting CPU's `CPU_HITS` count is already there, even when the observer
 /// stalls before its last store (ROADMAP §10.2, F021).
-fn msix_cpu_publish_last() -> Outcome {
+pub(super) fn msix_cpu_publish_last() -> Outcome {
     let Some(ap) = super::second_cpu() else {
         return Outcome::Skip("no AP");
     };

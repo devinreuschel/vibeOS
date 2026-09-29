@@ -4,24 +4,11 @@ use vibeos::fs::{
     FileId, FsError, InodeKind, O_CREAT, O_DIRECTORY, O_RDONLY, O_RDWR, OpenFlags, SEEK_SET, Stat,
 };
 
+use super::Outcome;
 use super::p10_s12::fid;
-use super::{Outcome, Test, test};
 use crate::fat_init;
 use crate::file_init;
 use crate::vibefs_init;
-
-pub(super) const TESTS: &[Test] = &[
-    test("vfs_fat_ops_initrd", test_vfs_fat_ops_initrd),
-    test(
-        "vfs_fat_unlinked_open_inode",
-        test_vfs_fat_unlinked_open_inode,
-    ),
-    test(
-        "vfs_fat_file_api_one_inode",
-        test_vfs_fat_file_api_one_inode,
-    ),
-    test("vfs_vibe_ops_mem", test_vfs_vibe_ops_mem),
-];
 
 /// A failed step and its error.
 type Step<T> = Result<T, (&'static str, FsError)>;
@@ -75,7 +62,7 @@ fn initrd_free() -> Step<u64> {
         .map_err(|e| ("df", e))
 }
 
-fn test_vfs_fat_ops_initrd() -> Outcome {
+pub(super) fn test_vfs_fat_ops_initrd() -> Outcome {
     if !fat_init::live() {
         return Outcome::Skip("no FAT initrd");
     }
@@ -124,7 +111,7 @@ fn fat_ops_initrd() -> Step<()> {
     }
 }
 
-fn test_vfs_fat_unlinked_open_inode() -> Outcome {
+pub(super) fn test_vfs_fat_unlinked_open_inode() -> Outcome {
     if !fat_init::live() {
         return Outcome::Skip("no FAT initrd");
     }
@@ -165,7 +152,7 @@ fn unlinked_open_body(f: FileId, old: &[u8; 1500]) -> Step<()> {
     Ok(())
 }
 
-fn test_vfs_fat_file_api_one_inode() -> Outcome {
+pub(super) fn test_vfs_fat_file_api_one_inode() -> Outcome {
     if !fat_init::live() {
         return Outcome::Skip("no FAT initrd");
     }
@@ -193,7 +180,7 @@ fn fat_file_api_one_inode() -> Step<()> {
     Ok(())
 }
 
-fn test_vfs_vibe_ops_mem() -> Outcome {
+pub(super) fn test_vfs_vibe_ops_mem() -> Outcome {
     if !vibefs_init::live() {
         return Outcome::Skip("no vibefs");
     }

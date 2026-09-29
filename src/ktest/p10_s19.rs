@@ -8,7 +8,7 @@ use vibeos::proc::{SIGCONT, SIGKILL, SIGSEGV, SIGSTOP, wait_signaled};
 use vibeos::syscall::SYS_KILL;
 
 use super::user::{self, DEFAULT, Image, Layout, user_code};
-use super::{Outcome, Test, cpu_remote, free_frames_owned, test};
+use super::{Outcome, cpu_remote, free_frames_owned};
 use crate::arch::idt::testing as idt_testing;
 use crate::console_init;
 use crate::fb_init::{self, testing as fb_testing};
@@ -18,18 +18,6 @@ use crate::proc_init::{self, testing as proc_testing};
 use crate::thread_init;
 use crate::time_init;
 use crate::x86;
-
-pub(super) const TESTS: &[Test] = &[
-    test("stop_cont_no_lost_wakeup", test_stop_cont_no_lost_wakeup).deadline(30_000),
-    test("syscall_body_if_on", test_syscall_body_if_on).deadline(30_000),
-    test("kill_line_whole", test_kill_line_whole).deadline(30_000),
-    test("console_write_newlines", test_console_write_newlines).deadline(60_000),
-    test(
-        "lifetime_console_write_acks_shootdown",
-        test_lifetime_console_write_acks_shootdown,
-    )
-    .deadline(60_000),
-];
 
 /// Sleep until `pred` holds, for at most `ms`.
 fn sleep_until(pred: impl Fn() -> bool, ms: u64) -> bool {
@@ -161,7 +149,7 @@ fn stop_pairs() {
 /// A `SIGCONT` sent while the target sits between its stop decision and
 /// its sleep on `stop_wq` wakes it: the process runs `getpid` again after
 /// every `SIGSTOP`/`SIGCONT` pair (ROADMAP §10.6, F033).
-fn test_stop_cont_no_lost_wakeup() -> Outcome {
+pub(super) fn test_stop_cont_no_lost_wakeup() -> Outcome {
     let Some(sender_cpu) = super::second_cpu() else {
         return Outcome::Skip("needs 2 CPUs");
     };
@@ -357,7 +345,7 @@ fn kill_line_cr2(pid: u32) -> Option<u64> {
 /// (ROADMAP §10.6, F011): a 50 ms `getpid` on CPU 0 acks another CPU's
 /// shootdown and is preempted by a ready thread, and a `#PF` body that
 /// yields to another process's fault still reports its own CR2.
-fn test_syscall_body_if_on() -> Outcome {
+pub(super) fn test_syscall_body_if_on() -> Outcome {
     let Some(other) = super::second_cpu() else {
         return Outcome::Skip("needs 2 CPUs");
     };
@@ -471,7 +459,7 @@ fn body_cr2() -> Outcome {
 /// that writes it runs with IF=1: A's kill line is held open mid-write
 /// until B, on the same CPU, has written its own, and each line still
 /// names its own process's CR2.
-fn test_kill_line_whole() -> Outcome {
+pub(super) fn test_kill_line_whole() -> Outcome {
     BODY_SPAWNED.store(false, Ordering::Release);
     proc_testing::arm_kill_line_yield(CR2_A);
     super::spawn_thread_on("s19_kill_faults", body_spawn_faults, 0);
@@ -612,7 +600,7 @@ fn nl_watcher() {
 /// per chunk and per redraw piece: CPU 0 ticks during it, each hold draws
 /// at most 16 KiB, and each chunk scrolls at most once (ROADMAP §10.6,
 /// F044). A write with IF off leaves its redraw to the next write.
-fn test_console_write_newlines() -> Outcome {
+pub(super) fn test_console_write_newlines() -> Outcome {
     let Some(other) = super::second_cpu() else {
         return Outcome::Skip("needs 2 CPUs");
     };
@@ -765,7 +753,7 @@ fn ack_unmapper() {
 /// A 1 MiB console `write` from ring 3 on CPU 0 acknowledges a shootdown
 /// another CPU sends during it: the unmap returns before the write does
 /// (ROADMAP §10.10, F011).
-fn test_lifetime_console_write_acks_shootdown() -> Outcome {
+pub(super) fn test_lifetime_console_write_acks_shootdown() -> Outcome {
     let Some(other) = super::second_cpu() else {
         return Outcome::Skip("needs 2 CPUs");
     };

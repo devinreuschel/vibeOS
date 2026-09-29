@@ -2,7 +2,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use super::{Outcome, Test, test};
+use super::Outcome;
 use crate::arch;
 use crate::ipi_init;
 use crate::per_cpu_init;
@@ -10,8 +10,6 @@ use crate::x86::{
     self, CR0_AM, CR0_CD, CR0_EM, CR0_MP, CR0_NE, CR0_NW, CR0_PE, CR0_PG, CR0_TS, CR0_WP, CR4_MCE,
     CR4_OSFXSR, CR4_OSXMMEXCPT, CR4_PAE, CR4_PGE,
 };
-
-pub(super) const TESTS: &[Test] = &[test("cpu_control_regs", cpu_control_regs)];
 
 /// CPUID.01H:ECX[31] (a hypervisor is present) and leaf `0x4000_0000`
 /// naming it `KVMKVMKVM\0\0\0`.
@@ -68,7 +66,7 @@ const CR4_SET: [(u64, &str); 5] = [
 /// Every online CPU runs with the bits ROADMAP §10.6's control-register box
 /// names, and with exactly the CR0 and CR4 `arch::cpu::init_control_regs`
 /// computed.
-fn cpu_control_regs() -> Outcome {
+pub(super) fn cpu_control_regs() -> Outcome {
     let Some(want) = arch::cpu::control_regs() else {
         return Outcome::Fail("control registers never computed");
     };

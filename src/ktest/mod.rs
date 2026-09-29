@@ -199,7 +199,6 @@ mod p10_s09;
 mod p10_s11;
 mod p10_s12;
 mod p10_s13;
-mod p10_s14;
 mod p10_s15;
 mod p10_s16;
 mod p10_s17;
@@ -210,6 +209,9 @@ mod p10_s21;
 mod p10_s22;
 mod p10_s23;
 
+/// Rows run in this order. A new test goes in its subsystem's ktest.rs, and its row goes after the
+/// last row whose path starts with that subsystem, or at the end if it has none (ROADMAP §10.2's T1
+/// box splits this list per subsystem).
 const TESTS: &[Test] = &[
     test("map_unmap", test_map_unmap),
     test("nx_enforcement", test_nx_enforcement),
@@ -337,33 +339,131 @@ const TESTS: &[Test] = &[
     test("ktest_rows", test_ktest_rows),
     test("ktest_fail_fmt", test_ktest_fail_fmt),
     test("ktest_helpers", test_ktest_helpers),
+    test("user_code_exit", p10_s01::test_user_code_exit),
+    test("user_image_elf", p10_s01::test_user_image_elf),
+    test("user_code_layout", p10_s01::test_user_code_layout),
+    test("orphan_freed_no_init", p10_s01::test_orphan_freed_no_init),
+    test("ktest_context", p10_s02::ktest_context),
+    test("msix_cpu_publish_last", p10_s02::msix_cpu_publish_last),
+    test(
+        "lifetime_iowaiter_publish_last",
+        p10_s04::lifetime_iowaiter_publish_last,
+    )
+    .deadline(60_000),
+    test(
+        "lifetime_shootdown_ack_late",
+        p10_s04::lifetime_shootdown_ack_late,
+    )
+    .deadline(15_000),
+    test("percpu_remote_view", p10_s05::percpu_remote_view),
+    test("frames_none_leaked", p10_s06::frames_none_leaked),
+    test("current_mapper_holds_pt", p10_s07::current_mapper_holds_pt),
+    test(
+        "teardown_live_root_asserts",
+        p10_s07::teardown_live_root_asserts,
+    ),
+    test("vmap_32_frames_unmapped", p10_s07::vmap_32_frames_unmapped),
+    test("spawn_stack_oom", p10_s08::spawn_stack_oom).deadline(10_000),
+    test("fork_oom", p10_s08::fork_oom).deadline(10_000),
+    test("lifetime_stack_reclaim", p10_s08::lifetime_stack_reclaim).deadline(120_000),
+    test("exit_burst", p10_s08::exit_burst).deadline(60_000),
+    test(
+        "lifetime_dead_slot_on_cpu",
+        p10_s08::lifetime_dead_slot_on_cpu,
+    )
+    .deadline(180_000),
+    test("file_table_fork_churn", p10_s09::test_file_table_fork_churn),
+    test(
+        "file_table_stale_writeback_ebadf",
+        p10_s09::test_file_table_stale_writeback_ebadf,
+    ),
+    test(
+        "open_creat_exists_opens",
+        p10_s09::test_open_creat_exists_opens,
+    ),
+    test(
+        "inode_size_shared_across_opens",
+        p10_s09::test_inode_size_shared_across_opens,
+    ),
+    test(
+        "fat_unlinked_open_frees_at_close",
+        p10_s09::test_fat_unlinked_open_frees_at_close,
+    ),
+    test("vibefs_efbig", p10_s09::test_vibefs_efbig),
+    test("vibefs_seek_end_5gib", p10_s09::test_vibefs_seek_end_5gib),
+    test("vfs_fat_ops_initrd", p10_s11::test_vfs_fat_ops_initrd),
+    test(
+        "vfs_fat_unlinked_open_inode",
+        p10_s11::test_vfs_fat_unlinked_open_inode,
+    ),
+    test(
+        "vfs_fat_file_api_one_inode",
+        p10_s11::test_vfs_fat_file_api_one_inode,
+    ),
+    test("vfs_vibe_ops_mem", p10_s11::test_vfs_vibe_ops_mem),
+    test("vfs_backends_via_ops", p10_s12::test_vfs_backends_via_ops),
+    test("vfs_fat_one_inode", p10_s12::test_vfs_fat_one_inode),
+    test(
+        "cache_flush_waits_writeback",
+        p10_s13::cache_flush_waits_writeback,
+    ),
+    test("block_fua_write", p10_s13::block_fua_write),
+    test("ac_clear_on_exception", p10_s15::test_ac_clear_on_exception).deadline(30_000),
+    test("ac_clear_user_popf", p10_s15::test_ac_clear_user_popf).deadline(30_000),
+    test("ist_gs_sign", p10_s15::test_ist_gs_sign).deadline(30_000),
+    test("user_exceptions", p10_s15::test_user_exceptions).deadline(30_000),
+    test("user_device_irq", p10_s15::test_user_device_irq).deadline(30_000),
+    test("user_ipi", p10_s15::test_user_ipi).deadline(30_000),
+    test("cpu_control_regs", p10_s16::cpu_control_regs),
+    test("console_read_exit", p10_s17::test_console_read_exit).deadline(30_000),
+    test("user_entry_irq", p10_s17::test_user_entry_irq).deadline(120_000),
+    test("exec_top_page_enoexec", p10_s17::test_exec_top_page_enoexec).deadline(30_000),
+    test(
+        "noncanonical_rip_sigsegv",
+        p10_s17::test_noncanonical_rip_sigsegv,
+    )
+    .deadline(30_000),
+    test("fp_no_leak", p10_s17::test_fp_no_leak).deadline(60_000),
+    test("fp_migrate_counter", p10_s17::test_fp_migrate_counter).deadline(30_000),
+    test("exec_huge_memsz", p10_s18::test_exec_huge_memsz).deadline(60_000),
+    test("brk_mmap_munmap_user", p10_s18::test_brk_mmap_munmap_user).deadline(30_000),
+    test(
+        "stop_cont_no_lost_wakeup",
+        p10_s19::test_stop_cont_no_lost_wakeup,
+    )
+    .deadline(30_000),
+    test("syscall_body_if_on", p10_s19::test_syscall_body_if_on).deadline(30_000),
+    test("kill_line_whole", p10_s19::test_kill_line_whole).deadline(30_000),
+    test(
+        "console_write_newlines",
+        p10_s19::test_console_write_newlines,
+    )
+    .deadline(60_000),
+    test(
+        "lifetime_console_write_acks_shootdown",
+        p10_s19::test_lifetime_console_write_acks_shootdown,
+    )
+    .deadline(60_000),
+    test(
+        "kalloc_fail_after_hook",
+        p10_s20::test_kalloc_fail_after_hook,
+    ),
+    test("kalloc_nomem", p10_s20::test_kalloc_nomem).deadline(120_000),
+    test("syscall_rcx_canary", p10_s21::test_syscall_rcx_canary).deadline(30_000),
+    test("fork_child_gprs", p10_s21::test_fork_child_gprs).deadline(30_000),
+    test("preempt_gpr_canaries", p10_s21::test_preempt_gpr_canaries).deadline(60_000),
+    test("user_single_step", p10_s21::test_user_single_step).deadline(30_000),
+    test("user_int1", p10_s21::test_user_int1).deadline(30_000),
+    test("user_tf_repin", p10_s21::test_user_tf_repin).deadline(60_000),
+    test("user_fork_wait_stall", p10_s22::user_fork_wait_stall),
+    test(
+        "shootdown_ack_while_busy",
+        p10_s23::shootdown_ack_while_busy,
+    ),
 ];
 
-/// The legacy list first, then each slice's suite in ID order (DESIGN §8.2).
-const SUITES: &[Suite] = &[
-    TESTS,
-    p10_s01::TESTS,
-    p10_s02::TESTS,
-    p10_s04::TESTS,
-    p10_s05::TESTS,
-    p10_s06::TESTS,
-    p10_s07::TESTS,
-    p10_s08::TESTS,
-    p10_s09::TESTS,
-    p10_s11::TESTS,
-    p10_s12::TESTS,
-    p10_s13::TESTS,
-    p10_s14::TESTS,
-    p10_s15::TESTS,
-    p10_s16::TESTS,
-    p10_s17::TESTS,
-    p10_s18::TESTS,
-    p10_s19::TESTS,
-    p10_s20::TESTS,
-    p10_s21::TESTS,
-    p10_s22::TESTS,
-    p10_s23::TESTS,
-];
+/// The one list, [`TESTS`] (DESIGN §8.2).
+const SUITES: &[Suite] = &[TESTS];
 
 /// Name of the registry's kernel thread.
 const REGISTRY_NAME: &str = "ktest";

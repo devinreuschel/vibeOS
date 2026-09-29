@@ -9,19 +9,12 @@ use vibeos::paging::VirtAddr;
 use vibeos::thread::ThreadState;
 
 use super::{
-    Outcome, Test, alloc_frames_owned, free_frames_owned, settle_threads, spawn_thread,
-    spin_until_ns, test,
+    Outcome, alloc_frames_owned, free_frames_owned, settle_threads, spawn_thread, spin_until_ns,
 };
 use crate::sync_init::Semaphore;
 use crate::{
     addr_space_init, arch, kva_init, paging_init, per_cpu_init, thread_init, time_init, x86,
 };
-
-pub(super) const TESTS: &[Test] = &[
-    test("current_mapper_holds_pt", current_mapper_holds_pt),
-    test("teardown_live_root_asserts", teardown_live_root_asserts),
-    test("vmap_32_frames_unmapped", vmap_32_frames_unmapped),
-];
 
 /// Yield until `pred` holds or `ms` pass.
 fn wait_ms(pred: impl Fn() -> bool, ms: u64) -> bool {
@@ -40,7 +33,7 @@ fn wait_ms(pred: impl Fn() -> bool, ms: u64) -> bool {
 
 /// PT is held while a `current_mapper` guard lives and free once it drops.
 /// Another CPU may take PT briefly after the drop, so the free check polls.
-fn current_mapper_holds_pt() -> Outcome {
+pub(super) fn current_mapper_holds_pt() -> Outcome {
     let g = paging_init::current_mapper();
     let held = !paging_init::pt_lock_free();
     let walks = g
@@ -71,7 +64,7 @@ fn parked() {
 
 /// `teardown` of a root that a parked TCB's `as_cr3` still names hits its
 /// assertion (invariant I128) instead of freeing the tables.
-fn teardown_live_root_asserts() -> Outcome {
+pub(super) fn teardown_live_root_asserts() -> Outcome {
     let Some(space) = addr_space_init::create() else {
         return Outcome::Fail("create");
     };
@@ -134,7 +127,7 @@ const VMAP_PAGES: u64 = 1 << VMAP_ORDER;
 
 /// A 32-frame `vmap` maps the handle's own frames, and `vunmap` unmaps all
 /// 32 pages and returns exactly the span it mapped to the KVA free list.
-fn vmap_32_frames_unmapped() -> Outcome {
+pub(super) fn vmap_32_frames_unmapped() -> Outcome {
     // No other thread runs and no dead stack waits to be freed, so the KVA
     // use below moves only for this test's span.
     settle_threads();

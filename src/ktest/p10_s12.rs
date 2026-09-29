@@ -4,17 +4,12 @@ use vibeos::fs::{
     FileRef, FsError, O_CREAT, O_DIRECTORY, O_RDONLY, O_RDWR, O_TRUNC, OpenFlags, SeekFrom,
 };
 
-use super::{Outcome, Test, test};
+use super::Outcome;
 use crate::fat_init;
 use crate::file_init;
 use crate::fs_init;
 use crate::shell_init;
 use crate::vibefs_init;
-
-pub(super) const TESTS: &[Test] = &[
-    test("vfs_backends_via_ops", test_vfs_backends_via_ops),
-    test("vfs_fat_one_inode", test_vfs_fat_one_inode),
-];
 
 /// A failed step and its error.
 type Step<T> = Result<T, (&'static str, FsError)>;
@@ -60,7 +55,7 @@ fn lists(path: &[u8], name: &[u8]) -> Result<bool, FsError> {
 
 const LINE: &[u8] = b"vfs backends via ops\n";
 
-fn test_vfs_backends_via_ops() -> Outcome {
+pub(super) fn test_vfs_backends_via_ops() -> Outcome {
     if !fat_init::live() || !vibefs_init::live() {
         return Outcome::Fail("needs FAT and vibefs live");
     }
@@ -148,7 +143,7 @@ fn backends_via_ops() -> Step<()> {
 
 const ONE: &[u8] = b"/vo_one";
 
-fn test_vfs_fat_one_inode() -> Outcome {
+pub(super) fn test_vfs_fat_one_inode() -> Outcome {
     if !fat_init::live() {
         return Outcome::Fail("no FAT initrd");
     }
