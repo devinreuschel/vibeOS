@@ -764,7 +764,7 @@ pub(crate) fn test_exec_large_elf_from_file() -> Outcome {
     }
     if matches!(out, Outcome::Ok) {
         for (path, _, code, want) in &cases {
-            match user::run(&Image::Code(*code, DEFAULT), &["exec_large"]) {
+            match user::run(&Image::Code(code, DEFAULT), &["exec_large"]) {
                 Ok(st) if st == wait_exited(*want) => {}
                 Ok(st) => {
                     out = crate::fail_fmt!("{path}: status {st:#x}, want exited {want}");
@@ -778,10 +778,10 @@ pub(crate) fn test_exec_large_elf_from_file() -> Outcome {
         }
     }
     for (path, _, _, _) in &cases {
-        if let Err(e) = unlink_quiet(path) {
-            if matches!(out, Outcome::Ok) {
-                out = crate::fail_fmt!("unlink {path}: {}", e.as_str());
-            }
+        if let Err(e) = unlink_quiet(path)
+            && matches!(out, Outcome::Ok)
+        {
+            out = crate::fail_fmt!("unlink {path}: {}", e.as_str());
         }
     }
     out
