@@ -27,14 +27,43 @@ jobs:
   check:
     name: check
     runs-on: ubuntu-26.04
+    env:
+      # vibeos-core FAT tests spawn fsck.fat. No QEMU / Limine / setup.sh (T3).
+      APT_PACKAGES: dosfstools
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # vibeos-core FAT tests spawn fsck.fat. No QEMU / Limine / setup.sh (T3).
-      - name: install host tools
+      # Host packages from a cache keyed by the runner image and the package
+      # list (ROADMAP §10.1, DESIGN §8.6): a hit installs the cached .deb files
+      # with no `apt-get update` and no download; a miss installs as before
+      # and saves what apt downloaded.
+      - name: apt cache key
+        id: apt-key
         run: |
-          sudo apt-get update
-          sudo apt-get install -y dosfstools
+          sum=$(printf '%s' "$APT_PACKAGES" | sha256sum | cut -d' ' -f1)
+          echo "key=apt-$ImageOS-$ImageVersion-$sum" >> "$GITHUB_OUTPUT"
+
+      - name: cache host packages
+        id: apt-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/apt-cache
+          key: ${{ steps.apt-key.outputs.key }}
+
+      - name: install host tools
+        env:
+          HIT: ${{ steps.apt-cache.outputs.cache-hit }}
+        run: |
+          if [ "$HIT" = true ]; then
+            if ls ~/apt-cache/*.deb >/dev/null 2>&1; then
+              sudo dpkg -i ~/apt-cache/*.deb
+            fi
+          else
+            sudo apt-get update
+            sudo apt-get install -y -o APT::Keep-Downloaded-Packages=true $APT_PACKAGES
+            mkdir -p ~/apt-cache
+            find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t ~/apt-cache {} +
+          fi
 
       - name: install rust nightly
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
@@ -101,13 +130,41 @@ jobs:
     # and DESIGN §8.6 together. setup.sh needs qemu-system-x86_64.
     env:
       VIBEOS_QEMU_VERSION: "10.2.1"
+      APT_PACKAGES: qemu-system-x86 xorriso nasm
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: install host tools
+      # Host packages from a cache keyed by the runner image and the package
+      # list (ROADMAP §10.1, DESIGN §8.6): a hit installs the cached .deb files
+      # with no `apt-get update` and no download; a miss installs as before
+      # and saves what apt downloaded.
+      - name: apt cache key
+        id: apt-key
         run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 xorriso nasm
+          sum=$(printf '%s' "$APT_PACKAGES" | sha256sum | cut -d' ' -f1)
+          echo "key=apt-$ImageOS-$ImageVersion-$sum" >> "$GITHUB_OUTPUT"
+
+      - name: cache host packages
+        id: apt-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/apt-cache
+          key: ${{ steps.apt-key.outputs.key }}
+
+      - name: install host tools
+        env:
+          HIT: ${{ steps.apt-cache.outputs.cache-hit }}
+        run: |
+          if [ "$HIT" = true ]; then
+            if ls ~/apt-cache/*.deb >/dev/null 2>&1; then
+              sudo dpkg -i ~/apt-cache/*.deb
+            fi
+          else
+            sudo apt-get update
+            sudo apt-get install -y -o APT::Keep-Downloaded-Packages=true $APT_PACKAGES
+            mkdir -p ~/apt-cache
+            find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t ~/apt-cache {} +
+          fi
 
       - name: install rust nightly
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
@@ -216,15 +273,43 @@ jobs:
     # and DESIGN §8.6 together.
     env:
       VIBEOS_QEMU_VERSION: "10.2.1"
+      # resolute's `ovmf` metapackage also pulls ovmf-amdsev, ovmf-inteltdx
+      # and ubuntu-virt; ovmf-generic ships /usr/share/ovmf/OVMF.fd.
+      APT_PACKAGES: qemu-system-x86 ovmf-generic
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # resolute's `ovmf` metapackage also pulls ovmf-amdsev, ovmf-inteltdx
-      # and ubuntu-virt; ovmf-generic ships /usr/share/ovmf/OVMF.fd.
-      - name: install host tools
+      # Host packages from a cache keyed by the runner image and the package
+      # list (ROADMAP §10.1, DESIGN §8.6): a hit installs the cached .deb files
+      # with no `apt-get update` and no download; a miss installs as before
+      # and saves what apt downloaded.
+      - name: apt cache key
+        id: apt-key
         run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 ovmf-generic
+          sum=$(printf '%s' "$APT_PACKAGES" | sha256sum | cut -d' ' -f1)
+          echo "key=apt-$ImageOS-$ImageVersion-$sum" >> "$GITHUB_OUTPUT"
+
+      - name: cache host packages
+        id: apt-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/apt-cache
+          key: ${{ steps.apt-key.outputs.key }}
+
+      - name: install host tools
+        env:
+          HIT: ${{ steps.apt-cache.outputs.cache-hit }}
+        run: |
+          if [ "$HIT" = true ]; then
+            if ls ~/apt-cache/*.deb >/dev/null 2>&1; then
+              sudo dpkg -i ~/apt-cache/*.deb
+            fi
+          else
+            sudo apt-get update
+            sudo apt-get install -y -o APT::Keep-Downloaded-Packages=true $APT_PACKAGES
+            mkdir -p ~/apt-cache
+            find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t ~/apt-cache {} +
+          fi
 
       # test-vibefs-crash's recipe runs `cargo test -p vibeos-hostlib-tests`
       # before its boots, so that tier alone needs the toolchain.

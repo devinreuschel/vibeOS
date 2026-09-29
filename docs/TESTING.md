@@ -585,7 +585,14 @@ GitHub Actions records per-step duration. Measured on `main` at `88370e5` (run 3
 53 s, then the ladder 160 s, serialized by `needs: check`. The ladder spends 58 s on setup, toolchain,
 kernel clippy, and ISO build before the first QEMU step, then 98 s across nine QEMU steps (longest:
 vibefs crash, 22 s); about **3m40s** end to end. A fmt or
-hostlib lint failure should go red in about a minute without starting QEMU. From ROADMAP §10.9's CI
+hostlib lint failure should go red in about a minute without starting QEMU. Host packages come from a
+cache (ROADMAP §10.1): `check`, `build` and `tier` each name theirs in `APT_PACKAGES` and restore
+`~/apt-cache` under the key `apt-<ImageOS>-<ImageVersion>-<sha256 of the list>`; a hit installs the
+cached `.deb` files with `dpkg -i`, with no `apt-get update` and no download, and a miss runs
+`apt-get install` with `APT::Keep-Downloaded-Packages=true` and saves what it downloaded. `build`
+and `tier` write the runner's CPU model to the job summary, so the "after" figure, a `ci` run on
+`main`, can cite it; each tier's `jobs` stays 1 until the timing tests and the §10.2 retried
+failures are fixed. From ROADMAP §10.9's CI
 history on, a measured number recorded in the design docs cites the commit it was measured at and the CPU
 model or machine it ran on (ROADMAP, How to read this).
 
