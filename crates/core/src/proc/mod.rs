@@ -143,6 +143,7 @@ impl Fd {
 }
 
 /// Fd table is full or the number is out of range.
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FdError;
 

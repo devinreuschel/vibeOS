@@ -52,10 +52,6 @@ pub mod limits;
 pub mod log;
 pub mod marker;
 pub mod mm;
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 pub mod proc;
 pub mod sched;
 pub mod shell;
