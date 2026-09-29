@@ -489,16 +489,6 @@ mod tests {
     }
 
     #[test]
-    fn publish_uses_release_not_only_compiler_fence() {
-        let idx = AtomicU16::new(0);
-        // Descriptor payload would be stored first; then publish.
-        publish_index::<Stub>(&idx, 3);
-        assert_eq!(idx.load(Ordering::Acquire), 3);
-        dma_wmb::<Stub>();
-        dma_rmb::<Stub>();
-    }
-
-    #[test]
     fn four_gib_boundary_helper() {
         assert!(!crosses_boundary(0x1000, 0x1000, DMA32_BOUNDARY));
         assert!(crosses_boundary(

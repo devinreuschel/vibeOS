@@ -1044,7 +1044,13 @@ mod tests {
             let da = data_off;
             q.add(da, 8, DESC_F_WRITE).unwrap();
             let old = q.last_avail;
-            q.publish();
+            let new = q.publish();
+            // The device asks for a kick at `old` (the first buffer since the
+            // last kick) and not at `new` (already notified past it).
+            q.wr16(layout.avail_event(), old);
+            assert!(q.should_kick(old), "iteration {n}: avail_event = old");
+            q.wr16(layout.avail_event(), new);
+            assert!(!q.should_kick(old), "iteration {n}: avail_event = new");
             // SAFETY: descriptors address `base` from offset 0, the `pool`
             // buffer; established here.
             let done = unsafe { sim_complete(&mut q, (0xA0 + n) as u8, base, 0) };
@@ -1052,7 +1058,6 @@ mod tests {
             let u = q.get_used().unwrap();
             assert_eq!(u.len, 8);
             assert_eq!(q.get_used(), None);
-            assert!(q.should_kick(old) || n > 0);
             n += 1;
         }
         assert_eq!(q.num_free, 4);
