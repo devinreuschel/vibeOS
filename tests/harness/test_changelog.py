@@ -90,21 +90,26 @@ def valid_changelog(entry_lines: int) -> str:
     )
 
 
+def run_check(text: str) -> tuple[int, str]:
+    """Run check_changelog.main() on `text`; return its exit code and stderr."""
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        path = root / "CHANGELOG.md"
+        path.write_text(text, encoding="utf-8")
+        err = io.StringIO()
+        with (
+            mock.patch.object(check_changelog, "ROOT", root),
+            mock.patch.object(check_changelog, "CHANGELOG", path),
+            contextlib.redirect_stderr(err),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            rc = check_changelog.main()
+        return rc, err.getvalue()
+
+
 class TestCheckChangelog(unittest.TestCase):
     def run_main(self, text: str) -> tuple[int, str]:
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
-            path = root / "CHANGELOG.md"
-            path.write_text(text, encoding="utf-8")
-            err = io.StringIO()
-            with (
-                mock.patch.object(check_changelog, "ROOT", root),
-                mock.patch.object(check_changelog, "CHANGELOG", path),
-                contextlib.redirect_stderr(err),
-                contextlib.redirect_stdout(io.StringIO()),
-            ):
-                rc = check_changelog.main()
-            return rc, err.getvalue()
+        return run_check(text)
 
     def test_entry_lengths_counts_continuations(self) -> None:
         text = "- one\n  two\n  three\n- four\n\n- five\n  six\nprose\n"
@@ -132,6 +137,22 @@ class TestCheckChangelog(unittest.TestCase):
         err = io.StringIO()
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(check_changelog.main(), 0, err.getvalue())
+
+
+class TestEntryLength(unittest.TestCase):
+    """DOC4: a changelog entry is at most 2 lines (ROADMAP §10.1)."""
+
+    def test_max_lines_is_two(self) -> None:
+        self.assertEqual(check_changelog.MAX_LINES, 2)
+
+    def test_three_line_entry_fails(self) -> None:
+        rc, err = run_check(valid_changelog(3))
+        self.assertEqual(rc, 1)
+        self.assertIn("entry is 3 lines (max 2)", err)
+
+    def test_two_line_entry_passes(self) -> None:
+        rc, err = run_check(valid_changelog(2))
+        self.assertEqual(rc, 0, err)
 
 
 if __name__ == "__main__":
