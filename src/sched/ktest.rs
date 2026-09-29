@@ -1443,4 +1443,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("block_in_hard_irq_asserts", block_in_hard_irq_asserts),
     test("in_hard_irq_top_bottom", in_hard_irq_top_bottom),
     test("sleep_under_spinlock_asserts", sleep_under_spinlock_asserts),
+    test("boot_stack_guarded", boot_stack_guarded),
 ];

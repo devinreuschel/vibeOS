@@ -919,4 +919,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("frames_none_leaked", frames_none_leaked),
     test("current_mapper_holds_pt", current_mapper_holds_pt),
     test("vmap_32_frames_unmapped", vmap_32_frames_unmapped),
+    test("kernel_va0_faults", kernel_va0_faults),
 ];
