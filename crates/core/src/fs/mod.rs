@@ -35,10 +35,6 @@
 pub mod fat;
 mod file;
 mod inode;
-#[allow(
-    clippy::let_underscore_must_use,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 pub mod kernfs;
 mod mount;
 mod ramfs;
