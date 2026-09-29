@@ -5,7 +5,11 @@
 //! and never takes SCHED. Runtime filter is an `AtomicU8` checked on
 //! emit and again on `dmesg`.
 
-use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+// `Filter` and `RateLimit` live in kernel `static`s (the log ring's cell and
+// one `RateLimit` per call site), so they take `core`'s atomics from the
+// seam's statics re-export, which has `const fn new` (C-ATOMICS).
+use crate::atomic::Ordering;
+use crate::atomic::statics::{AtomicU8, AtomicU64};
 
 /// Compile-time ceiling. Records above this are not formatted or stored.
 #[cfg(debug_assertions)]

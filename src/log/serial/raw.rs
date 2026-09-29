@@ -33,7 +33,7 @@ static STOP_HOOK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 pub fn init() {
     // SAFETY: invariant: COM1's registers are the I/O ports
     // `COM1_BASE + REG_*` on every PC-compatible machine QEMU models, and
-    // this sequence only programs that UART; established by `vibeos::uart`.
+    // this sequence only programs that UART; established by `vibeos::uart::COM1_BASE`.
     unsafe {
         x86::outb(COM1_BASE + REG_IER, 0x00); // mask all interrupts
         x86::outb(COM1_BASE + REG_LCR, LCR_DLAB);
@@ -50,10 +50,11 @@ fn write_byte(b: u8) {
     let mut spin = TX_POLL_CAP;
     while spin > 0 {
         // SAFETY: invariant: `COM1_BASE + REG_LSR` and `+ REG_DATA` are
-        // COM1's status and data ports; established by `vibeos::uart`.
+        // COM1's status and data ports; established by `vibeos::uart::COM1_BASE`.
         let lsr = unsafe { x86::inb(COM1_BASE + REG_LSR) };
         if lsr & LSR_THRE != 0 {
-            // SAFETY: as above.
+            // SAFETY: as above: COM1's data port; established by
+            // `vibeos::uart::COM1_BASE`.
             unsafe { x86::outb(COM1_BASE + REG_DATA, b) };
             return;
         }
@@ -75,12 +76,13 @@ pub fn write_bytes(bytes: &[u8]) {
 /// Poll COM1 RX. No lock; a caller racing another reader holds IRQs off.
 pub fn try_read_byte() -> Option<u8> {
     // SAFETY: invariant: `COM1_BASE + REG_LSR` and `+ REG_DATA` are COM1's
-    // status and data ports; established by `vibeos::uart`.
+    // status and data ports; established by `vibeos::uart::COM1_BASE`.
     let lsr = unsafe { x86::inb(COM1_BASE + REG_LSR) };
     if lsr & LSR_DR == 0 {
         return None;
     }
-    // SAFETY: as above.
+    // SAFETY: as above: COM1's data port; established by
+    // `vibeos::uart::COM1_BASE`.
     Some(unsafe { x86::inb(COM1_BASE + REG_DATA) })
 }
 

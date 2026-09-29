@@ -33,10 +33,15 @@ const EXIT_PANIC: u32 = 0x11;
 const BT_MAX: usize = 24;
 
 fn kstart() -> u64 {
+    // SAFETY: `__kernel_vma_start` is a linker symbol; only its address is
+    // taken, never its byte; established by `linker.ld`'s definition, which
+    // `panic::kstart` relies on.
     unsafe { &__kernel_vma_start as *const u8 as u64 }
 }
 
 fn kend() -> u64 {
+    // SAFETY: as in `panic::kstart`: only the linker symbol's address is
+    // taken, never its byte.
     unsafe { &__kernel_vma_end as *const u8 as u64 }
 }
 
@@ -110,11 +115,20 @@ fn dump_thread() {
             if c.current.is_null() {
                 (c.cpu_id, 0, "<none>")
             } else {
+                // SAFETY: invariant I9: a non-null `current` names a `Tcb`
+                // that stays in `SCHED`; the other CPUs are sent the stop
+                // IPI first (`panic::begin_dump`), and this reads two
+                // fields set before the thread ran; established by
+                // `thread_init::switch_now`.
                 let t = unsafe { &*c.current };
                 (c.cpu_id, t.id.raw(), t.name)
             }
         }
     };
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a write to Serial cannot fail (DESIGN §2.5)"
+    )]
     let _ = writeln!(Serial, "vibeOS: panic: thread cpu={cpu} tid={tid} {name}");
 }
 
@@ -168,7 +182,13 @@ fn dump_backtrace(rip: u64, rbp: u64) {
         if !stackish(rbp) {
             break;
         }
+        // SAFETY: `stackish` accepted `rbp`: 8-byte aligned and inside the
+        // boot stack, the physmap, heap, KVA or the kernel image, which are
+        // mapped, so the saved-RBP word reads without a fault; established
+        // by `panic::stackish`.
         let prev = unsafe { core::ptr::read_volatile(rbp as *const u64) };
+        // SAFETY: as above, for the return-address word 8 bytes up, in the
+        // same mapped range; established by `panic::stackish`.
         let ret = unsafe { core::ptr::read_volatile(rbp.wrapping_add(8) as *const u64) };
         if prev == rbp || ret == 0 {
             break;
@@ -182,6 +202,9 @@ fn dump_backtrace(rip: u64, rbp: u64) {
 fn finish() -> ! {
     Serial::write_bytes(b"vibeOS: panic: halted\n");
     #[cfg(feature = "panic_exit")]
+    // SAFETY: `panic_exit` builds run under QEMU with isa-debug-exit at
+    // port 0xF4, whose write ends the VM; established by the harness's
+    // `-device isa-debug-exit`, which `panic::ISA_DEBUG_EXIT` names.
     unsafe {
         x86::outl(ISA_DEBUG_EXIT, EXIT_PANIC);
     }
@@ -213,22 +236,29 @@ fn panic(info: &PanicInfo) -> ! {
     Serial::write_bytes(marker::PANIC_BANNER.as_bytes());
     Serial::write_bytes(b"\n");
 
-    if let Some(loc) = info.location() {
-        let _ = writeln!(
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a write to Serial cannot fail (DESIGN §2.5)"
+    )]
+    let _ = write_where(info);
+
+    dump_common(rip, rbp, rsp, rflags);
+    finish();
+}
+
+/// The panic's location and message lines, as one `fmt::Result`.
+fn write_where(info: &PanicInfo) -> core::fmt::Result {
+    match info.location() {
+        Some(loc) => writeln!(
             Serial,
             "vibeOS: panic: at {}:{}:{}",
             loc.file(),
             loc.line(),
             loc.column()
-        );
-    } else {
-        Serial::write_bytes(b"vibeOS: panic: at <unknown>\n");
+        )?,
+        None => Serial::write_bytes(b"vibeOS: panic: at <unknown>\n"),
     }
-
-    let _ = writeln!(Serial, "vibeOS: panic: msg: {}", info.message());
-
-    dump_common(rip, rbp, rsp, rflags);
-    finish();
+    writeln!(Serial, "vibeOS: panic: msg: {}", info.message())
 }
 
 pub fn exception_halt(

@@ -116,14 +116,6 @@ mod fs;
     reason = "audit pending, ROADMAP §10.1"
 )]
 mod irq;
-#[allow(
-    clippy::let_underscore_must_use,
-    reason = "audit pending, ROADMAP §10.1"
-)]
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 mod log;
 #[allow(clippy::expect_used, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
