@@ -1,29 +1,113 @@
 //! IPI protocol helpers. DESIGN §7.6–§7.9, ROADMAP §4.8–§4.10.
 //!
-//! Portable: inbox bits, RR placement, shootdown waiter/ack math.
+//! Portable: the wake inbox, RR placement, shootdown waiter/ack math.
 //! MMIO and IDT live in the binary crate.
 
-use crate::thread::{CpuAffinity, MAX_THREADS, ThreadId};
+use crate::atomic::{AtomicU64, Ordering};
+use crate::thread::{CpuAffinity, MAX_THREADS};
 
 /// Matches the 64-bit online mask. PerCpu is heap-sized from MADT.
 pub const MAX_IPI_CPUS: usize = 64;
 
-const _: () = assert!(MAX_THREADS <= 64, "wake inbox is a u64 bitset");
+/// One CPU's cross-CPU wake inbox (DESIGN §7.6): a bitmap of `WORDS`
+/// `AtomicU64` words, one bit per thread-table slot, and a summary word
+/// with one bit per word. A remote CPU pushes a slot and sends `0xFD`; the
+/// owner drains it into its run queue. Nothing allocates, and a slot pushed
+/// twice before a drain is queued once.
+pub struct WakeInbox<const WORDS: usize> {
+    summary: AtomicU64,
+    words: [AtomicU64; WORDS],
+}
 
-pub const fn inbox_bit(id: ThreadId) -> Option<u64> {
-    if id.is_none() || id.0 >= 64 {
-        None
-    } else {
-        Some(1u64 << id.0)
+impl<const WORDS: usize> WakeInbox<WORDS> {
+    /// The summary word has a bit per word.
+    const FITS: () = assert!(WORDS >= 1 && WORDS <= 64, "WakeInbox: 1..=64 words");
+
+    /// An empty inbox. `const` outside `cfg(loom)`, whose atomics have no
+    /// `const fn new` (C-ATOMICS).
+    #[cfg(not(loom))]
+    pub const fn new() -> Self {
+        #[allow(clippy::let_unit_value, reason = "forces the FITS assertion")]
+        let () = Self::FITS;
+        Self {
+            summary: AtomicU64::new(0),
+            words: [const { AtomicU64::new(0) }; WORDS],
+        }
+    }
+
+    /// An empty inbox (loom's atomics have no `const fn new`).
+    #[cfg(loom)]
+    pub fn new() -> Self {
+        #[allow(clippy::let_unit_value, reason = "forces the FITS assertion")]
+        let () = Self::FITS;
+        Self {
+            summary: AtomicU64::new(0),
+            words: core::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+
+    /// Queue `slot`: a Release `fetch_or` of its bit, then a Release
+    /// `fetch_or` of its word's summary bit, so a drain that sees the
+    /// summary bit sees the slot's bit. False only for a slot at or past
+    /// `WORDS * 64`, which queues nothing.
+    pub fn push(&self, slot: usize) -> bool {
+        let w = slot / 64;
+        let Some(word) = self.words.get(w) else {
+            return false;
+        };
+        word.fetch_or(1u64 << (slot % 64), Ordering::Release);
+        self.summary.fetch_or(1u64 << w, Ordering::Release);
+        true
+    }
+
+    /// Take every queued slot: an Acquire `swap(0)` of the summary, then an
+    /// Acquire `swap(0)` of each word it flags, calling `f(slot)` for each
+    /// set bit in ascending order. True if `f` ran. A push that races the
+    /// drain sets its summary bit after its slot bit, so a slot this drain
+    /// misses is flagged for the next one.
+    pub fn drain(&self, mut f: impl FnMut(usize)) -> bool {
+        let mut summary = self.summary.swap(0, Ordering::Acquire);
+        let mut any = false;
+        while summary != 0 {
+            let w = summary.trailing_zeros() as usize;
+            summary &= summary - 1;
+            let Some(word) = self.words.get(w) else {
+                continue;
+            };
+            let mut bits = word.swap(0, Ordering::Acquire);
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                f(w * 64 + b);
+                any = true;
+            }
+        }
+        any
+    }
+
+    /// True when no slot is queued: a snapshot. Acquire, pairing with the
+    /// drain's swaps as with a push's `fetch_or`s, so a caller that sees it
+    /// empty sees what the drain did before it.
+    pub fn is_empty(&self) -> bool {
+        self.summary.load(Ordering::Acquire) == 0
+            && self.words.iter().all(|w| w.load(Ordering::Acquire) == 0)
     }
 }
 
-pub fn inbox_or(bits: u64, id: ThreadId) -> u64 {
-    match inbox_bit(id) {
-        Some(b) => bits | b,
-        None => bits,
+#[cfg(not(loom))]
+impl<const WORDS: usize> Default for WakeInbox<WORDS> {
+    fn default() -> Self {
+        Self::new()
     }
 }
+
+/// Words in the kernel's inbox: one bit per thread-table slot.
+pub const INBOX_WORDS: usize = MAX_THREADS.div_ceil(64);
+
+const _: () = assert!(MAX_THREADS <= 64 * 64, "the inbox summary is one u64");
+
+/// The kernel's per-CPU wake inbox, sized from `limits::MAX_THREADS`.
+pub type ThreadInbox = WakeInbox<INBOX_WORDS>;
 
 /// CPUs that must ack, excluding the initiator.
 pub const fn waiter_mask(online: u64, self_cpu: u32) -> u64 {
@@ -99,19 +183,50 @@ pub fn home_cpu(affinity: CpuAffinity, last: u32, online: u64) -> u32 {
 mod tests {
     use super::*;
 
-    fn tid(n: u32) -> ThreadId {
-        ThreadId(n)
+    fn drained<const W: usize>(inbox: &WakeInbox<W>) -> std::vec::Vec<usize> {
+        let mut out = std::vec::Vec::new();
+        inbox.drain(|s| out.push(s));
+        out
     }
 
     #[test]
-    fn inbox_bits_are_thread_ids() {
-        assert_eq!(inbox_bit(tid(0)), Some(1));
-        assert_eq!(inbox_bit(tid(3)), Some(8));
-        assert_eq!(inbox_bit(tid(63)), Some(1u64 << 63));
-        assert_eq!(inbox_bit(ThreadId::NONE), None);
-        assert_eq!(inbox_or(0, tid(2)), 4);
-        assert_eq!(inbox_or(4, tid(2)), 4);
-        assert_eq!(inbox_or(4, tid(0)), 5);
+    fn wake_inbox_push_drain_past_64() {
+        let inbox = WakeInbox::<16>::new();
+        assert!(inbox.is_empty());
+        for slot in [1023, 64, 0, 130, 63] {
+            assert!(inbox.push(slot));
+        }
+        assert!(!inbox.is_empty());
+        assert_eq!(drained(&inbox), std::vec![0, 63, 64, 130, 1023]);
+        assert!(inbox.is_empty());
+    }
+
+    #[test]
+    fn wake_inbox_double_push_queues_once() {
+        let inbox = WakeInbox::<16>::new();
+        assert!(inbox.push(70));
+        assert!(inbox.push(70));
+        assert_eq!(drained(&inbox), std::vec![70]);
+        assert!(!inbox.drain(|_| {}), "nothing left");
+    }
+
+    #[test]
+    fn wake_inbox_drain_clears_summary() {
+        let inbox = WakeInbox::<16>::new();
+        assert!(inbox.push(5));
+        assert!(inbox.push(900));
+        assert!(inbox.drain(|_| {}));
+        assert_eq!(inbox.summary.load(Ordering::Relaxed), 0);
+        assert!(inbox.words.iter().all(|w| w.load(Ordering::Relaxed) == 0));
+    }
+
+    #[test]
+    fn wake_inbox_push_out_of_range_refused() {
+        let inbox = WakeInbox::<16>::new();
+        assert!(!inbox.push(1024));
+        assert!(!inbox.push(usize::MAX));
+        assert!(inbox.is_empty());
+        assert!(ThreadInbox::new().push(MAX_THREADS - 1));
     }
 
     #[test]

@@ -135,8 +135,31 @@ impl ThreadHandle {
 pub(crate) struct Sched {
     slots: [Option<TryBox<Tcb>>; MAX_THREADS],
     timeouts: TimeoutQueue,
-    places: [(u32, ThreadId); MAX_THREADS],
+    /// Wakes recorded under SCHED, placed after it drops: (cpu, id, slot).
+    places: [(u32, ThreadId, u32); MAX_THREADS],
     place_n: usize,
+}
+
+/// Each thread-table slot's tid, `u32::MAX` for none: what a wake-inbox
+/// bit (a slot) names when its CPU drains it ([`tid_of_slot`]). Stored with
+/// Release under SCHED ([`publish_slot`]) whenever a slot takes a TCB.
+static SLOT_TID: [AtomicU32; MAX_THREADS] = [const { AtomicU32::new(u32::MAX) }; MAX_THREADS];
+
+/// Record that `slot` now holds thread `id`. Under SCHED.
+fn publish_slot(slot: usize, id: ThreadId) {
+    if let Some(t) = SLOT_TID.get(slot) {
+        // Release: pairs with the Acquire load in `tid_of_slot`.
+        t.store(id.0, Ordering::Release);
+    }
+}
+
+/// The tid in thread-table slot `slot`, for `ipi_init::drain_inbox`. A slot
+/// with a bit in some inbox holds a Ready thread, which cannot die before
+/// it runs, so the slot is not reused while the bit is set.
+pub(crate) fn tid_of_slot(slot: usize) -> Option<ThreadId> {
+    // Acquire: pairs with the Release store in `publish_slot`.
+    let raw = SLOT_TID.get(slot)?.load(Ordering::Acquire);
+    (raw != u32::MAX).then_some(ThreadId(raw))
 }
 
 impl Sched {
@@ -144,7 +167,7 @@ impl Sched {
         Self {
             slots: [const { None }; MAX_THREADS],
             timeouts: TimeoutQueue::empty(),
-            places: [(0, ThreadId::NONE); MAX_THREADS],
+            places: [(0, ThreadId::NONE, 0); MAX_THREADS],
             place_n: 0,
         }
     }
@@ -164,11 +187,23 @@ impl Sched {
         }
     }
 
+    /// `id`'s thread-table slot.
+    fn slot_of(&self, id: ThreadId) -> Option<usize> {
+        let slot = id.0 as usize;
+        match self.slots.get(slot)?.as_deref() {
+            Some(t) if t.id == id => Some(slot),
+            _ => None,
+        }
+    }
+
     fn place(&mut self, cpu: u32, id: ThreadId) {
         if self.place_n >= MAX_THREADS {
             return;
         }
-        self.places[self.place_n] = (cpu, id);
+        let Some(slot) = self.slot_of(id) else {
+            return;
+        };
+        self.places[self.place_n] = (cpu, id, slot as u32);
         self.place_n += 1;
     }
 
@@ -725,7 +760,9 @@ pub unsafe fn init_bootstrap() {
         let mut s = SCHED.lock();
         assert!(s.slots[0].is_none(), "bootstrap twice");
         s.slots[0] = Some(tcb);
+        publish_slot(0, ThreadId::BOOTSTRAP);
     }
+    crate::ipi_init::set_slot_tid_hook(tid_of_slot);
     per_cpu_init::with_current(|cpu| {
         per_cpu_init::set_current_thread(cpu, ptr);
         cpu.idle = ptr;
@@ -938,6 +975,7 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, Guard
         tcb.id = id;
         tcb.stack = Some(stack);
         s.slots[slot] = Some(tcb);
+        publish_slot(slot, id);
         Ok(id)
     });
     match placed {
@@ -1030,6 +1068,7 @@ fn spawn_inner(
         fill_tcb(
             tcb, name, entry, affinity, cpu, ks, top, tramp, first_nest, pid, as_cr3,
         );
+        publish_slot(slot, id);
         if enqueue {
             s.place(cpu, id);
         }
@@ -1087,6 +1126,7 @@ fn spawn_inner(
         s.timeouts.remove(id);
         tcb.id = id;
         s.slots[slot] = Some(tcb);
+        publish_slot(slot, id);
         if enqueue {
             s.place(cpu, id);
         }
@@ -1188,7 +1228,8 @@ pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
     while i < n {
         #[cfg(feature = "kernel_tests")]
         testing::place_stall(places[i].1);
-        crate::ipi_init::place_ready(places[i].0, places[i].1);
+        let (cpu, id, slot) = places[i];
+        crate::ipi_init::place_ready(cpu, id, slot as usize);
         i += 1;
     }
     r

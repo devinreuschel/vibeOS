@@ -546,9 +546,7 @@ pub(crate) fn test_late_wake_after_exit() -> Outcome {
     let Some(cpu1) = crate::ktest::cpu_remote(1) else {
         return Outcome::Fail("no cpu1");
     };
-    if !late_wait(|| {
-        cpu1.wake_inbox.load(Ordering::Acquire) == 0 && cpu1.runq_len.load(Ordering::Relaxed) == 0
-    }) {
+    if !late_wait(|| cpu1.wake_inbox.is_empty() && cpu1.runq_len.load(Ordering::Relaxed) == 0) {
         return Outcome::Fail("cpu1 did not take the wake");
     }
     if let Err(e) = thread_init::spawn_on("late-probe", late_wake_probe, 1) {

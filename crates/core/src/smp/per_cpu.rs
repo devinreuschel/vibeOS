@@ -15,6 +15,7 @@ use crate::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::apic::TimerMode;
 use crate::desc::Tss;
+use crate::ipi::ThreadInbox;
 use crate::sched::ReadyQueue;
 use crate::thread::{CpuContext, GuardedStack, Tcb, ThreadId};
 
@@ -90,9 +91,10 @@ pub struct PerCpuRemote {
     /// Set by the CPU after GS/IDT/LAPIC/timer, its last bring-up store
     /// (Release); the BSP waits on it (Acquire).
     pub ready: AtomicBool,
-    /// ThreadId bitset. Remote CPUs OR a bit (Release) and send `0xFD`;
-    /// the owner takes it with `swap` (Acquire).
-    pub wake_inbox: AtomicU64,
+    /// Thread-table slot bitmap with a summary word (DESIGN §7.6). Remote
+    /// CPUs push a slot (Release) and send `0xFD`; the owner drains it
+    /// (Acquire).
+    pub wake_inbox: ThreadInbox,
     /// Local APIC id. Written before the CPU is started, then read-only.
     pub apic_id: AtomicU32,
     /// Root this CPU last loaded. Owner stores after each CR3 write
@@ -109,7 +111,7 @@ macro_rules! remote_new {
             switches: AtomicU64::new(0),
             runq_len: AtomicUsize::new(0),
             ready: AtomicBool::new(false),
-            wake_inbox: AtomicU64::new(0),
+            wake_inbox: ThreadInbox::new(),
             apic_id: AtomicU32::new(0),
             as_cr3: AtomicU64::new(0),
         }
@@ -349,7 +351,7 @@ mod tests {
         assert_eq!(R.switches.load(Ordering::Relaxed), 0);
         assert_eq!(R.runq_len.load(Ordering::Relaxed), 0);
         assert!(!R.ready.load(Ordering::Relaxed));
-        assert_eq!(R.wake_inbox.load(Ordering::Relaxed), 0);
+        assert!(R.wake_inbox.is_empty());
         assert_eq!(R.apic_id.load(Ordering::Relaxed), 0);
         assert_eq!(R.as_cr3.load(Ordering::Relaxed), 0);
         let d = PerCpuRemote::default();

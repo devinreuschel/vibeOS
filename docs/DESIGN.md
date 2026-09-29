@@ -150,6 +150,9 @@ that sets it:
   `file_init::init` before it brings the filesystems up.
 - `ipi_init::set_reschedule_hook` (a reschedule IPI's preemption point), set by `sched_init::init`
   before the scheduler goes live.
+- `ipi_init::set_slot_tid_hook` (the wake-inbox drain's slot-to-tid lookup,
+  `thread_init::tid_of_slot`), set by `thread_init::init_bootstrap` before a second thread exists;
+  unset, a drain leaves the inbox as it is.
 - Planned (ROADMAP §12.6): the allocation entry's hooks, set by the page cache (clean-page reclaim),
   the writeback threads (their wake and bounded wait), and the process layer (the OOM killer).
 
