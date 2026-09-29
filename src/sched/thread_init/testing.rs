@@ -90,7 +90,8 @@ pub fn fail_next_fork_stack() {
 pub(in crate::sched) static REQUEUE: AtomicBool = AtomicBool::new(false);
 /// Moves the hook has made since boot (`sched::ktest::requeues`).
 pub(in crate::sched) static REQUEUES: AtomicU64 = AtomicU64::new(0);
-/// Set when a thread was moved, cleared by the dequeue that runs it.
+/// Per thread-table slot: set when its thread was moved, cleared by the
+/// dequeue that runs it.
 pub(in crate::sched) static ARRIVED: [AtomicBool; MAX_THREADS] =
     [const { AtomicBool::new(false) }; MAX_THREADS];
 
@@ -106,17 +107,19 @@ pub(super) fn next_online_cpu(me: u32) -> Option<u32> {
         .find(|&c| mask & (1u64 << c) != 0)
 }
 
-pub(super) fn moved(id: ThreadId) {
-    if let Some(a) = ARRIVED.get(id.raw() as usize) {
+/// Thread-table slot `slot`'s thread was moved. Under SCHED.
+pub(super) fn moved(slot: usize) {
+    if let Some(a) = ARRIVED.get(slot) {
         a.store(true, Ordering::Release);
     }
     REQUEUES.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Whether `id` arrived by a move and has not run since; clears it.
-pub(super) fn take_arrived(id: ThreadId) -> bool {
+/// Whether slot `slot`'s thread arrived by a move and has not run since;
+/// clears it. Under SCHED.
+pub(super) fn take_arrived(slot: usize) -> bool {
     ARRIVED
-        .get(id.raw() as usize)
+        .get(slot)
         .is_some_and(|a| a.swap(false, Ordering::AcqRel))
 }
 
@@ -200,10 +203,45 @@ pub(super) fn place_stall(id: ThreadId) {
     let end =
         time_init::read_tsc().saturating_add(LATE_WAKE_MS.saturating_mul(time_init::tsc_per_ms()));
     while time_init::read_tsc() < end {
-        if super::try_state(id) == Some(ThreadState::Dead) {
+        if exited(id) {
             PLACE_LATE.store(true, Ordering::Release);
             return;
         }
         core::hint::spin_loop();
     }
+}
+
+#[allow(
+    clippy::expect_used,
+    reason = "invariant: a test asks only about a thread it keeps from being reaped, and a thread's tid names its TCB until a spawn reuses its Dead slot (`thread_init::spawn_inner`)"
+)]
+pub fn state(id: ThreadId) -> ThreadState {
+    super::SCHED.lock().get(id).expect("unknown thread").state
+}
+
+pub fn try_state(id: ThreadId) -> Option<ThreadState> {
+    super::SCHED.lock().get(id).map(|t| t.state)
+}
+
+/// Whether `id`'s thread has exited: its TCB is Dead, or a spawn has
+/// reused its Dead slot, after which the tid names no thread. For an id a
+/// spawn returned.
+pub fn exited(id: ThreadId) -> bool {
+    matches!(try_state(id), None | Some(ThreadState::Dead))
+}
+
+#[allow(
+    clippy::expect_used,
+    reason = "invariant: a test asks only about a thread it keeps from being reaped, and a thread's tid names its TCB until a spawn reuses its Dead slot (`thread_init::spawn_inner`)"
+)]
+pub fn name(id: ThreadId) -> &'static str {
+    super::SCHED.lock().get(id).expect("unknown thread").name
+}
+
+#[allow(
+    clippy::expect_used,
+    reason = "invariant: a test asks only about a thread it keeps from being reaped, and a thread's tid names its TCB until a spawn reuses its Dead slot (`thread_init::spawn_inner`)"
+)]
+pub fn cpu_of(id: ThreadId) -> u32 {
+    super::SCHED.lock().get(id).expect("unknown thread").cpu
 }
