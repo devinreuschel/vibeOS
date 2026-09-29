@@ -669,14 +669,14 @@ pub fn halt_if_idle() {
         // SAFETY: `cli` touches only IF; the `sti` below or the idle loop's
         // next pass turns it back on; established here.
         unsafe {
-            core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+            core::arch::asm!("cli", options(nostack, preserves_flags));
         }
         crate::ipi_init::drain_inbox();
         if !per_cpu_init::current().runq.is_empty() {
             // SAFETY: `sti` restores the IF=1 this idle loop runs with;
             // established here.
             unsafe {
-                core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+                core::arch::asm!("sti", options(nostack, preserves_flags));
             }
             return;
         }
