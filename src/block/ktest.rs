@@ -1,4 +1,4 @@
-//! In-guest tests for block (kernel_tests only). Rows: the list in crate::ktest.
+//! In-guest tests for block (kernel_tests only). Rows: [`TESTS`].
 
 use alloc::vec::Vec;
 use core::hint::{black_box, spin_loop};
@@ -9,7 +9,7 @@ use vibeos::cache::PAGE;
 
 use crate::block_init::{self, IoWaiter, testing as blk_testing};
 use crate::cache_init::{self, DEV_RAM0, testing};
-use crate::ktest::{Outcome, spawn_thread};
+use crate::ktest::{Outcome, Test, spawn_thread, test};
 use crate::part_init;
 use crate::thread_init;
 use crate::time_init;
@@ -945,3 +945,22 @@ pub(crate) fn block_fua_write() -> Outcome {
         crate::drivers::ktest::flushes,
     )
 }
+
+/// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
+/// runs them (DESIGN §8.2).
+pub(crate) const TESTS: &[Test] = &[
+    test("block_ramdisk_rw", test_block_ramdisk_rw),
+    test("block_concurrent", test_block_concurrent),
+    test("block_retry", test_block_retry),
+    test("block_part_mbr", test_block_part_mbr),
+    test("block_part_gpt", test_block_part_gpt),
+    test("block_cache_hit", test_block_cache_hit),
+    test("block_cache_evict", test_block_cache_evict),
+    test(
+        "lifetime_iowaiter_publish_last",
+        lifetime_iowaiter_publish_last,
+    )
+    .deadline(60_000),
+    test("cache_flush_waits_writeback", cache_flush_waits_writeback),
+    test("block_fua_write", block_fua_write),
+];

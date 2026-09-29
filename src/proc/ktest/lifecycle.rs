@@ -1,5 +1,5 @@
 //! In-guest tests for proc (kernel_tests only): stop, kill and out-of-memory paths.
-//! Rows: the list in crate::ktest.
+//! Rows: the parent `ktest.rs`'s `TESTS`.
 
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};

@@ -1,9 +1,9 @@
-//! In-guest tests for time (kernel_tests only). Rows: the list in crate::ktest.
+//! In-guest tests for time (kernel_tests only). Rows: [`TESTS`].
 
 use vibeos::time::{CalibSource, Instant, calib_band, calib_in_band, next_deadline};
 
 use crate::acpi_init;
-use crate::ktest::Outcome;
+use crate::ktest::{Outcome, Test, test};
 use crate::time_init::{self, STATE};
 use crate::x86;
 
@@ -162,3 +162,14 @@ pub(crate) fn test_rtc_offset() -> Outcome {
     });
     Outcome::Ok
 }
+
+/// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
+/// runs them (DESIGN §8.2).
+pub(crate) const TESTS: &[Test] = &[
+    test("pit_tick_rate", test_pit_tick_rate),
+    test("now_us_monotonic", test_now_us_monotonic),
+    test("now_us_under_yields", test_now_us_under_yields),
+    test("tsc_calib_source", test_tsc_calib_source),
+    test("uptime_sides", test_uptime_sides),
+    test("rtc_offset", test_rtc_offset),
+];

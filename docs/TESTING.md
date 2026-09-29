@@ -75,6 +75,13 @@ that can longjmp out of an interrupt gate, since the skipped `iretq` would leave
 test the registry fails it if IF is off or `irq_nest` is not 0, and restores both. `ktest_context`
 checks the registry's context and a `spawn_here` worker's.
 
+Each subsystem's `src/<subsystem>/ktest.rs` exports its rows as `pub(crate) const TESTS: &[Test]`,
+and `src/ktest/mod.rs` runs the lists in the order of its `GROUPS` (DESIGN §1.3). A list left out
+of `GROUPS` is unreferenced code, which the `kernel_tests` clippy run with `-D warnings` rejects as
+dead; the rule against a blanket `allow(dead_code)` in production modules (ROADMAP §10.2, Q2) keeps
+that true. The log group runs first, since `log_boot_captured` reads boot lines that the other
+groups' lines push out of the log ring.
+
 Built in the one `target/` like every variant, but copied to its own named ELF,
 `build/kernels/vibeos-ktest.elf`, which only `build/vibeos-ktest.iso`'s recipe reads. This is not
 fussiness: an ISO recipe that packaged whatever ELF the last build left in `target/` could put a
@@ -117,10 +124,7 @@ and from `end` to QEMU's exit. From `begin` to `end`, each run gets its printed 
 and each gap between lines 5 s, all multiplied by `env_config`'s one timeout scale. That backstops
 the in-guest deadline, which a CPU wedged with IF=0 never checks; a timeout names the test of the
 last run line and prints the partial line the guest was writing. Adding tests changes no timeout,
-and a test that needs longer carries a registry override, reviewed as code. A per-subsystem list
-left out of the aggregate registry is unreferenced code, which the `kernel_tests` clippy run with
-`-D warnings` rejects as dead; the rule against a blanket `allow(dead_code)` in production modules
-(ROADMAP §10.2, Q2) keeps that true. The `utest_*` lines of ROADMAP §10.5 follow the same protocol.
+and a test that needs longer carries a registry override, reviewed as code. The `utest_*` lines of ROADMAP §10.5 follow the same protocol.
 
 Skips are first class and carry their reason on the `ktest: skip <name>: <reason>` line. Every skip
 names what the configuration lacks: `no AP`, `no virtio-blk`, `no virtio-rng`, `no e1000e`, `no edu`,

@@ -162,6 +162,7 @@ GONE: list[tuple[str, str]] = [
     ("MAX_ELF", "`MAX_ELF` removed: the loader maps"),
     ("TooBig", "`MAX_ELF` removed: the loader maps"),
     ("src/proc/user_init.rs: fn read_path", "`MAX_ELF` removed: the loader maps"),
+    ("src/ktest/mod.rs: const SUITES", "the in-guest registry split per subsystem"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

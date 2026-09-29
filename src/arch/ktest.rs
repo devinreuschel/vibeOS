@@ -1,4 +1,4 @@
-//! In-guest tests for arch (kernel_tests only). Rows: the list in crate::ktest.
+//! In-guest tests for arch (kernel_tests only). Rows: [`TESTS`].
 
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -20,7 +20,7 @@ use crate::arch::idt::{TrapFrame, testing};
 use crate::ipi_init;
 use crate::irq_init;
 use crate::ktest::user::{self, DEFAULT, Image, user_code};
-use crate::ktest::{Outcome, spawn_thread_on, spin_until_ns};
+use crate::ktest::{Outcome, Test, spawn_thread_on, spin_until_ns, test};
 use crate::kva_init;
 use crate::per_cpu_init;
 use crate::proc_init;
@@ -31,8 +31,10 @@ use crate::x86::{
     CR4_OSXMMEXCPT, CR4_PAE, CR4_PGE,
 };
 
+mod seam;
 mod uaccess;
 
+pub(crate) use seam::test_arch_seam_core;
 pub(crate) use uaccess::*;
 
 const CR0_EM: u64 = 1 << 2;
@@ -1442,56 +1444,31 @@ pub(crate) fn test_force_kernel_irq_window() -> Outcome {
     Outcome::Ok
 }
 
-/// The x86_64 port's first seam impls, through `arch::current::Arch`
-/// (ROADMAP §10.3, PORTABILITY §11.1).
-pub(crate) fn test_arch_seam_core() -> Outcome {
-    use vibeos::arch::x86_64::trap::{Abi, UserFrame};
-    use vibeos::arch::{CycleCounter, InterruptMask, PerCpuBase, SyscallAbi};
-
-    use crate::arch::current::Arch;
-
-    if !Arch::enabled() {
-        return Outcome::Fail("registry runs with IF off");
-    }
-    let outer = Arch::save_disable();
-    let inner = Arch::save_disable();
-    Arch::restore(inner);
-    let after_inner = Arch::enabled();
-    let id = Arch::cpu_id();
-    let want_id = per_cpu_init::current().cpu_id;
-    Arch::restore(outer);
-    if after_inner {
-        return Outcome::Fail("IF on after the inner restore");
-    }
-    if !Arch::enabled() {
-        return Outcome::Fail("IF off after the outer restore");
-    }
-    if id != want_id {
-        return crate::fail_fmt!("cpu_id {} != PerCpu cpu_id {}", id, want_id);
-    }
-
-    let want_hz = time_init::tsc_per_ms().checked_mul(1000);
-    let hz = Arch::freq_hz();
-    if hz != want_hz || hz.is_none() {
-        return crate::fail_fmt!("freq_hz {:?} != tsc_per_ms * 1000 {:?}", hz, want_hz);
-    }
-    let hz = hz.unwrap_or(0);
-    let t0 = Arch::now();
-    time_init::busy_wait_ms(1);
-    let t1 = Arch::now();
-    let d = t1.wrapping_sub(t0);
-    if d < hz / 2000 {
-        return crate::fail_fmt!("now advanced {} over 1 ms, want >= {}", d, hz / 2000);
-    }
-
-    let mut f = UserFrame::default();
-    Arch::set_ip(&mut f, 0x40_1000);
-    if Arch::ip(&f) != Abi::ip(&f) || Abi::ip(&f) != 0x40_1000 {
-        return crate::fail_fmt!("ip {:#x} != Abi {:#x}", Arch::ip(&f), Abi::ip(&f));
-    }
-    Abi::set_ip(&mut f, 0x40_2000);
-    if Arch::ip(&f) != 0x40_2000 {
-        return crate::fail_fmt!("ip {:#x} after Abi::set_ip", Arch::ip(&f));
-    }
-    Outcome::Ok
-}
+/// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
+/// runs them (DESIGN §8.2).
+pub(crate) const TESTS: &[Test] = &[
+    test("gdt_selectors", test_gdt_selectors),
+    test("star_sysret_layout", test_star_sysret_layout),
+    test("int3_roundtrip", test_int3_roundtrip),
+    test("scoped_pf", test_scoped_pf),
+    test("gp_catch", test_gp_catch),
+    test("df_on_ist", test_df_on_ist),
+    test("lapic_timer_mode", test_lapic_timer_mode),
+    test("lapic_timer_rearm", test_lapic_timer_rearm),
+    test("ioapic_pit_gsi_masked", test_ioapic_pit_gsi_masked),
+    test("irq_guard_nest", test_irq_guard_nest),
+    test("cpu_hardening", test_cpu_hardening),
+    test("ac_clear_on_exception", test_ac_clear_on_exception).deadline(30_000),
+    test("ac_clear_user_popf", test_ac_clear_user_popf).deadline(30_000),
+    test("ist_gs_sign", test_ist_gs_sign).deadline(30_000),
+    test("user_exceptions", test_user_exceptions).deadline(30_000),
+    test("user_device_irq", test_user_device_irq).deadline(30_000),
+    test("user_ipi", test_user_ipi).deadline(30_000),
+    test("cpu_control_regs", cpu_control_regs),
+    test("catch_ignores_other_cpu", test_catch_ignores_other_cpu),
+    test("catch_ignores_user_frame", test_catch_ignores_user_frame).deadline(30_000),
+    test("force_kernel_irq_window", test_force_kernel_irq_window).deadline(30_000),
+    test("arch_seam_core", test_arch_seam_core),
+    test("uaccess_smap_stray_fault", test_uaccess_smap_stray_fault),
+    test("uaccess_smep_user_jump", test_uaccess_smep_user_jump),
+];

@@ -1,4 +1,4 @@
-//! In-guest tests for irq (kernel_tests only). Rows: the list in crate::ktest.
+//! In-guest tests for irq (kernel_tests only). Rows: [`TESTS`].
 
 use core::hint::spin_loop;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -16,9 +16,9 @@ use crate::apic_init;
 use crate::ipi_init;
 use crate::irq_init;
 use crate::ktest::{
-    EDU_IDENT, EDU_IDENT_VAL, Outcome, alloc_frames_owned, bar0_va, cpu_remote, find_edu,
+    EDU_IDENT, EDU_IDENT_VAL, Outcome, Test, alloc_frames_owned, bar0_va, cpu_remote, find_edu,
     free_frames_owned, mmio_r32, mmio_w32, quiescent_free_frames, second_cpu, spawn_thread_on,
-    spin_until_ns,
+    spin_until_ns, test,
 };
 use crate::kva_init;
 use crate::pci_init;
@@ -1021,3 +1021,20 @@ pub(crate) fn wake_inbox_and_kva_pool() -> Outcome {
     }
     Outcome::Ok
 }
+
+/// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
+/// runs them (DESIGN §8.2).
+pub(crate) const TESTS: &[Test] = &[
+    test("reschedule_ipi_wake_ap", test_reschedule_ipi_wake_ap),
+    test("call_function_ipi", test_call_function_ipi),
+    test("reschedule_hook_installed", test_reschedule_hook_installed),
+    test("irq_pool", test_irq_pool),
+    test("irq_free_threaded", test_irq_free_threaded),
+    test("msix_cpu", test_msix_cpu),
+    test("intx_fallback", test_intx_fallback),
+    test("intx_free_masks", test_intx_free_masks),
+    test("msix_cpu_publish_last", msix_cpu_publish_last),
+    test("lifetime_shootdown_ack_late", lifetime_shootdown_ack_late).deadline(15_000),
+    test("shootdown_ack_while_busy", shootdown_ack_while_busy),
+    test("wake_inbox_and_kva_pool", wake_inbox_and_kva_pool),
+];

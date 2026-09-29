@@ -1,5 +1,5 @@
 //! In-guest test of counted objects' deferred release (ROADMAP §10.4,
-//! DESIGN §2.11 rule 6). Row: the list in crate::ktest.
+//! DESIGN §2.11 rule 6). Rows: the parent `ktest.rs`'s `TESTS`.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 

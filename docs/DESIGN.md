@@ -203,13 +203,12 @@ children, need no row.
 **In-guest tests.** A `kernel_tests` build's test bodies live beside the code they test: each kernel
 subsystem directory holds a `ktest.rs` (`src/mm/ktest.rs`, `src/sched/ktest.rs`, and so on;
 `src/arch/ktest.rs` for the x86_64 port), declared `#[cfg(feature = "kernel_tests")] pub mod ktest;` in
-that directory's `mod.rs`, so no other build compiles it. `src/ktest/mod.rs` holds the runner, the
-helpers that tests of more than one subsystem share, and the one ordered list of tests
+that directory's `mod.rs`, so no other build compiles it. Each subsystem's `ktest.rs` exports its
+rows in run order as `pub(crate) const TESTS: &[Test]`, and `src/ktest/mod.rs` holds the runner, the
+helpers that tests of more than one subsystem share, and the ordered list of those lists, `GROUPS`
 ([TESTING.md §8.2](TESTING.md#82-in-guest-tests)); `src/ktest/user.rs` builds the ring-3 programs tests
-spawn. A new test goes into its subsystem's `ktest.rs`, and its row after the last row of that subsystem
-in the list, or at the end if it has none. Planned (ROADMAP §10.2, T1): each subsystem's `ktest.rs`
-exports its own rows. Planned (ROADMAP §10.2, Q2): the `kernel_tests` hooks still in production modules
-move into these files.
+spawn. A new test goes into its subsystem's `ktest.rs`, and its row into that file's `TESTS`. Planned
+(ROADMAP §10.2, Q2): the `kernel_tests` hooks still in production modules move into these files.
 
 ## 1.4 Documentation rules
 

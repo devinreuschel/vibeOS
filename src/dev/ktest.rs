@@ -1,4 +1,4 @@
-//! In-guest tests for dev (kernel_tests only). Rows: the list in crate::ktest.
+//! In-guest tests for dev (kernel_tests only). Rows: [`TESTS`].
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use vibeos::dev::{ClaimError, Device, Driver, IdMatch, ProbeError};
@@ -16,8 +16,8 @@ use crate::dma_init;
 use crate::fs_init;
 use crate::heap_init::{self, fail_after::Scope};
 use crate::ktest::{
-    EDU_IDENT, EDU_IDENT_VAL, Outcome, bar0_va, fid, find_edu, mmio_r32, mmio_w32,
-    quiescent_free_frames, spin_until_ns,
+    EDU_IDENT, EDU_IDENT_VAL, Outcome, Test, bar0_va, fid, find_edu, mmio_r32, mmio_w32,
+    quiescent_free_frames, spin_until_ns, test,
 };
 use crate::log_init;
 use crate::paging_init;
@@ -568,3 +568,19 @@ pub(crate) fn test_dev_probe_alloc_fail() -> Outcome {
     }
     Outcome::Ok
 }
+
+/// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
+/// runs them (DESIGN §8.2).
+pub(crate) const TESTS: &[Test] = &[
+    test("pci_qemu_set", test_pci_qemu_set),
+    test("pci_bar_map", test_pci_bar_map),
+    test("pci_cfg_rw", test_pci_cfg_rw),
+    test("pci_claim_exclusive", test_pci_claim_exclusive),
+    test("pci_bind_order", test_pci_bind_order),
+    test("dma_alloc", test_dma_alloc),
+    test("dma_edu", test_dma_edu),
+    test("virtio_bind", test_virtio_bind),
+    test("virtio_vq", test_virtio_vq),
+    test("dev_random_source", test_dev_random_source),
+    test("dev_probe_alloc_fail", test_dev_probe_alloc_fail),
+];

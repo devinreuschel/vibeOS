@@ -1,11 +1,11 @@
-//! In-guest tests for log (kernel_tests only). Rows: the list in crate::ktest.
+//! In-guest tests for log (kernel_tests only). Rows: [`TESTS`].
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::log::Level;
 
-use crate::ktest::{Outcome, spin_until_ns};
+use crate::ktest::{Outcome, Test, spin_until_ns, test};
 use crate::{per_cpu_init, thread_init, time_init};
 
 pub(crate) fn test_log_boot_captured() -> Outcome {
@@ -240,3 +240,15 @@ pub(crate) fn test_serial_frame() -> Outcome {
     crate::marker!("vibeOS: ktest: serial frame after open");
     Outcome::Ok
 }
+
+/// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
+/// runs them (DESIGN §8.2).
+pub(crate) const TESTS: &[Test] = &[
+    test("log_boot_captured", test_log_boot_captured),
+    test("log_runtime_filter", test_log_runtime_filter),
+    test("log_emit_roundtrip", test_log_emit_roundtrip),
+    test("log_dmesg_no_recapture", test_log_dmesg_no_recapture),
+    test("log_reentry_drop_counted", test_log_reentry_drop_counted),
+    test("serial_lines_whole", test_serial_lines_whole).deadline(60_000),
+    test("serial_frame", test_serial_frame),
+];
