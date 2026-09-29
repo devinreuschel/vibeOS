@@ -778,3 +778,27 @@ needs = [
   "an `arch` module boundary built",  # L1277
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L925
+[[box]]
+key = "BPB parsing and validation. Reopened"
+needs = [
+  "a crafted FAT BPB fails",  # L1234
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L950
+[[box]]
+key = "extent-based allocation rather than block"
+needs = [
+  "a vibefs write that cannot",  # L1495
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L952
+[[box]]
+key = "checksums on metadata and optionally"
+needs = [
+  "vibefs never rewrites corrupt data",  # L1496
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
