@@ -198,7 +198,7 @@ children, need no row.
 | block | `block/{mod,part,cache}.rs` | `block/{mod,block_init,part_init,cache_init}.rs` |
 | fs | `fs/{mod,inode,mount,walk,file,ramfs,testfs,tests}.rs`, `fs/kernfs/{mod,node,devfs,tmpfs,procfs,sysfs,tests}.rs`, `fs/vibefs/{mod,disk,layout,vol,ops,commit,mkfs,fsck,tests}.rs`, `fs/fat/{mod,vol,rw,dirent,chain,mkfs,tests}.rs` | `fs/{mod,fs_init,fat_init,vibefs_init,vibefs_crash,file_init}.rs` |
 | proc | `proc/{mod,elf,pid,syscall,uaccess}.rs`, `proc/addr_space/{mod,tests}.rs` | `proc/{mod,addr_space_init,user_init,syscall_init,uaccess_init}.rs`, `proc/proc_init/{mod,fd,exec,exit}.rs` |
-| ktest | — | `ktest/{mod,user}.rs` (`kernel_tests` only) |
+| ktest | `ktest/mod.rs` (selection by `vibeos.ktest=`, run counts, deadlines) | `ktest/{mod,user}.rs` (`kernel_tests` only) |
 
 **In-guest tests.** A `kernel_tests` build's test bodies live beside the code they test: each kernel
 subsystem directory holds a `ktest.rs` (`src/mm/ktest.rs`, `src/sched/ktest.rs`, and so on;
