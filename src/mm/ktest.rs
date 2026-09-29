@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use vibeos::heap::HEAP_SIZE;
 use vibeos::kva::{KVA_END, KVA_START, PAGE_SIZE};
-use vibeos::paging::{PageFlags, PhysAddr, VirtAddr, heap_flags};
+use vibeos::paging::{self, PageFlags, PageSize, PhysAddr, VirtAddr, heap_flags};
 
 use crate::diag;
 use crate::ipi_init;
@@ -42,7 +42,7 @@ pub(crate) fn test_map_unmap() -> Outcome {
     if got != 0xAABB_CCDD_EEFF_0011 {
         return Outcome::Fail("readback mismatch");
     }
-    let Some((unmapped, _)) = (unsafe { paging_init::unmap_4k(va) }) else {
+    let Some((unmapped, _)) = (unsafe { unmap_4k(va) }) else {
         return Outcome::Fail("unmap returned none");
     };
     if unmapped != pa {
@@ -76,7 +76,7 @@ pub(crate) fn test_nx_enforcement() -> Outcome {
     let f: unsafe extern "C" fn() = unsafe { core::mem::transmute(va.as_u64()) };
     core::hint::black_box(f);
     let fault = catch_fault(|| unsafe { f() });
-    let _ = unsafe { paging_init::unmap_4k(va) };
+    let _ = unsafe { unmap_4k(va) };
     free_frame(pa);
     kva_init::free_va(va, PAGE_SIZE);
     let Some(fault) = fault else {
@@ -378,7 +378,7 @@ pub(crate) fn test_tlb_shootdown_remote() -> Outcome {
     let r = shoot_touch(1);
     if r != 1 {
         shoot_quit();
-        let _ = unsafe { paging_init::unmap_4k(va) };
+        let _ = unsafe { unmap_4k(va) };
         free_frame(pa);
         kva_init::free_va(va, PAGE_SIZE);
         return if r == 0 {
@@ -389,7 +389,7 @@ pub(crate) fn test_tlb_shootdown_remote() -> Outcome {
     }
 
     let before = ipi_init::shootdown_count();
-    let _ = unsafe { paging_init::unmap_4k(va) };
+    let _ = unsafe { unmap_4k(va) };
     if shoot_touch(2) != 2 {
         shoot_quit();
         let _ = unsafe { paging_init::map_4k(va, pa, heap_flags()) };
@@ -414,7 +414,7 @@ pub(crate) fn test_tlb_shootdown_remote() -> Outcome {
     unsafe { (va.as_u64() as *mut u64).write_volatile(0xD15EA5E) };
     let ok = shoot_touch(3) == 1;
     shoot_quit();
-    let _ = unsafe { paging_init::unmap_4k(va) };
+    let _ = unsafe { unmap_4k(va) };
     free_frame(pa);
     kva_init::free_va(va, PAGE_SIZE);
     if !ok {
@@ -522,7 +522,7 @@ pub(crate) fn frames_none_leaked() -> Outcome {
 /// Another CPU may take PT briefly after the drop, so the free check polls.
 pub(crate) fn current_mapper_holds_pt() -> Outcome {
     let g = paging_init::current_mapper();
-    let held = !paging_init::pt_lock_free();
+    let held = !pt_lock_free();
     let walks = g
         .translate(VirtAddr(current_mapper_holds_pt as *const () as u64))
         .is_some();
@@ -533,7 +533,7 @@ pub(crate) fn current_mapper_holds_pt() -> Outcome {
     if !walks {
         return Outcome::Fail("guard's mapper does not translate kernel text");
     }
-    if !spin_until_ns(paging_init::pt_lock_free, 100_000_000) {
+    if !spin_until_ns(pt_lock_free, 100_000_000) {
         return Outcome::Fail("PT still held after drop");
     }
     Outcome::Ok
@@ -608,6 +608,39 @@ pub(crate) fn vmap_32_frames_unmapped() -> Outcome {
 }
 
 // ------------------ hooks ------------------
+
+// Test-only helpers over `paging_init`'s tables (Q2).
+
+/// Page-table pages the kernel mapper has taken from the buddy since boot,
+/// the PML4 included. They stay in the kernel tables for good: a mapping
+/// that reaches a 2 MiB span of KVA or heap no earlier mapping reached
+/// takes one, and its unmap leaves it in place.
+pub(crate) fn table_pages() -> usize {
+    paging_init::TABLE_PAGES.load(Ordering::Relaxed)
+}
+
+/// Whether PT is free right now: held by no CPU, this one included. It
+/// reads the lock rather than trying it, since a `try_lock` of a rank this
+/// CPU holds fails the rank check.
+pub(crate) fn pt_lock_free() -> bool {
+    !paging_init::PT.is_locked()
+}
+
+/// Unmap one leaf, drop PT, then shootdown. Returns the frame.
+///
+/// # Safety
+/// Caller is responsible for not unmapping a page the CPU is using
+/// (stack, code, the heap it is currently allocating from, …).
+pub unsafe fn unmap_4k(va: VirtAddr) -> Option<(PhysAddr, PageSize)> {
+    // SAFETY: `unmap_4k_locked`'s contract; the caller will not use `va`
+    // until the shootdown below (this fn's `# Safety` contract, established
+    // here).
+    let r = paging_init::with_pt(|pt| unsafe { paging_init::unmap_4k_locked(pt, va) });
+    if r.is_some() {
+        paging::tlb_shootdown_others(va);
+    }
+    r
+}
 
 /// A `kernel_tests` hook that fails every counted heap allocation after a
 /// budget (ROADMAP §10.4, C-FAILAFTER). `heap_init`'s `KernelAlloc::alloc`

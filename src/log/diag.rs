@@ -44,7 +44,11 @@ pub fn meminfo_to(w: &mut impl Write) {
         heap.used, heap.capacity
     );
     let _ = writeln!(w, "vibeOS: meminfo: kva used {} B", kva.used);
-    paging_init::dump_ranges_to(w);
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "DESIGN §2.5: a write to Serial or the console cannot fail"
+    )]
+    let _ = paging_init::dump_ranges_to(w);
 }
 
 /// Tick milliseconds and TSC microseconds side by side. ROADMAP §2.8.
