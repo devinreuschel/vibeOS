@@ -73,6 +73,16 @@ pub const OPTIONS: &[Opt] = &[
         origin: Origin::Linux,
         class: Class::Unstable,
     },
+    Opt {
+        name: "vibeos.ktest",
+        origin: Origin::Vibeos,
+        class: Class::Internal,
+    },
+    Opt {
+        name: "vibeos.ktest_repeat",
+        origin: Origin::Vibeos,
+        class: Class::Internal,
+    },
 ];
 
 /// Sysctl paths vibeOS implements, dotted. None yet: every

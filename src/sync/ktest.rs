@@ -967,7 +967,7 @@ pub(crate) fn test_op_gate_kill_sleeps() -> Outcome {
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
     test("irqcell_reentry_panics", test_irqcell_reentry_panics),
-    test("bootcell_set_once", test_bootcell_set_once),
+    test("bootcell_set_once", test_bootcell_set_once).once(),
     test("spin_mutex", test_spin_mutex),
     test("lock_spins", test_lock_spins),
     test("blocking_mutex_counter", test_blocking_mutex_counter),

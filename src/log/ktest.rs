@@ -267,7 +267,7 @@ pub(crate) fn test_serial_frame() -> Outcome {
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
     test("log_boot_level", test_log_boot_level),
-    test("log_boot_captured", test_log_boot_captured),
+    test("log_boot_captured", test_log_boot_captured).once(),
     test("log_runtime_filter", test_log_runtime_filter),
     test("log_emit_roundtrip", test_log_emit_roundtrip),
     test("log_dmesg_no_recapture", test_log_dmesg_no_recapture),

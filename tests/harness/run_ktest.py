@@ -3,13 +3,16 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 import sys
-from collections.abc import Callable
+from collections import Counter
+from collections.abc import Callable, Iterable
 
 from tests.harness import frame, results
 from tests.harness.harness import (
+    EnvConfig,
     HarnessError,
     KtestSummary,
     QemuConfig,
@@ -19,6 +22,7 @@ from tests.harness.harness import (
     env_config,
     env_flag,
     ktest_devices,
+    ktest_lines,
     ktest_summary,
     make_disk,
     qemu_argv,
@@ -129,11 +133,21 @@ def _block_name(name: str) -> Callable[[str], bool]:
     return pred
 
 
+def ran(lines: Iterable[str], name: str) -> bool:
+    """Whether the boot printed a `run <name>` line."""
+    return any(k.kind == "run" and k.name == name for k in ktest_lines(lines))
+
+
+# `block_persist` writes a pattern the persist reboot rereads (DESIGN §8.2).
+PERSIST_TEST = "block_persist"
+
+
 def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool) -> RunResult:
     """One ktest QEMU. It never retries (ROADMAP §10.2, F021).
 
     A timeout, a `FAIL` line, a panic signature, or a missing marker raises
-    `HarnessError` from this one boot.
+    `HarnessError` from this one boot. The persist lines are required only
+    when the boot ran `block_persist`.
     """
     raw = run_qemu_until_exit(cfg, timeout_s=timeout)
     results.current().add_boot(qemu_argv(cfg, None), cfg, raw.exit_code)
@@ -146,20 +160,111 @@ def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool) -> Run
         _check_serial_frame(raw.lines)
     _require_line(klines, _block_name("vda"), "missing virtio-blk marker")
     _require_line(klines, _block_name("vdap1"), "missing vdap1 marker")
+    persist = ran(raw.lines, PERSIST_TEST)
     if persist_reboot:
-        _require_line(
-            klines,
-            lambda ln: ln == "vibeOS: persist: intact",
-            "persist pattern did not survive reboot",
-        )
+        if persist:
+            _require_line(
+                klines,
+                lambda ln: ln == "vibeOS: persist: intact",
+                "persist pattern did not survive reboot",
+            )
     else:
         _require_line(klines, _block_name("vdap2"), "missing vdap2 marker")
-        _require_line(
-            klines,
-            lambda ln: ln == "vibeOS: persist: wrote",
-            "missing persist wrote",
-        )
+        if persist:
+            _require_line(
+                klines,
+                lambda ln: ln == "vibeOS: persist: wrote",
+                "missing persist wrote",
+            )
     return raw
+
+
+# The selection proof (ROADMAP §10.2): wildcard rows run on every pass, a
+# `.once()` row once, an opt-in row only when named literally, and
+# `loglevel=8` reaches `log_boot_level`. `ktest_*` also matches the
+# registry's own tests in the sched group.
+SELECT_KTEST = "ktest_*,ktest_optin_probe,log_boot_level"
+SELECT_REPEAT = 3
+SELECT_CMDLINE = "loglevel=8"
+SELECT_EXPECTED: dict[str, int] = {
+    "ktest_names_unique": 3,
+    "ktest_once_probe": 1,
+    "ktest_optin_probe": 3,
+    "log_boot_level": 3,
+    "ktest_rows": 3,
+    "ktest_fail_fmt": 3,
+    "ktest_helpers": 3,
+    "ktest_context": 3,
+}
+SELECT_ABSENT = frozenset({"ktest_deadline_hang"})
+# F074's frame baseline, repeated in one boot at `-smp 2`.
+REPEAT_TEST = "reap_many_via_idle"
+REPEAT_N = 20
+
+
+def check_select_run(lines: Iterable[str], expected: dict[str, int], absent: Iterable[str]) -> None:
+    """The boot's `begin` count is the sum of `expected`, its `ok` runs are
+    exactly `expected` (name to count), and no name in `absent` has a run
+    line. Raises `HarnessError`."""
+    lines = list(lines)
+    s = ktest_summary(lines)
+    want_n = sum(expected.values())
+    if s.begin != want_n:
+        raise HarnessError(f"ktest select: begin {s.begin}, want {want_n}")
+    got = Counter(o.name for o in s.oks)
+    want = Counter(expected)
+    if got != want:
+        missing = sorted((want - got).elements())
+        extra = sorted((got - want).elements())
+        raise HarnessError(f"ktest select: ok runs missing {missing}, extra {extra}")
+    ran_absent = sorted({r.name for r in s.runs} & set(absent))
+    if ran_absent:
+        raise HarnessError(f"ktest select: ran {ran_absent}, which the selection leaves out")
+
+
+def _proof_boot(
+    env: EnvConfig, label: str, *, ktest: str, repeat: int | None, cmdline: str = ""
+) -> RunResult:
+    """One proof boot on a fresh disk, with its own selection."""
+    penv = dataclasses.replace(
+        env, ktest=ktest, ktest_repeat=repeat, cmdline=f"{env.cmdline} {cmdline}".strip()
+    )
+    disk = make_disk(DISK_BYTES, "vibeos-vblk-")
+    try:
+        cfg = penv.qemu(extra=ktest_devices(disk, env.smp), boot_order="d")
+        raw = _ktest_boot(cfg, env.timeout, persist_reboot=False)
+    finally:
+        try:
+            os.unlink(disk)
+        except OSError:
+            pass
+    print(f"[ktest] {label}:", file=sys.stderr)
+    print_ktest_summary(ktest_summary(raw.lines), raw.exit_code)
+    return raw
+
+
+def _record(name: str, ok: bool) -> None:
+    results.current().record("marker", name, "passed" if ok else "failed")
+
+
+def ktest_select_boot(env: EnvConfig) -> None:
+    """`vibeos.ktest=` and `vibeos.ktest_repeat=` select and repeat rows
+    (ROADMAP §10.2): `SELECT_EXPECTED`'s runs and nothing else."""
+    try:
+        raw = _proof_boot(
+            env, "select", ktest=SELECT_KTEST, repeat=SELECT_REPEAT, cmdline=SELECT_CMDLINE
+        )
+        check_select_run(raw.lines, SELECT_EXPECTED, SELECT_ABSENT)
+    except HarnessError:
+        _record("ktest_select_boot", False)
+        raise
+    _record("ktest_select_boot", True)
+
+
+def _repeat_boot(env: EnvConfig) -> None:
+    """`reap_many_via_idle` 20 times in one boot (ROADMAP §10.2, F074)."""
+    raw = _proof_boot(env, "repeat", ktest=REPEAT_TEST, repeat=REPEAT_N)
+    check_select_run(raw.lines, {REPEAT_TEST: REPEAT_N}, ())
 
 
 def print_ktest_summary(summary: KtestSummary, exit_code: int | None) -> None:
@@ -182,25 +287,36 @@ def main() -> int:
         except HarnessError as e:
             print(f"[ktest] FAIL: {e}", file=sys.stderr)
             return 1
-
         print_ktest_summary(ktest_summary(raw.lines), raw.exit_code)
 
-        if skip_persist:
-            return 0
-
-        try:
-            _ktest_boot(cfg, env.timeout, persist_reboot=True)
-        except HarnessError as e:
-            print(f"[ktest] FAIL persist reboot: {e}", file=sys.stderr)
-            return 1
-
-        print("[ktest] persist reboot: intact", file=sys.stderr)
-        return 0
+        if not skip_persist and ran(raw.lines, PERSIST_TEST):
+            try:
+                _ktest_boot(cfg, env.timeout, persist_reboot=True)
+            except HarnessError as e:
+                print(f"[ktest] FAIL persist reboot: {e}", file=sys.stderr)
+                return 1
+            print("[ktest] persist reboot: intact", file=sys.stderr)
     finally:
         try:
             os.unlink(disk)
         except OSError:
             pass
+
+    # A boot the user selected with VIBEOS_KTEST is the whole run.
+    if env.ktest:
+        return 0
+    proofs: list[tuple[str, Callable[[EnvConfig], None]]] = [
+        ("select boot", ktest_select_boot)
+    ]
+    if env.smp == 2:
+        proofs.append(("repeat boot", _repeat_boot))
+    for label, proof in proofs:
+        try:
+            proof(env)
+        except HarnessError as e:
+            print(f"[ktest] FAIL {label}: {e}", file=sys.stderr)
+            return 1
+    return 0
 
 
 if __name__ == "__main__":

@@ -118,6 +118,24 @@ a `vibeOS: ktest:   <detail>` line never count. It requires `begin <n>` and `end
 with no count and `begin 0` (`ktest: no test selected`), rejects any `FAIL` line and any panic
 signature, and checks the exit status. `run_ktest.py` prints `[ktest] <ok> of <n> runs passed, <s>
 skipped`, the ten slowest runs, and the info lines (`ktest_summary`).
+
+Selection (BOOT.md §3.2). `vibeos.ktest=` (`VIBEOS_KTEST`) takes a comma-separated list of globs,
+`*` matching any run of characters and `?` one; with no item every row not marked opt-in runs. A row
+marked `.opt_in()` runs only when an item without a wildcard is its name. `vibeos.ktest_repeat=`
+(`VIBEOS_KTEST_REPEAT`) runs the selection 1 to 1000 times in one boot, pass after pass, and a row
+marked `.once()`, one that consumes state it cannot restore (a boot line in the log ring, a
+`BootCell`, a PCI claim, a cold cache block, a fixed file or snapshot name), runs in the first pass
+only. `begin` counts the runs after both, from the same predicates as the runner's loop, and no
+timeout scales with the repeat count. A repeat value outside 1 to 1000, or a run count past a `u32`,
+prints `vibeOS: ktest: bad option vibeos.ktest_repeat=<value>` before `begin` and exits `0x11`; a
+selection with no runs prints `begin 0`, then `end`, and exits `0x11`, and the harness fails both.
+The portable half, `vibeos::ktest`, parses and counts, with host tests. A boot that does not run
+`block_persist` needs no persist line and gets no persist reboot. When `VIBEOS_KTEST` is unset,
+`make test-kernel` also runs the proof boots, each on a fresh disk: `ktest_select_boot`
+(`vibeos.ktest=ktest_*,ktest_optin_probe,log_boot_level`, repeat 3, `loglevel=8`), which requires
+exactly its expected runs (`check_select_run`), the opt-in and once rows included, and no run of
+`ktest_deadline_hang`; and at `-smp 2` the repeat boot, `reap_many_via_idle` 20 times (F074).
+Each records its verdict in the tier's results file as a `marker`.
 `isa-debug-exit` at I/O port `0xf4` maps a written value to host exit status `(value << 1) | 1`:
 
 | Write | Host exit | Meaning |
@@ -495,6 +513,8 @@ sets none of them: `make run`, `make run-panic` and `make debug` honour the same
 | `VIBEOS_EXPECT_PIT` | off | `run_e2e` |
 | `VIBEOS_MCE_TEST` | off | `run_e2e` |
 | `VIBEOS_SKIP_PERSIST` | off | `run_ktest` |
+| `VIBEOS_KTEST` | unset; `vibeos.ktest=<value>` (BOOT.md §3.2), a comma-separated glob list that selects the in-guest tests; when set, `run_ktest` boots that selection alone | `run_ktest` (every driver's fw_cfg string) |
+| `VIBEOS_KTEST_REPEAT` | 1; `vibeos.ktest_repeat=<n>`, 1 to 1000, which the kernel checks | `run_ktest` (every driver's fw_cfg string) |
 | `VIBEOS_CRASH_ROUNDS` | `8` | `run_vibefs_crash` |
 | `VIBEOS_CRASH_SEED` | time-based | `run_vibefs_crash` |
 | `VIBEOS_MKFS` | `mkfs-vibefs` | `run_vibefs_crash`, `run_e2e` (the `test-e2e` tier's vda images) |

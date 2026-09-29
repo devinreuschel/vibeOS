@@ -163,7 +163,27 @@ impl Test {
 pub(crate) type Suite = &'static [Test];
 
 /// The runner's own rows (DESIGN §8.2).
-pub(crate) const TESTS: &[Test] = &[test("ktest_names_unique", test_ktest_names_unique)];
+pub(crate) const TESTS: &[Test] = &[
+    test("ktest_names_unique", test_ktest_names_unique),
+    test("ktest_once_probe", test_ktest_once_probe).once(),
+    test("ktest_optin_probe", test_ktest_optin_probe).opt_in(),
+];
+
+/// Set by [`test_ktest_once_probe`]'s first run.
+static ONCE_PROBE_RAN: AtomicBool = AtomicBool::new(false);
+
+/// A `.once()` row: fails if the runner runs it twice in one boot.
+fn test_ktest_once_probe() -> Outcome {
+    if ONCE_PROBE_RAN.swap(true, Ordering::Relaxed) {
+        return Outcome::Fail("a once row ran twice");
+    }
+    Outcome::Ok
+}
+
+/// An `.opt_in()` row: runs only when `vibeos.ktest=` names it.
+fn test_ktest_optin_probe() -> Outcome {
+    Outcome::Ok
+}
 
 /// Test names are unique across [`GROUPS`] and match `[a-z0-9_]+`, the
 /// form `vibeos.ktest=` globs and the harness's results name.
@@ -290,17 +310,22 @@ macro_rules! ktest_info {
 /// production kernel threads run in, then exit QEMU (DESIGN §8.2).
 fn registry_main() {
     REGISTRY_TID.store(thread_init::current_id().0, Ordering::Release);
-    let sel = vibeos::ktest::Selection::all();
-    let repeat = 1;
+    let cmdline = crate::boot::cmdline();
+    let sel = vibeos::ktest::Selection::parse(cmdline.get(OPT_KTEST));
+    let repeat_arg = cmdline.get(OPT_REPEAT);
+    let repeat = vibeos::ktest::parse_repeat(repeat_arg).unwrap_or_else(|_| bad_repeat(repeat_arg));
     let Some(n) = vibeos::ktest::run_count(
         rows().map(|(_, _, t)| (t.name, t.once, t.opt_in)),
         &sel,
         repeat,
     ) else {
-        crate::marker!("vibeOS: ktest: FAIL ktest: run count overflows u32");
-        qemu_exit(EXIT_FAIL);
+        bad_repeat(repeat_arg);
     };
     crate::marker!("vibeOS: ktest: begin {n}");
+    if n == 0 {
+        crate::marker!("vibeOS: ktest: end");
+        qemu_exit(EXIT_FAIL);
+    }
     quiesce_frames();
     let freq = Arch::freq_hz().unwrap_or(0);
     let mut failed = false;
@@ -318,6 +343,18 @@ fn registry_main() {
     assert_eq!(runs, n, "ktest: runs made != begin count");
     crate::marker!("vibeOS: ktest: end");
     qemu_exit(if failed { EXIT_FAIL } else { EXIT_PASS });
+}
+
+/// The command-line options that select and repeat rows (BOOT.md §3.2).
+const OPT_KTEST: &str = "vibeos.ktest";
+const OPT_REPEAT: &str = "vibeos.ktest_repeat";
+
+/// A `vibeos.ktest_repeat=` that is not 1 to `REPEAT_MAX`, or that makes
+/// more runs than a `u32` counts: say so before `begin` and fail the boot.
+fn bad_repeat(value: Option<&[u8]>) -> ! {
+    let v = vibeos::boot::cmdline::Escaped(value.unwrap_or(b""));
+    crate::marker!("vibeOS: ktest: bad option {OPT_REPEAT}={v}");
+    qemu_exit(EXIT_FAIL);
 }
 
 /// One run of row `r` of group `g`: its run line, the body, and its result

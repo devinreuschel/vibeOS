@@ -39,7 +39,7 @@ Drivers live in `run_*.py` and must not parse the environment or build argv;
 | `VIBEOS_QEMU_VERSION` | unset; the QEMU a CI job pins | all (`qemu_argv`, `CI` on Linux) |
 | `VIBEOS_CMDLINE` | empty; fw_cfg command-line words (BOOT.md §3.2) | all (`qemu`) |
 | `VIBEOS_KTEST` | empty; `vibeos.ktest=<value>`, no whitespace | all (`qemu`) |
-| `VIBEOS_KTEST_REPEAT` | unset; `vibeos.ktest_repeat=<n>`, `n >= 1` | all (`qemu`) |
+| `VIBEOS_KTEST_REPEAT` | unset; `vibeos.ktest_repeat=<n>`, a decimal; kernel checks 1-1000 | all |
 """
 
 from __future__ import annotations
@@ -662,9 +662,11 @@ def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
         try:
             ktest_repeat = int(repeat_raw)
         except ValueError:
-            ktest_repeat = 0
-        if ktest_repeat < 1:
-            raise HarnessError(f"VIBEOS_KTEST_REPEAT={repeat_raw!r}: not an integer of at least 1")
+            ktest_repeat = -1
+        # Only the kernel's range (1 to 1000) is checked in the guest, so a
+        # bad count fails on its `bad option` line (DESIGN §8.2).
+        if ktest_repeat < 0 or not repeat_raw.isdigit():
+            raise HarnessError(f"VIBEOS_KTEST_REPEAT={repeat_raw!r}: not a decimal integer")
     timeout_raw = os.environ.get("VIBEOS_TIMEOUT")
     if timeout_raw is None or timeout_raw == "":
         timeout = default_timeout

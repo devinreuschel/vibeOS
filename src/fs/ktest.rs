@@ -1307,7 +1307,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("pseudo_fs", test_pseudo_fs),
     test("fat_initrd", test_fat_initrd),
     test("initrd_module_sized", test_initrd_module_sized),
-    test("vibefs", test_vibefs),
+    test("vibefs", test_vibefs).once(),
     test("file_table_fork_churn", test_file_table_fork_churn),
     test(
         "file_table_stale_writeback_ebadf",
@@ -1333,7 +1333,7 @@ pub(crate) const TESTS: &[Test] = &[
         "vfs_fat_file_api_one_inode",
         test_vfs_fat_file_api_one_inode,
     ),
-    test("vfs_vibe_ops_mem", test_vfs_vibe_ops_mem),
+    test("vfs_vibe_ops_mem", test_vfs_vibe_ops_mem).once(),
     test("vfs_backends_via_ops", test_vfs_backends_via_ops),
     test("vfs_fat_one_inode", test_vfs_fat_one_inode),
     test(

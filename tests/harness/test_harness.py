@@ -1053,6 +1053,121 @@ class TestKtestSummary(unittest.TestCase):
         )
 
 
+def _boot(*texts: str, exit_code: int = ISA_DEBUG_PASS) -> RunResult:
+    return RunResult(lines=[K(t) for t in texts], exit_code=exit_code)
+
+
+BLOCK_MARKERS = (
+    "vibeOS: block: vda 8192 sectors",
+    "vibeOS: block: vdap1 128 sectors",
+    "vibeOS: block: vdap2 7647 sectors",
+)
+
+
+class TestSelectRun(unittest.TestCase):
+    """`run_ktest.check_select_run`: exactly the expected runs."""
+
+    EXPECTED = {"a": 2, "b": 1}
+
+    @staticmethod
+    def lines(begin: int, runs: list[str], oks: list[str] | None = None) -> list[str]:
+        out = [K(f"vibeOS: ktest: begin {begin}")]
+        for name in runs:
+            out.append(K(f"vibeOS: ktest: run {name} 10000"))
+            if oks is None or name in oks:
+                out.append(K(f"vibeOS: ktest: ok {name} (5 us)"))
+        return out + [K("vibeOS: ktest: end")]
+
+    def test_ok(self) -> None:
+        run_ktest.check_select_run(self.lines(3, ["a", "b", "a"]), self.EXPECTED, {"hang"})
+
+    def test_missing_run(self) -> None:
+        with self.assertRaisesRegex(HarnessError, r"missing \['a'\]"):
+            run_ktest.check_select_run(self.lines(3, ["a", "b"]), self.EXPECTED, ())
+
+    def test_extra_run(self) -> None:
+        with self.assertRaisesRegex(HarnessError, r"extra \['c'\]"):
+            run_ktest.check_select_run(
+                self.lines(3, ["a", "b", "a", "c"]), self.EXPECTED, ()
+            )
+
+    def test_wrong_begin(self) -> None:
+        with self.assertRaisesRegex(HarnessError, "begin 4, want 3"):
+            run_ktest.check_select_run(self.lines(4, ["a", "b", "a"]), self.EXPECTED, ())
+
+    def test_absent_test_ran(self) -> None:
+        lines = self.lines(3, ["a", "b", "a", "hang"], oks=["a", "b"])
+        with self.assertRaisesRegex(HarnessError, r"ran \['hang'\]"):
+            run_ktest.check_select_run(lines, self.EXPECTED, {"hang"})
+
+    def test_select_expected_counts(self) -> None:
+        self.assertEqual(run_ktest.SELECT_EXPECTED["ktest_once_probe"], 1)
+        self.assertEqual(run_ktest.SELECT_EXPECTED["ktest_optin_probe"], run_ktest.SELECT_REPEAT)
+        self.assertIn("ktest_deadline_hang", run_ktest.SELECT_ABSENT)
+
+
+class TestPersistDecision(unittest.TestCase):
+    """The persist lines and the reboot depend on `run block_persist`."""
+
+    CFG = QemuConfig(iso="x.iso", smp=2, extra=("-accel", "tcg"))
+
+    def boot(self, result: RunResult, *, persist_reboot: bool) -> None:
+        with mock.patch.object(run_ktest, "run_qemu_until_exit", side_effect=[result]):
+            run_ktest._ktest_boot(self.CFG, timeout=1.0, persist_reboot=persist_reboot)
+
+    def test_ran(self) -> None:
+        lines = [K("vibeOS: ktest: run block_persist 10000"), "vibeOS: ktest: run other 1"]
+        self.assertTrue(run_ktest.ran(lines, "block_persist"))
+        self.assertFalse(run_ktest.ran(lines, "other"))
+        self.assertFalse(
+            run_ktest.ran([K("vibeOS: dmesg: 1 cpu0 info vibeOS: ktest: run x 1")], "x")
+        )
+
+    def test_filtered_boot_needs_no_persist_line(self) -> None:
+        self.boot(
+            _boot(
+                *BLOCK_MARKERS,
+                "vibeOS: ktest: begin 1",
+                "vibeOS: ktest: run heap_box 10000",
+                "vibeOS: ktest: ok heap_box (3 us)",
+                "vibeOS: ktest: end",
+            ),
+            persist_reboot=False,
+        )
+
+    def test_persist_run_needs_wrote(self) -> None:
+        lines = (
+            *BLOCK_MARKERS,
+            "vibeOS: ktest: begin 1",
+            "vibeOS: ktest: run block_persist 10000",
+            "vibeOS: ktest: ok block_persist (3 us)",
+            "vibeOS: ktest: end",
+        )
+        with self.assertRaisesRegex(HarnessError, "missing persist wrote"):
+            self.boot(_boot(*lines), persist_reboot=False)
+        with self.assertRaisesRegex(HarnessError, "did not survive reboot"):
+            self.boot(_boot(*lines), persist_reboot=True)
+        self.boot(_boot(*lines[:3], "vibeOS: persist: wrote", *lines[3:]), persist_reboot=False)
+
+    def test_main_reboots_only_after_persist_ran(self) -> None:
+        filtered = _boot(
+            *BLOCK_MARKERS,
+            "vibeOS: ktest: begin 1",
+            "vibeOS: ktest: run heap_box 10000",
+            "vibeOS: ktest: ok heap_box (3 us)",
+            "vibeOS: ktest: end",
+        )
+        env = {"VIBEOS_ISO": "x.iso", "VIBEOS_KTEST": "heap_box", "VIBEOS_QEMU_ACCEL": ""}
+        with (
+            overlay_env(env, clear=True),
+            mock.patch.object(results.Results, "write"),
+            mock.patch.object(run_ktest, "run_qemu_until_exit", side_effect=[filtered]) as run,
+            mock.patch.object(run_ktest, "qemu_argv", return_value=["qemu"]),
+        ):
+            self.assertEqual(run_ktest.main(), 0)
+        self.assertEqual(run.call_count, 1)
+
+
 class TestNoRetry(unittest.TestCase):
     """Every driver boots each configuration once (ROADMAP §10.2, F021)."""
 
@@ -2016,13 +2131,21 @@ class TestEnvConfig(unittest.TestCase):
         for bad in (
             {"VIBEOS_KTEST": "a b"},
             {"VIBEOS_KTEST": "a\tb"},
-            {"VIBEOS_KTEST_REPEAT": "0"},
             {"VIBEOS_KTEST_REPEAT": "-2"},
+            {"VIBEOS_KTEST_REPEAT": "+2"},
             {"VIBEOS_KTEST_REPEAT": "two"},
             {"VIBEOS_KTEST_REPEAT": "1.5"},
         ):
             with overlay_env(bad, clear=True), self.assertRaises(HarnessError, msg=repr(bad)):
                 env_config(default_iso="x.iso", default_timeout=1)
+
+    def test_env_config_ktest_repeat_range_left_to_kernel(self) -> None:
+        from tests.harness.harness import env_config, overlay_env
+
+        for raw in ("0", "1001"):
+            with overlay_env({"VIBEOS_KTEST_REPEAT": raw}, clear=True):
+                env = env_config(default_iso="x.iso", default_timeout=1)
+                self.assertEqual(env.fw_cfg_cmdline(), f"vibeos.ktest_repeat={raw}")
 
     def test_qemu_cmdline_driver_words_first(self) -> None:
         from tests.harness.harness import env_config, overlay_env
