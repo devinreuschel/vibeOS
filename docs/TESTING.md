@@ -20,11 +20,11 @@ weakness was that nearly everything lived behind `main.rs` and was therefore unt
 Anything in `crates/core/src/lib.rs` and its submodules, compiled as `vibeos-core` on the host. No hardware
 access, no `unsafe` port I/O, no MMIO. The kernel half calls into it. Each port's pure half
 ([§11.1](PORTABILITY.md#111-the-seam)) is part of it and runs on every host. Rule; not yet enforced: ROADMAP §10.3.
-The x86-only pieces (`switch_context` in `thread.rs`, the fences in `dma.rs`) are
-`cfg(target_arch = "x86_64")`, so an aarch64 host such as the dev Mac compiles them and their tests
-out. ROADMAP §10.3 moves them to the kernel crate, and the host test that runs a port's switch
-assembly lives in `tests/hostlib`, which includes that port's assembly when the host's architecture
-matches (ROADMAP §10.2, §11.4).
+The core carries no assembly and no `cfg(target_arch)`, which `scripts/check_core_stable.py` enforces,
+so every host runs all of its tests. A host test of a port's assembly lives in `tests/hostlib`:
+`switch_context_roundtrip`, in `tests/hostlib/tests/switch_context.rs`, includes
+`src/arch/x86_64/switch.rs` with empty `cli` and `sti` macros and runs on x86_64 Linux hosts, since
+the assembly uses the kernel's object format (ELF); other hosts build an empty test binary.
 
 Things that belong here and are easy to get wrong, so should have tests from the day they are written:
 

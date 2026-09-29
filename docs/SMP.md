@@ -262,7 +262,7 @@ preemption point. Rule; not yet enforced: ROADMAP §10.3's `current` box (F039).
 
 `thread_init::switch_now` swaps `irq_nest` between the TCB and `PerCpu` and calls
 `syscall_init::on_switch` (FPU, RSP0, CR3) inside `with_current_switch`, then calls
-`thread::switch_context` (callee-saved GPRs, RSP, RIP, RFLAGS) after that `&mut` has ended. AGENTS.md rule 8 governs adding
+`arch::x86_64::switch::switch_context` (callee-saved GPRs, RSP, RIP, RFLAGS) after that `&mut` has ended. AGENTS.md rule 8 governs adding
 user-visible CPU state; the commit that adds it also adds its row here. The Arch column names the
 port a row belongs to; the aarch64 rows are planned (ROADMAP Phase 11), and there `switch_now` calls
 that port's `on_switch` and `switch_context`. A control that holds one value for every thread, such

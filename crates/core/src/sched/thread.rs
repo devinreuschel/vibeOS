@@ -1,6 +1,7 @@
 //! Thread ids, TCB, and context-switch frame. ROADMAP §3.1–§3.2.
 //!
-//! Portable half: types, synthetic frame layout, `switch_context` asm.
+//! Portable half: types and the synthetic frame layout. The switch itself
+//! lives in each port's hardware half (`arch::x86_64::switch` on x86_64).
 //! The TCB table, KVA mapping, and `spawn` live in the binary crate.
 
 use core::mem::{offset_of, size_of};
@@ -309,147 +310,10 @@ pub fn apply_if_on_resume(rflags: &mut u64, irq_nest: u32) {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
-mod switch_asm {
-    use super::CpuContext;
-    use core::arch::global_asm;
-
-    // Host unit tests cannot `cli` (ring 3 #GP). Kernel builds cli after
-    // saving rflags so the GPR shuffle is not preempted.
-    #[cfg(test)]
-    global_asm!(
-        r#"
-        .pushsection .text
-        .global vibeos_switch_context
-        .type vibeos_switch_context, @function
-        vibeos_switch_context:
-            mov rax, [rsp]
-            mov [rdi + {rip}], rax
-            lea rax, [rsp + 8]
-            mov [rdi + {rsp}], rax
-            mov [rdi + {rbx}], rbx
-            mov [rdi + {rbp}], rbp
-            mov [rdi + {r12}], r12
-            mov [rdi + {r13}], r13
-            mov [rdi + {r14}], r14
-            mov [rdi + {r15}], r15
-            pushfq
-            pop rax
-            mov [rdi + {rflags}], rax
-            mov rbx, [rsi + {rbx}]
-            mov rbp, [rsi + {rbp}]
-            mov r12, [rsi + {r12}]
-            mov r13, [rsi + {r13}]
-            mov r14, [rsi + {r14}]
-            mov r15, [rsi + {r15}]
-            mov rsp, [rsi + {rsp}]
-            mov rax, [rsi + {rflags}]
-            push rax
-            popfq
-            jmp qword ptr [rsi + {rip}]
-        .popsection
-        "#,
-        rbx = const CpuContext::RBX,
-        rbp = const CpuContext::RBP,
-        r12 = const CpuContext::R12,
-        r13 = const CpuContext::R13,
-        r14 = const CpuContext::R14,
-        r15 = const CpuContext::R15,
-        rflags = const CpuContext::RFLAGS,
-        rsp = const CpuContext::RSP,
-        rip = const CpuContext::RIP,
-    );
-
-    #[cfg(not(test))]
-    global_asm!(
-        r#"
-        .pushsection .text
-        .global vibeos_switch_context
-        .type vibeos_switch_context, @function
-        vibeos_switch_context:
-            mov rax, [rsp]
-            mov [rdi + {rip}], rax
-            lea rax, [rsp + 8]
-            mov [rdi + {rsp}], rax
-            mov [rdi + {rbx}], rbx
-            mov [rdi + {rbp}], rbp
-            mov [rdi + {r12}], r12
-            mov [rdi + {r13}], r13
-            mov [rdi + {r14}], r14
-            mov [rdi + {r15}], r15
-            pushfq
-            pop rax
-            mov [rdi + {rflags}], rax
-            cli
-            mov rbx, [rsi + {rbx}]
-            mov rbp, [rsi + {rbp}]
-            mov r12, [rsi + {r12}]
-            mov r13, [rsi + {r13}]
-            mov r14, [rsi + {r14}]
-            mov r15, [rsi + {r15}]
-            mov rsp, [rsi + {rsp}]
-            mov rax, [rsi + {rflags}]
-            test rax, {rflags_if}
-            jz 2f
-            and rax, {rflags_no_if}
-            push rax
-            popfq
-            sti
-            jmp qword ptr [rsi + {rip}]
-        2:
-            push rax
-            popfq
-            jmp qword ptr [rsi + {rip}]
-        .popsection
-        "#,
-        rbx = const CpuContext::RBX,
-        rbp = const CpuContext::RBP,
-        r12 = const CpuContext::R12,
-        r13 = const CpuContext::R13,
-        r14 = const CpuContext::R14,
-        r15 = const CpuContext::R15,
-        rflags = const CpuContext::RFLAGS,
-        rflags_if = const super::RFLAGS_IF,
-        rflags_no_if = const !super::RFLAGS_IF,
-        rsp = const CpuContext::RSP,
-        rip = const CpuContext::RIP,
-    );
-}
-
-#[cfg(target_arch = "x86_64")]
-unsafe extern "C" {
-    fn vibeos_switch_context(old: *mut CpuContext, new: *const CpuContext);
-}
-
-/// Save callee-saved GPRs, rflags, rsp, return address; restore `new`.
-///
-/// Kernel builds `cli` after the save so a timer cannot observe mixed
-/// GPRs. Incoming IF is applied with delayed `sti` immediately before
-/// `jmp`, not `popfq` with IF set: a tick in that window preempts a
-/// first-run thread, `schedule_preempt` overwrites the synthetic
-/// trampoline frame, and `iret` then `jmp`s into `schedule_inner` on
-/// `stack_top-8`. Host tests skip `cli` (ring 3). No FPU/SSE.
-///
-/// # Safety
-/// `old` is valid for writes of a `CpuContext` and `new` for reads of one,
-/// and neither is written by another CPU during the call. `new` was saved
-/// by `switch_context` or seeded by [`prepare_thread`], so `new.rsp`
-/// points into a live stack whose frame `new.rip` expects. The caller is
-/// not using the red zone below either `rsp`.
-#[cfg(target_arch = "x86_64")]
-pub unsafe fn switch_context(old: *mut CpuContext, new: *const CpuContext) {
-    // SAFETY: the caller meets this fn's `# Safety` contract, which is the
-    // asm's whole requirement; established by `thread::switch_context`'s
-    // callers, `thread_init::switch_now` in the kernel.
-    unsafe { vibeos_switch_context(old, new) };
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use core::mem::{offset_of, size_of};
-    #[cfg(target_arch = "x86_64")]
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
     fn context_layout() {
@@ -507,56 +371,5 @@ mod tests {
         assert_eq!(ThreadId::BOOTSTRAP.raw(), 0);
         assert!(ThreadId::NONE.is_none());
         assert_eq!(size_of::<ThreadId>(), 4);
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    static FLAG: AtomicU64 = AtomicU64::new(0);
-    #[cfg(target_arch = "x86_64")]
-    static MAIN_PTR: std::sync::atomic::AtomicPtr<CpuContext> =
-        std::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
-    #[cfg(target_arch = "x86_64")]
-    static WORKER_PTR: std::sync::atomic::AtomicPtr<CpuContext> =
-        std::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
-
-    #[cfg(target_arch = "x86_64")]
-    extern "C" fn worker_entry() {
-        FLAG.store(0xC0FFEE, Ordering::SeqCst);
-        // SAFETY: this worker runs only from the switch in
-        // `switch_context_roundtrip`, whose frame holds both contexts and
-        // waits in that switch, which saved `MAIN_PTR`'s context; established
-        // here, as the test's only worker.
-        unsafe {
-            switch_context(
-                WORKER_PTR.load(Ordering::SeqCst),
-                MAIN_PTR.load(Ordering::SeqCst),
-            );
-        }
-        panic!("worker resumed");
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    #[test]
-    fn switch_context_roundtrip() {
-        FLAG.store(0, Ordering::SeqCst);
-        let mut buf = vec![0u8; 16 * 1024 + 16];
-        let base = buf.as_mut_ptr() as usize;
-        let top = ((base + buf.len()) & !15) as u64;
-        let mut main_ctx = CpuContext::empty();
-        let mut worker_ctx = CpuContext::empty();
-        let main_p = &raw mut main_ctx;
-        let worker_p = &raw mut worker_ctx;
-        MAIN_PTR.store(main_p, Ordering::SeqCst);
-        WORKER_PTR.store(worker_p, Ordering::SeqCst);
-        // SAFETY: `top` is 16-byte aligned inside `buf`, which outlives the
-        // worker, and both contexts are locals this frame owns; the worker
-        // switches straight back; established here.
-        unsafe {
-            prepare_thread(&mut *worker_p, top, worker_entry as *const () as u64);
-            ((*worker_p).rsp as *mut u64).write_volatile(0);
-            switch_context(main_p, worker_p);
-        }
-        assert_eq!(FLAG.load(Ordering::SeqCst), 0xC0FFEE);
-        assert!(main_ctx.rip != 0);
-        assert!(main_ctx.rsp != 0);
     }
 }

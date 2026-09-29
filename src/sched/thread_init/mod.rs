@@ -22,7 +22,7 @@ use vibeos::sched::{SWEEP_TICKS, TimeoutQueue, effective_deadline, enqueue_runna
 use vibeos::syscall::UserFrame;
 use vibeos::thread::{
     CpuAffinity, CpuContext, Fxsave, MAX_THREADS, Tcb, ThreadId, ThreadState, WaitOutcome,
-    apply_if_on_resume, prepare_thread, switch_context,
+    apply_if_on_resume, prepare_thread,
 };
 use vibeos::time::Instant;
 use vibeos::wait::{self, WaitQueue};
@@ -528,7 +528,12 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
     // `thread_init::switch_to`, and IF=0 under their `InterruptGuard`,
     // which spans the switch; the `&mut PerCpu` above has ended (DESIGN
     // §7.5).
-    unsafe { switch_context(&mut (*old_ptr).context, &(*new_ptr).context) };
+    unsafe {
+        <crate::arch::current::Arch as vibeos::arch::ContextSwitch>::switch(
+            &mut (*old_ptr).context,
+            &(*new_ptr).context,
+        )
+    };
 }
 
 fn relink(s: &mut Sched) {

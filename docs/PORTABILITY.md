@@ -8,10 +8,10 @@ architecture's reference is Linux on that architecture (ROADMAP, How to read thi
 contract for the seam between them. `docs/ARCH.md` (ROADMAP §10.3) maps each row of the §11.1 table to
 the modules that implement it in each port. Planned: ROADMAP §10.3 builds the seam and Phase 11 the
 aarch64 port. Built so far: the seam traits and `Port` in `vibeos-core`'s `arch/mod.rs`, the stub port
-in `arch/stub.rs`, and the x86_64 port's zero-sized type with its `CycleCounter`, `InterruptMask`,
-`PerCpuBase`, and `SyscallAbi` impls, which kernel code names as `arch::current::Arch`; the other impls,
-`impl Port` for it, and `docs/ARCH.md` are planned in ROADMAP §10.3. `thread.rs` and `dma.rs` in
-`vibeos-core` carry `cfg(target_arch)` and assembly (ROADMAP §10.3); and the one port is x86_64's, in
+in `arch/stub.rs`, and the x86_64 port's zero-sized type with its `Barriers`, `ContextSwitch`,
+`CycleCounter`, `InterruptMask`, `PerCpuBase`, and `SyscallAbi` impls, which kernel code names as
+`arch::current::Arch`; the other impls, `impl Port` for it, and `docs/ARCH.md` are planned in ROADMAP
+§10.3. The one port is x86_64's, in
 the kernel crate's `src/arch/` and in `vibeos-core`'s `desc.rs`, `pic.rs`, and `vectors.rs`. The rest of
 this section is the design those lines build.
 

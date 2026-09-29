@@ -21,13 +21,33 @@ pub mod idt;
 pub mod pic;
 mod trampoline;
 
+/// `switch.rs`'s `cli`: the kernel masks interrupts across the GPR shuffle.
+macro_rules! switch_cli {
+    () => {
+        "cli"
+    };
+}
+
+/// `switch.rs`'s delayed `sti` before the jump to a thread that resumes
+/// with interrupts on (DESIGN §5.8).
+macro_rules! switch_sti {
+    () => {
+        "sti"
+    };
+}
+
+pub mod switch;
+
 use core::arch::asm;
 use core::mem::offset_of;
 use core::sync::atomic::{compiler_fence, fence};
 
 use vibeos::arch::x86_64::trap::Abi;
-use vibeos::arch::{Barriers, CycleCounter, InterruptMask, MmioWidth, PerCpuBase, SyscallAbi};
+use vibeos::arch::{
+    Barriers, ContextSwitch, CycleCounter, InterruptMask, MmioWidth, PerCpuBase, SyscallAbi,
+};
 use vibeos::atomic::statics::{AtomicU64, Ordering};
+use vibeos::sched::thread::{CpuContext, apply_if_on_resume, prepare_thread};
 use vibeos::smp::per_cpu::PerCpu;
 
 /// The x86_64 port's hardware half: the seam traits (PORTABILITY §11.1) on
@@ -77,6 +97,30 @@ impl CycleCounter for Arch {
             0 => None,
             v => v.checked_mul(1000),
         }
+    }
+}
+
+/// The switch is [`switch::switch_context`]; the portable half fills a first
+/// run's frame and the IF-on-resume bit (DESIGN §5.8).
+impl ContextSwitch for Arch {
+    type Context = CpuContext;
+
+    #[inline]
+    unsafe fn switch(old: *mut CpuContext, new: *const CpuContext) {
+        // SAFETY: the caller meets `vibeos::arch::ContextSwitch::switch`'s
+        // `# Safety` contract, which covers `switch::switch_context`'s;
+        // established by the caller's unsafe call, `thread_init::switch_now`.
+        unsafe { switch::switch_context(old, new) };
+    }
+
+    #[inline]
+    fn prepare(ctx: &mut CpuContext, stack_top: u64, entry: u64) {
+        prepare_thread(ctx, stack_top, entry);
+    }
+
+    #[inline]
+    fn resume_with_irqs(ctx: &mut CpuContext, enabled: bool) {
+        apply_if_on_resume(&mut ctx.rflags, u32::from(!enabled));
     }
 }
 

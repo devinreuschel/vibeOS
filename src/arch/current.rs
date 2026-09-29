@@ -2,7 +2,7 @@
 //! the seam traits by their full path, `vibeos::arch::…`, since `crate::arch`
 //! is the kernel's own module.
 
-use vibeos::arch::{Barriers, CycleCounter, InterruptMask, PerCpuBase, SyscallAbi};
+use vibeos::arch::{Barriers, ContextSwitch, CycleCounter, InterruptMask, PerCpuBase, SyscallAbi};
 
 /// This build's port, chosen by `cfg(target_arch)`.
 #[cfg(target_arch = "x86_64")]
@@ -15,7 +15,7 @@ pub type SplitQueue = vibeos::virtio::SplitQueue<Arch>;
 /// far. The bound becomes `Port` once the port implements every seam trait
 /// (ROADMAP §10.3).
 const fn implements_seam_core<
-    A: Barriers + CycleCounter + InterruptMask + PerCpuBase + SyscallAbi,
+    A: Barriers + ContextSwitch + CycleCounter + InterruptMask + PerCpuBase + SyscallAbi,
 >() {
 }
 
