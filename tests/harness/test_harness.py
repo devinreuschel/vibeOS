@@ -5,6 +5,7 @@ Runs under `python3 -m unittest discover`. Standard-library only.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import platform
 import socket
@@ -2895,7 +2896,11 @@ class TestHpetOffBoot(unittest.TestCase):
         )
 
     def cfg(self, cpu: str = "max") -> QemuConfig:
-        return run_ktest.hpet_off_config(self.env(cpu), "disk.img")
+        # No QEMU pin: a fixture config is not built by `env_config`, and the
+        # check job has no QEMU to pin (`harness.ensure_qemu_pinned`).
+        return dataclasses.replace(
+            run_ktest.hpet_off_config(self.env(cpu), "disk.img"), qemu_version=None
+        )
 
     def check(self, *texts: str, exit_code: int = ISA_DEBUG_PASS) -> None:
         run_ktest.check_hpet_off_boot([K(t) for t in texts], exit_code, self.cfg())
