@@ -778,3 +778,11 @@ needs = [
   "an `arch` module boundary built",  # L1277
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L883
+[[box]]
+key = "partitions exposed as offset-limited block"
+needs = [
+  "one registry of counted block-device",  # L1342
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
