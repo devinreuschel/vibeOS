@@ -170,7 +170,11 @@ kernel half is `src/<s>/` (the kernel binary, rooted at `src/main.rs`). A kernel
 re-exports its modules under their pre-move names (`vibeos::pmm`, `crate::pmm_init`, `crate::x86`).
 `arch/x86_64/` is the x86_64 port: its pure half (encodings, trap decode) in `vibeos-core`, and its
 hardware half in the kernel (DESIGN §11.1). `src/cell.rs` stays at the kernel root; `vibeos-core`
-compiles it under `cfg(test)` through `#[path]`. `user/` holds freestanding ELFs, not kernel modules.
+compiles it under `cfg(test)` through `#[path]`. `user/` holds user programs, not kernel modules: the
+Rust user runtime `vibeos-user` (`user/src/`, its programs in `user/src/bin/`, and everything that names an
+architecture in `user/src/arch/<arch>/`), its `#![no_builtins]` memory crate `vibeos-user-mem`
+(`user/mem/`), both workspace members that `make user` builds for the user triple (BOOT.md §3.1), and,
+until ROADMAP §10.5 ports them, the assembly programs `user/*.asm` of the initrd.
 
 **Reading the table.** Paths are relative to `crates/core/src/` (Portable) and `src/` (Kernel).
 `{a,b}` lists files of one directory, and `*` matches within one. Every listed path exists, and every
