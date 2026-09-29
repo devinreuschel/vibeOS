@@ -418,6 +418,7 @@ pub fn send_ipi(dest: u8, vector: u8, mode: IpiMode) -> Result<(), IpiError> {
 }
 
 pub fn send_ipi_cpu(cpu: u32, vector: u8) -> Result<(), IpiError> {
+    vibeos::trace!(IpiSend, u64::from(vector), u64::from(cpu));
     let Some(c) = crate::per_cpu_init::cpu(cpu) else {
         return Err(IpiError::NotReady);
     };
@@ -430,6 +431,7 @@ pub fn send_ipi_cpu(cpu: u32, vector: u8) -> Result<(), IpiError> {
 
 /// All-excluding-self shorthand. No-op with one online CPU.
 pub fn send_ipi_all_ex_self(vector: u8) -> Result<(), IpiError> {
+    vibeos::trace!(IpiSend, u64::from(vector), u64::MAX);
     let va = LAPIC_VA.load(Ordering::Acquire);
     if va == 0 {
         return Err(IpiError::NotReady);

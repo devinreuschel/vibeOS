@@ -123,6 +123,63 @@ pub const fn all_acked(waiters: u64, acked: u64) -> bool {
     waiters & acked == waiters
 }
 
+/// Most ranges one TLB shootdown round carries (DESIGN §7.9). A caller
+/// with more sends one round per this many.
+pub const SHOOT_RANGES: usize = 16;
+
+/// Most pages one [`ShootRange`] names: a receiver runs one `invlpg` per
+/// page with IF=0, so a round stays at most `SHOOT_RANGES * 32` of them.
+pub const SHOOT_RANGE_PAGES: u64 = 32;
+
+const PAGE_MASK: u64 = 0xFFF;
+
+const _: () = assert!(
+    SHOOT_RANGE_PAGES <= PAGE_MASK,
+    "a range's page count packs into its start's low 12 bits"
+);
+
+/// One kernel VA range a shootdown round invalidates: a page-aligned start
+/// and 1 to [`SHOOT_RANGE_PAGES`] pages, packed in one word (the count in
+/// the start's low 12 bits) so a round's slot publishes it in one atomic
+/// store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShootRange(u64);
+
+impl ShootRange {
+    /// The range of `pages` pages from `start`, or `None` when `start` is
+    /// not page-aligned or `pages` is 0 or above [`SHOOT_RANGE_PAGES`].
+    pub const fn new(start: u64, pages: u64) -> Option<Self> {
+        if start & PAGE_MASK != 0 || pages == 0 || pages > SHOOT_RANGE_PAGES {
+            return None;
+        }
+        Some(Self(start | pages))
+    }
+
+    /// The page that holds `va`.
+    pub const fn page(va: u64) -> Self {
+        Self((va & !PAGE_MASK) | 1)
+    }
+
+    /// The packed word, for a round's slot.
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+
+    /// A word [`raw`](Self::raw) packed. Any word decodes to a range of at
+    /// most [`PAGE_MASK`] pages; a slot holds only packed ones.
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub const fn start(self) -> u64 {
+        self.0 & !PAGE_MASK
+    }
+
+    pub const fn pages(self) -> u64 {
+        self.0 & PAGE_MASK
+    }
+}
+
 /// Round-robin among set bits of `online`. `rr` is the cursor; updated.
 pub fn pick_cpu(affinity: CpuAffinity, online: u64, rr: &mut u32) -> u32 {
     let n = online.count_ones();
@@ -238,6 +295,23 @@ mod tests {
         assert!(all_acked(0b1110, 0b1110));
         assert!(!all_acked(0b1110, 0b0100));
         assert!(all_acked(0, 0));
+    }
+
+    #[test]
+    fn shoot_range_packs_start_and_pages() {
+        let r = ShootRange::new(0xFFFF_9000_0000_3000, 4).unwrap();
+        assert_eq!(r.start(), 0xFFFF_9000_0000_3000);
+        assert_eq!(r.pages(), 4);
+        assert_eq!(ShootRange::from_raw(r.raw()), r);
+        assert_eq!(
+            ShootRange::new(0x5000, SHOOT_RANGE_PAGES).map(ShootRange::pages),
+            Some(SHOOT_RANGE_PAGES)
+        );
+        assert_eq!(ShootRange::new(0x5008, 1), None);
+        assert_eq!(ShootRange::new(0x5000, 0), None);
+        assert_eq!(ShootRange::new(0x5000, SHOOT_RANGE_PAGES + 1), None);
+        let p = ShootRange::page(0xFFFF_9000_0000_3ABC);
+        assert_eq!((p.start(), p.pages()), (0xFFFF_9000_0000_3000, 1));
     }
 
     #[test]

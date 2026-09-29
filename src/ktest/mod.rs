@@ -854,6 +854,13 @@ pub(crate) struct FrameCount {
     /// Mapped heap pages, for the failure line. They are not added back:
     /// heap growth in the test's window takes buddy frames and fails it.
     heap: usize,
+    /// The rest are for the failure line alone, each naming one place the
+    /// frames can be: dead threads' stacks not yet cached or freed when
+    /// [`settle`] returned (non-zero only when it timed out), KVA bytes
+    /// reserved, and frames of dropped `Frames` tokens.
+    in_flight: usize,
+    kva_used: u64,
+    dropped: usize,
 }
 
 impl FrameCount {
@@ -864,6 +871,9 @@ impl FrameCount {
             cached: thread_init::cached_stack_frames(),
             tables: crate::mm::ktest::table_pages(),
             heap: crate::heap_init::stats().capacity / vibeos::paging::PAGE_SIZE_4K as usize,
+            in_flight: thread_init::stacks_in_flight(),
+            kva_used: kva_init::stats().used,
+            dropped: vibeos::pmm::leaked_frames(),
         }
     }
 
@@ -873,13 +883,15 @@ impl FrameCount {
     }
 
     /// `Ok` when `after` accounts for as many frames as `self`; otherwise a
-    /// failure line that names every count before and after.
-    pub(crate) fn unchanged(&self, after: &Self, exits: usize) -> Outcome {
+    /// failure line that names every count before and after, and, after,
+    /// the stacks in flight, the KVA KiB used, and the dropped
+    /// frames, in [`FAIL_MSG_BYTES`].
+    pub(crate) fn unchanged(&self, after: &Self) -> Outcome {
         if after.total() == self.total() {
             return Outcome::Ok;
         }
         crate::fail_fmt!(
-            "frames {} -> {} after {exits} exits (buddy {}->{} cache {}->{} pt {}->{} heap {}->{})",
+            "frames {}->{} buddy {}->{} cache {}->{} pt {}->{} heap {}->{} fly {} kva {}k drop {}",
             self.total(),
             after.total(),
             self.buddy,
@@ -890,6 +902,9 @@ impl FrameCount {
             after.tables,
             self.heap,
             after.heap,
+            after.in_flight,
+            after.kva_used / 1024,
+            after.dropped.saturating_sub(self.dropped),
         )
     }
 }

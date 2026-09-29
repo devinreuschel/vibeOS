@@ -2,10 +2,12 @@
 
 mod counted;
 mod hooks;
+mod reclaim;
 mod registry;
 mod sleep;
 pub(crate) use counted::test_counted_deferred_release;
 pub(crate) use hooks::{RequeueGuard, requeues, set_requeue_next_cpu, work_live};
+pub(crate) use reclaim::dead_list_batched_rounds;
 pub(crate) use registry::{test_ktest_fail_fmt, test_ktest_helpers, test_ktest_rows};
 pub(crate) use sleep::{
     block_in_hard_irq_asserts, in_hard_irq_top_bottom, lock_across_switch_asserts,
@@ -160,7 +162,7 @@ pub(crate) fn test_sleep_ms_50() -> Outcome {
     }
     // TCG: ticks coalesce under SMP; sleep is now_ns. Keep 50–100 on
     // invariant TSC.
-    if !crate::time::ktest::tsc_invariant() && (40..=400).contains(&du) && (1..=400).contains(&dt) {
+    if !crate::time_init::tsc_invariant() && (40..=400).contains(&du) && (1..=400).contains(&dt) {
         return Outcome::Ok;
     }
     crate::marker!("vibeOS: ktest:   sleep_ms dt={dt} du={du}");
@@ -852,7 +854,7 @@ pub(crate) fn lifetime_stack_reclaim() -> Outcome {
     if tail != 0 {
         return crate::fail_fmt!("{tail} shootdowns sent from a switch tail");
     }
-    base.unchanged(&FrameCount::quiescent(), exits)
+    base.unchanged(&FrameCount::quiescent())
 }
 
 // Spin about 10 million iterations (several 10 ms quanta under TCG), then

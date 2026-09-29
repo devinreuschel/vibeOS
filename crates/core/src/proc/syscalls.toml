@@ -1,0 +1,233 @@
+# The syscall table (ROADMAP §10.5, C-SYSTABLE). `scripts/gen_syscalls.py`
+# writes the kernel table (`syscall_table.rs`), the user stubs
+# (`user/src/arch/x86_64/sys.rs`) and the table in docs/SYSCALL.md §3 from
+# it, and `make check` fails when an output differs from what it writes.
+# Every syscall added from here on is a row.
+#
+# Sources, as facts (DESIGN §1.5), of the baseline release docs/LINUX.md
+# names; no code is copied:
+#   - x86_64 numbers: `arch/x86/entry/syscalls/syscall_64.tbl`;
+#   - aarch64 numbers: `include/uapi/asm-generic/unistd.h`;
+#   - argument types and order: the declarations in
+#     `include/linux/syscalls.h`;
+#   - argument names: the man pages.
+#
+# A row:
+#   name      the `Handlers` method and the user stub
+#   x86_64    the number; the key is omitted where Linux has none
+#   aarch64   likewise (`open`, `dup2`, `fork` and `psinfo` have none)
+#   args      in x86_64 (canonical) register order, at most 6
+#   aarch64_order  the argument names in aarch64 register order, where
+#             Linux's order differs (raw `clone` swaps `tls` and `ctid`)
+#   unsafe    why the user stub is `unsafe` beyond the pointers the kernel
+#             writes through
+#   note      the notes cell of SYSCALL.md §3
+#
+# An argument: `name`, and `type`, one of `int`, `unsigned int`, `long`,
+# `unsigned long`, `size_t`, `off_t`, `pid_t`, `umode_t`, or a pointer
+# (`T *`). A pointer declares how its handler copies through it:
+#   ptr = "buf"     `len` names the integer argument holding its length;
+#                   `dir` is "in" (the kernel reads) or "out" (it writes)
+#   ptr = "fixed"   `size` bytes; `dir` as for "buf"
+#   ptr = "cstr"    a NUL-terminated string the kernel reads
+#   ptr = "strvec"  a NULL-terminated array of C strings the kernel reads
+#   when            where the handler first copies through it, after
+#                   which of Linux's checks (SYSCALL.md §3)
+#   null = true     NULL is valid and copies nothing
+# or `unread = "<the ROADMAP line that reads it>"` for a pointer the kernel
+# does not read yet.
+
+[[syscall]]
+name = "read"
+x86_64 = 0
+aarch64 = 63
+args = [
+  { name = "fd", type = "unsigned int" },
+  { name = "buf", type = "char *", ptr = "buf", len = "count", dir = "out", when = "after the `fd` lookup" },
+  { name = "count", type = "size_t" },
+]
+note = ""
+
+[[syscall]]
+name = "write"
+x86_64 = 1
+aarch64 = 64
+args = [
+  { name = "fd", type = "unsigned int" },
+  { name = "buf", type = "const char *", ptr = "buf", len = "count", dir = "in", when = "after the `fd` lookup" },
+  { name = "count", type = "size_t" },
+]
+note = ""
+
+[[syscall]]
+name = "open"
+x86_64 = 2
+args = [
+  { name = "pathname", type = "const char *", ptr = "cstr", when = "before anything else" },
+  { name = "flags", type = "int" },
+  { name = "mode", type = "umode_t" },
+]
+note = "`pathname` at most 255 bytes"
+
+[[syscall]]
+name = "close"
+x86_64 = 3
+aarch64 = 57
+args = [
+  { name = "fd", type = "unsigned int" },
+]
+note = ""
+
+[[syscall]]
+name = "lseek"
+x86_64 = 8
+aarch64 = 62
+args = [
+  { name = "fd", type = "unsigned int" },
+  { name = "offset", type = "off_t" },
+  { name = "whence", type = "unsigned int" },
+]
+note = ""
+
+[[syscall]]
+name = "mmap"
+x86_64 = 9
+aarch64 = 222
+args = [
+  { name = "addr", type = "unsigned long" },
+  { name = "length", type = "unsigned long" },
+  { name = "prot", type = "unsigned long" },
+  { name = "flags", type = "unsigned long" },
+  { name = "fd", type = "unsigned long" },
+  { name = "offset", type = "unsigned long" },
+]
+unsafe = "a mapping can replace memory the program uses"
+note = "anonymous and private only; returns the address"
+
+[[syscall]]
+name = "munmap"
+x86_64 = 11
+aarch64 = 215
+args = [
+  { name = "addr", type = "unsigned long" },
+  { name = "length", type = "size_t" },
+]
+unsafe = "the range can hold memory the program still uses"
+note = ""
+
+[[syscall]]
+name = "brk"
+x86_64 = 12
+aarch64 = 214
+args = [
+  { name = "addr", type = "unsigned long" },
+]
+unsafe = "shrinking the break unmaps memory the program may still use"
+note = "returns the break; `0` if the caller is not a process"
+
+[[syscall]]
+name = "sched_yield"
+x86_64 = 24
+aarch64 = 124
+args = []
+note = ""
+
+[[syscall]]
+name = "dup"
+x86_64 = 32
+aarch64 = 23
+args = [
+  { name = "oldfd", type = "unsigned int" },
+]
+note = "CLOEXEC cleared on the new fd"
+
+[[syscall]]
+name = "dup2"
+x86_64 = 33
+args = [
+  { name = "oldfd", type = "unsigned int" },
+  { name = "newfd", type = "unsigned int" },
+]
+note = ""
+
+[[syscall]]
+name = "getpid"
+x86_64 = 39
+aarch64 = 172
+args = []
+note = "`0` if the caller is not a process"
+
+[[syscall]]
+name = "fork"
+x86_64 = 57
+args = []
+note = "full address-space copy; the child returns 0"
+
+[[syscall]]
+name = "execve"
+x86_64 = 59
+aarch64 = 221
+args = [
+  { name = "pathname", type = "const char *", ptr = "cstr", when = "before anything else" },
+  { name = "argv", type = "const char *const *", ptr = "strvec", null = true, when = "after `pathname`" },
+  { name = "envp", type = "const char *const *", ptr = "strvec", null = true, when = "after `argv`" },
+]
+note = "`argv` and `envp` at most 15 strings of at most 255 bytes each; `envp` copied and dropped"
+
+[[syscall]]
+name = "exit"
+x86_64 = 60
+aarch64 = 93
+args = [
+  { name = "status", type = "int" },
+]
+note = "the low 8 bits of `status`"
+
+[[syscall]]
+name = "wait4"
+x86_64 = 61
+aarch64 = 260
+args = [
+  { name = "pid", type = "pid_t" },
+  { name = "wstatus", type = "int *", ptr = "fixed", size = 4, dir = "out", null = true, when = "after a child is reaped" },
+  { name = "options", type = "int" },
+  { name = "rusage", type = "struct rusage *", unread = "ROADMAP §13.7" },
+]
+note = ""
+
+[[syscall]]
+name = "kill"
+x86_64 = 62
+aarch64 = 129
+args = [
+  { name = "pid", type = "pid_t" },
+  { name = "sig", type = "int" },
+]
+note = "default actions only"
+
+[[syscall]]
+name = "fcntl"
+x86_64 = 72
+aarch64 = 25
+args = [
+  { name = "fd", type = "unsigned int" },
+  { name = "cmd", type = "unsigned int" },
+  { name = "arg", type = "unsigned long" },
+]
+note = "`F_GETFD` and `F_SETFD` (`FD_CLOEXEC`) only"
+
+[[syscall]]
+name = "getppid"
+x86_64 = 110
+aarch64 = 173
+args = []
+note = ""
+
+[[syscall]]
+name = "psinfo"
+x86_64 = 500
+args = [
+  { name = "buf", type = "char *", ptr = "buf", len = "len", dir = "out", when = "before anything else" },
+  { name = "len", type = "size_t" },
+]
+note = "vibeOS-specific (SYSCALL.md §8; LINUX.md `psinfo`)"

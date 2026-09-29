@@ -1830,6 +1830,9 @@ class TestLapicMode(unittest.TestCase):
         self.assertIn("smp_ap_online_0", names)
         self.assertIn("sched_cpu1", names)
         self.assertIn("smp_done", names)
+        self.assertIn("smp_tsc_skew", names)
+        self.assertLess(names.index("smp_ap_online_0"), names.index("smp_tsc_skew"))
+        self.assertLess(names.index("smp_tsc_skew"), names.index("smp_done"))
         self.assertNotIn("boot_done", names)
         self.assertIn("console_ok", names)
         self.assertIn("pci_devices", names)
@@ -1858,6 +1861,7 @@ class TestLapicMode(unittest.TestCase):
         self.assertNotIn("smp_ap_online_0", names1)
         self.assertNotIn("sched_cpu1", names1)
         self.assertIn("smp_done", names1)
+        self.assertNotIn("smp_tsc_skew", names1)
         names4 = [x.name for x in boot_contract_markers(smp=4)]
         self.assertEqual(sum(1 for n in names4 if n.startswith("smp_ap_online_")), 3)
         self.assertIn("sched_cpu3", names4)

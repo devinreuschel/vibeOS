@@ -858,6 +858,9 @@ pub(crate) fn has_threaded(vec: u8) -> bool {
 static IN_TAIL: [AtomicBool; MAX_IPI_CPUS] = [const { AtomicBool::new(false) }; MAX_IPI_CPUS];
 /// Shootdowns started while their CPU's `IN_TAIL` was set.
 static FROM_TAIL: AtomicU64 = AtomicU64::new(0);
+/// Shootdown rounds started by any CPU: with another CPU online, each is
+/// one IPI broadcast and one wait for acks.
+static ROUNDS: AtomicU64 = AtomicU64::new(0);
 
 /// This CPU enters a switch tail. IF=0.
 pub(crate) fn tail_enter() {
@@ -874,8 +877,14 @@ pub(crate) fn shootdowns_from_tail() -> u64 {
     FROM_TAIL.load(Ordering::Acquire)
 }
 
-/// `ipi_init::shootdown_va`'s count, IF=0.
+/// Shootdown rounds started since boot.
+pub(crate) fn rounds_sent() -> u64 {
+    ROUNDS.load(Ordering::Acquire)
+}
+
+/// `ipi_init::shootdown_round`'s count, IF=0.
 pub(crate) fn note_shootdown() {
+    ROUNDS.fetch_add(1, Ordering::AcqRel);
     if IN_TAIL[ipi_init::my_index()].load(Ordering::Relaxed) {
         FROM_TAIL.fetch_add(1, Ordering::AcqRel);
     }

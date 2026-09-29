@@ -49,6 +49,7 @@ pub mod irq;
     reason = "permanent: kalloc wraps alloc's owning types, and everything it exposes is fallible (DESIGN §4.4)"
 )]
 pub mod kalloc;
+pub mod kerror;
 pub mod ktest;
 pub mod limits;
 pub mod log;

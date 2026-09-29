@@ -519,6 +519,7 @@ unsafe extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
     if frame.user_mode() {
         testing::on_cpl3_entry(frame);
     }
+    vibeos::log::trace::trap_enter(v, frame.cr2, frame.error_code);
     if !pre_body(frame, v) {
         // A fault or trap taken at CPL 3 runs its body with IF=1 (DESIGN
         // §2.9 rule 3): the stub has saved the frame, CR2 included. IST
@@ -536,6 +537,7 @@ unsafe extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
             body(frame);
         }
     }
+    vibeos::log::trace::trap_exit(v);
     if frame.user_mode() {
         exit_to_user(frame);
     }
