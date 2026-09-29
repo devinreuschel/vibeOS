@@ -9,7 +9,7 @@ use vibeos::ipi::MAX_IPI_CPUS;
 use vibeos::lock::RANK_SCHED;
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::wait::WaitQueue;
-use vibeos::work::{WorkItem, WorkQueues};
+use vibeos::work::{WorkClass, WorkItem, WorkQueues};
 
 use crate::irq_init;
 use crate::kva_init;
@@ -91,7 +91,7 @@ pub(crate) fn kick_dead_stacks() {
 enum Next {
     /// This CPU's dead list, taken whole.
     DeadStacks(u64),
-    Item(WorkItem),
+    Item(WorkItem, WorkClass),
     Wait,
 }
 
@@ -108,8 +108,8 @@ fn worker() {
                 return Next::DeadStacks(head);
             }
             with_st(|st| {
-                if let Some(w) = st.q.pop() {
-                    return Next::Item(w);
+                if let Some((w, c)) = st.q.pop() {
+                    return Next::Item(w, c);
                 }
                 s.begin_wait(&mut st.wq[me], FAR_DEADLINE);
                 Next::Wait
@@ -120,7 +120,7 @@ fn worker() {
                 let n = kva_init::free_parked(head);
                 thread_init::stacks_reclaimed(n);
             }
-            Next::Item(w) => w.run(),
+            Next::Item(w, WorkClass::Soft | WorkClass::Normal) => w.run(),
             Next::Wait => thread_init::schedule(),
         }
     }
