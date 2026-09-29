@@ -1,20 +1,25 @@
 use super::*;
 
 impl FatVol {
-    pub(super) fn last_clu<D: Disk>(&mut self, d: &mut D, first: u32) -> Result<u32, FatError> {
+    /// The cluster count of the chain at `first` and its last cluster.
+    pub(super) fn chain_len<D: Disk>(
+        &mut self,
+        d: &mut D,
+        first: u32,
+    ) -> Result<(u32, u32), FatError> {
         let mut clu = first;
-        let mut i = 0u32;
+        let mut have = 1u32;
         loop {
             let next = self.fat_get(d, clu)?;
             if is_eoc(next) {
-                return Ok(clu);
+                return Ok((have, clu));
             }
             if next < 2 || next == BAD_CLUS {
                 return Err(FatError::Corrupt);
             }
+            have = have.checked_add(1).ok_or(FatError::Corrupt)?;
             clu = next;
-            i = i.checked_add(1).ok_or(FatError::Corrupt)?;
-            if i > self.info.nclus {
+            if have > self.info.nclus {
                 return Err(FatError::Corrupt);
             }
         }
@@ -146,7 +151,11 @@ impl FatVol {
         d.flush()
     }
 
-    fn release_chain<D: Disk>(&mut self, d: &mut D, mut clu: u32) -> Result<(), FatError> {
+    pub(super) fn release_chain<D: Disk>(
+        &mut self,
+        d: &mut D,
+        mut clu: u32,
+    ) -> Result<(), FatError> {
         let mut n = 0u32;
         while clu >= 2 && !is_eoc(clu) {
             let next = self.fat_get(d, clu)?;
@@ -173,7 +182,9 @@ impl FatVol {
 }
 
 /// The FAT sector holding cluster `clu`'s entry, and the entry's offset in
-/// it; `Corrupt` for a cluster number whose byte offset overflows.
+/// it; `Corrupt` for a cluster number whose byte offset overflows, which
+/// no mounted volume reaches: `parse_bpb` caps `nclus` at `0x0FFF_FFF5`,
+/// and `fat_get`/`fat_set` check `clu < nclus + 2` (`fat::vol::parse_bpb`).
 pub(super) fn fat_loc(clu: u32) -> Result<(u32, usize), FatError> {
     let off = clu.checked_mul(4).ok_or(FatError::Corrupt)? as usize;
     Ok(((off / SEC) as u32, off % SEC))

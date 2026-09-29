@@ -884,3 +884,24 @@ needs = [
   "`elf::parse` host tests also cover",  # L1355
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "BPB parsing and validation"
+needs = [
+  "a crafted FAT BPB fails",  # L1234
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "extent-based allocation rather than block"
+needs = [
+  "a vibefs write that cannot",  # L1495
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "checksums on metadata and optionally"
+needs = [
+  "vibefs never rewrites corrupt data",  # L1496
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"

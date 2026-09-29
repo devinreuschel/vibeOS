@@ -78,6 +78,8 @@ PANIC_SIGNATURES: tuple[str, ...] = (
     "#DF",
     "double fault",
     "stack overflow",
+    # The `vibefs_crash` build's refusal of a `vibeos.crash_plant=` value.
+    "vibeOS: vibefs: bad crash_plant",
 )
 
 # End of the dump. expect_panic waits for this so backtrace/logrec are in the log.
