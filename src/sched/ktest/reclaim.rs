@@ -1,6 +1,7 @@
 //! How a CPU's worker frees its dead-stack list (kernel_tests only),
 //! re-exported from `sched::ktest`.
 
+use vibeos::ipi::SHOOT_RANGES;
 use vibeos::kva::DEFAULT_STACK_PAGES;
 
 use super::WAIT_NS;
@@ -15,11 +16,8 @@ use crate::x86;
 /// Stacks [`dead_list_batched_rounds`] parks on CPU 0's dead list.
 const PARKED_STACKS: usize = 64;
 
-/// Stacks one shootdown round may cover.
-const STACKS_PER_ROUND: usize = 16;
-
 /// A worker frees its CPU's dead list with one shootdown round per
-/// [`STACKS_PER_ROUND`] stacks, not one per page: each round waits for
+/// `vibeos::ipi::SHOOT_RANGES` stacks, not one per page: each round waits for
 /// every other CPU's ack while an exit sends none, so per-page rounds let a
 /// burst of exits outrun the worker, and the dead stacks, their frames and
 /// fresh KVA pile up (`lifetime_stack_reclaim`). 64 default stacks parked
@@ -64,7 +62,7 @@ pub(crate) fn dead_list_batched_rounds() -> Outcome {
         thread_init::yield_now();
     }
     let rounds = ipi_init::testing::rounds_sent().wrapping_sub(r0);
-    let most = PARKED_STACKS.div_ceil(STACKS_PER_ROUND) as u64;
+    let most = PARKED_STACKS.div_ceil(SHOOT_RANGES) as u64;
     if rounds > most {
         return crate::fail_fmt!(
             "{rounds} shootdown rounds for {PARKED_STACKS} stacks, want <= {most}"
