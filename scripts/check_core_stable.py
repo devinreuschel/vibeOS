@@ -15,7 +15,7 @@ which fail once the attribute exists.
 `find_arch_code` finds `asm!`, `global_asm!`, `naked_asm!`, and any
 `target_arch` token outside comments. `main` runs it on every file
 `core_files` walks: each `.rs` under `crates/core/src`, test modules included,
-and each file a `#[path]` attribute there names (`src/cell.rs`), so a host test
+and each file a `#[path]` attribute there names (none today), so a host test
 of a port's assembly lives in a crate outside `vibeos-core` (`tests/hostlib`).
 """
 

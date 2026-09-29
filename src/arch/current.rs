@@ -8,6 +8,9 @@ use vibeos::arch::{Barriers, ContextSwitch, CycleCounter, InterruptMask, PerCpuB
 #[cfg(target_arch = "x86_64")]
 pub type Arch = super::x86_64::Arch;
 
+/// The IRQ-off exclusive cell over this build's port (DESIGN §2.3).
+pub type IrqCell<T> = vibeos::cell::IrqCell<T, Arch>;
+
 /// The split virtqueue over this build's port's barriers.
 pub type SplitQueue = vibeos::virtio::SplitQueue<Arch>;
 
