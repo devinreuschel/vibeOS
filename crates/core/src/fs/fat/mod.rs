@@ -7,6 +7,11 @@
 //!
 //! FAT has no POSIX perms/symlinks/hard links: those ops return
 //! [`FatError::NotSupp`]. Do not fake success.
+//!
+//! A byte parser (ROADMAP §10.1): every index into disk data is a checked
+//! access that returns [`FatError`], and all arithmetic is `checked_*`.
+
+#![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use crate::fs::{FsError, InodeKind};
 
@@ -31,12 +36,6 @@ pub const EOC_MIN: u32 = 0x0FFFFFF8;
 pub const BAD_CLUS: u32 = 0x0FFFFFF7;
 pub const ROOT_INO: u32 = 1;
 
-#[allow(dead_code)]
-const ATTR_RO: u8 = 0x01;
-#[allow(dead_code)]
-const ATTR_HIDDEN: u8 = 0x02;
-#[allow(dead_code)]
-const ATTR_SYS: u8 = 0x04;
 const ATTR_VOL: u8 = 0x08;
 const ATTR_DIR: u8 = 0x10;
 const ATTR_ARCH: u8 = 0x20;
@@ -45,9 +44,11 @@ const LFN_LAST: u8 = 0x40;
 const ENT_DEL: u8 = 0xE5;
 const ENT_FREE: u8 = 0x00;
 const ENT: usize = 32;
+const ENT_U32: u32 = ENT as u32;
 const LFN_CHARS: usize = 13;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
 pub enum FatError {
     Inval,
     Io,
@@ -138,7 +139,7 @@ impl Disk for MemDisk<'_> {
     }
 
     fn nsectors(&self) -> u32 {
-        (self.data.len() / self.sec as usize) as u32
+        self.data.len().checked_div(self.sec as usize).unwrap_or(0) as u32
     }
 
     fn read(&mut self, lba: u32, buf: &mut [u8]) -> Result<(), FatError> {
@@ -148,10 +149,7 @@ impl Disk for MemDisk<'_> {
         }
         let off = (lba as usize).checked_mul(ss).ok_or(FatError::Inval)?;
         let end = off.checked_add(ss).ok_or(FatError::Inval)?;
-        if end > self.data.len() {
-            return Err(FatError::Io);
-        }
-        buf.copy_from_slice(&self.data[off..end]);
+        buf.copy_from_slice(self.data.get(off..end).ok_or(FatError::Io)?);
         Ok(())
     }
 
@@ -162,10 +160,10 @@ impl Disk for MemDisk<'_> {
         }
         let off = (lba as usize).checked_mul(ss).ok_or(FatError::Inval)?;
         let end = off.checked_add(ss).ok_or(FatError::Inval)?;
-        if end > self.data.len() {
-            return Err(FatError::Io);
-        }
-        self.data[off..end].copy_from_slice(buf);
+        self.data
+            .get_mut(off..end)
+            .ok_or(FatError::Io)?
+            .copy_from_slice(buf);
         Ok(())
     }
 
@@ -191,26 +189,44 @@ pub struct FatInfo {
 }
 
 impl FatInfo {
+    /// Bytes per cluster. A `u8` times a `u32` fits in 64 bits, so this
+    /// saturates only where `usize` is narrower, and `FatVol::mount`
+    /// rejects anything above [`MAX_CLUS_BYTES`].
     pub fn clus_bytes(self) -> usize {
-        self.spc as usize * self.bps as usize
+        usize::from(self.spc).saturating_mul(self.bps as usize)
     }
 
     pub fn clus_lba(self, clu: u32) -> Result<u32, FatError> {
-        if clu < 2 || clu >= self.nclus + 2 {
+        if clu < 2 || self.past_end(clu) {
             return Err(FatError::Corrupt);
         }
-        Ok(self.data_lba + (clu - 2) * self.spc as u32)
+        clu.checked_sub(2)
+            .and_then(|c| c.checked_mul(u32::from(self.spc)))
+            .and_then(|o| o.checked_add(self.data_lba))
+            .ok_or(FatError::Corrupt)
     }
 
     pub fn fat_lba(self, copy: u8, fat_sec: u32) -> Result<u32, FatError> {
         if copy >= self.num_fats || fat_sec >= self.fatsz {
             return Err(FatError::Inval);
         }
-        Ok(self.rsvd + copy as u32 * self.fatsz + fat_sec)
+        u32::from(copy)
+            .checked_mul(self.fatsz)
+            .and_then(|o| o.checked_add(self.rsvd))
+            .and_then(|o| o.checked_add(fat_sec))
+            .ok_or(FatError::Corrupt)
     }
 
+    /// Whether `clu` lies past the last cluster, `nclus + 1`; FAT entries
+    /// 0 and 1 are in range.
+    pub(super) fn past_end(self, clu: u32) -> bool {
+        clu.checked_sub(2).is_some_and(|c| c >= self.nclus)
+    }
+
+    /// Data area in bytes; saturates only for a cluster size that
+    /// `FatVol::mount` rejects.
     pub fn data_bytes(self) -> u64 {
-        self.nclus as u64 * self.clus_bytes() as u64
+        u64::from(self.nclus).saturating_mul(self.clus_bytes() as u64)
     }
 }
 
@@ -242,8 +258,11 @@ impl Node {
         name: [0; MAX_NAME],
     };
 
+    /// The name; a `name_len` past the buffer names all of it.
     pub fn name(&self) -> &[u8] {
-        &self.name[..self.name_len as usize]
+        self.name
+            .get(..self.name_len as usize)
+            .unwrap_or(&self.name)
     }
 
     pub fn is_dir(self) -> bool {
@@ -324,13 +343,17 @@ pub fn stat_ino(dir_clu: u32, dir_off: u32) -> u32 {
     if dir_clu == 0 && dir_off == 0 {
         return ROOT_INO;
     }
-    let idx = dir_off / ENT as u32;
+    let idx = dir_off / ENT_U32;
     let n = if dir_clu < 0x1_0000 && idx < 0x1_0000 {
         (dir_clu << 16) | idx
     } else {
         dir_clu.wrapping_mul(0x9E37_79B9) ^ idx
     };
-    if n <= ROOT_INO { n + 2 } else { n }
+    if n > ROOT_INO {
+        return n;
+    }
+    // n + 2, since n <= ROOT_INO (1).
+    n | 2
 }
 
 impl FatVol {
@@ -343,7 +366,7 @@ impl FatVol {
                 return Ok(None);
             }
             clu = next;
-            i += 1;
+            i = i.checked_add(1).ok_or(FatError::Corrupt)?;
             if i > self.info.nclus {
                 return Err(FatError::Corrupt);
             }
@@ -353,29 +376,25 @@ impl FatVol {
 
     fn write_cluster<D: Disk>(&mut self, d: &mut D, clu: u32, buf: &[u8]) -> Result<(), FatError> {
         let n = self.info.clus_bytes();
-        if buf.len() < n {
-            return Err(FatError::Inval);
-        }
         let lba = self.info.clus_lba(clu)?;
-        let mut i = 0u32;
-        while i < self.info.spc as u32 {
-            let off = i as usize * self.info.bps as usize;
-            d.write(lba + i, &buf[off..off + self.info.bps as usize])?;
-            i += 1;
+        let src = buf.get(..n).ok_or(FatError::Inval)?;
+        let (secs, _) = src.as_chunks::<SEC>();
+        for (i, sec) in (0u32..).zip(secs) {
+            d.write(lba.checked_add(i).ok_or(FatError::Corrupt)?, sec)?;
         }
         Ok(())
     }
 
     fn fat_set<D: Disk>(&mut self, d: &mut D, clu: u32, val: u32) -> Result<(), FatError> {
-        if clu >= self.info.nclus + 2 {
+        if self.info.past_end(clu) {
             return Err(FatError::Corrupt);
         }
-        let (sec, ent_off) = fat_loc(clu);
-        let s = self.fat_cache(d, sec)?;
-        let old = le32(&self.cache[s].data, ent_off);
+        let (sec, ent_off) = fat_loc(clu)?;
+        let c = self.fat_sec(d, sec)?;
+        let old = le32(&c.data, ent_off)?;
         let packed = (old & 0xF000_0000) | (val & 0x0FFF_FFFF);
-        put_le32(&mut self.cache[s].data, ent_off, packed);
-        self.cache[s].dirty = true;
+        put_le32(&mut c.data, ent_off, packed)?;
+        c.dirty = true;
         if val == 0 && old & 0x0FFF_FFFF != 0 {
             self.free = self.free.saturating_add(1);
             self.fsinfo_dirty = true;
@@ -387,54 +406,71 @@ impl FatVol {
     }
 
     fn alloc_clu<D: Disk>(&mut self, d: &mut D, _hint_prev: u32) -> Result<u32, FatError> {
-        let start = if self.hint >= 2 { self.hint } else { 2 };
-        let end = self.info.nclus + 2;
-        let mut clu = start;
-        let mut scanned = 0u32;
-        while scanned < self.info.nclus {
-            if clu >= end {
+        let mut clu = if self.hint >= 2 { self.hint } else { 2 };
+        for _ in 0..self.info.nclus {
+            if self.info.past_end(clu) {
                 clu = 2;
             }
             let v = self.fat_get(d, clu)?;
             if v == 0 {
                 self.fat_set(d, clu, EOC_MIN)?;
                 self.hint = clu.saturating_add(1);
-                if self.hint >= end {
+                if self.info.past_end(self.hint) {
                     self.hint = 2;
                 }
                 self.fsinfo_dirty = true;
                 return Ok(clu);
             }
-            clu += 1;
-            scanned += 1;
+            clu = clu.checked_add(1).ok_or(FatError::Corrupt)?;
         }
         Err(FatError::NoSpace)
     }
 }
 
-fn le16(b: &[u8], o: usize) -> u16 {
-    u16::from_le_bytes([b[o], b[o + 1]])
+/// The `N` bytes of `b` at `o`; `Corrupt` when they run past its end.
+fn bytes_at<const N: usize>(b: &[u8], o: usize) -> Result<[u8; N], FatError> {
+    let end = o.checked_add(N).ok_or(FatError::Corrupt)?;
+    let s = b.get(o..end).ok_or(FatError::Corrupt)?;
+    <[u8; N]>::try_from(s).map_err(|_| FatError::Corrupt)
 }
 
-fn le32(b: &[u8], o: usize) -> u32 {
-    u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
+/// Copy `v` into `b` at `o`; `Corrupt` when it runs past `b`'s end.
+fn put_at(b: &mut [u8], o: usize, v: &[u8]) -> Result<(), FatError> {
+    let end = o.checked_add(v.len()).ok_or(FatError::Corrupt)?;
+    b.get_mut(o..end)
+        .ok_or(FatError::Corrupt)?
+        .copy_from_slice(v);
+    Ok(())
 }
 
-fn put_le16(b: &mut [u8], o: usize, v: u16) {
-    b[o..o + 2].copy_from_slice(&v.to_le_bytes());
+fn le16(b: &[u8], o: usize) -> Result<u16, FatError> {
+    bytes_at(b, o).map(u16::from_le_bytes)
 }
 
-fn put_le32(b: &mut [u8], o: usize, v: u32) {
-    b[o..o + 4].copy_from_slice(&v.to_le_bytes());
+fn le32(b: &[u8], o: usize) -> Result<u32, FatError> {
+    bytes_at(b, o).map(u32::from_le_bytes)
+}
+
+fn put_le16(b: &mut [u8], o: usize, v: u16) -> Result<(), FatError> {
+    put_at(b, o, &v.to_le_bytes())
+}
+
+fn put_le32(b: &mut [u8], o: usize, v: u32) -> Result<(), FatError> {
+    put_at(b, o, &v.to_le_bytes())
 }
 
 fn name_is_dot(n: &[u8]) -> bool {
-    n.len() == 1 && n[0] == b'.'
+    n == b"."
 }
 
 fn name_is_dotdot(n: &[u8]) -> bool {
-    n.len() == 2 && n[0] == b'.' && n[1] == b'.'
+    n == b".."
 }
 
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "host tests: a panic fails the test, not the kernel"
+)]
 #[cfg(test)]
 mod tests;

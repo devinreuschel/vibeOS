@@ -9,12 +9,12 @@ impl FatVol {
         off: u64,
         buf: &mut [u8],
     ) -> Result<usize, FatError> {
-        if off >= size as u64 {
-            return Ok(0);
-        }
-        let max = (size as u64 - off) as usize;
+        let max = match u64::from(size).checked_sub(off) {
+            Some(m) if m > 0 => m as usize,
+            _ => return Ok(0),
+        };
         let n = buf.len().min(max);
-        self.read_at(d, clu, off, &mut buf[..n])?;
+        self.read_at(d, clu, off, buf.get_mut(..n).ok_or(FatError::Inval)?)?;
         Ok(n)
     }
 
@@ -122,7 +122,7 @@ impl FatVol {
         let mut i = 0u32;
         while clu >= 2 && !is_eoc(clu) {
             let next = self.fat_get(d, clu)?;
-            i += 1;
+            i = i.checked_add(1).ok_or(FatError::Corrupt)?;
             if i == keep {
                 self.fat_set(d, clu, EOC_MIN)?;
             } else if i > keep {
@@ -158,7 +158,7 @@ impl FatVol {
         } else {
             0
         };
-        let slots = n_lfn + 1;
+        let slots = n_lfn.checked_add(1).ok_or(FatError::NameTooLong)?;
         let (ent_clu, ent_off) = self.dir_reserve(d, dir_clu, slots)?;
         let mut first = 0u32;
         if dir {
@@ -169,29 +169,25 @@ impl FatVol {
             d.flush()?;
         }
         let cs = lfn_checksum(&short);
-        let (date, time) = fat_datetime(self.now);
-        let mut slot = 0usize;
-        while slot < n_lfn {
-            let ord = (n_lfn - slot) as u8;
+        let (date, time) = fat_datetime(self.now)?;
+        for (slot, ord) in (1..=n_lfn).rev().enumerate() {
             let last = slot == 0;
             let mut ent = [0u8; ENT];
-            fill_lfn(&mut ent, ord, last, cs, name);
-            let off = ent_off + (slot * ENT) as u32;
-            self.write_dir_raw(d, dir_clu, off, &ent)?;
-            slot += 1;
+            fill_lfn(&mut ent, ord as u8, last, cs, name)?;
+            self.write_dir_raw(d, dir_clu, ent_at(ent_off, slot)?, &ent)?;
         }
         let mut ent = [0u8; ENT];
         ent[..11].copy_from_slice(&short);
         ent[11] = if dir { ATTR_DIR } else { ATTR_ARCH };
-        put_le16(&mut ent, 14, time);
-        put_le16(&mut ent, 16, date);
-        put_le16(&mut ent, 18, date);
-        put_le16(&mut ent, 20, (first >> 16) as u16);
-        put_le16(&mut ent, 22, time);
-        put_le16(&mut ent, 24, date);
-        put_le16(&mut ent, 26, (first & 0xFFFF) as u16);
-        put_le32(&mut ent, 28, 0);
-        let short_off = ent_off + (n_lfn * ENT) as u32;
+        put_le16(&mut ent, 14, time)?;
+        put_le16(&mut ent, 16, date)?;
+        put_le16(&mut ent, 18, date)?;
+        put_le16(&mut ent, 20, (first >> 16) as u16)?;
+        put_le16(&mut ent, 22, time)?;
+        put_le16(&mut ent, 24, date)?;
+        put_le16(&mut ent, 26, (first & 0xFFFF) as u16)?;
+        put_le32(&mut ent, 28, 0)?;
+        let short_off = ent_at(ent_off, n_lfn)?;
         self.write_dir_raw(d, dir_clu, short_off, &ent)?;
         d.flush()?;
         let _ = (ent_clu, date, time);
@@ -274,20 +270,18 @@ impl FatVol {
         } else {
             0
         };
-        let (_c, ent_off) = self.dir_reserve(d, dst_dir, n_lfn + 1)?;
+        let slots = n_lfn.checked_add(1).ok_or(FatError::NameTooLong)?;
+        let (_c, ent_off) = self.dir_reserve(d, dst_dir, slots)?;
         let cs = lfn_checksum(&short);
-        let mut slot = 0usize;
-        while slot < n_lfn {
-            let ord = (n_lfn - slot) as u8;
+        for (slot, ord) in (1..=n_lfn).rev().enumerate() {
             let mut ent = [0u8; ENT];
-            fill_lfn(&mut ent, ord, slot == 0, cs, dst_name);
-            self.write_dir_raw(d, dst_dir, ent_off + (slot * ENT) as u32, &ent)?;
-            slot += 1;
+            fill_lfn(&mut ent, ord as u8, slot == 0, cs, dst_name)?;
+            self.write_dir_raw(d, dst_dir, ent_at(ent_off, slot)?, &ent)?;
         }
         let mut ent = [0u8; ENT];
         self.read_dir_raw(d, src_dir, src.dir_off, &mut ent)?;
         ent[..11].copy_from_slice(&short);
-        let short_off = ent_off + (n_lfn * ENT) as u32;
+        let short_off = ent_at(ent_off, n_lfn)?;
         self.write_dir_raw(d, dst_dir, short_off, &ent)?;
         if src.kind == InodeKind::Dir && src_dir != dst_dir {
             let parent = if dst_dir == self.info.root_clus {
@@ -313,7 +307,7 @@ impl FatVol {
         if !self.read_dir_raw(d, dir, ENT as u32, &mut ent)? || &ent[..11] != b"..         " {
             return Err(FatError::Corrupt);
         }
-        let clu = (le16(&ent, 20) as u32) << 16 | le16(&ent, 26) as u32;
+        let clu = (le16(&ent, 20)? as u32) << 16 | le16(&ent, 26)? as u32;
         Ok(if clu == 0 { self.info.root_clus } else { clu })
     }
 
@@ -324,8 +318,8 @@ impl FatVol {
         if !self.read_dir_raw(d, dir, ENT as u32, &mut ent)? || &ent[..11] != b"..         " {
             return Err(FatError::Corrupt);
         }
-        put_le16(&mut ent, 20, (parent >> 16) as u16);
-        put_le16(&mut ent, 26, parent as u16);
+        put_le16(&mut ent, 20, (parent >> 16) as u16)?;
+        put_le16(&mut ent, 26, parent as u16)?;
         self.write_dir_raw(d, dir, ENT as u32, &ent)
     }
 
@@ -345,7 +339,7 @@ impl FatVol {
                 return Err(FatError::Corrupt);
             }
             cur = self.dotdot_of(d, cur)?;
-            steps += 1;
+            steps = steps.checked_add(1).ok_or(FatError::Corrupt)?;
         }
     }
 
@@ -439,7 +433,7 @@ impl FatVol {
             if next < 2 || next == BAD_CLUS {
                 return Err(FatError::Corrupt);
             }
-            have += 1;
+            have = have.checked_add(1).ok_or(FatError::Corrupt)?;
             clu = next;
             if have > self.info.nclus {
                 return Err(FatError::Corrupt);
@@ -451,7 +445,7 @@ impl FatVol {
             self.fat_set(d, clu, n)?;
             self.fat_set(d, n, EOC_MIN)?;
             clu = n;
-            have += 1;
+            have = have.checked_add(1).ok_or(FatError::Corrupt)?;
         }
         self.commit_fat(d)?;
         d.flush()
@@ -471,8 +465,8 @@ impl FatVol {
             return Ok(());
         }
         let cb = self.info.clus_bytes() as u64;
-        let skip = off / cb;
-        let mut pin = (off % cb) as usize;
+        let skip = off.checked_div(cb).ok_or(FatError::Corrupt)?;
+        let mut pin = off.checked_rem(cb).ok_or(FatError::Corrupt)? as usize;
         let mut clu = first;
         let mut s = 0u32;
         while s < skip as u32 {
@@ -481,24 +475,28 @@ impl FatVol {
                 buf.fill(0);
                 return Ok(());
             }
-            s += 1;
+            s = s.checked_add(1).ok_or(FatError::Corrupt)?;
             if s > self.info.nclus {
                 return Err(FatError::Corrupt);
             }
         }
-        let mut done = 0usize;
         let mut clbuf = [0u8; MAX_CLUS_BYTES];
-        while done < buf.len() {
+        let mut rest: &mut [u8] = buf;
+        while !rest.is_empty() {
             if clu < 2 || is_eoc(clu) {
-                buf[done..].fill(0);
+                rest.fill(0);
                 break;
             }
             let n = self.read_cluster(d, clu, &mut clbuf)?;
-            let take = (n - pin).min(buf.len() - done);
-            buf[done..done + take].copy_from_slice(&clbuf[pin..pin + take]);
-            done += take;
+            let src = clbuf.get(pin..n).ok_or(FatError::Corrupt)?;
+            let take = src.len().min(rest.len());
+            let (head, tail) = core::mem::take(&mut rest)
+                .split_at_mut_checked(take)
+                .ok_or(FatError::Corrupt)?;
+            head.copy_from_slice(src.get(..take).ok_or(FatError::Corrupt)?);
+            rest = tail;
             pin = 0;
-            if done >= buf.len() {
+            if rest.is_empty() {
                 break;
             }
             clu = self.fat_get(d, clu)?;
@@ -514,8 +512,8 @@ impl FatVol {
         buf: &[u8],
     ) -> Result<(), FatError> {
         let cb = self.info.clus_bytes() as u64;
-        let skip = off / cb;
-        let mut pin = (off % cb) as usize;
+        let skip = off.checked_div(cb).ok_or(FatError::Corrupt)?;
+        let mut pin = off.checked_rem(cb).ok_or(FatError::Corrupt)? as usize;
         let mut clu = first;
         let mut s = 0u32;
         while s < skip as u32 {
@@ -523,25 +521,38 @@ impl FatVol {
             if clu < 2 || is_eoc(clu) {
                 return Err(FatError::Corrupt);
             }
-            s += 1;
+            s = s.checked_add(1).ok_or(FatError::Corrupt)?;
         }
-        let mut done = 0usize;
         let mut clbuf = [0u8; MAX_CLUS_BYTES];
-        while done < buf.len() {
+        let mut rest = buf;
+        while !rest.is_empty() {
             if clu < 2 || is_eoc(clu) {
                 return Err(FatError::Corrupt);
             }
             let n = self.read_cluster(d, clu, &mut clbuf)?;
-            let take = (n - pin).min(buf.len() - done);
-            clbuf[pin..pin + take].copy_from_slice(&buf[done..done + take]);
-            self.write_cluster(d, clu, &clbuf[..n])?;
-            done += take;
+            let dst = clbuf.get_mut(pin..n).ok_or(FatError::Corrupt)?;
+            let take = dst.len().min(rest.len());
+            let (head, tail) = rest.split_at_checked(take).ok_or(FatError::Corrupt)?;
+            dst.get_mut(..take)
+                .ok_or(FatError::Corrupt)?
+                .copy_from_slice(head);
+            self.write_cluster(d, clu, clbuf.get(..n).ok_or(FatError::Corrupt)?)?;
+            rest = tail;
             pin = 0;
-            if done >= buf.len() {
+            if rest.is_empty() {
                 break;
             }
             clu = self.fat_get(d, clu)?;
         }
         Ok(())
     }
+}
+
+/// The offset of the `slot`th entry after `base` in a directory.
+fn ent_at(base: u32, slot: usize) -> Result<u32, FatError> {
+    let rel = slot
+        .checked_mul(ENT)
+        .and_then(|b| u32::try_from(b).ok())
+        .ok_or(FatError::NoSpace)?;
+    base.checked_add(rel).ok_or(FatError::NoSpace)
 }

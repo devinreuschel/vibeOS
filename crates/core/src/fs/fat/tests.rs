@@ -693,12 +693,12 @@ fn rename_dir_dotdot_names_new_parent() {
         let mut ent = [0u8; ENT];
         v.read_dir_raw(d, dd.clu, ENT as u32, &mut ent).unwrap();
         assert_eq!(
-            (le16(&ent, 20) as u32) << 16 | le16(&ent, 26) as u32,
+            (le16(&ent, 20).unwrap() as u32) << 16 | le16(&ent, 26).unwrap() as u32,
             bb.clu
         );
         v.rename(d, bb.clu, b"d", root, b"d").unwrap();
         v.read_dir_raw(d, dd.clu, ENT as u32, &mut ent).unwrap();
-        assert_eq!((le16(&ent, 20), le16(&ent, 26)), (0, 0));
+        assert_eq!((le16(&ent, 20).unwrap(), le16(&ent, 26).unwrap()), (0, 0));
         let got = v.lookup(d, root, b"d").unwrap();
         assert_eq!(got.clu, dd.clu);
         let f = v.lookup(d, got.clu, b"IN.TXT").unwrap();
@@ -708,4 +708,23 @@ fn rename_dir_dotdot_names_new_parent() {
         v.sync(d).unwrap();
     });
     fsck(&b);
+}
+
+/// Mount `b` with FATSz32 set to `fatsz` and NumFATs to `nfats`.
+fn mount_with_fatsz(fatsz: u32, nfats: u8) -> Result<(), FatError> {
+    let mut b = fresh(INITRD_BYTES);
+    b[36..40].copy_from_slice(&fatsz.to_le_bytes());
+    b[16] = nfats;
+    let mut disk = MemDisk::new(&mut b, SEC as u32).unwrap();
+    FatVol::mount(&mut disk).map(|_| ())
+}
+
+#[test]
+fn fat_bpb_data_lba_overflow_two_fats() {
+    assert_eq!(mount_with_fatsz(0x8000_0000, 2), Err(FatError::Corrupt));
+}
+
+#[test]
+fn fat_bpb_data_lba_overflow_one_fat() {
+    assert_eq!(mount_with_fatsz(0xFFFF_FFFF, 1), Err(FatError::Corrupt));
 }

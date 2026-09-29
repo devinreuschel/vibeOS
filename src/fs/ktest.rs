@@ -9,6 +9,12 @@ use vibeos::fs::{
 use vibeos::limits::MAX_OPEN_FILES;
 use vibeos::proc::wait_exited;
 
+mod hooks;
+mod slots;
+
+use hooks::{link_path, symlink_path, truncate_path};
+pub(crate) use slots::test_fs_drop_slot_busy_keeps_slot;
+
 use crate::fat_init;
 use crate::file_init;
 use crate::fs_init;
@@ -46,14 +52,14 @@ pub(crate) fn test_vfs_walk() -> Outcome {
     if file_init::creat(b"/ram/f").is_err() {
         return Outcome::Fail("rf");
     }
-    if file_init::symlink_path(b"/ram/l", b"/ram/f").is_err() {
+    if symlink_path(b"/ram/l", b"/ram/f").is_err() {
         return Outcome::Fail("symlink");
     }
     match fid::stat_path("/ram/l") {
         Ok(s) if s.kind == InodeKind::Reg => {}
         _ => return Outcome::Fail("follow"),
     }
-    if file_init::symlink_path(b"/ram/loop", b"/ram/loop").is_err() {
+    if symlink_path(b"/ram/loop", b"/ram/loop").is_err() {
         return Outcome::Fail("loopc");
     }
     match fid::stat_path("/ram/loop") {
@@ -193,7 +199,7 @@ pub(crate) fn test_fat_initrd() -> Outcome {
     if !fat_init::live() {
         return Outcome::Fail("not live");
     }
-    if fat_init::nvol() == 0 {
+    if fat_init::NVOL.load(Ordering::Acquire) == 0 {
         return Outcome::Fail("nvol");
     }
     match fid::stat_path("/hello.txt") {
@@ -229,16 +235,16 @@ pub(crate) fn test_fat_initrd() -> Outcome {
         }
         Err(_) => return Outcome::Fail("open"),
     }
-    if file_init::truncate_path(b"/kt/w.txt", 1).is_err() {
+    if truncate_path(b"/kt/w.txt", 1).is_err() {
         return Outcome::Fail("trunc");
     }
     if fid::unlink_path("/kt/w.txt", false).is_err() {
         return Outcome::Fail("unlink");
     }
-    if file_init::symlink_path(b"/s", b"/kt").err() != Some(FsError::NotSupp) {
+    if symlink_path(b"/s", b"/kt").err() != Some(FsError::NotSupp) {
         return Outcome::Fail("symlink supp");
     }
-    if file_init::link_path(b"/hello.txt", b"/h2").err() != Some(FsError::NotSupp) {
+    if link_path(b"/hello.txt", b"/h2").err() != Some(FsError::NotSupp) {
         return Outcome::Fail("link supp");
     }
     if file_init::sync_fs().is_err() {
@@ -251,7 +257,7 @@ pub(crate) fn test_vibefs() -> Outcome {
     if !vibefs_init::live() {
         return Outcome::Fail("not live");
     }
-    if vibefs_init::nvol() == 0 {
+    if vibefs_init::NVOL.load(Ordering::Acquire) == 0 {
         return Outcome::Fail("nvol");
     }
     match fid::stat_path("/vibe") {
@@ -287,7 +293,7 @@ pub(crate) fn test_vibefs() -> Outcome {
         Ok(s) if s.kind == InodeKind::Reg && (s.mode & 0o777) == 0o644 => {}
         _ => return Outcome::Fail("mode"),
     }
-    if file_init::symlink_path(b"/vibe/l", b"/vibe/d/f").is_err() {
+    if symlink_path(b"/vibe/l", b"/vibe/d/f").is_err() {
         return Outcome::Fail("symlink");
     }
     match fid::open("/vibe/big", O_RDWR | O_CREAT, 0o644) {
@@ -313,7 +319,7 @@ pub(crate) fn test_vibefs() -> Outcome {
         }
         Err(_) => return Outcome::Fail("extent open"),
     }
-    if vibefs_init::snapshot(vibefs_init::VOL_MEM, b"s0").is_err() {
+    if vibefs_init::with_slot(vibefs_init::VOL_MEM, |v, d| v.snapshot(d, b"s0")).is_err() {
         return Outcome::Fail("snap");
     }
     if file_init::sync_fs().is_err() {
@@ -324,7 +330,7 @@ pub(crate) fn test_vibefs() -> Outcome {
 
 /// Each open-file slot's `(used, refs)`.
 fn holders() -> [(bool, u16); MAX_OPEN_FILES] {
-    file_init::testing::table().map(|(used, refs, _)| (used, refs))
+    hooks::table().map(|(used, refs, _)| (used, refs))
 }
 
 /// Read up to `out.len()` bytes of `path` from offset 0; the count read.
@@ -482,9 +488,9 @@ pub(crate) fn test_file_table_fork_churn() -> Outcome {
         return Outcome::Fail("unlink before");
     }
     let base = holders();
-    file_init::testing::set_write_yield(true);
+    hooks::set_write_yield(true);
     let st = user::run(&Image::Code(F55_CHURN, DEFAULT), &["f55churn"]);
-    file_init::testing::set_write_yield(false);
+    hooks::set_write_yield(false);
     let out = check_churn(st, &base);
     let ua = unlink_quiet("/f55a.txt");
     let ub = unlink_quiet("/f55b.txt");
@@ -565,18 +571,18 @@ static STALE_DONE: AtomicBool = AtomicBool::new(false);
 /// opens `/f55t.txt` into the freed slot, then releases the write.
 fn stale_helper() {
     let mut n = 0u32;
-    while !file_init::testing::write_held() && n < 10_000 {
+    while !hooks::write_held() && n < 10_000 {
         thread_init::yield_now();
         n += 1;
     }
-    if file_init::testing::write_held()
+    if hooks::write_held()
         && fid::close(unpack(STALE_A.load(Ordering::Acquire))).is_ok()
         && let Ok(b) = fid::open("/f55t.txt", O_RDWR | O_CREAT | O_TRUNC, 0)
     {
         STALE_B.store(pack(b), Ordering::Release);
         STALE_B_OK.store(true, Ordering::Release);
     }
-    file_init::testing::release_write();
+    hooks::release_write();
     STALE_DONE.store(true, Ordering::Release);
 }
 
@@ -638,7 +644,7 @@ fn stale_writeback() -> Outcome {
     STALE_A.store(pack(a), Ordering::Release);
     STALE_B_OK.store(false, Ordering::Release);
     STALE_DONE.store(false, Ordering::Release);
-    file_init::testing::hold_next_write();
+    hooks::hold_next_write();
     crate::ktest::spawn_thread("f55-stale", stale_helper);
     let w = fid::write(a, b"x");
     let deadline = time_init::now_ns().saturating_add(1_000_000_000);
@@ -674,9 +680,9 @@ pub(crate) fn test_open_creat_exists_opens() -> Outcome {
     if unlink_quiet("/f55r.txt").is_err() {
         return Outcome::Fail("unlink before");
     }
-    file_init::testing::set_open_race(true);
+    hooks::set_open_race(true);
     let r = fid::open("/f55r.txt", O_RDWR | O_CREAT, 0);
-    file_init::testing::set_open_race(false);
+    hooks::set_open_race(false);
     match r {
         Ok(id) => {
             if let Err(e) = fid::close(id) {
@@ -688,9 +694,9 @@ pub(crate) fn test_open_creat_exists_opens() -> Outcome {
     if unlink_quiet("/f55r.txt").is_err() {
         return Outcome::Fail("unlink");
     }
-    file_init::testing::set_open_race(true);
+    hooks::set_open_race(true);
     let r = fid::open("/f55r.txt", O_RDWR | O_CREAT | O_EXCL, 0);
-    file_init::testing::set_open_race(false);
+    hooks::set_open_race(false);
     let excl = match r {
         Err(FsError::Exists) => Outcome::Ok,
         Ok(id) => {
@@ -1271,7 +1277,7 @@ fn vibe_ops_mem() -> Step<()> {
     if count_names("/vibe/s11", b"f")? != (1, 1, 1) {
         return Err(("readdir names", FsError::Io));
     }
-    file_init::symlink_path(b"/vibe/s11/l", b"/vibe/s11/f").map_err(|e| ("symlink", e))?;
+    symlink_path(b"/vibe/s11/l", b"/vibe/s11/f").map_err(|e| ("symlink", e))?;
     let l = vstat("/vibe/s11/l").map_err(|e| ("stat link", e))?;
     let f = vstat("/vibe/s11/f").map_err(|e| ("stat file", e))?;
     let k = vfs("lstat", fid::lstat_path("/vibe/s11/l"))?;
@@ -1329,9 +1335,9 @@ pub(crate) fn test_vfs_backends_via_ops() -> Outcome {
     if !fat_init::live() || !vibefs_init::live() {
         return Outcome::Fail("needs FAT and vibefs live");
     }
-    let (opens, routed) = file_init::testing::open_counts();
+    let (opens, routed) = hooks::open_counts();
     let r = backends_via_ops();
-    let (opens2, routed2) = file_init::testing::open_counts();
+    let (opens2, routed2) = hooks::open_counts();
     let mut clean = Ok(());
     for p in [&b"/vibe/vo_src"[..], b"/vo_copy", b"/vibe/vo_h"] {
         match file_init::unlink(p) {

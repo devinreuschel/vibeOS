@@ -502,6 +502,10 @@ impl Vol {
             if let Some((ei, phys)) = existing {
                 d.read_block(phys, &mut self.iobuf)?;
                 let old_e = self.inodes[is].extents[ei];
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "fixed by ROADMAP §10.11: vibefs never rewrites corrupt data"
+                )]
                 let _ = self.check_extent(d, old_e);
                 self.iobuf[pin..pin + n].copy_from_slice(&buf[done..done + n]);
                 let newp = self.alloc_block()?;
@@ -672,6 +676,10 @@ impl Vol {
                 let n = self.read(d, ino, 0, &mut tmp[..new as usize])?;
                 let _ = n;
             }
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "fixed by ROADMAP §10.11: a vibefs write that cannot add an extent"
+            )]
             let _ = self.free_inode_data(d, ino);
             let is = self.inode_slot(ino)?;
             self.inodes[is].flags |= F_INLINE;

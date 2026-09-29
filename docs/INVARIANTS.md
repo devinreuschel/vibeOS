@@ -557,8 +557,7 @@ which turns an arithmetic overflow into a panic. The kernel binary denies `unwra
 a site a kernel invariant bounds keeps an `#[allow]` that names the invariant (§9.4); not yet
 enforced: a module not yet audited carries an audit-pending allow on its `mod` line until ROADMAP
 §10.1's sweep of it. Planned (ROADMAP §10.1): both lints are denied in every byte parser ROADMAP
-§10.2's fuzzers cover, vibefs v1 excepted until ROADMAP §14.8 retires it. Crafted input panics portable code: a FAT BPB whose
-`rsvd + num_fats * FATSz32` overflows in `parse_bpb` (ROADMAP §10.2, F064); a CRC-valid vibefs leaf whose count
+§10.2's fuzzers cover, vibefs v1 excepted until ROADMAP §14.8 retires it. Crafted input panics portable code: a CRC-valid vibefs leaf whose count
 exceeds the per-leaf maximum (F061; ROADMAP §14.8 retires v1 for a v2 that validates every block it reads); a vibefs truncate-grow that keeps `F_INLINE`
 past 128 bytes (ROADMAP §13.9, F062). Panics in the kernel binary end in the binding order above.
 
@@ -718,6 +717,7 @@ that review cites means the review's text.
 | I233 | A virtio `SplitQueue`'s `base` is 16-byte aligned and valid for `layout.total` bytes for the queue's life, and only the queue and its device reach that memory | `virtio::SplitQueue::new` (its `# Safety` contract; the kernel passes a `dma_init::alloc` buffer); `virtio::SplitQueue::field` checks each offset against `layout.total` | enforced in part (the offset check; the buffer's life is the caller's contract) | Yes |
 | I234 | A VA `pci_init::map_mmio` returns maps its BAR or ECAM page, uncached unless it is the kept write-back framebuffer BAR, for the rest of the boot: nothing unmaps it | `pci_init::map_mmio` (the UC physmap patch or `ioremap`); `pci_init::map_func_bars` records it in the device's resources | documented | Partly: a range `patch_physmap_uc` fails on is still returned (ROADMAP §10.12, F115), and a BAR may overlap RAM until the same box refuses it |
 | I235 | A block `Request`'s segments name memory valid for their lengths that nothing else touches until the request's completion runs | `virtio_blk_init::build` and `block_init`'s submit paths, whose callers keep the buffer until `IoWaiter::wait` returns or the completion runs | documented | Yes: every in-tree submitter waits on its `IoWaiter` before it reuses the buffer |
+| I236 | A volume slot's `vol` and `back` cells in `fs::fat_init::SLOTS` and `fs::vibefs_init::SLOTS` are touched only by the one thread holding the slot's `busy` flag, which `grab`'s compare-exchange or the mount path under `ALLOC` sets and a Release store clears, or, while the slot's `used` flag is clear, by the one boot or mount path filling it before it stores `used` with Release | `fs::fat_init::grab`, `fs::vibefs_init::grab` | enforced at runtime (busy flag) | Yes: `drop_slot` no longer writes a slot whose `grab` failed |
 
 ## 2.8 Publish last
 

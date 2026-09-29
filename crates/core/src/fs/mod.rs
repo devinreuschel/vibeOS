@@ -90,6 +90,7 @@ pub const SEEK_CUR: u32 = 1;
 pub const SEEK_END: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
 pub enum FsError {
     NotFound,
     Exists,

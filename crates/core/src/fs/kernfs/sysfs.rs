@@ -70,7 +70,7 @@ fn sysfs_add(
             Err(FsError::NotFound) => kern_mk_dir(k, now, inst, pci_drvs, drv_bytes)?,
             Err(e) => return Err(e),
         };
-        let _ = kern_mk_lnk(k, now, inst, ddir_drv, name, &rel[..rlen]);
+        kern_mk_lnk(k, now, inst, ddir_drv, name, &rel[..rlen])?;
     }
     Ok(())
 }
@@ -125,8 +125,11 @@ fn kern_mk_sys_attr(
         n.mtime = t;
         n.ctime = t;
         n.name = nm;
-        if let Some(d) = driver {
-            let _ = set_target(&mut n.target, &mut n.target_len, d);
+        if let Some(d) = driver
+            && let Err(e) = set_target(&mut n.target, &mut n.target_len, d)
+        {
+            n.used = false;
+            return Err(e);
         }
         n.tag = packed;
         n.tag2 = ((class as u64) << 8) | (which as u64);

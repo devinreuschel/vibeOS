@@ -20,7 +20,7 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 | [D1](D1-heap-backed-tables.md) | Heap-allocate the growable fixed-capacity tables (Phase 10) | High | L | III | Q3, A3 | `in progress (#194)` |
 | [D2](D2-driver-instances.md) | Driver and volume instances instead of module singletons | Medium | L | III | A1, Q3 | `proposed` |
 | [D3](D3-bootinfo.md) | Capture boot information once (`BootInfo`) | Low | S | I | Q3 | `implemented (#90, #91)` |
-| [E1](E1-parser-robustness-lints.md) | Lock in parser robustness with restriction lints | Low | S | II | Q1 | `in progress (#86)` |
+| [E1](E1-parser-robustness-lints.md) | Lock in parser robustness with restriction lints | Low | S | II | Q1 | `in progress (#86, #194)` |
 | [E2](E2-kerror-errno.md) | One `KError` (errno-shaped) ahead of the syscall boundary | Medium | M | III | A3 | `proposed` |
 | [E3](E3-emit-paths.md) | Make the marker-vs-log rule explicit; one macro per intent | Low | S | II | — | `implemented (#83)` |
 | [C1](C1-pin-toolchain-and-inputs.md) | Pin every external input: nightly date, action SHAs, Limine commit | High | S | I | — | `implemented (#77)` |

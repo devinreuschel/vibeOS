@@ -15,10 +15,10 @@
 
 use vibeos::fs::{
     DirEntry, FileId, FileRef, FileSystem, FsError, InodeKind, InodeRef, MAX_NAME, MAX_PATH,
-    O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, O_TRUNC, O_WRONLY, OpenFlags, S_IFREG, SeekFrom, Stat,
-    split_basename,
+    O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, OpenFlags, S_IFREG, SeekFrom, Stat, split_basename,
 };
 use vibeos::lock::RANK_DEVICE;
+use vibeos::log::Level;
 
 use crate::block_init;
 use crate::dev_init;
@@ -203,32 +203,8 @@ pub fn addref(id: FileId) -> Result<(), FsError> {
     fs_init::api().addref(id)
 }
 
-/// Write back an open file's offset, the one field `read`, `write` and
-/// `seek` change: `refs` and `used` are never written from a snapshot,
-/// and a slot freed and reused meanwhile fails with `Badf`.
-#[allow(dead_code)]
-pub fn put_file(f: &FileRef, offset: u64) -> Result<(), FsError> {
-    seek(f, SeekFrom::Start(offset)).map(|_| ())
-}
-
 pub fn stat_path(path: &[u8]) -> Result<Stat, FsError> {
     with_abs(path, |p| fs_init::api().stat_path(None, p, true))
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn symlink_path(path: &[u8], target: &[u8]) -> Result<(), FsError> {
-    with_abs(path, |p| fs_init::api().symlink(None, p, target))
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn link_path(old: &[u8], new: &[u8]) -> Result<(), FsError> {
-    let (ob, on) = join_cwd(old)?;
-    with_abs(new, |n| fs_init::api().link(None, &ob[..on], n))
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn truncate_path(path: &[u8], size: u64) -> Result<(), FsError> {
-    with_abs(path, |p| fs_init::api().truncate(None, p, size))
 }
 
 /// Write every mounted filesystem's dirty state to its device.
@@ -266,9 +242,12 @@ pub fn mkdir_p(path: &[u8]) -> Result<(), FsError> {
     Ok(())
 }
 
-/// Create regular file `path`, or empty it.
-#[allow(dead_code)]
+/// Create regular file `path`, or empty it. Test-only: `ktest::fid`
+/// and the fs in-guest tests call it.
+#[cfg(feature = "kernel_tests")]
 pub fn creat(path: &[u8]) -> Result<(), FsError> {
+    use vibeos::fs::{O_TRUNC, O_WRONLY};
+
     let f = open(
         path,
         OpenFlags::from_bits(O_WRONLY | O_CREAT | O_TRUNC),
@@ -331,8 +310,8 @@ fn vol_parent(pb: &[u8]) -> Result<(InodeRef, &[u8]), FsError> {
 /// vibefs only, walked through the route tables, then opened as the
 /// `Vfs` file on the inode found.
 pub fn open_routed(path: &[u8], flags: OpenFlags, mode: u32) -> Result<FileRef, FsError> {
-    #[cfg(feature = "kernel_tests")]
-    testing::routed_open();
+    #[cfg(feature = "kernel_tests")] // counted for the in-guest test `vfs_backends_via_ops`
+    ROUTED.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
     let (buf, n) = join_cwd(path)?;
     let pb = &buf[..n];
     let api = fs_init::api();
@@ -363,106 +342,26 @@ pub fn open_routed(path: &[u8], flags: OpenFlags, mode: u32) -> Result<FileRef, 
     api.open_inode(walk_abs(pb)?, flags)
 }
 
-/// Hooks for the in-guest tests (AGENTS.md rule 9): atomics only, and no
-/// wait here is longer than 10,000 `yield_now` calls.
+/// Routed opens so far, which the in-guest test `vfs_backends_via_ops`
+/// compares with `Vfs`'s own count (`fs::ktest::open_counts`).
 #[cfg(feature = "kernel_tests")]
-pub mod testing {
-    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-
-    use vibeos::limits::MAX_OPEN_FILES;
-
-    use crate::fs_init;
-    use crate::thread_init;
-
-    static WRITE_YIELD: AtomicBool = AtomicBool::new(false);
-    static HOLD: AtomicBool = AtomicBool::new(false);
-    static HELD: AtomicBool = AtomicBool::new(false);
-    static RELEASE: AtomicBool = AtomicBool::new(false);
-    static OPEN_RACE: AtomicBool = AtomicBool::new(false);
-    static ROUTED: AtomicU32 = AtomicU32::new(0);
-
-    /// The most `yield_now` calls any wait here makes.
-    const MAX_YIELDS: u32 = 10_000;
-
-    /// Each [`super::write`] yields once between its backend I/O and its
-    /// write-back to the open-file table.
-    pub fn set_write_yield(on: bool) {
-        WRITE_YIELD.store(on, Ordering::Release);
-    }
-
-    /// The next [`super::write`] waits between its backend I/O and its
-    /// write-back until [`release_write`].
-    pub fn hold_next_write() {
-        RELEASE.store(false, Ordering::Release);
-        HELD.store(false, Ordering::Release);
-        HOLD.store(true, Ordering::Release);
-    }
-
-    /// Whether the held write has reached its wait.
-    pub fn write_held() -> bool {
-        HELD.load(Ordering::Acquire)
-    }
-
-    /// Let the held write go on.
-    pub fn release_write() {
-        RELEASE.store(true, Ordering::Release);
-    }
-
-    /// [`super::open`] with `O_CREAT` creates the file itself between its
-    /// walk and its create, as another opener would.
-    pub fn set_open_race(on: bool) {
-        OPEN_RACE.store(on, Ordering::Release);
-    }
-
-    /// The `Vfs` File API's `open_race` hook.
-    pub fn open_race() -> bool {
-        OPEN_RACE.load(Ordering::Acquire)
-    }
-
-    /// The `Vfs` File API's `write_window` hook, with the VFS lock
-    /// dropped.
-    pub fn write_window() {
-        if HOLD.swap(false, Ordering::AcqRel) {
-            HELD.store(true, Ordering::Release);
-            let mut n = 0u32;
-            while !RELEASE.load(Ordering::Acquire) && n < MAX_YIELDS {
-                thread_init::yield_now();
-                n += 1;
-            }
-            HELD.store(false, Ordering::Release);
-        }
-        if WRITE_YIELD.load(Ordering::Acquire) {
-            thread_init::yield_now();
-        }
-    }
-
-    pub(super) fn routed_open() {
-        ROUTED.fetch_add(1, Ordering::AcqRel);
-    }
-
-    /// `(Vfs::open` opens, routed opens) so far.
-    pub fn open_counts() -> (u32, u32) {
-        let v = fs_init::with(|v| v.stats.opens);
-        (v, ROUTED.load(Ordering::Acquire))
-    }
-
-    /// Each open-file slot's `(used, refs, gen)`.
-    pub fn table() -> [(bool, u16, u16); MAX_OPEN_FILES] {
-        fs_init::with(|v| v.file_table())
-    }
-}
+pub(super) static ROUTED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// The filesystem bring-up: the FAT and vibefs backends, the root
 /// (`fs_init::init`), then while it is live the pseudo filesystems, devfs
 /// and sysfs, and vibefs on `/vibe`, and last the working directory.
 pub fn init() {
-    #[cfg(feature = "kernel_tests")]
-    fs_init::set_test_hooks(testing::write_window, testing::open_race);
     fat_init::init();
     vibefs_init::init();
     fs_init::init(fat_init::live());
     if fs_init::live() {
-        let _ = mount_pseudo();
+        if let Err(e) = mount_pseudo() {
+            crate::klog!(
+                Level::Warn,
+                "vibeOS: fs: pseudo filesystems not mounted: {}",
+                e.as_str()
+            );
+        }
         populate_devfs();
         populate_sysfs();
         attach_vibefs();
@@ -474,8 +373,11 @@ fn attach_vibefs() {
     if !vibefs_init::live() {
         return;
     }
-    let _ = mkdir(b"/vibe", 0o755);
-    let _ = vibefs_init::mount_mem("/vibe");
+    if let Err(e) =
+        mkdir(b"/vibe", 0o755).and_then(|()| vibefs_init::mount_mem("/vibe").map(|_| ()))
+    {
+        crate::klog!(Level::Warn, "vibeOS: fs: /vibe not mounted: {}", e.as_str());
+    }
 }
 
 /// Mount the four pseudo filesystems on `/dev`, `/proc`, `/tmp` and
@@ -495,22 +397,44 @@ fn mount_pseudo() -> Result<(), FsError> {
     Ok(())
 }
 
+/// Add devfs block node `name` of `sz` bytes, logging a failure.
+fn devfs_add(name: &str, sz: u64) {
+    if let Err(e) = fs_init::KERNFS.devfs_add_block(name.as_bytes(), sz) {
+        crate::klog!(
+            Level::Warn,
+            "vibeOS: fs: devfs node {} not added: {}",
+            name,
+            e.as_str()
+        );
+    }
+}
+
 fn populate_devfs() {
     let sz = block_init::capacity_sectors().saturating_mul(block_init::logical_block_size() as u64);
-    let _ = fs_init::KERNFS.devfs_add_block(block_init::name().as_bytes(), sz);
+    devfs_add(block_init::name(), sz);
     if virtio_blk_init::live() {
         let sz = virtio_blk_init::capacity_sectors()
             .saturating_mul(virtio_blk_init::logical_block_size() as u64);
-        let _ = fs_init::KERNFS.devfs_add_block(virtio_blk_init::name().as_bytes(), sz);
+        devfs_add(virtio_blk_init::name(), sz);
     }
-    let n = part_init::count();
-    let mut i = 0usize;
-    while i < n {
+    let mut failed = 0u32;
+    let mut last = None;
+    for i in 0..part_init::count() {
         if let Some((name, nsect, bs, _)) = part_init::info(i) {
             let sz = nsect.saturating_mul(bs as u64);
-            let _ = fs_init::KERNFS.devfs_add_block(name.as_bytes(), sz);
+            if let Err(e) = fs_init::KERNFS.devfs_add_block(name.as_bytes(), sz) {
+                failed = failed.saturating_add(1);
+                last = Some(e);
+            }
         }
-        i += 1;
+    }
+    if let Some(e) = last {
+        crate::klog!(
+            Level::Warn,
+            "vibeOS: fs: {} partition devfs nodes not added, last: {}",
+            failed,
+            e.as_str()
+        );
     }
 }
 
@@ -531,13 +455,26 @@ fn bdf_name(bus: u8, device: u8, function: u8, out: &mut [u8; 8]) -> &[u8] {
 }
 
 fn populate_sysfs() {
+    let mut failed = 0u32;
+    let mut last = None;
     let mut i = 0usize;
     while let Some(d) = dev_init::get(i) {
         let mut name = [0u8; 8];
         let bdf = bdf_name(d.addr.bus, d.addr.device, d.addr.function, &mut name);
         let drv = d.bound.map(|s| s.as_bytes());
-        let _ = fs_init::KERNFS.sysfs_add_device(bdf, d.vendor, d.device_id, d.class, drv);
+        if let Err(e) = fs_init::KERNFS.sysfs_add_device(bdf, d.vendor, d.device_id, d.class, drv) {
+            failed = failed.saturating_add(1);
+            last = Some(e);
+        }
         i += 1;
+    }
+    if let Some(e) = last {
+        crate::klog!(
+            Level::Warn,
+            "vibeOS: fs: {} sysfs devices not added, last: {}",
+            failed,
+            e.as_str()
+        );
     }
 }
 

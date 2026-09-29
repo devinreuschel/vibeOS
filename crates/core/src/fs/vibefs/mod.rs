@@ -4,6 +4,12 @@
 //! Host mkfs/fsck and the kernel share this module. Do not grow a second
 //! on-disk layout.
 
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "vibefs v1 predates the parser deny; ROADMAP §14.8's v2 is written under it and retires this allow"
+)]
+
 use crate::fs::{FsError, InodeKind};
 use crate::part::crc32_ieee;
 
@@ -73,6 +79,7 @@ const KIND_DIR_U: u8 = KIND_DIR;
 const KIND_LNK_U: u8 = KIND_LNK;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
 pub enum Error {
     Inval,
     Io,

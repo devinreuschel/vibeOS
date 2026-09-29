@@ -439,6 +439,11 @@ pub(crate) const TESTS: &[Test] = &[
     test("vfs_backends_via_ops", fs::ktest::test_vfs_backends_via_ops),
     test("vfs_fat_one_inode", fs::ktest::test_vfs_fat_one_inode),
     test(
+        "fs_drop_slot_busy_keeps_slot",
+        fs::ktest::test_fs_drop_slot_busy_keeps_slot,
+    )
+    .deadline(20_000),
+    test(
         "cache_flush_waits_writeback",
         block::ktest::cache_flush_waits_writeback,
     ),

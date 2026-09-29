@@ -57,8 +57,6 @@ PARSERS: tuple[tuple[str, str, str], ...] = (
 PARSERS_PENDING: tuple[str, ...] = (
     "acpi/mod.rs",
     "console/kbd.rs::Decoder::feed",
-    "fs/fat/mod.rs",
-    "fs/vibefs/mod.rs",
     "proc/elf.rs",
     "shell/mod.rs::tokenize",
 )
