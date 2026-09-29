@@ -136,18 +136,24 @@ fn identity_on_ap(_: *mut ()) {
 }
 
 pub(crate) fn test_trampoline_page() -> Outcome {
+    let Some(page) = crate::boot::info().trampoline_page else {
+        return Outcome::Fail("boot chose no trampoline page");
+    };
+    if !(0x1000..0x10_0000).contains(&page) || !page.is_multiple_of(0x1000) {
+        return crate::fail_fmt!("trampoline page {page:#x} not a page in [0x1000, 1 MiB)");
+    }
     if !trampoline_installed() {
-        return Outcome::Fail("no cli opcode at 0x8000");
+        return crate::fail_fmt!("no cli opcode at trampoline page {page:#x}");
     }
     // INIT leaves CR0.CD|NW. Blob must AND 0x9FFFFFFF then WBINVD.
-    let p = 0x8000 as *const u8;
+    let p = smp_init::tramp_va(page).cast_const();
     let mut and_cdnw = false;
     let mut wbinvd = false;
     let mut i = 0usize;
     while i + 1 < 0xD0 {
-        // SAFETY: the low identity window maps the trampoline page at 0x8000
-        // (`mm::paging_init::install`), and every offset read here is below
-        // `0xD0`, inside it; established here.
+        // SAFETY: the physmap maps the trampoline page (invariant I14,
+        // established at `mm::paging_init::install`), and every offset read
+        // here is below `0xD0`, inside it; established here.
         let a = unsafe { p.add(i).read_volatile() };
         // SAFETY: as above, `i + 1 < 0xD0`; established here.
         let b = unsafe { p.add(i + 1).read_volatile() };
@@ -173,6 +179,46 @@ pub(crate) fn test_trampoline_page() -> Outcome {
     }
     if !wbinvd {
         return Outcome::Fail("trampoline missing wbinvd");
+    }
+    // The GDT pointer's base was rebased onto the page (`patch_blob`).
+    let gdt_site = vibeos::smp::PATCH_SITES[3];
+    let mut base = [0u8; 4];
+    for (k, b) in base.iter_mut().enumerate() {
+        // SAFETY: as above, `gdt_site + 3 < 0xD0`; established here.
+        *b = unsafe { p.add(gdt_site + k).read_volatile() };
+    }
+    let base = u64::from(u32::from_le_bytes(base));
+    if base.wrapping_sub(page) >= 0x1000 {
+        return crate::fail_fmt!("gdt base {base:#x} not inside page {page:#x}");
+    }
+    // The page is read-only, so the AP must never set an accessed bit: the
+    // four descriptors after the null one carry it preset (0x9B, 0x93).
+    let gdt = base - page;
+    for d in 1..5u64 {
+        let at = gdt + d * 8 + 5;
+        // SAFETY: as above, `at` is below `0xD0`, inside the page;
+        // established here.
+        let access = unsafe { p.add(at as usize).read_volatile() };
+        if access & 1 == 0 {
+            return crate::fail_fmt!(
+                "gdt descriptor {d} access {access:#x} lacks the accessed bit"
+            );
+        }
+    }
+    // After the identity teardown the page is the window's one leaf:
+    // 4 KiB, present, read-only, executable, not global.
+    let Some((pa, size, flags)) = crate::paging_init::translate(vibeos::paging::VirtAddr(page))
+    else {
+        return crate::fail_fmt!("trampoline page {page:#x} not identity mapped");
+    };
+    use vibeos::paging::{PageFlags, PageSize};
+    let bad = PageFlags::WRITABLE | PageFlags::NX | PageFlags::GLOBAL;
+    if pa.as_u64() != page || size != PageSize::Size4K || flags.0 & bad != 0 {
+        return crate::fail_fmt!(
+            "trampoline pte pa {:#x} flags {:#x}, want {page:#x} 4 KiB, not writable, NX or global",
+            pa.as_u64(),
+            flags.0
+        );
     }
     Outcome::Ok
 }
@@ -278,10 +324,13 @@ pub fn exercise_fail_cleanup() {
 }
 
 pub fn trampoline_installed() -> bool {
-    // SAFETY: the low identity window maps the trampoline page at its
-    // physical address (`mm::paging_init::install`), and `smp_init::init`
+    let Some(page) = crate::boot::info().trampoline_page else {
+        return false;
+    };
+    // SAFETY: the physmap maps the trampoline page (invariant I14,
+    // established at `mm::paging_init::install`), and `smp_init::init`
     // wrote it before any test runs; established here.
-    unsafe { smp_init::tramp_page().read_volatile() == 0xFA }
+    unsafe { smp_init::tramp_va(page).read_volatile() == 0xFA }
 }
 
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`

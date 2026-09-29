@@ -1409,6 +1409,33 @@ pub(crate) fn test_fp_migrate_counter() -> Outcome {
     Outcome::Ok
 }
 
+/// ROADMAP §10.6: the bootstrap thread runs on a guarded 64 KiB KVA stack
+/// that its `Tcb.stack` records, with the page below it unmapped.
+pub(crate) fn boot_stack_guarded() -> Outcome {
+    let Some((range, rsp, running)) = thread_init::bootstrap_stack() else {
+        return Outcome::Fail("bootstrap Tcb.stack not set");
+    };
+    let want = (thread_init::BOOT_STACK_PAGES as u64) * PAGE_SIZE_4K;
+    if range.end.wrapping_sub(range.start) != want {
+        return crate::fail_fmt!(
+            "bootstrap stack {:#x}..{:#x}, want {want} bytes",
+            range.start,
+            range.end
+        );
+    }
+    let guard = range.start.wrapping_sub(PAGE_SIZE_4K);
+    if paging_init::translate(vibeos::paging::VirtAddr(guard)).is_some() {
+        return crate::fail_fmt!("guard page {guard:#x} below the bootstrap stack is mapped");
+    }
+    if paging_init::translate(vibeos::paging::VirtAddr(range.start)).is_none() {
+        return crate::fail_fmt!("bootstrap stack base {:#x} unmapped", range.start);
+    }
+    if !running && !range.contains(&rsp) {
+        return crate::fail_fmt!("saved rsp {rsp:#x} outside the bootstrap stack");
+    }
+    Outcome::Ok
+}
+
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
@@ -1441,4 +1468,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("block_in_hard_irq_asserts", block_in_hard_irq_asserts),
     test("in_hard_irq_top_bottom", in_hard_irq_top_bottom),
     test("sleep_under_spinlock_asserts", sleep_under_spinlock_asserts),
+    test("boot_stack_guarded", boot_stack_guarded),
 ];

@@ -408,7 +408,8 @@ def main() -> int:
             "vibeOS: backtrace:",
             "vibeOS: panic: thread",
             ("vibeOS: logrec:", "smp: done"),
-            ("  0x", "normal_boot_tail"),
+            # `gp_test_trip`'s caller: boot's tail on the bootstrap stack.
+            ("  0x", "boot_rest"),
             "vibeOS: panic: halted",
         )
     elif expect_panic:

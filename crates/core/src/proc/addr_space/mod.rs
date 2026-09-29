@@ -2,8 +2,9 @@
 //!
 //! Kernel half (PML4[256..512)) is shared by copying the kernel's upper
 //! entries so they point at the same PDPTs. VA 0 is never mapped. The
-//! kernel's 512 MiB low identity window is GLOBAL; user maps in that
-//! range can alias a stale TLB until identity is torn down.
+//! kernel's low identity window is torn down after `smp: done`, global TLB
+//! entries flushed on every CPU, so a user map in its range aliases
+//! nothing; only the trampoline page stays, not global.
 
 use crate::paging::{
     FrameAlloc, KERNEL_PML4_FIRST, MapError, MapMode, Mapper, NULL_GUARD_LEN, PAGE_SIZE_4K,
