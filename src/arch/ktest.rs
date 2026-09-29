@@ -1,30 +1,327 @@
-//! In-guest tests of P10-S15, Generated IDT entry stubs (DESIGN §8.2).
+//! In-guest tests for arch (kernel_tests only). Rows: the list in crate::ktest.
 
+use core::arch::global_asm;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::addr_space::UserPerms;
+use vibeos::apic::TimerMode;
+use vibeos::desc::{IstSlot, KERNEL_CS, TSS_SEL};
+use vibeos::kva::PAGE_SIZE;
 use vibeos::paging::PAGE_SIZE_4K;
 use vibeos::proc::{SIGBUS, SIGFPE, SIGILL, SIGKILL, SIGSEGV, SIGTRAP, wait_signaled};
 use vibeos::syscall::SYS_KILL;
 use vibeos::vectors;
 
-use super::Outcome;
-use super::user::{self, DEFAULT, Image, user_code};
+use crate::acpi_init;
 use crate::addr_space_init;
 use crate::apic_init;
-use crate::arch::idt::TrapFrame;
-use crate::arch::idt::testing;
+use crate::arch;
+use crate::arch::idt::{TrapFrame, testing};
 use crate::ipi_init;
 use crate::irq_init;
+use crate::ktest::Outcome;
+use crate::ktest::user::{self, DEFAULT, Image, user_code};
+use crate::kva_init;
 use crate::per_cpu_init;
 use crate::proc_init;
+use crate::syscall_init;
 use crate::thread_init;
 use crate::time_init;
-use crate::x86;
+use crate::x86::{
+    self, CR0_AM, CR0_CD, CR0_EM, CR0_MP, CR0_NE, CR0_NW, CR0_PE, CR0_PG, CR0_TS, CR0_WP, CR4_MCE,
+    CR4_OSFXSR, CR4_OSXMMEXCPT, CR4_PAE, CR4_PGE,
+};
+
+unsafe extern "C" {
+    fn vibeos_write_u8_1(addr: u64);
+    fn vibeos_fault_on_bad_stack(rsp: u64) -> !;
+}
+
+// Known-length store (`C6 07 01`, 3 bytes) for the skip-RIP catcher.
+// `ud2` on an unmapped RSP forces #UD delivery to fail into #DF on IST1.
+global_asm!(
+    r#"
+    .pushsection .text
+    .global vibeos_write_u8_1
+    vibeos_write_u8_1:
+        mov byte ptr [rdi], 1
+        ret
+    .global vibeos_fault_on_bad_stack
+    vibeos_fault_on_bad_stack:
+        mov rsp, rdi
+        ud2
+    .popsection
+    "#
+);
+
+const WRITE_U8_1_LEN: u8 = 3;
+
+pub(crate) fn test_gdt_selectors() -> Outcome {
+    if x86::read_cs() != KERNEL_CS {
+        return Outcome::Fail("cs not kernel code");
+    }
+    if x86::read_tr() != TSS_SEL {
+        return Outcome::Fail("tr not tss");
+    }
+    Outcome::Ok
+}
+
+pub(crate) fn test_star_sysret_layout() -> Outcome {
+    if !syscall_init::star_configured() {
+        return Outcome::Fail("STAR.SYSCALL_CS/SYSRET_CS or EFER.SCE");
+    }
+    Outcome::Ok
+}
+
+pub(crate) fn test_int3_roundtrip() -> Outcome {
+    unsafe { core::arch::asm!("int3", options(nomem, nostack)) };
+    Outcome::Ok
+}
+
+pub(crate) fn test_scoped_pf() -> Outcome {
+    let Some(va) = kva_init::alloc_va(PAGE_SIZE) else {
+        return Outcome::Fail("kva alloc");
+    };
+    let caught = arch::catch::catch_skip(vectors::PF, WRITE_U8_1_LEN, || unsafe {
+        vibeos_write_u8_1(va.as_u64());
+    });
+    kva_init::free_va(va, PAGE_SIZE);
+    let Some(c) = caught else {
+        return Outcome::Fail("store did not fault");
+    };
+    if c.vector != vectors::PF {
+        return Outcome::Fail("wrong vector");
+    }
+    if (c.cr2 & !0xFFF) != (va.as_u64() & !0xFFF) {
+        return Outcome::Fail("cr2 not the unmapped page");
+    }
+    Outcome::Ok
+}
+
+pub(crate) fn test_gp_catch() -> Outcome {
+    let g = x86::InterruptGuard::enter();
+    let caught = arch::catch::catch(vectors::GP, || unsafe {
+        core::arch::asm!(
+            "mov ds, {0:x}",
+            in(reg) 0x0Bu16,
+            options(nostack, preserves_flags)
+        );
+    });
+    drop(g);
+    match caught {
+        Some(c)
+            if c.vector == vectors::GP && c.frame.cs == KERNEL_CS as u64 && c.frame.rip != 0 =>
+        {
+            Outcome::Ok
+        }
+        Some(_) => Outcome::Fail("wrong vector or frame"),
+        None => Outcome::Fail("no gp"),
+    }
+}
+
+pub(crate) fn test_df_on_ist() -> Outcome {
+    let Ok(stack) = kva_init::alloc_guarded_stack(1) else {
+        return Outcome::Fail("guarded stack");
+    };
+    let poison = stack.guard().as_u64() + 0x800;
+    let g = x86::InterruptGuard::enter();
+    let caught = arch::catch::catch(vectors::DF, || unsafe {
+        vibeos_fault_on_bad_stack(poison);
+    });
+    drop(g);
+    kva_init::free_stack(stack);
+    let Some(c) = caught else {
+        return Outcome::Fail("did not reach df handler");
+    };
+    let (lo, hi) = arch::gdt::ist_span(IstSlot::DoubleFault);
+    if c.handler_rsp >= lo && c.handler_rsp < hi {
+        Outcome::Ok
+    } else {
+        crate::marker!(
+            "vibeOS: ktest:   rsp={:#x} lo={:#x} hi={:#x}",
+            c.handler_rsp,
+            lo,
+            hi
+        );
+        Outcome::Fail("handler rsp not on ist1")
+    }
+}
+
+pub(crate) fn test_lapic_timer_mode() -> Outcome {
+    if !apic_init::is_ready() {
+        return Outcome::Fail("lapic not ready");
+    }
+    if !apic_init::owns_tick() && apic_init::timer_mode() != TimerMode::Pit {
+        return Outcome::Fail("lapic mode without owning tick");
+    }
+    let mode = apic_init::timer_mode();
+    let cpuid = apic_init::cpuid_has_tsc_deadline();
+    match (cpuid, mode) {
+        (true, TimerMode::TscDeadline) => Outcome::Ok,
+        (true, TimerMode::Periodic | TimerMode::Pit) => {
+            Outcome::Fail("silent downgrade from tsc-deadline")
+        }
+        (false, TimerMode::Periodic) => Outcome::Ok,
+        (false, TimerMode::Pit) => {
+            if acpi_init::info().is_some_and(|i| i.hpet_present()) {
+                Outcome::Fail("pit despite hpet")
+            } else {
+                Outcome::Ok
+            }
+        }
+        (false, TimerMode::TscDeadline) => Outcome::Fail("tsc-deadline without cpuid"),
+    }
+}
+
+pub(crate) fn test_lapic_timer_rearm() -> Outcome {
+    match apic_init::timer_mode() {
+        TimerMode::Pit => {
+            let t0 = time_init::uptime_ms();
+            time_init::busy_wait_ms(50);
+            let dt = time_init::uptime_ms().saturating_sub(t0);
+            if (20..=100).contains(&dt) {
+                Outcome::Ok
+            } else {
+                crate::marker!("vibeOS: ktest:   pit dt={dt}");
+                Outcome::Fail("pit ticks stalled")
+            }
+        }
+        TimerMode::TscDeadline | TimerMode::Periodic => {
+            let t0 = apic_init::timer_fires();
+            time_init::busy_wait_ms(50);
+            let n = apic_init::timer_fires().saturating_sub(t0);
+            if n >= 20 {
+                Outcome::Ok
+            } else {
+                crate::marker!("vibeOS: ktest:   lapic fires {n}");
+                Outcome::Fail("rearm stalled")
+            }
+        }
+    }
+}
+
+pub(crate) fn test_ioapic_pit_gsi_masked() -> Outcome {
+    match apic_init::timer_mode() {
+        TimerMode::Pit => Outcome::Skip("pit owns tick"),
+        TimerMode::TscDeadline | TimerMode::Periodic => {
+            let Some(info) = acpi_init::info() else {
+                return Outcome::Fail("no acpi");
+            };
+            let Some(madt) = info.madt.as_ref() else {
+                return Outcome::Fail("no madt");
+            };
+            let gsi = vibeos::apic::gsi_for_isa_irq(0, &madt.isos[..madt.iso_count]);
+            match apic_init::gsi_masked(gsi) {
+                Some(true) => Outcome::Ok,
+                Some(false) => Outcome::Fail("pit gsi unmasked"),
+                None => Outcome::Fail("pit gsi not on ioapic"),
+            }
+        }
+    }
+}
+
+pub(crate) fn test_irq_guard_nest() -> Outcome {
+    if !x86::interrupts_enabled() {
+        return Outcome::Fail("registry runs with IF off");
+    }
+    let nest0 = per_cpu_init::irq_nest();
+    {
+        let g1 = x86::InterruptGuard::enter();
+        if x86::interrupts_enabled() {
+            return Outcome::Fail("g1 left IF on");
+        }
+        if per_cpu_init::irq_nest() != nest0 + 1 {
+            return Outcome::Fail("g1 nest");
+        }
+        {
+            let g2 = x86::InterruptGuard::enter();
+            if x86::interrupts_enabled() {
+                return Outcome::Fail("g2 left IF on");
+            }
+            if per_cpu_init::irq_nest() != nest0 + 2 {
+                return Outcome::Fail("g2 nest");
+            }
+            core::mem::drop(g2);
+        }
+        if x86::interrupts_enabled() {
+            return Outcome::Fail("after g2 IF on");
+        }
+        if per_cpu_init::irq_nest() != nest0 + 1 {
+            return Outcome::Fail("after g2 nest");
+        }
+        core::mem::drop(g1);
+    }
+    if !x86::interrupts_enabled() {
+        return Outcome::Fail("outer drop did not restore IF");
+    }
+    if per_cpu_init::irq_nest() != nest0 {
+        return Outcome::Fail("nest not restored");
+    }
+    Outcome::Ok
+}
+
+struct CrSnap {
+    cr0: AtomicU64,
+    cr4: AtomicU64,
+}
+
+fn read_cr_remote(arg: *mut ()) {
+    let s = unsafe { &*(arg as *const CrSnap) };
+    s.cr0.store(x86::read_cr0(), Ordering::SeqCst);
+    s.cr4.store(x86::read_cr4(), Ordering::SeqCst);
+}
+
+pub(crate) fn test_cpu_hardening() -> Outcome {
+    let f = arch::cpu::cpuid_features();
+    if !f.smep && !f.smap && !f.umip {
+        return Outcome::Skip("no smep/smap/umip");
+    }
+    x86::clac();
+    x86::stac();
+    x86::clac();
+
+    let me = per_cpu_init::current().cpu_id;
+    let mask = per_cpu_init::online_mask();
+    let mut cpu = 0u32;
+    while cpu < 64 {
+        if mask & (1u64 << cpu) == 0 {
+            cpu += 1;
+            continue;
+        }
+        let snap = CrSnap {
+            cr0: AtomicU64::new(0),
+            cr4: AtomicU64::new(0),
+        };
+        if cpu == me {
+            snap.cr0.store(x86::read_cr0(), Ordering::SeqCst);
+            snap.cr4.store(x86::read_cr4(), Ordering::SeqCst);
+        } else {
+            ipi_init::call_cpu(cpu, read_cr_remote, &snap as *const _ as *mut (), true);
+        }
+        let cr0 = snap.cr0.load(Ordering::SeqCst);
+        let cr4 = snap.cr4.load(Ordering::SeqCst);
+        if cr0 & x86::CR0_WP == 0 {
+            return Outcome::Fail("wp");
+        }
+        if f.smep != (cr4 & x86::CR4_SMEP != 0) {
+            return Outcome::Fail("smep");
+        }
+        if f.smap != (cr4 & x86::CR4_SMAP != 0) {
+            return Outcome::Fail("smap");
+        }
+        if f.umip != (cr4 & x86::CR4_UMIP != 0) {
+            return Outcome::Fail("umip");
+        }
+        cpu += 1;
+    }
+    Outcome::Ok
+}
 
 const RFLAGS_AC: u64 = 1 << 18;
+
 /// Page-fault error code bit 0: the page was present (a protection fault).
 const PF_PRESENT: u64 = 1;
+
 /// The user page both AC tests read: `user::DEFAULT`'s load address.
 const USER_VA: u64 = 0x4000_0000;
 
@@ -67,7 +364,7 @@ impl AcProbe {
         // catches, or a plain read if AC leaked; established by the test
         // that installs the hook (`test_ac_clear_on_exception` loads its
         // space; in `test_ac_clear_user_popf` it is the child's code page).
-        let hit = super::catch_fault(|| unsafe {
+        let hit = crate::ktest::catch_fault(|| unsafe {
             core::ptr::read_volatile(USER_VA as *const u8);
         });
         if let Some(f) = hit {
@@ -107,8 +404,8 @@ impl AcProbe {
 /// on its way back, since it would land inside this test's count.
 fn settled_frames() -> usize {
     // A shortfall shows as a frame mismatch in the caller.
-    let _ = super::settle_threads();
-    super::free_frames()
+    let _ = crate::ktest::settle_threads();
+    crate::ktest::free_frames()
 }
 
 static BP_PROBE: AcProbe = AcProbe::new();
@@ -118,7 +415,7 @@ fn bp_hook(frame: &mut TrapFrame) -> bool {
     false
 }
 
-pub(super) fn test_ac_clear_on_exception() -> Outcome {
+pub(crate) fn test_ac_clear_on_exception() -> Outcome {
     if !x86::smap_live() {
         return Outcome::Skip("no SMAP");
     }
@@ -158,7 +455,7 @@ pub(super) fn test_ac_clear_on_exception() -> Outcome {
         return Outcome::Fail("iretq did not restore AC");
     }
     if !user::frames_settle(before) {
-        return crate::fail_fmt!("frame leak: {} -> {}", before, super::free_frames());
+        return crate::fail_fmt!("frame leak: {} -> {}", before, crate::ktest::free_frames());
     }
     Outcome::Ok
 }
@@ -186,7 +483,7 @@ fn ud_hook(frame: &mut TrapFrame) -> bool {
     false
 }
 
-pub(super) fn test_ac_clear_user_popf() -> Outcome {
+pub(crate) fn test_ac_clear_user_popf() -> Outcome {
     if !x86::smap_live() {
         return Outcome::Skip("no SMAP");
     }
@@ -206,7 +503,7 @@ pub(super) fn test_ac_clear_user_popf() -> Outcome {
         return crate::fail_fmt!("status {st:#x}, want SIGILL");
     }
     if !user::frames_settle(before) {
-        return crate::fail_fmt!("frame leak: {} -> {}", before, super::free_frames());
+        return crate::fail_fmt!("frame leak: {} -> {}", before, crate::ktest::free_frames());
     }
     Outcome::Ok
 }
@@ -224,15 +521,22 @@ unsafe extern "C" {
 }
 
 const SWAPGS: [u8; 3] = [0x0F, 0x01, 0xF8];
+
 const SYSRETQ: [u8; 3] = [0x48, 0x0F, 0x07];
+
 const IRETQ: [u8; 2] = [0x48, 0xCF];
+
 const RFLAGS_RF: u64 = 1 << 16;
+
 /// DR7 L0, L1 and L2; R/W and LEN zero: 1-byte execute breakpoints.
 const DR7_ARM: u64 = 0b01_0101;
 
 static DB_ADDR: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+
 static DB_HITS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+
 static DB_BAD: AtomicU64 = AtomicU64::new(0);
+
 static DB_ENTRIES: AtomicU32 = AtomicU32::new(0);
 
 /// Write DR0 to DR2 from `DB_ADDR`, then DR7.
@@ -288,7 +592,7 @@ fn percpu_ok() -> bool {
         return false;
     }
     let apic = x86::cpuid(1, 0).1 >> 24;
-    super::cpu_remote(cpu.cpu_id).is_some_and(|c| c.apic_id.load(Ordering::Relaxed) == apic)
+    crate::ktest::cpu_remote(cpu.cpu_id).is_some_and(|c| c.apic_id.load(Ordering::Relaxed) == apic)
 }
 
 fn db_hook(frame: &mut TrapFrame) -> bool {
@@ -343,7 +647,7 @@ fn wait_until(pred: impl Fn() -> bool, ms: u64) -> bool {
     true
 }
 
-pub(super) fn test_ist_gs_sign() -> Outcome {
+pub(crate) fn test_ist_gs_sign() -> Outcome {
     let entry = (&raw const vibeos_syscall_entry).cast::<u8>();
     let sysret = (&raw const vibeos_syscall_exit_swapgs)
         .cast::<u8>()
@@ -585,8 +889,8 @@ const EXC_CASES: &[ExcCase] = &[
     },
 ];
 
-pub(super) fn test_user_exceptions() -> Outcome {
-    let kvm = EXC_CASES.iter().any(|c| c.kvm_only) && super::on_kvm();
+pub(crate) fn test_user_exceptions() -> Outcome {
+    let kvm = EXC_CASES.iter().any(|c| c.kvm_only) && crate::ktest::on_kvm();
     for case in EXC_CASES {
         if case.kvm_only && !kvm {
             crate::marker!(
@@ -636,12 +940,18 @@ user_code!(
 const IRQ_HITS_WANT: u64 = 16;
 
 static IRQ_CHILD: AtomicU64 = AtomicU64::new(0);
+
 static IRQ_SPAWNED: AtomicBool = AtomicBool::new(false);
+
 /// Vectors the sender sends, 0 for none, and each one's CPL-3 hits at start.
 static IRQ_VECS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
 static IRQ_BASE: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
 static IRQ_SENT: AtomicBool = AtomicBool::new(false);
+
 static POOL_HITS: AtomicU64 = AtomicU64::new(0);
+
 static POOL_OFF_CPU0: AtomicU64 = AtomicU64::new(0);
 
 /// Pinned to CPU 0, so the child is too (`thread_init::spawn_user`).
@@ -708,7 +1018,7 @@ fn sleep_until(pred: impl Fn() -> bool, ms: u64) -> bool {
 /// Run the ring-3 child on CPU 0 and send it `vecs` (one or two) from
 /// another CPU.
 fn user_irqs(vecs: &[u8]) -> Outcome {
-    let Some(sender_cpu) = super::second_cpu() else {
+    let Some(sender_cpu) = crate::ktest::second_cpu() else {
         return Outcome::Skip("needs 2 CPUs");
     };
     for slot in &IRQ_VECS {
@@ -717,7 +1027,7 @@ fn user_irqs(vecs: &[u8]) -> Outcome {
     IRQ_SPAWNED.store(false, Ordering::Release);
     IRQ_SENT.store(false, Ordering::Release);
     let cpl3_before = cpl3_total();
-    super::spawn_thread_on("irq_spawner", irq_spawner, 0);
+    crate::ktest::spawn_thread_on("irq_spawner", irq_spawner, 0);
     if !sleep_until(|| IRQ_SPAWNED.load(Ordering::Acquire), 5_000) {
         return Outcome::Fail("spawner did not run");
     }
@@ -732,7 +1042,7 @@ fn user_irqs(vecs: &[u8]) -> Outcome {
             IRQ_BASE[i].store(testing::cpl3_hits(v), Ordering::Release);
             IRQ_VECS[i].store(u64::from(v), Ordering::Release);
         }
-        super::spawn_thread_on("irq_sender", irq_sender, sender_cpu);
+        crate::ktest::spawn_thread_on("irq_sender", irq_sender, sender_cpu);
         // The sender stops itself after 5 s.
         let _ = sleep_until(|| IRQ_SENT.load(Ordering::Acquire), 10_000);
     }
@@ -756,7 +1066,7 @@ fn user_irqs(vecs: &[u8]) -> Outcome {
     Outcome::Ok
 }
 
-pub(super) fn test_user_device_irq() -> Outcome {
+pub(crate) fn test_user_device_irq() -> Outcome {
     let v = match irq_init::allocate_vector(0) {
         Ok(v) => v,
         Err(e) => return Outcome::Fail(e.as_str()),
@@ -785,6 +1095,98 @@ pub(super) fn test_user_device_irq() -> Outcome {
     Outcome::Ok
 }
 
-pub(super) fn test_user_ipi() -> Outcome {
+pub(crate) fn test_user_ipi() -> Outcome {
     user_irqs(&[vectors::IPI_RESCHEDULE])
+}
+
+/// One CPU's CR0 and CR4. A zero CR0 (PE and PG clear) is an empty slot.
+struct CrSnapS16 {
+    cr0: AtomicU64,
+    cr4: AtomicU64,
+}
+
+fn snap_cr(arg: *mut ()) {
+    let snaps = unsafe { &*(arg as *const [CrSnapS16; 64]) };
+    let me = per_cpu_init::current().cpu_id as usize;
+    if let Some(s) = snaps.get(me) {
+        s.cr4.store(x86::read_cr4(), Ordering::Relaxed);
+        s.cr0.store(x86::read_cr0(), Ordering::Release);
+    }
+}
+
+const CR0_SET: [(u64, &str); 6] = [
+    (CR0_PE, "PE"),
+    (CR0_MP, "MP"),
+    (CR0_NE, "NE"),
+    (CR0_WP, "WP"),
+    (CR0_AM, "AM"),
+    (CR0_PG, "PG"),
+];
+
+const CR0_CLEAR: [(u64, &str); 4] = [
+    (CR0_EM, "EM"),
+    (CR0_TS, "TS"),
+    (CR0_CD, "CD"),
+    (CR0_NW, "NW"),
+];
+
+const CR4_SET: [(u64, &str); 5] = [
+    (CR4_PAE, "PAE"),
+    (CR4_MCE, "MCE"),
+    (CR4_PGE, "PGE"),
+    (CR4_OSFXSR, "OSFXSR"),
+    (CR4_OSXMMEXCPT, "OSXMMEXCPT"),
+];
+
+/// Every online CPU runs with the bits ROADMAP §10.6's control-register box
+/// names, and with exactly the CR0 and CR4 `arch::cpu::init_control_regs`
+/// computed.
+pub(crate) fn cpu_control_regs() -> Outcome {
+    let Some(want) = arch::cpu::control_regs() else {
+        return Outcome::Fail("control registers never computed");
+    };
+    let snaps: [CrSnapS16; 64] = core::array::from_fn(|_| CrSnapS16 {
+        cr0: AtomicU64::new(0),
+        cr4: AtomicU64::new(0),
+    });
+    let mask = per_cpu_init::online_mask();
+    {
+        // `call_mask` skips the caller, so the local read and the calls
+        // must see the same CPU: no migration in between.
+        let _irq = x86::InterruptGuard::enter();
+        snap_cr(&snaps as *const _ as *mut ());
+        ipi_init::call_mask(mask, snap_cr, &snaps as *const _ as *mut (), true);
+    }
+    for (c, s) in snaps.iter().enumerate() {
+        if mask & (1u64 << c) == 0 {
+            continue;
+        }
+        let cr0 = s.cr0.load(Ordering::Acquire);
+        let cr4 = s.cr4.load(Ordering::Relaxed);
+        if cr0 == 0 {
+            return crate::fail_fmt!("cpu {c}: no snapshot");
+        }
+        for (bit, name) in CR0_SET {
+            if cr0 & bit == 0 {
+                return crate::fail_fmt!("cpu {c}: CR0.{name} clear (cr0={cr0:#x})");
+            }
+        }
+        for (bit, name) in CR0_CLEAR {
+            if cr0 & bit != 0 {
+                return crate::fail_fmt!("cpu {c}: CR0.{name} set (cr0={cr0:#x})");
+            }
+        }
+        for (bit, name) in CR4_SET {
+            if cr4 & bit == 0 {
+                return crate::fail_fmt!("cpu {c}: CR4.{name} clear (cr4={cr4:#x})");
+            }
+        }
+        if cr0 != want.cr0 {
+            return crate::fail_fmt!("cpu {c}: cr0={cr0:#x}, routine computed {:#x}", want.cr0);
+        }
+        if cr4 != want.cr4 {
+            return crate::fail_fmt!("cpu {c}: cr4={cr4:#x}, routine computed {:#x}", want.cr4);
+        }
+    }
+    Outcome::Ok
 }

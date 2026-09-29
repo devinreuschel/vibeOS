@@ -5,19 +5,16 @@
 //! and exits QEMU through `isa-debug-exit`.
 
 use alloc::boxed::Box;
-use core::arch::global_asm;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::addr_space::{UserMemError, UserPerms};
 use vibeos::apic::{Polarity, TimerMode, Trigger};
 use vibeos::block::{BlockError, DeviceState, Op};
-use vibeos::desc::{IstSlot, KERNEL_CS, TSS_SEL};
 use vibeos::dev::{ClaimError, Device, Driver, IdMatch, ProbeError};
 use vibeos::dma::{self, DMA32_BOUNDARY, DmaAlloc};
 use vibeos::fs::{FsError, InodeKind, O_CREAT, O_RDWR};
 use vibeos::irq::{self, IrqError};
-use vibeos::kva::PAGE_SIZE;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::paging::{PAGE_SIZE_4K, PhysAddr, USER_END, VirtAddr};
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
@@ -194,8 +191,6 @@ mod p10_s09;
 mod p10_s11;
 mod p10_s12;
 mod p10_s13;
-mod p10_s15;
-mod p10_s16;
 mod p10_s17;
 mod p10_s18;
 mod p10_s19;
@@ -221,8 +216,8 @@ pub(crate) const TESTS: &[Test] = &[
     test("vmap", mm::ktest::test_vmap),
     test("mmio_uc_flags", mm::ktest::test_mmio_uc_flags),
     test("acpi_discovery", acpi::ktest::test_acpi_discovery),
-    test("gdt_selectors", test_gdt_selectors),
-    test("star_sysret_layout", test_star_sysret_layout),
+    test("gdt_selectors", arch::ktest::test_gdt_selectors),
+    test("star_sysret_layout", arch::ktest::test_star_sysret_layout),
     test(
         "addrspace_map_unmap_teardown",
         test_addrspace_map_unmap_teardown,
@@ -234,29 +229,32 @@ pub(crate) const TESTS: &[Test] = &[
     test("syscall_dispatch", test_syscall_dispatch),
     test("syscall_ptr_validate", test_syscall_ptr_validate),
     test("user_syscalls", test_user_syscalls),
-    test("int3_roundtrip", test_int3_roundtrip),
-    test("scoped_pf", test_scoped_pf),
-    test("gp_catch", test_gp_catch),
+    test("int3_roundtrip", arch::ktest::test_int3_roundtrip),
+    test("scoped_pf", arch::ktest::test_scoped_pf),
+    test("gp_catch", arch::ktest::test_gp_catch),
     test("irqcell_reentry_panics", test_irqcell_reentry_panics),
     test("bootcell_set_once", test_bootcell_set_once),
     test("bootinfo_consistent", test_bootinfo_consistent),
-    test("df_on_ist", test_df_on_ist),
+    test("df_on_ist", arch::ktest::test_df_on_ist),
     test("pit_tick_rate", test_pit_tick_rate),
     test("now_us_monotonic", test_now_us_monotonic),
     test("now_us_under_yields", test_now_us_under_yields),
     test("tsc_calib_source", test_tsc_calib_source),
     test("uptime_sides", test_uptime_sides),
     test("rtc_offset", test_rtc_offset),
-    test("lapic_timer_mode", test_lapic_timer_mode),
-    test("lapic_timer_rearm", test_lapic_timer_rearm),
-    test("ioapic_pit_gsi_masked", test_ioapic_pit_gsi_masked),
+    test("lapic_timer_mode", arch::ktest::test_lapic_timer_mode),
+    test("lapic_timer_rearm", arch::ktest::test_lapic_timer_rearm),
+    test(
+        "ioapic_pit_gsi_masked",
+        arch::ktest::test_ioapic_pit_gsi_masked,
+    ),
     test("per_cpu_bsp", test_per_cpu_bsp),
     test("per_cpu_identity", test_per_cpu_identity),
     test("trampoline_page", test_trampoline_page),
     test("failed_ap_cleanup", test_failed_ap_cleanup),
     test("spawn_sentinel", test_spawn_sentinel),
     test("switch_two_threads", test_switch_two_threads),
-    test("irq_guard_nest", test_irq_guard_nest),
+    test("irq_guard_nest", arch::ktest::test_irq_guard_nest),
     test("spin_mutex", test_spin_mutex),
     test("lock_spins", test_lock_spins),
     test("yield_now_switches", test_yield_now_switches),
@@ -279,7 +277,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("cross_cpu_spawn", test_cross_cpu_spawn),
     test("reschedule_ipi_wake_ap", test_reschedule_ipi_wake_ap),
     test("call_function_ipi", test_call_function_ipi),
-    test("cpu_hardening", test_cpu_hardening),
+    test("cpu_hardening", arch::ktest::test_cpu_hardening),
     test("tlb_shootdown_remote", mm::ktest::test_tlb_shootdown_remote),
     test("alloc_stress_smp", mm::ktest::test_alloc_stress_smp),
     test("log_boot_captured", test_log_boot_captured),
@@ -409,13 +407,17 @@ pub(crate) const TESTS: &[Test] = &[
         p10_s13::cache_flush_waits_writeback,
     ),
     test("block_fua_write", p10_s13::block_fua_write),
-    test("ac_clear_on_exception", p10_s15::test_ac_clear_on_exception).deadline(30_000),
-    test("ac_clear_user_popf", p10_s15::test_ac_clear_user_popf).deadline(30_000),
-    test("ist_gs_sign", p10_s15::test_ist_gs_sign).deadline(30_000),
-    test("user_exceptions", p10_s15::test_user_exceptions).deadline(30_000),
-    test("user_device_irq", p10_s15::test_user_device_irq).deadline(30_000),
-    test("user_ipi", p10_s15::test_user_ipi).deadline(30_000),
-    test("cpu_control_regs", p10_s16::cpu_control_regs),
+    test(
+        "ac_clear_on_exception",
+        arch::ktest::test_ac_clear_on_exception,
+    )
+    .deadline(30_000),
+    test("ac_clear_user_popf", arch::ktest::test_ac_clear_user_popf).deadline(30_000),
+    test("ist_gs_sign", arch::ktest::test_ist_gs_sign).deadline(30_000),
+    test("user_exceptions", arch::ktest::test_user_exceptions).deadline(30_000),
+    test("user_device_irq", arch::ktest::test_user_device_irq).deadline(30_000),
+    test("user_ipi", arch::ktest::test_user_ipi).deadline(30_000),
+    test("cpu_control_regs", arch::ktest::cpu_control_regs),
     test("console_read_exit", p10_s17::test_console_read_exit).deadline(30_000),
     test("user_entry_irq", p10_s17::test_user_entry_irq).deadline(120_000),
     test("exec_top_page_enoexec", p10_s17::test_exec_top_page_enoexec).deadline(30_000),
@@ -812,47 +814,6 @@ pub(crate) fn cpu_remote(id: u32) -> Option<&'static PerCpuRemote> {
     per_cpu_init::cpu(id)
 }
 
-unsafe extern "C" {
-    fn vibeos_write_u8_1(addr: u64);
-    fn vibeos_fault_on_bad_stack(rsp: u64) -> !;
-}
-
-// Known-length store (`C6 07 01`, 3 bytes) for the skip-RIP catcher.
-// `ud2` on an unmapped RSP forces #UD delivery to fail into #DF on IST1.
-global_asm!(
-    r#"
-    .pushsection .text
-    .global vibeos_write_u8_1
-    vibeos_write_u8_1:
-        mov byte ptr [rdi], 1
-        ret
-    .global vibeos_fault_on_bad_stack
-    vibeos_fault_on_bad_stack:
-        mov rsp, rdi
-        ud2
-    .popsection
-    "#
-);
-
-const WRITE_U8_1_LEN: u8 = 3;
-
-fn test_gdt_selectors() -> Outcome {
-    if x86::read_cs() != KERNEL_CS {
-        return Outcome::Fail("cs not kernel code");
-    }
-    if x86::read_tr() != TSS_SEL {
-        return Outcome::Fail("tr not tss");
-    }
-    Outcome::Ok
-}
-
-fn test_star_sysret_layout() -> Outcome {
-    if !syscall_init::star_configured() {
-        return Outcome::Fail("STAR.SYSCALL_CS/SYSRET_CS or EFER.SCE");
-    }
-    Outcome::Ok
-}
-
 fn test_addrspace_map_unmap_teardown() -> Outcome {
     let before = quiescent_free_frames();
     let Some(mut space) = addr_space_init::create() else {
@@ -1153,52 +1114,6 @@ fn test_user_syscalls() -> Outcome {
     Outcome::Ok
 }
 
-fn test_int3_roundtrip() -> Outcome {
-    unsafe { core::arch::asm!("int3", options(nomem, nostack)) };
-    Outcome::Ok
-}
-
-fn test_scoped_pf() -> Outcome {
-    let Some(va) = kva_init::alloc_va(PAGE_SIZE) else {
-        return Outcome::Fail("kva alloc");
-    };
-    let caught = arch::catch::catch_skip(vectors::PF, WRITE_U8_1_LEN, || unsafe {
-        vibeos_write_u8_1(va.as_u64());
-    });
-    kva_init::free_va(va, PAGE_SIZE);
-    let Some(c) = caught else {
-        return Outcome::Fail("store did not fault");
-    };
-    if c.vector != vectors::PF {
-        return Outcome::Fail("wrong vector");
-    }
-    if (c.cr2 & !0xFFF) != (va.as_u64() & !0xFFF) {
-        return Outcome::Fail("cr2 not the unmapped page");
-    }
-    Outcome::Ok
-}
-
-fn test_gp_catch() -> Outcome {
-    let g = x86::InterruptGuard::enter();
-    let caught = arch::catch::catch(vectors::GP, || unsafe {
-        core::arch::asm!(
-            "mov ds, {0:x}",
-            in(reg) 0x0Bu16,
-            options(nostack, preserves_flags)
-        );
-    });
-    drop(g);
-    match caught {
-        Some(c)
-            if c.vector == vectors::GP && c.frame.cs == KERNEL_CS as u64 && c.frame.rip != 0 =>
-        {
-            Outcome::Ok
-        }
-        Some(_) => Outcome::Fail("wrong vector or frame"),
-        None => Outcome::Fail("no gp"),
-    }
-}
-
 fn test_irqcell_reentry_panics() -> Outcome {
     static C: crate::cell::IrqCell<u32> = crate::cell::IrqCell::new(0);
     // The longjmp skips both `IrqCell` guards; this one restores IF.
@@ -1270,34 +1185,6 @@ fn test_bootcell_set_once() -> Outcome {
         return Outcome::Fail("unset get");
     }
     Outcome::Ok
-}
-
-fn test_df_on_ist() -> Outcome {
-    let Ok(stack) = kva_init::alloc_guarded_stack(1) else {
-        return Outcome::Fail("guarded stack");
-    };
-    let poison = stack.guard().as_u64() + 0x800;
-    let g = x86::InterruptGuard::enter();
-    let caught = arch::catch::catch(vectors::DF, || unsafe {
-        vibeos_fault_on_bad_stack(poison);
-    });
-    drop(g);
-    kva_init::free_stack(stack);
-    let Some(c) = caught else {
-        return Outcome::Fail("did not reach df handler");
-    };
-    let (lo, hi) = arch::gdt::ist_span(IstSlot::DoubleFault);
-    if c.handler_rsp >= lo && c.handler_rsp < hi {
-        Outcome::Ok
-    } else {
-        crate::marker!(
-            "vibeOS: ktest:   rsp={:#x} lo={:#x} hi={:#x}",
-            c.handler_rsp,
-            lo,
-            hi
-        );
-        Outcome::Fail("handler rsp not on ist1")
-    }
 }
 
 fn test_pit_tick_rate() -> Outcome {
@@ -1424,79 +1311,6 @@ fn test_rtc_offset() -> Outcome {
         ns: time_init::now_ns(),
     });
     Outcome::Ok
-}
-
-fn test_lapic_timer_mode() -> Outcome {
-    if !apic_init::is_ready() {
-        return Outcome::Fail("lapic not ready");
-    }
-    if !apic_init::owns_tick() && apic_init::timer_mode() != TimerMode::Pit {
-        return Outcome::Fail("lapic mode without owning tick");
-    }
-    let mode = apic_init::timer_mode();
-    let cpuid = apic_init::cpuid_has_tsc_deadline();
-    match (cpuid, mode) {
-        (true, TimerMode::TscDeadline) => Outcome::Ok,
-        (true, TimerMode::Periodic | TimerMode::Pit) => {
-            Outcome::Fail("silent downgrade from tsc-deadline")
-        }
-        (false, TimerMode::Periodic) => Outcome::Ok,
-        (false, TimerMode::Pit) => {
-            if acpi_init::info().is_some_and(|i| i.hpet_present()) {
-                Outcome::Fail("pit despite hpet")
-            } else {
-                Outcome::Ok
-            }
-        }
-        (false, TimerMode::TscDeadline) => Outcome::Fail("tsc-deadline without cpuid"),
-    }
-}
-
-fn test_lapic_timer_rearm() -> Outcome {
-    match apic_init::timer_mode() {
-        TimerMode::Pit => {
-            let t0 = time_init::uptime_ms();
-            time_init::busy_wait_ms(50);
-            let dt = time_init::uptime_ms().saturating_sub(t0);
-            if (20..=100).contains(&dt) {
-                Outcome::Ok
-            } else {
-                crate::marker!("vibeOS: ktest:   pit dt={dt}");
-                Outcome::Fail("pit ticks stalled")
-            }
-        }
-        TimerMode::TscDeadline | TimerMode::Periodic => {
-            let t0 = apic_init::timer_fires();
-            time_init::busy_wait_ms(50);
-            let n = apic_init::timer_fires().saturating_sub(t0);
-            if n >= 20 {
-                Outcome::Ok
-            } else {
-                crate::marker!("vibeOS: ktest:   lapic fires {n}");
-                Outcome::Fail("rearm stalled")
-            }
-        }
-    }
-}
-
-fn test_ioapic_pit_gsi_masked() -> Outcome {
-    match apic_init::timer_mode() {
-        TimerMode::Pit => Outcome::Skip("pit owns tick"),
-        TimerMode::TscDeadline | TimerMode::Periodic => {
-            let Some(info) = acpi_init::info() else {
-                return Outcome::Fail("no acpi");
-            };
-            let Some(madt) = info.madt.as_ref() else {
-                return Outcome::Fail("no madt");
-            };
-            let gsi = vibeos::apic::gsi_for_isa_irq(0, &madt.isos[..madt.iso_count]);
-            match apic_init::gsi_masked(gsi) {
-                Some(true) => Outcome::Ok,
-                Some(false) => Outcome::Fail("pit gsi unmasked"),
-                None => Outcome::Fail("pit gsi not on ioapic"),
-            }
-        }
-    }
 }
 
 fn test_per_cpu_bsp() -> Outcome {
@@ -1748,46 +1562,6 @@ fn test_switch_two_threads() -> Outcome {
     }
     if per_cpu_init::irq_nest() != nest0 {
         return Outcome::Fail("irq_nest leaked across switch");
-    }
-    Outcome::Ok
-}
-
-fn test_irq_guard_nest() -> Outcome {
-    if !x86::interrupts_enabled() {
-        return Outcome::Fail("registry runs with IF off");
-    }
-    let nest0 = per_cpu_init::irq_nest();
-    {
-        let g1 = x86::InterruptGuard::enter();
-        if x86::interrupts_enabled() {
-            return Outcome::Fail("g1 left IF on");
-        }
-        if per_cpu_init::irq_nest() != nest0 + 1 {
-            return Outcome::Fail("g1 nest");
-        }
-        {
-            let g2 = x86::InterruptGuard::enter();
-            if x86::interrupts_enabled() {
-                return Outcome::Fail("g2 left IF on");
-            }
-            if per_cpu_init::irq_nest() != nest0 + 2 {
-                return Outcome::Fail("g2 nest");
-            }
-            core::mem::drop(g2);
-        }
-        if x86::interrupts_enabled() {
-            return Outcome::Fail("after g2 IF on");
-        }
-        if per_cpu_init::irq_nest() != nest0 + 1 {
-            return Outcome::Fail("after g2 nest");
-        }
-        core::mem::drop(g1);
-    }
-    if !x86::interrupts_enabled() {
-        return Outcome::Fail("outer drop did not restore IF");
-    }
-    if per_cpu_init::irq_nest() != nest0 {
-        return Outcome::Fail("nest not restored");
     }
     Outcome::Ok
 }
@@ -2565,63 +2339,6 @@ fn test_call_function_ipi() -> Outcome {
     }
     if ipi_init::call_count() <= before {
         return Outcome::Fail("call count stuck");
-    }
-    Outcome::Ok
-}
-
-struct CrSnap {
-    cr0: AtomicU64,
-    cr4: AtomicU64,
-}
-
-fn read_cr_remote(arg: *mut ()) {
-    let s = unsafe { &*(arg as *const CrSnap) };
-    s.cr0.store(x86::read_cr0(), Ordering::SeqCst);
-    s.cr4.store(x86::read_cr4(), Ordering::SeqCst);
-}
-
-fn test_cpu_hardening() -> Outcome {
-    let f = arch::cpu::cpuid_features();
-    if !f.smep && !f.smap && !f.umip {
-        return Outcome::Skip("no smep/smap/umip");
-    }
-    x86::clac();
-    x86::stac();
-    x86::clac();
-
-    let me = per_cpu_init::current().cpu_id;
-    let mask = per_cpu_init::online_mask();
-    let mut cpu = 0u32;
-    while cpu < 64 {
-        if mask & (1u64 << cpu) == 0 {
-            cpu += 1;
-            continue;
-        }
-        let snap = CrSnap {
-            cr0: AtomicU64::new(0),
-            cr4: AtomicU64::new(0),
-        };
-        if cpu == me {
-            snap.cr0.store(x86::read_cr0(), Ordering::SeqCst);
-            snap.cr4.store(x86::read_cr4(), Ordering::SeqCst);
-        } else {
-            ipi_init::call_cpu(cpu, read_cr_remote, &snap as *const _ as *mut (), true);
-        }
-        let cr0 = snap.cr0.load(Ordering::SeqCst);
-        let cr4 = snap.cr4.load(Ordering::SeqCst);
-        if cr0 & x86::CR0_WP == 0 {
-            return Outcome::Fail("wp");
-        }
-        if f.smep != (cr4 & x86::CR4_SMEP != 0) {
-            return Outcome::Fail("smep");
-        }
-        if f.smap != (cr4 & x86::CR4_SMAP != 0) {
-            return Outcome::Fail("smap");
-        }
-        if f.umip != (cr4 & x86::CR4_UMIP != 0) {
-            return Outcome::Fail("umip");
-        }
-        cpu += 1;
     }
     Outcome::Ok
 }
