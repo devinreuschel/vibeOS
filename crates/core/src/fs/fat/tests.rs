@@ -773,3 +773,53 @@ fn fat_bpb_data_lba_overflow_two_fats() {
 fn fat_bpb_data_lba_overflow_one_fat() {
     assert_eq!(mount_with_fatsz(0xFFFF_FFFF, 1), Err(FatError::Corrupt));
 }
+
+/// A disk of `u32::MAX` sectors that holds `boot` at sector 0 and zeros
+/// everywhere else.
+struct HugeDisk {
+    boot: [u8; SEC],
+}
+
+impl Disk for HugeDisk {
+    fn sector_size(&self) -> u32 {
+        SEC as u32
+    }
+
+    fn nsectors(&self) -> u32 {
+        u32::MAX
+    }
+
+    fn read(&mut self, lba: u32, buf: &mut [u8]) -> Result<(), FatError> {
+        if lba == 0 {
+            buf.copy_from_slice(&self.boot);
+        } else {
+            buf.fill(0);
+        }
+        Ok(())
+    }
+
+    fn write(&mut self, _lba: u32, _buf: &[u8]) -> Result<(), FatError> {
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), FatError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn fat_bpb_cluster_count_above_max_is_corrupt() {
+    let mut boot = [0u8; SEC];
+    boot[11..13].copy_from_slice(&(SEC as u16).to_le_bytes());
+    boot[13] = 1;
+    boot[14..16].copy_from_slice(&32u16.to_le_bytes());
+    boot[16] = 2;
+    boot[21] = 0xF8;
+    boot[32..36].copy_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
+    boot[36..40].copy_from_slice(&1024u32.to_le_bytes());
+    boot[44..48].copy_from_slice(&2u32.to_le_bytes());
+    boot[510] = 0x55;
+    boot[511] = 0xAA;
+    let mut d = HugeDisk { boot };
+    assert_eq!(FatVol::mount(&mut d).map(|_| ()), Err(FatError::Corrupt));
+}

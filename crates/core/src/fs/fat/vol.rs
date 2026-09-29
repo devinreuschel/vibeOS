@@ -218,6 +218,9 @@ impl FatVol {
     }
 }
 
+/// The most clusters a FAT32 volume holds: numbers 2 to `0x0FFF_FFF6`.
+const MAX_NCLUS: u32 = 0x0FFF_FFF5;
+
 fn parse_bpb(boot: &[u8; SEC], nsectors: u32) -> Result<FatInfo, FatError> {
     if boot[510] != 0x55 || boot[511] != 0xAA {
         return Err(FatError::Corrupt);
@@ -266,7 +269,8 @@ fn parse_bpb(boot: &[u8; SEC], nsectors: u32) -> Result<FatInfo, FatError> {
     let nclus = data_secs
         .checked_div(u32::from(spc))
         .ok_or(FatError::Corrupt)?;
-    if nclus < 2 {
+    // The cap also keeps `fat_loc`'s byte offset `clu * 4` inside a `u32`.
+    if !(2..=MAX_NCLUS).contains(&nclus) {
         return Err(FatError::Corrupt);
     }
     Ok(FatInfo {

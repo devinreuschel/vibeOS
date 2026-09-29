@@ -173,7 +173,9 @@ impl FatVol {
 }
 
 /// The FAT sector holding cluster `clu`'s entry, and the entry's offset in
-/// it; `Corrupt` for a cluster number whose byte offset overflows.
+/// it; `Corrupt` for a cluster number whose byte offset overflows, which
+/// no mounted volume reaches: `parse_bpb` caps `nclus` at `0x0FFF_FFF5`,
+/// and `fat_get`/`fat_set` check `clu < nclus + 2` (`fat::vol::parse_bpb`).
 pub(super) fn fat_loc(clu: u32) -> Result<(u32, usize), FatError> {
     let off = clu.checked_mul(4).ok_or(FatError::Corrupt)? as usize;
     Ok(((off / SEC) as u32, off % SEC))

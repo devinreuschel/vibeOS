@@ -781,7 +781,7 @@ why = "claim: missing edge found by the Phase 10 planning survey and review (ext
 
 # L925
 [[box]]
-key = "BPB parsing and validation. Reopened"
+key = "BPB parsing and validation"
 needs = [
   "a crafted FAT BPB fails",  # L1234
 ]
