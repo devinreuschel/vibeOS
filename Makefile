@@ -167,6 +167,7 @@ help:
 	  '  run-panic             boot panic-test ISO' \
 	  '  layout                objdump sections + __kernel_ symbols' \
 	  '  test-unit             vibeos-core host tests (any host triple)' \
+	  '  models-quick          loom models (loom_*) at 3 preemptions, ROADMAP §10.8' \
 	  '  test-harness          python unit tests for the harness' \
 	  '  test-e2e              boot contract on the production ISO' \
 	  '  test-e2e-uefi         same, OVMF (prints a skip, then fails, if missing)' \
@@ -240,6 +241,7 @@ check:
 	cargo clippy --bin vibeos -- -D warnings
 	$(MAKE) test-unit
 	cargo test -p vibeos-core --lib --features std --target $(HOST_TRIPLE) --config 'profile.test.debug-assertions=false' -- release_assert_
+	$(MAKE) models-quick
 	$(MAKE) test-harness
 	$(MAKE) check-python
 	$(CARGO) build --bin vibeos --profile hookcheck --config 'profile.hookcheck.inherits="dev"'
@@ -333,6 +335,13 @@ test-unit:
 	VIBEOS_TIER=$@ cargo test -p vibeos-core --lib --features std --target $(HOST_TRIPLE)
 	VIBEOS_TIER=$@ cargo test -p vibeos-core --doc --features std --target $(HOST_TRIPLE)
 	VIBEOS_TIER=$@ cargo test -p vibeos-hostlib-tests --target $(HOST_TRIPLE)
+
+# Loom models (C-LOOM): every `loom_*` test, each variant a `_fails` test that
+# passes only when loom finds its race. Own target dir: `--cfg loom` rebuilds
+# everything.
+.PHONY: models-quick
+models-quick:
+	RUSTFLAGS="--cfg loom -D warnings" LOOM_MAX_PREEMPTIONS=3 cargo test -p vibeos-core --lib --features std --release --target $(HOST_TRIPLE) --target-dir $(CARGO_TARGET_DIR)/loom -- loom_ --test-threads=1
 
 test-harness:
 	VIBEOS_TIER=$@ GITHUB_STEP_SUMMARY= python3 -m unittest discover -s tests/harness -t . -v

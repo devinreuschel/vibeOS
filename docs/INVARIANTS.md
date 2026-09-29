@@ -989,7 +989,9 @@ covers the last store of a hand-off; these rules cover the rest.
    half, a timer or IPI callback, a spinlock section, a threaded bottom half or softirq-equivalent
    item, a writeback thread, a thread already in reclaim, an RCU read-side section), the put defers:
    it links the object onto this CPU's deferred-release list through a node the object's allocation
-   carries, so it allocates nothing, and queues a work item that runs the release with IF=1.
+   carries, so it allocates nothing, and queues a work item that runs the release with IF=1. It
+   queues the item at once where this CPU may take `SCHED`; under `SCHED` or a lock ranked after
+   it, and in §2.2's last row, it leaves the list for this CPU's next timer tick to queue.
    `TryArc`'s drop makes this check and defers by itself, because a completion or a timer cannot
    know that its put is the last and Rust drops values implicitly; `put_deferred` is the explicit
    form, for code that knows its put may be the last. A count whose release only returns memory to
@@ -1039,8 +1041,8 @@ Today the code breaks rules 1, 2, 4, and 5: TCBs are never freed and their slots
 place (I9; ROADMAP §10.10, F012), address spaces are reached through `&'static` references built
 from table-owned boxes (ROADMAP §10.6, F019), block completions point into stack frames (ROADMAP
 §12.5, F042), a pid is the index of its process-table slot, handed out lowest first
-(ROADMAP §10.4, F127), and a tid is its TCB slot index, in a space of its own. Nothing implements
-rule 3's operation gate or rule 6's deferred release yet (ROADMAP §10.4). A process's working
+(ROADMAP §10.4, F127), and a tid is its TCB slot index, in a space of its own. `kalloc::TryArc`
+implements rule 6's deferred release, and `sync::OpGate` rule 3's operation gate (ROADMAP §10.4). A process's working
 directory is a path string: one kernel-global `file_init::CWD` serves every process, and `Proc::cwd`
 is a buffer nothing reads (ROADMAP §10.4, F057).
 

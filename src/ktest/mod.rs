@@ -278,6 +278,7 @@ pub(crate) const TESTS: &[Test] = &[
         "cross_cpu_cells_ranked",
         sync::ktest::test_cross_cpu_cells_ranked,
     ),
+    test("op_gate_kill_sleeps", sync::ktest::test_op_gate_kill_sleeps).once(),
     test(
         "sched_lock_timer_irq",
         sched::ktest::test_sched_lock_timer_irq,
@@ -287,6 +288,10 @@ pub(crate) const TESTS: &[Test] = &[
         sched::ktest::test_spawn_exit_thousands,
     ),
     test("cross_cpu_spawn", sched::ktest::test_cross_cpu_spawn),
+    test(
+        "counted_deferred_release",
+        sched::ktest::test_counted_deferred_release,
+    ),
     test(
         "reschedule_ipi_wake_ap",
         irq::ktest::test_reschedule_ipi_wake_ap,
