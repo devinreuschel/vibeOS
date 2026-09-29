@@ -172,7 +172,7 @@ args = [
   { name = "argv", type = "const char *const *", ptr = "strvec", null = true, when = "after `pathname`" },
   { name = "envp", type = "const char *const *", ptr = "strvec", null = true, when = "after `argv`" },
 ]
-note = "`argv` at most 15 strings of at most 255 bytes each; `envp` not read"
+note = "`argv` and `envp` at most 15 strings of at most 255 bytes each; `envp` copied and dropped"
 
 [[syscall]]
 name = "exit"

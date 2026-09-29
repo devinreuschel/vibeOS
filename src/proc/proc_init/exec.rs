@@ -118,7 +118,11 @@ pub(super) fn sys_execve(
         Ok(v) => v,
         Err(e) => return Err(KError::from_errno(e)),
     };
-    let _ = envp;
+    // Copied, so its pointers are checked and its limits hold, and dropped:
+    // the new stack gets an empty environment until ROADMAP §10.5's envp box.
+    if let Err(e) = copy_cvec(envp) {
+        return Err(KError::from_errno(e));
+    }
     let Ok(mut argv_s) = TryVec::<&str>::try_with_capacity(argv_v.len().max(1)) else {
         return Err(KError::from_errno(ENOMEM));
     };

@@ -135,7 +135,7 @@ names, Linux values:
 | `ENOENT` | 2 | `open`/`execve` missing path |
 | `ESRCH` | 3 | `kill`: no such process, a zombie, `pid` 0, or a negative 32-bit `pid` (§3.1) |
 | `EIO` | 5 | device I/O error; a FAT or vibefs volume still busy after 1,000,000 yields |
-| `E2BIG` | 7 | `execve` argv with 16 or more entries. ROADMAP §10.5 moves to Linux's limits: a string over 131,072 bytes with its NUL, or argv and envp together over a quarter of `RLIMIT_STACK` |
+| `E2BIG` | 7 | `execve` argv or envp with 16 or more entries. ROADMAP §10.5 moves to Linux's limits: a string over 131,072 bytes with its NUL, or argv and envp together over a quarter of `RLIMIT_STACK` |
 | `ENOEXEC` | 8 | malformed ELF, `ET_DYN`, or `PT_INTERP` |
 | `EBADF` | 9 | closed / out-of-range fd; a file `mmap` (no `MAP_ANONYMOUS`) with a bad fd |
 | `ECHILD` | 10 | `wait4` with no matching child |
@@ -151,7 +151,7 @@ names, Linux values:
 | `EINVAL` | 22 | `lseek` with a bad `whence` or a resulting offset below 0, unknown `fcntl` command, `kill` signal 0 or above 31; the `mmap` and `munmap` argument checks in §3.1; the non-Linux cases in §2.1 |
 | `EMFILE` | 24 | per-process fd table full (`open`); the non-Linux cases in §2.1 |
 | `EFBIG` | 27 | a vibefs `write` that starts at or past the file-size limit, byte 2^44 − 4096 (VIBEFS.md §3) |
-| `ENAMETOOLONG` | 36 | path of 256 bytes or more; name above 64 bytes; an `execve` argv string of 256 bytes or more, which Linux accepts (ROADMAP §10.5). ROADMAP §13.9 moves the path and name limits to Linux's 4096 and 255 |
+| `ENAMETOOLONG` | 36 | path of 256 bytes or more; name above 64 bytes; an `execve` argv or envp string of 256 bytes or more, which Linux accepts (ROADMAP §10.5). ROADMAP §13.9 moves the path and name limits to Linux's 4096 and 255 |
 | `ENOSYS` | 38 | unknown number |
 
 Unknown numbers return `-ENOSYS`.
@@ -201,12 +201,21 @@ architecture, its arguments' C types in order, and its pointer arguments;
 user stubs (`vibeos_user::sys`), and the table below, and `make check` fails
 when one differs (ROADMAP §10.5).
 
-The rule ROADMAP §10.5 keeps: dispatch checks no pointer itself, and a
-handler checks each pointer where it first copies through it, after the
+Dispatch checks no pointer itself (ROADMAP §10.5). Each row declares its
+pointer arguments, and the table's "pointer arguments" column shows them
+(`—` for a call with none): a buffer the kernel reads (`in`) or writes
+(`out`) with the argument that holds its length, a fixed-size value, a C
+string, or a NULL-terminated vector of C strings, each marked where NULL is
+valid, or a pointer not read yet with the ROADMAP line that reads it. Each
+declaration names where its handler first copies through it: after the
 checks Linux's handler makes before that copy (the descriptor, the flags,
 whether a path or a child exists), so a call with two bad arguments returns
 the errno the baseline returns: `read(-1, <unmapped>, 1)` is `EBADF`, and
-`wait4` with no child and an unmapped status pointer is `ECHILD`.
+`wait4` with no child and an unmapped status pointer is `ECHILD`. The
+in-guest test `syscall_ptr_decl_efault` passes an unmapped and a
+kernel-half pointer in each declared pointer argument, with every other
+argument valid, and needs `EFAULT` from each, so a declaration cannot drift
+from its handler (F150).
 
 <!-- gen_syscalls: begin syscall-table -->
 
@@ -225,7 +234,7 @@ the errno the baseline returns: `read(-1, <unmapped>, 1)` is `EBADF`, and
 | 33 | — | `dup2` | 2 | `unsigned int oldfd`, `unsigned int newfd` | — | — |
 | 39 | 172 | `getpid` | 0 | — | — | `0` if the caller is not a process |
 | 57 | — | `fork` | 0 | — | — | full address-space copy; the child returns 0 |
-| 59 | 221 | `execve` | 3 | `const char *pathname`, `const char *const *argv`, `const char *const *envp` | `pathname`: C string, before anything else; `argv`: C string vector, may be NULL, after `pathname`; `envp`: C string vector, may be NULL, after `argv` | `argv` at most 15 strings of at most 255 bytes each; `envp` not read |
+| 59 | 221 | `execve` | 3 | `const char *pathname`, `const char *const *argv`, `const char *const *envp` | `pathname`: C string, before anything else; `argv`: C string vector, may be NULL, after `pathname`; `envp`: C string vector, may be NULL, after `argv` | `argv` and `envp` at most 15 strings of at most 255 bytes each; `envp` copied and dropped |
 | 60 | 93 | `exit` | 1 | `int status` | — | the low 8 bits of `status` |
 | 61 | 260 | `wait4` | 4 | `pid_t pid`, `int *wstatus`, `int options`, `struct rusage *rusage` | `wstatus`: out, 4 bytes, may be NULL, after a child is reaped; `rusage`: not read (ROADMAP §13.7) | — |
 | 62 | 129 | `kill` | 2 | `pid_t pid`, `int sig` | — | default actions only |
@@ -309,8 +318,10 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   lock dropped between chunks; a frame shortage unmaps and frees what the
   load mapped and returns `ENOMEM` to the old image. An empty
   argv becomes `[path]`; Linux starts the image with `argc` 1 and an empty
-  `argv[0]` (ROADMAP §10.5). `envp` is not read, and the new stack gets an
-  empty environment (§7; ROADMAP §9.4 defers the copy to §10.5)
+  `argv[0]` (ROADMAP §10.5). `envp` is copied as `argv` is, so its
+  pointers are checked and it holds at most 15 strings of at most 255
+  bytes, and then dropped: the new stack gets an empty environment (§7;
+  ROADMAP §10.5)
 - `wait4`: `pid > 0` waits for that child, any `pid < 0` for any child, and
   `pid == 0` returns `ECHILD`; Linux reads 0 and `pid < -1` as process
   groups. Only `WNOHANG` is read; other option bits are accepted and ignored, and `r10`
@@ -469,7 +480,7 @@ Static ELF64, no libc, hand-written `syscall` stubs. Initrd:
 
 Stack: `argc`, `argv`, `envp`, and `auxv`. Init's `argv` and `envp` come
 from the kernel command line (BOOT.md §3.2), at most 8 of each; `execve`
-still passes an empty `envp` (it does not read its `envp` argument). The
+still passes an empty `envp` (it copies its `envp` argument and drops it). The
 `auxv`: `AT_PAGESZ`, `AT_ENTRY`, `AT_PHENT`, `AT_PHNUM`,
 `AT_PHDR` (0 when no header table is mapped), `AT_BASE` 0, `AT_FLAGS` 0,
 `AT_UID`, `AT_EUID`, `AT_GID`, and `AT_EGID` (all 0), `AT_CLKTCK` 100,

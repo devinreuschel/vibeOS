@@ -372,8 +372,8 @@ pub fn fork() -> Result<usize, Errno> {
     result(unsafe { syscall0(nr::SYS_FORK) })
 }
 
-/// `execve(const char *pathname, const char *const *argv, const char *const *envp)`: `argv` at most
-/// 15 strings of at most 255 bytes each; `envp` not read.
+/// `execve(const char *pathname, const char *const *argv, const char *const *envp)`: `argv` and
+/// `envp` at most 15 strings of at most 255 bytes each; `envp` copied and dropped.
 pub fn execve(
     pathname: *const u8,
     argv: *const *const u8,

@@ -587,6 +587,18 @@ pub(crate) const TESTS: &[Test] = &[
     .deadline(30_000),
     test("user_runtime", proc::ktest::user_runtime),
     test(
+        "syscall_ptr_decl_efault",
+        proc::ktest::syscall_ptr_decl_efault,
+    ),
+    test(
+        "read_ebadf_before_efault",
+        proc::ktest::read_ebadf_before_efault,
+    ),
+    test(
+        "wait4_echild_before_efault",
+        proc::ktest::wait4_echild_before_efault,
+    ),
+    test(
         "shootdown_ack_while_busy",
         irq::ktest::shootdown_ack_while_busy,
     ),
