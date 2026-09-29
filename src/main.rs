@@ -63,10 +63,6 @@ mod arch;
     reason = "audit pending, ROADMAP §10.1"
 )]
 mod block;
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 mod boot;
 #[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
