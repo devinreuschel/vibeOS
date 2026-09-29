@@ -19,7 +19,9 @@ file). A bare word that names none of those but is a Makefile target
 (`test-e2e-mce`) is that `make` rule, since ROADMAP's How to read this names
 "a `make` target" as a proof without the `make` word. A path that git finds
 renamed by a commit between the ticking commit and the head (`git log -M -B`)
-resolves at its head path. Its definition changes
+resolves at its head path, and a `<path>::<name>` whose Rust module a later
+commit split into a directory (`<d>.rs` or `<d>/mod.rs` into `<d>/*.rs`)
+resolves in that directory's files. Its definition changes
 in `git diff base...head`, or its name appears in the ticked line; otherwise
 the line carries `(existing: <reason>)`, which the report lists.
 
@@ -807,6 +809,20 @@ class Checker:
                 now, hit = new, True
         return now if hit else None
 
+    def in_split(self, path: str, name: str) -> list[Definition]:
+        """`name`'s definitions in the files a split of the Rust module at `path`
+        left: the `.rs` files directly in `<d>/`, for a `path` of `<d>.rs` or
+        `<d>/mod.rs`."""
+        if not path.endswith(".rs"):
+            return []
+        d = path[:-len("/mod.rs")] if path.endswith("/mod.rs") else path[:-len(".rs")]
+        out: list[Definition] = []
+        for f in self.tree.files():
+            rel = f[len(d) + 1:] if f.startswith(d + "/") else ""
+            if rel.endswith(".rs") and "/" not in rel:
+                out.extend(resolve(f"{f}::{name}", self.tree)[0])
+        return out
+
     def check_proof(self, c: Commit, p: ProvesLine, t: Tick) -> list[Definition]:
         defs, name = resolve(p.proof, self.tree)
         path, sep, rest = p.proof.partition("::")
@@ -815,6 +831,10 @@ class Checker:
             new = self.moved(c.sha, path)
             if new is not None:
                 defs, name = resolve(new + sep + rest, self.tree)
+            if not defs and rest:
+                # A Rust module a later commit split into a directory keeps its items
+                # in that directory's files (ROADMAP §10.3, Q5).
+                defs = self.in_split(path if new is None else new, rest)
         if not defs:
             self.report.error(c.sha, t.line, f"proof not found at the head: {p.proof!r}")
             return defs

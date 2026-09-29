@@ -433,6 +433,36 @@ class TestDiffRule(RepoCase):
         self.commit("reuse", files={"scripts/check_x.py": "X = 1\n"})
         self.assertEqual(self.run_check().errors, [])
 
+    def tick_handler(self) -> str:
+        self.commit(f"t\n\nProves: crates/core/src/a.rs::handler -- {self.PREFIX}", "delta box",
+                    self.change("crates/core/src/a.rs", "assert!(true);\n    }\n}",
+                                "assert!(!false);\n    }\n}"))
+        return (self.repo.path / "crates/core/src/a.rs").read_text()
+
+    def test_path_proof_follows_a_split_into_a_directory(self) -> None:
+        text = self.tick_handler()
+        body = text[text.index("    #[test]\n    fn handler"):text.rindex("}")]
+        self.commit("split", files={"crates/core/src/a.rs": None,
+                                    "crates/core/src/a/mod.rs": "mod tests;\n",
+                                    "crates/core/src/a/tests.rs": body})
+        self.assertEqual(self.run_check().errors, [])
+
+    def test_path_proof_follows_a_split_of_a_mod_rs(self) -> None:
+        text = self.tick_handler()
+        self.commit("mv", files={"crates/core/src/a.rs": None, "crates/core/src/a/mod.rs": text})
+        body = text[text.index("    #[test]\n    fn handler"):text.rindex("}")]
+        self.commit("split", files={"crates/core/src/a/mod.rs": text.replace(body, ""),
+                                    "crates/core/src/a/tests.rs": body})
+        self.assertEqual(self.run_check().errors, [])
+
+    def test_split_proof_is_not_found_in_a_nested_directory(self) -> None:
+        text = self.tick_handler()
+        body = text[text.index("    #[test]\n    fn handler"):text.rindex("}")]
+        self.commit("split", files={"crates/core/src/a.rs": None,
+                                    "crates/core/src/a/mod.rs": "mod b;\n",
+                                    "crates/core/src/a/b/tests.rs": body})
+        self.assertErrors(self.run_check(), "proof not found")
+
     def test_moved_proof_that_lost_its_def_is_not_found(self) -> None:
         self.tick_wave()
         self.commit("mv", files={"scripts/check_x.py": None,

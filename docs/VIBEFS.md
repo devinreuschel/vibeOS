@@ -4,7 +4,7 @@
 
 This is the format document. Implementation code follows it, not the other way
 around. A change to layout, checksums, or the commit protocol bumps `version`
-in this file and in `crates/core/src/fs/vibefs.rs` (`VERSION`) in the same commit.
+in this file and in `crates/core/src/fs/vibefs/mod.rs` (`VERSION`) in the same commit.
 
 The byte layouts in §4 to §9 are the ones v1 code writes. v1 is not carried
 forward: ROADMAP §14.8 retires it once root is v2 (§14).
@@ -491,7 +491,7 @@ the transaction in memory is dropped, with its error reported to `fsync`.
 
 ## 11. `mkfs` and `fsck`
 
-Same module as the kernel (`crates/core/src/fs/vibefs.rs`). Host binaries
+Same module as the kernel (`crates/core/src/fs/vibefs/`). Host binaries
 `mkfs-vibefs` and `fsck-vibefs` are thin CLIs over that module.
 
 `mkfs`: zero image, write alloc-map (supers + alloc + one inode leaf
@@ -564,7 +564,7 @@ and with an explicit flag, and never writes over a live file's bytes.
 
 Not a clean unmount.
 
-1. **Host:** `CrashDisk` in `crates/core/src/fs/vibefs.rs` (test code) wraps the image.
+1. **Host:** `CrashDisk` in `crates/core/src/fs/vibefs/disk.rs` (test code) wraps the image.
    `CrashDisk::seeded(img, p, seed)` models a volatile write cache: writes
    since the last flush stay pending (reads see them newest-first), a flush
    at device op `p` or earlier applies them in order, and at op `p + 1`
