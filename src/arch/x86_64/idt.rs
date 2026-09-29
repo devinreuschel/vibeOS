@@ -583,15 +583,18 @@ pub fn user_fault(frame: &TrapFrame) {
 
 /// The exception intercept for vectors 0 to 31: `catch::intercept`, which
 /// `catch::init` sets right after `idt::init` (DESIGN §1.2). Unset, no
-/// exception is intercepted.
+/// exception is intercepted. `kernel_tests` only (ROADMAP §10.2, F146).
+#[cfg(feature = "kernel_tests")]
 static INTERCEPT: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
 /// Install the exception intercept. `true` from it skips the body.
+#[cfg(feature = "kernel_tests")]
 pub fn set_intercept_hook(f: fn(&mut TrapFrame) -> bool) {
     // Release: pairs with the Acquire load in `intercept`.
     INTERCEPT.store(f as *mut (), Ordering::Release);
 }
 
+#[cfg(feature = "kernel_tests")]
 #[inline(always)]
 fn intercept(frame: &mut TrapFrame) -> bool {
     // Acquire: pairs with the Release store in `set_intercept_hook`.
@@ -607,14 +610,19 @@ fn intercept(frame: &mut TrapFrame) -> bool {
 }
 
 /// Test hook, then the intercept (`catch::intercept`). `true` skips the
-/// body.
+/// body. Both exist only with `kernel_tests`; a production build runs
+/// every body.
 #[inline(always)]
 fn pre_body(frame: &mut TrapFrame, v: u8) -> bool {
     #[cfg(feature = "kernel_tests")]
-    if testing::on_entry(frame, v) {
-        return true;
+    {
+        testing::on_entry(frame, v) || (v < 32 && intercept(frame))
     }
-    v < 32 && intercept(frame)
+    #[cfg(not(feature = "kernel_tests"))]
+    {
+        let _ = (frame, v);
+        false
+    }
 }
 
 // Labels on the `iretq` instructions that return to ring 3.

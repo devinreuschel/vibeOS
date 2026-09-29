@@ -9,6 +9,8 @@ use vibeos::fat::{self, FatError, FatInode, FatVol, INITRD_BYTES, MemDisk, SEC};
 
 const NOW: u32 = 1_262_304_000;
 
+#[allow(clippy::disallowed_macros, reason = "audit pending, ROADMAP §10.1")]
+#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let mut path: Option<&str> = None;

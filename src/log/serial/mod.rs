@@ -145,6 +145,10 @@ pub fn line(msg: &str) {
 macro_rules! marker {
     ($fmt:literal $(, $($arg:tt)*)?) => {{
         use core::fmt::Write;
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a write to Serial cannot fail (DESIGN §2.5)"
+        )]
         let _ = writeln!($crate::serial::Serial, $fmt $(, $($arg)*)?);
     }};
     ($msg:expr) => {

@@ -9,6 +9,8 @@ use std::process::ExitCode;
 use vibeos::vibefs::{self, MemDisk, Vol};
 
 /// The bytes of `path` in the vibefs image `img`.
+#[allow(clippy::disallowed_macros, reason = "audit pending, ROADMAP §10.1")]
+#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
 fn cat(img: &mut [u8], path: &[u8]) -> Result<Vec<u8>, String> {
     let mut disk = MemDisk::new(img).map_err(|e| e.as_str().to_owned())?;
     let mut vol = Vol::new();
@@ -31,6 +33,7 @@ fn cat(img: &mut [u8], path: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let [image, path] = args.as_slice() else {
@@ -60,6 +63,8 @@ fn main() -> ExitCode {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_macros, reason = "audit pending, ROADMAP §10.1")]
+#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
 mod tests {
     use super::*;
     use vibeos::fs::InodeKind;

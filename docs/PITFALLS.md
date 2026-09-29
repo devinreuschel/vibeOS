@@ -247,9 +247,10 @@ Rule: delayed `sti` immediately before `jmp`; never `popfq` with IF set across a
 
 **Two `&mut T` from the same mutex in release builds only.**
 The spinlock's re-entrancy check was a `debug_assert!`. Rule: real CAS spin loop, and any invariant
-that must hold in release is an `assert!`. These are `debug_assert!`: `BootCell::set`'s set-once check,
-`pmm` `pop_head` on an empty order, and the heap `carve` bounds (ROADMAP §10.2, F041, F137). No CI job
-builds or boots `CARGO_PROFILE=release`, where they compile out (ROADMAP §10.2, F137).
+that must hold in release is an `assert!`: `BootCell::set`'s set-once check, `pmm` `pop_head` on an
+empty order, and the heap `carve` bounds are, and `make check` runs their `release_assert_` host tests
+with debug assertions off, where a `debug_assert!` would compile out. No CI job builds or boots
+`CARGO_PROFILE=release` (ROADMAP §10.2, F137).
 
 **`per_cpu: with_current re-entry` on the first workqueue IPI.**
 `with_current`'s busy flag spanned `switch_context`. The incoming thread resumed with the flag still

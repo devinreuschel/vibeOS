@@ -32,3 +32,6 @@ path = "src/bin/mkinitrd.rs"
 
 [dependencies]
 vibeos = { path = "../../crates/core", package = "vibeos-core", features = ["std"] }
+
+[lints]
+workspace = true

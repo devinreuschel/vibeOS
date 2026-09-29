@@ -1,6 +1,7 @@
 //! The x86_64 port: its kernel half (DESIGN §1.3).
 
 pub(crate) mod apic_init;
+#[cfg(feature = "kernel_tests")]
 pub mod catch;
 pub mod cpu;
 pub mod gdt;

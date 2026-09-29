@@ -462,6 +462,93 @@ pub(crate) fn test_blocking_mutex_counter() -> Outcome {
     Outcome::Ok
 }
 
+static LATE_M: BlockingMutex<u64> = BlockingMutex::new(0);
+/// Runs of [`late_wake_waiter`]'s entry.
+static LATE_RUNS: AtomicU32 = AtomicU32::new(0);
+static LATE_PROBE: AtomicBool = AtomicBool::new(false);
+/// Bound on each wait in [`test_late_wake_after_exit`].
+const LATE_WAIT_MS: u64 = 2_000;
+
+/// Block on [`LATE_M`] with the wait window held, then take it and exit.
+fn late_wake_waiter() {
+    LATE_RUNS.fetch_add(1, Ordering::AcqRel);
+    thread_init::testing::arm_wait_window(thread_init::current_id());
+    let mut g = LATE_M.lock();
+    *g = (*g).wrapping_add(1);
+}
+
+fn late_wake_probe() {
+    LATE_PROBE.store(true, Ordering::Release);
+}
+
+/// Wait, bounded, until `pred` holds, yielding between looks.
+fn late_wait(pred: impl Fn() -> bool) -> bool {
+    let t0 = time_init::uptime_ms();
+    while !pred() {
+        if time_init::uptime_ms().saturating_sub(t0) > LATE_WAIT_MS {
+            return false;
+        }
+        thread_init::yield_now();
+    }
+    true
+}
+
+/// A wake whose push to the woken thread's CPU lands after that thread has
+/// already resumed, through its own `schedule` finding it `Ready`, and has
+/// exited, does not run the dead thread again (ROADMAP §10.2): a waiter on
+/// CPU 1 is held between queueing on a mutex and its `schedule`; the unlock
+/// makes it `Ready`, and the hook holds the waker between dropping SCHED
+/// and pushing the waiter to CPU 1 until the waiter has taken the mutex and
+/// exited. CPU 1 then takes that push; it stays up, and the waiter's entry
+/// ran once. `blocking_mutex_counter` panicked `dead thread resumed` this
+/// way at random under `-smp 4`.
+pub(crate) fn test_late_wake_after_exit() -> Outcome {
+    if !per_cpu_init::is_online(1) {
+        return Outcome::Skip("needs 2 cpus");
+    }
+    LATE_RUNS.store(0, Ordering::Release);
+    LATE_PROBE.store(false, Ordering::Release);
+    let g = LATE_M.lock();
+    let waiter = match thread_init::spawn_on("late-wake", late_wake_waiter, 1) {
+        Ok(h) => h.id(),
+        Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
+    };
+    if !late_wait(thread_init::testing::wait_window_held) {
+        thread_init::testing::disarm_late_wake();
+        drop(g);
+        return Outcome::Fail("waiter did not block");
+    }
+    thread_init::testing::arm_late_wake(waiter);
+    // The unlock's wake: its push to CPU 1 goes out after the waiter died.
+    drop(g);
+    thread_init::testing::disarm_late_wake();
+    if !thread_init::testing::late_wake_after_death() {
+        return Outcome::Fail("the wake went out before the waiter exited");
+    }
+    // Wait for CPU 1 to take the push off its inbox and its run queue
+    // before any spawn can reuse the waiter's thread slot, then check that
+    // CPU 1 still schedules.
+    let Some(cpu1) = crate::ktest::cpu_remote(1) else {
+        return Outcome::Fail("no cpu1");
+    };
+    if !late_wait(|| {
+        cpu1.wake_inbox.load(Ordering::Acquire) == 0 && cpu1.runq_len.load(Ordering::Relaxed) == 0
+    }) {
+        return Outcome::Fail("cpu1 did not take the wake");
+    }
+    if let Err(e) = thread_init::spawn_on("late-probe", late_wake_probe, 1) {
+        return crate::fail_fmt!("probe spawn: {}", e.as_str());
+    }
+    if !late_wait(|| LATE_PROBE.load(Ordering::Acquire)) {
+        return Outcome::Fail("cpu1 did not run the probe");
+    }
+    let runs = LATE_RUNS.load(Ordering::Acquire);
+    if runs != 1 {
+        return crate::fail_fmt!("waiter entry ran {runs} times");
+    }
+    Outcome::Ok
+}
+
 static RW: RwLock<u64> = RwLock::new(0);
 
 static RW_DONE: AtomicU32 = AtomicU32::new(0);

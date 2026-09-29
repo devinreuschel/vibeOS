@@ -292,7 +292,7 @@ The lock, the serviced spins, and the two cells:
 | `SpinMutex` | Shared across CPUs. IRQ-aware. Ranked (§2.1): `lock` refuses a lock whose rank, or a later one, this CPU already holds, and `lock_nested` takes a second lock of a held rank (below). Its spin is a serviced spin. |
 | Serviced spin | `SpinMutex::lock`, `ipi_init::wait_acks`, and the call-function slot wait each call `ipi_init::service_incoming` on every iteration, so a CPU that waits on another with IF=0 still acknowledges shootdowns and runs call-function work ([§2.9](#29-preemption-and-interrupt-state) rule 2). That work runs inside whatever the spinning CPU holds, so, like an NMI, `#MC`, or CPL-0 `#DB` handler, it takes no lock ([§2.2](#22-interrupt-handler-rules)'s last row). Planned (ROADMAP §10.7, F135): `service_incoming` first reads this CPU's stop request word, and STOP runs §2.5's stop routine before any slot is served, so a serviced spin stops for a panic with no interrupt, on either architecture and GIC version. On aarch64 a serviced spin never executes WFE and waits with `core::hint::spin_loop`: a masked interrupt is a wake-up event for WFI but not for WFE (Arm ARM DDI 0487, the WFE and WFI wake-up events), so a WFE spinner with IRQs masked neither takes an SGI nor wakes to poll. A line that puts WFE in a serviced spin also makes every publisher of serviced work, the stop word included, issue `sev` after its Release store, and says so. |
 | `IrqCell` | IRQ-off exclusive access: `with` takes IRQs off, panics on same-CPU re-entry, and spins while another CPU holds it. Used only for CPU-local and boot-only state and for the log ring, the one cross-CPU exception: `log_init::LOG` keeps its unranked TAS because the panic path reads it without its lock and its holders never wait on another CPU (§2.5), and ROADMAP §19.5 replaces it with §2.5's lockless ring. The others: `log_init::STAGE`, one slot per CPU; `smp_init::STARTING` and `smp_init::LIVE_TABLES`, AP bring-up before `smp: done` (the `LIVE_TABLES` push allocates under the cell, which no rank allows); `arch::idt::IDT`, written by `idt::init` on the boot thread, whose address the APs load; `shell_init::REG`, CPU 0 only (the boot thread registers, and the kernel shell and the in-guest registry run pinned to CPU 0); and `arch::catch::LAST`, `kernel_tests` only, taken by the CPU that armed the one catch. It is `Send` and `Sync` only when `T: Send`, as `Mutex` is; const assertions in `src/cell.rs` fail the build otherwise. |
-| `BootCell` | Write once before `smp: done`, then shared `&T`. State written after publication sits behind its own `UnsafeCell` inside `T`. Not yet enforced: every switch writes the BSP's TSS through a pointer cast from `&Bsp` (ROADMAP §10.3, F089). The set-once check is a `debug_assert!` (ROADMAP §10.2, F137). It is `Sync` only when `T: Send + Sync` and `Send` only when `T: Send`, as `OnceLock` is, and const assertions in `src/cell.rs` fail the build otherwise; `PerCpu`, whose raw pointers make it neither, carries its own `unsafe impl` naming invariants I120 and I21 (§7.5). |
+| `BootCell` | Write once before `smp: done`, then shared `&T`. State written after publication sits behind its own `UnsafeCell` inside `T`. Not yet enforced: every switch writes the BSP's TSS through a pointer cast from `&Bsp` (ROADMAP §10.3, F089). The set-once check is an `assert!`, so it holds in release builds too (§9.4). It is `Sync` only when `T: Send + Sync` and `Send` only when `T: Send`, as `OnceLock` is, and const assertions in `src/cell.rs` fail the build otherwise; `PerCpu`, whose raw pointers make it neither, carries its own `unsafe impl` naming invariants I120 and I21 (§7.5). |
 
 Two locks of one rank nest only through `lock_nested`, in a pair order the call site's comment
 names, and a per-rank count keeps the outer rank held when the inner lock drops. ROADMAP §12.1 adds
@@ -488,7 +488,8 @@ machine and memory map it was written for.
 Log ring (ROADMAP §5.5):
 
 - 256 records of up to 96 message bytes; a wrap drops the oldest record and counts it, and the panic
-  dump prints the count (`last N (M dropped)`).
+  dump prints that count with the two drop counts below
+  (`vibeOS: log: last N (M dropped, S sink, R reentry)`).
 - Compile-time maximum level: `trace` in debug builds, `debug` in release. Runtime filter: an
   `AtomicU8`, default `info`.
 - The panic dump prints the last 24 records.
@@ -500,7 +501,8 @@ Log ring (ROADMAP §5.5):
 - Host tests cover overflow, filtering, and symbol lookup.
 - One global IRQ-safe ring and a serial try-lock sink. The sink drops its copy of a record when
   another CPU holds the TX lock, and `log_fmt` drops a record its CPU emits while already inside
-  `log_fmt`; neither drop is counted. Planned: a log record reaches serial whole (ROADMAP §10.2,
+  `log_fmt`; each drop is counted, in `log_init::sink_drops` (once per record) and
+  `log_init::reentry_drops`. Planned: a log record reaches serial whole (ROADMAP §10.2,
   F138); the log contract below (ROADMAP §19.5).
 
 Planned (ROADMAP §19.5), the log contract:
@@ -550,11 +552,12 @@ Rule: `vibeos-core` (`crates/core/src/lib.rs`) does not panic on data; its parse
 module error. Enforced only for `unwrap`, `expect`, and `panic!`: clippy denies `unwrap_used`,
 `expect_used`, and `panic` on that crate (allowed in `#[cfg(test)]`). Neither `indexing_slicing` nor
 `arithmetic_side_effects` is enabled, and both Cargo profiles set `overflow-checks = true` (§3.5),
-which turns an arithmetic overflow into a panic. Planned (ROADMAP §10.1): both lints are denied in every
-byte parser ROADMAP §10.2's fuzzers cover, vibefs v1 excepted until ROADMAP §14.8 retires it, and
-the kernel binary denies `unwrap_used`, `expect_used`, `panic`, `unreachable`, `todo`, and
-`unimplemented` crate-wide, where a site a kernel invariant bounds keeps an `#[allow]` that names the
-invariant (§9.4). Crafted input panics portable code: a FAT BPB whose
+which turns an arithmetic overflow into a panic. The kernel binary denies `unwrap_used`,
+`expect_used`, `panic`, `unreachable`, `todo`, and `unimplemented` crate-wide (`src/main.rs`), where
+a site a kernel invariant bounds keeps an `#[allow]` that names the invariant (§9.4); not yet
+enforced: a module not yet audited carries an audit-pending allow on its `mod` line until ROADMAP
+§10.1's sweep of it. Planned (ROADMAP §10.1): both lints are denied in every byte parser ROADMAP
+§10.2's fuzzers cover, vibefs v1 excepted until ROADMAP §14.8 retires it. Crafted input panics portable code: a FAT BPB whose
 `rsvd + num_fats * FATSz32` overflows in `parse_bpb` (ROADMAP §10.2, F064); a CRC-valid vibefs leaf whose count
 exceeds the per-leaf maximum (F061; ROADMAP §14.8 retires v1 for a v2 that validates every block it reads); a vibefs truncate-grow that keeps `F_INLINE`
 past 128 bytes (ROADMAP §13.9, F062). Panics in the kernel binary end in the binding order above.
@@ -587,12 +590,16 @@ it carries no failure anyone could act on, such as cleanup after an earlier erro
 returned, or the `fmt::Result` of a write to `Serial`, which cannot fail. Clippy's
 `let_underscore_must_use` and `unused_result_ok` catch a dropped `#[must_use]` value, and a kept drop
 carries `#[expect(clippy::let_underscore_must_use, reason = "...")]` naming the case above, so an
-exemption whose drop goes away fails the build; `#[cfg(test)]` code and the `kernel_tests`-only
-`ktest` module are exempt. An `if let Ok` with no `else`, and `let _ = f().ok()`, are review items,
-since no lint sees them. Not yet enforced: neither lint runs, `let _ =` drops a `Result` in more than
-40 files, and the kernel review found dropped errors that ROADMAP §10.2 (F080), §10.11 (F051, F063,
-and the tmpfs readahead eviction), §10.12 (F115), and §13.9 (F124) fix; ROADMAP §10.1 lands the
-lints and audits every site.
+exemption whose drop goes away fails the build. Test code is exempt at its root: `vibeos-core`
+allows both lints under `cfg(test)` in `lib.rs`, and each `kernel_tests`-only `ktest` module's `mod`
+line carries a permanent allow. An `if let Ok` with no `else`, and `let _ = f().ok()`, are review
+items, since no lint sees them. Built: root `Cargo.toml`'s `[workspace.lints.clippy]` denies both
+lints in every member. Not yet enforced: a module not yet audited carries
+`#[allow(<lint>, reason = "audit pending, ROADMAP §10.1")]` on its top-level `mod` line (on the item,
+in a crate root file), never as a crate-level attribute, until ROADMAP §10.1's sweep of that module
+removes it; `let _ =` drops a `Result` in more than 40 files, and the kernel review found dropped
+errors that ROADMAP §10.2 (F080), §10.11 (F051, F063, and the tmpfs readahead eviction), §10.12
+(F115), and §13.9 (F124) fix.
 
 Hardware events are also lost in three cases. An exception before `idt::init` (PMM, the CR3 switch,
 ACPI discovery, heap, KVA, GDT, PIC) goes to whatever IDT Limine left and resets or hangs with no
@@ -681,14 +688,14 @@ that review cites means the review's text.
 | I19 | I/O APIC high dword written before the low; IST index zero-based in software, one-based in the gate (§5.1, §5.6) | `apic.rs`, `desc.rs` | enforced, host-tested | Yes |
 | I20 | `now_ns` is monotonic | seqlock plus `time::monotonic_max` over `time_init::LAST_NS` | enforced | Yes, by construction, so the monotonicity tests cannot fail (ROADMAP §10.2, F100) |
 | I21 | A run queue is touched only by its owner CPU with IF=0 (§2.3) | `per_cpu_init::with_current`, `per_cpu_init::cpu` | enforced (busy flag; the remote view) | Partly: other CPUs read only the atomic `runq_len` in `PerCpuRemote`, but `current()` and `try_current()` hand out `&'static PerCpu` at any IF (ROADMAP §10.3, F039) |
-| I22 | A `BootCell` is set once, before SMP, and holds `Sync` data (§2.3) | `cell.rs` | enforced in part (the `Sync` part: the `T: Send + Sync` bound and `cell.rs`'s assertions) | No: the set-once check is a `debug_assert!` (ROADMAP §10.2, F137); every switch writes the BSP's TSS after publication through a pointer cast from `&Bsp` (ROADMAP §10.3, F089) |
+| I22 | A `BootCell` is set once, before SMP, and holds `Sync` data (§2.3) | `cell.rs` | enforced in part (the `Sync` part: the `T: Send + Sync` bound and `cell.rs`'s assertions; the set-once part: `BootCell::set`'s `assert!`, which the host test `release_assert_bootcell_set_twice` runs with debug assertions off) | No: every switch writes the BSP's TSS after publication through a pointer cast from `&Bsp` (ROADMAP §10.3, F089) |
 | I23 | The block layer orders only overlapping writes and a sequential zone's writes; a `Flush` makes durable every write completed before it was submitted, and a `Fua` write is durable when it completes (§10.2) | `block.rs` | documented | No: C-LOOK can reorder overlapping writes (ROADMAP §10.11, F043) |
 | I24 | vibefs never overwrites a live block before the newer superblock is durable, and from v2 reuses a block a commit freed only after the next commit's superblock is durable, so the older slot's tree stays whole; a v2 NOCOW file's data blocks are the one exception, overwritten in place ([VIBEFS.md](VIBEFS.md) §15) | vibefs commit | documented | No after a failed commit: the in-memory generation advances before the superblock write, so the retry writes the slot that holds the only valid superblock (ROADMAP §12.5, F050). Otherwise it rests on v1's on-disk refcounts, which its mount does not check (F061); v2 keeps no per-block count and checks its pointers and allocation map as it reads each block (VIBEFS.md §15; ROADMAP §14.8) |
 | I25 | Per-thread CPU state is saved and restored in full (§7.5) | `syscall_init::on_switch`, `thread::switch_context` | documented | No: `FS_BASE` is not switched (ROADMAP §11.6, F022); `fork` and `execve` get the FPU state wrong (ROADMAP §10.6, F069) |
 | I26 | Every kernel stack has a guard page (§2.4) | `kva_init::alloc_guarded_stack` | documented | No: boot runs on Limine's unguarded stack (ROADMAP §10.6, F072) |
 | I27 | `vibeos-core` does not panic on data (§2.5) | clippy deny on `unwrap`, `expect`, `panic` | enforced in part | No: indexing and overflow checks panic on crafted input; §2.5 lists the cases and their ROADMAP lines |
 | I28 | A line the harness takes as the kernel's is framed, and no user byte can produce the frame (§2.6) | `serial::Serial`, `console_init::write` | documented | No: nothing is framed, and the harness matches every line, so ring 3 can print a contract line (`/bin/sh` prints `shell ready`) or fail a run with `panicked at` (ROADMAP §10.2) |
-| I29 | A catch hook intercepts only a CPL-0 fault on the CPU that armed it, inside an in-guest test's catch window | `arch::catch` | assumed | Partly: production never arms it, but `intercept` runs first in every exception handler of every build, and its armed state is global, so in a `kernel_tests` build a fault with the armed vector on any CPU, at any CPL, is caught (ROADMAP §10.2, F146) |
+| I29 | A catch hook intercepts only a CPL-0 fault on the CPU that armed it, inside an in-guest test's catch window | `arch::catch::arm` (`ARMED`, the arming CPU's token) | enforced by the in-guest `catch_ignores_other_cpu` and `catch_ignores_user_frame` | Yes: `arch::catch` and the dispatcher's intercept compile only with `kernel_tests`, so production has no catch hook; `intercept`, `on_panic` and `on_alloc_error` act only on the CPU whose token `ARMED` holds, `intercept` only on a CPL-0 frame, and each CPU records its catch in its own `LAST` slot. A window must not span a CPU migration, which nothing does while no preempted thread changes CPU (I36) |
 | I30 | Interrupt and exception handlers run with RFLAGS.AC=0 (§5.10 rule 5) | `arch/x86_64/idt.rs` stubs | enforced by construction: every stub's first instruction is `clac` where the CPU has SMAP | Yes |
 | I31 | Every IF=0 stretch outside §2.9 rule 2's exemptions retires at most 100,000 instructions ([§2.9](#29-preemption-and-interrupt-state) rule 2) | §2.9; ROADMAP §10.3's IF-off tracer | documented | No: the heap's first-fit `alloc`, its address-ordered insertion on `dealloc`, and a moving `realloc`'s copy run under the IRQ-off HEAP lock over a free list whose length user churn sets (ROADMAP §12.6); the buddy's double-free check walks the free lists (ROADMAP §12.1, F029); a `klog!` emit waits on the UART with IF off, about 8 ms per 96-byte line on a 115200-baud 16550, which no QEMU tier paces (ROADMAP §19.5); a shootdown survives a violation: `wait_acks` keeps waiting and logs the CPUs that have not acknowledged once a second (§7.9, F011) |
 | I32 | A handler on an IST stack never blocks, switches threads, or takes a lock, and an IST vector taken at CPL 3 leaves the IST stack before its body runs (§5.10 rules 3 and 6) | the IST entry stubs and handlers | documented | Partly: an IST vector taken at CPL 3 moves its frame to the thread's kernel stack before its body (`arch::idt::vibeos_trap_entry_ist`); on a CPL-0 frame every IST handler halts, so none blocks or switches, except that under `kernel_tests` an armed `catch` steps RIP and returns or longjmps off the IST stack (ROADMAP §10.6, F007) |
@@ -696,7 +703,7 @@ that review cites means the review's text.
 | I34 | A PTE change that removes or narrows a translation takes effect only after every CPU that could hold the old one has invalidated and acknowledged; until then no frame, table page, or VA is reused and no page counts as clean (§2.4) | `kva_init::unmap_shootdown` (kernel); `addr_space_init::shootdown_user` (user) | documented | Partly: kernel unmaps free frames and VA only after `wait_acks`; a user change invalidates only on the calling CPU, enough only while I8 holds, and nothing yet clears a dirty bit (ROADMAP §12.3) |
 | I35 | A user PTE change invalidates the second-level translations (EPT, NPT, stage-2) of its range on every CPU that may hold them before the frame's count drops (§2.4) | none yet | documented | Not relied on yet: no hypervisor exists until ROADMAP §21.2, which lands it |
 | I36 | `current` is read in one instruction, and every other per-CPU access but the CPU-id hint runs with IF=0 ([§2.9](#29-preemption-and-interrupt-state) rule 5) | `per_cpu_init`; the syscall stub's `gs:[current]` load | documented | Partly: the syscall stub reads `current` in one load, but `current_thread`, `current_id`, `current_pid`, and `per_cpu!` load `gs:[0]` and then the field, and `current()` hands out `&'static PerCpu` at any IF; no preempted thread changes CPU yet (ROADMAP §10.3, F039) |
-| I37 | Nothing is silently swallowed: an error is returned to its caller, or handled where it arises by a counter and a rate-limited line, a recorded error state, or a bounded retry (§2.5) | every module; ROADMAP §10.1's lints | documented | No: nothing checks a discard, and the kernel review's dropped errors remain (ROADMAP §10.1 audit; §10.11, F051, F063; §10.12, F115; §13.9, F124) |
+| I37 | Nothing is silently swallowed: an error is returned to its caller, or handled where it arises by a counter and a rate-limited line, a recorded error state, or a bounded retry (§2.5) | every module; clippy's `let_underscore_must_use` and `unused_result_ok`, denied workspace-wide | enforced in part (the lints, outside modules whose `mod` line carries an audit-pending allow) | No: modules not yet audited carry an audit-pending allow, and the kernel review's dropped errors remain (ROADMAP §10.1 audit; §10.11, F051, F063; §10.12, F115; §13.9, F124) |
 | I38 | A return to user mode restores only what the §5.10 rule 10 validator accepted from any writer of the saved frame, and its last check for pending work runs with IF=0 (§5.10 rule 11) | the validators in each port's pure half; the exit paths | documented | Rule 10 holds vacuously: no writer of a saved user context exists before ROADMAP §13.8 and §17.4. Rule 11 does not: pending signals are acted on only at syscall entry and after the `wait4` sleep (ROADMAP §10.6, F033) |
 | I39 | On aarch64, an ASID a CPU has used since its last local TLB flush names one address space on that CPU ([§11.2](PORTABILITY.md#112-address-space-on-aarch64)) | the ASID allocator (ROADMAP §11.2) | documented | Not relied on yet: the aarch64 port does not exist; ROADMAP §11.2's host tests and loom model enforce it when it lands |
 | I40 | A thread sleeps, or takes a sleeping lock, only with IF=1 and no spinlock held (§2.1, [§2.9](#29-preemption-and-interrupt-state) rule 4) | none yet | documented | No: nothing asserts either condition until ROADMAP §10.3's may-sleep box (F108) |

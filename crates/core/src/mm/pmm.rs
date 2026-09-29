@@ -487,7 +487,7 @@ impl Buddy {
     unsafe fn pop_head(&mut self, order: u8) -> u64 {
         let k = order as usize;
         let head = self.heads[k];
-        debug_assert!(head != NULL, "pmm: pop_head on empty order {k}");
+        assert!(head != NULL, "pmm: pop_head on empty order {k}");
         let n = self.node_ptr(head);
         let next = unsafe { (*n).next };
         self.heads[k] = next;
@@ -636,6 +636,18 @@ mod tests {
     use std::panic;
     use std::vec;
     use std::vec::Vec;
+
+    /// Holds in release builds too (DESIGN §9.4): `make check` runs it with
+    /// debug assertions off. The buddy has no regions, and its node for
+    /// `NULL` is a zeroed local, so the unchecked code reads zeroes rather
+    /// than writing through a wild pointer.
+    #[test]
+    #[should_panic(expected = "pmm: pop_head on empty order 0")]
+    fn release_assert_pop_head_empty_order() {
+        let zero = [0u64; 4];
+        let mut b = Buddy::new((zero.as_ptr() as u64).wrapping_sub(NULL));
+        unsafe { b.pop_head(0) };
+    }
 
     #[test]
     fn exhaustion_returns_none() {

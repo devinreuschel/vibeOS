@@ -224,9 +224,15 @@ impl Heap {
     /// `block` is an unlinked free block of `size` bytes this heap owns.
     unsafe fn carve(&mut self, block: *mut u8, size: usize, layout: Layout) -> *mut u8 {
         let user = align_up(block as usize + HEADER + BACKPTR, layout.align());
-        debug_assert!(user + layout.size() <= block as usize + size);
+        assert!(
+            user + layout.size() <= block as usize + size,
+            "heap: carve past its block"
+        );
         let back = user - BACKPTR;
-        debug_assert!(back >= block as usize + HEADER);
+        assert!(
+            back >= block as usize + HEADER,
+            "heap: carve backpointer in its header"
+        );
         unsafe { (back as *mut usize).write(user - block as usize) };
 
         let used = align_up(user + layout.size() - block as usize, HEADER_ALIGN);
@@ -374,6 +380,18 @@ mod tests {
 
     fn layout(size: usize, align: usize) -> Layout {
         Layout::from_size_align(size, align).unwrap()
+    }
+
+    /// Holds in release builds too (DESIGN §9.4): `make check` runs it with
+    /// debug assertions off. A 64-byte layout in a 32-byte block, inside a
+    /// buffer large enough that the unchecked code writes nothing outside it.
+    #[test]
+    #[should_panic(expected = "heap: carve past its block")]
+    fn release_assert_carve_bounds() {
+        let mut mem = vec![0u8; 256];
+        let block = align_up(mem.as_mut_ptr() as usize, HEADER_ALIGN) as *mut u8;
+        let mut heap = Heap::empty();
+        unsafe { heap.carve(block, 32, layout(64, 8)) };
     }
 
     #[test]

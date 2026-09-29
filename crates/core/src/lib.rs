@@ -11,28 +11,77 @@
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+// Test code is exempt at the root (ROADMAP §10.1, C-LINTS): a host test may
+// unwrap, discard a result, and use `alloc`'s owning types, since a failure
+// ends the test, not the kernel.
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::let_underscore_must_use,
+        clippy::unused_result_ok,
+        clippy::disallowed_types,
+        clippy::disallowed_macros
+    )
+)]
 
 pub mod acpi;
 pub mod arch;
+pub mod atomic;
+#[allow(
+    clippy::undocumented_unsafe_blocks,
+    reason = "audit pending, ROADMAP §10.1"
+)]
 pub mod block;
 // Kernel `mod cell` in main.rs. Host tests only: production vibeos-core
 // has no InterruptGuard / per_cpu_init.
 #[cfg(test)]
 #[path = "../../../src/cell.rs"]
+#[allow(
+    clippy::undocumented_unsafe_blocks,
+    reason = "audit pending, ROADMAP §10.1"
+)]
 pub mod cell;
 pub mod console;
+#[allow(
+    clippy::undocumented_unsafe_blocks,
+    reason = "audit pending, ROADMAP §10.1"
+)]
 pub mod dev;
 pub mod drivers;
 pub mod fmt_util;
+#[allow(
+    clippy::let_underscore_must_use,
+    reason = "audit pending, ROADMAP §10.1"
+)]
 pub mod fs;
 pub mod irq;
+#[allow(
+    clippy::disallowed_types,
+    clippy::disallowed_macros,
+    reason = "kalloc wraps alloc's owning types (DESIGN §4.4)"
+)]
 pub mod kalloc;
 pub mod limits;
 pub mod log;
 pub mod marker;
+#[allow(clippy::missing_safety_doc, reason = "audit pending, ROADMAP §10.1")]
+#[allow(
+    clippy::undocumented_unsafe_blocks,
+    reason = "audit pending, ROADMAP §10.1"
+)]
 pub mod mm;
+#[allow(
+    clippy::undocumented_unsafe_blocks,
+    reason = "audit pending, ROADMAP §10.1"
+)]
 pub mod proc;
+#[allow(
+    clippy::undocumented_unsafe_blocks,
+    reason = "audit pending, ROADMAP §10.1"
+)]
 pub mod sched;
 pub mod shell;
 pub mod smp;

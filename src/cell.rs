@@ -61,7 +61,7 @@ impl<T> BootCell<T> {
     /// # Safety
     /// Single writer, before `smp: done`. Must not race `get` / `try_get`.
     pub unsafe fn set(&self, v: T) {
-        debug_assert_eq!(
+        assert_eq!(
             self.state.load(Ordering::Acquire),
             UNSET,
             "BootCell::set twice"
@@ -232,6 +232,18 @@ mod tests {
         unsafe { c.set(9u32) };
         assert_eq!(*c.get(), 9);
         assert_eq!(c.try_get().copied(), Some(9));
+    }
+
+    /// Holds in release builds too (DESIGN §9.4): `make check` runs it with
+    /// debug assertions off.
+    #[test]
+    #[should_panic(expected = "BootCell::set twice")]
+    fn release_assert_bootcell_set_twice() {
+        let c = BootCell::new();
+        unsafe {
+            c.set(1u32);
+            c.set(2u32);
+        }
     }
 
     #[test]

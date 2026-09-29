@@ -664,6 +664,14 @@ needs = [
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
+# L1224
+[[box]]
+key = "the `catch` module and every"
+needs = [
+  "`kernel_tests` hooks isolated in per-subsystem",  # L1223
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
 # L1305
 [[box]]
 key = "the rank checker enforces DESIGN"
