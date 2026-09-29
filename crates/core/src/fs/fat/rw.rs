@@ -154,7 +154,7 @@ impl FatVol {
         let mut short = [0u8; 11];
         let lfn = self.pick_short(d, dir_clu, name, &mut short)?;
         let n_lfn = if lfn {
-            utf16_len(name).div_ceil(LFN_CHARS)
+            utf16_len(name)?.div_ceil(LFN_CHARS)
         } else {
             0
         };
@@ -266,7 +266,7 @@ impl FatVol {
         let mut short = [0u8; 11];
         let lfn = self.pick_short(d, dst_dir, dst_name, &mut short)?;
         let n_lfn = if lfn {
-            utf16_len(dst_name).div_ceil(LFN_CHARS)
+            utf16_len(dst_name)?.div_ceil(LFN_CHARS)
         } else {
             0
         };

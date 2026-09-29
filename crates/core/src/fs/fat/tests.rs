@@ -974,3 +974,97 @@ fn dir_reserve_refuses_before_alloc() {
         assert_eq!(v.chain_len(d, root).unwrap().1, root);
     });
 }
+
+/// Every name `readdir` lists in `dir`.
+fn list_names(v: &mut FatVol, d: &mut MemDisk, dir: u32) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut cookie = 0u64;
+    let mut node = Node::EMPTY;
+    while let Some(next) = v.readdir(d, dir, cookie, &mut node).unwrap() {
+        out.push(node.name().to_vec());
+        cookie = next;
+    }
+    out
+}
+
+#[test]
+fn lfn_utf8_cafe_roundtrip() {
+    let mut b = fresh(INITRD_BYTES);
+    let cafe = "café".as_bytes();
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        v.create(d, root, cafe, false).unwrap();
+        assert_eq!(v.lookup(d, root, cafe).unwrap().name(), cafe);
+        assert_eq!(v.create(d, root, cafe, false), Err(FatError::Exists));
+        let names = list_names(v, d, root);
+        assert_eq!(names.iter().filter(|n| n.as_slice() == cafe).count(), 1);
+        v.sync(d).unwrap();
+    });
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        assert_eq!(v.lookup(d, root, cafe).unwrap().name(), cafe);
+    });
+    fsck(&b);
+}
+
+#[test]
+fn lfn_question_mark_rejected() {
+    let mut b = fresh(INITRD_BYTES);
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        v.create(d, root, "café".as_bytes(), false).unwrap();
+        assert_eq!(v.lookup(d, root, b"caf??"), Err(FatError::NotFound));
+        assert_eq!(v.create(d, root, b"caf??", false), Err(FatError::Inval));
+    });
+}
+
+#[test]
+fn check_name_rejects_lfn_illegal_chars() {
+    let mut b = fresh(INITRD_BYTES);
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        for c in b"\"*:<>?\\|" {
+            let name = [b'a', *c, b'b'];
+            assert_eq!(v.check_name(&name), Err(FatError::Inval), "{}", *c as char);
+            assert_eq!(v.create(d, root, &name, false), Err(FatError::Inval));
+        }
+        assert_eq!(v.check_name(&[b'a', 0xFF]), Err(FatError::Inval));
+        v.create(d, root, b"ok", false).unwrap();
+        assert_eq!(v.rename(d, root, b"ok", root, b"k?"), Err(FatError::Inval));
+        assert_eq!(v.check_name("é+.,;=[]".as_bytes()), Ok(()));
+    });
+}
+
+#[test]
+fn lfn_non_bmp_roundtrip() {
+    let mut b = fresh(INITRD_BYTES);
+    let name = "😀.txt".as_bytes();
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        v.create(d, root, name, false).unwrap();
+        v.sync(d).unwrap();
+    });
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        assert_eq!(v.lookup(d, root, name).unwrap().name(), name);
+        assert_eq!(list_names(v, d, root), vec![name.to_vec()]);
+    });
+    fsck(&b);
+}
+
+#[test]
+fn lfn_unpaired_surrogate_falls_back() {
+    let mut b = fresh(INITRD_BYTES);
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        let n = v.create(d, root, b"abc.txt", false).unwrap();
+        let lfn_off = n.dir_off - ENT_U32;
+        let mut ent = [0u8; ENT];
+        assert!(v.read_dir_raw(d, root, lfn_off, &mut ent).unwrap());
+        assert_eq!(ent[11], ATTR_LFN);
+        ent[1..3].copy_from_slice(&0xD800u16.to_le_bytes());
+        v.write_dir_raw(d, root, lfn_off, &ent).unwrap();
+        assert_eq!(list_names(v, d, root), vec![b"ABC.TXT".to_vec()]);
+        assert_eq!(v.lookup(d, root, b"abc.txt").unwrap().dir_off, n.dir_off);
+    });
+}

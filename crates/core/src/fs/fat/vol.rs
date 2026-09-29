@@ -211,12 +211,16 @@ impl FatVol {
         if name_is_dot(name) || name_is_dotdot(name) {
             return Err(FatError::Inval);
         }
-        if name.iter().any(|&c| c == 0 || c == b'/' || c < 0x20) {
+        if name.iter().any(|&c| c < 0x20 || LFN_ILLEGAL.contains(&c)) {
             return Err(FatError::Inval);
         }
+        core::str::from_utf8(name).map_err(|_| FatError::Inval)?;
         Ok(())
     }
 }
+
+/// The characters a long name may not hold, with `/` and controls.
+const LFN_ILLEGAL: &[u8] = b"/\"*:<>?\\|";
 
 /// The most clusters a FAT32 volume holds: numbers 2 to `0x0FFF_FFF6`.
 const MAX_NCLUS: u32 = 0x0FFF_FFF5;
