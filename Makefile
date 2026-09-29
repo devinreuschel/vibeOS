@@ -171,7 +171,7 @@ $(LIMINE_BIN):
 	@echo "limine binaries missing; run ./setup.sh" >&2
 	@exit 1
 
-$(INITRD): crates/core/src/fs/fat.rs tests/hostlib/src/bin/mkinitrd.rs tests/hostlib/Cargo.toml \
+$(INITRD): $(shell find crates/core/src/fs/fat -type f -name '*.rs') tests/hostlib/src/bin/mkinitrd.rs tests/hostlib/Cargo.toml \
 		crates/core/Cargo.toml $(USER_HELLO) $(USER_INIT) $(USER_SH) $(USER_TESTS)
 	mkdir -p $(dir $@)
 	cargo run -p vibeos-hostlib-tests --bin mkinitrd --target $(HOST_TRIPLE) --quiet -- $(abspath $@) \
