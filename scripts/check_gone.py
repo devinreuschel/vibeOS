@@ -162,6 +162,9 @@ GONE: list[tuple[str, str]] = [
     ("MAX_ELF", "`MAX_ELF` removed: the loader maps"),
     ("TooBig", "`MAX_ELF` removed: the loader maps"),
     ("src/proc/user_init.rs: fn read_path", "`MAX_ELF` removed: the loader maps"),
+    ("_PHASE0_BEFORE_TIME", "one marker registry, `tests/contract/markers.toml`, read with"),
+    ("PHASE0_PANIC_PREFIX", "one marker registry, `tests/contract/markers.toml`, read with"),
+    ("lapic_timer_marker", "one marker registry, `tests/contract/markers.toml`, read with"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

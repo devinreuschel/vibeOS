@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import os
 import unittest
+from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from tests.harness import frame, harness
+from tests.harness import frame, harness, registry
 from tests.harness.harness import Marker
 
 # (substring, name, and_contains, exactly_before, the side of the frame the
@@ -251,6 +252,41 @@ BRANCH_POINT_SIGNATURES: tuple[str, ...] = (
     "stack overflow",
     "vibeOS: vibefs: bad crash_plant",
 )
+# The kernel signatures the registry adds to the branch point's, in file order.
+ADDED: tuple[str, ...] = (
+    # §0.3: the halt reasons of the Limine handshake.
+    "vibeOS: limine: base revision unsupported",
+    "vibeOS: limine: hhdm missing",
+    "vibeOS: limine: memmap missing",
+    "vibeOS: limine: executable_address missing",
+    "vibeOS: limine: rsdp missing",
+    # §1.2, §1.4: the boot-halt lines of the paging and heap setup (P10-S31).
+    "vibeOS: paging: no frame for the PML4",
+    "vibeOS: paging: physmap map failed",
+    "vibeOS: paging: low identity map failed",
+    "vibeOS: paging: kernel section map failed",
+    "vibeOS: heap: initial map failed",
+    # §2.1: `gdt::init_bsp`'s stack allocations.
+    "vibeOS: gdt: ist df stack allocation failed",
+    "vibeOS: gdt: ist nmi stack allocation failed",
+    "vibeOS: gdt: ist mc stack allocation failed",
+    "vibeOS: gdt: ist db stack allocation failed",
+    "vibeOS: gdt: tss rsp0 stack allocation failed",
+    # §2.2: the dump banners no mnemonic signature covers.
+    "vibeOS: nmi rip=",
+    "vibeOS: #DB rip=",
+    "vibeOS: #MC rip=",
+    # §2.6, §3.1, §3.6: halt reasons.
+    "vibeOS: time: calib failed",
+    "vibeOS: thread: no memory for the bootstrap TCB",
+    "vibeOS: sched: no idle thread",
+    # §8.5: the `vibefs_crash` build's failures, today `run_vibefs_crash.py`'s
+    # `extra_panic`.
+    "vibeOS: vibefs: mount fail ",
+    "vibeOS: vibefs: sync fail ",
+    # §10.7: the blocked-thread sweep.
+    "vibeOS: sched: overdue tid ",
+)
 BRANCH_POINT_USER_FAILURES: tuple[str, ...] = ('user: tests fail',)
 BRANCH_POINT_LIMINE: tuple[str, ...] = ('PANIC(?:\\x1b\\[[0-9;]*m)*: ',)
 
@@ -282,7 +318,11 @@ class TestContractLists(unittest.TestCase):
                 self.assertEqual(built(config), want)
 
     def test_panic_signatures(self) -> None:
-        self.assertEqual(harness.PANIC_SIGNATURES, BRANCH_POINT_SIGNATURES)
+        """The branch point's signatures, in their order, plus `ADDED`."""
+        sigs = harness.PANIC_SIGNATURES
+        self.assertEqual(tuple(s for s in sigs if s in BRANCH_POINT_SIGNATURES),
+                         BRANCH_POINT_SIGNATURES)
+        self.assertEqual(tuple(s for s in sigs if s not in BRANCH_POINT_SIGNATURES), ADDED)
 
     def test_user_and_limine_lists(self) -> None:
         self.assertEqual(frame.USER_FAILURES, BRANCH_POINT_USER_FAILURES)
@@ -314,6 +354,208 @@ class TestContractLists(unittest.TestCase):
                     raw = frame.FRAME + text
                     self.assertEqual(new.matches(raw), old.matches(raw))
             self.assertTrue(new.matches(frame.FRAME + f"vibeOS: block: {part} 9 sectors"))
+
+
+def rows_of(toml: str) -> tuple[registry.Row, ...]:
+    return registry.parse_rows(toml, Path("fixture.toml"))
+
+
+ROW = """
+[[marker]]
+text = "vibeOS: a: <n> b"
+kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§1.1"
+"""
+
+
+def contract_row(text: str, order: int, name: str, extra: str = "") -> str:
+    return (
+        f'[[marker]]\ntext = "{text}"\nkind = "contract"\narch = "both"\n'
+        f'source = "kernel"\nsection = "§1.1"\norder = {order}\nname = "{name}"\n{extra}\n'
+    )
+
+
+def failure_row(text: str, source: str = "kernel") -> str:
+    return (
+        f'[[marker]]\ntext = "{text}"\nkind = "failure"\narch = "both"\n'
+        f'source = "{source}"\nsection = "§1.1"\n'
+    )
+
+
+class TestRegistrySchema(unittest.TestCase):
+    """`load_rows` rejects a malformed row, naming the file and the row."""
+
+    def bad(self, toml: str, why: str) -> None:
+        with self.assertRaisesRegex(registry.RegistryError, rf"^fixture\.toml: row \d+: .*{why}"):
+            rows_of(toml)
+
+    def test_tree_registry_loads(self) -> None:
+        rows = registry.load_rows()
+        self.assertIs(rows, registry.load_rows())
+        self.assertTrue(any(r.kind == "contract" for r in rows))
+
+    def test_good_row(self) -> None:
+        (row,) = rows_of(ROW)
+        self.assertEqual(row.text, "vibeOS: a: <n> b")
+        self.assertIsNone(row.order)
+        self.assertEqual(row.when, ())
+
+    def test_unknown_key(self) -> None:
+        self.bad(ROW + 'colour = "red"\n', "unknown key 'colour'")
+
+    def test_missing_key(self) -> None:
+        self.bad(ROW.replace('arch = "both"\n', ""), "'arch' missing")
+
+    def test_bad_values(self) -> None:
+        self.bad(ROW.replace('"diagnostic"', '"note"'), "kind 'note'")
+        self.bad(ROW.replace('"both"', '"riscv64"'), "arch 'riscv64'")
+        self.bad(ROW.replace('"kernel"', '"firmware"'), "source 'firmware'")
+        self.bad(ROW.replace('"§1.1"', '"1.1"'), "is not §N.M")
+
+    def test_text_rules(self) -> None:
+        self.bad(ROW.replace("vibeOS: a: <n> b", "<n> b"), "starts with a placeholder")
+        self.bad(ROW.replace("vibeOS: a: <n> b", "vibeOS: a <N> b"), "malformed placeholder")
+
+    def test_contract_keys(self) -> None:
+        self.bad(ROW + "order = 10\n", "'order' is only for contract rows")
+        self.bad(contract_row("vibeOS: x", 10, "x").replace("order = 10\n", ""), "int 'order'")
+        self.bad(contract_row("vibeOS: x", 15, "x"), "not a multiple of 10")
+        self.bad(contract_row("vibeOS: x", 10, "x") + contract_row("vibeOS: y", 10, "y"),
+                 "order 10 repeats row 1")
+        self.bad(contract_row("vibeOS: x", 10, "x") + contract_row("vibeOS: y", 20, "x"),
+                 "name 'x' repeats row 1")
+        self.bad(contract_row("vibeOS: x", 10, "x", 'when = ["smp"]'), "unknown 'when' term")
+        self.bad(contract_row("vibeOS: x", 10, "x", 'repeat = "per_cpu"'), "repeat 'per_cpu'")
+
+    def test_unreadable_file(self) -> None:
+        with self.assertRaisesRegex(registry.RegistryError, "nonexistent.toml"):
+            registry.load_rows("tests/contract/nonexistent.toml")
+
+    def test_bad_toml(self) -> None:
+        with self.assertRaisesRegex(registry.RegistryError, r"^fixture\.toml: "):
+            rows_of("[[marker]\n")
+
+
+CONTRACT = (
+    contract_row("vibeOS: first", 10, "first")
+    + contract_row("vibeOS: hpet only", 20, "hpet_only", 'when = ["hpet"]')
+    + contract_row("vibeOS: pit only", 30, "pit_only", 'when = ["pit"]')
+    + contract_row("vibeOS: cpu<n> up", 40, "cpu<n>", 'repeat = "per_ap"')
+    + contract_row("vibeOS: ap in", 50, "ap_<ap>", 'repeat = "per_ap"')
+    + contract_row("vibeOS: all in", 60, "all_in")
+    + contract_row("vibeOS: timer (<mode>) <n>/ms", 70, "timer")
+    + contract_row("vibeOS: shell", 80, "shell", 'when = ["!gp_test", "smp>1"]')
+)
+
+
+class TestBuilder(unittest.TestCase):
+    """`contract`, `when`, the per-AP group, binding and the harness's markers."""
+
+    def names(self, cfg: registry.BootConfig) -> list[str]:
+        rows = rows_of(CONTRACT)
+        return [registry.bind(r.name or "", b) for r, b in registry.contract(rows, cfg)]
+
+    def test_when_and_order(self) -> None:
+        cfg = registry.BootConfig(hpet=True, smp=1, lapic_mode="periodic")
+        self.assertEqual(self.names(cfg), ["first", "hpet_only", "all_in", "timer"])
+        cfg = registry.BootConfig(hpet=False, smp=2, lapic_mode="pit", gp_test=True)
+        self.assertEqual(self.names(cfg), ["first", "pit_only", "cpu1", "ap_0", "all_in", "timer"])
+
+    def test_per_ap_group(self) -> None:
+        cfg = registry.BootConfig(hpet=True, smp=3, lapic_mode="periodic")
+        self.assertEqual(
+            self.names(cfg),
+            ["first", "hpet_only", "cpu1", "ap_0", "cpu2", "ap_1", "all_in", "timer", "shell"],
+        )
+        rows = rows_of(CONTRACT)
+        close = registry.per_ap_close(rows, cfg)
+        assert close is not None
+        self.assertEqual((close[0].text, close[1].text), ("vibeOS: ap in", "vibeOS: all in"))
+
+    def test_bind_and_fragments(self) -> None:
+        self.assertEqual(registry.bind("a <mode> <n>/ms", {"mode": "pit"}), "a pit <n>/ms")
+        self.assertEqual(registry.fragments("a <n> b <m>"), ["a ", " b ", ""])
+        self.assertEqual(registry.placeholders("a <n> b <m>"), ["n", "m"])
+        self.assertEqual(registry.head("a <n> b"), "a ")
+        self.assertEqual(registry.row_regex("a.b <n> (c)"), r"a\.b .+ \(c\)")
+
+    def test_sample(self) -> None:
+        row = rows_of(ROW)[0]
+        self.assertEqual(registry.sample(row), "vibeOS: a: 1 b")
+        self.assertEqual(registry.sample(row, {"n": "7"}), "vibeOS: a: 7 b")
+
+    def test_marker_for(self) -> None:
+        row = rows_of(contract_row("vibeOS: timer (<mode>) <n>/ms", 10, "t"))[0]
+        m = harness._marker_for(row, {"mode": "pit"})
+        self.assertEqual((m.substring, m.name, m.and_contains, m.source),
+                         ("vibeOS: timer (pit) ", "t", ("/ms",), frame.KERNEL))
+
+    def test_harness_contract_names(self) -> None:
+        with mock.patch.dict(os.environ, clear=True):
+            names = [m.name for m in harness.boot_contract_markers(smp=3, cpu="max", accel="tcg")]
+        self.assertEqual(names.count("smp_done"), 1)
+        i = names.index("smp_done")
+        self.assertEqual(names[i - 4 : i],
+                         ["sched_cpu1", "smp_ap_online_0", "sched_cpu2", "smp_ap_online_1"])
+
+
+class TestSignatures(unittest.TestCase):
+    """Head signatures, the containment rule, and the pattern rows."""
+
+    def test_head_signatures_and_containment(self) -> None:
+        rows = rows_of(
+            failure_row("vibeOS: panic: halted")
+            + failure_row("vibeOS: panic:")
+            + failure_row("vibeOS: x: fail <err>")
+            + failure_row("#GP")
+            + failure_row("vibeOS: #GP rip=<text>")
+            + failure_row("user: bad", "user")
+        )
+        self.assertEqual(
+            registry.signatures(rows, {"kernel"}), ("vibeOS: panic:", "vibeOS: x: fail ", "#GP")
+        )
+        self.assertEqual(registry.signatures(rows, {"user"}), ("user: bad",))
+
+    def test_arch(self) -> None:
+        rows = rows_of(failure_row("vibeOS: a").replace('"both"', '"aarch64"'))
+        self.assertEqual(registry.signatures(rows, {"kernel"}), ())
+        self.assertEqual(registry.signatures(rows, {"kernel"}, arch="aarch64"), ("vibeOS: a",))
+
+    def test_failure_patterns(self) -> None:
+        rows = rows_of(failure_row("vibeOS: block: <dev> timeout") + failure_row("vibeOS: z <n>"))
+        (pat,) = registry.failure_patterns(rows, {"kernel"})
+        self.assertIsNotNone(pat.search("vibeOS: block: vda timeout"))
+        self.assertIsNone(pat.search("vibeOS: block: vda 20 sectors"))
+
+    def test_harness_failure_patterns(self) -> None:
+        self.assertTrue(harness.contains_panic(frame.FRAME + "vibeOS: block: vda timeout"))
+        self.assertTrue(
+            harness.contains_panic(frame.FRAME + "vibeOS: exception: vector 13 rip=0x1 cs=0x8")
+        )
+        self.assertFalse(harness.contains_panic("vibeOS: block: vda timeout"))
+        self.assertFalse(harness.contains_panic(frame.FRAME + "vibeOS: block: vda 9 sectors"))
+
+    def test_limine(self) -> None:
+        pat = registry.ansi_tolerant("PANIC: ")
+        self.assertIsNotNone(pat.search("\x1b[31mPANIC\x1b[37;1m\x1b[0m: stage2"))
+        self.assertIsNone(pat.search("PANICKED: no"))
+
+    def test_no_green_line_fails(self) -> None:
+        """No contract, diagnostic or test row's sample holds a failure head of
+        its source or matches one of its failure patterns (check 4's rule)."""
+        rows = registry.load_rows()
+        for src in (frame.KERNEL, frame.USER):
+            heads = registry.signatures(rows, {src})
+            pats = registry.failure_patterns(rows, {src})
+            for row in rows:
+                if row.kind == "failure" or row.source != src:
+                    continue
+                text = registry.sample(row)
+                with self.subTest(row=row.text):
+                    self.assertFalse([h for h in heads if h in text])
+                    self.assertFalse([p for p in pats if p.search(text)])
 
 
 if __name__ == "__main__":
