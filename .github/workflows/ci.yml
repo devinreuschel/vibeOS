@@ -20,7 +20,7 @@ concurrency:
 jobs:
   check:
     name: check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -85,7 +85,12 @@ jobs:
   phase0:
     name: phase 0 ladder
     needs: check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
+    # The harness fails every boot when QEMU is not this version (ROADMAP
+    # §10.1): resolute's qemu-system-x86 1:10.2.1+ds-1ubuntu3. Move the pin
+    # and DESIGN §8.6 together.
+    env:
+      VIBEOS_QEMU_VERSION: "10.2.1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -200,7 +205,7 @@ jobs:
     name: ticks
     if: ${{ github.event_name == 'pull_request' && !cancelled() }}
     needs: [phase0] # the ladder; the tier jobs once ROADMAP §10.1 lands
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
       actions: read # check_ticks.py reads scheduled runs and ci-history through gh (ROADMAP §10.9)

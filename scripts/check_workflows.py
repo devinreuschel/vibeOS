@@ -185,6 +185,7 @@ class _Parser:
             self.pos += 1
             entry = self._value(rest, ln, indent)
             entry.key = key
+            entry.line = ln.no
             entry.comment = ln.comment
             if node.get(key) is not None:
                 raise self.fail(ln.no, f"duplicate key {key!r}")
@@ -485,10 +486,103 @@ def rule_action_pins(tree: Tree) -> list[Problem]:
     return out
 
 
+RUNNERS = ("ubuntu-26.04", "ubuntu-26.04-arm")
+MATRIX_REF_RE = re.compile(r"\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}")
+
+
+def _matrix_values(job: Node, name: str) -> list[str]:
+    """Every value `matrix.<name>` takes: the axis list and each `include` entry's."""
+    strategy = job.get("strategy")
+    matrix = strategy.get("matrix") if strategy is not None else None
+    if matrix is None:
+        return []
+    out: list[str] = []
+    axis = matrix.get(name)
+    if axis is not None:
+        out += axis.scalars()
+    include = matrix.get("include")
+    for entry in include.items if include is not None else []:
+        v = entry.get(name)
+        if v is not None:
+            out += v.scalars()
+    return out
+
+
+def rule_runs_on(tree: Tree) -> list[Problem]:
+    """L1203: Linux jobs run on GitHub's free `ubuntu-26.04` image (`-arm` for arm64)."""
+    out = []
+    for path, wf in tree.workflows.items():
+        for job in _jobs(wf):
+            runs_on = job.get("runs-on")
+            if runs_on is None:
+                continue
+            labels: list[str] = []
+            for label in runs_on.scalars():
+                m = MATRIX_REF_RE.fullmatch(label.strip())
+                if m is None:
+                    labels.append(label)
+                    continue
+                values = _matrix_values(job, m.group(1))
+                if not values:
+                    out.append(
+                        Problem(path, runs_on.line, "runs_on", f"{label}: matrix has no values")
+                    )
+                labels += values
+            if runs_on.kind not in ("scalar", "seq"):
+                out.append(Problem(path, runs_on.line, "runs_on", "`runs-on:` is not a label"))
+            for label in labels:
+                if label not in RUNNERS and not label.startswith("macos-"):
+                    out.append(
+                        Problem(
+                            path,
+                            runs_on.line,
+                            "runs_on",
+                            f"job `{job.key}` runs on {label!r}; Linux jobs use ubuntu-26.04",
+                        )
+                    )
+    return out
+
+
+PIN_VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
+
+
+def _names(node: Node, needle: str) -> bool:
+    return any(
+        needle in (n.value or "") or needle in (n.key or "") for n in node.walk()
+    )
+
+
+def rule_qemu_pin(tree: Tree) -> list[Problem]:
+    """L1203: a job that names `qemu-system` pins the QEMU the harness checks it against."""
+    out = []
+    for path, wf in tree.workflows.items():
+        top_env = wf.get("env")
+        top_pin = top_env.get("VIBEOS_QEMU_VERSION") if top_env is not None else None
+        for job in _jobs(wf):
+            if not _names(job, "qemu-system"):
+                continue
+            env = job.get("env")
+            pin = env.get("VIBEOS_QEMU_VERSION") if env is not None else None
+            pin = pin or top_pin
+            if pin is None or not PIN_VERSION_RE.fullmatch(pin.value or ""):
+                out.append(
+                    Problem(
+                        path,
+                        job.line,
+                        "qemu_pin",
+                        f"job `{job.key}` names qemu-system but pins no "
+                        "`VIBEOS_QEMU_VERSION: \"N.N.N\"`",
+                    )
+                )
+    return out
+
+
 RULES: list[Callable[[Tree], list[Problem]]] = [
     rule_no_expr_in_run,
     rule_permissions,
     rule_action_pins,
+    rule_runs_on,
+    rule_qemu_pin,
 ]
 
 

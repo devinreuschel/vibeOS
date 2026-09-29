@@ -427,6 +427,7 @@ harness defaults match them.
 | `VIBEOS_FSCK` | `fsck-vibefs` | `run_vibefs_crash` |
 | `VIBEOS_NBD_CACHE` | `nbd-cache` | `run_vibefs_crash` |
 | `VIBEOS_VIBEFS_CAT` | `vibefs-cat` | `run_vibefs_crash` |
+| `VIBEOS_QEMU_VERSION` | unset; the QEMU version a CI job pins | `qemu_argv`, only under `CI` on Linux: it fails before the first boot when `qemu-system-x86_64 --version` differs, or when the variable is unset (§8.6, Runners) |
 
 `VIBEOS_BIOS` reaches QEMU as `-bios`, which accepts only an image whose size is a multiple of
 64 KiB. apt's combined `/usr/share/ovmf/OVMF.fd`, the Makefile's `OVMF` default and the one CI uses,
@@ -482,10 +483,23 @@ candidate commit, restores no cache, checks out nothing, and receives only artif
 SHA-256 list (ROADMAP §10.1, §14.6). Today `release` builds, tests, and publishes in one job with
 `contents: write`, a persisted checkout token, and restored caches.
 
-**Runners.** Planned (ROADMAP §11.7): every job that boots an aarch64 guest runs on an arm64 runner
+**Runners.** Every Linux job runs on GitHub's free `ubuntu-26.04` image (`ubuntu-26.04-arm` for
+arm64 jobs), whose apt QEMU 10.2.1 (`1:10.2.1+ds-1ubuntu3`) meets every QEMU minimum ROADMAP names
+(9.0 for Phase 11's EL2 boot and §20.1's boot with more than 255 vCPUs, 10.2 for §18.1's amd-iommu
+`dma-remap` and Phase 25's GHES injection). A line that needs QEMU 11.1 or later builds that release
+from its tarball, checked by SHA-256 and cached by version; none does yet. Every job that installs
+`qemu-system-*` sets `VIBEOS_QEMU_VERSION` to the version it pins, and when `CI` is set on Linux,
+`harness.qemu_argv` runs `ensure_qemu_pinned`, which compares `qemu-system-x86_64 --version` with
+that pin before the first boot and fails on a mismatch or an unset pin, so an image update that
+moves QEMU fails every tier loudly instead of changing what they test; move the pin and this
+paragraph together. `make check`, the macOS job, and a dev host's QEMU (Homebrew's included) are
+not checked. `scripts/check_workflows.py` fails on a `runs-on:` label other than these two and
+`macos-*` (`rule_runs_on`, which resolves `${{ matrix.X }}` to the matrix's values), and on a job
+that names `qemu-system` without a `VIBEOS_QEMU_VERSION` of the form `N.N.N` (`rule_qemu_pin`).
+Planned (ROADMAP §11.7): every job that boots an aarch64 guest runs on an arm64 runner
 (`ubuntu-26.04-arm`, or the scheduled macOS job's arm64 image), never on an x86_64 one. TCG adds no
 ordering to an aarch64 guest's loads and stores, so only an arm64 host lets a weak reordering reach
-guest code; an x86_64 host runs them in its TSO order. `scripts/check_workflows.py` checks it. From
+guest code; an x86_64 host runs them in its TSO order. `scripts/check_workflows.py` will check it. From
 ROADMAP Phase 11 on, `make gate` also needs two dev-host records that loop the -smp 4 in-guest tier
 and smp-stress under HVF for 30 minutes each (`tests/gates/common.toml`), the only gate that runs
 those tests on a weakly ordered CPU directly. The weekly aarch64 smp-stress leg records whether TCG

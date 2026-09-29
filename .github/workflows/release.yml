@@ -12,7 +12,12 @@ permissions:
 jobs:
   release:
     name: build ISO and publish
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
+    # The harness fails every boot when QEMU is not this version (ROADMAP
+    # §10.1): resolute's qemu-system-x86 1:10.2.1+ds-1ubuntu3. Move the pin
+    # and DESIGN §8.6 together.
+    env:
+      VIBEOS_QEMU_VERSION: "10.2.1"
     permissions:
       contents: write # publishes the GitHub Release (softprops/action-gh-release)
     steps:

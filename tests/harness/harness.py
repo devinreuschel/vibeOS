@@ -32,6 +32,7 @@ Drivers live in `run_*.py` and must not parse the environment or build argv.
 | `VIBEOS_FSCK` | `fsck-vibefs` | `run_vibefs_crash` |
 | `VIBEOS_NBD_CACHE` | `nbd-cache` | `run_vibefs_crash` |
 | `VIBEOS_VIBEFS_CAT` | `vibefs-cat` | `run_vibefs_crash` |
+| `VIBEOS_QEMU_VERSION` | unset; the QEMU a CI job pins | all (`qemu_argv`, `CI` on Linux) |
 """
 
 from __future__ import annotations
@@ -43,9 +44,10 @@ import select
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import IO
@@ -481,6 +483,9 @@ class QemuConfig:
     accel: str | None = None
     boot_order: str | None = None
     extra_panic: tuple[str, ...] = ()
+    # The QEMU version the CI job pins (VIBEOS_QEMU_VERSION). None skips the
+    # check: only a config `env_config` built carries the pin.
+    qemu_version: str | None = None
 
 
 @dataclass
@@ -494,6 +499,7 @@ class EnvConfig:
     timeout: float
     extra: tuple[str, ...]
     tier: str = "adhoc"
+    qemu_version: str = ""
 
     def qemu(
         self,
@@ -514,6 +520,7 @@ class EnvConfig:
             accel=self.accel,
             boot_order=boot_order,
             extra_panic=extra_panic,
+            qemu_version=self.qemu_version,
         )
 
 
@@ -558,6 +565,7 @@ def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
         timeout=timeout,
         extra=extra,
         tier=os.environ.get("VIBEOS_TIER") or "adhoc",
+        qemu_version=os.environ.get("VIBEOS_QEMU_VERSION", ""),
     )
 
 
@@ -696,6 +704,52 @@ OVMF_BOOT_ARGS: tuple[str, ...] = (
 )
 
 
+QEMU_VERSION_RE = re.compile(r"QEMU emulator version (\d+\.\d+\.\d+)")
+# binary -> the version its `--version` printed, so each binary runs once.
+_QEMU_VERSIONS: dict[str, str] = {}
+
+
+def _qemu_version_line(binary: str) -> str:
+    try:
+        out = subprocess.run(
+            [binary, "--version"], capture_output=True, text=True, check=False, timeout=10
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise HarnessError(f"{binary} --version failed: {e}") from e
+    return out.stdout.splitlines()[0] if out.stdout else ""
+
+
+def ensure_qemu_pinned(
+    binary: str,
+    pin: str | None,
+    *,
+    env: Mapping[str, str] = os.environ,
+    platform: str = sys.platform,
+    version_line: Callable[[str], str] = _qemu_version_line,
+) -> None:
+    """Fail when a Linux CI job's QEMU is not the version the job pins (ROADMAP §10.1).
+
+    An image update that moves QEMU then fails every boot loudly instead of
+    changing what the tiers test. Skipped with no pin (`None`, a config not
+    built by `env_config`), outside CI, and off Linux (macOS, dev hosts).
+    """
+    if pin is None or not env.get("CI") or not platform.startswith("linux"):
+        return
+    if pin == "":
+        raise HarnessError("CI on Linux: VIBEOS_QEMU_VERSION is unset; the job must pin QEMU")
+    found = _QEMU_VERSIONS.get(binary)
+    if found is None:
+        line = version_line(binary)
+        m = QEMU_VERSION_RE.search(line)
+        found = m.group(1) if m else line.strip()
+        _QEMU_VERSIONS[binary] = found
+    if found != pin:
+        raise HarnessError(
+            f"{binary} is QEMU {found or '(no version)'}, but VIBEOS_QEMU_VERSION pins {pin}; "
+            "move the pin and DESIGN §8.6 together"
+        )
+
+
 def qemu_argv(cfg: QemuConfig, monitor_sock: str | None) -> list[str]:
     argv = [
         "qemu-system-x86_64",
@@ -718,6 +772,7 @@ def qemu_argv(cfg: QemuConfig, monitor_sock: str | None) -> list[str]:
     elif cfg.boot_order:
         argv += ["-boot", f"order={cfg.boot_order}"]
     argv += list(cfg.extra)
+    ensure_qemu_pinned(argv[0], cfg.qemu_version)
     return argv
 
 
