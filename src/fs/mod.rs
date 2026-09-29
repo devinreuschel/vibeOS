@@ -3,4 +3,6 @@
 pub(crate) mod fat_init;
 pub(crate) mod file_init;
 pub(crate) mod fs_init;
+#[cfg(feature = "kernel_tests")]
+pub mod ktest;
 pub(crate) mod vibefs_init;

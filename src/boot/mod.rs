@@ -14,6 +14,9 @@ use limine::request::{
 use crate::cell::BootCell;
 use crate::paging_init::HHDM_BASE;
 
+#[cfg(feature = "kernel_tests")]
+pub mod ktest;
+
 #[used]
 #[unsafe(link_section = ".limine_requests")]
 static HHDM: HhdmRequest = HhdmRequest::new();

@@ -3,5 +3,7 @@
 pub(crate) mod dev_init;
 pub(crate) mod dma_init;
 pub(crate) mod entropy_init;
+#[cfg(feature = "kernel_tests")]
+pub mod ktest;
 pub(crate) mod pci_init;
 pub(crate) mod virtio_init;

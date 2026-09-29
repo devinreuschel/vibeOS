@@ -31,10 +31,7 @@ SUFFIXES = (".rs", ".S", ".asm", ".inc")
 
 # (repo-relative path, key of the open box that splits it). The slice that
 # splits a file deletes its row.
-SPLIT_BY: list[tuple[str, str]] = [
-    ("src/ktest.rs",
-     "`fs/mod.rs`, `vibefs.rs`, `fat.rs`, `fs/kernfs.rs`, and `ktest.rs` split by responsibility"),
-]
+SPLIT_BY: list[tuple[str, str]] = []
 
 HINT = "split it, or name it in SPLIT_BY with the open box that splits it (ROADMAP §10.3, Q5)"
 

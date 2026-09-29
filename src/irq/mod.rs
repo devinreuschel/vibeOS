@@ -2,3 +2,5 @@
 
 pub(crate) mod ipi_init;
 pub(crate) mod irq_init;
+#[cfg(feature = "kernel_tests")]
+pub mod ktest;

@@ -149,8 +149,8 @@ compiles it under `cfg(test)` through `#[path]`. `user/` holds freestanding ELFs
 **Reading the table.** Paths are relative to `crates/core/src/` (Portable) and `src/` (Kernel).
 `{a,b}` lists files of one directory, and `*` matches within one. Every listed path exists, and every
 `.rs`, `.S` and `.asm` file under the two roots is listed once. Outside the `crate` row, a row's paths
-lie in its subsystem's directory, except `ktest.rs` until ROADMAP §10.2's Q2 box moves the runner to
-`ktest/mod.rs`. Test bodies in `src/<s>/ktest.rs` need no row.
+lie in its subsystem's directory. Test bodies in `src/<s>/ktest.rs`, and its `src/<s>/ktest/<topic>.rs`
+children, need no row.
 
 | Subsystem | Portable (`crates/core/src/`) | Kernel (`src/`) |
 |---|---|---|
@@ -172,7 +172,18 @@ lie in its subsystem's directory, except `ktest.rs` until ROADMAP §10.2's Q2 bo
 | block | `block/{mod,part,cache}.rs` | `block/{mod,block_init,part_init,cache_init}.rs` |
 | fs | `fs/{mod,inode,mount,walk,file,ramfs,testfs,tests}.rs`, `fs/kernfs/{mod,node,devfs,tmpfs,procfs,sysfs,tests}.rs`, `fs/vibefs/{mod,disk,layout,vol,ops,commit,mkfs,fsck,tests}.rs`, `fs/fat/{mod,vol,rw,dirent,chain,mkfs,tests}.rs` | `fs/{mod,fs_init,fat_init,vibefs_init,file_init}.rs` |
 | proc | `proc/{mod,elf,syscall}.rs`, `proc/addr_space/{mod,tests}.rs` | `proc/{mod,addr_space_init,user_init,syscall_init}.rs`, `proc/proc_init/{mod,fd,exec,exit}.rs` |
-| ktest | — | `ktest.rs`, `ktest/*.rs` (`kernel_tests` only) |
+| ktest | — | `ktest/{mod,user}.rs` (`kernel_tests` only) |
+
+**In-guest tests.** A `kernel_tests` build's test bodies live beside the code they test: each kernel
+subsystem directory holds a `ktest.rs` (`src/mm/ktest.rs`, `src/sched/ktest.rs`, and so on;
+`src/arch/ktest.rs` for the x86_64 port), declared `#[cfg(feature = "kernel_tests")] pub mod ktest;` in
+that directory's `mod.rs`, so no other build compiles it. `src/ktest/mod.rs` holds the runner, the
+helpers that tests of more than one subsystem share, and the one ordered list of tests
+([TESTING.md §8.2](TESTING.md#82-in-guest-tests)); `src/ktest/user.rs` builds the ring-3 programs tests
+spawn. A new test goes into its subsystem's `ktest.rs`, and its row after the last row of that subsystem
+in the list, or at the end if it has none. Planned (ROADMAP §10.2, T1): each subsystem's `ktest.rs`
+exports its own rows. Planned (ROADMAP §10.2, Q2): the `kernel_tests` hooks still in production modules
+move into these files.
 
 ## 1.4 Documentation rules
 
