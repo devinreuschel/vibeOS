@@ -5,8 +5,14 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::log::Level;
 
+use vibeos::log::trace::{self, Event, RecordData};
+use vibeos::vectors;
+
+use crate::block::{block_init, blockdev_init};
+use crate::ktest::user::{self, DEFAULT, Image, user_code};
 use crate::ktest::{Outcome, spin_until_ns};
-use crate::{per_cpu_init, thread_init, time_init};
+use crate::log::trace_init::VIBEOS_TRACE;
+use crate::{ipi_init, per_cpu_init, thread_init, time_init};
 
 pub(crate) fn test_log_boot_captured() -> Outcome {
     if !crate::log_init::contains_msg("serial online") {
@@ -238,5 +244,171 @@ pub(crate) fn test_serial_frame() -> Outcome {
     crate::marker!("vibeOS: ktest: serial frame a\nb\rc\x1ed");
     crate::console_init::write(b"\x1eserial-frame open");
     crate::marker!("vibeOS: ktest: serial frame after open");
+    Outcome::Ok
+}
+
+/// Each CPU's ring head: the marks a flight-recorder test searches after.
+fn heads() -> [u64; trace::MAX_CPUS] {
+    let mut out = [0u64; trace::MAX_CPUS];
+    for (c, h) in out.iter_mut().enumerate() {
+        if let Some(r) = VIBEOS_TRACE.ring(c as u32) {
+            *h = r.head();
+        }
+    }
+    out
+}
+
+/// The first valid record, on any CPU, past that CPU's mark in `marks`,
+/// for which `pred(cpu, record)` holds.
+fn find_since(
+    marks: &[u64; trace::MAX_CPUS],
+    pred: impl Fn(u32, &RecordData) -> bool,
+) -> Option<(u32, RecordData)> {
+    for (c, mark) in marks.iter().enumerate() {
+        let cpu = c as u32;
+        let Some(r) = VIBEOS_TRACE.ring(cpu) else {
+            continue;
+        };
+        let head = r.head();
+        let start = (*mark).max(head.saturating_sub(trace::RECORDS_PER_CPU as u64));
+        for pos in start..head {
+            if let Some(d) = r.get(pos)
+                && pred(cpu, &d)
+            {
+                return Some((cpu, d));
+            }
+        }
+    }
+    None
+}
+
+fn trace_noop(_: *mut ()) {}
+
+/// L1415: after a call-function IPI to every other online CPU, every
+/// online CPU's ring holds records, and ring `c` holds only CPU `c`'s.
+pub(crate) fn test_trace_ring_own_cpu() -> Outcome {
+    if !VIBEOS_TRACE.is_live() {
+        return Outcome::Fail("trace not live");
+    }
+    let online = per_cpu_init::online_mask();
+    ipi_init::call_mask(online, trace_noop, core::ptr::null_mut(), true);
+    for c in 0..trace::MAX_CPUS as u32 {
+        if online & (1u64 << c) == 0 {
+            continue;
+        }
+        let Some(r) = VIBEOS_TRACE.ring(c) else {
+            return crate::fail_fmt!("no ring for cpu {c}");
+        };
+        let head = r.head();
+        if head == 0 {
+            return crate::fail_fmt!("cpu {c}: ring empty");
+        }
+        let start = head.saturating_sub(trace::RECORDS_PER_CPU as u64);
+        let mut valid = 0u32;
+        for pos in start..head {
+            if let Some(d) = r.get(pos) {
+                valid += 1;
+                if d.cpu != c {
+                    return crate::fail_fmt!("ring {c} pos {pos}: record of cpu {}", d.cpu);
+                }
+            }
+        }
+        if valid == 0 {
+            return crate::fail_fmt!("cpu {c}: no valid record");
+        }
+    }
+    Outcome::Ok
+}
+
+// getpid, then a store to 0x10, which faults: `SIGSEGV` ends it.
+user_code!(
+    TRACE_GETPID_FAULT,
+    "
+    mov eax, 39
+    syscall
+    mov ecx, 0x10
+    mov qword ptr [rcx], rax
+    ud2
+    "
+);
+
+/// L1416: each tracepoint the kernel has fires, with the arguments its
+/// event table names.
+pub(crate) fn test_trace_tracepoints_fire() -> Outcome {
+    let Some(ap) = crate::ktest::second_cpu() else {
+        return Outcome::Skip("needs a second cpu");
+    };
+    let me = u64::from(thread_init::current_id().0);
+    let ev = |r: &RecordData, e: Event| r.event == e.as_u32();
+
+    let marks = heads();
+    if user::run(&Image::Code(TRACE_GETPID_FAULT, DEFAULT), &["trace_fault"]).is_err() {
+        return Outcome::Fail("user program did not run");
+    }
+    if find_since(&marks, |_, r| ev(r, Event::SyscallEnter) && r.a == 39).is_none() {
+        return Outcome::Fail("no SyscallEnter for getpid");
+    }
+    if find_since(&marks, |_, r| ev(r, Event::SyscallExit) && r.a == 39).is_none() {
+        return Outcome::Fail("no SyscallExit for getpid");
+    }
+    if find_since(&marks, |_, r| ev(r, Event::PageFault) && r.a == 0x10).is_none() {
+        return Outcome::Fail("no PageFault at 0x10");
+    }
+
+    let marks = heads();
+    thread_init::sleep_ms(2);
+    if find_since(&marks, |_, r| ev(r, Event::Wake) && r.a == me).is_none() {
+        return Outcome::Fail("no Wake of the test thread");
+    }
+    if find_since(&marks, |_, r| {
+        ev(r, Event::Switch) && (r.a == me || r.b == me)
+    })
+    .is_none()
+    {
+        return Outcome::Fail("no Switch naming the test thread");
+    }
+    if find_since(&marks, |_, r| ev(r, Event::IrqEnter) && r.a >= 32).is_none() {
+        return Outcome::Fail("no IrqEnter");
+    }
+    if find_since(&marks, |_, r| ev(r, Event::IrqExit) && r.a >= 32).is_none() {
+        return Outcome::Fail("no IrqExit");
+    }
+
+    let marks = heads();
+    let call = u64::from(vectors::IPI_CALL);
+    ipi_init::call_cpu(ap, trace_noop, core::ptr::null_mut(), true);
+    if find_since(&marks, |_, r| {
+        ev(r, Event::IpiSend) && r.a == call && r.b == u64::from(ap)
+    })
+    .is_none()
+    {
+        return Outcome::Fail("no IpiSend 0xFB to the second cpu");
+    }
+    if find_since(&marks, |c, r| {
+        ev(r, Event::IpiAck) && r.a == call && c == ap
+    })
+    .is_none()
+    {
+        return Outcome::Fail("no IpiAck 0xFB on the second cpu");
+    }
+
+    let Some(d) = blockdev_init::lookup(block_init::RAM0_NAME.as_bytes()) else {
+        return Outcome::Fail("no ram0");
+    };
+    let marks = heads();
+    let mut buf = [0u8; 512];
+    if d.read_dev(0, &mut buf).is_err() {
+        return Outcome::Fail("ram0 read");
+    }
+    let Some((_, sub)) = find_since(&marks, |_, r| ev(r, Event::BlockSubmit) && r.b == 0) else {
+        return Outcome::Fail("no BlockSubmit of lba 0");
+    };
+    if find_since(&marks, |_, r| {
+        ev(r, Event::BlockComplete) && r.a == sub.a && r.b == 0
+    })
+    .is_none()
+    {
+        return Outcome::Fail("no BlockComplete for the submit");
+    }
     Outcome::Ok
 }

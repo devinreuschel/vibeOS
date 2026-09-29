@@ -906,6 +906,27 @@ needs = [
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
+[[box]]
+key = "syscall stubs generated from one"
+needs = [
+  "a `no_std` Rust crate under",  # L1350
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "syscall dispatch indexes the generated"
+needs = [
+  "syscall stubs generated from one",  # L1352
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "a dispatch table indexed by"
+needs = [
+  "syscall dispatch indexes the generated",  # L1353
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
 # L883
 [[box]]
 key = "partitions exposed as offset-limited block"
@@ -964,3 +985,20 @@ needs = [
   "one ring-3 entry model: `/hello`",  # L1402
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1416
+[[box]]
+key = "tracepoints at the boundaries that"
+needs = [
+  "a flight recorder (moved from",  # L1415
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1417
+[[box]]
+key = "timestamps from the §10.3 cycle"
+needs = [
+  "a hostlib core tool reads",  # L1412
+  "a flight recorder (moved from",  # L1415
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"

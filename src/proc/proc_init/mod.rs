@@ -13,6 +13,7 @@ use vibeos::elf::ElfError;
 use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, SeekFrom};
 use vibeos::kalloc::{TryBox, TryVec};
 use vibeos::kbd::{DecodedKey, NamedKey};
+use vibeos::kerror::KError;
 use vibeos::lock::RANK_SCHED;
 use vibeos::paging::{PAGE_SIZE_4K, USER_MAP_END};
 use vibeos::proc::pid::IdIndex;
@@ -25,10 +26,8 @@ use vibeos::proc::{
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::syscall::{
     self, E2BIG, EAGAIN, EBADF, EBUSY, ECHILD, EEXIST, EFAULT, EFBIG, EINVAL, EIO, EISDIR, EMFILE,
-    ENAMETOOLONG, ENODEV, ENOENT, ENOEXEC, ENOMEM, ENOSYS, ENOTDIR, EPERM, ESRCH, F_GETFD, F_SETFD,
-    SYS_BRK, SYS_CLOSE, SYS_DUP, SYS_DUP2, SYS_EXECVE, SYS_EXIT, SYS_FCNTL, SYS_FORK, SYS_GETPID,
-    SYS_GETPPID, SYS_KILL, SYS_LSEEK, SYS_MMAP, SYS_MUNMAP, SYS_OPEN, SYS_PSINFO, SYS_READ,
-    SYS_SCHED_YIELD, SYS_WAIT4, SYS_WRITE, UserFrame,
+    ENAMETOOLONG, ENODEV, ENOENT, ENOEXEC, ENOMEM, ENOTDIR, EPERM, ESRCH, F_GETFD, F_SETFD,
+    Handlers, SysResult, UserFrame,
 };
 use vibeos::thread::ThreadId;
 use vibeos::trap::{self, FpCause, FpUnit, Ring3Action, SyscallAbi, TrapKind};
@@ -516,9 +515,11 @@ pub fn syscall(frame: &mut UserFrame) -> i64 {
     apply_pending(Some(&mut *frame));
     let nr = Abi::nr(frame);
     let args: [u64; 6] = core::array::from_fn(|i| Abi::arg(frame, i));
-    let ret = dispatch_frame(nr, args, Some(frame));
+    let ret = syscall::encode(dispatch_frame(nr, args, Some(frame)));
     if syscall_init::trace_enabled() {
-        let name = syscall::info(nr).map(|i| i.name).unwrap_or("?");
+        let name = syscall::x86_64::TABLE
+            .lookup(nr)
+            .map_or("?", |s| s.row().name);
         #[expect(
             clippy::let_underscore_must_use,
             reason = "a write to Serial cannot fail (DESIGN §2.5)"
@@ -531,43 +532,113 @@ pub fn syscall(frame: &mut UserFrame) -> i64 {
 /// A syscall from kernel code, with no user frame: the in-guest tests'.
 #[cfg(feature = "kernel_tests")]
 pub fn dispatch(nr: u64, args: [u64; 6]) -> i64 {
-    dispatch_frame(nr, args, None)
+    syscall::encode(dispatch_frame(nr, args, None))
 }
 
-fn dispatch_frame(nr: u64, args: [u64; 6], frame: Option<&mut UserFrame>) -> i64 {
-    match nr {
-        SYS_READ => sys_read(args[0], args[1], args[2]),
-        SYS_WRITE => sys_write(args[0], args[1], args[2]),
-        SYS_OPEN => sys_open(args[0], args[1], args[2]),
-        SYS_CLOSE => sys_close(args[0]),
-        SYS_LSEEK => sys_lseek(args[0], args[1], args[2]),
-        SYS_MMAP => sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5]),
-        SYS_MUNMAP => sys_munmap(args[0], args[1]),
-        SYS_BRK => sys_brk(args[0]),
-        SYS_DUP => sys_dup(args[0]),
-        SYS_DUP2 => sys_dup2(args[0], args[1]),
-        SYS_GETPID => sys_getpid(),
-        SYS_GETPPID => with_table(|t| t.get(current_pid()).map(|p| p.ppid).unwrap_or(0)) as i64,
-        SYS_SCHED_YIELD => {
-            if current_pid() != 0 {
-                thread_init::yield_now();
-            }
-            0
+fn dispatch_frame(nr: u64, args: [u64; 6], frame: Option<&mut UserFrame>) -> SysResult {
+    syscall::x86_64::dispatch(&mut Ctx { frame }, nr, &args)
+}
+
+/// The running syscall's context: the user frame, which `fork` copies and
+/// `execve` rewrites; `None` for a kernel-side `dispatch` probe.
+struct Ctx<'a> {
+    frame: Option<&'a mut UserFrame>,
+}
+
+impl Handlers for Ctx<'_> {
+    fn read(&mut self, fd: u32, buf: u64, count: usize) -> SysResult {
+        sys_read(fd, buf, count)
+    }
+
+    fn write(&mut self, fd: u32, buf: u64, count: usize) -> SysResult {
+        sys_write(fd, buf, count)
+    }
+
+    fn open(&mut self, pathname: u64, flags: i32, mode: u16) -> SysResult {
+        sys_open(pathname, flags, mode)
+    }
+
+    fn close(&mut self, fd: u32) -> SysResult {
+        sys_close(fd)
+    }
+
+    fn lseek(&mut self, fd: u32, offset: i64, whence: u32) -> SysResult {
+        sys_lseek(fd, offset, whence)
+    }
+
+    fn mmap(
+        &mut self,
+        addr: u64,
+        length: u64,
+        prot: u64,
+        flags: u64,
+        fd: u64,
+        offset: u64,
+    ) -> SysResult {
+        sys_mmap(addr, length, prot, flags, fd, offset)
+    }
+
+    fn munmap(&mut self, addr: u64, length: usize) -> SysResult {
+        sys_munmap(addr, length)
+    }
+
+    fn brk(&mut self, addr: u64) -> SysResult {
+        sys_brk(addr)
+    }
+
+    fn sched_yield(&mut self) -> SysResult {
+        if current_pid() != 0 {
+            thread_init::yield_now();
         }
-        SYS_FORK => sys_fork(frame),
-        SYS_EXECVE => sys_execve(args[0], args[1], args[2], frame),
-        SYS_EXIT => {
-            if current_pid() == 0 {
-                0
-            } else {
-                sys_exit(args[0], false)
-            }
+        Ok(0)
+    }
+
+    fn dup(&mut self, oldfd: u32) -> SysResult {
+        sys_dup(oldfd)
+    }
+
+    fn dup2(&mut self, oldfd: u32, newfd: u32) -> SysResult {
+        sys_dup2(oldfd, newfd)
+    }
+
+    fn getpid(&mut self) -> SysResult {
+        sys_getpid()
+    }
+
+    fn fork(&mut self) -> SysResult {
+        sys_fork(self.frame.as_deref_mut())
+    }
+
+    fn execve(&mut self, pathname: u64, argv: u64, envp: u64) -> SysResult {
+        sys_execve(pathname, argv, envp, self.frame.as_deref_mut())
+    }
+
+    fn exit(&mut self, status: i32) -> SysResult {
+        if current_pid() == 0 {
+            Ok(0)
+        } else {
+            sys_exit(status, false)
         }
-        SYS_WAIT4 => sys_wait4(args[0], args[1], args[2]),
-        SYS_KILL => sys_kill(args[0], args[1]),
-        SYS_FCNTL => sys_fcntl(args[0], args[1], args[2]),
-        SYS_PSINFO => sys_psinfo(args[0], args[1]),
-        _ => syscall::neg(ENOSYS),
+    }
+
+    fn wait4(&mut self, pid: i32, wstatus: u64, options: i32, _rusage: u64) -> SysResult {
+        sys_wait4(pid, wstatus, options)
+    }
+
+    fn kill(&mut self, pid: i32, sig: i32) -> SysResult {
+        sys_kill(pid, sig)
+    }
+
+    fn fcntl(&mut self, fd: u32, cmd: u32, arg: u64) -> SysResult {
+        sys_fcntl(fd, cmd, arg)
+    }
+
+    fn getppid(&mut self) -> SysResult {
+        Ok(with_table(|t| t.get(current_pid()).map(|p| p.ppid).unwrap_or(0)) as usize)
+    }
+
+    fn psinfo(&mut self, buf: u64, len: usize) -> SysResult {
+        sys_psinfo(buf, len)
     }
 }
 
@@ -644,14 +715,14 @@ enum Pending {
     Stop,
 }
 
-fn sys_getpid() -> i64 {
+fn sys_getpid() -> SysResult {
     let pid = current_pid();
     #[cfg(feature = "kernel_tests")]
     {
         testing::getpid_spin(pid);
         testing::on_getpid(pid);
     }
-    pid as i64
+    Ok(pid as usize)
 }
 
 fn copy_user_str(va: u64, out: &mut [u8]) -> Result<usize, i32> {

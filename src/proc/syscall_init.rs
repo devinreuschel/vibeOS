@@ -7,6 +7,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use vibeos::addr_space::AddressSpace;
+use vibeos::arch::SyscallAbi;
 use vibeos::arch::x86_64::trap::sysret_ok;
 use vibeos::desc::{KERNEL_CS, STAR_SYSRET, Tss, USER_CS_RPL, USER_DS_RPL};
 use vibeos::fpu;
@@ -15,6 +16,7 @@ use vibeos::syscall::UserFrame;
 use vibeos::thread::{Fxsave, Tcb};
 use vibeos::vectors;
 
+use crate::arch::current::Arch;
 use crate::arch::gdt;
 use crate::arch::idt::TrapFrame;
 use crate::cell::BootCell;
@@ -710,6 +712,8 @@ pub extern "C" fn vibeos_syscall_stub(frame: *mut UserFrame) -> i64 {
     // syscall_init::vibeos_syscall_entry built at the top of this thread's
     // kernel stack, which only this thread's syscall path refers to.
     let frame = unsafe { &mut *frame };
+    let nr = <Arch as SyscallAbi>::nr(frame);
+    vibeos::trace!(SyscallEnter, nr, <Arch as SyscallAbi>::arg(frame, 0));
     // Acquire: pairs with the Release store in `set_syscall_handler`.
     let p = HANDLER.load(Ordering::Acquire);
     let r = if p.is_null() {
@@ -723,6 +727,7 @@ pub extern "C" fn vibeos_syscall_stub(frame: *mut UserFrame) -> i64 {
     };
     #[cfg(feature = "kernel_tests")]
     testing::on_exit(frame);
+    vibeos::trace!(SyscallExit, nr, r as u64);
     r
 }
 

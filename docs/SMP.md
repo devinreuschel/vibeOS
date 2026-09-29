@@ -174,8 +174,22 @@ For each enabled APIC ID that is not the BSP:
 On the AP side (`smp_init::ap_entry`), in order: `cli`; load the per-CPU GDT and TSS; set `GS_BASE`
 and `KERNEL_GS_BASE` (`per_cpu_init::install_gs`); write CR0 and CR4 whole (`arch::cpu::init_control_regs`), program the
 syscall MSRs and the FPU, and set RSP0 (`syscall_init::init_ap`); load the shared IDT; enable the LAPIC; copy the BSP's `tsc_per_ms` and timer mode into `PerCpu`; arm the
-LAPIC timer with the BSP's calibration (`apic_init::arm_ap`); mark the CPU online and print
+LAPIC timer with the BSP's calibration (`apic_init::arm_ap`); run the TSC warp test against the
+BSP; mark the CPU online and print
 `vibeOS: sched: cpu<i> ready`; publish the ready flag; `sti`; enter the idle loop.
+
+The TSC warp test (`smp_init::tsc_warp_source` on the BSP, `tsc_warp_target` on the AP) measures
+the AP's TSC against the BSP's over one shared cache line, `trace::WarpLine`. The BSP joins it just
+before step 5, with IF=1; the AP joins after arming its timer, with IF=0 before its first `sti`. Each
+side waits at a barrier that spins on its own cycle counter for at most the 3 s of step 5 and skips
+the test when left alone, then reads its counter for 2 ms, at most 200,000 times: each read is
+compared with the largest read either side has published, and one below it is a backward step.
+The skew is the largest backward step, in cycles, 0 for none (`time_init::note_tsc_warp`,
+`tsc_max_skew`); any backward step makes the TSC unfit to order a trace across CPUs, Linux's
+`check_tsc_warp` rule ([DESIGN §6.4](TIME.md#64-timekeeping-api)). Once at least one AP ran
+the test, the BSP prints `vibeOS: smp: tsc skew <n> cycles` before `vibeOS: smp: done`, and it
+always publishes the calibration, the invariant bit and the warp result into the flight recorder's
+header (`trace_init::publish_clock`), where the core tool reads them.
 
 `GS_BASE` must be set before any `lidt` and before `sti`. NMI and timer IRQs both
 read per-CPU state through `gs:[0]`. Setting it after `lidt` is a null dereference

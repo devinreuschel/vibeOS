@@ -249,6 +249,13 @@ and lock-free rings. A call-function closure that needs a lock queues a work ite
 instead. The panic path (§2.5) is the one exception: it reads the log ring and writes COM1 without
 taking their locks.
 
+The flight recorder (ROADMAP §10.7) is such a lock-free ring, one per CPU: a record masks IF for
+its few stores and pushes to its own CPU's ring. NMI, `#MC`, and `#DB` bodies never record, because
+`cli` does not mask them and one could land between a record's stores on its CPU. Shootdown and
+call-function work run from a spin may record, because a spin never runs inside a record's IF=0
+stores. The IDT dispatcher records only through `trace::traced_vector`, which names no event for
+those three vectors or `#DF`.
+
 The hard-IRQ top half acknowledges and wakes. Work that allocates or blocks runs on a kernel thread
 ([section 5.4](INTERRUPTS.md#54-irq-registration), ROADMAP §6.6). A blocking call from a device top half fails at the call:
 `park`, `Sched::begin_wait`, and a voluntary `schedule` assert that `hardirq::IN_ISR` is clear,

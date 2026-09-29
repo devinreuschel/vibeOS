@@ -1,7 +1,7 @@
 use super::*;
 use vibeos::fmt_util;
 
-pub(super) fn sys_exit(status: u64, _from_signal: bool) -> i64 {
+pub(super) fn sys_exit(status: i32, _from_signal: bool) -> SysResult {
     finish_exit(wait_exited(status as u32), false);
 }
 
@@ -98,13 +98,13 @@ fn reparent_children(s: &mut Sched, t: &mut Table, dead: u32) -> bool {
     adopted
 }
 
-pub(super) fn sys_wait4(pid: u64, status: u64, options: u64) -> i64 {
+pub(super) fn sys_wait4(pid: i32, status: u64, options: i32) -> SysResult {
     let self_pid = current_pid();
     if self_pid == 0 {
-        return syscall::neg(ECHILD);
+        return Err(KError::from_errno(ECHILD));
     }
-    let want = pid as i64;
-    let nohang = options & WNOHANG != 0;
+    let want = i64::from(pid);
+    let nohang = options as u64 & WNOHANG != 0;
     loop {
         let r = thread_init::with_sched(|s| {
             table_locked(|t| {
@@ -127,17 +127,17 @@ pub(super) fn sys_wait4(pid: u64, status: u64, options: u64) -> i64 {
             })
         });
         match r {
-            WaitAct::Done(0, _) => return 0,
+            WaitAct::Done(0, _) => return Ok(0),
             WaitAct::Done(cpid, st) => {
                 // After `with_sched`, with no lock held: the child is
                 // reaped, and a failed copy returns `EFAULT` without
                 // undoing that, as Linux's does (SYSCALL.md §5).
                 if status != 0 && uaccess_init::copy_to_user_val(status, &st).is_err() {
-                    return syscall::neg(EFAULT);
+                    return Err(KError::from_errno(EFAULT));
                 }
-                return cpid as i64;
+                return Ok(cpid as usize);
             }
-            WaitAct::Err(e) => return syscall::neg(e),
+            WaitAct::Err(e) => return Err(KError::from_errno(e)),
             WaitAct::Sleep => {
                 thread_init::schedule();
                 if let Some(s) = current_space() {
@@ -183,10 +183,10 @@ pub(super) fn reap_zombie(s: &mut Sched, t: &mut Table, pid: u32) {
     release_pid(s, t, pid);
 }
 
-pub(super) fn sys_kill(pid: u64, sig: u64) -> i64 {
+pub(super) fn sys_kill(pid: i32, sig: i32) -> SysResult {
     let sig = sig as u32;
     if sig == 0 || sig > 31 {
-        return syscall::neg(EINVAL);
+        return Err(KError::from_errno(EINVAL));
     }
     let target = pid as u32;
     let self_pid = current_pid();
@@ -227,12 +227,12 @@ pub(super) fn sys_kill(pid: u64, sig: u64) -> i64 {
         })
     });
     match r {
-        Err(e) => syscall::neg(e),
+        Err(e) => Err(KError::from_errno(e)),
         Ok(()) => {
             if target == self_pid && default_action(sig) == SigAct::Term {
                 finish_exit(wait_signaled(sig), true);
             }
-            0
+            Ok(0)
         }
     }
 }
@@ -240,19 +240,20 @@ pub(super) fn sys_kill(pid: u64, sig: u64) -> i64 {
 // Out of line: `dispatch_frame` keeps only the running syscall's frame,
 // and a preempted body carries an interrupt and a switch on top of it.
 #[inline(never)]
-pub(super) fn sys_psinfo(buf: u64, len: u64) -> i64 {
+pub(super) fn sys_psinfo(buf: u64, len: usize) -> SysResult {
+    let len = len as u64;
     if !user_range_ok(buf, len) {
-        return syscall::neg(EFAULT);
+        return Err(KError::from_errno(EFAULT));
     }
     let mut tmp = [0u8; 512];
     let n = format_ps(&mut tmp);
     let take = usize::try_from(len).map_or(n, |l| n.min(l));
     if take == 0 {
-        return 0;
+        return Ok(0);
     }
     match uaccess_init::copy_to_user_partial(buf, &tmp[..take]) {
-        0 => syscall::neg(EFAULT),
-        c => c as i64,
+        0 => Err(KError::from_errno(EFAULT)),
+        c => Ok(c),
     }
 }
 

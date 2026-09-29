@@ -467,6 +467,7 @@ impl Queue {
             return Err(BlockError::QueueFull);
         }
         req.seq = self.fresh_seq();
+        crate::trace!(BlockSubmit, u64::from(req.seq), req.bio.lba);
         if self.try_merge(&req) {
             return Ok(());
         }
@@ -497,6 +498,7 @@ impl Queue {
     /// The dispatch of `seq` succeeded. [`Completion::Report`] for an
     /// unknown seq, so a driver never loses a wake.
     pub fn complete(&mut self, seq: u64) -> Completion {
+        crate::trace!(BlockComplete, seq, 0);
         let Some(i) = self.flight_index(seq, FlightState::Dispatched) else {
             return Completion::Report;
         };
@@ -515,6 +517,7 @@ impl Queue {
     /// The dispatch of `seq` failed for good. Its waiters take the error
     /// from the driver, and an emulated-`Fua` write sends no `Flush`.
     pub fn abort(&mut self, seq: u64) {
+        crate::trace!(BlockComplete, seq, 1);
         self.retire(seq);
     }
 

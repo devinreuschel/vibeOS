@@ -26,7 +26,17 @@ pub(crate) unsafe extern "C" fn start(sp: *const usize) -> ! {
     // SAFETY: `crate::main!` defines the symbol with this signature in every
     // program, established here by the macro's expansion in the binary.
     let code = unsafe { __vibeos_user_main(&env) };
-    sys::exit(code)
+    exit(code)
+}
+
+/// End the process with status `code`.
+pub fn exit(code: i32) -> ! {
+    // `exit` does not return; if it ever did, spinning keeps this `-> !`.
+    match sys::exit(code) {
+        Ok(_) | Err(_) => loop {
+            core::hint::spin_loop();
+        },
+    }
 }
 
 /// The address of the program's entry point.
@@ -80,8 +90,8 @@ fn panic(info: &PanicInfo<'_>) -> ! {
         clippy::let_underscore_must_use,
         reason = "DESIGN §2.5: the panic path's write has no one to report to; exit status 101 carries the failure"
     )]
-    let _ = sys::write(2, &buf.bytes[..buf.len]);
-    sys::exit(101)
+    let _ = sys::write(2, buf.bytes.as_ptr(), buf.len);
+    exit(101)
 }
 
 /// The unwinding personality routine. The prebuilt `core` for the user

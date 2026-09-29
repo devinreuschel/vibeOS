@@ -323,6 +323,11 @@ pub(crate) const TESTS: &[Test] = &[
     ),
     test("serial_lines_whole", log::ktest::test_serial_lines_whole).deadline(60_000),
     test("serial_frame", log::ktest::test_serial_frame),
+    test("trace_ring_own_cpu", log::ktest::test_trace_ring_own_cpu),
+    test(
+        "trace_tracepoints_fire",
+        log::ktest::test_trace_tracepoints_fire,
+    ),
     test("fb_bgrx_roundtrip", console::ktest::test_fb_bgrx_roundtrip),
     test("fb_pitch", console::ktest::test_fb_pitch),
     test("fb_cr_home", console::ktest::test_fb_cr_home),
@@ -602,6 +607,18 @@ pub(crate) const TESTS: &[Test] = &[
     )
     .deadline(30_000),
     test("user_runtime", proc::ktest::user_runtime),
+    test(
+        "syscall_ptr_decl_efault",
+        proc::ktest::syscall_ptr_decl_efault,
+    ),
+    test(
+        "read_ebadf_before_efault",
+        proc::ktest::read_ebadf_before_efault,
+    ),
+    test(
+        "wait4_echild_before_efault",
+        proc::ktest::wait4_echild_before_efault,
+    ),
     test(
         "shootdown_ack_while_busy",
         irq::ktest::shootdown_ack_while_busy,
