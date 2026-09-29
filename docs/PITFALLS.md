@@ -17,8 +17,9 @@ profile uses `opt-level = 1`, and boot-path functions keep their frames small.
 **A build succeeds but the ISO behaves like the previous build.**
 Two causes, both real. `CARGO_TARGET_DIR` pointed at a shared cache so the ISO copied a stale ELF, and
 separately the Makefile's prerequisite list was hand-maintained and did not include newly added source
-directories. Rule: `make` pins `CARGO_TARGET_DIR` to `./target`, and prerequisites are a `find` over
-`src/`.
+directories. Rule: `make` pins `CARGO_TARGET_DIR` to `./target`, each ISO packages only its variant's
+named ELF under `build/kernels/`, which the variant's recipe deletes before it builds and writes last,
+and prerequisites are a `find` over `src/` and `crates/core/src/`.
 
 **Bare `cargo build` has an empty initrd; a relative linker script used to fail off-root.**
 `build.rs` only copies `VIBEOS_INITRD` (64 KiB) and passes an absolute `-T linker.ld`. Unset
@@ -393,8 +394,10 @@ match exception mnemonics (`#PF`, `#GP`, `#DF`, `#UD`) and `panicked at`, on lin
 (§2.6), since user programs print both.
 
 **A test-only build gets shipped in the production ISO.**
-The `kernel_tests` feature build shared a Cargo target directory with the normal build. Rule: separate
-target directory and separate ISO for the test build.
+The `kernel_tests` feature build shared a Cargo target directory with the normal build, and the ISO
+recipe packaged whatever ELF the last build left there. Rule: every variant's ELF is copied to its own
+named file, `build/kernels/vibeos-<variant>.elf`, and each ISO recipe reads only its own; the test
+build has its own ISO.
 
 **A boot regression passes CI.**
 The e2e harness checked that markers were present but not that they were ordered, and SMP bring-up ran

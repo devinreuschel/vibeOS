@@ -34,7 +34,7 @@ default = []
 # Test-only (AGENTS.md rule 9): no published ISO enables it.
 panic_test = []
 # Second kernel build: run the in-guest test registry after init (DESIGN §8.2).
-# Packaged into its own Cargo target dir / ISO; never the production image.
+# Packaged from its own named ELF into its own ISO; never the production image.
 # Test-only (AGENTS.md rule 9): no published ISO enables it.
 # release.yml still uploads vibeos-ktest.iso until ROADMAP §10.1's release box (F145).
 kernel_tests = []
@@ -48,7 +48,7 @@ gp_test = []
 # Test-only (AGENTS.md rule 9): no published ISO enables it.
 panic_exit = []
 # Write-loop kernel for QEMU-kill crash consistency (docs/VIBEFS.md §12).
-# Separate ISO / target dir; never the production image.
+# Its own named ELF and ISO; never the production image.
 # Test-only (AGENTS.md rule 9): no published ISO enables it.
 vibefs_crash = []
 

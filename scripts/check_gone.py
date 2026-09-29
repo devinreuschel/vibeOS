@@ -145,6 +145,12 @@ GONE: list[tuple[str, str]] = [
     ("crates/core/src/sync/lock.rs: fn can_acquire", "the rank checker enforces DESIGN"),
     ("crates/core/src/sync/lock.rs: fn release_mask", "the rank checker enforces DESIGN"),
     ("heap_then_buddy_is_forbidden", "the heap ranks first"),
+    ("KERNEL_TESTS_DIR", "one `target/` for every feature"),
+    ("KERNEL_VIBEFS_CRASH_DIR", "one `target/` for every feature"),
+    ("target-gp", "one `target/` for every feature"),
+    ("target-kernel-tests", "one `target/` for every feature"),
+    ("target-panic", "one `target/` for every feature"),
+    ("target-vibefs-crash", "one `target/` for every feature"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

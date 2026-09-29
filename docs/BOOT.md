@@ -242,6 +242,11 @@ budget is what bounds a whole path.
 
 ## 3.6 ISO and QEMU
 
+`make` builds every variant in the one `target/`, copies each variant's ELF to
+`build/kernels/vibeos-<variant>.elf`, and writes `build/vibeos.iso` and `build/vibeos-<variant>.iso`;
+`make isos` builds them all. Each ISO recipe reads only its own named ELF, so a test build cannot be
+packaged as production. The repository root holds no build product.
+
 `make` stages `build/iso_root_<variant>/` with the kernel ELF, `limine.conf`, and the Limine BIOS
 and UEFI artifacts, then builds a hybrid ISO with `xorriso` and runs `limine bios-install`. Hybrid
 means the same image boots BIOS and UEFI, which matters for real hardware later.

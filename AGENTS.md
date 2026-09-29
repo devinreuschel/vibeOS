@@ -47,7 +47,7 @@ These rules come from [KERNEL_REVIEW.md §8.1](docs/reviews/KERNEL_REVIEW.md#81-
 
     ./setup.sh          # Limine clone + host-tool check (verifies pinned Limine commit)
     make check          # fast local gate (fmt, host and kernel clippy, host units, harness, ruff/mypy, check scripts)
-    make                # kernel + vibeos.iso
+    make                # kernel + build/vibeos.iso
     make run            # QEMU window = PS/2; the terminal is COM1
     make test-unit      # vibeos-core unit tests on the host triple
     make test-harness   # Python harness units
@@ -87,7 +87,7 @@ Do not re-introduce an undated nightly except the weekly canary job in
 
 ## Do not
 
-- commit build products (`vibeos*.iso`, `iso_root*`, `build/initrd.fat`, `target*/`, `limine/`)
+- commit build products (anything under `build/` or `target/`, `limine/`, and the assembled `user/` programs)
 - edit `limine/` (cloned by `setup.sh`)
 - add dependencies without a note in the PR
 - copy or translate code, comments, or tables from a file licensed only under the GPL or LGPL (most of Linux, glibc, GNU tools), or have its implementation open while writing the code that matches it: match Linux's behaviour from its documentation and from running it, and cite where an interface's constants and layouts are defined; a format that only GPL code defines, with the algorithm that maintains it, is learned from what Linux writes, never from that code (DESIGN §1.5)

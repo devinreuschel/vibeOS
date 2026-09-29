@@ -18,6 +18,7 @@ from tests.harness.harness import (
     EnvConfig,
     HarnessError,
     boot_contract_markers,
+    default_iso,
     env_config,
     env_expect_panic,
     env_flag,
@@ -240,7 +241,7 @@ def _mce_main(env: EnvConfig) -> int:
 
 
 def main() -> int:
-    env = env_config(default_iso="vibeos.iso", default_timeout=60)
+    env = env_config(default_iso=default_iso(), default_timeout=60)
     if env_flag("VIBEOS_MCE_TEST"):
         return _mce_main(env)
     res = results.Results(env.tier)
