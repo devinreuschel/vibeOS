@@ -13,10 +13,8 @@
 use core::sync::atomic::AtomicPtr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use vibeos::fs::{
-    FileApi, FsError, FsType, Guarded, Hooks, KernFs, KernSkin, KernState, PathRef, RamFs,
-    RamState, Vfs,
-};
+use vibeos::fs::kernfs::{KernFs, KernSkin, KernState};
+use vibeos::fs::{FileApi, FsError, FsType, Guarded, Hooks, PathRef, RamFs, RamState, Vfs};
 use vibeos::lock::RANK_DEVICE;
 
 use crate::sync_init::SpinMutex;

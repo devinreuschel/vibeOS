@@ -35,14 +35,13 @@
 pub mod fat;
 mod file;
 mod inode;
-mod kernfs;
+pub mod kernfs;
 mod mount;
 mod ramfs;
 pub mod vibefs;
 mod walk;
 
 pub use file::{FileId, FileRef, SeekFrom};
-pub use kernfs::{KernFs, KernSkin, KernState};
 pub use ramfs::{RamFs, RamState};
 pub use walk::{WalkCall, WalkReply, WalkStep, Walker, split_basename};
 
