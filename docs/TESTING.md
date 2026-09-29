@@ -427,6 +427,7 @@ harness defaults match them.
 | `VIBEOS_FSCK` | `fsck-vibefs` | `run_vibefs_crash` |
 | `VIBEOS_NBD_CACHE` | `nbd-cache` | `run_vibefs_crash` |
 | `VIBEOS_VIBEFS_CAT` | `vibefs-cat` | `run_vibefs_crash` |
+| `VIBEOS_PREBUILT` | unset | the Makefile: `1` makes `make test-*` use the files `make prebuilt` packed (`build/prebuilt.tar`, unpacked in place) and build nothing, as a CI tier job does (§8.6) |
 | `VIBEOS_QEMU_VERSION` | unset; the QEMU version a CI job pins | `qemu_argv`, only under `CI` on Linux: it fails before the first boot when `qemu-system-x86_64 --version` differs, or when the variable is unset (§8.6, Runners) |
 
 `VIBEOS_BIOS` reaches QEMU as `-bios`, which accepts only an image whose size is a multiple of
@@ -464,21 +465,63 @@ missing `pull_request` or `workflow_dispatch` trigger, or on a group that is not
 (`rule_ci_triggers`); on any `concurrency` group built from `github.head_ref` or `github.ref_name`
 (`rule_concurrency_group`); and on a workflow a §10.9 gate entry names that has no
 `workflow_dispatch` trigger (`rule_gate_dispatch`). The other rows below are scheduled,
-dispatched, or run on a tag. A `pull_request` run never counts as proof of a commit (ROADMAP §10.9). The earlier
-one-ladder-job rule (runner queues) was lifted on 2026-09-22: the repo is public, so Actions minutes
-are free, and agents own the CI design. ROADMAP §10.1 plans a build-once job plus a tier matrix per
-architecture; until that lands the ladder is one job.
+dispatched, or run on a tag. A `pull_request` run never counts as proof of a commit (ROADMAP §10.9).
+
+**CI budget.** Every push to `main` and every pull-request update runs `check` and, alongside it,
+one `build` job per architecture (x86_64 now; from Phase 11 aarch64 on the arm64 runner, which also
+runs `make test-unit` and the hostlib tests natively, §11.4's aarch64 switch roundtrip among them).
+`build` runs `make prebuilt`, which builds every ISO variant and the host `mkfs`/`fsck`/`nbd-cache`/
+`vibefs-cat` tools once and packs them, with the host triple they were built for, into
+`build/prebuilt.tar`, uploaded as `prebuilt-<arch>`. A matrix of `tier` jobs per architecture
+(`needs: [check, build]`, `fail-fast: false`, TCG) downloads it and runs the same `make test-*`
+targets with `VIBEOS_PREBUILT=1`, which defines no ISO or host-tool rule, so a tier builds nothing
+and a missing file fails with `No rule to make target`: the Makefile stays the one definition of
+each tier. Tiers are grouped to about 40 s of QEMU each, a group over 60 s split at target
+boundaries, and each is its own check name, `tier (<arch>, <tier>)`, so a red pull request names
+the failing tier; the table below holds the grouping, and `scripts/check_workflows.py` fails when it
+and the matrix differ (`rule_budget_doc`), and when the `tier` job lacks `needs: [check, build]`,
+`fail-fast: false` or `VIBEOS_PREBUILT=1`, or a `make test` prerequisite is in no tier or in two, the
+ones `check` runs through `$(MAKE)` aside (`rule_tiers`). Everything else runs on a schedule: the
+macOS job, the KVM leg, the fuzzers, stress, and any job with a performance threshold. Later lines
+name two scheduled workflows, both on the pinned toolchain: the nightly job, which carries the KVM
+leg, and the weekly job (`smp-stress` today); the non-blocking `nightly-canary`, the one job on an
+undated nightly, is neither, and a line that needs its own workflow or another cadence names it
+(§20.8's `hardware-models`, §22.5's `fuzz.yml`, §24.2's rebuilds). A later line that says "in CI"
+for a functional test means a ladder tier; for a benchmark or a threshold it means the KVM leg. A
+red scheduled job blocks the next phase tag. The earlier no-matrix rule (runner queues) is lifted:
+the repository is public, so standard runners are free and unlimited, and the limits that matter
+are 20 concurrent jobs on the Free plan (at most 5 macOS; scheduled campaigns together hold at most
+10, so pushes keep the other 10) and 6 hours per job: a scheduled run longer than 5.5 hours is
+split into shards that hand their state on as artifacts, and the line that needs one says so;
+scheduled work runs in the 10 lanes of ROADMAP §10.1's next box (Scheduled capacity, below).
+
+Tiers, with each group's summed QEMU step time in the last green integration-branch `ci` run before
+the split (run 36522096073 at `30edb3d`, one `ubuntu-latest` runner, TCG); `vibefs-crash`'s figure
+includes its `cargo test` of the host tools, the one tier that needs the toolchain:
+
+| Arch | Tier | Targets | QEMU s |
+|---|---|---|---|
+| x86_64 | e2e-1 | `test-e2e`, `test-e2e-uefi`, `test-e2e-panic` | 32 |
+| x86_64 | e2e-2 | `test-e2e-gp`, `test-e2e-mce`, `test-e2e-pit`, `test-e2e-highmem` | 30 |
+| x86_64 | in-guest-1 | `test-kernel` | 64 |
+| x86_64 | in-guest-2 | `test-kernel-smp4` | 52 |
+| x86_64 | in-guest-3 | `test-lapic-fallback` | 50 |
+| x86_64 | vibefs-crash | `test-vibefs-crash` | 47 |
+
+`test-unit` and `test-harness` run inside `make check`, in the `check` job. The in-guest tiers
+each pass 40 s alone and cannot split below a target.
 
 | Job | When | What |
 |---|---|---|
 | `check` | push / PR | Installs `x86_64-unknown-none`. `make check` (fmt; clippy `-D warnings` on `vibeos-core` and hostlib for the host, `vibeos-core` for `x86_64-unknown-none`, and the kernel with default features; host units, harness, ruff/mypy, `scripts/check_*.py`) then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines 87`. No QEMU, no `setup.sh`. HTML report is a 7-day `core-coverage` artifact. |
-| `phase 0 ladder` | push / PR, `needs: check` | Limine, QEMU/nasm/xorriso/OVMF, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, `panic_test` with `panic_exit`, `gp_test` with `panic_exit`) and once with `kernel_shell` (the default set runs in `check`); ISO, e2e (BIOS/UEFI/panic/#GP/#MC/PIT/9 GiB), in-guest at `-smp 2` and `-smp 4`, LAPIC fallback, vibefs crash. Even after a failed step it writes a per-tier table and every harness retry to the job summary and uploads `build/results/` as `results-x86_64-phase0`. Green `main` uploads `vibeos.iso` (7 days). |
-| `ticks` | PR, `needs: phase0`, even after it fails | `scripts/check_ticks.py --base <PR base> --head <PR head> --run-commit $GITHUB_SHA --results <downloaded results-*> --summary $GITHUB_STEP_SUMMARY`: every box a commit of the pull request ticks pairs with a `Proves:` line, its proof exists at the head and is changed by the pull request or marked `(existing: ...)`, a ktest, utest, or marker proof passed in a results file of the head or the tested merge commit, no results file lists a retry, needs and closes rows hold, `Fails-before:` lines are present, and a bracketed proof passed on a scheduled run or `ci-history` record (read through `gh`, with `contents: read` and `actions: read`). The summary lists errors, `(existing: ...)` proofs, and notes. `make check` runs the pairing and diff rules bare against `origin/main` and skips them when that ref is missing, as in the `check` job's shallow checkout. |
+| `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/nasm/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, `panic_test` with `panic_exit`, `gp_test` with `panic_exit`) and once with `kernel_shell` (the default set runs in `check`); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos.iso` (7 days). |
+| `tier (<arch>, <tier>)` | push / PR, `needs: [check, build]` | One job per row of the tier table above: QEMU and OVMF, `prebuilt-<arch>` unpacked, the runner's CPU model to the job summary, then `make -k -j <jobs> --output-sync=target VIBEOS_PREBUILT=1 <targets>` under TCG (`jobs` is 1 until ROADMAP §10.1's parallel QEMU runs land). Even after a failed step it writes a per-tier table and every harness retry to the job summary and uploads `build/results/` as `results-<arch>-<tier>`. |
+| `ticks` | PR, `needs: tier`, even after it fails | `scripts/check_ticks.py --base <PR base> --head <PR head> --run-commit $GITHUB_SHA --results <downloaded results-*> --summary $GITHUB_STEP_SUMMARY`: every box a commit of the pull request ticks pairs with a `Proves:` line, its proof exists at the head and is changed by the pull request or marked `(existing: ...)`, a ktest, utest, or marker proof passed in a results file of the head or the tested merge commit, no results file lists a retry, needs and closes rows hold, `Fails-before:` lines are present, and a bracketed proof passed on a scheduled run or `ci-history` record (read through `gh`, with `contents: read` and `actions: read`). The summary lists errors, `(existing: ...)` proofs, and notes. `make check` runs the pairing and diff rules bare against `origin/main` and skips them when that ref is missing, as in the `check` job's shallow checkout. |
 | `smp-stress` | weekly Monday 06:00 UTC + dispatch | `-smp 4`, longer timeout (`VIBEOS_TIMEOUT=180`); planned (ROADMAP §10.2): the §8.2 per-run deadlines, with no longer timeout |
 | `nightly-canary` | same workflow, non-blocking | undated latest nightly, `make iso && make test-unit` |
 | `release` | `v*` tags | `make test-e2e` (BIOS) only, then production + ktest ISO, changelog section, GitHub Release. It does not wait for `ci` at the tagged commit, and the ktest ISO writes fixed LBAs of any virtio-blk disk attached at boot (ROADMAP §10.1, F145). Planned (ROADMAP §10.1): dispatched from `main` with the release tag as input; a `build` job with `contents: read` and `actions: read`, no cache, and no persisted token, then a `publish` job that runs no repository script; from ROADMAP §14.6 a `sign` job in the `release` environment between them, and from §22.4 a keyless `verify` job on vibeOS. From ROADMAP §18.7 the `sign` job is two key jobs, `sign-files` and `sign-manifest`, with an unprivileged `assemble` job between them, since images hold the signed kernels and Limine binaries and the manifest lists the images (ROADMAP §22.1). |
 
-The `ticks` job (ROADMAP §10.9) runs after the jobs that run the tiers, today the ladder, and reads
+The `ticks` job (ROADMAP §10.9) runs after the jobs that run the tiers, the `tier` matrix, and reads
 the `build/results/` files they upload. A pull request run tests the merge of its head with its
 base, so the results files carry the merge commit, which `--run-commit` names; `check_ticks.py`
 reads commits and their messages from the pull request's head.

@@ -44,7 +44,7 @@ jobs:
           # `make check` lints the kernel and vibeos-core's no_std build.
           targets: x86_64-unknown-none
 
-      # Distinct from the ladder's cargo cache so a host-only `target/`
+      # Distinct from the build job's cargo cache so a host-only `target/`
       # cannot evict kernel artifacts (DESIGN §8.6).
       - name: cache cargo (check)
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -88,13 +88,17 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  phase0:
-    name: phase 0 ladder
-    needs: check
+  # Builds every ISO variant and the host tools the tiers run once, and hands
+  # them to the tier jobs as `prebuilt-<arch>` (DESIGN §8.6).
+  build:
+    name: build (${{ matrix.arch }})
     runs-on: ubuntu-26.04
+    strategy:
+      matrix:
+        arch: [x86_64]
     # The harness fails every boot when QEMU is not this version (ROADMAP
     # §10.1): resolute's qemu-system-x86 1:10.2.1+ds-1ubuntu3. Move the pin
-    # and DESIGN §8.6 together.
+    # and DESIGN §8.6 together. setup.sh needs qemu-system-x86_64.
     env:
       VIBEOS_QEMU_VERSION: "10.2.1"
     steps:
@@ -103,7 +107,7 @@ jobs:
       - name: install host tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 xorriso nasm ovmf dosfstools
+          sudo apt-get install -y qemu-system-x86 xorriso nasm
 
       - name: install rust nightly
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
@@ -143,43 +147,126 @@ jobs:
           cargo clippy --bin vibeos --features panic_test --features panic_exit -- -D warnings
           cargo clippy --bin vibeos --features gp_test --features panic_exit -- -D warnings
           cargo clippy --bin vibeos --features kernel_shell -- -D warnings
-      - name: build kernel + hybrid ISO
-        run: make iso
 
-      - name: e2e (BIOS)
-        run: make test-e2e
+      - name: build every ISO and host tool (make prebuilt)
+        run: make prebuilt
 
-      - name: e2e (UEFI / OVMF)
-        run: make test-e2e-uefi
+      # The "after" figure of DESIGN §8.6 cites the CPU it ran on.
+      - name: runner CPU
+        run: |
+          cpu=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -n 1)
+          echo "runner CPU: $cpu, $(nproc) CPUs" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload prebuilt files
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: prebuilt-${{ matrix.arch }}
+          path: build/prebuilt.tar
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: upload production ISO
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: vibeos.iso
+          path: vibeos.iso
+          if-no-files-found: error
+          retention-days: 7
+
+  # One job per tier, each its own check name, running the Makefile's own
+  # `make test-*` targets on the prebuilt files (DESIGN §8.6's tier table,
+  # which scripts/check_workflows.py compares with this matrix). `jobs` is
+  # the QEMU runs in parallel inside a tier: 1 until the timing tests and the
+  # §10.2 retried failures are fixed (ROADMAP §10.1).
+  tier:
+    name: tier (${{ matrix.arch }}, ${{ matrix.tier }})
+    needs: [check, build]
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            tier: e2e-1
+            targets: test-e2e test-e2e-uefi test-e2e-panic
+            jobs: 1
+          - arch: x86_64
+            tier: e2e-2
+            targets: test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem
+            jobs: 1
+          - arch: x86_64
+            tier: in-guest-1
+            targets: test-kernel
+            jobs: 1
+          - arch: x86_64
+            tier: in-guest-2
+            targets: test-kernel-smp4
+            jobs: 1
+          - arch: x86_64
+            tier: in-guest-3
+            targets: test-lapic-fallback
+            jobs: 1
+          - arch: x86_64
+            tier: vibefs-crash
+            targets: test-vibefs-crash
+            jobs: 1
+    # The harness fails every boot when QEMU is not this version (ROADMAP
+    # §10.1): resolute's qemu-system-x86 1:10.2.1+ds-1ubuntu3. Move the pin
+    # and DESIGN §8.6 together.
+    env:
+      VIBEOS_QEMU_VERSION: "10.2.1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # resolute's `ovmf` metapackage also pulls ovmf-amdsev, ovmf-inteltdx
+      # and ubuntu-virt; ovmf-generic ships /usr/share/ovmf/OVMF.fd.
+      - name: install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf-generic
+
+      # test-vibefs-crash's recipe runs `cargo test -p vibeos-hostlib-tests`
+      # before its boots, so that tier alone needs the toolchain.
+      - name: install rust nightly
+        if: contains(matrix.targets, 'test-vibefs-crash')
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: nightly-2026-09-22
+
+      - name: cache cargo registry
+        if: contains(matrix.targets, 'test-vibefs-crash')
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-tier-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-tier-
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: prebuilt-${{ matrix.arch }}
+          path: build
+
+      - name: unpack prebuilt files
+        run: tar -xf build/prebuilt.tar
+
+      # The "after" figure of DESIGN §8.6 cites the CPU it ran on.
+      - name: runner CPU
+        run: |
+          cpu=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -n 1)
+          echo "runner CPU: $cpu, $(nproc) CPUs" >> "$GITHUB_STEP_SUMMARY"
+
+      # TARGETS is split into words on purpose: one make goal per target.
+      - name: make ${{ matrix.targets }}
         env:
+          TARGETS: ${{ matrix.targets }}
+          JOBS: ${{ matrix.jobs }}
+          VIBEOS_QEMU_ACCEL: tcg
           OVMF: /usr/share/ovmf/OVMF.fd
-
-      - name: e2e (panic path)
-        run: make test-e2e-panic
-
-      - name: e2e (#GP dump+halt)
-        run: make test-e2e-gp
-
-      - name: e2e (#MC dump+halt)
-        run: make test-e2e-mce
-
-      - name: e2e (PIT calibration fallback)
-        run: make test-e2e-pit
-
-      - name: e2e (9 GiB, past the physmap cap)
-        run: make test-e2e-highmem
-
-      - name: in-guest kernel tests
-        run: make test-kernel
-
-      - name: in-guest kernel tests (-smp 4)
-        run: make test-kernel-smp4
-
-      - name: in-guest LAPIC periodic fallback
-        run: make test-lapic-fallback
-
-      - name: vibefs QEMU-kill crash consistency
-        run: make test-vibefs-crash
+        run: make -k -j "$JOBS" --output-sync=target VIBEOS_PREBUILT=1 $TARGETS
 
       # Per-tier table and every harness retry, even after a failed step
       # (ROADMAP §10.2); check_ticks.py reads the uploaded files (§10.9).
@@ -191,26 +278,17 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: results-x86_64-phase0
+          name: results-${{ matrix.arch }}-${{ matrix.tier }}
           path: build/results/
           if-no-files-found: warn
           retention-days: 30
-
-      - name: upload production ISO
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: vibeos.iso
-          path: vibeos.iso
-          if-no-files-found: error
-          retention-days: 7
 
   # Every ROADMAP box a pull request ticks names its proof, and the proof
   # passed in the results files the tier jobs upload (ROADMAP §10.9).
   ticks:
     name: ticks
     if: ${{ github.event_name == 'pull_request' && !cancelled() }}
-    needs: [phase0] # the ladder; the tier jobs once ROADMAP §10.1 lands
+    needs: [tier]
     runs-on: ubuntu-26.04
     permissions:
       contents: read

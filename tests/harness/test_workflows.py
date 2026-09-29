@@ -18,6 +18,7 @@ from scripts.check_workflows import (
     load_tree,
     parse,
     rule_action_pins,
+    rule_budget_doc,
     rule_ci_triggers,
     rule_concurrency_group,
     rule_gate_dispatch,
@@ -25,6 +26,7 @@ from scripts.check_workflows import (
     rule_permissions,
     rule_qemu_pin,
     rule_runs_on,
+    rule_tiers,
 )
 
 WF = ".github/workflows/x.yml"
@@ -428,6 +430,145 @@ class TestGateDispatch(unittest.TestCase):
             )
             gates.joinpath("phase-10-needs.toml").write_text('[[box]]\nkey = "k"\nneeds = []\n')
             self.assertEqual(_gate_workflows(Path(d)), [("tests/gates/phase-10.toml", "ci.yml")])
+
+
+MAKEFILE = (
+    "check:\n\tcargo fmt --check\n\t$(MAKE) test-unit\n\t$(MAKE) test-harness\n\n"
+    "test-unit:\n\tcargo test\n"
+    "test-a: x.iso\n\trun a\n"
+    "test-b: x.iso\n\trun b\n"
+    "test-c: x.iso\n\trun c\n"
+    "test-smp-stress: x.iso\n\trun s\n"
+    "test: test-unit test-harness test-a \\\n\ttest-b test-c\n"
+)
+
+
+def tier_ci(
+    entries: str = (
+        "          - {arch: x86_64, tier: one, targets: test-a test-b, jobs: 1}\n"
+        "          - {arch: x86_64, tier: two, targets: test-c, jobs: 1}\n"
+    ),
+    needs: str = "[check, build]",
+    fail_fast: str = "false",
+    run: str = 'make -k -j "$JOBS" VIBEOS_PREBUILT=1 $TARGETS',
+    jobs: str = "check",
+) -> str:
+    head = "jobs:\n"
+    for j in jobs.split():
+        head += f"  {j}:\n    runs-on: ubuntu-26.04\n"
+    return (
+        head
+        + "  build:\n    runs-on: ubuntu-26.04\n"
+        + f"  tier:\n    needs: {needs}\n    strategy:\n      fail-fast: {fail_fast}\n"
+        + "      matrix:\n        include:\n"
+        + entries
+        + f"    steps:\n      - run: {run}\n"
+    )
+
+
+def tiers(text: str, makefile: str = MAKEFILE) -> list[str]:
+    t = Tree(workflows={CI: parse(text, CI)}, makefile=makefile)
+    return [p.message for p in rule_tiers(t)]
+
+
+class TestTiers(unittest.TestCase):
+    def test_built_shape_passes(self) -> None:
+        self.assertEqual(tiers(tier_ci()), [])
+
+    def test_missing_jobs_fail(self) -> None:
+        self.assertEqual(tiers(tier_ci(jobs="")), ["no `check` job"])
+        text = tier_ci().replace("  build:\n    runs-on: ubuntu-26.04\n", "")
+        self.assertEqual(tiers(text), ["no `build` job"])
+        self.assertEqual(tiers("jobs:\n  check:\n    x: 1\n"), ["no `build` job", "no `tier` job"])
+
+    def test_needs_fail_fast_and_prebuilt_switch(self) -> None:
+        self.assertEqual(len(tiers(tier_ci(needs="[build]"))), 1)
+        self.assertEqual(len(tiers(tier_ci(needs="check"))), 1)
+        self.assertEqual(len(tiers(tier_ci(fail_fast="true"))), 1)
+        self.assertEqual(len(tiers(tier_ci(run="make $TARGETS"))), 1)
+
+    def test_target_in_no_tier_fails(self) -> None:
+        entries = "          - {arch: x86_64, tier: one, targets: test-a test-b, jobs: 1}\n"
+        self.assertEqual(tiers(tier_ci(entries)), ["x86_64: `make test` runs test-c, no tier does"])
+
+    def test_target_in_two_tiers_fails(self) -> None:
+        entries = (
+            "          - {arch: x86_64, tier: one, targets: test-a test-b, jobs: 1}\n"
+            "          - {arch: x86_64, tier: two, targets: test-c test-a, jobs: 1}\n"
+        )
+        self.assertEqual(tiers(tier_ci(entries)), ["test-a in tiers one and two"])
+
+    def test_same_target_on_two_arches_passes(self) -> None:
+        entries = (
+            "          - {arch: x86_64, tier: one, targets: test-a test-b test-c, jobs: 1}\n"
+            "          - {arch: aarch64, tier: one, targets: test-a test-b test-c, jobs: 1}\n"
+        )
+        self.assertEqual(tiers(tier_ci(entries)), [])
+
+    def test_check_submakes_and_unknown_targets(self) -> None:
+        entries = (
+            "          - {arch: x86_64, tier: one, targets: test-a test-b test-c, jobs: 1}\n"
+            "          - {arch: x86_64, tier: two, targets: test-unit test-nope test-smp-stress,"
+            " jobs: 1}\n"
+        )
+        self.assertEqual(
+            tiers(tier_ci(entries)),
+            [
+                "tier two: target test-unit is not a `make test` tier",
+                "tier two: target test-nope unknown",
+                "tier two: target test-smp-stress is not a `make test` tier",
+            ],
+        )
+
+    def test_entry_without_a_key_fails(self) -> None:
+        entries = (
+            "          - {arch: x86_64, tier: one, targets: test-a test-b test-c}\n"
+        )
+        self.assertEqual(tiers(tier_ci(entries)), ["tier entry without `jobs`"])
+
+
+TABLE = (
+    "## 8.6 CI\n\ntext\n\n| Arch | Tier | Targets | QEMU s |\n|---|---|---|---|\n"
+    "{rows}\nafter\n\n## 8.7 Next\n"
+)
+
+
+def budget(rows: str, text: str | None = None) -> list[tuple[int, str]]:
+    t = Tree(
+        workflows={CI: parse(text or tier_ci(), CI)},
+        testing_md=TABLE.format(rows=rows),
+    )
+    return [(p.line, p.message) for p in rule_budget_doc(t)]
+
+
+class TestBudgetDoc(unittest.TestCase):
+    ROWS = (
+        "| x86_64 | one | `test-a`, `test-b` | 30 |\n"
+        "| x86_64 | two | `test-c` | 40 |"
+    )
+
+    def test_matching_table_passes(self) -> None:
+        self.assertEqual(budget(self.ROWS), [])
+
+    def test_differing_targets_fail(self) -> None:
+        rows = self.ROWS.replace("`test-a`, `test-b`", "`test-a`")
+        want = "tier (x86_64, one) targets ['test-a'], ci.yml ['test-a', 'test-b']"
+        self.assertEqual(budget(rows), [(7, want)])
+
+    def test_missing_and_extra_rows_fail(self) -> None:
+        rows = "| x86_64 | one | `test-a`, `test-b` | 30 |\n| x86_64 | three | `test-c` | 40 |"
+        self.assertEqual(
+            budget(rows),
+            [(5, "no row for tier (x86_64, two)"), (8, "row (x86_64, three) is no ci.yml tier")],
+        )
+
+    def test_malformed_row_fails(self) -> None:
+        rows = self.ROWS.replace("| 40 |", "| n/a |")
+        self.assertEqual([m for _, m in budget(rows)][0][:18], "tier row is not `|")
+
+    def test_missing_table_fails(self) -> None:
+        t = Tree(workflows={CI: parse(tier_ci(), CI)}, testing_md="## 8.6 CI\n\nno table\n")
+        self.assertEqual(rules(rule_budget_doc(t)), [(1, "budget_doc")])
 
 
 class TestTree(unittest.TestCase):

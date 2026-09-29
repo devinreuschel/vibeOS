@@ -690,6 +690,171 @@ def rule_gate_dispatch(tree: Tree) -> list[Problem]:
     return out
 
 
+@dataclass(frozen=True)
+class TierEntry:
+    arch: str
+    tier: str
+    targets: tuple[str, ...]
+    line: int
+
+
+def _tier_entries(job: Node) -> list[TierEntry]:
+    strategy = job.get("strategy")
+    matrix = strategy.get("matrix") if strategy is not None else None
+    include = matrix.get("include") if matrix is not None else None
+    out = []
+    for e in include.items if include is not None else []:
+        vals: dict[str, str | None] = {}
+        for k in _MATRIX_KEYS:
+            v = e.get(k)
+            vals[k] = v.value if v is not None else None
+        out.append(
+            TierEntry(
+                vals["arch"] or "",
+                vals["tier"] or "",
+                tuple((vals["targets"] or "").split()),
+                e.line,
+            )
+        )
+    return out
+
+
+_MATRIX_KEYS = ("arch", "tier", "targets", "jobs")
+
+
+def _make_prereqs(makefile: str, target: str) -> list[str]:
+    """The prerequisites of `target:` in `makefile`, continuation lines joined."""
+    text = makefile.replace("\\\n", " ")
+    m = re.search(rf"^{re.escape(target)}:([^=\n]*)$", text, re.M)
+    return m.group(1).split() if m else []
+
+
+def _check_submakes(makefile: str) -> set[str]:
+    """Targets the `check` recipe runs as `$(MAKE) <t>`: the `check` job covers them."""
+    m = re.search(r"^check:.*\n((?:\t.*\n|\n)*)", makefile, re.M)
+    return set(re.findall(r"\$\(MAKE\) (\S+)", m.group(1))) if m else set()
+
+
+def _is_rule(makefile: str, target: str) -> bool:
+    return re.search(rf"^{re.escape(target)}:(?!=)", makefile, re.M) is not None
+
+
+def rule_tiers(tree: Tree) -> list[Problem]:
+    """L1199: check, build and a tier matrix running every `make test` tier exactly once."""
+    wf = tree.workflows.get(CI)
+    if wf is None:
+        return [Problem(CI, 1, "tiers", "ci.yml is missing")]
+    out = []
+    jobs = {j.key: j for j in _jobs(wf)}
+    for name in ("check", "build", "tier"):
+        if name not in jobs:
+            out.append(Problem(CI, 1, "tiers", f"no `{name}` job"))
+    tier = jobs.get("tier")
+    if tier is None:
+        return out
+    needs = tier.get("needs")
+    if needs is None or not {"check", "build"} <= set(needs.scalars()):
+        out.append(Problem(CI, tier.line, "tiers", "`tier` needs must include check and build"))
+    strategy = tier.get("strategy")
+    ff = strategy.get("fail-fast") if strategy is not None else None
+    if ff is None or ff.value != "false":
+        out.append(Problem(CI, tier.line, "tiers", "`tier` must set `fail-fast: false`"))
+    steps = tier.get("steps")
+    runs = [st.get("run") for st in (steps.items if steps is not None else [])]
+    if not any(r is not None and "VIBEOS_PREBUILT=1" in (r.value or "") for r in runs):
+        out.append(Problem(CI, tier.line, "tiers", "no `tier` run step sets VIBEOS_PREBUILT=1"))
+    matrix = strategy.get("matrix") if strategy is not None else None
+    include = matrix.get("include") if matrix is not None else None
+    for item in include.items if include is not None else []:
+        for k in _MATRIX_KEYS:
+            v = item.get(k)
+            if v is None or not v.value:
+                out.append(Problem(CI, item.line, "tiers", f"tier entry without `{k}`"))
+    covered = _check_submakes(tree.makefile)
+    want = [t for t in _make_prereqs(tree.makefile, "test") if t not in covered]
+    if not want:
+        out.append(Problem("Makefile", 1, "tiers", "no `test:` prerequisites found"))
+    entries = _tier_entries(tier)
+    for arch in sorted({e.arch for e in entries}):
+        seen: dict[str, str] = {}
+        for e in [x for x in entries if x.arch == arch]:
+            for t in e.targets:
+                if t not in want:
+                    what = "is not a `make test` tier" if _is_rule(tree.makefile, t) else "unknown"
+                    out.append(Problem(CI, e.line, "tiers", f"tier {e.tier}: target {t} {what}"))
+                elif t in seen:
+                    out.append(
+                        Problem(CI, e.line, "tiers", f"{t} in tiers {seen[t]} and {e.tier}")
+                    )
+                else:
+                    seen[t] = e.tier
+        for t in want:
+            if t not in seen:
+                msg = f"{arch}: `make test` runs {t}, no tier does"
+                out.append(Problem(CI, tier.line, "tiers", msg))
+    return out
+
+
+TIER_TABLE_HEADER = "| Arch | Tier | Targets | QEMU s |"
+
+
+def section(md: str, number: str) -> tuple[int, str]:
+    """(first line, text) of the `## <number> ` section of `md`, or (0, "")."""
+    lines = md.splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.startswith(f"## {number} ")), None)
+    if start is None:
+        return 0, ""
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines)
+    )
+    return start + 1, "\n".join(lines[start:end])
+
+
+def rule_budget_doc(tree: Tree) -> list[Problem]:
+    """L1199: DESIGN §8.6's tier table is the `tier` matrix."""
+    doc = "docs/TESTING.md"
+    first, text = section(tree.testing_md, "8.6")
+    lines = text.splitlines()
+    try:
+        at = next(i for i, ln in enumerate(lines) if ln.strip() == TIER_TABLE_HEADER)
+    except StopIteration:
+        return [Problem(doc, first or 1, "budget_doc", f"§8.6 has no `{TIER_TABLE_HEADER}` table")]
+    rows: dict[tuple[str, str], tuple[tuple[str, ...], int]] = {}
+    out = []
+    for i in range(at + 2, len(lines)):
+        ln = lines[i].strip()
+        if not ln.startswith("|"):
+            break
+        cells = [c.strip() for c in ln.strip("|").split("|")]
+        no = first + i
+        if len(cells) != 4 or not re.fullmatch(r"\d+", cells[3]):
+            msg = "tier row is not `| <arch> | <tier> | <`target`s> | <seconds> |`"
+            out.append(Problem(doc, no, "budget_doc", msg))
+            continue
+        targets = tuple(re.findall(r"`([^`]+)`", cells[2]))
+        rows[(cells[0], cells[1])] = (targets, no)
+    wf = tree.workflows.get(CI)
+    tier = next((j for j in _jobs(wf) if j.key == "tier"), None) if wf is not None else None
+    entries = _tier_entries(tier) if tier is not None else []
+    for e in entries:
+        row = rows.pop((e.arch, e.tier), None)
+        if row is None:
+            msg = f"no row for tier ({e.arch}, {e.tier})"
+            out.append(Problem(doc, first + at, "budget_doc", msg))
+        elif sorted(row[0]) != sorted(e.targets):
+            out.append(
+                Problem(
+                    doc,
+                    row[1],
+                    "budget_doc",
+                    f"tier ({e.arch}, {e.tier}) targets {list(row[0])}, ci.yml {list(e.targets)}",
+                )
+            )
+    for (arch, name), (_, no) in rows.items():
+        out.append(Problem(doc, no, "budget_doc", f"row ({arch}, {name}) is no ci.yml tier"))
+    return out
+
+
 RULES: list[Callable[[Tree], list[Problem]]] = [
     rule_no_expr_in_run,
     rule_permissions,
@@ -699,6 +864,8 @@ RULES: list[Callable[[Tree], list[Problem]]] = [
     rule_ci_triggers,
     rule_concurrency_group,
     rule_gate_dispatch,
+    rule_tiers,
+    rule_budget_doc,
 ]
 
 
