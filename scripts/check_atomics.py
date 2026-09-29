@@ -39,7 +39,6 @@ SEAM = "crates/core/src/atomic.rs"
 # sweep (ROADMAP §10.1, C-ATOMICS) converts them; `--failing` regenerates it.
 PENDING: tuple[str, ...] = (
     "crates/core/src/kalloc.rs",
-    "crates/core/src/time/mod.rs",
 )
 
 BANNED = re.compile(r"\b(?:core|std)::(?:sync::atomic\b|hint::spin_loop\b)")

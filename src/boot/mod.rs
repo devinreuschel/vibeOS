@@ -134,6 +134,9 @@ pub fn capture() -> &'static BootInfo {
     // Base revision 3 hands back a physical RSDP, other revisions an HHDM VA.
     let rsdp_raw = rsdp.address as u64;
     let kernel_len = (&raw const __kernel_vma_end as u64) - (&raw const __kernel_vma_start as u64);
+    // SAFETY: invariant I22, established at `cell::BootCell::set`: this is
+    // the one write, first thing in `normal_boot_tail` on the BSP, before
+    // any reader and long before SMP.
     unsafe {
         INFO.set(BootInfo {
             kernel_phys: exec.physical_base..exec.physical_base + kernel_len,

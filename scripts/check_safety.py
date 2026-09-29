@@ -55,8 +55,6 @@ INVARIANTS = "docs/INVARIANTS.md"
 PENDING: tuple[str, ...] = (
     "crates/core/src/kalloc.rs",
     "crates/core/src/proc/addr_space/mod.rs",
-    "src/arch/ktest.rs",
-    "src/arch/x86_64/idt.rs",
     "src/proc/addr_space_init.rs",
 )
 

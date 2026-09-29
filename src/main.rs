@@ -38,29 +38,9 @@
 
 extern crate alloc;
 
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 mod acpi;
-#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
-#[allow(clippy::expect_used, reason = "audit pending, ROADMAP §10.1")]
-#[allow(
-    clippy::let_underscore_must_use,
-    reason = "audit pending, ROADMAP §10.1"
-)]
-#[allow(clippy::panic, reason = "audit pending, ROADMAP §10.1")]
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
-#[allow(clippy::unwrap_used, reason = "audit pending, ROADMAP §10.1")]
 mod arch;
 mod block;
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 mod boot;
 mod cell;
 #[allow(
@@ -71,14 +51,6 @@ mod console;
 mod dev;
 mod drivers;
 mod fs;
-#[allow(
-    clippy::let_underscore_must_use,
-    reason = "audit pending, ROADMAP §10.1"
-)]
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 mod irq;
 mod log;
 mod mm;
@@ -107,10 +79,6 @@ mod sched;
 mod shell;
 mod smp;
 mod sync;
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 mod time;
 
 #[cfg(feature = "kernel_tests")]

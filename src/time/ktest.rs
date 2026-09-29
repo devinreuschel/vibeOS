@@ -1,11 +1,41 @@
 //! In-guest tests for time (kernel_tests only). Rows: the list in crate::ktest.
 
-use vibeos::time::{CalibSource, Instant, calib_band, calib_in_band};
+use vibeos::time::{CalibSource, Instant, calib_band, calib_in_band, next_deadline};
 
 use crate::acpi_init;
 use crate::ktest::Outcome;
-use crate::time_init;
+use crate::time_init::{self, STATE};
 use crate::x86;
+
+/// A fresh PIT channel 2 calibration (`tsc_per_ms`).
+pub(crate) fn measure_pit_ch2() -> Option<u64> {
+    let use_rdtscp = STATE.try_get().is_some_and(|s| s.use_rdtscp);
+    time_init::calibrate_pit(use_rdtscp)
+}
+
+/// Fresh HPET window. ktest compares this to PIT under the same SMP load;
+/// boot `tsc_per_ms` was sampled before APs came up.
+pub(crate) fn measure_hpet() -> Option<u64> {
+    let hpet = acpi_init::info()?.hpet?;
+    time_init::calibrate_hpet(&hpet, STATE.try_get().is_some_and(|s| s.use_rdtscp))
+}
+
+/// Which source calibrated the TSC at boot.
+pub(crate) fn source() -> CalibSource {
+    STATE
+        .try_get()
+        .map(|s| s.source)
+        .unwrap_or(CalibSource::Pit)
+}
+
+/// CPUID.8000_0007H:EDX[8]. TCG leaves this clear; KVM and real silicon set it.
+pub(crate) fn tsc_invariant() -> bool {
+    STATE.try_get().is_some_and(|s| s.invariant_tsc)
+}
+
+pub(crate) fn deadline_after(now: Instant) -> Instant {
+    next_deadline(now)
+}
 
 pub(crate) fn test_pit_tick_rate() -> Outcome {
     let t0 = time_init::uptime_ms();
@@ -55,7 +85,7 @@ pub(crate) fn test_now_us_under_yields() -> Outcome {
 
 pub(crate) fn test_tsc_calib_source() -> Outcome {
     let present = acpi_init::info().is_some_and(|i| i.hpet_present());
-    match time_init::source() {
+    match source() {
         CalibSource::Hpet => {
             if !present {
                 return Outcome::Fail("hpet source without table");
@@ -65,12 +95,12 @@ pub(crate) fn test_tsc_calib_source() -> Outcome {
                 return Outcome::Fail("tsc_per_ms out of range");
             }
             // Boot HPET ran before APs. Remeasure both under this SMP load.
-            let ref_k = time_init::measure_hpet().unwrap_or(k);
-            let (lo_pct, hi_pct) = calib_band(time_init::tsc_invariant());
+            let ref_k = measure_hpet().unwrap_or(k);
+            let (lo_pct, hi_pct) = calib_band(tsc_invariant());
             let mut last_pit = 0u64;
             let mut i = 0u32;
             while i < 3 {
-                if let Some(pit) = time_init::measure_pit_ch2() {
+                if let Some(pit) = measure_pit_ch2() {
                     last_pit = pit;
                     if calib_in_band(ref_k, pit, lo_pct, hi_pct) {
                         return Outcome::Ok;
@@ -127,7 +157,7 @@ pub(crate) fn test_rtc_offset() -> Outcome {
     if b < a {
         return Outcome::Fail("wall clock went backwards");
     }
-    let _ = time_init::deadline_after(Instant {
+    let _ = deadline_after(Instant {
         ns: time_init::now_ns(),
     });
     Outcome::Ok

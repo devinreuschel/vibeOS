@@ -100,7 +100,7 @@ pub(crate) fn test_kbd_gsi_unmasked() -> Outcome {
     let Some(gsi) = crate::kbd_init::gsi() else {
         return Outcome::Fail("no keyboard gsi");
     };
-    match crate::apic_init::gsi_masked(gsi) {
+    match crate::arch::ktest::gsi_masked(gsi) {
         Some(false) => Outcome::Ok,
         Some(true) => Outcome::Fail("keyboard gsi still masked"),
         None => Outcome::Fail("gsi not on ioapic"),

@@ -1,10 +1,17 @@
 //! In-guest tests for acpi (kernel_tests only). Rows: the list in crate::ktest.
 
+use core::sync::atomic::Ordering;
+
 use vibeos::paging::{PageFlags, VirtAddr};
 
 use crate::acpi_init;
 use crate::ktest::Outcome;
 use crate::paging_init;
+
+/// Whether `acpi_init::init` UC-patched at least one MMIO leaf.
+pub(crate) fn mmio_uc_patched() -> bool {
+    acpi_init::MMIO_UC.load(Ordering::Acquire)
+}
 
 fn leaf_is_uc(phys: u64) -> bool {
     if phys == 0 {
@@ -33,7 +40,7 @@ pub(crate) fn test_acpi_discovery() -> Outcome {
     if !info.hpet_present() {
         return Outcome::Fail("no hpet");
     }
-    if !acpi_init::mmio_uc_patched() {
+    if !mmio_uc_patched() {
         return Outcome::Fail("mmio uc not patched");
     }
     let Some(madt) = info.madt.as_ref() else {

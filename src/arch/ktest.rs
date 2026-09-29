@@ -28,9 +28,61 @@ use crate::syscall_init;
 use crate::thread_init;
 use crate::time_init;
 use crate::x86::{
-    self, CR0_AM, CR0_CD, CR0_EM, CR0_MP, CR0_NE, CR0_NW, CR0_PE, CR0_PG, CR0_TS, CR0_WP, CR4_MCE,
-    CR4_OSFXSR, CR4_OSXMMEXCPT, CR4_PAE, CR4_PGE,
+    self, CR0_AM, CR0_MP, CR0_NE, CR0_PE, CR0_PG, CR0_TS, CR0_WP, CR4_MCE, CR4_OSFXSR,
+    CR4_OSXMMEXCPT, CR4_PAE, CR4_PGE,
 };
+
+const CR0_EM: u64 = 1 << 2;
+const CR0_NW: u64 = 1 << 29;
+const CR0_CD: u64 = 1 << 30;
+
+/// Whether the I/O APIC entry for `gsi` is masked; `None` when no I/O
+/// APIC serves it.
+pub(crate) fn gsi_masked(gsi: u32) -> Option<bool> {
+    apic_init::with_state(|st| {
+        let (io, pin) = apic_init::find_ioapic(st, gsi)?;
+        let (lo, _) = vibeos::apic::ioapic_redir_regs(pin);
+        // SAFETY: invariant I228, established at
+        // `arch::x86_64::apic_init::enum_ioapics`: `io.va` is set only
+        // there, and `with_state` holds `STATE`.
+        Some(vibeos::apic::redir_is_masked(unsafe {
+            apic_init::io_read(io.va, lo)
+        }))
+    })
+}
+
+/// Whether `apic_init::init` finished.
+fn apic_is_ready() -> bool {
+    apic_init::with_state(|st| st.ready)
+}
+
+/// `[base, top)` of one of the BSP's IST stacks.
+fn ist_span(slot: IstSlot) -> (u64, u64) {
+    let s = &arch::gdt::BSP.get().ist[slot.index()];
+    (s.base().as_u64(), s.top().as_u64())
+}
+
+/// Current code selector.
+fn read_cs() -> u16 {
+    let val: u16;
+    // SAFETY: `mov r, cs` only copies the CS selector into a register;
+    // established here.
+    unsafe {
+        core::arch::asm!("mov {0:x}, cs", out(reg) val, options(nomem, nostack, preserves_flags))
+    };
+    val
+}
+
+/// Task register, which the GDT test compares with the TSS selector.
+fn read_tr() -> u16 {
+    let val: u16;
+    // SAFETY: `str` only copies the task register into a register;
+    // established here.
+    unsafe {
+        core::arch::asm!("str {0:x}", out(reg) val, options(nomem, nostack, preserves_flags))
+    };
+    val
+}
 
 unsafe extern "C" {
     fn vibeos_write_u8_1(addr: u64);
@@ -57,10 +109,10 @@ global_asm!(
 const WRITE_U8_1_LEN: u8 = 3;
 
 pub(crate) fn test_gdt_selectors() -> Outcome {
-    if x86::read_cs() != KERNEL_CS {
+    if read_cs() != KERNEL_CS {
         return Outcome::Fail("cs not kernel code");
     }
-    if x86::read_tr() != TSS_SEL {
+    if read_tr() != TSS_SEL {
         return Outcome::Fail("tr not tss");
     }
     Outcome::Ok
@@ -74,6 +126,9 @@ pub(crate) fn test_star_sysret_layout() -> Outcome {
 }
 
 pub(crate) fn test_int3_roundtrip() -> Outcome {
+    // SAFETY: `int3` raises `#BP`, whose CPL-0 body returns past it, and
+    // touches nothing else; established by `arch::x86_64::idt::init`, which
+    // gives `#BP` its gate.
     unsafe { core::arch::asm!("int3", options(nomem, nostack)) };
     Outcome::Ok
 }
@@ -82,11 +137,17 @@ pub(crate) fn test_int3_roundtrip() -> Outcome {
 // `#[inline(never)]`, so each `int3` lies in its own function.
 #[inline(never)]
 fn int3_here() {
+    // SAFETY: `int3` raises `#BP`, whose CPL-0 body returns past it, and
+    // touches nothing else; established by `arch::x86_64::idt::init`, which
+    // gives `#BP` its gate.
     unsafe { core::arch::asm!("int3", options(nomem, nostack)) };
 }
 
 #[inline(never)]
 fn int3_other() {
+    // SAFETY: `int3` raises `#BP`, whose CPL-0 body returns past it, and
+    // touches nothing else; established by `arch::x86_64::idt::init`, which
+    // gives `#BP` its gate.
     unsafe { core::arch::asm!("int3", options(nomem, nostack)) };
 }
 
@@ -185,6 +246,9 @@ pub(crate) fn test_scoped_pf() -> Outcome {
     let Some(va) = crate::mm::ktest::alloc_va(PAGE_SIZE) else {
         return Outcome::Fail("kva alloc");
     };
+    // SAFETY: `va` is a reserved, unmapped kernel page, so the one-byte
+    // store faults and `catch_skip` steps past its `WRITE_U8_1_LEN` bytes
+    // before it writes anything; established here.
     let caught = arch::catch::catch_skip(vectors::PF, WRITE_U8_1_LEN, || unsafe {
         vibeos_write_u8_1(va.as_u64());
     });
@@ -203,6 +267,9 @@ pub(crate) fn test_scoped_pf() -> Outcome {
 
 pub(crate) fn test_gp_catch() -> Outcome {
     let g = x86::InterruptGuard::enter();
+    // SAFETY: selector 0x0B is not a data descriptor, so the load raises
+    // `#GP` before DS changes, and `catch` longjmps out with IRQs off (`g`);
+    // established here.
     let caught = arch::catch::catch(vectors::GP, || unsafe {
         core::arch::asm!(
             "mov ds, {0:x}",
@@ -228,6 +295,10 @@ pub(crate) fn test_df_on_ist() -> Outcome {
     };
     let poison = stack.guard().as_u64() + 0x800;
     let g = x86::InterruptGuard::enter();
+    // SAFETY: `poison` lies in `stack`'s unmapped guard page, so the first
+    // push faults, the fault's own push faults again, and `#DF` runs on its
+    // IST stack, where `catch` longjmps back with IRQs off (`g`);
+    // established here.
     let caught = arch::catch::catch(vectors::DF, || unsafe {
         vibeos_fault_on_bad_stack(poison);
     });
@@ -236,7 +307,7 @@ pub(crate) fn test_df_on_ist() -> Outcome {
     let Some(c) = caught else {
         return Outcome::Fail("did not reach df handler");
     };
-    let (lo, hi) = arch::gdt::ist_span(IstSlot::DoubleFault);
+    let (lo, hi) = ist_span(IstSlot::DoubleFault);
     if c.handler_rsp >= lo && c.handler_rsp < hi {
         Outcome::Ok
     } else {
@@ -251,14 +322,14 @@ pub(crate) fn test_df_on_ist() -> Outcome {
 }
 
 pub(crate) fn test_lapic_timer_mode() -> Outcome {
-    if !apic_init::is_ready() {
+    if !apic_is_ready() {
         return Outcome::Fail("lapic not ready");
     }
     if !apic_init::owns_tick() && apic_init::timer_mode() != TimerMode::Pit {
         return Outcome::Fail("lapic mode without owning tick");
     }
     let mode = apic_init::timer_mode();
-    let cpuid = apic_init::cpuid_has_tsc_deadline();
+    let cpuid = apic_init::cpuid_tsc_deadline();
     match (cpuid, mode) {
         (true, TimerMode::TscDeadline) => Outcome::Ok,
         (true, TimerMode::Periodic | TimerMode::Pit) => {
@@ -290,9 +361,11 @@ pub(crate) fn test_lapic_timer_rearm() -> Outcome {
             }
         }
         TimerMode::TscDeadline | TimerMode::Periodic => {
-            let t0 = apic_init::timer_fires();
+            let t0 = apic_init::TIMER_FIRES.load(Ordering::Relaxed);
             time_init::busy_wait_ms(50);
-            let n = apic_init::timer_fires().saturating_sub(t0);
+            let n = apic_init::TIMER_FIRES
+                .load(Ordering::Relaxed)
+                .saturating_sub(t0);
             if n >= 20 {
                 Outcome::Ok
             } else {
@@ -314,7 +387,7 @@ pub(crate) fn test_ioapic_pit_gsi_masked() -> Outcome {
                 return Outcome::Fail("no madt");
             };
             let gsi = vibeos::apic::gsi_for_isa_irq(0, &madt.isos[..madt.iso_count]);
-            match apic_init::gsi_masked(gsi) {
+            match gsi_masked(gsi) {
                 Some(true) => Outcome::Ok,
                 Some(false) => Outcome::Fail("pit gsi unmasked"),
                 None => Outcome::Fail("pit gsi not on ioapic"),
@@ -369,6 +442,9 @@ struct CrSnap {
 }
 
 fn read_cr_remote(arg: *mut ()) {
+    // SAFETY: `arg` is the `CrSnap` that `test_cpu_hardening` passes to a
+    // waiting `ipi_init::call_cpu`, live until every target acks; established
+    // at `arch::ktest::test_cpu_hardening`.
     let s = unsafe { &*(arg as *const CrSnap) };
     s.cr0.store(x86::read_cr0(), Ordering::SeqCst);
     s.cr4.store(x86::read_cr4(), Ordering::SeqCst);
@@ -465,8 +541,9 @@ impl AcProbe {
         // SAFETY: invariant: `USER_VA` is a present user page in the loaded
         // address space, so the read is a SMAP `#PF` that `catch_fault`
         // catches, or a plain read if AC leaked; established by the test
-        // that installs the hook (`test_ac_clear_on_exception` loads its
-        // space; in `test_ac_clear_user_popf` it is the child's code page).
+        // that installs the hook (`arch::ktest::test_ac_clear_on_exception`
+        // loads its space; in `test_ac_clear_user_popf` it is the child's
+        // code page).
         let hit = crate::ktest::catch_fault(|| unsafe {
             core::ptr::read_volatile(USER_VA as *const u8);
         });
@@ -647,7 +724,8 @@ fn arm_db(_: *mut ()) {
     let a = |i: usize| DB_ADDR[i].load(Ordering::Acquire);
     // SAFETY: invariant: the addresses are kernel text and DR7 enables
     // only execute breakpoints on them, which `db_hook` resumes past;
-    // established by `test_ist_gs_sign`, which clears them on every path.
+    // established by `arch::ktest::test_ist_gs_sign`, which clears them on
+    // every path.
     unsafe {
         core::arch::asm!(
             "mov dr0, {0}",
@@ -760,7 +838,8 @@ pub(crate) fn test_ist_gs_sign() -> Outcome {
         .wrapping_add(3);
     // SAFETY: invariant: each symbol is a label in `syscall_init`'s entry
     // asm with at least that many bytes of kernel text after it, mapped
-    // for the kernel's life; established by `syscall_init`'s `global_asm!`.
+    // for the kernel's life; established by the `global_asm!` in
+    // `proc::syscall_init`, whose `syscall_init::first_return` jumps into it.
     let bytes = unsafe {
         (
             core::slice::from_raw_parts(entry, 3),
@@ -1209,6 +1288,9 @@ struct CrSnapS16 {
 }
 
 fn snap_cr(arg: *mut ()) {
+    // SAFETY: `arg` is the `[CrSnapS16; 64]` that `cpu_control_regs` passes
+    // to itself and to a waiting `ipi_init::call_mask`, live until every
+    // target acks; established at `arch::ktest::cpu_control_regs`.
     let snaps = unsafe { &*(arg as *const [CrSnapS16; 64]) };
     let me = per_cpu_init::current().cpu_id as usize;
     if let Some(s) = snaps.get(me) {
@@ -1245,7 +1327,7 @@ const CR4_SET: [(u64, &str); 5] = [
 /// names, and with exactly the CR0 and CR4 `arch::cpu::init_control_regs`
 /// computed.
 pub(crate) fn cpu_control_regs() -> Outcome {
-    let Some(want) = arch::cpu::control_regs() else {
+    let Some(want) = arch::cpu::stored_control_regs() else {
         return Outcome::Fail("control registers never computed");
     };
     let snaps: [CrSnapS16; 64] = core::array::from_fn(|_| CrSnapS16 {
@@ -1290,6 +1372,69 @@ pub(crate) fn cpu_control_regs() -> Outcome {
         if cr4 != want.cr4 {
             return crate::fail_fmt!("cpu {c}: cr4={cr4:#x}, routine computed {:#x}", want.cr4);
         }
+    }
+    Outcome::Ok
+}
+
+static FK_TARGET: AtomicU32 = AtomicU32::new(0);
+static FK_STOP: AtomicBool = AtomicBool::new(false);
+static FK_DONE: AtomicBool = AtomicBool::new(false);
+/// Floods `FK_TARGET` with reschedule IPIs until `FK_STOP`.
+fn force_kernel_ipi_sender() {
+    let target = FK_TARGET.load(Ordering::Acquire);
+    while !FK_STOP.load(Ordering::Acquire) {
+        // A failed send only thins the IPI stream.
+        let _ = apic_init::send_ipi_cpu(target, vectors::IPI_RESCHEDULE);
+        let t = time_init::now_ns().saturating_add(20_000);
+        while time_init::now_ns() < t {
+            core::hint::spin_loop();
+        }
+    }
+    FK_DONE.store(true, Ordering::Release);
+}
+
+/// `gs::force_kernel` called with IF=1 while another CPU floods this one
+/// with IPIs, its window held open: an interrupt between its `mov gs` and
+/// its `GS_BASE` write would run at CPL 0 on `GS_BASE` = 0, which the entry
+/// stub does not swap, and fault on the first per-CPU access.
+pub(crate) fn test_force_kernel_irq_window() -> Outcome {
+    let Some(ap) = crate::ktest::second_cpu() else {
+        return Outcome::Skip("needs 2 CPUs");
+    };
+    let Some(me) = x86::cpu_index() else {
+        return Outcome::Fail("no cpu index");
+    };
+    if ap == me {
+        return Outcome::Skip("registry on the second CPU");
+    }
+    if !x86::interrupts_enabled() {
+        return Outcome::Fail("IF off in the registry");
+    }
+    FK_TARGET.store(me, Ordering::Release);
+    FK_STOP.store(false, Ordering::Release);
+    FK_DONE.store(false, Ordering::Release);
+    spawn_thread_on("fk_ipi_sender", force_kernel_ipi_sender, ap);
+    arch::catch::arm_force_kernel_window(20);
+    let t0 = time_init::now_ns();
+    while arch::catch::force_kernel_windows_left() != 0
+        && time_init::now_ns().saturating_sub(t0) < 5_000_000_000
+    {
+        arch::gs::force_kernel();
+    }
+    let left = arch::catch::force_kernel_windows_left();
+    arch::catch::arm_force_kernel_window(0);
+    FK_STOP.store(true, Ordering::Release);
+    if !spin_until_ns(|| FK_DONE.load(Ordering::Acquire), 5_000_000_000) {
+        return Outcome::Fail("IPI sender did not stop");
+    }
+    if left != 0 {
+        return Outcome::Fail("force_kernel did not reach its window");
+    }
+    let Some(cpu) = per_cpu_init::try_current() else {
+        return Outcome::Fail("per-CPU area gone");
+    };
+    if x86::rdmsr(x86::IA32_GS_BASE) != cpu.self_ptr as u64 {
+        return Outcome::Fail("GS_BASE is not this CPU's PerCpu");
     }
     Outcome::Ok
 }

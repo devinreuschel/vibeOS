@@ -5,10 +5,10 @@
 //! come from the KVA allocator (guarded), which is why this runs after
 //! `kva: ready` rather than before PMM.
 
-use alloc::boxed::Box;
 use core::mem::size_of;
 
 use vibeos::desc::{GDT_LIMIT, Gdt, IstSlot, KERNEL_CS, KERNEL_DS, TSS_SEL, Tss};
+use vibeos::kalloc::TryBox;
 
 use crate::cell::BootCell;
 use crate::kva_init::{self, GuardedStack};
@@ -55,10 +55,19 @@ impl CpuTables {
             limit: GDT_LIMIT,
             base: core::ptr::addr_of!(self.gdt) as u64,
         };
-        unsafe { x86::lgdt(&gdtr) };
-        unsafe { reload_cs(KERNEL_CS) };
-        unsafe { load_data_segs(KERNEL_DS) };
-        unsafe { x86::ltr(TSS_SEL) };
+        // SAFETY: invariant I230, established at `arch::x86_64::gdt::init_bsp`
+        // and `smp::smp_init::start_one`: `self` is this CPU's live tables
+        // (this fn's `# Safety`) and never moves or is freed while the CPU is
+        // online, so the GDT and the TSS its descriptor names stay valid.
+        // `init` built both: `KERNEL_CS`, `KERNEL_DS` and `TSS_SEL` index
+        // them, and IRQs are off, so the `GS_BASE` that `mov gs` zeroes is
+        // written back (`per_cpu_init::install_gs`) before any `gs:` read.
+        unsafe {
+            x86::lgdt(&gdtr);
+            reload_cs(KERNEL_CS);
+            x86::load_data_segs(KERNEL_DS);
+            x86::ltr(TSS_SEL);
+        }
     }
 
     pub fn tss_ptr(&mut self) -> *mut Tss {
@@ -66,21 +75,33 @@ impl CpuTables {
     }
 
     pub fn rsp0(&self) -> u64 {
+        // SAFETY: the pointer comes from `&self`, so it is valid for reads;
+        // `read_unaligned` needs no alignment in the packed `Tss`;
+        // established here.
         unsafe { core::ptr::addr_of!(self.tss.rsp[0]).read_unaligned() }
     }
 }
 
-struct Bsp {
+pub(crate) struct Bsp {
     tables: CpuTables,
-    ist: [GuardedStack; 4],
+    /// Owns the IST stacks the BSP's TSS names; only the in-guest tests
+    /// read it.
+    #[cfg_attr(
+        not(feature = "kernel_tests"),
+        expect(
+            dead_code,
+            reason = "invariant I230 (DESIGN §2.7): holds the IST stacks the TSS names for the BSP's life"
+        )
+    )]
+    pub(crate) ist: [GuardedStack; 4],
     rsp0: GuardedStack,
 }
 
-static BSP: BootCell<Bsp> = BootCell::new();
+pub(crate) static BSP: BootCell<Bsp> = BootCell::new();
 
 /// Per-AP GDT/TSS plus the IST/RSP0 stacks they point at.
 pub struct ApTables {
-    pub tables: Box<CpuTables>,
+    pub tables: TryBox<CpuTables>,
     pub ist: [GuardedStack; 4],
     pub rsp0: GuardedStack,
 }
@@ -123,7 +144,16 @@ pub fn alloc_ap_tables() -> Option<ApTables> {
         }
     };
     let ist = [ist0, ist1, ist2, ist3];
-    let mut tables = Box::new(CpuTables::empty());
+    // AP bring-up runs after `irq: enabled`, so the allocation is fallible
+    // (DESIGN §4.4). The tables are filled in place: `init` writes the TSS
+    // address into the GDT, so they must not move after it.
+    let Ok(mut tables) = TryBox::try_new(CpuTables::empty()) else {
+        kva_init::free_stack(rsp0);
+        for s in ist {
+            kva_init::free_stack(s);
+        }
+        return None;
+    };
     tables.init(
         [
             ist[0].top().as_u64(),
@@ -150,13 +180,18 @@ pub fn free_ap_tables(t: ApTables) {
 /// # Safety
 /// Single-CPU, IRQs off, KVA already up.
 pub unsafe fn init_bsp() {
+    // A boot-time resource failure no invariant bounds: halt with a line
+    // (C-LINTS's boot-halt rule).
+    let stack = |pages, msg| {
+        kva_init::alloc_guarded_stack(pages).unwrap_or_else(|_| crate::boot::halt_with(msg))
+    };
     let ist = [
-        kva_init::alloc_guarded_stack(IST_PAGES).expect("ist df"),
-        kva_init::alloc_guarded_stack(IST_PAGES).expect("ist nmi"),
-        kva_init::alloc_guarded_stack(IST_PAGES).expect("ist mc"),
-        kva_init::alloc_guarded_stack(IST_PAGES).expect("ist db"),
+        stack(IST_PAGES, "vibeOS: gdt: ist df stack allocation failed"),
+        stack(IST_PAGES, "vibeOS: gdt: ist nmi stack allocation failed"),
+        stack(IST_PAGES, "vibeOS: gdt: ist mc stack allocation failed"),
+        stack(IST_PAGES, "vibeOS: gdt: ist db stack allocation failed"),
     ];
-    let rsp0 = kva_init::alloc_guarded_stack(RSP0_PAGES).expect("tss rsp0");
+    let rsp0 = stack(RSP0_PAGES, "vibeOS: gdt: tss rsp0 stack allocation failed");
     let ist_tops = [
         ist[0].top().as_u64(),
         ist[1].top().as_u64(),
@@ -171,9 +206,17 @@ pub unsafe fn init_bsp() {
     };
     // `tables.init` writes the TSS base into the GDT. Do that after
     // `set` so the base is the BootCell address, not this stack slot.
+    // SAFETY: invariant I22, established at `cell::BootCell::set`: the one
+    // write, on the BSP before SMP (this fn's `# Safety`).
     unsafe { BSP.set(bsp) };
+    // SAFETY: no reader has seen `BSP` yet (single CPU, IRQs off, the cell
+    // set just above), so this is the only reference to it while `init`
+    // fills the tables in place; established here.
     let p = unsafe { &mut *BSP.as_ptr() };
     p.tables.init(ist_tops, rsp0_top);
+    // SAFETY: invariant I230, established here: `p.tables` lives in the
+    // `BSP` static, so it never moves or is freed, and `init` just filled
+    // it; IRQs are off (this fn's `# Safety`).
     unsafe { p.tables.load() };
 }
 
@@ -188,16 +231,10 @@ pub fn bsp_rsp0_top() -> u64 {
     BSP.get().rsp0.top().as_u64()
 }
 
-/// `[base, top)` of an IST stack. Used by the in-guest DF test.
-#[allow(dead_code)]
-pub fn ist_span(slot: IstSlot) -> (u64, u64) {
-    let s = &BSP.get().ist[slot.index()];
-    (s.base().as_u64(), s.top().as_u64())
-}
-
 /// # Safety
 /// `sel` is a valid code selector in the loaded GDT.
 unsafe fn reload_cs(sel: u16) {
+    // SAFETY: this fn's `# Safety` (here): `sel` is a valid code selector.
     unsafe {
         asm_reload_cs(sel as u64);
     }
@@ -206,6 +243,9 @@ unsafe fn reload_cs(sel: u16) {
 /// # Safety
 /// `sel` is a valid 64-bit code selector; this far-returns onto it.
 unsafe fn asm_reload_cs(sel: u64) {
+    // SAFETY: this fn's `# Safety` (here): the far return lands on the next
+    // instruction through a valid 64-bit code selector, and pops exactly the
+    // two words it pushed.
     unsafe {
         core::arch::asm!(
             "push {sel}",
@@ -216,22 +256,6 @@ unsafe fn asm_reload_cs(sel: u64) {
             sel = in(reg) sel,
             tmp = lateout(reg) _,
             options(preserves_flags),
-        );
-    }
-}
-
-/// # Safety
-/// `sel` is a valid data selector in the loaded GDT.
-unsafe fn load_data_segs(sel: u16) {
-    unsafe {
-        core::arch::asm!(
-            "mov ds, {0:x}",
-            "mov es, {0:x}",
-            "mov ss, {0:x}",
-            "mov fs, {0:x}",
-            "mov gs, {0:x}",
-            in(reg) sel,
-            options(nostack, preserves_flags),
         );
     }
 }

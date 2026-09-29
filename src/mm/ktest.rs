@@ -11,7 +11,6 @@ use vibeos::kva::{KVA_END, KVA_START, PAGE_SIZE};
 use vibeos::paging::{self, PageFlags, PageSize, PhysAddr, VirtAddr, heap_flags};
 
 use crate::diag;
-use crate::ipi_init;
 use crate::ktest::{
     Outcome, alloc_frame, alloc_frames_owned, catch_alloc_error, catch_fault, free_frame,
     free_frames, free_frames_owned, quiescent_free_frames, second_cpu, settle_threads,
@@ -458,7 +457,7 @@ pub(crate) fn test_tlb_shootdown_remote() -> Outcome {
         };
     }
 
-    let before = ipi_init::shootdown_count();
+    let before = crate::irq::ktest::shootdown_count();
     // SAFETY: `unmap_4k`'s contract; `va` is a test page, neither a stack nor code nor heap,
     // and the test does not touch it again until it frees or remaps it; established here.
     let _ = unsafe { unmap_4k(va) };
@@ -471,7 +470,9 @@ pub(crate) fn test_tlb_shootdown_remote() -> Outcome {
         free_va(va, PAGE_SIZE);
         return Outcome::Fail("AP did not fault after unmap");
     }
-    if per_cpu_init::online_mask().count_ones() > 1 && ipi_init::shootdown_count() <= before {
+    if per_cpu_init::online_mask().count_ones() > 1
+        && crate::irq::ktest::shootdown_count() <= before
+    {
         shoot_quit();
         // SAFETY: `paging_init::map_4k`'s contract; `pa` is a frame this test owns and `va` a
         // KVA page `alloc_va` reserved that nothing else maps; established here.

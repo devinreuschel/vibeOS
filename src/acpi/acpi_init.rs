@@ -14,7 +14,7 @@ use crate::cell::BootCell;
 use crate::paging_init;
 
 static INFO: BootCell<AcpiInfo> = BootCell::new();
-static MMIO_UC: AtomicBool = AtomicBool::new(false);
+pub(super) static MMIO_UC: AtomicBool = AtomicBool::new(false);
 
 struct HhdmPhys;
 
@@ -30,6 +30,10 @@ impl PhysMem for HhdmPhys {
             return false;
         }
         let src = (paging_init::HHDM_BASE.wrapping_add(addr)) as *const u8;
+        // SAFETY: `ensure_ram` just mapped every 4 KiB leaf of
+        // `[addr, end)` in the physmap, cacheable and readable, so `src`
+        // is valid for `buf.len()` bytes; `buf` is a distinct `&mut`, so
+        // the ranges do not overlap. Established here.
         unsafe { core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), buf.len()) };
         true
     }
@@ -57,10 +61,14 @@ fn map_gap(phys: u64, len: u64, flags: paging::PageFlags) -> bool {
     let mut p = start;
     while p < end {
         let va = VirtAddr(paging_init::HHDM_BASE.wrapping_add(p));
-        if paging_init::translate(va).is_none()
-            && unsafe { paging_init::map_4k(va, PhysAddr(p), flags) }.is_err()
-        {
-            return false;
+        if paging_init::translate(va).is_none() {
+            // SAFETY: the physmap maps a frame only at its own HHDM address
+            // and `translate` found no leaf at `va`, so the new leaf aliases
+            // no other mapping of `p`, which is what `Mapper::map_page` asks;
+            // established here.
+            if unsafe { paging_init::map_4k(va, PhysAddr(p), flags) }.is_err() {
+                return false;
+            }
         }
         p = match p.checked_add(PAGE_SIZE_4K) {
             Some(n) => n,
@@ -83,6 +91,8 @@ fn uc_mmio(phys: u64, len: u64) -> bool {
         return false;
     }
     matches!(
+        // SAFETY: `map_gap` just made the physmap cover `[phys, phys+len)`,
+        // which is `patch_physmap_uc`'s requirement; established here.
         unsafe { paging_init::patch_physmap_uc(PhysAddr(phys), len) },
         Ok(n) if n > 0
     )
@@ -119,9 +129,15 @@ pub unsafe fn init(rsdp_phys: u64) {
     // First MMIO touch: HPET GEN_CAP period, only after that page is UC.
     if hpet_uc && let Some(hpet) = info.hpet.as_mut() {
         let va = (paging_init::HHDM_BASE.wrapping_add(hpet.base)) as *const u64;
+        // SAFETY: invariant I228, established here: `uc_mmio` returned true,
+        // so the HPET register page is mapped UC in the physmap, and
+        // GEN_CAP is its aligned first register.
         let cap = unsafe { va.read_volatile() };
         hpet.period_fs = (cap >> 32) as u32;
     }
+    // SAFETY: invariant I22, established at `cell::BootCell::set`: this is
+    // the one write, on the BSP before SMP (`acpi::acpi_init::init`'s
+    // `# Safety`), and no reader runs until it returns.
     unsafe { INFO.set(info) };
 }
 
@@ -145,11 +161,6 @@ pub fn report() {
 
 pub fn info() -> Option<&'static AcpiInfo> {
     INFO.try_get()
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn mmio_uc_patched() -> bool {
-    MMIO_UC.load(Ordering::Acquire)
 }
 
 fn halt_acpi(e: AcpiError) -> ! {
