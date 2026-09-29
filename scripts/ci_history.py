@@ -16,6 +16,10 @@ Modes (one `if` branch each in `main`):
   `WORKFLOWS`, and builds the record from the Actions API.
 - `--backfill [--limit N]`: records, or tombstones, for listed `ci` runs on
   `main` that neither the branch nor an archive holds, newest first.
+- `--series WORKFLOW [--job NAME] [--step NAME]`: one line per record (finished
+  time, head SHA, run id, seconds), then the median. With no `--job`, the
+  run's push-to-green time (§10.1): its latest job `completed` minus its
+  earliest job `created`.
 
 Trust rules: a fork's pull request sets a run's branch, title and artifacts, so
 no run field reaches a shell line (subprocesses take argv lists), commit
@@ -37,6 +41,7 @@ import json
 import os
 import random
 import re
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -922,6 +927,93 @@ def backfill(
     return written, tombs
 
 
+# --- series -------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Point:
+    finished: str
+    head_sha: str
+    run_id: int
+    seconds: int
+
+
+def push_to_green(rec: Mapping[str, Any]) -> int | None:
+    """The latest job `completed` minus the earliest job `created`."""
+    jobs = [j for j in rec.get("jobs", []) if isinstance(j, dict)]
+    created = [t for t in (parse_time(j.get("created")) for j in jobs) if t is not None]
+    done = [t for t in (parse_time(j.get("completed")) for j in jobs) if t is not None]
+    if not created or not done:
+        return None
+    return round((max(done) - min(created)).total_seconds())
+
+
+def _find_job(rec: Mapping[str, Any], name: str) -> dict[str, Any] | None:
+    jobs = [j for j in rec.get("jobs", []) if isinstance(j, dict)]
+    exact = [j for j in jobs if j.get("name") == name]
+    if exact:
+        return exact[0]
+    loose = [j for j in jobs if isinstance(j.get("name"), str) and slug(j["name"]) == slug(name)]
+    return loose[0] if len(loose) == 1 else None
+
+
+def series(
+    history: HistoryRepo,
+    workflow: str,
+    job: str | None = None,
+    step: str | None = None,
+    branch: str | None = MAIN,
+    events: frozenset[str] | None = MAIN_EVENTS,
+) -> list[Point]:
+    """One point per record of `workflow` on `branch` from `events` (None or
+    empty: any), oldest first: the push-to-green time, a job's seconds, or
+    the seconds of a job's steps named `step`, summed."""
+    out: list[Point] = []
+    for rec in history.records(workflow):
+        if "tombstone" in rec:
+            continue
+        if branch and rec.get("branch") != branch:
+            continue
+        if events and rec.get("event") not in events:
+            continue
+        value: int | None
+        if job is None:
+            value = push_to_green(rec)
+        else:
+            j = _find_job(rec, job)
+            if j is None:
+                continue
+            if step is None:
+                value = j.get("seconds")
+            else:
+                secs = [
+                    s.get("seconds") for s in j.get("steps", [])
+                    if isinstance(s, dict) and s.get("name") == step
+                ]
+                known = [x for x in secs if isinstance(x, int)]
+                value = sum(known) if known else None
+        if not isinstance(value, int) or isinstance(value, bool):
+            continue
+        out.append(Point(
+            finished=str(rec.get("finished") or rec.get("started") or ""),
+            head_sha=str(rec.get("head_sha") or ""),
+            run_id=int(rec["run_id"]),
+            seconds=value,
+        ))
+    out.sort(key=lambda p: (p.finished, p.run_id))
+    return out
+
+
+def print_series(points: list[Point]) -> None:
+    for p in points:
+        print(f"{p.finished}  {p.head_sha[:12]}  {p.run_id}  {p.seconds}")
+    if points:
+        med = statistics.median(p.seconds for p in points)
+        print(f"median {med:g} s over {len(points)} runs")
+    else:
+        print("no matching records")
+
+
 # --- output -------------------------------------------------------------------
 
 
@@ -979,6 +1071,17 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--backfill", action="store_true",
         help="record listed ci runs on main the history lacks, or tombstone them",
     )
+    mode.add_argument(
+        "--series", metavar="WORKFLOW", choices=sorted(WORKFLOWS),
+        help="print a run's push-to-green time, or a job's or step's seconds, per record",
+    )
+    ap.add_argument("--job", metavar="NAME", help="--series: the job")
+    ap.add_argument("--step", metavar="NAME", help="--series: the job's step")
+    ap.add_argument("--branch", default=MAIN, help="--series: the runs' branch ('' for any)")
+    ap.add_argument(
+        "--events", default=",".join(sorted(MAIN_EVENTS)),
+        help="--series: the runs' events, comma-separated ('' for any)",
+    )
     ap.add_argument("--limit", type=int, default=BACKFILL_LIMIT,
                     help=f"--backfill: at most N runs (default {BACKFILL_LIMIT})")
     ap.add_argument("--gated", metavar="SHA",
@@ -1014,6 +1117,16 @@ def main(argv: list[str] | None = None) -> int:
                  f"commit {sha or 'unchanged'}"]
                 + [f"warning: {w}" for w in warnings]
             )
+            return 0
+        if args.series is not None:
+            if args.step is not None and args.job is None:
+                print("ci_history: --step needs --job", file=sys.stderr)
+                return 2
+            history = HistoryRepo(workdir, args.remote or default_remote())
+            history.open(depth=1)
+            events = frozenset(e for e in args.events.split(",") if e)
+            print_series(series(history, args.series, args.job, args.step,
+                                args.branch or None, events or None))
             return 0
         repo = _repository()
         api = GhApi()

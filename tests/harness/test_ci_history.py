@@ -781,5 +781,75 @@ class TestBackfill(GitIsolated):
         self.assertEqual(self.backfill(limit=2), (1, 0))
 
 
+class TestSeries(GitIsolated):
+    def setUp(self) -> None:
+        super().setUp()
+        self.h = self.history()
+        files = {}
+        for rid, (build, extra, event, branch) in enumerate([
+            (100, 10, "push", "main"),
+            (120, 20, "push", "main"),
+            (200, 5, "workflow_dispatch", "main"),
+            (999, 0, "pull_request", "main"),
+            (999, 0, "push", "topic"),
+        ], start=501):
+            t0 = f"2026-03-0{rid - 500}T10:00:00Z"
+            job = {
+                "name": "tier (x86_64, e2e-1)", "conclusion": "success",
+                "created": t0, "started": plus(t0, 30), "completed": plus(t0, 30 + build + extra),
+                "seconds": build + extra,
+                "steps": [{"name": "make", "seconds": build}, {"name": "upload", "seconds": extra},
+                          {"name": "make", "seconds": 1}, {"name": "skipped", "seconds": None}],
+            }
+            chk = {"name": "check", "conclusion": "success", "created": plus(t0, 5),
+                   "started": plus(t0, 6), "completed": plus(t0, 60), "seconds": 54, "steps": []}
+            rec = {**ci_history.run_fields(run_obj(rid, event=event, branch=branch,
+                                                   created=t0), "ci"),
+                   "finished": plus(t0, 30 + build + extra), "jobs": [job, chk]}
+            files[ci_history.record_path("ci", rid)] = ci_history.encode(rec)
+        files["runs/ci/506.json"] = ci_history.encode(
+            ci_history.tombstone(run_obj(506), "ci", "gone"))
+        self.h.commit_files(files, "series")
+
+    def test_step_series_and_median(self) -> None:
+        pts = ci_history.series(self.h, "ci", "tier (x86_64, e2e-1)", "make")
+        self.assertEqual([p.run_id for p in pts], [501, 502, 503])
+        self.assertEqual([p.seconds for p in pts], [101, 121, 201])  # same-named steps summed
+        self.assertEqual(pts[0].head_sha, SHA)
+        # the job's own seconds, found by slug too
+        pts = ci_history.series(self.h, "ci", "Tier x86_64 e2e 1")
+        self.assertEqual([p.seconds for p in pts], [110, 140, 205])
+        # any branch, any event
+        pts = ci_history.series(self.h, "ci", "check", None, None, None)
+        self.assertEqual(len(pts), 5)
+        # a step no record has
+        self.assertEqual(ci_history.series(self.h, "ci", "check", "nope"), [])
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            ci_history.print_series(ci_history.series(self.h, "ci", "tier (x86_64, e2e-1)",
+                                                      "make"))
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(lines[0].split(), ["2026-03-01T10:02:20Z", SHA[:12], "501", "101"])
+        self.assertEqual(lines[-1], "median 121 s over 3 runs")
+
+    def test_push_to_green_series(self) -> None:
+        pts = ci_history.series(self.h, "ci")
+        # the latest job completed minus the earliest job created
+        self.assertEqual([p.seconds for p in pts], [140, 170, 235])
+        pts = ci_history.series(self.h, "ci", events=frozenset({"push"}))
+        self.assertEqual([p.run_id for p in pts], [501, 502])
+
+    def test_main_series(self) -> None:
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            rc = ci_history.main(["--series", "ci", "--history", str(self.tmp / "m"),
+                                  "--remote", str(self.remote)])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.getvalue().splitlines()[-1], "median 170 s over 3 runs")
+        with mock.patch("sys.stderr", io.StringIO()):
+            self.assertEqual(ci_history.main(["--series", "ci", "--step", "make"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
