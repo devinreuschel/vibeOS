@@ -79,15 +79,6 @@ mod cell;
 )]
 mod console;
 mod dev;
-#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
-#[allow(
-    clippy::let_underscore_must_use,
-    reason = "audit pending, ROADMAP §10.1"
-)]
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 mod drivers;
 #[allow(
     clippy::let_underscore_must_use,

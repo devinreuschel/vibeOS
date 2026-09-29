@@ -4,6 +4,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use vibeos::block::{BlockError, DeviceState, Op};
 use vibeos::dev::Device;
+use vibeos::virtio_blk::{F_DISCARD, F_FLUSH, F_MQ};
 
 use crate::block_init::IoWaiter;
 use crate::ktest::Outcome;
@@ -11,6 +12,55 @@ use crate::per_cpu_init;
 use crate::thread_init;
 use crate::time_init;
 use crate::virtio_blk_init;
+
+// ---- Observers the drivers tests read. Their state stays in
+// `virtio_blk_init` as `pub(super)` items.
+
+fn features() -> u64 {
+    virtio_blk_init::FEATURES.load(Ordering::Acquire)
+}
+
+fn has_mq() -> bool {
+    features() & F_MQ != 0 && virtio_blk_init::num_queues() > 1
+}
+
+fn has_flush() -> bool {
+    features() & F_FLUSH != 0
+}
+
+fn has_discard() -> bool {
+    features() & F_DISCARD != 0
+}
+
+fn top_hits() -> u32 {
+    virtio_blk_init::TOP_HITS.load(Ordering::Acquire)
+}
+
+fn thread_hits() -> u32 {
+    virtio_blk_init::THREAD_HITS.load(Ordering::Acquire)
+}
+
+fn completions() -> u32 {
+    virtio_blk_init::COMPLETIONS.load(Ordering::Acquire)
+}
+
+/// `Flush` requests dispatched to vda, emulated-`Fua` ones and those
+/// finished locally without `F_FLUSH` included.
+pub(crate) fn flushes() -> u64 {
+    virtio_blk_init::FLUSHES.load(Ordering::Relaxed)
+}
+
+/// A test LBA inside the Linux GPT partition (which starts at 512), not
+/// the GPT backup.
+pub(crate) fn persist_lba() -> u64 {
+    const LBA: u64 = 2048;
+    let cap = virtio_blk_init::capacity_sectors();
+    if cap > LBA + 1 {
+        LBA
+    } else {
+        cap.saturating_sub(1)
+    }
+}
 
 fn find_blk() -> Option<(usize, Device)> {
     crate::dev::ktest::find_id(0x1af4, 0x1042)
@@ -82,10 +132,10 @@ pub(crate) fn test_block_vblk_rw() -> Outcome {
     if d.flush().is_err() {
         return Outcome::Fail("flush");
     }
-    if !virtio_blk_init::has_flush() {
+    if !has_flush() {
         // device did not offer F_FLUSH; flush is a successful no-op
     }
-    if virtio_blk_init::has_discard() && d.discard(5, 1).is_err() {
+    if has_discard() && d.discard(5, 1).is_err() {
         return Outcome::Fail("discard");
     }
     match d.read(0, &mut [0u8; 100]) {
@@ -103,9 +153,9 @@ pub(crate) fn test_block_vblk_irq() -> Outcome {
     if !virtio_blk_init::live() {
         return Outcome::Skip("no virtio-blk");
     }
-    let t0 = virtio_blk_init::top_hits();
-    let th0 = virtio_blk_init::thread_hits();
-    let c0 = virtio_blk_init::completions();
+    let t0 = top_hits();
+    let th0 = thread_hits();
+    let c0 = completions();
     let buf = [0x3Du8; 512];
     if virtio_blk_init::write(2, &buf).is_err() {
         return Outcome::Fail("write");
@@ -114,13 +164,13 @@ pub(crate) fn test_block_vblk_irq() -> Outcome {
     if virtio_blk_init::read(2, &mut out).is_err() || out != buf {
         return Outcome::Fail("read");
     }
-    if virtio_blk_init::completions() <= c0 {
+    if completions() <= c0 {
         return Outcome::Fail("no complete");
     }
-    if virtio_blk_init::top_hits() <= t0 {
+    if top_hits() <= t0 {
         return Outcome::Fail("no top");
     }
-    if virtio_blk_init::thread_hits() <= th0 {
+    if thread_hits() <= th0 {
         return Outcome::Fail("no thread");
     }
     Outcome::Ok
@@ -262,7 +312,7 @@ pub(crate) fn test_block_vblk_mq() -> Outcome {
         return Outcome::Fail("zero queues");
     }
     let cpus = per_cpu_init::online_mask().count_ones() as u8;
-    if virtio_blk_init::has_mq() {
+    if has_mq() {
         if nq < 2 && cpus >= 2 {
             return Outcome::Fail("mq expected");
         }
@@ -281,7 +331,7 @@ pub(crate) fn test_block_persist() -> Outcome {
     if !virtio_blk_init::live() {
         return Outcome::Skip("no virtio-blk");
     }
-    let lba = virtio_blk_init::persist_lba();
+    let lba = persist_lba();
     if lba == 0 {
         return Outcome::Fail("no persist lba");
     }

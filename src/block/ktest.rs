@@ -848,10 +848,10 @@ pub(crate) fn block_fua_write() -> Outcome {
         return Outcome::Skip("vda not 512");
     }
     fua_roundtrip(
-        virtio_blk_init::persist_lba().saturating_add(1),
+        crate::drivers::ktest::persist_lba().saturating_add(1),
         virtio_blk_init::read,
         virtio_blk_init::write,
         virtio_blk_init::write_fua,
-        virtio_blk_init::flushes,
+        crate::drivers::ktest::flushes,
     )
 }

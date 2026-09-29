@@ -394,8 +394,8 @@ leaves `Box` and `Arc` with no fallible path on stable Rust.
 
 Rule; enforced in part: `fork`, `execve`, `open`, and thread creation in `spawn_inner` allocate
 through `kalloc` and return `ENOMEM`, which the in-guest `kalloc_nomem` test checks (ROADMAP
-§10.4); a kernel stack that cannot be allocated is `SpawnError::NoMemory` (F010). Driver probes
-(`virtio_blk_init`'s `Box::new`) and other paths use the infallible API until ROADMAP §10.4's box
+§10.4); a kernel stack that cannot be allocated is `SpawnError::NoMemory` (F010). Other paths
+use the infallible API until ROADMAP §10.4's box
 that makes allocation after `irq: enabled` fallible on every path. Rejected: making small allocations never fail by having the allocator wait
 until the OOM killer frees memory (Linux's "too small to fail"), because an allocation made with a
 spinlock held, or on a path the OOM victim needs in order to exit, cannot wait, and a failed
