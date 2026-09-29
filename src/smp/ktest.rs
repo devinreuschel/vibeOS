@@ -1,9 +1,11 @@
 //! In-guest tests for smp (kernel_tests only). Rows: [`TESTS`].
 
-use core::sync::atomic::{AtomicU64, Ordering};
-
+use vibeos::acpi::MAX_CPUS;
+use vibeos::apic::TimerMode;
+use vibeos::atomic::statics::{AtomicU64, Ordering};
 use vibeos::thread::ThreadId;
 
+use crate::apic_init;
 use crate::ipi_init;
 use crate::ktest::{
     Outcome, Test, cpu_remote, quiescent_free_frames, registry_tid, spin_until_ns, test,
@@ -313,6 +315,57 @@ pub(crate) fn percpu_remote_view() -> Outcome {
     Outcome::Ok
 }
 
+/// Ticks each online CPU must gain, and the `now_ns` bound on the wait.
+const PERCPU_TICKS_WANT: u64 = 10;
+const PERCPU_TICKS_WAIT_NS: u64 = 2_000_000_000;
+
+/// One CPU's tick count through its remote view (C-PERCPU).
+fn remote_ticks(id: u32) -> Option<u64> {
+    // Relaxed: a counter read that pairs with no other access; only its
+    // growth is compared.
+    cpu_remote(id).map(|r| r.ticks.load(Ordering::Relaxed))
+}
+
+/// Box L1198 (F078): every online CPU's `ticks` advances, so each CPU's
+/// timer arm runs (`arm_tsc_deadline`, `rearm_deadline` and `arm_ap`'s
+/// `TscDeadline` arm under TSC-deadline; the periodic arm otherwise). In
+/// PIT mode `apic_init::arm_ap` arms nothing and APs never tick.
+pub(crate) fn percpu_ticks_advance() -> Outcome {
+    let mode = apic_init::timer_mode();
+    if mode == TimerMode::Pit {
+        return Outcome::Skip("pit owns tick");
+    }
+    if !x86::interrupts_enabled() {
+        return Outcome::Fail("registry runs with IF off");
+    }
+    let n = per_cpu_init::cpu_count().min(MAX_CPUS) as u32;
+    let mut start = [0u64; MAX_CPUS];
+    for id in 0..n {
+        if !per_cpu_init::is_online(id) {
+            continue;
+        }
+        let (Some(slot), Some(t)) = (start.get_mut(id as usize), remote_ticks(id)) else {
+            return Outcome::Fail("online cpu has no view");
+        };
+        *slot = t;
+    }
+    let gained = |id: u32| -> u64 {
+        let t0 = start.get(id as usize).copied().unwrap_or(0);
+        remote_ticks(id).unwrap_or(t0).wrapping_sub(t0)
+    };
+    let behind =
+        || (0..n).find(|&id| per_cpu_init::is_online(id) && gained(id) < PERCPU_TICKS_WANT);
+    // IF stays on through the wait, so this CPU's own tick is taken too.
+    spin_until_ns(|| behind().is_none(), PERCPU_TICKS_WAIT_NS);
+    match behind() {
+        None => Outcome::Ok,
+        Some(id) => {
+            let d = gained(id);
+            crate::fail_fmt!("cpu {id} ticks +{d} in 2 s ({})", mode.as_str())
+        }
+    }
+}
+
 // ------------------ hooks ------------------
 
 /// Allocate the same resources as bring-up, then take the timeout free
@@ -341,4 +394,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("trampoline_page", test_trampoline_page),
     test("failed_ap_cleanup", test_failed_ap_cleanup),
     test("percpu_remote_view", percpu_remote_view),
+    test("percpu_ticks_advance", percpu_ticks_advance),
 ];
