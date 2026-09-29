@@ -343,7 +343,20 @@ fn user_thread_entry() {
     feature = "kernel_shell"
 )))]
 pub fn start_init() {
-    match spawn_elf("/sbin/init", INIT_PID, 0) {
+    use vibeos::boot::cmdline::{CMDLINE_MAX, INIT_ARGV_MAX, INIT_ENVP_MAX};
+    // Init's argv and envp come from the kernel command line (BOOT.md §3.2).
+    let mut words = [0u8; CMDLINE_MAX];
+    let v = crate::boot::cmdline().init_vectors(b"/sbin/init", &mut words);
+    if v.dropped != 0 {
+        crate::klog!(
+            vibeos::log::Level::Warn,
+            "vibeOS: boot: cmdline: {} init words dropped (at most {} args, {} env)",
+            v.dropped,
+            INIT_ARGV_MAX,
+            INIT_ENVP_MAX
+        );
+    }
+    match spawn_elf("/sbin/init", v.argv(), v.envp(), INIT_PID, 0) {
         Ok(_) => {}
         Err(e) => {
             #[expect(
@@ -355,14 +368,21 @@ pub fn start_init() {
     }
 }
 
-/// Start the ELF at `path` as a new process with parent `ppid` (0: the
-/// kernel, which reaps it with [`wait_kernel`]).
+/// Start the ELF at `path` with `argv` (`[path]` when empty) and `envp`
+/// as a new process with parent `ppid` (0: the kernel, which reaps it with
+/// [`wait_kernel`]).
 #[cfg(not(feature = "vibefs_crash"))]
-pub(crate) fn spawn_elf(path: &str, prefer: u32, ppid: u32) -> Result<u32, LoadError> {
+pub(crate) fn spawn_elf(
+    path: &str,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    prefer: u32,
+    ppid: u32,
+) -> Result<u32, LoadError> {
     let slot = space_slot().ok_or(LoadError::NoMem)?;
     start_loaded(
         slot,
-        user_init::load_path(path, &[path])?,
+        user_init::load_path(path, argv, envp)?,
         prefer,
         ppid,
         intern_name(path),

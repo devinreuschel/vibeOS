@@ -429,10 +429,11 @@ does not meet this yet:
 
 ## 6. Tracing and counters
 
-`syscall_init::set_trace(true)` makes `proc_init::syscall` log
-`user: syscall <name> nr=<nr> = <ret>` on serial after each call; the line
-is not a `vibeOS:` marker. Nothing calls `set_trace`, so no build can turn
-tracing on (F150; ROADMAP §10.7).
+`vibeos.strace=1` on the kernel command line (BOOT.md §3.2) makes
+`syscall_init::init_bsp` call `syscall_init::set_trace(true)`, and
+`proc_init::syscall` then logs `user: syscall <name> nr=<nr> = <ret>` on
+serial after each call that returns (`?` names an unknown number); the line
+is not a `vibeOS:` marker. `exit`, which never returns, prints no line.
 
 `vibeos_syscall_stub` increments the calling TCB's `syscall_count` and the
 global `SYSCALLS` on every entry, `ENOSYS` included. Nothing reads either:
@@ -450,8 +451,10 @@ Static ELF64, no libc, hand-written `syscall` stubs. Initrd:
 - `/bin/tests` — syscall / `EFAULT` / `fork`+`exec`+`wait` / fault-kill runner
 - `/bin/sh` — interactive shell; prints `vibeOS: shell ready` then `vibeos>`
 
-Stack: `argc`, `argv`, an empty `envp` (`execve` does not read its `envp`
-argument), and `auxv`: `AT_PAGESZ`, `AT_ENTRY`, `AT_PHENT`, `AT_PHNUM`,
+Stack: `argc`, `argv`, `envp`, and `auxv`. Init's `argv` and `envp` come
+from the kernel command line (BOOT.md §3.2), at most 8 of each; `execve`
+still passes an empty `envp` (it does not read its `envp` argument). The
+`auxv`: `AT_PAGESZ`, `AT_ENTRY`, `AT_PHENT`, `AT_PHNUM`,
 `AT_PHDR` (0 when no header table is mapped), `AT_BASE` 0, `AT_FLAGS` 0,
 `AT_UID`, `AT_EUID`, `AT_GID`, and `AT_EGID` (all 0), `AT_CLKTCK` 100,
 `AT_SECURE` 0, `AT_RANDOM`, `AT_NULL`. `AT_RANDOM` is one TSC read and a

@@ -138,7 +138,7 @@ pub(super) fn sys_execve(path: u64, argv: u64, envp: u64, frame: Option<&mut Use
     let Some(slot) = space_slot() else {
         return syscall::neg(ENOMEM);
     };
-    let loaded = match user_init::load_path(path_s, &argv_s) {
+    let loaded = match user_init::load_path(path_s, &argv_s, &[]) {
         Ok(l) => l,
         Err(e) => return syscall::neg(load_errno(e)),
     };
