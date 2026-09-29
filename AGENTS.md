@@ -68,7 +68,8 @@ host triple (A2). The firmware probe finds Homebrew's `share/qemu/edk2-x86_64-co
 `edk2-i386-vars.fd`, and UEFI boots load the code read-only on pflash with a per-run copy of the
 variable store, so `make test` needs no firmware argument; `VIBEOS_FW_X86_64` names another code
 image. `make debug` attaches with Homebrew's `x86_64-elf-gdb`, since Homebrew has no `gdb` on
-Apple Silicon.
+Apple Silicon. The scheduled `macos` workflow (`.github/workflows/macos.yml`) runs `make check` and
+`make test` this way on an Apple Silicon runner every day.
 
 ## Toolchain bump (C1)
 
