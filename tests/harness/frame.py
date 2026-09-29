@@ -13,13 +13,16 @@ the first framed line of a boot, an unframed line that matches
 `LIMINE_PANIC` fails the run (`Stream.limine_panic`). After it, the same
 text is just a user line.
 
-Standard library only, and nothing from `harness.py`, which imports this.
+Standard library only, the marker registry (`registry.py`) aside, and
+nothing from `harness.py`, which imports this.
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+
+from tests.harness import registry
 
 FRAME = "\x1e"
 
@@ -28,29 +31,22 @@ KERNEL = "kernel"
 USER = "user"
 LIMINE = "limine"
 
-# Needles that name lines user programs print, which match only unframed
-# text (`source_of`). The pre-registry source table: ROADMAP §10.2's
-# markers.toml `source` column replaces it.
-USER_PREFIXES: tuple[str, ...] = (
-    "utest",
-    "vibeOS: utest:",
-    "user: tests begin",
-    "user: tests ok",
-    "user: tests fail",
-    "user: dup ok",
-    "init: ",
-    "vibeOS: shell ready",
-)
-
-# Limine's panic line: `PANIC`, optional ANSI colour codes, then `: `, as
-# `limine-bios.sys` prints `\x1b[31mPANIC\x1b[37;1m\x1b[0m: ` or `PANIC: `.
-LIMINE_PANIC = re.compile(r"PANIC(?:\x1b\[[0-9;]*m)*: ")
+_ROWS = registry.load_rows()
 
 # The user failure tuple, matched on unframed lines, and the Limine tuple,
-# matched before the first framed line. Every driver that checks the
+# matched before the first framed line: the head signatures of the marker
+# registry's `user` and `limine` failure rows. Every driver that checks the
 # kernel's `PANIC_SIGNATURES` (on framed lines) checks both too.
-USER_FAILURES: tuple[str, ...] = ("user: tests fail",)
-LIMINE_SIGNATURES: tuple[re.Pattern[str], ...] = (LIMINE_PANIC,)
+USER_FAILURES: tuple[str, ...] = registry.signatures(_ROWS, {USER})
+USER_FAILURE_PATTERNS: tuple[re.Pattern[str], ...] = registry.failure_patterns(_ROWS, {USER})
+LIMINE_SIGNATURES: tuple[re.Pattern[str], ...] = tuple(
+    registry.ansi_tolerant(s) for s in registry.signatures(_ROWS, {LIMINE})
+)
+
+# Limine's panic line, its `limine` row: `PANIC`, optional ANSI colour codes,
+# then `: `, as `limine-bios.sys` prints `\x1b[31mPANIC\x1b[37;1m\x1b[0m: `
+# or `PANIC: `.
+LIMINE_PANIC = LIMINE_SIGNATURES[0]
 
 
 def split_frame(raw: str) -> tuple[bool, str]:
@@ -92,16 +88,29 @@ def user_lines(lines: Iterable[str]) -> list[str]:
 
 
 def source_of(needle: str) -> str:
-    """`USER` for a needle a user program prints (`USER_PREFIXES`), else `KERNEL`."""
-    return USER if needle.startswith(USER_PREFIXES) else KERNEL
+    """`USER` for a needle a user program prints, else `KERNEL`: the source of
+    the registry's user row that `needle` starts with, or whose text up to its
+    first placeholder starts with `needle`."""
+    for row in _ROWS:
+        if row.source != USER:
+            continue
+        if re.match(registry.row_regex(row.text), needle, re.S) or registry.head(
+            row.text
+        ).startswith(needle):
+            return USER
+    return KERNEL
 
 
 def user_failure(raw: str) -> str | None:
-    """The `USER_FAILURES` entry in `raw`'s user text, if any."""
+    """The `USER_FAILURES` entry in `raw`'s user text, else the first of
+    `USER_FAILURE_PATTERNS` that matches it (as its pattern), if any."""
     text = user_text(raw)
     if text is None:
         return None
-    return next((f for f in USER_FAILURES if f in text), None)
+    fail = next((f for f in USER_FAILURES if f in text), None)
+    if fail is not None:
+        return fail
+    return next((p.pattern for p in USER_FAILURE_PATTERNS if p.search(text)), None)
 
 
 class Stream:
