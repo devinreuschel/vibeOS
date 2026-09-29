@@ -1330,24 +1330,10 @@ class TestEnvConfig(unittest.TestCase):
                 env_config(default_iso="x.iso", default_timeout=1).tier, "test-kernel"
             )
 
-    def test_env_config_defaults_match_makefile(self) -> None:
-        # Keep in sync with Makefile VIBEOS_* ?= (make run). C2.
-        import pathlib
-        import re
-
+    def test_env_config_defaults(self) -> None:
+        # The only defaults: the Makefile sets none (ROADMAP §10.2).
         from tests.harness.harness import env_config, overlay_env
 
-        text = pathlib.Path(__file__).resolve().parents[2].joinpath("Makefile").read_text()
-        for key, val in (
-            ("VIBEOS_SMP", "2"),
-            ("VIBEOS_QEMU_CPU", "max"),
-            ("VIBEOS_MEM", "128M"),
-            ("VIBEOS_QEMU_ACCEL", "tcg"),
-        ):
-            self.assertRegex(
-                text,
-                re.compile(rf"^{re.escape(key)}\s*\?=\s*{re.escape(val)}\s*$", re.M),
-            )
         with overlay_env({}, clear=True):
             env = env_config(default_iso="vibeos.iso", default_timeout=60.0)
             self.assertEqual(env.iso, "vibeos.iso")

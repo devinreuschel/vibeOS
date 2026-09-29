@@ -61,7 +61,7 @@ Kernel target is built-in `x86_64-unknown-none` (B2). `./setup.sh` runs `rustup 
 
 `make check` needs `ruff` and `mypy` at the versions the `check` job in `.github/workflows/ci.yml` pins, and `fsck.fat` (`dosfstools`) for the FAT host tests, and it fails when one is missing. `VIBEOS_ALLOW_MISSING_TOOLS=1` is a gate switch, not one of the `VIBEOS_*` QEMU overrides `harness.py` reads: the Makefile and the FAT host test read it, skip each check whose tool is missing, and print the check they skipped. CI never sets it. `make check` also builds `vibeos-core` with its MSRV toolchain, which `./setup.sh` installs, and fails without it on the same terms.
 
-`VIBEOS_*` overrides: `SMP`, `QEMU_CPU`, `MEM`, `QEMU_ACCEL` (default `tcg`), `ISO`, `TIMEOUT`, `BIOS`, `QEMU_EXTRA`. Makefile `?=` defaults are the source for `make run`. One reader: `tests/harness/harness.py` (`env_config`).
+`VIBEOS_*` overrides: `SMP`, `QEMU_CPU`, `MEM`, `QEMU_ACCEL` (default `tcg`), `ISO`, `TIMEOUT`, `BIOS`, `QEMU_EXTRA`. One reader, which holds the only defaults: `tests/harness/harness.py` (`env_config`); the Makefile sets none. `make run` and `make run-panic` honour the same settings: they start QEMU through `tests/harness/run_interactive.py`.
 
 macOS: `brew install qemu xorriso nasm python dosfstools`. `make test-unit` runs `vibeos-core` on the
 host triple (A2). `make test-e2e-uefi` hands the firmware to QEMU with `-bios`, which rejects Homebrew's

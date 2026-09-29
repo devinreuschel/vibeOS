@@ -8,18 +8,20 @@ Standard library only. `subprocess` with its own timeout, not shell `timeout`,
 because macOS coreutils lacks it (ROADMAP §0.6).
 
 One QEMU launcher (`qemu_argv`) and one `VIBEOS_*` reader (`env_config`).
-Drivers live in `run_*.py` and must not parse the environment or build argv.
+Drivers live in `run_*.py` and must not parse the environment or build argv;
+`run_interactive.py` is the one behind `make run`, `make run-panic` and
+`make debug`.
 
 | Variable | Default | Drivers |
 |---|---|---|
-| `VIBEOS_ISO` | per driver | all |
-| `VIBEOS_SMP` | `2` (Makefile `?=`) | all |
-| `VIBEOS_QEMU_CPU` | `max` | all |
-| `VIBEOS_MEM` | `128M` | all |
-| `VIBEOS_BIOS` | unset (SeaBIOS) | all |
-| `VIBEOS_QEMU_ACCEL` | `tcg` (empty omits `-accel`) | all |
-| `VIBEOS_TIMEOUT` | `60` e2e/ps2, `90` ktest/crash | all |
-| `VIBEOS_QEMU_EXTRA` | empty | all |
+| `VIBEOS_ISO` | per driver | all, `run_interactive` |
+| `VIBEOS_SMP` | `2` | all, `run_interactive` |
+| `VIBEOS_QEMU_CPU` | `max` | all, `run_interactive` |
+| `VIBEOS_MEM` | `128M` | all, `run_interactive` |
+| `VIBEOS_BIOS` | unset (SeaBIOS) | all, `run_interactive` |
+| `VIBEOS_QEMU_ACCEL` | `tcg` (empty omits `-accel`) | all, `run_interactive` |
+| `VIBEOS_TIMEOUT` | `60` e2e/ps2, `90` ktest/crash, none interactive | all, `run_interactive` |
+| `VIBEOS_QEMU_EXTRA` | empty | all, `run_interactive` |
 | `VIBEOS_TIER` | `adhoc`; each `make test-*` recipe sets its target name | all (`results.py`) |
 | `VIBEOS_EXPECT_PANIC` | off (`""` / `0`) | `run_e2e` |
 | `VIBEOS_GP_TEST` | off | `run_e2e` |
@@ -459,7 +461,8 @@ def _reap(src: LineSource) -> int | None:
 # QEMU 10 dropped `-no-hpet`. `pc,hpet=off` is the machine property on
 # 8.x (where -no-hpet is only deprecated) and on 10.x.
 HPET_OFF_MACHINE = ("-machine", "pc,hpet=off")
-# Keep in sync with Makefile `VIBEOS_* ?=` (`make run`).
+# The only defaults of the QEMU settings: the Makefile sets none, and
+# `make run` reads them through `run_interactive.py` (ROADMAP §10.2).
 DEFAULT_SMP = 2
 DEFAULT_CPU = "max"
 DEFAULT_MEM = "128M"
@@ -486,6 +489,8 @@ class QemuConfig:
     # The QEMU version the CI job pins (VIBEOS_QEMU_VERSION). None skips the
     # check: only a config `env_config` built carries the pin.
     qemu_version: str | None = None
+    # A display window (`make run`, `make debug`); False adds `-display none`.
+    display: bool = False
 
 
 @dataclass
@@ -773,9 +778,11 @@ def qemu_argv(cfg: QemuConfig, monitor_sock: str | None) -> list[str]:
         "-smp", str(cfg.smp),
         "-cpu", cfg.cpu,
         "-no-reboot",
-        "-display", "none",
-        "-serial", "stdio",
     ]
+    if not cfg.display:
+        # QEMU keeps the last `-display`, so there is only ever this one.
+        argv += ["-display", "none"]
+    argv += ["-serial", "stdio"]
     if monitor_sock is not None:
         argv += ["-monitor", f"unix:{monitor_sock},server=on,wait=off"]
     argv += _accel_args(cfg)

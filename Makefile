@@ -43,23 +43,6 @@ ISO_VIBEFS_CRASH := build/vibeos-vibefs-crash.iso
 LIMINE_DIR := ./limine
 LIMINE_BIN := $(LIMINE_DIR)/limine
 
-# QEMU config. `-smp 2` from day one, ROADMAP §0.5. VIBEOS_SMP / VIBEOS_QEMU_CPU
-# override so a single Makefile covers the SMP and LAPIC fallback variants.
-VIBEOS_SMP      ?= 2
-VIBEOS_QEMU_CPU ?= max
-VIBEOS_MEM      ?= 128M
-# TCG by default: KVM on a loaded host makes PIT/sleep tests flake.
-# Override with VIBEOS_QEMU_ACCEL=kvm (or empty for QEMU's default).
-VIBEOS_QEMU_ACCEL ?= tcg
-
-QEMU_BASE = qemu-system-x86_64 \
-    -cdrom $(ISO) \
-    -m $(VIBEOS_MEM) \
-    -smp $(VIBEOS_SMP) \
-    -cpu $(VIBEOS_QEMU_CPU) \
-    -accel $(VIBEOS_QEMU_ACCEL) \
-    -no-reboot
-
 # Prerequisites: everything under src/ and crates/core/src/, the linker
 # script, the limine config, and this Makefile. A find(1) so newly added
 # source dirs are not silently missed (DESIGN §9.1).
@@ -163,8 +146,8 @@ help:
 	  '  kernel                kernel ELF only (build/kernels/vibeos-default.elf)' \
 	  '  isos                  every ISO variant, as build/vibeos*.iso' \
 	  '  repro                 build this commit twice; fail unless byte-identical (REPRO_ARGS=--share-rustup)' \
-	  '  run                   boot production ISO in QEMU' \
-	  '  run-panic             boot panic-test ISO' \
+	  '  run                   boot production ISO in a QEMU window, COM1 on the terminal (VIBEOS_* apply)' \
+	  '  run-panic             boot panic-test ISO, no window, COM1 on the terminal' \
 	  '  layout                objdump sections + __kernel_ symbols' \
 	  '  test-unit             vibeos-core host tests (any host triple)' \
 	  '  test-harness          python unit tests for the harness' \
@@ -315,12 +298,14 @@ isos: $(ISOS)
 repro:
 	python3 scripts/repro_build.py $(REPRO_ARGS)
 
+# QEMU starts through the harness launcher, which builds the drivers' argv
+# from the same VIBEOS_* settings and defaults (DESIGN §8.4); the ISO is
+# harness.default_iso's unless VIBEOS_ISO names another.
 run: $(ISO)
-	$(QEMU_BASE) -serial stdio
+	python3 tests/harness/run_interactive.py run
 
 run-panic: $(ISO_PANIC)
-	qemu-system-x86_64 -cdrom $(ISO_PANIC) -m $(VIBEOS_MEM) -smp $(VIBEOS_SMP) \
-	    -cpu $(VIBEOS_QEMU_CPU) -accel $(VIBEOS_QEMU_ACCEL) -no-reboot -serial stdio -display none
+	python3 tests/harness/run_interactive.py panic
 
 layout: $(KERNEL_ELF)
 	@echo "== sections =="
