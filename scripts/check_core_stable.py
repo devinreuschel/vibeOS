@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """The portable crate's byte parsers deny panicking indexing and arithmetic
-(ROADMAP §10.1).
+(ROADMAP §10.1), and the crate holds no assembly and no `cfg(target_arch)`
+(ROADMAP §10.3, DESIGN §11.1).
 
 `vibeos-core` builds on stable Rust (DESIGN §1.1): `make check` builds it with
 its MSRV (`make check-msrv`), which rejects a feature attribute however it is
@@ -10,6 +11,12 @@ searches for one.
 `missing_parser_attrs` checks each `PARSERS` row for its `indexing_slicing`
 and `arithmetic_side_effects` attribute, except rows on `PARSERS_PENDING`,
 which fail once the attribute exists.
+
+`find_arch_code` finds `asm!`, `global_asm!`, `naked_asm!`, and any
+`target_arch` token outside comments. `main` runs it on every file
+`core_files` walks: each `.rs` under `crates/core/src`, test modules included,
+and each file a `#[path]` attribute there names (`src/cell.rs`), so a host test
+of a port's assembly lives in a crate outside `vibeos-core` (`tests/hostlib`).
 """
 
 from __future__ import annotations
@@ -148,8 +155,107 @@ def missing_parser_attrs(core_src: Path,
     return errors
 
 
+# `asm!` and its module forms, `global_asm!`, `naked_asm!`; not `my_asm!`.
+ARCH_MACRO = re.compile(r"(?<![\w])(?:global_|naked_)?asm\s*!")
+TARGET_ARCH = re.compile(r"\btarget_arch\b")
+PATH_ATTR = re.compile(r'#\[\s*path\s*=\s*"([^"]+)"\s*\]')
+RAW_STR = re.compile(r'b?r(#*)"')
+# A char literal, so `'"'` opens no string: `'x'`, `'\''`, `'\u{..}'` and so on.
+CHAR_LIT = re.compile(r"b?'(?:[^'\\\n]|\\(?:[^u\n]|u\{[0-9a-fA-F]{1,6}\}))'")
+
+
+def strip_comments(text: str) -> str:
+    """`text` with `//` and (nested) `/* */` comments blanked, newlines kept,
+    so line numbers survive. String, raw string and char literals are kept
+    whole, so a `//` inside one opens no comment."""
+    out: list[str] = []
+    i, n, depth = 0, len(text), 0
+    while i < n:
+        c = text[i]
+        if depth:
+            if text.startswith("/*", i):
+                depth += 1
+                i += 2
+            elif text.startswith("*/", i):
+                depth -= 1
+                i += 2
+            else:
+                out.append("\n" if c == "\n" else " ")
+                i += 1
+            continue
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if text.startswith("/*", i):
+            depth = 1
+            i += 2
+            continue
+        raw = RAW_STR.match(text, i)
+        if raw and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")):
+            end = text.find('"' + raw.group(1), raw.end())
+            j = n if end < 0 else end + 1 + len(raw.group(1))
+            out.append(text[i:j])
+            i = j
+            continue
+        char = CHAR_LIT.match(text, i)
+        if char:
+            out.append(char.group(0))
+            i = char.end()
+            continue
+        if c == '"':
+            j = i + 1
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == "\\" else 1
+            out.append(text[i: j + 1])
+            i = j + 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def find_arch_code(text: str) -> list[int]:
+    """1-based lines of `text` that hold `asm!`, `global_asm!`, `naked_asm!`, or
+    a `target_arch` token outside comments."""
+    lines = strip_comments(text).splitlines()
+    return [k + 1 for k, line in enumerate(lines)
+            if ARCH_MACRO.search(line) or TARGET_ARCH.search(line)]
+
+
+def core_files(src: Path) -> list[Path]:
+    """Every `.rs` under `src`, and each file a `#[path]` attribute in one of
+    them names (followed on from those files too), sorted and resolved."""
+    todo = sorted(p.resolve() for p in src.rglob("*.rs"))
+    seen: set[Path] = set()
+    while todo:
+        f = todo.pop()
+        if f in seen or not f.is_file():
+            continue
+        seen.add(f)
+        for m in PATH_ATTR.finditer(strip_comments(f.read_text(encoding="utf-8"))):
+            todo.append((f.parent / m.group(1)).resolve())
+    return sorted(seen)
+
+
+def arch_code_errors(src: Path) -> list[str]:
+    """One error per line of a `core_files` file that `find_arch_code` flags."""
+    errors = []
+    for f in core_files(src):
+        for line in find_arch_code(f.read_text(encoding="utf-8")):
+            try:
+                name = f.relative_to(ROOT)
+            except ValueError:
+                name = f
+            errors.append(f"{name}:{line}: assembly or `target_arch` in vibeos-core; move it to "
+                          "the port's hardware half, or its host test to tests/hostlib "
+                          "(ROADMAP §10.3, DESIGN §11.1)")
+    return errors
+
+
 def main() -> int:
     errors = missing_parser_attrs(CORE_ROOT.parent)
+    errors += arch_code_errors(CORE_ROOT.parent)
     for e in errors:
         print(f"check_core_stable: {e}", file=sys.stderr)
     if errors:

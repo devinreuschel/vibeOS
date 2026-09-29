@@ -1,5 +1,8 @@
 use super::*;
 
+/// The image size most tests format: 64 KiB.
+const IMG: usize = 64 * 1024;
+
 fn fresh(n: usize) -> Vec<u8> {
     let mut b = vec![0u8; n];
     mkfs(&mut b, b"TEST").unwrap();
@@ -80,17 +83,17 @@ fn run_fsck(prog: &str, buf: &[u8], allow: bool) -> bool {
 #[test]
 #[should_panic(expected = "not installed")]
 fn fsck_missing_tool_fails() {
-    run_fsck("vibeos-no-such-fsck", &fresh(INITRD_BYTES), false);
+    run_fsck("vibeos-no-such-fsck", &fresh(IMG), false);
 }
 
 #[test]
 fn fsck_missing_tool_skipped_when_allowed() {
-    assert!(!run_fsck("vibeos-no-such-fsck", &fresh(INITRD_BYTES), true));
+    assert!(!run_fsck("vibeos-no-such-fsck", &fresh(IMG), true));
 }
 
 #[test]
 fn bpb_validate_and_mount() {
-    let mut b = fresh(INITRD_BYTES);
+    let mut b = fresh(IMG);
     with_vol(&mut b, |v, _| {
         assert_eq!(v.info.bps, 512);
         assert_eq!(v.info.num_fats, 2);
@@ -101,7 +104,7 @@ fn bpb_validate_and_mount() {
 
 #[test]
 fn corrupt_boot_sig() {
-    let mut b = fresh(INITRD_BYTES);
+    let mut b = fresh(IMG);
     b[510] = 0;
     let mut disk = MemDisk::new(&mut b, SEC as u32).unwrap();
     let err = match FatVol::mount(&mut disk) {
@@ -119,7 +122,7 @@ fn truncated_image() {
 
 #[test]
 fn fatsz16_rejected() {
-    let mut b = fresh(INITRD_BYTES);
+    let mut b = fresh(IMG);
     b[22] = 1;
     let mut disk = MemDisk::new(&mut b, SEC as u32).unwrap();
     let err = match FatVol::mount(&mut disk) {
@@ -142,7 +145,7 @@ fn lfn_checksum_matches_spec() {
 
 #[test]
 fn create_write_read_across_clusters() {
-    let mut b = fresh(INITRD_BYTES);
+    let mut b = fresh(IMG);
     with_vol(&mut b, |v, d| {
         let n = v.create(d, v.info.root_clus, b"big.bin", false).unwrap();
         let mut clu = n.clu;
@@ -172,7 +175,7 @@ fn create_write_read_across_clusters() {
 
 #[test]
 fn lfn_roundtrip_and_readdir() {
-    let mut b = fresh(INITRD_BYTES);
+    let mut b = fresh(IMG);
     with_vol(&mut b, |v, d| {
         v.create(d, v.info.root_clus, b"hello.txt", false).unwrap();
         v.create(d, v.info.root_clus, b"Long File Name.dat", false)
@@ -200,7 +203,7 @@ fn lfn_roundtrip_and_readdir() {
 
 #[test]
 fn lfn_checksum_mismatch_falls_back() {
-    let mut b = fresh(INITRD_BYTES);
+    let mut b = fresh(IMG);
     with_vol(&mut b, |v, d| {
         v.create(d, v.info.root_clus, b"hello.txt", false).unwrap();
         v.sync(d).unwrap();
@@ -225,7 +228,7 @@ fn lfn_checksum_mismatch_falls_back() {
 
 #[test]
 fn mkdir_rmdir_unlink() {
-    let mut b = fresh(INITRD_BYTES);
+    let mut b = fresh(IMG);
     with_vol(&mut b, |v, d| {
         let dir = v.create(d, v.info.root_clus, b"sub", true).unwrap();
         assert!(dir.is_dir());
@@ -247,7 +250,7 @@ fn mkdir_rmdir_unlink() {
 
 #[test]
 fn truncate_and_delete() {
-    let mut b = fresh(INITRD_BYTES);
+    let mut b = fresh(IMG);
     with_vol(&mut b, |v, d| {
         let n = v.create(d, v.info.root_clus, b"t.bin", false).unwrap();
         let mut clu = n.clu;
@@ -268,7 +271,7 @@ fn truncate_and_delete() {
 
 #[test]
 fn rename_across_dirs() {
-    let mut b = fresh(INITRD_BYTES);
+    let mut b = fresh(IMG);
     with_vol(&mut b, |v, d| {
         let a = v.create(d, v.info.root_clus, b"a", true).unwrap();
         let bb = v.create(d, v.info.root_clus, b"b", true).unwrap();
@@ -293,7 +296,7 @@ fn rename_across_dirs() {
 
 #[test]
 fn dual_fat_after_alloc() {
-    let mut b = fresh(INITRD_BYTES);
+    let mut b = fresh(IMG);
     with_vol(&mut b, |v, d| {
         v.create(d, v.info.root_clus, b"one", false).unwrap();
         v.create(d, v.info.root_clus, b"two", true).unwrap();
@@ -304,7 +307,7 @@ fn dual_fat_after_alloc() {
 
 #[test]
 fn initrd_image_fsck() {
-    let mut b = vec![0u8; INITRD_BYTES];
+    let mut b = vec![0u8; IMG];
     mkinitrd(&mut b).unwrap();
     with_vol(&mut b, |v, d| {
         let h = v.lookup(d, v.info.root_clus, b"hello.txt").unwrap();
@@ -318,7 +321,7 @@ fn initrd_image_fsck() {
 
 #[test]
 fn initrd_add_one_level_dir() {
-    let mut b = vec![0u8; INITRD_BYTES];
+    let mut b = vec![0u8; IMG];
     mkinitrd(&mut b).unwrap();
     with_vol(&mut b, |v, d| {
         v.now = 1_262_304_000;
@@ -351,7 +354,7 @@ fn initrd_add_one_level_dir() {
 
 #[test]
 fn chain_loop_is_corrupt() {
-    let mut b = fresh(INITRD_BYTES);
+    let mut b = fresh(IMG);
     with_vol(&mut b, |v, d| {
         let n = v.create(d, v.info.root_clus, b"x", false).unwrap();
         let mut clu = n.clu;
@@ -369,7 +372,7 @@ fn chain_loop_is_corrupt() {
 
 #[test]
 fn second_fat_mismatch_is_detected() {
-    let mut b = fresh(INITRD_BYTES);
+    let mut b = fresh(IMG);
     with_vol(&mut b, |v, d| {
         v.create(d, v.info.root_clus, b"x", false).unwrap();
         v.sync(d).unwrap();
@@ -390,7 +393,7 @@ fn second_fat_mismatch_is_detected() {
 
 #[test]
 fn truncate_zero_dirent_cluster() {
-    let mut b = fresh(INITRD_BYTES);
+    let mut b = fresh(IMG);
     with_vol(&mut b, |v, d| {
         let n = v.create(d, v.info.root_clus, b"z.bin", false).unwrap();
         let mut clu = n.clu;
@@ -450,7 +453,7 @@ fn read_back(v: &mut FatVol, d: &mut MemDisk, n: &FatInode) -> Vec<u8> {
 
 #[test]
 fn fat_unlinked_open_frees_at_last_iput() {
-    let mut b = fresh(INITRD_BYTES);
+    let mut b = fresh(IMG);
     with_vol(&mut b, |v, d| {
         let root = v.info.root_clus;
         let before = v.free;
@@ -485,7 +488,7 @@ fn fat_unlinked_open_frees_at_last_iput() {
 
 #[test]
 fn fat_create_in_freed_slot_new_inode() {
-    let mut b = fresh(INITRD_BYTES);
+    let mut b = fresh(IMG);
     with_vol(&mut b, |v, d| {
         let root = v.info.root_clus;
         let mut old = create_words(v, d, root, b"A.BIN");
@@ -513,7 +516,7 @@ fn fat_create_in_freed_slot_new_inode() {
 
 #[test]
 fn fat_rename_rekeys_open_inode() {
-    let mut b = fresh(INITRD_BYTES);
+    let mut b = fresh(IMG);
     with_vol(&mut b, |v, d| {
         let root = v.info.root_clus;
         let a = v.create(d, root, b"a", true).unwrap();
@@ -538,7 +541,7 @@ fn fat_rename_rekeys_open_inode() {
 
 #[test]
 fn fat_rename_reports_replaced() {
-    let mut b = fresh(INITRD_BYTES);
+    let mut b = fresh(IMG);
     with_vol(&mut b, |v, d| {
         let root = v.info.root_clus;
         let mut src = create_words(v, d, root, b"S.BIN");
@@ -565,7 +568,7 @@ fn fat_rename_reports_replaced() {
 
 #[test]
 fn fat_inode_two_descriptors() {
-    let mut b = fresh(INITRD_BYTES);
+    let mut b = fresh(IMG);
     with_vol(&mut b, |v, d| {
         let root = v.info.root_clus;
         let n = v.create(d, root, b"two.bin", false).unwrap();
@@ -650,7 +653,7 @@ fn ci_names(v: &mut FatVol, d: &mut MemDisk, dir: u32, name: &[u8]) -> Vec<Vec<u
 }
 
 fn case_only_rename(from: &[u8], to: &[u8]) {
-    let mut b = fresh(INITRD_BYTES);
+    let mut b = fresh(IMG);
     let (clu, size, data) = with_vol(&mut b, |v, d| {
         let root = v.info.root_clus;
         // Leave three deleted slots ahead of `from`, so the rename's two
@@ -701,7 +704,7 @@ fn rename_case_only_lfn() {
 
 #[test]
 fn rename_into_own_subtree_einval() {
-    let mut b = fresh(INITRD_BYTES);
+    let mut b = fresh(IMG);
     with_vol(&mut b, |v, d| {
         let root = v.info.root_clus;
         let p = v.create(d, root, b"p", true).unwrap();
@@ -725,7 +728,7 @@ fn rename_into_own_subtree_einval() {
 
 #[test]
 fn rename_dir_dotdot_names_new_parent() {
-    let mut b = fresh(INITRD_BYTES);
+    let mut b = fresh(IMG);
     with_vol(&mut b, |v, d| {
         let root = v.info.root_clus;
         let a = v.create(d, root, b"a", true).unwrap();
@@ -757,7 +760,7 @@ fn rename_dir_dotdot_names_new_parent() {
 
 /// Mount `b` with FATSz32 set to `fatsz` and NumFATs to `nfats`.
 fn mount_with_fatsz(fatsz: u32, nfats: u8) -> Result<(), FatError> {
-    let mut b = fresh(INITRD_BYTES);
+    let mut b = fresh(IMG);
     b[36..40].copy_from_slice(&fatsz.to_le_bytes());
     b[16] = nfats;
     let mut disk = MemDisk::new(&mut b, SEC as u32).unwrap();
@@ -772,4 +775,345 @@ fn fat_bpb_data_lba_overflow_two_fats() {
 #[test]
 fn fat_bpb_data_lba_overflow_one_fat() {
     assert_eq!(mount_with_fatsz(0xFFFF_FFFF, 1), Err(FatError::Corrupt));
+}
+
+/// `mkfs` formats any multiple of 512 bytes with room for two clusters,
+/// and each image mounts; `Inval` below that or off a sector boundary.
+#[test]
+fn fat_mkfs_variable_size() {
+    for (len, check) in [
+        (MIN_SECTORS as usize * SEC, false),
+        (40 * 1024, true),
+        (200 * 1024, true),
+        (1024 * 1024, true),
+    ] {
+        let mut b = fresh(len);
+        with_vol(&mut b, |v, _| {
+            assert_eq!(v.info.totsec as usize * SEC, len);
+            assert_eq!(v.info.nclus, geometry(v.info.totsec).unwrap().nclus);
+            assert!(v.info.nclus >= 2);
+        });
+        if check {
+            fsck(&b);
+        }
+    }
+    let mut b = vec![0u8; (MIN_SECTORS as usize - 1) * SEC];
+    assert_eq!(mkfs(&mut b, b"TEST").map(|_| ()), Err(FatError::Inval));
+    let mut b = vec![0u8; 1000];
+    assert_eq!(mkfs(&mut b, b"TEST").map(|_| ()), Err(FatError::Inval));
+}
+
+/// `image_sectors` returns the smallest image with enough clusters: its
+/// geometry has them and one sector less has not.
+#[test]
+fn fat_image_sectors_minimal() {
+    for need in [0u32, 1, 127, 128, 1000, 4096, 100_000] {
+        for free in [0u64, INITRD_FREE_BYTES] {
+            let want = need + free.div_ceil(SEC as u64) as u32;
+            let t = image_sectors(need, free).unwrap();
+            let g = geometry(t).unwrap();
+            assert!(g.nclus >= want, "need {need} free {free}: {t} sectors");
+            assert!(
+                geometry(t - 1).map_or(true, |g| g.nclus < want),
+                "need {need} free {free}: {} sectors also fit",
+                t - 1
+            );
+        }
+    }
+    assert_eq!(image_sectors(u32::MAX, 1 << 20), Err(FatError::Inval));
+}
+
+/// A disk of `u32::MAX` sectors that holds `boot` at sector 0 and zeros
+/// everywhere else.
+struct HugeDisk {
+    boot: [u8; SEC],
+}
+
+impl Disk for HugeDisk {
+    fn sector_size(&self) -> u32 {
+        SEC as u32
+    }
+
+    fn nsectors(&self) -> u32 {
+        u32::MAX
+    }
+
+    fn read(&mut self, lba: u32, buf: &mut [u8]) -> Result<(), FatError> {
+        if lba == 0 {
+            buf.copy_from_slice(&self.boot);
+        } else {
+            buf.fill(0);
+        }
+        Ok(())
+    }
+
+    fn write(&mut self, _lba: u32, _buf: &[u8]) -> Result<(), FatError> {
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), FatError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn fat_bpb_cluster_count_above_max_is_corrupt() {
+    let mut boot = [0u8; SEC];
+    boot[11..13].copy_from_slice(&(SEC as u16).to_le_bytes());
+    boot[13] = 1;
+    boot[14..16].copy_from_slice(&32u16.to_le_bytes());
+    boot[16] = 2;
+    boot[21] = 0xF8;
+    boot[32..36].copy_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
+    boot[36..40].copy_from_slice(&1024u32.to_le_bytes());
+    boot[44..48].copy_from_slice(&2u32.to_le_bytes());
+    boot[510] = 0x55;
+    boot[511] = 0xAA;
+    let mut d = HugeDisk { boot };
+    assert_eq!(FatVol::mount(&mut d).map(|_| ()), Err(FatError::Corrupt));
+}
+
+#[test]
+fn extend_nospace_leaks_nothing() {
+    let mut b = fresh(IMG);
+    let before = with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        let mut e = create_words(v, d, root, b"e.txt");
+        let mut f = create_words(v, d, root, b"FILL.BIN");
+        let cb = v.info.clus_bytes();
+        let n = (v.free as usize - 2) * cb;
+        v.write_ino(d, &mut f, true, 0, false, &vec![7u8; n])
+            .unwrap();
+        assert_eq!(v.free, 2);
+        v.sync(d).unwrap();
+        let before = (v.free_bytes(), v.count_free(d).unwrap());
+        assert_eq!(
+            v.write_ino(d, &mut e, true, 10 * cb as u64, false, b"x")
+                .unwrap_err(),
+            FatError::NoSpace
+        );
+        assert_eq!((e.first_clu, e.size), (0, 0));
+        assert_eq!((v.free_bytes(), v.count_free(d).unwrap()), before);
+        v.sync(d).unwrap();
+        before
+    });
+    with_vol(&mut b, |v, d| {
+        assert_eq!((v.free_bytes(), v.count_free(d).unwrap()), before);
+        let e = v.lookup(d, v.info.root_clus, b"e.txt").unwrap();
+        assert_eq!((e.clu, e.size), (0, 0));
+    });
+    fsck(&b);
+}
+
+#[test]
+fn extend_failure_rolls_back_chain() {
+    let mut b = fresh(IMG);
+    let (o_first, free) = with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        let mut e = create_words(v, d, root, b"e.txt");
+        let mut o = create_words(v, d, root, b"o.txt");
+        v.write_ino(d, &mut o, true, 0, false, b"one cluster")
+            .unwrap();
+        v.sync(d).unwrap();
+        let o_first = o.first_clu;
+        let free = v.count_free(d).unwrap();
+        assert_eq!(v.free, free);
+        // A lying FSInfo count: the pre-check passes and the allocation
+        // runs out part way.
+        v.free += 20;
+        let cb = v.info.clus_bytes() as u64;
+        let far = (u64::from(free) + 5) * cb;
+        for f in [&mut e, &mut o] {
+            let size = f.size;
+            let first = f.first_clu;
+            assert_eq!(
+                v.write_ino(d, f, true, far, false, b"x").unwrap_err(),
+                FatError::NoSpace
+            );
+            assert_eq!((f.first_clu, f.size), (first, size));
+            assert_eq!(v.count_free(d).unwrap(), free);
+            assert_eq!(v.free, free + 20);
+        }
+        assert!(is_eoc(v.fat_get(d, o_first).unwrap()));
+        v.free -= 20;
+        v.fsinfo_dirty = true;
+        v.sync(d).unwrap();
+        (o_first, free)
+    });
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        assert_eq!(v.count_free(d).unwrap(), free);
+        assert_eq!(v.free, free);
+        let e = v.lookup(d, root, b"e.txt").unwrap();
+        assert_eq!((e.clu, e.size), (0, 0));
+        let o = v.lookup(d, root, b"o.txt").unwrap();
+        assert_eq!((o.clu, o.size), (o_first, 11));
+        assert!(is_eoc(v.fat_get(d, o_first).unwrap()));
+        assert!(v.fats_identical(d).unwrap());
+    });
+    fsck(&b);
+}
+
+/// The offset of `dir`'s first `0x00` entry within its first cluster.
+fn first_free_off(v: &mut FatVol, d: &mut MemDisk, dir: u32) -> u32 {
+    let cb = v.info.clus_bytes() as u32;
+    let mut ent = [0u8; ENT];
+    (0..cb)
+        .step_by(ENT)
+        .find(|&o| {
+            assert!(v.read_dir_raw(d, dir, o, &mut ent).unwrap());
+            ent[0] == ENT_FREE
+        })
+        .unwrap_or(cb)
+}
+
+#[test]
+fn lfn_creates_keep_free_bytes() {
+    let mut b = fresh(IMG);
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        let free = v.free_bytes();
+        for i in 1..=6 {
+            v.create(d, root, format!("a{i}.txt").as_bytes(), false)
+                .unwrap();
+            assert_eq!(v.free_bytes(), free, "create a{i}.txt");
+        }
+        v.rename(d, root, b"a1.txt", root, b"b1.txt").unwrap();
+        assert_eq!(v.free_bytes(), free);
+        assert_eq!(v.chain_len(d, root).unwrap().1, root);
+        assert_eq!(v.lookup(d, root, b"b1.txt").unwrap().name(), b"b1.txt");
+        v.sync(d).unwrap();
+    });
+    fsck(&b);
+}
+
+#[test]
+fn dir_reserve_extends_only_when_tail_too_short() {
+    let mut b = fresh(IMG);
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        let cb = v.info.clus_bytes() as u64;
+        let free = v.free_bytes();
+        let left = (cb as u32 - first_free_off(v, d, root)) / ENT_U32;
+        for i in 0..left {
+            v.create(d, root, format!("F{i}").as_bytes(), false)
+                .unwrap();
+        }
+        assert_eq!(v.free_bytes(), free);
+        assert_eq!(first_free_off(v, d, root), cb as u32);
+        let n = v.create(d, root, b"LAST", false).unwrap();
+        assert_eq!(v.free_bytes(), free - cb);
+        assert_eq!(n.dir_off, cb as u32);
+        assert_ne!(v.chain_len(d, root).unwrap().1, root);
+        v.create(d, root, b"NEXT", false).unwrap();
+        assert_eq!(v.free_bytes(), free - cb);
+        v.sync(d).unwrap();
+    });
+    fsck(&b);
+}
+
+#[test]
+fn dir_reserve_refuses_before_alloc() {
+    let mut b = fresh(IMG);
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        let free = v.free_bytes();
+        assert_eq!(v.dir_reserve(d, root, 40), Err(FatError::NoSpace));
+        assert_eq!(v.free_bytes(), free);
+        assert_eq!(v.chain_len(d, root).unwrap().1, root);
+    });
+}
+
+/// Every name `readdir` lists in `dir`.
+fn list_names(v: &mut FatVol, d: &mut MemDisk, dir: u32) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut cookie = 0u64;
+    let mut node = Node::EMPTY;
+    while let Some(next) = v.readdir(d, dir, cookie, &mut node).unwrap() {
+        out.push(node.name().to_vec());
+        cookie = next;
+    }
+    out
+}
+
+#[test]
+fn lfn_utf8_cafe_roundtrip() {
+    let mut b = fresh(IMG);
+    let cafe = "café".as_bytes();
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        v.create(d, root, cafe, false).unwrap();
+        assert_eq!(v.lookup(d, root, cafe).unwrap().name(), cafe);
+        assert_eq!(v.create(d, root, cafe, false), Err(FatError::Exists));
+        let names = list_names(v, d, root);
+        assert_eq!(names.iter().filter(|n| n.as_slice() == cafe).count(), 1);
+        v.sync(d).unwrap();
+    });
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        assert_eq!(v.lookup(d, root, cafe).unwrap().name(), cafe);
+    });
+    fsck(&b);
+}
+
+#[test]
+fn lfn_question_mark_rejected() {
+    let mut b = fresh(IMG);
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        v.create(d, root, "café".as_bytes(), false).unwrap();
+        assert_eq!(v.lookup(d, root, b"caf??"), Err(FatError::NotFound));
+        assert_eq!(v.create(d, root, b"caf??", false), Err(FatError::Inval));
+    });
+}
+
+#[test]
+fn check_name_rejects_lfn_illegal_chars() {
+    let mut b = fresh(IMG);
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        for c in b"\"*:<>?\\|" {
+            let name = [b'a', *c, b'b'];
+            assert_eq!(v.check_name(&name), Err(FatError::Inval), "{}", *c as char);
+            assert_eq!(v.create(d, root, &name, false), Err(FatError::Inval));
+        }
+        assert_eq!(v.check_name(&[b'a', 0xFF]), Err(FatError::Inval));
+        v.create(d, root, b"ok", false).unwrap();
+        assert_eq!(v.rename(d, root, b"ok", root, b"k?"), Err(FatError::Inval));
+        assert_eq!(v.check_name("é+.,;=[]".as_bytes()), Ok(()));
+    });
+}
+
+#[test]
+fn lfn_non_bmp_roundtrip() {
+    let mut b = fresh(IMG);
+    let name = "😀.txt".as_bytes();
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        v.create(d, root, name, false).unwrap();
+        v.sync(d).unwrap();
+    });
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        assert_eq!(v.lookup(d, root, name).unwrap().name(), name);
+        assert_eq!(list_names(v, d, root), vec![name.to_vec()]);
+    });
+    fsck(&b);
+}
+
+#[test]
+fn lfn_unpaired_surrogate_falls_back() {
+    let mut b = fresh(IMG);
+    with_vol(&mut b, |v, d| {
+        let root = v.info.root_clus;
+        let n = v.create(d, root, b"abc.txt", false).unwrap();
+        let lfn_off = n.dir_off - ENT_U32;
+        let mut ent = [0u8; ENT];
+        assert!(v.read_dir_raw(d, root, lfn_off, &mut ent).unwrap());
+        assert_eq!(ent[11], ATTR_LFN);
+        ent[1..3].copy_from_slice(&0xD800u16.to_le_bytes());
+        v.write_dir_raw(d, root, lfn_off, &ent).unwrap();
+        assert_eq!(list_names(v, d, root), vec![b"ABC.TXT".to_vec()]);
+        assert_eq!(v.lookup(d, root, b"abc.txt").unwrap().dir_off, n.dir_off);
+    });
 }

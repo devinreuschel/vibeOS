@@ -2,10 +2,11 @@
 //!
 //! IOMMU later: keep every device-visible address behind [`DmaTranslate`].
 //! x86 is coherent; [`sync_for_device`] / [`sync_for_cpu`] still run so
-//! aarch64 can fill them in. Descriptor publish uses real fences, not
-//! `compiler_fence`.
+//! aarch64 can fill them in. The fences are the port's: every barrier here
+//! is generic over [`Barriers`] and calls its method (PORTABILITY §11.1).
 
-use crate::atomic::{AtomicU16, Ordering, compiler_fence, fence};
+use crate::arch::Barriers;
+use crate::atomic::{AtomicU16, Ordering};
 
 use crate::pmm::{self, Buddy, Frames, PAGE_SIZE};
 
@@ -167,12 +168,12 @@ impl DmaBuffer {
         dma_to_device(self.phys())
     }
 
-    pub fn sync_for_device(&self) {
-        dma_wmb();
+    pub fn sync_for_device<A: Barriers>(&self) {
+        dma_wmb::<A>();
     }
 
-    pub fn sync_for_cpu(&self) {
-        dma_rmb();
+    pub fn sync_for_cpu<A: Barriers>(&self) {
+        dma_rmb::<A>();
     }
 
     pub fn as_ptr(&self) -> *mut u8 {
@@ -231,38 +232,40 @@ impl Default for SgList {
     }
 }
 
-/// Store-side barrier before a device may observe a published index.
+/// Store-side barrier before a device may observe a published index: the
+/// port's [`Barriers::dma_wmb`].
 #[inline]
-pub fn dma_wmb() {
-    fence(Ordering::Release);
-    #[cfg(target_arch = "x86_64")]
-    // SAFETY: `sfence` orders stores and touches no memory or register;
-    // established here.
-    unsafe {
-        core::arch::asm!("sfence", options(nostack, preserves_flags));
-    }
-    // Keep a compiler fence so a future port cannot "optimize" this
-    // into a comment. The atomic fence above is the contract.
-    compiler_fence(Ordering::Release);
+pub fn dma_wmb<A: Barriers>() {
+    #[cfg(test)]
+    trace::record(trace::Ev::Wmb);
+    A::dma_wmb();
 }
 
-/// Load-side barrier after the device writes a completion.
+/// Load-side barrier after the device writes a completion: the port's
+/// [`Barriers::dma_rmb`].
 #[inline]
-pub fn dma_rmb() {
-    fence(Ordering::Acquire);
-    #[cfg(target_arch = "x86_64")]
-    // SAFETY: `lfence` orders loads and touches no memory or register;
-    // established here.
-    unsafe {
-        core::arch::asm!("lfence", options(nostack, preserves_flags));
-    }
-    compiler_fence(Ordering::Acquire);
+pub fn dma_rmb<A: Barriers>() {
+    #[cfg(test)]
+    trace::record(trace::Ev::Rmb);
+    A::dma_rmb();
 }
 
-/// Publish `idx` after descriptor stores. Release + `sfence`.
+/// Full barrier: orders earlier stores before later loads, as well as what
+/// [`dma_wmb`] and [`dma_rmb`] order. The port's [`Barriers::dma_mb`]
+/// (`mfence` on x86_64). A virtqueue runs it between its index store and the
+/// load that decides a kick or re-reads `used.idx` (virtio 1.2
+/// §2.7.13.4.1, F016).
 #[inline]
-pub fn publish_index(slot: &AtomicU16, idx: u16) {
-    dma_wmb();
+pub fn dma_mb<A: Barriers>() {
+    #[cfg(test)]
+    trace::record(trace::Ev::Mb);
+    A::dma_mb();
+}
+
+/// Publish `idx` after descriptor stores: [`dma_wmb`], then a Release store.
+#[inline]
+pub fn publish_index<A: Barriers>(slot: &AtomicU16, idx: u16) {
+    dma_wmb::<A>();
     slot.store(idx, Ordering::Release);
 }
 
@@ -271,7 +274,7 @@ pub fn publish_index(slot: &AtomicU16, idx: u16) {
 ///
 /// No address limit applies: `max_phys` is `u64::MAX` until ROADMAP §20.6
 /// (F030) keeps a 32-bit device's buffer below 4 GiB.
-pub fn alloc_from_buddy(
+pub fn alloc_from_buddy<A: Barriers>(
     buddy: &mut Buddy,
     spec: DmaAlloc,
     virt_of: impl Fn(u64) -> u64,
@@ -282,13 +285,13 @@ pub fn alloc_from_buddy(
         len: spec.size,
         frames,
     };
-    buf.sync_for_device();
+    buf.sync_for_device::<A>();
     Some(buf)
 }
 
 /// Takes the buffer by value and frees its block once.
-pub fn free_to_buddy(buddy: &mut Buddy, buf: DmaBuffer) {
-    buf.sync_for_cpu();
+pub fn free_to_buddy<A: Barriers>(buddy: &mut Buddy, buf: DmaBuffer) {
+    buf.sync_for_cpu::<A>();
     buddy.free(buf.frames);
 }
 
@@ -296,11 +299,106 @@ pub fn crosses_boundary(phys: u64, size: u64, boundary: u64) -> bool {
     pmm::crosses_boundary(phys, size, boundary)
 }
 
+/// Host-test trace of ring accesses and barriers, per thread: between
+/// [`trace::start`] and [`trace::take`], the `dma_*` barriers here and the
+/// virtqueue's ring accessors record each event, so a test can check where a
+/// barrier falls between a store and a later load.
+#[cfg(test)]
+pub(crate) mod trace {
+    use core::cell::RefCell;
+
+    /// Events a [`Log`] keeps; a later one sets [`Log::overflow`].
+    pub(crate) const CAP: usize = 256;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Ev {
+        /// A ring load at this address.
+        Load(usize),
+        /// A ring store at this address.
+        Store(usize),
+        Wmb,
+        Rmb,
+        Mb,
+    }
+
+    /// The events recorded since [`start`], oldest first.
+    #[derive(Clone, Copy)]
+    pub(crate) struct Log {
+        evs: [Ev; CAP],
+        n: usize,
+        /// Set when an event did not fit.
+        pub(crate) overflow: bool,
+    }
+
+    impl Log {
+        const EMPTY: Log = Log {
+            evs: [Ev::Mb; CAP],
+            n: 0,
+            overflow: false,
+        };
+
+        pub(crate) fn as_slice(&self) -> &[Ev] {
+            &self.evs[..self.n]
+        }
+    }
+
+    struct State {
+        on: bool,
+        log: Log,
+    }
+
+    std::thread_local! {
+        static STATE: RefCell<State> = const {
+            RefCell::new(State {
+                on: false,
+                log: Log::EMPTY,
+            })
+        };
+    }
+
+    /// Clear the log and record from now on.
+    pub(crate) fn start() {
+        STATE.with(|c| {
+            let mut s = c.borrow_mut();
+            s.on = true;
+            s.log = Log::EMPTY;
+        });
+    }
+
+    /// Record `e` if recording is on.
+    pub(crate) fn record(e: Ev) {
+        STATE.with(|c| {
+            let mut s = c.borrow_mut();
+            if !s.on {
+                return;
+            }
+            let n = s.log.n;
+            if n < CAP {
+                s.log.evs[n] = e;
+                s.log.n = n + 1;
+            } else {
+                s.log.overflow = true;
+            }
+        });
+    }
+
+    /// Stop recording and return what was recorded.
+    pub(crate) fn take() -> Log {
+        STATE.with(|c| {
+            let mut s = c.borrow_mut();
+            s.on = false;
+            core::mem::replace(&mut s.log, Log::EMPTY)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pmm::MAX_ORDER;
     use crate::pmm::testing::Pool;
+
+    type Stub = crate::arch::stub::Arch;
 
     #[test]
     fn identity_never_returns_a_high_va() {
@@ -311,11 +409,11 @@ mod tests {
         assert_eq!(IdentityDma.dma_to_device(pa).0, pa);
         let mut p = Pool::new(16);
         let virt_of = |phys: u64| phys.wrapping_add(0xFFFF_8000_0000_0000);
-        let buf = alloc_from_buddy(&mut p.buddy, DmaAlloc::new(4096), virt_of).unwrap();
+        let buf = alloc_from_buddy::<Stub>(&mut p.buddy, DmaAlloc::new(4096), virt_of).unwrap();
         assert_eq!(buf.device().0, buf.phys());
         assert_ne!(buf.device().0, buf.virt());
         assert_eq!(buf.virt(), virt_of(buf.phys()));
-        free_to_buddy(&mut p.buddy, buf);
+        free_to_buddy::<Stub>(&mut p.buddy, buf);
     }
 
     #[test]
@@ -326,7 +424,7 @@ mod tests {
             align: 0x2000,
             boundary: DMA32_BOUNDARY,
         };
-        let buf = alloc_from_buddy(&mut p.buddy, spec, |phys| phys + 0x1000).unwrap();
+        let buf = alloc_from_buddy::<Stub>(&mut p.buddy, spec, |phys| phys + 0x1000).unwrap();
         assert_eq!(buf.phys() & 0x1FFF, 0);
         assert_eq!(buf.len(), 0x1800);
         assert!(!buf.is_empty());
@@ -335,9 +433,9 @@ mod tests {
         assert_eq!(buf.virt(), buf.phys() + 0x1000);
         assert_eq!(buf.as_ptr() as u64, buf.virt());
         assert_eq!(p.buddy.stats().free_frames, 256 - 2);
-        buf.sync_for_device();
-        buf.sync_for_cpu();
-        free_to_buddy(&mut p.buddy, buf);
+        buf.sync_for_device::<Stub>();
+        buf.sync_for_cpu::<Stub>();
+        free_to_buddy::<Stub>(&mut p.buddy, buf);
         assert_eq!(p.buddy.stats().free_frames, 256);
         assert!(DmaAlloc::dma32(64).boundary == DMA32_BOUNDARY);
         let _ = MAX_ORDER;
@@ -346,12 +444,13 @@ mod tests {
     #[test]
     fn sg_builds_from_buffer_and_caps() {
         let mut p = Pool::new(16);
-        let buf = alloc_from_buddy(&mut p.buddy, DmaAlloc::new(0x1000), |phys| phys).unwrap();
+        let buf =
+            alloc_from_buddy::<Stub>(&mut p.buddy, DmaAlloc::new(0x1000), |phys| phys).unwrap();
         let sg = SgList::from_buffer(&buf).unwrap();
         assert_eq!(sg.n, 1);
         assert_eq!(sg.entries[0].addr, buf.device());
         assert_eq!(sg.entries[0].len, 0x1000);
-        free_to_buddy(&mut p.buddy, buf);
+        free_to_buddy::<Stub>(&mut p.buddy, buf);
         let mut s = SgList::new();
         let mut i = 0u32;
         while i < MAX_SG as u32 {
@@ -385,18 +484,8 @@ mod tests {
         assert_eq!(DmaAlloc::dma32(0x1000).order(), Some(0));
         assert_eq!(DmaAlloc::new(0).order(), None);
         let mut p = Pool::new(16);
-        assert!(alloc_from_buddy(&mut p.buddy, over, |phys| phys).is_none());
+        assert!(alloc_from_buddy::<Stub>(&mut p.buddy, over, |phys| phys).is_none());
         assert_eq!(p.buddy.stats().free_frames, 16);
-    }
-
-    #[test]
-    fn publish_uses_release_not_only_compiler_fence() {
-        let idx = AtomicU16::new(0);
-        // Descriptor payload would be stored first; then publish.
-        publish_index(&idx, 3);
-        assert_eq!(idx.load(Ordering::Acquire), 3);
-        dma_wmb();
-        dma_rmb();
     }
 
     #[test]

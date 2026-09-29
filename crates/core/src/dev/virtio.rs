@@ -4,6 +4,9 @@
 //! index wrap, indirect descriptors, and `EVENT_IDX`. Packed VQ is later.
 //! Kernel MMIO / DMA / MSI-X live in `virtio_init`.
 
+use core::marker::PhantomData;
+
+use crate::arch::Barriers;
 use crate::atomic::AtomicU16;
 
 use crate::dma::{self, publish_index};
@@ -339,6 +342,8 @@ impl SplitLayout {
 /// `base + off` is valid for a volatile read (`load_*`) or write
 /// (`store_*`) of the field's size, and aligned to it.
 unsafe fn load_u16(base: *const u8, off: usize) -> u16 {
+    #[cfg(test)]
+    dma::trace::record(dma::trace::Ev::Load(base as usize + off));
     // SAFETY: the caller meets this fn's contract; established by
     // `virtio::load_u16`'s `# Safety` section.
     unsafe { u16::from_le(core::ptr::read_volatile(base.add(off) as *const u16)) }
@@ -347,6 +352,8 @@ unsafe fn load_u16(base: *const u8, off: usize) -> u16 {
 /// # Safety
 /// As [`load_u16`], for a write.
 unsafe fn store_u16(base: *mut u8, off: usize, v: u16) {
+    #[cfg(test)]
+    dma::trace::record(dma::trace::Ev::Store(base as usize + off));
     // SAFETY: the caller meets this fn's contract; established by
     // `virtio::load_u16`'s `# Safety` section.
     unsafe { core::ptr::write_volatile(base.add(off) as *mut u16, v.to_le()) }
@@ -355,6 +362,8 @@ unsafe fn store_u16(base: *mut u8, off: usize, v: u16) {
 /// # Safety
 /// As [`load_u16`], for four bytes.
 unsafe fn load_u32(base: *const u8, off: usize) -> u32 {
+    #[cfg(test)]
+    dma::trace::record(dma::trace::Ev::Load(base as usize + off));
     // SAFETY: the caller meets this fn's contract; established by
     // `virtio::load_u16`'s `# Safety` section.
     unsafe { u32::from_le(core::ptr::read_volatile(base.add(off) as *const u32)) }
@@ -363,6 +372,8 @@ unsafe fn load_u32(base: *const u8, off: usize) -> u32 {
 /// # Safety
 /// As [`load_u16`], for a four-byte write.
 unsafe fn store_u32(base: *mut u8, off: usize, v: u32) {
+    #[cfg(test)]
+    dma::trace::record(dma::trace::Ev::Store(base as usize + off));
     // SAFETY: the caller meets this fn's contract; established by
     // `virtio::load_u16`'s `# Safety` section.
     unsafe { core::ptr::write_volatile(base.add(off) as *mut u32, v.to_le()) }
@@ -406,25 +417,30 @@ pub struct DescBuf {
 
 pub const MAX_CHAIN: usize = 8;
 
-/// Split VQ over a caller-owned DMA / sim buffer.
-pub struct SplitQueue {
+/// The ring memory a [`SplitQueue`] reaches, at its 16-byte aligned base.
+struct RingPtr(*mut u8);
+
+// SAFETY: invariant I233: the memory at the pointer is owned alongside the
+// queue that holds it (the kernel keeps its `DmaBuffer` with it) and reached
+// only through that queue, so moving the queue to another thread moves that
+// access with it; established by `virtio::SplitQueue::new`.
+unsafe impl Send for RingPtr {}
+
+/// Split VQ over a caller-owned DMA / sim buffer. `A` is the port whose
+/// [`Barriers`] order the ring against the device.
+pub struct SplitQueue<A: Barriers> {
     layout: SplitLayout,
-    base: *mut u8,
+    base: RingPtr,
     pub last_used: u16,
     free_head: u16,
     pub num_free: u16,
     pub event_idx: bool,
     /// Avail idx last published. Kick uses this as `old`.
     pub last_avail: u16,
+    _port: PhantomData<fn() -> A>,
 }
 
-// SAFETY: invariant I233: the memory at `base` is owned alongside the
-// queue (the kernel keeps its `DmaBuffer` with it) and reached only through
-// the queue, so moving the queue to another thread moves that access with
-// it; established by `virtio::SplitQueue::new`.
-unsafe impl Send for SplitQueue {}
-
-impl SplitQueue {
+impl<A: Barriers> SplitQueue<A> {
     /// A queue over the ring memory at `base`.
     ///
     /// # Safety
@@ -434,12 +450,13 @@ impl SplitQueue {
     pub unsafe fn new(layout: SplitLayout, base: *mut u8, event_idx: bool) -> Self {
         Self {
             layout,
-            base,
+            base: RingPtr(base),
             last_used: 0,
             free_head: 0,
             num_free: layout.size,
             event_idx,
             last_avail: 0,
+            _port: PhantomData,
         }
     }
 
@@ -456,7 +473,7 @@ impl SplitQueue {
                 .is_some_and(|end| end <= self.layout.total),
             "virtio: ring offset past the queue"
         );
-        self.base.wrapping_add(off)
+        self.base.0.wrapping_add(off)
     }
 
     fn rd16(&self, off: usize) -> u16 {
@@ -617,7 +634,7 @@ impl SplitQueue {
     pub fn publish(&mut self) -> u16 {
         let old = self.rd16(self.layout.avail_idx());
         let new = old.wrapping_add(1);
-        dma::dma_wmb();
+        dma::dma_wmb::<A>();
         self.wr16(self.layout.avail_idx(), new);
         self.last_avail = new;
         new
@@ -628,7 +645,7 @@ impl SplitQueue {
         let old = self.rd16(self.layout.avail_idx());
         let new = old.wrapping_add(1);
         self.wr16(self.layout.avail_idx(), new);
-        publish_index(slot, new);
+        publish_index::<A>(slot, new);
         self.last_avail = new;
         new
     }
@@ -649,7 +666,7 @@ impl SplitQueue {
         if self.pending() == 0 {
             return None;
         }
-        dma::dma_rmb();
+        dma::dma_rmb::<A>();
         let off = self.layout.used_elem(self.last_used);
         let id = self.rd32(off) as u16;
         let len = self.rd32(off + 4);
@@ -657,11 +674,19 @@ impl SplitQueue {
         self.free_chain(id);
         if self.event_idx {
             self.wr16(self.layout.used_event(), self.last_used);
+            // The next `used.idx` load, here or in the caller's loop, comes
+            // after the `used_event` store (virtio 1.2 §2.7.13.4.1, F016).
+            dma::dma_mb::<A>();
         }
         Some(UsedElem { id, len })
     }
 
+    /// Whether the device wants a kick for the buffers published since
+    /// `old_avail`. Runs [`dma::dma_mb`] first, so its `avail_event` or
+    /// `used.flags` load follows `publish`'s `avail.idx` store (virtio 1.2
+    /// §2.7.13.4.1, F016).
     pub fn should_kick(&self, old_avail: u16) -> bool {
+        dma::dma_mb::<A>();
         let new = self.avail_idx();
         if self.event_idx {
             let event = self.rd16(self.layout.avail_event());
@@ -707,8 +732,8 @@ pub unsafe fn write_indirect_write(table: *mut u8, addr: u64, len: u32) {
 ///
 /// # Safety
 /// `guest_mem` covers the queue's guest physical addresses minus `guest_off`.
-pub unsafe fn sim_complete(
-    q: &mut SplitQueue,
+pub unsafe fn sim_complete<A: Barriers>(
+    q: &mut SplitQueue<A>,
     fill: u8,
     guest_mem: *mut u8,
     guest_off: u64,
@@ -768,7 +793,7 @@ pub unsafe fn sim_complete(
         i += 1;
     }
     if n != 0 {
-        dma::dma_wmb();
+        dma::dma_wmb::<A>();
         q.wr16(q.layout.used_idx(), used.wrapping_add(n));
     }
     n
@@ -795,6 +820,8 @@ mod tests {
     };
     use std::vec;
     use std::vec::Vec;
+
+    type Stub = crate::arch::stub::Arch;
 
     struct Fake {
         data: [u8; 256],
@@ -858,7 +885,7 @@ mod tests {
     }
 
     /// A queue over a [`pool`] buffer.
-    fn queue(layout: SplitLayout, base: *mut u8, event_idx: bool) -> SplitQueue {
+    fn queue(layout: SplitLayout, base: *mut u8, event_idx: bool) -> SplitQueue<Stub> {
         // SAFETY: invariant I233: every test passes a 16-byte-aligned `pool`
         // buffer of at least `layout.total` bytes, which it keeps alive
         // while it uses the queue; established here, by each caller.
@@ -1017,7 +1044,13 @@ mod tests {
             let da = data_off;
             q.add(da, 8, DESC_F_WRITE).unwrap();
             let old = q.last_avail;
-            q.publish();
+            let new = q.publish();
+            // The device asks for a kick at `old` (the first buffer since the
+            // last kick) and not at `new` (already notified past it).
+            q.wr16(layout.avail_event(), old);
+            assert!(q.should_kick(old), "iteration {n}: avail_event = old");
+            q.wr16(layout.avail_event(), new);
+            assert!(!q.should_kick(old), "iteration {n}: avail_event = new");
             // SAFETY: descriptors address `base` from offset 0, the `pool`
             // buffer; established here.
             let done = unsafe { sim_complete(&mut q, (0xA0 + n) as u8, base, 0) };
@@ -1025,12 +1058,76 @@ mod tests {
             let u = q.get_used().unwrap();
             assert_eq!(u.len, 8);
             assert_eq!(q.get_used(), None);
-            assert!(q.should_kick(old) || n > 0);
             n += 1;
         }
         assert_eq!(q.num_free, 4);
         assert_eq!(q.avail_idx(), 20);
         assert_eq!(q.used_idx(), 20);
+    }
+
+    /// Whether a `Mb` lies between the last `Store(store)` and the first
+    /// `Load(load)` after it in `log`, which must hold both.
+    fn mb_between(log: &[dma::trace::Ev], store: usize, load: usize) -> bool {
+        use dma::trace::Ev;
+        let s = log
+            .iter()
+            .rposition(|e| *e == Ev::Store(store))
+            .expect("store recorded");
+        let l = s + log[s..]
+            .iter()
+            .position(|e| *e == Ev::Load(load))
+            .expect("load recorded after the store");
+        log[s..l].contains(&Ev::Mb)
+    }
+
+    /// F016: `dma_mb` separates `publish`'s `avail.idx` store from
+    /// `should_kick`'s `avail_event` (EVENT_IDX) or `used.flags` load, and
+    /// `get_used`'s `used_event` store from the next `used.idx` load.
+    #[test]
+    fn split_queue_dma_mb_order() {
+        let layout = SplitLayout::new(4).unwrap();
+        let data_off = layout.total as u64;
+        for event_idx in [true, false] {
+            let (_keep, base) = pool(layout.total + 64);
+            let at = |off: usize| base as usize + off;
+            let mut q = queue(layout, base, event_idx);
+            q.init();
+            q.add(data_off, 8, DESC_F_WRITE).unwrap();
+            let old = q.last_avail;
+            dma::trace::start();
+            q.publish();
+            let _ = q.should_kick(old);
+            let log = dma::trace::take();
+            assert!(!log.overflow);
+            let load = if event_idx {
+                layout.avail_event()
+            } else {
+                layout.used_flags()
+            };
+            assert!(
+                mb_between(log.as_slice(), at(layout.avail_idx()), at(load)),
+                "event_idx {event_idx}: no dma_mb between avail.idx and the kick load"
+            );
+
+            // SAFETY: descriptors address `base` from offset 0, the `pool`
+            // buffer; established here.
+            assert_eq!(unsafe { sim_complete(&mut q, 0x11, base, 0) }, 1);
+            if event_idx {
+                dma::trace::start();
+                assert!(q.get_used().is_some());
+                assert_eq!(q.get_used(), None);
+                let log = dma::trace::take();
+                assert!(!log.overflow);
+                assert!(
+                    mb_between(
+                        log.as_slice(),
+                        at(layout.used_event()),
+                        at(layout.used_idx())
+                    ),
+                    "no dma_mb between used_event and the next used.idx load"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1113,7 +1210,7 @@ mod tests {
         let uoff = q.layout.used_elem(used);
         q.wr32(uoff, head as u32);
         q.wr32(uoff + 4, 513);
-        dma::dma_wmb();
+        dma::dma_wmb::<Stub>();
         q.wr16(q.layout.used_idx(), used.wrapping_add(1));
         let u = q.get_used().unwrap();
         assert_eq!(u.id, head);

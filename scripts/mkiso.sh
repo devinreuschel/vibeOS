@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Assemble a hybrid BIOS+UEFI ISO. Invoked by KERNEL_VARIANT (B1).
-# usage: mkiso.sh <kernel-elf> <out.iso> <staging-dir>
+# usage: mkiso.sh <kernel-elf> <initrd> <out.iso> <staging-dir>
 #
 # Reproducible (ROADMAP §10.2, F152; DESIGN §3.6): every time in the image
 # comes from SOURCE_DATE_EPOCH, Rock Ridge records no builder uid or gid, and
@@ -11,14 +11,15 @@ set -euo pipefail
 # value does: nothing looks the disk up by it.
 GPT_DISK_GUID=76696265-4f53-4953-8f00-000000000001
 
-if [ "$#" -ne 3 ]; then
-    echo "usage: mkiso.sh <kernel-elf> <out.iso> <staging-dir>" >&2
+if [ "$#" -ne 4 ]; then
+    echo "usage: mkiso.sh <kernel-elf> <initrd> <out.iso> <staging-dir>" >&2
     exit 2
 fi
 
 kernel_elf=$1
-out_iso=$2
-staging=$3
+initrd=$2
+out_iso=$3
+staging=$4
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 limine_dir=${LIMINE_DIR:-"$root/limine"}
@@ -44,6 +45,8 @@ stamp=$(python3 -c 'import sys, time; print(time.strftime("%Y%m%d%H%M%S00", time
 rm -rf "$staging"
 mkdir -p "$staging/boot" "$staging/EFI/BOOT"
 cp "$kernel_elf" "$staging/boot/vibeos"
+# The initrd, which limine.conf's module_path: loads as a Limine module.
+cp "$initrd" "$staging/boot/initrd.fat"
 cp "$root/limine.conf" "$staging/boot/"
 cp "$limine_dir/limine-bios.sys" "$staging/boot/"
 cp "$limine_dir/limine-bios-cd.bin" "$staging/boot/"

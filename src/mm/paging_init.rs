@@ -552,6 +552,37 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
         boot::halt_with("vibeOS: paging: physmap map failed");
     }
 
+    // ---- 2b. Modules past map_end ----
+    // Limine loads modules top-down, so with RAM past `PHYSMAP_CAP` the
+    // initrd lies above `map_end`. Map each such module's pages at its
+    // physmap alias, as `acpi_init` maps tables above `map_end`. A module
+    // this fails for stays unmapped, and `fat_init::init` then leaves the
+    // initrd not live (its recorded error state, DESIGN §2.5).
+    for m in info.modules() {
+        let start = m.start.max(map_end) & !(PAGE_SIZE_4K - 1);
+        let end = paging_align_up(m.end, PAGE_SIZE_4K);
+        if end <= start || end > vibeos::heap::HEAP_START - HHDM_BASE {
+            continue;
+        }
+        // SAFETY: `Mapper::map_range`'s contract; `[start, end)` lies above
+        // `map_end`, so nothing in this root maps it yet, and it maps once,
+        // at its own physmap alias below the heap slot (invariant I14,
+        // established here).
+        let r = unsafe {
+            mapper.map_range(
+                VirtAddr(HHDM_BASE + start),
+                PhysAddr(start),
+                end - start,
+                paging::physmap_flags(),
+                MapMode::Fresh,
+                &mut alloc,
+            )
+        };
+        if r.is_err() {
+            continue;
+        }
+    }
+
     // ---- 3. Low identity, 512 MiB, first 2 MiB executable ----
     // First 2 MiB: writable + executable (trampoline lives at 0x8000).
     // Rest: writable + NX. Everything with the GLOBAL bit so the TLB
@@ -700,13 +731,15 @@ fn map_kernel_section(
     len
 }
 
-/// Covers usable RAM, the kernel image, and every framebuffer, capped at
-/// [`PHYSMAP_CAP`]. Never raw memmap entries (DESIGN §4.1).
+/// Covers usable RAM, the kernel image, every framebuffer, and every
+/// Limine module (the initrd, which `fat_init` reads and writes in place),
+/// capped at [`PHYSMAP_CAP`]. Never raw memmap entries (DESIGN §4.1).
 fn physmap_extent(info: &BootInfo) -> u64 {
     let hi = info
         .usable()
         .map(|r| r.end)
         .chain(info.framebuffers().map(|fb| fb.phys + fb.size))
+        .chain(info.modules().map(|m| m.end))
         .fold(info.kernel_phys.end, u64::max);
     paging_align_up(hi, PAGE_SIZE_2M).min(PHYSMAP_CAP)
 }

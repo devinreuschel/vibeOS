@@ -62,6 +62,20 @@ else
     echo "setup: missing required tool: fsck.fat (make check fails without it unless VIBEOS_ALLOW_MISSING_TOOLS=1; install dosfstools)" >&2
 fi
 
+# UEFI firmware for `make test-e2e-uefi` (ROADMAP §10.2): the harness's probe,
+# reported and never required here.
+for arch in x86_64 aarch64; do
+    case $arch in
+        x86_64) hint="apt install ovmf, or brew install qemu" ;;
+        *) hint="apt install qemu-efi-aarch64, or brew install qemu" ;;
+    esac
+    if fw=$(cd "$ROOT" && PYTHONPATH="$ROOT" python3 tests/harness/run_interactive.py firmware "$arch" 2>&1); then
+        echo "setup: $fw"
+    else
+        echo "setup: note: $fw ($hint)"
+    fi
+done
+
 if [ -f "$TOOLCHAIN_FILE" ]; then
     PINNED=$(sed -n 's/^channel = "\(.*\)"/\1/p' "$TOOLCHAIN_FILE" | head -n1)
     if [ -z "$PINNED" ]; then
