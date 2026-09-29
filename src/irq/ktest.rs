@@ -210,7 +210,9 @@ pub(crate) fn test_irq_pool() -> Outcome {
     }
 }
 
-fn irq_th_nop() {}
+fn irq_th_nop(_ctx: Option<&(dyn core::any::Any + Send + Sync)>) {}
+
+fn irq_nop() {}
 
 pub(crate) fn test_irq_free_threaded() -> Outcome {
     let n0 = allocated_count();
@@ -218,7 +220,7 @@ pub(crate) fn test_irq_free_threaded() -> Outcome {
         Ok(v) => v,
         Err(e) => return Outcome::Fail(e.as_str()),
     };
-    if irq_init::set_threaded(v, Some(irq_th_nop), irq_th_nop).is_err() {
+    if irq_init::set_threaded(v, Some(irq_th_nop), irq_th_nop, None).is_err() {
         let _ = irq_init::free_vector(v);
         return Outcome::Fail("set_threaded");
     }
@@ -244,7 +246,7 @@ pub(crate) fn test_irq_free_threaded() -> Outcome {
         let _ = irq_init::free_vector(v2);
         return Outcome::Fail("recycle threaded");
     }
-    if irq_init::set_handler(v2, irq_th_nop).is_err() {
+    if irq_init::set_handler(v2, irq_nop).is_err() {
         let _ = irq_init::free_vector(v2);
         return Outcome::Fail("set_handler");
     }
@@ -848,7 +850,7 @@ pub(crate) fn has_threaded(vec: u8) -> bool {
     match irq_init::handler_slot(vec) {
         Some(i) => irq_init::with_irq(|s| {
             let t = &s.th;
-            t.top[i] != 0 || t.work[i] != 0 || t.pending[i]
+            t.top[i].is_some() || t.work[i].is_some() || t.ctx[i].is_some() || t.pending[i]
         }),
         None => false,
     }

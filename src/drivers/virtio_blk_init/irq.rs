@@ -67,7 +67,7 @@ pub(super) fn harvest() {
     pump();
 }
 
-pub(super) fn blk_top() {
+pub(super) fn blk_top(_ctx: Option<&(dyn core::any::Any + Send + Sync)>) {
     TOP_HITS.fetch_add(1, Ordering::SeqCst);
     let isr = ISR_VA.load(Ordering::Acquire);
     if isr != 0 {
@@ -77,7 +77,7 @@ pub(super) fn blk_top() {
     }
 }
 
-pub(super) fn blk_work() {
+pub(super) fn blk_work(_ctx: Option<&(dyn core::any::Any + Send + Sync)>) {
     THREAD_HITS.fetch_add(1, Ordering::SeqCst);
     harvest();
 }

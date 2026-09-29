@@ -298,7 +298,7 @@ fn setup(dev: &Device, caps: ModernCaps) -> Result<(), VirtioError> {
                 return Err(VirtioError::Failed);
             }
         };
-        if irq_init::set_threaded(vec, Some(blk_top), blk_work).is_err() {
+        if irq_init::set_threaded(vec, Some(blk_top), blk_work, None).is_err() {
             #[expect(
                 clippy::let_underscore_must_use,
                 reason = "cleanup after an error the caller already returns: a vector that fails to free stays allocated, which nothing can act on (DESIGN §2.5)"
@@ -374,7 +374,7 @@ fn setup(dev: &Device, caps: ModernCaps) -> Result<(), VirtioError> {
                     return Err(VirtioError::Failed);
                 }
             };
-            if irq_init::set_threaded(vec, Some(blk_top), blk_work).is_err() {
+            if irq_init::set_threaded(vec, Some(blk_top), blk_work, None).is_err() {
                 #[expect(
                     clippy::let_underscore_must_use,
                     reason = "cleanup after an error the caller already returns: a vector that fails to free stays allocated, which nothing can act on (DESIGN §2.5)"
