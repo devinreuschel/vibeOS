@@ -131,7 +131,10 @@ help:
 # features and vibeos-core's no_std build for the kernel target, so kernel-target
 # code compiles before every commit; CI's ladder lints each other ISO feature
 # set and kernel_shell (ROADMAP §10.1, F147).
-# Guard scripts (scripts/check_*.py) run when present (A4, Q5, A1).
+# Guard scripts (scripts/check_*.py) run when present (A4, Q5, A1). The
+# `hookcheck` link gives check_test_hooks.py a production-feature ELF (Q2's
+# nm check) without replacing the production kernel; it needs no initrd,
+# whose bytes change no symbol name.
 check:
 	cargo fmt --check --all
 	cargo clippy -p vibeos-core --all-targets --features std --target $(HOST_TRIPLE) -- -D warnings
@@ -154,6 +157,7 @@ check:
 	else \
 	    echo "check: mypy not installed; pip install mypy"; \
 	fi
+	$(CARGO) build --bin vibeos --profile hookcheck --config 'profile.hookcheck.inherits="dev"'
 	@set +e; \
 	for s in scripts/check_*.py; do \
 	    if [ -f "$$s" ]; then \
