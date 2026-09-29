@@ -32,6 +32,11 @@ ENV_CONFIG_VARS = (
     "VIBEOS_QEMU_EXTRA",
     "VIBEOS_TIER",
     "VIBEOS_QEMU_VERSION",
+    "VIBEOS_KTEST",
+    "VIBEOS_KTEST_REPEAT",
+    "VIBEOS_CMDLINE",
+    "VIBEOS_FW_X86_64",
+    "VIBEOS_FW_AARCH64",
 )
 
 
@@ -133,6 +138,15 @@ class TestInteractiveLauncher(unittest.TestCase):
                     self.assertEqual(_opt(argv, "-drive"), drive)
                     self.assertIn("-boot", argv)
             remove_vars_copies()
+
+    def test_cmdline_reaches_argv(self) -> None:
+        env = {"VIBEOS_CMDLINE": "vibeos.strace=1", "VIBEOS_KTEST": "t"}
+        for mode in run_interactive.MODES:
+            with self.subTest(mode=mode), overlay_env(env, clear=True):
+                argv = run_interactive.interactive_argv(mode)
+                self.assertIn(
+                    "name=opt/vibeos/cmdline,string=vibeos.ktest=t vibeos.strace=1", argv
+                )
 
     def test_empty_accel_omits_accel(self) -> None:
         for mode in run_interactive.MODES:
