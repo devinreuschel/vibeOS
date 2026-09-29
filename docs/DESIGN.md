@@ -170,7 +170,7 @@ lie in its subsystem's directory, except `ktest.rs` until ROADMAP §10.2's Q2 bo
 | dev | `dev/{mod,pci,dma,virtio,entropy}.rs` | `dev/{mod,dev_init,pci_init,dma_init,virtio_init,entropy_init}.rs` |
 | drivers | `drivers/{mod,virtio_blk}.rs` | `drivers/{mod,virtio_blk_init}.rs` |
 | block | `block/{mod,part,cache}.rs` | `block/{mod,block_init,part_init,cache_init}.rs` |
-| fs | `fs/{mod,inode,mount,walk,file,ramfs,testfs,tests,kernfs,fat,vibefs}.rs` | `fs/{mod,fs_init,fat_init,vibefs_init,file_init}.rs` |
+| fs | `fs/{mod,inode,mount,walk,file,ramfs,testfs,tests,fat,vibefs}.rs`, `fs/kernfs/{mod,node,devfs,tmpfs,procfs,sysfs,tests}.rs` | `fs/{mod,fs_init,fat_init,vibefs_init,file_init}.rs` |
 | proc | `proc/{mod,addr_space,elf,syscall}.rs` | `proc/{mod,proc_init,addr_space_init,user_init,syscall_init}.rs` |
 | ktest | — | `ktest.rs`, `ktest/*.rs` (`kernel_tests` only) |
 
