@@ -179,7 +179,7 @@ children, need no row.
 
 | Subsystem | Portable (`crates/core/src/`) | Kernel (`src/`) |
 |---|---|---|
-| crate | `lib.rs`, `marker.rs`, `fmt_util.rs`, `symtab.rs`, `limits.rs`, `kalloc.rs`, `trap.rs` | `main.rs`, `cell.rs` |
+| crate | `lib.rs`, `marker.rs`, `fmt_util.rs`, `symtab.rs`, `limits.rs`, `kalloc.rs`, `trap.rs`, `atomic.rs` | `main.rs`, `cell.rs` |
 | boot | — | `boot/mod.rs` (`BootInfo`, Limine requests) |
 | arch | `arch/mod.rs`, `arch/x86_64/{mod,apic,desc,pic,trap,uart,vectors}.rs` | `arch/mod.rs`, `arch/x86_64/{mod,apic_init,catch,cpu,gdt,gs,idt,pic,trampoline}.rs`, `arch/x86_64/trampoline.S` |
 | mm | `mm/{mod,pmm,paging,heap,kva}.rs` | `mm/{mod,pmm_init,paging_init,heap_init,kva_init}.rs` |

@@ -29,6 +29,7 @@
 
 pub mod acpi;
 pub mod arch;
+pub mod atomic;
 #[allow(
     clippy::undocumented_unsafe_blocks,
     reason = "audit pending, ROADMAP §10.1"
