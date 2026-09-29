@@ -17,6 +17,7 @@ pub const POOL_LEN: usize = (POOL_END - POOL_START) as usize + 1;
 pub const MSI_ADDR_BASE: u32 = 0xFEE0_0000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
 pub enum IrqError {
     Exhausted,
     InIrq,
