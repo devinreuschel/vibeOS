@@ -746,3 +746,11 @@ needs = [
   "`pci_init::map_mmio` refuses a range that",  # L1510
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1279
+[[box]]
+key = "the seam proven by a"
+needs = [
+  "an `arch` module boundary built",  # L1277
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
