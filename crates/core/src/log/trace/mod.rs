@@ -18,6 +18,7 @@
 //! exported unmangled so the core tool finds it; every layout it reads is
 //! `#[repr(C)]` and fixed by the const assertions below.
 
+use core::fmt;
 use core::mem::{offset_of, size_of};
 
 use crate::atomic::statics::{AtomicPtr, AtomicU32, AtomicU64};
@@ -664,6 +665,186 @@ impl ClockInfo {
     }
 }
 
+/// `cycles` of a counter running at `freq_hz`, in nanoseconds, or `None`
+/// when the counter is uncalibrated or the result does not fit.
+pub fn cycles_to_ns(cycles: u64, freq_hz: u64) -> Option<u64> {
+    if freq_hz == 0 {
+        return None;
+    }
+    let ns = u128::from(cycles)
+        .checked_mul(1_000_000_000)?
+        .checked_div(u128::from(freq_hz))?;
+    u64::try_from(ns).ok()
+}
+
+/// A timestamp field: `delta` cycles as microseconds with three decimals,
+/// or as raw cycles when the clock is uncalibrated.
+fn write_ts<W: fmt::Write>(out: &mut W, delta: u64, freq_hz: u64) -> fmt::Result {
+    match cycles_to_ns(delta, freq_hz) {
+        Some(ns) => write!(out, "{}.{:03}", ns / 1000, ns % 1000),
+        None => write!(out, "{delta}.000"),
+    }
+}
+
+/// One tracepoint as a Chrome trace-event instant event.
+fn write_event<W: fmt::Write>(
+    out: &mut W,
+    first: &mut bool,
+    r: &RecordData,
+    ev: Event,
+    delta: u64,
+    freq_hz: u64,
+    pid: u32,
+) -> fmt::Result {
+    if !*first {
+        out.write_char(',')?;
+    }
+    *first = false;
+    let (an, bn) = ev.arg_names();
+    write!(
+        out,
+        "{{\"name\":\"{}\",\"ph\":\"i\",\"s\":\"t\",\"ts\":",
+        ev.name()
+    )?;
+    write_ts(out, delta, freq_hz)?;
+    write!(
+        out,
+        ",\"pid\":{pid},\"tid\":{},\"args\":{{\"{an}\":\"{:#x}\",\"{bn}\":\"{:#x}\",\"seq\":\"{:#x}\"}}}}",
+        r.cpu, r.a, r.b, r.seq
+    )
+}
+
+/// A `ph:"M"` name event for a process or a thread.
+fn write_name<W: fmt::Write>(
+    out: &mut W,
+    first: &mut bool,
+    what: &str,
+    pid: u32,
+    tid: u32,
+    name: fmt::Arguments<'_>,
+) -> fmt::Result {
+    if !*first {
+        out.write_char(',')?;
+    }
+    *first = false;
+    write!(
+        out,
+        "{{\"name\":\"{what}\",\"ph\":\"M\",\"ts\":0,\"pid\":{pid},\"tid\":{tid},\"args\":{{\"name\":\"{name}\"}}}}"
+    )
+}
+
+/// Write every CPU's records as one Chrome trace-event JSON object, which
+/// Perfetto opens. `cpus` holds each CPU's valid records in ring order, as
+/// [`ordered`] yields them. With [`Order::Global`] the records form one
+/// timeline, merged by timestamp and counted from the smallest; otherwise
+/// each CPU is a track of its own in ring order, counted from its first
+/// record, and `otherData` says why (DESIGN §6.4). Allocates nothing.
+pub fn export_chrome<W: fmt::Write>(
+    cpus: &[(u32, &[RecordData])],
+    clock: &ClockInfo,
+    out: &mut W,
+) -> fmt::Result {
+    if cpus.len() > MAX_CPUS {
+        return Err(fmt::Error);
+    }
+    let order = clock.order();
+    out.write_str("{\"traceEvents\":[")?;
+    let mut first = true;
+    match order {
+        Order::Global => {
+            write_name(
+                out,
+                &mut first,
+                "process_name",
+                0,
+                0,
+                format_args!("vibeOS"),
+            )?;
+            for (cpu, _) in cpus {
+                write_name(
+                    out,
+                    &mut first,
+                    "thread_name",
+                    0,
+                    *cpu,
+                    format_args!("cpu {cpu}"),
+                )?;
+            }
+            let base = cpus
+                .iter()
+                .flat_map(|(_, rs)| rs.iter())
+                .filter(|r| r.event().is_some())
+                .map(|r| r.tsc)
+                .min()
+                .unwrap_or(0);
+            // A k-way merge: each CPU's cursor, advanced past the smallest
+            // head each round; ties go to the lower CPU index.
+            let mut at = [0usize; MAX_CPUS];
+            loop {
+                let mut best: Option<(usize, &RecordData)> = None;
+                for (i, (_, rs)) in cpus.iter().enumerate() {
+                    let Some(r) = at.get(i).and_then(|&k| rs.get(k)) else {
+                        continue;
+                    };
+                    if best.is_none_or(|(_, b)| r.tsc < b.tsc) {
+                        best = Some((i, r));
+                    }
+                }
+                let Some((i, r)) = best else {
+                    break;
+                };
+                if let Some(k) = at.get_mut(i) {
+                    *k = k.saturating_add(1);
+                }
+                if let Some(ev) = r.event() {
+                    let delta = r.tsc.saturating_sub(base);
+                    write_event(out, &mut first, r, ev, delta, clock.freq_hz, 0)?;
+                }
+            }
+        }
+        Order::PerCpu(_) => {
+            for (cpu, rs) in cpus {
+                write_name(
+                    out,
+                    &mut first,
+                    "process_name",
+                    *cpu,
+                    *cpu,
+                    format_args!("cpu {cpu} (own clock)"),
+                )?;
+                write_name(
+                    out,
+                    &mut first,
+                    "thread_name",
+                    *cpu,
+                    *cpu,
+                    format_args!("cpu {cpu}"),
+                )?;
+                let base = rs.iter().find(|r| r.event().is_some()).map_or(0, |r| r.tsc);
+                for r in rs.iter() {
+                    if let Some(ev) = r.event() {
+                        let delta = r.tsc.saturating_sub(base);
+                        write_event(out, &mut first, r, ev, delta, clock.freq_hz, *cpu)?;
+                    }
+                }
+            }
+        }
+    }
+    let (name, reason) = match order {
+        Order::Global => (
+            "global",
+            "invariant tsc and no backward step in the warp test",
+        ),
+        Order::PerCpu(why) => ("per-cpu", why),
+    };
+    let clk = if clock.freq_hz == 0 { "cycles" } else { "tsc" };
+    write!(
+        out,
+        "],\"displayTimeUnit\":\"ns\",\"otherData\":{{\"clock\":\"{clk}\",\"freq_hz\":\"{}\",\"order\":\"{name}\",\"reason\":\"{reason}\",\"skew_cycles\":\"{}\"}}}}",
+        clock.freq_hz, clock.max_skew
+    )
+}
+
 /// Where [`emit`] sends a record: null, or the kernel's
 /// `trace_init::record`, stored by [`set_sink`].
 static SINK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
@@ -728,328 +909,4 @@ macro_rules! trace {
 }
 
 #[cfg(test)]
-mod tests {
-    extern crate std;
-
-    use std::sync::Mutex;
-    use std::vec::Vec;
-
-    use super::*;
-
-    #[test]
-    fn record_layout_is_fixed() {
-        assert_eq!(size_of::<Record>(), 40);
-        assert_eq!(offset_of!(Record, seq), 0);
-        assert_eq!(offset_of!(Record, tsc), 8);
-        assert_eq!(offset_of!(Record, a), 16);
-        assert_eq!(offset_of!(Record, b), 24);
-        assert_eq!(offset_of!(Record, cpu), 32);
-        assert_eq!(offset_of!(Record, event), 36);
-        assert_eq!(offset_of!(Ring<4>, records), 16);
-        assert_eq!(offset_of!(KernelTrace, rings), 48);
-        assert_eq!(
-            size_of::<KernelTrace>(),
-            48 + MAX_CPUS * (16 + RECORDS_PER_CPU * 40)
-        );
-        assert_eq!(MAX_CPUS, 64);
-        assert_eq!(RECORDS_PER_CPU, 256);
-    }
-
-    #[test]
-    fn ring_push_assigns_positions() {
-        let r: Ring<8> = Ring::new();
-        for i in 0..5u64 {
-            r.push(3, Event::Wake, 100 + i, i, i * 2);
-        }
-        assert_eq!(r.head(), 5);
-        for pos in 0..5u64 {
-            let d = r.get(pos).unwrap();
-            assert_eq!(d.seq, pos + 1);
-            assert_eq!(d.tsc, 100 + pos);
-            assert_eq!(d.a, pos);
-            assert_eq!(d.b, pos * 2);
-            assert_eq!(d.cpu, 3);
-            assert_eq!(d.event(), Some(Event::Wake));
-        }
-        assert_eq!(r.get(5), None);
-    }
-
-    #[test]
-    fn ring_wraps_keeping_newest() {
-        let r: Ring<4> = Ring::new();
-        for i in 0..10u64 {
-            r.push(0, Event::Switch, i, i, 0);
-        }
-        // Positions 0 to 5 were overwritten; their slots hold 6 to 9.
-        for pos in 0..6u64 {
-            assert_eq!(r.get(pos), None, "pos {pos}");
-        }
-        for pos in 6..10u64 {
-            assert_eq!(r.get(pos).unwrap().a, pos);
-        }
-        let mut snap = [RecordData::default(); 4];
-        let head = r.snapshot(&mut snap);
-        let got: Vec<u64> = ordered(head, &snap).map(|d| d.a).collect();
-        assert_eq!(got, [6, 7, 8, 9]);
-    }
-
-    #[test]
-    fn torn_last_record_dropped() {
-        let r: Ring<4> = Ring::new();
-        for i in 0..3u64 {
-            r.push(1, Event::IrqEnter, i, 32, 0);
-        }
-        // A writer stopped between its `seq = 0` store and its last store.
-        r.records[2].seq.store(0, Ordering::Relaxed);
-        r.records[2].a.store(0xdead, Ordering::Relaxed);
-        assert_eq!(r.get(2), None);
-        assert!(r.get(1).is_some());
-        let mut snap = [RecordData::default(); 4];
-        let head = r.snapshot(&mut snap);
-        assert_eq!(ordered(head, &snap).count(), 2);
-        // The same slot as a dump holds it: seq 0, fields half-written.
-        let mut dump = [RecordData::default(); 4];
-        for (i, d) in dump.iter_mut().enumerate().take(3) {
-            *d = RecordData {
-                seq: i as u64 + 1,
-                tsc: i as u64,
-                a: 32,
-                b: 0,
-                cpu: 1,
-                event: Event::IrqEnter.as_u32(),
-            };
-        }
-        dump[2].seq = 0;
-        let seqs: Vec<u64> = ordered(3, &dump).map(|d| d.seq).collect();
-        assert_eq!(seqs, [1, 2]);
-        // A stale slot: its seq names another lap.
-        dump[2].seq = 7;
-        assert_eq!(ordered(3, &dump).count(), 2);
-        assert!(!valid_at(2, &dump[2]));
-    }
-
-    #[test]
-    fn record_data_le_bytes_round_trip() {
-        let d = RecordData {
-            seq: 0x0102_0304_0506_0708,
-            tsc: 0x1112_1314_1516_1718,
-            a: 0x2122_2324_2526_2728,
-            b: 0x3132_3334_3536_3738,
-            cpu: 0x4142_4344,
-            event: 0x5152_5354,
-        };
-        let b = d.to_le_bytes();
-        assert_eq!(b[0], 0x08);
-        assert_eq!(b[8], 0x18);
-        assert_eq!(b[16], 0x28);
-        assert_eq!(b[24], 0x38);
-        assert_eq!(b[32], 0x44);
-        assert_eq!(b[36], 0x54);
-        assert_eq!(RecordData::from_le_bytes(&b), d);
-        // The bytes a live `Record` holds are the same layout.
-        let r: Ring<1> = Ring::new();
-        r.push(7, Event::BlockSubmit, 99, 5, 6);
-        let raw = &r.records[0] as *const Record as *const [u8; RECORD_SIZE];
-        // SAFETY: `Record` is `#[repr(C)]`, 40 bytes of integers with no
-        // padding (the const assertions above), established here.
-        let got = RecordData::from_le_bytes(unsafe { &*raw });
-        assert_eq!(got, r.get(0).unwrap());
-    }
-
-    #[test]
-    fn traced_vector_skips_ist_vectors() {
-        for v in [1u8, 2, 8, 18] {
-            assert_eq!(traced_vector(v), None, "vector {v}");
-        }
-        for v in 0u8..32 {
-            let want = if v == 14 {
-                Some(Event::PageFault)
-            } else {
-                None
-            };
-            assert_eq!(traced_vector(v), want, "vector {v}");
-        }
-        for v in 32u8..=255 {
-            assert_eq!(traced_vector(v), Some(Event::IrqEnter), "vector {v}");
-        }
-    }
-
-    #[test]
-    fn event_encoding_round_trips() {
-        assert_eq!(Event::from_u32(0), None);
-        assert_eq!(Event::from_u32(12), None);
-        for (i, ev) in Event::ALL.iter().enumerate() {
-            assert_eq!(ev.as_u32(), i as u32 + 1);
-            assert_eq!(Event::from_u32(ev.as_u32()), Some(*ev));
-            assert!(!ev.name().is_empty());
-        }
-        assert_eq!(Event::SyscallEnter.as_u32(), 1);
-        assert_eq!(Event::BlockComplete.as_u32(), 11);
-    }
-
-    static SEEN: Mutex<Vec<(Event, u64, u64)>> = Mutex::new(Vec::new());
-
-    fn capture(ev: Event, a: u64, b: u64) {
-        SEEN.lock().unwrap().push((ev, a, b));
-    }
-
-    #[test]
-    fn emit_reaches_installed_sink() {
-        // The sink is global and other tests' code may emit, so look for
-        // this test's own arguments only.
-        const A: u64 = 0x5eed_0000_1234_5678;
-        set_sink(capture);
-        crate::trace!(IpiSend, A, 3);
-        trap_enter(14, A, 7);
-        trap_enter(2, A, 9);
-        trap_enter(0x40, A, 0);
-        trap_exit(0x40);
-        trap_exit(18);
-        let seen = SEEN.lock().unwrap();
-        assert!(seen.contains(&(Event::IpiSend, A, 3)));
-        assert!(seen.contains(&(Event::PageFault, A, 7)));
-        assert!(!seen.iter().any(|e| e.1 == A && e.2 == 9));
-        assert!(seen.contains(&(Event::IrqEnter, 0x40, 0)));
-        assert!(seen.contains(&(Event::IrqExit, 0x40, 0)));
-        assert!(!seen.contains(&(Event::IrqExit, 18, 0)));
-    }
-
-    #[test]
-    fn trace_init_writes_header() {
-        let t: Trace<2, 4> = Trace::new();
-        assert!(!t.is_live());
-        t.init();
-        assert!(t.is_live());
-        assert_eq!(t.ring(1).unwrap().cap.load(Ordering::Relaxed), 4);
-        assert!(t.ring(2).is_none());
-    }
-
-    #[test]
-    fn warp_step_scripted_backward() {
-        let w = WarpLine::new();
-        assert_eq!(w.step(|| 100), (100, 0));
-        assert_eq!(w.step(|| 90), (90, 10));
-        // The largest read stays published.
-        assert_eq!(w.step(|| 95), (95, 5));
-        assert_eq!(w.step(|| 120), (120, 0));
-        let reads = [200u64, 210, 150, 220, 230];
-        let i = std::cell::Cell::new(0usize);
-        let w = WarpLine::new();
-        let worst = w.run(
-            || {
-                let v = reads[i.get().min(reads.len() - 1)];
-                i.set(i.get() + 1);
-                v
-            },
-            25,
-            100,
-        );
-        assert_eq!(worst, 60);
-    }
-
-    #[test]
-    fn warp_step_monotonic_sees_none() {
-        let w = WarpLine::new();
-        let t = std::cell::Cell::new(0u64);
-        let clock = || {
-            t.set(t.get() + 3);
-            t.get()
-        };
-        assert_eq!(w.run(clock, 3000, WARP_MAX_ITERS), 0);
-        // It stops at the span, well before the iteration cap.
-        assert!(t.get() < 3100);
-        // And at the cap when the span is never reached.
-        let n = std::cell::Cell::new(0u32);
-        let w = WarpLine::new();
-        w.run(
-            || {
-                n.set(n.get() + 1);
-                1
-            },
-            u64::MAX,
-            50,
-        );
-        assert_eq!(n.get(), 51);
-    }
-
-    #[test]
-    fn warp_threads_synced_see_none() {
-        use std::sync::Arc;
-        use std::sync::atomic::AtomicU64 as StdU64;
-        // One shared counter both sides read: a synchronized clock.
-        let counter = Arc::new(StdU64::new(1));
-        let line = Arc::new(WarpLine::new());
-        let side = |c: Arc<StdU64>, l: Arc<WarpLine>| {
-            std::thread::spawn(move || {
-                let read = || c.fetch_add(1, Ordering::Relaxed);
-                assert!(l.arrive(read, 1 << 40));
-                let back = l.run(read, 20_000, WARP_MAX_ITERS);
-                l.leave();
-                back
-            })
-        };
-        let a = side(counter.clone(), line.clone());
-        let b = side(counter.clone(), line.clone());
-        assert_eq!(a.join().unwrap(), 0);
-        assert_eq!(b.join().unwrap(), 0);
-        assert!(line.wait_left(|| 0, 1));
-        line.reset();
-        assert_eq!(line.arrived.load(Ordering::Relaxed), 0);
-        assert_eq!(line.left.load(Ordering::Relaxed), 0);
-        assert_eq!(line.last.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn warp_arrive_times_out_alone() {
-        let w = WarpLine::new();
-        let t = std::cell::Cell::new(0u64);
-        let clock = || {
-            t.set(t.get() + 10);
-            t.get()
-        };
-        assert!(!w.arrive(clock, 1000));
-        assert!(t.get() >= 1000);
-        // It withdrew, so the next side waits for a partner of its own.
-        assert_eq!(w.arrived.load(Ordering::Relaxed), 0);
-        assert!(!w.wait_left(clock, 100));
-        // A partner already there: the second arrival meets it at once.
-        w.arrived.store(1, Ordering::Relaxed);
-        assert!(w.arrive(|| 0, 0));
-    }
-
-    #[test]
-    fn order_rule_matrix() {
-        for invariant in [false, true] {
-            for warp_measured in [false, true] {
-                for max_skew in [0u64, 1, 5000] {
-                    let c = ClockInfo {
-                        freq_hz: 1_000_000_000,
-                        invariant,
-                        warp_measured,
-                        max_skew,
-                    };
-                    let global = invariant && warp_measured && max_skew == 0;
-                    assert_eq!(c.order() == Order::Global, global, "{c:?}");
-                    let f = c.flags();
-                    assert_eq!(f & CLOCK_PUBLISHED, CLOCK_PUBLISHED);
-                    assert_eq!(f & TSC_INVARIANT != 0, invariant);
-                    assert_eq!(f & WARP_MEASURED != 0, warp_measured);
-                    assert_eq!(f & WARP_BACKWARD != 0, max_skew != 0);
-                    assert_eq!(ClockInfo::from_header(c.freq_hz, max_skew, f), Some(c));
-                }
-            }
-        }
-        assert_eq!(ClockInfo::from_header(1, 0, 0), None);
-        let t: Trace<1, 1> = Trace::new();
-        assert_eq!(t.clock(), None);
-        let c = ClockInfo {
-            freq_hz: 3,
-            invariant: true,
-            warp_measured: false,
-            max_skew: 0,
-        };
-        t.publish_clock(&c);
-        assert_eq!(t.clock(), Some(c));
-        assert_eq!(c.order(), Order::PerCpu("tsc warp test did not run"));
-    }
-}
+mod tests;

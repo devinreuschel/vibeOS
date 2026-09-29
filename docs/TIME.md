@@ -162,9 +162,13 @@ it shows, those two read once per tick and interpolate from the TSC, which still
 ticks coalesce. Planned: ROADMAP §10.3 (F027) moves x86_64 `now_ns` to this model, and §11.3 gives
 aarch64 the same function. Until then option 1 stalls and lags: after a CPU 0 IF-off stretch or deep
 idle, the `LAST_NS` clamp repeats one value until the interpolation catches up, and time then stays
-behind the TSC by the lost ticks. Trace timestamps are separate: ROADMAP §10.7's records carry raw
-cycle-counter reads, which order records across CPUs only when the TSC is invariant and the warp test
-saw no backward step.
+behind the TSC by the lost ticks. Trace timestamps are separate: ROADMAP §10.7's flight-recorder
+records carry raw cycle-counter reads. A trace orders records across CPUs only when CPUID reports the
+TSC invariant and the bring-up warp test ([DESIGN §7.4](SMP.md#74-ap-bring-up-sequence)), whose
+result `vibeOS: smp: tsc skew <n> cycles` reports, saw no backward step (Linux's `check_tsc_warp`
+rule). Otherwise the export (`trace::export_chrome`) orders records within each CPU only and says so
+in its `otherData`. The header of `VIBEOS_TRACE` carries the calibration and the warp result for the
+core tool.
 
 ## 6.5 Timers and timeouts
 
