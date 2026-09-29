@@ -1,34 +1,55 @@
 use super::*;
 
+/// The backup boot sector (BPB_BkBootSec).
+const BACKUP_BOOT: u32 = 6;
+/// The backup FSInfo sector, after the backup boot sector.
+const BACKUP_FSINFO: u32 = BACKUP_BOOT + 1;
+
 /// Format `buf` as FAT32. Size must be a multiple of 512 and at least 64 KiB.
 pub fn mkfs(buf: &mut [u8], label: &[u8]) -> Result<FatInfo, FatError> {
     if buf.len() < INITRD_BYTES || !buf.len().is_multiple_of(SEC) {
         return Err(FatError::Inval);
     }
     buf.fill(0);
-    let totsec = (buf.len() / SEC) as u32;
+    let totsec = u32::try_from(buf.len() / SEC).map_err(|_| FatError::Inval)?;
     let rsvd = 32u32;
     let spc = 1u8;
     let num_fats = 2u8;
+    // The first data sector for a FAT of `fatsz` sectors.
+    let data_start = |fatsz: u32| {
+        u32::from(num_fats)
+            .checked_mul(fatsz)
+            .and_then(|f| f.checked_add(rsvd))
+            .ok_or(FatError::Inval)
+    };
     let mut fatsz = 1u32;
     loop {
-        let data = totsec.saturating_sub(rsvd + num_fats as u32 * fatsz);
-        let nclus = data / spc as u32;
+        let data = totsec.saturating_sub(data_start(fatsz)?);
+        let nclus = data.checked_div(u32::from(spc)).ok_or(FatError::Inval)?;
         if nclus < 2 {
             return Err(FatError::Inval);
         }
-        let need = ((nclus + 2) * 4).div_ceil(SEC as u32);
+        let need = nclus
+            .checked_add(2)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or(FatError::Inval)?
+            .div_ceil(SEC as u32);
         if need <= fatsz {
             break;
         }
         fatsz = need;
-        if rsvd + num_fats as u32 * fatsz >= totsec {
+        if data_start(fatsz)? >= totsec {
             return Err(FatError::Inval);
         }
     }
-    let data_lba = rsvd + num_fats as u32 * fatsz;
-    let nclus = (totsec - data_lba) / spc as u32;
+    let data_lba = data_start(fatsz)?;
+    let nclus = totsec
+        .checked_sub(data_lba)
+        .and_then(|n| n.checked_div(u32::from(spc)))
+        .ok_or(FatError::Inval)?;
     let root = 2u32;
+    let mut lab = [b' '; 11];
+    lab.iter_mut().zip(label).for_each(|(o, &c)| *o = c);
     let mut boot = [0u8; SEC];
     boot[0] = 0xEB;
     boot[1] = 0x58;
@@ -45,45 +66,47 @@ pub fn mkfs(buf: &mut [u8], label: &[u8]) -> Result<FatInfo, FatError> {
     put_le32(&mut boot, 36, fatsz)?;
     put_le32(&mut boot, 44, root)?;
     put_le16(&mut boot, 48, 1)?;
-    put_le16(&mut boot, 50, 6)?;
+    put_le16(&mut boot, 50, BACKUP_BOOT as u16)?;
     boot[64] = 0x80;
     boot[66] = 0x29;
     put_le32(&mut boot, 67, 0x5642_4F53)?;
-    let mut lab = [b' '; 11];
-    let n = label.len().min(11);
-    lab[..n].copy_from_slice(&label[..n]);
     boot[71..82].copy_from_slice(&lab);
     boot[82..90].copy_from_slice(b"FAT32   ");
     boot[510] = 0x55;
     boot[511] = 0xAA;
-    buf[..SEC].copy_from_slice(&boot);
-    if 6 < rsvd {
-        buf[6 * SEC..7 * SEC].copy_from_slice(&boot);
-    }
     let mut fs = [0u8; SEC];
     put_le32(&mut fs, 0, 0x4161_5252)?;
     put_le32(&mut fs, 484, 0x6141_7272)?;
     put_le32(&mut fs, 488, nclus.saturating_sub(1))?;
     put_le32(&mut fs, 492, 3)?;
     put_le32(&mut fs, 508, 0xAA55_0000)?;
-    buf[SEC..2 * SEC].copy_from_slice(&fs);
-    if 7 < rsvd {
-        buf[7 * SEC..8 * SEC].copy_from_slice(&fs);
-    }
     let mut fat0 = [0u8; SEC];
     put_le32(&mut fat0, 0, 0x0FFF_FFF8)?;
     put_le32(&mut fat0, 4, 0x0FFF_FFFF)?;
     put_le32(&mut fat0, 8, 0x0FFF_FFFF)?;
-    let fat0_off = rsvd as usize * SEC;
-    let fat1_off = fat0_off + fatsz as usize * SEC;
-    buf[fat0_off..fat0_off + SEC].copy_from_slice(&fat0);
-    buf[fat1_off..fat1_off + SEC].copy_from_slice(&fat0);
-    let data_off = data_lba as usize * SEC;
-    if data_off + ENT <= buf.len() {
-        let mut ent = [0u8; ENT];
-        ent[..11].copy_from_slice(&lab);
-        ent[11] = ATTR_VOL;
-        buf[data_off..data_off + ENT].copy_from_slice(&ent);
+    let mut vol_ent = [0u8; ENT];
+    vol_ent[..11].copy_from_slice(&lab);
+    vol_ent[11] = ATTR_VOL;
+
+    // Sector offsets into `buf`, each checked against its length by `put_at`.
+    let at = |lba: u32| (lba as usize).checked_mul(SEC).ok_or(FatError::Inval);
+    put_at(buf, 0, &boot)?;
+    if BACKUP_BOOT < rsvd {
+        put_at(buf, at(BACKUP_BOOT)?, &boot)?;
+    }
+    put_at(buf, at(1)?, &fs)?;
+    if BACKUP_FSINFO < rsvd {
+        put_at(buf, at(BACKUP_FSINFO)?, &fs)?;
+    }
+    put_at(buf, at(rsvd)?, &fat0)?;
+    put_at(
+        buf,
+        at(rsvd.checked_add(fatsz).ok_or(FatError::Inval)?)?,
+        &fat0,
+    )?;
+    let data_off = at(data_lba)?;
+    if let Some(dst) = buf.get_mut(data_off..).and_then(|b| b.get_mut(..ENT)) {
+        dst.copy_from_slice(&vol_ent);
     }
     Ok(FatInfo {
         bps: SEC as u32,
@@ -94,7 +117,7 @@ pub fn mkfs(buf: &mut [u8], label: &[u8]) -> Result<FatInfo, FatError> {
         totsec,
         root_clus: root,
         fsinfo: 1,
-        backup: 6,
+        backup: BACKUP_BOOT,
         data_lba,
         nclus,
         media: 0xF8,

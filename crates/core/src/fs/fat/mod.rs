@@ -14,6 +14,7 @@ use crate::fs::{FsError, InodeKind};
 mod chain;
 #[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 mod dirent;
+#[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 mod mkfs;
 #[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 mod rw;
