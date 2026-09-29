@@ -38,9 +38,6 @@ SEAM = "crates/core/src/atomic.rs"
 # Files that use `core`'s atomics directly at this tip, skipped until their
 # sweep (ROADMAP §10.1, C-ATOMICS) converts them; `--failing` regenerates it.
 PENDING: tuple[str, ...] = (
-    "crates/core/src/dev/dma.rs",
-    "crates/core/src/dev/entropy.rs",
-    "crates/core/src/dev/virtio.rs",
     "crates/core/src/kalloc.rs",
     "crates/core/src/mm/paging.rs",
     "crates/core/src/mm/pmm.rs",

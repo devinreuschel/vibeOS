@@ -4,7 +4,9 @@
 //! tests and the pre-hook boot path leave it unset; kernfs then uses
 //! xorshift.
 
-use core::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
+// Statics only, so `core`'s atomics from the seam's statics re-export
+// (C-ATOMICS).
+use crate::atomic::statics::{AtomicPtr, AtomicU8, Ordering};
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +55,8 @@ pub fn hw_fill(buf: &mut [u8]) -> usize {
     if p.is_null() {
         return 0;
     }
+    // SAFETY: invariant: a non-null `HW` holds a `HwFill`; established by
+    // `entropy::set_hw_fill`, its only store.
     let f: HwFill = unsafe { core::mem::transmute(p) };
     let (n, src) = f(buf);
     if n > 0 {
@@ -67,6 +71,8 @@ pub fn warn_xorshift() {
     if p.is_null() {
         return;
     }
+    // SAFETY: invariant: a non-null `WARN` holds a `WarnFn`; established by
+    // `entropy::set_warn`, its only store.
     let f: WarnFn = unsafe { core::mem::transmute(p) };
     f();
 }

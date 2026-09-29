@@ -4,7 +4,7 @@
 //! index wrap, indirect descriptors, and `EVENT_IDX`. Packed VQ is later.
 //! Kernel MMIO / DMA / MSI-X live in `virtio_init`.
 
-use core::sync::atomic::AtomicU16;
+use crate::atomic::AtomicU16;
 
 use crate::dma::{self, publish_index};
 use crate::pci::{
@@ -71,6 +71,7 @@ pub const MAX_VENDOR_CAPS: usize = 8;
 /// Features the transport will accept if the device offers them.
 pub const OFFER: u64 = F_VERSION_1 | F_INDIRECT_DESC | F_EVENT_IDX;
 
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VirtioError {
     NoVersion1,
@@ -80,6 +81,8 @@ pub enum VirtioError {
     NoDesc,
     Features,
     Failed,
+    /// An allocation the driver needs failed (DESIGN §4.4).
+    NoMemory,
 }
 
 impl VirtioError {
@@ -92,6 +95,7 @@ impl VirtioError {
             VirtioError::NoDesc => "no desc",
             VirtioError::Features => "features_ok",
             VirtioError::Failed => "failed",
+            VirtioError::NoMemory => "no memory",
         }
     }
 }
@@ -329,31 +333,61 @@ impl SplitLayout {
     }
 }
 
-fn load_u16(base: *const u8, off: usize) -> u16 {
+/// Little-endian volatile field access to device-shared memory.
+///
+/// # Safety
+/// `base + off` is valid for a volatile read (`load_*`) or write
+/// (`store_*`) of the field's size, and aligned to it.
+unsafe fn load_u16(base: *const u8, off: usize) -> u16 {
+    // SAFETY: the caller meets this fn's contract; established by
+    // `virtio::load_u16`'s `# Safety` section.
     unsafe { u16::from_le(core::ptr::read_volatile(base.add(off) as *const u16)) }
 }
 
-fn store_u16(base: *mut u8, off: usize, v: u16) {
+/// # Safety
+/// As [`load_u16`], for a write.
+unsafe fn store_u16(base: *mut u8, off: usize, v: u16) {
+    // SAFETY: the caller meets this fn's contract; established by
+    // `virtio::load_u16`'s `# Safety` section.
     unsafe { core::ptr::write_volatile(base.add(off) as *mut u16, v.to_le()) }
 }
 
-fn load_u32(base: *const u8, off: usize) -> u32 {
+/// # Safety
+/// As [`load_u16`], for four bytes.
+unsafe fn load_u32(base: *const u8, off: usize) -> u32 {
+    // SAFETY: the caller meets this fn's contract; established by
+    // `virtio::load_u16`'s `# Safety` section.
     unsafe { u32::from_le(core::ptr::read_volatile(base.add(off) as *const u32)) }
 }
 
-fn store_u32(base: *mut u8, off: usize, v: u32) {
+/// # Safety
+/// As [`load_u16`], for a four-byte write.
+unsafe fn store_u32(base: *mut u8, off: usize, v: u32) {
+    // SAFETY: the caller meets this fn's contract; established by
+    // `virtio::load_u16`'s `# Safety` section.
     unsafe { core::ptr::write_volatile(base.add(off) as *mut u32, v.to_le()) }
 }
 
-fn load_u64(base: *const u8, off: usize) -> u64 {
-    let lo = load_u32(base, off) as u64;
-    let hi = load_u32(base, off + 4) as u64;
-    lo | (hi << 32)
+/// Two dword reads, low first. `off` is 4-byte aligned.
+///
+/// # Safety
+/// As [`load_u16`], for eight bytes.
+unsafe fn load_u64(base: *const u8, off: usize) -> u64 {
+    // SAFETY: both dwords lie in the caller's eight valid bytes; established
+    // by `virtio::load_u64`'s `# Safety` section.
+    let (lo, hi) = unsafe { (load_u32(base, off), load_u32(base, off + 4)) };
+    lo as u64 | ((hi as u64) << 32)
 }
 
-fn store_u64(base: *mut u8, off: usize, v: u64) {
-    store_u32(base, off, v as u32);
-    store_u32(base, off + 4, (v >> 32) as u32);
+/// # Safety
+/// As [`load_u16`], for an eight-byte write.
+unsafe fn store_u64(base: *mut u8, off: usize, v: u64) {
+    // SAFETY: both dwords lie in the caller's eight valid bytes; established
+    // by `virtio::store_u64`'s `# Safety` section.
+    unsafe {
+        store_u32(base, off, v as u32);
+        store_u32(base, off + 4, (v >> 32) as u32);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -374,7 +408,7 @@ pub const MAX_CHAIN: usize = 8;
 
 /// Split VQ over a caller-owned DMA / sim buffer.
 pub struct SplitQueue {
-    pub layout: SplitLayout,
+    layout: SplitLayout,
     base: *mut u8,
     pub last_used: u16,
     free_head: u16,
@@ -384,11 +418,20 @@ pub struct SplitQueue {
     pub last_avail: u16,
 }
 
-// DMA / sim backing is owned alongside the queue (kernel: DmaBuffer).
+// SAFETY: invariant I233: the memory at `base` is owned alongside the
+// queue (the kernel keeps its `DmaBuffer` with it) and reached only through
+// the queue, so moving the queue to another thread moves that access with
+// it; established by `virtio::SplitQueue::new`.
 unsafe impl Send for SplitQueue {}
 
 impl SplitQueue {
-    pub fn new(layout: SplitLayout, base: *mut u8, event_idx: bool) -> Self {
+    /// A queue over the ring memory at `base`.
+    ///
+    /// # Safety
+    /// Invariant I233: `base` is 16-byte aligned and valid for volatile
+    /// reads and writes of `layout.total` bytes for the queue's whole life,
+    /// and nothing else reaches that memory but the device the queue serves.
+    pub unsafe fn new(layout: SplitLayout, base: *mut u8, event_idx: bool) -> Self {
         Self {
             layout,
             base,
@@ -400,24 +443,83 @@ impl SplitQueue {
         }
     }
 
+    pub fn layout(&self) -> SplitLayout {
+        self.layout
+    }
+
+    /// Byte offset `off` of a `len`-byte ring field, checked against the
+    /// ring. Every offset comes from `SplitLayout`, which masks each index
+    /// by the ring size, so the check holds by construction.
+    fn field(&self, off: usize, len: usize) -> *mut u8 {
+        assert!(
+            off.checked_add(len)
+                .is_some_and(|end| end <= self.layout.total),
+            "virtio: ring offset past the queue"
+        );
+        self.base.wrapping_add(off)
+    }
+
+    fn rd16(&self, off: usize) -> u16 {
+        let p = self.field(off, 2);
+        // SAFETY: invariant I233: `p` lies inside the queue's ring (checked
+        // by `field`), which `base` keeps valid and aligned; established by
+        // `virtio::SplitQueue::new`.
+        unsafe { load_u16(p, 0) }
+    }
+
+    fn wr16(&self, off: usize, v: u16) {
+        let p = self.field(off, 2);
+        // SAFETY: invariant I233, as in `rd16`; established by
+        // `virtio::SplitQueue::new`.
+        unsafe { store_u16(p, 0, v) }
+    }
+
+    fn rd32(&self, off: usize) -> u32 {
+        let p = self.field(off, 4);
+        // SAFETY: invariant I233, as in `rd16`; established by
+        // `virtio::SplitQueue::new`.
+        unsafe { load_u32(p, 0) }
+    }
+
+    fn wr32(&self, off: usize, v: u32) {
+        let p = self.field(off, 4);
+        // SAFETY: invariant I233, as in `rd16`; established by
+        // `virtio::SplitQueue::new`.
+        unsafe { store_u32(p, 0, v) }
+    }
+
+    fn rd64(&self, off: usize) -> u64 {
+        let p = self.field(off, 8);
+        // SAFETY: invariant I233, as in `rd16`; established by
+        // `virtio::SplitQueue::new`.
+        unsafe { load_u64(p, 0) }
+    }
+
+    fn wr64(&self, off: usize, v: u64) {
+        let p = self.field(off, 8);
+        // SAFETY: invariant I233, as in `rd16`; established by
+        // `virtio::SplitQueue::new`.
+        unsafe { store_u64(p, 0, v) }
+    }
+
     /// Chain free descriptors. Zero rings.
     pub fn init(&mut self) {
         let n = self.layout.size;
         let mut i = 0u16;
         while i < n {
             let off = self.layout.desc(i);
-            store_u64(self.base, off, 0);
-            store_u32(self.base, off + 8, 0);
-            store_u16(self.base, off + 12, 0);
-            store_u16(self.base, off + 14, if i + 1 < n { i + 1 } else { 0 });
+            self.wr64(off, 0);
+            self.wr32(off + 8, 0);
+            self.wr16(off + 12, 0);
+            self.wr16(off + 14, if i + 1 < n { i + 1 } else { 0 });
             i += 1;
         }
-        store_u16(self.base, self.layout.avail_off, 0);
-        store_u16(self.base, self.layout.avail_idx(), 0);
-        store_u16(self.base, self.layout.used_flags(), 0);
-        store_u16(self.base, self.layout.used_idx(), 0);
-        store_u16(self.base, self.layout.used_event(), 0);
-        store_u16(self.base, self.layout.avail_event(), 0);
+        self.wr16(self.layout.avail_off, 0);
+        self.wr16(self.layout.avail_idx(), 0);
+        self.wr16(self.layout.used_flags(), 0);
+        self.wr16(self.layout.used_idx(), 0);
+        self.wr16(self.layout.used_event(), 0);
+        self.wr16(self.layout.avail_event(), 0);
         self.free_head = 0;
         self.num_free = n;
         self.last_used = 0;
@@ -429,25 +531,25 @@ impl SplitQueue {
             return None;
         }
         let i = self.free_head;
-        let next = load_u16(self.base, self.layout.desc(i) + 14);
+        let next = self.rd16(self.layout.desc(i) + 14);
         self.free_head = next;
         self.num_free -= 1;
         Some(i)
     }
 
     fn push_free(&mut self, i: u16) {
-        store_u16(self.base, self.layout.desc(i) + 14, self.free_head);
-        store_u16(self.base, self.layout.desc(i) + 12, 0);
+        self.wr16(self.layout.desc(i) + 14, self.free_head);
+        self.wr16(self.layout.desc(i) + 12, 0);
         self.free_head = i;
         self.num_free = self.num_free.saturating_add(1);
     }
 
     fn write_desc(&self, i: u16, addr: u64, len: u32, flags: u16, next: u16) {
         let off = self.layout.desc(i);
-        store_u64(self.base, off, addr);
-        store_u32(self.base, off + 8, len);
-        store_u16(self.base, off + 12, flags);
-        store_u16(self.base, off + 14, next);
+        self.wr64(off, addr);
+        self.wr32(off + 8, len);
+        self.wr16(off + 12, flags);
+        self.wr16(off + 14, next);
     }
 
     pub fn add(&mut self, addr: u64, len: u32, flags: u16) -> Result<u16, VirtioError> {
@@ -483,8 +585,8 @@ impl SplitQueue {
             i += 1;
         }
         let head = ids[0];
-        let aidx = load_u16(self.base, self.layout.avail_idx());
-        store_u16(self.base, self.layout.avail_ring(aidx), head);
+        let aidx = self.rd16(self.layout.avail_idx());
+        self.wr16(self.layout.avail_ring(aidx), head);
         Ok(head)
     }
 
@@ -513,30 +615,30 @@ impl SplitQueue {
 
     /// Descriptor stores first. Then avail.idx with a real store-side barrier.
     pub fn publish(&mut self) -> u16 {
-        let old = load_u16(self.base, self.layout.avail_idx());
+        let old = self.rd16(self.layout.avail_idx());
         let new = old.wrapping_add(1);
         dma::dma_wmb();
-        store_u16(self.base, self.layout.avail_idx(), new);
+        self.wr16(self.layout.avail_idx(), new);
         self.last_avail = new;
         new
     }
 
     /// Same publish via [`publish_index`] so the DMA helper stays on the path.
     pub fn publish_atomic(&mut self, slot: &AtomicU16) -> u16 {
-        let old = load_u16(self.base, self.layout.avail_idx());
+        let old = self.rd16(self.layout.avail_idx());
         let new = old.wrapping_add(1);
-        store_u16(self.base, self.layout.avail_idx(), new);
+        self.wr16(self.layout.avail_idx(), new);
         publish_index(slot, new);
         self.last_avail = new;
         new
     }
 
     pub fn avail_idx(&self) -> u16 {
-        load_u16(self.base, self.layout.avail_idx())
+        self.rd16(self.layout.avail_idx())
     }
 
     pub fn used_idx(&self) -> u16 {
-        load_u16(self.base, self.layout.used_idx())
+        self.rd16(self.layout.used_idx())
     }
 
     pub fn pending(&self) -> u16 {
@@ -549,12 +651,12 @@ impl SplitQueue {
         }
         dma::dma_rmb();
         let off = self.layout.used_elem(self.last_used);
-        let id = load_u32(self.base, off) as u16;
-        let len = load_u32(self.base, off + 4);
+        let id = self.rd32(off) as u16;
+        let len = self.rd32(off + 4);
         self.last_used = self.last_used.wrapping_add(1);
         self.free_chain(id);
         if self.event_idx {
-            store_u16(self.base, self.layout.used_event(), self.last_used);
+            self.wr16(self.layout.used_event(), self.last_used);
         }
         Some(UsedElem { id, len })
     }
@@ -562,36 +664,43 @@ impl SplitQueue {
     pub fn should_kick(&self, old_avail: u16) -> bool {
         let new = self.avail_idx();
         if self.event_idx {
-            let event = load_u16(self.base, self.layout.avail_event());
+            let event = self.rd16(self.layout.avail_event());
             need_event(event, new, old_avail)
         } else {
-            load_u16(self.base, self.layout.used_flags()) & USED_F_NO_NOTIFY == 0
+            self.rd16(self.layout.used_flags()) & USED_F_NO_NOTIFY == 0
         }
     }
 
     pub fn desc_addr(&self, i: u16) -> u64 {
-        load_u64(self.base, self.layout.desc(i))
+        self.rd64(self.layout.desc(i))
     }
 
     pub fn desc_len(&self, i: u16) -> u32 {
-        load_u32(self.base, self.layout.desc(i) + 8)
+        self.rd32(self.layout.desc(i) + 8)
     }
 
     pub fn desc_flags(&self, i: u16) -> u16 {
-        load_u16(self.base, self.layout.desc(i) + 12)
+        self.rd16(self.layout.desc(i) + 12)
     }
 
     pub fn desc_next(&self, i: u16) -> u16 {
-        load_u16(self.base, self.layout.desc(i) + 14)
+        self.rd16(self.layout.desc(i) + 14)
     }
 }
 
-/// One WRITE desc in an indirect table. `table` is 16 bytes.
-pub fn write_indirect_write(table: *mut u8, addr: u64, len: u32) {
-    store_u64(table, 0, addr);
-    store_u32(table, 8, len);
-    store_u16(table, 12, DESC_F_WRITE);
-    store_u16(table, 14, 0);
+/// One WRITE desc in an indirect table.
+///
+/// # Safety
+/// `table` is 16-byte aligned and valid for volatile writes of 16 bytes.
+pub unsafe fn write_indirect_write(table: *mut u8, addr: u64, len: u32) {
+    // SAFETY: the four fields lie in the caller's 16 valid bytes; established
+    // by `virtio::write_indirect_write`'s `# Safety` section.
+    unsafe {
+        store_u64(table, 0, addr);
+        store_u32(table, 8, len);
+        store_u16(table, 12, DESC_F_WRITE);
+        store_u16(table, 14, 0);
+    }
 }
 
 /// Simulated device: consume avail, complete WRITE / INDIRECT WRITE descs.
@@ -609,23 +718,31 @@ pub unsafe fn sim_complete(
     let n = used_pending(avail, used);
     let mut i = 0u16;
     while i < n {
-        let head = load_u16(q.base, q.layout.avail_ring(used.wrapping_add(i)));
+        let head = q.rd16(q.layout.avail_ring(used.wrapping_add(i)));
         let flags = q.desc_flags(head);
         let mut written = 0u32;
         if flags & DESC_F_INDIRECT != 0 {
             let taddr = q.desc_addr(head);
             let tlen = q.desc_len(head);
             if tlen >= 16 && taddr >= guest_off {
-                let p = unsafe { guest_mem.add((taddr - guest_off) as usize) };
-                let daddr = load_u64(p, 0);
-                let dlen = load_u32(p, 8);
-                let dflags = load_u16(p, 12);
+                // SAFETY: the indirect table's 16 bytes lie in `guest_mem`
+                // at `taddr - guest_off`; established by
+                // `virtio::sim_complete`'s `# Safety` section.
+                let (daddr, dlen, dflags) = unsafe {
+                    let p = guest_mem.add((taddr - guest_off) as usize);
+                    (load_u64(p, 0), load_u32(p, 8), load_u16(p, 12))
+                };
                 if dflags & DESC_F_WRITE != 0 && daddr >= guest_off {
-                    fill_bytes(
-                        unsafe { guest_mem.add((daddr - guest_off) as usize) },
-                        dlen as usize,
-                        fill,
-                    );
+                    // SAFETY: the WRITE buffer's `dlen` bytes lie in
+                    // `guest_mem`; established by `virtio::sim_complete`'s
+                    // `# Safety` section.
+                    unsafe {
+                        fill_bytes(
+                            guest_mem.add((daddr - guest_off) as usize),
+                            dlen as usize,
+                            fill,
+                        )
+                    };
                     written = dlen;
                 }
             }
@@ -633,29 +750,37 @@ pub unsafe fn sim_complete(
             let daddr = q.desc_addr(head);
             let dlen = q.desc_len(head);
             if daddr >= guest_off {
-                fill_bytes(
-                    unsafe { guest_mem.add((daddr - guest_off) as usize) },
-                    dlen as usize,
-                    fill,
-                );
+                // SAFETY: the WRITE buffer's `dlen` bytes lie in `guest_mem`;
+                // established by `virtio::sim_complete`'s `# Safety` section.
+                unsafe {
+                    fill_bytes(
+                        guest_mem.add((daddr - guest_off) as usize),
+                        dlen as usize,
+                        fill,
+                    )
+                };
             }
             written = dlen;
         }
         let uoff = q.layout.used_elem(used.wrapping_add(i));
-        store_u32(q.base, uoff, head as u32);
-        store_u32(q.base, uoff + 4, written);
+        q.wr32(uoff, head as u32);
+        q.wr32(uoff + 4, written);
         i += 1;
     }
     if n != 0 {
         dma::dma_wmb();
-        store_u16(q.base, q.layout.used_idx(), used.wrapping_add(n));
+        q.wr16(q.layout.used_idx(), used.wrapping_add(n));
     }
     n
 }
 
-fn fill_bytes(p: *mut u8, len: usize, fill: u8) {
+/// # Safety
+/// `p` is valid for volatile writes of `len` bytes.
+unsafe fn fill_bytes(p: *mut u8, len: usize, fill: u8) {
     let mut i = 0usize;
     while i < len {
+        // SAFETY: `i < len`; established by `virtio::fill_bytes`'s
+        // `# Safety` section.
         unsafe { p.add(i).write_volatile(fill) };
         i += 1;
     }
@@ -727,7 +852,17 @@ mod tests {
         let mut v = vec![0u8; n + 16];
         let p = v.as_mut_ptr();
         let adj = (16 - (p as usize % 16)) % 16;
+        // SAFETY: `adj < 16` and the vector has 16 spare bytes; established
+        // here.
         (v, unsafe { p.add(adj) })
+    }
+
+    /// A queue over a [`pool`] buffer.
+    fn queue(layout: SplitLayout, base: *mut u8, event_idx: bool) -> SplitQueue {
+        // SAFETY: invariant I233: every test passes a 16-byte-aligned `pool`
+        // buffer of at least `layout.total` bytes, which it keeps alive
+        // while it uses the queue; established here, by each caller.
+        unsafe { SplitQueue::new(layout, base, event_idx) }
     }
 
     #[test]
@@ -875,7 +1010,7 @@ mod tests {
         let layout = SplitLayout::new(4).unwrap();
         let data_off = layout.total as u64;
         let (_keep, base) = pool(layout.total + 64);
-        let mut q = SplitQueue::new(layout, base, true);
+        let mut q = queue(layout, base, true);
         q.init();
         let mut n = 0u16;
         while n < 20 {
@@ -883,10 +1018,10 @@ mod tests {
             q.add(da, 8, DESC_F_WRITE).unwrap();
             let old = q.last_avail;
             q.publish();
-            assert_eq!(
-                unsafe { sim_complete(&mut q, (0xA0 + n) as u8, base, 0) },
-                1
-            );
+            // SAFETY: descriptors address `base` from offset 0, the `pool`
+            // buffer; established here.
+            let done = unsafe { sim_complete(&mut q, (0xA0 + n) as u8, base, 0) };
+            assert_eq!(done, 1);
             let u = q.get_used().unwrap();
             assert_eq!(u.len, 8);
             assert_eq!(q.get_used(), None);
@@ -904,20 +1039,24 @@ mod tests {
         let table_off = ((layout.total + 15) & !15) as u64;
         let data_off = table_off + 16;
         let (_keep, base) = pool((data_off as usize) + 16);
-        let mut q = SplitQueue::new(layout, base, false);
+        let mut q = queue(layout, base, false);
         q.init();
-        write_indirect_write(unsafe { base.add(table_off as usize) }, data_off, 4);
+        // SAFETY: the table's 16 aligned bytes lie in the `pool` buffer;
+        // established here.
+        unsafe { write_indirect_write(base.add(table_off as usize), data_off, 4) };
         q.add_indirect(table_off, 16).unwrap();
         let slot = AtomicU16::new(0);
         q.publish_atomic(&slot);
         assert_eq!(slot.load(core::sync::atomic::Ordering::Acquire), 1);
+        // SAFETY: descriptors address `base` from offset 0; established here.
         assert_eq!(unsafe { sim_complete(&mut q, 0x5A, base, 0) }, 1);
         let u = q.get_used().unwrap();
         assert_eq!(u.len, 4);
+        // SAFETY: `data_off` lies in the `pool` buffer; established here.
         unsafe {
             assert_eq!(base.add(data_off as usize).read_volatile(), 0x5A);
         }
-        store_u16(base, q.layout.used_flags(), USED_F_NO_NOTIFY);
+        q.wr16(q.layout.used_flags(), USED_F_NO_NOTIFY);
         q.add(data_off, 4, DESC_F_WRITE).unwrap();
         let old = q.last_avail;
         q.publish();
@@ -928,7 +1067,7 @@ mod tests {
     fn no_desc_when_full() {
         let layout = SplitLayout::new(2).unwrap();
         let (_keep, base) = pool(layout.total);
-        let mut q = SplitQueue::new(layout, base, false);
+        let mut q = queue(layout, base, false);
         q.init();
         q.add(0x1000, 4, DESC_F_WRITE).unwrap();
         q.add(0x2000, 4, DESC_F_WRITE).unwrap();
@@ -939,7 +1078,7 @@ mod tests {
     fn chain_three_and_free() {
         let layout = SplitLayout::new(8).unwrap();
         let (_keep, base) = pool(layout.total);
-        let mut q = SplitQueue::new(layout, base, false);
+        let mut q = queue(layout, base, false);
         q.init();
         let head = q
             .add_chain(&[
@@ -972,10 +1111,10 @@ mod tests {
         q.publish();
         let used = q.used_idx();
         let uoff = q.layout.used_elem(used);
-        store_u32(base, uoff, head as u32);
-        store_u32(base, uoff + 4, 513);
+        q.wr32(uoff, head as u32);
+        q.wr32(uoff + 4, 513);
         dma::dma_wmb();
-        store_u16(base, q.layout.used_idx(), used.wrapping_add(1));
+        q.wr16(q.layout.used_idx(), used.wrapping_add(1));
         let u = q.get_used().unwrap();
         assert_eq!(u.id, head);
         assert_eq!(u.len, 513);

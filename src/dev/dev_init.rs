@@ -1,14 +1,14 @@
 //! Device registry instance and bind. ROADMAP §6.1. The `lspci` and
 //! `devices` commands are in `shell::cmds::dev`.
 
-use vibeos::dev::{ClaimError, Device, Driver, MAX_DEVICES, Registry};
+use vibeos::dev::{Device, Driver, MAX_DEVICES, Registry};
 use vibeos::lock::RANK_DEVICE;
-use vibeos::pci::Bdf;
 
 use crate::pci_init;
 use crate::sync_init::SpinMutex;
 
-static REG: SpinMutex<Registry> = SpinMutex::with_rank(Registry::new(), RANK_DEVICE);
+/// The device registry. `dev::ktest` reads it for its hooks.
+pub(super) static REG: SpinMutex<Registry> = SpinMutex::with_rank(Registry::new(), RANK_DEVICE);
 
 pub fn push(d: Device) -> bool {
     REG.lock().push(d)
@@ -49,49 +49,8 @@ pub fn bind_all() {
     }
 }
 
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn len() -> usize {
-    REG.lock().len()
-}
-
 pub fn get(i: usize) -> Option<Device> {
     REG.lock().get(i).copied()
-}
-
-#[allow(dead_code)]
-pub fn find_bdf(bdf: Bdf) -> Option<(usize, Device)> {
-    let g = REG.lock();
-    let mut i = 0usize;
-    while i < g.len() {
-        if let Some(d) = g.get(i)
-            && d.addr == bdf
-        {
-            return Some((i, *d));
-        }
-        i += 1;
-    }
-    None
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn find_id(vendor: u16, device: u16) -> Option<(usize, Device)> {
-    let g = REG.lock();
-    let mut i = 0usize;
-    while i < g.len() {
-        if let Some(d) = g.get(i)
-            && d.vendor == vendor
-            && d.device_id == device
-        {
-            return Some((i, *d));
-        }
-        i += 1;
-    }
-    None
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn claim(dev_i: usize, bar: u8) -> Result<(), ClaimError> {
-    REG.lock().claim(dev_i, bar)
 }
 
 /// Bind any drivers already registered.

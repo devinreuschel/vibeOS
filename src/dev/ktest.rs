@@ -1,10 +1,13 @@
 //! In-guest tests for dev (kernel_tests only). Rows: the list in crate::ktest.
 
+use core::sync::atomic::Ordering;
 use vibeos::dev::{ClaimError, Device, Driver, IdMatch, ProbeError};
 use vibeos::dma::{self, DMA32_BOUNDARY, DmaAlloc};
 use vibeos::fs::O_RDWR;
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_MASTER, CMD_MEM};
-use vibeos::virtio::F_VERSION_1;
+
+use vibeos::pci::CfgIo;
+use vibeos::virtio::{F_EVENT_IDX, F_INDIRECT_DESC, F_VERSION_1};
 
 use crate::dev_init;
 use crate::dma_init;
@@ -17,6 +20,90 @@ use crate::paging_init;
 use crate::pci_init;
 use crate::virtio_init;
 
+// ---- Hooks the dev tests (and other subsystems' tests) use. Their state
+// stays in the production files as `pub(super)` items.
+
+/// Devices in the registry.
+pub(crate) fn len() -> usize {
+    dev_init::REG.lock().len()
+}
+
+/// The first device with `vendor:device`, and its registry index.
+pub(crate) fn find_id(vendor: u16, device: u16) -> Option<(usize, Device)> {
+    let g = dev_init::REG.lock();
+    (0..g.len()).find_map(|i| {
+        g.get(i)
+            .filter(|d| d.vendor == vendor && d.device_id == device)
+            .map(|d| (i, *d))
+    })
+}
+
+/// Claim BAR `bar` of registry device `dev_i`.
+pub(crate) fn claim(dev_i: usize, bar: u8) -> Result<(), ClaimError> {
+    dev_init::REG.lock().claim(dev_i, bar)
+}
+
+/// Whether the PCI scan has run.
+pub(crate) fn pci_live() -> bool {
+    pci_init::LIVE.load(Ordering::Acquire)
+}
+
+pub(crate) fn cfg_read32(bdf: Bdf, offset: u16) -> u32 {
+    pci_init::HwCfg.read32(bdf, offset)
+}
+
+pub(crate) fn cfg_write32(bdf: Bdf, offset: u16, value: u32) {
+    pci_init::HwCfg.write32(bdf, offset, value)
+}
+
+fn rng_features() -> u64 {
+    virtio_init::FEATURES.load(Ordering::Acquire)
+}
+
+fn rng_uses_indirect() -> bool {
+    rng_features() & F_INDIRECT_DESC != 0
+}
+
+fn rng_uses_event_idx() -> bool {
+    rng_features() & F_EVENT_IDX != 0
+}
+
+fn rng_qdma_device() -> u64 {
+    virtio_init::QDMA_DEV.load(Ordering::Acquire)
+}
+
+fn rng_data_device() -> u64 {
+    virtio_init::DATA_DEV.load(Ordering::Acquire)
+}
+
+fn rng_data_virt() -> u64 {
+    virtio_init::DATA_VIRT.load(Ordering::Acquire)
+}
+
+fn rng_completions() -> u32 {
+    virtio_init::COMPLETIONS.load(Ordering::Acquire)
+}
+
+fn rng_top_hits() -> u32 {
+    virtio_init::TOP_HITS.load(Ordering::Acquire)
+}
+
+fn rng_thread_hits() -> u32 {
+    virtio_init::THREAD_HITS.load(Ordering::Acquire)
+}
+
+fn rng_alloced() -> bool {
+    virtio_init::ALLOCED.load(Ordering::Acquire)
+}
+
+fn rng_soft_hits() -> u32 {
+    virtio_init::SOFT_HITS.load(Ordering::Acquire)
+}
+
+fn rng_last_len() -> u32 {
+    virtio_init::LAST_LEN.load(Ordering::Acquire)
+}
+
 const PCI_QEMU_IDS: &[(u16, u16)] = &[
     (0x8086, 0x1237), // 440FX
     (0x8086, 0x7000), // PIIX3 ISA
@@ -27,16 +114,16 @@ const PCI_QEMU_IDS: &[(u16, u16)] = &[
 ];
 
 pub(crate) fn test_pci_qemu_set() -> Outcome {
-    if !pci_init::live() {
+    if !pci_live() {
         return Outcome::Fail("pci not live");
     }
-    if dev_init::len() < PCI_QEMU_IDS.len() {
+    if len() < PCI_QEMU_IDS.len() {
         return Outcome::Fail("device count");
     }
     let mut i = 0usize;
     while i < PCI_QEMU_IDS.len() {
         let (v, d) = PCI_QEMU_IDS[i];
-        if dev_init::find_id(v, d).is_none() {
+        if find_id(v, d).is_none() {
             return Outcome::Fail("missing qemu id");
         }
         i += 1;
@@ -45,7 +132,7 @@ pub(crate) fn test_pci_qemu_set() -> Outcome {
 }
 
 pub(crate) fn test_pci_bar_map() -> Outcome {
-    let Some((_, d)) = dev_init::find_id(0x1234, 0x1111) else {
+    let Some((_, d)) = find_id(0x1234, 0x1111) else {
         return Outcome::Fail("no vga");
     };
     let r = d.resources[0];
@@ -67,17 +154,17 @@ pub(crate) fn test_pci_bar_map() -> Outcome {
 
 pub(crate) fn test_pci_cfg_rw() -> Outcome {
     let bdf = Bdf::new(0, 0, 0);
-    let id = pci_init::cfg_read32(bdf, CFG_VENDOR);
+    let id = cfg_read32(bdf, CFG_VENDOR);
     if id as u16 != 0x8086 {
         return Outcome::Fail("host vendor");
     }
     if (id >> 16) as u16 != 0x1237 {
         return Outcome::Fail("host device");
     }
-    let prev = pci_init::cfg_read32(bdf, CFG_COMMAND) as u16;
+    let prev = cfg_read32(bdf, CFG_COMMAND) as u16;
     pci_init::enable_mem_master(bdf);
-    let now = pci_init::cfg_read32(bdf, CFG_COMMAND) as u16;
-    pci_init::cfg_write32(bdf, CFG_COMMAND, prev as u32);
+    let now = cfg_read32(bdf, CFG_COMMAND) as u16;
+    cfg_write32(bdf, CFG_COMMAND, prev as u32);
     if now & (CMD_MEM | CMD_MASTER) != CMD_MEM | CMD_MASTER {
         return Outcome::Fail("cmd bits");
     }
@@ -85,7 +172,7 @@ pub(crate) fn test_pci_cfg_rw() -> Outcome {
 }
 
 pub(crate) fn test_pci_claim_exclusive() -> Outcome {
-    let Some((i, d)) = dev_init::find_id(0x8086, 0x100e) else {
+    let Some((i, d)) = find_id(0x8086, 0x100e) else {
         return Outcome::Fail("no e1000");
     };
     let mut b = 0u8;
@@ -100,10 +187,10 @@ pub(crate) fn test_pci_claim_exclusive() -> Outcome {
     if !found {
         return Outcome::Fail("e1000 no bar");
     }
-    if let Err(e) = dev_init::claim(i, b) {
+    if let Err(e) = claim(i, b) {
         return Outcome::Fail(e.as_str());
     }
-    match dev_init::claim(i, b) {
+    match claim(i, b) {
         Err(ClaimError::Already) => Outcome::Ok,
         Err(_) => Outcome::Fail("wrong claim err"),
         Ok(()) => Outcome::Fail("double claim"),
@@ -137,7 +224,7 @@ pub(crate) fn test_pci_bind_order() -> Outcome {
         return Outcome::Fail("register");
     }
     dev_init::bind_all();
-    let Some((_, d)) = dev_init::find_id(0x8086, 0x1237) else {
+    let Some((_, d)) = find_id(0x8086, 0x1237) else {
         return Outcome::Fail("no host");
     };
     match d.bound {
@@ -170,6 +257,8 @@ pub(crate) fn test_dma_alloc() -> Outcome {
         return Outcome::Fail("dma32");
     }
     buf.sync_for_device();
+    // SAFETY: `buf` is this test's own DMA buffer, at least one byte long,
+    // shared with no device; established by `dma_init::alloc`.
     unsafe {
         buf.as_ptr().write_volatile(0xA5);
     }
@@ -233,6 +322,8 @@ pub(crate) fn test_dma_edu() -> Outcome {
         dma_init::free(src);
         return Outcome::Fail("dst");
     };
+    // SAFETY: `src` and `dst` are this test's own 64-byte DMA buffers, not
+    // yet handed to the device; established by `dma_init::alloc`.
     unsafe {
         let p = src.as_ptr();
         let q = dst.as_ptr();
@@ -273,6 +364,8 @@ pub(crate) fn test_dma_edu() -> Outcome {
     }
     dst.sync_for_cpu();
     let mut bad = false;
+    // SAFETY: both 64-byte buffers are this test's own, and the edu DMA
+    // into `dst` has completed; established by `dma_init::alloc`.
     unsafe {
         let p = src.as_ptr();
         let q = dst.as_ptr();
@@ -295,7 +388,7 @@ pub(crate) fn test_dma_edu() -> Outcome {
 }
 
 fn find_rng() -> Option<(usize, Device)> {
-    dev_init::find_id(0x1af4, 0x1044).or_else(|| dev_init::find_id(0x1af4, 0x1004))
+    find_id(0x1af4, 0x1044).or_else(|| find_id(0x1af4, 0x1004))
 }
 
 pub(crate) fn test_virtio_bind() -> Outcome {
@@ -310,10 +403,10 @@ pub(crate) fn test_virtio_bind() -> Outcome {
         Some(_) => return Outcome::Fail("wrong driver"),
         None => return Outcome::Fail("id match"),
     }
-    if virtio_init::rng_features() & F_VERSION_1 == 0 {
+    if rng_features() & F_VERSION_1 == 0 {
         return Outcome::Fail("no VERSION_1");
     }
-    if !virtio_init::rng_uses_indirect() && !virtio_init::rng_uses_event_idx() {
+    if !rng_uses_indirect() && !rng_uses_event_idx() {
         // Modern QEMU offers both; either is enough to prove negotiation.
         return Outcome::Fail("no optional feats");
     }
@@ -324,38 +417,38 @@ pub(crate) fn test_virtio_vq() -> Outcome {
     if !virtio_init::rng_bound() {
         return Outcome::Skip("no virtio-rng");
     }
-    let qdev = virtio_init::rng_qdma_device();
-    let ddev = virtio_init::rng_data_device();
-    let dvirt = virtio_init::rng_data_virt();
+    let qdev = rng_qdma_device();
+    let ddev = rng_data_device();
+    let dvirt = rng_data_virt();
     if qdev == 0 || ddev == 0 {
         return Outcome::Fail("dma");
     }
     if ddev == dvirt {
         return Outcome::Fail("device is va");
     }
-    let c0 = virtio_init::rng_completions();
-    let t0 = virtio_init::rng_top_hits();
-    let th0 = virtio_init::rng_thread_hits();
-    let s0 = virtio_init::rng_soft_hits();
+    let c0 = rng_completions();
+    let t0 = rng_top_hits();
+    let th0 = rng_thread_hits();
+    let s0 = rng_soft_hits();
     if virtio_init::rng_request().is_err() {
         return Outcome::Fail("request");
     }
-    if !spin_until_ns(|| virtio_init::rng_completions() > c0, 2_000_000_000) {
+    if !spin_until_ns(|| rng_completions() > c0, 2_000_000_000) {
         return Outcome::Fail("no complete");
     }
-    if virtio_init::rng_last_len() == 0 {
+    if rng_last_len() == 0 {
         return Outcome::Fail("empty");
     }
-    if virtio_init::rng_top_hits() <= t0 {
+    if rng_top_hits() <= t0 {
         return Outcome::Fail("no top");
     }
-    if virtio_init::rng_thread_hits() <= th0 {
+    if rng_thread_hits() <= th0 {
         return Outcome::Fail("no thread");
     }
-    if !virtio_init::rng_alloced() {
+    if !rng_alloced() {
         return Outcome::Fail("thread alloc");
     }
-    if !spin_until_ns(|| virtio_init::rng_soft_hits() > s0, 2_000_000_000) {
+    if !spin_until_ns(|| rng_soft_hits() > s0, 2_000_000_000) {
         return Outcome::Fail("no softirq");
     }
     Outcome::Ok

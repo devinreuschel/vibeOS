@@ -943,7 +943,12 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
         unsafe {
             core::ptr::write_bytes(qdma.virt() as *mut u8, 0, qdma.len() as usize);
         }
-        let mut vq = SplitQueue::new(layout, qdma.virt() as *mut u8, feat & F_EVENT_IDX != 0);
+        // SAFETY: invariant I233: `qdma` is a page-aligned DMA buffer of at
+        // least `layout.total` bytes, which stays allocated beside the queue
+        // until the device is reset and it is freed; established by
+        // `dma_init::alloc`.
+        let mut vq =
+            unsafe { SplitQueue::new(layout, qdma.virt() as *mut u8, feat & F_EVENT_IDX != 0) };
         vq.init();
         qdma.sync_for_device();
         w64(

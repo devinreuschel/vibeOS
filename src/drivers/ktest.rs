@@ -6,7 +6,6 @@ use vibeos::block::{BlockError, DeviceState, Op};
 use vibeos::dev::Device;
 
 use crate::block_init::IoWaiter;
-use crate::dev_init;
 use crate::ktest::Outcome;
 use crate::per_cpu_init;
 use crate::thread_init;
@@ -14,7 +13,8 @@ use crate::time_init;
 use crate::virtio_blk_init;
 
 fn find_blk() -> Option<(usize, Device)> {
-    dev_init::find_id(0x1af4, 0x1042).or_else(|| dev_init::find_id(0x1af4, 0x1001))
+    crate::dev::ktest::find_id(0x1af4, 0x1042)
+        .or_else(|| crate::dev::ktest::find_id(0x1af4, 0x1001))
 }
 
 pub(crate) fn test_block_vblk_rw() -> Outcome {

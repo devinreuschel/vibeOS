@@ -363,7 +363,7 @@ const CELL_CASES: &[CellCase] = &[
                 device: 0,
                 function: 0,
             };
-            let _ = crate::pci_init::cfg_read32(bdf, 0);
+            let _ = crate::dev::ktest::cfg_read32(bdf, 0);
         },
         file: "src/dev/pci_init.rs",
         rank: RANK_DEVICE,

@@ -15,7 +15,6 @@ use vibeos::pmm::Frames;
 use vibeos::thread::{ThreadId, ThreadState};
 use vibeos::vectors;
 
-use crate::dev_init;
 use crate::ipi_init;
 use crate::kva_init;
 use crate::per_cpu_init;
@@ -924,7 +923,8 @@ pub(crate) fn bar0_va(dev: &Device) -> Option<u64> {
 
 pub(crate) fn find_edu() -> Option<(usize, Device)> {
     // QEMU 8.x edu is 1234:11e8 (old QEMU vendor). Later trees use 1b36:11e8.
-    dev_init::find_id(0x1234, 0x11e8).or_else(|| dev_init::find_id(0x1b36, 0x11e8))
+    crate::dev::ktest::find_id(0x1234, 0x11e8)
+        .or_else(|| crate::dev::ktest::find_id(0x1b36, 0x11e8))
 }
 
 /// The free-frame count at a quiescent point (ROADMAP §10.2, F074): the

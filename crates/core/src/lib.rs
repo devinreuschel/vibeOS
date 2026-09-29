@@ -41,10 +41,6 @@ pub mod block;
 #[path = "../../../src/cell.rs"]
 pub mod cell;
 pub mod console;
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 pub mod dev;
 pub mod drivers;
 pub mod fmt_util;
