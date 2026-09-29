@@ -771,3 +771,19 @@ needs = [
   "an `arch` module boundary built",  # L1277
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1320
+[[box]]
+key = "`MAX_ELF` removed: the loader maps segments"
+needs = [
+  "the initrd is sized by `mkinitrd` from its contents",  # L1370
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra); its proof writes into the initrd's write-test space"
+
+# L1027
+[[box]]
+key = "host tests that parse checked-in"
+needs = [
+  "`elf::parse` host tests also cover",  # L1355
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
