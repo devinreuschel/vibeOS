@@ -76,6 +76,13 @@ that can longjmp out of an interrupt gate, since the skipped `iretq` would leave
 test the registry fails it if IF is off or `irq_nest` is not 0, and restores both. `ktest_context`
 checks the registry's context and a `spawn_here` worker's.
 
+Each subsystem's `src/<subsystem>/ktest.rs` exports its rows as `pub(crate) const TESTS: &[Test]`,
+and `src/ktest/mod.rs` runs the lists in the order of its `GROUPS` (DESIGN §1.3). A list left out
+of `GROUPS` is unreferenced code, which the `kernel_tests` clippy run with `-D warnings` rejects as
+dead; the rule against a blanket `allow(dead_code)` in production modules (ROADMAP §10.2, Q2) keeps
+that true. The log group runs first, since `log_boot_captured` reads boot lines that the other
+groups' lines push out of the log ring.
+
 Built in the one `target/` like every variant, but copied to its own named ELF,
 `build/kernels/vibeos-ktest.elf`, which only `build/vibeos-ktest.iso`'s recipe reads. This is not
 fussiness: an ISO recipe that packaged whatever ELF the last build left in `target/` could put a
@@ -86,16 +93,64 @@ are `--features panic_test --features panic_exit` and `--features gp_test --feat
 (underscores everywhere; Cargo features in this crate do not use hyphens).
 
 ```
-vibeOS: ktest: begin
-vibeOS: ktest: ok <name>
+vibeOS: ktest: begin <n>
+vibeOS: ktest: run <name> <deadline_ms>
+vibeOS: ktest: ok <name> (<us> us)
 vibeOS: ktest: FAIL <name>: <reason>
 vibeOS: ktest: skip <name>: <reason>
+vibeOS: ktest: info <name>: <text>
 vibeOS: ktest: end
 ```
 
-The harness requires `begin` and `end`, rejects any `FAIL` line and any panic signature, and checks
-the exit status. It reads each of these lines only when framed (§2.6), so a user program's copy, such as
-the unframed `?vibeOS: ktest: FAIL forged` line `/bin/tests` prints, is ignored.
+`begin` counts the runs the boot will make, and the runner asserts that it made that many before
+`end`. A `run` line precedes each run with the name and deadline of the row, and the run's result
+line follows it: `ok` with the run's time in microseconds, read from the cycle counter
+(`CycleCounter::now`) around the body, `FAIL` with its reason, or `skip` with its reason. A test
+prints a counter or a measurement as an `info` line (`ktest_info!`), which names the running test,
+or `ktest` between tests, and is never a result: it is not counted in `begin`'s `<n>`. A failure
+reason formats into a fixed 120-byte `FailMsg` through `vibeos::fmt_util::StackBuf`, cut at a
+character boundary. The runner's own group, `ktest_names_unique`, checks that names are unique
+across `GROUPS` and match `[a-z0-9_]+`.
+
+The harness reads each line through `harness.parse_ktest_line`, which matches `vibeOS: ktest: ` and a
+protocol word at the start of a framed line's text (§2.6), so a user program's copy, such as the
+unframed `?vibeOS: ktest: FAIL forged` line `/bin/tests` prints, a `dmesg:` or `logrec:` replay, and
+a `vibeOS: ktest:   <detail>` line never count. It requires `begin <n>` and `end`, fails a `begin`
+with no count and `begin 0` (`ktest: no test selected`), rejects any `FAIL` line and any panic
+signature, and checks the exit status. `run_ktest.py` prints `[ktest] <ok> of <n> runs passed, <s>
+skipped`, the ten slowest runs, and the info lines (`ktest_summary`).
+
+The deadline (ROADMAP §10.2, T1). Each row has a deadline, `vibeos::ktest::DEFAULT_DEADLINE_MS`
+(10 s) unless the registry sets another with `.deadline(ms)`, reviewed as code: twice the longest
+time a tier measured, for a row over 5 s. The runner arms it just before the body runs, as
+`CycleCounter::now()` plus the deadline in cycles, and clears it after. Every CPU's timer tick
+(`sched_init::on_timer_tick`, which the PIT and every LAPIC path run) checks it without a lock, so a
+test that hangs with IF=0 on one CPU is caught by another's tick; the first tick to claim a passed
+deadline, through one compare-exchange, prints `vibeOS: ktest: FAIL <name>: deadline` from the
+interrupt and panics, so the dump shows where the test stood. The opt-in `ktest_deadline_hang`
+(500 ms) holds IF=0 and spins; when `VIBEOS_KTEST` is unset and the tier runs at `-smp 2` or more,
+`make test-kernel`'s expect-fail boot `ktest_deadline_trip` selects it and requires, in order, its
+`run` line, the deadline `FAIL` line, a panic signature and `vibeOS: panic: halted`, and no `ok`
+line (`check_deadline_trip`). A CPU spinning with IF=0 never takes the panic's stop IPI, so that
+boot checks only those lines, not the other CPUs' state.
+
+Selection (BOOT.md §3.2). `vibeos.ktest=` (`VIBEOS_KTEST`) takes a comma-separated list of globs,
+`*` matching any run of characters and `?` one; with no item every row not marked opt-in runs. A row
+marked `.opt_in()` runs only when an item without a wildcard is its name. `vibeos.ktest_repeat=`
+(`VIBEOS_KTEST_REPEAT`) runs the selection 1 to 1000 times in one boot, pass after pass, and a row
+marked `.once()`, one that consumes state it cannot restore (a boot line in the log ring, a
+`BootCell`, a PCI claim, a cold cache block, a fixed file or snapshot name), runs in the first pass
+only. `begin` counts the runs after both, from the same predicates as the runner's loop, and no
+timeout scales with the repeat count. A repeat value outside 1 to 1000, or a run count past a `u32`,
+prints `vibeOS: ktest: bad option vibeos.ktest_repeat=<value>` before `begin` and exits `0x11`; a
+selection with no runs prints `begin 0`, then `end`, and exits `0x11`, and the harness fails both.
+The portable half, `vibeos::ktest`, parses and counts, with host tests. A boot that does not run
+`block_persist` needs no persist line and gets no persist reboot. When `VIBEOS_KTEST` is unset,
+`make test-kernel` also runs the proof boots, each on a fresh disk: `ktest_select_boot`
+(`vibeos.ktest=ktest_*,ktest_optin_probe,log_boot_level`, repeat 3, `loglevel=8`), which requires
+exactly its expected runs (`check_select_run`), the opt-in and once rows included, and no run of
+`ktest_deadline_hang`; and at `-smp 2` the repeat boot, `reap_many_via_idle` 20 times (F074).
+Each records its verdict in the tier's results file as a `marker`.
 `isa-debug-exit` at I/O port `0xf4` maps a written value to host exit status `(value << 1) | 1`:
 
 | Write | Host exit | Meaning |
@@ -109,19 +164,13 @@ the first boot and once for the persist reboot, `run_e2e.py` boots each variant 
 every other tier. The results file keeps its `retries` list, which stays empty, and `check_ticks.py`
 still fails a pull request whose results list a retry (ROADMAP §10.9).
 
-Planned (ROADMAP §10.2): `begin` carries the number of runs the boot will make, after the command
-line's filter and repeat count, and `vibeOS: ktest: run <name> <deadline_ms>` precedes each run,
-with the deadline the kernel enforces in the guest (10 s unless the registry sets another). The
-harness requires one result line per run line and exactly that many results. It has no whole-run
-deadline. `VIBEOS_TIMEOUT` bounds each stretch in which no test runs: from QEMU's start to `begin`,
+Planned (ROADMAP §10.2): the harness requires one result line per run line and exactly that many
+results. It has no whole-run deadline. `VIBEOS_TIMEOUT` bounds each stretch in which no test runs: from QEMU's start to `begin`,
 and from `end` to QEMU's exit. From `begin` to `end`, each run gets its printed deadline plus 5 s,
 and each gap between lines 5 s, all multiplied by `env_config`'s one timeout scale. That backstops
 the in-guest deadline, which a CPU wedged with IF=0 never checks; a timeout names the test of the
 last run line and prints the partial line the guest was writing. Adding tests changes no timeout,
-and a test that needs longer carries a registry override, reviewed as code. A per-subsystem list
-left out of the aggregate registry is unreferenced code, which the `kernel_tests` clippy run with
-`-D warnings` rejects as dead; the rule against a blanket `allow(dead_code)` in production modules
-(ROADMAP §10.2, Q2) keeps that true. The `utest_*` lines of ROADMAP §10.5 follow the same protocol.
+and a test that needs longer carries a registry override, reviewed as code. The `utest_*` lines of ROADMAP §10.5 follow the same protocol.
 
 Skips are first class and carry their reason on the `ktest: skip <name>: <reason>` line. Every skip
 names what the configuration lacks: `no AP`, `no virtio-blk`, `no virtio-rng`, `no e1000e`, `no edu`,
@@ -284,6 +333,14 @@ planned (ROADMAP §25.5), the soft lockup, hard lockup, and hung-thread reports 
 provokes one on purpose declares it; in any other run it fails the run, since a recovery no test expected is a bug a timeout hides, such as a
 lost kick ([section 10.4](BLOCK.md#104-virtio-blk)) that shows only as a 30 s pause.
 
+The in-guest runner's failure lines fail a `make test-kernel` run, matched on framed lines only
+(§8.2): `check_ktest_output` rejects every `vibeOS: ktest: FAIL <name>: <reason>` (a `test` row),
+and two `failure` rows fail the run as soon as they print: the deadline failure signature
+`vibeOS: ktest: FAIL <name>: deadline`, which a timer tick prints before it panics, and
+`vibeOS: ktest: bad option <key>=<value>`, printed before `begin`. The deadline trip boot expects
+both its failure and its panic (`run_qemu_until_exit(..., expect_fail=True)`) and checks them
+itself.
+
 User programs print these strings too: the ROADMAP §10.5 runtime reports a panic as `panicked at` on
 fd 2, and a fuzzer writes random bytes. The harness scans framed lines only (§2.6), and fails on
 `user: tests fail` only when unframed. Before the kernel's first framed line it fails fast on Limine's
@@ -442,6 +499,8 @@ sets none of them: `make run`, `make run-panic` and `make debug` honour the same
 | `VIBEOS_EXPECT_PIT` | off | `run_e2e` |
 | `VIBEOS_MCE_TEST` | off | `run_e2e` |
 | `VIBEOS_SKIP_PERSIST` | off | `run_ktest` |
+| `VIBEOS_KTEST` | unset; `vibeos.ktest=<value>` (BOOT.md §3.2), a comma-separated glob list that selects the in-guest tests; when set, `run_ktest` boots that selection alone | `run_ktest` (every driver's fw_cfg string) |
+| `VIBEOS_KTEST_REPEAT` | 1; `vibeos.ktest_repeat=<n>`, 1 to 1000, which the kernel checks | `run_ktest` (every driver's fw_cfg string) |
 | `VIBEOS_CRASH_ROUNDS` | `8` | `run_vibefs_crash` |
 | `VIBEOS_CRASH_SEED` | time-based | `run_vibefs_crash` |
 | `VIBEOS_MKFS` | `mkfs-vibefs` | `run_vibefs_crash`, `run_e2e` (the `test-e2e` tier's vda images) |

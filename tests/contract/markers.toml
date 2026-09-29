@@ -181,13 +181,6 @@ arch = "both"
 source = "kernel"
 section = "§1.1"
 
-[[marker]]
-text = "vibeOS: pmm: excludes overflow, dropping <start>..<end>"
-kind = "diagnostic"
-arch = "both"
-source = "kernel"
-section = "§1.1"
-
 # §1.2 Page tables
 
 [[marker]]
@@ -295,14 +288,14 @@ when = ["!panic_test"]
 # §1.6 In-guest test infrastructure
 
 [[marker]]
-text = "vibeOS: ktest: begin"
+text = "vibeOS: ktest: begin <n>"
 kind = "test"
 arch = "both"
 source = "kernel"
 section = "§1.6"
 
 [[marker]]
-text = "vibeOS: ktest: ok <name>"
+text = "vibeOS: ktest: ok <name> (<us> us)"
 kind = "test"
 arch = "both"
 source = "kernel"
@@ -402,7 +395,7 @@ kind = "contract"
 arch = "x86_64"
 source = "kernel"
 section = "§2.2"
-order = 290
+order = 300
 name = "gp_test_armed"
 when = ["gp_test", "!panic_test"]
 
@@ -697,7 +690,7 @@ kind = "contract"
 arch = "both"
 source = "kernel"
 section = "§4.5"
-order = 200
+order = 210
 name = "sched_cpu<n>"
 when = ["!panic_test"]
 repeat = "per_ap"
@@ -708,7 +701,7 @@ kind = "contract"
 arch = "both"
 source = "kernel"
 section = "§4.5"
-order = 210
+order = 220
 name = "smp_ap_online_<ap>"
 when = ["!panic_test"]
 repeat = "per_ap"
@@ -719,7 +712,7 @@ kind = "contract"
 arch = "both"
 source = "kernel"
 section = "§4.5"
-order = 230
+order = 240
 name = "smp_done"
 when = ["!panic_test"]
 
@@ -787,7 +780,7 @@ kind = "contract"
 arch = "both"
 source = "kernel"
 section = "§5.3"
-order = 240
+order = 250
 name = "console_ok"
 when = ["!panic_test"]
 
@@ -867,7 +860,7 @@ kind = "contract"
 arch = "both"
 source = "kernel"
 section = "§6.2"
-order = 250
+order = 260
 name = "pci_devices"
 when = ["!panic_test"]
 
@@ -940,7 +933,7 @@ kind = "contract"
 arch = "both"
 source = "kernel"
 section = "§7.1"
-order = 260
+order = 270
 name = "block_ramdisk"
 when = ["!panic_test"]
 
@@ -1012,7 +1005,7 @@ kind = "contract"
 arch = "both"
 source = "kernel"
 section = "§7.3"
-order = 270
+order = 280
 name = "block_ram0p1"
 when = ["!panic_test"]
 
@@ -1022,7 +1015,7 @@ kind = "contract"
 arch = "both"
 source = "kernel"
 section = "§7.3"
-order = 280
+order = 290
 name = "block_ram0p2"
 when = ["!panic_test"]
 
@@ -1082,7 +1075,7 @@ kind = "contract"
 arch = "both"
 source = "user"
 section = "§9.8"
-order = 310
+order = 320
 name = "shell_ready"
 when = ["!gp_test", "!panic_test"]
 
@@ -1102,7 +1095,7 @@ kind = "contract"
 arch = "both"
 source = "user"
 section = "§9.8"
-order = 300
+order = 310
 name = "user_tests_ok"
 when = ["!gp_test", "!panic_test"]
 
@@ -1133,6 +1126,37 @@ section = "§9.8"
 [[marker]]
 text = "vibeOS: boot: cmdline: <text>"
 kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.2"
+
+# The ktest runner protocol (TESTING.md §8.2, C-KTEST-PROTO): the line before
+# each run, a test's counters, a missed deadline (printed by the timer tick
+# that then panics), and a bad selection option (printed before `begin`).
+[[marker]]
+text = "vibeOS: ktest: run <name> <deadline_ms>"
+kind = "test"
+arch = "both"
+source = "kernel"
+section = "§10.2"
+
+[[marker]]
+text = "vibeOS: ktest: info <name>: <text>"
+kind = "test"
+arch = "both"
+source = "kernel"
+section = "§10.2"
+
+[[marker]]
+text = "vibeOS: ktest: FAIL <name>: deadline"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§10.2"
+
+[[marker]]
+text = "vibeOS: ktest: bad option <key>=<value>"
+kind = "failure"
 arch = "both"
 source = "kernel"
 section = "§10.2"
@@ -1182,6 +1206,27 @@ arch = "both"
 source = "user"
 section = "§10.2"
 
+# §10.6 Entry paths and user memory
+
+# The AP trampoline page `boot::capture` chose from the memory map, before
+# the first AP starts; with none, every AP is skipped.
+[[marker]]
+text = "vibeOS: smp: trampoline page <addr>"
+kind = "contract"
+arch = "x86_64"
+source = "kernel"
+section = "§10.6"
+order = 200
+name = "smp_trampoline_page"
+when = ["!panic_test"]
+
+[[marker]]
+text = "vibeOS: smp: no trampoline page"
+kind = "diagnostic"
+arch = "x86_64"
+source = "kernel"
+section = "§10.6"
+
 # §10.7 Forensics and tracing
 
 # `vibeos.strace=1`: one line per syscall that returns.
@@ -1208,7 +1253,7 @@ kind = "contract"
 arch = "x86_64"
 source = "kernel"
 section = "§10.7"
-order = 220
+order = 230
 name = "smp_tsc_skew"
 when = ["smp>1", "!panic_test"]
 

@@ -122,8 +122,11 @@ why = "claim: its test's orphan is freed by §10.5's reaper rule"
 
 [[box]]
 key = "the in-guest registry split per subsystem"
-needs = ["the in-guest registry runs in production's interrupt context"]
-why = "text of the registry box: T1's per-test deadline needs IF=1"
+needs = [
+  "the in-guest registry runs in production's interrupt context",
+  "one directory per subsystem, portable",  # L1280
+]
+why = "text of the registry box: T1's per-test deadline needs IF=1; claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 [[box]]
 key = "every call that may sleep checks that it may"
@@ -977,6 +980,14 @@ needs = [
   "`release.yml` runs only from `main`,",  # L1207
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+# L1404
+[[box]]
+key = "boot runs on a guarded"
+needs = [
+  "one ring-3 entry model: `/hello`",  # L1402
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
 
 # L1416
 [[box]]

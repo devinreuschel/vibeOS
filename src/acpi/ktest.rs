@@ -1,11 +1,11 @@
-//! In-guest tests for acpi (kernel_tests only). Rows: the list in crate::ktest.
+//! In-guest tests for acpi (kernel_tests only). Rows: [`TESTS`].
 
 use core::sync::atomic::Ordering;
 
 use vibeos::paging::{PageFlags, VirtAddr};
 
 use crate::acpi_init;
-use crate::ktest::Outcome;
+use crate::ktest::{Outcome, Test, test};
 use crate::paging_init;
 
 /// Whether `acpi_init::init` UC-patched at least one MMIO leaf.
@@ -65,3 +65,7 @@ pub(crate) fn test_acpi_discovery() -> Outcome {
     }
     Outcome::Ok
 }
+
+/// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
+/// runs them (DESIGN §8.2).
+pub(crate) const TESTS: &[Test] = &[test("acpi_discovery", test_acpi_discovery)];

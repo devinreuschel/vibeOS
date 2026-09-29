@@ -336,14 +336,13 @@ per-CPU inbox plus a reschedule IPI. More SMP-specific rules in [section 7.7](SM
 - The buddy takes only memory the boot memory map marks usable, less physical page 0, the AP
   trampoline page (§7.3), and the kernel image, framebuffers, and boot modules wherever they overlap
   usable memory. Limine keeps usable entries clear of every other entry, so the last three are
-  defensive; `pmm_init` clips each usable range against all of them as it reads `BootInfo`, with no
-  fixed-size list, so no exclusion is ever dropped. Rule; not yet enforced: `pmm_init` keeps an
-  8-entry `Excludes` list, admits a range past the eighth with a `pmm: excludes overflow` line, and
-  excludes the fixed page `0x8000` (ROADMAP §10.6).
+  defensive; `pmm_init` clips each usable range against all of them as it reads `BootInfo`
+  (`vibeos::pmm::clip_usable`), with no fixed-size list, so no exclusion is ever dropped.
 - Buddy free list nodes live inside the free pages themselves. A stray write into freed memory
-  corrupts the allocator, so guard pages on stacks are not optional. One stack has none: Limine's
-  boot stack (at least 64 KiB, no guard page, in bootloader-reclaimable memory), which all of boot
-  runs on, so an overflow there corrupts memory silently (ROADMAP §10.6, F072).
+  corrupts the allocator, so guard pages on stacks are not optional: every kernel stack, the
+  bootstrap thread's included, is a guarded KVA stack. Boot leaves Limine's stack at
+  `thread_init::init_bootstrap`, once KVA is up, for the bootstrap thread's guarded 64 KiB stack
+  ([§4.5](MEMORY.md#45-kernel-virtual-address-allocator)).
 - A PTE change that removes or narrows a translation takes effect only when every CPU that could hold
   the old translation has invalidated it and acknowledged. Such changes are unmapping, making a PTE
   not-present, read-only, or NX, and clearing its dirty bit. The rule covers kernel and user
@@ -359,9 +358,9 @@ per-CPU inbox plus a reschedule IPI. More SMP-specific rules in [section 7.7](SM
 - MMIO pages are mapped uncacheable. QEMU tolerates write-back MMIO; real hardware does not. On
   aarch64 they are Device-nGnRE (ROADMAP §11.1), and a device access is ordered against Normal
   memory only by [§4.7](MEMORY.md#47-dma)'s accessors.
-- Every mapping is `NO_EXECUTE` unless it holds code that is fetched. Exception: the low identity
-  window's first 2 MiB is executable, though only the trampoline page (§7.3) is fetched, and only
-  during AP bring-up (ROADMAP §10.6, F085).
+- Every mapping is `NO_EXECUTE` unless it holds code that is fetched. The trampoline page (§7.3) is
+  the low identity window's one executable leaf, read-only and not global, and after `smp: done` the
+  window's only leaf (ROADMAP §10.6, F085).
 - A value copied to user memory has no padding and no uninitialized bytes. Reading a padding byte is
   undefined behaviour in Rust, and copying one out leaks kernel stack or heap. The typed copy-out,
   `uaccess::copy_to_user_val`, takes only a type bounded by `zerocopy`'s `IntoBytes + Immutable`,
@@ -683,9 +682,9 @@ that review cites means the review's text.
 | I10 | A dead thread's stack is freed only after its CPU has switched off it (§2.8, §4.5) | `thread_init::finish_switch` | enforced by the in-guest `lifetime_stack_reclaim` | Yes: `thread_exit` parks the stack in its CPU's `PerCpu.dead_stack`, and only that CPU's switch tail, after `switch_context` has returned, moves it into the CPU's stack cache or onto its dead list, which that CPU's worker frees (ROADMAP §10.10, F012) |
 | I11 | A completer's publishing store is its last access to the waiter (§2.8) | `block_init::IoWaiter::finish` | enforced by the in-guest `lifetime_iowaiter_publish_last` | Yes: `finish` runs `wake_all` under SCHED, then stores `done` with Release as its last access (ROADMAP §10.10, F002); ROADMAP §10.8 adds its loom model |
 | I12 | Every kernel PML4 slot exists before the first user address space | `AddressSpace::new` copies PML4[256..512) once | assumed | Yes, by boot order only: `paging_init::install` creates none of the heap, KVA, and `ioremap` PML4 slots; each appears on its region's first mapping, and no current path makes a first mapping after `/hello` (ROADMAP §12.1, F101) |
-| I13 | The low identity window is removed after `smp: done` (§4.1) | none yet | documented | No: it stays mapped and GLOBAL, VA 0 included (ROADMAP §10.6, F085) |
+| I13 | The low identity window is removed after `smp: done` (§4.1) | `paging_init::teardown_identity`, from `smp_init::init` | enforced by the in-guest `kernel_va0_faults` | Yes: all but the trampoline page is unmapped and the TLB flushed on every CPU, global entries included, so a kernel read of VA 0 faults (ROADMAP §10.6, F085) |
 | I14 | Every buddy frame and page table lies inside the physmap (§4.1) | `pmm_init::init`, `paging_init::physmap_extent` | enforced | Yes; a framebuffer above the 8 GiB cap is not covered (ROADMAP §11.2, F020) |
-| I15 | Frame 0, the trampoline page, and the kernel image, framebuffers, and boot modules never enter the buddy (§2.4) | `pmm_init::init`; `Buddy::insert_region` skips frame 0 | enforced | Partly: the trampoline page is the fixed `0x8000`, which boot uses whatever the memory map says there (bootloader-reclaimable under SeaBIOS); `Excludes` holds 8 ranges, and a range past the 8th stays in the buddy with a `pmm: excludes overflow` line, which Limine's rule that usable entries overlap no other entry leaves unreachable (ROADMAP §10.6) |
+| I15 | Frame 0, the trampoline page, and the kernel image, framebuffers, and boot modules never enter the buddy (§2.4) | `pmm_init::init` through `vibeos::pmm::clip_usable`; `Buddy::insert_region` skips frame 0 | enforced; host tests `clip_usable_eight_framebuffers` and `clip_usable_unsorted_overlapping` | Yes: the trampoline page is the usable page `boot::capture` chose from the memory map, and the clip has no fixed-size list (ROADMAP §10.6) |
 | I16 | The kernel PML4 lies below 4 GiB, because the trampoline loads a 32-bit CR3 | `smp_init::start_one` | enforced by skipping every AP | Not guaranteed: the PML4 frame has no address limit, and above 4 GiB every AP is skipped with a `smp: cr3 above 4GiB` line (ROADMAP §20.1) |
 | I17 | MMIO is UC, RAM is WB, and no frame has both (§2.4) | `acpi_init`, `Mapper::patch_physmap_uc` | documented | Partly: a whole 2 MiB leaf goes UC with no RAM check, and a trailing leaf can be skipped (ROADMAP §11.2, F104) |
 | I18 | EOI before any switch; a one-shot timer is rearmed before yielding (§5.8) | timer ISRs | documented | Yes; no test tier runs the TSC-deadline timer, the only one-shot source, so nothing exercises the rearm (ROADMAP §10.1, F078) |
@@ -696,7 +695,7 @@ that review cites means the review's text.
 | I23 | The block layer orders only overlapping writes and a sequential zone's writes; a `Flush` makes durable every write completed before it was submitted, and a `Fua` write is durable when it completes (§10.2) | `block.rs` | documented | No: C-LOOK can reorder overlapping writes (ROADMAP §10.11, F043) |
 | I24 | vibefs never overwrites a live block before the newer superblock is durable, and from v2 reuses a block a commit freed only after the next commit's superblock is durable, so the older slot's tree stays whole; a v2 NOCOW file's data blocks are the one exception, overwritten in place ([VIBEFS.md](VIBEFS.md) §15) | vibefs commit | documented | No after a failed commit: the in-memory generation advances before the superblock write, so the retry writes the slot that holds the only valid superblock (ROADMAP §12.5, F050). Otherwise it rests on v1's on-disk refcounts, which its mount does not check (F061); v2 keeps no per-block count and checks its pointers and allocation map as it reads each block (VIBEFS.md §15; ROADMAP §14.8) |
 | I25 | Per-thread CPU state is saved and restored in full (§7.5) | `syscall_init::on_switch`, `arch::x86_64::switch::switch_context` | documented | No: `FS_BASE` is not switched (ROADMAP §11.6, F022); `fork` and `execve` get the FPU state wrong (ROADMAP §10.6, F069) |
-| I26 | Every kernel stack has a guard page (§2.4) | `kva_init::alloc_guarded_stack` | documented | No: boot runs on Limine's unguarded stack (ROADMAP §10.6, F072) |
+| I26 | Every kernel stack has a guard page (§2.4) | `kva_init::alloc_guarded_stack`; `thread_init::init_bootstrap` moves boot onto one | enforced for the bootstrap thread by the in-guest `boot_stack_guarded`; documented otherwise | Yes: boot leaves Limine's stack at `init_bootstrap`, and every other kernel stack comes from `alloc_guarded_stack` (ROADMAP §10.6, F072) |
 | I27 | `vibeos-core` does not panic on data (§2.5) | clippy deny on `unwrap`, `expect`, `panic`; `indexing_slicing` and `arithmetic_side_effects` denied in the byte parsers `scripts/check_core_stable.py` lists | enforced by clippy; vibefs v1 excepted | Partly: vibefs v1 and its truncate-grow still panic on crafted input; §2.5 lists the cases and their ROADMAP lines |
 | I28 | A line the harness takes as the kernel's is framed, and no user byte can produce the frame (§2.6) | `serial::raw`, `console_init::write`, `tests/harness/frame.py` | enforced (the `/bin/tests` forged-line case, `test_frame.py`) | Yes |
 | I29 | A catch hook intercepts only a CPL-0 fault on the CPU that armed it, inside an in-guest test's catch window | `arch::catch::arm` (`ARMED`, the arming CPU's token) | enforced by the in-guest `catch_ignores_other_cpu` and `catch_ignores_user_frame` | Yes: `arch::catch` and the dispatcher's intercept compile only with `kernel_tests`, so production has no catch hook; `intercept`, `on_panic` and `on_alloc_error` act only on the CPU whose token `ARMED` holds, `intercept` only on a CPL-0 frame, and each CPU records its catch in its own `LAST` slot. A window must not span a CPU migration, which nothing does while no preempted thread changes CPU (I36) |

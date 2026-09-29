@@ -1,5 +1,5 @@
 //! In-guest tests for proc (kernel_tests only): address spaces, syscall entry and register state.
-//! Rows: the list in crate::ktest.
+//! Rows: the parent `ktest.rs`'s `TESTS`.
 
 use core::mem::ManuallyDrop;
 use core::ptr;

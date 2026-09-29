@@ -192,7 +192,7 @@ children, need no row.
 | acpi | `acpi/mod.rs` | `acpi/{mod,acpi_init}.rs` |
 | irq | `irq/{mod,ipi}.rs` | `irq/{mod,irq_init,ipi_init,hardirq}.rs` |
 | smp | `smp/{mod,per_cpu}.rs` | `smp/{mod,smp_init,per_cpu_init}.rs` |
-| sched | `sched/{mod,thread,wait,work,fpu}.rs` | `sched/{mod,sched_init,work_init}.rs`, `sched/thread_init/{mod,testing}.rs` |
+| sched | `sched/{mod,thread,wait,work,fpu}.rs` | `sched/{mod,sched_init,work_init}.rs`, `sched/thread_init/{boot,mod,testing}.rs` |
 | sync | `sync/{mod,lock}.rs` | `sync/{mod,sync_init,blocking_init}.rs` |
 | log | `log/{mod,line}.rs`, `log/trace/{mod,tests}.rs` | `log/{mod,log_init,panic,diag,ksyms,trace_init}.rs`, `log/serial/{mod,raw}.rs` |
 | console | `console/{mod,kbd,fb,font}.rs` | `console/{mod,console_init,kbd_init,fb_init}.rs` |
@@ -202,18 +202,17 @@ children, need no row.
 | block | `block/{mod,part,cache,blockdev}.rs` | `block/{mod,block_init,blockdev_init,part_init,cache_init}.rs` |
 | fs | `fs/{mod,inode,mount,walk,file,ramfs,testfs,tests}.rs`, `fs/kernfs/{mod,node,devfs,tmpfs,procfs,sysfs,tests}.rs`, `fs/vibefs/{mod,disk,layout,vol,ops,commit,mkfs,fsck,tests}.rs`, `fs/fat/{mod,vol,rw,dirent,chain,mkfs,tests}.rs` | `fs/{mod,fs_init,fat_init,vibefs_init,vibefs_crash,file_init}.rs` |
 | proc | `proc/{mod,elf,pid,syscall,syscall_table,uaccess}.rs`, `proc/addr_space/{mod,tests}.rs` | `proc/{mod,addr_space_init,user_init,syscall_init,uaccess_init}.rs`, `proc/proc_init/{mod,fd,exec,exit}.rs` |
-| ktest | — | `ktest/{mod,user}.rs` (`kernel_tests` only) |
+| ktest | `ktest/mod.rs` (selection by `vibeos.ktest=`, run counts, deadlines) | `ktest/{mod,user}.rs` (`kernel_tests` only) |
 
 **In-guest tests.** A `kernel_tests` build's test bodies live beside the code they test: each kernel
 subsystem directory holds a `ktest.rs` (`src/mm/ktest.rs`, `src/sched/ktest.rs`, and so on;
 `src/arch/ktest.rs` for the x86_64 port), declared `#[cfg(feature = "kernel_tests")] pub mod ktest;` in
-that directory's `mod.rs`, so no other build compiles it. `src/ktest/mod.rs` holds the runner, the
-helpers that tests of more than one subsystem share, and the one ordered list of tests
+that directory's `mod.rs`, so no other build compiles it. Each subsystem's `ktest.rs` exports its
+rows in run order as `pub(crate) const TESTS: &[Test]`, and `src/ktest/mod.rs` holds the runner, the
+helpers that tests of more than one subsystem share, and the ordered list of those lists, `GROUPS`
 ([TESTING.md §8.2](TESTING.md#82-in-guest-tests)); `src/ktest/user.rs` builds the ring-3 programs tests
-spawn. A new test goes into its subsystem's `ktest.rs`, and its row after the last row of that subsystem
-in the list, or at the end if it has none. Planned (ROADMAP §10.2, T1): each subsystem's `ktest.rs`
-exports its own rows. Planned (ROADMAP §10.2, Q2): the `kernel_tests` hooks still in production modules
-move into these files.
+spawn. A new test goes into its subsystem's `ktest.rs`, and its row into that file's `TESTS`. Planned
+(ROADMAP §10.2, Q2): the `kernel_tests` hooks still in production modules move into these files.
 
 ## 1.4 Documentation rules
 

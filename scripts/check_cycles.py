@@ -13,7 +13,7 @@ Builds the module graph of both crates, `src/main.rs` (`kernel:`) and
   in them; gated items inside a production module still count.
 - `ONE_MODULE` names directory modules that are one node: a file whose parent
   directory module is listed, and that is not listed itself, belongs to its
-  parent's node. It holds the Q5 splits of P10-S26 and nothing else.
+  parent's node. It holds the Q5 splits of P10-S26 and P10-S79 and nothing else.
 - Edges. Each `use`-tree leaf and each path starting with `crate`, `$crate`,
   `self`, `super`, `vibeos` or a child module is an edge, after comments and
   literals (`asm!` text included) are stripped. A path resolves through `mod`
@@ -49,13 +49,14 @@ ROOT = Path(__file__).resolve().parent.parent
 KERNEL_ROOT = Path("src") / "main.rs"
 CORE_ROOT = Path("crates") / "core" / "src" / "lib.rs"
 
-# Directory modules that are one node (the Q5 splits of P10-S26).
+# Directory modules that are one node (the Q5 splits of P10-S26 and P10-S79).
 ONE_MODULE: frozenset[str] = frozenset({
     "core:fs",
     "core:fs::kernfs",
     "core:fs::vibefs",
     "core:fs::fat",
     "kernel:proc::proc_init",
+    "kernel:sched::thread_init",
 })
 
 RAW = "kernel:log::serial::raw"

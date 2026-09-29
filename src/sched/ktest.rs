@@ -1,4 +1,4 @@
-//! In-guest tests for sched (kernel_tests only). Rows: the list in crate::ktest.
+//! In-guest tests for sched (kernel_tests only). Rows: [`TESTS`].
 
 mod counted;
 mod hooks;
@@ -30,8 +30,8 @@ use vibeos::thread::{MAX_THREADS, ThreadId, ThreadState};
 use crate::apic_init;
 use crate::ktest::user::{self, DEFAULT, Image, user_code};
 use crate::ktest::{
-    FrameCount, Outcome, dying_entry, quiescent_free_frames, registry_tid, second_cpu, sleep_until,
-    spin_until_ns,
+    FrameCount, Outcome, Test, dying_entry, quiescent_free_frames, registry_tid, second_cpu,
+    sleep_until, spin_until_ns, test,
 };
 use crate::kva_init;
 use crate::paging_init;
@@ -1385,3 +1385,69 @@ pub(crate) fn test_fp_migrate_counter() -> Outcome {
     }
     Outcome::Ok
 }
+
+/// ROADMAP §10.6: the bootstrap thread runs on a guarded 64 KiB KVA stack
+/// that its `Tcb.stack` records, with the page below it unmapped.
+pub(crate) fn boot_stack_guarded() -> Outcome {
+    let Some((range, rsp, running)) = thread_init::bootstrap_stack() else {
+        return Outcome::Fail("bootstrap Tcb.stack not set");
+    };
+    let want = (thread_init::BOOT_STACK_PAGES as u64) * PAGE_SIZE_4K;
+    if range.end.wrapping_sub(range.start) != want {
+        return crate::fail_fmt!(
+            "bootstrap stack {:#x}..{:#x}, want {want} bytes",
+            range.start,
+            range.end
+        );
+    }
+    let guard = range.start.wrapping_sub(PAGE_SIZE_4K);
+    if paging_init::translate(vibeos::paging::VirtAddr(guard)).is_some() {
+        return crate::fail_fmt!("guard page {guard:#x} below the bootstrap stack is mapped");
+    }
+    if paging_init::translate(vibeos::paging::VirtAddr(range.start)).is_none() {
+        return crate::fail_fmt!("bootstrap stack base {:#x} unmapped", range.start);
+    }
+    if !running && !range.contains(&rsp) {
+        return crate::fail_fmt!("saved rsp {rsp:#x} outside the bootstrap stack");
+    }
+    Outcome::Ok
+}
+
+/// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
+/// runs them (DESIGN §8.2).
+pub(crate) const TESTS: &[Test] = &[
+    test("spawn_sentinel", test_spawn_sentinel),
+    test("switch_two_threads", test_switch_two_threads),
+    test("yield_now_switches", test_yield_now_switches),
+    test("sleep_ms_50", test_sleep_ms_50),
+    test("preempt_two_threads", test_preempt_two_threads),
+    test("idle_runs", test_idle_runs),
+    test("reap_returns_frames", test_reap_returns_frames),
+    test("reap_many_via_idle", test_reap_many_via_idle),
+    test("sched_lock_timer_irq", test_sched_lock_timer_irq),
+    test("spawn_exit_thousands", test_spawn_exit_thousands),
+    test("cross_cpu_spawn", test_cross_cpu_spawn),
+    test("counted_deferred_release", test_counted_deferred_release),
+    test("workqueue", test_workqueue),
+    test("ktest_rows", test_ktest_rows),
+    test("ktest_fail_fmt", test_ktest_fail_fmt),
+    test("ktest_helpers", test_ktest_helpers),
+    test("ktest_context", ktest_context),
+    test("spawn_stack_oom", spawn_stack_oom).deadline(10_000),
+    test("fork_oom", fork_oom).deadline(10_000),
+    test("lifetime_stack_reclaim", lifetime_stack_reclaim).deadline(120_000),
+    test("dead_list_batched_rounds", dead_list_batched_rounds),
+    test("exit_burst", exit_burst).deadline(60_000),
+    test("lifetime_dead_slot_on_cpu", lifetime_dead_slot_on_cpu).deadline(180_000),
+    test("fp_no_leak", test_fp_no_leak).deadline(60_000),
+    test(
+        "requeue_moves_each_dequeue",
+        test_requeue_moves_each_dequeue,
+    ),
+    test("fp_migrate_counter", test_fp_migrate_counter).deadline(30_000),
+    test("lock_across_switch_asserts", lock_across_switch_asserts),
+    test("block_in_hard_irq_asserts", block_in_hard_irq_asserts),
+    test("in_hard_irq_top_bottom", in_hard_irq_top_bottom),
+    test("sleep_under_spinlock_asserts", sleep_under_spinlock_asserts),
+    test("boot_stack_guarded", boot_stack_guarded),
+];
