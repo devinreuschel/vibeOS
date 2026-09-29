@@ -7,12 +7,11 @@
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
+use core::panic::Location;
 use core::ptr;
-#[cfg(feature = "kernel_tests")]
-use core::sync::atomic::AtomicU64;
-use core::sync::atomic::{AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
-use vibeos::lock::{acquire_mask, can_acquire, release_mask};
+use vibeos::lock::{Held, RankError};
 use vibeos::sync::SpinLock;
 
 use crate::per_cpu_init;
@@ -60,6 +59,7 @@ unsafe impl<T: Send> Send for SpinMutex<T> {}
 pub struct SpinMutexGuard<'a, T> {
     mutex: &'a SpinMutex<T>,
     owner: usize,
+    /// The rank `lock_enter` counted (0 when it counted nothing).
     rank: u8,
     _irq: InterruptGuard,
 }
@@ -77,10 +77,29 @@ impl<T> SpinMutex<T> {
         }
     }
 
+    /// Take the lock. The rank checker refuses it while this CPU holds a
+    /// higher rank (DESIGN §2.1).
+    #[track_caller]
     pub fn lock(&self) -> SpinMutexGuard<'_, T> {
+        // Not yet strict: ROADMAP §10.3's nesting-rule box makes `lock`
+        // refuse a held rank (`Held::acquire`).
+        self.lock_counted(true)
+    }
+
+    /// Take a second lock of a rank this CPU already holds. `subclass`
+    /// (1 or more) is this lock's place in its pair, which a
+    /// `// pair order:` comment above the call names (DESIGN §2.3).
+    #[track_caller]
+    pub fn lock_nested(&self, subclass: u8) -> SpinMutexGuard<'_, T> {
+        debug_assert!(subclass >= 1, "lock_nested: subclass 0");
+        self.lock_counted(true)
+    }
+
+    #[track_caller]
+    fn lock_counted(&self, nested: bool) -> SpinMutexGuard<'_, T> {
         let irq = InterruptGuard::enter();
         let owner = owner_token();
-        lock_enter(self.rank);
+        let rank = lock_enter(self.rank, nested);
         while !self.lock.try_acquire(owner) {
             #[cfg(feature = "kernel_tests")]
             record_spin(self.rank);
@@ -90,29 +109,32 @@ impl<T> SpinMutex<T> {
         SpinMutexGuard {
             mutex: self,
             owner,
-            rank: self.rank,
+            rank,
             _irq: irq,
         }
     }
 
-    /// One shot. `None` if held (including by us: recursive would panic
-    /// the TAS, so we treat same-owner as fail without a second CAS).
+    /// One shot. `None` if held, including by us: a rank-0 lock this CPU
+    /// holds fails without a second CAS (which would panic the TAS).
+    #[track_caller]
     pub fn try_lock(&self) -> Option<SpinMutexGuard<'_, T>> {
         let irq = InterruptGuard::enter();
         let owner = owner_token();
+        // Not yet strict: see `lock`.
+        let rank = lock_enter(self.rank, true);
         if self.lock.is_locked() && self.lock.owner() == owner {
+            lock_leave(rank);
             return None;
         }
-        lock_enter(self.rank);
         if self.lock.try_acquire(owner) {
             Some(SpinMutexGuard {
                 mutex: self,
                 owner,
-                rank: self.rank,
+                rank,
                 _irq: irq,
             })
         } else {
-            lock_leave(self.rank);
+            lock_leave(rank);
             None
         }
     }
@@ -172,40 +194,110 @@ fn lock_cpu() -> usize {
     }
 }
 
-/// Debug lock-order tracker. Cheap: one byte per CPU, skipped until GS is live.
-static HELD: [core::sync::atomic::AtomicU8; 64] =
-    [const { core::sync::atomic::AtomicU8::new(0) }; 64];
+/// Each CPU's held ranks and lockless depth (`vibeos::lock::Held`), in
+/// every build. Skipped until GS is live. Changed with `fetch_add` and
+/// `fetch_sub`, since an NMI may run between a load and a store.
+static HELD: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
 
-fn lock_enter(rank: u8) {
-    if rank == 0 || !per_cpu_init::is_live() {
-        return;
+/// This CPU's `HELD` slot, once per-CPU data is live.
+fn held_slot() -> Option<&'static AtomicU64> {
+    if !per_cpu_init::is_live() {
+        return None;
     }
-    let i = lock_cpu();
-    if i >= 64 {
-        return;
+    HELD.get(lock_cpu())
+}
+
+/// This CPU's held locks. `Held::EMPTY` before per-CPU data is live.
+pub fn held() -> Held {
+    match held_slot() {
+        // Relaxed: only this CPU writes its slot.
+        Some(h) => Held::from_raw(h.load(Ordering::Relaxed)),
+        None => Held::EMPTY,
     }
-    let held = HELD[i].load(core::sync::atomic::Ordering::Relaxed);
-    assert!(
-        can_acquire(held, rank),
-        "lock order: rank {rank} while holding {held:#x}"
-    );
-    HELD[i].store(
-        acquire_mask(held, rank),
-        core::sync::atomic::Ordering::Relaxed,
+}
+
+/// Bit `rank - 1` set for each rank this CPU holds.
+pub fn held_mask() -> u8 {
+    held().mask()
+}
+
+#[cfg(feature = "kernel_tests")]
+static RANK_FAILURES: AtomicU64 = AtomicU64::new(0);
+
+#[track_caller]
+#[allow(clippy::panic)]
+fn rank_refused(e: RankError, held: Held) -> ! {
+    #[cfg(feature = "kernel_tests")]
+    RANK_FAILURES.fetch_add(1, Ordering::Relaxed);
+    panic!(
+        "lock order: {e} (held {:#x}) at {}",
+        held.raw(),
+        Location::caller()
     );
 }
 
+/// Count one lock of `rank` on this CPU, or panic if the rank checker
+/// refuses it. `nested` allows a rank already held (`lock_nested`).
+/// Returns the rank counted, which the guard releases: 0 when nothing was.
+#[track_caller]
+fn lock_enter(rank: u8, nested: bool) -> u8 {
+    if rank == 0 {
+        return 0;
+    }
+    let Some(slot) = held_slot() else {
+        return 0;
+    };
+    // Relaxed: only this CPU writes its slot, with IF off; an NMI that
+    // raises the depth lowers it again before it returns.
+    let held = Held::from_raw(slot.load(Ordering::Relaxed));
+    let r = if nested {
+        held.acquire_nested(rank)
+    } else {
+        held.acquire(rank)
+    };
+    if let Err(e) = r {
+        rank_refused(e, held);
+    }
+    slot.fetch_add(Held::count_unit(rank), Ordering::Relaxed);
+    rank
+}
+
 fn lock_leave(rank: u8) {
-    if rank == 0 || !per_cpu_init::is_live() {
+    if rank == 0 {
         return;
     }
-    let i = lock_cpu();
-    if i >= 64 {
+    let Some(slot) = held_slot() else {
         return;
+    };
+    if Held::from_raw(slot.load(Ordering::Relaxed)).count(rank) != 0 {
+        slot.fetch_sub(Held::count_unit(rank), Ordering::Relaxed);
     }
-    let held = HELD[i].load(core::sync::atomic::Ordering::Relaxed);
-    HELD[i].store(
-        release_mask(held, rank),
-        core::sync::atomic::Ordering::Relaxed,
-    );
+}
+
+/// Test access to the rank checker (kernel_tests only).
+#[cfg(feature = "kernel_tests")]
+pub mod testing {
+    use super::*;
+
+    /// This CPU's held locks.
+    pub fn held() -> Held {
+        super::held()
+    }
+
+    /// Put back this CPU's held word after an `arch::catch` longjmp skipped
+    /// the guards that would have released it.
+    ///
+    /// # Safety
+    /// `h` is what this CPU held before the skipped acquisitions, and every
+    /// lock those acquisitions counted is released or was never taken.
+    pub unsafe fn restore_held(h: Held) {
+        if let Some(slot) = held_slot() {
+            slot.store(h.raw(), Ordering::Relaxed);
+        }
+    }
+
+    /// Rank-checker refusals since boot.
+    pub fn rank_failures() -> u64 {
+        RANK_FAILURES.load(Ordering::Relaxed)
+    }
 }

@@ -2,13 +2,14 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use vibeos::lock::RANK_DEVICE;
 use vibeos::time::Instant;
 
 use crate::arch;
 use crate::ktest::Outcome;
 use crate::per_cpu_init;
 use crate::sync::blocking_init::{BlockingMutex, Channel, Condvar, RwLock, Semaphore};
-use crate::sync_init::SpinMutex;
+use crate::sync_init::{self, SpinMutex};
 use crate::thread_init;
 use crate::time_init;
 use crate::x86;
@@ -93,6 +94,64 @@ pub(crate) fn test_lock_spins() -> Outcome {
         c[5],
         c[6]
     );
+    Outcome::Ok
+}
+
+/// Two `RANK_DEVICE` locks the rank tests nest.
+static RANK_A: SpinMutex<u32> = SpinMutex::with_rank(0, RANK_DEVICE);
+static RANK_B: SpinMutex<u32> = SpinMutex::with_rank(0, RANK_DEVICE);
+
+pub(crate) fn test_rank_lock_nested_keeps_outer() -> Outcome {
+    let if0 = x86::interrupts_enabled();
+    let nest0 = per_cpu_init::irq_nest();
+    let held0 = sync_init::testing::held();
+    let fails0 = sync_init::testing::rank_failures();
+    let mut counts = [u8::MAX; 2];
+    let hit;
+    {
+        let _a = RANK_A.lock();
+        let held_a = sync_init::testing::held();
+        let nest_a = per_cpu_init::irq_nest();
+        hit = arch::catch::catch_panic(|| {
+            // pair order: RANK_A, then RANK_B
+            let _b = RANK_B.lock_nested(1);
+            counts[0] = sync_init::testing::held().count(RANK_DEVICE);
+        });
+        if hit {
+            // SAFETY: invariant: a rank refusal panics in
+            // `sync_init::lock_enter` before the spin, so `RANK_B` was never
+            // taken and `held_a`, this CPU's word with `RANK_A` alone
+            // counted, is what it holds; established by
+            // `sync_init::SpinMutex::lock_nested`.
+            unsafe { sync_init::testing::restore_held(held_a) };
+            per_cpu_init::current()
+                .irq_nest
+                .store(nest_a, Ordering::Relaxed);
+        }
+        counts[1] = sync_init::testing::held().count(RANK_DEVICE);
+    }
+    let after = sync_init::testing::held();
+    if hit {
+        return Outcome::Fail("lock_nested hit the rank check");
+    }
+    if counts != [2, 1] {
+        return crate::fail_fmt!("device counts {:?}, want [2, 1]", counts);
+    }
+    if after.count(RANK_DEVICE) != 0 || after != held0 {
+        return crate::fail_fmt!("held {:#x} after, {:#x} before", after.raw(), held0.raw());
+    }
+    if sync_init::held_mask() != held0.mask() {
+        return Outcome::Fail("held_mask changed");
+    }
+    if sync_init::testing::rank_failures() != fails0 {
+        return Outcome::Fail("rank failure counted");
+    }
+    if x86::interrupts_enabled() != if0 || per_cpu_init::irq_nest() != nest0 {
+        return Outcome::Fail("IF or irq_nest changed");
+    }
+    if RANK_B.try_lock().is_none() {
+        return Outcome::Fail("RANK_B left held");
+    }
     Outcome::Ok
 }
 

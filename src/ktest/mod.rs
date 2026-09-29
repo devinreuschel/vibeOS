@@ -253,6 +253,10 @@ pub(crate) const TESTS: &[Test] = &[
         sync::ktest::test_spin_poll_hook_installed,
     ),
     test(
+        "rank_lock_nested_keeps_outer",
+        sync::ktest::test_rank_lock_nested_keeps_outer,
+    ),
+    test(
         "sched_lock_timer_irq",
         sched::ktest::test_sched_lock_timer_irq,
     ),

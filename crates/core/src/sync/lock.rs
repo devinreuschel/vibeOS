@@ -1,4 +1,4 @@
-//! Global lock ranks. DESIGN §2.1 / §7.7.
+//! Global lock ranks and the per-CPU held word. DESIGN §2.1 to §2.3, §7.7.
 //!
 //! Acquire increasing rank, release reverse. Never take a lower rank
 //! while holding a higher one. Rank 0 is untracked.
@@ -16,22 +16,186 @@ pub const RANK_DEVICE: u8 = 5;
 /// Serial TX. Last so any holder can still log.
 pub const RANK_SERIAL: u8 = 6;
 
-/// Bit for `rank` in a held mask. Rank 0 → 0.
-pub const fn rank_bit(rank: u8) -> u8 {
-    if rank == 0 { 0 } else { 1u8 << (rank - 1) }
+/// Highest rank `Held` counts. Ranks 1 to `MAX_RANK`; rank 0 is untracked.
+pub const MAX_RANK: u8 = 8;
+
+/// Bits of one rank's count in [`Held`].
+const COUNT_BITS: u32 = 4;
+/// Largest count a rank holds before [`RankError::Overflow`].
+const COUNT_MAX: u64 = (1 << COUNT_BITS) - 1;
+/// First bit of the lockless depth in [`Held`].
+const DEPTH_SHIFT: u32 = 32;
+/// Largest lockless depth before [`Held::enter_lockless`] saturates.
+const DEPTH_MAX: u64 = 0xFF;
+
+/// Why the rank checker refused a lock. DESIGN §2.1 to §2.3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RankError {
+    /// This CPU already holds a lock of `rank`; `lock_nested` names a pair.
+    SameRank { rank: u8 },
+    /// This CPU holds a lock ranked above `rank` (`held` is the rank mask).
+    Order { rank: u8, held: u8 },
+    /// This CPU runs code that takes no lock: call-function or shootdown
+    /// work, or an NMI, `#MC`, or CPL-0 `#DB` body (DESIGN §2.2).
+    Lockless,
+    /// `rank` is already held `COUNT_MAX` times.
+    Overflow { rank: u8 },
 }
 
-/// No held rank is strictly above `rank`. Rank 0 always allowed.
-pub const fn can_acquire(held: u8, rank: u8) -> bool {
-    if rank == 0 { true } else { held >> rank == 0 }
+impl core::fmt::Display for RankError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            RankError::SameRank { rank } => write!(f, "rank {rank} already held"),
+            RankError::Order { rank, held } => {
+                write!(f, "rank {rank} while holding {held:#x}")
+            }
+            RankError::Lockless => f.write_str("lock in a lockless section"),
+            RankError::Overflow { rank } => write!(f, "rank {rank} nested too deep"),
+        }
+    }
 }
 
-pub const fn acquire_mask(held: u8, rank: u8) -> u8 {
-    held | rank_bit(rank)
-}
+/// One CPU's held locks: a 4-bit count per rank (rank `r` at bits
+/// `4 * (r - 1)`) and the lockless depth (bits 32 to 39). The kernel keeps
+/// one per CPU and changes it with atomic adds, since an NMI may raise the
+/// depth between a load and a store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Held(u64);
 
-pub const fn release_mask(held: u8, rank: u8) -> u8 {
-    held & !rank_bit(rank)
+impl Held {
+    pub const EMPTY: Held = Held(0);
+
+    pub const fn from_raw(raw: u64) -> Held {
+        Held(raw)
+    }
+
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+
+    /// What adding one lock of `rank` adds to the raw word. 0 for rank 0
+    /// or a rank above `MAX_RANK`.
+    pub const fn count_unit(rank: u8) -> u64 {
+        if rank == 0 || rank > MAX_RANK {
+            0
+        } else {
+            1 << (COUNT_BITS * (rank as u32 - 1))
+        }
+    }
+
+    /// What one lockless level adds to the raw word.
+    pub const fn depth_unit() -> u64 {
+        1 << DEPTH_SHIFT
+    }
+
+    /// Locks of `rank` held. 0 for rank 0.
+    pub const fn count(self, rank: u8) -> u8 {
+        if rank == 0 || rank > MAX_RANK {
+            0
+        } else {
+            ((self.0 >> (COUNT_BITS * (rank as u32 - 1))) & COUNT_MAX) as u8
+        }
+    }
+
+    /// Bit `rank - 1` set for each rank held at least once.
+    pub const fn mask(self) -> u8 {
+        let mut m = 0u8;
+        let mut r = 1u8;
+        while r <= MAX_RANK {
+            if self.count(r) != 0 {
+                m |= 1 << (r - 1);
+            }
+            r += 1;
+        }
+        m
+    }
+
+    pub const fn lockless_depth(self) -> u8 {
+        ((self.0 >> DEPTH_SHIFT) & DEPTH_MAX) as u8
+    }
+
+    /// No lock held and no lockless section entered.
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Take one lock of `rank`: refused when `rank` or a higher rank is
+    /// held, or inside a lockless section. DESIGN §2.3's nesting rule.
+    pub const fn acquire(self, rank: u8) -> Result<Held, RankError> {
+        if rank != 0 && self.count(rank) != 0 {
+            if let Err(e) = self.check_cell() {
+                return Err(e);
+            }
+            if let Err(e) = self.check_order(rank) {
+                return Err(e);
+            }
+            return Err(RankError::SameRank { rank });
+        }
+        self.acquire_nested(rank)
+    }
+
+    /// Take one lock of `rank`, which may already be held (a named pair).
+    pub const fn acquire_nested(self, rank: u8) -> Result<Held, RankError> {
+        if let Err(e) = self.check_cell() {
+            return Err(e);
+        }
+        if rank == 0 || rank > MAX_RANK {
+            return Ok(self);
+        }
+        if let Err(e) = self.check_order(rank) {
+            return Err(e);
+        }
+        if self.count(rank) as u64 == COUNT_MAX {
+            return Err(RankError::Overflow { rank });
+        }
+        Ok(Held(self.0 + Held::count_unit(rank)))
+    }
+
+    /// Drop one lock of `rank`. Saturates at 0.
+    pub const fn release(self, rank: u8) -> Held {
+        if self.count(rank) == 0 {
+            self
+        } else {
+            Held(self.0 - Held::count_unit(rank))
+        }
+    }
+
+    /// An IRQ-off cell may be taken: no lockless section is active.
+    pub const fn check_cell(self) -> Result<(), RankError> {
+        if self.lockless_depth() != 0 {
+            Err(RankError::Lockless)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Raise the lockless depth. Saturates.
+    pub const fn enter_lockless(self) -> Held {
+        if self.lockless_depth() as u64 == DEPTH_MAX {
+            self
+        } else {
+            Held(self.0 + Held::depth_unit())
+        }
+    }
+
+    /// Lower the lockless depth. Saturates at 0.
+    pub const fn leave_lockless(self) -> Held {
+        if self.lockless_depth() == 0 {
+            self
+        } else {
+            Held(self.0 - Held::depth_unit())
+        }
+    }
+
+    /// No held rank is strictly above `rank`.
+    const fn check_order(self, rank: u8) -> Result<(), RankError> {
+        let held = self.mask();
+        if (held as u32) >> rank != 0 {
+            Err(RankError::Order { rank, held })
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Two CPU-local locks: lower `cpu_id` first. DESIGN §7.7.
@@ -62,31 +226,85 @@ mod tests {
 
     #[test]
     fn acquire_increasing_is_ok() {
-        let mut h = 0u8;
-        assert!(can_acquire(h, RANK_PT));
-        h = acquire_mask(h, RANK_PT);
-        assert!(can_acquire(h, RANK_BUDDY));
-        h = acquire_mask(h, RANK_BUDDY);
-        assert!(can_acquire(h, RANK_HEAP));
-        h = acquire_mask(h, RANK_HEAP);
-        assert!(can_acquire(h, RANK_SCHED));
-        h = acquire_mask(h, RANK_SERIAL);
-        assert_eq!(h & rank_bit(RANK_PT), rank_bit(RANK_PT));
-        h = release_mask(h, RANK_SERIAL);
-        h = release_mask(h, RANK_HEAP);
-        h = release_mask(h, RANK_BUDDY);
-        h = release_mask(h, RANK_PT);
-        assert_eq!(h, 0);
+        let mut h = Held::EMPTY;
+        for r in [RANK_PT, RANK_BUDDY, RANK_HEAP, RANK_SCHED, RANK_SERIAL] {
+            h = h.acquire(r).unwrap();
+        }
+        assert_eq!(h.count(RANK_PT), 1);
+        assert_eq!(h.count(RANK_DEVICE), 0);
+        for r in [RANK_SERIAL, RANK_SCHED, RANK_HEAP, RANK_BUDDY, RANK_PT] {
+            h = h.release(r);
+        }
+        assert!(h.is_empty());
+        assert_eq!(h.release(RANK_PT), Held::EMPTY);
     }
 
     #[test]
     fn heap_then_buddy_is_forbidden() {
-        let h = acquire_mask(0, RANK_HEAP);
-        assert!(!can_acquire(h, RANK_BUDDY));
-        assert!(!can_acquire(h, RANK_PT));
-        assert!(can_acquire(h, RANK_SCHED));
-        assert!(can_acquire(h, RANK_SERIAL));
-        assert!(can_acquire(h, 0));
+        let h = Held::EMPTY.acquire(RANK_HEAP).unwrap();
+        assert!(matches!(
+            h.acquire(RANK_BUDDY),
+            Err(RankError::Order {
+                rank: RANK_BUDDY,
+                ..
+            })
+        ));
+        assert!(h.acquire(RANK_PT).is_err());
+        assert!(h.acquire_nested(RANK_PT).is_err());
+        assert!(h.acquire(RANK_SCHED).is_ok());
+        assert!(h.acquire(RANK_SERIAL).is_ok());
+        assert_eq!(h.acquire(0), Ok(h));
+    }
+
+    #[test]
+    fn nested_inner_release_keeps_outer_rank() {
+        let outer = Held::EMPTY.acquire(RANK_DEVICE).unwrap();
+        let inner = outer.acquire_nested(RANK_DEVICE).unwrap();
+        assert_eq!(inner.count(RANK_DEVICE), 2);
+        let after = inner.release(RANK_DEVICE);
+        assert_eq!(after, outer);
+        assert_eq!(after.count(RANK_DEVICE), 1);
+        assert_eq!(after.mask(), 1 << (RANK_DEVICE - 1));
+        assert!(after.release(RANK_DEVICE).is_empty());
+        let mut h = Held::EMPTY;
+        for _ in 0..15 {
+            h = h.acquire_nested(RANK_SCHED).unwrap();
+        }
+        assert_eq!(
+            h.acquire_nested(RANK_SCHED),
+            Err(RankError::Overflow { rank: RANK_SCHED })
+        );
+        assert_eq!(h.count(RANK_DEVICE), 0);
+    }
+
+    #[test]
+    fn same_rank_lock_is_refused() {
+        let h = Held::EMPTY.acquire(RANK_DEVICE).unwrap();
+        assert_eq!(
+            h.acquire(RANK_DEVICE),
+            Err(RankError::SameRank { rank: RANK_DEVICE })
+        );
+        assert!(h.acquire_nested(RANK_DEVICE).is_ok());
+        assert_eq!(h.acquire(0), Ok(h));
+        assert_eq!(h.acquire(0).unwrap().acquire(0), Ok(h));
+    }
+
+    #[test]
+    fn lock_in_lockless_depth_is_refused() {
+        let h = Held::EMPTY.enter_lockless();
+        assert_eq!(h.lockless_depth(), 1);
+        assert!(h.mask() == 0 && !h.is_empty());
+        assert_eq!(h.acquire(RANK_DEVICE), Err(RankError::Lockless));
+        assert_eq!(h.acquire_nested(RANK_DEVICE), Err(RankError::Lockless));
+        assert_eq!(h.acquire(0), Err(RankError::Lockless));
+        assert_eq!(h.check_cell(), Err(RankError::Lockless));
+        let h2 = h.enter_lockless().leave_lockless();
+        assert_eq!(h2, h);
+        let out = h.leave_lockless();
+        assert!(out.is_empty());
+        assert_eq!(out.leave_lockless(), out);
+        assert!(out.check_cell().is_ok());
+        assert!(out.acquire(RANK_DEVICE).is_ok());
     }
 
     #[test]
