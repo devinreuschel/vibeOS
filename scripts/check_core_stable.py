@@ -58,8 +58,6 @@ PARSERS_PENDING: tuple[str, ...] = (
     "acpi/mod.rs",
     "block/part.rs",
     "console/kbd.rs::Decoder::feed",
-    "dev/pci.rs",
-    "dev/virtio.rs::read_modern_caps",
     "fs/fat/mod.rs",
     "fs/vibefs/mod.rs",
     "proc/elf.rs",

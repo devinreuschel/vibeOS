@@ -150,6 +150,12 @@ impl ModernCaps {
 }
 
 /// First of each modern cap type. Extra ids of the same type are ignored.
+///
+/// The capability list is device input (ROADMAP §10.1): a capability whose
+/// body runs past the 256-byte header, whose BAR index is not 0 to 5, or
+/// whose `offset + length` overflows is skipped, so a crafted list leaves
+/// the result incomplete instead of panicking.
+#[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub fn read_modern_caps<C: CfgIo>(cfg: &mut C, bdf: Bdf) -> ModernCaps {
     let mut out = ModernCaps::empty();
     let status = pci::read16(cfg, bdf, CFG_STATUS);
@@ -159,55 +165,60 @@ pub fn read_modern_caps<C: CfgIo>(cfg: &mut C, bdf: Bdf) -> ModernCaps {
     let mut ptr = pci::read8(cfg, bdf, CFG_CAP_PTR);
     let mut n = 0usize;
     while ptr >= 0x40 && n < MAX_CAP_WALK {
-        n += 1;
-        let id = pci::read8(cfg, bdf, ptr as u16);
-        if id == CAP_VENDOR {
-            let cap_len = pci::read8(cfg, bdf, ptr as u16 + 2);
-            if cap_len as u16 >= CAP_HDR {
-                let cfg_type = pci::read8(cfg, bdf, ptr as u16 + 3);
-                let bar = pci::read8(cfg, bdf, ptr as u16 + 4);
-                let offset = cfg.read32(bdf, ptr as u16 + 8);
-                let length = cfg.read32(bdf, ptr as u16 + 12);
-                let mut mult = 0u32;
-                if cfg_type == PCI_CAP_NOTIFY && cap_len as u16 >= CAP_HDR + 4 {
-                    mult = cfg.read32(bdf, ptr as u16 + 16);
-                }
-                let cap = PciCap::parse(cfg_type, bar, offset, length, mult);
-                match cfg_type {
-                    PCI_CAP_COMMON => {
-                        if out.common.is_none() {
-                            out.common = Some(cap);
-                        }
-                    }
-                    PCI_CAP_NOTIFY => {
-                        if out.notify.is_none() {
-                            out.notify = Some(cap);
-                        }
-                    }
-                    PCI_CAP_ISR => {
-                        if out.isr.is_none() {
-                            out.isr = Some(cap);
-                        }
-                    }
-                    PCI_CAP_DEVICE => {
-                        if out.device.is_none() {
-                            out.device = Some(cap);
-                        }
-                    }
-                    PCI_CAP_PCI_CFG => {}
-                    _ => {}
-                }
+        n = n.saturating_add(1);
+        let id = pci::read8(cfg, bdf, u16::from(ptr));
+        if id == CAP_VENDOR
+            && let Some(cap) = read_vendor_cap(cfg, bdf, u16::from(ptr))
+        {
+            let slot = match cap.cfg_type {
+                PCI_CAP_COMMON => Some(&mut out.common),
+                PCI_CAP_NOTIFY => Some(&mut out.notify),
+                PCI_CAP_ISR => Some(&mut out.isr),
+                PCI_CAP_DEVICE => Some(&mut out.device),
+                _ => None,
+            };
+            if let Some(slot) = slot
+                && slot.is_none()
+            {
+                *slot = Some(cap);
             }
         }
-        let next = pci::read8(cfg, bdf, ptr as u16 + 1);
+        // `ptr` is a u8, so `ptr + 1` fits u16.
+        let next = pci::read8(cfg, bdf, u16::from(ptr).saturating_add(1));
         if next == 0 || next == ptr {
             break;
         }
         ptr = next;
     }
-    let _ = n;
     out
 }
+
+/// One virtio vendor capability at `ptr`, or `None` when it is short, runs
+/// past the 256-byte header, names a BAR index above 5, or its
+/// `offset + length` overflows.
+#[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+fn read_vendor_cap<C: CfgIo>(cfg: &mut C, bdf: Bdf, ptr: u16) -> Option<PciCap> {
+    let cap_len = u16::from(pci::read8(cfg, bdf, ptr.checked_add(2)?));
+    if cap_len < CAP_HDR || ptr.checked_add(cap_len)? > CFG_SPACE_LEN {
+        return None;
+    }
+    let cfg_type = pci::read8(cfg, bdf, ptr.checked_add(3)?);
+    let bar = pci::read8(cfg, bdf, ptr.checked_add(4)?);
+    if usize::from(bar) >= pci::MAX_BARS {
+        return None;
+    }
+    let offset = cfg.read32(bdf, ptr.checked_add(8)?);
+    let length = cfg.read32(bdf, ptr.checked_add(12)?);
+    offset.checked_add(length)?;
+    let mut mult = 0u32;
+    if cfg_type == PCI_CAP_NOTIFY && cap_len >= CAP_HDR.checked_add(4)? {
+        mult = cfg.read32(bdf, ptr.checked_add(16)?);
+    }
+    Some(PciCap::parse(cfg_type, bar, offset, length, mult))
+}
+
+/// Bytes of the PCI header's config space, where capabilities live.
+const CFG_SPACE_LEN: u16 = 0x100;
 
 pub fn is_rng(vendor: u16, device: u16) -> bool {
     vendor == VENDOR_ID && (device == DEV_RNG_MODERN || device == DEV_RNG_LEGACY)
@@ -777,6 +788,55 @@ mod tests {
         assert_eq!(c.device.unwrap().offset, 0x40);
         write16(&mut f, b, CFG_COMMAND, 6);
         assert_eq!(pci::read16(&mut f, b, CFG_COMMAND), 6);
+    }
+
+    /// Crafted capability lists (ROADMAP §10.1): each breaks one cap of an
+    /// otherwise complete list, and the result is incomplete, with no panic.
+    #[test]
+    fn read_modern_caps_crafted_chain() {
+        let b = Bdf::new(0, 4, 0);
+        let good = |f: &mut Fake| {
+            f.device();
+            f.put8(CFG_CAP_PTR, 0x40);
+            f.vend(0x40, 0x54, PCI_CAP_COMMON, 0, 0, 0x38, 0);
+            f.vend(0x54, 0x6C, PCI_CAP_NOTIFY, 1, 0x100, 0x20, 4);
+            f.vend(0x6C, 0, PCI_CAP_ISR, 2, 0, 4, 0);
+        };
+        let mut f = Fake::new();
+        good(&mut f);
+        assert!(read_modern_caps(&mut f, b).is_complete());
+
+        // A `cap_len` shorter than the virtio header.
+        let mut f = Fake::new();
+        good(&mut f);
+        f.put8(0x42, 8);
+        assert!(read_modern_caps(&mut f, b).common.is_none());
+
+        // `offset + length` overflows u32.
+        let mut f = Fake::new();
+        good(&mut f);
+        f.put32(0x54 + 8, 0xFFFF_FFF0);
+        f.put32(0x54 + 12, 0x20);
+        let c = read_modern_caps(&mut f, b);
+        assert!(c.notify.is_none() && !c.is_complete());
+
+        // A BAR index of 6 or more.
+        for bar in [6u8, 0xFF] {
+            let mut f = Fake::new();
+            good(&mut f);
+            f.put8(0x6C + 4, bar);
+            assert!(!read_modern_caps(&mut f, b).is_complete());
+        }
+
+        // A cap at 0xFC whose body would run past the 256-byte header.
+        let mut f = Fake::new();
+        f.device();
+        f.put8(CFG_CAP_PTR, 0xFC);
+        f.put8(0xFC, CAP_VENDOR);
+        f.put8(0xFD, 0);
+        f.put8(0xFE, 16);
+        f.put8(0xFF, PCI_CAP_COMMON);
+        assert_eq!(read_modern_caps(&mut f, b), ModernCaps::empty());
     }
 
     #[test]
