@@ -169,8 +169,8 @@ kernel half is `src/<s>/` (the kernel binary, rooted at `src/main.rs`). A kernel
 `mm/pmm_init.rs`). A module named like its directory is that directory's `mod.rs`. Each crate root
 re-exports its modules under their pre-move names (`vibeos::pmm`, `crate::pmm_init`, `crate::x86`).
 `arch/x86_64/` is the x86_64 port: its pure half (encodings, trap decode) in `vibeos-core`, and its
-hardware half in the kernel (DESIGN §11.1). `src/cell.rs` stays at the kernel root; `vibeos-core`
-compiles it under `cfg(test)` through `#[path]`. `user/` holds user programs, not kernel modules: the
+hardware half in the kernel (DESIGN §11.1). The cells are portable (`cell.rs`, over the port's seam),
+and the kernel's `cell.rs` names them over its port. `user/` holds user programs, not kernel modules: the
 Rust user runtime `vibeos-user` (`user/src/`, its programs in `user/src/bin/`, and everything that names an
 architecture in `user/src/arch/<arch>/`), its `#![no_builtins]` memory crate `vibeos-user-mem`
 (`user/mem/`), both workspace members that `make user` builds for the user triple (BOOT.md §3.1), and,
@@ -184,7 +184,7 @@ children, need no row.
 
 | Subsystem | Portable (`crates/core/src/`) | Kernel (`src/`) |
 |---|---|---|
-| crate | `lib.rs`, `marker.rs`, `fmt_util.rs`, `symtab.rs`, `limits.rs`, `kalloc.rs`, `kerror.rs`, `trap.rs`, `atomic.rs` | `main.rs`, `cell.rs` |
+| crate | `lib.rs`, `marker.rs`, `fmt_util.rs`, `symtab.rs`, `limits.rs`, `kalloc.rs`, `kerror.rs`, `trap.rs`, `atomic.rs`, `cell.rs` (`BootCell`, `IrqCell`, `CellHooks`) | `main.rs`, `cell.rs` (the kernel's names for the cells and its `CellHooks` impl) |
 | boot | `boot/{mod,cmdline}.rs` | `boot/{mod,fw_cfg_init}.rs` (`BootInfo`, Limine requests, fw_cfg) |
 | arch | `arch/{mod,stub}.rs`, `arch/x86_64/{mod,apic,desc,pic,trap,uart,vectors}.rs` | `arch/{mod,current}.rs`, `arch/x86_64/{mod,apic_init,catch,cpu,gdt,gs,idt,pic,switch,trampoline,uaccess}.rs`, `arch/x86_64/trampoline.S` |
 | mm | `mm/{mod,pmm,paging,heap,kva}.rs` | `mm/{mod,pmm_init,paging_init,heap_init,kva_init}.rs` |

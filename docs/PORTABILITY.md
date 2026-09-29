@@ -119,8 +119,8 @@ The mechanism:
   links it, without `std`, for the host, where no port exists, so only a type parameter reaches one.
   `vibeos-core` contains no `cfg(target_arch)` and no assembly (ROADMAP Phase 10 gate):
   `scripts/check_core_stable.py` fails on `asm!`, `global_asm!`, `naked_asm!`, or a `target_arch`
-  token outside comments in any file of the crate, its test modules and the files its `#[path]`
-  attributes name (`src/cell.rs`) included. A host test of a port's assembly lives in
+  token outside comments in any file of the crate, its test modules and any file a `#[path]`
+  attribute names included. A host test of a port's assembly lives in
   `tests/hostlib`, outside the crate.
 - The atomics seam is the one exception: a module selected by `cfg(loom)` (ROADMAP §10.8), because
   loom replaces types, not functions.

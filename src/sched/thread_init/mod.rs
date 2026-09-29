@@ -11,7 +11,7 @@
 //! the stack, puts it in the CPU's stack cache or on its dead list, which
 //! the CPU's workqueue worker unmaps and frees with IF=1 (DESIGN §4.5).
 
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 
 use vibeos::ipi::{home_cpu, pick_cpu};
 use vibeos::kalloc::TryBox;
@@ -23,7 +23,7 @@ use vibeos::proc::pid::{IdIndex, PidAlloc};
 use vibeos::sched::{SWEEP_TICKS, TimeoutQueue, effective_deadline, enqueue_runnable, take_next};
 use vibeos::syscall::UserFrame;
 use vibeos::thread::{
-    CpuAffinity, CpuContext, Fxsave, MAX_THREADS, Tcb, ThreadId, ThreadState, WaitOutcome,
+    CpuAffinity, CpuContext, Fxsave, MAX_THREADS, OnCpu, Tcb, ThreadId, ThreadState, WaitOutcome,
     apply_if_on_resume, prepare_thread,
 };
 use vibeos::time::Instant;
@@ -605,7 +605,7 @@ fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
                 cpu.irq_nest.load(Ordering::Relaxed),
             );
             per_cpu_init::set_current_thread(cpu, new_ptr);
-            (*new_ptr).on_cpu.store(true, Ordering::Relaxed);
+            (*new_ptr).on_cpu.set();
             on_switch(cpu, old_ptr, new_ptr);
         }
     });
@@ -697,9 +697,10 @@ pub(crate) fn finish_switch() {
         // SAFETY: `prev` is the TCB this CPU switched off (stored in
         // `tail_prev` by `thread_init::switch_now`), a live entry of `SCHED`
         // (invariant I9); `switch_context` has returned, so every save into
-        // it is done. This Release store is this CPU's last access to it:
-        // after it `spawn_inner` may rewrite the slot (AGENTS rule 5).
-        unsafe { (*prev).on_cpu.store(false, Ordering::Release) };
+        // it is done. This Release store (`OnCpu::clear`) is this CPU's
+        // last access to it: after it `spawn_inner` may rewrite the slot
+        // (AGENTS rule 5).
+        unsafe { (*prev).on_cpu.clear() };
     }
 }
 
@@ -965,7 +966,7 @@ pub fn adopt_ap_idle(cpu_id: u32, stack: GuardedStack) -> Result<ThreadId, Guard
         id: ThreadId(0),
         name: "idle",
         state: ThreadState::Running,
-        on_cpu: AtomicBool::new(true),
+        on_cpu: OnCpu::new_set(),
         stack: None,
         context: CpuContext::empty(),
         entry: ap_idle_entry,
@@ -1091,7 +1092,7 @@ fn spawn_inner(
     // goes back to the allocator; the new thread takes a new tid.
     let reused = with_sched(|s| {
         let slot = s.slots.iter().position(|x| match x.as_ref() {
-            Some(t) => t.state == ThreadState::Dead && !t.on_cpu.load(Ordering::Acquire),
+            Some(t) => t.state == ThreadState::Dead && t.on_cpu.is_clear(),
             None => false,
         })?;
         let old = s.slots[slot].as_deref()?.id;
@@ -1131,7 +1132,7 @@ fn spawn_inner(
         id: ThreadId(0),
         name,
         state: ThreadState::Ready,
-        on_cpu: AtomicBool::new(false),
+        on_cpu: OnCpu::new(),
         stack: None,
         context: CpuContext::empty(),
         entry,
