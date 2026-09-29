@@ -79,23 +79,26 @@ pub(crate) fn test_block_vblk_rw() -> Outcome {
         Some(_) => return Outcome::Fail("wrong driver"),
         None => return Outcome::Fail("unbound"),
     }
-    let d = match virtio_blk_init::device() {
-        Some(d) => d,
-        None => return Outcome::Fail("no device"),
+    // vda's registry handle; its `_dev` calls reach the driver below the
+    // page cache, as this test always has.
+    let Some(d) = crate::block::blockdev_init::lookup(b"vda") else {
+        return Outcome::Fail("no device");
     };
-    if d.name() != virtio_blk_init::name() {
+    if d.name().as_str() != vibeos::virtio_blk::NAME || d.parent().is_some() {
         return Outcome::Fail("name");
     }
-    if d.logical_block_size() == 0 || d.logical_block_size() % 512 != 0 {
+    let (Ok(bs), Ok(cap)) = (d.logical_block_size(), d.capacity_sectors()) else {
+        return Outcome::Fail("geometry");
+    };
+    if bs == 0 || bs % 512 != 0 {
         return Outcome::Fail("bs");
     }
-    if d.capacity_sectors() < 16 {
+    if cap < 16 {
         return Outcome::Fail("cap");
     }
     if d.state() != DeviceState::Ready {
         return Outcome::Fail("state");
     }
-    let bs = d.logical_block_size() as usize;
     if bs != 512 {
         return Outcome::Fail("need 512");
     }
@@ -105,11 +108,11 @@ pub(crate) fn test_block_vblk_rw() -> Outcome {
         buf[i] = (i as u8).wrapping_add(0xA1);
         i += 1;
     }
-    if d.write(1, &buf).is_err() {
+    if d.write_dev(1, &buf).is_err() {
         return Outcome::Fail("write");
     }
     let mut out = [0u8; 512];
-    if d.read(1, &mut out).is_err() {
+    if d.read_dev(1, &mut out).is_err() {
         return Outcome::Fail("read");
     }
     if out != buf {
@@ -122,14 +125,14 @@ pub(crate) fn test_block_vblk_rw() -> Outcome {
         multi[i] = (i as u8).wrapping_add(0x5C);
         i += 1;
     }
-    if d.write(5, &multi).is_err() {
+    if d.write_dev(5, &multi).is_err() {
         return Outcome::Fail("multi write");
     }
     let mut mout = [0u8; 1536];
-    if d.read(5, &mut mout).is_err() || mout != multi {
+    if d.read_dev(5, &mut mout).is_err() || mout != multi {
         return Outcome::Fail("multi read");
     }
-    if d.flush().is_err() {
+    if d.flush_dev().is_err() {
         return Outcome::Fail("flush");
     }
     if !has_flush() {
@@ -138,11 +141,11 @@ pub(crate) fn test_block_vblk_rw() -> Outcome {
     if has_discard() && d.discard(5, 1).is_err() {
         return Outcome::Fail("discard");
     }
-    match d.read(0, &mut [0u8; 100]) {
+    match d.read_dev(0, &mut [0u8; 100]) {
         Err(BlockError::Inval) => {}
         _ => return Outcome::Fail("unaligned buf"),
     }
-    match d.write(d.capacity_sectors(), &buf) {
+    match d.write_dev(cap, &buf) {
         Err(BlockError::Inval) => {}
         _ => return Outcome::Fail("past end"),
     }

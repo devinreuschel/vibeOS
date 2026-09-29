@@ -153,6 +153,15 @@ GONE: list[tuple[str, str]] = [
     ("target-vibefs-crash", "one `target/` for every feature"),
     ("find_features", "`vibeos-core` builds with its MSRV"),
     ("FEATURE_ATTR", "`vibeos-core` builds with its MSRV"),
+    ("DEV_RAM0", "one registry of counted block-device"),
+    ("DEV_VDA", "one registry of counted block-device"),
+    ("NAMES_RAM", "one registry of counted block-device"),
+    ("NAMES_VDA", "one registry of counted block-device"),
+    ("parent_raw_read", "one registry of counted block-device"),
+    ("parent_bs_cap", "one registry of counted block-device"),
+    ("src/block/cache_init.rs: fn raw_read", "one registry of counted block-device"),
+    ("src/block/cache_init.rs: fn raw_write", "one registry of counted block-device"),
+    ("src/block/cache_init.rs: fn raw_flush", "one registry of counted block-device"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

@@ -5,17 +5,18 @@
 //! `IoWaiter` path. Kick is inline for ramdisk; virtio-blk replaces it.
 
 use core::cell::UnsafeCell;
-use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
+use vibeos::block::blockdev::Backing;
 use vibeos::block::{
-    BlockError, Completion, DeviceState, MAX_QUEUE, Op, Queue, Ramdisk, Request, write_marker,
+    BlockDevice, BlockError, Completion, DeviceState, MAX_QUEUE, Op, Queue, Ramdisk, Request,
 };
+use vibeos::kalloc::TryBox;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::wait::WaitQueue;
 
-use crate::serial::Serial;
+use crate::block::{blockdev_init, cache_init};
 use crate::sync_init::SpinMutex;
 use crate::thread_init;
 
@@ -47,7 +48,7 @@ pub(super) static FLUSHES: AtomicU64 = AtomicU64::new(0);
     reason = "ram0's geometry is the nonzero constants `block_init::RAM0_BLOCK_SIZE` and `block_init::RAM0_SECTORS`, which `Ramdisk::new` accepts"
 )]
 fn ram() -> Ramdisk {
-    Ramdisk::new(RAM0_NAME, RAM0_BLOCK_SIZE, RAM0_SECTORS).expect("ram0 geom")
+    Ramdisk::new(RAM0_BLOCK_SIZE, RAM0_SECTORS).expect("ram0 geom")
 }
 
 fn pack(r: Result<(), BlockError>) -> u32 {
@@ -448,7 +449,6 @@ pub fn write_fua(lba: u64, buf: &[u8]) -> Result<(), BlockError> {
     w.wait()
 }
 
-#[cfg(feature = "kernel_tests")]
 pub fn discard(lba: u64, nsectors: u64) -> Result<(), BlockError> {
     if nsectors > u32::MAX as u64 {
         return Err(BlockError::Inval);
@@ -456,16 +456,13 @@ pub fn discard(lba: u64, nsectors: u64) -> Result<(), BlockError> {
     blocking(Op::Discard, lba, nsectors as u32, 0, 0)
 }
 
+#[cfg(feature = "kernel_tests")]
 pub fn live() -> bool {
     LIVE.load(Ordering::Acquire)
 }
 
 pub fn state() -> DeviceState {
     DeviceState::from_u8(STATE.load(Ordering::Acquire))
-}
-
-pub fn name() -> &'static str {
-    RAM0_NAME
 }
 
 pub fn logical_block_size() -> u32 {
@@ -496,6 +493,48 @@ pub fn reset() {
     });
 }
 
+/// ram0's driver operations, which its registry entry owns.
+struct Ram0;
+
+impl BlockDevice for Ram0 {
+    fn logical_block_size(&self) -> u32 {
+        logical_block_size()
+    }
+    fn capacity_sectors(&self) -> u64 {
+        capacity_sectors()
+    }
+    fn state(&self) -> DeviceState {
+        state()
+    }
+    fn read(&self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        read(lba, buf)
+    }
+    fn write(&self, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+        write(lba, buf)
+    }
+    fn flush(&self) -> Result<(), BlockError> {
+        flush()
+    }
+    fn discard(&self, lba: u64, nsectors: u64) -> Result<(), BlockError> {
+        discard(lba, nsectors)
+    }
+}
+
+/// Register ram0 in the block registry, through the page cache; its
+/// registration prints the `block: ram0` marker.
+fn register() -> Result<(), BlockError> {
+    let ops =
+        TryBox::<dyn BlockDevice>::try_new_unsize(Ram0, |b| b).map_err(|_| BlockError::NoMem)?;
+    blockdev_init::register(
+        RAM0_NAME.as_bytes(),
+        Backing::Disk {
+            ops,
+            cache: Some(&cache_init::PAGE_CACHE),
+        },
+    )
+    .map(|_| ())
+}
+
 pub fn init() {
     debug_assert_eq!(ram().byte_len(), RAM0_BYTES);
     {
@@ -504,9 +543,11 @@ pub fn init() {
     }
     STATE.store(DeviceState::Ready.as_u8(), Ordering::Release);
     LIVE.store(true, Ordering::Release);
-    #[expect(
-        clippy::let_underscore_must_use,
-        reason = "a write to Serial cannot fail (DESIGN §2.5)"
-    )]
-    let _ = write_marker(&mut Serial, RAM0_NAME, RAM0_SECTORS).and_then(|()| writeln!(Serial));
+    if let Err(e) = register() {
+        crate::klog!(
+            vibeos::log::Level::Error,
+            "vibeOS: blk: ram0 not registered: {}",
+            e.as_str()
+        );
+    }
 }

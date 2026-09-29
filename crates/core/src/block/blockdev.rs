@@ -594,9 +594,6 @@ pub(crate) mod testing {
     }
 
     impl BlockDevice for MemDisk {
-        fn name(&self) -> &'static str {
-            "mem"
-        }
         fn logical_block_size(&self) -> u32 {
             self.bs
         }

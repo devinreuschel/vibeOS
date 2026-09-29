@@ -18,6 +18,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use vibeos::block::BlockError;
+use vibeos::block::blockdev::BlockRef;
 use vibeos::fat::{self, Disk, FatError, FatInode, FatVol, INITRD_BYTES, Node, SEC};
 use vibeos::fs::{
     Dirent, FileSystem, FsError, FsType, Inode, InodeHandle, InodeInfo, InodeKind, InodeOps,
@@ -25,12 +26,10 @@ use vibeos::fs::{
 };
 use vibeos::lock::RANK_DEVICE;
 
-use crate::block_init;
-use crate::cache_init;
+use crate::block::blockdev_init;
 use crate::fs_init;
 use crate::sync_init::SpinMutex;
 use crate::thread_init;
-use crate::virtio_blk_init;
 
 use vibeos::limits::MAX_FAT_VOLS as MAX_VOLS;
 
@@ -46,10 +45,10 @@ pub const VOL_INITRD: u8 = 0;
 const MNT_MAX: usize = 2;
 const MNT_PATH: usize = 64;
 
-#[derive(Clone, Copy)]
 enum Media {
     Initrd,
-    Dev(u32),
+    /// A registered block device; the slot's handle keeps it alive.
+    Dev(BlockRef),
 }
 
 /// A volume slot. Its `vol` and `back` cells belong to the one thread
@@ -123,11 +122,11 @@ pub(super) static NVOL: AtomicU8 = AtomicU8::new(0);
 
 const INITRD_RO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/initrd.fat"));
 
-struct Io {
-    back: Media,
+struct Io<'a> {
+    back: &'a Media,
 }
 
-impl Disk for Io {
+impl Disk for Io<'_> {
     fn sector_size(&self) -> u32 {
         SEC as u32
     }
@@ -135,9 +134,9 @@ impl Disk for Io {
     fn nsectors(&self) -> u32 {
         match self.back {
             Media::Initrd => (INITRD_BYTES / SEC) as u32,
-            Media::Dev(cache_init::DEV_RAM0) => block_init::capacity_sectors() as u32,
-            Media::Dev(cache_init::DEV_VDA) => virtio_blk_init::capacity_sectors() as u32,
-            Media::Dev(_) => 0,
+            Media::Dev(r) => r
+                .capacity_sectors()
+                .map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX)),
         }
     }
 
@@ -155,7 +154,7 @@ impl Disk for Io {
                     Ok(())
                 })
             }
-            Media::Dev(dev) => cache_init::read(dev, lba as u64, buf).map_err(fat_io_err),
+            Media::Dev(r) => r.read(u64::from(lba), buf).map_err(fat_io_err),
         }
     }
 
@@ -173,14 +172,14 @@ impl Disk for Io {
                     Ok(())
                 })
             }
-            Media::Dev(dev) => cache_init::write(dev, lba as u64, buf).map_err(fat_io_err),
+            Media::Dev(r) => r.write(u64::from(lba), buf).map_err(fat_io_err),
         }
     }
 
     fn flush(&mut self) -> Result<(), FatError> {
         match self.back {
             Media::Initrd => Ok(()),
-            Media::Dev(dev) => cache_init::flush(dev).map_err(fat_io_err),
+            Media::Dev(r) => r.flush().map_err(fat_io_err),
         }
     }
 }
@@ -233,7 +232,7 @@ fn with_grabbed<R>(
             None => Err(FsError::Io),
             Some(v) => {
                 let mut io = Io {
-                    back: *SLOTS[i].back.get(),
+                    back: &*SLOTS[i].back.get(),
                 };
                 f(v, &mut io)
             }
@@ -616,7 +615,7 @@ pub fn init() {
         return;
     }
     let mut io = Io {
-        back: Media::Initrd,
+        back: &Media::Initrd,
     };
     let vol = match FatVol::mount(&mut io) {
         Ok(v) => v,
@@ -754,6 +753,8 @@ pub(super) fn drop_slot(id: u8) -> Result<(), FatError> {
     // which is dropped only below; established by `fs::fat_init::grab`.
     unsafe {
         *slot.vol.get() = None;
+        // Releases the slot's device handle.
+        *slot.back.get() = Media::Initrd;
     }
     slot.used.store(false, Ordering::Release);
     slot.sb.store(NO_SB, Ordering::Release);
@@ -781,22 +782,9 @@ fn drop_spare(id: u8) {
 /// otherwise the volume gets a slot, which is dropped again when `Vfs`
 /// reports that another mount of the device won the race.
 pub fn mount_dev(name: &str, at: &str, ro: bool) -> Result<u8, FsError> {
-    let (back, dev) = match name {
-        "ram0" => {
-            if !block_init::live() {
-                return Err(FsError::Io);
-            }
-            (Media::Dev(cache_init::DEV_RAM0), cache_init::DEV_RAM0)
-        }
-        "vda" => {
-            if !virtio_blk_init::live() {
-                return Err(FsError::Io);
-            }
-            (Media::Dev(cache_init::DEV_VDA), cache_init::DEV_VDA)
-        }
-        _ => return Err(FsError::Inval),
-    };
-    let dev = Some(u64::from(dev));
+    let r = blockdev_init::lookup(name.as_bytes()).ok_or(FsError::NotFound)?;
+    let dev = Some(r.id());
+    let back = Media::Dev(r);
     let api = fs_init::api();
     if let Some(sb) = dev.and_then(|d| fs_init::with(|v| v.super_of_dev(d))) {
         let vol = fs_init::with(|v| v.sb_private(sb))?[0] as u8;
@@ -804,8 +792,7 @@ pub fn mount_dev(name: &str, at: &str, ro: bool) -> Result<u8, FsError> {
         api.mount_fs(None, at.as_bytes(), fs, dev, ro)?;
         return Ok(vol);
     }
-    let mut io = Io { back };
-    let vol = FatVol::mount(&mut io)?;
+    let vol = FatVol::mount(&mut Io { back: &back })?;
     let root_clu = vol.info.root_clus;
     let id = {
         let _g = ALLOC.lock();

@@ -135,14 +135,14 @@ impl Op {
     }
 }
 
-/// Backend a filesystem (and the request queue) talks to.
+/// A disk driver's operations, which its `blockdev::BlockRef` owns; a
+/// filesystem reaches them through that handle, which names the device.
 ///
 /// Logical block size is per device. Do not assume 512; virtio-blk may
 /// advertise 4K. `capacity_sectors` is in those logical blocks.
 ///
 /// Methods may block and allocate. Do not call them from hard IRQ.
 pub trait BlockDevice: Send + Sync {
-    fn name(&self) -> &'static str;
     fn logical_block_size(&self) -> u32;
     fn capacity_sectors(&self) -> u64;
     fn state(&self) -> DeviceState {
@@ -665,28 +665,22 @@ impl Default for Queue {
 /// and a no-op (must not panic). Flush is a successful no-op.
 #[derive(Clone, Copy, Debug)]
 pub struct Ramdisk {
-    name: &'static str,
     block_size: u32,
     nsectors: u64,
 }
 
 impl Ramdisk {
-    pub fn new(name: &'static str, block_size: u32, nsectors: u64) -> Result<Self, BlockError> {
-        if name.is_empty() || block_size == 0 || nsectors == 0 {
+    pub fn new(block_size: u32, nsectors: u64) -> Result<Self, BlockError> {
+        if block_size == 0 || nsectors == 0 {
             return Err(BlockError::Inval);
         }
         if (nsectors as u128).checked_mul(block_size as u128).is_none() {
             return Err(BlockError::Inval);
         }
         Ok(Self {
-            name,
             block_size,
             nsectors,
         })
-    }
-
-    pub fn name(self) -> &'static str {
-        self.name
     }
 
     pub fn logical_block_size(self) -> u32 {
@@ -1103,7 +1097,7 @@ mod tests {
 
     #[test]
     fn ramdisk_rw_and_4k() {
-        let rd = Ramdisk::new("ram0", 4096, 4).unwrap();
+        let rd = Ramdisk::new(4096, 4).unwrap();
         let mut data = vec![0u8; rd.byte_len()];
         let mut buf = vec![0u8; 4096];
         buf[0] = 0xAB;
@@ -1125,7 +1119,7 @@ mod tests {
 
     #[test]
     fn ramdisk_512_roundtrip() {
-        let rd = Ramdisk::new("r", DEFAULT_BLOCK_SIZE, 8).unwrap();
+        let rd = Ramdisk::new(DEFAULT_BLOCK_SIZE, 8).unwrap();
         let mut data = vec![0u8; rd.byte_len()];
         let buf = [0x5Au8; 512];
         rd.write(&mut data, 7, &buf).unwrap();
@@ -1146,7 +1140,7 @@ mod tests {
 
     impl HeapDisk {
         fn new(bs: u32, n: u64) -> Self {
-            let ram = Ramdisk::new("heap", bs, n).unwrap();
+            let ram = Ramdisk::new(bs, n).unwrap();
             let data = vec![0u8; ram.byte_len()];
             Self {
                 ram,
@@ -1158,9 +1152,6 @@ mod tests {
     }
 
     impl BlockDevice for HeapDisk {
-        fn name(&self) -> &'static str {
-            self.ram.name()
-        }
         fn logical_block_size(&self) -> u32 {
             self.ram.logical_block_size()
         }
@@ -1219,7 +1210,6 @@ mod tests {
         assert_eq!(BlockError::Inval.as_str(), "inval");
         assert_eq!(Op::Flush.as_str(), "flush");
         assert_eq!(DeviceState::Failed.as_str(), "failed");
-        assert_eq!(d.name(), "heap");
         assert_eq!(d.logical_block_size(), 512);
         assert_eq!(d.capacity_sectors(), 4);
     }

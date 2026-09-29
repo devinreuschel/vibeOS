@@ -1,9 +1,14 @@
 //! Write-back block cache. ROADMAP §7.4.
 //!
-//! Sits above [`BlockDevice`] miss paths. Lock dropped before device
-//! I/O (RANK_DEVICE + blocking wait). A slot whose write is in flight is
-//! in WRITEBACK (`vibeos::cache`), and a thread that needs it sleeps on
-//! the slot's wait queue. [`flush`] writes each dirty page of its device
+//! [`PAGE_CACHE`] is every disk's `BlockCache` (`vibeos::block::blockdev`):
+//! a disk's `BlockRef` reads, writes and flushes through it, and its miss
+//! path reaches the driver through the same handle's `read_dev`,
+//! `write_dev` and `flush_dev`. Pages are keyed by (`BlockRef` id, page
+//! offset). Lock dropped before device I/O (RANK_DEVICE + blocking wait).
+//! A slot whose write is in flight is in WRITEBACK (`vibeos::cache`), and
+//! a thread that needs it sleeps on the slot's wait queue. A page whose
+//! device is gone is dropped, never retried (DEVICES.md §12.4 rule 9).
+//! [`PageCache::flush`] writes each dirty page of its device
 //! and waits for it, waits for every write already in flight on the
 //! device (`blk-wb`'s and eviction writes), and only then sends the device
 //! `Flush` (DESIGN §10.6). Phase 12 makes this cache each block device's
@@ -13,19 +18,16 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use vibeos::block::BlockError;
+use vibeos::block::blockdev::{BlockCache, BlockRef};
 use vibeos::cache::{self, Cache, CacheKey, CacheStats, DEFAULT_PAGES, FillNeed, FlushStep, PAGE};
 use vibeos::kalloc::TryVec;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::wait::WaitQueue;
 
-use crate::block_init;
+use crate::block::blockdev_init;
 use crate::sync_init::SpinMutex;
 use crate::thread_init;
-use crate::virtio_blk_init;
-
-pub const DEV_RAM0: u32 = 0;
-pub const DEV_VDA: u32 = 1;
 
 static CACHE: SpinMutex<Cache<DEFAULT_PAGES>> = SpinMutex::with_rank(Cache::new(), RANK_DEVICE);
 static LIVE: AtomicBool = AtomicBool::new(false);
@@ -40,52 +42,9 @@ unsafe impl Sync for SlotWaits {}
 
 static SLOT_WQ: SlotWaits = SlotWaits([const { UnsafeCell::new(WaitQueue::new()) }; DEFAULT_PAGES]);
 
-fn geom(dev: u32) -> Result<(u32, u64), BlockError> {
-    match dev {
-        DEV_RAM0 => {
-            if !block_init::live() {
-                return Err(BlockError::Failed);
-            }
-            Ok((
-                block_init::logical_block_size(),
-                block_init::capacity_sectors(),
-            ))
-        }
-        DEV_VDA => {
-            if !virtio_blk_init::live() {
-                return Err(BlockError::Failed);
-            }
-            Ok((
-                virtio_blk_init::logical_block_size(),
-                virtio_blk_init::capacity_sectors(),
-            ))
-        }
-        _ => Err(BlockError::Inval),
-    }
-}
-
-fn raw_read(dev: u32, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
-    match dev {
-        DEV_RAM0 => block_init::read(lba, buf),
-        DEV_VDA => virtio_blk_init::read(lba, buf),
-        _ => Err(BlockError::Inval),
-    }
-}
-
-fn raw_write(dev: u32, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
-    match dev {
-        DEV_RAM0 => block_init::write(lba, buf),
-        DEV_VDA => virtio_blk_init::write(lba, buf),
-        _ => Err(BlockError::Inval),
-    }
-}
-
-fn raw_flush(dev: u32) -> Result<(), BlockError> {
-    match dev {
-        DEV_RAM0 => block_init::flush(),
-        DEV_VDA => virtio_blk_init::flush(),
-        _ => Err(BlockError::Inval),
-    }
+/// Block size and capacity of `dev`, in logical blocks.
+fn geom(dev: &BlockRef) -> Result<(u32, u64), BlockError> {
+    Ok((dev.logical_block_size()?, dev.capacity_sectors()?))
 }
 
 fn page_io_len(dev_bytes: u64, offset: u64) -> Result<usize, BlockError> {
@@ -96,7 +55,7 @@ fn page_io_len(dev_bytes: u64, offset: u64) -> Result<usize, BlockError> {
     Ok(left.min(PAGE))
 }
 
-fn backend_read(dev: u32, offset: u64, page: &mut [u8]) -> Result<(), BlockError> {
+fn backend_read(dev: &BlockRef, offset: u64, page: &mut [u8]) -> Result<(), BlockError> {
     if page.len() < PAGE {
         return Err(BlockError::Inval);
     }
@@ -113,10 +72,10 @@ fn backend_read(dev: u32, offset: u64, page: &mut [u8]) -> Result<(), BlockError
         return Err(BlockError::Inval);
     }
     page[..PAGE].fill(0);
-    raw_read(dev, offset / bs, &mut page[..n])
+    dev.read_dev(offset / bs, &mut page[..n])
 }
 
-fn backend_write(dev: u32, offset: u64, page: &[u8]) -> Result<(), BlockError> {
+fn backend_write(dev: &BlockRef, offset: u64, page: &[u8]) -> Result<(), BlockError> {
     if page.len() < PAGE {
         return Err(BlockError::Inval);
     }
@@ -132,12 +91,17 @@ fn backend_write(dev: u32, offset: u64, page: &[u8]) -> Result<(), BlockError> {
     if n % bs as usize != 0 {
         return Err(BlockError::Inval);
     }
-    raw_write(dev, offset / bs, &page[..n])
+    dev.write_dev(offset / bs, &page[..n])
 }
 
-/// The device a cache key's id names. Ids above `u32` are no device yet.
-fn key_dev(key: CacheKey) -> Result<u32, BlockError> {
-    u32::try_from(key.dev).map_err(|_| BlockError::Inval)
+/// The device a page key names: `dev` when the ids match, else a lookup
+/// by id, made with no cache lock held. `Gone` when the id is no longer
+/// registered.
+fn key_dev(dev: Option<&BlockRef>, key: CacheKey) -> Result<BlockRef, BlockError> {
+    match dev {
+        Some(d) if d.id() == key.dev => Ok(d.clone()),
+        _ => blockdev_init::lookup_id(key.dev).ok_or(BlockError::Gone),
+    }
 }
 
 /// A zeroed page buffer; `NoMem` when the heap refuses it (DESIGN §4.4).
@@ -194,16 +158,37 @@ fn end_writeback_and_wake(slot: usize, key: CacheKey, res: Result<(), BlockError
     }
 }
 
+/// Write back `key`'s page from `data` through its device, then end the
+/// slot's writeback. A page whose device is gone is dropped with every
+/// other page of that id, and the write counts as done: it can never
+/// succeed, and retrying it would stall its caller for good
+/// (INVARIANTS.md §2.5's recorded state).
+fn write_page(
+    dev: Option<&BlockRef>,
+    slot: usize,
+    key: CacheKey,
+    data: &[u8],
+) -> Result<(), BlockError> {
+    let res = key_dev(dev, key).and_then(|d| backend_write(&d, key.offset, data));
+    end_writeback_and_wake(slot, key, res);
+    match res {
+        Err(BlockError::Gone) => {
+            CACHE.lock().drop_dev(key.dev);
+            Ok(())
+        }
+        r => r,
+    }
+}
+
 /// Write a `Writeback` fill's victim from `evict` and end its writeback.
-fn write_victim(fill: &cache::Fill, evict: &[u8]) -> Result<(), BlockError> {
-    let res = key_dev(fill.evict_key).and_then(|d| backend_write(d, fill.evict_key.offset, evict));
-    end_writeback_and_wake(fill.slot, fill.evict_key, res);
-    res
+/// The victim may belong to another device than `dev`.
+fn write_victim(dev: &BlockRef, fill: &cache::Fill, evict: &[u8]) -> Result<(), BlockError> {
+    write_page(Some(dev), fill.slot, fill.evict_key, evict)
 }
 
 /// Read a `Read` fill's page, or abort the fill.
-fn fill_read(fill: &cache::Fill, page: &mut [u8]) -> Result<(), BlockError> {
-    match key_dev(fill.key).and_then(|d| backend_read(d, fill.key.offset, page)) {
+fn fill_read(dev: &BlockRef, fill: &cache::Fill, page: &mut [u8]) -> Result<(), BlockError> {
+    match backend_read(dev, fill.key.offset, page) {
         Ok(()) => {
             let mut c = CACHE.lock();
             c.stats.device_reads = c.stats.device_reads.saturating_add(1);
@@ -231,7 +216,7 @@ fn wait_busy(fill: &cache::Fill, spins: &mut u32) -> Result<(), BlockError> {
     Ok(())
 }
 
-fn byte_off(dev: u32, lba: u64) -> Result<u64, BlockError> {
+fn byte_off(dev: &BlockRef, lba: u64) -> Result<u64, BlockError> {
     let (bs, cap) = geom(dev)?;
     if lba >= cap {
         return Err(BlockError::Inval);
@@ -239,10 +224,14 @@ fn byte_off(dev: u32, lba: u64) -> Result<u64, BlockError> {
     lba.checked_mul(bs as u64).ok_or(BlockError::Inval)
 }
 
-fn bump_readahead(evict: &mut [u8], page: &mut [u8]) {
+fn bump_readahead(dev: &BlockRef, evict: &mut [u8], page: &mut [u8]) {
     let Some(rk) = ({ CACHE.lock().want_readahead() }) else {
         return;
     };
+    // Readahead follows `dev`'s own sequential run only.
+    if rk.dev != dev.id() {
+        return;
+    }
     if CACHE.lock().find(rk).is_some() {
         return;
     }
@@ -260,10 +249,10 @@ fn bump_readahead(evict: &mut [u8], page: &mut [u8]) {
         // write stays recorded: `end_writeback` leaves the page dirty for
         // the next flush to retry and report.
         FillNeed::Writeback => {
-            let _kept_dirty = write_victim(&fill, evict).is_err();
+            let _kept_dirty = write_victim(dev, &fill, evict).is_err();
         }
         FillNeed::Read => {
-            if fill_read(&fill, page).is_ok() {
+            if fill_read(dev, &fill, page).is_ok() {
                 let mut one = [0u8; 1];
                 let mut c = CACHE.lock();
                 if c.install_read(&fill, page, 0, &mut one).is_err() {
@@ -274,9 +263,9 @@ fn bump_readahead(evict: &mut [u8], page: &mut [u8]) {
     }
 }
 
-pub fn read(dev: u32, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+fn read(dev: &BlockRef, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
     if !LIVE.load(Ordering::Acquire) {
-        return raw_read(dev, lba, buf);
+        return dev.read_dev(lba, buf);
     }
     let (bs, cap) = geom(dev)?;
     if bs == 0 || !buf.len().is_multiple_of(bs as usize) {
@@ -293,7 +282,7 @@ pub fn read(dev: u32, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
     let mut spins = 0u32;
     while done < buf.len() {
         let off = base.saturating_add(done as u64);
-        let key = CacheKey::page(u64::from(dev), off);
+        let key = CacheKey::page(dev.id(), off);
         let pin = (off as usize) & (PAGE - 1);
         let n = (PAGE - pin).min(buf.len() - done);
         let plan = {
@@ -307,11 +296,11 @@ pub fn read(dev: u32, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
                     continue;
                 }
                 FillNeed::Writeback => {
-                    write_victim(&fill, &evict)?;
+                    write_victim(dev, &fill, &evict)?;
                     continue;
                 }
                 FillNeed::Read => {
-                    fill_read(&fill, &mut page)?;
+                    fill_read(dev, &fill, &mut page)?;
                     CACHE
                         .lock()
                         .install_read(&fill, &page, pin, &mut buf[done..done + n])?;
@@ -321,13 +310,13 @@ pub fn read(dev: u32, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
         done += n;
         spins = 0;
     }
-    bump_readahead(&mut evict, &mut page);
+    bump_readahead(dev, &mut evict, &mut page);
     Ok(())
 }
 
-pub fn write(dev: u32, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+fn write(dev: &BlockRef, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
     if !LIVE.load(Ordering::Acquire) {
-        return raw_write(dev, lba, buf);
+        return dev.write_dev(lba, buf);
     }
     let (bs, cap) = geom(dev)?;
     if bs == 0 || !buf.len().is_multiple_of(bs as usize) {
@@ -344,7 +333,7 @@ pub fn write(dev: u32, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
     let mut spins = 0u32;
     while done < buf.len() {
         let off = base.saturating_add(done as u64);
-        let key = CacheKey::page(u64::from(dev), off);
+        let key = CacheKey::page(dev.id(), off);
         let pin = (off as usize) & (PAGE - 1);
         let n = (PAGE - pin).min(buf.len() - done);
         let plan = {
@@ -358,11 +347,11 @@ pub fn write(dev: u32, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
                     continue;
                 }
                 FillNeed::Writeback => {
-                    write_victim(&fill, &evict)?;
+                    write_victim(dev, &fill, &evict)?;
                     continue;
                 }
                 FillNeed::Read => {
-                    fill_read(&fill, &mut page)?;
+                    fill_read(dev, &fill, &mut page)?;
                     CACHE
                         .lock()
                         .install_write(&fill, &page, pin, &buf[done..done + n])?;
@@ -375,7 +364,9 @@ pub fn write(dev: u32, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
     Ok(())
 }
 
-/// `blk-wb`'s pass: write back each dirty page not already in writeback.
+/// `blk-wb`'s pass: write back each dirty page not already in writeback,
+/// of device id `dev` or of every device. Each page's device is looked up
+/// by its id; a gone device's pages are dropped ([`write_page`]).
 fn writeback_dev(dev: Option<u64>) -> Result<(), BlockError> {
     let mut data = page_vec()?;
     let mut start = 0usize;
@@ -389,34 +380,50 @@ fn writeback_dev(dev: Option<u64>) -> Result<(), BlockError> {
         };
         #[cfg(feature = "kernel_tests")]
         testing::hold_point(key);
-        let res = key_dev(key).and_then(|d| backend_write(d, key.offset, &data));
-        end_writeback_and_wake(slot, key, res);
-        res?;
+        write_page(None, slot, key, &data)?;
         start = slot + 1;
     }
     Ok(())
 }
 
-/// Make every write to `dev` through the cache durable: write each dirty
-/// page and wait for it, wait for each write already in flight (`blk-wb`'s
-/// and eviction writes), write pages dirtied meanwhile, and send the
-/// device `Flush` only when `dev` has no dirty and no writeback slot.
-pub fn flush(dev: u32) -> Result<(), BlockError> {
-    let mut data = page_vec()?;
-    loop {
-        let step = { CACHE.lock().flush_step(Some(u64::from(dev)), &mut data) };
-        match step {
-            FlushStep::Write(slot, key) => {
-                let res = key_dev(key).and_then(|d| backend_write(d, key.offset, &data));
-                end_writeback_and_wake(slot, key, res);
-                res?;
-            }
-            FlushStep::Wait(slot, _) => wait_writeback(slot),
-            FlushStep::Flush => {
-                raw_flush(dev)?;
-                let mut c = CACHE.lock();
-                c.stats.device_flushes = c.stats.device_flushes.saturating_add(1);
-                return Ok(());
+/// The page cache every disk's `BlockRef` reads and writes through
+/// (`vibeos::block::blockdev::BlockCache`). Until [`init`] each call goes
+/// straight to the device.
+pub struct PageCache;
+
+pub static PAGE_CACHE: PageCache = PageCache;
+
+impl BlockCache for PageCache {
+    fn read(&self, dev: &BlockRef, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        read(dev, lba, buf)
+    }
+
+    fn write(&self, dev: &BlockRef, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
+        write(dev, lba, buf)
+    }
+
+    /// Make every write to `dev` through the cache durable: write each dirty
+    /// page and wait for it, wait for each write already in flight (`blk-wb`'s
+    /// and eviction writes), write pages dirtied meanwhile, and send the
+    /// device `Flush` only when `dev` has no dirty and no writeback slot.
+    fn flush(&self, dev: &BlockRef) -> Result<(), BlockError> {
+        if !LIVE.load(Ordering::Acquire) {
+            return dev.flush_dev();
+        }
+        let mut data = page_vec()?;
+        loop {
+            let step = { CACHE.lock().flush_step(Some(dev.id()), &mut data) };
+            match step {
+                FlushStep::Write(slot, key) => {
+                    write_page(Some(dev), slot, key, &data)?;
+                }
+                FlushStep::Wait(slot, _) => wait_writeback(slot),
+                FlushStep::Flush => {
+                    dev.flush_dev()?;
+                    let mut c = CACHE.lock();
+                    c.stats.device_flushes = c.stats.device_flushes.saturating_add(1);
+                    return Ok(());
+                }
             }
         }
     }
@@ -484,10 +491,10 @@ pub fn init() {
 }
 
 /// A one-shot hold of `blk-wb`'s write of one page, so a test can find
-/// [`flush`] waiting for it (ROADMAP §10.11).
+/// [`PageCache::flush`] waiting for it (ROADMAP §10.11).
 #[cfg(feature = "kernel_tests")]
 pub mod testing {
-    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use vibeos::cache::CacheKey;
 
@@ -500,7 +507,7 @@ pub mod testing {
 
     // The hold's state; `block::ktest`'s setters arm and read it.
     pub(in crate::block) const UNARMED_OFF: u64 = UNARMED;
-    pub(in crate::block) static DEV: AtomicU32 = AtomicU32::new(0);
+    pub(in crate::block) static DEV: AtomicU64 = AtomicU64::new(0);
     pub(in crate::block) static OFF: AtomicU64 = AtomicU64::new(UNARMED);
     pub(in crate::block) static HELD: AtomicBool = AtomicBool::new(false);
     pub(in crate::block) static RELEASE: AtomicBool = AtomicBool::new(false);
@@ -508,7 +515,7 @@ pub mod testing {
     /// `writeback_dev`'s hold point, reached with no lock held. It sleeps
     /// until `block::ktest::release`, or [`SELF_RELEASE_NS`] at most.
     pub(super) fn hold_point(key: CacheKey) {
-        if u64::from(DEV.load(Ordering::Acquire)) != key.dev
+        if DEV.load(Ordering::Acquire) != key.dev
             || OFF
                 .compare_exchange(key.offset, UNARMED, Ordering::AcqRel, Ordering::Acquire)
                 .is_err()

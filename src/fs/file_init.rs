@@ -13,6 +13,8 @@
 //! backends' route tables, then opens the inode it finds as a `Vfs` file,
 //! so reads, writes, seeks and closes share one table and one data path.
 
+use vibeos::block::MAX_BLOCKDEVS;
+use vibeos::block::blockdev::BlockRef;
 use vibeos::fs::{
     DirEntry, FileId, FileRef, FileSystem, FsError, InodeKind, InodeRef, MAX_NAME, MAX_PATH,
     O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, OpenFlags, S_IFREG, SeekFrom, Stat, split_basename,
@@ -20,14 +22,12 @@ use vibeos::fs::{
 use vibeos::lock::RANK_DEVICE;
 use vibeos::log::Level;
 
-use crate::block_init;
+use crate::block::blockdev_init;
 use crate::dev_init;
 use crate::fat_init;
 use crate::fs_init;
-use crate::part_init;
 use crate::sync_init::SpinMutex;
 use crate::vibefs_init;
-use crate::virtio_blk_init;
 
 struct CwdBuf {
     buf: [u8; MAX_PATH],
@@ -397,41 +397,31 @@ fn mount_pseudo() -> Result<(), FsError> {
     Ok(())
 }
 
-/// Add devfs block node `name` of `sz` bytes, logging a failure.
-fn devfs_add(name: &str, sz: u64) {
-    if let Err(e) = fs_init::KERNFS.devfs_add_block(name.as_bytes(), sz) {
-        crate::klog!(
-            Level::Warn,
-            "vibeOS: fs: devfs node {} not added: {}",
-            name,
-            e.as_str()
-        );
-    }
-}
-
+/// One devfs block node per registered block device, disks and
+/// partitions alike. The registry is read into a stack array first, so no
+/// registry lock is held under the VFS's.
 fn populate_devfs() {
-    let sz = block_init::capacity_sectors().saturating_mul(block_init::logical_block_size() as u64);
-    devfs_add(block_init::name(), sz);
-    if virtio_blk_init::live() {
-        let sz = virtio_blk_init::capacity_sectors()
-            .saturating_mul(virtio_blk_init::logical_block_size() as u64);
-        devfs_add(virtio_blk_init::name(), sz);
-    }
+    let mut all: [Option<BlockRef>; MAX_BLOCKDEVS] = [const { None }; MAX_BLOCKDEVS];
+    let n = blockdev_init::snapshot(&mut all);
     let mut failed = 0u32;
     let mut last = None;
-    for i in 0..part_init::count() {
-        if let Some((name, nsect, bs, _)) = part_init::info(i) {
-            let sz = nsect.saturating_mul(bs as u64);
-            if let Err(e) = fs_init::KERNFS.devfs_add_block(name.as_bytes(), sz) {
-                failed = failed.saturating_add(1);
-                last = Some(e);
-            }
+    for r in all.iter().take(n).flatten() {
+        let sz = r
+            .capacity_sectors()
+            .and_then(|c| {
+                r.logical_block_size()
+                    .map(|bs| c.saturating_mul(u64::from(bs)))
+            })
+            .unwrap_or(0);
+        if let Err(e) = fs_init::KERNFS.devfs_add_block(r.name().as_bytes(), sz) {
+            failed = failed.saturating_add(1);
+            last = Some(e);
         }
     }
     if let Some(e) = last {
         crate::klog!(
             Level::Warn,
-            "vibeOS: fs: {} partition devfs nodes not added, last: {}",
+            "vibeOS: fs: {} block devfs nodes not added, last: {}",
             failed,
             e.as_str()
         );

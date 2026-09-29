@@ -308,14 +308,16 @@ entry that overlaps another entry or the table itself, a GPT header whose
 MyLBA is not the LBA it was read from, and a GPT entry outside the usable
 range are all accepted (ROADMAP §13.9, F117).
 
-Children are offset-limited `BlockDevice`s. Child LBA `l` maps to
-`start + l` and I/O past `nsectors` is `Inval`. Marker
-`vibeOS: block: <parent>p<N> <n> sectors` (e.g. `ram0p1`, `vdap1`).
-`register_table` takes names from fixed tables (`ram0p1` to `ram0p5`,
-`vdap1` to `vdap4`) and stops without a log line at the first entry past
-them (ROADMAP §10.12, F117). Only in-guest tests use the child devices:
-`mount_dev` accepts only `ram0` and `vda`, and devfs block nodes return
-`NotSupp` (ROADMAP §10.4, F081).
+Children are entries of the block registry ([§12.1](DEVICES.md#121-devices)), each a
+`BlockRef` with its disk as parent. Child LBA `l` maps to `start + l` and
+I/O past `nsectors` is `Inval`. `register_table` registers a disk's entries
+in order under generated names, `<parent>p<N>` (e.g. `ram0p1`, `vdap1`),
+and each registration prints the marker `vibeOS: block: <name> <n>
+sectors`. It stops at the first entry whose registration fails, with one
+log line naming the entry and the error (ROADMAP §10.12, F117). FAT and
+vibefs `mount_dev` mount any registered name, a disk or a partition. Only
+in-guest tests use the child devices for I/O otherwise: devfs block nodes
+return `NotSupp` (ROADMAP §10.4, F081).
 
 `part_init::init` stamps an MBR on `ram0` (RAM) in every build. Only a
 `kernel_tests` build stamps a GPT, through `stamp_vda_gpt`, and only on an
@@ -345,9 +347,9 @@ changes a copy's filesystem id offline (VIBEFS.md §15).
 ## 10.6 Block cache
 
 Page-granular (4 KiB), 16 pages (`cache::DEFAULT_PAGES`), keyed by
-`(dev_id, page offset)`. Read-through, write-back, clock eviction,
-sequential readahead, dirty-ratio writeback thread (`blk-wb`). `flush(dev)`
-writes each dirty page of `dev` not already in writeback and waits for it,
+`(id, page offset)`, where the id is the device's `BlockRef` id. Read-through,
+write-back, clock eviction, sequential readahead, dirty-ratio writeback thread
+(`blk-wb`). `PageCache::flush(dev)` writes each dirty page of `dev` not already in writeback and waits for it,
 waits for every page of `dev` in writeback, writes pages dirtied meanwhile,
 and sends the device `Flush` (§10.2) only when `dev` has no dirty and no
 writeback page.
@@ -362,14 +364,14 @@ until the write ends (ROADMAP §10.11, F015, F043). A slot has no filling
 state: `find()` matches only valid slots, so a second reader of a page being
 filled does not wait for it (ROADMAP §12.5, F015).
 
-The cache reaches the drivers by raw device id: `cache_init::raw_read`,
-`raw_write`, and `raw_flush` match `DEV_RAM0` to `block_init` and `DEV_VDA`
-to `virtio_blk_init`, and only in-guest tests call the `BlockDevice` trait
-objects. Planned (ROADMAP §10.4, D2): the cache holds a counted `BlockRef`
-from one registry of block devices, partitions included, and keys its pages
-by the device's never-reused id ([§12.1](DEVICES.md#121-devices)), instead of matching
-device ids (F081). Hit/miss/device-request counters are in the `blk` shell
-command. The cache lock is RANK_DEVICE and is dropped before blocking
+Each disk's `BlockRef` carries the cache (`cache_init::PAGE_CACHE`), and a
+partition's I/O goes through its disk's, so a page is keyed by its disk's
+never-reused id ([§12.1](DEVICES.md#121-devices), F081). A miss, a writeback, and the
+device `Flush` reach the driver through the same handle's `read_dev`,
+`write_dev`, and `flush_dev`. A page whose id no longer names a registered
+device, or whose write returns `Gone`, is dropped with every page of that id
+instead of retried ([§12.4](DEVICES.md#124-removal) rule 9). Hit/miss/device-request
+counters are in the `blk` shell command. The cache lock is RANK_DEVICE and is dropped before blocking
 device I/O.
 
 Planned (ROADMAP §12.5): one page cache made of mappings, of which this cache becomes one kind.
