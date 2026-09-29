@@ -57,7 +57,7 @@ impl CpuTables {
         };
         unsafe { x86::lgdt(&gdtr) };
         unsafe { reload_cs(KERNEL_CS) };
-        unsafe { load_data_segs(KERNEL_DS) };
+        unsafe { x86::load_data_segs(KERNEL_DS) };
         unsafe { x86::ltr(TSS_SEL) };
     }
 
@@ -216,22 +216,6 @@ unsafe fn asm_reload_cs(sel: u64) {
             sel = in(reg) sel,
             tmp = lateout(reg) _,
             options(preserves_flags),
-        );
-    }
-}
-
-/// # Safety
-/// `sel` is a valid data selector in the loaded GDT.
-unsafe fn load_data_segs(sel: u16) {
-    unsafe {
-        core::arch::asm!(
-            "mov ds, {0:x}",
-            "mov es, {0:x}",
-            "mov ss, {0:x}",
-            "mov fs, {0:x}",
-            "mov gs, {0:x}",
-            in(reg) sel,
-            options(nostack, preserves_flags),
         );
     }
 }

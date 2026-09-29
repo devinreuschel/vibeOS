@@ -28,9 +28,35 @@ use crate::syscall_init;
 use crate::thread_init;
 use crate::time_init;
 use crate::x86::{
-    self, CR0_AM, CR0_CD, CR0_EM, CR0_MP, CR0_NE, CR0_NW, CR0_PE, CR0_PG, CR0_TS, CR0_WP, CR4_MCE,
-    CR4_OSFXSR, CR4_OSXMMEXCPT, CR4_PAE, CR4_PGE,
+    self, CR0_AM, CR0_MP, CR0_NE, CR0_PE, CR0_PG, CR0_TS, CR0_WP, CR4_MCE, CR4_OSFXSR,
+    CR4_OSXMMEXCPT, CR4_PAE, CR4_PGE,
 };
+
+const CR0_EM: u64 = 1 << 2;
+const CR0_NW: u64 = 1 << 29;
+const CR0_CD: u64 = 1 << 30;
+
+/// Current code selector.
+fn read_cs() -> u16 {
+    let val: u16;
+    // SAFETY: `mov r, cs` only copies the CS selector into a register;
+    // established here.
+    unsafe {
+        core::arch::asm!("mov {0:x}, cs", out(reg) val, options(nomem, nostack, preserves_flags))
+    };
+    val
+}
+
+/// Task register, which the GDT test compares with the TSS selector.
+fn read_tr() -> u16 {
+    let val: u16;
+    // SAFETY: `str` only copies the task register into a register;
+    // established here.
+    unsafe {
+        core::arch::asm!("str {0:x}", out(reg) val, options(nomem, nostack, preserves_flags))
+    };
+    val
+}
 
 unsafe extern "C" {
     fn vibeos_write_u8_1(addr: u64);
@@ -57,10 +83,10 @@ global_asm!(
 const WRITE_U8_1_LEN: u8 = 3;
 
 pub(crate) fn test_gdt_selectors() -> Outcome {
-    if x86::read_cs() != KERNEL_CS {
+    if read_cs() != KERNEL_CS {
         return Outcome::Fail("cs not kernel code");
     }
-    if x86::read_tr() != TSS_SEL {
+    if read_tr() != TSS_SEL {
         return Outcome::Fail("tr not tss");
     }
     Outcome::Ok
@@ -1245,7 +1271,7 @@ const CR4_SET: [(u64, &str); 5] = [
 /// names, and with exactly the CR0 and CR4 `arch::cpu::init_control_regs`
 /// computed.
 pub(crate) fn cpu_control_regs() -> Outcome {
-    let Some(want) = arch::cpu::control_regs() else {
+    let Some(want) = arch::cpu::stored_control_regs() else {
         return Outcome::Fail("control registers never computed");
     };
     let snaps: [CrSnapS16; 64] = core::array::from_fn(|_| CrSnapS16 {

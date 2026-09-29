@@ -39,18 +39,6 @@
 extern crate alloc;
 
 mod acpi;
-#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
-#[allow(clippy::expect_used, reason = "audit pending, ROADMAP §10.1")]
-#[allow(
-    clippy::let_underscore_must_use,
-    reason = "audit pending, ROADMAP §10.1"
-)]
-#[allow(clippy::panic, reason = "audit pending, ROADMAP §10.1")]
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
-#[allow(clippy::unwrap_used, reason = "audit pending, ROADMAP §10.1")]
 mod arch;
 #[allow(clippy::disallowed_macros, reason = "audit pending, ROADMAP §10.1")]
 #[allow(clippy::expect_used, reason = "audit pending, ROADMAP §10.1")]

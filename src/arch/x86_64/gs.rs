@@ -45,26 +45,10 @@ pub fn force_kernel() {
     // `arch::x86_64::gdt::init_bsp` (or `smp_init`'s AP path) loaded.
     unsafe {
         x86::wrmsr(IA32_KERNEL_GS_BASE, ptr);
-        load_data_segs(KERNEL_DS);
+        x86::load_data_segs(KERNEL_DS);
     }
     #[cfg(feature = "kernel_tests")]
     crate::arch::x86_64::catch::force_kernel_window();
     // SAFETY: invariant I4, as above; established here.
     unsafe { x86::wrmsr(IA32_GS_BASE, ptr) };
-}
-
-/// # Safety
-/// `sel` is a valid data selector; clobbers DS/ES/SS/FS/GS.
-unsafe fn load_data_segs(sel: u16) {
-    unsafe {
-        core::arch::asm!(
-            "mov ds, {0:x}",
-            "mov es, {0:x}",
-            "mov ss, {0:x}",
-            "mov fs, {0:x}",
-            "mov gs, {0:x}",
-            in(reg) sel,
-            options(nostack, preserves_flags),
-        );
-    }
 }
