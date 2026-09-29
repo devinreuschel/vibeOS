@@ -22,10 +22,13 @@ named ELF under `build/kernels/`, which the variant's recipe deletes before it b
 and prerequisites are a `find` over `src/` and `crates/core/src/`. The host tools and the initrd,
 which build from `vibeos-core` too, list the same sources and `Cargo.lock` (`$(HOSTLIB_DEPS)`).
 
-**Bare `cargo build` has an empty initrd; a relative linker script used to fail off-root.**
-`build.rs` only copies `VIBEOS_INITRD` (64 KiB) and passes an absolute `-T linker.ld`. Unset
-`VIBEOS_INITRD` embeds zeros so `cargo check` works. Rule: `make` stages `build/initrd.fat` via
-hostlib `mkinitrd`. Do not generate the image inside `build.rs`.
+**A kernel booted without the ISO's module has no initrd; a relative linker script used to fail off-root.**
+The initrd is not in the kernel: `limine.conf`'s `module_path:` loads `/boot/initrd.fat` as a Limine
+module, and `fat_init` mounts that memory in place. A kernel booted from a hand-made config without
+the `module_path:` line, or from bare `cargo build` output, mounts a ramfs root and reports
+`user: init failed`. `build.rs` only passes an absolute `-T linker.ld` (and the ksyms table). Rule:
+`make` builds `build/initrd.fat` with hostlib `mkinitrd` and `mkiso.sh` stages it. Do not generate
+the image inside `build.rs` or embed it in the kernel.
 
 **A Limine response pointer is null and the kernel dies with no explanation.**
 The request static was not in the `.limine_requests` section, so the loader never saw it. Rule: every

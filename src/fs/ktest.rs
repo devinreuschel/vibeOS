@@ -10,9 +10,11 @@ use vibeos::limits::MAX_OPEN_FILES;
 use vibeos::proc::wait_exited;
 
 mod hooks;
+mod initrd;
 mod slots;
 
 use hooks::{link_path, symlink_path, truncate_path};
+pub(crate) use initrd::test_initrd_module_sized;
 pub(crate) use slots::test_fs_drop_slot_busy_keeps_slot;
 
 use crate::fat_init;

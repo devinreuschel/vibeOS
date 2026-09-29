@@ -870,3 +870,17 @@ needs = [
   "`dma::dma_mb`, a full barrier (`mfence`",  # L1276
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+[[box]]
+key = "removed: the loader maps segments from the file"
+needs = [
+  "the initrd is sized by `mkinitrd` from its contents",  # L1370
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra); its proof writes into the initrd's write-test space"
+
+[[box]]
+key = "host tests that parse checked-in"
+needs = [
+  "`elf::parse` host tests also cover",  # L1355
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"

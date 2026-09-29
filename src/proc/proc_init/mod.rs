@@ -212,7 +212,7 @@ fn load_errno(e: LoadError) -> i32 {
         LoadError::Fs(f) => fs_errno(f),
         LoadError::Elf(ElfError::ImageTooBig) => ENOMEM,
         LoadError::Elf(_) => ENOEXEC,
-        LoadError::As(_) | LoadError::TooBig => ENOMEM,
+        LoadError::As(_) => ENOMEM,
         LoadError::Mem(_) => EFAULT,
         LoadError::Empty => ENOEXEC,
         LoadError::NoProc => EAGAIN,

@@ -59,7 +59,7 @@ USER_TESTS  := user/tests
 INITRD := $(CURDIR)/build/initrd.fat
 KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml crates/core/Cargo.toml build.rs linker.ld Makefile rust-toolchain.toml \
 	scripts/gen_ksyms.py scripts/mkuserelf.py scripts/mkiso.sh \
-	user/hello.asm user/init.asm user/sh.asm user/tests.asm user/sys.inc $(INITRD) \
+	user/hello.asm user/init.asm user/sh.asm user/tests.asm user/sys.inc \
 	.cargo/config.toml Cargo.lock
 
 ifneq ($(VIBEOS_PREBUILT),1)
@@ -94,14 +94,14 @@ ISOS += $(3)
 ifneq ($(VIBEOS_PREBUILT),1)
 build/kernels/vibeos-$(1).elf: $(KERNEL_DEPS) $(PROFILE_STAMP)
 	rm -rf $$@ build/kernels/vibeos-$(1).ksyms.rs build/kernels/.vibeos-$(1)
-	VIBEOS_INITRD=$(INITRD) $$(CARGO_SHIP) build $$(CARGO_FLAGS) $(2) --artifact-dir build/kernels/.vibeos-$(1)
+	$$(CARGO_SHIP) build $$(CARGO_FLAGS) $(2) --artifact-dir build/kernels/.vibeos-$(1)
 	python3 scripts/gen_ksyms.py --nm "$$(NM)" build/kernels/.vibeos-$(1)/vibeos build/kernels/vibeos-$(1).ksyms.rs
-	VIBEOS_INITRD=$(INITRD) VIBEOS_KSYMS=$(CURDIR)/build/kernels/vibeos-$(1).ksyms.rs $$(CARGO_SHIP) build $$(CARGO_FLAGS) $(2) --artifact-dir build/kernels/.vibeos-$(1)
+	VIBEOS_KSYMS=$(CURDIR)/build/kernels/vibeos-$(1).ksyms.rs $$(CARGO_SHIP) build $$(CARGO_FLAGS) $(2) --artifact-dir build/kernels/.vibeos-$(1)
 	python3 scripts/gen_ksyms.py --nm "$$(NM)" --check build/kernels/.vibeos-$(1)/vibeos build/kernels/vibeos-$(1).ksyms.rs
 	python3 scripts/check_kernel_fp.py --objdump "$$(OBJDUMP)" build/kernels/.vibeos-$(1)/vibeos
 	cp build/kernels/.vibeos-$(1)/vibeos $$@
-$(3): build/kernels/vibeos-$(1).elf limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py
-	LIMINE_DIR=$$(LIMINE_DIR) scripts/mkiso.sh $$< $$@ build/iso_root_$(1)
+$(3): build/kernels/vibeos-$(1).elf $(INITRD) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py
+	LIMINE_DIR=$$(LIMINE_DIR) scripts/mkiso.sh $$< $(INITRD) $$@ build/iso_root_$(1)
 endif
 endef
 

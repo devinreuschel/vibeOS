@@ -138,7 +138,7 @@ names, Linux values:
 | `EBADF` | 9 | closed / out-of-range fd; a file `mmap` (no `MAP_ANONYMOUS`) with a bad fd |
 | `ECHILD` | 10 | `wait4` with no matching child |
 | `EAGAIN` | 11 | `fork` with every process-table slot in use, zombies included (`MAX_PROCS` is 18), or no pid free (pids and tids share one allocator, up to 32,767, then from 300) |
-| `ENOMEM` | 12 | AS clone / load; an ELF file above 64 KiB, or an image above `limits::EXEC_IMAGE_MAX`; `mmap` with no free range, a full region table, a `len` past `USER_MAP_END`, or no frames; a `munmap` that must split a region when the region table is full; a kernel heap allocation that fails in `fork`, `execve`, or `open` (DESIGN §4.4) |
+| `ENOMEM` | 12 | AS clone / load; an image above `limits::EXEC_IMAGE_MAX`; `mmap` with no free range, a full region table, a `len` past `USER_MAP_END`, or no frames; a `munmap` that must split a region when the region table is full; a kernel heap allocation that fails in `fork`, `execve`, or `open` (DESIGN §4.4) |
 | `EACCES` | 13 | defined; no syscall returns it |
 | `EFAULT` | 14 | bad user pointer / length |
 | `EBUSY` | 16 | defined; no syscall returns it |
@@ -287,8 +287,11 @@ probe with no process (ktest, IF off) returns `0` without scheduling.
   frame shortage leave it where it is. Growth maps zeroed pages at the call
   (ROADMAP §12.4 makes them lazy); shrinking unmaps the whole pages above
   the new break
-- `execve`: the image is read whole and must be at most 64 KiB (`ENOMEM`)
-  until ROADMAP §10.4 removes `MAX_ELF`. An image whose page-rounded
+- `execve`: the loader reads the ELF header and program headers from the
+  open file and copies each segment's file bytes into the new address space
+  in 512-byte chunks, so the file's size has no bound of its own; a file that
+  ends inside a segment, or shrinks while it loads, is `ENOEXEC`, and a
+  filesystem error keeps its errno. An image whose page-rounded
   `PT_LOAD` and `PT_TLS` bytes together exceed 1 GiB
   (`limits::EXEC_IMAGE_MAX`) returns `ENOMEM` before anything is mapped,
   where Linux loads it while memory lasts (LINUX.md `exec-image-cap`; F009,

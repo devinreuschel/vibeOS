@@ -18,9 +18,14 @@ Power-on to `sti`. Limine does the ugly part (real mode, A20, long mode, ELF loa
 | Panic | kernel target `abort`; host tests `unwind` (`profile.dev`) |
 | Extra host tools | `xorriso`, `nasm` (`user/*.asm`), `qemu-system-x86_64`, `python3`, `dosfstools` (`fsck.fat`; the host FAT tests fail without it unless `VIBEOS_ALLOW_MISSING_TOOLS=1`), `ruff` and `mypy` (`make check`, at the versions the `check` job pins) |
 
-`make` is the usual entry. It stages `build/initrd.fat` and passes `VIBEOS_INITRD` into `build.rs`.
-Bare `cargo check` / `cargo build` works: `build.rs` passes `-T$CARGO_MANIFEST_DIR/linker.ld` and
-embeds an empty 64 KiB initrd if the env is unset. Host tests: `make test-unit` (`cargo test -p vibeos-core
+`make` is the usual entry. It builds `build/initrd.fat` with hostlib `mkinitrd` and stages it on the
+ISO as `/boot/initrd.fat`, which `limine.conf`'s `module_path:` loads as a Limine module; the kernel
+embeds no initrd. `mkinitrd` sizes the image from its contents: it adds the files to a scratch image
+to count the data clusters they use, then writes them again onto the smallest image
+(`fat::image_sectors`) with `fat::INITRD_FREE_BYTES`, 512 KiB, free after them, and fails if less is
+free. The free space is for the in-guest write tests: `exec_large_elf_from_file` holds about 180 KB
+of it at once, and the FAT write tests need a few clusters more. Bare `cargo check` / `cargo build` works: `build.rs` passes
+`-T$CARGO_MANIFEST_DIR/linker.ld`, and a kernel booted with no module mounts a ramfs root. Host tests: `make test-unit` (`cargo test -p vibeos-core
 --features std --target $HOST`). `tests/hostlib` is mkfs/fsck/`mkinitrd` only.
 
 `make` pins `CARGO_TARGET_DIR` to `./target`. Some environments point it at a shared cache, which
@@ -77,7 +82,8 @@ loader never sees the request, so the response pointer is null and the kernel di
 with no explanation. Check the base revision before trusting any other response. After that handshake,
 `boot::capture` reads every response once into a write-once `BootInfo` (`BootCell`). Nothing else
 touches the Limine request statics, and no Limine type leaves `boot`: consumers get the kernel's
-physical span, the RSDP, and `usable()` / `framebuffers()` iterators, and derive the rest themselves.
+physical span, the RSDP, and `usable()` / `framebuffers()` / `modules()` iterators (with `initrd()`, the
+first module), and derive the rest themselves.
 
 | Request | What we need from it |
 |---------|---------------------|
@@ -87,6 +93,7 @@ physical span, the RSDP, and `usable()` / `framebuffers()` iterators, and derive
 | HHDM | Higher-half direct map offset. `virt = phys + offset` for any physical access before our own tables exist. |
 | Executable address | Physical and virtual base of the loaded kernel, so we can map ourselves and exclude ourselves from the allocator. |
 | RSDP | Physical pointer to the ACPI RSDP. Gates all of ACPI, APIC, HPET, SMP. |
+| Modules | The files `limine.conf`'s `module_path:` keys load, as HHDM addresses and lengths: the x86_64 initrd, `/boot/initrd.fat`. `capture` keeps each one's physical range, never a slice over it, and never calls `path()` or `cmdline()`, which unwrap. Optional: with none the root is a ramfs. |
 | Executable command line | The `limine.conf` entry's `cmdline:`, read as raw bytes up to the NUL (at most 2048), never through the crate's `cmdline()`, which unwraps non-UTF-8. Optional: absent means empty. |
 | SMP (optional) | Limine can bring up APs for us. We do it ourselves; see [section 7](SMP.md#7-smp) for why. |
 
@@ -161,7 +168,7 @@ where the paragraphs below the table say so. The executable contract for the mar
 | 17 | Framebuffer console, PS/2, mux | `console ok` | After `smp: done`. Install the IRQ1 / keyboard GSI handler, init the 8042, then unmask. Replay the pre-FB log ring onto the framebuffer. |
 | 17b | PCI enum + device registry | `pci: N devices` | After `console ok`. ECAM for the buses the first MCFG allocation covers (`acpi::parse_mcfg` reads no other entry; F045); otherwise `0xCF8`/`0xCFC`, which the kernel uses only for bus 0 (a kernel limit: configuration mechanism #1 addresses any bus; ROADMAP §20.1, F114). Scan builds a device list. Workqueue + threaded IRQ start, then drivers bind by id. Memory BARs are mapped through ioremap or the capped physmap; sizes above 32 MiB are recorded and skipped (§9.2). |
 | 17c | Block layer + ramdisk + virtio-blk + partitions | `block: <name> <n> sectors` | After bind. One line per device. virtio-blk (`vda`) emits during probe; ramdisk (`ram0`) follows in `block_init`; partition children (`<parent>p<N>`) after that. |
-| 17d | VFS + FAT initrd root + pseudo mounts + vibefs | (none) | After block. Makefile FAT32 initrd at `/` when live, else dummy ramfs. Then devfs/procfs/tmpfs/sysfs on `/dev` `/proc` `/tmp` `/sys`. BSS vibefs at `/vibe` (Phase 8D). No serial marker: a root without `/sbin/init` shows as `user: init failed` and no `shell ready`. Syscalls do not reach the VFS or kernfs: `file_init` resolves paths through its own FAT and vibefs route tables (ROADMAP §10.4, F086). |
+| 17d | VFS + FAT initrd root + pseudo mounts + vibefs | (none) | After block. The FAT32 initrd Limine loaded as a module (§3.2), mounted read-write in place through the physmap, at `/` when live; with no module, or one past `map_end`, a ramfs root. Then devfs/procfs/tmpfs/sysfs on `/dev` `/proc` `/tmp` `/sys`. BSS vibefs at `/vibe` (Phase 8D). No serial marker: a root without `/sbin/init` shows as `user: init failed` and no `shell ready`. Syscalls do not reach the VFS or kernfs: `file_init` resolves paths through its own FAT and vibefs route tables (ROADMAP §10.4, F086). |
 | 18 | `/hello`, builtins, `/sbin/init` as pid 1 | `shell ready` | Last marker. The bootstrap thread spawns `/hello` and waits for it (`proc_init::spawn_elf`, `proc_init::wait_kernel`), `shell_init::init` registers the builtins, and `proc_init::start_init` spawns `/sbin/init` pinned to the BSP. `/sbin/init` forks `/bin/tests` and waits for it without reading its exit status, then forks `/bin/sh`, which writes `shell ready` from ring 3 (`user/sh.asm`); the marker is not kernel-emitted and does not show that `/bin/tests` passed (ROADMAP §10.5, F073). A `kernel_shell` build instead spawns the kernel `shell` thread, which prints `shell ready`; a `kernel_tests` build runs the in-guest registry. |
 
 Ordering rules worth stating separately because they were learned the hard way:
@@ -276,8 +283,9 @@ not ship and build without it.
 `make isos` builds them all. Each ISO recipe reads only its own named ELF, so a test build cannot be
 packaged as production. The repository root holds no build product.
 
-`make` stages `build/iso_root_<variant>/` with the kernel ELF, `limine.conf`, and the Limine BIOS
-and UEFI artifacts, then builds a hybrid ISO with `xorriso` and runs `limine bios-install`. Hybrid
+`make` stages `build/iso_root_<variant>/` with the kernel ELF, `build/initrd.fat` as
+`boot/initrd.fat`, `limine.conf`, and the Limine BIOS and UEFI artifacts
+(`scripts/mkiso.sh <kernel-elf> <initrd> <out.iso> <staging-dir>`), then builds a hybrid ISO with `xorriso` and runs `limine bios-install`. Hybrid
 means the same image boots BIOS and UEFI, which matters for real hardware later.
 
 The Makefile lists every `.rs` and `.asm` under `src/` and `crates/core/src/` as a prerequisite. A hand-maintained short list
