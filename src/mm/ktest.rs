@@ -25,16 +25,16 @@ use crate::thread_init;
 // ------------------ tests ------------------
 
 pub(crate) fn test_map_unmap() -> Outcome {
-    let Some(va) = kva_init::alloc_va(PAGE_SIZE) else {
+    let Some(va) = alloc_va(PAGE_SIZE) else {
         return Outcome::Fail("kva alloc");
     };
     let Some(pa) = alloc_frame() else {
-        kva_init::free_va(va, PAGE_SIZE);
+        free_va(va, PAGE_SIZE);
         return Outcome::Fail("frame alloc");
     };
     if unsafe { paging_init::map_4k(va, pa, heap_flags()) }.is_err() {
         free_frame(pa);
-        kva_init::free_va(va, PAGE_SIZE);
+        free_va(va, PAGE_SIZE);
         return Outcome::Fail("map_4k");
     }
     unsafe { (va.as_u64() as *mut u64).write_volatile(0xAABB_CCDD_EEFF_0011) };
@@ -49,7 +49,7 @@ pub(crate) fn test_map_unmap() -> Outcome {
         return Outcome::Fail("unmap phys mismatch");
     }
     free_frame(pa);
-    kva_init::free_va(va, PAGE_SIZE);
+    free_va(va, PAGE_SIZE);
     let fault = catch_fault(|| unsafe {
         (va.as_u64() as *mut u8).write_volatile(1);
     });
@@ -60,16 +60,16 @@ pub(crate) fn test_map_unmap() -> Outcome {
 }
 
 pub(crate) fn test_nx_enforcement() -> Outcome {
-    let Some(va) = kva_init::alloc_va(PAGE_SIZE) else {
+    let Some(va) = alloc_va(PAGE_SIZE) else {
         return Outcome::Fail("kva alloc");
     };
     let Some(pa) = alloc_frame() else {
-        kva_init::free_va(va, PAGE_SIZE);
+        free_va(va, PAGE_SIZE);
         return Outcome::Fail("frame alloc");
     };
     if unsafe { paging_init::map_4k(va, pa, heap_flags()) }.is_err() {
         free_frame(pa);
-        kva_init::free_va(va, PAGE_SIZE);
+        free_va(va, PAGE_SIZE);
         return Outcome::Fail("map_4k");
     }
     unsafe { (va.as_u64() as *mut u8).write_volatile(0xC3) };
@@ -78,7 +78,7 @@ pub(crate) fn test_nx_enforcement() -> Outcome {
     let fault = catch_fault(|| unsafe { f() });
     let _ = unsafe { unmap_4k(va) };
     free_frame(pa);
-    kva_init::free_va(va, PAGE_SIZE);
+    free_va(va, PAGE_SIZE);
     let Some(fault) = fault else {
         return Outcome::Fail("NX execute did not fault");
     };
@@ -357,16 +357,16 @@ pub(crate) fn test_tlb_shootdown_remote() -> Outcome {
     let Some(ap) = second_cpu() else {
         return Outcome::Skip("no AP");
     };
-    let Some(va) = kva_init::alloc_va(PAGE_SIZE) else {
+    let Some(va) = alloc_va(PAGE_SIZE) else {
         return Outcome::Fail("kva alloc");
     };
     let Some(pa) = alloc_frame() else {
-        kva_init::free_va(va, PAGE_SIZE);
+        free_va(va, PAGE_SIZE);
         return Outcome::Fail("frame alloc");
     };
     if unsafe { paging_init::map_4k(va, pa, heap_flags()) }.is_err() {
         free_frame(pa);
-        kva_init::free_va(va, PAGE_SIZE);
+        free_va(va, PAGE_SIZE);
         return Outcome::Fail("map");
     }
     unsafe { (va.as_u64() as *mut u64).write_volatile(0xD15EA5E) };
@@ -380,7 +380,7 @@ pub(crate) fn test_tlb_shootdown_remote() -> Outcome {
         shoot_quit();
         let _ = unsafe { unmap_4k(va) };
         free_frame(pa);
-        kva_init::free_va(va, PAGE_SIZE);
+        free_va(va, PAGE_SIZE);
         return if r == 0 {
             Outcome::Fail("AP probe did not answer")
         } else {
@@ -394,21 +394,21 @@ pub(crate) fn test_tlb_shootdown_remote() -> Outcome {
         shoot_quit();
         let _ = unsafe { paging_init::map_4k(va, pa, heap_flags()) };
         free_frame(pa);
-        kva_init::free_va(va, PAGE_SIZE);
+        free_va(va, PAGE_SIZE);
         return Outcome::Fail("AP did not fault after unmap");
     }
     if per_cpu_init::online_mask().count_ones() > 1 && ipi_init::shootdown_count() <= before {
         shoot_quit();
         let _ = unsafe { paging_init::map_4k(va, pa, heap_flags()) };
         free_frame(pa);
-        kva_init::free_va(va, PAGE_SIZE);
+        free_va(va, PAGE_SIZE);
         return Outcome::Fail("no shootdown IPI");
     }
 
     if unsafe { paging_init::map_4k(va, pa, heap_flags()) }.is_err() {
         shoot_quit();
         free_frame(pa);
-        kva_init::free_va(va, PAGE_SIZE);
+        free_va(va, PAGE_SIZE);
         return Outcome::Fail("remap");
     }
     unsafe { (va.as_u64() as *mut u64).write_volatile(0xD15EA5E) };
@@ -416,7 +416,7 @@ pub(crate) fn test_tlb_shootdown_remote() -> Outcome {
     shoot_quit();
     let _ = unsafe { unmap_4k(va) };
     free_frame(pa);
-    kva_init::free_va(va, PAGE_SIZE);
+    free_va(va, PAGE_SIZE);
     if !ok {
         return Outcome::Fail("AP could not read after remap");
     }
@@ -609,7 +609,19 @@ pub(crate) fn vmap_32_frames_unmapped() -> Outcome {
 
 // ------------------ hooks ------------------
 
-// Test-only helpers over `paging_init`'s tables (Q2).
+// Test-only helpers over `kva_init`'s free list and `paging_init`'s
+// tables (Q2).
+
+/// Reserve `len` bytes of KVA with nothing mapped (Q2: no production
+/// caller).
+pub(crate) fn alloc_va(len: u64) -> Option<VirtAddr> {
+    paging_init::with_pt(|_pt| kva_init::with_kva(|k| k.alloc(len)).map(VirtAddr))
+}
+
+/// Give back a range [`alloc_va`] reserved.
+pub(crate) fn free_va(va: VirtAddr, len: u64) {
+    kva_init::release_va(va, len);
+}
 
 /// Page-table pages the kernel mapper has taken from the buddy since boot,
 /// the PML4 included. They stay in the kernel tables for good: a mapping
