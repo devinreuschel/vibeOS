@@ -33,6 +33,9 @@ Drivers live in `run_*.py` and must not parse the environment or build argv.
 | `VIBEOS_NBD_CACHE` | `nbd-cache` | `run_vibefs_crash` |
 | `VIBEOS_VIBEFS_CAT` | `vibefs-cat` | `run_vibefs_crash` |
 | `VIBEOS_QEMU_VERSION` | unset; the QEMU a CI job pins | all (`qemu_argv`, `CI` on Linux) |
+| `VIBEOS_CMDLINE` | empty; fw_cfg command-line words (BOOT.md §3.2) | all (`qemu`) |
+| `VIBEOS_KTEST` | empty; `vibeos.ktest=<value>`, no whitespace | all (`qemu`) |
+| `VIBEOS_KTEST_REPEAT` | unset; `vibeos.ktest_repeat=<n>`, `n >= 1` | all (`qemu`) |
 """
 
 from __future__ import annotations
@@ -517,6 +520,11 @@ class QemuConfig:
     # The QEMU version the CI job pins (VIBEOS_QEMU_VERSION). None skips the
     # check: only a config `env_config` built carries the pin.
     qemu_version: str | None = None
+    # Kernel command-line words for fw_cfg `opt/vibeos/cmdline` (BOOT.md §3.2).
+    cmdline: str = ""
+    # `vibeos.ktest=` for this boot alone: `qemu_argv` appends it last, so it
+    # wins over any `vibeos.ktest=` in `cmdline` (C-CMDLINE).
+    ktest: str | None = None
 
 
 @dataclass
@@ -531,6 +539,21 @@ class EnvConfig:
     extra: tuple[str, ...]
     tier: str = "adhoc"
     qemu_version: str = ""
+    ktest: str = ""
+    ktest_repeat: int | None = None
+    cmdline: str = ""
+
+    def fw_cfg_cmdline(self, driver_words: str = "") -> str:
+        """The fw_cfg command-line string: the driver's words, then
+        `VIBEOS_KTEST`, `VIBEOS_KTEST_REPEAT` and `VIBEOS_CMDLINE`, the
+        non-empty ones joined by one space (later words win in the kernel)."""
+        parts = [
+            driver_words.strip(),
+            f"vibeos.ktest={self.ktest}" if self.ktest else "",
+            f"vibeos.ktest_repeat={self.ktest_repeat}" if self.ktest_repeat is not None else "",
+            self.cmdline.strip(),
+        ]
+        return " ".join(p for p in parts if p)
 
     def qemu(
         self,
@@ -539,6 +562,7 @@ class EnvConfig:
         hpet: bool = True,
         boot_order: str | None = None,
         extra_panic: tuple[str, ...] = (),
+        cmdline: str = "",
     ) -> QemuConfig:
         return QemuConfig(
             iso=self.iso,
@@ -552,6 +576,7 @@ class EnvConfig:
             boot_order=boot_order,
             extra_panic=extra_panic,
             qemu_version=self.qemu_version,
+            cmdline=self.fw_cfg_cmdline(cmdline),
         )
 
 
@@ -596,6 +621,18 @@ def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
         bios = None
     accel_raw = os.environ.get("VIBEOS_QEMU_ACCEL")
     extra = tuple(x for x in os.environ.get("VIBEOS_QEMU_EXTRA", "").split() if x)
+    ktest = os.environ.get("VIBEOS_KTEST", "")
+    if any(c.isspace() for c in ktest):
+        raise HarnessError(f"VIBEOS_KTEST={ktest!r}: whitespace is not allowed")
+    repeat_raw = os.environ.get("VIBEOS_KTEST_REPEAT", "")
+    ktest_repeat: int | None = None
+    if repeat_raw != "":
+        try:
+            ktest_repeat = int(repeat_raw)
+        except ValueError:
+            ktest_repeat = 0
+        if ktest_repeat < 1:
+            raise HarnessError(f"VIBEOS_KTEST_REPEAT={repeat_raw!r}: not an integer of at least 1")
     timeout_raw = os.environ.get("VIBEOS_TIMEOUT")
     if timeout_raw is None or timeout_raw == "":
         timeout = default_timeout
@@ -612,6 +649,9 @@ def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
         extra=extra,
         tier=os.environ.get("VIBEOS_TIER") or "adhoc",
         qemu_version=os.environ.get("VIBEOS_QEMU_VERSION", ""),
+        ktest=ktest,
+        ktest_repeat=ktest_repeat,
+        cmdline=os.environ.get("VIBEOS_CMDLINE", ""),
     )
 
 
@@ -796,6 +836,19 @@ def ensure_qemu_pinned(
         )
 
 
+# The fw_cfg file the kernel appends to Limine's command line (BOOT.md §3.2).
+FW_CFG_CMDLINE = "opt/vibeos/cmdline"
+
+
+def fw_cfg_cmdline_words(cfg: QemuConfig) -> str:
+    """The command-line string `qemu_argv` hands fw_cfg: `cfg.cmdline`, then
+    `vibeos.ktest=<cfg.ktest>` when set."""
+    parts = [cfg.cmdline.strip()]
+    if cfg.ktest is not None:
+        parts.append(f"vibeos.ktest={cfg.ktest}")
+    return " ".join(p for p in parts if p)
+
+
 def qemu_argv(cfg: QemuConfig, monitor_sock: str | None) -> list[str]:
     argv = [
         "qemu-system-x86_64",
@@ -817,6 +870,10 @@ def qemu_argv(cfg: QemuConfig, monitor_sock: str | None) -> list[str]:
         argv += list(OVMF_BOOT_ARGS)
     elif cfg.boot_order:
         argv += ["-boot", f"order={cfg.boot_order}"]
+    words = fw_cfg_cmdline_words(cfg)
+    if words:
+        # QEMU's option syntax reads `,,` as one comma inside a value.
+        argv += ["-fw_cfg", f"name={FW_CFG_CMDLINE},string={words.replace(',', ',,')}"]
     argv += list(cfg.extra)
     ensure_qemu_pinned(argv[0], cfg.qemu_version)
     return argv

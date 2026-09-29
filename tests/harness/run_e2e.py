@@ -30,6 +30,7 @@ from tests.harness.harness import (
     run_qemu_and_check,
     run_qemu_console_input,
     run_qemu_inject_mce,
+    serial_tail,
     virtio_blk_args,
 )
 
@@ -275,6 +276,111 @@ def _mce_main(env: EnvConfig) -> int:
         if "vibeOS: #MC " in line or "vibeOS: panic:" in line:
             print(f"[e2e]     {line}", file=sys.stderr)
     return 0
+
+
+CMDLINE_ECHO = "vibeOS: boot: cmdline: "
+STRACE_PREFIX = "user: syscall "
+STRACE_RE = re.compile(r"user: syscall (\S+) nr=(\d+) = (-?\d+)")
+STRACE_WRITE_RE = re.compile(r"user: syscall write nr=1 = -?\d+")
+
+
+def limine_cmdline(path: str = "limine.conf") -> str:
+    """The `cmdline:` value of limine.conf's `/vibeOS` entry, or ""."""
+    with open(path, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    in_entry = False
+    for line in lines:
+        s = line.strip()
+        if s.startswith("/"):
+            in_entry = s == "/vibeOS"
+            continue
+        if in_entry and s.startswith("cmdline:"):
+            return s[len("cmdline:"):].strip()
+    return ""
+
+
+def check_strace_lines(lines: list[str], expected_cmdline: str) -> tuple[str, str]:
+    """Fail unless the echo `vibeOS: boot: cmdline: <expected>` comes before
+    the first trace line, every trace line reads
+    `user: syscall <name> nr=<n> = <ret>`, and the first `write` line is
+    `user: syscall write nr=1 = <int>`. Returns the echo and that line.
+
+    Until kernel lines are framed, a trace line can follow
+    user output that ended without a newline, so it is found anywhere in a
+    serial line.
+    """
+    want = CMDLINE_ECHO + expected_cmdline
+    echo_at: int | None = None
+    first_trace: int | None = None
+    first_write: str | None = None
+    for i, line in enumerate(lines):
+        line = line.rstrip("\r")
+        if echo_at is None and CMDLINE_ECHO in line:
+            got = line[line.index(CMDLINE_ECHO):]
+            if got != want:
+                raise HarnessError(f"cmdline echo {got!r}, expected {want!r}")
+            echo_at = i
+        j = line.find(STRACE_PREFIX)
+        if j < 0:
+            continue
+        trace = line[j:]
+        m = STRACE_RE.fullmatch(trace)
+        if m is None:
+            raise HarnessError(f"malformed trace line {trace!r}")
+        if first_trace is None:
+            first_trace = i
+        if first_write is None and m.group(1) == "write":
+            first_write = trace
+    if echo_at is None:
+        raise HarnessError(f"no {CMDLINE_ECHO!r} line{serial_tail(lines)}")
+    if first_trace is None:
+        raise HarnessError(f"no {STRACE_PREFIX!r} line{serial_tail(lines)}")
+    if first_trace < echo_at:
+        raise HarnessError("a trace line comes before the cmdline echo")
+    if first_write is None:
+        raise HarnessError(f"no 'user: syscall write' line{serial_tail(lines)}")
+    if STRACE_WRITE_RE.fullmatch(first_write) is None:
+        raise HarnessError(f"first write trace {first_write!r} is not write nr=1")
+    return want, first_write
+
+
+def _strace() -> int:
+    env = env_config(default_iso="vibeos.iso", default_timeout=60)
+    res = results.Results(env.tier)
+    if "vibeos.strace=1" not in env.cmdline.split():
+        print("[e2e] FAIL: VIBEOS_CMDLINE must hold vibeos.strace=1", file=sys.stderr)
+        return 1
+    cfg = env.qemu()
+    markers = boot_contract_markers(cpu=env.cpu, smp=env.smp)
+    try:
+        result = run_qemu_and_check(cfg, markers, timeout_s=env.timeout)
+    except HarnessError as e:
+        _record_missing(str(e))
+        res.add_boot(qemu_argv(cfg, None), cfg, None)
+        print(f"[e2e] FAIL: {e}", file=sys.stderr)
+        return 1
+    for name in result.matched:
+        res.record("marker", name, "passed")
+    res.add_boot(qemu_argv(cfg, None), cfg, result.exit_code)
+    try:
+        echo, write = check_strace_lines(
+            result.lines, limine_cmdline() + " " + env.fw_cfg_cmdline()
+        )
+    except HarnessError as e:
+        res.record("marker", "strace", "failed")
+        print(f"[e2e] FAIL: {e}", file=sys.stderr)
+        return 1
+    res.record("marker", "strace", "passed")
+    print(f"[e2e] ok: {len(result.matched)} markers matched", file=sys.stderr)
+    print(f"[e2e]   . {echo}", file=sys.stderr)
+    print(f"[e2e]   . {write}", file=sys.stderr)
+    return 0
+
+
+def strace_main() -> int:
+    """`make test-e2e-strace`: boot with `VIBEOS_CMDLINE=vibeos.strace=1` and
+    check the command-line echo and the syscall trace. No retry."""
+    return results.run_main(_strace)
 
 
 def main() -> int:

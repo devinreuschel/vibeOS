@@ -1069,6 +1069,128 @@ class TestQemuArgv(unittest.TestCase):
         self.assertEqual(argv.count("-boot"), 1)
 
 
+class TestStraceE2e(unittest.TestCase):
+    """`make test-e2e-strace`'s checks (ROADMAP §10.7, F150)."""
+
+    ECHO = "vibeOS: boot: cmdline: vibeos.strace=0 vibeos.strace=1"
+    GOOD = [
+        "vibeOS: serial online",
+        ECHO,
+        "vibeOS: smp: done",
+        "user: syscall getpid nr=39 = 1",
+        "init: startinguser: syscall write nr=1 = 14",
+        "user: syscall write nr=1 = -14",
+        "user: syscall ? nr=999 = -38",
+    ]
+
+    def test_limine_cmdline_value(self) -> None:
+        import tempfile
+
+        text = (
+            "timeout: 0\n"
+            "/Other\n    cmdline: nope\n"
+            "/vibeOS\n    protocol: limine\n    cmdline:  a=1 vibeos.strace=0 \n"
+            "/Later\n    cmdline: later\n"
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as f:
+            f.write(text)
+        try:
+            self.assertEqual(run_e2e.limine_cmdline(f.name), "a=1 vibeos.strace=0")
+        finally:
+            os.unlink(f.name)
+        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as f:
+            f.write("/vibeOS\n    protocol: limine\n")
+        try:
+            self.assertEqual(run_e2e.limine_cmdline(f.name), "")
+        finally:
+            os.unlink(f.name)
+        self.assertEqual(run_e2e.limine_cmdline(), "vibeos.strace=0")
+
+    def test_check_strace_lines_ok(self) -> None:
+        echo, write = run_e2e.check_strace_lines(self.GOOD, "vibeos.strace=0 vibeos.strace=1")
+        self.assertEqual(echo, self.ECHO)
+        self.assertEqual(write, "user: syscall write nr=1 = 14")
+        # A carriage return from the serial line is not part of the text.
+        lines = [line + "\r" for line in self.GOOD]
+        run_e2e.check_strace_lines(lines, "vibeos.strace=0 vibeos.strace=1")
+
+    def test_check_strace_lines_missing_write(self) -> None:
+        lines = [line for line in self.GOOD if "write" not in line]
+        with self.assertRaisesRegex(HarnessError, "write"):
+            run_e2e.check_strace_lines(lines, "vibeos.strace=0 vibeos.strace=1")
+        with self.assertRaisesRegex(HarnessError, "user: syscall"):
+            run_e2e.check_strace_lines(self.GOOD[:3], "vibeos.strace=0 vibeos.strace=1")
+        bad_nr = [*self.GOOD[:3], "user: syscall write nr=2 = 1"]
+        with self.assertRaisesRegex(HarnessError, "nr=1"):
+            run_e2e.check_strace_lines(bad_nr, "vibeos.strace=0 vibeos.strace=1")
+
+    def test_check_strace_lines_malformed(self) -> None:
+        for bad in (
+            "user: syscall write nr=1 =",
+            "user: syscall write nr=x = 1",
+            "user: syscall write nr=1 = 1 extra",
+            "user: syscall  nr=1 = 1",
+        ):
+            with self.subTest(bad=bad), self.assertRaisesRegex(HarnessError, "malformed"):
+                run_e2e.check_strace_lines(
+                    [*self.GOOD, bad], "vibeos.strace=0 vibeos.strace=1"
+                )
+
+    def test_check_strace_lines_echo_mismatch(self) -> None:
+        with self.assertRaisesRegex(HarnessError, "cmdline echo"):
+            run_e2e.check_strace_lines(self.GOOD, "vibeos.strace=1")
+        no_echo = [line for line in self.GOOD if line != self.ECHO]
+        with self.assertRaisesRegex(HarnessError, "boot: cmdline"):
+            run_e2e.check_strace_lines(no_echo, "vibeos.strace=0 vibeos.strace=1")
+        late = [self.GOOD[0], self.GOOD[3], self.ECHO, *self.GOOD[4:]]
+        with self.assertRaisesRegex(HarnessError, "before the cmdline echo"):
+            run_e2e.check_strace_lines(late, "vibeos.strace=0 vibeos.strace=1")
+
+
+class TestFwCfgCmdline(unittest.TestCase):
+    """C-CMDLINE: the harness's words reach the kernel as fw_cfg `opt/vibeos/cmdline`."""
+
+    @staticmethod
+    def fw_cfg(argv: list[str]) -> list[str]:
+        return [argv[i + 1] for i, a in enumerate(argv) if a == "-fw_cfg"]
+
+    def test_qemu_argv_fw_cfg_cmdline(self) -> None:
+        from tests.harness.harness import FW_CFG_CMDLINE, QemuConfig, qemu_argv
+
+        self.assertEqual(FW_CFG_CMDLINE, "opt/vibeos/cmdline")
+        self.assertEqual(self.fw_cfg(qemu_argv(QemuConfig(iso="x.iso"), None)), [])
+        argv = qemu_argv(QemuConfig(iso="x.iso", cmdline="vibeos.strace=1", extra=("-S",)), None)
+        self.assertEqual(self.fw_cfg(argv), ["name=opt/vibeos/cmdline,string=vibeos.strace=1"])
+        self.assertLess(argv.index("-fw_cfg"), argv.index("-S"))
+        # Under OVMF the tianocore files stay, and ours is added once.
+        argv = qemu_argv(QemuConfig(iso="x.iso", bios="/o.fd", cmdline="a=1"), None)
+        self.assertEqual(
+            [f for f in self.fw_cfg(argv) if f.startswith("name=opt/vibeos/")],
+            ["name=opt/vibeos/cmdline,string=a=1"],
+        )
+
+    def test_qemu_argv_fw_cfg_commas_doubled(self) -> None:
+        from tests.harness.harness import QemuConfig, qemu_argv
+
+        argv = qemu_argv(QemuConfig(iso="x.iso", cmdline="vibeos.ktest=a,b,,c"), None)
+        self.assertEqual(
+            self.fw_cfg(argv), ["name=opt/vibeos/cmdline,string=vibeos.ktest=a,,b,,,,c"]
+        )
+
+    def test_qemu_argv_fw_cfg_ktest_override(self) -> None:
+        from tests.harness.harness import QemuConfig, qemu_argv
+
+        cfg = QemuConfig(iso="x.iso", cmdline="vibeos.ktest=all x=1", ktest="one")
+        self.assertEqual(
+            self.fw_cfg(qemu_argv(cfg, None)),
+            ["name=opt/vibeos/cmdline,string=vibeos.ktest=all x=1 vibeos.ktest=one"],
+        )
+        cfg = QemuConfig(iso="x.iso", ktest="one")
+        self.assertEqual(
+            self.fw_cfg(qemu_argv(cfg, None)), ["name=opt/vibeos/cmdline,string=vibeos.ktest=one"]
+        )
+
+
 class TestLapicMode(unittest.TestCase):
     def test_tcg_max_is_periodic(self) -> None:
         from tests.harness.harness import expected_lapic_mode
@@ -1425,6 +1547,64 @@ class TestEnvConfig(unittest.TestCase):
             self.assertEqual(env.extra, ("-nic", "none"))
             self.assertEqual(env.qemu_version, "10.2.1")
             self.assertEqual(env.qemu().qemu_version, "10.2.1")
+
+    def test_env_config_cmdline_words(self) -> None:
+        from tests.harness.harness import env_config, overlay_env
+
+        with overlay_env(
+            {
+                "VIBEOS_KTEST": "lifetime_*,exit_burst",
+                "VIBEOS_KTEST_REPEAT": "3",
+                "VIBEOS_CMDLINE": "  vibeos.strace=1 TERM=vt100 ",
+            },
+            clear=True,
+        ):
+            env = env_config(default_iso="x.iso", default_timeout=1)
+            self.assertEqual(env.ktest, "lifetime_*,exit_burst")
+            self.assertEqual(env.ktest_repeat, 3)
+            self.assertEqual(env.cmdline, "  vibeos.strace=1 TERM=vt100 ")
+            want = (
+                "vibeos.ktest=lifetime_*,exit_burst vibeos.ktest_repeat=3 "
+                "vibeos.strace=1 TERM=vt100"
+            )
+            self.assertEqual(env.fw_cfg_cmdline(), want)
+            self.assertEqual(env.qemu().cmdline, want)
+
+    def test_env_config_cmdline_empty(self) -> None:
+        from tests.harness.harness import env_config, overlay_env, qemu_argv
+
+        with overlay_env({"VIBEOS_CMDLINE": "   ", "VIBEOS_KTEST": ""}, clear=True):
+            env = env_config(default_iso="x.iso", default_timeout=1)
+            self.assertEqual(env.ktest, "")
+            self.assertIsNone(env.ktest_repeat)
+            self.assertEqual(env.fw_cfg_cmdline(), "")
+            cfg = env.qemu()
+            self.assertEqual(cfg.cmdline, "")
+            self.assertNotIn("-fw_cfg", qemu_argv(cfg, None))
+
+    def test_env_config_ktest_rejects_bad_values(self) -> None:
+        from tests.harness.harness import env_config, overlay_env
+
+        for bad in (
+            {"VIBEOS_KTEST": "a b"},
+            {"VIBEOS_KTEST": "a\tb"},
+            {"VIBEOS_KTEST_REPEAT": "0"},
+            {"VIBEOS_KTEST_REPEAT": "-2"},
+            {"VIBEOS_KTEST_REPEAT": "two"},
+            {"VIBEOS_KTEST_REPEAT": "1.5"},
+        ):
+            with overlay_env(bad, clear=True), self.assertRaises(HarnessError, msg=repr(bad)):
+                env_config(default_iso="x.iso", default_timeout=1)
+
+    def test_qemu_cmdline_driver_words_first(self) -> None:
+        from tests.harness.harness import env_config, overlay_env
+
+        with overlay_env({"VIBEOS_CMDLINE": "vibeos.strace=0", "VIBEOS_KTEST": "t"}, clear=True):
+            env = env_config(default_iso="x.iso", default_timeout=1)
+            self.assertEqual(
+                env.qemu(cmdline="vibeos.strace=1 A=1").cmdline,
+                "vibeos.strace=1 A=1 vibeos.ktest=t vibeos.strace=0",
+            )
 
 
 class TestQemuVersionPin(unittest.TestCase):
