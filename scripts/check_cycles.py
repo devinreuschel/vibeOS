@@ -63,11 +63,6 @@ RAW_ALIAS = "x86"
 HEAP_LEAVES = frozenset({"heap", "heap_init", "pmm", "pmm_init"})
 UPPER_PREFIXES = ("sched", "thread", "wait", "cache", "proc")
 
-# Exact failure keys the tree may still produce while this branch breaks them.
-KNOWN: list[str] = [
-    "two-way kernel:proc::proc_init kernel:proc::syscall_init",
-]
-
 PATH_STARTS = frozenset({"crate", "$crate", "self", "super", "vibeos"})
 
 
@@ -664,22 +659,12 @@ def long_cycles(g: Graph) -> list[list[str]]:
     return sorted(comps)
 
 
-def check(root_dir: Path, known: list[str]) -> tuple[list[str], list[str], Graph]:
+def check(root_dir: Path) -> tuple[list[str], list[str], Graph]:
     """(errors, notes, graph) for the tree under `root_dir`."""
     g, kernel, _core, res = build(root_dir)
     fails = failures(g, kernel, res)
-    errors: list[str] = []
-    notes: list[str] = []
-    for key in sorted(fails):
-        if key in known:
-            notes.append(f"known {key}: {fails[key]}")
-        else:
-            errors.append(f"{key}: {fails[key]}")
-    for key in known:
-        if key not in fails:
-            errors.append(f"KNOWN: stale key {key!r}; delete it")
-    for comp in long_cycles(g):
-        notes.append("cycle of " + str(len(comp)) + ": " + " ".join(comp))
+    errors = [f"{key}: {fails[key]}" for key in sorted(fails)]
+    notes = ["cycle of " + str(len(comp)) + ": " + " ".join(comp) for comp in long_cycles(g)]
     return errors, notes, g
 
 
@@ -688,7 +673,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--root", type=Path, default=ROOT, help="tree to check")
     ap.add_argument("--edges", action="store_true", help="print every edge")
     args = ap.parse_args(argv)
-    errors, notes, g = check(args.root.resolve(), KNOWN)
+    errors, notes, g = check(args.root.resolve())
     if args.edges:
         for (a, b), where in sorted(g.edges.items()):
             print(f"{a} -> {b}  {where}")

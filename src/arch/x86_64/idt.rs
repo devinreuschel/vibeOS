@@ -567,7 +567,9 @@ pub fn set_user_fault_hook(f: fn(&TrapFrame)) {
     USER_FAULT.store(f as *mut (), Ordering::Release);
 }
 
-fn user_fault(frame: &TrapFrame) {
+/// Run the ring-3 fault hook. The syscall exit's non-canonical-RIP path
+/// takes it too.
+pub fn user_fault(frame: &TrapFrame) {
     // Acquire: pairs with the Release store in `set_user_fault_hook`.
     let p = USER_FAULT.load(Ordering::Acquire);
     if p.is_null() {

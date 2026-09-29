@@ -21,7 +21,7 @@ use crate::ktest::{Outcome, quiescent_free_frames, spawn_thread};
 use crate::per_cpu_init;
 use crate::proc_init::{self, testing as proc_testing};
 use crate::sync::blocking_init::Semaphore;
-use crate::syscall_init::{self, testing as entry_testing};
+use crate::syscall_init::testing as entry_testing;
 use crate::thread_init;
 use crate::time_init;
 use crate::x86;
@@ -213,18 +213,18 @@ pub(crate) fn test_ring3_hello_exit() -> Outcome {
 }
 
 pub(crate) fn test_syscall_dispatch() -> Outcome {
-    if syscall_init::dispatch(vibeos::syscall::SYS_GETPID, [0; 6]) != 0 {
+    if proc_init::dispatch(vibeos::syscall::SYS_GETPID, [0; 6]) != 0 {
         return Outcome::Fail("getpid");
     }
-    if syscall_init::dispatch(vibeos::syscall::SYS_SCHED_YIELD, [0; 6]) != 0 {
+    if proc_init::dispatch(vibeos::syscall::SYS_SCHED_YIELD, [0; 6]) != 0 {
         return Outcome::Fail("yield");
     }
-    if syscall_init::dispatch(vibeos::syscall::SYS_WRITE, [3, 0, 1, 0, 0, 0])
+    if proc_init::dispatch(vibeos::syscall::SYS_WRITE, [3, 0, 1, 0, 0, 0])
         != vibeos::syscall::neg(vibeos::syscall::EBADF)
     {
         return Outcome::Fail("ebadf");
     }
-    if syscall_init::dispatch(0xC0FFEE, [0; 6]) != vibeos::syscall::neg(vibeos::syscall::ENOSYS) {
+    if proc_init::dispatch(0xC0FFEE, [0; 6]) != vibeos::syscall::neg(vibeos::syscall::ENOSYS) {
         return Outcome::Fail("enosys");
     }
     Outcome::Ok

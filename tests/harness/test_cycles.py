@@ -273,29 +273,17 @@ class TestCheck(unittest.TestCase):
             "src/a.rs": "use crate::b;\n", "src/b.rs": "use crate::c;\n",
             "src/c.rs": "use crate::a;\n"})
         try:
-            errors, notes, _ = check(t.root, [])
+            errors, notes, _ = check(t.root)
         finally:
             t.close()
         self.assertEqual(errors, [])
         self.assertEqual(notes, ["cycle of 3: kernel:a kernel:b kernel:c"])
 
-    def test_known_key_passes_and_stale_key_fails(self) -> None:
-        t = Tree("mod a;\nmod b;\n", {"src/a.rs": "use crate::b;\n", "src/b.rs": "use crate::a;\n"})
-        try:
-            key = two_way("kernel:a", "kernel:b")
-            errors, notes, _ = check(t.root, [key])
-            self.assertEqual(errors, [])
-            self.assertTrue(notes[0].startswith(f"known {key}: src/a.rs:1 ; src/b.rs:1"))
-            errors, _, _ = check(t.root, [key, "raw missing"])
-            self.assertEqual(errors, ["KNOWN: stale key 'raw missing'; delete it"])
-        finally:
-            t.close()
-
     def test_failure_prints_both_locations(self) -> None:
         t = Tree("mod a;\nmod b;\n", {"src/a.rs": "\nuse crate::b;\n",
                                       "src/b.rs": "\n\nuse crate::a::f;\n"})
         try:
-            errors, _, _ = check(t.root, [])
+            errors, _, _ = check(t.root)
         finally:
             t.close()
         self.assertEqual(errors, ["two-way kernel:a kernel:b: src/a.rs:2 ; src/b.rs:3"])

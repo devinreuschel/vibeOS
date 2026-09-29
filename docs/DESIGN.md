@@ -77,7 +77,11 @@ These are not style preferences. They shape every subsystem.
    call up, except through a hook an upper layer installs at init, and §1.2 lists each one. The
    buddy and the heap never call up, directly or by hook, but for the TLB shootdown a kernel-half
    mapping change makes (§4.3): an allocation reaches reclaim, the writeback wait, and the OOM
-   killer only through the allocation entry's hooks (§4.4).
+   killer only through the allocation entry's hooks (§4.4). `scripts/check_cycles.py`, which `make
+   check` runs, enforces it on the module graph of both crates: it fails on two modules that use
+   each other, on an edge from `heap`, `heap_init`, `pmm` or `pmm_init` to a scheduler, VFS,
+   block-cache or process module, and on any reference from the raw serial layer (`serial::raw`)
+   to a kernel module but `arch::cpu`. Cycles of three or more modules it prints and does not fail.
 7. **The portable crate is stable Rust.** `vibeos-core` enables no `#![feature]` and builds with its
    MSRV (§3.1), the oldest Rust that Kani (ROADMAP §10.8) and Verus (Phase 38) use: each pins its
    own toolchain, older than the kernel's nightly, and must build the code the kernel links. Nightly
@@ -140,6 +144,10 @@ that sets it:
   a new thread's FP image), set by `syscall_init::init_bsp` before the scheduler starts.
 - `thread_init::set_kick_hook` (wake a CPU's workqueue worker to free its dead stacks), set by
   `work_init::init` before it starts the workers.
+- `syscall_init::set_syscall_handler` (the syscall entry's handler, `proc_init::syscall`), set by
+  `proc_init::init` before the first ring-3 entry; unset, a syscall returns `-ENOSYS`.
+- `fs_init::set_test_hooks` (a `kernel_tests` build's File API hooks, `file_init::testing`), set by
+  `file_init::init` before it brings the filesystems up.
 - `ipi_init::set_reschedule_hook` (a reschedule IPI's preemption point), set by `sched_init::init`
   before the scheduler goes live.
 - Planned (ROADMAP §12.6): the allocation entry's hooks, set by the page cache (clean-page reclaim),

@@ -219,7 +219,7 @@ unsafe extern "C" fn vibeos_syscall_bad_rip(frame: *mut UserFrame) -> ! {
     let f = unsafe { &*frame };
     #[cfg(feature = "kernel_tests")]
     testing::BAD_RIP_KILLS.fetch_add(1, Ordering::Relaxed);
-    crate::proc_init::try_user_fault(&TrapFrame::for_user(vectors::GP, 0, f));
+    crate::arch::idt::user_fault(&TrapFrame::for_user(vectors::GP, 0, f));
     panic!(
         "syscall: non-canonical return RIP {:#x} with no process",
         f.rip
@@ -652,6 +652,17 @@ fn bump_counter() {
     }
 }
 
+/// The syscall handler: the process layer's `syscall`, which its `init`
+/// sets before the first ring-3 entry (DESIGN §1.2). Unset, every syscall
+/// returns `-ENOSYS`.
+static HANDLER: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
+
+/// Install the syscall handler.
+pub fn set_syscall_handler(f: fn(&mut UserFrame) -> i64) {
+    // Release: pairs with the Acquire load in `vibeos_syscall_stub`.
+    HANDLER.store(f as *mut (), Ordering::Release);
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn vibeos_syscall_stub(frame: *mut UserFrame) -> i64 {
     bump_counter();
@@ -659,14 +670,20 @@ pub extern "C" fn vibeos_syscall_stub(frame: *mut UserFrame) -> i64 {
     // syscall_init::vibeos_syscall_entry built at the top of this thread's
     // kernel stack, which only this thread's syscall path refers to.
     let frame = unsafe { &mut *frame };
-    let r = crate::proc_init::syscall(frame);
+    // Acquire: pairs with the Release store in `set_syscall_handler`.
+    let p = HANDLER.load(Ordering::Acquire);
+    let r = if p.is_null() {
+        ENOSYS_RET
+    } else {
+        // SAFETY: invariant: a non-null `HANDLER` holds a
+        // `fn(&mut UserFrame) -> i64`; established by
+        // `syscall_init::set_syscall_handler`, its only store.
+        let f = unsafe { core::mem::transmute::<*mut (), fn(&mut UserFrame) -> i64>(p) };
+        f(frame)
+    };
     #[cfg(feature = "kernel_tests")]
     testing::on_exit(frame);
     r
-}
-
-pub fn dispatch(nr: u64, args: [u64; 6]) -> i64 {
-    crate::proc_init::dispatch(nr, args)
 }
 
 /// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
