@@ -63,11 +63,6 @@ pub mod kalloc;
 pub mod limits;
 pub mod log;
 pub mod marker;
-#[allow(clippy::missing_safety_doc, reason = "audit pending, ROADMAP §10.1")]
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 pub mod mm;
 #[allow(
     clippy::undocumented_unsafe_blocks,

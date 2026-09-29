@@ -182,13 +182,13 @@ pub(crate) fn test_catch_ignores_user_frame() -> Outcome {
 }
 
 pub(crate) fn test_scoped_pf() -> Outcome {
-    let Some(va) = kva_init::alloc_va(PAGE_SIZE) else {
+    let Some(va) = crate::mm::ktest::alloc_va(PAGE_SIZE) else {
         return Outcome::Fail("kva alloc");
     };
     let caught = arch::catch::catch_skip(vectors::PF, WRITE_U8_1_LEN, || unsafe {
         vibeos_write_u8_1(va.as_u64());
     });
-    kva_init::free_va(va, PAGE_SIZE);
+    crate::mm::ktest::free_va(va, PAGE_SIZE);
     let Some(c) = caught else {
         return Outcome::Fail("store did not fault");
     };
