@@ -4,6 +4,9 @@
 //! index wrap, indirect descriptors, and `EVENT_IDX`. Packed VQ is later.
 //! Kernel MMIO / DMA / MSI-X live in `virtio_init`.
 
+use core::marker::PhantomData;
+
+use crate::arch::Barriers;
 use crate::atomic::AtomicU16;
 
 use crate::dma::{self, publish_index};
@@ -406,25 +409,30 @@ pub struct DescBuf {
 
 pub const MAX_CHAIN: usize = 8;
 
-/// Split VQ over a caller-owned DMA / sim buffer.
-pub struct SplitQueue {
+/// The ring memory a [`SplitQueue`] reaches, at its 16-byte aligned base.
+struct RingPtr(*mut u8);
+
+// SAFETY: invariant I233: the memory at the pointer is owned alongside the
+// queue that holds it (the kernel keeps its `DmaBuffer` with it) and reached
+// only through that queue, so moving the queue to another thread moves that
+// access with it; established by `virtio::SplitQueue::new`.
+unsafe impl Send for RingPtr {}
+
+/// Split VQ over a caller-owned DMA / sim buffer. `A` is the port whose
+/// [`Barriers`] order the ring against the device.
+pub struct SplitQueue<A: Barriers> {
     layout: SplitLayout,
-    base: *mut u8,
+    base: RingPtr,
     pub last_used: u16,
     free_head: u16,
     pub num_free: u16,
     pub event_idx: bool,
     /// Avail idx last published. Kick uses this as `old`.
     pub last_avail: u16,
+    _port: PhantomData<fn() -> A>,
 }
 
-// SAFETY: invariant I233: the memory at `base` is owned alongside the
-// queue (the kernel keeps its `DmaBuffer` with it) and reached only through
-// the queue, so moving the queue to another thread moves that access with
-// it; established by `virtio::SplitQueue::new`.
-unsafe impl Send for SplitQueue {}
-
-impl SplitQueue {
+impl<A: Barriers> SplitQueue<A> {
     /// A queue over the ring memory at `base`.
     ///
     /// # Safety
@@ -434,12 +442,13 @@ impl SplitQueue {
     pub unsafe fn new(layout: SplitLayout, base: *mut u8, event_idx: bool) -> Self {
         Self {
             layout,
-            base,
+            base: RingPtr(base),
             last_used: 0,
             free_head: 0,
             num_free: layout.size,
             event_idx,
             last_avail: 0,
+            _port: PhantomData,
         }
     }
 
@@ -456,7 +465,7 @@ impl SplitQueue {
                 .is_some_and(|end| end <= self.layout.total),
             "virtio: ring offset past the queue"
         );
-        self.base.wrapping_add(off)
+        self.base.0.wrapping_add(off)
     }
 
     fn rd16(&self, off: usize) -> u16 {
@@ -617,7 +626,7 @@ impl SplitQueue {
     pub fn publish(&mut self) -> u16 {
         let old = self.rd16(self.layout.avail_idx());
         let new = old.wrapping_add(1);
-        dma::dma_wmb();
+        dma::dma_wmb::<A>();
         self.wr16(self.layout.avail_idx(), new);
         self.last_avail = new;
         new
@@ -628,7 +637,7 @@ impl SplitQueue {
         let old = self.rd16(self.layout.avail_idx());
         let new = old.wrapping_add(1);
         self.wr16(self.layout.avail_idx(), new);
-        publish_index(slot, new);
+        publish_index::<A>(slot, new);
         self.last_avail = new;
         new
     }
@@ -649,7 +658,7 @@ impl SplitQueue {
         if self.pending() == 0 {
             return None;
         }
-        dma::dma_rmb();
+        dma::dma_rmb::<A>();
         let off = self.layout.used_elem(self.last_used);
         let id = self.rd32(off) as u16;
         let len = self.rd32(off + 4);
@@ -707,8 +716,8 @@ pub unsafe fn write_indirect_write(table: *mut u8, addr: u64, len: u32) {
 ///
 /// # Safety
 /// `guest_mem` covers the queue's guest physical addresses minus `guest_off`.
-pub unsafe fn sim_complete(
-    q: &mut SplitQueue,
+pub unsafe fn sim_complete<A: Barriers>(
+    q: &mut SplitQueue<A>,
     fill: u8,
     guest_mem: *mut u8,
     guest_off: u64,
@@ -768,7 +777,7 @@ pub unsafe fn sim_complete(
         i += 1;
     }
     if n != 0 {
-        dma::dma_wmb();
+        dma::dma_wmb::<A>();
         q.wr16(q.layout.used_idx(), used.wrapping_add(n));
     }
     n
@@ -795,6 +804,8 @@ mod tests {
     };
     use std::vec;
     use std::vec::Vec;
+
+    type Stub = crate::arch::stub::Arch;
 
     struct Fake {
         data: [u8; 256],
@@ -858,7 +869,7 @@ mod tests {
     }
 
     /// A queue over a [`pool`] buffer.
-    fn queue(layout: SplitLayout, base: *mut u8, event_idx: bool) -> SplitQueue {
+    fn queue(layout: SplitLayout, base: *mut u8, event_idx: bool) -> SplitQueue<Stub> {
         // SAFETY: invariant I233: every test passes a 16-byte-aligned `pool`
         // buffer of at least `layout.total` bytes, which it keeps alive
         // while it uses the queue; established here, by each caller.
@@ -1113,7 +1124,7 @@ mod tests {
         let uoff = q.layout.used_elem(used);
         q.wr32(uoff, head as u32);
         q.wr32(uoff + 4, 513);
-        dma::dma_wmb();
+        dma::dma_wmb::<Stub>();
         q.wr16(q.layout.used_idx(), used.wrapping_add(1));
         let u = q.get_used().unwrap();
         assert_eq!(u.id, head);

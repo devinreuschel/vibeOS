@@ -23,7 +23,7 @@ use vibeos::virtio::{
     COMMON_OFF_QENABLE, COMMON_OFF_QMSIX, COMMON_OFF_QNOTIFY, COMMON_OFF_QSEL, COMMON_OFF_QSIZE,
     COMMON_OFF_STATUS, DESC_F_WRITE, DEV_BLK_LEGACY, DEV_BLK_MODERN, DescBuf, F_EVENT_IDX,
     MSI_NO_VECTOR, ModernCaps, PciCap, STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK,
-    STATUS_FEATURES_OK, SplitLayout, SplitQueue, VENDOR_ID, VirtioError, notify_addr,
+    STATUS_FEATURES_OK, SplitLayout, VENDOR_ID, VirtioError, notify_addr,
 };
 use vibeos::virtio_blk::{
     CFG_BLK_SIZE, CFG_CAPACITY, CFG_MAX_DISCARD_SECTORS, CFG_NUM_QUEUES, CFG_TOPOLOGY, F_DISCARD,
@@ -32,6 +32,7 @@ use vibeos::virtio_blk::{
     sector_for_lba,
 };
 
+use crate::arch::{self, current::Arch};
 use crate::block_init::{self, IoWaiter};
 use crate::dev_init;
 use crate::dma_init;
@@ -51,7 +52,7 @@ const SLOT_STRIDE: usize = SLOT_META + BOUNCE;
 const FREE: u8 = 0xFF;
 
 struct Vq {
-    vq: SplitQueue,
+    vq: arch::current::SplitQueue,
     qdma: DmaBuffer,
     doorbell: u64,
     inflight: [u8; MAX_QSIZE],
@@ -316,7 +317,7 @@ fn descs_for(op: Op) -> u16 {
 }
 
 fn kick(doorbell: u64) {
-    dma::dma_wmb();
+    dma::dma_wmb::<Arch>();
     // SAFETY: invariant I234: `doorbell` is a queue's notify register inside
     // the notify capability's BAR, which `map_mmio` mapped uncached, checked
     // against the capability length by `virtio::notify_addr`; established by
@@ -406,7 +407,7 @@ fn issue(blk: &mut Blk, req: Request) -> Issued {
     let st_d = slot_dev(&blk.slots, si, 16);
     let data_d = slot_dev(&blk.slots, si, SLOT_META);
     let disc_d = slot_dev(&blk.slots, si, 32);
-    blk.slots.sync_for_device();
+    blk.slots.sync_for_device::<Arch>();
 
     let chain: [DescBuf; 3];
     let nchain: usize;
@@ -513,7 +514,7 @@ fn issue(blk: &mut Blk, req: Request) -> Issued {
     }
     blk.slot_req[si] = Some(req);
     v.vq.publish();
-    v.qdma.sync_for_device();
+    v.qdma.sync_for_device::<Arch>();
     let kick = v.vq.should_kick(old);
     Issued::Device { qi, kick }
 }
@@ -693,7 +694,7 @@ fn harvest() {
                         continue;
                     }
                     let si = si as usize;
-                    blk.slots.sync_for_cpu();
+                    blk.slots.sync_for_cpu::<Arch>();
                     // SAFETY: slot `si` is in flight on this queue, so the
                     // device wrote its status byte at offset 16, synced for
                     // the CPU above; established by
@@ -1007,10 +1008,11 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
         // least `layout.total` bytes, which stays allocated beside the queue
         // until the device is reset and it is freed; established by
         // `dma_init::alloc`.
-        let mut vq =
-            unsafe { SplitQueue::new(layout, qdma.virt() as *mut u8, feat & F_EVENT_IDX != 0) };
+        let mut vq = unsafe {
+            arch::current::SplitQueue::new(layout, qdma.virt() as *mut u8, feat & F_EVENT_IDX != 0)
+        };
         vq.init();
-        qdma.sync_for_device();
+        qdma.sync_for_device::<Arch>();
         w64(
             common,
             COMMON_OFF_QDESC,
