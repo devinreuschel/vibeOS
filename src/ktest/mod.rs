@@ -349,6 +349,11 @@ pub(crate) const TESTS: &[Test] = &[
     test("virtio_bind", dev::ktest::test_virtio_bind),
     test("virtio_vq", dev::ktest::test_virtio_vq),
     test("dev_random_source", dev::ktest::test_dev_random_source),
+    test("rng_pool_no_dup", dev::ktest::rng_pool_no_dup),
+    test(
+        "rng_refill_after_empty_completion",
+        dev::ktest::rng_refill_after_empty_completion,
+    ),
     test(
         "dev_probe_alloc_fail",
         dev::ktest::test_dev_probe_alloc_fail,
@@ -369,6 +374,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("block_part_gpt", block::ktest::test_block_part_gpt),
     test("block_cache_hit", block::ktest::test_block_cache_hit),
     test("block_cache_evict", block::ktest::test_block_cache_evict),
+    test("part_six_entries", block::ktest::part_six_entries),
     test("vfs_walk", fs::ktest::test_vfs_walk),
     test("pseudo_fs", fs::ktest::test_pseudo_fs),
     test("fat_initrd", fs::ktest::test_fat_initrd),

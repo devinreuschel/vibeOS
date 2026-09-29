@@ -25,7 +25,7 @@ mod procfs;
 mod sysfs;
 mod tmpfs;
 
-use devfs::{blk_read, blk_write, mix_rng};
+use devfs::{blk_read, blk_write};
 use node::{
     kern_alloc, kern_create, kern_drop_sb, kern_find_child, kern_get, kern_get_mut, kern_idx,
     kern_info, kern_link, kern_lookup, kern_lookup_ino, kern_mk_dir, kern_mk_lnk, kern_mk_root,
@@ -159,8 +159,7 @@ pub struct KernState {
     tmp_cache: Cache<TMPFS_CACHE_PAGES>,
     tmp_back: [u8; TMPFS_BACK_BYTES],
     tmp_bits: u64,
-    rng: u64,
-    /// The clock the last op brought in; the xorshift fallback's seed.
+    /// The clock the last op brought in.
     now: u64,
     next_inst: u32,
     skins: [Skin; MAX_MOUNTS],
@@ -179,7 +178,6 @@ impl KernState {
             tmp_cache: Cache::new(),
             tmp_back: [0u8; TMPFS_BACK_BYTES],
             tmp_bits: 0,
-            rng: 0,
             now: 0,
             next_inst: 0,
             skins: [Skin::EMPTY; MAX_MOUNTS],

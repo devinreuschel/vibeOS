@@ -75,43 +75,63 @@ fn zeroed(n: usize) -> Result<TryVec<u8>, AllocError> {
     Ok(v)
 }
 
-/// Register each entry of `t` as a child of `parent`, in order, named
-/// `<parent>p<N>`. The first entry that fails stops the scan with one line
-/// naming it (ROADMAP §10.12, F117).
-fn register_table(parent: &BlockRef, t: &Table) {
+/// What [`register_table`] did with a table's entries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Registered {
+    pub added: usize,
+    pub dropped: usize,
+}
+
+/// Parse `parent`'s table and register its entries as children.
+pub fn scan(parent: &BlockRef) -> Result<Registered, part::PartError> {
+    let t = parse_dev(parent)?;
+    Ok(register_table(parent, &t))
+}
+
+/// Register each entry of `t` (at most `MAX_PARTS`) as a child of `parent`
+/// named `<parent>p<N>`, `N` the entry's index. An entry that is not
+/// registered, because the name does not fit or `register` refuses it, gets
+/// one warning line naming it, and the rest are still registered (ROADMAP
+/// §10.12, F117).
+pub fn register_table(parent: &BlockRef, t: &Table) -> Registered {
+    let mut r = Registered {
+        added: 0,
+        dropped: 0,
+    };
     let mut i = 0usize;
     while let Some(p) = t.get(i) {
-        let res = u32::try_from(i)
-            .ok()
-            .and_then(|n| n.checked_add(1))
-            .ok_or(BlockError::Inval)
-            .and_then(|n| BlockName::child(parent.name(), n))
-            .and_then(|name| {
-                blockdev_init::register(
-                    name.as_bytes(),
-                    Backing::Part {
-                        parent: parent.clone(),
-                        info: PartInfo {
-                            start: p.start_lba,
-                            nsect: p.nsectors,
-                            kind: p.kind,
-                        },
+        let res = match BlockName::child(parent.name(), u32::from(p.index)) {
+            Err(_) => Err("name does not fit in 32 bytes"),
+            Ok(name) => blockdev_init::register(
+                name.as_bytes(),
+                Backing::Part {
+                    parent: parent.clone(),
+                    info: PartInfo {
+                        start: p.start_lba,
+                        nsect: p.nsectors,
+                        kind: p.kind,
                     },
-                )
-            });
-        if let Err(e) = res {
-            crate::klog!(
-                vibeos::log::Level::Warn,
-                "vibeOS: part: {} entry {} of {} not registered: {}",
-                parent.name().as_str(),
-                i.saturating_add(1),
-                t.n,
-                e.as_str()
-            );
-            return;
+                },
+            )
+            .map_err(BlockError::as_str),
+        };
+        match res {
+            Ok(_) => r.added = r.added.saturating_add(1),
+            Err(why) => {
+                r.dropped = r.dropped.saturating_add(1);
+                crate::klog!(
+                    vibeos::log::Level::Warn,
+                    "vibeOS: part: {} entry {} of {} not registered: {}",
+                    parent.name().as_str(),
+                    p.index,
+                    t.n,
+                    why
+                );
+            }
         }
         i = i.saturating_add(1);
     }
+    r
 }
 
 fn stamp_ram0_mbr(ram0: &BlockRef) -> Result<(), BlockError> {
@@ -303,10 +323,18 @@ pub fn init() {
     let mut all: [Option<BlockRef>; MAX_BLOCKDEVS] = [const { None }; MAX_BLOCKDEVS];
     let n = blockdev_init::snapshot(&mut all);
     for d in all.iter().take(n).flatten() {
-        if d.parent().is_none()
-            && let Ok(t) = parse_dev(d)
-        {
-            register_table(d, &t);
+        if d.parent().is_none() {
+            // A disk with no table has no children: recorded at debug
+            // level, since most disks have none. Each entry
+            // `register_table` drops is logged there.
+            if let Err(e) = scan(d) {
+                crate::klog!(
+                    vibeos::log::Level::Debug,
+                    "vibeOS: part: {}: no table: {}",
+                    d.name().as_str(),
+                    e.as_str()
+                );
+            }
         }
     }
     LIVE.store(true, Ordering::Release);
