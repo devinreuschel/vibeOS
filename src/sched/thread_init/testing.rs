@@ -197,20 +197,33 @@ pub fn wait_window_held() -> bool {
 }
 
 /// Called by `with_sched` before it takes SCHED: IF off for each section
-/// of [`arm_wait_window`]'s thread until [`wait_window`] has run. SCHED's
-/// own guard would turn IF back on as it drops, and a tick between that
-/// and the hold would switch the thread off `Blocked`, so that it reached
-/// the hold only once woken.
-pub(super) fn window_enter() -> Option<crate::x86::InterruptGuard> {
+/// of [`arm_wait_window`]'s thread until the returned guard drops, after
+/// the section's places are delivered. SCHED's own guard would turn IF
+/// back on as it drops, and a tick between that and the hold would switch
+/// the thread off `Blocked`, so that it reached the hold only once woken.
+pub(super) fn window_enter() -> Option<WindowGuard> {
     let armed = WINDOW_TID.load(Ordering::Acquire);
-    (armed != u32::MAX && armed == super::current_id().raw())
-        .then(crate::x86::InterruptGuard::enter)
+    (armed != u32::MAX && armed == super::current_id().raw()).then(|| WindowGuard {
+        _irq: crate::x86::InterruptGuard::enter(),
+    })
 }
 
-/// Called by `with_sched` after it has delivered its places, IF off under
-/// [`window_enter`]'s guard. Holds the thread when that section left it
-/// `Blocked`: the wait's queueing is done and its `schedule` not yet.
-pub(super) fn wait_window() {
+/// [`window_enter`]'s guard: on drop it runs [`wait_window`], then turns
+/// IF back on.
+pub(super) struct WindowGuard {
+    _irq: crate::x86::InterruptGuard,
+}
+
+impl Drop for WindowGuard {
+    fn drop(&mut self) {
+        wait_window();
+    }
+}
+
+/// Holds the thread, IF off under [`window_enter`]'s guard, when its
+/// `with_sched` section left it `Blocked`: the wait's queueing is done and
+/// its `schedule` not yet.
+fn wait_window() {
     let me = super::current_id();
     if !matches!(try_state(me), Some(ThreadState::Blocked { .. })) {
         return;
