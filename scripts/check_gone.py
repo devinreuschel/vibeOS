@@ -206,6 +206,8 @@ GONE: list[tuple[str, str]] = [
     ("src/fs/fat_init.rs: static SLOTS", "driver and volume state as"),
     ("src/fs/vibefs_init.rs: static SLOTS", "driver and volume state as"),
     ("src/fs/vibefs_init.rs: static IMAGE", "driver and volume state as"),
+    ("CALIB_BAND_TCG", "`tsc_calib_source` measures PIT channel 2 once"),
+    ("calib_band", "`tsc_calib_source` measures PIT channel 2 once"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

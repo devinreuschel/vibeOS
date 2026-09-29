@@ -196,7 +196,8 @@ class TrimPathsTest(unittest.TestCase):
 
     def test_cargo_ship_trims_paths(self) -> None:
         ship = make_db().variables["CARGO_SHIP"]
-        self.assertTrue(ship.startswith("$(CARGO) "), ship)
+        # Built whole, as CI builds it (check_stack_sizes.py screens this ELF).
+        self.assertTrue(ship.startswith("CARGO_INCREMENTAL=0 $(CARGO) "), ship)
         self.assertIn("-Ztrim-paths", ship.split())
         self.assertIn("--config 'profile.$(CARGO_PROFILE).trim-paths=\"all\"'", ship)
         # The flags go before the subcommand.

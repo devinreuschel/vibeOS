@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import os
 import re
@@ -21,9 +22,11 @@ from tests.harness.harness import (
     KtestSummary,
     QemuConfig,
     RunResult,
+    boot_contract_markers,
     check_ktest_output,
     contains_panic,
     default_iso,
+    effective_accel_name,
     env_config,
     env_flag,
     ktest_devices,
@@ -561,7 +564,88 @@ def ktest_deadline_trip(env: EnvConfig) -> None:
     print(f"[ktest] deadline trip: {TRIP_TEST} failed on its deadline", file=sys.stderr)
 
 
-def main() -> int:
+# The hpet=off boot (ROADMAP §10.2): with no HPET and no TSC-deadline the
+# PIT drives the tick, so the opt-in tests that need it run here alone.
+HPET_OFF_KTEST: tuple[str, ...] = ("pit_tick_rate",)
+NO_TSC_DEADLINE = "-tsc-deadline"
+
+
+def hpet_off_config(env: EnvConfig, disk: str) -> QemuConfig:
+    """The hpet=off boot: `-machine pc,hpet=off`, `-cpu <model>,-tsc-deadline`
+    (the KVM leg's model offers TSC-deadline, which takes the tick without an
+    HPET), and `vibeos.ktest=` set to `HPET_OFF_KTEST`, which overrides
+    `VIBEOS_KTEST` and keeps `VIBEOS_KTEST_REPEAT`."""
+    cfg = env.qemu(extra=ktest_devices(disk, env.smp), hpet=False, boot_order="d")
+    parts = [p.strip() for p in cfg.cpu.split(",")]
+    cpu = cfg.cpu if NO_TSC_DEADLINE in parts else f"{cfg.cpu},{NO_TSC_DEADLINE}"
+    return dataclasses.replace(cfg, cpu=cpu, ktest=",".join(HPET_OFF_KTEST))
+
+
+def lapic_timer_line(cfg: QemuConfig) -> str:
+    """The `lapic_timer` marker a boot without an HPET must print, from the
+    marker registry (`tests/contract/markers.toml`)."""
+    markers = boot_contract_markers(
+        hpet=False, cpu=cfg.cpu, accel=effective_accel_name(cfg), smp=cfg.smp
+    )
+    return next(m.substring for m in markers if m.name == "lapic_timer_ok")
+
+
+def check_hpet_off_boot(lines: list[str], exit_code: int | None, cfg: QemuConfig) -> None:
+    """The hpet=off boot's verdict: the ktest verdict and skip comparison
+    for `cfg`, the `lapic_timer` marker naming `pit`, and an `ok` line for
+    each test in `HPET_OFF_KTEST`. No block or persist lines are required.
+    Raises `HarnessError("hpet=off boot: ...")`."""
+    try:
+        verdict = check_ktest_output(lines, exit_code)
+        skips.check_skips(
+            verdict.ktest_skips,
+            verdict.ktest_runs,
+            skips.launch_config(cfg),
+            skips.load_skips(),
+            must_run=skips.must_run_names(ktest_selection(cfg)),
+        )
+        want = lapic_timer_line(cfg)
+        _require_line(frame.kernel_lines(lines), lambda ln: ln == want, f"missing {want!r}")
+        oks = {o.name for o in ktest_summary(lines).oks}
+        for name in HPET_OFF_KTEST:
+            if name not in oks:
+                raise HarnessError(f"no ok line for {name}")
+    except HarnessError as e:
+        raise HarnessError(f"hpet=off boot: {e}") from e
+
+
+def hpet_off_boot(env: EnvConfig) -> None:
+    """One boot with the PIT driving the tick, on its own disk, with
+    `_ktest_boot`'s allowance; recorded in the results file, then checked
+    by `check_hpet_off_boot`."""
+    disk = make_disk(DISK_BYTES, "vibeos-vblk-")
+    try:
+        cfg = hpet_off_config(env, disk)
+        raw = run_qemu_until_exit(
+            cfg,
+            timeout_s=env.timeout,
+            progress=KtestDeadlines(env.timeout, env.timeout_scale),
+        )
+        results.current().add_boot(qemu_argv(cfg, None), cfg, raw.exit_code)
+        results.current().record_ktest_lines(frame.kernel_lines(raw.lines))
+        check_hpet_off_boot(raw.lines, raw.exit_code, cfg)
+    finally:
+        try:
+            os.unlink(disk)
+        except OSError:
+            pass
+    print("[ktest] hpet=off boot:", file=sys.stderr)
+    print_ktest_summary(ktest_summary(raw.lines), raw.exit_code)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--hpet-off",
+        action="store_true",
+        help="after the default boot, boot HPET_OFF_KTEST with the PIT driving the tick",
+    )
+    args = parser.parse_args([] if argv is None else argv)
     env = env_config(default_iso=default_iso("ktest"), default_timeout=BOOT_ALLOWANCE_S)
     results.Results(env.tier)
     skip_persist = env_flag("VIBEOS_SKIP_PERSIST")
@@ -600,6 +684,13 @@ def main() -> int:
             except OSError:
                 pass
 
+    if args.hpet_off:
+        try:
+            hpet_off_boot(env)
+        except HarnessError as e:
+            print(f"[ktest] FAIL hpet=off boot: {e}", file=sys.stderr)
+            return 1
+
     # A boot the user selected with VIBEOS_KTEST is the whole run.
     if env.ktest:
         return 0
@@ -622,4 +713,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(results.run_main(main))
+    raise SystemExit(results.run_main(lambda: main(sys.argv[1:])))
