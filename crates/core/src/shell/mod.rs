@@ -20,6 +20,7 @@ pub enum Feed {
     Complete,
 }
 
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TokenError {
     UnclosedQuote,
@@ -368,54 +369,51 @@ fn hist_index(head: usize, view: usize) -> usize {
 
 /// Split `line` on whitespace. Quotes (`'` / `"`) keep interior spaces.
 /// No escapes. Unclosed quote is an error. Empty unquoted spans are dropped.
+#[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub fn tokenize<'a>(line: &'a str, out: &mut [&'a str]) -> Result<usize, TokenError> {
-    let b = line.as_bytes();
-    let mut i = 0usize;
+    let mut slots = out.iter_mut();
     let mut n = 0usize;
-    while i < b.len() {
-        while i < b.len() && is_ws(b[i]) {
-            i += 1;
-        }
-        if i >= b.len() {
+    let mut rest = line;
+    loop {
+        rest = rest.trim_start_matches(is_ws);
+        let Some(&first) = rest.as_bytes().first() else {
             break;
-        }
-        if n >= out.len() {
-            return Err(TokenError::TooMany);
-        }
-        let (tok, next) = match b[i] {
-            q @ (b'"' | b'\'') => take_quoted(line, i, q)?,
-            _ => take_word(line, i),
         };
-        out[n] = tok;
-        n += 1;
-        i = next;
+        let slot = slots.next().ok_or(TokenError::TooMany)?;
+        let (tok, next) = match first {
+            q @ (b'"' | b'\'') => take_quoted(rest, char::from(q))?,
+            _ => take_word(rest),
+        };
+        *slot = tok;
+        // `n` counts filled slots of `out`, so it stays below `out.len()`.
+        n = n.checked_add(1).ok_or(TokenError::TooMany)?;
+        rest = next;
     }
     Ok(n)
 }
 
-fn is_ws(c: u8) -> bool {
-    c == b' ' || c == b'\t'
+#[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+fn is_ws(c: char) -> bool {
+    c == ' ' || c == '\t'
 }
 
-fn take_quoted(line: &str, start: usize, q: u8) -> Result<(&str, usize), TokenError> {
-    let b = line.as_bytes();
-    let mut i = start + 1;
-    while i < b.len() {
-        if b[i] == q {
-            return Ok((&line[start + 1..i], i + 1));
-        }
-        i += 1;
-    }
-    Err(TokenError::UnclosedQuote)
+/// `rest` starts with the quote `q`: the text up to the next `q`, and what
+/// follows that `q`.
+#[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+fn take_quoted(rest: &str, q: char) -> Result<(&str, &str), TokenError> {
+    rest.strip_prefix(q)
+        .and_then(|body| body.split_once(q))
+        .ok_or(TokenError::UnclosedQuote)
 }
 
-fn take_word(line: &str, start: usize) -> (&str, usize) {
-    let b = line.as_bytes();
-    let mut i = start;
-    while i < b.len() && !is_ws(b[i]) && b[i] != b'"' && b[i] != b'\'' {
-        i += 1;
-    }
-    (&line[start..i], i)
+/// The word at the start of `rest`, up to whitespace or a quote, and what
+/// follows it.
+#[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+fn take_word(rest: &str) -> (&str, &str) {
+    let end = rest
+        .find(|c| is_ws(c) || c == '"' || c == '\'')
+        .unwrap_or(rest.len());
+    rest.split_at_checked(end).unwrap_or((rest, ""))
 }
 
 pub type CmdFn = fn(args: &[&str]);
@@ -721,5 +719,18 @@ mod tests {
     #[test]
     fn fixed_tables_match_limits() {
         assert_eq!(Registry::new().cmds.len(), crate::limits::MAX_COMMANDS);
+    }
+
+    #[test]
+    fn tokenize_utf8_and_adjacent_quotes() {
+        let mut out = [""; 8];
+        let n = tokenize("é \"ü x\"'' w\"q\"", &mut out).unwrap();
+        assert_eq!(&out[..n], &["é", "ü x", "", "w", "q"]);
+        assert_eq!(tokenize("", &mut out), Ok(0));
+        assert_eq!(tokenize(" \t ", &mut out), Ok(0));
+        assert_eq!(tokenize("a", &mut []), Err(TokenError::TooMany));
+        assert_eq!(tokenize("  ", &mut []), Ok(0));
+        assert_eq!(tokenize("\"", &mut out), Err(TokenError::UnclosedQuote));
+        assert_eq!(tokenize("'a\"", &mut out), Err(TokenError::UnclosedQuote));
     }
 }
