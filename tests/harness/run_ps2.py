@@ -14,11 +14,17 @@ from __future__ import annotations
 import sys
 
 from tests.harness import results
-from tests.harness.harness import HarnessError, env_config, qemu_argv, run_qemu_console_input
+from tests.harness.harness import (
+    HarnessError,
+    default_iso,
+    env_config,
+    qemu_argv,
+    run_qemu_console_input,
+)
 
 
 def main() -> int:
-    env = env_config(default_iso="vibeos.iso", default_timeout=60)
+    env = env_config(default_iso=default_iso(), default_timeout=60)
     res = results.Results(env.tier)
     cfg = env.qemu()
     try:

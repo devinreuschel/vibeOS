@@ -18,6 +18,7 @@ from tests.harness.harness import (
     EnvConfig,
     HarnessError,
     boot_contract_markers,
+    default_iso,
     env_config,
     env_expect_panic,
     env_flag,
@@ -240,7 +241,7 @@ def _mce_main(env: EnvConfig) -> int:
 
 
 def main() -> int:
-    env = env_config(default_iso="vibeos.iso", default_timeout=60)
+    env = env_config(default_iso=default_iso(), default_timeout=60)
     if env_flag("VIBEOS_MCE_TEST"):
         return _mce_main(env)
     res = results.Results(env.tier)
@@ -272,6 +273,9 @@ def main() -> int:
             "intentional panic-test",
             ("vibeOS: logrec:", "serial online"),
             "rust_begin_unwind",
+            # The symbolized frame the ksyms table names right only when the
+            # second link leaves .text in place (ROADMAP §10.2, F084).
+            ("  0x", "core::panicking::panic_fmt"),
             "vibeOS: panic: halted",
         )
     else:

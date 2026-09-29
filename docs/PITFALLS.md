@@ -17,8 +17,10 @@ profile uses `opt-level = 1`, and boot-path functions keep their frames small.
 **A build succeeds but the ISO behaves like the previous build.**
 Two causes, both real. `CARGO_TARGET_DIR` pointed at a shared cache so the ISO copied a stale ELF, and
 separately the Makefile's prerequisite list was hand-maintained and did not include newly added source
-directories. Rule: `make` pins `CARGO_TARGET_DIR` to `./target`, and prerequisites are a `find` over
-`src/`.
+directories. Rule: `make` pins `CARGO_TARGET_DIR` to `./target`, each ISO packages only its variant's
+named ELF under `build/kernels/`, which the variant's recipe deletes before it builds and writes last,
+and prerequisites are a `find` over `src/` and `crates/core/src/`. The host tools and the initrd,
+which build from `vibeos-core` too, list the same sources and `Cargo.lock` (`$(HOSTLIB_DEPS)`).
 
 **Bare `cargo build` has an empty initrd; a relative linker script used to fail off-root.**
 `build.rs` only copies `VIBEOS_INITRD` (64 KiB) and passes an absolute `-T linker.ld`. Unset
@@ -31,15 +33,16 @@ request is `#[used]` with an explicit `link_section`, and the base revision is v
 response is read.
 
 **Panic backtrace addresses have no names, or name the wrong function.**
-Earlier builds put the symbol table in `.text` or patched it in place. Today the second link moves `.text`: with
-pass 1's empty `KSYMS`, `print_frame_addr` encodes the table reference as short immediates, pass 2
-grows it from 0x2a2 to 0x2b2 bytes, and every later function shifts. The panic ISO's table is wrong for
-every function from `panic::finish` on (36 entries), and a `CARGO_PROFILE=release` table is wrong in 499 of 1106 entries.
-Rule: first link with an empty `.rodata` table, `nm --demangle` the ELF, second link with the filled
-table (Makefile `KERNEL_VARIANT`). `.text` must not move, so the reference to the table compiles to
-the same size empty and filled. Planned (ROADMAP §10.2, F084): the table moves to its own `.ksyms`
-section reached only through linker-defined bounds, and the build regenerates it from the final ELF
-and fails on any difference.
+Earlier builds put the symbol table in `.text` or patched it in place, and later ones moved `.text` in
+the second link: with pass 1's empty `KSYMS`, `print_frame_addr` encoded the reference to the
+constant-length table as short immediates, pass 2 grew it from 0x2a2 to 0x2b2 bytes, and every later
+function shifted. The panic ISO's table was wrong for every function from `panic::finish` on (36
+entries), and a `CARGO_PROFILE=release` table in 499 of 1106 entries. Rule: first link with an empty
+table, `nm --demangle` the ELF, second link with the filled table (Makefile `KERNEL_VARIANT`). The
+table is its own `.ksyms` section, reached only through the linker-defined `__ksyms_start` and
+`__ksyms_end`, so the code that reads it is the same size empty and filled and `.text` does not move;
+the recipe regenerates the table from the final ELF with `gen_ksyms.py --check` and fails on any
+difference (ROADMAP §10.2, F084).
 
 **QEMU framebuffer reprints the prompt on every key; serial looks fine.**
 The FB write path skipped `\r` before the text grid saw it, so the line editor's in-place paint
@@ -393,8 +396,10 @@ match exception mnemonics (`#PF`, `#GP`, `#DF`, `#UD`) and `panicked at`, on lin
 (§2.6), since user programs print both.
 
 **A test-only build gets shipped in the production ISO.**
-The `kernel_tests` feature build shared a Cargo target directory with the normal build. Rule: separate
-target directory and separate ISO for the test build.
+The `kernel_tests` feature build shared a Cargo target directory with the normal build, and the ISO
+recipe packaged whatever ELF the last build left there. Rule: every variant's ELF is copied to its own
+named file, `build/kernels/vibeos-<variant>.elf`, and each ISO recipe reads only its own; the test
+build has its own ISO.
 
 **A boot regression passes CI.**
 The e2e harness checked that markers were present but not that they were ordered, and SMP bring-up ran
