@@ -169,7 +169,7 @@ impl FatVol {
             d.flush()?;
         }
         let cs = lfn_checksum(&short);
-        let (date, time) = fat_datetime(self.now);
+        let (date, time) = fat_datetime(self.now)?;
         let mut slot = 0usize;
         while slot < n_lfn {
             let ord = (n_lfn - slot) as u8;

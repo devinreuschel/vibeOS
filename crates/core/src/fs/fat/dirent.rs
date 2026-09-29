@@ -18,7 +18,7 @@ impl FatVol {
                 Ok(false) => return Ok(None),
                 Ok(true) => {}
             }
-            let next = off + ENT as u32;
+            let next = off.checked_add(ENT as u32).ok_or(FatError::Corrupt)?;
             if ent[0] == ENT_FREE {
                 return Ok(None);
             }
@@ -62,7 +62,11 @@ impl FatVol {
                 None => false,
             };
             let use_lfn = short_ok && lfn_len > 0;
-            let name = if use_lfn { &lfn[..lfn_len] } else { &[] };
+            let name = if use_lfn {
+                lfn.get(..lfn_len).ok_or(FatError::Corrupt)?
+            } else {
+                &[]
+            };
             let node = self.node_from_short(dir, off, &ent, name)?;
             return Ok(Some((next, node)));
         }
@@ -76,21 +80,19 @@ impl FatVol {
         ent: &mut [u8; ENT],
     ) -> Result<bool, FatError> {
         let cb = self.info.clus_bytes() as u32;
-        if cb == 0 {
-            return Err(FatError::Corrupt);
-        }
-        let idx = off / cb;
-        let pin = (off % cb) as usize;
+        let idx = off.checked_div(cb).ok_or(FatError::Corrupt)?;
+        let pin = off.checked_rem(cb).ok_or(FatError::Corrupt)? as usize;
         let clu = match self.nth_clu(d, dir, idx)? {
             None => return Ok(false),
             Some(c) => c,
         };
         let mut clbuf = [0u8; MAX_CLUS_BYTES];
         let n = self.read_cluster(d, clu, &mut clbuf)?;
-        if pin + ENT > n {
+        let end = pin.checked_add(ENT).ok_or(FatError::Corrupt)?;
+        if end > n {
             return Err(FatError::Corrupt);
         }
-        ent.copy_from_slice(&clbuf[pin..pin + ENT]);
+        ent.copy_from_slice(clbuf.get(pin..end).ok_or(FatError::Corrupt)?);
         Ok(true)
     }
 
@@ -102,16 +104,17 @@ impl FatVol {
         ent: &[u8; ENT],
     ) -> Result<(), FatError> {
         let cb = self.info.clus_bytes() as u32;
-        let idx = off / cb;
-        let pin = (off % cb) as usize;
+        let idx = off.checked_div(cb).ok_or(FatError::Corrupt)?;
+        let pin = off.checked_rem(cb).ok_or(FatError::Corrupt)? as usize;
         let clu = self.nth_clu(d, dir, idx)?.ok_or(FatError::Corrupt)?;
         let mut clbuf = [0u8; MAX_CLUS_BYTES];
         let n = self.read_cluster(d, clu, &mut clbuf)?;
-        if pin + ENT > n {
+        let end = pin.checked_add(ENT).ok_or(FatError::Corrupt)?;
+        if end > n {
             return Err(FatError::Corrupt);
         }
-        clbuf[pin..pin + ENT].copy_from_slice(ent);
-        self.write_cluster(d, clu, &clbuf[..n])
+        put_at(&mut clbuf, pin, ent)?;
+        self.write_cluster(d, clu, clbuf.get(..n).ok_or(FatError::Corrupt)?)
     }
 
     pub(super) fn dir_reserve<D: Disk>(
@@ -120,7 +123,7 @@ impl FatVol {
         dir: u32,
         slots: usize,
     ) -> Result<(u32, u32), FatError> {
-        let need = slots * ENT;
+        let need = slots.checked_mul(ENT).ok_or(FatError::Inval)?;
         let cb = self.info.clus_bytes();
         let mut off = 0u32;
         let mut run = 0usize;
@@ -135,14 +138,14 @@ impl FatVol {
                         if run == 0 {
                             run_off = off;
                         }
-                        run += 1;
+                        run = run.checked_add(1).ok_or(FatError::Corrupt)?;
                         if run >= slots {
                             return Ok((dir, run_off));
                         }
                     } else {
                         run = 0;
                     }
-                    off += ENT as u32;
+                    off = off.checked_add(ENT as u32).ok_or(FatError::Corrupt)?;
                     if ent[0] == ENT_FREE {
                         break;
                     }
@@ -161,8 +164,8 @@ impl FatVol {
         self.commit_fat(d)?;
         d.flush()?;
         let start = if run > 0 { run_off } else { off };
-        let have = run * ENT;
-        if have + cb < need {
+        let have = run.checked_mul(ENT).ok_or(FatError::Corrupt)?;
+        if have.checked_add(cb).ok_or(FatError::Corrupt)? < need {
             return Err(FatError::NoSpace);
         }
         Ok((dir, start))
@@ -183,10 +186,9 @@ impl FatVol {
             }
             ent[0] = ENT_DEL;
             self.write_dir_raw(d, dir, off, &ent)?;
-            if off < ENT as u32 {
+            let Some(prev) = off.checked_sub(ENT as u32) else {
                 break;
-            }
-            let prev = off - ENT as u32;
+            };
             let mut p = [0u8; ENT];
             if !self.read_dir_raw(d, dir, prev, &mut p)? {
                 break;
@@ -233,14 +235,12 @@ impl FatVol {
             *out = stem;
             return Ok(true);
         }
-        let mut n = 1u32;
-        while n < 1_000_000 {
+        for n in 1..1_000_000u32 {
             *out = stem;
             apply_tilde(out, n);
             if !self.short_taken(d, dir, out)? {
                 return Ok(true);
             }
-            n += 1;
         }
         Err(FatError::NoSpace)
     }
@@ -264,7 +264,7 @@ impl FatVol {
                     if ent[0] != ENT_DEL && ent[11] != ATTR_LFN && ent[..11] == short[..] {
                         return Ok(true);
                     }
-                    off += ENT as u32;
+                    off = off.checked_add(ENT as u32).ok_or(FatError::Corrupt)?;
                 }
             }
         }
@@ -285,7 +285,7 @@ impl FatVol {
             parent
         };
         fill_dot(&mut buf[ENT..ENT * 2], b"..         ", p, self.now)?;
-        self.write_cluster(d, clu, &buf[..n])
+        self.write_cluster(d, clu, buf.get(..n).ok_or(FatError::Corrupt)?)
     }
 
     pub(super) fn update_short<D: Disk>(
@@ -300,7 +300,7 @@ impl FatVol {
         if !self.read_dir_raw(d, dir, off, &mut ent)? {
             return Err(FatError::Corrupt);
         }
-        let (date, time) = fat_datetime(self.now);
+        let (date, time) = fat_datetime(self.now)?;
         put_le16(&mut ent, 20, (first >> 16) as u16)?;
         put_le16(&mut ent, 22, time)?;
         put_le16(&mut ent, 24, date)?;
@@ -311,74 +311,46 @@ impl FatVol {
 }
 
 pub fn lfn_checksum(name: &[u8; 11]) -> u8 {
-    let mut sum = 0u8;
-    let mut i = 0usize;
-    while i < 11 {
-        sum = sum.rotate_right(1).wrapping_add(name[i]);
-        i += 1;
-    }
-    sum
+    name.iter()
+        .fold(0u8, |sum, &c| sum.rotate_right(1).wrapping_add(c))
 }
 
 pub(super) fn eq_ci(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut i = 0usize;
-    while i < a.len() {
-        if to_upper(a[i]) != to_upper(b[i]) {
-            return false;
-        }
-        i += 1;
-    }
-    true
+    a.eq_ignore_ascii_case(b)
 }
 
 fn to_upper(c: u8) -> u8 {
-    if c.is_ascii_lowercase() {
-        c - b'a' + b'A'
-    } else {
-        c
-    }
+    c.to_ascii_uppercase()
 }
 
 pub(super) fn utf16_len(name: &[u8]) -> usize {
     name.len()
 }
 
+/// The byte offset of each of an LFN entry's 13 UTF-16 units, in name
+/// order: five at 1, six at 14, two at 28.
+const LFN_OFFS: [usize; LFN_CHARS] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
+
 fn take_lfn(ent: &[u8; ENT], out: &mut [u8; MAX_NAME], _len: usize) -> Result<usize, FatError> {
     let ord = ent[0] & !LFN_LAST;
-    if ord == 0 {
+    let Some(prev) = (ord as usize).checked_sub(1) else {
         return Ok(0);
-    }
-    let base = ((ord as usize) - 1) * LFN_CHARS;
-    let slots = [(1usize, 5usize), (14usize, 6usize), (28usize, 2usize)];
-    let mut i = 0usize;
-    let mut n = 0usize;
-    while i < 3 {
-        let (off, cnt) = slots[i];
-        let mut k = 0usize;
-        while k < cnt {
-            let p = off + k * 2;
-            let ch = le16(ent, p)?;
-            if ch == 0 || ch == 0xFFFF {
-                return Ok(if base + n > MAX_NAME {
-                    MAX_NAME
-                } else {
-                    base + n
-                });
-            }
-            let at = base + n;
-            if at < MAX_NAME {
-                out[at] = if ch < 0x80 { ch as u8 } else { b'?' };
-            }
-            n += 1;
-            k += 1;
+    };
+    let base = prev.checked_mul(LFN_CHARS).ok_or(FatError::Corrupt)?;
+    for (n, &o) in LFN_OFFS.iter().enumerate() {
+        let ch = le16(ent, o)?;
+        let at = base.checked_add(n).ok_or(FatError::Corrupt)?;
+        if ch == 0 || ch == 0xFFFF {
+            return Ok(at.min(MAX_NAME));
         }
-        i += 1;
+        if let Some(c) = out.get_mut(at) {
+            *c = if ch < 0x80 { ch as u8 } else { b'?' };
+        }
     }
-    let total = base + n;
-    Ok(if total > MAX_NAME { MAX_NAME } else { total })
+    Ok(base
+        .checked_add(LFN_CHARS)
+        .ok_or(FatError::Corrupt)?
+        .min(MAX_NAME))
 }
 
 pub(super) fn fill_lfn(
@@ -392,97 +364,71 @@ pub(super) fn fill_lfn(
     ent[0] = if last { ord | LFN_LAST } else { ord };
     ent[11] = ATTR_LFN;
     ent[13] = cs;
-    let start = (ord as usize - 1) * LFN_CHARS;
+    let start = (ord as usize)
+        .checked_sub(1)
+        .and_then(|p| p.checked_mul(LFN_CHARS))
+        .ok_or(FatError::Inval)?;
     let mut chars = [0xFFFFu16; LFN_CHARS];
-    let mut i = 0usize;
     let mut term = false;
-    while i < LFN_CHARS {
-        let p = start + i;
+    for (i, c) in chars.iter_mut().enumerate() {
+        let p = start.checked_add(i).ok_or(FatError::Inval)?;
         if term {
-            chars[i] = 0xFFFF;
-        } else if p < name.len() {
-            chars[i] = name[p] as u16;
+            *c = 0xFFFF;
+        } else if let Some(&b) = name.get(p) {
+            *c = b as u16;
         } else {
-            chars[i] = 0;
+            *c = 0;
             term = true;
         }
-        i += 1;
     }
-    let mut k = 0usize;
-    while k < 5 {
-        put_le16(ent, 1 + k * 2, chars[k])?;
-        k += 1;
+    for (&o, &c) in LFN_OFFS.iter().zip(chars.iter()) {
+        put_le16(ent, o, c)?;
     }
-    k = 0;
-    while k < 6 {
-        put_le16(ent, 14 + k * 2, chars[5 + k])?;
-        k += 1;
-    }
-    put_le16(ent, 28, chars[11])?;
-    put_le16(ent, 30, chars[12])?;
     Ok(())
 }
 
 pub(super) fn decode_short(ent: &[u8; ENT]) -> ([u8; MAX_NAME], u8) {
-    let mut out = [0u8; MAX_NAME];
-    let mut n = 0usize;
-    let mut i = 0usize;
-    let mut name0 = ent[0];
-    if name0 == 0x05 {
-        name0 = 0xE5;
-    }
     let mut tmp = [0u8; 11];
     tmp.copy_from_slice(&ent[..11]);
-    tmp[0] = name0;
-    while i < 8 && tmp[i] != b' ' {
-        out[n] = tmp[i];
-        n += 1;
-        i += 1;
+    if tmp[0] == 0x05 {
+        tmp[0] = 0xE5;
     }
-    if tmp[8] != b' ' {
-        out[n] = b'.';
-        n += 1;
-        i = 8;
-        while i < 11 && tmp[i] != b' ' {
-            out[n] = tmp[i];
-            n += 1;
-            i += 1;
-        }
-    }
+    let stem = tmp[..8].iter().copied().take_while(|&c| c != b' ');
+    let dot = (tmp[8] != b' ').then_some(b'.');
+    let ext = tmp[8..].iter().copied().take_while(|&c| c != b' ');
+    let mut out = [0u8; MAX_NAME];
+    let n = out
+        .iter_mut()
+        .zip(stem.chain(dot).chain(ext))
+        .map(|(o, c)| *o = c)
+        .count();
     (out, n as u8)
 }
 
 fn as_pure_83(name: &[u8]) -> Option<[u8; 11]> {
-    let mut out = [b' '; 11];
-    let mut dot = None;
-    let mut i = 0usize;
-    while i < name.len() {
-        if name[i] == b'.' {
-            if dot.is_some() {
-                return None;
-            }
-            dot = Some(i);
-        } else if !is_83_char(name[i]) || name[i].is_ascii_lowercase() {
-            return None;
-        }
-        i += 1;
+    if name
+        .iter()
+        .any(|&c| c != b'.' && (!is_83_char(c) || c.is_ascii_lowercase()))
+    {
+        return None;
     }
-    match dot {
+    let mut out = [b' '; 11];
+    match name.iter().position(|&c| c == b'.') {
         None => {
             if name.is_empty() || name.len() > 8 {
                 return None;
             }
-            out[..name.len()].copy_from_slice(name);
+            out.get_mut(..name.len())?.copy_from_slice(name);
         }
         Some(0) => return None,
         Some(d) => {
-            let stem = &name[..d];
-            let ext = &name[d + 1..];
-            if stem.is_empty() || stem.len() > 8 || ext.is_empty() || ext.len() > 3 {
+            let stem = name.get(..d)?;
+            let ext = name.get(d.checked_add(1)?..)?;
+            if stem.len() > 8 || ext.is_empty() || ext.len() > 3 || ext.contains(&b'.') {
                 return None;
             }
-            out[..stem.len()].copy_from_slice(stem);
-            out[8..8 + ext.len()].copy_from_slice(ext);
+            out.get_mut(..stem.len())?.copy_from_slice(stem);
+            out.get_mut(8..)?.get_mut(..ext.len())?.copy_from_slice(ext);
         }
     }
     Some(out)
@@ -494,74 +440,72 @@ fn is_83_char(c: u8) -> bool {
         | b'~')
 }
 
+/// An 8.3 stem and extension for `name`: leading dots skipped, the stem up
+/// to the next dot and the extension after it with its dots dropped, each
+/// upper-cased, a character 8.3 cannot hold made `_`, and cut to 8 and 3.
 fn make_lossy_83(name: &[u8], out: &mut [u8; 11]) {
     out.fill(b' ');
-    let mut stem = [0u8; 8];
-    let mut sn = 0usize;
-    let mut ext = [0u8; 3];
-    let mut en = 0usize;
-    let mut in_ext = false;
-    let mut i = 0usize;
-    while i < name.len() {
-        let mut c = to_upper(name[i]);
-        if c == b'.' {
-            if !in_ext && sn > 0 {
-                in_ext = true;
-            }
-            i += 1;
-            continue;
-        }
-        if !is_83_char(c) {
-            c = b'_';
-        }
-        if in_ext {
-            if en < 3 {
-                ext[en] = c;
-                en += 1;
-            }
-        } else if sn < 8 {
-            stem[sn] = c;
-            sn += 1;
-        }
-        i += 1;
+    let rest = name
+        .iter()
+        .position(|&c| c != b'.')
+        .and_then(|i| name.get(i..))
+        .unwrap_or(&[]);
+    let (stem, ext) = match rest.iter().position(|&c| c == b'.') {
+        Some(d) => rest.split_at(d),
+        None => (rest, &[][..]),
+    };
+    let lossy = |&b: &u8| {
+        let c = to_upper(b);
+        if is_83_char(c) { c } else { b'_' }
+    };
+    let (out_stem, out_ext) = out.split_at_mut(8);
+    let sn = out_stem
+        .iter_mut()
+        .zip(stem.iter().map(lossy))
+        .map(|(o, c)| *o = c)
+        .count();
+    if sn == 0
+        && let Some(c) = out_stem.first_mut()
+    {
+        *c = b'_';
     }
-    if sn == 0 {
-        stem[0] = b'_';
-        sn = 1;
-    }
-    out[..sn].copy_from_slice(&stem[..sn]);
-    if en > 0 {
-        out[8..8 + en].copy_from_slice(&ext[..en]);
-    }
+    out_ext
+        .iter_mut()
+        .zip(ext.iter().filter(|&&c| c != b'.').map(lossy))
+        .for_each(|(o, c)| *o = c);
 }
 
+/// Put `~` and the last eight decimal digits of `n` (1 for 0) at the end
+/// of the stem, leaving at least one stem character.
 fn apply_tilde(out: &mut [u8; 11], n: u32) {
     let mut digits = [0u8; 8];
-    let mut dn = 0usize;
-    let mut x = n;
-    if x == 0 {
-        x = 1;
-    }
-    while x > 0 && dn < 8 {
-        digits[dn] = b'0' + (x % 10) as u8;
-        dn += 1;
-        x /= 10;
-    }
-    let need = dn + 1;
-    let stem = 8usize.saturating_sub(need).max(1);
-    out[stem] = b'~';
-    let mut i = 0usize;
-    while i < dn {
-        out[stem + 1 + i] = digits[dn - 1 - i];
-        i += 1;
+    let lsd_first =
+        core::iter::successors(Some(n.max(1)), |&x| (x >= 10).then_some(x / 10)).map(|x| {
+            b"0123456789"
+                .get((x % 10) as usize)
+                .copied()
+                .unwrap_or(b'0')
+        });
+    let dn = digits
+        .iter_mut()
+        .zip(lsd_first)
+        .map(|(o, c)| *o = c)
+        .count();
+    let stem = 8usize.saturating_sub(dn.saturating_add(1)).max(1);
+    if let Some((tilde, tail)) = out.get_mut(stem..).and_then(|t| t.split_first_mut()) {
+        *tilde = b'~';
+        let msd_first = digits.get(..dn).unwrap_or(&[]).iter().rev();
+        for (o, &c) in tail.iter_mut().zip(msd_first) {
+            *o = c;
+        }
     }
 }
 
 fn fill_dot(ent: &mut [u8], name11: &[u8], clu: u32, now: u32) -> Result<(), FatError> {
     ent.fill(0);
-    ent[..11].copy_from_slice(name11);
-    ent[11] = ATTR_DIR;
-    let (date, time) = fat_datetime(now);
+    put_at(ent, 0, name11)?;
+    put_at(ent, 11, &[ATTR_DIR])?;
+    let (date, time) = fat_datetime(now)?;
     put_le16(ent, 14, time)?;
     put_le16(ent, 16, date)?;
     put_le16(ent, 18, date)?;
@@ -572,23 +516,23 @@ fn fill_dot(ent: &mut [u8], name11: &[u8], clu: u32, now: u32) -> Result<(), Fat
     Ok(())
 }
 
-pub(super) fn fat_datetime(secs: u32) -> (u16, u16) {
+/// FAT `(date, time)` of `secs` since 1980, the year clamped to 127.
+pub(super) fn fat_datetime(secs: u32) -> Result<(u16, u16), FatError> {
     let s = (secs % 60) / 2;
     let mi = (secs / 60) % 60;
     let h = (secs / 3600) % 24;
     let mut days = secs / 86400;
     let mut y = 0u16;
-    loop {
-        let ly = if y.is_multiple_of(4) { 366 } else { 365 };
-        if days < ly {
-            break;
-        }
-        days -= ly;
-        y += 1;
-        if y > 127 {
-            y = 127;
-            days = 0;
-            break;
+    for yr in 0..=127u16 {
+        y = yr;
+        let ly = if yr.is_multiple_of(4) { 366 } else { 365 };
+        match days.checked_sub(ly) {
+            None => break,
+            Some(_) if yr == 127 => {
+                days = 0;
+                break;
+            }
+            Some(rest) => days = rest,
         }
     }
     let leap = y.is_multiple_of(4);
@@ -606,16 +550,30 @@ pub(super) fn fat_datetime(secs: u32) -> (u16, u16) {
         30,
         31,
     ];
-    let mut m = 0u16;
-    while m < 12 && days >= md[m as usize] {
-        days -= md[m as usize];
-        m += 1;
+    let mut m = 12u16;
+    for (i, &len) in (0u16..).zip(md.iter()) {
+        match days.checked_sub(len) {
+            Some(rest) => days = rest,
+            None => {
+                m = i;
+                break;
+            }
+        }
     }
-    let date = (y << 9) | ((m + 1) << 5) | ((days as u16) + 1);
+    let mon = m.checked_add(1).ok_or(FatError::Inval)?;
+    let day = u16::try_from(days)
+        .ok()
+        .and_then(|d| d.checked_add(1))
+        .ok_or(FatError::Inval)?;
+    let date = (y << 9) | (mon << 5) | day;
     let time = ((h as u16) << 11) | ((mi as u16) << 5) | (s as u16);
-    (date, time)
+    Ok((date, time))
 }
 
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "every field is masked to at most 7 bits, so the sum stays below 2^33"
+)]
 pub(super) fn fat_to_unix(date: u16, time: u16) -> u64 {
     let y = ((date >> 9) & 0x7F) as u64;
     let m = ((date >> 5) & 0xF) as u64;
