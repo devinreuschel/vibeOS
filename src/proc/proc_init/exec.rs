@@ -55,16 +55,12 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> i64 {
     };
     let Some(slot) = space_slot() else {
         close_all_fds(&mut { fds });
-        with_table(|t| {
-            t.procs[pid as usize] = Proc::empty();
-        });
+        with_sched_table(|s, t| release_pid(s, t, pid));
         return syscall::neg(ENOMEM);
     };
     let Some(cloned) = addr_space_init::clone_full(src) else {
         close_all_fds(&mut { fds });
-        with_table(|t| {
-            t.procs[pid as usize] = Proc::empty();
-        });
+        with_sched_table(|s, t| release_pid(s, t, pid));
         return syscall::neg(ENOMEM);
     };
     let cr3 = cloned.root().as_u64();
@@ -78,21 +74,20 @@ pub(super) fn sys_fork(frame: Option<&mut UserFrame>) -> i64 {
             // Nothing names the clone's root yet: no thread was made.
             addr_space_init::teardown(boxed.into_inner());
             close_all_fds(&mut { fds });
-            with_table(|t| {
-                t.procs[pid as usize] = Proc::empty();
-            });
+            with_sched_table(|s, t| release_pid(s, t, pid));
             return syscall::neg(spawn_errno(e));
         }
     };
     with_table(|t| {
         init_slot(t, pid, ppid, "user");
-        let p = &mut t.procs[pid as usize];
-        p.fds = fds;
-        p.cwd = cwd;
-        p.creds = creds;
-        p.space = Some(boxed);
-        p.fs_base = fs;
-        p.tid = h.id();
+        if let Some(p) = t.get_mut(pid) {
+            p.fds = fds;
+            p.cwd = cwd;
+            p.creds = creds;
+            p.space = Some(boxed);
+            p.fs_base = fs;
+            p.tid = h.id();
+        }
     });
     thread_init::make_ready(h.id());
     // Child may run (and exit) before we return. POSIX allows either order.

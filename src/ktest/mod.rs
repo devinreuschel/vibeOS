@@ -527,6 +527,10 @@ pub(crate) const TESTS: &[Test] = &[
     test("user_tf_repin", proc::ktest::test_user_tf_repin).deadline(60_000),
     test("user_fork_wait_stall", proc::ktest::user_fork_wait_stall),
     test(
+        "pid_not_reused_after_reap",
+        proc::ktest::pid_not_reused_after_reap,
+    ),
+    test(
         "shootdown_ack_while_busy",
         irq::ktest::shootdown_ack_while_busy,
     ),

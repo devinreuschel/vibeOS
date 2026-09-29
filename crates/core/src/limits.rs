@@ -20,8 +20,8 @@
 
 /// Thread table slots (`thread_init`'s scheduler, `sched` run and timeout queues).
 pub const MAX_THREADS: usize = 64;
-/// Process table slots (`proc_init`). Pids 2 to 17 leave room for 16 live
-/// processes besides init, as ROADMAP §10.10's `exit_burst` runs.
+/// Process table slots (`proc_init`), init's included: room for the 16 live
+/// processes besides init that ROADMAP §10.10's `exit_burst` runs.
 pub const MAX_PROCS: usize = 18;
 /// File descriptors per process (`proc::FdTable`, `fs::FdTable`).
 pub const MAX_FDS: usize = 16;

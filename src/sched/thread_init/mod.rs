@@ -19,6 +19,7 @@ use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::limits::PID_MAX;
 use vibeos::lock::RANK_SCHED;
 use vibeos::per_cpu::PerCpu;
+use vibeos::proc::INIT_PID;
 use vibeos::proc::pid::{IdIndex, PidAlloc};
 use vibeos::sched::{SWEEP_TICKS, TimeoutQueue, effective_deadline, enqueue_runnable, take_next};
 use vibeos::syscall::UserFrame;
@@ -203,6 +204,20 @@ impl Sched {
         self.pids.alloc()
     }
 
+    /// Add a use to `id`: a user thread's tid is its process's pid, which
+    /// the process holds already. False when `id` is out of range or its
+    /// use count is full.
+    #[must_use]
+    pub(crate) fn hold_id(&mut self, id: u32) -> bool {
+        self.pids.hold(id)
+    }
+
+    /// Whether `id` has a use: `proc_init::alloc_pid` asks it for init's
+    /// pid, which `init_bootstrap` holds until init takes it over.
+    pub(crate) fn id_in_use(&self, id: u32) -> bool {
+        self.pids.in_use(id)
+    }
+
     /// Drop a use of `id`; at zero the id is free for a later `alloc_id`.
     #[allow(
         clippy::panic,
@@ -210,6 +225,16 @@ impl Sched {
     )]
     pub(crate) fn free_id(&mut self, id: u32) {
         assert!(self.pids.free(id), "pid: {id} freed with no use");
+    }
+
+    /// A new thread's tid: a user thread's (`pid != 0`) is its process's
+    /// pid, with a use of its own; a kernel thread's is a new id.
+    fn new_tid(&mut self, pid: u32) -> Option<u32> {
+        if pid == 0 {
+            self.alloc_id()
+        } else {
+            self.hold_id(pid).then_some(pid)
+        }
     }
 
     /// Point `id` at `slot` in the index and publish it for the inbox.
@@ -814,6 +839,9 @@ pub unsafe fn init_bootstrap() {
         s.slots[0] = Some(tcb);
         // Tid 0 is the bootstrap's, which `PidAlloc` never hands out.
         s.bind(ThreadId::BOOTSTRAP, 0);
+        // Init stays pid 1: held before any other thread takes an id, and
+        // taken over by init's process (`proc_init::alloc_pid`).
+        assert!(s.hold_id(INIT_PID), "pid: init's hold");
     }
     crate::ipi_init::set_slot_tid_hook(tid_of_slot);
     per_cpu_init::with_current(|cpu| {
@@ -1120,7 +1148,7 @@ fn spawn_inner(
         })?;
         let old = s.slots[slot].as_deref()?.id;
         let ks = stack.take()?;
-        let Some(raw) = s.alloc_id() else {
+        let Some(raw) = s.new_tid(pid) else {
             stack = Some(ks);
             return Some(Err(SpawnError::NoSlot));
         };
@@ -1194,7 +1222,7 @@ fn spawn_inner(
             // Dropped after SCHED is released: no heap free under it.
             return Err(tcb);
         };
-        let Some(raw) = s.alloc_id() else {
+        let Some(raw) = s.new_tid(pid) else {
             return Err(tcb);
         };
         let id = ThreadId(raw);
