@@ -17,4 +17,7 @@ rustflags = [
     "-C", "link-arg=-no-pie",
     "-C", "link-arg=-zmax-page-size=0x1000",
     "-C", "link-arg=-znorelro",
+    # Per-function frame sizes in `.stack_sizes`, which linker.ld keeps
+    # non-alloc and scripts/check_stack_sizes.py screens (ROADMAP §10.2).
+    "-Z", "emit-stack-sizes",
 ]

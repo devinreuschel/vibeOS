@@ -282,6 +282,8 @@ check:
 	$(MAKE) check-python
 	$(CARGO) build --bin vibeos --profile hookcheck --config 'profile.hookcheck.inherits="dev"'
 	python3 scripts/gen_syscalls.py --check
+	# The default kernel ELF, whose .stack_sizes check_stack_sizes.py reads.
+	$(MAKE) kernel
 	@set +e; \
 	for s in scripts/check_*.py; do \
 	    if [ -f "$$s" ]; then \
