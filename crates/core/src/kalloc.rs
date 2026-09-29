@@ -14,6 +14,7 @@
 
 extern crate alloc;
 
+use crate::atomic::{AtomicUsize, Ordering, fence};
 use alloc::boxed::Box;
 use alloc::collections::TryReserveError;
 use alloc::string::String;
@@ -26,7 +27,6 @@ use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
-use crate::atomic::{AtomicUsize, Ordering, fence};
 
 /// A heap allocation failed. Callers map it to `ENOMEM` (or the errno
 /// Linux returns there) at the syscall boundary (DESIGN §4.4).
