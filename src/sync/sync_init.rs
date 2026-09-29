@@ -138,6 +138,12 @@ impl<T> SpinMutex<T> {
             None
         }
     }
+
+    /// Whether any CPU, this one included, holds the lock right now. A
+    /// snapshot, for tests: another CPU may take or drop it at once.
+    pub fn is_locked(&self) -> bool {
+        self.lock.is_locked()
+    }
 }
 
 impl<T> Drop for SpinMutexGuard<'_, T> {
