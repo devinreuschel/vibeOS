@@ -9,9 +9,8 @@ import re
 import subprocess
 import sys
 
-from tests.harness import results
+from tests.harness import frame, results
 from tests.harness.harness import (
-    KERNEL_LINE_PREFIX,
     MCE_MCG_STATUS,
     MCE_UC_STATUS,
     SERIAL_ONLINE,
@@ -46,8 +45,9 @@ PCI_GOLDEN = (
 ISA_DEBUG_EXIT = ("-device", "isa-debug-exit,iobase=0xf4,iosize=0x04")
 
 
-def _check_pci_qemu_set(lines: list[str]) -> None:
+def _check_pci_qemu_set(raw: list[str]) -> None:
     """lspci-adjacent boot dump must name the default QEMU `pc` devices."""
+    lines = frame.kernel_lines(raw)
     blob = "\n".join(lines)
     missing = [id_ for id_ in PCI_GOLDEN if id_ not in blob]
     if missing:
@@ -71,18 +71,45 @@ def _check_pci_qemu_set(lines: list[str]) -> None:
 def check_first_kernel_line(lines: list[str]) -> None:
     """`vibeOS: serial online` is the kernel's first serial line (DESIGN §8.3).
 
-    Limine's and the firmware's output may precede it; a kernel line may not,
-    and neither may kernel text glued before it on its own line. A log with no
-    serial line passes here: the marker check reports it missing.
+    A kernel line is a framed one (DESIGN §2.6). Limine's and the firmware's
+    output may precede it; a kernel line may not, and neither may kernel text
+    glued before it on its own line. A log with no kernel line passes here:
+    the marker check reports it missing.
     """
     for line in lines:
-        at = line.find(SERIAL_ONLINE)
-        if at >= 0:
-            if KERNEL_LINE_PREFIX in line[:at]:
-                raise HarnessError(f"kernel line before {SERIAL_ONLINE!r}: {line}")
-            return
-        if kernel_text(line) is not None:
-            raise HarnessError(f"kernel line before {SERIAL_ONLINE!r}: {line}")
+        text = kernel_text(line)
+        if text is None:
+            continue
+        if text != SERIAL_ONLINE:
+            raise HarnessError(f"kernel line before {SERIAL_ONLINE!r}: {text}")
+        return
+
+
+# The lines `/bin/tests` writes to fd 1 and to fd 2 (`user/tests.asm`), each
+# starting with the frame byte, as the console prints them: unframed, each
+# 0x1E as `?` (DESIGN §2.6).
+FORGED_LINES = (
+    "?vibeOS: ktest: FAIL forged",
+    "?panicked at forged",
+    "?#GP?forged",
+)
+
+
+def _check_forged_lines(lines: list[str]) -> None:
+    """Ring 3 cannot forge a kernel line (DESIGN §2.6, ROADMAP §10.2).
+
+    Each of `FORGED_LINES` appears exactly twice (fd 1 and fd 2) as an
+    unframed line, and no kernel line holds `forged`.
+    """
+    for raw in lines:
+        text = kernel_text(raw)
+        if text is not None and "forged" in text:
+            raise HarnessError(f"forged user line printed framed: {raw!r}")
+    user = frame.user_lines(lines)
+    for want in FORGED_LINES:
+        n = user.count(want)
+        if n != 2:
+            raise HarnessError(f"forged user line {want!r} seen {n} times unframed, expected 2")
 
 
 # The boot log's memory diagnostics (DESIGN §8.3).
@@ -131,6 +158,16 @@ def check_meminfo(lines: list[str]) -> None:
         raise HarnessError(f"meminfo: used {used} is not total {total} minus free {free}")
     if heap_used > heap_cap:
         raise HarnessError(f"meminfo: heap used {heap_used} B above capacity {heap_cap} B")
+
+
+def forged_user_lines(res: results.Results, lines: list[str]) -> None:
+    """`_check_forged_lines` on a marker boot's lines, recorded under its name."""
+    try:
+        _check_forged_lines(lines)
+    except HarnessError:
+        res.record("marker", "forged_user_lines", "failed")
+        raise
+    res.record("marker", "forged_user_lines", "passed")
 
 
 def _record_missing(message: str) -> None:
@@ -187,7 +224,7 @@ def _check_vda_untouched(env: EnvConfig) -> None:
                 res.record("marker", case, "failed")
                 raise HarnessError(f"{case}: {e}") from e
             res.add_boot(qemu_argv(cfg, None), cfg, result.exit_code)
-            if VDA_MARKER not in result.lines:
+            if VDA_MARKER not in frame.kernel_lines(result.lines):
                 res.record("marker", case, "failed")
                 raise HarnessError(f"{case}: no {VDA_MARKER!r}")
             after = _sha256(disk)
@@ -233,7 +270,7 @@ def _mce_main(env: EnvConfig) -> int:
     results.current().add_boot(qemu_argv(cfg, None), cfg, result.exit_code)
     print(f"[e2e] ok: {len(result.matched)} markers matched", file=sys.stderr)
     print(f"[e2e]   . {cmd}: #MC dump and halt", file=sys.stderr)
-    for line in result.lines:
+    for line in frame.kernel_lines(result.lines):
         if "vibeOS: #MC " in line or "vibeOS: panic:" in line:
             print(f"[e2e]     {line}", file=sys.stderr)
     return 0
@@ -315,6 +352,12 @@ def main() -> int:
             print(f"[e2e] FAIL: {e}", file=sys.stderr)
             return 1
         print("[e2e]   . pci qemu set ok", file=sys.stderr)
+        try:
+            forged_user_lines(res, result.lines)
+        except HarnessError as e:
+            print(f"[e2e] FAIL: {e}", file=sys.stderr)
+            return 1
+        print("[e2e]   . forged user lines unframed", file=sys.stderr)
         try:
             check_meminfo(result.lines)
         except HarnessError as e:

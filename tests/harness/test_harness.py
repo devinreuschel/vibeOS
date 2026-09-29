@@ -15,7 +15,7 @@ from unittest import mock
 
 import tests.harness.run_e2e as run_e2e
 import tests.harness.run_ktest as run_ktest
-from tests.harness import results
+from tests.harness import frame, results
 from tests.harness.harness import (
     AP_ONLINE,
     HPET_OFF_MACHINE,
@@ -52,6 +52,11 @@ from tests.harness.harness import (
 from tests.harness.linesource import FakeLineSource
 
 
+def K(text: str) -> str:
+    """`text` as the kernel prints it on serial: framed (DESIGN §2.6)."""
+    return frame.FRAME + text
+
+
 class TestMarkerShape(unittest.TestCase):
     def test_serial_tail(self) -> None:
         self.assertEqual(serial_tail([]), " (no serial)")
@@ -68,9 +73,9 @@ class TestMarkerShape(unittest.TestCase):
             "pmm_free_frames",
             and_contains=(" free 4KiB frames",),
         )
-        self.assertTrue(m.matches("vibeOS: pmm: 31329 free 4KiB frames"))
-        self.assertFalse(m.matches("someone reports 12 free 4KiB frames"))
-        self.assertFalse(m.matches("vibeOS: pmm: initializing"))
+        self.assertTrue(m.matches(K("vibeOS: pmm: 31329 free 4KiB frames")))
+        self.assertFalse(m.matches(K("someone reports 12 free 4KiB frames")))
+        self.assertFalse(m.matches(K("vibeOS: pmm: initializing")))
 
     def test_pci_count_marker_ignores_per_device_lines(self) -> None:
         m = Marker(
@@ -78,12 +83,12 @@ class TestMarkerShape(unittest.TestCase):
             "pci_devices",
             and_contains=(" devices",),
         )
-        self.assertTrue(m.matches("vibeOS: pci: 6 devices"))
+        self.assertTrue(m.matches(K("vibeOS: pci: 6 devices")))
         self.assertFalse(
-            m.matches("vibeOS: pci: 00:00.0 8086:1237 host bridge [440FX]")
+            m.matches(K("vibeOS: pci: 00:00.0 8086:1237 host bridge [440FX]"))
         )
-        self.assertFalse(m.matches("vibeOS: pci: ecam 0xe0000000 buses 0-255"))
-        self.assertFalse(m.matches("vibeOS: pci: skip bar 00:02.0 size 0x10000000000"))
+        self.assertFalse(m.matches(K("vibeOS: pci: ecam 0xe0000000 buses 0-255")))
+        self.assertFalse(m.matches(K("vibeOS: pci: skip bar 00:02.0 size 0x10000000000")))
 
     def test_block_ramdisk_marker_needs_name_and_sectors(self) -> None:
         m = Marker(
@@ -91,11 +96,11 @@ class TestMarkerShape(unittest.TestCase):
             "block_ramdisk",
             and_contains=(" ram0 ", " sectors"),
         )
-        self.assertTrue(m.matches("vibeOS: block: ram0 256 sectors"))
-        self.assertFalse(m.matches("vibeOS: block: init"))
-        self.assertFalse(m.matches("vibeOS: block: ram0"))
-        self.assertFalse(m.matches("ram0 256 sectors"))
-        self.assertFalse(m.matches("vibeOS: block: ram0p1 32 sectors"))
+        self.assertTrue(m.matches(K("vibeOS: block: ram0 256 sectors")))
+        self.assertFalse(m.matches(K("vibeOS: block: init")))
+        self.assertFalse(m.matches(K("vibeOS: block: ram0")))
+        self.assertFalse(m.matches(K("ram0 256 sectors")))
+        self.assertFalse(m.matches(K("vibeOS: block: ram0p1 32 sectors")))
 
     def test_block_partition_marker_parent_pN(self) -> None:
         m = Marker(
@@ -103,9 +108,9 @@ class TestMarkerShape(unittest.TestCase):
             "block_ram0p1",
             and_contains=(" ram0p1 ", " sectors"),
         )
-        self.assertTrue(m.matches("vibeOS: block: ram0p1 32 sectors"))
-        self.assertFalse(m.matches("vibeOS: block: ram0 256 sectors"))
-        self.assertFalse(m.matches("vibeOS: block: ram0p2 24 sectors"))
+        self.assertTrue(m.matches(K("vibeOS: block: ram0p1 32 sectors")))
+        self.assertFalse(m.matches(K("vibeOS: block: ram0 256 sectors")))
+        self.assertFalse(m.matches(K("vibeOS: block: ram0p2 24 sectors")))
 
     def test_block_vda_marker_needs_name_and_sectors(self) -> None:
         m = Marker(
@@ -113,11 +118,11 @@ class TestMarkerShape(unittest.TestCase):
             "block_vda",
             and_contains=(" vda ", " sectors"),
         )
-        self.assertTrue(m.matches("vibeOS: block: vda 8192 sectors"))
-        self.assertFalse(m.matches("vibeOS: block: ram0 256 sectors"))
-        self.assertFalse(m.matches("vibeOS: block: vda"))
-        self.assertFalse(m.matches("vibeOS: virtio: blk vda"))
-        self.assertFalse(m.matches("vibeOS: block: vdap1 128 sectors"))
+        self.assertTrue(m.matches(K("vibeOS: block: vda 8192 sectors")))
+        self.assertFalse(m.matches(K("vibeOS: block: ram0 256 sectors")))
+        self.assertFalse(m.matches(K("vibeOS: block: vda")))
+        self.assertFalse(m.matches(K("vibeOS: virtio: blk vda")))
+        self.assertFalse(m.matches(K("vibeOS: block: vdap1 128 sectors")))
 
 
 ABC_MARKERS = [
@@ -147,9 +152,9 @@ class TestMarkerOrder(unittest.TestCase):
 
     def test_all_present_in_order_quits(self) -> None:
         lines = [
-            "vibeOS: serial online",
-            "vibeOS: limine: rev 3 ok",
-            "vibeOS: boot: phase1 done",
+            K("vibeOS: serial online"),
+            K("vibeOS: limine: rev 3 ok"),
+            K("vibeOS: boot: phase1 done"),
         ]
         result, src = check_fake(lines, ABC_MARKERS)
         self.assertEqual(result.matched, ["a", "b", "c"])
@@ -158,16 +163,16 @@ class TestMarkerOrder(unittest.TestCase):
 
     def test_out_of_order_fails(self) -> None:
         lines = [
-            "vibeOS: boot: phase1 done",  # too early
-            "vibeOS: serial online",
-            "vibeOS: limine: rev 3 ok",
+            K("vibeOS: boot: phase1 done"),  # too early
+            K("vibeOS: serial online"),
+            K("vibeOS: limine: rev 3 ok"),
         ]
         with self.assertRaises(HarnessError) as cm:
             check_fake(lines, ABC_MARKERS)
         self.assertIn("'c'", str(cm.exception))
 
     def test_missing_final_marker_fails(self) -> None:
-        lines = ["vibeOS: serial online", "vibeOS: limine: rev 3 ok"]
+        lines = [K("vibeOS: serial online"), K("vibeOS: limine: rev 3 ok")]
         with self.assertRaises(HarnessError) as cm:
             check_fake(lines, ABC_MARKERS)
         # The error names the missing marker's `name`, not its substring.
@@ -175,9 +180,9 @@ class TestMarkerOrder(unittest.TestCase):
 
     def test_panic_signature_fails_fast_and_kills(self) -> None:
         lines = [
-            "vibeOS: serial online",
-            "panicked at src/foo.rs:1:1",
-            "vibeOS: boot: phase1 done",
+            K("vibeOS: serial online"),
+            K("panicked at src/foo.rs:1:1"),
+            K("vibeOS: boot: phase1 done"),
         ]
         src = FakeLineSource.from_lines(lines)
         with self.assertRaises(HarnessError) as cm:
@@ -187,19 +192,19 @@ class TestMarkerOrder(unittest.TestCase):
         self.assertIn("panicked at", str(cm.exception))
         self.assertTrue(src.killed)
         # Fails at the signature: the line after it is never read.
-        self.assertEqual(src.next_event(), ("line", "vibeOS: boot: phase1 done"))
+        self.assertEqual(src.next_event(), ("line", K("vibeOS: boot: phase1 done")))
 
     def test_and_contains_wrong_shape_fails(self) -> None:
         # The pmm marker must not accept a line that lacks the prefix.
         lines = [
-            "vibeOS: serial online",
+            K("vibeOS: serial online"),
             "diagnostic: 12 free 4KiB frames on some other subsystem",
-            "vibeOS: boot: phase1 done",
+            K("vibeOS: boot: phase1 done"),
         ]
         markers = [
             Marker("vibeOS: serial online", "a"),
             Marker(
-                "vibeOS: pmm: ",
+                K("vibeOS: pmm: "),
                 "pmm",
                 and_contains=(" free 4KiB frames",),
             ),
@@ -212,17 +217,17 @@ class TestMarkerOrder(unittest.TestCase):
     def test_extra_lines_between_markers_are_fine(self) -> None:
         lines = [
             "chatter",
-            "vibeOS: serial online",
+            K("vibeOS: serial online"),
             "more chatter",
-            "vibeOS: limine: rev 3 ok",
+            K("vibeOS: limine: rev 3 ok"),
             "even more",
-            "vibeOS: boot: phase1 done",
+            K("vibeOS: boot: phase1 done"),
         ]
         result, _ = check_fake(lines, ABC_MARKERS)
         self.assertEqual(result.matched, ["a", "b", "c"])
 
     def test_timeout_names_missing_marker(self) -> None:
-        src = FakeLineSource.from_lines(["vibeOS: serial online"], end="timeout")
+        src = FakeLineSource.from_lines([K("vibeOS: serial online")], end="timeout")
         with self.assertRaises(HarnessError) as cm:
             run_qemu_and_check(FAKE_CFG, ABC_MARKERS, line_source=src, timeout_s=7.0)
         msg = str(cm.exception)
@@ -232,20 +237,26 @@ class TestMarkerOrder(unittest.TestCase):
 
     def test_fake_skips_path_and_iso_checks(self) -> None:
         with mock.patch("shutil.which", return_value=None):
-            result, _ = check_fake(["vibeOS: serial online"], ABC_MARKERS[:1])
+            result, _ = check_fake([K("vibeOS: serial online")], ABC_MARKERS[:1])
         self.assertEqual(result.matched, ["a"])
 
 
 def contract_log(markers: list[Marker]) -> list[str]:
-    """One synthetic serial line per marker, each matching it."""
-    return [m.substring + "".join(m.and_contains) for m in markers]
+    """One synthetic serial line per marker, each matching it: framed for a
+    kernel marker, unframed for a user program's (`shell ready`)."""
+    out = []
+    for m in markers:
+        text = m.substring + "".join(m.and_contains)
+        out.append(text if frame.source_of(m.substring) == frame.USER else K(text))
+    return out
 
 
 def smp_log(n: int, *, extra_before: int = 0, extra_after: int = 0) -> list[str]:
     """A `-smp n` contract log with extra `ap online` lines around `smp: done`."""
     lines = contract_log(boot_contract_markers(smp=n, cpu="max", accel="tcg"))
-    i = lines.index("vibeOS: smp: done")
-    return lines[:i] + [AP_ONLINE] * extra_before + [lines[i]] + [AP_ONLINE] * extra_after + (
+    i = lines.index(K("vibeOS: smp: done"))
+    ap = K(AP_ONLINE)
+    return lines[:i] + [ap] * extra_before + [lines[i]] + [ap] * extra_after + (
         lines[i + 1 :]
     )
 
@@ -261,7 +272,7 @@ class TestSmpApCount(unittest.TestCase):
 
     def test_smp2_one_line_passes(self) -> None:
         lines = smp_log(2)
-        self.assertEqual(lines.count(AP_ONLINE), 1)
+        self.assertEqual(lines.count(K(AP_ONLINE)), 1)
         self.assertIn("smp_done", self.run_smp(2, lines).matched)
 
     def test_smp2_extra_line_before_done_fails(self) -> None:
@@ -287,7 +298,7 @@ class TestSmpApCount(unittest.TestCase):
 
     def test_smp4_three_lines_passes(self) -> None:
         lines = smp_log(4)
-        self.assertEqual(lines.count(AP_ONLINE), 3)
+        self.assertEqual(lines.count(K(AP_ONLINE)), 3)
         self.assertIn("smp_done", self.run_smp(4, lines).matched)
 
     def test_too_few_before_owner_fails(self) -> None:
@@ -295,7 +306,7 @@ class TestSmpApCount(unittest.TestCase):
             Marker("vibeOS: serial online", "a"),
             Marker("vibeOS: smp: done", "smp_done", exactly_before=(AP_ONLINE, 2)),
         ]
-        lines = ["vibeOS: serial online", AP_ONLINE, "vibeOS: smp: done"]
+        lines = [K("vibeOS: serial online"), K(AP_ONLINE), K("vibeOS: smp: done")]
         with self.assertRaises(HarnessError) as cm:
             check_fake(lines, markers)
         self.assertIn("before 'smp_done', expected exactly 2", str(cm.exception))
@@ -304,23 +315,23 @@ class TestSmpApCount(unittest.TestCase):
 # A real `make test-e2e-panic` boot's serial (the panic_exit build).
 PANIC_BOOT = [
     "limine: Loading executable `boot():/boot/vibeos`...",
-    "vibeOS: serial online",
-    "vibeOS: limine: rev 3 ok",
-    "vibeOS: boot: panic-test armed",
+    K("vibeOS: serial online"),
+    K("vibeOS: limine: rev 3 ok"),
+    K("vibeOS: boot: panic-test armed"),
 ]
 PANIC_DUMP = [
-    "vibeOS: panic:",
-    "vibeOS: panic: at src/main.rs:110:9",
-    "vibeOS: panic: msg: intentional panic-test trip",
-    "vibeOS: regs: rbp=0xffff800007f92f70 rsp=0xffff800007f92ee0 rflags=0x82",
-    "vibeOS: panic: thread cpu=0 tid=0 <early>",
-    "vibeOS: log: last 3 (0 dropped)",
-    "vibeOS: logrec: 2980393398tsc cpu0 info vibeOS: serial online",
-    "vibeOS: logrec: 2981355280tsc cpu0 info vibeOS: limine: rev 3 ok",
-    "vibeOS: logrec: 2981513364tsc cpu0 info vibeOS: boot: panic-test armed",
-    "vibeOS: backtrace:",
-    "  0xffffffff80001a5b __rustc::rust_begin_unwind+0x1b",
-    "vibeOS: panic: halted",
+    K("vibeOS: panic:"),
+    K("vibeOS: panic: at src/main.rs:110:9"),
+    K("vibeOS: panic: msg: intentional panic-test trip"),
+    K("vibeOS: regs: rbp=0xffff800007f92f70 rsp=0xffff800007f92ee0 rflags=0x82"),
+    K("vibeOS: panic: thread cpu=0 tid=0 <early>"),
+    K("vibeOS: log: last 3 (0 dropped)"),
+    K("vibeOS: logrec: 2980393398tsc cpu0 info vibeOS: serial online"),
+    K("vibeOS: logrec: 2981355280tsc cpu0 info vibeOS: limine: rev 3 ok"),
+    K("vibeOS: logrec: 2981513364tsc cpu0 info vibeOS: boot: panic-test armed"),
+    K("vibeOS: backtrace:"),
+    K("  0xffffffff80001a5b __rustc::rust_begin_unwind+0x1b"),
+    K("vibeOS: panic: halted"),
 ]
 PANIC_NEEDLES: tuple[str | tuple[str, ...], ...] = (
     "vibeOS: panic: at",
@@ -330,15 +341,15 @@ PANIC_NEEDLES: tuple[str | tuple[str, ...], ...] = (
     "vibeOS: panic: halted",
 )
 BANNER_KINDS = (
-    "vibeOS: panic:",
-    "vibeOS: exception: vector 3 rip=0xffffffff80001000 cs=0x8",
-    "vibeOS: #UD rip=0xffffffff80001000 cs=0x8",
-    "vibeOS: nmi rip=0xffffffff80001000 cs=0x8",
-    "vibeOS: #DB rip=0xffffffff80001000 cs=0x8",
-    "vibeOS: #GP rip=0xffffffff80001000 cs=0x8 err=0x0",
-    "vibeOS: #PF rip=0xffffffff80001000 cs=0x8 err=0x2 cr2=0x0",
-    "vibeOS: #DF rip=0xffffffff80001000 cs=0x8 err=0x0",
-    "vibeOS: #MC rip=0xffffffff80001000 cs=0x8",
+    K("vibeOS: panic:"),
+    K("vibeOS: exception: vector 3 rip=0xffffffff80001000 cs=0x8"),
+    K("vibeOS: #UD rip=0xffffffff80001000 cs=0x8"),
+    K("vibeOS: nmi rip=0xffffffff80001000 cs=0x8"),
+    K("vibeOS: #DB rip=0xffffffff80001000 cs=0x8"),
+    K("vibeOS: #GP rip=0xffffffff80001000 cs=0x8 err=0x0"),
+    K("vibeOS: #PF rip=0xffffffff80001000 cs=0x8 err=0x2 cr2=0x0"),
+    K("vibeOS: #DF rip=0xffffffff80001000 cs=0x8 err=0x0"),
+    K("vibeOS: #MC rip=0xffffffff80001000 cs=0x8"),
 )
 
 
@@ -367,7 +378,7 @@ class TestExpectPanic(unittest.TestCase):
     def test_real_dump_passes_unkilled(self) -> None:
         result, src = self.expect(PANIC_BOOT + PANIC_DUMP, needles=PANIC_NEEDLES)
         self.assertEqual(result.matched, ["serial_online", "limine_ok", "panic_test_armed"])
-        self.assertEqual(result.panic_line, "vibeOS: panic:")
+        self.assertEqual(result.panic_line, K("vibeOS: panic:"))
         self.assertEqual(result.exit_code, 35)
         self.assertFalse(src.killed)
         self.assertFalse(src.quit_sent)
@@ -390,8 +401,8 @@ class TestExpectPanic(unittest.TestCase):
         markers = [
             Marker("vibeOS: smp: done", "smp_done", exactly_before=(AP_ONLINE, 1)),
         ]
-        lines = [AP_ONLINE, "vibeOS: smp: done", "vibeOS: #GP rip=0x1 err=0x0"]
-        lines += [f"vibeOS: logrec: 46ms cpu0 info {AP_ONLINE}", "vibeOS: panic: halted"]
+        lines = [K(AP_ONLINE), K("vibeOS: smp: done"), K("vibeOS: #GP rip=0x1 err=0x0")]
+        lines += [K(f"vibeOS: logrec: 46ms cpu0 info {AP_ONLINE}"), K("vibeOS: panic: halted")]
         result, _ = self.expect(lines, markers=markers)
         self.assertEqual(result.matched, ["smp_done"])
 
@@ -415,15 +426,15 @@ class TestExpectPanic(unittest.TestCase):
         self.assertIn("QEMU exited with status 1", msg)
 
     def test_two_banners_fail(self) -> None:
-        lines = PANIC_BOOT + PANIC_DUMP[:3] + ["vibeOS: #PF rip=0x1 err=0x0 cr2=0x0"]
+        lines = PANIC_BOOT + PANIC_DUMP[:3] + [K("vibeOS: #PF rip=0x1 err=0x0 cr2=0x0")]
         with self.assertRaises(HarnessError) as cm:
             self.expect(lines + PANIC_DUMP[3:])
         self.assertIn("expected one dump banner, saw 2", str(cm.exception))
 
     def test_reentered_fails(self) -> None:
-        lines = PANIC_BOOT + PANIC_DUMP[:3] + ["vibeOS: panic: reentered"]
+        lines = PANIC_BOOT + PANIC_DUMP[:3] + [K("vibeOS: panic: reentered")]
         with self.assertRaises(HarnessError) as cm:
-            self.expect(lines + ["vibeOS: panic: halted"])
+            self.expect(lines + [K("vibeOS: panic: halted")])
         self.assertIn("expected one dump banner, saw 2", str(cm.exception))
 
     def test_signature_without_banner_fails(self) -> None:
@@ -440,17 +451,20 @@ class TestExpectPanic(unittest.TestCase):
         for banner in BANNER_KINDS:
             with self.subTest(banner=banner):
                 self.assertTrue(is_dump_banner(banner))
-                lines = PANIC_BOOT + [banner, "vibeOS: panic: thread cpu=0 tid=0"]
-                result, _ = self.expect(lines + ["vibeOS: panic: halted"])
+                lines = PANIC_BOOT + [banner, K("vibeOS: panic: thread cpu=0 tid=0")]
+                result, _ = self.expect(lines + [K("vibeOS: panic: halted")])
                 self.assertEqual(result.panic_line, banner)
 
     def test_non_banners(self) -> None:
         for line in (
-            "vibeOS: logrec: 1ms cpu0 info vibeOS: panic:",
-            "vibeOS: logrec: 1ms cpu0 info vibeOS: #GP rip=0x1",
-            "vibeOS: panic: at src/main.rs:1:1",
-            "vibeOS: panic: halted",
-            "x vibeOS: panic:",
+            K("vibeOS: logrec: 1ms cpu0 info vibeOS: panic:"),
+            K("vibeOS: logrec: 1ms cpu0 info vibeOS: #GP rip=0x1"),
+            K("vibeOS: panic: at src/main.rs:1:1"),
+            K("vibeOS: panic: halted"),
+            K("x vibeOS: panic:"),
+            # A user program's copy of a banner is not one.
+            "vibeOS: panic:",
+            "?vibeOS: #GP rip=0x1 cs=0x8",
         ):
             with self.subTest(line=line):
                 self.assertFalse(is_dump_banner(line))
@@ -464,7 +478,7 @@ class TestFirstKernelLine(unittest.TestCase):
         run_e2e.check_first_kernel_line(result.lines)
 
     def test_kernel_line_first_fails(self) -> None:
-        lines = ["vibeOS: heap ok"] + [m.substring for m in ABC_MARKERS]
+        lines = [K("vibeOS: heap ok")] + [K(m.substring) for m in ABC_MARKERS]
         with self.assertRaises(HarnessError) as cm:
             self.boot(lines)
         self.assertIn(
@@ -472,19 +486,24 @@ class TestFirstKernelLine(unittest.TestCase):
         )
 
     def test_limine_line_first_passes(self) -> None:
-        self.boot(PANIC_BOOT[:1] + [m.substring for m in ABC_MARKERS])
+        self.boot(PANIC_BOOT[:1] + [K(m.substring) for m in ABC_MARKERS])
 
     def test_nothing_before_serial_line_passes(self) -> None:
-        self.boot([m.substring for m in ABC_MARKERS])
+        self.boot([K(m.substring) for m in ABC_MARKERS])
 
     def test_glued_non_kernel_prefix_passes(self) -> None:
-        lines = [m.substring for m in ABC_MARKERS]
-        lines[0] = "\x1b[2J\x1b[Hlimine: boot " + lines[0]
+        # Loader output that left its line open: the kernel's first line
+        # starts on a fresh one, so the loader's text is a line of its own.
+        lines = ["\x1b[2J\x1b[Hlimine: boot "] + [K(m.substring) for m in ABC_MARKERS]
+        self.boot(lines)
+
+    def test_user_copy_before_serial_line_passes(self) -> None:
+        lines = ["vibeOS: heap ok"] + [K(m.substring) for m in ABC_MARKERS]
         self.boot(lines)
 
     def test_glued_kernel_prefix_fails(self) -> None:
-        lines = [m.substring for m in ABC_MARKERS]
-        lines[0] = "vibeOS: heap ok" + lines[0]
+        lines = [K(m.substring) for m in ABC_MARKERS]
+        lines[0] = K("vibeOS: heap ok" + ABC_MARKERS[0].substring)
         with self.assertRaises(HarnessError) as cm:
             self.boot(lines)
         self.assertIn("vibeOS: heap okvibeOS: serial online", str(cm.exception))
@@ -493,7 +512,8 @@ class TestFirstKernelLine(unittest.TestCase):
         run_e2e.check_first_kernel_line(["limine: Loading executable"])
 
     def test_kernel_text(self) -> None:
-        self.assertEqual(kernel_text("vibeOS: heap ok"), "vibeOS: heap ok")
+        self.assertEqual(kernel_text(K("vibeOS: heap ok")), "vibeOS: heap ok")
+        self.assertIsNone(kernel_text("vibeOS: heap ok"))
         self.assertIsNone(kernel_text("limine: Loading executable"))
         self.assertIsNone(kernel_text("user: tests ok"))
 
@@ -501,27 +521,28 @@ class TestFirstKernelLine(unittest.TestCase):
 # The memory diagnostics of a real `make test-e2e` boot.
 MEMINFO_BOOT = [
     "limine: Loading executable `boot():/boot/vibeos`...",
-    "vibeOS: serial online",
-    "vibeOS: limine: rev 3 ok",
-    "vibeOS: pmm: 29503 free 4KiB frames",
-    "vibeOS: pmm: 29503 total, largest order 10",
-    "vibeOS: paging: cr3 ok",
-    "vibeOS: meminfo: total 29503 frames, free 29208, used 295, largest order 10",
-    "vibeOS: meminfo: leaked 0 frames",
-    "vibeOS: meminfo: heap used 5728 B / capacity 1048576 B",
-    "vibeOS: meminfo: kva used 102400 B",
-    "vibeOS: pt: 16 ranges",
-    "vibeOS: sched: cpu0 ready",
+    K("vibeOS: serial online"),
+    K("vibeOS: limine: rev 3 ok"),
+    K("vibeOS: pmm: 29503 free 4KiB frames"),
+    K("vibeOS: pmm: 29503 total, largest order 10"),
+    K("vibeOS: paging: cr3 ok"),
+    K("vibeOS: meminfo: total 29503 frames, free 29208, used 295, largest order 10"),
+    K("vibeOS: meminfo: leaked 0 frames"),
+    K("vibeOS: meminfo: heap used 5728 B / capacity 1048576 B"),
+    K("vibeOS: meminfo: kva used 102400 B"),
+    K("vibeOS: pt: 16 ranges"),
+    K("vibeOS: sched: cpu0 ready"),
 ]
 MEMINFO_TOTAL_LINE = MEMINFO_BOOT.index(
-    "vibeOS: meminfo: total 29503 frames, free 29208, used 295, largest order 10"
+    K("vibeOS: meminfo: total 29503 frames, free 29208, used 295, largest order 10")
 )
-MEMINFO_HEAP_LINE = MEMINFO_BOOT.index("vibeOS: meminfo: heap used 5728 B / capacity 1048576 B")
+MEMINFO_HEAP_LINE = MEMINFO_BOOT.index(K("vibeOS: meminfo: heap used 5728 B / capacity 1048576 B"))
 
 
 def doctor(i: int, line: str) -> list[str]:
+    """`MEMINFO_BOOT` with its line `i` replaced by the kernel line `line`."""
     out = list(MEMINFO_BOOT)
-    out[i] = line
+    out[i] = K(line)
     return out
 
 
@@ -564,7 +585,7 @@ class TestMeminfoCheck(unittest.TestCase):
         self.fails(lines, "0 'vibeOS: meminfo: total' lines, expected one")
 
     def test_trailing_fields_tolerated(self) -> None:
-        line = MEMINFO_BOOT[MEMINFO_TOTAL_LINE] + ", leaked 0"
+        line = f"{kernel_text(MEMINFO_BOOT[MEMINFO_TOTAL_LINE])}, leaked 0"
         run_e2e.check_meminfo(doctor(MEMINFO_TOTAL_LINE, line))
 
 
@@ -666,7 +687,7 @@ class TestConsoleInput(unittest.TestCase):
         self.assertIn("PS/2 sendkey echo missing", str(cm.exception))
 
     def test_panic_fails(self) -> None:
-        src = FakeLineSource.from_lines(["vibeOS: shell ready", "vibeOS: panic: x"])
+        src = FakeLineSource.from_lines(["vibeOS: shell ready", K("vibeOS: panic: x")])
         with self.assertRaises(HarnessError) as cm:
             run_qemu_console_input(FAKE_CFG, line_source=src)
         self.assertIn("vibeOS: panic:", str(cm.exception))
@@ -678,7 +699,7 @@ class TestConsoleTail(unittest.TestCase):
 
     def test_panic_after_last_reply_fails(self) -> None:
         src = FakeLineSource.from_lines(
-            CONSOLE_OK_LINES + ["vibeOS: vibefs: commit", "vibeOS: panic:"], end="timeout"
+            CONSOLE_OK_LINES + [K("vibeOS: vibefs: commit"), K("vibeOS: panic:")], end="timeout"
         )
         with self.assertRaises(HarnessError) as cm:
             run_qemu_console_input(FAKE_CFG, line_source=src)
@@ -690,7 +711,7 @@ class TestConsoleTail(unittest.TestCase):
     def test_extra_panic_counts_in_tail(self) -> None:
         cfg = QemuConfig(iso="fake.iso", extra_panic=("vibeOS: sched: overdue",))
         src = FakeLineSource.from_lines(
-            CONSOLE_OK_LINES + ["vibeOS: sched: overdue tid 7"], end="timeout"
+            CONSOLE_OK_LINES + [K("vibeOS: sched: overdue tid 7")], end="timeout"
         )
         with self.assertRaises(HarnessError) as cm:
             run_qemu_console_input(cfg, line_source=src)
@@ -720,20 +741,20 @@ class TestConsoleTail(unittest.TestCase):
 
 class TestPanicSignatureScan(unittest.TestCase):
     def test_matches_exception_mnemonic(self) -> None:
-        self.assertTrue(contains_panic("cpu halted on #PF at ..."))
-        self.assertTrue(contains_panic("panicked at src/main.rs:12:5"))
+        self.assertTrue(contains_panic(K("cpu halted on #PF at ...")))
+        self.assertTrue(contains_panic(K("panicked at src/main.rs:12:5")))
 
     def test_english_prose_is_not_a_false_positive(self) -> None:
         # DESIGN §9.7: matching prose is a footgun. `page fault` must NOT
         # trigger the scanner; only `#PF` does.
-        self.assertFalse(contains_panic("shell help: 'demo a page fault'"))
-        self.assertFalse(contains_panic("help text about general protection"))
+        self.assertFalse(contains_panic(K("shell help: 'demo a page fault'")))
+        self.assertFalse(contains_panic(K("help text about general protection")))
 
     def test_double_fault_phrase_matches_intentionally(self) -> None:
         # The literal phrase 'double fault' is in the harness signature list.
         # If someone puts it in help text later, they need to rename the
         # help text, not the harness.
-        self.assertTrue(contains_panic("we hit a double fault"))
+        self.assertTrue(contains_panic(K("we hit a double fault")))
 
 
 class TestDeadlineReader(unittest.TestCase):
@@ -806,21 +827,24 @@ class TestDeadlineReader(unittest.TestCase):
         try:
             os.write(
                 w,
-                b"msg: ipi: ack timeout waiters=0xd\n"
+                b"\x1emsg: ipi: ack timeout waiters=0xd\n"
                 b"vibeOS: panic: halted\n"
+                b"\x1evibeOS: panic: halted\n"
                 b"ignored\n",
             )
             os.close(w)
             w = -1
-            result = RunResult(lines=["vibeOS: panic:"])
+            result = RunResult(lines=[K("vibeOS: panic:")])
             reader = DeadlineReader(r, time.monotonic() + 1.0)
             drain_panic_tail(reader, result, window_s=0.5)
+            # A user program's `panic: halted` does not end the drain.
             self.assertEqual(
                 result.lines,
                 [
-                    "vibeOS: panic:",
-                    "msg: ipi: ack timeout waiters=0xd",
+                    K("vibeOS: panic:"),
+                    K("msg: ipi: ack timeout waiters=0xd"),
                     "vibeOS: panic: halted",
+                    K("vibeOS: panic: halted"),
                 ],
             )
         finally:
@@ -834,9 +858,9 @@ class TestKtestProtocol(unittest.TestCase):
         from tests.harness.harness import ISA_DEBUG_PASS, check_ktest_output
 
         lines = [
-            "vibeOS: ktest: begin",
-            "vibeOS: ktest: ok map_unmap",
-            "vibeOS: ktest: end",
+            K("vibeOS: ktest: begin"),
+            K("vibeOS: ktest: ok map_unmap"),
+            K("vibeOS: ktest: end"),
         ]
         check_ktest_output(lines, ISA_DEBUG_PASS)
 
@@ -844,9 +868,9 @@ class TestKtestProtocol(unittest.TestCase):
         from tests.harness.harness import ISA_DEBUG_PASS, HarnessError, check_ktest_output
 
         lines = [
-            "vibeOS: ktest: begin",
-            "vibeOS: ktest: FAIL nx_enforcement: PF was not instruction-fetch",
-            "vibeOS: ktest: end",
+            K("vibeOS: ktest: begin"),
+            K("vibeOS: ktest: FAIL nx_enforcement: PF was not instruction-fetch"),
+            K("vibeOS: ktest: end"),
         ]
         with self.assertRaises(HarnessError) as cm:
             check_ktest_output(lines, ISA_DEBUG_PASS)
@@ -857,14 +881,14 @@ class TestKtestProtocol(unittest.TestCase):
         from tests.harness.harness import ISA_DEBUG_PASS, HarnessError, check_ktest_output
 
         with self.assertRaises(HarnessError):
-            check_ktest_output(["vibeOS: ktest: end"], ISA_DEBUG_PASS)
+            check_ktest_output([K("vibeOS: ktest: end")], ISA_DEBUG_PASS)
         with self.assertRaises(HarnessError):
-            check_ktest_output(["vibeOS: ktest: begin"], ISA_DEBUG_PASS)
+            check_ktest_output([K("vibeOS: ktest: begin")], ISA_DEBUG_PASS)
 
     def test_wrong_exit_status(self) -> None:
         from tests.harness.harness import ISA_DEBUG_FAIL, HarnessError, check_ktest_output
 
-        lines = ["vibeOS: ktest: begin", "vibeOS: ktest: end"]
+        lines = [K("vibeOS: ktest: begin"), K("vibeOS: ktest: end")]
         with self.assertRaises(HarnessError) as cm:
             check_ktest_output(lines, ISA_DEBUG_FAIL)
         self.assertIn("isa-debug-exit", str(cm.exception))
@@ -877,12 +901,12 @@ class TestNoRetry(unittest.TestCase):
     def _passing_first_boot() -> RunResult:
         return RunResult(
             lines=[
-                "vibeOS: block: vda 8192 sectors",
-                "vibeOS: block: vdap1 128 sectors",
-                "vibeOS: block: vdap2 7647 sectors",
-                "vibeOS: persist: wrote",
-                "vibeOS: ktest: begin",
-                "vibeOS: ktest: end",
+                K("vibeOS: block: vda 8192 sectors"),
+                K("vibeOS: block: vdap1 128 sectors"),
+                K("vibeOS: block: vdap2 7647 sectors"),
+                K("vibeOS: persist: wrote"),
+                K("vibeOS: ktest: begin"),
+                K("vibeOS: ktest: end"),
             ],
             exit_code=ISA_DEBUG_PASS,
         )
@@ -915,9 +939,9 @@ class TestNoRetry(unittest.TestCase):
     def test_fail_line_boots_once(self) -> None:
         failed = RunResult(
             lines=[
-                "vibeOS: ktest: begin",
-                "vibeOS: ktest: FAIL msix_cpu: ap counter",
-                "vibeOS: ktest: end",
+                K("vibeOS: ktest: begin"),
+                K("vibeOS: ktest: FAIL msix_cpu: ap counter"),
+                K("vibeOS: ktest: end"),
             ],
             exit_code=ISA_DEBUG_FAIL,
         )
@@ -957,7 +981,12 @@ class TestNoRetry(unittest.TestCase):
 
     def test_e2e_console_input_no_shell_boots_once(self) -> None:
         marker_boot = RunResult(
-            lines=[*MEMINFO_BOOT, *run_e2e.PCI_GOLDEN, "vibeOS: pci: 6 devices"],
+            lines=[
+                *MEMINFO_BOOT,
+                *[K(f"vibeOS: pci: {id_}") for id_ in run_e2e.PCI_GOLDEN],
+                K("vibeOS: pci: 6 devices"),
+                *[ln for ln in run_e2e.FORGED_LINES for _ in range(2)],
+            ],
             exit_code=0,
         )
         with (
@@ -1128,14 +1157,14 @@ class TestDumpNeedles(unittest.TestCase):
         from tests.harness.harness import check_dump_needles, dump_after_panic
 
         lines = [
-            "vibeOS: smp: done",
-            "vibeOS: #GP rip=0x1",
-            "vibeOS: logrec: 3ms cpu0 info vibeOS: smp: done",
-            "vibeOS: backtrace:",
-            "vibeOS: panic: halted",
+            K("vibeOS: smp: done"),
+            K("vibeOS: #GP rip=0x1"),
+            K("vibeOS: logrec: 3ms cpu0 info vibeOS: smp: done"),
+            K("vibeOS: backtrace:"),
+            K("vibeOS: panic: halted"),
         ]
         dump = dump_after_panic(lines)
-        self.assertTrue(dump[0].startswith("vibeOS: #GP"))
+        self.assertEqual(dump[0], K("vibeOS: #GP rip=0x1"))
         check_dump_needles(
             dump,
             ("#GP", "vibeOS: backtrace:", ("vibeOS: logrec:", "smp: done")),
@@ -1144,15 +1173,17 @@ class TestDumpNeedles(unittest.TestCase):
     def test_english_page_fault_still_ignored(self) -> None:
         from tests.harness.harness import contains_panic
 
-        self.assertFalse(contains_panic("dmesg: page fault help text"))
-        self.assertTrue(contains_panic("vibeOS: #PF rip=0x1"))
+        self.assertFalse(contains_panic(K("dmesg: page fault help text")))
+        self.assertTrue(contains_panic(K("vibeOS: #PF rip=0x1")))
+        # A user program's copy is never a kernel panic.
+        self.assertFalse(contains_panic("vibeOS: #PF rip=0x1"))
 
     def test_missing_joint_needle_fails(self) -> None:
         from tests.harness.harness import HarnessError, check_dump_needles
 
         with self.assertRaises(HarnessError):
             check_dump_needles(
-                ["vibeOS: logrec: hello", "vibeOS: smp: done"],
+                [K("vibeOS: logrec: hello"), K("vibeOS: smp: done")],
                 (("vibeOS: logrec:", "smp: done"),),
             )
 
@@ -1488,11 +1519,11 @@ class TestQemuVersionPin(unittest.TestCase):
 
 class TestMceHelpers(unittest.TestCase):
     DUMP = [
-        "vibeOS: #MC rip=0xffffffff80001234 cs=0x8 rflags=0x2 rsp=0x0 ss=0x0",
-        "vibeOS: regs: rbp=0x0 rsp=0x0 rflags=0x2 rip=0xffffffff80001234 cr3=0x1000",
-        "vibeOS: panic: thread cpu=0 tid=0 idle",
-        "vibeOS: backtrace:",
-        "vibeOS: panic: halted",
+        K("vibeOS: #MC rip=0xffffffff80001234 cs=0x8 rflags=0x2 rsp=0x0 ss=0x0"),
+        K("vibeOS: regs: rbp=0x0 rsp=0x0 rflags=0x2 rip=0xffffffff80001234 cr3=0x1000"),
+        K("vibeOS: panic: thread cpu=0 tid=0 idle"),
+        K("vibeOS: backtrace:"),
+        K("vibeOS: panic: halted"),
     ]
 
     def test_command_format(self) -> None:
@@ -1521,7 +1552,7 @@ class TestMceHelpers(unittest.TestCase):
     def test_qemu_exit_before_dump_carries_reply(self) -> None:
         reply = "mce 0 1 0xb200000000000000 0x5 0x0 0x0 MCE capability is not enabled"
         with self.assertRaises(HarnessError) as cm:
-            check_mce_dump(["vibeOS: smp: done"], exit_code=0, reply=reply)
+            check_mce_dump([K("vibeOS: smp: done")], exit_code=0, reply=reply)
         msg = str(cm.exception)
         self.assertIn("QEMU exited (status 0) before the #MC dump", msg)
         self.assertIn("MCE capability is not enabled", msg)

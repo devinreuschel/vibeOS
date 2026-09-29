@@ -52,11 +52,15 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import IO
 
+from tests.harness import frame
+from tests.harness.frame import kernel_text as kernel_text
 from tests.harness.linesource import LineSource
 
-# Any of these substrings in a serial line means the run has failed. Matches
-# exception mnemonics rather than English so shell prose does not false-fire
-# (DESIGN §9.7).
+# Any of these substrings in a kernel line (a framed one, DESIGN §2.6) means
+# the run has failed. Matches exception mnemonics rather than English so
+# shell prose does not false-fire (DESIGN §9.7). A user program's line never
+# matches: every driver also fails on `frame.USER_FAILURES` in user text and
+# on `frame.LIMINE_SIGNATURES` before the first framed line.
 PANIC_SIGNATURES: tuple[str, ...] = (
     "panicked at",
     "vibeOS: panic:",
@@ -89,15 +93,7 @@ def is_dump_banner(line: str) -> bool:
     return text is not None and DUMP_BANNER_RE.match(text) is not None
 
 
-# A kernel line starts with this until DESIGN §2.6's frame lands; then
-# `kernel_text` is the one predicate that changes (to the frame's split).
-KERNEL_LINE_PREFIX = "vibeOS:"
 SERIAL_ONLINE = "vibeOS: serial online"
-
-
-def kernel_text(line: str) -> str | None:
-    """The kernel's text of a serial line, or None when the kernel did not print it."""
-    return line if line.startswith(KERNEL_LINE_PREFIX) else None
 
 
 class HarnessError(Exception):
@@ -116,15 +112,21 @@ class Marker:
 
     `exactly_before=(needle, n)`: exactly `n` lines containing `needle`
     precede this marker, and none follows it.
+
+    `source` is where the line comes from (`frame.KERNEL` or `frame.USER`):
+    a kernel marker matches only a framed line, a user program's only an
+    unframed one (DESIGN §2.6). Empty means `frame.source_of(substring)`.
     """
 
     substring: str
     name: str
     and_contains: tuple[str, ...] = ()
     exactly_before: tuple[str, int] | None = None
+    source: str = ""
 
-    def matches(self, line: str) -> bool:
-        if self.substring not in line:
+    def matches(self, raw: str) -> bool:
+        line = frame.text_for(self.source or frame.source_of(self.substring), raw)
+        if line is None or self.substring not in line:
             return False
         return all(needle in line for needle in self.and_contains)
 
@@ -148,8 +150,37 @@ def serial_tail(lines: list[str], n: int = 40) -> str:
     return f"\n--- serial tail {len(tail)}/{len(lines)} ---\n{body}"
 
 
+def panic_signature(raw: str, sigs: tuple[str, ...] = PANIC_SIGNATURES) -> str | None:
+    """The first of `sigs` in `raw`'s kernel text, if any."""
+    text = kernel_text(raw)
+    if text is None:
+        return None
+    return next((s for s in sigs if s in text), None)
+
+
 def contains_panic(line: str, sigs: tuple[str, ...] = PANIC_SIGNATURES) -> bool:
-    return any(s in line for s in sigs)
+    """A kernel line holding one of `sigs`."""
+    return panic_signature(line, sigs) is not None
+
+
+def run_failure(
+    raw: str, stream: frame.Stream, sigs: tuple[str, ...] = PANIC_SIGNATURES
+) -> tuple[str, str] | None:
+    """Why `raw` fails a run, as (reason, the line's text), or None: a panic
+    signature in kernel text, a `frame.USER_FAILURES` entry in user text, or
+    Limine's panic line before the boot's first framed line. Feeds `raw` to
+    `stream`."""
+    limine = stream.limine_panic(raw)
+    _, text = stream.feed(raw)
+    if limine:
+        return "Limine panic before the kernel", text
+    sig = panic_signature(raw, sigs)
+    if sig is not None:
+        return f"panic signature {sig!r}", text
+    fail = frame.user_failure(raw)
+    if fail is not None:
+        return f"user failure {fail!r}", text
+    return None
 
 
 def dump_after_panic(
@@ -168,8 +199,8 @@ def check_dump_needles(
     dump: Iterable[str],
     needles: tuple[str | tuple[str, ...], ...] = (),
 ) -> None:
-    """Each needle must appear. A tuple means all fragments on one line."""
-    lines = list(dump)
+    """Each needle must appear on a kernel line. A tuple means all fragments on one line."""
+    lines = frame.kernel_lines(dump)
     for needle in needles:
         if isinstance(needle, tuple):
             if not any(all(part in line for part in needle) for line in lines):
@@ -810,12 +841,18 @@ def run_qemu_and_check(
 
     `line_source` replaces QEMU (C-LINESOURCE): the PATH and ISO checks are
     skipped and the lines, exit status and stderr come from the source.
+
+    Panic signatures, the dump and `PANIC_DONE` match only kernel lines
+    (framed, DESIGN §2.6); each marker matches its own source's lines.
+    Limine's panic line before the first framed line, and a
+    `frame.USER_FAILURES` line before the dump, fail the run.
     """
     panic_signatures = _panic_sigs(cfg, panic_signatures, extra_panic)
     deadline = time.monotonic() + timeout_s
     src = line_source if line_source is not None else _start_qemu(cfg, deadline)
 
     result = RunResult()
+    stream = frame.Stream()
     marker_idx = 0
     dump_at: int | None = None  # index in result.lines of the dump's first line
     banners = 0
@@ -839,18 +876,28 @@ def run_qemu_and_check(
                 break
 
             result.lines.append(line)
-            sig = next((s for s in panic_signatures if s in line), None)
+            limine = stream.limine_panic(line)
+            framed, text = stream.feed(line)
+            if limine:
+                result.panic_line = line
+                raise fail(f"Limine panic before the kernel in: {text!r}")
+            ktext = text if framed else None
+            sig = panic_signature(line, panic_signatures)
+            ufail = frame.user_failure(line)
+            if dump_at is None and ufail is not None:
+                result.panic_line = line
+                raise fail(f"user failure {ufail!r} in: {text!r}")
 
             if dump_at is None and sig is not None and not expect_panic:
                 result.panic_line = line
-                raise fail(f"panic signature {sig!r} in: {line!r}")
+                raise fail(f"panic signature {sig!r} in: {text!r}")
             if dump_at is None and expect_panic and (sig is not None or is_dump_banner(line)):
                 dump_at = len(result.lines) - 1
                 result.panic_line = line
                 if marker_idx < len(markers):
                     raise fail(
                         f"missing marker {markers[marker_idx].name!r} before the first "
-                        f"panic signature: {line!r}{serial_tail(result.lines)}"
+                        f"panic signature: {text!r}{serial_tail(result.lines)}"
                     )
 
             if dump_at is not None:
@@ -858,13 +905,14 @@ def run_qemu_and_check(
                     banners += 1
                     if banners > 1:
                         raise fail(f"expected one dump banner, saw {banners}: {line!r}")
-                if PANIC_DONE in line and not panic_done:
+                if ktext is not None and PANIC_DONE in ktext and not panic_done:
                     panic_done = True
                     src.set_deadline(time.monotonic() + PANIC_EXIT_S)
                 continue
 
             for needle, n in exact.items():
-                if needle in line:
+                ntext = frame.text_for(frame.source_of(needle), line)
+                if ntext is not None and needle in ntext:
                     counts[needle] += 1
                     if counts[needle] > n:
                         raise fail(
@@ -1024,7 +1072,7 @@ def check_mce_dump(
     first = needles[0]
     started = any(
         all(part in line for part in first) if isinstance(first, tuple) else first in line
-        for line in after
+        for line in frame.kernel_lines(after)
     )
     if not started:
         if exit_code is not None:
@@ -1045,9 +1093,10 @@ def run_qemu_inject_mce(
 ) -> RunResult:
     """Boot, wait for `markers`, inject a machine check with `cmd`, check the dump.
 
-    Before the injection any panic signature fails the run. After it the
-    lines are collected until `PANIC_DONE`, EOF, or `MCE_DUMP_WAIT_S`, and
-    `check_mce_dump` judges them. Never retries.
+    Before the injection a failing line (`run_failure`) fails the run.
+    After it the lines are collected until a kernel line holds `PANIC_DONE`,
+    EOF, or `MCE_DUMP_WAIT_S`, and `check_mce_dump` judges them. Never
+    retries.
     """
     if not shutil.which("qemu-system-x86_64"):
         raise HarnessError("qemu-system-x86_64 not on PATH")
@@ -1070,6 +1119,7 @@ def run_qemu_inject_mce(
     assert proc.stdout is not None
 
     result = RunResult()
+    stream = frame.Stream()
     marker_idx = 0
     reader = DeadlineReader(proc.stdout.fileno(), time.monotonic() + timeout_s)
     after: list[str] = []
@@ -1096,10 +1146,10 @@ def run_qemu_inject_mce(
                     f"{len(result.lines)} lines{_qemu_report(result, exited=True)}"
                 )
             result.lines.append(line)
-            for sig in panic_signatures:
-                if sig in line:
-                    result.panic_line = line
-                    raise HarnessError(f"panic signature {sig!r} in: {line!r}")
+            why = run_failure(line, stream, panic_signatures)
+            if why is not None:
+                result.panic_line = line
+                raise HarnessError(f"{why[0]} in: {why[1]!r}")
             if markers[marker_idx].matches(line):
                 result.matched.append(markers[marker_idx].name)
                 marker_idx += 1
@@ -1121,7 +1171,7 @@ def run_qemu_inject_mce(
                 break
             result.lines.append(line)
             after.append(line)
-            if PANIC_DONE in line:
+            if PANIC_DONE in (kernel_text(line) or ""):
                 break
     finally:
         if proc.poll() is None:
@@ -1133,7 +1183,9 @@ def run_qemu_inject_mce(
             result.exit_code = proc.wait()
 
     check_mce_dump(after, exit_code=exited, reply=reply, needles=dump_needles)
-    result.panic_line = next((ln for ln in after if "vibeOS: panic:" in ln), None)
+    result.panic_line = next(
+        (ln for ln in after if "vibeOS: panic:" in (kernel_text(ln) or "")), None
+    )
     return result
 
 
@@ -1146,9 +1198,13 @@ CONSOLE_TAIL_S = 3.0
 
 
 def _console_tail(
-    src: LineSource, result: RunResult, sigs: tuple[str, ...], window_s: float
+    src: LineSource,
+    result: RunResult,
+    sigs: tuple[str, ...],
+    window_s: float,
+    stream: frame.Stream,
 ) -> None:
-    """Read serial for `window_s`: fail on a panic signature or on QEMU's exit."""
+    """Read serial for `window_s`: fail on a failing line (`run_failure`) or on QEMU's exit."""
     src.set_deadline(time.monotonic() + window_s)
     while True:
         kind, line = src.next_event()
@@ -1162,14 +1218,11 @@ def _console_tail(
                 f"{_qemu_report(result, exited=True)}"
             )
         result.lines.append(line)
-        for sig in sigs:
-            if sig in line:
-                result.panic_line = line
-                src.kill()
-                raise HarnessError(
-                    f"panic signature {sig!r} in the {window_s} s after the last reply: "
-                    f"{line}"
-                )
+        why = run_failure(line, stream, sigs)
+        if why is not None:
+            result.panic_line = line
+            src.kill()
+            raise HarnessError(f"{why[0]} in the {window_s} s after the last reply: {why[1]}")
 
 
 def run_qemu_console_input(
@@ -1183,6 +1236,9 @@ def run_qemu_console_input(
     `-display none` still has an i8042; QEMU `sendkey` injects set-1
     scancodes on IRQ1, the same path as a focused QEMU window.
     `line_source` replaces QEMU as in `run_qemu_and_check`.
+
+    `shell ready` and the replies are `/bin/sh`'s, so they match only
+    unframed lines; panic signatures match only kernel lines (DESIGN §2.6).
     """
     panic_signatures = _panic_sigs(cfg, PANIC_SIGNATURES, ())
     deadline = time.monotonic() + timeout_s
@@ -1193,6 +1249,7 @@ def run_qemu_console_input(
     )
 
     result = RunResult()
+    stream = frame.Stream()
     saw_ready = False
     saw_serial = False
     saw_ps2 = False
@@ -1207,14 +1264,15 @@ def run_qemu_console_input(
             if kind == "eof":
                 break
             result.lines.append(line)
-            for sig in panic_signatures:
-                if sig in line:
-                    result.panic_line = line
-                    src.kill()
-                    raise HarnessError(
-                        f"panic signature {sig!r} in: {line!r}"
-                    )
-            if not saw_ready and SHELL_READY_NEEDLE in line:
+            why = run_failure(line, stream, panic_signatures)
+            if why is not None:
+                result.panic_line = line
+                src.kill()
+                raise HarnessError(f"{why[0]} in: {why[1]!r}")
+            utext = frame.user_text(line)
+            if utext is None:
+                continue
+            if not saw_ready and SHELL_READY_NEEDLE in utext:
                 saw_ready = True
                 result.matched.append("shell_ready")
                 # Prompt is written without a newline; give the shell
@@ -1222,19 +1280,19 @@ def run_qemu_console_input(
                 time.sleep(0.2)
                 src.send_input(f"echo {SERIAL_ECHO_TOKEN}\n".encode())
                 continue
-            if saw_ready and not saw_serial and SERIAL_ECHO_TOKEN in line:
+            if saw_ready and not saw_serial and SERIAL_ECHO_TOKEN in utext:
                 # Line editor reprints the command; wait for the echo
                 # payload, not only the typed line.
-                if line.strip() == SERIAL_ECHO_TOKEN:
+                if utext.strip() == SERIAL_ECHO_TOKEN:
                     saw_serial = True
                     result.matched.append("serial_echo")
                     src.monitor("sendkey " + sendkey_chars(f"echo {PS2_ECHO_TOKEN}\n"))
                     continue
-            if saw_serial and not saw_ps2 and line.strip() == PS2_ECHO_TOKEN:
+            if saw_serial and not saw_ps2 and utext.strip() == PS2_ECHO_TOKEN:
                 saw_ps2 = True
                 result.matched.append("ps2_echo")
                 # A later reply step goes before the tail.
-                _console_tail(src, result, panic_signatures, CONSOLE_TAIL_S)
+                _console_tail(src, result, panic_signatures, CONSOLE_TAIL_S, stream)
                 src.quit()
                 break
     finally:
@@ -1243,9 +1301,9 @@ def run_qemu_console_input(
 
     report = _qemu_report(result, exited=not result.timed_out)
     if not saw_ready:
-        why = f"after {timeout_s}s" if result.timed_out else "before QEMU exited"
+        when = f"after {timeout_s}s" if result.timed_out else "before QEMU exited"
         raise HarnessError(
-            f"console input: no shell ready {why}; matched={result.matched}{report}"
+            f"console input: no shell ready {when}; matched={result.matched}{report}"
         )
     if not saw_serial:
         raise HarnessError(f"console input: serial echo missing{report}")
@@ -1278,7 +1336,7 @@ def drain_panic_tail(
         if kind != "line":
             return
         result.lines.append(line)
-        if PANIC_DONE in line:
+        if PANIC_DONE in (kernel_text(line) or ""):
             return
 
 
@@ -1288,18 +1346,26 @@ def check_ktest_output(
     *,
     pass_status: int = ISA_DEBUG_PASS,
 ) -> RunResult:
-    """Require begin then end, reject any FAIL line, require pass exit status."""
+    """Require begin then end, reject any FAIL line, require pass exit status.
+
+    `begin`, `FAIL`, `end` and the panic signatures match only kernel lines
+    (framed, DESIGN §2.6), so a user program's forged `FAIL` line is ignored.
+    """
     result = RunResult()
     result.exit_code = exit_code
+    stream = frame.Stream()
     saw_begin = False
     saw_end = False
     fails: list[str] = []
-    for line in lines:
-        result.lines.append(line)
-        for sig in PANIC_SIGNATURES:
-            if sig in line:
-                result.panic_line = line
-                raise HarnessError(f"panic signature {sig!r} in: {line!r}")
+    for raw in lines:
+        result.lines.append(raw)
+        why = run_failure(raw, stream)
+        if why is not None:
+            result.panic_line = raw
+            raise HarnessError(f"{why[0]} in: {why[1]!r}")
+        line = kernel_text(raw)
+        if line is None:
+            continue
         if KTEST_BEGIN in line:
             if saw_end:
                 raise HarnessError("ktest begin after end")
@@ -1333,7 +1399,8 @@ def run_qemu_until_exit(
     """Boot the ISO and wait for QEMU to exit (isa-debug-exit).
 
     `kill_after(line)` may return seconds-until-SIGKILL. The first non-None
-    wins (vibefs crash consistency). A kill is not a harness timeout.
+    wins (vibefs crash consistency). A kill is not a harness timeout. It gets
+    the raw line; a failing line (`run_failure`) ends the run.
     """
     if not shutil.which("qemu-system-x86_64"):
         raise HarnessError("qemu-system-x86_64 not on PATH")
@@ -1358,17 +1425,16 @@ def run_qemu_until_exit(
     deadline = time.monotonic() + timeout_s
     kill_at: float | None = None
     reader = DeadlineReader(proc.stdout.fileno(), deadline)
+    stream = frame.Stream()
 
     def take(line: str) -> None:
         result.lines.append(line)
-        for sig in panic_signatures:
-            if sig in line:
-                result.panic_line = line
-                drain_panic_tail(reader, result)
-                proc.kill()
-                raise HarnessError(
-                    f"panic signature {sig!r} in: {line!r}{serial_tail(result.lines)}"
-                )
+        why = run_failure(line, stream, panic_signatures)
+        if why is not None:
+            result.panic_line = line
+            drain_panic_tail(reader, result)
+            proc.kill()
+            raise HarnessError(f"{why[0]} in: {why[1]!r}{serial_tail(result.lines)}")
 
     try:
         while True:

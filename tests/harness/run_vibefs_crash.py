@@ -28,7 +28,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 
-from tests.harness import results
+from tests.harness import frame, results
 from tests.harness.harness import (
     EnvConfig,
     HarnessError,
@@ -132,15 +132,18 @@ def _one_round(env: EnvConfig, tools: Tools, rng: random.Random, round: int) -> 
                 raw = run_qemu_until_exit(
                     cfg,
                     timeout_s=env.timeout,
-                    kill_after=lambda line: jitter if line.strip() == want else None,
+                    kill_after=lambda line: (
+                        jitter if (frame.kernel_text(line) or "").strip() == want else None
+                    ),
                 )
             except HarnessError:
                 results.current().add_boot(qemu_argv(cfg, None), cfg, None)
                 raise
             results.current().add_boot(qemu_argv(cfg, None), cfg, raw.exit_code)
-            if READY not in raw.lines:
+            klines = frame.kernel_lines(raw.lines)
+            if READY not in klines:
                 raise HarnessError(f"no crash-ready (exit {raw.exit_code}, tail {raw.lines[-8:]})")
-            n = check_harness_kill(raw.exit_code, raw.lines, k)
+            n = check_harness_kill(raw.exit_code, klines, k)
             code = srv.stop(10.0)
             if code != 0:
                 raise HarnessError(f"nbd-cache exited {code}")

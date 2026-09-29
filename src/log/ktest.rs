@@ -225,3 +225,18 @@ pub(crate) fn test_serial_lines_whole() -> Outcome {
     }
     outcome
 }
+
+// ---------------------------------------------------------------------------
+// serial_frame (ROADMAP §10.2, DESIGN §2.6)
+
+/// A kernel line with a `\n`, a `\r` and a frame byte inside, then user
+/// console bytes that leave their line open, then a kernel line.
+/// `run_ktest.py`'s `_check_serial_frame` finds the first framed with each
+/// of the three as `?`, the user bytes unframed with the frame byte as `?`,
+/// and the last framed on a line of its own.
+pub(crate) fn test_serial_frame() -> Outcome {
+    crate::marker!("vibeOS: ktest: serial frame a\nb\rc\x1ed");
+    crate::console_init::write(b"\x1eserial-frame open");
+    crate::marker!("vibeOS: ktest: serial frame after open");
+    Outcome::Ok
+}

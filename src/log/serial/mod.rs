@@ -1,6 +1,6 @@
 //! COM1 serial writer. Uses the register constants from `vibeos::uart`.
 //!
-//! One call writes one line. `Serial::write_fmt` formats the whole line,
+//! One call writes one line, framed (DESIGN §2.6, [`raw::put_line`]). `Serial::write_fmt` formats the whole line,
 //! newline included, into a stack buffer of `LINE_CAP` bytes and writes it
 //! under one TX hold, so another CPU cannot split it (DESIGN §7.7, ROADMAP
 //! §10.2 F138); a longer line is cut and ends in `...`. `write_str` writes
@@ -74,16 +74,17 @@ impl Serial {
         emit_bytes(content, true);
     }
 
-    /// Console bytes a process wrote: not captured, and not a kernel line.
+    /// Console bytes a process wrote: not captured, and not a kernel line,
+    /// so unframed, with each frame byte escaped (DESIGN §2.6).
     /// `console_init::write` is the only caller.
     pub fn write_user(bytes: &[u8]) {
         if halting() {
             let _irq = InterruptGuard::enter();
-            raw::write_after_halt(bytes);
+            raw::user_after_halt(bytes);
             return;
         }
         let _g = TX.lock();
-        raw::write_bytes(bytes);
+        raw::put_user(bytes);
     }
 
     /// Poll COM1 RX. No lock; caller holds IRQs off if racing a consumer.
@@ -102,7 +103,7 @@ impl Serial {
         let Some(_g) = TX.try_lock() else {
             return false;
         };
-        raw::write_bytes(bytes);
+        raw::put_line(bytes);
         true
     }
 }
@@ -119,7 +120,7 @@ fn emit(line: &[u8], capture: bool) {
         self::capture(line);
     }
     let _g = TX.lock();
-    raw::write_bytes(line);
+    raw::put_line(line);
 }
 
 /// `content` as one line: sent as it is when it already ends in its `\n`

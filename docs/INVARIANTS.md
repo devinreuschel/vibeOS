@@ -648,8 +648,15 @@ console `write` today, the ROADMAP §13.7 serial TTY and its echo later) prints 
 as `?`, and a record a user writes through `/dev/kmsg` prints unframed. Before a framed line, the
 kernel writes a newline when the last byte on that UART was user output that did not end one. The
 framebuffer console never draws the frame, and a UART that is not the console carries neither frame
-nor escape. Rule; not yet enforced: nothing is framed, and the harness matches every line (ROADMAP
-§10.2).
+nor escape.
+
+As built (ROADMAP §10.2): `serial::raw`, the only code that writes the UART data register, frames and
+escapes every kernel line through `vibeos::log::line::kernel_line`, and the console `write` that user
+descriptors reach sends user bytes through `Serial::write_user`, which escapes each 0x1E and adds no
+frame (`line::user_bytes`). The flag that says a user line is open starts set, since the loader's last
+byte is unknown, so the kernel's first line always starts on a fresh one. A kernel line over 256 bytes
+is cut and ends in `...`. `tests/harness/frame.py` classifies each line for every driver: kernel text
+from a framed line, user text from an unframed one.
 
 ## 2.7 Invariant register
 
@@ -693,7 +700,7 @@ that review cites means the review's text.
 | I25 | Per-thread CPU state is saved and restored in full (§7.5) | `syscall_init::on_switch`, `thread::switch_context` | documented | No: `FS_BASE` is not switched (ROADMAP §11.6, F022); `fork` and `execve` get the FPU state wrong (ROADMAP §10.6, F069) |
 | I26 | Every kernel stack has a guard page (§2.4) | `kva_init::alloc_guarded_stack` | documented | No: boot runs on Limine's unguarded stack (ROADMAP §10.6, F072) |
 | I27 | `vibeos-core` does not panic on data (§2.5) | clippy deny on `unwrap`, `expect`, `panic`; `indexing_slicing` and `arithmetic_side_effects` denied in the byte parsers `scripts/check_core_stable.py` lists | enforced by clippy; vibefs v1 excepted | Partly: vibefs v1 and its truncate-grow still panic on crafted input; §2.5 lists the cases and their ROADMAP lines |
-| I28 | A line the harness takes as the kernel's is framed, and no user byte can produce the frame (§2.6) | `serial::Serial`, `console_init::write` | documented | No: nothing is framed, and the harness matches every line, so ring 3 can print a contract line (`/bin/sh` prints `shell ready`) or fail a run with `panicked at` (ROADMAP §10.2) |
+| I28 | A line the harness takes as the kernel's is framed, and no user byte can produce the frame (§2.6) | `serial::raw`, `console_init::write`, `tests/harness/frame.py` | enforced (the `/bin/tests` forged-line case, `test_frame.py`) | Yes |
 | I29 | A catch hook intercepts only a CPL-0 fault on the CPU that armed it, inside an in-guest test's catch window | `arch::catch::arm` (`ARMED`, the arming CPU's token) | enforced by the in-guest `catch_ignores_other_cpu` and `catch_ignores_user_frame` | Yes: `arch::catch` and the dispatcher's intercept compile only with `kernel_tests`, so production has no catch hook; `intercept`, `on_panic` and `on_alloc_error` act only on the CPU whose token `ARMED` holds, `intercept` only on a CPL-0 frame, and each CPU records its catch in its own `LAST` slot. A window must not span a CPU migration, which nothing does while no preempted thread changes CPU (I36) |
 | I30 | Interrupt and exception handlers run with RFLAGS.AC=0 (§5.10 rule 5) | `arch/x86_64/idt.rs` stubs | enforced by construction: every stub's first instruction is `clac` where the CPU has SMAP | Yes |
 | I31 | Every IF=0 stretch outside §2.9 rule 2's exemptions retires at most 100,000 instructions ([§2.9](#29-preemption-and-interrupt-state) rule 2) | §2.9; ROADMAP §10.3's IF-off tracer | documented | No: the heap's first-fit `alloc`, its address-ordered insertion on `dealloc`, and a moving `realloc`'s copy run under the IRQ-off HEAP lock over a free list whose length user churn sets (ROADMAP §12.6); the buddy's double-free check walks the free lists (ROADMAP §12.1, F029); a `klog!` emit waits on the UART with IF off, about 8 ms per 96-byte line on a 115200-baud 16550, which no QEMU tier paces (ROADMAP §19.5); a shootdown survives a violation: `wait_acks` keeps waiting and logs the CPUs that have not acknowledged once a second (§7.9, F011) |

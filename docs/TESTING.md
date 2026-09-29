@@ -90,7 +90,8 @@ vibeOS: ktest: end
 ```
 
 The harness requires `begin` and `end`, rejects any `FAIL` line and any panic signature, and checks
-the exit status. ROADMAP §10.2 makes it read each of these lines only when framed (§2.6).
+the exit status. It reads each of these lines only when framed (§2.6), so a user program's copy, such as
+the unframed `?vibeOS: ktest: FAIL forged` line `/bin/tests` prints, is ignored.
 `isa-debug-exit` at I/O port `0xf4` maps a written value to host exit status `(value << 1) | 1`:
 
 | Write | Host exit | Meaning |
@@ -143,8 +144,20 @@ vibeOS: ktest: serial noise klog cpu<c> <n> <pad>
 lines in a loop, while CPU 0 prints the 1,000 numbered `serial whole` lines; `<pad>` is a fixed
 36-byte string. When the run holds `vibeOS: ktest: ok serial_lines_whole`, `_check_serial_whole`
 requires each numbered line exactly once and fails on any line that holds `serial whole` or
-`serial noise` but is not exactly one of these lines, a fragment of a line another CPU split. A
-log-ring replay of one (`dmesg`, a dump's `logrec`) is checked for fragments and not counted.
+`serial noise` but is not exactly one of these lines, a fragment of a line another CPU split. It reads
+kernel lines; a log-ring replay of one (a dump's `logrec`) is checked for fragments and not counted.
+
+```
+vibeOS: ktest: serial frame a?b?c?d
+?serial-frame open
+vibeOS: ktest: serial frame after open
+```
+
+`serial_frame` (§2.6) prints a kernel line with a `\n`, a `\r` and a 0x1E inside it, then writes
+`\x1eserial-frame open` through the console `write` that user descriptors reach, then a kernel line.
+When the run holds `vibeOS: ktest: ok serial_frame`, `_check_serial_frame` requires the first framed
+with each of the three as `?`, the second as the exact unframed line `?serial-frame open`, and the
+third framed on a later line of its own, since the kernel breaks the open user line first.
 
 When a test fails, print enough to diagnose it without a rerun. A failing test that only prints its
 name costs a full debug cycle to learn anything.
@@ -169,10 +182,11 @@ removed silently. The executable contract is `boot_contract_markers()` in `tests
 the list below gives its order, the paragraphs after it add the lines that depend on the machine (the
 calibration source, the LAPIC timer mode, the per-AP pairs, and the partition children), and the
 `_start` table in [section 3.3](BOOT.md#33-_start-order) says why each step sits where it does. Every line in
-it is the kernel's except `shell ready`, which `/bin/sh` prints in the production ISO. ROADMAP §10.2
-makes the harness match the kernel's lines only when framed (§2.6), and a line a user program prints
-(`shell ready`, the ROADMAP §10.5 `utest_*` lines, `user: tests ok`) only when unframed; today it
-matches every line.
+it is the kernel's except `shell ready`, which `/bin/sh` prints in the production ISO. The harness
+matches the kernel's lines only when framed (§2.6), and a line a user program prints (`shell ready`,
+the ROADMAP §10.5 `utest_*` lines, `user: tests begin`, `ok` and `fail`, `user: dup ok`, the `init:`
+lines, and the console-input replies) only when unframed. `Marker.source` says which a marker is;
+until the registry below gives each line its source, `frame.USER_PREFIXES` lists the user lines.
 
 Planned (ROADMAP §10.2): one registry, `tests/contract/markers.toml`, holds every line the harness
 knows (contract markers, diagnostics, failure lines and halt reasons, and the ktest and utest
@@ -293,9 +307,10 @@ other run it fails the run, since a recovery no test expected is a bug a timeout
 lost kick ([section 10.4](BLOCK.md#104-virtio-blk)) that shows only as a 30 s pause.
 
 User programs print these strings too: the ROADMAP §10.5 runtime reports a panic as `panicked at` on
-fd 2, and a fuzzer writes random bytes. ROADMAP §10.2 makes the harness scan framed lines only
-(§2.6). Before the kernel's first framed line it fails fast on Limine's panic line, the one failure
-that cannot be framed.
+fd 2, and a fuzzer writes random bytes. The harness scans framed lines only (§2.6), and fails on
+`user: tests fail` only when unframed. Before the kernel's first framed line it fails fast on Limine's
+panic line, the one failure that cannot be framed: `PANIC`, optional ANSI colour codes, then `: `
+(`frame.LIMINE_PANIC`). After the first framed line the same text is just a user line.
 
 Expected-panic e2e matches boot markers only against the lines before the first panic signature (or
 dump banner), so the dump's `vibeOS: logrec:` replay of earlier records cannot satisfy one, and a
@@ -346,6 +361,15 @@ serial lines carry only the guest's output. When QEMU exits before the last mark
 the missing marker, QEMU's exit status, and the last 20 lines of its stderr, then the serial tail, so
 a firmware QEMU could not load reads as that and not only as `missing marker 'serial_online'`
 (F079); a timeout shows the stderr lines too when there are any.
+
+Every driver classifies each serial line through `tests/harness/frame.py` (DESIGN §2.6): a framed line
+is the kernel's and is matched with its frame stripped, an unframed line is a user program's or the
+loader's, and each driver checks the three failure tuples, the kernel's `PANIC_SIGNATURES` on framed
+lines, `frame.USER_FAILURES` on unframed ones, and `frame.LIMINE_SIGNATURES` before the first framed
+line. `/bin/tests` writes `\x1evibeOS: ktest: FAIL forged`, `\x1epanicked at forged` and
+`\x1e#GP\x1eforged` to fd 1 and to fd 2; the run stays green, and `run_e2e.py`'s `_check_forged_lines`
+requires each as an unframed line (`?vibeOS: ktest: FAIL forged`, `?panicked at forged`,
+`?#GP?forged`) exactly twice and no framed line holding `forged`, and records `forged_user_lines`.
 
 The `vibefs_crash` build (`fs::vibefs_crash::crash_loop`) prints no boot contract past its own lines,
 which `run_vibefs_crash.py` knows:
