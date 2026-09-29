@@ -114,6 +114,25 @@ class TestResults(unittest.TestCase):
             },
         )
 
+    def test_record_ktest_lines_timed_and_run_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            r = results.Results("t", out_dir=Path(d))
+            r.record_ktest_lines(
+                [
+                    "vibeOS: ktest: begin 3",
+                    "vibeOS: ktest: run alpha 10000",
+                    "vibeOS: ktest: ok alpha (1234 us)",
+                    "vibeOS: ktest: info alpha: spins 3",
+                    "vibeOS: ktest: run beta 500",
+                    "vibeOS: ktest: FAIL beta: deadline",
+                    "vibeOS: ktest: end",
+                ]
+            )
+            data = _load(r.write())
+        self.assertEqual(
+            data["ktest"], {"passed": ["alpha"], "skipped": [], "failed": ["beta"]}
+        )
+
     def test_missing_marker_and_failure_line(self) -> None:
         self.assertEqual(
             results.missing_marker("timed out after 1.0s; 3/40 markers; missing 'heap_ok'\n--"),
@@ -191,7 +210,7 @@ class TestResults(unittest.TestCase):
                 K("vibeOS: block: vdap1 128 sectors"),
                 K("vibeOS: block: vdap2 7647 sectors"),
                 K("vibeOS: persist: wrote"),
-                K("vibeOS: ktest: begin"),
+                K("vibeOS: ktest: begin 1"),
                 K("vibeOS: ktest: ok alpha"),
                 # A user program's copy of a verdict is not recorded.
                 "?vibeOS: ktest: FAIL forged",

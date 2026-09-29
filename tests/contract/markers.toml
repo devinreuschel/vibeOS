@@ -288,14 +288,14 @@ when = ["!panic_test"]
 # §1.6 In-guest test infrastructure
 
 [[marker]]
-text = "vibeOS: ktest: begin"
+text = "vibeOS: ktest: begin <n>"
 kind = "test"
 arch = "both"
 source = "kernel"
 section = "§1.6"
 
 [[marker]]
-text = "vibeOS: ktest: ok <name>"
+text = "vibeOS: ktest: ok <name> (<us> us)"
 kind = "test"
 arch = "both"
 source = "kernel"
@@ -1126,6 +1126,37 @@ section = "§9.8"
 [[marker]]
 text = "vibeOS: boot: cmdline: <text>"
 kind = "diagnostic"
+arch = "both"
+source = "kernel"
+section = "§10.2"
+
+# The ktest runner protocol (TESTING.md §8.2, C-KTEST-PROTO): the line before
+# each run, a test's counters, a missed deadline (printed by the timer tick
+# that then panics), and a bad selection option (printed before `begin`).
+[[marker]]
+text = "vibeOS: ktest: run <name> <deadline_ms>"
+kind = "test"
+arch = "both"
+source = "kernel"
+section = "§10.2"
+
+[[marker]]
+text = "vibeOS: ktest: info <name>: <text>"
+kind = "test"
+arch = "both"
+source = "kernel"
+section = "§10.2"
+
+[[marker]]
+text = "vibeOS: ktest: FAIL <name>: deadline"
+kind = "failure"
+arch = "both"
+source = "kernel"
+section = "§10.2"
+
+[[marker]]
+text = "vibeOS: ktest: bad option <key>=<value>"
+kind = "failure"
 arch = "both"
 source = "kernel"
 section = "§10.2"

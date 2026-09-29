@@ -1,11 +1,13 @@
-//! In-guest tests for smp (kernel_tests only). Rows: the list in crate::ktest.
+//! In-guest tests for smp (kernel_tests only). Rows: [`TESTS`].
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use vibeos::thread::ThreadId;
 
 use crate::ipi_init;
-use crate::ktest::{Outcome, cpu_remote, quiescent_free_frames, registry_tid, spin_until_ns};
+use crate::ktest::{
+    Outcome, Test, cpu_remote, quiescent_free_frames, registry_tid, spin_until_ns, test,
+};
 use crate::per_cpu_init;
 use crate::sched_init;
 use crate::smp_init;
@@ -330,3 +332,13 @@ pub fn trampoline_installed() -> bool {
     // wrote it before any test runs; established here.
     unsafe { smp_init::tramp_va(page).read_volatile() == 0xFA }
 }
+
+/// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
+/// runs them (DESIGN §8.2).
+pub(crate) const TESTS: &[Test] = &[
+    test("per_cpu_bsp", test_per_cpu_bsp),
+    test("per_cpu_identity", test_per_cpu_identity),
+    test("trampoline_page", test_trampoline_page),
+    test("failed_ap_cleanup", test_failed_ap_cleanup),
+    test("percpu_remote_view", percpu_remote_view),
+];

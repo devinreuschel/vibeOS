@@ -1,4 +1,4 @@
-//! In-guest tests for console (kernel_tests only). Rows: the list in crate::ktest.
+//! In-guest tests for console (kernel_tests only). Rows: [`TESTS`].
 
 mod hooks;
 
@@ -11,7 +11,9 @@ use vibeos::fb::PIECE_BYTES;
 
 use crate::fb_init::{self, testing as fb_testing};
 use crate::ktest::user::{self, Image, Layout, user_code};
-use crate::ktest::{Outcome, cpu_remote, free_frames_owned, sleep_until_s19, spin_until};
+use crate::ktest::{
+    Outcome, Test, cpu_remote, free_frames_owned, sleep_until_s19, spin_until, test,
+};
 use crate::kva_init;
 use crate::proc_init::testing as proc_testing;
 use crate::x86;
@@ -493,3 +495,22 @@ pub(crate) fn test_lifetime_console_write_acks_shootdown() -> Outcome {
     }
     Outcome::Ok
 }
+
+/// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
+/// runs them (DESIGN §8.2).
+pub(crate) const TESTS: &[Test] = &[
+    test("fb_bgrx_roundtrip", test_fb_bgrx_roundtrip),
+    test("fb_pitch", test_fb_pitch),
+    test("fb_cr_home", test_fb_cr_home),
+    test("kbd_gsi_unmasked", test_kbd_gsi_unmasked),
+    test("kbd_8042_clock", test_kbd_8042_clock),
+    test("kbd_ps2_irq", test_kbd_ps2_irq),
+    test("console_mux", test_console_mux),
+    test("kbd_ring_drain", test_kbd_ring_drain),
+    test("console_write_newlines", test_console_write_newlines).deadline(60_000),
+    test(
+        "lifetime_console_write_acks_shootdown",
+        test_lifetime_console_write_acks_shootdown,
+    )
+    .deadline(60_000),
+];

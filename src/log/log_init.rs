@@ -115,6 +115,23 @@ pub fn set_max_level(max: Level) {
     with_logger(|l| l.filter.set(max));
 }
 
+/// Apply `loglevel=` from the kernel command line (ROADMAP §10.2, BOOT.md
+/// §3.2): Linux's numbering, mapped by `vibeos::log::level_from_loglevel`.
+/// Absent leaves the default; any other value is ignored with a warning.
+pub fn apply_boot_level() {
+    let Some(v) = crate::boot::cmdline().get("loglevel") else {
+        return;
+    };
+    match vibeos::log::level_from_loglevel(v) {
+        Some(l) => set_max_level(l),
+        None => crate::klog!(
+            Level::Warn,
+            "vibeOS: log: loglevel={}: not a number, ignored",
+            vibeos::boot::cmdline::Escaped(v)
+        ),
+    }
+}
+
 pub fn max_level() -> Level {
     runtime()
 }

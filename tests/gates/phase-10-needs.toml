@@ -122,8 +122,11 @@ why = "claim: its test's orphan is freed by §10.5's reaper rule"
 
 [[box]]
 key = "the in-guest registry split per subsystem"
-needs = ["the in-guest registry runs in production's interrupt context"]
-why = "text of the registry box: T1's per-test deadline needs IF=1"
+needs = [
+  "the in-guest registry runs in production's interrupt context",
+  "one directory per subsystem, portable",  # L1280
+]
+why = "text of the registry box: T1's per-test deadline needs IF=1; claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 [[box]]
 key = "every call that may sleep checks that it may"

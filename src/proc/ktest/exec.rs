@@ -1,5 +1,5 @@
 //! In-guest tests for proc (kernel_tests only): ring-3 images, user entry and exec.
-//! Rows: the list in crate::ktest.
+//! Rows: the parent `ktest.rs`'s `TESTS`.
 
 use alloc::vec::Vec;
 use core::fmt;

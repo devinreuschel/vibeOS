@@ -1,8 +1,8 @@
-//! In-guest tests for shell (kernel_tests only). Rows: the list in crate::ktest.
+//! In-guest tests for shell (kernel_tests only). Rows: [`TESTS`].
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::ktest::Outcome;
+use crate::ktest::{Outcome, Test, test};
 use crate::shell_init;
 use crate::thread_init;
 use crate::time_init;
@@ -119,3 +119,12 @@ pub(crate) fn test_lspci_cmd() -> Outcome {
         _ => Outcome::Fail("did not run"),
     }
 }
+
+/// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
+/// runs them (DESIGN §8.2).
+pub(crate) const TESTS: &[Test] = &[
+    test("shell_registry", test_shell_registry),
+    test("shell_dispatch", test_shell_dispatch),
+    test("shell_dmesg_level", test_shell_dmesg_level),
+    test("lspci_cmd", test_lspci_cmd),
+];

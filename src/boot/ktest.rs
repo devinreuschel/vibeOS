@@ -1,4 +1,4 @@
-//! In-guest tests for boot (kernel_tests only). Rows: the list in crate::ktest.
+//! In-guest tests for boot (kernel_tests only). Rows: [`TESTS`].
 
 use vibeos::boot::cmdline::{CMDLINE_MAX, CmdlineBuf};
 use vibeos::boot::{FW_CFG_DMA_READ, FW_CFG_NAME_MAX};
@@ -7,7 +7,7 @@ use vibeos::paging::VirtAddr;
 
 use super::fw_cfg_init::{self, FwCfgError, FwCfgFile};
 use crate::dma_init;
-use crate::ktest::Outcome;
+use crate::ktest::{Outcome, Test, test};
 use crate::paging_init;
 
 /// `BootInfo` agrees with what PMM and paging built from it.
@@ -170,3 +170,16 @@ pub(crate) fn test_strace_flag_matches_cmdline() -> Outcome {
         Outcome::Fail("trace_enabled differs from vibeos.strace")
     }
 }
+
+/// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
+/// runs them (DESIGN §8.2).
+pub(crate) const TESTS: &[Test] = &[
+    test("bootinfo_consistent", test_bootinfo_consistent),
+    test("fw_cfg_probe", test_fw_cfg_probe),
+    test("fw_cfg_dma", test_fw_cfg_dma),
+    test("cmdline_captured", test_cmdline_captured),
+    test(
+        "strace_flag_matches_cmdline",
+        test_strace_flag_matches_cmdline,
+    ),
+];
