@@ -18,6 +18,18 @@
 #![no_std]
 #![no_main]
 #![feature(alloc_error_handler)]
+// No panicking call on a path untrusted input reaches (AGENTS.md rule 4,
+// ROADMAP §10.1). A site a kernel invariant bounds keeps an `#[allow]` naming
+// the invariant; a module not yet audited carries an audit-pending allow on
+// its `mod` line (C-LINTS).
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented
+)]
 // The panic-test build gates the entire non-panic tail behind
 // `#[cfg(not(feature = "panic_test"))]`, which leaves the Limine
 // requests, paging init, and helpers technically dead. That is
@@ -36,16 +48,20 @@ extern crate alloc;
 )]
 mod acpi;
 #[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
+#[allow(clippy::expect_used, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::let_underscore_must_use,
     reason = "audit pending, ROADMAP §10.1"
 )]
+#[allow(clippy::panic, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::undocumented_unsafe_blocks,
     reason = "audit pending, ROADMAP §10.1"
 )]
+#[allow(clippy::unwrap_used, reason = "audit pending, ROADMAP §10.1")]
 mod arch;
 #[allow(clippy::disallowed_macros, reason = "audit pending, ROADMAP §10.1")]
+#[allow(clippy::expect_used, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::let_underscore_must_use,
     reason = "audit pending, ROADMAP §10.1"
@@ -122,10 +138,12 @@ mod irq;
     reason = "audit pending, ROADMAP §10.1"
 )]
 mod log;
+#[allow(clippy::expect_used, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::let_underscore_must_use,
     reason = "audit pending, ROADMAP §10.1"
 )]
+#[allow(clippy::panic, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::undocumented_unsafe_blocks,
     reason = "audit pending, ROADMAP §10.1"
@@ -137,24 +155,29 @@ mod mm;
     clippy::let_underscore_must_use,
     reason = "audit pending, ROADMAP §10.1"
 )]
+#[allow(clippy::panic, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::undocumented_unsafe_blocks,
     reason = "audit pending, ROADMAP §10.1"
 )]
 mod proc;
+#[allow(clippy::expect_used, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::let_underscore_must_use,
     reason = "audit pending, ROADMAP §10.1"
 )]
+#[allow(clippy::panic, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::undocumented_unsafe_blocks,
     reason = "audit pending, ROADMAP §10.1"
 )]
+#[allow(clippy::unreachable, reason = "audit pending, ROADMAP §10.1")]
 mod sched;
 #[allow(
     clippy::let_underscore_must_use,
     reason = "audit pending, ROADMAP §10.1"
 )]
+#[allow(clippy::panic, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::undocumented_unsafe_blocks,
     reason = "audit pending, ROADMAP §10.1"
@@ -165,11 +188,14 @@ mod shell;
     clippy::let_underscore_must_use,
     reason = "audit pending, ROADMAP §10.1"
 )]
+#[allow(clippy::panic, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::undocumented_unsafe_blocks,
     reason = "audit pending, ROADMAP §10.1"
 )]
 mod smp;
+#[allow(clippy::expect_used, reason = "audit pending, ROADMAP §10.1")]
+#[allow(clippy::panic, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::undocumented_unsafe_blocks,
     reason = "audit pending, ROADMAP §10.1"
@@ -246,6 +272,7 @@ static REQ_END: RequestsEndMarker = RequestsEndMarker::new();
     clippy::let_underscore_must_use,
     reason = "audit pending, ROADMAP §10.1"
 )]
+#[allow(clippy::panic, reason = "audit pending, ROADMAP §10.1")]
 pub extern "C" fn _start() -> ! {
     // Step 1: serial. Nothing before this is debuggable.
     serial::Serial::init();
@@ -284,10 +311,12 @@ pub extern "C" fn _start() -> ! {
 /// without duplicating markers.
 #[cfg(not(feature = "panic_test"))]
 #[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
+#[allow(clippy::expect_used, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::let_underscore_must_use,
     reason = "audit pending, ROADMAP §10.1"
 )]
+#[allow(clippy::panic, reason = "audit pending, ROADMAP §10.1")]
 #[allow(
     clippy::undocumented_unsafe_blocks,
     reason = "audit pending, ROADMAP §10.1"

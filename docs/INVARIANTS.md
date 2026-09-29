@@ -534,11 +534,12 @@ Rule: `vibeos-core` (`crates/core/src/lib.rs`) does not panic on data; its parse
 module error. Enforced only for `unwrap`, `expect`, and `panic!`: clippy denies `unwrap_used`,
 `expect_used`, and `panic` on that crate (allowed in `#[cfg(test)]`). Neither `indexing_slicing` nor
 `arithmetic_side_effects` is enabled, and both Cargo profiles set `overflow-checks = true` (§3.5),
-which turns an arithmetic overflow into a panic. Planned (ROADMAP §10.1): both lints are denied in every
-byte parser ROADMAP §10.2's fuzzers cover, vibefs v1 excepted until ROADMAP §14.8 retires it, and
-the kernel binary denies `unwrap_used`, `expect_used`, `panic`, `unreachable`, `todo`, and
-`unimplemented` crate-wide, where a site a kernel invariant bounds keeps an `#[allow]` that names the
-invariant (§9.4). Crafted input panics portable code: a FAT BPB whose
+which turns an arithmetic overflow into a panic. The kernel binary denies `unwrap_used`,
+`expect_used`, `panic`, `unreachable`, `todo`, and `unimplemented` crate-wide (`src/main.rs`), where
+a site a kernel invariant bounds keeps an `#[allow]` that names the invariant (§9.4); not yet
+enforced: a module not yet audited carries an audit-pending allow on its `mod` line until ROADMAP
+§10.1's sweep of it. Planned (ROADMAP §10.1): both lints are denied in every byte parser ROADMAP
+§10.2's fuzzers cover, vibefs v1 excepted until ROADMAP §14.8 retires it. Crafted input panics portable code: a FAT BPB whose
 `rsvd + num_fats * FATSz32` overflows in `parse_bpb` (ROADMAP §10.2, F064); a CRC-valid vibefs leaf whose count
 exceeds the per-leaf maximum (F061; ROADMAP §14.8 retires v1 for a v2 that validates every block it reads); a vibefs truncate-grow that keeps `F_INLINE`
 past 128 bytes (ROADMAP §13.9, F062). Panics in the kernel binary end in the binding order above.
