@@ -1197,7 +1197,8 @@ pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
     r
 }
 
-#[cfg(feature = "kernel_tests")]
+/// Why the current thread's last wait ended. Valid after `schedule`
+/// returns from a wait.
 pub fn last_wait_outcome() -> WaitOutcome {
     let p = per_cpu_init::current_thread();
     assert!(!p.is_null(), "no current thread");

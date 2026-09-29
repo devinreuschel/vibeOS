@@ -1040,8 +1040,7 @@ place (I9; ROADMAP §10.10, F012), address spaces are reached through `&'static`
 from table-owned boxes (ROADMAP §10.6, F019), block completions point into stack frames (ROADMAP
 §12.5, F042), a pid is the index of its process-table slot, handed out lowest first
 (ROADMAP §10.4, F127), and a tid is its TCB slot index, in a space of its own. `kalloc::TryArc`
-implements rule 6's deferred release; nothing implements rule 3's operation gate yet
-(ROADMAP §10.4). A process's working
+implements rule 6's deferred release, and `sync::OpGate` rule 3's operation gate (ROADMAP §10.4). A process's working
 directory is a path string: one kernel-global `file_init::CWD` serves every process, and `Proc::cwd`
 is a buffer nothing reads (ROADMAP §10.4, F057).
 

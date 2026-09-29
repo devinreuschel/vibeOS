@@ -326,6 +326,11 @@ fn normal_boot_tail() {
     // defers to this CPU's list, and a worker releases it.
     vibeos::kalloc::set_release_context(sync_init::may_release_here);
     vibeos::kalloc::set_deferral(work_init::defer_release);
+    // DESIGN §2.11 rule 3: `OpGate::kill` sleeps on SCHED from here.
+    vibeos::sync::set_gate_wait(
+        sync::blocking_init::gate_sleep,
+        sync::blocking_init::gate_wake,
+    );
     crate::marker!(marker::SCHED_CPU0);
     crate::marker!(marker::IRQ_ENABLED);
 
