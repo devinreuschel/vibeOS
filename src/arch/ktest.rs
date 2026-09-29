@@ -31,6 +31,10 @@ use crate::x86::{
     CR4_OSXMMEXCPT, CR4_PAE, CR4_PGE,
 };
 
+mod uaccess;
+
+pub(crate) use uaccess::*;
+
 const CR0_EM: u64 = 1 << 2;
 const CR0_NW: u64 = 1 << 29;
 const CR0_CD: u64 = 1 << 30;

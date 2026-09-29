@@ -356,10 +356,12 @@ per-CPU inbox plus a reschedule IPI. More SMP-specific rules in [section 7.7](SM
   window's first 2 MiB is executable, though only the trampoline page (§7.3) is fetched, and only
   during AP bring-up (ROADMAP §10.6, F085).
 - A value copied to user memory has no padding and no uninitialized bytes. Reading a padding byte is
-  undefined behaviour in Rust, and copying one out leaks kernel stack or heap. A typed copy-out takes
-  only a type whose bytes are all initialized, proved at compile time (ROADMAP §10.6); a byte slice
-  passes as it is. Holds today only because every copy-out takes a byte slice built by hand; nothing
-  checks it until that box lands.
+  undefined behaviour in Rust, and copying one out leaks kernel stack or heap. The typed copy-out,
+  `uaccess::copy_to_user_val`, takes only a type bounded by `zerocopy`'s `IntoBytes + Immutable`,
+  whose derive refuses at compile time a type with padding or uninitialized bytes (a `compile_fail`
+  doctest on it copies out a `#[repr(C)]` struct with a hole); the byte form, `copy_to_user`, takes
+  a `&[u8]`. A uapi struct whose Linux layout has an implicit hole declares it as an explicit field
+  that the kernel zeroes (`_pad: [u8; N]`).
 - A second-level translation of guest memory (an EPT or NPT entry on x86_64, a stage-2 entry on
   aarch64) is a mapping of the host frame behind it, since ROADMAP §21.2 backs guest RAM with the
   VMM's address space. Every change or removal of a user PTE (`munmap`, a COW write-protect or
@@ -570,9 +572,10 @@ names each ring-0 case that continues instead of halting. A kernel `#BP`
 logs and continues. Planned (ROADMAP §17.4, §18.4): so do three ring-0 `#DB` cases, which §5.2's row
 lists: a hit on a debug slot the current thread's tracer armed, a stray single step, and, in the
 data-race detector's build, a hit on its own slots. Every other exception taken in ring 0 dumps and
-halts in the same order as `#[panic_handler]`. Planned (ROADMAP §10.6): a `#PF` (on aarch64, a data
-abort) at CPL 0 whose faulting instruction has an exception-table entry is not a kernel fault; only
-the §5.1 user-memory accessors have entries, and §5.1 says how each kind ends. Rule: ring 3 never
+halts in the same order as `#[panic_handler]`. A `#PF` at CPL 0 whose faulting instruction has an
+exception-table entry, with CR2 in the user half, is not a kernel fault: it resumes at the entry's
+fixup. Only the §5.1 user-memory accessors have entries, and §5.1 says how each kind ends. Planned
+(ROADMAP §11.6): the same rule for an aarch64 data abort at EL1. Rule: ring 3 never
 halts the kernel. An exception raised by ring-3 code, or by a return to ring 3, sends that process
 the signal §5.2 gives the vector (§11.5 the exception class, on aarch64), and the kernel keeps
 running. The signal's action then applies, as on Linux: from ROADMAP §13.8 a handler may catch it,
@@ -683,7 +686,7 @@ that review cites means the review's text.
 | I4 | Kernel code outside the §5.10 entry and exit sequences runs with `GS_BASE` = this CPU's `PerCpu` (§5.10) | `arch::gs`, `per_cpu_init` | documented | No: the IF=1 window in `syscall_init::first_return` (F006) and a fault on the return-to-user `iretq` (F007) run on the user base (ROADMAP §10.6) |
 | I5 | One entry stub per vector makes the `swapgs` decision (§5.10 rule 1) | `arch/x86_64/idt.rs` | enforced by construction: `idt::init` points every gate at a stub it generates, and `scripts/check_entry.py` fails on an `x86-interrupt` handler outside `src/arch/` | Yes |
 | I6 | Ring 3 never halts the kernel, pid 1's exit excepted (§2.5, §5.2, §11.5) | `proc_init::try_user_fault` | documented | No: the I4 windows halt (ROADMAP §10.6) |
-| I7 | The kernel reads or writes user memory only through the §5.1 user-memory accessors, and writes an address space that is not running only through the fill API (ROADMAP §10.6) | `addr_space/mod.rs`; the arch accessors from ROADMAP §10.6 | enforced by SMAP where the CPU has it (PAN on aarch64, ROADMAP §11.6); the fill-API rule is documented | Partly: today's accessors copy through the physmap after `check_user_range`, and `write_bytes` ignores the PTE's `WRITABLE` bit (ROADMAP §10.6, F023) |
+| I7 | The kernel reads or writes user memory only through the §5.1 user-memory accessors, and writes an address space that is not running only through the fill API (ROADMAP §10.6) | `vibeos::proc::uaccess` and `arch::x86_64::uaccess` | enforced by SMAP where the CPU has it (PAN on aarch64, ROADMAP §11.6); the fill-API rule is documented | Partly: the physmap helpers remain for the loader and `clone_anon` until the fill-API box (ROADMAP §10.6, F023) |
 | I8 | One thread per address space changes its regions, and another CPU changes its page tables only under its page-table lock (§2.11) | process model | assumed | Yes: only the owning thread touches a space. Lock-free user copies, local-only `invlpg`, and `&'static AddressSpace` depend on it. ROADMAP §10.6 replaces `&'static` with a counted object, §12.1's reverse map changes page tables from other CPUs under the space's page-table lock, §12.3 shoots down every CPU in the space's set, and §13.1's threads bring the address-space lock |
 | I9 | TCBs are never freed, so a `*mut Tcb` stays valid | 64-slot table, `thread_init` | assumed; slot reuse enforced by the in-guest `lifetime_dead_slot_on_cpu` | Yes: `spawn_inner` reuses a Dead slot only after an Acquire load finds its `Tcb.on_cpu` clear, which its CPU's `thread_init::finish_switch` clears with Release once `switch_context` has returned, and `thread_exit` stores `Dead` under SCHED (ROADMAP §10.10, F012) |
 | I10 | A dead thread's stack is freed only after its CPU has switched off it (§2.8, §4.5) | `thread_init::finish_switch` | enforced by the in-guest `lifetime_stack_reclaim` | Yes: `thread_exit` parks the stack in its CPU's `PerCpu.dead_stack`, and only that CPU's switch tail, after `switch_context` has returned, moves it into the CPU's stack cache or onto its dead list, which that CPU's worker frees (ROADMAP §10.10, F012) |

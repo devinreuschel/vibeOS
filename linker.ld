@@ -47,6 +47,14 @@ SECTIONS
         *(.rodata .rodata.*)
     } :rodata
 
+    /* The user accessors' exception-table records (INTERRUPTS §5.1): read
+     * only, and kept whole because nothing references them by symbol. */
+    __ex_table : ALIGN(4) {
+        __ex_table_start = .;
+        KEEP(*(__ex_table))
+        __ex_table_end = .;
+    } :rodata
+
     /* Inside __rodata_* so paging maps it (copied to 0x8000, not executed here). */
     .trampoline : ALIGN(16) {
         __trampoline_start = .;

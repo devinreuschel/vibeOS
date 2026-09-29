@@ -378,40 +378,44 @@ ROADMAP §10.4).
 
 ## 5. User pointers
 
-Current behavior; ROADMAP §10.6 replaces the page-table pre-walk and the
-physmap copy with user-VA accessors and an exception-table fixup.
+Syscalls copy user memory through the user-VA accessors of DESIGN §5.1
+(`proc::uaccess_init` over `vibeos::proc::uaccess`), which dereference the
+user address inside `stac`/`clac`, so the user PTE's present and `WRITABLE`
+bits and `CR0.WP` apply, and a fault there becomes `EFAULT` through an
+exception-table fixup. No syscall path walks the page tables first.
 
-Before any copy, `AddressSpace::check_user_range` checks the whole range of
-a pointer argument against the caller's address space: canonical, below
-`USER_END`, not in the first page (`NULL_GUARD_LEN`), `ptr + len` does not
-overflow, and every leaf present with `USER` set. Failure is `-EFAULT`.
+**Range check.** Before any copy, `uaccess::user_range_ok(ptr, len)`, a pure
+check, accepts a non-empty range from `NULL_GUARD_LEN` (the first page is
+never user memory) up to at most `USER_MAP_END` with no overflow, and an
+empty range only below `USER_MAP_END`, as Linux's `access_ok`. A refused
+range returns `-EFAULT` before any I/O, so `read(fd, kernel_ptr, 0)` returns
+`-EFAULT`, as on Linux. Until ROADMAP §10.6's identity-teardown box, the
+x86_64 accessors also refuse a range that starts below 512 MiB, where the
+kernel's GLOBAL identity map would otherwise reach low physical memory.
 
-The check does not test `WRITABLE`. `read`, the `wait4` status, and
-`psinfo` copy out with `AddressSpace::write_bytes`, which writes through the
-kernel's physmap alias, so the user PTE's W bit and `CR0.WP` do not apply:
-a destination in the caller's read-only or executable pages succeeds where
-Linux returns `EFAULT` (F023; ROADMAP §10.6).
+**Byte counts.** An accessor reports how many bytes it copied before a
+fault. `read`, `write`, and `psinfo` return that count when it is above 0
+and `-EFAULT` when it is 0, as Linux's do. `read` from a file reads at most
+256 bytes, copies them out, and seeks back by the bytes it could not copy,
+so the next `read` returns them; a file that cannot seek keeps them, as a
+Linux device does. `write` copies each 256-byte chunk in, writes the bytes
+it copied, and stops at a short chunk. `len == 0` returns 0 once the range
+check passes.
 
-**Partial copy:** for `read`, `write`, `psinfo`, and the `wait4` status,
-the range check covers `[ptr, ptr+len)` before the first byte moves, so a
-failure copies nothing and returns `-EFAULT`. `len == 0` is success
-(`write` returns 0) and does not touch the pointer. `open` and `execve`
-check and copy each C string into a kernel buffer one byte at a time, and
-each 8-byte argv pointer in one piece.
+**State before the copy.** A call that changes state before its copy-out
+keeps the change and returns `-EFAULT`: `wait4` reaps the child, then copies
+the status with no lock held, and a failed copy returns `-EFAULT`, so the
+next `wait4` returns `-ECHILD`.
 
-The rule ROADMAP §10.6 implements, as Linux does: a range that does not lie
-wholly in the user half returns `-EFAULT` before any byte moves, as Linux's
-`access_ok` check does; within it, a user-memory accessor reports how many
-bytes it copied before a fault it cannot resolve, and `read`, `write`, and
-the other calls that return a byte count return that count when it is above
-0 and `-EFAULT` when it is 0. A call that changes state before its copy-out
-keeps the change and returns `-EFAULT`: `wait4` has already reaped the child
-whose status it could not store.
+**Strings and vectors.** `open` and `execve` copy a C string with
+`strncpy_from_user`, in chunks that stop at each page boundary and at
+`USER_MAP_END`, so a string that ends before an unmapped page copies; a
+string that fills the kernel buffer is `-ENAMETOOLONG`, and a fault before
+its NUL `-EFAULT`. Each 8-byte argv or envp pointer is one all-or-nothing
+copy.
 
-Copies go through the page tables and the physmap
-(`AddressSpace::read_bytes` / `write_bytes`) rather than a user-VA access,
-because there is no fault fixup yet. A user `#PF`, `#GP`, or `#UD` from the
-program itself is a process kill (DESIGN §5.2 CPL split), not `EFAULT`.
+A user `#PF`, `#GP`, or `#UD` from the program itself is a process kill
+(DESIGN §5.2 CPL split), not `EFAULT`.
 
 **Kernel survival:** no user program may panic or halt the kernel (DESIGN
 §2.5 for ring-3 exceptions, AGENTS.md rule 4 for syscall paths). The code

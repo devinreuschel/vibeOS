@@ -16,6 +16,11 @@ default = []
 # Host tools and `cargo test`. Kernel builds leave this off (`no_std`).
 std = []
 
+[dependencies]
+# Compile-time proof that a typed copy to user memory has no padding or
+# uninitialized bytes (INVARIANTS §2.4, ROADMAP §10.6).
+zerocopy = { version = "0.8", default-features = false, features = ["derive"] }
+
 [lints]
 workspace = true
 

@@ -155,13 +155,6 @@ static SMAP_LIVE: AtomicBool = AtomicBool::new(false);
 
 /// `stac`/`clac` are #UD when SMAP is not present. `arch::cpu::init_control_regs` sets this.
 #[inline]
-#[cfg_attr(
-    not(feature = "kernel_tests"),
-    expect(
-        dead_code,
-        reason = "ROADMAP §9.1 `stac`/`clac` helpers; §10.6's user accessors call them"
-    )
-)]
 pub fn smap_live() -> bool {
     SMAP_LIVE.load(Ordering::Acquire)
 }

@@ -5,15 +5,11 @@ fn copy_cvec(va: u64) -> Result<TryVec<TryVec<u8>>, i32> {
     if va == 0 {
         return Ok(v);
     }
-    let Some(space) = current_space() else {
-        return Err(EFAULT);
-    };
     let mut i = 0u64;
     while i < 16 {
-        let ptr_va = va + i * 8;
-        syscall::check_user_ptr(|p, l| space.check_user_range(p, l), ptr_va, 8)?;
+        let ptr_va = va.checked_add(i * 8).ok_or(EFAULT)?;
         let mut raw = [0u8; 8];
-        space.read_bytes(ptr_va, &mut raw).map_err(|_| EFAULT)?;
+        uaccess_init::copy_from_user(&mut raw, ptr_va).map_err(|f| f.errno())?;
         let p = u64::from_le_bytes(raw);
         if p == 0 {
             return Ok(v);

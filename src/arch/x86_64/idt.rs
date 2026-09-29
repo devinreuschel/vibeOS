@@ -796,13 +796,19 @@ fn general_protection(frame: &mut TrapFrame) {
 }
 
 /// Reads CR2 from the frame: with IF=1 a preempting thread's fault can
-/// change the register (DESIGN §5.10 rule 9).
+/// change the register (DESIGN §5.10 rule 9). A CPL-0 fault on a user
+/// accessor's copy with CR2 in the user half resumes at its exception-table
+/// fixup, RCX, RSI and RDI as the fault left them, and the saved AC, which
+/// the fixup's `clac` clears (INTERRUPTS §5.1).
 fn page_fault(frame: &mut TrapFrame) {
     let (err, cr2) = (frame.error_code, frame.cr2);
     if frame.user_mode() {
         #[cfg(feature = "kernel_tests")]
         testing::on_user_pf(frame);
         user_fault(frame);
+    } else if let Some(rip) = super::uaccess::fixup(frame.iret.rip, cr2) {
+        frame.iret.rip = rip;
+        return;
     }
     x86::cli();
     crate::panic::exception_halt(b"#PF", &frame.iret, Some(err), Some(cr2));
