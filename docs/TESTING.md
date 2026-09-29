@@ -719,13 +719,18 @@ each pass 40 s alone and cannot split below a target.
 | `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/nasm/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, `panic_test` with `panic_exit`, `gp_test` with `panic_exit`) and once with `kernel_shell` (the default set runs in `check`); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos.iso` (7 days). |
 | `tier (<arch>, <tier>)` | push / PR, `needs: [check, build]` | One job per row of the tier table above: QEMU and OVMF, `prebuilt-<arch>` unpacked, the runner's CPU model to the job summary, then `make -k -j <jobs> --output-sync=target VIBEOS_PREBUILT=1 <targets>` under TCG (`jobs` is 1 until ROADMAP §10.1's parallel QEMU runs land). Even after a failed step it writes a per-tier table and every harness retry to the job summary and uploads `build/results/` as `results-<arch>-<tier>`. |
 | `ticks` | PR, `needs: tier`, even after it fails | `scripts/check_ticks.py --base <PR base> --head <PR head> --run-commit $GITHUB_SHA --results <downloaded results-*> --summary $GITHUB_STEP_SUMMARY`: every box a commit of the pull request ticks pairs with a `Proves:` line, its proof exists at the head and is changed by the pull request or marked `(existing: ...)`, a ktest, utest, or marker proof passed in a results file of the head or the tested merge commit, no results file lists a retry, needs and closes rows hold, `Fails-before:` lines are present, and a bracketed proof passed on a scheduled run or `ci-history` record (read through `gh`, with `contents: read` and `actions: read`). The summary lists errors, `(existing: ...)` proofs, and notes. `make check` runs the pairing and diff rules bare against `origin/main` and skips them when that ref is missing, as in the `check` job's shallow checkout. |
-| `smp-stress` | weekly Monday 06:00 UTC + dispatch | `-smp 4`, the §8.2 per-run deadlines |
-| `nightly-canary` | same workflow, non-blocking | undated latest nightly, `make iso && make test-unit` |
+| `smp-stress` `stress` | weekly Monday 06:00 UTC + dispatch, `sched-lane-4` | `make test-smp-stress`: the in-guest tier at `-smp 4`, under the §8.2 per-run deadlines and no whole-run timeout |
+| `smp-stress` `repeat-kernel` | same workflow, `sched-lane-4` | `VIBEOS_KTEST_REPEAT=20 make test-kernel`: every in-guest test 20 times in one `-smp 2` boot |
+| `smp-stress` `repeat-kernel-smp4` | same workflow, `sched-lane-5` | `VIBEOS_KTEST_REPEAT=20 make test-kernel-smp4`: the same at `-smp 4` |
+| `nightly-canary` | same workflow, non-blocking, `sched-lane-5` | undated latest nightly, `make iso && make test-unit` |
 | `release` | `v*` tags | `make test-e2e` (BIOS) only, then production + ktest ISO, changelog section, GitHub Release. It does not wait for `ci` at the tagged commit, and the ktest ISO writes fixed LBAs of any virtio-blk disk attached at boot (ROADMAP §10.1, F145). Planned (ROADMAP §10.1): dispatched from `main` with the release tag as input; a `build` job with `contents: read` and `actions: read`, no cache, and no persisted token, then a `publish` job that runs no repository script; from ROADMAP §14.6 a `sign` job in the `release` environment between them, and from §22.4 a keyless `verify` job on vibeOS. From ROADMAP §18.7 the `sign` job is two key jobs, `sign-files` and `sign-manifest`, with an unprivileged `assemble` job between them, since images hold the signed kernels and Limine binaries and the manifest lists the images (ROADMAP §22.1). |
 | `ci-history` | `ci`, `release`, `nightly` or `smp-stress` run completes; daily 04:23 UTC; dispatch | `record` (on a completed run): the run's record on the `ci-history` branch. `daily` (schedule, dispatch): the packed size and the 500 MB rotation (`--rotate`), the backfill (`--backfill --limit 200`), then the completeness check, which turns it red on a missing record (CI history, below). Each job holds `contents: write` and `actions: read` only and checks out nothing. Both jobs run in `sched-lane-6`. |
 | `macos` | daily 04:23 UTC + dispatch, `sched-lane-9` | `macos-15` arm64 with Homebrew's `qemu`, `xorriso`, `nasm` and `dosfstools`; jobs `check` (`make check`) and `test` (`make -k test-e2e-uefi test`, with Homebrew's edk2 firmware on pflash); each uploads `build/results/`. |
 | `nightly` `kvm` | daily 03:17 UTC + dispatch, `sched-lane-0` | The x86_64 KVM leg (ROADMAP §10.1): `/dev/kvm` opened by GitHub's documented udev rule, job env `VIBEOS_QEMU_ACCEL=kvm` and `VIBEOS_QEMU_CPU=max,+invtsc`, then `make test-kernel`, `make test-e2e`, `VIBEOS_SMP=1 make test-e2e`, `make test-lapic-fallback LAPIC_FALLBACK_CPU=qemu64,+invtsc,-tsc-deadline`, and `VIBEOS_KTEST='lifetime_*,exit_burst,fork_oom' VIBEOS_KTEST_REPEAT=20 make test-kernel-smp4` (exit-gate line §10.10), each step run even after an earlier one failed. GitHub assigns each job's host CPU at random (AMD EPYC or Intel Xeon, several models), so `scripts/runner_info.py` writes the CPU model beside the guest's invariant-TSC bit to the job summary and to `build/runner.json`, uploaded as `runner-kvm`, which fills the CI-history record's `runner`; a regression threshold compares a number only with history from the same CPU model. `build/results/` is uploaded as `results-x86_64-kvm` (90 days). |
 | `nightly` `release-profile` | daily 03:17 UTC + dispatch, `sched-lane-1` | `make CARGO_PROFILE=release test-e2e test-kernel` under TCG, in its own job, since the release and dev ISOs share their names under `build/` (ROADMAP §10.2, F137; BOOT.md §3.5); the runner record and the uploads as `results-x86_64-release-profile` and `runner-release-profile`. Releases still ship the dev profile. |
+| `nightly` `repro` | daily 03:17 UTC + dispatch, `sched-lane-2` | `make repro`: every ISO variant built twice from one commit, with a different checkout path, `CARGO_HOME` and `RUSTUP_HOME`, compared byte for byte, and no host path in any output (`scripts/repro_build.py`) |
+| `nightly` `deny-advisories` | daily 03:17 UTC + dispatch, `sched-lane-3` | cargo-deny's pinned release archive, checked against its SHA-256 as in `check`, then `cargo deny check advisories`, which fetches the RustSec database and so stays out of `make check` |
+| `nightly` `provenance-fetch` | daily 03:17 UTC + dispatch, `sched-lane-3` | `python3 scripts/check_provenance.py --fetch`: each provenance header's upstream file at its pinned revision (DESIGN §1.5) |
 
 The `ticks` job (ROADMAP §10.9) runs after the jobs that run the tiers, the `tier` matrix, and reads
 the `build/results/` files they upload. A pull request run tests the merge of its head with its
@@ -880,7 +885,11 @@ reserves for jobs that end within 5.5 hours (`timeout-minutes` at most 330) the 
 needs, which no multi-day chain (a soak, a campaign, ROADMAP §24.2's rebuilds) takes, and names the
 lanes a release window takes (ROADMAP §22.1). The ledger gives each scheduled or dispatched
 workflow's cadence, jobs per run, job-hours per run (estimated until `ci-history` measures them),
-peak concurrent jobs, and lanes. Both change in the same commit as the workflows they describe.
+peak concurrent jobs, and lanes. Both change in the same commit as the workflows they describe. Every job of `nightly.yml` and
+`smp-stress.yml` ends with three `if: always()` steps: `scripts/runner_info.py`, then the uploads of
+`build/results/` as `results-x86_64-<job>` and `build/runner.json` as `runner-<job>` (90 days), so
+the `ticks` job and the CI history read a scheduled run's results and runner (C-RESULTS,
+C-HISTORY).
 `scripts/check_workflows.py` fails on a scheduled or dispatched workflow with no ledger row
 (`rule_ledger_row`); on more than 100 jobs of one run in one lane, a matrix counting the product of
 its literal axes plus its `include` entries and a matrix built from an expression failing as
@@ -896,7 +905,7 @@ workflow (`rule_lane_map`). `Reserved for` is `nightly`, `weekly`, `scheduled`, 
 | `sched-lane-0` | nightly | `nightly.yml` `kvm` |
 | `sched-lane-1` | nightly | `nightly.yml` `release-profile` |
 | `sched-lane-2` | nightly | `nightly.yml` `repro`; `models` and `miri` when they land |
-| `sched-lane-3` | nightly | `nightly.yml` `budget`, `advisories`, `provenance`; `irqoff` when it lands |
+| `sched-lane-3` | nightly | `nightly.yml` `budget`, `deny-advisories`, `provenance-fetch`; `irqoff` when it lands |
 | `sched-lane-4` | weekly | `smp-stress.yml` `stress`, `repeat-kernel` |
 | `sched-lane-5` | weekly | `smp-stress.yml` `repeat-kernel-smp4`, `nightly-canary`; `fuzz` when it lands |
 | `sched-lane-6` | history | `ci-history.yml` (every job) |
@@ -908,8 +917,8 @@ Release windows: none
 
 | Workflow | Cadence | Jobs per run | Job-hours per run | Peak concurrent jobs | Lanes |
 |---|---|---|---|---|---|
-| `smp-stress.yml` | weekly `0 6 * * 1` and dispatch | 2 | 0.6 (estimated) | 2 | `sched-lane-4`, `sched-lane-5` |
-| `nightly.yml` | daily `17 3 * * *` and dispatch | 2 | 2.5 (estimated) | 2 | `sched-lane-0`, `sched-lane-1` |
+| `smp-stress.yml` | weekly `0 6 * * 1` and dispatch | 4 | 4.5 (estimated) | 2 | `sched-lane-4`, `sched-lane-5` |
+| `nightly.yml` | daily `17 3 * * *` and dispatch | 5 | 4.5 (estimated) | 4 | `sched-lane-0`, `sched-lane-1`, `sched-lane-2`, `sched-lane-3` |
 | `ci-history.yml` | each completed `ci`, `release`, `nightly` or `smp-stress` run (`record`); daily `23 4 * * *` and dispatch (`daily`) | 1 | 0.05 per `record`, 0.3 per `daily` (estimated) | 1 | `sched-lane-6` |
 | `macos.yml` | daily `23 4 * * *` and dispatch | 2 | 1.5 (estimated) | 1 | `sched-lane-9` |
 
