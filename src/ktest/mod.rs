@@ -8,6 +8,7 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use vibeos::dev::Device;
+use vibeos::fmt_util::StackBuf;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::paging::PhysAddr;
 use vibeos::per_cpu::PerCpuRemote;
@@ -44,7 +45,8 @@ pub(crate) enum Outcome {
 pub(crate) const FAIL_MSG_BYTES: usize = 120;
 
 /// A formatted failure reason, cut at [`FAIL_MSG_BYTES`] on a character
-/// boundary. Build one with [`crate::fail_fmt!`].
+/// boundary. Build one with [`crate::fail_fmt!`]. It writes through
+/// [`StackBuf`], the one fixed-buffer writer (DESIGN §8.2).
 #[derive(Clone, Copy)]
 pub(crate) struct FailMsg {
     buf: [u8; FAIL_MSG_BYTES],
@@ -75,16 +77,24 @@ impl FailMsg {
         core::str::from_utf8(&self.buf[..self.len as usize]).unwrap_or("<invalid utf-8>")
     }
 
+    /// Append the longest prefix of `s` that ends on a character boundary
+    /// and fits; after the first character that does not fit, nothing more.
     fn push_whole(&mut self, s: &str) {
-        for ch in s.chars() {
-            let at = self.len as usize;
-            let n = ch.len_utf8();
-            if self.full || at + n > FAIL_MSG_BYTES {
-                self.full = true;
-                return;
-            }
-            ch.encode_utf8(&mut self.buf[at..at + n]);
-            self.len += n as u8;
+        if self.full {
+            return;
+        }
+        let at = self.len as usize;
+        let room = FAIL_MSG_BYTES - at;
+        let mut n = s.len().min(room);
+        while !s.is_char_boundary(n) {
+            n -= 1;
+        }
+        let mut w = StackBuf::new(&mut self.buf[at..]);
+        w.push_bytes(&s.as_bytes()[..n]);
+        // `n <= room <= FAIL_MSG_BYTES`, which fits a u8.
+        self.len += w.len() as u8;
+        if n < s.len() {
+            self.full = true;
         }
     }
 }
