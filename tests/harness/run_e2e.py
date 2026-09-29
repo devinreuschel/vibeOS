@@ -11,6 +11,7 @@ import sys
 
 from tests.harness import frame, results
 from tests.harness.harness import (
+    BOOT_ALLOWANCE_S,
     MCE_MCG_STATUS,
     MCE_UC_STATUS,
     SERIAL_ONLINE,
@@ -346,7 +347,7 @@ def check_strace_lines(lines: list[str], expected_cmdline: str) -> tuple[str, st
 
 
 def _strace() -> int:
-    env = env_config(default_iso="vibeos.iso", default_timeout=60)
+    env = env_config(default_iso="vibeos.iso", default_timeout=BOOT_ALLOWANCE_S)
     res = results.Results(env.tier)
     if "vibeos.strace=1" not in env.cmdline.split():
         print("[e2e] FAIL: VIBEOS_CMDLINE must hold vibeos.strace=1", file=sys.stderr)
@@ -385,7 +386,7 @@ def strace_main() -> int:
 
 
 def main() -> int:
-    env = env_config(default_iso=default_iso(), default_timeout=60)
+    env = env_config(default_iso=default_iso(), default_timeout=BOOT_ALLOWANCE_S)
     if env_flag("VIBEOS_MCE_TEST"):
         return _mce_main(env)
     res = results.Results(env.tier)

@@ -12,9 +12,12 @@ from collections.abc import Callable, Iterable
 
 from tests.harness import frame, results
 from tests.harness.harness import (
+    BOOT_ALLOWANCE_S,
     PANIC_DONE,
+    TIMEOUT_SCALE,
     EnvConfig,
     HarnessError,
+    KtestDeadlines,
     KtestSummary,
     QemuConfig,
     RunResult,
@@ -145,14 +148,18 @@ def ran(lines: Iterable[str], name: str) -> bool:
 PERSIST_TEST = "block_persist"
 
 
-def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool) -> RunResult:
+def _ktest_boot(
+    cfg: QemuConfig, timeout: float, *, persist_reboot: bool, scale: float = TIMEOUT_SCALE
+) -> RunResult:
     """One ktest QEMU. It never retries (ROADMAP §10.2, F021).
 
-    A timeout, a `FAIL` line, a panic signature, or a missing marker raises
+    `timeout` is the boot allowance and `scale` the timeout scale of the
+    progress deadline (`KtestDeadlines`). A timeout, a `FAIL` line, a panic
+    signature, a missing marker, or a run without its result raises
     `HarnessError` from this one boot. The persist lines are required only
     when the boot ran `block_persist`.
     """
-    raw = run_qemu_until_exit(cfg, timeout_s=timeout)
+    raw = run_qemu_until_exit(cfg, timeout_s=timeout, progress=KtestDeadlines(timeout, scale))
     results.current().add_boot(qemu_argv(cfg, None), cfg, raw.exit_code)
     klines = frame.kernel_lines(raw.lines)
     results.current().record_ktest_lines(klines)
@@ -235,7 +242,7 @@ def _proof_boot(
     disk = make_disk(DISK_BYTES, "vibeos-vblk-")
     try:
         cfg = penv.qemu(extra=ktest_devices(disk, env.smp), boot_order="d")
-        raw = _ktest_boot(cfg, env.timeout, persist_reboot=False)
+        raw = _ktest_boot(cfg, env.timeout, persist_reboot=False, scale=env.timeout_scale)
     finally:
         try:
             os.unlink(disk)
@@ -336,6 +343,7 @@ def ktest_deadline_trip(env: EnvConfig) -> None:
                     TRIP_KILL_AFTER_S if frame.kernel_text(ln) == PANIC_DONE else None
                 ),
                 expect_fail=True,
+                progress=KtestDeadlines(env.timeout, env.timeout_scale),
             )
             results.current().add_boot(qemu_argv(cfg, None), cfg, raw.exit_code)
             check_deadline_trip(raw.lines, TRIP_TEST, TRIP_DEADLINE_MS)
@@ -352,14 +360,14 @@ def ktest_deadline_trip(env: EnvConfig) -> None:
 
 
 def main() -> int:
-    env = env_config(default_iso=default_iso("ktest"), default_timeout=90)
+    env = env_config(default_iso=default_iso("ktest"), default_timeout=BOOT_ALLOWANCE_S)
     results.Results(env.tier)
     skip_persist = env_flag("VIBEOS_SKIP_PERSIST")
     disk = make_disk(DISK_BYTES, "vibeos-vblk-")
     try:
         cfg = env.qemu(extra=ktest_devices(disk, env.smp), boot_order="d")
         try:
-            raw = _ktest_boot(cfg, env.timeout, persist_reboot=False)
+            raw = _ktest_boot(cfg, env.timeout, persist_reboot=False, scale=env.timeout_scale)
         except HarnessError as e:
             print(f"[ktest] FAIL: {e}", file=sys.stderr)
             return 1
@@ -367,7 +375,7 @@ def main() -> int:
 
         if not skip_persist and ran(raw.lines, PERSIST_TEST):
             try:
-                _ktest_boot(cfg, env.timeout, persist_reboot=True)
+                _ktest_boot(cfg, env.timeout, persist_reboot=True, scale=env.timeout_scale)
             except HarnessError as e:
                 print(f"[ktest] FAIL persist reboot: {e}", file=sys.stderr)
                 return 1

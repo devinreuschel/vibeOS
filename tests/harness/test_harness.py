@@ -9,6 +9,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from collections.abc import Iterator
@@ -2509,6 +2510,63 @@ class TestKtestVerdict(unittest.TestCase):
         only_info = self._boot("run a 10000", "info a: 1", n=1)
         with self.assertRaisesRegex(HarnessError, "run a has no result before end"):
             check_ktest_output(only_info, ISA_DEBUG_PASS)
+
+    def test_progress_deadline_windows(self) -> None:
+        from tests.harness.harness import KtestDeadlines
+
+        d = KtestDeadlines(60.0, 2.0)
+        self.assertEqual(d.start(100.0), 160.0)
+        # Noise, an unframed copy and a replay before `begin` extend nothing.
+        self.assertEqual(d.on_line(K("vibeOS: serial online"), 150.0), 160.0)
+        self.assertEqual(d.on_line("vibeOS: ktest: begin 3", 150.0), 160.0)
+        self.assertIn("no begin within 60 s", d.hung_message())
+        self.assertEqual(d.on_line(K("vibeOS: ktest: begin 3"), 150.0), 160.0)
+        self.assertIn("no run within 10 s of begin", d.hung_message())
+        # A run: (deadline_ms / 1000 + 5) * scale.
+        self.assertEqual(d.on_line(K("vibeOS: ktest: run a 2000"), 151.0), 165.0)
+        self.assertEqual(d.on_line(K("vibeOS: ktest: info a: 3"), 160.0), 165.0)
+        self.assertEqual(d.on_line(K("vibeOS: noise"), 160.0), 165.0)
+        self.assertEqual(d.hung_message(), "ktest hung in a: no result within 14 s")
+        # A result opens a gap of 5 * scale.
+        self.assertEqual(d.on_line(K("vibeOS: ktest: ok a (3 us)"), 162.0), 172.0)
+        self.assertIn("ktest hung in a: no run or end within 10 s", d.hung_message())
+        self.assertEqual(d.on_line(K("vibeOS: ktest: run b 500"), 163.0), 174.0)
+        self.assertEqual(d.on_line(K("vibeOS: ktest: FAIL b: why"), 164.0), 174.0)
+        self.assertEqual(d.on_line(K("vibeOS: ktest: run c 10000"), 165.0), 195.0)
+        self.assertEqual(d.on_line(K("vibeOS: ktest: skip c: no AP"), 166.0), 176.0)
+        # `end` gives the allowance again, unscaled.
+        self.assertEqual(d.on_line(K("vibeOS: ktest: end"), 167.0), 227.0)
+        self.assertEqual(d.on_line(K("vibeOS: ktest: run d 1"), 168.0), 227.0)
+        self.assertIn("did not exit within 60 s of end", d.hung_message())
+
+    def test_hung_run_named(self) -> None:
+        from tests.harness.harness import KtestDeadlines, run_qemu_until_exit
+
+        with tempfile.TemporaryDirectory() as tmp:
+            qemu = os.path.join(tmp, "qemu-system-x86_64")
+            with open(qemu, "w") as f:
+                f.write(
+                    "#!/bin/sh\n"
+                    "printf '\\036vibeOS: ktest: begin 1\\n'\n"
+                    "printf '\\036vibeOS: ktest: run slow 100\\n'\n"
+                    "printf '\\036vibeOS: slow: step 3 of'\n"
+                    "exec sleep 30\n"
+                )
+            os.chmod(qemu, 0o755)
+            iso = os.path.join(tmp, "x.iso")
+            open(iso, "w").close()
+            cfg = QemuConfig(iso=iso)
+            path = tmp + os.pathsep + os.environ.get("PATH", "")
+            t0 = time.monotonic()
+            with overlay_env({"PATH": path}):
+                with self.assertRaises(HarnessError) as cm:
+                    run_qemu_until_exit(cfg, timeout_s=30.0, progress=KtestDeadlines(5.0, 0.05))
+            elapsed = time.monotonic() - t0
+        msg = str(cm.exception)
+        self.assertIn("ktest hung in slow", msg)
+        # The partial line the guest was writing is in the serial tail.
+        self.assertIn("vibeOS: slow: step 3 of", msg)
+        self.assertLess(elapsed, 5.0)
 
     def test_monitor_dir_removed_at_exit(self) -> None:
         code = (

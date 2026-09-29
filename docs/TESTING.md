@@ -164,13 +164,23 @@ the first boot and once for the persist reboot, `run_e2e.py` boots each variant 
 every other tier. The results file keeps its `retries` list, which stays empty, and `check_ticks.py`
 still fails a pull request whose results list a retry (ROADMAP §10.9).
 
-Planned (ROADMAP §10.2): the harness requires one result line per run line and exactly that many
-results. It has no whole-run deadline. `VIBEOS_TIMEOUT` bounds each stretch in which no test runs: from QEMU's start to `begin`,
-and from `end` to QEMU's exit. From `begin` to `end`, each run gets its printed deadline plus 5 s,
-and each gap between lines 5 s, all multiplied by `env_config`'s one timeout scale. That backstops
-the in-guest deadline, which a CPU wedged with IF=0 never checks; a timeout names the test of the
-last run line and prints the partial line the guest was writing. Adding tests changes no timeout,
-and a test that needs longer carries a registry override, reviewed as code. The `utest_*` lines of ROADMAP §10.5 follow the same protocol.
+The verdict counts runs (ROADMAP §10.2). `check_ktest_output` reads `begin <n>`, then pairs each
+`run <name>` with the next result line (`ok`, `FAIL` or `skip`) for the same name, by order, since a
+repeated test reuses its name. A run left open by the next `run` or by `end`, a result with no open
+run, a result for another name, and a count of runs or results other than `<n>` each fail, naming
+the test; info lines are never results. There is no whole-run deadline: `VIBEOS_TIMEOUT` is a boot
+allowance, `BOOT_ALLOWANCE_S` (60 s) in every driver, which bounds each stretch of a boot in which no
+test runs, from QEMU's start to `begin` and from `end` to QEMU's exit, and the whole of an e2e, ps2
+or crash boot. From `begin` to `end`, `harness.KtestDeadlines` gives a run the deadline its line
+printed plus 5 s, and each gap between lines 5 s, all multiplied by `EnvConfig.timeout_scale`, which
+`env_config` sets to 1 in every tier (ROADMAP §17.6 makes it a setting); other lines extend no
+deadline. That backstops the in-guest deadline, which a CPU wedged with IF=0 never checks. A timeout
+fails with `ktest hung in <name>` for the last run line, or names the stretch outside `begin` and
+`end`, and the serial tail it prints ends with the partial line the guest was writing:
+`DeadlineReader` returns buffered bytes without a newline as a `partial` event before it reports the
+timeout. Adding tests changes no timeout, and a test that needs longer carries a registry override,
+reviewed as code; `make test-smp-stress` sets no longer timeout. Every driver's QEMU monitor
+directory (`vibeos-mon-*`) is removed when the driver exits. The `utest_*` lines of ROADMAP §10.5 follow the same protocol.
 
 Skips are first class and carry their reason on the `ktest: skip <name>: <reason>` line. Every skip
 names what the configuration lacks: `no AP`, `no virtio-blk`, `no virtio-rng`, `no e1000e`, `no edu`,
@@ -491,7 +501,7 @@ sets none of them: `make run`, `make run-panic` and `make debug` honour the same
 | `VIBEOS_FW_X86_64` | probed (the firmware table below) | all drivers and `run_interactive` under `VIBEOS_BIOS=uefi`; `make test-e2e-uefi`; `setup.sh` |
 | `VIBEOS_FW_AARCH64` | probed (the firmware table below) | `run_interactive.py firmware aarch64` and `setup.sh`; planned (ROADMAP §11.7): the aarch64 QEMU line |
 | `VIBEOS_QEMU_ACCEL` | `tcg` (empty omits `-accel`) | all drivers; `run_interactive` |
-| `VIBEOS_TIMEOUT` | `60` e2e/ps2, `90` ktest/crash; planned (ROADMAP §10.2): the §8.2 boot allowance, which bounds only the stretches of a boot in which no test runs | all drivers; `run_interactive` only when set |
+| `VIBEOS_TIMEOUT` | `60` in every driver: the §8.2 boot allowance: the whole of an e2e, ps2 or crash boot, and a ktest boot before `begin` and after `end` | all drivers; `run_interactive` only when set |
 | `VIBEOS_QEMU_EXTRA` | empty | all drivers; `run_interactive` |
 | `VIBEOS_TIER` | `adhoc`; each `make test-*` recipe sets its target name | all drivers, which write `build/results/<arch>-<tier>.json` (schema 1, `tests/harness/results.py`) |
 | `VIBEOS_EXPECT_PANIC` | off (`""` / `0`) | `run_e2e` |
@@ -653,7 +663,7 @@ each pass 40 s alone and cannot split below a target.
 | `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/nasm/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, `panic_test` with `panic_exit`, `gp_test` with `panic_exit`) and once with `kernel_shell` (the default set runs in `check`); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos.iso` (7 days). |
 | `tier (<arch>, <tier>)` | push / PR, `needs: [check, build]` | One job per row of the tier table above: QEMU and OVMF, `prebuilt-<arch>` unpacked, the runner's CPU model to the job summary, then `make -k -j <jobs> --output-sync=target VIBEOS_PREBUILT=1 <targets>` under TCG (`jobs` is 1 until ROADMAP §10.1's parallel QEMU runs land). Even after a failed step it writes a per-tier table and every harness retry to the job summary and uploads `build/results/` as `results-<arch>-<tier>`. |
 | `ticks` | PR, `needs: tier`, even after it fails | `scripts/check_ticks.py --base <PR base> --head <PR head> --run-commit $GITHUB_SHA --results <downloaded results-*> --summary $GITHUB_STEP_SUMMARY`: every box a commit of the pull request ticks pairs with a `Proves:` line, its proof exists at the head and is changed by the pull request or marked `(existing: ...)`, a ktest, utest, or marker proof passed in a results file of the head or the tested merge commit, no results file lists a retry, needs and closes rows hold, `Fails-before:` lines are present, and a bracketed proof passed on a scheduled run or `ci-history` record (read through `gh`, with `contents: read` and `actions: read`). The summary lists errors, `(existing: ...)` proofs, and notes. `make check` runs the pairing and diff rules bare against `origin/main` and skips them when that ref is missing, as in the `check` job's shallow checkout. |
-| `smp-stress` | weekly Monday 06:00 UTC + dispatch | `-smp 4`, longer timeout (`VIBEOS_TIMEOUT=180`); planned (ROADMAP §10.2): the §8.2 per-run deadlines, with no longer timeout |
+| `smp-stress` | weekly Monday 06:00 UTC + dispatch | `-smp 4`, the §8.2 per-run deadlines |
 | `nightly-canary` | same workflow, non-blocking | undated latest nightly, `make iso && make test-unit` |
 | `release` | `v*` tags | `make test-e2e` (BIOS) only, then production + ktest ISO, changelog section, GitHub Release. It does not wait for `ci` at the tagged commit, and the ktest ISO writes fixed LBAs of any virtio-blk disk attached at boot (ROADMAP §10.1, F145). Planned (ROADMAP §10.1): dispatched from `main` with the release tag as input; a `build` job with `contents: read` and `actions: read`, no cache, and no persisted token, then a `publish` job that runs no repository script; from ROADMAP §14.6 a `sign` job in the `release` environment between them, and from §22.4 a keyless `verify` job on vibeOS. From ROADMAP §18.7 the `sign` job is two key jobs, `sign-files` and `sign-manifest`, with an unprivileged `assemble` job between them, since images hold the signed kernels and Limine binaries and the manifest lists the images (ROADMAP §22.1). |
 | `ci-history` | `ci` or `release` run completes; daily 04:23 UTC; dispatch | `record` (on a completed run): the run's record on the `ci-history` branch. `daily` (schedule, dispatch): the packed size and the 500 MB rotation (`--rotate`), the backfill (`--backfill --limit 200`), then the completeness check, which turns it red on a missing record (CI history, below). Each job holds `contents: write` and `actions: read` only and checks out nothing. |

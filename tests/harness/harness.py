@@ -22,7 +22,7 @@ Drivers live in `run_*.py` and must not parse the environment or build argv;
 | `VIBEOS_FW_X86_64` | probed (`FIRMWARE_TABLE`) | all, `run_interactive` (`VIBEOS_BIOS=uefi`) |
 | `VIBEOS_FW_AARCH64` | probed (`FIRMWARE_TABLE`) | none yet (ROADMAP §11.7) |
 | `VIBEOS_QEMU_ACCEL` | `tcg` (empty omits `-accel`) | all, `run_interactive` |
-| `VIBEOS_TIMEOUT` | `60` e2e/ps2, `90` ktest/crash, none interactive | all, `run_interactive` |
+| `VIBEOS_TIMEOUT` | `60` (`BOOT_ALLOWANCE_S`), none interactive | all, `run_interactive` |
 | `VIBEOS_QEMU_EXTRA` | empty | all, `run_interactive` |
 | `VIBEOS_TIER` | `adhoc`; each `make test-*` recipe sets its target name | all (`results.py`) |
 | `VIBEOS_EXPECT_PANIC` | off (`""` / `0`) | `run_e2e` |
@@ -40,11 +40,17 @@ Drivers live in `run_*.py` and must not parse the environment or build argv;
 | `VIBEOS_CMDLINE` | empty; fw_cfg command-line words (BOOT.md §3.2) | all (`qemu`) |
 | `VIBEOS_KTEST` | empty; `vibeos.ktest=<value>`, no whitespace | all (`qemu`) |
 | `VIBEOS_KTEST_REPEAT` | unset; `vibeos.ktest_repeat=<n>`, a decimal; kernel checks 1-1000 | all |
+
+`VIBEOS_TIMEOUT` is the boot allowance (DESIGN §8.2): the whole of an e2e,
+ps2 or crash boot, and a ktest boot before `begin` and after `end`. Between
+them each run has its printed deadline plus 5 s, and each gap 5 s
+(`KtestDeadlines`).
 """
 
 from __future__ import annotations
 
 import atexit
+import math
 import os
 import random
 import re
@@ -526,6 +532,16 @@ DEFAULT_CPU = "max"
 DEFAULT_MEM = "128M"
 DEFAULT_ACCEL = "tcg"
 LAPIC_TIMER_MODES = ("tsc-deadline", "periodic", "pit")
+# The timeout model (DESIGN §8.2, ROADMAP §10.2). `VIBEOS_TIMEOUT` is a boot
+# allowance, `BOOT_ALLOWANCE_S` in every driver: it bounds each stretch of a
+# boot in which no test runs. From `begin` to `end` a run gets its printed
+# deadline plus `KTEST_RUN_SLACK_S`, and each gap between lines
+# `KTEST_GAP_S`, all times `EnvConfig.timeout_scale`, which is
+# `TIMEOUT_SCALE` in every tier until ROADMAP §17.6 (`KtestDeadlines`).
+TIMEOUT_SCALE = 1.0
+BOOT_ALLOWANCE_S = 60.0
+KTEST_RUN_SLACK_S = 5.0
+KTEST_GAP_S = 5.0
 CRASH_KILL_MAX_S = 0.05
 # `cache=unsafe` drops flushes, so the volatile-cache device never sees them.
 NBD_CACHE_MODES = ("writeback", "none", "writethrough")
@@ -575,6 +591,9 @@ class EnvConfig:
     ktest: str = ""
     ktest_repeat: int | None = None
     cmdline: str = ""
+    # Multiplies every ktest progress deadline (`KtestDeadlines`); no
+    # variable sets it until ROADMAP §17.6.
+    timeout_scale: float = TIMEOUT_SCALE
 
     def fw_cfg_cmdline(self, driver_words: str = "") -> str:
         """The fw_cfg command-line string: the driver's words, then
@@ -705,6 +724,7 @@ def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
         ktest=ktest,
         ktest_repeat=ktest_repeat,
         cmdline=os.environ.get("VIBEOS_CMDLINE", ""),
+        timeout_scale=TIMEOUT_SCALE,
     )
 
 
@@ -1843,6 +1863,80 @@ def check_ktest_output(
     return result
 
 
+class KtestDeadlines:
+    """The progress deadline of a ktest boot (DESIGN §8.2, ROADMAP §10.2).
+
+    Each stretch of the boot has its own deadline, set when the stretch
+    starts:
+
+    | Stretch | Deadline |
+    |---|---|
+    | QEMU start to `begin` | `allowance` |
+    | a `run` line to its result | `(deadline_ms / 1000 + KTEST_RUN_SLACK_S) * scale` |
+    | `begin` or a result to the next `run` or `end` | `KTEST_GAP_S * scale` |
+    | `end` to QEMU's exit | `allowance` |
+
+    Only those protocol lines (`parse_ktest_line`) move it; other lines,
+    info lines included, extend nothing. It backstops the in-guest deadline,
+    which a CPU wedged with IF=0 never checks.
+    """
+
+    def __init__(self, allowance: float, scale: float = TIMEOUT_SCALE) -> None:
+        self.allowance = allowance
+        self.scale = scale
+        # "boot" before `begin`, "tests" from `begin` to `end`, "after" then.
+        self.stretch = "boot"
+        self.last_run: str | None = None
+        self.run_open = False
+        self.window = allowance
+        self.deadline = math.inf
+
+    def start(self, now: float) -> float:
+        """QEMU started at `now`: the deadline for `begin`."""
+        self.window = self.allowance
+        self.deadline = now + self.window
+        return self.deadline
+
+    def on_line(self, line: str, now: float) -> float:
+        """Read raw serial `line`, seen at `now`: the current deadline."""
+        k = parse_ktest_line(line)
+        if k is None:
+            return self.deadline
+        if self.stretch == "boot" and k.kind == "begin":
+            self.stretch = "tests"
+            self.window = KTEST_GAP_S * self.scale
+        elif self.stretch == "tests" and k.kind == "run" and k.deadline_ms is not None:
+            self.last_run = k.name
+            self.run_open = True
+            self.window = (k.deadline_ms / 1000 + KTEST_RUN_SLACK_S) * self.scale
+        elif self.stretch == "tests" and k.kind in ("ok", "fail", "skip"):
+            self.run_open = False
+            self.window = KTEST_GAP_S * self.scale
+        elif self.stretch == "tests" and k.kind == "end":
+            self.stretch = "after"
+            self.window = self.allowance
+        else:
+            return self.deadline
+        self.deadline = now + self.window
+        return self.deadline
+
+    def hung_message(self) -> str:
+        """What timed out: the last run's name from `begin` to `end`, else
+        the stretch."""
+        if self.stretch == "boot":
+            return f"ktest: no begin within {self.window:g} s of QEMU's start"
+        if self.stretch == "after":
+            return f"ktest: QEMU did not exit within {self.window:g} s of end"
+        if self.last_run is None:
+            return f"ktest: no run within {self.window:g} s of begin"
+        if self.run_open:
+            return f"ktest hung in {self.last_run}: no result within {self.window:g} s"
+        return (
+            f"ktest hung in {self.last_run}: no run or end within {self.window:g} s "
+            "of its result"
+        )
+
+
 def run_qemu_until_exit(
     cfg: QemuConfig,
     timeout_s: float = 60.0,
@@ -1851,8 +1945,15 @@ def run_qemu_until_exit(
     kill_after: Callable[[str], float | None] | None = None,
     *,
     expect_fail: bool = False,
+    progress: KtestDeadlines | None = None,
 ) -> RunResult:
     """Boot the ISO and wait for QEMU to exit (isa-debug-exit).
+
+    Without `progress` the whole boot has `timeout_s`. With it, the ktest
+    progress deadline replaces that: `progress` sets the deadline of each
+    stretch from the lines it reads, and a timeout names the test of the
+    last run line (`KtestDeadlines.hung_message`). A partial line at the
+    deadline goes into the serial tail, never to `progress` or the checks.
 
     `kill_after(line)` may return seconds-until-SIGKILL. The first non-None
     wins (vibefs crash consistency). A kill is not a harness timeout. It gets
@@ -1880,7 +1981,8 @@ def run_qemu_until_exit(
     assert proc.stdout is not None
 
     result = RunResult()
-    deadline = time.monotonic() + timeout_s
+    t0 = time.monotonic()
+    deadline = progress.start(t0) if progress is not None else t0 + timeout_s
     kill_at: float | None = None
     reader = DeadlineReader(proc.stdout.fileno(), deadline)
     stream = frame.Stream()
@@ -1926,6 +2028,9 @@ def run_qemu_until_exit(
                 result.lines.append(line)
                 continue
             take(line)
+            if progress is not None:
+                deadline = progress.on_line(line, time.monotonic())
+                reader.set_deadline(deadline if kill_at is None else min(deadline, kill_at))
             if kill_after is not None and kill_at is None:
                 delay = kill_after(line)
                 if delay is not None:
@@ -1938,6 +2043,10 @@ def run_qemu_until_exit(
             proc.kill()
             result.exit_code = proc.wait()
 
+    if result.timed_out and progress is not None:
+        raise HarnessError(
+            f"{progress.hung_message()}; {len(result.lines)} lines{serial_tail(result.lines)}"
+        )
     if result.timed_out:
         raise HarnessError(
             f"timed out after {timeout_s}s; {len(result.lines)} lines"
