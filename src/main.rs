@@ -275,6 +275,7 @@ fn normal_boot_tail() {
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
     // below: the GDT is loaded and the PIC masks every line, as `per_cpu_init::init_bsp` requires; established here.
     unsafe { per_cpu_init::init_bsp() };
+    log::trace_init::init();
     // SAFETY: boot order (DESIGN §3.3), single CPU with IF=0 until `sti`
     // below: `GS_BASE` is the BSP's `PerCpu` (`per_cpu_init::init_bsp` above), first call, as `thread_init::init_bootstrap` requires; established here.
     unsafe { thread_init::init_bootstrap() };
