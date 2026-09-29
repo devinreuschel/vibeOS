@@ -15,11 +15,20 @@ use vibeos::lock::RANK_HEAP;
 use vibeos::paging::{PhysAddr, VirtAddr, heap_flags};
 use vibeos::pmm::Frames;
 
+use crate::boot;
 use crate::paging_init;
 use crate::pmm_init;
 use crate::sync_init::SpinMutex;
 
+/// The heap-failure hook's path (C-FAILAFTER); it lives in `mm::ktest`.
+#[cfg(feature = "kernel_tests")]
+pub(crate) use super::ktest::fail_after;
+
 struct LockedHeap(Heap);
+// SAFETY: `Heap` holds only pointers into the kernel heap window, which the
+// kernel half maps the same on every CPU and only `Heap` writes (invariant
+// I225, established at `mm::heap_init::grow_for`); `HEAP`'s lock gives one
+// CPU at a time the `&mut`, so moving it between CPUs is sound.
 unsafe impl Send for LockedHeap {}
 
 static HEAP: SpinMutex<LockedHeap> = SpinMutex::with_rank(LockedHeap(Heap::empty()), RANK_HEAP);
@@ -33,9 +42,15 @@ pub unsafe fn init() {
     paging_init::assert_unmapped(VirtAddr(HEAP_START), VirtAddr(HEAP_END));
     let mut mapped = 0usize;
     while mapped < HEAP_INITIAL as usize {
-        map_one(HEAP_START + mapped as u64).expect("heap: initial map");
+        if map_one(HEAP_START + mapped as u64).is_err() {
+            boot::halt_with("vibeOS: heap: initial map failed");
+        }
         mapped += PAGE_SIZE;
     }
+    // SAFETY: `Heap::init`'s contract; the loop above mapped
+    // `[HEAP_START, HEAP_START + HEAP_INITIAL)` writable from fresh buddy
+    // frames, `assert_unmapped` proved nothing else maps the window, and
+    // `HEAP_START` is page aligned (invariant I225, established here).
     unsafe {
         HEAP.lock().0.init(
             HEAP_START as usize,
@@ -56,6 +71,11 @@ fn map_one(va: u64) -> Result<(), ()> {
     let va = VirtAddr(va);
     let r = paging_init::with_pt(|pt| {
         let pa = pmm_init::with_buddy(|b| b.alloc(0)).ok_or(())?.into_entry();
+        // SAFETY: `map_4k_locked`'s contract (`Mapper::map_page`'s): `pa` is a
+        // fresh buddy frame nothing else maps, and the heap window below
+        // `va` is the heap's alone (invariant I225, established here); `pt`
+        // is the page-table lock (invariant I226, established at
+        // `mm::paging_init::current_mapper`).
         unsafe {
             paging_init::map_4k_locked(pt, va, PhysAddr(pa), heap_flags()).map_err(|_| {
                 // SAFETY: `pa` is the order-0 `into_entry` above, and the
@@ -129,6 +149,10 @@ fn grow_for(layout: Layout) -> bool {
         let mut h = HEAP.lock();
         let now = h.0.mapped();
         if n > now && n <= h.0.cap() {
+            // SAFETY: `Heap::extend`'s contract; `page_present` found every
+            // page of `[now, n)` mapped, and only this heap maps heap-window
+            // pages (`map_one`), so the span is writable and unused
+            // (invariant I225, established here).
             unsafe { h.0.extend(n) };
         }
     }
@@ -141,6 +165,10 @@ struct KernelAlloc;
 /// real bound (`grow_for` returns false at the window cap).
 const GROW_ROUNDS: u32 = 4096;
 
+// SAFETY: `GlobalAlloc`'s contract; every block comes from `Heap`, which
+// hands out disjoint blocks of at least the layout's size and alignment
+// inside memory mapped before `Heap::extend` takes it (invariant I225,
+// established at `mm::heap_init::grow_for`), and a failure returns null.
 unsafe impl GlobalAlloc for KernelAlloc {
     /// # Safety
     /// `layout` is a valid allocation request.
@@ -153,6 +181,9 @@ unsafe impl GlobalAlloc for KernelAlloc {
         loop {
             {
                 let mut h = HEAP.lock();
+                // SAFETY: `Heap::alloc`'s contract; the caller treats the
+                // block as `layout` until `dealloc` (`GlobalAlloc::alloc`'s
+                // contract, established here).
                 let p = unsafe { h.0.alloc(layout) };
                 if !p.is_null() {
                     return p;
@@ -168,6 +199,8 @@ unsafe impl GlobalAlloc for KernelAlloc {
     /// # Safety
     /// `ptr` came from `alloc` with the same `layout`.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: `Heap::dealloc`'s contract; `ptr` came from `alloc` with
+        // `layout` (this fn's `# Safety` contract, established here).
         unsafe { HEAP.lock().0.dealloc(ptr, layout) };
     }
 
@@ -182,11 +215,18 @@ unsafe impl GlobalAlloc for KernelAlloc {
         loop {
             {
                 let mut h = HEAP.lock();
+                // SAFETY: `Heap::realloc`'s contract; `ptr` came from `alloc`
+                // with `layout`, and `new_size` rounded to its alignment
+                // fits `isize` (`GlobalAlloc::realloc`'s contract,
+                // established here).
                 let p = unsafe { h.0.realloc(ptr, layout, new_size) };
                 if !p.is_null() || new_size == 0 {
                     return p;
                 }
             }
+            // SAFETY: `layout.align()` is a power of two, and
+            // `GlobalAlloc::realloc`'s contract bounds `new_size`,
+            // established here.
             let new_layout = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
             if n >= GROW_ROUNDS || !grow_for(new_layout) {
                 return ptr::null_mut();
@@ -196,108 +236,14 @@ unsafe impl GlobalAlloc for KernelAlloc {
     }
 }
 
-/// A `kernel_tests` hook that fails every counted heap allocation after a
-/// budget (ROADMAP §10.4, C-FAILAFTER). `KernelAlloc::alloc` and `realloc`
-/// ask [`fail_after::refuse`] before they take the heap lock or grow the
-/// heap, so a refused allocation maps no frame; `dealloc` never asks.
-#[cfg(feature = "kernel_tests")]
-pub(crate) mod fail_after {
-    use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
-
-    use vibeos::thread::ThreadId;
-
-    use crate::x86::InterruptGuard;
-    use crate::{per_cpu_init, syscall_init, thread_init};
-
-    /// Which allocations the hook counts.
-    #[derive(Clone, Copy)]
-    pub(crate) enum Scope {
-        /// Allocations on a process thread (pid != 0) whose
-        /// `Tcb.syscall_count` is at least `from_syscall`: 1 counts from
-        /// the thread's first syscall, 2 skips it.
-        Processes { from_syscall: u64 },
-        /// Allocations on one thread, a kernel thread included.
-        Thread(ThreadId),
-    }
-
-    /// What the hook saw while armed: `counted` in-scope allocations, of
-    /// which it refused the last `refused`.
-    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-    pub(crate) struct Seen {
-        pub counted: usize,
-        pub refused: usize,
-    }
-
-    const KIND_PROCESSES: u8 = 0;
-    const KIND_THREAD: u8 = 1;
-
-    static ARMED: AtomicBool = AtomicBool::new(false);
-    static KIND: AtomicU8 = AtomicU8::new(KIND_PROCESSES);
-    /// `from_syscall`, or the thread id.
-    static ARG: AtomicU64 = AtomicU64::new(0);
-    static BUDGET: AtomicUsize = AtomicUsize::new(0);
-    static COUNTED: AtomicUsize = AtomicUsize::new(0);
-    static REFUSED: AtomicUsize = AtomicUsize::new(0);
-
-    /// The first `budget` allocations in `scope` succeed; every later one
-    /// returns null. One arm at a time.
-    pub(crate) fn arm(budget: usize, scope: Scope) {
-        assert!(!ARMED.load(Ordering::Acquire), "fail_after: armed twice");
-        let (kind, arg) = match scope {
-            Scope::Processes { from_syscall } => (KIND_PROCESSES, from_syscall),
-            Scope::Thread(id) => (KIND_THREAD, u64::from(id.0)),
-        };
-        KIND.store(kind, Ordering::Relaxed);
-        ARG.store(arg, Ordering::Relaxed);
-        BUDGET.store(budget, Ordering::Relaxed);
-        COUNTED.store(0, Ordering::Relaxed);
-        REFUSED.store(0, Ordering::Relaxed);
-        // Publishes the fields above to `refuse`'s Acquire load.
-        ARMED.store(true, Ordering::Release);
-    }
-
-    /// Stop counting and return what the hook saw since [`arm`].
-    pub(crate) fn disarm() -> Seen {
-        ARMED.store(false, Ordering::Release);
-        Seen {
-            counted: COUNTED.load(Ordering::Acquire),
-            refused: REFUSED.load(Ordering::Acquire),
-        }
-    }
-
-    /// Whether this allocation is refused. Atomics only; never allocates.
-    pub(super) fn refuse() -> bool {
-        if !ARMED.load(Ordering::Acquire) {
-            return false;
-        }
-        // One thread's pid, id and count: no switch between the reads.
-        let _irq = InterruptGuard::enter();
-        if per_cpu_init::current_thread().is_null() {
-            return false;
-        }
-        let arg = ARG.load(Ordering::Relaxed);
-        let in_scope = match KIND.load(Ordering::Relaxed) {
-            KIND_PROCESSES => {
-                thread_init::current_pid() != 0 && syscall_init::syscall_count() >= arg
-            }
-            _ => u64::from(thread_init::current_id().0) == arg,
-        };
-        if !in_scope {
-            return false;
-        }
-        let n = COUNTED.fetch_add(1, Ordering::AcqRel);
-        if n < BUDGET.load(Ordering::Relaxed) {
-            return false;
-        }
-        REFUSED.fetch_add(1, Ordering::AcqRel);
-        true
-    }
-}
-
 #[global_allocator]
 static GLOBAL: KernelAlloc = KernelAlloc;
 
 #[alloc_error_handler]
+#[allow(
+    clippy::panic,
+    reason = "DESIGN §4.4: only an infallible allocation reaches this handler, and those run only before irq: enabled"
+)]
 fn on_alloc_error(layout: Layout) -> ! {
     #[cfg(feature = "kernel_tests")]
     crate::arch::catch::on_alloc_error(layout);

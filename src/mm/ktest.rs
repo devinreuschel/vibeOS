@@ -606,3 +606,102 @@ pub(crate) fn vmap_32_frames_unmapped() -> Outcome {
     }
     Outcome::Ok
 }
+
+// ------------------ hooks ------------------
+
+/// A `kernel_tests` hook that fails every counted heap allocation after a
+/// budget (ROADMAP §10.4, C-FAILAFTER). `heap_init`'s `KernelAlloc::alloc`
+/// and `realloc` ask [`fail_after::refuse`] before they take the heap lock or grow the
+/// heap, so a refused allocation maps no frame; `dealloc` never asks.
+pub(crate) mod fail_after {
+    use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+
+    use vibeos::thread::ThreadId;
+
+    use crate::x86::InterruptGuard;
+    use crate::{per_cpu_init, syscall_init, thread_init};
+
+    /// Which allocations the hook counts.
+    #[derive(Clone, Copy)]
+    pub(crate) enum Scope {
+        /// Allocations on a process thread (pid != 0) whose
+        /// `Tcb.syscall_count` is at least `from_syscall`: 1 counts from
+        /// the thread's first syscall, 2 skips it.
+        Processes { from_syscall: u64 },
+        /// Allocations on one thread, a kernel thread included.
+        Thread(ThreadId),
+    }
+
+    /// What the hook saw while armed: `counted` in-scope allocations, of
+    /// which it refused the last `refused`.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub(crate) struct Seen {
+        pub counted: usize,
+        pub refused: usize,
+    }
+
+    const KIND_PROCESSES: u8 = 0;
+    const KIND_THREAD: u8 = 1;
+
+    static ARMED: AtomicBool = AtomicBool::new(false);
+    static KIND: AtomicU8 = AtomicU8::new(KIND_PROCESSES);
+    /// `from_syscall`, or the thread id.
+    static ARG: AtomicU64 = AtomicU64::new(0);
+    static BUDGET: AtomicUsize = AtomicUsize::new(0);
+    static COUNTED: AtomicUsize = AtomicUsize::new(0);
+    static REFUSED: AtomicUsize = AtomicUsize::new(0);
+
+    /// The first `budget` allocations in `scope` succeed; every later one
+    /// returns null. One arm at a time.
+    pub(crate) fn arm(budget: usize, scope: Scope) {
+        assert!(!ARMED.load(Ordering::Acquire), "fail_after: armed twice");
+        let (kind, arg) = match scope {
+            Scope::Processes { from_syscall } => (KIND_PROCESSES, from_syscall),
+            Scope::Thread(id) => (KIND_THREAD, u64::from(id.0)),
+        };
+        KIND.store(kind, Ordering::Relaxed);
+        ARG.store(arg, Ordering::Relaxed);
+        BUDGET.store(budget, Ordering::Relaxed);
+        COUNTED.store(0, Ordering::Relaxed);
+        REFUSED.store(0, Ordering::Relaxed);
+        // Publishes the fields above to `refuse`'s Acquire load.
+        ARMED.store(true, Ordering::Release);
+    }
+
+    /// Stop counting and return what the hook saw since [`arm`].
+    pub(crate) fn disarm() -> Seen {
+        ARMED.store(false, Ordering::Release);
+        Seen {
+            counted: COUNTED.load(Ordering::Acquire),
+            refused: REFUSED.load(Ordering::Acquire),
+        }
+    }
+
+    /// Whether this allocation is refused. Atomics only; never allocates.
+    pub(crate) fn refuse() -> bool {
+        if !ARMED.load(Ordering::Acquire) {
+            return false;
+        }
+        // One thread's pid, id and count: no switch between the reads.
+        let _irq = InterruptGuard::enter();
+        if per_cpu_init::current_thread().is_null() {
+            return false;
+        }
+        let arg = ARG.load(Ordering::Relaxed);
+        let in_scope = match KIND.load(Ordering::Relaxed) {
+            KIND_PROCESSES => {
+                thread_init::current_pid() != 0 && syscall_init::syscall_count() >= arg
+            }
+            _ => u64::from(thread_init::current_id().0) == arg,
+        };
+        if !in_scope {
+            return false;
+        }
+        let n = COUNTED.fetch_add(1, Ordering::AcqRel);
+        if n < BUDGET.load(Ordering::Relaxed) {
+            return false;
+        }
+        REFUSED.fetch_add(1, Ordering::AcqRel);
+        true
+    }
+}
