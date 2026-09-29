@@ -602,6 +602,23 @@ outside a comment. Until a workflow a job entry names exists (`macos.yml`, `nigh
 missing workflow, so the line fails rather than passes without its job.
 `tests/harness/test_gates.py` holds a failing case per rule and runs the script on the tree.
 
+**Which run proves a commit.** A run proves commit C only when its event is `push`, `schedule`, or
+`workflow_dispatch` and its head SHA is C, or, for a workflow that takes a commit as input, its
+CI-history record names C (`commit`); a `pull_request` run never proves a commit, since it tests the
+merge with the pull request's base. `gatelib.run_proves_commit` is that rule, and `make gate`, the
+`ticks` job and every other reader of runs use it. A gate map's `job` entry passes on a run of its
+workflow that concluded `success`, proves the gated commit, and whose jobs named as the job id's
+`name:` in the workflow at that commit (or `<name> (…)`, one per matrix leg) all concluded `success`;
+`gate.py` takes the candidates from `gh api …/actions/workflows/<wf>/runs -f head_sha=<C>` and from
+the workflow's `ci-history` records, merging a run's record into it for a workflow that takes a
+commit as input. It starts nothing: when no run proves the commit it prints the maintainer's
+commands, `git push origin <C>:refs/heads/gate/<N>` and `gh workflow run <wf> --ref gate/<N>`, or
+for a workflow that takes a commit as input `gh workflow run <wf> --ref main -f commit=<C>`, so
+every workflow a gate entry names has a `workflow_dispatch` trigger (`rule_gate_dispatch`). A
+`record` entry's command never runs off the dev host: the entry passes only when `ci-history` holds
+a dev-host record (below) with event `dev-host`, the gated commit, phase N, the line's key, the map's
+command at that commit, every required field, and result `pass`.
+
 **Workflow rules.** `scripts/check_workflows.py`, which `make check` runs, reads every workflow
 with a stdlib YAML subset reader that fails on anything it does not parse (anchors, aliases, tags,
 `---`, multi-line flow) rather than misread it, and holds one function per rule in `RULES`. Besides

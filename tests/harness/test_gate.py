@@ -5,14 +5,18 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
-from scripts import gate
+from scripts import ci_history, gate
 from scripts.check_gates import Entry
 from scripts.gate import EntryResult, Tools, box_problems, line_verdict, run_gate
 from tests.harness.gitfixture import TempRepo
 
 C = "c" * 40
+OTHER = "d" * 40
+
 ROADMAP = """# Roadmap
 ## Phase 4: SMP
 **Exit gate**
@@ -55,6 +59,20 @@ ROADMAP = """# Roadmap
 - [ ] a proposal, lands in §10.9.
 """
 
+WORKFLOW = """name: ci
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-26.04
+  tier:
+    name: tier
+    runs-on: ubuntu-26.04
+"""
+
+
 def map_text(one: list[str], two: list[str]) -> str:
     def entries(rows: list[str]) -> str:
         return "".join(f"[[line.entry]]\n{r}\n" for r in rows)
@@ -83,6 +101,37 @@ class FakeRunner:
         return self.rc.get(cmd, 0)
 
 
+class FakeGh:
+    def __init__(self, runs: list[dict[str, Any]] | None = None,
+                 jobs: dict[int, list[dict[str, Any]]] | None = None) -> None:
+        self._runs = runs or []
+        self._jobs = jobs or {}
+
+    def runs(self, workflow: str, commit: str) -> list[dict[str, Any]]:
+        return [r for r in self._runs if r.get("head_sha") == commit]
+
+    def jobs(self, run_id: int) -> list[dict[str, Any]]:
+        return self._jobs.get(run_id, [])
+
+
+class FakeHistory:
+    def __init__(self, runs: dict[str, list[dict[str, Any]]] | None = None,
+                 records: list[dict[str, Any]] | None = None) -> None:
+        self._runs = runs or {}
+        self._records = records or []
+        self.written: list[Path] = []
+
+    def runs(self, workflow: str) -> list[dict[str, Any]]:
+        return self._runs.get(workflow, [])
+
+    def dev_host_records(self) -> list[dict[str, Any]]:
+        return self._records
+
+    def write_record(self, path: Path, forbidden: list[tuple[str, str]]) -> str | None:
+        self.written.append(path)
+        return "0" * 40
+
+
 class Tree:
     def __init__(self, case: unittest.TestCase, files: dict[str, str]) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -94,10 +143,13 @@ class Tree:
             p.write_text(text, encoding="utf-8")
 
     def gate(self, phase: int = 10, runner: FakeRunner | None = None,
-             dry_run: bool = False) -> tuple[bool, list[str]]:
+             gh: FakeGh | None = None, history: FakeHistory | None = None,
+             dry_run: bool = False,
+             workflow_at: Callable[[str], str | None] | None = None) -> tuple[bool, list[str]]:
         out: list[str] = []
-        ok = run_gate(phase, C, self.root, Tools(runner or FakeRunner()), out.append,
-                      dry_run=dry_run)
+        tools = Tools(runner or FakeRunner(), gh or FakeGh(), history or FakeHistory())
+        ok = run_gate(phase, C, self.root, tools, out.append, dry_run=dry_run,
+                      workflow_at=workflow_at or (lambda wf: WORKFLOW))
         return ok, out
 
 
@@ -276,6 +328,105 @@ class BelowTen(unittest.TestCase):
         self.assertIn("      -     cmd a  (not run)", out)
 
 
+def run(workflow_runs: list[dict[str, Any]], jobs: dict[int, list[dict[str, Any]]]) -> FakeGh:
+    return FakeGh(workflow_runs, jobs)
+
+
+GREEN = [{"name": "check", "conclusion": "success"}]
+
+
+class Jobs(unittest.TestCase):
+    def setUp(self) -> None:
+        self.t = tree(self, ['job = { workflow = "ci.yml", job = "check" }'], ['cmd = "c"'])
+
+    def test_pull_request_run_fails(self) -> None:
+        gh = run([{"id": 1, "event": "pull_request", "head_sha": C, "conclusion": "success"}],
+                 {1: GREEN})
+        self.assertFalse(self.t.gate(gh=gh)[0])
+
+    def test_push_run_passes(self) -> None:
+        gh = run([{"id": 1, "event": "push", "head_sha": C, "conclusion": "success"}],
+                 {1: GREEN})
+        ok, out = self.t.gate(gh=gh)
+        self.assertTrue(ok, out)
+        self.assertIn("      ok    job ci.yml:check  run 1 (push)", out)
+
+    def test_red_run_or_skipped_job_fails(self) -> None:
+        red = run([{"id": 1, "event": "push", "head_sha": C, "conclusion": "failure"}],
+                  {1: GREEN})
+        self.assertFalse(self.t.gate(gh=red)[0])
+        skipped = run([{"id": 1, "event": "schedule", "head_sha": C, "conclusion": "success"}],
+                      {1: [{"name": "check", "conclusion": "skipped"}]})
+        self.assertFalse(self.t.gate(gh=skipped)[0])
+
+    def test_matrix_legs_all_green(self) -> None:
+        t = tree(self, ['job = { workflow = "ci.yml", job = "tier" }'], ['cmd = "c"'])
+        legs = [{"name": "tier (x86_64, e2e-1)", "conclusion": "success"},
+                {"name": "tier (x86_64, e2e-2)", "conclusion": "success"}]
+        base = [{"id": 1, "event": "push", "head_sha": C, "conclusion": "success"}]
+        self.assertTrue(t.gate(gh=run(base, {1: legs}))[0])
+        legs[1]["conclusion"] = "failure"
+        self.assertFalse(t.gate(gh=run(base, {1: legs}))[0])
+
+    def test_unknown_job_id_fails(self) -> None:
+        t = tree(self, ['job = { workflow = "ci.yml", job = "nope" }'], ['cmd = "c"'])
+        gh = run([{"id": 1, "event": "push", "head_sha": C, "conclusion": "success"}],
+                 {1: [{"name": "nope", "conclusion": "success"}]})
+        ok, out = t.gate(gh=gh)
+        self.assertFalse(ok)
+        self.assertTrue(any("job id nope is not in ci.yml" in r for r in out))
+
+    def test_no_run_prints_hint(self) -> None:
+        ok, out = self.t.gate(gh=FakeGh())
+        self.assertFalse(ok)
+        hint = next(r for r in out if "job ci.yml:check" in r)
+        self.assertIn(f"git push origin {C}:refs/heads/gate/10", hint)
+        self.assertIn("gh workflow run ci.yml --ref gate/10", hint)
+
+    def test_commit_input_workflow_proven_by_history(self) -> None:
+        t = tree(self, ['job = { workflow = "release.yml", job = "check" }'], ['cmd = "c"'])
+        self.assertTrue(gate.takes_commit("release.yml"))
+        rec = {"run_id": 7, "event": "workflow_dispatch", "head_sha": OTHER, "commit": C,
+               "conclusion": "success", "jobs": GREEN}
+        self.assertTrue(t.gate(history=FakeHistory({"release.yml": [rec]}))[0])
+        api = [{"id": 7, "event": "workflow_dispatch", "head_sha": C, "conclusion": "success"}]
+        moved = dict(rec, commit=OTHER)
+        ok, out = t.gate(gh=run(api, {7: GREEN}), history=FakeHistory({"release.yml": [moved]}))
+        self.assertFalse(ok, "the history record's commit overrides the run's head SHA")
+        hint = next(r for r in out if "job release.yml:check" in r)
+        self.assertIn(f"gh workflow run release.yml --ref main -f commit={C}", hint)
+
+
+def record(**over: Any) -> dict[str, Any]:
+    rec: dict[str, Any] = {f: "x" for f in ci_history.REQUIRED_RECORD_FIELDS}
+    rec.update(event="dev-host", host="dev-host", commit=C, phase=10, line="line  one",
+               command="make models", result="pass", schema=1)
+    rec.update(over)
+    return rec
+
+
+class Records(unittest.TestCase):
+    def setUp(self) -> None:
+        self.t = tree(self, ['record = { cmd = "make models" }'], ['cmd = "c"'])
+
+    def gate(self, rec: dict[str, Any]) -> bool:
+        runner = FakeRunner()
+        ok, _ = self.t.gate(runner=runner, history=FakeHistory(records=[rec]))
+        self.assertNotIn("make models", [c for c, _ in runner.calls])
+        return ok
+
+    def test_matching_pass(self) -> None:
+        self.assertTrue(self.gate(record()))
+
+    def test_mismatches_fail(self) -> None:
+        missing = record()
+        del missing["mac_model"]
+        for rec in (record(command="make models2"), missing, record(result="fail"),
+                    record(commit=OTHER), record(phase=11), record(line="line two"),
+                    record(event="push")):
+            self.assertFalse(self.gate(rec), rec)
+
+
 class LocalRun(unittest.TestCase):
     def setUp(self) -> None:
         self.repo = TempRepo()
@@ -290,7 +441,7 @@ class LocalRun(unittest.TestCase):
 
     def main(self, *args: str) -> tuple[int, list[str]]:
         out: list[str] = []
-        tools = Tools(FakeRunner())
+        tools = Tools(FakeRunner(), FakeGh(), FakeHistory())
         rc = gate.main(["--phase", "3", "--root", str(self.repo.path), *args], tools,
                        out=out.append)
         return rc, out

@@ -14,8 +14,9 @@ row per exit-gate line of phase N, each followed by its entries' results:
 
 For N >= 10 it runs every entry of `tests/gates/phase-<N>.toml`
 (C-GATEMAP; `scripts/check_gates.py` holds the map's rules, which run
-first): a `cmd` entry through `sh -c` at the root, each distinct command
-once. A line passes only when every entry passes. For N < 10, which
+first): a `cmd` entry through `sh -c` at the root, a `job` entry against the
+runs of its workflow, and a `record` entry against the dev-host records on
+`ci-history`. A line passes only when every entry passes. For N < 10, which
 has no map, it runs no entry and needs every gate line but the tag ticked.
 Every phase gets the two box rules:
 
@@ -27,11 +28,11 @@ Every phase gets the two box rules:
 
 A local run gates `HEAD` of a clean work tree (tracked files): `--commit`
 must name `HEAD`. `--dry-run` prints the rows and the box problems and runs
-nothing.
+nothing. A record entry's command never runs here.
 
 Exit codes: 0 pass, 1 fail, 2 usage.
 
-Standard library only.
+Standard library only; `gh` and `git` are its only tools.
 """
 
 from __future__ import annotations
@@ -46,12 +47,12 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from scripts import check_gates, gatelib  # noqa: E402
+from scripts import check_gates, ci_history, gatelib  # noqa: E402
 from scripts.check_gates import Entry, GateLine, MapLine, norm  # noqa: E402
 
 ARCH = "x86_64"
@@ -124,6 +125,61 @@ def shell_runner(cmd: str, cwd: Path, log: Path) -> int:
                               check=False).returncode
 
 
+class Gh(Protocol):
+    def runs(self, workflow: str, commit: str) -> list[dict[str, Any]]: ...
+
+    def jobs(self, run_id: int) -> list[dict[str, Any]]: ...
+
+
+class GhCli:
+    """Workflow runs through `ci_history.GhApi` (`gh api`)."""
+
+    def __init__(self) -> None:
+        self.api = ci_history.GhApi()
+        self._repo: str | None = None
+
+    def repo(self) -> str:
+        if self._repo is None:
+            self._repo = ci_history._repository()
+        return self._repo
+
+    def runs(self, workflow: str, commit: str) -> list[dict[str, Any]]:
+        path = f"/repos/{self.repo()}/actions/workflows/{workflow}/runs"
+        return list(ci_history.paged(self.api, path, "workflow_runs", {"head_sha": commit}))
+
+    def jobs(self, run_id: int) -> list[dict[str, Any]]:
+        path = f"/repos/{self.repo()}/actions/runs/{run_id}/jobs"
+        return list(ci_history.paged(self.api, path, "jobs", {"filter": "latest"}))
+
+
+class History(Protocol):
+    def runs(self, workflow: str) -> list[dict[str, Any]]: ...
+
+    def dev_host_records(self) -> list[dict[str, Any]]: ...
+
+
+class BranchHistory:
+    """The `ci-history` branch through `ci_history.HistoryRepo`, opened on
+    first use, so a gate with no job or record entry never fetches it."""
+
+    def __init__(self) -> None:
+        self._repo: ci_history.HistoryRepo | None = None
+
+    def repo(self) -> ci_history.HistoryRepo:
+        if self._repo is None:
+            self._repo = ci_history.HistoryRepo(ci_history.default_workdir(),
+                                                ci_history.default_remote())
+            self._repo.open(depth=1)
+        return self._repo
+
+    def runs(self, workflow: str) -> list[dict[str, Any]]:
+        key = workflow_key(workflow)
+        return [] if key is None else self.repo().records(key)
+
+    def dev_host_records(self) -> list[dict[str, Any]]:
+        return ci_history.dev_host_records(self.repo())
+
+
 # --- entries ------------------------------------------------------------------
 
 
@@ -132,6 +188,19 @@ class EntryResult:
     entry: Entry
     ok: bool
     detail: str = ""
+
+
+def workflow_key(workflow: str) -> str | None:
+    """The `ci_history.WORKFLOWS` key of a workflow file name, or None."""
+    for k, spec in ci_history.WORKFLOWS.items():
+        if workflow in (k, spec.path, spec.path.rsplit("/", 1)[-1]):
+            return k
+    return None
+
+
+def takes_commit(workflow: str) -> bool:
+    key = workflow_key(workflow)
+    return key is not None and ci_history.WORKFLOWS[key].commit_input
 
 
 def ktest_selection(cmd: str) -> tuple[list[str], str | None] | None:
@@ -219,6 +288,129 @@ def eval_cmd(e: Entry, index: int, cache: CmdCache, root: Path) -> EntryResult:
     return EntryResult(e, True)
 
 
+def job_name(workflow_text: str, workflow: str, job: str) -> str | None:
+    """The display name of job id `job` in a workflow (its `name:`, else the
+    id), or None when the workflow has no such job or does not parse."""
+    try:
+        from scripts import check_workflows
+
+        wf = check_workflows.parse(workflow_text, workflow)
+    except Exception:  # noqa: BLE001 - any parse failure means "no such job"
+        return None
+    jobs = wf.get("jobs")
+    node = jobs.get(job) if jobs is not None else None
+    if node is None:
+        return None
+    name = node.get("name")
+    return name.value if name is not None and name.value else job
+
+
+def leg_matches(name: object, want: str) -> bool:
+    """A job run is the named job or one of its matrix legs, `<name> (…)`. A
+    name built from `${{ … }}` matches on its literal part before the first
+    expression."""
+    if not isinstance(name, str):
+        return False
+    literal = want.split("${{", 1)[0].strip()
+    if "${{" in want:
+        return bool(literal) and name.startswith(literal)
+    return name == want or name.startswith(f"{want} (")
+
+
+def dispatch_hint(workflow: str, commit: str, phase: int) -> list[str]:
+    if takes_commit(workflow):
+        return [f"gh workflow run {workflow} --ref main -f commit={commit}"]
+    return [f"git push origin {commit}:refs/heads/gate/{phase}",
+            f"gh workflow run {workflow} --ref gate/{phase}"]
+
+
+def eval_job(
+    e: Entry,
+    commit: str,
+    phase: int,
+    gh: Gh,
+    history: History,
+    workflow_at: Callable[[str], str | None],
+) -> EntryResult:
+    """Passes on a green run that proves `commit` (`gatelib.run_proves_commit`)
+    whose legs of the named job all concluded `success`. Candidates are the
+    API's runs at `commit` and the `ci-history` runs whose commit is `commit`;
+    for a workflow that takes a commit as input, a run's history record is
+    merged into it. It starts nothing: with no proving run it prints how the
+    maintainer starts one."""
+    text = workflow_at(e.workflow)
+    if text is None:
+        return EntryResult(e, False, f"{e.workflow} is not in the tree at {commit[:12]}")
+    name = job_name(text, e.workflow, e.job)
+    if name is None:
+        return EntryResult(e, False, f"job id {e.job} is not in {e.workflow} at {commit[:12]}")
+    notes: list[str] = []
+    recorded: list[dict[str, Any]] = []
+    try:
+        recorded = history.runs(e.workflow)
+    except ci_history.HistoryError as err:
+        notes.append(f"ci-history: {err}")
+    by_id = {r.get("run_id"): r for r in recorded}
+    candidates: list[tuple[dict[str, Any], list[dict[str, Any]] | None]] = []
+    api_runs: list[dict[str, Any]] = []
+    try:
+        api_runs = gh.runs(e.workflow, commit)
+    except (ci_history.HistoryError, OSError) as err:
+        notes.append(f"gh: {err}")
+    seen: set[object] = set()
+    for run in api_runs:
+        merged = dict(run)
+        rec = by_id.get(run.get("id"))
+        if takes_commit(e.workflow) and rec is not None and isinstance(rec.get("commit"), str):
+            merged["commit"] = rec["commit"]
+        seen.add(run.get("id"))
+        candidates.append((merged, None))
+    for rec in recorded:
+        if rec.get("run_id") not in seen and gatelib.run_commit(rec) == commit:
+            candidates.append((rec, rec.get("jobs") if isinstance(rec.get("jobs"), list) else []))
+    for run, jobs in candidates:
+        if not gatelib.run_proves_commit(run, commit) or run.get("conclusion") != "success":
+            continue
+        if jobs is None:
+            try:
+                jobs = gh.jobs(int(run.get("id", 0)))
+            except (ci_history.HistoryError, OSError, ValueError) as err:
+                notes.append(f"gh: {err}")
+                continue
+        legs = [j for j in jobs if isinstance(j, dict) and leg_matches(j.get("name"), name)]
+        if legs and all(j.get("conclusion") == "success" for j in legs):
+            rid = run.get("id", run.get("run_id"))
+            return EntryResult(e, True, f"run {rid} ({run.get('event')})")
+    hint = "; ".join(dispatch_hint(e.workflow, commit, phase))
+    detail = f"no green run of {e.workflow} proves {commit[:12]}; start one: {hint}"
+    return EntryResult(e, False, "; ".join([detail, *notes]))
+
+
+def eval_record(e: Entry, key: str, commit: str, phase: int, history: History) -> EntryResult:
+    """Passes only on a `ci-history` dev-host record of this entry at
+    `commit`: event `dev-host`, commit, phase, line and command equal, every
+    required field present, and result `pass`. Its command never runs."""
+    try:
+        records = history.dev_host_records()
+    except ci_history.HistoryError as err:
+        return EntryResult(e, False, f"ci-history: {err}")
+    for r in records:
+        if (
+            r.get("event") == ci_history.DEV_HOST
+            and r.get("commit") == commit
+            and r.get("phase") == phase
+            and isinstance(r.get("line"), str)
+            and norm(r["line"]) == key
+            and r.get("command") == e.cmd
+            and all(f in r for f in ci_history.REQUIRED_RECORD_FIELDS)
+            and r.get("result") == "pass"
+        ):
+            return EntryResult(e, True, f"dev-host record from {r.get('finished')}")
+    return EntryResult(e, False, f"ci-history holds no passing dev-host record of it at "
+                                 f"{commit[:12]}; run make gate PHASE={phase} RECORD=1 on the "
+                                 "dev host")
+
+
 def line_verdict(results: list[EntryResult]) -> bool:
     """A line passes only when it has entries and every one passed."""
     return bool(results) and all(r.ok for r in results)
@@ -235,6 +427,14 @@ def short(text: str) -> str:
 @dataclass
 class Tools:
     runner: Runner
+    gh: Gh
+    history: History
+
+
+def git_show(root: Path, commit: str, rel: str) -> str | None:
+    r = subprocess.run(["git", "-C", str(root), "show", f"{commit}:{rel}"],
+                       capture_output=True, text=True, check=False)
+    return r.stdout if r.returncode == 0 else None
 
 
 def run_gate(
@@ -245,6 +445,7 @@ def run_gate(
     out: Callable[[str], None] = print,
     *,
     dry_run: bool = False,
+    workflow_at: Callable[[str], str | None] | None = None,
 ) -> bool:
     """Print the rows for phase N at `commit` (the tree at `root`) and return
     whether the gate passes."""
@@ -282,12 +483,15 @@ def run_gate(
     cache = CmdCache(root, phase, tools.runner)
     index = {id(e): i for i, e in enumerate(
         (e for ml in lines or [] for e in ml.entries), start=1)}
+    if workflow_at is None:
+        def workflow_at(wf: str) -> str | None:
+            return git_show(root, commit, f".github/workflows/{wf}")
     for g in gates:
         if g.tag:
             out(f"TAG   L{g.line}  {short(g.text)}")
             continue
-        passed, rows = evaluate_line(g, by_key.get(norm(g.text)), phase, root, cache, index,
-                                     dry_run, lines is not None)
+        passed, rows = evaluate_line(g, by_key.get(norm(g.text)), phase, commit, root, tools,
+                                     cache, index, workflow_at, dry_run, lines is not None)
         ok = ok and passed
         out(f"{'PASS' if passed else 'FAIL'}  L{g.line}  {short(g.text)}")
         for r in rows:
@@ -303,9 +507,12 @@ def evaluate_line(
     g: GateLine,
     ml: MapLine | None,
     phase: int,
+    commit: str,
     root: Path,
+    tools: Tools,
     cache: CmdCache,
     index: dict[int, int],
+    workflow_at: Callable[[str], str | None],
     dry_run: bool,
     mapped: bool,
 ) -> tuple[bool, list[str]]:
@@ -322,16 +529,18 @@ def evaluate_line(
     for e in (x for x in ml.entries if not x.expect_fail):
         if e.kind == "cmd":
             results.append(eval_cmd(e, index[id(e)], cache, root))
+        elif e.kind == "job":
+            results.append(eval_job(e, commit, phase, tools.gh, tools.history, workflow_at))
         else:
-            results.append(EntryResult(e, False, f"{e.kind} entries are not evaluated yet"))
+            results.append(eval_record(e, ml.key, commit, phase, tools.history))
     plain_passed = any(r.ok for r in results)
     for e in (x for x in ml.entries if x.expect_fail):
         if not plain_passed:
             results.append(EntryResult(e, False, "not run: no plain entry of this line passed"))
-        elif e.kind == "cmd":
-            results.append(eval_cmd(e, index[id(e)], cache, root))
+        elif e.kind == "record":
+            results.append(eval_record(e, ml.key, commit, phase, tools.history))
         else:
-            results.append(EntryResult(e, False, f"{e.kind} entries are not evaluated yet"))
+            results.append(eval_cmd(e, index[id(e)], cache, root))
     rows = [f"      {'ok  ' if r.ok else 'FAIL'}  {r.entry.describe()}"
             + (f"  {r.detail}" if r.detail else "") for r in results]
     return line_verdict(results), rows
@@ -373,7 +582,7 @@ def main(
     except SystemExit as e:
         return 2 if e.code else 0
     root: Path = args.root
-    tools = tools or Tools(shell_runner)
+    tools = tools or Tools(shell_runner, GhCli(), BranchHistory())
     try:
         if args.phase < 0:
             raise GateUsage("PHASE is a phase number")

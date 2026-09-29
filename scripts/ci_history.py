@@ -1288,6 +1288,36 @@ def rotate(
     raise HistoryError(f"rotation lost its lease {PUSH_ATTEMPTS} times")
 
 
+# --- dev-host records -----------------------------------------------------------
+
+DEV_HOST = "dev-host"
+# The fields every dev-host record carries (ROADMAP §10.9, the dev-host box);
+# `make gate` passes a record entry only on a record holding all of them.
+REQUIRED_RECORD_FIELDS = (
+    "schema", "event", "commit", "head_sha", "host", "mac_model", "macos", "qemu",
+    "phase", "line", "command", "numbers", "result", "started", "finished", "results",
+)
+RECORDS = "records"
+
+
+def dev_host_records(history: HistoryRepo) -> list[dict[str, Any]]:
+    """Every JSON object under `records/` on the branch whose event is
+    `dev-host`. Readers match a record by its content (commit, phase, line,
+    command), never by its file name."""
+    out: list[dict[str, Any]] = []
+    d = history.workdir / RECORDS
+    if not d.is_dir():
+        return out
+    for p in sorted(d.glob("*.json")):
+        try:
+            obj = json.loads(p.read_bytes())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(obj, dict) and obj.get("event") == DEV_HOST:
+            out.append(obj)
+    return out
+
+
 # --- output -------------------------------------------------------------------
 
 
