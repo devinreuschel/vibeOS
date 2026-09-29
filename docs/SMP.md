@@ -404,7 +404,7 @@ whose `dmb oshst` puts the CPU's earlier stores ahead of it, as the `dmb ishst` 
 SGI write does. INIT and SIPI go through the same send. Callers publish with a Release store or a
 locked read-modify-write and add no fence of their own. Rule; not yet enforced:
 `apic_init::send_ipi` has no barrier of its own, and the callers that fence (`smp_init::start_one`,
-`ipi_init::shootdown_va`) do so before their publishing store, which is not enough under x2APIC
+`ipi_init::shootdown_ranges`) do so before their publishing store, which is not enough under x2APIC
 (ROADMAP §20.1).
 
 The wake inbox (§7.5) is `vibeos::irq::ipi::WakeInbox`, a per-CPU bitmap of `AtomicU64` words
@@ -565,18 +565,23 @@ between working and a hang that only appears under load. `SpinMutex::lock`'s spi
 reaches `service_incoming` through `sync_init::set_spin_poll`, which `ipi_init::init` sets before the
 first AP starts.
 
-The wait never panics, because `shootdown_va` and `call_mask` free frames and reuse their slot as
+The wait never panics, because `shootdown_ranges` and `call_mask` free frames and reuse their slot as
 soon as `ipi_init::wait_acks` returns. After each second (1000 × `tsc_per_ms` cycles) without every
 acknowledgement, it logs `vibeOS: ipi: wait_acks late <n> s: cpu<i> …` and counts it in
 `ipi_init::ack_late_count`. Without a TSC it logs every 50,000,000 polls. A CPU at IF=0 that does not
 poll `service_incoming` delays every shootdown until it does. One that never does leaves a hang for
 ROADMAP §10.7's forensics to report. `lifetime_shootdown_ack_late` holds IF off for 3 s on one CPU
-while another unmaps. As built, one round invalidates one VA
-(`shootdown_va`) on every online CPU; ROADMAP §12.3 replaces it with the rounds above. `kva_init::unmap_shootdown` unmaps at most 32 pages (`MAX_UNMAP`) and leaves the
+while another unmaps. As built, a round is kernel-only and goes to every online CPU: it carries up
+to 16 ranges (`vibeos::ipi::SHOOT_RANGES`) of 1 to 32 pages each (`ShootRange`, a page-aligned start
+with the page count in its low 12 bits), and each receiver runs `invlpg` on every page of them
+(`ipi_init::shootdown_ranges`, which sends one round per 16 ranges; `paging::tlb_shootdown_others(va)`
+is the one-page case). A KVA unmap of up to 32 pages sends one round, and a worker frees its CPU's
+dead stacks 16 to a round ([§4.5](MEMORY.md#45-kernel-virtual-address-allocator)); ROADMAP §12.3
+adds the target, the "all" count, and the freed-tables flag of the rounds above. `kva_init::unmap_shootdown` unmaps at most 32 pages (`MAX_UNMAP`) and leaves the
 rest mapped with no error.
 
 The shootdown handler allocates nothing and takes no lock ([§2.2](INVARIANTS.md#22-interrupt-handler-rules)). It
-reads a request slot and executes `invlpg`.
+reads a request slot and executes `invlpg` on each page it names, at most 512.
 
 ## 7.10 Verification and later work
 
