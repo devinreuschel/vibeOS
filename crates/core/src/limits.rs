@@ -61,9 +61,13 @@ pub const MAX_NAME: usize = 64;
 pub const MAX_SYMLINK: u32 = 8;
 /// Components one lookup walks, symlinks included (`fs`).
 pub const MAX_WALK: u32 = 80;
-/// Kernel virtual-address free-list nodes (`kva::Kva`). A `u8` holds the
-/// count (`kva::Kva`'s `nslots`), hence the assert below.
-pub const MAX_KVA_RANGES: usize = 128;
+/// Kernel virtual-address free-list nodes (`kva::Kva`): one per thread stack
+/// (`MAX_THREADS`); 8 per CPU (`acpi::MAX_CPUS`), for its 4 IST stacks, its
+/// RSP0 stack, its 2 cached stacks and its 1 dead-stack slot; and 64 for
+/// `vmap` and tests. `Kva::alloc` refuses once this minus 2 ranges are live,
+/// so `Kva::free` never runs out of nodes. `u16` links hold an index, hence
+/// the assert below.
+pub const MAX_KVA_RANGES: usize = MAX_THREADS + 8 * crate::acpi::MAX_CPUS + 64;
 /// Pages one deferred unmap batch holds (`kva_init`).
 pub const MAX_UNMAP_PAGES: usize = 32;
 /// Mounted FAT volumes (`fat_init`).
@@ -91,4 +95,4 @@ pub const MAX_ELF_LOADS: usize = 8;
 
 const _: () = assert!(EXEC_IMAGE_MAX > 192 * 1024 * 1024);
 const _: () = assert!(PID_WRAP < PID_MAX);
-const _: () = assert!(MAX_KVA_RANGES <= u8::MAX as usize);
+const _: () = assert!(MAX_KVA_RANGES <= u16::MAX as usize);
