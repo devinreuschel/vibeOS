@@ -17,10 +17,11 @@
 # file against docs/ROADMAP.md; docs/TESTING.md §8.5 and §8.6 describe the rest.
 #
 # `test -f .github/workflows/<wf>.yml` entries stand in for the job entries of
-# workflows not yet in the tree (nightly.yml: kvm, models, miri), which
-# check_workflows.py's rule_gate_dispatch rejects while the file is missing;
-# the slice that adds the workflow replaces them with the job entries, so
-# until then those lines fail rather than pass without them.
+# workflows not yet in the tree, which check_workflows.py's rule_gate_dispatch
+# rejects while the file is missing; the slice that adds the workflow replaces
+# them with the job entries, so until then those lines fail rather than pass
+# without them. nightly.yml's entries name its `kvm` job and the `models` and
+# `miri` jobs, which fail their line until the slice that adds them lands.
 
 [[line]]
 key = """
@@ -91,7 +92,7 @@ an ELF whose last page holds a `syscall` (§10.6)"""
 [[line.entry]]
 cmd = "VIBEOS_KTEST=exec_top_page_enoexec,noncanonical_rip_sigsegv make test-kernel"
 [[line.entry]]
-cmd = "test -f .github/workflows/nightly.yml"
+job = { workflow = "nightly.yml", job = "kvm" }
 
 [[line]]
 key = """
@@ -105,7 +106,7 @@ cmd = "VIBEOS_KTEST=user_single_step,user_int1,user_exceptions make test-kernel"
 [[line.entry]]
 cmd = "VIBEOS_KTEST=user_single_step,user_int1,user_exceptions make test-kernel-smp4"
 [[line.entry]]
-cmd = "test -f .github/workflows/nightly.yml"
+job = { workflow = "nightly.yml", job = "kvm" }
 
 [[line]]
 key = """
@@ -120,7 +121,7 @@ cmd = "VIBEOS_KTEST=user_device_irq,user_ipi,console_read_exit,user_entry_irq ma
 [[line.entry]]
 cmd = "VIBEOS_KTEST=user_device_irq,user_ipi,console_read_exit,user_entry_irq make test-kernel-smp4"
 [[line.entry]]
-cmd = "test -f .github/workflows/nightly.yml"
+job = { workflow = "nightly.yml", job = "kvm" }
 
 [[line]]
 key = """
@@ -137,7 +138,7 @@ cmd = "VIBEOS_KTEST=exit_burst,fork_oom,exec_huge_memsz make test-kernel"
 [[line.entry]]
 cmd = "VIBEOS_KTEST=exit_burst,fork_oom,exec_huge_memsz make test-kernel-smp4"
 [[line.entry]]
-cmd = "test -f .github/workflows/nightly.yml"
+job = { workflow = "nightly.yml", job = "kvm" }
 
 [[line]]
 key = """
@@ -150,7 +151,7 @@ cmd = "VIBEOS_KTEST='lifetime_*,exit_burst,fork_oom' VIBEOS_KTEST_REPEAT=20 make
 [[line.entry]]
 cmd = "VIBEOS_KTEST='lifetime_iowaiter_publish_last,exit_burst,fork_oom' VIBEOS_KTEST_REPEAT=20 make test-kernel"
 [[line.entry]]
-cmd = "test -f .github/workflows/nightly.yml"
+job = { workflow = "nightly.yml", job = "kvm" }
 
 [[line]]
 key = """
@@ -325,7 +326,9 @@ key = """
 weakened variant, Kani proves the buddy allocator and the §10.6 user-range check to their stated
 bounds, and Miri passes over the portable crate's host tests (§10.8)"""
 [[line.entry]]
-cmd = "test -f .github/workflows/nightly.yml"
+job = { workflow = "nightly.yml", job = "models" }
+[[line.entry]]
+job = { workflow = "nightly.yml", job = "miri" }
 [[line.entry]]
 record = { cmd = "make models" }
 

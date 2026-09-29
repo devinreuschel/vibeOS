@@ -651,7 +651,7 @@ comes before drivers rather than after.
 - [x] rearm before calling the scheduler
 - [x] mask the PIT's GSI when the LAPIC owns the tick
 - [x] log which mode was chosen, and make it an e2e assertion so a silent downgrade is not invisible
-- [x] in-guest tests: the timer fires, and the periodic timer keeps firing across many ticks (`lapic_timer_rearm`); `rearm_deadline`, the only software rearm, returns before its `IA32_TSC_DEADLINE` write in every tier (F078)
+- [x] in-guest tests: the timer fires, and the periodic timer keeps firing across many ticks (`lapic_timer_rearm`); `rearm_deadline`, the only software rearm, returns before its `IA32_TSC_DEADLINE` write (F078)
 
 ### 4.4 AP trampoline
 - [x] `trampoline.S` via `global_asm!` into `.trampoline`, copied to the page §10.6 chooses from the memory map; blob fits below the param block

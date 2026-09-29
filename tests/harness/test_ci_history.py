@@ -339,11 +339,17 @@ class TestEvent(unittest.TestCase):
             ),
             ("release", 555),
         )
+        self.assertEqual(
+            ci_history.load_event(
+                self.event(name="nightly", path=".github/workflows/nightly.yml"), REPO
+            ),
+            ("nightly", 555),
+        )
 
     def test_event_rejects_unlisted_workflow(self) -> None:
         with self.assertRaises(NotRecorded):
             ci_history.load_event(
-                self.event(name="nightly", path=".github/workflows/nightly.yml"), REPO
+                self.event(name="macos", path=".github/workflows/macos.yml"), REPO
             )
         with self.assertRaises(NotRecorded):
             ci_history.load_event(self.event(), "someone/else")
@@ -1131,7 +1137,11 @@ class TestWorkflow(unittest.TestCase):
         self.assertEqual(cond, {"record": "github.event_name == 'workflow_run'",
                                 "daily": "github.event_name != 'workflow_run'"})
         for job in self.jobs.values():
-            self.assertIsNone(job.get("concurrency"))
+            conc = job.get("concurrency")
+            assert conc is not None
+            # Scheduled lane 6 (DESIGN §8.6), queued, never cancelled.
+            self.assertEqual({c.key: c.value for c in conc.children},
+                             {"group": "sched-lane-6", "queue": "max"})
             self.assertEqual(job.get("runs-on").value, "ubuntu-26.04")  # type: ignore[union-attr]
 
     def test_workflow_names_match_files(self) -> None:
@@ -1143,6 +1153,233 @@ class TestWorkflow(unittest.TestCase):
             self.assertEqual(name.value if name else None, key, spec.path)
         name = self.wf.get("name")
         self.assertEqual(name.value if name else None, "ci-history")
+
+
+
+# --- budget and tiers (ROADMAP §10.1, DESIGN §8.6 Scheduled capacity) --------------
+
+# A Wednesday; the last 4 complete weeks start on the Mondays below.
+NOW = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
+W1 = datetime(2026, 9, 21, tzinfo=UTC)  # the latest complete week
+W4 = datetime(2026, 8, 31, tzinfo=UTC)  # the oldest
+LANES = ci_history.Lanes(
+    job_lane={
+        ("nightly", "kvm"): "sched-lane-0",
+        ("smp-stress", "stress"): "sched-lane-7",
+        ("smp-stress", "rebuild"): "sched-lane-8",
+    },
+    reserved={"sched-lane-0": "nightly", "sched-lane-7": "none", "sched-lane-8": "rebuilds"},
+)
+
+
+def iso(t: datetime) -> str:
+    return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def sched_rec(
+    workflow: str, job: str, start: datetime, hours: float, wait_h: float = 0.0, run_id: int = 1
+) -> dict[str, Any]:
+    created = start - timedelta(hours=wait_h)
+    return {
+        "workflow": workflow, "run_id": run_id, "event": "schedule", "branch": "main",
+        "jobs": [{
+            "name": job, "created": iso(created), "started": iso(start),
+            "completed": iso(start + timedelta(hours=hours)), "steps": [],
+        }],
+    }
+
+
+def busy(lane_job: tuple[str, str], share: float, week: datetime = W1) -> list[dict[str, Any]]:
+    """Records that keep one lane busy `share` of `week`, in one-day jobs."""
+    total = share * 7 * 24
+    out, t, i = [], week, 0
+    while total > 0:
+        h = min(total, 24.0)
+        out.append(sched_rec(lane_job[0], lane_job[1], t, h, run_id=100 + i))
+        total -= h
+        t += timedelta(days=1)
+        i += 1
+    return out
+
+
+class Budget(unittest.TestCase):
+    def run_budget(
+        self, records: list[dict[str, Any]], windows: list[tuple[datetime, datetime]] | None = None
+    ) -> list[str]:
+        with mock.patch("builtins.print"):
+            return ci_history.budget(records, LANES, windows or [], NOW)
+
+    def test_busy_61_percent_fails_59_passes(self) -> None:
+        got = self.run_budget(busy(("nightly", "kvm"), 0.61))
+        self.assertEqual(len(got), 1)
+        self.assertIn("sched-lane-0: busy 61% of the week of 2026-09-21", got[0])
+        self.assertEqual(self.run_budget(busy(("nightly", "kvm"), 0.59)), [])
+
+    def test_unreserved_lane_busy_limit_holds_too(self) -> None:
+        got = self.run_budget(busy(("smp-stress", "stress"), 0.61, W4))
+        self.assertEqual(len(got), 1)
+        self.assertIn("sched-lane-7: busy 61% of the week of 2026-08-31", got[0])
+
+    def test_rebuilds_lane_at_90_percent_passes(self) -> None:
+        self.assertEqual(self.run_budget(busy(("smp-stress", "rebuild"), 0.90)), [])
+
+    def test_release_window_week_ignored(self) -> None:
+        window = (W1 + timedelta(days=2), W1 + timedelta(days=3))
+        self.assertEqual(self.run_budget(busy(("nightly", "kvm"), 0.90), [window]), [])
+        self.assertEqual(len(self.run_budget(busy(("nightly", "kvm"), 0.90, W4), [window])), 1)
+
+    def test_older_and_current_weeks_ignored(self) -> None:
+        old = busy(("nightly", "kvm"), 0.9, W4 - timedelta(days=7))
+        now_week = busy(("nightly", "kvm"), 0.9, W1 + timedelta(days=7))
+        self.assertEqual(self.run_budget(old + now_week), [])
+
+    def test_reserved_wait_12h1m_fails(self) -> None:
+        rec = sched_rec("nightly", "kvm", W1 + timedelta(days=1), 1, wait_h=12 + 1 / 60)
+        got = self.run_budget([rec])
+        self.assertEqual(len(got), 1)
+        self.assertIn("waited 12.0 h to start", got[0])
+        ok = sched_rec("nightly", "kvm", W1 + timedelta(days=1), 1, wait_h=12)
+        self.assertEqual(self.run_budget([ok]), [])
+
+    def test_unreserved_20h_wait_passes(self) -> None:
+        rec = sched_rec("smp-stress", "stress", W1 + timedelta(days=1), 1, wait_h=20)
+        self.assertEqual(self.run_budget([rec]), [])
+
+    def test_matrix_leg_takes_its_job_lane(self) -> None:
+        recs = busy(("nightly", "kvm (x86_64)"), 0.61)
+        self.assertEqual(len(self.run_budget(recs)), 1)
+
+    def test_prints_job_hours_and_waits(self) -> None:
+        rec = sched_rec("nightly", "kvm", W1 + timedelta(days=1), 2, wait_h=1)
+        with mock.patch("builtins.print") as p:
+            ci_history.budget([rec], LANES, [], NOW)
+        text = "\n".join(str(c.args[0]) for c in p.call_args_list)
+        self.assertIn("workflow nightly: 0.0, 0.0, 0.0, 2.0 job-hours per week", text)
+        self.assertIn("sched-lane-0 (nightly): busy 0%, 0%, 0%, 1%; wait median 1.0 h, max 1.0 h",
+                      text)
+
+    def test_missing_times_raise(self) -> None:
+        rec = sched_rec("nightly", "kvm", W1, 1)
+        rec["jobs"][0]["created"] = None
+        with self.assertRaises(ci_history.MissingTimes):
+            self.run_budget([rec])
+
+    def test_tombstone_skipped(self) -> None:
+        self.assertEqual(self.run_budget([{"workflow": "nightly", "tombstone": "gone"}]), [])
+
+
+def ci_run(run_id: int, seconds: dict[str, int | None], *, event: str = "push",
+           branch: str = "main", finished: str | None = None) -> dict[str, Any]:
+    jobs = [
+        {"name": "check", "steps": [{"name": "make check", "seconds": 300}]},
+        *({"name": name, "steps": [
+            {"name": "unpack prebuilt files", "seconds": 5},
+            {"name": "make test-kernel", "seconds": s},
+        ]} for name, s in seconds.items()),
+    ]
+    return {
+        "workflow": "ci", "run_id": run_id, "event": event, "branch": branch,
+        "finished": finished or f"2026-09-{1 + run_id % 28:02d}T00:00:{run_id % 60:02d}Z",
+        "jobs": jobs,
+    }
+
+
+class Tiers(unittest.TestCase):
+    TIER = "tier (x86_64, in-guest-1)"
+
+    def run_tiers(self, records: list[dict[str, Any]]) -> list[str]:
+        with mock.patch("builtins.print"):
+            return ci_history.tiers(records)
+
+    def runs(self, value: int, n: int = 20) -> list[dict[str, Any]]:
+        return [ci_run(i, {self.TIER: value}, finished=f"2026-09-20T{i:02d}:00:00Z")
+                for i in range(n)]
+
+    def test_median_61_fails_59_passes(self) -> None:
+        got = self.run_tiers(self.runs(61))
+        self.assertEqual(len(got), 1)
+        self.assertIn("tier (x86_64, in-guest-1): median QEMU time 61 s over 20 runs", got[0])
+        self.assertEqual(self.run_tiers(self.runs(59)), [])
+
+    def test_21st_older_run_ignored(self) -> None:
+        old = ci_run(99, {self.TIER: 10_000}, finished="2026-01-01T00:00:00Z")
+        self.assertEqual(self.run_tiers([old, *self.runs(59)]), [])
+
+    def test_pull_request_and_other_branch_runs_ignored(self) -> None:
+        pr = [ci_run(50 + i, {self.TIER: 500}, event="pull_request") for i in range(20)]
+        other = [ci_run(80 + i, {self.TIER: 500}, branch="phase-10") for i in range(20)]
+        self.assertEqual(self.run_tiers([*pr, *other, *self.runs(59)]), [])
+
+    def test_fewer_runs_prints_n(self) -> None:
+        with mock.patch("builtins.print") as p:
+            self.assertEqual(ci_history.tiers(self.runs(40, n=3)), [])
+        self.assertIn(f"{self.TIER}: median 40 s, n=3", [c.args[0] for c in p.call_args_list])
+
+    def test_steps_summed_and_other_steps_ignored(self) -> None:
+        rec = ci_run(1, {})
+        rec["jobs"].append({"name": self.TIER, "steps": [
+            {"name": "make test-e2e test-e2e-uefi", "seconds": 40},
+            {"name": "make test-kernel", "seconds": 30},
+            {"name": "harness results summary", "seconds": 900},
+        ]})
+        got = self.run_tiers([rec])
+        self.assertEqual(len(got), 1)
+        self.assertIn("median QEMU time 70 s", got[0])
+
+    def test_missing_step_time_raises(self) -> None:
+        with self.assertRaises(ci_history.MissingTimes):
+            self.run_tiers([ci_run(1, {self.TIER: None})])
+        rec = ci_run(1, {})
+        rec["jobs"].append({"name": self.TIER, "steps": []})
+        with self.assertRaises(ci_history.MissingTimes):
+            self.run_tiers([rec])
+
+
+class ReleaseWindows(unittest.TestCase):
+    def test_none_and_pairs(self) -> None:
+        self.assertEqual(ci_history.release_windows("x\nRelease windows: none\n"), [])
+        got = ci_history.release_windows(
+            "Release windows: `2026-09-01T00:00:00Z..2026-09-03T00:00:00Z`\n")
+        want = (datetime(2026, 9, 1, tzinfo=UTC), datetime(2026, 9, 3, tzinfo=UTC))
+        self.assertEqual(got, [want])
+
+    def test_missing_or_bad_line_fails(self) -> None:
+        with self.assertRaises(HistoryError):
+            ci_history.release_windows("no line")
+        with self.assertRaises(HistoryError):
+            ci_history.release_windows("Release windows: soon\n")
+
+
+class BudgetCli(unittest.TestCase):
+    def test_tree_lanes(self) -> None:
+        lanes, keys = ci_history.scheduled_lanes()
+        self.assertEqual(sorted(keys), ["nightly", "smp-stress"])
+        self.assertEqual(lanes.lane_of("nightly", "kvm"), "sched-lane-0")
+        self.assertEqual(lanes.reserved["sched-lane-0"], "nightly")
+
+    def test_missing_times_exit_2(self) -> None:
+        rec = sched_rec("nightly", "kvm", W1, 1)
+        rec["jobs"][0]["started"] = None
+        history = mock.Mock()
+        history.records.return_value = [rec]
+        with (
+            mock.patch.object(ci_history, "HistoryRepo", return_value=history),
+            mock.patch("builtins.print"),
+            mock.patch("sys.stderr"),
+        ):
+            self.assertEqual(ci_history.main(["--budget", "--remote", "x"]), 2)
+
+    def test_no_history_exit_2(self) -> None:
+        history = mock.Mock()
+        history.records.return_value = []
+        for mode in ("--budget", "--tiers"):
+            with (
+                self.subTest(mode=mode),
+                mock.patch.object(ci_history, "HistoryRepo", return_value=history),
+                mock.patch("builtins.print"),
+                mock.patch("sys.stderr"),
+            ):
+                self.assertEqual(ci_history.main([mode, "--remote", "x"]), 2)
 
 
 if __name__ == "__main__":

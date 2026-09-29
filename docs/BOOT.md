@@ -269,8 +269,9 @@ by default and what every per-push tier runs. `release` (`opt-level = 3`, debug 
 what v* releases and 1.0 ship, and a gate that compares with Linux or states a rate or throughput is
 measured on it (ROADMAP, How to read this). Both set `overflow-checks = true`, so an arithmetic
 overflow panics in shipped images as it does in tests, and AGENTS.md rule 4's `checked_*` rule holds
-in both. What must hold in release is an `assert!` (§9.4). Rule; not yet enforced: nothing builds or
-boots the release profile, and releases ship the dev profile (ROADMAP §10.2, F137).
+in both. What must hold in release is an `assert!` (§9.4). The nightly `release-profile` job builds
+and boots the release profile, `make CARGO_PROFILE=release test-e2e test-kernel` under TCG (TESTING.md
+§8.6); releases still ship the dev profile (ROADMAP §10.2, F137).
 
 `opt-level = 1` for the dev profile. At `opt-level = 0` the page table setup function's stack frame is
 large enough to overflow the boot stack Limine provides, and it faults on entry before printing

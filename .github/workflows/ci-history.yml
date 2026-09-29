@@ -1,8 +1,8 @@
 name: ci-history
 
-# ROADMAP §10.9, DESIGN §8.6 (CI history): one JSON record per completed `ci`
-# or `release` run on the orphan `ci-history` branch, and a daily backfill,
-# completeness check and 500 MB rotation. GitHub runs `workflow_run` and
+# ROADMAP §10.9, DESIGN §8.6 (CI history): one JSON record per completed `ci`,
+# `release`, `nightly` or `smp-stress` run on the orphan `ci-history` branch,
+# and a daily backfill, completeness check and 500 MB rotation. GitHub runs `workflow_run` and
 # `schedule` from this file as it is on the default branch, with GITHUB_SHA
 # at that branch's last commit, so the tool fetched below is `main`'s, never
 # the triggering commit's. The event's run fields are set by whoever pushed
@@ -10,7 +10,7 @@ name: ci-history
 # the run id from the event file and the rest from the API.
 on:
   workflow_run:
-    workflows: [ci, release]
+    workflows: [ci, nightly, release, smp-stress]
     types: [completed]
   schedule:
     - cron: "23 4 * * *"
@@ -25,6 +25,11 @@ jobs:
     if: github.event_name == 'workflow_run'
     runs-on: ubuntu-26.04
     timeout-minutes: 15
+    # Scheduled lane 6 (DESIGN §8.6, ROADMAP §10.1): one job at a time, the
+    # rest queued first in first out, so no record is cancelled as pending.
+    concurrency:
+      group: sched-lane-6
+      queue: max
     permissions:
       contents: write  # push the run's record to ci-history (ROADMAP §10.9)
       actions: read  # read the run's jobs, steps and artifacts
@@ -49,6 +54,11 @@ jobs:
     if: github.event_name != 'workflow_run'
     runs-on: ubuntu-26.04
     timeout-minutes: 60
+    # Scheduled lane 6 (DESIGN §8.6, ROADMAP §10.1): one job at a time, the
+    # rest queued first in first out, so no record is cancelled as pending.
+    concurrency:
+      group: sched-lane-6
+      queue: max
     permissions:
       contents: write  # push backfilled records and the rotated branch to ci-history (ROADMAP §10.9)
       actions: read  # list ci's runs and read their jobs, steps and artifacts

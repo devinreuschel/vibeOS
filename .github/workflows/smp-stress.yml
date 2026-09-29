@@ -14,6 +14,12 @@ jobs:
   stress:
     name: high-CPU SMP stress
     runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    # Scheduled lane 4 (DESIGN §8.6, ROADMAP §10.1): one job at a time, the
+    # rest queued first in first out.
+    concurrency:
+      group: sched-lane-4
+      queue: max
     # The harness fails every boot when QEMU is not this version (ROADMAP
     # §10.1): resolute's qemu-system-x86 1:10.2.1+ds-1ubuntu3. Move the pin
     # and DESIGN §8.6 together.
@@ -54,7 +60,7 @@ jobs:
       - name: setup
         run: ./setup.sh
 
-      - name: SMP stress (-smp 4, longer timeout)
+      - name: SMP stress (-smp 4)
         run: make test-smp-stress
 
       # Per-tier table and every harness retry, even after a failed step
@@ -63,18 +69,204 @@ jobs:
         if: always()
         run: python3 -m tests.harness.results summary build/results >> "$GITHUB_STEP_SUMMARY"
 
+      # The host CPU model and the guest's invariant-TSC bit, to the job
+      # summary and build/runner.json (ROADMAP §10.1, C-HISTORY).
+      - name: runner record
+        if: always()
+        run: python3 scripts/runner_info.py
+
       - name: upload harness results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: results-x86_64-stress
           path: build/results/
-          if-no-files-found: warn
-          retention-days: 30
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: upload runner record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runner-stress
+          path: build/runner.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+  repeat-kernel:
+    name: repeat-kernel
+    runs-on: ubuntu-26.04
+    timeout-minutes: 240
+    # Scheduled lane 4 (DESIGN §8.6, ROADMAP §10.1): one job at a time, the
+    # rest queued first in first out.
+    # Every in-guest test 20 times in one -smp 2 boot (C-SCHED-TARGETS).
+    concurrency:
+      group: sched-lane-4
+      queue: max
+    # The harness fails every boot when QEMU is not this version (ROADMAP
+    # §10.1): resolute's qemu-system-x86 1:10.2.1+ds-1ubuntu3. Move the pin
+    # and DESIGN §8.6 together.
+    env:
+      VIBEOS_QEMU_VERSION: "10.2.1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 xorriso nasm ovmf
+
+      - name: install rust nightly
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: nightly-2026-09-22
+          components: rust-src, llvm-tools
+          targets: x86_64-unknown-none, x86_64-unknown-linux-musl
+
+      - name: cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-repeat-kernel-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-repeat-kernel-
+
+      - name: cache limine binaries
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: limine
+          key: limine-v9.6.7-binary-ee5d29cd0a8034612dcd1df3f00052480db785c5
+
+      - name: setup
+        run: ./setup.sh
+
+      - name: make test-kernel (each run 20 times)
+        run: VIBEOS_KTEST_REPEAT=20 make test-kernel
+
+      # Per-tier table and every harness retry, even after a failed step
+      # (ROADMAP §10.2); check_ticks.py reads the uploaded files (§10.9).
+      - name: harness results summary
+        if: always()
+        run: python3 -m tests.harness.results summary build/results >> "$GITHUB_STEP_SUMMARY"
+
+      # The host CPU model and the guest's invariant-TSC bit, to the job
+      # summary and build/runner.json (ROADMAP §10.1, C-HISTORY).
+      - name: runner record
+        if: always()
+        run: python3 scripts/runner_info.py
+
+      - name: upload harness results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results-x86_64-repeat-kernel
+          path: build/results/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: upload runner record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runner-repeat-kernel
+          path: build/runner.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+  repeat-kernel-smp4:
+    name: repeat-kernel-smp4
+    runs-on: ubuntu-26.04
+    timeout-minutes: 300
+    # Scheduled lane 5 (DESIGN §8.6, ROADMAP §10.1): one job at a time, the
+    # rest queued first in first out.
+    # Every in-guest test 20 times in one -smp 4 boot (C-SCHED-TARGETS).
+    concurrency:
+      group: sched-lane-5
+      queue: max
+    # The harness fails every boot when QEMU is not this version (ROADMAP
+    # §10.1): resolute's qemu-system-x86 1:10.2.1+ds-1ubuntu3. Move the pin
+    # and DESIGN §8.6 together.
+    env:
+      VIBEOS_QEMU_VERSION: "10.2.1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 xorriso nasm ovmf
+
+      - name: install rust nightly
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: nightly-2026-09-22
+          components: rust-src, llvm-tools
+          targets: x86_64-unknown-none, x86_64-unknown-linux-musl
+
+      - name: cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-repeat-kernel-smp4-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-repeat-kernel-smp4-
+
+      - name: cache limine binaries
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: limine
+          key: limine-v9.6.7-binary-ee5d29cd0a8034612dcd1df3f00052480db785c5
+
+      - name: setup
+        run: ./setup.sh
+
+      - name: make test-kernel-smp4 (each run 20 times)
+        run: VIBEOS_KTEST_REPEAT=20 make test-kernel-smp4
+
+      # Per-tier table and every harness retry, even after a failed step
+      # (ROADMAP §10.2); check_ticks.py reads the uploaded files (§10.9).
+      - name: harness results summary
+        if: always()
+        run: python3 -m tests.harness.results summary build/results >> "$GITHUB_STEP_SUMMARY"
+
+      # The host CPU model and the guest's invariant-TSC bit, to the job
+      # summary and build/runner.json (ROADMAP §10.1, C-HISTORY).
+      - name: runner record
+        if: always()
+        run: python3 scripts/runner_info.py
+
+      - name: upload harness results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results-x86_64-repeat-kernel-smp4
+          path: build/results/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: upload runner record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runner-repeat-kernel-smp4
+          path: build/runner.json
+          if-no-files-found: ignore
+          retention-days: 90
 
   nightly-canary:
     name: latest nightly canary
     runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    # Scheduled lane 5 (DESIGN §8.6); continue-on-error does not free the lane.
+    concurrency:
+      group: sched-lane-5
+      queue: max
     # The harness fails every boot when QEMU is not this version (ROADMAP
     # §10.1): resolute's qemu-system-x86 1:10.2.1+ds-1ubuntu3. Move the pin
     # and DESIGN §8.6 together.
@@ -120,3 +312,27 @@ jobs:
         run: make iso && make test-unit
         env:
           RUSTUP_TOOLCHAIN: nightly
+
+      # The host CPU model and the guest's invariant-TSC bit, to the job
+      # summary and build/runner.json (ROADMAP §10.1, C-HISTORY).
+      - name: runner record
+        if: always()
+        run: python3 scripts/runner_info.py
+
+      - name: upload harness results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results-x86_64-nightly-canary
+          path: build/results/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: upload runner record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runner-nightly-canary
+          path: build/runner.json
+          if-no-files-found: ignore
+          retention-days: 90

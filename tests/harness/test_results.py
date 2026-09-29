@@ -210,6 +210,7 @@ class TestResults(unittest.TestCase):
                 K("vibeOS: block: vdap1 128 sectors"),
                 K("vibeOS: block: vdap2 7647 sectors"),
                 K("vibeOS: persist: wrote"),
+                K("vibeOS: time: lapic_timer ok (periodic)"),
                 K("vibeOS: ktest: begin 1"),
                 K("vibeOS: ktest: run alpha 10000"),
                 K("vibeOS: ktest: ok alpha"),
