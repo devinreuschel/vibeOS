@@ -15,7 +15,7 @@ use vibeos::dma::{self, DMA32_BOUNDARY, DmaAlloc};
 use vibeos::fs::{FsError, InodeKind, O_CREAT, O_RDWR};
 use vibeos::irq::{self, IrqError};
 use vibeos::lock::RANK_DEVICE;
-use vibeos::paging::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
+use vibeos::paging::{PAGE_SIZE_4K, PhysAddr};
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
 use vibeos::per_cpu::PerCpuRemote;
 use vibeos::pmm::Frames;
@@ -51,7 +51,7 @@ use crate::virtio_blk_init;
 use crate::virtio_init;
 use crate::work_init;
 use crate::x86;
-use crate::{acpi, arch, mm, proc, sync};
+use crate::{acpi, arch, boot, mm, proc, sync};
 pub(crate) mod user;
 
 const ISA_DEBUG_EXIT: u16 = 0xF4;
@@ -231,7 +231,7 @@ pub(crate) const TESTS: &[Test] = &[
         sync::ktest::test_irqcell_reentry_panics,
     ),
     test("bootcell_set_once", sync::ktest::test_bootcell_set_once),
-    test("bootinfo_consistent", test_bootinfo_consistent),
+    test("bootinfo_consistent", boot::ktest::test_bootinfo_consistent),
     test("df_on_ist", arch::ktest::test_df_on_ist),
     test("pit_tick_rate", test_pit_tick_rate),
     test("now_us_monotonic", test_now_us_monotonic),
@@ -833,25 +833,6 @@ pub(crate) fn free_frames_owned(f: Frames) {
 
 pub(crate) fn cpu_remote(id: u32) -> Option<&'static PerCpuRemote> {
     per_cpu_init::cpu(id)
-}
-
-/// `BootInfo` agrees with what PMM and paging built from it.
-fn test_bootinfo_consistent() -> Outcome {
-    let info = crate::boot::info();
-    let k = &info.kernel_phys;
-    if info.usable().any(|r| r.start < k.end && k.start < r.end) {
-        return Outcome::Fail("kernel image in usable ram");
-    }
-    let text = VirtAddr(test_bootinfo_consistent as *const () as u64);
-    match paging_init::translate(text) {
-        Some((pa, _, _)) if k.contains(&pa.as_u64()) => {}
-        _ => return Outcome::Fail("text outside kernel span"),
-    }
-    let map_end = paging_init::map_end();
-    if info.framebuffers().any(|fb| fb.phys + fb.size > map_end) {
-        return Outcome::Fail("fb outside physmap");
-    }
-    Outcome::Ok
 }
 
 fn test_pit_tick_rate() -> Outcome {
