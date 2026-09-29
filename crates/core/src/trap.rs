@@ -162,15 +162,13 @@ pub trait SyscallAbi {
     fn restart(f: &mut Self::Frame);
 }
 
-pub use crate::arch::x86_64::trap as x86_64;
-
 #[cfg(test)]
 mod tests {
     use core::mem::{offset_of, size_of};
 
     use super::si_code::*;
-    use super::x86_64::{Abi, UserFrame, decode, fp_cause, sysret_ok};
     use super::*;
+    use crate::arch::x86_64::trap::{Abi, UserFrame, decode, fp_cause, sysret_ok};
     use crate::desc::{USER_CS_RPL, USER_DS_RPL};
     use crate::paging::USER_MAP_END;
 

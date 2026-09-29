@@ -467,7 +467,7 @@ RIP from RCX and RFLAGS from R11, so only a context that `syscall` created can t
 set it traps before the next user instruction runs, where `iretq` lets that instruction run first.
 A syscall that must restart sets `rax` from `orig_rax` and moves `rip` back 2 bytes, or on aarch64
 sets `x0` from `orig_x0` and moves `pc` back 4, as Linux does. Built so on x86_64: the frame is
-`vibeos::trap::x86_64::UserFrame` (`vibeos::syscall` re-exports it), which portable code reaches
+`vibeos::arch::x86_64::trap::UserFrame` (`vibeos::syscall` re-exports it), which portable code reaches
 through `vibeos::trap::SyscallAbi` (`restart` is the rewind); the syscall entry pushes it below
 `PerCpu.kernel_rsp0` with a pad word under it, and a generated stub for a CS.RPL 3 frame builds
 `arch::idt::TrapFrame`, whose last 21 words are the same frame at the same place, since the CPU

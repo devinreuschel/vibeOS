@@ -8,12 +8,12 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use vibeos::addr_space::AddressSpace;
+use vibeos::arch::x86_64::trap::sysret_ok;
 use vibeos::desc::{KERNEL_CS, STAR_SYSRET, Tss, USER_CS_RPL, USER_DS_RPL};
 use vibeos::fpu;
 use vibeos::per_cpu::PerCpu;
 use vibeos::syscall::UserFrame;
 use vibeos::thread::{Fxsave, Tcb};
-use vibeos::trap::x86_64::sysret_ok;
 use vibeos::vectors;
 
 use crate::arch::gdt;
@@ -57,7 +57,7 @@ global_asm!(
         mov qword ptr gs:[{user_rsp}], rsp
         mov rsp, qword ptr gs:[{ksp}]
 
-        // The user frame (vibeos::trap::x86_64::UserFrame), top down:
+        // The user frame (vibeos::arch::x86_64::trap::UserFrame), top down:
         // RCX is the return RIP and R11 the user RFLAGS.
         push {user_ss}
         push qword ptr gs:[{user_rsp}]
@@ -227,7 +227,7 @@ unsafe extern "C" fn vibeos_syscall_bad_rip(frame: *mut UserFrame) -> ! {
 }
 
 /// The exit's choice between `sysretq` and `iretq` (Linux's rule,
-/// `trap::x86_64::sysret_ok`).
+/// `arch::x86_64::trap::sysret_ok`).
 ///
 /// # Safety
 /// `f` is the user frame the exit is returning over.
