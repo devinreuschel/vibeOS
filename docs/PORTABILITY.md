@@ -7,7 +7,10 @@ ports disagree about the kernel's own behaviour; for anything a user program can
 architecture's reference is Linux on that architecture (ROADMAP, How to read this). This section is the
 contract for the seam between them. `docs/ARCH.md` (ROADMAP §10.3) maps each row of the §11.1 table to
 the modules that implement it in each port. Planned: ROADMAP §10.3 builds the seam and Phase 11 the
-aarch64 port. Today no seam trait, stub port, or `docs/ARCH.md` exists; `thread.rs` and `dma.rs` in
+aarch64 port. Built so far: the seam traits and `Port` in `vibeos-core`'s `arch/mod.rs`, the stub port
+in `arch/stub.rs`, and the x86_64 port's zero-sized type with its `CycleCounter`, `InterruptMask`,
+`PerCpuBase`, and `SyscallAbi` impls, which kernel code names as `arch::current::Arch`; the other impls,
+`impl Port` for it, and `docs/ARCH.md` are planned in ROADMAP §10.3. `thread.rs` and `dma.rs` in
 `vibeos-core` carry `cfg(target_arch)` and assembly (ROADMAP §10.3); and the one port is x86_64's, in
 the kernel crate's `src/arch/` and in `vibeos-core`'s `desc.rs`, `pic.rs`, and `vectors.rs`. The rest of
 this section is the design those lines build.
@@ -24,26 +27,26 @@ per-architecture uapi (ROADMAP §13.10).
 
 | Concern | Seam | x86_64 | aarch64 | ROADMAP |
 |---|---|---|---|---|
-| Boot handover: the machine state the boot handshake hands over, normalized into `BootInfo` | trait | Limine base revision 3, until ROADMAP §11.1's bump moves it to aarch64's; long mode; without Limine, the direct entry (§4.1): a PVH door and a 64-bit door into one body | Limine base revision 6, EL1, or EL2 with VHE; without Limine, the direct entry (§4.1) behind an arm64 `Image` header, entered with the MMU off | §10.3, §11.1, §25.4, §26.4 |
+| Boot handover: the machine state the boot handshake hands over, normalized into `BootInfo` | trait (`BootHandover`) | Limine base revision 3, until ROADMAP §11.1's bump moves it to aarch64's; long mode; without Limine, the direct entry (§4.1): a PVH door and a 64-bit door into one body | Limine base revision 6, EL1, or EL2 with VHE; without Limine, the direct entry (§4.1) behind an arm64 `Image` header, entered with the MMU off | §10.3, §11.1, §25.4, §26.4 |
 | Early console | port module | 16550 on COM1 | PL011 | §11.1 |
 | Exception entry and exit | port module: generated entry code | one stub per IDT vector ([§5.10](INTERRUPTS.md#510-privilege-transitions) rule 1) | one 16-entry vector table ([§11.5](#115-aarch64-exceptions-and-privilege-transitions)) | §10.6, §11.3 |
 | Trap decode | pure half: a trap to a `TrapKind` (§5.2) | vector and error code | vector slot and `ESR_EL1` (§11.5) | §10.6, §11.3 |
 | Kernel stack-overflow report | port module | `#DF` on IST 1 (§5.1) | a stack test at every vector entry and a per-CPU overflow stack (§4.5, §11.5) | §11.3 |
-| Interrupt mask | trait | RFLAGS.IF (`cli`, `sti`) | PSTATE.I and F (`msr daifset`, `msr daifclr`); priority masking from ROADMAP §25.5 | §10.3 |
+| Interrupt mask | trait (`InterruptMask`) | RFLAGS.IF (`cli`, `sti`) | PSTATE.I and F (`msr daifset`, `msr daifclr`); priority masking from ROADMAP §25.5 | §10.3 |
 | Interrupt controller and IRQ identity | port module: finding the root controller, with the vector entry and the IPI send in their own rows; each controller is an `IrqChip` object (§5.4), not a seam trait | 8259, I/O APIC, and LAPIC MSI chips; a hwirq is an IDT vector (§5.3) | GICv2 or GICv3 distributor and redistributor chips, ITS or GICv2m; a hwirq is an INTID | §11.3 |
-| IPI send and its ordering | trait | LAPIC ICR write (§7.6) | SGI register write | §10.3, §11.3 |
+| IPI send and its ordering | trait (`IpiSend`) | LAPIC ICR write (§7.6) | SGI register write | §10.3, §11.3 |
 | Timer and cycle counter | trait (`CycleCounter`) | TSC, or the HPET or ACPI PM timer as the clocksource (§6.4); LAPIC timer | `CNTVCT_EL0`; generic timer | §10.3, §11.3 |
 | Page-table format and attributes | trait (`PageTable`); encodings in the pure half | 4-level tables, PAT bits | 4 KiB granule, 48-bit VA, MAIR, break-before-make | §10.3, §11.2 |
 | TLB maintenance and address-space ids | trait (`PageTable`) | `invlpg` and the shootdown IPI (§7.9); no PCID | broadcast `tlbi ...is`; ASIDs from §11.2's generation allocator | §10.3, §11.2 |
 | Cache maintenance and DMA coherence | trait (`Barriers`) | none: coherent | per-device coherence from `dma-coherent` or `_CCA`; `dc cvac` and `dc ivac` to the Point of Coherency for non-coherent devices (§4.7); `dc` and `ic` for code | §10.3, §11.2 |
 | Barriers (`dma_wmb`, `dma_rmb`, `dma_mb`) and MMIO accessors | trait (`Barriers`) | `mfence`, `sfence`, `lfence`; plain loads and stores; accessors carry a compiler barrier (§4.7) | `dmb oshst`, `dmb oshld`, `dmb osh`; `dmb oshst` before an `mmio_write` and `dmb oshld` after an `mmio_read` (§4.7) | §10.3, §11.2 |
 | Atomics | module selected by `cfg(loom)` (below) | `core::sync::atomic` | `core::sync::atomic`, with LSE instructions (`+lse`, §3.1's floor) | §10.8 |
-| Per-CPU base and current-thread registers | trait | `GS_BASE` and `swapgs`; `current` by one `gs`-relative load (§2.9 rule 5) | `TPIDR_EL1`, or `TPIDR_EL2` at EL2; `current` in `SP_EL0` (§2.9 rule 5) | §10.3, §11.4, §11.6 |
-| Syscall instruction, user frame's layout ([§5.10](INTERRUPTS.md#510-privilege-transitions)), numbers and argument order | trait | `syscall` and `sysretq`; the x86_64 table | `svc #0`; the asm-generic table | §10.3, §10.5, §10.6, §11.6 |
-| User-memory accessors | trait | `stac` and `clac` (SMAP) | PAN | §10.3, §10.6, §11.6 |
+| Per-CPU base and current-thread registers | trait (`PerCpuBase`) | `GS_BASE` and `swapgs`; `current` by one `gs`-relative load (§2.9 rule 5) | `TPIDR_EL1`, or `TPIDR_EL2` at EL2; `current` in `SP_EL0` (§2.9 rule 5) | §10.3, §11.4, §11.6 |
+| Syscall instruction, user frame's layout ([§5.10](INTERRUPTS.md#510-privilege-transitions)), numbers and argument order | trait (`SyscallAbi`) | `syscall` and `sysretq`; the x86_64 table | `svc #0`; the asm-generic table | §10.3, §10.5, §10.6, §11.6 |
+| User-memory accessors | trait (`UserAccess`) | `stac` and `clac` (SMAP) | PAN | §10.3, §10.6, §11.6 |
 | FP and SIMD state | port module, under §7.5's per-thread rules | FXSAVE image | V0-V31, FPCR, FPSR | §10.6, §11.6 |
 | User TLS register | port module | `FS_BASE` | `TPIDR_EL0` | §11.6 |
-| Context switch | trait | `switch_context`: callee-saved registers, RSP, RIP | `switch_context`: x19-x29, SP, LR | §10.3, §11.4 |
+| Context switch | trait (`ContextSwitch`) | `switch_context`: callee-saved registers, RSP, RIP | `switch_context`: x19-x29, SP, LR | §10.3, §11.4 |
 | Secondary-CPU bring-up | port module | INIT-SIPI and the trampoline page (§7.3) | PSCI `CPU_ON` | §11.4 |
 | CPU identity, topology, and features | port module | APIC ID, CPUID | MPIDR, ID registers | §11.4 |
 | Idle | port module | `sti; hlt` | `wfi` with IRQs masked (below) | §11.3, §19.6 |
@@ -97,7 +100,11 @@ The mechanism:
   both ports' encodings. Its hardware half lives in the kernel crate under `arch/<name>/`, the
   assembly and the system-register and port access, and implements the traits on one zero-sized
   type: `arch::x86_64::Arch` or `arch::aarch64::Arch`. `vibeos-core` carries a third implementation,
-  `arch::stub::Arch`, which the host tests use.
+  `arch::stub::Arch` in `arch/stub.rs`, which the host tests use. The stub is compiled in host builds
+  only (`cfg(any(test, feature = "std"))`); its state is per host thread, so parallel tests never
+  share it, and settable (the counter and its step, the frequency, the CPU id, IPI refusal, a user-copy
+  fault address); and it records each seam call in a bounded event log, the first 256 events and a
+  count of the rest, which a test reads back.
 - Portable code that needs the seam takes the port as one type parameter of the type that uses it,
   never as `dyn`, so every seam call is resolved at compile time and inlines. A leaf type bounds the
   parameter by the traits it calls (`Mapper<A: PageTable>`, `SplitQueue<A: Barriers>`), so its
@@ -106,8 +113,11 @@ The mechanism:
   whose supertraits are the table's traits, so a second port parameter never spreads into the types
   that hold it. The kernel crate names the concrete types once, in `arch::current` (for example
   `type AddressSpace = vibeos::AddressSpace<Arch>`), so kernel code never spells the parameter.
-- The kernel binary names its port once, `type Arch = arch::current::Arch;`, chosen by
-  `cfg(target_arch)` in the kernel crate. `vibeos-core` contains no `cfg(target_arch)` and no
+- The kernel binary names its port once, as `arch::current::Arch` in `src/arch/current.rs`, a type
+  alias chosen by `cfg(target_arch)` in the kernel crate, where a compile-time item checks that the
+  port implements the seam traits built so far. `make check` also builds `vibeos-core` as the kernel
+  links it, without `std`, for the host, where no port exists, so only a type parameter reaches one.
+  `vibeos-core` contains no `cfg(target_arch)` and no
   assembly, test modules included (ROADMAP Phase 10 gate); `scripts/check_core_stable.py` enforces
   it from ROADMAP §10.3's A2 box.
 - The atomics seam is the one exception: a module selected by `cfg(loom)` (ROADMAP §10.8), because

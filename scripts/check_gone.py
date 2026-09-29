@@ -151,6 +151,8 @@ GONE: list[tuple[str, str]] = [
     ("target-kernel-tests", "one `target/` for every feature"),
     ("target-panic", "one `target/` for every feature"),
     ("target-vibefs-crash", "one `target/` for every feature"),
+    ("find_features", "`vibeos-core` builds with its MSRV"),
+    ("FEATURE_ATTR", "`vibeos-core` builds with its MSRV"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",
