@@ -7,9 +7,7 @@ impl FatVol {
         dir: u32,
         mut off: u32,
     ) -> Result<Option<(u32, Node)>, FatError> {
-        let mut lfn = [0u8; MAX_NAME];
-        let mut lfn_len = 0usize;
-        let mut expect_cs: Option<u8> = None;
+        let mut lfn = Lfn::EMPTY;
         loop {
             let mut ent = [0u8; ENT];
             match self.read_dir_raw(d, dir, off, &mut ent) {
@@ -23,51 +21,25 @@ impl FatVol {
                 return Ok(None);
             }
             if ent[0] == ENT_DEL {
-                lfn_len = 0;
-                expect_cs = None;
+                lfn = Lfn::EMPTY;
                 off = next;
                 continue;
             }
             if ent[11] == ATTR_LFN {
-                let cs = ent[13];
-                if ent[0] & LFN_LAST != 0 {
-                    lfn = [0u8; MAX_NAME];
-                    lfn_len = 0;
-                    expect_cs = Some(cs);
-                } else if expect_cs.map(|c| c != cs).unwrap_or(true) {
-                    lfn_len = 0;
-                    expect_cs = None;
-                    off = next;
-                    continue;
-                }
-                let n = take_lfn(&ent, &mut lfn, lfn_len)?;
-                if n > lfn_len {
-                    lfn_len = n;
-                }
+                lfn.gather(&ent)?;
                 off = next;
                 continue;
             }
             if ent[11] & ATTR_VOL != 0 {
-                lfn_len = 0;
-                expect_cs = None;
+                lfn = Lfn::EMPTY;
                 off = next;
                 continue;
             }
-            let short_ok = match expect_cs {
-                Some(cs) => {
-                    let mut sn = [0u8; 11];
-                    sn.copy_from_slice(&ent[..11]);
-                    cs == lfn_checksum(&sn)
-                }
-                None => false,
-            };
-            let use_lfn = short_ok && lfn_len > 0;
-            let name = if use_lfn {
-                lfn.get(..lfn_len).ok_or(FatError::Corrupt)?
-            } else {
-                &[]
-            };
-            let node = self.node_from_short(dir, off, &ent, name)?;
+            let mut sn = [0u8; 11];
+            sn.copy_from_slice(&ent[..11]);
+            let mut name = [0u8; MAX_NAME];
+            let len = lfn.name(lfn_checksum(&sn), &mut name).unwrap_or(0);
+            let node = self.node_from_short(dir, off, &ent, name.get(..len).unwrap_or(&[]))?;
             return Ok(Some((next, node)));
         }
     }
@@ -117,56 +89,79 @@ impl FatVol {
         self.write_cluster(d, clu, clbuf.get(..n).ok_or(FatError::Corrupt)?)
     }
 
+    /// Find `slots` free entries in `dir` and return where they start. A
+    /// run of deleted entries between live ones serves when it is long
+    /// enough; otherwise the free run that reaches the first `0x00` entry,
+    /// with every entry after it to the chain's end, serves, and the
+    /// directory grows by one cluster only when that is too short.
     pub(super) fn dir_reserve<D: Disk>(
         &mut self,
         d: &mut D,
         dir: u32,
         slots: usize,
     ) -> Result<(u32, u32), FatError> {
-        let need = slots.checked_mul(ENT).ok_or(FatError::Inval)?;
-        let cb = self.info.clus_bytes();
+        let need = slots
+            .checked_mul(ENT)
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or(FatError::NoSpace)?;
+        let cb = self.info.clus_bytes() as u32;
         let mut off = 0u32;
         let mut run = 0usize;
         let mut run_off = 0u32;
         loop {
             let mut ent = [0u8; ENT];
-            match self.read_dir_raw(d, dir, off, &mut ent) {
-                Ok(false) => break,
-                Err(e) => return Err(e),
-                Ok(true) => {
-                    if ent[0] == ENT_FREE || ent[0] == ENT_DEL {
-                        if run == 0 {
-                            run_off = off;
-                        }
-                        run = run.checked_add(1).ok_or(FatError::Corrupt)?;
-                        if run >= slots {
-                            return Ok((dir, run_off));
-                        }
-                    } else {
-                        run = 0;
-                    }
-                    off = off.checked_add(ENT as u32).ok_or(FatError::Corrupt)?;
-                    if ent[0] == ENT_FREE {
-                        break;
-                    }
-                }
+            if !self.read_dir_raw(d, dir, off, &mut ent)? {
+                break;
             }
+            if ent[0] == ENT_FREE {
+                if run == 0 {
+                    run_off = off;
+                }
+                run = run.checked_add(1).ok_or(FatError::Corrupt)?;
+                break;
+            }
+            if ent[0] == ENT_DEL {
+                if run == 0 {
+                    run_off = off;
+                }
+                run = run.checked_add(1).ok_or(FatError::Corrupt)?;
+                if run >= slots {
+                    return Ok((dir, run_off));
+                }
+            } else {
+                run = 0;
+            }
+            off = off.checked_add(ENT_U32).ok_or(FatError::Corrupt)?;
         }
-        if run >= slots {
-            return Ok((dir, run_off));
-        }
-        // extend directory
-        let last = self.last_clu(d, dir)?;
-        let new = self.alloc_clu(d, last)?;
-        self.zero_cluster(d, new)?;
-        self.fat_set(d, last, new)?;
-        self.fat_set(d, new, EOC_MIN)?;
-        self.commit_fat(d)?;
-        d.flush()?;
         let start = if run > 0 { run_off } else { off };
-        let have = run.checked_mul(ENT).ok_or(FatError::Corrupt)?;
-        if have.checked_add(cb).ok_or(FatError::Corrupt)? < need {
-            return Err(FatError::NoSpace);
+        let (nclu, last) = self.chain_len(d, dir)?;
+        let chain = nclu.checked_mul(cb).ok_or(FatError::Corrupt)?;
+        let avail = chain.checked_sub(start).ok_or(FatError::Corrupt)?;
+        let end = start.checked_add(need).ok_or(FatError::NoSpace)?;
+        if avail < need {
+            let short = need.checked_sub(avail).ok_or(FatError::Corrupt)?;
+            if short > cb || end > MAX_DIR_BYTES {
+                return Err(FatError::NoSpace);
+            }
+            let new = self.alloc_clu(d, last)?;
+            let linked = self
+                .zero_cluster(d, new)
+                .and_then(|()| self.fat_set(d, last, new));
+            if let Err(e) = linked {
+                return self
+                    .fat_set(d, new, 0)
+                    .and_then(|()| self.commit_fat(d))
+                    .and(Err(e));
+            }
+            self.commit_fat(d)?;
+            d.flush()?;
+        }
+        // A foreign image may hold garbage after its terminator: the entry
+        // after the reserved ones ends the directory.
+        let mut ent = [0u8; ENT];
+        if self.read_dir_raw(d, dir, end, &mut ent)? && ent[0] != ENT_FREE {
+            ent.fill(0);
+            self.write_dir_raw(d, dir, end, &ent)?;
         }
         Ok((dir, start))
     }
@@ -323,36 +318,117 @@ fn to_upper(c: u8) -> u8 {
     c.to_ascii_uppercase()
 }
 
-pub(super) fn utf16_len(name: &[u8]) -> usize {
-    name.len()
+/// The UTF-16 code units that name `name`; `Inval` when it is not UTF-8.
+pub(super) fn utf16_len(name: &[u8]) -> Result<usize, FatError> {
+    let s = core::str::from_utf8(name).map_err(|_| FatError::Inval)?;
+    Ok(s.encode_utf16().count())
 }
 
 /// The byte offset of each of an LFN entry's 13 UTF-16 units, in name
 /// order: five at 1, six at 14, two at 28.
 const LFN_OFFS: [usize; LFN_CHARS] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
 
-fn take_lfn(ent: &[u8; ENT], out: &mut [u8; MAX_NAME], _len: usize) -> Result<usize, FatError> {
-    let ord = ent[0] & !LFN_LAST;
-    let Some(prev) = (ord as usize).checked_sub(1) else {
-        return Ok(0);
-    };
-    let base = prev.checked_mul(LFN_CHARS).ok_or(FatError::Corrupt)?;
-    for (n, &o) in LFN_OFFS.iter().enumerate() {
-        let ch = le16(ent, o)?;
-        let at = base.checked_add(n).ok_or(FatError::Corrupt)?;
-        if ch == 0 || ch == 0xFFFF {
-            return Ok(at.min(MAX_NAME));
-        }
-        if let Some(c) = out.get_mut(at) {
-            *c = if ch < 0x80 { ch as u8 } else { b'?' };
-        }
-    }
-    Ok(base
-        .checked_add(LFN_CHARS)
-        .ok_or(FatError::Corrupt)?
-        .min(MAX_NAME))
+/// The most LFN entries a [`MAX_NAME`]-byte UTF-8 name needs: one unit per
+/// byte at most, 13 units an entry.
+const LFN_MAX_ENTS: usize = MAX_NAME.div_ceil(LFN_CHARS);
+
+/// The highest ordinal FAT allows: 20 entries of 13 units, 255 units.
+const LFN_MAX_ORD: u8 = 20;
+
+/// The long name gathered from the LFN entries before a short entry,
+/// which arrive highest ordinal first.
+struct Lfn {
+    units: [u16; LFN_MAX_ENTS * LFN_CHARS],
+    /// The unit count the first (highest) entry set; 0 when nothing is
+    /// gathered.
+    len: usize,
+    /// The ordinal the next entry must carry; 0 once ordinal 1 is in.
+    next_ord: u8,
+    cs: u8,
+    /// A sequence longer than [`MAX_NAME`] bytes can hold: its short name
+    /// serves.
+    too_long: bool,
 }
 
+impl Lfn {
+    const EMPTY: Self = Self {
+        units: [0; LFN_MAX_ENTS * LFN_CHARS],
+        len: 0,
+        next_ord: 0,
+        cs: 0,
+        too_long: false,
+    };
+
+    /// Take LFN entry `ent` into the sequence. Anything out of order
+    /// (an ordinal of 0 or above [`LFN_MAX_ORD`], a gap, a checksum that
+    /// changes) drops what was gathered.
+    fn gather(&mut self, ent: &[u8; ENT]) -> Result<(), FatError> {
+        let ord = ent[0] & !LFN_LAST;
+        let cs = ent[13];
+        if ord == 0 || ord > LFN_MAX_ORD {
+            *self = Self::EMPTY;
+            return Ok(());
+        }
+        if ent[0] & LFN_LAST != 0 {
+            *self = Self::EMPTY;
+            self.cs = cs;
+            self.len = usize::from(ord)
+                .checked_mul(LFN_CHARS)
+                .ok_or(FatError::Corrupt)?;
+            self.too_long = usize::from(ord) > LFN_MAX_ENTS;
+        } else if self.next_ord != ord || self.cs != cs {
+            *self = Self::EMPTY;
+            return Ok(());
+        }
+        self.next_ord = ord.checked_sub(1).ok_or(FatError::Corrupt)?;
+        if self.too_long {
+            return Ok(());
+        }
+        let base = usize::from(self.next_ord)
+            .checked_mul(LFN_CHARS)
+            .ok_or(FatError::Corrupt)?;
+        let dst = base
+            .checked_add(LFN_CHARS)
+            .and_then(|end| self.units.get_mut(base..end))
+            .ok_or(FatError::Corrupt)?;
+        for (u, &o) in dst.iter_mut().zip(LFN_OFFS.iter()) {
+            *u = le16(ent, o)?;
+        }
+        Ok(())
+    }
+
+    /// The gathered name as UTF-8 in `out` and its length, when a whole
+    /// sequence whose checksum is `cs` is in; `None` sends the caller to
+    /// the short name.
+    fn name(&self, cs: u8, out: &mut [u8; MAX_NAME]) -> Option<usize> {
+        if self.len == 0 || self.next_ord != 0 || self.too_long || self.cs != cs {
+            return None;
+        }
+        take_lfn(self.units.get(..self.len)?, out)
+    }
+}
+
+/// Decode the UTF-16 `units` of a long name, up to its first `0x0000`,
+/// into UTF-8 in `out`; the byte count, or `None` for an unpaired
+/// surrogate, an empty name, a name over [`MAX_NAME`] bytes, or one that
+/// holds `/`.
+pub(super) fn take_lfn(units: &[u16], out: &mut [u8; MAX_NAME]) -> Option<usize> {
+    let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
+    let mut n = 0usize;
+    for c in char::decode_utf16(units.get(..end)?.iter().copied()) {
+        let c = c.ok()?;
+        if c == '/' {
+            return None;
+        }
+        let at = n.checked_add(c.len_utf8())?;
+        c.encode_utf8(out.get_mut(n..at)?);
+        n = at;
+    }
+    (n > 0).then_some(n)
+}
+
+/// Fill `ent` as LFN entry `ord` of `name`: its units from
+/// `(ord - 1) * 13`, then one `0x0000` and `0xFFFF` padding.
 pub(super) fn fill_lfn(
     ent: &mut [u8; ENT],
     ord: u8,
@@ -360,6 +436,7 @@ pub(super) fn fill_lfn(
     cs: u8,
     name: &[u8],
 ) -> Result<(), FatError> {
+    let s = core::str::from_utf8(name).map_err(|_| FatError::Inval)?;
     ent.fill(0);
     ent[0] = if last { ord | LFN_LAST } else { ord };
     ent[11] = ATTR_LFN;
@@ -368,20 +445,17 @@ pub(super) fn fill_lfn(
         .checked_sub(1)
         .and_then(|p| p.checked_mul(LFN_CHARS))
         .ok_or(FatError::Inval)?;
-    let mut chars = [0xFFFFu16; LFN_CHARS];
+    let mut units = s.encode_utf16().skip(start);
     let mut term = false;
-    for (i, c) in chars.iter_mut().enumerate() {
-        let p = start.checked_add(i).ok_or(FatError::Inval)?;
-        if term {
-            *c = 0xFFFF;
-        } else if let Some(&b) = name.get(p) {
-            *c = b as u16;
+    for &o in LFN_OFFS.iter() {
+        let c = if term {
+            0xFFFF
+        } else if let Some(u) = units.next() {
+            u
         } else {
-            *c = 0;
             term = true;
-        }
-    }
-    for (&o, &c) in LFN_OFFS.iter().zip(chars.iter()) {
+            0
+        };
         put_le16(ent, o, c)?;
     }
     Ok(())

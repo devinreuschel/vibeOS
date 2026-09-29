@@ -637,6 +637,156 @@ pub(crate) fn test_exec_huge_memsz() -> Outcome {
     Outcome::Ok
 }
 
+// Exit 0 when the data segment at 0x4010_0000 holds byte i % 251 at 70000
+// (222) and at 99999 (101), else exit 1.
+user_code!(
+    CHECK_BIG_DATA,
+    "
+    mov rax, 0x40100000
+    mov edi, 1
+    cmp byte ptr [rax + 70000], 222
+    jne 1f
+    cmp byte ptr [rax + 99999], 101
+    jne 1f
+    xor edi, edi
+1:
+    mov eax, 60
+    syscall
+    ud2
+    "
+);
+
+// execve("/xbig", {"/xbig", NULL}, NULL); on return exit(100 - rax).
+user_code!(
+    EXEC_XBIG,
+    "
+    lea rdi, [rip + 2f]
+    push 0
+    push rdi
+    mov rsi, rsp
+    xor edx, edx
+    mov eax, 59
+    syscall
+    neg rax
+    lea rdi, [rax + 100]
+    mov eax, 60
+    syscall
+    ud2
+2:
+    .asciz \"/xbig\"
+    "
+);
+
+// execve("/xcut", {"/xcut", NULL}, NULL); on return exit(100 - rax).
+user_code!(
+    EXEC_XCUT,
+    "
+    lea rdi, [rip + 2f]
+    push 0
+    push rdi
+    mov rsi, rsp
+    xor edx, edx
+    mov eax, 59
+    syscall
+    neg rax
+    lea rdi, [rax + 100]
+    mov eax, 60
+    syscall
+    ud2
+2:
+    .asciz \"/xcut\"
+    "
+);
+
+/// Bytes of `exec_large_elf_from_file`'s data segment.
+const BIG_DATA: usize = 100_000;
+
+/// An `ET_EXEC` with a code `PT_LOAD` (`CHECK_BIG_DATA`) at 0x4000_0000,
+/// file offset 0x1000, a read-only data `PT_LOAD` of [`BIG_DATA`] bytes,
+/// byte i being i % 251, at 0x4010_0000, file offset 0x2000, and a
+/// `PT_GNU_STACK`: 108,192 bytes.
+fn big_elf() -> Vec<u8> {
+    use vibeos::elf::{EHDR_SIZE, PF_R, PF_W, PHDR_SIZE, PT_GNU_STACK, PT_LOAD};
+    let mut b = user::elf_bytes(&Image::Code(CHECK_BIG_DATA, DEFAULT));
+    b.resize(0x2000, 0);
+    b.extend((0..BIG_DATA).map(|i| (i % 251) as u8));
+    b[56..58].copy_from_slice(&3u16.to_le_bytes());
+    let mut ph = |i: usize, ty: u32, flags: u32, off: u64, va: u64, len: u64| {
+        let o = EHDR_SIZE + i * PHDR_SIZE;
+        b[o..o + 4].copy_from_slice(&ty.to_le_bytes());
+        b[o + 4..o + 8].copy_from_slice(&flags.to_le_bytes());
+        b[o + 8..o + 16].copy_from_slice(&off.to_le_bytes());
+        b[o + 16..o + 24].copy_from_slice(&va.to_le_bytes());
+        b[o + 24..o + 32].copy_from_slice(&va.to_le_bytes());
+        b[o + 32..o + 40].copy_from_slice(&len.to_le_bytes());
+        b[o + 40..o + 48].copy_from_slice(&len.to_le_bytes());
+        b[o + 48..o + 56].copy_from_slice(&0x1000u64.to_le_bytes());
+    };
+    ph(1, PT_LOAD, PF_R, 0x2000, 0x4010_0000, BIG_DATA as u64);
+    ph(2, PT_GNU_STACK, PF_R | PF_W, 0, 0, 0);
+    b
+}
+
+/// Write `bytes` to `path` in 4 KiB writes, creating or truncating it.
+fn write_file_4k(path: &str, bytes: &[u8]) -> Result<(), FsError> {
+    let f = fid::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)?;
+    let mut done = 0usize;
+    let rc = loop {
+        if done == bytes.len() {
+            break Ok(());
+        }
+        let end = (done + 4096).min(bytes.len());
+        match fid::write(f, &bytes[done..end]) {
+            Ok(0) => break Err(FsError::Io),
+            Ok(n) => done += n,
+            Err(e) => break Err(e),
+        }
+    };
+    let closed = fid::close(f);
+    rc.and(closed)
+}
+
+/// ROADMAP §10.4 (the loader maps segments from the file): a 108 KB ELF in the initrd loads
+/// from the file, its data segment's bytes arriving intact, and one cut
+/// short inside that segment is `ENOEXEC` (exit 108).
+pub(crate) fn test_exec_large_elf_from_file() -> Outcome {
+    let elf = big_elf();
+    let cases: [(&str, &[u8], &'static [u8], u32); 2] = [
+        ("/xbig", &elf, EXEC_XBIG, 0),
+        ("/xcut", &elf[..70_000], EXEC_XCUT, 108),
+    ];
+    let mut out = Outcome::Ok;
+    for (path, bytes, _, _) in &cases {
+        if let Err(e) = write_file_4k(path, bytes) {
+            out = crate::fail_fmt!("write {path}: {}", e.as_str());
+            break;
+        }
+    }
+    if matches!(out, Outcome::Ok) {
+        for (path, _, code, want) in &cases {
+            match user::run(&Image::Code(code, DEFAULT), &["exec_large"]) {
+                Ok(st) if st == wait_exited(*want) => {}
+                Ok(st) => {
+                    out = crate::fail_fmt!("{path}: status {st:#x}, want exited {want}");
+                    break;
+                }
+                Err(e) => {
+                    out = crate::fail_fmt!("{path}: spawn: {}", e.as_str());
+                    break;
+                }
+            }
+        }
+    }
+    for (path, _, _, _) in &cases {
+        if let Err(e) = unlink_quiet(path)
+            && matches!(out, Outcome::Ok)
+        {
+            out = crate::fail_fmt!("unlink {path}: {}", e.as_str());
+        }
+    }
+    out
+}
+
 // brk(0) = b, non-zero and page-aligned (1). brk(b+0x3010) returns it (2),
 // and the new pages read 0 (3); a store and load at b and b+0x3008 (4).
 // brk(b+0x1000) returns it (5); brk(b-0x1000) (6) and brk(b+0x4000_0000),

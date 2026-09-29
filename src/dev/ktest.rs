@@ -10,6 +10,7 @@ use vibeos::kalloc::TryBox;
 use vibeos::pci::CfgIo;
 use vibeos::virtio::{F_EVENT_IDX, F_INDIRECT_DESC, F_VERSION_1};
 
+use crate::arch::current::Arch;
 use crate::dev_init;
 use crate::dma_init;
 use crate::fs_init;
@@ -260,13 +261,13 @@ pub(crate) fn test_dma_alloc() -> Outcome {
         dma_init::free(buf);
         return Outcome::Fail("dma32");
     }
-    buf.sync_for_device();
+    buf.sync_for_device::<Arch>();
     // SAFETY: `buf` is this test's own DMA buffer, at least one byte long,
     // shared with no device; established by `dma_init::alloc`.
     unsafe {
         buf.as_ptr().write_volatile(0xA5);
     }
-    buf.sync_for_cpu();
+    buf.sync_for_cpu::<Arch>();
     let sg = match dma::SgList::from_buffer(&buf) {
         Ok(s) => s,
         Err(_) => {
@@ -338,12 +339,12 @@ pub(crate) fn test_dma_edu() -> Outcome {
             i += 1;
         }
     }
-    src.sync_for_device();
-    dst.sync_for_device();
+    src.sync_for_device::<Arch>();
+    dst.sync_for_device::<Arch>();
     mmio_w32(mmio, EDU_DMA_SRC, src.device().as_u64() as u32);
     mmio_w32(mmio, EDU_DMA_DST, EDU_DMA_BUF);
     mmio_w32(mmio, EDU_DMA_CNT, 64);
-    dma::dma_wmb();
+    dma::dma_wmb::<Arch>();
     mmio_w32(mmio, EDU_DMA_CMD, EDU_DMA_RUN);
     if !spin_until_ns(
         || mmio_r32(mmio, EDU_DMA_CMD) & EDU_DMA_RUN == 0,
@@ -356,7 +357,7 @@ pub(crate) fn test_dma_edu() -> Outcome {
     mmio_w32(mmio, EDU_DMA_SRC, EDU_DMA_BUF);
     mmio_w32(mmio, EDU_DMA_DST, dst.device().as_u64() as u32);
     mmio_w32(mmio, EDU_DMA_CNT, 64);
-    dma::dma_wmb();
+    dma::dma_wmb::<Arch>();
     mmio_w32(mmio, EDU_DMA_CMD, EDU_DMA_RUN | EDU_DMA_TO_PCI);
     if !spin_until_ns(
         || mmio_r32(mmio, EDU_DMA_CMD) & EDU_DMA_RUN == 0,
@@ -366,7 +367,7 @@ pub(crate) fn test_dma_edu() -> Outcome {
         dma_init::free(dst);
         return Outcome::Fail("dma from edu");
     }
-    dst.sync_for_cpu();
+    dst.sync_for_cpu::<Arch>();
     let mut bad = false;
     // SAFETY: both 64-byte buffers are this test's own, and the edu DMA
     // into `dst` has completed; established by `dma_init::alloc`.

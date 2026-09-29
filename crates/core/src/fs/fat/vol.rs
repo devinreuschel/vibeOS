@@ -211,12 +211,19 @@ impl FatVol {
         if name_is_dot(name) || name_is_dotdot(name) {
             return Err(FatError::Inval);
         }
-        if name.iter().any(|&c| c == 0 || c == b'/' || c < 0x20) {
+        if name.iter().any(|&c| c < 0x20 || LFN_ILLEGAL.contains(&c)) {
             return Err(FatError::Inval);
         }
+        core::str::from_utf8(name).map_err(|_| FatError::Inval)?;
         Ok(())
     }
 }
+
+/// The characters a long name may not hold, with `/` and controls.
+const LFN_ILLEGAL: &[u8] = b"/\"*:<>?\\|";
+
+/// The most clusters a FAT32 volume holds: numbers 2 to `0x0FFF_FFF6`.
+const MAX_NCLUS: u32 = 0x0FFF_FFF5;
 
 fn parse_bpb(boot: &[u8; SEC], nsectors: u32) -> Result<FatInfo, FatError> {
     if boot[510] != 0x55 || boot[511] != 0xAA {
@@ -266,7 +273,8 @@ fn parse_bpb(boot: &[u8; SEC], nsectors: u32) -> Result<FatInfo, FatError> {
     let nclus = data_secs
         .checked_div(u32::from(spc))
         .ok_or(FatError::Corrupt)?;
-    if nclus < 2 {
+    // The cap also keeps `fat_loc`'s byte offset `clu * 4` inside a `u32`.
+    if !(2..=MAX_NCLUS).contains(&nclus) {
         return Err(FatError::Corrupt);
     }
     Ok(FatInfo {

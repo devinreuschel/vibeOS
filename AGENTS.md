@@ -39,7 +39,7 @@ These rules come from [KERNEL_REVIEW.md §8.1](docs/reviews/KERNEL_REVIEW.md#81-
 5. **Publish last.** In a completion or handoff, the store that lets another CPU or thread free or reuse an object is the publisher's last access to that object. That store is a Release store, a Release read-modify-write, or the unlock of a lock the other side takes before it frees, and the other side reads it with Acquire; program order alone orders nothing on a weakly ordered CPU. An object deferred for cross-CPU reclaim, such as a kernel stack, is freed only after the CPU that last used it has switched away. (F012)
 6. **Soundness is typed.** An `unsafe impl` of `Send` or `Sync` carries std's bounds: `Send` needs `T: Send`; `Sync` needs `T: Send` for a type that gives one holder at a time `&mut T` (a mutex, `IrqCell`) and `T: Send + Sync` for one that shares `&T` (a read-write lock, `BootCell`). A lock guard is `!Send`, and `Sync` only when `T: Sync`, as `MutexGuard` is. A fn that can cause UB on bad arguments is an `unsafe fn`. A pointer that is written through takes its provenance from `&mut`, an `UnsafeCell`, or its allocation, never from a `&T` cast to `*mut`. Ownership tokens (frames, stacks, DMA buffers, address spaces) are not `Copy`. No `&'static` is built from a raw pointer or a table-owned `Box`. A type copied to user memory has no padding and no uninitialized bytes, checked at compile time (DESIGN §2.4, ROADMAP §10.6). (F018, F019, F038, F042, F089)
 7. **A SAFETY comment names its invariant.** Each `// SAFETY:` comment names the invariant, as `invariant I<n>` when DESIGN §2.7 has a row for it and in a sentence otherwise, and where it is established: the module path of the function, method, type, static, or const that establishes it (`heap_init::grow_for`), or `here` when the enclosing function does. `scripts/check_safety.py` checks the form, and review covers the files on its `PENDING` list until their ROADMAP §10.1 sweep removes them. "Caller guarantees" is not a reason inside a safe fn. (F041)
-8. **Per-thread CPU state has one list.** The table in DESIGN §7.5 (Per-thread CPU state) lists what `thread_init::switch_now`, `syscall_init::on_switch`, and `thread::switch_context` switch; today they do not switch `FS_BASE`. New user-visible CPU state, such as debug registers or an XSAVE component, gets a row there and an in-guest test that switches between two processes that differ in it, in the same commit. A control that changes what an instruction does in ring 3 or at EL0 and holds one value for every thread gets a row in DESIGN §11.4's table instead, in the commit that sets it, and every CPU writes its register whole. (F022)
+8. **Per-thread CPU state has one list.** The table in DESIGN §7.5 (Per-thread CPU state) lists what `thread_init::switch_now`, `syscall_init::on_switch`, and `arch::x86_64::switch::switch_context` switch; today they do not switch `FS_BASE`. New user-visible CPU state, such as debug registers or an XSAVE component, gets a row there and an in-guest test that switches between two processes that differ in it, in the same commit. A control that changes what an instruction does in ring 3 or at EL0 and holds one value for every thread gets a row in DESIGN §11.4's table instead, in the commit that sets it, and every CPU writes its register whole. (F022)
 9. **Test hooks do not ship.** What a test needs from production code (`catch::intercept`, fault injection, stdout capture, GPT stamping) is behind a test-only Cargo feature, `kernel_tests` or another that `Cargo.toml` marks test-only, which no published ISO enables. A test's trust anchors (test CAs, test signing keys, the harness's SSH keys) reach a guest only through the harness (ROADMAP §14.3), never through a package recipe or a release image. (F003, F145, F146)
 10. **One implementation per primitive.** Before adding a lock, ring buffer, setjmp, error enum, user-entry path, or file stack, find the existing one and extend it. Deleting a duplicate is part of the change. (F082, F086)
 
@@ -61,19 +61,15 @@ Kernel target is built-in `x86_64-unknown-none` (B2). `./setup.sh` runs `rustup 
 
 `make check` needs `ruff` and `mypy` at the versions the `check` job in `.github/workflows/ci.yml` pins, and `fsck.fat` (`dosfstools`) for the FAT host tests, and it fails when one is missing. `VIBEOS_ALLOW_MISSING_TOOLS=1` is a gate switch, not one of the `VIBEOS_*` QEMU overrides `harness.py` reads: the Makefile and the FAT host test read it, skip each check whose tool is missing, and print the check they skipped. CI never sets it. `make check` also builds `vibeos-core` with its MSRV toolchain, which `./setup.sh` installs, and fails without it on the same terms.
 
-`VIBEOS_*` overrides: `SMP`, `QEMU_CPU`, `MEM`, `QEMU_ACCEL` (default `tcg`), `ISO`, `TIMEOUT`, `BIOS`, `QEMU_EXTRA`. Makefile `?=` defaults are the source for `make run`. One reader: `tests/harness/harness.py` (`env_config`).
+`VIBEOS_*` overrides: `SMP`, `QEMU_CPU`, `MEM`, `QEMU_ACCEL` (default `tcg`), `ISO`, `TIMEOUT`, `BIOS` (`uefi` boots the probed UEFI firmware), `FW_X86_64` (the firmware code image `uefi` boots), `QEMU_EXTRA`. One reader, which holds the only defaults: `tests/harness/harness.py` (`env_config`); the Makefile sets none. `make run`, `make run-panic` and `make debug` honour the same settings: they start QEMU through `tests/harness/run_interactive.py`.
 
 macOS: `brew install qemu xorriso nasm python dosfstools`. `make test-unit` runs `vibeos-core` on the
-host triple (A2). `make test-e2e-uefi` hands the firmware to QEMU with `-bios`, which rejects Homebrew's
-code-only `share/qemu/edk2-x86_64-code.fd`. When `OVMF` (default `/usr/share/ovmf/OVMF.fd`, absent on macOS)
-names a missing file, the target prints its skip line and then fails, so `make test` stops there. ROADMAP §10.2 fixes both: I1 adds one firmware probe and a
-visible skip, and F079 attaches a code-only image as pflash. Until then, pass a combined image, which
-`-bios` accepts:
-
-    mkdir -p build
-    cat "$(brew --prefix)/share/qemu/edk2-i386-vars.fd" \
-        "$(brew --prefix)/share/qemu/edk2-x86_64-code.fd" > build/OVMF.fd
-    make test OVMF=build/OVMF.fd
+host triple (A2). The firmware probe finds Homebrew's `share/qemu/edk2-x86_64-code.fd` with
+`edk2-i386-vars.fd`, and UEFI boots load the code read-only on pflash with a per-run copy of the
+variable store, so `make test` needs no firmware argument; `VIBEOS_FW_X86_64` names another code
+image. `make debug` attaches with Homebrew's `x86_64-elf-gdb`, since Homebrew has no `gdb` on
+Apple Silicon. The scheduled `macos` workflow (`.github/workflows/macos.yml`) runs `make check` and
+`make test` this way on an Apple Silicon runner every day.
 
 ## Toolchain bump (C1)
 

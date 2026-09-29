@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use vibeos::block::{BlockError, DeviceState, Op};
 use vibeos::dev::Device;
-use vibeos::virtio_blk::{F_DISCARD, F_FLUSH, F_MQ};
+use vibeos::virtio_blk::{F_DISCARD, F_MQ};
 
 use crate::block_init::IoWaiter;
 use crate::ktest::Outcome;
@@ -22,10 +22,6 @@ fn features() -> u64 {
 
 fn has_mq() -> bool {
     features() & F_MQ != 0 && virtio_blk_init::num_queues() > 1
-}
-
-fn has_flush() -> bool {
-    features() & F_FLUSH != 0
 }
 
 fn has_discard() -> bool {
@@ -134,9 +130,6 @@ pub(crate) fn test_block_vblk_rw() -> Outcome {
     }
     if d.flush_dev().is_err() {
         return Outcome::Fail("flush");
-    }
-    if !has_flush() {
-        // device did not offer F_FLUSH; flush is a successful no-op
     }
     if has_discard() && d.discard(5, 1).is_err() {
         return Outcome::Fail("discard");

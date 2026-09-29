@@ -2,6 +2,7 @@
 //! QEMU kill interrupts. Only that build declares this module.
 
 use crate::vibefs_init;
+use vibeos::vibefs::Plant;
 
 /// QEMU-kill workload. Marker `vibeOS: vibefs: wr N` is not a boot
 /// contract line. Printed *before* the write+fsync so a kill can land
@@ -38,8 +39,20 @@ pub fn crash_loop() -> ! {
         file_init::sync_fs().map_err(|e| e.as_str())
     }
 
+    // `vibeos.crash_plant=leak|early_super` plants one commit defect, so
+    // the crash test shows it can fail (BOOT.md §3.2).
+    let plant = match crate::boot::cmdline().get("vibeos.crash_plant") {
+        None => Plant::None,
+        Some(b"leak") => Plant::Leak,
+        Some(b"early_super") => Plant::EarlySuper,
+        Some(_) => {
+            crate::marker!("vibeOS: vibefs: bad crash_plant");
+            x86::halt();
+        }
+    };
     if let Err(e) = file_init::mkdir(b"/crash", 0o755)
         .and_then(|()| vibefs_init::mount_dev("vda", "/crash", false).map(|_| ()))
+        .and_then(|()| vibefs_init::set_plant(b"/crash", plant))
     {
         crate::marker!("vibeOS: vibefs: mount fail {}", e.as_str());
         x86::halt();

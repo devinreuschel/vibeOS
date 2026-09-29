@@ -24,6 +24,8 @@ impl Vol {
             drop: [0; MAX_DROP],
             ndrop: 0,
             iobuf: [0; BLOCK],
+            #[cfg(any(test, feature = "crash_plant"))]
+            plant: Plant::None,
         }
     }
 
@@ -71,6 +73,16 @@ impl Vol {
         }
         self.ndrop = 0;
         self.iobuf.fill(0);
+        #[cfg(any(test, feature = "crash_plant"))]
+        {
+            self.plant = Plant::None;
+        }
+    }
+
+    /// Plant `p` in every later commit of this volume (test-only).
+    #[cfg(any(test, feature = "crash_plant"))]
+    pub fn set_plant(&mut self, p: Plant) {
+        self.plant = p;
     }
 }
 
@@ -109,6 +121,23 @@ impl Vol {
         }
         self.drop[self.ndrop as usize] = bno;
         self.ndrop += 1;
+        Ok(())
+    }
+
+    /// How many of the `len` blocks from `phys` [`Self::pending_drop`]
+    /// would put on the drop list: those not new in this transaction.
+    pub(super) fn drops_needed(&self, phys: u32, len: u32) -> usize {
+        (0..len)
+            .filter_map(|b| phys.checked_add(b))
+            .filter(|&bno| bno >= 2 && !bit_get(&self.txn, bno))
+            .count()
+    }
+
+    /// `NoSpace` unless the drop list has room for `n` more blocks.
+    pub(super) fn drop_room(&self, n: usize) -> Result<(), Error> {
+        if self.ndrop as usize + n > MAX_DROP {
+            return Err(Error::NoSpace);
+        }
         Ok(())
     }
 

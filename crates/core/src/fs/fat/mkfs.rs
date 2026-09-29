@@ -5,27 +5,49 @@ const BACKUP_BOOT: u32 = 6;
 /// The backup FSInfo sector, after the backup boot sector.
 const BACKUP_FSINFO: u32 = BACKUP_BOOT + 1;
 
-/// Format `buf` as FAT32. Size must be a multiple of 512 and at least 64 KiB.
-pub fn mkfs(buf: &mut [u8], label: &[u8]) -> Result<FatInfo, FatError> {
-    if buf.len() < INITRD_BYTES || !buf.len().is_multiple_of(SEC) {
-        return Err(FatError::Inval);
-    }
-    buf.fill(0);
-    let totsec = u32::try_from(buf.len() / SEC).map_err(|_| FatError::Inval)?;
-    let rsvd = 32u32;
-    let spc = 1u8;
-    let num_fats = 2u8;
+/// Reserved sectors [`mkfs`] writes: the boot sector, FSInfo and their
+/// backups.
+const RSVD: u32 = 32;
+/// FAT copies [`mkfs`] writes.
+const NUM_FATS: u8 = 2;
+/// Sectors per cluster [`mkfs`] writes.
+const SPC: u8 = 1;
+
+/// The smallest image [`mkfs`] formats: the reserved sectors, two
+/// one-sector FATs and two data clusters.
+pub const MIN_SECTORS: u32 = 36;
+
+/// Free space `mkinitrd` leaves in the initrd for the in-guest write tests
+/// (ROADMAP §10.5): room for the about 180 KB `exec_large_elf_from_file`
+/// holds at once, and for the small FAT write tests.
+pub const INITRD_FREE_BYTES: u64 = 512 * 1024;
+
+/// Where [`mkfs`] puts things on an image of `totsec` sectors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Geometry {
+    /// Sectors per FAT copy.
+    pub fatsz: u32,
+    /// First data sector.
+    pub data_lba: u32,
+    /// Data clusters.
+    pub nclus: u32,
+}
+
+/// The layout [`mkfs`] writes on `totsec` sectors: [`RSVD`] reserved
+/// sectors, two FATs just big enough for the clusters that follow them, and
+/// one sector per cluster. `Inval` below two clusters.
+pub fn geometry(totsec: u32) -> Result<Geometry, FatError> {
     // The first data sector for a FAT of `fatsz` sectors.
     let data_start = |fatsz: u32| {
-        u32::from(num_fats)
+        u32::from(NUM_FATS)
             .checked_mul(fatsz)
-            .and_then(|f| f.checked_add(rsvd))
+            .and_then(|f| f.checked_add(RSVD))
             .ok_or(FatError::Inval)
     };
     let mut fatsz = 1u32;
     loop {
         let data = totsec.saturating_sub(data_start(fatsz)?);
-        let nclus = data.checked_div(u32::from(spc)).ok_or(FatError::Inval)?;
+        let nclus = data.checked_div(u32::from(SPC)).ok_or(FatError::Inval)?;
         if nclus < 2 {
             return Err(FatError::Inval);
         }
@@ -45,8 +67,54 @@ pub fn mkfs(buf: &mut [u8], label: &[u8]) -> Result<FatInfo, FatError> {
     let data_lba = data_start(fatsz)?;
     let nclus = totsec
         .checked_sub(data_lba)
-        .and_then(|n| n.checked_div(u32::from(spc)))
+        .and_then(|n| n.checked_div(u32::from(SPC)))
         .ok_or(FatError::Inval)?;
+    Ok(Geometry {
+        fatsz,
+        data_lba,
+        nclus,
+    })
+}
+
+/// The smallest image, in sectors, whose [`geometry`] has at least
+/// `data_clusters` clusters plus enough for `free_bytes` more. `Inval` when
+/// no `u32` sector count has.
+pub fn image_sectors(data_clusters: u32, free_bytes: u64) -> Result<u32, FatError> {
+    let free = u32::try_from(free_bytes.div_ceil(SEC as u64)).map_err(|_| FatError::Inval)?;
+    let need = data_clusters.checked_add(free).ok_or(FatError::Inval)?;
+    // A FAT is at least one sector, so no image below `need` data sectors
+    // past the reserved sectors and two one-sector FATs has enough.
+    let mut totsec = need
+        .checked_add(RSVD)
+        .and_then(|n| n.checked_add(u32::from(NUM_FATS)))
+        .ok_or(FatError::Inval)?
+        .max(MIN_SECTORS);
+    loop {
+        if let Ok(g) = geometry(totsec)
+            && g.nclus >= need
+        {
+            return Ok(totsec);
+        }
+        totsec = totsec.checked_add(1).ok_or(FatError::Inval)?;
+    }
+}
+
+/// Format `buf` as FAT32. Its length must be a multiple of 512 and at
+/// least [`MIN_SECTORS`] sectors.
+pub fn mkfs(buf: &mut [u8], label: &[u8]) -> Result<FatInfo, FatError> {
+    if !buf.len().is_multiple_of(SEC) {
+        return Err(FatError::Inval);
+    }
+    let totsec = u32::try_from(buf.len() / SEC).map_err(|_| FatError::Inval)?;
+    let Geometry {
+        fatsz,
+        data_lba,
+        nclus,
+    } = geometry(totsec)?;
+    buf.fill(0);
+    let rsvd = RSVD;
+    let spc = SPC;
+    let num_fats = NUM_FATS;
     let root = 2u32;
     let mut lab = [b' '; 11];
     lab.iter_mut().zip(label).for_each(|(o, &c)| *o = c);

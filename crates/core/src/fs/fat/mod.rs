@@ -22,13 +22,12 @@ mod rw;
 mod vol;
 
 pub use dirent::lfn_checksum;
-pub use mkfs::{mkfs, mkinitrd};
+pub use mkfs::{Geometry, INITRD_FREE_BYTES, MIN_SECTORS, geometry, image_sectors, mkfs, mkinitrd};
 
 use chain::{fat_loc, is_eoc};
 use dirent::{decode_short, eq_ci, fat_datetime, fat_to_unix, fill_lfn, utf16_len};
 
 pub const SEC: usize = 512;
-pub const INITRD_BYTES: usize = 64 * 1024;
 pub const MAX_CLUS_BYTES: usize = 4096;
 pub use crate::limits::MAX_NAME;
 pub const FAT_CACHE: usize = 8;
@@ -46,6 +45,8 @@ const ENT_FREE: u8 = 0x00;
 const ENT: usize = 32;
 const ENT_U32: u32 = ENT as u32;
 const LFN_CHARS: usize = 13;
+/// A directory holds at most 65,536 entries.
+const MAX_DIR_BYTES: u32 = 65_536 * ENT_U32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
