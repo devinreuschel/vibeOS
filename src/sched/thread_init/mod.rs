@@ -490,6 +490,15 @@ fn requeue_next_cpu(next: ThreadId, cur: ThreadId, idle: ThreadId, me: u32) -> T
 }
 
 fn switch_now(old_ptr: *mut Tcb, new_ptr: *mut Tcb) {
+    #[cfg(feature = "kernel_tests")]
+    if crate::sync_init::held_mask() != 0 {
+        // SAFETY: invariant I9: `new_ptr` is a live entry of `SCHED` that
+        // `schedule_inner` or `switch_to` set Running for this CPU, and `id`
+        // changes only while its slot is Dead; established by
+        // `thread_init::spawn_inner`.
+        testing::refuse_switch(unsafe { (*new_ptr).id });
+    }
+    crate::sync_init::assert_switch_clean();
     let now = time_init::read_tsc();
     per_cpu_init::with_current_switch(|cpu| {
         // For the switch tail that runs next on this CPU.

@@ -666,7 +666,7 @@ that review cites means the review's text.
 
 | # | Invariant | Established at | Status | Holds today |
 |---|-----------|----------------|--------|-------------|
-| I1 | Lock rank HEAP < PT < BUDDY < SCHED < DEVICE < SERIAL (§2.1); a second lock of a held rank only through `lock_nested` (§2.3) | `lock.rs`, `sync_init::lock_enter`, `IrqCell::with` | enforced at runtime, per CPU | Partly: a lock held across a switch goes unseen (ROADMAP §10.3, §13.12, F108) |
+| I1 | Lock rank HEAP < PT < BUDDY < SCHED < DEVICE < SERIAL (§2.1); a second lock of a held rank only through `lock_nested` (§2.3) | `lock.rs`, `sync_init::lock_enter`, `IrqCell::with`, `thread_init::switch_now` | enforced at runtime, per CPU | Partly: `switch_now` asserts that no ranked lock is held across a context switch, but an `IrqCell` or a rank-0 `SpinMutex` held across one is not counted and stays unchecked (ROADMAP §13.12) |
 | I2 | Hard-IRQ context never blocks or allocates (§2.2) | convention | documented | Yes, unchecked: only `irq_init::dispatch` sets `IN_ISR`, and no blocking primitive asserts it (ROADMAP §10.3, F110) |
 | I3 | IF=0 through every return-to-user sequence (§5.10 rule 4) | FMASK (§7.2) | documented | No: the syscall exit has no `cli` and `console_init::wait_key` returns with IF=1 (F001); `syscall_init::first_return` runs with IF=1 (F006) (ROADMAP §10.6) |
 | I4 | Kernel code outside the §5.10 entry and exit sequences runs with `GS_BASE` = this CPU's `PerCpu` (§5.10) | `arch::gs`, `per_cpu_init` | documented | No: the IF=1 window in `syscall_init::first_return` (F006) and a fault on the return-to-user `iretq` (F007) run on the user base (ROADMAP §10.6) |

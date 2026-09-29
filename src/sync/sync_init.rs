@@ -12,6 +12,9 @@ use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 #[cfg(feature = "kernel_tests")]
 use core::sync::atomic::{AtomicU16, AtomicUsize};
 
+#[cfg(feature = "kernel_tests")]
+use vibeos::atomic::statics::AtomicU8;
+
 use vibeos::lock::{Held, RankError};
 use vibeos::sync::SpinLock;
 
@@ -229,10 +232,37 @@ pub fn held() -> Held {
     }
 }
 
-/// Bit `rank - 1` set for each rank this CPU holds.
-#[cfg(feature = "kernel_tests")]
+/// Bit `rank - 1` set for each rank this CPU holds; 0 before per-CPU data
+/// is live. Call with IF off, so the thread stays on the CPU whose slot it
+/// reads.
 pub fn held_mask() -> u8 {
-    held().mask()
+    match held_slot() {
+        // Relaxed: only this CPU writes its slot.
+        Some(h) => Held::from_raw(h.load(Ordering::Relaxed)).mask(),
+        None => 0,
+    }
+}
+
+/// A context switch leaves this CPU holding no ranked lock. `HELD` is per
+/// CPU, so a lock held across `switch_context` would be charged to the
+/// thread that runs next (invariant I1). Called first in
+/// `thread_init::switch_now`, with IF off. Off before per-CPU data is live
+/// and once `HALTING` is set, as the rank checker is.
+#[track_caller]
+pub fn assert_switch_clean() {
+    if held_slot().is_none() || halting() {
+        return;
+    }
+    let mask = held_mask();
+    #[cfg(feature = "kernel_tests")]
+    if mask != 0 {
+        testing::trip(testing::SleepTrip::SwitchHeld);
+    }
+    assert!(
+        mask == 0,
+        "context switch holding ranks {mask:#x} at {}",
+        Location::caller()
+    );
 }
 
 #[cfg(feature = "kernel_tests")]
@@ -418,6 +448,31 @@ pub mod testing {
     /// Rank-checker refusals since boot.
     pub fn rank_failures() -> u64 {
         RANK_FAILURES.load(Ordering::Relaxed)
+    }
+
+    /// Which lock or sleep assertion fired last: the panic message is lost
+    /// to `arch::catch::catch_panic`, so a test reads this instead.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SleepTrip {
+        /// `sync_init::assert_switch_clean`: a ranked lock held across a
+        /// context switch.
+        SwitchHeld = 1,
+    }
+
+    /// The last [`SleepTrip`], 0 when none is recorded.
+    static TRIP: AtomicU8 = AtomicU8::new(0);
+
+    /// Record `t` just before its assertion fires.
+    pub(super) fn trip(t: SleepTrip) {
+        TRIP.store(t as u8, Ordering::Relaxed);
+    }
+
+    /// Take the last recorded [`SleepTrip`] and clear it.
+    pub fn take_trip() -> Option<SleepTrip> {
+        match TRIP.swap(0, Ordering::Relaxed) {
+            1 => Some(SleepTrip::SwitchHeld),
+            _ => None,
+        }
     }
 
     /// Entries one armed trace keeps; later acquisitions are dropped.

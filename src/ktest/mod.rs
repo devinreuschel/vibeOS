@@ -488,6 +488,10 @@ pub(crate) const TESTS: &[Test] = &[
     .deadline(30_000),
     test("fp_no_leak", sched::ktest::test_fp_no_leak).deadline(60_000),
     test("fp_migrate_counter", sched::ktest::test_fp_migrate_counter).deadline(30_000),
+    test(
+        "lock_across_switch_asserts",
+        sched::ktest::lock_across_switch_asserts,
+    ),
     test("exec_huge_memsz", proc::ktest::test_exec_huge_memsz).deadline(60_000),
     test(
         "brk_mmap_munmap_user",
