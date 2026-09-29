@@ -269,6 +269,7 @@ pub unsafe fn init_cpu() {
 pub unsafe fn init_bsp() {
     unsafe { init_cpu() };
     crate::arch::idt::set_user_return_hook(fp_user_return);
+    crate::thread_init::set_switch_hooks(on_switch, fpu_template);
     per_cpu_init::with_current(|cpu| {
         cpu.tss = gdt::bsp_tss_ptr();
         let top = gdt::bsp_rsp0_top();
