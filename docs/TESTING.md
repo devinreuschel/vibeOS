@@ -725,6 +725,7 @@ each pass 40 s alone and cannot split below a target.
 | `ci-history` | `ci`, `release`, `nightly` or `smp-stress` run completes; daily 04:23 UTC; dispatch | `record` (on a completed run): the run's record on the `ci-history` branch. `daily` (schedule, dispatch): the packed size and the 500 MB rotation (`--rotate`), the backfill (`--backfill --limit 200`), then the completeness check, which turns it red on a missing record (CI history, below). Each job holds `contents: write` and `actions: read` only and checks out nothing. Both jobs run in `sched-lane-6`. |
 | `macos` | daily 04:23 UTC + dispatch, `sched-lane-9` | `macos-15` arm64 with Homebrew's `qemu`, `xorriso`, `nasm` and `dosfstools`; jobs `check` (`make check`) and `test` (`make -k test-e2e-uefi test`, with Homebrew's edk2 firmware on pflash); each uploads `build/results/`. |
 | `nightly` `kvm` | daily 03:17 UTC + dispatch, `sched-lane-0` | The x86_64 KVM leg (ROADMAP §10.1): `/dev/kvm` opened by GitHub's documented udev rule, job env `VIBEOS_QEMU_ACCEL=kvm` and `VIBEOS_QEMU_CPU=max,+invtsc`, then `make test-kernel`, `make test-e2e`, `VIBEOS_SMP=1 make test-e2e`, `make test-lapic-fallback LAPIC_FALLBACK_CPU=qemu64,+invtsc,-tsc-deadline`, and `VIBEOS_KTEST='lifetime_*,exit_burst,fork_oom' VIBEOS_KTEST_REPEAT=20 make test-kernel-smp4` (exit-gate line §10.10), each step run even after an earlier one failed. GitHub assigns each job's host CPU at random (AMD EPYC or Intel Xeon, several models), so `scripts/runner_info.py` writes the CPU model beside the guest's invariant-TSC bit to the job summary and to `build/runner.json`, uploaded as `runner-kvm`, which fills the CI-history record's `runner`; a regression threshold compares a number only with history from the same CPU model. `build/results/` is uploaded as `results-x86_64-kvm` (90 days). |
+| `nightly` `release-profile` | daily 03:17 UTC + dispatch, `sched-lane-1` | `make CARGO_PROFILE=release test-e2e test-kernel` under TCG, in its own job, since the release and dev ISOs share their names under `build/` (ROADMAP §10.2, F137; BOOT.md §3.5); the runner record and the uploads as `results-x86_64-release-profile` and `runner-release-profile`. Releases still ship the dev profile. |
 
 The `ticks` job (ROADMAP §10.9) runs after the jobs that run the tiers, the `tier` matrix, and reads
 the `build/results/` files they upload. A pull request run tests the merge of its head with its
@@ -908,7 +909,7 @@ Release windows: none
 | Workflow | Cadence | Jobs per run | Job-hours per run | Peak concurrent jobs | Lanes |
 |---|---|---|---|---|---|
 | `smp-stress.yml` | weekly `0 6 * * 1` and dispatch | 2 | 0.6 (estimated) | 2 | `sched-lane-4`, `sched-lane-5` |
-| `nightly.yml` | daily `17 3 * * *` and dispatch | 1 | 1.5 (estimated) | 1 | `sched-lane-0` |
+| `nightly.yml` | daily `17 3 * * *` and dispatch | 2 | 2.5 (estimated) | 2 | `sched-lane-0`, `sched-lane-1` |
 | `ci-history.yml` | each completed `ci`, `release`, `nightly` or `smp-stress` run (`record`); daily `23 4 * * *` and dispatch (`daily`) | 1 | 0.05 per `record`, 0.3 per `daily` (estimated) | 1 | `sched-lane-6` |
 | `macos.yml` | daily `23 4 * * *` and dispatch | 2 | 1.5 (estimated) | 1 | `sched-lane-9` |
 

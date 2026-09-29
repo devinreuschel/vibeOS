@@ -3,7 +3,8 @@ name: nightly
 # ROADMAP §10.1, DESIGN §8.6: the nightly scheduled jobs, each in its own
 # scheduled lane (the lane map and ledger in DESIGN §8.6). `kvm` is the x86_64
 # KVM leg: `make test-kernel`, the e2e and LAPIC-fallback runs, and the
-# §10.10 selection at -smp 4, under `-accel kvm -cpu max,+invtsc`. Jobs call
+# §10.10 selection at -smp 4, under `-accel kvm -cpu max,+invtsc`.
+# `release-profile` builds and boots `CARGO_PROFILE=release` under TCG. Jobs call
 # only `make` targets and scripts (C-SCHED-TARGETS), and each ends by writing
 # its runner record and uploading it with its results files, which the ticks
 # job reads for `[nightly]` proofs (C-TICK, C-RESULTS, C-HISTORY). No timeout
@@ -152,6 +153,113 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: runner-kvm
+          path: build/runner.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+  release-profile:
+    name: release-profile
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    # Scheduled lane 1 (DESIGN §8.6): one job at a time, the rest queued.
+    concurrency:
+      group: sched-lane-1
+      queue: max
+    # L1268 (F137): the release profile built and booted under TCG, in its
+    # own job, since dev and release ISOs share their names in build/.
+    # The harness fails every boot when QEMU is not this version (ROADMAP
+    # §10.1): resolute's qemu-system-x86 1:10.2.1+ds-1ubuntu3. Move the pin
+    # and DESIGN §8.6 together.
+    env:
+      VIBEOS_QEMU_VERSION: "10.2.1"
+      APT_PACKAGES: qemu-system-x86 xorriso nasm dosfstools
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # Host packages from a cache keyed by the runner image and the package
+      # list (ROADMAP §10.1, DESIGN §8.6): a hit installs the cached .deb files
+      # with no `apt-get update` and no download; a miss installs as before
+      # and saves what apt downloaded.
+      - name: apt cache key
+        id: apt-key
+        run: |
+          sum=$(printf '%s' "$APT_PACKAGES" | sha256sum | cut -d' ' -f1)
+          echo "key=apt-$ImageOS-$ImageVersion-$sum" >> "$GITHUB_OUTPUT"
+
+      - name: cache host packages
+        id: apt-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/apt-cache
+          key: ${{ steps.apt-key.outputs.key }}
+
+      - name: install host tools
+        env:
+          HIT: ${{ steps.apt-cache.outputs.cache-hit }}
+        run: |
+          if [ "$HIT" = true ]; then
+            if ls ~/apt-cache/*.deb >/dev/null 2>&1; then
+              sudo dpkg -i ~/apt-cache/*.deb
+            fi
+          else
+            sudo apt-get update
+            sudo apt-get install -y -o APT::Keep-Downloaded-Packages=true $APT_PACKAGES
+            mkdir -p ~/apt-cache
+            find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t ~/apt-cache {} +
+          fi
+
+      - name: install rust nightly
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: nightly-2026-09-22
+          components: rust-src, llvm-tools
+          targets: x86_64-unknown-none, x86_64-unknown-linux-musl
+
+      - name: cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-nightly-release-profile-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-nightly-release-profile-
+
+      - name: cache limine binaries
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: limine
+          key: limine-v9.6.7-binary-ee5d29cd0a8034612dcd1df3f00052480db785c5
+
+      - name: setup
+        run: ./setup.sh
+
+      - name: make CARGO_PROFILE=release test-e2e test-kernel
+        run: make CARGO_PROFILE=release test-e2e test-kernel
+
+      # The host CPU model and the guest's invariant-TSC bit, to the job
+      # summary and build/runner.json (ROADMAP §10.1, C-HISTORY).
+      - name: runner record
+        if: always()
+        run: python3 scripts/runner_info.py
+
+      - name: upload harness results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results-x86_64-release-profile
+          path: build/results/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: upload runner record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runner-release-profile
           path: build/runner.json
           if-no-files-found: ignore
           retention-days: 90
