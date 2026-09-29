@@ -61,19 +61,14 @@ Kernel target is built-in `x86_64-unknown-none` (B2). `./setup.sh` runs `rustup 
 
 `make check` needs `ruff` and `mypy` at the versions the `check` job in `.github/workflows/ci.yml` pins, and `fsck.fat` (`dosfstools`) for the FAT host tests, and it fails when one is missing. `VIBEOS_ALLOW_MISSING_TOOLS=1` is a gate switch, not one of the `VIBEOS_*` QEMU overrides `harness.py` reads: the Makefile and the FAT host test read it, skip each check whose tool is missing, and print the check they skipped. CI never sets it. `make check` also builds `vibeos-core` with its MSRV toolchain, which `./setup.sh` installs, and fails without it on the same terms.
 
-`VIBEOS_*` overrides: `SMP`, `QEMU_CPU`, `MEM`, `QEMU_ACCEL` (default `tcg`), `ISO`, `TIMEOUT`, `BIOS`, `QEMU_EXTRA`. One reader, which holds the only defaults: `tests/harness/harness.py` (`env_config`); the Makefile sets none. `make run` and `make run-panic` honour the same settings: they start QEMU through `tests/harness/run_interactive.py`.
+`VIBEOS_*` overrides: `SMP`, `QEMU_CPU`, `MEM`, `QEMU_ACCEL` (default `tcg`), `ISO`, `TIMEOUT`, `BIOS` (`uefi` boots the probed UEFI firmware), `FW_X86_64` (the firmware code image `uefi` boots), `QEMU_EXTRA`. One reader, which holds the only defaults: `tests/harness/harness.py` (`env_config`); the Makefile sets none. `make run`, `make run-panic` and `make debug` honour the same settings: they start QEMU through `tests/harness/run_interactive.py`.
 
 macOS: `brew install qemu xorriso nasm python dosfstools`. `make test-unit` runs `vibeos-core` on the
-host triple (A2). `make test-e2e-uefi` hands the firmware to QEMU with `-bios`, which rejects Homebrew's
-code-only `share/qemu/edk2-x86_64-code.fd`. When `OVMF` (default `/usr/share/ovmf/OVMF.fd`, absent on macOS)
-names a missing file, the target prints its skip line and then fails, so `make test` stops there. ROADMAP §10.2 fixes both: I1 adds one firmware probe and a
-visible skip, and F079 attaches a code-only image as pflash. Until then, pass a combined image, which
-`-bios` accepts:
-
-    mkdir -p build
-    cat "$(brew --prefix)/share/qemu/edk2-i386-vars.fd" \
-        "$(brew --prefix)/share/qemu/edk2-x86_64-code.fd" > build/OVMF.fd
-    make test OVMF=build/OVMF.fd
+host triple (A2). The firmware probe finds Homebrew's `share/qemu/edk2-x86_64-code.fd` with
+`edk2-i386-vars.fd`, and UEFI boots load the code read-only on pflash with a per-run copy of the
+variable store, so `make test` needs no firmware argument; `VIBEOS_FW_X86_64` names another code
+image. `make debug` attaches with Homebrew's `x86_64-elf-gdb`, since Homebrew has no `gdb` on
+Apple Silicon.
 
 ## Toolchain bump (C1)
 

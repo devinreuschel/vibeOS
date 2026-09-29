@@ -18,7 +18,9 @@ Drivers live in `run_*.py` and must not parse the environment or build argv;
 | `VIBEOS_SMP` | `2` | all, `run_interactive` |
 | `VIBEOS_QEMU_CPU` | `max` | all, `run_interactive` |
 | `VIBEOS_MEM` | `128M` | all, `run_interactive` |
-| `VIBEOS_BIOS` | unset (SeaBIOS) | all, `run_interactive` |
+| `VIBEOS_BIOS` | unset, `seabios`: SeaBIOS; `uefi`: probe, pflash | all, `run_interactive` |
+| `VIBEOS_FW_X86_64` | probed (`FIRMWARE_TABLE`) | all, `run_interactive` (`VIBEOS_BIOS=uefi`) |
+| `VIBEOS_FW_AARCH64` | probed (`FIRMWARE_TABLE`) | none yet (ROADMAP §11.7) |
 | `VIBEOS_QEMU_ACCEL` | `tcg` (empty omits `-accel`) | all, `run_interactive` |
 | `VIBEOS_TIMEOUT` | `60` e2e/ps2, `90` ktest/crash, none interactive | all, `run_interactive` |
 | `VIBEOS_QEMU_EXTRA` | empty | all, `run_interactive` |
@@ -39,6 +41,7 @@ Drivers live in `run_*.py` and must not parse the environment or build argv;
 
 from __future__ import annotations
 
+import atexit
 import os
 import random
 import re
@@ -479,7 +482,8 @@ class QemuConfig:
     smp: int = DEFAULT_SMP
     cpu: str = DEFAULT_CPU
     mem: str = DEFAULT_MEM
-    bios: str | None = None  # None = QEMU default (SeaBIOS)
+    # UEFI firmware on pflash; None = QEMU's default SeaBIOS.
+    firmware: Firmware | None = None
     extra: tuple[str, ...] = ()
     hpet: bool = True
     # None → VIBEOS_QEMU_ACCEL, else DEFAULT_ACCEL. Empty string omits -accel.
@@ -502,7 +506,7 @@ class EnvConfig:
     smp: int
     cpu: str
     mem: str
-    bios: str | None
+    firmware: Firmware | None
     accel: str | None
     timeout: float
     extra: tuple[str, ...]
@@ -522,7 +526,7 @@ class EnvConfig:
             smp=self.smp,
             cpu=self.cpu,
             mem=self.mem,
-            bios=self.bios,
+            firmware=self.firmware,
             extra=extra + self.extra,
             hpet=hpet,
             accel=self.accel,
@@ -567,10 +571,28 @@ def default_iso(variant: str = "default") -> str:
     return f"build/vibeos-{variant}.iso"
 
 
+def env_firmware(environ: Mapping[str, str]) -> Firmware | None:
+    """`VIBEOS_BIOS`: unset, empty or `seabios` is SeaBIOS (None); `uefi` is
+    the x86_64 pair `probe_firmware` finds, which `VIBEOS_FW_X86_64` names."""
+    bios = environ.get("VIBEOS_BIOS", "")
+    if bios in ("", "seabios"):
+        return None
+    if bios != "uefi":
+        raise HarnessError(
+            f"VIBEOS_BIOS={bios}: not seabios or uefi; to boot a firmware image, name it "
+            "with VIBEOS_FW_X86_64 and set VIBEOS_BIOS=uefi"
+        )
+    fw = probe_firmware("x86_64", environ)
+    if fw is None:
+        raise HarnessError(
+            "VIBEOS_BIOS=uefi: no x86_64 UEFI firmware installed (apt: ovmf; Homebrew: qemu); "
+            "set VIBEOS_FW_X86_64 to a code image"
+        )
+    return fw
+
+
 def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
-    bios = os.environ.get("VIBEOS_BIOS")
-    if bios == "":
-        bios = None
+    firmware = env_firmware(os.environ)
     accel_raw = os.environ.get("VIBEOS_QEMU_ACCEL")
     extra = tuple(x for x in os.environ.get("VIBEOS_QEMU_EXTRA", "").split() if x)
     timeout_raw = os.environ.get("VIBEOS_TIMEOUT")
@@ -583,7 +605,7 @@ def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
         smp=env_int("VIBEOS_SMP", DEFAULT_SMP),
         cpu=os.environ.get("VIBEOS_QEMU_CPU", DEFAULT_CPU),
         mem=os.environ.get("VIBEOS_MEM", DEFAULT_MEM),
-        bios=bios,
+        firmware=firmware,
         accel=DEFAULT_ACCEL if accel_raw is None else accel_raw,
         timeout=timeout,
         extra=extra,
@@ -839,6 +861,49 @@ def probe_firmware(
     return None
 
 
+# The per-process directory of variable-store copies; atexit removes it.
+_VARS_DIR: str | None = None
+
+
+def new_vars_copy(fw: Firmware) -> str:
+    """A fresh copy of `fw`'s variable-store template for one QEMU run, so no
+    run sees another's variables and the template stays untouched. It is the
+    only way to make one; a later reboot that must keep its variables reuses
+    the path instead of calling this again."""
+    global _VARS_DIR
+    if _VARS_DIR is None:
+        _VARS_DIR = tempfile.mkdtemp(prefix="vibeos-fw-")
+        atexit.register(remove_vars_copies)
+    fd, path = tempfile.mkstemp(prefix=f"{fw.arch}-vars-", suffix=".fd", dir=_VARS_DIR)
+    os.close(fd)
+    shutil.copyfile(fw.vars_template, path)
+    return path
+
+
+def remove_vars_copies() -> None:
+    """Remove this process's variable-store copies."""
+    global _VARS_DIR
+    if _VARS_DIR is not None:
+        shutil.rmtree(_VARS_DIR, ignore_errors=True)
+        _VARS_DIR = None
+
+
+def _drive_file(path: str) -> str:
+    """`path` as a `-drive file=` value: QEMU splits options at a comma, and
+    reads a doubled one as a literal comma."""
+    return path.replace(",", ",,")
+
+
+def pflash_args(fw: Firmware, vars_copy: str) -> list[str]:
+    """The firmware code read-only on pflash unit 0 and a variable store on
+    unit 1, never `-bios`, which refuses a code image whose size is not a
+    multiple of 64 KiB (Homebrew's `edk2-x86_64-code.fd`, ROADMAP §10.2)."""
+    return [
+        "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={_drive_file(fw.code)}",
+        "-drive", f"if=pflash,format=raw,unit=1,file={_drive_file(vars_copy)}",
+    ]
+
+
 # OVMF BDS PXEs the default e1000 if the CD isn't first/ready. slirp
 # answers DHCP; TFTP does not. Silent stall matches VIBEOS_TIMEOUT.
 # Hits the UEFI e2e second boot (COM1 is an open pipe; marker boot is not).
@@ -916,8 +981,8 @@ def qemu_argv(cfg: QemuConfig, monitor_sock: str | None) -> list[str]:
         argv += list(HPET_OFF_MACHINE)
     if cfg.gdb:
         argv += ["-s", "-S"]
-    if cfg.bios:
-        argv += ["-bios", cfg.bios]
+    if cfg.firmware is not None:
+        argv += pflash_args(cfg.firmware, new_vars_copy(cfg.firmware))
         argv += list(OVMF_BOOT_ARGS)
     elif cfg.boot_order:
         argv += ["-boot", f"order={cfg.boot_order}"]

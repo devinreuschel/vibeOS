@@ -389,6 +389,7 @@ number of images checked, and the trace's write and flush counts.
 | Context | Flags |
 |---------|-------|
 | e2e | `-cdrom build/vibeos.iso -m 128M -smp 2 -cpu max -no-reboot -display none -serial stdio -monitor unix:...,server=on,wait=off -accel tcg` (`harness.qemu_argv`) |
+| UEFI (`VIBEOS_BIOS=uefi`, `make test-e2e-uefi`) | as e2e plus `-drive if=pflash,format=raw,unit=0,readonly=on,file=<code>` and `-drive if=pflash,format=raw,unit=1,file=<copy>`, where `<copy>` is a fresh copy of the pair's variable-store template made for each QEMU start (`harness.new_vars_copy`, in one per-process temporary directory that exit removes), and `-boot order=d,menu=off` with `-fw_cfg` entries turning off OVMF's PXE and setup (`harness.OVMF_BOOT_ARGS`). A comma in a path is doubled. Never `-bios` |
 | `make run`, `make run-panic`, `make debug` | e2e's argv from `tests/harness/run_interactive.py` (`run`, `panic`, `debug`), which builds it with `env_config` and `harness.qemu_argv` and adds no `-monitor`: `make run` opens a display window instead of `-display none`, `make run-panic` boots `build/vibeos-panic.iso` with `-display none`, and `make debug` is `make run` plus `-s -S`. COM1 is the terminal (`-serial stdio`), and the launcher ignores `SIGINT` while QEMU runs |
 | ktest | as e2e plus `-device isa-debug-exit,iobase=0xf4,iosize=0x04`, `-device e1000e`, `-device edu` (planned, ROADMAP §11.7: `-device edu,dma_mask=0xFFFFFFFF` on both architectures), `-device virtio-rng-pci,disable-legacy=on`, virtio-blk (`-drive file=…,if=none,id=vibehd,format=raw,cache=writeback,discard=unmap` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>`). Extra NICs/edu/virtio are ktest-only; e2e stays the default `pc` set (`pci: 6 devices`). After a green first boot the harness reboots the same disk and requires `vibeOS: persist: intact`. |
 | vibefs crash | as e2e plus `-boot order=d` and the volatile-cache device: `-drive file.driver=nbd,file.server.type=unix,file.server.path=<sock>,format=raw,if=none,id=vibehd,cache=<writeback\|none\|writethrough>` + `-device virtio-blk-pci,drive=vibehd,disable-legacy=on,num-queues=<smp>,write-cache=on` (`harness.virtio_blk_args(..., nbd=True)`). QEMU 8.2 accepts the `file.driver=nbd` form; `cache=unsafe` is refused, since it drops flushes |
@@ -415,7 +416,9 @@ sets none of them: `make run`, `make run-panic` and `make debug` honour the same
 | `VIBEOS_SMP` | `2` | all drivers; `run_interactive` |
 | `VIBEOS_QEMU_CPU` | `max` | all drivers; `run_interactive` |
 | `VIBEOS_MEM` | `128M` | all drivers; `run_interactive` |
-| `VIBEOS_BIOS` | unset (SeaBIOS) | all drivers; `run_interactive` |
+| `VIBEOS_BIOS` | unset or `seabios`: SeaBIOS; `uefi`: the x86_64 firmware pair the probe finds, on pflash; anything else fails and names `VIBEOS_FW_X86_64` | all drivers; `run_interactive` |
+| `VIBEOS_FW_X86_64` | probed (the firmware table below) | all drivers and `run_interactive` under `VIBEOS_BIOS=uefi`; `make test-e2e-uefi`; `setup.sh` |
+| `VIBEOS_FW_AARCH64` | probed (the firmware table below) | `run_interactive.py firmware aarch64` and `setup.sh`; planned (ROADMAP §11.7): the aarch64 QEMU line |
 | `VIBEOS_QEMU_ACCEL` | `tcg` (empty omits `-accel`) | all drivers; `run_interactive` |
 | `VIBEOS_TIMEOUT` | `60` e2e/ps2, `90` ktest/crash; planned (ROADMAP §10.2): the §8.2 boot allowance, which bounds only the stretches of a boot in which no test runs | all drivers; `run_interactive` only when set |
 | `VIBEOS_QEMU_EXTRA` | empty | all drivers; `run_interactive` |
@@ -434,11 +437,33 @@ sets none of them: `make run`, `make run-panic` and `make debug` honour the same
 | `VIBEOS_PREBUILT` | unset | the Makefile: `1` makes `make test-*` use the files `make prebuilt` packed (`build/prebuilt.tar`, unpacked in place) and build nothing, as a CI tier job does (§8.6) |
 | `VIBEOS_QEMU_VERSION` | unset; the QEMU version a CI job pins | `qemu_argv`, only under `CI` on Linux: it fails before the first boot when `qemu-system-x86_64 --version` differs, or when the variable is unset (§8.6, Runners) |
 
-`VIBEOS_BIOS` reaches QEMU as `-bios`, which accepts only an image whose size is a multiple of
-64 KiB. apt's combined `/usr/share/ovmf/OVMF.fd`, the Makefile's `OVMF` default and the one CI uses,
-boots. Homebrew's code-only `edk2-x86_64-code.fd` is refused and needs `-drive if=pflash` instead.
-`make test-e2e-uefi` prints a skip message when `OVMF` does not exist and then runs the harness
-anyway, because the check and the run are separate recipe lines (ROADMAP §10.2, F079).
+UEFI firmware is found by one probe, `harness.probe_firmware(arch)`, which reads one table of
+(code image, variable-store template) pairs per architecture, `harness.FIRMWARE_TABLE`, in this
+order (ROADMAP §10.2, I1, F079):
+
+| Architecture | Code image | Variable-store template | Directories |
+|--------------|------------|-------------------------|-------------|
+| x86_64 | `OVMF_CODE_4M.fd` | `OVMF_VARS_4M.fd` | `/usr/share/OVMF` (Ubuntu's `ovmf`) |
+| x86_64 | `edk2-x86_64-code.fd` | `edk2-i386-vars.fd` | `<prefix>/share/qemu` (Homebrew's `qemu`) |
+| aarch64 | `AAVMF_CODE.fd` | `AAVMF_VARS.fd` | `/usr/share/AAVMF` (Ubuntu's `qemu-efi-aarch64`) |
+| aarch64 | `edk2-aarch64-code.fd` | `edk2-arm-vars.fd` | `<prefix>/share/qemu` (Homebrew's `qemu`) |
+
+Homebrew's `<prefix>` is `$HOMEBREW_PREFIX` when set, then `/opt/homebrew`, then `/usr/local`.
+Homebrew ships no vars file named for either 64-bit architecture, so its 32-bit ones pair with the
+64-bit code. The first row whose code image exists decides: when its template is missing the probe
+fails and names both paths, and never falls through to a later row. `VIBEOS_FW_X86_64` and
+`VIBEOS_FW_AARCH64` override the probe with a code image, whose template is its row's in the same
+directory; a missing file, or an image no row of that architecture names, fails. Secure-boot builds
+need SMM and `q35`, so the table leaves them out. The code image boots read-only from pflash, so a
+code-only image boots whatever its size (Homebrew's `edk2-x86_64-code.fd` is 0x37C000 bytes, which
+`-bios` refuses because it is no multiple of 64 KiB).
+
+`python3 tests/harness/run_interactive.py firmware <arch>` prints the pair and exits 0, exits 1 and
+names the directories it searched when none is installed, and exits 2 on a probe error; `setup.sh`
+reports it for both architectures. `make test-e2e-uefi` runs it and the harness in one shell line:
+0 runs the boot contract with `VIBEOS_BIOS=uefi` and passes its status on, 1 prints
+`test-e2e-uefi: SKIP: …` and exits 0, or prints `test-e2e-uefi: FAIL: …` and fails when `CI` is
+set, and 2 fails.
 
 `make debug` builds the production ISO and starts it as `make run` does, with `-s -S`: QEMU opens a
 gdb stub on TCP port 1234 (every interface, as `-s` does) and holds the CPUs until gdb continues.

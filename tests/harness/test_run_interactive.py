@@ -118,10 +118,21 @@ class TestInteractiveLauncher(unittest.TestCase):
                 self.assertEqual(_opt(argv, "-accel"), "kvm")
                 self.assertEqual(argv[-2:], ["-nic", "none"])
 
-    def test_bios_reaches_argv(self) -> None:
-        with overlay_env({"VIBEOS_BIOS": "/fw/OVMF.fd"}, clear=True):
-            argv = run_interactive.interactive_argv("run")
-        self.assertEqual(_opt(argv, "-bios"), "/fw/OVMF.fd")
+    def test_uefi_reaches_argv(self) -> None:
+        from tests.harness.harness import remove_vars_copies
+
+        with tempfile.TemporaryDirectory() as d:
+            code = Path(d, "OVMF_CODE_4M.fd")
+            code.write_bytes(b"c")
+            Path(d, "OVMF_VARS_4M.fd").write_bytes(b"v")
+            env = {"VIBEOS_BIOS": "uefi", "VIBEOS_FW_X86_64": str(code)}
+            for mode in run_interactive.MODES:
+                with self.subTest(mode=mode), overlay_env(env, clear=True):
+                    argv = run_interactive.interactive_argv(mode)
+                    drive = f"if=pflash,format=raw,unit=0,readonly=on,file={code}"
+                    self.assertEqual(_opt(argv, "-drive"), drive)
+                    self.assertIn("-boot", argv)
+            remove_vars_copies()
 
     def test_empty_accel_omits_accel(self) -> None:
         for mode in run_interactive.MODES:
@@ -243,6 +254,113 @@ class TestDebugTarget(unittest.TestCase):
         self.assertEqual(lines[-1], f"target remote localhost:{run_interactive.GDB_PORT}")
         self.assertLess(lines.index(f"source {run_interactive.GDB_SYMBOLS}"), len(lines) - 1)
         self.assertIn("set architecture i386:x86-64", lines)
+
+
+STUB_PYTHON = """#!/bin/sh
+# python3 for TestE2eUefiRecipe: fakes the probe's exit code and records a
+# run_e2e.py call; every other call goes to the real interpreter.
+case "$1" in
+tests/harness/run_interactive.py)
+    if [ "$2" = firmware ]; then
+        echo "probe $3" >> "$STUB_LOG"
+        exit "$STUB_PROBE"
+    fi ;;
+tests/harness/run_e2e.py)
+    echo "run_e2e tier=$VIBEOS_TIER iso=$VIBEOS_ISO bios=$VIBEOS_BIOS" >> "$STUB_LOG"
+    exit "$STUB_E2E" ;;
+esac
+exec "$REAL_PYTHON" "$@"
+"""
+
+
+class TestE2eUefiRecipe(unittest.TestCase):
+    """`make test-e2e-uefi` probes for the firmware and runs the harness in one
+    shell line: 0 runs it, 1 skips (fails under CI), 2 fails. The real
+    recipe, through `make`, with a stub python3 first on PATH and the ISO
+    prerequisite marked old (`-o`), so nothing is built."""
+
+    def setUp(self) -> None:
+        import sys
+
+        self._tmp = tempfile.TemporaryDirectory()
+        d = self._tmp.name
+        stub = Path(d, "python3")
+        stub.write_text(STUB_PYTHON, encoding="utf-8")
+        stub.chmod(0o755)
+        self.log = Path(d, "log")
+        self.env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("MAKEFLAGS", "MFLAGS", "MAKELEVEL", "CI", "VIBEOS_PREBUILT")
+            and not k.startswith("VIBEOS_")
+        }
+        self.env.update(
+            PATH=f"{d}{os.pathsep}{os.environ.get('PATH', '')}",
+            STUB_LOG=str(self.log),
+            REAL_PYTHON=sys.executable,
+        )
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def make(self, probe: int, e2e: int = 0, ci: str = "") -> tuple[int, str, list[str]]:
+        env = dict(self.env, STUB_PROBE=str(probe), STUB_E2E=str(e2e))
+        if ci:
+            env["CI"] = ci
+        self.log.write_text("", encoding="utf-8")
+        r = subprocess.run(
+            ["make", "--no-print-directory", "-o", "build/vibeos.iso", "test-e2e-uefi"],
+            cwd=ROOT, env=env, capture_output=True, text=True, check=False, timeout=120,
+        )
+        calls = self.log.read_text(encoding="utf-8").splitlines()
+        return r.returncode, r.stdout + r.stderr, calls
+
+    def test_found_runs_the_harness(self) -> None:
+        rc, out, calls = self.make(0)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(
+            calls,
+            ["probe x86_64", "run_e2e tier=test-e2e-uefi iso=build/vibeos.iso bios=uefi"],
+        )
+
+    def test_harness_status_passes_through(self) -> None:
+        rc, out, calls = self.make(0, e2e=3)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("Error 3", out)
+        self.assertEqual(len(calls), 2)
+
+    def test_none_installed_skips_outside_ci(self) -> None:
+        rc, out, calls = self.make(1)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("test-e2e-uefi: SKIP:", out)
+        self.assertEqual(calls, ["probe x86_64"])
+
+    def test_none_installed_fails_in_ci(self) -> None:
+        rc, out, calls = self.make(1, ci="true")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("test-e2e-uefi: FAIL:", out)
+        self.assertIn("Error 1", out)
+        self.assertEqual(calls, ["probe x86_64"])
+
+    def test_probe_error_fails(self) -> None:
+        for ci in ("", "true"):
+            with self.subTest(ci=ci):
+                rc, out, calls = self.make(2, ci=ci)
+                self.assertNotEqual(rc, 0)
+                self.assertIn("Error 2", out)
+                self.assertEqual(calls, ["probe x86_64"])
+
+    def test_help_line(self) -> None:
+        env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MFLAGS", "MAKELEVEL")}
+        out = subprocess.run(
+            ["make", "--no-print-directory", "help"],
+            cwd=ROOT, env=env, capture_output=True, text=True, check=True,
+        ).stdout
+        line = next(ln for ln in out.splitlines() if ln.split()[:1] == ["test-e2e-uefi"])
+        self.assertIn("probe", line)
+        self.assertIn("pflash", line)
+        self.assertIn("skip", line)
+        self.assertIn("CI", line)
 
 
 class TestFirmwareCli(unittest.TestCase):

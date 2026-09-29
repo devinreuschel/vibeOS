@@ -153,7 +153,7 @@ help:
 	  '  test-unit             vibeos-core host tests (any host triple)' \
 	  '  test-harness          python unit tests for the harness' \
 	  '  test-e2e              boot contract on the production ISO' \
-	  '  test-e2e-uefi         same, OVMF (prints a skip, then fails, if missing)' \
+	  '  test-e2e-uefi         same, UEFI firmware from the probe on pflash; none installed: skip (fail under CI)' \
 	  '  test-e2e-panic        panic-test dump contract' \
 	  '  test-e2e-gp           #GP dump+halt contract' \
 	  '  test-e2e-mce          injected #MC dump+halt contract' \
@@ -364,14 +364,23 @@ test-e2e: $(ISO) $(MKFS_VIBEFS)
 test-ps2: $(ISO)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) python3 tests/harness/run_ps2.py
 
-# UEFI path via OVMF. Skipped if OVMF is not installed.
-OVMF ?= /usr/share/ovmf/OVMF.fd
+# The boot contract under UEFI: the firmware probe (harness.FIRMWARE_TABLE,
+# VIBEOS_FW_X86_64) finds a code image and its variable-store template, which
+# the harness boots from pflash. One shell line, so the probe's answer decides
+# the run: 0 runs the harness and passes its status on; 1 (none installed)
+# prints a skip and exits 0, or fails when CI is set; 2 (a probe error) fails.
 test-e2e-uefi: $(ISO)
-	@if [ ! -f "$(OVMF)" ]; then \
-	    echo "test-e2e-uefi: OVMF not found at $(OVMF); skipping"; \
-	    exit 0; \
-	fi
-	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) VIBEOS_BIOS=$(OVMF) python3 tests/harness/run_e2e.py
+	@python3 tests/harness/run_interactive.py firmware x86_64; rc=$$?; \
+	case $$rc in \
+	    0) VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) VIBEOS_BIOS=uefi python3 tests/harness/run_e2e.py ;; \
+	    1) if [ -n "$$CI" ]; then \
+	           echo "test-e2e-uefi: FAIL: no x86_64 UEFI firmware installed, and CI is set" >&2; \
+	           exit 1; \
+	       fi; \
+	       echo "test-e2e-uefi: SKIP: no x86_64 UEFI firmware installed (apt: ovmf; Homebrew: qemu; or set VIBEOS_FW_X86_64)"; \
+	       exit 0 ;; \
+	    *) exit 2 ;; \
+	esac
 
 test-e2e-panic: $(ISO_PANIC)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_PANIC) VIBEOS_EXPECT_PANIC=1 python3 tests/harness/run_e2e.py
@@ -420,7 +429,7 @@ gate:
 	@test -n "$(PHASE)" || { echo "gate: set PHASE=N" >&2; exit 2; }
 	python3 scripts/gate.py --phase "$(PHASE)" $(if $(filter 1,$(RECORD)),--record) $(if $(COMMIT),--commit "$(COMMIT)")
 
-# Keeps build/results/ and a macOS build/OVMF.fd.
+# Keeps build/results/.
 clean:
 	rm -rf build/kernels build/iso_root_* $(ISOS) $(addsuffix .xorriso-version,$(ISOS)) \
 	    $(INITRD) \
