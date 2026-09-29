@@ -31,6 +31,7 @@ pub mod acpi;
 pub mod arch;
 pub mod atomic;
 pub mod block;
+pub mod boot;
 // Kernel `mod cell` in main.rs. Host tests only: production vibeos-core
 // has no InterruptGuard / per_cpu_init.
 #[cfg(test)]

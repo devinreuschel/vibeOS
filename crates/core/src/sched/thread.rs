@@ -6,7 +6,7 @@
 
 use core::mem::{offset_of, size_of};
 
-use crate::atomic::AtomicBool;
+use crate::atomic::{AtomicBool, AtomicU32};
 use crate::paging::{PAGE_SIZE_4K, VirtAddr};
 use crate::pmm::Frames;
 use crate::time::Instant;
@@ -221,6 +221,12 @@ pub struct Tcb {
     pub syscall_count: u64,
     /// 0 = kernel thread. Process pid otherwise.
     pub pid: u32,
+    /// Nonzero while this thread is a no-reclaim thread, which releases no
+    /// counted object in place (DESIGN §2.11 rule 6): the threaded-IRQ
+    /// bottom half for life, and a workqueue worker while it runs a
+    /// softirq-equivalent item (`sync_init::no_reclaim`). Atomic, because
+    /// `Sched::get_mut` builds `&mut Tcb` for threads running elsewhere.
+    pub no_reclaim: AtomicU32,
 }
 
 /// Callee-saved GPRs, rflags, rsp, return address. No XMM: soft-float.
