@@ -98,13 +98,44 @@ pub(in crate::sched) static REQUEUES: AtomicU64 = AtomicU64::new(0);
 pub(in crate::sched) static ARRIVED: [AtomicBool; MAX_THREADS] =
     [const { AtomicBool::new(false) }; MAX_THREADS];
 
-/// Let `id`, spawned pinned and not yet run, run on any CPU: a thread
-/// the requeue hook may move, queued where it was spawned.
-pub fn unpin(id: ThreadId) {
-    super::with_sched(|s| {
-        if let Some(t) = s.get_mut(id) {
-            t.affinity = vibeos::thread::CpuAffinity::Any;
+/// A `CpuAffinity::Any` kernel thread, a thread the requeue hook may
+/// move, that does not run until [`queue_here`] queues it on a CPU. It
+/// waits `Blocked` on no queue, with no deadline, so a stale run-queue
+/// entry for its slot cannot run it (`thread_init::runnable_on`). Its
+/// entry starts at `irq_nest` 1, IF off, on the CPU that first runs it:
+/// no tick or IPI can switch it off, and the hook move it on, first.
+pub fn spawn_parked_any(
+    name: &'static str,
+    entry: fn(),
+) -> Result<super::ThreadHandle, super::SpawnError> {
+    let h = super::spawn_inner(
+        name,
+        entry,
+        CpuAffinity::Any,
+        false,
+        1,
+        0,
+        0,
+        vibeos::kva::DEFAULT_STACK_PAGES,
+    )?;
+    with_sched(|s| {
+        if let Some(t) = s.get_mut(h.id()) {
+            t.state = ThreadState::Blocked { wq: 0 };
         }
+    });
+    Ok(h)
+}
+
+/// Make [`spawn_parked_any`]'s thread `id` Ready on this CPU's run queue.
+pub fn queue_here(id: ThreadId) {
+    let me = super::current_cpu();
+    with_sched(|s| {
+        let Some(t) = s.get_mut(id) else {
+            return;
+        };
+        t.state = ThreadState::Ready;
+        t.cpu = me;
+        s.place(me, id);
     });
 }
 
