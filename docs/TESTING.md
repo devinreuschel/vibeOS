@@ -179,47 +179,17 @@ something two subsystems away breaks.
 
 ### Marker contract
 
-This is the full contract once the kernel is complete through the console phase. It grows one phase at
-a time: a phase adds its markers to the harness in the same commit that emits them, and nothing is ever
-removed silently. The executable contract is `boot_contract_markers()` in `tests/harness/harness.py`;
-the list below gives its order, the paragraphs after it add the lines that depend on the machine (the
-calibration source, the LAPIC timer mode, the per-AP pairs, and the partition children), and the
-`_start` table in [section 3.3](BOOT.md#33-_start-order) says why each step sits where it does. Every line in
-it is the kernel's except `shell ready`, which `/bin/sh` prints in the production ISO. The harness
-matches the kernel's lines only when framed (§2.6), and a line a user program prints (`shell ready`,
-the ROADMAP §10.5 `utest_*` lines, `user: tests begin`, `ok` and `fail`, `user: dup ok`, the `init:`
-lines, and the console-input replies) only when unframed. `Marker.source` says which a marker is;
-until the registry below gives each line its source, `frame.USER_PREFIXES` lists the user lines.
-
-Planned (ROADMAP §10.2): one registry, `tests/contract/markers.toml`, holds every line the harness
-knows (contract markers, diagnostics, failure lines and halt reasons, and the ktest and utest
-protocol), each with its architecture, the program that prints it, and the configurations it holds in.
-The harness builds this contract and the failing-fast list from it, `scripts/check_markers.py` fails on
-a `marker!` line with no row, and this section then keeps the rules and links the file instead of
-listing lines.
-
-```
-vibeOS: serial online
-vibeOS: limine: rev 3 ok
-vibeOS: pmm: <n> free 4KiB frames
-vibeOS: paging: cr3 ok
-vibeOS: paging: mmio uc
-vibeOS: heap ok
-vibeOS: kva: ready
-vibeOS: gdt ok
-vibeOS: pic: remapped
-vibeOS: idt ok
-vibeOS: per_cpu: bsp ready
-vibeOS: acpi: xsdt <n> tables
-vibeOS: time: tsc <n>/ms
-vibeOS: sched: cpu0 ready
-vibeOS: irq: enabled
-vibeOS: smp: done
-vibeOS: console ok
-vibeOS: pci: <n> devices
-vibeOS: block: <name> <n> sectors
-vibeOS: shell ready
-```
+The contract is the `contract` rows of the marker registry,
+[`tests/contract/markers.toml`](../tests/contract/markers.toml) (ROADMAP §10.2), in their `order`:
+`boot_contract_markers()` in `tests/harness/harness.py` builds each configuration's list from the rows
+whose `when` holds in it, and the paragraphs below give the rules the rows encode (the calibration
+source, the LAPIC timer mode, the per-AP pairs, and the partition children). The `_start` table in
+[section 3.3](BOOT.md#33-_start-order) says why each step sits where it does. The contract grows one
+phase at a time: a phase adds its rows in the same commit that prints the lines, and nothing is ever
+removed silently. Every contract line is the kernel's except `shell ready`, which `/bin/sh` prints in
+the production ISO. The harness matches a row only on its `source`'s side of the frame (§2.6): the
+kernel's lines when framed, and a line a user program prints (`shell ready`, `user: tests begin`, `ok`
+and `fail`, `user: dup ok`, the `init:` lines, and the console-input replies) only when unframed.
 
 `vibeOS: serial online` is the kernel's first serial line: `run_e2e.py` fails when a kernel line (one
 starting `vibeOS:`) comes before it; Limine's or the firmware's output may precede it.
@@ -268,18 +238,9 @@ With `-smp N`, additionally:
 - `vibeOS: time: lapic_timer ok (<mode>)` naming the selected timer path
   (`tsc-deadline`, `periodic`, or `pit`) rather than inferring it
 
-e2e also reads the boot log's memory diagnostics, which print before `sched: cpu0 ready`, in every
-production mode (default, `EXPECT_PIT`, highmem, and UEFI; `check_meminfo` in `run_e2e.py`):
-
-```
-vibeOS: pmm: <n> free 4KiB frames
-vibeOS: pmm: <n> total, largest order <n>
-vibeOS: meminfo: total <n> frames, free <n>, used <n>, largest order <n>
-vibeOS: meminfo: leaked <n> frames
-vibeOS: meminfo: heap used <n> B / capacity <n> B
-```
-
-Each `meminfo:` line (told apart by its text up to the first digit) and each `pmm:` line appears
+e2e also reads the boot log's memory diagnostics, the registry's `pmm:` and `meminfo:` rows, which
+print before `sched: cpu0 ready`, in every production mode (default, `EXPECT_PIT`, highmem, and UEFI;
+`check_meminfo` in `run_e2e.py`). Each `meminfo:` line (told apart by its text up to the first digit) and each `pmm:` line appears
 once; the `meminfo:` frame total equals the `pmm: <n> total` line's; free is at most the
 `pmm: <n> free 4KiB frames` count; used is total minus free; and heap use is at most heap capacity.
 
@@ -299,22 +260,22 @@ boots with `maxcpus=1` and so prints no `smp: ap online` line, and its list ends
 
 ### Failing fast
 
-Scan for these (`PANIC_SIGNATURES` in `tests/harness/harness.py`) and, in a run that expects no
-panic, fail immediately with the captured line rather than waiting out the timeout:
-
-```
-panicked at   vibeOS: panic:   #PF   #GP   #UD   #DF   double fault   stack overflow
-```
+Scan for the `failure` rows of [`tests/contract/markers.toml`](../tests/contract/markers.toml) and, in
+a run that expects no panic, fail immediately with the captured line rather than waiting out the
+timeout. A row whose placeholders all follow its last literal fails a line that holds its text up to
+the first placeholder (`PANIC_SIGNATURES` in `tests/harness/harness.py`, and `frame.USER_FAILURES`
+for the `user` rows); any other fails a line its pattern matches (`FAILURE_PATTERNS`). The rows are
+the panic signatures (`panicked at`, `vibeOS: panic:`, the exception mnemonics, `double fault`,
+`stack overflow`), the lines of a dump, and the halt reasons.
 
 Match the exception mnemonics, not the phrase "page fault". Shell help text and log messages contain
 English words, and a substring match on prose produces false failures that erode trust in the suite.
 
-Planned (ROADMAP §10.7, §12.5, §25.5): a registered failure line reports a failure the kernel
-survived, so a run that shows one would otherwise pass. The blocked-thread sweep's
-`vibeOS: sched: overdue tid <id>` (ROADMAP §10.7) is the first; `vibeOS: block: <dev> timeout` and
-`vibeOS: block: <dev> reset` (ROADMAP §12.5) and ROADMAP §25.5's soft lockup, hard lockup, and
-hung-thread reports follow. A test that provokes one on purpose declares it; in any
-other run it fails the run, since a recovery no test expected is a bug a timeout hides, such as a
+A registered failure line can also report a failure the kernel survived, so a run that shows one
+would otherwise pass. The blocked-thread sweep's `vibeOS: sched: overdue tid <id>` (ROADMAP §10.7),
+and `vibeOS: block: <dev> timeout` and `vibeOS: block: <dev> reset` (ROADMAP §12.5), are such rows;
+planned (ROADMAP §25.5), the soft lockup, hard lockup, and hung-thread reports follow. A test that
+provokes one on purpose declares it; in any other run it fails the run, since a recovery no test expected is a bug a timeout hides, such as a
 lost kick ([section 10.4](BLOCK.md#104-virtio-blk)) that shows only as a 30 s pause.
 
 User programs print these strings too: the ROADMAP §10.5 runtime reports a panic as `panicked at` on
