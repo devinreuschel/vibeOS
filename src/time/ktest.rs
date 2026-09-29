@@ -1,6 +1,8 @@
 //! In-guest tests for time (kernel_tests only). Rows: [`TESTS`].
 
-use vibeos::time::{CalibSource, Instant, calib_band, calib_in_band, next_deadline};
+use vibeos::time::{
+    CalibSource, Instant, TICK_NS, calib_band, calib_in_band, next_deadline, unix_from_civil,
+};
 
 use crate::acpi_init;
 use crate::ktest::{Outcome, Test, test};
@@ -141,10 +143,22 @@ pub(crate) fn test_uptime_sides() -> Outcome {
     }
 }
 
+/// Seconds in a mean Gregorian year, to name the year a bad RTC reads.
+const MEAN_YEAR_S: u64 = 31_556_952;
+
 pub(crate) fn test_rtc_offset() -> Outcome {
     let Some(a) = time_init::unix_time_s() else {
         return Outcome::Skip("rtc unread");
     };
+    let lo = unix_from_civil(2024, 1, 1, 0, 0, 0);
+    let hi = unix_from_civil(2100, 1, 1, 0, 0, 0);
+    let (Some(lo), Some(hi)) = (lo, hi) else {
+        return Outcome::Fail("unix_from_civil");
+    };
+    if !(lo..hi).contains(&a) {
+        let year = 1970 + a / MEAN_YEAR_S;
+        return crate::fail_fmt!("rtc reads year {year} (unix {a}), not 2024 to 2099");
+    }
     time_init::busy_wait_ms(20);
     let Some(b) = time_init::unix_time_s() else {
         return Outcome::Fail("rtc lost");
@@ -152,9 +166,14 @@ pub(crate) fn test_rtc_offset() -> Outcome {
     if b < a {
         return Outcome::Fail("wall clock went backwards");
     }
-    let _ = deadline_after(Instant {
-        ns: time_init::now_ns(),
-    });
+    let now = time_init::now_ns();
+    let d = deadline_after(Instant { ns: now });
+    if d.ns <= now || d.ns - now > TICK_NS {
+        return crate::fail_fmt!(
+            "deadline_after({now}) = {}, want (now, now + TICK_NS]",
+            d.ns
+        );
+    }
     Outcome::Ok
 }
 
