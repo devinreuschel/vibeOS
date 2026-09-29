@@ -50,16 +50,17 @@ pub fn bind_all() {
         pci_init::enable_mem_master(dev.addr);
         match drv.probe(dev) {
             Ok(inst) => {
-                // A device bound meanwhile keeps its driver; `inst` is
-                // dropped after the lock.
-                let mut spare = inst;
-                {
-                    let mut g = REG.lock();
-                    if g.bound(dev).is_none() && g.bind(dev, drv.name(), spare.take()) {
-                        continue;
-                    }
+                let mut g = REG.lock();
+                if g.bound(dev).is_none() {
+                    // An unbound device and a registered driver: it binds.
+                    g.bind(dev, drv.name(), inst);
+                } else {
+                    // Binding is serial, so this does not happen; were the
+                    // device bound meanwhile, it keeps its driver, and
+                    // `inst` is dropped with the lock dropped.
+                    drop(g);
+                    drop(inst);
                 }
-                drop(spare);
             }
             // The device stays unbound, its slot untouched.
             Err(e) => crate::klog!(
