@@ -17,6 +17,7 @@ import tests.harness.run_e2e as run_e2e
 import tests.harness.run_ktest as run_ktest
 from tests.harness import results
 from tests.harness.harness import (
+    AP_ONLINE,
     HPET_OFF_MACHINE,
     ISA_DEBUG_FAIL,
     ISA_DEBUG_PASS,
@@ -31,6 +32,7 @@ from tests.harness.harness import (
     QemuProcess,
     RunResult,
     _monitor_reply,
+    boot_contract_markers,
     check_mce_dump,
     contains_panic,
     drain_panic_tail,
@@ -227,6 +229,71 @@ class TestMarkerOrder(unittest.TestCase):
         with mock.patch("shutil.which", return_value=None):
             result, _ = check_fake(["vibeOS: serial online"], ABC_MARKERS[:1])
         self.assertEqual(result.matched, ["a"])
+
+
+def contract_log(markers: list[Marker]) -> list[str]:
+    """One synthetic serial line per marker, each matching it."""
+    return [m.substring + "".join(m.and_contains) for m in markers]
+
+
+def smp_log(n: int, *, extra_before: int = 0, extra_after: int = 0) -> list[str]:
+    """A `-smp n` contract log with extra `ap online` lines around `smp: done`."""
+    lines = contract_log(boot_contract_markers(smp=n, cpu="max", accel="tcg"))
+    i = lines.index("vibeOS: smp: done")
+    return lines[:i] + [AP_ONLINE] * extra_before + [lines[i]] + [AP_ONLINE] * extra_after + (
+        lines[i + 1 :]
+    )
+
+
+class TestSmpApCount(unittest.TestCase):
+    """`smp: done` needs exactly N-1 `ap online` lines (F141)."""
+
+    def run_smp(self, n: int, lines: list[str]) -> RunResult:
+        markers = boot_contract_markers(smp=n, cpu="max", accel="tcg")
+        return run_qemu_and_check(
+            FAKE_CFG, markers, line_source=FakeLineSource.from_lines(lines)
+        )
+
+    def test_smp2_one_line_passes(self) -> None:
+        lines = smp_log(2)
+        self.assertEqual(lines.count(AP_ONLINE), 1)
+        self.assertIn("smp_done", self.run_smp(2, lines).matched)
+
+    def test_smp2_extra_line_before_done_fails(self) -> None:
+        with self.assertRaises(HarnessError) as cm:
+            self.run_smp(2, smp_log(2, extra_before=1))
+        self.assertIn(
+            "extra 'vibeOS: smp: ap online' line (2 seen, expected exactly 1)",
+            str(cm.exception),
+        )
+
+    def test_smp2_extra_line_after_done_fails(self) -> None:
+        with self.assertRaises(HarnessError) as cm:
+            self.run_smp(2, smp_log(2, extra_after=1))
+        self.assertIn("(2 seen, expected exactly 1)", str(cm.exception))
+
+    def test_smp1_with_a_line_fails(self) -> None:
+        with self.assertRaises(HarnessError) as cm:
+            self.run_smp(1, smp_log(1, extra_before=1))
+        self.assertIn("(1 seen, expected exactly 0)", str(cm.exception))
+
+    def test_smp1_without_lines_passes(self) -> None:
+        self.assertIn("smp_done", self.run_smp(1, smp_log(1)).matched)
+
+    def test_smp4_three_lines_passes(self) -> None:
+        lines = smp_log(4)
+        self.assertEqual(lines.count(AP_ONLINE), 3)
+        self.assertIn("smp_done", self.run_smp(4, lines).matched)
+
+    def test_too_few_before_owner_fails(self) -> None:
+        markers = [
+            Marker("vibeOS: serial online", "a"),
+            Marker("vibeOS: smp: done", "smp_done", exactly_before=(AP_ONLINE, 2)),
+        ]
+        lines = ["vibeOS: serial online", AP_ONLINE, "vibeOS: smp: done"]
+        with self.assertRaises(HarnessError) as cm:
+            check_fake(lines, markers)
+        self.assertIn("before 'smp_done', expected exactly 2", str(cm.exception))
 
 
 QEMU_LOAD_ERR = "qemu-system-x86_64: -bios x.fd: could not load"

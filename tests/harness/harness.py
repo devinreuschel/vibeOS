@@ -83,11 +83,15 @@ class Marker:
     payload is runtime-generated (a decimal count, a hex address) can be
     pinned to its full `vibeOS: <subsystem>: <state>` shape without
     hard-coding the varying part. See DESIGN §2.6 / §8.3.
+
+    `exactly_before=(needle, n)`: exactly `n` lines containing `needle`
+    precede this marker, and none follows it.
     """
 
     substring: str
     name: str
     and_contains: tuple[str, ...] = ()
+    exactly_before: tuple[str, int] | None = None
 
     def matches(self, line: str) -> bool:
         if self.substring not in line:
@@ -325,8 +329,11 @@ class QemuProcess:
         self._reader = DeadlineReader(self._proc.stdout.fileno(), deadline)
         self._monitor_sock = monitor_sock
         self._mon: socket.socket | None = None
+        self._stderr: str | None = None  # set, and the files closed, at exit
 
     def next_event(self) -> tuple[str, str]:
+        if self._stderr is not None:
+            return ("eof", "")
         return self._reader.next_event()
 
     def set_deadline(self, deadline: float) -> None:
@@ -364,16 +371,19 @@ class QemuProcess:
             code = self._proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             return None
-        if self._mon is not None:
-            try:
-                self._mon.close()
-            except OSError:
-                pass
+        if self._stderr is None:
+            self._stderr = _file_text(self._err)
+            for f in (self._mon, self._err, self._proc.stdout, self._proc.stdin):
+                if f is not None:
+                    try:
+                        f.close()
+                    except OSError:
+                        pass
             self._mon = None
         return code
 
     def stderr_text(self) -> str:
-        return _file_text(self._err)
+        return self._stderr if self._stderr is not None else _file_text(self._err)
 
 
 def _file_text(f: IO[bytes]) -> str:
@@ -724,6 +734,8 @@ def run_qemu_and_check(
     marker_idx = 0
     panic_seen: str | None = None
     panic_done = False
+    exact = {m.exactly_before[0]: m.exactly_before[1] for m in markers if m.exactly_before}
+    counts = dict.fromkeys(exact, 0)
 
     try:
         while True:
@@ -754,7 +766,27 @@ def run_qemu_and_check(
                 if PANIC_DONE in line:
                     panic_done = True
 
+            # Counted before the first panic signature only, so a dump's
+            # logrec replay of earlier lines is not counted again.
+            if panic_seen is None:
+                for needle, n in exact.items():
+                    if needle in line:
+                        counts[needle] += 1
+                        if counts[needle] > n:
+                            src.kill()
+                            raise HarnessError(
+                                f"extra {needle!r} line ({counts[needle]} seen, "
+                                f"expected exactly {n}): {line}"
+                            )
+
             if marker_idx < len(markers) and markers[marker_idx].matches(line):
+                eb = markers[marker_idx].exactly_before
+                if eb is not None and counts[eb[0]] != eb[1]:
+                    src.kill()
+                    raise HarnessError(
+                        f"{counts[eb[0]]} {eb[0]!r} lines before "
+                        f"{markers[marker_idx].name!r}, expected exactly {eb[1]}"
+                    )
                 result.matched.append(markers[marker_idx].name)
                 marker_idx += 1
                 if marker_idx == len(markers) and not expect_panic:
@@ -1306,6 +1338,8 @@ def run_qemu_until_exit(
 # unlike `paging: mmio uc` it is not a claim that ports were programmed.
 # Trailing live marker is `shell ready`. Runtime-derived payload uses
 # `and_contains`.
+AP_ONLINE = "vibeOS: smp: ap online"
+
 _PHASE0_BEFORE_TIME: list[Marker] = [
     Marker("vibeOS: serial online", "serial_online"),
     Marker("vibeOS: limine: rev 3 ok", "limine_ok"),
@@ -1355,8 +1389,14 @@ def boot_contract_markers(
         after.append(
             Marker(f"vibeOS: sched: cpu{i} ready", f"sched_cpu{i}")
         )
-        after.append(Marker("vibeOS: smp: ap online", f"smp_ap_online_{i - 1}"))
-    after.append(Marker("vibeOS: smp: done", "smp_done"))
+        after.append(Marker(AP_ONLINE, f"smp_ap_online_{i - 1}"))
+    after.append(
+        Marker(
+            "vibeOS: smp: done",
+            "smp_done",
+            exactly_before=(AP_ONLINE, max(smp, 1) - 1),
+        )
+    )
     after.append(Marker("vibeOS: console ok", "console_ok"))
     after.append(
         Marker(

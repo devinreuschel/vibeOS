@@ -226,8 +226,9 @@ and fails on a panic signature in that window, or on QEMU's exit, before it quit
 With `-smp N`, additionally:
 
 - for each AP `i` in `1..N`, `vibeOS: sched: cpu<i> ready` then `vibeOS: smp: ap online`, in order,
-  before `smp: done`. The harness requires at least these `N-1` pairs and does not reject an extra
-  `ap online` line; ROADMAP §10.2 makes it count exactly `N-1` (F141)
+  before `smp: done`: exactly these `N-1` `ap online` lines, and an extra one before or after
+  `smp: done` fails (F141). The count is `smp_done`'s `exactly_before` in `boot_contract_markers`,
+  and it covers `-smp 1`, which has no pair
 - `vibeOS: sched: cpu<i> ready` for every `i` in `0..N`
 - `vibeOS: time: lapic_timer ok (<mode>)` naming the selected timer path
   (`tsc-deadline`, `periodic`, or `pit`) rather than inferring it
