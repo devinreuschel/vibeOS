@@ -17,15 +17,13 @@ use vibeos::pmm::Frames;
 use vibeos::thread::{ThreadId, ThreadState};
 use vibeos::vectors;
 
-use crate::block_init::{self, IoWaiter};
-use crate::cache_init;
+use crate::block_init::IoWaiter;
 use crate::dev_init;
 use crate::fat_init;
 use crate::file_init;
 use crate::fs_init;
 use crate::ipi_init;
 use crate::kva_init;
-use crate::part_init;
 use crate::per_cpu_init;
 use crate::pmm_init;
 use crate::sync_init::SpinMutex;
@@ -34,7 +32,9 @@ use crate::time_init;
 use crate::vibefs_init;
 use crate::virtio_blk_init;
 use crate::x86;
-use crate::{acpi, arch, boot, console, dev, irq, log, mm, proc, sched, shell, smp, sync, time};
+use crate::{
+    acpi, arch, block, boot, console, dev, irq, log, mm, proc, sched, shell, smp, sync, time,
+};
 pub(crate) mod user;
 
 const ISA_DEBUG_EXIT: u16 = 0xF4;
@@ -158,11 +158,9 @@ impl Test {
 
 pub(crate) type Suite = &'static [Test];
 
-mod p10_s04;
 mod p10_s09;
 mod p10_s11;
 mod p10_s12;
-mod p10_s13;
 
 /// Rows run in this order. A new test goes in its subsystem's ktest.rs, and its row goes after the
 /// last row whose path starts with that subsystem, or at the end if it has none (ROADMAP §10.2's T1
@@ -313,19 +311,19 @@ pub(crate) const TESTS: &[Test] = &[
     test("virtio_bind", dev::ktest::test_virtio_bind),
     test("virtio_vq", dev::ktest::test_virtio_vq),
     test("dev_random_source", dev::ktest::test_dev_random_source),
-    test("block_ramdisk_rw", test_block_ramdisk_rw),
-    test("block_concurrent", test_block_concurrent),
-    test("block_retry", test_block_retry),
+    test("block_ramdisk_rw", block::ktest::test_block_ramdisk_rw),
+    test("block_concurrent", block::ktest::test_block_concurrent),
+    test("block_retry", block::ktest::test_block_retry),
     test("block_vblk_rw", test_block_vblk_rw),
     test("block_vblk_irq", test_block_vblk_irq),
     test("block_vblk_deep", test_block_vblk_deep),
     test("block_vblk_concurrent", test_block_vblk_concurrent),
     test("block_vblk_mq", test_block_vblk_mq),
     test("block_persist", test_block_persist),
-    test("block_part_mbr", test_block_part_mbr),
-    test("block_part_gpt", test_block_part_gpt),
-    test("block_cache_hit", test_block_cache_hit),
-    test("block_cache_evict", test_block_cache_evict),
+    test("block_part_mbr", block::ktest::test_block_part_mbr),
+    test("block_part_gpt", block::ktest::test_block_part_gpt),
+    test("block_cache_hit", block::ktest::test_block_cache_hit),
+    test("block_cache_evict", block::ktest::test_block_cache_evict),
     test("vfs_walk", test_vfs_walk),
     test("pseudo_fs", test_pseudo_fs),
     test("fat_initrd", test_fat_initrd),
@@ -344,7 +342,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("msix_cpu_publish_last", irq::ktest::msix_cpu_publish_last),
     test(
         "lifetime_iowaiter_publish_last",
-        p10_s04::lifetime_iowaiter_publish_last,
+        block::ktest::lifetime_iowaiter_publish_last,
     )
     .deadline(60_000),
     test(
@@ -412,9 +410,9 @@ pub(crate) const TESTS: &[Test] = &[
     test("vfs_fat_one_inode", p10_s12::test_vfs_fat_one_inode),
     test(
         "cache_flush_waits_writeback",
-        p10_s13::cache_flush_waits_writeback,
+        block::ktest::cache_flush_waits_writeback,
     ),
-    test("block_fua_write", p10_s13::block_fua_write),
+    test("block_fua_write", block::ktest::block_fua_write),
     test(
         "ac_clear_on_exception",
         arch::ktest::test_ac_clear_on_exception,
@@ -893,217 +891,6 @@ pub(crate) fn find_edu() -> Option<(usize, Device)> {
     dev_init::find_id(0x1234, 0x11e8).or_else(|| dev_init::find_id(0x1b36, 0x11e8))
 }
 
-fn test_block_ramdisk_rw() -> Outcome {
-    if !block_init::live() {
-        return Outcome::Fail("block not live");
-    }
-    block_init::reset();
-    let d = block_init::device();
-    if d.name() != block_init::name() {
-        return Outcome::Fail("name");
-    }
-    if d.logical_block_size() != block_init::logical_block_size() {
-        return Outcome::Fail("bs");
-    }
-    if d.capacity_sectors() != block_init::capacity_sectors() {
-        return Outcome::Fail("cap");
-    }
-    if d.state() != DeviceState::Ready {
-        return Outcome::Fail("state");
-    }
-    let mut buf = [0u8; 512];
-    let mut i = 0usize;
-    while i < 512 {
-        buf[i] = (i as u8).wrapping_add(0x3C);
-        i += 1;
-    }
-    if d.write(1, &buf).is_err() {
-        return Outcome::Fail("write");
-    }
-    let mut out = [0u8; 512];
-    if d.read(1, &mut out).is_err() {
-        return Outcome::Fail("read");
-    }
-    if out != buf {
-        return Outcome::Fail("mismatch");
-    }
-    if d.flush().is_err() {
-        return Outcome::Fail("flush");
-    }
-    if d.discard(1, 1).is_err() {
-        return Outcome::Fail("discard");
-    }
-    out = [0u8; 512];
-    if d.read(1, &mut out).is_err() || out != buf {
-        return Outcome::Fail("discard clobber");
-    }
-    let mut odd = [0u8; 100];
-    match d.read(0, &mut odd) {
-        Err(BlockError::Inval) => {}
-        _ => return Outcome::Fail("unaligned"),
-    }
-    match d.write(block_init::RAM0_SECTORS, &buf) {
-        Err(BlockError::Inval) => {}
-        _ => return Outcome::Fail("past end"),
-    }
-    match d.discard(block_init::RAM0_SECTORS, 1) {
-        Err(BlockError::Inval) => {}
-        _ => return Outcome::Fail("discard past"),
-    }
-    if !crate::shell_init::has_command("blk") {
-        return Outcome::Fail("no blk");
-    }
-    if crate::shell_init::dispatch_line("blk").is_err() {
-        return Outcome::Fail("blk cmd");
-    }
-    Outcome::Ok
-}
-
-const BLK_ITERS: u32 = 60;
-const BLK_SPAN: u64 = 32;
-static BLK_WID: AtomicU32 = AtomicU32::new(0);
-static BLK_DONE: AtomicU32 = AtomicU32::new(0);
-static BLK_FAIL: AtomicU32 = AtomicU32::new(0);
-
-fn blk_worker() {
-    let id = BLK_WID.fetch_add(1, Ordering::SeqCst);
-    let base = id as u64 * BLK_SPAN;
-    let mut i = 0u32;
-    while i < BLK_ITERS {
-        let lba = base + (i as u64 % BLK_SPAN);
-        let mut buf = [0u8; 512];
-        let mut j = 0usize;
-        while j < 512 {
-            buf[j] = (id as u8).wrapping_add(i as u8).wrapping_add(j as u8);
-            j += 1;
-        }
-        if block_init::write(lba, &buf).is_err() {
-            BLK_FAIL.fetch_add(1, Ordering::SeqCst);
-            break;
-        }
-        let mut out = [0u8; 512];
-        if block_init::read(lba, &mut out).is_err() || out != buf {
-            BLK_FAIL.fetch_add(1, Ordering::SeqCst);
-            break;
-        }
-        i += 1;
-    }
-    BLK_DONE.fetch_add(1, Ordering::SeqCst);
-}
-
-static TEAR_ID: AtomicU32 = AtomicU32::new(0);
-static TEAR_DONE: AtomicU32 = AtomicU32::new(0);
-
-fn tear_worker() {
-    let id = TEAR_ID.fetch_add(1, Ordering::SeqCst);
-    let fill = if id == 0 { 0xAAu8 } else { 0x55u8 };
-    let buf = [fill; 512];
-    if block_init::write(0, &buf).is_err() {
-        BLK_FAIL.fetch_add(1, Ordering::SeqCst);
-    }
-    TEAR_DONE.fetch_add(1, Ordering::SeqCst);
-}
-
-fn test_block_concurrent() -> Outcome {
-    if !block_init::live() {
-        return Outcome::Fail("block not live");
-    }
-    block_init::reset();
-    BLK_WID.store(0, Ordering::SeqCst);
-    BLK_DONE.store(0, Ordering::SeqCst);
-    BLK_FAIL.store(0, Ordering::SeqCst);
-    let Ok(_a) = thread_init::spawn("blk-a", blk_worker) else {
-        return Outcome::Fail("spawn");
-    };
-    let Ok(_b) = thread_init::spawn("blk-b", blk_worker) else {
-        return Outcome::Fail("spawn");
-    };
-    let t0 = time_init::uptime_ms();
-    loop {
-        if BLK_DONE.load(Ordering::SeqCst) == 2 {
-            break;
-        }
-        if time_init::uptime_ms().saturating_sub(t0) > 8_000 {
-            return Outcome::Fail("rw stall");
-        }
-        thread_init::yield_now();
-    }
-    if BLK_FAIL.load(Ordering::SeqCst) != 0 {
-        return Outcome::Fail("rw corrupt");
-    }
-    TEAR_ID.store(0, Ordering::SeqCst);
-    TEAR_DONE.store(0, Ordering::SeqCst);
-    let Ok(_c) = thread_init::spawn("tear-a", tear_worker) else {
-        return Outcome::Fail("spawn");
-    };
-    let Ok(_d) = thread_init::spawn("tear-b", tear_worker) else {
-        return Outcome::Fail("spawn");
-    };
-    let t1 = time_init::uptime_ms();
-    loop {
-        if TEAR_DONE.load(Ordering::SeqCst) == 2 {
-            break;
-        }
-        if time_init::uptime_ms().saturating_sub(t1) > 8_000 {
-            return Outcome::Fail("tear stall");
-        }
-        thread_init::yield_now();
-    }
-    if BLK_FAIL.load(Ordering::SeqCst) != 0 {
-        return Outcome::Fail("tear write");
-    }
-    let mut out = [0u8; 512];
-    if block_init::read(0, &mut out).is_err() {
-        return Outcome::Fail("tear read");
-    }
-    let b0 = out[0];
-    if b0 != 0xAA && b0 != 0x55 {
-        return Outcome::Fail("tear pattern");
-    }
-    let mut i = 1usize;
-    while i < 512 {
-        if out[i] != b0 {
-            return Outcome::Fail("torn sector");
-        }
-        i += 1;
-    }
-    Outcome::Ok
-}
-
-fn test_block_retry() -> Outcome {
-    if !block_init::live() {
-        return Outcome::Fail("block not live");
-    }
-    block_init::reset();
-    let mut buf = [0x11u8; 512];
-    block_init::inject_io_fails(3);
-    if block_init::write(3, &buf).is_err() {
-        return Outcome::Fail("retry should pass");
-    }
-    let mut out = [0u8; 512];
-    if block_init::read(3, &mut out).is_err() || out != buf {
-        return Outcome::Fail("after retry");
-    }
-    block_init::inject_io_fails(4);
-    match block_init::write(4, &buf) {
-        Err(BlockError::Failed) => {}
-        _ => return Outcome::Fail("expected failed"),
-    }
-    if block_init::state() != DeviceState::Failed {
-        return Outcome::Fail("not marked failed");
-    }
-    match block_init::read(3, &mut out) {
-        Err(BlockError::Failed) => {}
-        _ => return Outcome::Fail("submit after fail"),
-    }
-    block_init::reset();
-    buf[0] = 0x22;
-    if block_init::write(3, &buf).is_err() {
-        return Outcome::Fail("reset");
-    }
-    Outcome::Ok
-}
-
 fn find_blk() -> Option<(usize, Device)> {
     dev_init::find_id(0x1af4, 0x1042).or_else(|| dev_init::find_id(0x1af4, 0x1001))
 }
@@ -1400,185 +1187,6 @@ fn test_block_persist() -> Outcome {
         return Outcome::Fail("flush");
     }
     crate::marker!("vibeOS: persist: wrote");
-    Outcome::Ok
-}
-
-fn test_block_part_mbr() -> Outcome {
-    if !part_init::live() {
-        return Outcome::Fail("parts not live");
-    }
-    let Some(i) = part_init::find_name("ram0p1") else {
-        return Outcome::Fail("no ram0p1");
-    };
-    let Some(i2) = part_init::find_name("ram0p2") else {
-        return Outcome::Fail("no ram0p2");
-    };
-    if part_init::find_name("ram0p3").is_none() {
-        return Outcome::Fail("no ram0p3");
-    }
-    let Some(d) = part_init::device(i) else {
-        return Outcome::Fail("no device");
-    };
-    if d.name() != "ram0p1" {
-        return Outcome::Fail("name");
-    }
-    if d.capacity_sectors() != 32 {
-        return Outcome::Fail("cap");
-    }
-    let mut buf = [0u8; 512];
-    buf[0] = 0xC1;
-    buf[511] = 0xC2;
-    if d.write(0, &buf).is_err() {
-        return Outcome::Fail("write");
-    }
-    let mut out = [0u8; 512];
-    if d.read(0, &mut out).is_err() || out != buf {
-        return Outcome::Fail("read");
-    }
-    match d.write(32, &buf) {
-        Err(BlockError::Inval) => {}
-        _ => return Outcome::Fail("overflow"),
-    }
-    match d.read(31, &mut [0u8; 1024]) {
-        Err(BlockError::Inval) => {}
-        _ => return Outcome::Fail("overflow 2"),
-    }
-    let Some((_, n2, _, k2)) = part_init::info(i2) else {
-        return Outcome::Fail("info p2");
-    };
-    if n2 != 24 {
-        return Outcome::Fail("logical size");
-    }
-    if part_init::type_str(k2) != "linux" {
-        return Outcome::Fail("type");
-    }
-    Outcome::Ok
-}
-
-fn test_block_part_gpt() -> Outcome {
-    if !virtio_blk_init::live() {
-        return Outcome::Skip("no virtio-blk");
-    }
-    let Some(i1) = part_init::find_name("vdap1") else {
-        return Outcome::Fail("no vdap1");
-    };
-    let Some(i2) = part_init::find_name("vdap2") else {
-        return Outcome::Fail("no vdap2");
-    };
-    let Some((_, _, _, k1)) = part_init::info(i1) else {
-        return Outcome::Fail("info p1");
-    };
-    let Some((_, n2, _, k2)) = part_init::info(i2) else {
-        return Outcome::Fail("info p2");
-    };
-    if part_init::type_str(k1) != "efi" {
-        return Outcome::Fail("efi guid");
-    }
-    if part_init::type_str(k2) != "linux" {
-        return Outcome::Fail("linux guid");
-    }
-    if n2 < 16 {
-        return Outcome::Fail("linux small");
-    }
-    let Some(d) = part_init::device(i1) else {
-        return Outcome::Fail("no d1");
-    };
-    let mut buf = [0u8; 512];
-    buf[0] = 0xE1;
-    buf[100] = 0xE2;
-    if d.write(1, &buf).is_err() {
-        return Outcome::Fail("write");
-    }
-    let mut out = [0u8; 512];
-    if d.read(1, &mut out).is_err() || out != buf {
-        return Outcome::Fail("read");
-    }
-    if d.flush().is_err() {
-        return Outcome::Fail("flush");
-    }
-    match d.write(d.capacity_sectors(), &buf) {
-        Err(BlockError::Inval) => {}
-        _ => return Outcome::Fail("gpt overflow"),
-    }
-    Outcome::Ok
-}
-
-fn test_block_cache_hit() -> Outcome {
-    if !cache_init::live() || !block_init::live() {
-        return Outcome::Fail("not live");
-    }
-    let lba = 200u64;
-    let mut buf = [0u8; 512];
-    buf[3] = 0x44;
-    if block_init::write(lba, &buf).is_err() {
-        return Outcome::Fail("seed");
-    }
-    let raw0 = block_init::io_reqs();
-    if block_init::read(lba, &mut [0u8; 512]).is_err() {
-        return Outcome::Fail("raw1");
-    }
-    if block_init::read(lba, &mut [0u8; 512]).is_err() {
-        return Outcome::Fail("raw2");
-    }
-    let raw_delta = block_init::io_reqs().saturating_sub(raw0);
-    let s0 = cache_init::stats();
-    let mut out = [0u8; 512];
-    if cache_init::read(cache_init::DEV_RAM0, lba, &mut out).is_err() {
-        return Outcome::Fail("c1");
-    }
-    if out != buf {
-        return Outcome::Fail("data");
-    }
-    let s1 = cache_init::stats();
-    if cache_init::read(cache_init::DEV_RAM0, lba, &mut out).is_err() || out != buf {
-        return Outcome::Fail("c2");
-    }
-    let s2 = cache_init::stats();
-    if s1.device_reads <= s0.device_reads {
-        return Outcome::Fail("miss reqs");
-    }
-    if s2.device_reads != s1.device_reads {
-        return Outcome::Fail("hit extra req");
-    }
-    if s2.hits <= s1.hits {
-        return Outcome::Fail("no hit");
-    }
-    if raw_delta < 2 {
-        return Outcome::Fail("raw not 2");
-    }
-    let cached = s2.device_reads.saturating_sub(s0.device_reads);
-    if cached >= raw_delta {
-        return Outcome::Fail("no reduce");
-    }
-    crate::marker!(
-        "vibeOS: cache: hits {} misses {} device {} raw {}",
-        s2.hits,
-        s2.misses,
-        s2.device_reqs(),
-        raw_delta
-    );
-    Outcome::Ok
-}
-
-fn test_block_cache_evict() -> Outcome {
-    if !cache_init::live() || !block_init::live() {
-        return Outcome::Fail("not live");
-    }
-    let s0 = cache_init::stats();
-    let mut buf = [0u8; 512];
-    let mut i = 0u64;
-    while i < 18 {
-        let lba = i * 8;
-        buf[0] = i as u8;
-        if cache_init::read(cache_init::DEV_RAM0, lba, &mut buf).is_err() {
-            return Outcome::Fail("fill");
-        }
-        i += 1;
-    }
-    let s1 = cache_init::stats();
-    if s1.evicts <= s0.evicts {
-        return Outcome::Fail("no evict");
-    }
     Outcome::Ok
 }
 
