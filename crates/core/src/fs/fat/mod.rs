@@ -15,6 +15,7 @@ mod chain;
 #[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 mod dirent;
 mod mkfs;
+#[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 mod rw;
 #[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 mod vol;
