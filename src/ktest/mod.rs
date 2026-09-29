@@ -41,7 +41,7 @@ use crate::vibefs_init;
 use crate::virtio_blk_init;
 use crate::virtio_init;
 use crate::x86;
-use crate::{acpi, arch, boot, console, irq, log, mm, proc, sched, smp, sync, time};
+use crate::{acpi, arch, boot, console, irq, log, mm, proc, sched, shell, smp, sync, time};
 pub(crate) mod user;
 
 const ISA_DEBUG_EXIT: u16 = 0xF4;
@@ -300,15 +300,15 @@ pub(crate) const TESTS: &[Test] = &[
     test("kbd_ps2_irq", console::ktest::test_kbd_ps2_irq),
     test("console_mux", console::ktest::test_console_mux),
     test("kbd_ring_drain", console::ktest::test_kbd_ring_drain),
-    test("shell_registry", test_shell_registry),
-    test("shell_dispatch", test_shell_dispatch),
-    test("shell_dmesg_level", test_shell_dmesg_level),
+    test("shell_registry", shell::ktest::test_shell_registry),
+    test("shell_dispatch", shell::ktest::test_shell_dispatch),
+    test("shell_dmesg_level", shell::ktest::test_shell_dmesg_level),
     test("pci_qemu_set", test_pci_qemu_set),
     test("pci_bar_map", test_pci_bar_map),
     test("pci_cfg_rw", test_pci_cfg_rw),
     test("pci_claim_exclusive", test_pci_claim_exclusive),
     test("pci_bind_order", test_pci_bind_order),
-    test("lspci_cmd", test_lspci_cmd),
+    test("lspci_cmd", shell::ktest::test_lspci_cmd),
     test("irq_pool", irq::ktest::test_irq_pool),
     test("irq_free_threaded", irq::ktest::test_irq_free_threaded),
     test("msix_cpu", irq::ktest::test_msix_cpu),
@@ -875,63 +875,6 @@ pub(crate) fn spin_until_ns(pred: impl Fn() -> bool, ns: u64) -> bool {
     true
 }
 
-fn test_shell_registry() -> Outcome {
-    for name in crate::shell_init::builtin_names() {
-        if !crate::shell_init::has_command(name) {
-            return Outcome::Fail("missing builtin");
-        }
-    }
-    if crate::shell_init::command_count() < 10 {
-        return Outcome::Fail("registry short");
-    }
-    if crate::shell_init::has_command("not-a-cmd") {
-        return Outcome::Fail("unknown present");
-    }
-    Outcome::Ok
-}
-
-fn test_shell_dispatch() -> Outcome {
-    if crate::shell_init::dispatch_line("echo ktest-shell-echo").is_err() {
-        return Outcome::Fail("echo");
-    }
-    if crate::shell_init::dispatch_line("").is_err() {
-        return Outcome::Fail("empty");
-    }
-    if crate::shell_init::dispatch_line("not-a-cmd").is_ok() {
-        return Outcome::Fail("unknown succeeded");
-    }
-    if crate::shell_init::dispatch_line("dmesg info").is_err() {
-        return Outcome::Fail("dmesg");
-    }
-    Outcome::Ok
-}
-
-fn test_shell_dmesg_level() -> Outcome {
-    use vibeos::log::Level;
-    let old = crate::log_init::max_level();
-    if crate::shell_init::dispatch_line("dmesg -n error").is_err() {
-        crate::log_init::set_max_level(old);
-        return Outcome::Fail("dmesg -n");
-    }
-    crate::klog!(Level::Debug, "vibeOS: ktest: shell-level-hidden");
-    if crate::log_init::contains_msg("shell-level-hidden") {
-        crate::log_init::set_max_level(old);
-        return Outcome::Fail("debug stored at error");
-    }
-    if crate::shell_init::dispatch_line("dmesg -n trace").is_err() {
-        crate::log_init::set_max_level(old);
-        return Outcome::Fail("dmesg -n trace");
-    }
-    crate::klog!(Level::Debug, "vibeOS: ktest: shell-level-visible");
-    let ok = crate::log_init::contains_msg("shell-level-visible");
-    crate::log_init::set_max_level(old);
-    if ok {
-        Outcome::Ok
-    } else {
-        Outcome::Fail("debug missing after -n trace")
-    }
-}
-
 const PCI_QEMU_IDS: &[(u16, u16)] = &[
     (0x8086, 0x1237), // 440FX
     (0x8086, 0x7000), // PIIX3 ISA
@@ -1058,44 +1001,6 @@ fn test_pci_bind_order() -> Outcome {
         Some("host-bridge") => Outcome::Ok,
         Some(_) => Outcome::Fail("wrong driver"),
         None => Outcome::Fail("unbound"),
-    }
-}
-
-static LSPCI_STACK: AtomicU32 = AtomicU32::new(0);
-/// How long [`test_lspci_cmd`] yields for its worker.
-const LSPCI_WAIT_NS: u64 = 2_000_000_000;
-
-fn lspci_stack_entry() {
-    let ok = crate::shell_init::dispatch_line("lspci").is_ok()
-        && crate::shell_init::dispatch_line("devices").is_ok();
-    LSPCI_STACK.store(if ok { 1 } else { 2 }, Ordering::SeqCst);
-}
-
-fn test_lspci_cmd() -> Outcome {
-    if !crate::shell_init::has_command("lspci") {
-        return Outcome::Fail("no lspci");
-    }
-    if !crate::shell_init::has_command("devices") {
-        return Outcome::Fail("no devices");
-    }
-    // Shell stacks are 16 KiB. lspci on _start would miss a full
-    // [Device; 64] snapshot overflowing the guard.
-    LSPCI_STACK.store(0, Ordering::SeqCst);
-    let Ok(h) = thread_init::spawn_here("lspci-stk", lspci_stack_entry) else {
-        return Outcome::Fail("spawn");
-    };
-    thread_init::switch_to(h.id());
-    // The worker runs with IF on, so a tick can hand the CPU back first.
-    let t0 = time_init::now_ns();
-    while LSPCI_STACK.load(Ordering::SeqCst) == 0
-        && time_init::now_ns().saturating_sub(t0) < LSPCI_WAIT_NS
-    {
-        thread_init::yield_now();
-    }
-    match LSPCI_STACK.load(Ordering::SeqCst) {
-        1 => Outcome::Ok,
-        2 => Outcome::Fail("lspci/devices"),
-        _ => Outcome::Fail("did not run"),
     }
 }
 
