@@ -8,7 +8,6 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use vibeos::dev::Device;
-use vibeos::fs::{FsError, InodeKind, O_CREAT, O_RDWR};
 use vibeos::lock::RANK_DEVICE;
 use vibeos::paging::PhysAddr;
 use vibeos::per_cpu::PerCpuRemote;
@@ -17,9 +16,6 @@ use vibeos::thread::{ThreadId, ThreadState};
 use vibeos::vectors;
 
 use crate::dev_init;
-use crate::fat_init;
-use crate::file_init;
-use crate::fs_init;
 use crate::ipi_init;
 use crate::kva_init;
 use crate::per_cpu_init;
@@ -27,11 +23,10 @@ use crate::pmm_init;
 use crate::sync_init::SpinMutex;
 use crate::thread_init::{self, ThreadHandle};
 use crate::time_init;
-use crate::vibefs_init;
 use crate::x86;
 use crate::{
-    acpi, arch, block, boot, console, dev, drivers, irq, log, mm, proc, sched, shell, smp, sync,
-    time,
+    acpi, arch, block, boot, console, dev, drivers, fs, irq, log, mm, proc, sched, shell, smp,
+    sync, time,
 };
 pub(crate) mod user;
 
@@ -155,10 +150,6 @@ impl Test {
 }
 
 pub(crate) type Suite = &'static [Test];
-
-mod p10_s09;
-mod p10_s11;
-mod p10_s12;
 
 /// Rows run in this order. A new test goes in its subsystem's ktest.rs, and its row goes after the
 /// last row whose path starts with that subsystem, or at the end if it has none (ROADMAP §10.2's T1
@@ -325,10 +316,10 @@ pub(crate) const TESTS: &[Test] = &[
     test("block_part_gpt", block::ktest::test_block_part_gpt),
     test("block_cache_hit", block::ktest::test_block_cache_hit),
     test("block_cache_evict", block::ktest::test_block_cache_evict),
-    test("vfs_walk", test_vfs_walk),
-    test("pseudo_fs", test_pseudo_fs),
-    test("fat_initrd", test_fat_initrd),
-    test("vibefs", test_vibefs),
+    test("vfs_walk", fs::ktest::test_vfs_walk),
+    test("pseudo_fs", fs::ktest::test_pseudo_fs),
+    test("fat_initrd", fs::ktest::test_fat_initrd),
+    test("vibefs", fs::ktest::test_vibefs),
     test("ktest_rows", sched::ktest::test_ktest_rows),
     test("ktest_fail_fmt", sched::ktest::test_ktest_fail_fmt),
     test("ktest_helpers", sched::ktest::test_ktest_helpers),
@@ -378,37 +369,40 @@ pub(crate) const TESTS: &[Test] = &[
         sched::ktest::lifetime_dead_slot_on_cpu,
     )
     .deadline(180_000),
-    test("file_table_fork_churn", p10_s09::test_file_table_fork_churn),
+    test(
+        "file_table_fork_churn",
+        fs::ktest::test_file_table_fork_churn,
+    ),
     test(
         "file_table_stale_writeback_ebadf",
-        p10_s09::test_file_table_stale_writeback_ebadf,
+        fs::ktest::test_file_table_stale_writeback_ebadf,
     ),
     test(
         "open_creat_exists_opens",
-        p10_s09::test_open_creat_exists_opens,
+        fs::ktest::test_open_creat_exists_opens,
     ),
     test(
         "inode_size_shared_across_opens",
-        p10_s09::test_inode_size_shared_across_opens,
+        fs::ktest::test_inode_size_shared_across_opens,
     ),
     test(
         "fat_unlinked_open_frees_at_close",
-        p10_s09::test_fat_unlinked_open_frees_at_close,
+        fs::ktest::test_fat_unlinked_open_frees_at_close,
     ),
-    test("vibefs_efbig", p10_s09::test_vibefs_efbig),
-    test("vibefs_seek_end_5gib", p10_s09::test_vibefs_seek_end_5gib),
-    test("vfs_fat_ops_initrd", p10_s11::test_vfs_fat_ops_initrd),
+    test("vibefs_efbig", fs::ktest::test_vibefs_efbig),
+    test("vibefs_seek_end_5gib", fs::ktest::test_vibefs_seek_end_5gib),
+    test("vfs_fat_ops_initrd", fs::ktest::test_vfs_fat_ops_initrd),
     test(
         "vfs_fat_unlinked_open_inode",
-        p10_s11::test_vfs_fat_unlinked_open_inode,
+        fs::ktest::test_vfs_fat_unlinked_open_inode,
     ),
     test(
         "vfs_fat_file_api_one_inode",
-        p10_s11::test_vfs_fat_file_api_one_inode,
+        fs::ktest::test_vfs_fat_file_api_one_inode,
     ),
-    test("vfs_vibe_ops_mem", p10_s11::test_vfs_vibe_ops_mem),
-    test("vfs_backends_via_ops", p10_s12::test_vfs_backends_via_ops),
-    test("vfs_fat_one_inode", p10_s12::test_vfs_fat_one_inode),
+    test("vfs_vibe_ops_mem", fs::ktest::test_vfs_vibe_ops_mem),
+    test("vfs_backends_via_ops", fs::ktest::test_vfs_backends_via_ops),
+    test("vfs_fat_one_inode", fs::ktest::test_vfs_fat_one_inode),
     test(
         "cache_flush_waits_writeback",
         block::ktest::cache_flush_waits_writeback,
@@ -890,309 +884,6 @@ pub(crate) fn bar0_va(dev: &Device) -> Option<u64> {
 pub(crate) fn find_edu() -> Option<(usize, Device)> {
     // QEMU 8.x edu is 1234:11e8 (old QEMU vendor). Later trees use 1b36:11e8.
     dev_init::find_id(0x1234, 0x11e8).or_else(|| dev_init::find_id(0x1b36, 0x11e8))
-}
-
-fn test_vfs_walk() -> Outcome {
-    if !fs_init::live() {
-        return Outcome::Fail("not live");
-    }
-    if file_init::mkdir(b"/a", 0o755).is_err() {
-        return Outcome::Fail("mkdir");
-    }
-    if file_init::creat(b"/a/f").is_err() {
-        return Outcome::Fail("creat");
-    }
-    match fid::stat_path("/a/./f") {
-        Ok(s) if s.kind == InodeKind::Reg => {}
-        _ => return Outcome::Fail("dot walk"),
-    }
-    match fid::stat_path("/a/f/../f") {
-        Ok(s) if s.kind == InodeKind::Reg => {}
-        _ => return Outcome::Fail("dotdot"),
-    }
-    if file_init::mkdir(b"/ram", 0o755).is_err() {
-        return Outcome::Fail("ramdir");
-    }
-    if file_init::mount(b"none", b"/ram", b"ramfs", false).is_err() {
-        return Outcome::Fail("mount");
-    }
-    if file_init::creat(b"/ram/f").is_err() {
-        return Outcome::Fail("rf");
-    }
-    if file_init::symlink_path(b"/ram/l", b"/ram/f").is_err() {
-        return Outcome::Fail("symlink");
-    }
-    match fid::stat_path("/ram/l") {
-        Ok(s) if s.kind == InodeKind::Reg => {}
-        _ => return Outcome::Fail("follow"),
-    }
-    if file_init::symlink_path(b"/ram/loop", b"/ram/loop").is_err() {
-        return Outcome::Fail("loopc");
-    }
-    match fid::stat_path("/ram/loop") {
-        Err(FsError::Loop) => {}
-        _ => return Outcome::Fail("noloop"),
-    }
-    match fid::stat_path("/ram/..") {
-        Ok(s) if s.kind == InodeKind::Dir => {}
-        _ => return Outcome::Fail("cross"),
-    }
-    Outcome::Ok
-}
-
-fn dir_has(path: &str, want: &[u8]) -> bool {
-    let flags = vibeos::fs::OpenFlags::from_bits(vibeos::fs::O_RDONLY | vibeos::fs::O_DIRECTORY);
-    let Ok(f) = file_init::open(path.as_bytes(), flags, 0) else {
-        return false;
-    };
-    let mut hit = false;
-    let r = file_init::readdir(&f, &mut |d| {
-        hit = d.name.eq_bytes(want);
-        !hit
-    });
-    let _ = file_init::close(f);
-    r.is_ok() && hit
-}
-
-fn test_pseudo_fs() -> Outcome {
-    if !fs_init::live() {
-        return Outcome::Fail("not live");
-    }
-    match fid::stat_path("/dev") {
-        Ok(s) if s.kind == InodeKind::Dir => {}
-        _ => return Outcome::Fail("/dev"),
-    }
-    match fid::stat_path("/proc") {
-        Ok(s) if s.kind == InodeKind::Dir => {}
-        _ => return Outcome::Fail("/proc"),
-    }
-    match fid::stat_path("/tmp") {
-        Ok(s) if s.kind == InodeKind::Dir => {}
-        _ => return Outcome::Fail("/tmp"),
-    }
-    match fid::stat_path("/sys") {
-        Ok(s) if s.kind == InodeKind::Dir => {}
-        _ => return Outcome::Fail("/sys"),
-    }
-    if !dir_has("/dev", b"null")
-        || !dir_has("/dev", b"zero")
-        || !dir_has("/dev", b"random")
-        || !dir_has("/dev", b"console")
-        || !dir_has("/dev", b"tty")
-    {
-        return Outcome::Fail("dev chars");
-    }
-    if !dir_has("/dev", b"ram0") {
-        return Outcome::Fail("dev ram0");
-    }
-    match fid::stat_path("/dev/null") {
-        Ok(s) if s.kind == InodeKind::Chr => {}
-        _ => return Outcome::Fail("null kind"),
-    }
-    let Ok(f) = fid::open("/dev/null", O_RDWR, 0) else {
-        return Outcome::Fail("open null");
-    };
-    if fid::write(f, b"x").ok() != Some(1) {
-        let _ = fid::close(f);
-        return Outcome::Fail("write null");
-    }
-    let _ = fid::close(f);
-    let Ok(z) = fid::open("/dev/zero", O_RDWR, 0) else {
-        return Outcome::Fail("open zero");
-    };
-    let mut buf = [0xFFu8; 4];
-    if fid::read(z, &mut buf).ok() != Some(4) || buf != [0u8; 4] {
-        let _ = fid::close(z);
-        return Outcome::Fail("read zero");
-    }
-    let _ = fid::close(z);
-    let Ok(r) = fid::open("/dev/random", O_RDWR, 0) else {
-        return Outcome::Fail("open rand");
-    };
-    if fid::read(r, &mut buf).ok() != Some(4) {
-        let _ = fid::close(r);
-        return Outcome::Fail("read rand");
-    }
-    let _ = fid::close(r);
-    if fid::creat("/tmp/f").is_err() {
-        return Outcome::Fail("tmp creat");
-    }
-    let Ok(t) = fid::open("/tmp/f", O_RDWR | O_CREAT, 0o644) else {
-        return Outcome::Fail("tmp open");
-    };
-    if fid::write(t, b"ok").ok() != Some(2) {
-        let _ = fid::close(t);
-        return Outcome::Fail("tmp write");
-    }
-    if fid::seek(t, 0, vibeos::fs::SEEK_SET).is_err() {
-        let _ = fid::close(t);
-        return Outcome::Fail("tmp seek");
-    }
-    buf = [0u8; 4];
-    if fid::read(t, &mut buf).ok() != Some(2) || &buf[..2] != b"ok" {
-        let _ = fid::close(t);
-        return Outcome::Fail("tmp read");
-    }
-    let _ = fid::close(t);
-    if !dir_has("/proc", b"1") || !dir_has("/proc", b"self") {
-        return Outcome::Fail("proc stubs");
-    }
-    if !dir_has("/proc/1", b"cmdline")
-        || !dir_has("/proc/1", b"status")
-        || !dir_has("/proc/1", b"maps")
-        || !dir_has("/proc/1", b"fd")
-    {
-        return Outcome::Fail("proc/1");
-    }
-    let Ok(c) = fid::open("/proc/1/cmdline", O_RDWR, 0) else {
-        return Outcome::Fail("cmdline");
-    };
-    buf = [0u8; 4];
-    match fid::read(c, &mut buf) {
-        Ok(n) if n > 0 => {}
-        _ => {
-            let _ = fid::close(c);
-            return Outcome::Fail("cmdline read");
-        }
-    }
-    let _ = fid::close(c);
-    if !dir_has("/sys", b"devices") || !dir_has("/sys", b"bus") {
-        return Outcome::Fail("sys skeleton");
-    }
-    Outcome::Ok
-}
-
-fn test_fat_initrd() -> Outcome {
-    if !fat_init::live() {
-        return Outcome::Fail("not live");
-    }
-    if fat_init::nvol() == 0 {
-        return Outcome::Fail("nvol");
-    }
-    match fid::stat_path("/hello.txt") {
-        Ok(s) if s.kind == InodeKind::Reg && s.size > 0 => {}
-        Ok(_) => return Outcome::Fail("hello meta"),
-        Err(_) => match fid::stat_path("/HELLO.TXT") {
-            Ok(s) if s.kind == InodeKind::Reg && s.size > 0 => {}
-            _ => return Outcome::Fail("hello"),
-        },
-    }
-    if file_init::mkdir(b"/kt", 0o755).is_err() {
-        return Outcome::Fail("mkdir");
-    }
-    match fid::open("/kt/w.txt", O_RDWR | O_CREAT, 0o644) {
-        Ok(fid) => {
-            if fid::write(fid, b"abc").ok() != Some(3) {
-                let _ = fid::close(fid);
-                return Outcome::Fail("write");
-            }
-            if fid::seek(fid, 0, vibeos::fs::SEEK_SET).is_err() {
-                let _ = fid::close(fid);
-                return Outcome::Fail("seek");
-            }
-            let mut buf = [0u8; 4];
-            match fid::read(fid, &mut buf) {
-                Ok(3) if &buf[..3] == b"abc" => {}
-                _ => {
-                    let _ = fid::close(fid);
-                    return Outcome::Fail("read");
-                }
-            }
-            let _ = fid::close(fid);
-        }
-        Err(_) => return Outcome::Fail("open"),
-    }
-    if file_init::truncate_path(b"/kt/w.txt", 1).is_err() {
-        return Outcome::Fail("trunc");
-    }
-    if fid::unlink_path("/kt/w.txt", false).is_err() {
-        return Outcome::Fail("unlink");
-    }
-    if file_init::symlink_path(b"/s", b"/kt").err() != Some(FsError::NotSupp) {
-        return Outcome::Fail("symlink supp");
-    }
-    if file_init::link_path(b"/hello.txt", b"/h2").err() != Some(FsError::NotSupp) {
-        return Outcome::Fail("link supp");
-    }
-    if file_init::sync_fs().is_err() {
-        return Outcome::Fail("sync");
-    }
-    Outcome::Ok
-}
-
-fn test_vibefs() -> Outcome {
-    if !vibefs_init::live() {
-        return Outcome::Fail("not live");
-    }
-    if vibefs_init::nvol() == 0 {
-        return Outcome::Fail("nvol");
-    }
-    match fid::stat_path("/vibe") {
-        Ok(s) if s.kind == InodeKind::Dir => {}
-        _ => return Outcome::Fail("mount"),
-    }
-    if file_init::mkdir(b"/vibe/d", 0o755).is_err() {
-        return Outcome::Fail("mkdir");
-    }
-    match fid::open("/vibe/d/f", O_RDWR | O_CREAT, 0o644) {
-        Ok(fid) => {
-            if fid::write(fid, b"hello").ok() != Some(5) {
-                let _ = fid::close(fid);
-                return Outcome::Fail("write");
-            }
-            if fid::seek(fid, 0, vibeos::fs::SEEK_SET).is_err() {
-                let _ = fid::close(fid);
-                return Outcome::Fail("seek");
-            }
-            let mut buf = [0u8; 8];
-            match fid::read(fid, &mut buf) {
-                Ok(5) if &buf[..5] == b"hello" => {}
-                _ => {
-                    let _ = fid::close(fid);
-                    return Outcome::Fail("read");
-                }
-            }
-            let _ = fid::close(fid);
-        }
-        Err(_) => return Outcome::Fail("open"),
-    }
-    match fid::stat_path("/vibe/d/f") {
-        Ok(s) if s.kind == InodeKind::Reg && (s.mode & 0o777) == 0o644 => {}
-        _ => return Outcome::Fail("mode"),
-    }
-    if file_init::symlink_path(b"/vibe/l", b"/vibe/d/f").is_err() {
-        return Outcome::Fail("symlink");
-    }
-    match fid::open("/vibe/big", O_RDWR | O_CREAT, 0o644) {
-        Ok(fid) => {
-            let payload = [b'x'; 200];
-            if fid::write(fid, &payload).ok() != Some(200) {
-                let _ = fid::close(fid);
-                return Outcome::Fail("extent w");
-            }
-            if fid::seek(fid, 0, vibeos::fs::SEEK_SET).is_err() {
-                let _ = fid::close(fid);
-                return Outcome::Fail("extent seek");
-            }
-            let mut out = [0u8; 200];
-            match fid::read(fid, &mut out) {
-                Ok(200) if out == payload => {}
-                _ => {
-                    let _ = fid::close(fid);
-                    return Outcome::Fail("extent r");
-                }
-            }
-            let _ = fid::close(fid);
-        }
-        Err(_) => return Outcome::Fail("extent open"),
-    }
-    if vibefs_init::snapshot(vibefs_init::VOL_MEM, b"s0").is_err() {
-        return Outcome::Fail("snap");
-    }
-    if file_init::sync_fs().is_err() {
-        return Outcome::Fail("sync");
-    }
-    Outcome::Ok
 }
 
 /// The free-frame count at a quiescent point (ROADMAP §10.2, F074): the

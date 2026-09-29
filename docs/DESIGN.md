@@ -172,7 +172,7 @@ children, need no row.
 | block | `block/{mod,part,cache}.rs` | `block/{mod,block_init,part_init,cache_init}.rs` |
 | fs | `fs/{mod,kernfs,ramfs,testfs,fat,vibefs}.rs` | `fs/{mod,fs_init,fat_init,vibefs_init,file_init}.rs` |
 | proc | `proc/{mod,addr_space,elf,syscall}.rs` | `proc/{mod,proc_init,addr_space_init,user_init,syscall_init}.rs` |
-| ktest | — | `ktest/{mod,user}.rs`, `ktest/p10_s*.rs` (`kernel_tests` only) |
+| ktest | — | `ktest/{mod,user}.rs` (`kernel_tests` only) |
 
 **In-guest tests.** A `kernel_tests` build's test bodies live beside the code they test: each kernel
 subsystem directory holds a `ktest.rs` (`src/mm/ktest.rs`, `src/sched/ktest.rs`, and so on;
