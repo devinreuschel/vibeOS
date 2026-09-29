@@ -721,6 +721,18 @@ pub fn df(id: u8) -> Result<(FsType, u64, u64, u32), FsError> {
     })
 }
 
+/// The mounted initrd's image bytes, from its BPB, and its free bytes;
+/// `None` when it is not mounted (`initrd_module_sized`).
+#[cfg(feature = "kernel_tests")]
+pub fn initrd_geometry() -> Option<(u64, u64)> {
+    with_slot(VOL_INITRD, |v, _| {
+        let bytes = u64::from(v.info.totsec).checked_mul(u64::from(v.info.bps));
+        Ok(bytes.map(|b| (b, v.free_bytes())))
+    })
+    .ok()
+    .flatten()
+}
+
 /// `(vol, strip)`: skip `strip` bytes of `path`; if nothing remains, walk `"/"`.
 pub fn route(path: &[u8]) -> (u8, usize) {
     let mnts = {

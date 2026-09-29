@@ -354,6 +354,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("vfs_walk", fs::ktest::test_vfs_walk),
     test("pseudo_fs", fs::ktest::test_pseudo_fs),
     test("fat_initrd", fs::ktest::test_fat_initrd),
+    test("initrd_module_sized", fs::ktest::test_initrd_module_sized),
     test("vibefs", fs::ktest::test_vibefs),
     test("ktest_rows", sched::ktest::test_ktest_rows),
     test("ktest_fail_fmt", sched::ktest::test_ktest_fail_fmt),
