@@ -119,6 +119,20 @@ with no count and `begin 0` (`ktest: no test selected`), rejects any `FAIL` line
 signature, and checks the exit status. `run_ktest.py` prints `[ktest] <ok> of <n> runs passed, <s>
 skipped`, the ten slowest runs, and the info lines (`ktest_summary`).
 
+The deadline (ROADMAP §10.2, T1). Each row has a deadline, `vibeos::ktest::DEFAULT_DEADLINE_MS`
+(10 s) unless the registry sets another with `.deadline(ms)`, reviewed as code: twice the longest
+time a tier measured, for a row over 5 s. The runner arms it just before the body runs, as
+`CycleCounter::now()` plus the deadline in cycles, and clears it after. Every CPU's timer tick
+(`sched_init::on_timer_tick`, which the PIT and every LAPIC path run) checks it without a lock, so a
+test that hangs with IF=0 on one CPU is caught by another's tick; the first tick to claim a passed
+deadline, through one compare-exchange, prints `vibeOS: ktest: FAIL <name>: deadline` from the
+interrupt and panics, so the dump shows where the test stood. The opt-in `ktest_deadline_hang`
+(500 ms) holds IF=0 and spins; when `VIBEOS_KTEST` is unset and the tier runs at `-smp 2` or more,
+`make test-kernel`'s expect-fail boot `ktest_deadline_trip` selects it and requires, in order, its
+`run` line, the deadline `FAIL` line, a panic signature and `vibeOS: panic: halted`, and no `ok`
+line (`check_deadline_trip`). A CPU spinning with IF=0 never takes the panic's stop IPI, so that
+boot checks only those lines, not the other CPUs' state.
+
 Selection (BOOT.md §3.2). `vibeos.ktest=` (`VIBEOS_KTEST`) takes a comma-separated list of globs,
 `*` matching any run of characters and `?` one; with no item every row not marked opt-in runs. A row
 marked `.opt_in()` runs only when an item without a wildcard is its name. `vibeos.ktest_repeat=`
@@ -353,7 +367,9 @@ other run it fails the run, since a recovery no test expected is a bug a timeout
 lost kick ([section 10.4](BLOCK.md#104-virtio-blk)) that shows only as a 30 s pause.
 
 The in-guest runner's failure lines fail a `make test-kernel` run the same way, matched on framed
-lines only (§8.2): `vibeOS: ktest: FAIL <name>: <reason>`.
+lines only (§8.2): `vibeOS: ktest: FAIL <name>: <reason>`, which includes the deadline failure
+signature `vibeOS: ktest: FAIL <name>: deadline` that a timer tick prints before it panics, and
+`vibeOS: ktest: bad option <key>=<value>`, printed before `begin`.
 
 User programs print these strings too: the ROADMAP §10.5 runtime reports a panic as `panicked at` on
 fd 2, and a fuzzer writes random bytes. The harness scans framed lines only (§2.6), and fails on

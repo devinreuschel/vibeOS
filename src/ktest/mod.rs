@@ -5,7 +5,7 @@
 //! and exits QEMU through `isa-debug-exit`.
 
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use vibeos::arch::CycleCounter;
 use vibeos::dev::Device;
@@ -134,7 +134,7 @@ pub(crate) const fn test(name: &'static str, run: TestFn) -> Test {
     Test {
         name,
         run,
-        deadline_ms: 10_000,
+        deadline_ms: vibeos::ktest::DEFAULT_DEADLINE_MS,
         once: false,
         opt_in: false,
     }
@@ -167,7 +167,20 @@ pub(crate) const TESTS: &[Test] = &[
     test("ktest_names_unique", test_ktest_names_unique),
     test("ktest_once_probe", test_ktest_once_probe).once(),
     test("ktest_optin_probe", test_ktest_optin_probe).opt_in(),
+    test("ktest_deadline_hang", test_ktest_deadline_hang)
+        .deadline(500)
+        .opt_in(),
 ];
+
+/// The planted hang (opt-in): IF=0 on this CPU and no return, so only
+/// another CPU's tick can see its 500 ms deadline pass. `run_ktest.py`'s
+/// `ktest_deadline_trip` boot expects the FAIL line and the panic.
+fn test_ktest_deadline_hang() -> Outcome {
+    let _g = x86::InterruptGuard::enter();
+    loop {
+        core::hint::spin_loop();
+    }
+}
 
 /// Set by [`test_ktest_once_probe`]'s first run.
 static ONCE_PROBE_RAN: AtomicBool = AtomicBool::new(false);
@@ -279,6 +292,66 @@ const NO_TEST: u32 = u32::MAX;
 /// The running row as `group << 16 | row`, or [`NO_TEST`].
 static CURRENT: AtomicU32 = AtomicU32::new(NO_TEST);
 
+/// The running row's deadline in cycles of `Arch`'s counter; 0 when none is
+/// armed. [`arm`] sets it, and [`disarm`] or the tick that finds it passed
+/// ([`on_tick`]) clears it, whichever comes first.
+static DEADLINE: AtomicU64 = AtomicU64::new(0);
+
+/// Make row `r` of group `g` the running row and arm its deadline, `ms`
+/// from now. False, and no deadline armed, while the cycle counter's
+/// frequency is unknown.
+fn arm(g: usize, r: usize, ms: u32) -> bool {
+    CURRENT.store(((g as u32) << 16) | r as u32, Ordering::Relaxed);
+    let Some(freq) = Arch::freq_hz() else {
+        return false;
+    };
+    let at = Arch::now()
+        .saturating_add(vibeos::ktest::deadline_cycles(ms, freq))
+        .max(1);
+    // Release: pairs with `on_tick`'s Acquire load and compare-exchange, so
+    // a tick that sees this deadline sees the `CURRENT` stored above.
+    DEADLINE.store(at, Ordering::Release);
+    true
+}
+
+/// Clear the running row's deadline. If a tick already claimed it, that
+/// tick is printing the failure and panicking, so wait for the panic.
+fn disarm() {
+    // AcqRel: the swap and `on_tick`'s compare-exchange are the one pair of
+    // claims on the armed value; exactly one of them takes it.
+    if DEADLINE.swap(0, Ordering::AcqRel) == 0 {
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+    CURRENT.store(NO_TEST, Ordering::Relaxed);
+}
+
+/// Every CPU's timer tick (`sched_init::on_timer_tick`): fail the running
+/// test once its deadline has passed. Lock-free, so a test that hangs with
+/// IF=0 on one CPU is caught by another CPU's tick (ROADMAP §10.2, T1).
+/// The one tick that claims the passed deadline prints
+/// `vibeOS: ktest: FAIL <name>: deadline` and panics, so the dump shows
+/// where the test stood.
+pub(crate) fn on_tick() {
+    // Acquire: pairs with `arm`'s Release store.
+    let d = DEADLINE.load(Ordering::Acquire);
+    if d == 0 || Arch::now() < d {
+        return;
+    }
+    // Acquire on success: pairs with `arm`'s Release store, as above; the
+    // failure value is unused.
+    if DEADLINE
+        .compare_exchange(d, 0, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    let name = current_name();
+    crate::marker!("vibeOS: ktest: FAIL {name}: deadline");
+    panic!("ktest: {name}: deadline");
+}
+
 /// The row `cur` names, if any.
 fn row_of(cur: u32) -> Option<&'static Test> {
     GROUPS
@@ -362,11 +435,15 @@ fn bad_repeat(value: Option<&[u8]>) -> ! {
 fn run_one(g: usize, r: usize, t: &'static Test, freq: u64) -> bool {
     let name = t.name;
     crate::marker!("vibeOS: ktest: run {name} {}", t.deadline_ms);
-    CURRENT.store(((g as u32) << 16) | r as u32, Ordering::Relaxed);
+    let armed = arm(g, r, t.deadline_ms);
     let t0 = Arch::now();
     let mut outcome = (t.run)();
     let us = vibeos::ktest::cycles_to_us(Arch::now().wrapping_sub(t0), freq);
-    CURRENT.store(NO_TEST, Ordering::Relaxed);
+    if armed {
+        disarm();
+    } else {
+        CURRENT.store(NO_TEST, Ordering::Relaxed);
+    }
     // A test that needs interrupts off takes its own guard and drops it
     // before it returns.
     let if_on = x86::interrupts_enabled();

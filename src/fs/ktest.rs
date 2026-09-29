@@ -1340,5 +1340,5 @@ pub(crate) const TESTS: &[Test] = &[
         "fs_drop_slot_busy_keeps_slot",
         test_fs_drop_slot_busy_keeps_slot,
     )
-    .deadline(20_000),
+    .deadline(26_000),
 ];

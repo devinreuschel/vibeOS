@@ -41,6 +41,8 @@ pub fn is_live() -> bool {
 /// After EOI. Preempt every `QUANTUM_TICKS`, or every tick while idle
 /// so a sleeper can displace `sti; hlt`. Each CPU owns its runq.
 pub fn on_timer_tick() {
+    #[cfg(feature = "kernel_tests")]
+    crate::ktest::on_tick();
     if !is_live() {
         return;
     }

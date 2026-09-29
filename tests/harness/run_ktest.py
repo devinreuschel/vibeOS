@@ -12,12 +12,14 @@ from collections.abc import Callable, Iterable
 
 from tests.harness import frame, results
 from tests.harness.harness import (
+    PANIC_DONE,
     EnvConfig,
     HarnessError,
     KtestSummary,
     QemuConfig,
     RunResult,
     check_ktest_output,
+    contains_panic,
     default_iso,
     env_config,
     env_flag,
@@ -25,6 +27,7 @@ from tests.harness.harness import (
     ktest_lines,
     ktest_summary,
     make_disk,
+    parse_ktest_line,
     qemu_argv,
     run_qemu_until_exit,
 )
@@ -275,6 +278,78 @@ def print_ktest_summary(summary: KtestSummary, exit_code: int | None) -> None:
     print(f"[ktest] exit {exit_code}", file=sys.stderr)
 
 
+# The planted hang (ROADMAP §10.2, T1): IF=0 on CPU 0 with a 500 ms
+# deadline, which only another CPU's tick can catch.
+TRIP_TEST = "ktest_deadline_hang"
+TRIP_DEADLINE_MS = 500
+# After `panic: halted` the guest sits in `hlt`: read this long, then kill.
+TRIP_KILL_AFTER_S = 0.5
+
+
+def check_deadline_trip(lines: Iterable[str], name: str, deadline_ms: int) -> None:
+    """In order: `run <name> <deadline_ms>`, `FAIL <name>: deadline`, a
+    panic signature, then `vibeOS: panic: halted`; and no `ok <name>`.
+    Kernel lines only. Raises `HarnessError`."""
+    lines = list(lines)
+    steps: tuple[tuple[str, Callable[[str], bool]], ...] = (
+        (
+            f"run {name} {deadline_ms}",
+            lambda ln: parse_ktest_line(ln)
+            == parse_ktest_line(frame.FRAME + f"vibeOS: ktest: run {name} {deadline_ms}"),
+        ),
+        (
+            f"FAIL {name}: deadline",
+            lambda ln: frame.kernel_text(ln) == f"vibeOS: ktest: FAIL {name}: deadline",
+        ),
+        (
+            "a panic signature",
+            lambda ln: contains_panic(ln) and frame.kernel_text(ln) != PANIC_DONE,
+        ),
+        (PANIC_DONE, lambda ln: frame.kernel_text(ln) == PANIC_DONE),
+    )
+    at = 0
+    for what, pred in steps:
+        found = next((i for i in range(at, len(lines)) if pred(lines[i])), None)
+        if found is None:
+            raise HarnessError(f"deadline trip: no {what!r} after line {at}")
+        at = found + 1
+    for ln in lines:
+        k = parse_ktest_line(ln)
+        if k is not None and k.kind == "ok" and k.name == name:
+            raise HarnessError(f"deadline trip: {name} passed")
+
+
+def ktest_deadline_trip(env: EnvConfig) -> None:
+    """The expect-fail boot of `ktest_deadline_hang` (ROADMAP §10.2, T1):
+    another CPU's tick finds its deadline passed, prints the FAIL line and
+    panics. Panic signatures are expected, so none fails the boot."""
+    penv = dataclasses.replace(env, ktest=TRIP_TEST, ktest_repeat=None)
+    disk = make_disk(DISK_BYTES, "vibeos-vblk-")
+    try:
+        cfg = penv.qemu(extra=ktest_devices(disk, env.smp), boot_order="d")
+        try:
+            raw = run_qemu_until_exit(
+                cfg,
+                timeout_s=env.timeout,
+                panic_signatures=(),
+                kill_after=lambda ln: (
+                    TRIP_KILL_AFTER_S if frame.kernel_text(ln) == PANIC_DONE else None
+                ),
+            )
+            results.current().add_boot(qemu_argv(cfg, None), cfg, raw.exit_code)
+            check_deadline_trip(raw.lines, TRIP_TEST, TRIP_DEADLINE_MS)
+        except HarnessError:
+            _record("ktest_deadline_trip", False)
+            raise
+    finally:
+        try:
+            os.unlink(disk)
+        except OSError:
+            pass
+    _record("ktest_deadline_trip", True)
+    print(f"[ktest] deadline trip: {TRIP_TEST} failed on its deadline", file=sys.stderr)
+
+
 def main() -> int:
     env = env_config(default_iso=default_iso("ktest"), default_timeout=90)
     results.Results(env.tier)
@@ -310,6 +385,8 @@ def main() -> int:
     ]
     if env.smp == 2:
         proofs.append(("repeat boot", _repeat_boot))
+    if env.smp >= 2:
+        proofs.append(("deadline trip boot", ktest_deadline_trip))
     for label, proof in proofs:
         try:
             proof(env)

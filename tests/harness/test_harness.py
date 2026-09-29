@@ -1106,6 +1106,59 @@ class TestSelectRun(unittest.TestCase):
         self.assertIn("ktest_deadline_hang", run_ktest.SELECT_ABSENT)
 
 
+class TestDeadlineTrip(unittest.TestCase):
+    """`run_ktest.check_deadline_trip`: the planted hang's lines, in order."""
+
+    GOOD = (
+        "vibeOS: ktest: begin 1",
+        "vibeOS: ktest: run ktest_deadline_hang 500",
+        "vibeOS: ktest: FAIL ktest_deadline_hang: deadline",
+        "vibeOS: panic:",
+        "vibeOS: panic: msg: ktest: ktest_deadline_hang: deadline",
+        "vibeOS: panic: halted",
+    )
+
+    def check(self, *texts: str) -> None:
+        run_ktest.check_deadline_trip([K(t) for t in texts], "ktest_deadline_hang", 500)
+
+    def test_ok(self) -> None:
+        self.check(*self.GOOD)
+
+    def test_each_line_required(self) -> None:
+        # Index 3 drops the dump's signature lines, banner and `msg:` both.
+        for i, j in ((1, 2), (2, 3), (3, 5), (5, 6)):
+            with self.subTest(dropped=self.GOOD[i:j]):
+                with self.assertRaises(HarnessError):
+                    self.check(*self.GOOD[:i], *self.GOOD[j:])
+
+    def test_wrong_deadline(self) -> None:
+        lines = list(self.GOOD)
+        lines[1] = "vibeOS: ktest: run ktest_deadline_hang 10000"
+        with self.assertRaisesRegex(HarnessError, "no 'run ktest_deadline_hang 500'"):
+            self.check(*lines)
+
+    def test_out_of_order(self) -> None:
+        g = self.GOOD
+        with self.assertRaisesRegex(HarnessError, "FAIL"):
+            self.check(g[0], g[2], g[1], g[3], g[5])
+        with self.assertRaisesRegex(HarnessError, "panic signature"):
+            self.check(g[0], g[1], g[3], g[2], g[5])
+
+    def test_halted_is_not_the_signature(self) -> None:
+        with self.assertRaisesRegex(HarnessError, "panic signature"):
+            self.check(*self.GOOD[:3], "vibeOS: panic: halted")
+
+    def test_ok_line_fails(self) -> None:
+        with self.assertRaisesRegex(HarnessError, "passed"):
+            self.check(*self.GOOD, "vibeOS: ktest: ok ktest_deadline_hang (1 us)")
+
+    def test_unframed_ignored(self) -> None:
+        lines = [K(t) for t in self.GOOD]
+        lines[2] = "vibeOS: ktest: FAIL ktest_deadline_hang: deadline"
+        with self.assertRaises(HarnessError):
+            run_ktest.check_deadline_trip(lines, "ktest_deadline_hang", 500)
+
+
 class TestPersistDecision(unittest.TestCase):
     """The persist lines and the reboot depend on `run block_persist`."""
 

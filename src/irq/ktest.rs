@@ -1035,6 +1035,6 @@ pub(crate) const TESTS: &[Test] = &[
     test("intx_free_masks", test_intx_free_masks),
     test("msix_cpu_publish_last", msix_cpu_publish_last),
     test("lifetime_shootdown_ack_late", lifetime_shootdown_ack_late).deadline(15_000),
-    test("shootdown_ack_while_busy", shootdown_ack_while_busy),
+    test("shootdown_ack_while_busy", shootdown_ack_while_busy).deadline(13_000),
     test("wake_inbox_and_kva_pool", wake_inbox_and_kva_pool),
 ];

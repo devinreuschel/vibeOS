@@ -25,7 +25,7 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 | [E3](E3-emit-paths.md) | Make the marker-vs-log rule explicit; one macro per intent | Low | S | II | — | `implemented (#83)` |
 | [C1](C1-pin-toolchain-and-inputs.md) | Pin every external input: nightly date, action SHAs, Limine commit | High | S | I | — | `implemented (#77)` |
 | [C2](C2-centralize-env-config.md) | Centralize `VIBEOS_*` environment handling in the harness | Low | S | I | T2 | `implemented (#79)` |
-| [T1](T1-split-ktest-registry.md) | Split the in-guest registry; make failures self-diagnosing | Medium | M | II | Q2 | `in progress (#194)` |
+| [T1](T1-split-ktest-registry.md) | Split the in-guest registry; make failures self-diagnosing | Medium | M | II | Q2 | `implemented (#194)` |
 | [T2](T2-single-qemu-launcher.md) | One QEMU launcher for all drivers | Medium | S | I | — | `implemented (#79)` |
 | [T3](T3-fast-check-ci-job.md) | A fast `check` CI job ahead of the QEMU ladder; coverage floor | Medium | S | II | Q1, T2 | `implemented (#82)` |
 | [T4](T4-fuzz-parsers.md) | Fuzz the pure parsers now | Medium | S | II | A2 | `proposed` |
