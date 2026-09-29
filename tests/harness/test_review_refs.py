@@ -8,8 +8,22 @@ import unittest
 from unittest import mock
 
 from scripts import check_review_refs
-from scripts.check_review_refs import check, check_needs, parse_review, parse_roadmap, wave
-from scripts.gatelib import NeedRow, NeedsFile
+from scripts.check_review_refs import (
+    DEPARTURES,
+    Finding,
+    check,
+    check_design_reviews,
+    check_needs,
+    check_placement,
+    design_review_inputs,
+    doc_headings,
+    parse_review,
+    parse_roadmap,
+    tag_phase,
+    wave,
+)
+from scripts.gatelib import REVIEW as REVIEW_PATH
+from scripts.gatelib import NeedRow, NeedsFile, parse_boxes, roadmap_boxes
 
 REVIEW = """### Critical
 
@@ -267,6 +281,222 @@ class TestMain(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm:
             self.run_main(["--wave", "2"])
         self.assertEqual(cm.exception.code, 2)
+
+
+def placement_roadmap(*phases: tuple[int, str]) -> str:
+    """A roadmap with one `### N.1` section per (phase, body)."""
+    out = []
+    for n, body in phases:
+        out.append(f"## Phase {n}: P{n}\n\n### {n}.1 S\n\n{body}\n")
+    return "\n".join(out)
+
+
+def finding(fid: str, severity: str = "LOW", tag: str | None = None) -> Finding:
+    return Finding(fid, severity, tag is not None, tag)
+
+
+class TestPlacement(unittest.TestCase):
+    def errs(self, findings: list[Finding], roadmap: str,
+             departures: dict[str, tuple[str, str]] | None = None) -> list[str]:
+        with mock.patch.dict(DEPARTURES, departures or {}, clear=True):
+            return check_placement({f.fid: f for f in findings}, parse_boxes(roadmap))
+
+    def test_prose_only_fails(self) -> None:
+        roadmap = placement_roadmap((10, "prose names F001\n- [ ] a box"))
+        self.assertEqual(self.errs([finding("F001")], roadmap),
+                         ["F001: cited by no box line, only by prose"])
+
+    def test_box_citation_passes(self) -> None:
+        roadmap = placement_roadmap((10, "- [ ] a box (F001)"))
+        self.assertEqual(self.errs([finding("F001")], roadmap), [])
+
+    def test_critical_after_phase_10_fails(self) -> None:
+        roadmap = placement_roadmap((10, "- [ ] other"), (11, "- [ ] a box (F001)"))
+        got = self.errs([finding("F001", "CRITICAL")], roadmap)
+        self.assertEqual(len(got), 1)
+        self.assertIn("F001 (CRITICAL): no box before", got[0])
+
+    def test_critical_in_phase_10_passes(self) -> None:
+        roadmap = placement_roadmap((10, "- [x] a box (F001)"), (11, "- [ ] again F001"))
+        self.assertEqual(self.errs([finding("F001", "CRITICAL")], roadmap), [])
+
+    def test_latent_critical_after_phase_10_passes(self) -> None:
+        roadmap = placement_roadmap((13, "- [ ] a box (F001)"))
+        self.assertEqual(self.errs([finding("F001", "HIGH", "threads")], roadmap), [])
+
+    def test_latent_after_its_phase_fails(self) -> None:
+        roadmap = placement_roadmap((13, "- [ ] a box (F001)"))
+        got = self.errs([finding("F001", "MEDIUM", "Phase 12 COW")], roadmap)
+        self.assertEqual(len(got), 1)
+        self.assertIn("F001: LATENT tag names Phase 12", got[0])
+
+    def test_latent_in_or_before_its_phase_passes(self) -> None:
+        for n in (11, 12):
+            with self.subTest(phase=n):
+                roadmap = placement_roadmap((n, "- [ ] a box (F001)"), (13, "- [ ] F001"))
+                self.assertEqual(self.errs([finding("F001", "MEDIUM", "Phase 12 COW")],
+                                           roadmap), [])
+
+    def test_exit_gate_and_stretch_lines_count(self) -> None:
+        roadmap = ("## Phase 12: P\n\n**Exit gate.**\n\n- [ ] gate (F001)\n\n"
+                   "### Stretch\n\n- [ ] stretch (F002)\n")
+        got = self.errs([finding("F001", tag="Phase 12"), finding("F002", tag="Phase 12")],
+                        roadmap)
+        self.assertEqual(got, [])
+
+    def test_tag_phase(self) -> None:
+        cases: list[tuple[str | None, int | None]] = [
+            ("Phase 12.5 unified page cache / production disk mounts", 12),
+            ("real hardware or KVM; untrusted users, Phase 18/22", 18),
+            ("real hardware, ROADMAP §20.1", 20),
+            ("Phase 12.7 swap, Phase 18.2 KASLR, Phase 18.3 FSGSBASE", 12),
+            ("Phase 22 release: 22.1 \"no paths\"; §19.6", 19),
+            ("Phase 20: Real hardware (ECAM / q35)", 20),
+            ("real hardware / KVM", None),
+            (None, None),
+        ]
+        for tag, want in cases:
+            with self.subTest(tag=tag):
+                self.assertEqual(tag_phase(tag), want)
+
+    def test_nested_parentheses_in_tag(self) -> None:
+        review = ("#### F118 · x\n\n**Severity:** LOW · LATENT (Phase 20: Real hardware "
+                  "(ECAM / q35)) · **Confidence:** Confirmed\n\n#### F119 · y\n\n"
+                  "**Severity:** HIGH · **Confidence:** Likely\n")
+        f = parse_review(review)
+        self.assertEqual(f["F118"].tag, "Phase 20: Real hardware (ECAM / q35)")
+        self.assertTrue(f["F118"].latent)
+        self.assertIsNone(f["F119"].tag)
+
+    def test_listed_departure_passes(self) -> None:
+        roadmap = placement_roadmap((20, "- [ ] other"), (26, "- [ ] the far box (F001)"))
+        deps = {"F001": ("the far box", "why")}
+        self.assertEqual(self.errs([finding("F001", tag="Phase 20")], roadmap, deps), [])
+
+    def test_stale_departure_fails(self) -> None:
+        roadmap = placement_roadmap((20, "- [ ] the near box (F001)"))
+        deps = {"F001": ("the near box", "why")}
+        got = self.errs([finding("F001", tag="Phase 20")], roadmap, deps)
+        self.assertEqual(got, ["DEPARTURES F001: stale, the finding passes without the entry"])
+
+    def test_departure_box_not_citing_fails(self) -> None:
+        roadmap = placement_roadmap((20, "- [ ] a box"), (26, "- [ ] the far box (F001)"))
+        deps = {"F001": ("a box", "why")}
+        got = self.errs([finding("F001", tag="Phase 20")], roadmap, deps)
+        self.assertEqual(len(got), 1)
+        self.assertIn("does not cite F001", got[0])
+
+    def test_departure_key_unmatched_or_ambiguous_fails(self) -> None:
+        roadmap = placement_roadmap((26, "- [ ] far box one (F001)\n- [ ] far box two"))
+        for key, word in (("no such box", "matches no line"), ("far box", "matches 2 lines")):
+            with self.subTest(key=key):
+                got = self.errs([finding("F001", tag="Phase 20")], roadmap,
+                                {"F001": (key, "why")})
+                self.assertEqual(len(got), 1)
+                self.assertIn(word, got[0])
+
+    def test_own_rule_box_and_funded_line_do_not_cite(self) -> None:
+        roadmap = (placement_roadmap((10, "- [ ] `scripts/check_review_refs.py` cites F001"))
+                   + "\n# Funded goals\n\n### A goal\n\n- [ ] proposal (F001)\n")
+        self.assertEqual(self.errs([finding("F001")], roadmap),
+                         ["F001: cited by no box line, only by prose"])
+
+    def test_real_tree_only_f122_departs(self) -> None:
+        findings = parse_review(REVIEW_PATH.read_text(encoding="utf-8"))
+        boxes = roadmap_boxes()
+        self.assertEqual(sorted(DEPARTURES), ["F122"])
+        self.assertEqual(check_placement(findings, boxes), [])
+        with mock.patch.dict(DEPARTURES, {}, clear=True):
+            got = check_placement(findings, boxes)
+        self.assertEqual(len(got), 1)
+        self.assertTrue(got[0].startswith("F122: LATENT tag names Phase 20"), got)
+
+
+REVIEWS = """# Design reviews
+
+| Id | Severity | Decision | Sections | PR |
+|----|----------|----------|----------|----|
+| G001 | Major | one | {sections} | #92 |
+
+## H
+
+| Id | Severity | Decision | PR | Sections |
+|----|----------|----------|----|----------|
+| H007 | Legal | two | #93 | README |
+"""
+
+DOC_FILES = {
+    "docs/DESIGN.md": "# vibeOS design\n\n## Contents\n\n# 1. Overview\n\n### 1.3 Module map\n",
+    "docs/INVARIANTS.md": "# 2. Invariants\n\n### 2.10 Trust boundaries\n",
+    "docs/ROADMAP.md": ("# Roadmap\n\n## How to read this\n\n**Standing gates** apply.\n\n"
+                        "## Phase 10: Consolidation\n\n### 10.9 Engineering system\n"),
+    "docs/SYSCALL.md": "# Syscall ABI\n\n## 1. Registers\n\n```\n### 1.9 fenced\n```\n",
+}
+
+
+class TestDesignReviews(unittest.TestCase):
+    def errs(self, cites: dict[str, str], sections: str = "DESIGN §2.10") -> list[str]:
+        return check_design_reviews(cites, REVIEWS.format(sections=sections), DOC_FILES)
+
+    def test_unknown_id_fails(self) -> None:
+        got = self.errs({"docs/X.md": "see\ndesign review G002 here"})
+        self.assertEqual(got, ["docs/X.md:2: design review G002 has no row in DESIGN_REVIEWS.md"])
+
+    def test_known_id_passes(self) -> None:
+        for text in ("design review G001", "[design review H007](reviews/x.md)",
+                     "Design\nReview G001", "per the DESIGN  REVIEW H007"):
+            with self.subTest(text=text):
+                self.assertEqual(self.errs({"AGENTS.md": text}), [])
+
+    def test_no_id_is_ignored(self) -> None:
+        self.assertEqual(self.errs({"README.md": "A design review writes each decision. "
+                                                 "design review g001, design review G0012"}),
+                         [])
+
+    def test_missing_section_fails(self) -> None:
+        got = self.errs({}, "DESIGN §2.10, §2.11")
+        self.assertEqual(got, ["DESIGN_REVIEWS.md:5: G001: DESIGN §2.11 names no heading"])
+
+    def test_fenced_heading_does_not_resolve(self) -> None:
+        got = self.errs({}, "SYSCALL §1.9")
+        self.assertEqual(got, ["DESIGN_REVIEWS.md:5: G001: SYSCALL §1.9 names no heading"])
+
+    def test_items_resolve(self) -> None:
+        sections = ("DESIGN §1.3, §2.10, §2, Contents, header; ROADMAP §10, §10.9, Phase 10, "
+                    "How to read this, standing gates, Engineering system; SYSCALL §1, header; "
+                    "DESIGN; VIBEFS header")
+        self.assertEqual(self.errs({}, sections), [])
+
+    def test_unknown_items_fail(self) -> None:
+        got = self.errs({}, "ROADMAP Phase 11, §11, Nowhere")
+        self.assertEqual([e.split(": ", 2)[2] for e in got], [
+            "ROADMAP Phase 11 names no heading", "ROADMAP §11 names no heading",
+            "ROADMAP Nowhere names no heading",
+        ])
+
+    def test_bare_section_is_a_phase_only_in_roadmap(self) -> None:
+        got = self.errs({}, "SYSCALL §10")
+        self.assertEqual(got, ["DESIGN_REVIEWS.md:5: G001: SYSCALL §10 names no heading"])
+
+    def test_other_groups_are_ignored(self) -> None:
+        self.assertEqual(self.errs({}, "AGENTS rule 2; issue plan A3; README; CHANGELOG"), [])
+
+    def test_doc_headings(self) -> None:
+        got = doc_headings("DESIGN", DOC_FILES)
+        self.assertEqual([(h.file, h.line, h.level, h.number, h.title) for h in got], [
+            ("docs/DESIGN.md", 1, 1, None, "vibeOS design"),
+            ("docs/DESIGN.md", 3, 2, None, "Contents"),
+            ("docs/DESIGN.md", 5, 1, "1", "1. Overview"),
+            ("docs/DESIGN.md", 7, 3, "1.3", "1.3 Module map"),
+            ("docs/INVARIANTS.md", 1, 1, "2", "2. Invariants"),
+            ("docs/INVARIANTS.md", 3, 3, "2.10", "2.10 Trust boundaries"),
+        ])
+
+    def test_real_tree_passes(self) -> None:
+        cites, reviews, files = design_review_inputs()
+        self.assertIn("AGENTS.md", cites)
+        self.assertIn("docs/INVARIANTS.md", files)
+        self.assertEqual(check_design_reviews(cites, reviews, files), [])
 
 
 if __name__ == "__main__":
