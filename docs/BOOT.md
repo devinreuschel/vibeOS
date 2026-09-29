@@ -13,10 +13,11 @@ Power-on to `sti`. Limine does the ugly part (real mode, A20, long mode, ELF loa
 | Why nightly | The kernel binary's `alloc_error_handler`; the flags `-Zsanitizer` (ROADMAP §12.1), `-Zretpoline-external-thunk` and `-Zfunction-return` (§18.3), and `-Zub-checks` (§18.4). `vibeos-core` uses none (§1.1 constraint 7). |
 | MSRV | `rust-version` in `crates/core/Cargo.toml`, for `vibeos-core` only (§1.1 constraint 7): the older of the last stable release before the nightly Kani pins (ROADMAP §10.8) and the Rust release Verus requires (the latest Verus release's, until ROADMAP §38.1 pins one). Before §10.8 lands, the stable release current on the pinned nightly's date. A bump of the nightly, Kani, or Verus re-derives it. `1.98`, the stable release current on 2026-09-22, which `make check`, `setup.sh` and the `check` job read from the manifest |
 | Components | `llvm-tools` (objdump/nm/size), `rustfmt`, `clippy`; `rust-src` for rust-analyzer |
-| Target | built-in `x86_64-unknown-none` (`rust-toolchain.toml` `targets`) |
+| Target | built-in `x86_64-unknown-none` for the kernel, and `x86_64-unknown-linux-musl` for user programs (ROADMAP §10.5); both in `rust-toolchain.toml` `targets` |
 | Build | `cargo build` (default target in `.cargo/config.toml`) |
+| User build | `make user` (a prerequisite of `make all` and of the ktest kernel): clippy `-D warnings`, then `cargo build -p vibeos-user --target x86_64-unknown-linux-musl` with, through `--config` only, `-D warnings`, `-C linker=rust-lld`, `-C relocation-model=static`, `-C link-self-contained=no`, `-C link-arg=-zseparate-loadable-segments`, `-C link-arg=--image-base=0x40000000`, `-C panic=abort`, and opt-level `"z"`; `scripts/check_user_elf.py` on each unstripped ELF; then each program stripped to `build/user/<name>` |
 | Panic | kernel target `abort`; host tests `unwind` (`profile.dev`) |
-| Extra host tools | `xorriso`, `nasm` (`user/*.asm`), `qemu-system-x86_64`, `python3`, `dosfstools` (`fsck.fat`; the host FAT tests fail without it unless `VIBEOS_ALLOW_MISSING_TOOLS=1`), `ruff` and `mypy` (`make check`, at the versions the `check` job pins) |
+| Extra host tools | `xorriso`, `nasm` (`user/*.asm`), `qemu-system-x86_64`, `python3`, `dosfstools` (`fsck.fat`; the host FAT tests fail without it unless `VIBEOS_ALLOW_MISSING_TOOLS=1`), `ruff` and `mypy` (`make check`, at the versions the `check` job pins), `cargo-deny` (`make check`'s `cargo deny check licenses bans sources`, at the version the `check` job pins; `cargo install cargo-deny --locked --version <pin>`) |
 
 `make` is the usual entry. It builds `build/initrd.fat` with hostlib `mkinitrd` and stages it on the
 ISO as `/boot/initrd.fat`, which `limine.conf`'s `module_path:` loads as a Limine module; the kernel
@@ -53,10 +54,17 @@ Target notes:
   `f64` multiply compiles to a call to `__muldf3`, `f64` arguments pass in integer registers, and
   rustc warns that enabling SSE there breaks the target's ABI. A user program built for it would use
   no SSE and could not call C built by ROADMAP §14.1's clang, which passes `f64` in XMM registers,
-  and `aarch64-unknown-none` differs again (hard-float, strict alignment). Planned (ROADMAP §10.5,
-  §11.1): the `no_std` user runtime builds for `<arch>-unknown-linux-musl`, the triple `std` user
-  code uses (ROADMAP §24.3), and links with `rust-lld` as a static `ET_EXEC` with no crt objects, so
-  no host needs a C compiler for it.
+  and `aarch64-unknown-none` differs again (hard-float, strict alignment). So the `no_std` user
+  runtime (ROADMAP §10.5) builds for `x86_64-unknown-linux-musl`, the triple `std` user code uses
+  (ROADMAP §24.3): the SysV hard-float ABI, the small code model, and the prebuilt `core` in rustup's
+  `rust-std`, with no `-Zbuild-std`. It links with `rust-lld` as a static non-PIE `ET_EXEC` below
+  2 GiB with no crt objects, so no host needs a C compiler for it, and each `PT_LOAD` on pages of
+  its own. `.cargo/config.toml` has no table for the triple, so `std` builds of it keep their
+  defaults; a `compile_error!` stops a build of the crate for any other target. The triple's
+  `compiler_builtins` leaves `memcpy`, `memmove`, `memset`, `memcmp`, `bcmp` and `strlen` to a libc,
+  so `vibeos-user-mem` defines them. `core` for the triple is built to unwind, so the runtime
+  defines a `rust_eh_personality` that nothing calls. Planned (ROADMAP §11.1):
+  `aarch64-unknown-linux-musl`.
 - `build.rs` passes the linker script as an absolute `-T` so the link does not depend on cwd.
 - Each kernel target has an ISA floor, and a CPU feature above it is used only where CPUID or an ID
   register reports it. x86_64 builds for x86-64-v1, the target's default CPU, and also needs NX,
@@ -170,7 +178,7 @@ where the paragraphs below the table say so. The executable contract for the mar
 | 17b | PCI enum + device registry | `pci: N devices` | After `console ok`. ECAM for the buses the first MCFG allocation covers (`acpi::parse_mcfg` reads no other entry; F045); otherwise `0xCF8`/`0xCFC`, which the kernel uses only for bus 0 (a kernel limit: configuration mechanism #1 addresses any bus; ROADMAP §20.1, F114). Scan builds a device list. Workqueue + threaded IRQ start, then drivers bind by id. Memory BARs are mapped through ioremap or the capped physmap; sizes above 32 MiB are recorded and skipped (§9.2). |
 | 17c | Block layer + ramdisk + virtio-blk + partitions | `block: <name> <n> sectors` | After bind. One line per device. virtio-blk (`vda`) emits during probe; ramdisk (`ram0`) follows in `block_init`; partition children (`<parent>p<N>`) after that. |
 | 17d | VFS + FAT initrd root + pseudo mounts + vibefs | (none) | After block. The FAT32 initrd Limine loaded as a module (§3.2), mounted read-write in place through the physmap, at `/` when live; with no module, or one past `map_end`, a ramfs root. Then devfs/procfs/tmpfs/sysfs on `/dev` `/proc` `/tmp` `/sys`. BSS vibefs at `/vibe` (Phase 8D). No serial marker: a root without `/sbin/init` shows as `user: init failed` and no `shell ready`. Syscalls do not reach the VFS or kernfs: `file_init` resolves paths through its own FAT and vibefs route tables (ROADMAP §10.4, F086). |
-| 18 | `/hello`, builtins, `/sbin/init` as pid 1 | `shell ready` | Last marker. The bootstrap thread spawns `/hello` and waits for it (`proc_init::spawn_elf`, `proc_init::wait_kernel`), `shell_init::init` registers the builtins, and `proc_init::start_init` spawns `/sbin/init` pinned to the BSP. `/sbin/init` forks `/bin/tests` and waits for it without reading its exit status, then forks `/bin/sh`, which writes `shell ready` from ring 3 (`user/sh.asm`); the marker is not kernel-emitted and does not show that `/bin/tests` passed (ROADMAP §10.5, F073). A `kernel_shell` build instead spawns the kernel `shell` thread, which prints `shell ready`; a `kernel_tests` build runs the in-guest registry. |
+| 18 | `/hello`, builtins, `/sbin/init` as pid 1 | `shell ready` | Last marker. The bootstrap thread spawns `/hello` and waits for it (`proc_init::spawn_elf`, `proc_init::wait_kernel`), `shell_init::init` registers the builtins, and `proc_init::start_init` spawns `/sbin/init` pinned to the BSP. `/sbin/init` forks `/bin/tests`, waits for it, and prints `init: /bin/tests exited <status>` on fd 2 when the wait status is nonzero, then forks `/bin/sh`, which writes `shell ready` from ring 3 (`user/sh.asm`); the marker is not kernel-emitted; the harness requires `user: tests ok` before it (ROADMAP §10.2). A `kernel_shell` build instead spawns the kernel `shell` thread, which prints `shell ready`; a `kernel_tests` build runs the in-guest registry. |
 
 Ordering rules worth stating separately because they were learned the hard way:
 

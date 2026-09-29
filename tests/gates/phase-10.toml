@@ -257,8 +257,8 @@ cmd = "VIBEOS_KTEST=cpu_hardening make test-kernel-smp4"
 
 [[line]]
 key = """
-the kernel VFS's `/dev/random` fed by virtio-rng, then `RDRAND`, then a xorshift fallback that
-§10.12 deletes (F134); no syscall reaches `/dev/random` until §10.4's A3 routes file syscalls
+the kernel VFS's `/dev/random` fed by virtio-rng, then `RDRAND`, and nothing else until the
+§13.10 CSPRNG (F134); no syscall reaches `/dev/random` until §10.4's A3 routes file syscalls
 through `Vfs` (F086)"""
 [[line.entry]]
 cmd = "VIBEOS_KTEST=dev_random_source make test-kernel"

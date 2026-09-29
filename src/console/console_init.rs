@@ -28,6 +28,8 @@ pub(super) static LIVE: AtomicBool = AtomicBool::new(false);
 /// caller runs with IF=1 (DESIGN §2.9 rule 2). An empty write only lets
 /// the framebuffer redraw.
 pub fn write(bytes: &[u8]) {
+    #[cfg(feature = "kernel_tests")]
+    testing::record(bytes);
     let fb = FB_ON.load(Ordering::Acquire);
     if bytes.is_empty() {
         if fb {
@@ -133,9 +135,58 @@ fn wait_key_loop() -> DecodedKey {
 /// In-guest test hooks. `kernel_tests` only (AGENTS.md rule 9).
 #[cfg(feature = "kernel_tests")]
 pub(crate) mod testing {
-    use core::sync::atomic::{AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
     pub(super) static HALTS: AtomicU64 = AtomicU64::new(0);
+
+    /// How many bytes of [`write`](super::write) a capture keeps.
+    pub(crate) const CAPTURE_CAP: usize = 256;
+
+    static CAPTURING: AtomicBool = AtomicBool::new(false);
+    /// Bytes recorded since [`start_capture`], past `CAPTURE_CAP` included.
+    static CAPTURED: AtomicUsize = AtomicUsize::new(0);
+    static BYTES: [AtomicU8; CAPTURE_CAP] = [const { AtomicU8::new(0) }; CAPTURE_CAP];
+
+    /// Keep `bytes`, the console output of a process's fd 1 or fd 2 or of
+    /// the kernel, while a capture is on.
+    pub(super) fn record(bytes: &[u8]) {
+        if !CAPTURING.load(Ordering::SeqCst) {
+            return;
+        }
+        for &b in bytes {
+            let i = CAPTURED.fetch_add(1, Ordering::SeqCst);
+            let Some(slot) = BYTES.get(i) else {
+                return;
+            };
+            slot.store(b, Ordering::SeqCst);
+        }
+    }
+
+    /// Start keeping what [`write`](super::write) sends, from empty.
+    pub(crate) fn start_capture() {
+        CAPTURING.store(false, Ordering::SeqCst);
+        for b in &BYTES {
+            b.store(0, Ordering::SeqCst);
+        }
+        CAPTURED.store(0, Ordering::SeqCst);
+        CAPTURING.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn stop_capture() {
+        CAPTURING.store(false, Ordering::SeqCst);
+    }
+
+    /// Copy the bytes kept so far into `out`; how many.
+    pub(crate) fn captured(out: &mut [u8]) -> usize {
+        let n = CAPTURED
+            .load(Ordering::SeqCst)
+            .min(CAPTURE_CAP)
+            .min(out.len());
+        for (o, b) in out.iter_mut().zip(BYTES.iter()).take(n) {
+            *o = b.load(Ordering::SeqCst);
+        }
+        n
+    }
 
     /// Calls of `wait_key` that reached its `sti; hlt`, since the last
     /// [`reset_halts`].

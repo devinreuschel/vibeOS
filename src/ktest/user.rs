@@ -11,6 +11,7 @@ use vibeos::elf::{
     EHDR_SIZE, ELFCLASS64, ELFDATA2LSB, ELFMAG0, EM_X86_64, ET_EXEC, EV_CURRENT, PF_R, PF_W, PF_X,
     PHDR_SIZE, PT_LOAD,
 };
+use vibeos::fs::FsError;
 
 use crate::proc_init;
 use crate::thread_init;
@@ -40,11 +41,25 @@ impl Default for Layout {
     }
 }
 
-/// A ring-3 program: code from [`user_code!`] at a [`Layout`], or a whole
-/// ELF image.
+/// A ring-3 program: code from [`user_code!`] at a [`Layout`], a whole ELF
+/// image, or a Rust user program `make user` built, by name (C-USERBINS).
 pub(crate) enum Image {
     Code(&'static [u8], Layout),
     Elf(&'static [u8]),
+    UserBin(&'static str),
+}
+
+/// The user programs this kernel embeds (`build.rs`, `VIBEOS_USER_BINS`).
+mod bins {
+    include!(concat!(env!("OUT_DIR"), "/user_bins.rs"));
+}
+
+/// The embedded user program called `name`.
+fn user_bin(name: &str) -> Option<&'static [u8]> {
+    bins::USER_BINS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, elf)| *elf)
 }
 
 /// File offset of the one `PT_LOAD` segment: the code starts on its own page.
@@ -85,11 +100,12 @@ fn code_elf(code: &[u8], layout: &Layout) -> Vec<u8> {
     b
 }
 
-/// The ELF bytes of `img`.
+/// The ELF bytes of `img`; empty for an unknown [`Image::UserBin`].
 pub(crate) fn elf_bytes(img: &Image) -> Vec<u8> {
     match img {
         Image::Code(code, layout) => code_elf(code, layout),
         Image::Elf(elf) => elf.to_vec(),
+        Image::UserBin(name) => user_bin(name).map(<[u8]>::to_vec).unwrap_or_default(),
     }
 }
 
@@ -101,6 +117,10 @@ pub(crate) fn spawn(img: &Image, argv: &[&str]) -> Result<u32, LoadError> {
     match img {
         Image::Code(code, layout) => proc_init::spawn_image(&code_elf(code, layout), &argv_b, 0),
         Image::Elf(elf) => proc_init::spawn_image(elf, &argv_b, 0),
+        Image::UserBin(name) => match user_bin(name) {
+            Some(elf) => proc_init::spawn_image(elf, &argv_b, 0),
+            None => Err(LoadError::Fs(FsError::NotFound)),
+        },
     }
 }
 

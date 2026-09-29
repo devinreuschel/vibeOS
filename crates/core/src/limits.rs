@@ -81,8 +81,10 @@ pub const MAX_VIBEFS_VOLS: usize = 2;
 pub const MAX_FAT_INODES: usize = 96;
 /// Partitions per disk (`part::Table`, `part_init`).
 pub const MAX_PARTS: usize = 16;
-/// Registered block devices (`block`).
-pub const MAX_BLOCKDEVS: usize = 8;
+/// Registered block devices, partitions included (`block`): boot's two
+/// disks with their children, plus a disk and the `MAX_PARTS` children an
+/// in-guest partition test registers beside them.
+pub const MAX_BLOCKDEVS: usize = 32;
 /// Registered drivers (`dev::Registry`).
 pub const MAX_DRIVERS: usize = 16;
 /// Device claims (`dev::Registry`).

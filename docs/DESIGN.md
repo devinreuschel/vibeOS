@@ -170,7 +170,11 @@ kernel half is `src/<s>/` (the kernel binary, rooted at `src/main.rs`). A kernel
 re-exports its modules under their pre-move names (`vibeos::pmm`, `crate::pmm_init`, `crate::x86`).
 `arch/x86_64/` is the x86_64 port: its pure half (encodings, trap decode) in `vibeos-core`, and its
 hardware half in the kernel (DESIGN §11.1). `src/cell.rs` stays at the kernel root; `vibeos-core`
-compiles it under `cfg(test)` through `#[path]`. `user/` holds freestanding ELFs, not kernel modules.
+compiles it under `cfg(test)` through `#[path]`. `user/` holds user programs, not kernel modules: the
+Rust user runtime `vibeos-user` (`user/src/`, its programs in `user/src/bin/`, and everything that names an
+architecture in `user/src/arch/<arch>/`), its `#![no_builtins]` memory crate `vibeos-user-mem`
+(`user/mem/`), both workspace members that `make user` builds for the user triple (BOOT.md §3.1), and,
+until ROADMAP §10.5 ports them, the assembly programs `user/*.asm` of the initrd.
 
 **Reading the table.** Paths are relative to `crates/core/src/` (Portable) and `src/` (Kernel).
 `{a,b}` lists files of one directory, and `*` matches within one. Every listed path exists, and every
@@ -195,7 +199,7 @@ children, need no row.
 | shell | `shell/mod.rs` | `shell/{mod,shell_init,complete}.rs`, `shell/cmds/{mod,blk,dev,fs,sys}.rs` |
 | dev | `dev/{mod,pci,dma,virtio,entropy}.rs` | `dev/{mod,dev_init,pci_init,dma_init,virtio_init,entropy_init}.rs` |
 | drivers | `drivers/{mod,virtio_blk}.rs` | `drivers/{mod,virtio_blk_init}.rs` |
-| block | `block/{mod,part,cache}.rs` | `block/{mod,block_init,part_init,cache_init}.rs` |
+| block | `block/{mod,part,cache,blockdev}.rs` | `block/{mod,block_init,blockdev_init,part_init,cache_init}.rs` |
 | fs | `fs/{mod,inode,mount,walk,file,ramfs,testfs,tests}.rs`, `fs/kernfs/{mod,node,devfs,tmpfs,procfs,sysfs,tests}.rs`, `fs/vibefs/{mod,disk,layout,vol,ops,commit,mkfs,fsck,tests}.rs`, `fs/fat/{mod,vol,rw,dirent,chain,mkfs,tests}.rs` | `fs/{mod,fs_init,fat_init,vibefs_init,vibefs_crash,file_init}.rs` |
 | proc | `proc/{mod,elf,pid,syscall,uaccess}.rs`, `proc/addr_space/{mod,tests}.rs` | `proc/{mod,addr_space_init,user_init,syscall_init,uaccess_init}.rs`, `proc/proc_init/{mod,fd,exec,exit}.rs` |
 | ktest | — | `ktest/{mod,user}.rs` (`kernel_tests` only) |
@@ -260,11 +264,28 @@ and measured behaviour, or from sources whose license lets it into an MIT tree:
   that option of a dual license), may be adapted into a vibeOS file. The file keeps the notice and
   carries a provenance header naming the upstream project, the file's path, the pinned tag or
   commit, and the upstream license as an SPDX identifier; ROADMAP §10.9 checks the header and ships
-  the notice. Code under Apache-2.0 alone, or under any license with a further condition, is never
-  adapted into a vibeOS file: it enters as a crate under ROADMAP §10.9's `cargo deny` policy or as a
-  port under §14.10, keeping its own license and NOTICE.
+  the notice. The header sits within the file's first 40 lines, in one comment block (`//`, `#` or
+  `;` lines, or one `/* */` block with ` * ` prefixes), and runs to the end of that block:
+
+  ```
+  <c> Provenance: <https repository URL> <path in that repository> @ <tag or 40-hex commit>
+  <c> Upstream-License: <SPDX expression, as upstream states it>
+  <c> <upstream copyright line(s) and permission notice, verbatim>
+  ```
+
+  `scripts/check_provenance.py`, in `make check`, fails when a source file outside `third_party/`
+  has a copyright line or an SPDX line and no header, when a header lacks a field or its notice,
+  and when `Upstream-License` has no option made only of the notice-only ids above.
+  `check_provenance.py --fetch`, on the nightly job, fetches each recorded file at its pinned
+  revision and fails unless its SPDX line names the recorded license or, where it has none, its
+  first comment block holds that license's text. Code under Apache-2.0 alone, or under any license with a further condition, is never
+  adapted into a vibeOS file: it enters as a crate under ROADMAP §10.9's `deny.toml` policy or as a
+  port under §14.10, keeping its own license and NOTICE. That policy, which `make check` runs as
+  `cargo deny check licenses bans sources`, admits crates from crates.io only, under the notice-only
+  licenses above or Apache-2.0 or Unicode-3.0, and only when `deny.toml`'s `[bans]` allow list names
+  the crate with the reason it is in the graph; another license needs an edit here first.
 - Cryptographic primitives and the TLS state machine are depended on, never written in-tree: pinned,
-  widely reviewed crates behind one facade, `vibeos-crypto`, under ROADMAP §10.9's `cargo deny`
+  widely reviewed crates behind one facade, `vibeos-crypto`, under ROADMAP §10.9's `deny.toml`
   policy, with RustCrypto and dalek for the primitives and rustls for TLS (ROADMAP §13.10, §14.7,
   §15.11). In-tree crypto code is the entropy pool, the CSPRNG's construction, the signature
   formats, and glue.
@@ -278,10 +299,16 @@ and measured behaviour, or from sources whose license lets it into an MIT tree:
   tools or are free-licensed and fetched by SHA-256; copyrighted media is never committed.
 - A binary the project publishes (an image, a package, a release asset, or a workflow artifact
   anyone can download) carries the copyright and license notices its third-party code's licenses
-  require: `/LICENSES/` on an image, and the same file as an asset beside it in a release, generated
-  by ROADMAP §10.9's notices script. A copyleft binary also carries its source offer (ROADMAP
-  §14.10). Rule; not yet enforced: today's ISO carries Limine's binaries, the `limine` crate, and
-  Rust's `core` and `alloc` with no notice (ROADMAP §10.9).
+  require. Every ISO carries `/LICENSES/LICENSE`, vibeOS's own, and
+  `/LICENSES/THIRD-PARTY-NOTICES.txt`, which `scripts/mkiso.sh` generates with
+  `scripts/gen_notices.py` (ROADMAP §10.9): Limine's license and the texts of the projects its
+  `3RDPARTY.md` lists, kept in `third_party/limine/` with the release they came from; the license
+  files of every crate in the normal dependency graph of each shipped binary, from the registry or
+  `third_party/crates/`; Rust's `COPYRIGHT-library.html` notice for the standard library, with the
+  license texts it names; and the notice of each file a provenance header marks as adapted. Host
+  tests fail when an entry is missing or `third_party/limine/` names a release other than the one
+  `setup.sh` pins. Planned (ROADMAP §10.9): the same file as an asset beside the image in each
+  release. A copyleft binary also carries its source offer (ROADMAP §14.10).
 
 Why: one function derived from GPL code would put the kernel under the GPL, against the project's
 license. The kernel review's spot check found no such copy, but no rule said so. Adapted code is

@@ -618,33 +618,17 @@ interrupt on a pool vector no handler owns is EOIed and ignored with no count (R
 Every boot line is `vibeOS: ` followed by lowercase text: `<subsystem>: <state>`, or
 `<subsystem> <state>` for the one-word lines (`serial online`, `heap ok`, `gdt ok`, `idt ok`,
 `console ok`, `shell ready`); units keep their case (`4KiB`), and no line ends in a period or an
-exclamation mark. Success markers are asserted by the e2e harness in order. Adding a marker means
-updating the contract in [section 8.3](TESTING.md#83-end-to-end) in the same commit.
+exclamation mark. Success markers are asserted by the e2e harness in order. A line the harness knows
+is a row of `tests/contract/markers.toml` (ROADMAP, How to read this), added in the commit that first
+prints it; `scripts/check_markers.py` fails on a `marker!` line with no row.
 
 The markers are a contract with the harness, not an interface for software outside the tree: ROADMAP
-§39.1 classes them `internal`, so a release may change one, with section 8.3's contract in the same
-commit.
+§39.1 classes them `internal`, so a release may change one, with its row in the same commit.
 
-`marker!` for contract lines (never filtered, always captured); `klog!` for everything else;
-`PlainSerial` only for `dmesg` and panic dumps. `marker!` writes serial before it returns; from
+`marker!` for registered lines of every kind (ROADMAP, How to read this); `klog!` for everything
+else; `PlainSerial` only for `dmesg` and panic dumps. `marker!` writes serial before it returns; from
 ROADMAP §19.5 a `klog!` line reaches serial when a printer thread gets to it
 ([§2.5](#25-panic-policy)).
-
-```
-vibeOS: serial online
-vibeOS: limine: rev 3 ok
-vibeOS: pmm: 32741 free 4KiB frames
-vibeOS: paging: cr3 ok
-vibeOS: paging: mmio uc
-vibeOS: heap ok
-vibeOS: kva: ready
-vibeOS: gdt ok
-vibeOS: pic: remapped
-vibeOS: idt ok
-vibeOS: per_cpu: bsp ready
-vibeOS: acpi: xsdt 9 tables
-vibeOS: time: tsc 2500000/ms
-```
 
 Every line the kernel writes to its console UART starts with the byte 0x1E (ASCII RS), which
 terminals ignore: `marker!` and `klog!` lines, ktest verdicts, and the panic dump alike. The harness

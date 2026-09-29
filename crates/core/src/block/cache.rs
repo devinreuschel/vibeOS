@@ -1,6 +1,7 @@
 //! Page-granular block cache. ROADMAP §7.4.
 //!
-//! Keyed by `(dev, page-aligned byte offset)`. Read-through, write-back,
+//! Keyed by (`BlockRef` id, page offset): the page-aligned byte offset on
+//! the device whose id `blockdev::DiskSeq` handed out, never reused. Read-through, write-back,
 //! clock (second-chance) eviction, sequential readahead, dirty-ratio cap.
 //!
 //! Phase 12 makes this each block device's mapping in one page cache of
@@ -30,12 +31,13 @@ const F_WB: u8 = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CacheKey {
-    pub dev: u32,
+    /// A `BlockRef` id (`blockdev::DiskSeq`).
+    pub dev: u64,
     pub offset: u64,
 }
 
 impl CacheKey {
-    pub const fn page(dev: u32, byte_off: u64) -> Self {
+    pub const fn page(dev: u64, byte_off: u64) -> Self {
         Self {
             dev,
             offset: byte_off & !((PAGE as u64) - 1),
@@ -76,7 +78,10 @@ struct Meta {
 
 impl Meta {
     const EMPTY: Self = Self {
-        key: CacheKey { dev: 0, offset: 0 },
+        key: CacheKey {
+            dev: u64::MAX,
+            offset: 0,
+        },
         flags: 0,
     };
 }
@@ -136,7 +141,7 @@ impl<const N: usize> Cache<N> {
             data: [[0u8; PAGE]; N],
             hand: 0,
             last: CacheKey {
-                dev: u32::MAX,
+                dev: u64::MAX,
                 offset: u64::MAX,
             },
             seq: 0,
@@ -217,7 +222,7 @@ impl<const N: usize> Cache<N> {
         dirty
     }
 
-    fn any_writeback(&self, dev: Option<u32>) -> Option<usize> {
+    fn any_writeback(&self, dev: Option<u64>) -> Option<usize> {
         let mut i = 0usize;
         while i < N {
             let m = self.meta[i];
@@ -436,7 +441,7 @@ impl<const N: usize> Cache<N> {
     pub fn take_dirty(
         &mut self,
         start: usize,
-        dev: Option<u32>,
+        dev: Option<u64>,
         dst: &mut [u8],
     ) -> Option<(usize, CacheKey)> {
         if dst.len() < PAGE {
@@ -484,7 +489,7 @@ impl<const N: usize> Cache<N> {
 
     /// Start one dirty page's writeback (into `dst`), else name a slot in
     /// writeback, else `Flush`. `dev` limits it to one device when `Some`.
-    pub fn flush_step(&mut self, dev: Option<u32>, dst: &mut [u8]) -> FlushStep {
+    pub fn flush_step(&mut self, dev: Option<u64>, dst: &mut [u8]) -> FlushStep {
         if let Some((slot, key)) = self.take_dirty(0, dev, dst) {
             return FlushStep::Write(slot, key);
         }
@@ -496,7 +501,7 @@ impl<const N: usize> Cache<N> {
 
     /// Forget every page of `dev`. A slot in writeback keeps `F_WB`, so it
     /// is not reused before [`Cache::end_writeback`].
-    pub fn drop_dev(&mut self, dev: u32) {
+    pub fn drop_dev(&mut self, dev: u64) {
         let mut i = 0usize;
         while i < N {
             if self.meta[i].key.dev == dev {
@@ -554,7 +559,7 @@ fn write_victim<B: Backend, const N: usize>(
 pub fn cached_read<B: Backend, const N: usize>(
     c: &mut Cache<N>,
     b: &B,
-    dev: u32,
+    dev: u64,
     byte_off: u64,
     buf: &mut [u8],
 ) -> Result<(), BlockError> {
@@ -623,7 +628,7 @@ pub fn cached_read<B: Backend, const N: usize>(
 pub fn cached_write<B: Backend, const N: usize>(
     c: &mut Cache<N>,
     b: &B,
-    dev: u32,
+    dev: u64,
     byte_off: u64,
     buf: &[u8],
 ) -> Result<(), BlockError> {
@@ -666,7 +671,7 @@ pub fn cached_write<B: Backend, const N: usize>(
 pub fn cached_flush<B: Backend, const N: usize>(
     c: &mut Cache<N>,
     b: &B,
-    dev: Option<u32>,
+    dev: Option<u64>,
 ) -> Result<(), BlockError> {
     let mut data = [0u8; PAGE];
     loop {
@@ -976,5 +981,13 @@ mod tests {
         assert_eq!(k.dev, 3);
         assert_eq!(k.offset, 4096);
         assert_eq!(k.next_page().offset, 8192);
+        assert_eq!(k.next_page().dev, 3);
+    }
+
+    #[test]
+    fn key_ids_are_64_bit() {
+        let hi = CacheKey::page(1 << 40, 0);
+        assert_ne!(hi, CacheKey::page(0, 0));
+        assert_eq!(hi.dev, 1 << 40);
     }
 }

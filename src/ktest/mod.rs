@@ -186,6 +186,10 @@ pub(crate) const TESTS: &[Test] = &[
         proc::ktest::test_syscall_ptr_validate,
     ),
     test("user_syscalls", proc::ktest::test_user_syscalls),
+    test(
+        "init_reports_failed_tests",
+        proc::ktest::test_init_reports_failed_tests,
+    ),
     test("int3_roundtrip", arch::ktest::test_int3_roundtrip),
     test("scoped_pf", arch::ktest::test_scoped_pf),
     test("gp_catch", arch::ktest::test_gp_catch),
@@ -345,6 +349,11 @@ pub(crate) const TESTS: &[Test] = &[
     test("virtio_bind", dev::ktest::test_virtio_bind),
     test("virtio_vq", dev::ktest::test_virtio_vq),
     test("dev_random_source", dev::ktest::test_dev_random_source),
+    test("rng_pool_no_dup", dev::ktest::rng_pool_no_dup),
+    test(
+        "rng_refill_after_empty_completion",
+        dev::ktest::rng_refill_after_empty_completion,
+    ),
     test(
         "dev_probe_alloc_fail",
         dev::ktest::test_dev_probe_alloc_fail,
@@ -365,6 +374,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("block_part_gpt", block::ktest::test_block_part_gpt),
     test("block_cache_hit", block::ktest::test_block_cache_hit),
     test("block_cache_evict", block::ktest::test_block_cache_evict),
+    test("part_six_entries", block::ktest::part_six_entries),
     test("vfs_walk", fs::ktest::test_vfs_walk),
     test("pseudo_fs", fs::ktest::test_pseudo_fs),
     test("fat_initrd", fs::ktest::test_fat_initrd),
@@ -589,6 +599,7 @@ pub(crate) const TESTS: &[Test] = &[
         proc::ktest::test_uaccess_readonly_efault,
     )
     .deadline(30_000),
+    test("user_runtime", proc::ktest::user_runtime),
     test(
         "shootdown_ack_while_busy",
         irq::ktest::shootdown_ack_while_busy,
