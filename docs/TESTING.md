@@ -241,6 +241,15 @@ boots one test on a fresh disk): the opt-in `stack_depth_planted`, whose thread 
 recurses 13 levels of a 1 KiB array with IF=0, so no top half lands at depth, and requires an exit
 record of at least 13 KiB. That boot passes only when `check_planted` finds the report whole and
 `stack-plant` the one use over budget; it records `stack_depth_planted` in the results file.
+Then the FAT stack boot (`_fat_boot`, ROADMAP §10.4, F058): the opt-in `fat_vda_16k_stack` alone
+on a fresh disk, since it overwrites `vda`'s first 256 KiB with a FAT32 image through the block
+cache. Its worker, started with `spawn_on`'s 16 KiB stack on a CPU that has a virtio-blk queue
+vector (`virtio_blk_init::queue_vector`), mounts `vda` through the File API, writes 64 KiB at offset
+100 and reads it back, and unmounts; while it writes, `fs::ktest::on_cache_write`, which `fat_init`'s
+`Io::write` calls before each block-cache write, sends that CPU a self-IPI on the vector whenever IF
+is on, so the virtio-blk top half lands on the write path. The test requires at least 64 self-IPIs
+and no send error, at least as many new top-half runs, and the worker's exit depth within budget;
+the boot requires its `ok` line and the stack check as every boot does.
 
 When a test fails, print enough to diagnose it without a rerun. A failing test that only prints its
 name costs a full debug cycle to learn anything.

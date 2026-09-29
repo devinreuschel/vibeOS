@@ -231,7 +231,11 @@ impl Disk for Io<'_> {
                 }
                 Ok(())
             }),
-            Media::Dev(r) => r.write(u64::from(lba), buf).map_err(fat_io_err),
+            Media::Dev(r) => {
+                #[cfg(feature = "kernel_tests")]
+                crate::fs::ktest::on_cache_write();
+                r.write(u64::from(lba), buf).map_err(fat_io_err)
+            }
         }
     }
 

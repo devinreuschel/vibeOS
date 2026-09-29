@@ -53,7 +53,7 @@ pub(crate) fn report() {
 }
 
 /// Wait up to 2 s for the exit scan of thread `tid`.
-fn wait_exit_depth(tid: u32) -> Option<usize> {
+pub(crate) fn wait_exit_depth(tid: u32) -> Option<usize> {
     if !sleep_until(|| exit_depth(tid).is_some(), 2_000) {
         return None;
     }

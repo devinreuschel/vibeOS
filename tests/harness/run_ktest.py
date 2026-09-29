@@ -436,6 +436,19 @@ def _planted_boot(env: EnvConfig) -> None:
     print(f"[ktest] planted stack: {PLANT_THREAD} over budget, as planted", file=sys.stderr)
 
 
+# The FAT stack boot (ROADMAP §10.4, F058): a disk-backed FAT mount and a
+# 64 KiB write on `vda` from a 16 KiB stack, in its own boot on a fresh disk,
+# since its image overwrites the GPT `vda` boots with.
+FAT_STACK_TEST = "fat_vda_16k_stack"
+
+
+def _fat_boot(env: EnvConfig) -> None:
+    """`fat_vda_16k_stack` alone; the stack check is enforced as in every
+    boot, and its `ok` line is required."""
+    raw = _single_test_boot(env, FAT_STACK_TEST, "fat 16k stack")
+    check_select_run(raw.lines, {FAT_STACK_TEST: 1}, ())
+
+
 def print_ktest_summary(summary: KtestSummary, exit_code: int | None) -> None:
     """The report on stderr: passes out of runs, the ten slowest runs, the
     info lines, then the exit status."""
@@ -557,6 +570,7 @@ def main() -> int:
     if env.smp >= 2:
         proofs.append(("deadline trip boot", ktest_deadline_trip))
     proofs.append(("planted stack boot", _planted_boot))
+    proofs.append(("fat 16k stack boot", _fat_boot))
     for label, proof in proofs:
         try:
             proof(env)

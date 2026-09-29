@@ -519,6 +519,20 @@ fn issue(blk: &mut Blk, req: Request) -> Issued {
     Issued::Device { qi, kick }
 }
 
+/// The vectors the probe allocated, one per queue (or one for all), each as
+/// `QUEUE_VEC_LIVE | cpu << 8 | vector`; 0 for none.
+static QUEUE_VECS: [AtomicU64; MAX_VQ] = [const { AtomicU64::new(0) }; MAX_VQ];
+const QUEUE_VEC_LIVE: u64 = 1 << 63;
+
+/// The virtio-blk vector allocated on `cpu`, valid only on that CPU.
+#[cfg(feature = "kernel_tests")]
+pub fn queue_vector(cpu: u32) -> Option<u8> {
+    QUEUE_VECS.iter().find_map(|q| {
+        let v = q.load(Ordering::Acquire);
+        (v & QUEUE_VEC_LIVE != 0 && ((v & !QUEUE_VEC_LIVE) >> 8) as u32 == cpu).then_some(v as u8)
+    })
+}
+
 /// Requests finished here that one [`pump`] pass holds before it drops
 /// `BLK` to wake their waiters and picks again. Small, so the pass's frame
 /// stays far below a top half's 4 KiB share of a kernel stack: `pump` runs
@@ -826,6 +840,8 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
     let table_size = msix_table_size(dev);
     let per_q_msix = table_size as usize >= nq;
     let mut vecs = [0u8; MAX_VQ];
+    // The CPU each of `vecs` was allocated on; a vector is valid only there.
+    let mut vcpus = [0u32; MAX_VQ];
     let mut nvec = 0usize;
 
     w16(common, COMMON_OFF_MSIX_CFG, MSI_NO_VECTOR);
@@ -866,6 +882,7 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
             };
         }
         vecs[0] = vec;
+        vcpus[0] = cpu;
         nvec = 1;
     }
 
@@ -960,6 +977,7 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
                 return Err(VirtioError::Failed);
             }
             vecs[nvec] = vec;
+            vcpus[nvec] = cpu;
             nvec += 1;
         }
 
@@ -1107,6 +1125,16 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
         running: false,
     });
     *BLK.lock() = Some(boxed);
+    let mut i = 0usize;
+    while i < MAX_VQ {
+        let v = if i < nvec {
+            QUEUE_VEC_LIVE | (u64::from(vcpus[i]) << 8) | u64::from(vecs[i])
+        } else {
+            0
+        };
+        QUEUE_VECS[i].store(v, Ordering::Release);
+        i += 1;
+    }
     LIVE.store(true, Ordering::Release);
 
     // The registration prints the `block: vda` marker. A failure leaves
