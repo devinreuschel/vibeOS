@@ -451,6 +451,10 @@ fn main() -> ExitCode {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::let_underscore_must_use,
+    reason = "audit pending, ROADMAP §10.1"
+)]
 mod tests {
     use super::*;
     use std::path::PathBuf;

@@ -14,3 +14,6 @@ name = "vibeos"
 default = []
 # Host tools and `cargo test`. Kernel builds leave this off (`no_std`).
 std = []
+
+[lints]
+workspace = true

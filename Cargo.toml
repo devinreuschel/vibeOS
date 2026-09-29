@@ -2,6 +2,20 @@
 members = ["crates/core", "tests/hostlib"]
 resolver = "3"
 
+# C-LINTS (ROADMAP §10.1): every member has `[lints] workspace = true`. A module
+# not yet swept carries `#[allow(<lint>, reason = "audit pending, ROADMAP §10.1")]`
+# on its `mod` line until its sweep removes it.
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+let_underscore_must_use = "deny"
+unused_result_ok = "deny"
+
+# Cargo takes no lints table beside `[lints] workspace = true` in a member,
+# so loom's cfg (ROADMAP §10.8) is declared here.
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
+
 [package]
 name = "vibeos"
 version = "0.8.0"
@@ -37,6 +51,9 @@ panic_exit = []
 # Separate ISO / target dir; never the production image.
 # Test-only (AGENTS.md rule 9): no published ISO enables it.
 vibefs_crash = []
+
+[lints]
+workspace = true
 
 [dependencies]
 limine = "0.6"
