@@ -683,6 +683,14 @@ needs = [
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
+# L1305
+[[box]]
+key = "the rank checker enforces DESIGN"
+needs = [
+  "every `IrqCell` static that more",  # L1304
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
 # L1448
 [[box]]
 key = "CI history: when a `ci`"

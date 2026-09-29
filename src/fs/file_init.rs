@@ -18,13 +18,14 @@ use vibeos::fs::{
     O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, O_TRUNC, O_WRONLY, OpenFlags, S_IFREG, SeekFrom, Stat,
     split_basename,
 };
+use vibeos::lock::RANK_DEVICE;
 
 use crate::block_init;
-use crate::cell::IrqCell;
 use crate::dev_init;
 use crate::fat_init;
 use crate::fs_init;
 use crate::part_init;
+use crate::sync_init::SpinMutex;
 use crate::vibefs_init;
 use crate::virtio_blk_init;
 
@@ -39,10 +40,16 @@ const fn cwd_root() -> CwdBuf {
     CwdBuf { buf, len: 1 }
 }
 
-static CWD: IrqCell<CwdBuf> = IrqCell::new(cwd_root());
+static CWD: SpinMutex<CwdBuf> = SpinMutex::with_rank(cwd_root(), RANK_DEVICE);
+
+/// Run `f` on the working directory.
+fn with_cwd<R>(f: impl FnOnce(&mut CwdBuf) -> R) -> R {
+    let mut g = CWD.lock();
+    f(&mut g)
+}
 
 pub(crate) fn cwd_copy() -> ([u8; MAX_PATH], usize) {
-    CWD.with(|c| {
+    with_cwd(|c| {
         let mut buf = [0u8; MAX_PATH];
         buf[..c.len].copy_from_slice(&c.buf[..c.len]);
         (buf, c.len)
@@ -50,7 +57,7 @@ pub(crate) fn cwd_copy() -> ([u8; MAX_PATH], usize) {
 }
 
 pub(crate) fn set_cwd(p: &[u8]) {
-    CWD.with(|c| {
+    with_cwd(|c| {
         let n = p.len().min(MAX_PATH);
         c.buf[..n].copy_from_slice(&p[..n]);
         c.len = n;

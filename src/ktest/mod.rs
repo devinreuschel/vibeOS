@@ -257,6 +257,22 @@ pub(crate) const TESTS: &[Test] = &[
         sync::ktest::test_spin_poll_hook_installed,
     ),
     test(
+        "rank_alloc_under_pt_asserts",
+        sync::ktest::test_rank_alloc_under_pt_asserts,
+    ),
+    test(
+        "rank_same_rank_lock_asserts",
+        sync::ktest::test_rank_same_rank_lock_asserts,
+    ),
+    test(
+        "rank_lock_nested_keeps_outer",
+        sync::ktest::test_rank_lock_nested_keeps_outer,
+    ),
+    test(
+        "cross_cpu_cells_ranked",
+        sync::ktest::test_cross_cpu_cells_ranked,
+    ),
+    test(
         "sched_lock_timer_irq",
         sched::ktest::test_sched_lock_timer_irq,
     ),

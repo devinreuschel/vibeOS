@@ -512,8 +512,11 @@ pub fn rng_take(buf: &mut [u8]) -> usize {
 }
 
 /// Submit one entropy buffer. Completion is harvested by the IRQ thread.
+/// A `/dev/random` read calls it through `entropy_init::hw_fill` with the
+/// kernfs store lock held, both `RANK_DEVICE`.
 pub fn rng_request() -> Result<(), VirtioError> {
-    let mut g = Q.lock();
+    // pair order: fs_init::KERNFS's store lock, then Q
+    let mut g = Q.lock_nested(1);
     let q = g.as_mut().ok_or(VirtioError::Failed)?;
     if IN_FLIGHT.load(Ordering::Acquire) {
         return Ok(());

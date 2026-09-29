@@ -6,14 +6,15 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use vibeos::ipi::MAX_IPI_CPUS;
+use vibeos::lock::RANK_SCHED;
 use vibeos::sched::FAR_DEADLINE;
 use vibeos::wait::WaitQueue;
 use vibeos::work::{WorkItem, WorkQueues};
 
-use crate::cell::IrqCell;
 use crate::irq_init;
 use crate::kva_init;
 use crate::per_cpu_init;
+use crate::sync_init::SpinMutex;
 use crate::thread_init;
 
 struct State {
@@ -23,15 +24,25 @@ struct State {
     wq: [WaitQueue; MAX_IPI_CPUS],
 }
 
-static ST: IrqCell<State> = IrqCell::new(State {
-    q: WorkQueues::new(),
-    wq: [const { WaitQueue::new() }; MAX_IPI_CPUS],
-});
+static ST: SpinMutex<State> = SpinMutex::with_rank(
+    State {
+        q: WorkQueues::new(),
+        wq: [const { WaitQueue::new() }; MAX_IPI_CPUS],
+    },
+    RANK_SCHED,
+);
+
+/// Run `f` on the work queues. Callers hold SCHED, which serializes their wait queues.
+fn with_st<R>(f: impl FnOnce(&mut State) -> R) -> R {
+    // pair order: thread_init::SCHED, then ST
+    let mut g = ST.lock_nested(1);
+    f(&mut g)
+}
 static LIVE: AtomicBool = AtomicBool::new(false);
 
 fn push(hi: bool, item: WorkItem) -> bool {
     thread_init::with_sched(|s| {
-        ST.with(|st| {
+        with_st(|st| {
             let ok = if hi {
                 st.q.push_hi(item)
             } else {
@@ -68,7 +79,7 @@ fn my_queue() -> usize {
 pub(crate) fn kick_dead_stacks() {
     let me = my_queue();
     thread_init::with_sched(|s| {
-        ST.with(|st| {
+        with_st(|st| {
             s.wake_all(&mut st.wq[me]);
         })
     });
@@ -93,7 +104,7 @@ fn worker() {
             if head != 0 {
                 return Next::DeadStacks(head);
             }
-            ST.with(|st| {
+            with_st(|st| {
                 if let Some(w) = st.q.pop() {
                     return Next::Item(w);
                 }

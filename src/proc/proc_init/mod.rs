@@ -15,6 +15,7 @@ use vibeos::elf::ElfError;
 use vibeos::fs::{FileId, FileRef, FsError, OpenFlags, SeekFrom};
 use vibeos::kalloc::{TryBox, TryVec};
 use vibeos::kbd::{DecodedKey, NamedKey};
+use vibeos::lock::RANK_SCHED;
 use vibeos::paging::{PAGE_SIZE_4K, USER_MAP_END};
 use vibeos::proc::{
     Creds, Cwd, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, InitState, MAX_FDS, MAX_PROCS,
@@ -36,10 +37,10 @@ use vibeos::wait::WaitQueue;
 
 use crate::addr_space_init;
 use crate::arch::idt::TrapFrame;
-use crate::cell::IrqCell;
 use crate::console_init;
 use crate::file_init;
 use crate::serial::Serial;
+use crate::sync_init::SpinMutex;
 use crate::syscall_init;
 use crate::thread_init::{self, SpawnError};
 use crate::user_init::{self, LoadError, Loaded};
@@ -139,10 +140,17 @@ impl Table {
     }
 }
 
-static TABLE: IrqCell<Table> = IrqCell::new(Table::empty());
+static TABLE: SpinMutex<Table> = SpinMutex::with_rank(Table::empty(), RANK_SCHED);
+
+/// Run `f` on the process table. Callers hold SCHED, which serializes its wait queues.
+fn table_locked<R>(f: impl FnOnce(&mut Table) -> R) -> R {
+    // pair order: thread_init::SCHED, then TABLE
+    let mut g = TABLE.lock_nested(1);
+    f(&mut g)
+}
 
 fn with_table<R>(f: impl FnOnce(&mut Table) -> R) -> R {
-    thread_init::with_sched(|_| TABLE.with(f))
+    thread_init::with_sched(|_| table_locked(f))
 }
 
 fn intern_name(path: &str) -> &'static str {
@@ -396,7 +404,7 @@ pub(crate) fn wait_kernel(pid: u32) -> u32 {
     debug_assert_eq!(current_pid(), 0);
     loop {
         let r = thread_init::with_sched(|s| {
-            TABLE.with(|t| {
+            table_locked(|t| {
                 let Some(p) = t.get(pid) else {
                     return KernelWait::NotKernelChild;
                 };
@@ -507,7 +515,7 @@ fn apply_pending(frame: Option<&mut UserFrame>) {
     }
     loop {
         let act = thread_init::with_sched(|s| {
-            TABLE.with(|t| {
+            table_locked(|t| {
                 let Some(p) = t.get_mut(pid) else {
                     return Pending::None;
                 };

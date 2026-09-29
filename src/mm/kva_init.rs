@@ -11,16 +11,24 @@
 #![allow(dead_code)]
 
 use vibeos::kva::{KVA_END, KVA_SIZE, KVA_START, Kva, KvaError, KvaStats, PAGE_SIZE};
+use vibeos::lock::RANK_PT;
 use vibeos::paging::{MapError, PhysAddr, VirtAddr, heap_flags, stack_flags};
 use vibeos::pmm::Frames;
 pub use vibeos::thread::GuardedStack;
 use vibeos::thread::MAX_STACK_PAGES;
 
-use crate::cell::IrqCell;
 use crate::paging_init;
 use crate::pmm_init;
+use crate::sync_init::SpinMutex;
 
-static KVA: IrqCell<Kva> = IrqCell::new(Kva::empty());
+static KVA: SpinMutex<Kva> = SpinMutex::with_rank(Kva::empty(), RANK_PT);
+
+/// Run `f` on the KVA free-list, which its callers reach under PT.
+fn with_kva<R>(f: impl FnOnce(&mut Kva) -> R) -> R {
+    // pair order: paging_init::PT, then KVA
+    let mut g = KVA.lock_nested(1);
+    f(&mut g)
+}
 
 use vibeos::limits::MAX_UNMAP_PAGES as MAX_UNMAP;
 
@@ -33,19 +41,19 @@ const _: () = assert!(MAX_STACK_PAGES <= MAX_UNMAP);
 /// Single-CPU, IRQs off, live page tables already ours.
 pub unsafe fn init() {
     paging_init::assert_unmapped(VirtAddr(KVA_START), VirtAddr(KVA_END));
-    paging_init::with_pt(|_pt| KVA.with(|k| k.init(KVA_START, KVA_SIZE).expect("kva: init")));
+    paging_init::with_pt(|_pt| with_kva(|k| k.init(KVA_START, KVA_SIZE).expect("kva: init")));
 }
 
 pub fn stats() -> KvaStats {
-    paging_init::with_pt(|_pt| KVA.with(|k| k.stats()))
+    paging_init::with_pt(|_pt| with_kva(|k| k.stats()))
 }
 
 pub fn alloc_va(len: u64) -> Option<VirtAddr> {
-    paging_init::with_pt(|_pt| KVA.with(|k| k.alloc(len)).map(VirtAddr))
+    paging_init::with_pt(|_pt| with_kva(|k| k.alloc(len)).map(VirtAddr))
 }
 
 pub fn free_va(va: VirtAddr, len: u64) {
-    paging_init::with_pt(|_pt| KVA.with(|k| k.free(va.as_u64(), len).expect("kva: free-list")));
+    paging_init::with_pt(|_pt| with_kva(|k| k.free(va.as_u64(), len).expect("kva: free-list")));
 }
 
 /// Reserve `pages+1` VA, map the upper `pages` from separate order-0
@@ -55,7 +63,7 @@ pub fn alloc_guarded_stack(pages: usize) -> Result<GuardedStack, KvaError> {
     if pages == 0 || pages > MAX_STACK_PAGES {
         return Err(KvaError::Size);
     }
-    let guard = paging_init::with_pt(|_pt| KVA.with(|k| k.alloc_guarded(pages)))
+    let guard = paging_init::with_pt(|_pt| with_kva(|k| k.alloc_guarded(pages)))
         .map(VirtAddr)
         .ok_or(KvaError::NoVa)?;
     let base = VirtAddr(guard.as_u64() + PAGE_SIZE);
@@ -200,7 +208,7 @@ pub fn vmap(frames: Frames) -> Result<Vmap, KvaError> {
     let pa0 = frames.base();
     let mut mapped = 0usize;
     let r = paging_init::with_pt(|pt| {
-        let va = KVA.with(|k| k.alloc(len)).ok_or((None, KvaError::NoVa))?;
+        let va = with_kva(|k| k.alloc(len)).ok_or((None, KvaError::NoVa))?;
         while mapped < n {
             let off = mapped as u64 * PAGE_SIZE;
             let page = VirtAddr(va + off);
@@ -248,7 +256,7 @@ pub fn vunmap(v: Vmap) -> Frames {
     let n = frames.count();
     unmap_shootdown(base, n);
     paging_init::with_pt(|_pt| {
-        KVA.with(|k| {
+        with_kva(|k| {
             k.free(base.as_u64(), n as u64 * PAGE_SIZE)
                 .expect("kva: free-list")
         })

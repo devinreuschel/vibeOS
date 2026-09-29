@@ -19,8 +19,8 @@ use crate::arch;
 use crate::arch::idt::{TrapFrame, testing};
 use crate::ipi_init;
 use crate::irq_init;
-use crate::ktest::Outcome;
 use crate::ktest::user::{self, DEFAULT, Image, user_code};
+use crate::ktest::{Outcome, spawn_thread_on, spin_until_ns};
 use crate::kva_init;
 use crate::per_cpu_init;
 use crate::proc_init;
@@ -86,8 +86,22 @@ fn int3_here() {
 }
 
 #[inline(never)]
-fn int3_other(_: *mut ()) {
+fn int3_other() {
     unsafe { core::arch::asm!("int3", options(nomem, nostack)) };
+}
+
+/// Run `int3_other` once `INT3_GO` is set, then set `INT3_DONE`. A kernel
+/// thread pinned on the other CPU, not call-function work, since the `#BP`
+/// body logs and call-function work takes no lock (DESIGN §2.2).
+static INT3_GO: AtomicBool = AtomicBool::new(false);
+static INT3_DONE: AtomicBool = AtomicBool::new(false);
+
+fn int3_thread() {
+    // Acquire: pairs with the Release store of `INT3_GO` in the test.
+    if spin_until_ns(|| INT3_GO.load(Ordering::Acquire), 2_000_000_000) {
+        int3_other();
+    }
+    INT3_DONE.store(true, Ordering::Release);
 }
 
 /// Whether `rip`, a `#BP` return address, lies in the function at `f`:
@@ -108,10 +122,18 @@ pub(crate) fn test_catch_ignores_other_cpu() -> Outcome {
     let here = int3_here as *const () as u64;
     let there = int3_other as *const () as u64;
     // insn_len 0: `#BP` is a trap, its saved RIP is already past `int3`.
+    INT3_GO.store(false, Ordering::Relaxed);
+    INT3_DONE.store(false, Ordering::Relaxed);
+    let _t = spawn_thread_on("int3-other", int3_thread, other);
+    let mut ran = false;
     let caught = arch::catch::catch_skip(vectors::BP, 0, || {
-        ipi_init::call_cpu(other, int3_other, core::ptr::null_mut(), true);
+        INT3_GO.store(true, Ordering::Release);
+        ran = spin_until_ns(|| INT3_DONE.load(Ordering::Acquire), 2_000_000_000);
         int3_here();
     });
+    if !ran {
+        return Outcome::Fail("the other cpu's int3 thread did not run");
+    }
     let Some(c) = caught else {
         return Outcome::Fail("no #BP caught");
     };

@@ -139,6 +139,10 @@ GONE: list[tuple[str, str]] = [
     ("write_byte_raw", "every two-way dependency between kernel modules"),
     ("CONTROL_REGS", "every two-way dependency between kernel modules"),
     ("src/proc/syscall_init.rs: fn dispatch", "every two-way dependency between kernel modules"),
+    ("crates/core/src/sync/lock.rs: fn acquire_mask", "the rank checker enforces DESIGN"),
+    ("crates/core/src/sync/lock.rs: fn can_acquire", "the rank checker enforces DESIGN"),
+    ("crates/core/src/sync/lock.rs: fn release_mask", "the rank checker enforces DESIGN"),
+    ("heap_then_buddy_is_forbidden", "the heap ranks first"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

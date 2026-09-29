@@ -2,8 +2,8 @@
 //!
 //! Three cells in the kernel:
 //! - [`crate::sync_init::SpinMutex`]: shared across CPUs
-//! - [`IrqCell`]: IRQ-off exclusive `&mut T` for CPU-local and boot-only state, and as an
-//!   unranked cross-CPU lock (DESIGN §2.3); same-CPU re-entry panics
+//! - [`IrqCell`]: IRQ-off exclusive `&mut T` for CPU-local and boot-only state, and the log
+//!   ring's unranked lock (DESIGN §2.3); same-CPU re-entry panics
 //! - [`BootCell`]: write once before `smp: done`, then shared `&T`
 //!
 //! Both carry std's bounds, as `OnceLock` and `Mutex` do: `BootCell<T>` is `Sync` only when
@@ -115,10 +115,15 @@ impl<T> IrqCell<T> {
         }
     }
 
+    /// Refused inside a lockless section (DESIGN §2.2's last row), as
+    /// `SpinMutex::lock` is.
     #[inline(always)]
+    #[track_caller]
     #[allow(clippy::panic)]
     pub fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
         let _irq = InterruptGuard::enter();
+        #[cfg(target_os = "none")]
+        crate::sync_init::check_cell_context();
         let me = owner_token();
         loop {
             match self
