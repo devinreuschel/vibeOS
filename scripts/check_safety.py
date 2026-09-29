@@ -68,6 +68,14 @@ PENDING: tuple[str, ...] = (
 # (path, regex of a false wording) for statements corrected against the code
 # (ROADMAP §10.1, F041). A match fails.
 STALE_CLAIMS: tuple[tuple[str, str], ...] = (
+    # `try_current` reads `gs:[0]` once `LIVE` is set.
+    ("src/smp/per_cpu_init.rs", r"No-op before \[`init_bsp`\], or if GS is still 0"),
+    # Software writes `TSS.RSP0` (`syscall_init::set_rsp0_for`).
+    ("src/arch/x86_64/gdt.rs", r"Hardware updates RSP0"),
+    # `Mapper` is auto-`Sync`.
+    ("crates/core/src/mm/paging.rs", r"Not `Sync`: the design uses one root"),
+    # `IrqCell` also guards cross-CPU data through its owner CAS.
+    ("src/cell.rs", r"\[`IrqCell`\]: CPU-local or boot-only mutable"),
 )
 
 IDENT = r"[A-Za-z_][A-Za-z0-9_]*"

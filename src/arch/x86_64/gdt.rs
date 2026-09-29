@@ -177,7 +177,9 @@ pub unsafe fn init_bsp() {
     unsafe { p.tables.load() };
 }
 
-/// TSS for the BSP. Call after [`init_bsp`]. Hardware updates RSP0.
+/// TSS for the BSP. Call after [`init_bsp`]. The CPU only reads
+/// `TSS.RSP0`; software writes it on each switch through this pointer
+/// (`syscall_init::set_rsp0_for`).
 pub fn bsp_tss_ptr() -> *mut Tss {
     core::ptr::addr_of!(BSP.get().tables.tss) as *mut Tss
 }

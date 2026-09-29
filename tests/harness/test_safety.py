@@ -157,6 +157,28 @@ class TestCheckTree(unittest.TestCase):
         self.assertIn("missing", errors[0])
 
 
+class TestStaleClaims(unittest.TestCase):
+    def test_stale_claims(self) -> None:
+        stale = (("src/a/b.rs", r"Hardware updates RSP0"),)
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            make_tree(root)
+            self.assertEqual(check_tree(root, (), stale), ([], []))
+            (root / "src/a/b.rs").write_text(
+                TREE["src/a/b.rs"] + "/// TSS for the BSP. Hardware\n/// updates RSP0.\n")
+            errors, failing = check_tree(root, (), stale)
+            self.assertEqual(failing, [])
+            self.assertEqual(len(errors), 1)
+            self.assertIn("stale claim", errors[0])
+            errors, _ = check_tree(root, (), (("src/gone.rs", "x"),))
+            self.assertIn("missing file", errors[0])
+
+    def test_real_tree_has_no_stale_claim(self) -> None:
+        self.assertEqual(len(check_safety.STALE_CLAIMS), 4)
+        for rel, _ in check_safety.STALE_CLAIMS:
+            self.assertTrue((check_safety.ROOT / rel).is_file(), rel)
+
+
 class TestMain(unittest.TestCase):
     def test_real_tree_passes(self) -> None:
         out, err = io.StringIO(), io.StringIO()
