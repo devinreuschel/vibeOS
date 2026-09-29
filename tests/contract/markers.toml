@@ -1113,6 +1113,14 @@ arch = "both"
 source = "user"
 section = "§9.8"
 
+# `/sbin/init`, on fd 2, when `/bin/tests`' wait status is nonzero.
+[[marker]]
+text = "init: /bin/tests exited <status>"
+kind = "failure"
+arch = "both"
+source = "user"
+section = "§9.8"
+
 [[marker]]
 text = "user: dup ok"
 kind = "diagnostic"

@@ -297,6 +297,8 @@ ADDED: tuple[str, ...] = (
     "vibeOS: sched: overdue tid ",
 )
 BRANCH_POINT_USER_FAILURES: tuple[str, ...] = ('user: tests fail',)
+# The user failures the registry adds: box 1249's line.
+ADDED_USER: tuple[str, ...] = ("init: /bin/tests exited ",)
 BRANCH_POINT_LIMINE: tuple[str, ...] = ('PANIC(?:\\x1b\\[[0-9;]*m)*: ',)
 
 
@@ -334,7 +336,7 @@ class TestContractLists(unittest.TestCase):
         self.assertEqual(tuple(s for s in sigs if s not in BRANCH_POINT_SIGNATURES), ADDED)
 
     def test_user_and_limine_lists(self) -> None:
-        self.assertEqual(frame.USER_FAILURES, BRANCH_POINT_USER_FAILURES)
+        self.assertEqual(frame.USER_FAILURES, BRANCH_POINT_USER_FAILURES + ADDED_USER)
         self.assertEqual(
             tuple(p.pattern for p in frame.LIMINE_SIGNATURES), BRANCH_POINT_LIMINE
         )
@@ -616,6 +618,18 @@ class TestUserTestsResult(unittest.TestCase):
                                          "user: tests fail"])
         with self.assertRaisesRegex(harness.HarnessError, "user failure 'user: tests fail'"):
             harness.run_qemu_console_input(FAKE_CFG, line_source=src)
+
+    def test_init_tests_exited_fails_run(self) -> None:
+        lines = synthetic_boot(self.CFG)
+        at = lines.index("vibeOS: shell ready")
+        lines = lines[:at] + ["init: /bin/tests exited 256"] + lines[at:]
+        with self.assertRaisesRegex(
+            harness.HarnessError, "user failure 'init: /bin/tests exited '"
+        ):
+            self.run_boot(lines)
+        framed = synthetic_boot(self.CFG)
+        framed.insert(at, frame.FRAME + "init: /bin/tests exited 256")
+        self.assertEqual(self.run_boot(framed).matched[-1], "shell_ready")
 
     def test_shell_variants_list_it(self) -> None:
         with mock.patch.dict(os.environ, clear=True):

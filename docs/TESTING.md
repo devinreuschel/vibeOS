@@ -217,7 +217,10 @@ In the production ISO, `shell ready` is written from ring 3 by `/bin/sh`, which 
 after waiting for `/bin/tests`. Every e2e variant that reaches the shell requires `/bin/tests`'
 unframed `user: tests ok` before `shell ready` (the `user_tests_ok` row), and every driver fails the
 run on an unframed `user: tests fail`, so a failing `/bin/tests` fails the boot (ROADMAP §10.2,
-F073). `init` passes no status pointer to `wait4`, so it does not report the failure itself.
+F073). `init` passes a status pointer to `wait4` and, when the status word is nonzero (an exit code
+other than 0, or a signal), prints `init: /bin/tests exited <status>` on fd 2 before it starts
+`/bin/sh`: a registered failure line, so a `/bin/tests` that dies before its last line fails the
+boot too.
 
 `smp: done` before `shell ready` is deliberate. Put SMP bring-up after the shell starts and an AP
 failure becomes invisible, because the harness sees its last marker and passes. `pci: <n> devices`
