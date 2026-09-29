@@ -384,18 +384,15 @@ corrupt payload into a new extent and call the volume clean. From
 ROADMAP §12.5 the page cache's fill enforces the same rule, and v2 keeps it
 (§15, Corrupt data).
 
-v1 code does not meet the write rule yet: the overwrite path discards
-`check_extent`'s result, merges the new bytes into the corrupt block, and
-stores a fresh CRC, so one write hides the corruption. A split or partial
-truncate of a multi-block extent also keeps the old whole-extent CRC (F063;
-ROADMAP §10.11). v1 `fsck` counts a bad extent as one error and prints only
+A split or partial truncate verifies the extent it splits and recomputes
+the CRC of each extent it changes; `read` verifies an extent before it
+copies from it. v1 `fsck` counts a bad extent as one error and prints only
 totals (§11).
 
 Blocks written by a transaction that never committed are free under the
 committed alloc map, so a crash before the super switch leaks nothing. The
-leak warnings v1 `fsck` reports come from snapshots (§2), from the
-accounting gaps in §6, and from blocks a failed commit allocated (§10,
-F050).
+leak warnings v1 `fsck` reports come from snapshots (§2) and from blocks
+a failed commit allocated (§10, F050).
 
 ---
 

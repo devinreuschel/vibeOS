@@ -433,12 +433,28 @@ impl Vol {
             buf[..want].copy_from_slice(&self.inodes[is].inline_data[s..s + want]);
             return Ok(want);
         }
+        // Every extent the range touches verifies before anything is
+        // copied, so a `Corrupt` leaves `buf` untouched.
+        let (first, _) = Self::block_of(off)?;
+        let (last, _) = Self::block_of(off + (want as u64 - 1))?;
+        let n_ext = (self.inodes[is].n_ext as usize).min(MAX_EXT);
+        let mut i = 0usize;
+        while i < n_ext {
+            let e = self.inodes[is].extents[i];
+            let end = u64::from(e.log)
+                .checked_add(u64::from(e.len))
+                .ok_or(Error::Corrupt)?;
+            if e.log <= last && end > u64::from(first) {
+                self.check_extent(d, e)?;
+            }
+            i += 1;
+        }
         let mut done = 0usize;
         while done < want {
             let pos = off.checked_add(done as u64).ok_or(Error::FileTooBig)?;
             let (fblk, pin) = Self::block_of(pos)?;
             let n = (BLOCK - pin).min(want - done);
-            let (ei, phys) = match self.map_block(is, fblk)? {
+            let (_, phys) = match self.map_block(is, fblk)? {
                 Some(mapping) => mapping,
                 None => {
                     buf[done..done + n].fill(0);
@@ -448,9 +464,6 @@ impl Vol {
             };
             d.read_block(phys, &mut self.iobuf)?;
             buf[done..done + n].copy_from_slice(&self.iobuf[pin..pin + n]);
-            let e = self.inodes.get(is).and_then(|ino| ino.extents.get(ei));
-            let e = *e.ok_or(Error::Corrupt)?;
-            self.check_extent(d, e)?;
             done += n;
         }
         Ok(want)
@@ -580,18 +593,16 @@ impl Vol {
         self.iobuf.fill(0);
         if let Some((ei, phys)) = existing {
             self.drop_room(self.drops_needed(phys, 1))?;
-            d.read_block(phys, &mut self.iobuf)?;
             let old_e = self.inodes[is].extents[ei];
-            #[expect(
-                clippy::let_underscore_must_use,
-                reason = "fixed by ROADMAP §10.11: vibefs never rewrites corrupt data"
-            )]
-            let _ = self.check_extent(d, old_e);
+            // The check fills `iobuf` with the whole extent, so the target
+            // block is read after it.
+            self.check_extent(d, old_e)?;
+            d.read_block(phys, &mut self.iobuf)?;
             self.iobuf[pin..pin + data.len()].copy_from_slice(data);
             let newp = self.alloc_block()?;
-            let r = self.place_block(d, newp, |v, crc| {
+            let r = self.place_block(d, newp, |v, d, crc| {
                 // replace this one physical block in the extent list
-                v.split_replace_extent(is, fblk, newp, crc)
+                v.split_replace_extent(d, is, fblk, newp, crc)
             });
             if r.is_ok() {
                 // `drop_room` above left room for `phys`.
@@ -601,7 +612,7 @@ impl Vol {
         } else {
             self.iobuf[pin..pin + data.len()].copy_from_slice(data);
             let newp = self.alloc_block()?;
-            self.place_block(d, newp, |v, crc| v.add_extent(is, fblk, newp, 1, crc))
+            self.place_block(d, newp, |v, _, crc| v.add_extent(is, fblk, newp, 1, crc))
         }
     }
 
@@ -611,12 +622,12 @@ impl Vol {
         &mut self,
         d: &mut D,
         newp: u32,
-        link: impl FnOnce(&mut Self, u32) -> Result<(), Error>,
+        link: impl FnOnce(&mut Self, &mut D, u32) -> Result<(), Error>,
     ) -> Result<(), Error> {
         let r = d
             .write_block(newp, &self.iobuf)
             .and_then(|()| self.extent_crc(d, newp, 1))
-            .and_then(|crc| link(self, crc));
+            .and_then(|crc| link(self, d, crc));
         match r {
             Ok(()) => Ok(()),
             // `newp` is new in this transaction: `pending_drop` frees it
@@ -625,8 +636,12 @@ impl Vol {
         }
     }
 
-    fn split_replace_extent(
+    /// Put `newp`, whose CRC is `crc`, in place of file block `fblk`. A
+    /// longer extent splits, and the prefix and suffix left of it get
+    /// CRCs of their own, over bytes the caller verified just before.
+    fn split_replace_extent<D: Disk>(
         &mut self,
+        d: &mut D,
         is: usize,
         fblk: u32,
         newp: u32,
@@ -659,6 +674,17 @@ impl Vol {
             to32(right_phys)?,
             to32(right_len)?,
         );
+        // Both CRCs before any change, so a read error leaves the list whole.
+        let left_crc = if left_len > 0 {
+            self.extent_crc(d, e.phys, left_len)?
+        } else {
+            0
+        };
+        let right_crc = if right_len > 0 {
+            self.extent_crc(d, right_phys, right_len)?
+        } else {
+            0
+        };
         // shrink original to left, or replace with the new block if left_len==0
         if left_len == 0 {
             self.inodes[is].extents[ei] = Extent {
@@ -668,21 +694,16 @@ impl Vol {
                 crc,
             };
         } else {
-            self.inodes[is].extents[ei].len = left_len;
-            // left crc stale: v1 re-sums on next check via stored crc of old
-            // whole extent. Recompute would need disk. Mark crc 0 to skip? Spec
-            // requires crc. Leave old crc only if we don't check prefix here.
-            // Simpler: only use 1-block extents after first CoW split.
             self.inodes[is].extents[ei] = Extent {
                 log: e.log,
                 phys: e.phys,
                 len: left_len,
-                crc: e.crc,
+                crc: left_crc,
             };
             self.add_extent(is, fblk, newp, 1, crc)?;
         }
         if right_len > 0 {
-            self.add_extent(is, right_log, right_phys, right_len, e.crc)?;
+            self.add_extent(is, right_log, right_phys, right_len, right_crc)?;
         }
         Ok(())
     }
@@ -716,25 +737,50 @@ impl Vol {
             self.bump_mtime(ino);
             return Ok(());
         }
+        if new <= INLINE as u64 {
+            // The kept bytes are read, which verifies them, before any
+            // extent goes.
+            let mut tmp = [0u8; INLINE];
+            if new > 0 {
+                self.read(d, ino, 0, &mut tmp[..new as usize])?;
+            }
+            self.free_inode_data(d, ino)?;
+            let is = self.inode_slot(ino)?;
+            self.inodes[is].flags |= F_INLINE;
+            self.inodes[is].n_ext = 0;
+            self.inodes[is].extents = [Extent::EMPTY; MAX_EXT];
+            self.inodes[is].inline_len = new as u8;
+            self.inodes[is].inline_data = tmp;
+            self.inodes[is].size = new;
+            self.bump_mtime(ino);
+            return Ok(());
+        }
         let keep_blks = u32::try_from(new.div_ceil(BLOCK as u64)).map_err(|_| Error::FileTooBig)?;
         let n_ext = (self.inodes[is].n_ext as usize).min(MAX_EXT);
-        // Every block this truncate drops, those `free_inode_data` drops
-        // for a file that goes inline included, fits the drop list before
-        // the first is queued.
+        // Before any change: every block this truncate drops fits the drop
+        // list, and the one extent that straddles the new end verifies and
+        // gets the CRC of the part it keeps.
         let mut drops = 0usize;
-        for e in &self.inodes[is].extents[..n_ext] {
+        let mut straddle = None;
+        let mut i = 0usize;
+        while i < n_ext {
+            let e = self.inodes[is].extents[i];
             let end = u64::from(e.log)
                 .checked_add(u64::from(e.len))
                 .ok_or(Error::Corrupt)?;
-            let gone = if new <= INLINE as u64 || e.log >= keep_blks {
+            let gone = if e.log >= keep_blks {
                 e.len
             } else if end > u64::from(keep_blks) {
-                e.len - (keep_blks - e.log)
+                let keep = keep_blks - e.log;
+                self.check_extent(d, e)?;
+                straddle = Some((i, self.extent_crc(d, e.phys, keep)?));
+                e.len - keep
             } else {
                 0
             };
             let from = e.phys.checked_add(e.len - gone).ok_or(Error::Corrupt)?;
             drops += self.drops_needed(from, gone);
+            i += 1;
         }
         self.drop_room(drops)?;
         let mut i = 0usize;
@@ -758,6 +804,11 @@ impl Vol {
                     b += 1;
                 }
                 self.inodes[is].extents[i].len = keep;
+                if let Some((si, crc)) = straddle
+                    && si == i
+                {
+                    self.inodes[is].extents[i].crc = crc;
+                }
             }
             i += 1;
         }
@@ -782,21 +833,6 @@ impl Vol {
             .filter(|e| e.len != 0)
             .count() as u8;
         self.inodes[is].size = new;
-        if new <= INLINE as u64 {
-            let mut tmp = [0u8; INLINE];
-            if new > 0 {
-                let n = self.read(d, ino, 0, &mut tmp[..new as usize])?;
-                let _ = n;
-            }
-            self.free_inode_data(d, ino)?;
-            let is = self.inode_slot(ino)?;
-            self.inodes[is].flags |= F_INLINE;
-            self.inodes[is].n_ext = 0;
-            self.inodes[is].extents = [Extent::EMPTY; MAX_EXT];
-            self.inodes[is].inline_len = new as u8;
-            self.inodes[is].inline_data = tmp;
-            self.inodes[is].size = new;
-        }
         self.bump_mtime(ino);
         Ok(())
     }

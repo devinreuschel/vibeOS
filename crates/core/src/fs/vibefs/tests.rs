@@ -954,3 +954,142 @@ fn cow_split_without_slots_leaks_nothing() {
     let r = fsck_of(&mut b);
     assert_eq!((r.errors, r.warnings), (0, 0));
 }
+
+/// Require every extent of `ino` to match its CRC.
+fn assert_crcs_valid(v: &mut Vol, d: &mut MemDisk, ino: u32) {
+    let is = v.inode_slot(ino).unwrap();
+    let r = v.inodes[is];
+    for e in &r.extents[..r.n_ext as usize] {
+        v.check_extent(d, *e)
+            .unwrap_or_else(|err| panic!("extent at {}: {err:?}", e.log));
+    }
+}
+
+/// `ino`'s bytes from `off`, `len` of them, which must all read.
+fn read_all(v: &mut Vol, d: &mut MemDisk, ino: u32, off: u64, len: usize) -> Vec<u8> {
+    let mut out = vec![0u8; len];
+    assert_eq!(v.read(d, ino, off, &mut out).unwrap(), len);
+    out
+}
+
+#[test]
+fn overwrite_corrupt_block_reports_corrupt() {
+    let mut b = fresh(256 * 1024);
+    let (ino, phys) = with_vol(&mut b, |v, d| {
+        let ino = new_file(v, d, b"f");
+        assert_eq!(v.write(d, ino, 0, &payload(1)).unwrap(), 300);
+        v.sync(d).unwrap();
+        let ex = extents(v, ino);
+        assert_eq!(ex.len(), 1);
+        (ino, ex[0].1)
+    });
+    b[phys as usize * BLOCK + 17] ^= 0x40;
+    let reads_corrupt = |v: &mut Vol, d: &mut MemDisk| {
+        for _ in 0..3 {
+            let mut out = [0u8; 300];
+            assert_eq!(v.read(d, ino, 0, &mut out).unwrap_err(), Error::Corrupt);
+        }
+    };
+    with_vol(&mut b, |v, d| {
+        let df = v.df();
+        let ex = extents(v, ino);
+        assert_eq!(v.write(d, ino, 100, b"z").unwrap_err(), Error::Corrupt);
+        reads_corrupt(v, d);
+        assert_eq!(v.df(), df);
+        assert_eq!(extents(v, ino), ex);
+        v.sync(d).unwrap();
+        reads_corrupt(v, d);
+        assert_eq!(extents(v, ino), ex);
+    });
+    with_vol(&mut b, |v, d| reads_corrupt(v, d));
+}
+
+#[test]
+fn cow_block0_of_two_block_extent() {
+    let mut b = fresh(256 * 1024);
+    with_vol(&mut b, |v, d| {
+        let ino = new_file(v, d, b"f");
+        craft_extent(v, d, ino, 2);
+        assert_eq!(v.write(d, ino, 5, b"new").unwrap(), 3);
+        assert_eq!(n_ext(v, ino), 2);
+        assert_crcs_valid(v, d, ino);
+        let mut blk0 = craft_block(0);
+        blk0[5..8].copy_from_slice(b"new");
+        assert_eq!(read_all(v, d, ino, 0, BLOCK), blk0);
+        assert_eq!(read_all(v, d, ino, BLOCK as u64, BLOCK), craft_block(1));
+        v.sync(d).unwrap();
+    });
+    let r = fsck_of(&mut b);
+    assert_eq!((r.errors, r.warnings), (0, 0));
+}
+
+#[test]
+fn cow_middle_of_three_block_extent() {
+    let mut b = fresh(256 * 1024);
+    with_vol(&mut b, |v, d| {
+        let ino = new_file(v, d, b"f");
+        craft_extent(v, d, ino, 3);
+        assert_eq!(v.write(d, ino, BLOCK as u64 + 9, b"mid").unwrap(), 3);
+        assert_eq!(n_ext(v, ino), 3);
+        assert_crcs_valid(v, d, ino);
+        let mut blk1 = craft_block(1);
+        blk1[9..12].copy_from_slice(b"mid");
+        assert_eq!(read_all(v, d, ino, 0, BLOCK), craft_block(0));
+        assert_eq!(read_all(v, d, ino, BLOCK as u64, BLOCK), blk1);
+        assert_eq!(read_all(v, d, ino, 2 * BLOCK as u64, BLOCK), craft_block(2));
+        v.sync(d).unwrap();
+    });
+    let r = fsck_of(&mut b);
+    assert_eq!((r.errors, r.warnings), (0, 0));
+}
+
+/// Truncate a file held in one crafted 2-block extent to `new` bytes;
+/// every CRC stays valid and the kept bytes unchanged.
+fn truncate_two_block_extent(new: u64) {
+    let mut b = fresh(256 * 1024);
+    with_vol(&mut b, |v, d| {
+        let ino = new_file(v, d, b"f");
+        craft_extent(v, d, ino, 2);
+        let mut want = craft_block(0).to_vec();
+        want.extend_from_slice(&craft_block(1));
+        want.truncate(new as usize);
+        v.truncate(d, ino, new).unwrap();
+        assert_eq!(v.file_size(ino).unwrap(), new);
+        assert_crcs_valid(v, d, ino);
+        assert_eq!(read_all(v, d, ino, 0, new as usize), want);
+        v.sync(d).unwrap();
+    });
+    let r = fsck_of(&mut b);
+    assert_eq!((r.errors, r.warnings), (0, 0));
+}
+
+#[test]
+fn truncate_two_block_extent_to_1_5_blocks() {
+    truncate_two_block_extent(BLOCK as u64 + BLOCK as u64 / 2);
+}
+
+#[test]
+fn truncate_two_block_extent_to_half_block() {
+    truncate_two_block_extent(BLOCK as u64 / 2);
+}
+
+#[test]
+fn read_corrupt_leaves_buffer_untouched() {
+    let mut b = fresh(256 * 1024);
+    let (ino, phys) = with_vol(&mut b, |v, d| {
+        let ino = new_file(v, d, b"f");
+        for k in 0..2u64 {
+            let blk = craft_block(k as u32);
+            assert_eq!(v.write(d, ino, k * BLOCK as u64, &blk).unwrap(), BLOCK);
+        }
+        v.sync(d).unwrap();
+        (ino, extents(v, ino)[1].1)
+    });
+    b[phys as usize * BLOCK + 100] ^= 1;
+    with_vol(&mut b, |v, d| {
+        let mut out = vec![0xAAu8; 2 * BLOCK];
+        assert_eq!(v.read(d, ino, 0, &mut out).unwrap_err(), Error::Corrupt);
+        assert!(out.iter().all(|&c| c == 0xAA));
+        assert_eq!(read_all(v, d, ino, 0, BLOCK), craft_block(0));
+    });
+}
