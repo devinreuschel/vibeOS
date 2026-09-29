@@ -157,7 +157,7 @@ class GhApi:
             self._argv(path, None), stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
         assert p.stdout is not None and p.stderr is not None
-        data = p.stdout.read(max_bytes + 1)
+        data: bytes = p.stdout.read(max_bytes + 1)
         if len(data) > max_bytes:
             p.kill()
             p.wait()
