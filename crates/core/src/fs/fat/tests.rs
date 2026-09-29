@@ -773,3 +773,49 @@ fn fat_bpb_data_lba_overflow_two_fats() {
 fn fat_bpb_data_lba_overflow_one_fat() {
     assert_eq!(mount_with_fatsz(0xFFFF_FFFF, 1), Err(FatError::Corrupt));
 }
+
+/// `mkfs` formats any multiple of 512 bytes with room for two clusters,
+/// and each image mounts; `Inval` below that or off a sector boundary.
+#[test]
+fn fat_mkfs_variable_size() {
+    for (len, check) in [
+        (MIN_SECTORS as usize * SEC, false),
+        (40 * 1024, true),
+        (200 * 1024, true),
+        (1024 * 1024, true),
+    ] {
+        let mut b = fresh(len);
+        with_vol(&mut b, |v, _| {
+            assert_eq!(v.info.totsec as usize * SEC, len);
+            assert_eq!(v.info.nclus, geometry(v.info.totsec).unwrap().nclus);
+            assert!(v.info.nclus >= 2);
+        });
+        if check {
+            fsck(&b);
+        }
+    }
+    let mut b = vec![0u8; (MIN_SECTORS as usize - 1) * SEC];
+    assert_eq!(mkfs(&mut b, b"TEST").map(|_| ()), Err(FatError::Inval));
+    let mut b = vec![0u8; 1000];
+    assert_eq!(mkfs(&mut b, b"TEST").map(|_| ()), Err(FatError::Inval));
+}
+
+/// `image_sectors` returns the smallest image with enough clusters: its
+/// geometry has them and one sector less has not.
+#[test]
+fn fat_image_sectors_minimal() {
+    for need in [0u32, 1, 127, 128, 1000, 4096, 100_000] {
+        for free in [0u64, INITRD_FREE_BYTES] {
+            let want = need + free.div_ceil(SEC as u64) as u32;
+            let t = image_sectors(need, free).unwrap();
+            let g = geometry(t).unwrap();
+            assert!(g.nclus >= want, "need {need} free {free}: {t} sectors");
+            assert!(
+                geometry(t - 1).map_or(true, |g| g.nclus < want),
+                "need {need} free {free}: {} sectors also fit",
+                t - 1
+            );
+        }
+    }
+    assert_eq!(image_sectors(u32::MAX, 1 << 20), Err(FatError::Inval));
+}
