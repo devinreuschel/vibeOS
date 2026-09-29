@@ -3,8 +3,13 @@
 # usage: mkiso.sh <kernel-elf> <out.iso> <staging-dir>
 #
 # Reproducible (ROADMAP §10.2, F152; DESIGN §3.6): every time in the image
-# comes from SOURCE_DATE_EPOCH, and Rock Ridge records no builder uid or gid.
+# comes from SOURCE_DATE_EPOCH, Rock Ridge records no builder uid or gid, and
+# no identifier is random.
 set -euo pipefail
+
+# The GPT disk GUID; xorriso derives the partition GUIDs from it. Any fixed
+# value does: nothing looks the disk up by it.
+GPT_DISK_GUID=76696265-4f53-4953-8f00-000000000001
 
 if [ "$#" -ne 3 ]; then
     echo "usage: mkiso.sh <kernel-elf> <out.iso> <staging-dir>" >&2
@@ -59,11 +64,12 @@ os.utime(top, (t, t))
 PY
 
 # 4. The image: -r records uid and gid 0 and sane modes; the volume dates and
-# UUID come from the stamp.
+# UUID come from the stamp, and the GPT GUIDs from the constant.
 TZ=UTC xorriso -as mkisofs -quiet \
     -r \
     --modification-date="$stamp" \
     --set_all_file_dates "$stamp" \
+    --gpt_disk_guid "$GPT_DISK_GUID" \
     -b boot/limine-bios-cd.bin \
     -no-emul-boot -boot-load-size 4 -boot-info-table \
     --efi-boot boot/limine-uefi-cd.bin \
@@ -72,4 +78,14 @@ TZ=UTC xorriso -as mkisofs -quiet \
 
 # 5. Limine's BIOS stages.
 "$limine_dir/limine" bios-install "$out_iso" >/dev/null
+
+# 6. bios-install seeds the MBR disk signature at 0x1B8 from time(NULL); the
+# signature becomes one derived from the image. limine.conf names its files
+# with boot(), so nothing looks the disk up by it.
+python3 "$root/scripts/iso_disk_id.py" "$out_iso"
+
+# 7. The xorriso version, which lands in the volume descriptor, recorded
+# beside the ISO for a release to publish. sed, not head: SIGPIPE would trip
+# pipefail.
+xorriso -version 2>&1 | sed -n 1p > "$out_iso.xorriso-version"
 echo "  ISO $out_iso"

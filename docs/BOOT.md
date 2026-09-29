@@ -274,8 +274,14 @@ Builds are reproducible: two builds of one commit give byte-identical kernels, i
 `1262304000`. `mkinitrd` stamps the files it adds with that time, in destination order whatever the
 `--add` order. `mkiso.sh` stages every file above its time pin, which sets each staged path's times to
 the epoch, and runs `xorriso` with `-r`, so Rock Ridge records uid and gid 0, and with
-`--modification-date` and `--set_all_file_dates` at the epoch's UTC time. An incremental build keeps
-the epoch of the commit it last rebuilt a file at; compare clean builds.
+`--modification-date` and `--set_all_file_dates` at the epoch's UTC time, which also fixes the volume
+UUID. No identifier is random either: `--gpt_disk_guid` is a constant in `mkiso.sh`, from which xorriso
+derives the partition GUIDs, and after `limine bios-install`, which seeds the MBR disk signature at
+`0x1B8` from `time(NULL)`, `scripts/iso_disk_id.py` overwrites it with the first 4 bytes of the SHA-256
+of the image with those bytes zeroed. That is safe because `limine.conf` names its files with `boot():`,
+never by disk signature. The xorriso version lands in the volume descriptor, so `mkiso.sh` records it
+beside each ISO as `<iso>.xorriso-version`, which a release publishes. An incremental build keeps the
+epoch of the commit it last rebuilt a file at; compare clean builds.
 
 `make run` boots with COM1 on stdio and more than one CPU, so the default developer loop exercises SMP
 rather than discovering AP bugs only in CI. Full flag set in [section 8.4](TESTING.md#84-qemu-flags).

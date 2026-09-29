@@ -117,7 +117,7 @@ build/kernels/vibeos-$(1).elf: $(KERNEL_DEPS) $(PROFILE_STAMP)
 	python3 scripts/gen_ksyms.py --nm "$$(NM)" --check build/kernels/.vibeos-$(1)/vibeos build/kernels/vibeos-$(1).ksyms.rs
 	python3 scripts/check_kernel_fp.py --objdump "$$(OBJDUMP)" build/kernels/.vibeos-$(1)/vibeos
 	cp build/kernels/.vibeos-$(1)/vibeos $$@
-$(3): build/kernels/vibeos-$(1).elf limine.conf $(LIMINE_BIN) scripts/mkiso.sh
+$(3): build/kernels/vibeos-$(1).elf limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py
 	LIMINE_DIR=$$(LIMINE_DIR) scripts/mkiso.sh $$< $$@ build/iso_root_$(1)
 endif
 endef
