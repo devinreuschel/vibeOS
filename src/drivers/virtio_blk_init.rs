@@ -519,14 +519,20 @@ fn issue(blk: &mut Blk, req: Request) -> Issued {
     Issued::Device { qi, kick }
 }
 
+/// Requests finished here that one [`pump`] pass holds before it drops
+/// `BLK` to wake their waiters and picks again. Small, so the pass's frame
+/// stays far below a top half's 4 KiB share of a kernel stack: `pump` runs
+/// on a submitter's stack, under the FAT write path (DESIGN §4.5).
+const PUMP_BATCH: usize = 4;
+
 /// Dispatch what `blk.q` picks until it is idle or a virtqueue is full.
 /// A request finished here (`Local`) is completed or aborted under `BLK`,
-/// and its waiters wake after the lock drops.
+/// and its waiters wake after the lock drops, [`PUMP_BATCH`] at a time.
 fn pump() {
     loop {
         let mut kicks = [0u64; MAX_VQ];
         let mut want = [false; MAX_VQ];
-        let mut local: [Option<(Request, Result<(), BlockError>)>; MAX_QUEUE] = [None; MAX_QUEUE];
+        let mut local: [Option<(Request, Result<(), BlockError>)>; PUMP_BATCH] = [None; PUMP_BATCH];
         let mut nlocal = 0usize;
         let mut again = false;
         {
@@ -535,7 +541,7 @@ fn pump() {
                 return;
             };
             loop {
-                if nlocal == MAX_QUEUE {
+                if nlocal == PUMP_BATCH {
                     again = true;
                     break;
                 }
