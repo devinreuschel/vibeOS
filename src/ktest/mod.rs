@@ -474,6 +474,14 @@ pub(crate) const TESTS: &[Test] = &[
     )
     .deadline(30_000),
     test("arch_seam_core", arch::ktest::test_arch_seam_core),
+    test(
+        "uaccess_smap_stray_fault",
+        arch::ktest::test_uaccess_smap_stray_fault,
+    ),
+    test(
+        "uaccess_smep_user_jump",
+        arch::ktest::test_uaccess_smep_user_jump,
+    ),
     test("console_read_exit", proc::ktest::test_console_read_exit).deadline(30_000),
     test("user_entry_irq", proc::ktest::test_user_entry_irq).deadline(120_000),
     test(
