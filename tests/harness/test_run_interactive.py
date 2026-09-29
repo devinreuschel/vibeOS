@@ -245,5 +245,61 @@ class TestDebugTarget(unittest.TestCase):
         self.assertIn("set architecture i386:x86-64", lines)
 
 
+class TestFirmwareCli(unittest.TestCase):
+    """`run_interactive.py firmware <arch>`: 0 found, 1 none, 2 probe error,
+    the codes the Makefile's `test-e2e-uefi` and setup.sh act on."""
+
+    def run_cli(self, arch: str, env: dict[str, str], root: str) -> tuple[int, str, str]:
+        import contextlib
+        import io
+
+        from tests.harness import harness
+
+        out, err = io.StringIO(), io.StringIO()
+        real = harness.probe_firmware
+
+        def rooted(a: str, environ: Any = None, *, root_: str = root) -> Any:
+            return real(a, environ, root=root_)
+
+        with (
+            overlay_env(env, clear=True),
+            mock.patch.object(run_interactive, "probe_firmware", rooted),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            rc = run_interactive.main(["firmware", arch])
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_codes(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            rc, out, err = self.run_cli("x86_64", {}, root)
+            self.assertEqual(rc, 1)
+            self.assertIn("/usr/share/OVMF", err)
+            self.assertIn("VIBEOS_FW_X86_64", err)
+            d = os.path.join(root, "usr/share/OVMF")
+            os.makedirs(d)
+            Path(d, "OVMF_CODE_4M.fd").write_bytes(b"c")
+            rc, out, err = self.run_cli("x86_64", {}, root)
+            self.assertEqual(rc, 2)
+            self.assertIn("OVMF_VARS_4M.fd", err)
+            Path(d, "OVMF_VARS_4M.fd").write_bytes(b"v")
+            rc, out, err = self.run_cli("x86_64", {}, root)
+            self.assertEqual(rc, 0)
+            self.assertEqual(
+                out.strip(),
+                f"firmware: x86_64 code={d}/OVMF_CODE_4M.fd vars={d}/OVMF_VARS_4M.fd",
+            )
+            rc, _, err = self.run_cli("x86_64", {"VIBEOS_FW_X86_64": f"{root}/none.fd"}, root)
+            self.assertEqual(rc, 2)
+
+    def test_bad_arch_is_a_usage_error(self) -> None:
+        import contextlib
+        import io
+
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+            run_interactive.main(["firmware", "riscv64"])
+        self.assertEqual(cm.exception.code, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

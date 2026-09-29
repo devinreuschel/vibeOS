@@ -716,6 +716,129 @@ def _accel_args(cfg: QemuConfig) -> list[str]:
     return ["-accel", accel]
 
 
+class FirmwareError(HarnessError):
+    """A UEFI firmware image the probe cannot use: a code image without its
+    paired variable-store template, or a `VIBEOS_FW_<ARCH>` that names a
+    missing file or no code image of its architecture (C-FIRMWARE)."""
+
+
+@dataclass(frozen=True)
+class Firmware:
+    """A UEFI firmware pair: the code image, booted read-only from pflash
+    unit 0, and the variable-store template each run copies onto unit 1."""
+
+    arch: str
+    code: str
+    vars_template: str
+
+
+@dataclass(frozen=True)
+class FirmwarePair:
+    """One probe row: a code image and its variable-store template, both
+    basenames of files in the same directory, and the directories to look in.
+    `{homebrew}` in a directory stands for each of `_homebrew_dirs`."""
+
+    code: str
+    vars_template: str
+    dirs: tuple[str, ...]
+
+
+HOMEBREW_QEMU = "{homebrew}/share/qemu"
+
+# The probe table (ROADMAP §10.2, I1), rows in probe order per architecture.
+# Ubuntu's apt `ovmf` and `qemu-efi-aarch64`; then Homebrew's `qemu`, which
+# ships no vars file named for either 64-bit architecture, so its 32-bit
+# ones pair with the 64-bit code. Secure-boot builds need SMM and q35, and
+# are left out.
+FIRMWARE_TABLE: dict[str, tuple[FirmwarePair, ...]] = {
+    "x86_64": (
+        FirmwarePair("OVMF_CODE_4M.fd", "OVMF_VARS_4M.fd", ("/usr/share/OVMF",)),
+        FirmwarePair("edk2-x86_64-code.fd", "edk2-i386-vars.fd", (HOMEBREW_QEMU,)),
+    ),
+    "aarch64": (
+        FirmwarePair("AAVMF_CODE.fd", "AAVMF_VARS.fd", ("/usr/share/AAVMF",)),
+        FirmwarePair("edk2-aarch64-code.fd", "edk2-arm-vars.fd", (HOMEBREW_QEMU,)),
+    ),
+}
+
+# One variable per architecture: a code image, which overrides the probe.
+FIRMWARE_VARS: dict[str, str] = {
+    "x86_64": "VIBEOS_FW_X86_64",
+    "aarch64": "VIBEOS_FW_AARCH64",
+}
+
+
+def _homebrew_dirs(environ: Mapping[str, str]) -> list[str]:
+    """Homebrew's prefixes, in probe order: `$HOMEBREW_PREFIX` when set, then
+    Apple Silicon's `/opt/homebrew` and Intel's `/usr/local`."""
+    out: list[str] = []
+    for d in (environ.get("HOMEBREW_PREFIX", ""), "/opt/homebrew", "/usr/local"):
+        if d and d.rstrip("/") not in out:
+            out.append(d.rstrip("/"))
+    return out
+
+
+def _rooted(root: str, path: str) -> str:
+    return os.path.join(root, path.lstrip("/")) if root else path
+
+
+def firmware_dirs(pair: FirmwarePair, environ: Mapping[str, str], root: str = "") -> list[str]:
+    """The directories `pair` is looked for in, in order, under `root`."""
+    out: list[str] = []
+    for d in pair.dirs:
+        if "{homebrew}" in d:
+            out += [_rooted(root, d.format(homebrew=h)) for h in _homebrew_dirs(environ)]
+        else:
+            out.append(_rooted(root, d))
+    return out
+
+
+def _paired(arch: str, code: str, pair: FirmwarePair) -> Firmware:
+    vars_template = os.path.join(os.path.dirname(code), pair.vars_template)
+    if not os.path.isfile(vars_template):
+        raise FirmwareError(
+            f"{arch} firmware code {code} has no variable-store template {vars_template}"
+        )
+    return Firmware(arch, code, vars_template)
+
+
+def probe_firmware(
+    arch: str, environ: Mapping[str, str] | None = None, *, root: str = ""
+) -> Firmware | None:
+    """The UEFI firmware pair for `arch`, or None when none is installed.
+
+    `VIBEOS_FW_<ARCH>` names a code image of the architecture's rows, whose
+    template is the row's in the same directory. Otherwise the first row
+    whose code image exists decides; its template missing fails the probe,
+    which never falls through to a later row. `root` prefixes every probed
+    path (tests)."""
+    if arch not in FIRMWARE_TABLE:
+        raise FirmwareError(f"no firmware table for {arch!r} (one of {', '.join(FIRMWARE_TABLE)})")
+    environ = os.environ if environ is None else environ
+    rows = FIRMWARE_TABLE[arch]
+    var = FIRMWARE_VARS[arch]
+    override = environ.get(var, "")
+    if override:
+        if not os.path.isfile(override):
+            raise FirmwareError(f"{var}={override}: no such file")
+        name = os.path.basename(override)
+        pair = next((r for r in rows if r.code == name), None)
+        if pair is None:
+            other = [a for a, rs in FIRMWARE_TABLE.items() if any(r.code == name for r in rs)]
+            what = f"{other[0]}'s code image" if other else "not a code image the probe knows"
+            raise FirmwareError(
+                f"{var}={override}: {what}; {arch} takes one of "
+                + ", ".join(r.code for r in rows)
+            )
+        return _paired(arch, override, pair)
+    for pair in rows:
+        for d in firmware_dirs(pair, environ, root):
+            code = os.path.join(d, pair.code)
+            if os.path.isfile(code):
+                return _paired(arch, code, pair)
+    return None
+
+
 # OVMF BDS PXEs the default e1000 if the CD isn't first/ready. slirp
 # answers DHCP; TFTP does not. Silent stall matches VIBEOS_TIMEOUT.
 # Hits the UEFI e2e second boot (COM1 is an open pipe; marker boot is not).

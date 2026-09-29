@@ -1040,6 +1040,149 @@ class TestQemuArgv(unittest.TestCase):
         self.assertEqual(argv.count("-boot"), 1)
 
 
+class TestFirmwareProbe(unittest.TestCase):
+    """ROADMAP §10.2 (I1): one probe table of (code, vars template) pairs per
+    architecture, and one variable per architecture that overrides it."""
+
+    def setUp(self) -> None:
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = self._tmp.name
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def put(self, path: str) -> str:
+        full = os.path.join(self.root, path.lstrip("/"))
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "wb") as f:
+            f.write(b"fw")
+        return full
+
+    def probe(self, arch: str, env: dict[str, str] | None = None) -> Any:
+        from tests.harness.harness import probe_firmware
+
+        return probe_firmware(arch, env or {}, root=self.root)
+
+    def test_every_row_under_a_root(self) -> None:
+        from tests.harness.harness import Firmware
+
+        rows = (
+            ("x86_64", "/usr/share/OVMF/OVMF_CODE_4M.fd", "/usr/share/OVMF/OVMF_VARS_4M.fd"),
+            ("aarch64", "/usr/share/AAVMF/AAVMF_CODE.fd", "/usr/share/AAVMF/AAVMF_VARS.fd"),
+            (
+                "x86_64",
+                "/opt/homebrew/share/qemu/edk2-x86_64-code.fd",
+                "/opt/homebrew/share/qemu/edk2-i386-vars.fd",
+            ),
+            (
+                "aarch64",
+                "/usr/local/share/qemu/edk2-aarch64-code.fd",
+                "/usr/local/share/qemu/edk2-arm-vars.fd",
+            ),
+        )
+        for arch, code, tmpl in rows:
+            with self.subTest(code=code):
+                self.tearDown()
+                self.setUp()
+                c, t = self.put(code), self.put(tmpl)
+                self.assertEqual(self.probe(arch), Firmware(arch, c, t))
+
+    def test_ubuntu_row_first(self) -> None:
+        ubuntu = self.put("/usr/share/OVMF/OVMF_CODE_4M.fd")
+        self.put("/usr/share/OVMF/OVMF_VARS_4M.fd")
+        self.put("/opt/homebrew/share/qemu/edk2-x86_64-code.fd")
+        self.put("/opt/homebrew/share/qemu/edk2-i386-vars.fd")
+        self.assertEqual(self.probe("x86_64").code, ubuntu)
+
+    def test_homebrew_prefix(self) -> None:
+        self.put("/usr/local/share/qemu/edk2-x86_64-code.fd")
+        self.put("/usr/local/share/qemu/edk2-i386-vars.fd")
+        code = self.put("/brew/share/qemu/edk2-x86_64-code.fd")
+        tmpl = self.put("/brew/share/qemu/edk2-i386-vars.fd")
+        fw = self.probe("x86_64", {"HOMEBREW_PREFIX": "/brew"})
+        self.assertEqual((fw.code, fw.vars_template), (code, tmpl))
+        fw = self.probe("x86_64")
+        self.assertTrue(fw.code.endswith("/usr/local/share/qemu/edk2-x86_64-code.fd"))
+
+    def test_code_without_template_fails(self) -> None:
+        from tests.harness.harness import FirmwareError
+
+        code = self.put("/usr/share/OVMF/OVMF_CODE_4M.fd")
+        # A complete later row does not rescue it: the first code image decides.
+        self.put("/opt/homebrew/share/qemu/edk2-x86_64-code.fd")
+        self.put("/opt/homebrew/share/qemu/edk2-i386-vars.fd")
+        with self.assertRaises(FirmwareError) as cm:
+            self.probe("x86_64")
+        self.assertIn(code, str(cm.exception))
+        self.assertIn(os.path.join(os.path.dirname(code), "OVMF_VARS_4M.fd"), str(cm.exception))
+
+    def test_architectures_never_cross(self) -> None:
+        self.put("/usr/share/AAVMF/AAVMF_CODE.fd")
+        self.put("/usr/share/AAVMF/AAVMF_VARS.fd")
+        self.put("/opt/homebrew/share/qemu/edk2-aarch64-code.fd")
+        self.put("/opt/homebrew/share/qemu/edk2-arm-vars.fd")
+        self.assertIsNone(self.probe("x86_64"))
+        self.tearDown()
+        self.setUp()
+        self.put("/usr/share/OVMF/OVMF_CODE_4M.fd")
+        self.put("/usr/share/OVMF/OVMF_VARS_4M.fd")
+        self.put("/opt/homebrew/share/qemu/edk2-x86_64-code.fd")
+        self.put("/opt/homebrew/share/qemu/edk2-i386-vars.fd")
+        self.assertIsNone(self.probe("aarch64"))
+
+    def test_nothing_found(self) -> None:
+        self.assertIsNone(self.probe("x86_64"))
+        self.assertIsNone(self.probe("aarch64"))
+
+    def test_variable_overrides_probe(self) -> None:
+        self.put("/usr/share/OVMF/OVMF_CODE_4M.fd")
+        self.put("/usr/share/OVMF/OVMF_VARS_4M.fd")
+        code = self.put("/elsewhere/edk2-x86_64-code.fd")
+        tmpl = self.put("/elsewhere/edk2-i386-vars.fd")
+        fw = self.probe("x86_64", {"VIBEOS_FW_X86_64": code})
+        self.assertEqual((fw.arch, fw.code, fw.vars_template), ("x86_64", code, tmpl))
+
+    def test_variable_failures(self) -> None:
+        from tests.harness.harness import FirmwareError
+
+        unknown = self.put("/fw/OVMF.fd")
+        aarch = self.put("/fw/AAVMF_CODE.fd")
+        self.put("/fw/AAVMF_VARS.fd")
+        lone = self.put("/lone/OVMF_CODE_4M.fd")
+        missing = os.path.join(self.root, "nope/OVMF_CODE_4M.fd")
+        for path, needle in (
+            (unknown, "not a code image"),
+            (aarch, "aarch64's code image"),
+            (missing, "no such file"),
+            (lone, "OVMF_VARS_4M.fd"),
+        ):
+            with self.subTest(path=path), self.assertRaisesRegex(FirmwareError, needle):
+                self.probe("x86_64", {"VIBEOS_FW_X86_64": path})
+
+    def test_variables_are_independent(self) -> None:
+        x = self.put("/x/OVMF_CODE_4M.fd")
+        self.put("/x/OVMF_VARS_4M.fd")
+        a = self.put("/a/edk2-aarch64-code.fd")
+        self.put("/a/edk2-arm-vars.fd")
+        env = {"VIBEOS_FW_X86_64": x, "VIBEOS_FW_AARCH64": a}
+        self.assertEqual(self.probe("x86_64", env).code, x)
+        self.assertEqual(self.probe("aarch64", env).code, a)
+        # One architecture's variable leaves the other's probe alone.
+        self.assertIsNone(self.probe("aarch64", {"VIBEOS_FW_X86_64": x}))
+        self.assertEqual(self.probe("x86_64", {"VIBEOS_FW_AARCH64": a}), None)
+
+    def test_one_variable_per_architecture(self) -> None:
+        from tests.harness.harness import FIRMWARE_TABLE, FIRMWARE_VARS
+
+        self.assertEqual(set(FIRMWARE_VARS), set(FIRMWARE_TABLE))
+        self.assertEqual(
+            FIRMWARE_VARS, {"x86_64": "VIBEOS_FW_X86_64", "aarch64": "VIBEOS_FW_AARCH64"}
+        )
+        self.assertEqual([len(rows) for rows in FIRMWARE_TABLE.values()], [2, 2])
+
+
 class TestLapicMode(unittest.TestCase):
     def test_tcg_max_is_periodic(self) -> None:
         from tests.harness.harness import expected_lapic_mode

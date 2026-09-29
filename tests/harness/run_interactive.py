@@ -14,6 +14,9 @@ nothing, so it writes no results file.
                                 as `run`, halted with a gdb stub (`-s -S`);
                                 writes build/debug/symbols.gdb, which
                                 scripts/vibeos.gdb sources
+    run_interactive.py firmware ARCH
+                                the probed UEFI firmware pair (C-FIRMWARE):
+                                exit 0 found, 1 none installed, 2 probe error
 """
 
 from __future__ import annotations
@@ -30,10 +33,15 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from tests.harness.harness import (
+    FIRMWARE_TABLE,
+    FIRMWARE_VARS,
+    FirmwareError,
     HarnessError,
     QemuConfig,
     default_iso,
     env_config,
+    firmware_dirs,
+    probe_firmware,
     qemu_argv,
 )
 
@@ -103,6 +111,27 @@ def launch(argv: Sequence[str], timeout: float | None) -> int:
         signal.signal(signal.SIGINT, old)
 
 
+def firmware_main(arch: str) -> int:
+    """The probe for the Makefile's `test-e2e-uefi` and setup.sh: 0 and the
+    pair on stdout when found, 1 and the searched directories on stderr when
+    none is installed, 2 on a probe error."""
+    try:
+        fw = probe_firmware(arch)
+    except FirmwareError as e:
+        print(f"firmware: {e}", file=sys.stderr)
+        return 2
+    if fw is None:
+        dirs = [d for pair in FIRMWARE_TABLE[arch] for d in firmware_dirs(pair, os.environ)]
+        print(
+            f"firmware: no {arch} UEFI firmware in {', '.join(dirs)}; "
+            f"set {FIRMWARE_VARS[arch]} to a code image",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"firmware: {arch} code={fw.code} vars={fw.vars_template}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="run_interactive.py", description="interactive QEMU launcher")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -111,7 +140,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     dbg = sub.add_parser("debug", help="as run, halted with a gdb stub on :1234")
     dbg.add_argument("--kernel-elf", required=True)
     dbg.add_argument("--user-elf", action="append", default=[])
+    fw = sub.add_parser("firmware", help="print the probed UEFI firmware pair")
+    fw.add_argument("arch", choices=sorted(FIRMWARE_TABLE))
     args = ap.parse_args(argv)
+    if args.cmd == "firmware":
+        return firmware_main(args.arch)
     try:
         cfg, timeout = interactive_config(args.cmd)
         if args.cmd == "debug":
