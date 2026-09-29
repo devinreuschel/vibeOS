@@ -514,7 +514,8 @@ static BODIES: [AtomicUsize; 256] = [const { AtomicUsize::new(0) }; 256];
 unsafe extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
     // SAFETY: invariant: `frame` is the calling entry path's own frame on
     // this stack, which nothing else refers to during the call; established
-    // by `arch::idt::vibeos_trap_entry` and `arch::idt::vibeos_trap_entry_ist`.
+    // by the entry paths (`vibeos_trap_entry`, `vibeos_trap_entry_ist`) that
+    // `arch::x86_64::idt::init` points every gate at.
     let frame = unsafe { &mut *frame };
     let v = frame.vector as u8;
     // Before anything that reads `gs:`, `catch::intercept` included: a
@@ -650,14 +651,18 @@ fn is_user_return_iretq(rip: u64) -> bool {
 /// `GS_BASE` is not a kernel (negative) address, then kill the process
 /// with `SIGSEGV` whatever the vector (DESIGN §5.2, §5.10 rule 2). Returns
 /// when the fault is anything else.
+#[allow(
+    clippy::panic,
+    reason = "kernel invariant (DESIGN §9.4): a user-return iretq runs only for a thread with a process, so `user_fault` does not return"
+)]
 fn user_return_fault(frame: &TrapFrame) {
     if gs::from_user(frame.iret.cs) || !is_user_return_iretq(frame.iret.rip) {
         return;
     }
     // SAFETY: invariant: a CPL-0 fault whose RIP is a labeled user-return
     // `iretq` left RSP at that `iretq`'s five-word frame on this CPU's
-    // kernel stack; established by the `global_asm!` in `syscall_init`
-    // and `arch::idt` that places each label.
+    // kernel stack; established at `arch::x86_64::idt::is_user_return_iretq`,
+    // whose labels each sit on such an `iretq`.
     let user = unsafe { ptr::read(frame.iret.rsp as *const InterruptFrame) };
     if !gs::from_user(user.cs) {
         return;
@@ -880,6 +885,8 @@ pub fn pointer() -> (u16, u64) {
 pub unsafe fn load() {
     let (limit, base) = pointer();
     let idtr = DtPtr { limit, base };
+    // SAFETY: this fn's `# Safety` (here): `IDT` is the filled 256-entry
+    // table, a `static` that never moves, and its gates name `KERNEL_CS`.
     unsafe { x86::lidt(&idtr) };
 }
 
@@ -906,6 +913,8 @@ pub unsafe fn init() {
         }
     });
     register_named();
+    // SAFETY: `load`'s `# Safety`, established here: every gate was just
+    // filled, and this fn's `# Safety` has the GDT loaded.
     unsafe { load() };
 }
 
@@ -942,7 +951,7 @@ fn check_stub(stub: *const u8, v: usize, row: &Row) {
     }
     // SAFETY: invariant: `vibeos_trap_stubs` is 256 strides of kernel text,
     // mapped readable for the kernel's life; established by the stub
-    // `global_asm!` in `arch::idt` and the kernel image mapping.
+    // `global_asm!` `arch::x86_64::idt::init` reads, in the kernel image.
     let got = unsafe { core::slice::from_raw_parts(stub, n) };
     assert!(got == &want[..n], "idt: stub {v} bytes");
 }
@@ -1255,7 +1264,7 @@ pub mod testing {
             return false;
         }
         // SAFETY: invariant: a nonzero `HOOKS` entry is a `Hook` address;
-        // established by `arch::idt::testing::set_hook`, its only store.
+        // established here, in this module's `set_hook`, its only store.
         let hook: Hook = unsafe { core::mem::transmute::<usize, Hook>(p) };
         hook(frame)
     }

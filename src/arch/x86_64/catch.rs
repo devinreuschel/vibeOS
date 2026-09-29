@@ -155,6 +155,8 @@ global_asm!(
 /// # Safety
 /// `p` is `Option<F>` for the active catch thunk.
 unsafe fn invoke<F: FnOnce()>(p: *mut u8) {
+    // SAFETY: this fn's `# Safety` (here): `p` is the `Option<F>` that
+    // `with_thunk` stored, live on its frame and referred to by nothing else.
     let slot = unsafe { &mut *(p as *mut Option<F>) };
     slot.take().unwrap()();
 }
@@ -163,6 +165,11 @@ fn with_thunk<F: FnOnce()>(f: F) -> i32 {
     let mut slot = Some(f);
     THUNK_DATA.store((&raw mut slot).cast(), Ordering::Release);
     THUNK_CALL.store(invoke::<F> as *const () as usize, Ordering::Release);
+    // SAFETY: invariant: `THUNK_DATA` points at `slot`, live on this frame
+    // for the call, and `THUNK_CALL` is `invoke::<F>`, the one reader that
+    // matches it, so `vibeos_catch_thunk` runs `f` once; `vibeos_catch`
+    // saves the context a longjmp returns to while this frame is live;
+    // established here.
     let rc = unsafe { vibeos_catch() };
     THUNK_CALL.store(0, Ordering::Release);
     rc
@@ -173,7 +180,13 @@ extern "C" fn vibeos_catch_thunk() {
     let call = THUNK_CALL.swap(0, Ordering::Acquire);
     if call != 0 {
         let data = THUNK_DATA.swap(core::ptr::null_mut(), Ordering::Acquire);
+        // SAFETY: invariant: a nonzero `THUNK_CALL` is an `invoke::<F>`
+        // address and `THUNK_DATA` its `Option<F>`; established by
+        // `arch::x86_64::catch::with_thunk`, the only nonzero store of each.
         let f: unsafe fn(*mut u8) = unsafe { core::mem::transmute(call) };
+        // SAFETY: `invoke`'s `# Safety`, established by
+        // `arch::x86_64::catch::with_thunk`: `data` is the matching
+        // `Option<F>`.
         unsafe { f(data) };
     }
 }
@@ -247,6 +260,9 @@ pub fn intercept(frame: &mut TrapFrame) -> bool {
         ST_VECTOR if want == vector => {
             record(frame);
             disarm();
+            // SAFETY: invariant: an armed window lies inside `with_thunk`'s call,
+            // so `vibeos_jmpbuf` holds the context `vibeos_catch` saved on a frame
+            // that is still live; established by `arch::x86_64::catch::with_thunk`.
             unsafe { vibeos_longjmp(core::ptr::addr_of_mut!(vibeos_jmpbuf), 1) };
         }
         ST_SKIP if want == vector => {
@@ -305,18 +321,23 @@ pub fn catch_panic<F: FnOnce()>(f: F) -> bool {
 }
 
 /// Longjmp out of an armed `catch_alloc`, on the CPU that armed it only.
-pub fn on_alloc_error(layout: Layout) {
+pub fn on_alloc_error(_layout: Layout) {
     if armed_here() == ST_ALLOC {
         disarm();
+        // SAFETY: invariant: an armed window lies inside `with_thunk`'s call,
+        // so `vibeos_jmpbuf` holds the context `vibeos_catch` saved on a frame
+        // that is still live; established by `arch::x86_64::catch::with_thunk`.
         unsafe { vibeos_longjmp(core::ptr::addr_of_mut!(vibeos_jmpbuf), 1) };
     }
-    let _ = layout;
 }
 
 /// Longjmp out of an armed `catch_panic`, on the CPU that armed it only.
 pub fn on_panic() {
     if armed_here() == ST_PANIC {
         disarm();
+        // SAFETY: invariant: an armed window lies inside `with_thunk`'s call,
+        // so `vibeos_jmpbuf` holds the context `vibeos_catch` saved on a frame
+        // that is still live; established by `arch::x86_64::catch::with_thunk`.
         unsafe { vibeos_longjmp(core::ptr::addr_of_mut!(vibeos_jmpbuf), 1) };
     }
 }

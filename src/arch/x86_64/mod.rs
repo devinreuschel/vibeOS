@@ -11,33 +11,20 @@
 pub(crate) mod apic_init;
 #[cfg(feature = "kernel_tests")]
 #[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::let_underscore_must_use,
+    clippy::unused_result_ok,
+    clippy::disallowed_types,
+    clippy::disallowed_macros,
+    reason = "kernel_tests-only in-guest tests: a failure ends a test, not the kernel"
 )]
-#[allow(clippy::unwrap_used, reason = "audit pending, ROADMAP §10.1")]
 pub mod catch;
 pub mod cpu;
-#[allow(clippy::disallowed_types, reason = "audit pending, ROADMAP §10.1")]
-#[allow(clippy::expect_used, reason = "audit pending, ROADMAP §10.1")]
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 pub mod gdt;
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 pub mod gs;
-#[allow(clippy::panic, reason = "audit pending, ROADMAP §10.1")]
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 pub mod idt;
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 pub mod pic;
 mod trampoline;

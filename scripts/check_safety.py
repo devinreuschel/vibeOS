@@ -58,7 +58,6 @@ PENDING: tuple[str, ...] = (
     "crates/core/src/proc/addr_space/mod.rs",
     "crates/core/src/smp/per_cpu.rs",
     "src/arch/ktest.rs",
-    "src/arch/x86_64/idt.rs",
     "src/log/log_init.rs",
     "src/log/serial/raw.rs",
     "src/proc/addr_space_init.rs",

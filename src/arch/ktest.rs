@@ -36,6 +36,12 @@ const CR0_EM: u64 = 1 << 2;
 const CR0_NW: u64 = 1 << 29;
 const CR0_CD: u64 = 1 << 30;
 
+/// `[base, top)` of one of the BSP's IST stacks.
+fn ist_span(slot: IstSlot) -> (u64, u64) {
+    let s = &arch::gdt::BSP.get().ist[slot.index()];
+    (s.base().as_u64(), s.top().as_u64())
+}
+
 /// Current code selector.
 fn read_cs() -> u16 {
     let val: u16;
@@ -262,7 +268,7 @@ pub(crate) fn test_df_on_ist() -> Outcome {
     let Some(c) = caught else {
         return Outcome::Fail("did not reach df handler");
     };
-    let (lo, hi) = arch::gdt::ist_span(IstSlot::DoubleFault);
+    let (lo, hi) = ist_span(IstSlot::DoubleFault);
     if c.handler_rsp >= lo && c.handler_rsp < hi {
         Outcome::Ok
     } else {

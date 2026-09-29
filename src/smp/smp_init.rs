@@ -206,7 +206,7 @@ fn start_one(a: ApAlloc) -> bool {
             return false;
         }
     };
-    let tables_ptr = a.tables.tables.as_ref() as *const CpuTables as *mut CpuTables;
+    let tables_ptr = &*a.tables.tables as *const CpuTables as *mut CpuTables;
     STARTING.with(|starting| {
         starting.cpu = cpu_ptr;
         starting.cpu_tables = tables_ptr;
