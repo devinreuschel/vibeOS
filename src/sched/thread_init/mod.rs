@@ -1265,6 +1265,9 @@ pub fn with_sched_lock<R>(f: impl FnOnce() -> R) -> R {
 
 pub(crate) fn with_sched<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
     let ctx = sync_init::sleep_ctx();
+    // Dropped last, once the places are delivered.
+    #[cfg(feature = "kernel_tests")]
+    let _window = testing::window_enter();
     let (r, places, n) = {
         let mut s = SCHED.lock();
         s.waiter = ctx;

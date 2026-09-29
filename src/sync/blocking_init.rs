@@ -37,8 +37,6 @@ fn me() -> ThreadId {
 /// Sleep until woken. `WaitOutcome::Timeout` only when the wait's deadline
 /// passed, so a wait with no deadline (`deadline_of(None)`) never returns it.
 fn wait_resume() -> WaitOutcome {
-    #[cfg(feature = "kernel_tests")]
-    thread_init::testing::wait_window();
     thread_init::schedule();
     thread_init::last_wait_outcome()
 }

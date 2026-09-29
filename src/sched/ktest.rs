@@ -4,11 +4,13 @@ mod counted;
 mod hooks;
 mod reclaim;
 mod registry;
+mod requeue;
 mod sleep;
 pub(crate) use counted::test_counted_deferred_release;
 pub(crate) use hooks::{RequeueGuard, requeues, set_requeue_next_cpu, work_live};
 pub(crate) use reclaim::dead_list_batched_rounds;
 pub(crate) use registry::{test_ktest_fail_fmt, test_ktest_helpers, test_ktest_rows};
+pub(crate) use requeue::test_requeue_moves_each_dequeue;
 pub(crate) use sleep::{
     block_in_hard_irq_asserts, in_hard_irq_top_bottom, lock_across_switch_asserts,
     sleep_under_spinlock_asserts,
@@ -1438,6 +1440,10 @@ pub(crate) const TESTS: &[Test] = &[
     test("exit_burst", exit_burst).deadline(60_000),
     test("lifetime_dead_slot_on_cpu", lifetime_dead_slot_on_cpu).deadline(180_000),
     test("fp_no_leak", test_fp_no_leak).deadline(60_000),
+    test(
+        "requeue_moves_each_dequeue",
+        test_requeue_moves_each_dequeue,
+    ),
     test("fp_migrate_counter", test_fp_migrate_counter).deadline(30_000),
     test("lock_across_switch_asserts", lock_across_switch_asserts),
     test("block_in_hard_irq_asserts", block_in_hard_irq_asserts),

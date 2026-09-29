@@ -98,6 +98,47 @@ pub(in crate::sched) static REQUEUES: AtomicU64 = AtomicU64::new(0);
 pub(in crate::sched) static ARRIVED: [AtomicBool; MAX_THREADS] =
     [const { AtomicBool::new(false) }; MAX_THREADS];
 
+/// A `CpuAffinity::Any` kernel thread, a thread the requeue hook may
+/// move, that does not run until [`queue_here`] queues it on a CPU. It
+/// waits `Blocked` on no queue, with no deadline, so a stale run-queue
+/// entry for its slot cannot run it (`thread_init::runnable_on`). Its
+/// entry starts at `irq_nest` 1, IF off, on the CPU that first runs it:
+/// no tick or IPI can switch it off, and the hook move it on, first.
+pub fn spawn_parked_any(
+    name: &'static str,
+    entry: fn(),
+) -> Result<super::ThreadHandle, super::SpawnError> {
+    let h = super::spawn_inner(
+        name,
+        entry,
+        CpuAffinity::Any,
+        false,
+        1,
+        0,
+        0,
+        vibeos::kva::DEFAULT_STACK_PAGES,
+    )?;
+    with_sched(|s| {
+        if let Some(t) = s.get_mut(h.id()) {
+            t.state = ThreadState::Blocked { wq: 0 };
+        }
+    });
+    Ok(h)
+}
+
+/// Make [`spawn_parked_any`]'s thread `id` Ready on this CPU's run queue.
+pub fn queue_here(id: ThreadId) {
+    let me = super::current_cpu();
+    with_sched(|s| {
+        let Some(t) = s.get_mut(id) else {
+            return;
+        };
+        t.state = ThreadState::Ready;
+        t.cpu = me;
+        s.place(me, id);
+    });
+}
+
 pub(super) fn requeue_on() -> bool {
     REQUEUE.load(Ordering::Acquire)
 }
@@ -139,10 +180,11 @@ static PLACE_TID: AtomicU32 = AtomicU32::new(u32::MAX);
 /// Set when [`place_stall`] delivered its wake after the thread died.
 static PLACE_LATE: AtomicBool = AtomicBool::new(false);
 
-/// Hold `id`'s next blocking wait (`sync_init::wait_resume`) between the
-/// store that queues it on the wait queue and its `schedule`, IF=0,
-/// until [`arm_late_wake`]'s held wake lets it go or 2 s pass. The
-/// thread calls it on itself before it blocks.
+/// Hold `id`'s next blocking wait between the store that queues it on the
+/// wait queue and its `schedule`, IF=0, until [`arm_late_wake`]'s held
+/// wake lets it go or 2 s pass: the `with_sched` whose section leaves it
+/// `Blocked` holds it once SCHED has dropped. The thread calls it on
+/// itself before it blocks.
 pub fn arm_wait_window(id: ThreadId) {
     WINDOW_GO.store(false, Ordering::Relaxed);
     WINDOW_HELD.store(false, Ordering::Relaxed);
@@ -154,17 +196,45 @@ pub fn wait_window_held() -> bool {
     WINDOW_HELD.load(Ordering::Acquire)
 }
 
-/// Called by `sync_init::wait_resume` before it schedules.
-pub fn wait_window() {
-    let me = super::current_id().raw();
+/// Called by `with_sched` before it takes SCHED: IF off for each section
+/// of [`arm_wait_window`]'s thread until the returned guard drops, after
+/// the section's places are delivered. SCHED's own guard would turn IF
+/// back on as it drops, and a tick between that and the hold would switch
+/// the thread off `Blocked`, so that it reached the hold only once woken.
+pub(super) fn window_enter() -> Option<WindowGuard> {
+    let armed = WINDOW_TID.load(Ordering::Acquire);
+    (armed != u32::MAX && armed == super::current_id().raw()).then(|| WindowGuard {
+        _irq: crate::x86::InterruptGuard::enter(),
+    })
+}
+
+/// [`window_enter`]'s guard: on drop it runs [`wait_window`], then turns
+/// IF back on.
+pub(super) struct WindowGuard {
+    _irq: crate::x86::InterruptGuard,
+}
+
+impl Drop for WindowGuard {
+    fn drop(&mut self) {
+        wait_window();
+    }
+}
+
+/// Holds the thread, IF off under [`window_enter`]'s guard, when its
+/// `with_sched` section left it `Blocked`: the wait's queueing is done and
+/// its `schedule` not yet.
+fn wait_window() {
+    let me = super::current_id();
+    if !matches!(try_state(me), Some(ThreadState::Blocked { .. })) {
+        return;
+    }
+    let me = me.raw();
     if WINDOW_TID
         .compare_exchange(me, u32::MAX, Ordering::AcqRel, Ordering::Relaxed)
         .is_err()
     {
         return;
     }
-    // IF=0 so no tick switches the held thread off before the wake.
-    let _irq = crate::x86::InterruptGuard::enter();
     WINDOW_HELD.store(true, Ordering::Release);
     let end =
         time_init::read_tsc().saturating_add(LATE_WAKE_MS.saturating_mul(time_init::tsc_per_ms()));
@@ -256,9 +326,16 @@ pub fn cpu_of(id: ThreadId) -> u32 {
 /// only runnable one here stays queued while this CPU runs idle, whose
 /// dequeue then moves it. Never the running thread, an idle thread, or a
 /// pinned kernel thread; the move goes out through `place` after the
-/// SCHED lock drops, before any switch.
-pub(super) fn requeue_next_cpu(next: ThreadId, cur: ThreadId, idle: ThreadId, me: u32) -> ThreadId {
-    if !requeue_on() || next == idle {
+/// SCHED lock drops, before any switch. Each entry dequeued after a move
+/// goes through the hook too, so a movable thread queued behind a moved
+/// one moves as well.
+pub(super) fn requeue_next_cpu(
+    mut next: ThreadId,
+    cur: ThreadId,
+    idle: ThreadId,
+    me: u32,
+) -> ThreadId {
+    if !requeue_on() {
         return next;
     }
     let Some(target) = next_online_cpu(me) else {
@@ -267,41 +344,46 @@ pub(super) fn requeue_next_cpu(next: ThreadId, cur: ThreadId, idle: ThreadId, me
     // A stale entry's thread is not runnable here and does not move:
     // `schedule_inner` drops the entry.
     let movable = |t: &Tcb| runnable_on(t, me) && (t.pid != 0 || t.affinity == CpuAffinity::Any);
-    if next == cur {
-        if with_sched(|s| s.get(cur).is_some_and(movable)) {
-            per_cpu_init::with_current(|cpu| cpu.runq.push_back(cur));
-            return idle;
+    loop {
+        if next == idle {
+            return next;
         }
-        return next;
+        if next == cur {
+            if with_sched(|s| s.get(cur).is_some_and(movable)) {
+                per_cpu_init::with_current(|cpu| cpu.runq.push_back(cur));
+                return idle;
+            }
+            return next;
+        }
+        let did_move = with_sched(|s| {
+            let Some(slot) = s.slot_of(next) else {
+                return false;
+            };
+            if take_arrived(slot) {
+                return false;
+            }
+            let Some(t) = s.get_mut(next) else {
+                return false;
+            };
+            if !movable(t) {
+                return false;
+            }
+            t.cpu = target;
+            if t.pid != 0 {
+                t.affinity = CpuAffinity::Pinned(target);
+            }
+            // Before the place: `with_sched` hands the thread to `target` as
+            // its lock drops, and a dequeue there that finds no arrival would
+            // move it again.
+            moved(slot);
+            s.place(target, next);
+            true
+        });
+        if !did_move {
+            return next;
+        }
+        next = per_cpu_init::with_current(|cpu| take_next(&mut cpu.runq, idle));
     }
-    let did_move = with_sched(|s| {
-        let Some(slot) = s.slot_of(next) else {
-            return false;
-        };
-        if take_arrived(slot) {
-            return false;
-        }
-        let Some(t) = s.get_mut(next) else {
-            return false;
-        };
-        if !movable(t) {
-            return false;
-        }
-        t.cpu = target;
-        if t.pid != 0 {
-            t.affinity = CpuAffinity::Pinned(target);
-        }
-        // Before the place: `with_sched` hands the thread to `target` as
-        // its lock drops, and a dequeue there that finds no arrival would
-        // move it again.
-        moved(slot);
-        s.place(target, next);
-        true
-    });
-    if !did_move {
-        return next;
-    }
-    per_cpu_init::with_current(|cpu| take_next(&mut cpu.runq, idle))
 }
 
 /// The incoming thread of the last switch `sync_init::assert_switch_clean`
