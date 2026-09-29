@@ -80,6 +80,12 @@ class TestPasses(unittest.TestCase):
     def test_unlisted_subsystem_ktest_body(self) -> None:
         self.assertEqual(run(kernel=KERNEL | {"mm/ktest.rs"}), [])
 
+    def test_unlisted_subsystem_ktest_child(self) -> None:
+        kernel = KERNEL | {"mm/ktest.rs", "mm/ktest/heap.rs"}
+        self.assertEqual(run(kernel=kernel), [])
+        self.assertEqual(run(kernel=KERNEL | {"nope/ktest/heap.rs"}),
+                         ["R4: kernel `nope/ktest/heap.rs` is in no row"])
+
     def test_flat_ktest_runner(self) -> None:
         self.assertIn("ktest.rs", check_module_map.FLAT_OK)
         self.assertEqual(run(), [])

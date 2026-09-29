@@ -8,7 +8,6 @@ use alloc::boxed::Box;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use vibeos::addr_space::{UserMemError, UserPerms};
 use vibeos::apic::{Polarity, TimerMode, Trigger};
 use vibeos::block::{BlockError, DeviceState, Op};
 use vibeos::dev::{ClaimError, Device, Driver, IdMatch, ProbeError};
@@ -16,18 +15,16 @@ use vibeos::dma::{self, DMA32_BOUNDARY, DmaAlloc};
 use vibeos::fs::{FsError, InodeKind, O_CREAT, O_RDWR};
 use vibeos::irq::{self, IrqError};
 use vibeos::lock::RANK_DEVICE;
-use vibeos::paging::{PAGE_SIZE_4K, PhysAddr, USER_END, VirtAddr};
+use vibeos::paging::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
 use vibeos::pci::{self, Bdf, CFG_COMMAND, CFG_VENDOR, CMD_INTX_DISABLE, CMD_MASTER, CMD_MEM};
 use vibeos::per_cpu::PerCpuRemote;
 use vibeos::pmm::Frames;
-use vibeos::proc::{SIGILL, wait_exited, wait_signaled, wexitstatus, wifexited};
 use vibeos::thread::{ThreadId, ThreadState};
 use vibeos::time::{CalibSource, Instant, calib_band, calib_in_band};
 use vibeos::vectors;
 use vibeos::virtio::F_VERSION_1;
 
 use crate::acpi_init;
-use crate::addr_space_init;
 use crate::apic_init;
 use crate::block_init::{self, IoWaiter};
 use crate::cache_init;
@@ -44,11 +41,9 @@ use crate::part_init;
 use crate::pci_init;
 use crate::per_cpu_init;
 use crate::pmm_init;
-use crate::proc_init;
 use crate::sched_init;
 use crate::smp_init;
 use crate::sync_init::{BlockingMutex, Channel, Condvar, RwLock, Semaphore, SpinMutex};
-use crate::syscall_init;
 use crate::thread_init::{self, ThreadHandle};
 use crate::time_init;
 use crate::vibefs_init;
@@ -56,9 +51,8 @@ use crate::virtio_blk_init;
 use crate::virtio_init;
 use crate::work_init;
 use crate::x86;
-use crate::{acpi, arch, mm};
+use crate::{acpi, arch, mm, proc};
 pub(crate) mod user;
-use user::user_code;
 
 const ISA_DEBUG_EXIT: u16 = 0xF4;
 const EXIT_PASS: u32 = 0x10;
@@ -181,22 +175,16 @@ impl Test {
 
 pub(crate) type Suite = &'static [Test];
 
-mod p10_s01;
 mod p10_s02;
 mod p10_s04;
 mod p10_s05;
-mod p10_s07;
 mod p10_s08;
 mod p10_s09;
 mod p10_s11;
 mod p10_s12;
 mod p10_s13;
 mod p10_s17;
-mod p10_s18;
 mod p10_s19;
-mod p10_s20;
-mod p10_s21;
-mod p10_s22;
 mod p10_s23;
 
 /// Rows run in this order. A new test goes in its subsystem's ktest.rs, and its row goes after the
@@ -220,15 +208,21 @@ pub(crate) const TESTS: &[Test] = &[
     test("star_sysret_layout", arch::ktest::test_star_sysret_layout),
     test(
         "addrspace_map_unmap_teardown",
-        test_addrspace_map_unmap_teardown,
+        proc::ktest::test_addrspace_map_unmap_teardown,
     ),
-    test("user_ptr_helpers", test_user_ptr_helpers),
-    test("cr3_switch_skip", test_cr3_switch_skip),
-    test("ring3_syscall_enosys", test_ring3_syscall_enosys),
-    test("ring3_hello_exit", test_ring3_hello_exit),
-    test("syscall_dispatch", test_syscall_dispatch),
-    test("syscall_ptr_validate", test_syscall_ptr_validate),
-    test("user_syscalls", test_user_syscalls),
+    test("user_ptr_helpers", proc::ktest::test_user_ptr_helpers),
+    test("cr3_switch_skip", proc::ktest::test_cr3_switch_skip),
+    test(
+        "ring3_syscall_enosys",
+        proc::ktest::test_ring3_syscall_enosys,
+    ),
+    test("ring3_hello_exit", proc::ktest::test_ring3_hello_exit),
+    test("syscall_dispatch", proc::ktest::test_syscall_dispatch),
+    test(
+        "syscall_ptr_validate",
+        proc::ktest::test_syscall_ptr_validate,
+    ),
+    test("user_syscalls", proc::ktest::test_user_syscalls),
     test("int3_roundtrip", arch::ktest::test_int3_roundtrip),
     test("scoped_pf", arch::ktest::test_scoped_pf),
     test("gp_catch", arch::ktest::test_gp_catch),
@@ -332,10 +326,13 @@ pub(crate) const TESTS: &[Test] = &[
     test("ktest_rows", test_ktest_rows),
     test("ktest_fail_fmt", test_ktest_fail_fmt),
     test("ktest_helpers", test_ktest_helpers),
-    test("user_code_exit", p10_s01::test_user_code_exit),
-    test("user_image_elf", p10_s01::test_user_image_elf),
-    test("user_code_layout", p10_s01::test_user_code_layout),
-    test("orphan_freed_no_init", p10_s01::test_orphan_freed_no_init),
+    test("user_code_exit", proc::ktest::test_user_code_exit),
+    test("user_image_elf", proc::ktest::test_user_image_elf),
+    test("user_code_layout", proc::ktest::test_user_code_layout),
+    test(
+        "orphan_freed_no_init",
+        proc::ktest::test_orphan_freed_no_init,
+    ),
     test("ktest_context", p10_s02::ktest_context),
     test("msix_cpu_publish_last", p10_s02::msix_cpu_publish_last),
     test(
@@ -356,7 +353,7 @@ pub(crate) const TESTS: &[Test] = &[
     ),
     test(
         "teardown_live_root_asserts",
-        p10_s07::teardown_live_root_asserts,
+        proc::ktest::teardown_live_root_asserts,
     ),
     test(
         "vmap_32_frames_unmapped",
@@ -418,25 +415,33 @@ pub(crate) const TESTS: &[Test] = &[
     test("user_device_irq", arch::ktest::test_user_device_irq).deadline(30_000),
     test("user_ipi", arch::ktest::test_user_ipi).deadline(30_000),
     test("cpu_control_regs", arch::ktest::cpu_control_regs),
-    test("console_read_exit", p10_s17::test_console_read_exit).deadline(30_000),
-    test("user_entry_irq", p10_s17::test_user_entry_irq).deadline(120_000),
-    test("exec_top_page_enoexec", p10_s17::test_exec_top_page_enoexec).deadline(30_000),
+    test("console_read_exit", proc::ktest::test_console_read_exit).deadline(30_000),
+    test("user_entry_irq", proc::ktest::test_user_entry_irq).deadline(120_000),
+    test(
+        "exec_top_page_enoexec",
+        proc::ktest::test_exec_top_page_enoexec,
+    )
+    .deadline(30_000),
     test(
         "noncanonical_rip_sigsegv",
-        p10_s17::test_noncanonical_rip_sigsegv,
+        proc::ktest::test_noncanonical_rip_sigsegv,
     )
     .deadline(30_000),
     test("fp_no_leak", p10_s17::test_fp_no_leak).deadline(60_000),
     test("fp_migrate_counter", p10_s17::test_fp_migrate_counter).deadline(30_000),
-    test("exec_huge_memsz", p10_s18::test_exec_huge_memsz).deadline(60_000),
-    test("brk_mmap_munmap_user", p10_s18::test_brk_mmap_munmap_user).deadline(30_000),
+    test("exec_huge_memsz", proc::ktest::test_exec_huge_memsz).deadline(60_000),
     test(
-        "stop_cont_no_lost_wakeup",
-        p10_s19::test_stop_cont_no_lost_wakeup,
+        "brk_mmap_munmap_user",
+        proc::ktest::test_brk_mmap_munmap_user,
     )
     .deadline(30_000),
-    test("syscall_body_if_on", p10_s19::test_syscall_body_if_on).deadline(30_000),
-    test("kill_line_whole", p10_s19::test_kill_line_whole).deadline(30_000),
+    test(
+        "stop_cont_no_lost_wakeup",
+        proc::ktest::test_stop_cont_no_lost_wakeup,
+    )
+    .deadline(30_000),
+    test("syscall_body_if_on", proc::ktest::test_syscall_body_if_on).deadline(30_000),
+    test("kill_line_whole", proc::ktest::test_kill_line_whole).deadline(30_000),
     test(
         "console_write_newlines",
         p10_s19::test_console_write_newlines,
@@ -449,16 +454,20 @@ pub(crate) const TESTS: &[Test] = &[
     .deadline(60_000),
     test(
         "kalloc_fail_after_hook",
-        p10_s20::test_kalloc_fail_after_hook,
+        proc::ktest::test_kalloc_fail_after_hook,
     ),
-    test("kalloc_nomem", p10_s20::test_kalloc_nomem).deadline(120_000),
-    test("syscall_rcx_canary", p10_s21::test_syscall_rcx_canary).deadline(30_000),
-    test("fork_child_gprs", p10_s21::test_fork_child_gprs).deadline(30_000),
-    test("preempt_gpr_canaries", p10_s21::test_preempt_gpr_canaries).deadline(60_000),
-    test("user_single_step", p10_s21::test_user_single_step).deadline(30_000),
-    test("user_int1", p10_s21::test_user_int1).deadline(30_000),
-    test("user_tf_repin", p10_s21::test_user_tf_repin).deadline(60_000),
-    test("user_fork_wait_stall", p10_s22::user_fork_wait_stall),
+    test("kalloc_nomem", proc::ktest::test_kalloc_nomem).deadline(120_000),
+    test("syscall_rcx_canary", proc::ktest::test_syscall_rcx_canary).deadline(30_000),
+    test("fork_child_gprs", proc::ktest::test_fork_child_gprs).deadline(30_000),
+    test(
+        "preempt_gpr_canaries",
+        proc::ktest::test_preempt_gpr_canaries,
+    )
+    .deadline(60_000),
+    test("user_single_step", proc::ktest::test_user_single_step).deadline(30_000),
+    test("user_int1", proc::ktest::test_user_int1).deadline(30_000),
+    test("user_tf_repin", proc::ktest::test_user_tf_repin).deadline(60_000),
+    test("user_fork_wait_stall", proc::ktest::user_fork_wait_stall),
     test(
         "shootdown_ack_while_busy",
         p10_s23::shootdown_ack_while_busy,
@@ -812,306 +821,6 @@ pub(crate) fn free_frames_owned(f: Frames) {
 
 pub(crate) fn cpu_remote(id: u32) -> Option<&'static PerCpuRemote> {
     per_cpu_init::cpu(id)
-}
-
-fn test_addrspace_map_unmap_teardown() -> Outcome {
-    let before = quiescent_free_frames();
-    let Some(mut space) = addr_space_init::create() else {
-        return Outcome::Fail("create");
-    };
-    // Above the 512 MiB GLOBAL low-identity window (DESIGN §4.1).
-    let va = 0x0000_0000_4000_0000u64;
-    if unsafe { addr_space_init::map_anon(&mut space, va, PAGE_SIZE_4K * 2, UserPerms::RW) }
-        .is_err()
-    {
-        return Outcome::Fail("map_anon");
-    }
-    // IF stays off while this thread runs on `space`'s CR3: the registry
-    // thread has IF=1 and `as_cr3 == 0`, so a switch away and back in this
-    // window would reload the kernel CR3 under the user VA below.
-    let irqs_off = x86::InterruptGuard::enter();
-    addr_space_init::load_cr3(&space);
-    x86::invlpg(va);
-    // User PTE: SMAP would #PF a kernel store/load via this VA.
-    x86::stac();
-    unsafe {
-        (va as *mut u64).write_volatile(0x1111_2222_3333_4444);
-    }
-    let got = unsafe { (va as *const u64).read_volatile() };
-    x86::clac();
-    if got != 0x1111_2222_3333_4444 {
-        addr_space_init::load_kernel_cr3();
-        drop(irqs_off);
-        addr_space_init::teardown(space);
-        return Outcome::Fail("readback");
-    }
-    if unsafe { addr_space_init::unmap(&mut space, va, PAGE_SIZE_4K * 2) }.is_err() {
-        addr_space_init::load_kernel_cr3();
-        drop(irqs_off);
-        addr_space_init::teardown(space);
-        return Outcome::Fail("unmap");
-    }
-    addr_space_init::load_kernel_cr3();
-    drop(irqs_off);
-    let st = addr_space_init::teardown(space);
-    if st.pt_frames == 0 {
-        return Outcome::Fail("teardown pt");
-    }
-    if quiescent_free_frames() != before {
-        return Outcome::Fail("frame leak");
-    }
-    Outcome::Ok
-}
-
-fn test_user_ptr_helpers() -> Outcome {
-    let Some(mut space) = addr_space_init::create() else {
-        return Outcome::Fail("create");
-    };
-    let va = 0x0000_0000_4000_0000u64;
-    if unsafe { addr_space_init::map_anon(&mut space, va, PAGE_SIZE_4K, UserPerms::RW) }.is_err() {
-        addr_space_init::teardown(space);
-        return Outcome::Fail("map");
-    }
-    if space.check_user_range(va, 8).is_err() {
-        addr_space_init::teardown(space);
-        return Outcome::Fail("mapped range");
-    }
-    if space.check_user_range(0, 8) != Err(UserMemError::NullGuard) {
-        addr_space_init::teardown(space);
-        return Outcome::Fail("null guard");
-    }
-    if space.check_user_range(0xFFFF_8000_0000_1000, 8) != Err(UserMemError::Kernel) {
-        addr_space_init::teardown(space);
-        return Outcome::Fail("kernel ptr");
-    }
-    if space.check_user_range(u64::MAX, 2) != Err(UserMemError::Overflow) {
-        addr_space_init::teardown(space);
-        return Outcome::Fail("overflow");
-    }
-    if space.check_user_range(va + PAGE_SIZE_4K, 8) != Err(UserMemError::Unmapped) {
-        addr_space_init::teardown(space);
-        return Outcome::Fail("unmapped");
-    }
-    if space.check_user_range(USER_END, 8) != Err(UserMemError::NonCanonical) {
-        addr_space_init::teardown(space);
-        return Outcome::Fail("user end");
-    }
-    addr_space_init::teardown(space);
-    Outcome::Ok
-}
-
-fn test_cr3_switch_skip() -> Outcome {
-    let Some(a) = addr_space_init::create() else {
-        return Outcome::Fail("create a");
-    };
-    let Some(b) = addr_space_init::create() else {
-        addr_space_init::teardown(a);
-        return Outcome::Fail("create b");
-    };
-    // IF stays off while this thread runs on a user CR3 (see
-    // test_addrspace_map_unmap_teardown): a switch away and back would reload
-    // the kernel CR3 between the load and the read.
-    let irqs_off = x86::InterruptGuard::enter();
-    addr_space_init::load_cr3(&a);
-    let cr3_a = x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK;
-    if !addr_space_init::cr3_was_skipped(&a) {
-        addr_space_init::load_kernel_cr3();
-        drop(irqs_off);
-        addr_space_init::teardown(a);
-        addr_space_init::teardown(b);
-        return Outcome::Fail("a not recorded");
-    }
-    addr_space_init::load_cr3(&a);
-    if (x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK) != cr3_a {
-        addr_space_init::load_kernel_cr3();
-        drop(irqs_off);
-        addr_space_init::teardown(a);
-        addr_space_init::teardown(b);
-        return Outcome::Fail("skip mutated cr3");
-    }
-    addr_space_init::load_cr3(&b);
-    let cr3_b = x86::read_cr3() & vibeos::paging::PTE_ADDR_MASK;
-    if cr3_b == cr3_a {
-        addr_space_init::load_kernel_cr3();
-        drop(irqs_off);
-        addr_space_init::teardown(a);
-        addr_space_init::teardown(b);
-        return Outcome::Fail("b shares a cr3");
-    }
-    addr_space_init::load_kernel_cr3();
-    drop(irqs_off);
-    addr_space_init::teardown(a);
-    addr_space_init::teardown(b);
-    Outcome::Ok
-}
-
-// syscall 0xC0FFEE, then `ud2` if rax is -ENOSYS, else exit(1).
-user_code!(
-    ENOSYS_PROBE,
-    "
-    mov eax, 0xC0FFEE
-    syscall
-    cmp rax, -38
-    jne 1f
-    ud2
-1:
-    mov edi, 1
-    mov eax, 60
-    syscall
-    ud2
-    "
-);
-
-fn test_ring3_syscall_enosys() -> Outcome {
-    let before = quiescent_free_frames();
-    let st = match user::run(&user::Image::Code(ENOSYS_PROBE, user::DEFAULT), &["enosys"]) {
-        Ok(st) => st,
-        Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
-    };
-    if st == wait_exited(1) {
-        return Outcome::Fail("rax not -ENOSYS");
-    }
-    if st != wait_signaled(SIGILL) {
-        return crate::fail_fmt!("status {st:#x}, want SIGILL");
-    }
-    let after = quiescent_free_frames();
-    if after != before {
-        crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
-        return Outcome::Fail("enosys frame leak");
-    }
-    Outcome::Ok
-}
-
-fn test_ring3_hello_exit() -> Outcome {
-    let before = quiescent_free_frames();
-    let pid = match proc_init::spawn_elf("/hello", 0, 0) {
-        Ok(pid) => pid,
-        Err(e) => return crate::fail_fmt!("spawn /hello: {}", e.as_str()),
-    };
-    let st = proc_init::wait_kernel(pid);
-    if st != wait_exited(42) {
-        return crate::fail_fmt!("hello status {st:#x}, want exited 42");
-    }
-    let after = quiescent_free_frames();
-    if after != before {
-        crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
-        return Outcome::Fail("hello frame leak");
-    }
-    Outcome::Ok
-}
-
-fn test_syscall_dispatch() -> Outcome {
-    if syscall_init::dispatch(vibeos::syscall::SYS_GETPID, [0; 6]) != 0 {
-        return Outcome::Fail("getpid");
-    }
-    if syscall_init::dispatch(vibeos::syscall::SYS_SCHED_YIELD, [0; 6]) != 0 {
-        return Outcome::Fail("yield");
-    }
-    if syscall_init::dispatch(vibeos::syscall::SYS_WRITE, [3, 0, 1, 0, 0, 0])
-        != vibeos::syscall::neg(vibeos::syscall::EBADF)
-    {
-        return Outcome::Fail("ebadf");
-    }
-    if syscall_init::dispatch(0xC0FFEE, [0; 6]) != vibeos::syscall::neg(vibeos::syscall::ENOSYS) {
-        return Outcome::Fail("enosys");
-    }
-    Outcome::Ok
-}
-
-// write(1, "hi\n" in its page, 3) must return 3; then NULL/8, a kernel
-// pointer/8, the unmapped page after its own/8, and -1/2 must each return
-// -EFAULT. Exits 11 to 15 at the first mismatch, else 0.
-user_code!(
-    PTR_VALIDATE,
-    "
-    lea rbx, [rip]
-    and rbx, -4096
-    mov edi, 1
-    lea rsi, [rip + 9f]
-    mov edx, 3
-    mov eax, 1
-    syscall
-    mov r12d, 11
-    cmp rax, 3
-    jne 8f
-    mov edi, 1
-    xor esi, esi
-    mov edx, 8
-    mov eax, 1
-    syscall
-    mov r12d, 12
-    cmp rax, -14
-    jne 8f
-    mov edi, 1
-    mov rsi, 0xFFFF800000001000
-    mov edx, 8
-    mov eax, 1
-    syscall
-    mov r12d, 13
-    cmp rax, -14
-    jne 8f
-    mov edi, 1
-    lea rsi, [rbx + 0x1000]
-    mov edx, 8
-    mov eax, 1
-    syscall
-    mov r12d, 14
-    cmp rax, -14
-    jne 8f
-    mov edi, 1
-    mov rsi, -1
-    mov edx, 2
-    mov eax, 1
-    syscall
-    mov r12d, 15
-    cmp rax, -14
-    jne 8f
-    xor r12d, r12d
-8:
-    mov edi, r12d
-    mov eax, 60
-    syscall
-    ud2
-9:
-    .byte 0x68, 0x69, 0x0a
-    "
-);
-
-fn test_syscall_ptr_validate() -> Outcome {
-    let st = match user::run(&user::Image::Code(PTR_VALIDATE, user::DEFAULT), &["ptrs"]) {
-        Ok(st) => st,
-        Err(e) => return crate::fail_fmt!("spawn: {}", e.as_str()),
-    };
-    if !wifexited(st) {
-        return crate::fail_fmt!("status {st:#x}, want exited");
-    }
-    match wexitstatus(st) {
-        0 => Outcome::Ok,
-        11 => Outcome::Fail("good write"),
-        12 => Outcome::Fail("null"),
-        13 => Outcome::Fail("kernel ptr"),
-        14 => Outcome::Fail("unmapped"),
-        15 => Outcome::Fail("overflow"),
-        code => crate::fail_fmt!("exit {code}"),
-    }
-}
-
-fn test_user_syscalls() -> Outcome {
-    let before = quiescent_free_frames();
-    let pid = match proc_init::spawn_elf("/bin/tests", 0, 0) {
-        Ok(pid) => pid,
-        Err(e) => return crate::fail_fmt!("spawn /bin/tests: {}", e.as_str()),
-    };
-    let st = proc_init::wait_kernel(pid);
-    if st != wait_exited(0) {
-        return crate::fail_fmt!("tests status {st:#x}, want exited 0");
-    }
-    let after = quiescent_free_frames();
-    if after != before {
-        crate::marker!("vibeOS: ktest:   frames {before} -> {after}");
-        return Outcome::Fail("tests frame leak");
-    }
-    Outcome::Ok
 }
 
 fn test_irqcell_reentry_panics() -> Outcome {

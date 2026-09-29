@@ -12,7 +12,8 @@ one path component, and `—` is an empty cell. Rules:
 - R2: every literal path exists, and every `*` token matches a file.
 - R3: no file is listed twice.
 - R4: every `.rs`, `.S` and `.asm` file under the two roots is listed, except
-  a kernel `<s>/ktest.rs` for a row `<s>` (C-KTEST-LAYOUT).
+  a kernel `<s>/ktest.rs`, or a `<s>/ktest/<topic>.rs` child of it, for a row
+  `<s>` (C-KTEST-LAYOUT).
 - R5: outside `crate`, row `<s>`'s paths start with `<s>/`, except the kernel
   paths in `FLAT_OK`.
 - R6: a kernel module `<n>_init` sits in a directory its portable `<n>`
@@ -162,6 +163,14 @@ def _parent(path: str) -> str:
     return path.rsplit("/", 1)[0] if "/" in path else ""
 
 
+def _ktest_body(path: str, subs: set[str]) -> bool:
+    """A kernel `<s>/ktest.rs`, or a `<s>/ktest/<topic>.rs` child, for a row `<s>`."""
+    if path.endswith("/" + KTEST_BODY):
+        return _parent(path) in subs
+    parent = _parent(path)
+    return parent.endswith("/" + KTEST_BODY[:-3]) and _parent(parent) in subs
+
+
 def _init_name(path: str) -> tuple[str, str] | None:
     """(`<n>`, directory) of a kernel `<d>/<n>_init.rs` or `<d>/<n>_init/mod.rs`."""
     parts = path.split("/")
@@ -221,8 +230,7 @@ def check(rows: list[Row], core: set[str], kernel: set[str]) -> list[str]:
                     side == "kernel" and path in FLAT_OK):
                 errors.append(f"R5: {side} `{path}` lies outside row {sub}'s directory")
         for path in sorted(files - set(seen)):
-            if side == "kernel" and path.endswith("/" + KTEST_BODY) \
-                    and _parent(path) in subs:
+            if side == "kernel" and _ktest_body(path, subs):
                 continue
             errors.append(f"R4: {side} `{path}` is in no row")
     allowed = _allowed(core_rows)

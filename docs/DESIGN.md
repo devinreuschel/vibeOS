@@ -149,7 +149,8 @@ compiles it under `cfg(test)` through `#[path]`. `user/` holds freestanding ELFs
 **Reading the table.** Paths are relative to `crates/core/src/` (Portable) and `src/` (Kernel).
 `{a,b}` lists files of one directory, and `*` matches within one. Every listed path exists, and every
 `.rs`, `.S` and `.asm` file under the two roots is listed once. Outside the `crate` row, a row's paths
-lie in its subsystem's directory. Test bodies in `src/<s>/ktest.rs` need no row.
+lie in its subsystem's directory. Test bodies in `src/<s>/ktest.rs`, and its `src/<s>/ktest/<topic>.rs`
+children, need no row.
 
 | Subsystem | Portable (`crates/core/src/`) | Kernel (`src/`) |
 |---|---|---|
