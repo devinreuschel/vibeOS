@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from collections.abc import Callable
 
-from tests.harness import results
+from tests.harness import frame, results
 from tests.harness.harness import (
     HarnessError,
     QemuConfig,
@@ -24,10 +25,92 @@ from tests.harness.harness import (
 
 DISK_BYTES = 4 * 1024 * 1024
 
+# `serial_lines_whole` (ROADMAP §10.2, F138): CPU 0 prints SERIAL_WHOLE_N
+# numbered lines while every AP prints noise lines; each ends in SERIAL_PAD.
+SERIAL_WHOLE_OK = "vibeOS: ktest: ok serial_lines_whole"
+SERIAL_WHOLE_N = 1000
+SERIAL_PAD = "0123456789abcdefghijklmnopqrstuvwxyz"
+_SERIAL_WHOLE_RE = re.compile(
+    rf"vibeOS: ktest: serial whole (\d+) of {SERIAL_WHOLE_N} {SERIAL_PAD}"
+)
+_SERIAL_NOISE_RE = re.compile(rf"vibeOS: ktest: serial noise (?:klog )?cpu\d+ \d+ {SERIAL_PAD}")
+# A log-ring replay of one of those lines: `dmesg`, or a panic dump's logrec.
+_RING_REPLAY_RE = re.compile(r"vibeOS: (?:dmesg|logrec): \S+ cpu\d+ \w+ (.*)")
+
 
 def _require_line(lines: list[str], pred: Callable[[str], bool], msg: str) -> None:
     if not any(pred(ln) for ln in lines):
         raise HarnessError(msg)
+
+
+def _check_serial_whole(lines: list[str]) -> None:
+    """Each numbered `serial whole` line appears once, whole (ROADMAP §10.2, F138).
+
+    `lines` are kernel text (`frame.kernel_lines`).
+
+    A line that holds `serial whole` or `serial noise` but is not exactly one
+    such line is a fragment of a line another CPU split. A log-ring replay
+    of a whole line (`dmesg`, `logrec`) is checked for fragments but not
+    counted.
+    """
+    seen = [0] * SERIAL_WHOLE_N
+    for ln in lines:
+        if "serial whole" not in ln and "serial noise" not in ln:
+            continue
+        replay = _RING_REPLAY_RE.fullmatch(ln)
+        text = replay.group(1) if replay is not None else ln
+        whole = _SERIAL_WHOLE_RE.fullmatch(text)
+        if whole is None and _SERIAL_NOISE_RE.fullmatch(text) is None:
+            raise HarnessError(f"serial_lines_whole: split line {ln!r}")
+        if whole is None or replay is not None:
+            continue
+        i = int(whole.group(1))
+        if i >= SERIAL_WHOLE_N:
+            raise HarnessError(f"serial_lines_whole: number out of range: {ln!r}")
+        seen[i] += 1
+    bad = [i for i, n in enumerate(seen) if n != 1]
+    if bad:
+        raise HarnessError(
+            f"serial_lines_whole: {SERIAL_WHOLE_N - len(bad)} of {SERIAL_WHOLE_N} "
+            f"numbered lines whole; line {bad[0]} seen {seen[bad[0]]} times"
+        )
+
+
+# `serial_frame` (DESIGN §2.6): a framed line with `\n`, `\r` and 0x1E inside,
+# console bytes from the kernel that leave their line open, then a framed line.
+SERIAL_FRAME_OK = "vibeOS: ktest: ok serial_frame"
+SERIAL_FRAME_ESCAPED = "vibeOS: ktest: serial frame a?b?c?d"
+SERIAL_FRAME_OPEN = "?serial-frame open"
+SERIAL_FRAME_AFTER = "vibeOS: ktest: serial frame after open"
+
+
+def _check_serial_frame(lines: list[str]) -> None:
+    """`serial_frame`'s three lines, from raw serial `lines`.
+
+    The first is framed with each of `\n`, `\r` and 0x1E as `?`; the console
+    bytes are one unframed line with the 0x1E as `?`; and the last is framed,
+    after them, on a line of its own, because the kernel breaks the open user
+    line first.
+    """
+    esc = open_at = after = None
+    for i, raw in enumerate(lines):
+        framed, text = frame.split_frame(raw)
+        if framed and text == SERIAL_FRAME_ESCAPED and esc is None:
+            esc = i
+        elif not framed and text == SERIAL_FRAME_OPEN and open_at is None:
+            open_at = i
+        elif framed and text == SERIAL_FRAME_AFTER and after is None:
+            after = i
+    if esc is None:
+        raise HarnessError(f"serial_frame: no framed {SERIAL_FRAME_ESCAPED!r}")
+    if open_at is None:
+        raise HarnessError(f"serial_frame: no unframed line {SERIAL_FRAME_OPEN!r}")
+    if after is None:
+        raise HarnessError(f"serial_frame: no framed {SERIAL_FRAME_AFTER!r}")
+    if not esc < open_at < after:
+        raise HarnessError(
+            f"serial_frame: lines out of order ({esc}, {open_at}, {after})"
+        )
 
 
 def _block_name(name: str) -> Callable[[str], bool]:
@@ -52,20 +135,25 @@ def _ktest_boot(cfg: QemuConfig, timeout: float, *, persist_reboot: bool) -> Run
     """
     raw = run_qemu_until_exit(cfg, timeout_s=timeout)
     results.current().add_boot(qemu_argv(cfg, None), cfg, raw.exit_code)
-    results.current().record_ktest_lines(raw.lines)
+    klines = frame.kernel_lines(raw.lines)
+    results.current().record_ktest_lines(klines)
     check_ktest_output(raw.lines, raw.exit_code)
-    _require_line(raw.lines, _block_name("vda"), "missing virtio-blk marker")
-    _require_line(raw.lines, _block_name("vdap1"), "missing vdap1 marker")
+    if SERIAL_WHOLE_OK in klines:
+        _check_serial_whole(klines)
+    if SERIAL_FRAME_OK in klines:
+        _check_serial_frame(raw.lines)
+    _require_line(klines, _block_name("vda"), "missing virtio-blk marker")
+    _require_line(klines, _block_name("vdap1"), "missing vdap1 marker")
     if persist_reboot:
         _require_line(
-            raw.lines,
+            klines,
             lambda ln: ln == "vibeOS: persist: intact",
             "persist pattern did not survive reboot",
         )
     else:
-        _require_line(raw.lines, _block_name("vdap2"), "missing vdap2 marker")
+        _require_line(klines, _block_name("vdap2"), "missing vdap2 marker")
         _require_line(
-            raw.lines,
+            klines,
             lambda ln: ln == "vibeOS: persist: wrote",
             "missing persist wrote",
         )
@@ -85,8 +173,9 @@ def main() -> int:
             print(f"[ktest] FAIL: {e}", file=sys.stderr)
             return 1
 
-        oks = [ln for ln in raw.lines if ln.startswith("vibeOS: ktest: ok ")]
-        skips = [ln for ln in raw.lines if ln.startswith("vibeOS: ktest: skip ")]
+        klines = frame.kernel_lines(raw.lines)
+        oks = [ln for ln in klines if ln.startswith("vibeOS: ktest: ok ")]
+        skips = [ln for ln in klines if ln.startswith("vibeOS: ktest: skip ")]
         print(
             f"[ktest] ok: {len(oks)} passed, {len(skips)} skipped, exit {raw.exit_code}",
             file=sys.stderr,

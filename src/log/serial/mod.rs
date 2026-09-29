@@ -1,11 +1,16 @@
 //! COM1 serial writer. Uses the register constants from `vibeos::uart`.
 //!
-//! Polled TX with a bounded THRE wait; a dead UART drops the byte rather
-//! than wedging the panic handler (DESIGN §9.6). Byte-granularity TX lock
-//! so SMP CPUs do not interleave bytes (DESIGN §7.7). Once `raw::HALTING`
-//! is set the writes skip the lock so a holder cannot stall the dump.
-//! `log!` uses try-lock + drop. The port I/O, the halt flag and the dump
-//! owner live in [`raw`], which takes no lock and calls nothing above arch.
+//! One call writes one line, framed (DESIGN §2.6, [`raw::put_line`]). `Serial::write_fmt` formats the whole line,
+//! newline included, into a stack buffer of `LINE_CAP` bytes and writes it
+//! under one TX hold, so another CPU cannot split it (DESIGN §7.7, ROADMAP
+//! §10.2 F138); a longer line is cut and ends in `...`. `write_str` writes
+//! its argument as one line, so a caller that builds a line from pieces
+//! uses [`write_line_with`]. Polled TX with a bounded THRE wait; a dead
+//! UART drops the byte rather than wedging the panic handler (DESIGN
+//! §9.6). Once `raw::HALTING` is set the writes skip the lock so a holder
+//! cannot stall the dump. `klog!` uses try-lock + drop. The port I/O, the
+//! halt flag and the dump owner live in [`raw`], which takes no lock and
+//! calls nothing above arch.
 
 pub mod raw;
 
@@ -13,7 +18,9 @@ use core::fmt::{self, Write};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
+use vibeos::fmt_util::StackBuf;
 use vibeos::lock::RANK_SERIAL;
+use vibeos::log::line::LINE_CAP;
 
 use crate::sync_init::SpinMutex;
 use crate::x86::InterruptGuard;
@@ -25,7 +32,7 @@ static TX: SpinMutex<()> = SpinMutex::with_rank((), RANK_SERIAL);
 /// marker (DESIGN §1.2). Unset, nothing is captured.
 static CAPTURE: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
-/// Install the log capture `Serial::write_bytes` calls while `HALTING` is
+/// Install the log capture `Serial::write_line` calls while `HALTING` is
 /// clear.
 pub fn set_capture_hook(f: fn(&[u8])) {
     // Release: pairs with the Acquire load in `capture`.
@@ -60,25 +67,24 @@ impl Serial {
         INITIALIZED.store(true, Ordering::Release);
     }
 
-    pub fn write_bytes(bytes: &[u8]) {
-        let _irq = InterruptGuard::enter();
-        if !halting() {
-            capture(bytes);
-        }
-        Self::write_bytes_plain(bytes);
+    /// Write `content` as one kernel line, captured into the log ring. One
+    /// trailing `\n` is the terminator; without one, the line gets one. A
+    /// line over `LINE_CAP` bytes is cut and ends in `...`.
+    pub fn write_line(content: &[u8]) {
+        emit_bytes(content, true);
     }
 
-    /// TX without ring capture. `dmesg` uses this so a dump cannot wrap
-    /// the ring in copies of itself.
-    pub fn write_bytes_plain(bytes: &[u8]) {
+    /// Console bytes a process wrote: not captured, and not a kernel line,
+    /// so unframed, with each frame byte escaped (DESIGN §2.6).
+    /// `console_init::write` is the only caller.
+    pub fn write_user(bytes: &[u8]) {
         if halting() {
-            // IF=0 for the CPU-index read in `write_after_halt`.
             let _irq = InterruptGuard::enter();
-            raw::write_after_halt(bytes);
+            raw::user_after_halt(bytes);
             return;
         }
         let _g = TX.lock();
-        raw::write_bytes(bytes);
+        raw::put_user(bytes);
     }
 
     /// Poll COM1 RX. No lock; caller holds IRQs off if racing a consumer.
@@ -86,7 +92,8 @@ impl Serial {
         raw::try_read_byte()
     }
 
-    /// ISR / log sink: one lock for the whole buffer, drop the line if busy.
+    /// ISR / log sink: `line`, newline included, as one kernel line under
+    /// one try-lock; the line is dropped if TX is busy. Not captured.
     pub fn try_write_bytes(bytes: &[u8]) -> bool {
         if halting() {
             let _irq = InterruptGuard::enter();
@@ -96,37 +103,100 @@ impl Serial {
         let Some(_g) = TX.try_lock() else {
             return false;
         };
-        raw::write_bytes(bytes);
+        raw::put_line(bytes);
         true
     }
 }
 
+/// Write one whole line, `\n` included, under one TX hold, after one
+/// capture into the log ring when `capture` is set.
+fn emit(line: &[u8], capture: bool) {
+    let _irq = InterruptGuard::enter();
+    if halting() {
+        raw::write_after_halt(line);
+        return;
+    }
+    if capture {
+        self::capture(line);
+    }
+    let _g = TX.lock();
+    raw::put_line(line);
+}
+
+/// `content` as one line: sent as it is when it already ends in its `\n`
+/// and fits, otherwise copied, cut to `LINE_CAP`, and given its `\n`.
+fn emit_bytes(content: &[u8], capture: bool) {
+    if content.ends_with(b"\n") && content.len() <= LINE_CAP + 1 {
+        emit(content, capture);
+        return;
+    }
+    emit_built(capture, |w| w.push_bytes(content));
+}
+
+/// Build one line in a `LINE_CAP` stack buffer with `f`, then emit it.
+fn emit_built(capture: bool, f: impl FnOnce(&mut StackBuf<'_>)) {
+    let mut buf = [0u8; LINE_CAP + 1];
+    let n = {
+        let mut w = StackBuf::new(&mut buf[..LINE_CAP]);
+        f(&mut w);
+        w.mark_cut();
+        let n = w.len();
+        if w.as_bytes().ends_with(b"\n") {
+            n - 1
+        } else {
+            n
+        }
+    };
+    // `n <= LINE_CAP`, so the newline has its byte.
+    if let Some(b) = buf.get_mut(n) {
+        *b = b'\n';
+    }
+    emit(buf.get(..=n).unwrap_or(&[]), capture);
+}
+
+/// [`emit_built`] with a fallible builder. The line is written even when
+/// `f` fails; `f`'s result is returned.
+fn emit_with(capture: bool, f: impl FnOnce(&mut StackBuf<'_>) -> fmt::Result) -> fmt::Result {
+    let mut res = Ok(());
+    emit_built(capture, |w| res = f(w));
+    res
+}
+
+/// Write one kernel line that `f` builds from pieces, captured into the
+/// log ring: the caller of a line assembled by helpers (`write_hex`, a
+/// shared `write_marker`) instead of several `Serial` writes, each of
+/// which would be a line of its own.
+pub fn write_line_with(f: impl FnOnce(&mut StackBuf<'_>) -> fmt::Result) -> fmt::Result {
+    emit_with(true, f)
+}
+
 impl fmt::Write for Serial {
+    /// `s` as one line.
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        Self::write_bytes(s.as_bytes());
+        Self::write_line(s.as_bytes());
         Ok(())
     }
 
+    /// The whole formatted line, newline included, under one TX hold.
     fn write_fmt(&mut self, args: fmt::Arguments<'_>) -> fmt::Result {
-        // One IRQ-off region for the whole formatted write so per-CPU
-        // capture stage cannot mix with a preempting thread (or ISR).
-        let _irq = InterruptGuard::enter();
-        fmt::write(self, args)
+        emit_with(true, |w| w.write_fmt(args))
     }
 }
 
-/// Serial TX that does not land in the log ring.
+/// Serial TX that does not land in the log ring. `dmesg` uses it so a
+/// dump cannot wrap the ring in copies of itself.
 pub struct PlainSerial;
 
 impl fmt::Write for PlainSerial {
+    /// `s` as one line.
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        Serial::write_bytes_plain(s.as_bytes());
+        emit_bytes(s.as_bytes(), false);
         Ok(())
     }
 
+    /// The whole formatted line, newline included, under one TX hold.
     fn write_fmt(&mut self, args: fmt::Arguments<'_>) -> fmt::Result {
-        let _irq = InterruptGuard::enter();
-        fmt::write(self, args)
+        emit_with(false, |w| w.write_fmt(args))
     }
 }
 

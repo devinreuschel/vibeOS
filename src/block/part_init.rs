@@ -3,7 +3,6 @@
 //! Offset-limited windows on ram0 / vda. Marker
 //! `vibeOS: block: <parent>p<N> <n> sectors`.
 
-use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use vibeos::block::{BlockError, write_marker};
@@ -21,7 +20,6 @@ use vibeos::part::{
 
 use crate::block_init;
 use crate::cache_init::{DEV_RAM0, DEV_VDA};
-use crate::serial::Serial;
 use crate::sync_init::SpinMutex;
 use crate::virtio_blk_init;
 
@@ -189,7 +187,7 @@ fn register_parts(dev: u32, t: &Table, bs: u32) -> usize {
             clippy::let_underscore_must_use,
             reason = "a write to Serial cannot fail (DESIGN §2.5)"
         )]
-        let _ = write_marker(&mut Serial, name, p.nsectors).and_then(|()| writeln!(Serial));
+        let _ = crate::serial::write_line_with(|w| write_marker(w, name, p.nsectors));
         added += 1;
         i += 1;
     }

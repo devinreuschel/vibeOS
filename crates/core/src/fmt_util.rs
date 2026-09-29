@@ -1,4 +1,77 @@
-//! Small no-alloc formatting helpers used by the panic path.
+//! Small no-alloc formatting helpers used by the panic path and the
+//! serial line writer.
+
+use core::fmt;
+
+/// A `fmt::Write` over a caller's byte buffer, usually on the stack. It
+/// copies what fits and drops the rest, so it never returns `Err`;
+/// `is_cut` says whether anything was dropped.
+pub struct StackBuf<'a> {
+    buf: &'a mut [u8],
+    pos: usize,
+    cut: bool,
+}
+
+impl<'a> StackBuf<'a> {
+    pub fn new(buf: &'a mut [u8]) -> Self {
+        Self {
+            buf,
+            pos: 0,
+            cut: false,
+        }
+    }
+
+    /// The bytes written so far.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.buf.get(..self.pos).unwrap_or(&[])
+    }
+
+    pub fn len(&self) -> usize {
+        self.pos
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pos == 0
+    }
+
+    /// True once a write did not fit.
+    pub fn is_cut(&self) -> bool {
+        self.cut
+    }
+
+    /// On a cut line, make its last three bytes `...` so a reader sees the
+    /// cut. A line that was not cut is unchanged.
+    pub fn mark_cut(&mut self) {
+        if !self.cut {
+            return;
+        }
+        let start = self.pos.saturating_sub(3);
+        if let Some(tail) = self.buf.get_mut(start..self.pos) {
+            tail.fill(b'.');
+        }
+    }
+
+    /// Append `src`, or as much of it as fits.
+    pub fn push_bytes(&mut self, src: &[u8]) {
+        let space = self.buf.len().saturating_sub(self.pos);
+        let n = src.len().min(space);
+        if n < src.len() {
+            self.cut = true;
+        }
+        let end = self.pos.saturating_add(n);
+        if let (Some(dst), Some(src)) = (self.buf.get_mut(self.pos..end), src.get(..n)) {
+            dst.copy_from_slice(src);
+            self.pos = end;
+        }
+    }
+}
+
+impl fmt::Write for StackBuf<'_> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.push_bytes(s.as_bytes());
+        Ok(())
+    }
+}
 
 /// Write a decimal `u64` into `buf`, returning the slice actually filled.
 /// Never allocates; safe from the panic handler.
@@ -48,7 +121,46 @@ pub fn write_hex(n: u64, buf: &mut [u8]) -> &[u8] {
 
 #[cfg(test)]
 mod tests {
+    use core::fmt::Write;
+
     use super::*;
+    use crate::log::MSG_CAP;
+
+    #[test]
+    fn stackbuf_cuts_and_marks() {
+        let mut b = [0u8; 8];
+        let mut w = StackBuf::new(&mut b);
+        assert!(write!(w, "abc").is_ok());
+        assert!(!w.is_cut());
+        w.mark_cut();
+        assert_eq!(w.as_bytes(), b"abc");
+        assert!(write!(w, "defghijk").is_ok());
+        assert!(w.is_cut());
+        assert_eq!(w.len(), 8);
+        assert_eq!(w.as_bytes(), b"abcdefgh");
+        w.mark_cut();
+        assert_eq!(w.as_bytes(), b"abcde...");
+    }
+
+    #[test]
+    fn stackbuf_room_for_newline_at_msg_cap() {
+        // `log_fmt` formats into the first `MSG_CAP` bytes of a
+        // `MSG_CAP + 1` buffer, so a record at the cap still has a byte
+        // for its newline.
+        let mut b = [0u8; MSG_CAP + 1];
+        let n = {
+            let mut w = StackBuf::new(&mut b[..MSG_CAP]);
+            for _ in 0..MSG_CAP {
+                assert!(w.write_str("xy").is_ok());
+            }
+            assert!(w.is_cut());
+            w.len()
+        };
+        assert_eq!(n, MSG_CAP);
+        b[n] = b'\n';
+        assert_eq!(b[MSG_CAP], b'\n');
+        assert!(b[..MSG_CAP].iter().all(|&c| c == b'x' || c == b'y'));
+    }
 
     #[test]
     fn zero() {

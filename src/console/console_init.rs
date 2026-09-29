@@ -37,7 +37,7 @@ pub fn write(bytes: &[u8]) {
     }
     for chunk in bytes.chunks(CHUNK) {
         if SERIAL_ON.load(Ordering::Acquire) {
-            Serial::write_bytes_plain(chunk);
+            Serial::write_user(chunk);
         }
         if fb {
             fb_init::write(chunk);

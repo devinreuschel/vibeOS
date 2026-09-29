@@ -315,6 +315,8 @@ pub(crate) const TESTS: &[Test] = &[
         "log_reentry_drop_counted",
         log::ktest::test_log_reentry_drop_counted,
     ),
+    test("serial_lines_whole", log::ktest::test_serial_lines_whole).deadline(60_000),
+    test("serial_frame", log::ktest::test_serial_frame),
     test("fb_bgrx_roundtrip", console::ktest::test_fb_bgrx_roundtrip),
     test("fb_pitch", console::ktest::test_fb_pitch),
     test("fb_cr_home", console::ktest::test_fb_cr_home),
