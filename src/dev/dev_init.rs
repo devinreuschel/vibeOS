@@ -3,6 +3,7 @@
 
 use vibeos::dev::{Device, Driver, MAX_DEVICES, Registry};
 use vibeos::lock::RANK_DEVICE;
+use vibeos::log::Level;
 
 use crate::pci_init;
 use crate::sync_init::SpinMutex;
@@ -35,15 +36,27 @@ pub fn bind_all() {
             continue;
         };
         pci_init::enable_mem_master(dev.addr);
-        if let Ok(()) = drv.probe(&mut dev) {
-            let name = drv.name();
-            let mut g = REG.lock();
-            if let Some(slot) = g.get_mut(dev_i as usize)
-                && slot.bound.is_none()
-            {
-                *slot = dev;
-                slot.bound = Some(name);
+        match drv.probe(&mut dev) {
+            Ok(()) => {
+                let name = drv.name();
+                let mut g = REG.lock();
+                if let Some(slot) = g.get_mut(dev_i as usize)
+                    && slot.bound.is_none()
+                {
+                    *slot = dev;
+                    slot.bound = Some(name);
+                }
             }
+            // The device stays unbound, its slot untouched.
+            Err(e) => crate::klog!(
+                Level::Warn,
+                "vibeOS: dev: probe {} {} {:04x}:{:04x} failed: {}",
+                drv.name(),
+                dev.addr,
+                dev.vendor,
+                dev.device_id,
+                e.as_str()
+            ),
         }
         i += 1;
     }
