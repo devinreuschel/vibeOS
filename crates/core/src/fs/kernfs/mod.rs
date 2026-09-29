@@ -37,7 +37,7 @@ use tmpfs::{
     TMPFS_BACK_BYTES, TMPFS_CACHE_PAGES, tmp_free_extent, tmp_read, tmp_truncate, tmp_write,
 };
 
-const TMPFS_DEV: u32 = 0;
+const TMPFS_DEV: u64 = 0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KernKind {

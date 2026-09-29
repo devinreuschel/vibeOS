@@ -135,6 +135,11 @@ fn backend_write(dev: u32, offset: u64, page: &[u8]) -> Result<(), BlockError> {
     raw_write(dev, offset / bs, &page[..n])
 }
 
+/// The device a cache key's id names. Ids above `u32` are no device yet.
+fn key_dev(key: CacheKey) -> Result<u32, BlockError> {
+    u32::try_from(key.dev).map_err(|_| BlockError::Inval)
+}
+
 /// A zeroed page buffer; `NoMem` when the heap refuses it (DESIGN §4.4).
 fn page_vec() -> Result<TryVec<u8>, BlockError> {
     let mut v = TryVec::try_with_capacity(PAGE).map_err(|_| BlockError::NoMem)?;
@@ -191,14 +196,14 @@ fn end_writeback_and_wake(slot: usize, key: CacheKey, res: Result<(), BlockError
 
 /// Write a `Writeback` fill's victim from `evict` and end its writeback.
 fn write_victim(fill: &cache::Fill, evict: &[u8]) -> Result<(), BlockError> {
-    let res = backend_write(fill.evict_key.dev, fill.evict_key.offset, evict);
+    let res = key_dev(fill.evict_key).and_then(|d| backend_write(d, fill.evict_key.offset, evict));
     end_writeback_and_wake(fill.slot, fill.evict_key, res);
     res
 }
 
 /// Read a `Read` fill's page, or abort the fill.
 fn fill_read(fill: &cache::Fill, page: &mut [u8]) -> Result<(), BlockError> {
-    match backend_read(fill.key.dev, fill.key.offset, page) {
+    match key_dev(fill.key).and_then(|d| backend_read(d, fill.key.offset, page)) {
         Ok(()) => {
             let mut c = CACHE.lock();
             c.stats.device_reads = c.stats.device_reads.saturating_add(1);
@@ -288,7 +293,7 @@ pub fn read(dev: u32, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
     let mut spins = 0u32;
     while done < buf.len() {
         let off = base.saturating_add(done as u64);
-        let key = CacheKey::page(dev, off);
+        let key = CacheKey::page(u64::from(dev), off);
         let pin = (off as usize) & (PAGE - 1);
         let n = (PAGE - pin).min(buf.len() - done);
         let plan = {
@@ -339,7 +344,7 @@ pub fn write(dev: u32, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
     let mut spins = 0u32;
     while done < buf.len() {
         let off = base.saturating_add(done as u64);
-        let key = CacheKey::page(dev, off);
+        let key = CacheKey::page(u64::from(dev), off);
         let pin = (off as usize) & (PAGE - 1);
         let n = (PAGE - pin).min(buf.len() - done);
         let plan = {
@@ -371,7 +376,7 @@ pub fn write(dev: u32, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
 }
 
 /// `blk-wb`'s pass: write back each dirty page not already in writeback.
-fn writeback_dev(dev: Option<u32>) -> Result<(), BlockError> {
+fn writeback_dev(dev: Option<u64>) -> Result<(), BlockError> {
     let mut data = page_vec()?;
     let mut start = 0usize;
     loop {
@@ -384,7 +389,7 @@ fn writeback_dev(dev: Option<u32>) -> Result<(), BlockError> {
         };
         #[cfg(feature = "kernel_tests")]
         testing::hold_point(key);
-        let res = backend_write(key.dev, key.offset, &data);
+        let res = key_dev(key).and_then(|d| backend_write(d, key.offset, &data));
         end_writeback_and_wake(slot, key, res);
         res?;
         start = slot + 1;
@@ -399,10 +404,10 @@ fn writeback_dev(dev: Option<u32>) -> Result<(), BlockError> {
 pub fn flush(dev: u32) -> Result<(), BlockError> {
     let mut data = page_vec()?;
     loop {
-        let step = { CACHE.lock().flush_step(Some(dev), &mut data) };
+        let step = { CACHE.lock().flush_step(Some(u64::from(dev)), &mut data) };
         match step {
             FlushStep::Write(slot, key) => {
-                let res = backend_write(key.dev, key.offset, &data);
+                let res = key_dev(key).and_then(|d| backend_write(d, key.offset, &data));
                 end_writeback_and_wake(slot, key, res);
                 res?;
             }
@@ -503,7 +508,7 @@ pub mod testing {
     /// `writeback_dev`'s hold point, reached with no lock held. It sleeps
     /// until `block::ktest::release`, or [`SELF_RELEASE_NS`] at most.
     pub(super) fn hold_point(key: CacheKey) {
-        if DEV.load(Ordering::Acquire) != key.dev
+        if u64::from(DEV.load(Ordering::Acquire)) != key.dev
             || OFF
                 .compare_exchange(key.offset, UNARMED, Ordering::AcqRel, Ordering::Acquire)
                 .is_err()

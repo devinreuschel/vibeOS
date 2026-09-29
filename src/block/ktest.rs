@@ -50,7 +50,7 @@ fn hold_wb(dev: u32, byte_off: u64) {
     testing::HELD.store(false, Ordering::Release);
     testing::DEV.store(dev, Ordering::Release);
     testing::OFF.store(
-        vibeos::cache::CacheKey::page(dev, byte_off).offset,
+        vibeos::cache::CacheKey::page(u64::from(dev), byte_off).offset,
         Ordering::Release,
     );
 }
