@@ -713,6 +713,7 @@ that review cites means the review's text.
 | I128 | A page-table root is freed only when no CPU has it loaded (CR3; TTBR0 on aarch64) and no TCB's `as_cr3` names it; a path that drops or replaces a thread's space records the replacement (or 0) in `as_cr3` and loads it before `teardown` | `addr_space_init::teardown` (assertion); `proc_init::finish_exit`, `proc_init::sys_execve` | enforced at runtime, every build | Yes |
 | I224 | A frame on a buddy free list is written only by the buddy, which reaches its node at `phys + hhdm_offset`; no other code holds a pointer into a free frame ([§4.2](MEMORY.md#42-physical-memory-buddy-allocator), [§9.2](PITFALLS.md#92-memory)) | `mm::pmm::Buddy::insert_region`, `mm::pmm::Buddy::free` | documented | Yes, unchecked: a stray write into a freed page corrupts the lists (§9.2) |
 | I225 | A block on the heap's free list is written only by `Heap`, and `[base, base + mapped)` is mapped writable before `Heap::init` or `Heap::extend` takes it ([§4.4](MEMORY.md#44-kernel-heap)) | `mm::heap::Heap::init`, `mm::heap::Heap::extend`, `mm::heap_init::grow_for` | documented | Yes |
+| I226 | The kernel root's page tables are written only while the PT lock is held, boot's `install` excepted ([§4.3](MEMORY.md#43-page-tables)) | `mm::paging_init::current_mapper` | enforced by `MapperGuard` | Yes; user roots follow invariant I8 |
 
 ## 2.8 Publish last
 
