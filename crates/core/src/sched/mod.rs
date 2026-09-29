@@ -31,12 +31,25 @@ pub fn effective_deadline(deadline: Option<Instant>) -> Instant {
 }
 
 /// FIFO round-robin of ready `ThreadId`s. Idle stays off this list.
+#[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ReadyQueue {
     buf: [ThreadId; MAX_THREADS],
     head: usize,
     len: usize,
 }
+
+// The layout the core tool reads (docs/VMCOREINFO.md, "Types the core tool
+// reads"): `MAX_THREADS` ids, then `head` and `len`.
+#[cfg(not(loom))]
+const _: () = {
+    use core::mem::{align_of, offset_of, size_of};
+    assert!(offset_of!(ReadyQueue, buf) == 0);
+    assert!(offset_of!(ReadyQueue, head) == MAX_THREADS * 4);
+    assert!(offset_of!(ReadyQueue, len) == MAX_THREADS * 4 + 8);
+    assert!(size_of::<ReadyQueue>() == MAX_THREADS * 4 + 16);
+    assert!(align_of::<ReadyQueue>() == 8);
+};
 
 impl ReadyQueue {
     pub const fn empty() -> Self {

@@ -52,6 +52,7 @@ PARSERS: tuple[tuple[str, str, str], ...] = (
     ("boot/mod.rs", "fn", "parse_fw_cfg_dir_count"),
     ("boot/mod.rs", "fn", "parse_fw_cfg_dir_entry"),
     ("boot/mod.rs", "fn", "fw_cfg_dma_access"),
+    ("log/vmcoreinfo.rs", "inner", ""),
 )
 # Rows whose attribute the sweep that owns the module adds (ROADMAP §10.1),
 # as `path` or `path::target`. A pending row whose attribute exists fails.

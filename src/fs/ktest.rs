@@ -75,6 +75,11 @@ pub(crate) fn test_vfs_walk() -> Outcome {
         Ok(s) if s.kind == InodeKind::Dir => {}
         _ => return Outcome::Fail("cross"),
     }
+    // The mount is this run's own, so a repeated run (`vibeos.ktest_repeat`)
+    // mounts /ram again.
+    if file_init::umount(b"/ram").is_err() {
+        return Outcome::Fail("umount");
+    }
     Outcome::Ok
 }
 

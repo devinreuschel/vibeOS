@@ -525,6 +525,10 @@ def _reap(src: LineSource) -> int | None:
 # QEMU 10 dropped `-no-hpet`. `pc,hpet=off` is the machine property on
 # 8.x (where -no-hpet is only deprecated) and on 10.x.
 HPET_OFF_MACHINE = ("-machine", "pc,hpet=off")
+# On every x86_64 boot (DESIGN §8.4): `pvpanic` for the panic path's event
+# and `vmcoreinfo` so `dump-guest-memory` copies the kernel's VMCOREINFO
+# note into a core (docs/VMCOREINFO.md). Neither is a PCI device.
+FORENSICS_DEVICES = ("-device", "pvpanic", "-device", "vmcoreinfo")
 # The only defaults of the QEMU settings: the Makefile sets none, and
 # `make run` reads them through `run_interactive.py` (ROADMAP §10.2).
 DEFAULT_SMP = 2
@@ -1120,6 +1124,7 @@ def qemu_argv(cfg: QemuConfig, monitor_sock: str | None) -> list[str]:
     if words:
         # QEMU's option syntax reads `,,` as one comma inside a value.
         argv += ["-fw_cfg", f"name={FW_CFG_CMDLINE},string={words.replace(',', ',,')}"]
+    argv += list(FORENSICS_DEVICES)
     argv += list(cfg.extra)
     ensure_qemu_pinned(argv[0], cfg.qemu_version)
     return argv

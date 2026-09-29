@@ -435,6 +435,140 @@ pub(crate) fn test_trace_tracepoints_fire() -> Outcome {
     Outcome::Ok
 }
 
+/// A `NUMBER`/`LENGTH` (decimal) or `SYMBOL` (hex) value of the note.
+fn note_u64(desc: &[u8], key: &str, radix: u32) -> Option<u64> {
+    let v = vibeos::log::vmcoreinfo::get(desc, key)?;
+    u64::from_str_radix(core::str::from_utf8(v).ok()?, radix).ok()
+}
+
+/// The note `vmcoreinfo_init::publish` built at boot parses, carries this
+/// kernel's build id, page-table root and the three table roots, reaches
+/// the tables through the portable types, and QEMU's `vmcoreinfo` device
+/// holds its address (ROADMAP §10.7, docs/VMCOREINFO.md).
+pub(crate) fn test_vmcoreinfo_published() -> Outcome {
+    use crate::arch::current::Arch;
+    use crate::boot::fw_cfg_init;
+    use crate::log::vmcoreinfo_init::{self, DeviceState};
+    use vibeos::fmt_util::StackBuf;
+    use vibeos::log::KernelLog;
+    use vibeos::log::vmcoreinfo::{self, FORMAT_ELF, FW_CFG_FILE, FwCfgVmcoreinfo};
+    use vibeos::per_cpu::PerCpu;
+    use vibeos::thread::{TcbSlot, ThreadId};
+
+    let Some((note, pa, state)) = vmcoreinfo_init::published() else {
+        return Outcome::Fail("no note published");
+    };
+    let parsed = match vmcoreinfo::parse_note(note) {
+        Ok(n) => n,
+        Err(e) => return crate::fail_fmt!("note does not parse: {}", e.as_str()),
+    };
+    if parsed.name != vmcoreinfo::NOTE_NAME || parsed.kind != vmcoreinfo::NOTE_TYPE {
+        return Outcome::Fail("note name or type");
+    }
+    let va = vibeos::paging::VirtAddr(note.as_ptr().addr() as u64);
+    match crate::paging_init::translate(va) {
+        Some((p, _, _)) if p.0 == pa => {}
+        _ => return crate::fail_fmt!("note pa {:#x} is not its translation", pa),
+    }
+    let desc = parsed.desc;
+
+    let id = vmcoreinfo_init::build_id();
+    if id.as_bytes().len() != 20 {
+        return crate::fail_fmt!("build id is {} bytes, want 20", id.as_bytes().len());
+    }
+    let mut hex = [0u8; 40];
+    let mut w = StackBuf::new(&mut hex);
+    for b in id.as_bytes() {
+        if core::fmt::Write::write_fmt(&mut w, format_args!("{b:02x}")).is_err() {
+            return Outcome::Fail("build id hex");
+        }
+    }
+    if w.is_cut() || vmcoreinfo::get(desc, "BUILD-ID") != Some(&hex[..]) {
+        return Outcome::Fail("BUILD-ID is not this kernel's 40-digit id");
+    }
+    if note_u64(desc, "PAGESIZE", 10) != Some(4096) {
+        return Outcome::Fail("PAGESIZE");
+    }
+    if note_u64(desc, "NUMBER(vibeos_pgt_root)", 10) != Some(crate::paging_init::kernel_cr3()) {
+        return Outcome::Fail("NUMBER(vibeos_pgt_root) is not kernel_cr3");
+    }
+    if note_u64(desc, "NUMBER(vibeos_pgt_levels)", 10) != Some(4) {
+        return Outcome::Fail("NUMBER(vibeos_pgt_levels)");
+    }
+
+    let log = note_u64(desc, "SYMBOL(vibeos_log)", 16);
+    let tcbs = note_u64(desc, "SYMBOL(vibeos_tcbs)", 16);
+    let tcbs_len = note_u64(desc, "LENGTH(vibeos_tcbs)", 10);
+    let cpus = note_u64(desc, "SYMBOL(vibeos_cpus)", 16);
+    let cpus_len = note_u64(desc, "LENGTH(vibeos_cpus)", 10);
+    if log != Some(crate::log_init::ring_root()) {
+        return Outcome::Fail("SYMBOL(vibeos_log) is not ring_root");
+    }
+    let (t, tn) = thread_init::table_root();
+    if tcbs != Some(t) || tcbs_len != Some(tn) || tn == 0 {
+        return Outcome::Fail("SYMBOL/LENGTH(vibeos_tcbs) is not table_root");
+    }
+    let (c, cn) = per_cpu_init::table_root();
+    if cpus != Some(c) || cpus_len != Some(cn) || cn == 0 {
+        return Outcome::Fail("SYMBOL/LENGTH(vibeos_cpus) is not table_root");
+    }
+
+    // SAFETY: `t` is `Sched.slots`' base (`thread_init::table_root`, checked
+    // above), a static array of `tn > 0` initialized `TcbSlot`s, and SCHED is
+    // held while slot 0 and its TCB are read, so no CPU writes them; the
+    // borrow ends inside the closure; established by
+    // `thread_init::table_root`.
+    let slot0 = thread_init::with_sched_lock(|| unsafe {
+        (*(t as *const TcbSlot)).as_deref().map(|tcb| tcb.id)
+    });
+    if slot0 != Some(ThreadId::BOOTSTRAP) {
+        return crate::fail_fmt!("tcb slot 0 holds {:?}, want the bootstrap thread", slot0);
+    }
+    // SAFETY: `c` is the base of `CPUS`' boxed slice (`per_cpu_init::
+    // table_root`, checked above), which holds `cn > 0` initialized
+    // `PerCpu`s for good; `cpu_id` is set in `init_bsp`/`init_ap` before the
+    // slot is published and never written after, and the read goes through
+    // a raw place, not a reference; established by
+    // `per_cpu_init::table_root`.
+    let cpu0 = unsafe { core::ptr::read(&raw const (*(c as *const PerCpu)).cpu_id) };
+    if cpu0 != 0 {
+        return crate::fail_fmt!("cpus[0].cpu_id {}, want 0", cpu0);
+    }
+    // SAFETY: `log_init::ring_root` is `LOG`'s address (checked above), a
+    // static `KernelLog` over this port that lives for the kernel's life and
+    // is only ever shared as `&`; established by `log_init::ring_root`.
+    let cell = unsafe { &*(crate::log_init::ring_root() as *const KernelLog<Arch>) };
+    if cell.with(|l| l.ring.written()) == 0 {
+        return Outcome::Fail("log ring reached through SYMBOL(vibeos_log) is empty");
+    }
+
+    if !fw_cfg_init::present() {
+        return Outcome::Skip("no fw_cfg");
+    }
+    if state != DeviceState::Written {
+        return crate::fail_fmt!("device {}", state.as_str());
+    }
+    let Some(file) = fw_cfg_init::file(FW_CFG_FILE) else {
+        return Outcome::Fail("no etc/vmcoreinfo");
+    };
+    let mut raw = [0u8; FwCfgVmcoreinfo::LEN];
+    if fw_cfg_init::read(&file, &mut raw) != raw.len() {
+        return Outcome::Fail("etc/vmcoreinfo is short");
+    }
+    let dev = FwCfgVmcoreinfo::from_le_bytes(&raw);
+    if dev.guest_format != FORMAT_ELF || dev.size as usize != note.len() || dev.paddr != pa {
+        return crate::fail_fmt!(
+            "device holds format {} size {} paddr {:#x}, want 1, {}, {:#x}",
+            dev.guest_format,
+            dev.size,
+            dev.paddr,
+            note.len(),
+            pa
+        );
+    }
+    Outcome::Ok
+}
+
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
@@ -448,4 +582,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("serial_frame", test_serial_frame),
     test("trace_ring_own_cpu", test_trace_ring_own_cpu),
     test("trace_tracepoints_fire", test_trace_tracepoints_fire),
+    test("vmcoreinfo_published", test_vmcoreinfo_published),
 ];

@@ -369,8 +369,14 @@ why = "text: lands after the T1 box"
 
 [[box]]
 key = "for the Phase 10 exit gate's §10.10 line, the KVM leg also runs"
-needs = ["`vibeos.ktest=<glob>` runs only the matching in-guest tests"]
-why = "text: lands after §10.2's `vibeos.ktest=` box"
+needs = [
+  "`vibeos.ktest=<glob>` runs only the matching in-guest tests",
+  "a nightly x86_64 KVM leg",  # L1194
+  "`IoWaiter::finish` makes its `done` store",  # L1470
+  "a dead thread's kernel stack is reused",  # L1472
+  "`wait_acks` never panics: after 1",  # L1476
+]
+why = "text: lands after §10.2's `vibeos.ktest=` box; claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 [[box]]
 key = "the crash test's planted defects"
@@ -641,7 +647,11 @@ why = "claim: missing edge found by the Phase 10 planning survey and review (sur
 [[box]]
 key = "an in-guest test finds every CPU's `PerCpu.ticks` advancing"
 closes = ["detect TSC-deadline via `CPUID.01H:ECX[24]`"]
-why = "reopened by design review J136"
+needs = [
+  "a nightly x86_64 KVM leg",  # L1194
+  "`run_ktest.py` checks the `lapic_timer` marker's",  # L1197
+]
+why = "reopened by design review J136; claim: missing edge found by the Phase 10 planning survey and review (survey)"
 
 [[box]]
 key = "pid 1's exit panics the kernel"
@@ -1060,5 +1070,56 @@ needs = [
   "portable code reaches atomics, fences,",  # L1433
   "`IoWaiter::finish` makes its `done` store",  # L1470
   "`spawn_inner` reuses a `Dead` TCB",  # L1474
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
+
+# L1200
+[[box]]
+key = "scheduled lanes and a ledger."
+needs = [
+  "CI history: when a `ci`",  # L1448
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
+# L1194
+[[box]]
+key = "a nightly x86_64 KVM leg"
+needs = [
+  "`tsc_calib_source` measures PIT channel 2",  # L1256
+  "`pit_tick_rate` counts timer interrupts, not",  # L1265
+  "`now_ns` is computed from one",  # L1310
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1195
+[[box]]
+key = "the KVM leg also runs `make test-e2e`,"
+needs = [
+  "a nightly x86_64 KVM leg",  # L1194
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L648
+[[box]]
+key = "detect TSC-deadline via `CPUID.01H:ECX[24]`; LVT"
+needs = [
+  "a nightly x86_64 KVM leg",  # L1194
+  "`run_ktest.py` checks the `lapic_timer` marker's",  # L1197
+  "an in-guest test finds every",  # L1198
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "one VMCOREINFO note, in Linux's"
+needs = [
+  "a kernel command line: `cmdline:`",  # L1227
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+[[box]]
+key = "the log ring, TCB, and"
+needs = [
+  "portable code reaches atomics, fences,",  # L1433
+  "the §10.4 wake inbox's push",  # L1434
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"

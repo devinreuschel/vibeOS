@@ -38,31 +38,32 @@ reason = "needs 4 cpus"
 smp = [1, 2, 3]
 
 # qemu64 has no SMEP, SMAP or UMIP, under TCG and KVM alike:
-# `make test-lapic-fallback` and its nightly KVM run.
+# `make test-lapic-fallback` and its nightly KVM run, which adds `+invtsc`
+# (`LAPIC_FALLBACK_CPU`, DESIGN §8.4).
 [[skip]]
 name = "cpu_hardening"
 reason = "no smep/smap/umip"
-cpu = "qemu64,-tsc-deadline"
+cpu = ["qemu64,-tsc-deadline", "qemu64,+invtsc,-tsc-deadline"]
 
 [[skip]]
 name = "ac_clear_on_exception"
 reason = "no SMAP"
-cpu = "qemu64,-tsc-deadline"
+cpu = ["qemu64,-tsc-deadline", "qemu64,+invtsc,-tsc-deadline"]
 
 [[skip]]
 name = "ac_clear_user_popf"
 reason = "no SMAP"
-cpu = "qemu64,-tsc-deadline"
+cpu = ["qemu64,-tsc-deadline", "qemu64,+invtsc,-tsc-deadline"]
 
 [[skip]]
 name = "uaccess_smap_stray_fault"
 reason = "cpu: CR4.SMAP clear"
-cpu = "qemu64,-tsc-deadline"
+cpu = ["qemu64,-tsc-deadline", "qemu64,+invtsc,-tsc-deadline"]
 
 [[skip]]
 name = "uaccess_smep_user_jump"
 reason = "cpu: CR4.SMEP clear"
-cpu = "qemu64,-tsc-deadline"
+cpu = ["qemu64,-tsc-deadline", "qemu64,+invtsc,-tsc-deadline"]
 
 # No invariant TSC, so the PIT-against-HPET band means nothing
 # (`tsc_calib_source`): TCG on every per-push tier and the weekly
