@@ -6,10 +6,16 @@
 //! nothing in the kernel above the cpu module, so a CPU that holds any
 //! lock, or that faulted inside one, can still write here. The TX lock and
 //! the locked writes stay in `serial` (`serial/mod.rs`).
+//!
+//! It is the only code that writes the UART data register, and it frames
+//! every kernel line (DESIGN §2.6): [`put_line`] writes `vibeos::log::line`'s
+//! frame, the escaped content and `\r\n`, after a `\r\n` when user output
+//! left a line open, and [`put_user`] writes console bytes a process wrote,
+//! escaped and unframed.
 
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
-
+use vibeos::atomic::statics::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
+use vibeos::log::line;
 use vibeos::uart::*;
 
 use crate::x86;
@@ -18,6 +24,12 @@ use crate::x86;
 /// (`ipi_init::halt_others`) or takes the halt IPI. From then on the
 /// serial writes skip the TX lock and the log capture.
 pub static HALTING: AtomicBool = AtomicBool::new(false);
+
+/// Set while the last bytes on the UART were user output that did not end
+/// its line, so the next kernel line starts on a fresh one. It starts set:
+/// the loader's last byte is unknown (OVMF may not end its line). Written
+/// under the TX lock, or by the dump's owner once `HALTING` is set.
+static USER_OPEN: AtomicBool = AtomicBool::new(true);
 
 const NO_OWNER: u32 = u32::MAX;
 
@@ -62,15 +74,23 @@ fn write_byte(b: u8) {
     }
 }
 
-/// Write `bytes`, `\n` as `\r\n`. No lock: a caller that must not
-/// interleave with another CPU holds `serial`'s TX lock.
-pub fn write_bytes(bytes: &[u8]) {
-    for &b in bytes {
-        if b == b'\n' {
-            write_byte(b'\r');
-        }
-        write_byte(b);
-    }
+/// Write `content` as one framed kernel line (`line::kernel_line`). No
+/// lock: the caller holds `serial`'s TX lock, or is the dump's owner.
+pub fn put_line(content: &[u8]) {
+    // AcqRel: the flag is read and cleared in one step, so a write on the
+    // halt path, which takes no lock, sees a defined value.
+    let open = USER_OPEN.swap(false, Ordering::AcqRel);
+    line::kernel_line(open, content, write_byte);
+}
+
+/// Write console bytes a process wrote (`line::user_bytes`): unframed,
+/// each frame byte escaped, `\n` as `\r\n`. No lock: the caller holds
+/// `serial`'s TX lock.
+pub fn put_user(bytes: &[u8]) {
+    // Acquire / Release: as in `put_line`, the value is defined on every path.
+    let was = USER_OPEN.load(Ordering::Acquire);
+    let open = line::user_bytes(was, bytes, write_byte);
+    USER_OPEN.store(open, Ordering::Release);
 }
 
 /// Poll COM1 RX. No lock; a caller racing another reader holds IRQs off.
@@ -137,25 +157,34 @@ fn is_owner() -> bool {
     owner_cpu() == Some(this_cpu())
 }
 
-/// Write one kernel line, only on the dump's owner. Any other CPU runs
-/// the stop hook if one is set, and otherwise returns without writing.
+/// Write `line` as one framed kernel line, only on the dump's owner. Any
+/// other CPU runs the stop hook if one is set, and otherwise returns
+/// without writing.
 #[allow(
     dead_code,
     reason = "C-RAWSERIAL: ROADMAP §10.7 routes the panic path's writes through it"
 )]
-pub fn write_owner(bytes: &[u8]) {
+pub fn write_owner(line: &[u8]) {
     if is_owner() {
-        write_bytes(bytes);
+        put_line(line);
     } else {
         run_stop_hook();
     }
 }
 
-/// A write once `HALTING` is set: on the owner it writes; elsewhere it
-/// runs the stop hook, and if none is set or it returns, writes unlocked.
-pub fn write_after_halt(bytes: &[u8]) {
+/// A kernel line once `HALTING` is set: on the owner it writes; elsewhere
+/// it runs the stop hook, and if none is set or it returns, writes unlocked.
+pub fn write_after_halt(line: &[u8]) {
     if !is_owner() {
         run_stop_hook();
     }
-    write_bytes(bytes);
+    put_line(line);
+}
+
+/// User console bytes once `HALTING` is set, as [`write_after_halt`].
+pub fn user_after_halt(bytes: &[u8]) {
+    if !is_owner() {
+        run_stop_hook();
+    }
+    put_user(bytes);
 }

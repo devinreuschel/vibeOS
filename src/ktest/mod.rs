@@ -315,6 +315,8 @@ pub(crate) const TESTS: &[Test] = &[
         "log_reentry_drop_counted",
         log::ktest::test_log_reentry_drop_counted,
     ),
+    test("serial_lines_whole", log::ktest::test_serial_lines_whole).deadline(60_000),
+    test("serial_frame", log::ktest::test_serial_frame),
     test("fb_bgrx_roundtrip", console::ktest::test_fb_bgrx_roundtrip),
     test("fb_pitch", console::ktest::test_fb_pitch),
     test("fb_cr_home", console::ktest::test_fb_cr_home),
@@ -486,6 +488,14 @@ pub(crate) const TESTS: &[Test] = &[
     )
     .deadline(30_000),
     test("arch_seam_core", arch::ktest::test_arch_seam_core),
+    test(
+        "uaccess_smap_stray_fault",
+        arch::ktest::test_uaccess_smap_stray_fault,
+    ),
+    test(
+        "uaccess_smep_user_jump",
+        arch::ktest::test_uaccess_smep_user_jump,
+    ),
     test("console_read_exit", proc::ktest::test_console_read_exit).deadline(30_000),
     test("user_entry_irq", proc::ktest::test_user_entry_irq).deadline(120_000),
     test(
@@ -500,6 +510,22 @@ pub(crate) const TESTS: &[Test] = &[
     .deadline(30_000),
     test("fp_no_leak", sched::ktest::test_fp_no_leak).deadline(60_000),
     test("fp_migrate_counter", sched::ktest::test_fp_migrate_counter).deadline(30_000),
+    test(
+        "lock_across_switch_asserts",
+        sched::ktest::lock_across_switch_asserts,
+    ),
+    test(
+        "block_in_hard_irq_asserts",
+        sched::ktest::block_in_hard_irq_asserts,
+    ),
+    test(
+        "in_hard_irq_top_bottom",
+        sched::ktest::in_hard_irq_top_bottom,
+    ),
+    test(
+        "sleep_under_spinlock_asserts",
+        sched::ktest::sleep_under_spinlock_asserts,
+    ),
     test("exec_huge_memsz", proc::ktest::test_exec_huge_memsz).deadline(60_000),
     test(
         "brk_mmap_munmap_user",
@@ -543,6 +569,16 @@ pub(crate) const TESTS: &[Test] = &[
         "pid_not_reused_after_reap",
         proc::ktest::pid_not_reused_after_reap,
     ),
+    test(
+        "uaccess_syscall_copies",
+        proc::ktest::test_uaccess_syscall_copies,
+    )
+    .deadline(30_000),
+    test(
+        "uaccess_readonly_efault",
+        proc::ktest::test_uaccess_readonly_efault,
+    )
+    .deadline(30_000),
     test(
         "shootdown_ack_while_busy",
         irq::ktest::shootdown_ack_while_busy,

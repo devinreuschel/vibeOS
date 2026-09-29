@@ -303,3 +303,20 @@ pub(super) fn requeue_next_cpu(next: ThreadId, cur: ThreadId, idle: ThreadId, me
     }
     per_cpu_init::with_current(|cpu| take_next(&mut cpu.runq, idle))
 }
+
+/// The incoming thread of the last switch `sync_init::assert_switch_clean`
+/// refused, or `ThreadId::NONE`.
+static REFUSED_SWITCH: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// Called by `switch_now` just before a switch that holds a ranked lock.
+pub(super) fn refuse_switch(id: ThreadId) {
+    REFUSED_SWITCH.store(id.0, Ordering::Relaxed);
+}
+
+/// The thread a refused switch was about to run, which `schedule_inner` has
+/// already set Running and taken off this CPU's run queue: a test that
+/// catches the refusal `switch_to`s it to undo that. Clears the record.
+pub fn take_refused_switch() -> Option<ThreadId> {
+    let id = ThreadId(REFUSED_SWITCH.swap(ThreadId::NONE.0, Ordering::Relaxed));
+    if id.is_none() { None } else { Some(id) }
+}

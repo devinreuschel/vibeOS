@@ -12,6 +12,9 @@ use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 #[cfg(feature = "kernel_tests")]
 use core::sync::atomic::{AtomicU16, AtomicUsize};
 
+#[cfg(feature = "kernel_tests")]
+use vibeos::atomic::statics::AtomicU8;
+
 use vibeos::lock::{Held, RANK_SCHED, RankError};
 use vibeos::sync::SpinLock;
 use vibeos::thread::Tcb;
@@ -230,9 +233,148 @@ pub fn held() -> Held {
 }
 
 /// Bit `rank - 1` set for each rank this CPU holds; 0 before per-CPU
-/// data is live.
+/// data is live. Call with IF off, so the thread stays on the CPU whose
+/// slot it reads.
 pub fn held_mask() -> u8 {
     held().mask()
+}
+
+/// A blocking call from a device's hard-IRQ top half fails at the call
+/// (invariant I2): `Sched::begin_wait` and a voluntary `schedule` call it
+/// with IF off, where the per-CPU read is stable. In every build.
+#[track_caller]
+pub fn assert_not_hard_irq() {
+    let hard = crate::irq::hardirq::in_hard_irq();
+    #[cfg(feature = "kernel_tests")]
+    if hard {
+        testing::trip(testing::SleepTrip::HardIrq);
+    }
+    assert!(
+        !hard,
+        "blocking call in hard-IRQ context at {}",
+        Location::caller()
+    );
+}
+
+/// Whether the checks only debug and `kernel_tests` builds make are on:
+/// `HELD` empty and IF on at a sleep (DESIGN §2.9 rule 4).
+const SLEEP_CHECKS: bool = cfg!(any(debug_assertions, feature = "kernel_tests"));
+
+/// The context a sleep starts from: hard-IRQ flag, held rank mask, and IF.
+/// `with_sched` records one before it takes SCHED, for `Sched::begin_wait`,
+/// which runs under SCHED with IF off and cannot read them itself.
+#[derive(Clone, Copy)]
+pub struct SleepCtx {
+    pub hard_irq: bool,
+    /// Bit `rank - 1` for each rank held ([`held_mask`]).
+    pub held: u8,
+    pub if_on: bool,
+}
+
+impl SleepCtx {
+    /// A context every check passes: what a build without the debug checks
+    /// records, and `Sched`'s value before its first `with_sched`.
+    pub const UNCHECKED: SleepCtx = SleepCtx {
+        hard_irq: false,
+        held: 0,
+        if_on: true,
+    };
+
+    /// This CPU's context now. IF is read first; the flag and `HELD` are
+    /// read inside a short `InterruptGuard`, so both name the CPU the
+    /// guard pinned, and it drops before anything asserts on them.
+    pub fn now() -> SleepCtx {
+        let if_on = crate::x86::interrupts_enabled();
+        let _irq = InterruptGuard::enter();
+        SleepCtx {
+            hard_irq: crate::irq::hardirq::in_hard_irq(),
+            held: held_mask(),
+            if_on,
+        }
+    }
+
+    /// Assert that a thread in this context may sleep: not in a device's
+    /// hard-IRQ top half (invariant I2, every build), and, in debug and
+    /// `kernel_tests` builds, holding no ranked lock and with IF on
+    /// (invariant I40). The rank and IF checks are off once `HALTING` is
+    /// set, as the rank checker is.
+    #[track_caller]
+    pub fn check(self) {
+        #[cfg(feature = "kernel_tests")]
+        if self.hard_irq {
+            testing::trip(testing::SleepTrip::HardIrq);
+        }
+        assert!(
+            !self.hard_irq,
+            "sleeping call in hard-IRQ context at {}",
+            Location::caller()
+        );
+        if !SLEEP_CHECKS || halting() {
+            return;
+        }
+        #[cfg(feature = "kernel_tests")]
+        if self.held != 0 {
+            testing::trip(testing::SleepTrip::Held);
+        }
+        assert!(
+            self.held == 0,
+            "sleeping call holding ranks {:#x} at {}",
+            self.held,
+            Location::caller()
+        );
+        #[cfg(feature = "kernel_tests")]
+        if !self.if_on {
+            testing::trip(testing::SleepTrip::IfOff);
+        }
+        assert!(
+            self.if_on,
+            "sleeping call with IF off at {}",
+            Location::caller()
+        );
+    }
+}
+
+/// What `with_sched` records for `Sched::begin_wait`: [`SleepCtx::now`] in
+/// debug and `kernel_tests` builds, else [`SleepCtx::UNCHECKED`], since
+/// `begin_wait` checks the hard-IRQ flag itself in every build.
+pub fn sleep_ctx() -> SleepCtx {
+    if SLEEP_CHECKS {
+        SleepCtx::now()
+    } else {
+        SleepCtx::UNCHECKED
+    }
+}
+
+/// Every call that may sleep calls this first, before it takes any lock
+/// (DESIGN §2.9 rule 4): not in a device's hard-IRQ top half, and, in
+/// debug and `kernel_tests` builds, no ranked lock held and IF on
+/// ([`SleepCtx::check`]). A caught panic leaks nothing: the reads' guard
+/// has dropped before the assertion.
+#[track_caller]
+pub fn might_sleep() {
+    SleepCtx::now().check();
+}
+
+/// A context switch leaves this CPU holding no ranked lock. `HELD` is per
+/// CPU, so a lock held across `switch_context` would be charged to the
+/// thread that runs next (invariant I1). Called first in
+/// `thread_init::switch_now`, with IF off. Off before per-CPU data is live
+/// and once `HALTING` is set, as the rank checker is.
+#[track_caller]
+pub fn assert_switch_clean() {
+    if held_slot().is_none() || halting() {
+        return;
+    }
+    let mask = held_mask();
+    #[cfg(feature = "kernel_tests")]
+    if mask != 0 {
+        testing::trip(testing::SleepTrip::SwitchHeld);
+    }
+    assert!(
+        mask == 0,
+        "context switch holding ranks {mask:#x} at {}",
+        Location::caller()
+    );
 }
 
 /// Whether this CPU may take `SCHED` now: it is not in a lockless section
@@ -501,6 +643,42 @@ pub mod testing {
     /// Rank-checker refusals since boot.
     pub fn rank_failures() -> u64 {
         RANK_FAILURES.load(Ordering::Relaxed)
+    }
+
+    /// Which lock or sleep assertion fired last: the panic message is lost
+    /// to `arch::catch::catch_panic`, so a test reads this instead.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SleepTrip {
+        /// `sync_init::might_sleep` or `assert_not_hard_irq`: a sleeping or
+        /// blocking call from a device's hard-IRQ top half.
+        HardIrq = 2,
+        /// `sync_init::SleepCtx::check`: a sleeping call holding a ranked
+        /// lock.
+        Held = 3,
+        /// `sync_init::SleepCtx::check`: a sleeping call with IF off.
+        IfOff = 4,
+        /// `sync_init::assert_switch_clean`: a ranked lock held across a
+        /// context switch.
+        SwitchHeld = 1,
+    }
+
+    /// The last [`SleepTrip`], 0 when none is recorded.
+    static TRIP: AtomicU8 = AtomicU8::new(0);
+
+    /// Record `t` just before its assertion fires.
+    pub(super) fn trip(t: SleepTrip) {
+        TRIP.store(t as u8, Ordering::Relaxed);
+    }
+
+    /// Take the last recorded [`SleepTrip`] and clear it.
+    pub fn take_trip() -> Option<SleepTrip> {
+        match TRIP.swap(0, Ordering::Relaxed) {
+            1 => Some(SleepTrip::SwitchHeld),
+            2 => Some(SleepTrip::HardIrq),
+            3 => Some(SleepTrip::Held),
+            4 => Some(SleepTrip::IfOff),
+            _ => None,
+        }
     }
 
     /// Entries one armed trace keeps; later acquisitions are dropped.

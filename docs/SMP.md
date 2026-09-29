@@ -228,7 +228,7 @@ Contents (`crates/core/src/smp/per_cpu.rs`):
 `per_cpu_init::init_bsp` allocates one `PerCpu` per MADT CPU in a heap array, not a static array
 sized by a `MAX_CPUS` guess, and installs the BSP at slot 0; each AP installs its own slot with
 `per_cpu_init::install_gs`. `current` and `idle` are `*mut Tcb`. The other per-CPU tables are static
-and cap the CPU count at 64: the MADT `apic_ids` array (`acpi::MAX_CPUS`), `irq_init::IN_ISR`,
+and cap the CPU count at 64: the MADT `apic_ids` array (`acpi::MAX_CPUS`), `hardirq::IN_ISR`,
 `ipi_init::SHOOT`, `per_cpu_init::WITH_BUSY`, `sync_init::HELD`, `log_init::EMITTING` and `log_init::STAGE`, and the `u64` online mask. The 64-slot thread table, of which boot takes 2N+3 at
 `-smp N`, limits it further (ROADMAP §10.4, F037).
 
@@ -433,11 +433,9 @@ The global lock order is in [section 2.1](INVARIANTS.md#21-lock-order) and the o
 - A lock taken from an ISR is taken with interrupts disabled in every other context too. The scheduler
   lock is the canonical case: the timer ISR calls into the scheduler, so any holder with interrupts
   enabled deadlocks the moment its own timer fires.
-- Serial TX takes a lock so bytes from different CPUs do not interleave. `Serial::write_fmt` keeps
-  IRQs off for the whole line but takes the TX lock once per `write_str` piece, so another CPU can
-  write between two pieces of a formatted line, and `log_fmt` sends a record and its newline as two
-  writes. The harness then misses a contract line split that way. Planned (ROADMAP §10.2, F138):
-  each line is formatted, newline included, into one buffer and written under one TX hold.
+- Serial TX takes a lock so bytes from different CPUs do not interleave. Each kernel line is
+  formatted, newline included, into one stack buffer and written under one TX hold, so another CPU
+  cannot split it (ROADMAP §10.2, F138).
 - klog records go to one global IRQ-safe log ring and to a serial sink that only try-locks TX.
   Per-CPU serial capture assembles serial output into lines for the ring. Planned (ROADMAP §19.5):
   one lockless ring any context may append to, and a printer thread per console (§2.5).

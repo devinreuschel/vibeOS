@@ -162,6 +162,7 @@ GONE: list[tuple[str, str]] = [
     ("src/block/cache_init.rs: fn raw_read", "one registry of counted block-device"),
     ("src/block/cache_init.rs: fn raw_write", "one registry of counted block-device"),
     ("src/block/cache_init.rs: fn raw_flush", "one registry of counted block-device"),
+    ("validate_buf", "user-VA accessors replace the physmap copy"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

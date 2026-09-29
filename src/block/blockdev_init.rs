@@ -6,13 +6,10 @@
 //! entry before it takes the lock, and every handle a lookup returns is a
 //! clone taken under it, dropped by the caller after it unlocks.
 
-use core::fmt::Write;
-
 use vibeos::block::blockdev::{Backing, BlockName, BlockRef, DiskSeq, Registry};
 use vibeos::block::{BlockError, write_marker};
 use vibeos::lock::RANK_DEVICE;
 
-use crate::serial::Serial;
 use crate::sync_init::SpinMutex;
 
 static REG: SpinMutex<Registry> = SpinMutex::with_rank(Registry::new(), RANK_DEVICE);
@@ -34,7 +31,7 @@ pub fn register(name: &[u8], dev: Backing) -> Result<BlockRef, BlockError> {
         clippy::let_underscore_must_use,
         reason = "a write to Serial cannot fail (DESIGN §2.5)"
     )]
-    let _ = write_marker(&mut Serial, r.name().as_str(), nsect).and_then(|()| writeln!(Serial));
+    let _ = crate::serial::write_line_with(|w| write_marker(w, r.name().as_str(), nsect));
     Ok(r)
 }
 

@@ -129,18 +129,11 @@ pub(super) fn sys_wait4(pid: u64, status: u64, options: u64) -> i64 {
         match r {
             WaitAct::Done(0, _) => return 0,
             WaitAct::Done(cpid, st) => {
-                if status != 0
-                    && let Some(space) = current_space()
-                {
-                    if syscall::check_user_ptr(|p, n| space.check_user_range(p, n), status, 4)
-                        .is_err()
-                    {
-                        return syscall::neg(EFAULT);
-                    }
-                    let bytes = st.to_le_bytes();
-                    if space.write_bytes(status, &bytes).is_err() {
-                        return syscall::neg(EFAULT);
-                    }
+                // After `with_sched`, with no lock held: the child is
+                // reaped, and a failed copy returns `EFAULT` without
+                // undoing that, as Linux's does (SYSCALL.md §5).
+                if status != 0 && uaccess_init::copy_to_user_val(status, &st).is_err() {
+                    return syscall::neg(EFAULT);
                 }
                 return cpid as i64;
             }
@@ -248,19 +241,19 @@ pub(super) fn sys_kill(pid: u64, sig: u64) -> i64 {
 // and a preempted body carries an interrupt and a switch on top of it.
 #[inline(never)]
 pub(super) fn sys_psinfo(buf: u64, len: u64) -> i64 {
-    if let Err(e) = validate_buf(buf, len) {
-        return syscall::neg(e);
+    if !user_range_ok(buf, len) {
+        return syscall::neg(EFAULT);
     }
     let mut tmp = [0u8; 512];
     let n = format_ps(&mut tmp);
-    let take = n.min(len as usize);
-    let Some(space) = current_space() else {
-        return syscall::neg(EFAULT);
-    };
-    if space.write_bytes(buf, &tmp[..take]).is_err() {
-        return syscall::neg(EFAULT);
+    let take = usize::try_from(len).map_or(n, |l| n.min(l));
+    if take == 0 {
+        return 0;
     }
-    take as i64
+    match uaccess_init::copy_to_user_partial(buf, &tmp[..take]) {
+        0 => syscall::neg(EFAULT),
+        c => c as i64,
+    }
 }
 
 fn format_ps(out: &mut [u8]) -> usize {

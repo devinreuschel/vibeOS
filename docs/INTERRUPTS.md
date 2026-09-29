@@ -42,17 +42,32 @@ the TSS `0x28`, and `STAR.SYSRET_CS` is `0x10`, so ring 3 runs with CS `0x23`, w
 code selector, and SS `0x1B`, and `syscall_init::first_return` loads `0x1B` into DS, ES, FS,
 and GS.
 
-User-memory access will go through `copy_from_user`/`copy_to_user`, which dereference the user VA
-inside `stac`/`clac` (ROADMAP §10.6); pointer ranges are validated before use (ROADMAP §9.3). Today it
-is `AddressSpace::read_bytes`/`write_bytes` after `check_user_range`, copying through the HHDM physmap
-(a supervisor mapping, so SMAP does not apply until a user-VA accessor exists), and `write_bytes` does
-not check the PTE's `WRITABLE` bit. `arch::cpu::init_control_regs` sets `CR0.WP`, and `CR4.SMEP`, `SMAP` and
-`UMIP` where CPUID reports them, on every CPU; `stac`/`clac` are no-ops when SMAP is missing.
+Syscalls reach user memory through `vibeos::proc::uaccess` and its kernel half
+`proc::uaccess_init` (ROADMAP §10.6): `copy_from_user`, `copy_to_user`, their `_partial` forms,
+which return the bytes copied, and `strncpy_from_user`, which reads in chunks that stop at each page
+boundary and at `USER_MAP_END`. Each copy runs `user_range_ok` first, a pure check with no
+page-table walk: a non-empty range from `NULL_GUARD_LEN` up to at most `USER_MAP_END` with no
+overflow, or an empty range below `USER_MAP_END`. The check stays because inside `stac`/`clac` the
+MMU still lets the kernel reach its own pages. The port's `UserAccess` methods
+(`arch::x86_64::uaccess`) then run one `rep movsb` on the user VA inside `stac`/`clac`, or without
+them where SMAP is missing, since both raise `#UD` there; so a not-present page faults, and
+`CR0.WP` faults a write to a read-only one. Each such instruction has one `__ex_table` record,
+`uaccess::ExEntry`: the instruction and its fixup as offsets from each field's own address, and the
+kind in bit 0 of `data`. `linker.ld` keeps the section whole inside `__rodata_*`. A CPL-0 `#PF` at
+a recorded instruction with CR2 below `USER_MAP_END` resumes at its fixup, the `clac`, with RCX
+holding the bytes left, and the accessor reports the bytes it copied ([§5.2](#52-idt-and-exceptions)).
+Until ROADMAP §10.6's identity-teardown box removes the GLOBAL identity map of VA 0 to 512 MiB, the
+x86_64 methods also refuse a range that starts below 512 MiB. The ELF loader and `clone_anon` still
+copy through the HHDM physmap with `AddressSpace::read_bytes`/`write_bytes` after
+`check_user_range`, which ignore the PTE's `WRITABLE` bit, until ROADMAP §10.6's fill-API box.
+`arch::cpu::init_control_regs` sets `CR0.WP`, and `CR4.SMEP`, `SMAP` and `UMIP` where CPUID reports
+them, on every CPU; `stac`/`clac` are no-ops when SMAP is missing.
 
-Planned (ROADMAP §10.6, §12.2, §12.5): two kinds of accessor, told apart by a kind bit in each
-exception-table entry. A faulting accessor (`copy_from_user`, `copy_to_user`, and their string and
-vector forms) handles a fault through the region fault handler from ROADMAP §12.2 on, which may
-sleep, and returns `EFAULT` only when that handler cannot resolve the fault. It runs with IF=1, no
+Two kinds of accessor are told apart by that kind bit. Every entry today is faulting (bit 0 clear):
+its fault resumes at the fixup, and the call returns `EFAULT` or a short count. Planned (ROADMAP
+§12.2, §12.5): from §12.2 a faulting accessor (`copy_from_user`, `copy_to_user`, and their string
+and vector forms) handles a fault through the region fault handler first, which may sleep, and
+returns `EFAULT` only when that handler cannot resolve the fault. It runs with IF=1, no
 spinlock held, and no sleeping lock of §2.1 levels 2 to 4 held (§2.9 rule 4). A non-faulting
 accessor's fault goes straight to the fixup and returns a short count: no region lookup, no lock, no
 sleep, and IF left as it was. It may run anywhere, under a busy page, a spinlock, or IF=0. The
@@ -133,7 +148,7 @@ fault, downstream of it.
 | `0x08` | `#DF` | dump on IST, halt | not a ring-3 fault: the Ring 0 column applies | as the rule |
 | `0x0B`, `0x0C` | `#NP`, `#SS` | dump, halt | `SIGBUS`; `SIGSEGV` for a fault on the return-to-user `iretq` (§5.10 rule 2) | as the rule |
 | `0x0D` | `#GP` | dump with error code, halt | `SIGSEGV`, including a fault on the return-to-user `iretq` (§5.10 rule 2) | as the rule |
-| `0x0E` | `#PF` | dump with CR2, halt. Planned (ROADMAP §10.6, §12.2): a fault inside a user-memory accessor is handled by that accessor's kind (§5.1) and ends in `EFAULT` or a short count | `SIGSEGV`. Planned (ROADMAP §12.2): a fault on a page that a region reserves is resolved first, and one through a file mapping on a page wholly past EOF, or on a page whose fill fails, gets `SIGBUS`, and so does a store through a shared file mapping whose space reservation fails (§4.3) | as the rule |
+| `0x0E` | `#PF` | a fault on a user accessor's copy instruction with CR2 below `USER_MAP_END` resumes at its exception-table fixup and ends in `EFAULT` or a short count (§5.1); `catch::intercept` runs first. Any other: dump with CR2, halt. Planned (ROADMAP §12.2, §12.5): the region fault handler resolves a faulting accessor's fault before its fixup, and a non-faulting accessor's goes straight to the fixup | `SIGSEGV`. Planned (ROADMAP §12.2): a fault on a page that a region reserves is resolved first, and one through a file mapping on a page wholly past EOF, or on a page whose fill fails, gets `SIGBUS`, and so does a store through a shared file mapping whose space reservation fails (§4.3) | as the rule |
 | `0x10` | `#MF` | dump, halt | `SIGFPE` | as the rule |
 | `0x11` | `#AC` | dump, halt | `SIGBUS`, for a misaligned access while ring 3 has set RFLAGS.AC; `CR0.AM` is set on every CPU, as Linux sets it | as the rule |
 | `0x12` | `#MC` | dump on IST, halt. Planned (ROADMAP §25.1, §25.3): only a fatal machine check, or an action-required error in kernel memory, halts; a lower severity is recorded and the CPU continues | not a ring-3 fault: the Ring 0 column applies. Planned (ROADMAP §25.3): an action-required error that ring-3 code consumed is recorded by the handler and recovered in exit work (§5.10 rule 11), which sends `SIGBUS` with `BUS_MCEERR_AR` | as the rule |
@@ -202,9 +217,9 @@ irq::set_handler(vec, my_handler);
 ```
 
 The kernel binary exposes this as `irq_init::allocate_vector`. Allocate is refused
-inside a device hard-IRQ: `irq_init::dispatch` sets a per-CPU `IN_ISR` flag around the handler. The
-timer, IPI, and keyboard ISRs do not set it, and no blocking primitive checks it (ROADMAP §10.3,
-F110). That flag is not the `InterruptGuard` nest: `allocate_vector` takes only spinlocks, so a
+inside a device hard-IRQ: `irq_init::dispatch` sets a per-CPU `hardirq::IN_ISR` flag around the handler. The
+timer, IPI, and keyboard ISRs do not set it, and `park`, `begin_wait` and a voluntary `schedule` assert that it is clear
+([INVARIANTS.md §2.2](INVARIANTS.md#22-interrupt-handler-rules)). That flag is not the `InterruptGuard` nest: `allocate_vector` takes only spinlocks, so a
 caller with IF off may allocate, and only a device hard-IRQ is refused.
 
 Planned (ROADMAP §11.3, on x86_64 before the GIC): drivers name an interrupt by an `IrqId`, a `u32`
