@@ -142,6 +142,16 @@ if [ "$got" != "$LIMINE_COMMIT" ]; then
     exit 1
 fi
 echo "setup: limine $LIMINE_TAG @ $LIMINE_COMMIT"
+# A tracked file that differs from HEAD (a restored cache or a local edit)
+# would ship a Limine binary the HEAD check passed (ROADMAP §10.1). Untracked
+# files stay: the macOS build leaves limine.dSYM/.
+changed=$(git -C "$LIMINE_DIR" status --porcelain --untracked-files=no)
+if [ -n "$changed" ]; then
+    echo "setup: limine has changed tracked files (a restored cache or a local edit):" >&2
+    echo "$changed" >&2
+    echo "setup: rm -rf $LIMINE_DIR and re-run" >&2
+    exit 1
+fi
 
 if [ ! -x "$LIMINE_DIR/limine" ]; then
     echo "setup: building limine host tool"
