@@ -138,6 +138,8 @@ that sets it:
   `syscall_init::init_bsp` before the first ring-3 entry.
 - `thread_init::set_switch_hooks` (a context switch's hardware side, `syscall_init::on_switch`, and
   a new thread's FP image), set by `syscall_init::init_bsp` before the scheduler starts.
+- `thread_init::set_kick_hook` (wake a CPU's workqueue worker to free its dead stacks), set by
+  `work_init::init` before it starts the workers.
 - `ipi_init::set_reschedule_hook` (a reschedule IPI's preemption point), set by `sched_init::init`
   before the scheduler goes live.
 - Planned (ROADMAP §12.6): the allocation entry's hooks, set by the page cache (clean-page reclaim),

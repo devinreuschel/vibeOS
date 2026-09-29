@@ -80,6 +80,30 @@ fn fpu_template() -> Fxsave {
     f()
 }
 
+/// Wake this CPU's workqueue worker to free its dead stacks:
+/// `work_init::kick_dead_stacks`, which `work_init::init` sets (DESIGN
+/// §1.2). Unset, nothing is woken; the worker frees the list when it
+/// starts.
+static KICK_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Install the dead-stack kick.
+pub fn set_kick_hook(f: fn()) {
+    // Release: pairs with the Acquire load in `kick_dead_stacks`.
+    KICK_HOOK.store(f as *mut (), Ordering::Release);
+}
+
+fn kick_dead_stacks() {
+    // Acquire: pairs with the Release store in `set_kick_hook`.
+    let p = KICK_HOOK.load(Ordering::Acquire);
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: invariant: a non-null `KICK_HOOK` holds a `fn()`;
+    // established by `thread_init::set_kick_hook`, its only store.
+    let f = unsafe { core::mem::transmute::<*mut (), fn()>(p) };
+    f();
+}
+
 /// Why a `spawn*` call made no thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpawnError {
@@ -528,7 +552,7 @@ pub(crate) fn finish_switch() {
         }
     });
     if kick {
-        crate::work_init::kick_dead_stacks();
+        kick_dead_stacks();
     }
     #[cfg(feature = "kernel_tests")]
     crate::ipi_init::testing::tail_leave();
