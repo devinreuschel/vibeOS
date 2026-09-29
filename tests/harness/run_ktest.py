@@ -10,7 +10,7 @@ import sys
 from collections import Counter
 from collections.abc import Callable, Iterable
 
-from tests.harness import frame, results
+from tests.harness import frame, results, skips
 from tests.harness.harness import (
     BOOT_ALLOWANCE_S,
     PANIC_DONE,
@@ -139,6 +139,18 @@ def _block_name(name: str) -> Callable[[str], bool]:
     return pred
 
 
+def ktest_selection(cfg: QemuConfig) -> str:
+    """The `vibeos.ktest=` value the boot gets: `cfg.ktest`, else the last
+    such word of its command line (later words win in the kernel)."""
+    if cfg.ktest is not None:
+        return cfg.ktest
+    value = ""
+    for word in cfg.cmdline.split():
+        if word.startswith("vibeos.ktest="):
+            value = word[len("vibeos.ktest=") :]
+    return value
+
+
 def ran(lines: Iterable[str], name: str) -> bool:
     """Whether the boot printed a `run <name>` line."""
     return any(k.kind == "run" and k.name == name for k in ktest_lines(lines))
@@ -155,15 +167,23 @@ def _ktest_boot(
 
     `timeout` is the boot allowance and `scale` the timeout scale of the
     progress deadline (`KtestDeadlines`). A timeout, a `FAIL` line, a panic
-    signature, a missing marker, or a run without its result raises
-    `HarnessError` from this one boot. The persist lines are required only
+    signature, a missing marker, a run without its result, or a skipped set
+    that differs from `tests/harness/skips.toml` (`skips.check_skips`)
+    raises `HarnessError` from this one boot. The persist lines are required only
     when the boot ran `block_persist`.
     """
     raw = run_qemu_until_exit(cfg, timeout_s=timeout, progress=KtestDeadlines(timeout, scale))
     results.current().add_boot(qemu_argv(cfg, None), cfg, raw.exit_code)
     klines = frame.kernel_lines(raw.lines)
     results.current().record_ktest_lines(klines)
-    check_ktest_output(raw.lines, raw.exit_code)
+    verdict = check_ktest_output(raw.lines, raw.exit_code)
+    skips.check_skips(
+        verdict.ktest_skips,
+        verdict.ktest_runs,
+        skips.launch_config(cfg),
+        skips.load_skips(),
+        must_run=skips.must_run_names(ktest_selection(cfg)),
+    )
     if SERIAL_WHOLE_OK in klines:
         _check_serial_whole(klines)
     if SERIAL_FRAME_OK in klines:

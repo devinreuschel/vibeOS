@@ -1,0 +1,65 @@
+# Expected skips (DESIGN §8.2, ROADMAP §10.2, C-SKIPS). `skips.py` reads it.
+#
+# Format: one `[[skip]]` row per test and condition. `name` is the test,
+# `reason` the exact text of its `skip <name>: <reason>` line. The optional
+# fields `arch`, `accel`, `cpu`, `smp`, `mem`, `machine` and `host` say
+# where the row holds, each as one value or an array meaning any of them
+# (`smp` is an integer, the rest strings); an unknown key is an error.
+#
+# Matching: `skips.launch_config` gives the configuration a boot launched:
+# `arch` from `qemu-system-<arch>`, `accel` the effective accelerator
+# (`tcg`, `kvm`, `hvf`), `cpu`, `smp` and `mem` as passed (`cpu` compared
+# as the exact string, so `max` and `max,+invtsc` differ), `machine` the
+# `-machine` value (`pc` when there is none, `pc,hpet=off` with HPET off),
+# and `host` the harness host (`platform.system().lower()`). A row matches
+# when every field it sets holds the configuration's value; a field left
+# out matches every value. A boot fails when a test with a `run` line
+# skips and no matching row names it with that reason, when a test of a
+# matching row runs instead of skipping, and when a test that
+# `VIBEOS_KTEST` names without a glob skips. A test without a `run` line
+# in the boot needs nothing.
+#
+# The file shrinks only by an edit: each row added or removed takes a
+# `Gate-change: tests/harness/skips.toml <name> <condition class>: <reason>`
+# trailer (C-GATECHANGE), and a box that adds a test which skips somewhere
+# adds its rows in the same commit.
+
+# Fewer than the four CPUs the tail-reclaim tests pin threads to: the
+# `-smp 2` tiers (`make test-kernel`, `make test-lapic-fallback`, and the
+# nightly KVM leg's `make test-kernel`) under TCG and KVM alike.
+[[skip]]
+name = "lifetime_stack_reclaim"
+reason = "needs 4 cpus"
+smp = [1, 2, 3]
+
+[[skip]]
+name = "lifetime_dead_slot_on_cpu"
+reason = "needs 4 cpus"
+smp = [1, 2, 3]
+
+# qemu64 has no SMEP, SMAP or UMIP, under TCG and KVM alike:
+# `make test-lapic-fallback` and its nightly KVM run.
+[[skip]]
+name = "cpu_hardening"
+reason = "no smep/smap/umip"
+cpu = "qemu64,-tsc-deadline"
+
+[[skip]]
+name = "ac_clear_on_exception"
+reason = "no SMAP"
+cpu = "qemu64,-tsc-deadline"
+
+[[skip]]
+name = "ac_clear_user_popf"
+reason = "no SMAP"
+cpu = "qemu64,-tsc-deadline"
+
+[[skip]]
+name = "uaccess_smap_stray_fault"
+reason = "cpu: CR4.SMAP clear"
+cpu = "qemu64,-tsc-deadline"
+
+[[skip]]
+name = "uaccess_smep_user_jump"
+reason = "cpu: CR4.SMEP clear"
+cpu = "qemu64,-tsc-deadline"

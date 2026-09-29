@@ -188,12 +188,22 @@ names what the configuration lacks: `no AP`, `no virtio-blk`, `no virtio-rng`, `
 in the in-guest test bodies, DESIGN §1.3). Destructive exception tests run inside `arch::catch` scopes, which longjmp out or
 step RIP past the faulting instruction, instead of skipping.
 
-Planned (ROADMAP §10.2): `tests/harness/skips.toml` lists each test allowed to skip, with its reason
-and the configurations it skips in (architecture, accelerator, CPU model, CPU count, memory, machine
-options, and the harness host). A run fails when its skipped set differs from the rows that match
-its configuration, in either direction, so a lost `-device` or a regressed detection that turns
-tests into skips fails the tier. Tests a run does not select print no run line and need no row, and
-a test that `VIBEOS_KTEST` names without a glob must run whatever the file says (ROADMAP §12.3).
+Expected skips are data (ROADMAP §10.2). `tests/harness/skips.toml` holds one `[[skip]]` row per
+test and condition: `name`, `reason` (the exact text of the skip line), and optional `arch`,
+`accel`, `cpu`, `smp`, `mem`, `machine` and `host`, each one value or an array meaning any of them
+(`smp` an integer), a field left out matching every value; an unknown key is an error.
+`skips.launch_config` gives the configuration a boot launched: `arch` from
+`qemu-system-<arch>`, the effective accelerator, `cpu`, `smp` and `mem` as passed (`cpu` compared as
+the exact string), the `-machine` value (`pc` when there is none, `pc,hpet=off` with HPET off), and
+the harness host. After `check_ktest_output`, `run_ktest.py` runs `skips.check_skips` on every ktest
+boot, the persist reboot and the proof boots included: it fails, listing each problem, when a test
+with a `run` line skips and no matching row names it with that reason, when a test of a matching
+row runs instead of skipping, and when a test that `VIBEOS_KTEST` names without a glob character
+skips, since such a test must run whatever the file says (ROADMAP §12.3). So a lost `-device` or a
+regressed detection that turns tests into skips fails the tier. Tests a run does not select print
+no run line and need no row. The file shrinks only by an edit, each row a `Gate-change:` trailer, and
+a box that adds a test which skips somewhere adds its rows in the same commit. The first rows hold
+the skips of each configuration that `make test`, the nightly KVM leg and the weekly job launch.
 
 Besides the verdicts, `run_ktest.py` reads these lines of the in-guest tests themselves:
 

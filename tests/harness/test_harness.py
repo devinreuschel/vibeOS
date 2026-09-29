@@ -6,6 +6,7 @@ Runs under `python3 -m unittest discover`. Standard-library only.
 from __future__ import annotations
 
 import os
+import platform
 import socket
 import subprocess
 import sys
@@ -2583,6 +2584,152 @@ class TestKtestVerdict(unittest.TestCase):
         d = out.stdout.strip()
         self.assertIn("vibeos-mon-", d)
         self.assertFalse(os.path.exists(d), d)
+
+
+class TestSkips(unittest.TestCase):
+    """Expected skips as data (ROADMAP §10.2, `tests/harness/skips.py`)."""
+
+    TCG2: dict[str, str | int] = {
+        "arch": "x86_64",
+        "accel": "tcg",
+        "cpu": "max",
+        "smp": 2,
+        "mem": "128M",
+        "machine": "pc",
+        "host": "linux",
+    }
+
+    @staticmethod
+    def _rows(text: str) -> list[Any]:
+        import tomllib
+
+        from tests.harness.skips import parse_skips
+
+        return parse_skips(tomllib.loads(text))
+
+    def test_unlisted_skip_fails(self) -> None:
+        from tests.harness.skips import check_skips
+
+        with self.assertRaisesRegex(HarnessError, "msix_cpu skipped .'no e1000e'."):
+            check_skips({"msix_cpu": "no e1000e"}, ["msix_cpu"], self.TCG2, [])
+
+    def test_listed_test_that_ran_fails(self) -> None:
+        from tests.harness.skips import check_skips
+
+        rows = self._rows('[[skip]]\nname = "a"\nreason = "needs 4 cpus"\nsmp = 2\n')
+        with self.assertRaisesRegex(HarnessError, "a ran, but skips.toml lists it"):
+            check_skips({}, ["a"], self.TCG2, rows)
+        check_skips({"a": "needs 4 cpus"}, ["a"], self.TCG2, rows)
+        # At -smp 4 the row does not match, so a run is right and a skip is not.
+        smp4 = {**self.TCG2, "smp": 4}
+        check_skips({}, ["a"], smp4, rows)
+        with self.assertRaisesRegex(HarnessError, "no skips.toml row matches"):
+            check_skips({"a": "needs 4 cpus"}, ["a"], smp4, rows)
+
+    def test_omitted_field_matches_every_value(self) -> None:
+        from tests.harness.skips import row_matches
+
+        (row,) = self._rows('[[skip]]\nname = "a"\nreason = "r"\ncpu = "qemu64"\n')
+        for accel in ("tcg", "kvm", "hvf"):
+            self.assertTrue(row_matches(row, {**self.TCG2, "cpu": "qemu64", "accel": accel}))
+        self.assertFalse(row_matches(row, self.TCG2))
+        (anywhere,) = self._rows('[[skip]]\nname = "a"\nreason = "r"\n')
+        self.assertTrue(row_matches(anywhere, self.TCG2))
+
+    def test_array_value_is_any_of(self) -> None:
+        from tests.harness.skips import row_matches
+
+        (row,) = self._rows(
+            '[[skip]]\nname = "a"\nreason = "r"\nsmp = [1, 2, 3]\naccel = ["tcg", "kvm"]\n'
+        )
+        self.assertTrue(row_matches(row, self.TCG2))
+        self.assertTrue(row_matches(row, {**self.TCG2, "smp": 3, "accel": "kvm"}))
+        self.assertFalse(row_matches(row, {**self.TCG2, "smp": 4}))
+        self.assertFalse(row_matches(row, {**self.TCG2, "accel": "hvf"}))
+        # `cpu` is an exact string: `max` is not `max,+invtsc`.
+        (cpu,) = self._rows('[[skip]]\nname = "a"\nreason = "r"\ncpu = "max"\n')
+        self.assertFalse(row_matches(cpu, {**self.TCG2, "cpu": "max,+invtsc"}))
+
+    def test_unselected_row_is_ignored(self) -> None:
+        from tests.harness.skips import check_skips
+
+        rows = self._rows('[[skip]]\nname = "a"\nreason = "r"\n')
+        check_skips({}, ["b"], self.TCG2, rows)
+
+    def test_must_run_name_cannot_skip(self) -> None:
+        from tests.harness.skips import check_skips, must_run_names
+
+        self.assertEqual(
+            must_run_names("lifetime_*,exit_burst,fork_?om,a[bc],fork_oom"),
+            frozenset({"exit_burst", "fork_oom"}),
+        )
+        self.assertEqual(must_run_names(""), frozenset())
+        rows = self._rows('[[skip]]\nname = "a"\nreason = "r"\n')
+        with self.assertRaisesRegex(HarnessError, "VIBEOS_KTEST names it: it must run"):
+            check_skips({"a": "r"}, ["a"], self.TCG2, rows, must_run=must_run_names("a"))
+        check_skips({}, ["a"], self.TCG2, rows, must_run=must_run_names("a"))
+        check_skips({"a": "r"}, ["a"], self.TCG2, rows, must_run=must_run_names("a*"))
+
+    def test_reason_must_match(self) -> None:
+        from tests.harness.skips import check_skips
+
+        rows = self._rows('[[skip]]\nname = "a"\nreason = "no AP"\n')
+        with self.assertRaisesRegex(HarnessError, "a skipped with reason 'no edu'"):
+            check_skips({"a": "no edu"}, ["a"], self.TCG2, rows)
+
+    def test_every_problem_in_one_error(self) -> None:
+        from tests.harness.skips import check_skips
+
+        rows = self._rows('[[skip]]\nname = "a"\nreason = "r"\n')
+        with self.assertRaises(HarnessError) as cm:
+            check_skips({"b": "x"}, ["a", "b"], self.TCG2, rows)
+        self.assertIn("b skipped", str(cm.exception))
+        self.assertIn("a ran", str(cm.exception))
+
+    def test_bad_rows_rejected(self) -> None:
+        for text, why in (
+            ('[[skip]]\nname = "a"\nreason = "r"\nmemory = "1G"\n', "unknown key"),
+            ('[[skip]]\nname = "a"\n', "reason"),
+            ('[[skip]]\nreason = "r"\n', "name"),
+            ('[[skip]]\nname = "a"\nreason = "r"\nsmp = "2"\n', "not an integer"),
+            ('[[skip]]\nname = "a"\nreason = "r"\ncpu = 2\n', "not a non-empty string"),
+            ('[[skip]]\nname = "a"\nreason = "r"\ncpu = []\n', "empty array"),
+            ('[[skips]]\nname = "a"\n', "unknown top-level"),
+        ):
+            with self.subTest(why=why):
+                with self.assertRaisesRegex(HarnessError, why):
+                    self._rows(text)
+
+    def test_launch_config_hpet_off_machine(self) -> None:
+        from tests.harness.skips import launch_config
+
+        on = launch_config(QemuConfig(iso="x.iso", smp=4, cpu="qemu64,-tsc-deadline", accel="kvm"))
+        self.assertEqual(on["arch"], "x86_64")
+        self.assertEqual(on["accel"], "kvm")
+        self.assertEqual(on["cpu"], "qemu64,-tsc-deadline")
+        self.assertEqual(on["smp"], 4)
+        self.assertEqual(on["mem"], "128M")
+        self.assertEqual(on["machine"], "pc")
+        self.assertEqual(on["host"], platform.system().lower())
+        off = launch_config(QemuConfig(iso="x.iso", hpet=False, accel="tcg"))
+        self.assertEqual(off["machine"], "pc,hpet=off")
+        self.assertEqual(off["accel"], "tcg")
+
+    def test_ktest_selection(self) -> None:
+        self.assertEqual(run_ktest.ktest_selection(QemuConfig(iso="x", ktest="a,b*")), "a,b*")
+        cfg = QemuConfig(iso="x", cmdline="loglevel=8 vibeos.ktest=x vibeos.ktest=y,z")
+        self.assertEqual(run_ktest.ktest_selection(cfg), "y,z")
+        self.assertEqual(run_ktest.ktest_selection(QemuConfig(iso="x")), "")
+
+    def test_repo_skips_toml_loads(self) -> None:
+        from tests.harness.skips import FIELDS, SKIPS_TOML, load_skips
+
+        rows = load_skips(SKIPS_TOML)
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertTrue(set(row.match) <= set(FIELDS))
+        names = {r.name for r in rows}
+        self.assertIn("cpu_hardening", names)
 
 
 if __name__ == "__main__":
