@@ -11,9 +11,8 @@ use vibeos::acpi::Iso;
 use vibeos::apic::{self, Polarity, Trigger};
 use vibeos::kbd::{
     self, CMD_DISABLE_1, CMD_DISABLE_2, CMD_ENABLE_1, CMD_READ_CFG, CMD_SELF_TEST, CMD_TEST_1,
-    CMD_WRITE_CFG, CMD_WRITE_KBD_OUT, DATA, DecodedKey, Decoder, KBD_ACK, KBD_BAT_OK, KBD_RESET,
-    PORT_TEST_OK, RING_CAP, Ring, SELF_TEST_OK, STAT_IBF, STAT_MOUSE, STAT_OBF, STATUS, cfg_probe,
-    cfg_run,
+    CMD_WRITE_CFG, DATA, DecodedKey, Decoder, KBD_ACK, KBD_BAT_OK, KBD_RESET, PORT_TEST_OK,
+    RING_CAP, Ring, SELF_TEST_OK, STAT_IBF, STAT_MOUSE, STAT_OBF, STATUS, cfg_probe, cfg_run,
 };
 use vibeos::lock::RANK_DEVICE;
 use vibeos::pic::{PIC_EOI, PIC1_CMD};
@@ -24,14 +23,14 @@ use crate::apic_init;
 use crate::arch;
 use crate::per_cpu_init;
 use crate::sync_init::SpinMutex;
-use crate::x86::{self, InterruptGuard};
+use crate::x86;
 
 const POLL_CAP: u32 = 100_000;
-const GSI_NONE: u32 = u32::MAX;
+pub(super) const GSI_NONE: u32 = u32::MAX;
 
-struct Kbd {
+pub(super) struct Kbd {
     decoder: Decoder,
-    ring: Ring<DecodedKey, RING_CAP>,
+    pub(super) ring: Ring<DecodedKey, RING_CAP>,
 }
 
 static KBD: SpinMutex<Kbd> = SpinMutex::with_rank(
@@ -43,13 +42,13 @@ static KBD: SpinMutex<Kbd> = SpinMutex::with_rank(
 );
 
 /// Run `f` on the keyboard state.
-fn with_kbd<R>(f: impl FnOnce(&mut Kbd) -> R) -> R {
+pub(super) fn with_kbd<R>(f: impl FnOnce(&mut Kbd) -> R) -> R {
     let mut g = KBD.lock();
     f(&mut g)
 }
-static LIVE: AtomicBool = AtomicBool::new(false);
-static GSI: AtomicU32 = AtomicU32::new(GSI_NONE);
-static PIC_FALLBACK: AtomicBool = AtomicBool::new(false);
+pub(super) static LIVE: AtomicBool = AtomicBool::new(false);
+pub(super) static GSI: AtomicU32 = AtomicU32::new(GSI_NONE);
+pub(super) static PIC_FALLBACK: AtomicBool = AtomicBool::new(false);
 
 fn kbd_ioapic(_frame: &mut arch::idt::TrapFrame) {
     on_irq();
@@ -58,15 +57,22 @@ fn kbd_ioapic(_frame: &mut arch::idt::TrapFrame) {
 
 fn kbd_pic(_frame: &mut arch::idt::TrapFrame) {
     on_irq();
+    // SAFETY: invariant I229 names IRQ1's master 8259 EOI as an exception to
+    // `arch::x86_64::pic`'s ownership of port 0x20, and an EOI touches no
+    // memory; established by `arch::x86_64::pic::program`.
     unsafe { x86::outb(PIC1_CMD, PIC_EOI) };
 }
 
 /// ISR: read 0x60, push, return. No alloc, no log.
 pub fn on_irq() {
+    // SAFETY: invariant I229: ports 0x60 and 0x64 belong to the 8042's owner,
+    // this module, and a port read or write touches no memory; established by
+    // `kbd_init::init`.
     let status = unsafe { x86::inb(STATUS) };
     if status & STAT_OBF == 0 {
         return;
     }
+    // SAFETY: as for the status read above (`kbd_init::init`).
     let data = unsafe { x86::inb(DATA) };
     if status & STAT_MOUSE != 0 {
         return;
@@ -78,25 +84,8 @@ pub fn on_irq() {
     });
 }
 
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn pop() -> Option<DecodedKey> {
     with_kbd(|k| k.ring.pop())
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn live() -> bool {
-    LIVE.load(Ordering::Acquire)
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn gsi() -> Option<u32> {
-    let g = GSI.load(Ordering::Acquire);
-    if g == GSI_NONE { None } else { Some(g) }
-}
-
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn pic_fallback() -> bool {
-    PIC_FALLBACK.load(Ordering::Acquire)
 }
 
 /// Handler, route GSI, 8042, then unmask. Not PIC IRQ1 after PIC mask.
@@ -161,6 +150,9 @@ fn iso_irq1(isos: &[Iso], gsi: u32) -> (Trigger, Polarity) {
 fn wait_ibf_clear() -> bool {
     let mut n = POLL_CAP;
     while n > 0 {
+        // SAFETY: invariant I229: ports 0x60 and 0x64 belong to the 8042's owner,
+        // this module, and a port read or write touches no memory; established by
+        // `kbd_init::init`.
         if unsafe { x86::inb(STATUS) } & STAT_IBF == 0 {
             return true;
         }
@@ -172,6 +164,9 @@ fn wait_ibf_clear() -> bool {
 fn wait_obf() -> bool {
     let mut n = POLL_CAP;
     while n > 0 {
+        // SAFETY: invariant I229: ports 0x60 and 0x64 belong to the 8042's owner,
+        // this module, and a port read or write touches no memory; established by
+        // `kbd_init::init`.
         if unsafe { x86::inb(STATUS) } & STAT_OBF != 0 {
             return true;
         }
@@ -180,32 +175,45 @@ fn wait_obf() -> bool {
     false
 }
 
-fn write_cmd(cmd: u8) -> bool {
+pub(super) fn write_cmd(cmd: u8) -> bool {
     if !wait_ibf_clear() {
         return false;
     }
+    // SAFETY: invariant I229: ports 0x60 and 0x64 belong to the 8042's owner,
+    // this module, and a port read or write touches no memory; established by
+    // `kbd_init::init`.
     unsafe { x86::outb(kbd::CMD, cmd) };
     true
 }
 
-fn write_data(data: u8) -> bool {
+pub(super) fn write_data(data: u8) -> bool {
     if !wait_ibf_clear() {
         return false;
     }
+    // SAFETY: invariant I229: ports 0x60 and 0x64 belong to the 8042's owner,
+    // this module, and a port read or write touches no memory; established by
+    // `kbd_init::init`.
     unsafe { x86::outb(DATA, data) };
     true
 }
 
-fn read_data() -> Option<u8> {
+pub(super) fn read_data() -> Option<u8> {
     if !wait_obf() {
         return None;
     }
+    // SAFETY: invariant I229: ports 0x60 and 0x64 belong to the 8042's owner,
+    // this module, and a port read or write touches no memory; established by
+    // `kbd_init::init`.
     Some(unsafe { x86::inb(DATA) })
 }
 
-fn flush_obf() {
+pub(super) fn flush_obf() {
     let mut n = 16u32;
+    // SAFETY: invariant I229: ports 0x60 and 0x64 belong to this module, and
+    // a port read touches no memory; established by `kbd_init::init`. The
+    // drained byte is dropped by design.
     while n > 0 && unsafe { x86::inb(STATUS) } & STAT_OBF != 0 {
+        // SAFETY: as for the status read above (`kbd_init::init`).
         let _ = unsafe { x86::inb(DATA) };
         n -= 1;
     }
@@ -266,31 +274,4 @@ fn init_8042() -> bool {
     }
     flush_obf();
     true
-}
-
-/// Queue `k` as if the keyboard had sent it. Test hook (AGENTS.md rule 9).
-#[cfg(feature = "kernel_tests")]
-pub fn push_for_test(k: DecodedKey) {
-    with_kbd(|kbd| kbd.ring.push(k));
-}
-
-/// Read the 8042 config byte. CLI so the IRQ1 ISR cannot steal it.
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn read_cfg() -> Option<u8> {
-    let _irq = InterruptGuard::enter();
-    flush_obf();
-    if !write_cmd(CMD_READ_CFG) {
-        return None;
-    }
-    read_data()
-}
-
-/// Present `sc` as a keyboard byte (cmd 0xD2). IRQ1 runs after this
-/// returns if INT1 is armed and the GSI is unmasked. Not the device
-/// clock: that is `cfg_clock1_on` / QEMU `sendkey`.
-#[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
-pub fn inject_scancode(sc: u8) -> bool {
-    let _irq = InterruptGuard::enter();
-    flush_obf();
-    write_cmd(CMD_WRITE_KBD_OUT) && write_data(sc)
 }

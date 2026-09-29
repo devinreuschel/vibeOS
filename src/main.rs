@@ -43,10 +43,6 @@ mod arch;
 mod block;
 mod boot;
 mod cell;
-#[allow(
-    clippy::undocumented_unsafe_blocks,
-    reason = "audit pending, ROADMAP §10.1"
-)]
 mod console;
 mod dev;
 mod drivers;
