@@ -918,9 +918,11 @@ class TestKtestProtocol(unittest.TestCase):
 
         lines = [
             K("vibeOS: ktest: begin 1"),
+            K("vibeOS: ktest: run x 10000"),
             K("vibeOS: dmesg: 12 cpu0 info vibeOS: ktest: FAIL x: y"),
             K("vibeOS: logrec: 12 cpu0 info vibeOS: ktest: begin 0"),
             "vibeOS: ktest: FAIL forged: unframed",
+            K("vibeOS: ktest: ok x (5 us)"),
             K("vibeOS: ktest: end"),
         ]
         check_ktest_output(lines, ISA_DEBUG_PASS)
@@ -928,7 +930,12 @@ class TestKtestProtocol(unittest.TestCase):
     def test_wrong_exit_status(self) -> None:
         from tests.harness.harness import ISA_DEBUG_FAIL, HarnessError, check_ktest_output
 
-        lines = [K("vibeOS: ktest: begin 1"), K("vibeOS: ktest: end")]
+        lines = [
+            K("vibeOS: ktest: begin 1"),
+            K("vibeOS: ktest: run x 10000"),
+            K("vibeOS: ktest: ok x (5 us)"),
+            K("vibeOS: ktest: end"),
+        ]
         with self.assertRaises(HarnessError) as cm:
             check_ktest_output(lines, ISA_DEBUG_FAIL)
         self.assertIn("isa-debug-exit", str(cm.exception))
@@ -1235,6 +1242,8 @@ class TestNoRetry(unittest.TestCase):
                 K("vibeOS: block: vdap2 7647 sectors"),
                 K("vibeOS: persist: wrote"),
                 K("vibeOS: ktest: begin 1"),
+                K("vibeOS: ktest: run x 10000"),
+                K("vibeOS: ktest: ok x (5 us)"),
                 K("vibeOS: ktest: end"),
             ],
             exit_code=ISA_DEBUG_PASS,
@@ -2432,6 +2441,74 @@ class TestKtestVerdict(unittest.TestCase):
         finally:
             os.close(r)
             os.close(w)
+
+    @staticmethod
+    def _boot(*body: str, n: int = 2) -> list[str]:
+        return [
+            K(f"vibeOS: ktest: begin {n}"),
+            *(K(f"vibeOS: ktest: {b}") for b in body),
+            K("vibeOS: ktest: end"),
+        ]
+
+    def test_count_matches_begin(self) -> None:
+        from tests.harness.harness import check_ktest_output
+
+        ok = self._boot("run a 10000", "ok a (3 us)", "run a 10000", "skip a: no AP")
+        r = check_ktest_output(ok, ISA_DEBUG_PASS)
+        self.assertEqual(r.ktest_runs, ["a", "a"])
+        self.assertEqual(r.ktest_skips, {"a": "no AP"})
+        for n in (1, 3):
+            with self.subTest(n=n):
+                lines = self._boot("run a 10000", "ok a (3 us)", "run b 10000", "ok b", n=n)
+                with self.assertRaisesRegex(HarnessError, f"begin {n}, but 2 runs and 2 results"):
+                    check_ktest_output(lines, ISA_DEBUG_PASS)
+
+    def test_run_without_result_is_named(self) -> None:
+        from tests.harness.harness import check_ktest_output
+
+        next_run = self._boot("run slow 10000", "run b 10000", "ok b")
+        with self.assertRaisesRegex(HarnessError, "run slow has no result"):
+            check_ktest_output(next_run, ISA_DEBUG_PASS)
+        at_end = self._boot("run a 10000", "ok a", "run slow 10000")
+        with self.assertRaisesRegex(HarnessError, "run slow has no result before end"):
+            check_ktest_output(at_end, ISA_DEBUG_PASS)
+        no_end = at_end[:-1]
+        with self.assertRaisesRegex(HarnessError, "ktest_end'; run slow has no result"):
+            check_ktest_output(no_end, ISA_DEBUG_PASS)
+
+    def test_result_without_run_fails(self) -> None:
+        from tests.harness.harness import check_ktest_output
+
+        lines = self._boot("run a 10000", "ok a", "ok b")
+        with self.assertRaisesRegex(HarnessError, "result for b with no open run"):
+            check_ktest_output(lines, ISA_DEBUG_PASS)
+        twice = self._boot("run a 10000", "ok a", "skip a: again")
+        with self.assertRaisesRegex(HarnessError, "result for a with no open run"):
+            check_ktest_output(twice, ISA_DEBUG_PASS)
+
+    def test_name_mismatch_fails(self) -> None:
+        from tests.harness.harness import check_ktest_output
+
+        lines = self._boot("run a 10000", "ok b", "run b 10000", "ok b")
+        with self.assertRaisesRegex(HarnessError, "run a got a result for b"):
+            check_ktest_output(lines, ISA_DEBUG_PASS)
+
+    def test_info_line_is_not_a_result(self) -> None:
+        from tests.harness.harness import check_ktest_output
+
+        lines = self._boot(
+            "info lock_spins: pt=0 buddy=0",
+            "run a 10000",
+            "info a: 12 rounds",
+            "ok a",
+            "info ktest: between",
+            n=1,
+        )
+        r = check_ktest_output(lines, ISA_DEBUG_PASS)
+        self.assertEqual(r.ktest_runs, ["a"])
+        only_info = self._boot("run a 10000", "info a: 1", n=1)
+        with self.assertRaisesRegex(HarnessError, "run a has no result before end"):
+            check_ktest_output(only_info, ISA_DEBUG_PASS)
 
     def test_monitor_dir_removed_at_exit(self) -> None:
         code = (

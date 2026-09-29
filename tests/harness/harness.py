@@ -146,6 +146,10 @@ class RunResult:
     timed_out: bool = False
     panic_line: str | None = None
     stderr: str = ""
+    # `check_ktest_output`: the name of each run line in order, and each
+    # skipped test's reason.
+    ktest_runs: list[str] = field(default_factory=list)
+    ktest_skips: dict[str, str] = field(default_factory=dict)
 
 
 def serial_tail(lines: list[str], n: int = 40) -> str:
@@ -1750,19 +1754,31 @@ def check_ktest_output(
     *,
     pass_status: int = ISA_DEBUG_PASS,
 ) -> RunResult:
-    """Require `begin <n>` then `end`, reject any FAIL line, require pass exit status.
+    """Require `begin <n>`, exactly `n` runs each with its one result, then
+    `end`; reject any FAIL line; require the pass exit status.
 
-    Each line is read through `parse_ktest_line`, so `begin`, `FAIL`,
-    `end` and the panic signatures match only kernel lines (framed, DESIGN
-    §2.6) at the start of their text: a user program's forged `FAIL` line
-    and a `dmesg:` or `logrec:` replay are ignored. A `begin` with no count,
-    `begin 0` (no test selected) and a `bad option` line fail the run.
+    Each line is read through `parse_ktest_line`, so `begin`, `run`, the
+    results, `end` and the panic signatures match only kernel lines
+    (framed, DESIGN §2.6) at the start of their text: a user program's
+    forged `FAIL` line and a `dmesg:` or `logrec:` replay are ignored. A
+    `begin` with no count, `begin 0` (no test selected) and a `bad option`
+    line fail the run.
+
+    Runs pair by order, since a repeated test reuses its name: each `run
+    <name>` opens a run that the next result line (`ok`, `FAIL` or `skip`)
+    must close, for the same name. A run left open by the next `run` or by
+    `end`, a result with no open run, a result for another name, and a
+    count of runs or results other than `begin`'s each fail, naming the
+    test. Info lines are never results. The result carries the run names
+    (`ktest_runs`) and the skips (`ktest_skips`, name to reason).
     """
     result = RunResult()
     result.exit_code = exit_code
     stream = frame.Stream()
-    saw_begin = False
+    n: int | None = None
     saw_end = False
+    open_run: str | None = None
+    results_seen = 0
     fails: list[str] = []
     for raw in lines:
         result.lines.append(raw)
@@ -1778,23 +1794,48 @@ def check_ktest_output(
         if k.kind == "begin":
             if saw_end:
                 raise HarnessError("ktest begin after end")
+            if n is not None:
+                raise HarnessError("ktest: a second begin")
             if k.n is None:
                 raise HarnessError("ktest begin without a run count")
             if k.n == 0:
                 raise HarnessError("ktest: no test selected")
-            saw_begin = True
-        elif k.kind == "fail":
-            fails.append(frame.kernel_text(raw) or raw)
+            n = k.n
+        elif k.kind == "run":
+            if n is None or saw_end:
+                raise HarnessError(f"ktest: run {k.name} outside begin and end")
+            if open_run is not None:
+                raise HarnessError(f"ktest: run {open_run} has no result (next: run {k.name})")
+            open_run = k.name
+            result.ktest_runs.append(k.name)
+        elif k.kind in ("ok", "fail", "skip"):
+            if open_run is None:
+                raise HarnessError(f"ktest: result for {k.name} with no open run: {k.kind}")
+            if k.name != open_run:
+                raise HarnessError(f"ktest: run {open_run} got a result for {k.name}")
+            open_run = None
+            results_seen += 1
+            if k.kind == "fail":
+                fails.append(frame.kernel_text(raw) or raw)
+            elif k.kind == "skip":
+                result.ktest_skips[k.name] = k.text
         elif k.kind == "end":
-            if not saw_begin:
+            if n is None:
                 raise HarnessError("ktest end without begin")
+            if open_run is not None:
+                raise HarnessError(f"ktest: run {open_run} has no result before end")
             saw_end = True
-    if not saw_begin:
+    if n is None:
         raise HarnessError("missing marker 'ktest_begin'")
     if not saw_end:
-        raise HarnessError("missing marker 'ktest_end'")
+        where = f"; run {open_run} has no result" if open_run is not None else ""
+        raise HarnessError(f"missing marker 'ktest_end'{where}")
     if fails:
         raise HarnessError(f"ktest FAIL: {fails[0]}")
+    if len(result.ktest_runs) != n or results_seen != n:
+        raise HarnessError(
+            f"ktest: begin {n}, but {len(result.ktest_runs)} runs and {results_seen} results"
+        )
     if exit_code != pass_status:
         raise HarnessError(
             f"isa-debug-exit status {exit_code}, expected {pass_status}"

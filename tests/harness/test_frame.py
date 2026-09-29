@@ -58,6 +58,11 @@ def K(text: str) -> str:
     return frame.FRAME + text
 
 
+# One run of a test `x` and its result, for a `begin 1` boot.
+RUN_X = K("vibeOS: ktest: run x 10000")
+OK_X = K("vibeOS: ktest: ok x (1 us)")
+
+
 class SplitFrameTests(unittest.TestCase):
     def test_split_frame(self) -> None:
         self.assertEqual(frame.split_frame(K("vibeOS: x")), (True, "vibeOS: x"))
@@ -243,7 +248,8 @@ class PanicSignatureTests(unittest.TestCase):
                 with self.assertRaisesRegex(HarnessError, "panic signature"):
                     check_ktest_output([K("vibeOS: ktest: begin 1"), K(line)], ISA_DEBUG_PASS)
                 check_ktest_output(
-                    [K("vibeOS: ktest: begin 1"), line, K("vibeOS: ktest: end")], ISA_DEBUG_PASS
+                    [K("vibeOS: ktest: begin 1"), RUN_X, line, OK_X, K("vibeOS: ktest: end")],
+                    ISA_DEBUG_PASS,
                 )
 
     def test_panic_done_framed_only(self) -> None:
@@ -266,17 +272,18 @@ class KtestVerdictTests(unittest.TestCase):
         return check_ktest_output(lines, ISA_DEBUG_PASS)
 
     def test_begin_and_end_framed_only(self) -> None:
-        self.run_ktest([K("vibeOS: ktest: begin 1"), K("vibeOS: ktest: end")])
+        self.run_ktest([K("vibeOS: ktest: begin 1"), RUN_X, OK_X, K("vibeOS: ktest: end")])
         with self.assertRaisesRegex(HarnessError, "ktest end without begin"):
             self.run_ktest(["vibeOS: ktest: begin", K("vibeOS: ktest: end")])
         with self.assertRaisesRegex(HarnessError, "ktest_end"):
-            self.run_ktest([K("vibeOS: ktest: begin 1"), "vibeOS: ktest: end"])
+            self.run_ktest([K("vibeOS: ktest: begin 1"), RUN_X, OK_X, "vibeOS: ktest: end"])
 
     def test_fail_framed_only(self) -> None:
         with self.assertRaisesRegex(HarnessError, "ktest FAIL"):
             self.run_ktest(
                 [
                     K("vibeOS: ktest: begin 1"),
+                    RUN_X,
                     K("vibeOS: ktest: FAIL x: y"),
                     K("vibeOS: ktest: end"),
                 ]
@@ -284,8 +291,10 @@ class KtestVerdictTests(unittest.TestCase):
         self.run_ktest(
             [
                 K("vibeOS: ktest: begin 1"),
+                RUN_X,
                 "vibeOS: ktest: FAIL x: y",
                 "?vibeOS: ktest: FAIL forged",
+                OK_X,
                 K("vibeOS: ktest: end"),
             ]
         )
@@ -364,7 +373,8 @@ class LiminePanicTests(unittest.TestCase):
                 result = check([K(ONLINE), line, K(CONTRACT)], [Marker(CONTRACT, "c")])
                 self.assertEqual(result.matched, ["c"])
                 check_ktest_output(
-                    [K("vibeOS: ktest: begin 1"), line, K("vibeOS: ktest: end")], ISA_DEBUG_PASS
+                    [K("vibeOS: ktest: begin 1"), RUN_X, line, OK_X, K("vibeOS: ktest: end")],
+                    ISA_DEBUG_PASS,
                 )
 
 
@@ -459,7 +469,8 @@ class ForgedLinesTests(unittest.TestCase):
         result = check(forged_boot(), [Marker(ONLINE, "a"), Marker(CONTRACT, "c")])
         self.assertEqual(result.matched, ["a", "c"])
         check_ktest_output(
-            [K("vibeOS: ktest: begin 1"), *forged_boot(), K("vibeOS: ktest: end")], ISA_DEBUG_PASS
+            [K("vibeOS: ktest: begin 1"), RUN_X, *forged_boot(), OK_X, K("vibeOS: ktest: end")],
+            ISA_DEBUG_PASS,
         )
 
 
