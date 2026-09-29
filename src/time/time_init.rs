@@ -347,11 +347,19 @@ pub fn on_hw_tick(tsc: u64) {
         return;
     };
     let ticks = st.ticks.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    #[cfg(feature = "kernel_tests")]
+    super::ktest::publish_tick(ticks, tsc);
     st.clock.write(ticks, tsc);
 }
 
 pub fn on_pit_tick(tsc: u64) {
     on_hw_tick(tsc);
+}
+
+/// The seqlock clock, for the in-guest clock tests' unclamped read.
+#[cfg(feature = "kernel_tests")]
+pub(super) fn tick_clock() -> Option<&'static TickClock> {
+    STATE.try_get().map(|s| &s.clock)
 }
 
 pub fn uptime_ms() -> u64 {
@@ -495,7 +503,8 @@ pub unsafe fn init() {
     st.tsc_per_ms = per_ms;
     crate::arch::x86_64::publish_tsc_per_ms(per_ms);
     st.source = source;
-    st.clock.write(0, rdtsc_ser(use_rdtscp));
+    let tsc0 = rdtsc_ser(use_rdtscp);
+    st.clock.write(0, tsc0);
 
     program_pit_ch0();
 
@@ -511,6 +520,8 @@ pub unsafe fn init() {
 
     crate::marker!("vibeOS: time: calibrated {} {}/ms", source.as_str(), per_ms);
     crate::marker!("vibeOS: time: tsc {}/ms", per_ms);
+    #[cfg(feature = "kernel_tests")]
+    super::ktest::publish_tick(0, tsc0);
     // SAFETY: invariant I22, established at `cell::BootCell::set`: the one
     // write, on the BSP before SMP (`time::time_init::init`'s `# Safety`
     // runs it before IRQs are on), and no reader sees `STATE` until then.
