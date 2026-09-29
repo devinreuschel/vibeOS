@@ -15,7 +15,7 @@ use crate::ipi_init;
 use crate::ktest::{
     Outcome, alloc_frame, alloc_frames_owned, catch_alloc_error, catch_fault, free_frame,
     free_frames, free_frames_owned, quiescent_free_frames, second_cpu, settle_threads,
-    spin_until_ns,
+    spawn_thread_on, spin_until_ns,
 };
 use crate::kva_init;
 use crate::paging_init;
@@ -297,19 +297,60 @@ pub(crate) fn test_mmio_uc_flags() -> Outcome {
     Outcome::Ok
 }
 
-struct ShootProbe {
-    va: u64,
-    /// 0 idle, 1 access ok, 2 fault.
-    result: AtomicU64,
+/// The probe `tlb_shootdown_remote` drives on the AP: a kernel thread
+/// pinned there, fed through these statics rather than call-function work,
+/// which takes no lock (DESIGN §2.2) while `catch_fault` takes
+/// `arch::catch::LAST`. `SHOOT_REQ` counts requests (`SHOOT_QUIT` ends the
+/// thread), `SHOOT_ACK` names the last one served, and `SHOOT_RESULT` holds
+/// its outcome: 1 the read succeeded, 2 it faulted.
+static SHOOT_VA: AtomicU64 = AtomicU64::new(0);
+static SHOOT_REQ: AtomicU64 = AtomicU64::new(0);
+static SHOOT_ACK: AtomicU64 = AtomicU64::new(0);
+static SHOOT_RESULT: AtomicU64 = AtomicU64::new(0);
+const SHOOT_QUIT: u64 = u64::MAX;
+
+/// Spin on the AP, never blocking, so the TLB entry a read loads stays
+/// live until a shootdown removes it; IF stays on for the shootdown IPI.
+fn shoot_prober() {
+    let mut seen = 0u64;
+    loop {
+        // Acquire: pairs with the Release store in `shoot_touch`.
+        let req = SHOOT_REQ.load(Ordering::Acquire);
+        if req == SHOOT_QUIT {
+            SHOOT_ACK.store(SHOOT_QUIT, Ordering::Release);
+            return;
+        }
+        if req != seen {
+            let va = SHOOT_VA.load(Ordering::Relaxed);
+            let fault = catch_fault(|| unsafe {
+                core::ptr::read_volatile(va as *const u64);
+            });
+            SHOOT_RESULT.store(if fault.is_some() { 2 } else { 1 }, Ordering::Relaxed);
+            seen = req;
+            // Release: publishes the result to `shoot_touch`.
+            SHOOT_ACK.store(req, Ordering::Release);
+        }
+        core::hint::spin_loop();
+    }
 }
 
-fn shoot_touch(arg: *mut ()) {
-    let p = unsafe { &*(arg as *const ShootProbe) };
-    let fault = catch_fault(|| unsafe {
-        core::ptr::read_volatile(p.va as *const u64);
-    });
-    p.result
-        .store(if fault.is_some() { 2 } else { 1 }, Ordering::SeqCst);
+/// Ask the prober to read `SHOOT_VA` and return its result, 0 on timeout.
+fn shoot_touch(req: u64) -> u64 {
+    // Release: `SHOOT_VA` and the mapping change happen before the request.
+    SHOOT_REQ.store(req, Ordering::Release);
+    if !spin_until_ns(|| SHOOT_ACK.load(Ordering::Acquire) == req, 2_000_000_000) {
+        return 0;
+    }
+    SHOOT_RESULT.load(Ordering::Relaxed)
+}
+
+/// End the prober and wait until it has stopped reading.
+fn shoot_quit() {
+    SHOOT_REQ.store(SHOOT_QUIT, Ordering::Release);
+    let _ = spin_until_ns(
+        || SHOOT_ACK.load(Ordering::Acquire) == SHOOT_QUIT,
+        2_000_000_000,
+    );
 }
 
 pub(crate) fn test_tlb_shootdown_remote() -> Outcome {
@@ -330,29 +371,34 @@ pub(crate) fn test_tlb_shootdown_remote() -> Outcome {
     }
     unsafe { (va.as_u64() as *mut u64).write_volatile(0xD15EA5E) };
 
-    let probe = ShootProbe {
-        va: va.as_u64(),
-        result: AtomicU64::new(0),
-    };
-    ipi_init::call_cpu(ap, shoot_touch, &probe as *const _ as *mut (), true);
-    if probe.result.load(Ordering::SeqCst) != 1 {
+    SHOOT_VA.store(va.as_u64(), Ordering::Relaxed);
+    SHOOT_REQ.store(0, Ordering::Relaxed);
+    SHOOT_ACK.store(0, Ordering::Relaxed);
+    let _prober = spawn_thread_on("shoot-probe", shoot_prober, ap);
+    let r = shoot_touch(1);
+    if r != 1 {
+        shoot_quit();
         let _ = unsafe { paging_init::unmap_4k(va) };
         free_frame(pa);
         kva_init::free_va(va, PAGE_SIZE);
-        return Outcome::Fail("AP could not read mapped page");
+        return if r == 0 {
+            Outcome::Fail("AP probe did not answer")
+        } else {
+            Outcome::Fail("AP could not read mapped page")
+        };
     }
 
     let before = ipi_init::shootdown_count();
     let _ = unsafe { paging_init::unmap_4k(va) };
-    probe.result.store(0, Ordering::SeqCst);
-    ipi_init::call_cpu(ap, shoot_touch, &probe as *const _ as *mut (), true);
-    if probe.result.load(Ordering::SeqCst) != 2 {
+    if shoot_touch(2) != 2 {
+        shoot_quit();
         let _ = unsafe { paging_init::map_4k(va, pa, heap_flags()) };
         free_frame(pa);
         kva_init::free_va(va, PAGE_SIZE);
         return Outcome::Fail("AP did not fault after unmap");
     }
     if per_cpu_init::online_mask().count_ones() > 1 && ipi_init::shootdown_count() <= before {
+        shoot_quit();
         let _ = unsafe { paging_init::map_4k(va, pa, heap_flags()) };
         free_frame(pa);
         kva_init::free_va(va, PAGE_SIZE);
@@ -360,14 +406,14 @@ pub(crate) fn test_tlb_shootdown_remote() -> Outcome {
     }
 
     if unsafe { paging_init::map_4k(va, pa, heap_flags()) }.is_err() {
+        shoot_quit();
         free_frame(pa);
         kva_init::free_va(va, PAGE_SIZE);
         return Outcome::Fail("remap");
     }
     unsafe { (va.as_u64() as *mut u64).write_volatile(0xD15EA5E) };
-    probe.result.store(0, Ordering::SeqCst);
-    ipi_init::call_cpu(ap, shoot_touch, &probe as *const _ as *mut (), true);
-    let ok = probe.result.load(Ordering::SeqCst) == 1;
+    let ok = shoot_touch(3) == 1;
+    shoot_quit();
     let _ = unsafe { paging_init::unmap_4k(va) };
     free_frame(pa);
     kva_init::free_va(va, PAGE_SIZE);

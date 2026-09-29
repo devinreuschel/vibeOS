@@ -1,14 +1,17 @@
 //! In-guest tests for sync (kernel_tests only). Rows: the list in crate::ktest.
 
+use core::alloc::Layout;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use vibeos::lock::{RANK_BUDDY, RANK_DEVICE, RANK_HEAP, RANK_PT, RANK_SCHED, RANK_SERIAL};
 use vibeos::time::Instant;
 
 use crate::arch;
 use crate::ktest::Outcome;
+use crate::kva_init;
 use crate::per_cpu_init;
 use crate::sync::blocking_init::{BlockingMutex, Channel, Condvar, RwLock, Semaphore};
-use crate::sync_init::SpinMutex;
+use crate::sync_init::{self, SpinMutex};
 use crate::thread_init;
 use crate::time_init;
 use crate::x86;
@@ -85,14 +88,331 @@ pub(crate) fn test_spin_mutex() -> Outcome {
 pub(crate) fn test_lock_spins() -> Outcome {
     let c = crate::sync_init::spin_counts();
     crate::marker!(
-        "vibeOS: ktest:   spins pt={} buddy={} heap={} sched={} device={} serial={}",
-        c[1],
-        c[2],
-        c[3],
-        c[4],
-        c[5],
-        c[6]
+        "vibeOS: ktest:   spins heap={} pt={} buddy={} sched={} device={} serial={}",
+        c[usize::from(RANK_HEAP)],
+        c[usize::from(RANK_PT)],
+        c[usize::from(RANK_BUDDY)],
+        c[usize::from(RANK_SCHED)],
+        c[usize::from(RANK_DEVICE)],
+        c[usize::from(RANK_SERIAL)]
     );
+    Outcome::Ok
+}
+
+/// One byte allocated and freed under PT must fail the rank check: the heap
+/// ranks first (DESIGN §2.1).
+pub(crate) fn test_rank_alloc_under_pt_asserts() -> Outcome {
+    let layout = Layout::new::<u8>();
+    let if0 = x86::interrupts_enabled();
+    let nest0 = per_cpu_init::irq_nest();
+    let held0 = sync_init::testing::held();
+    let fails0 = sync_init::testing::rank_failures();
+    let hit = crate::paging_init::with_pt(|_pt| {
+        let held_pt = sync_init::testing::held();
+        let nest_pt = per_cpu_init::irq_nest();
+        let hit = arch::catch::catch_panic(|| {
+            // `black_box` keeps LLVM from eliding the unused pair.
+            // SAFETY: `layout` has a nonzero size; established here.
+            let p = core::hint::black_box(unsafe { alloc::alloc::alloc(layout) });
+            if !p.is_null() {
+                // SAFETY: `p` came from `alloc` with `layout` just above;
+                // established here.
+                unsafe { alloc::alloc::dealloc(p, layout) };
+            }
+        });
+        // The longjmp skipped the `InterruptGuard` that `HEAP.lock()`
+        // entered; PT's guard drop restores IF.
+        per_cpu_init::current()
+            .irq_nest
+            .store(nest_pt, Ordering::Relaxed);
+        // SAFETY: invariant: a rank refusal panics in
+        // `sync_init::lock_enter` before the spin, so `HEAP` was never taken
+        // and `held_pt`, the word with PT counted, is what this CPU holds;
+        // established by `sync_init::SpinMutex::lock`.
+        unsafe { sync_init::testing::restore_held(held_pt) };
+        hit
+    });
+    if !hit {
+        return Outcome::Fail("allocation under PT passed the rank check");
+    }
+    let fails = sync_init::testing::rank_failures() - fails0;
+    if fails != 1 {
+        return crate::fail_fmt!("{} rank failures, want 1", fails);
+    }
+    if x86::interrupts_enabled() != if0 || per_cpu_init::irq_nest() != nest0 {
+        return Outcome::Fail("IF or irq_nest changed");
+    }
+    if sync_init::testing::held() != held0 || sync_init::held_mask() != held0.mask() {
+        return Outcome::Fail("held word changed");
+    }
+    // SAFETY: `layout` has a nonzero size; established here.
+    let p = core::hint::black_box(unsafe { alloc::alloc::alloc(layout) });
+    if p.is_null() {
+        return Outcome::Fail("heap unusable after the catch");
+    }
+    // SAFETY: `p` came from `alloc` with `layout` just above; established
+    // here.
+    unsafe { alloc::alloc::dealloc(p, layout) };
+    Outcome::Ok
+}
+
+/// Two `RANK_DEVICE` locks the rank tests nest.
+static RANK_A: SpinMutex<u32> = SpinMutex::with_rank(0, RANK_DEVICE);
+static RANK_B: SpinMutex<u32> = SpinMutex::with_rank(0, RANK_DEVICE);
+
+/// A second `RANK_DEVICE` lock taken with `lock` or `try_lock` while one is
+/// held fails the rank check (DESIGN §2.3's nesting rule).
+pub(crate) fn test_rank_same_rank_lock_asserts() -> Outcome {
+    let if0 = x86::interrupts_enabled();
+    let nest0 = per_cpu_init::irq_nest();
+    let held0 = sync_init::testing::held();
+    let fails0 = sync_init::testing::rank_failures();
+    let hits;
+    {
+        let _a = RANK_A.lock();
+        let held_a = sync_init::testing::held();
+        let nest_a = per_cpu_init::irq_nest();
+        let restore = || {
+            // The longjmp skipped the `InterruptGuard` `RANK_B`'s acquire
+            // entered; `RANK_A`'s guard drop restores IF.
+            per_cpu_init::current()
+                .irq_nest
+                .store(nest_a, Ordering::Relaxed);
+            // SAFETY: invariant: a rank refusal panics in
+            // `sync_init::lock_enter` before the spin, so `RANK_B` was never
+            // taken and `held_a`, the word with `RANK_A` counted, is what
+            // this CPU holds; established by `sync_init::SpinMutex::lock`
+            // and `try_lock`.
+            unsafe { sync_init::testing::restore_held(held_a) };
+        };
+        let hit_lock = arch::catch::catch_panic(|| {
+            let _b = RANK_B.lock();
+        });
+        restore();
+        let hit_try = arch::catch::catch_panic(|| {
+            let _b = RANK_B.try_lock();
+        });
+        restore();
+        hits = [hit_lock, hit_try];
+    }
+    if hits != [true, true] {
+        return crate::fail_fmt!("hits [lock, try_lock] = {:?}, want both", hits);
+    }
+    let fails = sync_init::testing::rank_failures() - fails0;
+    if fails != 2 {
+        return crate::fail_fmt!("{} rank failures, want 2", fails);
+    }
+    if RANK_B.is_locked() {
+        return Outcome::Fail("RANK_B left held");
+    }
+    if x86::interrupts_enabled() != if0 || per_cpu_init::irq_nest() != nest0 {
+        return Outcome::Fail("IF or irq_nest changed");
+    }
+    if sync_init::testing::held() != held0 || sync_init::held_mask() != held0.mask() {
+        return Outcome::Fail("held word changed");
+    }
+    Outcome::Ok
+}
+
+pub(crate) fn test_rank_lock_nested_keeps_outer() -> Outcome {
+    let if0 = x86::interrupts_enabled();
+    let nest0 = per_cpu_init::irq_nest();
+    let held0 = sync_init::testing::held();
+    let fails0 = sync_init::testing::rank_failures();
+    let mut counts = [u8::MAX; 2];
+    let hit;
+    {
+        let _a = RANK_A.lock();
+        let held_a = sync_init::testing::held();
+        let nest_a = per_cpu_init::irq_nest();
+        hit = arch::catch::catch_panic(|| {
+            // pair order: RANK_A, then RANK_B
+            let _b = RANK_B.lock_nested(1);
+            counts[0] = sync_init::testing::held().count(RANK_DEVICE);
+        });
+        if hit {
+            // SAFETY: invariant: a rank refusal panics in
+            // `sync_init::lock_enter` before the spin, so `RANK_B` was never
+            // taken and `held_a`, this CPU's word with `RANK_A` alone
+            // counted, is what it holds; established by
+            // `sync_init::SpinMutex::lock_nested`.
+            unsafe { sync_init::testing::restore_held(held_a) };
+            per_cpu_init::current()
+                .irq_nest
+                .store(nest_a, Ordering::Relaxed);
+        }
+        counts[1] = sync_init::testing::held().count(RANK_DEVICE);
+    }
+    let after = sync_init::testing::held();
+    if hit {
+        return Outcome::Fail("lock_nested hit the rank check");
+    }
+    if counts != [2, 1] {
+        return crate::fail_fmt!("device counts {:?}, want [2, 1]", counts);
+    }
+    if after.count(RANK_DEVICE) != 0 || after != held0 {
+        return crate::fail_fmt!("held {:#x} after, {:#x} before", after.raw(), held0.raw());
+    }
+    if sync_init::held_mask() != held0.mask() {
+        return Outcome::Fail("held_mask changed");
+    }
+    if sync_init::testing::rank_failures() != fails0 {
+        return Outcome::Fail("rank failure counted");
+    }
+    if x86::interrupts_enabled() != if0 || per_cpu_init::irq_nest() != nest0 {
+        return Outcome::Fail("IF or irq_nest changed");
+    }
+    if RANK_B.is_locked() {
+        return Outcome::Fail("RANK_B left held");
+    }
+    Outcome::Ok
+}
+
+fn noop_work(_: usize) {}
+
+/// Each cross-CPU cell box 1304 converted, the call that takes it as
+/// production does, and what the acquisition trace must hold for it.
+struct CellCase {
+    name: &'static str,
+    take: fn(),
+    file: &'static str,
+    rank: u8,
+    count: u8,
+}
+
+const CELL_CASES: &[CellCase] = &[
+    CellCase {
+        name: "kva_init::KVA",
+        take: || {
+            let _ = kva_init::stats();
+        },
+        file: "src/mm/kva_init.rs",
+        rank: RANK_PT,
+        count: 2,
+    },
+    CellCase {
+        name: "proc_init::TABLE",
+        take: || {
+            let _ = crate::proc_init::dispatch(vibeos::syscall::SYS_GETPPID, [0; 6]);
+        },
+        file: "src/proc/proc_init/mod.rs",
+        rank: RANK_SCHED,
+        count: 2,
+    },
+    CellCase {
+        name: "work_init::ST",
+        take: || {
+            if !crate::work_init::enqueue(noop_work, 0) {
+                crate::klog!(vibeos::log::Level::Warn, "ktest: work ring full");
+            }
+        },
+        file: "src/sched/work_init.rs",
+        rank: RANK_SCHED,
+        count: 2,
+    },
+    CellCase {
+        name: "irq_init::IRQ",
+        take: || {
+            let _ = crate::irq_init::cpu_of(0x40);
+        },
+        file: "src/irq/irq_init.rs",
+        rank: RANK_DEVICE,
+        count: 1,
+    },
+    CellCase {
+        name: "apic_init::STATE",
+        take: || {
+            let _ = crate::apic_init::timer_mode();
+        },
+        file: "src/arch/x86_64/apic_init.rs",
+        rank: RANK_DEVICE,
+        count: 1,
+    },
+    CellCase {
+        name: "kbd_init::KBD",
+        take: || {
+            if let Some(k) = crate::kbd_init::pop() {
+                crate::kbd_init::push_for_test(k);
+            }
+        },
+        file: "src/console/kbd_init.rs",
+        rank: RANK_DEVICE,
+        count: 1,
+    },
+    CellCase {
+        name: "pci_init::ECAM",
+        take: || {
+            let bdf = vibeos::dev::pci::Bdf {
+                segment: 0,
+                bus: 0,
+                device: 0,
+                function: 0,
+            };
+            let _ = crate::pci_init::cfg_read32(bdf, 0);
+        },
+        file: "src/dev/pci_init.rs",
+        rank: RANK_DEVICE,
+        count: 1,
+    },
+    CellCase {
+        name: "file_init::CWD",
+        take: || {
+            let _ = crate::file_init::cwd_copy();
+        },
+        file: "src/fs/file_init.rs",
+        rank: RANK_DEVICE,
+        count: 1,
+    },
+    CellCase {
+        name: "fat_init::INITRD",
+        take: crate::fs::ktest::probe_initrd,
+        file: "src/fs/fat_init.rs",
+        rank: RANK_DEVICE,
+        count: 1,
+    },
+    CellCase {
+        name: "vibefs_init::IMAGE",
+        take: crate::fs::ktest::probe_image,
+        file: "src/fs/vibefs_init.rs",
+        rank: RANK_DEVICE,
+        count: 1,
+    },
+];
+
+/// Every cross-CPU cell box 1304 converted is a ranked `SpinMutex`: taking
+/// it through its production path records an acquisition in its file, at
+/// its rank, nested where it pairs with the lock its callers hold.
+pub(crate) fn test_cross_cpu_cells_ranked() -> Outcome {
+    for c in CELL_CASES {
+        let trace = {
+            let _irq = x86::InterruptGuard::enter();
+            sync_init::testing::trace_arm();
+            (c.take)();
+            sync_init::testing::trace_take()
+        };
+        let found = trace
+            .iter()
+            .flatten()
+            .any(|e| e.at.file() == c.file && e.rank == c.rank && e.count == c.count);
+        if !found {
+            let mut seen = 0usize;
+            for e in trace.iter().flatten() {
+                if e.at.file() == c.file {
+                    return crate::fail_fmt!(
+                        "{}: rank {} count {} at line {}, want rank {} count {}",
+                        c.name,
+                        e.rank,
+                        e.count,
+                        e.at.line(),
+                        c.rank,
+                        c.count
+                    );
+                }
+                seen += 1;
+            }
+            return crate::fail_fmt!("{}: no ranked acquisition ({} others)", c.name, seen);
+        }
+    }
     Outcome::Ok
 }
 

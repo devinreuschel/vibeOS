@@ -682,3 +682,11 @@ needs = [
   "`pit_tick_rate` counts timer interrupts, not",  # L1265
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1305
+[[box]]
+key = "the rank checker enforces DESIGN"
+needs = [
+  "every `IrqCell` static that more",  # L1304
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"

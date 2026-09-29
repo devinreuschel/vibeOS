@@ -746,6 +746,8 @@ fn invalid_opcode(frame: &mut TrapFrame) {
 }
 
 fn nmi(frame: &mut TrapFrame) {
+    // It runs inside whatever this CPU held: no lock (DESIGN §2.2).
+    let _lockless = crate::sync_init::lockless_section();
     crate::panic::exception_halt(b"nmi", &frame.iret, None, None);
 }
 
@@ -763,6 +765,9 @@ fn debug_ex(frame: &mut TrapFrame) {
         }
         user_fault(frame);
     }
+    // A CPL-0 `#DB` runs inside whatever this CPU held: no lock (DESIGN
+    // §2.2).
+    let _lockless = crate::sync_init::lockless_section();
     x86::cli();
     crate::panic::exception_halt(b"#DB", &frame.iret, None, None);
 }
@@ -811,6 +816,8 @@ fn double_fault(frame: &mut TrapFrame) {
 }
 
 fn machine_check(frame: &mut TrapFrame) {
+    // It runs inside whatever this CPU held: no lock (DESIGN §2.2).
+    let _lockless = crate::sync_init::lockless_section();
     crate::panic::exception_halt(b"#MC", &frame.iret, None, None);
 }
 

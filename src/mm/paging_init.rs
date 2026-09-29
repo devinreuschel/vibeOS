@@ -134,10 +134,12 @@ pub fn with_pt<R>(f: impl FnOnce(&mut MapperGuard) -> R) -> R {
     f(&mut g)
 }
 
-/// Whether PT is free right now (and not held by this CPU).
+/// Whether PT is free right now: held by no CPU, this one included. It
+/// reads the lock rather than trying it, since a `try_lock` of a rank this
+/// CPU holds fails the rank check.
 #[cfg(feature = "kernel_tests")]
 pub(crate) fn pt_lock_free() -> bool {
-    PT.try_lock().is_some()
+    !PT.is_locked()
 }
 
 static MAP_END: AtomicU64 = AtomicU64::new(0);

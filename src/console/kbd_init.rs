@@ -15,14 +15,15 @@ use vibeos::kbd::{
     PORT_TEST_OK, RING_CAP, Ring, SELF_TEST_OK, STAT_IBF, STAT_MOUSE, STAT_OBF, STATUS, cfg_probe,
     cfg_run,
 };
+use vibeos::lock::RANK_DEVICE;
 use vibeos::pic::{PIC_EOI, PIC1_CMD};
 use vibeos::vectors;
 
 use crate::acpi_init;
 use crate::apic_init;
 use crate::arch;
-use crate::cell::IrqCell;
 use crate::per_cpu_init;
+use crate::sync_init::SpinMutex;
 use crate::x86::{self, InterruptGuard};
 
 const POLL_CAP: u32 = 100_000;
@@ -33,10 +34,19 @@ struct Kbd {
     ring: Ring<DecodedKey, RING_CAP>,
 }
 
-static KBD: IrqCell<Kbd> = IrqCell::new(Kbd {
-    decoder: Decoder::new(),
-    ring: Ring::empty(DecodedKey::Char(0)),
-});
+static KBD: SpinMutex<Kbd> = SpinMutex::with_rank(
+    Kbd {
+        decoder: Decoder::new(),
+        ring: Ring::empty(DecodedKey::Char(0)),
+    },
+    RANK_DEVICE,
+);
+
+/// Run `f` on the keyboard state.
+fn with_kbd<R>(f: impl FnOnce(&mut Kbd) -> R) -> R {
+    let mut g = KBD.lock();
+    f(&mut g)
+}
 static LIVE: AtomicBool = AtomicBool::new(false);
 static GSI: AtomicU32 = AtomicU32::new(GSI_NONE);
 static PIC_FALLBACK: AtomicBool = AtomicBool::new(false);
@@ -61,7 +71,7 @@ pub fn on_irq() {
     if status & STAT_MOUSE != 0 {
         return;
     }
-    KBD.with(|k| {
+    with_kbd(|k| {
         if let Some(key) = k.decoder.feed(data) {
             k.ring.push(key);
         }
@@ -70,7 +80,7 @@ pub fn on_irq() {
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 pub fn pop() -> Option<DecodedKey> {
-    KBD.with(|k| k.ring.pop())
+    with_kbd(|k| k.ring.pop())
 }
 
 #[cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
@@ -261,7 +271,7 @@ fn init_8042() -> bool {
 /// Queue `k` as if the keyboard had sent it. Test hook (AGENTS.md rule 9).
 #[cfg(feature = "kernel_tests")]
 pub fn push_for_test(k: DecodedKey) {
-    KBD.with(|kbd| kbd.ring.push(k));
+    with_kbd(|kbd| kbd.ring.push(k));
 }
 
 /// Read the 8042 config byte. CLI so the IRQ1 ISR cannot steal it.

@@ -23,7 +23,6 @@ use vibeos::vibefs::{self, BLOCK, Disk, Error, Node, ROOT_INO, Vol};
 
 use crate::block_init;
 use crate::cache_init;
-use crate::cell::IrqCell;
 use crate::fs_init;
 use crate::sync_init::SpinMutex;
 use crate::thread_init;
@@ -97,7 +96,13 @@ static SLOTS: [Slot; MAX_VOLS] = [Slot::empty(), Slot::empty()];
 static ALLOC: SpinMutex<()> = SpinMutex::with_rank((), RANK_DEVICE);
 static MNTS: SpinMutex<[Mnt; MNT_MAX]> =
     SpinMutex::with_rank([Mnt::EMPTY, Mnt::EMPTY], RANK_DEVICE);
-static IMAGE: IrqCell<[u8; IMAGE_BYTES]> = IrqCell::new([0; IMAGE_BYTES]);
+static IMAGE: SpinMutex<[u8; IMAGE_BYTES]> = SpinMutex::with_rank([0; IMAGE_BYTES], RANK_DEVICE);
+
+/// Run `f` on the vibefs image.
+pub(super) fn with_image<R>(f: impl FnOnce(&mut [u8; IMAGE_BYTES]) -> R) -> R {
+    let mut g = IMAGE.lock();
+    f(&mut g)
+}
 static LIVE: AtomicBool = AtomicBool::new(false);
 static NVOL: AtomicU8 = AtomicU8::new(0);
 
@@ -143,7 +148,7 @@ impl Disk for Io {
             Media::Mem => {
                 let off = (bno as usize).checked_mul(BLOCK).ok_or(Error::Inval)?;
                 let end = off.checked_add(BLOCK).ok_or(Error::Inval)?;
-                IMAGE.with(|data| {
+                with_image(|data| {
                     if end > data.len() {
                         return Err(Error::Io);
                     }
@@ -168,7 +173,7 @@ impl Disk for Io {
             Media::Mem => {
                 let off = (bno as usize).checked_mul(BLOCK).ok_or(Error::Inval)?;
                 let end = off.checked_add(BLOCK).ok_or(Error::Inval)?;
-                IMAGE.with(|data| {
+                with_image(|data| {
                     if end > data.len() {
                         return Err(Error::Io);
                     }
@@ -563,7 +568,7 @@ pub fn nvol() -> u8 {
 }
 
 pub fn init() {
-    IMAGE.with(|buf| buf.fill(0));
+    with_image(|buf| buf.fill(0));
     let mut io = Io { back: Media::Mem };
     let vref = unsafe { &mut *SLOTS[0].vol.get() };
     vref.clear();
