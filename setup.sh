@@ -3,7 +3,8 @@
 #
 # Clones the Limine binary branch to ./limine, builds the `limine` host tool,
 # and verifies the other host tools that make(1) needs. Never rewrites any
-# project files (ROADMAP §0.5).
+# project files (ROADMAP §0.5). Installs scripts/hooks/commit-msg into the
+# clone's git hooks unless a hook of another origin is already there.
 
 set -euo pipefail
 
@@ -90,6 +91,20 @@ if [ ! -x "$LIMINE_DIR/limine" ]; then
     make -C "$LIMINE_DIR"
 else
     echo "setup: limine host tool already built"
+fi
+
+hooks_path=$(git -C "$ROOT" config --get core.hooksPath || true)
+hook_dir=$(git -C "$ROOT" rev-parse --git-path hooks)
+case "$hook_dir" in /*) ;; *) hook_dir="$ROOT/$hook_dir" ;; esac
+if [ -n "$hooks_path" ]; then
+    echo "setup: core.hooksPath is $hooks_path; add scripts/hooks/commit-msg there by hand"
+elif [ -e "$hook_dir/commit-msg" ] && ! grep -q 'vibeOS commit-msg hook' "$hook_dir/commit-msg"; then
+    echo "setup: $hook_dir/commit-msg is not vibeOS's; add scripts/hooks/commit-msg to it by hand"
+else
+    mkdir -p "$hook_dir"
+    cp "$ROOT/scripts/hooks/commit-msg" "$hook_dir/commit-msg"
+    chmod +x "$hook_dir/commit-msg"
+    echo "setup: installed the commit-msg hook (check_ticks.py --commit-msg)"
 fi
 
 echo "setup: ok"

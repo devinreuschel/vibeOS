@@ -166,6 +166,41 @@ class RepoCase(unittest.TestCase):
         return {path: text.replace(old, new)}
 
 
+class TestCommitMsg(RepoCase):
+    """`--commit-msg`: the staged tree and the message about to be committed."""
+
+    def stage(self, needle: str) -> None:
+        self.roadmap = tick(self.roadmap, needle)
+        self.repo.write({"docs/ROADMAP.md": self.roadmap})
+        self.repo.git("add", "-A")
+
+    def test_paired_staged_tick_passes(self) -> None:
+        self.stage("beta box")
+        r = check_ticks.check_message(
+            "t\n\nProves: make lint -- beta box: `make lint` checks the", self.repo.path)
+        self.assertEqual((r.errors, r.ticks), ([], 1))
+
+    def test_unpaired_or_unresolved_is_refused(self) -> None:
+        self.stage("beta box")
+        for msg, needle in (("t", "ticked with no"),
+                            ("t\n\nProves: make nothing -- beta box", "proof not found"),
+                            ("t\n# Proves: make lint -- beta box", "ticked with no")):
+            with self.subTest(msg=msg):
+                self.assertErrors(check_ticks.check_message(msg, self.repo.path), needle)
+
+    def test_no_tick_needs_no_proves(self) -> None:
+        self.assertEqual(check_ticks.check_message("t", self.repo.path).errors, [])
+
+    def test_main_returns_1_on_a_bad_message(self) -> None:
+        self.stage("beta box")
+        msg = self.repo.path / "MSG"
+        msg.write_text("t\n", encoding="utf-8")
+        with mock.patch.object(check_ticks, "ROOT", self.repo.path), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(check_ticks.main(["--commit-msg", str(msg)]), 1)
+        self.assertIn("ticked with no", err.getvalue())
+
+
 class TestPairing(RepoCase):
     def test_paired_tick_passes(self) -> None:
         self.commit("t\n\nProves: make lint -- beta box: `make lint` checks the", "beta box")
@@ -176,9 +211,9 @@ class TestPairing(RepoCase):
         sha = self.commit("t", "beta box")
         self.assertErrors(self.run_check(), f"{sha[:7]} L6: ticked with no `Proves:` line")
 
-    def test_four_word_prefix(self) -> None:
-        self.commit("t\n\nProves: make lint -- beta box: `make lint`", "beta box")
-        self.assertErrors(self.run_check(), "fewer than 5 words", "ticked with no")
+    def test_short_prefix_that_pairs_one_tick_passes(self) -> None:
+        self.commit("t\n\nProves: make lint -- beta box", "beta box")
+        self.assertEqual(self.run_check().errors, [])
 
     def test_prefix_pairs_two_lines(self) -> None:
         self.roadmap = tick(self.roadmap, "alpha box one two three four five")

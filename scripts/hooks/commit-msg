@@ -1,0 +1,9 @@
+#!/bin/sh
+# vibeOS commit-msg hook, which setup.sh installs. It refuses a commit whose
+# `Proves:` lines do not pair with the ROADMAP boxes it ticks, or name a proof
+# that does not exist (scripts/check_ticks.py --commit-msg), because a pushed
+# message cannot be fixed without rewriting history. A merge brings other
+# commits' ticks, which their own messages pair, so a merge is not checked.
+git_dir=$(git rev-parse --git-dir) || exit 1
+[ -f "$git_dir/MERGE_HEAD" ] && exit 0
+exec python3 "$(git rev-parse --show-toplevel)/scripts/check_ticks.py" --commit-msg "$1"

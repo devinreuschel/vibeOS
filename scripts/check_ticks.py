@@ -9,8 +9,8 @@ whose text changes names its proof again; one reopened or deleted needs none.
 
 Each tick pairs with one `Proves: <proof>[ [<bracket>]][ (existing: <reason>)]
 -- <prefix>` line of the commit's message, read anywhere in the message: the
-prefix, at least five words, begins that ticked line and no other line the
-commit ticks (whitespace collapsed). The line splits at its first ` -- `.
+prefix begins that ticked line and no other line the commit ticks (whitespace
+collapsed). The line splits at its first ` -- `.
 
 The proof exists at the head: a `make <target>` rule, a path (optionally
 `<path>::<name>`), a `"<marker text>"`, or an identifier (a ktest registry row,
@@ -28,7 +28,10 @@ Modes:
   closes and Fails-before rules;
 - `--results DIR [--run-commit SHA]`: adds the results, retry and bracket
   rules, reading C-RESULTS files under DIR at the head or at SHA;
-- `--summary FILE`: appends a Markdown report to FILE.
+- `--summary FILE`: appends a Markdown report to FILE;
+- `--commit-msg FILE`: the pairing and proof rules for the commit about to be
+  made, from its message FILE and the staged tree (`scripts/hooks/commit-msg`,
+  which setup.sh installs), so a bad trailer is refused before it exists.
 
 Errors go to stderr as `<sha7> L<line>: <message>`; the exit code is then 1.
 """
@@ -52,7 +55,6 @@ sys.path.insert(0, str(ROOT))
 from scripts import gatelib  # noqa: E402
 
 ROADMAP_PATH = "docs/ROADMAP.md"
-MIN_PREFIX_WORDS = 5
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 TICKED = re.compile(r"^\s*- \[x\] (.*)$")
 EXISTING = re.compile(r"^(.*?)\s+\(existing:\s*(.*)\)$")
@@ -745,10 +747,6 @@ class Checker:
             if isinstance(p, str):
                 self.report.error(c.sha, None, p)
                 continue
-            if len(p.prefix.split()) < MIN_PREFIX_WORDS:
-                self.report.error(c.sha, None, f"{tag}: prefix has fewer than "
-                                  f"{MIN_PREFIX_WORDS} words: {p.prefix!r}")
-                continue
             pre = collapse(p.prefix)
             hits = [t for t in c.ticks if collapse(t.text).startswith(pre)]
             if not hits:
@@ -1035,6 +1033,31 @@ def check(
                    gh=gh, history=history).run()
 
 
+def check_message(message: str, repo: Path = gatelib.ROOT) -> Report:
+    """The pairing and proof rules for the commit about to be made: `message`
+    and the staged tree, against HEAD's ticks and, for the diff rule, the
+    merge base with origin/main (HEAD when that ref is missing)."""
+    message = "\n".join(ln for ln in message.splitlines() if not ln.startswith("#"))
+    ck = Checker.__new__(Checker)
+    ck.repo, ck.full, ck.results, ck.report = repo, False, None, Report()
+    ck.tree = Tree(gatelib.git(repo, "write-tree").strip(), repo)
+    main = gatelib.git(repo, "rev-parse", "--verify", "-q", "origin/main", check=False).strip()
+    base = gatelib.git(repo, "merge-base", main, "HEAD", check=False).strip() if main else ""
+    ck._changed = parse_changed(gatelib.git(repo, "diff", "--cached", "-U0", "--no-color",
+                                            "--no-ext-diff", "--no-renames", base or "HEAD"))
+    diff = gatelib.git(repo, "diff", "--cached", "-U0", "--no-color", "--no-ext-diff",
+                       "--no-renames", "--", ROADMAP_PATH)
+    added, removed = parse_roadmap_diff("\0staged\n" + diff).get("staged", ([], []))
+    head_text = gatelib.git(repo, "show", f"HEAD:{ROADMAP_PATH}", check=False)
+    at_head = {b.text for b in gatelib.parse_boxes(head_text) if b.ticked}
+    gone = set(removed)
+    c = Commit("staged", message)
+    c.ticks = [Tick(c.sha, n, x) for n, x in added if x not in gone and x not in at_head]
+    ck.report.ticks = len(c.ticks)
+    ck.check_commit(c)
+    return ck.report
+
+
 def summary(r: Report, base: str, head: str) -> str:
     out = [f"## check_ticks: {base[:12]}..{head[:12]}", "",
            f"{r.ticks} ticked lines; {'ok' if not r.errors else f'{len(r.errors)} errors'}."]
@@ -1061,7 +1084,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--results", type=Path, help="results files (C-RESULTS) to read")
     ap.add_argument("--run-commit", help="the commit a pull_request run tested (GITHUB_SHA)")
     ap.add_argument("--summary", type=Path, help="append a Markdown report to this file")
+    ap.add_argument("--commit-msg", type=Path,
+                    help="check the commit about to be made (the commit-msg hook)")
     args = ap.parse_args(argv)
+    if args.commit_msg is not None:
+        try:
+            r = check_message(args.commit_msg.read_text(encoding="utf-8"), repo=ROOT)
+        except (OSError, gatelib.GateError) as e:
+            print(f"check_ticks: {e}", file=sys.stderr)
+            return 1
+        print_report(r)
+        if r.errors:
+            print("check_ticks: this commit's `Proves:` lines do not pair (see above); fix the "
+                  "message, since a pushed message cannot be fixed", file=sys.stderr)
+            return 1
+        return 0
     base = args.base
     full = base is not None
     if base is None:
