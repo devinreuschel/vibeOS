@@ -301,8 +301,7 @@ different apparent TSC rate, and LAPIC periodic ticks coalesce so `uptime_ms` du
 sample, and it gets no wider band where it flakes (§9.8). The PIT-vs-HPET cross-check holds its
 75–125% band only where the TSC is invariant, so without the CPUID bit it skips with the reason
 `no invariant tsc`, and the ROADMAP §10.1 KVM leg, whose guest has the bit, runs it. Not yet
-enforced: `tsc_calib_source` measures PIT three times in a 50–200% band without the bit (ROADMAP
-§10.2), and `sleep_ms_50` accepts 40–400 ms of `now_us` when ticks coalesce (ROADMAP §10.3). Do not
+enforced: `sleep_ms_50` accepts 40–400 ms of `now_us` when ticks coalesce (ROADMAP §10.3). Do not
 loosen the invariant-TSC path. Under KVM too, QEMU leaves the invariant-TSC bit out of `-cpu max`
 and `-cpu host` while the vCPU is migratable, its default, so the KVM leg asks for `+invtsc` and
 fails if the guest still reports none (ROADMAP §10.1). Planned (ROADMAP §10.3): `now_ns` stops

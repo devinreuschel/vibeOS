@@ -119,9 +119,16 @@ just read is monotonic by construction and passes even with torn reads, so the t
 independently published timestamp to compare against. And a single-threaded test never sees the race,
 so the in-guest coverage has to read the clock from threads that yield while a timer fires and compare
 it with that independent timestamp. The in-guest tests `now_us_monotonic` and `now_us_under_yields`
-do neither. `now_ns` returns `LAST_NS.fetch_max(n).max(n)`, which never goes below an earlier return,
-so neither test can fail, and the yields variant runs one thread that calls `hlt_once`. Only the host
-tests `now_us_seqlock_retry_under_simulated_writer` and `seqlock_threaded_writer_never_tears` exercise a torn read, and both bypass `LAST_NS` (ROADMAP §10.2, F100).
+do both. They read through `time::ktest::now_ns_unclamped`, a `kernel_tests` hook that calls
+`TickClock::now_ns_with` directly and so skips `LAST_NS`, and match each read within 1 µs against the
+tick records CPU 0 publishes, before each seqlock write, into a ring the seqlock does not guard. The raw
+reading may step back after a late tick, which `LAST_NS` hides from `now_ns`, so the tests check the
+match on the raw reading and check the clamped `now_us` for order. They run readers on every CPU that
+call `yield_now` while the timer fires, and every 500th read stalls inside the seqlock window until two
+ticks have been published, so the retry runs. `now_us_planted_tear` makes a stalled read pair one
+tick's count with a later tick's TSC stamp, as a skipped retry would, and requires both tests to fail.
+The host tests `now_us_seqlock_retry_under_simulated_writer` and `seqlock_threaded_writer_never_tears`
+still cover the retry in the portable half (ROADMAP §10.2, F100).
 
 ### Global monotonicity under SMP
 
