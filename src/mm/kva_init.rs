@@ -61,6 +61,12 @@ pub fn stats() -> KvaStats {
 /// orders nothing, so Relaxed.
 static LEAKED_BYTES: AtomicU64 = AtomicU64::new(0);
 
+/// Bytes [`note_leaked`] has counted since boot.
+#[cfg(feature = "kernel_tests")]
+pub(crate) fn leaked_bytes() -> u64 {
+    LEAKED_BYTES.load(Ordering::Relaxed)
+}
+
 /// Free `[va, va + len)` to the KVA free list, under PT. Returns the bytes
 /// leaked: `len` when the node pool is full (`KvaError::Exhausted`, the one
 /// error `Kva::free` returns), which leaves the range reserved and counted

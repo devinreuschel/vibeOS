@@ -970,7 +970,7 @@ pub(crate) fn lifetime_stack_reclaim() -> Outcome {
     if tail != 0 {
         return crate::fail_fmt!("{tail} shootdowns sent from a switch tail");
     }
-    base.unchanged(&FrameCount::quiescent(), exits)
+    base.unchanged(&FrameCount::quiescent())
 }
 
 // Spin about 10 million iterations (several 10 ms quanta under TCG), then
