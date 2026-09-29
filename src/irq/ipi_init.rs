@@ -8,9 +8,8 @@
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use vibeos::apic::IpiError;
-use vibeos::ipi::{MAX_IPI_CPUS, all_acked, waiter_mask};
+use vibeos::ipi::{MAX_IPI_CPUS, SHOOT_RANGES, ShootRange, all_acked, waiter_mask};
 use vibeos::log::Level;
-use vibeos::paging::VirtAddr;
 use vibeos::thread::ThreadId;
 use vibeos::vectors;
 
@@ -20,8 +19,10 @@ use crate::sync_init;
 use crate::time_init;
 use crate::x86;
 
+/// One CPU's shootdown round: `n` packed [`ShootRange`]s in `ranges`.
 struct Slot {
-    va: AtomicU64,
+    n: AtomicU64,
+    ranges: [AtomicU64; SHOOT_RANGES],
     waiters: AtomicU64,
     acked: AtomicU64,
 }
@@ -29,7 +30,8 @@ struct Slot {
 impl Slot {
     const fn empty() -> Self {
         Self {
-            va: AtomicU64::new(0),
+            n: AtomicU64::new(0),
+            ranges: [const { AtomicU64::new(0) }; SHOOT_RANGES],
             waiters: AtomicU64::new(0),
             acked: AtomicU64::new(0),
         }
@@ -126,8 +128,15 @@ fn service_shootdowns() {
         if w & me != 0 && s.acked.load(Ordering::Relaxed) & me == 0 {
             {
                 let _lockless = sync_init::lockless_section();
-                let va = s.va.load(Ordering::Relaxed);
-                x86::invlpg(va);
+                let n = s.n.load(Ordering::Relaxed);
+                for r in s.ranges.iter().take(n as usize) {
+                    let r = ShootRange::from_raw(r.load(Ordering::Relaxed));
+                    let mut p = 0u64;
+                    while p < r.pages() {
+                        x86::invlpg(r.start().wrapping_add(p << 12));
+                        p += 1;
+                    }
+                }
             }
             s.acked.fetch_or(me, Ordering::Release);
             SHOOT_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -164,7 +173,7 @@ fn service_calls() {
 }
 
 /// Wait until every CPU in `waiters` has acked. Never panics and never
-/// returns early: `shootdown_va` and `call_mask` callers free frames and
+/// returns early: `shootdown_ranges` and `call_mask` callers free frames and
 /// reuse their slot as soon as it returns (DESIGN §7.9). After each second
 /// without every ack (or [`NO_TSC_LATE_POLLS`] polls without a TSC) it logs
 /// the CPUs that have not acked and counts it in [`ack_late_count`]; a CPU
@@ -233,12 +242,21 @@ impl core::fmt::Display for CpuList {
     }
 }
 
-/// After local `invlpg`. Broadcast 0xFC, wait, service inbound.
+/// After the local `invlpg`s. For each [`SHOOT_RANGES`] of `ranges`,
+/// one round: publish them, broadcast 0xFC, wait for every other online
+/// CPU to invalidate every page of them, service inbound.
 ///
 /// IRQ-off for publish→wait→clear: this CPU's `SHOOT` slot is not
 /// reentered by a timer/reschedule switch. Inbound shootdowns still
 /// run through `service_incoming` (IF off cannot take the IPI).
-pub fn shootdown_va(va: VirtAddr) {
+pub fn shootdown_ranges(ranges: &[ShootRange]) {
+    for chunk in ranges.chunks(SHOOT_RANGES) {
+        shootdown_round(chunk);
+    }
+}
+
+/// One round for at most [`SHOOT_RANGES`] ranges.
+fn shootdown_round(ranges: &[ShootRange]) {
     let _irq = x86::InterruptGuard::enter();
     #[cfg(feature = "kernel_tests")]
     crate::irq::ktest::note_shootdown();
@@ -248,7 +266,12 @@ pub fn shootdown_va(va: VirtAddr) {
         return;
     }
     let slot = &SHOOT[me as usize];
-    slot.va.store(va.as_u64(), Ordering::Relaxed);
+    let mut n = 0u64;
+    for (dst, r) in slot.ranges.iter().zip(ranges) {
+        dst.store(r.raw(), Ordering::Relaxed);
+        n += 1;
+    }
+    slot.n.store(n, Ordering::Relaxed);
     slot.acked.store(0, Ordering::Relaxed);
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
     slot.waiters.store(waiters, Ordering::Release);
@@ -438,6 +461,6 @@ pub fn call_cpu(cpu: u32, f: fn(*mut ()), arg: *mut (), wait: bool) {
 
 /// Install the shootdown hook. IDT overlays are already in place.
 pub fn init() {
-    vibeos::paging::set_tlb_shootdown_hook(shootdown_va);
+    vibeos::paging::set_tlb_shootdown_hook(shootdown_ranges);
     crate::sync_init::set_spin_poll(service_incoming);
 }

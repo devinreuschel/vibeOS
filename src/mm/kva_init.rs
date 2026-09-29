@@ -9,7 +9,10 @@
 //! The KVA free-list lives under the page-table lock. Unmap, drop PT,
 //! shootdown, then free VA to the tail ([`release_va`]).
 
-use vibeos::kva::{KVA_END, KVA_SIZE, KVA_START, Kva, KvaError, KvaStats, PAGE_SIZE};
+use vibeos::ipi::{SHOOT_RANGE_PAGES, SHOOT_RANGES, ShootRange};
+use vibeos::kva::{
+    DEFAULT_STACK_PAGES, KVA_END, KVA_SIZE, KVA_START, Kva, KvaError, KvaStats, PAGE_SIZE,
+};
 use vibeos::lock::RANK_PT;
 use vibeos::paging::{MapError, PhysAddr, VirtAddr, heap_flags, stack_flags};
 use vibeos::pmm::Frames;
@@ -33,6 +36,15 @@ use vibeos::limits::MAX_UNMAP_PAGES as MAX_UNMAP;
 
 // `free_stack` unmaps a whole stack in one `unmap_shootdown` batch.
 const _: () = assert!(MAX_STACK_PAGES <= MAX_UNMAP);
+// One `ShootRange` covers what `unmap_shootdown` unmaps, so it sends one
+// round (`shoot_span`).
+const _: () = assert!(MAX_UNMAP as u64 <= SHOOT_RANGE_PAGES);
+
+/// Frames one [`free_parked`] batch holds between its unmaps and its
+/// shootdown round: [`SHOOT_RANGES`] default stacks, and one stack of any
+/// size.
+const BATCH_PAGES: usize = SHOOT_RANGES * DEFAULT_STACK_PAGES;
+const _: () = assert!(MAX_STACK_PAGES <= BATCH_PAGES);
 
 /// Claim the 64 GiB window. Must run after paging + heap.
 ///
@@ -96,11 +108,7 @@ pub fn alloc_guarded_stack(pages: usize) -> Result<GuardedStack, KvaError> {
         release_va(guard, (pages as u64 + 1) * PAGE_SIZE);
         return Err(e);
     }
-    let mut i = 0;
-    while i < pages {
-        vibeos::paging::tlb_shootdown_others(VirtAddr(base.as_u64() + PAGE_SIZE * i as u64));
-        i += 1;
-    }
+    shoot_span(base, pages);
     // SAFETY: `[guard, guard + (pages + 1) pages)` came from
     // `Kva::alloc_guarded(pages)` above, upper page `i` maps `frames[i]`
     // (the loop above), the other slots are `None`, the guard page was
@@ -160,19 +168,78 @@ pub(crate) fn park_on_list(head: &mut u64, stack: GuardedStack) {
 
 /// Free every stack on the dead list `head`, which the caller took whole
 /// off its owner (`thread_init::take_dead_stacks`). IF=1. Returns how many.
+///
+/// A batch at a time ([`free_batch`]): one shootdown round per
+/// [`SHOOT_RANGES`] stacks, not one per page, so a worker frees stacks
+/// faster than a burst of exits, which sends no IPI, parks them (DESIGN
+/// §4.5).
 pub(crate) fn free_parked(mut head: u64) -> usize {
     let mut n = 0usize;
     while head != 0 {
-        // SAFETY: invariant I10, established at `thread_init::finish_switch`:
-        // `head` is a node `park_on_list` wrote into a stack no CPU runs on,
-        // and the list was taken whole, so this is the one read of it; the
-        // link and the handle are moved out before the stack is freed.
-        let Parked { next, stack } = unsafe { core::ptr::read(head as *const Parked) };
-        free_stack(stack);
-        head = next;
-        n += 1;
+        let (rest, k) = free_batch(head);
+        head = rest;
+        n += k;
     }
     n
+}
+
+/// Free stacks from the dead list `head` on, at most [`SHOOT_RANGES`] of
+/// them and [`BATCH_PAGES`] pages, and at least one: unmap each, then one
+/// shootdown round for all of them, then their frames and their VA.
+/// Returns the rest of the list and how many it freed.
+fn free_batch(mut head: u64) -> (u64, usize) {
+    let mut frames: [Option<Frames>; BATCH_PAGES] = [const { None }; BATCH_PAGES];
+    let mut nf = 0usize;
+    let mut ranges = [ShootRange::page(0); SHOOT_RANGES];
+    let mut nr = 0usize;
+    let mut vas = [(VirtAddr(0), 0usize); SHOOT_RANGES];
+    let mut k = 0usize;
+    while head != 0 && k < SHOOT_RANGES {
+        // SAFETY: invariant I10, established at `thread_init::finish_switch`:
+        // `head` is a node `park_on_list` wrote into a stack no CPU runs on,
+        // and the list was taken whole, so nothing else reads or writes it;
+        // this reads the handle's page count in place.
+        let pages = unsafe { (*(head as *const Parked)).stack.pages() };
+        if nf + pages > BATCH_PAGES {
+            break;
+        }
+        // SAFETY: invariant I10, established at `thread_init::finish_switch`,
+        // as above; this is the one move out of the node, and the link and
+        // the handle leave it before the stack is unmapped.
+        let Parked { next, stack } = unsafe { core::ptr::read(head as *const Parked) };
+        head = next;
+        // SAFETY: `GuardedStack::into_raw_parts`'s contract; the range is
+        // unmapped just below and shot down by the round after this loop,
+        // and its frames and VA are freed only after that round, established
+        // here.
+        let (guard, pages, parts) = unsafe { stack.into_raw_parts() };
+        let base = VirtAddr(guard.as_u64() + PAGE_SIZE);
+        // SAFETY: `unmap_only_locked`'s contract; no CPU runs on the stack
+        // (invariant I10, established at `thread_init::finish_switch`), and
+        // the round below completes before its frames and VA are freed.
+        paging_init::with_pt(|pt| unsafe { unmap_only_locked(pt, base, pages) });
+        match ShootRange::new(base.as_u64(), pages as u64) {
+            Some(r) => {
+                ranges[nr] = r;
+                nr += 1;
+            }
+            None => shoot_span(base, pages),
+        }
+        // A stack's frames sit in its first `pages` slots
+        // (`GuardedStack::from_raw_parts`), and the check above left room.
+        for f in parts.into_iter().flatten() {
+            frames[nf] = Some(f);
+            nf += 1;
+        }
+        vas[k] = (guard, pages);
+        k += 1;
+    }
+    vibeos::paging::tlb_shootdown_ranges(&ranges[..nr]);
+    free_frames(&mut frames[..nf]);
+    for &(guard, pages) in &vas[..k] {
+        release_va(guard, (pages as u64 + 1) * PAGE_SIZE);
+    }
+    (head, k)
 }
 
 /// One `Frames` block mapped contiguously into KVA. Move-only: only
@@ -267,13 +334,7 @@ pub fn vmap(frames: Frames) -> Result<Vmap, KvaError> {
     });
     match r {
         Ok(base) => {
-            let mut i = 0;
-            while i < n {
-                vibeos::paging::tlb_shootdown_others(VirtAddr(
-                    base.as_u64() + i as u64 * PAGE_SIZE,
-                ));
-                i += 1;
-            }
+            shoot_span(base, n);
             Ok(Vmap { base, frames })
         }
         Err((va, e)) => {
@@ -321,6 +382,20 @@ fn unmap_shootdown(va: VirtAddr, n: usize) {
     // before this fn returns, and every caller frees the frames and the VA
     // only after that, established here.
     paging_init::with_pt(|pt| unsafe { unmap_only_locked(pt, va, n) });
+    shoot_span(va, n);
+}
+
+/// Shoot the `n` pages from `va` down on every other CPU, in one round
+/// when one [`ShootRange`] holds them: page-aligned KVA and at most
+/// `MAX_UNMAP` pages, which every caller passes. Otherwise a round a page.
+fn shoot_span(va: VirtAddr, n: usize) {
+    if n == 0 {
+        return;
+    }
+    if let Some(r) = ShootRange::new(va.as_u64(), n as u64) {
+        vibeos::paging::tlb_shootdown_ranges(&[r]);
+        return;
+    }
     let mut i = 0;
     while i < n {
         vibeos::paging::tlb_shootdown_others(VirtAddr(va.as_u64() + i as u64 * PAGE_SIZE));
