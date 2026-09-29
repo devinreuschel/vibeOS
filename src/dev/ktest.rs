@@ -810,5 +810,10 @@ pub(crate) const TESTS: &[Test] = &[
     test("virtio_bind", test_virtio_bind),
     test("virtio_vq", test_virtio_vq),
     test("dev_random_source", test_dev_random_source),
+    test("rng_pool_no_dup", rng_pool_no_dup),
+    test(
+        "rng_refill_after_empty_completion",
+        rng_refill_after_empty_completion,
+    ),
     test("dev_probe_alloc_fail", test_dev_probe_alloc_fail),
 ];

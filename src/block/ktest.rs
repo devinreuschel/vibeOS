@@ -1223,6 +1223,7 @@ pub(crate) const TESTS: &[Test] = &[
     test("block_part_gpt", test_block_part_gpt),
     test("block_cache_hit", test_block_cache_hit).once(),
     test("block_cache_evict", test_block_cache_evict),
+    test("part_six_entries", part_six_entries),
     test(
         "lifetime_iowaiter_publish_last",
         lifetime_iowaiter_publish_last,
