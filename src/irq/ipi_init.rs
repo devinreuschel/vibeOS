@@ -8,7 +8,7 @@
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use vibeos::apic::IpiError;
-use vibeos::ipi::{MAX_IPI_CPUS, all_acked, inbox_bit, waiter_mask};
+use vibeos::ipi::{MAX_IPI_CPUS, all_acked, waiter_mask};
 use vibeos::log::Level;
 use vibeos::paging::VirtAddr;
 use vibeos::thread::ThreadId;
@@ -260,19 +260,22 @@ pub fn shootdown_va(va: VirtAddr) {
     slot.waiters.store(0, Ordering::Release);
 }
 
-fn inbox_push(cpu: u32, id: ThreadId) {
-    let Some(bit) = inbox_bit(id) else {
-        return;
-    };
+/// Queue thread-table slot `slot` on `cpu`'s wake inbox.
+fn inbox_push(cpu: u32, slot: usize) {
     let Some(pc) = per_cpu_init::cpu(cpu) else {
         return;
     };
-    pc.wake_inbox.fetch_or(bit, Ordering::Release);
+    // Invariant: `slot` is a thread-table slot, below `MAX_THREADS`, and the
+    // inbox has a bit for each (`vibeos::ipi::INBOX_WORDS`).
+    assert!(
+        pc.wake_inbox.push(slot),
+        "wake inbox: slot {slot} out of range"
+    );
 }
 
-/// Place `id` on `cpu`. Local: runq. Remote: inbox + 0xFD. Never a
-/// remote queue lock. IRQ-off for the local runq.
-pub fn place_ready(cpu: u32, id: ThreadId) {
+/// Place `id`, in thread-table slot `slot`, on `cpu`. Local: runq. Remote:
+/// inbox + 0xFD. Never a remote queue lock. IRQ-off for the local runq.
+pub fn place_ready(cpu: u32, id: ThreadId, slot: usize) {
     let _irq = crate::x86::InterruptGuard::enter();
     let me = per_cpu_init::try_current().map(|c| c.cpu_id).unwrap_or(0);
     let cpu = if cpu == me || per_cpu_init::is_online(cpu) {
@@ -286,29 +289,44 @@ pub fn place_ready(cpu: u32, id: ThreadId) {
         });
         return;
     }
-    inbox_push(cpu, id);
+    inbox_push(cpu, slot);
     note_send(
         "reschedule",
         apic_init::send_ipi_cpu(cpu, vectors::IPI_RESCHEDULE),
     );
 }
 
+/// A wake-inbox slot's tid: `thread_init::tid_of_slot`, which
+/// `thread_init::init_bootstrap` sets (DESIGN §1.2). Unset, no thread
+/// table exists yet and [`drain_inbox`] leaves the inbox as it is.
+static SLOT_TID_HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Install the slot-to-tid lookup the drain uses.
+pub fn set_slot_tid_hook(f: fn(usize) -> Option<ThreadId>) {
+    // Release: pairs with the Acquire load in `drain_inbox`.
+    SLOT_TID_HOOK.store(f as *mut (), Ordering::Release);
+}
+
+/// Move this CPU's wake inbox onto its run queue. Each slot maps to its
+/// tid through the slot-to-tid hook (`thread_init::tid_of_slot`). True if
+/// a slot was queued.
 pub fn drain_inbox() -> bool {
+    // Acquire: pairs with the Release store in `set_slot_tid_hook`.
+    let p = SLOT_TID_HOOK.load(Ordering::Acquire);
+    if p.is_null() {
+        return false;
+    }
+    // SAFETY: invariant: a non-null `SLOT_TID_HOOK` holds a
+    // `fn(usize) -> Option<ThreadId>`; established by
+    // `ipi_init::set_slot_tid_hook`, its only store.
+    let tid_of_slot = unsafe { core::mem::transmute::<*mut (), fn(usize) -> Option<ThreadId>>(p) };
     per_cpu_init::with_current(|pc| {
-        let bits = pc.remote.wake_inbox.swap(0, Ordering::Acquire);
-        if bits == 0 {
-            return false;
-        }
-        let mut b = bits;
-        let mut id = 0u32;
-        while b != 0 {
-            if b & 1 != 0 {
-                pc.runq.push_back(ThreadId(id));
+        let remote = pc.remote;
+        remote.wake_inbox.drain(|slot| {
+            if let Some(id) = tid_of_slot(slot) {
+                pc.runq.push_back(id);
             }
-            b >>= 1;
-            id += 1;
-        }
-        true
+        })
     })
 }
 

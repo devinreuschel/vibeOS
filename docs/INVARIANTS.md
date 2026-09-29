@@ -1037,12 +1037,11 @@ deferral only at call sites marked by hand, which misses an implicit drop. RCU (
 lockless readers only, and it adds a grace period to their objects' counts rather than replacing
 them; everything else uses counts alone.
 
-Today the code breaks rules 1, 2, 4, and 5: TCBs are never freed and their slots are rewritten in
+Today the code breaks rules 1, 2, and 5: TCBs are never freed and their slots are rewritten in
 place (I9; ROADMAP §10.10, F012), address spaces are reached through `&'static` references built
-from table-owned boxes (ROADMAP §10.6, F019), block completions point into stack frames (ROADMAP
-§12.5, F042), a pid is the index of its process-table slot, handed out lowest first
-(ROADMAP §10.4, F127), and a tid is its TCB slot index, in a space of its own. `kalloc::TryArc`
-implements rule 6's deferred release, and `sync::OpGate` rule 3's operation gate (ROADMAP §10.4). A process's working
+from table-owned boxes (ROADMAP §10.6, F019), and block completions point into stack frames
+(ROADMAP §12.5, F042). `kalloc::TryArc` implements rule 6's deferred release, and `sync::OpGate`
+rule 3's operation gate (ROADMAP §10.4). A process's working
 directory is a path string: one kernel-global `file_init::CWD` serves every process, and `Proc::cwd`
 is a buffer nothing reads (ROADMAP §10.4, F057).
 
