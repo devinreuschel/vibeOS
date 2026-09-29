@@ -29,7 +29,7 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 | [T2](T2-single-qemu-launcher.md) | One QEMU launcher for all drivers | Medium | S | I | — | `implemented (#79)` |
 | [T3](T3-fast-check-ci-job.md) | A fast `check` CI job ahead of the QEMU ladder; coverage floor | Medium | S | II | Q1, T2 | `implemented (#82)` |
 | [T4](T4-fuzz-parsers.md) | Fuzz the pure parsers now | Medium | S | II | A2 | `proposed` |
-| [P1](P1-build-multiplicity.md) | Cut the build multiplicity | Low | M | II | B1, B2 | `proposed` |
+| [P1](P1-build-multiplicity.md) | Cut the build multiplicity | Low | M | II | B1, B2 | `implemented (#194)` |
 | [P2](P2-lock-hotspots-note.md) | Record the known single-lock hotspots as Phase 19 items | Low | S | II | — | `implemented (#83)` |
 | [S1](S1-pre-ring3-hardening.md) | Finish the pre-ring-3 hardening checklist | Medium | S | II | — | `implemented (#85)` |
 | [B1](B1-parametrize-makefile.md) | Parametrize the Makefile's ISO recipes; add `make check` | Medium | S | I | — | `implemented (#76)` |
@@ -42,7 +42,7 @@ One document per recommendation in [ARCHITECTURE_REVIEW.md](../ARCHITECTURE_REVI
 | [DOC3](DOC3-agents-md.md) | Version the agent instructions in the repo (`AGENTS.md`) | High | S | I | — | `implemented (#78)` |
 | [DOC4](DOC4-changelog-style.md) | Keep `CHANGELOG.md` short and user-facing | Low | S | I | B3 | `implemented (#81, #194)` |
 | [DX1](DX1-make-check-and-lint-config.md) | A fast local gate (`make check`) and formatter/linter configuration | Medium | S | I | Q1, B1, A2 | `implemented (#76, #194)` |
-| [R1](R1-repo-tidy.md) | Tidy the root, `tests/`, and remote branches | Low | S | I | B1, T2 | `in progress (#78, #79)` |
+| [R1](R1-repo-tidy.md) | Tidy the root, `tests/`, and remote branches | Low | S | I | B1, T2 | `implemented (#78, #79, #194)` |
 | [O1](O1-phase9-resume-note.md) | Note the Phase 9 pause and resume; research notes deferred | Low | S | II | — | `superseded: Phase 9 did not pause, so there is no resume to note; research notes stay deferred` |
 
 Suggested order for tier I (all independent unless noted): DOC1, DOC3, C1, Q1, B1, T2 → C2, DX1, B3 → DOC4, D3, R1.

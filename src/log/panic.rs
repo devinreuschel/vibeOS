@@ -16,7 +16,6 @@ use vibeos::log::DUMP_LAST;
 use vibeos::marker;
 use vibeos::symtab;
 
-use crate::ksyms::KSYMS;
 use crate::per_cpu_init;
 use crate::serial::{self, Serial};
 use crate::x86;
@@ -163,8 +162,8 @@ fn print_frame_addr(addr: u64) {
     dump_line(|w| {
         w.push_bytes(b"  0x");
         hex(w, addr);
-        if let Some(e) = symtab::lookup(KSYMS, addr) {
-            let off = symtab::offset(e, addr);
+        if let Some(e) = crate::log::ksyms::lookup(addr) {
+            let off = symtab::offset(&e, addr);
             // Sparse tables (panic-test) would otherwise pin a RIP to the
             // previous function with a huge offset.
             if off < 0x1_0000 {

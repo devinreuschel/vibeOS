@@ -32,9 +32,11 @@ fn main() {
         });
         std::fs::write(&ksyms_out, body).unwrap();
     } else {
+        // The empty form of what `scripts/gen_ksyms.py` renders.
         std::fs::write(
             &ksyms_out,
-            "pub static KSYMS: &[vibeos::symtab::Entry] = &[];\n",
+            "#[used]\n#[unsafe(link_section = \".ksyms\")]\n\
+             static KSYMS: [vibeos::symtab::Entry; 0] = [\n];\n",
         )
         .unwrap();
     }

@@ -575,6 +575,21 @@ def env_str(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
+_VARIANT_RE = re.compile(r"[a-z0-9-]+")
+
+
+def default_iso(variant: str = "default") -> str:
+    """The ISO the Makefile builds for `variant` (C-BUILD-OUTPUTS).
+
+    `build/vibeos.iso` for `default`, `build/vibeos-<variant>.iso` otherwise.
+    """
+    if not _VARIANT_RE.fullmatch(variant):
+        raise ValueError(f"default_iso: bad variant {variant!r}")
+    if variant == "default":
+        return "build/vibeos.iso"
+    return f"build/vibeos-{variant}.iso"
+
+
 def env_config(*, default_iso: str, default_timeout: float) -> EnvConfig:
     bios = os.environ.get("VIBEOS_BIOS")
     if bios == "":
