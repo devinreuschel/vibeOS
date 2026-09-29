@@ -108,7 +108,7 @@ KERNEL_ELF := $(CURDIR)/target/$(TARGET)/$(PROFILE_DIR)/vibeos
 KERNEL_TESTS_DIR := $(CURDIR)/target-kernel-tests
 KERNEL_VIBEFS_CRASH_DIR := $(CURDIR)/target-vibefs-crash
 
-.PHONY: help check check-python all kernel iso run run-panic clean distclean setup layout prebuilt \
+.PHONY: help check check-python check-msrv all kernel iso run run-panic clean distclean setup layout prebuilt \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-gp test-e2e-mce test \
         test-e2e-pit test-e2e-highmem test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
         test-smp-stress test-vibefs-crash test-e2e-uefi
@@ -118,6 +118,7 @@ help:
 	  'vibeOS make targets:' \
 	  '  check                 fast local gate (clippy/unit/harness/python)' \
 	  '  check-python          ruff and mypy (VIBEOS_ALLOW_MISSING_TOOLS=1 skips a missing one)' \
+	  '  check-msrv            vibeos-core with its MSRV toolchain (rust-version), host and kernel target' \
 	  '  all / iso             kernel + vibeos.iso (hybrid BIOS/UEFI)' \
 	  '  kernel                kernel ELF only' \
 	  '  run                   boot production ISO in QEMU' \
@@ -171,6 +172,11 @@ run_py_tool = if command -v $(1) >/dev/null 2>&1; then \
 	    $(call missing_tool,$(1),$(strip $(1) $(2)),pip install the version the check job in .github/workflows/ci.yml pins); \
 	fi
 
+# vibeos-core's MSRV (ROADMAP §10.1, BOOT.md §3.1), read from its manifest;
+# MSRV_TOOLCHAIN overrides the rustup toolchain check-msrv builds with.
+MSRV := $(shell sed -n 's/^rust-version = "\(.*\)"$$/\1/p' crates/core/Cargo.toml)
+MSRV_TOOLCHAIN ?= $(MSRV)
+
 # Fast local / CI `check` job gate (T3). It lints the kernel with its default
 # features and vibeos-core's no_std build for the kernel target, so kernel-target
 # code compiles before every commit; CI's ladder lints each other ISO feature
@@ -184,6 +190,7 @@ check:
 	cargo clippy -p vibeos-core --all-targets --features std --target $(HOST_TRIPLE) -- -D warnings
 	cargo clippy -p vibeos-hostlib-tests --all-targets --target $(HOST_TRIPLE) -- -D warnings
 	cargo clippy -p vibeos-core --target $(TARGET) -- -D warnings
+	$(MAKE) check-msrv
 	cargo clippy --bin vibeos -- -D warnings
 	$(MAKE) test-unit
 	cargo test -p vibeos-core --lib --features std --target $(HOST_TRIPLE) --config 'profile.test.debug-assertions=false' -- release_assert_
@@ -203,6 +210,25 @@ check:
 check-python:
 	@$(call run_py_tool,$(RUFF),check tests scripts)
 	@$(call run_py_tool,$(MYPY),)
+
+# vibeos-core builds with its MSRV, for the host with std and for $(TARGET)
+# without it. RUSTFLAGS replaces both .cargo/config.toml rustflags tables, so
+# this proves only that the crate builds; clippy on the pinned nightly keeps
+# the lints. RUSTUP_AUTO_INSTALL=0 and the toolchain check keep rustup from
+# downloading a toolchain; the separate target dir keeps the nightly's cache.
+check-msrv:
+	$(if $(MSRV),,$(error crates/core/Cargo.toml sets no rust-version))
+	@if command -v rustup >/dev/null 2>&1 \
+	    && rustup toolchain list | cut -d' ' -f1 | grep -qxF '$(MSRV_TOOLCHAIN)-$(HOST_TRIPLE)' \
+	    && rustup target list --installed --toolchain '$(MSRV_TOOLCHAIN)' 2>/dev/null | grep -qxF '$(TARGET)'; then \
+	    set -ex; \
+	    RUSTUP_AUTO_INSTALL=0 RUSTFLAGS=--cap-lints=warn CARGO_TARGET_DIR=$(CARGO_TARGET_DIR)/msrv \
+	        cargo +$(MSRV_TOOLCHAIN) check -p vibeos-core --features std --target $(HOST_TRIPLE); \
+	    RUSTUP_AUTO_INSTALL=0 RUSTFLAGS=--cap-lints=warn CARGO_TARGET_DIR=$(CARGO_TARGET_DIR)/msrv \
+	        cargo +$(MSRV_TOOLCHAIN) check -p vibeos-core --target $(TARGET); \
+	else \
+	    $(call missing_tool,rust $(MSRV_TOOLCHAIN),cargo +$(MSRV_TOOLCHAIN) check -p vibeos-core,run ./setup.sh); \
+	fi
 
 all: $(ISO)
 

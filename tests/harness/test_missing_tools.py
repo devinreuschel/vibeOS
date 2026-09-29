@@ -65,6 +65,21 @@ class TestMissingTools(unittest.TestCase):
             skipped,
         )
 
+    def test_missing_msrv_toolchain_fails(self) -> None:
+        proc = run_make("check-msrv", "MSRV_TOOLCHAIN=vibeos-missing")
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("rust vibeos-missing not installed", proc.stderr)
+        self.assertNotIn("cargo +vibeos-missing check", proc.stdout)
+
+    def test_allowed_missing_msrv_toolchain_skips_and_prints(self) -> None:
+        proc = run_make("check-msrv", "MSRV_TOOLCHAIN=vibeos-missing", allow=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(
+            "check: skipped cargo +vibeos-missing check -p vibeos-core: "
+            f"rust vibeos-missing not installed ({SWITCH}=1)",
+            proc.stdout.splitlines(),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

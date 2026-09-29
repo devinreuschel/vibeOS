@@ -445,8 +445,11 @@ for the host, on `vibeos-core` for `x86_64-unknown-none`, and on the kernel with
 unit tests, the `release_assert_` host tests again with debug assertions off, harness unit tests,
 ruff and mypy; a production-feature link under the `hookcheck`
 profile, whose ELF `scripts/check_test_hooks.py` checks for test-only symbols, Q2's `nm` check; then every
-`scripts/check_*.py`). A missing `ruff`, `mypy` or `fsck.fat` fails it unless `VIBEOS_ALLOW_MISSING_TOOLS=1`,
-which skips that check and prints it. CI runs it as the `check` job before QEMU (DESIGN §8.6).
+`scripts/check_*.py`). Right after the `vibeos-core` clippy lines it builds `vibeos-core` with its MSRV
+(`make check-msrv`: `cargo +<MSRV> check` for the host with `std` and for `x86_64-unknown-none`, under
+`RUSTFLAGS=--cap-lints=warn`, so it proves only that the crate builds). A missing `ruff`, `mypy`,
+`fsck.fat` or MSRV toolchain fails it unless `VIBEOS_ALLOW_MISSING_TOOLS=1`, which skips that check and
+prints it. CI runs it as the `check` job before QEMU (DESIGN §8.6).
 `make test-e2e` is enough when only boot output or QEMU wiring changed. `make test` is the gate before
 a PR. `make test-ps2` is the focused #66 sendkey boot; `make test-e2e` already runs it, so `make test`
 does not boot it twice.
@@ -533,7 +536,7 @@ each pass 40 s alone and cannot split below a target.
 
 | Job | When | What |
 |---|---|---|
-| `check` | push / PR | Installs `x86_64-unknown-none`. `make check` (fmt; clippy `-D warnings` on `vibeos-core` and hostlib for the host, `vibeos-core` for `x86_64-unknown-none`, and the kernel with default features; host units, harness, ruff and mypy at pinned versions, `scripts/check_*.py`) then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines 87`. No QEMU, no `setup.sh`. HTML report is a 7-day `core-coverage` artifact. |
+| `check` | push / PR | Installs `x86_64-unknown-none`, and the MSRV toolchain with the host and `x86_64-unknown-none` targets. `make check` (fmt; clippy `-D warnings` on `vibeos-core` and hostlib for the host, `vibeos-core` for `x86_64-unknown-none`, and the kernel with default features; host units, harness, ruff and mypy at pinned versions, the MSRV build, `scripts/check_*.py`) then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines 87`. No QEMU, no `setup.sh`. HTML report is a 7-day `core-coverage` artifact. |
 | `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/nasm/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, `panic_test` with `panic_exit`, `gp_test` with `panic_exit`) and once with `kernel_shell` (the default set runs in `check`); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos.iso` (7 days). |
 | `tier (<arch>, <tier>)` | push / PR, `needs: [check, build]` | One job per row of the tier table above: QEMU and OVMF, `prebuilt-<arch>` unpacked, the runner's CPU model to the job summary, then `make -k -j <jobs> --output-sync=target VIBEOS_PREBUILT=1 <targets>` under TCG (`jobs` is 1 until ROADMAP §10.1's parallel QEMU runs land). Even after a failed step it writes a per-tier table and every harness retry to the job summary and uploads `build/results/` as `results-<arch>-<tier>`. |
 | `ticks` | PR, `needs: tier`, even after it fails | `scripts/check_ticks.py --base <PR base> --head <PR head> --run-commit $GITHUB_SHA --results <downloaded results-*> --summary $GITHUB_STEP_SUMMARY`: every box a commit of the pull request ticks pairs with a `Proves:` line, its proof exists at the head and is changed by the pull request or marked `(existing: ...)`, a ktest, utest, or marker proof passed in a results file of the head or the tested merge commit, no results file lists a retry, needs and closes rows hold, `Fails-before:` lines are present, and a bracketed proof passed on a scheduled run or `ci-history` record (read through `gh`, with `contents: read` and `actions: read`). The summary lists errors, `(existing: ...)` proofs, and notes. `make check` runs the pairing and diff rules bare against `origin/main` and skips them when that ref is missing, as in the `check` job's shallow checkout. |

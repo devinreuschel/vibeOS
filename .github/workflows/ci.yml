@@ -73,6 +73,13 @@ jobs:
           # `make check` lints the kernel and vibeos-core's no_std build.
           targets: x86_64-unknown-none
 
+      # vibeos-core's MSRV, which `make check` builds it with (ROADMAP §10.1),
+      # read from its manifest.
+      - name: install rust MSRV
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' crates/core/Cargo.toml)
+          rustup toolchain install "$msrv" --profile minimal --target x86_64-unknown-none --no-self-update
+
       # Distinct from the build job's cargo cache so a host-only `target/`
       # cannot evict kernel artifacts (DESIGN §8.6).
       - name: cache cargo (check)

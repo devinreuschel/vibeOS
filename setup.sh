@@ -78,6 +78,19 @@ if [ -f "$TOOLCHAIN_FILE" ]; then
         fi
         echo "setup: adding target x86_64-unknown-none"
         rustup target add x86_64-unknown-none --toolchain "$PINNED"
+        # vibeos-core's MSRV, which `make check` builds it with (ROADMAP §10.1).
+        MSRV=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' "$ROOT/crates/core/Cargo.toml")
+        if [ -z "$MSRV" ]; then
+            echo "setup: could not read rust-version from crates/core/Cargo.toml" >&2
+            exit 1
+        fi
+        if rustup toolchain list | cut -d' ' -f1 | grep -q "^$MSRV-"; then
+            echo "setup: MSRV $MSRV already installed"
+        else
+            echo "setup: installing MSRV $MSRV"
+            rustup toolchain install "$MSRV" --profile minimal --no-self-update
+        fi
+        rustup target add x86_64-unknown-none --toolchain "$MSRV"
     else
         echo "setup: rustup not found; install $PINNED with rust-src, llvm-tools, and target x86_64-unknown-none" >&2
     fi

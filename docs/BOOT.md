@@ -11,7 +11,7 @@ Power-on to `sti`. Limine does the ugly part (real mode, A20, long mode, ELF loa
 |-------|-------|
 | Channel | dated nightly in `rust-toolchain.toml` (bump with CI in one PR) |
 | Why nightly | The kernel binary's `alloc_error_handler`; the flags `-Zsanitizer` (ROADMAP §12.1), `-Zretpoline-external-thunk` and `-Zfunction-return` (§18.3), and `-Zub-checks` (§18.4). `vibeos-core` uses none (§1.1 constraint 7). |
-| MSRV | `rust-version` in `crates/core/Cargo.toml`, for `vibeos-core` only (§1.1 constraint 7): the older of the last stable release before the nightly Kani pins (ROADMAP §10.8) and the Rust release Verus requires (the latest Verus release's, until ROADMAP §38.1 pins one). Before §10.8 lands, the stable release current on the pinned nightly's date. A bump of the nightly, Kani, or Verus re-derives it. Set by ROADMAP §10.1 |
+| MSRV | `rust-version` in `crates/core/Cargo.toml`, for `vibeos-core` only (§1.1 constraint 7): the older of the last stable release before the nightly Kani pins (ROADMAP §10.8) and the Rust release Verus requires (the latest Verus release's, until ROADMAP §38.1 pins one). Before §10.8 lands, the stable release current on the pinned nightly's date. A bump of the nightly, Kani, or Verus re-derives it. `1.98`, the stable release current on 2026-09-22, which `make check`, `setup.sh` and the `check` job read from the manifest |
 | Components | `llvm-tools` (objdump/nm/size), `rustfmt`, `clippy`; `rust-src` for rust-analyzer |
 | Target | built-in `x86_64-unknown-none` (`rust-toolchain.toml` `targets`) |
 | Build | `cargo build` (default target in `.cargo/config.toml`) |
