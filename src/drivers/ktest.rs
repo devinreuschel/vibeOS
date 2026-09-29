@@ -1,4 +1,4 @@
-//! In-guest tests for drivers (kernel_tests only). Rows: the list in crate::ktest.
+//! In-guest tests for drivers (kernel_tests only). Rows: [`TESTS`].
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -7,7 +7,7 @@ use vibeos::dev::Device;
 use vibeos::virtio_blk::{F_DISCARD, F_MQ};
 
 use crate::block_init::IoWaiter;
-use crate::ktest::Outcome;
+use crate::ktest::{Outcome, Test, test};
 use crate::per_cpu_init;
 use crate::thread_init;
 use crate::time_init;
@@ -361,3 +361,14 @@ pub(crate) fn test_block_persist() -> Outcome {
     crate::marker!("vibeOS: persist: wrote");
     Outcome::Ok
 }
+
+/// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
+/// runs them (DESIGN §8.2).
+pub(crate) const TESTS: &[Test] = &[
+    test("block_vblk_rw", test_block_vblk_rw),
+    test("block_vblk_irq", test_block_vblk_irq),
+    test("block_vblk_deep", test_block_vblk_deep),
+    test("block_vblk_concurrent", test_block_vblk_concurrent),
+    test("block_vblk_mq", test_block_vblk_mq),
+    test("block_persist", test_block_persist),
+];

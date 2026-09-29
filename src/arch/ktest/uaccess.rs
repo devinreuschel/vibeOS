@@ -1,6 +1,6 @@
 //! In-guest SMAP and SMEP tests for arch (kernel_tests only): stray kernel
-//! accesses to user pages (exit-gate line 1150). Rows: the list in
-//! crate::ktest.
+//! accesses to user pages (exit-gate line 1150). Rows: the parent
+//! `ktest.rs`'s `TESTS`.
 
 use vibeos::addr_space::UserPerms;
 use vibeos::paging::PAGE_SIZE_4K;

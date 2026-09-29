@@ -1,4 +1,4 @@
-//! In-guest tests for log (kernel_tests only). Rows: the list in crate::ktest.
+//! In-guest tests for log (kernel_tests only). Rows: [`TESTS`].
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -10,9 +10,31 @@ use vibeos::vectors;
 
 use crate::block::{block_init, blockdev_init};
 use crate::ktest::user::{self, DEFAULT, Image, user_code};
-use crate::ktest::{Outcome, spin_until_ns};
+use crate::ktest::{Outcome, Test, spin_until_ns, test};
 use crate::log::trace_init::VIBEOS_TRACE;
 use crate::{ipi_init, per_cpu_init, thread_init, time_init};
+
+/// The runtime level is what `loglevel=` set at boot (BOOT.md §3.2), or
+/// the default without one. It runs first in its group, before the tests
+/// that set the level and restore it.
+pub(crate) fn test_log_boot_level() -> Outcome {
+    use vibeos::boot::cmdline::Escaped;
+    use vibeos::log::{DEFAULT_RUNTIME_MAX, level_from_loglevel};
+    let arg = crate::boot::cmdline().get("loglevel");
+    let want = arg
+        .and_then(level_from_loglevel)
+        .unwrap_or(DEFAULT_RUNTIME_MAX);
+    let got = crate::log_init::max_level();
+    if got != want {
+        return crate::fail_fmt!(
+            "runtime level {} with loglevel={}, want {}",
+            got.as_str(),
+            Escaped(arg.unwrap_or(b"<absent>")),
+            want.as_str()
+        );
+    }
+    Outcome::Ok
+}
 
 pub(crate) fn test_log_boot_captured() -> Outcome {
     if !crate::log_init::contains_msg("serial online") {
@@ -412,3 +434,18 @@ pub(crate) fn test_trace_tracepoints_fire() -> Outcome {
     }
     Outcome::Ok
 }
+
+/// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
+/// runs them (DESIGN §8.2).
+pub(crate) const TESTS: &[Test] = &[
+    test("log_boot_level", test_log_boot_level),
+    test("log_boot_captured", test_log_boot_captured).once(),
+    test("log_runtime_filter", test_log_runtime_filter),
+    test("log_emit_roundtrip", test_log_emit_roundtrip),
+    test("log_dmesg_no_recapture", test_log_dmesg_no_recapture),
+    test("log_reentry_drop_counted", test_log_reentry_drop_counted),
+    test("serial_lines_whole", test_serial_lines_whole).deadline(60_000),
+    test("serial_frame", test_serial_frame),
+    test("trace_ring_own_cpu", test_trace_ring_own_cpu),
+    test("trace_tracepoints_fire", test_trace_tracepoints_fire),
+];

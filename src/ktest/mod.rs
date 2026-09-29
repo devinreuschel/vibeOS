@@ -5,9 +5,11 @@
 //! and exits QEMU through `isa-debug-exit`.
 
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use vibeos::arch::CycleCounter;
 use vibeos::dev::Device;
+use vibeos::fmt_util::StackBuf;
 use vibeos::lock::RANK_DEVICE;
 use vibeos::paging::PhysAddr;
 use vibeos::per_cpu::PerCpuRemote;
@@ -15,6 +17,7 @@ use vibeos::pmm::Frames;
 use vibeos::thread::{ThreadId, ThreadState};
 use vibeos::vectors;
 
+use crate::arch::current::Arch;
 use crate::ipi_init;
 use crate::kva_init;
 use crate::per_cpu_init;
@@ -44,7 +47,8 @@ pub(crate) enum Outcome {
 pub(crate) const FAIL_MSG_BYTES: usize = 120;
 
 /// A formatted failure reason, cut at [`FAIL_MSG_BYTES`] on a character
-/// boundary. Build one with [`crate::fail_fmt!`].
+/// boundary. Build one with [`crate::fail_fmt!`]. It writes through
+/// [`StackBuf`], the one fixed-buffer writer (DESIGN §8.2).
 #[derive(Clone, Copy)]
 pub(crate) struct FailMsg {
     buf: [u8; FAIL_MSG_BYTES],
@@ -75,16 +79,24 @@ impl FailMsg {
         core::str::from_utf8(&self.buf[..self.len as usize]).unwrap_or("<invalid utf-8>")
     }
 
+    /// Append the longest prefix of `s` that ends on a character boundary
+    /// and fits; after the first character that does not fit, nothing more.
     fn push_whole(&mut self, s: &str) {
-        for ch in s.chars() {
-            let at = self.len as usize;
-            let n = ch.len_utf8();
-            if self.full || at + n > FAIL_MSG_BYTES {
-                self.full = true;
-                return;
-            }
-            ch.encode_utf8(&mut self.buf[at..at + n]);
-            self.len += n as u8;
+        if self.full {
+            return;
+        }
+        let at = self.len as usize;
+        let room = FAIL_MSG_BYTES - at;
+        let mut n = s.len().min(room);
+        while !s.is_char_boundary(n) {
+            n -= 1;
+        }
+        let mut w = StackBuf::new(&mut self.buf[at..]);
+        w.push_bytes(&s.as_bytes()[..n]);
+        // `n <= room <= FAIL_MSG_BYTES`, which fits a u8.
+        self.len += w.len() as u8;
+        if n < s.len() {
+            self.full = true;
         }
     }
 }
@@ -122,7 +134,7 @@ pub(crate) const fn test(name: &'static str, run: TestFn) -> Test {
     Test {
         name,
         run,
-        deadline_ms: 10_000,
+        deadline_ms: vibeos::ktest::DEFAULT_DEADLINE_MS,
         once: false,
         opt_in: false,
     }
@@ -150,485 +162,89 @@ impl Test {
 
 pub(crate) type Suite = &'static [Test];
 
-/// Rows run in this order. A new test goes in its subsystem's ktest.rs, and its row goes after the
-/// last row whose path starts with that subsystem, or at the end if it has none (ROADMAP §10.2's T1
-/// box splits this list per subsystem).
+/// The runner's own rows (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
-    test("map_unmap", mm::ktest::test_map_unmap),
-    test("nx_enforcement", mm::ktest::test_nx_enforcement),
-    test("heap_box", mm::ktest::test_heap_box),
-    test("heap_reuse", mm::ktest::test_heap_reuse),
-    test("heap_align", mm::ktest::test_heap_align),
-    test("heap_growth", mm::ktest::test_heap_growth),
-    test("heap_oom", mm::ktest::test_heap_oom),
-    test("stack_guard", mm::ktest::test_stack_guard),
-    test("kva_roundtrip", mm::ktest::test_kva_roundtrip),
-    test("kva_deferred", mm::ktest::test_kva_deferred),
-    test("vmap", mm::ktest::test_vmap),
-    test("mmio_uc_flags", mm::ktest::test_mmio_uc_flags),
-    test("acpi_discovery", acpi::ktest::test_acpi_discovery),
-    test("gdt_selectors", arch::ktest::test_gdt_selectors),
-    test("star_sysret_layout", arch::ktest::test_star_sysret_layout),
-    test(
-        "addrspace_map_unmap_teardown",
-        proc::ktest::test_addrspace_map_unmap_teardown,
-    ),
-    test("user_ptr_helpers", proc::ktest::test_user_ptr_helpers),
-    test("cr3_switch_skip", proc::ktest::test_cr3_switch_skip),
-    test(
-        "ring3_syscall_enosys",
-        proc::ktest::test_ring3_syscall_enosys,
-    ),
-    test("ring3_hello_exit", proc::ktest::test_ring3_hello_exit),
-    test("syscall_dispatch", proc::ktest::test_syscall_dispatch),
-    test(
-        "syscall_ptr_validate",
-        proc::ktest::test_syscall_ptr_validate,
-    ),
-    test("user_syscalls", proc::ktest::test_user_syscalls),
-    test(
-        "init_reports_failed_tests",
-        proc::ktest::test_init_reports_failed_tests,
-    ),
-    test("int3_roundtrip", arch::ktest::test_int3_roundtrip),
-    test("scoped_pf", arch::ktest::test_scoped_pf),
-    test("gp_catch", arch::ktest::test_gp_catch),
-    test(
-        "irqcell_reentry_panics",
-        sync::ktest::test_irqcell_reentry_panics,
-    ),
-    test("bootcell_set_once", sync::ktest::test_bootcell_set_once),
-    test("bootinfo_consistent", boot::ktest::test_bootinfo_consistent),
-    test("fw_cfg_probe", boot::ktest::test_fw_cfg_probe),
-    test("fw_cfg_dma", boot::ktest::test_fw_cfg_dma),
-    test("cmdline_captured", boot::ktest::test_cmdline_captured),
-    test(
-        "strace_flag_matches_cmdline",
-        boot::ktest::test_strace_flag_matches_cmdline,
-    ),
-    test("df_on_ist", arch::ktest::test_df_on_ist),
-    test("pit_tick_rate", time::ktest::test_pit_tick_rate),
-    test("now_us_monotonic", time::ktest::test_now_us_monotonic),
-    test("now_us_under_yields", time::ktest::test_now_us_under_yields),
-    test("tsc_calib_source", time::ktest::test_tsc_calib_source),
-    test("uptime_sides", time::ktest::test_uptime_sides),
-    test("rtc_offset", time::ktest::test_rtc_offset),
-    test("lapic_timer_mode", arch::ktest::test_lapic_timer_mode),
-    test("lapic_timer_rearm", arch::ktest::test_lapic_timer_rearm),
-    test(
-        "ioapic_pit_gsi_masked",
-        arch::ktest::test_ioapic_pit_gsi_masked,
-    ),
-    test("per_cpu_bsp", smp::ktest::test_per_cpu_bsp),
-    test("per_cpu_identity", smp::ktest::test_per_cpu_identity),
-    test("trampoline_page", smp::ktest::test_trampoline_page),
-    test("failed_ap_cleanup", smp::ktest::test_failed_ap_cleanup),
-    test("spawn_sentinel", sched::ktest::test_spawn_sentinel),
-    test("switch_two_threads", sched::ktest::test_switch_two_threads),
-    test("irq_guard_nest", arch::ktest::test_irq_guard_nest),
-    test("spin_mutex", sync::ktest::test_spin_mutex),
-    test("lock_spins", sync::ktest::test_lock_spins),
-    test("yield_now_switches", sched::ktest::test_yield_now_switches),
-    test("sleep_ms_50", sched::ktest::test_sleep_ms_50),
-    test(
-        "preempt_two_threads",
-        sched::ktest::test_preempt_two_threads,
-    ),
-    test("idle_runs", sched::ktest::test_idle_runs),
-    test(
-        "reap_returns_frames",
-        sched::ktest::test_reap_returns_frames,
-    ),
-    test("reap_many_via_idle", sched::ktest::test_reap_many_via_idle),
-    test(
-        "blocking_mutex_counter",
-        sync::ktest::test_blocking_mutex_counter,
-    ),
-    test(
-        "late_wake_after_exit",
-        sync::ktest::test_late_wake_after_exit,
-    ),
-    test("rwlock_exclusion", sync::ktest::test_rwlock_exclusion),
-    test(
-        "rwlock_writer_timeout",
-        sync::ktest::test_rwlock_writer_timeout,
-    ),
-    test("semaphore_wake", sync::ktest::test_semaphore_wake),
-    test("condvar_signal", sync::ktest::test_condvar_signal),
-    test(
-        "condvar_wait_releases",
-        sync::ktest::test_condvar_wait_releases,
-    ),
-    test("channel_mpsc", sync::ktest::test_channel_mpsc),
-    test("mutex_deadline", sync::ktest::test_mutex_deadline),
-    test("sync_try_paths", sync::ktest::test_sync_try_paths),
-    test(
-        "spin_poll_hook_installed",
-        sync::ktest::test_spin_poll_hook_installed,
-    ),
-    test(
-        "rank_alloc_under_pt_asserts",
-        sync::ktest::test_rank_alloc_under_pt_asserts,
-    ),
-    test(
-        "rank_same_rank_lock_asserts",
-        sync::ktest::test_rank_same_rank_lock_asserts,
-    ),
-    test(
-        "rank_lock_nested_keeps_outer",
-        sync::ktest::test_rank_lock_nested_keeps_outer,
-    ),
-    test(
-        "cross_cpu_cells_ranked",
-        sync::ktest::test_cross_cpu_cells_ranked,
-    ),
-    test("op_gate_kill_sleeps", sync::ktest::test_op_gate_kill_sleeps).once(),
-    test(
-        "sched_lock_timer_irq",
-        sched::ktest::test_sched_lock_timer_irq,
-    ),
-    test(
-        "spawn_exit_thousands",
-        sched::ktest::test_spawn_exit_thousands,
-    ),
-    test("cross_cpu_spawn", sched::ktest::test_cross_cpu_spawn),
-    test(
-        "counted_deferred_release",
-        sched::ktest::test_counted_deferred_release,
-    ),
-    test(
-        "reschedule_ipi_wake_ap",
-        irq::ktest::test_reschedule_ipi_wake_ap,
-    ),
-    test("call_function_ipi", irq::ktest::test_call_function_ipi),
-    test(
-        "reschedule_hook_installed",
-        irq::ktest::test_reschedule_hook_installed,
-    ),
-    test("cpu_hardening", arch::ktest::test_cpu_hardening),
-    test("tlb_shootdown_remote", mm::ktest::test_tlb_shootdown_remote),
-    test("alloc_stress_smp", mm::ktest::test_alloc_stress_smp),
-    test("log_boot_captured", log::ktest::test_log_boot_captured),
-    test("log_runtime_filter", log::ktest::test_log_runtime_filter),
-    test("log_emit_roundtrip", log::ktest::test_log_emit_roundtrip),
-    test(
-        "log_dmesg_no_recapture",
-        log::ktest::test_log_dmesg_no_recapture,
-    ),
-    test(
-        "log_reentry_drop_counted",
-        log::ktest::test_log_reentry_drop_counted,
-    ),
-    test("serial_lines_whole", log::ktest::test_serial_lines_whole).deadline(60_000),
-    test("serial_frame", log::ktest::test_serial_frame),
-    test("trace_ring_own_cpu", log::ktest::test_trace_ring_own_cpu),
-    test(
-        "trace_tracepoints_fire",
-        log::ktest::test_trace_tracepoints_fire,
-    ),
-    test("fb_bgrx_roundtrip", console::ktest::test_fb_bgrx_roundtrip),
-    test("fb_pitch", console::ktest::test_fb_pitch),
-    test("fb_cr_home", console::ktest::test_fb_cr_home),
-    test("kbd_gsi_unmasked", console::ktest::test_kbd_gsi_unmasked),
-    test("kbd_8042_clock", console::ktest::test_kbd_8042_clock),
-    test("kbd_ps2_irq", console::ktest::test_kbd_ps2_irq),
-    test("console_mux", console::ktest::test_console_mux),
-    test("kbd_ring_drain", console::ktest::test_kbd_ring_drain),
-    test("shell_registry", shell::ktest::test_shell_registry),
-    test("shell_dispatch", shell::ktest::test_shell_dispatch),
-    test("shell_dmesg_level", shell::ktest::test_shell_dmesg_level),
-    test("pci_qemu_set", dev::ktest::test_pci_qemu_set),
-    test("pci_bar_map", dev::ktest::test_pci_bar_map),
-    test("pci_cfg_rw", dev::ktest::test_pci_cfg_rw),
-    test("pci_claim_exclusive", dev::ktest::test_pci_claim_exclusive),
-    test("pci_bind_order", dev::ktest::test_pci_bind_order),
-    test("lspci_cmd", shell::ktest::test_lspci_cmd),
-    test("irq_pool", irq::ktest::test_irq_pool),
-    test("irq_free_threaded", irq::ktest::test_irq_free_threaded),
-    test("msix_cpu", irq::ktest::test_msix_cpu),
-    test("intx_fallback", irq::ktest::test_intx_fallback),
-    test("intx_free_masks", irq::ktest::test_intx_free_masks),
-    test("dma_alloc", dev::ktest::test_dma_alloc),
-    test("dma_edu", dev::ktest::test_dma_edu),
-    test("workqueue", sched::ktest::test_workqueue),
-    test("virtio_bind", dev::ktest::test_virtio_bind),
-    test("virtio_vq", dev::ktest::test_virtio_vq),
-    test("dev_random_source", dev::ktest::test_dev_random_source),
-    test("rng_pool_no_dup", dev::ktest::rng_pool_no_dup),
-    test(
-        "rng_refill_after_empty_completion",
-        dev::ktest::rng_refill_after_empty_completion,
-    ),
-    test(
-        "dev_probe_alloc_fail",
-        dev::ktest::test_dev_probe_alloc_fail,
-    ),
-    test("block_ramdisk_rw", block::ktest::test_block_ramdisk_rw),
-    test("block_concurrent", block::ktest::test_block_concurrent),
-    test("block_retry", block::ktest::test_block_retry),
-    test("block_vblk_rw", drivers::ktest::test_block_vblk_rw),
-    test("block_vblk_irq", drivers::ktest::test_block_vblk_irq),
-    test("block_vblk_deep", drivers::ktest::test_block_vblk_deep),
-    test(
-        "block_vblk_concurrent",
-        drivers::ktest::test_block_vblk_concurrent,
-    ),
-    test("block_vblk_mq", drivers::ktest::test_block_vblk_mq),
-    test("block_persist", drivers::ktest::test_block_persist),
-    test("block_part_mbr", block::ktest::test_block_part_mbr),
-    test("block_part_gpt", block::ktest::test_block_part_gpt),
-    test("block_cache_hit", block::ktest::test_block_cache_hit),
-    test("block_cache_evict", block::ktest::test_block_cache_evict),
-    test("part_six_entries", block::ktest::part_six_entries),
-    test("vfs_walk", fs::ktest::test_vfs_walk),
-    test("pseudo_fs", fs::ktest::test_pseudo_fs),
-    test("fat_initrd", fs::ktest::test_fat_initrd),
-    test("initrd_module_sized", fs::ktest::test_initrd_module_sized),
-    test("vibefs", fs::ktest::test_vibefs),
-    test("ktest_rows", sched::ktest::test_ktest_rows),
-    test("ktest_fail_fmt", sched::ktest::test_ktest_fail_fmt),
-    test("ktest_helpers", sched::ktest::test_ktest_helpers),
-    test("user_code_exit", proc::ktest::test_user_code_exit),
-    test("user_image_elf", proc::ktest::test_user_image_elf),
-    test("user_code_layout", proc::ktest::test_user_code_layout),
-    test(
-        "orphan_freed_no_init",
-        proc::ktest::test_orphan_freed_no_init,
-    ),
-    test("ktest_context", sched::ktest::ktest_context),
-    test("msix_cpu_publish_last", irq::ktest::msix_cpu_publish_last),
-    test(
-        "lifetime_iowaiter_publish_last",
-        block::ktest::lifetime_iowaiter_publish_last,
-    )
-    .deadline(60_000),
-    test(
-        "lifetime_shootdown_ack_late",
-        irq::ktest::lifetime_shootdown_ack_late,
-    )
-    .deadline(15_000),
-    test("percpu_remote_view", smp::ktest::percpu_remote_view),
-    test("frames_none_leaked", mm::ktest::frames_none_leaked),
-    test(
-        "current_mapper_holds_pt",
-        mm::ktest::current_mapper_holds_pt,
-    ),
-    test(
-        "teardown_live_root_asserts",
-        proc::ktest::teardown_live_root_asserts,
-    ),
-    test(
-        "vmap_32_frames_unmapped",
-        mm::ktest::vmap_32_frames_unmapped,
-    ),
-    test("spawn_stack_oom", sched::ktest::spawn_stack_oom).deadline(10_000),
-    test("fork_oom", sched::ktest::fork_oom).deadline(10_000),
-    test(
-        "lifetime_stack_reclaim",
-        sched::ktest::lifetime_stack_reclaim,
-    )
-    .deadline(120_000),
-    test(
-        "dead_list_batched_rounds",
-        sched::ktest::dead_list_batched_rounds,
-    ),
-    test("exit_burst", sched::ktest::exit_burst).deadline(60_000),
-    test(
-        "lifetime_dead_slot_on_cpu",
-        sched::ktest::lifetime_dead_slot_on_cpu,
-    )
-    .deadline(180_000),
-    test(
-        "file_table_fork_churn",
-        fs::ktest::test_file_table_fork_churn,
-    ),
-    test(
-        "file_table_stale_writeback_ebadf",
-        fs::ktest::test_file_table_stale_writeback_ebadf,
-    ),
-    test(
-        "open_creat_exists_opens",
-        fs::ktest::test_open_creat_exists_opens,
-    ),
-    test(
-        "inode_size_shared_across_opens",
-        fs::ktest::test_inode_size_shared_across_opens,
-    ),
-    test(
-        "fat_unlinked_open_frees_at_close",
-        fs::ktest::test_fat_unlinked_open_frees_at_close,
-    ),
-    test("vibefs_efbig", fs::ktest::test_vibefs_efbig),
-    test("vibefs_seek_end_5gib", fs::ktest::test_vibefs_seek_end_5gib),
-    test("vfs_fat_ops_initrd", fs::ktest::test_vfs_fat_ops_initrd),
-    test(
-        "vfs_fat_unlinked_open_inode",
-        fs::ktest::test_vfs_fat_unlinked_open_inode,
-    ),
-    test(
-        "vfs_fat_file_api_one_inode",
-        fs::ktest::test_vfs_fat_file_api_one_inode,
-    ),
-    test("vfs_vibe_ops_mem", fs::ktest::test_vfs_vibe_ops_mem),
-    test("vfs_backends_via_ops", fs::ktest::test_vfs_backends_via_ops),
-    test("vfs_fat_one_inode", fs::ktest::test_vfs_fat_one_inode),
-    test(
-        "fs_drop_slot_busy_keeps_slot",
-        fs::ktest::test_fs_drop_slot_busy_keeps_slot,
-    )
-    .deadline(20_000),
-    test(
-        "cache_flush_waits_writeback",
-        block::ktest::cache_flush_waits_writeback,
-    ),
-    test("block_fua_write", block::ktest::block_fua_write),
-    test(
-        "ac_clear_on_exception",
-        arch::ktest::test_ac_clear_on_exception,
-    )
-    .deadline(30_000),
-    test("ac_clear_user_popf", arch::ktest::test_ac_clear_user_popf).deadline(30_000),
-    test("ist_gs_sign", arch::ktest::test_ist_gs_sign).deadline(30_000),
-    test("user_exceptions", arch::ktest::test_user_exceptions).deadline(30_000),
-    test("user_device_irq", arch::ktest::test_user_device_irq).deadline(30_000),
-    test("user_ipi", arch::ktest::test_user_ipi).deadline(30_000),
-    test("cpu_control_regs", arch::ktest::cpu_control_regs),
-    test(
-        "catch_ignores_other_cpu",
-        arch::ktest::test_catch_ignores_other_cpu,
-    ),
-    test(
-        "catch_ignores_user_frame",
-        arch::ktest::test_catch_ignores_user_frame,
-    )
-    .deadline(30_000),
-    test(
-        "force_kernel_irq_window",
-        arch::ktest::test_force_kernel_irq_window,
-    )
-    .deadline(30_000),
-    test("arch_seam_core", arch::ktest::test_arch_seam_core),
-    test(
-        "uaccess_smap_stray_fault",
-        arch::ktest::test_uaccess_smap_stray_fault,
-    ),
-    test(
-        "uaccess_smep_user_jump",
-        arch::ktest::test_uaccess_smep_user_jump,
-    ),
-    test("console_read_exit", proc::ktest::test_console_read_exit).deadline(30_000),
-    test("user_entry_irq", proc::ktest::test_user_entry_irq).deadline(120_000),
-    test(
-        "exec_top_page_enoexec",
-        proc::ktest::test_exec_top_page_enoexec,
-    )
-    .deadline(30_000),
-    test(
-        "noncanonical_rip_sigsegv",
-        proc::ktest::test_noncanonical_rip_sigsegv,
-    )
-    .deadline(30_000),
-    test("fp_no_leak", sched::ktest::test_fp_no_leak).deadline(60_000),
-    test("fp_migrate_counter", sched::ktest::test_fp_migrate_counter).deadline(30_000),
-    test(
-        "lock_across_switch_asserts",
-        sched::ktest::lock_across_switch_asserts,
-    ),
-    test(
-        "block_in_hard_irq_asserts",
-        sched::ktest::block_in_hard_irq_asserts,
-    ),
-    test(
-        "in_hard_irq_top_bottom",
-        sched::ktest::in_hard_irq_top_bottom,
-    ),
-    test(
-        "sleep_under_spinlock_asserts",
-        sched::ktest::sleep_under_spinlock_asserts,
-    ),
-    test("exec_huge_memsz", proc::ktest::test_exec_huge_memsz).deadline(60_000),
-    test(
-        "exec_large_elf_from_file",
-        proc::ktest::test_exec_large_elf_from_file,
-    )
-    .deadline(60_000),
-    test(
-        "brk_mmap_munmap_user",
-        proc::ktest::test_brk_mmap_munmap_user,
-    )
-    .deadline(30_000),
-    test(
-        "stop_cont_no_lost_wakeup",
-        proc::ktest::test_stop_cont_no_lost_wakeup,
-    )
-    .deadline(30_000),
-    test("syscall_body_if_on", proc::ktest::test_syscall_body_if_on).deadline(30_000),
-    test("kill_line_whole", proc::ktest::test_kill_line_whole).deadline(30_000),
-    test(
-        "console_write_newlines",
-        console::ktest::test_console_write_newlines,
-    )
-    .deadline(60_000),
-    test(
-        "lifetime_console_write_acks_shootdown",
-        console::ktest::test_lifetime_console_write_acks_shootdown,
-    )
-    .deadline(60_000),
-    test(
-        "kalloc_fail_after_hook",
-        proc::ktest::test_kalloc_fail_after_hook,
-    ),
-    test("kalloc_nomem", proc::ktest::test_kalloc_nomem).deadline(120_000),
-    test("syscall_rcx_canary", proc::ktest::test_syscall_rcx_canary).deadline(30_000),
-    test("fork_child_gprs", proc::ktest::test_fork_child_gprs).deadline(30_000),
-    test(
-        "preempt_gpr_canaries",
-        proc::ktest::test_preempt_gpr_canaries,
-    )
-    .deadline(60_000),
-    test("user_single_step", proc::ktest::test_user_single_step).deadline(30_000),
-    test("user_int1", proc::ktest::test_user_int1).deadline(30_000),
-    test("user_tf_repin", proc::ktest::test_user_tf_repin).deadline(60_000),
-    test("user_fork_wait_stall", proc::ktest::user_fork_wait_stall),
-    test(
-        "pid_not_reused_after_reap",
-        proc::ktest::pid_not_reused_after_reap,
-    ),
-    test(
-        "uaccess_syscall_copies",
-        proc::ktest::test_uaccess_syscall_copies,
-    )
-    .deadline(30_000),
-    test(
-        "uaccess_readonly_efault",
-        proc::ktest::test_uaccess_readonly_efault,
-    )
-    .deadline(30_000),
-    test("user_runtime", proc::ktest::user_runtime),
-    test(
-        "syscall_ptr_decl_efault",
-        proc::ktest::syscall_ptr_decl_efault,
-    ),
-    test(
-        "read_ebadf_before_efault",
-        proc::ktest::read_ebadf_before_efault,
-    ),
-    test(
-        "wait4_echild_before_efault",
-        proc::ktest::wait4_echild_before_efault,
-    ),
-    test(
-        "shootdown_ack_while_busy",
-        irq::ktest::shootdown_ack_while_busy,
-    ),
-    test(
-        "wake_inbox_and_kva_pool",
-        irq::ktest::wake_inbox_and_kva_pool,
-    ),
+    test("ktest_names_unique", test_ktest_names_unique),
+    test("ktest_once_probe", test_ktest_once_probe).once(),
+    test("ktest_optin_probe", test_ktest_optin_probe).opt_in(),
+    test("ktest_deadline_hang", test_ktest_deadline_hang)
+        .deadline(500)
+        .opt_in(),
 ];
 
-/// The one list, [`TESTS`] (DESIGN §8.2).
-pub(crate) const SUITES: &[Suite] = &[TESTS];
+/// The planted hang (opt-in): IF=0 on this CPU and no return, so only
+/// another CPU's tick can see its 500 ms deadline pass. `run_ktest.py`'s
+/// `ktest_deadline_trip` boot expects the FAIL line and the panic.
+fn test_ktest_deadline_hang() -> Outcome {
+    let _g = x86::InterruptGuard::enter();
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+/// Set by [`test_ktest_once_probe`]'s first run.
+static ONCE_PROBE_RAN: AtomicBool = AtomicBool::new(false);
+
+/// A `.once()` row: fails if the runner runs it twice in one boot.
+fn test_ktest_once_probe() -> Outcome {
+    if ONCE_PROBE_RAN.swap(true, Ordering::Relaxed) {
+        return Outcome::Fail("a once row ran twice");
+    }
+    Outcome::Ok
+}
+
+/// An `.opt_in()` row: runs only when `vibeos.ktest=` names it.
+fn test_ktest_optin_probe() -> Outcome {
+    Outcome::Ok
+}
+
+/// Test names are unique across [`GROUPS`] and match `[a-z0-9_]+`, the
+/// form `vibeos.ktest=` globs and the harness's results name.
+fn test_ktest_names_unique() -> Outcome {
+    for (i, (_, _, t)) in rows().enumerate() {
+        if t.name.is_empty()
+            || !t
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        {
+            return crate::fail_fmt!("name {:?} is not [a-z0-9_]+", t.name);
+        }
+        if rows().skip(i + 1).any(|(_, _, o)| o.name == t.name) {
+            return crate::fail_fmt!("duplicate test name {}", t.name);
+        }
+    }
+    crate::ktest_info!("{} rows in {} groups", rows().count(), GROUPS.len());
+    Outcome::Ok
+}
+
+/// Every subsystem's rows, in run order: each group's `TESTS` lives in its
+/// subsystem's `ktest.rs`, and a new test goes in its subsystem's list
+/// (DESIGN §8.2). A group missing here is dead code, which the
+/// `kernel_tests` clippy run denies. The groups follow their first row's
+/// place in the old single list, except log, which runs first:
+/// `log_boot_captured` reads boot lines that the other groups' lines push
+/// out of the log ring.
+pub(crate) const GROUPS: &[Suite] = &[
+    TESTS,
+    log::ktest::TESTS,
+    mm::ktest::TESTS,
+    acpi::ktest::TESTS,
+    arch::ktest::TESTS,
+    proc::ktest::TESTS,
+    sync::ktest::TESTS,
+    boot::ktest::TESTS,
+    time::ktest::TESTS,
+    smp::ktest::TESTS,
+    sched::ktest::TESTS,
+    irq::ktest::TESTS,
+    console::ktest::TESTS,
+    shell::ktest::TESTS,
+    dev::ktest::TESTS,
+    block::ktest::TESTS,
+    drivers::ktest::TESTS,
+    fs::ktest::TESTS,
+];
 
 /// Name of the registry's kernel thread.
 const REGISTRY_NAME: &str = "ktest";
@@ -662,52 +278,205 @@ pub fn run() -> ! {
     }
 }
 
-/// Run every suite with IF on and `irq_nest` 0, the context production
-/// kernel threads run in, then exit QEMU.
-fn registry_main() {
-    REGISTRY_TID.store(thread_init::current_id().0, Ordering::Release);
-    crate::marker!("vibeOS: ktest: begin");
-    quiesce_frames();
-    let mut failed = false;
-    for suite in SUITES {
-        for t in suite.iter() {
-            let name = t.name;
-            let mut outcome = (t.run)();
-            // A test that needs interrupts off takes its own guard and
-            // drops it before it returns.
-            let if_on = x86::interrupts_enabled();
-            let nest = per_cpu_init::irq_nest();
-            if !if_on || nest != 0 {
-                per_cpu_init::current().irq_nest.store(0, Ordering::Relaxed);
-                x86::sti();
-                if !matches!(outcome, Outcome::Fail(_) | Outcome::FailFmt(_)) {
-                    outcome = crate::fail_fmt!("left IF={} irq_nest={}", u8::from(if_on), nest);
-                }
-            }
-            match outcome {
-                Outcome::Ok => {
-                    crate::marker!("vibeOS: ktest: ok {name}");
-                }
-                Outcome::Fail(why) => {
-                    // Same shape as skip: reason on the protocol line so
-                    // check_ktest_output (which raises on that line alone)
-                    // is enough to diagnose (DESIGN §8.2).
-                    crate::marker!("vibeOS: ktest: FAIL {name}: {why}");
-                    failed = true;
-                }
-                Outcome::FailFmt(msg) => {
-                    let why = msg.as_str();
-                    crate::marker!("vibeOS: ktest: FAIL {name}: {why}");
-                    failed = true;
-                }
-                Outcome::Skip(reason) => {
-                    crate::marker!("vibeOS: ktest: skip {name}: {reason}");
-                }
-            }
+/// Every selected row, as (group, row, test), in run order.
+fn rows() -> impl Iterator<Item = (usize, usize, &'static Test)> {
+    GROUPS
+        .iter()
+        .enumerate()
+        .flat_map(|(g, suite)| suite.iter().enumerate().map(move |(r, t)| (g, r, t)))
+}
+
+/// [`CURRENT`] when no test runs.
+const NO_TEST: u32 = u32::MAX;
+
+/// The running row as `group << 16 | row`, or [`NO_TEST`].
+static CURRENT: AtomicU32 = AtomicU32::new(NO_TEST);
+
+/// The running row's deadline in cycles of `Arch`'s counter; 0 when none is
+/// armed. [`arm`] sets it, and [`disarm`] or the tick that finds it passed
+/// ([`on_tick`]) clears it, whichever comes first.
+static DEADLINE: AtomicU64 = AtomicU64::new(0);
+
+/// Make row `r` of group `g` the running row and arm its deadline, `ms`
+/// from now. False, and no deadline armed, while the cycle counter's
+/// frequency is unknown.
+fn arm(g: usize, r: usize, ms: u32) -> bool {
+    CURRENT.store(((g as u32) << 16) | r as u32, Ordering::Relaxed);
+    let Some(freq) = Arch::freq_hz() else {
+        return false;
+    };
+    let at = Arch::now()
+        .saturating_add(vibeos::ktest::deadline_cycles(ms, freq))
+        .max(1);
+    // Release: pairs with `on_tick`'s Acquire load and compare-exchange, so
+    // a tick that sees this deadline sees the `CURRENT` stored above.
+    DEADLINE.store(at, Ordering::Release);
+    true
+}
+
+/// Clear the running row's deadline. If a tick already claimed it, that
+/// tick is printing the failure and panicking, so wait for the panic.
+fn disarm() {
+    // AcqRel: the swap and `on_tick`'s compare-exchange are the one pair of
+    // claims on the armed value; exactly one of them takes it.
+    if DEADLINE.swap(0, Ordering::AcqRel) == 0 {
+        loop {
+            core::hint::spin_loop();
         }
     }
+    CURRENT.store(NO_TEST, Ordering::Relaxed);
+}
+
+/// Every CPU's timer tick (`sched_init::on_timer_tick`): fail the running
+/// test once its deadline has passed. Lock-free, so a test that hangs with
+/// IF=0 on one CPU is caught by another CPU's tick (ROADMAP §10.2, T1).
+/// The one tick that claims the passed deadline prints
+/// `vibeOS: ktest: FAIL <name>: deadline` and panics, so the dump shows
+/// where the test stood.
+pub(crate) fn on_tick() {
+    // Acquire: pairs with `arm`'s Release store.
+    let d = DEADLINE.load(Ordering::Acquire);
+    if d == 0 || Arch::now() < d {
+        return;
+    }
+    // Acquire on success: pairs with `arm`'s Release store, as above; the
+    // failure value is unused.
+    if DEADLINE
+        .compare_exchange(d, 0, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    let name = current_name();
+    crate::marker!("vibeOS: ktest: FAIL {name}: deadline");
+    panic!("ktest: {name}: deadline");
+}
+
+/// The row `cur` names, if any.
+fn row_of(cur: u32) -> Option<&'static Test> {
+    GROUPS
+        .get((cur >> 16) as usize)?
+        .get((cur & 0xFFFF) as usize)
+}
+
+/// The running test's name, or `ktest` between tests.
+fn current_name() -> &'static str {
+    row_of(CURRENT.load(Ordering::Relaxed)).map_or(REGISTRY_NAME, |t| t.name)
+}
+
+/// Print `vibeOS: ktest: info <test>: <text>`, a counter or a measurement
+/// that is never a result (DESIGN §8.2). Use [`crate::ktest_info!`].
+pub(crate) fn info(args: fmt::Arguments<'_>) {
+    let name = current_name();
+    crate::marker!("vibeOS: ktest: info {name}: {args}");
+}
+
+/// `ktest::info` with `format_args!`: an info line for the running test.
+#[macro_export]
+macro_rules! ktest_info {
+    ($($arg:tt)*) => {
+        $crate::ktest::info(format_args!($($arg)*))
+    };
+}
+
+/// Run every selected row with IF on and `irq_nest` 0, the context
+/// production kernel threads run in, then exit QEMU (DESIGN §8.2).
+fn registry_main() {
+    REGISTRY_TID.store(thread_init::current_id().0, Ordering::Release);
+    let cmdline = crate::boot::cmdline();
+    let sel = vibeos::ktest::Selection::parse(cmdline.get(OPT_KTEST));
+    let repeat_arg = cmdline.get(OPT_REPEAT);
+    let repeat = vibeos::ktest::parse_repeat(repeat_arg).unwrap_or_else(|_| bad_repeat(repeat_arg));
+    let Some(n) = vibeos::ktest::run_count(
+        rows().map(|(_, _, t)| (t.name, t.once, t.opt_in)),
+        &sel,
+        repeat,
+    ) else {
+        bad_repeat(repeat_arg);
+    };
+    crate::marker!("vibeOS: ktest: begin {n}");
+    if n == 0 {
+        crate::marker!("vibeOS: ktest: end");
+        qemu_exit(EXIT_FAIL);
+    }
+    quiesce_frames();
+    let freq = Arch::freq_hz().unwrap_or(0);
+    let mut failed = false;
+    let mut runs: u32 = 0;
+    for pass in 1..=repeat {
+        for (g, r, t) in rows() {
+            if !sel.selects(t.name, t.opt_in) || !vibeos::ktest::runs_in_pass(t.once, pass) {
+                continue;
+            }
+            runs += 1;
+            failed |= !run_one(g, r, t, freq);
+        }
+    }
+    // `n` and the loop ask the same two predicates.
+    assert_eq!(runs, n, "ktest: runs made != begin count");
     crate::marker!("vibeOS: ktest: end");
     qemu_exit(if failed { EXIT_FAIL } else { EXIT_PASS });
+}
+
+/// The command-line options that select and repeat rows (BOOT.md §3.2).
+const OPT_KTEST: &str = "vibeos.ktest";
+const OPT_REPEAT: &str = "vibeos.ktest_repeat";
+
+/// A `vibeos.ktest_repeat=` that is not 1 to `REPEAT_MAX`, or that makes
+/// more runs than a `u32` counts: say so before `begin` and fail the boot.
+fn bad_repeat(value: Option<&[u8]>) -> ! {
+    let v = vibeos::boot::cmdline::Escaped(value.unwrap_or(b""));
+    crate::marker!("vibeOS: ktest: bad option {OPT_REPEAT}={v}");
+    qemu_exit(EXIT_FAIL);
+}
+
+/// One run of row `r` of group `g`: its run line, the body, and its result
+/// line. False when it failed.
+fn run_one(g: usize, r: usize, t: &'static Test, freq: u64) -> bool {
+    let name = t.name;
+    crate::marker!("vibeOS: ktest: run {name} {}", t.deadline_ms);
+    let armed = arm(g, r, t.deadline_ms);
+    let t0 = Arch::now();
+    let mut outcome = (t.run)();
+    let us = vibeos::ktest::cycles_to_us(Arch::now().wrapping_sub(t0), freq);
+    if armed {
+        disarm();
+    } else {
+        CURRENT.store(NO_TEST, Ordering::Relaxed);
+    }
+    // A test that needs interrupts off takes its own guard and drops it
+    // before it returns.
+    let if_on = x86::interrupts_enabled();
+    let nest = per_cpu_init::irq_nest();
+    if !if_on || nest != 0 {
+        per_cpu_init::current().irq_nest.store(0, Ordering::Relaxed);
+        x86::sti();
+        if !matches!(outcome, Outcome::Fail(_) | Outcome::FailFmt(_)) {
+            outcome = crate::fail_fmt!("left IF={} irq_nest={}", u8::from(if_on), nest);
+        }
+    }
+    match outcome {
+        Outcome::Ok => {
+            crate::marker!("vibeOS: ktest: ok {name} ({us} us)");
+            true
+        }
+        Outcome::Fail(why) => {
+            // Same shape as skip: reason on the protocol line so
+            // check_ktest_output (which raises on that line alone) is
+            // enough to diagnose (DESIGN §8.2).
+            crate::marker!("vibeOS: ktest: FAIL {name}: {why}");
+            false
+        }
+        Outcome::FailFmt(msg) => {
+            let why = msg.as_str();
+            crate::marker!("vibeOS: ktest: FAIL {name}: {why}");
+            false
+        }
+        Outcome::Skip(reason) => {
+            crate::marker!("vibeOS: ktest: skip {name}: {reason}");
+            true
+        }
+    }
 }
 
 fn qemu_exit(code: u32) -> ! {

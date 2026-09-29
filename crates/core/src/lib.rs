@@ -50,6 +50,7 @@ pub mod irq;
 )]
 pub mod kalloc;
 pub mod kerror;
+pub mod ktest;
 pub mod limits;
 pub mod log;
 pub mod marker;

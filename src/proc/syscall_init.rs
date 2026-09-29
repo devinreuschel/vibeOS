@@ -297,6 +297,7 @@ pub unsafe fn init_bsp() {
     if crate::boot::cmdline().flag("vibeos.strace") {
         set_trace(true);
     }
+    crate::log_init::apply_boot_level();
 }
 
 /// AP: `tables` is this CPU's GDT/TSS. Call after `install_gs`.

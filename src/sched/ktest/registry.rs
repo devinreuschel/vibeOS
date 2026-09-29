@@ -1,5 +1,5 @@
 //! In-guest tests of the ktest registry itself: its rows, its failure
-//! messages and its helpers. Rows: the list in crate::ktest.
+//! messages and its helpers. Rows: `crate::sched::ktest::TESTS`.
 
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -8,7 +8,7 @@ use vibeos::paging::PAGE_SIZE_4K;
 use vibeos::thread::ThreadState;
 
 use crate::ktest::{
-    FAIL_MSG_BYTES, FailMsg, Outcome, SUITES, TESTS, alloc_frames, cpu_remote, dealloc_frames,
+    FAIL_MSG_BYTES, FailMsg, GROUPS, Outcome, alloc_frames, cpu_remote, dealloc_frames,
     service_incoming_guarded, spawn_thread, spawn_thread_on, test,
 };
 use crate::per_cpu_init;
@@ -17,13 +17,13 @@ use crate::time_init;
 
 pub(crate) fn test_ktest_rows() -> Outcome {
     let mut seen = 0usize;
-    for (si, suite) in SUITES.iter().enumerate() {
+    for (si, suite) in GROUPS.iter().enumerate() {
         for (ri, t) in suite.iter().enumerate() {
             seen += 1;
             if t.deadline_ms == 0 {
                 return crate::fail_fmt!("zero deadline on {}", t.name);
             }
-            for (sj, other) in SUITES.iter().enumerate().skip(si) {
+            for (sj, other) in GROUPS.iter().enumerate().skip(si) {
                 let from = if sj == si { ri + 1 } else { 0 };
                 if other[from..].iter().any(|o| o.name == t.name) {
                     return crate::fail_fmt!("duplicate test name {}", t.name);
@@ -31,8 +31,8 @@ pub(crate) fn test_ktest_rows() -> Outcome {
             }
         }
     }
-    if seen < TESTS.len() {
-        return Outcome::Fail("SUITES does not hold the legacy list");
+    if seen < GROUPS.len() || GROUPS.iter().any(|g| g.is_empty()) {
+        return Outcome::Fail("GROUPS holds an empty group");
     }
     let d = test("d", test_ktest_rows);
     if d.deadline_ms != 10_000 || d.once || d.opt_in {

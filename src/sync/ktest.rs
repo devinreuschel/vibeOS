@@ -1,4 +1,4 @@
-//! In-guest tests for sync (kernel_tests only). Rows: the list in crate::ktest.
+//! In-guest tests for sync (kernel_tests only). Rows: [`TESTS`].
 
 use core::alloc::Layout;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -8,7 +8,7 @@ use vibeos::sync::OpGate;
 use vibeos::time::Instant;
 
 use crate::arch;
-use crate::ktest::{Outcome, sleep_until, spawn_thread};
+use crate::ktest::{Outcome, Test, sleep_until, spawn_thread, test};
 use crate::kva_init;
 use crate::per_cpu_init;
 use crate::sync::blocking_init::{BlockingMutex, Channel, Condvar, RwLock, Semaphore};
@@ -962,3 +962,37 @@ pub(crate) fn test_op_gate_kill_sleeps() -> Outcome {
     }
     Outcome::Ok
 }
+
+/// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
+/// runs them (DESIGN §8.2).
+pub(crate) const TESTS: &[Test] = &[
+    test("irqcell_reentry_panics", test_irqcell_reentry_panics),
+    test("bootcell_set_once", test_bootcell_set_once).once(),
+    test("spin_mutex", test_spin_mutex),
+    test("lock_spins", test_lock_spins),
+    test("blocking_mutex_counter", test_blocking_mutex_counter),
+    test("late_wake_after_exit", test_late_wake_after_exit),
+    test("rwlock_exclusion", test_rwlock_exclusion),
+    test("rwlock_writer_timeout", test_rwlock_writer_timeout),
+    test("semaphore_wake", test_semaphore_wake),
+    test("condvar_signal", test_condvar_signal),
+    test("condvar_wait_releases", test_condvar_wait_releases),
+    test("channel_mpsc", test_channel_mpsc),
+    test("mutex_deadline", test_mutex_deadline),
+    test("sync_try_paths", test_sync_try_paths),
+    test("spin_poll_hook_installed", test_spin_poll_hook_installed),
+    test(
+        "rank_alloc_under_pt_asserts",
+        test_rank_alloc_under_pt_asserts,
+    ),
+    test(
+        "rank_same_rank_lock_asserts",
+        test_rank_same_rank_lock_asserts,
+    ),
+    test(
+        "rank_lock_nested_keeps_outer",
+        test_rank_lock_nested_keeps_outer,
+    ),
+    test("cross_cpu_cells_ranked", test_cross_cpu_cells_ranked),
+    test("op_gate_kill_sleeps", test_op_gate_kill_sleeps).once(),
+];

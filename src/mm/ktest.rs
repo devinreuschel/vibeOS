@@ -1,4 +1,4 @@
-//! In-guest tests for mm (kernel_tests only). Rows: the list in crate::ktest.
+//! In-guest tests for mm (kernel_tests only). Rows: [`TESTS`].
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -12,9 +12,9 @@ use vibeos::paging::{self, PageFlags, PageSize, PhysAddr, VirtAddr, heap_flags};
 
 use crate::diag;
 use crate::ktest::{
-    Outcome, alloc_frame, alloc_frames_owned, catch_alloc_error, catch_fault, free_frame,
+    Outcome, Test, alloc_frame, alloc_frames_owned, catch_alloc_error, catch_fault, free_frame,
     free_frames, free_frames_owned, quiescent_free_frames, second_cpu, settle_threads,
-    spawn_thread_on, spin_until_ns,
+    spawn_thread_on, spin_until_ns, test,
 };
 use crate::kva_init;
 use crate::paging_init;
@@ -833,3 +833,25 @@ pub(crate) mod fail_after {
         true
     }
 }
+
+/// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
+/// runs them (DESIGN §8.2).
+pub(crate) const TESTS: &[Test] = &[
+    test("map_unmap", test_map_unmap),
+    test("nx_enforcement", test_nx_enforcement),
+    test("heap_box", test_heap_box),
+    test("heap_reuse", test_heap_reuse),
+    test("heap_align", test_heap_align),
+    test("heap_growth", test_heap_growth),
+    test("heap_oom", test_heap_oom),
+    test("stack_guard", test_stack_guard),
+    test("kva_roundtrip", test_kva_roundtrip),
+    test("kva_deferred", test_kva_deferred),
+    test("vmap", test_vmap),
+    test("mmio_uc_flags", test_mmio_uc_flags),
+    test("tlb_shootdown_remote", test_tlb_shootdown_remote),
+    test("alloc_stress_smp", test_alloc_stress_smp),
+    test("frames_none_leaked", frames_none_leaked),
+    test("current_mapper_holds_pt", current_mapper_holds_pt),
+    test("vmap_32_frames_unmapped", vmap_32_frames_unmapped),
+];
