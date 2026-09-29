@@ -291,6 +291,10 @@ pub unsafe fn init_bsp() {
             .store(crate::paging_init::kernel_cr3(), Ordering::Release);
     });
     seed_current_fpu();
+    // `vibeos.strace=1` on the kernel command line (BOOT.md §3.2).
+    if crate::boot::cmdline().flag("vibeos.strace") {
+        set_trace(true);
+    }
 }
 
 /// AP: `tables` is this CPU's GDT/TSS. Call after `install_gs`.
@@ -621,10 +625,6 @@ static TRACE: AtomicBool = AtomicBool::new(false);
 static CURRENT_AS: AtomicPtr<AddressSpace> = AtomicPtr::new(ptr::null_mut());
 static SYSCALLS: AtomicU64 = AtomicU64::new(0);
 
-#[allow(
-    dead_code,
-    reason = "P10-S36 adds its caller, the boot command line's trace switch"
-)]
 pub fn set_trace(on: bool) {
     TRACE.store(on, Ordering::Release);
 }

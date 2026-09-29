@@ -133,7 +133,7 @@ KERNEL_ELF := build/kernels/vibeos-default.elf
 
 .PHONY: help check check-python check-msrv all kernel iso isos repro run run-panic debug clean distclean setup layout prebuilt \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-gp test-e2e-mce test \
-        test-e2e-pit test-e2e-highmem test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
+        test-e2e-pit test-e2e-highmem test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
         test-smp-stress test-vibefs-crash test-e2e-uefi
 
 help:
@@ -151,6 +151,7 @@ help:
 	  '  debug                 as run, halted with a gdb stub on :1234; then gdb -x scripts/vibeos.gdb' \
 	  '  layout                objdump sections + __kernel_ symbols' \
 	  '  test-unit             vibeos-core host tests (any host triple)' \
+	  '  models-quick          loom models (loom_*) at 3 preemptions, ROADMAP §10.8' \
 	  '  test-harness          python unit tests for the harness' \
 	  '  test-e2e              boot contract on the production ISO' \
 	  '  test-e2e-uefi         same, UEFI firmware from the probe on pflash; none installed: skip (fail under CI)' \
@@ -159,6 +160,7 @@ help:
 	  '  test-e2e-mce          injected #MC dump+halt contract' \
 	  '  test-e2e-pit          PIT calibration fallback' \
 	  '  test-e2e-highmem      boot contract with 9 GiB, past the physmap cap' \
+	  '  test-e2e-strace       vibeos.strace=1 via fw_cfg: cmdline echo + syscall trace' \
 	  '  test-ps2              QEMU sendkey echo (also part of test-e2e)' \
 	  '  test-kernel           in-guest tests, -smp 2' \
 	  '  test-kernel-smp4      in-guest tests, -smp 4' \
@@ -223,6 +225,7 @@ check:
 	cargo clippy --bin vibeos -- -D warnings
 	$(MAKE) test-unit
 	cargo test -p vibeos-core --lib --features std --target $(HOST_TRIPLE) --config 'profile.test.debug-assertions=false' -- release_assert_
+	$(MAKE) models-quick
 	$(MAKE) test-harness
 	$(MAKE) check-python
 	$(CARGO) build --bin vibeos --profile hookcheck --config 'profile.hookcheck.inherits="dev"'
@@ -328,6 +331,13 @@ test-unit:
 	VIBEOS_TIER=$@ cargo test -p vibeos-core --doc --features std --target $(HOST_TRIPLE)
 	VIBEOS_TIER=$@ cargo test -p vibeos-hostlib-tests --target $(HOST_TRIPLE)
 
+# Loom models (C-LOOM): every `loom_*` test, each variant a `_fails` test that
+# passes only when loom finds its race. Own target dir: `--cfg loom` rebuilds
+# everything.
+.PHONY: models-quick
+models-quick:
+	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR)/loom RUSTFLAGS="--cfg loom -D warnings" LOOM_MAX_PREEMPTIONS=3 cargo test -p vibeos-core --lib --features std --release --target $(HOST_TRIPLE) -- loom_ --test-threads=1
+
 test-harness:
 	VIBEOS_TIER=$@ GITHUB_STEP_SUMMARY= python3 -m unittest discover -s tests/harness -t . -v
 
@@ -401,6 +411,11 @@ test-e2e-pit: $(ISO)
 test-e2e-highmem: $(ISO)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO) VIBEOS_MEM=9G python3 tests/harness/run_e2e.py
 
+# Kernel command line through fw_cfg (BOOT.md §3.2): vibeos.strace=1 turns
+# the syscall trace on; the echo shows limine.conf's words, then the harness's.
+test-e2e-strace: $(ISO)
+	VIBEOS_TIER=test-e2e-strace VIBEOS_ISO=$(ISO) VIBEOS_CMDLINE=vibeos.strace=1 python3 -c 'from tests.harness.run_e2e import strace_main; raise SystemExit(strace_main())'
+
 test-kernel: $(ISO_KTEST)
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_KTEST) python3 tests/harness/run_ktest.py
 
@@ -417,7 +432,7 @@ test-vibefs-crash: $(ISO_VIBEFS_CRASH) $(MKFS_VIBEFS) $(FSCK_VIBEFS) $(NBD_CACHE
 	VIBEOS_TIER=$@ VIBEOS_ISO=$(ISO_VIBEFS_CRASH) VIBEOS_MKFS=$(MKFS_VIBEFS) VIBEOS_FSCK=$(FSCK_VIBEFS) \
 	    VIBEOS_NBD_CACHE=$(NBD_CACHE) VIBEOS_VIBEFS_CAT=$(VIBEFS_CAT) python3 tests/harness/run_vibefs_crash.py
 
-test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
+test: test-unit test-harness test-e2e test-e2e-uefi test-e2e-panic test-e2e-gp test-e2e-mce test-e2e-pit test-e2e-highmem test-e2e-strace test-kernel test-kernel-smp4 test-lapic-fallback test-vibefs-crash
 
 # Longer high-CPU stress. Scheduled CI, not every push. ROADMAP §4.11.
 test-smp-stress: $(ISO_KTEST)

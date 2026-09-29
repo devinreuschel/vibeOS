@@ -7,12 +7,23 @@ use core::ops::Range;
 
 use limine::memmap::{Entry, MEMMAP_USABLE};
 use limine::request::{
-    ExecutableAddressRequest, FramebufferRequest, FramebufferResponse, HhdmRequest, MemmapRequest,
-    RsdpRequest,
+    ExecutableAddressRequest, ExecutableCmdlineRequest, FramebufferRequest, FramebufferResponse,
+    HhdmRequest, MemmapRequest, RsdpRequest,
 };
 
 use crate::cell::BootCell;
+use vibeos::boot::cmdline::{self, CMDLINE_MAX, Cmdline, CmdlineBuf, Escaped, SYSCTLS};
+use vibeos::log::Level;
 use vibeos::paging::HHDM_BASE;
+
+#[cfg_attr(
+    not(feature = "kernel_tests"),
+    expect(
+        dead_code,
+        reason = "`dma_write`'s first production caller is ROADMAP §10.12's VMCOREINFO (P10-S82)"
+    )
+)]
+pub mod fw_cfg_init;
 
 #[cfg(feature = "kernel_tests")]
 #[allow(
@@ -50,6 +61,14 @@ static EXEC_ADDR: ExecutableAddressRequest = ExecutableAddressRequest::new();
 #[unsafe(link_section = ".limine_requests")]
 static FRAMEBUFFER: FramebufferRequest = FramebufferRequest::new();
 
+// The `limine.conf` entry's `cmdline:` (BOOT.md §3.2).
+#[used]
+#[unsafe(link_section = ".limine_requests")]
+static CMDLINE_REQ: ExecutableCmdlineRequest = ExecutableCmdlineRequest::new();
+
+/// The fw_cfg file whose text follows Limine's command line.
+pub const FW_CFG_CMDLINE: &str = "opt/vibeos/cmdline";
+
 // Kernel image bounds from linker.ld (DESIGN §3.4). Virtual.
 unsafe extern "C" {
     static __kernel_vma_start: u8;
@@ -75,6 +94,8 @@ pub struct BootInfo {
     pub rsdp_phys: u64,
     memmap: &'static [&'static Entry],
     fb: Option<&'static FramebufferResponse>,
+    /// Limine's command line, then one space and fw_cfg's.
+    cmdline: CmdlineBuf,
 }
 
 impl BootInfo {
@@ -102,9 +123,67 @@ impl BootInfo {
             })
         })
     }
+
+    /// The kernel command line as captured, at most `CMDLINE_MAX` bytes.
+    pub fn cmdline_raw(&self) -> &[u8] {
+        self.cmdline.as_bytes()
+    }
+
+    /// Length of Limine's part, a prefix of [`cmdline_raw`](Self::cmdline_raw).
+    #[cfg_attr(
+        not(feature = "kernel_tests"),
+        expect(dead_code, reason = "the in-guest `cmdline_captured` reads it")
+    )]
+    pub fn cmdline_limine_len(&self) -> usize {
+        self.cmdline.limine_len()
+    }
 }
 
 static INFO: BootCell<BootInfo> = BootCell::new();
+/// `INFO`'s command line, parsed; set right after `INFO`.
+static CMDLINE: BootCell<Cmdline<'static>> = BootCell::new();
+
+/// Append Limine's command line to `buf`: its bytes up to the NUL, at most
+/// `CMDLINE_MAX`.
+fn append_limine_cmdline(buf: &mut CmdlineBuf) {
+    let Some(resp) = CMDLINE_REQ.response() else {
+        return;
+    };
+    let data: &limine::request::ExecutableCmdlineRespData = resp;
+    // SAFETY: limine 0.6.5's `ExecutableCmdlineRespData` is `#[repr(C)]`
+    // with one field, the string's pointer (Cargo.lock pins the crate), so
+    // it is read at offset 0 rather than through `cmdline()`, which unwraps
+    // non-UTF-8; established here. Limine is trusted (DESIGN §2.10).
+    let p =
+        unsafe { *(data as *const limine::request::ExecutableCmdlineRespData as *const *const u8) };
+    if p.is_null() {
+        return;
+    }
+    let mut n = 0;
+    // SAFETY: Limine's protocol, trusted here: `p` is a NUL-terminated
+    // string that Limine's HHDM maps while `boot::capture` runs, first in
+    // `normal_boot_tail`; the scan stops at the NUL or `CMDLINE_MAX`.
+    while n < CMDLINE_MAX && unsafe { p.add(n).read() } != 0 {
+        n += 1;
+    }
+    // SAFETY: as above, established here: the `n` bytes before the NUL are
+    // the string's, and the slice does not outlive this call.
+    buf.append(unsafe { core::slice::from_raw_parts(p, n) });
+}
+
+/// Limine's command line, then fw_cfg's `opt/vibeos/cmdline` when QEMU's
+/// fw_cfg lists it.
+fn capture_cmdline() -> CmdlineBuf {
+    let mut buf = CmdlineBuf::new();
+    append_limine_cmdline(&mut buf);
+    buf.seal_limine();
+    if let Some(f) = fw_cfg_init::file(FW_CFG_CMDLINE) {
+        let mut text = [0u8; CMDLINE_MAX + 1];
+        let n = fw_cfg_init::read(&f, &mut text);
+        buf.append(&text[..n]);
+    }
+    buf
+}
 
 /// Read every Limine response we need and stash it. First thing in
 /// `normal_boot_tail`, before PMM / paging / ACPI. A missing required
@@ -143,9 +222,48 @@ pub fn capture() -> &'static BootInfo {
             rsdp_phys: rsdp_raw.checked_sub(HHDM_BASE).unwrap_or(rsdp_raw),
             memmap: memmap.entries(),
             fb: FRAMEBUFFER.response(),
+            cmdline: capture_cmdline(),
         })
     };
-    INFO.get()
+    let info = INFO.get();
+    // SAFETY: invariant I22, established at `cell::BootCell::set`: the one
+    // write, on the BSP right after `INFO`'s, before any reader.
+    unsafe { CMDLINE.set(cmdline::parse(info.cmdline_raw())) };
+    report_cmdline(info);
+    info
+}
+
+/// The echo marker, then one line per ignored sysctl, dropped word, and
+/// truncation.
+fn report_cmdline(info: &BootInfo) {
+    crate::marker!("vibeOS: boot: cmdline: {}", Escaped(info.cmdline_raw()));
+    let c = cmdline();
+    for s in c.sysctls().filter(|s| !s.known_in(SYSCTLS)) {
+        crate::klog!(
+            Level::Warn,
+            "vibeOS: boot: cmdline: sysctl.{}: unknown sysctl, ignored",
+            Escaped(s.path)
+        );
+    }
+    for name in c.dropped() {
+        crate::klog!(
+            Level::Warn,
+            "vibeOS: boot: cmdline: {}: unknown option, dropped",
+            Escaped(name)
+        );
+    }
+    if info.cmdline.truncated() {
+        crate::klog!(
+            Level::Warn,
+            "vibeOS: boot: cmdline: truncated to {} bytes",
+            CMDLINE_MAX
+        );
+    }
+}
+
+/// The parsed kernel command line. Panics if [`capture`] has not run.
+pub fn cmdline() -> &'static Cmdline<'static> {
+    CMDLINE.get()
 }
 
 /// Captured snapshot. Panics if [`capture`] has not run.

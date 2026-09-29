@@ -254,6 +254,14 @@ Each `meminfo:` line (told apart by its text up to the first digit) and each `pm
 once; the `meminfo:` frame total equals the `pmm: <n> total` line's; free is at most the
 `pmm: <n> free 4KiB frames` count; used is total minus free; and heap use is at most heap capacity.
 
+Two diagnostics come from the kernel command line (BOOT.md §3.2): the kernel prints
+`vibeOS: boot: cmdline: <text>` once, after `limine: rev <n> ok` and before `pmm:` (ROADMAP §10.2),
+and with `vibeos.strace=1` each syscall that returns prints `user: syscall <name> nr=<n> = <ret>`
+(ROADMAP §10.7). `make test-e2e-strace` boots the production ISO with `VIBEOS_CMDLINE=vibeos.strace=1`
+and fails unless the echo reads `limine.conf`'s `cmdline:` value, one space, then the harness's fw_cfg
+words, comes before the first trace line, every trace line has that form, and the first `write` line
+reads `user: syscall write nr=1 = <int>`.
+
 The list above is the contract of a boot through Limine. Planned (ROADMAP §25.4, §26.4): a boot
 through the image's direct entry prints `vibeOS: boot: <path> entry ok`, where `<path>` is `kexec`,
 `crash`, or `pvh`, in place of `limine: rev <n> ok`. A crash entry, ROADMAP §25.4's capture kernel,
@@ -564,7 +572,7 @@ includes its `cargo test` of the host tools, the one tier that needs the toolcha
 | Arch | Tier | Targets | QEMU s |
 |---|---|---|---|
 | x86_64 | e2e-1 | `test-e2e`, `test-e2e-uefi`, `test-e2e-panic` | 32 |
-| x86_64 | e2e-2 | `test-e2e-gp`, `test-e2e-mce`, `test-e2e-pit`, `test-e2e-highmem` | 30 |
+| x86_64 | e2e-2 | `test-e2e-gp`, `test-e2e-mce`, `test-e2e-pit`, `test-e2e-highmem`, `test-e2e-strace` | 30 |
 | x86_64 | in-guest-1 | `test-kernel` | 64 |
 | x86_64 | in-guest-2 | `test-kernel-smp4` | 52 |
 | x86_64 | in-guest-3 | `test-lapic-fallback` | 50 |
