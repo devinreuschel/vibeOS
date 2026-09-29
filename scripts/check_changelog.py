@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CHANGELOG = ROOT / "CHANGELOG.md"
-MAX_LINES = 3
+MAX_LINES = 2
 STYLE_NEEDLES = (
     "One or two lines per entry",
     "someone running vibeOS",
