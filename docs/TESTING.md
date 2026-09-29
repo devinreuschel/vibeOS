@@ -46,8 +46,9 @@ Things that belong here and are easy to get wrong, so should have tests from the
   invalidate-on-create, mount-point crossing.
 - kernfs: one directory implementation shared by devfs/tmpfs/procfs/sysfs; tmpfs
   writes evict through the Phase 7 block cache rather than pinning a grow-only
-  buffer; `/dev/null` `/dev/zero` `/dev/random` (virtio-rng, then RDRAND, then a
-  xorshift fallback that ROADMAP §10.12 deletes, F134); procfs stubs do not
+  buffer; `/dev/null` `/dev/zero` `/dev/random` (virtio-rng, then RDRAND, and nothing
+  else: a short count when they supply less, `EAGAIN` when they supply none,
+  until ROADMAP §13.10's CSPRNG); procfs stubs do not
   panic.
 
 Two lessons about writing these:
@@ -179,47 +180,17 @@ something two subsystems away breaks.
 
 ### Marker contract
 
-This is the full contract once the kernel is complete through the console phase. It grows one phase at
-a time: a phase adds its markers to the harness in the same commit that emits them, and nothing is ever
-removed silently. The executable contract is `boot_contract_markers()` in `tests/harness/harness.py`;
-the list below gives its order, the paragraphs after it add the lines that depend on the machine (the
-calibration source, the LAPIC timer mode, the per-AP pairs, and the partition children), and the
-`_start` table in [section 3.3](BOOT.md#33-_start-order) says why each step sits where it does. Every line in
-it is the kernel's except `shell ready`, which `/bin/sh` prints in the production ISO. The harness
-matches the kernel's lines only when framed (§2.6), and a line a user program prints (`shell ready`,
-the ROADMAP §10.5 `utest_*` lines, `user: tests begin`, `ok` and `fail`, `user: dup ok`, the `init:`
-lines, and the console-input replies) only when unframed. `Marker.source` says which a marker is;
-until the registry below gives each line its source, `frame.USER_PREFIXES` lists the user lines.
-
-Planned (ROADMAP §10.2): one registry, `tests/contract/markers.toml`, holds every line the harness
-knows (contract markers, diagnostics, failure lines and halt reasons, and the ktest and utest
-protocol), each with its architecture, the program that prints it, and the configurations it holds in.
-The harness builds this contract and the failing-fast list from it, `scripts/check_markers.py` fails on
-a `marker!` line with no row, and this section then keeps the rules and links the file instead of
-listing lines.
-
-```
-vibeOS: serial online
-vibeOS: limine: rev 3 ok
-vibeOS: pmm: <n> free 4KiB frames
-vibeOS: paging: cr3 ok
-vibeOS: paging: mmio uc
-vibeOS: heap ok
-vibeOS: kva: ready
-vibeOS: gdt ok
-vibeOS: pic: remapped
-vibeOS: idt ok
-vibeOS: per_cpu: bsp ready
-vibeOS: acpi: xsdt <n> tables
-vibeOS: time: tsc <n>/ms
-vibeOS: sched: cpu0 ready
-vibeOS: irq: enabled
-vibeOS: smp: done
-vibeOS: console ok
-vibeOS: pci: <n> devices
-vibeOS: block: <name> <n> sectors
-vibeOS: shell ready
-```
+The contract is the `contract` rows of the marker registry,
+[`tests/contract/markers.toml`](../tests/contract/markers.toml) (ROADMAP §10.2), in their `order`:
+`boot_contract_markers()` in `tests/harness/harness.py` builds each configuration's list from the rows
+whose `when` holds in it, and the paragraphs below give the rules the rows encode (the calibration
+source, the LAPIC timer mode, the per-AP pairs, and the partition children). The `_start` table in
+[section 3.3](BOOT.md#33-_start-order) says why each step sits where it does. The contract grows one
+phase at a time: a phase adds its rows in the same commit that prints the lines, and nothing is ever
+removed silently. Every contract line is the kernel's except `shell ready`, which `/bin/sh` prints in
+the production ISO. The harness matches a row only on its `source`'s side of the frame (§2.6): the
+kernel's lines when framed, and a line a user program prints (`shell ready`, `user: tests begin`, `ok`
+and `fail`, `user: dup ok`, the `init:` lines, and the console-input replies) only when unframed.
 
 `vibeOS: serial online` is the kernel's first serial line: `run_e2e.py` fails when a kernel line (one
 starting `vibeOS:`) comes before it; Limine's or the firmware's output may precede it.
@@ -228,7 +199,8 @@ Live e2e through Phase 6 slice A asserts through `idt ok`, then `per_cpu: bsp re
 then `acpi: xsdt`, then `time: tsc <n>/ms`, then `time: lapic_timer ok (<mode>)`, then
 `sched: cpu0 ready`, then `irq: enabled`, then for each AP `sched: cpu<i> ready`
 followed by `smp: ap online`, then `smp: done`, then `console ok`, then
-`pci: <n> devices`, then `block: <name> <n> sectors`, then `shell ready`.
+`pci: <n> devices`, then `block: <name> <n> sectors`, then `/bin/tests`' `user: tests ok`, then
+`shell ready`.
 `boot: phase1 done` was a Phase 1–4 stand-in and is no longer in the contract; the
 trailing marker is `shell ready`. After that, the same ISO is booted again and the
 harness types `echo serial-ok` on COM1 and `echo ps2-ok` via QEMU `sendkey` (i8042 /
@@ -243,9 +215,13 @@ the diagnostic `time: calibrated hpet <n>/ms`; `make test-e2e-pit` asserts
 (`-cpu qemu64,-tsc-deadline`) runs in-guest tests on the periodic path.
 
 In the production ISO, `shell ready` is written from ring 3 by `/bin/sh`, which `/sbin/init` starts
-after waiting for `/bin/tests`. `init` passes no status pointer to `wait4`, and the harness matches
-neither `user: tests ok` nor `user: tests fail`, so a failing `/bin/tests` passes every e2e variant
-(ROADMAP §10.5, F073).
+after waiting for `/bin/tests`. Every e2e variant that reaches the shell requires `/bin/tests`'
+unframed `user: tests ok` before `shell ready` (the `user_tests_ok` row), and every driver fails the
+run on an unframed `user: tests fail`, so a failing `/bin/tests` fails the boot (ROADMAP §10.2,
+F073). `init` passes a status pointer to `wait4` and, when the status word is nonzero (an exit code
+other than 0, or a signal), prints `init: /bin/tests exited <status>` on fd 2 before it starts
+`/bin/sh`: a registered failure line, so a `/bin/tests` that dies before its last line fails the
+boot too.
 
 `smp: done` before `shell ready` is deliberate. Put SMP bring-up after the shell starts and an AP
 failure becomes invisible, because the harness sees its last marker and passes. `pci: <n> devices`
@@ -268,18 +244,9 @@ With `-smp N`, additionally:
 - `vibeOS: time: lapic_timer ok (<mode>)` naming the selected timer path
   (`tsc-deadline`, `periodic`, or `pit`) rather than inferring it
 
-e2e also reads the boot log's memory diagnostics, which print before `sched: cpu0 ready`, in every
-production mode (default, `EXPECT_PIT`, highmem, and UEFI; `check_meminfo` in `run_e2e.py`):
-
-```
-vibeOS: pmm: <n> free 4KiB frames
-vibeOS: pmm: <n> total, largest order <n>
-vibeOS: meminfo: total <n> frames, free <n>, used <n>, largest order <n>
-vibeOS: meminfo: leaked <n> frames
-vibeOS: meminfo: heap used <n> B / capacity <n> B
-```
-
-Each `meminfo:` line (told apart by its text up to the first digit) and each `pmm:` line appears
+e2e also reads the boot log's memory diagnostics, the registry's `pmm:` and `meminfo:` rows, which
+print before `sched: cpu0 ready`, in every production mode (default, `EXPECT_PIT`, highmem, and UEFI;
+`check_meminfo` in `run_e2e.py`). Each `meminfo:` line (told apart by its text up to the first digit) and each `pmm:` line appears
 once; the `meminfo:` frame total equals the `pmm: <n> total` line's; free is at most the
 `pmm: <n> free 4KiB frames` count; used is total minus free; and heap use is at most heap capacity.
 
@@ -299,22 +266,22 @@ boots with `maxcpus=1` and so prints no `smp: ap online` line, and its list ends
 
 ### Failing fast
 
-Scan for these (`PANIC_SIGNATURES` in `tests/harness/harness.py`) and, in a run that expects no
-panic, fail immediately with the captured line rather than waiting out the timeout:
-
-```
-panicked at   vibeOS: panic:   #PF   #GP   #UD   #DF   double fault   stack overflow
-```
+Scan for the `failure` rows of [`tests/contract/markers.toml`](../tests/contract/markers.toml) and, in
+a run that expects no panic, fail immediately with the captured line rather than waiting out the
+timeout. A row whose placeholders all follow its last literal fails a line that holds its text up to
+the first placeholder (`PANIC_SIGNATURES` in `tests/harness/harness.py`, and `frame.USER_FAILURES`
+for the `user` rows); any other fails a line its pattern matches (`FAILURE_PATTERNS`). The rows are
+the panic signatures (`panicked at`, `vibeOS: panic:`, the exception mnemonics, `double fault`,
+`stack overflow`), the lines of a dump, and the halt reasons.
 
 Match the exception mnemonics, not the phrase "page fault". Shell help text and log messages contain
 English words, and a substring match on prose produces false failures that erode trust in the suite.
 
-Planned (ROADMAP §10.7, §12.5, §25.5): a registered failure line reports a failure the kernel
-survived, so a run that shows one would otherwise pass. The blocked-thread sweep's
-`vibeOS: sched: overdue tid <id>` (ROADMAP §10.7) is the first; `vibeOS: block: <dev> timeout` and
-`vibeOS: block: <dev> reset` (ROADMAP §12.5) and ROADMAP §25.5's soft lockup, hard lockup, and
-hung-thread reports follow. A test that provokes one on purpose declares it; in any
-other run it fails the run, since a recovery no test expected is a bug a timeout hides, such as a
+A registered failure line can also report a failure the kernel survived, so a run that shows one
+would otherwise pass. The blocked-thread sweep's `vibeOS: sched: overdue tid <id>` (ROADMAP §10.7),
+and `vibeOS: block: <dev> timeout` and `vibeOS: block: <dev> reset` (ROADMAP §12.5), are such rows;
+planned (ROADMAP §25.5), the soft lockup, hard lockup, and hung-thread reports follow. A test that
+provokes one on purpose declares it; in any other run it fails the run, since a recovery no test expected is a bug a timeout hides, such as a
 lost kick ([section 10.4](BLOCK.md#104-virtio-blk)) that shows only as a 30 s pause.
 
 User programs print these strings too: the ROADMAP §10.5 runtime reports a panic as `panicked at` on
@@ -531,9 +498,10 @@ for the host, on `vibeos-core` for `x86_64-unknown-none`, and on the kernel with
 unit tests, the `release_assert_` host tests again with debug assertions off, harness unit tests,
 ruff and mypy; a production-feature link under the `hookcheck`
 profile, whose ELF `scripts/check_test_hooks.py` checks for test-only symbols, Q2's `nm` check; then every
-`scripts/check_*.py`). Right after the `vibeos-core` clippy lines it builds `vibeos-core` with its MSRV
+`scripts/check_*.py`; then `cargo deny check licenses bans sources` against `deny.toml`, ROADMAP §10.9's
+dependency policy). Right after the `vibeos-core` clippy lines it builds `vibeos-core` with its MSRV
 (`make check-msrv`: `cargo +<MSRV> check` for the host with `std` and for `x86_64-unknown-none`, under
-`RUSTFLAGS=--cap-lints=warn`, so it proves only that the crate builds). A missing `ruff`, `mypy`,
+`RUSTFLAGS=--cap-lints=warn`, so it proves only that the crate builds). A missing `ruff`, `mypy`, `cargo-deny`,
 `fsck.fat` or MSRV toolchain fails it unless `VIBEOS_ALLOW_MISSING_TOOLS=1`, which skips that check and
 prints it. CI runs it as the `check` job before QEMU (DESIGN §8.6).
 `make test-e2e` is enough when only boot output or QEMU wiring changed. `make test` is the gate before
@@ -622,7 +590,7 @@ each pass 40 s alone and cannot split below a target.
 
 | Job | When | What |
 |---|---|---|
-| `check` | push / PR | Installs `x86_64-unknown-none`, and the MSRV toolchain with the host and `x86_64-unknown-none` targets. `make check` (fmt; clippy `-D warnings` on `vibeos-core` and hostlib for the host, `vibeos-core` for `x86_64-unknown-none`, and the kernel with default features; host units, harness, ruff and mypy at pinned versions, the MSRV build, `scripts/check_*.py`) then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines 87`. No QEMU, no `setup.sh`. HTML report is a 7-day `core-coverage` artifact. |
+| `check` | push / PR | Installs `x86_64-unknown-none`, the MSRV toolchain with the host and `x86_64-unknown-none` targets, and cargo-deny's pinned release archive, checked against the SHA-256 the step records. `make check` (fmt; clippy `-D warnings` on `vibeos-core` and hostlib for the host, `vibeos-core` for `x86_64-unknown-none`, and the kernel with default features; host units, harness, ruff and mypy at pinned versions, the MSRV build, `scripts/check_*.py`, `cargo deny check licenses bans sources`) then `cargo llvm-cov -p vibeos-core --lib --features std --target $HOST --fail-under-lines 87`. No QEMU, no `setup.sh`. HTML report is a 7-day `core-coverage` artifact. |
 | `build (<arch>)` | push / PR, beside `check` | Limine, QEMU/nasm/xorriso, kernel clippy `-D warnings` once for each other feature set an ISO is built with (`kernel_tests`, `vibefs_crash`, `panic_test` with `panic_exit`, `gp_test` with `panic_exit`) and once with `kernel_shell` (the default set runs in `check`); `make prebuilt`, uploaded as `prebuilt-<arch>` (1 day); the runner's CPU model to the job summary. Green `main` uploads `vibeos.iso` (7 days). |
 | `tier (<arch>, <tier>)` | push / PR, `needs: [check, build]` | One job per row of the tier table above: QEMU and OVMF, `prebuilt-<arch>` unpacked, the runner's CPU model to the job summary, then `make -k -j <jobs> --output-sync=target VIBEOS_PREBUILT=1 <targets>` under TCG (`jobs` is 1 until ROADMAP §10.1's parallel QEMU runs land). Even after a failed step it writes a per-tier table and every harness retry to the job summary and uploads `build/results/` as `results-<arch>-<tier>`. |
 | `ticks` | PR, `needs: tier`, even after it fails | `scripts/check_ticks.py --base <PR base> --head <PR head> --run-commit $GITHUB_SHA --results <downloaded results-*> --summary $GITHUB_STEP_SUMMARY`: every box a commit of the pull request ticks pairs with a `Proves:` line, its proof exists at the head and is changed by the pull request or marked `(existing: ...)`, a ktest, utest, or marker proof passed in a results file of the head or the tested merge commit, no results file lists a retry, needs and closes rows hold, `Fails-before:` lines are present, and a bracketed proof passed on a scheduled run or `ci-history` record (read through `gh`, with `contents: read` and `actions: read`). The summary lists errors, `(existing: ...)` proofs, and notes. `make check` runs the pairing and diff rules bare against `origin/main` and skips them when that ref is missing, as in the `check` job's shallow checkout. |

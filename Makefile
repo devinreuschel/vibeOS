@@ -61,6 +61,10 @@ KERNEL_DEPS := $(KERNEL_SRCS) Cargo.toml crates/core/Cargo.toml build.rs linker.
 	scripts/gen_ksyms.py scripts/mkuserelf.py scripts/mkiso.sh \
 	user/hello.asm user/init.asm user/sh.asm user/tests.asm user/sys.inc \
 	.cargo/config.toml Cargo.lock
+# What mkiso.sh's /LICENSES/ notices are generated from (ROADMAP §10.9); the
+# crate graph comes from Cargo.lock, which the ELF already depends on.
+NOTICES_DEPS := LICENSE setup.sh scripts/gen_notices.py scripts/check_provenance.py \
+	$(wildcard third_party/limine/* third_party/limine/*/* third_party/crates/*/*)
 
 ifneq ($(VIBEOS_PREBUILT),1)
 LLVM_TOOL_DIR := $(shell rustc --print sysroot)/lib/rustlib/$(shell rustc -vV | sed -n 's/^host: //p')/bin
@@ -100,7 +104,7 @@ build/kernels/vibeos-$(1).elf: $(KERNEL_DEPS) $(PROFILE_STAMP)
 	python3 scripts/gen_ksyms.py --nm "$$(NM)" --check build/kernels/.vibeos-$(1)/vibeos build/kernels/vibeos-$(1).ksyms.rs
 	python3 scripts/check_kernel_fp.py --objdump "$$(OBJDUMP)" build/kernels/.vibeos-$(1)/vibeos
 	cp build/kernels/.vibeos-$(1)/vibeos $$@
-$(3): build/kernels/vibeos-$(1).elf $(INITRD) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py
+$(3): build/kernels/vibeos-$(1).elf $(INITRD) limine.conf $(LIMINE_BIN) scripts/mkiso.sh scripts/iso_disk_id.py $(NOTICES_DEPS)
 	LIMINE_DIR=$$(LIMINE_DIR) scripts/mkiso.sh $$< $(INITRD) $$@ build/iso_root_$(1)
 endif
 endef
@@ -249,6 +253,10 @@ run_py_tool = if command -v $(1) >/dev/null 2>&1; then \
 MSRV := $(shell sed -n 's/^rust-version = "\(.*\)"$$/\1/p' crates/core/Cargo.toml)
 MSRV_TOOLCHAIN ?= $(MSRV)
 
+# cargo-deny's version, which the check job in .github/workflows/ci.yml pins
+# (ROADMAP §10.9); it names the version in a missing-tool hint.
+CARGO_DENY_PIN := $(shell sed -n 's/^ *CARGO_DENY_VERSION: *//p' .github/workflows/ci.yml | head -n1)
+
 # Fast local / CI `check` job gate (T3). It lints the kernel with its default
 # features and vibeos-core's no_std build for the kernel target, so kernel-target
 # code compiles before every commit; CI's ladder lints each other ISO feature
@@ -281,6 +289,12 @@ check:
 	    fi; \
 	done
 	python3 scripts/doc_refs.py
+	@if command -v cargo-deny >/dev/null 2>&1; then \
+	    set -x; \
+	    cargo deny --workspace check licenses bans sources; \
+	else \
+	    $(call missing_tool,cargo-deny,cargo deny check licenses bans sources,cargo install cargo-deny --locked --version $(CARGO_DENY_PIN)); \
+	fi
 	@echo "check: ok"
 
 # ruff and mypy over tests/ and scripts/ (DX1, F147).

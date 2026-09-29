@@ -1,4 +1,6 @@
 use super::*;
+use crate::block::blockdev::testing as blk_testing;
+use crate::block::blockdev::{DiskSeq, Registry};
 use crate::fs::{O_CREAT, O_RDWR, SEEK_SET, Vfs};
 use std::boxed::Box;
 use std::sync::Mutex;
@@ -135,37 +137,135 @@ fn devfs_char_nodes() {
     v.close(z).unwrap();
 }
 
+/// A hardware source that has 5 bytes, from `RDRAND`.
+fn five_bytes(buf: &mut [u8]) -> (usize, Option<crate::entropy::Source>) {
+    let n = buf.len().min(5);
+    for (i, b) in buf.iter_mut().take(n).enumerate() {
+        *b = 0xE0 + i as u8;
+    }
+    (n, Some(crate::entropy::Source::RdRand))
+}
+
+/// Hardware sources with no byte.
+fn no_bytes(_buf: &mut [u8]) -> (usize, Option<crate::entropy::Source>) {
+    (0, None)
+}
+
+/// ROADMAP §10.12 (F134): `/dev/random` and `/dev/urandom` return only what
+/// the hardware hook supplies: a short count, or `Again` for none.
 #[test]
-fn devfs_random_does_not_block() {
+fn devfs_random_hardware_only() {
+    use crate::entropy::{Source, last_source, test_hook};
     let (mut v, _k) = boot();
-    v.now = 0x1234_5678;
-    let fid = v.open_path(None, "/dev/random", O_RDWR, 0).unwrap();
-    let mut a = [0u8; 16];
-    let mut b = [0u8; 16];
-    assert_eq!(v.read(&fid, &mut a).unwrap(), 16);
-    assert_eq!(v.read(&fid, &mut b).unwrap(), 16);
-    assert_ne!(a, b);
-    v.close(fid).unwrap();
-    let u = v.open_path(None, "/dev/urandom", O_RDWR, 0).unwrap();
-    assert_eq!(v.read(&u, &mut a).unwrap(), 16);
-    v.close(u).unwrap();
+    for path in ["/dev/random", "/dev/urandom"] {
+        let fid = v.open_path(None, path, O_RDWR, 0).unwrap();
+        {
+            let _g = test_hook(Some(five_bytes));
+            let mut buf = [0u8; 64];
+            assert_eq!(v.read(&fid, &mut buf), Ok(5), "{path}");
+            assert_eq!(buf[..5], [0xE0, 0xE1, 0xE2, 0xE3, 0xE4], "{path}");
+            assert!(buf[5..].iter().all(|&b| b == 0), "{path}");
+            assert_eq!(last_source(), Some(Source::RdRand), "{path}");
+            assert_eq!(v.read(&fid, &mut []), Ok(0), "{path}");
+        }
+        {
+            let _g = test_hook(Some(no_bytes));
+            let mut buf = [0u8; 64];
+            assert_eq!(v.read(&fid, &mut buf), Err(FsError::Again), "{path}");
+            assert_eq!(last_source(), None, "{path}");
+            assert_eq!(v.read(&fid, &mut []), Ok(0), "{path}");
+        }
+        {
+            // No hook at all, as on the host and before `entropy_init`.
+            let _g = test_hook(None);
+            let mut buf = [0u8; 8];
+            assert_eq!(v.read(&fid, &mut buf), Err(FsError::Again), "{path}");
+        }
+        v.close(fid).unwrap();
+    }
+    // `fs_errno` maps `Again` to Linux's EAGAIN.
+    assert_eq!(FsError::Again.as_str(), "again");
+    assert_eq!(crate::syscall::EAGAIN, 11);
+}
+
+/// A registry of the fake disk `fake` (64 sectors) and its partition
+/// `fakep1` (sectors 8 to 23), and handles to both.
+fn fake_disk() -> (Registry, BlockRef, BlockRef) {
+    let seq = DiskSeq::new();
+    let mut reg = Registry::new();
+    let d = blk_testing::disk(&mut reg, &seq, b"fake", 64);
+    let p = blk_testing::part(&mut reg, &seq, &d, b"fakep1", 8, 16);
+    (reg, d, p)
 }
 
 #[test]
 fn devfs_block_names() {
     let (mut v, k) = boot();
-    k.fs.devfs_add_block(b"ram0", 256 * 512).unwrap();
-    k.fs.devfs_add_block(b"vda", 1024 * 512).unwrap();
-    k.fs.devfs_add_block(b"ram0p1", 32 * 512).unwrap();
+    let seq = DiskSeq::new();
+    let mut reg = Registry::new();
+    let ram0 = blk_testing::disk(&mut reg, &seq, b"ram0", 256);
+    let vda = blk_testing::disk(&mut reg, &seq, b"vda", 1024);
+    let p1 = blk_testing::part(&mut reg, &seq, &ram0, b"ram0p1", 80, 32);
+    for d in [&ram0, &vda, &p1] {
+        k.fs.devfs_add_block(d).unwrap();
+    }
     assert!(has_name(&mut v, "/dev", b"ram0"));
     assert!(has_name(&mut v, "/dev", b"vda"));
     assert!(has_name(&mut v, "/dev", b"ram0p1"));
     let s = v.stat(None, "/dev/ram0").unwrap();
     assert_eq!(s.kind, InodeKind::Blk);
     assert_eq!(s.size, 256 * 512);
-    let fid = v.open_path(None, "/dev/ram0", O_RDWR, 0).unwrap();
-    let mut buf = [0u8; 4];
-    assert_eq!(v.read(&fid, &mut buf).unwrap_err(), FsError::NotSupp);
+    assert_eq!(v.stat(None, "/dev/ram0p1").unwrap().size, 32 * 512);
+    // A second add of the same device keeps its one node.
+    let a = k.fs.devfs_add_block(&vda).unwrap();
+    assert_eq!(k.fs.devfs_add_block(&vda).unwrap(), a);
+}
+
+#[test]
+fn devfs_block_rw_through_blockref() {
+    let (mut v, k) = boot();
+    let (mut reg, d, p) = fake_disk();
+    k.fs.devfs_add_block(&d).unwrap();
+    k.fs.devfs_add_block(&p).unwrap();
+    assert_eq!(v.stat(None, "/dev/fakep1").unwrap().size, 16 * 512);
+    let mut disk = [0u8; 512];
+    d.read(8, &mut disk).unwrap();
+    let fid = v.open_path(None, "/dev/fakep1", O_RDWR, 0).unwrap();
+    let mut first = [0u8; 512];
+    assert_eq!(v.read(&fid, &mut first).unwrap(), 512);
+    assert_eq!(first, disk);
+    v.seek(&fid, 3, SEEK_SET).unwrap();
+    let mut five = [0u8; 5];
+    assert_eq!(v.read(&fid, &mut five).unwrap(), 5);
+    assert_eq!(five, disk[3..8]);
+    // A read across a block boundary and one crossing the end.
+    let mut mid = [0u8; 700];
+    v.seek(&fid, 300, SEEK_SET).unwrap();
+    assert_eq!(v.read(&fid, &mut mid).unwrap(), 700);
+    let mut two = [0u8; 1024];
+    d.read(8, &mut two).unwrap();
+    assert_eq!(mid[..], two[300..1000]);
+    v.seek(&fid, 16 * 512 - 10, SEEK_SET).unwrap();
+    assert_eq!(v.read(&fid, &mut mid).unwrap(), 10);
+    v.seek(&fid, 16 * 512, SEEK_SET).unwrap();
+    assert_eq!(v.read(&fid, &mut five).unwrap(), 0);
+    assert_eq!(v.write(&fid, b"x").unwrap_err(), FsError::NoSpace);
+    // Writes land in the disk at the partition's start.
+    v.seek(&fid, 0, SEEK_SET).unwrap();
+    assert_eq!(v.write(&fid, &[0xA5u8; 512]).unwrap(), 512);
+    d.read(8, &mut disk).unwrap();
+    assert_eq!(disk, [0xA5u8; 512]);
+    v.seek(&fid, 510, SEEK_SET).unwrap();
+    assert_eq!(v.write(&fid, b"\x55\xAA\x01\x02").unwrap(), 4);
+    d.read(8, &mut two).unwrap();
+    // The read-modify-write kept the bytes around the write.
+    assert_eq!(two[508..510], [0xA5, 0xA5]);
+    assert_eq!(two[510..514], [0x55, 0xAA, 0x01, 0x02]);
+    assert_eq!(usize::from(two[514]), (9 * 512 + 2) % 251);
+    // After unpublish and kill, I/O through the node is EIO.
+    blk_testing::remove(&mut reg, &p);
+    v.seek(&fid, 0, SEEK_SET).unwrap();
+    assert_eq!(v.read(&fid, &mut five).unwrap_err(), FsError::Io);
     v.close(fid).unwrap();
 }
 

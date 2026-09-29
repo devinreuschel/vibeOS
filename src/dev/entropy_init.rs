@@ -1,6 +1,7 @@
-//! virtio-rng, then RDRAND, then kernfs xorshift. S1.
-
-use core::sync::atomic::{AtomicBool, Ordering};
+//! `/dev/random`'s hardware fill: virtio-rng, then RDRAND, and nothing
+//! else until ROADMAP §13.10's CSPRNG. A read gets a short count when they
+//! supply less than it asks for, and `EAGAIN` when they supply none
+//! (ROADMAP §10.12, F134). S1.
 
 use vibeos::entropy::{self, Source};
 use vibeos::log::Level;
@@ -8,16 +9,19 @@ use vibeos::log::Level;
 use crate::virtio_init;
 use crate::x86;
 
-static WARNED: AtomicBool = AtomicBool::new(false);
-
-fn hw_fill(buf: &mut [u8]) -> (usize, Source) {
+fn hw_fill(buf: &mut [u8]) -> (usize, Option<Source>) {
     let mut i = 0usize;
-    let mut src = Source::XorShift;
+    let mut src = None;
     if virtio_init::rng_bound() {
         let n = virtio_init::rng_take(&mut buf[i..]);
         if n > 0 {
             i += n;
-            src = Source::VirtioRng;
+            src = Some(Source::VirtioRng);
+        }
+        // Fewer bytes than asked, 0 included, means the pool is empty:
+        // ask for the next refill, which `rng_request` skips while one is
+        // in flight, so an empty completion cannot stop refills (F121).
+        if n < buf.len() {
             refill();
         }
     }
@@ -31,34 +35,22 @@ fn hw_fill(buf: &mut [u8]) -> (usize, Source) {
             buf[i..i + n].copy_from_slice(&b[..n]);
             i += n;
         }
-        if src == Source::XorShift && i > 0 {
-            src = Source::RdRand;
+        if src.is_none() && i > 0 {
+            src = Some(Source::RdRand);
         }
     }
     (i, src)
 }
 
-fn warn_once() {
-    if WARNED.swap(true, Ordering::Relaxed) {
-        return;
-    }
-    crate::klog!(
-        Level::Warn,
-        "vibeOS: entropy: /dev/random using xorshift fallback"
-    );
-}
-
 pub fn init() {
     entropy::set_hw_fill(hw_fill);
-    entropy::set_warn(warn_once);
     if virtio_init::rng_bound() {
         refill();
     }
 }
 
-/// Queue the next virtio-rng buffer. A failure leaves the pool to drain
-/// into RDRAND or xorshift; it is counted and logged at most once a second
-/// (DESIGN §2.5).
+/// Queue the next virtio-rng buffer. A failure leaves reads to RDRAND
+/// alone; it is logged at most once a second (DESIGN §2.5).
 fn refill() {
     if let Err(e) = virtio_init::rng_request() {
         crate::klog_ratelimited!(

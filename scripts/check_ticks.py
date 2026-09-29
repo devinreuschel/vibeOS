@@ -57,6 +57,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from scripts import gatelib  # noqa: E402
+from tests.harness import registry  # noqa: E402
 
 ROADMAP_PATH = "docs/ROADMAP.md"
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -84,6 +85,8 @@ HOST_TEST_DIRS = ("src/", "crates/", "tests/hostlib/")
 # Where `marker!` calls and the marker constants live.
 MARKER_DIRS = ("src/", "crates/core/src/")
 MARKER_CONSTS = "crates/core/src/marker.rs"
+# The marker registry: a row's text, and a contract row's name (ROADMAP §10.2).
+MARKER_REGISTRY = "tests/contract/markers.toml"
 PY_DIRS = ("tests/harness/", "scripts/")
 HARNESS_DIR = "tests/harness/"
 # Workflow file whose jobs a bracket's `make <target>` proof is looked up in.
@@ -432,7 +435,25 @@ def _resolve_marker(text: str, tree: Tree) -> list[Definition]:
         if m.group(2) == text:
             n = consts.count("\n", 0, m.start()) + 1
             out.append(Definition("marker", MARKER_CONSTS, n, n, text))
+    raw = tree.read(MARKER_REGISTRY) or ""
+    for row in _registry_rows(tree):
+        if re.fullmatch(registry.row_regex(row.text), text, re.S):
+            at = raw.find(f"text = {json.dumps(row.text, ensure_ascii=False)}")
+            n = raw.count("\n", 0, at) + 1 if at >= 0 else 0
+            out.append(Definition("marker", MARKER_REGISTRY, n, n, text))
     return out
+
+
+def _registry_rows(tree: Tree) -> tuple[registry.Row, ...]:
+    """The marker registry's rows at the tree, or none when it is missing or
+    malformed (`check_markers.py` reports that)."""
+    raw = tree.read(MARKER_REGISTRY)
+    if raw is None:
+        return ()
+    try:
+        return registry.parse_rows(raw, Path(MARKER_REGISTRY))
+    except registry.RegistryError:
+        return ()
 
 
 def _fstring_regex(node: ast.expr, hole: str) -> str | None:
@@ -451,11 +472,18 @@ def _fstring_regex(node: ast.expr, hole: str) -> str | None:
 
 
 def marker_labels(text: str, tree: Tree) -> list[re.Pattern[str]]:
-    """The C-RESULTS names of a marker proof: the labels of the harness's
+    """The C-RESULTS names of a marker proof: the names of the marker
+    registry's contract rows whose text matches `text` (each placeholder any
+    text), and the labels of the harness's
     `Marker("<needle>", "<label>", and_contains=(...))` entries under
     tests/harness/ (test files left out) whose needle and fragments all occur
     in `text`. The harness records a marker's label, never its text."""
-    out: list[re.Pattern[str]] = []
+    out: list[re.Pattern[str]] = [
+        re.compile(registry.row_regex(row.name))
+        for row in _registry_rows(tree)
+        if row.kind == "contract" and row.name is not None
+        and re.fullmatch(registry.row_regex(row.text), text, re.S)
+    ]
     for path in tree.grep("Marker", (HARNESS_DIR,)):
         if not path.endswith(".py") or path.rsplit("/", 1)[-1].startswith("test_"):
             continue

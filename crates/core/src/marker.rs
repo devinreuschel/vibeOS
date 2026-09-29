@@ -1,8 +1,10 @@
 //! Serial marker strings, DESIGN §2.6.
 //!
 //! Every boot line is `vibeOS: <subsystem>: <state>` (lowercase, no trailing
-//! punctuation). The e2e harness asserts these in order. Adding a marker
-//! means updating the harness contract in the same commit.
+//! punctuation). Each constant is the text of a row of
+//! `tests/contract/markers.toml`, the marker registry (ROADMAP §10.2), or its
+//! `_PREFIX` or `_SUFFIX` fragment; `scripts/check_markers.py` fails on one
+//! that differs. A new registered line adds its row in the same commit.
 
 pub const SERIAL_ONLINE: &str = "vibeOS: serial online";
 pub const LIMINE_OK: &str = "vibeOS: limine: rev 3 ok";
@@ -64,10 +66,6 @@ pub const IRQ_ENABLED: &str = "vibeOS: irq: enabled";
 pub const SMP_AP_ONLINE: &str = "vibeOS: smp: ap online";
 pub const SMP_DONE: &str = "vibeOS: smp: done";
 
-/// Retired Phase 1–4 stand-in. Kept as a spelling constant; boot no longer
-/// emits it. Trailing marker is [`SHELL_READY`] (DESIGN §3.3 / §8.3).
-pub const BOOT_DONE: &str = "vibeOS: boot: phase1 done";
-
 /// Phase 5 slice B. After `smp: done`. FB text, PS/2, and the mux are live;
 /// IRQ1 was unmasked after the handler.
 pub const CONSOLE_OK: &str = "vibeOS: console ok";
@@ -119,7 +117,6 @@ mod tests {
             IRQ_ENABLED,
             SMP_AP_ONLINE,
             SMP_DONE,
-            BOOT_DONE,
             CONSOLE_OK,
             PCI_PREFIX,
             BLOCK_PREFIX,
@@ -155,7 +152,6 @@ mod tests {
         assert_eq!(IRQ_ENABLED, "vibeOS: irq: enabled");
         assert_eq!(SMP_AP_ONLINE, "vibeOS: smp: ap online");
         assert_eq!(SMP_DONE, "vibeOS: smp: done");
-        assert_eq!(BOOT_DONE, "vibeOS: boot: phase1 done");
         assert_eq!(CONSOLE_OK, "vibeOS: console ok");
         assert_eq!(PCI_PREFIX, "vibeOS: pci: ");
         assert_eq!(PCI_DEVICES_SUFFIX, " devices");
