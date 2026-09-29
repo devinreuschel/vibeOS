@@ -58,13 +58,6 @@ impl CallSlot {
 
 static SHOOT: [Slot; MAX_IPI_CPUS] = [const { Slot::empty() }; MAX_IPI_CPUS];
 static CALL: CallSlot = CallSlot::empty();
-#[cfg_attr(
-    not(feature = "kernel_tests"),
-    expect(
-        dead_code,
-        reason = "ROADMAP §4.9 0xFB call-function; only the in-guest tests send one yet"
-    )
-)]
 static CALL_BUSY: AtomicBool = AtomicBool::new(false);
 pub(super) static RESCHED_COUNT: AtomicU64 = AtomicU64::new(0);
 pub(super) static SHOOT_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -410,13 +403,6 @@ pub fn halt_others() {
 /// to reclaim the single CALL slot (`wait` is the public completion
 /// contract). IRQ-off for publish → IPI → ack → clear; inbound still
 /// polls `service_incoming`.
-#[cfg_attr(
-    not(feature = "kernel_tests"),
-    expect(
-        dead_code,
-        reason = "ROADMAP §4.9 0xFB call-function; only the in-guest tests send one yet"
-    )
-)]
 pub fn call_mask(mask: u64, f: fn(*mut ()), arg: *mut (), _wait: bool) {
     let me = my_index() as u32;
     let waiters = waiter_mask(mask & per_cpu_init::online_mask(), me);

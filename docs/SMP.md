@@ -100,10 +100,11 @@ reads: the lowest 4 KiB page above frame 0 and below 1 MiB that the map marks us
 is its page number; vectors `0xA0` to `0xBF` are reserved, and no usable page lies there on a PC.
 With no such page every AP is skipped with `vibeOS: smp: no trampoline page`, as the CR3 check below
 skips them. Under SeaBIOS the pinned Limine types `0x1000`–`0x52000` bootloader-reclaimable and the
-page is `0x52000`; under OVMF `0x0`–`0x87000` is usable and it is `0x1000`. Linux likewise reserves
-its real-mode trampoline from memory below 1 MiB at boot. Rule; not yet enforced: `pmm_init` and
-`smp` each define `0x8000`, and `smp_init` copies the blob there without reading the memory map,
-which types that page bootloader-reclaimable under SeaBIOS (ROADMAP §10.6).
+page is `0x52000`; under OVMF the first usable page is `0x1000` (the edk2 build `make test-e2e-uefi`
+boots types `0x0`–`0x1000` bootloader-reclaimable and `0x1000`–`0xA0000` usable; older builds type
+`0x0`–`0x87000` usable). Linux likewise reserves its real-mode trampoline from memory below 1 MiB at
+boot. `vibeos::pmm::choose_trampoline_page` makes the choice, and `smp_init` prints
+`vibeOS: smp: trampoline page <addr>` before the first AP starts.
 
 The trampoline is `src/arch/x86_64/trampoline.S`, assembled with `global_asm!` into `.trampoline` (inside
 `__rodata_start..__rodata_end` so the kernel map covers the copy source) and copied to the chosen
@@ -113,9 +114,13 @@ point. On the way it clears `CR0.CD` and `CR0.NW` (then `wbinvd`), sets `CR4.PAE
 sets `CR0.PG` and `CR0.WP`. The blob runs at whichever page boot chose, from `0x1000` to `0x9F000`:
 its real-mode code addresses itself through CS (DS = CS, offsets from the blob's start), and
 `smp_init` patches its absolute operands (the protected-mode and long-mode entry addresses, the GDT
-base, and the parameter block's address) from the page's base when it copies it. Rule; not yet
-enforced: the blob sets DS to 0 and takes absolute addresses from `.set BASE, 0x8000`, which hold
-only below 64 KiB (ROADMAP §10.6).
+base, and the parameter block's address) from the page's base when it copies it. Each is assembled
+as if the blob sat at 0, and `.org` pins it at an offset `vibeos::smp::PATCH_SITES` lists;
+`vibeos::smp::patch_blob` adds the base to a copy of the blob, and `smp_init` asserts at boot that
+the blob's exported patch labels sit at those offsets. The jump out of real mode is the 32-bit
+offset form (`66 EA imm32 imm16`), since a 16-bit offset cannot reach a page above 64 KiB, and long
+mode loads the stack and entry RIP-relative. INIT leaves SP at 0, so nothing pushes before long
+mode.
 
 The blob loads CR3 with a 32-bit `mov`, so the kernel PML4 must lie below 4 GiB.
 `smp_init::start_one` checks it and, when the PML4 is higher, skips the AP with
@@ -141,8 +146,9 @@ Two correctness requirements:
   compiler move the copy past the write that starts the AP, and the AP then reads uninitialized
   parameters. This one is invisible in debug builds.
 - The trampoline page must be identity mapped and executable. The AP starts in real mode and touches
-  the page's physical address directly, so this cannot go through the physmap. Reserve the frame in
-  the PMM forever, even after all APs are up.
+  the page's physical address directly, so this cannot go through the physmap. The BSP writes the
+  blob and its parameters only through the physmap. Reserve the frame in the PMM forever, even after
+  all APs are up.
 
 ## 7.4 AP bring-up sequence
 
@@ -289,7 +295,7 @@ as `CR4.TSD` or `SCTLR_EL1.UCT`, is a row of §11.4's table instead.
 | both | `irq_nest` | `Tcb.irq_nest`, swapped with `PerCpu.irq_nest` | `switch_now` | switched |
 | x86_64 | user GPRs, RIP, RSP, RFLAGS, CS, SS, and the original syscall number | the thread's user frame at the top of `Tcb.stack` ([section 5.10](INTERRUPTS.md#510-privilege-transitions)), saved by every entry from ring 3 | the RSP0 switch, which gives each thread its own entry stack | switched: the syscall entry and every generated stub for a CS.RPL 3 frame save all 21 words of `UserFrame` at the top of the thread's kernel stack, and every return to ring 3 restores from it; `thread_init::spawn_user` writes a new thread's |
 | x86_64 | x87, SSE, MXCSR | `Tcb.fpu`, a 512-byte FXSAVE image | the FP binding below: `fxsave64` at the switch away from a thread whose state is live, `fxrstor64` in the return to ring 3 when the registers hold another thread's state | switched, by the binding as built: `PerCpu.fp_owner` and `Tcb.fp_cpu`, whose transitions are `vibeos::fpu`. `syscall_init::switch_fpu` in `on_switch` saves a live state with `fp_save` and loads nothing; `vibeos_fp_user_return` runs with IF=0 after the syscall exit's `cli`, in `idt::exit_to_user` after a `cli`, and in a new thread's first return, which enters the syscall exit after its `cli`, and loads with `fp_load` when the registers hold another thread's state. The syscall entry and exit neither save nor restore it. A new TCB, and one `fill_tcb` reuses, starts with `fp_cpu` empty, and `thread_init::fp_invalidate` empties it for a write to `Tcb.fpu`. `fork` gives the child `fpu_template()`, not the parent's image, and `execve` keeps the old image's registers (ROADMAP §10.6, F069). The template is captured after `fninit`, which resets only the x87 control, status, and tag words, so MXCSR and the XMM and ST registers hold whatever the loader left (ROADMAP §10.6, F129). FXSAVE covers no XSAVE state; `CR4.OSXSAVE`, `CR4.PKE`, and `EFER.FFXSR` are assumed clear and never asserted (ROADMAP §11.1, F130). |
-| x86_64 | RSP0 | TSS.RSP0 and `PerCpu.kernel_rsp0`: the top of `Tcb.stack`, or `fallback_rsp0` for the bootstrap thread | `set_rsp0_for` in `on_switch` | switched |
+| x86_64 | RSP0 | TSS.RSP0 and `PerCpu.kernel_rsp0`: the top of `Tcb.stack`, which every thread has, the bootstrap thread included (`thread_init::init_bootstrap`); `fallback_rsp0` only for a thread without one | `set_rsp0_for` in `on_switch` | switched |
 | x86_64 | CR3 | `Tcb.as_cr3` (0 means the kernel PML4) | `switch_cr3_for` in `on_switch`, skipped when unchanged | switched; no PCID (ROADMAP §18.3 adds it with §7.9's flush generation) |
 | x86_64 | FS_BASE (user TLS) | not saved | nothing | not switched. `syscall_init::first_return` (from `Proc.fs_base`) and `execve` write it; `force_kernel`'s `mov fs` zeroes it on every exit or kill; `fork` copies the live MSR, so a child can inherit another process's base (ROADMAP §11.6, F022). |
 | x86_64 | user GS base | not saved; always 0 | nothing | holds while no `ARCH_SET_GS` or FSGSBASE exists (ROADMAP §18.3); from then on it is per thread, and while the thread is in the kernel it is in `KERNEL_GS_BASE` whichever vector it entered by, IST vectors included ([section 5.10](INTERRUPTS.md#510-privilege-transitions) rule 3), where the switch away reads it |

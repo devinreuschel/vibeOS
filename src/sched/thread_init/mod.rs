@@ -19,7 +19,6 @@ use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::limits::PID_MAX;
 use vibeos::lock::RANK_SCHED;
 use vibeos::per_cpu::PerCpu;
-use vibeos::proc::INIT_PID;
 use vibeos::proc::pid::{IdIndex, PidAlloc};
 use vibeos::sched::{SWEEP_TICKS, TimeoutQueue, effective_deadline, enqueue_runnable, take_next};
 use vibeos::syscall::UserFrame;
@@ -35,6 +34,12 @@ use crate::per_cpu_init;
 use crate::sync_init::{self, SleepCtx, SpinMutex};
 use crate::time_init;
 use crate::x86::InterruptGuard;
+
+mod boot;
+#[cfg(feature = "kernel_tests")]
+pub(crate) use boot::BOOT_STACK_PAGES;
+pub(crate) use boot::bootstrap_stack;
+pub use boot::init_bootstrap;
 
 // The syscall layer's hooks (DESIGN §1.2), which `syscall_init::init_bsp`
 // sets before the scheduler runs a second thread.
@@ -792,66 +797,6 @@ pub fn halt_if_idle() {
             core::arch::asm!("sti; hlt", options(nomem, nostack));
         }
     }
-}
-
-/// Wrap the current boot context as thread 0. After [`per_cpu_init::init_bsp`].
-///
-/// # Safety
-/// Single-CPU, `GS_BASE` live, not already initialized.
-pub unsafe fn init_bootstrap() {
-    // Before `irq: enabled`, where DESIGN §4.4 allows a boot-time panic.
-    let tcb = TryBox::try_new(Tcb {
-        id: ThreadId::BOOTSTRAP,
-        name: "bootstrap",
-        state: ThreadState::Running,
-        on_cpu: AtomicBool::new(true),
-        stack: None,
-        context: CpuContext::empty(),
-        entry: bootstrap_entry,
-        next: None,
-        prev: None,
-        affinity: CpuAffinity::Pinned(0),
-        cpu: 0,
-        irq_nest: 0,
-        switches: 0,
-        run_tsc: 0,
-        wait_outcome: WaitOutcome::Woken,
-        as_cr3: 0,
-        fpu: fpu_template(),
-        fp_cpu: None,
-        syscall_count: 0,
-        pid: 0,
-        no_reclaim: AtomicU32::new(0),
-    });
-    let Ok(mut tcb) = tcb else {
-        crate::boot::halt_with("vibeOS: thread: no memory for the bootstrap TCB");
-    };
-    let ptr = &mut *tcb as *mut Tcb;
-    {
-        let mut s = SCHED.lock();
-        assert!(s.slots[0].is_none(), "bootstrap twice");
-        s.slots[0] = Some(tcb);
-        // Tid 0 is the bootstrap's, which `PidAlloc` never hands out.
-        s.bind(ThreadId::BOOTSTRAP, 0);
-        // Init stays pid 1: held before any other thread takes an id, and
-        // taken over by init's process (`proc_init::alloc_pid`).
-        assert!(s.hold_id(INIT_PID), "pid: init's hold");
-    }
-    crate::ipi_init::set_slot_tid_hook(tid_of_slot);
-    per_cpu_init::with_current(|cpu| {
-        per_cpu_init::set_current_thread(cpu, ptr);
-        cpu.idle = ptr;
-        cpu.idle_id = ThreadId::BOOTSTRAP;
-        cpu.ready_head = core::ptr::null_mut();
-    });
-}
-
-#[allow(
-    clippy::panic,
-    reason = "invariant: the bootstrap TCB is adopted Running and never started, so nothing enters its `entry` (`thread_init::init_bootstrap`)"
-)]
-fn bootstrap_entry() {
-    panic!("bootstrap entry called");
 }
 
 pub fn spawn(name: &'static str, entry: fn()) -> Result<ThreadHandle, SpawnError> {

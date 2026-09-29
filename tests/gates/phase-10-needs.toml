@@ -988,6 +988,14 @@ needs = [
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (extra, survey)"
 
+# L1404
+[[box]]
+key = "boot runs on a guarded"
+needs = [
+  "one ring-3 entry model: `/hello`",  # L1402
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
+
 # L1416
 [[box]]
 key = "tracepoints at the boundaries that"

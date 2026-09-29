@@ -834,6 +834,71 @@ pub(crate) mod fail_after {
     }
 }
 
+/// `kernel_va0_faults`' probe result: 0 none yet, 1 `#PF` at CR2 0 on a
+/// not-present supervisor read, 2 the read did not fault, 3 any other
+/// fault. The CPU that ran it is in the upper 32 bits.
+static VA0_RESULT: AtomicU64 = AtomicU64::new(0);
+
+/// Read VA 0 under `catch_fault` with an asm load (a Rust null
+/// dereference is UB) and classify the result.
+fn va0_probe() -> u64 {
+    let fault = catch_fault(|| {
+        // SAFETY: the load reads VA 0, which the identity teardown leaves
+        // unmapped, and `catch_fault` recovers from the #PF it raises; the
+        // asm writes only its scratch register; established here.
+        unsafe {
+            core::arch::asm!(
+                "mov {tmp}, qword ptr [{va}]",
+                va = in(reg) 0u64,
+                tmp = out(reg) _,
+                options(nostack, readonly, preserves_flags)
+            );
+        }
+    });
+    match fault {
+        None => 2,
+        // Error code: not present (bit 0), read (bit 1), supervisor (bit 2).
+        Some(f) if f.cr2 == 0 && f.error & 0x7 == 0 => 1,
+        Some(_) => 3,
+    }
+}
+
+fn va0_entry() {
+    let cpu = u64::from(per_cpu_init::current().cpu_id);
+    // Release: publishes the result to `kernel_va0_faults`.
+    VA0_RESULT.store(cpu << 32 | va0_probe(), Ordering::Release);
+}
+
+/// ROADMAP §10.6: after `smp: done` the low identity window is gone, so a
+/// kernel read of VA 0 faults on every online CPU. `catch_fault`'s one
+/// jump buffer serves one CPU at a time, so the CPUs probe in turn.
+pub(crate) fn kernel_va0_faults() -> Outcome {
+    let me = per_cpu_init::current().cpu_id;
+    let online = per_cpu_init::online_mask();
+    for cpu in (0..64u32).filter(|c| online & (1u64 << c) != 0) {
+        let r = if cpu == me {
+            u64::from(cpu) << 32 | va0_probe()
+        } else {
+            VA0_RESULT.store(0, Ordering::Relaxed);
+            spawn_thread_on("va0", va0_entry, cpu);
+            if !spin_until_ns(|| VA0_RESULT.load(Ordering::Acquire) != 0, 2_000_000_000) {
+                return crate::fail_fmt!("cpu {cpu}: probe did not run");
+            }
+            VA0_RESULT.load(Ordering::Acquire)
+        };
+        let (ran, what) = ((r >> 32) as u32, r & 0xFFFF_FFFF);
+        if ran != cpu {
+            return crate::fail_fmt!("cpu {cpu}: probe ran on cpu {ran}");
+        }
+        match what {
+            1 => {}
+            2 => return crate::fail_fmt!("cpu {cpu}: a kernel read of VA 0 did not fault"),
+            _ => return crate::fail_fmt!("cpu {cpu}: VA 0 read took a fault other than #PF cr2=0"),
+        }
+    }
+    Outcome::Ok
+}
+
 /// This subsystem's in-guest tests, in run order; `crate::ktest::GROUPS`
 /// runs them (DESIGN §8.2).
 pub(crate) const TESTS: &[Test] = &[
@@ -854,4 +919,5 @@ pub(crate) const TESTS: &[Test] = &[
     test("frames_none_leaked", frames_none_leaked),
     test("current_mapper_holds_pt", current_mapper_holds_pt),
     test("vmap_32_frames_unmapped", vmap_32_frames_unmapped),
+    test("kernel_va0_faults", kernel_va0_faults),
 ];

@@ -1,6 +1,8 @@
 //! AP trampoline install and bring-up. ROADMAP §4.4–4.5, DESIGN §7.3–7.4.
 //!
 //! One AP at a time: they share the trampoline page and its param block.
+//! The page is the one `boot::capture` chose from the memory map (DESIGN
+//! §7.3); the BSP writes it only through the physmap, with
 //! `write_volatile` + `compiler_fence(SeqCst)` before SIPI.
 
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -11,10 +13,11 @@ use vibeos::kalloc::TryVec;
 use vibeos::kva::DEFAULT_STACK_PAGES;
 use vibeos::log::trace::{ClockInfo, WARP_MAX_ITERS, WARP_MS, WarpLine};
 use vibeos::marker;
+use vibeos::paging::HHDM_BASE;
 use vibeos::per_cpu::PerCpu;
 use vibeos::smp::{
-    INIT_WAIT_MS, PARAM_CR3, PARAM_ENTRY, PARAM_IDT, PARAM_OFF, PARAM_STACK, READY_TIMEOUT_MS,
-    SIPI_VECTOR, SIPI_WAIT_MS, TRAMPOLINE_PHYS, blob_fits, pack_idtr,
+    INIT_WAIT_MS, PARAM_CR3, PARAM_ENTRY, PARAM_IDT, PARAM_OFF, PARAM_STACK, PATCH_SITES,
+    READY_TIMEOUT_MS, SIPI_WAIT_MS, blob_fits, pack_idtr, patch_blob, sipi_vector,
 };
 use vibeos::thread::ThreadId;
 
@@ -34,6 +37,11 @@ use crate::x86;
 unsafe extern "C" {
     static __trampoline_start: u8;
     static __trampoline_end: u8;
+    // `trampoline.S`'s patch labels, in `PATCH_SITES` order.
+    static vibeos_tramp_patch_pm32: u8;
+    static vibeos_tramp_patch_cr3: u8;
+    static vibeos_tramp_patch_lm64: u8;
+    static vibeos_tramp_patch_gdt: u8;
 }
 
 struct Starting {
@@ -74,64 +82,100 @@ pub(super) struct ApAlloc {
     published: bool,
 }
 
-pub(super) fn tramp_page() -> *mut u8 {
-    TRAMPOLINE_PHYS as *mut u8
+/// The trampoline page `page`'s physmap address, through which the BSP
+/// writes it (the AP reaches it at its identity address).
+pub(super) fn tramp_va(page: u64) -> *mut u8 {
+    HHDM_BASE.wrapping_add(page) as *mut u8
 }
 
-/// Store `val` at byte `off` of the trampoline page.
+/// Store `val` at byte `off` of trampoline page `page`.
 ///
 /// # Safety
-/// `off + 8` is at most the page size, and no AP runs on the trampoline
-/// page: `start_one` starts one AP at a time and writes the page only
-/// before that AP's INIT.
-unsafe fn write_u64(off: usize, val: u64) {
-    // SAFETY: the low identity window maps the trampoline page writable at
-    // its physical address (`mm::paging_init::install`), the buddy never
-    // hands it out (invariant I15), and this fn's `# Safety` contract keeps
-    // the store inside it with no AP reading it; established here.
+/// `page` is `BootInfo.trampoline_page`, `off + 8` is at most the page
+/// size, and no AP runs on the trampoline page: `start_one` starts one AP
+/// at a time and writes the page only before that AP's INIT.
+unsafe fn write_u64(page: u64, off: usize, val: u64) {
+    // SAFETY: the physmap maps the trampoline page writable (invariant I14,
+    // established at `mm::paging_init::install`: the page is usable RAM
+    // below 1 MiB), the buddy never hands it out (invariant I15), and this
+    // fn's `# Safety` contract keeps the store inside it with no AP reading
+    // it; established here.
     unsafe {
-        tramp_page().add(off).cast::<u64>().write_volatile(val);
+        tramp_va(page).add(off).cast::<u64>().write_volatile(val);
     }
 }
 
-fn install_blob() {
+/// Whether `trampoline.S`'s exported patch labels sit at `PATCH_SITES`.
+fn patch_labels_match() -> bool {
+    let start = core::ptr::addr_of!(__trampoline_start) as usize;
+    let labels = [
+        core::ptr::addr_of!(vibeos_tramp_patch_pm32) as usize,
+        core::ptr::addr_of!(vibeos_tramp_patch_cr3) as usize,
+        core::ptr::addr_of!(vibeos_tramp_patch_lm64) as usize,
+        core::ptr::addr_of!(vibeos_tramp_patch_gdt) as usize,
+    ];
+    labels.len() == PATCH_SITES.len()
+        && labels
+            .iter()
+            .zip(PATCH_SITES)
+            .all(|(&l, &at)| l.wrapping_sub(start) == at)
+}
+
+/// Copy the blob into a local buffer, rebase it onto `page`
+/// (`vibeos::smp::patch_blob`), and write it to the page through the
+/// physmap. False when the blob cannot be rebased there.
+fn install_blob(page: u64) -> bool {
+    // Kernel invariant: `.org` pins each patched operand in `trampoline.S`
+    // at its `PATCH_SITES` offset.
+    assert!(
+        patch_labels_match(),
+        "smp: trampoline patch labels differ from PATCH_SITES"
+    );
     let src = core::ptr::addr_of!(__trampoline_start);
     // SAFETY: both symbols bound the one `.trampoline` section the linker
     // script places in the kernel image, end after start
     // (`smp::smp_init::__trampoline_start`).
     let n = unsafe { core::ptr::addr_of!(__trampoline_end).offset_from(src) as usize };
     let n = if blob_fits(n) { n } else { PARAM_OFF };
-    let dst = tramp_page();
-    let mut i = 0;
-    while i < n {
-        // SAFETY: `i < n` stays inside the blob
-        // (`smp::smp_init::__trampoline_start`) and below `PARAM_OFF`, inside
-        // the trampoline page, which the low identity window maps writable
-        // (`mm::paging_init::install`) and the buddy never hands out
-        // (invariant I15); `init` runs before any AP starts.
-        unsafe { dst.add(i).write_volatile(src.add(i).read()) };
-        i += 1;
+    let mut blob = [0u8; PARAM_OFF];
+    for (i, b) in blob.iter_mut().enumerate().take(n) {
+        // SAFETY: `i < n` stays inside the blob, which the kernel map covers
+        // (`smp::smp_init::__trampoline_start`); established here.
+        *b = unsafe { src.add(i).read() };
     }
+    let Some(blob) = blob.get_mut(..n) else {
+        return false;
+    };
+    if patch_blob(blob, page).is_err() {
+        return false;
+    }
+    let dst = tramp_va(page);
+    for (i, &b) in blob.iter().enumerate() {
+        // SAFETY: `i < n <= PARAM_OFF`, inside trampoline page `page`,
+        // which the physmap maps writable (invariant I14, established at
+        // `mm::paging_init::install`) and the buddy never hands out
+        // (invariant I15); `init` runs before any AP starts.
+        unsafe { dst.add(i).write_volatile(b) };
+    }
+    true
 }
 
-fn patch_params(cr3: u64, stack_top: u64, entry: u64, idt_limit: u16, idt_base: u64) {
-    // SAFETY: `write_u64`'s contract; each `PARAM_*` offset plus 8 lies
-    // inside the page, and `start_one` patches before this AP's INIT with
-    // no other AP starting (`smp::smp_init::start_one`).
+fn patch_params(page: u64, cr3: u64, stack_top: u64, entry: u64, idt_limit: u16, idt_base: u64) {
+    // SAFETY: `write_u64`'s contract; `page` is the trampoline page, each
+    // `PARAM_*` offset plus 8 lies inside it, and `start_one` patches before
+    // this AP's INIT with no other AP starting (`smp::smp_init::start_one`).
     unsafe {
-        write_u64(PARAM_CR3, cr3);
-        write_u64(PARAM_STACK, stack_top);
-        write_u64(PARAM_ENTRY, entry);
+        write_u64(page, PARAM_CR3, cr3);
+        write_u64(page, PARAM_STACK, stack_top);
+        write_u64(page, PARAM_ENTRY, entry);
     }
     let packed = pack_idtr(idt_limit, idt_base);
-    let mut i = 0;
-    while i < packed.len() {
+    for (i, &b) in packed.iter().enumerate() {
         // SAFETY: as for `write_u64`: `PARAM_IDT + i` is below
-        // `PARAM_IDT + PARAM_IDT_LEN`, inside the trampoline page that the
-        // low identity window maps (`mm::paging_init::install`), before the
-        // AP's INIT (`smp::smp_init::start_one`).
-        unsafe { tramp_page().add(PARAM_IDT + i).write_volatile(packed[i]) };
-        i += 1;
+        // `PARAM_IDT + PARAM_IDT_LEN`, inside the trampoline page, which the
+        // physmap maps writable (invariant I14), before the AP's INIT
+        // (`smp::smp_init::start_one`).
+        unsafe { tramp_va(page).add(PARAM_IDT + i).write_volatile(b) };
     }
 }
 
@@ -322,9 +366,9 @@ fn report_tsc_warp() {
     });
 }
 
-/// Start the AP `a` describes and wait for it. Every failure prints its
-/// line and frees what `a` holds.
-fn start_one(a: ApAlloc) {
+/// Start the AP `a` describes from trampoline page `page` and wait for it.
+/// Every failure prints its line and frees what `a` holds.
+fn start_one(a: ApAlloc, page: u64) {
     let cpu_id = a.cpu_id;
     let apic_id = a.apic_id;
     let cr3 = x86::read_cr3();
@@ -374,7 +418,7 @@ fn start_one(a: ApAlloc) {
     });
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
 
-    patch_params(cr3, stack_top, entry, idt_limit, idt_base);
+    patch_params(page, cr3, stack_top, entry, idt_limit, idt_base);
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
     x86::mfence();
 
@@ -384,17 +428,20 @@ fn start_one(a: ApAlloc) {
         return;
     }
     time_init::busy_wait_ms(INIT_WAIT_MS);
+    // `init` checked the page with `install_blob`, which `patch_blob`
+    // refuses for any page `sipi_vector` does.
+    let vector = sipi_vector(page).unwrap_or(0);
     #[expect(
         clippy::let_underscore_must_use,
         reason = "DESIGN §2.5 bounded retry: the second SIPI retries the first, and wait_ready gives up after READY_TIMEOUT_MS with the smp: apic N timed out line and frees the AP"
     )]
-    let _ = apic_init::send_ipi(apic_id, SIPI_VECTOR, IpiMode::Sipi);
+    let _ = apic_init::send_ipi(apic_id, vector, IpiMode::Sipi);
     time_init::busy_wait_ms(SIPI_WAIT_MS);
     #[expect(
         clippy::let_underscore_must_use,
         reason = "DESIGN §2.5 bounded retry: the second SIPI retries the first, and wait_ready gives up after READY_TIMEOUT_MS with the smp: apic N timed out line and frees the AP"
     )]
-    let _ = apic_init::send_ipi(apic_id, SIPI_VECTOR, IpiMode::Sipi);
+    let _ = apic_init::send_ipi(apic_id, vector, IpiMode::Sipi);
 
     tsc_warp_source();
     if !wait_ready(cpu_id) {
@@ -462,27 +509,60 @@ extern "C" fn ap_entry() -> ! {
     crate::sched_init::idle_loop();
 }
 
-/// Bring up every enabled MADT CPU except the BSP. Emits `smp: done`.
+/// Bring up every enabled MADT CPU except the BSP from the trampoline page
+/// `boot::capture` chose, or none when it chose none. Emits `smp: done`.
 ///
 /// # Safety
 /// Scheduler live, LAPIC ready, trampoline page identity-mapped and
 /// excluded from the PMM.
 pub unsafe fn init() {
-    install_blob();
-    core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    let keep = match crate::boot::info().trampoline_page {
+        Some(page) if install_blob(page) => {
+            crate::marker!("vibeOS: smp: trampoline page {page:#x}");
+            core::sync::atomic::compiler_fence(Ordering::SeqCst);
+            start_aps(page);
+            Some(page)
+        }
+        _ => {
+            crate::marker!("vibeOS: smp: no trampoline page");
+            None
+        }
+    };
+    report_tsc_warp();
+    crate::marker!(marker::SMP_DONE);
+    // ROADMAP §10.6: the low identity window goes, all but the trampoline
+    // page. Kernel invariant: boot runs on the bootstrap thread's KVA stack
+    // (`thread_init::init_bootstrap`), outside the window.
+    let window = crate::paging_init::identity_window();
+    let rsp = x86::read_rsp();
+    assert!(
+        !window.contains(&rsp),
+        "smp: rsp {rsp:#x} in the identity window"
+    );
+    let stack = thread_init::bootstrap_stack().map(|(r, _, _)| r);
+    assert!(
+        stack
+            .as_ref()
+            .is_some_and(|r| r.end <= window.start || r.start >= window.end),
+        "smp: bootstrap stack {stack:#x?} not outside the identity window"
+    );
+    // SAFETY: every AP is up or abandoned (`start_aps` returned), nothing
+    // uses an identity address but the trampoline page, which `keep`
+    // keeps, and this CPU's stack is outside the window (checked above);
+    // established here.
+    unsafe { crate::paging_init::teardown_identity(keep) };
+}
 
+/// Start each MADT CPU but the BSP, one at a time, from `page`.
+fn start_aps(page: u64) {
     let bsp_apic = per_cpu_init::current()
         .remote
         .apic_id
         .load(Ordering::Relaxed) as u8;
     let Some(info) = acpi_init::info() else {
-        report_tsc_warp();
-        crate::marker!(marker::SMP_DONE);
         return;
     };
     let Some(madt) = info.madt.as_ref() else {
-        report_tsc_warp();
-        crate::marker!(marker::SMP_DONE);
         return;
     };
 
@@ -502,10 +582,7 @@ pub unsafe fn init() {
             logical += 1;
             continue;
         };
-        start_one(alloc);
+        start_one(alloc, page);
         logical += 1;
     }
-
-    report_tsc_warp();
-    crate::marker!(marker::SMP_DONE);
 }

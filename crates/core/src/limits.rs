@@ -10,8 +10,7 @@
 //!
 //! - hardware: acpi `MAX_CPUS`, `MAX_IOAPICS`, `MAX_ISOS`; ipi
 //!   `MAX_IPI_CPUS`; pci `MAX_BARS`, `MAX_SCAN`, `MAX_CAP_WALK`,
-//!   `MAX_BAR_MAP`; dev `MAX_DEVICES`; pmm `MAX_ORDER`; pmm_init
-//!   `MAX_EXCLUDES`.
+//!   `MAX_BAR_MAP`; dev `MAX_DEVICES`; pmm `MAX_ORDER`.
 //! - device-queue geometry: block `MAX_QUEUE`, `MAX_SEGS`; dma `MAX_SG`;
 //!   virtio `MAX_VENDOR_CAPS`, `MAX_CHAIN`; virtio_blk_init `MAX_VQ`,
 //!   `MAX_QSIZE`.
