@@ -9,6 +9,64 @@
 
 pub mod lock;
 
+/// The loom variant switch (C-LOOM, ROADMAP §10.8).
+///
+/// A loom model's failing variant runs the kernel's own code with one site
+/// weakened, and loom must find the race that opens. Each weakenable site
+/// is a [`Site`](variant::Site); the code there takes
+/// [`pick`](variant::pick)'s answer, which outside `cfg(loom)` is always
+/// the kernel's choice, so no build but a model's can take the other. A
+/// model weakens one site for its run with `weaken`. A later slice adds
+/// one `Site` per variant.
+pub mod variant {
+    /// A site a loom variant weakens.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[repr(u8)]
+    pub enum Site {
+        /// `kalloc`'s `TryArc` put decrements with `Relaxed`, not `Release`.
+        TryArcDecrement = 1,
+        /// `sync::OpGate::enter` reads the dead mark before it counts
+        /// itself in.
+        OpGateCountFirst = 2,
+    }
+
+    /// `kernel` at `site`, or `weak` while a loom model has weakened it.
+    #[inline(always)]
+    pub fn pick<T>(site: Site, kernel: T, weak: T) -> T {
+        #[cfg(loom)]
+        if WEAKENED.load(crate::atomic::statics::Ordering::Relaxed) == site as u8 {
+            return weak;
+        }
+        #[cfg(not(loom))]
+        let _ = (site, weak);
+        kernel
+    }
+
+    /// The weakened site, or 0. `core`'s atomic: the switch is set outside
+    /// the model's threads, and loom must not schedule it.
+    #[cfg(loom)]
+    static WEAKENED: crate::atomic::statics::AtomicU8 = crate::atomic::statics::AtomicU8::new(0);
+
+    /// Weaken `site` until the returned guard drops, which also happens as
+    /// a failing model unwinds.
+    #[cfg(loom)]
+    pub fn weaken(site: Site) -> Weakened {
+        WEAKENED.store(site as u8, crate::atomic::statics::Ordering::Relaxed);
+        Weakened(())
+    }
+
+    /// Restores the kernel's choice at every site when dropped.
+    #[cfg(loom)]
+    pub struct Weakened(());
+
+    #[cfg(loom)]
+    impl Drop for Weakened {
+        fn drop(&mut self) {
+            WEAKENED.store(0, crate::atomic::statics::Ordering::Relaxed);
+        }
+    }
+}
+
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 
@@ -139,14 +197,18 @@ impl OpGate {
     /// Count one operation in, or fail with [`Dead`] once the gate is
     /// killed. The guard leaves on [`OpGuard::exit`] or drop.
     pub fn enter(&self) -> Result<OpGuard<'_>, Dead> {
-        self.enter_as::<true>()
+        if variant::pick(variant::Site::OpGateCountFirst, true, false) {
+            self.enter_as::<true>()
+        } else {
+            self.enter_as::<false>()
+        }
     }
 
     /// `enter`, counting in before it reads the dead mark (`COUNT_FIRST`),
     /// which the kernel always does. The other order, reading the mark and
     /// then counting in, lets a `kill` between the two see no operation
     /// inside and return while this one proceeds; only a loom variant
-    /// builds it.
+    /// takes it (`variant::Site::OpGateCountFirst`).
     fn enter_as<const COUNT_FIRST: bool>(&self) -> Result<OpGuard<'_>, Dead> {
         if !COUNT_FIRST {
             if self.state.load(Ordering::Acquire) & DEAD != 0 {
@@ -459,5 +521,66 @@ mod opgate_tests {
         });
         assert!(holder.join().unwrap(), "kill waited before it woke");
         assert_eq!(gate.inside(), 0);
+    }
+}
+
+#[cfg(all(test, loom))]
+mod loom_models {
+    extern crate std;
+
+    use super::*;
+    use loom::cell::UnsafeCell;
+    use loom::sync::Arc;
+    use loom::thread;
+
+    /// A gate and the object state it guards.
+    struct Shared {
+        gate: OpGate,
+        cell: UnsafeCell<u32>,
+    }
+
+    // SAFETY: `cell` is read only inside the gate and written only after
+    // `kill` returns; the models check, through loom, that the gate orders
+    // the two. Established here.
+    unsafe impl Sync for Shared {}
+
+    /// A reads the state inside the gate; B kills the gate, then writes the
+    /// state as a teardown would.
+    fn opgate_model() {
+        loom::model(|| {
+            let s = Arc::new(Shared {
+                gate: OpGate::new(),
+                cell: UnsafeCell::new(0),
+            });
+            let a = {
+                let s = s.clone();
+                thread::spawn(move || {
+                    if let Ok(g) = s.gate.enter() {
+                        // SAFETY: inside the gate, `kill` has not returned,
+                        // so no teardown writes `cell`; established by
+                        // `sync::OpGate::kill_and_wake`.
+                        let _v = s.cell.with(|p| unsafe { *p });
+                        g.exit();
+                    }
+                })
+            };
+            s.gate.kill();
+            // SAFETY: `kill` returned, so no operation is inside and none
+            // can enter; established by `sync::OpGate::kill_and_wake`.
+            s.cell.with_mut(|p| unsafe { *p = 1 });
+            a.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn loom_opgate() {
+        opgate_model();
+    }
+
+    #[test]
+    #[should_panic(expected = "Causality violation")]
+    fn loom_opgate_check_first_fails() {
+        let _w = variant::weaken(variant::Site::OpGateCountFirst);
+        opgate_model();
     }
 }
