@@ -24,26 +24,26 @@ per-architecture uapi (ROADMAP §13.10).
 
 | Concern | Seam | x86_64 | aarch64 | ROADMAP |
 |---|---|---|---|---|
-| Boot handover: the machine state the boot handshake hands over, normalized into `BootInfo` | trait | Limine base revision 3, until ROADMAP §11.1's bump moves it to aarch64's; long mode; without Limine, the direct entry (§4.1): a PVH door and a 64-bit door into one body | Limine base revision 6, EL1, or EL2 with VHE; without Limine, the direct entry (§4.1) behind an arm64 `Image` header, entered with the MMU off | §10.3, §11.1, §25.4, §26.4 |
+| Boot handover: the machine state the boot handshake hands over, normalized into `BootInfo` | trait (`BootHandover`) | Limine base revision 3, until ROADMAP §11.1's bump moves it to aarch64's; long mode; without Limine, the direct entry (§4.1): a PVH door and a 64-bit door into one body | Limine base revision 6, EL1, or EL2 with VHE; without Limine, the direct entry (§4.1) behind an arm64 `Image` header, entered with the MMU off | §10.3, §11.1, §25.4, §26.4 |
 | Early console | port module | 16550 on COM1 | PL011 | §11.1 |
 | Exception entry and exit | port module: generated entry code | one stub per IDT vector ([§5.10](INTERRUPTS.md#510-privilege-transitions) rule 1) | one 16-entry vector table ([§11.5](#115-aarch64-exceptions-and-privilege-transitions)) | §10.6, §11.3 |
 | Trap decode | pure half: a trap to a `TrapKind` (§5.2) | vector and error code | vector slot and `ESR_EL1` (§11.5) | §10.6, §11.3 |
 | Kernel stack-overflow report | port module | `#DF` on IST 1 (§5.1) | a stack test at every vector entry and a per-CPU overflow stack (§4.5, §11.5) | §11.3 |
-| Interrupt mask | trait | RFLAGS.IF (`cli`, `sti`) | PSTATE.I and F (`msr daifset`, `msr daifclr`); priority masking from ROADMAP §25.5 | §10.3 |
+| Interrupt mask | trait (`InterruptMask`) | RFLAGS.IF (`cli`, `sti`) | PSTATE.I and F (`msr daifset`, `msr daifclr`); priority masking from ROADMAP §25.5 | §10.3 |
 | Interrupt controller and IRQ identity | port module: finding the root controller, with the vector entry and the IPI send in their own rows; each controller is an `IrqChip` object (§5.4), not a seam trait | 8259, I/O APIC, and LAPIC MSI chips; a hwirq is an IDT vector (§5.3) | GICv2 or GICv3 distributor and redistributor chips, ITS or GICv2m; a hwirq is an INTID | §11.3 |
-| IPI send and its ordering | trait | LAPIC ICR write (§7.6) | SGI register write | §10.3, §11.3 |
+| IPI send and its ordering | trait (`IpiSend`) | LAPIC ICR write (§7.6) | SGI register write | §10.3, §11.3 |
 | Timer and cycle counter | trait (`CycleCounter`) | TSC, or the HPET or ACPI PM timer as the clocksource (§6.4); LAPIC timer | `CNTVCT_EL0`; generic timer | §10.3, §11.3 |
 | Page-table format and attributes | trait (`PageTable`); encodings in the pure half | 4-level tables, PAT bits | 4 KiB granule, 48-bit VA, MAIR, break-before-make | §10.3, §11.2 |
 | TLB maintenance and address-space ids | trait (`PageTable`) | `invlpg` and the shootdown IPI (§7.9); no PCID | broadcast `tlbi ...is`; ASIDs from §11.2's generation allocator | §10.3, §11.2 |
 | Cache maintenance and DMA coherence | trait (`Barriers`) | none: coherent | per-device coherence from `dma-coherent` or `_CCA`; `dc cvac` and `dc ivac` to the Point of Coherency for non-coherent devices (§4.7); `dc` and `ic` for code | §10.3, §11.2 |
 | Barriers (`dma_wmb`, `dma_rmb`, `dma_mb`) and MMIO accessors | trait (`Barriers`) | `mfence`, `sfence`, `lfence`; plain loads and stores; accessors carry a compiler barrier (§4.7) | `dmb oshst`, `dmb oshld`, `dmb osh`; `dmb oshst` before an `mmio_write` and `dmb oshld` after an `mmio_read` (§4.7) | §10.3, §11.2 |
 | Atomics | module selected by `cfg(loom)` (below) | `core::sync::atomic` | `core::sync::atomic`, with LSE instructions (`+lse`, §3.1's floor) | §10.8 |
-| Per-CPU base and current-thread registers | trait | `GS_BASE` and `swapgs`; `current` by one `gs`-relative load (§2.9 rule 5) | `TPIDR_EL1`, or `TPIDR_EL2` at EL2; `current` in `SP_EL0` (§2.9 rule 5) | §10.3, §11.4, §11.6 |
-| Syscall instruction, user frame's layout ([§5.10](INTERRUPTS.md#510-privilege-transitions)), numbers and argument order | trait | `syscall` and `sysretq`; the x86_64 table | `svc #0`; the asm-generic table | §10.3, §10.5, §10.6, §11.6 |
-| User-memory accessors | trait | `stac` and `clac` (SMAP) | PAN | §10.3, §10.6, §11.6 |
+| Per-CPU base and current-thread registers | trait (`PerCpuBase`) | `GS_BASE` and `swapgs`; `current` by one `gs`-relative load (§2.9 rule 5) | `TPIDR_EL1`, or `TPIDR_EL2` at EL2; `current` in `SP_EL0` (§2.9 rule 5) | §10.3, §11.4, §11.6 |
+| Syscall instruction, user frame's layout ([§5.10](INTERRUPTS.md#510-privilege-transitions)), numbers and argument order | trait (`SyscallAbi`) | `syscall` and `sysretq`; the x86_64 table | `svc #0`; the asm-generic table | §10.3, §10.5, §10.6, §11.6 |
+| User-memory accessors | trait (`UserAccess`) | `stac` and `clac` (SMAP) | PAN | §10.3, §10.6, §11.6 |
 | FP and SIMD state | port module, under §7.5's per-thread rules | FXSAVE image | V0-V31, FPCR, FPSR | §10.6, §11.6 |
 | User TLS register | port module | `FS_BASE` | `TPIDR_EL0` | §11.6 |
-| Context switch | trait | `switch_context`: callee-saved registers, RSP, RIP | `switch_context`: x19-x29, SP, LR | §10.3, §11.4 |
+| Context switch | trait (`ContextSwitch`) | `switch_context`: callee-saved registers, RSP, RIP | `switch_context`: x19-x29, SP, LR | §10.3, §11.4 |
 | Secondary-CPU bring-up | port module | INIT-SIPI and the trampoline page (§7.3) | PSCI `CPU_ON` | §11.4 |
 | CPU identity, topology, and features | port module | APIC ID, CPUID | MPIDR, ID registers | §11.4 |
 | Idle | port module | `sti; hlt` | `wfi` with IRQs masked (below) | §11.3, §19.6 |
