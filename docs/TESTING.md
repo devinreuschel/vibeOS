@@ -619,6 +619,28 @@ every workflow a gate entry names has a `workflow_dispatch` trigger (`rule_gate_
 a dev-host record (below) with event `dev-host`, the gated commit, phase N, the line's key, the map's
 command at that commit, every required field, and result `pass`.
 
+**Dev-host records.** No hosted CI runner can run an HVF guest, so a gate line, or the part of one,
+that runs under HVF has a `record` entry, proved on the Apple Silicon dev host (ROADMAP §10.9).
+`make gate PHASE=N RECORD=1` refuses to run anywhere but macOS on arm64; it runs only the map's record
+entries, each in a `git worktree` of the gated commit in a temporary directory, so an uncommitted
+change in the maintainer's tree reaches no record, and writes one JSON record per commit and entry,
+pass or fail: `schema`, `event: "dev-host"`, `commit`, `head_sha`, the fixed `host: "dev-host"`,
+`mac_model` (`sysctl -n hw.model`), `macos` (`sw_vers`), `qemu` (the first `--version` line of each
+`qemu-system-*` on `PATH`), `phase`, `line` (the key), `command`, `numbers` (`seconds` and any
+`numbers` section of the run's results files), `result`, `started`, `finished`, and `results`, the
+`build/results/*.json` files the run wrote, which `check_ticks.py` reads. Every string is scrubbed
+first (the worktree becomes `<checkout>`, the temporary directory `<tmp>`, the home directory
+`<home>`), and `ci_history.validate_record` then refuses any record that holds the machine's
+hostname (`socket.gethostname()`, its short form, `scutil --get LocalHostName`), user name, home
+directory, or serial number (`ioreg -rd1 -c IOPlatformExpertDevice`, compared and never printed or
+stored), since `ci-history` is public (DESIGN §1.5). `ci_history.py --record PATH` commits the record
+at `records/<yyyy-mm-dd>-dev-host-<sha>-<entry-id>.json` (C-HISTORY; the entry id is the first 12
+hex digits of the SHA-256 of the phase, the key and the command) and, on a rejected push, re-applies
+it on the new tip and pushes again. Two record entries of one line with one command would share a
+path, so `RECORD=1` refuses them before anything runs. Everywhere else, `release.yml` included, the
+records are only read (above). `tests/harness/test_gate_records.py` pushes only to a bare repository
+in its own temporary directory.
+
 **Workflow rules.** `scripts/check_workflows.py`, which `make check` runs, reads every workflow
 with a stdlib YAML subset reader that fails on anything it does not parse (anchors, aliases, tags,
 `---`, multi-line flow) rather than misread it, and holds one function per rule in `RULES`. Besides

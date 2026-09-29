@@ -28,7 +28,9 @@ Every phase gets the two box rules:
 
 A local run gates `HEAD` of a clean work tree (tracked files): `--commit`
 must name `HEAD`. `--dry-run` prints the rows and the box problems and runs
-nothing. A record entry's command never runs here.
+nothing. `--record` (RECORD=1) runs only on macOS arm64: it runs each record
+entry in a clean worktree of the commit and writes one scrubbed record per
+entry through `ci_history.py --record`'s writer.
 
 Exit codes: 0 pass, 1 fail, 2 usage.
 
@@ -39,13 +41,20 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import getpass
 import json
 import os
+import platform
 import re
+import shutil
+import socket
 import subprocess
 import sys
+import tempfile
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -60,6 +69,7 @@ FIRST_MAPPED_PHASE = check_gates.FIRST_MAPPED_PHASE
 KTEST_VAR = re.compile(r"(?:^|\s)VIBEOS_KTEST=('[^']*'|\"[^\"]*\"|\S+)")
 MAKE_TIER = re.compile(r"\bmake\s+(?:\S+=\S*\s+)*(test-[A-Za-z0-9-]+)")
 STRETCH = re.compile(r"^### \d+\.\d+ Stretch:")
+SERIAL = re.compile(r'"IOPlatformSerialNumber"\s*=\s*"([^"]*)"')
 ROW_TEXT = 100
 
 
@@ -157,6 +167,8 @@ class History(Protocol):
 
     def dev_host_records(self) -> list[dict[str, Any]]: ...
 
+    def write_record(self, path: Path, forbidden: list[tuple[str, str]]) -> str | None: ...
+
 
 class BranchHistory:
     """The `ci-history` branch through `ci_history.HistoryRepo`, opened on
@@ -178,6 +190,85 @@ class BranchHistory:
 
     def dev_host_records(self) -> list[dict[str, Any]]:
         return ci_history.dev_host_records(self.repo())
+
+    def write_record(self, path: Path, forbidden: list[tuple[str, str]]) -> str | None:
+        return ci_history.record_main(path, self.repo(), forbidden)
+
+
+class Host(Protocol):
+    def system(self) -> str: ...
+
+    def machine(self) -> str: ...
+
+    def hostnames(self) -> list[str]: ...
+
+    def user(self) -> str: ...
+
+    def home(self) -> str: ...
+
+    def serial(self) -> str: ...
+
+    def mac_model(self) -> str: ...
+
+    def macos(self) -> str: ...
+
+    def qemu(self) -> dict[str, str]: ...
+
+
+def _out(argv: list[str]) -> str:
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, check=False)
+    except OSError:
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+class LocalHost:
+    """This machine. `serial` is read for comparison only: never printed."""
+
+    def system(self) -> str:
+        return platform.system()
+
+    def machine(self) -> str:
+        return platform.machine()
+
+    def hostnames(self) -> list[str]:
+        full = socket.gethostname()
+        names = [full, full.split(".")[0], _out(["scutil", "--get", "LocalHostName"])]
+        return sorted({n for n in names if n})
+
+    def user(self) -> str:
+        try:
+            return getpass.getuser()
+        except (KeyError, OSError):
+            return os.environ.get("USER", "")
+
+    def home(self) -> str:
+        return str(Path.home())
+
+    def serial(self) -> str:
+        m = SERIAL.search(_out(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"]))
+        return m.group(1) if m else ""
+
+    def mac_model(self) -> str:
+        return _out(["sysctl", "-n", "hw.model"])
+
+    def macos(self) -> str:
+        name = _out(["sw_vers", "-productName"]) or "macOS"
+        version = _out(["sw_vers", "-productVersion"])
+        return f"{name} {version} ({_out(['sw_vers', '-buildVersion'])})"
+
+    def qemu(self) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for d in os.environ.get("PATH", "").split(os.pathsep):
+            p = Path(d)
+            if not p.is_dir():
+                continue
+            for exe in sorted(p.glob("qemu-system-*")):
+                if exe.name not in out and os.access(exe, os.X_OK):
+                    first = _out([str(exe), "--version"]).splitlines()
+                    out[exe.name] = first[0] if first else ""
+        return out
 
 
 # --- entries ------------------------------------------------------------------
@@ -546,6 +637,165 @@ def evaluate_line(
     return line_verdict(results), rows
 
 
+# --- dev-host records ------------------------------------------------------------
+
+
+def forbidden_values(host: Host) -> list[tuple[str, str]]:
+    """(kind, value) pairs no record may hold. The values are compared only,
+    never printed: a refusal names the kind."""
+    out = [("hostname", h) for h in host.hostnames()]
+    out += [("user name", host.user()), ("home directory", host.home()),
+            ("serial number", host.serial())]
+    return [(k, v) for k, v in out if v]
+
+
+def scrub(obj: Any, replacements: list[tuple[str, str]]) -> Any:
+    """`obj` with each `old` in every string, keys included, replaced by its
+    `new`, the longest `old` first."""
+    order = sorted((r for r in replacements if r[0]), key=lambda r: -len(r[0]))
+
+    def s(text: str) -> str:
+        for old, new in order:
+            text = text.replace(old, new)
+        return text
+
+    if isinstance(obj, str):
+        return s(obj)
+    if isinstance(obj, list):
+        return [scrub(x, order) for x in obj]
+    if isinstance(obj, dict):
+        return {s(k) if isinstance(k, str) else k: scrub(v, order) for k, v in obj.items()}
+    return obj
+
+
+def iso(t: float) -> str:
+    return datetime.fromtimestamp(t, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def build_record(
+    *,
+    host: Host,
+    commit: str,
+    head_sha: str,
+    phase: int,
+    key: str,
+    command: str,
+    ok: bool,
+    started: float,
+    finished: float,
+    results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """A dev-host record (ROADMAP §10.9, C-HISTORY): `numbers` holds
+    `seconds` and every `numbers` section of the run's results files."""
+    numbers: dict[str, Any] = {"seconds": round(finished - started, 1)}
+    for r in results:
+        extra = r.get("numbers")
+        if isinstance(extra, dict):
+            numbers.update(extra)
+    return {
+        "schema": ci_history.SCHEMA,
+        "event": ci_history.DEV_HOST,
+        "commit": commit,
+        "head_sha": head_sha,
+        "host": ci_history.DEV_HOST,
+        "mac_model": host.mac_model(),
+        "macos": host.macos(),
+        "qemu": host.qemu(),
+        "phase": phase,
+        "line": key,
+        "command": command,
+        "numbers": numbers,
+        "result": "pass" if ok else "fail",
+        "started": iso(started),
+        "finished": iso(finished),
+        "results": results,
+    }
+
+
+def worktree_results(checkout: Path) -> list[dict[str, Any]]:
+    out = []
+    for r in gatelib.load_results(checkout / "build" / "results"):
+        r.pop("_path", None)
+        out.append(r)
+    return out
+
+
+def record_gate(
+    phase: int,
+    commit: str,
+    root: Path,
+    tools: Tools,
+    host: Host,
+    out: Callable[[str], None] = print,
+) -> int:
+    """RECORD=1: run each record entry of the map at `commit` in a clean
+    worktree of `commit` and write its record. 0 when all passed."""
+    if host.system() != "Darwin" or host.machine() != "arm64":
+        out(f"gate: RECORD=1 runs only on the Apple Silicon dev host (macOS arm64), "
+            f"not {host.system()} {host.machine()}")
+        return 2
+    rel = f"tests/gates/phase-{phase}.toml"
+    text = git_show(root, commit, rel)
+    if text is None:
+        out(f"gate: {rel} is not in the tree at {commit}")
+        return 1
+    try:
+        lines = check_gates.load_map(text, rel)
+    except check_gates.MapError as err:
+        out(f"gate: {err}")
+        return 1
+    todo = [(ml.key, e) for ml in lines for e in ml.entries if e.kind == "record"]
+    ids = [ci_history.record_entry_id(phase, k, e.cmd) for k, e in todo]
+    if len(set(ids)) != len(ids):
+        out("gate: two record entries share one record path (same line and command); "
+            "fix the map before recording")
+        return 1
+    if not todo:
+        out(f"gate: phase {phase} has no record entry")
+        return 0
+    forbidden = forbidden_values(host)
+    logs = root / "build" / "gate" / f"phase-{phase}"
+    failed = 0
+    for i, ((key, e), entry_id) in enumerate(zip(todo, ids, strict=True), start=1):
+        with tempfile.TemporaryDirectory(prefix="vibeos-gate-") as tmp_s:
+            tmp = Path(tmp_s)
+            checkout = tmp / "checkout"
+            gatelib.git(root, "worktree", "add", "--detach", "-q", str(checkout), commit)
+            try:
+                head = gatelib.git(checkout, "rev-parse", "HEAD").strip()
+                started = time.time()
+                rc = tools.runner(e.cmd, checkout, logs / f"record-{i}.log")
+                finished = time.time()
+                rec = build_record(host=host, commit=commit, head_sha=head, phase=phase,
+                                   key=key, command=e.cmd, ok=rc == 0, started=started,
+                                   finished=finished, results=worktree_results(checkout))
+            finally:
+                gatelib.git(root, "worktree", "remove", "--force", str(checkout), check=False)
+                shutil.rmtree(checkout, ignore_errors=True)
+            pairs = [(str(checkout.resolve()), "<checkout>"), (str(checkout), "<checkout>"),
+                     (str(tmp.resolve()), "<tmp>"), (str(tmp), "<tmp>")]
+            rec = scrub(rec, pairs + [(host.home(), "<home>")])
+        problems = ci_history.validate_record(rec, forbidden)
+        if problems:
+            out(f"FAIL  record {e.cmd}: refused: {'; '.join(problems)}")
+            failed += 1
+            continue
+        path = logs / f"record-{entry_id}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(ci_history.encode(rec))
+        try:
+            pushed = tools.history.write_record(path, forbidden)
+        except ci_history.HistoryError as err:
+            out(f"FAIL  record {e.cmd}: {err}")
+            failed += 1
+            continue
+        out(f"{'PASS' if rc == 0 else 'FAIL'}  record {e.cmd}  "
+            f"{ci_history.dev_host_record_path(rec)} ({pushed or 'unchanged'})")
+        failed += rc != 0
+    out(f"gate: phase {phase} records at {commit}: {'pass' if not failed else 'fail'}")
+    return 1 if failed else 0
+
+
 # --- main ------------------------------------------------------------------------
 
 
@@ -556,6 +806,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "PASS or FAIL per gate line, and apply the box rules.",
     )
     ap.add_argument("--phase", type=int, required=True, metavar="N")
+    ap.add_argument("--record", action="store_true",
+                    help="dev host only: run the record entries and write their records")
     ap.add_argument("--commit", default="HEAD", metavar="SHA",
                     help="the gated commit (default HEAD; a local run gates HEAD only)")
     ap.add_argument("--dry-run", action="store_true",
@@ -575,6 +827,7 @@ def resolve(root: Path, rev: str) -> str:
 def main(
     argv: list[str] | None = None,
     tools: Tools | None = None,
+    host: Host | None = None,
     out: Callable[[str], None] = print,
 ) -> int:
     try:
@@ -587,6 +840,8 @@ def main(
         if args.phase < 0:
             raise GateUsage("PHASE is a phase number")
         commit = resolve(root, args.commit)
+        if args.record:
+            return record_gate(args.phase, commit, root, tools, host or LocalHost(), out)
         if not args.dry_run:
             head = resolve(root, "HEAD")
             if commit != head:
