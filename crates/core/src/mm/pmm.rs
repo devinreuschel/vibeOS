@@ -34,6 +34,7 @@
 
 use crate::atomic::statics::{AtomicUsize, Ordering};
 use core::num::NonZeroU64;
+use core::ops::Range;
 
 pub const PAGE_BITS: u32 = 12;
 pub const PAGE_SIZE: u64 = 1 << PAGE_BITS;
@@ -633,6 +634,75 @@ pub const fn crosses_boundary(phys: u64, size: u64, boundary: u64) -> bool {
     (phys & mask) + size > boundary
 }
 
+/// One past the last byte a SIPI can start an AP at: real mode reaches
+/// only the first 1 MiB (DESIGN §7.3).
+pub const TRAMPOLINE_LIMIT: u64 = 0x10_0000;
+
+/// The AP trampoline page (DESIGN §7.3): the lowest 4 KiB page `p` with
+/// `0x1000 <= p` and `p + 0x1000 <= 1 MiB` that lies wholly inside one of
+/// `usable`, or `None`. Each range is rounded inward to pages; a range
+/// that wraps or is empty holds no page. The firmware map is untrusted
+/// input (DESIGN §2.10), so nothing here panics or overflows.
+pub fn choose_trampoline_page<I: IntoIterator<Item = Range<u64>>>(usable: I) -> Option<u64> {
+    let mut best: Option<u64> = None;
+    for r in usable {
+        let Some(lo) = r.start.checked_add(PAGE_SIZE - 1) else {
+            continue;
+        };
+        let lo = align_down(lo, PAGE_SIZE).max(PAGE_SIZE);
+        let hi = align_down(r.end, PAGE_SIZE).min(TRAMPOLINE_LIMIT);
+        let Some(page_end) = lo.checked_add(PAGE_SIZE) else {
+            continue;
+        };
+        if page_end <= hi && best.is_none_or(|b| lo < b) {
+            best = Some(lo);
+        }
+    }
+    best
+}
+
+/// Emit, in ascending order, each part of `r` that lies outside every
+/// range `excl()` yields, each exclusion rounded outward to pages. The
+/// exclusions may overlap and come in any order; `excl` is called again for
+/// each step, so nothing is collected and there is no cap on how many there
+/// are (DESIGN §2.4). An empty or wrapped exclusion excludes nothing. It
+/// allocates nothing and panics on nothing.
+pub fn clip_usable<I: Iterator<Item = Range<u64>>>(
+    r: Range<u64>,
+    excl: impl Fn() -> I,
+    mut emit: impl FnMut(Range<u64>),
+) {
+    let mut cur = r.start;
+    while cur < r.end {
+        // The end of the furthest exclusion covering `cur`, and the start
+        // of the nearest one ahead of it.
+        let mut skip_to: Option<u64> = None;
+        let mut next = r.end;
+        for e in excl() {
+            if e.start >= e.end {
+                continue;
+            }
+            let lo = align_down(e.start, PAGE_SIZE);
+            let hi = match e.end.checked_add(PAGE_SIZE - 1) {
+                Some(x) => align_down(x, PAGE_SIZE),
+                None => u64::MAX,
+            };
+            if lo <= cur && cur < hi {
+                skip_to = Some(skip_to.map_or(hi, |s| s.max(hi)));
+            } else if lo > cur && lo < next {
+                next = lo;
+            }
+        }
+        match skip_to {
+            Some(h) => cur = h,
+            None => {
+                emit(cur..next);
+                cur = next;
+            }
+        }
+    }
+}
+
 /// Host-test backing store shared by the `pmm`, `dma`, `paging` and
 /// `addr_space` tests.
 #[cfg(test)]
@@ -1046,5 +1116,173 @@ mod tests {
         assert!(!crosses_boundary(f.base(), 0x1000, 1u64 << 32));
         p.buddy.free(f);
         assert_eq!(p.buddy.stats().free_frames, 64);
+    }
+
+    // ---- AP trampoline page and usable-range clipping (DESIGN §7.3, §2.4) ----
+
+    /// Limine memory map types, as `limine::memmap` numbers them.
+    const USABLE: u64 = 0;
+    const RESERVED: u64 = 1;
+    const BOOTLOADER_RECLAIMABLE: u64 = 5;
+
+    /// The usable ranges of a `(base, end, type)` map.
+    fn usable(map: &[(u64, u64, u64)]) -> impl Iterator<Item = core::ops::Range<u64>> + '_ {
+        map.iter()
+            .filter(|e| e.2 == USABLE)
+            .map(|&(base, end, _)| base..end)
+    }
+
+    /// Below 1 MiB, the map the pinned Limine reports under QEMU's SeaBIOS
+    /// with 128 MiB (frame 0 is in no entry), and the first usable range
+    /// above it.
+    const SEABIOS_MAP: &[(u64, u64, u64)] = &[
+        (0x1000, 0x52000, BOOTLOADER_RECLAIMABLE),
+        (0x52000, 0x9F000, USABLE),
+        (0x9FC00, 0xA0000, RESERVED),
+        (0xF0000, 0x10_0000, RESERVED),
+        (0x10_0000, 0x7FE_0000, USABLE),
+    ];
+
+    /// Below 1 MiB, the map the pinned Limine reports under the OVMF
+    /// (edk2) `make test-e2e-uefi` boots with 128 MiB.
+    const OVMF_MAP: &[(u64, u64, u64)] = &[
+        (0x0, 0x1000, BOOTLOADER_RECLAIMABLE),
+        (0x1000, 0xA0000, USABLE),
+        (0x10_0000, 0x80_0000, USABLE),
+    ];
+
+    #[test]
+    fn trampoline_page_seabios_map() {
+        assert_eq!(choose_trampoline_page(usable(SEABIOS_MAP)), Some(0x52000));
+    }
+
+    #[test]
+    fn trampoline_page_ovmf_map() {
+        assert_eq!(choose_trampoline_page(usable(OVMF_MAP)), Some(0x1000));
+        // DESIGN §7.3's OVMF map, with frame 0 usable: frame 0 is skipped.
+        let older = [(0x0, 0x87000, USABLE), (0x10_0000, 0x80_0000, USABLE)];
+        assert_eq!(choose_trampoline_page(usable(&older)), Some(0x1000));
+    }
+
+    #[test]
+    fn trampoline_page_skips_reserved_0x8000() {
+        let map = [
+            (0x1000, 0x8000, BOOTLOADER_RECLAIMABLE),
+            (0x8000, 0x9000, RESERVED),
+            (0x9000, 0x9F000, USABLE),
+            (0x10_0000, 0x80_0000, USABLE),
+        ];
+        assert_eq!(choose_trampoline_page(usable(&map)), Some(0x9000));
+        // Unsorted, and the lower range unaligned: rounded inward.
+        let ranges = [0x9000..0x9F000, 0x7800..0x8000, 0x2800..0x4000];
+        assert_eq!(choose_trampoline_page(ranges), Some(0x3000));
+        // A partial page never counts.
+        assert_eq!(
+            choose_trampoline_page(core::iter::once(0x2001..0x3FFF)),
+            None
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::reversed_empty_ranges,
+        reason = "a wrapped range is the untrusted input under test"
+    )]
+    fn trampoline_page_none_below_1mib() {
+        let map = [
+            (0x0, 0x1000, USABLE),
+            (0x1000, 0x9F000, BOOTLOADER_RECLAIMABLE),
+            (0xF_F800, 0x10_0000, USABLE),
+            (0x10_0000, 0x80_0000, USABLE),
+        ];
+        assert_eq!(choose_trampoline_page(usable(&map)), None);
+        // A range straddling 1 MiB offers the pages wholly below it.
+        assert_eq!(
+            choose_trampoline_page(core::iter::once(0xFF000..0x20_0000)),
+            Some(0xFF000)
+        );
+        // Untrusted input: wrapped, empty and top-of-space ranges.
+        assert_eq!(
+            choose_trampoline_page([0x9000..0x1000, 0x5000..0x5000, u64::MAX - 5..u64::MAX]),
+            None
+        );
+    }
+
+    /// Clip `r` against `excl` into a vector.
+    fn clipped(r: core::ops::Range<u64>, excl: &[core::ops::Range<u64>]) -> Vec<(u64, u64)> {
+        let mut out = Vec::new();
+        clip_usable(r, || excl.iter().cloned(), |p| out.push((p.start, p.end)));
+        out
+    }
+
+    #[test]
+    fn clip_usable_eight_framebuffers() {
+        const M: u64 = 0x10_0000;
+        // Frame 0, the trampoline page, the kernel, and eight framebuffers:
+        // eleven exclusions, more than the old 8-entry list held.
+        let mut excl = vec![0..PAGE_SIZE, 0x52000..0x53000, 2 * M..4 * M];
+        for i in 0..8u64 {
+            let base = 16 * M + i * 4 * M;
+            excl.push(base..base + 3 * M + 100);
+        }
+        let out = clipped(0..64 * M, &excl);
+        let mut want = vec![(PAGE_SIZE, 0x52000), (0x53000, 2 * M), (4 * M, 16 * M)];
+        for i in 0..8u64 {
+            let end = 16 * M + i * 4 * M + 3 * M + 100;
+            let next = if i == 7 {
+                64 * M
+            } else {
+                16 * M + (i + 1) * 4 * M
+            };
+            want.push((end.next_multiple_of(PAGE_SIZE), next));
+        }
+        want.retain(|&(a, b)| a < b);
+        assert_eq!(out, want);
+        let kept: u64 = out.iter().map(|&(a, b)| b - a).sum();
+        for (a, b) in &out {
+            assert!(a % PAGE_SIZE == 0 && b % PAGE_SIZE == 0);
+            assert!(excl.iter().all(|e| *b <= e.start || *a >= e.end));
+        }
+        assert!(kept < 64 * M);
+    }
+
+    #[test]
+    #[allow(
+        clippy::reversed_empty_ranges,
+        reason = "a wrapped exclusion is an input under test"
+    )]
+    fn clip_usable_unsorted_overlapping() {
+        const P: u64 = PAGE_SIZE;
+        // Unsorted, overlapping, nested, empty, wrapped, and unaligned
+        // exclusions, one reaching the top of the address space.
+        let excl = [
+            30 * P..35 * P,
+            5 * P + 1..6 * P - 1,
+            10 * P..20 * P,
+            12 * P..25 * P,
+            14 * P..15 * P,
+            40 * P..40 * P,
+            50 * P..45 * P,
+            u64::MAX - 3..u64::MAX,
+        ];
+        assert_eq!(
+            clipped(0..64 * P, &excl),
+            vec![
+                (0, 5 * P),
+                (6 * P, 10 * P),
+                (25 * P, 30 * P),
+                (35 * P, 64 * P)
+            ]
+        );
+        // Wholly excluded, and a range above every exclusion.
+        assert_eq!(clipped(11 * P..24 * P, &excl), vec![]);
+        assert_eq!(clipped(100 * P..101 * P, &excl), vec![(100 * P, 101 * P)]);
+        // An exclusion running past the range's end, and one to the top.
+        assert_eq!(
+            clipped(60 * P..70 * P, core::slice::from_ref(&(65 * P..u64::MAX))),
+            vec![(60 * P, 65 * P)]
+        );
+        // No exclusions at all.
+        assert_eq!(clipped(3 * P..4 * P, &[]), vec![(3 * P, 4 * P)]);
     }
 }

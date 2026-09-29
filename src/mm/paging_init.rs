@@ -39,10 +39,9 @@ use crate::x86;
 /// paths stay for the callers that name them here.
 pub use vibeos::paging::{HHDM_BASE, PHYSMAP_CAP};
 
-/// Low identity window base and size (DESIGN §4.1). 512 MiB is enough
-/// to keep the AP trampoline reachable and to give phase 2's early
-/// probing room; the first 2 MiB is executable so the SIPI target at
-/// physical 0x8000 is fetchable.
+/// Low identity window base and size (DESIGN §4.1). It exists for AP
+/// bring-up; [`teardown_identity`] removes all of it but the trampoline
+/// page after `smp: done`.
 const LOW_ID_BASE: u64 = 0;
 const LOW_ID_SIZE: u64 = 512 * 1024 * 1024;
 
@@ -583,24 +582,37 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
         }
     }
 
-    // ---- 3. Low identity, 512 MiB, first 2 MiB executable ----
-    // First 2 MiB: writable + executable (trampoline lives at 0x8000).
-    // Rest: writable + NX. Everything with the GLOBAL bit so the TLB
-    // survives CR3 reloads (DESIGN §4.3 TLB section).
+    // ---- 3. Low identity, 512 MiB ----
+    // First 2 MiB as 4 KiB leaves: the trampoline page (DESIGN §7.3)
+    // present, read-only and executable, and not GLOBAL, so the teardown's
+    // flush need not reach it; every other page writable, NX and GLOBAL.
+    // Rest: 2 MiB leaves, writable + NX + GLOBAL, so the TLB survives CR3
+    // reloads (DESIGN §4.3 TLB section) until `teardown_identity`.
+    let tramp = info.trampoline_page;
+    let low_4k = |va: u64| {
+        if Some(va) == tramp {
+            PageFlags(PageFlags::PRESENT)
+        } else {
+            PageFlags(PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::GLOBAL | PageFlags::NX)
+        }
+    };
     // SAFETY: `Mapper::map_page`'s and `map_range`'s contract; the low
     // identity window maps `[0, 512 MiB)` onto itself once, in the low half
     // no other kernel mapping uses, for the AP trampoline (DESIGN §4.1);
     // established here.
     let low_id = unsafe {
-        mapper
-            .map_page(
-                VirtAddr(LOW_ID_BASE),
-                PhysAddr(LOW_ID_BASE),
-                PageFlags(PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::GLOBAL),
-                PageSize::Size2M,
-                MapMode::Fresh,
-                &mut alloc,
-            )
+        (0..PAGE_SIZE_2M)
+            .step_by(PAGE_SIZE_4K as usize)
+            .try_for_each(|va| {
+                mapper.map_page(
+                    VirtAddr(LOW_ID_BASE + va),
+                    PhysAddr(LOW_ID_BASE + va),
+                    low_4k(LOW_ID_BASE + va),
+                    PageSize::Size4K,
+                    MapMode::Fresh,
+                    &mut alloc,
+                )
+            })
             .and_then(|()| {
                 mapper.map_range(
                     VirtAddr(LOW_ID_BASE + PAGE_SIZE_2M),
@@ -666,6 +678,77 @@ pub unsafe fn install(info: &BootInfo) -> PagingReport {
         kernel_data_bytes: data_bytes,
         duplicated_stack_entry: duplicated,
     }
+}
+
+/// The low identity window's range, virtual and physical alike (DESIGN
+/// §4.1).
+pub(crate) fn identity_window() -> core::ops::Range<u64> {
+    LOW_ID_BASE..LOW_ID_BASE + LOW_ID_SIZE
+}
+
+/// Identity leaves unmapped per PT hold in [`teardown_identity`] (DESIGN
+/// §2.9 rule 2).
+const TEARDOWN_BATCH: usize = 64;
+
+/// Remove the low identity window after `smp: done`, all but the leaf that
+/// maps `keep` (the trampoline page), then flush the whole TLB, global
+/// entries included, on this CPU and every other online one, so a kernel
+/// read of VA 0 faults on each (DESIGN §4.1, §4.3). The page tables stay:
+/// a kernel table page is never freed.
+///
+/// # Safety
+/// Once, after every AP is up; nothing on any CPU uses an identity address
+/// but the trampoline page from here, and this CPU's stack lies outside
+/// the window.
+pub unsafe fn teardown_identity(keep: Option<u64>) {
+    let window = identity_window();
+    let mut va = window.start;
+    while va < window.end {
+        let mut pt = current_mapper();
+        let mut n = 0usize;
+        while n < TEARDOWN_BATCH && va < window.end {
+            let size = match pt.translate(VirtAddr(va)) {
+                Some((_, PageSize::Size2M, _)) => PAGE_SIZE_2M,
+                Some((_, PageSize::Size4K, _)) | None => PAGE_SIZE_4K,
+            };
+            if keep != Some(va) {
+                // SAFETY: `Mapper::unmap_page`'s contract; the caller keeps
+                // every CPU off the window (this fn's `# Safety` contract),
+                // and the whole-TLB flush below runs on every CPU before
+                // this returns; established here.
+                let _unmapped = unsafe { pt.unmap_page(VirtAddr(va)) };
+                n += 1;
+            }
+            va += size;
+        }
+    }
+    flush_tlb_all_local();
+    crate::ipi_init::call_mask(u64::MAX, flush_tlb_all_ipi, core::ptr::null_mut(), true);
+}
+
+/// Drop every TLB entry on this CPU, global ones included: toggle
+/// `CR4.PGE` when it is set, else reload CR3 (Intel SDM Vol. 3A §4.10.4.1).
+fn flush_tlb_all_local() {
+    let cr4 = x86::read_cr4();
+    if cr4 & x86::CR4_PGE != 0 {
+        // SAFETY: clearing and restoring `CR4.PGE` changes nothing but
+        // which TLB entries survive; every other CR4 bit is written back as
+        // read; established here.
+        unsafe {
+            x86::write_cr4(cr4 & !x86::CR4_PGE);
+            x86::write_cr4(cr4);
+        }
+    } else {
+        // SAFETY: reloading CR3 with its own value keeps the same tables;
+        // established here.
+        unsafe { x86::write_cr3(x86::read_cr3()) };
+    }
+}
+
+/// [`flush_tlb_all_local`] on a CPU `teardown_identity` calls through
+/// `ipi_init::call_mask`: it takes no lock and allocates nothing.
+fn flush_tlb_all_ipi(_: *mut ()) {
+    flush_tlb_all_local();
 }
 
 /// Print the phase-1 §1.2 exit marker and the diagnostic follow-ups.
