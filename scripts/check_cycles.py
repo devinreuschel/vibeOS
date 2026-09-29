@@ -81,7 +81,6 @@ KNOWN: list[str] = [
     "two-way kernel:fs::file_init kernel:fs::vibefs_init",
     "two-way kernel:fs::file_init kernel:shell::shell_init",
     "two-way kernel:fs::fs_init kernel:fs::vibefs_init",
-    "two-way kernel:irq::ipi_init kernel:sched::thread_init",
     "two-way kernel:mm::paging_init kernel:mm::pmm_init",
     "two-way kernel:proc::proc_init kernel:proc::syscall_init",
     "two-way kernel:proc::syscall_init kernel:sched::thread_init",

@@ -266,6 +266,10 @@ pub(crate) const TESTS: &[Test] = &[
         irq::ktest::test_reschedule_ipi_wake_ap,
     ),
     test("call_function_ipi", irq::ktest::test_call_function_ipi),
+    test(
+        "reschedule_hook_installed",
+        irq::ktest::test_reschedule_hook_installed,
+    ),
     test("cpu_hardening", arch::ktest::test_cpu_hardening),
     test("tlb_shootdown_remote", mm::ktest::test_tlb_shootdown_remote),
     test("alloc_stress_smp", mm::ktest::test_alloc_stress_smp),

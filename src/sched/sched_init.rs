@@ -28,6 +28,7 @@ pub unsafe fn init() {
         cpu.idle_id = h.id();
         cpu.slice_tsc = crate::time_init::read_tsc();
     });
+    crate::ipi_init::set_reschedule_hook(thread_init::schedule_preempt);
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
     LIVE.store(true, Ordering::Release);
 }

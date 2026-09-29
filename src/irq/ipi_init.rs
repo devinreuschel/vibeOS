@@ -16,7 +16,6 @@ use vibeos::vectors;
 
 use crate::apic_init;
 use crate::per_cpu_init;
-use crate::thread_init;
 use crate::time_init;
 use crate::x86;
 
@@ -268,10 +267,35 @@ pub fn drain_inbox() -> bool {
     })
 }
 
+/// What a reschedule IPI runs after it drains the inbox: the scheduler's
+/// preemption point, which `sched_init::init` sets (DESIGN §1.2). Unset,
+/// the IPI only counts and drains.
+static RESCHED: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Install the reschedule hook.
+pub fn set_reschedule_hook(f: fn()) {
+    // Release: pairs with the Acquire load in `on_reschedule_ipi`.
+    RESCHED.store(f as *mut (), Ordering::Release);
+}
+
+/// Whether the reschedule hook is set.
+#[cfg(feature = "kernel_tests")]
+pub fn reschedule_hook_installed() -> bool {
+    !RESCHED.load(Ordering::Acquire).is_null()
+}
+
 pub fn on_reschedule_ipi() {
     RESCHED_COUNT.fetch_add(1, Ordering::Relaxed);
     drain_inbox();
-    thread_init::schedule_preempt();
+    // Acquire: pairs with the Release store in `set_reschedule_hook`.
+    let p = RESCHED.load(Ordering::Acquire);
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: invariant: a non-null `RESCHED` holds a `fn()`; established
+    // by `ipi_init::set_reschedule_hook`, its only store.
+    let f = unsafe { core::mem::transmute::<*mut (), fn()>(p) };
+    f();
 }
 
 pub fn on_shootdown_ipi() {

@@ -797,3 +797,12 @@ pub(crate) fn shootdown_ack_while_busy() -> Outcome {
     }
     Outcome::Ok
 }
+
+/// `sched_init::init` installed the reschedule IPI's hook
+/// (`ipi_init::set_reschedule_hook`), so a reschedule IPI preempts.
+pub(crate) fn test_reschedule_hook_installed() -> Outcome {
+    if !crate::ipi_init::reschedule_hook_installed() {
+        return Outcome::Fail("reschedule hook unset");
+    }
+    Outcome::Ok
+}

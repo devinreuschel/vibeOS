@@ -130,7 +130,8 @@ that sets it:
 - Planned (ROADMAP §10.7): `serial::raw::set_stop_hook`, set by the stop primitive.
 - `sync_init::set_spin_poll` (`SpinMutex::lock`'s spin runs `service_incoming`), set by
   `ipi_init::init` before the first AP starts (§7.9).
-- Planned (ROADMAP §10.3, A4): the scheduler hooks in `ipi_init`, set by `sched_init::init`.
+- `ipi_init::set_reschedule_hook` (a reschedule IPI's preemption point), set by `sched_init::init`
+  before the scheduler goes live.
 - Planned (ROADMAP §12.6): the allocation entry's hooks, set by the page cache (clean-page reclaim),
   the writeback threads (their wake and bounded wait), and the process layer (the OOM killer).
 
