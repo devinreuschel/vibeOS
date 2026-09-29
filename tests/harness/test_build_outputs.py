@@ -126,6 +126,14 @@ class NamedOutputsTest(unittest.TestCase):
             # Nothing else writes $@.
             self.assertFalse(any("$@" in line for line in recipe[1:-1]), v)
 
+    def test_elf_relinks_when_the_profile_changes(self) -> None:
+        db = make_db()
+        stamp = db.variables["PROFILE_STAMP"]
+        self.assertTrue(stamp.startswith("build/"), stamp)
+        self.assertIn("CARGO_PROFILE", "\n".join(db.rules[stamp].recipe))
+        for v in VARIANTS:
+            self.assertIn(stamp, db.rules[f"build/kernels/vibeos-{v}.elf"].prereqs, v)
+
     def test_no_second_target_dir(self) -> None:
         texts = {"Makefile": (ROOT / "Makefile").read_text(encoding="utf-8"), **workflow_texts()}
         for name, text in texts.items():

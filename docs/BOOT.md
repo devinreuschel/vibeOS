@@ -221,7 +221,8 @@ with. Two requirements that are easy to get wrong:
   without mapping code writable.
 
 Export at minimum: `__kernel_vma_start`, `__kernel_vma_end`, and per-section start/end pairs for
-`.text`, `.rodata`, `.data`, `.bss`.
+`.text`, `.rodata`, `.data`, `.bss`, and `__ksyms_start` and `__ksyms_end` around the `.ksyms`
+section, which sits after `.rodata` and before `__rodata_end`, so paging maps it (§2.5).
 
 ## 3.5 Profiles
 

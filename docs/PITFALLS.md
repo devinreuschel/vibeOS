@@ -33,15 +33,16 @@ request is `#[used]` with an explicit `link_section`, and the base revision is v
 response is read.
 
 **Panic backtrace addresses have no names, or name the wrong function.**
-Earlier builds put the symbol table in `.text` or patched it in place. Today the second link moves `.text`: with
-pass 1's empty `KSYMS`, `print_frame_addr` encodes the table reference as short immediates, pass 2
-grows it from 0x2a2 to 0x2b2 bytes, and every later function shifts. The panic ISO's table is wrong for
-every function from `panic::finish` on (36 entries), and a `CARGO_PROFILE=release` table is wrong in 499 of 1106 entries.
-Rule: first link with an empty `.rodata` table, `nm --demangle` the ELF, second link with the filled
-table (Makefile `KERNEL_VARIANT`). `.text` must not move, so the reference to the table compiles to
-the same size empty and filled. Planned (ROADMAP §10.2, F084): the table moves to its own `.ksyms`
-section reached only through linker-defined bounds, and the build regenerates it from the final ELF
-and fails on any difference.
+Earlier builds put the symbol table in `.text` or patched it in place, and later ones moved `.text` in
+the second link: with pass 1's empty `KSYMS`, `print_frame_addr` encoded the reference to the
+constant-length table as short immediates, pass 2 grew it from 0x2a2 to 0x2b2 bytes, and every later
+function shifted. The panic ISO's table was wrong for every function from `panic::finish` on (36
+entries), and a `CARGO_PROFILE=release` table in 499 of 1106 entries. Rule: first link with an empty
+table, `nm --demangle` the ELF, second link with the filled table (Makefile `KERNEL_VARIANT`). The
+table is its own `.ksyms` section, reached only through the linker-defined `__ksyms_start` and
+`__ksyms_end`, so the code that reads it is the same size empty and filled and `.text` does not move;
+the recipe regenerates the table from the final ELF with `gen_ksyms.py --check` and fails on any
+difference (ROADMAP §10.2, F084).
 
 **QEMU framebuffer reprints the prompt on every key; serial looks fine.**
 The FB write path skipped `\r` before the text grid saw it, so the line editor's in-place paint

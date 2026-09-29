@@ -94,7 +94,8 @@ CARGO_SHIP = $(CARGO) -Ztrim-paths -Zunstable-options --config 'profile.$(CARGO_
 # first and writes it last, and the variant's ISO reads only that file, so a
 # test build cannot be packaged as production.
 # Two-pass ksyms: the first link has an empty table, nm fills it, and the
-# second link must not move .text (DESIGN §2.5).
+# second link must not move .text: --check regenerates the table from the
+# final ELF and fails on any difference (DESIGN §2.5).
 # $(1)=variant name  $(2)=feature flags  $(3)=iso file
 # Feature flags use repeated --features, never commas (those split $(call)).
 # $$ so $(CARGO_SHIP) is expanded when the recipe runs, not at $(eval) time.
@@ -103,17 +104,29 @@ define KERNEL_VARIANT
 KERNEL_ELFS += build/kernels/vibeos-$(1).elf
 ISOS += $(3)
 ifneq ($(VIBEOS_PREBUILT),1)
-build/kernels/vibeos-$(1).elf: $(KERNEL_DEPS)
+build/kernels/vibeos-$(1).elf: $(KERNEL_DEPS) $(PROFILE_STAMP)
 	rm -rf $$@ build/kernels/vibeos-$(1).ksyms.rs build/kernels/.vibeos-$(1)
 	VIBEOS_INITRD=$(INITRD) $$(CARGO_SHIP) build $$(CARGO_FLAGS) $(2) --artifact-dir build/kernels/.vibeos-$(1)
 	python3 scripts/gen_ksyms.py --nm "$$(NM)" build/kernels/.vibeos-$(1)/vibeos build/kernels/vibeos-$(1).ksyms.rs
 	VIBEOS_INITRD=$(INITRD) VIBEOS_KSYMS=$(CURDIR)/build/kernels/vibeos-$(1).ksyms.rs $$(CARGO_SHIP) build $$(CARGO_FLAGS) $(2) --artifact-dir build/kernels/.vibeos-$(1)
+	python3 scripts/gen_ksyms.py --nm "$$(NM)" --check build/kernels/.vibeos-$(1)/vibeos build/kernels/vibeos-$(1).ksyms.rs
 	python3 scripts/check_kernel_fp.py --objdump "$$(OBJDUMP)" build/kernels/.vibeos-$(1)/vibeos
 	cp build/kernels/.vibeos-$(1)/vibeos $$@
 $(3): build/kernels/vibeos-$(1).elf limine.conf $(LIMINE_BIN) scripts/mkiso.sh
 	LIMINE_DIR=$$(LIMINE_DIR) scripts/mkiso.sh $$< $$@ build/iso_root_$(1)
 endif
 endef
+
+# The named ELFs do not name the profile, so each depends on a stamp that
+# changes only when CARGO_PROFILE does: a release build after a dev build
+# relinks instead of reusing the dev ELF.
+PROFILE_STAMP := build/kernels/profile.stamp
+$(PROFILE_STAMP): FORCE
+	@mkdir -p $(dir $@)
+	@[ "$$(cat $@ 2>/dev/null)" = "$(CARGO_PROFILE)" ] || echo "$(CARGO_PROFILE)" > $@
+
+.PHONY: FORCE
+FORCE:
 
 KERNEL_ELFS :=
 ISOS :=
