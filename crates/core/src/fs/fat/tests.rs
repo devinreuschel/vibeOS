@@ -693,12 +693,12 @@ fn rename_dir_dotdot_names_new_parent() {
         let mut ent = [0u8; ENT];
         v.read_dir_raw(d, dd.clu, ENT as u32, &mut ent).unwrap();
         assert_eq!(
-            (le16(&ent, 20) as u32) << 16 | le16(&ent, 26) as u32,
+            (le16(&ent, 20).unwrap() as u32) << 16 | le16(&ent, 26).unwrap() as u32,
             bb.clu
         );
         v.rename(d, bb.clu, b"d", root, b"d").unwrap();
         v.read_dir_raw(d, dd.clu, ENT as u32, &mut ent).unwrap();
-        assert_eq!((le16(&ent, 20), le16(&ent, 26)), (0, 0));
+        assert_eq!((le16(&ent, 20).unwrap(), le16(&ent, 26).unwrap()), (0, 0));
         let got = v.lookup(d, root, b"d").unwrap();
         assert_eq!(got.clu, dd.clu);
         let f = v.lookup(d, got.clu, b"IN.TXT").unwrap();

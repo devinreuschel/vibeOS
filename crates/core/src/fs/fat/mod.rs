@@ -10,6 +10,7 @@
 
 use crate::fs::{FsError, InodeKind};
 
+#[deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 mod chain;
 mod dirent;
 mod mkfs;
@@ -209,6 +210,12 @@ impl FatInfo {
         Ok(self.rsvd + copy as u32 * self.fatsz + fat_sec)
     }
 
+    /// Whether `clu` lies past the last cluster, `nclus + 1`; FAT entries
+    /// 0 and 1 are in range.
+    pub(super) fn past_end(self, clu: u32) -> bool {
+        clu.checked_sub(2).is_some_and(|c| c >= self.nclus)
+    }
+
     pub fn data_bytes(self) -> u64 {
         self.nclus as u64 * self.clus_bytes() as u64
     }
@@ -367,15 +374,15 @@ impl FatVol {
     }
 
     fn fat_set<D: Disk>(&mut self, d: &mut D, clu: u32, val: u32) -> Result<(), FatError> {
-        if clu >= self.info.nclus + 2 {
+        if self.info.past_end(clu) {
             return Err(FatError::Corrupt);
         }
-        let (sec, ent_off) = fat_loc(clu);
-        let s = self.fat_cache(d, sec)?;
-        let old = le32(&self.cache[s].data, ent_off);
+        let (sec, ent_off) = fat_loc(clu)?;
+        let c = self.fat_sec(d, sec)?;
+        let old = le32(&c.data, ent_off)?;
         let packed = (old & 0xF000_0000) | (val & 0x0FFF_FFFF);
-        put_le32(&mut self.cache[s].data, ent_off, packed);
-        self.cache[s].dirty = true;
+        put_le32(&mut c.data, ent_off, packed)?;
+        c.dirty = true;
         if val == 0 && old & 0x0FFF_FFFF != 0 {
             self.free = self.free.saturating_add(1);
             self.fsinfo_dirty = true;
@@ -412,20 +419,36 @@ impl FatVol {
     }
 }
 
-fn le16(b: &[u8], o: usize) -> u16 {
-    u16::from_le_bytes([b[o], b[o + 1]])
+/// The `N` bytes of `b` at `o`; `Corrupt` when they run past its end.
+fn bytes_at<const N: usize>(b: &[u8], o: usize) -> Result<[u8; N], FatError> {
+    let end = o.checked_add(N).ok_or(FatError::Corrupt)?;
+    let s = b.get(o..end).ok_or(FatError::Corrupt)?;
+    <[u8; N]>::try_from(s).map_err(|_| FatError::Corrupt)
 }
 
-fn le32(b: &[u8], o: usize) -> u32 {
-    u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
+/// Copy `v` into `b` at `o`; `Corrupt` when it runs past `b`'s end.
+fn put_at(b: &mut [u8], o: usize, v: &[u8]) -> Result<(), FatError> {
+    let end = o.checked_add(v.len()).ok_or(FatError::Corrupt)?;
+    b.get_mut(o..end)
+        .ok_or(FatError::Corrupt)?
+        .copy_from_slice(v);
+    Ok(())
 }
 
-fn put_le16(b: &mut [u8], o: usize, v: u16) {
-    b[o..o + 2].copy_from_slice(&v.to_le_bytes());
+fn le16(b: &[u8], o: usize) -> Result<u16, FatError> {
+    bytes_at(b, o).map(u16::from_le_bytes)
 }
 
-fn put_le32(b: &mut [u8], o: usize, v: u32) {
-    b[o..o + 4].copy_from_slice(&v.to_le_bytes());
+fn le32(b: &[u8], o: usize) -> Result<u32, FatError> {
+    bytes_at(b, o).map(u32::from_le_bytes)
+}
+
+fn put_le16(b: &mut [u8], o: usize, v: u16) -> Result<(), FatError> {
+    put_at(b, o, &v.to_le_bytes())
+}
+
+fn put_le32(b: &mut [u8], o: usize, v: u32) -> Result<(), FatError> {
+    put_at(b, o, &v.to_le_bytes())
 }
 
 fn name_is_dot(n: &[u8]) -> bool {

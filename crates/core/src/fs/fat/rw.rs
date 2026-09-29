@@ -175,7 +175,7 @@ impl FatVol {
             let ord = (n_lfn - slot) as u8;
             let last = slot == 0;
             let mut ent = [0u8; ENT];
-            fill_lfn(&mut ent, ord, last, cs, name);
+            fill_lfn(&mut ent, ord, last, cs, name)?;
             let off = ent_off + (slot * ENT) as u32;
             self.write_dir_raw(d, dir_clu, off, &ent)?;
             slot += 1;
@@ -183,14 +183,14 @@ impl FatVol {
         let mut ent = [0u8; ENT];
         ent[..11].copy_from_slice(&short);
         ent[11] = if dir { ATTR_DIR } else { ATTR_ARCH };
-        put_le16(&mut ent, 14, time);
-        put_le16(&mut ent, 16, date);
-        put_le16(&mut ent, 18, date);
-        put_le16(&mut ent, 20, (first >> 16) as u16);
-        put_le16(&mut ent, 22, time);
-        put_le16(&mut ent, 24, date);
-        put_le16(&mut ent, 26, (first & 0xFFFF) as u16);
-        put_le32(&mut ent, 28, 0);
+        put_le16(&mut ent, 14, time)?;
+        put_le16(&mut ent, 16, date)?;
+        put_le16(&mut ent, 18, date)?;
+        put_le16(&mut ent, 20, (first >> 16) as u16)?;
+        put_le16(&mut ent, 22, time)?;
+        put_le16(&mut ent, 24, date)?;
+        put_le16(&mut ent, 26, (first & 0xFFFF) as u16)?;
+        put_le32(&mut ent, 28, 0)?;
         let short_off = ent_off + (n_lfn * ENT) as u32;
         self.write_dir_raw(d, dir_clu, short_off, &ent)?;
         d.flush()?;
@@ -280,7 +280,7 @@ impl FatVol {
         while slot < n_lfn {
             let ord = (n_lfn - slot) as u8;
             let mut ent = [0u8; ENT];
-            fill_lfn(&mut ent, ord, slot == 0, cs, dst_name);
+            fill_lfn(&mut ent, ord, slot == 0, cs, dst_name)?;
             self.write_dir_raw(d, dst_dir, ent_off + (slot * ENT) as u32, &ent)?;
             slot += 1;
         }
@@ -313,7 +313,7 @@ impl FatVol {
         if !self.read_dir_raw(d, dir, ENT as u32, &mut ent)? || &ent[..11] != b"..         " {
             return Err(FatError::Corrupt);
         }
-        let clu = (le16(&ent, 20) as u32) << 16 | le16(&ent, 26) as u32;
+        let clu = (le16(&ent, 20)? as u32) << 16 | le16(&ent, 26)? as u32;
         Ok(if clu == 0 { self.info.root_clus } else { clu })
     }
 
@@ -324,8 +324,8 @@ impl FatVol {
         if !self.read_dir_raw(d, dir, ENT as u32, &mut ent)? || &ent[..11] != b"..         " {
             return Err(FatError::Corrupt);
         }
-        put_le16(&mut ent, 20, (parent >> 16) as u16);
-        put_le16(&mut ent, 26, parent as u16);
+        put_le16(&mut ent, 20, (parent >> 16) as u16)?;
+        put_le16(&mut ent, 26, parent as u16)?;
         self.write_dir_raw(d, dir, ENT as u32, &ent)
     }
 

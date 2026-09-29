@@ -23,12 +23,12 @@ impl FatVol {
         if info.fsinfo != 0 && info.fsinfo < info.rsvd {
             let mut fs = [0u8; SEC];
             d.read(info.fsinfo, &mut fs)?;
-            if le32(&fs, 0) == 0x4161_5252
-                && le32(&fs, 484) == 0x6141_7272
-                && le32(&fs, 508) == 0xAA55_0000
+            if le32(&fs, 0)? == 0x4161_5252
+                && le32(&fs, 484)? == 0x6141_7272
+                && le32(&fs, 508)? == 0xAA55_0000
             {
-                let free = le32(&fs, 488);
-                let hint = le32(&fs, 492);
+                let free = le32(&fs, 488)?;
+                let hint = le32(&fs, 492)?;
                 if free != 0xFFFFFFFF {
                     vol.free = free;
                 }
@@ -187,8 +187,8 @@ impl FatVol {
         ent: &[u8; ENT],
         lfn: &[u8],
     ) -> Result<Node, FatError> {
-        let clu = (le16(ent, 20) as u32) << 16 | le16(ent, 26) as u32;
-        let size = le32(ent, 28);
+        let clu = (le16(ent, 20)? as u32) << 16 | le16(ent, 26)? as u32;
+        let size = le32(ent, 28)?;
         let attr = ent[11];
         let kind = if attr & ATTR_DIR != 0 {
             InodeKind::Dir
@@ -197,7 +197,7 @@ impl FatVol {
         };
         let mut n = self.node_from_clu(clu, kind, size, dir_clu, dir_off)?;
         n.attr = attr;
-        n.mtime = fat_to_unix(le16(ent, 24), le16(ent, 22));
+        n.mtime = fat_to_unix(le16(ent, 24)?, le16(ent, 22)?);
         if !lfn.is_empty() {
             let len = lfn.len().min(MAX_NAME);
             n.name[..len].copy_from_slice(&lfn[..len]);
@@ -233,7 +233,7 @@ fn parse_bpb(boot: &[u8; SEC], nsectors: u32) -> Result<FatInfo, FatError> {
     if boot[510] != 0x55 || boot[511] != 0xAA {
         return Err(FatError::Corrupt);
     }
-    let bps = le16(boot, 11) as u32;
+    let bps = le16(boot, 11)? as u32;
     if bps != SEC as u32 {
         return Err(FatError::Inval);
     }
@@ -241,30 +241,30 @@ fn parse_bpb(boot: &[u8; SEC], nsectors: u32) -> Result<FatInfo, FatError> {
     if spc == 0 || (spc & (spc - 1)) != 0 {
         return Err(FatError::Inval);
     }
-    let rsvd = le16(boot, 14) as u32;
+    let rsvd = le16(boot, 14)? as u32;
     let num_fats = boot[16];
     if rsvd == 0 || num_fats == 0 || num_fats > 2 {
         return Err(FatError::Inval);
     }
-    if le16(boot, 17) != 0 || le16(boot, 22) != 0 {
+    if le16(boot, 17)? != 0 || le16(boot, 22)? != 0 {
         return Err(FatError::Inval);
     }
-    let tot16 = le16(boot, 19) as u32;
-    let tot32 = le32(boot, 32);
+    let tot16 = le16(boot, 19)? as u32;
+    let tot32 = le32(boot, 32)?;
     let totsec = if tot16 != 0 { tot16 } else { tot32 };
     if totsec == 0 || totsec > nsectors {
         return Err(FatError::Corrupt);
     }
-    let fatsz = le32(boot, 36);
+    let fatsz = le32(boot, 36)?;
     if fatsz == 0 {
         return Err(FatError::Inval);
     }
-    let root_clus = le32(boot, 44);
+    let root_clus = le32(boot, 44)?;
     if root_clus < 2 {
         return Err(FatError::Corrupt);
     }
-    let fsinfo = le16(boot, 48) as u32;
-    let backup = le16(boot, 50) as u32;
+    let fsinfo = le16(boot, 48)? as u32;
+    let backup = le16(boot, 50)? as u32;
     let media = boot[21];
     let data_lba = rsvd + num_fats as u32 * fatsz;
     if data_lba >= totsec {

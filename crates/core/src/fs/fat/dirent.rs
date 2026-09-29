@@ -40,7 +40,7 @@ impl FatVol {
                     off = next;
                     continue;
                 }
-                let n = take_lfn(&ent, &mut lfn, lfn_len);
+                let n = take_lfn(&ent, &mut lfn, lfn_len)?;
                 if n > lfn_len {
                     lfn_len = n;
                 }
@@ -278,13 +278,13 @@ impl FatVol {
     ) -> Result<(), FatError> {
         let mut buf = [0u8; MAX_CLUS_BYTES];
         let n = self.info.clus_bytes();
-        fill_dot(&mut buf[0..ENT], b".          ", clu, self.now);
+        fill_dot(&mut buf[0..ENT], b".          ", clu, self.now)?;
         let p = if parent == self.info.root_clus {
             0
         } else {
             parent
         };
-        fill_dot(&mut buf[ENT..ENT * 2], b"..         ", p, self.now);
+        fill_dot(&mut buf[ENT..ENT * 2], b"..         ", p, self.now)?;
         self.write_cluster(d, clu, &buf[..n])
     }
 
@@ -301,11 +301,11 @@ impl FatVol {
             return Err(FatError::Corrupt);
         }
         let (date, time) = fat_datetime(self.now);
-        put_le16(&mut ent, 20, (first >> 16) as u16);
-        put_le16(&mut ent, 22, time);
-        put_le16(&mut ent, 24, date);
-        put_le16(&mut ent, 26, (first & 0xFFFF) as u16);
-        put_le32(&mut ent, 28, size);
+        put_le16(&mut ent, 20, (first >> 16) as u16)?;
+        put_le16(&mut ent, 22, time)?;
+        put_le16(&mut ent, 24, date)?;
+        put_le16(&mut ent, 26, (first & 0xFFFF) as u16)?;
+        put_le32(&mut ent, 28, size)?;
         self.write_dir_raw(d, dir, off, &ent)
     }
 }
@@ -346,10 +346,10 @@ pub(super) fn utf16_len(name: &[u8]) -> usize {
     name.len()
 }
 
-fn take_lfn(ent: &[u8; ENT], out: &mut [u8; MAX_NAME], _len: usize) -> usize {
+fn take_lfn(ent: &[u8; ENT], out: &mut [u8; MAX_NAME], _len: usize) -> Result<usize, FatError> {
     let ord = ent[0] & !LFN_LAST;
     if ord == 0 {
-        return 0;
+        return Ok(0);
     }
     let base = ((ord as usize) - 1) * LFN_CHARS;
     let slots = [(1usize, 5usize), (14usize, 6usize), (28usize, 2usize)];
@@ -360,13 +360,13 @@ fn take_lfn(ent: &[u8; ENT], out: &mut [u8; MAX_NAME], _len: usize) -> usize {
         let mut k = 0usize;
         while k < cnt {
             let p = off + k * 2;
-            let ch = le16(ent, p);
+            let ch = le16(ent, p)?;
             if ch == 0 || ch == 0xFFFF {
-                return if base + n > MAX_NAME {
+                return Ok(if base + n > MAX_NAME {
                     MAX_NAME
                 } else {
                     base + n
-                };
+                });
             }
             let at = base + n;
             if at < MAX_NAME {
@@ -378,10 +378,16 @@ fn take_lfn(ent: &[u8; ENT], out: &mut [u8; MAX_NAME], _len: usize) -> usize {
         i += 1;
     }
     let total = base + n;
-    if total > MAX_NAME { MAX_NAME } else { total }
+    Ok(if total > MAX_NAME { MAX_NAME } else { total })
 }
 
-pub(super) fn fill_lfn(ent: &mut [u8; ENT], ord: u8, last: bool, cs: u8, name: &[u8]) {
+pub(super) fn fill_lfn(
+    ent: &mut [u8; ENT],
+    ord: u8,
+    last: bool,
+    cs: u8,
+    name: &[u8],
+) -> Result<(), FatError> {
     ent.fill(0);
     ent[0] = if last { ord | LFN_LAST } else { ord };
     ent[11] = ATTR_LFN;
@@ -404,16 +410,17 @@ pub(super) fn fill_lfn(ent: &mut [u8; ENT], ord: u8, last: bool, cs: u8, name: &
     }
     let mut k = 0usize;
     while k < 5 {
-        put_le16(ent, 1 + k * 2, chars[k]);
+        put_le16(ent, 1 + k * 2, chars[k])?;
         k += 1;
     }
     k = 0;
     while k < 6 {
-        put_le16(ent, 14 + k * 2, chars[5 + k]);
+        put_le16(ent, 14 + k * 2, chars[5 + k])?;
         k += 1;
     }
-    put_le16(ent, 28, chars[11]);
-    put_le16(ent, 30, chars[12]);
+    put_le16(ent, 28, chars[11])?;
+    put_le16(ent, 30, chars[12])?;
+    Ok(())
 }
 
 pub(super) fn decode_short(ent: &[u8; ENT]) -> ([u8; MAX_NAME], u8) {
@@ -550,18 +557,19 @@ fn apply_tilde(out: &mut [u8; 11], n: u32) {
     }
 }
 
-fn fill_dot(ent: &mut [u8], name11: &[u8], clu: u32, now: u32) {
+fn fill_dot(ent: &mut [u8], name11: &[u8], clu: u32, now: u32) -> Result<(), FatError> {
     ent.fill(0);
     ent[..11].copy_from_slice(name11);
     ent[11] = ATTR_DIR;
     let (date, time) = fat_datetime(now);
-    put_le16(ent, 14, time);
-    put_le16(ent, 16, date);
-    put_le16(ent, 18, date);
-    put_le16(ent, 20, (clu >> 16) as u16);
-    put_le16(ent, 22, time);
-    put_le16(ent, 24, date);
-    put_le16(ent, 26, (clu & 0xFFFF) as u16);
+    put_le16(ent, 14, time)?;
+    put_le16(ent, 16, date)?;
+    put_le16(ent, 18, date)?;
+    put_le16(ent, 20, (clu >> 16) as u16)?;
+    put_le16(ent, 22, time)?;
+    put_le16(ent, 24, date)?;
+    put_le16(ent, 26, (clu & 0xFFFF) as u16)?;
+    Ok(())
 }
 
 pub(super) fn fat_datetime(secs: u32) -> (u16, u16) {
