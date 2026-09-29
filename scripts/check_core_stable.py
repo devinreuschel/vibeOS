@@ -56,7 +56,6 @@ PARSERS: tuple[tuple[str, str, str], ...] = (
 # as `path` or `path::target`. A pending row whose attribute exists fails.
 PARSERS_PENDING: tuple[str, ...] = (
     "acpi/mod.rs",
-    "block/part.rs",
     "console/kbd.rs::Decoder::feed",
     "fs/fat/mod.rs",
     "fs/vibefs/mod.rs",
