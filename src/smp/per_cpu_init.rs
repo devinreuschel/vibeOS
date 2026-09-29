@@ -1,11 +1,18 @@
-#![cfg_attr(not(feature = "kernel_tests"), allow(dead_code))]
 //! Per-CPU areas via `GS_BASE`. DESIGN §3.3 step 11, §7.5.
 //!
 //! Heap array sized from the MADT CPU count. After GDT (`mov gs` zeros
 //! the hidden base). Before the first timer IRQ: ISRs must not `gs:[0]`
 //! until this is live. `KERNEL_GS_BASE` matches `GS_BASE`.
 
+#[allow(
+    clippy::disallowed_types,
+    reason = "boot: DESIGN §3.3 step 11 per-CPU areas, before irq: enabled; sized once from the MADT, never grown"
+)]
 use alloc::boxed::Box;
+#[allow(
+    clippy::disallowed_types,
+    reason = "boot: DESIGN §3.3 step 11 per-CPU areas, before irq: enabled; sized once from the MADT, never grown"
+)]
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -20,9 +27,17 @@ use crate::x86::InterruptGuard;
 pub const IA32_GS_BASE: u32 = 0xC000_0101;
 pub const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
 
+#[allow(
+    clippy::disallowed_types,
+    reason = "boot: DESIGN §3.3 step 11 per-CPU areas, before irq: enabled; sized once from the MADT, never grown"
+)]
 static CPUS: BootCell<Box<[PerCpu]>> = BootCell::new();
 /// Each CPU's remote view, apart from `CPUS` so that no `&mut PerCpu`
 /// covers memory another CPU holds `&` to (DESIGN §7.5).
+#[allow(
+    clippy::disallowed_types,
+    reason = "boot: DESIGN §3.3 step 11 per-CPU areas, before irq: enabled; sized once from the MADT, never grown"
+)]
 static REMOTE: BootCell<Box<[PerCpuRemote]>> = BootCell::new();
 
 // `cpu(id)` shares `&PerCpuRemote` across CPUs, so the view must be `Sync`
@@ -50,6 +65,10 @@ fn madt_cpu_count() -> usize {
 /// # Safety
 /// GDT already loaded (`mov gs` already happened). Single-CPU. IRQs
 /// still masked at the controller, or at least no ISR uses `per_cpu`.
+#[allow(
+    clippy::disallowed_types,
+    reason = "boot: DESIGN §3.3 step 11 per-CPU areas, before irq: enabled; sized once from the MADT, never grown"
+)]
 pub unsafe fn init_bsp() {
     let n = madt_cpu_count();
     let mut r = Vec::with_capacity(n);
@@ -79,11 +98,18 @@ pub unsafe fn init_bsp() {
     remote[0].apic_id.store(apic_id(), Ordering::Relaxed);
     remote[0].ready.store(true, Ordering::Release);
     let ptr = boxed[0].self_ptr as u64;
+    // SAFETY: `ptr` is slot 0's address, the BSP's `PerCpu`, and the heap
+    // keeps the boxed slice in place for good once `CPUS` holds it; the GDT
+    // load already did the `mov gs`, and no ISR reads `gs:[0]` yet (this
+    // fn's `# Safety` contract), so both bases name this CPU's area from
+    // here on (invariant I4, established here).
     unsafe {
         x86::wrmsr(IA32_GS_BASE, ptr);
         x86::wrmsr(IA32_KERNEL_GS_BASE, ptr);
     }
     core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    // SAFETY: single writer before `smp: done`, no reader yet (BootCell's
+    // set contract); established here: `init_bsp` runs once on the BSP.
     unsafe { CPUS.set(boxed) };
     x86::set_per_cpu_hooks(irq_nest_enter, irq_nest_leave, cpu_index_hook);
     LIVE.store(true, Ordering::Release);
@@ -115,6 +141,11 @@ pub fn current() -> &'static PerCpu {
     assert!(is_live(), "per_cpu: not live");
     let p = gs_self();
     assert!(!p.is_null(), "per_cpu: gs null");
+    // SAFETY: once `LIVE` is set, `gs:[0]` is this CPU's slot in `CPUS`,
+    // which is never freed (invariant I4, established at
+    // `smp::per_cpu_init::init_bsp` and `smp::per_cpu_init::install_gs`).
+    // The shared reference may overlap a `with_current` scope's `&mut` on
+    // this CPU, as invariant I36's row records (ROADMAP §10.3, F039).
     unsafe { &*p }
 }
 
@@ -126,6 +157,9 @@ pub fn try_current() -> Option<&'static PerCpu> {
     if p.is_null() {
         return None;
     }
+    // SAFETY: as in `current`: invariant I4, established at
+    // `smp::per_cpu_init::init_bsp` and `smp::per_cpu_init::install_gs`,
+    // with the overlap invariant I36's row records.
     Some(unsafe { &*p })
 }
 
@@ -139,7 +173,10 @@ pub fn with_current<R>(f: impl FnOnce(&mut PerCpu) -> R) -> R {
     assert!(is_live(), "per_cpu: not live");
     let p = gs_self();
     assert!(!p.is_null(), "per_cpu: gs null");
-    with_ptr(p, f)
+    // SAFETY: `with_ptr`'s contract; `p` is this CPU's slot (invariant I4,
+    // established at `smp::per_cpu_init::init_bsp`), and the guard above
+    // holds IF=0 (invariant I21, established here).
+    unsafe { with_ptr(p, f) }
 }
 
 /// Exclusive `&mut PerCpu` for `switch_now`'s bookkeeping. Needs IF=0.
@@ -157,7 +194,10 @@ pub fn with_current_switch<R>(f: impl FnOnce(&mut PerCpu) -> R) -> R {
     assert!(is_live(), "per_cpu: not live");
     let p = gs_self();
     assert!(!p.is_null(), "per_cpu: gs null");
-    with_ptr(p, f)
+    // SAFETY: `with_ptr`'s contract; `p` is this CPU's slot (invariant I4,
+    // established at `smp::per_cpu_init::init_bsp`), and the assert above
+    // found IF=0 (invariant I21, established here).
+    unsafe { with_ptr(p, f) }
 }
 
 /// Exclusive `&mut PerCpu` for CPU `id`. IRQs off. BSP bring-up of an AP
@@ -172,11 +212,25 @@ pub unsafe fn with_cpu<R>(id: u32, f: impl FnOnce(&mut PerCpu) -> R) -> Option<R
     let _irq = InterruptGuard::enter();
     let cpus = CPUS.try_get()?;
     let cpu = cpus.get(id as usize)?;
-    Some(with_ptr(cpu.self_ptr, f))
+    // SAFETY: `with_ptr`'s contract; `self_ptr` is slot `id` of `CPUS`, and
+    // CPU `id` is not running by this fn's `# Safety` contract (invariants
+    // I120 and I21, established here).
+    Some(unsafe { with_ptr(cpu.self_ptr, f) })
 }
 
+/// Run `f` on `&mut *p` under `p`'s busy flag.
+///
+/// # Safety
+/// `p` is a slot of `CPUS`, and the caller may take `&mut` to it: it is
+/// this CPU's slot and IF=0, or its CPU is not running (invariant I21).
 #[inline(always)]
-fn with_ptr<R>(p: *mut PerCpu, f: impl FnOnce(&mut PerCpu) -> R) -> R {
+#[allow(
+    clippy::panic,
+    reason = "invariant I21: a with_current or with_cpu scope never nests on one slot"
+)]
+unsafe fn with_ptr<R>(p: *mut PerCpu, f: impl FnOnce(&mut PerCpu) -> R) -> R {
+    // SAFETY: `p` is a live slot of `CPUS` by this fn's `# Safety`
+    // contract, established here; `cpu_id` is written once in `init_bsp`.
     let id = unsafe { (*p).cpu_id as usize }.min(63);
     if WITH_BUSY[id].swap(true, Ordering::Acquire) {
         panic!("per_cpu: with_current re-entry");
@@ -203,6 +257,9 @@ fn with_ptr<R>(p: *mut PerCpu, f: impl FnOnce(&mut PerCpu) -> R) -> R {
 /// before `sti` / any ISR that reads `gs:[0]`.
 pub unsafe fn install_gs(cpu: &PerCpu) {
     let ptr = cpu.self_ptr as u64;
+    // SAFETY: `cpu` is this CPU's `PerCpu`, after `mov gs` and before any
+    // ISR reads `gs:[0]` (this fn's `# Safety` contract), so both bases name
+    // this CPU's area from here on (invariant I4, established here).
     unsafe {
         x86::wrmsr(IA32_GS_BASE, ptr);
         x86::wrmsr(IA32_KERNEL_GS_BASE, ptr);
@@ -239,6 +296,10 @@ pub fn irq_nest() -> u32 {
 
 pub fn gs_self() -> *mut PerCpu {
     let ptr: u64;
+    // SAFETY: an 8-byte load at `GS_BASE` that touches no stack or flags;
+    // once `init_bsp` (on an AP, `install_gs`) ran, `GS_BASE` is this CPU's
+    // `PerCpu`, whose first field is `self_ptr` (invariant I4, established
+    // at `smp::per_cpu_init::init_bsp`), and every caller runs after that.
     unsafe {
         core::arch::asm!(
             "mov {}, qword ptr gs:[0]",
