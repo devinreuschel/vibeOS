@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import subprocess
 import sys
 
@@ -82,6 +83,54 @@ def check_first_kernel_line(lines: list[str]) -> None:
             return
         if kernel_text(line) is not None:
             raise HarnessError(f"kernel line before {SERIAL_ONLINE!r}: {line}")
+
+
+# The boot log's memory diagnostics (DESIGN §8.3).
+PMM_FREE_RE = re.compile(r"^vibeOS: pmm: (\d+) free 4KiB frames$")
+PMM_TOTAL_RE = re.compile(r"^vibeOS: pmm: (\d+) total, largest order (-?\d+)$")
+MEMINFO_TOTAL_RE = re.compile(r"^vibeOS: meminfo: total (\d+) frames, free (\d+), used (\d+)\b")
+MEMINFO_HEAP_RE = re.compile(r"^vibeOS: meminfo: heap used (\d+) B / capacity (\d+) B$")
+MEMINFO_PREFIX = "vibeOS: meminfo: "
+
+
+def check_meminfo(lines: list[str]) -> None:
+    """`diag::meminfo`'s boot lines agree with the `pmm:` lines (ROADMAP §10.2).
+
+    Each `meminfo:` line (grouped by its text up to the first digit) and each
+    `pmm:` line appears once; the frame total equals pmm's; free is at most
+    pmm's free count; used is total minus free; heap use is at most capacity.
+    """
+    texts = [t for t in (kernel_text(ln) for ln in lines) if t is not None]
+    groups: dict[str, int] = {}
+    for t in texts:
+        if t.startswith(MEMINFO_PREFIX):
+            key = re.match(r"\D*", t)
+            k = key.group() if key else t
+            groups[k] = groups.get(k, 0) + 1
+    for k, n in groups.items():
+        if n != 1:
+            raise HarnessError(f"meminfo: {k!r} line appears {n} times, expected once")
+
+    def once(rx: re.Pattern[str], what: str) -> re.Match[str]:
+        found = [m for m in (rx.match(t) for t in texts) if m is not None]
+        if len(found) != 1:
+            raise HarnessError(f"meminfo: {len(found)} {what!r} lines, expected one")
+        return found[0]
+
+    pmm_free = int(once(PMM_FREE_RE, "vibeOS: pmm: <n> free 4KiB frames").group(1))
+    pmm_total = int(once(PMM_TOTAL_RE, "vibeOS: pmm: <n> total").group(1))
+    m = once(MEMINFO_TOTAL_RE, "vibeOS: meminfo: total")
+    total, free, used = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    h = once(MEMINFO_HEAP_RE, "vibeOS: meminfo: heap used")
+    heap_used, heap_cap = int(h.group(1)), int(h.group(2))
+    if total != pmm_total:
+        raise HarnessError(f"meminfo: total {total} frames, but pmm: {pmm_total} total")
+    if free > pmm_free:
+        raise HarnessError(f"meminfo: free {free} above pmm: {pmm_free} free 4KiB frames")
+    if used != total - free:
+        raise HarnessError(f"meminfo: used {used} is not total {total} minus free {free}")
+    if heap_used > heap_cap:
+        raise HarnessError(f"meminfo: heap used {heap_used} B above capacity {heap_cap} B")
 
 
 def _record_missing(message: str) -> None:
@@ -266,6 +315,12 @@ def main() -> int:
             print(f"[e2e] FAIL: {e}", file=sys.stderr)
             return 1
         print("[e2e]   . pci qemu set ok", file=sys.stderr)
+        try:
+            check_meminfo(result.lines)
+        except HarnessError as e:
+            print(f"[e2e] FAIL: {e}", file=sys.stderr)
+            return 1
+        print("[e2e]   . meminfo ok", file=sys.stderr)
         try:
             inp = run_qemu_console_input(cfg, timeout_s=env.timeout)
         except HarnessError as e:

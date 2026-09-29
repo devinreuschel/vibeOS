@@ -498,6 +498,76 @@ class TestFirstKernelLine(unittest.TestCase):
         self.assertIsNone(kernel_text("user: tests ok"))
 
 
+# The memory diagnostics of a real `make test-e2e` boot.
+MEMINFO_BOOT = [
+    "limine: Loading executable `boot():/boot/vibeos`...",
+    "vibeOS: serial online",
+    "vibeOS: limine: rev 3 ok",
+    "vibeOS: pmm: 29503 free 4KiB frames",
+    "vibeOS: pmm: 29503 total, largest order 10",
+    "vibeOS: paging: cr3 ok",
+    "vibeOS: meminfo: total 29503 frames, free 29208, used 295, largest order 10",
+    "vibeOS: meminfo: leaked 0 frames",
+    "vibeOS: meminfo: heap used 5728 B / capacity 1048576 B",
+    "vibeOS: meminfo: kva used 102400 B",
+    "vibeOS: pt: 16 ranges",
+    "vibeOS: sched: cpu0 ready",
+]
+MEMINFO_TOTAL_LINE = MEMINFO_BOOT.index(
+    "vibeOS: meminfo: total 29503 frames, free 29208, used 295, largest order 10"
+)
+MEMINFO_HEAP_LINE = MEMINFO_BOOT.index("vibeOS: meminfo: heap used 5728 B / capacity 1048576 B")
+
+
+def doctor(i: int, line: str) -> list[str]:
+    out = list(MEMINFO_BOOT)
+    out[i] = line
+    return out
+
+
+class TestMeminfoCheck(unittest.TestCase):
+    """The boot log's `meminfo:` lines agree with its `pmm:` lines."""
+
+    def fails(self, lines: list[str], needle: str) -> None:
+        with self.assertRaises(HarnessError) as cm:
+            run_e2e.check_meminfo(lines)
+        self.assertIn(needle, str(cm.exception))
+
+    def test_real_boot_passes(self) -> None:
+        run_e2e.check_meminfo(MEMINFO_BOOT)
+
+    def test_duplicate_total_fails(self) -> None:
+        lines = MEMINFO_BOOT + [MEMINFO_BOOT[MEMINFO_TOTAL_LINE]]
+        self.fails(lines, "'vibeOS: meminfo: total ' line appears 2 times, expected once")
+
+    def test_duplicate_pmm_line_fails(self) -> None:
+        self.fails(MEMINFO_BOOT + [MEMINFO_BOOT[3]], "2 'vibeOS: pmm: <n> free 4KiB frames' lines")
+
+    def test_total_not_pmm_total_fails(self) -> None:
+        line = "vibeOS: meminfo: total 29504 frames, free 29209, used 295, largest order 10"
+        self.fails(doctor(MEMINFO_TOTAL_LINE, line), "total 29504 frames, but pmm: 29503 total")
+
+    def test_free_above_pmm_free_fails(self) -> None:
+        lines = doctor(3, "vibeOS: pmm: 29000 free 4KiB frames")
+        self.fails(lines, "free 29208 above pmm: 29000 free 4KiB frames")
+
+    def test_used_not_total_minus_free_fails(self) -> None:
+        line = "vibeOS: meminfo: total 29503 frames, free 29208, used 296, largest order 10"
+        self.fails(doctor(MEMINFO_TOTAL_LINE, line), "used 296 is not total 29503 minus free 29208")
+
+    def test_heap_above_capacity_fails(self) -> None:
+        line = "vibeOS: meminfo: heap used 1048577 B / capacity 1048576 B"
+        self.fails(doctor(MEMINFO_HEAP_LINE, line), "heap used 1048577 B above capacity 1048576 B")
+
+    def test_no_meminfo_line_fails(self) -> None:
+        lines = [ln for ln in MEMINFO_BOOT if "meminfo:" not in ln]
+        self.fails(lines, "0 'vibeOS: meminfo: total' lines, expected one")
+
+    def test_trailing_fields_tolerated(self) -> None:
+        line = MEMINFO_BOOT[MEMINFO_TOTAL_LINE] + ", leaked 0"
+        run_e2e.check_meminfo(doctor(MEMINFO_TOTAL_LINE, line))
+
+
 QEMU_LOAD_ERR = "qemu-system-x86_64: -bios x.fd: could not load"
 
 
@@ -887,7 +957,7 @@ class TestNoRetry(unittest.TestCase):
 
     def test_e2e_console_input_no_shell_boots_once(self) -> None:
         marker_boot = RunResult(
-            lines=["vibeOS: serial online", *run_e2e.PCI_GOLDEN, "vibeOS: pci: 6 devices"],
+            lines=[*MEMINFO_BOOT, *run_e2e.PCI_GOLDEN, "vibeOS: pci: 6 devices"],
             exit_code=0,
         )
         with (

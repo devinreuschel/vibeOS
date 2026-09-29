@@ -236,6 +236,21 @@ With `-smp N`, additionally:
 - `vibeOS: time: lapic_timer ok (<mode>)` naming the selected timer path
   (`tsc-deadline`, `periodic`, or `pit`) rather than inferring it
 
+e2e also reads the boot log's memory diagnostics, which print before `sched: cpu0 ready`, in every
+production mode (default, `EXPECT_PIT`, highmem, and UEFI; `check_meminfo` in `run_e2e.py`):
+
+```
+vibeOS: pmm: <n> free 4KiB frames
+vibeOS: pmm: <n> total, largest order <n>
+vibeOS: meminfo: total <n> frames, free <n>, used <n>, largest order <n>
+vibeOS: meminfo: leaked <n> frames
+vibeOS: meminfo: heap used <n> B / capacity <n> B
+```
+
+Each `meminfo:` line (told apart by its text up to the first digit) and each `pmm:` line appears
+once; the `meminfo:` frame total equals the `pmm: <n> total` line's; free is at most the
+`pmm: <n> free 4KiB frames` count; used is total minus free; and heap use is at most heap capacity.
+
 The list above is the contract of a boot through Limine. Planned (ROADMAP §25.4, §26.4): a boot
 through the image's direct entry prints `vibeOS: boot: <path> entry ok`, where `<path>` is `kexec`,
 `crash`, or `pvh`, in place of `limine: rev <n> ok`. A crash entry, ROADMAP §25.4's capture kernel,
