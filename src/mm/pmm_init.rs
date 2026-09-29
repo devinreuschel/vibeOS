@@ -4,27 +4,23 @@
 //!
 //! DESIGN §4.2 lists the regions that must not enter the free lists:
 //!   - physical frame 0
+//!   - the AP trampoline page `boot::capture` chose (DESIGN §7.3)
 //!   - the loaded kernel image span
-//!   - the AP trampoline page at 0x8000
-//!   - the framebuffer
+//!   - each framebuffer and each boot module
 //!   - anything not marked `USABLE`, including bootloader- and
 //!     ACPI-reclaimable
 //!   - anything above the 8 GiB physmap cap
 //!
-//! Frame 0 is dropped inside `Buddy::insert_region`. Kernel, trampoline,
-//! and framebuffer are sorted into an "excludes" list and subtracted from
-//! every USABLE range before it is inserted.
+//! `vibeos::pmm::clip_usable` subtracts the first four from every USABLE
+//! range as it reads `BootInfo`, with no fixed-size list (DESIGN §2.4);
+//! `Buddy::insert_region` drops frame 0 again as defence in depth.
 
 use vibeos::lock::RANK_BUDDY;
-use vibeos::pmm::{Buddy, PAGE_SIZE, PmmStats};
+use vibeos::pmm::{Buddy, PAGE_SIZE, PmmStats, clip_usable};
 
 use crate::boot::BootInfo;
 use crate::sync_init::SpinMutex;
 use vibeos::paging::{HHDM_BASE, PHYSMAP_CAP};
-
-/// AP trampoline page. DESIGN §7.3 fixes the SIPI vector at 0x08, which
-/// means the entry point lives at physical 0x8000.
-const AP_TRAMPOLINE_PHYS: u64 = 0x8000;
 
 static BUDDY: SpinMutex<Buddy> = SpinMutex::with_rank(Buddy::new(HHDM_BASE), RANK_BUDDY);
 
@@ -32,62 +28,6 @@ static BUDDY: SpinMutex<Buddy> = SpinMutex::with_rank(Buddy::new(HHDM_BASE), RAN
 pub fn with_buddy<R>(f: impl FnOnce(&mut Buddy) -> R) -> R {
     let mut g = BUDDY.lock();
     f(&mut g)
-}
-
-/// One entry in the sorted excludes list, [start, end).
-#[derive(Copy, Clone, Debug)]
-struct Range {
-    start: u64,
-    end: u64,
-}
-
-/// Fixed-size excludes buffer: kernel image, AP trampoline, one per
-/// framebuffer. Frame 0 is handled implicitly by `Buddy::insert_region`.
-const MAX_EXCLUDES: usize = 8;
-
-struct Excludes {
-    ranges: [Range; MAX_EXCLUDES],
-    len: usize,
-}
-
-impl Excludes {
-    const fn new() -> Self {
-        Self {
-            ranges: [Range { start: 0, end: 0 }; MAX_EXCLUDES],
-            len: 0,
-        }
-    }
-
-    /// Rounded out to pages so no partial page leaks in.
-    fn push(&mut self, start: u64, end: u64) {
-        let (start, end) = (align_down(start, PAGE_SIZE), align_up(end, PAGE_SIZE));
-        if start >= end {
-            return;
-        }
-        if self.len >= MAX_EXCLUDES {
-            // Bump the cap rather than silently dropping.
-            crate::marker!("vibeOS: pmm: excludes overflow, dropping {start:#x}..{end:#x}");
-            return;
-        }
-        self.ranges[self.len] = Range { start, end };
-        self.len += 1;
-    }
-
-    fn sort(&mut self) {
-        // Insertion sort by start. len <= MAX_EXCLUDES so O(n^2) is nothing.
-        let s = &mut self.ranges[..self.len];
-        for i in 1..s.len() {
-            let mut j = i;
-            while j > 0 && s[j - 1].start > s[j].start {
-                s.swap(j - 1, j);
-                j -= 1;
-            }
-        }
-    }
-
-    fn as_slice(&self) -> &[Range] {
-        &self.ranges[..self.len]
-    }
 }
 
 /// Ingest usable RAM into the global buddy. Returns the resulting stats
@@ -100,79 +40,38 @@ impl Excludes {
 pub unsafe fn init(info: &BootInfo) -> PmmStats {
     let mut buddy = BUDDY.lock();
 
-    let mut excl = Excludes::new();
-    // AP trampoline. DESIGN §2.4 keeps 0x8000 reserved forever, even
-    // after all APs are up.
-    excl.push(AP_TRAMPOLINE_PHYS, AP_TRAMPOLINE_PHYS + PAGE_SIZE);
-    excl.push(info.kernel_phys.start, info.kernel_phys.end);
-    // Limine's memmap already marks framebuffers non-USABLE on most
-    // firmware. DESIGN §4.2 excludes them anyway so a quirky BIOS cannot
-    // hand us the scanout region.
-    for fb in info.framebuffers() {
-        excl.push(fb.phys, fb.phys + fb.size);
-    }
-    excl.sort();
+    // DESIGN §2.4: frame 0, the trampoline page (kept forever, even after
+    // every AP is up), the kernel image, and each framebuffer and module.
+    // Limine keeps usable entries clear of the last three; excluding them
+    // anyway keeps a quirky firmware from handing us the scanout region.
+    let tramp = info.trampoline_page;
+    let excl = || {
+        core::iter::once(0..PAGE_SIZE)
+            .chain(tramp.map(|p| p..p.saturating_add(PAGE_SIZE)))
+            .chain(core::iter::once(info.kernel_phys.clone()))
+            .chain(
+                info.framebuffers()
+                    .map(|fb| fb.phys..fb.phys.saturating_add(fb.size)),
+            )
+            .chain(info.modules())
+    };
 
     // Free-list nodes, page tables, and heap pages are all reached through
     // our physmap once cr3 switches, so RAM above its cap stays out.
     for r in info.usable() {
         let end = r.end.min(PHYSMAP_CAP);
         if r.start < end {
-            // SAFETY: `insert_clipped`'s contract; Limine's HHDM maps every
-            // USABLE range (this fn's `# Safety` contract, established
-            // here), clipped to the physmap cap so the kernel's physmap
-            // reaches it too (invariant I14), and the excludes keep frame 0,
-            // the trampoline, the kernel image and framebuffers out
-            // (invariant I15, established here).
-            unsafe { insert_clipped(&mut buddy, r.start, end, excl.as_slice()) };
+            clip_usable(r.start..end, excl, |part| {
+                // SAFETY: `Buddy::insert_region`'s contract; Limine's HHDM
+                // maps every USABLE range (this fn's `# Safety` contract),
+                // clipped to the physmap cap so the kernel's physmap reaches
+                // it too (invariant I14), `clip_usable` hands each part once
+                // and outside frame 0, the trampoline page, the kernel image,
+                // framebuffers and modules (invariant I15); established here.
+                unsafe { buddy.insert_region(part.start, part.end) };
+            });
         }
     }
 
     buddy.stats()
-}
-
-/// Feed `[base, end)` into the buddy, skipping every byte covered by any
-/// exclude in `sorted`.
-///
-/// # Safety
-/// Same contract as `Buddy::insert_region`: caller vouches for the
-/// physical pages being real, writable memory accessible via the HHDM physmap.
-unsafe fn insert_clipped(buddy: &mut Buddy, base: u64, end: u64, sorted: &[Range]) {
-    let mut cur = base;
-    for r in sorted {
-        if r.end <= cur {
-            continue;
-        }
-        if r.start >= end {
-            break;
-        }
-        let ex_s = r.start.max(cur);
-        let ex_e = r.end.min(end);
-        if ex_s > cur {
-            // SAFETY: `Buddy::insert_region`'s contract; `[cur, ex_s)` is part
-            // of the range this fn's `# Safety` contract vouches for, below
-            // every exclude, and not yet inserted, established here
-            // (invariants I14 and I15).
-            unsafe { buddy.insert_region(cur, ex_s) };
-        }
-        cur = ex_e;
-        if cur >= end {
-            return;
-        }
-    }
-    if cur < end {
-        // SAFETY: as above: `[cur, end)` is the range's tail past the last
-        // exclude, vouched for by this fn's `# Safety` contract and not yet
-        // inserted, established here (invariants I14 and I15).
-        unsafe { buddy.insert_region(cur, end) };
-    }
-}
-
-#[inline]
-const fn align_up(x: u64, a: u64) -> u64 {
-    (x + a - 1) & !(a - 1)
-}
-#[inline]
-const fn align_down(x: u64, a: u64) -> u64 {
-    x & !(a - 1)
 }

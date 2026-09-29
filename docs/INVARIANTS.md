@@ -329,10 +329,8 @@ per-CPU inbox plus a reschedule IPI. More SMP-specific rules in [section 7.7](SM
 - The buddy takes only memory the boot memory map marks usable, less physical page 0, the AP
   trampoline page (§7.3), and the kernel image, framebuffers, and boot modules wherever they overlap
   usable memory. Limine keeps usable entries clear of every other entry, so the last three are
-  defensive; `pmm_init` clips each usable range against all of them as it reads `BootInfo`, with no
-  fixed-size list, so no exclusion is ever dropped. Rule; not yet enforced: `pmm_init` keeps an
-  8-entry `Excludes` list, admits a range past the eighth with a `pmm: excludes overflow` line, and
-  excludes the fixed page `0x8000` (ROADMAP §10.6).
+  defensive; `pmm_init` clips each usable range against all of them as it reads `BootInfo`
+  (`vibeos::pmm::clip_usable`), with no fixed-size list, so no exclusion is ever dropped.
 - Buddy free list nodes live inside the free pages themselves. A stray write into freed memory
   corrupts the allocator, so guard pages on stacks are not optional: every kernel stack, the
   bootstrap thread's included, is a guarded KVA stack. Boot leaves Limine's stack at
@@ -679,7 +677,7 @@ that review cites means the review's text.
 | I12 | Every kernel PML4 slot exists before the first user address space | `AddressSpace::new` copies PML4[256..512) once | assumed | Yes, by boot order only: `paging_init::install` creates none of the heap, KVA, and `ioremap` PML4 slots; each appears on its region's first mapping, and no current path makes a first mapping after `/hello` (ROADMAP §12.1, F101) |
 | I13 | The low identity window is removed after `smp: done` (§4.1) | none yet | documented | No: it stays mapped and GLOBAL, VA 0 included (ROADMAP §10.6, F085) |
 | I14 | Every buddy frame and page table lies inside the physmap (§4.1) | `pmm_init::init`, `paging_init::physmap_extent` | enforced | Yes; a framebuffer above the 8 GiB cap is not covered (ROADMAP §11.2, F020) |
-| I15 | Frame 0, the trampoline page, and the kernel image, framebuffers, and boot modules never enter the buddy (§2.4) | `pmm_init::init`; `Buddy::insert_region` skips frame 0 | enforced | Partly: the trampoline page is the fixed `0x8000`, which boot uses whatever the memory map says there (bootloader-reclaimable under SeaBIOS); `Excludes` holds 8 ranges, and a range past the 8th stays in the buddy with a `pmm: excludes overflow` line, which Limine's rule that usable entries overlap no other entry leaves unreachable (ROADMAP §10.6) |
+| I15 | Frame 0, the trampoline page, and the kernel image, framebuffers, and boot modules never enter the buddy (§2.4) | `pmm_init::init` through `vibeos::pmm::clip_usable`; `Buddy::insert_region` skips frame 0 | enforced; host tests `clip_usable_eight_framebuffers` and `clip_usable_unsorted_overlapping` | Yes: the trampoline page is the usable page `boot::capture` chose from the memory map, and the clip has no fixed-size list (ROADMAP §10.6) |
 | I16 | The kernel PML4 lies below 4 GiB, because the trampoline loads a 32-bit CR3 | `smp_init::start_one` | enforced by skipping every AP | Not guaranteed: the PML4 frame has no address limit, and above 4 GiB every AP is skipped with a `smp: cr3 above 4GiB` line (ROADMAP §20.1) |
 | I17 | MMIO is UC, RAM is WB, and no frame has both (§2.4) | `acpi_init`, `Mapper::patch_physmap_uc` | documented | Partly: a whole 2 MiB leaf goes UC with no RAM check, and a trailing leaf can be skipped (ROADMAP §11.2, F104) |
 | I18 | EOI before any switch; a one-shot timer is rearmed before yielding (§5.8) | timer ISRs | documented | Yes; no test tier runs the TSC-deadline timer, the only one-shot source, so nothing exercises the rearm (ROADMAP §10.1, F078) |

@@ -168,14 +168,18 @@ Initialization walks the Limine memory map and ingests every `USABLE` region as 
 blocks, excluding:
 
 - physical frame 0
+- the AP trampoline page `boot::capture` chose from the memory map (`BootInfo.trampoline_page`,
+  [§7.3](SMP.md#73-ap-trampoline))
 - the loaded kernel image span
-- the AP trampoline page, `0x8000` today (§7.3)
-- the framebuffer
+- each framebuffer
+- each boot module (the initrd on x86_64)
 - anything not marked `USABLE`, including bootloader and ACPI reclaimable
 - anything above the 8 GiB physmap cap (§4.1)
 
-Planned (ROADMAP §10.6): the exclusions are §2.4's, clipped from each usable range as `BootInfo` is
-read, with no fixed-size list.
+The exclusions are [§2.4](INVARIANTS.md#24-memory-invariants)'s: `pmm_init::init` feeds each usable range
+through `vibeos::pmm::clip_usable`, with a closure that yields frame 0, the trampoline page, the
+kernel image, the framebuffers, and the modules from `BootInfo`, each rounded out to pages, so there
+is no fixed-size list and no exclusion is dropped.
 
 `stats().free_frames` is a running counter, so `meminfo` costs O(1). `deallocate` does not: its
 double-free check and its buddy lookup walk the free lists, O(`MAX_ORDER` × list length) per call, so

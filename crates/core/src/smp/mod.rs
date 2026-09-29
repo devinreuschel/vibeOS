@@ -1,13 +1,12 @@
 //! AP trampoline layout. DESIGN §7.3 / ROADMAP §4.4.
 //!
-//! Portable: offsets, SIPI vector, timeouts. The `.trampoline` blob and
-//! INIT/SIPI live in the binary crate. One AP at a time: they share this page.
+//! Portable: offsets, the SIPI vector and blob rebasing for the page
+//! `boot::capture` chooses from the memory map (`vibeos::pmm::
+//! choose_trampoline_page`), timeouts. The `.trampoline` blob and INIT/SIPI
+//! live in the binary crate. One AP at a time: they share this page.
 
 pub mod per_cpu;
 
-/// SIPI vector `0x08` → physical `0x8000`. 4 KiB aligned, below 1 MiB.
-pub const TRAMPOLINE_PHYS: u64 = 0x8000;
-pub const SIPI_VECTOR: u8 = 0x08;
 pub const TRAMPOLINE_PAGES: u64 = 1;
 
 /// Param block. Blob must fit strictly below this.
@@ -111,17 +110,6 @@ pub fn pack_idtr(limit: u16, base: u64) -> [u8; PARAM_IDT_LEN] {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn trampoline_page_and_sipi_vector() {
-        assert_eq!(TRAMPOLINE_PHYS, 0x8000);
-        assert_eq!(SIPI_VECTOR, 0x08);
-        assert_eq!((SIPI_VECTOR as u64) << 12, TRAMPOLINE_PHYS);
-        assert_eq!(TRAMPOLINE_PHYS % 4096, 0);
-        const {
-            assert!(TRAMPOLINE_PHYS < 0x100000);
-        }
-    }
 
     #[test]
     fn sipi_vector_is_page_number() {

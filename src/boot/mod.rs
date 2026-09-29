@@ -105,6 +105,9 @@ pub struct FbInfo {
 pub struct BootInfo {
     /// Physical span of the loaded kernel image.
     pub kernel_phys: Range<u64>,
+    /// The AP trampoline page (DESIGN §7.3): the lowest usable 4 KiB page
+    /// above frame 0 and below 1 MiB, or `None` when the map has none.
+    pub trampoline_page: Option<u64>,
     pub rsdp_phys: u64,
     memmap: &'static [&'static Entry],
     fb: Option<&'static FramebufferResponse>,
@@ -268,12 +271,20 @@ pub fn capture() -> &'static BootInfo {
     let rsdp_raw = rsdp.address as u64;
     let kernel_len = (&raw const __kernel_vma_end as u64) - (&raw const __kernel_vma_start as u64);
     let (modules, nmod) = module_ranges();
+    let trampoline_page = vibeos::pmm::choose_trampoline_page(
+        memmap
+            .entries()
+            .iter()
+            .filter(|e| e.type_ == MEMMAP_USABLE)
+            .map(|e| e.base..e.base.saturating_add(e.length)),
+    );
     // SAFETY: invariant I22, established at `cell::BootCell::set`: this is
     // the one write, first thing in `normal_boot_tail` on the BSP, before
     // any reader and long before SMP.
     unsafe {
         INFO.set(BootInfo {
             kernel_phys: exec.physical_base..exec.physical_base + kernel_len,
+            trampoline_page,
             rsdp_phys: rsdp_raw.checked_sub(HHDM_BASE).unwrap_or(rsdp_raw),
             memmap: memmap.entries(),
             fb: FRAMEBUFFER.response(),
