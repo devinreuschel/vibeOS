@@ -41,9 +41,12 @@ pub const MAX_REGIONS: usize = 32;
 /// 128 MiB guest, and the size of the 1-2 GiB window that static `ET_EXEC`
 /// images link into.
 pub const EXEC_IMAGE_MAX: u64 = 1 << 30;
-/// `pid_max`: pids and tids count up to it, Linux's default (ROADMAP §10.4).
+/// `pid_max`, Linux's default: pids and tids run `1..PID_MAX`
+/// (`proc::pid::PidAlloc`, ROADMAP §10.4). ROADMAP §23.4 makes the maximum
+/// tunable as `kernel/pid_max`.
 pub const PID_MAX: u32 = 32_768;
-/// Where pid allocation wraps to, Linux's `RESERVED_PIDS` (ROADMAP §10.4).
+/// Where pid allocation wraps to past `PID_MAX`, Linux's `RESERVED_PIDS`
+/// (`proc::pid::PidAlloc`, ROADMAP §10.4).
 pub const PID_WRAP: u32 = 300;
 /// RAM-backed node slots (`fs::Vfs` ramfs).
 pub const MAX_RAM_NODES: usize = 64;
