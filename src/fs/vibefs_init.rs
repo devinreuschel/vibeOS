@@ -14,6 +14,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use vibeos::block::BlockError;
+use vibeos::block::blockdev::BlockRef;
 use vibeos::fs::{
     Dirent, FileSystem, FsError, FsType, Inode, InodeHandle, InodeInfo, InodeKind, InodeOps,
     InodeRef, Key, MAX_PATH, Name, OpCx, S_IFDIR_MODE, S_IFMT,
@@ -21,12 +22,10 @@ use vibeos::fs::{
 use vibeos::lock::RANK_DEVICE;
 use vibeos::vibefs::{self, BLOCK, Disk, Error, Node, ROOT_INO, Vol};
 
-use crate::block_init;
-use crate::cache_init;
+use crate::block::blockdev_init;
 use crate::fs_init;
 use crate::sync_init::SpinMutex;
 use crate::thread_init;
-use crate::virtio_blk_init;
 
 pub const VOL_MEM: u8 = 0;
 use vibeos::limits::MAX_VIBEFS_VOLS as MAX_VOLS;
@@ -46,10 +45,10 @@ pub const IMAGE_BYTES: usize = 256 * 1024;
 const _: () = assert!(IMAGE_BYTES / BLOCK <= vibeos::vibefs::MAX_BLOCKS);
 const _: () = assert!(IMAGE_BYTES.is_multiple_of(BLOCK));
 
-#[derive(Clone, Copy)]
 enum Media {
     Mem,
-    Dev(u32),
+    /// A registered block device; the slot's handle keeps it alive.
+    Dev(BlockRef),
 }
 
 /// A volume slot. Its `vol` and `back` cells belong to the one thread
@@ -121,8 +120,8 @@ static LIVE: AtomicBool = AtomicBool::new(false);
 /// Slots in use, which the in-guest test `vibefs` reads.
 pub(super) static NVOL: AtomicU8 = AtomicU8::new(0);
 
-pub(super) struct Io {
-    back: Media,
+pub(super) struct Io<'a> {
+    back: &'a Media,
 }
 
 fn secs_per_blk(bs: u32) -> Result<u32, Error> {
@@ -132,29 +131,26 @@ fn secs_per_blk(bs: u32) -> Result<u32, Error> {
     Ok(BLOCK as u32 / bs)
 }
 
-impl Disk for Io {
+/// The logical block number of vibefs block `bno` on `r`, whose block
+/// size must divide [`BLOCK`].
+fn dev_lba(r: &BlockRef, bno: u32) -> Result<u64, Error> {
+    let spb = secs_per_blk(r.logical_block_size().map_err(vibefs_io_err)?)?;
+    u64::from(bno)
+        .checked_mul(u64::from(spb))
+        .ok_or(Error::Inval)
+}
+
+impl Disk for Io<'_> {
     fn nblocks(&self) -> u32 {
         match self.back {
             Media::Mem => (IMAGE_BYTES / BLOCK) as u32,
-            Media::Dev(cache_init::DEV_RAM0) => {
-                let bs = block_init::logical_block_size();
-                let n = block_init::capacity_sectors();
-                if bs == 0 {
-                    0
-                } else {
-                    ((n * bs as u64) / BLOCK as u64) as u32
+            Media::Dev(r) => match (r.logical_block_size(), r.capacity_sectors()) {
+                (Ok(bs), Ok(n)) => {
+                    let blocks = n.saturating_mul(u64::from(bs)) / BLOCK as u64;
+                    u32::try_from(blocks).unwrap_or(u32::MAX)
                 }
-            }
-            Media::Dev(cache_init::DEV_VDA) => {
-                let bs = virtio_blk_init::logical_block_size();
-                let n = virtio_blk_init::capacity_sectors();
-                if bs == 0 {
-                    0
-                } else {
-                    (n.saturating_mul(bs as u64) / BLOCK as u64) as u32
-                }
-            }
-            Media::Dev(_) => 0,
+                _ => 0,
+            },
         }
     }
 
@@ -171,15 +167,7 @@ impl Disk for Io {
                     Ok(())
                 })
             }
-            Media::Dev(dev) => {
-                let bs = match dev {
-                    cache_init::DEV_RAM0 => block_init::logical_block_size(),
-                    _ => virtio_blk_init::logical_block_size(),
-                };
-                let spb = secs_per_blk(bs)?;
-                let lba = bno as u64 * spb as u64;
-                cache_init::read(dev, lba, buf).map_err(vibefs_io_err)
-            }
+            Media::Dev(r) => r.read(dev_lba(r, bno)?, buf).map_err(vibefs_io_err),
         }
     }
 
@@ -196,22 +184,14 @@ impl Disk for Io {
                     Ok(())
                 })
             }
-            Media::Dev(dev) => {
-                let bs = match dev {
-                    cache_init::DEV_RAM0 => block_init::logical_block_size(),
-                    _ => virtio_blk_init::logical_block_size(),
-                };
-                let spb = secs_per_blk(bs)?;
-                let lba = bno as u64 * spb as u64;
-                cache_init::write(dev, lba, buf).map_err(vibefs_io_err)
-            }
+            Media::Dev(r) => r.write(dev_lba(r, bno)?, buf).map_err(vibefs_io_err),
         }
     }
 
     fn flush(&mut self) -> Result<(), Error> {
         match self.back {
             Media::Mem => Ok(()),
-            Media::Dev(dev) => cache_init::flush(dev).map_err(vibefs_io_err),
+            Media::Dev(r) => r.flush().map_err(vibefs_io_err),
         }
     }
 }
@@ -259,7 +239,7 @@ fn with_grabbed<R, E>(id: u8, f: impl FnOnce(&mut Vol, &mut Io) -> Result<R, E>)
     let r = unsafe {
         let v = &mut *SLOTS[i].vol.get();
         let mut io = Io {
-            back: *SLOTS[i].back.get(),
+            back: &*SLOTS[i].back.get(),
         };
         f(v, &mut io)
     };
@@ -595,7 +575,7 @@ pub fn live() -> bool {
 
 pub fn init() {
     with_image(|buf| buf.fill(0));
-    let mut io = Io { back: Media::Mem };
+    let mut io = Io { back: &Media::Mem };
     // SAFETY: invariant I236: slot 0's `used` flag is clear, so no `grab`
     // takes it, and this boot path is its one writer until the Release
     // store of `used` below, although other CPUs run; established here.
@@ -756,6 +736,12 @@ pub(super) fn drop_slot(id: u8) -> Result<(), Error> {
         return Ok(());
     };
     grab(id)?;
+    // SAFETY: invariant I236: `grab` above took the slot's busy flag,
+    // which is dropped only below; established by `fs::vibefs_init::grab`.
+    // Releases the slot's device handle.
+    unsafe {
+        *slot.back.get() = Media::Mem;
+    }
     slot.used.store(false, Ordering::Release);
     drop_busy(id);
     recount();
@@ -790,22 +776,9 @@ pub fn mount_mem(at: &str) -> Result<u8, FsError> {
 /// differs); otherwise the volume gets a slot, which is dropped again
 /// when `Vfs` reports that another mount of the device won the race.
 pub fn mount_dev(name: &str, at: &str, ro: bool) -> Result<u8, FsError> {
-    let (back, dev) = match name {
-        "ram0" => {
-            if !block_init::live() {
-                return Err(FsError::Io);
-            }
-            (Media::Dev(cache_init::DEV_RAM0), cache_init::DEV_RAM0)
-        }
-        "vda" => {
-            if !virtio_blk_init::live() {
-                return Err(FsError::Io);
-            }
-            (Media::Dev(cache_init::DEV_VDA), cache_init::DEV_VDA)
-        }
-        _ => return Err(FsError::Inval),
-    };
-    let dev = Some(u64::from(dev));
+    let r = blockdev_init::lookup(name.as_bytes()).ok_or(FsError::NotFound)?;
+    let dev = Some(r.id());
+    let back = Media::Dev(r);
     let api = fs_init::api();
     if let Some(sb) = dev.and_then(|d| fs_init::with(|v| v.super_of_dev(d))) {
         let vol = fs_init::with(|v| v.sb_private(sb))?[0] as u8;
@@ -813,7 +786,7 @@ pub fn mount_dev(name: &str, at: &str, ro: bool) -> Result<u8, FsError> {
         api.mount_fs(None, at.as_bytes(), fs, dev, ro)?;
         return Ok(vol);
     }
-    let mut io = Io { back };
+    let mut io = Io { back: &back };
     if !vibefs::probe(&mut io) {
         return Err(FsError::Inval);
     }

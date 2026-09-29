@@ -9,7 +9,7 @@ import unittest
 
 import tests.harness.run_e2e as run_e2e
 import tests.harness.run_ktest as run_ktest
-from tests.harness import frame
+from tests.harness import frame, registry
 from tests.harness.harness import (
     ISA_DEBUG_PASS,
     PANIC_DONE,
@@ -89,10 +89,13 @@ class SplitFrameTests(unittest.TestCase):
         self.assertEqual(frame.user_lines(raw), ["user: b", "?vibeOS: d"])
 
     def test_source_of(self) -> None:
-        for needle in frame.USER_PREFIXES:
-            self.assertEqual(frame.source_of(needle), frame.USER, needle)
-        self.assertEqual(frame.source_of("init: /bin/tests exited 256"), frame.USER)
-        self.assertEqual(frame.source_of("utest_pass foo"), frame.USER)
+        """The marker registry's `source` column decides (ROADMAP §10.2)."""
+        for row in registry.load_rows():
+            if row.source == frame.USER:
+                text = registry.sample(row)
+                self.assertEqual(frame.source_of(text), frame.USER, text)
+        self.assertEqual(frame.source_of("user: tests ok"), frame.USER)
+        self.assertEqual(frame.source_of("vibeOS: shell ready"), frame.USER)
         self.assertEqual(frame.source_of("vibeOS: serial online"), frame.KERNEL)
         self.assertEqual(frame.source_of("vibeOS: ktest: ok x"), frame.KERNEL)
         self.assertEqual(frame.source_of("user: pid 3 killed SIGSEGV"), frame.KERNEL)
@@ -200,9 +203,8 @@ class UserLineTests(unittest.TestCase):
             "vibeOS: shell ready",
             "user: tests begin",
             "user: tests ok",
-            "init: /bin/tests exited 256",
-            "utest_pass tests::a",
-            "vibeOS: utest: ok a",
+            "user: dup ok",
+            "serial-ok",
         ):
             with self.subTest(text=text):
                 m = Marker(text, "u")

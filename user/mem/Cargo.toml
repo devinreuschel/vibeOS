@@ -1,0 +1,15 @@
+[package]
+name = "vibeos-user-mem"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# The C memory and string symbols the user runtime's `core` calls
+# (ROADMAP §10.5), built `#![no_builtins]`.
+[lib]
+test = false
+doctest = false
+
+[lints]
+workspace = true

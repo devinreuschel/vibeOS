@@ -71,7 +71,7 @@ jobs:
           toolchain: nightly-2026-09-22
           components: rust-src, llvm-tools, rustfmt, clippy
           # `make check` lints the kernel and vibeos-core's no_std build.
-          targets: x86_64-unknown-none
+          targets: x86_64-unknown-none, x86_64-unknown-linux-musl
 
       # vibeos-core's MSRV, which `make check` builds it with (ROADMAP §10.1),
       # read from its manifest.
@@ -100,6 +100,22 @@ jobs:
         run: |
           python3 -m pip install --user --break-system-packages ruff==0.16.9 mypy==2.3.1
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Pinned (ROADMAP §10.9): the release's prebuilt musl archive, checked
+      # against its SHA-256. setup.sh and the Makefile read the version here.
+      - name: install cargo-deny
+        env:
+          CARGO_DENY_VERSION: 0.20.2
+          CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+        run: |
+          name="cargo-deny-$CARGO_DENY_VERSION-x86_64-unknown-linux-musl"
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/$name.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/$CARGO_DENY_VERSION/$name.tar.gz"
+          echo "$CARGO_DENY_SHA256  $RUNNER_TEMP/$name.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+          mkdir -p "$HOME/.local/bin"
+          install -m 755 "$RUNNER_TEMP/$name/cargo-deny" "$HOME/.local/bin/cargo-deny"
+          "$HOME/.local/bin/cargo-deny" --version
 
       - name: make check
         run: time make check
@@ -180,7 +196,7 @@ jobs:
         with:
           toolchain: nightly-2026-09-22
           components: rust-src, llvm-tools, rustfmt, clippy
-          targets: x86_64-unknown-none
+          targets: x86_64-unknown-none, x86_64-unknown-linux-musl
 
       - name: cache cargo registry
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -213,6 +229,11 @@ jobs:
           cargo clippy --bin vibeos --features panic_test --features panic_exit -- -D warnings
           cargo clippy --bin vibeos --features gp_test --features panic_exit -- -D warnings
           cargo clippy --bin vibeos --features kernel_shell -- -D warnings
+
+      # The Rust user programs (ROADMAP §10.5): links through rust-lld with no
+      # C compiler, and checks each ELF with scripts/check_user_elf.py.
+      - name: build the user programs (make user)
+        run: make user
 
       - name: build every ISO and host tool (make prebuilt)
         run: make prebuilt

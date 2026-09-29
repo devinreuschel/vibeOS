@@ -8,8 +8,9 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
+use vibeos::block::blockdev::Backing;
 use vibeos::block::{
-    BlockError, Completion, DeviceState, MAX_QUEUE, Op, Queue, Request, write_marker,
+    BlockDevice, BlockError, Completion, DeviceState, MAX_QUEUE, Op, Queue, Request,
 };
 use vibeos::dev::{Device, Driver, IdMatch, ProbeError};
 use vibeos::dma::{self, DmaAlloc, DmaBuffer};
@@ -1102,11 +1103,15 @@ fn setup(dev: &mut Device, caps: ModernCaps) -> Result<(), VirtioError> {
     *BLK.lock() = Some(boxed);
     LIVE.store(true, Ordering::Release);
 
-    #[expect(
-        clippy::let_underscore_must_use,
-        reason = "a write to Serial cannot fail (DESIGN §2.5)"
-    )]
-    let _ = crate::serial::write_line_with(|w| write_marker(w, NAME, capacity));
+    // The registration prints the `block: vda` marker. A failure leaves
+    // the driver live but vda unregistered, so nothing mounts it.
+    if let Err(e) = register() {
+        crate::klog!(
+            vibeos::log::Level::Error,
+            "vibeOS: blk: {NAME} not registered: {}",
+            e.as_str()
+        );
+    }
     let mq = if feat & F_MQ != 0 { "mq" } else { "sq" };
     crate::marker!(
         "vibeOS: virtio: blk {NAME} {} qsz={q0sz} nq={nq} {mq} feat={:#x} bs={blk_size} topo={}/{} discard={}",
@@ -1195,10 +1200,6 @@ pub fn live() -> bool {
 
 pub fn state() -> DeviceState {
     DeviceState::from_u8(STATE.load(Ordering::Acquire))
-}
-
-pub fn name() -> &'static str {
-    NAME
 }
 
 pub fn logical_block_size() -> u32 {
@@ -1380,7 +1381,6 @@ pub fn write_fua(lba: u64, buf: &[u8]) -> Result<(), BlockError> {
     )
 }
 
-#[cfg(feature = "kernel_tests")]
 pub fn discard(lba: u64, nsectors: u64) -> Result<(), BlockError> {
     if nsectors == 0 || nsectors > u32::MAX as u64 {
         return Err(BlockError::Inval);
@@ -1388,14 +1388,10 @@ pub fn discard(lba: u64, nsectors: u64) -> Result<(), BlockError> {
     blocking(Op::Discard, lba, nsectors as u32, 0, 0)
 }
 
-#[cfg(feature = "kernel_tests")]
+/// vda's driver operations, which its registry entry owns.
 struct Vda;
 
-#[cfg(feature = "kernel_tests")]
-impl vibeos::block::BlockDevice for Vda {
-    fn name(&self) -> &'static str {
-        NAME
-    }
+impl BlockDevice for Vda {
     fn logical_block_size(&self) -> u32 {
         logical_block_size()
     }
@@ -1419,9 +1415,18 @@ impl vibeos::block::BlockDevice for Vda {
     }
 }
 
-#[cfg(feature = "kernel_tests")]
-pub fn device() -> Option<&'static dyn vibeos::block::BlockDevice> {
-    if live() { Some(&Vda) } else { None }
+/// Register vda in the block registry, through the page cache.
+fn register() -> Result<(), BlockError> {
+    let ops =
+        TryBox::<dyn BlockDevice>::try_new_unsize(Vda, |b| b).map_err(|_| BlockError::NoMem)?;
+    crate::block::blockdev_init::register(
+        NAME.as_bytes(),
+        Backing::Disk {
+            ops,
+            cache: Some(&crate::cache_init::PAGE_CACHE),
+        },
+    )
+    .map(|_| ())
 }
 
 pub fn shell_line(f: &mut impl core::fmt::Write) -> core::fmt::Result {

@@ -67,6 +67,11 @@ FILES = {
                                  "    Marker(\"vibeOS: boot: \", \"boot_other\", "
                                  "and_contains=(\" other\",)),\n"
                                  "    Marker(f\"vibeOS: cpu{i} up\", f\"cpu{i}_up\"),\n]\n"),
+    # A marker registry contract row (ROADMAP §10.2): its name is the label.
+    "tests/contract/markers.toml": ("[[marker]]\ntext = \"vibeOS: disk: <name> ok\"\n"
+                                    "kind = \"contract\"\narch = \"both\"\n"
+                                    "source = \"kernel\"\nsection = \"§7.1\"\n"
+                                    "order = 10\nname = \"disk_<name>_ok\"\n"),
     "scripts/check_x.py": ("def main() -> int:\n    return 0\n\n\n"
                            "def wave(\n    a: int,\n    b: int,\n) -> int:\n"
                            "    x = a + b\n    return x\n"),
@@ -524,6 +529,18 @@ class TestResultsRule(RepoCase):
         got = [p.pattern for p in check_ticks.marker_labels("vibeOS: cpu3 up", tree)]
         self.assertEqual(len(got), 1)
         self.assertTrue(re.fullmatch(got[0], "cpu3_up"))
+
+    def test_marker_proof_from_the_registry(self) -> None:
+        self.commit(f't\n\nProves: "vibeOS: disk: vda ok" (existing: x) -- {PREFIX}',
+                    "delta box")
+        head = self.head()
+        self.assertEqual(self.run_check([results_file(head, marker=["disk_vda_ok"])]).errors,
+                         [])
+        self.assertErrors(self.run_check([results_file(head, marker=["ready_ok"])]),
+                          "marker 'vibeOS: disk: vda ok'")
+        tree = check_ticks.Tree("HEAD", self.repo.path)
+        (d,) = check_ticks.resolve('"vibeOS: disk: vda ok"', tree)[0]
+        self.assertEqual((d.path, d.start), ("tests/contract/markers.toml", 2))
 
     def test_no_results_dir_skips_the_rule(self) -> None:
         self.tick_suite()

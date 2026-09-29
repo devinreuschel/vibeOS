@@ -4,11 +4,13 @@ use alloc::vec::Vec;
 use core::hint::{black_box, spin_loop};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use vibeos::block::blockdev::BlockRef;
 use vibeos::block::{BlockError, DeviceState, Op};
 use vibeos::cache::PAGE;
 
+use crate::block::blockdev_init;
 use crate::block_init::{self, IoWaiter, testing as blk_testing};
-use crate::cache_init::{self, DEV_RAM0, testing};
+use crate::cache_init::{self, testing};
 use crate::ktest::{Outcome, Test, spawn_thread, test};
 use crate::part_init;
 use crate::thread_init;
@@ -45,12 +47,12 @@ fn finish_stalls_run() -> u32 {
 }
 
 /// Hold `blk-wb`'s next write of the page holding `byte_off` of `dev`.
-fn hold_wb(dev: u32, byte_off: u64) {
+fn hold_wb(dev: &BlockRef, byte_off: u64) {
     testing::RELEASE.store(false, Ordering::Release);
     testing::HELD.store(false, Ordering::Release);
-    testing::DEV.store(dev, Ordering::Release);
+    testing::DEV.store(dev.id(), Ordering::Release);
     testing::OFF.store(
-        vibeos::cache::CacheKey::page(dev, byte_off).offset,
+        vibeos::cache::CacheKey::page(dev.id(), byte_off).offset,
         Ordering::Release,
     );
 }
@@ -71,38 +73,9 @@ fn part_live() -> bool {
     crate::part_init::LIVE.load(Ordering::Acquire)
 }
 
-struct Ram0;
-
-impl vibeos::block::BlockDevice for Ram0 {
-    fn name(&self) -> &'static str {
-        block_init::RAM0_NAME
-    }
-    fn logical_block_size(&self) -> u32 {
-        block_init::RAM0_BLOCK_SIZE
-    }
-    fn capacity_sectors(&self) -> u64 {
-        block_init::RAM0_SECTORS
-    }
-    fn state(&self) -> DeviceState {
-        block_init::state()
-    }
-    fn read(&self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
-        block_init::read(lba, buf)
-    }
-    fn write(&self, lba: u64, buf: &[u8]) -> Result<(), BlockError> {
-        block_init::write(lba, buf)
-    }
-    fn flush(&self) -> Result<(), BlockError> {
-        block_init::flush()
-    }
-    fn discard(&self, lba: u64, nsectors: u64) -> Result<(), BlockError> {
-        block_init::discard(lba, nsectors)
-    }
-}
-
-/// ram0 as a block device.
-pub(crate) fn ram0_device() -> &'static dyn vibeos::block::BlockDevice {
-    &Ram0
+/// ram0's registry handle.
+fn ram0() -> Option<BlockRef> {
+    blockdev_init::lookup(block_init::RAM0_NAME.as_bytes())
 }
 
 pub(crate) fn test_block_ramdisk_rw() -> Outcome {
@@ -110,14 +83,17 @@ pub(crate) fn test_block_ramdisk_rw() -> Outcome {
         return Outcome::Fail("block not live");
     }
     block_init::reset();
-    let d = ram0_device();
-    if d.name() != block_init::name() {
+    // Its `_dev` calls reach the driver below the page cache.
+    let Some(d) = ram0() else {
+        return Outcome::Fail("no ram0");
+    };
+    if d.name().as_str() != block_init::RAM0_NAME || d.parent().is_some() {
         return Outcome::Fail("name");
     }
-    if d.logical_block_size() != block_init::logical_block_size() {
+    if d.logical_block_size() != Ok(block_init::logical_block_size()) {
         return Outcome::Fail("bs");
     }
-    if d.capacity_sectors() != block_init::capacity_sectors() {
+    if d.capacity_sectors() != Ok(block_init::capacity_sectors()) {
         return Outcome::Fail("cap");
     }
     if d.state() != DeviceState::Ready {
@@ -129,32 +105,32 @@ pub(crate) fn test_block_ramdisk_rw() -> Outcome {
         buf[i] = (i as u8).wrapping_add(0x3C);
         i += 1;
     }
-    if d.write(1, &buf).is_err() {
+    if d.write_dev(1, &buf).is_err() {
         return Outcome::Fail("write");
     }
     let mut out = [0u8; 512];
-    if d.read(1, &mut out).is_err() {
+    if d.read_dev(1, &mut out).is_err() {
         return Outcome::Fail("read");
     }
     if out != buf {
         return Outcome::Fail("mismatch");
     }
-    if d.flush().is_err() {
+    if d.flush_dev().is_err() {
         return Outcome::Fail("flush");
     }
     if d.discard(1, 1).is_err() {
         return Outcome::Fail("discard");
     }
     out = [0u8; 512];
-    if d.read(1, &mut out).is_err() || out != buf {
+    if d.read_dev(1, &mut out).is_err() || out != buf {
         return Outcome::Fail("discard clobber");
     }
     let mut odd = [0u8; 100];
-    match d.read(0, &mut odd) {
+    match d.read_dev(0, &mut odd) {
         Err(BlockError::Inval) => {}
         _ => return Outcome::Fail("unaligned"),
     }
-    match d.write(block_init::RAM0_SECTORS, &buf) {
+    match d.write_dev(block_init::RAM0_SECTORS, &buf) {
         Err(BlockError::Inval) => {}
         _ => return Outcome::Fail("past end"),
     }
@@ -325,22 +301,27 @@ pub(crate) fn test_block_part_mbr() -> Outcome {
     if !part_live() {
         return Outcome::Fail("parts not live");
     }
-    let Some(i) = part_init::find_name("ram0p1") else {
+    let Some(disk) = ram0() else {
+        return Outcome::Fail("no ram0");
+    };
+    let Some(d) = blockdev_init::lookup(b"ram0p1") else {
         return Outcome::Fail("no ram0p1");
     };
-    let Some(i2) = part_init::find_name("ram0p2") else {
+    let Some(d2) = blockdev_init::lookup(b"ram0p2") else {
         return Outcome::Fail("no ram0p2");
     };
-    if part_init::find_name("ram0p3").is_none() {
+    let Some(d3) = blockdev_init::lookup(b"ram0p3") else {
         return Outcome::Fail("no ram0p3");
-    }
-    let Some(d) = part_init::device(i) else {
-        return Outcome::Fail("no device");
     };
-    if d.name() != "ram0p1" {
+    for p in [&d, &d2, &d3] {
+        if p.parent().map(BlockRef::id) != Some(disk.id()) || p.part().is_none() {
+            return Outcome::Fail("parent");
+        }
+    }
+    if d.name().as_str() != "ram0p1" {
         return Outcome::Fail("name");
     }
-    if d.capacity_sectors() != 32 {
+    if d.capacity_sectors() != Ok(32) {
         return Outcome::Fail("cap");
     }
     let mut buf = [0u8; 512];
@@ -361,13 +342,13 @@ pub(crate) fn test_block_part_mbr() -> Outcome {
         Err(BlockError::Inval) => {}
         _ => return Outcome::Fail("overflow 2"),
     }
-    let Some((_, n2, _, k2)) = part_init::info(i2) else {
+    let Some(i2) = d2.part() else {
         return Outcome::Fail("info p2");
     };
-    if n2 != 24 {
+    if i2.nsect != 24 {
         return Outcome::Fail("logical size");
     }
-    if part_init::type_str(k2) != "linux" {
+    if part_init::type_str(i2.kind) != "linux" {
         return Outcome::Fail("type");
     }
     Outcome::Ok
@@ -377,30 +358,35 @@ pub(crate) fn test_block_part_gpt() -> Outcome {
     if !virtio_blk_init::live() {
         return Outcome::Skip("no virtio-blk");
     }
-    let Some(i1) = part_init::find_name("vdap1") else {
+    let Some(disk) = blockdev_init::lookup(b"vda") else {
+        return Outcome::Fail("no vda");
+    };
+    let Some(d) = blockdev_init::lookup(b"vdap1") else {
         return Outcome::Fail("no vdap1");
     };
-    let Some(i2) = part_init::find_name("vdap2") else {
+    let Some(d2) = blockdev_init::lookup(b"vdap2") else {
         return Outcome::Fail("no vdap2");
     };
-    let Some((_, _, _, k1)) = part_init::info(i1) else {
+    for p in [&d, &d2] {
+        if p.parent().map(BlockRef::id) != Some(disk.id()) {
+            return Outcome::Fail("parent");
+        }
+    }
+    let Some(i1) = d.part() else {
         return Outcome::Fail("info p1");
     };
-    let Some((_, n2, _, k2)) = part_init::info(i2) else {
+    let Some(i2) = d2.part() else {
         return Outcome::Fail("info p2");
     };
-    if part_init::type_str(k1) != "efi" {
+    if part_init::type_str(i1.kind) != "efi" {
         return Outcome::Fail("efi guid");
     }
-    if part_init::type_str(k2) != "linux" {
+    if part_init::type_str(i2.kind) != "linux" {
         return Outcome::Fail("linux guid");
     }
-    if n2 < 16 {
+    if i2.nsect < 16 {
         return Outcome::Fail("linux small");
     }
-    let Some(d) = part_init::device(i1) else {
-        return Outcome::Fail("no d1");
-    };
     let mut buf = [0u8; 512];
     buf[0] = 0xE1;
     buf[100] = 0xE2;
@@ -414,7 +400,7 @@ pub(crate) fn test_block_part_gpt() -> Outcome {
     if d.flush().is_err() {
         return Outcome::Fail("flush");
     }
-    match d.write(d.capacity_sectors(), &buf) {
+    match d.write(i1.nsect, &buf) {
         Err(BlockError::Inval) => {}
         _ => return Outcome::Fail("gpt overflow"),
     }
@@ -425,6 +411,9 @@ pub(crate) fn test_block_cache_hit() -> Outcome {
     if !cache_init::live() || !block_init::live() {
         return Outcome::Fail("not live");
     }
+    let Some(ram) = ram0() else {
+        return Outcome::Fail("no ram0");
+    };
     let lba = 200u64;
     let mut buf = [0u8; 512];
     buf[3] = 0x44;
@@ -441,14 +430,14 @@ pub(crate) fn test_block_cache_hit() -> Outcome {
     let raw_delta = block_init::io_reqs().saturating_sub(raw0);
     let s0 = cache_init::stats();
     let mut out = [0u8; 512];
-    if cache_init::read(cache_init::DEV_RAM0, lba, &mut out).is_err() {
+    if ram.read(lba, &mut out).is_err() {
         return Outcome::Fail("c1");
     }
     if out != buf {
         return Outcome::Fail("data");
     }
     let s1 = cache_init::stats();
-    if cache_init::read(cache_init::DEV_RAM0, lba, &mut out).is_err() || out != buf {
+    if ram.read(lba, &mut out).is_err() || out != buf {
         return Outcome::Fail("c2");
     }
     let s2 = cache_init::stats();
@@ -482,13 +471,16 @@ pub(crate) fn test_block_cache_evict() -> Outcome {
     if !cache_init::live() || !block_init::live() {
         return Outcome::Fail("not live");
     }
+    let Some(ram) = ram0() else {
+        return Outcome::Fail("no ram0");
+    };
     let s0 = cache_init::stats();
     let mut buf = [0u8; 512];
     let mut i = 0u64;
     while i < 18 {
         let lba = i * 8;
         buf[0] = i as u8;
-        if cache_init::read(cache_init::DEV_RAM0, lba, &mut buf).is_err() {
+        if ram.read(lba, &mut buf).is_err() {
             return Outcome::Fail("fill");
         }
         i += 1;
@@ -760,7 +752,7 @@ const FLUSH_ERR: u32 = 2;
 static FLUSH_RES: AtomicU32 = AtomicU32::new(FLUSH_PENDING);
 
 fn flush_ram0() {
-    let res = match cache_init::flush(DEV_RAM0) {
+    let res = match ram0().ok_or(BlockError::Gone).and_then(|r| r.flush()) {
         Ok(()) => FLUSH_OK,
         Err(_) => FLUSH_ERR,
     };
@@ -791,8 +783,9 @@ impl WbGuard {
         release();
         // A failed flush thread may still be waiting: wait out its flush.
         let _pending = wait_for(|| FLUSH_RES.load(Ordering::Acquire) != FLUSH_PENDING);
-        cache_init::write(DEV_RAM0, WB_FIRST_LBA, &self.saved)?;
-        cache_init::flush(DEV_RAM0)?;
+        let ram = ram0().ok_or(BlockError::Gone)?;
+        ram.write(WB_FIRST_LBA, &self.saved)?;
+        ram.flush()?;
         self.restored = true;
         Ok(())
     }
@@ -809,17 +802,20 @@ impl Drop for WbGuard {
     }
 }
 
-/// `cache_init::flush` sends no `Flush` while `blk-wb` holds one write of
+/// `PageCache::flush` sends no `Flush` while `blk-wb` holds one write of
 /// the device, and the held page is on the device once it does.
 pub(crate) fn cache_flush_waits_writeback() -> Outcome {
     if !cache_init::live() || !block_init::live() {
         return Outcome::Fail("no ram0 cache");
     }
-    if cache_init::flush(DEV_RAM0).is_err() {
+    let Some(ram) = ram0() else {
+        return Outcome::Fail("no ram0");
+    };
+    if ram.flush().is_err() {
         return Outcome::Fail("pre-flush");
     }
     let mut saved = alloc::vec![0u8; WB_PAGES * PAGE];
-    if cache_init::read(DEV_RAM0, WB_FIRST_LBA, &mut saved).is_err() {
+    if ram.read(WB_FIRST_LBA, &mut saved).is_err() {
         return Outcome::Fail("save");
     }
     FLUSH_RES.store(FLUSH_OK, Ordering::Release);
@@ -834,8 +830,8 @@ pub(crate) fn cache_flush_waits_writeback() -> Outcome {
         i += 1;
     }
     let held_off = WB_FIRST_LBA * 512;
-    hold_wb(DEV_RAM0, held_off);
-    if cache_init::write(DEV_RAM0, WB_FIRST_LBA, &dirty).is_err() {
+    hold_wb(&ram, held_off);
+    if ram.write(WB_FIRST_LBA, &dirty).is_err() {
         return Outcome::Fail("dirty");
     }
     if !wait_for(held) {
