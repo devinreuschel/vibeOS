@@ -12,7 +12,34 @@ fn with_vol<R>(buf: &mut [u8], f: impl FnOnce(&mut FatVol, &mut MemDisk) -> R) -
     f(&mut vol, &mut disk)
 }
 
+/// `VIBEOS_ALLOW_MISSING_TOOLS=1`, the gate switch the Makefile exports
+/// (AGENTS.md How to run): a missing host tool skips its check instead of
+/// failing the test.
+fn allow_missing_tools() -> bool {
+    std::env::var_os("VIBEOS_ALLOW_MISSING_TOOLS").is_some_and(|v| v == "1")
+}
+
+/// Require host `fsck.fat -n` to report `buf` clean (ROADMAP Phase 8 exit gate).
+/// A skipped check prints its line once per process.
 fn fsck(buf: &[u8]) {
+    static SKIPPED: std::sync::Once = std::sync::Once::new();
+    if !run_fsck("fsck.fat", buf, allow_missing_tools()) {
+        // libtest captures `eprintln!` from a passing test; a direct write to
+        // the stderr handle is not captured.
+        SKIPPED.call_once(|| {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "skipped fsck.fat -n: fsck.fat not installed (VIBEOS_ALLOW_MISSING_TOOLS=1)"
+            );
+        });
+    }
+}
+
+/// Run `prog -n` on an image of `buf` and require it to report the image
+/// clean; false when `prog` is not installed and `allow` skips the check. A
+/// missing `prog` panics unless `allow`.
+fn run_fsck(prog: &str, buf: &[u8], allow: bool) -> bool {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir();
@@ -22,7 +49,7 @@ fn fsck(buf: &[u8]) {
         SEQ.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::write(&p, buf).unwrap();
-    let st = std::process::Command::new("fsck.fat")
+    let st = std::process::Command::new(prog)
         .args(["-n", p.to_str().unwrap()])
         .output();
     let _ = std::fs::remove_file(&p);
@@ -30,17 +57,35 @@ fn fsck(buf: &[u8]) {
         Ok(o) => {
             assert!(
                 o.status.success(),
-                "fsck.fat failed status={:?}\nstdout:\n{}\nstderr:\n{}",
+                "{prog} failed status={:?}\nstdout:\n{}\nstderr:\n{}",
                 o.status.code(),
                 String::from_utf8_lossy(&o.stdout),
                 String::from_utf8_lossy(&o.stderr)
             );
+            true
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("skipping fsck.fat: not installed ({e})");
+            if !allow {
+                panic!(
+                    "{prog} not installed: install dosfstools, or set \
+                     VIBEOS_ALLOW_MISSING_TOOLS=1 to skip the fsck.fat -n check"
+                );
+            }
+            false
         }
-        Err(e) => panic!("fsck.fat spawn: {e}"),
+        Err(e) => panic!("{prog} spawn: {e}"),
     }
+}
+
+#[test]
+#[should_panic(expected = "not installed")]
+fn fsck_missing_tool_fails() {
+    run_fsck("vibeos-no-such-fsck", &fresh(INITRD_BYTES), false);
+}
+
+#[test]
+fn fsck_missing_tool_skipped_when_allowed() {
+    assert!(!run_fsck("vibeos-no-such-fsck", &fresh(INITRD_BYTES), true));
 }
 
 #[test]
