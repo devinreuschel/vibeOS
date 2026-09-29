@@ -143,7 +143,11 @@ pub(crate) fn test_trampoline_page() -> Outcome {
     let mut wbinvd = false;
     let mut i = 0usize;
     while i + 1 < 0xD0 {
+        // SAFETY: the low identity window maps the trampoline page at 0x8000
+        // (`mm::paging_init::install`), and every offset read here is below
+        // `0xD0`, inside it; established here.
         let a = unsafe { p.add(i).read_volatile() };
+        // SAFETY: as above, `i + 1 < 0xD0`; established here.
         let b = unsafe { p.add(i + 1).read_volatile() };
         if a == 0x0F && b == 0x09 {
             wbinvd = true;
@@ -151,8 +155,11 @@ pub(crate) fn test_trampoline_page() -> Outcome {
         if i + 4 < 0xD0
             && a == 0x25
             && b == 0xFF
+            // SAFETY: as above, `i + 4 < 0xD0`; established here.
             && unsafe { p.add(i + 2).read_volatile() } == 0xFF
+            // SAFETY: as above, `i + 4 < 0xD0`; established here.
             && unsafe { p.add(i + 3).read_volatile() } == 0xFF
+            // SAFETY: as above, `i + 4 < 0xD0`; established here.
             && unsafe { p.add(i + 4).read_volatile() } == 0x9F
         {
             and_cdnw = true;
