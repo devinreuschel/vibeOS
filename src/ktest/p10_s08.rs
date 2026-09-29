@@ -29,11 +29,17 @@ pub(super) const TESTS: &[Test] = &[
 /// no dead thread's stack is still on its way back. Every frame-accounting
 /// test takes its `before` and `after` from here.
 pub(crate) fn quiescent_free_frames() -> usize {
+    settle();
+    super::free_frames()
+}
+
+/// Run the shared warm-up, then wait for [`quiesce`], saying so if it
+/// timed out.
+fn settle() {
     super::quiesce_frames();
     if !quiesce() {
         crate::marker!("vibeOS: ktest:   quiesce: threads did not settle");
     }
-    super::free_frames()
 }
 
 /// Wait, bounded, until no thread but this one and the idle threads is
@@ -263,7 +269,8 @@ fn exit_batch() -> Result<(), Outcome> {
 /// ran it, after it has switched off it (ROADMAP §10.10, F012): 10,000
 /// exits on CPU 0, the first 100 held open between the store that makes
 /// the stack reclaimable and the switch, while CPUs 1 to 3 run switch
-/// tails; no switch tail sends a shootdown and the frames come back.
+/// tails; no switch tail sends a shootdown and the frames come back, to
+/// the buddy, a stack cache, or the kernel page tables ([`FrameCount`]).
 fn lifetime_stack_reclaim() -> Outcome {
     if !tail_cpus_online() {
         return Outcome::Skip("needs 4 cpus");
@@ -271,7 +278,7 @@ fn lifetime_stack_reclaim() -> Outcome {
     if thread_init::current_cpu() != 0 {
         return Outcome::Fail("registry not on cpu0");
     }
-    let base = quiescent_free_frames();
+    let base = FrameCount::quiescent();
     let t0 = ipi_init::testing::shootdowns_from_tail();
     CHURN_STOP.store(false, Ordering::Release);
     CHURN_DONE.store(0, Ordering::Release);
@@ -315,11 +322,65 @@ fn lifetime_stack_reclaim() -> Outcome {
     if tail != 0 {
         return crate::fail_fmt!("{tail} shootdowns sent from a switch tail");
     }
-    let after = quiescent_free_frames();
-    if after != base {
-        return crate::fail_fmt!("frames {base} -> {after} after {exits} exits");
+    let after = FrameCount::quiescent();
+    if after.total() != base.total() {
+        return crate::fail_fmt!(
+            "frames {} -> {} after {exits} exits (buddy {}->{} cache {}->{} pt {}->{} heap {}->{})",
+            base.total(),
+            after.total(),
+            base.buddy,
+            after.buddy,
+            base.cached,
+            after.cached,
+            base.tables,
+            after.tables,
+            base.heap,
+            after.heap,
+        );
     }
     Outcome::Ok
+}
+
+/// What [`lifetime_stack_reclaim`] accounts for, read at a quiescent point.
+///
+/// The kernel page tables are counted with the free frames. Each stack that
+/// misses its CPU's stack cache is carved from KVA, and `Kva` hands out VA
+/// first-fit over a list that frees append to and that is merged in address
+/// order only when its node pool runs out; after each merge, the fresh VA
+/// starts above the highest stack still live, and which stacks those are
+/// (the ones the CPUs' stack caches hold, the ones still running or on a
+/// dead list) depends on timing. So the highest VA the test maps moves by
+/// several MiB from run to run, and each 2 MiB span it reaches for the first
+/// time takes a table page, which stays in the kernel tables for good
+/// (`paging_init::table_pages`) and is no frame lost. No warm-up can map the
+/// span ahead, since nothing bounds it but the KVA window.
+struct FrameCount {
+    /// The buddy's free frames.
+    buddy: usize,
+    /// Frames of the stacks the stack caches hold.
+    cached: usize,
+    /// Page-table pages the kernel mapper has taken since boot.
+    tables: usize,
+    /// Mapped heap pages, for the failure line. They are not added back:
+    /// heap growth in the test's window takes buddy frames and fails it.
+    heap: usize,
+}
+
+impl FrameCount {
+    fn quiescent() -> Self {
+        settle();
+        Self {
+            buddy: buddy_free(),
+            cached: thread_init::cached_stack_frames(),
+            tables: crate::paging_init::table_pages(),
+            heap: crate::heap_init::stats().capacity / vibeos::paging::PAGE_SIZE_4K as usize,
+        }
+    }
+
+    /// The frames free (`ktest::free_frames`) or in kernel page tables.
+    fn total(&self) -> usize {
+        self.buddy + self.cached + self.tables
+    }
 }
 
 // Spin about 10 million iterations (several 10 ms quanta under TCG), then
