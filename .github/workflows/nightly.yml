@@ -6,7 +6,8 @@ name: nightly
 # §10.10 selection at -smp 4, under `-accel kvm -cpu max,+invtsc`.
 # `release-profile` builds and boots `CARGO_PROFILE=release` under TCG.
 # `repro`, `deny-advisories` and `provenance-fetch` run the C-SCHED-TARGETS
-# commands present today; later targets arrive as `CI-step:` lines. Jobs call
+# commands present today; later targets arrive as `CI-step:` lines. `budget`
+# runs `make ci-budget` against the ci-history branch. Jobs call
 # only `make` targets and scripts (C-SCHED-TARGETS), and each ends by writing
 # its runner record and uploading it with its results files, which the ticks
 # job reads for `[nightly]` proofs (C-TICK, C-RESULTS, C-HISTORY). No timeout
@@ -474,6 +475,52 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: runner-provenance-fetch
+          path: build/runner.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+  budget:
+    name: budget
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    # Scheduled lane 3 (DESIGN §8.6): one job at a time, the rest queued.
+    concurrency:
+      group: sched-lane-3
+      queue: max
+    # L1200: the scheduled lanes' busy shares and waits and the per-push
+    # tiers' medians, read from the ci-history branch as ci_history.py's
+    # loader reads it (a clone of that branch alone, and release assets for
+    # rotated years through gh).
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: make ci-budget
+        run: make ci-budget
+
+      # The host CPU model and the guest's invariant-TSC bit, to the job
+      # summary and build/runner.json (ROADMAP §10.1, C-HISTORY).
+      - name: runner record
+        if: always()
+        run: python3 scripts/runner_info.py
+
+      - name: upload harness results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results-x86_64-budget
+          path: build/results/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: upload runner record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runner-budget
           path: build/runner.json
           if-no-files-found: ignore
           retention-days: 90

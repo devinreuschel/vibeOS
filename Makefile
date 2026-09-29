@@ -177,7 +177,7 @@ build/kernels/vibeos-ktest.elf: export VIBEOS_USER_BINS := $(VIBEOS_USER_BINS)
 build/kernels/vibeos-ktest.elf: export VIBEOS_USER_DIR := $(USER_OUT)
 endif
 
-.PHONY: help check check-python check-msrv all kernel iso isos repro run run-panic debug clean distclean setup layout prebuilt \
+.PHONY: help check check-python check-msrv all kernel iso isos repro ci-budget run run-panic debug clean distclean setup layout prebuilt \
         test-unit test-harness test-e2e test-e2e-panic test-e2e-gp test-e2e-mce test \
         test-e2e-pit test-e2e-highmem test-e2e-strace test-ps2 test-kernel test-kernel-smp4 test-lapic-fallback \
         test-smp-stress test-vibefs-crash test-vibefs-crash-plants test-e2e-uefi
@@ -193,6 +193,7 @@ help:
 	  '  user                  Rust user programs, as build/user/<name> (ROADMAP §10.5)' \
 	  '  isos                  every ISO variant, as build/vibeos*.iso' \
 	  '  repro                 build this commit twice; fail unless byte-identical (REPRO_ARGS=--share-rustup)' \
+	  '  ci-budget             scheduled lanes under 60% busy and tier medians under 60 s (ci-history)' \
 	  '  run                   boot production ISO in a QEMU window, COM1 on the terminal (VIBEOS_* apply)' \
 	  '  run-panic             boot panic-test ISO, no window, COM1 on the terminal' \
 	  '  debug                 as run, halted with a gdb stub on :1234; then gdb -x scripts/vibeos.gdb' \
@@ -362,6 +363,11 @@ isos: $(ISOS)
 # DESIGN §3.6). REPRO_ARGS: see scripts/repro_build.py.
 repro:
 	python3 scripts/repro_build.py $(REPRO_ARGS)
+
+# The scheduled share and the per-push tiers, from ci-history (ROADMAP
+# §10.1, DESIGN §8.6): both modes run, and the target fails if either does.
+ci-budget:
+	python3 scripts/ci_history.py --budget; b=$$?; python3 scripts/ci_history.py --tiers; t=$$?; [ $$b -eq 0 ] && [ $$t -eq 0 ]
 
 # QEMU starts through the harness launcher, which builds the drivers' argv
 # from the same VIBEOS_* settings and defaults (DESIGN §8.4); the ISO is

@@ -731,6 +731,7 @@ each pass 40 s alone and cannot split below a target.
 | `nightly` `repro` | daily 03:17 UTC + dispatch, `sched-lane-2` | `make repro`: every ISO variant built twice from one commit, with a different checkout path, `CARGO_HOME` and `RUSTUP_HOME`, compared byte for byte, and no host path in any output (`scripts/repro_build.py`) |
 | `nightly` `deny-advisories` | daily 03:17 UTC + dispatch, `sched-lane-3` | cargo-deny's pinned release archive, checked against its SHA-256 as in `check`, then `cargo deny check advisories`, which fetches the RustSec database and so stays out of `make check` |
 | `nightly` `provenance-fetch` | daily 03:17 UTC + dispatch, `sched-lane-3` | `python3 scripts/check_provenance.py --fetch`: each provenance header's upstream file at its pinned revision (DESIGN §1.5) |
+| `nightly` `budget` | daily 03:17 UTC + dispatch, `sched-lane-3` | `make ci-budget` (`ci_history.py --budget` and `--tiers`, Scheduled capacity below) against the `ci-history` branch, which it clones alone |
 
 The `ticks` job (ROADMAP §10.9) runs after the jobs that run the tiers, the `tier` matrix, and reads
 the `build/results/` files they upload. A pull request run tests the merge of its head with its
@@ -918,16 +919,36 @@ Release windows: none
 | Workflow | Cadence | Jobs per run | Job-hours per run | Peak concurrent jobs | Lanes |
 |---|---|---|---|---|---|
 | `smp-stress.yml` | weekly `0 6 * * 1` and dispatch | 4 | 4.5 (estimated) | 2 | `sched-lane-4`, `sched-lane-5` |
-| `nightly.yml` | daily `17 3 * * *` and dispatch | 5 | 4.5 (estimated) | 4 | `sched-lane-0`, `sched-lane-1`, `sched-lane-2`, `sched-lane-3` |
+| `nightly.yml` | daily `17 3 * * *` and dispatch | 6 | 4.6 (estimated) | 4 | `sched-lane-0`, `sched-lane-1`, `sched-lane-2`, `sched-lane-3` |
 | `ci-history.yml` | each completed `ci`, `release`, `nightly` or `smp-stress` run (`record`); daily `23 4 * * *` and dispatch (`daily`) | 1 | 0.05 per `record`, 0.3 per `daily` (estimated) | 1 | `sched-lane-6` |
 | `macos.yml` | daily `23 4 * * *` and dispatch | 2 | 1.5 (estimated) | 1 | `sched-lane-9` |
 
-Planned (ROADMAP §10.1): `ci_history.py --budget` holds every lane but the rebuilds' under 60%
-busy and every reserved-lane wait under 12 hours. The 40% left absorbs GitHub's delays to scheduled
-runs and new workflows, and keeps the account from running its share full around the clock, which
-GitHub's Actions terms count against it when the burden is disproportionate to the benefits. The
-section also records each per-push tier's median QEMU time, which `ci_history.py --tiers` keeps
-under 60 s, and the `ci-history` branch's packed size (ROADMAP §10.9).
+`ci_history.py --budget` reads the `ci-history` records of the scheduled workflows `WORKFLOWS`
+lists and takes each job's lane from its workflow file through `check_workflows.py`'s reader. Over
+the last 4 complete weeks (Monday 00:00 UTC) outside a release window, it prints each workflow's
+weekly job-hours and each lane's weekly busy share with its median and maximum wait (started minus
+created), and fails when a lane but a `rebuilds` one was busy more than 60% of a week, or a job in a
+reserved lane waited more than 12 hours to start. The 40% left absorbs GitHub's delays to
+scheduled runs and new workflows, and keeps the account from running its share full around the
+clock, which GitHub's Actions terms count against it when the burden is disproportionate to the
+benefits. `ci_history.py --tiers` takes the last 20 `ci` runs with event `push` on `main`, sums
+each `tier (<arch>, <tier>)` job's `make test-*` step seconds, prints each tier's median and run
+count (`n=<k>`, fewer than 20 while the history is young), and fails on a median above 60 s, which
+a new tier with its own check name fixes. Both exit 2, naming what is missing, when the history
+holds no such run or a record lacks a job's `created`, `started` or `completed` time or a tier
+step's seconds. `make ci-budget` runs both and fails if either fails; the nightly `budget` job runs
+it, and from ROADMAP Phase 11 an entry of `tests/gates/common.toml` runs it before every phase
+tag. The medians below are filled from a `make ci-budget` run on `main`, citing the commit and the
+CPU model, and the section also records the `ci-history` branch's packed size (ROADMAP §10.9).
+
+| Tier | Median QEMU s (last 20 runs on main) | Measured at |
+|---|---|---|
+| `tier (x86_64, e2e-1)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, e2e-2)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, in-guest-1)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, in-guest-2)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, in-guest-3)` | pending (make ci-budget after merge) | - |
+| `tier (x86_64, vibefs-crash)` | pending (make ci-budget after merge) | - |
 
 **Issues and crash records.** Planned (ROADMAP §14.10, §22.5): one `workflow_run` filer is the only
 job with `issues: write`; it checks out nothing, runs no repository code, and opens or comments on

@@ -15,6 +15,7 @@ from scripts.check_workflows import (
     Tree,
     Unsupported,
     check,
+    job_lanes,
     lane_map,
     ledger,
     load_tree,
@@ -693,6 +694,17 @@ class TestLaneTables(unittest.TestCase):
     def test_other_section_and_header_ignored(self) -> None:
         self.assertEqual(ledger(LANE_DOC.replace("## 8.6", "## 8.5")), {})
         self.assertEqual(lane_map(LANE_DOC.replace("| Reserved for |", "| Reserved |")), {})
+
+
+class TestJobLanes(unittest.TestCase):
+    def test_keys_by_display_name(self) -> None:
+        jobs = lane_job("a", "sched-lane-0").replace(
+            "  a:\n", "  a:\n    name: the a job\n"
+        ) + lane_job("b", "sched-lane-1")
+        self.assertEqual(
+            job_lanes(sched_tree(jobs)),
+            {(SCHED, "the a job"): "sched-lane-0", (SCHED, "b"): "sched-lane-1"},
+        )
 
 
 class TestLedgerRow(unittest.TestCase):

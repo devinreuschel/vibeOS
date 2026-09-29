@@ -25,6 +25,13 @@ Modes (one `if` branch each in `main`):
   the asset of a prerelease `ci-history-<year>` never marked latest, listed in
   `archives.json`, and restart the branch from an orphan commit holding the
   rest. `records()` and `has()` read the branch and every archive alike.
+- `--budget` / `--tiers` (ROADMAP §10.1, DESIGN §8.6 Scheduled capacity): the
+  scheduled share's weekly job-hours, lane busy shares and waits over the last
+  4 complete weeks, failing past 60% busy (a `rebuilds` lane aside) or a
+  reserved-lane wait past 12 hours; and each per-push tier's median QEMU time
+  over the last 20 `ci` push runs on `main`, failing past 60 s. Both exit 2
+  when the history lacks the runs or the times they need. `make ci-budget`
+  runs both.
 - `--record PATH`: the dev-host record writer `make gate PHASE=N RECORD=1`
   calls on the Apple Silicon dev host (ROADMAP §10.9, the dev-host box). It
   refuses a record that lacks a required field or holds the machine's
@@ -1182,6 +1189,213 @@ def print_series(points: list[Point]) -> None:
         print("no matching records")
 
 
+# --- budget and tiers (ROADMAP §10.1, DESIGN §8.6 Scheduled capacity) --------------
+
+WEEK = timedelta(days=7)
+BUDGET_WEEKS = 4
+BUSY_MAX = 0.60
+RESERVED_WAIT_MAX = timedelta(hours=12)
+TIER_RUNS = 20
+TIER_MEDIAN_MAX_S = 60
+TIER_JOB = re.compile(r"tier \((?P<arch>[^,()]+), (?P<tier>[^()]+)\)")
+# ci.yml's tier job runs its targets in one step named `make <targets>`.
+TIER_STEP = re.compile(r"make test-\S+(?: test-\S+)*")
+RELEASE_WINDOWS = re.compile(r"^Release windows: (.+)$", re.M)
+
+
+class MissingTimes(Exception):
+    """A record lacks a per-job or per-step time `--budget` or `--tiers` needs."""
+
+
+@dataclass(frozen=True)
+class Lanes:
+    """Each scheduled job's lane, keyed by (workflow key, job display name), and
+    each lane's `Reserved for` value (DESIGN §8.6's lane map)."""
+
+    job_lane: Mapping[tuple[str, str], str]
+    reserved: Mapping[str, str]
+
+    def lane_of(self, workflow: str, job: str) -> str | None:
+        hit = self.job_lane.get((workflow, job))
+        if hit is not None:
+            return hit
+        # A matrix leg is `<name> (…)`.
+        base = job.split(" (", 1)[0]
+        return self.job_lane.get((workflow, base))
+
+
+def _week_start(t: datetime) -> datetime:
+    day = t.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    return day - timedelta(days=day.weekday())
+
+
+def _overlap(a0: datetime, a1: datetime, b0: datetime, b1: datetime) -> float:
+    return max(0.0, (min(a1, b1) - max(a0, b0)).total_seconds())
+
+
+def _job_times(
+    rec: Mapping[str, Any], job: Mapping[str, Any]
+) -> tuple[datetime, datetime, datetime]:
+    got = [parse_time(job.get(k)) for k in ("created", "started", "completed")]
+    created, started, completed = got
+    if created is None or started is None or completed is None:
+        raise MissingTimes(
+            f"{rec.get('workflow')} run {rec.get('run_id')} job {job.get('name')!r}: "
+            "no created, started or completed time"
+        )
+    return created, started, completed
+
+
+def budget(
+    records: Sequence[Mapping[str, Any]],
+    lanes: Lanes,
+    windows: Sequence[tuple[datetime, datetime]],
+    now: datetime,
+) -> list[str]:
+    """Print each workflow's weekly job-hours and each lane's busy share and
+    waits over the last 4 complete weeks (Monday 00:00 UTC); return the
+    failures: a lane but a `rebuilds` one busy past 60% of a week, or a job in
+    a reserved lane that waited past 12 hours to start. Weeks that overlap a
+    release window are skipped. Raises `MissingTimes` on a job without its
+    times."""
+    end = _week_start(now)
+    weeks = [(end - WEEK * (i + 1), end - WEEK * i) for i in range(BUDGET_WEEKS)][::-1]
+    weeks = [w for w in weeks if not any(_overlap(w[0], w[1], a, b) > 0 for a, b in windows)]
+    hours: dict[str, list[float]] = {}
+    busy: dict[str, list[float]] = {}
+    waits: dict[str, list[float]] = {}
+    problems: list[str] = []
+    for rec in records:
+        if "tombstone" in rec:
+            continue
+        wf = str(rec.get("workflow"))
+        for job in rec.get("jobs") or []:
+            if not isinstance(job, dict):
+                continue
+            created, started, completed = _job_times(rec, job)
+            lane = lanes.lane_of(wf, str(job.get("name")))
+            for i, (w0, w1) in enumerate(weeks):
+                run_s = _overlap(started, completed, w0, w1)
+                hours.setdefault(wf, [0.0] * len(weeks))[i] += run_s / 3600
+                if lane is None:
+                    continue
+                busy.setdefault(lane, [0.0] * len(weeks))[i] += run_s / WEEK.total_seconds()
+                if not w0 <= created < w1:
+                    continue
+                wait = (started - created).total_seconds()
+                waits.setdefault(lane, []).append(wait)
+                if (
+                    lanes.reserved.get(lane, "none") != "none"
+                    and started - created > RESERVED_WAIT_MAX
+                ):
+                    problems.append(
+                        f"{lane}: {wf} job {job.get('name')!r} of run {rec.get('run_id')} "
+                        f"waited {wait / 3600:.1f} h to start (reserved lanes: at most 12 h)"
+                    )
+    label = ", ".join(w0.strftime("%Y-%m-%d") for w0, _ in weeks) or "none"
+    print(f"budget: weeks from {label} (Monday 00:00 UTC), release windows skipped")
+    for wf, hs in sorted(hours.items()):
+        print(f"workflow {wf}: " + ", ".join(f"{h:.1f}" for h in hs) + " job-hours per week")
+    for lane in sorted(set(busy) | set(waits)):
+        shares = busy.get(lane, [0.0] * len(weeks))
+        ws = waits.get(lane, [])
+        med = statistics.median(ws) / 3600 if ws else 0.0
+        top = max(ws) / 3600 if ws else 0.0
+        print(
+            f"{lane} ({lanes.reserved.get(lane, 'unmapped')}): busy "
+            + ", ".join(f"{b:.0%}" for b in shares)
+            + f"; wait median {med:.1f} h, max {top:.1f} h"
+        )
+        if lanes.reserved.get(lane) == "rebuilds":
+            continue
+        for (w0, _), share in zip(weeks, shares, strict=True):
+            if share > BUSY_MAX:
+                problems.append(
+                    f"{lane}: busy {share:.0%} of the week of {w0:%Y-%m-%d} (at most 60%)"
+                )
+    return problems
+
+
+def _run_order(rec: Mapping[str, Any]) -> tuple[str, int]:
+    return (str(rec.get("finished") or rec.get("started") or ""), int(rec.get("run_id") or 0))
+
+
+def tiers(records: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Print each per-push tier's median QEMU time over the last 20 `ci` runs
+    with event `push` on `main`, a tier's time being the summed seconds of its
+    `tier (<arch>, <tier>)` job's `make test-*` steps; return the tiers whose
+    median passes 60 s. Raises `MissingTimes` on such a job with no step time."""
+    runs = [
+        r for r in records
+        if "tombstone" not in r and r.get("workflow") == "ci"
+        and r.get("event") == "push" and r.get("branch") == MAIN
+    ]
+    runs = sorted(runs, key=_run_order)[-TIER_RUNS:]
+    per_tier: dict[str, list[int]] = {}
+    for rec in runs:
+        for job in rec.get("jobs") or []:
+            if not isinstance(job, dict) or not TIER_JOB.fullmatch(str(job.get("name"))):
+                continue
+            steps = [
+                s for s in job.get("steps") or []
+                if isinstance(s, dict) and TIER_STEP.fullmatch(str(s.get("name")))
+            ]
+            secs = [s.get("seconds") for s in steps]
+            known = [x for x in secs if isinstance(x, int) and not isinstance(x, bool)]
+            if not steps or len(known) != len(secs):
+                raise MissingTimes(
+                    f"ci run {rec.get('run_id')} job {job.get('name')!r}: "
+                    "no seconds for its `make test-*` step"
+                )
+            per_tier.setdefault(str(job["name"]), []).append(sum(known))
+    problems: list[str] = []
+    for name, values in sorted(per_tier.items()):
+        med = statistics.median(values)
+        print(f"{name}: median {med:g} s, n={len(values)}")
+        if med > TIER_MEDIAN_MAX_S:
+            problems.append(
+                f"{name}: median QEMU time {med:g} s over {len(values)} runs passes 60 s; "
+                "split it into a new tier with its own check name"
+            )
+    return problems
+
+
+def release_windows(testing_md: str) -> list[tuple[datetime, datetime]]:
+    """DESIGN §8.6's `Release windows:` line: `none`, or `<start>..<end>` pairs
+    of ISO times, comma-separated."""
+    m = RELEASE_WINDOWS.search(testing_md)
+    if m is None:
+        raise HistoryError("docs/TESTING.md §8.6 has no `Release windows:` line")
+    text = m.group(1).strip()
+    if text == "none":
+        return []
+    out = []
+    for part in text.split(","):
+        a, sep, b = part.strip().strip("`").partition("..")
+        t0, t1 = parse_time(a), parse_time(b)
+        if not sep or t0 is None or t1 is None:
+            raise HistoryError(f"release window {part.strip()!r} is not `<start>..<end>`")
+        out.append((t0, t1))
+    return out
+
+
+def scheduled_lanes(root: Path = ROOT) -> tuple[Lanes, list[str]]:
+    """The lane of every scheduled job, read through check_workflows.py's
+    reader, and the `WORKFLOWS` keys of the scheduled workflows."""
+    from scripts import check_workflows as cw
+
+    tree = cw.load_tree(root)
+    by_path = {spec.path: key for key, spec in WORKFLOWS.items()}
+    job_lane = {
+        (by_path[path], name): lane
+        for (path, name), lane in cw.job_lanes(tree).items()
+        if path in by_path
+    }
+    keys = sorted({by_path[path] for path, _ in cw.scheduled(tree) if path in by_path})
+    reserved = {lane: row.reserved for lane, row in cw.lane_map(tree.testing_md).items()}
+    return Lanes(job_lane, reserved), keys
+
+
 # --- rotation -----------------------------------------------------------------
 
 
@@ -1439,6 +1653,34 @@ def local_head() -> str | None:
     return gatelib.git(ROOT, "rev-parse", "HEAD", check=False).strip() or None
 
 
+def budget_main(history: HistoryRepo, *, tiers_mode: bool) -> int:
+    """`--budget` or `--tiers`: 0 when it holds, 1 on a failure, 2 when the
+    history lacks the runs or the times it needs (fail closed)."""
+    mode = "--tiers" if tiers_mode else "--budget"
+    try:
+        if tiers_mode:
+            records = list(history.records("ci"))
+            if not any(r.get("event") == "push" and r.get("branch") == MAIN for r in records):
+                print(f"ci_history: {mode}: no history: ci-history holds no ci push run on "
+                      f"{MAIN}", file=sys.stderr)
+                return 2
+            problems = tiers(records)
+        else:
+            lanes, keys = scheduled_lanes()
+            windows = release_windows((ROOT / "docs/TESTING.md").read_text(encoding="utf-8"))
+            records = [r for k in keys for r in history.records(k)]
+            if not records:
+                print(f"ci_history: {mode}: no history: ci-history holds no run of "
+                      f"{', '.join(keys) or 'a scheduled workflow'}", file=sys.stderr)
+                return 2
+            problems = budget(records, lanes, windows, datetime.now(UTC))
+    except MissingTimes as e:
+        print(f"ci_history: {mode}: missing times: {e}", file=sys.stderr)
+        return 2
+    summary([f"ci-history {mode}: {p}" for p in problems] or [f"ci-history {mode}: ok"])
+    return 1 if problems else 0
+
+
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         prog="ci_history.py",
@@ -1465,6 +1707,16 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     mode.add_argument("--record", metavar="PATH", type=Path,
                       help="commit the dev-host record in PATH (make gate RECORD=1)")
+    mode.add_argument(
+        "--budget", action="store_true",
+        help="print scheduled job-hours, lane busy shares and waits over the last 4 weeks; "
+        "fail past 60%% busy or a 12 h reserved-lane wait (DESIGN §8.6)",
+    )
+    mode.add_argument(
+        "--tiers", action="store_true",
+        help="print each per-push tier's median QEMU time over the last 20 ci runs on main; "
+        "fail past 60 s",
+    )
     ap.add_argument("--job", metavar="NAME", help="--series: the job")
     ap.add_argument("--step", metavar="NAME", help="--series: the job's step")
     ap.add_argument("--branch", default=MAIN, help="--series: the runs' branch ('' for any)")
@@ -1527,6 +1779,11 @@ def main(argv: list[str] | None = None) -> int:
             print_series(series(history, args.series, args.job, args.step,
                                 args.branch or None, events or None))
             return 0
+        if args.budget or args.tiers:
+            history = HistoryRepo(workdir, args.remote or default_remote(),
+                                  releaser=GhReleaser(_repository()), codec=ZstdCli())
+            history.open(depth=1)
+            return budget_main(history, tiers_mode=args.tiers)
         repo = _repository()
         api = GhApi()
         releaser = GhReleaser(repo)

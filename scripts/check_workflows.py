@@ -975,7 +975,7 @@ def ledger(text: str) -> dict[str, LedgerRow]:
     return out
 
 
-def _scheduled(tree: Tree) -> list[tuple[str, Node]]:
+def scheduled(tree: Tree) -> list[tuple[str, Node]]:
     """Workflows that run on a schedule or a dispatch, ci.yml and release.yml aside."""
     out = []
     for path, wf in tree.workflows.items():
@@ -1031,17 +1031,30 @@ def _job_count(job: Node) -> int | None:
 
 
 def _sched_jobs(tree: Tree) -> Iterator[tuple[str, Node, Node]]:
-    for path, wf in _scheduled(tree):
+    for path, wf in scheduled(tree):
         for job in _jobs(wf):
             if _hosted(job):
                 yield path, wf, job
+
+
+def job_lanes(tree: Tree) -> dict[tuple[str, str], str]:
+    """Each scheduled job's lane, keyed by (workflow path, the job's display name,
+    its `name:` or else its id), for `ci_history.py --budget`."""
+    out = {}
+    for path, _, job in _sched_jobs(tree):
+        lane = _lane(job)
+        if lane is None or job.key is None:
+            continue
+        name = job.get("name")
+        out[(path, name.value if name is not None and name.value else job.key)] = lane
+    return out
 
 
 def rule_ledger_row(tree: Tree) -> list[Problem]:
     """L1200: every scheduled or dispatched workflow has a DESIGN §8.6 ledger row."""
     rows = ledger(tree.testing_md)
     out = []
-    for path, wf in _scheduled(tree):
+    for path, wf in scheduled(tree):
         if Path(path).name not in rows:
             msg = f"scheduled workflow {Path(path).name} has no §8.6 ledger row"
             out.append(Problem(path, wf.line, "ledger_row", msg))
