@@ -305,25 +305,26 @@ def check_strace_lines(lines: list[str], expected_cmdline: str) -> tuple[str, st
     `user: syscall <name> nr=<n> = <ret>`, and the first `write` line is
     `user: syscall write nr=1 = <int>`. Returns the echo and that line.
 
-    Until kernel lines are framed, a trace line can follow
-    user output that ended without a newline, so it is found anywhere in a
-    serial line.
+    The kernel prints the echo and the trace, so both are read from kernel
+    lines only (framed, DESIGN §2.6). A kernel line starts on a fresh line
+    even after user output that did not end one, so each trace line is a
+    whole kernel line, and a user program's copy of one is ignored.
     """
     want = CMDLINE_ECHO + expected_cmdline
     echo_at: int | None = None
     first_trace: int | None = None
     first_write: str | None = None
-    for i, line in enumerate(lines):
-        line = line.rstrip("\r")
-        if echo_at is None and CMDLINE_ECHO in line:
-            got = line[line.index(CMDLINE_ECHO):]
-            if got != want:
-                raise HarnessError(f"cmdline echo {got!r}, expected {want!r}")
-            echo_at = i
-        j = line.find(STRACE_PREFIX)
-        if j < 0:
+    for i, raw in enumerate(lines):
+        line = kernel_text(raw.rstrip("\r"))
+        if line is None:
             continue
-        trace = line[j:]
+        if echo_at is None and line.startswith(CMDLINE_ECHO):
+            if line != want:
+                raise HarnessError(f"cmdline echo {line!r}, expected {want!r}")
+            echo_at = i
+        if not line.startswith(STRACE_PREFIX):
+            continue
+        trace = line
         m = STRACE_RE.fullmatch(trace)
         if m is None:
             raise HarnessError(f"malformed trace line {trace!r}")

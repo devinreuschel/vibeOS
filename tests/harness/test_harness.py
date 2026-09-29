@@ -1072,15 +1072,18 @@ class TestQemuArgv(unittest.TestCase):
 class TestStraceE2e(unittest.TestCase):
     """`make test-e2e-strace`'s checks (ROADMAP §10.7, F150)."""
 
-    ECHO = "vibeOS: boot: cmdline: vibeos.strace=0 vibeos.strace=1"
+    ECHO = K("vibeOS: boot: cmdline: vibeos.strace=0 vibeos.strace=1")
     GOOD = [
-        "vibeOS: serial online",
+        K("vibeOS: serial online"),
         ECHO,
-        "vibeOS: smp: done",
-        "user: syscall getpid nr=39 = 1",
-        "init: startinguser: syscall write nr=1 = 14",
-        "user: syscall write nr=1 = -14",
-        "user: syscall ? nr=999 = -38",
+        K("vibeOS: smp: done"),
+        K("user: syscall getpid nr=39 = 1"),
+        # User output that did not end its line: the kernel's trace line
+        # starts a fresh one.
+        "init: starting",
+        K("user: syscall write nr=1 = 14"),
+        K("user: syscall write nr=1 = -14"),
+        K("user: syscall ? nr=999 = -38"),
     ]
 
     def test_limine_cmdline_value(self) -> None:
@@ -1108,11 +1111,14 @@ class TestStraceE2e(unittest.TestCase):
 
     def test_check_strace_lines_ok(self) -> None:
         echo, write = run_e2e.check_strace_lines(self.GOOD, "vibeos.strace=0 vibeos.strace=1")
-        self.assertEqual(echo, self.ECHO)
+        self.assertEqual(echo, kernel_text(self.ECHO))
         self.assertEqual(write, "user: syscall write nr=1 = 14")
         # A carriage return from the serial line is not part of the text.
         lines = [line + "\r" for line in self.GOOD]
         run_e2e.check_strace_lines(lines, "vibeos.strace=0 vibeos.strace=1")
+        # A user program's copy of a trace or echo line is not the kernel's.
+        forged = [*self.GOOD, "user: syscall bogus", "vibeOS: boot: cmdline: forged"]
+        run_e2e.check_strace_lines(forged, "vibeos.strace=0 vibeos.strace=1")
 
     def test_check_strace_lines_missing_write(self) -> None:
         lines = [line for line in self.GOOD if "write" not in line]
@@ -1120,16 +1126,16 @@ class TestStraceE2e(unittest.TestCase):
             run_e2e.check_strace_lines(lines, "vibeos.strace=0 vibeos.strace=1")
         with self.assertRaisesRegex(HarnessError, "user: syscall"):
             run_e2e.check_strace_lines(self.GOOD[:3], "vibeos.strace=0 vibeos.strace=1")
-        bad_nr = [*self.GOOD[:3], "user: syscall write nr=2 = 1"]
+        bad_nr = [*self.GOOD[:3], K("user: syscall write nr=2 = 1")]
         with self.assertRaisesRegex(HarnessError, "nr=1"):
             run_e2e.check_strace_lines(bad_nr, "vibeos.strace=0 vibeos.strace=1")
 
     def test_check_strace_lines_malformed(self) -> None:
         for bad in (
-            "user: syscall write nr=1 =",
-            "user: syscall write nr=x = 1",
-            "user: syscall write nr=1 = 1 extra",
-            "user: syscall  nr=1 = 1",
+            K("user: syscall write nr=1 ="),
+            K("user: syscall write nr=x = 1"),
+            K("user: syscall write nr=1 = 1 extra"),
+            K("user: syscall  nr=1 = 1"),
         ):
             with self.subTest(bad=bad), self.assertRaisesRegex(HarnessError, "malformed"):
                 run_e2e.check_strace_lines(
