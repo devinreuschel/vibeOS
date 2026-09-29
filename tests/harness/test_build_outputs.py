@@ -138,7 +138,9 @@ class NamedOutputsTest(unittest.TestCase):
         texts = {"Makefile": (ROOT / "Makefile").read_text(encoding="utf-8"), **workflow_texts()}
         for name, text in texts.items():
             self.assertIsNone(re.search(r"\btarget-[a-z]", text), name)
-            self.assertNotIn("CARGO_TARGET_DIR=", text, name)
+            # Only a directory inside target/ (check-msrv's other toolchain).
+            for m in re.finditer(r"CARGO_TARGET_DIR=(\S*)", text):
+                self.assertTrue(m.group(1).startswith("$(CARGO_TARGET_DIR)/"), f"{name}: {m[0]}")
         for line in make_db().rules["build/kernels/vibeos-default.elf"].recipe:
             self.assertNotIn("CARGO_TARGET_DIR", line)
 
