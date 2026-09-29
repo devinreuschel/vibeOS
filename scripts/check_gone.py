@@ -147,6 +147,7 @@ GONE: list[tuple[str, str]] = [
     ("heap_then_buddy_is_forbidden", "the heap ranks first"),
     ("find_features", "`vibeos-core` builds with its MSRV"),
     ("FEATURE_ATTR", "`vibeos-core` builds with its MSRV"),
+    ("validate_buf", "user-VA accessors replace the physmap copy"),
 ]
 
 SCOPE = ["src", "crates", "user", "tests", "scripts", ".github", "Makefile", "build.rs",

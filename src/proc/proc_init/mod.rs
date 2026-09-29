@@ -15,6 +15,7 @@ use vibeos::kalloc::{TryBox, TryVec};
 use vibeos::kbd::{DecodedKey, NamedKey};
 use vibeos::lock::RANK_SCHED;
 use vibeos::paging::{PAGE_SIZE_4K, USER_MAP_END};
+use vibeos::proc::uaccess::user_range_ok;
 use vibeos::proc::{
     Creds, Cwd, FD_CLOEXEC, Fd, FdKind, FdTable, INIT_PID, InitState, MAX_FDS, MAX_PROCS,
     ProcState, SIGCHLD, SIGCONT, SIGKILL, SIGSTOP, SigAct, WNOHANG, default_action,
@@ -37,6 +38,7 @@ use crate::addr_space_init;
 use crate::arch::idt::TrapFrame;
 use crate::console_init;
 use crate::file_init;
+use crate::proc::uaccess_init;
 use crate::serial::Serial;
 use crate::sync_init::SpinMutex;
 use crate::syscall_init;
@@ -57,7 +59,7 @@ use exit::reap_zombie;
 use exit::{finish_exit, sys_exit, sys_kill, sys_psinfo, sys_wait4};
 use fd::{
     close_all_fds, close_dropped, dup_table, lookup_fd, sys_close, sys_dup, sys_dup2, sys_fcntl,
-    sys_lseek, sys_open, sys_read, sys_write, validate_buf,
+    sys_lseek, sys_open, sys_read, sys_write,
 };
 
 struct Proc {
@@ -613,26 +615,11 @@ fn sys_getpid() -> i64 {
 }
 
 fn copy_user_str(va: u64, out: &mut [u8]) -> Result<usize, i32> {
-    if va == 0 {
-        return Err(EFAULT);
+    match uaccess_init::strncpy_from_user(out, va) {
+        Ok(n) if n == out.len() => Err(ENAMETOOLONG),
+        Ok(n) => Ok(n),
+        Err(f) => Err(f.errno()),
     }
-    let Some(space) = current_space() else {
-        return Err(EFAULT);
-    };
-    let mut n = 0usize;
-    while n < out.len() {
-        syscall::check_user_ptr(|p, l| space.check_user_range(p, l), va + n as u64, 1)?;
-        let mut b = [0u8; 1];
-        space
-            .read_bytes(va + n as u64, &mut b)
-            .map_err(|_| EFAULT)?;
-        if b[0] == 0 {
-            return Ok(n);
-        }
-        out[n] = b[0];
-        n += 1;
-    }
-    Err(ENAMETOOLONG)
 }
 
 /// The signal and `si_code` for a trap raised by ring-3 code: the port's

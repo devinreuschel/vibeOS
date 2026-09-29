@@ -528,6 +528,16 @@ pub(crate) const TESTS: &[Test] = &[
     test("user_tf_repin", proc::ktest::test_user_tf_repin).deadline(60_000),
     test("user_fork_wait_stall", proc::ktest::user_fork_wait_stall),
     test(
+        "uaccess_syscall_copies",
+        proc::ktest::test_uaccess_syscall_copies,
+    )
+    .deadline(30_000),
+    test(
+        "uaccess_readonly_efault",
+        proc::ktest::test_uaccess_readonly_efault,
+    )
+    .deadline(30_000),
+    test(
         "shootdown_ack_while_busy",
         irq::ktest::shootdown_ack_while_busy,
     ),

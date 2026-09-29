@@ -10,8 +10,7 @@
 use core::mem::size_of;
 
 use crate::arch::UserAccess;
-use crate::paging::{NULL_GUARD_LEN, PAGE_SIZE_4K, USER_MAP_END, is_canonical};
-use crate::proc::addr_space::UserMemError;
+use crate::paging::{NULL_GUARD_LEN, PAGE_SIZE_4K, USER_MAP_END};
 use crate::proc::syscall::EFAULT;
 
 /// A user copy that the range check refused or that faulted before its end.
@@ -38,28 +37,6 @@ pub const fn user_range_ok(addr: u64, len: u64) -> bool {
         Some(end) => addr >= NULL_GUARD_LEN && end <= USER_MAP_END,
         None => false,
     }
-}
-
-/// Which bound a range that [`user_range_ok`] refused breaks, for callers
-/// that report a [`UserMemError`]. Only meaningful for a refused range.
-pub const fn refusal(addr: u64, len: u64) -> UserMemError {
-    if len == 0 {
-        return if is_canonical(addr) {
-            UserMemError::Kernel
-        } else {
-            UserMemError::NonCanonical
-        };
-    }
-    let Some(end) = addr.checked_add(len) else {
-        return UserMemError::Overflow;
-    };
-    if !is_canonical(addr) || !is_canonical(end.wrapping_sub(1)) {
-        return UserMemError::NonCanonical;
-    }
-    if addr >= USER_MAP_END || end > USER_MAP_END {
-        return UserMemError::Kernel;
-    }
-    UserMemError::NullGuard
 }
 
 /// One exception-table record, as the port's accessors emit it into
@@ -328,18 +305,6 @@ mod tests {
         assert!(!user_range_ok(0xFFFF_8000_0000_1000, 0));
         assert!(!user_range_ok(0x0000_8000_0000_0000, 8));
         assert!(!user_range_ok(0x0000_8000_0000_0000, 0));
-        assert_eq!(refusal(0, 8), UserMemError::NullGuard);
-        assert_eq!(refusal(0xFFFF_8000_0000_1000, 8), UserMemError::Kernel);
-        assert_eq!(refusal(u64::MAX, 2), UserMemError::Overflow);
-        assert_eq!(
-            refusal(0x0000_8000_0000_0000, 8),
-            UserMemError::NonCanonical
-        );
-        assert_eq!(refusal(USER_MAP_END, 1), UserMemError::Kernel);
-        assert_eq!(
-            refusal(0x0000_8000_0000_0000, 0),
-            UserMemError::NonCanonical
-        );
     }
 
     /// Entries whose offsets point `insn_off` and `fixup_off` bytes past

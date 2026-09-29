@@ -93,13 +93,6 @@ pub(super) fn lookup_fd(fd: u64) -> Option<Fd> {
     with_table(|t| t.get(pid).and_then(|p| p.fds.get(fd as u32)))
 }
 
-pub(super) fn validate_buf(buf: u64, len: u64) -> Result<(), i32> {
-    let Some(space) = current_space() else {
-        return Err(EFAULT);
-    };
-    syscall::check_user_ptr(|p, n| space.check_user_range(p, n), buf, len)
-}
-
 pub(super) fn sys_write(fd: u64, buf: u64, len: u64) -> i64 {
     let Some(slot) = lookup_fd(fd) else {
         return syscall::neg(EBADF);
@@ -107,43 +100,46 @@ pub(super) fn sys_write(fd: u64, buf: u64, len: u64) -> i64 {
     match slot.kind {
         FdKind::None => syscall::neg(EBADF),
         FdKind::Console | FdKind::File { .. } => {
-            if let Err(e) = validate_buf(buf, len) {
-                return syscall::neg(e);
+            if !user_range_ok(buf, len) {
+                return syscall::neg(EFAULT);
             }
             if len == 0 {
                 return 0;
             }
-            let Some(space) = current_space() else {
-                return syscall::neg(EFAULT);
-            };
             let mut scratch = [0u8; 256];
             let mut done = 0u64;
             while done < len {
                 let n = (len - done).min(scratch.len() as u64) as usize;
-                if space.read_bytes(buf + done, &mut scratch[..n]).is_err() {
-                    return syscall::neg(EFAULT);
-                }
-                match slot.kind {
-                    FdKind::Console => console_init::write(&scratch[..n]),
-                    FdKind::File { fid, r#gen } => {
-                        match file_write(FileId { fid, r#gen }, &scratch[..n]) {
-                            Ok(k) => {
-                                if k < n {
-                                    return (done + k as u64) as i64;
+                let Some(va) = buf.checked_add(done) else {
+                    return byte_count(done);
+                };
+                let c = uaccess_init::copy_from_user_partial(&mut scratch[..n], va);
+                if c > 0 {
+                    match slot.kind {
+                        FdKind::Console => console_init::write(&scratch[..c]),
+                        FdKind::File { fid, r#gen } => {
+                            match file_write(FileId { fid, r#gen }, &scratch[..c]) {
+                                Ok(k) => {
+                                    if k < c {
+                                        return byte_count(done + k as u64);
+                                    }
+                                }
+                                Err(e) => {
+                                    return if done == 0 {
+                                        syscall::neg(fs_errno(e))
+                                    } else {
+                                        done as i64
+                                    };
                                 }
                             }
-                            Err(e) => {
-                                return if done == 0 {
-                                    syscall::neg(fs_errno(e))
-                                } else {
-                                    done as i64
-                                };
-                            }
                         }
+                        FdKind::None => return syscall::neg(EBADF),
                     }
-                    FdKind::None => return syscall::neg(EBADF),
                 }
-                done += n as u64;
+                done += c as u64;
+                if c < n {
+                    return byte_count(done);
+                }
             }
             #[cfg(feature = "kernel_tests")]
             if matches!(slot.kind, FdKind::Console) {
@@ -151,6 +147,38 @@ pub(super) fn sys_write(fd: u64, buf: u64, len: u64) -> i64 {
             }
             done as i64
         }
+    }
+}
+
+/// A byte-counting call's result after a short copy: the bytes it moved,
+/// or `EFAULT` when it moved none (SYSCALL.md §5).
+fn byte_count(done: u64) -> i64 {
+    if done == 0 {
+        syscall::neg(EFAULT)
+    } else {
+        done as i64
+    }
+}
+
+/// Give back the `n` bytes a read consumed from `id` but could not copy
+/// out, so the next read returns them. A file that cannot seek keeps them,
+/// as a Linux device does.
+fn unread(id: FileId, n: usize) {
+    let Some(back) = i64::try_from(n).ok().and_then(i64::checked_neg) else {
+        return;
+    };
+    let r = file_init::fget(id).and_then(|f| {
+        let r = file_init::seek(&f, SeekFrom::Current(back));
+        file_init::close(f).and(r)
+    });
+    match r {
+        Ok(_) | Err(FsError::NotSupp) => {}
+        Err(e) => crate::klog_ratelimited!(
+            1000,
+            vibeos::log::Level::Warn,
+            "vibeOS: proc: read rewind failed: {}",
+            e.as_str()
+        ),
     }
 }
 
@@ -168,15 +196,12 @@ pub(super) fn sys_read(fd: u64, buf: u64, len: u64) -> i64 {
     let Some(slot) = lookup_fd(fd) else {
         return syscall::neg(EBADF);
     };
-    if let Err(e) = validate_buf(buf, len) {
-        return syscall::neg(e);
+    if !user_range_ok(buf, len) {
+        return syscall::neg(EFAULT);
     }
     if len == 0 {
         return 0;
     }
-    let Some(space) = current_space() else {
-        return syscall::neg(EFAULT);
-    };
     match slot.kind {
         FdKind::None => syscall::neg(EBADF),
         FdKind::Console => {
@@ -185,12 +210,11 @@ pub(super) fn sys_read(fd: u64, buf: u64, len: u64) -> i64 {
                 let Some(b) = key_byte(console_init::wait_key()) else {
                     continue;
                 };
-                if space.write_bytes(buf + n, &[b]).is_err() {
-                    return if n == 0 {
-                        syscall::neg(EFAULT)
-                    } else {
-                        n as i64
-                    };
+                let Some(va) = buf.checked_add(n) else {
+                    return byte_count(n);
+                };
+                if uaccess_init::copy_to_user_partial(va, &[b]) == 0 {
+                    return byte_count(n);
                 }
                 n += 1;
                 if b == b'\n' {
@@ -200,14 +224,17 @@ pub(super) fn sys_read(fd: u64, buf: u64, len: u64) -> i64 {
             n as i64
         }
         FdKind::File { fid, r#gen } => {
+            let id = FileId { fid, r#gen };
             let mut scratch = [0u8; 256];
             let n = (len as usize).min(scratch.len());
-            match file_read(FileId { fid, r#gen }, &mut scratch[..n]) {
+            match file_read(id, &mut scratch[..n]) {
+                Ok(0) => 0,
                 Ok(k) => {
-                    if k > 0 && space.write_bytes(buf, &scratch[..k]).is_err() {
-                        return syscall::neg(EFAULT);
+                    let c = uaccess_init::copy_to_user_partial(buf, &scratch[..k]);
+                    if c < k {
+                        unread(id, k - c);
                     }
-                    k as i64
+                    byte_count(c as u64)
                 }
                 Err(e) => syscall::neg(fs_errno(e)),
             }
