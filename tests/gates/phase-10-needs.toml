@@ -690,3 +690,12 @@ needs = [
   "every `IrqCell` static that more",  # L1304
 ]
 why = "claim: missing edge found by the Phase 10 planning survey and review (survey)"
+
+# L1448
+[[box]]
+key = "CI history: when a `ci`"
+needs = [
+  "no workflow expands a `${{",  # L1204
+  "`ci.yml` runs on a push",  # L1205
+]
+why = "claim: missing edge found by the Phase 10 planning survey and review (extra)"
