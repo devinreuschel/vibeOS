@@ -169,11 +169,18 @@ impl Vol {
         Ok(())
     }
 
+    /// Release every data block of inode `ino`. The drop list's room is
+    /// checked first, so a failure queues nothing.
     fn free_inode_data<D: Disk>(&mut self, _d: &mut D, ino: u32) -> Result<(), Error> {
         let is = self.inode_slot(ino)?;
-        let n_ext = self.inodes[is].n_ext as usize;
+        let n_ext = (self.inodes[is].n_ext as usize).min(MAX_EXT);
         let mut ex = [Extent::EMPTY; MAX_EXT];
         ex.copy_from_slice(&self.inodes[is].extents);
+        let mut drops = 0usize;
+        for e in &ex[..n_ext] {
+            drops += self.drops_needed(e.phys, e.len);
+        }
+        self.drop_room(drops)?;
         let mut i = 0usize;
         while i < n_ext {
             let mut b = 0u32;
@@ -249,7 +256,12 @@ impl Vol {
         }
     }
 
-    fn extent_crc<D: Disk>(&mut self, d: &mut D, phys: u32, len: u32) -> Result<u32, Error> {
+    pub(super) fn extent_crc<D: Disk>(
+        &mut self,
+        d: &mut D,
+        phys: u32,
+        len: u32,
+    ) -> Result<u32, Error> {
         let mut crc = 0xFFFF_FFFFu32;
         let mut b = 0u32;
         while b < len {
@@ -324,31 +336,51 @@ impl Vol {
         if nb as usize > MAX_EXT {
             return Err(Error::NoSpace);
         }
-        let mut physs = [0u32; MAX_EXT];
+        let mut ex = [Extent::EMPTY; MAX_EXT];
         let mut p = 0u32;
         while p < nb {
-            physs[p as usize] = self.alloc_block()?;
-            p += 1;
-        }
-        p = 0;
-        while p < nb {
-            let start = (p as usize) * BLOCK;
-            let chunk = &tmp[start..size.min(start + BLOCK)];
-            let crc = self.write_extent_bytes(d, physs[p as usize], 1, chunk)?;
-            let is = self.inode_slot(ino)?;
-            self.inodes[is].extents[p as usize] = Extent {
-                log: p,
-                phys: physs[p as usize],
-                len: 1,
-                crc,
-            };
+            let r = self.spill_block(d, &tmp[..size], p);
+            match r {
+                Ok(e) => ex[p as usize] = e,
+                Err(e) => {
+                    // Each block is new in this transaction, so
+                    // `pending_drop` frees it and cannot fail.
+                    let mut q = 0usize;
+                    let mut rel = Ok(());
+                    while q < p as usize {
+                        rel = rel.and(self.pending_drop(ex[q].phys));
+                        q += 1;
+                    }
+                    return rel.and(Err(e));
+                }
+            }
             p += 1;
         }
         let is = self.inode_slot(ino)?;
+        self.inodes[is].extents = ex;
         self.inodes[is].flags &= !F_INLINE;
         self.inodes[is].inline_len = 0;
         self.inodes[is].n_ext = nb as u8;
         Ok(())
+    }
+
+    /// Write block `p` of the inline bytes `data` to a new block; its
+    /// extent. A write error releases the block.
+    fn spill_block<D: Disk>(&mut self, d: &mut D, data: &[u8], p: u32) -> Result<Extent, Error> {
+        let start = (p as usize) * BLOCK;
+        let chunk = &data[start..data.len().min(start + BLOCK)];
+        let phys = self.alloc_block()?;
+        match self.write_extent_bytes(d, phys, 1, chunk) {
+            Ok(crc) => Ok(Extent {
+                log: p,
+                phys,
+                len: 1,
+                crc,
+            }),
+            // `phys` is new in this transaction: `pending_drop` frees it
+            // and cannot fail.
+            Err(e) => self.pending_drop(phys).and(Err(e)),
+        }
     }
 
     /// The size of inode `ino`, which `SEEK_END` and `O_APPEND` read.
@@ -496,40 +528,101 @@ impl Vol {
             let pos = off.checked_add(done as u64).ok_or(Error::FileTooBig)?;
             let (fblk, pin) = Self::block_of(pos)?;
             let n = (BLOCK - pin).min(buf.len() - done);
-            let is = self.inode_slot(ino)?;
-            let existing = self.map_block(is, fblk)?;
-            self.iobuf.fill(0);
-            if let Some((ei, phys)) = existing {
-                d.read_block(phys, &mut self.iobuf)?;
-                let old_e = self.inodes[is].extents[ei];
-                #[expect(
-                    clippy::let_underscore_must_use,
-                    reason = "fixed by ROADMAP §10.11: vibefs never rewrites corrupt data"
-                )]
-                let _ = self.check_extent(d, old_e);
-                self.iobuf[pin..pin + n].copy_from_slice(&buf[done..done + n]);
-                let newp = self.alloc_block()?;
-                d.write_block(newp, &self.iobuf)?;
-                let crc = self.extent_crc(d, newp, 1)?;
-                // replace this one physical block in the extent list
-                self.split_replace_extent(is, fblk, newp, crc)?;
-                self.pending_drop(phys)?;
-            } else {
-                self.iobuf[pin..pin + n].copy_from_slice(&buf[done..done + n]);
-                let newp = self.alloc_block()?;
-                d.write_block(newp, &self.iobuf)?;
-                let crc = self.extent_crc(d, newp, 1)?;
-                let is = self.inode_slot(ino)?;
-                self.add_extent(is, fblk, newp, 1, crc)?;
+            match self.write_chunk(d, ino, fblk, pin, &buf[done..done + n]) {
+                Ok(()) => done += n,
+                Err(e) if done == 0 => return Err(e),
+                // A short count: the chunks before this one are written.
+                Err(_) => break,
             }
-            done += n;
         }
+        let end = off + done as u64;
         let is = self.inode_slot(ino)?;
         if end > self.inodes[is].size {
             self.inodes[is].size = end;
         }
         self.bump_mtime(ino);
-        Ok(buf.len())
+        Ok(done)
+    }
+
+    /// The extent slots a write to file block `fblk` adds: 1 for a hole,
+    /// 0 to replace a 1-block extent, 1 at either end of a longer extent,
+    /// and 2 in its middle.
+    fn slots_needed(&self, is: usize, fblk: u32) -> Result<usize, Error> {
+        let Some((ei, _)) = self.map_block(is, fblk)? else {
+            return Ok(1);
+        };
+        let e = self.inodes[is].extents[ei];
+        let last = e.log + (e.len - 1);
+        Ok(match (e.len, fblk == e.log, fblk == last) {
+            (1, _, _) => 0,
+            (_, true, _) | (_, _, true) => 1,
+            _ => 2,
+        })
+    }
+
+    /// Write `data` into file block `fblk` at byte `pin` through a new
+    /// block. Everything that can refuse the write is checked before the
+    /// block is allocated, and an error after that releases it.
+    fn write_chunk<D: Disk>(
+        &mut self,
+        d: &mut D,
+        ino: u32,
+        fblk: u32,
+        pin: usize,
+        data: &[u8],
+    ) -> Result<(), Error> {
+        let is = self.inode_slot(ino)?;
+        let n_ext = self.inodes[is].n_ext as usize;
+        if n_ext + self.slots_needed(is, fblk)? > MAX_EXT {
+            return Err(Error::NoSpace);
+        }
+        let existing = self.map_block(is, fblk)?;
+        self.iobuf.fill(0);
+        if let Some((ei, phys)) = existing {
+            self.drop_room(self.drops_needed(phys, 1))?;
+            d.read_block(phys, &mut self.iobuf)?;
+            let old_e = self.inodes[is].extents[ei];
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "fixed by ROADMAP §10.11: vibefs never rewrites corrupt data"
+            )]
+            let _ = self.check_extent(d, old_e);
+            self.iobuf[pin..pin + data.len()].copy_from_slice(data);
+            let newp = self.alloc_block()?;
+            let r = self.place_block(d, newp, |v, crc| {
+                // replace this one physical block in the extent list
+                v.split_replace_extent(is, fblk, newp, crc)
+            });
+            if r.is_ok() {
+                // `drop_room` above left room for `phys`.
+                self.pending_drop(phys)?;
+            }
+            r
+        } else {
+            self.iobuf[pin..pin + data.len()].copy_from_slice(data);
+            let newp = self.alloc_block()?;
+            self.place_block(d, newp, |v, crc| v.add_extent(is, fblk, newp, 1, crc))
+        }
+    }
+
+    /// Write `iobuf` to the new block `newp` and hand its CRC to `link`;
+    /// on any error, release `newp`.
+    fn place_block<D: Disk>(
+        &mut self,
+        d: &mut D,
+        newp: u32,
+        link: impl FnOnce(&mut Self, u32) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let r = d
+            .write_block(newp, &self.iobuf)
+            .and_then(|()| self.extent_crc(d, newp, 1))
+            .and_then(|crc| link(self, crc));
+        match r {
+            Ok(()) => Ok(()),
+            // `newp` is new in this transaction: `pending_drop` frees it
+            // and cannot fail.
+            Err(e) => self.pending_drop(newp).and(Err(e)),
+        }
     }
 
     fn split_replace_extent(
@@ -625,6 +718,25 @@ impl Vol {
         }
         let keep_blks = u32::try_from(new.div_ceil(BLOCK as u64)).map_err(|_| Error::FileTooBig)?;
         let n_ext = (self.inodes[is].n_ext as usize).min(MAX_EXT);
+        // Every block this truncate drops, those `free_inode_data` drops
+        // for a file that goes inline included, fits the drop list before
+        // the first is queued.
+        let mut drops = 0usize;
+        for e in &self.inodes[is].extents[..n_ext] {
+            let end = u64::from(e.log)
+                .checked_add(u64::from(e.len))
+                .ok_or(Error::Corrupt)?;
+            let gone = if new <= INLINE as u64 || e.log >= keep_blks {
+                e.len
+            } else if end > u64::from(keep_blks) {
+                e.len - (keep_blks - e.log)
+            } else {
+                0
+            };
+            let from = e.phys.checked_add(e.len - gone).ok_or(Error::Corrupt)?;
+            drops += self.drops_needed(from, gone);
+        }
+        self.drop_room(drops)?;
         let mut i = 0usize;
         while i < n_ext {
             let e = self.inodes[is].extents[i];
@@ -676,11 +788,7 @@ impl Vol {
                 let n = self.read(d, ino, 0, &mut tmp[..new as usize])?;
                 let _ = n;
             }
-            #[expect(
-                clippy::let_underscore_must_use,
-                reason = "fixed by ROADMAP §10.11: a vibefs write that cannot add an extent"
-            )]
-            let _ = self.free_inode_data(d, ino);
+            self.free_inode_data(d, ino)?;
             let is = self.inode_slot(ino)?;
             self.inodes[is].flags |= F_INLINE;
             self.inodes[is].n_ext = 0;

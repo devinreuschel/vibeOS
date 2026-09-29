@@ -267,10 +267,7 @@ track a generation's metadata blocks in a table of that size (`MAX_META`).
 commit's drops applied. It takes effect only with the new super, so the
 commit rule still holds. After any sequence of commits and remounts, every
 block from 2 on with a refcount above 0 is reachable from the live tree or a
-snapshot. v1 code does not meet this yet:
-
-- a `write` that needs a fifth extent fails and leaks a block (§13, F051;
-  ROADMAP §10.11)
+snapshot.
 
 ---
 
@@ -612,8 +609,9 @@ device's trace carries every write and flush the guest sent.
 - Inode extents overflow to an extent tree (4 extents is the cap; files
   that would need a fifth return `NoSpace`). v1 code writes only 1-block
   extents and never merges them, so a file it writes holds at most 4 data
-  blocks (16 KiB) until v2 (ROADMAP §14.8). The `write` that needs a fifth
-  extent fails and leaks the block it allocated first (F051; ROADMAP §10.11)
+  blocks (16 KiB) until v2 (ROADMAP §14.8). A `write` that needs a fifth
+  extent returns the bytes it wrote before that block, or `NoSpace` when it
+  wrote none, and allocates nothing for the block it refuses
 - Reserve metadata space. From ROADMAP §12.5 a v1 page reserves its data
   block when it becomes dirty (§15's Space reservation row), but nothing
   reserves the metadata blocks a commit rewrites, and no blocks are held

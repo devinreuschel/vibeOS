@@ -112,6 +112,23 @@ impl Vol {
         Ok(())
     }
 
+    /// How many of the `len` blocks from `phys` [`Self::pending_drop`]
+    /// would put on the drop list: those not new in this transaction.
+    pub(super) fn drops_needed(&self, phys: u32, len: u32) -> usize {
+        (0..len)
+            .filter_map(|b| phys.checked_add(b))
+            .filter(|&bno| bno >= 2 && !bit_get(&self.txn, bno))
+            .count()
+    }
+
+    /// `NoSpace` unless the drop list has room for `n` more blocks.
+    pub(super) fn drop_room(&self, n: usize) -> Result<(), Error> {
+        if self.ndrop as usize + n > MAX_DROP {
+            return Err(Error::NoSpace);
+        }
+        Ok(())
+    }
+
     pub(super) fn alloc_block(&mut self) -> Result<u32, Error> {
         let mut i = 2u32;
         while i < self.nblocks {

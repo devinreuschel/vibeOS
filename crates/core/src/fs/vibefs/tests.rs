@@ -829,3 +829,128 @@ fn rename_dir_into_own_subtree_einval() {
     assert_eq!(r.errors, 0, "{r:?}");
     assert_eq!(r.count(Defect::Unreachable), 0);
 }
+
+/// Block `i` of the crafted test data: every byte `i + 1`, the first
+/// eight the block's number.
+fn craft_block(i: u32) -> [u8; BLOCK] {
+    let mut blk = [(i + 1) as u8; BLOCK];
+    blk[..4].copy_from_slice(&i.to_le_bytes());
+    blk
+}
+
+/// Hold `ino`'s first `blocks` file blocks in one multi-block extent, which
+/// the kernel never writes itself: contiguous blocks on a fresh volume,
+/// written with [`craft_block`] and committed.
+fn craft_extent(v: &mut Vol, d: &mut MemDisk, ino: u32, blocks: u32) {
+    let first = v.alloc_block().unwrap();
+    for i in 1..blocks {
+        assert_eq!(v.alloc_block().unwrap(), first + i, "contiguous blocks");
+    }
+    for i in 0..blocks {
+        d.write_block(first + i, &craft_block(i)).unwrap();
+    }
+    let crc = v.extent_crc(d, first, blocks).unwrap();
+    let is = v.inode_slot(ino).unwrap();
+    v.inodes[is].extents[0] = Extent {
+        log: 0,
+        phys: first,
+        len: blocks,
+        crc,
+    };
+    v.inodes[is].n_ext = 1;
+    v.inodes[is].size = u64::from(blocks) * BLOCK as u64;
+    v.inodes[is].flags &= !F_INLINE;
+    v.inodes[is].inline_len = 0;
+    v.dirty = true;
+    v.sync(d).unwrap();
+}
+
+/// `ino`'s extents, each `(log, phys, len, crc)`.
+fn extents(v: &Vol, ino: u32) -> Vec<(u32, u32, u32, u32)> {
+    let r = &v.inodes[v.inode_slot(ino).unwrap()];
+    r.extents[..r.n_ext as usize]
+        .iter()
+        .map(|e| (e.log, e.phys, e.len, e.crc))
+        .collect()
+}
+
+#[test]
+fn write_past_16k_retry_no_leak() {
+    let mut b = fresh(256 * 1024);
+    with_vol(&mut b, |v, d| {
+        let ino = new_file(v, d, b"f");
+        for k in 0..4u64 {
+            let blk = craft_block(k as u32);
+            assert_eq!(v.write(d, ino, k * BLOCK as u64, &blk).unwrap(), BLOCK);
+        }
+        assert_eq!(n_ext(v, ino), MAX_EXT as u8);
+        v.sync(d).unwrap();
+        let df = v.df();
+        let ex = extents(v, ino);
+        for i in 0..100 {
+            assert_eq!(
+                v.write(d, ino, 16 * 1024, b"x").unwrap_err(),
+                Error::NoSpace,
+                "retry {i}"
+            );
+            assert_eq!(v.df(), df, "free space after retry {i}");
+        }
+        assert_eq!(extents(v, ino), ex);
+        assert_eq!(v.file_size(ino).unwrap(), 16 * 1024);
+        v.sync(d).unwrap();
+        assert_eq!(v.df(), df);
+    });
+    let r = fsck_of(&mut b);
+    assert_eq!((r.errors, r.warnings), (0, 0));
+}
+
+#[test]
+fn write_short_count_updates_size() {
+    let mut b = fresh(256 * 1024);
+    with_vol(&mut b, |v, d| {
+        let ino = new_file(v, d, b"f");
+        for k in 0..3u64 {
+            let blk = craft_block(k as u32);
+            assert_eq!(v.write(d, ino, k * BLOCK as u64, &blk).unwrap(), BLOCK);
+        }
+        v.sync(d).unwrap();
+        let (_, free, _) = v.df();
+        let two = [0x5Au8; 2 * BLOCK];
+        assert_eq!(v.write(d, ino, 12 * 1024, &two).unwrap(), BLOCK);
+        assert_eq!(v.file_size(ino).unwrap(), 16 * 1024);
+        assert_eq!(v.df().1, free - BLOCK as u64);
+        let mut out = [0u8; 2 * BLOCK];
+        assert_eq!(v.read(d, ino, 12 * 1024, &mut out).unwrap(), BLOCK);
+        assert_eq!(out[..BLOCK], two[..BLOCK]);
+        v.sync(d).unwrap();
+        assert_eq!(v.df().1, free - BLOCK as u64);
+    });
+    let r = fsck_of(&mut b);
+    assert_eq!((r.errors, r.warnings), (0, 0));
+}
+
+#[test]
+fn cow_split_without_slots_leaks_nothing() {
+    let mut b = fresh(256 * 1024);
+    with_vol(&mut b, |v, d| {
+        let ino = new_file(v, d, b"f");
+        craft_extent(v, d, ino, 3);
+        for k in 3..5u64 {
+            let blk = craft_block(k as u32);
+            assert_eq!(v.write(d, ino, k * BLOCK as u64, &blk).unwrap(), BLOCK);
+        }
+        assert_eq!(n_ext(v, ino), 3);
+        let df = v.df();
+        let ex = extents(v, ino);
+        assert_eq!(
+            v.write(d, ino, BLOCK as u64 + 7, b"x").unwrap_err(),
+            Error::NoSpace
+        );
+        assert_eq!(v.df(), df);
+        assert_eq!(extents(v, ino), ex);
+        v.sync(d).unwrap();
+        assert_eq!(v.df(), df);
+    });
+    let r = fsck_of(&mut b);
+    assert_eq!((r.errors, r.warnings), (0, 0));
+}
